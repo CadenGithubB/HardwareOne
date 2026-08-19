@@ -6,6 +6,7 @@
 #include "System_Camera_Video.h"
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_VFS.h"
+#include "System_TaskUtils.h"  // taskStackRecord — taskstats stack-size registry
 #include <strings.h>   // strcasecmp (used by the always-compiled viewer below)
 
 // Exposed to System_I2C.cpp status builder so UI can gate SD-dependent
@@ -505,6 +506,7 @@ bool startVideoRecording() {
   s_startMs = millis();
   videoRecording = true;
 
+  taskStackRecord("cam_record", VIDEO_REC_STACK_WORDS);
   BaseType_t ok = xTaskCreatePinnedToCore(
     recordingTask, "cam_record", VIDEO_REC_STACK_WORDS, nullptr,
     /*priority*/ 5, &s_task, /*core*/ 1);

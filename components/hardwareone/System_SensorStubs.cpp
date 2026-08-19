@@ -174,6 +174,7 @@ const size_t micCommandsCount = 0;
 bool gCameraRunning = false;
 bool cameraConnected = false;
 bool cameraStreaming = false;
+bool cameraDetected = false;   // no camera compiled in — never latches
 const char* cameraModel = "None";
 int cameraWidth = 0;
 int cameraHeight = 0;

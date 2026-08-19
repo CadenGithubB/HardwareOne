@@ -319,21 +319,19 @@ void hijackFsmInit() {
     DEBUG_G2F("[FSM] queue alloc failed — dispatches will apply inline");
     return;
   }
-  // Priority 5 sits above idle and below the BLE / page-swap worker
-  // tasks so transitions drain promptly without preempting time-
-  // sensitive paths.
-  // Stack is 2560 BYTES (2.5 KB). ESP-IDF's xTaskCreate takes usStackDepth in
+  // Priority 5 matches the G2 control/connect workers and preempts the
+  // priority-2 page/tap workers so lifecycle transitions drain promptly.
+  // Stack is 4096 BYTES (4 KB). ESP-IDF's xTaskCreate takes usStackDepth in
   // BYTES, not words — see System_TaskUtils.h.
   //
-  // Correcting this comment's own history: it previously claimed the arg was
-  // words and "corrected" an earlier "3 KB stack" note by a factor of 4. That
-  // earlier note was the accurate one — 2560 is 2.5 KB, not 10 KB. The
-  // "observed peak ~4.2 KB" cited here cannot be true against a 2560 B stack;
-  // it came from the reporter while it multiplied HWM by 4 (real peak ~1.05 KB).
-  // Re-measure before resizing.
-  const BaseType_t ok = xTaskCreatePinnedToCore(fsmWorkerTask, "g2-fsm",
-                                    /*stack bytes*/ 2560,
-                                    nullptr, 5, &gFsmTaskHandle, APP_CORE);
+  // Hardware validation on XIAO ESP32-S3 (2026-08-12) measured a 2280-byte
+  // peak on the former 2560-byte allocation, leaving only 280 bytes (10.9%).
+  // 4096 leaves 1816 bytes (44.3%) at that observed peak and costs 1536 bytes
+  // of additional internal DRAM. Keep measuring on both ESP32-S3 and ESP32.
+  const BaseType_t ok = xTaskCreateLogged(fsmWorkerTask, "g2-fsm",
+                                    /*stack bytes*/ 4096,
+                                    nullptr, 5, &gFsmTaskHandle,
+                                    "g2.fsm", APP_CORE);
   if (ok != pdPASS) {
     DEBUG_G2F("[FSM] worker task create failed — dispatches will apply inline");
     vQueueDelete(gFsmQueue);

@@ -6,6 +6,72 @@ extern "C" {
   #include "esp_memory_utils.h"
 }
 
+// ── Correct internal-heap queries ─────────────────────────────────────────
+// Do NOT use ESP.getFreeHeap()/getHeapSize()/getMinFreeHeap()/getMaxAllocHeap()
+// for internal-RAM decisions or reporting. Arduino defines them as
+// heap_caps_*(MALLOC_CAP_INTERNAL) with NO MALLOC_CAP_8BIT
+// (components/arduino/cores/esp32/Esp.cpp:159-176).
+//
+// On ESP32 classic that sweeps in the IRAM-only heap (_iram_end..0x400A0000 =
+// 26,600 B) whose caps are {MALLOC_CAP_INTERNAL|EXEC|32BIT} — no MALLOC_CAP_8BIT
+// (heap/port/esp32/memory_layout.c). Nothing a malloc(), new, String or FreeRTOS
+// task stack needs can ever be served from it, so those APIs read up to 25,864 B
+// HIGH (26,600 minus multi_heap/TLSF metadata).
+//
+// getHeapSize() is worse: it ALSO double-counts CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL,
+// because esp_psram_extram_reserve_dma_pool() heap_caps_malloc's that block out of
+// the main heap and then re-registers the SAME bytes as their own heap, while
+// heap_caps_get_total_size() just sums (heap->end - heap->start) over every
+// matching heap (heap/heap_caps.c).
+//
+// Measured on feather_esp32_v2 (ESP32-PICO-V3-02, 2MB PSRAM): the boot report
+// printed "Free: 121775" while genuinely-usable 8-bit internal free was 95,835 —
+// and "Total: 280479" against 221,112 B of physical 8-bit internal RAM.
+
+// True 8-bit-capable internal free — use for REPORTING internal RAM.
+inline size_t hw1InternalFreeBytes() {
+  return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+inline size_t hw1InternalMinFreeBytes() {
+  return heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+inline size_t hw1InternalLargestBlock() {
+  return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+// Physical 8-bit internal RAM, with the reserve pool's double-count removed.
+// Exact to within one byte per reserve chunk: the pool is registered as
+// [start, start + size - 1], so each chunk's span is size-1 (esp_psram.c).
+inline size_t hw1InternalTotalBytes() {
+  size_t total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#if defined(CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL) && (CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL > 0)
+  const size_t reserved = (size_t)CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL;
+  if (total > reserved) total -= reserved;
+#endif
+  return total;
+}
+
+// DIAGNOSTIC ONLY — do NOT use this to guard an allocation on this board.
+// It reports the internal pool that heap_caps_malloc_default() PREFERS, which is
+// not the pool it is limited to. heap_caps_malloc_default() (heap/heap_caps.c)
+// tries DEFAULT|INTERNAL for size <= CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL, then
+// DEFAULT|SPIRAM above it, and finally retries bare MALLOC_CAP_DEFAULT — which
+// matches the SPIRAM heap (heap/port/esp32/memory_layout.c). With SPIRAM_USE_MALLOC=y
+// and ~1.5 MB of PSRAM free, a plain malloc()/new/String therefore cannot fail
+// regardless of internal DRAM, so a guard built on this number refuses work that
+// would have succeeded.
+//
+// What genuinely CANNOT fall back to PSRAM: FreeRTOS task stacks/TCBs/queues
+// (freertos/heap_idf.c pins MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT), explicit
+// heap_caps_malloc(INTERNAL|8BIT) callers, and the BT controller. All of those are
+// exactly hw1InternalFreeBytes()'s cap set — use that for guards, and
+// hw1InternalLargestBlock() when the allocation must be contiguous (a task stack).
+inline size_t hw1MallocableInternalBytes() {
+  return heap_caps_get_free_size(MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL);
+}
+
 // ── PSRAM fallback diagnostics ────────────────────────────────────────────
 // Incremented every time a ps_alloc/ps_calloc/ps_realloc request that asked
 // for PSRAM had to fall back to the internal DRAM heap. This makes an

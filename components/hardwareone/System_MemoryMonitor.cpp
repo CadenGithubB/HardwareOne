@@ -82,7 +82,40 @@ static const MemoryRequirement gMemoryRequirements[] = {
   { "gps",           16384,    GPS_STACK_WORDS,       0 },       // 12KB stack + overhead
   { "rtc",           20480,    RTC_STACK_WORDS,       0 },       // 16KB stack + overhead
   { "espnow",        20480,    ESPNOW_HB_STACK_WORDS, 327680 }, // 16KB stack + overhead (~310KB PSRAM for state)
-  { "bluetooth",     61440,    0,                     0 },       // ~60KB DRAM (BLE controller + host tasks)
+  // 84 KB. initG2Client is the most expensive operation in this firmware and was
+  // COMPLETELY UNGATED until now -- the "bluetooth" row below is only consulted
+  // from initBluetooth (server path), never from the client path.
+  // MEASURED on feather_esp32_v2, one boot, probes 587 ms apart:
+  //   pre-BLEDevice::init   148,115
+  //   post-BLEDevice::init  104,843   -> BLE core   43,272
+  //   initG2Client COMPLETE  67,135   -> G2 workers 37,708
+  //   TOTAL                                        80,980
+  // The worker figure reconciles with the four stacks it creates -- g2_page_swap_w
+  // 8192 + g2_tap_disp 10240 + g2_session_w 10240 + r1_owner 6144 = 34,816, plus
+  // 2,892 of TCBs/queues -- all MALLOC_CAP_INTERNAL|8BIT and unable to fall back
+  // to PSRAM. The BLE-core figure independently matches openble's 42,944 (3 runs).
+  //
+  // 86016 = 80,980 + ~5 KB. NOTE this is deliberately a tight floor: it still
+  // admits g2init on a WiFi+HTTP device (~95.8 KB free), which lands near 9 KB and
+  // has been observed to fail afterwards at openg2. Raising this toward ~102,400
+  // would refuse that combination outright.
+  { "g2client",      86016,    0,                     0 },       // 84KB DRAM (BLE core 43K + 4 G2 worker stacks 38K)
+  // 52 KB, against an HONEST INTERNAL|8BIT reading. MEASURED on feather_esp32_v2,
+  // not estimated: BLE init costs 42,944 B (four runs, 4-byte spread) --
+  //   g2init at boot   148,115 -> 104,843
+  //   openble x3        107,383 ->  64,439 / 95,931 -> 52,987 / 84,559 -> 41,611
+  // 53248 = 42,944 init + ~10 KB survivable floor.
+  //
+  // Why this exact value: openble/closeble leaks 11,192 B per cycle (the firmware
+  // counts it itself, "~11KB this cycle"), and the largest free block drops
+  // ~10 KB per cycle. By cycle 5 the gate sees free=51,163 but largest=8,192 --
+  // below BTC_TASK's 8,704 B contiguous stack -- so init fails there. 53248
+  // refuses at cycle 5, the first cycle that genuinely cannot complete. The
+  // previous 46080 let cycle 5 through into that failure.
+  //
+  // Not a false-refusal risk: the check sits after deinitG2Client + deinitChecked,
+  // and was MEASURED at 107,383 B free with G2 previously connected.
+  { "bluetooth",     53248,    0,                     0 },       // 52KB DRAM (BLE controller + host tasks)
 };
 
 static const size_t gMemoryRequirementsCount = sizeof(gMemoryRequirements) / sizeof(MemoryRequirement);
@@ -110,8 +143,14 @@ bool checkMemoryAvailable(const char* component, String* outReason) {
     return false;
   }
   
-  size_t freeHeap = ESP.getFreeHeap();
-  size_t freePsram = ESP.getFreePsram();
+  // Internal 8-bit RAM only. ESP.getFreeHeap() is MALLOC_CAP_INTERNAL with no
+  // MALLOC_CAP_8BIT, so on ESP32 classic it read ~25.8 KB high (the IRAM-only
+  // heap nothing can malloc from) and every tier below was effectively that much
+  // looser than its stated number. See hw1InternalFreeBytes() in System_MemUtil.h.
+  // The rows were sized against the inflated reading, so any row NOT retuned
+  // alongside this change becomes ~25.8 KB stricter in real terms.
+  size_t freeHeap = hw1InternalFreeBytes();
+  size_t freePsram = ESP.getFreePsram();  // correct as-is: MALLOC_CAP_SPIRAM
   
   // Check heap requirement
   if (freeHeap < req->minHeapBytes) {
@@ -156,15 +195,30 @@ static unsigned long gLastMemorySampleMs = 0;
 
 // Heap pressure monitoring state (consolidated from main loop)
 static size_t gLowestHeapSeen = UINT32_MAX;
-static const size_t HEAP_WARNING_THRESHOLD = 40960;  // 40KB warning threshold
+// 25 KB. Was 40960, which was implicitly calibrated against ESP.getFreeHeap()'s
+// inflated reading (~25.8 KB high on ESP32 classic — see hw1InternalFreeBytes()
+// in System_MemUtil.h). Once the samplers became honest, 40960 sat ABOVE normal
+// operating level and warned every 10 s for as long as the G2 glasses were
+// connected, which trains the reader to ignore it.
+// Measured on feather_esp32_v2 (honest INTERNAL|8BIT figures):
+//   boot, WiFi + HTTP, no BLE ......... 95,927 B
+//   after openble (server mode) ....... 33,435 B
+//   after g2init (client + G2) ........ 26,495 B
+//   G2 connected, hijack page open .... 21,299 B  <- still warns at 25 KB, intended
+static const size_t HEAP_WARNING_THRESHOLD = 25600;  // 25KB warning threshold
 
 void sampleMemoryState(bool forceFullScan) {
   // ── Combined heap (DRAM + PSRAM when SPIRAM_USE_MALLOC) ──
-  size_t freeHeap = ESP.getFreeHeap();
-  size_t totalHeap = ESP.getHeapSize();
-  size_t minFreeHeap = ESP.getMinFreeHeap();
-  size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  int heapUsedPercent = totalHeap ? (int)(((totalHeap - freeHeap) * 100) / totalHeap) : 0;
+  // Internal 8-bit RAM only. Previously: ESP.* (MALLOC_CAP_INTERNAL, no 8BIT)
+  // folded in the unusable IRAM-only heap, and largestBlock used bare
+  // MALLOC_CAP_8BIT which ALSO matches PSRAM — so it reported the ~1.5 MB PSRAM
+  // block as if it were internal. See hw1InternalFreeBytes() in System_MemUtil.h.
+  size_t freeHeap = hw1InternalFreeBytes();
+  size_t totalHeap = hw1InternalTotalBytes();
+  size_t minFreeHeap = hw1InternalMinFreeBytes();
+  size_t largestBlock = hw1InternalLargestBlock();
+  int heapUsedPercent = (totalHeap && totalHeap > freeHeap)
+                          ? (int)(((totalHeap - freeHeap) * 100) / totalHeap) : 0;
   
   // ── PSRAM ──
   bool hasPsram = psramFound();
@@ -266,9 +320,14 @@ void sampleMemoryState(bool forceFullScan) {
     };
     
 #if ENABLE_ESPNOW
-    TaskHandle_t espnowHandle = getEspNowTaskHandle();
+    TaskHandle_t espnowHandle = nullptr;
+    UBaseType_t espnowWatermark = 0;
+    const bool espnowSnapshotValid =
+        getEspNowTaskStackSnapshot(&espnowHandle, &espnowWatermark);
 #else
     TaskHandle_t espnowHandle = nullptr;
+    UBaseType_t espnowWatermark = 0;
+    const bool espnowSnapshotValid = false;
 #endif
     
     const TaskEntry tasks[] = {
@@ -288,7 +347,7 @@ void sampleMemoryState(bool forceFullScan) {
     
     // Enabled flags for each task — if false, handle may be stale (task self-deleted)
     const bool taskAlive[] = {
-      espnowHandle != nullptr,                                        // espnow_task
+      espnowSnapshotValid,                                            // espnow_task
       gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
       queueProcessorTask != nullptr,                                  // sensor_queue_task
       gInputRunning,                                                 // gamepad_task
@@ -316,7 +375,9 @@ void sampleMemoryState(bool forceFullScan) {
       // absolute figure 4x (percentages stayed right, since both terms scaled)
       // AND made these warnings 4x less sensitive — LOW only fired below 256 B
       // free. See System_TaskUtils.h.
-      UBaseType_t watermark = uxTaskGetStackHighWaterMark(t.handle);
+      UBaseType_t watermark = (taskIdx == 1)
+          ? espnowWatermark
+          : uxTaskGetStackHighWaterMark(t.handle);
       uint32_t totalBytes = t.stackWords;
       uint32_t freeBytes  = (uint32_t)watermark;
       uint32_t usedBytes = totalBytes - freeBytes;

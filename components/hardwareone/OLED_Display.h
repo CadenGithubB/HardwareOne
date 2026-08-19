@@ -46,6 +46,8 @@ void oledPrepareForSleep();
 void oledResumeFromSleep();
 
 // Notify OLED UI that local display auth state changed (login/logout)
+// Declared centrally in System_User.h (included by OLED_Utils.h); retained
+// here for display-only includers.
 void oledNotifyLocalDisplayAuthChanged();
 
 // Returns true if the display should be blocked pending authentication.

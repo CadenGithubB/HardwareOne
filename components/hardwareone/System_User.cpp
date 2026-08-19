@@ -26,38 +26,45 @@
 #include "System_Settings.h"
 #include "System_UartLink.h"
 #include "Bluetooth.h"
-#include "BLE_Peers.h"            // gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser
-                                  // — G2 identity source for SOURCE_G2_GLASSES branches
+#include "BLE_Peers.h"            // synchronized G2 paired-owner authority
                                   // (declarations are #if ENABLE_BLUETOOTH-gated inside)
 
 // ----------------------------------------------------------------------------
-// G2 identity accessors — wrap gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser
-// behind the BT compile gate so SOURCE_G2_GLASSES switch branches below
-// compile cleanly on BT-off builds. On BT-off the lens can't connect anyway,
-// so the readers return empty/false and the mutators are no-ops; nothing
-// downstream relies on a real value.
+// G2 identity accessors — use the coherent owner+generation+epoch snapshot
+// behind the BT compile gate. On BT-off the lens cannot connect, so readers
+// return empty/false and the mutator is a no-op.
 // ----------------------------------------------------------------------------
 static inline String g2PairedUserGet() {
 #if ENABLE_BLUETOOTH
-  return gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser;
+  BlePeerOwnerSession owner;
+  return blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, owner) &&
+                 owner.live()
+             ? owner.user
+             : String();
 #else
   return String();
 #endif
 }
 static inline void g2PairedUserClear() {
 #if ENABLE_BLUETOOTH
-  gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser = String();
+  (void)blePeerOwnerSessionClear(BLE_PEER_G2_GLASSES);
 #endif
 }
-static inline bool g2PairedUserMatches(const String& username) {
+static inline bool g2PairedUserClearIfMatches(const String& username) {
 #if ENABLE_BLUETOOTH
-  return gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser.equalsIgnoreCase(username);
+  BlePeerOwnerSession owner;
+  if (!blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, owner) ||
+      !owner.live() || !owner.user.equalsIgnoreCase(username)) {
+    return false;
+  }
+  return blePeerOwnerSessionClearIfCurrent(BLE_PEER_G2_GLASSES, owner);
 #else
   (void)username;
   return false;
 #endif
 }
 #include "OLED_Display.h"
+#include <atomic>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include "System_UserSettings.h"
@@ -70,6 +77,14 @@ static String uartSessionUserSnapshot() {
   char user[kPublicUsernameMaxLen + 1] = {};
   if (!uartLinkSessionSnapshot(user, sizeof(user))) return String();
   return String(user);
+}
+
+static bool localDisplayBootAuthBypassActive() {
+#if ENABLE_OLED_DISPLAY
+  return oledBootModeActive;
+#else
+  return false;
+#endif
 }
 
 // ============================================================================
@@ -135,6 +150,476 @@ extern uint32_t gBootCounter;
 // Serial authentication globals
 extern bool gSerialAuthed;
 extern String gSerialUser;
+extern std::atomic<unsigned long> gSerialLastInteractionMs;
+
+// ============================================================================
+// Boot-local transport session generations
+// ============================================================================
+//
+// These are incarnation counters, not timestamps. They intentionally ignore
+// RTC/NTP/wall-clock state, so a device may gain or lose time synchronization
+// without changing command authority or an interactive prompt's owner.
+namespace {
+constexpr size_t kTransportSessionSlots = 12;  // web(2)+BLE(4)+serial+OLED+G2+headroom
+struct TransportSessionSlot {
+  CommandSource source = SOURCE_INTERNAL;
+  TransportSessionEpoch epoch = kNoTransportSessionEpoch;
+};
+TransportSessionSlot sTransportSessions[kTransportSessionSlots];
+TransportSessionEpoch sTransportSessionGeneration = 0;
+portMUX_TYPE sTransportSessionMux = portMUX_INITIALIZER_UNLOCKED;
+
+struct LegacySessionShadow {
+  TransportSessionEpoch epoch = kNoTransportSessionEpoch;
+  bool authed = false;
+  char user[kPublicUsernameMaxLen + 1] = {};
+};
+LegacySessionShadow sSerialSession;
+LegacySessionShadow sDisplaySession;
+portMUX_TYPE sLegacySessionShadowMux = portMUX_INITIALIZER_UNLOCKED;
+std::atomic_flag sSerialSessionWriter = ATOMIC_FLAG_INIT;
+std::atomic_flag sDisplaySessionWriter = ATOMIC_FLAG_INIT;
+
+class AtomicFlagGuard {
+ public:
+  explicit AtomicFlagGuard(std::atomic_flag& flag) : flag_(flag) {
+    while (flag_.test_and_set(std::memory_order_acquire)) taskYIELD();
+  }
+  ~AtomicFlagGuard() { flag_.clear(std::memory_order_release); }
+ private:
+  std::atomic_flag& flag_;
+};
+
+TransportSessionEpoch nextTransportSessionEpochLocked() {
+  for (;;) {
+    do {
+      ++sTransportSessionGeneration;
+    } while (sTransportSessionGeneration == kNoTransportSessionEpoch);
+    bool inUse = false;
+    for (const TransportSessionSlot& slot : sTransportSessions) {
+      if (slot.epoch == sTransportSessionGeneration) {
+        inUse = true;
+        break;
+      }
+    }
+    if (!inUse) return sTransportSessionGeneration;
+  }
+}
+
+void clearLegacyShadow(LegacySessionShadow& shadow,
+                       TransportSessionEpoch& oldEpoch) {
+  portENTER_CRITICAL(&sLegacySessionShadowMux);
+  oldEpoch = shadow.epoch;
+  shadow.epoch = kNoTransportSessionEpoch;
+  shadow.authed = false;
+  shadow.user[0] = '\0';
+  portEXIT_CRITICAL(&sLegacySessionShadowMux);
+}
+
+void publishLegacyShadow(LegacySessionShadow& shadow,
+                         TransportSessionEpoch epoch,
+                         const String& user,
+                         bool authed = true) {
+  portENTER_CRITICAL(&sLegacySessionShadowMux);
+  shadow.authed = authed;
+  strlcpy(shadow.user, user.c_str(), sizeof(shadow.user));
+  shadow.epoch = epoch;
+  portEXIT_CRITICAL(&sLegacySessionShadowMux);
+}
+
+TransportSessionEpoch snapshotLegacyShadow(const LegacySessionShadow& shadow,
+                                            String& userOut,
+                                            bool& authedOut) {
+  char user[kPublicUsernameMaxLen + 1] = {};
+  TransportSessionEpoch epoch = 0;
+  bool authed = false;
+  portENTER_CRITICAL(&sLegacySessionShadowMux);
+  epoch = shadow.epoch;
+  authed = shadow.authed;
+  strlcpy(user, shadow.user, sizeof(user));
+  portEXIT_CRITICAL(&sLegacySessionShadowMux);
+  userOut = user;
+  authedOut = authed && epoch != 0;
+  return epoch;
+}
+}  // namespace
+
+TransportSessionEpoch transportSessionOpen(CommandSource source) {
+  TransportSessionEpoch epoch = 0;
+  portENTER_CRITICAL(&sTransportSessionMux);
+  for (size_t i = 0; i < kTransportSessionSlots; ++i) {
+    if (sTransportSessions[i].epoch != 0) continue;
+    epoch = nextTransportSessionEpochLocked();
+    sTransportSessions[i].source = source;
+    sTransportSessions[i].epoch = epoch;
+    break;
+  }
+  portEXIT_CRITICAL(&sTransportSessionMux);
+  return epoch;
+}
+
+void transportSessionClose(CommandSource source, TransportSessionEpoch epoch) {
+  if (epoch == 0) return;
+  portENTER_CRITICAL(&sTransportSessionMux);
+  for (size_t i = 0; i < kTransportSessionSlots; ++i) {
+    if (sTransportSessions[i].epoch != epoch ||
+        sTransportSessions[i].source != source) continue;
+    sTransportSessions[i].epoch = 0;
+    sTransportSessions[i].source = SOURCE_INTERNAL;
+    break;
+  }
+  portEXIT_CRITICAL(&sTransportSessionMux);
+}
+
+bool transportSessionEpochIsLive(CommandSource source,
+                                 TransportSessionEpoch epoch) {
+  if (epoch == 0) return false;
+  if (source == SOURCE_UART) {
+    return uartLinkTransportSessionEpoch() == epoch;
+  }
+  if (source == SOURCE_WEB) {
+#if ENABLE_HTTP_SERVER
+    // The fixed sidecar is cleared before the String-heavy SessionEntry is
+    // mutated. It is a prerequisite, while the central registry remains the
+    // second half of the publication contract. Requiring both makes the
+    // open-then-publish and unpublish-then-close windows fail closed.
+    if (!webSessionEpochIsLive(epoch)) return false;
+#else
+    return false;
+#endif
+  }
+  if (source == SOURCE_BLUETOOTH) {
+    if (!bleSessionEpochIsLive(epoch)) return false;
+  }
+  if (source == SOURCE_SERIAL || source == SOURCE_LOCAL_DISPLAY) {
+    const LegacySessionShadow& shadow =
+        source == SOURCE_SERIAL ? sSerialSession : sDisplaySession;
+    bool policyLive = false;
+    portENTER_CRITICAL(&sLegacySessionShadowMux);
+    policyLive = shadow.epoch == epoch &&
+                 (shadow.authed ||
+                  (source == SOURCE_SERIAL
+                       ? !gSettings.serialRequireAuth
+                       : !gSettings.localDisplayRequireAuth));
+    portEXIT_CRITICAL(&sLegacySessionShadowMux);
+    if (!policyLive) return false;
+  }
+  bool live = false;
+  portENTER_CRITICAL(&sTransportSessionMux);
+  for (size_t i = 0; i < kTransportSessionSlots; ++i) {
+    if (sTransportSessions[i].epoch == epoch &&
+        sTransportSessions[i].source == source) {
+      live = true;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&sTransportSessionMux);
+  return live;
+}
+
+void serialTransportSessionCleared() {
+  AtomicFlagGuard guard(sSerialSessionWriter);
+  TransportSessionEpoch oldEpoch = 0;
+  clearLegacyShadow(sSerialSession, oldEpoch);
+  transportSessionClose(SOURCE_SERIAL, oldEpoch);
+  gSerialAuthed = false;
+  gSerialUser = String();
+  gSerialLastInteractionMs.store(0, std::memory_order_release);
+}
+
+void serialTransportAuthPolicyChanged() {
+  AtomicFlagGuard guard(sSerialSessionWriter);
+  TransportSessionEpoch oldEpoch = 0;
+  portENTER_CRITICAL(&sLegacySessionShadowMux);
+  if (!sSerialSession.authed) {
+    oldEpoch = sSerialSession.epoch;
+    sSerialSession.epoch = kNoTransportSessionEpoch;
+    sSerialSession.user[0] = '\0';
+  }
+  portEXIT_CRITICAL(&sLegacySessionShadowMux);
+  transportSessionClose(SOURCE_SERIAL, oldEpoch);
+}
+
+bool serialTransportSessionBeginDelivery(TransportSessionEpoch epoch) {
+  if (epoch == 0) return false;
+  while (sSerialSessionWriter.test_and_set(std::memory_order_acquire)) {
+    taskYIELD();
+  }
+  String liveUser;
+  bool liveAuthed = false;
+  if (snapshotLegacyShadow(sSerialSession, liveUser, liveAuthed) != epoch) {
+    sSerialSessionWriter.clear(std::memory_order_release);
+    return false;
+  }
+  return true;
+}
+
+void serialTransportSessionEndDelivery() {
+  sSerialSessionWriter.clear(std::memory_order_release);
+}
+
+TransportSessionEpoch serialTransportInputEpoch() {
+  String user;
+  bool authed = false;
+  TransportSessionEpoch epoch =
+      snapshotLegacyShadow(sSerialSession, user, authed);
+  if (epoch != 0) return epoch;
+  AtomicFlagGuard guard(sSerialSessionWriter);
+  epoch = snapshotLegacyShadow(sSerialSession, user, authed);
+  if (epoch == 0) {
+    epoch = transportSessionOpen(SOURCE_SERIAL);
+    if (epoch != 0) publishLegacyShadow(sSerialSession, epoch, String(), false);
+  }
+  return epoch;
+}
+
+bool serialTransportInputEpochIsCurrent(TransportSessionEpoch epoch) {
+  if (epoch == 0) return false;
+  String user;
+  bool authed = false;
+  return snapshotLegacyShadow(sSerialSession, user, authed) == epoch;
+}
+
+bool localDisplayTransportSessionBeginDelivery(TransportSessionEpoch epoch) {
+  if (epoch == 0) return false;
+  while (sDisplaySessionWriter.test_and_set(std::memory_order_acquire)) {
+    taskYIELD();
+  }
+  if (!transportSessionEpochIsLive(SOURCE_LOCAL_DISPLAY, epoch)) {
+    sDisplaySessionWriter.clear(std::memory_order_release);
+    return false;
+  }
+  return true;
+}
+
+void localDisplayTransportSessionEndDelivery() {
+  sDisplaySessionWriter.clear(std::memory_order_release);
+}
+
+TransportSessionEpoch localDisplayTransportSessionBeginUiSync(
+    String& userOut, bool& authedOut) {
+  while (sDisplaySessionWriter.test_and_set(std::memory_order_acquire)) {
+    taskYIELD();
+  }
+
+  // Unlike BeginDelivery(), logout is a real UI boundary too. Keep the writer
+  // held and return epoch zero instead of failing so the OLED owner can erase
+  // the former identity and all of its cached UI state.
+  TransportSessionEpoch epoch =
+      snapshotLegacyShadow(sDisplaySession, userOut, authedOut);
+  if (epoch == 0 && !gSettings.localDisplayRequireAuth) {
+    epoch = transportSessionOpen(SOURCE_LOCAL_DISPLAY);
+    if (epoch != 0) {
+      publishLegacyShadow(sDisplaySession, epoch, String(), false);
+      userOut = String();
+      authedOut = false;
+    }
+  }
+  return epoch;
+}
+
+void localDisplayTransportSessionEndUiSync() {
+  sDisplaySessionWriter.clear(std::memory_order_release);
+}
+
+static TransportSessionEpoch serialTransportSessionAuthenticatedLocked(
+    const String& user) {
+  TransportSessionEpoch oldEpoch = 0;
+  clearLegacyShadow(sSerialSession, oldEpoch);
+  transportSessionClose(SOURCE_SERIAL, oldEpoch);
+  gSerialAuthed = true;
+  gSerialUser = user.length() ? user : String("serial");
+  TransportSessionEpoch epoch = transportSessionOpen(SOURCE_SERIAL);
+  if (epoch == 0) {
+    gSerialAuthed = false;
+    gSerialUser = String();
+    gSerialLastInteractionMs.store(0, std::memory_order_release);
+    return 0;
+  }
+  publishLegacyShadow(sSerialSession, epoch, gSerialUser);
+  gSerialLastInteractionMs.store(sessionStampNow(),
+                                  std::memory_order_release);
+  return epoch;
+}
+
+TransportSessionEpoch serialTransportSessionAuthenticated(const String& user) {
+  AtomicFlagGuard guard(sSerialSessionWriter);
+  return serialTransportSessionAuthenticatedLocked(user);
+}
+
+TransportSessionEpoch serialTransportSessionAuthenticatedIfEpoch(
+    TransportSessionEpoch expectedEpoch, const String& user) {
+  AtomicFlagGuard guard(sSerialSessionWriter);
+  String currentUser;
+  bool currentAuthed = false;
+  const TransportSessionEpoch currentEpoch =
+      snapshotLegacyShadow(sSerialSession, currentUser, currentAuthed);
+  if (currentEpoch != expectedEpoch) return 0;
+  return serialTransportSessionAuthenticatedLocked(user);
+}
+
+bool serialTransportSessionClearAndBeginDelivery(
+    TransportSessionEpoch expectedEpoch) {
+  while (sSerialSessionWriter.test_and_set(std::memory_order_acquire)) {
+    taskYIELD();
+  }
+  String currentUser;
+  bool currentAuthed = false;
+  const TransportSessionEpoch currentEpoch =
+      snapshotLegacyShadow(sSerialSession, currentUser, currentAuthed);
+  if (currentEpoch != expectedEpoch) {
+    sSerialSessionWriter.clear(std::memory_order_release);
+    return false;
+  }
+  TransportSessionEpoch oldEpoch = 0;
+  clearLegacyShadow(sSerialSession, oldEpoch);
+  transportSessionClose(SOURCE_SERIAL, oldEpoch);
+  gSerialAuthed = false;
+  gSerialUser = String();
+  gSerialLastInteractionMs.store(0, std::memory_order_release);
+  // Intentionally retain sSerialSessionWriter. The local caller writes its
+  // fixed ACK directly, then calls serialTransportSessionEndDelivery().
+  return true;
+}
+
+TransportSessionEpoch serialTransportSessionSnapshot(String& userOut,
+                                                      bool& authedOut) {
+  TransportSessionEpoch epoch =
+      snapshotLegacyShadow(sSerialSession, userOut, authedOut);
+  if (epoch != 0 || gSettings.serialRequireAuth) return epoch;
+  AtomicFlagGuard guard(sSerialSessionWriter);
+  epoch = snapshotLegacyShadow(sSerialSession, userOut, authedOut);
+  if (epoch == 0 && !gSettings.serialRequireAuth) {
+    epoch = transportSessionOpen(SOURCE_SERIAL);
+    if (epoch != 0) {
+      publishLegacyShadow(sSerialSession, epoch, String(), false);
+      userOut = String();
+      authedOut = false;
+    }
+  }
+  return epoch;
+}
+
+void localDisplayTransportSessionCleared() {
+  {
+    AtomicFlagGuard guard(sDisplaySessionWriter);
+    TransportSessionEpoch oldEpoch = 0;
+    clearLegacyShadow(sDisplaySession, oldEpoch);
+    transportSessionClose(SOURCE_LOCAL_DISPLAY, oldEpoch);
+    gLocalDisplayLastInteractionMs.store(0, std::memory_order_release);
+    // Publish the atomic UI generation before releasing the lifecycle writer.
+    // The OLED commit fence takes this same writer, so it cannot observe new
+    // authority without also observing a pending owner-side boundary.
+    oledNotifyLocalDisplayAuthChanged();
+  }
+}
+
+void localDisplayTransportAuthPolicyChanged() {
+  {
+    AtomicFlagGuard guard(sDisplaySessionWriter);
+    TransportSessionEpoch oldEpoch = 0;
+    portENTER_CRITICAL(&sLegacySessionShadowMux);
+    if (!sDisplaySession.authed) {
+      oldEpoch = sDisplaySession.epoch;
+      sDisplaySession.epoch = kNoTransportSessionEpoch;
+      sDisplaySession.user[0] = '\0';
+    }
+    portEXIT_CRITICAL(&sLegacySessionShadowMux);
+    transportSessionClose(SOURCE_LOCAL_DISPLAY, oldEpoch);
+    if (oldEpoch != 0) {
+      gLocalDisplayLastInteractionMs.store(0, std::memory_order_release);
+    }
+    oledNotifyLocalDisplayAuthChanged();
+  }
+}
+
+void localDisplayTransportSessionAuthenticated(const String& user) {
+  {
+    AtomicFlagGuard guard(sDisplaySessionWriter);
+    TransportSessionEpoch oldEpoch = 0;
+    clearLegacyShadow(sDisplaySession, oldEpoch);
+    transportSessionClose(SOURCE_LOCAL_DISPLAY, oldEpoch);
+    const String canonicalUser = user.length() ? user : String("display");
+    TransportSessionEpoch epoch = transportSessionOpen(SOURCE_LOCAL_DISPLAY);
+    if (epoch == 0) {
+      gLocalDisplayLastInteractionMs.store(0, std::memory_order_release);
+    } else {
+      publishLegacyShadow(sDisplaySession, epoch, canonicalUser);
+      gLocalDisplayLastInteractionMs.store(sessionStampNow(),
+                                            std::memory_order_release);
+    }
+    oledNotifyLocalDisplayAuthChanged();
+  }
+}
+
+TransportSessionEpoch localDisplayTransportSessionSnapshot(String& userOut,
+                                                            bool& authedOut) {
+  TransportSessionEpoch epoch =
+      snapshotLegacyShadow(sDisplaySession, userOut, authedOut);
+  if (epoch != 0 || gSettings.localDisplayRequireAuth) return epoch;
+  AtomicFlagGuard guard(sDisplaySessionWriter);
+  epoch = snapshotLegacyShadow(sDisplaySession, userOut, authedOut);
+  if (epoch == 0 && !gSettings.localDisplayRequireAuth) {
+    epoch = transportSessionOpen(SOURCE_LOCAL_DISPLAY);
+    if (epoch != 0) {
+      publishLegacyShadow(sDisplaySession, epoch, String(), false);
+      userOut = String();
+      authedOut = false;
+    }
+  }
+  return epoch;
+}
+
+TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
+  switch (ctx.transport) {
+    case SOURCE_WEB:
+#if ENABLE_HTTP_SERVER
+      return ctx.sid.length() ? webSessionEpochForSID(ctx.sid) : 0;
+#else
+      return 0;
+#endif
+    case SOURCE_SERIAL: {
+      String user;
+      bool authed = false;
+      TransportSessionEpoch epoch = serialTransportSessionSnapshot(user, authed);
+      if (authed) return user.equalsIgnoreCase(ctx.user) ? epoch : 0;
+      return !gSettings.serialRequireAuth && ctx.user == "AuthBypass"
+                 ? epoch : 0;
+    }
+    case SOURCE_LOCAL_DISPLAY: {
+      String user;
+      bool authed = false;
+      TransportSessionEpoch epoch =
+          localDisplayTransportSessionSnapshot(user, authed);
+      if (authed) return user.equalsIgnoreCase(ctx.user) ? epoch : 0;
+      return !gSettings.localDisplayRequireAuth && ctx.user == "AuthBypass"
+                 ? epoch : 0;
+    }
+    case SOURCE_BLUETOOTH: {
+      if (ctx.sid.length() == 0) return 0;
+      char* end = nullptr;
+      unsigned long conn = strtoul(ctx.sid.c_str(), &end, 10);
+      if (!end || *end != '\0' || conn > UINT16_MAX) return 0;
+      return bleSessionEpochForConnection(static_cast<uint16_t>(conn));
+    }
+    case SOURCE_UART:
+      return uartLinkTransportSessionEpoch();
+    case SOURCE_G2_GLASSES: {
+#if ENABLE_BLUETOOTH
+      BlePeerOwnerSession owner;
+      if (!blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, owner) ||
+          !owner.live() || owner.user != ctx.user) {
+        return kNoTransportSessionEpoch;
+      }
+      return owner.transportEpoch;
+#else
+      return kNoTransportSessionEpoch;
+#endif
+    }
+    default:
+      return 0;
+  }
+}
 
 // Web authentication functions (from web_server.h)
 extern bool isAuthed(httpd_req_t* req, String& outUser);
@@ -178,16 +663,25 @@ bool tgRequireAuth(AuthContext& ctx) {
       return false;
     }
     ctx.user = userTmp;
+    // Keep the bearer locator separate from the numeric command-generation
+    // fence. Basic Auth has no cookie and therefore remains intentionally
+    // stateless (empty sid / epoch zero).
+    ctx.sid = getCookieSID(req);
     if (ctx.ip.length() == 0) { getClientIP(req, ctx.ip); }
     logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, "");
     return true;
   } else if (ctx.transport == SOURCE_SERIAL) {
-    // Serial console auth state
-    if (gSettings.serialRequireAuth && !gSerialAuthed) {
+    // Serial console auth state. Use the synchronized fixed-storage shadow;
+    // targeted session administration can replace the legacy Arduino String
+    // from cmd_exec while another task is resolving a request.
+    String serialUser;
+    bool serialAuthed = false;
+    (void)serialTransportSessionSnapshot(serialUser, serialAuthed);
+    if (gSettings.serialRequireAuth && !serialAuthed) {
       broadcastOutput("ERROR: auth required");
       return false;
     }
-    ctx.user = gSerialUser;
+    ctx.user = serialAuthed ? serialUser : String();
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
   } else if (ctx.transport == SOURCE_UART) {
@@ -204,13 +698,19 @@ bool tgRequireAuth(AuthContext& ctx) {
     if (ctx.ip.length() == 0) ctx.ip = "uart";
     return true;
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
-    // Local display auth state - check if auth is required via settings
-    // Allow commands during boot phase (before auth is enforced)
-    if (shouldBlockForDisplayAuth()) {
+    // Resolve from the synchronized authority, not the OLED-loop's legacy UI
+    // mirror. A remote login/logout updates this shadow synchronously and only
+    // then asks the main loop to redraw.
+    String displayUser;
+    bool displayAuthed = false;
+    (void)localDisplayTransportSessionSnapshot(displayUser, displayAuthed);
+    // Allow commands during boot phase (before auth is enforced).
+    if (gSettings.localDisplayRequireAuth && !displayAuthed &&
+        !localDisplayBootAuthBypassActive()) {
       broadcastOutput("ERROR: auth required (display)");
       return false;
     }
-    ctx.user = gLocalDisplayUser;
+    ctx.user = displayAuthed ? displayUser : String();
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
   } else if (ctx.transport == SOURCE_G2_GLASSES) {
@@ -248,11 +748,14 @@ bool tgRequireAuth(AuthContext& ctx) {
 bool tgRequireAuth(AuthContext& ctx) {
   // Serial auth only when HTTP server disabled
   if (ctx.transport == SOURCE_SERIAL) {
-    if (gSettings.serialRequireAuth && !gSerialAuthed) {
+    String serialUser;
+    bool serialAuthed = false;
+    (void)serialTransportSessionSnapshot(serialUser, serialAuthed);
+    if (gSettings.serialRequireAuth && !serialAuthed) {
       broadcastOutput("ERROR: auth required");
       return false;
     }
-    ctx.user = gSerialUser;
+    ctx.user = serialAuthed ? serialUser : String();
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
   } else if (ctx.transport == SOURCE_UART) {
@@ -268,11 +771,15 @@ bool tgRequireAuth(AuthContext& ctx) {
     if (ctx.ip.length() == 0) ctx.ip = "uart";
     return true;
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
-    if (shouldBlockForDisplayAuth()) {
+    String displayUser;
+    bool displayAuthed = false;
+    (void)localDisplayTransportSessionSnapshot(displayUser, displayAuthed);
+    if (gSettings.localDisplayRequireAuth && !displayAuthed &&
+        !localDisplayBootAuthBypassActive()) {
       broadcastOutput("ERROR: auth required (display)");
       return false;
     }
-    ctx.user = gLocalDisplayUser;
+    ctx.user = displayAuthed ? displayUser : String();
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
   } else if (ctx.transport == SOURCE_G2_GLASSES) {
@@ -465,9 +972,110 @@ bool isKnownUserRole(const String& role) {
   return role == "guest" || role == "user" || role == "admin" || role == "superadmin";
 }
 
+// CM5 readiness is stronger than ordinary guest login: it can admit native
+// device work, so an unreadable/missing/malformed account must never default
+// to the ordinary-user role. This lookup runs only at UART login, not at the
+// five-second heartbeat cadence.
+bool getUserAuthorizationRole(const String& username, String& roleOut) {
+  roleOut = String();
+  if (!filesystemReady || username.length() == 0) return false;
+  FsLockGuard guard("users.authorization_role");
+  if (!guard.held && !isFsLockedByCurrentTask()) return false;
+  if (!VFS::existsGuarded(USERS_JSON_FILE,
+                          VFS::systemAuth("user.authorizationRole")))
+    return false;
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r",
+                            VFS::systemAuth("user.authorizationRole"));
+  if (!f) return false;
+  PSRAM_JSON_DOC(doc);
+  const DeserializationError err = deserializeJson(doc, f);
+  f.close();
+  if (err) return false;
+  const JsonArray users = doc["users"].as<JsonArray>();
+  if (!users) return false;
+  bool firstAccount = true;
+  for (JsonObject user : users) {
+    const char* storedName = user["username"] | "";
+    // Usernames are currently exact/case-sensitive in credential and role
+    // lookup. Do not let a case-colliding ordinary account authorize a Guest
+    // whose name differs only by case.
+    if (username != storedName) {
+      firstAccount = false;
+      continue;
+    }
+    if (user["banned"] | false) return false;
+    const JsonVariantConst roleField = user["role"];
+    String role;
+    if (roleField.isNull()) {
+      // Compatibility with pre-role rosters is deliberate elsewhere in this
+      // module: the first account remains the recovery owner, while another
+      // account with no legacy role is an ordinary user. Missing is distinct
+      // from a present-but-malformed/unknown role, which stays fail-closed.
+      role = firstAccount ? "superadmin" : "user";
+    } else if (roleField.is<const char*>()) {
+      role = String(roleField.as<const char*>());
+    } else {
+      return false;
+    }
+    role.toLowerCase();
+    if (!isKnownUserRole(role)) return false;
+    roleOut = role;
+    return true;
+  }
+  return false;
+}
+
+bool userMayControlOtherSessions(const String& username) {
+  String role;
+  return getUserAuthorizationRole(username, role) && role != "guest";
+}
+
+static bool userMayPublishCm5Presence(const String& username) {
+  return userMayControlOtherSessions(username);
+}
+
+uint32_t publishUartAccountSession(const String& username,
+                                   uint32_t* transportEpochOut) {
+  if (transportEpochOut) *transportEpochOut = 0;
+  // Role/delete mutations bump this generation after the durable write and
+  // before their session-revocation sweep. Ban/unban follows the same order.
+  // If any mutation overlaps this tiny publication window, retain the named
+  // login but conservatively disable CM5 presence until the next login.
+  const uint32_t generationBefore =
+      gIdentityGeneration.load(std::memory_order_acquire);
+  const bool allowCm5Presence = userMayPublishCm5Presence(username);
+  const uint32_t sessionEpoch =
+      uartLinkSessionAuthenticated(username, allowCm5Presence,
+                                   transportEpochOut);
+  if (sessionEpoch != 0 &&
+      gIdentityGeneration.load(std::memory_order_acquire) !=
+          generationBefore) {
+    (void)uartLinkSessionRestrictCm5PresenceIfUser(username, sessionEpoch);
+  }
+  return sessionEpoch;
+}
+
 // ============================================================================
 // Centralized Transport Authentication Management
 // ============================================================================
+
+bool validateTransportCredentials(CommandSource transport,
+                                  const String& username,
+                                  const String& password) {
+  if (!isFsLockedByCurrentTask()) return false;
+  (void)transport;
+  return isValidUser(username, password);
+}
+
+void recordTransportLoginResult(CommandSource transport,
+                                const String& username,
+                                bool success,
+                                const char* reason) {
+  recordLoginAttempt(transport, username, String(), success,
+                     reason ? reason : (success ? "Login successful"
+                                                : "Authentication failed"));
+  if (success) updateUserLastSeen(username);
+}
 
 bool loginTransport(CommandSource transport, const String& username, const String& password) {
   // serial / display / bluetooth are the credential-login transports that funnel
@@ -478,55 +1086,64 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
                                     transport == SOURCE_BLUETOOTH ||
                                     transport == SOURCE_UART);
 
-  // Validate credentials first
+  // Serialize credential validation through publication for every native
+  // transport. Account writers use this recursive filesystem lock and revoke
+  // only after releasing it, so an old password can never publish after a
+  // reset/delete/ban sweep observed an empty session slot.
+  FsLockGuard authGuard("users.login_transport");
+  if (!authGuard.held && !isFsLockedByCurrentTask()) {
+    if (credentialTransport)
+      recordLoginAttempt(transport, username, String(), false,
+                         "Authentication store unavailable");
+    return false;
+  }
   if (!isValidUser(username, password)) {
     if (credentialTransport)
       recordLoginAttempt(transport, username, String(), false, "Invalid credentials");
     return false;
   }
 
-  if (credentialTransport)
-    recordLoginAttempt(transport, username, String(), true, "Login successful");
-
   // Set auth state based on transport
+  bool published = false;
   switch (transport) {
     case SOURCE_SERIAL:
-      gSerialAuthed = true;
-      gSerialUser = username;
-      updateUserLastSeen(username);
-      return true;
+      serialTransportSessionAuthenticated(username);
+      {
+        String liveUser; bool authed = false;
+        (void)serialTransportSessionSnapshot(liveUser, authed);
+        published = authed && liveUser == username;
+      }
+      break;
 
     case SOURCE_UART:
-      // UART host link. No caller reaches this today: the link's in-band
-      // login goes through authSuccessUnified (or sets the globals directly
-      // in stub builds), and cmd_login has no "uart" transport keyword and
-      // refuses SOURCE_UART callers outright. Kept so the transport is
-      // complete here — if a future path does route through loginTransport,
-      // it establishes the right session instead of silently failing.
-      if (!uartLinkIsRunning()) return false;
-      uartLinkSessionAuthenticated(username);
-      updateUserLastSeen(username);
-      return true;
+      if (!uartLinkIsRunning()) break;
+      publishUartAccountSession(username);
+      {
+        char liveUser[kPublicUsernameMaxLen + 1] = {};
+        published = uartLinkSessionSnapshot(liveUser, sizeof(liveUser)) &&
+                    username == liveUser;
+      }
+      break;
 
     case SOURCE_LOCAL_DISPLAY:
-      gLocalDisplayAuthed = true;
-      gLocalDisplayUser = username;
-      // Start the idle clock now: login is a real interaction, and without this
-      // a user who logs in then walks away would read as never-stamped (0) and
-      // never time out. localDisplaySessionTick() refreshes it on later input.
-      gLocalDisplayLastInteractionMs = sessionStampNow();
-      oledNotifyLocalDisplayAuthChanged();
-      updateUserLastSeen(username);
-      return true;
+      localDisplayTransportSessionAuthenticated(username);
+      {
+        String liveUser; bool authed = false;
+        (void)localDisplayTransportSessionSnapshot(liveUser, authed);
+        published = authed && liveUser == username;
+      }
+      break;
 
     case SOURCE_BLUETOOTH:
-      updateUserLastSeen(username);
-      return true;
+      // Validation-only here. The BLE owner binds the exact connection before
+      // releasing this auth transaction via its dedicated deferred login path.
+      published = true;
+      break;
       
     case SOURCE_WEB:
       // Web auth is handled separately via session cookies
       // This function doesn't apply to web transport
-      return false;
+      break;
 
     case SOURCE_G2_GLASSES:
       // G2 doesn't use credential login. Identity is captured at pair time
@@ -534,37 +1151,145 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
       // executed under an already-authenticated CLI session. No code path
       // should be calling loginTransport(SOURCE_G2_GLASSES) — return false
       // so it surfaces clearly if one ever does.
-      return false;
+      break;
 
     default:
-      return false;
+      break;
   }
+
+  if (credentialTransport)
+    recordLoginAttempt(transport, username, String(), published,
+                       published ? "Login successful" : "Session publication failed");
+  if (published) updateUserLastSeen(username);
+  return published;
+}
+
+namespace {
+class NamedSourceUseGuard {
+ public:
+  NamedSourceUseGuard(CommandSource source, const String& user,
+                      TransportSessionEpoch epoch)
+      : source_(source) {
+    if (source == SOURCE_SERIAL) {
+      locked_ = serialTransportSessionBeginDelivery(epoch);
+      if (locked_) {
+        String liveUser; bool authed = false;
+        const TransportSessionEpoch liveEpoch =
+            serialTransportSessionSnapshot(liveUser, authed);
+        locked_ = authed && liveEpoch == epoch && liveUser == user;
+        if (!locked_) serialTransportSessionEndDelivery();
+      }
+    } else if (source == SOURCE_LOCAL_DISPLAY) {
+      locked_ = localDisplayTransportSessionBeginDelivery(epoch);
+      if (locked_) {
+        String liveUser; bool authed = false;
+        const TransportSessionEpoch liveEpoch =
+            localDisplayTransportSessionSnapshot(liveUser, authed);
+        locked_ = authed && liveEpoch == epoch && liveUser == user;
+        if (!locked_) localDisplayTransportSessionEndDelivery();
+      }
+    } else if (source == SOURCE_UART) {
+      locked_ = uartLinkNamedSessionBeginUse(epoch, user);
+    }
+  }
+  ~NamedSourceUseGuard() {
+    if (!locked_) return;
+    if (source_ == SOURCE_SERIAL) serialTransportSessionEndDelivery();
+    else if (source_ == SOURCE_LOCAL_DISPLAY)
+      localDisplayTransportSessionEndDelivery();
+    else if (source_ == SOURCE_UART) uartLinkNamedSessionEndUse();
+  }
+  explicit operator bool() const { return locked_; }
+ private:
+  CommandSource source_;
+  bool locked_ = false;
+};
+}  // namespace
+
+bool loginTransportFromNamedSession(CommandSource target,
+                                    const String& username,
+                                    const String& password,
+                                    CommandSource source,
+                                    const String& sourceUser,
+                                    TransportSessionEpoch sourceEpoch) {
+  if (target == source ||
+      (target != SOURCE_SERIAL && target != SOURCE_UART &&
+       target != SOURCE_LOCAL_DISPLAY)) return false;
+
+  // Credential writers use this same recursive lock and revoke only after
+  // releasing it. Keeping it through exact source revalidation and target
+  // publication makes the operation linearizable with reset/delete/ban.
+  FsLockGuard authGuard("users.cross_transport_login");
+  if (!authGuard.held && !isFsLockedByCurrentTask()) return false;
+  if (!isValidUser(username, password)) {
+    recordLoginAttempt(target, username, String(), false,
+                       "Invalid credentials");
+    return false;
+  }
+  if (!userMayControlOtherSessions(sourceUser)) return false;
+
+  NamedSourceUseGuard sourceGuard(source, sourceUser, sourceEpoch);
+  if (!sourceGuard) return false;
+
+  bool published = false;
+  if (target == SOURCE_SERIAL) {
+    serialTransportSessionAuthenticated(username);
+    String liveUser; bool authed = false;
+    (void)serialTransportSessionSnapshot(liveUser, authed);
+    published = authed && liveUser == username;
+  } else if (target == SOURCE_LOCAL_DISPLAY) {
+    localDisplayTransportSessionAuthenticated(username);
+    String liveUser; bool authed = false;
+    (void)localDisplayTransportSessionSnapshot(liveUser, authed);
+    published = authed && liveUser == username;
+  } else {
+    if (!uartLinkIsRunning()) return false;
+    publishUartAccountSession(username);
+    char liveUser[kPublicUsernameMaxLen + 1] = {};
+    published = uartLinkSessionSnapshot(liveUser, sizeof(liveUser)) &&
+                username == liveUser;
+  }
+  recordLoginAttempt(target, username, String(), published,
+                     published ? "Login successful" : "Session publication failed");
+  if (published) updateUserLastSeen(username);
+  return published;
+}
+
+bool logoutTransportFromNamedSession(CommandSource target,
+                                     CommandSource source,
+                                     const String& sourceUser,
+                                     TransportSessionEpoch sourceEpoch) {
+  if (target == source ||
+      (target != SOURCE_SERIAL && target != SOURCE_UART &&
+       target != SOURCE_LOCAL_DISPLAY)) return false;
+  FsLockGuard authGuard("users.cross_transport_logout");
+  if (!authGuard.held && !isFsLockedByCurrentTask()) return false;
+  if (!userMayControlOtherSessions(sourceUser)) return false;
+  NamedSourceUseGuard sourceGuard(source, sourceUser, sourceEpoch);
+  if (!sourceGuard) return false;
+  logoutTransport(target);
+  return true;
 }
 
 void logoutTransport(CommandSource transport) {
   switch (transport) {
     case SOURCE_SERIAL:
-      gSerialAuthed = false;
-      gSerialUser = String();
+      serialTransportSessionCleared();
       break;
 
     case SOURCE_UART:
-      uartLinkSessionCleared();
+      uartLinkSessionCleared(UartLinkSessionClearReason::TransportLogout);
       break;
       
     case SOURCE_LOCAL_DISPLAY:
-      gLocalDisplayAuthed = false;
-      gLocalDisplayUser = String();
-      oledNotifyLocalDisplayAuthChanged();
+      localDisplayTransportSessionCleared();
       break;
 
     case SOURCE_G2_GLASSES:
-      // Clear the previous pair stamp, then immediately re-home to the
-      // device owner so MAC/autoReconnect never leave the lens unowned.
+      // Logout revokes lens authority. MAC/reconnect data may remain, but a
+      // later automatic reconnect must not silently assign a replacement
+      // owner; explicit authenticated pairing is required.
       g2PairedUserClear();
-#if ENABLE_BLUETOOTH
-      bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
-#endif
       break;
 
     case SOURCE_BLUETOOTH:
@@ -615,28 +1340,23 @@ int revokeUserSessions(const String& username,
   if (username.length() == 0) return 0;
   int revoked = 0;
 
-  // Web: walk gSessions, skip exceptSid if set.
-  if (gSessions) {
-    for (int i = 0; i < MAX_SESSIONS; ++i) {
-      if (!gSessions[i].sid.length()) continue;
-      if (!gSessions[i].user.equalsIgnoreCase(username)) continue;
-      if (exceptSid.length() > 0 && gSessions[i].sid == exceptSid) continue;
-      if (gSessions[i].ip.length() > 0) {
-        storeLogoutReason(gSessions[i].ip, reason);
-      }
-      enqueueTargetedRevokeForSessionIdx(i, reason);
-      revoked++;
-    }
-  }
+  // The web helper owns the String session table lock and rechecks the exact
+  // bearer SID before revocation, so a concurrently reused slot cannot revoke
+  // the replacement browser.
+#if ENABLE_HTTP_SERVER
+  revoked += webRevokeSessionsForUser(username, reason, exceptSid);
+#endif
 
   // Serial transport: single per-device session, skipped if this is the
   // calling transport (self-modify case).
-  if (exceptTransport != SOURCE_SERIAL
-      && gSerialAuthed
-      && gSerialUser.equalsIgnoreCase(username)) {
-    gSerialAuthed = false;
-    gSerialUser   = String();
-    revoked++;
+  if (exceptTransport != SOURCE_SERIAL) {
+    String serialUser;
+    bool serialAuthed = false;
+    (void)serialTransportSessionSnapshot(serialUser, serialAuthed);
+    if (serialAuthed && serialUser.equalsIgnoreCase(username)) {
+      serialTransportSessionCleared();
+      revoked++;
+    }
   }
 
   // UART host link: single per-port session, same shape as serial.
@@ -646,24 +1366,21 @@ int revokeUserSessions(const String& username,
   }
 
   // Local display (OLED).
-  if (exceptTransport != SOURCE_LOCAL_DISPLAY
-      && gLocalDisplayAuthed
-      && gLocalDisplayUser.equalsIgnoreCase(username)) {
-    gLocalDisplayAuthed = false;
-    gLocalDisplayUser   = String();
-    oledNotifyLocalDisplayAuthChanged();
-    revoked++;
+  if (exceptTransport != SOURCE_LOCAL_DISPLAY) {
+    String displayUser;
+    bool displayAuthed = false;
+    (void)localDisplayTransportSessionSnapshot(displayUser, displayAuthed);
+    if (displayAuthed && displayUser.equalsIgnoreCase(username)) {
+      localDisplayTransportSessionCleared();
+      revoked++;
+    }
   }
 
   // G2 glasses (BLE-attached lens; pair-time identity).
   // The pair stays valid (MAC + autoReconnect kept) but the lens stops being
   // able to act as this user until re-stamp via `bleautoreconnect g2-glasses on`.
-  if (exceptTransport != SOURCE_G2_GLASSES && g2PairedUserMatches(username)) {
-    g2PairedUserClear();
-#if ENABLE_BLUETOOTH
-    // Re-home to founder so ban/delete of the pairer doesn't leave stuck blank.
-    bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
-#endif
+  if (exceptTransport != SOURCE_G2_GLASSES &&
+      g2PairedUserClearIfMatches(username)) {
     revoked++;
   }
 
@@ -681,14 +1398,20 @@ int revokeUserSessions(const String& username,
 
 bool isTransportAuthenticated(CommandSource transport) {
   switch (transport) {
-    case SOURCE_SERIAL:
-      return gSerialAuthed;
+    case SOURCE_SERIAL: {
+      String user; bool authed = false;
+      (void)serialTransportSessionSnapshot(user, authed);
+      return authed;
+    }
 
     case SOURCE_UART:
       return uartLinkSessionEpoch() != 0;
 
-    case SOURCE_LOCAL_DISPLAY:
-      return gLocalDisplayAuthed;
+    case SOURCE_LOCAL_DISPLAY: {
+      String user; bool authed = false;
+      (void)localDisplayTransportSessionSnapshot(user, authed);
+      return authed;
+    }
 
     case SOURCE_G2_GLASSES:
       // G2 is "authenticated" iff the lens is paired AND pairedByUser is
@@ -710,15 +1433,21 @@ bool isTransportAuthenticated(CommandSource transport) {
 
 String getTransportUser(CommandSource transport) {
   switch (transport) {
-    case SOURCE_SERIAL:
-      return gSerialUser;
+    case SOURCE_SERIAL: {
+      String user; bool authed = false;
+      (void)serialTransportSessionSnapshot(user, authed);
+      return authed ? user : String();
+    }
 
     case SOURCE_UART:
       return uartSessionUserSnapshot();
 
 
-    case SOURCE_LOCAL_DISPLAY:
-      return gLocalDisplayUser;
+    case SOURCE_LOCAL_DISPLAY: {
+      String user; bool authed = false;
+      (void)localDisplayTransportSessionSnapshot(user, authed);
+      return authed ? user : String();
+    }
 
     case SOURCE_G2_GLASSES:
       // Pair-time stamp. Empty string when not yet stamped / cleared by
@@ -1113,38 +1842,39 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
     }
   }
 
+  // Account suspension changes whether an identity may publish device
+  // readiness. Bump before revoking sessions so a concurrently completing
+  // UART login either sees the new account state or disables CM5 presence.
+  bumpIdentityGeneration(ban ? "user.ban" : "user.unban");
+
   if (ban) {
     // Revoke serial transport session if active for this user
-    if (gSerialAuthed && gSerialUser.equalsIgnoreCase(username)) {
-      gSerialAuthed = false;
-      gSerialUser   = String();
+    String serialUser;
+    bool serialAuthed = false;
+    (void)serialTransportSessionSnapshot(serialUser, serialAuthed);
+    if (serialAuthed && serialUser.equalsIgnoreCase(username)) {
+      serialTransportSessionCleared();
     }
     // Revoke UART host-link session if active for this user
     (void)uartLinkSessionClearIfUser(username);
-    // Revoke OLED/local display session if active for this user
-    if (gLocalDisplayAuthed && gLocalDisplayUser.equalsIgnoreCase(username)) {
-      gLocalDisplayAuthed = false;
-      gLocalDisplayUser   = String();
+    // Revoke OLED/local display authority from its synchronized shadow. The
+    // legacy globals are updated later by the OLED owner and may intentionally
+    // still show the prior frame here.
+    String displayUser;
+    bool displayAuthed = false;
+    (void)localDisplayTransportSessionSnapshot(displayUser, displayAuthed);
+    if (displayAuthed && displayUser.equalsIgnoreCase(username)) {
+      localDisplayTransportSessionCleared();
     }
-    // Clear G2 pair-time stamp if the banned user paired the lens, then
-    // re-home to the device owner (same heal as revokeUserSessions).
-    if (g2PairedUserMatches(username)) {
-      g2PairedUserClear();
-#if ENABLE_BLUETOOTH
-      bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
-#endif
-    }
+    // Clear G2 pair-time authority. Reconnect may restore transport only;
+    // authority remains absent until a new authenticated pairing gesture.
+    (void)g2PairedUserClearIfMatches(username);
     // Revoke Bluetooth sessions for this user
     (void)bleRevokeUserSessions(username);
 #if ENABLE_HTTP_SERVER
-    // Revoke all web sessions for this user
-    if (gSessions) {
-      for (int i = 0; i < MAX_SESSIONS; i++) {
-        if (gSessions[i].sid.length() > 0 && gSessions[i].user.equalsIgnoreCase(username)) {
-          enqueueTargetedRevokeForSessionIdx(i, "Your account has been suspended by an administrator.");
-        }
-      }
-    }
+    (void)webRevokeSessionsForUser(
+        username,
+        "Your account has been suspended by an administrator.");
 #endif
     systemEventPost(SYSEVT_USER_BANNED, username.c_str());
   }
@@ -1875,7 +2605,12 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
   // the user being deleted, kick them too. revokeUserSessions returns
   // the count and emits [SESSION-REVOKE] to the audit log; we just
   // need a per-transport user-facing notice on serial in addition.
-  if (gSerialAuthed && gSerialUser.equalsIgnoreCase(username)) {
+  String deletedSerialUser;
+  bool deletedSerialAuthed = false;
+  (void)serialTransportSessionSnapshot(deletedSerialUser,
+                                       deletedSerialAuthed);
+  if (deletedSerialAuthed &&
+      deletedSerialUser.equalsIgnoreCase(username)) {
     broadcastOutput("[serial] Your account has been deleted. You have been logged out.");
   }
   int revokedSessions =
@@ -1963,7 +2698,11 @@ const char* cmd_user_promote(const String& argsInput) {
     return buf;
   }
   systemEventPost(SYSEVT_USER_PROMOTED, username.c_str());
-  if (gSerialAuthed && gSerialUser == username)
+  String promotedSerialUser;
+  bool promotedSerialAuthed = false;
+  (void)serialTransportSessionSnapshot(promotedSerialUser,
+                                       promotedSerialAuthed);
+  if (promotedSerialAuthed && promotedSerialUser == username)
     broadcastOutput("[serial] Your privileges have been updated");
   BROADCAST_PRINTF("[admin] Set user '%s' role to %s", username.c_str(), role.c_str());
   snprintf(buf, 1024, "Promoted user '%s' to %s", username.c_str(), role.c_str());
@@ -1996,7 +2735,11 @@ const char* cmd_user_demote(const String& argsInput) {
   }
   systemEventPost(SYSEVT_USER_DEMOTED, username.c_str());
   // Force re-auth so a session that just lost privilege can't keep using it.
-  if (gSerialAuthed && gSerialUser == username)
+  String demotedSerialUser;
+  bool demotedSerialAuthed = false;
+  (void)serialTransportSessionSnapshot(demotedSerialUser,
+                                       demotedSerialAuthed);
+  if (demotedSerialAuthed && demotedSerialUser == username)
     broadcastOutput("[serial] Your privileges have been changed");
   revokeUserSessions(username, "Your privileges have changed. Please log in again.");
   BROADCAST_PRINTF("[admin] Set user '%s' role to %s", username.c_str(), role.c_str());
@@ -2010,29 +2753,33 @@ const char* cmd_user_demote(const String& argsInput) {
 // with the framework holding sActiveMode in between).
 static String s_pendingUserDeleteName;
 
-static const char* user_delete_confirmed(void* /*userData*/) {
+static const char* doUserDelete(const String& username) {
   EXT_RAM_BSS_ATTR static char respBuf[160];
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   DEBUG_USERSF("[users] CLI delete (confirmed) username=%s",
-               s_pendingUserDeleteName.c_str());
+               username.c_str());
   // Re-check rank at confirm time (not just at prompt): close the window where
   // the target could have been elevated between the prompt and the 'yes'.
   {
     String merr;
-    if (!userMutationAllowed(s_pendingUserDeleteName, kRoleRankNoGrant, merr)) {
+    if (!userMutationAllowed(username, kRoleRankNoGrant, merr)) {
       snprintf(respBuf, sizeof(respBuf), "Error: %s", merr.c_str());
       return respBuf;
     }
   }
   String err;
-  if (!deleteUserInternal(s_pendingUserDeleteName, err)) {
+  if (!deleteUserInternal(username, err)) {
     snprintf(respBuf, sizeof(respBuf), "Error: %s", err.c_str());
     return respBuf;
   }
   snprintf(respBuf, sizeof(respBuf), "Deleted user '%s'",
-           s_pendingUserDeleteName.c_str());
+           username.c_str());
   return respBuf;
+}
+
+static const char* user_delete_confirmed(void* /*userData*/) {
+  return doUserDelete(s_pendingUserDeleteName);
 }
 
 static const char* user_delete_cancelled(void* /*userData*/) {
@@ -2040,6 +2787,11 @@ static const char* user_delete_cancelled(void* /*userData*/) {
   snprintf(respBuf, sizeof(respBuf), "Cancelled. User '%s' not deleted.",
            s_pendingUserDeleteName.c_str());
   return respBuf;
+}
+
+static void user_delete_confirm_accepted(void* opaque) {
+  const String* username = static_cast<const String*>(opaque);
+  if (username) s_pendingUserDeleteName = *username;
 }
 
 const char* cmd_user_delete(const String& argsInput) {
@@ -2096,15 +2848,9 @@ const char* cmd_user_delete(const String& argsInput) {
     }
   }
 
-  // Stash the target name for the confirm callbacks. We do NOT capture
-  // the AuthContext here because deleteUserInternal doesn't take one --
-  // it has internal permission logic. (Compare to filedelete which uses
-  // VFS::removeGuarded(path, ctx).)
-  s_pendingUserDeleteName = username;
-
   // One-shot: run the confirmed path now (it re-checks rank + deletes).
   if (oneShot) {
-    return user_delete_confirmed(nullptr);
+    return doUserDelete(username);
   }
 
   String prompt = "Confirm delete of user '" + username +
@@ -2113,10 +2859,12 @@ const char* cmd_user_delete(const String& argsInput) {
   // in [CMD] log as "userdelete bob (confirm: yes) -> Deleted user 'bob'"
   // (or "(confirm: no) -> Cancelled. User 'bob' not deleted." on cancel).
   String origCmd = "userdelete " + username;
-  if (!cliRequestConfirm(prompt, origCmd, user_delete_confirmed, user_delete_cancelled, nullptr)) {
+  if (!cliRequestConfirm(prompt, origCmd, user_delete_confirmed,
+                         user_delete_cancelled, nullptr,
+                         user_delete_confirm_accepted, &username)) {
     return "Error: cannot request confirm (another interactive mode is active)";
   }
-  return "Type 'yes' to confirm or anything else to cancel.";
+  return cliConfirmPromptResponse();
 }
 
 // Shared password-change implementation. Both the CLI command wrapper below
@@ -2512,9 +3260,12 @@ const char* cmd_session_list(const String& argsInput) {
     JsonArray sessions = doc["sessions"].to<JsonArray>();
     buildAllSessionsJson("", sessions);
     // Append active transport (non-web) sessions as synthetic entries
-    if (gSerialAuthed && gSerialUser.length()) {
+    String serialUser;
+    bool serialAuthed = false;
+    (void)serialTransportSessionSnapshot(serialUser, serialAuthed);
+    if (serialAuthed && serialUser.length()) {
       JsonObject t = sessions.add<JsonObject>();
-      t["user"]      = gSerialUser;
+      t["user"]      = serialUser;
       t["transport"] = "serial";
     }
     const String uartUser = uartSessionUserSnapshot();
@@ -2523,9 +3274,12 @@ const char* cmd_session_list(const String& argsInput) {
       t["user"]      = uartUser;
       t["transport"] = "uart";
     }
-    if (gLocalDisplayAuthed && gLocalDisplayUser.length()) {
+    String displayUser;
+    bool displayAuthed = false;
+    (void)localDisplayTransportSessionSnapshot(displayUser, displayAuthed);
+    if (displayAuthed && displayUser.length()) {
       JsonObject t = sessions.add<JsonObject>();
-      t["user"]      = gLocalDisplayUser;
+      t["user"]      = displayUser;
       t["transport"] = "oled";
     }
     {
@@ -2554,13 +3308,7 @@ const char* cmd_session_list(const String& argsInput) {
     // Stream human-readable format
     broadcastOutput("Active Sessions:");
 
-    int sessionCount = 0;
-    for (int i = 0; i < MAX_SESSIONS; ++i) {
-      const SessionEntry& s = gSessions[i];
-      if (s.user.length() == 0) continue;  // empty slot
-      BROADCAST_PRINTF("  %s from %s (last: %lu)", s.user.c_str(), s.ip.c_str(), s.lastSeen);
-      sessionCount++;
-    }
+    const int sessionCount = webBroadcastSessionsHuman();
 
     if (sessionCount == 0) {
       broadcastOutput("No active sessions");
@@ -2586,15 +3334,13 @@ const char* cmd_session_revoke(const String& argsInput) {
     String sid = a.arg(1);
     String reason = a.has(2) ? a.remaining(1) : String();
     if (!reason.length()) reason = defaultReason;
-    int idx = findSessionIndexBySID(sid);
-    if (idx < 0) return "Error: Session not found for given SID.";
-    if (gSessions[idx].ip.length() > 0) {
-      storeLogoutReason(gSessions[idx].ip, reason);
+    String who;
+    if (!webRevokeSessionBySid(sid, reason, &who)) {
+      return "Error: Session not found for given SID.";
     }
-    enqueueTargetedRevokeForSessionIdx(idx, reason);
     // Admin audit broadcast
     {
-      String who = gSessions[idx].user.length() ? gSessions[idx].user : String("(unknown)");
+      if (!who.length()) who = "(unknown)";
       if (ensureDebugBuffer()) {
         snprintf(getDebugBuffer(), 1024, "Admin audit: revoked session by SID for user '%s' reason='%s'", who.c_str(), reason.c_str());
         broadcastOutput(getDebugBuffer());
@@ -3471,20 +4217,50 @@ static const char* cmd_serialrequireauth(const String& argsInput) {
   }
   arg.toLowerCase();
   if (arg == "on" || arg == "true" || arg == "1") {
+    const bool changed = !gSettings.serialRequireAuth;
     setSetting(gSettings.serialRequireAuth, true);
+    if (changed) serialTransportAuthPolicyChanged();
     return "[Serial] Require auth enabled";
   } else if (arg == "off" || arg == "false" || arg == "0") {
+    const bool changed = gSettings.serialRequireAuth;
     setSetting(gSettings.serialRequireAuth, false);
+    if (changed) serialTransportAuthPolicyChanged();
     return "[Serial] Require auth disabled - serial commands bypass login";
   }
   return "Error: invalid arguments — Usage: serialrequireauth [on|off]";
 }
 
+static const char* cmd_whoami(const String& argsInput) {
+  CommandArgs args(argsInput);
+  if (args.unterminatedQuote() || args.count() != 0) {
+    return "Error: invalid arguments — Usage: whoami";
+  }
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const AuthContext& auth = currentAuthContext();
+  const char* transport = "unknown";
+  switch (auth.transport) {
+    case SOURCE_SERIAL: transport = "serial"; break;
+    case SOURCE_UART: transport = "uart"; break;
+    case SOURCE_LOCAL_DISPLAY: transport = "display"; break;
+    case SOURCE_WEB: transport = "web"; break;
+    case SOURCE_BLUETOOTH: transport = "bluetooth"; break;
+    default: break;
+  }
+  EXT_RAM_BSS_ATTR static char buf[128];
+  const String& user = auth.user.length() ? auth.user : String("(unknown)");
+  snprintf(buf, sizeof(buf), "You are %s%s on %s", user.c_str(),
+           isAdminUser(user) ? " (admin)" : "", transport);
+  return buf;
+}
+
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry userSystemCommands[] = {
   // Authentication commands
-  { "login", "Login: <user> <pass> [transport]", false, cmd_login, "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth" },
-  { "logout", "Logout [transport]", false, cmd_logout, "Usage: logout [transport]\nTransport: serial (default), display, bluetooth, g2" },
+  { "login", "Login this interface, or target another session after signing in: <user> <pass> [serial|uart|display]", false, cmd_login,
+    "Usage: login <username> <password> [serial|uart|display]\nBare login always targets the submitting interface. An explicit target requires a live named non-Guest Serial/UART/display session." },
+  { "logout", "Logout this interface, or target another session after signing in: [serial|uart|display]", false, cmd_logout,
+    "Usage: logout [serial|uart|display]\nBare logout always targets the submitting interface. An explicit target requires a live named non-Guest Serial/UART/display session." },
+  { "whoami", "Show the identity of the submitting interface.", false, cmd_whoami, "Usage: whoami" },
   { "serialrequireauth", "Enable/disable serial auth requirement [on|off].", true, cmd_serialrequireauth, "Usage: serialrequireauth [on|off]", /*requiresSuperAdmin=*/true },
   
   // User management commands

@@ -1357,8 +1357,8 @@ void oledEspNowSelectMode() {
 }
 
 void oledEspNowUnpairDevice() {
-  if (!gEspNow) return;
-  esp_now_del_peer(gOledEspNowState.selectedDeviceMac);
+  if (!gEspNow || !gEspNow->initialized) return;
+  if (!espnowDeletePeerRuntime(gOledEspNowState.selectedDeviceMac)) return;
   removeEspNowDevice(gOledEspNowState.selectedDeviceMac);
   oledEspNowBackToList();
 }

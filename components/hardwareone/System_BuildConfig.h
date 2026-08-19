@@ -30,9 +30,10 @@
 //
 //     NETWORK_FEATURE_LEVEL, WEB_FEATURE_LEVEL, I2C_FEATURE_LEVEL,
 //     DISPLAY_TYPE,
-//     ENABLE_MQTT, ENABLE_HTTPS, ENABLE_ONDEVICE_LLM,
+//     ENABLE_MQTT, ENABLE_HTTPS,
+//     ENABLE_LLM_BACKEND, ENABLE_LLM_SOURCE_ONBOARD, ENABLE_LLM_SOURCE_CM5,
 //     ENABLE_MAPS, ENABLE_AUTOMATION, ENABLE_EDGE_IMPULSE, ENABLE_GAMES,
-//     ENABLE_RASPBERRY_PI_HOST_POWER
+//     ENABLE_RASPBERRY_PI_HOST_POWER, ENABLE_RASPBERRY_PI_HOST_FAN
 //
 // The regex expects EXACTLY this shape, on a single non-indented line:
 //     #define NAME <integer>
@@ -68,7 +69,7 @@
 #if NETWORK_FEATURE_LEVEL == 4
   #define CUSTOM_ENABLE_NET_WIFI     1   // WiFi connectivity
   #define CUSTOM_ENABLE_NET_HTTP     1   // HTTP server (web UI)
-  #define CUSTOM_ENABLE_NET_ESPNOW   1   // ESP-NOW mesh networking
+  #define CUSTOM_ENABLE_NET_ESPNOW   0   // ESP-NOW mesh networking  [TEST BUILD: off for LLM/CM5 flash headroom]
 #endif
 
 // Web level: which feature pages compile in.
@@ -86,7 +87,7 @@
   #define CUSTOM_ENABLE_WEB_SENSORS    1
   #define CUSTOM_ENABLE_WEB_BLUETOOTH  1
   #define CUSTOM_ENABLE_WEB_SPEECH     0
-  #define CUSTOM_ENABLE_WEB_ESPNOW     1
+  #define CUSTOM_ENABLE_WEB_ESPNOW     0   // [TEST BUILD: off with ESP-NOW]
   #define CUSTOM_ENABLE_WEB_BOND       0
   #define CUSTOM_ENABLE_WEB_MQTT       0
   #define CUSTOM_ENABLE_WEB_GAMES      0
@@ -125,7 +126,7 @@
 // build (camera + mic only) — level 0 also zeroes ENABLE_OLED_DISPLAY and every
 // ENABLE_*_SENSOR below (see the level table further down), so the screen and the
 // sensor drivers fall out on their own.
-#define I2C_FEATURE_LEVEL       0   // CARRIER BUILD: XIAO Sense setting (drops OLED + sensor/I2C layer for BT flash headroom); was 4 (FeatherS3 CUSTOM)
+#define I2C_FEATURE_LEVEL       4   // CARRIER BUILD: XIAO Sense setting (drops OLED + sensor/I2C layer for BT flash headroom); was 4 (FeatherS3 CUSTOM)
 
 #if I2C_FEATURE_LEVEL == 4
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
@@ -150,7 +151,7 @@
 // on-board display. HAL_Display.cpp compiles unconditionally and switches on
 // DISPLAY_TYPE, so a screenless build must set 0 here even though
 // I2C_FEATURE_LEVEL 0 already zeroes ENABLE_OLED_DISPLAY.
-#define DISPLAY_TYPE            0
+#define DISPLAY_TYPE            1
 
 // Input device: which physical input controller is wired to the I2C bus.
 // Exactly one driver compiles in (mutually exclusive — both share STEMMA QT
@@ -162,7 +163,7 @@
 //
 // CURRENT: SEESAW_GAMEPAD for the FeatherS3. Set to 0 (NONE) for the XIAO —
 // both options hang off the I2C bus a level-0 build doesn't have.
-#define INPUT_DEVICE_TYPE       0
+#define INPUT_DEVICE_TYPE       1
 
 // XIAO ESP32S3 Sense expansion: camera + PDM mic + microSD. The base XIAO and the
 // Sense share one Arduino variant (CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"), so this
@@ -249,13 +250,16 @@
 // status), which must survive on PDM-less boards like the FeatherS3 so the G2
 // glasses mic is usable there.
 //
-// NB: ENABLE_G2_GLASSES is literally `#define 1` and is never #undef'd — its
-// "auto-disabled when BT off" behaviour lives at compound use-sites
-// (`#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES`). So we MUST AND-in ENABLE_BLUETOOTH
-// here; a bare `|| ENABLE_G2_GLASSES` would evaluate 1 on every board (incl.
-// BT-off and non-S3 boards with only G2 stubs), compiling a mic feature that has
-// no usable source. Keep this a plain literal expression — CMakeLists greps
-// `#define NAME <int>` and cannot evaluate `(A || B)`.
+// NB: we still AND-in ENABLE_BLUETOOTH here even though the DERIVED rules below
+// now force ENABLE_G2_GLASSES to 0 when Bluetooth is off. This macro is an
+// UNEXPANDED expression evaluated at each use site, and the literal above is what
+// CMake greps — so spelling the dependency out keeps this line true on its own
+// terms and independent of rule ordering. Keep it a plain literal expression:
+// CMakeLists greps `#define NAME <int>` and cannot evaluate `(A || B)`.
+//
+// (Historical note: ENABLE_G2_GLASSES used to be a never-#undef'd literal, which
+// made a BARE `#if ENABLE_G2_GLASSES` silently true on BT-off boards. The derived
+// rule below fixed that class — see docs/G2_GATE_AUDIT.md.)
 #define ENABLE_MICROPHONE       (ENABLE_MICROPHONE_SENSOR || (ENABLE_BLUETOOTH && ENABLE_G2_GLASSES))
 
 // ---------------------------------------------------------------------------
@@ -299,21 +303,9 @@
 // Edge Impulse: ML inference engine.
 #define ENABLE_EDGE_IMPULSE     0
 
-// On-device LLM: tiny transformer inference (Llama + GPT-2 architectures).
-// Requires ESP32-S3 + PSRAM. Models load from LittleFS or SD. FP32 / INT8.
-// Typical PSRAM usage: 1–4 MB at runtime.
-//
-// CURRENT: on for the FeatherS3. Set to 0 for the XIAO camera build. Keep this
-// a plain literal — CMakeLists regex-greps this exact line to decide whether to
-// compile System_LLM*.cpp, and it does not evaluate the preprocessor, so wrapping
-// it in an #if would desync the build from the compiler and break the link.
-#define ENABLE_ONDEVICE_LLM     0
-#if ENABLE_ONDEVICE_LLM
-// Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
-// Lower uses less PSRAM; must cover prompt + max generation.
-// Typical tiny models: 256–1024.
-#define LLM_MAX_CONTEXT_LEN     1024
-#endif
+// LLM moved to §5 USER-FACING APPS — it is a composed feature (registry +
+// conversation layer + web/OLED/G2 surfaces), not a bare subsystem, and the
+// on-device engine is now only one of its answer SOURCES. See ENABLE_LLM_BACKEND.
 
 // Automation: scheduled tasks + conditional commands.
 #define ENABLE_AUTOMATION       1
@@ -322,6 +314,11 @@
 // link. This compiles the `hostpower` command module and its finite EVT/ACK
 // protocol; it does not enable the UART link at runtime by itself.
 #define ENABLE_RASPBERRY_PI_HOST_POWER 1
+
+// CM5 fan mode/readback control over the authenticated UART host link. This
+// compiles the independent `hostfan` EVT/ACK/report state machine; it does not
+// enable the UART link at runtime or implement the Linux fan curve itself.
+#define ENABLE_RASPBERRY_PI_HOST_FAN 1
 
 // Bonded mode: two-device bonded pair via ESP-NOW (master/worker).
 // Master shows remote UI for worker features, manifest cached in LittleFS.
@@ -345,6 +342,40 @@
 #define ENABLE_GAMES            0
 #define ENABLE_WEB_GAME_MAZE        0   // Tilt Maze (IMU/gamepad prototype)
 #define ENABLE_WEB_GAME_DARKROOM    0   // A Dark Room (en/es/fr/zh_cn)
+
+// LLM assistant: model registry, conversation layer, CLI commands, web page
+// (/llm), OLED chat mode, and the G2 lens page.
+//
+//   ENABLE_LLM_BACKEND is the master switch for the feature. Then enable one or
+//   more SOURCES — a source is a place answers can come from. They are
+//   symmetric: the on-device engine has no special status beyond being local.
+//
+//     ENABLE_LLM_SOURCE_ONBOARD  tiny transformer inference on this chip
+//                                (Llama + GPT-2, FP32/INT8). Requires ESP32-S3
+//                                + PSRAM; 1-4 MB PSRAM at runtime, and it is by
+//                                far the largest part of the feature's flash.
+//     ENABLE_LLM_SOURCE_CM5      the CM5 / Pi 5 co-processor, reached over the
+//                                authenticated UART host link. Costs almost no
+//                                flash — the model runs on the other end.
+//
+//   Turning a source off removes it from every model picker; the feature and
+//   its remaining sources are unaffected. Master off ignores both sources.
+//
+//   Keep all three PLAIN LITERALS. CMakeLists regex-greps these exact lines to
+//   decide which files reach the compiler and does not evaluate the
+//   preprocessor, so nesting a source inside `#if ENABLE_LLM_BACKEND` would
+//   still be read as its literal and compile the engine with the feature off.
+//   The dependency between them is enforced by #error in §8 instead.
+#define ENABLE_LLM_BACKEND          1
+#define ENABLE_LLM_SOURCE_ONBOARD   0
+#define ENABLE_LLM_SOURCE_CM5       1
+
+#if ENABLE_LLM_SOURCE_ONBOARD
+// Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
+// Lower uses less PSRAM; must cover prompt + max generation.
+// Typical tiny models: 256–1024.
+#define LLM_MAX_CONTEXT_LEN     1024
+#endif
 
 // Maps: offline maps and waypoints web page.
 #define ENABLE_MAPS             0   // CARRIER BUILD: dropped for BT flash headroom; was 1
@@ -714,6 +745,17 @@
   #define ENABLE_WEB_MAPS 0
 #endif
 
+// G2 glasses need the BLE radio — the ESP32 is a BLE central for them. Force
+// the feature off when Bluetooth is compiled out, so a BARE `#if ENABLE_G2_GLASSES`
+// is correct everywhere instead of silently evaluating 1 on a BT-off board.
+// Same shape as the ENABLE_R1_HEALTH rule below; ENABLE_G2_GLASSES stays a plain
+// literal above so CMake can grep it (CMake takes the FIRST regex match, i.e. the
+// literal — and HW_CFG_BUILD_G2 already ANDs in HW_CFG_ENABLE_BLUETOOTH itself).
+#if !ENABLE_BLUETOOTH
+  #undef ENABLE_G2_GLASSES
+  #define ENABLE_G2_GLASSES 0
+#endif
+
 // R1 Health needs BT + G2 (ring transport). Force feature + web page off
 // when either prerequisite is missing. ENABLE_R1_HEALTH is a plain literal
 // above so CMake can grep it; this is the runtime/compile truth for TUs.
@@ -738,7 +780,7 @@
   #define ENABLE_BONDED_MODE 0
 #endif
 
-// Note: ENABLE_ONDEVICE_LLM requires ESP32-S3 with PSRAM.
+// Note: ENABLE_LLM_SOURCE_ONBOARD requires ESP32-S3 with PSRAM.
 // CMakeLists.txt handles excluding LLM source files on non-S3 targets.
 
 // =============================================================================
@@ -833,14 +875,32 @@
   #define BATTERY_BACKEND_FUEL_GAUGE 0
 
   // UART host link — UART1 on the Feather V2's TX/RX header pins (GPIO8/7).
-  // Console stays on UART0 through the bridge chip. See QT Py block for the
-  // classic-ESP32 baud-cap rationale.
+  // Console stays on UART0 through the bridge chip.
+  //
+  // The 230400 DEFAULT is not a hardware limit — classic ESP32 UART handles far
+  // more. It is the largest baud the Arduino HAL still clocks from REF_TICK
+  // (REF_TICK_BAUDRATE_LIMIT = 250000 in esp32-hal-uart.c). REF_TICK is a fixed
+  // 1 MHz source, immune to CPU/APB frequency changes; above it the HAL falls
+  // back to UART_SCLK_APB, whose rate follows the CPU clock whenever the CPU
+  // drops BELOW 80 MHz (240/160/80 are all PLL-derived and pin APB at 80 MHz;
+  // only the XTAL-derived 40 MHz moves it).
+  //
+  // MAX is therefore 460800, not 230400: the one state that would corrupt an
+  // APB-clocked link is UltraSaver's 40 MHz idle floor, and the idle power-save
+  // path clamps that floor to 80 MHz while a >REF_TICK link is running (see
+  // powerSaveTick in HardwareOne.cpp). 460800 is worth reaching for — captured
+  // audio is 32000 B/s, so 230400 (23040 B/s) transfers a recording SLOWER than
+  // real time while 460800 (46080 B/s) outruns it.
+  //
+  // Opt in at runtime with `uartlinkbaud 460800`; the CM5's config.yaml
+  // link.baud must match exactly. Still below live-pcm-v1's 921600 floor, so
+  // live streaming remains unavailable on this board either way.
   #define UART_LINK_PORT        Serial1
   #define UART_LINK_UART_NUM    1
   #define UART_LINK_TX_PIN      8
   #define UART_LINK_RX_PIN      7
   #define UART_LINK_BAUD_DEFAULT 230400
-  #define UART_LINK_BAUD_MAX    230400
+  #define UART_LINK_BAUD_MAX    460800
 
 // --- Seeed Studio XIAO ESP32S3 Sense (with camera/mic expansion) ---
 // Note: Sense uses same variant as base XIAO ESP32S3, expansion board is add-on hardware
@@ -1205,6 +1265,37 @@
   #else
     #define OLED_BUS_DEFAULT 0
   #endif
+#endif
+
+// Dictation = speech as a text INPUT METHOD (the OLED keyboard's mic page).
+// Needs a mic to capture with and a display to type into. Defined down here,
+// after the board blocks, because ENABLE_OLED_DISPLAY is not resolved until
+// then.
+//
+// The CM5 host link that actually performs the transcription is deliberately a
+// RUNTIME condition rather than a build one: nothing on this device turns
+// speech into arbitrary text (ESP-SR is a fixed command grammar), so the mode
+// is useless without an authenticated host — but that host comes and goes while
+// the firmware runs. uartLinkIsRunning() stubs to false on boards with no
+// UART_LINK_* pins, so dictationAvailable() refuses there too and the keyboard
+// skips the mode. Source-agnostic: PDM or G2, whichever the mic layer resolves.
+#define ENABLE_DICTATION        (ENABLE_MICROPHONE && ENABLE_OLED_DISPLAY)
+
+// =============================================================================
+// LLM FEATURE / SOURCE CONSISTENCY  (see §5 ENABLE_LLM_BACKEND)
+// =============================================================================
+// The three LLM flags are declared as plain literals so CMake can grep them, so
+// their dependency cannot be expressed by nesting them in #if. It is enforced
+// here instead. Placed after the board blocks because the CM5 source needs
+// UART_LINK_PORT, which is not resolved until then.
+#if ENABLE_LLM_BACKEND && !ENABLE_LLM_SOURCE_ONBOARD && !ENABLE_LLM_SOURCE_CM5
+  #error "ENABLE_LLM_BACKEND needs at least one answer source. Set ENABLE_LLM_SOURCE_ONBOARD and/or ENABLE_LLM_SOURCE_CM5 to 1, or turn the feature off."
+#endif
+#if !ENABLE_LLM_BACKEND && (ENABLE_LLM_SOURCE_ONBOARD || ENABLE_LLM_SOURCE_CM5)
+  #error "An LLM source is enabled but ENABLE_LLM_BACKEND is 0. A source has nothing to plug into on its own — set ENABLE_LLM_BACKEND 1, or turn the source off."
+#endif
+#if ENABLE_LLM_SOURCE_CM5 && !defined(UART_LINK_PORT)
+  #error "ENABLE_LLM_SOURCE_CM5 requires the authenticated UART host link, and this board defines no UART_LINK_PORT."
 #endif
 
 // =============================================================================

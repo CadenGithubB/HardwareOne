@@ -339,6 +339,7 @@ static bool sWifiKeyboardActive = false;
 static bool sWifiAddConnectAfter = false;   // true when password flow began from a scan pick
 static String sWifiAddSSID = "";
 static String sWifiAddPass = "";
+static TransportSessionEpoch sWifiAddEpoch = kNoTransportSessionEpoch;
 
 // Saved-networks picker (shared by the List + Remove sub-modes) and scan-results
 // picker. Both are plain OLEDScrollState lists rendered the SAME way as this menu
@@ -352,6 +353,7 @@ static bool sWifiScanInitialized = false;
 // Kept in stable storage because OLEDScrollState items store pointers, not copies.
 EXT_RAM_BSS_ATTR static char sWifiScanSSIDs[16][33];
 EXT_RAM_BSS_ATTR static char sWifiScanLabels[16][40];
+EXT_RAM_BSS_ATTR static char sWifiScanFailure[40];
 static int  sWifiScanCount = 0;
 
 // Pending removal SSID + confirm-prompt buffer. oledConfirmRequest stores the
@@ -391,10 +393,15 @@ static void displayNetworkWifiMenuRendered() {
 }
 
 static void startWifiAddSSID() {
+  String sessionUser;
+  bool sessionAuthed = false;
+  sWifiAddEpoch = localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
+  secureClearString(sessionUser);
+  (void)sessionAuthed;  // AuthBypass also owns a real policy-scoped epoch.
   sWifiAddStep = WIFI_ADD_SSID;
   sWifiAddConnectAfter = false;  // manual Add = save only (unchanged behavior)
-  sWifiAddSSID = "";
-  sWifiAddPass = "";
+  secureClearString(sWifiAddSSID);
+  secureClearString(sWifiAddPass);
   oledKeyboardInit("Enter SSID:", "");
   sWifiKeyboardActive = true;
 }
@@ -409,17 +416,29 @@ static void wifiAddReset() {
   sWifiAddStep = WIFI_ADD_NONE;
   sWifiKeyboardActive = false;
   sWifiAddConnectAfter = false;
-  sWifiAddSSID = "";
-  sWifiAddPass = "";
+  secureClearString(sWifiAddSSID);
+  secureClearString(sWifiAddPass);
+  sWifiAddEpoch = kNoTransportSessionEpoch;
   oledKeyboardReset();
+}
+
+void oledNetworkModeResetSessionState() {
+  wifiAddReset();
+  secureClearString(sPendingRemoveSSID);
+  memset(sRemovePromptBuf, 0, sizeof(sRemovePromptBuf));
 }
 
 // Pre-fill the SSID from a scan pick and jump straight to password entry.
 static void startWifiAddFromScan(const char* ssid) {
+  String sessionUser;
+  bool sessionAuthed = false;
+  sWifiAddEpoch = localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
+  secureClearString(sessionUser);
+  (void)sessionAuthed;  // AuthBypass also owns a real policy-scoped epoch.
   sWifiAddStep = WIFI_ADD_PASS;
   sWifiAddConnectAfter = true;   // scan pick = save AND connect
   sWifiAddSSID = String(ssid);
-  sWifiAddPass = "";
+  secureClearString(sWifiAddPass);
   oledKeyboardInit("Enter Password:", "");
   sWifiKeyboardActive = true;
 }
@@ -431,6 +450,13 @@ static bool wifiAddKeyboardTick(bool* handled) {
   if (!sWifiKeyboardActive) return false;
   *handled = false;
   if (oledKeyboardIsCompleted()) {
+    const TransportSessionEpoch sessionEpoch = sWifiAddEpoch;
+    if (!transportSessionEpochIsLive(
+            SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
+      wifiAddReset();
+      *handled = true;
+      return true;
+    }
     String text = String(oledKeyboardGetText());
     oledKeyboardReset();
     sWifiKeyboardActive = false;
@@ -439,8 +465,27 @@ static bool wifiAddKeyboardTick(bool* handled) {
       startWifiAddPass();
     } else if (sWifiAddStep == WIFI_ADD_PASS) {
       sWifiAddPass = text;
-      executeOLEDCommand("wifiadd \"" + sWifiAddSSID + "\" \"" + sWifiAddPass + "\"");
-      if (sWifiAddConnectAfter) executeOLEDCommand("openwifi --best");
+      String command = "wifiadd \"" + sWifiAddSSID + "\" \"" + sWifiAddPass + "\"";
+      const bool connectAfter = sWifiAddConnectAfter;
+      // Expected-epoch admission/result fencing below fails closed if a
+      // replacement arrives during FS/network I/O.
+      char result[128] = {};
+      const bool added = executeOLEDCommandWithResultForSession(
+          command, sessionEpoch, result, sizeof(result));
+      secureClearString(command);
+      if (added && connectAfter) {
+        (void)executeOLEDCommandWithResultForSession(
+            "openwifi --best", sessionEpoch, result, sizeof(result));
+      }
+      volatile char* wipe = reinterpret_cast<volatile char*>(result);
+      for (size_t i = 0; i < sizeof(result); ++i) wipe[i] = '\0';
+      secureClearString(text);
+      if (transportSessionEpochIsLive(
+              SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
+        wifiAddReset();
+      }
+    } else {
+      secureClearString(text);
       wifiAddReset();
     }
     *handled = true;
@@ -548,7 +593,9 @@ static void displayNetworkWifiScanRendered() {
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-    oledDisplay->println("No networks found");
+    oledDisplay->println(sWifiScanFailure[0]
+                             ? sWifiScanFailure
+                             : "No networks found");
     return;
   }
   oledScrollRenderSimple(oledDisplay, &sWifiScanScroll);
@@ -571,6 +618,26 @@ static bool networkWifiScanInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPr
   return false;  // B → global pop
 }
 
+#if ENABLE_WIFI
+static bool cacheOledWifiScanRecord(const WifiScanRecord& record,
+                                    uint16_t /*index*/, uint16_t /*total*/,
+                                    void* /*context*/) {
+  if (record.ssid[0] == '\0') return true;  // named picker skips hidden APs
+  if (sWifiScanCount >= 16) return false;
+
+  memcpy(sWifiScanSSIDs[sWifiScanCount], record.ssid,
+         sizeof(sWifiScanSSIDs[sWifiScanCount]));
+  sWifiScanSSIDs[sWifiScanCount][32] = '\0';
+  const char* bars = (record.rssi > -50) ? " +++"
+                    : (record.rssi > -70) ? " ++" : " +";
+  snprintf(sWifiScanLabels[sWifiScanCount],
+           sizeof(sWifiScanLabels[sWifiScanCount]), "%.32s%s",
+           sWifiScanSSIDs[sWifiScanCount], bars);
+  ++sWifiScanCount;
+  return sWifiScanCount < 16;
+}
+#endif
+
 // Blocking WiFi scan, then push the scan sub-mode showing the results.
 static void startWifiScan() {
   // Immediate "Scanning..." feedback before the blocking scan (mirrors the
@@ -587,21 +654,24 @@ static void startWifiScan() {
   }
 
   sWifiScanCount = 0;
+  sWifiScanFailure[0] = '\0';
 #if ENABLE_WIFI
-  if (ensureWiFiInitialized()) {
-    int n = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
-    for (int i = 0; i < n && sWifiScanCount < 16; i++) {
-      String ssid = WiFi.SSID(i);
-      if (ssid.length() == 0) continue;  // skip hidden
-      strncpy(sWifiScanSSIDs[sWifiScanCount], ssid.c_str(), 32);
-      sWifiScanSSIDs[sWifiScanCount][32] = '\0';
-      int rssi = WiFi.RSSI(i);
-      const char* bars = (rssi > -50) ? " +++" : (rssi > -70) ? " ++" : " +";
-      snprintf(sWifiScanLabels[sWifiScanCount], sizeof(sWifiScanLabels[0]),
-               "%.32s%s", sWifiScanSSIDs[sWifiScanCount], bars);
-      sWifiScanCount++;
+  if (!ensureWiFiInitialized()) {
+    snprintf(sWifiScanFailure, sizeof(sWifiScanFailure),
+             "WiFi unavailable");
+  } else {
+    const WifiScanResult result = wifiScanForEach(
+        /*includeHidden=*/true, cacheOledWifiScanRecord, nullptr,
+        /*acquireTimeoutMs=*/0);
+    if (!result.ok()) {
+      // Do not expose a prefix of a failed driver walk as a selectable list.
+      sWifiScanCount = 0;
+      snprintf(sWifiScanFailure, sizeof(sWifiScanFailure),
+               "Scan %s; try again", wifiScanStatusText(result.status));
+      DEBUG_WIFIF("OLED WiFi scan failed (%s, driver=%ld)",
+                  wifiScanStatusText(result.status),
+                  (long)result.driverError);
     }
-    if (n >= 0) WiFi.scanDelete();
   }
 #endif
 

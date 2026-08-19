@@ -116,6 +116,11 @@ boards/qtpy_esp32.defaults        # esp32    — adafruit_qtpy_esp32      + Quad
 boards/feather_esp32_v2.defaults  # esp32    — adafruit_feather_esp32_v2 + Quad PSRAM, 8 MB flash
 ```
 
+The XIAO profile also pins the camera component to the three sensors this
+firmware supports (`OV2640`, `OV3660`, and `OV5640`) and compiles the other
+sensor drivers out. Keep that allowlist synchronized with the camera hardware
+contract before adding a new XIAO/Sense sensor.
+
 `CMakeLists.txt` reads the `HW_BOARD` env var at configure time and layers the
 matching board file on top of the chip-family defaults (`sdkconfig.defaults.<target>`,
 which holds only the settings common to all boards of that chip). Each board

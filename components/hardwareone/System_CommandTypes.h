@@ -59,6 +59,25 @@ enum CommandOrigin {
 // identical-by-contract copy of those bits; unified 2026-07.)
 
 // Full execution context for a command
+enum CommandContextBehavior : uint8_t {
+  COMMAND_CONTEXT_DEFAULT = 0,
+  // Machine-protocol traffic must remain in the normal registry/executor
+  // pipeline, but it must never be interpreted as an answer to a human CLI
+  // prompt or open an interactive mode of its own.
+  COMMAND_CONTEXT_MODE_INDEPENDENT = 1u << 0,
+  // The producer authenticated a stateful transport session and therefore
+  // requires an exact, still-live generation at execution time. This bit
+  // distinguishes a failed epoch capture (which must fail closed) from an
+  // intentionally stateless caller such as HTTP Basic Auth or firmware-
+  // internal work.
+  COMMAND_CONTEXT_REQUIRE_LIVE_SESSION = 1u << 1,
+  // A firmware-internal G2 EvenAI command is authorized by one exact active
+  // exchange and one exact named UART login. The typed fields below prevent a
+  // queued open/start operation from surviving logout/re-login and attaching
+  // itself to a replacement host session.
+  COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY = 1u << 2,
+};
+
 struct CommandContext {
   // Defaulted deliberately, and deliberately NOT to ORIGIN_SERIAL.
   //
@@ -75,13 +94,20 @@ struct CommandContext {
   // implicit trust and is subject to the ordinary auth checks.
   CommandOrigin origin = ORIGIN_WEB;
   AuthContext auth;
-  uint32_t id;
-  uint32_t timestampMs;
-  uint32_t outputMask;
-  bool validateOnly;
+  uint32_t id = 0;
+  uint32_t timestampMs = 0;
+  uint32_t outputMask = 0;
+  // Boot-local incarnation of the transport session that admitted this
+  // command. This is an incrementing generation, not Unix/NTP time. Zero
+  // means the invocation is intentionally stateless/unbound.
+  uint32_t transportSessionEpoch = 0;
+  uint32_t authoritySessionEpoch = 0;
+  uint64_t authorityId = 0;
+  uint8_t behaviorFlags = COMMAND_CONTEXT_DEFAULT;
+  bool validateOnly = false;
   bool captureOutput = false;  // capture broadcastOutput into HTTP response
-  void* replyHandle;     // placeholder for future sync replies
-  httpd_req_t* httpReq;  // used by web origin if needed
+  void* replyHandle = nullptr;     // placeholder for future sync replies
+  httpd_req_t* httpReq = nullptr;  // used by web origin if needed
   // Non-empty when the command is an automation sub-command. Used by
   // executeCommand to write COMMAND/OUTPUT lines to the autolog, attributed
   // to the named automation. Stamped at queue time in queueAutomationSubCommand

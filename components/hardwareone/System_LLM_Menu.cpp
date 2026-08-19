@@ -17,7 +17,7 @@
  * LLM_GUIDED_MENU_SPEC §5.
  */
 #include "System_BuildConfig.h"
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
 
 #include "System_LLM.h"
 #include "System_LLM_Internal.h"   // gLLM, LLMMenuGroupDesc, lifecycle hooks, llmPsramFree
@@ -517,4 +517,4 @@ const char* cmd_llm_ask(const String& args) {
   return menuCmdBuf;
 }
 
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_SOURCE_ONBOARD

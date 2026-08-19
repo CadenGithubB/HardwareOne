@@ -9,11 +9,13 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include <Arduino.h>
+#include <atomic>
 #include <new>          // std::nothrow
 #include "System_CommandTypes.h"
 #include "System_User.h"   // AuthContext, CommandSource
 #include "System_Debug.h"  // WARN_COMMANDF, ERROR_MEMORYF
-#include "BLE_Peers.h"     // gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser
+#include "System_Utils.h"  // redactCmdForAudit
+#include "BLE_Peers.h"     // synchronized G2 paired-owner authority
 
 // Provided by System_Utils.cpp — same function the BLE server uses.
 extern bool submitCommandAsync(const Command& cmd,
@@ -68,16 +70,57 @@ struct HijackCallContext {
   G2CmdCookie         cookie;
   G2HijackCmdCallback userCallback;
   void*               userData;
+  BlePeerOwnerSession owner;
 };
 
 void g2HijackInternalCallback(bool ok, const char* result, void* userData) {
   HijackCallContext* ctx = static_cast<HijackCallContext*>(userData);
   if (!ctx) return;
 
-  if (ctx->userCallback) {
+  // The executor admission fence prevents a queued command from running after
+  // an owner replacement. Fence the UI callback too: a result produced for a
+  // prior owner must not redraw or disclose data to the replacement session.
+  const bool ownerStillCurrent = blePeerOwnerSessionIsCurrent(
+      BLE_PEER_G2_GLASSES, ctx->owner);
+  if (ctx->userCallback && ownerStillCurrent) {
     ctx->userCallback(ok, result ? result : "", ctx->cookie, ctx->userData);
+  } else if (!ownerStillCurrent) {
+    DEBUG_G2F("[G2-Hijack] drop stale completion seq=%u ownerGen=%lu epoch=%lu",
+              (unsigned)ctx->cookie.seq,
+              (unsigned long)ctx->owner.generation,
+              (unsigned long)ctx->owner.transportEpoch);
   }
   delete ctx;
+}
+
+AuthContext g2HijackAuthContextForOwner(BlePeerOwnerSession* ownerOut) {
+  AuthContext ctx;
+  ctx.transport = SOURCE_G2_GLASSES;
+  ctx.path      = "/g2/hijack";
+  ctx.ip        = "g2.local";
+  ctx.sid       = "";
+  ctx.opaque    = nullptr;
+
+  BlePeerOwnerSession owner;
+  (void)blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, owner);
+  BlePeerSavedTargetSnapshot target;
+  (void)blePeerSavedTargetSnapshot(BLE_PEER_G2_GLASSES, target);
+
+  // Stuck/unowned-state detector. Automatic reconnect must never manufacture
+  // authority: only an explicit authenticated pairing/reconnect-enable action
+  // may assign the lens owner. Fail closed and explain the recovery gesture.
+  static std::atomic<bool> warnedStuck{false};
+  if (!owner.live() && target.target.mac1[0]) {
+    if (!owner.live() && !warnedStuck.exchange(true)) {
+      WARN_BLUETOOTHF("g2-glasses peer STUCK: mac1='%s' but owner authority is unavailable (no device owner/session slot?).",
+                      target.target.mac1);
+      WARN_BLUETOOTHF("  Recovery: finish first-time setup / create owner, then `bleautoreconnect g2-glasses on`.");
+    }
+  }
+
+  ctx.user = owner.live() ? owner.user : String();
+  if (ownerOut) *ownerOut = owner;
+  return ctx;
 }
 
 } // namespace
@@ -90,20 +133,22 @@ bool g2SubmitHijackCommand(const char* line,
     WARN_COMMANDF("g2.hijack.cmd: reject empty line");
     return false;
   }
+  const String safeLineForTrace = redactCmdForAudit(String(line));
 
   // Fail closed before queueing — same identity source as cmd.ctx.auth below.
   // Blank pairedByUser is the stuck-stamp state; do not let anonymous taps
   // reach cmd_exec. Callers must treat false as a hard no-op (no inline
   // WiFi/settings mutate on the tap/BLE task — wrong stack + no auth).
-  AuthContext hijackAuth = g2HijackAuthContext();
-  if (hijackAuth.user.length() == 0) {
-    WARN_COMMANDF("g2.hijack.cmd: reject blank pairedByUser line='%s'", line);
+  BlePeerOwnerSession owner;
+  AuthContext hijackAuth = g2HijackAuthContextForOwner(&owner);
+  if (hijackAuth.user.length() == 0 || !owner.live()) {
+    WARN_COMMANDF("g2.hijack.cmd: reject blank pairedByUser line='%s'", safeLineForTrace.c_str());
     return false;
   }
 
   HijackCallContext* ctx = new (std::nothrow) HijackCallContext{};
   if (!ctx) {
-    ERROR_MEMORYF("g2.hijack.cmd: alloc failed line='%s'", line);
+    ERROR_MEMORYF("g2.hijack.cmd: alloc failed line='%s'", safeLineForTrace.c_str());
     return false;
   }
   // Helper-owned fields: seq/menuGen are stamped here, overwriting whatever
@@ -114,6 +159,7 @@ bool g2SubmitHijackCommand(const char* line,
   ctx->cookie.menuGen = gMenuGen;
   ctx->userCallback   = callback;
   ctx->userData       = userData;
+  ctx->owner          = owner;
 
   Command cmd;
   cmd.line = line;
@@ -129,19 +175,24 @@ bool g2SubmitHijackCommand(const char* line,
   cmd.ctx.auth         = hijackAuth;
   cmd.ctx.id           = (uint32_t)millis();
   cmd.ctx.timestampMs  = (uint32_t)millis();
+  cmd.ctx.transportSessionEpoch = owner.transportEpoch;
+  cmd.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT |
+                           COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
   cmd.ctx.outputMask   = MSG_ROUTE_FILE;
   cmd.ctx.validateOnly = false;
   cmd.ctx.captureOutput = false;
   cmd.ctx.replyHandle  = nullptr;
   cmd.ctx.httpReq      = nullptr;
 
-  DEBUG_G2F("[G2-Hijack] submit '%.40s' user='%s' transport=%d seq=%u menuGen=%u",
-            line, cmd.ctx.auth.user.c_str(),
+  DEBUG_G2F("[G2-Hijack] submit '%.40s' user='%s' transport=%d seq=%u menuGen=%u ownerGen=%lu epoch=%lu",
+            safeLineForTrace.c_str(), cmd.ctx.auth.user.c_str(),
             (int)cmd.ctx.auth.transport,
             (unsigned)ctx->cookie.seq,
-            (unsigned)ctx->cookie.menuGen);
+            (unsigned)ctx->cookie.menuGen,
+            (unsigned long)owner.generation,
+            (unsigned long)owner.transportEpoch);
   if (!submitCommandAsync(cmd, g2HijackInternalCallback, ctx)) {
-    WARN_COMMANDF("g2.hijack.cmd: queue full line='%s'", line);
+    WARN_COMMANDF("g2.hijack.cmd: queue full line='%s'", safeLineForTrace.c_str());
     delete ctx;
     return false;
   }
@@ -175,31 +226,7 @@ bool g2SubmitHijackCommand(const char* line,
 // =============================================================================
 
 AuthContext g2HijackAuthContext() {
-  AuthContext ctx;
-  ctx.transport = SOURCE_G2_GLASSES;
-  ctx.user      = gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser;
-  ctx.path      = "/g2/hijack";
-  ctx.ip        = "g2.local";
-  ctx.sid       = "";
-  ctx.opaque    = nullptr;
-
-  // Stuck-state detector — should be rare now (boot/load heal + founder
-  // fallback). If it still fires, attempt one heal then warn.
-  static bool warnedStuck = false;
-  if (!warnedStuck
-      && ctx.user.length() == 0
-      && gBlePeerData[BLE_PEER_G2_GLASSES].mac1.length() > 0) {
-    bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
-    ctx.user = gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser;
-    if (ctx.user.length() == 0) {
-      warnedStuck = true;
-      WARN_BLUETOOTHF("g2-glasses peer STUCK: mac1='%s' but pairedByUser blank (no device owner yet?).",
-                      gBlePeerData[BLE_PEER_G2_GLASSES].mac1.c_str());
-      WARN_BLUETOOTHF("  Recovery: finish first-time setup / create owner, then `bleautoreconnect g2-glasses on`.");
-    }
-  }
-
-  return ctx;
+  return g2HijackAuthContextForOwner(nullptr);
 }
 
 // Sugar over CommandIdentityScope: installs the G2 identity + G2 notification
@@ -213,6 +240,10 @@ AuthContext g2HijackAuthContext() {
 // CommandIdentityScope's inner guards copy what they need from the ctx at
 // construction; neither retains a reference back.
 G2HijackCtxGuard::G2HijackCtxGuard()
-    : scope_(g2HijackAuthContext()) {}
+    : owner_{}, scope_(g2HijackAuthContextForOwner(&owner_)) {}
+
+bool G2HijackCtxGuard::stillCurrent() const {
+  return blePeerOwnerSessionIsCurrent(BLE_PEER_G2_GLASSES, owner_);
+}
 
 #endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

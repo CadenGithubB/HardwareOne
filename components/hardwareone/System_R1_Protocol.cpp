@@ -309,33 +309,31 @@ R1Frame R1Encoder::buildHealthQuery(uint8_t cmd, uint8_t subCmd) {
                nullptr, 0);
 }
 
-R1Frame R1Encoder::buildPacketAck(R1ProtocolProfile profile,
-                                  const R1Decoded& received) {
-  if (profile != R1_PROFILE_FW_2_2_7_0005 ||
-      !r1DecodedIsTrusted(received) ||
-      received.module != R1_MODULE_HEALTH ||
-      received.subCmd != R1_SUB_DAILY ||
-      received.statusType != R1_STATUS_TYPE_NOTIFY ||
-      received.statusMethod != R1_STATUS_METHOD_SET ||
-      received.statusAck != R1_STATUS_ACK_OK ||
-      (received.cmd != R1_CMD_HEARTRATE &&
-       received.cmd != R1_CMD_HRV &&
-       received.cmd != R1_CMD_SPO2 &&
-       received.cmd != R1_CMD_SLEEP &&
-       received.cmd != R1_CMD_ACTIVITY)) {
+R1Frame R1Encoder::buildPacketAck(
+    R1ProtocolProfile profile, const R1PacketAckDescriptor& received) {
+  if (profile != R1_PROFILE_FW_2_2_7_0005 || !received.valid()) {
     return R1Frame{};
   }
 
   uint8_t payload[10] = {};
-  payload[0] = received.module;
-  payload[1] = received.cmd;
-  payload[2] = received.subCmd;
+  payload[0] = received.module_;
+  payload[1] = received.cmd_;
+  payload[2] = received.subCmd_;
   // payload[3] and payload[6..9] are capture-proven zero. Their semantic
   // names are not known, so keep them reserved rather than inventing fields.
-  writeU16LE(payload + 4, received.serial);
+  writeU16LE(payload + 4, received.serial_);
   return build(R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_PACKET_ACK,
                R1_STATUS_TYPE_ACK, R1_STATUS_METHOD_GET, R1_STATUS_ACK_OK,
                payload, sizeof(payload));
+}
+
+R1Frame R1Encoder::buildPacketAck(R1ProtocolProfile profile,
+                                  const R1Decoded& received) {
+  R1PacketAckDescriptor descriptor;
+  if (!r1PacketAckDescriptorFromDecoded(profile, received, descriptor)) {
+    return R1Frame{};
+  }
+  return buildPacketAck(profile, descriptor);
 }
 
 R1Frame R1Encoder::buildGenericQuery(uint8_t module, uint8_t cmd, uint8_t subCmd) {
@@ -411,6 +409,45 @@ R1ParseError r1ValidateDecoded(const R1Decoded& decoded) {
 
 bool r1DecodedIsTrusted(const R1Decoded& decoded) {
   return r1ValidateDecoded(decoded) == R1_PARSE_OK;
+}
+
+namespace {
+constexpr uint8_t R1_PACKET_ACK_TRUST_MARKER = 0xA7;
+
+bool r1PacketAckCmdAllowed(uint8_t cmd) {
+  return cmd == R1_CMD_HEARTRATE || cmd == R1_CMD_HRV ||
+         cmd == R1_CMD_SPO2 || cmd == R1_CMD_SLEEP ||
+         cmd == R1_CMD_ACTIVITY;
+}
+}  // namespace
+
+bool R1PacketAckDescriptor::valid() const {
+  return trustMarker_ == R1_PACKET_ACK_TRUST_MARKER &&
+         module_ == R1_MODULE_HEALTH && subCmd_ == R1_SUB_DAILY &&
+         r1PacketAckCmdAllowed(cmd_);
+}
+
+bool r1PacketAckDescriptorFromDecoded(R1ProtocolProfile profile,
+                                      const R1Decoded& decoded,
+                                      R1PacketAckDescriptor& out) {
+  out = R1PacketAckDescriptor{};
+  if (profile != R1_PROFILE_FW_2_2_7_0005 ||
+      !r1DecodedIsTrusted(decoded) ||
+      decoded.module != R1_MODULE_HEALTH ||
+      decoded.subCmd != R1_SUB_DAILY ||
+      decoded.statusType != R1_STATUS_TYPE_NOTIFY ||
+      decoded.statusMethod != R1_STATUS_METHOD_SET ||
+      decoded.statusAck != R1_STATUS_ACK_OK ||
+      !r1PacketAckCmdAllowed(decoded.cmd)) {
+    return false;
+  }
+
+  out.serial_ = decoded.serial;
+  out.module_ = decoded.module;
+  out.cmd_ = decoded.cmd;
+  out.subCmd_ = decoded.subCmd;
+  out.trustMarker_ = R1_PACKET_ACK_TRUST_MARKER;
+  return true;
 }
 
 static bool decodePaddedString16(const uint8_t* wire, char out[17]) {
@@ -781,18 +818,18 @@ static R1ParseError validateDailyFrame(R1ProtocolProfile profile,
   return R1_PARSE_OK;
 }
 
-static R1ParseError parseDailyPrefix(const R1Decoded& decoded,
+static R1ParseError parseDailyPrefix(const uint8_t* payload, size_t payloadLength,
                                      uint8_t& count,
                                      int16_t& timezoneMinutes,
                                      uint32_t& dayStart) {
-  if (decoded.payloadLength < 7) return R1_PARSE_LENGTH;
-  count = decoded.payload[0];
-  timezoneMinutes = readI16LE(decoded.payload + 1);
+  if (!payload || payloadLength < 7) return R1_PARSE_LENGTH;
+  count = payload[0];
+  timezoneMinutes = readI16LE(payload + 1);
   // HardwareOne's configured fixed-offset range is UTC-12 through UTC+14.
   if (timezoneMinutes < -720 || timezoneMinutes > 840) {
     return R1_PARSE_VALUE_RANGE;
   }
-  dayStart = readU32LE(decoded.payload + 3);
+  dayStart = readU32LE(payload + 3);
   return R1_PARSE_OK;
 }
 
@@ -893,7 +930,8 @@ R1ParseError r1ParseCommonDaily(R1ProtocolProfile profile,
   uint8_t count = 0;
   int16_t timezoneMinutes = 0;
   uint32_t dayStart = 0;
-  R1ParseError error = parseDailyPrefix(decoded, count, timezoneMinutes, dayStart);
+  R1ParseError error = parseDailyPrefix(decoded.payload, decoded.payloadLength,
+                                        count, timezoneMinutes, dayStart);
   if (error != R1_PARSE_OK) return error;
   if (count > R1_COMMON_DAILY_MAX_RECORDS) return R1_PARSE_TOO_LARGE;
   const size_t expectedLength = 16U + (size_t)count * 4U;
@@ -969,7 +1007,8 @@ R1ParseError r1ParseHrvDaily(R1ProtocolProfile profile,
   uint8_t count = 0;
   int16_t timezoneMinutes = 0;
   uint32_t dayStart = 0;
-  R1ParseError error = parseDailyPrefix(decoded, count, timezoneMinutes, dayStart);
+  R1ParseError error = parseDailyPrefix(decoded.payload, decoded.payloadLength,
+                                        count, timezoneMinutes, dayStart);
   if (error != R1_PARSE_OK) return error;
   if (count > R1_HRV_DAILY_MAX_RECORDS) return R1_PARSE_TOO_LARGE;
   const size_t expectedLength = 17U + (size_t)count * 7U;
@@ -1029,31 +1068,35 @@ R1ParseError r1ParseHrvDaily(R1ProtocolProfile profile,
   return R1_PARSE_OK;
 }
 
-R1ParseError r1ParseActivityDaily(R1ProtocolProfile profile,
-                                  const R1Decoded& decoded,
-                                  R1ActivityDailyResult& out) {
+// Shared activity-daily record-parsing core. Operates on a raw payload span so
+// both the single-frame decoder (decoded.payload) and the multi-fragment
+// reassembly path (a stitched buffer) run identical layout/range validation.
+static R1ParseError parseActivityDailyPayload(R1ProtocolProfile profile,
+                                              const uint8_t* payload,
+                                              size_t payloadLength,
+                                              uint16_t serial,
+                                              uint32_t crc32Received,
+                                              R1ActivityDailyResult& out) {
   out = R1ActivityDailyResult{};
-  const R1ParseError gate = validateDailyFrame(profile, decoded, R1_CMD_ACTIVITY);
-  if (gate != R1_PARSE_OK) return gate;
 
   uint8_t count = 0;
   int16_t timezoneMinutes = 0;
   uint32_t dayStart = 0;
-  R1ParseError error = parseDailyPrefix(decoded, count, timezoneMinutes, dayStart);
+  R1ParseError error =
+      parseDailyPrefix(payload, payloadLength, count, timezoneMinutes, dayStart);
   if (error != R1_PARSE_OK) return error;
   if ((size_t)count > (size_t)R1_ACTIVITY_DAILY_MAX_RECORDS) {
     return R1_PARSE_TOO_LARGE;
   }
   const size_t expectedLength = 11U + (size_t)count * 7U;
-  if (decoded.payloadLength != expectedLength) return R1_PARSE_LENGTH;
+  if (payloadLength != expectedLength) return R1_PARSE_LENGTH;
 
-  const uint8_t* payload = decoded.payload;
   const uint32_t trailer = readU32LE(payload + expectedLength - 4);
 
   out.profile = profile;
   out.metric = R1_DAILY_METRIC_ACTIVITY;
-  out.sourceSerial = decoded.serial;
-  out.sourceCrc32 = decoded.crc32Received;
+  out.sourceSerial = serial;
+  out.sourceCrc32 = crc32Received;
   out.timezoneMinutes = timezoneMinutes;
   out.dayMode = classifyDailyDay(dayStart, timezoneMinutes);
   out.dayStart = dayStart;
@@ -1092,6 +1135,69 @@ R1ParseError r1ParseActivityDaily(R1ProtocolProfile profile,
     }
   }
   return R1_PARSE_OK;
+}
+
+R1ParseError r1ParseActivityDaily(R1ProtocolProfile profile,
+                                  const R1Decoded& decoded,
+                                  R1ActivityDailyResult& out) {
+  out = R1ActivityDailyResult{};
+  const R1ParseError gate = validateDailyFrame(profile, decoded, R1_CMD_ACTIVITY);
+  if (gate != R1_PARSE_OK) return gate;
+  return parseActivityDailyPayload(profile, decoded.payload,
+                                   decoded.payloadLength, decoded.serial,
+                                   decoded.crc32Received, out);
+}
+
+R1ParseError r1ParseReassembledActivityDaily(R1ProtocolProfile profile,
+                                             const uint8_t* model,
+                                             size_t modelLen,
+                                             uint32_t crc32Whole,
+                                             R1ActivityDailyResult& out) {
+  out = R1ActivityDailyResult{};
+  if (profile != R1_PROFILE_FW_2_2_7_0005) return R1_PARSE_WRONG_PROFILE;
+  // 12-byte model header + at least the 7-byte daily prefix start.
+  if (!model || modelLen < 12) return R1_PARSE_LENGTH;
+
+  const uint8_t version = model[0];
+  const uint8_t moduleId = model[1];
+  const uint8_t moduleVersion = model[2];
+  const uint16_t serial = (uint16_t)model[3] | ((uint16_t)model[4] << 8);
+  uint8_t statusType = 0, statusMethod = 0, statusAck = 0;
+  r1DecodeStatus(model[5], statusType, statusMethod, statusAck);
+  const uint8_t cmd = model[6];
+  const uint8_t subCmd = model[7];
+  const size_t declaredModelLen = (size_t)model[8] | ((size_t)model[9] << 8);
+
+  if (version != 0x64 || moduleVersion != 0x64) return R1_PARSE_UNSUPPORTED_LAYOUT;
+  // The stitched buffer must contain at least the declared model. Some
+  // transports pad the final fragment, so trailing bytes past declaredModelLen
+  // are allowed (and excluded from the CRC/parse below).
+  if (declaredModelLen < 12 || declaredModelLen > modelLen) return R1_PARSE_LENGTH;
+  if (moduleId != R1_MODULE_HEALTH || cmd != R1_CMD_ACTIVITY ||
+      subCmd != R1_SUB_DAILY || statusType != R1_STATUS_TYPE_NOTIFY ||
+      statusMethod != R1_STATUS_METHOD_SET || statusAck != R1_STATUS_ACK_OK) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  // The fragments carried a whole-model CRC32; recompute over exactly the
+  // declared model and reject any reassembly that does not reproduce it.
+  if (r1Crc32(model, declaredModelLen) != crc32Whole) return R1_PARSE_BAD_CRC;
+
+  return parseActivityDailyPayload(profile, model + 12, declaredModelLen - 12,
+                                   serial, crc32Whole, out);
+}
+
+bool r1MakeDailyPacketAckDescriptor(R1ProtocolProfile profile, uint16_t serial,
+                                    uint8_t cmd, R1PacketAckDescriptor& out) {
+  out = R1PacketAckDescriptor{};
+  if (profile != R1_PROFILE_FW_2_2_7_0005 || !r1PacketAckCmdAllowed(cmd)) {
+    return false;
+  }
+  out.serial_ = serial;
+  out.module_ = R1_MODULE_HEALTH;
+  out.cmd_ = cmd;
+  out.subCmd_ = R1_SUB_DAILY;
+  out.trustMarker_ = R1_PACKET_ACK_TRUST_MARKER;
+  return true;
 }
 
 static size_t annotateCommonDaily(R1ProtocolProfile profile,
@@ -1141,7 +1247,10 @@ static size_t annotateHrvDaily(R1ProtocolProfile profile,
 static size_t annotateActivityDaily(R1ProtocolProfile profile,
                                     const R1Decoded& decoded,
                                     char* out, size_t cap) {
-  R1ActivityDailyResult parsed;
+  // R1ActivityDailyResult is now sized for a full 144-slot day (~2.3 KB); this
+  // diagnostic path runs serialized on the ring owner task, so a single static
+  // instance keeps it off that task's modest stack.
+  static R1ActivityDailyResult parsed;
   const R1ParseError error = r1ParseActivityDaily(profile, decoded, parsed);
   if (error != R1_PARSE_OK) {
     return (size_t)snprintf(out, cap, "daily rejected=%s",
@@ -1263,27 +1372,27 @@ static bool selfTestCompare(const char* label,
                             const uint8_t* actual, size_t actualLen,
                             const uint8_t* expected, size_t expectedLen) {
   if (actualLen != expectedLen) {
-    DEBUG_G2F("[R1-selftest] FAIL %s: length=%u (expected %u)",
+    DEBUG_RING_SETUPF("[R1-selftest] FAIL %s: length=%u (expected %u)",
               label, (unsigned)actualLen, (unsigned)expectedLen);
     return false;
   }
   for (size_t i = 0; i < actualLen; i++) {
     if (actual[i] != expected[i]) {
-      DEBUG_G2F("[R1-selftest] FAIL %s: byte[%u]=%02X (expected %02X)",
+      DEBUG_RING_SETUPF("[R1-selftest] FAIL %s: byte[%u]=%02X (expected %02X)",
                 label, (unsigned)i, actual[i], expected[i]);
       return false;
     }
   }
-  DEBUG_G2F("[R1-selftest] PASS %s (%u B)", label, (unsigned)actualLen);
+  DEBUG_RING_SETUPF("[R1-selftest] PASS %s (%u B)", label, (unsigned)actualLen);
   return true;
 }
 
 static bool selfTestExpect(const char* label, bool condition) {
   if (!condition) {
-    DEBUG_G2F("[R1-selftest] FAIL %s", label);
+    DEBUG_RING_SETUPF("[R1-selftest] FAIL %s", label);
     return false;
   }
-  DEBUG_G2F("[R1-selftest] PASS %s", label);
+  DEBUG_RING_SETUPF("[R1-selftest] PASS %s", label);
   return true;
 }
 
@@ -1304,6 +1413,10 @@ static bool __attribute__((noinline)) selfTestDecoded(
 
 bool r1ProtocolSelfTest() {
   bool ok = true;
+  // R1ActivityDailyResult is now full-day sized (~2.3 KB). This one-shot boot
+  // self-test runs single-threaded, so its activity sub-tests share one static
+  // instance (aliased below) rather than putting ~2.3 KB on the init stack.
+  static R1ActivityDailyResult activityScratch;
 
   {
     // Existing public fixture: it independently anchors both CRC algorithms.
@@ -1408,7 +1521,12 @@ bool r1ProtocolSelfTest() {
   {
     // Exact identity/profile selection, with synthetic hardware text.
     uint8_t deviceInfoPayload[32] = {};
-    memcpy(deviceInfoPayload, "2.2.7.0005", 12);
+    // sizeof includes the NUL (11 bytes); the rest of the 16-byte field is
+    // already zero from the {} init. A fixed 12 read one byte past the
+    // literal (ASan-caught, 2026-08-11) — benign only while the next rodata
+    // byte happened to be 0x00; a nonzero byte there would have failed
+    // decodePaddedString16 and silently disabled the ring module at init.
+    memcpy(deviceInfoPayload, "2.2.7.0005", sizeof("2.2.7.0005"));
     memcpy(deviceInfoPayload + 16, "SYNTH-HW", 8);
     R1Decoded deviceInfoDecoded;
     R1DeviceInfo deviceInfo;
@@ -1584,7 +1702,7 @@ bool r1ProtocolSelfTest() {
   }
   {
     R1Decoded decoded;
-    R1ActivityDailyResult parsed;
+    R1ActivityDailyResult& parsed = activityScratch;
     ok &= selfTestExpect(
         "typed activity daily",
         selfTestDecoded(48, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,
@@ -1681,7 +1799,7 @@ bool r1ProtocolSelfTest() {
   }
   {
     R1Decoded decoded;
-    R1ActivityDailyResult parsed;
+    R1ActivityDailyResult& parsed = activityScratch;
     ok &= selfTestExpect(
         "daily zero-base activity remains unanchored",
         selfTestDecoded(52, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,
@@ -1739,17 +1857,89 @@ bool r1ProtocolSelfTest() {
         R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET,
         hrPayload, sizeof(hrPayload), source);
     R1Encoder packetAckEncoder;
-    R1Decoded badSource = source;
-    badSource.crc32Valid = false;
-    R1Frame rejectedAck = packetAckEncoder.buildPacketAck(
-        R1_PROFILE_FW_2_2_7_0005, badSource);
+    R1PacketAckDescriptor descriptor;
+    const bool descriptorOk = r1PacketAckDescriptorFromDecoded(
+        R1_PROFILE_FW_2_2_7_0005, source, descriptor);
+
+    auto expectDescriptorReject = [&](const char* name,
+                                      R1ProtocolProfile profile,
+                                      const R1Decoded& candidate) {
+      R1PacketAckDescriptor rejected = descriptor;
+      const bool accepted = r1PacketAckDescriptorFromDecoded(
+          profile, candidate, rejected);
+      ok &= selfTestExpect(name, !accepted && !rejected.valid());
+    };
+    R1Decoded rejectedSource = source;
+    expectDescriptorReject("packetAck unknown profile rejected",
+                           R1_PROFILE_UNKNOWN, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.crc32Valid = false;
+    expectDescriptorReject("packetAck bad integrity rejected",
+                           R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.payloadLength = rejectedSource.payloadLength + 1;
+    expectDescriptorReject("packetAck bad length rejected",
+                           R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.module = R1_MODULE_SPORT;
+    expectDescriptorReject("packetAck wrong module rejected",
+                           R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.subCmd = R1_SUB_POINT;
+    expectDescriptorReject("packetAck wrong subcommand rejected",
+                           R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.statusType = R1_STATUS_TYPE_ACK;
+    expectDescriptorReject("packetAck wrong status type rejected",
+                           R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.statusMethod = R1_STATUS_METHOD_GET;
+    expectDescriptorReject("packetAck wrong status method rejected",
+                           R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.statusAck = R1_STATUS_ACK_ERROR;
+    expectDescriptorReject("packetAck error status rejected",
+                           R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.cmd = R1_CMD_TEMPERATURE;
+    expectDescriptorReject("packetAck non-whitelist opcode rejected",
+                           R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+
+    R1PacketAckDescriptor invalidDescriptor;
+    R1Frame rejectedDefault = packetAckEncoder.buildPacketAck(
+        R1_PROFILE_FW_2_2_7_0005, invalidDescriptor);
+    R1Frame rejectedProfile = packetAckEncoder.buildPacketAck(
+        R1_PROFILE_UNKNOWN, descriptor);
+    rejectedSource = source;
+    rejectedSource.crc32Valid = false;
+    R1Frame rejectedIntegrity = packetAckEncoder.buildPacketAck(
+        R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.statusMethod = R1_STATUS_METHOD_GET;
+    R1Frame rejectedStatus = packetAckEncoder.buildPacketAck(
+        R1_PROFILE_FW_2_2_7_0005, rejectedSource);
+    rejectedSource = source;
+    rejectedSource.cmd = R1_CMD_TEMPERATURE;
+    R1Frame rejectedOpcode = packetAckEncoder.buildPacketAck(
+        R1_PROFILE_FW_2_2_7_0005, rejectedSource);
     R1Frame packetAck = packetAckEncoder.buildPacketAck(
-        R1_PROFILE_FW_2_2_7_0005, source);
-    ok &= selfTestExpect("packetAck bad CRC fails without serial",
-                         sourceOk && rejectedAck.length == 0 &&
+        R1_PROFILE_FW_2_2_7_0005, descriptor);
+    ok &= selfTestExpect("packetAck rejects without consuming serial",
+                         sourceOk && descriptorOk && descriptor.valid() &&
+                         rejectedDefault.length == 0 &&
+                         rejectedProfile.length == 0 &&
+                         rejectedIntegrity.length == 0 &&
+                         rejectedStatus.length == 0 &&
+                         rejectedOpcode.length == 0 &&
                          packetAck.serial == 1);
     ok &= selfTestCompare("packetAck golden", packetAck.bytes,
                           packetAck.length, expectedPacketAck,
+                          sizeof(expectedPacketAck));
+    R1Encoder decodedPacketAckEncoder;
+    const R1Frame decodedPacketAck = decodedPacketAckEncoder.buildPacketAck(
+        R1_PROFILE_FW_2_2_7_0005, source);
+    ok &= selfTestCompare("packetAck decoded wrapper", decodedPacketAck.bytes,
+                          decodedPacketAck.length, expectedPacketAck,
                           sizeof(expectedPacketAck));
   }
 
@@ -1894,7 +2084,7 @@ bool r1ProtocolSelfTest() {
     memcpy(malformed, activityPayload, sizeof(malformed));
     malformed[7] = 144;
     R1Decoded decoded;
-    R1ActivityDailyResult rejected;
+    R1ActivityDailyResult& rejected = activityScratch;
     ok &= selfTestExpect(
         "activity slot range",
         selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,
@@ -1910,7 +2100,7 @@ bool r1ProtocolSelfTest() {
     memcpy(malformed, activityPayload, sizeof(malformed));
     malformed[14] = malformed[7];  // Duplicate second ten-minute slot.
     R1Decoded decoded;
-    R1ActivityDailyResult rejected;
+    R1ActivityDailyResult& rejected = activityScratch;
     ok &= selfTestExpect(
         "activity duplicate slot rejected",
         selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,
@@ -1926,7 +2116,7 @@ bool r1ProtocolSelfTest() {
     memcpy(malformed, activityPayload, sizeof(malformed));
     malformed[10] = 11;  // active kcal 11, total kcal 10.
     R1Decoded decoded;
-    R1ActivityDailyResult rejected;
+    R1ActivityDailyResult& rejected = activityScratch;
     ok &= selfTestExpect(
         "activity kcal underflow",
         selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,

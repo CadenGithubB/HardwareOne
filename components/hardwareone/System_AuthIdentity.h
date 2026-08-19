@@ -183,10 +183,11 @@ void initAuthIdentityForCurrentTask();
 //     (was unowned, now owned by "asd").
 //   * cmd_user_add / cmd_user_approve — a new user account becomes real
 //     (was nonexistent or pending, now real with permissions).
-//   * cmd_user_delete — a user account goes away (their permissions
+//   * user.sync / user.add / user.approve — a new usable account appears.
+//   * user.delete — a user account goes away (their permissions
 //     evaporate; any cache that filtered "what user X can see" must rerun).
-//   * cmd_user_promote — a user becomes admin (gains access).
-//   * cmd_user_demote — an admin becomes a regular user (loses access).
+//   * user.setrole — an account gains or loses permissions.
+//   * banuser / unbanuser — an account becomes unusable or usable again.
 //
 // EVENTS THAT DO **NOT** BUMP
 // ---------------------------
@@ -222,6 +223,8 @@ void initAuthIdentityForCurrentTask();
 //   user.promote                   | yes         | no  (gained access)
 //   user.demote                    | yes         | yes (drop admin session)
 //   user.delete                    | yes         | yes (account gone)
+//   user.ban                       | yes         | yes (account suspended)
+//   user.unban                     | yes         | no  (usable on next login)
 //   user.changepassword (self)     | no          | yes (except calling session)
 //   user.resetpassword (by admin)  | no          | yes (kick target everywhere)
 //   login / logout                 | no          | n/a (session itself is the change)

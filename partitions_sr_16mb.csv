@@ -14,10 +14,15 @@
 # littlefs (and model, where present) carry the `encrypted` flag - a
 # documented no-op without flash encryption. factory/littlefs offsets are
 # UNCHANGED; the nvs move reformats NVS once (saved WiFi creds re-enter).
+# 2026-08-16: factory grown +512K (0x80000) at littlefs's expense to restore
+#             app-partition headroom (was ~2% free). 512K not 500K: app partition
+#             offsets must stay 64K-aligned. littlefs OFFSET MOVES -> the data
+#             partition is REFORMATTED on the first flash after this change.
+#             NVS (0xA000) is untouched, so saved WiFi credentials survive.
 # Name,   Type, SubType, Offset,   Size,    Flags
 nvs,      data, nvs,     0xA000,   0x4000,
 nvs_key,  data, nvs_keys, 0xE000,  0x1000,  encrypted
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x4E0000,
-model,    data, spiffs,  0x4F0000, 0x2F0000, encrypted
-littlefs, data, littlefs, 0x7E0000, 0x820000, encrypted
+factory,  app,  factory, 0x10000,  0x560000,
+model,    data, spiffs,  0x570000, 0x2F0000, encrypted
+littlefs, data, littlefs, 0x860000, 0x7A0000, encrypted

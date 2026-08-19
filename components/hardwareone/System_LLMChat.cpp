@@ -6,7 +6,7 @@
 
 #include "System_LLMChat.h"
 
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
 
 #include <Arduino.h>
 #include <math.h>
@@ -177,7 +177,7 @@ static void drainEngineLocked() {
 
   // Detect session drift — if the engine moved on to a different session
   // (or started a brand-new one), the streaming turn is stale.
-  if (llmGetSessionId() != sStreamingSessionId) {
+  if (llmBackendSessionId() != sStreamingSessionId) {
     sStreamingTurnSlot = -1;
     sStreamingSessionId = 0;
     sEngineOffsetDrained = 0;
@@ -188,11 +188,11 @@ static void drainEngineLocked() {
 
   // Bulk-copy any new bytes
   while (true) {
-    int engineLen = llmGetResultLen();
+    int engineLen = llmBackendResultLen();
     if (engineLen <= sEngineOffsetDrained) break;
 
     char chunk[256];
-    int got = llmGetResultChunk(sEngineOffsetDrained, chunk, sizeof(chunk));
+    int got = llmBackendResultChunk(sEngineOffsetDrained, chunk, sizeof(chunk));
     if (got <= 0) break;
 
     if (!ensureTurnCapacity(t, t.textLen + got)) {
@@ -208,8 +208,8 @@ static void drainEngineLocked() {
   }
 
   // If engine reports done, finalize the turn's metrics.
-  if (llmIsGenerationDone()) {
-    LLMStatus st = llmGetStatus();
+  if (llmBackendIsDone()) {
+    LLMStatus st = llmBackendStatus();
     t.tokenCount      = st.lastTokenCount;
     t.tokensPerSecX10 = (uint16_t)(st.lastTokensPerSec * 10.0f);
     // Snapshot the finished turn so a client that hasn't polled yet can still
@@ -306,7 +306,12 @@ EXT_RAM_BSS_ATTR static char sFramedPrompt[1024];
 int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt) {
   chatInit();
   if (!userPrompt || !*userPrompt) return 0;
-  if (!llmIsReady()) return 0;
+  if (!llmBackendIsReady()) return 0;
+  // Do:-mode is on-device only. Refused here rather than at the framing
+  // chokepoint because framing cannot fail — it returns a string — and every
+  // surface funnels through this call, so one guard covers web, CLI, OLED, the
+  // lens and the BLE app at once.
+  if (llmPromptIsCommandMode(userPrompt) && !llmBackendSupportsCommandMode()) return 0;
 
   ChatLock lk;
   if (!lk.held) return 0;
@@ -332,8 +337,8 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt) {
   // Hand off to the engine. The turn above deliberately stores what the user
   // actually typed — only the engine sees the Q:/A: scaffolding, so the chat
   // ring stays clean for the OLED and G2 viewers.
-  int sid = llmStartAsync(llmFramePrompt(userPrompt, sFramedPrompt, sizeof(sFramedPrompt)),
-                          params);
+  int sid = llmBackendStartAsync(
+      llmBackendFramePrompt(userPrompt, sFramedPrompt, sizeof(sFramedPrompt)), params);
   if (sid <= 0) {
     // Engine refused — roll back the empty assistant turn so the UI doesn't
     // show a stale "..." that never resolves.
@@ -351,7 +356,7 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt) {
 
 int chatRetryLast(const ChatParamOverride* opt) {
   chatInit();
-  if (!llmIsReady()) return 0;
+  if (!llmBackendIsReady()) return 0;
 
   ChatLock lk;
   if (!lk.held) return 0;
@@ -391,8 +396,10 @@ int chatRetryLast(const ChatParamOverride* opt) {
   if (lastAssistantSlot >= 0 && sTurns[lastAssistantSlot].text &&
       sTurns[lastAssistantSlot].textLen > 0) {
     int scratch[LLM_CHAT_SUPPRESS_SCRATCH];
-    int n = llmTokenize(sTurns[lastAssistantSlot].text, scratch,
-                        LLM_CHAT_SUPPRESS_SCRATCH);
+    // Returns 0 for a source with no local tokenizer, which is what leaves the
+    // suppress list empty for a remote model instead of sending it foreign ids.
+    int n = llmBackendTokenize(sTurns[lastAssistantSlot].text, scratch,
+                               LLM_CHAT_SUPPRESS_SCRATCH);
     for (int i = 0; i < n && params.suppressCount < 128; i++) {
       int tok = scratch[i];
       // Dedupe — repeated tokens in the answer would otherwise eat slots.
@@ -418,8 +425,8 @@ int chatRetryLast(const ChatParamOverride* opt) {
   // promptBuf is the stored USER turn, i.e. the raw text — frame it the same way
   // the original attempt was framed, or a retry would ask the model a different
   // question than the one it just answered.
-  int sid = llmStartAsync(llmFramePrompt(promptBuf, sFramedPrompt, sizeof(sFramedPrompt)),
-                          params);
+  int sid = llmBackendStartAsync(
+      llmBackendFramePrompt(promptBuf, sFramedPrompt, sizeof(sFramedPrompt)), params);
   if (sid <= 0) {
     popLastTurnLocked();
     return 0;
@@ -432,7 +439,7 @@ int chatRetryLast(const ChatParamOverride* opt) {
 }
 
 void chatStop() {
-  llmStop();
+  llmBackendStop();
   // The drain on next read will see llmIsGenerationDone() == true and
   // finalize the current assistant turn (keeping whatever was generated).
 }
@@ -562,4 +569,4 @@ int chatGetSessionId() {
   return sStreamingSessionId;
 }
 
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_BACKEND

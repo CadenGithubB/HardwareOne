@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 
 #include <esp_log.h>
+#include <esp_partition.h>  // blank-partition probe — see littlefsPartitionIsBlank()
 
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -50,15 +51,66 @@ bool filesystemReady = false;
 // Filesystem Initialization
 // ============================================================================
 
+// True only when the data partition is provably ERASED — every byte 0xFF, end to
+// end. This is what `esptool erase_flash` (or a first-ever flash) leaves behind,
+// and it is indistinguishable to LittleFS from corruption: a blank partition
+// fails to mount with "Corrupted dir pair at {0x0, 0x1}" because the superblock
+// pair was never written.
+//
+// The scan is exhaustive and bails out on the FIRST non-0xFF byte, so a
+// partition holding real data costs a few microseconds to reject. A genuinely
+// blank partition costs one full read of the region — acceptable because this
+// only ever runs after a mount has already failed, which is not a hot path.
+static bool littlefsPartitionIsBlank(const esp_partition_t* part) {
+  if (!part) return false;
+  static uint8_t buf[512];
+  for (size_t off = 0; off < part->size; off += sizeof(buf)) {
+    const size_t chunk = (part->size - off) < sizeof(buf) ? (part->size - off) : sizeof(buf);
+    if (esp_partition_read(part, off, buf, chunk) != ESP_OK) {
+      // Cannot prove blankness — fail closed and preserve.
+      ESP_LOGE("FS", "blank-probe read failed at offset %u; assuming data present", (unsigned)off);
+      return false;
+    }
+    for (size_t i = 0; i < chunk; ++i) {
+      if (buf[i] != 0xFF) return false;
+    }
+  }
+  return true;
+}
+
 bool initFilesystem() {
   ESP_LOGI("FS", "Initializing LittleFS...");
   delay(50);  // Allow USB serial to attach before early boot logs
 
   // Configure LittleFS using ESP-IDF native API (bypasses Arduino wrapper issues)
-  if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
+  bool mounted = LittleFS.begin(false, "/littlefs", 10, "littlefs");
+
+  if (!mounted) {
     // Retained data and cryptographic material live here. Never turn a mount
     // error into an automatic format; OTA layouts can enter factory recovery,
     // while legacy layouts remain available for explicit cable-side repair.
+    //
+    // The ONE exception is a partition that is provably erased: a blank region
+    // holds nothing to preserve, and refusing to format it leaves a freshly
+    // erased board unable to boot at all (there is no other format path in the
+    // firmware). Corruption of real data still fails closed, exactly as before.
+    const esp_partition_t* part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "littlefs");
+    if (part && littlefsPartitionIsBlank(part)) {
+      ESP_LOGW("FS", "LittleFS partition is blank (erased) — formatting once for first boot");
+      logSystemEvent("FS", "LittleFS blank after erase — formatting for first boot");
+      mounted = LittleFS.begin(true, "/littlefs", 10, "littlefs");
+      if (mounted) {
+        ESP_LOGI("FS", "LittleFS formatted and mounted");
+        logSystemEvent("FS", "LittleFS formatted (first boot)");
+      } else {
+        ESP_LOGE("FS", "LittleFS format failed on a blank partition");
+        logSystemEvent("FS", "LittleFS format FAILED on blank partition");
+      }
+    }
+  }
+
+  if (!mounted) {
     ESP_LOGE("FS", "LittleFS mount failed; preserving data (automatic format is forbidden)");
     logSystemEvent("FS", "LittleFS mount FAILED — data partition preserved");
     filesystemReady = false;
@@ -111,7 +163,7 @@ bool initFilesystem() {
 #if HW1_OTA_LAYOUT
     VFS::mkdirGuarded("/system/ota",                  VFS::systemAuth(VFS::Scopes::OTA, "fs.init.ota"));
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
     VFS::mkdirGuarded("/system/llm",                  sys);  // LLM1 model files
 #endif
 #if ENABLE_ESPNOW
@@ -130,7 +182,7 @@ bool initFilesystem() {
     AuthContext sys = VFS::systemAuth("fs.init.tmp_cleanup");
     const char* cleanupDirs[] = {
         "/", "/system", "/system/users", "/system/users/user_settings", "/maps"
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
         , "/system/llm"
 #endif
     };
@@ -1078,20 +1130,35 @@ const char* cmd_filewrite(const String& argsInput) {
 
 // filedelete is now a two-step interactive flow built on the CLIMode
 // framework's confirm mode. The flow:
-//   1. cmd_filedelete validates the path and captures the caller's
-//      AuthContext into s_pendingFiledelete{Path,Ctx}.
-//   2. Calls cliRequestConfirm() -- enters confirm mode, prints the
-//      "Confirm delete of /foo?" prompt via broadcastOutput, frees
-//      cmd_exec.
+//   1. cmd_filedelete validates the path and stages the path + caller
+//      AuthContext in a stack candidate.
+//   2. cliRequestConfirm() atomically publishes that candidate into
+//      s_pendingFiledelete{Path,Ctx} only after the exact session acquires the
+//      confirm slot. The addressed command result carries the prompt and
+//      cmd_exec is free between inputs.
 //   3. User's next command line is interpreted by confirm mode:
 //        - "yes"/"y"/"true"/"1"/"on" -> filedelete_confirmed runs,
 //          performs the actual delete, returns the result.
 //        - anything else             -> filedelete_cancelled runs,
 //          returns "Cancelled."
-// Single-slot statics are safe because only one CLIMode is active at a
-// time (cliRequestConfirm returns false if another mode is already up).
+// Single-slot statics are safe because mode acquisition and payload
+// publication happen under the same lock; a rejected foreign request cannot
+// replace the winning session's payload.
 static String      s_pendingFiledeletePath;
 static AuthContext s_pendingFiledeleteCtx;  // captured by VALUE so it survives between commands
+
+struct FiledeleteConfirmCandidate {
+  const String* path;
+  const AuthContext* ctx;
+};
+
+static void filedelete_confirm_accepted(void* opaque) {
+  const FiledeleteConfirmCandidate* candidate =
+      static_cast<const FiledeleteConfirmCandidate*>(opaque);
+  if (!candidate || !candidate->path || !candidate->ctx) return;
+  s_pendingFiledeletePath = *candidate->path;
+  s_pendingFiledeleteCtx = *candidate->ctx;
+}
 
 // Perform the actual delete under `ctx`. Shared by the interactive confirm
 // callback and the one-shot `filedelete <path> confirm` path. Returns a static
@@ -1168,27 +1235,19 @@ const char* cmd_filedelete(const String& argsInput) {
     return doFiledelete(path, ctx);
   }
 
-  // Stash for the confirm callbacks. Capture the AuthContext BY VALUE
-  // because currentAuthContext() returns a reference to per-task TLS
-  // state that's owned by the current ExecIdentityGuard -- when this
-  // function returns and the next command starts, the TLS reference
-  // points at a different AuthContext.
-  s_pendingFiledeletePath = path;
-  s_pendingFiledeleteCtx  = ctx;
-
   String prompt = "Confirm delete of " + path + "? (cannot be undone)";
   // Originating command line stored for the resolution audit -- shows up
   // in [CMD] log as "filedelete /foo (confirm: yes) -> Deleted file: /foo"
   // (or "(confirm: no) -> Cancelled. /foo not deleted." on cancel).
   String origCmd = "filedelete " + quotePath(path);
-  if (!cliRequestConfirm(prompt, origCmd, filedelete_confirmed, filedelete_cancelled, nullptr)) {
+  FiledeleteConfirmCandidate candidate{&path, &ctx};
+  if (!cliRequestConfirm(prompt, origCmd, filedelete_confirmed,
+                         filedelete_cancelled, nullptr,
+                         filedelete_confirm_accepted, &candidate)) {
     return "Error: cannot request confirm (another interactive mode is active)";
   }
 
-  // cliRequestConfirm already printed `prompt` via broadcastOutput from
-  // confirm_onEnter. Return the yes/no hint as our command response so
-  // the user sees a single coherent prompt.
-  return "Type 'yes' to confirm or anything else to cancel.";
+  return cliConfirmPromptResponse();
 }
 
 // ============================================================================
@@ -1560,10 +1619,6 @@ String quotePath(const String& path) {
 // Role resolution + permission lookup
 // ============================================================================
 
-// Forward decl from System_User.cpp.
-extern bool isAdminUser(const String& who);
-extern bool isGuestUser(const String& who);
-
 enum class FsRole : uint8_t { ANON, GUEST, USER, ADMIN, SUPER, SYSTEM };
 
 // SUPER and SYSTEM are the unrestricted roles: the path rules and the
@@ -1576,9 +1631,41 @@ static inline bool isUnrestrictedRole(FsRole r) {
 static FsRole resolveRole(const AuthContext& ctx) {
   if (ctx.user.length() == 0) return FsRole::ANON;
   if (ctx.transport == SOURCE_INTERNAL && ctx.user == "system") return FsRole::SYSTEM;
-  // Checked BEFORE isAdminUser: a superadmin also satisfies the admin predicate,
-  // so the order is what makes the tier distinguishable at all.
-  //
+  // AuthBypass is a reserved execution identity used only when a transport's
+  // require-auth policy is disabled.  It is not a users.json account, but it
+  // intentionally retains the ordinary User filesystem tier.
+  if (ctx.user == "AuthBypass") return FsRole::USER;
+
+  // The G2 EvenAI worker carries a non-transferable UART-session capability
+  // as this exact synthetic tuple instead of copying a mutable UART username
+  // across tasks.  Preserve only its existing ordinary-User filesystem tier;
+  // neither the username nor SOURCE_INTERNAL alone is sufficient.
+  if (ctx.transport == SOURCE_INTERNAL && ctx.user == "uart-session" &&
+      ctx.path == "/g2evenai") {
+    return FsRole::USER;
+  }
+
+#if ENABLE_BONDED_MODE
+  // The bonded peer is another reserved, non-roster identity.  Preserve its
+  // SUPER tier only for the live authenticated ESP-NOW bond session; a stale
+  // or forged bond-admin string must fail closed below.
+  if (ctx.user == kBondAdminUser) {
+    return ctx.transport == SOURCE_ESPNOW && isSuperAdminUser(ctx.user)
+               ? FsRole::SUPER
+               : FsRole::ANON;
+  }
+#endif
+
+  // Named accounts must resolve positively at the access boundary.  The
+  // older isAdminUser()/isGuestUser() chain defaults an unknown/unreadable
+  // account to User, which is suitable for legacy UI ranking but not for VFS
+  // authorization.  This lookup is exact, rejects banned/malformed accounts,
+  // and preserves the legacy first-owner/missing-role compatibility rules.
+  FsLockGuard roleGuard("filesystem.resolveRole");
+  if (!roleGuard.held && !isFsLockedByCurrentTask()) return FsRole::ANON;
+  String storedRole;
+  if (!getUserAuthorizationRole(ctx.user, storedRole)) return FsRole::ANON;
+
   // Deliberate scope, chosen by the device owner: a superadmin has unrestricted
   // filesystem access on EVERY transport. That includes over the air — the
   // bonded ESP-NOW master resolves to super for the life of a valid bond
@@ -1586,12 +1673,16 @@ static FsRole resolveRole(const AuthContext& ctx) {
   // read/write/delete across /system, certs, users and models that the local
   // web UI does. Narrowing this to local transports means gating on
   // ctx.transport here.
+  // Check the effective owner fallback only after the positive roster lookup;
+  // this preserves recovery for old no-superadmin rosters without allowing an
+  // unknown name to fall through as User.
   if (isSuperAdminUser(ctx.user)) return FsRole::SUPER;
-  if (isAdminUser(ctx.user)) return FsRole::ADMIN;
   // Guest shares the user path-rule column but is masked to PERM_READ in
   // permsForRole — view-only surface, no separate PathRule column needed.
-  if (isGuestUser(ctx.user)) return FsRole::GUEST;
-  return FsRole::USER;
+  if (storedRole == "guest") return FsRole::GUEST;
+  if (storedRole == "superadmin") return FsRole::SUPER;
+  if (storedRole == "admin") return FsRole::ADMIN;
+  return storedRole == "user" ? FsRole::USER : FsRole::ANON;
 }
 
 static const char* roleName(FsRole r) {

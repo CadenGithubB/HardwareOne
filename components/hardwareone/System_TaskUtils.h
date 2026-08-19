@@ -111,6 +111,7 @@ constexpr uint32_t ESPNOW_TX_STACK_WORDS = 5120;     // 5 KB (was annotated ~20K
 constexpr uint32_t MIC_RECORD_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — microphone recording
 constexpr uint32_t MIC_VIZ_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — microphone visualizer
 constexpr uint32_t LIVE_AUDIO_TX_STACK_WORDS = 4096;  // 4 KB — dormant synthetic live-PCM UART producer
+constexpr uint32_t CM5_PRESENCE_STACK_BYTES = 2048;   // 2 KB — notification/deadline-only CM5 service lease monitor
 constexpr uint32_t SR_STACK_WORDS = 8192;     // 8 KB (was ~32KB) — speech recognition inference
 constexpr uint32_t SR_SNIP_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — speech recognition snippet writer
 constexpr uint32_t EI_CONTINUOUS_STACK_WORDS = 8192;     // 8 KB (was ~32KB) — EdgeImpulse continuous inference
@@ -179,6 +180,46 @@ constexpr BaseType_t I2C_SENSOR_CORE = APP_CORE;
 // ============================================================================
 
 // ============================================================================
+// DEFERRED WORK POLICY  (read before making a caller wait — or spawning a task)
+// ============================================================================
+// Work gets deferred for two different reasons, and they take different tools.
+// Picking by reason keeps us from paying for a task we don't need — or from
+// "fixing" a stack problem by moving it to a later moment on the same stack.
+//
+//   NOT ENOUGH TIME — the caller's loop can't stall this long.
+//     Tool: a flag/enum drained by a loop that ALREADY runs.  Cost: ~nothing.
+//     Requires: some other context is ticking and can afford the work.
+//     Examples: uartLinkRequestStop() (port teardown → main loop, because
+//     tearing down under an in-flight drain corrupts the accumulator);
+//     FileBrowserPendingAction (filesystem I/O → outside the I2C transaction);
+//     videoRecording=false (polled by the cam_record task, which self-finalizes);
+//     requestStopRecordingOwned() (recorder finalize → off the OLED task).
+//
+//   NOT ENOUGH STACK — the caller physically cannot run this, ever.
+//     Tool: a dedicated worker task + queue.  Cost: a whole stack.
+//     Deferring to "later" does NOT help here: later is the same stack.
+//     Example: cameraPower*Async/Sync — camera power transitions are stack-heavy
+//     and the G2 tap path runs on BTC_TASK (~3-4 KB), which cannot host them at
+//     any point in time. See also the BTC_TASK note in G2 tap dispatch.
+//
+// The Sync flavor (caller blocks, worker proceeds) REQUIRES the second tool.
+// It cannot be built on the first: a blocked caller isn't ticking its own loop,
+// so nothing would drain the flag — that deadlocks by construction.
+//
+// Default to the flag. A worker task per UI action is the thing we're avoiding;
+// cam_pwr is the justified exception and even it retires itself once its queue
+// has been idle, rather than holding a stack forever.
+//
+// NAMING CONTRACT — the call site must reveal whether it blocks:
+//     Request*()        returns immediately; caller learns the outcome elsewhere
+//     bare verb         MAY BLOCK — document the bound in the header
+//     *Sync / *Async    when one operation offers both, suffix is mandatory
+// Known wart: stopVideoRecording() blocks up to ~3 s on an SD flush and its
+// name says nothing. Harmless today (CLI/web callers only), a UI freeze the
+// moment anything display-side calls it — give it a Request* sibling then.
+// ============================================================================
+
+// ============================================================================
 // FreeRTOS Task Creation with Memory Logging
 // ============================================================================
 
@@ -193,6 +234,35 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
                               TaskHandle_t* pxCreatedTask,
                               const char* tag,
                               BaseType_t coreId = tskNO_AFFINITY);
+
+// ============================================================================
+// Task Stack-Size Registry
+// ============================================================================
+// FreeRTOS reports how much stack a task has LEFT (usStackHighWaterMark) but
+// never how much it was GIVEN: TaskStatus_t::pxEndOfStack is compiled out on
+// this port — it requires portSTACK_GROWTH > 0 and ESP32 stacks grow down, so
+// no Kconfig option can restore it — and pxStackBase alone doesn't bound the
+// region. The total is therefore unrecoverable once xTaskCreate() returns, and
+// has to be recorded as the task is created.
+//
+// Register the byte count passed to xTaskCreate (the *_STACK_WORDS constants
+// above are byte counts — see the BYTES note at the top of this header).
+// xTaskCreateLogged() does this for its own callers automatically; sites that
+// call xTaskCreatePinnedToCore() directly record themselves.
+//
+// Recording BEFORE the create is intentional and safe: the registry is only
+// ever consulted for tasks that are actually running, so an entry for a task
+// that failed to spawn is inert.
+void taskStackRecord(const char* name, uint32_t allocatedBytes);
+
+// Total stack in bytes for a registered task name, or 0 if unknown. Names are
+// compared under the same 16-byte bound FreeRTOS applies to the TCB copy
+// (CONFIG_FREERTOS_MAX_TASK_NAME_LEN), so kernel-truncated names still match.
+//
+// A 0 return means "not recorded" — NOT "zero-sized". Tasks owned by IDF
+// (ipc0/ipc1, esp_timer, IDLEn, wifi, BT) are never registered, so callers must
+// present unknown sizes as unknown rather than inventing a total.
+uint32_t taskStackLookup(const char* name);
 
 // ============================================================================
 // Sensor Task Creation Helpers

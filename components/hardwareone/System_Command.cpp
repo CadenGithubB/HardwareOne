@@ -6,6 +6,7 @@
  */
 
 #include <Arduino.h>
+#include <ctype.h>
 #include <esp_attr.h>
 #include <string.h>
 
@@ -13,6 +14,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Settings.h"
+#include "System_Utils.h"
 
 // Forward declaration for exitToNormalBanner function (defined in cli_system.cpp)
 String exitToNormalBanner();
@@ -52,7 +54,7 @@ static size_t gCommandRegistryDropped = 0;
 static size_t gModuleSummaryDropped = 0;
 
 // Maximum number of command modules we can track for the debug summary.
-// gCommandModules[] has 44 rows in source (27 compile in the committed FeatherS3
+// gCommandModules[] has 45 rows in source (28 compile in the committed FeatherS3
 // config), so 64 is permanent headroom even with every feature turned on. Cost is
 // 12 B per slot — three words — and it lands in PSRAM, not internal DRAM: the
 // array below is EXT_RAM_BSS_ATTR and CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
@@ -130,7 +132,8 @@ const CommandEntry* findCommand(const String& cmdLine) {
     // Check if command line starts with this entry name
     if (lc.startsWith(lcEntry)) {
       // Ensure it's a complete word match (followed by space, end, or nothing)
-      if (lc.length() == entryLen || lc.charAt(entryLen) == ' ') {
+      if (lc.length() == entryLen ||
+          isspace(static_cast<unsigned char>(lc.charAt(entryLen)))) {
         // Prefer longer matches (e.g., "user list" over "user")
         if (entryLen > bestLen) {
           bestMatch = commandRegistry[i];
@@ -209,7 +212,8 @@ String executeCommandThroughRegistry(const String& argsInput) {
     }
   }
 
-  DEBUG_COMMAND_SYSTEMF("CommandSystem: Executing command '%s'", command.c_str());
+  const String safeCommandForTrace = redactCmdForAudit(command);
+  DEBUG_COMMAND_SYSTEMF("CommandSystem: Executing command '%s'", safeCommandForTrace.c_str());
 
   // Step 1: Resolve canonical command key once (case-insensitive, args preserved)
   String resolvedKey = resolveRegistryCommandKey(command);
@@ -246,20 +250,8 @@ String executeCommandThroughRegistry(const String& argsInput) {
       command += resolvedArgs;
     }
 
-    // Handle help mode exit and command reprocessing
-    if (gCLIState != CLI_NORMAL) {
-      if (!isHelpModeCommand(found->name)) {
-        // User typed a regular command while in help mode
-        // Exit help first, then execute the command
-        String exitBanner = exitToNormalBanner();
-        broadcastOutput(exitBanner);
-        const char* commandResult = found->handler(resolvedArgs);
-        return String(commandResult);
-      }
-    }
-
     // Execute through registry handler - pass only args, not full command
-    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s (args: %s)", command.c_str(), resolvedArgs.c_str());
+    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s", found->name);
     const char* result = found->handler(resolvedArgs);
     
     // Check if result indicates an error or usage issue
@@ -283,7 +275,8 @@ String executeCommandThroughRegistry(const String& argsInput) {
     return String(result);
   } else {
     // Command not found in registry
-    return "Unknown command: " + command + "\nType 'help' for available commands";
+    return "Unknown command: " + redactCmdForAudit(command) +
+           "\nType 'help' for available commands";
   }
 }
 
@@ -390,8 +383,11 @@ void CommandArgs::parse() {
   int pos = 0;
 
   while (pos < len && argCount_ < MAX_ARGS) {
-    // skip spaces
-    while (pos < len && raw_[pos] == ' ') pos++;
+    // Use the same ASCII-whitespace grammar as findCommand(). Keeping the
+    // registry boundary and argument parser aligned prevents a tab-delimited
+    // command from being authorized as one shape and executed as another.
+    while (pos < len &&
+           isspace(static_cast<unsigned char>(raw_[pos]))) pos++;
     if (pos >= len) break;
 
     int start = pos;
@@ -412,7 +408,8 @@ void CommandArgs::parse() {
       argCount_++;
     } else {
       // unquoted token
-      while (pos < len && raw_[pos] != ' ') pos++;
+      while (pos < len &&
+             !isspace(static_cast<unsigned char>(raw_[pos]))) pos++;
       args_[argCount_]    = raw_.substring(start, pos);
       offsets_[argCount_] = start;
       quoted_[argCount_]  = false;
@@ -473,10 +470,12 @@ String CommandArgs::remaining(int afterIndex) const {
     while (pos < (int)raw_.length() && raw_[pos] != '"') pos++;
     if (pos < (int)raw_.length()) pos++;  // closing quote
   } else {
-    while (pos < (int)raw_.length() && raw_[pos] != ' ') pos++;
+    while (pos < (int)raw_.length() &&
+           !isspace(static_cast<unsigned char>(raw_[pos]))) pos++;
   }
-  // skip spaces between token and remainder
-  while (pos < (int)raw_.length() && raw_[pos] == ' ') pos++;
+  // skip whitespace between token and remainder
+  while (pos < (int)raw_.length() &&
+         isspace(static_cast<unsigned char>(raw_[pos]))) pos++;
 
   if (pos >= (int)raw_.length()) return String();
   return raw_.substring(pos);
@@ -513,9 +512,10 @@ String CommandArgs::value(const String& key) const {
     return out;
   }
 
-  // unquoted — find next space
-  int end = raw_.indexOf(' ', start);
-  if (end < 0) end = raw_.length();
+  // unquoted — find the next command whitespace boundary
+  int end = start;
+  while (end < (int)raw_.length() &&
+         !isspace(static_cast<unsigned char>(raw_[end]))) end++;
   return raw_.substring(start, end);
 }
 

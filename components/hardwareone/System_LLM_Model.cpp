@@ -4,7 +4,7 @@
  * System_LLM.cpp (no behavioral change).
  */
 #include "System_BuildConfig.h"
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
 
 #include "System_LLM_Model.h"
 #include "System_LLM_Internal.h"
@@ -1080,6 +1080,17 @@ static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
       case 4:    // MENU — validated + published into a PSRAM blob
         parseMenuSection(f, payloadStart, slen);
         break;
+      case 5: {  // CAPS — u8 caps_version + u16 flags (LE)
+        uint8_t  capsVer = 0;
+        uint16_t flags   = 0;
+        if (slen >= 3 && f.read(&capsVer, 1) == 1 &&
+            f.read((uint8_t*)&flags, 2) == 2 && capsVer == LLM_CAPS_VERSION) {
+          gLLM.modelCaps = flags;
+        }
+        // Any failure -- short payload, short read, unknown version -- leaves
+        // modelCaps at 0. A model that cannot be understood does not get trusted.
+        break;
+      }
       default:   // unknown section id → skip
         break;
     }
@@ -1615,4 +1626,4 @@ bool loadWeights(const char* path) {
 }
 
 
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_SOURCE_ONBOARD

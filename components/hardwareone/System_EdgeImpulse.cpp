@@ -1885,6 +1885,7 @@ bool startContinuousInference() {
   // No core affinity: prio 1 on Core 0 was getting starved by WiFi (prio ~23)
   // and BT — continuous inference would stall whenever the radios were busy.
   // Letting the scheduler float it gets CPU on whichever core has slack.
+  taskStackRecord("ei_continuous", EI_CONTINUOUS_STACK_WORDS);
   BaseType_t result = xTaskCreatePinnedToCore(
     continuousInferenceTask,
     "ei_continuous",

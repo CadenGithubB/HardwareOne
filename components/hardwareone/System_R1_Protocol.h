@@ -205,6 +205,45 @@ struct R1Decoded {
 R1ParseError r1ValidateDecoded(const R1Decoded& decoded);
 bool r1DecodedIsTrusted(const R1Decoded& decoded);
 
+// Compact capability for one packetAck. Only
+// r1PacketAckDescriptorFromDecoded() can stamp a valid instance, and it does so
+// after the full decoded-frame integrity, profile, status, and opcode whitelist
+// gates pass. Keeping the echoed identifiers private prevents queue owners from
+// manufacturing a "trusted" ACK request out of unvalidated wire fields; the
+// read-only accessors exist for duplicate suppression and logs.
+class R1PacketAckDescriptor {
+public:
+  R1PacketAckDescriptor() = default;
+
+  bool valid() const;
+  uint16_t receivedSerial() const { return serial_; }
+  uint8_t module() const { return module_; }
+  uint8_t cmd() const { return cmd_; }
+  uint8_t subCmd() const { return subCmd_; }
+
+private:
+  friend bool r1PacketAckDescriptorFromDecoded(
+      R1ProtocolProfile profile, const R1Decoded& decoded,
+      R1PacketAckDescriptor& out);
+  friend bool r1MakeDailyPacketAckDescriptor(R1ProtocolProfile profile,
+                                             uint16_t serial, uint8_t cmd,
+                                             R1PacketAckDescriptor& out);
+  friend class R1Encoder;
+
+  uint16_t serial_ = 0;
+  uint8_t module_ = 0;
+  uint8_t cmd_ = 0;
+  uint8_t subCmd_ = 0;
+  uint8_t trustMarker_ = 0;
+};
+
+static_assert(sizeof(R1PacketAckDescriptor) == 6,
+              "packet ACK descriptor must stay compact");
+
+bool r1PacketAckDescriptorFromDecoded(R1ProtocolProfile profile,
+                                      const R1Decoded& decoded,
+                                      R1PacketAckDescriptor& out);
+
 struct R1DeviceInfo {
   char firmware[17];
   char hardware[17];
@@ -319,6 +358,11 @@ public:
   // payload echoes module/cmd/subCmd and received serial; byte 3 and bytes 6..9
   // are capture-proven zero but their semantics remain unknown. Invalid CRC,
   // length, status/opcode, or profile fails closed without consuming a serial.
+  // The descriptor overload accepts only a capability produced by
+  // r1PacketAckDescriptorFromDecoded(); it repeats the profile/opcode/stamp
+  // checks before allocating the outbound serial.
+  R1Frame buildPacketAck(R1ProtocolProfile profile,
+                         const R1PacketAckDescriptor& received);
   R1Frame buildPacketAck(R1ProtocolProfile profile,
                          const R1Decoded& received);
 
@@ -437,10 +481,15 @@ const char* r1DailyTimestampModeName(R1DailyTimestampMode mode);
 
 #define R1_COMMON_DAILY_MAX_RECORDS    24
 #define R1_HRV_DAILY_MAX_RECORDS       24
-// A full day has 144 ten-minute slots, but the current bounded single-frame
-// decoder can carry at most 35. Pagination/fragmentation remains a separate
-// evidence gate; a page that exceeds this limit returns R1_PARSE_TOO_LARGE.
-#define R1_ACTIVITY_DAILY_MAX_RECORDS  ((R1_MAX_PAYLOAD - 11) / 7)
+// A full day has 144 ten-minute slots. A single BLE notification can only carry
+// (R1_MAX_PAYLOAD-11)/7 = 35 records, so the ring fragments a larger activity
+// day across several notifications (see the reassembly path in G2_Ring). The
+// result type is sized for the full day; the single-frame decoder still self-
+// limits to 35 because payloadLength must equal 11+count*7 within R1_MAX_PAYLOAD.
+#define R1_ACTIVITY_DAILY_MAX_RECORDS  144
+// Largest reassembled activity model: 12 B header + 11 B daily prefix + 144*7 B
+// records = 1031 B. The reassembly buffer rounds up for headroom.
+#define R1_ACTIVITY_REASSEMBLED_MODEL_MAX  (12U + 11U + 144U * 7U)
 struct R1CommonDailyRecord {
   uint8_t hourSlot;
   uint8_t average;
@@ -524,6 +573,26 @@ R1ParseError r1ParseHrvDaily(R1ProtocolProfile profile,
 R1ParseError r1ParseActivityDaily(R1ProtocolProfile profile,
                                   const R1Decoded& decoded,
                                   R1ActivityDailyResult& out);
+
+// Parse an activity-daily frame that was reassembled from multiple BLE
+// notifications. `model` is the concatenated model bytes (version…payload,
+// i.e. the frame minus its 1-byte transferType and 4-byte CRC32), `modelLen`
+// its length, and `crc32Whole` the CRC32 the fragments carried. Validates the
+// CRC32 over the whole model and the daily header before parsing, so it fails
+// closed exactly like the single-frame decoder. Shares the record-parsing core
+// with r1ParseActivityDaily.
+R1ParseError r1ParseReassembledActivityDaily(R1ProtocolProfile profile,
+                                             const uint8_t* model,
+                                             size_t modelLen,
+                                             uint32_t crc32Whole,
+                                             R1ActivityDailyResult& out);
+
+// Stamp a trusted packetAck descriptor for a health daily NOTIFY that was
+// validated outside the bounded R1Decoded path (i.e. after reassembly). Same
+// trust-marker contract as r1PacketAckDescriptorFromDecoded — only this
+// translation unit can mint a valid descriptor.
+bool r1MakeDailyPacketAckDescriptor(R1ProtocolProfile profile, uint16_t serial,
+                                    uint8_t cmd, R1PacketAckDescriptor& out);
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #endif  // SYSTEM_R1_PROTOCOL_H

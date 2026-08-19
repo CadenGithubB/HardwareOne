@@ -29,11 +29,11 @@ check_markers() { # relative-file min_marker_count
   fi
 }
 
-# Expected minimum marker counts as of 2026-07-28. If you ADD a marked patch,
+# Expected minimum marker counts as of 2026-08-14. If you ADD a marked patch,
 # bump the count here and regenerate arduino-local-patches.patch (see README).
-check_markers libraries/BLE/src/BLEClient.cpp 12
-check_markers libraries/BLE/src/BLEDevice.cpp 1
-check_markers libraries/BLE/src/BLERemoteCharacteristic.cpp 5
+check_markers libraries/BLE/src/BLEClient.cpp 13
+check_markers libraries/BLE/src/BLEDevice.cpp 2
+check_markers libraries/BLE/src/BLERemoteCharacteristic.cpp 6
 check_markers libraries/BLE/src/BLERemoteDescriptor.cpp 4
 
 # NetworkEvents.cpp carries an UNMARKED local change — detectable only via git.

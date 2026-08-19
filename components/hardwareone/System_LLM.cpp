@@ -50,7 +50,7 @@
 #include <esp_attr.h>
 #include <ctype.h>   // isalpha/isalnum — vocab-aware prompt casing
 
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
 
 #include "System_LLM.h"
 #include "System_Mutex.h"
@@ -65,6 +65,7 @@
 #include "System_Filesystem.h"
 #include "System_VFS.h"
 #include "System_Settings.h"
+#include "System_LLMBackend.h"   // model registry — the one id -> source resolver
 
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -910,7 +911,6 @@ static float* forward(int token, int pos) {
 
 // ============================================================================
 // 11. Public API
-// ============================================================================
 
 void llmInit() {
   memset(&gLLM, 0, sizeof(gLLM));
@@ -1071,6 +1071,7 @@ void llmUnload() {
   // Drop any info-block metadata so a failed/early-aborted next load can't show
   // the previous model's description or icon.
   gLLM.modelDesc[0] = '\0';
+  gLLM.modelCaps    = 0;      // never let the previous model's trust survive
   gLLM.modelHasIcon = false;
   gLLM.modelIconW   = 0;
   gLLM.modelIconH   = 0;
@@ -1216,6 +1217,8 @@ static bool llmIsMetaPrompt(const char* prompt) {
 // intake flattens newlines to spaces, so an already-framed prompt can arrive as
 // "Q: ... A:" and must not be wrapped twice — the normalization below restores
 // that newline itself.
+uint16_t llmModelCaps() { return gLLM.modelCaps; }
+
 const char* llmFramePrompt(const char* userText, char* out, size_t outSize) {
   if (!userText || !out || outSize < 8) return userText;
 
@@ -1435,6 +1438,20 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
           // bare count as tiebreak (whole-name added tokens like "Bulbasaur"
           // are stored bare, so their space forms tie at 2 while bare shows
           // 1-vs-3). Rewrite when a casing strictly wins lexicographically.
+          //
+          // The bare tiebreak is gated on the space form being FRAGMENTED
+          // (>= 2 tokens). That is the only situation it was meant for: both
+          // casings fragment in context, and the bare count is the evidence
+          // that one of them is a whole added token. When the space form is
+          // already ONE token the word is optimally tokenized as typed, the
+          // rewrite cannot save a token, and all it does is corrupt casing —
+          // " How"/" how" and " do"/" Do" both tie at 1, so the bare counts
+          // (2 vs 1) were silently flipping ordinary words and pushing the
+          // prompt off-distribution. Observed on HardwareOneHelpAgent: "How do
+          // I turn off wifi" became "how Do I turn off wifi", and the engine's
+          // own next-token prediction disagreed with the rewrite it had just
+          // been handed — model_top=' you'(logit 13.2, rank 0) against the
+          // substituted ' You'(logit -0.6, rank 694).
           char asBuf[36], loBuf[36], tiBuf[36];
           asBuf[0] = loBuf[0] = tiBuf[0] = ' ';           // [0] = space prefix; bare form starts at [1]
           for (int k = 0; k < wl; k++) {
@@ -1450,8 +1467,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
           int sLo = encode(loBuf, tmpTok, 48), bLo = encode(loBuf + 1, tmpTok, 48);
           int sTi = encode(tiBuf, tmpTok, 48), bTi = encode(tiBuf + 1, tmpTok, 48);
           const char* pick = asBuf; int sPick = sAs, bPick = bAs;
-          if (sLo > 0 && bLo > 0 && (sLo < sPick || (sLo == sPick && bLo < bPick))) { pick = loBuf; sPick = sLo; bPick = bLo; }
-          if (sTi > 0 && bTi > 0 && (sTi < sPick || (sTi == sPick && bTi < bPick))) { pick = tiBuf; sPick = sTi; bPick = bTi; }
+          if (sLo > 0 && bLo > 0 && (sLo < sPick || (sLo == sPick && sPick >= 2 && bLo < bPick))) { pick = loBuf; sPick = sLo; bPick = bLo; }
+          if (sTi > 0 && bTi > 0 && (sTi < sPick || (sTi == sPick && sPick >= 2 && bTi < bPick))) { pick = tiBuf; sPick = sTi; bPick = bTi; }
           if (pick != asBuf) {                             // a cleaner casing exists
             DEBUG_LLM_GENERATEF("[LLM] casing: '%.*s' -> '%s' (space %d->%d, bare %d->%d tok)",
                                 wl, asBuf + 1, pick + 1, sAs, sPick, bAs, bPick);
@@ -2446,59 +2463,6 @@ int llmTokenize(const char* text, int* outTokens, int maxTokens) {
   return encode(text, outTokens, maxTokens);
 }
 
-String llmListModels() {
-  FsLockGuard fsGuard("llm.list_models");
-  String json = "[";
-  bool first = true;
-
-  // Scan a directory and append model entries to json
-  // dirPath: full VFS path e.g. "/system/llm" or "/sd/llm"
-  // storage: "internal" or "sd"
-  auto scanDir = [&](const char* dirPath, const char* storage) {
-    File dir = VFS::openGuarded(dirPath, FILE_READ, VFS::systemAuth("llm.list_models"));
-    if (!dir || !dir.isDirectory()) return;
-    File entry;
-    while ((entry = dir.openNextFile())) {
-      String name = entry.name();
-      // Strip directory prefix — SD library may return full path, LittleFS returns just filename
-      int slash = name.lastIndexOf('/');
-      if (slash >= 0) name = name.substring(slash + 1);
-      String nameLower = name; nameLower.toLowerCase();
-      if (nameLower.endsWith(".bin")) {
-        if (!first) json += ",";
-        // Build full path for loading (pre-reserved to avoid chained allocs)
-        String fullPath;
-        fullPath.reserve(strlen(dirPath) + 1 + name.length());
-        fullPath = dirPath;
-        fullPath += '/';
-        fullPath += name;
-        json += "{\"name\":\"";
-        json += name;
-        json += "\",\"size\":";
-        json += (unsigned long)entry.size();
-        json += ",\"path\":\"";
-        json += fullPath;
-        json += "\",\"storage\":\"";
-        json += storage;
-        json += "\"}";
-        first = false;
-      }
-      entry.close();
-    }
-    dir.close();
-  };
-
-  // Always scan internal LittleFS location
-  scanDir("/system/llm", "internal");
-
-  // Scan SD card if present
-  if (VFS::isSDAvailable()) {
-    scanDir("/sd/llm", "sd");
-  }
-
-  json += "]";
-  return json;
-}
 
 // ============================================================================
 // 11b. Async Public API
@@ -2572,503 +2536,9 @@ int  llmGetSessionId()     { return (int)gLLMSessionId; }
 #include "System_Utils.h"      // CommandEntry, argWantsJson
 #include "System_LLMChat.h"    // chatBeginTurn — shared async conversation layer
 
-EXT_RAM_BSS_ATTR static char llmCmdBuf[512];
+// The command surface, the settings table and llmCommands[] moved to
+// System_LLMCommands.cpp so they compile under ENABLE_LLM_BACKEND rather
+// than under this file's engine flag — a CM5-only build has commands but
+// no engine. Everything left in this file IS the engine.
 
-// Debug: arm a one-shot RunState corruption to verify the forward() guard +
-// llmBindRunState rebind + retry recovery path. The next generation nulls s->x;
-// the guard catches it, rebinds from the intact base blocks, and continues — so
-// the answer still completes. Lets the corruption-recovery path be proven on demand.
-static const char* cmd_llm_corrupt_test(const String& /*args*/) {
-  if (!llmIsReady()) return "Error: LLM not loaded — load a model first";
-  gLLM.injectCorruptOnce = true;
-  return "Armed: next generation injects one RunState corruption. Run a prompt, then look for "
-         "'[LLM] TEST: injected' followed by 'rebound RunState, retry 1/2' — the answer should still complete.";
-}
-
-static const char* cmd_llm_status(const String& argsInput) {
-  LLMStatus st = llmGetStatus();
-  const char* stateStr = "UNLOADED";
-  switch (st.state) {
-    case LLMState::LOADING:    stateStr = "LOADING"; break;
-    case LLMState::READY:      stateStr = "READY"; break;
-    case LLMState::GENERATING: stateStr = "GENERATING"; break;
-    case LLMState::ERROR:      stateStr = "ERROR"; break;
-    default: break;
-  }
-
-  // Structured path: one verbatim JSON blob via a PSRAM buffer (no
-  // broadcastOutput). This is what the app's Chat page polls for
-  // state / model / tok-s. Schema:
-  //   {"v":1,"state","model","tokPerSec","error","psramKB",
-  //    "contextUsed","contextMax","tokens"}
-  if (argWantsJson(argsInput)) {
-    const char* model = st.modelPath;
-    const char* slash = strrchr(st.modelPath, '/');
-    if (slash) model = slash + 1;            // filename only, per contract
-    PSRAM_JSON_DOC(doc);
-    // Degraded-context warning (shared helper — same text every surface uses).
-    // char[] so ArduinoJson copies it into the doc pool (safe past this scope).
-    char ctxWarnBuf[192];
-    const bool ctxDeg = llmContextWarning(ctxWarnBuf, sizeof(ctxWarnBuf)) > 0;
-    doc["schema"]           = 1;
-    doc["state"]       = stateStr;
-    doc["model"]       = model;
-    doc["tokPerSec"]   = st.lastTokensPerSec;
-    doc["error"]       = st.errorMsg;        // "" when no error
-    doc["psramKB"]     = (unsigned)(st.totalPsramUsed / 1024);
-    doc["contextUsed"] = st.lastContextUsed;
-    doc["contextMax"]  = st.lastContextMax;
-    doc["tokens"]      = st.lastTokenCount;
-    doc["meanLogprob"] = st.lastMeanLogprob;   // Phase 2 confidence (0 = no signal)
-    doc["confTokens"]  = st.lastConfTokens;
-    doc["ctxWarn"]     = ctxDeg;               // true → context auto-shrunk unusably low
-    if (ctxDeg) doc["ctxWarning"] = ctxWarnBuf;
-    // Guided-input menu: presence + generation so a surface can show/hide the
-    // guided picker and detect a model swap (refetch on gen change).
-    JsonObject menu = doc["menu"].to<JsonObject>();
-    menu["groups"] = llmMenuGroupCount();
-    menu["gen"]    = llmMenuGeneration();
-    static char* jbuf = nullptr;
-    if (!jbuf) jbuf = (char*)ps_alloc(640, AllocPref::PreferPSRAM, "llmstatus.json");
-    if (!jbuf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, jbuf, 640);
-    return jbuf;
-  }
-
-  char ctxWarnLine[224];
-  {
-    char w[192];
-    if (llmContextWarning(w, sizeof(w)) > 0)
-      snprintf(ctxWarnLine, sizeof(ctxWarnLine), "WARNING: %s\n", w);
-    else
-      ctxWarnLine[0] = '\0';
-  }
-  snprintf(llmCmdBuf, sizeof(llmCmdBuf),
-    "LLM State: %s\n"
-    "Model: %s\n"
-    "Config: dim=%d layers=%d heads=%d vocab=%d seq=%d ctx=%d\n"
-    "PSRAM: %uKB (weights=%uKB runtime=%uKB)\n"
-    "Last: %d tokens @ %.1f tok/s\n"
-    "%s%s%s",
-    stateStr, st.modelPath,
-    st.config.dim, st.config.n_layers, st.config.n_heads,
-    st.config.vocab_size, st.config.seq_len, st.lastContextMax,
-    (unsigned)(st.totalPsramUsed / 1024),
-    (unsigned)(st.modelSizeBytes / 1024),
-    (unsigned)(st.runtimeSizeBytes / 1024),
-    st.lastTokenCount, st.lastTokensPerSec,
-    ctxWarnLine,
-    st.errorMsg[0] ? "Error: " : "",
-    st.errorMsg[0] ? st.errorMsg : "");
-  return llmCmdBuf;
-}
-
-static const char* cmd_llm_load(const String& args) {
-  if (!gSettings.llmEnabled) {
-    return "{\"schema\":1,\"ok\":false,\"error\":\"LLM disabled - run llmenabled 1 first\"}";
-  }
-  CommandArgs ca(args);
-  String a = ca.arg(0);  // optional model filename
-
-  const char* modelPath = LLM_DEFAULT_MODEL_PATH;
-
-  char customPath[96];
-  if (a.length() > 0) {
-    if (a.startsWith("/")) {
-      // Full path provided — use as-is
-      strlcpy(customPath, a.c_str(), sizeof(customPath));
-    } else {
-      // Bare filename — try SD card first, then internal
-      snprintf(customPath, sizeof(customPath), "/sd/llm/%s", a.c_str());
-      if (!VFS::isSDAvailable() || !VFS::existsGuarded(customPath, VFS::systemAuth("llm.load_check"))) {
-        snprintf(customPath, sizeof(customPath), "/system/llm/%s", a.c_str());
-      }
-    }
-    modelPath = customPath;
-  }
-
-  // JSON reply mirrors POST /api/llm/load ({"ok":true} / {"ok":false,"error"}).
-  // The app sends `llmload <name>` (no `json` token) and parses the reply like
-  // the web, so this must be a JSON object, not the old human "Model loaded:".
-  bool ok = llmLoadModel(modelPath);
-  if (ok) {
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"schema\":1,\"ok\":true}");
-  } else {
-    LLMStatus st = llmGetStatus();
-    // errorMsg is firmware-controlled (short, no quotes/backslashes) — safe to inline.
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"schema\":1,\"ok\":false,\"error\":\"%s\"}", st.errorMsg);
-  }
-  return llmCmdBuf;
-}
-
-static const char* cmd_llm_unload(const String&) {
-  // llmUnload() already stops a live generation and waits for it before freeing
-  // the weights, so there is nothing to add here. The generation worker stays
-  // parked on its notify holding its stack — see gLLMWorkerStack.
-  llmUnload();
-  return "{\"schema\":1,\"ok\":true}";   // mirror POST /api/llm/unload
-}
-
-static const char* cmd_llm_models(const String& argsInput) {
-  // Structured path: {"v":1,"models":["a.bin","b.bin"]} — names only, the
-  // shape the app's model picker consumes. Reuse llmListModels() (the single
-  // source of truth for the LittleFS + SD scan, which emits rich objects) and
-  // project it down to the filename list the contract asks for.
-  if (argWantsJson(argsInput)) {
-    String rich = llmListModels();   // [{"name","size","path","storage"},...]
-    PSRAM_JSON_DOC(src);
-    PSRAM_JSON_DOC(out);
-    out["schema"] = 1;
-    JsonArray names = out["models"].to<JsonArray>();
-    if (deserializeJson(src, rich) == DeserializationError::Ok) {
-      for (JsonObject m : src.as<JsonArray>()) {
-        const char* n = m["name"] | "";
-        if (n[0]) names.add(n);              // linked into src, alive until serialize
-      }
-    }
-    static char* jbuf = nullptr;
-    if (!jbuf) jbuf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "llmmodels.json");
-    if (!jbuf) return "{\"error\":\"oom\"}";
-    serializeJson(out, jbuf, 1024);
-    return jbuf;
-  }
-
-  String models = llmListModels();
-  bool sdAvail = VFS::isSDAvailable();
-  snprintf(llmCmdBuf, sizeof(llmCmdBuf), "Models (internal + %s):\n%s",
-           sdAvail ? "SD card" : "no SD card", models.c_str());
-  return llmCmdBuf;
-}
-
-static const char* cmd_llm_generate(const String& args) {
-  // Structured (async, non-blocking) path. Contract: `llmgenerate json <prompt>`
-  // — the leading `json` token is the mode flag, everything after it is the
-  // prompt (which may contain spaces, and may itself mention the word "json").
-  // So detect the LEADING token here rather than via argWantsJson(), which
-  // scans the whole string and would false-trigger on a prompt that merely
-  // says "json". Kicks generation off via the shared chat layer and returns
-  // {session} immediately — it must NOT block until generation finishes (that
-  // is the whole reason this path exists; the blocking human path below would
-  // tie up the BLE channel for the entire run and trip the app's watchdog).
-  {
-    String a = args; a.trim();
-    if (argLeadingTokenIsJson(a)) {
-      if (!llmIsReady()) return "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\"}";
-      String payload = a.startsWith("json ") ? a.substring(5) : String();
-      payload.trim();
-      if (payload.length() == 0) return "{\"schema\":1,\"ok\":false,\"error\":\"empty prompt\"}";
-
-      // Two accepted shapes:
-      //   json <raw prompt text>                    → no overrides
-      //   json {"prompt":"...","params":{...}}       → per-request overrides
-      // The object form lets the app tune a single reply (e.g. hard_cap +
-      // sentence_limit for a Do:-style short answer) without mutating settings.
-      // See docs/LLM_BLE_GENERATE_OVERRIDES.md for the wire contract.
-      String prompt;
-      ChatParamOverride ov;
-      bool haveOverrides = false;
-      if (payload[0] == '{') {
-        PSRAM_JSON_DOC(body);   // parse pool in PSRAM, not the tight internal DRAM
-        if (deserializeJson(body, payload) != DeserializationError::Ok)
-          return "{\"schema\":1,\"ok\":false,\"error\":\"invalid JSON payload\"}";
-        prompt = (const char*)(body["prompt"] | "");
-        prompt.trim();
-        if (prompt.length() == 0) return "{\"schema\":1,\"ok\":false,\"error\":\"empty prompt\"}";
-        JsonObjectConst params = body["params"].as<JsonObjectConst>();
-        if (!params.isNull()) { chatParamOverrideFromJson(params, ov); haveOverrides = true; }
-      } else {
-        prompt = payload;  // raw text form
-      }
-
-      int session = chatBeginTurn(prompt.c_str(), haveOverrides ? &ov : nullptr);
-      if (session <= 0) return "{\"schema\":1,\"ok\":false,\"error\":\"busy or failed to start\"}";
-      // Mirror the web's {"ok":true,"session":N} (POST /api/llm/generate &
-      // /chat/retry). The app validates the start by `ok`, so omitting it reads
-      // as "command not recognized" → its "streaming not supported" fallback.
-      // Generation runs async: this only starts it. The reply streams in
-      // separately, so point the caller at the poll command (the `hint` key
-      // mirrors the human-path cliHint — same text either way).
-      snprintf(llmCmdBuf, sizeof(llmCmdBuf),
-               "{\"schema\":1,\"ok\":true,\"session\":%d,"
-               "\"hint\":\"the reply streams in asynchronously - read it with 'llmresult json 0'\"}",
-               session);
-      return llmCmdBuf;
-    }
-  }
-
-  if (!llmIsReady()) return "Error: no model loaded";
-
-  CommandArgs ca(args);
-  if (ca.count() == 0) return "Error: invalid arguments — Usage: llm generate <prompt>";
-  String a = ca.raw();  // full prompt text
-
-  // This path drives the engine directly instead of going through chatBeginTurn,
-  // so it has to frame the prompt itself — otherwise `llmgenerate <question>`
-  // would keep completing prose while `llmgenerate json <question>` answered
-  // properly. Static rather than a stack buffer: llmGenerate runs on this same
-  // task and already wants ~5 KB of its stack, and llmGenerate's
-  // READY->GENERATING gate is what stops two synchronous generations — hence two
-  // users of this buffer — from overlapping.
-  EXT_RAM_BSS_ATTR static char framedBuf[1024];
-  const char* framed = llmFramePrompt(a.c_str(), framedBuf, sizeof(framedBuf));
-
-  // Build output into buffer
-  String output;
-  output.reserve(1024);
-
-  int result = llmGenerate(framed, [&output](const char* token) -> bool {
-    output += token;
-    return (output.length() < 2000);  // safety limit for CLI
-  }, 128, LLM_DEFAULT_TEMPERATURE);
-
-  if (result < 0) {
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "Generation error");
-  } else {
-    // Truncate if needed
-    if (output.length() >= sizeof(llmCmdBuf) - 32) {
-      output = output.substring(0, sizeof(llmCmdBuf) - 32);
-      output += "\n[truncated]";
-    }
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "%s\n(%d tokens)", output.c_str(), result);
-  }
-  return llmCmdBuf;
-}
-
-static const char* cmd_llm_result(const String& args) {
-  // Poll for streamed tokens. Contract: `llmresult json <offset>` →
-  //   {"v":1,"text":"<bytes since offset>","done":<bool>,"len":<total so far>}
-  // Mirrors GET /api/llm/result. We read straight from the engine's result
-  // buffer (llmGetResult*) rather than the chat layer's streaming cursor:
-  // the engine buffer persists after generation ends, so the final chunk and
-  // the total length stay readable on the very poll where done flips true —
-  // whereas chatReadStream()/chatGetStreamLen() return 0 the instant the
-  // streaming turn is finalized, which would silently drop the tail.
-  String a = args; a.trim();
-  if (!argLeadingTokenIsJson(a))
-    return "Error: invalid arguments — Usage: llmresult json <offset>";
-
-  int offset = 0;
-  if (a.startsWith("json ")) {
-    String rest = a.substring(5); rest.trim();
-    offset = rest.toInt();
-    if (offset < 0) offset = 0;
-  }
-
-  // 512-byte read window mirrors the web poller. The app polls ~every 350 ms
-  // and advances offset = len, so this easily outpaces on-device generation;
-  // any backlog (engine ran ahead) just drains across successive polls — no
-  // data is lost because the engine buffer is not cleared until the next gen.
-  char chunk[512];
-  int  n     = llmGetResultChunk(offset, chunk, sizeof(chunk));
-  int  total = llmGetResultLen();
-  bool done  = llmIsGenerationDone();
-
-  PSRAM_JSON_DOC(doc);
-  doc["schema"]    = 1;
-  doc["text"] = (n > 0) ? (const char*)chunk : "";   // linked; chunk outlives serialize
-  doc["done"] = done;
-  doc["len"]  = total;
-  // Sized for the worst case: a full 512-byte window where every byte needs
-  // \uXXXX escaping (512×6) + envelope, still inside the 4 KB command-return
-  // cap. Real LLM text escapes to ~1.1× so the typical blob is ~550 B.
-  static char* jbuf = nullptr;
-  if (!jbuf) jbuf = (char*)ps_alloc(3200, AllocPref::PreferPSRAM, "llmresult.json");
-  if (!jbuf) return "{\"error\":\"oom\"}";
-  serializeJson(doc, jbuf, 3200);
-  return jbuf;
-}
-
-static const char* cmd_llm_stop(const String&) {
-  llmStop();
-  return "{\"schema\":1,\"ok\":true}";   // mirror POST /api/llm/stop
-}
-
-static const char* cmd_llm_clear(const String&) {
-  // Reset the shared conversation. Thin wrapper over chatClear() — the same
-  // call POST /api/llm/chat/clear makes. Without this, a BLE app's "New chat"
-  // only wipes its own bubbles while the device keeps accumulating turns
-  // (the model still "remembers" cleared messages and contextUsed creeps up).
-  // chatClear() refuses mid-generation, so surface that as a stop-first hint.
-  // JSON mirrors POST /api/llm/chat/clear so the app parses it like the web.
-  if (!chatClear()) return "{\"schema\":1,\"ok\":false,\"error\":\"busy — stop first\"}";
-  return "{\"schema\":1,\"ok\":true}";
-}
-
-static const char* cmd_llm_retry(const String&) {
-  // Regenerate the last assistant reply. Thin wrapper over chatRetryLast()
-  // (mirror of POST /api/llm/chat/retry): it drops the last reply, steers the
-  // model away from repeating it, and kicks off a fresh async generation.
-  // Returns a session exactly like `llmgenerate json` — the app then polls
-  // `llmresult json <offset>` to stream the new reply.
-  if (!llmIsReady()) return "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\"}";
-  int session = chatRetryLast(nullptr);
-  if (session <= 0) return "{\"schema\":1,\"ok\":false,\"error\":\"no prior turn or busy\"}";
-  // Like llmgenerate, this only kicks off the regeneration; the new reply
-  // streams in separately via the result poller.
-  snprintf(llmCmdBuf, sizeof(llmCmdBuf),
-           "{\"schema\":1,\"session\":%d,"
-           "\"hint\":\"the new reply streams in asynchronously - read it with 'llmresult json 0'\"}",
-           session);
-  return llmCmdBuf;
-}
-
-static const char* cmd_llm_turns(const String& args) {
-  // Resync the conversation after a reconnect. Wraps the same turn-reader
-  // functions the web's GET /api/llm/chat/turns uses (chatGetTurnCount /
-  // chatGetTurnInfo / chatReadTurn — web-only until now).
-  //
-  // The web endpoint streams an unbounded array; a BLE command reply is capped
-  // at 4 KB and can't chunk arbitrarily. So this is paginated ONE TURN PER
-  // CALL by index — a single turn (<=2 KB body) always fits. The app reads
-  // `count` from any response, then fetches index 0..count-1. Schema:
-  //   {"v":1,"count":N,"index":I,"role":"user|assistant","text":"…",
-  //    "tokens":T,"tokPerSec":F,"streaming":bool}
-  //   out-of-range → {"v":1,"count":N,"index":I,"end":true}
-  String a = args; a.trim();
-  if (!argLeadingTokenIsJson(a))
-    return "Error: invalid arguments — Usage: llmturns json <index>";
-
-  int index = 0;
-  if (a.startsWith("json ")) {
-    String rest = a.substring(5); rest.trim();
-    index = rest.toInt();
-    if (index < 0) index = 0;
-  }
-
-  int count = chatGetTurnCount();
-  PSRAM_JSON_DOC(doc);
-  doc["schema"]     = 1;
-  doc["count"] = count;
-  doc["index"] = index;
-
-  ChatTurnInfo info;
-  if (index >= count || !chatGetTurnInfo(index, &info)) {
-    doc["end"] = true;
-    static char* ebuf = nullptr;
-    if (!ebuf) ebuf = (char*)ps_alloc(96, AllocPref::PreferPSRAM, "llmturns_end.json");
-    if (!ebuf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, ebuf, 96);
-    return ebuf;
-  }
-
-  // Read the turn body into a reusable PSRAM scratch buffer. Assigned to the
-  // doc as a (non-const) char* so ArduinoJson COPIES it into the doc pool —
-  // the scratch buffer can then be reused safely on the next call.
-  static char* turnBuf = nullptr;
-  if (!turnBuf) turnBuf = (char*)ps_alloc(LLM_CHAT_TURN_MAX_BYTES + 1, AllocPref::PreferPSRAM, "llmturn.txt");
-  if (!turnBuf) return "{\"error\":\"oom\"}";
-  chatReadTurn(index, 0, turnBuf, LLM_CHAT_TURN_MAX_BYTES + 1);
-
-  doc["role"]      = (info.role == ChatTurnRole::USER) ? "user" : "assistant";
-  doc["text"]      = turnBuf;                       // char* → copied into doc
-  doc["tokens"]    = info.tokenCount;
-  doc["tokPerSec"] = info.tokensPerSecX10 / 10.0f;
-  doc["streaming"] = info.isStreaming;
-
-  // One turn body is <=2 KB; realistic text escapes to ~1.1×, so the blob sits
-  // well under the 4 KB command-return cap.
-  static char* jbuf = nullptr;
-  if (!jbuf) jbuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "llmturns.json");
-  if (!jbuf) return "{\"error\":\"oom\"}";
-  serializeJson(doc, jbuf, 4096);
-  return jbuf;
-}
-
-// ============================================================================
-// LLM Settings Module (generation defaults, persisted)
-// ============================================================================
-
-// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options, isSecret, group, cmdKey
-static const SettingEntry llmSettingEntries[] = {
-  { "llmEnabled", SETTING_BOOL, &gSettings.llmEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "llmenabled" },
-  { "autoStart",     SETTING_BOOL,   &gSettings.llmAutoStart,     0, 0,    nullptr,    0,    1, "Auto-start at boot",   nullptr, false, nullptr, "llmautostart" },  // idx 1
-  { "temperature",   SETTING_FLOAT,  &gSettings.llmTemperature,  0,   0.5f, nullptr,    0,    0, "Temperature",          nullptr, false, nullptr, "llmtemperature"   },
-  { "topP",          SETTING_FLOAT,  &gSettings.llmTopP,         0,   0.8f, nullptr,    0,    1, "Top-P",                nullptr, false, nullptr, "llmtopp"          },
-  { "maxTokens",     SETTING_INT,    &gSettings.llmMaxTokens,    256, 0,    nullptr,    1,  512, "Max Tokens",           nullptr, false, nullptr, "llmmaxtokens"     },
-  { "sentenceLimit", SETTING_INT,    &gSettings.llmSentenceLimit,  2, 0,    nullptr,    0,   20, "Sentence Limit",       nullptr, false, nullptr, "llmsentencelimit" },
-  { "hardCap",       SETTING_INT,    &gSettings.llmHardCap,       80, 0,    nullptr,    0,  512, "Hard Cap",             nullptr, false, nullptr, "llmhardcap"       },
-  { "repPenalty",    SETTING_FLOAT,  &gSettings.llmRepPenalty,    0,  1.3f, nullptr,    1,    3, "Rep Penalty",          nullptr, false, nullptr, "llmreppenalty"    },
-  { "repWindow",     SETTING_INT,    &gSettings.llmRepWindow,     32, 0,    nullptr,    1, LLM_DEFAULT_REP_WINDOW, "Rep Window", nullptr, false, nullptr, "llmrepwindow" },  // max = ring size; higher values were silently truncated
-  { "maxContext",    SETTING_INT,    &gSettings.llmMaxContext,     0, 0,    nullptr,    0, LLM_SETTING_MAX_CONTEXT, "Max Context (0=auto)", nullptr, false, nullptr, "llmmaxcontext"    },
-  { "defaultModel",  SETTING_STRING, &gSettings.llmDefaultModel,  0, 0,    "model.bin",0,    0, "Default Model",        nullptr, false, nullptr, "llmdefaultmodel"  },
-  // ── APPEND-ONLY below this line ───────────────────────────────────────────
-  // The CLI setting commands (LLM_SETTING_CMD) map to this table by INDEX, so
-  // inserting mid-table silently misroutes every command after the insert point.
-  // New settings go HERE, at the end, with a matching macro+command index below.
-  // (Mirostat + dynTemp rows were removed 2026-07-10; the whole table + macros
-  //  were renumbered in one verified pass — the sanctioned append-only break.)
-  { "minP",          SETTING_FLOAT,  &gSettings.llmMinP,          0, 0.0f, nullptr,    0,    1, "Min-P (0=off)",        nullptr, false, nullptr, "llmminp"   },  // idx 11
-  { "kvPrecision",   SETTING_INT,    &gSettings.llmKvPrecision,   1, 0,    nullptr,    0,    2, "KV Cache (0=FP32,1=FP16,2=INT8, reload to apply)", "0:FP32,1:FP16,2:INT8", false, nullptr, "llmkvprec" },  // idx 12 (default FP16: 2x ctx, ~lossless)
-  { "noRepeatNgram", SETTING_INT,    &gSettings.llmNoRepeatNgram, 0, 0,    nullptr,    0,    8, "No-repeat n-gram (0=off)", nullptr, false, nullptr, "llmnorepeatngram" },  // idx 13 (shipped off per user; 3 typical)
-  { "confThreshold", SETTING_FLOAT,  &gSettings.llmConfThreshold, 0, -1.0f, nullptr,  -8,    0, "Confidence gate mean-logprob (0=off)", nullptr, false, nullptr, "llmconfthreshold" },  // idx 14
-  { "contentBoost",  SETTING_FLOAT,  &gSettings.llmContentBoost,  0, 1.5f, nullptr,    0,    4, "Content boost (0=off)", nullptr, false, nullptr, "llmcontentboost" },  // idx 15 (on-topic logit bonus; co-tune w/ repPenalty)
-  { "domainGate",    SETTING_BOOL,   &gSettings.llmDomainGate,    1, 0,    nullptr,    0,    1, "Domain gate (refuse off-topic)", nullptr, false, nullptr, "llmdomaingate" },  // idx 16 (refuse prompts outside the .bin's embedded domain vocab)
-  { "profile",       SETTING_BOOL,   &gSettings.llmProfile,       0, 0,    nullptr,    0,    1, "Profiler (per-section fwd timing)", nullptr, false, nullptr, "llmprofile" },  // idx 17 (diagnostic; dumps a breakdown after each generation)
-};
-
-extern const SettingsModule llmSettingsModule = {
-  "llm", "apps.llm", llmSettingEntries,
-  sizeof(llmSettingEntries) / sizeof(llmSettingEntries[0]),
-  nullptr,
-  "On-device LLM generation defaults"
-};
-
-// Setting command handlers (one per entry, via index)
-#define LLM_SETTING_CMD(funcName, idx) \
-  static const char* funcName(const String& a) { \
-    return handleSettingCommand(&llmSettingEntries[idx], a); \
-  }
-
-LLM_SETTING_CMD(cmd_llm_temperature,   0)
-LLM_SETTING_CMD(cmd_llm_topp,          1)
-LLM_SETTING_CMD(cmd_llm_maxtokens,     2)
-LLM_SETTING_CMD(cmd_llm_sentencelimit, 3)
-LLM_SETTING_CMD(cmd_llm_hardcap,       4)
-LLM_SETTING_CMD(cmd_llm_reppenalty,    5)
-LLM_SETTING_CMD(cmd_llm_repwindow,     6)
-LLM_SETTING_CMD(cmd_llm_maxcontext,    7)
-LLM_SETTING_CMD(cmd_llm_defaultmodel,  8)
-LLM_SETTING_CMD(cmd_llm_minp,          9)
-LLM_SETTING_CMD(cmd_llm_kvprec,       10)
-LLM_SETTING_CMD(cmd_llm_autostart,    11)
-LLM_SETTING_CMD(cmd_llm_norepeatngram, 12)
-LLM_SETTING_CMD(cmd_llm_confthreshold, 13)
-LLM_SETTING_CMD(cmd_llm_contentboost, 14)
-LLM_SETTING_CMD(cmd_llm_domaingate,   15)
-LLM_SETTING_CMD(cmd_llm_profile,      16)
-
-const CommandEntry llmCommands[] = {
-  { "llmstatus",        "Show LLM engine status (add 'json' for JSON output)",               false, cmd_llm_status },
-  { "llmload",          "Load model [model.bin]",               true,  cmd_llm_load,         "Usage: llmload [filename.bin]" },
-  { "llmunload",        "Unload model and free PSRAM",          true,  cmd_llm_unload },
-  { "llmautostart",     "Auto-load default model at boot (0|1)", true,  cmd_llm_autostart,    "Usage: llmautostart <0|1>" },
-  { "llmmodels",        "List available model files (add 'json' for JSON output)",           false, cmd_llm_models },
-  { "llmgenerate",      "Ask the loaded model a question",      false, cmd_llm_generate,     "Usage: llmgenerate <question>  |  llmgenerate do: <intent>\nThe question is wrapped in the model's Q:/A: format for you, same as the web chat. Prefix 'do:' to ask for a command instead of an answer. A prompt that already starts with 'Q:' is sent as-is." },
-  { "llmresult",        "Poll streamed generation (JSON)",      false, cmd_llm_result,       "Usage: llmresult json <offset>" },
-  { "llmstop",          "Stop in-progress generation",          false, cmd_llm_stop },
-  { "llmcorrupttest",   "Debug: force corruption-recovery test", true, cmd_llm_corrupt_test },
-  { "llmclear",         "Reset the LLM conversation",           false, cmd_llm_clear },
-  { "llmretry",         "Regenerate the last reply (JSON)",     false, cmd_llm_retry },
-  { "llmturns",         "Read a conversation turn (JSON)",      false, cmd_llm_turns,        "Usage: llmturns json <index>" },
-  { "llmmenu",          "Guided-input menu status/listing (add 'json')",  false, cmd_llm_menu, "Usage: llmmenu  |  llmmenu json  |  llmmenu json tpl <g> <off>  |  llmmenu json ent <g> <off>\nLists this model's guided question templates + entity rosters (empty if the model ships none)." },
-  { "llmask",           "Ask a guided question by index",       false, cmd_llm_ask,          "Usage: llmask <group> <template> [entity]  |  llmask json <gen> <g> <t> [e]  |  llmask repeat\nComposes the question on-device from 'llmmenu' indices and streams the answer (read it with 'llmresult json 0')." },
-  { "llmtemperature",   "Set default sampling temperature",     true,  cmd_llm_temperature,  "Usage: llmtemperature <0.0-2.0>" },
-  { "llmtopp",          "Set default Top-P threshold",          true,  cmd_llm_topp,         "Usage: llmtopp <0.0-1.0>" },
-  { "llmmaxtokens",     "Set default max tokens per reply",     true,  cmd_llm_maxtokens,    "Usage: llmmaxtokens <1-512>" },
-  { "llmsentencelimit", "Set default sentence stop limit",      true,  cmd_llm_sentencelimit,"Usage: llmsentencelimit <0-20>" },
-  { "llmhardcap",       "Set default hard token cap",           true,  cmd_llm_hardcap,      "Usage: llmhardcap <0-512>" },
-  { "llmreppenalty",    "Set default repetition penalty",       true,  cmd_llm_reppenalty,   "Usage: llmreppenalty <1.0-3.0>" },
-  { "llmrepwindow",     "Set default rep-penalty look-back",    true,  cmd_llm_repwindow,    "Usage: llmrepwindow <1-32>" },
-  { "llmmaxcontext",    "Set KV cache context window (0=auto)", true,  cmd_llm_maxcontext,   "Usage: llmmaxcontext <0-4096>" },
-  { "llmdefaultmodel",  "Set default model filename",           true,  cmd_llm_defaultmodel, "Usage: llmdefaultmodel <filename.bin>" },
-  { "llmminp",          "Set min-p sampling floor (0=off)",     true,  cmd_llm_minp,         "Usage: llmminp <0.0-1.0>" },
-  { "llmkvprec",        "KV cache precision (0=FP32,1=FP16,2=INT8)", true,  cmd_llm_kvprec,       "Usage: llmkvprec <0..2>  (0=FP32,1=FP16,2=INT8; reload model to apply)" },
-  { "llmnorepeatngram", "Ban repeating generated n-grams (0=off)", true, cmd_llm_norepeatngram, "Usage: llmnorepeatngram <0-8>  (default 0=off; 3 breaks verbatim phrase loops)" },
-  { "llmconfthreshold", "Low-confidence hedge threshold (0=off)",  true, cmd_llm_confthreshold, "Usage: llmconfthreshold <-8.0-0>  (mean logprob; default -1.0, 0 disables)" },
-  { "llmcontentboost",  "On-topic logit bonus (0=off)",         true,  cmd_llm_contentboost, "Usage: llmcontentboost <0.0-4.0>  (default 1.5; higher = stickier to prompt words)" },
-  { "llmdomaingate",    "Refuse prompts outside the model's domain (0|1)", true, cmd_llm_domaingate, "Usage: llmdomaingate <0|1>  (only enforced when the model .bin carries a domain vocab)" },
-  { "llmprofile",       "Per-section forward-pass timing breakdown (0|1)",  true, cmd_llm_profile,    "Usage: llmprofile <0|1>  (diagnostic; splits qkv/attn/ffn/cls after each generation. Turn OFF other debugllm* flags for clean numbers)" },
-};
-const size_t llmCommandsCount = sizeof(llmCommands) / sizeof(llmCommands[0]);
-
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_SOURCE_ONBOARD

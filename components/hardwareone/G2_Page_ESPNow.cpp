@@ -1296,7 +1296,9 @@ void g2ESPNowAppOnRxText(const uint8_t* senderMac) {
   job->targetNetSub   = (uint8_t)gSub;
   job->payload.redraw = spec;
 
-  if (!g2EnqueueLensJob(job)) {
+  // Called by espnow_task's RX drain. This cosmetic refresh must not stall
+  // radio/message processing behind a saturated lens queue.
+  if (!g2EnqueueLensJob(job, G2LensEnqueueWait::NoWait)) {
     DEBUG_G2F("[G2-ESP-NOW-APP] rx push-kick: enqueue FAILED");
     delete spec;
     delete job;

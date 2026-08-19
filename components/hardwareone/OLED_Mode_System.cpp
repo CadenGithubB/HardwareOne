@@ -11,6 +11,9 @@
 #include "System_Settings.h"
 #include "System_Utils.h"
 #include <esp_heap_caps.h>
+// Must come before the first hw1Internal*() use (this file also includes it
+// further down, but that is after the System/memory render paths).
+#include "System_MemUtil.h"
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -57,7 +60,7 @@ void displaySystemStatus() {
 
   // Memory
   oledDisplay->print("Heap: ");
-  oledDisplay->print(ESP.getFreeHeap() / 1024);
+  oledDisplay->print(hw1InternalFreeBytes() / 1024);
   oledDisplay->println(" KB");
 
   // Uptime
@@ -83,8 +86,8 @@ void displayMemoryStats() {
   oledDisplay->println();
   
   // Heap memory
-  size_t freeHeap = ESP.getFreeHeap();
-  size_t totalHeap = ESP.getHeapSize();
+  size_t freeHeap = hw1InternalFreeBytes();
+  size_t totalHeap = hw1InternalTotalBytes();
   size_t usedHeap = totalHeap - freeHeap;
   int heapPercent = (usedHeap * 100) / totalHeap;
   
@@ -124,7 +127,7 @@ void displayMemoryStats() {
   // Min free heap (watermark)
   oledDisplay->setCursor(0, 48);
   oledDisplay->print("Min: ");
-  oledDisplay->print(ESP.getMinFreeHeap() / 1024);
+  oledDisplay->print(hw1InternalMinFreeBytes() / 1024);
   oledDisplay->println("KB");
 }
 
@@ -276,8 +279,9 @@ static MemoryRenderData memoryRenderData = {0};
 // Gather memory data (called OUTSIDE I2C transaction to avoid blocking gamepad)
 void prepareMemoryData() {
   // Get heap data OUTSIDE I2C transaction
-  memoryRenderData.freeHeap = ESP.getFreeHeap();
-  memoryRenderData.totalHeap = ESP.getHeapSize();
+  // Internal 8-bit only — see hw1InternalFreeBytes() in System_MemUtil.h.
+  memoryRenderData.freeHeap = hw1InternalFreeBytes();
+  memoryRenderData.totalHeap = hw1InternalTotalBytes();
   memoryRenderData.usedHeap = memoryRenderData.totalHeap - memoryRenderData.freeHeap;
   memoryRenderData.heapPercent = (memoryRenderData.usedHeap * 100) / memoryRenderData.totalHeap;
   
@@ -292,8 +296,10 @@ void prepareMemoryData() {
   }
   
   // Get additional stats
-  memoryRenderData.minFreeHeap = ESP.getMinFreeHeap();
-  memoryRenderData.largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  memoryRenderData.minFreeHeap = hw1InternalMinFreeBytes();
+  // Bare MALLOC_CAP_8BIT also matches the SPIRAM heap, so this was reporting
+  // PSRAM's ~1.5 MB block as if it were internal.
+  memoryRenderData.largestBlock = hw1InternalLargestBlock();
   
   memoryRenderData.valid = true;
 }
@@ -691,7 +697,7 @@ void prepareSystemStatusData() {
   }
   
   // Get heap data OUTSIDE I2C transaction
-  systemStatusRenderData.freeHeap = ESP.getFreeHeap();
+  systemStatusRenderData.freeHeap = hw1InternalFreeBytes();
   
   // Calculate uptime OUTSIDE I2C transaction
   unsigned long uptimeSec = millis() / 1000;

@@ -1,8 +1,14 @@
 // System_UartLink.cpp — UART host link drain. See System_UartLink.h for the
 // design charter and docs/UART_HOST_LINK_PLAN.md for the verified plan.
 #include "System_UartLink.h"
+#include "System_Cm5HostControl.h"
+#include "System_Cm5Presence.h"
+#include "System_LLMCm5.h"   // cm5 llm push/end intrinsic (no-op header when off)
+#include "System_Debug.h"
+#include "System_User.h"  // sessionStampNow + shared auth/session helpers
 
 #include <atomic>
+#include <freertos/semphr.h>
 
 // Session gate lives here.
 // Defined unconditionally so the auth plumbing (revocation sweeps, session
@@ -12,15 +18,143 @@
 // storage under sUartSessionMux and is never exposed as a mutable String.
 static constexpr size_t kUartSessionUserMax = 64;
 static char sUartSessionUser[kUartSessionUserMax + 1] = {};
+static bool sUartSessionCm5PresenceAllowed = false;
 static portMUX_TYPE sUartSessionMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sUartLifecycleInitMux = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t sUartLifecycleMutexStorage;
+static SemaphoreHandle_t sUartLifecycleMutex = nullptr;
 static std::atomic<uint32_t> sUartSessionGeneration{0};
 static std::atomic<uint32_t> sUartActiveSessionEpoch{0};
+static std::atomic<uint32_t> sUartTransportGeneration{0};
+static std::atomic<uint32_t> sUartActiveTransportEpoch{0};
+static std::atomic<unsigned long> sLastInteractionMs{0}; // idle clock
+enum class UartLinkSessionEvent : uint8_t {
+  Never,
+  Authenticated,
+  Cleared,
+  LinkStopped,
+  IdleTimeout,
+  ExplicitLogout,
+  TransportLogout,
+  AccountRevoked,
+};
+static std::atomic<uint8_t> sUartLastSessionEvent{
+    static_cast<uint8_t>(UartLinkSessionEvent::Never)};
+
+static SemaphoreHandle_t uartLifecycleMutex() {
+  if (sUartLifecycleMutex) return sUartLifecycleMutex;
+  portENTER_CRITICAL(&sUartLifecycleInitMux);
+  if (!sUartLifecycleMutex) {
+    sUartLifecycleMutex =
+        xSemaphoreCreateRecursiveMutexStatic(&sUartLifecycleMutexStorage);
+  }
+  portEXIT_CRITICAL(&sUartLifecycleInitMux);
+  return sUartLifecycleMutex;
+}
+
+class UartLifecycleGuard {
+ public:
+  explicit UartLifecycleGuard(TickType_t wait = portMAX_DELAY) {
+    SemaphoreHandle_t mutex = uartLifecycleMutex();
+    locked_ = mutex && xSemaphoreTakeRecursive(mutex, wait) == pdTRUE;
+  }
+  ~UartLifecycleGuard() {
+    if (locked_) xSemaphoreGiveRecursive(sUartLifecycleMutex);
+  }
+  explicit operator bool() const { return locked_; }
+ private:
+  bool locked_ = false;
+};
 
 uint32_t uartLinkSessionEpoch() {
   return sUartActiveSessionEpoch.load(std::memory_order_acquire);
 }
 
-void uartLinkSessionAuthenticated(const String& user) {
+uint32_t uartLinkTransportSessionEpoch() {
+  return sUartActiveTransportEpoch.load(std::memory_order_acquire);
+}
+
+// The caller holds sUartSessionMux. A command-transport incarnation exists
+// whenever the physical link is open, including auth-disabled/AuthBypass use.
+// It is deliberately separate from the named login epoch used by CM5 leases.
+static void uartLinkRotateTransportLocked(bool open) {
+  sUartActiveTransportEpoch.store(0, std::memory_order_release);
+  if (!open) return;
+  uint32_t current = sUartTransportGeneration.load(std::memory_order_relaxed);
+  uint32_t next = 0;
+  do {
+    next = current + 1u;
+    if (next == 0) next = 1;
+  } while (!sUartTransportGeneration.compare_exchange_weak(
+      current, next, std::memory_order_release, std::memory_order_relaxed));
+  sUartActiveTransportEpoch.store(next, std::memory_order_release);
+}
+
+void uartLinkAuthPolicyChanged() {
+  UartLifecycleGuard lifecycle;
+  if (!lifecycle) return;
+  bool rotated = false;
+  uint32_t transportEpoch = 0;
+  portENTER_CRITICAL(&sUartSessionMux);
+  // A named login already rotated away every older bypass request and remains
+  // valid across a policy toggle. Only the unauthenticated link incarnation
+  // needs replacement.
+  if (sUartActiveSessionEpoch.load(std::memory_order_relaxed) == 0 &&
+      sUartActiveTransportEpoch.load(std::memory_order_relaxed) != 0) {
+    uartLinkRotateTransportLocked(true);
+    rotated = true;
+  }
+  transportEpoch =
+      sUartActiveTransportEpoch.load(std::memory_order_relaxed);
+  portEXIT_CRITICAL(&sUartSessionMux);
+  DEBUG_UART_LIFECYCLEF(
+      "[uartlink] auth policy changed transport_epoch=%lu rotated=%d",
+      static_cast<unsigned long>(transportEpoch), rotated ? 1 : 0);
+}
+
+uint32_t uartLinkSessionGeneration() {
+  return sUartSessionGeneration.load(std::memory_order_acquire);
+}
+
+static const char* uartLinkSessionEventName(UartLinkSessionEvent event) {
+  switch (event) {
+    case UartLinkSessionEvent::Never: return "never";
+    case UartLinkSessionEvent::Authenticated: return "authenticated";
+    case UartLinkSessionEvent::Cleared: return "cleared";
+    case UartLinkSessionEvent::LinkStopped: return "link_stop";
+    case UartLinkSessionEvent::IdleTimeout: return "idle_timeout";
+    case UartLinkSessionEvent::ExplicitLogout: return "explicit_logout";
+    case UartLinkSessionEvent::TransportLogout: return "transport_logout";
+    case UartLinkSessionEvent::AccountRevoked: return "account_revoked";
+  }
+  return "unknown";
+}
+
+const char* uartLinkSessionLastEventName() {
+  return uartLinkSessionEventName(static_cast<UartLinkSessionEvent>(
+      sUartLastSessionEvent.load(std::memory_order_acquire)));
+}
+
+UartLinkSessionDiagnostics uartLinkSessionDiagnostics() {
+  UartLinkSessionDiagnostics out{};
+  UartLinkSessionEvent event = UartLinkSessionEvent::Never;
+  portENTER_CRITICAL(&sUartSessionMux);
+  out.activeEpoch = sUartActiveSessionEpoch.load(std::memory_order_relaxed);
+  out.lastEpoch = sUartSessionGeneration.load(std::memory_order_relaxed);
+  event = static_cast<UartLinkSessionEvent>(
+      sUartLastSessionEvent.load(std::memory_order_relaxed));
+  portEXIT_CRITICAL(&sUartSessionMux);
+  out.lastEvent = uartLinkSessionEventName(event);
+  return out;
+}
+
+uint32_t uartLinkSessionAuthenticated(const String& user,
+                                      bool allowCm5Presence,
+                                      uint32_t* transportEpochOut) {
+  if (transportEpochOut) *transportEpochOut = 0;
+  UartLifecycleGuard lifecycle;
+  if (!lifecycle) return 0;
+  const unsigned long interactionStamp = sessionStampNow();
   // Publish the new identity and generation before opening the auth gate. A
   // producer from the previous login may have one physical frame already
   // admitted, but every later session-fenced admission observes the new epoch.
@@ -30,6 +164,7 @@ void uartLinkSessionAuthenticated(const String& user) {
   portENTER_CRITICAL(&sUartSessionMux);
   sUartActiveSessionEpoch.store(0, std::memory_order_release);
   memcpy(sUartSessionUser, nextUser, sizeof(sUartSessionUser));
+  sUartSessionCm5PresenceAllowed = allowCm5Presence;
   uint32_t current = sUartSessionGeneration.load(std::memory_order_relaxed);
   uint32_t next = 0;
   do {
@@ -38,21 +173,80 @@ void uartLinkSessionAuthenticated(const String& user) {
   } while (!sUartSessionGeneration.compare_exchange_weak(
       current, next, std::memory_order_release, std::memory_order_relaxed));
   sUartActiveSessionEpoch.store(next, std::memory_order_release);
+  uartLinkRotateTransportLocked(true);
+  const uint32_t transportEpoch =
+      sUartActiveTransportEpoch.load(std::memory_order_relaxed);
+  sUartLastSessionEvent.store(
+      static_cast<uint8_t>(UartLinkSessionEvent::Authenticated),
+      std::memory_order_release);
+  sLastInteractionMs.store(interactionStamp, std::memory_order_release);
   portEXIT_CRITICAL(&sUartSessionMux);
+  if (transportEpochOut) *transportEpochOut = transportEpoch;
+  cm5PresenceNotifySessionChanged();
+  DEBUG_UART_LIFECYCLEF(
+      "[uartlink] session authenticated named_epoch=%lu transport_epoch=%lu control=%d",
+      static_cast<unsigned long>(next),
+      static_cast<unsigned long>(transportEpoch),
+      allowCm5Presence ? 1 : 0);
+  return next;
 }
 
-void uartLinkSessionCleared() {
+uint32_t uartLinkSessionCleared(UartLinkSessionClearReason reason,
+                                uint32_t expectedTransportEpoch) {
+  UartLifecycleGuard lifecycle;
+  if (!lifecycle) return 0;
   // Close the fast auth gate first. The epoch advances on the next successful
   // login; keeping the last value while logged out makes status diagnostics
   // useful without granting any authority.
   portENTER_CRITICAL(&sUartSessionMux);
+  if (expectedTransportEpoch != 0 &&
+      sUartActiveTransportEpoch.load(std::memory_order_relaxed) !=
+          expectedTransportEpoch) {
+    portEXIT_CRITICAL(&sUartSessionMux);
+    return 0;
+  }
   sUartActiveSessionEpoch.store(0, std::memory_order_release);
   sUartSessionUser[0] = '\0';
+  sUartSessionCm5PresenceAllowed = false;
+  UartLinkSessionEvent event = UartLinkSessionEvent::Cleared;
+  switch (reason) {
+    case UartLinkSessionClearReason::LinkStop:
+      event = UartLinkSessionEvent::LinkStopped;
+      break;
+    case UartLinkSessionClearReason::IdleTimeout:
+      event = UartLinkSessionEvent::IdleTimeout;
+      break;
+    case UartLinkSessionClearReason::ExplicitLogout:
+      event = UartLinkSessionEvent::ExplicitLogout;
+      break;
+    case UartLinkSessionClearReason::TransportLogout:
+      event = UartLinkSessionEvent::TransportLogout;
+      break;
+    case UartLinkSessionClearReason::Unspecified:
+      break;
+  }
+  const bool linkRemainsOpen =
+      reason != UartLinkSessionClearReason::LinkStop &&
+      sUartActiveTransportEpoch.load(std::memory_order_relaxed) != 0;
+  uartLinkRotateTransportLocked(linkRemainsOpen);
+  const uint32_t transportEpoch =
+      sUartActiveTransportEpoch.load(std::memory_order_relaxed);
+  sUartLastSessionEvent.store(static_cast<uint8_t>(event),
+                              std::memory_order_release);
+  sLastInteractionMs.store(0, std::memory_order_release);
   portEXIT_CRITICAL(&sUartSessionMux);
+  cm5PresenceNotifySessionChanged();
+  DEBUG_UART_LIFECYCLEF(
+      "[uartlink] session %s transport_epoch=%lu",
+      uartLinkSessionEventName(event),
+      static_cast<unsigned long>(transportEpoch));
+  return transportEpoch;
 }
 
 bool uartLinkSessionSnapshot(char* userOut, size_t userOutSize,
-                             uint32_t* epochOut) {
+                             uint32_t* epochOut,
+                             uint32_t* transportEpochOut,
+                             bool* cm5PresenceAllowedOut) {
   if (userOut && userOutSize) userOut[0] = '\0';
   portENTER_CRITICAL(&sUartSessionMux);
   const uint32_t activeEpoch =
@@ -62,8 +256,53 @@ bool uartLinkSessionSnapshot(char* userOut, size_t userOutSize,
     strlcpy(userOut, sUartSessionUser, userOutSize);
   if (epochOut)
     *epochOut = activeEpoch;
+  if (transportEpochOut)
+    *transportEpochOut =
+        sUartActiveTransportEpoch.load(std::memory_order_relaxed);
+  if (cm5PresenceAllowedOut)
+    *cm5PresenceAllowedOut = authed && sUartSessionCm5PresenceAllowed;
   portEXIT_CRITICAL(&sUartSessionMux);
   return authed;
+}
+
+bool uartLinkNamedSessionBeginUse(uint32_t transportEpoch,
+                                  const String& expectedUser) {
+  if (transportEpoch == 0 || expectedUser.length() == 0) return false;
+  SemaphoreHandle_t mutex = uartLifecycleMutex();
+  if (!mutex || xSemaphoreTakeRecursive(mutex, portMAX_DELAY) != pdTRUE)
+    return false;
+
+  char user[kUartSessionUserMax + 1] = {};
+  uint32_t namedEpoch = 0;
+  uint32_t liveTransportEpoch = 0;
+  const bool authed = uartLinkSessionSnapshot(
+      user, sizeof(user), &namedEpoch, &liveTransportEpoch);
+  if (!authed || namedEpoch == 0 || liveTransportEpoch != transportEpoch ||
+      expectedUser != user) {
+    xSemaphoreGiveRecursive(mutex);
+    return false;
+  }
+  return true;
+}
+
+void uartLinkNamedSessionEndUse() {
+  if (sUartLifecycleMutex) xSemaphoreGiveRecursive(sUartLifecycleMutex);
+}
+
+bool uartLinkTransportSessionBeginUse(uint32_t transportEpoch) {
+  if (transportEpoch == 0) return false;
+  SemaphoreHandle_t mutex = uartLifecycleMutex();
+  if (!mutex || xSemaphoreTakeRecursive(mutex, portMAX_DELAY) != pdTRUE)
+    return false;
+  if (uartLinkTransportSessionEpoch() != transportEpoch) {
+    xSemaphoreGiveRecursive(mutex);
+    return false;
+  }
+  return true;
+}
+
+void uartLinkTransportSessionEndUse() {
+  if (sUartLifecycleMutex) xSemaphoreGiveRecursive(sUartLifecycleMutex);
 }
 
 static bool uartSessionUserEqualsAsciiNoCase(const char* a, const char* b) {
@@ -79,6 +318,8 @@ static bool uartSessionUserEqualsAsciiNoCase(const char* a, const char* b) {
 
 bool uartLinkSessionClearIfUser(const String& user) {
   if (!user.length()) return false;
+  UartLifecycleGuard lifecycle;
+  if (!lifecycle) return false;
   char target[kUartSessionUserMax + 1] = {};
   strlcpy(target, user.c_str(), sizeof(target));
   bool cleared = false;
@@ -87,10 +328,44 @@ bool uartLinkSessionClearIfUser(const String& user) {
       uartSessionUserEqualsAsciiNoCase(sUartSessionUser, target)) {
     sUartActiveSessionEpoch.store(0, std::memory_order_release);
     sUartSessionUser[0] = '\0';
+    sUartSessionCm5PresenceAllowed = false;
+    sUartLastSessionEvent.store(
+        static_cast<uint8_t>(UartLinkSessionEvent::AccountRevoked),
+        std::memory_order_release);
+    if (sUartActiveTransportEpoch.load(std::memory_order_relaxed) != 0)
+      uartLinkRotateTransportLocked(true);
     cleared = true;
   }
   portEXIT_CRITICAL(&sUartSessionMux);
+  if (cleared) {
+    cm5PresenceNotifySessionChanged();
+    DEBUG_UART_LIFECYCLEF("[uartlink] session account_revoked");
+  }
   return cleared;
+}
+
+bool uartLinkSessionRestrictCm5PresenceIfUser(
+    const String& user, uint32_t expectedSessionEpoch) {
+  if (!user.length() || expectedSessionEpoch == 0) return false;
+  UartLifecycleGuard lifecycle;
+  if (!lifecycle) return false;
+  char target[kUartSessionUserMax + 1] = {};
+  strlcpy(target, user.c_str(), sizeof(target));
+  bool restricted = false;
+  portENTER_CRITICAL(&sUartSessionMux);
+  if (sUartActiveSessionEpoch.load(std::memory_order_relaxed) ==
+          expectedSessionEpoch &&
+      uartSessionUserEqualsAsciiNoCase(sUartSessionUser, target)) {
+    sUartSessionCm5PresenceAllowed = false;
+    restricted = true;
+  }
+  portEXIT_CRITICAL(&sUartSessionMux);
+  if (restricted) {
+    DEBUG_UART_LIFECYCLEF(
+        "[uartlink] session control restricted named_epoch=%lu",
+        static_cast<unsigned long>(expectedSessionEpoch));
+  }
+  return restricted;
 }
 
 #ifdef UART_LINK_PORT
@@ -98,8 +373,6 @@ bool uartLinkSessionClearIfUser(const String& user) {
 #include "System_BuildConfig.h"
 #include "System_CommandTypes.h"
 #include "System_Settings.h"
-#include "System_User.h"
-#include "System_Debug.h"
 #include "System_Events.h"        // systemEventPost — SYSEVT_LOGIN_OK/FAIL for the host link
 #include "System_SetupWizard.h"   // gWizardOwnsSerial — park while wizard owns the CLI
 #include "System_Command.h"       // CommandArgs — cmd_voicefetch argument parsing
@@ -139,9 +412,14 @@ extern bool submitAndExecuteSync(const Command& cmd, String& out);
 
 static std::atomic<bool> sStarted{false};    // publishes port/mutex lifecycle
 static String sUartCLI;                     // line accumulator
-static unsigned long sLastInteractionMs = 0; // idle clock (0 = never stamped)
+static uint32_t sUartLineTransportEpoch = 0; // incarnation owning first byte
 static unsigned long sLastNagMs = 0;         // rate limiter for unauth/garbage replies
 static bool sDiscardingLine = false;         // true = swallow bytes until the next '\n'
+// uartProcessLine runs only on the loop task and consumes at most one line per
+// lap, so one fixed callback buffer is safe. It is deliberately separate from
+// System_Cm5HostControl's cmd_exec reply buffer: direct machine callbacks may
+// arrive while cmd_exec is serving another transport.
+static char sUartControlReply[256];
 
 // Deferred lifecycle request. Command handlers run on cmd_exec_task, which
 // ticks concurrently with the loop task that owns the drain — calling
@@ -194,19 +472,56 @@ static bool uartTxLocked(const uint8_t* data, size_t len, uint32_t timeoutMs = 1
   if (xSemaphoreTake(sTxMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
   bool ok = sStarted.load(std::memory_order_acquire);
   // Re-check under the mutex (stop() takes it too).
-  if (ok) UART_LINK_PORT.write(data, len);
+  if (ok) ok = UART_LINK_PORT.write(data, len) == len;
   xSemaphoreGive(sTxMutex);
   return ok;
 }
 
-static void uartWriteLine(const char* s) {
+static bool uartTxLockedForTransportSession(const uint8_t* data, size_t len,
+                                            uint32_t expectedEpoch,
+                                            uint32_t timeoutMs = 1000) {
+  UartLifecycleGuard lifecycle(pdMS_TO_TICKS(timeoutMs));
+  if (!lifecycle) return false;
+  // This helper is specifically for a command bound to an admitted transport
+  // incarnation. Zero means capture/admission failed, so fail closed rather
+  // than silently degrading to an unfenced write.
+  if (expectedEpoch == 0) return false;
+  if (uartLinkTransportSessionEpoch() != expectedEpoch || !sTxMutex)
+    return false;
+  if (xSemaphoreTake(sTxMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
+  const bool sessionMatches =
+      sStarted.load(std::memory_order_acquire) &&
+      uartLinkTransportSessionEpoch() == expectedEpoch;
+  bool ok = sessionMatches;
+  if (ok) ok = UART_LINK_PORT.write(data, len) == len;
+  xSemaphoreGive(sTxMutex);
+  return ok;
+}
+
+static bool uartWriteLine(const char* s) {
   // Single-write text line (≤ small status/nag strings; replies go via the
   // String path in uartProcessLine).
   char buf[256];
   size_t n = strlcpy(buf, s, sizeof(buf) - 1);
   if (n > sizeof(buf) - 2) n = sizeof(buf) - 2;
   buf[n] = '\n';
-  uartTxLocked((const uint8_t*)buf, n + 1);
+  return uartTxLocked((const uint8_t*)buf, n + 1);
+}
+
+static bool uartWriteLineForTransportSession(const char* s,
+                                             uint32_t expectedEpoch,
+                                             uint32_t timeoutMs = 1000) {
+  // This helper is loop-task-only (all call sites are in uartProcessLine), so
+  // fixed storage avoids putting a worst-case fan-report/usage reply on the
+  // loop stack while preserving the one-write, non-interleaving guarantee.
+  static char buf[sizeof(sUartControlReply) + 2];
+  size_t n = strlcpy(buf, s, sizeof(buf) - 1);
+  if (n > sizeof(buf) - 2) n = sizeof(buf) - 2;
+  buf[n] = '\n';
+  buf[n + 1] = '\0';
+  return uartTxLockedForTransportSession(
+      reinterpret_cast<const uint8_t*>(buf), n + 1, expectedEpoch,
+      timeoutMs);
 }
 
 // Rate-limited variant for replies a garbage stream could trigger per-line
@@ -259,8 +574,9 @@ bool uartLinkStart() {
   // driver actually came up (pin attach can fail on a bad pin map).
   UART_LINK_PORT.begin((unsigned long)baud, SERIAL_8N1, UART_LINK_RX_PIN, UART_LINK_TX_PIN);
   if (!UART_LINK_PORT) {
-    DEBUG_SYSTEMF("[uartlink] begin FAILED: uart%d tx=%d rx=%d baud=%d",
-                  UART_LINK_UART_NUM, UART_LINK_TX_PIN, UART_LINK_RX_PIN, baud);
+    DEBUG_UART_LIFECYCLEF("[uartlink] begin FAILED: uart%d tx=%d rx=%d baud=%d",
+                          UART_LINK_UART_NUM, UART_LINK_TX_PIN,
+                          UART_LINK_RX_PIN, baud);
     return false;
   }
   // The Arduino HAL enables no pull on the RX pin (verified: the only rx
@@ -271,15 +587,27 @@ bool uartLinkStart() {
   // fully initialized. Cross-task frame writers use this as their acquire
   // gate before touching any of those objects.
   sStarted.store(true, std::memory_order_release);
-  DEBUG_SYSTEMF("[uartlink] started: uart%d tx=%d rx=%d baud=%d",
-                UART_LINK_UART_NUM, UART_LINK_TX_PIN, UART_LINK_RX_PIN, baud);
+  {
+    UartLifecycleGuard lifecycle;
+    if (!lifecycle) {
+      sStarted.store(false, std::memory_order_release);
+      UART_LINK_PORT.end();
+      return false;
+    }
+    portENTER_CRITICAL(&sUartSessionMux);
+    uartLinkRotateTransportLocked(true);
+    portEXIT_CRITICAL(&sUartSessionMux);
+  }
+  DEBUG_UART_LIFECYCLEF("[uartlink] started: uart%d tx=%d rx=%d baud=%d",
+                        UART_LINK_UART_NUM, UART_LINK_TX_PIN,
+                        UART_LINK_RX_PIN, baud);
   return true;
 }
 
 static bool uartLinkStopPhysical() {
   // Close authorization immediately, even if physical teardown must retry.
   // This makes every session-fenced producer fail at its next boundary.
-  uartLinkSessionCleared();
+  uartLinkSessionCleared(UartLinkSessionClearReason::LinkStop);
   if (!sStarted.load(std::memory_order_acquire)) return true;
   // Order matters: close the drain's gate BEFORE tearing the port down, so a
   // tick that already passed the entry check can't operate on a dead port.
@@ -293,16 +621,18 @@ static bool uartLinkStopPhysical() {
   if (!locked) {
     // Never end the UART driver beneath a writer or give a mutex this task
     // does not own. The loop retries the pending transition next lap.
-    DEBUG_SYSTEMF("[uartlink] stop deferred — TX writer did not quiesce");
+    DEBUG_UART_LIFECYCLEF(
+        "[uartlink] stop deferred — TX writer did not quiesce");
     return false;
   }
   sStarted.store(false, std::memory_order_release);
   UART_LINK_PORT.end();
   if (sTxMutex != nullptr) xSemaphoreGive(sTxMutex);
   sUartCLI = "";
+  sUartLineTransportEpoch = 0;
   sDiscardingLine = false;
-  sLastInteractionMs = 0;
-  DEBUG_SYSTEMF("[uartlink] stopped");
+  sLastInteractionMs.store(0, std::memory_order_release);
+  DEBUG_UART_LIFECYCLEF("[uartlink] stopped");
   return true;
 }
 
@@ -311,23 +641,38 @@ void uartLinkStop() {
 }
 
 void uartLinkInitFromSettings() {
-  if (gSettings.uartLinkEnabled) (void)uartLinkStart();
+  if (!gSettings.uartLinkEnabled) {
+    DEBUG_UART_LIFECYCLEF("[uartlink] boot: disabled by setting");
+    return;
+  }
+  (void)uartLinkStart();
 }
 
 const char* uartLinkStatusLine() {
-  static char buf[192];
+  static char buf[384];
   char sessionUser[kUartSessionUserMax + 1];
   const bool sessionAuthed = uartLinkSessionSnapshot(
       sessionUser, sizeof(sessionUser));
+  const UartLinkSessionDiagnostics session = uartLinkSessionDiagnostics();
+  const Cm5PresenceSnapshot cm5 =
+      cm5PresenceSnapshotForSession(session.activeEpoch, millis());
   int baud = uartLinkEffectiveBaud();
   snprintf(buf, sizeof(buf),
-           "UART link: %s (enabled=%d) uart%d tx=%d rx=%d baud=%d auth=%s user=%s idle=%lumin",
+           "UART link: %s enabled=%d epoch=%lu last_epoch=%lu last_event=%s "
+           "uart%d tx=%d rx=%d baud=%d auth=%s user=%s idle=%lumin "
+           "cm5=%s cm5_fresh=%d cm5_age_ms=%lu cm5_task=%s",
            sStarted.load(std::memory_order_acquire) ? "running" : "stopped",
            gSettings.uartLinkEnabled ? 1 : 0,
+           (unsigned long)session.activeEpoch,
+           (unsigned long)session.lastEpoch,
+           session.lastEvent,
            UART_LINK_UART_NUM, UART_LINK_TX_PIN, UART_LINK_RX_PIN, baud,
            gSettings.uartRequireAuth ? "required" : "off",
            sessionAuthed ? sessionUser : "(none)",
-           (unsigned long)gSettings.sessionIdleUart);
+           (unsigned long)gSettings.sessionIdleUart,
+           cm5PresenceModeName(cm5.mode), cm5.fresh ? 1 : 0,
+           (unsigned long)cm5.ageMs,
+           cm5.taskRunning ? "running" : "dormant");
   return buf;
 }
 
@@ -336,33 +681,79 @@ const char* uartLinkStatusLine() {
 // reply is written directly to the link port (this channel has no sink), and
 // there is no "$ " prompt (machines parse the OK:/Error: contract, not
 // prompts).
-static void uartProcessLine(String& cmd) {
+static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
+  // This is a short admission check, not a lifecycle hold: the loop task must
+  // never wait on cmd_exec while owning the UART lifecycle mutex.
+  if (admittedTransportEpoch == 0 ||
+      uartLinkTransportSessionEpoch() != admittedTransportEpoch) return;
   // Idle logout — drop a stale session before processing this line; the line
   // then falls through to the login gate and is rejected, exactly like serial.
   if (uartLinkSessionEpoch() != 0 &&
-      sessionIdleExpired(SOURCE_UART, sLastInteractionMs)) {
-    uartLinkSessionCleared();
-    uartWriteLine("[uart] Signed out due to inactivity. Please log in again.");
+      sessionIdleExpired(
+          SOURCE_UART, sLastInteractionMs.load(std::memory_order_acquire))) {
+    const uint32_t clearedTransportEpoch =
+        uartLinkSessionCleared(UartLinkSessionClearReason::IdleTimeout,
+                               admittedTransportEpoch);
+    if (clearedTransportEpoch == 0) return;
+    (void)uartWriteLineForTransportSession(
+        "[uart] Signed out due to inactivity. Please log in again.",
+        clearedTransportEpoch);
+    return;  // the completed line belonged to the expired incarnation
   }
 
-  // In-band login is an intrinsic, NOT part of the auth gate: with
+  // A current host honors the marked direct-renew cadence; legacy host/firmware
+  // pairs retain a slower compatibility cadence. Once the initial command has
+  // created the TX task and lease, handle healthy exact renewals like the CM5
+  // heartbeat: on this UART control plane, before CommandArgs, cmd_exec, feed
+  // allocation, and CM5 command-busy accounting. The handler returns
+  // NotHandled for acquisition/repair/mismatch so those state changes still
+  // use the fully authorized registry path below.
+  // Shared caller-owned scratch for both mutually exclusive control-plane
+  // intrinsics. Keeping one array avoids adding two 256-byte locals to this
+  // main-loop call frame.
+  uint32_t liveNamedEpoch = 0;
+  uint32_t liveTransportEpoch = 0;
+  bool liveControlAllowed = false;
+  (void)uartLinkSessionSnapshot(
+      nullptr, 0, &liveNamedEpoch, &liveTransportEpoch,
+      &liveControlAllowed);
+  if (liveTransportEpoch != admittedTransportEpoch) return;
+  if (liveAudioHandleReadyIntrinsic(
+          cmd.c_str(), liveNamedEpoch, liveControlAllowed, sUartControlReply,
+          sizeof(sUartControlReply)) ==
+      LiveAudioReadyIntrinsicResult::Handled) {
+    // A concurrent logout/re-login/revoke may invalidate the request after
+    // renewal.  The stored lease remains bound to the old named epoch, while
+    // this exact transport fence prevents its ACK crossing into the new one.
+    const bool sent = uartWriteLineForTransportSession(
+        sUartControlReply, liveTransportEpoch);
+    DEBUG_UART_CONTROLF("[UART-CTRL] RX liveaudio.ready epoch=%lu -> %s reply=%s",
+                        static_cast<unsigned long>(liveNamedEpoch),
+                        strncmp(sUartControlReply, "OK", 2) == 0
+                            ? "OK" : "ERROR",
+                        sent ? "sent" : "dropped");
+    return;
+  }
+
+  // Bare in-band login is an intrinsic, NOT part of the auth gate: with
   // uartRequireAuth=0 the gate below is skipped entirely, and cmd_login
   // refuses SOURCE_UART callers (it would otherwise mint a session on the
   // physical console), so without this the host could never establish a named
-  // session in auth-off mode — it would be pinned to non-admin AuthBypass
-  // while being told to "use the in-band login" it had just used.
-  const bool wantsLogin = cmd.startsWith("login ");
-  if (wantsLogin ||
+  // session in auth-off mode. A fourth token is an explicit target and is
+  // allowed to reach the registry only after this UART already has a named,
+  // non-Guest login.
+  CommandArgs uartLineArgs(cmd);
+  const bool loginVerb =
+      uartLineArgs.count() > 0 &&
+      uartLineArgs.arg(0).equalsIgnoreCase("login");
+  const bool wantsLocalLogin =
+      loginVerb && !uartLineArgs.unterminatedQuote() &&
+      uartLineArgs.count() == 3;
+  if (wantsLocalLogin ||
       (gSettings.uartRequireAuth && uartLinkSessionEpoch() == 0)) {
-    if (wantsLogin) {
-      String rest = cmd.substring(6);
-      rest.trim();
-      int sp = rest.indexOf(' ');
-      if (sp <= 0) {
-        uartWriteLine("Usage: login <username> <password>");
-      } else {
-        String u = rest.substring(0, sp);
-        String p = rest.substring(sp + 1);
+    if (wantsLocalLogin) {
+        const String u = uartLineArgs.arg(1);
+        const String p = uartLineArgs.arg(2);
 #if ENABLE_HTTP_SERVER
         unsigned long lockoutRemainingMs = 0;
         bool locked = isLoginLocked(kUartLockoutKey, &lockoutRemainingMs);
@@ -377,21 +768,32 @@ static void uartProcessLine(String& cmd) {
           uartWriteLine(msg);
           recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, false, "Locked out");
 #endif
-        } else if (isValidUser(u, p)) {
-          AuthContext ctx;
-          ctx.transport = SOURCE_UART;
-          ctx.user = u;
-          ctx.ip = kUartLockoutKey;
-          ctx.path = "uart/login";
-          ctx.sid = String();
-          ctx.opaque = nullptr;
+        } else {
+          bool loginSucceeded = false;
+          uint32_t loginTransportEpoch = 0;
+          // Keep the auth database stable from password validation through
+          // exact UART session publication. Credential writers take this
+          // same reentrant filesystem lock and revoke only after releasing
+          // it, closing the old-password-validation/new-session race.
+          {
+            FsLockGuard authGuard("uart.inband_login");
+            const bool authStoreHeld =
+                authGuard.held || isFsLockedByCurrentTask();
+            if (authStoreHeld && isValidUser(u, p)) {
+              const bool sourceStillCurrent =
+                  uartLinkTransportSessionBeginUse(admittedTransportEpoch);
+              if (sourceStillCurrent) {
 #if ENABLE_HTTP_SERVER
-          // authSuccessUnified publishes the synchronized UART session.
-          clearLoginAttempts(kUartLockoutKey);
-          authSuccessUnified(ctx, nullptr);
-#else
-          uartLinkSessionAuthenticated(u);
+                clearLoginAttempts(kUartLockoutKey);
 #endif
+                const uint32_t namedEpoch =
+                    publishUartAccountSession(u, &loginTransportEpoch);
+                loginSucceeded = namedEpoch != 0 && loginTransportEpoch != 0;
+                uartLinkTransportSessionEndUse();
+              }
+            }
+          }
+          if (loginSucceeded) {
           // Audit + event are OUTSIDE the guard: the security trail must not
           // depend on the web server being compiled in.
           recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, true, "Login successful");
@@ -399,45 +801,207 @@ static void uartProcessLine(String& cmd) {
           char msg[96];
           snprintf(msg, sizeof(msg), "OK: logged in as %s%s", u.c_str(),
                    isAdminUser(u) ? " (admin)" : "");
-          uartWriteLine(msg);
-        } else {
+          (void)uartWriteLineForTransportSession(
+              msg, loginTransportEpoch);
+          } else {
 #if ENABLE_HTTP_SERVER
-          recordFailedLogin(kUartLockoutKey);
+            recordFailedLogin(kUartLockoutKey);
 #endif
-          recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, false, "Invalid credentials");
-          systemEventPost(SYSEVT_LOGIN_FAIL, u.c_str(), "uart");
-          uartWriteLine("Error: authentication failed");
+            recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, false, "Invalid credentials");
+            systemEventPost(SYSEVT_LOGIN_FAIL, u.c_str(), "uart");
+            uartWriteLine("Error: authentication failed");
+          }
         }
-      }
+    } else if (loginVerb) {
+      uartWriteLine("Error: sign in first with bare: login <username> <password>");
     } else if (cmd.length() > 0) {
       // Rate-limited: break/garbage from an unpowered or resetting host
       // arrives as a line flood; one nag per window is plenty for a machine.
       uartWriteLineNagLimited("Error: authentication required. Use: login <username> <password>");
     }
-    return;  // login lines never fall through to the registry
+    return;  // unauthenticated lines never fall through to the registry
   }
 
   // Authenticated (or auth disabled): in-band intrinsics, then the registry.
-  if (cmd == "logout") {
-    uartLinkSessionCleared();
-    uartWriteLine("OK: logged out");
+  if (uartLineArgs.count() == 1 &&
+      uartLineArgs.arg(0).equalsIgnoreCase("logout")) {
+    const uint32_t logoutTransportEpoch =
+        uartLinkSessionCleared(UartLinkSessionClearReason::ExplicitLogout,
+                               admittedTransportEpoch);
+    if (logoutTransportEpoch == 0) return;
+    (void)uartWriteLineForTransportSession(
+        "OK: logged out", logoutTransportEpoch);
     return;
   }
-  if (cmd == "whoami") {
+  if (uartLineArgs.count() == 1 &&
+      uartLineArgs.arg(0).equalsIgnoreCase("whoami")) {
     char msg[96];
     char sessionUser[kUartSessionUserMax + 1];
+    uint32_t whoamiTransportEpoch = 0;
     const bool sessionAuthed = uartLinkSessionSnapshot(
-        sessionUser, sizeof(sessionUser));
+        sessionUser, sizeof(sessionUser), nullptr, &whoamiTransportEpoch);
+    if (whoamiTransportEpoch != admittedTransportEpoch) return;
     const char* name = sessionAuthed && sessionUser[0]
                            ? sessionUser : "AuthBypass";
     const String userName(name);
     snprintf(msg, sizeof(msg), "OK: %s%s", name,
              (sessionAuthed && isAdminUser(userName)) ? " (admin)" : "");
-    uartWriteLine(msg);
+    (void)uartWriteLineForTransportSession(
+        msg, whoamiTransportEpoch);
+    return;
+  }
+  char heartbeatUser[kUartSessionUserMax + 1];
+  uint32_t heartbeatNamedEpoch = 0;
+  uint32_t heartbeatTransportEpoch = 0;
+  bool heartbeatAllowed = false;
+  (void)uartLinkSessionSnapshot(
+      heartbeatUser, sizeof(heartbeatUser), &heartbeatNamedEpoch,
+      &heartbeatTransportEpoch, &heartbeatAllowed);
+  if (heartbeatTransportEpoch != admittedTransportEpoch) return;
+  if (cm5PresenceHandleHeartbeatIntrinsic(
+          cmd.c_str(), heartbeatNamedEpoch, heartbeatAllowed,
+          sUartControlReply, sizeof(sUartControlReply)) ==
+      Cm5HeartbeatIntrinsicResult::Handled) {
+    // A concurrent logout/re-login/revoke may invalidate the heartbeat after
+    // it was parsed. The record is already fail-closed by named-epoch
+    // comparison; this second fence also prevents its ACK from crossing into
+    // the replacement physical command session.
+    const bool sent = uartWriteLineForTransportSession(
+        sUartControlReply, heartbeatTransportEpoch);
+    DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.heartbeat epoch=%lu -> %s reply=%s",
+                        static_cast<unsigned long>(heartbeatNamedEpoch),
+                        strncmp(sUartControlReply, "OK", 2) == 0
+                            ? "OK" : "ERROR",
+                        sent ? "sent" : "dropped");
+    return;
+  }
+  // `cm5 time set ...`: the CM5's periodic clock push. Same control-plane
+  // placement, auth snapshot, and transport-epoch fence as the heartbeat —
+  // before CommandArgs/cmd_exec/feed/busy accounting. The intrinsic only
+  // validates + stashes; cm5TimeSyncTick() applies it on the loop.
+  if (cm5TimeHandleTimeIntrinsic(
+          cmd.c_str(), heartbeatNamedEpoch, heartbeatAllowed,
+          sUartControlReply, sizeof(sUartControlReply)) ==
+      Cm5TimeIntrinsicResult::Handled) {
+    const bool sent = uartWriteLineForTransportSession(
+        sUartControlReply, heartbeatTransportEpoch);
+    DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.time epoch=%lu -> %s reply=%s",
+                        static_cast<unsigned long>(heartbeatNamedEpoch),
+                        strncmp(sUartControlReply, "OK", 2) == 0
+                            ? "OK" : "ERROR",
+                        sent ? "sent" : "dropped");
+    return;
+  }
+  const bool powerCallback =
+      ENABLE_RASPBERRY_PI_HOST_POWER && uartLineArgs.count() >= 3 &&
+      uartLineArgs.arg(0).equalsIgnoreCase("cm5") &&
+      uartLineArgs.arg(1).equalsIgnoreCase("power") &&
+      (uartLineArgs.arg(2).equalsIgnoreCase("ack") ||
+       uartLineArgs.arg(2).equalsIgnoreCase("report"));
+  const bool fanCallback =
+      ENABLE_RASPBERRY_PI_HOST_FAN && uartLineArgs.count() >= 3 &&
+      uartLineArgs.arg(0).equalsIgnoreCase("cm5") &&
+      uartLineArgs.arg(1).equalsIgnoreCase("fan") &&
+      (uartLineArgs.arg(2).equalsIgnoreCase("ack") ||
+       uartLineArgs.arg(2).equalsIgnoreCase("report"));
+#if ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_CM5
+  // `cm5 llm …` — model catalog and streamed answer chunks. Consumed here, on
+  // the same control plane and for the same reason as power/fan: a generation
+  // pushes many chunks, and routing each through cmd_exec would take the
+  // command lock and write a durable audit line per token group.
+  //
+  // Detected on the RAW line rather than through uartLineArgs: the tail of a
+  // push is payload, not arguments, and the escaping contract that protects it
+  // (System_LLMCm5.h) exists precisely so no tokenizer touches it.
+  if (cm5LlmIsCallbackLine(cmd.c_str())) {
+    const bool llmSessionPinned =
+        uartLinkTransportSessionBeginUse(heartbeatTransportEpoch);
+    if (!llmSessionPinned) return;
+    uint32_t llmNamedEpoch = 0;
+    uint32_t llmTransportEpoch = 0;
+    bool llmAllowed = false;
+    (void)uartLinkSessionSnapshot(
+        nullptr, 0, &llmNamedEpoch, &llmTransportEpoch, &llmAllowed);
+    if (llmTransportEpoch != heartbeatTransportEpoch) {
+      uartLinkTransportSessionEndUse();
+      return;
+    }
+    const Cm5LlmCallbackResult llmResult = cm5LlmHandleCallbackIntrinsic(
+        cmd.c_str(), llmNamedEpoch, llmAllowed, sUartControlReply,
+        sizeof(sUartControlReply));
+    if (llmResult != Cm5LlmCallbackResult::Handled) {
+      uartLinkTransportSessionEndUse();
+      return;
+    }
+    const bool llmSent = uartWriteLineForTransportSession(
+        sUartControlReply, llmTransportEpoch, 5000);
+    uartLinkTransportSessionEndUse();
+    DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.llm epoch=%lu -> %s reply=%s",
+                        static_cast<unsigned long>(llmNamedEpoch),
+                        strncmp(sUartControlReply, "OK", 2) == 0 ? "OK" : "ERROR",
+                        llmSent ? "sent" : "dropped");
+    return;
+  }
+#endif
+  if (powerCallback || fanCallback) {
+    // Hold the exact physical command-session incarnation across callback
+    // state mutation and reply admission. Login/logout/revocation takes this
+    // same recursive lifecycle mutex, so an old callback cannot mutate under
+    // one identity and reply into its replacement. Only the four callback
+    // prefixes take this lock; ordinary UART commands proceed directly to the
+    // command boundary below.
+    const bool callbackSessionPinned =
+        uartLinkTransportSessionBeginUse(heartbeatTransportEpoch);
+    if (!callbackSessionPinned) return;
+    uint32_t callbackNamedEpoch = 0;
+    uint32_t callbackTransportEpoch = 0;
+    bool callbackAllowed = false;
+    (void)uartLinkSessionSnapshot(
+        nullptr, 0, &callbackNamedEpoch, &callbackTransportEpoch,
+        &callbackAllowed);
+    if (callbackTransportEpoch != heartbeatTransportEpoch) {
+      uartLinkTransportSessionEndUse();
+      return;
+    }
+    const Cm5HostCallbackIntrinsicResult callbackResult =
+        cm5HostControlHandleCallbackIntrinsic(
+            cmd.c_str(), callbackNamedEpoch, callbackAllowed,
+            sUartControlReply, sizeof(sUartControlReply));
+    if (callbackResult != Cm5HostCallbackIntrinsicResult::Handled) {
+      uartLinkTransportSessionEndUse();
+      return;
+    }
+    // Power/fan callback state is already bound to either the request ID or
+    // the exact named epoch. The physical transport fence keeps its ACK from
+    // crossing a concurrent re-login, just like heartbeat and ready above.
+    const bool sent = uartWriteLineForTransportSession(
+        sUartControlReply, callbackTransportEpoch, 5000);
+    uartLinkTransportSessionEndUse();
+    const char* callbackName =
+        powerCallback
+            ? (uartLineArgs.arg(2).equalsIgnoreCase("ack")
+                   ? "cm5.power.ack" : "cm5.power.report")
+            : (uartLineArgs.arg(2).equalsIgnoreCase("ack")
+                   ? "cm5.fan.ack" : "cm5.fan.report");
+    DEBUG_UART_CONTROLF("[UART-CTRL] RX %s epoch=%lu -> %s reply=%s",
+                        callbackName,
+                        static_cast<unsigned long>(callbackNamedEpoch),
+                        strncmp(sUartControlReply, "OK", 2) == 0
+                            ? "OK" : "ERROR",
+                        sent ? "sent" : "dropped");
     return;
   }
   if (cmd.length() == 0) return;
 
+  // CM5 and live-audio status/capabilities are read-only machine
+  // housekeeping. They remain ordinary registry commands, but do not extend
+  // application-busy state or evict useful human history. A healthy ready
+  // renewal already returned through the intrinsic above; an initial/repair
+  // ready intentionally reaches this ordinary, busy-accounted path.
+  const bool cm5ProtocolCommand = cm5PresenceIsProtocolCommand(cmd.c_str());
+  const bool liveAudioHousekeeping =
+      liveAudioIsHousekeepingCommand(cmd.c_str());
+  const bool hostHousekeeping = cm5ProtocolCommand || liveAudioHousekeeping;
   appendCommandToFeed("uart", cmd, String(), String());
 
   AuthContext actx;
@@ -445,8 +1009,12 @@ static void uartProcessLine(String& cmd) {
   // AuthBypass sentinel when auth is off and nobody logged in — same audit
   // convention as the serial/OLED drains (reserved username, non-admin).
   char sessionUser[kUartSessionUserMax + 1];
+  uint32_t commandSessionEpoch = 0;
+  uint32_t commandTransportEpoch = 0;
   const bool sessionAuthed = uartLinkSessionSnapshot(
-      sessionUser, sizeof(sessionUser));
+      sessionUser, sizeof(sessionUser), &commandSessionEpoch,
+      &commandTransportEpoch);
+  if (commandTransportEpoch != admittedTransportEpoch) return;
   actx.user = sessionAuthed && sessionUser[0]
                   ? String(sessionUser) : String("AuthBypass");
   actx.ip = kUartLockoutKey;
@@ -459,6 +1027,9 @@ static void uartProcessLine(String& cmd) {
   uc.ctx.auth = actx;
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
+  uc.ctx.transportSessionEpoch = commandTransportEpoch;
+  uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
+  uc.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
   // MSG_ROUTE_FILE only: the reply below is the one delivery this channel
   // gets; broadcast lines go to the audit log, never the wire. captureOutput
   // stays false — capture PREPENDS streamed lines to the return value, which
@@ -470,17 +1041,35 @@ static void uartProcessLine(String& cmd) {
   uc.ctx.httpReq = nullptr;
 
   String out;
+  if (!hostHousekeeping) cm5PresenceCommandStarted(commandSessionEpoch);
   bool ok = submitAndExecuteSync(uc, out);
+  bool replyAdmitted = false;
   if (out.length()) {
     // ONE write call for blob + newline: with cross-task frame writers live
     // (voicefetch), a two-call reply could be split mid-message.
-    out += '\n';
-    uartTxLocked((const uint8_t*)out.c_str(), out.length(),
-                 5000);  // replies are load-bearing; wait out a slow frame
+    // concat() reports allocation failure; without the newline the peer has
+    // no complete reply, so do not write it or grant post-command grace.
+    if (out.concat('\n')) {
+      replyAdmitted = uartTxLockedForTransportSession(
+          (const uint8_t*)out.c_str(), out.length(),
+          commandTransportEpoch,
+          5000);  // replies are load-bearing; wait out a slow frame
+    }
   } else {
     // Never leave the host hanging: an empty result still gets a status line.
-    uartWriteLine(ok ? "OK" : "Error: command failed");
+    char fallback[32];
+    size_t n = strlcpy(fallback, ok ? "OK" : "Error: command failed",
+                       sizeof(fallback) - 1);
+    fallback[n++] = '\n';
+    replyAdmitted = uartTxLockedForTransportSession(
+        reinterpret_cast<const uint8_t*>(fallback), n,
+        commandTransportEpoch, 1000);
   }
+  // Keep the bounded command extension through physical reply admission.
+  // The post-command grace begins only now, giving the CM5 heartbeat actor a
+  // chance to acquire its own serialized Session lock after this reply lands.
+  if (!hostHousekeeping)
+    cm5PresenceCommandFinished(commandSessionEpoch, replyAdmitted);
 }
 
 void uartLinkTick() {
@@ -523,31 +1112,53 @@ void uartLinkTick() {
   while (UART_LINK_PORT.available()) {
     char c = (char)UART_LINK_PORT.read();
     if (c == '\r') continue;
+    const uint32_t liveTransportEpoch = uartLinkTransportSessionEpoch();
+    if (sUartLineTransportEpoch != 0 &&
+        sUartLineTransportEpoch != liveTransportEpoch) {
+      // Never splice bytes received under two physical command-session
+      // incarnations. This also scrubs a partially typed password.
+      sUartCLI = "";
+      sDiscardingLine = false;
+      sUartLineTransportEpoch = 0;
+    }
     if (c == '\n') {
       if (sDiscardingLine) {
         // Tail of an over-long line — drop it whole. Executing the residue
         // would run an arbitrary fragment as a command under the live session.
         sDiscardingLine = false;
         sUartCLI = "";
+        sUartLineTransportEpoch = 0;
+        continue;
+      }
+      if (sUartLineTransportEpoch == 0 ||
+          sUartLineTransportEpoch != liveTransportEpoch) {
+        sUartCLI = "";
+        sUartLineTransportEpoch = 0;
         continue;
       }
       String cmd = sUartCLI;
       sUartCLI = "";
+      const uint32_t admittedTransportEpoch = sUartLineTransportEpoch;
+      sUartLineTransportEpoch = 0;
       cmd.trim();
-      uartProcessLine(cmd);
+      uartProcessLine(cmd, admittedTransportEpoch);
       // Refresh the idle clock on any completed line while authenticated —
       // one stamp covers both a fresh login and a subsequent command.
       if (uartLinkSessionEpoch() != 0)
-        sLastInteractionMs = sessionStampNow();
+        sLastInteractionMs.store(sessionStampNow(),
+                                 std::memory_order_release);
       break;  // at most one command per loop() lap, same as the serial drain
     } else {
       if (sDiscardingLine) continue;
       if (sUartCLI.length() >= kUartLineCap) {
         sUartCLI = "";
+        sUartLineTransportEpoch = 0;
         sDiscardingLine = true;   // swallow the rest, including the newline
         uartWriteLineNagLimited("Error: line too long — discarded");
         continue;
       }
+      if (sUartLineTransportEpoch == 0)
+        sUartLineTransportEpoch = liveTransportEpoch;
       sUartCLI += c;
     }
   }
@@ -604,6 +1215,8 @@ static bool uartLinkWriteFrameWithWait(uint8_t type, uint16_t seq,
                                        TickType_t mutexWaitTicks,
                                        uint32_t expectedSessionEpoch = 0) {
   if (len > UARTLINK_FRAME_MAX_PAYLOAD) return false;
+  UartLifecycleGuard lifecycle(mutexWaitTicks);
+  if (!lifecycle) return false;
   // Session gate, per-frame: a revoked/blocked session stops the stream at
   // the next frame boundary (bounds leakage; see plan §7). Unconditional on
   // the active session epoch — every bulk/live producer requires a real login

@@ -48,7 +48,10 @@ CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 # Stack sizes - tuned for this app
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304
-CONFIG_ESP_IPC_TASK_STACK_SIZE=1024
+# 1536, not the IDF default (1024 generic / 1280 on S3): the S3 carves the AI
+# coprocessor context save area out of every task stack, so nominal bytes buy
+# less usable depth there. Applied to all boards for uniform headroom.
+CONFIG_ESP_IPC_TASK_STACK_SIZE=1536
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=3584
 CONFIG_ESP_MINIMAL_SHARED_STACK_SIZE=2048
 CONFIG_ARDUINO_LOOP_STACK_SIZE=8192

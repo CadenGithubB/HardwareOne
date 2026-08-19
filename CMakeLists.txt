@@ -95,6 +95,13 @@ if(_hw_board)
             "HW_BOARD=${_hw_board} but boards/${_hw_board}.defaults does not exist. "
             "Available: ${_available_str}")
     endif()
+    # Re-run configure when the board file changes. Everything below reads it
+    # with file(STRINGS), which does NOT create a dependency on its own, so
+    # without this an edit to boards/<board>.defaults is silently ignored on an
+    # existing build dir: ninja sees no reason to re-run CMake, the auto-recovery
+    # block in step 4 never fires, and the build succeeds with a byte-identical
+    # binary. That failure mode looks exactly like a change that worked.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_board_file}")
     # Validate the board's declared chip matches the active target. HW_BOARD
     # layers settings; it cannot change the target, so a mismatch is always a
     # mistake — point the user at set-target instead of producing a bad image.
@@ -321,6 +328,25 @@ if(_board_file)
         list(APPEND SDKCONFIG_DEFAULTS "${_ota_key_defaults}")
     endif()
 
+    # Same dependency gap for the defaults files themselves. IDF registers the
+    # SAVED sdkconfig as a configure dependency (tools/cmake/kconfig.cmake) but
+    # never the SDKCONFIG_DEFAULTS inputs, so editing sdkconfig.defaults or the
+    # chip-family sdkconfig.defaults.<target> is inert until something else
+    # forces a reconfigure. CMAKE_CONFIGURE_DEPENDS only works for files that
+    # exist at CMake runtime, hence the EXISTS guard.
+    foreach(_defaults_file IN LISTS SDKCONFIG_DEFAULTS)
+        if(EXISTS "${_defaults_file}")
+            set_property(DIRECTORY APPEND PROPERTY
+                CMAKE_CONFIGURE_DEPENDS "${_defaults_file}")
+        endif()
+    endforeach()
+    set(_family_defaults
+        "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.${_inferred_target}")
+    if(EXISTS "${_family_defaults}")
+        set_property(DIRECTORY APPEND PROPERTY
+            CMAKE_CONFIGURE_DEPENDS "${_family_defaults}")
+    endif()
+
     # Auto-recovery: if HW_BOARD is explicitly set, ensure sdkconfig honors
     # the board file's settings. IDF's defaults-files only apply to UNSET
     # options, so a stale sdkconfig (e.g. restored by `set-target` from a
@@ -393,12 +419,12 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 if(_ota_layout)
     if(_hw_board STREQUAL "feathers3_fe")
-        set(PROJECT_VER "0.99.89+f3feo1")
+        set(PROJECT_VER "0.99.9+f3feo1")
     else()
-        set(PROJECT_VER "0.99.89+f3o1")
+        set(PROJECT_VER "0.99.9+f3o1")
     endif()
 else()
-    set(PROJECT_VER "0.99.89")
+    set(PROJECT_VER "0.99.9")
 endif()
 project(hardwareone-idf)
 

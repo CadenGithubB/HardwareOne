@@ -41,11 +41,8 @@ volatile bool gInHelpRender = false;
 // modes are stable; for now we minimize risk by delegating.
 
 static void helpMode_onEnter(void* /*userData*/) {
-  // gCLIState was already set to CLI_HELP_MAIN by cmd_help before it called
-  // cliEnterMode -- there's nothing extra to do here for the moment. Keeping
-  // the callback wired lets us add per-enter setup later (e.g. snapshot
-  // gShowAllCommands so it can be restored on exit) without re-touching the
-  // call sites.
+  // cmd_help sets the requested page immediately after entry. Keeping this
+  // callback side-effect free also makes prepared mode publication safe.
   DEBUGF(DEBUG_CLI, "[climode/help] entered (gCLIState=%d)", (int)gCLIState);
 }
 
@@ -66,11 +63,10 @@ static CLIModeInputResult helpMode_onInput(const String& line, void* /*userData*
     }
     return CLI_MODE_HANDLED;
   }
-  // Not a help-navigation command -- let the dispatcher do normal command
-  // lookup. The dispatcher's post-lookup isHelpModeCommand() check
-  // (System_Utils.cpp / System_Command.cpp) still decides whether to
-  // auto-exit help before running the looked-up command.
-  return CLI_MODE_PASSTHROUGH;
+  // A normal command from the owning session leaves help before registry
+  // dispatch. Foreign sessions never reach this callback, so they neither
+  // exit nor mutate the owner's help state.
+  return CLI_MODE_PASSTHROUGH_AND_EXIT;
 }
 
 static void helpMode_onExit(void* /*userData*/) {
@@ -93,6 +89,7 @@ static const CLIMode kHelpMode = {
   helpMode_onExit,
   nullptr,  // onTick — help is purely input-driven
   nullptr,  // userData — help keeps state in gCLIState/gShowAllCommands
+  10u * 60u * 1000u,
 };
 
 // ============================================================================
@@ -219,7 +216,8 @@ const char* renderHelpSensors() {
 // ============================================================================
 
 bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
-  DEBUGF(DEBUG_CLI, "[handleHelpNavigation] cmd='%s', gCLIState=%d", cmd.c_str(), (int)gCLIState);
+  const String safeCmdForTrace = redactCmdForAudit(cmd);
+  DEBUGF(DEBUG_CLI, "[handleHelpNavigation] cmd='%s', gCLIState=%d", safeCmdForTrace.c_str(), (int)gCLIState);
   if (gCLIState == CLI_NORMAL) return false;
 
   gInHelpRender = true;
@@ -309,14 +307,6 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
 String exitToNormalBanner() {
   gCLIState = CLI_NORMAL;
   gShowAllCommands = false;  // Reset show all flag
-  // Also tell the CLIMode framework if it currently has help registered.
-  // This covers callsites OUTSIDE helpMode_onInput -- e.g. cmd_back, and
-  // the System_Command.cpp dispatcher's "exit help before running a normal
-  // command" path. Idempotent: if help wasn't the active mode, cliExitMode
-  // is a no-op.
-  if (cliCurrentMode() == &kHelpMode) {
-    cliExitMode();
-  }
   // Restore hidden history when leaving help
   String banner = "Returned to normal CLI mode.";
   return banner;
@@ -499,23 +489,32 @@ static const char* cmd_help(const String& argsInput) {
 
   if (!gWebMirror.buf) { gWebMirror.init(gWebMirrorCap); }
 
+  const bool interactive = cliModeCurrentInvocationCanInteract();
+
   // Register the help CLIMode with the framework if no mode is active.
   // Every cmd_help branch below sets gCLIState = CLI_HELP_*; the framework
   // needs to know too so subsequent input is routed through
   // helpMode_onInput rather than going straight to normal command lookup.
   // If a mode is already active (e.g. user typed `help` while already in
   // help mode) cliEnterMode is a no-op.
-  if (!cliInModeActive()) {
-    cliEnterMode(&kHelpMode);
+  if (interactive && !cliModeCurrentCommandOwns(&kHelpMode)) {
+    if (cliInModeActive()) {
+      return "Error: another interactive session is already active.";
+    }
+    if (!cliEnterMode(&kHelpMode)) {
+      return "Error: this command source cannot open an interactive session.";
+    }
   }
 
   // ── Plain "help" — enter / return to main help menu ──────────────────────
   if (args.length() == 0) {
-    gWebMirror.clear();
-    gCLIState = CLI_HELP_MAIN;
-    DEBUGF(DEBUG_CLI, "[cmd_help] gCLIState -> CLI_HELP_MAIN");
+    if (interactive) {
+      gWebMirror.clear();
+      gCLIState = CLI_HELP_MAIN;
+      DEBUGF(DEBUG_CLI, "[cmd_help] gCLIState -> CLI_HELP_MAIN");
+    }
     gInHelpRender = true;
-    renderHelpMain(gShowAllCommands);
+    renderHelpMain(interactive ? gShowAllCommands : false);
     gInHelpRender = false;
     return "OK";
   }
@@ -524,8 +523,10 @@ static const char* cmd_help(const String& argsInput) {
 
   // ── Meta-commands ─────────────────────────────────────────────────────────
   if (args == "all") {
-    gShowAllCommands = true;
-    gCLIState = CLI_HELP_MAIN;
+    if (interactive) {
+      gShowAllCommands = true;
+      gCLIState = CLI_HELP_MAIN;
+    }
     renderHelpMain(true);
     gInHelpRender = false;
     return "OK";
@@ -533,13 +534,16 @@ static const char* cmd_help(const String& argsInput) {
   if (args == "tail") {
     helpSuppressedTailDump();
     gInHelpRender = false;
+    if (interactive) (void)cliExitMode();
     return "OK";
   }
 
   // ── Sensors: aggregate view across all sensor modules ─────────────────────
   if (args == "sensors") {
-    gCLIState = CLI_HELP_MODULE;
-    gShowAllCommands = false;
+    if (interactive) {
+      gCLIState = CLI_HELP_MODULE;
+      gShowAllCommands = false;
+    }
     renderHelpSensors();
     gInHelpRender = false;
     return "OK";
@@ -551,7 +555,7 @@ static const char* cmd_help(const String& argsInput) {
 
   for (size_t i = 0; i < moduleCount; i++) {
     if (args.equalsIgnoreCase(modules[i].name)) {
-      gCLIState = CLI_HELP_MODULE;
+      if (interactive) gCLIState = CLI_HELP_MODULE;
       renderHelpModuleByName(modules[i].name, nullptr);
       gInHelpRender = false;
       return "OK";
@@ -566,13 +570,14 @@ static const char* cmd_help(const String& argsInput) {
   }
   broadcastOutput("Special topics: sensors, all, tail");
   gInHelpRender = false;
+  if (interactive) (void)cliExitMode();
   return "ERROR";
 }
 
 static const char* cmd_back(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (gCLIState != CLI_NORMAL) {
+  if (cliModeCurrentCommandOwns(&kHelpMode)) {
     gCLIState = CLI_HELP_MAIN;
     gInHelpRender = true;
     renderHelpMain(gShowAllCommands);
@@ -585,7 +590,7 @@ static const char* cmd_back(const String& argsInput) {
 static const char* cmd_exit(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (gCLIState != CLI_NORMAL) {
+  if (cliModeCurrentCommandOwns(&kHelpMode)) {
     String banner = exitToNormalBanner();
     broadcastOutput(banner);
     helpSuppressedPrintAndReset();

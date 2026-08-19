@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <esp_attr.h>
 #include <esp_log.h>
+#include <freertos/semphr.h>
 
 #include "System_BuildConfig.h"
 #include "System_Clock.h"  // Clock::isValidEpoch — one epoch-validity vocabulary
@@ -12,6 +13,7 @@
 #include "Bluetooth.h"
 #include "G2_Glasses.h"
 #include "System_CLI.h"
+#include "System_CLIMode.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Logging.h"
@@ -48,7 +50,7 @@ static constexpr DebugFlagMask kBootDefaultDebugFlags =
     DEBUG_AUTH | DEBUG_HTTP | DEBUG_SSE | DEBUG_CLI |
     DEBUG_CMD_FLOW | DEBUG_COMMAND_SYSTEM | DEBUG_USERS | DEBUG_SYSTEM |
     DEBUG_STORAGE | DEBUG_LOGGER | DEBUG_PERFORMANCE | DEBUG_WIFI |
-    DEBUG_MEMORY | DEBUG_G2 | DEBUG_MQTT | DEBUG_FMRADIO | DEBUG_I2C |
+    DEBUG_MEMORY | DEBUG_G2 | DEBUG_RING | DEBUG_MQTT | DEBUG_FMRADIO | DEBUG_I2C |
     DEBUG_MICROPHONE | DEBUG_CAMERA |
     DEBUG_ESPNOW_CORE | DEBUG_ESPNOW_ROUTER | DEBUG_ESPNOW_MESH |
     DEBUG_ESPNOW_TOPO | DEBUG_ESPNOW_STREAM |
@@ -98,9 +100,6 @@ static uint16_t gSystemLogUnflushedCount = 0;
 static const uint16_t LOG_FLUSH_MESSAGE_COUNT = 20;      // Flush every 20 messages
 static const uint32_t LOG_FLUSH_INTERVAL_MS = 5000;      // Or every 5 seconds
 
-// Suppressed output during help (summary only)
-static volatile unsigned long gHelpSuppressedCount = 0;
-
 // BLE broadcast output buffer (accumulates messages for periodic send to authenticated BLE clients)
 #if ENABLE_BLUETOOTH
 static String gBLEOutputBuffer;
@@ -146,22 +145,50 @@ extern volatile bool gInHelpRender;
 static const size_t kHelpTailLines = 32;
 static const size_t kHelpTailCols = 120;
 EXT_RAM_BSS_ATTR static char gHelpTail[kHelpTailLines][kHelpTailCols];
+EXT_RAM_BSS_ATTR static char gHelpTailSnapshot[kHelpTailLines][kHelpTailCols];
 static size_t gHelpTailCount = 0;
 static size_t gHelpTailIndex = 0;
+static unsigned long gHelpSuppressedCount = 0;
+static StaticSemaphore_t gHelpTailMutexStorage;
+static SemaphoreHandle_t gHelpTailMutex = nullptr;
+static portMUX_TYPE gHelpTailInitMux = portMUX_INITIALIZER_UNLOCKED;
+
+static SemaphoreHandle_t helpTailMutex() {
+  if (gHelpTailMutex) return gHelpTailMutex;
+  portENTER_CRITICAL(&gHelpTailInitMux);
+  if (!gHelpTailMutex)
+    gHelpTailMutex = xSemaphoreCreateMutexStatic(&gHelpTailMutexStorage);
+  portEXIT_CRITICAL(&gHelpTailInitMux);
+  return gHelpTailMutex;
+}
 
 static void pushHelpSuppressed(const char* t) {
   if (!t) return;
+  SemaphoreHandle_t mutex = helpTailMutex();
+  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
+  ++gHelpSuppressedCount;
   size_t i = gHelpTailIndex % kHelpTailLines;
   strncpy(gHelpTail[i], t, kHelpTailCols - 1);
   gHelpTail[i][kHelpTailCols - 1] = '\0';
   gHelpTailIndex++;
   if (gHelpTailCount < kHelpTailLines) gHelpTailCount++;
+  xSemaphoreGive(mutex);
 }
 
 void helpSuppressedTailDump() {
-  unsigned long totalSuppressed = gHelpSuppressedCount;
+  unsigned long totalSuppressed = 0;
+  size_t tailCount = 0;
+  size_t tailIndex = 0;
+  SemaphoreHandle_t mutex = helpTailMutex();
+  if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+    totalSuppressed = gHelpSuppressedCount;
+    tailCount = gHelpTailCount;
+    tailIndex = gHelpTailIndex;
+    memcpy(gHelpTailSnapshot, gHelpTail, sizeof(gHelpTailSnapshot));
+    xSemaphoreGive(mutex);
+  }
   
-  if (gHelpTailCount == 0) {
+  if (tailCount == 0) {
     if (totalSuppressed > 0) {
       broadcastOutput("(Note) Suppressed output tail is empty (tail buffer overflow or no recent messages).");
     } else {
@@ -175,19 +202,19 @@ void helpSuppressedTailDump() {
   if (totalSuppressed > kHelpTailLines) {
     snprintf(header, sizeof(header), 
              "════════ Suppressed Output Tail (showing last %zu of %lu lines) ════════",
-             gHelpTailCount, totalSuppressed);
+             tailCount, totalSuppressed);
   } else {
     snprintf(header, sizeof(header), 
              "════════ Suppressed Output Tail (%zu lines) ════════",
-             gHelpTailCount);
+             tailCount);
   }
   broadcastOutput(header);
   
   // Dump tail buffer
-  size_t start = (gHelpTailIndex >= gHelpTailCount) ? (gHelpTailIndex - gHelpTailCount) : 0;
-  for (size_t n = 0; n < gHelpTailCount; n++) {
+  size_t start = (tailIndex >= tailCount) ? (tailIndex - tailCount) : 0;
+  for (size_t n = 0; n < tailCount; n++) {
     size_t idx = (start + n) % kHelpTailLines;
-    broadcastOutput(gHelpTail[idx]);
+    broadcastOutput(gHelpTailSnapshot[idx]);
   }
   
   broadcastOutput("═══════════════════════════════════════════════════════════════");
@@ -214,20 +241,6 @@ void debugOutputTask(void* parameter) {
       if (gDebugPoolGrowthRequested) {
         (void)growDebugPoolIfNeeded(true);
       }
-      // Help-mode gating for queued messages (allow security/auth/error)
-      if (gCLIState != CLI_NORMAL && !gInHelpRender) {
-        if ((msg->routing & MSG_ROUTE_ALLOW_IN_HELP) == 0 &&
-            !(strncmp(msg->text, "[SECURITY]", 10) == 0 || strncmp(msg->text, "[AUTH]", 6) == 0 ||
-              strncmp(msg->text, "[ERROR]", 7) == 0)) {
-          gHelpSuppressedCount = gHelpSuppressedCount + 1;  // (= x+1: ++ on volatile is deprecated in C++20)
-          pushHelpSuppressed(msg->text);
-          if (gDebugFreeQueue) {
-            xQueueSend(gDebugFreeQueue, &msg, 0);
-          }
-          continue; // Drop from sinks to avoid overwriting help UI
-        }
-      }
-
       // Surface dropped-message bursts so queue saturation is never silent.
       // Rate-limited to one marker per second; a burst coalesces into one line.
       // Emitted straight to Serial + web mirror from this (single) consumer task,
@@ -255,8 +268,23 @@ void debugOutputTask(void* parameter) {
 
       // --- Per-sink output gated by msg->routing AND hardware availability ---
 
-      // Serial
-      if ((msg->routing & MSG_ROUTE_SERIAL) && (gOutputFlags & MSG_ROUTE_SERIAL)) {
+      // Serial ambient output is suppressed only for a serial-owned mode. Do
+      // not revive the former process-global help gate: web/file/BLE/OLED/G2
+      // sinks continue normally, and another transport's mode never silences
+      // this console. Explicit mode renders and urgent notices still pass.
+      const bool suppressAmbientSerial =
+          (msg->routing & MSG_ROUTE_SERIAL) &&
+          !(msg->routing & MSG_ROUTE_ALLOW_IN_HELP) &&
+          strncmp(msg->text, "[SECURITY]", 10) != 0 &&
+          strncmp(msg->text, "[AUTH]", 6) != 0 &&
+          strncmp(msg->text, "[ERROR]", 7) != 0 &&
+          cliModeSuppressesAmbientSerial();
+      if (suppressAmbientSerial) {
+        pushHelpSuppressed(msg->text);
+      }
+      if (!suppressAmbientSerial &&
+          (msg->routing & MSG_ROUTE_SERIAL) &&
+          (gOutputFlags & MSG_ROUTE_SERIAL)) {
         Serial.printf("[%lu] %s\n", msg->timestamp, msg->text);
       }
       // Web mirror (circular buffer for /api/cli/logs polling)
@@ -674,6 +702,7 @@ void initDebugSystem() {
 
   // Create debug output task
   if (!gDebugOutputTaskHandle) {
+    taskStackRecord("debug_out", DEBUG_OUT_STACK_WORDS);
     BaseType_t result = xTaskCreatePinnedToCore(
       debugOutputTask,
       "debug_out",
@@ -937,17 +966,7 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
     }
   }
 
-  // 3. Help-mode gating: drop non-help-render output while help UI is active,
-  //    but allow security/auth notices to pass through
-  if (gCLIState != CLI_NORMAL && !gInHelpRender) {
-    if (!(strncmp(text, "[SECURITY]", 10) == 0 || strncmp(text, "[AUTH]", 6) == 0)) {
-      gHelpSuppressedCount = gHelpSuppressedCount + 1;  // (= x+1: ++ on volatile is deprecated in C++20)
-      pushHelpSuppressed(text);
-      return;
-    }
-  }
-
-  // 4. Skip output if current task is a sensor task that's been disabled
+  // 3. Skip output if current task is a sensor task that's been disabled
   extern bool gThermalRunning, gImuRunning, gTofRunning;
   TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
   extern TaskHandle_t gThermalTaskHandle, gImuTaskHandle, gTofTaskHandle;
@@ -970,7 +989,12 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   } else {
     route = MSG_ROUTE_ALL;  // non-command output goes to all sinks
   }
-  if (gInHelpRender) route |= MSG_ROUTE_ALLOW_IN_HELP;
+  // gInHelpRender is legacy process-global render state, but only cmd_exec's
+  // current command is allowed to mark its own help pages as explicit output.
+  // Background tasks racing a render have no CommandContext and remain
+  // ambient, so they cannot punch through a serial-owned help session.
+  if (gInHelpRender && currentCommandContext())
+    route |= MSG_ROUTE_ALLOW_IN_HELP;
 
   // 6. Enqueue — one broadcastOutput() call == one queue message, verbatim.
   //    No splitting/packing: text goes in as sent. Over-long text (> 255 B) is
@@ -1119,13 +1143,20 @@ static void setIdfLogBridge(bool enable) {
 
 // Print summary (and tail) of output suppressed during help; resets counters
 void helpSuppressedPrintAndReset() {
-  unsigned long n = gHelpSuppressedCount;
+  unsigned long n = 0;
+  SemaphoreHandle_t mutex = helpTailMutex();
+  if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+    n = gHelpSuppressedCount;
+    gHelpSuppressedCount = 0;
+    gHelpTailCount = 0;
+    gHelpTailIndex = 0;
+    xSemaphoreGive(mutex);
+  }
   if (n > 0) {
     // Minimal one-line notice to keep UI clean
     char msg[96];
     snprintf(msg, sizeof(msg), "(Note) Suppressed %lu lines during help.", (unsigned long)n);
     broadcastOutput(msg);
-    gHelpSuppressedCount = 0;
   }
 }
 
@@ -1461,7 +1492,7 @@ void dbgRecomputeAllParents() {
 // ============================================================================
 // Generated CLI debug-command dispatch (C3).
 //
-// The ~156 mechanical flag/sub command handlers are no longer hand-written:
+// The ~159 mechanical flag/sub command handlers are no longer hand-written:
 // each cmd_<name> is a generated thunk (below) forwarding to one of two shared
 // dispatchers. dbgFlagCmd()/dbgSubCmd() reproduce the pre-C3 handler bodies
 // exactly (temp = live mask bit only; persist = gSettings + bit; bitless subs
@@ -2037,6 +2068,9 @@ const CommandEntry debugCommands[] = {
   { "debugbluetoothcore", "Debug Bluetooth core lifecycle.", true, cmd_debugbluetoothcore, "Usage: debugbluetoothcore <0|1> [temp|runtime]" },
   { "debugbluetoothgatt", "Debug Bluetooth GATT operations.", true, cmd_debugbluetoothgatt, "Usage: debugbluetoothgatt <0|1> [temp|runtime]" },
   { "debugbluetoothdata", "Debug Bluetooth command/data path.", true, cmd_debugbluetoothdata, "Usage: debugbluetoothdata <0|1> [temp|runtime]" },
+  { "debuguart", "Debug UART host link (parent flag).", true, cmd_debuguart, "Usage: debuguart <0|1> [temp|runtime]" },
+  { "debuguartlifecycle", "Debug UART link/session lifecycle.", true, cmd_debuguartlifecycle, "Usage: debuguartlifecycle <0|1> [temp|runtime]" },
+  { "debuguartcontrol", "Debug UART CM5/liveaudio control intrinsics.", true, cmd_debuguartcontrol, "Usage: debuguartcontrol <0|1> [temp|runtime]" },
   { "debugcamera",          "Debug camera (parent flag).",                              true, cmd_debugcamera,          "Usage: debugcamera <0|1> [temp|runtime]" },
   { "debugcameralifecycle", "Debug camera init/stop/PWDN-RESET/GPIO state.",            true, cmd_debugcameralifecycle, "Usage: debugcameralifecycle <0|1> [temp|runtime]" },
   { "debugcameracapture",   "Debug captureFrame, JPEG validation, fb buffer, recovery.",true, cmd_debugcameracapture,   "Usage: debugcameracapture <0|1> [temp|runtime]" },
@@ -2093,7 +2127,7 @@ const CommandEntry debugCommands[] = {
   { "debugmapsloading", "Debug map file loading and tile directory.", true, cmd_debugmapsloading, "Usage: debugmapsloading <0|1> [temp|runtime]" },
   { "debugmapsrendering", "Debug map render pipeline and feature drawing.", true, cmd_debugmapsrendering, "Usage: debugmapsrendering <0|1> [temp|runtime]" },
   { "debugmapsperf", "Debug map performance timing (render ms, tile I/O, cache, FPS).", true, cmd_debugmapsperf, "Usage: debugmapsperf <0|1> [temp|runtime]" },
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
   { "debugllm", "Debug on-device LLM (parent flag).", true, cmd_debugllm, "Usage: debugllm <0|1> [temp|runtime]" },
   { "debugllmload", "Debug LLM checkpoint load and validation.", true, cmd_debugllmload, "Usage: debugllmload <0|1> [temp|runtime]" },
   { "debugllmtokenizer", "Debug LLM tokenizer / BPE.", true, cmd_debugllmtokenizer, "Usage: debugllmtokenizer <0|1> [temp|runtime]" },
@@ -2190,6 +2224,14 @@ const CommandEntry debugCommands[] = {
   { "debugg2pages",     "Debug G2 page-swap worker / hijack / lens state.", true, cmd_debugg2pages, "Usage: debugg2pages <0|1> [temp|runtime]" },
   { "debugg2heartbeat", "Debug G2 heartbeat TX + acks (loud).",         true, cmd_debugg2heartbeat, "Usage: debugg2heartbeat <0|1> [temp|runtime]" },
   { "debugg2dump",      "Debug G2 ring-buffer dumps on errors.",        true, cmd_debugg2dump,      "Usage: debugg2dump <0|1> [temp|runtime]" },
+  { "debugring",          "Debug R1 health ring (parent flag).",             true, cmd_debugring,          "Usage: debugring <0|1> [temp|runtime]" },
+  { "debugringlifecycle", "Debug R1 scan/connect/GATT/disconnect.",          true, cmd_debugringlifecycle, "Usage: debugringlifecycle <0|1> [temp|runtime]" },
+  { "debugringsetup",     "Debug R1 setup ritual + clock custody.",          true, cmd_debugringsetup,     "Usage: debugringsetup <0|1> [temp|runtime]" },
+  { "debugringprotocol",  "Debug R1 per-frame decode/reassembly (loud).",    true, cmd_debugringprotocol,  "Usage: debugringprotocol <0|1> [temp|runtime]" },
+  { "debugringtxn",       "Debug R1 transactions + packetAck (loud).",       true, cmd_debugringtxn,       "Usage: debugringtxn <0|1> [temp|runtime]" },
+  { "debugringhealth",    "Debug R1 telemetry cache + history sweep.",       true, cmd_debugringhealth,    "Usage: debugringhealth <0|1> [temp|runtime]" },
+  { "debugringbridge",    "Debug R1→G2 spoof bridge push.",                  true, cmd_debugringbridge,    "Usage: debugringbridge <0|1> [temp|runtime]" },
+  { "debugringdump",      "Debug R1 raw hex frame/payload dumps (loud).",    true, cmd_debugringdump,      "Usage: debugringdump <0|1> [temp|runtime]" },
 #endif
   { "outble", "Enable/disable BLE broadcast output.", false, cmd_outble, "Usage: outble <0|1> - streams broadcast output to authenticated BLE clients" },
   { "debugsr",          "Debug ESP-SR speech recognition (parent flag).", true, cmd_debugsr,          "Usage: debugsr <0|1> [temp|runtime]" },
@@ -2207,12 +2249,13 @@ const CommandEntry debugCommands[] = {
 
 const size_t debugCommandsCount = sizeof(debugCommands) / sizeof(debugCommands[0]);
 
-// C3 drift tripwire. The flag/sub command handlers are generated thunks: 116
+// C3 drift tripwire. The flag/sub command handlers are generated thunks: 119
 // flag rows (DBG_FLAG_COUNT minus the ALWAYS control row that carries
-// DBG_NO_CMD) + 40 bitless subs = 156. The rows enumerated below stay
+// DBG_NO_CMD) + 40 bitless subs = 159. The rows enumerated below stay
 // hand-written. Adding a flag/sub row to the tables, or a hand row here,
 // without reconciling the counts fails this assert. The subtractions track the
-// two feature-gated table spans: 6 LLM flag rows, 7 debugg2* flag rows, and the
+// two feature-gated table spans: 6 LLM flag rows, 7 debugg2* + 8 debugring*
+// flag rows (both under ENABLE_BLUETOOTH && ENABLE_G2_GLASSES), and the
 // outg2 hand row.
 static constexpr size_t kDbgHandCmdRows = 15;  // debugespnow(alias), notifstats,
   // debugverbose, debugbuffer, debugflags, loglink, debugstack,
@@ -2220,11 +2263,11 @@ static constexpr size_t kDbgHandCmdRows = 15;  // debugespnow(alias), notifstats
   // memorysampleintervalsec, loglevel, log, webconsole
 static constexpr size_t kDbgGenCmdRowsInTable =
     (size_t)(DBG_FLAG_COUNT - 1) + (size_t)DBG_SUBBOOL_COUNT
-#if !ENABLE_ONDEVICE_LLM
+#if !ENABLE_LLM_SOURCE_ONBOARD
     - 6
 #endif
 #if !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
-    - 7
+    - 15  // 7 debugg2* + 8 debugring*
 #endif
     ;
 static constexpr size_t kDbgHandCmdRowsInTable = kDbgHandCmdRows

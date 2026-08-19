@@ -2,6 +2,7 @@
 #define SYSTEM_CLIMODE_H
 
 #include <Arduino.h>
+#include "System_User.h"
 
 // ============================================================================
 // CLI Interactive Mode framework
@@ -21,11 +22,10 @@
 // `waitForSerialInputBlocking()` for the entire wizard duration.
 //
 // Why this matters operationally:
-//   1. A wizard built on this framework can be invoked from any transport
-//      (web CLI, Bluetooth, MQTT, internal automations) -- not just serial
-//      and OLED. Each transport's input naturally flows through the
-//      command dispatcher; the active mode's onInput handler runs on the
-//      cmd_exec task and returns immediately.
+//   1. A wizard can be invoked from a stateful interactive transport with a
+//      live generation (human web CLI, serial, or OLED). Machine/stateless
+//      sources such as CM5 UART traffic, G2 callbacks, MQTT, automation and
+//      the currently non-transactional BLE link remain mode-independent.
 //   2. Other CLI commands keep working while the user is "inside" a mode
 //      because cmd_exec isn't held hostage.
 //   3. No race between the main-loop's serial drain and a per-task
@@ -41,8 +41,9 @@
 //   ...user types things...
 //   cliExitMode();             // ends the mode; onExit fires
 //
-// Only ONE mode is active at a time in this initial implementation. Entering
-// a mode while another is active is rejected; the active mode must exit first.
+// Only ONE mode is active at a time. It is bound to the exact transport login
+// generation that opened it. Input from every other session bypasses the mode
+// and continues through ordinary registry dispatch without mutating it.
 // (Stackable modes can be added later if needed -- e.g., a wizard popping up
 // a confirm dialog mid-flow.)
 //
@@ -91,8 +92,10 @@ struct CLIMode {
   // copied from the CLIMode struct itself).
   void (*onEnter)(void* userData);
 
-  // Called for each user command line while this mode is active. See the
-  // CLIModeInputResult comments above for what to return.
+  // Called for each owning-session command line while this mode is active.
+  // The slot remains reserved, but the global mode mutex is NOT held across
+  // this callback, so filesystem/network work cannot invert lifecycle locks.
+  // See the CLIModeInputResult comments above for what to return.
   //
   // `line`   -- the raw command line as typed (with the command name still
   //             attached). Already trimmed; not lowercased.
@@ -132,29 +135,75 @@ struct CLIMode {
   // file-static struct or a heap allocation made in onEnter and freed in
   // onExit. The framework never dereferences it.
   void* userData;
+
+  // Monotonic idle timeout. Measured with esp_timer_get_time(), never with
+  // RTC/Unix/NTP time, so acquiring NTP mid-session has no effect. Zero uses
+  // the framework default (5 minutes).
+  uint32_t idleTimeoutMs = 0;
 };
+
+// Synchronous, non-retained preparation hook used when a mode and its
+// caller-owned payload must become visible atomically. It runs only after the
+// exact owner was validated and the global slot was proven empty, while the
+// mode mutex is held. The hook must be short, cannot fail, and must not block.
+using CLIModeEntryCommit = void (*)(void* data);
 
 // ----------------------------------------------------------------------------
 // Public API
 // ----------------------------------------------------------------------------
 
-// Activate `mode`. Calls mode->onEnter(mode->userData). Returns false if
-// another mode is already active (caller should cliExitMode() first).
+// Activate `mode` for the current queued CommandContext. Entry fails for a
+// stateless/stale session or a MODE_INDEPENDENT machine invocation.
 //
 // The pointer must remain valid for the lifetime of the mode -- pass a
 // pointer to a file-static or globally-allocated CLIMode, not a stack
 // instance.
 bool cliEnterMode(const CLIMode* mode);
 
-// Deactivate the current mode. Calls mode->onExit(userData). No-op if no
-// mode is active. After this, cliInModeActive() returns false.
-void cliExitMode();
+bool cliEnterModePrepared(const CLIMode* mode,
+                          CLIModeEntryCommit commit,
+                          void* commitData);
+
+// Request deactivation only when the current command owns the mode. A
+// no-context main-loop call is accepted only for a local-display-owned mode
+// (the OLED wizard tick). Cleanup/onExit is drained on cmd_exec; true means the
+// exit request was accepted, not necessarily that cleanup already completed.
+bool cliExitMode();
 
 // True if any mode is currently active.
 bool cliInModeActive();
 
 // The currently-active mode (read-only), or nullptr if none.
 const CLIMode* cliCurrentMode();
+
+// True only when the current queued command owns the active mode. `expected`
+// optionally narrows the check to one mode (e.g. help).
+bool cliModeCurrentCommandOwns(const CLIMode* expected = nullptr);
+
+// Cross-task delivery check for the command submitter after cmd_exec returns.
+// Used to keep an interactive prompt's result off shared mirror/log lanes
+// while still returning it directly to the owning serial/web/OLED session.
+bool cliModeOwnedBySession(CommandSource source,
+                           TransportSessionEpoch epoch,
+                           const CLIMode* expected = nullptr);
+
+// True when the current command is allowed to participate in an interactive
+// mode. Validation and MODE_INDEPENDENT machine contexts return false. Output
+// capture is orthogonal: the human web terminal captures its addressed reply.
+bool cliModeCurrentInvocationCanInteract();
+
+// Refresh the active mode's monotonic idle timer for an exact owner input.
+// The no-command form is accepted only for local-display physical input.
+bool cliModeNoteActivity();
+
+// True while the physical serial console owns a live interactive slot. The
+// debug drain uses this to suppress only ambient serial lines (other sinks keep
+// running), so background logs cannot overwrite a human prompt.
+bool cliModeSuppressesAmbientSerial();
+
+// Monotonic nonzero instance id of the active mode, or zero. Used to detect
+// that a handler entered a mode without relying on a racy global bool.
+uint32_t cliModeInstanceId();
 
 // Called by the command dispatcher BEFORE normal command lookup. If a mode
 // is active, the mode's onInput is invoked.
@@ -177,5 +226,9 @@ bool cliModeDispatchInput(const String& line, char* out, size_t outSize);
 // Safe to call when no mode is active (no-op) or when the active mode
 // has no onTick (also no-op).
 void cliModeTick();
+
+// Run pending onExit cleanup on cmd_exec_task. Queries and transport callback
+// tasks only request cancellation; they never execute mode cleanup themselves.
+bool cliModeExecutorDrainPending();
 
 #endif // SYSTEM_CLIMODE_H

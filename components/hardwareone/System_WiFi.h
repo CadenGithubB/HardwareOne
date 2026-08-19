@@ -23,6 +23,68 @@ extern int gWifiNetworkCount;
 
 #if ENABLE_WIFI
 
+// Compact, caller-independent view of one ESP-IDF scan record. Scan consumers
+// copy only these fields while the driver owns its transient AP list; no
+// Arduino WiFiScan result buffer is retained after wifiScanForEach() returns.
+struct WifiScanRecord {
+  char ssid[33];
+  uint8_t bssid[6];
+  int8_t rssi;
+  uint8_t channel;
+  uint8_t authMode;
+};
+static_assert(sizeof(WifiScanRecord) == 42,
+              "WifiScanRecord layout changed; re-check scan snapshot memory");
+
+enum class WifiScanStatus : uint8_t {
+  OK = 0,
+  BUSY,
+  RADIO_UNAVAILABLE,
+  DRIVER_ERROR,
+  INVALID_ARGUMENT,
+};
+
+struct WifiScanResult {
+  WifiScanStatus status;
+  uint16_t found;
+  uint16_t delivered;
+  int32_t driverError;
+
+  bool ok() const { return status == WifiScanStatus::OK; }
+};
+
+using WifiScanVisitor = bool (*)(const WifiScanRecord& record,
+                                 uint16_t index, uint16_t total,
+                                 void* context);
+
+// Run one synchronous IDF scan and stream its RSSI-sorted records through a
+// caller callback. An OK result guarantees that the driver AP list was
+// released. Cleanup is attempted on every owned failure path; DRIVER_ERROR can
+// mean the driver did not confirm that cleanup. A false visitor return stops
+// delivery early without changing result.found.
+WifiScanResult wifiScanForEach(bool includeHidden, WifiScanVisitor visitor,
+                               void* context,
+                               uint32_t acquireTimeoutMs = 0);
+const char* wifiScanStatusText(WifiScanStatus status);
+
+// Fence a driver/mode mutation against an explicit scan. The recursive mutex
+// permits existing composed radio helpers, while a mutation attempted from a
+// scan visitor is rejected to prevent re-entering the live driver AP list.
+class WifiRadioMutationGuard {
+ public:
+  explicit WifiRadioMutationGuard(uint32_t timeoutMs = 250);
+  ~WifiRadioMutationGuard();
+
+  WifiRadioMutationGuard(const WifiRadioMutationGuard&) = delete;
+  WifiRadioMutationGuard& operator=(const WifiRadioMutationGuard&) = delete;
+
+  bool acquired() const { return acquired_; }
+  void release();
+
+ private:
+  bool acquired_ = false;
+};
+
 // WiFi Command Handlers
 const char* cmd_wifiinfo(const String& argsInput);
 const char* cmd_wifilist(const String& argsInput);

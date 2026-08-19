@@ -1899,7 +1899,7 @@ function saveNotifPolicy() {
     debugmapsrendering:"Logs map-render passes and buffer writes to the OLED.",
     debugmapsperf:"Performance counters for map rendering: per-tile draw time, cache hit rate.",
     // llm
-    debugllm:"Master toggle for on-device LLM debug (when ENABLE_ONDEVICE_LLM is built in).",
+    debugllm:"Master toggle for on-device LLM debug (when ENABLE_LLM_SOURCE_ONBOARD is built in).",
     debugllmload:"Logs model checkpoint loading and weight-tensor allocation.",
     debugllmtokenizer:"Logs tokenizer operations — encode and decode calls.",
     debugllmforward:"Logs forward-pass execution steps. Very verbose during generation.",
@@ -2750,10 +2750,11 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       postSettingsCli('wifiscan json')
       .then(function(txt) {
         console.log('[SETTINGS] WiFi scan result length:', (txt||'').length);
-        var data = [];
+        var data = [], scanError = '';
         try {
           var raw = JSON.parse(txt || '{}');
           data = Array.isArray(raw) ? raw : (raw && raw.networks) || [];
+          scanError = (!Array.isArray(raw) && raw && raw.error) ? String(raw.error) : '';
         } catch(_) {
           data = [];
         }
@@ -2778,7 +2779,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         if (hiddenCount > 0) {
           html += '<div style="color:var(--panel-fg);font-size:0.85rem;margin-top:4px">' + hiddenCount + ' hidden network' + (hiddenCount > 1 ? 's' : '') + ' detected</div>';
         }
-        if (visible.length === 0) {
+        if (scanError) {
+          html += '<div style="color:#dc3545">Scan ' + scanError + '; retry shortly.</div>';
+        } else if (visible.length === 0) {
           html += '<div style="color:var(--panel-fg)">No networks found.</div>';
         } else {
           html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:0.5rem;margin-top:0.5rem">';
@@ -3382,6 +3385,11 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
            "Error: Error:" as the four handlers above — missed in that pass
            because this one branches on !r.ok rather than indexOf('Error'). */
         if (!r.ok) { alert(r.result || 'Error: no response'); return; }
+        if (r.pending) {
+          alert(r.result);
+          setTimeout(function(){ try { refreshUsers(); } catch(_) {} }, 2000);
+          return;
+        }
         alert(r.result);
         try { refreshUsers(); } catch(_) {}
       } catch (e) {

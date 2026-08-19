@@ -891,6 +891,30 @@ static String sRestoreKeyData;
 static bool sRestoreUsedHttps = false;
 #endif
 
+// NOTE — this deliberately shares the ONE global `server` handle
+// (HardwareOne.cpp, declared WebServer_Handle.h) with the normal web server
+// (WebServer_Server.cpp, httpd_start(&server,...)). It is not a second,
+// independent httpd instance, despite the "restore-only" name.
+//
+// Why that is safe TODAY, and only today: this pair is called exclusively from
+// the Import branch of first-time setup (System_FirstTimeSetup.cpp), which runs
+// inside hardwareone_setup() and BLOCKS. The normal web server is not started
+// until later in boot (phase-8 HTTP autostart / cmd_openhttp), so `server` is
+// reliably NULL when we claim it here and reliably ours when we release it.
+// There is no reachable sequence in which both want the handle at once.
+//
+// What would break it: stopRestoreOnlyHttpServer() checks `if (server)` — "is
+// *a* server running" — not "is *my* server running". It cannot distinguish its
+// own instance from the user's. So if first-time setup ever stops blocking boot
+// (i.e. the async CLIMode migration considered and rejected in
+// docs/FTS_WIZARD_OUTPUT_PLAN.md §4 row 6), or if this is ever invoked after the
+// real server is up, the Import "go back" path would stop and NULL the user's
+// live web server.
+//
+// The fix at that point is a dedicated `static httpd_handle_t sRestoreServer`
+// plus an `if (server) return;` guard below — deliberately NOT done now, because
+// it would change working web-server lifecycle code to defend against a state
+// the current architecture cannot reach.
 void startRestoreOnlyHttpServer() {
 #if ENABLE_HTTPS
   // Try HTTPS if enabled and certs are present
@@ -996,6 +1020,10 @@ restore_register:
 
 void stopRestoreOnlyHttpServer() {
   discardStagedMigrationRestore();
+  // `if (server)` is an is-anything-running test, not an ownership test — see
+  // the note above startRestoreOnlyHttpServer(). Correct only while first-time
+  // setup blocks boot, which guarantees the only server that can be running
+  // here is the one we started.
   if (server) {
 #if ENABLE_HTTPS
     if (sRestoreUsedHttps) {

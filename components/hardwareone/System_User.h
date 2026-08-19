@@ -2,6 +2,7 @@
 #define SYSTEM_USER_H
 
 #include <Arduino.h>
+#include <atomic>
 
 // ============================================================================
 // User System - User and session management command handlers
@@ -54,15 +55,84 @@ struct AuthContext {
   String scope;  // optional path-prefix confinement (empty = unconfined); enforced in checkPerm. Set via VFS::systemAuth(scope, reason).
 };
 
+// A transport-session epoch is a boot-local, nonzero generation token. It is
+// deliberately unrelated to wall-clock time: NTP may be absent at boot or may
+// synchronize at any later point without changing command ownership.
+using TransportSessionEpoch = uint32_t;
+inline constexpr TransportSessionEpoch kNoTransportSessionEpoch = 0;
+
+// Fixed-capacity registry used by transports with one or more live sessions
+// (web, BLE, serial and the local display). Open only after the session's
+// identity is fully initialized; close before clearing or replacing it.
+TransportSessionEpoch transportSessionOpen(CommandSource source);
+void transportSessionClose(CommandSource source, TransportSessionEpoch epoch);
+bool transportSessionEpochIsLive(CommandSource source,
+                                 TransportSessionEpoch epoch);
+
+// Resolve the live epoch represented by an AuthContext. Stateless identities
+// (system/internal work and HTTP Basic Auth) intentionally return zero.
+TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx);
+
+// Serial and OLED authentication globals predate transport-session fencing.
+// These helpers are now the only mutation/snapshot front doors for queued
+// command ownership; they invalidate the old generation before identity
+// changes and publish the new one afterwards.
+TransportSessionEpoch serialTransportSessionAuthenticated(const String& user);
+// Local Serial intrinsics use the epoch that owned the completed input line.
+// Login publishes only if that exact incarnation is still current; logout
+// clears it and retains the writer lock through the direct physical ACK.
+TransportSessionEpoch serialTransportSessionAuthenticatedIfEpoch(
+    TransportSessionEpoch expectedEpoch, const String& user);
+bool serialTransportSessionClearAndBeginDelivery(
+    TransportSessionEpoch expectedEpoch);
+// Physical input is generation-bound even before authentication. These two
+// helpers create/read the private pre-auth incarnation used only to ensure a
+// partially typed line cannot cross a login/logout/replacement boundary.
+TransportSessionEpoch serialTransportInputEpoch();
+bool serialTransportInputEpochIsCurrent(TransportSessionEpoch epoch);
+void serialTransportSessionCleared();
+// Invalidate only an unauthenticated/AuthBypass incarnation when the live
+// require-auth policy changes. A named authenticated session remains valid;
+// any bypass command admitted under the previous policy generation does not.
+void serialTransportAuthPolicyChanged();
+// Linearize the final serial result write with login/logout/revocation and
+// auth-policy rotation. Begin returns with the lifecycle writer held only when
+// the exact epoch is still live; callers must pair a successful begin with end.
+bool serialTransportSessionBeginDelivery(TransportSessionEpoch epoch);
+void serialTransportSessionEndDelivery();
+bool localDisplayTransportSessionBeginDelivery(TransportSessionEpoch epoch);
+void localDisplayTransportSessionEndDelivery();
+// OLED-owner-only synchronization point. Begin always returns with the
+// display lifecycle writer held, including when the authoritative state is
+// logged out (epoch zero), and snapshots that state into the outputs. This is
+// what lets the main loop update its legacy String/UI mirror without any
+// foreign task touching OLED-owned state. Every Begin must be paired with End.
+TransportSessionEpoch localDisplayTransportSessionBeginUiSync(
+    String& userOut, bool& authedOut);
+void localDisplayTransportSessionEndUiSync();
+TransportSessionEpoch serialTransportSessionSnapshot(String& userOut,
+                                                      bool& authedOut);
+void localDisplayTransportSessionAuthenticated(const String& user);
+void localDisplayTransportSessionCleared();
+void localDisplayTransportAuthPolicyChanged();
+TransportSessionEpoch localDisplayTransportSessionSnapshot(String& userOut,
+                                                            bool& authedOut);
+// Cross-task writers use this while holding the display lifecycle writer so
+// the authority cutover and pending UI-boundary generation are one publication.
+// Implemented by OLED_Utils as an atomic generation/dirty bump only.
+void oledNotifyLocalDisplayAuthChanged();
+
 // User command registry - using userSystemCommands only
 
 // ============================================================================
 // Authentication State Globals (defined in HardwareOne.cpp)
 // ============================================================================
 
+// Main/OLED-loop mirror only. Cross-task authentication and authorization
+// must use localDisplayTransportSessionSnapshot(), never these legacy fields.
 extern bool gLocalDisplayAuthed;
 extern String gLocalDisplayUser;
-extern unsigned long gLocalDisplayLastInteractionMs;  // OLED session idle clock; see HardwareOne.cpp
+extern std::atomic<unsigned long> gLocalDisplayLastInteractionMs;  // OLED session idle clock; see HardwareOne.cpp
 
 // UART host-link session (defined in System_UartLink.cpp). One session per
 // port, deliberately separate so the CM5 link and USB console can never fuse
@@ -99,8 +169,9 @@ String getDeviceOwnerUsername();
 // Top tier — role=="superadmin" (or a live bonded session). Gates the
 // identity/crypto/destructive/auth-posture command set; see commandRequiresSuperAdmin.
 bool isSuperAdminUser(const String& who);
-// Bottom tier — role=="guest". Authenticated view-only: login/logout only
-// for commands; filesystem reads use the user column masked to PERM_READ.
+// Bottom tier — role=="guest". Authenticated view-only: caller-local
+// login/logout and whoami only; filesystem reads use the user column masked
+// to PERM_READ.
 bool isGuestUser(const String& who);
 
 // Privilege ranks — single source of truth for C++ comparisons. The settings
@@ -122,10 +193,42 @@ int userRoleRank(const String& role);
 int userAccountRank(const String& username);
 // True for the four grantable role names (caller should lowercase first).
 bool isKnownUserRole(const String& role);
+// Fail-closed eligibility for controlling another transport's session.
+// Returns true only when users.json is readable, the exact account exists,
+// is not banned, and has a known non-Guest role. This is intentionally
+// stronger than !isGuestUser(), whose legacy fallback treats lookup failures
+// as ordinary User for non-security UI ranking.
+bool userMayControlOtherSessions(const String& username);
+bool getUserAuthorizationRole(const String& username, String& roleOut);
 
 // Centralized transport authentication management
 bool loginTransport(CommandSource transport, const String& username, const String& password);
+// BLE validates under the users database lock, then binds an exact GATT
+// connection epoch before recording success. This avoids auditing a login as
+// successful when the connection disappeared between validation and bind.
+bool validateTransportCredentials(CommandSource transport,
+                                  const String& username,
+                                  const String& password);
+void recordTransportLoginResult(CommandSource transport,
+                                const String& username,
+                                bool success,
+                                const char* reason);
+bool loginTransportFromNamedSession(CommandSource target,
+                                    const String& username,
+                                    const String& password,
+                                    CommandSource source,
+                                    const String& sourceUser,
+                                    TransportSessionEpoch sourceEpoch);
+// Publish an already credential-verified UART account as a named session.
+// CM5 presence eligibility is resolved fail-closed from users.json and fenced
+// against concurrent role/delete/ban mutations.
+uint32_t publishUartAccountSession(const String& username,
+                                   uint32_t* transportEpochOut = nullptr);
 void logoutTransport(CommandSource transport);
+bool logoutTransportFromNamedSession(CommandSource target,
+                                     CommandSource source,
+                                     const String& sourceUser,
+                                     TransportSessionEpoch sourceEpoch);
 bool isTransportAuthenticated(CommandSource transport);
 String getTransportUser(CommandSource transport);
 bool isTransportAdmin(CommandSource transport);
@@ -229,7 +332,8 @@ void cleanupOldBootAnchors(void* doc = nullptr);  // doc is StaticJsonDocument<8
 //   * bumpIdentityGeneration(reason) — "permission topology changed,
 //     auth-derived caches need to invalidate." See System_AuthIdentity.h
 //     for the full protocol. Bumped when: a user is created/deleted, a
-//     role changes (promote/demote), or peer ownership stamps (BLE pair).
+//     role/account availability changes (promote/demote/ban/unban), or peer
+//     ownership stamps (BLE pair).
 //     NOT bumped on login/logout (sessions), password change/reset
 //     (creds rotated but perms unchanged), or userrequest/userdeny
 //     (pending acct has no perms).

@@ -130,8 +130,10 @@ size_t formatHHMMLocal(time_t t, char* out, size_t outSize);
 
 // ----- Clock-step chokepoint ----------------------------------------------
 //
-// Five things can set this system's clock: NTP, the DS3231 RTC, `timeset`,
-// the R1 ring (dark-boot adoption), and lwIP's background SNTP daemon. Each
+// Six things can set this system's clock: NTP, the DS3231 RTC, `timeset`,
+// the R1 ring (dark-boot adoption), the CM5 carrier's battery-backed RTC
+// (SYNC_CM5, pushed over the UART host link), and lwIP's background SNTP
+// daemon. Each
 // step owes the same follow-up chores — post the TIME_SYNCED event on the
 // first valid clock, write/refresh the boot anchor, resolve pending user
 // timestamps, wake the automation scheduler, push the time into the RTC,
@@ -144,12 +146,12 @@ size_t formatHHMMLocal(time_t t, char* out, size_t outSize);
 // are pended and drained by clockDutiesTick() on the main loop (or
 // clockDutiesFlush() synchronously from big-stack contexts).
 
-enum SyncSource : uint8_t { SYNC_NONE = 0, SYNC_RTC, SYNC_NTP, SYNC_MANUAL, SYNC_RING };
+enum SyncSource : uint8_t { SYNC_NONE = 0, SYNC_RTC, SYNC_NTP, SYNC_MANUAL, SYNC_RING, SYNC_CM5 };
 
 // Last source that stepped the clock THIS boot. SYNC_NONE with isSynced()
 // true means the time was carried across a soft reboot in the RTC domain.
 SyncSource syncSource();
-const char* syncSourceName(SyncSource s);  // "none|rtc|ntp|manual|ring"
+const char* syncSourceName(SyncSource s);  // "none|rtc|ntp|manual|ring|cm5"
 
 // Call immediately AFTER a successful settimeofday(), passing the pre-step
 // epoch. Inline-cheap; safe from any normal task. NOT for lwIP/BLE

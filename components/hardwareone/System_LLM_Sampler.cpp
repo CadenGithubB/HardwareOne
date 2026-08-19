@@ -6,7 +6,7 @@
  * and reuses gLLM.sampleIndices to avoid per-token allocation.
  */
 #include "System_BuildConfig.h"
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
 
 #include "System_LLM_Sampler.h"
 #include "System_LLM_Internal.h"   // gLLM.sampleIndices / sampleIndicesSize
@@ -194,4 +194,4 @@ int sample(float* logits, int vocab_size, float temperature, float topp, float m
   return sample_topp(logits, vocab_size, topp, outChosenProb);
 }
 
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_SOURCE_ONBOARD

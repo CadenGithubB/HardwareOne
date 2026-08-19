@@ -31,6 +31,7 @@
 #include "System_I2C.h"
 #include "System_Utils.h"   // argWantsJson
 #include <ArduinoJson.h>
+#include <atomic>
 
 static SemaphoreHandle_t gCameraMutex = nullptr;
 
@@ -78,6 +79,12 @@ static const char* cameraErrorToString(esp_err_t err) {
 bool gCameraRunning = false;
 bool cameraConnected = false;
 bool cameraStreaming = false;
+// Sticky hardware-presence latch, distinct from cameraConnected (a runtime
+// init flag that goes false on every stopCamera). Set once the SCCB probe in
+// initCamera gets a sensor handle back, and never cleared — so a stopped
+// camera still reports "silicon is present here", which is what callers need
+// to tell "not started" apart from "no camera on this board".
+bool cameraDetected = false;
 const char* cameraModel = "Unknown";
 int cameraWidth = 0;
 int cameraHeight = 0;
@@ -168,6 +175,13 @@ static void cameraDimsForFramesize(framesize_t fs, int& w, int& h) {
 // Static buffer for status JSON
 static char* cameraStatusBuffer = nullptr;
 static const size_t kStatusBufSize = 512;
+// User-facing power requests own the desired state independently of the
+// driver's transient gCameraRunning flag. Inline frame recovery checks this
+// latch before and after re-init so a queued STOP cannot be undone even when
+// the worker's bounded camera-mutex take expires behind a stuck frame fetch.
+static std::atomic<bool> sCameraDesiredOn{false};
+
+static bool stopCameraInternal(bool isRecovery);
 
 bool initCamera(bool isRecovery) {
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ========== initCamera() ENTRY ==========");
@@ -184,6 +198,12 @@ bool initCamera(bool isRecovery) {
     INFO_CAMERAF("Already initialized");
     unlockCameraMutex();
     return true;
+  }
+
+  if (isRecovery && !sCameraDesiredOn) {
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Recovery cancelled by desired-off latch");
+    unlockCameraMutex();
+    return false;
   }
 
   // ---------------------------------------------------------------------
@@ -478,6 +498,9 @@ bool initCamera(bool isRecovery) {
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] esp_camera_sensor_get() returned %p", s);
   
   if (s) {
+    // A sensor handle means the SCCB probe got an answer — real evidence of
+    // silicon, independent of whether the model is one we recognize below.
+    cameraDetected = true;
     DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Sensor info: PID=0x%x VER=0x%x MIDL=0x%x MIDH=0x%x",
                   s->id.PID, s->id.VER, s->id.MIDL, s->id.MIDH);
     INFO_CAMERAF("Sensor PID=0x%x", s->id.PID);
@@ -631,6 +654,15 @@ bool initCamera(bool isRecovery) {
 
   cameraConnected = true;
   gCameraRunning = true;
+  // A STOP may have timed out waiting for this recovery-held recursive mutex.
+  // Do not publish a resurrected camera; tear it down while we still own the
+  // lock. stopCameraInternal(true) is recursive and suppresses user events.
+  if (isRecovery && !sCameraDesiredOn) {
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Recovery completed after desired-off; deinitializing");
+    (void)stopCameraInternal(/*isRecovery=*/true);
+    unlockCameraMutex();
+    return false;
+  }
   sensorStatusBumpWith("opencamera");
 
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ========== initCamera() COMPLETE ==========");
@@ -658,12 +690,8 @@ bool initCamera(bool isRecovery) {
   return true;
 }
 
-void stopCamera(bool isRecovery) {
+static bool stopCameraInternal(bool isRecovery) {
   DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] stopCamera() called, gCameraRunning=%d", gCameraRunning);
-  if (!gCameraRunning) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Already stopped, returning");
-    return;
-  }
 
   // Finalize AVI before taking the camera mutex. stopVideoRecording waits
   // for cam_record, which may itself be inside captureFrame (holding that
@@ -676,7 +704,18 @@ void stopCamera(bool isRecovery) {
 
   if (!lockCameraMutex(15000)) {
     DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] ERROR: camera mutex timeout (camera busy)");
-    return;
+    return false;
+  }
+
+  // Check only after acquiring the camera mutex. In particular, inline frame
+  // recovery temporarily sets gCameraRunning=false before re-initialising while
+  // holding this recursive mutex. A concurrent worker STOP must wait for that
+  // recovery to finish and then turn the camera back off, not mistake the
+  // transient false value for an already-completed stop.
+  if (!gCameraRunning) {
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Already stopped, returning");
+    unlockCameraMutex();
+    return true;
   }
 
   DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Heap before deinit: %u", esp_get_free_heap_size());
@@ -695,6 +734,11 @@ void stopCamera(bool isRecovery) {
   INFO_CAMERAF("Stopped");
 
   unlockCameraMutex();
+  return true;
+}
+
+void stopCamera(bool isRecovery) {
+  (void)stopCameraInternal(isRecovery);
 }
 
 uint8_t* captureFrame(size_t* outLen) {
@@ -731,11 +775,19 @@ uint8_t* captureFrame(size_t* outLen) {
     // Recovery logging - keep these for diagnosing camera issues
     DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Capture failed - attempting recovery...");
 
-    stopCamera(/*isRecovery=*/true);
+    (void)stopCameraInternal(/*isRecovery=*/true);
     vTaskDelay(pdMS_TO_TICKS(150));
-    bool ok = initCamera(/*isRecovery=*/true);
+    bool ok = sCameraDesiredOn && initCamera(/*isRecovery=*/true);
     if (ok) {
       fb = esp_camera_fb_get();
+      // A STOP admitted while the second fetch was blocked owns the desired
+      // state even if the worker could not take the mutex. Discard the recovered
+      // frame; initCamera's post-init fence already prevents resurrection when
+      // STOP arrived earlier in recovery.
+      if (!sCameraDesiredOn && fb) {
+        esp_camera_fb_return(fb);
+        fb = nullptr;
+      }
     }
     if (!ok || !fb) {
       DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Recovery failed");
@@ -905,6 +957,14 @@ const char* buildCameraStatusJson() {
   }
 
   PSRAM_JSON_DOC(doc);
+  // supported: camera silicon is wired on this board and compiled in. Always
+  // true here; the !ENABLE_CAMERA_SENSOR stub reports false. This is the
+  // camera's analog of the microphone's pdmAvailable — a build fact, not a probe.
+  doc["supported"] = true;
+  // detected: the SCCB probe has seen a sensor at least once since boot.
+  // Sticky, so it stays true while the camera is stopped. Consumers wanting
+  // "is there a camera?" want this; "connected" only answers "is it running?".
+  doc["detected"] = cameraDetected;
   doc["enabled"] = gCameraRunning;
   doc["connected"] = cameraConnected;
   doc["streaming"] = cameraStreaming;
@@ -931,20 +991,137 @@ enum : uint8_t {
 };
 
 struct CameraPwrMsg {
-  uint8_t      cmd;
-  TaskHandle_t notify;  // optional: xTaskNotifyGive after handling
+  uint8_t  cmd;
+  uint8_t  completionSlot;
+  uint16_t reserved;
+  uint32_t completionGeneration;
+};
+
+struct CameraPwrCompletionSlot {
+  StaticSemaphore_t storage;
+  SemaphoreHandle_t done;
+  uint32_t          generation;
+  bool              inUse;
+  bool              waiterAttached;
+  bool              completed;
+  bool              result;
 };
 
 static QueueHandle_t       sCamPwrQueue = nullptr;
 static TaskHandle_t        sCamPwrTask  = nullptr;
 static CameraPowerPostHook sCamPwrHook  = nullptr;
+static StaticSemaphore_t   sCamPwrLifecycleMutexStorage;
+static SemaphoreHandle_t   sCamPwrLifecycleMutex =
+    xSemaphoreCreateMutexStatic(&sCamPwrLifecycleMutexStorage);
+// Synchronous completions use bounded static storage rather than a caller task
+// handle. A timed-out waiter detaches, but its generation remains reserved
+// until the queued/in-flight worker completes it; only then can the slot be
+// reused. This avoids stale task handles and never consumes or overwrites
+// another subsystem's task notification.
+constexpr uint8_t          kCamPwrNoCompletion = 0xff;
+constexpr uint8_t          kCamPwrCompletionSlotCount = 4;
+static CameraPwrCompletionSlot
+    sCamPwrCompletions[kCamPwrCompletionSlotCount] = {};
+static UBaseType_t         sCamPwrAdmissions = 0;
+static TickType_t          sCamPwrLastDetachTick = 0;
+static bool                sCamPwrHasDetached = false;
 
-void cameraPowerSetPostHook(CameraPowerPostHook hook) { sCamPwrHook = hook; }
+// A full quiet interval after the last completed command is the retirement
+// boundary. The drained queue is deleted and the published pair is detached
+// under sCamPwrLifecycleMutex, so admissions either land on this worker or
+// create a wholly new pair; no sender can retain a queue being deleted.
+constexpr uint32_t kCamPwrIdleRetireMs = 10000;
+
+static bool cameraPwrLifecycleTake() {
+  return sCamPwrLifecycleMutex &&
+         xSemaphoreTake(sCamPwrLifecycleMutex, portMAX_DELAY) == pdTRUE;
+}
+
+static void cameraPwrLifecycleGive() {
+  xSemaphoreGive(sCamPwrLifecycleMutex);
+}
+
+static bool cameraPwrReserveCompletionLocked(CameraPwrMsg& m) {
+  for (uint8_t i = 0; i < kCamPwrCompletionSlotCount; ++i) {
+    CameraPwrCompletionSlot& slot = sCamPwrCompletions[i];
+    if (slot.inUse) continue;
+
+    if (!slot.done) {
+      slot.done = xSemaphoreCreateBinaryStatic(&slot.storage);
+      if (!slot.done) {
+        ERROR_CAMERAF("[CAM_PWR] static completion semaphore init failed slot=%u",
+                      (unsigned)i);
+        return false;
+      }
+    }
+    // A give that raced just after a previous caller timed out can leave the
+    // binary semaphore full. Generation matching makes it harmless; draining
+    // here prevents it from completing this new request immediately.
+    while (xSemaphoreTake(slot.done, 0) == pdTRUE) {}
+
+    ++slot.generation;
+    if (slot.generation == 0) ++slot.generation;
+    slot.waiterAttached = true;
+    slot.completed = false;
+    slot.result = false;
+    slot.inUse = true;
+    m.completionSlot = i;
+    m.completionGeneration = slot.generation;
+    return true;
+  }
+  ERROR_CAMERAF("[CAM_PWR] all %u static completion slots are busy",
+                (unsigned)kCamPwrCompletionSlotCount);
+  return false;
+}
+
+static void cameraPwrReleaseCompletionLocked(const CameraPwrMsg& m) {
+  if (m.completionSlot >= kCamPwrCompletionSlotCount) return;
+  CameraPwrCompletionSlot& slot = sCamPwrCompletions[m.completionSlot];
+  if (slot.inUse && slot.generation == m.completionGeneration) {
+    slot.inUse = false;
+    slot.waiterAttached = false;
+    slot.completed = false;
+  }
+}
+
+static void cameraPwrComplete(const CameraPwrMsg& m, bool result) {
+  if (m.completionSlot >= kCamPwrCompletionSlotCount) return;
+  if (!cameraPwrLifecycleTake()) {
+    ERROR_CAMERAF("[CAM_PWR] lifecycle mutex unavailable for completion");
+    return;
+  }
+  CameraPwrCompletionSlot& slot = sCamPwrCompletions[m.completionSlot];
+  if (slot.inUse && slot.generation == m.completionGeneration) {
+    slot.result = result;
+    slot.completed = true;
+    if (!slot.waiterAttached) {
+      // The caller timed out while this command was queued or running. The
+      // worker is the final owner of the generation and releases it now; no
+      // stale signal is published and reuse was impossible before this point.
+      cameraPwrReleaseCompletionLocked(m);
+    } else if (xSemaphoreGive(slot.done) != pdTRUE) {
+      ERROR_CAMERAF("[CAM_PWR] completion semaphore already full slot=%u gen=%lu",
+                    (unsigned)m.completionSlot,
+                    (unsigned long)m.completionGeneration);
+    }
+  }
+  cameraPwrLifecycleGive();
+}
+
+void cameraPowerSetPostHook(CameraPowerPostHook hook) {
+  if (!cameraPwrLifecycleTake()) {
+    ERROR_CAMERAF("[CAM_PWR] lifecycle mutex unavailable; post hook unchanged");
+    return;
+  }
+  sCamPwrHook = hook;
+  cameraPwrLifecycleGive();
+}
 
 static void cameraPwrRunOne(const CameraPwrMsg& m) {
+  bool result = false;
   switch (m.cmd) {
     case CAM_PWR_CMD_STOP:
-      stopCamera();
+      result = stopCameraInternal(/*isRecovery=*/false);
       break;
     case CAM_PWR_CMD_START:
       if (!gCameraRunning) {
@@ -957,42 +1134,88 @@ static void cameraPwrRunOne(const CameraPwrMsg& m) {
           ramFlushMarkAutostartFailed(RF_CAMERA);
         }
       }
+      result = gCameraRunning;
       break;
     case CAM_PWR_CMD_RESTART: {
       const bool was = gCameraRunning;
       if (was) {
-        stopCamera();
+        if (!stopCameraInternal(/*isRecovery=*/false)) break;
         vTaskDelay(pdMS_TO_TICKS(100));
         if (!initCamera()) {
           BROADCAST_PRINTF("[CAM_PWR] restart: initCamera failed after stop");
         }
       }
+      result = gCameraRunning;
       break;
     }
     default:
       break;
   }
-  if (sCamPwrHook) {
-    sCamPwrHook();
+  CameraPowerPostHook hook = nullptr;
+  if (cameraPwrLifecycleTake()) {
+    hook = sCamPwrHook;
+    cameraPwrLifecycleGive();
   }
-  if (m.notify) {
-    xTaskNotifyGive(m.notify);
+  if (hook) {
+    hook();
   }
+  cameraPwrComplete(m, result);
 }
 
-static void cameraPwrWorker(void* /*arg*/) {
+static void cameraPwrWorker(void* arg) {
+  QueueHandle_t ownQueue = static_cast<QueueHandle_t>(arg);
   CameraPwrMsg m;
   for (;;) {
-    if (xQueueReceive(sCamPwrQueue, &m, portMAX_DELAY) != pdTRUE) {
+    if (xQueueReceive(ownQueue, &m,
+                      pdMS_TO_TICKS(kCamPwrIdleRetireMs)) == pdTRUE) {
+      cameraPwrRunOne(m);
       continue;
     }
-    cameraPwrRunOne(m);
+
+    // Serialise the empty re-check with every ensure+send operation. If a
+    // sender won the mutex first, its item is visible and this worker stays.
+    // If retirement wins, both globals are detached before the mutex is
+    // released, so the sender creates a new queue/task and never touches this
+    // queue. No task is force-deleted; this worker owns its final vTaskDelete.
+    if (!cameraPwrLifecycleTake()) continue;
+    const bool ownsPublishedPair =
+        sCamPwrTask == xTaskGetCurrentTaskHandle() &&
+        sCamPwrQueue == ownQueue;
+    const bool queueDrained = uxQueueMessagesWaiting(ownQueue) == 0;
+    if (!ownsPublishedPair || !queueDrained || sCamPwrAdmissions != 0) {
+      cameraPwrLifecycleGive();
+      continue;
+    }
+
+    // No sender can be blocked on or retain ownQueue: every send holds an
+    // admission reference from pointer capture through xQueueSend completion.
+    // Delete the drained queue while new admissions are still excluded, then
+    // detach the pair. The only unavoidable overlap left is the old dynamic
+    // task's stack/TCB, which FreeRTOS reclaims later from an IDLE task after
+    // this worker self-deletes; a replacement allocation may therefore need a
+    // second 10 KB stack briefly and can fail explicitly under heap pressure.
+    vQueueDelete(ownQueue);
+    sCamPwrTask = nullptr;
+    sCamPwrQueue = nullptr;
+    sCamPwrLastDetachTick = xTaskGetTickCount();
+    sCamPwrHasDetached = true;
+    cameraPwrLifecycleGive();
+
+    vTaskDelete(nullptr);
   }
 }
 
-void cameraPowerWorkerEnsureStarted() {
-  if (sCamPwrQueue) {
-    return;
+// Caller must hold sCamPwrLifecycleMutex. Publishing and teardown of the pair
+// happen under that same mutex, so a non-null pair always accepts the send that
+// follows ensure. Dynamic xTaskCreate keeps the stack in internal DRAM.
+static bool cameraPwrEnsureStartedLocked() {
+  if (sCamPwrQueue && sCamPwrTask) {
+    return true;
+  }
+  if (sCamPwrQueue || sCamPwrTask) {
+    ERROR_CAMERAF("[CAM_PWR] inconsistent lifecycle state (queue=%p task=%p)",
+                  (void*)sCamPwrQueue, (void*)sCamPwrTask);
+    return false;
   }
   constexpr UBaseType_t kDepth = 6;
   // ESP-IDF xTaskCreate stack depth is in BYTES — 10240 here is 10 KB.
@@ -1004,13 +1227,20 @@ void cameraPowerWorkerEnsureStarted() {
     ERROR_CAMERAF("[CAM_PWR] queue create failed (DRAM free=%u largest=%u)",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    return;
+    if (sCamPwrHasDetached) {
+      ERROR_CAMERAF("[CAM_PWR] previous self-deleted worker detached %lu ms ago; "
+                    "its internal stack/TCB are reclaimed asynchronously by IDLE",
+                    (unsigned long)pdTICKS_TO_MS(xTaskGetTickCount() -
+                                                 sCamPwrLastDetachTick));
+    }
+    return false;
   }
+  taskStackRecord("cam_pwr", kStack);
   const BaseType_t ok =
       // Pin to Core 1 (I2C_SENSOR_CORE): initCamera() does a shared-Wire I2C scan
       // before handing the bus to the camera driver, so this worker carries the
       // starve-mid-transaction → bus-storm → panic(4) hazard. Off the saturated Core 0.
-      xTaskCreatePinnedToCore(cameraPwrWorker, "cam_pwr", kStack, nullptr,
+      xTaskCreatePinnedToCore(cameraPwrWorker, "cam_pwr", kStack, sCamPwrQueue,
                   tskIDLE_PRIORITY + 2, &sCamPwrTask, I2C_SENSOR_CORE);
   if (ok != pdPASS) {
     ERROR_CAMERAF("[CAM_PWR] worker task create failed — need ~%u B internal stack "
@@ -1018,97 +1248,176 @@ void cameraPowerWorkerEnsureStarted() {
                   (unsigned)kStack,
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    if (sCamPwrHasDetached) {
+      ERROR_CAMERAF("[CAM_PWR] previous self-deleted worker detached %lu ms ago; "
+                    "its internal stack/TCB are reclaimed asynchronously by IDLE",
+                    (unsigned long)pdTICKS_TO_MS(xTaskGetTickCount() -
+                                                 sCamPwrLastDetachTick));
+    }
     vQueueDelete(sCamPwrQueue);
     sCamPwrQueue = nullptr;
     sCamPwrTask  = nullptr;
-  }
-}
-
-static bool cameraPwrSend(const CameraPwrMsg& m, TickType_t queueTicks) {
-  cameraPowerWorkerEnsureStarted();
-  if (!sCamPwrQueue) {
     return false;
   }
-  return xQueueSend(sCamPwrQueue, &m, queueTicks) == pdTRUE;
+  return true;
+}
+
+bool cameraPowerWorkerEnsureStarted() {
+  if (!cameraPwrLifecycleTake()) {
+    ERROR_CAMERAF("[CAM_PWR] lifecycle mutex unavailable; cannot start worker");
+    return false;
+  }
+  const bool ok = cameraPwrEnsureStartedLocked();
+  cameraPwrLifecycleGive();
+  return ok;
+}
+
+static bool cameraPwrSend(CameraPwrMsg& m, TickType_t queueTicks,
+                          bool needsCompletion = false) {
+  if (!cameraPwrLifecycleTake()) {
+    ERROR_CAMERAF("[CAM_PWR] lifecycle mutex unavailable; command=%u rejected",
+                  (unsigned)m.cmd);
+    return false;
+  }
+
+  // Desired power is authoritative and published at admission, before any
+  // allocation or queue operation can fail. In particular, a STOP that cannot
+  // recreate cam_pwr still fences captureFrame's inline recovery from re-init.
+  // Plain initCamera()/stopCamera() and recovery do not mutate this latch.
+  sCameraDesiredOn = m.cmd != CAM_PWR_CMD_STOP;
+
+  if (!cameraPwrEnsureStartedLocked()) {
+    cameraPwrLifecycleGive();
+    return false;
+  }
+  if (needsCompletion && !cameraPwrReserveCompletionLocked(m)) {
+    cameraPwrLifecycleGive();
+    return false;
+  }
+  QueueHandle_t targetQueue = sCamPwrQueue;
+  ++sCamPwrAdmissions;
+  cameraPwrLifecycleGive();
+
+  // Do not block on a full queue while holding the lifecycle mutex: the worker
+  // copies the post-hook under that mutex before it can receive the next item.
+  // The admission reference prevents retirement/deletion while this send is in
+  // flight, so targetQueue remains valid across the blocking call.
+  const bool sent = xQueueSend(targetQueue, &m, queueTicks) == pdTRUE;
+
+  if (!cameraPwrLifecycleTake()) {
+    ERROR_CAMERAF("[CAM_PWR] lifecycle mutex unavailable after command=%u send",
+                  (unsigned)m.cmd);
+    return false;
+  }
+  configASSERT(sCamPwrAdmissions > 0);
+  --sCamPwrAdmissions;
+  const UBaseType_t queued = sent ? 0 : uxQueueMessagesWaiting(targetQueue);
+  if (!sent) cameraPwrReleaseCompletionLocked(m);
+  cameraPwrLifecycleGive();
+  if (!sent) {
+    ERROR_CAMERAF("[CAM_PWR] queue send failed command=%u queued=%u",
+                  (unsigned)m.cmd, (unsigned)queued);
+  }
+  return sent;
 }
 
 bool cameraPowerRequestStartAsync() {
-  const CameraPwrMsg m{CAM_PWR_CMD_START, nullptr};
+  CameraPwrMsg m{CAM_PWR_CMD_START, kCamPwrNoCompletion, 0, 0};
   return cameraPwrSend(m, 0);
 }
 
 bool cameraPowerRequestStopAsync() {
-  // Never started and already off — do not spawn cam_pwr just to no-op.
-  if (!sCamPwrQueue && !gCameraRunning) {
-    return true;
-  }
-  const CameraPwrMsg m{CAM_PWR_CMD_STOP, nullptr};
+  CameraPwrMsg m{CAM_PWR_CMD_STOP, kCamPwrNoCompletion, 0, 0};
   return cameraPwrSend(m, 0);
 }
 
-static void cameraPwrWaitDone(TaskHandle_t self, uint32_t waitMs) {
-  (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
+static bool cameraPwrWaitDone(const CameraPwrMsg& m, uint32_t waitMs,
+                              bool& result) {
+  if (m.completionSlot >= kCamPwrCompletionSlotCount) return false;
+
+  SemaphoreHandle_t done = nullptr;
+  if (cameraPwrLifecycleTake()) {
+    CameraPwrCompletionSlot& slot = sCamPwrCompletions[m.completionSlot];
+    if (slot.inUse && slot.generation == m.completionGeneration) {
+      done = slot.done;
+    }
+    cameraPwrLifecycleGive();
+  }
+  if (!done || xSemaphoreTake(done, pdMS_TO_TICKS(waitMs)) != pdTRUE) {
+    if (cameraPwrLifecycleTake()) {
+      CameraPwrCompletionSlot& slot = sCamPwrCompletions[m.completionSlot];
+      if (slot.inUse && slot.generation == m.completionGeneration) {
+        slot.waiterAttached = false;
+        if (slot.completed) {
+          // Completion raced the timeout and already published its give. The
+          // worker no longer owns this generation, so drain and release it;
+          // the API still reports the elapsed timeout honestly.
+          while (xSemaphoreTake(slot.done, 0) == pdTRUE) {}
+          cameraPwrReleaseCompletionLocked(m);
+        }
+        // Otherwise leave inUse set. The queued/in-flight worker owns the last
+        // reference and will release this generation from cameraPwrComplete().
+      }
+      cameraPwrLifecycleGive();
+    }
+    return false;
+  }
+
+  bool matched = false;
+  if (cameraPwrLifecycleTake()) {
+    CameraPwrCompletionSlot& slot = sCamPwrCompletions[m.completionSlot];
+    matched = slot.inUse && slot.generation == m.completionGeneration &&
+              slot.completed;
+    if (matched) result = slot.result;
+    cameraPwrReleaseCompletionLocked(m);
+    cameraPwrLifecycleGive();
+  }
+  return matched;
 }
 
 bool cameraPowerRequestStartSync(uint32_t waitMs) {
-  cameraPowerWorkerEnsureStarted();
-  if (!sCamPwrQueue) {
+  CameraPwrMsg m{CAM_PWR_CMD_START, kCamPwrNoCompletion, 0, 0};
+  if (!cameraPwrSend(m, pdMS_TO_TICKS(5000), true)) {
     return false;
   }
-  TaskHandle_t self = xTaskGetCurrentTaskHandle();
-  (void)ulTaskNotifyTake(pdTRUE, 0);
-  const CameraPwrMsg m{CAM_PWR_CMD_START, self};
-  if (!cameraPwrSend(m, pdMS_TO_TICKS(5000))) {
+  bool result = false;
+  if (!cameraPwrWaitDone(m, waitMs, result)) {
+    ERROR_CAMERAF("[CAM_PWR] start timed out slot=%u gen=%lu",
+                  (unsigned)m.completionSlot,
+                  (unsigned long)m.completionGeneration);
     return false;
   }
-  cameraPwrWaitDone(self, waitMs);
-  return gCameraRunning;
+  return result;
 }
 
-void cameraPowerRequestStopSync(uint32_t waitMs) {
-  // Lazy worker: idle stop must not create cam_pwr. If the camera is somehow
-  // running without a worker, tear it down inline on the caller stack.
-  if (!sCamPwrQueue) {
-    if (gCameraRunning) {
-      stopCamera();
-    }
-    return;
+bool cameraPowerRequestStopSync(uint32_t waitMs) {
+  CameraPwrMsg m{CAM_PWR_CMD_STOP, kCamPwrNoCompletion, 0, 0};
+  if (!cameraPwrSend(m, pdMS_TO_TICKS(5000), true)) {
+    return false;
   }
-  TaskHandle_t self = xTaskGetCurrentTaskHandle();
-  (void)ulTaskNotifyTake(pdTRUE, 0);
-  const CameraPwrMsg m{CAM_PWR_CMD_STOP, self};
-  if (!cameraPwrSend(m, pdMS_TO_TICKS(5000))) {
-    stopCamera();
-    return;
+  bool result = false;
+  if (!cameraPwrWaitDone(m, waitMs, result)) {
+    ERROR_CAMERAF("[CAM_PWR] stop timed out slot=%u gen=%lu",
+                  (unsigned)m.completionSlot,
+                  (unsigned long)m.completionGeneration);
+    return false;
   }
-  cameraPwrWaitDone(self, waitMs);
+  return result;
 }
 
 bool cameraPowerRequestRestartSync(uint32_t waitMs) {
-  cameraPowerWorkerEnsureStarted();
-  if (!sCamPwrQueue) {
-    const bool was = gCameraRunning;
-    if (was) {
-      stopCamera();
-      vTaskDelay(pdMS_TO_TICKS(100));
-      return initCamera();
-    }
+  CameraPwrMsg m{CAM_PWR_CMD_RESTART, kCamPwrNoCompletion, 0, 0};
+  if (!cameraPwrSend(m, pdMS_TO_TICKS(5000), true)) {
     return false;
   }
-  TaskHandle_t self = xTaskGetCurrentTaskHandle();
-  (void)ulTaskNotifyTake(pdTRUE, 0);
-  const CameraPwrMsg m{CAM_PWR_CMD_RESTART, self};
-  if (!cameraPwrSend(m, pdMS_TO_TICKS(5000))) {
-    const bool was = gCameraRunning;
-    if (was) {
-      stopCamera();
-      vTaskDelay(pdMS_TO_TICKS(100));
-      return initCamera();
-    }
+  bool result = false;
+  if (!cameraPwrWaitDone(m, waitMs, result)) {
+    ERROR_CAMERAF("[CAM_PWR] restart timed out slot=%u gen=%lu",
+                  (unsigned)m.completionSlot,
+                  (unsigned long)m.completionGeneration);
     return false;
   }
-  cameraPwrWaitDone(self, waitMs);
-  return gCameraRunning;
+  return result;
 }
 
 // Command handlers
@@ -1130,8 +1439,9 @@ const char* cmd_camerastart(const String& argsInput) {
 
 const char* cmd_camerastop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  cameraPowerRequestStopSync(30000);
-  return "Camera stopped";
+  return cameraPowerRequestStopSync(30000)
+             ? "Camera stopped"
+             : "Error: Camera stop failed or timed out";
 }
 
 const char* cmd_cameracapture(const String& argsInput) {
@@ -1143,7 +1453,7 @@ const char* cmd_cameracapture(const String& argsInput) {
   size_t len = 0;
   uint8_t* frame = captureFrame(&len);
   if (frame) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "Captured frame: %u bytes", (unsigned)len);
     free(frame);
     // The captured frame is measured then discarded — it is not written to
@@ -1195,12 +1505,13 @@ const char* cmd_camerares(const String& argsInput) {
   bool wasEnabled = gCameraRunning;
   bool wasStreaming = cameraStreaming;
   
-  if (wasEnabled) {
-    (void)cameraPowerRequestRestartSync(60000);
-  }
+  const bool restartOk = !wasEnabled || cameraPowerRequestRestartSync(60000);
   
-  static char result[96];
-  if (wasStreaming) {
+  EXT_RAM_BSS_ATTR static char result[96];
+  if (!restartOk) {
+    snprintf(result, sizeof(result),
+             "Error: Resolution saved, but camera restart failed");
+  } else if (wasStreaming) {
     snprintf(result, sizeof(result), "Resolution set to %dx%d (saved). Streaming stopped - please restart stream.", cameraWidth, cameraHeight);
   } else if (wasEnabled) {
     snprintf(result, sizeof(result), "Resolution set to %dx%d (saved). Camera restarted.", cameraWidth, cameraHeight);
@@ -1222,7 +1533,7 @@ const char* cmd_cameraframesize(const String& argsInput) {
   valStr.trim();
 
   if (valStr.length() == 0) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "cameraFramesize=%d", gSettings.cameraFramesize);
     return result;
   }
@@ -1236,13 +1547,17 @@ const char* cmd_cameraframesize(const String& argsInput) {
   
   // If camera is running, restart to apply
   bool wasEnabled = gCameraRunning;
-  if (wasEnabled) {
-    (void)cameraPowerRequestRestartSync(60000);
-  }
+  const bool restartOk = !wasEnabled || cameraPowerRequestRestartSync(60000);
   
-  static char result[80];
-  snprintf(result, sizeof(result), "Resolution set to %dx%d. %s", cameraWidth, cameraHeight,
-           wasEnabled ? "Camera restarted." : "Will apply on next start.");
+  EXT_RAM_BSS_ATTR static char result[80];
+  if (!restartOk) {
+    snprintf(result, sizeof(result),
+             "Error: Resolution saved, but camera restart failed");
+  } else {
+    snprintf(result, sizeof(result), "Resolution set to %dx%d. %s",
+             cameraWidth, cameraHeight,
+             wasEnabled ? "Camera restarted." : "Will apply on next start.");
+  }
   return result;
 }
 
@@ -1253,7 +1568,7 @@ const char* cmd_cameraquality(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char result[80];
+    EXT_RAM_BSS_ATTR static char result[80];
     snprintf(result, sizeof(result), "Current: %d\nUsage: cameraquality <0-63> (lower = better quality, larger file)", 
              gSettings.cameraQuality);
     return result;
@@ -1270,12 +1585,12 @@ const char* cmd_cameraquality(const String& argsInput) {
   // Apply live if camera is running (quality can be changed without restart)
   if (gCameraRunning) {
     setCameraQuality(quality);
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "JPEG quality set to %d (saved, applied live)", quality);
     return result;
   }
   
-  static char result[64];
+  EXT_RAM_BSS_ATTR static char result[64];
   snprintf(result, sizeof(result), "JPEG quality set to %d (saved, will apply on camera start)", quality);
   return result;
 }
@@ -1289,7 +1604,7 @@ const char* cmd_cameratiny(const String& argsInput) {
   size_t len = 0;
   uint8_t* frame = captureTinyFrame(&len);
   if (frame) {
-    static char result[96];
+    EXT_RAM_BSS_ATTR static char result[96];
     snprintf(result, sizeof(result), "Tiny frame (160x120): %u bytes %s", 
              (unsigned)len, len <= 250 ? "(ESP-NOW compatible)" : "(too large for single ESP-NOW packet)");
     free(frame);
@@ -1325,7 +1640,7 @@ const char* cmd_camerabrightness(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "Brightness: %d (range -2 to 2)", gSettings.cameraBrightness);
     return result;
   }
@@ -1334,7 +1649,7 @@ const char* cmd_camerabrightness(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_brightness(s, val) == 0) {
     setSetting(gSettings.cameraBrightness, val);
-    static char result[48];
+    EXT_RAM_BSS_ATTR static char result[48];
     snprintf(result, sizeof(result), "Brightness set to %d (saved)", val);
     return result;
   }
@@ -1349,7 +1664,7 @@ const char* cmd_cameracontrast(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "Contrast: %d (range -2 to 2)", gSettings.cameraContrast);
     return result;
   }
@@ -1358,7 +1673,7 @@ const char* cmd_cameracontrast(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_contrast(s, val) == 0) {
     setSetting(gSettings.cameraContrast, val);
-    static char result[48];
+    EXT_RAM_BSS_ATTR static char result[48];
     snprintf(result, sizeof(result), "Contrast set to %d (saved)", val);
     return result;
   }
@@ -1373,7 +1688,7 @@ const char* cmd_camerasaturation(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "Saturation: %d (range -2 to 2)", gSettings.cameraSaturation);
     return result;
   }
@@ -1382,7 +1697,7 @@ const char* cmd_camerasaturation(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_saturation(s, val) == 0) {
     setSetting(gSettings.cameraSaturation, val);
-    static char result[48];
+    EXT_RAM_BSS_ATTR static char result[48];
     snprintf(result, sizeof(result), "Saturation set to %d (saved)", val);
     return result;
   }
@@ -1397,7 +1712,7 @@ const char* cmd_camerawb(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char result[96];
+    EXT_RAM_BSS_ATTR static char result[96];
     snprintf(result, sizeof(result), "WB mode: %d (0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home)", gSettings.cameraWBMode);
     return result;
   }
@@ -1408,7 +1723,7 @@ const char* cmd_camerawb(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_wb_mode(s, val) == 0) {
     setSetting(gSettings.cameraWBMode, val);
-    static char result[48];
+    EXT_RAM_BSS_ATTR static char result[48];
     snprintf(result, sizeof(result), "WB mode set to %d (saved)", val);
     return result;
   }
@@ -1423,7 +1738,7 @@ const char* cmd_camerasharpness(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "Sharpness: %d (range -2 to 2, OV3660 only)", gSettings.cameraSharpness);
     return result;
   }
@@ -1434,7 +1749,7 @@ const char* cmd_camerasharpness(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_sharpness && s->set_sharpness(s, val) == 0) {
     setSetting(gSettings.cameraSharpness, val);
-    static char result[48];
+    EXT_RAM_BSS_ATTR static char result[48];
     snprintf(result, sizeof(result), "Sharpness set to %d (saved)", val);
     return result;
   }
@@ -1449,7 +1764,7 @@ const char* cmd_cameradenoise(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "Denoise: %d (range 0-8)", gSettings.cameraDenoise);
     return result;
   }
@@ -1460,7 +1775,7 @@ const char* cmd_cameradenoise(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_denoise && s->set_denoise(s, val) == 0) {
     setSetting(gSettings.cameraDenoise, val);
-    static char result[48];
+    EXT_RAM_BSS_ATTR static char result[48];
     snprintf(result, sizeof(result), "Denoise set to %d (saved)", val);
     return result;
   }
@@ -1475,7 +1790,7 @@ const char* cmd_cameraeffect(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char result[96];
+    EXT_RAM_BSS_ATTR static char result[96];
     snprintf(result, sizeof(result), "Effect: %d (0=None,1=Neg,2=Gray,3=Red,4=Green,5=Blue,6=Sepia)", gSettings.cameraSpecialEffect);
     return result;
   }
@@ -1486,7 +1801,7 @@ const char* cmd_cameraeffect(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_special_effect(s, val) == 0) {
     setSetting(gSettings.cameraSpecialEffect, val);
-    static char result[48];
+    EXT_RAM_BSS_ATTR static char result[48];
     snprintf(result, sizeof(result), "Effect set to %d (saved)", val);
     return result;
   }
@@ -1501,7 +1816,7 @@ const char* cmd_cameraexposure(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char result[80];
+    EXT_RAM_BSS_ATTR static char result[80];
     snprintf(result, sizeof(result), "AE Level: %d (range -2 to 2, negative=darker)", gSettings.cameraAELevel);
     return result;
   }
@@ -1512,7 +1827,7 @@ const char* cmd_cameraexposure(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_ae_level(s, val) == 0) {
     setSetting(gSettings.cameraAELevel, val);
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "AE Level set to %d (saved)", val);
     return result;
   }
@@ -1550,7 +1865,7 @@ const char* cmd_camerafps(const String& argsInput) {
   valStr.trim();
 
   if (valStr.length() == 0) {
-    static char buf[96];
+    EXT_RAM_BSS_ATTR static char buf[96];
     snprintf(buf, sizeof(buf), "Camera FPS: %d fps\nUsage: camerafps <1-20>",
              gSettings.cameraStreamFps);
     return buf;
@@ -1559,7 +1874,7 @@ const char* cmd_camerafps(const String& argsInput) {
   int val = valStr.toInt();
   if (val < 1 || val > 20) return "Error: cameraStreamFps must be 1-20";
   setSetting(gSettings.cameraStreamFps, val);
-  static char buf[64];
+  EXT_RAM_BSS_ATTR static char buf[64];
   snprintf(buf, sizeof(buf), "cameraStreamFps set to %d fps", val);
   return buf;
 }
@@ -1583,7 +1898,7 @@ const char* cmd_cameraaecvalue(const String& argsInput) {
 
   (void)s->set_exposure_ctrl(s, 0);
   if (s->set_aec_value(s, val) == 0) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "Manual exposure set to %d", val);
     return result;
   }
@@ -1633,7 +1948,7 @@ const char* cmd_cameraagcgain(const String& argsInput) {
 
   (void)s->set_gain_ctrl(s, 0);
   if (s->set_agc_gain(s, val) == 0) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "Manual gain set to %d", val);
     return result;
   }
@@ -1659,7 +1974,7 @@ const char* cmd_cameragainceiling(const String& argsInput) {
   if (!sens) return "Error: Camera sensor not available";
 
   if (s.length() == 0) {
-    static char r[64];
+    EXT_RAM_BSS_ATTR static char r[64];
     static const char* kNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
     int v = sens->status.gainceiling;
     snprintf(r, sizeof(r), "Gainceiling: %d (%s). Set with: cameragainceiling <0-6>",
@@ -1669,7 +1984,7 @@ const char* cmd_cameragainceiling(const String& argsInput) {
   int v = s.toInt();
   if (v < 0 || v > 6) return "Error: gainceiling must be 0..6 (2X..128X)";
   if (sens->set_gainceiling(sens, (gainceiling_t)v) == 0) {
-    static char r[64];
+    EXT_RAM_BSS_ATTR static char r[64];
     static const char* kNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
     snprintf(r, sizeof(r), "Gainceiling set to %d (%s)", v, kNames[v]);
     return r;
@@ -1693,7 +2008,7 @@ static const char* cameraBoolToggle(const String& argsInput,
   sensor_t* s = esp_camera_sensor_get();
   if (!s || !setter) return "Error: Camera sensor not available";
 
-  static char r[80];
+  EXT_RAM_BSS_ATTR static char r[80];
   String a = argsInput; a.trim();
   if (a.length() == 0) {
     snprintf(r, sizeof(r), "%s: %s", tag, currentVal ? "ON" : "OFF");
@@ -1798,7 +2113,7 @@ const char* cmd_camerareg(const String& argsInput) {
     return "Error: Bad format. Usage: camerareg <addr_hex> <mask_hex> <value_hex>";
   }
   if (s->set_reg(s, (int)addr, (int)mask, (int)val) == 0) {
-    static char r[80];
+    EXT_RAM_BSS_ATTR static char r[80];
     snprintf(r, sizeof(r), "set_reg(0x%04X, 0x%02X, 0x%02X) ok", addr, mask, val);
     return r;
   }
@@ -1868,7 +2183,7 @@ const char* cmd_camerafx(const String& argsInput) {
 
   String a = argsInput; a.trim();
   if (a.length() == 0) {
-    static char r[96];
+    EXT_RAM_BSS_ATTR static char r[96];
     snprintf(r, sizeof(r),
              "camerafx: bri=%d con=%d sat=%d. Usage: camerafx <bri> <con> <sat>  (-2..+2 each)",
              (int)s->status.brightness, (int)s->status.contrast,
@@ -1898,7 +2213,7 @@ const char* cmd_camerafx(const String& argsInput) {
   setSetting(gSettings.cameraContrast,   con);
   setSetting(gSettings.cameraSaturation, sat);
 
-  static char r[120];
+  EXT_RAM_BSS_ATTR static char r[120];
   snprintf(r, sizeof(r),
            "camerafx applied: bri=%d (rc=%d), con=%d (rc=%d), sat=%d (rc=%d) — saved",
            bri, rc2, con, rc1, sat, rc3);
@@ -2002,14 +2317,14 @@ const char* cmd_camerastoragelocation(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char buf[64];
+    EXT_RAM_BSS_ATTR static char buf[64];
     snprintf(buf, sizeof(buf), "cameraStorageLocation = %d (0=LittleFS, 1=SD, 2=Both)", gSettings.cameraStorageLocation);
     return buf;
   }
   int val = valStr.toInt();
   if (val < 0 || val > 2) return "Error: cameraStorageLocation must be 0-2";
   setSetting(gSettings.cameraStorageLocation, val);
-  static char buf[48];
+  EXT_RAM_BSS_ATTR static char buf[48];
   snprintf(buf, sizeof(buf), "cameraStorageLocation set to %d", val);
   return buf;
 }
@@ -2036,14 +2351,14 @@ const char* cmd_cameramaxstoredimages(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char buf[64];
+    EXT_RAM_BSS_ATTR static char buf[64];
     snprintf(buf, sizeof(buf), "cameraMaxStoredImages = %d", gSettings.cameraMaxStoredImages);
     return buf;
   }
   int val = valStr.toInt();
   if (val < 0 || val > 1000) return "Error: cameraMaxStoredImages must be 0-1000";
   setSetting(gSettings.cameraMaxStoredImages, val);
-  static char buf[48];
+  EXT_RAM_BSS_ATTR static char buf[48];
   snprintf(buf, sizeof(buf), "cameraMaxStoredImages set to %d", val);
   return buf;
 }
@@ -2071,14 +2386,14 @@ const char* cmd_cameraautocaptureinterval(const String& argsInput) {
   valStr.trim();
   
   if (valStr.length() == 0) {
-    static char buf[64];
+    EXT_RAM_BSS_ATTR static char buf[64];
     snprintf(buf, sizeof(buf), "cameraAutoCaptureInterval = %d sec", gSettings.cameraAutoCaptureIntervalSec);
     return buf;
   }
   int val = valStr.toInt();
   if (val < 10 || val > 3600) return "Error: cameraAutoCaptureInterval must be 10-3600";
   setSetting(gSettings.cameraAutoCaptureIntervalSec, val);
-  static char buf[48];
+  EXT_RAM_BSS_ATTR static char buf[48];
   snprintf(buf, sizeof(buf), "cameraAutoCaptureInterval set to %d sec", val);
   return buf;
 }
@@ -2135,7 +2450,7 @@ const char* cmd_camerasave(const String& argsInput) {
   // Capture and save
   String savedPath = gImageManager.captureAndSave(loc);
   if (savedPath.length() > 0) {
-    static char result[128];
+    EXT_RAM_BSS_ATTR static char result[128];
     snprintf(result, sizeof(result), "Saved: %s", savedPath.c_str());
     return result;
   }
@@ -2145,7 +2460,7 @@ const char* cmd_camerasave(const String& argsInput) {
 // ── Video recording commands ────────────────────────────────────────────────
 // These forward to System_Camera_Video. Kept here so they register alongside
 // the rest of the camera command table.
-static char gCameraCmdBuffer[192];
+EXT_RAM_BSS_ATTR static char gCameraCmdBuffer[192];
 
 const char* cmd_camerarecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -2165,7 +2480,7 @@ const char* cmd_camerarecord(const String& argsInput) {
     bool wasRecording = videoRecording;
     stopVideoRecording();
     if (!wasRecording) return "Recording stopped";
-    static char out[160];
+    EXT_RAM_BSS_ATTR static char out[160];
     snprintf(out, sizeof(out), "Recording stopped — %s (%lu frames)",
              videoLastRecordingPath(), (unsigned long)videoLastRecordingFrames());
     return out;

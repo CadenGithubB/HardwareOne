@@ -52,7 +52,7 @@ static const SettingEntry thermalSettingEntries[] = {
   { "thermalTargetFps", SETTING_INT, &gSettings.thermalTargetFps, 8, 0, nullptr, 1, 8, "Target FPS", nullptr, false, "timing", "thermaltargetfps" },
   { "thermalDevicePollMs", SETTING_INT, &gSettings.thermalDevicePollMs, 100, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr, false, "timing", "thermaldevicepollms" },
   { "thermalTemporalAlpha", SETTING_FLOAT, &gSettings.thermalTemporalAlpha, 0, 0.5f, nullptr, 0, 1, "Temporal Alpha", nullptr, false, "filtering", "thermaltemporalalpha" },
-  { "thermalRotation", SETTING_INT, &gSettings.thermalRotation, 0, 0, nullptr, 0, 3, "Rotation (0-3)", nullptr, false, "display", "thermalrotation" },
+  { "thermalRotation", SETTING_INT, &gSettings.thermalRotation, 0, 0, nullptr, 0, 3, "Rotation", "0|0°,1|90°,2|180°,3|270°", false, "display", "thermalrotation" },
   { "thermalI2cClockHz", SETTING_INT, &gSettings.i2cClockThermalHz, 400000, 0, nullptr, 100000, 1000000, "I2C Clock (Hz)", nullptr, false, nullptr, "thermali2cclockhz" },
 };
 

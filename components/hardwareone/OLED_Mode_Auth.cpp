@@ -39,6 +39,19 @@ static String errorMessage = "";
 static unsigned long errorDisplayUntil = 0;
 static bool loginKeyboardActive = false;
 
+// Identity-boundary teardown. This is intentionally stronger than a normal
+// mode exit: a remote session replacement can happen while this mode is not
+// current, so every credential-bearing field must be erased independently of
+// navigation/onEnter hooks.
+static void resetLoginSessionState() {
+  loginKeyboardActive = false;
+  currentField = FIELD_USERNAME;
+  secureClearString(usernameBuffer);
+  secureClearString(passwordBuffer);
+  secureClearString(errorMessage);
+  errorDisplayUntil = 0;
+}
+
 // Login display function
 static void displayLoginMode() {
   if (!oledDisplay) {
@@ -181,25 +194,19 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
     if (currentField == FIELD_LOGIN_BUTTON) {
       // Attempt login
       if (usernameBuffer.length() > 0 && passwordBuffer.length() > 0) {
+        // Authority publishes synchronously, while its UI consequences are
+        // deferred until this input callback unwinds. Keep only the audit name
+        // long enough to post the event, and erase both credentials here too;
+        // the owner-side boundary reset is the second line of defence.
+        String attemptedUser = usernameBuffer;
         if (loginTransport(SOURCE_LOCAL_DISPLAY, usernameBuffer, passwordBuffer)) {
-          systemEventPost(SYSEVT_LOGIN_OK, usernameBuffer.c_str(), "display");
-          errorMessage = "Login successful!";
-          errorDisplayUntil = millis() + 2000;
-          oledMarkDirtyUntil(errorDisplayUntil);
-          
-          // Securely clear buffers for next login
-          secureClearString(usernameBuffer);
-          secureClearString(passwordBuffer);
-          currentField = FIELD_USERNAME;
-          
-          // Go to menu after successful login (no stack push — login screen should not be in history)
-          requestOLEDMode(OLED_MENU, "auth.login.success", false);
-          resetOLEDMenu();
-          tryAutoStartInputForMenu();
-          
+          systemEventPost(SYSEVT_LOGIN_OK, attemptedUser.c_str(), "display");
+          resetLoginSessionState();
+          secureClearString(attemptedUser);
           return true;
         } else {
-          systemEventPost(SYSEVT_LOGIN_FAIL, usernameBuffer.c_str(), "display");
+          systemEventPost(SYSEVT_LOGIN_FAIL, attemptedUser.c_str(), "display");
+          secureClearString(attemptedUser);
           errorMessage = "Invalid credentials";
           errorDisplayUntil = millis() + 3000;
           oledMarkDirtyUntil(errorDisplayUntil);
@@ -265,6 +272,16 @@ static bool isLoginModeAvailable(String* outReason) {
 // Logout state
 static unsigned long logoutMessageUntil = 0;
 static String loggedOutUser = "";
+
+static void resetLogoutSessionState() {
+  logoutMessageUntil = 0;
+  secureClearString(loggedOutUser);
+}
+
+void oledAuthModeResetSessionState() {
+  resetLoginSessionState();
+  resetLogoutSessionState();
+}
 
 // Display logout confirmation
 static void displayLogoutMode() {
@@ -341,12 +358,12 @@ static bool handleLogoutModeInput(int deltaX, int deltaY, uint32_t newlyPressed)
     bool isAuthed = isTransportAuthenticated(SOURCE_LOCAL_DISPLAY);
     
     if (isAuthed && currentUser.length() > 0) {
-      // Perform logout
-      loggedOutUser = currentUser;
+      // Publish logout now; the OLED owner applies its UI teardown immediately
+      // after this input callback unwinds, before the next render.
       logoutTransport(SOURCE_LOCAL_DISPLAY);
-      logoutMessageUntil = millis() + 3000;  // Show message for 3 seconds
-      
-      DEBUG_SYSTEMF("[LOGOUT] User '%s' logged out from OLED", loggedOutUser.c_str());
+
+      DEBUG_SYSTEMF("[LOGOUT] User '%s' logged out from OLED", currentUser.c_str());
+      secureClearString(currentUser);
       handled = true;
     } else {
       // No session to log out - go back to previous mode

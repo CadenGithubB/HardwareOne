@@ -32,6 +32,7 @@
 //   }
 //
 #include "System_BuildConfig.h"
+#include "System_User.h"  // TransportSessionEpoch
 #include <Arduino.h>
 
 #if ENABLE_BLUETOOTH
@@ -51,19 +52,64 @@ enum BlePeerKind : uint8_t {
   BLE_PEER_MAX        = 8,   // hard cap on the registry table
 };
 
+// Result of asking a peer module to admit one saved-target connect attempt.
+// This reports admission only; STARTED does not imply that the asynchronous
+// BLE operation will ultimately connect.
+enum class BlePeerConnectAdmission : uint8_t {
+  STARTED = 0,
+  COALESCED,
+  BUSY,
+  ALREADY_UP,
+  NO_TARGET,
+  ROLE_BLOCKED,
+};
+
+// Persisted peers currently store address text only. Keep the coordinator
+// handoff fixed-size and allocation-free; address type 0 matches the ESP-IDF
+// BLE_ADDR_TYPE_PUBLIC default, but `addressType*Known` remains false until the
+// persistence schema records the observed type.
+constexpr size_t BLE_PEER_ADDRESS_TEXT_CAPACITY = 18;  // 17 chars + NUL
+constexpr uint8_t BLE_PEER_DEFAULT_ADDRESS_TYPE = 0;
+
+struct BlePeerSavedTarget {
+  char mac1[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+  char mac2[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+  uint8_t addressType1 = BLE_PEER_DEFAULT_ADDRESS_TYPE;
+  uint8_t addressType2 = BLE_PEER_DEFAULT_ADDRESS_TYPE;
+  bool addressType1Known = false;
+  bool addressType2Known = false;
+};
+
+// Exact scheduler incarnation being offered to the peer coordinator. A peer
+// must carry these generations into asynchronous work and reject/cancel work
+// for which blePeerConnectRequestIsCurrent() becomes false.
+struct BlePeerConnectRequest {
+  uint32_t intentGeneration = 0;
+  uint32_t identityGeneration = 0;
+  bool autoReconnect = false;
+  bool explicitReseek = false;
+  BlePeerSavedTarget savedTarget;
+};
+
+using BlePeerConnectSavedAdmissionFn =
+    BlePeerConnectAdmission (*)(const BlePeerConnectRequest& request);
+
 // Per-peer connect ops, supplied by the owning module at registration.
-// All callbacks must be safe to call from any context (CLI thread, web
-// handler thread, BLE notify task) — they typically spawn their own
-// background task to do real work and return quickly.
+// All callbacks must be safe to call from task context (CLI/web/main-loop/BLE
+// host tasks). They must enqueue or coalesce real work and return quickly.
 struct BlePeerOps {
-  // Begin a saved-MAC reconnect. Reads gBlePeerData[kind].mac1/mac2 and
-  // initiates connection. Returns true if the attempt was started (not
-  // necessarily that it'll succeed — connect is async).
+  // Legacy admission callback. Kept as a compatibility bridge while peer
+  // modules migrate to connectSavedAdmission below. true maps to STARTED;
+  // false maps conservatively to BUSY.
   bool (*connectSaved)(void);
   // Tear down any active connection. Idempotent; safe when not connected.
   void (*disconnect)(void);
   // True when the peer is currently linked at the BLE level.
   bool (*isConnected)(void);
+  // Preferred admission callback. When present, the scheduler uses this
+  // explicit result and never calls the legacy bool callback. This trailing
+  // field preserves existing three-entry aggregate initializers.
+  BlePeerConnectSavedAdmissionFn connectSavedAdmission;
 };
 
 // Compile-time descriptor for a peer. Each owning module fills one of
@@ -77,25 +123,6 @@ struct BlePeerSpec {
   const BlePeerOps* ops;           // null when !connectable
 };
 
-// Per-peer mutable data. Persisted in settings.json under the peer name.
-// Indexed by BlePeerKind. All BLE_PEER_MAX slots exist; only the
-// registered ones have meaningful data.
-struct BlePeerData {
-  String mac1;
-  String mac2;        // empty unless macCount==2
-  bool   autoReconnect;
-  // Username of whoever first paired this peer (turned autoReconnect on
-  // or saved the MAC). Used by callers that act *on behalf of* the
-  // peer — most notably G2_HijackCmd, which needs an AuthContext.user
-  // when submitting tap-driven commands through cmd_exec. Stamped once
-  // by bleStampPairedByIfBlank and never overwritten in-session; to
-  // re-assign ownership, clear the peer (bondrm or settings edit).
-  // When blank, callers should treat the action as unauthenticated.
-  String pairedByUser;
-};
-
-extern BlePeerData gBlePeerData[BLE_PEER_MAX];
-
 // -----------------------------------------------------------------------------
 // Registration
 // -----------------------------------------------------------------------------
@@ -104,7 +131,7 @@ extern BlePeerData gBlePeerData[BLE_PEER_MAX];
 // same kind overwrites the first registration. Returns true on success;
 // false if `kind >= BLE_PEER_MAX` or `spec.name` collides with a different
 // kind already registered. Safe to call after settings have loaded — the
-// registry just binds the spec; gBlePeerData is already populated.
+// registry just binds the spec; the private persisted mirror is already loaded.
 bool bleRegisterPeer(const BlePeerSpec& spec);
 
 // Register the built-in metadata-only peers (currently just "phone") that
@@ -134,32 +161,74 @@ const BlePeerSpec*  bleRegisteredPeerAt(size_t i);
 void bleSavePeerMac(BlePeerKind kind,
                     const String& mac1,
                     const String& mac2 = String());
+// Generation-conditioned variant for an asynchronous repair that discovered
+// a previously missing address. It cannot overwrite a target/owner identity
+// replaced after the repair was admitted.
+bool bleSavePeerMacIfIdentityCurrent(
+    BlePeerKind kind, uint32_t expectedIdentityGeneration,
+    const String& mac1, const String& mac2 = String());
 
 // Stamp pairedByUser if blank. Resolves identity in order:
 //   1) calling task TLS user
 //   2) live OLED / serial session (non-guest)
 //   3) device founder (first users.json username)
 // Idempotent when already owned. Only WARNs when no usable owner exists
-// at all (pre-FTS). Call from pairing-intent sites (`openg2`,
-// `bleautoreconnect on`, OLED connect, boot reconnect heal).
+// at all (pre-FTS). Call only from explicit authenticated pairing-intent sites
+// (`openg2`, `bleautoreconnect on`, OLED connect); never from boot/automatic
+// saved-MAC recovery.
 void bleStampPairedByIfBlank(BlePeerKind kind);
+
+// Coherent runtime authority for a peer that acts on behalf of its owner.
+// `generation` changes on every owner publication/clear. `transportEpoch` is
+// the central boot-local session token used by queued G2 commands; it is zero
+// for an unowned peer (and for peer kinds that do not execute commands).
+struct BlePeerOwnerSession {
+  String user;
+  uint32_t generation = 0;
+  TransportSessionEpoch transportEpoch = kNoTransportSessionEpoch;
+
+  bool live() const {
+    return user.length() > 0 && generation != 0 && transportEpoch != 0;
+  }
+};
+
+// Snapshot owner + generation + central transport epoch under one lock.
+bool blePeerOwnerSessionSnapshot(BlePeerKind kind,
+                                 BlePeerOwnerSession& out);
+
+// Exact post-snapshot fence. All four values must still describe the same
+// live owner incarnation. This is used by G2 completion/revocation paths in
+// addition to cmd_exec's central transport-session fence.
+bool blePeerOwnerSessionIsCurrent(BlePeerKind kind,
+                                  const BlePeerOwnerSession& expected);
+
+// Compare-and-clear: succeeds only if the exact owner incarnation captured in
+// `expected` is still current. Used by account revoke/ban paths so they cannot
+// accidentally clear a replacement owner that won a concurrent publication.
+bool blePeerOwnerSessionClearIfCurrent(
+    BlePeerKind kind, const BlePeerOwnerSession& expected);
+
+// Clear the persistent owner and close its central authority epoch. The peer
+// lock is released before settings are written, so this is safe from user/
+// settings mutation paths. Returns true only when state changed.
+bool blePeerOwnerSessionClear(BlePeerKind kind);
 
 // -----------------------------------------------------------------------------
 // Boot + runtime reconnect orchestrator
 // -----------------------------------------------------------------------------
 
-// True if any registered peer wants auto-reconnect at boot AND has a
-// saved MAC to reconnect to. Used by HardwareOne.cpp to decide whether
-// to bring up the BLE central stack at boot when bleAutoStart is
-// off but a peer wants to come up.
+// True if any persisted known peer wants auto-reconnect at boot, has a saved
+// MAC, and already has owner authority. Used by HardwareOne.cpp to decide
+// whether to bring up the BLE central stack at boot when bleAutoStart is off
+// but a peer wants to come up.
 bool bleAnyPeerWantsAutoReconnect(void);
 
-// Iterate the registry and trigger connectSaved() for every peer whose
-// autoReconnect flag is set AND that has a saved mac1. Each connect is
-// non-blocking (spawns its own task), but we pace them so multiple
-// peers don't fight the same BLE radio for scan windows: 2 s stagger
-// between kicks. Call AFTER initG2Client() so peer modules have
-// registered.
+// Iterate the registry and request saved-target admission for every peer whose
+// autoReconnect flag is set, whose owner authority already exists, and that
+// has at least one usable saved target. Requests are non-blocking and newly
+// STARTED attempts are paced by 2 s. Failed/coalesced admissions remain
+// scheduled for the periodic tick; boot recovery never manufactures peer
+// ownership. Call AFTER initG2Client() so peer modules have registered.
 void bleBootReconnect(void);
 
 // Mid-session drop recovery (when autoReconnect is on + saved MAC):
@@ -168,12 +237,52 @@ void bleBootReconnect(void);
 //   blePeerNoteLinkLost — call from BLE onDisconnect when the link was up;
 //     schedules a reconnect attempt if autoReconnect is on and the drop was
 //     not user-initiated.
-//   blePeerNoteLinkUp — call on connect success; clears backoff / user flag.
+//   blePeerNoteUserConnectIntent — call when an authenticated user explicitly
+//     starts a manual pairing/connect; clears older disconnect suppression and
+//     invalidates queued automatic work before the async operation begins.
+//   blePeerNoteLinkUp — call on a manual/untracked connect success; clears
+//     backoff only if no newer user disconnect superseded that operation.
+//   blePeerNoteLinkUpIfCurrent — scheduler-worker completion variant; commits
+//     only if the exact admitted request is still current, so a late success
+//     cannot undo a newer user disconnect or target/owner change.
 //   bleAutoReconnectTick — call from the main loop; fires due reconnects
 //     with exponential backoff (5s → ~3 min).
 void blePeerNoteUserDisconnect(BlePeerKind kind);
+void blePeerNoteUserConnectIntent(BlePeerKind kind);
 void blePeerNoteLinkLost(BlePeerKind kind);
 void blePeerNoteLinkUp(BlePeerKind kind);
+bool blePeerNoteLinkUpIfCurrent(
+    BlePeerKind kind, const BlePeerConnectRequest& request);
+// Finite/manual repair fence. Unlike a scheduler request, a half-pair repair
+// is allowed while autoReconnect is off, but it must still be cancelled by a
+// newer user disconnect, owner/target replacement, or manual intent.
+bool blePeerIntentIsCurrent(BlePeerKind kind, uint32_t intentGeneration,
+                            uint32_t identityGeneration);
+bool blePeerNoteLinkUpIfIntentCurrent(BlePeerKind kind,
+                                      uint32_t intentGeneration,
+                                      uint32_t identityGeneration);
+// Begin a manual/name-or-MAC discovery which may learn a new saved target.
+// The returned generations fence the asynchronous job against a later user
+// disconnect, owner revocation, or target replacement without requiring a
+// saved target to exist yet.
+bool blePeerBeginManualLearn(BlePeerKind kind,
+                             uint32_t& intentGeneration,
+                             uint32_t& identityGeneration);
+// Atomically validate a manual-learning fence, apply the discovered address,
+// and (only for a complete logical topology) consume reconnect intent. The
+// caller persists after releasing its family completion mutex when requested.
+bool blePeerCommitLearnedTargetIfCurrent(
+    BlePeerKind kind, uint32_t intentGeneration,
+    uint32_t identityGeneration, const String& mac1,
+    const String& mac2, uint8_t replaceMask, bool completeTopology,
+    bool* persistNeeded = nullptr);
+// Atomically validates a finite repair's intent+identity, applies any newly
+// discovered MAC, and commits LinkUp under the PeerData→reconnect lock order.
+// No separate policy or persistence window remains after this returns true.
+bool blePeerCommitRepairIfCurrent(
+    BlePeerKind kind, uint32_t intentGeneration,
+    uint32_t identityGeneration, const String& mac1,
+    const String& mac2 = String(), bool* persistNeeded = nullptr);
 void bleAutoReconnectTick(void);
 
 // One-shot / schedule a reseek even when autoReconnect is off (e.g. Health
@@ -181,6 +290,56 @@ void bleAutoReconnectTick(void);
 // disconnected, there is no saved MAC, or the peer is already linked.
 // Non-blocking — the next bleAutoReconnectTick fires connectSaved.
 void blePeerRequestReseek(BlePeerKind kind);
+
+// Synchronized scheduler snapshot. intentGeneration changes whenever user or
+// link intent is created, replaced, or cancelled. Handing an admitted one-shot
+// to its asynchronous job does not invalidate that job's generation.
+// identityGeneration changes when
+// the saved target or owner-authority incarnation changes. Callers can use the
+// pair as an ABA fence around asynchronous work; zero means not initialized.
+struct BlePeerReconnectSnapshot {
+  uint32_t intentGeneration = 0;
+  uint32_t identityGeneration = 0;
+  bool userDisconnect = false;
+  bool wantsReconnect = false;
+  bool explicitReseek = false;
+  bool autoReconnect = false;
+  bool hasSavedTarget = false;
+  bool ownerAuthorityAvailable = false;
+  bool admissionInFlight = false;
+  uint8_t launchedAttempts = 0;
+  uint32_t dueMs = 0;
+};
+
+bool blePeerReconnectSnapshot(BlePeerKind kind,
+                              BlePeerReconnectSnapshot& out);
+bool blePeerAutoReconnectEnabled(BlePeerKind kind);
+
+// Immutable saved-target snapshot copied from the same synchronized runtime
+// publication used by reconnect admission. A valid kind returns true even if
+// no target is configured; single-address peers test target.mac1[0], while G2
+// may legitimately have only target.mac2[0] for a right-temple-only pairing.
+struct BlePeerSavedTargetSnapshot {
+  uint32_t identityGeneration = 0;
+  BlePeerSavedTarget target;
+};
+
+bool blePeerSavedTargetSnapshot(BlePeerKind kind,
+                                BlePeerSavedTargetSnapshot& out);
+
+// True while an admitted asynchronous request still names the current saved
+// target/owner/user intent. Fails on owner or target loss, identity change,
+// user disconnect, and (for persistent requests) autoReconnect disable. An
+// admitted one-shot remains current after the scheduler hands it off; a later
+// user/link/config event advances its generation and fences it.
+bool blePeerConnectRequestIsCurrent(
+    BlePeerKind kind, const BlePeerConnectRequest& request);
+
+// Start an explicit saved-target connect as one generation-fenced request.
+// This atomically clears older user suppression, invalidates scheduler work,
+// and snapshots the current owner/target incarnation into `out`.
+bool blePeerBeginManualConnectRequest(
+    BlePeerKind kind, BlePeerConnectRequest& out);
 
 // -----------------------------------------------------------------------------
 // CLI handlers
@@ -214,10 +373,25 @@ inline bool bleAnyPeerWantsAutoReconnect(void)            { return false; }
 inline void bleBootReconnect(void)                      {}
 inline void bleSavePeerMac(int, const String&, const String& = String()) {}
 inline void blePeerNoteUserDisconnect(int)              {}
+inline void blePeerNoteUserConnectIntent(int)           {}
 inline void blePeerNoteLinkLost(int)                    {}
 inline void blePeerNoteLinkUp(int)                      {}
+inline bool blePeerIntentIsCurrent(int, uint32_t, uint32_t) { return false; }
+inline bool blePeerNoteLinkUpIfIntentCurrent(int, uint32_t, uint32_t) { return false; }
+inline bool blePeerBeginManualLearn(int, uint32_t&, uint32_t&) { return false; }
+inline bool blePeerCommitLearnedTargetIfCurrent(
+    int, uint32_t, uint32_t, const String&, const String&, uint8_t, bool,
+    bool* = nullptr) { return false; }
+inline bool bleSavePeerMacIfIdentityCurrent(int, uint32_t,
+                                             const String&,
+                                             const String& = String()) { return false; }
+inline bool blePeerCommitRepairIfCurrent(int, uint32_t, uint32_t,
+                                          const String&,
+                                          const String& = String(),
+                                          bool* = nullptr) { return false; }
 inline void bleAutoReconnectTick(void)                  {}
 inline void blePeerRequestReseek(int)                   {}
+inline bool blePeerAutoReconnectEnabled(int)            { return false; }
 
 #endif  // ENABLE_BLUETOOTH
 #endif  // BLE_PEERS_H

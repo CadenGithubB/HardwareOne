@@ -19,10 +19,13 @@ uint32_t uptimeSeconds() {
 }
 
 uint32_t freeHeapBytes() {
-  // ESP.getFreeHeap() returns the same value as esp_get_free_heap_size() —
-  // both internal+SPIRAM if PSRAM is enabled. Wraps it so callers don't have
-  // to remember which API to use.
-  return (uint32_t)ESP.getFreeHeap();
+  // Internal 8-bit RAM only — identical to dramFreeBytes() below.
+  // The old comment here claimed ESP.getFreeHeap() returns "internal+SPIRAM";
+  // that has not been true since Arduino defined it as
+  // heap_caps_get_free_size(MALLOC_CAP_INTERNAL). It excludes PSRAM but INCLUDES
+  // the IRAM-only heap, which no malloc/new/task stack can use — so it read
+  // ~25.8 KB high on ESP32 classic.
+  return dramFreeBytes();
 }
 
 uint32_t dramFreeBytes() {

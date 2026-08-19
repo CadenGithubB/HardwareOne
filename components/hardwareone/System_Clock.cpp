@@ -168,6 +168,7 @@ const char* syncSourceName(SyncSource s) {
     case SYNC_NTP:    return "ntp";
     case SYNC_MANUAL: return "manual";
     case SYNC_RING:   return "ring";
+    case SYNC_CM5:    return "cm5";
     default:          return "none";
   }
 }

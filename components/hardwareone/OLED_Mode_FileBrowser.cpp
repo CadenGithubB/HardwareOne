@@ -19,22 +19,18 @@
 #include "System_AuthIdentity.h"    // CommandIdentityScope — composed identity + notif install
 #include "System_User.h"            // AuthContext, SOURCE_LOCAL_DISPLAY
 #include "System_Settings.h"        // gSettings (for displayRequireAuth via globals)
-
-// OLED login state — set by OLED_Mode_Auth on successful login. The FileManager
-// runs under whoever is in the OLED render task's TLS identity slot at call
-// time, so the file browser MUST install one before touching VFS or every
-// guarded read denies. See prepareFileBrowserData below for the install site
-// and the G2_Page_Files counterpart (g2ShowFilesMenu) for the same pattern
-// on the lens side.
-extern String gLocalDisplayUser;
-extern bool   gLocalDisplayAuthed;
+// ps_alloc/ps_delete/AllocPref are used UNGATED below (the gOledFileManager
+// PSRAM allocation at ~:643 and its teardown at ~:1464), so this include must
+// NOT sit inside the ENABLE_ESPNOW block — with ESP-NOW off the header vanished
+// and those uses failed to compile. Same gated-include / ungated-use shape as
+// the System_Utils.cpp G2_Glasses.h bug; found by tools/build_coverage.sh pass 2.
+#include "System_MemUtil.h"         // ps_alloc / ps_delete — PSRAM FileManager
+#include <new>                      // placement-new: gOledFileManager lives in PSRAM
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow_Wire.h"     // V4PayloadFsListReplyHeader, V4PayloadFsEntry, FsListStatus
 #include "System_ESPNow_FsList.h"   // fsListSendRequest / fsGetSendRequest / fsListCancel
 #include "System_BondedPeer.h"      // BondedPeer::isPaired, peerMacBytes
-#include "System_MemUtil.h"         // ps_alloc / ps_free for the peer entry cache
-#include <new>                       // placement-new: gOledFileManager lives in PSRAM
 #include "System_CommandTypes.h"    // ExecReq::DeferredFn (submitDeferredToCmdExec)
 // Externs into System_ESPNow.cpp (avoid including the heavy System_ESPNow.h here,
 // which redeclares drawIcon and clashes with this file's local extern).
@@ -218,6 +214,26 @@ static const unsigned long OLED_FILE_BROWSER_DEBOUNCE = 200; // ms
 // callback fires (file pick) OR cancel fires (back at root).
 static FilePickerRequest sPickerReq = {};
 static bool sPickerActive = false;
+
+void oledFileBrowserResetSessionState() {
+  // A picker callback and file/action buffers belong to the identity that
+  // opened them. Drop them silently at a session boundary; firing a cancel
+  // callback would execute old-identity behavior under the replacement user.
+  sPickerActive = false;
+  sPickerReq = FilePickerRequest{};
+  fileBrowserPendingAction = FileBrowserPendingAction::NONE;
+  sFbLevel = FbLevel::LIST;
+  sFbRenameActive = false;
+  memset(sFbActionName, 0, sizeof(sFbActionName));
+  memset(sFbDeletePrompt, 0, sizeof(sFbDeletePrompt));
+  memset(sFbViewBody, 0, sizeof(sFbViewBody));
+  memset(sFbViewLineOff, 0, sizeof(sFbViewLineOff));
+  sFbViewLineCount = 0;
+  sFbViewScroll = 0;
+  sFbViewTruncated = false;
+  fileBrowserRenderData.valid = false;
+  oledFileBrowserNeedsInit = true;
+}
 
 bool oledFilePickerIsActive() { return sPickerActive; }
 
@@ -722,8 +738,8 @@ void prepareFileBrowserData() {
   // per-task TLS (see commit history on System_AuthIdentity).
   //
   // OLEDFileBrowserCtxGuard installs:
-  //   * Identity = OLED login state (gLocalDisplayUser, or "AuthBypass"
-  //     reserved name when displayRequireAuth is off)
+  //   * Identity = OLED owner's synchronized session mirror (or
+  //     "AuthBypass" when displayRequireAuth is off)
   //   * Notification source = NOTIF_SOURCE_OLED with the same user as
   //     subsource — anything via notify*() (notifyFileDeleted on a delete
   //     confirm, etc.) attributes to "OLED / <user>" instead of whichever

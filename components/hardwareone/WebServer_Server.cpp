@@ -16,6 +16,7 @@
 #include <LittleFS.h>
 #include <mbedtls/base64.h>
 #include <memory>
+#include <atomic>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -34,6 +35,7 @@
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard — install web ctx into TLS before calling userChangePasswordCore
 #include "System_CLI.h"
+#include "System_CLIMode.h"
 #include "System_UserSettings.h"
 #include "System_FirstTimeSetup.h"
 #include "System_Utils.h"
@@ -90,7 +92,7 @@
 #if ENABLE_WEB_MQTT
 #include "WebPage_MQTT.h"
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
 #include "WebPage_LLM.h"
 #include "System_LLM.h"
 #endif
@@ -128,10 +130,13 @@ bool gServerIsHttps = false;
 // it once the waiter drains.
 volatile int gWebCmdWaiters = 0;
 static volatile bool sHttpStopPending = false;
+static void webInvalidateAllSessionEpochs();
+static void webRepublishLiveSessionEpochs();
 
 // Common bookkeeping for a completed stop. Callers previously open-coded this
 // in three places (closewifi, closehttp, radio power-off) and drifted.
 static void httpServerStopFinish() {
+  webInvalidateAllSessionEpochs();
   server = nullptr;
   gServerIsHttps = false;
   systemEventPost(SYSEVT_HTTP_SERVER_STOPPED, "http");
@@ -266,6 +271,132 @@ int findSessionIndexBySID(const String& sid) {
   return -1;
 }
 
+namespace {
+std::atomic<TransportSessionEpoch> sWebSessionEpoch[MAX_SESSIONS];
+// The bearer SID and its command-generation must be published as one logical
+// record. Keeping a fixed copy here avoids consulting the String-heavy
+// SessionEntry table while cmd_exec is fencing a queued command.
+static constexpr size_t kWebSessionSidChars = 32;
+char sWebSessionSid[MAX_SESSIONS][kWebSessionSidChars + 1] = {};
+StaticSemaphore_t sWebSessionFenceMutexStorage;
+SemaphoreHandle_t sWebSessionFenceMutex =
+    xSemaphoreCreateRecursiveMutexStatic(&sWebSessionFenceMutexStorage);
+
+class WebSessionFenceGuard {
+ public:
+  WebSessionFenceGuard()
+      : locked_(sWebSessionFenceMutex &&
+                xSemaphoreTakeRecursive(sWebSessionFenceMutex,
+                                        portMAX_DELAY) == pdTRUE) {}
+  ~WebSessionFenceGuard() {
+    if (locked_) xSemaphoreGiveRecursive(sWebSessionFenceMutex);
+  }
+  explicit operator bool() const { return locked_; }
+
+ private:
+  bool locked_;
+};
+
+void webInvalidateSessionSlotLocked(int idx) {
+  TransportSessionEpoch old =
+      sWebSessionEpoch[idx].exchange(0, std::memory_order_acq_rel);
+  sWebSessionSid[idx][0] = '\0';
+  transportSessionClose(SOURCE_WEB, old);
+}
+
+void webInvalidateSessionSlot(int idx) {
+  if (idx < 0 || idx >= MAX_SESSIONS) return;
+  WebSessionFenceGuard guard;
+  if (!guard) return;
+  webInvalidateSessionSlotLocked(idx);
+}
+
+bool webPublishSessionSlot(int idx) {
+  if (idx < 0 || idx >= MAX_SESSIONS) return false;
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions) return false;
+
+  webInvalidateSessionSlotLocked(idx);
+  const String& sid = gSessions[idx].sid;
+  if (gSessions[idx].revoked || sid.length() != kWebSessionSidChars) {
+    return false;
+  }
+  TransportSessionEpoch epoch = transportSessionOpen(SOURCE_WEB);
+  if (epoch == 0) return false;
+  memcpy(sWebSessionSid[idx], sid.c_str(), kWebSessionSidChars);
+  sWebSessionSid[idx][kWebSessionSidChars] = '\0';
+  // Release-publish the epoch only after the fixed SID record is complete.
+  sWebSessionEpoch[idx].store(epoch, std::memory_order_release);
+  return true;
+}
+}  // namespace
+
+TransportSessionEpoch webSessionEpochForSID(const String& sid) {
+  if (sid.length() != kWebSessionSidChars) return 0;
+  WebSessionFenceGuard guard;
+  if (!guard) return 0;
+  for (int i = 0; i < MAX_SESSIONS; ++i) {
+    if (memcmp(sWebSessionSid[i], sid.c_str(), kWebSessionSidChars) != 0 ||
+        sWebSessionSid[i][kWebSessionSidChars] != '\0') {
+      continue;
+    }
+    return sWebSessionEpoch[i].load(std::memory_order_acquire);
+  }
+  return 0;
+}
+
+bool webSessionEpochIsLive(TransportSessionEpoch epoch) {
+  if (epoch == 0) return false;
+  for (int i = 0; i < MAX_SESSIONS; ++i) {
+    if (sWebSessionEpoch[i].load(std::memory_order_acquire) == epoch) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool webNoteSessionInteraction(const String& sid,
+                                      TransportSessionEpoch epoch) {
+  if (sid.length() != kWebSessionSidChars || epoch == 0) return false;
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions) return false;
+  for (int i = 0; i < MAX_SESSIONS; ++i) {
+    if (sWebSessionEpoch[i].load(std::memory_order_acquire) != epoch ||
+        memcmp(sWebSessionSid[i], sid.c_str(), kWebSessionSidChars) != 0 ||
+        sWebSessionSid[i][kWebSessionSidChars] != '\0' ||
+        gSessions[i].revoked || gSessions[i].sid != sid) {
+      continue;
+    }
+    gSessions[i].lastInteractionMs = sessionStampNow();
+    return true;
+  }
+  return false;
+}
+
+static void webInvalidateAllSessionEpochs() {
+  WebSessionFenceGuard guard;
+  if (!guard) return;
+  for (int i = 0; i < MAX_SESSIONS; ++i) webInvalidateSessionSlot(i);
+}
+
+static void webRepublishLiveSessionEpochs() {
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions) return;
+  const unsigned long now = millis();
+  for (int i = 0; i < MAX_SESSIONS; ++i) {
+    if (gSessions[i].sid.length() == 0 || gSessions[i].revoked ||
+        gSessions[i].bootId != gBootId ||
+        (gSessions[i].expiresAt > 0 &&
+         static_cast<long>(now - gSessions[i].expiresAt) >= 0) ||
+        sessionIdleExpired(SOURCE_WEB, gSessions[i].lastInteractionMs, now)) {
+      webInvalidateSessionSlot(i);
+      if (gSessions[i].sid.length()) gSessions[i] = SessionEntry();
+      continue;
+    }
+    if (!webPublishSessionSlot(i)) gSessions[i] = SessionEntry();
+  }
+}
+
 int findFreeSessionIndex() {
   for (int i = 0; i < MAX_SESSIONS; ++i) {
     if (gSessions[i].sid.length() == 0) return i;
@@ -290,12 +421,16 @@ void pruneExpiredSessions() {
   if (now - lastPrune < 30000) return;
   lastPrune = now;
 
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions) return;
+
   for (int i = 0; i < MAX_SESSIONS; ++i) {
     if (gSessions[i].sid.length() == 0) continue;
     bool ttlExpired  = gSessions[i].expiresAt > 0 && (long)(now - gSessions[i].expiresAt) >= 0;
     bool idleExpired = sessionIdleExpired(SOURCE_WEB, gSessions[i].lastInteractionMs, now);
     if (ttlExpired || idleExpired) {
       systemEventPost(SYSEVT_LOGOUT, gSessions[i].user.c_str(), idleExpired ? "idle" : "ttl");
+      webInvalidateSessionSlot(i);
       gSessions[i] = SessionEntry();
     }
   }
@@ -356,37 +491,24 @@ String setSession(httpd_req_t* req, const String& u) {
   // Get current client IP to avoid storing logout reason for same IP
   String currentIP;
   getClientIP(req, currentIP);
-  unsigned long nowMs = millis();
+  const int currentSockfd = httpd_req_to_sockfd(req);
+  String createdSid;
+  int socketsToClose[MAX_SESSIONS] = {};
+  size_t socketsToCloseCount = 0;
 
-  // If a valid session already exists for this user from the same IP, reuse it
-  for (int i = 0; i < MAX_SESSIONS; ++i) {
-    if (gSessions[i].sid.length() > 0 && gSessions[i].user == u) {
-      // Validate not expired and not revoked
-      if (!(gSessions[i].expiresAt > 0 && (long)(nowMs - gSessions[i].expiresAt) >= 0) && !gSessions[i].revoked) {
-        if (gSessions[i].ip == currentIP) {
-          // Refresh and reuse existing session
-          gSessions[i].lastSeen = nowMs;
-          gSessions[i].expiresAt = nowMs + SESSION_TTL_MS;
-          gSessions[i].lastInteractionMs = sessionStampNow();  // login counts as a real interaction
-          esp_err_t sc = writeSessionCookie(req, gSessions[i].sid);
-          // The sid IS the bearer credential — isAuthed validates a cookie on the
-          // sid alone (no IP or User-Agent binding), so anything that prints it in
-          // full hands over the session. BROADCAST_PRINTF reaches the web CLI
-          // mirror, which GET /api/cli/logs serves to any authenticated non-guest
-          // and which is routing-gated only (deliberately — System_Debug.h:16-24),
-          // so it carries no part of the sid at all. The DEBUG_AUTH lane is behind
-          // an operator-controlled flag and keeps an 8-char prefix, which is enough
-          // to tell one session from another while debugging.
-          DEBUG_AUTHF("Reusing existing session idx=%d user=%s sid=%.8s... | refreshed", i, u.c_str(), gSessions[i].sid.c_str());
-          BROADCAST_PRINTF("[auth] reusedSession user=%s, exp(ms)=%lu", u.c_str(), gSessions[i].expiresAt);
-          DEBUG_AUTHF("Set-Cookie (reuse) rc=%d", (int)sc);
-          return gSessions[i].sid;
-        }
-      }
-    }
-  }
+  // Serialize the String session table mutation with fixed SID/epoch capture.
+  // The mutex is recursive because the helpers below also use it; no blocking
+  // network operation is performed while the guard is held. Logging, cookie
+  // delivery, and persistence happen after releasing it.
+  {
+    WebSessionFenceGuard sessionGuard;
+    if (!sessionGuard || !gSessions) return String();
 
-  // Enforce 1 session per user limit - immediately clear any existing sessions for this user
+  // Every successful login gets a fresh bearer SID. Reusing the previous SID
+  // would let a browser holding the old cookie resolve the newly issued mode
+  // ownership epoch and act as the new login. Keep the one-session-per-user
+  // policy, but do not close the socket carrying this login response when the
+  // same browser re-authenticates on its existing HTTP connection.
   for (int i = 0; i < MAX_SESSIONS; ++i) {
     if (gSessions[i].sid.length() > 0 && gSessions[i].user == u) {
       // Found existing session for this user - only store logout reason if different IP
@@ -394,9 +516,12 @@ String setSession(httpd_req_t* req, const String& u) {
         storeLogoutReason(gSessions[i].ip, "You were signed out because you logged in from another device.");
       }
       BROADCAST_PRINTF("[auth] Clearing existing session for user: %s (session limit enforcement)", u.c_str());
-      if (gSessions[i].sockfd >= 0) {
-        httpd_sess_trigger_close(server, gSessions[i].sockfd);
+      if (gSessions[i].sockfd >= 0 &&
+          gSessions[i].sockfd != currentSockfd &&
+          socketsToCloseCount < MAX_SESSIONS) {
+        socketsToClose[socketsToCloseCount++] = gSessions[i].sockfd;
       }
+      webInvalidateSessionSlot(i);
       gSessions[i] = SessionEntry();  // Clear immediately
     }
   }
@@ -418,23 +543,41 @@ String setSession(httpd_req_t* req, const String& u) {
   String ip;
   getClientIP(req, ip);
   s.ip = ip;
-  s.sockfd = httpd_req_to_sockfd(req);  // Store socket descriptor for force disconnect
+  s.sockfd = currentSockfd;  // Store socket descriptor for force disconnect
+  webInvalidateSessionSlot(idx);  // free-slot eviction may replace a live entry
   gSessions[idx] = s;
+  if (!webPublishSessionSlot(idx)) {
+    gSessions[idx] = SessionEntry();
+    createdSid = String();
+  } else {
+    // New session should reconcile UI immediately on next SSE ping
+    gSessions[idx].needsStatusUpdate = true;
+    gSessions[idx].lastSensorSeqSent = 0;
+    createdSid = s.sid;
+  }
+  }
+
+  for (size_t i = 0; i < socketsToCloseCount; ++i) {
+    if (server) httpd_sess_trigger_close(server, socketsToClose[i]);
+  }
+
+  if (!createdSid.length()) {
+    writeSessionCookie(req, String());
+    return String();
+  }
   updateUserLastSeen(u);
-  // New session should reconcile UI immediately on next SSE ping
-  gSessions[idx].needsStatusUpdate = true;
-  gSessions[idx].lastSensorSeqSent = 0;
-  DEBUG_AUTHF("New session created idx=%d user=%s sid=%.8s... | needsStatusUpdate=1", idx, u.c_str(), s.sid.c_str());
+  DEBUG_AUTHF("New session created user=%s sid=%.8s... | needsStatusUpdate=1", u.c_str(), createdSid.c_str());
 
   // Set new session cookie via writeSessionCookie — HttpOnly + SameSite=Strict
   // (+ Secure on HTTPS) applied uniformly. See helper comment for rationale.
-  esp_err_t sc = writeSessionCookie(req, s.sid);
-  DEBUG_AUTHF("Setting session cookie for sid=%.8s...", s.sid.c_str());
+  esp_err_t sc = writeSessionCookie(req, createdSid);
+  DEBUG_AUTHF("Setting session cookie for sid=%.8s...", createdSid.c_str());
   DEBUG_AUTHF("Set-Cookie rc=%d", (int)sc);
 
-  // No sid on the web-mirror lane — see the note at the reusedSession site above.
-  BROADCAST_PRINTF("[auth] setSession user=%s, exp(ms)=%lu", u.c_str(), s.expiresAt);
-  return s.sid;
+  // The SID is a bearer credential. Never put it on the shared web-mirror lane;
+  // the DEBUG_AUTH lane above emits only a short diagnostic prefix.
+  BROADCAST_PRINTF("[auth] setSession user=%s", u.c_str());
+  return createdSid;
 }
 
 // ============================================================================
@@ -445,8 +588,6 @@ String setSession(httpd_req_t* req, const String& u) {
 // ============================================================================
 
 // External dependencies for authSuccessUnified
-extern bool gSerialAuthed;
-extern String gSerialUser;
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 extern "C" void __attribute__((weak)) authSuccessDebug(const char* user,
                                                        const char* ip,
@@ -485,23 +626,22 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
     }
   } else if (ctx.transport == SOURCE_SERIAL) {
     // Establish serial-side session state
-    gSerialAuthed = true;
-    if (ctx.user.length()) gSerialUser = ctx.user;  // keep provided name
-    if (!gSerialUser.length()) gSerialUser = "serial";
+    serialTransportSessionAuthenticated(
+        ctx.user.length() ? ctx.user : String("serial"));
     // Admin decision left to existing logic; do not forcibly elevate here
     sidShort = "serial";
     if (ctx.ip.length() == 0) ctx.ip = "local";
   } else if (ctx.transport == SOURCE_UART) {
     // Establish UART host-link session state (mirrors serial; separate pair)
-    uartLinkSessionAuthenticated(
-        ctx.user.length() ? ctx.user : String("uart"));
+    const String uartUser =
+        ctx.user.length() ? ctx.user : String("uart");
+    publishUartAccountSession(uartUser);
     sidShort = "uart";
     if (ctx.ip.length() == 0) ctx.ip = "uart";
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
     // Establish local display session state
-    gLocalDisplayAuthed = true;
-    if (ctx.user.length()) gLocalDisplayUser = ctx.user;
-    if (!gLocalDisplayUser.length()) gLocalDisplayUser = "display";
+    localDisplayTransportSessionAuthenticated(
+        ctx.user.length() ? ctx.user : String("display"));
     sidShort = "display";
     if (ctx.ip.length() == 0) ctx.ip = "local";
   } else {
@@ -536,8 +676,9 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
            redirectTo ? redirectTo : "<none>");
   appendLineWithCap(LOG_OK_FILE, logLine, LOG_CAP_BYTES);
 
-  // Weak hook for external instrumentation
-  authSuccessDebug(ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), ctx.sid.c_str(), redirectTo ? redirectTo : "", reused);
+  // Weak hook for external instrumentation. Debug extensions receive the
+  // non-bearer hint, never the live session cookie.
+  authSuccessDebug(ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), sidShort.c_str(), redirectTo ? redirectTo : "", reused);
 
   // Transport-specific post-login actions
   // Note: Web login response (303 redirect) is handled directly by handleLogin,
@@ -561,9 +702,11 @@ void clearSession(httpd_req_t* req, const char* logoutReason) {
 
   // Revoke current session by cookie value
   String sid = getCookieSID(req);
+  WebSessionFenceGuard sessionGuard;
   int idx = findSessionIndexBySID(sid);
-  if (idx >= 0) {
+  if (sessionGuard && idx >= 0) {
     systemEventPost(SYSEVT_LOGOUT, gSessions[idx].user.c_str(), "manual");
+    webInvalidateSessionSlot(idx);
     gSessions[idx] = SessionEntry();
   }
   // Clear session cookie client-side
@@ -640,6 +783,13 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
     return false;
   }
 
+  // Cookie-backed sessions are shared with cmd_exec revocation paths. Keep
+  // the String table and its authoritative SID/epoch sidecar coherent for the
+  // remainder of this validation/update operation. Basic Auth above remains
+  // stateless and intentionally does not acquire the session-table lock.
+  WebSessionFenceGuard sessionGuard;
+  if (!sessionGuard || !gSessions) return false;
+
   int idx = findSessionIndexBySID(sid);
   if (idx < 0) {
     // Rate limit session debug/broadcast messages per IP
@@ -694,6 +844,7 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
       storeLogoutReason(ipBuf, "Your session expired due to a system restart. Please log in again.");
     }
     // Clear the stale session
+    webInvalidateSessionSlot(idx);
     gSessions[idx] = SessionEntry();
     return false;
   } else {
@@ -711,6 +862,7 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
   unsigned long now = millis();
   if (gSessions[idx].expiresAt > 0 && (long)(now - gSessions[idx].expiresAt) >= 0) {
     // expired
+    webInvalidateSessionSlot(idx);
     gSessions[idx] = SessionEntry();
     BROADCAST_PRINTF("[auth] expired SID for uri=%.*s", 120, uri);
     return false;
@@ -726,6 +878,7 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
     if (!hasLogoutReason(ipBuf)) {
       storeLogoutReason(ipBuf, "You were signed out due to inactivity.");
     }
+    webInvalidateSessionSlot(idx);
     gSessions[idx] = SessionEntry();
     return false;
   }
@@ -746,6 +899,8 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
 
 // Build JSON for all sessions (admin view)
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions) {
+  WebSessionFenceGuard sessionGuard;
+  if (!sessionGuard || !gSessions) return;
   // Convert boot millis to epoch millis for display
   time_t now = time(nullptr);
   unsigned long currentMillis = millis();
@@ -760,7 +915,9 @@ void buildAllSessionsJson(const String& currentSid, JsonArray& sessions) {
     if (!s.sid.length()) continue;
     
     JsonObject session = sessions.add<JsonObject>();
-    session["sid"] = s.sid;
+    // A SID is the live bearer cookie, not an administrative identifier. Keep
+    // only the diagnostic hint used elsewhere by auth logs.
+    session["sid"] = s.sid.substring(0, 8) + "...";
     session["user"] = s.user;
     // Convert boot-relative millis to epoch millis for JavaScript Date()
     session["createdAt"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.createdAt) : s.createdAt;
@@ -1143,6 +1300,8 @@ const char* banListJson() {
 // Session will be cleared on next auth check or after notice delivery.
 void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg) {
   if (idx < 0 || idx >= MAX_SESSIONS) return;
+  WebSessionFenceGuard sessionGuard;
+  if (!sessionGuard || !gSessions) return;
   if (gSessions[idx].sid.length() == 0) return;
   const char* reason = reasonMsg.length() ? reasonMsg.c_str() : "Your session has been signed out by an administrator.";
   char msgBuf[128];
@@ -1150,12 +1309,75 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg) {
   String msg(msgBuf);
 
   // Mark session as revoked but keep it alive for notice delivery
+  webInvalidateSessionSlot(idx);
   gSessions[idx].revoked = true;
   // Set grace period for SSE delivery (30 seconds from now)
   gSessions[idx].expiresAt = millis() + 30000UL;
 
   // Send SSE notice while session still exists
   sseEnqueueNotice(gSessions[idx], msg);
+}
+
+int webRevokeSessionsForUser(const String& username,
+                             const String& reason,
+                             const String& exceptSid) {
+  if (!username.length()) return 0;
+  WebSessionFenceGuard sessionGuard;
+  if (!sessionGuard || !gSessions) return 0;
+  int revoked = 0;
+  for (int i = 0; i < MAX_SESSIONS; ++i) {
+    if (!gSessions[i].sid.length() ||
+        !gSessions[i].user.equalsIgnoreCase(username) ||
+        (exceptSid.length() && gSessions[i].sid == exceptSid)) {
+      continue;
+    }
+    if (gSessions[i].ip.length()) {
+      storeLogoutReason(gSessions[i].ip, reason);
+    }
+    enqueueTargetedRevokeForSessionIdx(i, reason);
+    ++revoked;
+  }
+  return revoked;
+}
+
+bool webRevokeSessionBySid(const String& sid,
+                           const String& reason,
+                           String* outUser) {
+  WebSessionFenceGuard sessionGuard;
+  if (!sessionGuard || !gSessions) return false;
+  int idx = findSessionIndexBySID(sid);
+  // Session listings expose only an eight-character, non-bearer hint. Accept
+  // that hint when it identifies exactly one live session so `sessionrevoke
+  // sid <listed-value>` remains useful without disclosing the cookie itself.
+  if (idx < 0 && sid.length() == 11 && sid.endsWith("...")) {
+    const String prefix = sid.substring(0, 8);
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+      if (!gSessions[i].sid.length() || !gSessions[i].sid.startsWith(prefix)) continue;
+      if (idx >= 0) return false;
+      idx = i;
+    }
+  }
+  if (idx < 0) return false;
+  if (outUser) *outUser = gSessions[idx].user;
+  if (gSessions[idx].ip.length()) {
+    storeLogoutReason(gSessions[idx].ip, reason);
+  }
+  enqueueTargetedRevokeForSessionIdx(idx, reason);
+  return true;
+}
+
+int webBroadcastSessionsHuman() {
+  WebSessionFenceGuard sessionGuard;
+  if (!sessionGuard || !gSessions) return 0;
+  int count = 0;
+  for (int i = 0; i < MAX_SESSIONS; ++i) {
+    const SessionEntry& s = gSessions[i];
+    if (!s.user.length() || !s.sid.length() || s.revoked) continue;
+    BROADCAST_PRINTF("  %s from %s (last: %lu)", s.user.c_str(),
+                     s.ip.c_str(), s.lastSeen);
+    ++count;
+  }
+  return count;
 }
 
 // ============================================================================
@@ -1169,6 +1391,7 @@ extern void streamSensorsContent(httpd_req_t* req, const String& username);
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
 #if ENABLE_AUTOMATION
 extern bool sanitizeAutomationsJson(String& json);
+extern String redactAutomationsJsonForResponse(const String& json);
 extern void writeAutomationsJsonAtomic(const String& json);
 extern const char* AUTOMATIONS_JSON_FILE;
 extern bool gAutomationsDirty;
@@ -1210,6 +1433,23 @@ extern void appendCommandToFeed(const char* origin, const String& cmd, const Str
 extern bool submitAndExecuteSync(const Command& uc, String& out);
 extern bool gMeshActivitySuspended;
 // gBroadcastSkipSessionIdx declared in web_server.h
+
+// Command dispatch historically echoed the full line for an unknown verb.
+// Preserve that useful diagnostic while applying the command redactor to the
+// echoed portion (important for typo'd credential commands such as `logni`).
+static String redactWebCommandResult(const String& output) {
+  String safe = redactOutputForLog(output);
+  static const char kUnknownPrefix[] = "Unknown command: ";
+  if (!safe.startsWith(kUnknownPrefix)) return safe;
+  const int lineEnd = safe.indexOf('\n');
+  const int commandStart = strlen(kUnknownPrefix);
+  const String echoed = lineEnd >= 0
+                            ? safe.substring(commandStart, lineEnd)
+                            : safe.substring(commandStart);
+  String rebuilt = String(kUnknownPrefix) + redactCmdForAudit(echoed);
+  if (lineEnd >= 0) rebuilt += safe.substring(lineEnd);
+  return rebuilt;
+}
 extern void streamCLIContent(httpd_req_t* req, const String& username);
 extern void streamAutomationsContent(httpd_req_t* req, const String& username);
 extern void streamFilesContent(httpd_req_t* req, const String& username);
@@ -2871,15 +3111,17 @@ esp_err_t handleNotice(httpd_req_t* req) {
   }
 
   String sid = getCookieSID(req);
+  WebSessionFenceGuard sessionGuard;
   int idx = findSessionIndexBySID(sid);
   String note = "";
-  if (idx >= 0) {
+  if (sessionGuard && idx >= 0) {
     // Dequeue one notice from the ring if available
     String dequeued;
     if (sseDequeueNotice(gSessions[idx], dequeued)) {
       note = dequeued;
       // If this is a revoke notice, immediately clear the session and expire cookie
       if (note.startsWith("[revoke]")) {
+        webInvalidateSessionSlot(idx);
         gSessions[idx] = SessionEntry();
         writeSessionCookie(req, String());  // empty sid → Max-Age=0
       }
@@ -3208,24 +3450,31 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
       received += ret;
     }
     buf.get()[received] = '\0';
-    DEBUG_CMD_FLOWF("[web.cli] received=%d bytes, buf[0-79]='%.80s'", received, buf.get());
+    // The form body contains the command verbatim and may therefore contain
+    // login/password material.  Log only structural metadata; the decoded
+    // command is redacted below once we can parse it as a command line.
+    DEBUG_CMD_FLOWF("[web.cli] received=%d bytes", received);
     body = String(buf.get());
     DEBUG_CMD_FLOWF("[web.cli] body.length()=%d after String conversion", body.length());
   }
   String cmdEncoded = extractFormField(body, "cmd");
   DEBUG_CMD_FLOWF("[web.cli] cmdEncoded.length()=%d after extractFormField", cmdEncoded.length());
   String cmd = urlDecode(cmdEncoded);
+  const String safeCmd = redactCmdForAudit(cmd);
   DEBUG_CMD_FLOWF("[web.cli] cmd.length()=%d after urlDecode", cmd.length());
   String validateStr = extractFormField(body, "validate");
   bool doValidate = (validateStr == "1" || validateStr == "true");
   String captureStr = extractFormField(body, "capture");
   bool doCapture = (captureStr == "1");
-  DEBUG_CMD_FLOWF("[web.cli] authed user=%s cmd_len=%d validate=%d capture=%d", ctx.user.c_str(), cmd.length(), doValidate ? 1 : 0, doCapture ? 1 : 0);
-  DEBUG_CMD_FLOWF("[web.cli] cmd_first_80='%.80s'", cmd.c_str());
+  String interactiveStr = extractFormField(body, "interactive");
+  const bool doInteractive =
+      (interactiveStr == "1" || interactiveStr == "true") && !doValidate;
+  DEBUG_CMD_FLOWF("[web.cli] authed user=%s cmd_len=%d validate=%d capture=%d interactive=%d", ctx.user.c_str(), cmd.length(), doValidate ? 1 : 0, doCapture ? 1 : 0, doInteractive ? 1 : 0);
+  DEBUG_CMD_FLOWF("[web.cli] cmd_first_80='%.80s'", safeCmd.c_str());
 
   // Record the command in the unified feed (skip if validation-only), then execute centrally
   if (!doValidate) {
-    appendCommandToFeed("web", cmd, ctx.user, ctx.ip);
+    appendCommandToFeed("web", safeCmd, ctx.user, ctx.ip);
   }
 
   // Determine originating session index and set skip for SSE broadcast during this command
@@ -3249,6 +3498,17 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
   uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
+  uc.ctx.transportSessionEpoch = captureTransportSessionEpoch(ctx);
+  if (ctx.sid.length()) {
+    uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
+  }
+  // /api/cli is also used by background page controls. Treat it as a machine
+  // request unless the human CLI explicitly opts in. Capture controls reply
+  // delivery only; it does not by itself imply either interaction or machine
+  // traffic. Validation is always side-effect-free and mode-independent.
+  if (!doInteractive || doValidate) {
+    uc.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
+  }
   uc.ctx.validateOnly = doValidate;
   uc.ctx.captureOutput = doCapture;
   uc.ctx.replyHandle = nullptr;
@@ -3260,13 +3520,34 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   bool ok = submitAndExecuteSync(uc, out);
   gMeshActivitySuspended = false;
 
+  // The command result belongs to the exact cookie-session generation that
+  // submitted it. A concurrent logout/revoke/re-login may let an already
+  // admitted handler finish, but it must not release that result to the stale
+  // HTTP request or shared web mirror.
+  bool webSessionStillLive =
+      !ctx.sid.length() ||
+      transportSessionEpochIsLive(SOURCE_WEB,
+                                  uc.ctx.transportSessionEpoch);
+  if (!webSessionStillLive) {
+    ok = false;
+    out = "Error: web session changed before command result delivery.";
+  }
+
   // Redact sensitive data from output (passwords, session IDs)
   // This applies to CLI history, logs, and all broadcast sinks
-  String redactedOut = redactOutputForLog(out);
+  String redactedOut = redactWebCommandResult(out);
 
   DEBUG_CMD_FLOWF("[web.cli] executed ok=%d out_len=%d", ok ? 1 : 0, out.length());
   DEBUG_CLIF("Command result: %s", redactedOut.c_str());
-  if (!doValidate) {
+  webSessionStillLive =
+      webSessionStillLive &&
+      (!ctx.sid.length() ||
+       transportSessionEpochIsLive(SOURCE_WEB,
+                                   uc.ctx.transportSessionEpoch));
+  const bool ownsInteractiveResult =
+      webSessionStillLive && cliModeOwnedBySession(
+          ctx.transport, uc.ctx.transportSessionEpoch);
+  if (webSessionStillLive && !doValidate && !ownsInteractiveResult) {
     // Route output to configured sinks (web + log). HTTP response is sent below.
     DEBUG_CMD_FLOWF("[web.cli] routing output len=%d", redactedOut.length());
     broadcastOutput(redactedOut, uc.ctx);
@@ -3283,18 +3564,23 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // API calls with capture=1 are stateless — don't leave the device in
-  // interactive help mode after rendering. Without this, "help" via the API
-  // sets gCLIState globally, breaking subsequent commands from any source.
-  if (doCapture && gCLIState != CLI_NORMAL) {
-    gCLIState = CLI_NORMAL;
-    gShowAllCommands = false;
+  // Response admission is a separate boundary from shared-mirror admission.
+  // If revocation won since the earlier check, return only a fixed error body.
+  if (ctx.sid.length() &&
+      !transportSessionEpochIsLive(SOURCE_WEB,
+                                   uc.ctx.transportSessionEpoch)) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, "Error: web session changed.");
+    return ESP_OK;
   }
 
   // Set HTTP status based on command result so API consumers can distinguish
   // success from permission/input errors without parsing the body.
   httpd_resp_set_type(req, "text/plain");
-  if (!ok && redactedOut.startsWith("Error: Admin access required")) {
+  if (!webSessionStillLive) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+  } else if (!ok && redactedOut.startsWith("Error: Admin access required")) {
     httpd_resp_set_status(req, "403 Forbidden");
   } else if (!ok || redactedOut.startsWith("Empty command") || redactedOut.startsWith("Unknown command")) {
     httpd_resp_set_status(req, "400 Bad Request");
@@ -3354,13 +3640,16 @@ esp_err_t handleAutomationsGet(httpd_req_t* req) {
     writeAutomationsJsonAtomic(body);  // best-effort writeback
   }
 
-  PSRAM_JSON_DOC(doc);
-  DeserializationError err = deserializeJson(doc, body);
-  if (err) {
-    // Preserve prior contract: emit the raw file text if it isn't JSON.
-    httpd_resp_send(req, body.c_str(), body.length());
+  const String safeBody = redactAutomationsJsonForResponse(body);
+  if (!safeBody.length()) {
+    httpd_resp_send(req,
+      "{\"success\":false,\"systemEnabled\":false,\"error\":\"Malformed automations.json\"}",
+      HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
+  PSRAM_JSON_DOC(doc);
+  DeserializationError err = deserializeJson(doc, safeBody);
+  if (err) return sendJsonResponse(req, "{\"success\":false,\"error\":\"Automation response encoding failed\"}");
   doc["systemEnabled"] = gSettings.automationEnabled;
   String out;
   serializeJson(doc, out);
@@ -4940,8 +5229,14 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
       httpd_resp_set_type(req, "application/json");
       httpd_resp_set_hdr(req, "Content-Disposition", ("attachment; filename=\"" + filename + "\"").c_str());
 
-      // Send single automation JSON (targetAuto already includes braces)
-      httpd_resp_send(req, targetAuto.c_str(), HTTPD_RESP_USE_STRLEN);
+      // Export is an authenticated response, not a secret-backup channel:
+      // stored command credentials must remain server-side.
+      const String safeTargetAuto = redactAutomationsJsonForResponse(targetAuto);
+      if (!safeTargetAuto.length()) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Malformed automation");
+        return ESP_OK;
+      }
+      httpd_resp_send(req, safeTargetAuto.c_str(), HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
     }
   }
@@ -4968,7 +5263,12 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
   snprintf(dispBuf, sizeof(dispBuf), "attachment; filename=\"%s\"", filename);
   httpd_resp_set_hdr(req, "Content-Disposition", dispBuf);
 
-  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+  const String safeJson = redactAutomationsJsonForResponse(json);
+  if (!safeJson.length()) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Malformed automations");
+    return ESP_OK;
+  }
+  httpd_resp_send(req, safeJson.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 #endif // ENABLE_AUTOMATION
@@ -5037,7 +5337,7 @@ void broadcastSensorStatusToAllSessions() {
       // Do not skip originator; client-side seq handling de-duplicates UI work
       gSessions[i].needsStatusUpdate = true;
       flagged++;
-      DEBUG_SSEF("Flagged session %d (SID: %s) for status update", i, gSessions[i].sid.c_str());
+      DEBUG_SSEF("Flagged session %d (SID: %.8s...) for status update", i, gSessions[i].sid.c_str());
     }
   }
 
@@ -5093,6 +5393,36 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   }
 
   String sidForCmd = getCookieSID(req);
+  const TransportSessionEpoch batchSessionEpoch =
+      captureTransportSessionEpoch(ctx);
+  const bool interactiveBatch = doc["interactive"] | false;
+  if (interactiveBatch) {
+    JsonArray commands = doc["commands"].as<JsonArray>();
+    String answer = commands.size() == 2 ? commands[1].as<String>() : String();
+    answer.trim();
+    answer.toLowerCase();
+    if (commands.size() != 2 || answer != "yes") {
+      httpd_resp_set_status(req, "400 Bad Request");
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_sendstr(
+          req,
+          "{\"error\":\"interactive batch must be [command, yes]\"}");
+      return ESP_OK;
+    }
+    // /api/cli/batch is normally a passive machine endpoint. This narrowly
+    // classified two-command form is a deliberate human interaction and must
+    // refresh the exact cookie session's idle clock before the prompt begins.
+    // Stateless Basic Auth cannot own an interactive CLIMode.
+    if (!ctx.sid.length() || batchSessionEpoch == 0 ||
+        !webNoteSessionInteraction(ctx.sid, batchSessionEpoch)) {
+      httpd_resp_set_status(req, "401 Unauthorized");
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_sendstr(
+          req,
+          "{\"ok\":false,\"error\":\"stateful_web_session_required\"}");
+      return ESP_OK;
+    }
+  }
   int originIdx = findSessionIndexBySID(sidForCmd);
   int prevSkip = gBroadcastSkipSessionIdx;
   gBroadcastSkipSessionIdx = originIdx;
@@ -5100,9 +5430,13 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
 
   // Collect per-command outputs for the results array
   std::vector<String> results;
+  bool batchSessionStillLive =
+      !ctx.sid.length() ||
+      transportSessionEpochIsLive(SOURCE_WEB, batchSessionEpoch);
 
   int count = 0;
   for (JsonVariant v : doc["commands"].as<JsonArray>()) {
+    if (!batchSessionStillLive) break;
     String cmd = v.as<String>();
     cmd.trim();
     if (cmd.length() == 0) {
@@ -5110,7 +5444,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
       continue;
     }
 
-    appendCommandToFeed("web", cmd, ctx.user, ctx.ip);
+    appendCommandToFeed("web", redactCmdForAudit(cmd), ctx.user, ctx.ip);
 
     Command uc;
     uc.line = cmd;
@@ -5119,15 +5453,37 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     uc.ctx.id = (uint32_t)millis();
     uc.ctx.timestampMs = (uint32_t)millis();
     uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
+    uc.ctx.transportSessionEpoch = batchSessionEpoch;
+    if (ctx.sid.length()) {
+      uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
+    }
+    if (!interactiveBatch) {
+      uc.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
+    }
     uc.ctx.validateOnly = false;
     uc.ctx.replyHandle = nullptr;
     uc.ctx.httpReq = req;
 
     String out;
     submitAndExecuteSync(uc, out);
-    String redacted = redactOutputForLog(out);
-    broadcastOutput(redacted, uc.ctx);
-    results.push_back(out);
+    batchSessionStillLive =
+        !ctx.sid.length() ||
+        transportSessionEpochIsLive(SOURCE_WEB, batchSessionEpoch);
+    if (!batchSessionStillLive) {
+      // Do not retain earlier results after this cookie generation loses
+      // authority; a later command in the batch may have revoked it.
+      results.clear();
+      results.push_back(
+          "Error: web session changed before command result delivery.");
+      break;
+    }
+    String redacted = redactWebCommandResult(out);
+    if (!cliModeOwnedBySession(ctx.transport, batchSessionEpoch)) {
+      broadcastOutput(redacted, uc.ctx);
+    }
+    // Batch results cross the same HTTP boundary as the single-command path;
+    // never return an unredacted handler response to the browser.
+    results.push_back(redacted);
 
     count++;
 
@@ -5143,6 +5499,22 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   // If server was destroyed by a command, req is dangling — skip response
   if (server == NULL) return ESP_OK;
 
+  // Close the tiny window between the final command's check and response
+  // serialization. Never send accumulated command data to an invalidated
+  // cookie request.
+  batchSessionStillLive =
+      batchSessionStillLive &&
+      (!ctx.sid.length() ||
+       transportSessionEpochIsLive(SOURCE_WEB, batchSessionEpoch));
+  if (!batchSessionStillLive) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(
+        req,
+        "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    return ESP_OK;
+  }
+
   // Build response: {"ok":true,"count":N,"results":["out0","out1",...]}
   // Use ArduinoJson to safely serialize the output strings (handles escaping)
   PSRAM_JSON_DOC(respDoc);
@@ -5155,6 +5527,15 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   httpd_resp_set_type(req, "application/json");
   String respStr;
   serializeJson(respDoc, respStr);
+  if (ctx.sid.length() &&
+      !transportSessionEpochIsLive(SOURCE_WEB, batchSessionEpoch)) {
+    respStr = String();
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_sendstr(
+        req,
+        "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    return ESP_OK;
+  }
   httpd_resp_sendstr(req, respStr.c_str());
   return ESP_OK;
 }
@@ -5495,7 +5876,7 @@ register_handlers:
  #if ENABLE_WEB_GAME_DARKROOM
   registerDarkRoomHandlers(server);
  #endif
- #if ENABLE_ONDEVICE_LLM
+ #if ENABLE_LLM_BACKEND
   registerLLMHandlers(server);
  #endif
   
@@ -5526,6 +5907,10 @@ register_handlers:
   
   // Enable web output when server starts
   gOutputFlags |= MSG_ROUTE_WEB;
+  // A real server restart is a new routing incarnation. Retained cookie
+  // sessions receive fresh boot-local command generations; queued work from
+  // the stopped server remains permanently fenced out.
+  webRepublishLiveSessionEpochs();
   
   broadcastOutput(gServerIsHttps ? "HTTPS server started" : "HTTP server started");
   // Positive counterpart to the HTTPS-fallback / start-failed events above:

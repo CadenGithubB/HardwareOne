@@ -27,7 +27,8 @@
 #endif
 
 #if ENABLE_WIFI
-#include <WiFi.h>
+#include <esp_attr.h>
+#include "System_WiFi.h"
 #endif
 
 // External references
@@ -340,6 +341,65 @@ bool getOLEDYesNoPrompt(const char* prompt, bool defaultYes) {
 // OLED WiFi Selection
 // ============================================================================
 
+#if ENABLE_WIFI
+// The setup picker can wait indefinitely for a person. Keep only copied SSID
+// metadata in PSRAM during that wait; Arduino/IDF scan-result storage is owned
+// and released by wifiScanForEach before any input loop starts.
+static constexpr int FTS_WIFI_MENU_MAX = 20;
+static constexpr int FTS_WIFI_MENU_NAMED_MAX = FTS_WIFI_MENU_MAX - 3;
+// Retain exactly the named entries the OLED can display. Additional APs are
+// counted and can still be joined by typing the exact SSID; they do not consume
+// a hidden, non-discoverable numeric slot.
+static constexpr uint16_t FTS_WIFI_SCAN_CACHE_MAX =
+    FTS_WIFI_MENU_NAMED_MAX;
+
+struct FtsWifiScanEntry {
+  char ssid[33];
+  int8_t rssi;
+};
+
+EXT_RAM_BSS_ATTR static FtsWifiScanEntry
+    sFtsWifiScanEntries[FTS_WIFI_SCAN_CACHE_MAX];
+EXT_RAM_BSS_ATTR static char
+    sFtsWifiMenuLabels[FTS_WIFI_MENU_MAX][40];
+static uint16_t sFtsWifiStoredCount = 0;
+
+static void clearFtsWifiScanCache() {
+  memset(sFtsWifiScanEntries, 0, sizeof(sFtsWifiScanEntries));
+  memset(sFtsWifiMenuLabels, 0, sizeof(sFtsWifiMenuLabels));
+  sFtsWifiStoredCount = 0;
+}
+
+struct FtsWifiScanContext {
+  uint16_t named = 0;
+  uint16_t hidden = 0;
+};
+
+static bool cacheFtsWifiScanRecord(const WifiScanRecord& record,
+                                   uint16_t /*index*/, uint16_t /*total*/,
+                                   void* opaque) {
+  FtsWifiScanContext* context =
+      static_cast<FtsWifiScanContext*>(opaque);
+  if (record.ssid[0] == '\0') {
+    ++context->hidden;
+    return true;
+  }
+
+  ++context->named;
+  if (sFtsWifiStoredCount < FTS_WIFI_SCAN_CACHE_MAX) {
+    FtsWifiScanEntry& entry = sFtsWifiScanEntries[sFtsWifiStoredCount++];
+    memcpy(entry.ssid, record.ssid, sizeof(entry.ssid));
+    entry.ssid[32] = '\0';
+    entry.rssi = record.rssi;
+  }
+  return true;  // keep counting named/hidden APs even after the copy cap
+}
+
+struct FtsWifiScanCacheGuard {
+  ~FtsWifiScanCacheGuard() { clearFtsWifiScanCache(); }
+};
+#endif
+
 bool getOLEDWiFiSelection(String& outSSID) {
   // Fallback to serial if OLED not available
   if (!isOLEDAvailable()) {
@@ -350,266 +410,249 @@ bool getOLEDWiFiSelection(String& outSSID) {
   }
 
 #if ENABLE_WIFI
-  // Scan for networks
-  OLED_TRANSACTION(
-    oledDisplay->clearDisplay();
-    oledDisplay->setTextSize(1);
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, 0);
-    oledDisplay->print("Scanning WiFi...");
-    oledDisplay->display();
-  );
-  
-  WiFi.mode(WIFI_STA);
-  int networkCount = WiFi.scanNetworks(false, true);
+  FtsWifiScanCacheGuard cacheGuard;
+  for (;;) {  // rescan/manual-back return here without recursive stack growth
+    clearFtsWifiScanCache();
 
-  // Number ONLY named networks, sequentially — this MUST match the input parser
-  // below, which maps "N" to the Nth named network (hidden/empty SSIDs skipped).
-  // Numbering the raw scan index here (blanks included) is exactly what made
-  // typing the shown number for a network with hidden nets above it save the
-  // literal digit as the SSID (e.g. "4" -> NO_SSID_AVAIL).
-  Serial.printf("Found %d networks:\n", networkCount);
-  int sNamed = 0, sHidden = 0;
-  for (int i = 0; i < networkCount; i++) {
-    if (WiFi.SSID(i).length() == 0) { sHidden++; continue; }  // hidden — not numbered
-    sNamed++;
-    if (sNamed <= 15) {
-      Serial.printf("  %d. %-24s  %lddBm\n", sNamed, WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i));
-    }
-  }
-  if (sNamed > 15) Serial.printf("  ... and %d more named\n", sNamed - 15);
-  if (sHidden > 0) Serial.printf("  (+%d hidden network%s — type the exact SSID to join)\n",
-                                 sHidden, sHidden == 1 ? "" : "s");
-  Serial.println("Enter a number to select, type an SSID directly, 'rescan' to refresh, or 'skip':");
-  Serial.print("> ");
-  
-  if (networkCount == 0) {
-    OLED_TRANSACTION(
-      oledDisplay->clearDisplay();
-      oledDisplay->setCursor(0, 0);
-      oledDisplay->print("No networks found");
-      oledDisplay->setCursor(0, 20);
-      oledDisplay->print("Press A to retry");
-      oledDisplay->setCursor(0, 30);
-      oledDisplay->print("Press B to skip");
-      oledDisplay->display();
-    );
-    
-    uint32_t pressed = waitForButtonPress();
-    if (INPUT_CHECK(pressed, INPUT_BUTTON_A)) {
-      return getOLEDWiFiSelection(outSSID);  // Retry
-    }
-    return false;  // Skip
-  }
-  
-  // Build network list (limit to 20 networks), skip hidden (empty SSID)
-  const int maxNetworks = 20;
-  String networks[maxNetworks];
-  int displayCount = 0;
-  int hiddenCount = 0;
-
-  for (int i = 0; i < networkCount && displayCount < maxNetworks - 3; i++) {
-    String ssid = WiFi.SSID(i);
-    if (ssid.length() == 0) {
-      hiddenCount++;
-      continue;
-    }
-    networks[displayCount] = ssid;
-    // Add signal strength indicator
-    int rssi = WiFi.RSSI(i);
-    if (rssi > -50) networks[displayCount] += " +++";
-    else if (rssi > -70) networks[displayCount] += " ++";
-    else networks[displayCount] += " +";
-    displayCount++;
-  }
-
-  // Insert hidden network count label (non-actionable info row)
-  int hiddenLabelIdx = -1;
-  if (hiddenCount > 0 && displayCount < maxNetworks) {
-    char hiddenLabel[32];
-    snprintf(hiddenLabel, sizeof(hiddenLabel), "  %d Hidden Network%s",
-             hiddenCount, hiddenCount == 1 ? "" : "s");
-    networks[displayCount] = String(hiddenLabel);
-    hiddenLabelIdx = displayCount;
-    displayCount++;
-  }
-
-  // Add special options at the end (skip is always available via B)
-  if (displayCount < maxNetworks) {
-    networks[displayCount] = "< Rescan WiFi >";
-    displayCount++;
-  }
-  if (displayCount < maxNetworks) {
-    networks[displayCount] = "< Manual Entry >";
-    displayCount++;
-  }
-  
-  // Show selection menu
-  int selection = 0;
-  int scrollOffset = 0;
-  bool confirmed = false;
-  
-  while (!confirmed) {
-    // Adjust scroll to keep selection visible
-    const int maxVisible = 5;
-    if (selection < scrollOffset) {
-      scrollOffset = selection;
-    } else if (selection >= scrollOffset + maxVisible) {
-      scrollOffset = selection - maxVisible + 1;
-    }
-    
-    // Render WiFi selection menu (wrapped in I2C transaction)
     OLED_TRANSACTION(
       oledDisplay->clearDisplay();
       oledDisplay->setTextSize(1);
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-      
-      // Title
       oledDisplay->setCursor(0, 0);
-      oledDisplay->print("Select WiFi:");
-      
-      // Calculate visible items (5 lines, 10px each = 50px, starting at y=12)
-      const int itemHeight = 10;
-      const int startY = 12;
-      
-      // Draw visible items
-      for (int i = 0; i < maxVisible && (scrollOffset + i) < displayCount; i++) {
-        int idx = scrollOffset + i;
-        int y = startY + i * itemHeight;
-        
-        if (idx == selection) {
-          oledDisplay->fillRect(0, y - 1, 128, itemHeight, DISPLAY_COLOR_WHITE);
-          oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-        } else {
-          oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-        }
-        
-        oledDisplay->setCursor(2, y);
-        // Truncate long SSIDs
-        String displayName = networks[idx];
-        if (displayName.length() > 20) {
-          displayName = displayName.substring(0, 17); displayName += "...";
-        }
-        oledDisplay->print(displayName);
-      }
-      
-      // Scroll indicators
-      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-      if (scrollOffset > 0) {
-        oledDisplay->setCursor(120, 12);
-        oledDisplay->print("^");
-      }
-      if (scrollOffset + maxVisible < displayCount) {
-        oledDisplay->setCursor(120, 52);
-        oledDisplay->print("v");
-      }
-      
+      oledDisplay->print("Scanning WiFi...");
       oledDisplay->display();
     );
-    
-    // Check for serial input first (non-blocking)
-    if (Serial.available()) {
-      String serialInput = Serial.readStringUntil('\n');
-      serialInput.trim();
-      if (serialInput.length() > 0) {
-        // Check if it's a skip command
-        if (serialInput.equalsIgnoreCase("skip")) {
-          broadcastOutput("Skipping WiFi setup");
-          return false;
-        }
-        // Check if it's a rescan command
-        if (serialInput.equalsIgnoreCase("rescan")) {
-          broadcastOutput("Rescanning WiFi...");
-          WiFi.scanDelete();
-          return getOLEDWiFiSelection(outSSID);
-        }
-        // A bare number selects the Nth *named* network — skip hidden (empty-SSID)
-        // ones so the serial pick matches the on-screen list (which hides them).
-        // Prevents picking a blank SSID, which fails to connect (and crashed import).
-        int idx = serialInput.toInt();
-        bool isPureNumber = (idx >= 1 && String(idx) == serialInput);
-        bool picked = false;
-        if (isPureNumber) {
-          int seen = 0;
-          for (int i = 0; i < networkCount; i++) {
-            if (WiFi.SSID(i).length() == 0) continue;  // skip hidden, like the display
-            if (++seen == idx) { outSSID = WiFi.SSID(i); picked = true; break; }
-          }
-          if (!picked) {
-            // A number with no matching listed network is a mistype, NOT an SSID
-            // literally named e.g. "4". Reject + re-prompt instead of saving the
-            // digit as the SSID (which only fails later with NO_SSID_AVAIL).
-            Serial.printf("'%s' isn't in the list (1-%d). Pick again, type an exact SSID, or 'skip'.\n> ",
-                          serialInput.c_str(), seen);
-            continue;
-          }
-        } else {
-          outSSID = serialInput;  // non-numeric → literal SSID (manual entry / hidden net by name)
-        }
-        broadcastOutput(outSSID);
-        return true;
-      }
-    }
-    
-    // Handle input
-    updateInputState();
-    int deltaX, deltaY;
-    getJoystickDelta(deltaX, deltaY);
-    uint32_t newlyPressed = getNewlyPressedButtons();
-    
-    // Up/Down to navigate
-    if (deltaY < -JOYSTICK_DEADZONE) {
-      if (selection > 0) selection--;
-      delay(150);
-    } else if (deltaY > JOYSTICK_DEADZONE) {
-      if (selection < displayCount - 1) selection++;
-      delay(150);
-    }
-    
-    // A button to confirm (skip hidden label row - it is non-selectable)
-    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      if (selection == hiddenLabelIdx) {
-        if (selection < displayCount - 1) selection++;
-      } else {
-        confirmed = true;
-      }
-    }
-    
-    // B button to cancel/skip
-    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+
+    FtsWifiScanContext scanContext;
+    const WifiScanResult scanResult = wifiScanForEach(
+        /*includeHidden=*/true, cacheFtsWifiScanRecord, &scanContext,
+        /*acquireTimeoutMs=*/1000);
+
+    if (!scanResult.ok()) {
+      const char* status = wifiScanStatusText(scanResult.status);
+      Serial.printf("WiFi scan %s (driver=%ld). Press A to retry or B to skip.\n",
+                    status, (long)scanResult.driverError);
+      OLED_TRANSACTION(
+        oledDisplay->clearDisplay();
+        oledDisplay->setTextSize(1);
+        oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+        oledDisplay->setCursor(0, 0);
+        oledDisplay->print("WiFi scan ");
+        oledDisplay->println(status);
+        oledDisplay->setCursor(0, 20);
+        oledDisplay->print("Press A to retry");
+        oledDisplay->setCursor(0, 30);
+        oledDisplay->print("Press B to skip");
+        oledDisplay->display();
+      );
+      const uint32_t pressed = waitForButtonPress();
+      if (INPUT_CHECK(pressed, INPUT_BUTTON_A)) continue;
       return false;
     }
-    
-    delay(50);
-  }
-  
-  // Check if user selected "Rescan"
-  if (networks[selection].startsWith("< Rescan")) {
-    WiFi.scanDelete();
-    return getOLEDWiFiSelection(outSSID);
-  }
-  
-  // Check if user selected "Manual Entry" (for hidden networks)
-  if (networks[selection].startsWith("< Manual")) {
-    WiFi.scanDelete();
-    bool cancelled = false;
-    outSSID = getOLEDTextInput("WiFi SSID:", false, "", 32, &cancelled);
-    if (cancelled || outSSID.length() == 0) {
-      return getOLEDWiFiSelection(outSSID);  // Back to network list
+
+    // Number named networks only. Hidden entries never consume a displayed or
+    // serial selection number, so a numeric pick maps to the copied SSID that
+    // was printed even after the native scan storage has been released.
+    Serial.printf("Found %u networks:\n", (unsigned)scanResult.found);
+    const uint16_t serialShown = sFtsWifiStoredCount;
+    for (uint16_t i = 0; i < serialShown; ++i) {
+      Serial.printf("  %u. %-24s  %lddBm\n", (unsigned)(i + 1),
+                    sFtsWifiScanEntries[i].ssid,
+                    (long)sFtsWifiScanEntries[i].rssi);
     }
-    return true;
+    if (scanContext.named > serialShown) {
+      Serial.printf("  ... and %u more named\n",
+                    (unsigned)(scanContext.named - serialShown));
+    }
+    if (scanContext.hidden > 0) {
+      Serial.printf("  (+%u hidden network%s — type the exact SSID to join)\n",
+                    (unsigned)scanContext.hidden,
+                    scanContext.hidden == 1 ? "" : "s");
+    }
+    Serial.println("Enter a number to select, type an SSID directly, 'rescan' to refresh, or 'skip':");
+    Serial.print("> ");
+
+    if (scanResult.found == 0) {
+      OLED_TRANSACTION(
+        oledDisplay->clearDisplay();
+        oledDisplay->setCursor(0, 0);
+        oledDisplay->print("No networks found");
+        oledDisplay->setCursor(0, 20);
+        oledDisplay->print("Press A to retry");
+        oledDisplay->setCursor(0, 30);
+        oledDisplay->print("Press B to skip");
+        oledDisplay->display();
+      );
+      const uint32_t pressed = waitForButtonPress();
+      if (INPUT_CHECK(pressed, INPUT_BUTTON_A)) continue;
+      return false;
+    }
+
+    const int namedMenuCount =
+        sFtsWifiStoredCount < FTS_WIFI_MENU_NAMED_MAX
+            ? sFtsWifiStoredCount : FTS_WIFI_MENU_NAMED_MAX;
+    int displayCount = namedMenuCount;
+    for (int i = 0; i < namedMenuCount; ++i) {
+      const int rssi = sFtsWifiScanEntries[i].rssi;
+      const char* bars = (rssi > -50) ? " +++"
+                         : (rssi > -70) ? " ++" : " +";
+      snprintf(sFtsWifiMenuLabels[i], sizeof(sFtsWifiMenuLabels[i]),
+               "%.32s%s", sFtsWifiScanEntries[i].ssid, bars);
+    }
+
+    int hiddenLabelIdx = -1;
+    if (scanContext.hidden > 0 && displayCount < FTS_WIFI_MENU_MAX) {
+      hiddenLabelIdx = displayCount;
+      snprintf(sFtsWifiMenuLabels[displayCount],
+               sizeof(sFtsWifiMenuLabels[displayCount]),
+               "  %u Hidden Network%s", (unsigned)scanContext.hidden,
+               scanContext.hidden == 1 ? "" : "s");
+      ++displayCount;
+    }
+
+    const int rescanIdx = displayCount;
+    snprintf(sFtsWifiMenuLabels[displayCount++],
+             sizeof(sFtsWifiMenuLabels[0]), "< Rescan WiFi >");
+    const int manualIdx = displayCount;
+    snprintf(sFtsWifiMenuLabels[displayCount++],
+             sizeof(sFtsWifiMenuLabels[0]), "< Manual Entry >");
+
+    int selection = 0;
+    int scrollOffset = 0;
+    bool confirmed = false;
+    bool rescanRequested = false;
+
+    while (!confirmed) {
+      const int maxVisible = 5;
+      if (selection < scrollOffset) {
+        scrollOffset = selection;
+      } else if (selection >= scrollOffset + maxVisible) {
+        scrollOffset = selection - maxVisible + 1;
+      }
+
+      OLED_TRANSACTION(
+        oledDisplay->clearDisplay();
+        oledDisplay->setTextSize(1);
+        oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+        oledDisplay->setCursor(0, 0);
+        oledDisplay->print("Select WiFi:");
+
+        const int itemHeight = 10;
+        const int startY = 12;
+        for (int i = 0;
+             i < maxVisible && (scrollOffset + i) < displayCount; ++i) {
+          const int idx = scrollOffset + i;
+          const int y = startY + i * itemHeight;
+          if (idx == selection) {
+            oledDisplay->fillRect(0, y - 1, 128, itemHeight,
+                                  DISPLAY_COLOR_WHITE);
+            oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
+          } else {
+            oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+          }
+
+          oledDisplay->setCursor(2, y);
+          char displayName[21];
+          const size_t labelLength = strlen(sFtsWifiMenuLabels[idx]);
+          if (labelLength > 20) {
+            memcpy(displayName, sFtsWifiMenuLabels[idx], 17);
+            memcpy(displayName + 17, "...", 4);
+          } else {
+            strncpy(displayName, sFtsWifiMenuLabels[idx],
+                    sizeof(displayName) - 1);
+            displayName[sizeof(displayName) - 1] = '\0';
+          }
+          oledDisplay->print(displayName);
+        }
+
+        oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+        if (scrollOffset > 0) {
+          oledDisplay->setCursor(120, 12);
+          oledDisplay->print("^");
+        }
+        if (scrollOffset + maxVisible < displayCount) {
+          oledDisplay->setCursor(120, 52);
+          oledDisplay->print("v");
+        }
+        oledDisplay->display();
+      );
+
+      if (Serial.available()) {
+        String serialInput = Serial.readStringUntil('\n');
+        serialInput.trim();
+        if (serialInput.length() > 0) {
+          if (serialInput.equalsIgnoreCase("skip")) {
+            broadcastOutput("Skipping WiFi setup");
+            return false;
+          }
+          if (serialInput.equalsIgnoreCase("rescan")) {
+            broadcastOutput("Rescanning WiFi...");
+            rescanRequested = true;
+            break;
+          }
+
+          const int idx = serialInput.toInt();
+          const bool isPureNumber =
+              idx >= 1 && String(idx) == serialInput;
+          if (isPureNumber) {
+            if (idx > sFtsWifiStoredCount) {
+              // A bare unmatched number is a typo, not a literal numeric SSID.
+              // Digit-leading non-numbers (for example "4G-home") remain valid
+              // exact SSIDs through the branch below.
+              Serial.printf("'%s' isn't in the list (1-%u). Pick again, type an exact SSID, or 'skip'.\n> ",
+                            serialInput.c_str(),
+                            (unsigned)sFtsWifiStoredCount);
+              continue;
+            }
+            outSSID = sFtsWifiScanEntries[idx - 1].ssid;
+          } else {
+            outSSID = serialInput;
+          }
+          broadcastOutput(outSSID);
+          return true;
+        }
+      }
+
+      updateInputState();
+      int deltaX, deltaY;
+      getJoystickDelta(deltaX, deltaY);
+      const uint32_t newlyPressed = getNewlyPressedButtons();
+
+      if (deltaY < -JOYSTICK_DEADZONE) {
+        if (selection > 0) --selection;
+        delay(150);
+      } else if (deltaY > JOYSTICK_DEADZONE) {
+        if (selection < displayCount - 1) ++selection;
+        delay(150);
+      }
+
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+        if (selection == hiddenLabelIdx) {
+          if (selection < displayCount - 1) ++selection;
+        } else {
+          confirmed = true;
+        }
+      }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) return false;
+      delay(50);
+    }
+
+    if (rescanRequested || selection == rescanIdx) continue;
+    if (selection == manualIdx) {
+      bool cancelled = false;
+      outSSID = getOLEDTextInput("WiFi SSID:", false, "", 32,
+                                 &cancelled);
+      if (cancelled || outSSID.length() == 0) continue;
+      return true;
+    }
+
+    if (selection >= 0 && selection < namedMenuCount) {
+      outSSID = sFtsWifiScanEntries[selection].ssid;
+      outSSID.trim();
+      return outSSID.length() > 0;
+    }
   }
-  
-  // Extract SSID (remove signal strength indicator)
-  outSSID = networks[selection];
-  int plusIdx = outSSID.lastIndexOf(" +");
-  if (plusIdx > 0) {
-    outSSID = outSSID.substring(0, plusIdx);
-  }
-  outSSID.trim();
-  
-  return true;
-  
+
 #else
   // WiFi disabled at compile time
   OLED_TRANSACTION(

@@ -42,6 +42,14 @@ static bool sKeyboardActive = false;
 static unsigned long sMessageUntil = 0;
 static bool sAuthUsingGamepad = false;  // True if authenticating with gamepad password
 
+void oledSetPatternModeResetSessionState() {
+  sKeyboardActive = false;
+  sStep = PATTERN_STEP_AUTH_CHECK;
+  secureClearString(sFirstPattern);
+  sMessageUntil = 0;
+  sAuthUsingGamepad = false;
+}
+
 static void startPatternKeyboard(const char* title) {
   oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH);
   // Force pattern mode as default for this flow

@@ -3,13 +3,15 @@
 #include "System_Mutex.h"  // For isFsLockedByCurrentTask
 #include "System_Debug.h"  // For DEBUG_CLIF macro
 #include "System_MemUtil.h"      // For ps_alloc, AllocPref
-#include "System_ESPNow.h"       // For getEspNowTaskHandle()
-#include "System_ESPNow_Tx.h"    // For espnowtx::getTaskHandle()
+#include "System_ESPNow.h"       // Safe espnow_task stack snapshot
+#include "System_ESPNow_Tx.h"    // Safe espnow_tx stack snapshot
 #include "System_I2C.h"          // For queueProcessorTask
 #include "HAL_Input.h"           // For INPUT_TASK_NAME / INPUT_TASK_TAG
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_heap_caps.h>
 #include <cstdio>                 // snprintf (per-interval CPU% formatting)
+#include <cstring>                // strncmp/strlcpy (task stack-size registry)
 
 // Some ESP-IDF configurations do not provide uxTaskGetSystemState (runtime
 // stats disabled). Provide a weak stub so diagnostic commands still link. If
@@ -78,6 +80,67 @@ extern void gpsTask(void* parameter);
 extern void rtcTask(void* parameter);
 
 // ============================================================================
+// Task Stack-Size Registry
+// ============================================================================
+// See the contract in System_TaskUtils.h. Append-only: entries are never
+// removed, because a re-created task reuses its name and simply overwrites its
+// size in place.
+//
+// Sizing: ~40 distinct names register today (20 direct taskStackRecord sites +
+// ~19 through xTaskCreateLogged). Board profiles gate many of them, but the
+// registry is append-only across a boot, so budget for the union, not the
+// live set. 56 slots ≈ 1.1 KB of .bss. Overflow drops the newest entries, which
+// degrades to "size unknown" rather than misreporting a wrong total.
+static constexpr size_t TASK_STACK_REG_MAX = 56;
+
+struct TaskStackEntry {
+  char     name[configMAX_TASK_NAME_LEN];
+  uint32_t bytes;
+};
+
+static TaskStackEntry sTaskStackReg[TASK_STACK_REG_MAX];
+static size_t         sTaskStackRegCount = 0;
+static portMUX_TYPE   sTaskStackRegMux   = portMUX_INITIALIZER_UNLOCKED;
+
+// Names are copied under sizeof(name) == configMAX_TASK_NAME_LEN, the same
+// bound prvInitialiseNewTask() uses for the TCB copy, so a name the kernel
+// truncated truncates identically here and still compares equal.
+void taskStackRecord(const char* name, uint32_t allocatedBytes) {
+  if (!name || !name[0] || allocatedBytes == 0) return;
+
+  taskENTER_CRITICAL(&sTaskStackRegMux);
+  for (size_t i = 0; i < sTaskStackRegCount; i++) {
+    if (strncmp(sTaskStackReg[i].name, name, configMAX_TASK_NAME_LEN - 1) == 0) {
+      sTaskStackReg[i].bytes = allocatedBytes;  // re-created, possibly resized
+      taskEXIT_CRITICAL(&sTaskStackRegMux);
+      return;
+    }
+  }
+  if (sTaskStackRegCount < TASK_STACK_REG_MAX) {
+    TaskStackEntry& e = sTaskStackReg[sTaskStackRegCount];
+    strlcpy(e.name, name, sizeof(e.name));
+    e.bytes = allocatedBytes;
+    sTaskStackRegCount++;
+  }
+  taskEXIT_CRITICAL(&sTaskStackRegMux);
+}
+
+uint32_t taskStackLookup(const char* name) {
+  if (!name || !name[0]) return 0;
+
+  uint32_t bytes = 0;
+  taskENTER_CRITICAL(&sTaskStackRegMux);
+  for (size_t i = 0; i < sTaskStackRegCount; i++) {
+    if (strncmp(sTaskStackReg[i].name, name, configMAX_TASK_NAME_LEN - 1) == 0) {
+      bytes = sTaskStackReg[i].bytes;
+      break;
+    }
+  }
+  taskEXIT_CRITICAL(&sTaskStackRegMux);
+  return bytes;
+}
+
+// ============================================================================
 // Task Creation with Memory Logging
 // ============================================================================
 
@@ -93,8 +156,17 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
   size_t heapBefore = ESP.getFreeHeap();
   size_t psTot = ESP.getPsramSize();
   size_t psBefore = (psTot > 0) ? ESP.getFreePsram() : 0;
+  size_t internalBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t largestBefore = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  // Record the total before creating, so `taskstats --json` can report stack
+  // size alongside the high-water mark (FreeRTOS cannot recover it later).
+  taskStackRecord(pcName, usStackDepth);
 
   BaseType_t res = xTaskCreatePinnedToCore(pxTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask, coreId);
+
+  size_t internalAfter = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t largestAfter = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
   // Durable, always-on record of task-create FAILURES only. A task that fails
   // to spawn (heap/PSRAM exhaustion) means its whole feature silently never
@@ -104,10 +176,10 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
   // while per-task memory telemetry is the DEBUG_MEMORY block below.
   if (res != pdPASS) {
     size_t psFree = (psTot > 0) ? ESP.getFreePsram() : 0;
-    logSystemEvent("TASK", "failed to create '%s'%s%s (heap=%u psram=%u) — feature unavailable this boot",
+    logSystemEvent("TASK", "failed to create '%s'%s%s (internal=%u largest=%u psram=%u) — feature unavailable this boot",
                    pcName ? pcName : "?",
                    (tag && tag[0]) ? " tag=" : "", (tag && tag[0]) ? tag : "",
-                   (unsigned)ESP.getFreeHeap(), (unsigned)psFree);
+                   (unsigned)internalAfter, (unsigned)largestAfter, (unsigned)psFree);
   }
 
   // Optionally log (only when FS is ready and not inside FS critical section)
@@ -155,6 +227,14 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
     line += String(heapAfter);
     line += " heapDelta=";
     line += String(heapDelta);
+    line += " internalBefore=";
+    line += String(internalBefore);
+    line += " internalAfter=";
+    line += String(internalAfter);
+    line += " largestBefore=";
+    line += String(largestBefore);
+    line += " largestAfter=";
+    line += String(largestAfter);
     if (psTot > 0) {
       line += " psBefore=";
       line += String(psBefore);
@@ -523,11 +603,21 @@ void reportAllTaskStacks() {
   
   // Build known tasks list dynamically (some handles are runtime-resolved)
 #if ENABLE_ESPNOW
-  TaskHandle_t espnowHandle = getEspNowTaskHandle();
-  TaskHandle_t espnowTxHandle = espnowtx::getTaskHandle();
+  TaskHandle_t espnowHandle = nullptr;
+  UBaseType_t espnowWatermark = 0;
+  const bool espnowSnapshotValid =
+      getEspNowTaskStackSnapshot(&espnowHandle, &espnowWatermark);
+  TaskHandle_t espnowTxHandle = nullptr;
+  UBaseType_t espnowTxWatermark = 0;
+  const bool espnowTxSnapshotValid =
+      espnowtx::getTaskStackSnapshot(&espnowTxHandle, &espnowTxWatermark);
 #else
   TaskHandle_t espnowHandle = nullptr;
+  UBaseType_t espnowWatermark = 0;
+  const bool espnowSnapshotValid = false;
   TaskHandle_t espnowTxHandle = nullptr;
+  UBaseType_t espnowTxWatermark = 0;
+  const bool espnowTxSnapshotValid = false;
 #endif
 
   const KnownTask knownTasks[] = {
@@ -556,8 +646,8 @@ void reportAllTaskStacks() {
   
   // Enabled flags for each task — if false, handle may be stale (task self-deleted)
   const bool taskAlive[] = {
-    espnowHandle != nullptr,                                        // espnow_task
-    espnowTxHandle != nullptr,                                      // espnow_tx
+    espnowSnapshotValid,                                            // espnow_task
+    espnowTxSnapshotValid,                                         // espnow_tx
     gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
     queueProcessorTask != nullptr,                                  // sensor_queue_task
     gInputRunning,                                                 // gamepad_task
@@ -580,7 +670,13 @@ void reportAllTaskStacks() {
     
     // BYTES, not words — kt.stackWords holds the byte count passed to
     // xTaskCreate, and the HWM is in bytes too. See System_TaskUtils.h.
-    UBaseType_t watermark = uxTaskGetStackHighWaterMark(kt.handle);
+    // The TX task can be deleted by closeespnow. Its watermark was sampled
+    // while the TX lifecycle-owner mutex prevented deletion; never issue a
+    // later FreeRTOS task query with the now-unpinned handle.
+    UBaseType_t watermark = (ktIdx == 1)
+        ? espnowWatermark
+        : (ktIdx == 2) ? espnowTxWatermark
+                       : uxTaskGetStackHighWaterMark(kt.handle);
     uint32_t allocBytes = kt.stackWords;
     uint32_t freeBytes = (uint32_t)watermark;
     uint32_t usedBytes = allocBytes - freeBytes;
@@ -733,7 +829,10 @@ void reportAllTaskStacks() {
     if (!isTaskHandleInSnapshot(kt.handle)) continue;
     // Only call expensive FreeRTOS function when needed for warning check
     if (!isDebugFlagSet(DEBUG_PERFORMANCE)) continue;
-    UBaseType_t watermark = uxTaskGetStackHighWaterMark(kt.handle);
+    UBaseType_t watermark = (warnIdx == 1)
+        ? espnowWatermark
+        : (warnIdx == 2) ? espnowTxWatermark
+                         : uxTaskGetStackHighWaterMark(kt.handle);
     uint32_t freePercent = (watermark * 100) / kt.stackWords;
     if (freePercent < 25) {
       BROADCAST_PRINTF("  [!] %-16s CRITICAL: Only %u%% stack free!", 

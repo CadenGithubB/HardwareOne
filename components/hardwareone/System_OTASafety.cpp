@@ -1,5 +1,6 @@
 #include "System_OTASafety.h"
 #include "System_OTA.h"
+#include "System_TaskUtils.h"  // taskStackRecord — taskstats stack-size registry
 
 #include <atomic>
 #include <stddef.h>
@@ -251,6 +252,7 @@ void otaSafetyInitEarly() {
 #endif
 
   TaskHandle_t supervisor = nullptr;
+  taskStackRecord("ota_probation", 3072);
   const BaseType_t created = xTaskCreatePinnedToCore(
       probationSupervisor, "ota_probation", 3072, nullptr, 6, &supervisor,
       kSupervisorCore);

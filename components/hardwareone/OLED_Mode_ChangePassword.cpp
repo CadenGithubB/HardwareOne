@@ -36,6 +36,22 @@ static unsigned long errorDisplayUntil = 0;
 static bool changePasswordKeyboardActive = false;
 static bool passwordChangeInProgress = false;
 
+void oledChangePasswordModeResetSessionState() {
+  changePasswordKeyboardActive = false;
+  passwordChangeInProgress = false;
+  currentField = FIELD_CURRENT_PASSWORD;
+  secureClearString(currentPassBuffer);
+  secureClearString(newPassBuffer);
+  secureClearString(confirmPassBuffer);
+  secureClearString(errorMessage);
+  errorDisplayUntil = 0;
+}
+
+static void wipeResultBuffer(char* buffer, size_t size) {
+  volatile char* p = reinterpret_cast<volatile char*>(buffer);
+  while (size-- > 0) *p++ = '\0';
+}
+
 // ============================================================================
 // Display Function
 // ============================================================================
@@ -45,6 +61,13 @@ static void displayChangePasswordMode() {
     ERROR_SYSTEMF("[CHANGE_PASSWORD] FATAL: oledDisplay is null!");
     return;
   }
+
+  String sessionUser;
+  bool sessionAuthed = false;
+  const TransportSessionEpoch sessionEpoch =
+      localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
+  secureClearString(sessionUser);
+  if (!sessionAuthed || sessionEpoch == kNoTransportSessionEpoch) return;
 
   // If the on-screen keyboard is active (a field was selected for entry), render
   // it full-screen instead of the fields view — same pattern every other
@@ -191,6 +214,16 @@ static void displayChangePasswordMode() {
 // ============================================================================
 
 static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+  String sessionUser;
+  bool sessionAuthed = false;
+  const TransportSessionEpoch sessionEpoch =
+      localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
+  secureClearString(sessionUser);
+  if (!sessionAuthed || sessionEpoch == kNoTransportSessionEpoch) {
+    oledChangePasswordModeResetSessionState();
+    return true;
+  }
+
   // Keyboard input handling
   if (changePasswordKeyboardActive) {
     if (oledKeyboardIsCompleted()) {
@@ -271,13 +304,31 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
       // call previously bypassed both the identity install and the audit log.
       passwordChangeInProgress = true;
       String args = "userchangepassword " + currentPassBuffer + " " + newPassBuffer + " " + confirmPassBuffer;
-      char resultBuf[256];
-      executeOLEDCommandWithResult(args, resultBuf, sizeof(resultBuf));
+      // Do not pin identity replacement through password hashing/FS work. The
+      // command carries the exact epoch and result publication is fenced.
+      char resultBuf[256] = {};
+      const bool commandOk = executeOLEDCommandWithResultForSession(
+          args, sessionEpoch, resultBuf, sizeof(resultBuf));
+      secureClearString(args);
       const char* result = resultBuf;
 
       passwordChangeInProgress = false;
 
-      if (result && strstr(result, "Error") == NULL && strstr(result, "successfully") != NULL) {
+      // A successful password change intentionally revokes this user's other
+      // sessions but preserves the calling display session. If a future policy
+      // rotates the caller too, the exact-epoch lease below simply fails.
+
+      // The command may have waited behind a remote display replacement. Do
+      // not publish its result/error state unless the exact submitting display
+      // incarnation is still live. If replacement races the following owner-
+      // only state update, the pending boundary wipes it before rendering.
+      if (!transportSessionEpochIsLive(SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
+        wipeResultBuffer(resultBuf, sizeof(resultBuf));
+        return true;
+      }
+
+      if (commandOk && result && strstr(result, "Error") == NULL &&
+          strstr(result, "successfully") != NULL) {
         // Success
         errorMessage = "Password changed!";
         errorDisplayUntil = millis() + 2000;
@@ -288,11 +339,6 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         secureClearString(newPassBuffer);
         secureClearString(confirmPassBuffer);
         currentField = FIELD_CURRENT_PASSWORD;
-        
-        // Return to menu after delay (no stack push — don't keep change-password in history)
-        delay(2000);
-        requestOLEDMode(OLED_MENU, "changepw.done", false);
-        resetOLEDMenu();
       } else {
         // Error
         String errMsg = result ? String(result) : "Unknown error";
@@ -309,6 +355,23 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         // Clear only current password on error
         secureClearString(currentPassBuffer);
         currentField = FIELD_CURRENT_PASSWORD;
+      }
+
+      const bool passwordChanged =
+          commandOk && result && strstr(result, "Error") == NULL &&
+          strstr(result, "successfully") != NULL;
+      wipeResultBuffer(resultBuf, sizeof(resultBuf));
+
+      if (passwordChanged) {
+        // Return to the menu only if this is still the same display session
+        // after the acknowledgement delay. A replacement identity owns its
+        // own navigation and must not be moved by this old handler.
+        delay(2000);
+        if (transportSessionEpochIsLive(
+                SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
+          requestOLEDMode(OLED_MENU, "changepw.done", false);
+          resetOLEDMenu();
+        }
       }
       
     } else {

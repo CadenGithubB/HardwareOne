@@ -948,6 +948,7 @@ static void initAsyncMapRenderer() {
   // prio-LOW on Core 0 was getting starved by WiFi/BT/esp_timer; let the
   // scheduler place it wherever there's actual slack.
   // APP_CORE: offscreen map raster is pure compute; keep it off the Wi-Fi/BLE core.
+  taskStackRecord("mapRender", MAP_RENDER_STACK_WORDS);
   xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr, TASK_PRIORITY_LOW, &sRenderTaskHandle, APP_CORE);
   
   DEBUG_MAPSF("[MAP_ASYNC] Async renderer initialized (double-buffer + render task)");

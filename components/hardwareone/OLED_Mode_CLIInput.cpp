@@ -15,6 +15,7 @@
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
 #include "OLED_ConsoleBuffer.h"
+#include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Utils.h"
 
@@ -33,8 +34,35 @@ static bool     sShowingResult   = false;
 static bool     sLastOk          = false;
 static String   sLastCommand     = "";
 static String   sLastResult      = "";
+static TransportSessionEpoch sResultEpoch = kNoTransportSessionEpoch;
+static TransportSessionEpoch sInputEpoch = kNoTransportSessionEpoch;
+
+void resetCLIInputState();
+
+enum class OledCliNativeTransition : uint8_t {
+  None,
+  Login,
+  Logout,
+};
+
+static OledCliNativeTransition classifyNativeTransition(const String& cmd) {
+  CommandArgs args(cmd);
+  if (args.count() == 3 && args.arg(0).equalsIgnoreCase("login")) {
+    return OledCliNativeTransition::Login;
+  }
+  if (args.count() == 1 && args.arg(0).equalsIgnoreCase("logout")) {
+    return OledCliNativeTransition::Logout;
+  }
+  return OledCliNativeTransition::None;
+}
 
 static void startInputKeyboard() {
+  String sessionUser;
+  bool sessionAuthed = false;
+  sInputEpoch =
+      localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
+  secureClearString(sessionUser);
+  if (!sessionAuthed) sInputEpoch = kNoTransportSessionEpoch;
   oledKeyboardInit("Command:", nullptr, OLED_KEYBOARD_MAX_LENGTH);
   sKeyboardActive = true;
 }
@@ -94,7 +122,15 @@ static void displayCLIInput() {
 
   // After a command runs, show the result screen until the user dismisses it.
   if (sShowingResult) {
-    displayCLIResult();
+    // Only render a result owned by the current authority. A replacement that
+    // races after this check schedules an owner-side wipe, and the central
+    // framebuffer commit fence prevents these pixels reaching its successor.
+    if (transportSessionEpochIsLive(
+            SOURCE_LOCAL_DISPLAY, sResultEpoch)) {
+      displayCLIResult();
+    } else {
+      resetCLIInputState();
+    }
     return;
   }
 
@@ -125,6 +161,11 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) ||
         INPUT_CHECK(newlyPressed, INPUT_BUTTON_X) ||
         INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
+      if (!transportSessionEpochIsLive(
+              SOURCE_LOCAL_DISPLAY, sResultEpoch)) {
+        resetCLIInputState();
+        return true;
+      }
       sShowingResult = false;
       startInputKeyboard();
       return true;
@@ -135,11 +176,23 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (!sKeyboardActive) return false;
 
   if (oledKeyboardIsCompleted()) {
+    const TransportSessionEpoch sessionEpoch = sInputEpoch;
+    if (sessionEpoch == kNoTransportSessionEpoch ||
+        !transportSessionEpochIsLive(
+            SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
+      resetCLIInputState();
+      return true;
+    }
+
+    // Only the OLED owner mutates the shared keyboard. Remote replacement can
+    // change authority here but merely schedules a boundary; that boundary is
+    // applied after this callback and wipes anything copied below.
     const char* text = oledKeyboardGetText();
     String cmd = String(text);
     cmd.trim();
     oledKeyboardReset();
     sKeyboardActive = false;
+    sInputEpoch = kNoTransportSessionEpoch;
 
     if (cmd.length() == 0) {
       // Nothing typed — just re-open the keyboard.
@@ -147,9 +200,36 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       return true;
     }
 
-    // Echo the command into the shared console (viewable on CLI Output page).
+    // Echo only the audit-safe form; login/password commands must never live
+    // in the Guest-visible shared console history.
+    const String safeCommand = redactCmdForAudit(cmd);
     char echoBuf[64];
-    snprintf(echoBuf, sizeof(echoBuf), "> %s", cmd.c_str());
+    snprintf(echoBuf, sizeof(echoBuf), "> %s", safeCommand.c_str());
+
+    // Login/logout are local display lifecycle operations, not ordinary text
+    // commands. Running them through cmd_exec would rotate the very epoch that
+    // owns this result and could make a post-handler reply/audit land in the
+    // replacement session. The native Login/Logout screens are the one safe
+    // caller-local path; explicit cross-transport targets still flow below.
+    const OledCliNativeTransition transition = classifyNativeTransition(cmd);
+    if (transition != OledCliNativeTransition::None) {
+      const char* guidance =
+          transition == OledCliNativeTransition::Login
+              ? "Use the OLED Login screen"
+              : "Use the OLED Logout screen";
+      gOledConsole.append(echoBuf, millis());
+      gOledConsole.append(guidance, millis());
+      sLastCommand = safeCommand;
+      sLastResult = guidance;
+      sLastOk = false;
+      sResultEpoch = sessionEpoch;
+      sShowingResult = true;
+      sAwaitingResult = false;
+      oledMarkDirty();
+      secureClearString(cmd);
+      return true;
+    }
+
     gOledConsole.append(echoBuf, millis());
 
     // Record console size before executing so we can detect new output.
@@ -157,8 +237,18 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     sAwaitingResult = true;
 
     // Execute through the same auth context used by all OLED commands.
-    char out[256];
-    bool ok = executeOLEDCommandWithResult(cmd, out, sizeof(out));
+    char out[256] = {};
+    bool ok = executeOLEDCommandWithResultForSession(
+        cmd, sessionEpoch, out, sizeof(out));
+    secureClearString(cmd);
+
+    if (!transportSessionEpochIsLive(
+            SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
+      volatile char* wipe = reinterpret_cast<volatile char*>(out);
+      for (size_t i = 0; i < sizeof(out); ++i) wipe[i] = '\0';
+      resetCLIInputState();
+      return true;
+    }
 
     // If the command produced no output to the console buffer itself,
     // append the returned string so the CLI Output page always has feedback.
@@ -170,17 +260,26 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
 
     // Show the inline result screen so the user sees pass/fail right here
     // instead of a blank re-opened keyboard.
-    sLastCommand = cmd;
+    sLastCommand = safeCommand;
     sLastResult  = (strlen(out) > 0) ? String(out) : (ok ? "OK" : "(no output)");
     sLastOk      = ok;
+    sResultEpoch = sessionEpoch;
     sShowingResult = true;
     oledMarkDirty();
+    volatile char* wipe = reinterpret_cast<volatile char*>(out);
+    for (size_t i = 0; i < sizeof(out); ++i) wipe[i] = '\0';
     return true;
   }
 
   if (oledKeyboardIsCancelled()) {
+    if (!transportSessionEpochIsLive(
+            SOURCE_LOCAL_DISPLAY, sInputEpoch)) {
+      resetCLIInputState();
+      return true;
+    }
     oledKeyboardReset();
     sKeyboardActive = false;
+    sInputEpoch = kNoTransportSessionEpoch;
     oledMenuBack();
     return true;
   }
@@ -213,8 +312,14 @@ void resetCLIInputState() {
   sShowingResult = false;
   sLastCommand = "";
   sLastResult = "";
+  sResultEpoch = kNoTransportSessionEpoch;
+  sInputEpoch = kNoTransportSessionEpoch;
   sAwaitingResult = false;
   sPreSubmitCount = 0;
+}
+
+void oledCLIInputResetSessionState() {
+  resetCLIInputState();
 }
 
 // ============================================================================

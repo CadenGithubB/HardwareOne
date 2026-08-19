@@ -369,6 +369,9 @@ inline void incrementDebugDropped() { gDebugDropped = gDebugDropped + 1; }
 // Broadcast output functions
 void broadcastOutput(const String& s);
 void broadcastOutput(const char* s);
+// Exact sink route for framework code that must not inherit the ordinary
+// command fan-out (which deliberately adds OLED and G2).
+void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
 
 // CLI next-step hint (see System_Debug.cpp). Text form prints "Hint: <text>";
 // JSON command output sets a top-level "hint" string field instead. Use only
@@ -471,6 +474,11 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 #define DEBUG_MQTT_PUBSUBF(fmt, ...)      DEBUGF_QUEUE_DEBUG(DEBUG_MQTT | DEBUG_MQTT_PUBSUB,     fmt, ##__VA_ARGS__)
 #define DEBUG_MQTT_DISCOVERYF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_MQTT | DEBUG_MQTT_DISCOVERY,  fmt, ##__VA_ARGS__)
 #define DEBUG_MQTT_COMMANDSF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_MQTT | DEBUG_MQTT_COMMANDS,   fmt, ##__VA_ARGS__)
+// UART host-link sub-flags gate on parent OR sub so `debuguart` remains the
+// master switch while lifecycle/control-plane traces can be selected alone.
+#define DEBUG_UARTF(fmt, ...)           DEBUGF_QUEUE_DEBUG(DEBUG_UART, fmt, ##__VA_ARGS__)
+#define DEBUG_UART_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_UART | DEBUG_UART_LIFECYCLE, fmt, ##__VA_ARGS__)
+#define DEBUG_UART_CONTROLF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_UART | DEBUG_UART_CONTROL,   fmt, ##__VA_ARGS__)
 #define DEBUG_CMD_FLOWF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CMD_FLOW, fmt, ##__VA_ARGS__)
 #define DEBUG_FMRADIOF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_FMRADIO, fmt, ##__VA_ARGS__)
 #define DEBUG_G2F(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_G2, fmt, ##__VA_ARGS__)
@@ -486,6 +494,17 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 #define DEBUG_G2_PAGESF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_G2 | DEBUG_G2_PAGES,     fmt, ##__VA_ARGS__)
 #define DEBUG_G2_HEARTBEATF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_G2 | DEBUG_G2_HEARTBEAT, fmt, ##__VA_ARGS__)
 #define DEBUG_G2_DUMPF(fmt, ...)      DEBUGF_QUEUE_DEBUG(DEBUG_G2 | DEBUG_G2_DUMP,      fmt, ##__VA_ARGS__)
+#define DEBUG_RINGF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_RING, fmt, ##__VA_ARGS__)
+// R1 ring sub-flag macros. Same parent-OR-sub contract as DEBUG_G2_*F: the
+// ring is a separate BLE peer from the glasses, so its logs must be
+// enable-able without the glasses firehose (and vice versa).
+#define DEBUG_RING_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_LIFECYCLE, fmt, ##__VA_ARGS__)
+#define DEBUG_RING_SETUPF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_SETUP,     fmt, ##__VA_ARGS__)
+#define DEBUG_RING_PROTOCOLF(fmt, ...)  DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_PROTOCOL,  fmt, ##__VA_ARGS__)
+#define DEBUG_RING_TXNF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_TXN,       fmt, ##__VA_ARGS__)
+#define DEBUG_RING_HEALTHF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_HEALTH,    fmt, ##__VA_ARGS__)
+#define DEBUG_RING_BRIDGEF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_BRIDGE,    fmt, ##__VA_ARGS__)
+#define DEBUG_RING_DUMPF(fmt, ...)      DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_DUMP,      fmt, ##__VA_ARGS__)
 #define DEBUG_CAMERAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA, fmt, ##__VA_ARGS__)
 // Camera sub-flag macros — gate on parent OR sub-flag so the Camera "All"
 // toggle still acts as a master switch. Mirrors DEBUG_G2_*F.
@@ -591,6 +610,7 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 #define ERROR_SESSIONF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_AUTH, "[ERROR][SESSION] " fmt, ##__VA_ARGS__)
 #define ERROR_USERF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_USERS, "[ERROR][USER] " fmt, ##__VA_ARGS__)
 #define ERROR_LOGGINGF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LOGGER, "[ERROR][LOG] " fmt, ##__VA_ARGS__)
+#define ERROR_RINGF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RING, "[ERROR][RING] " fmt, ##__VA_ARGS__)
 #define ERROR_WEBF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_HTTP, "[ERROR][WEB] " fmt, ##__VA_ARGS__)
 #define ERROR_COMMANDF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_CLI, "[ERROR][CMD] " fmt, ##__VA_ARGS__)
 #define ERROR_SYSTEMF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SYSTEM, "[ERROR][SYS] " fmt, ##__VA_ARGS__)
@@ -624,6 +644,7 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 #define WARN_SESSIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_AUTH, "[WARN][SESSION] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_USERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_USERS, "[WARN][USER] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_LOGGINGF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LOGGER, "[WARN][LOG] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_RINGF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RING, "[WARN][RING] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_WEBF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_HTTP, "[WARN][WEB] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_COMMANDF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_CLI, "[WARN][CMD] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_SYSTEMF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SYSTEM, "[WARN][SYS] " fmt, ##__VA_ARGS__); } while (0)
@@ -648,6 +669,7 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 #define INFO_THERMALF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_THERMAL,    "[INFO][THERMAL] "  fmt, ##__VA_ARGS__); } while (0)
 #define INFO_TOFF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_TOF,        "[INFO][TOF] "      fmt, ##__VA_ARGS__); } while (0)
 #define INFO_IMUF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU,        "[INFO][IMU] "      fmt, ##__VA_ARGS__); } while (0)
+#define INFO_RINGF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RING, "[INFO][RING] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_INPUTF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_INPUT,    "[INFO][INPUT] "  fmt, ##__VA_ARGS__); } while (0)
 #define INFO_ANO_ENCODERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ANO_ENCODER, "[INFO][ANO] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_APDSF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS,       "[INFO][APDS] "     fmt, ##__VA_ARGS__); } while (0)
@@ -881,7 +903,7 @@ const char* cmd_debugmaps(const String& argsInput);
 const char* cmd_debugmapsloading(const String& argsInput);
 const char* cmd_debugmapsrendering(const String& argsInput);
 const char* cmd_debugmapsperf(const String& argsInput);
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
 const char* cmd_debugllm(const String& argsInput);
 const char* cmd_debugllmload(const String& argsInput);
 const char* cmd_debugllmtokenizer(const String& argsInput);

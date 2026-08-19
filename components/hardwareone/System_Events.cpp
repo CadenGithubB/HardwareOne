@@ -167,6 +167,12 @@ const char* systemEventKindName(uint8_t kind) {
 
 int systemEventKindFromName(const char* name) {
   if (!name || !name[0]) return -1;
+  // Event names are persisted by automations and notification policy. Keep the
+  // former single boot event as a read-time alias for the completion edge so
+  // upgrades do not silently orphan existing `on: "boot"` configuration. New
+  // listings and writes use only the two canonical boot_started/boot_finished
+  // names generated from SYSEVT_KIND_LIST.
+  if (strcasecmp(name, "boot") == 0) return SYSEVT_BOOT_FINISHED;
   for (int i = SYSEVT_NONE + 1; i < SYSEVT_COUNT; i++) {
     if (strcasecmp(name, kEventKindNames[i]) == 0) return i;
   }
@@ -337,7 +343,7 @@ const char* cmd_events(const String& argsInput) {
       // see the JSON contract in System_Utils.cpp. Broadcasting it meant the
       // addressed reply on every transport was a bare "OK", since only the
       // return value reaches those.
-      // Per-transport reality for the ~2.2 KB payload, so nobody re-derives it:
+      // Per-transport reality for this multi-kilobyte payload:
       //   web /api/cli, BLE  — ExecReq::out[4096], full document. OK.
       //   ESP-NOW            — 6143 B fragmenting. OK.
       //   MQTT               — TRUNCATED. System_MQTT.cpp hands executeCommand a
@@ -347,12 +353,10 @@ const char* cmd_events(const String& argsInput) {
       //   serial console     — still [CUT]. The return value is echoed via
       //                        broadcastOutput(), which clamps a line to 255 B.
       //                        Platform line limit, not this command's bug.
-      // GROUPED ONLY — one shape, not two. Emitting a flat `kinds` array
-      // alongside the grouped copy would repeat all 134 names and land near
-      // 4.8 KB, over CMD_RESULT_MAX. A consumer that only wants the flat
-      // vocabulary flattens the groups in one line, so the second copy would
-      // buy nothing and cost the whole headroom.
-      // Grouped total is ~2.6 KB: the names (~2.2 KB) plus 11 family wrappers.
+      // GROUPED ONLY — one shape, not two. Emitting a flat `kinds` array beside
+      // the grouped copy would repeat every name and can push the result over
+      // CMD_RESULT_MAX. A consumer that only wants the flat vocabulary can
+      // flatten the groups, so the second copy buys nothing and costs headroom.
       PSRAM_JSON_DOC(doc);
       JsonArray fams = doc["families"].to<JsonArray>();
       for (int f = 0; f < SYSEVT_FAM_COUNT; f++) {

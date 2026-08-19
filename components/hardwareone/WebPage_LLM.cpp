@@ -13,13 +13,20 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_ONDEVICE_LLM && ENABLE_HTTP_SERVER
+#if ENABLE_LLM_BACKEND && ENABLE_HTTP_SERVER
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <esp_http_server.h>
 
-#include "System_LLM.h"
+#if ENABLE_LLM_SOURCE_ONBOARD
+  #include "System_LLM.h"   // engine-only; the shared vocabulary is in System_LLMTypes.h
+#endif
+#include "System_LLMBackend.h"   // registry + source dispatch
+#if ENABLE_LLM_SOURCE_CM5
+  #include "System_LLMCm5.h"      // cm5LlmSelectPendingMs + the select watchdog ceiling
+  #include "System_Cm5Presence.h" // host mode: "starting" vs "gone"
+#endif
 #include "System_LLMChat.h"
 #include "System_Debug.h"
 #include "System_Settings.h"
@@ -60,12 +67,12 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("[LLM-API] GET /api/llm/status from user=%s", ctx.user.c_str());
 
-  LLMStatus st = llmGetStatus();
+  LLMStatus st = llmBackendStatus();
   // Guided-menu presence + generation so the chat page can show/hide the guided
   // strip and refetch it when a model swap changes the menu (LLM_GUIDED_MENU_SPEC §7).
   uint8_t  menuGroups = llmMenuGroupCount();
   uint16_t menuGen    = llmMenuGeneration();
-  char json[896];   // headroom for the optional ctxWarning fragment + a long error
+  char json[1024];  // headroom for the optional ctxWarning + host fragments + a long error
   const char* stateStr = "UNLOADED";
   switch (st.state) {
     case LLMState::LOADING:    stateStr = "LOADING"; break;
@@ -75,8 +82,15 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
     default: break;
   }
 
-  const char* archStr = (st.config.arch_type == 1) ? "GPT-2" : "Llama";
-  const char* quantStr = (st.config.quant_type == 1) ? "INT8" : "FP32";
+  // LLMConfig describes a LOCAL checkpoint and is ZEROED for a remote source,
+  // where arch_type 0 / quant_type 0 would render as the plausible-looking lie
+  // "Llama · FP32" for a model this device has never seen the weights of. Emit
+  // empty strings instead — the page already skips falsy detail fields.
+  const bool localModel = (llmBackendActiveKind() == LlmBackendKind::Onboard);
+  const char* archStr  = !localModel ? ""
+                       : ((st.config.arch_type == 1) ? "GPT-2" : "Llama");
+  const char* quantStr = !localModel ? ""
+                       : ((st.config.quant_type == 1) ? "INT8" : "FP32");
 
   // Degraded-context warning fragment (shared helper — same text as CLI/OLED/G2).
   // The message has no quotes/backslashes, so it needs no JSON escaping.
@@ -89,12 +103,37 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
       snprintf(ctxWarnFrag, sizeof(ctxWarnFrag), ",\"ctxWarn\":false");
   }
 
+  // Remote-load progress. A CM5 select restarts llama-server on the host, so a
+  // switch is a multi-GB disk read THERE — the link only ever carried the
+  // model's name. Both numbers below are measured, not estimated: elapsed comes
+  // from the select arm-point, and the ceiling is the same watchdog that will
+  // abandon the select. hostMode separates "the host is starting" from "the
+  // host is gone", which a single "not available right now" string used to
+  // conflate — that ambiguity is the whole reason a first load looked broken.
+  // Deliberately no percentage derived from model size: one timing sample is
+  // not a calibration (see the 44-cps lesson in EVENAI_ASK_DISPLAY_DEBUG_PLAN).
+  char hostFrag[160];   // +loadPct
+  hostFrag[0] = '\0';
+#if ENABLE_LLM_SOURCE_CM5
+  {
+    const Cm5PresenceSnapshot pres = cm5PresenceSnapshot();
+    snprintf(hostFrag, sizeof(hostFrag),
+             ",\"hostMode\":\"%s\",\"hostFresh\":%s,"
+             "\"selectMs\":%lu,\"selectMaxMs\":%lu,\"loadPct\":%u",
+             cm5PresenceModeName(pres.mode),
+             (pres.fresh && pres.seenForSession) ? "true" : "false",
+             (unsigned long)cm5LlmSelectPendingMs(),
+             (unsigned long)CM5_LLM_SELECT_TIMEOUT_MS,
+             (unsigned)cm5LlmLoadPercent());
+  }
+#endif
+
   snprintf(json, sizeof(json),
     "{\"state\":\"%s\",\"model\":\"%s\",\"params\":\"%dx%dx%d\","
     "\"psramKB\":%u,\"tokPerSec\":%.1f,\"lastTokens\":%d,\"error\":\"%s\","
     "\"dim\":%d,\"layers\":%d,\"heads\":%d,\"kvHeads\":%d,\"vocab\":%d,\"seqLen\":%d,"
     "\"ctxUsed\":%d,\"ctxMax\":%d,\"arch\":\"%s\",\"quant\":\"%s\","
-    "\"menu\":{\"groups\":%u,\"gen\":%u}%s}",
+    "\"menu\":{\"groups\":%u,\"gen\":%u},\"backend\":\"%s\",\"cmdMode\":%s%s%s}",
     stateStr, st.modelPath,
     st.config.dim, st.config.n_layers, st.config.n_heads,
     (unsigned)(st.totalPsramUsed / 1024),
@@ -102,7 +141,9 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
     st.config.dim, st.config.n_layers, st.config.n_heads,
     st.config.n_kv_heads, st.config.vocab_size, st.config.seq_len,
     st.lastContextUsed, st.lastContextMax, archStr, quantStr,
-    (unsigned)menuGroups, (unsigned)menuGen, ctxWarnFrag);
+    (unsigned)menuGroups, (unsigned)menuGen,
+    llmBackendKindName(llmBackendActiveKind()),
+    llmBackendSupportsCommandMode() ? "true" : "false", ctxWarnFrag, hostFrag);
 
   return sendJsonResponse(req, json);
 }
@@ -220,33 +261,25 @@ static esp_err_t handleLLMLoad(httpd_req_t* req) {
 
   DEBUG_HTTPF("[LLM-API] POST /api/llm/load: model='%s' max_ctx=%d", modelName, maxCtx);
 
-  // Accept either a full path (/sd/llm/... or /system/llm/...) or a bare filename
-  char modelPath[128];
-  if (modelName[0] == '/') {
-    // Full path — validate it's under an allowed LLM directory
-    if (strncasecmp(modelName, "/system/llm/", 12) != 0 &&
-        strncasecmp(modelName, "/sd/llm/", 8) != 0) {
-      DEBUG_HTTPF("[LLM-API] Rejected invalid model path: %s", modelName);
-      return sendJsonResponse(req, "{\"ok\":false,\"error\":\"Invalid model path\"}");
-    }
-    strlcpy(modelPath, modelName, sizeof(modelPath));
-  } else {
-    // Bare filename — default to internal storage
-    snprintf(modelPath, sizeof(modelPath), "/system/llm/%s", modelName);
-  }
-
-  DEBUG_HTTPF("[LLM-API] Resolved model path: %s", modelPath);
-  bool ok = llmLoadModel(modelPath, maxCtx);
+  // `model` is a registry id ("onboard:x.bin" / "cm5:y.gguf"); a bare filename
+  // or absolute path still resolves, for hand-made requests. The path probing
+  // and directory allowlist that used to live here now live once, in
+  // llmResolveModelId — a remote model has no path to validate at all.
+  char err[96] = {0};
+  const bool ok = llmBackendSelect(modelName, err, sizeof(err), maxCtx);
   if (ok) {
-    DEBUG_HTTPF("[LLM-API] Model loaded successfully: %s (ctx=%d)", modelPath, maxCtx);
-    return sendJsonResponse(req, "{\"ok\":true}");
-  } else {
-    LLMStatus st = llmGetStatus();
-    char resp[256];
-    snprintf(resp, sizeof(resp), "{\"ok\":false,\"error\":\"%s\"}", st.errorMsg);
-    DEBUG_HTTPF("[LLM-API] Model load FAILED: %s error='%s'", modelPath, st.errorMsg);
+    // A remote source is still switching when this returns, so report readiness
+    // rather than implying the model is live.
+    const bool ready = llmBackendIsReady();
+    char resp[128];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"ready\":%s}", ready ? "true" : "false");
+    DEBUG_HTTPF("[LLM-API] Model selected: %s (ctx=%d ready=%d)", modelName, maxCtx, (int)ready);
     return sendJsonResponse(req, resp);
   }
+  char resp[256];
+  snprintf(resp, sizeof(resp), "{\"ok\":false,\"error\":\"%s\"}", err[0] ? err : "load failed");
+  DEBUG_HTTPF("[LLM-API] Model select FAILED: %s error='%s'", modelName, err);
+  return sendJsonResponse(req, resp);
 }
 
 // ============================================================================
@@ -255,7 +288,7 @@ static esp_err_t handleLLMLoad(httpd_req_t* req) {
 static esp_err_t handleLLMUnload(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("[LLM-API] POST /api/llm/unload from user=%s", ctx.user.c_str());
-  llmUnload();
+  llmBackendUnload();
   DEBUG_HTTPF("[LLM-API] Model unloaded");
   return sendJsonResponse(req, "{\"ok\":true}");
 }
@@ -266,7 +299,7 @@ static esp_err_t handleLLMUnload(httpd_req_t* req) {
 static esp_err_t handleLLMStop(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("[LLM-API] POST /api/llm/stop from user=%s", ctx.user.c_str());
-  llmStop();
+  llmBackendStop();
   return sendJsonResponse(req, "{\"ok\":true}");
 }
 
@@ -279,7 +312,7 @@ static esp_err_t handleLLMStop(httpd_req_t* req) {
 static esp_err_t handleLLMGenerate(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
-  if (!llmIsReady()) {
+  if (!llmBackendIsReady()) {
     DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: model not ready");
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"model not ready\"}");
   }
@@ -312,6 +345,16 @@ static esp_err_t handleLLMGenerate(httpd_req_t* req) {
     (int)(ov.maxTokens   != INT32_MIN ? ov.maxTokens   : gSettings.llmMaxTokens),
     (double)(!isnan(ov.temperature)   ? ov.temperature : gSettings.llmTemperature));
 
+  // Check before chatBeginTurn so the user gets the REASON. chatBeginTurn
+  // returns a bare 0 for every refusal, which would surface here as "busy or
+  // failed to start" — actively misleading for a request that will never work
+  // on this backend no matter how long you wait.
+  if (llmPromptIsCommandMode(prompt) && !llmBackendSupportsCommandMode()) {
+    return sendJsonResponse(req,
+        "{\"ok\":false,\"error\":\"Do: mode needs the on-device model — a remote "
+        "model does not know this device's commands\"}");
+  }
+
   int sessionId = chatBeginTurn(prompt, &ov);
   if (sessionId == 0) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"busy or failed to start\"}");
@@ -324,7 +367,11 @@ static esp_err_t handleLLMGenerate(httpd_req_t* req) {
 
 // ============================================================================
 // GET /api/llm/result?session=N&offset=N
-// Returns buffered tokens since byte offset as JSON: {"text":"...","done":bool,"len":N}
+// Returns buffered tokens since byte offset as JSON:
+//   {"text":"...","done":bool,"len":N,"next":N}
+// `next` is the absolute byte cursor the device served up to — the client must
+// use it rather than measuring the decoded text. `len` is the TOTAL buffered
+// length and is NOT a cursor; never compare the two to decide completion.
 // ============================================================================
 static esp_err_t handleLLMPoll(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
@@ -367,12 +414,57 @@ static esp_err_t handleLLMPoll(httpd_req_t* req) {
     n        = chatReadFinished(session, offset, chunk, sizeof(chunk));
     totalLen = chatFinishedLen(session);
   }
-  bool done = !chatIsGenerating();
+  // Serving-edge hygiene, once, AFTER the finished-turn fallback has chosen
+  // which reader filled `chunk`. The re-NUL must follow the trim: ArduinoJson
+  // links the pointer and walks it with strlen, so trimming without it is a
+  // silent no-op.
+  n = utf8TrimPartialTail(chunk, n);
+  chunk[n] = '\0';
+  jsonSanitizeServedBytes(chunk, n);
+
+  // `done` must NOT be gated on the client's cursor reaching `totalLen`. A turn
+  // can legally end mid-character — the 2 KB cap drops a whole engine window and
+  // freezes textLen wherever the previous one ended — so the trim may withhold
+  // up to 3 bytes forever and `offset + n >= totalLen` would never be satisfied.
+  // That is a fixed-offset livelock. Gate on `n == 0`, which is the terminal
+  // condition the trim actually produces. DO NOT "improve" this to compare
+  // against totalLen.
+  //
+  // The `n == 0` conjunct also closes a data-loss bug that predates the UTF-8
+  // work: `!chatIsGenerating()` alone is cursor-blind, so an answer that was
+  // already complete when the first poll landed got exactly ONE 511-byte window
+  // with done:true and the page stopped there. Turn text runs to 2047 bytes, so
+  // a fast answer — an instant gate refusal, a CM5 one-liner arriving in a UART
+  // burst — silently lost everything past 511.
+  bool done = !chatIsGenerating() && (n == 0);
 
   PSRAM_JSON_DOC(jdoc);
   jdoc["done"] = done;
   jdoc["len"]  = totalLen;
   jdoc["text"] = (n > 0) ? (const char*)chunk : "";
+  // Absolute cursor, not a delta: the page's poll has a retry path, and an
+  // absolute value is idempotent under a duplicated or reordered response. It is
+  // authoritative because the sanitizer above guarantees strlen(chunk) == n,
+  // whereas anything the client infers from the DECODED text is wrong for every
+  // byte the trim deliberately passes through (U+FFFD re-encodes to 3 bytes).
+  jdoc["next"] = offset + n;
+
+  // A turn that ends because the SOURCE failed -- the host vanished mid-answer,
+  // the stall watchdog fired, the host reported an error -- has a reason, and
+  // the page has no other way to get it. finishGen refreshes status with
+  // afterGen=true, which suppresses every announcement so a finished answer
+  // does not re-print "Model loaded"; that same suppression swallowed the one
+  // message explaining an EMPTY answer. Observed on hardware: stopping the CM5
+  // daemon mid-generation left a blank reply and nothing else on screen.
+  //
+  // Only on the terminal poll, and only when there is something to say, so the
+  // 150 ms hot path stays as lean as it was. Safe from staleness because
+  // cm5LlmStartAsync clears the error string at the top of every generation, so
+  // anything set here belongs to the turn that just ended.
+  if (done) {
+    const LLMStatus est = llmBackendStatus();
+    if (est.errorMsg[0] != '\0') jdoc["error"] = (const char*)est.errorMsg;
+  }
 
   String resp;
   serializeJson(jdoc, resp);
@@ -514,4 +606,4 @@ void registerLLMHandlers(httpd_handle_t server) {
   httpd_register_uri_handler(server, &llmChatClear);
 }
 
-#endif // ENABLE_ONDEVICE_LLM && ENABLE_HTTP_SERVER
+#endif // ENABLE_LLM_BACKEND && ENABLE_HTTP_SERVER

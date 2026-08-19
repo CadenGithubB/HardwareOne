@@ -15,6 +15,12 @@
 #include "System_Settings.h"
 #include "System_SettingsEditorCore.h"
 #include "System_Utils.h"
+#if ENABLE_BLUETOOTH
+#include "Bluetooth.h"
+#endif
+#if ENABLE_G2_GLASSES
+#include "G2_Glasses.h"
+#endif
 
 // gThermalConnected / gTofConnected come from the sensor headers.
 #if ENABLE_THERMAL_SENSOR
@@ -1052,23 +1058,32 @@ static void toggleQuickWiFi() {
 // --- Bluetooth ---
 #if ENABLE_BLUETOOTH
 static bool getQuickBluetoothState() {
-  extern bool isBLERunning();
-  return isBLERunning();
+  return bleSubsystemActive();
 }
 static void bluetoothToggleConfirmedQuick(void* userData) {
   (void)userData;
-  extern bool isBLERunning();
-  if (isBLERunning()) {
+  if (isBleServerInitialized()) {
     setQuickStatus("Bluetooth OFF");
     executeOLEDCommand("closeble");
-  } else {
-    setQuickStatus("Bluetooth ON");
-    executeOLEDCommand("openble");
+    return;
   }
+#if ENABLE_G2_GLASSES
+  if (isG2ClientInitialized()) {
+    setQuickStatus("Bluetooth OFF");
+    executeOLEDCommand("g2deinit");
+    return;
+  }
+  if (gSettings.bleMode == BLE_MODE_G2_CLIENT) {
+    setQuickStatus("Bluetooth ON");
+    executeOLEDCommand("openg2");
+    return;
+  }
+#endif
+  setQuickStatus("Bluetooth ON");
+  executeOLEDCommand("openble");
 }
 static void toggleQuickBluetooth() {
-  extern bool isBLERunning();
-  if (isBLERunning()) {
+  if (bleSubsystemActive()) {
     oledConfirmRequest("Stop Bluetooth?", nullptr, bluetoothToggleConfirmedQuick, nullptr, false);
   } else {
     oledConfirmRequest("Start Bluetooth?", nullptr, bluetoothToggleConfirmedQuick, nullptr);

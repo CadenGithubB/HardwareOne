@@ -29,12 +29,67 @@
 // token. Session mutation stays centralized here because account revocation,
 // idle expiry, the web auth helper, and the in-band UART login all touch the
 // same globals.
-void uartLinkSessionAuthenticated(const String& user);
-void uartLinkSessionCleared();
+// `allowCm5Presence` is captured once from the authenticated account role.
+// Guest sessions remain valid for their limited command surface but cannot
+// publish application readiness through the heartbeat fast path.
+uint32_t uartLinkSessionAuthenticated(const String& user,
+                                      bool allowCm5Presence,
+                                      uint32_t* transportEpochOut = nullptr);
+enum class UartLinkSessionClearReason : uint8_t {
+  Unspecified,
+  LinkStop,
+  IdleTimeout,
+  ExplicitLogout,
+  TransportLogout,
+};
+uint32_t uartLinkSessionCleared(
+    UartLinkSessionClearReason reason = UartLinkSessionClearReason::Unspecified,
+    uint32_t expectedTransportEpoch = 0);
 uint32_t uartLinkSessionEpoch();
+// Boot-local incarnation of the physical command transport. Unlike the named
+// login epoch above, this is nonzero while an auth-disabled link is usable and
+// rotates on login/logout and auth-policy changes. Queued text commands use it
+// so an old AuthBypass request cannot revive after an on/off policy cycle.
+uint32_t uartLinkTransportSessionEpoch();
+void uartLinkAuthPolicyChanged();
+// Last nonzero login generation issued during this firmware boot. Unlike the
+// active epoch above, this value is retained after logout/revocation. It is
+// diagnostic only: callers must never treat it as current authorization.
+// A zero value means no UART login has succeeded since boot.
+uint32_t uartLinkSessionGeneration();
+// Last session lifecycle transition retained for diagnostics only. Returned
+// names are static and contain no username or credential data.
+const char* uartLinkSessionLastEventName();
+struct UartLinkSessionDiagnostics {
+  uint32_t activeEpoch;
+  uint32_t lastEpoch;
+  const char* lastEvent;
+};
+// Coherent snapshot of the diagnostic session fields. Use this when the
+// relationship between activeEpoch, lastEpoch and lastEvent matters; reading
+// the individual accessors across a concurrent login/logout can mix states.
+UartLinkSessionDiagnostics uartLinkSessionDiagnostics();
 bool uartLinkSessionSnapshot(char* userOut, size_t userOutSize,
-                             uint32_t* epochOut = nullptr);
+                             uint32_t* epochOut = nullptr,
+                             uint32_t* transportEpochOut = nullptr,
+                             bool* cm5PresenceAllowedOut = nullptr);
 bool uartLinkSessionClearIfUser(const String& user);
+// Pin the exact named UART command session across one cross-transport effect.
+// On success the lifecycle mutex remains held until EndUse; callers must pair.
+bool uartLinkNamedSessionBeginUse(uint32_t transportEpoch,
+                                  const String& expectedUser);
+void uartLinkNamedSessionEndUse();
+// Pin any exact physical command-transport incarnation, including the
+// pre-auth/AuthBypass state. Local login/logout/whoami use this between line
+// admission and their transition/reply so a remote replacement cannot steal
+// a partially admitted operation. Pair every success with EndUse().
+bool uartLinkTransportSessionBeginUse(uint32_t transportEpoch);
+void uartLinkTransportSessionEndUse();
+// Fail-closed downgrade for an account-backed login whose role changed while
+// it was being published. The exact epoch prevents a delayed downgrade from
+// affecting a newer login by the same username.
+bool uartLinkSessionRestrictCm5PresenceIfUser(
+    const String& user, uint32_t expectedSessionEpoch);
 
 // Binary frame IDs and payload ceiling are part of the board-independent wire
 // contract. Keep them visible even on boards whose UART-link methods compile
@@ -47,6 +102,14 @@ bool uartLinkSessionClearIfUser(const String& user);
 #define UARTLINK_FRAME_LIVE_END    0x12  // live-pcm-v1 successful terminal
 #define UARTLINK_FRAME_LIVE_ABORT  0x13  // live-pcm-v1 failed terminal
 #define UARTLINK_FRAME_MAX_PAYLOAD 1024
+
+// Largest baud the Arduino UART HAL still clocks from REF_TICK on chips that
+// have it (ESP32 / ESP32-S2) — mirrors REF_TICK_BAUDRATE_LIMIT in
+// esp32-hal-uart.c. At or below this the link is immune to CPU frequency
+// changes; above it the HAL selects UART_SCLK_APB, whose rate tracks APB, and
+// APB follows the CPU clock once it drops below 80 MHz. Callers that change the
+// CPU clock must not sink below 80 MHz while a faster link is running.
+#define UART_LINK_REF_TICK_BAUD_LIMIT 250000
 
 #ifdef UART_LINK_PORT
 

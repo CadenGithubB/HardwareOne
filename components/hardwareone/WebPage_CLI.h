@@ -160,7 +160,7 @@ try{ inHelp = JSON.parse(localStorage.getItem('cliInHelp') || 'false'); }catch(_
 try{ outputBackup = localStorage.getItem('cliOutputHistoryBackup') || ''; }catch(_){ outputBackup=''; }
 function __stripAnsi(s){ try{ return (s||'').replace(/\x1B\[[0-9;]*[A-Za-z]/g, ''); }catch(_){ return s; } }
 function __applyClear(s){ try{ var ESC=String.fromCharCode(27); var clearSeq=ESC+'[2J'+ESC+'[H'; var idx=(s||'').lastIndexOf(clearSeq); if(idx!==-1){ return s.substring(idx+clearSeq.length); } return s; }catch(_){ return s; } }
-try{ fetch('/api/cli/logs', { credentials: 'same-origin', cache:'no-store' })
+try{ if(!inHelp) fetch('/api/cli/logs', { credentials: 'same-origin', cache:'no-store' })
 .then(function(r){ return r.text(); })
 .then(function(text){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t || ''; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} try{ if(!scrolledOnce){ cliOutput.scrollTop = cliOutput.scrollHeight; scrolledOnce = true; } }catch(_){} } })
 .catch(function(e){ try { console.debug('[CLI] logs fetch error: ' + e.message); } catch(_){} }); }catch(_){ }
@@ -175,9 +175,10 @@ function cliStartLogPoller(){
   try {
     window.__cliPoller = setInterval(function(){
       if (cliBondMode) { cliStopLogPoller(); return; }  // stopped the moment we switch to bonded
+      if (inHelp) return;  // addressed help replies own the terminal surface
       fetch('/api/cli/logs', { credentials: 'same-origin', cache: 'no-store' })
         .then(function(r){ if(r.status===401){ cliStopLogPoller(); return ''; } return r.text(); })
-        .then(function(text){ if(text && !cliBondMode){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } })
+        .then(function(text){ if(text && !cliBondMode && !inHelp){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } })
         .catch(function(_){ });
     }, 500);
   } catch(e) { try{ console.debug('[CLI] polling init error: ' + e.message); }catch(_){} }
@@ -217,7 +218,9 @@ function executeCommand(){
   historyIndex = -1; currentCommand = '';
   if (cliOutput) { cliOutput.textContent += ('$ ' + command + '\n'); }
   try { console.debug('[CLI] fetch start: ' + command); } catch(_){}
-  hw.postFormText('/api/cli', { cmd: command, capture: '1' })
+  // This is the human terminal. Other /api/cli users default to machine mode
+  // so their polls/buttons cannot answer a pending confirmation.
+  hw.postFormText('/api/cli', { cmd: command, capture: '1', interactive: '1' })
   .then(function(result){ try { console.debug('[CLI] fetch ok, len=' + (result ? result.length : 0)); } catch(_){} var ESC=String.fromCharCode(27); var clearSeq = ESC+'[2J'+ESC+'[H'; if (result && result.indexOf(clearSeq) !== -1) { var cleanResult = result.split(clearSeq).join(''); if (exitingHelp && inHelp) { if (cliOutput) { cliOutput.textContent = outputBackup || ''; } inHelp = false; try{ localStorage.setItem('cliInHelp','false'); localStorage.removeItem('cliOutputHistoryBackup'); }catch(_){} if (cleanResult && cliOutput) { cliOutput.textContent += cleanResult; } try{ localStorage.setItem('cliOutputHistory', cliOutput ? cliOutput.textContent : ''); }catch(_){} } else { if (cliOutput) { cliOutput.textContent = cleanResult; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } } else { if (cliOutput) { cliOutput.textContent += result + '\n'; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } if (cliInput) { cliInput.value=''; cliInput.focus(); } })
   .catch(function(e){ try { console.debug('[CLI] fetch error: ' + e.message); } catch(_){} var errorMsg='Error: ' + e.message + '\n'; if (cliOutput) { cliOutput.textContent += errorMsg; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } if (cliInput) { cliInput.value=''; cliInput.focus(); } });
 }

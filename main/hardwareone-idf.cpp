@@ -2,6 +2,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#if CONFIG_BT_ENABLED && CONFIG_IDF_TARGET_ESP32 && CONFIG_BTDM_CTRL_MODE_BLE_ONLY
+#include "esp_bt.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#endif
+
 #include "../components/hardwareone/System_AuthIdentity.h"
 #include "../components/hardwareone/System_OTASafety.h"
 
@@ -37,6 +43,52 @@ extern "C" void app_main(void)
     // Inspect OTA state and arm the pending-image supervisor before Arduino can
     // auto-recover NVS or otherwise enter a setup path that might hang.
     otaSafetyInitEarly();
+
+#if CONFIG_BT_ENABLED && CONFIG_IDF_TARGET_ESP32 && CONFIG_BTDM_CTRL_MODE_BLE_ONLY
+    // Hand the BR/EDR exchange-memory block back to the heap. bt.c reserves
+    // SOC_MEM_BT_EM_START..SOC_MEM_BT_EM_BREDR_REAL_END at link time
+    // (SOC_RESERVE_MEMORY_REGION, bt.c) whether or not Classic BT is used, so on
+    // this BLE-only build 0x3ffb2730..0x3ffb6388 = 15448 B of internal DRAM sits
+    // reserved for a radio mode the controller cannot enter. Releasing
+    // ESP_BT_MODE_CLASSIC_BT frees exactly that one row of
+    // btdm_dram_available_region[] — the BLE exchange memory, controller .bss
+    // and .data rows are BTDM-owned and are left untouched — and registers it as
+    // a heap via heap_caps_add_region (INTERNAL|8BIT|DMA, so task stacks may use
+    // it). Net gain is ~15032 B after TLSF overhead.
+    //
+    // Must run here: both entry points bail with ESP_ERR_INVALID_STATE unless
+    // btdm_controller_status == ESP_BT_CONTROLLER_STATUS_IDLE, which holds only
+    // before esp_bt_controller_init(). It is also what keeps the release safe --
+    // btdm_controller_mem_init() memsets every region whose mode is not IDLE, and
+    // the release clears this row's mode to IDLE, so a later BLE init will not
+    // zero memory the heap has already handed out.
+    //
+    // Irreversible for the boot: BR/EDR cannot be used afterwards without a
+    // reset. That costs nothing while CONFIG_BTDM_CTRL_MODE_BLE_ONLY holds (the
+    // guard above), and nothing in this firmware uses SPP/A2DP/HFP. The call is
+    // idempotent -- a second one returns ESP_OK after logging a warning.
+    //
+    // Deliberately not ESP_ERROR_CHECK: failing to reclaim is a lost
+    // optimisation, not a boot-stopping fault.
+    {
+        const size_t beforeFree =
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        const esp_err_t bredrRel =
+            esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+        if (bredrRel == ESP_OK) {
+            const size_t afterFree =
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            ESP_LOGI("boot", "BR/EDR memory released: internal free %u -> %u (+%d B), largest block %u B",
+                     (unsigned)beforeFree, (unsigned)afterFree,
+                     (int)(afterFree - beforeFree),
+                     (unsigned)heap_caps_get_largest_free_block(
+                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        } else {
+            ESP_LOGW("boot", "BR/EDR memory release skipped: %s",
+                     esp_err_to_name(bredrRel));
+        }
+    }
+#endif
 
     // Initialize Arduino core (Serial, peripherals, etc.)
     initArduino();

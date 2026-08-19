@@ -10,11 +10,9 @@
  * default 50 lines costs ~3.4KB against the ceiling's ~6.8KB. The allocation is
  * what fixes the depth, so changing the setting needs a reboot.
  *
- * The ring stays in INTERNAL DRAM despite being display text: OLED_Mode_CLIInput
- * echoes every submitted command into it verbatim, and `login <user> <pass>` is
- * meant to be typed on the OLED keyboard (its transport enum has a "display"
- * mode), so the ring routinely holds plaintext credentials. PSRAM is externally
- * probeable with flash encryption off, which rules it out here.
+ * The ring stays in INTERNAL DRAM because it can contain private command
+ * results. Credential-bearing command lines are redacted before append, and
+ * the whole ring is cleared on every local-display identity transition.
  *
  * init() runs only after OLED display initialization succeeds. Devices with
  * OLED disabled in settings, or without a detected display, keep this ring
@@ -40,7 +38,7 @@
 // fails, so every accessor tolerates a null ring: the console then degrades to
 // "no history" instead of faulting.
 struct OLEDConsoleBuffer {
-  char (*lines)[OLED_CONSOLE_LINE_LEN];  // [capacity][LINE_LEN], INTERNAL DRAM — holds echoed credentials, never PSRAM
+  char (*lines)[OLED_CONSOLE_LINE_LEN];  // [capacity][LINE_LEN], INTERNAL DRAM
   uint32_t* timestamps;                  // [capacity], INTERNAL DRAM (allocated alongside lines)
   uint8_t head;      // Write position (next slot to write)
   uint8_t count;     // Number of valid lines (0 to capacity)
@@ -49,6 +47,7 @@ struct OLEDConsoleBuffer {
   
   OLEDConsoleBuffer();
   void init();
+  void clear();  // blocking identity-boundary erase
   void append(const char* text, uint32_t timestamp);
   int getLineCount() const;
   const char* getLine(int index) const;  // 0 = oldest, count-1 = newest

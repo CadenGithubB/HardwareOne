@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 // ============================================================================
-// Setup Wizard — CLIMode-based, transport-agnostic
+// Setup Wizard — CLIMode-based, exact-session-owned
 // ============================================================================
 //
 // Phase 5 of the CLIMode rollout. Replaces the synchronous-blocking
@@ -12,9 +12,9 @@
 // the cmd_exec task in waitForSerialInputBlocking() for the duration of
 // the wizard, each user input is one short handler call that mutates
 // persistent state and returns. The cmd_exec task is free between
-// keystrokes, so the wizard works from ANY text transport that flows
-// through the CLI dispatcher -- serial console, web CLI, BLE, MQTT,
-// ESPNOW, automations.
+// keystrokes. The wizard accepts input only from the live stateful session
+// that opened it (human web CLI, serial, or OLED); machine/stateless inputs
+// continue through normal command dispatch without touching wizard state.
 //
 // What stays the same:
 //   - The wizard's logical state model (SetupWizardPage, currentSelection,

@@ -111,6 +111,11 @@ struct LogoutReason {
 };
 extern LogoutReason* gLogoutReasons;
 
+// Boot-local session-generation lookup used to fence queued commands and
+// interactive CLI ownership. The value is not wall-clock/NTP time.
+TransportSessionEpoch webSessionEpochForSID(const String& sid);
+bool webSessionEpochIsLive(TransportSessionEpoch epoch);
+
 #if ENABLE_HTTP_SERVER
 
 // ============================================================================
@@ -242,13 +247,16 @@ String makeSessToken();
 void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 void getClientIP(httpd_req_t* req, String& ipOut);
 
-// Construct a SOURCE_WEB AuthContext from an HTTP request (sets transport, opaque, path, ip)
+// Construct a SOURCE_WEB AuthContext from an HTTP request. The SID is routing
+// metadata; queued command authority is captured separately as a numeric
+// transport-session epoch.
 inline AuthContext makeWebAuthCtx(httpd_req_t* req) {
   AuthContext ctx;
   ctx.transport = SOURCE_WEB;
   ctx.opaque = req;
   ctx.path = req ? req->uri : "";
   getClientIP(req, ctx.ip);
+  ctx.sid = getCookieSID(req);
   return ctx;
 }
 
@@ -265,6 +273,15 @@ bool hasLogoutReason(const char* ip);
 
 // Session revocation
 void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg);
+// Exact, table-locked web-session helpers for callers outside the HTTP TU.
+// They avoid racing slot reuse while inspecting Arduino String fields.
+int webRevokeSessionsForUser(const String& username,
+                             const String& reason,
+                             const String& exceptSid = String());
+bool webRevokeSessionBySid(const String& sid,
+                           const String& reason,
+                           String* outUser = nullptr);
+int webBroadcastSessionsHuman();
 void sseEnqueueNotice(SessionEntry& s, const String& msg);
 bool sseDequeueNotice(SessionEntry& s, String& out);
 // Custom SSE event queue helpers

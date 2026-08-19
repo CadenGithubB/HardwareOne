@@ -17,6 +17,7 @@
 #include <ArduinoJson.h>
 #include "OLED_Utils.h"
 #include "System_Debug.h"
+#include "System_Mutex.h"
 #include "System_User.h"      // isAdminUser / isSuperAdminUser / userRoleRank / USERS_JSON_FILE / gLocalDisplay*
 #include "System_Utils.h"     // readText
 #include "System_MemUtil.h"   // PSRAM_JSON_DOC
@@ -50,6 +51,29 @@ static String        umError;
 static unsigned long umErrorUntil = 0;
 
 static const char* const kUmRoles[4] = { "guest", "user", "admin", "superadmin" };
+
+static void umWipe(char* buffer, size_t size) {
+  volatile char* p = reinterpret_cast<volatile char*>(buffer);
+  while (size-- > 0) *p++ = '\0';
+}
+
+void oledUserManagerModeResetSessionState() {
+  memset(gUsers, 0, sizeof(gUsers));
+  gUmCount = 0;
+  gUmLevel = UM_LIST;
+  gUmSel = 0;
+  gUmScroll = 0;
+  gUmTarget = -1;
+  gUmActSel = 0;
+  gUmRoleSel = 0;
+  gUmKbActive = false;
+  gUmKbStage = 0;
+  umWipe(gAddUser, sizeof(gAddUser));
+  umWipe(gAddPass, sizeof(gAddPass));
+  umWipe(gUmDelName, sizeof(gUmDelName));
+  secureClearString(umError);
+  umErrorUntil = 0;
+}
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -87,8 +111,25 @@ static void loadUsers() {
 // Synchronous dispatch (submitAndExecuteSync under the OLED identity). On
 // failure, surface the Error: text. Always reload + return to the list.
 static void umDispatch(const String& cmd) {
-  char out[96];
-  bool ok = executeOLEDCommandWithResult(cmd, out, sizeof(out));
+  String sessionUser;
+  bool sessionAuthed = false;
+  const TransportSessionEpoch sessionEpoch =
+      localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
+  secureClearString(sessionUser);
+  if (!sessionAuthed || sessionEpoch == kNoTransportSessionEpoch) return;
+
+  char out[96] = {};
+  bool ok = executeOLEDCommandWithResultForSession(
+      cmd, sessionEpoch, out, sizeof(out));
+  // Re-check authority before publishing owner-only UI state. Then take FS for
+  // the users.json refresh without a display lifecycle lease; credential
+  // publication uses FS -> writer and must never deadlock against writer -> FS.
+  if (!transportSessionEpochIsLive(
+          SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
+    umWipe(out, sizeof(out));
+    return;
+  }
+  FsLockGuard fsGuard("oled.user_manager.result");
   if (!ok || strncmp(out, "Error", 5) == 0) {
     const char* m = out[0] ? out : "Failed";
     if (strncmp(m, "Error: ", 7) == 0) m += 7;
@@ -97,6 +138,9 @@ static void umDispatch(const String& cmd) {
   loadUsers();
   gUmLevel = UM_LIST;
   if (gUmSel > gUmCount) gUmSel = gUmCount;
+  umWipe(gAddUser, sizeof(gAddUser));
+  umWipe(gAddPass, sizeof(gAddPass));
+  umWipe(out, sizeof(out));
 }
 
 // Deferred delete confirm callback (oledConfirmRequest).
@@ -289,6 +333,7 @@ bool userManagerInput(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
       } else {                            // UM_ADD_ROLE → useradd
         String cmd = String("useradd \"") + gAddUser + "\" \"" + gAddPass + "\" 0 " + kUmRoles[gUmRoleSel];
         umDispatch(cmd);
+        secureClearString(cmd);
       }
       return true;
     }
@@ -305,10 +350,7 @@ bool userManagerInput(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
 // Fresh view on forward entry.
 static void userManagerOnEnter(bool isForward) {
   if (!isForward) return;
-  gUmLevel = UM_LIST;
-  gUmSel = 0; gUmScroll = 0; gUmTarget = -1;
-  gUmKbActive = false;
-  umError = "";
+  oledUserManagerModeResetSessionState();
   loadUsers();
 }
 

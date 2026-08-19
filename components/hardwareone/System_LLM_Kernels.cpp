@@ -9,7 +9,7 @@
  * PSRAM; INT8/INT4 are dequantized inline during the matmul (no FP32 expansion).
  */
 #include "System_BuildConfig.h"
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
 
 #include "System_LLM_Kernels.h"
 #include <cmath>
@@ -276,4 +276,4 @@ void wmatmul(float* __restrict xout, const float* __restrict x,
   else          matmul_q8(xout, x, i8, sc, gs, n, d);
 }
 
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_SOURCE_ONBOARD

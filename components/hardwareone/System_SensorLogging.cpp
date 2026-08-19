@@ -1693,12 +1693,17 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
 #endif
 }
 
+// The three health commands below live in their own #if ENABLE_R1_HEALTH block
+// and are registered through healthCommands[] (not sensorLoggingCommands[]), so
+// they disappear with the feature like every other gated command family. They
+// used to be rows in the always-compiled sensor-logging table, each carrying an
+// "#if !ENABLE_R1_HEALTH -> return Error:" stub; that made them permanently
+// registered on builds without R1, which is not how any other feature behaves.
+// The FeatureRegistry `r1health` row is what lets a client find out the feature
+// is absent, so these no longer need to stay reachable to say so themselves.
+#if ENABLE_R1_HEALTH
 const char* cmd_healthstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-#if !ENABLE_R1_HEALTH
-  (void)argsInput;
-  return "Error: R1 Health requires ENABLE_R1_HEALTH in this build";
-#else
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   CommandArgs a(argsInput);
   String sub = a.has(0) ? a.arg(0) : String();
@@ -1788,8 +1793,8 @@ const char* cmd_healthstatus(const String& argsInput) {
            captureEncryptModeName(gSettings.captureEncryptMode),
            (gSensorLoggingRunning && gSensorLogSealed) ? " (active session sealed)" : "");
   return getDebugBuffer();
-#endif
 }
+#endif  // ENABLE_R1_HEALTH — cmd_healthstatus
 
 void healthLoggingTick() {
 #if ENABLE_R1_HEALTH
@@ -2149,6 +2154,7 @@ const char* healthLoggingSet(bool on) {
   return result ? result : "SUCCESS: Health logging OFF";
 }
 
+#if ENABLE_R1_HEALTH
 const char* cmd_healthlogging(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -2323,6 +2329,7 @@ const char* cmd_healthlogmerge(const String& argsInput) {
            filesDone, outPath.c_str(), totalBytes);
   return buf;
 }
+#endif  // ENABLE_R1_HEALTH — cmd_healthlogging + cmd_healthlogmerge
 
 // ============================================================================
 // capturecrypt — at-rest sealing mode, status, and plaintext export
@@ -2465,6 +2472,28 @@ const CommandEntry sensorLoggingCommands[] = {
     "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>: Select sensors to log\n"
     "  interval <ms>: Set poll interval 100-3600000 (default 5000)\n"
     "  autostart [on|off]: Auto-start logging on boot (bare = toggle)" },
+  { "capturecrypt", "Capture at-rest encryption: status, mode (off/health/all), plaintext export", true, cmd_capturecrypt,
+    "Usage: capturecrypt [status|off|health|all|export \"<in>\" \"<out>\"]\n"
+    "  Sealed sessions write '#HW1ENC' on line 1 + per-row ciphertext; filenames\n"
+    "  don't change. health: seal sessions that include the R1 ring (default).\n"
+    "  all: every capture session. Mode changes apply at the next session or\n"
+    "  day rollover — a single file is never mixed-mode.\n"
+    "  Viewers (fileview, web view, G2/OLED) decrypt for authorized users; raw\n"
+    "  downloads, fileread and ESP-NOW transfers ship sealed bytes.\n"
+    "  export: write a decrypted copy (inside /logging_captures) for sharing." },
+};
+
+const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof(sensorLoggingCommands[0]);
+
+// R1 ring health — its own gated command module, so the whole family is absent
+// on a build without the feature instead of being registered and answering with
+// an error. Lives here rather than in G2_Health.cpp because the handlers are
+// built on this file's local sensor-logging machinery; what matters for
+// discoverability is that the TABLE and its registration are gated, which they
+// now are. Clients learn the feature is missing from the FeatureRegistry
+// `r1health` row, not by probing a command.
+#if ENABLE_R1_HEALTH
+const CommandEntry healthCommands[] = {
   { "healthlogging", "Start/stop local R1 health logging (independent of ring collection)", false, cmd_healthlogging,
     "Usage: healthlogging <on|off|toggle|status|interval [sec]>\n"
     "  on: enable LOG_R1, force format=CSV, start under /logging_captures/sensors/, persist for boot\n"
@@ -2488,18 +2517,10 @@ const CommandEntry sensorLoggingCommands[] = {
     "  Concatenation is byte-exact: CSV inputs keep their header lines mid-file,\n"
     "  rows are NOT time-ordered, and mixing formats/sensor masks yields\n"
     "  an unparseable result. Max 8 inputs (arg limit)." },
-  { "capturecrypt", "Capture at-rest encryption: status, mode (off/health/all), plaintext export", true, cmd_capturecrypt,
-    "Usage: capturecrypt [status|off|health|all|export \"<in>\" \"<out>\"]\n"
-    "  Sealed sessions write '#HW1ENC' on line 1 + per-row ciphertext; filenames\n"
-    "  don't change. health: seal sessions that include the R1 ring (default).\n"
-    "  all: every capture session. Mode changes apply at the next session or\n"
-    "  day rollover — a single file is never mixed-mode.\n"
-    "  Viewers (fileview, web view, G2/OLED) decrypt for authorized users; raw\n"
-    "  downloads, fileread and ESP-NOW transfers ship sealed bytes.\n"
-    "  export: write a decrypted copy (inside /logging_captures) for sharing." },
 };
 
-const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof(sensorLoggingCommands[0]);
+const size_t healthCommandsCount = sizeof(healthCommands) / sizeof(healthCommands[0]);
+#endif  // ENABLE_R1_HEALTH
 
 // Registration handled by gCommandModules[] in System_Utils.cpp
 

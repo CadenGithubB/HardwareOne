@@ -24,10 +24,12 @@ the peer-metadata items shipped earlier in v0.95.10).
   broadcast to other consoles. Plain (non-json) calls behave exactly as before.
 - **Transport.** BLE responses are already chunked by the BLE secure-channel layer
   (frames <=195 B payload); reassemble frames as you do today.
-- **WARNING: 2 KB result ceiling (important).** Every command that runs through the
+- **WARNING: 4 KB result ceiling (important).** Every command that runs through the
   cmd_exec path - **both BLE and the web `/api/cli`** - copies the handler's result
-  into a fixed **2048-byte** buffer (`ExecReq.out`; `strncpy` cap). A reply longer
-  than ~2047 bytes is **silently truncated -> invalid JSON**. This is upstream of the
+  into a fixed **4096-byte** buffer (`ExecReq.out` = `CMD_RESULT_MAX`; `strncpy` cap).
+  A reply longer than ~4095 bytes is **silently truncated -> invalid JSON**. (This
+  section said 2048 until the buffer was raised alongside `GLOBAL_DEBUG_BUFFER_SIZE`;
+  the inbound `ExecReq.line` array is the one that is still 2048.) This is upstream of the
   BLE framing, so chunking does not save it. Almost every command's JSON is well
   under 2 KB; the one that can exceed it is the **aggregate `sensors json`** when
   several sensors are active (ToF's data alone is ~1 KB). See sec. 6 - fetch sensors
@@ -274,7 +276,74 @@ A peer's automations arrive as its `automations.json`. Each automation's schedul
 `recurrence` means daily.** Render the cadence next to the time (e.g. `14:02 daily`) - showing
 bare `14:02` is ambiguous. The field was always present; just surface it.
 
-## 9. Status
+## 9. Unsolicited notification cards (`#NOTIF`) - the app as a notification sink
+
+Everything above is request/reply. This section is the one thing the device sends
+**without being asked**, so it needs different handling on the app side.
+
+The device's notification system fans one event out to several surfaces (OLED banner,
+web toast, G2 lens card). The companion app is now one of those surfaces - sink
+`NSINK_APP`, peer of `NSINK_G2`. When an event passes the filters, the device writes a
+single line to the ordinary `CMD_RESPONSE` reply lane:
+
+```
+#NOTIF {"kind":"peer_online","level":"info","title":"Mesh","msg":"Peer online: kitchen","ms":2000}\n
+```
+
+| Field | Meaning |
+|---|---|
+| `kind` | Event-kind **name** - the stable contract (kind numbers are internal). Feed it straight back to `notifyusermute` / `notifyusershow`. |
+| `level` | `info` \| `success` \| `warning` \| `error`. Drives icon/colour. |
+| `title` | Event **family** name, for grouping. Same title the G2 lens card uses. |
+| `msg` | The one-liner body, JSON-escaped. Source text is <=63 chars, but it is truncated to fit the envelope (see "Sizing" below) — treat it as short display text, not a fixed width. |
+| `ms` | Suggested display duration for a transient banner. |
+
+**Delivery rules the firmware guarantees:**
+
+- **Directed, not broadcast.** Cards go to one session at a time, and only to sessions
+  that are **logged in**. An unauthenticated app receives nothing at all - there is no
+  "anonymous" card.
+- **Per-user filtering already happened.** The card you receive already passed that
+  session user's device policy, admin gating, importance floor (`notifylevel`), and
+  personal mutes (`notifyusermute` / `notifyusershow`). Do not re-filter; just render.
+- **Best-effort.** If the link is mid-transfer on a large paced reply, the card is
+  dropped rather than queued (visible as `app_drop` in `notifstats`). Cards are not
+  reliable delivery and must never be the only record of anything.
+- **Encryption.** Cards ride the same Secure Channel framing as any other reply when
+  one is established; nothing special to do.
+- **Sizing.** A whole card line is capped at 195 bytes — exactly the Secure Channel's
+  per-frame payload budget, so a card is always one frame on a secure link and always
+  inside the MTU any working peer has already negotiated. `msg` is escaped into
+  whatever space the other fields leave. Escaping can expand one byte to six (`\u00XX`
+  for a control character) and event text can carry remote-supplied names, so a long or
+  escape-heavy body **is truncated**. Truncation stops on a clean character boundary:
+  you will see a shortened `msg`, never malformed JSON. Do not assume round-tripping.
+
+**Two things the app MUST do (the `#` prefix is why it is there):**
+
+1. **Reject `#NOTIF` lines from the in-flight capture buffer.** Reply capture claims a
+   fragment only if it starts with `{`, so a card can never *start* a bogus capture -
+   but once a capture buffer is non-empty it appends whatever arrives. Check the
+   `#NOTIF ` prefix **before** that append.
+
+   Be precise about why, so nobody later "optimises away" the check: a card cannot
+   interleave *within* a single framed message. The secure sender holds its tx mutex
+   for a whole message, and cards are sent non-blocking, so a card arriving mid-message
+   is dropped rather than spliced in. The real exposure is **between** messages - a
+   large reply is emitted as several separate sends, and your capture buffer spans all
+   of them. A card landing in that gap is what corrupts the reply.
+2. **Handle `#NOTIF` before the auth-state sniffer and before the console.** The
+   line-level auth check does substring matches for `Login successful` /
+   `Authentication required` / `Logged out`; a card body carrying such text (a device
+   or file named that way) would flip the app's auth state. No current formatter emits
+   those exact phrases, so this is hardening, not a live bug - but the interception
+   point is the same one, so do both at once.
+
+Device-side controls: `notifydeviceapp <0|1>` (admin, master switch for this sink) and
+`notifstats`, whose `app-cards` / `app` / `app-drop` counters are the ground truth for
+"did the device actually send it".
+
+## 10. Status
 
 All of the above builds clean and is pending on-device validation; on confirmation it
 will be committed with a version bump. If a shape here doesn't match what the device

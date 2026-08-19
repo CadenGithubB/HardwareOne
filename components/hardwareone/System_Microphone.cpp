@@ -22,6 +22,7 @@
 #include "System_Debug.h"
 #include "System_TaskUtils.h"
 #include "System_Command.h"
+#include "System_CommandTypes.h"
 #include "System_Utils.h"   // argWantsJson
 #include <ArduinoJson.h>
 #include "System_Mutex.h"
@@ -31,6 +32,7 @@
 #include "System_AuthIdentity.h"  // currentAuthContext (recording path checks)
 #include "System_UartLink.h"      // cmd_voicefetch (registered in micCommands below)
 #include "System_LiveAudio.h"     // best-effort owned-recorder PCM shadow
+#include "System_Dictation.h"     // keyboard voice input: terminal capture hook
 #include "G2_Glasses.h"           // native EvenAI owner/login-epoch fence
 #include "HAL_Audio.h"            // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
 
@@ -1066,8 +1068,32 @@ static void recordingTask(void* param) {
           for (size_t fi = 1; fi < gRecFloorWinCount; fi++) {
             if (gRecFloorWin[fi] < gRecFloorAvg) gRecFloorAvg = gRecFloorWin[fi];
           }
-          int32_t cut = kRecSilenceFloorAvg;
-          if (2 * gRecFloorAvg > cut) cut = 2 * gRecFloorAvg;
+          // TWO gates, deliberately different.
+          //
+          // trimCut is floor-relative only: "is this chunk meaningfully above
+          // the ambient noise?" It decides what is DISCARDED.
+          //
+          // cut adds the peak-relative term (1/8 of the loudest chunk, i.e.
+          // -18 dB) and decides when the trailing-silence clock runs, i.e. when
+          // to STOP.
+          //
+          // They were one value, and that truncated words. Word-final
+          // consonants and vowel decays sit 20-30 dB below a stressed vowel, so
+          // once peak grew they scored below peak/8, went into the hold ring,
+          // and were dropped at stop. MEASURED 2026-08-13: "potato" captured as
+          // "potat", "picture" as "pict", "That's the price" as "is the price".
+          // Keying the discard decision to the MEASURED floor instead is
+          // mic-neutral by construction: it self-scales to the G2 temple mic
+          // (~-60 dBFS floor) and to the noisier on-carrier PDM mic (~-40 dBFS)
+          // without favouring either, where any peak-relative or absolute
+          // threshold necessarily suits one and hurts the other.
+          //
+          // trimCut <= cut always, so strictly fewer chunks are held than
+          // before: auto-stop timing is unchanged, only less audio is thrown
+          // away.
+          int32_t trimCut = kRecSilenceFloorAvg;
+          if (2 * gRecFloorAvg > trimCut) trimCut = 2 * gRecFloorAvg;
+          int32_t cut = trimCut;
           if (gRecPeakAvg / 8 > cut)  cut = gRecPeakAvg / 8;
           // Speech has to stand above the MEASURED ambient floor, not merely
           // above a fixed absolute level. Room tone on the G2 temple mic runs
@@ -1093,7 +1119,10 @@ static void recordingTask(void* param) {
           const uint32_t chunkMs = (gRecSampleRate > 0)
               ? (uint32_t)((uint64_t)sampleCount * 1000 / gRecSampleRate) : 128;
           const bool scoredSilent = (gRecHeardSpeech && avg < cut);
-          chunkScoredSilent = scoredSilent;
+          // Discard decision uses the floor-relative gate, so a quiet word tail
+          // is committed rather than held; the auto-stop clock below keeps the
+          // peak-relative gate so end-of-speech detection does not get slower.
+          chunkScoredSilent = (gRecHeardSpeech && avg < trimCut);
           if (scoredSilent) gRecSilenceMs += chunkMs;
           else              gRecSilenceMs = 0;
           const uint32_t elapsedMs = (gRecSampleRate > 0)
@@ -1438,6 +1467,20 @@ static void recordingTask(void* param) {
     }
   }
 
+  // Dictation captures (keyboard voice input) terminate here too, but on their
+  // own terms: unlike the EvenAI flow above this fires whether the VAD ended
+  // the capture or the wearer stopped it by hand, and it is NOT fenced to
+  // disposition.admissionSessionEpoch — a wearer-armed capture has no admitting
+  // UART session, so that epoch is zero. The hook re-checks that this exact
+  // owner is the pending dictation before it does anything observable, and
+  // no-ops for every other owner. See System_Dictation.h for why the fence
+  // differs and how narrowly the difference is scoped.
+  //
+  // Placed alongside the pushes above for the same reason they are here: the
+  // WAV is closed and immediately fetchable, and we are outside every
+  // FsLockGuard.
+  dictationOnCaptureClosed(disposition.owner, currentRecordingPath, saved);
+
   // Recording over: drop the FAST hold and tear down our container (if we
   // created one) BEFORE publishing IDLE. Recorder-task context; the ~200 ms
   // page shutdown is fine here. Latched no-ops for PDM captures and when the
@@ -1476,6 +1519,43 @@ static bool startRecordingInternal(MicRecordingOwner owner,
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] FAILED: mic not enabled");
     INFO_MIC_LIFECYCLEF("Cannot record - mic not enabled");
     return false;
+  }
+
+  // Re-resolve the source preference against what is connected NOW.
+  //
+  // initMicrophone() is the only place the preference is resolved, and nothing
+  // on the wake path calls it — so a mic started before the glasses connected
+  // stays latched on the fallback for every capture afterwards. MEASURED
+  // 2026-08-13: `micsource` reported preference=g2, active=pdm for a whole
+  // session with the glasses connected throughout, producing -25 dBFS audio and
+  // badly wrong transcripts, and only a manual closemic/openmic fixed it.
+  //
+  // Checked here rather than on the BLE connect event for three reasons: this is
+  // the only moment the source actually matters, it runs on the caller's task
+  // instead of BTC_TASK (whose stack cannot afford a capture restart), and the
+  // lifecycle claim below has not been taken yet, so a cycle cannot interrupt an
+  // in-flight capture. If the glasses are NOT connected, audioSourceAvailable()
+  // is false and the incumbent source is left alone — an out-of-range G2 must
+  // never take the mic away from PDM.
+  if (gSettings.micSource == "g2" &&
+      audioGetSource() != AUDIO_SRC_G2_LEFT &&
+      audioSourceAvailable(AUDIO_SRC_G2_LEFT) &&
+      !micRecordingBusy()) {
+    WARN_SYSTEMF("[MIC_START_REC] preference=g2 and the glasses are connected but "
+                 "active=%s — re-resolving the source", micSourceName());
+    if (stopMicrophone()) {
+      if (!initMicrophone()) {
+        // The mic is now DOWN: report the failed start rather than claiming a
+        // recording that has no capture behind it.
+        WARN_SYSTEMF("[MIC_START_REC] re-resolve could not restart the mic");
+        INFO_MIC_LIFECYCLEF("Mic source re-resolve failed");
+        return false;
+      }
+      WARN_SYSTEMF("[MIC_START_REC] source re-resolved to %s", micSourceName());
+    } else {
+      // Finalizing a previous capture — keep the incumbent source and record.
+      WARN_SYSTEMF("[MIC_START_REC] re-resolve skipped (mic busy stopping)");
+    }
   }
 
   // This claim MUST precede every write to the capture globals below. A start
@@ -1613,6 +1693,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   recordingSamples = 0;
   
   // Start recording task
+  taskStackRecord("mic_record", MIC_RECORD_STACK_WORDS);
   BaseType_t taskCreated = xTaskCreatePinnedToCore(
     recordingTask,
     "mic_record",
@@ -1732,6 +1813,11 @@ MicRecordingOwnedOp deleteRecordingOwned(
     return MicRecordingOwnedOp::INVALID_OWNER;
   }
   return micRecordingDiscardCompleted(owner, expectedFilename);
+}
+
+MicRecordingOwnedOp requestStopRecordingOwned(MicRecordingOwner owner,
+                                              bool discard) {
+  return micRecordingRequestStopOwned(owner, discard);
 }
 
 MicRecordingOwnedOp stopRecordingOwned(MicRecordingOwner owner,
@@ -2220,6 +2306,23 @@ const char* cmd_mic(const String& argsInput) {
 
 const char* cmd_micstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  const AuthContext& admissionCtx = currentAuthContext();
+  const CommandContext* commandCtx =
+      static_cast<const CommandContext*>(currentCommandContext());
+  const bool syntheticEvenAi =
+      admissionCtx.transport == SOURCE_INTERNAL &&
+      admissionCtx.user == "uart-session" &&
+      admissionCtx.path == "/g2evenai";
+  if (syntheticEvenAi) {
+    if (!commandCtx ||
+        !(commandCtx->behaviorFlags &
+          COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY) ||
+        !g2EvenAiExchangeBoundToUartSession(
+            commandCtx->authorityId,
+            commandCtx->authoritySessionEpoch)) {
+      return "Error: G2 EvenAI UART authority changed before microphone start.";
+    }
+  }
   if (!gSettings.micEnabled) {
     return "ERROR: Microphone is disabled - run 'micenabled 1' first";
   }
@@ -2388,6 +2491,25 @@ const char* cmd_micrecord(const String& argsInput) {
       return "Error: Microphone not enabled. Use 'openmic' first.";
     }
     const AuthContext& admissionCtx = currentAuthContext();
+    const CommandContext* commandCtx =
+        static_cast<const CommandContext*>(currentCommandContext());
+    const bool syntheticEvenAi =
+        admissionCtx.transport == SOURCE_INTERNAL &&
+        admissionCtx.user == "uart-session" &&
+        admissionCtx.path == "/g2evenai";
+    if (syntheticEvenAi) {
+      if (!commandCtx ||
+          !(commandCtx->behaviorFlags &
+            COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY)) {
+        return "Error: G2 EvenAI recording start lacks bound UART authority.";
+      }
+      if (commandCtx->authorityId != owner ||
+          !g2EvenAiExchangeBoundToUartSession(
+              commandCtx->authorityId,
+              commandCtx->authoritySessionEpoch)) {
+        return "Error: G2 EvenAI UART authority changed before recording start.";
+      }
+    }
     const uint32_t currentSessionEpoch = uartLinkSessionEpoch();
     uint32_t admissionSessionEpoch = 0;
     if (currentSessionEpoch != 0) {
@@ -2870,6 +2992,7 @@ const char* cmd_micviz(const String& argsInput) {
   // mic_record (Core 1, HIGH) owns the audio buffer; viz is a consumer that
   // can run wherever the scheduler has cycles.
   // APP_CORE: waveform-render compute; keep it off the Wi-Fi/BLE core.
+  taskStackRecord("mic_viz", MIC_VIZ_STACK_WORDS);
   xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", MIC_VIZ_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gMicVisualizerTask, APP_CORE);
   return "Visualizer started (press any key to stop)";
 }
@@ -2970,12 +3093,14 @@ static const SettingEntry micSettingEntries[] = {
   { "micEnabled", SETTING_BOOL, &gSettings.micEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "micenabled" },
   { "microphoneAutoStart", SETTING_BOOL, &gSettings.micAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "micautostart" },
   // Source preference {auto,pdm,g2}. Resolved lazily against availability.
-  { "micSource", SETTING_STRING, &gSettings.micSource, 0, 0, "auto", 0, 0, "Mic source", nullptr, false, nullptr, "micsource" },
+  { "micSource", SETTING_STRING, &gSettings.micSource, 0, 0, "auto", 0, 0, "Mic source", "auto|Auto,pdm|Onboard PDM,g2|G2 glasses", false, nullptr, "micsource" },
   // These three were previously reported as "(saved)" but never registered, so
   // they silently reset to defaults on reboot. Registering them fixes that.
   { "microphoneSampleRate", SETTING_INT, &gSettings.microphoneSampleRate, 16000, 0, nullptr, 8000, 48000, "Sample rate (Hz, PDM only)", nullptr, false, nullptr, "micsamplerate" },
   { "microphoneGain", SETTING_INT, &gSettings.microphoneGain, 70, 0, nullptr, 0, 100, "Software gain (%)", nullptr, false, nullptr, "micgain" },
-  { "microphoneBitDepth", SETTING_INT, &gSettings.microphoneBitDepth, 16, 0, nullptr, 16, 32, "Bit depth (cosmetic; WAV is always 16-bit)", nullptr, false, nullptr, "micbitdepth" },
+  // Only 16 and 32 are accepted (cmd_micbitdepth); the 16..32 min/max would
+  // otherwise render as a number box offering values the command rejects.
+  { "microphoneBitDepth", SETTING_INT, &gSettings.microphoneBitDepth, 16, 0, nullptr, 16, 32, "Bit depth (cosmetic; WAV is always 16-bit)", "16|16-bit,32|32-bit", false, nullptr, "micbitdepth" },
 };
 
 // Module "connected" = a mic source is actually available (onboard PDM present

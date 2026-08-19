@@ -8,6 +8,7 @@
 
 #include "System_Debug.h"
 #include "System_MemUtil.h"
+#include "System_Mutex.h"
 #include "System_User.h"
 #include "System_UserSettings.h"
 #include "System_Settings.h"
@@ -408,7 +409,31 @@ static bool webGuestApiAllowed(const char* path) {
 
 bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx) {
   if (!req) return false;
-  if (ctx.user.length() == 0 || !isGuestUser(ctx.user)) return true;
+  // This is an authorization boundary, so do not use isGuestUser() here:
+  // that UI-oriented helper deliberately falls back to ordinary User when an
+  // account cannot be resolved.  A live web session whose account was deleted,
+  // banned, or became unreadable must lose access rather than escape the Guest
+  // allowlist.  getUserAuthorizationRole() also preserves pre-role rosters
+  // (first account = recovery owner, later missing-role accounts = User).
+  if (ctx.user.length() == 0 || ctx.user == "AuthBypass") return true;
+  bool roleVerified = false;
+  bool guestRole = false;
+  {
+    FsLockGuard roleGuard("web.guestAccess");
+    if (roleGuard.held || isFsLockedByCurrentTask()) {
+      String role;
+      roleVerified = getUserAuthorizationRole(ctx.user, role);
+      // Preserve the legacy device-owner recovery rule only after the account
+      // was resolved positively from the same locked roster snapshot.
+      guestRole = roleVerified && role == "guest" &&
+                  !isSuperAdminUser(ctx.user);
+    }
+  }
+  if (!roleVerified) {
+    webGuestSendForbidden(req);
+    return false;
+  }
+  if (!guestRole) return true;
 
   // CORS preflight — never a mutate.
   if (req->method == HTTP_OPTIONS) return true;
@@ -511,7 +536,13 @@ String generateNavigation(const String& activePage, const String& username, cons
 #if ENABLE_WEB_SPEECH
   link("/speech", "speech", "Speech");
 #endif
-#if ENABLE_ONDEVICE_LLM
+// Match the ROUTE's gate, not a source's. WebPage_LLM.cpp and the /llm handler
+// registration both compile under ENABLE_LLM_BACKEND, so gating this link on
+// ENABLE_LLM_SOURCE_ONBOARD hid the menu entry on a CM5-only build while the
+// page itself stayed live and reachable by typing the URL — a working surface
+// with no way to navigate to it. The backend flag is what says the page exists;
+// which source answers is the page's business, not the nav's.
+#if ENABLE_LLM_BACKEND
   link("/llm", "llm", "LLM");
 #endif
 #if ENABLE_AUTOMATION
@@ -520,7 +551,10 @@ String generateNavigation(const String& activePage, const String& username, cons
   link("/settings", "settings", "Settings");
   nav += "</div>";
   nav += "<div class=\"user-info\">";
-  if (username == "guest") {
+  String navRole;
+  const bool namedGuest =
+      getUserAuthorizationRole(username, navRole) && navRole == "guest";
+  if (username.length() == 0 || namedGuest) {
     nav += "<a href=\"/login\" class=\"login-btn\">Login</a>";
   } else {
     nav += "<div class=\"username\">" + username + "</div>";
@@ -736,7 +770,7 @@ void streamBeginHtml(httpd_req_t* req,
       "try{if(window.hw&&hw.applyGuestViewOnly)hw.applyGuestViewOnly()}catch(_){}"
       "});</script>");
   }
-  streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});hw.qs=function(s,c){return (c||document).querySelector(s)};hw.qsa=function(s,c){return (c||document).querySelectorAll(s)};hw.on=function(e,v,f){if(e)e.addEventListener(v,f)};hw._ge=function(x){return typeof x==='string'?document.getElementById(x):x};hw.setText=function(x,t){var el=hw._ge(x);if(el)el.textContent=t};hw.setHTML=function(x,h){var el=hw._ge(x);if(el)el.innerHTML=h};hw.show=function(x){var el=hw._ge(x);if(el)el.style.display=''};hw.hide=function(x){var el=hw._ge(x);if(el)el.style.display='none'};hw.toggle=function(x,sh){(sh?hw.show:hw.hide)(x)};hw._auth401=function(r){if(r.status!==401)return r;return r.json().then(function(d){if(d&&d.error==='auth_required'&&d.reload){w.location.href='/login'}throw new Error('auth_required')}).catch(function(){w.location.href='/login';throw new Error('auth_required')})};hw.fetchJSON=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';if(!o.headers)o.headers={};o.headers['Accept']='application/json';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})};hw.postJSON=function(u,b,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/json'},o.headers||{});o.body=JSON.stringify(b||{});return hw.fetchJSON(u,o)};hw.postForm=function(u,form,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/x-www-form-urlencoded'},o.headers||{});var b=[];for(var k in (form||{})){if(Object.prototype.hasOwnProperty.call(form,k)){b.push(encodeURIComponent(k)+'='+encodeURIComponent(form[k]))}};o.body=b.join('&');if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401)};hw.fetchText=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.postFormText=function(u,form,o){return hw.postForm(u,form,o).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.cliConfirm=function(cliCmd,userPrompt,opts){opts=opts||{};var url=(opts.target==='bond')?'/api/bond/cli/batch':'/api/cli/batch';var ask=(typeof w.hwConfirm==='function')?w.hwConfirm(userPrompt):Promise.resolve(w.confirm(userPrompt));return ask.then(function(ok){if(!ok)return {cancelled:true,ok:false,result:''};return hw.postJSON(url,{commands:[cliCmd,'yes']}).then(function(data){var rs=(data&&data.results)||[];var result=rs[1]||'';var failed=!result||/Error|Failed|Cancelled/.test(result);return {cancelled:false,ok:!failed,result:result};});});};try{console.log('[HW] helpers ready');}catch(_){} })(window);</script>");
+    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});hw.qs=function(s,c){return (c||document).querySelector(s)};hw.qsa=function(s,c){return (c||document).querySelectorAll(s)};hw.on=function(e,v,f){if(e)e.addEventListener(v,f)};hw._ge=function(x){return typeof x==='string'?document.getElementById(x):x};hw.setText=function(x,t){var el=hw._ge(x);if(el)el.textContent=t};hw.setHTML=function(x,h){var el=hw._ge(x);if(el)el.innerHTML=h};hw.show=function(x){var el=hw._ge(x);if(el)el.style.display=''};hw.hide=function(x){var el=hw._ge(x);if(el)el.style.display='none'};hw.toggle=function(x,sh){(sh?hw.show:hw.hide)(x)};hw._auth401=function(r){if(r.status!==401)return r;return r.json().then(function(d){if(d&&d.error==='auth_required'&&d.reload){w.location.href='/login'}throw new Error('auth_required')}).catch(function(){w.location.href='/login';throw new Error('auth_required')})};hw.fetchJSON=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';if(!o.headers)o.headers={};o.headers['Accept']='application/json';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})};hw.postJSON=function(u,b,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/json'},o.headers||{});o.body=JSON.stringify(b||{});return hw.fetchJSON(u,o)};hw.postForm=function(u,form,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/x-www-form-urlencoded'},o.headers||{});var b=[];for(var k in (form||{})){if(Object.prototype.hasOwnProperty.call(form,k)){b.push(encodeURIComponent(k)+'='+encodeURIComponent(form[k]))}};o.body=b.join('&');if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401)};hw.fetchText=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.postFormText=function(u,form,o){return hw.postForm(u,form,o).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.cliConfirm=function(cliCmd,userPrompt,opts){opts=opts||{};var url=(opts.target==='bond')?'/api/bond/cli/batch':'/api/cli/batch';var ask=(typeof w.hwConfirm==='function')?w.hwConfirm(userPrompt):Promise.resolve(w.confirm(userPrompt));return ask.then(function(ok){if(!ok)return {cancelled:true,ok:false,pending:false,result:''};return hw.postJSON(url,{commands:[cliCmd,'yes'],interactive:true}).then(function(data){var rs=(data&&data.results)||[];var result=rs[1]||'';var pending=/^Pending(?:\\s|:|$)/i.test(result);var failed=!result||/^(?:Error|Failed|Cancelled)(?:\\s|:|$)/i.test(result);return {cancelled:false,ok:!failed,pending:pending,result:result};});});};try{console.log('[HW] helpers ready');}catch(_){} })(window);</script>");
   streamChunkC(req, "<script>(function(w){var hw=w.hw||(w.hw={});hw.pollJSON=function(u,ms,cb){try{cb=cb||function(){};ms=ms||1000;var h=setInterval(function(){hw.fetchJSON(u).then(cb).catch(function(e){if(e&&e.message==='auth_required'){clearInterval(h)}})},ms);return function(){clearInterval(h)};}catch(_){return function(){}}};try{console.log('[HW] page=\"");
   streamChunkC(req, activePage.c_str());
   streamChunkC(req, "\"');}catch(_){}})(window);</script>");

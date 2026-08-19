@@ -123,6 +123,13 @@ bool startRecordingOwned(MicRecordingOwner owner,
 MicRecordingOwnedOp stopRecordingOwned(MicRecordingOwner owner,
                                        bool discard = false,
                                        uint32_t timeoutMs = 3000);
+// Non-blocking sibling of the above: requests the stop (and optionally the
+// discard) and returns immediately, without waiting through FINALIZING. UI
+// tasks must use this — the OLED display task cannot afford to stall a frame
+// for up to `timeoutMs` while the recorder closes a WAV. The caller learns the
+// outcome from the recorder's own terminal path rather than from the return.
+MicRecordingOwnedOp requestStopRecordingOwned(MicRecordingOwner owner,
+                                              bool discard = false);
 MicRecordingOwnedOp getRecordingResultOwned(MicRecordingOwner owner,
                                             MicRecordingResult* out);
 // Delete/redact only the completed result belonging to `owner`. The caller's

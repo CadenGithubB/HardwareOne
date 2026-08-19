@@ -30,12 +30,13 @@ enum : uint8_t {
   NSINK_QUEUE  = 1 << 1,  // persistent notification-center view (ring-backed)
   NSINK_TOAST  = 1 << 2,  // web toast via SSE
   NSINK_G2     = 1 << 3,  // native notification card on the G2 lens (EFS push)
+  NSINK_APP    = 1 << 4,  // Android companion app, over the BLE command link
 };
 
 // The "interrupt" surfaces — transient pop-ups that grab attention. The per-user
-// importance floor gates these three UNIFORMLY (banner/toast/G2 fire on the same
-// kinds for a given user). QUEUE is silent history and is never floor-gated.
-constexpr uint8_t NSINK_INTERRUPT = NSINK_BANNER | NSINK_TOAST | NSINK_G2;
+// importance floor gates these four UNIFORMLY (banner/toast/G2/app fire on the
+// same kinds for a given user). QUEUE is silent history and is never floor-gated.
+constexpr uint8_t NSINK_INTERRUPT = NSINK_BANNER | NSINK_TOAST | NSINK_G2 | NSINK_APP;
 
 // Cross-cutting importance tiers — orthogonal to event family, and the axis
 // users actually tune. A per-user "minimum tier" (NotifViewer.minTier) decides
@@ -64,7 +65,8 @@ struct NotifRule {
 //   2. device policy      — per-kind level from /system/notifications.json:
 //                           all (default) / admin (admin viewers only) /
 //                           off (hidden for everyone)
-//   3. sink masters       — gSettings.notifBanners/notifToasts/notifQueue/notifG2
+//   3. sink masters       — gSettings.notifBanners/notifToasts/notifQueue/
+//                           notifG2/notifApp
 //   4. personal prefs     — the viewer's importance floor (interrupt only
 //                           at/above minTier) plus per-kind force-on/force-off,
 //                           from their per-user settings file. This one

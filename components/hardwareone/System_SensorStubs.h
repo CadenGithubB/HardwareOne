@@ -198,6 +198,7 @@
   extern bool gCameraRunning;
   extern bool cameraConnected;
   extern bool cameraStreaming;
+  extern bool cameraDetected;
   extern const char* cameraModel;
   extern int cameraWidth;
   extern int cameraHeight;
@@ -206,7 +207,14 @@
   inline bool initCamera() { return false; }
   inline void stopCamera() {}
   inline uint8_t* captureFrame(size_t* outLen) { if (outLen) *outLen = 0; return nullptr; }
-  inline const char* buildCameraStatusJson() { return "{}"; }
+  // Same key set as the real builder so clients can branch on supported/detected
+  // without special-casing the compiled-out build. An empty {} used to be
+  // indistinguishable from "camera present but stopped" on the wire.
+  inline const char* buildCameraStatusJson() {
+    return "{\"supported\":false,\"detected\":false,\"enabled\":false,"
+           "\"connected\":false,\"streaming\":false,\"model\":\"None\","
+           "\"width\":0,\"height\":0,\"psram\":false}";
+  }
 #endif
 
 #if !ENABLE_MICROPHONE
@@ -356,6 +364,8 @@
   inline void sseEnqueueEvent(SessionEntry& s, const char* name, const char* data) {}
   inline String getCookieSID(httpd_req_t* req) { return ""; }
   inline int findSessionIndexBySID(const String& sid) { return -1; }
+  inline uint32_t webSessionEpochForSID(const String& sid) { return 0; }
+  inline bool webSessionEpochIsLive(uint32_t epoch) { return false; }
   inline void storeLogoutReason(const String& ip, const String& reason) {}
   inline void enqueueTargetedRevokeForSessionIdx(int idx, const String& reason) {}
   // Auth and session stubs (gAuthUser/gAuthPass + rebuildExpectedAuthHeader

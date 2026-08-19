@@ -5,6 +5,7 @@
  */
 
 #include "System_SetupWizard.h"
+#include "System_MemUtil.h"
 #include <esp_attr.h>
 #include "System_FeatureRegistry.h"
 #include "System_Settings.h"
@@ -15,6 +16,7 @@
 
 #if ENABLE_WIFI
 #include <WiFi.h>
+#include "System_WiFi.h"
 #endif
 
 #if ENABLE_OLED_DISPLAY
@@ -324,10 +326,15 @@ char* getWizardDeviceNameBuf() { return wizardDeviceName; }
  }
  
  static void calibrateWizardBaseline() {
-   uint32_t totalHeapKB = (uint32_t)(ESP.getHeapSize() / 1024);
+   // Internal 8-bit only (see hw1InternalFreeBytes, System_MemUtil.h) — the
+   // old ESP.* calls overstated total by ~59 KB and free by ~26 KB, which
+   // skewed every wizard heap bar.
+   uint32_t totalHeapKB = (uint32_t)(hw1InternalTotalBytes() / 1024);
    if (totalHeapKB == 0) totalHeapKB = 1;
  
-   uint32_t usedNowKB = (uint32_t)((ESP.getHeapSize() - ESP.getFreeHeap()) / 1024);
+   const size_t wizTotal = hw1InternalTotalBytes();
+   const size_t wizFree  = hw1InternalFreeBytes();
+   uint32_t usedNowKB = (uint32_t)((wizTotal > wizFree ? wizTotal - wizFree : 0) / 1024);
    uint32_t infraKB = getWizardInfrastructureCostKB();
  
    sWizardBaselineKB = (usedNowKB > infraKB) ? (usedNowKB - infraKB) : 0;
@@ -338,7 +345,7 @@ char* getWizardDeviceNameBuf() { return wizardDeviceName; }
 uint32_t wizardEnabledModeExtraHeapKB();  // defined with the mode-menu table below
 
 void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage) {
-  uint32_t totalHeapKB = (uint32_t)(ESP.getHeapSize() / 1024);
+  uint32_t totalHeapKB = (uint32_t)(hw1InternalTotalBytes() / 1024);
   if (totalHeapKB == 0) totalHeapKB = 1;
 
    if (!sWizardBaselineCalibrated) {
@@ -380,7 +387,13 @@ void initSetupWizard() {
   for (size_t i = 0; i < getFeatureCount(); i++) {
     const FeatureEntry* f = getFeatureByIndex(i);
     if (!f || !isFeatureCompiled(f)) continue;
-    
+    // Compile-time-only features (nullptr setting — e.g. maps, games) have
+    // nothing for a checkbox to toggle. They must be skipped rather than shown
+    // unchecked: the render path falls back to false for a null pointer, which
+    // would claim "disabled" for a feature isFeatureEnabled() reports as ON.
+    // Same guard the sensor auto-start loop below already applies.
+    if (!f->enabledSetting) continue;
+
     if ((f->category == FEATURE_CAT_NETWORK || f->category == FEATURE_CAT_SYSTEM) && featuresPageCount < 16) {
       featuresPage[featuresPageCount].id = f->id;
       featuresPage[featuresPageCount].label = f->name;
@@ -406,6 +419,7 @@ void initSetupWizard() {
   for (size_t i = 0; i < getFeatureCount(); i++) {
     const FeatureEntry* f = getFeatureByIndex(i);
     if (!f || !isFeatureCompiled(f)) continue;
+    if (!f->enabledSetting) continue;  // compile-time only — see features page above
 
     if (f->category == FEATURE_CAT_DISPLAY && sensorsPageCount < 16) {
       sensorsPage[sensorsPageCount].id = f->id;
@@ -1286,40 +1300,96 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
 // Shared WiFi scan-and-list printer — see System_SetupWizard.h for contract.
 // Numbers NAMED networks only; hidden (empty-SSID) APs are collapsed into a
 // single "(+H hidden ...)" line so a numbered pick can never yield a blank
-// SSID. namedScanIdx[k] holds the raw scan index of the (k+1)-th named AP.
-int wifiScanPrintNamed(int* namedScanIdx, int namedCap) {
-  int n = WiFi.scanNetworks(false, true);
-  int storedNamed = 0;   // named APs we numbered (capped at namedCap)
-  int totalNamed  = 0;   // all named APs seen
-  int hiddenCount = 0;
-  for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i).length() == 0) { hiddenCount++; continue; }
-    totalNamed++;
-    if (storedNamed < namedCap) namedScanIdx[storedNamed++] = i;
+// SSID. Only the copied SSID cache survives wifiScanForEach(); Arduino's
+// global result block is released before the function returns.
+static constexpr int kWizardNamedWifiCapacity = 24;
+EXT_RAM_BSS_ATTR static char sWizardNamedWifi[kWizardNamedWifiCapacity][33];
+static int sWizardNamedWifiCount = 0;
+
+struct WizardWifiScanContext {
+  int cap;
+  int storedNamed;
+  int totalNamed;
+  int hiddenCount;
+  int8_t rssi[kWizardNamedWifiCapacity];
+  uint8_t authMode[kWizardNamedWifiCapacity];
+};
+
+static bool collectWizardWifiRecord(const WifiScanRecord& record,
+                                    uint16_t /*index*/, uint16_t /*total*/,
+                                    void* context) {
+  WizardWifiScanContext* scan = static_cast<WizardWifiScanContext*>(context);
+  if (record.ssid[0] == '\0') {
+    scan->hiddenCount++;
+    return true;
   }
 
-  if (storedNamed > 0) {
-    broadcastOutput(String("Found ") + totalNamed + " network(s):");
-    for (int j = 0; j < storedNamed; j++) {
+  scan->totalNamed++;
+  if (scan->storedNamed >= scan->cap) return true;
+
+  int slot = scan->storedNamed++;
+  strlcpy(sWizardNamedWifi[slot], record.ssid,
+          sizeof(sWizardNamedWifi[slot]));
+  scan->rssi[slot] = record.rssi;
+  scan->authMode[slot] = record.authMode;
+  return true;
+}
+
+void wifiScanClearNamed() {
+  memset(sWizardNamedWifi, 0, sizeof(sWizardNamedWifi));
+  sWizardNamedWifiCount = 0;
+}
+
+bool wifiScanGetNamedSSID(int zeroBasedIndex, String& outSSID) {
+  outSSID = "";
+  if (zeroBasedIndex < 0 || zeroBasedIndex >= sWizardNamedWifiCount) {
+    return false;
+  }
+  outSSID = sWizardNamedWifi[zeroBasedIndex];
+  return outSSID.length() > 0;
+}
+
+int wifiScanPrintNamed(int namedCap) {
+  wifiScanClearNamed();
+  if (namedCap < 0) namedCap = 0;
+  if (namedCap > kWizardNamedWifiCapacity) {
+    namedCap = kWizardNamedWifiCapacity;
+  }
+
+  WizardWifiScanContext scan = {};
+  scan.cap = namedCap;
+  WifiScanResult result = wifiScanForEach(
+      /*includeHidden=*/true, collectWizardWifiRecord, &scan);
+  if (!result.ok()) {
+    broadcastOutput(String("WiFi scan unavailable: ") +
+                    wifiScanStatusText(result.status));
+    return 0;
+  }
+
+  sWizardNamedWifiCount = scan.storedNamed;
+  if (scan.storedNamed > 0) {
+    broadcastOutput(String("Found ") + scan.totalNamed + " network(s):");
+    for (int j = 0; j < scan.storedNamed; j++) {
       char line[96];
-      snprintf(line, sizeof(line), "  %d. %-24s  %lddBm  %s",
-               j + 1, WiFi.SSID(namedScanIdx[j]).c_str(),
-               (long)WiFi.RSSI(namedScanIdx[j]),
-               (WiFi.encryptionType(namedScanIdx[j]) == WIFI_AUTH_OPEN) ? "Open" : "Secured");
+      snprintf(line, sizeof(line), "  %d. %-24.32s  %lddBm  %s",
+               j + 1, sWizardNamedWifi[j], (long)scan.rssi[j],
+               scan.authMode[j] == 0 ? "Open" : "Secured");
       broadcastOutput(line);
     }
-    if (totalNamed > storedNamed) {
-      broadcastOutput(String("  (... and ") + (totalNamed - storedNamed) +
+    if (scan.totalNamed > scan.storedNamed) {
+      broadcastOutput(String("  (... and ") +
+                      (scan.totalNamed - scan.storedNamed) +
                       " more named — type the exact SSID to join)");
     }
   } else {
     broadcastOutput("No named WiFi networks found.");
   }
-  if (hiddenCount > 0) {
-    broadcastOutput(String("  (+") + hiddenCount + " hidden network" +
-                    (hiddenCount == 1 ? "" : "s") + " — type the exact SSID to join)");
+  if (scan.hiddenCount > 0) {
+    broadcastOutput(String("  (+") + scan.hiddenCount + " hidden network" +
+                    (scan.hiddenCount == 1 ? "" : "s") +
+                    " — type the exact SSID to join)");
   }
-  return storedNamed;
+  return scan.storedNamed;
 }
 #endif
 
@@ -1332,8 +1402,7 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
   bool wifiPageDone = false;
   while (!wifiPageDone) {
 #if ENABLE_WIFI
-    int named[24];
-    int namedCount = wifiScanPrintNamed(named, 24);
+    int namedCount = wifiScanPrintNamed(24);
     Serial.println("----------------------------------------");
     Serial.println("Enter number, SSID directly, 'rescan', or 'skip':");
     Serial.println("('b' or 'back' to return to previous page)");
@@ -1341,23 +1410,23 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
     String ssidInput = waitForSerialInputBlocking();
     // Honor wizard-input timeout (CLI featuresetup installs one; FTS doesn't).
     if (isWizardCancelRequested()) {
-      WiFi.scanDelete();
+      wifiScanClearNamed();
       result.completed = false;
       running = false;
       return;
     }
     if (ssidInput.equalsIgnoreCase("b") || ssidInput.equalsIgnoreCase("back")) {
-      WiFi.scanDelete();
+      wifiScanClearNamed();
       wizardPrevPage();
       wifiPageDone = true;
       continue;
     }
     if (ssidInput.equalsIgnoreCase("rescan")) {
-      WiFi.scanDelete();
+      wifiScanClearNamed();
       continue;
     }
     if (ssidInput.equalsIgnoreCase("skip") || ssidInput.length() == 0) {
-      WiFi.scanDelete();
+      wifiScanClearNamed();
       result.completed = true;
       running = false;
       wifiPageDone = true;
@@ -1368,9 +1437,13 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
     // Map a bare in-range integer to the Nth NAMED network; anything else
     // (incl. SSIDs that start with a digit, e.g. "2WIRE") is a typed SSID.
     if (idx >= 1 && idx <= namedCount && String(idx) == ssidInput) {
-      ssid = WiFi.SSID(named[idx - 1]);
+      if (!wifiScanGetNamedSSID(idx - 1, ssid)) {
+        wifiScanClearNamed();
+        Serial.println("WiFi list expired; scanning again.");
+        continue;
+      }
     }
-    WiFi.scanDelete();
+    wifiScanClearNamed();
     if (ssid.length() > 0) {
       Serial.println("Enter WiFi password (or 'b' to go back):");
       Serial.print("> ");
@@ -1803,4 +1876,3 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
 
   return result;
 }
-
