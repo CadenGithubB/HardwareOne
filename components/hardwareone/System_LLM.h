@@ -14,10 +14,17 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
 
 #include <Arduino.h>
 #include <functional>
+
+// Types and generation defaults shared with every other source and surface.
+// They live outside this header because a CM5-only build has no engine but
+// still needs to describe a generation. Do NOT redeclare them here.
+#include "System_LLMTypes.h"   // also carries the surface-facing metadata /
+                               // guided-menu API, which has no-op stubs when this
+                               // engine is not in the build
 
 // ============================================================================
 // LLM Configuration
@@ -42,15 +49,6 @@
 #define LLM_MAX_CONTEXT_LEN       1024
 #endif
 
-// Upper bound the llmmaxcontext SETTING accepts, in TOKENS. Not related to
-// CMD_RESULT_MAX (4096 BYTES) — same number, unrelated concept, do not unify.
-// One definition for the schema bound, the CLI usage text and the web loader's
-// clamp; those were three hand-typed numbers that had already drifted (the web
-// silently halved every load to 2048). The effective context is still
-// min(model config.seq_len, this), then reduced further by PSRAM auto-fit —
-// raising this cannot over-allocate, it only stops capping below the model.
-#define LLM_SETTING_MAX_CONTEXT   4096
-
 // Minimum runtime context (TOKENS) considered usable for a real Q&A. Below this,
 // PSRAM auto-fit has shrunk the KV window so far that a typical prompt fills it
 // and generation stalls immediately (the "ctx=6/6, 0-1 tokens" failure). When
@@ -59,16 +57,6 @@
 // llmContextDegraded() reports true so every surface can warn the user to reload
 // the model or restart. Not a hard floor on loading — the model still loads.
 #define LLM_MIN_USABLE_CONTEXT      24
-
-// Generation defaults
-#define LLM_DEFAULT_MAX_TOKENS      256
-#define LLM_DEFAULT_TEMPERATURE     0.5f
-#define LLM_DEFAULT_TOPP            0.8f
-#define LLM_DEFAULT_MINP            0.0f   // min-p relative floor (0 = off → use top-p)
-#define LLM_DEFAULT_REP_PENALTY     1.3f   // repetition penalty divisor (1.0 = disabled)
-#define LLM_DEFAULT_REP_WINDOW      32     // tokens looked back for rep penalty
-#define LLM_DEFAULT_SENTENCE_LIMIT  2      // stop after N sentences (0 = disabled)
-#define LLM_DEFAULT_HARD_CAP        80     // hard token cap regardless of sentences (0 = disabled)
 
 // Inference task. This is a BYTE count (stack depth arg is StackType_t words,
 // and sizeof(StackType_t)==1 on this Xtensa build, so words==bytes). The stack
@@ -87,70 +75,41 @@
 // windows to answer BLE/serial polls promptly (see in-forward yields).
 #define LLM_TASK_PRIORITY         2
 
-// ============================================================================
-// Model Binary Format (LLM1 — esp32-llm-converter)
-// ============================================================================
+// LLMConfig / LLMState / LLMStatus / LLMGenParams now live in
+// System_LLMTypes.h (included above), so a build whose only source is the
+// CM5 co-processor still has them without compiling the engine.
 
-// LLM1 header magic (big-endian in file: "LLM1")
+// LLM1 container magic ("LLM1"). Stays here rather than in the shared types:
+// it describes THIS engine's on-disk checkpoint format and means nothing to a
+// source that does not read local weights.
 #define LLM1_MAGIC 0x4C4C4D31
 
-struct LLMConfig {
-  int dim;            // transformer dimension
-  int hidden_dim;     // ffn hidden dimension
-  int n_layers;       // number of transformer layers
-  int n_heads;        // number of query heads
-  int n_kv_heads;     // number of key/value heads (can be < n_heads for GQA)
-  int vocab_size;     // vocabulary size
-  int seq_len;        // max sequence length
-  uint8_t quant_type; // 0=FP32, 1=INT8, 2=INT4_MIXED
-  uint16_t group_size;// quantization group size
-  uint8_t arch_type;  // 0=Llama, 1=GPT-2
-  uint8_t n_q8_start; // (quant_type==2) INT8 layers at front
-  uint8_t n_q8_end;   // (quant_type==2) INT8 layers at back
-  uint8_t file_version; // LLM1 file version (2 or 3)
-};
+// ---------------------------------------------------------------------------
+// Model-declared capabilities — CAPS section (id 5) of the LLM1 info block.
+//
+//   u8  caps_version   (1)
+//   u16 flags          (little-endian, same convention as the DOMAIN/ICON u16s)
+//
+// A model that omits the section, or declares a version this firmware does not
+// know, reports NO capabilities. Fail-closed is the whole point: the only
+// capability today decides whether the model's output may be offered to the
+// user as a runnable device command.
+//
+// The section table is a TLV walk whose default arm skips unknown ids, so older
+// firmware ignores this section harmlessly and a model carrying it stays
+// loadable everywhere.
+#define LLM_CAPS_VERSION 1
 
-// ============================================================================
-// Runtime State
-// ============================================================================
+// The model was trained on THIS device's command vocabulary, so its answers may
+// be offered as runnable CLI commands (the web page's Do: mode, which renders a
+// RUN button). Absent this bit, a model is answer-only. A general-knowledge
+// model that has never seen the command set cannot know one, so it would invent
+// a plausible-looking command -- which is worse than refusing, because it looks
+// real right up until it runs.
+#define LLM_CAP_COMMAND_MODE 0x0001u
 
-enum class LLMState : uint8_t {
-  UNLOADED = 0,     // No model loaded
-  LOADING,          // Model load in progress
-  READY,            // Model loaded, idle
-  GENERATING,       // Inference running
-  ERROR             // Load or runtime error
-};
-
-struct LLMStatus {
-  LLMState state;
-  char modelPath[64];
-  LLMConfig config;
-  size_t modelSizeBytes;      // Size of weight data in PSRAM
-  size_t runtimeSizeBytes;    // KV cache + activations
-  size_t totalPsramUsed;      // Total PSRAM consumed by LLM
-  float lastTokensPerSec;     // Performance of last generation
-  int lastTokenCount;         // Tokens generated in last run
-  int lastContextUsed;        // Context positions used in last generation (prompt + generated)
-  int lastContextMax;         // Total KV cache capacity (seq_ctx)
-  float lastMeanLogprob;      // Phase 2 confidence: mean log-prob of generated tokens (0 = no signal; less negative = more confident)
-  int lastConfTokens;         // Phase 2: # tokens that contributed to lastMeanLogprob
-  char errorMsg[128];         // Last error message
-};
-
-// Degraded-context detection — single source of truth for every LLM surface
-// (CLI, web page + /api/llm, OLED, G2). Returns true when a model is loaded but
-// PSRAM auto-fit shrank its context below LLM_MIN_USABLE_CONTEXT AND below what
-// was requested (so an intentionally small model or a deliberate llmMaxContext
-// cap does NOT trip it). outCtx/outModelSeq, when non-null, receive the active
-// context and the model's native seq_len even when not degraded.
-bool llmContextDegraded(int* outCtx = nullptr, int* outModelSeq = nullptr);
-
-// Formats the one-line, human-readable degraded-context warning into buf (always
-// NUL-terminates). Returns the string length, or 0 when not degraded (buf set to
-// ""). Same wording on every surface — the caller supplies the buffer so it is
-// task-safe (no shared state). Recommend cap >= 160.
-size_t llmContextWarning(char* buf, size_t cap);
+// Capabilities the currently loaded model declared. 0 when nothing is loaded.
+uint16_t llmModelCaps();
 
 // Token callback: called for each generated token string.
 // Return false to stop generation early.
@@ -178,15 +137,6 @@ bool llmIsReady();
 
 // Get current status (thread-safe snapshot)
 LLMStatus llmGetStatus();
-
-// Optional per-model metadata from the LLM1 "info block" (a description + icon
-// baked into the .bin by the converter), populated at load time. Zero-copy: the
-// returned pointers reference fixed engine storage that stays valid until the
-// next llmLoadModel/llmUnload. Kept out of LLMStatus so the by-value status
-// snapshot (copied every OLED frame) does not grow.
-const char* llmModelDescription();   // "" when the model carries no description
-// Returns the loaded model's icon (1bpp, MSB-first, row-major) or false if none.
-bool        llmModelIcon(const uint8_t** bits, uint8_t* width, uint8_t* height);
 
 // Generate text from a prompt. Calls tokenCb for each output token.
 // Runs synchronously on the calling task — caller is responsible for
@@ -229,20 +179,6 @@ void llmStop();
 // Async generation (non-blocking — sensor-style architecture)
 // ============================================================================
 
-// Parameters for one generation run.  Caller fills this, passes to llmStartAsync.
-struct LLMGenParams {
-  int   maxTokens;
-  float temperature;
-  float topp;
-  float minP;
-  float repPenalty;
-  int   repWindow;
-  int   sentenceLimit;
-  int   hardCap;
-  int   suppressTokens[128];
-  int   suppressCount;
-};
-
 // Start generation in a background FreeRTOS task (returns immediately).
 // Returns new session ID (> 0) on success, 0 if model not ready or task
 // could not be created.  Poll llmGetResultChunk / llmIsGenerationDone for output.
@@ -269,75 +205,11 @@ int llmTokenize(const char* text, int* outTokens, int maxTokens);
 // List available model files from all storage locations.
 // Returns JSON array: [{"name":"model.bin","size":1048576,"path":"/sd/llm/model.bin","storage":"sd"}, ...]
 // storage field is "internal" (LittleFS /system/llm/) or "sd" (/sd/llm/)
-String llmListModels();
 
 // ============================================================================
-// Guided-input menu API (System_LLM_Menu.cpp)
-// ============================================================================
-// A model's info block may carry a MENU section: curated, corpus-exact question
-// templates ("What type is {}?") + entity rosters ("Bulbasaur", ...). Surfaces
-// (web/OLED/G2/CLI) present pickers and submit integer indices; composition
-// happens once, on-device, and the composed question feeds the existing chat
-// pipeline unchanged. All accessors are thread-safe (internal sMenuLock) and
-// COPY OUT — no pointer into the menu blob ever escapes. See
-// LLM_GUIDED_MENU_SPEC §5. ChatParamOverride is from System_LLMChat.h.
-struct ChatParamOverride;
+// Command table + settings module are declared in System_LLMTypes.h (included
+// above) — they are defined in System_LLMCommands.cpp under the FEATURE flag,
+// and `const` needs that extern declaration in scope to get external linkage.
 
-// Menu generation counter — bumped on every model load and unload. A surface
-// caches it, and treats any change as "the menu may have changed, refetch".
-uint16_t llmMenuGeneration(void);
-
-// Number of guided-input groups (0 = this model has no menu; hide guided UI).
-uint8_t  llmMenuGroupCount(void);
-
-// Copied-out snapshot of one group's header (name + counts + flags).
-struct LLMMenuGroupInfo {
-  char     name[33];   // NUL-terminated (<=32 chars)
-  uint8_t  flags;      // bit0 = Do-mode
-  uint16_t tplCount;
-  uint16_t entCount;
-};
-bool llmMenuGroupInfo(uint8_t g, LLMMenuGroupInfo* out);
-
-// Copy the display form of template t in group g into buf (NUL-terminated). The
-// slot marker (0x1F) is rendered as "{}". *hasSlot (if non-null) reports whether
-// the template has an entity slot. Returns bytes written, or -1 on bad index.
-int  llmMenuTemplate(uint8_t g, uint16_t t, char* buf, size_t cap, bool* hasSlot);
-
-// Copy entity e of group g into buf (NUL-terminated). Returns bytes written, -1 bad index.
-int  llmMenuEntity(uint8_t g, uint16_t e, char* buf, size_t cap);
-
-// Compose the final question for (group g, template t, entity e) into buf. Pass
-// e = -1 for a slotless template. Returns composed length, or <0 on error
-// (-2 bad index, -3 no menu).
-int  llmMenuCompose(uint8_t g, uint16_t t, int e, char* buf, size_t cap);
-
-// Compose and submit a guided question to the chat pipeline. `gen` must match the
-// current menuGeneration (guards against composing against a swapped model).
-// Do-mode groups get the "do: " scaffold + hardCap=4/sentenceLimit=0 (suggestion
-// only — never auto-executed). Returns:
-//   >0 = chat session id;  0 = busy (generation in flight);
-//   -1 = stale generation;  -2 = bad index;  -3 = no menu.
-int  llmMenuAsk(uint16_t gen, uint8_t g, uint16_t t, int e, const ChatParamOverride* ov);
-
-// Re-ask the last guided question PLAIN (a fresh generation with NO suppress list
-// — chatRetryLast would ban the memorized-correct answer, which is wrong for a
-// guided ask). Same return codes as llmMenuAsk.
-int  llmMenuRepeatLast(void);
-
-// True iff a guided last-ask exists; *sessionOut (if non-null) receives its chat
-// session id. Retry branch (spec §5): guided-last -> llmMenuRepeatLast(), else ->
-// chatRetryLast(). Do NOT gate on chatGetSessionId() — it reads 0 the instant a
-// turn finishes, so post-completion the comparison always fails and wrongly falls
-// through to chatRetryLast (which bans the memorized-correct answer). A surface
-// that also accepts free-text tracks "was my last turn guided" locally and matches
-// this session id (OLED); a guided-only surface (G2 lens) branches on existence.
-bool llmMenuLastAskInfo(int* sessionOut);
-
-// Command table (registered with CommandSystem)
-struct CommandEntry;
-extern const CommandEntry llmCommands[];
-extern const size_t llmCommandsCount;
-
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_SOURCE_ONBOARD
 #endif // SYSTEM_LLM_H

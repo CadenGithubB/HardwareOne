@@ -153,7 +153,12 @@ def iter_initializers(body: str):
 # ============================================================================
 
 ARRAY_RE = re.compile(r"CommandEntry\s+(\w+)\s*\[\]\s*=\s*\{")
-NAME_RE = re.compile(r'\{\s*"([A-Za-z0-9_\-]+)"\s*,')
+# Command keys may contain spaces; the firmware's longest-prefix lookup uses
+# those rows for subcommands such as ``cm5 status``. Keep the generated
+# reference aligned with the actual registry instead of silently listing only
+# the single-token root row.
+NAME_RE = re.compile(
+    r'\{\s*"([A-Za-z0-9_\-]+(?: [A-Za-z0-9_\-]+)*)"\s*,')
 SUPER_RE = re.compile(r"requiresSuperAdmin\s*=\s*\*/\s*true")
 
 

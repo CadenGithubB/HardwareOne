@@ -347,7 +347,7 @@ void g2HealthApplyDailyBackfill(G2HealthMetric metric,
     s->hasBackfill = true;
     s->backfillAnchorMs = nowMs;
   }
-  DEBUG_G2F("[HEALTH] daily backfill metric=%u count=%u",
+  DEBUG_RING_HEALTHF("[HEALTH] daily backfill metric=%u count=%u",
             (unsigned)metric, (unsigned)count);
 }
 
@@ -402,7 +402,7 @@ void g2HealthApplyTrendDaily(G2HealthMetric metric,
   if (sNav == HEALTH_NAV_TRENDS && sSelected == metric) {
     g2HealthArmGraphPush(200);
   }
-  DEBUG_G2F("[HEALTH] trend daily metric=%u count=%u avg=%d",
+  DEBUG_RING_HEALTHF("[HEALTH] trend daily metric=%u count=%u avg=%d",
             (unsigned)metric, (unsigned)n, (int)meta->avg);
 }
 
@@ -578,8 +578,12 @@ static void applyActivityToDayLocked(const R1ActivityDailyResult& result) {
   R1HealthActivityDay& activity = sHistoryDay.activity;
   activity.sourceSerial = result.sourceSerial;
   activity.sourceCrc32 = result.sourceCrc32;
-  // The current parser proves only one bounded frame (<=35/144), not paging.
-  activity.fullDayVerified = false;
+  // The ring answers an activity-daily query with one logical message covering
+  // the whole day — small days fit a single notification, larger ones arrive
+  // fragmented and are stitched by the transport's reassembler. Either way the
+  // parse+CRC-validated result is the complete day (not one page of several),
+  // so it is honest to mark it verified.
+  activity.fullDayVerified = true;
   for (uint8_t i = 0; i < result.count; ++i) {
     const R1ActivityDailyRecord& src = result.records[i];
     R1HealthActivityBucket& dst = activity.slots[src.tenMinuteSlot];
@@ -1057,7 +1061,7 @@ void g2HealthOpen(void) {
   g2HealthClearGraphPush();
   syncFromTelemetry();
   if (!sLoggedHint && !healthLoggingIsActive()) {
-    DEBUG_G2F("[HEALTH] tip: tap Health Logging (or 'healthlogging on') to persist vitals");
+    DEBUG_G2_PAGESF("[HEALTH] tip: tap Health Logging (or 'healthlogging on') to persist vitals");
     sLoggedHint = true;
   }
 }
@@ -1102,7 +1106,7 @@ void g2HealthAction(uint32_t rowIdx) {
     switch (rowIdx) {
       case 0:
         leaveTrendsNav();
-        DEBUG_G2F("[HEALTH] Trends → main");
+        DEBUG_G2_PAGESF("[HEALTH] Trends → main");
         break;
       case 1:
         sSelected = HEALTH_METRIC_HR;
@@ -1123,7 +1127,7 @@ void g2HealthAction(uint32_t rowIdx) {
         sSelected = HEALTH_METRIC_OVERVIEW;
         g2HealthClearGraphPush();
         requestHistoryRefresh(false);
-        DEBUG_G2F("[HEALTH] Trends Refresh requested");
+        DEBUG_RING_HEALTHF("[HEALTH] Trends Refresh requested");
         break;
       default: break;
     }
@@ -1140,10 +1144,15 @@ void g2HealthAction(uint32_t rowIdx) {
     case 2:
       sSelected = HEALTH_METRIC_ACTIVITY;
       g2HealthClearGraphPush();
+      // Activity is fed by the typed daily-history sweep (kMetrics includes
+      // R1_CMD_ACTIVITY), NOT the live point-poll. Arm a refresh on select the
+      // same way the HR/HRV/SpO2 tabs do, so opening Activity actually fetches
+      // instead of sitting on a stale/empty history model forever.
+      requestHistoryRefresh(false);
       break;
     case 3:
       enterTrendsNav();
-      DEBUG_G2F("[HEALTH] → Trends");
+      DEBUG_G2_PAGESF("[HEALTH] → Trends");
       break;
     case 4:
       sSelected = HEALTH_METRIC_HR;
@@ -1170,11 +1179,16 @@ void g2HealthAction(uint32_t rowIdx) {
       break;
     case 9:
       sPollRequest = true;
-      DEBUG_G2F("[HEALTH] Poll Now requested");
+      // Poll Now is the user's explicit "refresh what I'm looking at". The live
+      // point-poll only feeds Overview/vitals; also arm the typed-history sweep
+      // so Poll Now can populate the Activity screen (and refresh trend graphs)
+      // rather than silently doing nothing on those views.
+      requestHistoryRefresh(false);
+      DEBUG_RING_HEALTHF("[HEALTH] Poll Now requested");
       break;
     case 10: {
       const char* r = healthLoggingSet(!gSettings.healthLoggingEnabled);
-      DEBUG_G2F("[HEALTH] Health Logging → %s", r ? r : "(null)");
+      DEBUG_G2_PAGESF("[HEALTH] Health Logging → %s", r ? r : "(null)");
       break;
     }
     default: break;
@@ -2039,10 +2053,31 @@ static void g2HealthBuildActivityText(char* out, size_t cap) {
   G2HealthHistorySummary history{};
   g2HealthHistoryGetSummary(history);
   if (!history.available || history.dayStart == 0) {
-    snprintf(out, cap,
-             "Activity\n"
-             "No typed history yet\n"
-             "Refresh after ring setup");
+    // Name the real blocker instead of the old misleading "ring setup" hint.
+    // Priority: not paired > fetch in flight > no wall clock (the day-key can
+    // never classify as EPOCH while host/ring are dark) > paired+clocked but
+    // nothing recorded yet.
+    if (!g2RingIsConnected()) {
+      snprintf(out, cap,
+               "Activity\n"
+               "Ring offline\n"
+               "Pair via BT / R1");
+    } else if (history.fetchState == R1_HISTORY_FETCHING) {
+      snprintf(out, cap,
+               "Activity\n"
+               "Fetching history...\n"
+               "Please wait");
+    } else if (!Clock::isValidEpoch(time(nullptr))) {
+      snprintf(out, cap,
+               "Activity\n"
+               "Device clock not set\n"
+               "Set time to log a day");
+    } else {
+      snprintf(out, cap,
+               "Activity\n"
+               "No activity yet today\n"
+               "Tap Poll Now");
+    }
     return;
   }
   const R1HealthActivitySummary& summary = history.activity;

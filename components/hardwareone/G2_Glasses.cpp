@@ -21,8 +21,12 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 #include <esp_gap_ble_api.h>  // esp_ble_gap_update_conn_params (HIGH priority)
+#include <esp_bt.h>
+#include <esp_bt_main.h>
 #include <esp_attr.h>         // EXT_RAM_BSS_ATTR
-#include <esp_heap_caps.h>    // heap_caps_get_free_size — ESP.getFreeHeap() includes PSRAM
+#include <esp_heap_caps.h>    // heap_caps_get_free_size — ESP.getFreeHeap() is
+                              // MALLOC_CAP_INTERNAL with no 8BIT, so it counts the
+                              // IRAM-only heap nothing can malloc from (not PSRAM).
 #include <esp_system.h>       // esp_random — boot-unique EvenAI exchange IDs
 #include <esp_timer.h>        // esp_timer_create/start_once — replaces notifyClearTaskBody
 
@@ -35,12 +39,14 @@
 #include "System_Utils.h"
 #include "System_Notifications.h"
 #include "System_MemUtil.h"
+#include "System_MemoryMonitor.h"   // checkMemoryAvailable() — g2client gate
 #include "System_VFS.h"
 #include "System_Mutex.h"       // FsLockGuard — serialize long-lived File handles
 #include "System_Battery.h"   // BatteryState + getBatteryPercentage etc — for ESP corner widget
 #include "System_Microphone.h"  // gMicRunning, micConnected, getAudioLevel, etc — for MIC detail page
 #include "HAL_Audio.h"          // audioGetSource/audioCaptureActive/audioCaptureStop — G2 as a mic source
 #include "System_UartLink.h"    // session-fenced EvenAI wake/cancel → CM5 host push
+#include "System_Cm5Presence.h" // authenticated CM5 daemon readiness lease
 #include "System_LiveAudio.h"   // exact recorder-shadow arm/abort fence
 #include "System_PollPause.h"   // PollPauseGuard — pause sensor polling during BLE connect/discovery
 #include "G2_HijackCmd.h"   // g2BumpMenuGen() — called from g2SetHijackPage
@@ -80,8 +86,9 @@ extern "C" {
 #include "i2csensor_pa1010d.h" // GPS running/fix state for the map status pane
 #endif
 #endif
-#if ENABLE_ONDEVICE_LLM
-#include "System_LLM.h"        // llmGetStatus / model load status for Select Model
+#if ENABLE_LLM_BACKEND
+#include "System_LLMBackend.h" // model registry — Select Model lists every source
+#include "System_LLMTypes.h"   // LLMStatus + the guided-menu API (stubbed with no engine)
 #include "System_LLMChat.h"    // chat turns + streaming reads for the read-only G2 LLM viewer
 #endif
 #include "System_Settings.h"
@@ -223,6 +230,8 @@ struct G2Temple {
   BLEAdvertisedDevice*         advertisedDevice;
   String                       deviceName;
   String                       deviceAddress;
+  uint8_t                      deviceAddressType;
+  bool                         deviceAddressTypeKnown;
   char                         firmwareVersion[32];
   uint16_t                     mtu;
   bool                         connected;
@@ -368,16 +377,20 @@ struct G2Temple {
 // pointed to directly because g2Connect/g2Disconnect take/return G2-
 // specific types) to the registry's plain function-pointer slots.
 static bool g2PeerConnectSavedThunk() { return g2ConnectSaved(); }
+static BlePeerConnectAdmission g2PeerConnectSavedAdmissionThunk(
+    const BlePeerConnectRequest& request);
+static bool g2PublishedPairConnected();
 static void g2PeerDisconnectThunk() {
-  blePeerNoteUserDisconnect(BLE_PEER_G2_GLASSES);
-  g2Disconnect();
+  g2Disconnect(/*userInitiated=*/true);
 }
-// Peer registry "linked" means both temples — auto-reseek if either drops.
-static bool g2PeerIsConnectedThunk()  { return g2BothConnected(); }
+// Scheduler "linked" means both temples have crossed final request/cancel CAS,
+// not merely that provisional GATT transports are up during session prelude.
+static bool g2PeerIsConnectedThunk()  { return g2PublishedPairConnected(); }
 static const BlePeerOps g2PeerOps = {
   g2PeerConnectSavedThunk,
   g2PeerDisconnectThunk,
   g2PeerIsConnectedThunk,
+  g2PeerConnectSavedAdmissionThunk,
 };
 static const BlePeerSpec g2PeerSpec = {
   BLE_PEER_G2_GLASSES,
@@ -394,6 +407,74 @@ static void registerG2Pages(void);
 
 static G2Temple gL;
 static G2Temple gR;
+
+// Linearizes each family's terminal success publication against user/lifecycle
+// cancellation and disconnect event publication. This is a fixed static mutex,
+// not a new task or stack allocation. Never hold it across a BLE/GATT method.
+static StaticSemaphore_t gG2CompletionMutexStorage;
+static SemaphoreHandle_t gG2CompletionMutex = nullptr;
+static portMUX_TYPE gG2CompletionInitMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t gG2PublishedTempleMask = 0;
+
+static SemaphoreHandle_t g2CompletionMutex() {
+  portENTER_CRITICAL(&gG2CompletionInitMux);
+  if (!gG2CompletionMutex) {
+    gG2CompletionMutex =
+        xSemaphoreCreateRecursiveMutexStatic(&gG2CompletionMutexStorage);
+  }
+  SemaphoreHandle_t mutex = gG2CompletionMutex;
+  portEXIT_CRITICAL(&gG2CompletionInitMux);
+  return mutex;
+}
+
+class G2CompletionGuard {
+ public:
+  explicit G2CompletionGuard(TickType_t wait = portMAX_DELAY) {
+    SemaphoreHandle_t mutex = g2CompletionMutex();
+    locked_ = mutex && xSemaphoreTakeRecursive(mutex, wait) == pdTRUE;
+  }
+  ~G2CompletionGuard() {
+    if (locked_) xSemaphoreGiveRecursive(gG2CompletionMutex);
+  }
+  explicit operator bool() const { return locked_; }
+ private:
+  bool locked_ = false;
+};
+
+static bool g2PublishedPairConnected() {
+  G2CompletionGuard completion;
+  return completion && (gG2PublishedTempleMask & 0x03) == 0x03;
+}
+
+// The BLE host callback and the central worker both mutate link topology.
+// Keep the coordinator's decisions coherent without holding a lock across any
+// BLE call. Characteristic/client pointers remain owned by their established
+// TX/lifecycle barriers; this lock is deliberately only the cheap topology
+// snapshot (flags + connection generations).
+static portMUX_TYPE gTopologyMux = portMUX_INITIALIZER_UNLOCKED;
+struct G2LinkSnapshot {
+  bool left;
+  bool right;
+  uint32_t leftGeneration;
+  uint32_t rightGeneration;
+};
+
+static G2LinkSnapshot g2LinkSnapshot() {
+  G2LinkSnapshot out{};
+  portENTER_CRITICAL(&gTopologyMux);
+  out.left = gL.connected;
+  out.right = gR.connected;
+  out.leftGeneration = gL.connectionGeneration;
+  out.rightGeneration = gR.connectionGeneration;
+  portEXIT_CRITICAL(&gTopologyMux);
+  return out;
+}
+
+static void g2SetTempleConnected(G2Temple& temple, bool connected) {
+  portENTER_CRITICAL(&gTopologyMux);
+  temple.connected = connected;
+  portEXIT_CRITICAL(&gTopologyMux);
+}
 
 // =============================================================================
 // Frame ring buffer — post-mortem debugging
@@ -574,6 +655,126 @@ static BLEScan*       gScan    = nullptr;
 // Bluedroid's BLEScan has no isScanning() (NimBLE does); we skip a redundant
 // stop() at the end of the poll loop to avoid "scan not active" errors.
 static volatile bool gG2ScanStoppedEarly = false;
+static portMUX_TYPE gG2ScanCallbackMux = portMUX_INITIALIZER_UNLOCKED;
+static bool gG2ScanCallbackAdmission = false;
+static uint16_t gG2ScanCallbacksInFlight = 0;
+static uint32_t gG2ScanEpoch = 0;
+static bool gG2ScanCallbackQuarantined = false;
+// Immutable scan request copied into each callback claim. These live here so
+// an old callback never reads filters/target that a later scan replaced.
+static char gG2FilterMacL[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+static char gG2FilterMacR[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+static char gG2FallbackMacL[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+static char gG2FallbackMacR[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+static G2Eye gConnectTarget = G2_EYE_AUTO;
+
+class G2ScanCallbackClaim {
+ public:
+  G2ScanCallbackClaim() {
+    portENTER_CRITICAL(&gG2ScanCallbackMux);
+    if (gG2ScanCallbackAdmission && !gG2ScanCallbackQuarantined &&
+        gG2ScanCallbacksInFlight < UINT16_MAX) {
+      ++gG2ScanCallbacksInFlight;
+      held_ = true;
+      epoch_ = gG2ScanEpoch;
+      target_ = gConnectTarget;
+      memcpy(filterL_, gG2FilterMacL, sizeof(filterL_));
+      memcpy(filterR_, gG2FilterMacR, sizeof(filterR_));
+      memcpy(fallbackL_, gG2FallbackMacL, sizeof(fallbackL_));
+      memcpy(fallbackR_, gG2FallbackMacR, sizeof(fallbackR_));
+    }
+    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  }
+  ~G2ScanCallbackClaim() {
+    if (!held_) return;
+    portENTER_CRITICAL(&gG2ScanCallbackMux);
+    if (gG2ScanCallbacksInFlight > 0) --gG2ScanCallbacksInFlight;
+    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  }
+  explicit operator bool() const { return held_; }
+  bool current() const {
+    if (!held_) return false;
+    portENTER_CRITICAL(&gG2ScanCallbackMux);
+    const bool value = gG2ScanCallbackAdmission &&
+        !gG2ScanCallbackQuarantined && epoch_ == gG2ScanEpoch;
+    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+    return value;
+  }
+  const char* filterL() const { return filterL_; }
+  const char* filterR() const { return filterR_; }
+  const char* fallbackL() const { return fallbackL_; }
+  const char* fallbackR() const { return fallbackR_; }
+  G2Eye target() const { return target_; }
+ private:
+  bool held_ = false;
+  uint32_t epoch_ = 0;
+  G2Eye target_ = G2_EYE_AUTO;
+  char filterL_[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+  char filterR_[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+  char fallbackL_[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+  char fallbackR_[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+};
+
+static uint32_t g2ScanCallbackBegin() {
+  if (bleStackLifecycleFaulted()) return 0;
+  portENTER_CRITICAL(&gG2ScanCallbackMux);
+  if (gG2ScanCallbackQuarantined || gG2ScanCallbackAdmission ||
+      gG2ScanCallbacksInFlight != 0) {
+    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+    return 0;
+  }
+  ++gG2ScanEpoch;
+  if (gG2ScanEpoch == 0) gG2ScanEpoch = 1;
+  gG2ScanCallbackAdmission = true;
+  const uint32_t epoch = gG2ScanEpoch;
+  portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  return epoch;
+}
+
+static bool g2ScanCallbackResetAfterHostInit() {
+  portENTER_CRITICAL(&gG2ScanCallbackMux);
+  if (gG2ScanCallbacksInFlight != 0) {
+    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+    return false;
+  }
+  ++gG2ScanEpoch;
+  if (gG2ScanEpoch == 0) gG2ScanEpoch = 1;
+  gG2ScanCallbackAdmission = false;
+  gG2ScanCallbackQuarantined = false;
+  portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  return true;
+}
+
+static bool g2ScanCallbackEnd(uint32_t epoch, uint32_t timeoutMs = 500) {
+  if (epoch == 0) return false;
+  portENTER_CRITICAL(&gG2ScanCallbackMux);
+  if (gG2ScanEpoch == epoch) gG2ScanCallbackAdmission = false;
+  portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  const uint32_t deadline = millis() + timeoutMs;
+  for (;;) {
+    portENTER_CRITICAL(&gG2ScanCallbackMux);
+    const bool idle = gG2ScanCallbacksInFlight == 0;
+    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+    if (idle) return true;
+    if ((int32_t)(millis() - deadline) >= 0) {
+      portENTER_CRITICAL(&gG2ScanCallbackMux);
+      gG2ScanCallbackQuarantined = true;
+      portEXIT_CRITICAL(&gG2ScanCallbackMux);
+      // Do not dispatch another central job or free callback-owned objects.
+      // Recovery now requires the checked full host teardown path.
+      bleStackSetLifecycleFault(true);
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
+static bool g2ScanCallbacksIdle() {
+  portENTER_CRITICAL(&gG2ScanCallbackMux);
+  const bool idle = !gG2ScanCallbackAdmission && gG2ScanCallbacksInFlight == 0;
+  portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  return idle;
+}
 
 // G2ScanCallbacks may call stop() when all required temples are found early.
 // Calling stop() again after the poll loop triggers Bluedroid noise:
@@ -599,8 +800,6 @@ static portMUX_TYPE   gSeqMux = portMUX_INITIALIZER_UNLOCKED;
 // Magic allocator — effectively u8. Wrap at 0xFF → 1 (avoid 0).
 static uint8_t        gNextMagic = 1;
 
-// Scan target during g2Connect.
-static G2Eye          gConnectTarget = G2_EYE_AUTO;
 static volatile bool  gScanFoundL = false;
 static volatile bool  gScanFoundR = false;
 
@@ -627,6 +826,57 @@ extern volatile bool        gRingScanFound;
 // each transient task — there's no per-call task to track now.
 static volatile bool  gConnectTaskActive = false;
 static volatile bool  gConnectCancel     = false;
+static portMUX_TYPE    gConnectAdmissionMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t gBleConnectCancelEpoch = 1;
+static bool g2ManualConnectAdmissionOpen();
+
+static bool g2ConnectClaim(uint32_t* cancelEpochOut = nullptr) {
+  if (!g2ManualConnectAdmissionOpen()) return false;
+  bool claimed = false;
+  portENTER_CRITICAL(&gConnectAdmissionMux);
+  if (!gConnectTaskActive) {
+    // Claim, clear the prior cancel, and bind the job epoch as one transaction.
+    // A disconnect either advances after this (making the job stale) or before
+    // this (so a genuinely newer manual request may proceed); it can no longer
+    // land between claim and a later cancel reset.
+    gConnectTaskActive = true;
+    gConnectCancel = false;
+    if (cancelEpochOut) *cancelEpochOut = gBleConnectCancelEpoch;
+    claimed = true;
+  }
+  portEXIT_CRITICAL(&gConnectAdmissionMux);
+  return claimed;
+}
+
+static void g2ConnectRelease() {
+  portENTER_CRITICAL(&gConnectAdmissionMux);
+  gConnectTaskActive = false;
+  portEXIT_CRITICAL(&gConnectAdmissionMux);
+}
+
+static uint32_t bleConnectCancelEpochSnapshot() {
+  portENTER_CRITICAL(&gConnectAdmissionMux);
+  const uint32_t epoch = gBleConnectCancelEpoch;
+  portEXIT_CRITICAL(&gConnectAdmissionMux);
+  return epoch;
+}
+
+static bool bleConnectCancelPendingSnapshot() {
+  portENTER_CRITICAL(&gConnectAdmissionMux);
+  const bool pending = gConnectCancel;
+  portEXIT_CRITICAL(&gConnectAdmissionMux);
+  return pending;
+}
+
+static uint32_t bleConnectCancelAdvance() {
+  portENTER_CRITICAL(&gConnectAdmissionMux);
+  gBleConnectCancelEpoch = gBleConnectCancelEpoch + 1;
+  if (gBleConnectCancelEpoch == 0) gBleConnectCancelEpoch = 1;
+  gConnectCancel = true;
+  const uint32_t epoch = gBleConnectCancelEpoch;
+  portEXIT_CRITICAL(&gConnectAdmissionMux);
+  return epoch;
+}
 
 // Event callback registered by the caller.
 static G2EventCallback gEventCallback = nullptr;
@@ -740,13 +990,44 @@ static inline bool g2FsmPageSwapping() {
 // gestures, and at the end of every page-swap.
 static uint32_t gHijackStartedMs = 0;
 
-// Page-swap-worker lifecycle. begin/end are paired with xTaskCreate; the
-// xTaskCreate-failure path also calls pageSwapEnd to release the guard.
-static inline void pageSwapBegin() {
+// Monotonic identity of the presentation the firmware has actually accepted.
+// Tap/nav entries snapshot it at enqueue time and the dispatcher rejects an
+// entry after a later CREATE/REBUILD ack or container teardown. This prevents
+// an old row index from being interpreted against a newly displayed page.
+static volatile uint32_t gPresentationEpoch = 1;
+static inline uint32_t g2PresentationEpochCurrent() {
+  return __atomic_load_n(&gPresentationEpoch, __ATOMIC_ACQUIRE);
+}
+static inline void g2PresentationEpochAdvance() {
+  uint32_t next = __atomic_add_fetch(&gPresentationEpoch, 1, __ATOMIC_ACQ_REL);
+  if (next == 0) {
+    // Keep zero reserved for zero-initialized/unstamped work.
+    __atomic_add_fetch(&gPresentationEpoch, 1, __ATOMIC_ACQ_REL);
+  }
+}
+
+// The FSM worker applies PageSwapBegin asynchronously, so reading only its
+// state leaves a small admission window where two producers can both start a
+// swap. Claim synchronously before enqueueing, then mirror the transition to
+// the FSM for the rest of the lens state model.
+static volatile uint8_t gPageSwapAdmission = 0;
+
+// Page-swap-worker lifecycle. begin/end are paired with a successfully queued
+// PageSwap job; the enqueue-failure path calls pageSwapCancel to release the
+// synchronous admission claim without recording a successful presentation.
+static inline bool pageSwapBegin() {
+  uint8_t expected = 0;
+  if (!__atomic_compare_exchange_n(&gPageSwapAdmission, &expected, 1,
+                                   false, __ATOMIC_ACQ_REL,
+                                   __ATOMIC_ACQUIRE)) {
+    return false;
+  }
   hijackFsmDispatch(HijackEvent::PageSwapBegin, "pageSwapBegin");
+  return true;
 }
 static inline void pageSwapEnd() {
   hijackFsmDispatch(HijackEvent::PageSwapEnd, "pageSwapEnd");
+  __atomic_store_n(&gPageSwapAdmission, 0, __ATOMIC_RELEASE);
   // Refresh the hijack safety-timer baseline. Without this, the 60 s
   // HIJACK_SAFETY_MS window measures from the *first* MenuStartUp hijack,
   // so a user who taps a row → reads the new page for 60 s gets a
@@ -755,26 +1036,41 @@ static inline void pageSwapEnd() {
   // the timer measures time on the current page.
   gHijackStartedMs = millis();
 }
-static inline bool pageSwapInFlight() { return g2FsmPageSwapping(); }
+static inline void pageSwapFail(const char* source) {
+  g2PresentationEpochAdvance();
+  hijackFsmDispatch(HijackEvent::HijackExit,
+                    source ? source : "pageSwapFail");
+  __atomic_store_n(&gPageSwapAdmission, 0, __ATOMIC_RELEASE);
+}
+static inline void pageSwapCancel() {
+  hijackFsmDispatch(HijackEvent::PageSwapEnd, "pageSwapCancel");
+  __atomic_store_n(&gPageSwapAdmission, 0, __ATOMIC_RELEASE);
+}
+static inline bool pageSwapInFlight() {
+  return __atomic_load_n(&gPageSwapAdmission, __ATOMIC_ACQUIRE) != 0 ||
+         g2FsmPageSwapping();
+}
+
+enum class G2WorkerInitState : uint8_t {
+  Uninitialized,
+  Starting,
+  Ready,
+};
 
 // Forward decl — defined further down with the persistent page-swap worker
-// infrastructure. Created lazily on first page/lens job enqueue.
-static void pageSwapInit();
+// infrastructure. Initialization is attempted eagerly by initG2Client and
+// remains retryable from producers if early allocation fails.
+static bool pageSwapInit();
 
-// Forward decls — tap dispatcher. Defers handleHijackMenuTap() AND the
-// "Hijack tap: …" BROADCAST_PRINTF off the Bluedroid notify-task stack
-// onto a persistent worker. Two reasons this matters:
-//   1. BTC_TASK has a small stack (~3-4 KB). Running vsnprintf-heavy
-//      BROADCAST_PRINTF + handleHijackMenuTap (which alloc + spawn page
-//      swaps) inline pushes BTC over its canary — observed 2026-05-03 as
-//      a "stack overflow in task BTC_TASK" panic on the first hijack tap.
-//   2. handleHijackMenuTap → g2ShowTextAsList does heap allocations +
-//      enqueues page-swap work; doing that inside Bluedroid spinlock
-//      context risks reentrant spinlock acquires.
-// Mirrors the page-swap and hijack-FSM queue-worker patterns.
-static void tapDispatcherInit();
+// Forward decls — tap dispatcher. BLE callbacks only copy packets into the RX
+// ring now; g2_ctrl_owner parses them and produces tap/nav/exit work. The
+// dispatcher keeps deep UI, filesystem, formatting, and settings paths off
+// that 6144-byte control/ACK-owner stack. It also ensures the task that must
+// decode CREATE/REBUILD responses never waits for those responses itself.
+static bool tapDispatcherInit();
 static bool tapDispatcherEnqueue(uint32_t idx, const char* iname);
 static bool tapDispatcherEnqueueExit(void (*fn)());
+static bool tapDispatcherEnqueueNav(G2TapFn fn, G2TapKind kind);
 
 // Echo-guard stamp for intentional Cmd=9 sends. clearOurShutdownStamp is
 // called in the worker cleanup so the window doesn't bleed into unrelated
@@ -1011,16 +1307,19 @@ static bool g2SettingsAckSnapshot(uint8_t* inner, uint8_t* leaf,
 // g2-kit-unofficial/ble/docs/gotchas.md ("Left arm is silent on async
 // events ... Don't waste time looking for a config bit"). When this is
 // true, the heartbeat-miss → pluginDead heuristic is fundamentally
-// inapplicable to L: every L heartbeat will go unacked because the
-// firmware doesn't reply, not because the plugin task is hung. Treat
-// "no L notify" as steady-state, not a fault.
+// inapplicable to L: acknowledgements for both heartbeats arrive through the
+// RIGHT callback, so L's per-temple counter can never be cleared. Treat "no L
+// notify" as steady-state, not a fault.
 //
-// Empty version → assume affected (only firmware in our hardware
-// coverage is 2.2.0.24). Once a version push lands and proves we're on
-// a different firmware, the heuristic resumes for L.
+// Empty version → assume affected until the RIGHT temple reports a version.
+// Keep this an exact compatibility allowlist: a blanket L exemption would
+// hide a genuinely hung left plugin if a future firmware restores per-temple
+// notification routing. Hardware captures have confirmed right-only routing
+// on both versions below.
 static bool firmwareSilencesLeftNotify() {
   if (gFwVersion[0] == '\0') return true;
   if (strcmp(gFwVersion, "2.2.0.24") == 0) return true;
+  if (strcmp(gFwVersion, "2.2.7.14") == 0) return true;
   return false;
 }
 
@@ -1176,7 +1475,7 @@ static volatile uint32_t gHealthPageGen        = 0;
 // can accelerate the firmware "connection lost" teardown).
 static volatile bool     gHealthTextDead       = false;
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
 // Read-only LLM viewer (g2LlmPageWorker) — same list-tap-bitfield + active
 // gate pattern as the map/camera self-driving workers. Defined near the top
 // so the BLE dispatcher (lstLlm branch) sees them before use.
@@ -1238,17 +1537,11 @@ static SemaphoreHandle_t gRebuildAckSem      = nullptr;
 static volatile uint8_t  gExpectRebuildMagic = 0;
 static volatile bool     gRebuildOk          = false;
 
-// BLE notify task handle — captured on first handleNotify() call.
-// Used by G2_ASSERT_NOT_NOTIFY_TASK to detect deadlock-prone callers
-// of the sendCreate*AndWait / sendRebuild*AndWait family. Those
-// helpers wait on a semaphore signaled BY this task; calling them
-// from this task itself guarantees the wait times out (1.5 s) and
-// the on-wire CREATE/REBUILD never gets a follow-up. We hit exactly
-// this with g2StartLiveTextPage / Status; the assertion catches the
-// regression class at the call site instead of at the timeout.
-//
-// Cleared if BLE drops + reconnects on a different task; in practice
-// the notify task is bound at Bluedroid init and never moves.
+// BLE callback-task handle — captured defensively on first notification. The
+// callback now only copies into the RX ring; g2_ctrl_owner parses responses
+// and gives the CREATE/REBUILD semaphores. Sync-wait guards reject both tasks:
+// blocking the owner is a direct self-deadlock, while blocking the callback
+// can prevent the response from reaching the owner in the first place.
 static TaskHandle_t       gBleNotifyTaskHandle = nullptr;
 
 // Forward declarations for live-list page primitive (defined further
@@ -1324,7 +1617,25 @@ static volatile unsigned gImgPushAcked     = 0;
 // range but not accepting connections wedged the stack. Every attempt after
 // that refused in 15 ms and the device needed a reboot to talk BLE again.
 static const uint32_t kBleInstantFailMs = 250;
+static const uint8_t  kBleWedgeStreakTrip = 2;
 static volatile uint8_t gBleWedgeStreak = 0;
+// A client whose accepted APP_REGISTER/UNREGISTER never delivered its
+// retirement event cannot be reused or freed while Bluedroid may still route
+// callbacks to it. Unlike the ordinary cancel wedge, leaving another link up
+// would also prevent terminal teardown forever and permit one quarantined
+// client per retry. This flag requests a controlled whole-client-role recycle
+// as soon as the shared worker is idle, even if a sibling link survived.
+static volatile uint8_t gBleClientRetirementPeerMask = 0;
+struct BleRetiredClientSlot {
+  BLEClient* client = nullptr;
+  uint32_t sinceMs = 0;
+  uint8_t peerKind = 0;
+  bool reaping = false;
+};
+static BleRetiredClientSlot
+    gBleRetiredClients[BLE_CLIENT_RETIRE_SLOT_COUNT];
+static portMUX_TYPE gBleRetiredClientMux = portMUX_INITIALIZER_UNLOCKED;
+static const uint32_t kBleRetirementGraceMs = 3000;
 
 // Worker-level busy flag spanning EVERY connect job kind — the per-family
 // flags (gConnectTaskActive, the ring's own) each cover only their own jobs,
@@ -1337,19 +1648,46 @@ static volatile bool gBleConnectJobActive = false;
 // True only when the worker is between jobs AND nothing is queued behind it.
 // Defined in the worker section (needs gBleConnectQueue).
 static bool bleConnectWorkerIdle(void);
+static void bleConnectPreemptForG2Repair(void);
 
 uint8_t bleStackWedgeStreak(void) { return gBleWedgeStreak; }
 
-void bleNoteConnectOutcome(bool ok, uint32_t elapsedMs, const char* logTag) {
+static void bleClassifyConnectOutcome(const BLEClientConnectOutcome* detail,
+                                      bool ok, uint32_t elapsedMs,
+                                      const char* logTag) {
   if (!logTag) logTag = "BLE";
 
   if (ok) {
     // A real link proves the stack is healthy, whatever came before it.
-    gBleWedgeStreak = 0;
+    // It does not, however, retire a different client's lost native app route.
+    if (gBleClientRetirementPeerMask == 0) gBleWedgeStreak = 0;
     return;
   }
 
-  if (elapsedMs < kBleInstantFailMs) {
+  bool hostRefusalEvidence = elapsedMs < kBleInstantFailMs;
+  if (detail) {
+    BROADCAST_PRINTF("[%s] connect result stage=%s elapsed=%lums "
+                     "esp=%ld gatt=0x%04lx unreg=%s(%ld/%lums)",
+                     logTag,
+                     BLEClient::connectStageToString(detail->stage),
+                     (unsigned long)elapsedMs,
+                     (long)detail->espStatus,
+                     (unsigned long)(uint32_t)detail->gattStatus,
+                     BLEClient::unregisterStateToString(detail->unregisterState),
+                     (long)detail->unregisterEspStatus,
+                     (unsigned long)detail->unregisterElapsedMs);
+    // Registration/precheck failures are application/resource problems, not
+    // evidence that Bluedroid's global create-connection admission is wedged.
+    hostRefusalEvidence = hostRefusalEvidence &&
+        (detail->stage == BLEClientConnectStage::OPEN_API ||
+         detail->stage == BLEClientConnectStage::OPEN_EVENT);
+    if (detail->unregisterState == BLEClientUnregisterState::REQUEST_FAILED ||
+        detail->unregisterState == BLEClientUnregisterState::COMPLETION_TIMEOUT) {
+      hostRefusalEvidence = true;
+    }
+  }
+
+  if (hostRefusalEvidence) {
     if (gBleWedgeStreak < 255) gBleWedgeStreak++;
     BROADCAST_PRINTF("[%s] Connect REFUSED by BLE stack in %lu ms (streak %u) — "
                      "stale link record, not an RF problem",
@@ -1363,12 +1701,183 @@ void bleNoteConnectOutcome(bool ok, uint32_t elapsedMs, const char* logTag) {
   // second failure would keep the streak pinned at 1 forever.
 }
 
+void bleNoteConnectOutcome(bool ok, uint32_t elapsedMs, const char* logTag) {
+  bleClassifyConnectOutcome(nullptr, ok, elapsedMs, logTag);
+}
+
+void bleNoteClientConnectOutcome(BLEClient* client, bool ok,
+                                 uint32_t elapsedMs, const char* logTag) {
+  if (!client) {
+    bleClassifyConnectOutcome(nullptr, ok, elapsedMs, logTag);
+    return;
+  }
+  const BLEClientConnectOutcome detail = client->getLastConnectOutcome();
+  bleClassifyConnectOutcome(&detail, ok, elapsedMs, logTag);
+}
+
+static void bleRecomputeRetirementMaskLocked() {
+  uint8_t mask = 0;
+  for (const BleRetiredClientSlot& slot : gBleRetiredClients) {
+    if (slot.client && slot.peerKind < 8) {
+      mask |= (uint8_t)(1U << slot.peerKind);
+    }
+  }
+  gBleClientRetirementPeerMask = mask;
+}
+
+bool bleRetireClientForReplacement(BLEClient*& client,
+                                   uint8_t retirementSlot,
+                                   uint8_t peerKind,
+                                   const char* logTag) {
+  if (!client) return true;
+  if (!logTag) logTag = "BLE";
+
+  BLEClient* retired = client;
+  client = nullptr;
+  retired->setClientCallbacks(nullptr);
+  if (BLEDevice::deleteClient(retired)) {
+    DEBUG_G2F("[%s] BLE client safely retired", logTag);
+    return true;
+  }
+
+  if (retirementSlot >= BLE_CLIENT_RETIRE_SLOT_COUNT || peerKind >= 8) {
+    // No bounded ownership slot exists. Restore the app pointer so the caller
+    // cannot allocate behind an object which may still receive callbacks.
+    client = retired;
+    BROADCAST_PRINTF("[%s] BLE client retirement slot invalid — replacement blocked",
+                     logTag);
+    return false;
+  }
+
+  bool stored = false;
+  const uint32_t retirementStartedMs = millis();
+  portENTER_CRITICAL(&gBleRetiredClientMux);
+  BleRetiredClientSlot& slot = gBleRetiredClients[retirementSlot];
+  if (!slot.client || slot.client == retired) {
+    slot.client = retired;
+    slot.peerKind = peerKind;
+    slot.sinceMs = retirementStartedMs;
+    slot.reaping = false;
+    bleRecomputeRetirementMaskLocked();
+    stored = true;
+  }
+  portEXIT_CRITICAL(&gBleRetiredClientMux);
+
+  if (!stored) {
+    // The fixed slot is already protecting an older native route. Keep this
+    // pointer in its app owner and fail the admission; never create a fourth
+    // untracked retirement lane.
+    client = retired;
+    BROADCAST_PRINTF("[%s] BLE retirement slot busy — replacement blocked",
+                     logTag);
+    return false;
+  }
+  BROADCAST_PRINTF("[%s] BLE client retirement deferred; replacement blocked",
+                   logTag);
+  return false;
+}
+
+static uint32_t bleReapRetiredClients() {
+  const uint32_t now = millis();
+  for (uint8_t i = 0; i < BLE_CLIENT_RETIRE_SLOT_COUNT; ++i) {
+    BLEClient* candidate = nullptr;
+    portENTER_CRITICAL(&gBleRetiredClientMux);
+    BleRetiredClientSlot& slot = gBleRetiredClients[i];
+    if (slot.client && !slot.reaping) {
+      slot.reaping = true;
+      candidate = slot.client;
+    }
+    portEXIT_CRITICAL(&gBleRetiredClientMux);
+    if (!candidate) continue;
+
+    const bool deleted = BLEDevice::deleteClient(candidate);
+    portENTER_CRITICAL(&gBleRetiredClientMux);
+    BleRetiredClientSlot& finished = gBleRetiredClients[i];
+    if (finished.client == candidate) {
+      if (deleted) finished = BleRetiredClientSlot{};
+      else finished.reaping = false;
+    }
+    bleRecomputeRetirementMaskLocked();
+    portEXIT_CRITICAL(&gBleRetiredClientMux);
+    if (deleted) DEBUG_G2F("[BLE] Deferred client retirement completed (slot=%u)",
+                           (unsigned)i);
+  }
+
+  uint32_t oldestAge = 0;
+  portENTER_CRITICAL(&gBleRetiredClientMux);
+  for (const BleRetiredClientSlot& slot : gBleRetiredClients) {
+    if (slot.client) {
+      const uint32_t age = now - slot.sinceMs;
+      if (age > oldestAge) oldestAge = age;
+    }
+  }
+  portEXIT_CRITICAL(&gBleRetiredClientMux);
+  return oldestAge;
+}
+
+void bleCentralClientsTerminalTeardownAcknowledged() {
+  portENTER_CRITICAL(&gBleRetiredClientMux);
+  for (BleRetiredClientSlot& slot : gBleRetiredClients) {
+    slot = BleRetiredClientSlot{};
+  }
+  gBleClientRetirementPeerMask = 0;
+  portEXIT_CRITICAL(&gBleRetiredClientMux);
+  gBleWedgeStreak = 0;
+}
+
+bool bleQuarantineClientAfterFailedConnect(BLEClient*& client,
+                                           uint8_t retirementSlot,
+                                           uint8_t peerKind,
+                                           const char* logTag) {
+  if (!client) return false;
+
+  const BLEClientConnectOutcome outcome = client->getLastConnectOutcome();
+  if (outcome.success) return false;
+
+  const bool registrationTimedOut =
+      outcome.stage == BLEClientConnectStage::APP_REGISTER_TIMEOUT;
+  const bool stalePrecheck =
+      outcome.stage == BLEClientConnectStage::PRECHECK &&
+      outcome.espStatus == ESP_ERR_INVALID_STATE;
+  const bool unregisterOutstanding =
+      outcome.unregisterState == BLEClientUnregisterState::REQUESTED ||
+      outcome.unregisterState == BLEClientUnregisterState::REQUEST_FAILED ||
+      outcome.unregisterState == BLEClientUnregisterState::COMPLETION_TIMEOUT;
+
+  // Ordinary RF/open failures whose GATTC application retired cleanly can
+  // safely reuse the client. The cases below cannot: connect() will reject
+  // them at PRECHECK while the old app-id route remains live. APP_REG timeout
+  // is included even if its late REG/UNREG happened to retire between our
+  // snapshots; a fresh object avoids reusing its stale registration semaphore.
+  if (!registrationTimedOut && !stalePrecheck && !unregisterOutstanding) {
+    return false;
+  }
+
+  if (!logTag) logTag = "BLE";
+  const bool deleted = bleRetireClientForReplacement(
+      client, retirementSlot, peerKind, logTag);
+
+  // Missing APP_REG/UNREG completion is host-local, not an RF miss. One such
+  // loss is sufficient to request the same checked/rate-limited host recycle
+  // used for the two-refusal fingerprint. If the native route cannot already
+  // be retired, the checked recycle deliberately restores the whole central
+  // role instead of allocating another client behind a permanently live one.
+  if (gBleWedgeStreak < kBleWedgeStreakTrip) {
+    gBleWedgeStreak = kBleWedgeStreakTrip;
+  }
+  BROADCAST_PRINTF("[%s] BLE client %s after %s; host recycle armed when safe",
+                   logTag,
+                   deleted ? "retired" : "quarantined",
+                   BLEClient::connectStageToString(outcome.stage));
+  return true;
+}
+
 bool bleConnectWatched(BLEClient* client, BLEAdvertisedDevice* dev,
                        uint32_t timeoutMs, const char* logTag) {
   if (!client || !dev) return false;
   const uint32_t t0 = millis();
   const bool ok = client->connectTimeout(dev, timeoutMs);
-  bleNoteConnectOutcome(ok, millis() - t0, logTag);
+  bleNoteClientConnectOutcome(client, ok, millis() - t0, logTag);
   return ok;
 }
 
@@ -1627,11 +2136,30 @@ static bool gG2ScanVerbose = true;
 // a recognizable name we can still reconnect to a previously paired pair.
 // Cleared by g2ConnectSavedSync after each use so subsequent normal scans
 // (pairing path) use the name-based behavior.
-static String gG2FilterMacL = "";
-static String gG2FilterMacR = "";
+static void copyBleAddressText(char (&dst)[BLE_PEER_ADDRESS_TEXT_CAPACITY],
+                               const char* src) {
+  memset(dst, 0, sizeof(dst));
+  if (!src) return;
+  strncpy(dst, src, sizeof(dst) - 1);
+}
 
-static bool macEqualsIgnoreCase(const String& a, const String& b) {
-  if (a.length() == 0 || b.length() != a.length()) return false;
+static void g2ScanSetMacContext(const char* filterL, const char* filterR,
+                                const char* fallbackL = nullptr,
+                                const char* fallbackR = nullptr) {
+  copyBleAddressText(gG2FilterMacL, filterL);
+  copyBleAddressText(gG2FilterMacR, filterR);
+  copyBleAddressText(gG2FallbackMacL, fallbackL);
+  copyBleAddressText(gG2FallbackMacR, fallbackR);
+}
+
+static void g2ScanClearMacContext() {
+  g2ScanSetMacContext(nullptr, nullptr, nullptr, nullptr);
+}
+
+static bool macEqualsIgnoreCase(const String& a, const char* b) {
+  if (!b || a.length() == 0) return false;
+  const size_t bLen = strlen(b);
+  if (bLen != a.length()) return false;
   for (size_t i = 0; i < a.length(); i++) {
     char ca = a[i], cb = b[i];
     if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
@@ -1641,8 +2169,26 @@ static bool macEqualsIgnoreCase(const String& a, const String& b) {
   return true;
 }
 
+static bool templeMatchesSavedTarget(const G2Temple& temple,
+                                     const char* expectedMac,
+                                     uint8_t expectedAddressType,
+                                     bool expectedAddressTypeKnown) {
+  if (!temple.connected || !expectedMac || !expectedMac[0] ||
+      !macEqualsIgnoreCase(temple.deviceAddress, expectedMac)) {
+    return false;
+  }
+  if (expectedAddressTypeKnown &&
+      (!temple.deviceAddressTypeKnown ||
+       temple.deviceAddressType != expectedAddressType)) {
+    return false;
+  }
+  return true;
+}
+
 class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) override {
+    G2ScanCallbackClaim callbackClaim;
+    if (!callbackClaim || !callbackClaim.current()) return;
     const bool hasName = advertisedDevice.haveName();
     String name = hasName ? String(advertisedDevice.getName().c_str()) : String();
     char side = hasName ? classifyG2Name(name) : 0;
@@ -1652,10 +2198,10 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
     // We trust the saved MAC over the advertised name in case the firmware
     // uses a different name across reboots (observed: name format changes
     // between firmware versions).
-    if (gG2FilterMacL.length() > 0 || gG2FilterMacR.length() > 0) {
+    if (callbackClaim.filterL()[0] || callbackClaim.filterR()[0]) {
       String addr = advertisedDevice.getAddress().toString().c_str();
-      if      (macEqualsIgnoreCase(addr, gG2FilterMacL)) { side = 'L'; isRing = false; }
-      else if (macEqualsIgnoreCase(addr, gG2FilterMacR)) { side = 'R'; isRing = false; }
+      if      (macEqualsIgnoreCase(addr, callbackClaim.filterL())) { side = 'L'; isRing = false; }
+      else if (macEqualsIgnoreCase(addr, callbackClaim.filterR())) { side = 'R'; isRing = false; }
       else                                                { side = 0; /* preserve isRing — the
                                                                  saved-MAC filter is for
                                                                  G2 temple matching only;
@@ -1671,14 +2217,13 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
       // (observed 2026-04-29: missed a temple's whole scan window because
       // its adverts had no name field even though its MAC was visible at
       // strong RSSI). Fall back to checking the BLE-Peers registry's
-      // saved MACs for g2-glasses — by codebase convention mac1=LEFT,
-      // mac2=RIGHT (see bleSavePeerMac call at end of g2ConnectSync).
-      const String& savedL = gBlePeerData[BLE_PEER_G2_GLASSES].mac1;
-      const String& savedR = gBlePeerData[BLE_PEER_G2_GLASSES].mac2;
-      if (savedL.length() > 0 || savedR.length() > 0) {
+      // immutable saved-MAC snapshot installed by the worker before scan — by
+      // convention mac1=LEFT, mac2=RIGHT. Never read mutable Arduino Strings
+      // from the BLE host callback.
+      if (callbackClaim.fallbackL()[0] || callbackClaim.fallbackR()[0]) {
         String addr = advertisedDevice.getAddress().toString().c_str();
-        if      (savedL.length() > 0 && macEqualsIgnoreCase(addr, savedL)) side = 'L';
-        else if (savedR.length() > 0 && macEqualsIgnoreCase(addr, savedR)) side = 'R';
+        if      (macEqualsIgnoreCase(addr, callbackClaim.fallbackL())) side = 'L';
+        else if (macEqualsIgnoreCase(addr, callbackClaim.fallbackR())) side = 'R';
       }
     }
 
@@ -1696,7 +2241,14 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
     // scan on its own (we might still be looking for a temple), but any
     // in-flight ringConnect() can pick it up.
     if (isRing && !gRingAdvertisedDevice) {
-      gRingAdvertisedDevice = new BLEAdvertisedDevice(advertisedDevice);
+      BLEAdvertisedDevice* copy =
+          new (std::nothrow) BLEAdvertisedDevice(advertisedDevice);
+      if (!copy) return;
+      if (!callbackClaim.current() || gRingAdvertisedDevice) {
+        delete copy;
+        return;
+      }
+      gRingAdvertisedDevice = copy;
       gRingDeviceName       = name;
       gRingDeviceAddress    = advertisedDevice.getAddress().toString().c_str();
       gRingScanFound        = true;
@@ -1709,6 +2261,17 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
     }
 
     if (!side) return;
+    if (!callbackClaim.current()) return;
+    // A targeted LEFT/RIGHT scan must not publish the opposite side into its
+    // live temple object. The non-target arm may be an already-connected
+    // survivor whose admitted MAC/generation is part of this repair. Letting
+    // an unrelated advert overwrite its address would create a mixed-pair
+    // commit (or poison the next finite-repair validation).
+    const G2Eye scanTarget = callbackClaim.target();
+    if ((scanTarget == G2_EYE_LEFT && side != 'L') ||
+        (scanTarget == G2_EYE_RIGHT && side != 'R')) {
+      return;
+    }
     DEBUG_G2F("[G2-SCAN] Found %c: %s (RSSI %d)", side, name.c_str(),
               advertisedDevice.getRSSI());
 
@@ -1717,16 +2280,25 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
 
     // Copy to heap — the scan system reuses its per-result object after this
     // callback returns, so we keep our own copy for later connect().
-    t.advertisedDevice = new BLEAdvertisedDevice(advertisedDevice);
+    BLEAdvertisedDevice* copy =
+        new (std::nothrow) BLEAdvertisedDevice(advertisedDevice);
+    if (!copy) return;
+    if (!callbackClaim.current() || t.advertisedDevice) {
+      delete copy;
+      return;
+    }
+    t.advertisedDevice = copy;
     t.deviceName    = name;
     t.deviceAddress = advertisedDevice.getAddress().toString().c_str();
+    t.deviceAddressType = advertisedDevice.getAddressType();
+    t.deviceAddressTypeKnown = true;
 
     if (side == 'L') gScanFoundL = true;
     else             gScanFoundR = true;
 
     // Stop scanning early if we've found all we need.
-    bool needL = (gConnectTarget != G2_EYE_RIGHT);
-    bool needR = (gConnectTarget != G2_EYE_LEFT);
+    bool needL = (callbackClaim.target() != G2_EYE_RIGHT);
+    bool needR = (callbackClaim.target() != G2_EYE_LEFT);
     if ((!needL || gScanFoundL) && (!needR || gScanFoundR)) {
       DEBUG_G2F("[G2-SCAN] All required temples found; stopping scan early");
       gG2ScanStoppedEarly = true;
@@ -1735,9 +2307,87 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
   }
 };
 
+// BLEScan stores a raw callback pointer and does not own it. Reusing one
+// process-lifetime object avoids leaking a callback on every reconnect and is
+// safe because every scan/create operation is serialized by g2_ble_connect.
+static G2ScanCallbacks gG2ScanCallbacks;
+
 // =============================================================================
 // Client callbacks (per temple)
 // =============================================================================
+
+struct G2TempleDownTransition {
+  bool wasConnected = false;
+  bool downEventPublished = false;
+  uint32_t disconnectedGeneration = 0;
+};
+
+static uint8_t g2TemplePublishedBit(const G2Temple& temple) {
+  return temple.side == 'L' ? 0x01 : 0x02;
+}
+
+// Completion mutex is outermost. It serializes cancel-generation advance,
+// topology-down publication, scheduler LinkLost, and durable event ordering.
+// All physical BLE disconnect work happens after this helper returns.
+static G2TempleDownTransition g2BeginTempleDown(G2Temple& temple) {
+  G2TempleDownTransition transition;
+  G2CompletionGuard completion;
+  if (!completion) return transition;
+
+  transition.wasConnected = temple.connected;
+  transition.disconnectedGeneration = temple.connectionGeneration;
+
+  // Explicit teardown has already advanced the family epoch. Avoid advancing
+  // it again from its asynchronous callback; a stale callback for a replaced
+  // client is rejected by onDisconnect before reaching this helper.
+  if (transition.wasConnected && !bleConnectCancelPendingSnapshot()) {
+    bleConnectCancelAdvance();
+  }
+  g2AdvanceGeneration(temple);
+  g2SetTempleConnected(temple, false);
+  temple.writeChar = nullptr;
+  temple.notifyChar = nullptr;
+  temple.audioNotifyChar = nullptr;
+
+  const uint8_t bit = g2TemplePublishedBit(temple);
+  transition.downEventPublished = (gG2PublishedTempleMask & bit) != 0;
+  gG2PublishedTempleMask &= (uint8_t)~bit;
+  if (transition.downEventPublished) {
+    BROADCAST_PRINTF("[G2] %s temple dropped",
+                     temple.side == 'L' ? "LEFT" : "RIGHT");
+    systemEventPost(SYSEVT_G2_DISCONNECTED,
+                    temple.side == 'L' ? "LEFT" : "RIGHT",
+                    (!gL.connected && !gR.connected)
+                        ? "none left" : "one side up");
+  }
+  if ((transition.wasConnected || transition.downEventPublished) &&
+      !g2BothConnected()) {
+    blePeerNoteLinkLost(BLE_PEER_G2_GLASSES);
+  }
+  char reason[16];
+  snprintf(reason, sizeof(reason), "disconnect-%c", temple.side);
+  g2PushStatusEvent(reason);
+  return transition;
+}
+
+static void g2PublishDisconnectIntent(bool userInitiated = false) {
+  G2CompletionGuard completion;
+  if (!completion) return;
+  if (userInitiated) {
+    blePeerNoteUserDisconnect(BLE_PEER_G2_GLASSES);
+  }
+  bleConnectCancelAdvance();
+  const uint8_t published = gG2PublishedTempleMask;
+  gG2PublishedTempleMask = 0;
+  if (published & 0x01) {
+    systemEventPost(SYSEVT_G2_DISCONNECTED, "LEFT",
+                    (published & 0x02) ? "explicit close" : "none left");
+  }
+  if (published & 0x02) {
+    systemEventPost(SYSEVT_G2_DISCONNECTED, "RIGHT", "none left");
+  }
+  if (published) blePeerNoteLinkLost(BLE_PEER_G2_GLASSES);
+}
 
 // Mic-capture teardown when the LEFT temple (the audio arm) drops — defined
 // below, after the mic-ring statics. Called from onDisconnect (BLE host task
@@ -1752,12 +2402,19 @@ public:
     DEBUG_G2F("[G2-%c] BLE connected", temple->side);
   }
 
-  void onDisconnect(BLEClient* /*pClient*/) override {
-    const bool wasConnected = temple->connected;
-    const uint32_t disconnectedGeneration = temple->connectionGeneration;
-    g2AdvanceGeneration(*temple);
+  void onDisconnect(BLEClient* pClient) override {
+    // A quarantined/retired client may deliver its final callback after a new
+    // client has been installed for this temple. Never let that old callback
+    // tear down the replacement incarnation.
+    if (pClient != temple->client) {
+      DEBUG_G2F("[G2-%c] Ignoring stale-client disconnect callback", temple->side);
+      return;
+    }
+    const G2TempleDownTransition down = g2BeginTempleDown(*temple);
+    const bool wasConnected = down.wasConnected;
     if (wasConnected) {
-      g2EvenAiOnTempleDisconnect(temple->side, disconnectedGeneration);
+      g2EvenAiOnTempleDisconnect(temple->side,
+                                 down.disconnectedGeneration);
     }
     DEBUG_G2F("[G2-%c] BLE disconnected", temple->side);
     // Dump the recent-frame ring so we can see what we and the glasses
@@ -1766,13 +2423,9 @@ public:
     // app-layer quit, not a BLE-link failure, and the packets leading up
     // to it tell us which op it took issue with.
     if (wasConnected) g2RingDump("BLE disconnect");
-    temple->connected = false;
     // Unexpected drop — auto-reconnect will rebuild this link, and its initial
     // HIGH request must not be skipped as already-applied.
     templeForgetConnParams(*temple);
-    temple->writeChar = nullptr;
-    temple->notifyChar = nullptr;
-    temple->audioNotifyChar = nullptr;
     // Container is tied to the plugin task — task dies with the BLE link,
     // so force a fresh CREATE on reconnect.
     temple->containerReady = false;
@@ -1786,6 +2439,7 @@ public:
     if (temple->side == 'R' && wasConnected) {
       // Display arm lost — any in-memory list swap cache is invalid.
       resetHijackListSwapCache();
+      g2PresentationEpochAdvance();
     }
     // Blocks-hijack state depends on the right temple being reachable to
     // send its Cmd=9 ShutdownPage on lens-close. If R drops (or both
@@ -1803,28 +2457,12 @@ public:
     // needing to poll g2status. Only broadcast if we were actually in a
     // connected state — skip the noise from init-time "not yet connected"
     // transitions.
-    if (wasConnected) {
-      BROADCAST_PRINTF("[G2] %s temple dropped",
-                       temple->side == 'L' ? "LEFT" : "RIGHT");
-      systemEventPost(SYSEVT_G2_DISCONNECTED, temple->side == 'L' ? "LEFT" : "RIGHT",
-                      (!gL.connected && !gR.connected) ? "none left" : "one side up");
-      // Schedule mid-session reseek when autoReconnect is on (either temple
-      // gone → not "fully linked"). Intentional closeg2 stamps user-disconnect
-      // first so this becomes a no-op.
-      if (!g2BothConnected()) blePeerNoteLinkLost(BLE_PEER_G2_GLASSES);
-    }
-
     // If neither temple is connected, roll back global state so the
     // heartbeat timer can stop itself.
     if (!gL.connected && !gR.connected) {
       if (gG2State) gG2State->state = G2_STATE_IDLE;
       stopHeartbeatTimer();
     }
-    // Push the state blob to any open browsers so they can flip the
-    // panel from green → gray without needing a page refresh.
-    char reason[16];
-    snprintf(reason, sizeof(reason), "disconnect-%c", temple->side);
-    g2PushStatusEvent(reason);
   }
 
 private:
@@ -2486,18 +3124,19 @@ void g2MicReleaseCaptureContainer() {
 // nothing on the wire tells us — gMicStreamOn stays stale-true, so
 // g2MicStreamEnable(true) refuses to re-arm. The MIC-detail lens hides this by
 // tearing its own container down every render tick (which clears the flag), so
-// the mic only survives while that page is open. For a HEADLESS capture
+// the mic only survives while that page is open. For a HEADLESS recording
 // (CM5/UART micrecord, no lens ticking) the heartbeat worker calls this ~1 Hz
-// while G2 capture is active, replicating that keepalive so the mic stays live
+// while G2 recording is active, replicating that keepalive so the mic stays live
 // regardless of the display state. One BLE write; idempotent on the glasses.
 static bool g2MicStreamReassert() {
   if (!gL.connected) return false;
 #if ENABLE_MICROPHONE
-  // Self-guard: only re-arm for a LIVE G2 capture. The caller's snapshot can
-  // go stale across its wait; re-arming after a stop streams LC3 into the
-  // void AND poisons the next capture's rising-edge reset (the stale
-  // gMicStreamOn=true makes g2MicStreamEnable(true) early-return).
-  if (!(audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT))
+  // Self-guard: only re-arm for a real G2 recording. `openmic` intentionally
+  // keeps the HAL capture lease active while the recorder is idle; treating
+  // that lease as a recording streams LC3 whenever an unrelated Lens page is
+  // open and poisons the next recording's rising-edge reset.
+  if (!(audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT &&
+        micRecordingBusy()))
     return false;
 #endif
   uint8_t buf[64];
@@ -2512,7 +3151,7 @@ static bool g2MicStreamReassert() {
 // Recorder-facing kick: re-arm the stream immediately after the capture
 // container goes up, instead of waiting up to a full keepalive lap for the
 // first frames (which would eat the start of the utterance on bench
-// recordings). Carries the reassert's capture-active self-guard.
+// recordings). Carries the reassert's recording-active self-guard.
 bool g2MicKickStream() {
   // Re-anchor the delivered-rate watchdog at the RECORDING kick, not just the
   // stream-enable edge. With the idle-open mic, that edge can be minutes old
@@ -2820,8 +3459,21 @@ static bool subscribeAudioNotify(G2Temple& t) {
               t.side, svc, ch, ch ? (ch->canNotify() ? 1 : 0) : 0);
     return false;
   }
+  const BLERemoteNotifyResult notify = ch->registerForNotify(
+      (t.side == 'L') ? audioNotifyThunkL : audioNotifyThunkR);
+  if (!notify.success) {
+    DEBUG_G2F("[G2-%c] audio notify registration failed api=%ld evt=%ld "
+              "descApi=%ld descEvt=%ld timeout=%d disconnected=%d",
+              t.side, (long)notify.apiStatus, (long)notify.eventStatus,
+              (long)notify.descriptorApiStatus,
+              (long)notify.descriptorEventStatus,
+              (int)notify.timedOut, (int)notify.disconnected);
+    t.audioNotifyChar = nullptr;
+    return false;
+  }
+  // Availability is published only after REG_FOR_NOTIFY and CCCD both
+  // positively complete; a non-null pointer must never advertise a mute mic.
   t.audioNotifyChar = ch;
-  ch->registerForNotify((t.side == 'L') ? audioNotifyThunkL : audioNotifyThunkR);
   DEBUG_G2F("[G2-%c] audio probe subscribed on 6402", t.side);
   return true;
 }
@@ -3039,8 +3691,10 @@ static bool g2RxEvenAiCtrlStatus(const uint8_t* data, size_t len,
 }
 static void g2AdvanceGeneration(G2Temple& t) {
   portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&gTopologyMux);
   t.connectionGeneration++;
   if (t.connectionGeneration == 0) t.connectionGeneration = 1;
+  portEXIT_CRITICAL(&gTopologyMux);
   t.firmwareVersion[0] = '\0';
   if (t.side == 'R') {
     gFwVersion[0] = '\0';
@@ -3746,7 +4400,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
         return;
       }
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
       // LLM viewer list dispatch (container 'lstLlm'). Rows: 0 Back,
       // 1 Re-run last. Set the row's bit; the worker drains it each loop.
       // Refresh the 60 s hijack safety-timeout on real taps (same rationale
@@ -3788,12 +4442,9 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
           // definition, not stuck. Idle hijacks still time out
           // normally because gHijackStartedMs only advances on input.
           if (g2FsmHijackActive()) gHijackStartedMs = millis();
-          // Defer the actual handler AND the "Hijack tap: …" log line
-          // off the Bluedroid notify-task stack. BTC_TASK's stack is
-          // tight (~3-4 KB) and the inline BROADCAST_PRINTF + handler
-          // path pushed it over the canary on first tap (2026-05-03).
-          // The persistent tap-dispatcher worker prints + runs the
-          // handler from a normal task context with full headroom.
+          // Defer the actual handler AND the "Hijack tap: …" log line off
+          // g2_ctrl_owner. BLE callback delivery is copy-only now; parsing
+          // runs on the 6144-byte owner that must remain free to decode ACKs.
           tapDispatcherEnqueue(idx, iname);
         }
       }
@@ -3850,7 +4501,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
           // second g2ShowTextPage fails while the index has already moved
           // twice (SCROLL_TOP especially: stuck / double-skip on next
           // scroll). Ignore duplicate nav while PageSwapping.
-          if (g2FsmPageSwapping()) {
+          if (pageSwapInFlight()) {
             DEBUG_G2F("[G2] TEXT view: TextEvent %s(%u) — ignoring page-%s "
                       "(swap in flight; duplicate L+R)",
                       osEventTypeName(etype), (unsigned)etype,
@@ -3861,8 +4512,11 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
             DEBUG_G2F("[G2] TEXT view: TextEvent %s(%u) → page-%s handler",
                       osEventTypeName(etype), (unsigned)etype,
                       kind == G2_TAP_PAGE_PREV ? "prev" : "next");
-            gTextViewActivatedMs = millis();
-            gTextViewTapFn(kind);
+            if (tapDispatcherEnqueueNav(gTextViewTapFn, kind)) {
+              gTextViewActivatedMs = millis();
+            } else {
+              DEBUG_G2F("[G2] TEXT view: nav already pending/unavailable — dropped");
+            }
           }
         } else if (gTextViewExitFn) {
           // Same race guard as the SysEvent CLICK branch below — pages
@@ -3883,15 +4537,11 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
           }
           if (!deferred) {
             DEBUG_G2F("[G2] TEXT view: TextEvent CLICK → deferring exit handler to g2_tap_disp");
-            // Snapshot fn before clearing state. State-clear happens on
-            // BTC synchronously so subsequent notify events bail out via
-            // the gTextViewActive guard while the exit work runs on the
-            // dispatcher worker (25 KB stack vs BTC_TASK's 4 KB).
+            // Enqueue before disarming. If the zero-time send fails the view
+            // remains armed, so the user can retry instead of losing its only
+            // exit callback.
             void (*fn)() = gTextViewExitFn;
-            gTextViewActive = false;
-            gTextViewExitFn = nullptr;
-            gTextViewTapFn  = nullptr;
-            tapDispatcherEnqueueExit(fn);
+            if (tapDispatcherEnqueueExit(fn)) g2TextViewDisarm();
           }
         }
       }
@@ -4015,7 +4665,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
         // Single-page views (tapFn=null) preserve legacy "any tap exits".
         const bool isExitGesture = (etype == 3);  // DOUBLE_CLICK
         if (gTextViewTapFn && !isExitGesture) {
-          if (g2FsmPageSwapping()) {
+          if (pageSwapInFlight()) {
             DEBUG_G2F("[G2] TEXT view: SysEvent %s(%u) src=%u — ignoring "
                       "page-%s (swap in flight; duplicate L+R)",
                       osEventTypeName(etype), (unsigned)etype,
@@ -4029,8 +4679,11 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
                     osEventTypeName(etype), (unsigned)etype,
                     (unsigned)src,
                     kind == G2_TAP_PAGE_PREV ? "prev" : "next");
-          gTextViewActivatedMs = millis();
-          gTextViewTapFn(kind);
+          if (tapDispatcherEnqueueNav(gTextViewTapFn, kind)) {
+            gTextViewActivatedMs = millis();
+          } else {
+            DEBUG_G2F("[G2] TEXT view: nav already pending/unavailable — dropped");
+          }
           return;
         }
         if (gTextViewExitFn) {
@@ -4063,15 +4716,10 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
           DEBUG_G2F("[G2] TEXT view: SysEvent %s(%u) src=%u → deferring exit "
                     "handler to g2_tap_disp", osEventTypeName(etype),
                     (unsigned)etype, (unsigned)src);
-          // Snapshot fn and clear state synchronously on BTC; heavy work
-          // (file chooser redraw, page swap, FS reads) runs on the
-          // dispatcher worker. Inline fn() here used to overflow the
-          // 4 KB BTC stack — see tapDispatcherEnqueueExit().
+          // Enqueue first; disarm only after ownership transfers. Queue-full
+          // leaves the view retryable instead of silently losing its exit.
           void (*fn)() = gTextViewExitFn;
-          gTextViewActive = false;
-          gTextViewExitFn = nullptr;
-          gTextViewTapFn  = nullptr;
-          tapDispatcherEnqueueExit(fn);
+          if (tapDispatcherEnqueueExit(fn)) g2TextViewDisarm();
           return;
         }
       }
@@ -4247,13 +4895,16 @@ static void dispatchEventPayload(char side, const uint8_t* payload, size_t len) 
       // Paginated TEXT view: USER_ACTIVITY (lens tap) is non-directional;
       // map to "next page" by convention. SCROLL_TOP/BOTTOM via SysEvent
       // give the user backward navigation.
-      if (g2FsmPageSwapping()) {
+      if (pageSwapInFlight()) {
         DEBUG_G2F("[G2] TEXT view: user-activity — ignoring page-next "
                   "(swap in flight; duplicate L+R)");
       } else {
         DEBUG_G2F("[G2] TEXT view: user-activity → page-next handler");
-        gTextViewActivatedMs = now;
-        gTextViewTapFn(G2_TAP_PAGE_NEXT);
+        if (tapDispatcherEnqueueNav(gTextViewTapFn, G2_TAP_PAGE_NEXT)) {
+          gTextViewActivatedMs = now;
+        } else {
+          DEBUG_G2F("[G2] TEXT view: nav already pending/unavailable — dropped");
+        }
       }
     } else if (gTextViewExitFn) {
       // Same race guard as the SysEvent CLICK / TextEvent CLICK
@@ -4282,10 +4933,7 @@ static void dispatchEventPayload(char side, const uint8_t* payload, size_t len) 
       if (!deferred) {
         DEBUG_G2F("[G2] TEXT view: user-activity → deferring exit handler to g2_tap_disp");
         void (*fn)() = gTextViewExitFn;
-        gTextViewActive = false;
-        gTextViewExitFn = nullptr;
-        gTextViewTapFn  = nullptr;
-        tapDispatcherEnqueueExit(fn);
+        if (tapDispatcherEnqueueExit(fn)) g2TextViewDisarm();
       }
     }
   }
@@ -4888,8 +5536,14 @@ static void buildG2StatusMeter(char* out, size_t cap) {
   if (!out || cap == 0) return;
   out[0] = '\0';
 
-  const uint32_t heapFree  = (uint32_t)ESP.getFreeHeap();
-  const uint32_t heapTotal = (uint32_t)ESP.getHeapSize();
+  // Internal 8-bit RAM only, matching the serial HEAP_PRESSURE line and the
+  // boot report. ESP.getFreeHeap()/getHeapSize() are MALLOC_CAP_INTERNAL with no
+  // MALLOC_CAP_8BIT, so on ESP32 classic they sweep in the ~25.8 KB IRAM-only
+  // heap that nothing here can allocate from — the lens read ~45 KB while the
+  // serial console read 21 KB for the same instant. getHeapSize() also
+  // double-counts the DMA reserve, which made the usage bar under-draw.
+  const uint32_t heapFree  = (uint32_t)hw1InternalFreeBytes();
+  const uint32_t heapTotal = (uint32_t)hw1InternalTotalBytes();
   const uint32_t heapUsed  = heapTotal > heapFree ? (heapTotal - heapFree) : 0;
   const unsigned heapKb    = (unsigned)(heapFree / 1024);
   char barH[32];
@@ -5203,7 +5857,7 @@ static bool g2ShowPetPage(void (*onDone)());   // Apps → Pet: list+animated-cr
 #if ENABLE_MAPS
 static bool g2ShowMapPage(void (*onDone)());   // interactive list+image Maps page, defined below
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
 static bool g2ShowLlmPage(void (*onDone)());   // read-only streaming LLM viewer, defined below
 static void g2ShowLlmMenu();                   // LLM submenu (chat / guided / re-run / model), defined below
 #endif
@@ -5217,7 +5871,7 @@ static void g2ShowLoggingMenu();               // sensor-logging control list, d
 // Non-static: sub-pages in their own TUs (Settings, Tests, Users) return to
 // these on Back via a local `extern` decl, exactly like g2ShowAppsMenu.
 void g2ShowSystemMenu();                        // System launcher (Status/System Events/Logging/Tests), defined below
-void g2ShowConfigMenu();                        // Config launcher (Settings/Users/OLED Login), defined below
+void g2ShowConfigMenu();                        // Config launcher (Settings/Users), defined below
 // invokePageFromMain is defined much further down (with the tap dispatcher);
 // the System launcher reuses it to open the Status live-text page (Status has
 // no show*Menu of its own).
@@ -5237,8 +5891,8 @@ enum G2AppRow : uint8_t {
   APP_ROW_AUTOMATIONS,
   APP_ROW_HEALTH,
   APP_ROW_PET,
-  // System Events + Logging moved to the System launcher; Users + OLED Login
-  // moved to the Config launcher (menu reorg — mirrors the OLED categories).
+  // System Events + Logging moved to the System launcher; Users moved to the
+  // Config launcher (menu reorg — mirrors the OLED categories).
 };
 
 // Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Health + Pet.
@@ -5264,7 +5918,7 @@ static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
   const bool haveMap = MapCore::hasValidMap() || (MapCore::getAvailableMaps(probe, 1) > 0);
   add(haveMap ? "Maps" : "Maps (none)", APP_ROW_MAPS);
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
   add("LLM", APP_ROW_LLM);
 #endif
   add("Automations", APP_ROW_AUTOMATIONS);
@@ -5273,7 +5927,7 @@ static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
 #endif
   add("Pet",         APP_ROW_PET);
   // Menu reorg: System Events + Logging now live under the System launcher,
-  // and Users + OLED Login under the Config launcher (see g2SystemBuildRows /
+  // and Users under the Config launcher (see g2SystemBuildRows /
   // g2ConfigBuildRows). Apps keeps only the app-like tools, mirroring the
   // OLED's "Apps" category.
   return n;
@@ -5305,76 +5959,6 @@ void g2ShowAppsMenu() {
   }
 }
 
-#if ENABLE_OLED_DISPLAY
-// --- OLED login flow (Config -> OLED Login) ---------------------------------
-// Collect username + password on the lens keyboard and dispatch the EXISTING
-// `login <user> <pass> display` command, so the on-device OLED logs in with a
-// real credential check (no new command, no password-less handoff). The G2
-// hijack path runs on cmd_exec and is NOT the phone-app characteristic handler,
-// so the `display` transport is NOT rewritten to `bluetooth`.
-static char gOledLoginUser[33] = {0};
-
-// Completion on cmd_exec: show the login result ("Login successful for 'x' on
-// display (admin)" / "Error: Authentication failed"), then re-assert Config.
-static void onOledLoginCmdDone(bool ok, const char* result,
-                               const G2CmdCookie& /*cookie*/, void* /*userData*/) {
-  const char* msg = (result && result[0]) ? result : (ok ? "Login sent" : "Login failed");
-  if (strncmp(msg, "Error: ", 7) == 0) msg += 7;
-  char banner[80];
-  snprintf(banner, sizeof(banner), "%.76s", msg);
-  g2ShowText(banner);
-  vTaskDelay(pdMS_TO_TICKS(1800));
-  g2ShowConfigMenu();   // re-render + re-assert G2_HIJACK_PAGE_CONFIG after the banner
-}
-
-static void oledLoginCancel() { g2ShowConfigMenu(); }
-
-// Password entered -> dispatch `login "<user>" "<pass>" display`. The keyboard
-// charset can't produce a double-quote, so wrapping both args is always safe
-// (handles spaces in either field).
-static void oledLoginPassCommit(const char* text) {
-  if (!text || text[0] == '\0') { g2ShowConfigMenu(); return; }  // empty = cancel
-  String line = String("login \"") + gOledLoginUser + "\" \"" + text + "\" display";
-  g2ShowText("Logging in...");
-  G2CmdCookie cookie{};
-  cookie.targetPage = g2GetHijackPage();
-  if (!g2SubmitHijackCommand(line.c_str(), cookie, onOledLoginCmdDone, nullptr)) {
-    g2ShowText("Busy - try again");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    g2ShowConfigMenu();
-  }
-}
-
-// Username entered -> ask for the password.
-static void oledLoginUserCommit(const char* text) {
-  if (!text || text[0] == '\0') { g2ShowConfigMenu(); return; }
-  strncpy(gOledLoginUser, text, sizeof(gOledLoginUser) - 1);
-  gOledLoginUser[sizeof(gOledLoginUser) - 1] = '\0';
-  TextEntryConfig cfg = {};
-  cfg.prompt   = "OLED Password";
-  cfg.initial  = "";
-  cfg.maxLen   = 32;
-  cfg.onCommit = oledLoginPassCommit;
-  cfg.onCancel = oledLoginCancel;
-  cfg.isSecret = true;   // login password — keep out of debug logs
-  if (!g2BeginTextEntry(cfg)) g2ShowConfigMenu();
-}
-
-static void beginOledLogin() {
-  // Pre-fill the username with the paired wearer as a convenience: accept it to
-  // log in as yourself, or edit it to log in as anyone.
-  const String& wearer = g2HijackAuthContext().user;
-  const bool realWearer = (wearer.length() > 0 && !isGuestUser(wearer));
-  TextEntryConfig cfg = {};
-  cfg.prompt   = "OLED Username";
-  cfg.initial  = realWearer ? wearer.c_str() : "";
-  cfg.maxLen   = 32;
-  cfg.onCommit = oledLoginUserCommit;
-  cfg.onCancel = oledLoginCancel;
-  if (!g2BeginTextEntry(cfg)) g2ShowConfigMenu();
-}
-#endif  // ENABLE_OLED_DISPLAY
-
 static void g2AppsHandleTap(uint32_t idx) {
   const char* labels[G2_APPS_MAX_ROWS];
   G2AppRow    ids[G2_APPS_MAX_ROWS];
@@ -5392,7 +5976,7 @@ static void g2AppsHandleTap(uint32_t idx) {
 #if ENABLE_MAPS
     case APP_ROW_MAPS:   g2ShowMapPage(&g2ShowAppsMenu); return;   // Back → Apps
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
     case APP_ROW_LLM:    g2ShowLlmMenu(); return;   // opens the LLM submenu (chat / guided / re-run / model)
 #endif
     case APP_ROW_AUTOMATIONS: g2ShowAutomationsMenu(); return;     // Back → Apps (own TU)
@@ -5400,8 +5984,8 @@ static void g2AppsHandleTap(uint32_t idx) {
     case APP_ROW_HEALTH:      g2ShowHealthPage(&g2ShowAppsMenu); return; // Back → Apps
 #endif
     case APP_ROW_PET:         g2ShowPetPage(&g2ShowAppsMenu); return;   // Back → Apps
-    // System Events / Logging / Users / OLED Login moved to the System &
-    // Config launchers (menu reorg) — no longer dispatched from Apps.
+    // System Events / Logging / Users moved to the System & Config launchers
+    // (menu reorg) — no longer dispatched from Apps.
     default: return;
   }
 }
@@ -5515,16 +6099,15 @@ static const G2PageModule kSystemPage = {
 
 // ─────────────────────────────────────────────────────────────────────
 // Config launcher (menu reorg) — mirrors the OLED's "Config" category.
-// Groups Settings + Users (admin) + OLED Login. Users is admin-gated in the
-// builder (the command layer is the backstop); OLED Login is board-gated.
+// Groups Settings + Users (admin). Users is admin-gated in the builder (the
+// command layer is the backstop).
 // ─────────────────────────────────────────────────────────────────────
 enum G2ConfigRow : uint8_t {
   CFG_ROW_BACK = 0,
   CFG_ROW_SETTINGS,
   CFG_ROW_USERS,
-  CFG_ROW_OLED_LOGIN,
 };
-#define G2_CONFIG_MAX_ROWS 4
+#define G2_CONFIG_MAX_ROWS 3
 
 static size_t g2ConfigBuildRows(const char** labels, G2ConfigRow* ids, size_t cap) {
   size_t n = 0;
@@ -5535,9 +6118,6 @@ static size_t g2ConfigBuildRows(const char** labels, G2ConfigRow* ids, size_t ca
   add("Settings",     CFG_ROW_SETTINGS);
   // Admin-only, same gate as the old Apps → Users row.
   if (isAdminUser(g2HijackAuthContext().user)) add("Users", CFG_ROW_USERS);
-#if ENABLE_OLED_DISPLAY
-  add("OLED Login",   CFG_ROW_OLED_LOGIN);
-#endif
   return n;
 }
 
@@ -5580,16 +6160,13 @@ static void g2ConfigHandleTap(uint32_t idx) {
     }
     case CFG_ROW_SETTINGS: g2ShowSettingsMenu(); return;   // Back → Config
     case CFG_ROW_USERS:    g2ShowUsersMenu();    return;   // Back → Config (own TU)
-#if ENABLE_OLED_DISPLAY
-    case CFG_ROW_OLED_LOGIN: beginOledLogin();   return;   // keyboard → login … display, Back → Config
-#endif
     default: return;
   }
 }
 
 static const G2PageModule kConfigPage = {
   "config", "Config",
-  "Show the Config launcher (Settings / Users / OLED Login) on the lens",
+  "Show the Config launcher (Settings / Users) on the lens",
   g2BuildConfigInfo,
   g2ShowConfigMenu,
   g2ConfigHandleTap,
@@ -6261,10 +6838,9 @@ static bool renderSysEventsPage() {
 // Wrapping forward off the last (oldest) page returns to the newest page, and
 // that is the one place we re-read the ring — you've reached the end of what
 // was on screen, so cycling back to the top should show anything that landed
-// meanwhile. The rebuild is DEFERRED onto g2_tap_disp: this callback runs on
-// the BLE notify task, whose stack has no room for the builder's frames. Same
-// deferral primitive as the text-view exit path — we are not exiting, just
-// borrowing the "run this off BTC" hop.
+// meanwhile. Text navigation already runs on g2_tap_disp; wrapping requeues
+// the heavier refresh as a separate dispatcher turn so the NAV callback stays
+// bounded and its pending claim can be released first.
 static void g2SysEventsNav(G2TapKind kind) {
   const bool wrapsToNewest = (kind != G2_TAP_PAGE_PREV) &&
                              gSysEvPager.pageCount > 1 &&
@@ -6669,7 +7245,7 @@ bool g2ShowFmTunerPage() {
 }
 #endif  // ENABLE_FM_RADIO
 
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
 // ─────────────────────────────────────────────────────────────────────
 // LLM guided-input menu — on-lens picker for the tiny on-device model
 // (LLM_GUIDED_MENU_SPEC §9). Apps → LLM opens a small submenu
@@ -6727,9 +7303,11 @@ enum LlmHomeAction : uint8_t {
 #define LLM_MENU_BUCKET_THRESH   40   // ent_count over this inserts the alpha-bucket level
 #define LLM_MENU_MAX_BUCKETS     8    // alpha buckets are reachable in one screen (no chrome)
 #define LLM_MENU_MAX_BUCKET_ENTS 1024 // == the §2 per-group entity cap (a bucket never exceeds it)
-#define LLM_MODEL_MAX            24   // .bin files listed on Select Model (paginated)
-#define LLM_MODEL_NAME_LEN       40   // display name (basename, truncated)
-#define LLM_MODEL_PATH_LEN       96   // full VFS path for llmload
+// Model-table sizing now comes from the shared registry (System_LLMBackend.h).
+// G2 used to define its own LLM_MODEL_NAME_LEN/PATH_LEN, which both duplicated
+// the registry's constants and collided with them by name once this file needed
+// the registry header.
+#define G2_LLM_MODEL_MAX  LLM_REGISTRY_MAX_MODELS
 
 // Row buffers shared by every level (one page is on screen at a time;
 // g2ShowListPage deep-copies immediately, so reuse between renders is safe).
@@ -6769,8 +7347,7 @@ static char         sLlmMsg[40] = {0};
 // Select Model cache — filled once when the page opens (tap task), then
 // paginated. Paths are full VFS paths so llmload is unambiguous if the same
 // basename exists on both internal and SD.
-EXT_RAM_BSS_ATTR static char sLlmModelNames[LLM_MODEL_MAX][LLM_MODEL_NAME_LEN];
-EXT_RAM_BSS_ATTR static char sLlmModelPaths[LLM_MODEL_MAX][LLM_MODEL_PATH_LEN];
+EXT_RAM_BSS_ATTR static LlmModelDesc sLlmModels[G2_LLM_MODEL_MAX];
 static uint8_t sLlmModelCount = 0;
 
 // Show functions used before their definitions (forward decls keep the
@@ -6884,11 +7461,13 @@ static void llmMenuFillItem(LlmMenuLevel lvl, size_t globalIdx, char* out, size_
       }
       const size_t mi = globalIdx - 1;
       if (mi >= sLlmModelCount) break;
-      LLMStatus st = llmGetStatus();
-      const bool cur = (st.state == LLMState::READY &&
-                        st.modelPath[0] &&
-                        strcmp(st.modelPath, sLlmModelPaths[mi]) == 0);
-      snprintf(out, cap, "%s%s", cur ? "* " : "", sLlmModelNames[mi]);
+      // Compare IDs, not paths: a remote model has no path, and the host may
+      // have adopted a different name than the one that was asked for.
+      LlmModelDesc act;
+      const bool cur = llmBackendIsReady() && llmBackendActiveModel(&act) &&
+                       strcasecmp(act.id, sLlmModels[mi].id) == 0;
+      snprintf(out, cap, "%s%s%s", cur ? "* " : "", sLlmModels[mi].name,
+               sLlmModels[mi].available ? "" : " (offline)");
       break;
     }
     default: break;
@@ -6959,29 +7538,11 @@ static void llmMenuShowEntities() {
 // cache. Same locations as llmListModels(), but fixed buffers — no Arduino
 // String / JSON on the tap path. Called once when the page opens.
 static void llmMenuScanModels() {
-  sLlmModelCount = 0;
-  auto scanDir = [&](const char* dirPath) {
-    File dir = VFS::openGuarded(dirPath, FILE_READ, VFS::systemAuth("g2.llm.list_models"));
-    if (!dir || !dir.isDirectory()) return;
-    File entry;
-    while ((entry = dir.openNextFile()) && sLlmModelCount < LLM_MODEL_MAX) {
-      const char* raw = entry.name();
-      if (!raw || !raw[0]) { entry.close(); continue; }
-      const char* base = strrchr(raw, '/');
-      base = base ? base + 1 : raw;
-      const size_t len = strlen(base);
-      if (len >= 4 && strcasecmp(base + len - 4, ".bin") == 0) {
-        const uint8_t i = sLlmModelCount;
-        strlcpy(sLlmModelNames[i], base, LLM_MODEL_NAME_LEN);
-        snprintf(sLlmModelPaths[i], LLM_MODEL_PATH_LEN, "%s/%s", dirPath, base);
-        sLlmModelCount++;
-      }
-      entry.close();
-    }
-    dir.close();
-  };
-  scanDir("/system/llm");
-  if (VFS::isSDAvailable()) scanDir("/sd/llm");
+  // Was a third private copy of the .bin scan (web and OLED had the other two).
+  // The registry lists every source, so a CM5 model — which has no file on this
+  // device and therefore could never appear in a filesystem walk — shows up here
+  // for free.
+  sLlmModelCount = (uint8_t)llmEnumerateModels(sLlmModels, G2_LLM_MODEL_MAX);
 }
 
 static void llmMenuShowModels() {
@@ -7148,7 +7709,7 @@ static void llmMenuModelTap(uint32_t idx) {
   const size_t mi = (size_t)item - 1;
   if (mi >= sLlmModelCount) return;
   char line[112];
-  snprintf(line, sizeof(line), "llmload %s", sLlmModelPaths[mi]);
+  snprintf(line, sizeof(line), "llmload %s", sLlmModels[mi].id);
   llmMenuSubmitModelCmd(line, "Loading model...");
 }
 
@@ -7349,7 +7910,7 @@ static void g2ShowLlmMenu() {
   // glasses can show which weights are active before opening the picker.
   {
     char modelRow[LLM_MENU_ROW_LEN];
-    LLMStatus st = llmGetStatus();
+    LLMStatus st = llmBackendStatus();
     if (st.state == LLMState::READY && st.modelPath[0]) {
       const char* base = strrchr(st.modelPath, '/');
       base = base ? base + 1 : st.modelPath;
@@ -7383,7 +7944,7 @@ static void g2ShowLlmMenu() {
     DEBUG_G2F("[G2-LLM] submenu show FAILED");
   }
 }
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_BACKEND
 
 // ---------------------------------------------------------------------------
 // Generic sensor-detail LIVE compound (all non-camera sensors)
@@ -7478,7 +8039,7 @@ static void registerG2Pages(void) {
   // Hardware (Sensors), Apps, Power. Status / Settings / Tests are now hidden
   // and reached via the System/Config launchers.
   g2RegisterPage(kSystemPage);     // "System" — Status / System Events / Logging / Tests
-  g2RegisterPage(kConfigPage);     // "Config" — Settings / Users / OLED Login
+  g2RegisterPage(kConfigPage);     // "Config" — Settings / Users
   g2RegisterPage(kNetworkPage);    // "Connect" — WiFi / Bluetooth (relabeled)
   g2RegisterPage(kSensorsPage);    // "Hardware" — sensor list (relabeled)
   g2RegisterPage(kAppsPage);       // "Apps" — rows come from g2AppsBuildRows()
@@ -7503,7 +8064,7 @@ static void registerG2Pages(void) {
 #if ENABLE_FM_RADIO
   g2RegisterPage(kFmTunerPage);          // hidden — reached via Hardware → FM
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
   g2RegisterPage(kLlmMenuPage);          // hidden — reached via Apps → LLM (guided-input picker)
 #endif
 #if ENABLE_CAMERA_SENSOR
@@ -7634,11 +8195,9 @@ static bool shouldDedupHijackTap(uint32_t idx) {
   return false;
 }
 
-// Called from handleDevEvent when a ListEvent CLICK on container "app"
-// is seen AND dedup passes. Runs on the BLE notify task, so any send
-// must be non-blocking (no ack waits). g2ShowText on a hijack-CREATEd
-// container takes the REBUILD fast path (containerReady=true), which
-// is send-and-forget — safe from this context.
+// Called by g2_tap_disp after g2_ctrl_owner sees and deduplicates a ListEvent
+// CLICK on container "app". This worker may allocate and enqueue UI work; the
+// separate control owner remains available to decode synchronous ACKs.
 //
 // Return-to-list UX: the firmware's normal display-auto-off handles
 // it. When the user stops interacting, the display blanks, we get
@@ -7901,16 +8460,13 @@ static void handleMenuStartUp(G2Temple& t, uint32_t widgetId) {
   }
 
   // Step 5/Group D: enqueue the Shutdown+CREATE handshake onto the lens
-  // applier instead of spawning a per-call 4 KB stack here. Same off-the-
-  // BLE-notify-task guarantee (the applier runs on a separate persistent
-  // task), with no transient stack allocation. The deadlock that the
-  // legacy code warned about (inline-on-BLE-notify) still applies — both
-  // failure modes (alloc fail, queue full) drop the hijack rather than
-  // stall the notify task.
+  // applier instead of spawning a per-call stack here. handleMenuStartUp runs
+  // on g2_ctrl_owner, so this hop is load-bearing: the task that decodes the
+  // CREATE response must never block waiting for that response itself.
   CustomSpec* spec = new (std::nothrow) CustomSpec{};
   if (!spec) {
     DEBUG_G2F("[G2] Hijack: CustomSpec alloc failed — dropping (would "
-              "deadlock to run inline on notify task)");
+              "deadlock to run inline on control/ACK owner)");
     return;
   }
   spec->run = &hijackBootstrapBody;
@@ -7928,7 +8484,7 @@ static void handleMenuStartUp(G2Temple& t, uint32_t widgetId) {
   job->targetNetSub   = 0;
   job->payload.custom = spec;
 
-  if (!g2EnqueueLensJob(job)) {
+  if (!g2EnqueueLensJob(job, G2LensEnqueueWait::NoWait)) {
     DEBUG_G2F("[G2] Hijack: lens job enqueue FAILED — applier queue full?");
     delete spec;
     delete job;
@@ -8812,6 +9368,19 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
         DEBUG_G2F("[G2-%c] EvenAI EVENT type=%s(%u) magic=%u (%u B)",
                   t.side, eventName(evtype), (unsigned)evtype,
                   (unsigned)magic, (unsigned)pbLen);
+        // RE aid (2026-08, follow-up-gesture investigation): the type byte
+        // alone collapses scroll-up, scroll-down, scroll-past-end, tap, and
+        // ring-vs-temple all into SCROLL(1). Dump the WHOLE body so a labelled
+        // capture (each gesture, each device) shows which byte, if any,
+        // separates them — the same way logPbFlat is used for unmapped sids.
+        {
+          char raw[3 * 24 + 1]; size_t rp = 0;
+          for (size_t i = 0; i < pbLen && rp + 3 < sizeof(raw); i++)
+            rp += snprintf(raw + rp, sizeof(raw) - rp, "%02X ", pb[i]);
+          if (rp > 0) raw[rp - 1] = '\0'; else raw[0] = '\0';
+          DEBUG_G2F("[G2-%c] EvenAI EVENT raw=[%s]", t.side, raw);
+        }
+        logPbFlat(t.side, "  EVENT", pb, pbLen);
         // STREAM_COMPLETE = the glasses finished painting the streamed reply.
         // Was debug-log-only; the exec plan requires a capture-ID-correlated
         // host event before this is usable as a production metric. Worker
@@ -9294,10 +9863,31 @@ static volatile bool     gBeatPending    = false;
 static constexpr uint32_t G2_CONTROL_STACK_BYTES = 6144;
 static portMUX_TYPE       gControlLifecycleMux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t            gControlStartBlocks = 0;
+
+static bool g2ManualConnectAdmissionOpen() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool open = gControlStartBlocks == 0;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return open;
+}
 static bool               gControlStarting = false;
+// Counts page/tap worker initializers that claimed UNINITIALIZED and are
+// currently allocating outside gControlLifecycleMux. Deinit closes the start
+// gate first, then waits for this to reach zero before tearing BLE down.
+static uint8_t            gUiWorkerInitters = 0;
+// Producers hold this claim from the lifecycle-protected queue snapshot until
+// xQueueSend returns. Closing the start gate and waiting for this count to
+// drain prevents a pre-teardown producer from publishing behind a quiesce
+// barrier after the queue was already drained.
+static uint8_t            gUiSubmitters = 0;
 static uint8_t            gBleConnectSubmitters = 0;
 static uint8_t            gSessionSubmitters = 0;
 static uint8_t            gClientInitters = 0;
+
+static bool g2RoleAdmissionOpen() {
+  return bleRoleTransitionState() == BleRoleTransition::IDLE ||
+         bleRoleTransitionHeldByCurrentTask();
+}
 
 static void g2ControlStartBlockAcquire() {
   portENTER_CRITICAL(&gControlLifecycleMux);
@@ -9312,6 +9902,7 @@ static void g2ControlStartBlockRelease() {
 }
 
 static bool g2ClientInitBegin() {
+  if (!g2RoleAdmissionOpen()) return false;
   portENTER_CRITICAL(&gControlLifecycleMux);
   const bool allowed = gControlStartBlocks == 0 && gClientInitters == 0;
   if (allowed) gClientInitters++;
@@ -9327,10 +9918,24 @@ static void g2ClientInitDone() {
 
 static bool g2ClientInitIdle() {
   portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool idle = gClientInitters == 0;
+  const bool idle = gClientInitters == 0 && gUiWorkerInitters == 0 &&
+      gUiSubmitters == 0;
   portEXIT_CRITICAL(&gControlLifecycleMux);
   return idle;
 }
+
+static void g2UiSubmitDone() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gUiSubmitters > 0) gUiSubmitters--;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+struct G2UiSubmitClaim {
+  ~G2UiSubmitClaim() { g2UiSubmitDone(); }
+  G2UiSubmitClaim(const G2UiSubmitClaim&) = delete;
+  G2UiSubmitClaim& operator=(const G2UiSubmitClaim&) = delete;
+  G2UiSubmitClaim() = default;
+};
 
 struct G2ClientInitClaim {
   bool held;
@@ -9339,6 +9944,8 @@ struct G2ClientInitClaim {
 };
 
 static bool g2BleConnectSubmitBegin() {
+  if (!g2RoleAdmissionOpen() || bleStackLifecycleFaulted() ||
+      gBleClientRetirementPeerMask != 0) return false;
   portENTER_CRITICAL(&gControlLifecycleMux);
   const bool allowed = gControlStartBlocks == 0 &&
       gBleConnectSubmitters < 0xFF;
@@ -9361,8 +9968,12 @@ static bool g2BleConnectSubmitIdle() {
 }
 
 static bool g2SessionSubmitBegin() {
+  if (!g2RoleAdmissionOpen()) return false;
   portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool allowed = gControlStartBlocks == 0 && gSessionSubmitters < 0xFF;
+  // Submission owns abort/drain/reset/enqueue as one transaction. Allowing
+  // two producers here lets each drain or reset the other's freshly prepared
+  // job even when the queue/task themselves are valid.
+  const bool allowed = gControlStartBlocks == 0 && gSessionSubmitters == 0;
   if (allowed) gSessionSubmitters++;
   portEXIT_CRITICAL(&gControlLifecycleMux);
   return allowed;
@@ -9534,13 +10145,18 @@ static constexpr uint8_t kMaxRecoveryAttempts =
 static uint32_t gNextRecoveryAttemptMs = 0;  // 0 = no attempt scheduled yet
 static uint8_t  gRecoveryAttemptCount  = 0;
 static bool     gRecoveryGiveUpLogged  = false;  // once-per-episode event latch
+static bool     gRecoveryAttemptQueued = false;
+static portMUX_TYPE gRecoveryMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Reset the backoff state. Call from anywhere a fresh recovery cycle is
 // warranted — both temples are up (success), one drops (so the next
 // detection cycle starts from attempt #1), or the user explicitly asks.
 static void resetRecoveryBackoff() {
+  portENTER_CRITICAL(&gRecoveryMux);
   gNextRecoveryAttemptMs = 0;
   gRecoveryAttemptCount  = 0;
+  gRecoveryAttemptQueued = false;
+  portEXIT_CRITICAL(&gRecoveryMux);
 }
 
 // Synchronous attempt to scan + connect the missing temple. Pauses the
@@ -9549,14 +10165,47 @@ static void resetRecoveryBackoff() {
 // link rides through it. Caller is responsible for backoff scheduling.
 //
 // Returns true if the missing temple was found and connected.
-static bool attemptMissingArmRecovery() {
+static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
+                                          const BleConnectJob& job) {
   if (!gG2State || !gG2State->initialized || !gScan) return false;
   // Need exactly one connected and one missing. Both connected = nothing
   // to do; both missing = user initiated a teardown and a fresh
   // g2ConnectSync is the right path, not partial recovery.
-  const bool needL = !gL.connected;
-  const bool needR = !gR.connected;
+  const G2LinkSnapshot initialLinks = g2LinkSnapshot();
+  const bool needL = !initialLinks.left;
+  const bool needR = !initialLinks.right;
   if (needL == needR) return false;
+
+  // A finite half-repair is not policy-gated on autoReconnect, but it still
+  // belongs to the exact user/owner/target intent that admitted it. Turning
+  // auto recovery off stamps a user disconnect and advances this fence.
+  auto repairIntentCurrent = [&job]() {
+    return blePeerIntentIsCurrent(BLE_PEER_G2_GLASSES,
+                                  job.peerIntentGeneration,
+                                  job.peerIdentityGeneration);
+  };
+  const uint32_t survivorGeneration = needL
+      ? initialLinks.rightGeneration : initialLinks.leftGeneration;
+  const char* survivorMac = needL ? job.mac2 : job.mac;
+  const uint8_t survivorAddressType = needL
+      ? job.addressType2 : job.addressType1;
+  const bool survivorAddressTypeKnown = needL
+      ? job.addressType2Known : job.addressType1Known;
+  auto survivorCurrent = [needL, survivorGeneration, survivorMac,
+                          survivorAddressType,
+                          survivorAddressTypeKnown]() {
+    const G2LinkSnapshot current = g2LinkSnapshot();
+    return needL
+        ? (!current.left && current.right &&
+           current.rightGeneration == survivorGeneration &&
+           templeMatchesSavedTarget(gR, survivorMac, survivorAddressType,
+                                    survivorAddressTypeKnown))
+        : (current.left && !current.right &&
+           current.leftGeneration == survivorGeneration &&
+           templeMatchesSavedTarget(gL, survivorMac, survivorAddressType,
+                                    survivorAddressTypeKnown));
+  };
+  if (!repairIntentCurrent() || !survivorCurrent()) return false;
 
   G2Temple* missing  = needL ? &gL : &gR;
   G2Eye missingEye   = needL ? G2_EYE_LEFT : G2_EYE_RIGHT;
@@ -9568,21 +10217,20 @@ static bool attemptMissingArmRecovery() {
   // — we fall through to a name-based scan in that case rather than
   // skipping recovery entirely (the original bug: missing temple stays
   // unreconnected forever until the user manually triggers g2scan).
-  String savedMac = needL ? gBlePeerData[BLE_PEER_G2_GLASSES].mac1
-                          : gBlePeerData[BLE_PEER_G2_GLASSES].mac2;
-  const bool haveMac = savedMac.length() > 0;
+  const char* savedMac = needL ? job.mac : job.mac2;
+  const bool haveMac = savedMac && savedMac[0];
 
   if (haveMac) {
     BROADCAST_PRINTF("[G2] Recovery: scanning for missing %s temple "
                      "(MAC %s, attempt %u/%u)",
-                     sideStr, savedMac.c_str(),
-                     (unsigned)(gRecoveryAttemptCount + 1),
+                     sideStr, savedMac,
+                     (unsigned)attemptNumber,
                      (unsigned)kMaxRecoveryAttempts);
   } else {
     BROADCAST_PRINTF("[G2] Recovery: scanning for missing %s temple "
                      "(no saved MAC — name-based match, attempt %u/%u)",
                      sideStr,
-                     (unsigned)(gRecoveryAttemptCount + 1),
+                     (unsigned)attemptNumber,
                      (unsigned)kMaxRecoveryAttempts);
   }
 
@@ -9602,11 +10250,11 @@ static bool attemptMissingArmRecovery() {
   // takes on first-ever connect. gConnectTarget still pins the side, so
   // an advert for the *other* temple won't accidentally claim this slot.
   if (haveMac) {
-    if (needL) { gG2FilterMacL = savedMac; gG2FilterMacR = String(); }
-    else       { gG2FilterMacL = String(); gG2FilterMacR = savedMac; }
+    g2ScanSetMacContext(needL ? savedMac : nullptr,
+                        needR ? savedMac : nullptr,
+                        job.mac, job.mac2);
   } else {
-    gG2FilterMacL = String();
-    gG2FilterMacR = String();
+    g2ScanSetMacContext(nullptr, nullptr, job.mac, job.mac2);
   }
   gConnectTarget = missingEye;
   gScanFoundL = false;
@@ -9617,9 +10265,16 @@ static bool attemptMissingArmRecovery() {
   gScan->setActiveScan(true);
   gScan->setInterval(100);
   gScan->setWindow(99);
-  gScan->setAdvertisedDeviceCallbacks(new G2ScanCallbacks(), true);
+  gScan->setAdvertisedDeviceCallbacks(&gG2ScanCallbacks, true);
   const uint32_t kScanSec = 3;
   gG2ScanStoppedEarly = false;
+  const uint32_t scanEpoch = g2ScanCallbackBegin();
+  if (scanEpoch == 0) {
+    g2ScanClearMacContext();
+    gConnectTarget = G2_EYE_AUTO;
+    DEBUG_G2F("[G2] recovery: scan generation unavailable");
+    return false;
+  }
   gScan->start(kScanSec, [](BLEScanResults) {}, false);
 
   // Same poll-with-yield pattern as g2ConnectSync. Yields the heartbeat
@@ -9627,19 +10282,30 @@ static bool attemptMissingArmRecovery() {
   // as soon as the missing side is populated.
   const uint32_t deadline = millis() + (kScanSec * 1000) + 500;
   while (millis() < deadline) {
-    if (gBeatTaskStop) break;
+    if (gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
+        !survivorCurrent()) {
+      break;
+    }
     if ((needL && gScanFoundL) || (needR && gScanFoundR)) break;
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   g2ScanStopIfActive();
+  const bool scanCallbacksIdle = g2ScanCallbackEnd(scanEpoch);
 
   // Clear the filters so the next open scan (manual g2connect, etc.)
   // sees both sides again.
-  gG2FilterMacL = String();
-  gG2FilterMacR = String();
+  g2ScanClearMacContext();
   gConnectTarget = G2_EYE_AUTO;
 
-  if (gBeatTaskStop) return false;
+  if (!scanCallbacksIdle) {
+    DEBUG_G2F("[G2] recovery: scan callback did not quiesce");
+    return false;
+  }
+
+  if (gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
+      !survivorCurrent()) {
+    return false;
+  }
 
   if (!missing->advertisedDevice) {
     DEBUG_G2F("[G2] recovery: %s temple not seen during scan", sideStr);
@@ -9651,10 +10317,134 @@ static bool attemptMissingArmRecovery() {
     return false;
   }
 
-  BROADCAST_PRINTF("[G2] Recovery: %s temple reconnected — both sides up",
-                   sideStr);
-  g2PushStatusEvent("recovery-ok");
+  bool completionCurrent = false;
+  bool persistNeeded = false;
+  {
+    G2CompletionGuard completion;
+    if (completion && job.cancelEpoch == bleConnectCancelEpochSnapshot() &&
+        !bleConnectCancelPendingSnapshot()) {
+      const G2LinkSnapshot completedLinks = g2LinkSnapshot();
+      const bool survivorStillCurrent = needL
+          ? (completedLinks.right &&
+             completedLinks.rightGeneration == survivorGeneration &&
+             templeMatchesSavedTarget(gR, survivorMac, survivorAddressType,
+                                      survivorAddressTypeKnown))
+          : (completedLinks.left &&
+             completedLinks.leftGeneration == survivorGeneration &&
+             templeMatchesSavedTarget(gL, survivorMac, survivorAddressType,
+                                      survivorAddressTypeKnown));
+      completionCurrent = repairIntentCurrent() && survivorStillCurrent &&
+          completedLinks.left && completedLinks.right &&
+          blePeerCommitRepairIfCurrent(
+              BLE_PEER_G2_GLASSES, job.peerIntentGeneration,
+              job.peerIdentityGeneration,
+              gL.connected ? gL.deviceAddress : String(),
+              gR.connected ? gR.deviceAddress : String(), &persistNeeded);
+      if (completionCurrent) {
+        gG2PublishedTempleMask |= 0x03;
+        BROADCAST_PRINTF("[G2] Recovery: %s temple reconnected — both sides up",
+                         sideStr);
+        gG2State->state = G2_STATE_CONNECTED;
+        if (gG2State->connectedSince == 0) {
+          gG2State->connectedSince = millis();
+        }
+        startHeartbeatTimer();
+        g2PushStatusEvent("recovery-ok");
+      }
+    }
+  }
+  if (!completionCurrent) {
+    DEBUG_G2F("[G2] recovery: topology/identity changed after %s OPEN — "
+              "closing only the newly-created link", sideStr);
+    disconnectTemple(*missing);
+    return false;
+  }
+  if (persistNeeded) (void)writeSettingsJson();
   return true;
+}
+
+static bool queueMissingArmRecovery(bool manualIntent = false) {
+  BleConnectJob job{};
+  job.kind = BleConnectKind::G2_REPAIR;
+  uint32_t epoch = 0;
+  BlePeerReconnectSnapshot intent;
+  BlePeerSavedTargetSnapshot target;
+  {
+    // Manual repair admission and explicit user-down share this mutex. The
+    // peer intent and family cancel epoch therefore have one total order.
+    G2CompletionGuard completion;
+    if (!completion || !g2ConnectClaim(&epoch)) return false;
+
+    portENTER_CRITICAL(&gRecoveryMux);
+    if (gRecoveryAttemptQueued) {
+      portEXIT_CRITICAL(&gRecoveryMux);
+      g2ConnectRelease();
+      return false;
+    }
+    gRecoveryAttemptQueued = true;
+    portEXIT_CRITICAL(&gRecoveryMux);
+
+    job.cancelEpoch = epoch;
+    bool intentReady = false;
+    if (manualIntent) {
+      intentReady = blePeerBeginManualLearn(
+          BLE_PEER_G2_GLASSES, job.peerIntentGeneration,
+          job.peerIdentityGeneration);
+    } else if (blePeerReconnectSnapshot(BLE_PEER_G2_GLASSES, intent)) {
+      job.peerIntentGeneration = intent.intentGeneration;
+      job.peerIdentityGeneration = intent.identityGeneration;
+      job.peerAutoReconnect = intent.autoReconnect;
+      job.peerExplicitReseek = intent.explicitReseek;
+      intentReady = !intent.userDisconnect && intent.ownerAuthorityAvailable;
+    }
+    if (!intentReady ||
+        !blePeerSavedTargetSnapshot(BLE_PEER_G2_GLASSES, target) ||
+        job.peerIdentityGeneration != target.identityGeneration) {
+      portENTER_CRITICAL(&gRecoveryMux);
+      gRecoveryAttemptQueued = false;
+      portEXIT_CRITICAL(&gRecoveryMux);
+      g2ConnectRelease();
+      return false;
+    }
+    copyBleAddressText(job.mac, target.target.mac1);
+    copyBleAddressText(job.mac2, target.target.mac2);
+    job.addressType1 = target.target.addressType1;
+    job.addressType2 = target.target.addressType2;
+    job.addressType1Known = target.target.addressType1Known;
+    job.addressType2Known = target.target.addressType2Known;
+  }
+  if (!g2SubmitBleConnect(job)) {
+    portENTER_CRITICAL(&gRecoveryMux);
+    gRecoveryAttemptQueued = false;
+    portEXIT_CRITICAL(&gRecoveryMux);
+    g2ConnectRelease();
+    return false;
+  }
+  return true;
+}
+
+static void missingArmRecoveryComplete(bool ok) {
+  const G2LinkSnapshot links = g2LinkSnapshot();
+  portENTER_CRITICAL(&gRecoveryMux);
+  gRecoveryAttemptQueued = false;
+  if ((links.left && links.right) || (!links.left && !links.right)) {
+    // Both-down terminates the finite half-heal episode. Persistent full
+    // reconnect intent remains owned by BLE_Peers when autoReconnect is on.
+    gNextRecoveryAttemptMs = 0;
+    gRecoveryAttemptCount = 0;
+  } else if (ok) {
+    gNextRecoveryAttemptMs = 0;
+    gRecoveryAttemptCount = 0;
+  } else {
+    if (gRecoveryAttemptCount < 0xFF) ++gRecoveryAttemptCount;
+    if (gRecoveryAttemptCount < kMaxRecoveryAttempts) {
+      gNextRecoveryAttemptMs =
+          millis() + kRecoveryBackoffMs[gRecoveryAttemptCount];
+    } else {
+      gNextRecoveryAttemptMs = 0;
+    }
+  }
+  portEXIT_CRITICAL(&gRecoveryMux);
 }
 
 // Heartbeat-tick hook. Decides whether to actually run recovery this
@@ -9665,13 +10455,20 @@ static void recoveryHeartbeatTick() {
 
   // Both up — nothing to do, and reset the backoff so the next
   // half-connect cycle starts fresh.
-  if (gL.connected && gR.connected) {
+  const G2LinkSnapshot links = g2LinkSnapshot();
+  if (links.left && links.right) {
     resetRecoveryBackoff();
     return;
   }
   // Both down — explicit teardown path, not our business.
-  if (!gL.connected && !gR.connected) {
+  if (!links.left && !links.right) {
     resetRecoveryBackoff();
+    return;
+  }
+
+  portENTER_CRITICAL(&gRecoveryMux);
+  if (gRecoveryAttemptQueued) {
+    portEXIT_CRITICAL(&gRecoveryMux);
     return;
   }
 
@@ -9680,27 +10477,35 @@ static void recoveryHeartbeatTick() {
     gNextRecoveryAttemptMs = millis() + kRecoveryBackoffMs[0];
     gRecoveryAttemptCount  = 0;
     gRecoveryGiveUpLogged  = false;  // new episode — re-arm the give-up event
+    portEXIT_CRITICAL(&gRecoveryMux);
     return;
   }
   // Out of attempts — silent give-up. Manual g2recover resets.
   if (gRecoveryAttemptCount >= kMaxRecoveryAttempts) {
     if (!gRecoveryGiveUpLogged) {
       gRecoveryGiveUpLogged = true;
+      portEXIT_CRITICAL(&gRecoveryMux);
       logSystemEvent("G2", "half-connected recovery gave up: %s temple still missing after %u attempts",
-                     gL.connected ? "RIGHT" : "LEFT", (unsigned)kMaxRecoveryAttempts);
+                     links.left ? "RIGHT" : "LEFT", (unsigned)kMaxRecoveryAttempts);
+      return;
     }
+    portEXIT_CRITICAL(&gRecoveryMux);
     return;
   }
   // Not yet time.
-  if ((int32_t)(millis() - gNextRecoveryAttemptMs) < 0) return;
+  if ((int32_t)(millis() - gNextRecoveryAttemptMs) < 0) {
+    portEXIT_CRITICAL(&gRecoveryMux);
+    return;
+  }
+  portEXIT_CRITICAL(&gRecoveryMux);
 
-  const bool ok = attemptMissingArmRecovery();
-  gRecoveryAttemptCount++;
-  if (ok) {
-    resetRecoveryBackoff();
-  } else if (gRecoveryAttemptCount < kMaxRecoveryAttempts) {
-    gNextRecoveryAttemptMs =
-        millis() + kRecoveryBackoffMs[gRecoveryAttemptCount];
+  // Admission only. The existing central worker performs the scan/connect,
+  // leaving the heartbeat/control owner responsive during a 35 s OPEN wait.
+  // A busy/coalesced submission does not consume a retry slot.
+  if (!queueMissingArmRecovery()) {
+    portENTER_CRITICAL(&gRecoveryMux);
+    gNextRecoveryAttemptMs = millis() + 1000;
+    portEXIT_CRITICAL(&gRecoveryMux);
   }
 }
 
@@ -9979,6 +10784,7 @@ static portMUX_TYPE gEvenAiSessionMux = portMUX_INITIALIZER_UNLOCKED;
 // for the `evenai_timing` EVT emitted by the recorder task at auto-stop.
 static volatile uint32_t gEvenAiLastWakeMs = 0;
 uint32_t g2EvenAiLastWakeMs() { return gEvenAiLastWakeMs; }
+void g2EvenAiHostStateChanged() { g2ControlWake(); }
 static uint32_t gEvenAiBootNonce = 0;
 static uint32_t gEvenAiExchangeCounter = 0;
 static uint32_t gEvenAiMagicCtr = 200;  // magicRandom base — MUST stay byte-sized
@@ -10000,6 +10806,187 @@ struct G2EvenAiPendingCancel {
   uint8_t deliveredCopies;
   char reason[24];
 };
+
+// Distinct, stable terminal reasons for the UART-host guard. Keep the legacy
+// `host_link_lost` prefix so operational greps remain useful, and keep every
+// spelling within G2EvenAiPendingCancel::reason (including its trailing NUL).
+static constexpr char kEvenAiHostRuntimeLost[] = "host_link_lost_runtime";
+static constexpr char kEvenAiHostNeverAuthed[] = "host_link_lost_never";
+static constexpr char kEvenAiHostSessionCleared[] = "host_link_lost_cleared";
+static constexpr char kEvenAiHostSessionChanged[] = "host_link_lost_epoch";
+static constexpr char kEvenAiHostServiceNever[] = "host_service_never";
+static constexpr char kEvenAiHostServiceStale[] = "host_service_stale";
+static constexpr char kEvenAiHostServiceUnready[] = "host_service_unready";
+static constexpr char kEvenAiHostServiceBusy[] = "host_service_busy";
+static_assert(sizeof(kEvenAiHostRuntimeLost) <=
+              sizeof(((G2EvenAiPendingCancel*)nullptr)->reason));
+static_assert(sizeof(kEvenAiHostNeverAuthed) <=
+              sizeof(((G2EvenAiPendingCancel*)nullptr)->reason));
+static_assert(sizeof(kEvenAiHostSessionCleared) <=
+              sizeof(((G2EvenAiPendingCancel*)nullptr)->reason));
+static_assert(sizeof(kEvenAiHostSessionChanged) <=
+              sizeof(((G2EvenAiPendingCancel*)nullptr)->reason));
+static_assert(sizeof(kEvenAiHostServiceNever) <=
+              sizeof(((G2EvenAiPendingCancel*)nullptr)->reason));
+static_assert(sizeof(kEvenAiHostServiceStale) <=
+              sizeof(((G2EvenAiPendingCancel*)nullptr)->reason));
+static_assert(sizeof(kEvenAiHostServiceUnready) <=
+              sizeof(((G2EvenAiPendingCancel*)nullptr)->reason));
+static_assert(sizeof(kEvenAiHostServiceBusy) <=
+              sizeof(((G2EvenAiPendingCancel*)nullptr)->reason));
+
+enum class G2EvenAiHostGate : uint8_t {
+  Ready,
+  RuntimeStopped,
+  NeverAuthenticated,
+  SessionCleared,
+  SessionChanged,
+  ServiceNever,
+  ServiceStale,
+  ServiceUnready,
+  ServiceBusy,
+};
+
+// Pure classification over one host-link observation. `lastSessionEpoch` is
+// diagnostic history, never authority: activeSessionEpoch remains the only
+// authorization token. A fresh exchange has boundSessionEpoch=0 until ENTER.
+static constexpr G2EvenAiHostGate g2EvenAiClassifyHostGate(
+    bool uartRunning, uint32_t activeSessionEpoch,
+    uint32_t lastSessionEpoch, uint32_t boundSessionEpoch,
+    bool cm5SeenForSession = true, bool cm5Fresh = true,
+    Cm5PresenceMode cm5Mode = Cm5PresenceMode::Ready,
+    bool cm5CommandInFlight = false) {
+  if (!uartRunning) return G2EvenAiHostGate::RuntimeStopped;
+  if (activeSessionEpoch == 0) {
+    return lastSessionEpoch == 0 ? G2EvenAiHostGate::NeverAuthenticated
+                                 : G2EvenAiHostGate::SessionCleared;
+  }
+  if (boundSessionEpoch != 0 &&
+      activeSessionEpoch != boundSessionEpoch) {
+    return G2EvenAiHostGate::SessionChanged;
+  }
+  if (!cm5SeenForSession) return G2EvenAiHostGate::ServiceNever;
+  if (!cm5Fresh) return G2EvenAiHostGate::ServiceStale;
+  const bool busy = cm5Mode == Cm5PresenceMode::Busy || cm5CommandInFlight;
+  // Busy is healthy for the exchange already bound to this exact UART epoch,
+  // but it declines a new wake until the daemon advertises ready again.
+  if (busy)
+    return boundSessionEpoch != 0 ? G2EvenAiHostGate::Ready
+                                  : G2EvenAiHostGate::ServiceBusy;
+  if (cm5Mode != Cm5PresenceMode::Ready)
+    return G2EvenAiHostGate::ServiceUnready;
+  return G2EvenAiHostGate::Ready;
+}
+
+static const char* g2EvenAiHostGateReason(G2EvenAiHostGate cause) {
+  switch (cause) {
+    case G2EvenAiHostGate::RuntimeStopped: return kEvenAiHostRuntimeLost;
+    case G2EvenAiHostGate::NeverAuthenticated: return kEvenAiHostNeverAuthed;
+    case G2EvenAiHostGate::SessionCleared: return kEvenAiHostSessionCleared;
+    case G2EvenAiHostGate::SessionChanged: return kEvenAiHostSessionChanged;
+    case G2EvenAiHostGate::ServiceNever: return kEvenAiHostServiceNever;
+    case G2EvenAiHostGate::ServiceStale: return kEvenAiHostServiceStale;
+    case G2EvenAiHostGate::ServiceUnready: return kEvenAiHostServiceUnready;
+    case G2EvenAiHostGate::ServiceBusy: return kEvenAiHostServiceBusy;
+    case G2EvenAiHostGate::Ready: break;
+  }
+  return nullptr;
+}
+
+struct G2EvenAiHostObservation {
+  bool uartRunning;
+  uint32_t activeSessionEpoch;
+  uint32_t lastSessionEpoch;
+  uint32_t boundSessionEpoch;
+  G2EvenAiHostGate cause;
+  const char* lastSessionEvent;
+  Cm5PresenceMode cm5Mode;
+  uint32_t cm5AgeMs;
+  bool cm5SeenForSession;
+  bool cm5Fresh;
+  bool cm5CommandInFlight;
+};
+
+static void g2EvenAiFormatExchangeId(uint64_t id, char out[17]);
+
+static G2EvenAiHostObservation g2EvenAiObserveHost(
+    uint32_t boundSessionEpoch) {
+  G2EvenAiHostObservation out{};
+  const UartLinkSessionDiagnostics session = uartLinkSessionDiagnostics();
+  out.uartRunning = uartLinkIsRunning();
+  out.activeSessionEpoch = session.activeEpoch;
+  out.lastSessionEpoch = session.lastEpoch;
+  out.boundSessionEpoch = boundSessionEpoch;
+  const Cm5PresenceSnapshot cm5 =
+      cm5PresenceSnapshotForSession(session.activeEpoch, millis());
+  out.cm5Mode = cm5.mode;
+  out.cm5AgeMs = cm5.ageMs;
+  out.cm5SeenForSession = cm5.seenForSession;
+  out.cm5Fresh = cm5.fresh;
+  out.cm5CommandInFlight = cm5.commandInFlight;
+  out.cause = g2EvenAiClassifyHostGate(
+      out.uartRunning, out.activeSessionEpoch,
+      out.lastSessionEpoch, out.boundSessionEpoch,
+      out.cm5SeenForSession, out.cm5Fresh, out.cm5Mode,
+      out.cm5CommandInFlight);
+  out.lastSessionEvent = session.lastEvent;
+  return out;
+}
+
+static void g2EvenAiLogHostFailure(uint64_t exchangeId, const char* stage,
+                                   const G2EvenAiHostObservation& host) {
+  char id[17];
+  g2EvenAiFormatExchangeId(exchangeId, id);
+  DEBUG_G2F("[G2-EVENAI] host guard failed id=%s stage=%s reason=%s "
+            "uart=%s activeEpoch=%lu lastEpoch=%lu boundEpoch=%lu "
+            "lastEvent=%s cm5=%s cm5Seen=%d cm5Fresh=%d cm5Age=%lums "
+            "cm5Cmd=%d",
+            id, stage ? stage : "unknown",
+            g2EvenAiHostGateReason(host.cause),
+            host.uartRunning ? "running" : "stopped",
+            (unsigned long)host.activeSessionEpoch,
+            (unsigned long)host.lastSessionEpoch,
+            (unsigned long)host.boundSessionEpoch,
+            host.lastSessionEvent ? host.lastSessionEvent : "unknown",
+            cm5PresenceModeName(host.cm5Mode), host.cm5SeenForSession ? 1 : 0,
+            host.cm5Fresh ? 1 : 0, (unsigned long)host.cm5AgeMs,
+            host.cm5CommandInFlight ? 1 : 0);
+}
+
+static_assert(g2EvenAiClassifyHostGate(false, 0, 0, 0) ==
+              G2EvenAiHostGate::RuntimeStopped);
+static_assert(g2EvenAiClassifyHostGate(false, 7, 7, 7) ==
+              G2EvenAiHostGate::RuntimeStopped);
+static_assert(g2EvenAiClassifyHostGate(true, 0, 0, 0) ==
+              G2EvenAiHostGate::NeverAuthenticated);
+static_assert(g2EvenAiClassifyHostGate(true, 0, 7, 0) ==
+              G2EvenAiHostGate::SessionCleared);
+static_assert(g2EvenAiClassifyHostGate(true, 8, 8, 0) ==
+              G2EvenAiHostGate::Ready);
+static_assert(g2EvenAiClassifyHostGate(true, 8, 8, 8) ==
+              G2EvenAiHostGate::Ready);
+static_assert(g2EvenAiClassifyHostGate(true, 8, 8, 7) ==
+              G2EvenAiHostGate::SessionChanged);
+static_assert(g2EvenAiClassifyHostGate(
+                  true, 8, 8, 0, false, false,
+                  Cm5PresenceMode::Unknown, false) ==
+              G2EvenAiHostGate::ServiceNever);
+static_assert(g2EvenAiClassifyHostGate(
+                  true, 8, 8, 0, true, false,
+                  Cm5PresenceMode::Ready, false) ==
+              G2EvenAiHostGate::ServiceStale);
+static_assert(g2EvenAiClassifyHostGate(
+                  true, 8, 8, 0, true, true,
+                  Cm5PresenceMode::Starting, false) ==
+              G2EvenAiHostGate::ServiceUnready);
+static_assert(g2EvenAiClassifyHostGate(
+                  true, 8, 8, 0, true, true,
+                  Cm5PresenceMode::Busy, false) ==
+              G2EvenAiHostGate::ServiceBusy);
+static_assert(g2EvenAiClassifyHostGate(
+                  true, 8, 8, 8, true, true,
+                  Cm5PresenceMode::Busy, false) ==
+              G2EvenAiHostGate::Ready);
 
 static constexpr uint8_t G2_EVENAI_CANCEL_DEPTH = 4;
 static constexpr uint8_t G2_EVENAI_CANCEL_MAX_ATTEMPTS = 80;
@@ -10139,11 +11126,16 @@ static bool g2EvenAiTryCancelEvent(uint64_t exchangeId,
   return uartLinkTryPushEventForSession(sessionEpoch, evt);
 }
 
-static void g2EvenAiQueueCancelRetry(uint64_t exchangeId,
+static bool g2EvenAiQueueCancelRetry(uint64_t exchangeId,
                                      uint32_t sessionEpoch,
                                      const char* reason,
                                      uint8_t deliveredCopies) {
-  if (!exchangeId || !sessionEpoch) return;
+  // An old login epoch can never become active again. Do not advertise or
+  // spend eight seconds retrying a cancel that its session fence must reject.
+  // The exact-session check can race a later logout, but that only leaves the
+  // existing bounded tombstone; it cannot cross authority to a new login.
+  if (!exchangeId || !sessionEpoch || !uartLinkIsRunning() ||
+      uartLinkSessionEpoch() != sessionEpoch) return false;
   const uint32_t nowMs = millis();
   G2EvenAiPendingCancel pending{};
   pending.exchangeId = exchangeId;
@@ -10188,8 +11180,9 @@ static void g2EvenAiQueueCancelRetry(uint64_t exchangeId,
     char evicted[17];
     g2EvenAiFormatExchangeId(evictedId, evicted);
     DEBUG_G2F("[G2-EVENAI] cancel retry queue full — evicted oldest id=%s",
-              evicted);
+                  evicted);
   }
+  return true;
 }
 
 static bool g2EvenAiCancelRetryPending() {
@@ -10294,11 +11287,19 @@ static bool g2EvenAiTerminate(uint64_t expectedId, const char* reason) {
   // even after a locally accepted write and send three total copies; the host
   // keys cancellation by exchange ID, so duplicates are harmless while a
   // reset/corrupt UART frame no longer silently wastes a full inference.
-  g2EvenAiQueueCancelRetry(endedId, endedSessionEpoch, reason,
-                           pushed ? 1 : 0);
+  const bool retryQueued = g2EvenAiQueueCancelRetry(
+      endedId, endedSessionEpoch, reason, pushed ? 1 : 0);
+  const char* cancelState = nullptr;
+  if (pushed) {
+    cancelState = retryQueued ? "queued+repeat" : "queued";
+  } else if (retryQueued) {
+    cancelState = "retry-pending";
+  } else {
+    cancelState = endedSessionEpoch ? "session-gone" : "not-bound";
+  }
   DEBUG_G2F("[G2-EVENAI] terminal id=%s reason=%s cancelEvt=%s",
             id, (reason && reason[0]) ? reason : "ended",
-            pushed ? "queued+repeat" : "retry-pending");
+            cancelState);
   if (gBeatSem) xSemaphoreGive(gBeatSem);
   return true;
 }
@@ -10500,6 +11501,16 @@ static const uint32_t kEvenAiCapStartTimeoutMs = 5000;
 // Mirrors queueAutomationSubCommand in System_Automation.cpp;
 // MSG_ROUTE_FILE keeps results off every live surface (audit log only).
 static bool g2EvenAiSubmitCmd(const char* line) {
+  const bool startsAuthorityBoundWork =
+      strcasecmp(line, "openmic") == 0 ||
+      strncasecmp(line, "micrecord startid ", 18) == 0;
+  const G2EvenAiSessionState authority = g2EvenAiSessionSnapshot();
+  if (startsAuthorityBoundWork &&
+      (!authority.active || authority.exchangeId == 0 ||
+       authority.uartSessionEpoch == 0 ||
+       uartLinkSessionEpoch() != authority.uartSessionEpoch)) {
+    return false;
+  }
   Command uc;
   uc.line = line;
   uc.ctx.origin         = ORIGIN_SYSTEM;
@@ -10511,6 +11522,12 @@ static bool g2EvenAiSubmitCmd(const char* line) {
   uc.ctx.auth.opaque    = nullptr;
   uc.ctx.id             = (uint32_t)millis();
   uc.ctx.timestampMs    = (uint32_t)millis();
+  uc.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
+  if (startsAuthorityBoundWork) {
+    uc.ctx.authorityId = authority.exchangeId;
+    uc.ctx.authoritySessionEpoch = authority.uartSessionEpoch;
+    uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY;
+  }
   uc.ctx.outputMask     = MSG_ROUTE_FILE;
   uc.ctx.validateOnly   = false;
   uc.ctx.replyHandle    = nullptr;
@@ -10597,9 +11614,19 @@ static void g2EvenAiCaptureTick() {
         // Link/session died between kick and start. Do not hold the native
         // card open for a consumer that never learned this ID; termination
         // makes the next capture tick stop+discard the owned recording.
-        DEBUG_G2F("[G2-EVENAI] capture live but host wake push failed");
+        const G2EvenAiHostObservation wakeHost =
+            g2EvenAiObserveHost(nativeSession.uartSessionEpoch);
+        const char* wakeFailure = g2EvenAiHostGateReason(wakeHost.cause);
+        if (wakeFailure != nullptr) {
+          g2EvenAiLogHostFailure(gEvenAiCapExchangeId, "wake_event",
+                                 wakeHost);
+        } else {
+          DEBUG_G2F("[G2-EVENAI] capture live but host wake push failed "
+                    "(session healthy; TX admission failed)");
+        }
         (void)g2EvenAiSendCtrl(gEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
-        g2EvenAiTerminate(gEvenAiCapExchangeId, "wake_event_failed");
+        g2EvenAiTerminate(gEvenAiCapExchangeId,
+                          wakeFailure ? wakeFailure : "wake_event_failed");
       }
     } else if (millis() - gEvenAiCapKickMs >= kEvenAiCapStartTimeoutMs) {
       DEBUG_G2F("[G2-EVENAI] capture never started within %lums — giving up",
@@ -10634,17 +11661,20 @@ static void g2EvenAiSessionTick() {
   if (!s.active) return;
   const uint64_t exchangeId = s.exchangeId;
 #if ENABLE_MICROPHONE
-  // A deliberate UART-link stop or authentication revocation means the CM5
-  // can no longer finish this exchange.  Commit the local display fence now;
-  // the advisory cancel may be undeliverable, but captureTick will still
-  // finalize+discard the exact owned WAV.  (A crashed host process cannot be
-  // detected on a permanently-open UART without a future host lease/heartbeat;
-  // the 60 s session cap remains that last-resort bound.)
-  if (!uartLinkIsRunning() || uartLinkSessionEpoch() == 0 ||
-      (s.uartSessionEpoch != 0 &&
-       uartLinkSessionEpoch() != s.uartSessionEpoch)) {
+  // A deliberate UART-link stop or authentication loss means the CM5 can no
+  // longer finish this exchange. Snapshot each independently synchronized
+  // value once, classify the exact observed state, and include all four values
+  // in the log. The retained generation distinguishes "never authenticated on
+  // this boot" from "a previously authenticated session was cleared" without
+  // granting any authority. A changed nonzero epoch means logout/re-login
+  // occurred after this exchange was bound.
+  const G2EvenAiHostObservation host =
+      g2EvenAiObserveHost(s.uartSessionEpoch);
+  const char* hostFailure = g2EvenAiHostGateReason(host.cause);
+  if (hostFailure != nullptr) {
+    g2EvenAiLogHostFailure(exchangeId, "session_tick", host);
     (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
-    g2EvenAiTerminate(exchangeId, "host_link_lost");
+    g2EvenAiTerminate(exchangeId, hostFailure);
     return;
   }
 #endif
@@ -10654,7 +11684,8 @@ static void g2EvenAiSessionTick() {
   }
   const uint32_t nowMs = millis();
   if (g2EvenAiTakeEnterPending(exchangeId)) {
-    uint32_t admittedSessionEpoch = uartLinkSessionEpoch();
+    const G2EvenAiHostObservation admissionHost = g2EvenAiObserveHost(0);
+    const uint32_t admittedSessionEpoch = admissionHost.activeSessionEpoch;
 #if ENABLE_MICROPHONE
     // No-consumer guard: with no logged-in CM5 host session (or a foreign
     // recording hogging the mic) nobody can transcribe or answer this wake.
@@ -10671,15 +11702,23 @@ static void g2EvenAiSessionTick() {
       g2EvenAiSetEnterPending(exchangeId, true);
       return;
     }
+    const bool hostReady = admissionHost.cause == G2EvenAiHostGate::Ready;
     const bool canCapture =
-        uartLinkIsRunning() && admittedSessionEpoch != 0 &&
+        hostReady &&
         getMicRecordingState() == MicRecordingState::IDLE &&
         gEvenAiCapState == EVENAI_CAP_IDLE;
     if (!canCapture) {
-      DEBUG_G2F("[G2-EVENAI] wake declined — no host to answer "
-                "(link=%d auth=%d foreignRec=%d)",
-                (int)uartLinkIsRunning(),
-                (int)(uartLinkSessionEpoch() != 0),
+      const char* admissionFailure =
+          g2EvenAiHostGateReason(admissionHost.cause);
+      if (admissionFailure != nullptr) {
+        g2EvenAiLogHostFailure(exchangeId, "capture_admission",
+                               admissionHost);
+        (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+        g2EvenAiTerminate(exchangeId, admissionFailure);
+        return;
+      }
+      DEBUG_G2F("[G2-EVENAI] wake declined — recorder unavailable "
+                "(host session healthy, foreignRec=%d)",
                 (int)micRecordingBusy());
       g2EvenAiTerminate(exchangeId, "no_consumer");
       return;
@@ -10687,16 +11726,56 @@ static void g2EvenAiSessionTick() {
 #endif
     // Bind the native exchange before ENTER or any later tagged mutation.
     // A logout/re-login, even by the same user/controller, cannot inherit it.
+    bool boundToHost = false;
     portENTER_CRITICAL(&gEvenAiSessionMux);
     if (gEvenAiSession.active &&
         gEvenAiSession.exchangeId == exchangeId &&
         uartLinkSessionEpoch() == admittedSessionEpoch &&
         admittedSessionEpoch != 0) {
       gEvenAiSession.uartSessionEpoch = admittedSessionEpoch;
+      boundToHost = true;
     }
     portEXIT_CRITICAL(&gEvenAiSessionMux);
+    if (!boundToHost) {
+      const G2EvenAiSessionState afterBind = g2EvenAiSessionSnapshot();
+      if (!afterBind.active || afterBind.exchangeId != exchangeId) return;
+      G2EvenAiHostObservation bindHost =
+          g2EvenAiObserveHost(admittedSessionEpoch);
+      if (bindHost.cause == G2EvenAiHostGate::Ready)
+        bindHost.cause = G2EvenAiHostGate::SessionChanged;
+      const char* bindFailure = g2EvenAiHostGateReason(bindHost.cause);
+      g2EvenAiLogHostFailure(exchangeId, "session_bind", bindHost);
+      (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+      g2EvenAiTerminate(exchangeId, bindFailure);
+      return;
+    }
+    // Recheck after publishing the epoch binding and before ENTER. A daemon
+    // can become busy/stale between the admission snapshot and this point;
+    // bound exchanges normally tolerate busy, but this one has not entered
+    // the native session yet and must still obey new-admission policy.
+    G2EvenAiHostObservation preEnterHost =
+        g2EvenAiObserveHost(admittedSessionEpoch);
+    if (preEnterHost.cause == G2EvenAiHostGate::Ready &&
+        (preEnterHost.cm5Mode == Cm5PresenceMode::Busy ||
+         preEnterHost.cm5CommandInFlight)) {
+      preEnterHost.cause = G2EvenAiHostGate::ServiceBusy;
+    }
+    const char* preEnterFailure =
+        g2EvenAiHostGateReason(preEnterHost.cause);
+    if (preEnterFailure != nullptr) {
+      g2EvenAiLogHostFailure(exchangeId, "pre_enter", preEnterHost);
+      (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+      g2EvenAiTerminate(exchangeId, preEnterFailure);
+      return;
+    }
     if (!g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_ENTER)) {
-      g2EvenAiTerminate(exchangeId, "enter_failed");
+      const G2EvenAiHostObservation enterHost =
+          g2EvenAiObserveHost(admittedSessionEpoch);
+      const char* enterFailure = g2EvenAiHostGateReason(enterHost.cause);
+      if (enterFailure != nullptr)
+        g2EvenAiLogHostFailure(exchangeId, "enter", enterHost);
+      g2EvenAiTerminate(exchangeId,
+                        enterFailure ? enterFailure : "enter_failed");
       return;
     }
     portENTER_CRITICAL(&gEvenAiSessionMux);
@@ -10762,12 +11841,15 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     portENTER_CRITICAL(&gControlStateMux);
     policyTxnActive = gControlTxn.active;
     portEXIT_CRITICAL(&gControlStateMux);
-    // While a headless G2-mic capture is active, wake ~1 Hz so the keepalive
+    // While a headless G2-mic recording is active, wake ~1 Hz so the keepalive
     // re-assert below runs on time (the mic dies ~2 s after the last arm).
+    // The HAL lease can be permanently active due to mic autostart, so the
+    // recorder FSM is the authority for whether PCM delivery is needed.
     bool g2MicCaptureActive = false;
 #if ENABLE_MICROPHONE
     g2MicCaptureActive =
-        (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT);
+        (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT &&
+         micRecordingBusy());
 #endif
     const bool cancelRetryPending = g2EvenAiCancelRetryPending();
     // gMicRecFile/pending-close: a bench g2micrec dump has no HAL capture,
@@ -10792,7 +11874,8 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     // making a previous capture's `degraded` latch immortal. The pre-sleep
     // value above is only ever used for ownerWaitMs.
     g2MicCaptureActive =
-        (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT);
+        (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT &&
+         micRecordingBusy());
 #endif
 
 #if ENABLE_MICROPHONE
@@ -11021,9 +12104,10 @@ static bool g2ControlWorkerEnsure() {
     DEBUG_G2F("[G2] control owner start cancelled by teardown");
     return false;
   }
-  BaseType_t rc = xTaskCreatePinnedToCore(heartbeatWorkerTask, "g2_ctrl_owner",
+  BaseType_t rc = xTaskCreateLogged(heartbeatWorkerTask, "g2_ctrl_owner",
                               /*stack bytes*/ G2_CONTROL_STACK_BYTES, nullptr,
-                              /*prio*/ 5, &gBeatTaskHandle, APP_CORE);
+                              /*prio*/ 5, &gBeatTaskHandle,
+                              "g2.control", APP_CORE);
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] control owner task create failed (stack=%u internal=%u)",
               (unsigned)G2_CONTROL_STACK_BYTES, (unsigned)internalFree);
@@ -11146,7 +12230,7 @@ static uint32_t sG2PushedEpoch = 0;
 static uint32_t sG2PushedAtMs  = 0;
 static int32_t  sG2PushedTzQ   = INT32_MIN;
 
-static bool g2AutoTimeSyncIfReady(G2Temple& t) {
+static bool g2AutoTimeSyncIfReady(G2Temple& t, bool eager = false) {
   if (t.side != 'R') return false;          // builder targets right arm only
   if (!t.connected || t.pluginDead) return false;
 
@@ -11169,8 +12253,16 @@ static bool g2AutoTimeSyncIfReady(G2Temple& t) {
               (long)tzQ);
     return false;
   }
-  if (!sendEnvelope(t, env, n)) {
-    DEBUG_G2F("[G2-R] Auto time-sync: send failed");
+  // On the loop-driven (eager) path use the short heartbeat gate timeout and
+  // treat Busy/Fail as a clean skip — the adaptive tick retries on its 500 ms
+  // cadence, so a contended or GATT-degraded link can never block the main loop
+  // or hold the shared BLE-TX gate against heartbeats. The connect path (control
+  // task) stays patient with the full envelope timeout.
+  if (sendEnvelopeEx(t, env, n,
+                     eager ? G2_CENTRAL_TX_HEARTBEAT_MS
+                           : G2_CENTRAL_TX_ENVELOPE_MS) != G2SendResult::Ok) {
+    DEBUG_G2F("[G2-R] Auto time-sync: send deferred/failed%s",
+              eager ? " — retry next tick" : "");
     return false;
   }
   sG2PushedEpoch = (uint32_t)now;
@@ -11192,13 +12284,27 @@ static bool g2AutoTimeSyncIfReady(G2Temple& t) {
 // clock has moved more than 2 minutes from what they were last told (an NTP
 // arrival, a `timeset`, or a ring adoption). Self-quenching — drift is ~0
 // immediately after each push.
+// Adaptive cadence: eager while a correction is outstanding, relaxed once the
+// glasses agree with the ESP (and thus the CM5/NTP source). The idle path is a
+// single everyMs() compare, so the slow heartbeat is effectively free; the fast
+// cadence is entered only when there is something to fix (fresh link, timezone
+// change, clock step, or a send that has not yet landed) and self-quenches back
+// to slow the moment the push sticks. Mirrors the ring: retry until it takes.
+static constexpr uint32_t kG2TimeSyncFastMs = 500;
+static constexpr uint32_t kG2TimeSyncSlowMs = 2000;
+
 static void g2TimeSyncTick() {
   static uint32_t sLastMs = 0;
-  if (!everyMs(&sLastMs, 2000)) return;
+  static uint32_t sIntervalMs = kG2TimeSyncSlowMs;
+  if (!everyMs(&sLastMs, sIntervalMs)) return;
 
   static bool sWasUp = false;
   const bool up = gR.connected && !gR.pluginDead;
-  if (!up) { sWasUp = false; return; }
+  if (!up) {
+    sWasUp = false;
+    sIntervalMs = kG2TimeSyncSlowMs;   // nothing to sync while the link is down
+    return;
+  }
   if (!sWasUp) {          // fresh link: nothing has been told to THIS session
     sWasUp = true;
     sG2PushedEpoch = 0;
@@ -11207,7 +12313,10 @@ static void g2TimeSyncTick() {
   }
 
   const time_t now = Clock::epochSeconds();
-  if (!Clock::isValidEpoch(now)) return;   // still dark — nothing honest to send
+  if (!Clock::isValidEpoch(now)) {         // still dark — nothing honest to send
+    sIntervalMs = kG2TimeSyncSlowMs;
+    return;
+  }
 
   const int32_t tzQ = Clock::tzOffsetQuarterHours();
   const int64_t expected = (int64_t)sG2PushedEpoch +
@@ -11216,9 +12325,17 @@ static void g2TimeSyncTick() {
   if (drift < 0) drift = -drift;
 
   const bool never = (sG2PushedEpoch == 0);
-  if (!never && tzQ == sG2PushedTzQ && drift <= 120) return;
+  if (!never && tzQ == sG2PushedTzQ && drift <= 120) {
+    sIntervalMs = kG2TimeSyncSlowMs;       // glasses agree with the ESP → relax
+    return;
+  }
 
-  if (g2AutoTimeSyncIfReady(gR)) {
+  // Mismatch: fresh link, timezone changed, clock stepped, or a prior send has
+  // not landed. Push now and keep checking on the fast cadence until it sticks —
+  // a failed send leaves sG2Pushed* unchanged so the next fast tick retries;
+  // success updates them and the following tick relaxes back to the heartbeat.
+  sIntervalMs = kG2TimeSyncFastMs;
+  if (g2AutoTimeSyncIfReady(gR, /*eager=*/true)) {
     DEBUG_G2F("[G2-R] Time-sync re-pushed (%s)",
               never ? "first valid clock this link"
                     : (tzQ != sG2PushedTzQ ? "timezone changed" : "clock drifted"));
@@ -11291,7 +12408,7 @@ static bool templeReset(G2Temple& t) {
   // their gates. Then take the global TX gate followed by the per-temple
   // mutex, matching the normal send lock order. A sender that passed its
   // connected check before this reset must cross one of those gates.
-  t.connected = false;
+  g2SetTempleConnected(t, false);
   t.writeChar = nullptr;
   t.notifyChar = nullptr;
   t.audioNotifyChar = nullptr;
@@ -11319,26 +12436,22 @@ static bool templeReset(G2Temple& t) {
     // characteristics and descriptors — so a plain `delete` reclaims the
     // full GATT cache. We own the pointer; the library doesn't.
     //
-    // But disconnect() above is ASYNC: the DISCONNECT_EVT that unregisters
-    // the gattc app and pulls this client out of BLEDevice's routing map
-    // lands 50-500 ms later, and deleting before then hands the dispatcher
-    // a freed pointer. Same reap gate as the stale-replacement paths:
-    // wait (bounded) for getGattcIf() to drop, settle one poll interval,
-    // and leak instead of delete if the event never comes.
-    BLEClient* dead = t.client;
-    t.client = nullptr;
-    bool libReleased = false;
-    for (uint32_t waited = 0; ; waited += 50) {
-      if (dead->getGattcIf() == ESP_GATT_IF_NONE) { libReleased = true; break; }
-      if (waited >= 3000) break;
-      vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    if (libReleased) {
-      vTaskDelay(pdMS_TO_TICKS(50));
-      delete dead;
-    } else {
-      DEBUG_G2F("[G2-%c] templeReset: client NOT freed (lib still holds it) — "
-                "leaked by design", t.side);
+    // disconnect() is asynchronous. The patched library's checked deletion
+    // closes callback admission and succeeds only after routing/app-unregister
+    // ownership is retired. A false result leaves the client in BLEDevice's
+    // all-client registry for terminal deinitChecked() to quarantine/reap.
+    const bool retired = bleRetireClientForReplacement(
+        t.client,
+        t.side == 'L' ? BLE_CLIENT_RETIRE_G2_LEFT
+                      : BLE_CLIENT_RETIRE_G2_RIGHT,
+        (uint8_t)BLE_PEER_G2_GLASSES,
+        t.side == 'L' ? "G2-L" : "G2-R");
+    if (!retired && t.client) {
+      // The bounded slot was already occupied, so ownership could not be
+      // transferred. Retain every runtime object the client may reference.
+      if (t.writeMutex) xSemaphoreGive(t.writeMutex);
+      bleCentralTxGive();
+      return false;
     }
   }
   if (t.writeMutex) xSemaphoreGive(t.writeMutex);
@@ -11346,6 +12459,7 @@ static bool templeReset(G2Temple& t) {
   bleCentralTxGive();
   if (t.advertisedDevice) { delete t.advertisedDevice; t.advertisedDevice = nullptr; }
   t.containerReady = false;
+  if (t.side == 'R') g2PresentationEpochAdvance();
   templeForgetConnParams(t);
   // deinit wipes both temples, which invariably drops hijack state too.
   // Fire HijackExit so the FSM ends in Idle; the apply path also clears
@@ -11399,30 +12513,24 @@ static bool connectTemple(G2Temple& t) {
     // from turning this delete into a UAF), and (2) in-flight senders
     // hold t.writeMutex across their t.client/t.writeChar dereferences.
     // If either gate fails, leak rather than free reachable memory.
-    BLEClient* dead = t.client;
-    t.client = nullptr;
-    bool libReleased = false;
-    for (uint32_t waited = 0; ; waited += 50) {
-      if (dead->getGattcIf() == ESP_GATT_IF_NONE) { libReleased = true; break; }
-      if (waited >= 3000) break;
-      vTaskDelay(pdMS_TO_TICKS(50));
-    }
     const bool locked = t.writeMutex &&
         xSemaphoreTake(t.writeMutex, pdMS_TO_TICKS(2000)) == pdTRUE;
-    if (libReleased && locked) {
-      // One extra poll interval: gattc_if drops mid-DISCONNECT-case on the
-      // BTC task, a hair before the routing-map removal and onDisconnect
-      // callback finish with the object (cross-core, so genuinely parallel).
-      vTaskDelay(pdMS_TO_TICKS(50));
-      delete dead;
-    } else {
-      DEBUG_G2F("[G2-%c] Stale client NOT freed (libReleased=%d locked=%d) — "
-                "leaked by design", t.side, (int)libReleased, (int)locked);
+    if (!locked) {
+      DEBUG_G2F("[G2-%c] Stale client retirement deferred: writer active", t.side);
+      return false;
     }
-    if (locked) xSemaphoreGive(t.writeMutex);
+    const bool retired = bleRetireClientForReplacement(
+        t.client,
+        t.side == 'L' ? BLE_CLIENT_RETIRE_G2_LEFT
+                      : BLE_CLIENT_RETIRE_G2_RIGHT,
+        (uint8_t)BLE_PEER_G2_GLASSES,
+        t.side == 'L' ? "G2-L" : "G2-R");
+    xSemaphoreGive(t.writeMutex);
+    if (!retired) return false;
     t.clientStale = false;
   }
   if (!t.client) {
+    t.clientStale = false;
     DEBUG_G2F("[G2-%c] Creating new BLEClient", t.side);
     t.client = BLEDevice::createClient();
     if (!t.client) {
@@ -11466,6 +12574,11 @@ static bool connectTemple(G2Temple& t) {
   if (!bleConnectWatched(t.client, t.advertisedDevice, 35000, connTag)) {
     DEBUG_G2F("[G2-%c] BLE connect failed after %u ms",
               t.side, (unsigned)(millis() - tConnStart));
+    (void)bleQuarantineClientAfterFailedConnect(
+        t.client,
+        t.side == 'L' ? BLE_CLIENT_RETIRE_G2_LEFT
+                      : BLE_CLIENT_RETIRE_G2_RIGHT,
+        (uint8_t)BLE_PEER_G2_GLASSES, connTag);
     return false;
   }
   DEBUG_G2F("[G2-%c] BLE connect OK in %u ms",
@@ -11536,13 +12649,30 @@ static bool connectTemple(G2Temple& t) {
             t.writeChar->canWriteNoResponse() ? 1 : 0,
             t.notifyChar->canNotify() ? 1 : 0,
             t.notifyChar->canIndicate() ? 1 : 0);
-  if (t.notifyChar->canNotify()) {
-    DEBUG_G2F("[G2-%c] Subscribing to notifications", t.side);
-    g2AdvanceGeneration(t);
-    g2RxReset(t);
-    t.notifyChar->registerForNotify((t.side == 'L') ? notifyThunkL : notifyThunkR);
-  } else {
-    DEBUG_G2F("[G2-%c] WARN: notifyChar cannot notify — will not receive responses", t.side);
+  if (!t.notifyChar->canNotify()) {
+    DEBUG_G2F("[G2-%c] Notify characteristic cannot notify; refusing mute link",
+              t.side);
+    t.client->disconnect();
+    return false;
+  }
+  DEBUG_G2F("[G2-%c] Subscribing to notifications", t.side);
+  g2AdvanceGeneration(t);
+  g2RxReset(t);
+  const BLERemoteNotifyResult commandNotify =
+      t.notifyChar->registerForNotify(
+          (t.side == 'L') ? notifyThunkL : notifyThunkR);
+  if (!commandNotify.success) {
+    DEBUG_G2F("[G2-%c] Command notify registration failed api=%ld evt=%ld "
+              "descApi=%ld descEvt=%ld timeout=%d disconnected=%d",
+              t.side, (long)commandNotify.apiStatus,
+              (long)commandNotify.eventStatus,
+              (long)commandNotify.descriptorApiStatus,
+              (long)commandNotify.descriptorEventStatus,
+              (int)commandNotify.timedOut,
+              (int)commandNotify.disconnected);
+    t.notifyChar = nullptr;
+    t.client->disconnect();
+    return false;
   }
 
   // One-shot enumeration of undocumented services. Logs the char list +
@@ -11567,9 +12697,12 @@ static bool connectTemple(G2Temple& t) {
   // examined. This lets `g2micon` flip the firmware-side stream on/off
   // without needing to re-discover the char each time.
   t.audioNotifyChar = nullptr;
-  subscribeAudioNotify(t);
+  if (!subscribeAudioNotify(t)) {
+    DEBUG_G2F("[G2-%c] Audio notify unavailable; command link remains usable",
+              t.side);
+  }
 
-  t.connected = true;
+  g2SetTempleConnected(t, true);
   t.heartbeatCounter = 0;
   t.heartbeatMissed  = 0;
   t.pluginDead       = false;
@@ -11587,7 +12720,7 @@ static bool connectTemple(G2Temple& t) {
   if (!runSessionPrelude(t)) {
     DEBUG_G2F("[G2-%c] Prelude failed; disconnecting", t.side);
     t.client->disconnect();
-    t.connected = false;
+    g2SetTempleConnected(t, false);
     templeForgetConnParams(t);
     return false;
   }
@@ -11614,14 +12747,17 @@ static void disconnectTemple(G2Temple& t) {
   size_t n = g2BuildShutdown(seq, G2_MAGIC_SHUTDOWN, 0, buf, sizeof(buf));
   if (n) sendEnvelope(t, buf, n);
   if (t.client && t.client->isConnected()) t.client->disconnect();
-  t.connected = false;
+  g2SetTempleConnected(t, false);
   templeForgetConnParams(t);
   t.containerReady = false;
   // Explicit-disconnect path clears the hijack regardless of which arm —
   // either way, the right-side container we rely on is gone. FSM-side:
   // dispatch HijackExit so its state matches; apply path also clears
   // the lens-mirror container fields.
-  if (t.side == 'R') g2LensSetHijackActive(false);
+  if (t.side == 'R') {
+    g2PresentationEpochAdvance();
+    g2LensSetHijackActive(false);
+  }
 }
 
 // =============================================================================
@@ -11631,13 +12767,45 @@ static void disconnectTemple(G2Temple& t) {
 // Forward decls — defined further down alongside the unified BLE-connect
 // worker. Needed here because initG2Client / deinitG2Client call them but
 // are themselves above the worker definitions in the file.
-static void bleConnectInit();
-static void bleConnectShutdown();
+static bool bleConnectInit();
+static bool bleConnectShutdown();
 // Persistent G2 session worker (Health/Map/LLM/viewers/live pages).
-static void g2SessionEnsureWorker();
+static bool g2SessionEnsureWorker();
 static bool g2SessionShutdown();
+// Boot-lifetime lens/tap workers must positively release any job that could
+// still dereference temple/runtime state before deinit frees it.
+static bool g2UiWorkersQuiesce(uint32_t timeoutMs);
+
+class G2BleRoleTransitionClaim {
+ public:
+  explicit G2BleRoleTransitionClaim(BleRoleTransition state)
+      : held_(bleRoleTransitionBegin(state)) {}
+  ~G2BleRoleTransitionClaim() { if (held_) bleRoleTransitionEnd(); }
+  explicit operator bool() const { return held_; }
+ private:
+  bool held_;
+};
 
 bool initG2Client() {
+  G2BleRoleTransitionClaim role(BleRoleTransition::G2_START);
+  if (!role) {
+    DEBUG_G2F("[G2] Client init deferred: another BLE role transition is active");
+    return false;
+  }
+  // A disable/role-change path may already have completed the terminal host
+  // teardown requested by a quarantined client. The native terminal states
+  // are the positive lifetime acknowledgement; do not carry a client-only
+  // admission block into the next clean generation.
+  if (gBleClientRetirementPeerMask != 0 &&
+      esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED &&
+      esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
+    bleCentralClientsTerminalTeardownAcknowledged();
+  }
+  if (bleStackLifecycleFaulted() &&
+      bleRoleTransitionState() != BleRoleTransition::RECOVERING) {
+    broadcastOutput("[G2] Client start blocked: prior BLE teardown was incomplete; reboot required");
+    return false;
+  }
   const bool initClaimed = g2ClientInitBegin();
   if (!initClaimed) {
     DEBUG_G2F("[G2] Client init rejected during teardown");
@@ -11650,6 +12818,20 @@ bool initG2Client() {
     return false;
   }
 
+  // Memory gate. Must sit here: after the RAII claims (whose destructors run on
+  // every return path) but BEFORE the gG2State ps_calloc and BLEDevice::init
+  // below, so a refusal allocates nothing and leaves no partial client state.
+  // See the "g2client" row in System_MemoryMonitor.cpp for the measurement this
+  // threshold is derived from.
+  {
+    String g2MemReason;
+    if (!checkMemoryAvailable("g2client", &g2MemReason)) {
+      broadcastOutput((String("[G2] Client start refused: ") + g2MemReason).c_str());
+      broadcastOutput("[G2] Free internal DRAM first ('closehttp' / 'closewifi') or reboot.");
+      return false;
+    }
+  }
+
   DEBUG_G2F("[G2] Initializing client mode");
   broadcastOutput("[G2] Initializing client mode");
 
@@ -11658,34 +12840,40 @@ bool initG2Client() {
 
   // BLE server mode (phone profile) uses the same controller and won't
   // coexist with client scanning. Tear it down if it's running.
-  if (isBLERunning()) {
+  if (isBleServerInitialized()) {
     DEBUG_G2F("[G2] Stopping BLE server mode first");
     broadcastOutput("[G2] Stopping BLE server");
     deinitBluetooth();
     vTaskDelay(pdMS_TO_TICKS(200));
-  }
-  if (btStarted()) {
-    // Controller restart under a (possibly) live host: any ring link from a
-    // previous session dies the moment btStop lands. Clear its state and
-    // drop the pointer — the object stays heap-valid but unreachable, a
-    // deliberate one-off leak instead of a dangling reap. No-op when
-    // deinitBluetooth above already invalidated, or when no ring was up.
-    // SKIP while a ring connect is in flight on the worker: nulling
-    // gRing.client mid-connect is a null-deref for the worker, and an
-    // in-flight connect means the ring is NOT connected — there is no
-    // zombie state to clear; the attempt simply fails after btStop, same
-    // as it always did.
-    if (!g2RingConnectInFlight()) {
-      g2RingInvalidateLink();
+    if (isBleServerInitialized() || bleStackLifecycleFaulted()) {
+      broadcastOutput("[G2] BLE server teardown incomplete; client start aborted (reboot may be required)");
+      return false;
     }
-    btStop();
+  }
+  if (BLEDevice::getInitialized() || isBluedroidHostEnabled() ||
+      esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE) {
+    // A runtime-only G2 deinit can leave the host/controller generation up.
+    // Normalize it with the checked host-first teardown; a controller-only
+    // btStop/btStart while Bluedroid is live preserves exactly the stale TCB /
+    // BLE_CONN_CANCEL state this recovery work is meant to eliminate.
+    if (g2RingConnectInFlight()) {
+      broadcastOutput("[G2] Ring connection is still active; BLE role change deferred");
+      return false;
+    }
+    if (!g2RingPrepareForStackTeardown(2000)) {
+      broadcastOutput("[G2] Ring owner did not quiesce; BLE role change deferred");
+      return false;
+    }
+    BLEDevice::setCustomGapHandler(nullptr);
+    const BLEDeviceDeinitResult reset = BLEDevice::deinitChecked(false);
+    if (!reset.success) {
+      bleStackSetLifecycleFault(true);
+      broadcastOutput("[G2] Existing BLE host could not be normalized; reboot required");
+      return false;
+    }
+    bleCentralClientsTerminalTeardownAcknowledged();
     vTaskDelay(pdMS_TO_TICKS(100));
   }
-  if (!btStart()) {
-    broadcastOutput("[G2] BT controller start failed");
-    return false;
-  }
-  vTaskDelay(pdMS_TO_TICKS(100));
 
   // gG2State lives for the program's life and is touched only by regular
   // task contexts (BLE notify, command dispatch, etc.) — safe in PSRAM.
@@ -11706,6 +12894,23 @@ bool initG2Client() {
   new (gG2State) G2ClientState();
 
   BLEDevice::init("HardwareOne");
+  if (!BLEDevice::getInitialized() || !isBluedroidHostEnabled() ||
+      !isBleControllerEnabled()) {
+    // BLEDevice::init can fail after enabling the native controller/host but
+    // before publishing its Arduino initialized flag. Never free app state
+    // while that partial host generation can still dispatch callbacks.
+    BLEDevice::setCustomGapHandler(nullptr);
+    const BLEDeviceDeinitResult rollback = BLEDevice::deinitChecked(false);
+    if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
+    if (!rollback.success) bleStackSetLifecycleFault(true);
+    gG2State->~G2ClientState();
+    free(gG2State);
+    gG2State = nullptr;
+    broadcastOutput(rollback.success
+        ? "[G2] BLE host initialization failed (rolled back)"
+        : "[G2] BLE host initialization failed; teardown incomplete — reboot required");
+    return false;
+  }
   BLEDevice::setMTU(MTU_TARGET);
   // Make the APPLIED connection interval observable. Until now nothing in the
   // firmware read `conn_int` — esp_ble_gap_update_conn_params() only REQUESTS,
@@ -11718,7 +12923,12 @@ bool initG2Client() {
   // does not handle UPDATE_CONN_PARAMS itself, so it falls through to here.
   BLEDevice::setCustomGapHandler(g2GapEventHandler);
   gScan = BLEDevice::getScan();
-  if (!gScan) {
+  if (!gScan || !g2ScanCallbackResetAfterHostInit()) {
+    BLEDevice::setCustomGapHandler(nullptr);
+    const BLEDeviceDeinitResult rollback = BLEDevice::deinitChecked(false);
+    if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
+    if (!rollback.success) bleStackSetLifecycleFault(true);
+    gG2State->~G2ClientState();
     free(gG2State); gG2State = nullptr;
     broadcastOutput("[G2] Scan init failed");
     return false;
@@ -11738,6 +12948,19 @@ bool initG2Client() {
   }
   if (!gImgPushAckSem) {
     gImgPushAckSem = xSemaphoreCreateBinary();
+  }
+
+  // Pay the two persistent UI-worker stacks while INTERNAL DRAM is still
+  // relatively contiguous, rather than gambling that the first later tap can
+  // find 8-10 KiB in one block. Each initializer publishes its queue only
+  // after the matching consumer task exists; allocation failure leaves the
+  // state UNINITIALIZED so a later producer can retry safely.
+  const bool lensWorkerReady = pageSwapInit();
+  const bool tapWorkerReady  = tapDispatcherInit();
+  if (!lensWorkerReady || !tapWorkerReady) {
+    DEBUG_G2F("[G2] UI worker unavailable at init (lens=%d tap=%d); retry remains enabled",
+              lensWorkerReady ? 1 : 0, tapWorkerReady ? 1 : 0);
+    broadcastOutput("[G2] UI worker memory unavailable; lens actions may be rejected");
   }
 
   gG2State->initialized = true;
@@ -11767,15 +12990,34 @@ bool initG2Client() {
   registerG2Pages();
 
   // One permanent INTERNAL stack (kG2SessionStackBytes) for long-lived G2 UI
-  // sessions (Health/Map/viewers/…). Paid early while DRAM is still
-  // contiguous; entry points enqueue instead of xTaskCreate per Apps tap.
+  // sessions (Health/Map/viewers/…); entry points enqueue instead of
+  // xTaskCreate per Apps tap.
+  //
+  // Ordering note: this is the LAST allocation in initG2Client, not an early
+  // one. BLEDevice::init above has already taken the BT controller + Bluedroid
+  // host, and g2RingInit has spawned r1_owner, so this competes for whatever
+  // internal DRAM is left rather than claiming a contiguous block up front. On
+  // a low-DRAM board (feather_esp32_v2 has ~206 KB of usable internal heap) the
+  // kG2SessionStackBytes request can exceed the largest free block and fail
+  // right here. Not fatal: the xTaskCreateLogged failure path resets
+  // gSessionInitState to Uninitialized, and g2SessionSubmit calls
+  // g2SessionEnsureWorker again on the first real session — so the worker still
+  // comes up later even when it cannot be created at init time. The
+  // "feature unavailable this boot" line xTaskCreateLogged emits on failure is
+  // misleading for this task.
   g2SessionEnsureWorker();
+
 
   DEBUG_G2F("[G2] Client initialized");
   return true;
 }
 
 bool deinitG2Client() {
+  G2BleRoleTransitionClaim role(BleRoleTransition::G2_STOP);
+  if (!role) {
+    DEBUG_G2F("[G2] Client deinit deferred: another BLE role transition is active");
+    return false;
+  }
   g2ControlStartBlockAcquire();
   const uint32_t initDeadline = millis() + 3000;
   while (!g2ClientInitIdle()) {
@@ -11789,6 +13031,11 @@ bool deinitG2Client() {
   if (!gG2State) {
     g2ControlStartBlockRelease();
     return true;
+  }
+  if (!g2UiWorkersQuiesce(6000)) {
+    DEBUG_G2F("[G2] deinit deferred: lens/tap worker still owns G2 runtime");
+    g2ControlStartBlockRelease();
+    return false;
   }
   const bool disconnectSafe = g2Disconnect();
   if (!disconnectSafe) {
@@ -11806,13 +13053,22 @@ bool deinitG2Client() {
     g2ControlStartBlockRelease();
     return false;
   }
+  if (!g2ScanCallbacksIdle()) {
+    DEBUG_G2F("[G2] deinit deferred: scan callback still in flight");
+    g2ControlStartBlockRelease();
+    return false;
+  }
   if (!g2SessionShutdown()) {
     DEBUG_G2F("[G2] deinit deferred: G2 session worker did not become idle");
     g2ControlStartBlockRelease();
     return false;
   }
   // No connect job may begin using the temple objects after this point.
-  bleConnectShutdown();
+  if (!bleConnectShutdown()) {
+    DEBUG_G2F("[G2] deinit deferred: central worker did not acknowledge idle");
+    g2ControlStartBlockRelease();
+    return false;
+  }
   stopHeartbeatTimer();
   const bool leftReset = templeReset(gL);
   const bool rightReset = templeReset(gR);
@@ -11822,6 +13078,7 @@ bool deinitG2Client() {
     g2ControlStartBlockRelease();
     return false;
   }
+  gG2State->~G2ClientState();
   free(gG2State);
   gG2State = nullptr;
   gScan = nullptr;
@@ -11854,51 +13111,163 @@ bool isG2ClientInitialized() {
 //   - worker idle — bleConnectShutdown vTaskDeletes it outright, which leaks
 //     BLE-stack state if it lands mid-connect (see its own comment). That is
 //     the exact damage we are here to undo, so never risk causing it.
-//   - nothing linked — a recycle kills every BLE link, so it may only run when
-//     there is none to kill. In the wedged state that holds by definition.
+//   - nothing linked for an ordinary cancel wedge. A lost native client-route
+//     acknowledgement is the exception: its object cannot be freed and one
+//     more retry would quarantine another allocation, so the affected central
+//     role is deliberately brought down and restored as one transaction.
 //   - server mode off — if the phone profile owns the stack, tearing it down
 //     is not this path's call to make.
 //   - rate limited — if a recycle doesn't take, looping on it is worse than
 //     leaving the stack alone until the user intervenes.
 //
-// Neither g2Disconnect() nor g2RingDisconnect() stamps blePeerNoteUserDisconnect
-// (that is done by the peer thunks and the CLI commands), so auto-reconnect
-// state survives this and the normal reseek brings the links back on its own.
-static const uint8_t  kBleWedgeStreakTrip  = 2;
+// Internal g2Disconnect()/g2RingDisconnect() calls use userInitiated=false,
+// so they do not stamp blePeerNoteUserDisconnect. Auto-reconnect state survives
+// this controlled recycle and the normal reseek can restore the links.
 static const uint32_t kBleRecycleMinGapMs  = 10UL * 60UL * 1000UL;
 static uint32_t sBleLastRecycleMs = 0;
 
 bool bleStackRecycleIfWedged(void) {
-  if (gBleWedgeStreak < kBleWedgeStreakTrip)              return false;
-  if (!gG2State || !gG2State->initialized)                return false;
+  if (gBleWedgeStreak < kBleWedgeStreakTrip &&
+      gBleClientRetirementPeerMask == 0) return false;
+  G2BleRoleTransitionClaim role(BleRoleTransition::RECOVERING);
+  if (!role)                                              return false;
+  // Normal DISCONNECT→UNREG retirement is asynchronous. Give the fixed slots
+  // a bounded chance to become safely deletable before escalating to a whole
+  // host reset; admissions stay closed while any slot is occupied.
+  const uint32_t retirementAgeMs = bleReapRetiredClients();
+  const uint8_t retirementPeers = gBleClientRetirementPeerMask;
+  const bool mustRetireClient = retirementPeers != 0;
+  if (gBleWedgeStreak < kBleWedgeStreakTrip && !mustRetireClient) return false;
+  if (mustRetireClient && retirementAgeMs < kBleRetirementGraceMs) return false;
+  const bool hadClientRuntime = gG2State && gG2State->initialized;
+  if (!hadClientRuntime && !mustRetireClient)              return false;
   if (!bleConnectWorkerIdle())                            return false;
-  if (gL.connected || gR.connected || g2RingIsConnected()) return false;
-  if (isBLERunning())                                     return false;
+  // A forced terminal reset for one lost native route tears down the whole
+  // central role. Preserve every peer that was physically up beforehand as a
+  // one-shot restore intent, including manually connected peers whose
+  // persistent autoReconnect setting is off. blePeerRequestReseek() later
+  // revalidates explicit user-down, owner authority, and current saved target.
+  uint8_t previouslyLivePeers = 0;
+  const G2LinkSnapshot liveG2 = g2LinkSnapshot();
+  if (liveG2.left || liveG2.right) {
+    previouslyLivePeers |= (uint8_t)(1U << BLE_PEER_G2_GLASSES);
+  }
+  if (g2RingIsConnected()) {
+    previouslyLivePeers |= (uint8_t)(1U << BLE_PEER_R1_RING);
+  }
+  const uint8_t restorePeers = retirementPeers | previouslyLivePeers;
+  const bool restoreClientRuntime = hadClientRuntime || previouslyLivePeers != 0;
+  if ((gL.connected || gR.connected || g2RingIsConnected()) &&
+      !mustRetireClient)                                  return false;
+  if (isBleServerInitialized())                           return false;
 
   const uint32_t now = millis();
   if (sBleLastRecycleMs && (now - sBleLastRecycleMs) < kBleRecycleMinGapMs) {
     return false;
   }
-  sBleLastRecycleMs = now ? now : 1;   // 0 is the "never recycled" sentinel
-
-  BROADCAST_PRINTF("[BLE] Host stack wedged (%u instant refusals) — recycling",
+  BROADCAST_PRINTF("[BLE] Host stack recovery required (%s, streak=%u) — recycling",
+                   mustRetireClient ? "unretired client route" : "connect admission wedged",
                    (unsigned)gBleWedgeStreak);
   char det[48];
   snprintf(det, sizeof(det), "%u instant refusals", (unsigned)gBleWedgeStreak);
   systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "wedged", det);
 
-  if (!deinitG2Client()) {
+  if (hadClientRuntime && !deinitG2Client()) {
     BROADCAST_PRINTF("[BLE] Stack recycle aborted — G2 control owner did not stop");
     return false;
   }
-  BLEDevice::deinit(false);
-  vTaskDelay(pdMS_TO_TICKS(200));
-  gBleWedgeStreak = 0;
+  if (!g2RingPrepareForStackTeardown(2000)) {
+    BROADCAST_PRINTF("[BLE] Stack recycle aborted — Ring owner did not quiesce");
+    return false;
+  }
 
+  // Consume the destructive-action rate limit only after all application
+  // owners have positively quiesced. A transient busy worker should not
+  // suppress a later safe recovery for ten minutes.
+  sBleLastRecycleMs = now ? now : 1;   // 0 is the "never recycled" sentinel
+  BLEDevice::setCustomGapHandler(nullptr);
+  const BLEDeviceDeinitResult deinitResult = BLEDevice::deinitChecked(false);
+  vTaskDelay(pdMS_TO_TICKS(200));
+
+  if (!deinitResult.success) {
+    bleStackSetLifecycleFault(true);
+    BROADCAST_PRINTF("[BLE] Stack recycle FAILED during teardown "
+                     "(phase=%u host=%ld->%ld controller=%ld->%ld "
+                     "quarantined=%d) — reboot required",
+                     (unsigned)deinitResult.phase,
+                     (long)deinitResult.hostStatusBefore,
+                     (long)deinitResult.hostStatusAfter,
+                     (long)deinitResult.controllerStatusBefore,
+                     (long)deinitResult.controllerStatusAfter,
+                     deinitResult.clientQuarantined ? 1 : 0);
+    systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "teardown-failed", nullptr);
+    return false;
+  }
+  bleCentralClientsTerminalTeardownAcknowledged();
+
+  const esp_bluedroid_status_t host = esp_bluedroid_get_status();
+  const esp_bt_controller_status_t controller = esp_bt_controller_get_status();
+  if (host != ESP_BLUEDROID_STATUS_UNINITIALIZED ||
+      controller != ESP_BT_CONTROLLER_STATUS_IDLE) {
+    bleStackSetLifecycleFault(true);
+    BROADCAST_PRINTF("[BLE] Stack recycle FAILED to normalize host/controller "
+                     "(host=%d controller=%d) — reboot required",
+                     (int)host, (int)controller);
+    systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "normalize-failed", nullptr);
+    return false;
+  }
+  // Terminal host/controller teardown is the positive lifetime barrier for
+  // every client left in BLEDevice's retirement registry.
+  if (!restoreClientRuntime) {
+    // A runtime-only `g2deinit` may have transferred a late client route.
+    // Normalize the host to reclaim it, but preserve the user's request to
+    // leave the client runtime down.
+    gBleWedgeStreak = 0;
+    bleStackSetLifecycleFault(false);
+    BROADCAST_PRINTF("[BLE] Deferred client retirement complete — central runtime remains down");
+    return true;
+  }
+
+  // Master-disable or a role change can be committed while RECOVERING. The
+  // setting is the desired terminal state; never blindly resurrect the old
+  // client role after the user asked to power BLE down or switch to server.
+  if (!gSettings.bleEnabled) {
+    bleStackSetLifecycleFault(false);
+    gBleWedgeStreak = 0;
+    BROADCAST_PRINTF("[BLE] Stack recycle complete — BLE remains disabled by user intent");
+    return true;
+  }
+
+  // This recovery was admitted only while the server profile was not the
+  // stack owner. Restore the actual client role that was just quiesced rather
+  // than the persisted preference: boot may intentionally coerce a saved-peer
+  // reconnect into client mode without rewriting gSettings.bleMode. A later
+  // explicit role transition remains serialized by the same transition token.
   const bool ok = initG2Client();
   if (ok) {
-    BROADCAST_PRINTF("[BLE] Stack recycle complete — reconnect will retry normally");
+    if (!BLEDevice::getInitialized() || !isBluedroidHostEnabled() ||
+        !isBleControllerEnabled() || !isG2ClientInitialized() ||
+        isBleServerInitialized()) {
+      BROADCAST_PRINTF("[BLE] Stack recycle re-init reported success but "
+                       "host/controller state is incomplete — reboot required");
+      bleStackSetLifecycleFault(true);
+      systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "verify-failed", nullptr);
+      return false;
+    }
+    gBleWedgeStreak = 0;
+    bleStackSetLifecycleFault(false);
+    BROADCAST_PRINTF("[BLE] Stack recycle complete — G2 client role restored");
+    // Preserve the user's operation across the controlled role reset. This
+    // is a one-shot even when persistent auto-reconnect is off, but remains
+    // subject to the current owner/target and explicit-disconnect fences.
+    if (restorePeers & (1U << BLE_PEER_G2_GLASSES)) {
+      blePeerRequestReseek(BLE_PEER_G2_GLASSES);
+    }
+    if (restorePeers & (1U << BLE_PEER_R1_RING)) {
+      blePeerRequestReseek(BLE_PEER_R1_RING);
+    }
   } else {
+    bleStackSetLifecycleFault(true);
     BROADCAST_PRINTF("[BLE] Stack recycle FAILED to re-init — BLE down until reboot");
     systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "reinit-failed", nullptr);
   }
@@ -11936,8 +13305,56 @@ static void g2NoteConnectFailure(const char* reason, G2Eye eye) {
 // Synchronous connect — scans, connects both requested temples, runs prelude.
 // May block for up to SCAN_DURATION_MS + per-temple connect time. Do NOT call
 // from the command-handler task; use g2ConnectAsync() for CLI paths.
-static bool g2ConnectSync(G2Eye eye) {
+static bool g2PeerRequestCurrent(const BlePeerConnectRequest* request) {
+  if (!request) return true;
+  if (!request->autoReconnect && !request->explicitReseek) {
+    return blePeerIntentIsCurrent(BLE_PEER_G2_GLASSES,
+                                  request->intentGeneration,
+                                  request->identityGeneration);
+  }
+  return blePeerConnectRequestIsCurrent(BLE_PEER_G2_GLASSES, *request);
+}
+
+static bool g2ConnectSync(G2Eye eye,
+                          const BlePeerConnectRequest* expectedRequest = nullptr,
+                          const BlePeerSavedTarget* savedFilter = nullptr,
+                          uint32_t cancelEpoch = 0) {
   if (!gG2State && !initG2Client()) return false;
+  if (cancelEpoch == 0) cancelEpoch = bleConnectCancelEpochSnapshot();
+  if (!g2PeerRequestCurrent(expectedRequest)) {
+    DEBUG_G2F("[G2] Connect request became stale before scan");
+    return false;
+  }
+  const G2LinkSnapshot before = g2LinkSnapshot();
+  const bool learnsTarget = expectedRequest &&
+      !expectedRequest->autoReconnect && !expectedRequest->explicitReseek;
+  const bool requestedArmAlreadyLive =
+      (eye == G2_EYE_AUTO && (before.left || before.right)) ||
+      (eye == G2_EYE_LEFT && before.left) ||
+      (eye == G2_EYE_RIGHT && before.right);
+  if (learnsTarget && requestedArmAlreadyLive) {
+    DEBUG_G2F("[G2] Manual pairing requires requested arm(s) down; "
+              "existing link left untouched");
+    return false;
+  }
+  if (learnsTarget && eye == G2_EYE_LEFT && before.right &&
+      !templeMatchesSavedTarget(
+          gR, expectedRequest->savedTarget.mac2,
+          expectedRequest->savedTarget.addressType2,
+          expectedRequest->savedTarget.addressType2Known)) {
+    DEBUG_G2F("[G2] Manual LEFT pairing rejected: preserved RIGHT is not "
+              "part of the admitted target");
+    return false;
+  }
+  if (learnsTarget && eye == G2_EYE_RIGHT && before.left &&
+      !templeMatchesSavedTarget(
+          gL, expectedRequest->savedTarget.mac1,
+          expectedRequest->savedTarget.addressType1,
+          expectedRequest->savedTarget.addressType1Known)) {
+    DEBUG_G2F("[G2] Manual RIGHT pairing rejected: preserved LEFT is not "
+              "part of the admitted target");
+    return false;
+  }
   gConnectTarget = eye;
   gG2State->state = G2_STATE_SCANNING;
   g2PushStatusEvent("scan-start");
@@ -11948,18 +13365,43 @@ static bool g2ConnectSync(G2Eye eye) {
   gScanFoundL = false;
   gScanFoundR = false;
 
+  // Install one immutable scan context for the callback's entire admission
+  // epoch. Saved reconnects use the request target as an authoritative filter;
+  // manual/name-based connects use a synchronized saved-target snapshot only
+  // as fallback for unnamed adverts.
+  BlePeerSavedTargetSnapshot fallback{};
+  const BlePeerSavedTarget* fallbackTarget = savedFilter;
+  if (!fallbackTarget &&
+      blePeerSavedTargetSnapshot(BLE_PEER_G2_GLASSES, fallback)) {
+    fallbackTarget = &fallback.target;
+  }
+  const char* fallbackL = fallbackTarget ? fallbackTarget->mac1 : nullptr;
+  const char* fallbackR = fallbackTarget ? fallbackTarget->mac2 : nullptr;
+  const char* filterL = savedFilter && eye != G2_EYE_RIGHT
+      ? savedFilter->mac1 : nullptr;
+  const char* filterR = savedFilter && eye != G2_EYE_LEFT
+      ? savedFilter->mac2 : nullptr;
+  g2ScanSetMacContext(filterL, filterR, fallbackL, fallbackR);
+
   DEBUG_G2F("[G2] Scanning for %s temple(s)",
             eye == G2_EYE_LEFT ? "LEFT" :
             eye == G2_EYE_RIGHT ? "RIGHT" : "BOTH");
   broadcastOutput("[G2] Scanning...");
 
-  gScan->setAdvertisedDeviceCallbacks(new G2ScanCallbacks(), true);
+  gScan->setAdvertisedDeviceCallbacks(&gG2ScanCallbacks, true);
   // Arduino BLE has two `start()` overloads:
   //   start(duration, is_continue)                  → BLOCKING, returns results
   //   start(duration, completeCb, is_continue)      → non-blocking, fires cb
   // Use the non-blocking form so this call doesn't hog the command handler.
   const uint32_t scanSec = (SCAN_DURATION_MS + 999) / 1000;
   gG2ScanStoppedEarly = false;
+  const uint32_t scanEpoch = g2ScanCallbackBegin();
+  if (scanEpoch == 0) {
+    g2ScanClearMacContext();
+    gG2State->state = G2_STATE_IDLE;
+    DEBUG_G2F("[G2] Scan generation unavailable; connect aborted");
+    return false;
+  }
   gScan->start(scanSec, [](BLEScanResults) {
     // No-op — we react to individual results in the advertised-device
     // callback. This just exists so start() takes the non-blocking path.
@@ -11968,12 +13410,26 @@ static bool g2ConnectSync(G2Eye eye) {
   // Poll for a found-both condition, up to the scan window + a small cushion.
   const uint32_t deadline = millis() + (scanSec * 1000) + 1000;
   while (millis() < deadline) {
+    if (!g2PeerRequestCurrent(expectedRequest)) break;
     bool needL = (eye != G2_EYE_RIGHT);
     bool needR = (eye != G2_EYE_LEFT);
     if ((!needL || gScanFoundL) && (!needR || gScanFoundR)) break;
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   g2ScanStopIfActive();
+  const bool scanCallbacksIdle = g2ScanCallbackEnd(scanEpoch);
+  g2ScanClearMacContext();
+  if (!scanCallbacksIdle) {
+    DEBUG_G2F("[G2] Scan callback did not quiesce; connect aborted");
+    gG2State->state = G2_STATE_IDLE;
+    return false;
+  }
+
+  if (!g2PeerRequestCurrent(expectedRequest)) {
+    DEBUG_G2F("[G2] Connect request became stale during scan");
+    gG2State->state = G2_STATE_IDLE;
+    return false;
+  }
 
   if (gConnectCancel) {
     DEBUG_G2F("[G2] Connect cancelled after scan");
@@ -11997,21 +13453,27 @@ static bool g2ConnectSync(G2Eye eye) {
 
   gG2State->state = G2_STATE_CONNECTING;
   bool ok = false;
-  if (needL && gScanFoundL && !gConnectCancel) {
+  if (needL && gScanFoundL && !gConnectCancel &&
+      g2PeerRequestCurrent(expectedRequest)) {
     DEBUG_G2F("[G2] Starting LEFT temple connect");
     bool lOk = connectTemple(gL);
     DEBUG_G2F("[G2] LEFT temple connect result: %s", lOk ? "OK" : "FAIL");
     ok |= lOk;
   }
-  if (needR && gScanFoundR && !gConnectCancel) {
+  if (needR && gScanFoundR && !gConnectCancel &&
+      gBleClientRetirementPeerMask == 0 &&
+      g2PeerRequestCurrent(expectedRequest)) {
     DEBUG_G2F("[G2] Starting RIGHT temple connect");
     bool rOk = connectTemple(gR);
     DEBUG_G2F("[G2] RIGHT temple connect result: %s", rOk ? "OK" : "FAIL");
     ok |= rOk;
   }
 
-  if (gConnectCancel) {
-    DEBUG_G2F("[G2] Connect cancelled during temple connects");
+  if (gConnectCancel || !g2PeerRequestCurrent(expectedRequest)) {
+    DEBUG_G2F("[G2] Connect cancelled or superseded during temple connects");
+    const G2LinkSnapshot after = g2LinkSnapshot();
+    if (!before.left && after.left) disconnectTemple(gL);
+    if (!before.right && after.right) disconnectTemple(gR);
     gG2State->state = G2_STATE_IDLE;
     return false;
   }
@@ -12027,24 +13489,102 @@ static bool g2ConnectSync(G2Eye eye) {
     return false;
   }
 
-  sG2ConnFailStreak = 0;
-  gG2State->state = G2_STATE_CONNECTED;
-  gG2State->connectedSince = millis();
-  startHeartbeatTimer();
-  broadcastOutput("[G2] Connected");
-  g2PushStatusEvent("connect-ok");
-  systemEventPost(SYSEVT_G2_CONNECTED,
-                  (gL.connected && gR.connected) ? "L+R" : (gL.connected ? "L" : "R"));
-
-  // Persist temple MACs for boot-time auto-reconnect. bleSavePeerMac is
-  // a no-op when the values match what's already stored, so calling on
-  // every successful connect is cheap. Auto-reconnect is gated separately
-  // by the peer's autoReconnect flag (gBlePeerData[BLE_PEER_G2_GLASSES]) —
-  // saving the MAC here is just bookkeeping.
-  bleSavePeerMac(BLE_PEER_G2_GLASSES,
-                 gL.connected ? gL.deviceAddress : String(),
-                 gR.connected ? gR.deviceAddress : String());
-  if (g2BothConnected()) blePeerNoteLinkUp(BLE_PEER_G2_GLASSES);
+  G2LinkSnapshot after{};
+  bool expectedCompletionCurrent = false;
+  bool persistNeeded = false;
+  {
+    G2CompletionGuard completion;
+    if (completion) {
+      // Always snapshot physical topology while completion/down is ordered.
+      // A disconnect callback may have advanced the cancel epoch after this
+      // job opened its sibling; cleanup still needs to see and close that
+      // unpublished job-created link.
+      after = g2LinkSnapshot();
+    }
+    bool survivorStillAdmitted = true;
+    if (completion && learnsTarget && eye == G2_EYE_LEFT && before.right) {
+      survivorStillAdmitted = after.right &&
+          after.rightGeneration == before.rightGeneration &&
+          templeMatchesSavedTarget(
+              gR, expectedRequest->savedTarget.mac2,
+              expectedRequest->savedTarget.addressType2,
+              expectedRequest->savedTarget.addressType2Known);
+    } else if (completion && learnsTarget && eye == G2_EYE_RIGHT &&
+               before.left) {
+      survivorStillAdmitted = after.left &&
+          after.leftGeneration == before.leftGeneration &&
+          templeMatchesSavedTarget(
+              gL, expectedRequest->savedTarget.mac1,
+              expectedRequest->savedTarget.addressType1,
+              expectedRequest->savedTarget.addressType1Known);
+    }
+    if (completion && survivorStillAdmitted &&
+        cancelEpoch == bleConnectCancelEpochSnapshot() &&
+        !bleConnectCancelPendingSnapshot()) {
+      const bool expectedTopologyComplete = !expectedRequest ||
+          ((!expectedRequest->savedTarget.mac1[0] || after.left) &&
+           (!expectedRequest->savedTarget.mac2[0] || after.right));
+      if (learnsTarget) {
+        const uint8_t replaceMask = eye == G2_EYE_LEFT ? 0x01 :
+                                    eye == G2_EYE_RIGHT ? 0x02 : 0x03;
+        expectedCompletionCurrent = blePeerCommitLearnedTargetIfCurrent(
+            BLE_PEER_G2_GLASSES,
+            expectedRequest->intentGeneration,
+            expectedRequest->identityGeneration,
+            (replaceMask & 0x01) && after.left
+                ? gL.deviceAddress : String(),
+            (replaceMask & 0x02) && after.right
+                ? gR.deviceAddress : String(),
+            replaceMask,
+            /*completeTopology=*/after.left && after.right,
+            &persistNeeded);
+      } else {
+        expectedCompletionCurrent = !expectedRequest ||
+            (expectedTopologyComplete
+                 ? blePeerNoteLinkUpIfCurrent(BLE_PEER_G2_GLASSES,
+                                              *expectedRequest)
+                 : blePeerConnectRequestIsCurrent(BLE_PEER_G2_GLASSES,
+                                                  *expectedRequest));
+      }
+      if (expectedCompletionCurrent) {
+        // Manual/name connects do not carry a saved-target request. Preserve
+        // retry intent for a partial pair; consume it only once both arms are
+        // actually up, matching the registry's isConnected contract.
+        if (!expectedRequest && after.left && after.right) {
+          blePeerNoteLinkUp(BLE_PEER_G2_GLASSES);
+        }
+        if (after.left) gG2PublishedTempleMask |= 0x01;
+        if (after.right) gG2PublishedTempleMask |= 0x02;
+        sG2ConnFailStreak = 0;
+        gG2State->state = G2_STATE_CONNECTED;
+        if ((!before.left && !before.right) || gG2State->connectedSince == 0) {
+          gG2State->connectedSince = millis();
+        }
+        startHeartbeatTimer();
+        broadcastOutput("[G2] Connected");
+        const bool repairedPair =
+            (before.left != before.right) && after.left && after.right;
+        g2PushStatusEvent(repairedPair ? "topology-repaired" : "connect-ok");
+        if (!before.left && !before.right) {
+          systemEventPost(
+              SYSEVT_G2_CONNECTED,
+              (after.left && after.right) ? "L+R" : (after.left ? "L" : "R"));
+        }
+      }
+    }
+  }
+  if (!expectedCompletionCurrent) {
+    // User disconnect, owner/target replacement, or policy change won the
+    // race after the last non-atomic currentness check. Do not publish a stale
+    // success; close only links this job created.
+    const G2LinkSnapshot cleanupAfter = g2LinkSnapshot();
+    if (!before.left && cleanupAfter.left) disconnectTemple(gL);
+    if (!before.right && cleanupAfter.right) disconnectTemple(gR);
+    gG2State->state = G2_STATE_IDLE;
+    DEBUG_G2F("[G2] Saved reconnect completion superseded — success discarded");
+    return false;
+  }
+  if (persistNeeded) (void)writeSettingsJson();
   return true;
 }
 
@@ -12060,11 +13600,57 @@ static bool g2ConnectSync(G2Eye eye) {
 // clears the flag when *Sync returns.
 
 // Forward decl — g2ConnectSavedSync is static and defined further down.
-static bool g2ConnectSavedSync();
+static bool g2ConnectSavedSync(const BleConnectJob& job);
+
+static bool bleJobHasPeerRequest(const BleConnectJob& job) {
+  return job.peerIntentGeneration != 0 && job.peerIdentityGeneration != 0 &&
+      (job.peerAutoReconnect || job.peerExplicitReseek);
+}
+
+static bool bleJobHasManualFence(const BleConnectJob& job) {
+  return job.peerIntentGeneration != 0 && job.peerIdentityGeneration != 0 &&
+      !job.peerAutoReconnect && !job.peerExplicitReseek;
+}
+
+static BlePeerConnectRequest blePeerRequestFromJob(const BleConnectJob& job) {
+  BlePeerConnectRequest request{};
+  request.intentGeneration = job.peerIntentGeneration;
+  request.identityGeneration = job.peerIdentityGeneration;
+  request.autoReconnect = job.peerAutoReconnect;
+  request.explicitReseek = job.peerExplicitReseek;
+  copyBleAddressText(request.savedTarget.mac1, job.mac);
+  copyBleAddressText(request.savedTarget.mac2, job.mac2);
+  request.savedTarget.addressType1 = job.addressType1;
+  request.savedTarget.addressType2 = job.addressType2;
+  request.savedTarget.addressType1Known = job.addressType1Known;
+  request.savedTarget.addressType2Known = job.addressType2Known;
+  return request;
+}
+
+static void blePeerRequestToJob(const BlePeerConnectRequest& request,
+                                BleConnectJob& job) {
+  job.peerIntentGeneration = request.intentGeneration;
+  job.peerIdentityGeneration = request.identityGeneration;
+  job.peerAutoReconnect = request.autoReconnect;
+  job.peerExplicitReseek = request.explicitReseek;
+  copyBleAddressText(job.mac, request.savedTarget.mac1);
+  copyBleAddressText(job.mac2, request.savedTarget.mac2);
+  job.addressType1 = request.savedTarget.addressType1;
+  job.addressType2 = request.savedTarget.addressType2;
+  job.addressType1Known = request.savedTarget.addressType1Known;
+  job.addressType2Known = request.savedTarget.addressType2Known;
+}
 
 static QueueHandle_t gBleConnectQueue   = nullptr;
 static TaskHandle_t  gBleConnectTaskH   = nullptr;
+static G2WorkerInitState gBleConnectInitState =
+    G2WorkerInitState::Uninitialized;
 static const size_t  kBleConnectQueueDepth = 4;
+static portMUX_TYPE gBleWorkerStateMux = portMUX_INITIALIZER_UNLOCKED;
+static BleConnectKind gBleActiveKind = BleConnectKind::G2_EYE;
+static bool gBleActiveKindValid = false;
+static volatile uint32_t gBleConnectBarrierGeneration = 0;
+static volatile uint32_t gBleConnectBarrierAckGeneration = 0;
 // gBleConnectJobActive (set/cleared around the dispatch below) is declared up
 // in the BLE stack-wedge section — see there for why it exists.
 
@@ -12081,112 +13667,260 @@ static bool bleConnectWorkerIdle(void) {
   return true;
 }
 
-static void bleConnectWorkerLoop(void* /*arg*/) {
+static void bleConnectPreemptForG2Repair(void) {
+  bool preemptScan = false;
+  portENTER_CRITICAL(&gBleWorkerStateMux);
+  preemptScan = gBleActiveKindValid &&
+      (gBleActiveKind == BleConnectKind::RING_SCAN ||
+       gBleActiveKind == BleConnectKind::RING_SCAN_ONLY);
+  portEXIT_CRITICAL(&gBleWorkerStateMux);
+  if (preemptScan) {
+    BLEScan* scan = BLEDevice::getScan();
+    if (scan) {
+      DEBUG_G2F("[BLE] Preempting lower-priority Ring scan for G2 repair");
+      scan->stop();
+    }
+  }
+}
+
+void g2CancelActiveRingScan() {
+  bool cancelScan = false;
+  portENTER_CRITICAL(&gBleWorkerStateMux);
+  cancelScan = gBleActiveKindValid &&
+      (gBleActiveKind == BleConnectKind::RING_SCAN ||
+       gBleActiveKind == BleConnectKind::RING_SCAN_ONLY);
+  portEXIT_CRITICAL(&gBleWorkerStateMux);
+  if (cancelScan) {
+    BLEScan* scan = BLEDevice::getScan();
+    if (scan) scan->stop();
+  }
+}
+
+static void bleConnectWorkerLoop(void* arg) {
+  QueueHandle_t const queue = static_cast<QueueHandle_t>(arg);
   for (;;) {
     BleConnectJob* job = nullptr;
-    if (xQueueReceive(gBleConnectQueue, &job, portMAX_DELAY) != pdTRUE) continue;
+    if (xQueueReceive(queue, &job, portMAX_DELAY) != pdTRUE) continue;
     if (!job) continue;
 
     gBleConnectJobActive = true;
+    portENTER_CRITICAL(&gBleWorkerStateMux);
+    gBleActiveKind = job->kind;
+    gBleActiveKindValid = true;
+    portEXIT_CRITICAL(&gBleWorkerStateMux);
+    const bool staleG2Job =
+        (job->kind == BleConnectKind::G2_EYE ||
+         job->kind == BleConnectKind::G2_SAVED ||
+         job->kind == BleConnectKind::G2_REPAIR) &&
+        job->cancelEpoch != bleConnectCancelEpochSnapshot();
+    const bool centralFaulted = bleStackLifecycleFaulted() ||
+        gBleClientRetirementPeerMask != 0;
     switch (job->kind) {
       case BleConnectKind::G2_EYE:
-        g2ConnectSync((G2Eye)job->eye);
-        gConnectTaskActive = false;
+        if (!staleG2Job && !centralFaulted) {
+          BlePeerConnectRequest expected{};
+          const BlePeerConnectRequest* expectedPtr = nullptr;
+          if (bleJobHasManualFence(*job)) {
+            expected = blePeerRequestFromJob(*job);
+            expectedPtr = &expected;
+          }
+          g2ConnectSync((G2Eye)job->eye, expectedPtr, nullptr,
+                        job->cancelEpoch);
+        }
+        g2ConnectRelease();
         break;
 
       case BleConnectKind::G2_SAVED:
-        g2ConnectSavedSync();
-        gConnectTaskActive = false;
+        if (!staleG2Job && !centralFaulted) g2ConnectSavedSync(*job);
+        g2ConnectRelease();
         break;
 
+      case BleConnectKind::G2_REPAIR: {
+        uint8_t attempt = 1;
+        portENTER_CRITICAL(&gRecoveryMux);
+        attempt = (uint8_t)(gRecoveryAttemptCount + 1);
+        portEXIT_CRITICAL(&gRecoveryMux);
+        const bool ok = !staleG2Job && !centralFaulted &&
+            attemptMissingArmRecoverySync(attempt, *job);
+        missingArmRecoveryComplete(ok);
+        g2ConnectRelease();
+        break;
+      }
+
       case BleConnectKind::RING_SCAN:
-        ringPerformConnect();
+        if (!centralFaulted) {
+          BlePeerConnectRequest expected{};
+          const BlePeerConnectRequest* expectedPtr = nullptr;
+          if (bleJobHasManualFence(*job)) {
+            expected = blePeerRequestFromJob(*job);
+            expectedPtr = &expected;
+          }
+          ringPerformConnect(String(), expectedPtr, job->cancelEpoch);
+        }
         g2RingConnectMarkComplete();
         break;
 
       case BleConnectKind::RING_SAVED: {
-        // Wait for both glasses to be up before competing for BLE radio.
-        // Same logic that ringConnectSavedTaskBody used to do, inlined
-        // here since the worker IS the right context for it. With
-        // serialization through one queue, this wait is usually trivially
-        // satisfied — a preceding G2_SAVED job (if any) finishes first.
-        if (g2WaitForBothConnected(20000)) {
-          DEBUG_G2F("[RING] auto-reconnect: both glasses up — settling 3s "
-                    "before competing for BLE radio");
-          vTaskDelay(pdMS_TO_TICKS(3000));
+        // Do not occupy the only central worker waiting for another peer.
+        // Queue ordering already lets an earlier G2 job finish first; if the
+        // glasses remain partial/down, Ring's own priority guard safely makes
+        // the attempt and BLE_Peers retains later retry intent.
+        if (!job->mac[0]) {
+          DEBUG_RING_LIFECYCLEF("[RING] auto-reconnect: no saved MAC — skipping");
         } else {
-          DEBUG_G2F("[RING] auto-reconnect: glasses not both ready after 20s — "
-                    "proceeding anyway (may degrade if they come up mid-connect)");
-        }
-        String mac = gBlePeerData[BLE_PEER_R1_RING].mac1;
-        mac.trim();
-        if (mac.length() == 0) {
-          DEBUG_G2F("[RING] auto-reconnect: no saved MAC — skipping");
-        } else {
-          ringPerformConnect(mac);
+          BlePeerConnectRequest expected{};
+          const BlePeerConnectRequest* expectedPtr = nullptr;
+          if (bleJobHasPeerRequest(*job)) {
+            expected = blePeerRequestFromJob(*job);
+            expectedPtr = &expected;
+          }
+          if (!centralFaulted) {
+            ringPerformConnect(String(job->mac), expectedPtr,
+                               job->cancelEpoch);
+          }
         }
         g2RingConnectMarkComplete();
         break;
       }
 
       case BleConnectKind::RING_MAC:
-        ringPerformConnect(String(job->mac));
+        if (!centralFaulted) {
+          BlePeerConnectRequest expected{};
+          const BlePeerConnectRequest* expectedPtr = nullptr;
+          if (bleJobHasManualFence(*job)) {
+            expected = blePeerRequestFromJob(*job);
+            expectedPtr = &expected;
+          }
+          ringPerformConnect(String(job->mac), expectedPtr,
+                             job->cancelEpoch);
+        }
         g2RingConnectMarkComplete();
+        break;
+
+      case BleConnectKind::RING_SCAN_ONLY:
+        if (!centralFaulted) {
+          g2RingScan(job->scanSeconds ? job->scanSeconds : 1,
+                     job->cancelEpoch);
+        }
+        g2RingConnectMarkComplete();
+        break;
+
+      case BleConnectKind::BARRIER:
+        // This marker can only be consumed after every job which was queued
+        // before it. Publish the acknowledgement from the worker itself; the
+        // teardown side then also waits for the active bit to fall.
+        __atomic_store_n(&gBleConnectBarrierAckGeneration,
+                         job->cancelEpoch, __ATOMIC_RELEASE);
         break;
     }
     delete job;
+    portENTER_CRITICAL(&gBleWorkerStateMux);
+    gBleActiveKindValid = false;
+    portEXIT_CRITICAL(&gBleWorkerStateMux);
     gBleConnectJobActive = false;
   }
 }
 
-// Idempotent — first call creates the queue + spawns the worker, subsequent
-// calls are no-ops. Called from g2SubmitBleConnect(), so plain G2 client init
-// does not pin this stack before a connect or reconnect is requested.
-static void bleConnectInit() {
-  if (gBleConnectQueue) return;
-  gBleConnectQueue = xQueueCreate(kBleConnectQueueDepth, sizeof(BleConnectJob*));
-  if (!gBleConnectQueue) {
+// Idempotent, lifecycle-published lazy initialization. G2 and Ring have
+// independent producer gates, so the old naked check/create/publish sequence
+// could create two workers on first use. Only the task holding STARTING may
+// allocate; queue and task handles become visible together at READY.
+static bool bleConnectInit() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gBleConnectInitState == G2WorkerInitState::Ready) {
+    const bool ready = gBleConnectQueue && gBleConnectTaskH;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return ready;
+  }
+  if (gBleConnectInitState != G2WorkerInitState::Uninitialized ||
+      gControlStartBlocks != 0) {
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
+  }
+  gBleConnectInitState = G2WorkerInitState::Starting;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+
+  QueueHandle_t queue =
+      xQueueCreate(kBleConnectQueueDepth, sizeof(BleConnectJob*));
+  if (!queue) {
     DEBUG_G2F("[G2] ble-connect: queue create FAILED (depth=%u)",
               (unsigned)kBleConnectQueueDepth);
-    return;
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gBleConnectInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
   }
-  // 6 KB matches the largest of the retired transient stacks (g2 connect
-  // was 6 KB, ring was 5 KB). Spawned on first connect submission and reused
-  // across G2/Ring connect jobs.
-  // Stack in WORDS (4 bytes). Historical 6144 was 24 KB. Observed peak
-  // during dual-temple connect (deepest BLE callstack we ever hit) is
-  // ~9.4 KB. 5120 words = 20 KB leaves ~10 KB headroom and reclaims
-  // 4 KB DRAM. Don't go lower — connect-time service discovery has
-  // genuinely unbounded depth on certain failure paths.
-  if (xTaskCreatePinnedToCore(bleConnectWorkerLoop, "g2_ble_connect",
-                  /*stack bytes*/ 5120, nullptr,
-                  /*prio*/  5,         &gBleConnectTaskH, APP_CORE) != pdPASS) {
+  // Spawned on first connect submission and reused across G2/Ring jobs.
+  // ESP-IDF expresses this stack in BYTES. Keep 5120 until a corrected
+  // byte-based HWM is captured across service-discovery failure paths; the
+  // historical 9.4-KB figure came from the retired 4x stack reporter and
+  // cannot describe this allocation.
+  TaskHandle_t task = nullptr;
+  if (xTaskCreateLogged(bleConnectWorkerLoop, "g2_ble_connect",
+                  /*stack bytes*/ 5120, queue,
+                  /*prio*/  5,         &task,
+                  "g2.ble-connect", APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] ble-connect: worker xTaskCreate FAILED");
-    vQueueDelete(gBleConnectQueue);
-    gBleConnectQueue = nullptr;
-    gBleConnectTaskH = nullptr;
+    vQueueDelete(queue);
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gBleConnectInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
   } else {
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gBleConnectQueue = queue;
+    gBleConnectTaskH = task;
+    gBleConnectInitState = G2WorkerInitState::Ready;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
     DEBUG_G2F("[G2] ble-connect: persistent worker started "
               "(queue depth=%u, stack=5 KB)", (unsigned)kBleConnectQueueDepth);
   }
+  return true;
 }
 
-// Tear down the worker + drain pending jobs. Called from deinitG2Client().
-// vTaskDelete on a worker mid-connect leaks BLE-stack state — but deinit
-// is the user explicitly nuking G2, so that's acceptable. Subsequent
-// initG2Client() respawns cleanly.
-static void bleConnectShutdown() {
-  if (gBleConnectTaskH) {
-    vTaskDelete(gBleConnectTaskH);
-    gBleConnectTaskH = nullptr;
+// Positive worker-owned idle barrier. The connect worker is boot-lifetime once
+// created; keeping the existing task blocked on its queue avoids force-delete
+// races and does not allocate another task or stack on re-init.
+static bool bleConnectShutdown() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  QueueHandle_t queue = gBleConnectQueue;
+  TaskHandle_t task = gBleConnectTaskH;
+  const bool ready = gBleConnectInitState == G2WorkerInitState::Ready;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  if (!ready || !queue || !task) return !queue && !task;
+
+  uint32_t generation = __atomic_add_fetch(
+      &gBleConnectBarrierGeneration, 1, __ATOMIC_ACQ_REL);
+  if (generation == 0) {
+    generation = __atomic_add_fetch(&gBleConnectBarrierGeneration, 1,
+                                    __ATOMIC_ACQ_REL);
   }
-  if (gBleConnectQueue) {
-    BleConnectJob* job = nullptr;
-    while (xQueueReceive(gBleConnectQueue, &job, 0) == pdTRUE) {
-      delete job;
+  BleConnectJob* barrier = new (std::nothrow) BleConnectJob{};
+  if (!barrier) {
+    DEBUG_G2F("[G2] ble-connect shutdown deferred: barrier allocation failed");
+    return false;
+  }
+  barrier->kind = BleConnectKind::BARRIER;
+  barrier->cancelEpoch = generation;
+  if (xQueueSend(queue, &barrier, pdMS_TO_TICKS(50)) != pdTRUE) {
+    delete barrier;
+    DEBUG_G2F("[G2] ble-connect shutdown deferred: barrier enqueue failed");
+    return false;
+  }
+
+  const uint32_t deadline = millis() + 6000;
+  for (;;) {
+    const bool acked = __atomic_load_n(
+        &gBleConnectBarrierAckGeneration, __ATOMIC_ACQUIRE) == generation;
+    if (acked && !gBleConnectJobActive &&
+        uxQueueMessagesWaiting(queue) == 0) {
+      return true;
     }
-    vQueueDelete(gBleConnectQueue);
-    gBleConnectQueue = nullptr;
+    if ((int32_t)(millis() - deadline) >= 0) {
+      DEBUG_G2F("[G2] ble-connect shutdown deferred: worker barrier timeout");
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
@@ -12198,15 +13932,29 @@ bool g2SubmitBleConnect(const BleConnectJob& job) {
     DEBUG_G2F("[G2] BLE-connect submission rejected during teardown");
     return false;
   }
-  if (!gBleConnectQueue) {
-    bleConnectInit();
-  }
-  if (!gBleConnectQueue) {
+  if (!bleConnectInit()) {
     DEBUG_G2F("[G2] g2SubmitBleConnect: worker unavailable");
     g2BleConnectSubmitDone();
     return false;
   }
-  BleConnectJob* heap = new (std::nothrow) BleConnectJob(job);
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  QueueHandle_t queue = gBleConnectQueue;
+  const bool workerReady = gBleConnectInitState == G2WorkerInitState::Ready &&
+      queue != nullptr && gBleConnectTaskH != nullptr;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  if (!workerReady) {
+    DEBUG_G2F("[G2] g2SubmitBleConnect: worker publication incomplete");
+    g2BleConnectSubmitDone();
+    return false;
+  }
+  BleConnectJob admitted = job;
+  if (admitted.cancelEpoch == 0 &&
+      (admitted.kind == BleConnectKind::G2_EYE ||
+       admitted.kind == BleConnectKind::G2_SAVED ||
+       admitted.kind == BleConnectKind::G2_REPAIR)) {
+    admitted.cancelEpoch = bleConnectCancelEpochSnapshot();
+  }
+  BleConnectJob* heap = new (std::nothrow) BleConnectJob(admitted);
   if (!heap) {
     DEBUG_G2F("[G2] g2SubmitBleConnect: heap alloc failed");
     g2BleConnectSubmitDone();
@@ -12214,12 +13962,19 @@ bool g2SubmitBleConnect(const BleConnectJob& job) {
   }
   // Short timeout so a wedged worker fails the producer fast rather than
   // blocking the BLE notify task / CLI handler indefinitely.
-  if (xQueueSend(gBleConnectQueue, &heap, pdMS_TO_TICKS(50)) != pdTRUE) {
+  const bool prioritizeG2 = admitted.kind == BleConnectKind::G2_EYE ||
+      admitted.kind == BleConnectKind::G2_SAVED ||
+      admitted.kind == BleConnectKind::G2_REPAIR;
+  const BaseType_t queued = prioritizeG2
+      ? xQueueSendToFront(queue, &heap, pdMS_TO_TICKS(50))
+      : xQueueSend(queue, &heap, pdMS_TO_TICKS(50));
+  if (queued != pdTRUE) {
     DEBUG_G2F("[G2] g2SubmitBleConnect: queue full (kind=%d)", (int)job.kind);
     delete heap;
     g2BleConnectSubmitDone();
     return false;
   }
+  if (prioritizeG2) bleConnectPreemptForG2Repair();
   g2BleConnectSubmitDone();
   return true;
 }
@@ -12227,23 +13982,42 @@ bool g2SubmitBleConnect(const BleConnectJob& job) {
 // Public API: non-blocking connect. Returns immediately after enqueueing.
 // Use g2status to observe progress (scanning → connecting → connected | idle).
 bool g2Connect(G2Eye eye) {
-  if (gConnectTaskActive) {
-    DEBUG_G2F("[G2] Connect already in progress");
-    return false;
-  }
   if (!gG2State && !initG2Client()) return false;
-  // Reset cancel flag BEFORE submitting so a stale signal from a prior
-  // disconnect doesn't immediately abort this connect. Must come before
-  // setting active=true (otherwise a concurrent g2Disconnect could see
-  // active without seeing the reset cancel).
-  gConnectCancel = false;
-  gConnectTaskActive = true;
+  uint32_t cancelEpoch = 0;
   BleConnectJob job{};
   job.kind = BleConnectKind::G2_EYE;
   job.eye  = (uint8_t)eye;
+  {
+    G2CompletionGuard completion;
+    if (!completion || !g2ConnectClaim(&cancelEpoch)) {
+      DEBUG_G2F("[G2] Connect already in progress or teardown active");
+      return false;
+    }
+    job.cancelEpoch = cancelEpoch;
+    if (!blePeerBeginManualLearn(BLE_PEER_G2_GLASSES,
+                                 job.peerIntentGeneration,
+                                 job.peerIdentityGeneration)) {
+      DEBUG_G2F("[G2] Connect rejected — no current peer owner authority");
+      g2ConnectRelease();
+      return false;
+    }
+    BlePeerSavedTargetSnapshot priorTarget;
+    if (!blePeerSavedTargetSnapshot(BLE_PEER_G2_GLASSES, priorTarget) ||
+        priorTarget.identityGeneration != job.peerIdentityGeneration) {
+      DEBUG_G2F("[G2] Connect rejected — peer target changed during admission");
+      g2ConnectRelease();
+      return false;
+    }
+    copyBleAddressText(job.mac, priorTarget.target.mac1);
+    copyBleAddressText(job.mac2, priorTarget.target.mac2);
+    job.addressType1 = priorTarget.target.addressType1;
+    job.addressType2 = priorTarget.target.addressType2;
+    job.addressType1Known = priorTarget.target.addressType1Known;
+    job.addressType2Known = priorTarget.target.addressType2Known;
+  }
   if (!g2SubmitBleConnect(job)) {
     DEBUG_G2F("[G2] g2SubmitBleConnect(G2_EYE) failed — queue full or worker not init'd");
-    gConnectTaskActive = false;
+    g2ConnectRelease();
     return false;
   }
   return true;
@@ -12255,12 +14029,49 @@ bool g2Connect(G2Eye eye) {
 // the saved addresses. Used by the boot-time auto-reconnect and any future
 // "reconnect now" UI affordance. Returns true if at least one temple came
 // up. Caller owns task management — this is the sync body, not a wrapper.
-static bool g2ConnectSavedSync() {
-  String macL = gBlePeerData[BLE_PEER_G2_GLASSES].mac1;
-  String macR = gBlePeerData[BLE_PEER_G2_GLASSES].mac2;
-  macL.trim();
-  macR.trim();
-  if (macL.length() == 0 && macR.length() == 0) {
+static bool g2ConnectSavedSync(const BleConnectJob& job) {
+  BlePeerConnectRequest expected{};
+  const BlePeerConnectRequest* expectedPtr = nullptr;
+  BlePeerSavedTarget target{};
+  if (bleJobHasPeerRequest(job)) {
+    expected = blePeerRequestFromJob(job);
+    expectedPtr = &expected;
+    target = expected.savedTarget;
+    if (!g2PeerRequestCurrent(expectedPtr)) {
+      DEBUG_G2F("[G2] Auto-reconnect request stale before dispatch");
+      return false;
+    }
+  } else {
+    copyBleAddressText(target.mac1, job.mac);
+    copyBleAddressText(target.mac2, job.mac2);
+    target.addressType1 = job.addressType1;
+    target.addressType2 = job.addressType2;
+    target.addressType1Known = job.addressType1Known;
+    target.addressType2Known = job.addressType2Known;
+  }
+  G2LinkSnapshot links = g2LinkSnapshot();
+  // A live arm is not automatically part of this saved-target incarnation.
+  // Validate its address (and type when known) before preserving it; otherwise
+  // a target replacement can deterministically build an old-L/new-R pair.
+  if (links.left &&
+      !templeMatchesSavedTarget(gL, target.mac1, target.addressType1,
+                                target.addressType1Known)) {
+    DEBUG_G2F("[G2] Auto-reconnect: live LEFT does not match admitted target; "
+              "aborting without touching the pre-existing link");
+    return false;
+  }
+  if (links.right &&
+      !templeMatchesSavedTarget(gR, target.mac2, target.addressType2,
+                                target.addressType2Known)) {
+    DEBUG_G2F("[G2] Auto-reconnect: live RIGHT does not match admitted target; "
+              "aborting without touching the pre-existing link");
+    return false;
+  }
+  if (links.left && links.right) {
+    DEBUG_G2F("[G2] Auto-reconnect: both temples already connected");
+    return true;
+  }
+  if (!target.mac1[0] && !target.mac2[0]) {
     DEBUG_G2F("[G2] Auto-reconnect: no saved MACs — skipping");
     return false;
   }
@@ -12268,48 +14079,100 @@ static bool g2ConnectSavedSync() {
   // Pick the eye target based on which MACs are saved. If only one side
   // is saved we still connect to that one — better than nothing.
   G2Eye eye = G2_EYE_AUTO;
-  if (macL.length() > 0 && macR.length() == 0) eye = G2_EYE_LEFT;
-  else if (macR.length() > 0 && macL.length() == 0) eye = G2_EYE_RIGHT;
+  if (links.left && !links.right) {
+    // Preserve the live LEFT link and repair only RIGHT. Retargeting both
+    // temples here was the second producer of overlapping/cancelled OPENs.
+    target.mac1[0] = '\0';
+    eye = G2_EYE_RIGHT;
+  } else if (!links.left && links.right) {
+    target.mac2[0] = '\0';
+    eye = G2_EYE_LEFT;
+  } else if (target.mac1[0] && !target.mac2[0]) {
+    eye = G2_EYE_LEFT;
+  } else if (target.mac2[0] && !target.mac1[0]) {
+    eye = G2_EYE_RIGHT;
+  }
+
+  if ((eye == G2_EYE_LEFT && !target.mac1[0]) ||
+      (eye == G2_EYE_RIGHT && !target.mac2[0])) {
+    DEBUG_G2F("[G2] Auto-reconnect: missing temple has no saved MAC");
+    return false;
+  }
 
   DEBUG_G2F("[G2] Auto-reconnect: targeting L='%s' R='%s'",
-            macL.length() ? macL.c_str() : "(none)",
-            macR.length() ? macR.c_str() : "(none)");
+            target.mac1[0] ? target.mac1 : "(none)",
+            target.mac2[0] ? target.mac2 : "(none)");
 
-  gG2FilterMacL = macL;
-  gG2FilterMacR = macR;
-  bool ok = g2ConnectSync(eye);
-  // Always clear the filter when we're done so the next pairing-path
-  // scan (`openg2 auto`) goes back to name-based matching.
-  gG2FilterMacL = "";
-  gG2FilterMacR = "";
-  return ok;
+  return g2ConnectSync(eye, expectedPtr, &target, job.cancelEpoch);
 }
 
 // Public API: non-blocking auto-reconnect from saved MACs. Used by the
 // boot hook; safe to call from any context.
 bool g2ConnectSaved() {
-  // Pairing-intent / heal stamp before the ANON BLE worker runs. No-op when
-  // already owned; otherwise homes to OLED/serial session or device founder.
-  bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
-  if (gConnectTaskActive) {
-    DEBUG_G2F("[G2] g2ConnectSaved: connect already in progress");
-    return false;
-  }
   if (!gG2State && !initG2Client()) return false;
-  gConnectCancel = false;
-  gConnectTaskActive = true;
+  uint32_t cancelEpoch = 0;
   BleConnectJob job{};
   job.kind = BleConnectKind::G2_SAVED;
+  BlePeerConnectRequest request;
+  {
+    G2CompletionGuard completion;
+    if (!completion || !g2ConnectClaim(&cancelEpoch)) {
+      DEBUG_G2F("[G2] g2ConnectSaved: connect already in progress or teardown active");
+      return false;
+    }
+    job.cancelEpoch = cancelEpoch;
+    if (!blePeerBeginManualConnectRequest(BLE_PEER_G2_GLASSES, request)) {
+      DEBUG_G2F("[G2] g2ConnectSaved: no owned saved target");
+      g2ConnectRelease();
+      return false;
+    }
+    blePeerRequestToJob(request, job);
+  }
   if (!g2SubmitBleConnect(job)) {
     DEBUG_G2F("[G2] g2SubmitBleConnect(G2_SAVED) failed — queue full or worker not init'd");
-    gConnectTaskActive = false;
+    g2ConnectRelease();
     return false;
   }
   return true;
 }
 
-bool g2Disconnect() {
+static BlePeerConnectAdmission g2PeerConnectSavedAdmissionThunk(
+    const BlePeerConnectRequest& request) {
+  if (!g2RoleAdmissionOpen() || !isG2ClientInitialized() ||
+      isBleServerInitialized()) {
+    return BlePeerConnectAdmission::ROLE_BLOCKED;
+  }
+  if (g2PublishedPairConnected()) {
+    return BlePeerConnectAdmission::ALREADY_UP;
+  }
+  if (!request.savedTarget.mac1[0] && !request.savedTarget.mac2[0]) {
+    return BlePeerConnectAdmission::NO_TARGET;
+  }
+  if (!blePeerConnectRequestIsCurrent(BLE_PEER_G2_GLASSES, request)) {
+    return BlePeerConnectAdmission::ROLE_BLOCKED;
+  }
+  uint32_t cancelEpoch = 0;
+  if (!g2ConnectClaim(&cancelEpoch)) {
+    return BlePeerConnectAdmission::COALESCED;
+  }
+  BleConnectJob job{};
+  job.kind = BleConnectKind::G2_SAVED;
+  job.cancelEpoch = cancelEpoch;
+  blePeerRequestToJob(request, job);
+  if (!g2SubmitBleConnect(job)) {
+    g2ConnectRelease();
+    return BlePeerConnectAdmission::BUSY;
+  }
+  return BlePeerConnectAdmission::STARTED;
+}
+
+bool g2Disconnect(bool userInitiated) {
   g2ControlStartBlockAcquire();
+  // Linearize logical down/cancel before waiting on or calling into BLE. A
+  // completion already holding the mutex publishes UP first and this publishes
+  // DOWN after it; otherwise the old job sees the advanced epoch and cannot
+  // publish a late success.
+  g2PublishDisconnectIntent(userInitiated);
   // Explicit teardown stops the control owner before disconnecting temples.
   // Do not rely on a later BLE callback to fence the exchange: some client
   // implementations deliver onDisconnect after disconnectTemple has already
@@ -12329,7 +14192,9 @@ bool g2Disconnect() {
   // stack.
   if (gConnectTaskActive) {
     DEBUG_G2F("[G2] Cancelling in-flight connect");
-    gConnectCancel = true;
+    if (gG2State && gG2State->state == G2_STATE_SCANNING) {
+      g2ScanStopIfActive();
+    }
     if (gL.client && gL.client->isConnected()) gL.client->disconnect();
     if (gR.client && gR.client->isConnected()) gR.client->disconnect();
     const uint32_t deadline = millis() + 2000;
@@ -12348,6 +14213,10 @@ bool g2Disconnect() {
   disconnectTemple(gL);
   disconnectTemple(gR);
   if (gG2State) gG2State->state = G2_STATE_IDLE;
+  {
+    G2CompletionGuard completion;
+    if (completion) g2PushStatusEvent("disconnect");
+  }
   g2ControlStartBlockRelease();
   const bool connectIdle = !gConnectTaskActive && g2BleConnectSubmitIdle();
   if (!connectIdle) {
@@ -12357,11 +14226,13 @@ bool g2Disconnect() {
 }
 
 bool isG2Connected() {
-  return gL.connected || gR.connected;
+  const G2LinkSnapshot links = g2LinkSnapshot();
+  return links.left || links.right;
 }
 
 bool g2BothConnected() {
-  return gL.connected && gR.connected;
+  const G2LinkSnapshot links = g2LinkSnapshot();
+  return links.left && links.right;
 }
 
 // Mic-availability predicate: LEFT temple linked AND its audio-notify char
@@ -12867,6 +14738,10 @@ static void g2NoteCreateSuccess(G2Temple& arm, bool isList,
                                 uint32_t widgetId) {
   arm.containerReady  = true;
   arm.containerIsList = isList;
+  // CREATE ACK is the authoritative point where a new physical presentation
+  // exists. Invalidate every tap/nav entry stamped against the prior row or
+  // callback mapping, including CREATEs outside pageSwapJobBody.
+  g2PresentationEpochAdvance();
   g2LensSetContainer(true, isList, widgetId);
 }
 
@@ -12926,36 +14801,36 @@ static void g2TextViewDisarm() {
 //
 // The helpers below extract steps 1-3 and 5-6 so each public sync-wait
 // helper just does step 4 between an arm*Slot and a wait*Ack call.
-// They also embed the deadlock guard (G2_ASSERT_NOT_NOTIFY_TASK) so
+// They also embed the deadlock guard (G2_ASSERT_NOT_ACK_OWNER_TASK) so
 // every sync-wait path is protected without needing the macro at each
 // public-helper site.
 
 // Caller log ID. The string lives at the public helper's call site so
 // log lines can stay distinct ("CREATE-list" vs "CREATE-text" etc.).
 //
-// If invoked from the BLE notify task, the wait below would deadlock:
-// the matching CreateResp/RebuildResp is delivered BY this very task,
-// so we'd be sleeping on a semaphore only the sleeper can give. Log
-// the violation loudly and refuse to ship — graceful degradation
-// rather than a 1.5 s timeout that leaves the lens in a torn-down
-// state. (g2StartLiveTextPage hit this 2026-04-30; the fix moved the
-// handshake to a worker. This guard catches the regression class.)
-#define G2_ASSERT_NOT_NOTIFY_TASK(who) do {                              \
+// The callback only copies RX now; g2_ctrl_owner decodes the matching
+// CreateResp/RebuildResp and gives the semaphore. Sleeping on that owner is a
+// guaranteed self-deadlock, and sleeping on the callback is still unsafe
+// because it can prevent the response from being copied. Refuse both.
+#define G2_ASSERT_NOT_ACK_OWNER_TASK(who) do {                           \
   TaskHandle_t _cur = xTaskGetCurrentTaskHandle();                       \
-  if (gBleNotifyTaskHandle && _cur == gBleNotifyTaskHandle) {            \
-    DEBUG_G2F("[G2] %s: ABORTED — called on BLE notify task. "           \
-              "The 1.5 s ack-wait would deadlock because the response "  \
-              "is delivered by this task. Spawn a worker task and call " \
-              "from there.", (who));                                     \
+  const bool _owner = gBeatTaskHandle && _cur == gBeatTaskHandle;        \
+  const bool _callback = gBleNotifyTaskHandle &&                         \
+                         _cur == gBleNotifyTaskHandle;                   \
+  if (_owner || _callback) {                                             \
+    DEBUG_G2F("[G2] %s: ABORTED — called on %s task. The 1.5 s "          \
+              "ack-wait would block delivery of its own response. "      \
+              "Defer to a UI/session worker.", (who),                    \
+              _owner ? "G2 control/ACK-owner" : "BLE callback");        \
     return false;                                                        \
   }                                                                      \
 } while (0)
 
 // Arm the CREATE ack slot. Returns true if the slot is ready for a
 // build+send, false (with log) if the slot isn't initialised or the
-// caller is on the BLE notify task.
+// caller is on the G2 control/ACK owner or BLE callback task.
 static bool armCreateSlot(const char* who) {
-  G2_ASSERT_NOT_NOTIFY_TASK(who);
+  G2_ASSERT_NOT_ACK_OWNER_TASK(who);
   if (!gCreateAckSem) {
     DEBUG_G2F("[G2] %s: ack sem not ready (init path broken?)", who);
     return false;
@@ -12987,7 +14862,7 @@ static bool waitCreateAck(const char* who, uint32_t widgetId) {
 // REBUILD acks are Cmd=8 — handleEnvelope dispatches each to its own
 // sem so a CREATE/REBUILD pair can't get crossed.
 static bool armRebuildSlot(const char* who) {
-  G2_ASSERT_NOT_NOTIFY_TASK(who);
+  G2_ASSERT_NOT_ACK_OWNER_TASK(who);
   if (!gRebuildAckSem) {
     DEBUG_G2F("[G2] %s: ack sem not ready", who);
     return false;
@@ -13839,16 +15714,15 @@ bool g2ClearDisplay() {
 //      widgetId=10509 (BLOCKS_WIDGET_ID)
 //   4. Block on the CreateResp ack
 //
-// Why a worker task: sendCreateListAndWait blocks on a semaphore signaled
-// by the BLE notify task. Calling it directly from BTC_TASK (where tap
-// dispatch runs) would deadlock waiting for an ack that arrives on the
-// same task. Hence the spawn-and-return pattern.
+// Why a worker task: sendCreateListAndWait blocks on a semaphore signaled by
+// g2_ctrl_owner after it parses the copied RX packet. Running this handshake
+// on the owner would deadlock waiting for an ACK only that owner can decode.
 
 // Args carried across to the worker. We deep-copy strings into the
 // worker's own heap allocation so the caller's static row buffer
 // (g2ShowTextAsList's gRows, G2_Page_Files's gFilesRows, etc.) can be
 // reused freely after g2ShowListPage / g2ShowTextPage returns. Without
-// this, a second tap that gets dropped at the gPageSwapActive guard
+// this, a second tap that gets dropped at the synchronous admission guard
 // would still have rewritten the page module's static buffer —
 // corrupting the in-flight worker's view of the content.
 //
@@ -13878,6 +15752,11 @@ enum PageSwapKind : uint8_t {
 
 struct PageSwapArgs {
   PageSwapKind     kind;
+  // Text-view callbacks are published only after the requested presentation
+  // has ACKed. Carrying them with the job prevents a failed enqueue/CREATE
+  // from replacing the controls of the page that is still physically shown.
+  void           (*exitFn)();
+  G2TapFn          tapFn;
   // PSK_LIST fields:
   char**           items;        // heap-owned; freed by the worker
   size_t           itemCount;
@@ -13933,26 +15812,53 @@ static void freePageSwapItems(char** items, size_t n) {
   free(items);
 }
 
+// Memory-only PageSwapArgs disposer. It deliberately does not touch the FSM,
+// presentation epoch, or text-view callbacks; lifecycle completion belongs to
+// the code that decides whether the job ran, failed admission, or was drained.
+static void freePageSwapArgs(PageSwapArgs* args) {
+  if (!args) return;
+  if (args->kind == PSK_LIST) {
+    freePageSwapItems(args->items, args->itemCount);
+  } else if (args->kind == PSK_TEXT) {
+    free(args->text);
+    free(args->followUpText);
+  } else if (args->kind == PSK_MULTITEXT) {
+    if (args->multiSpecs) {
+      for (size_t i = 0; i < args->multiCount; i++) {
+        free((void*)args->multiSpecs[i].containerName);
+        free((void*)args->multiSpecs[i].content);
+      }
+      free(args->multiSpecs);
+    }
+  } else /* PSK_LIST_TEXT */ {
+    freePageSwapItems(args->items, args->itemCount);
+    free(args->titleName);
+    free(args->titleContent);
+  }
+  delete args;
+}
+
 // gTextViewActive / gTextViewExitFn are defined at the top-of-file
 // forward declarations (zero-initialized by static storage rules).
-// Lifecycle: gTextViewExitFn is armed by g2ShowTextPage before the
-// worker starts; gTextViewActive is set true when the CREATE-text ack
-// arrives, cleared when the user-input event handlers fire the exit
-// (or when a subsequent LIST swap reuses the lens).
+// Lifecycle: callbacks travel inside PageSwapArgs and are published together
+// only after the requested TEXT/MULTITEXT presentation has ACKed and the swap
+// admission is released. gTextViewActive is written last by g2TextViewArm;
+// user-input handlers clear the slot on exit, and every later swap disarms it
+// before changing the physical presentation.
 //
-// gPageSwapActive and gOurShutdownAtMs are declared at the top of this
-// file alongside their inline access helpers (pageSwapBegin/End/
-// InFlight, noteOurShutdownSent, clearOurShutdownStamp,
-// ourShutdownEchoActive). All reads/writes of those flags route through
-// those helpers — see Phase 0 hijack-FSM refactor.
+// gPageSwapAdmission and gOurShutdownAtMs are declared at the top of this
+// file alongside their inline access helpers (pageSwapBegin/End/Fail/Cancel/
+// InFlight, noteOurShutdownSent, clearOurShutdownStamp and
+// ourShutdownEchoActive). All reads/writes route through those helpers.
 
-// Per-job body. Runs the SHUTDOWN+CREATE swap for one PageSwapArgs and
-// frees it. Does NOT manage task lifecycle — caller (the persistent
-// worker loop) owns the task. Previously this was the body of a
+// Per-job body. Runs the SHUTDOWN+CREATE swap for one PageSwapArgs but does
+// not free it; the outer LensUiJob disposer owns all payload memory. It also
+// does not manage task lifecycle — caller (the persistent worker loop) owns
+// the task. Previously this was the body of a
 // transient task spawned per UI action; now it's invoked from the
 // long-lived `pageSwapWorkerLoop` via a queue so we don't churn
 // internal heap by allocating a 4 KB task stack per navigation.
-static void pageSwapJobBody(PageSwapArgs* args) {
+static bool pageSwapJobBody(PageSwapArgs* args) {
   // Snapshot at worker entry: did the user have an active hijack when
   // they tapped this menu item? Used to gate auto-recovery — we only
   // recover hijacks we actually broke ourselves, not, say, a tap that
@@ -13962,6 +15868,13 @@ static void pageSwapJobBody(PageSwapArgs* args) {
   bool didShutdown = false;   // set true once we successfully sent Shutdown
   bool createOk = false;      // declared up here so `goto cleanup` can't
                               // cross its initialization
+  bool armRequestedTextCallbacks = false;
+
+  // From this point until a successful requested TEXT/MULTITEXT presentation
+  // is committed, no callback belongs to the transitioning display. This
+  // prevents control-owner events during SHUTDOWN/CREATE from invoking the
+  // previous page's handler against new logical state.
+  g2TextViewDisarm();
 
   // Cancel any active live page (list OR text) before swapping content.
   // The live worker rebuilds the same widget on a tick; if it ran
@@ -14000,10 +15913,11 @@ static void pageSwapJobBody(PageSwapArgs* args) {
                 "(scroll-position preserved if firmware honours it)",
                 (unsigned)args->itemCount);
       createOk = true;
+      g2PresentationEpochAdvance();
       gLastHijackListRowCount  = args->itemCount;
       gLastHijackListPageShape = HijackListPageShape::PureList;
-      // Container stays live & list-typed — no flag changes needed.
-      // gTextViewActive flags also unchanged because we're list→list.
+      // Container stays live & list-typed. The job-entry disarm already
+      // cleared any stale text callback state before this list→list rebuild.
       goto cleanup;
     }
     DEBUG_G2F("[G2] page-swap: REBUILD-list failed — falling back to "
@@ -14038,11 +15952,11 @@ static void pageSwapJobBody(PageSwapArgs* args) {
   // firmware sees this as the Blocks app re-launching with new content
   // — same identity, fresh state. Each branch ends in:
   //   * sendCreate*AndWait → captures createOk
-  //   * if createOk: g2NoteCreateSuccess + (kind-specific gTextView arm)
-  // The gTextView slot is armed for kinds whose taps fall through to
-  // the SysEvent exit handler (TEXT, MULTITEXT) and disarmed for
-  // list-driven kinds (LIST, LIST_TEXT) where ListEvent CLICKs reach
-  // the dispatcher directly.
+  //   * if createOk: g2NoteCreateSuccess; TEXT/MULTITEXT mark their queued
+  //     callback pair for publication after the swap commits.
+  // The gTextView slot stays disarmed throughout the blocking protocol. It is
+  // armed after PageSwapEnd only for kinds whose taps use the SysEvent fallback
+  // (TEXT, MULTITEXT); list-driven kinds remain disarmed.
   if (args->kind == PSK_LIST) {
     createOk = sendCreateListAndWait(*arm, (const char* const*)args->items,
                                      args->itemCount, BLOCKS_WIDGET_ID, args->geom);
@@ -14066,7 +15980,7 @@ static void pageSwapJobBody(PageSwapArgs* args) {
                                      /*eventCapture=*/ true);
     if (createOk) {
       g2NoteCreateSuccess(*arm, /*isList*/ false, BLOCKS_WIDGET_ID);
-      g2TextViewArm();
+      armRequestedTextCallbacks = true;
       DEBUG_G2F("[G2] page-swap: CREATE-text acked (%u B content)",
                 (unsigned)(args->text ? strlen(args->text) : 0));
       // Optional follow-up REBUILD-text. Used by the Transport Tests
@@ -14109,7 +16023,7 @@ static void pageSwapJobBody(PageSwapArgs* args) {
                                           args->multiCount, BLOCKS_WIDGET_ID);
     if (createOk) {
       g2NoteCreateSuccess(*arm, /*isList*/ false, BLOCKS_WIDGET_ID);
-      g2TextViewArm();
+      armRequestedTextCallbacks = true;
       DEBUG_G2F("[G2] page-swap: CREATE-multitext acked (%u children)",
                 (unsigned)args->multiCount);
     }
@@ -14184,38 +16098,26 @@ static void pageSwapJobBody(PageSwapArgs* args) {
 
 cleanup:
   clearOurShutdownStamp();
-  if (args->kind == PSK_LIST) {
-    freePageSwapItems(args->items, args->itemCount);
-  } else if (args->kind == PSK_TEXT) {
-    free(args->text);
-    if (args->followUpText) free(args->followUpText);
-  } else if (args->kind == PSK_MULTITEXT) {
-    if (args->multiSpecs) {
-      for (size_t i = 0; i < args->multiCount; i++) {
-        // containerName + content were strdup'd in g2ShowMultiTextPage.
-        free((void*)args->multiSpecs[i].containerName);
-        free((void*)args->multiSpecs[i].content);
-      }
-      free(args->multiSpecs);
-    }
-  } else /* PSK_LIST_TEXT */ {
-    freePageSwapItems(args->items, args->itemCount);
-    free(args->titleName);
-    free(args->titleContent);
-  }
-  delete args;
   // PageSwapEnd always lands in Hijacked and re-arms the lens mirror.
   // Only do that when a container actually came up — otherwise a failed
   // CREATE (e.g. Health safety-timeout → Apps onDone race) would leave a
   // phantom hijack with no widget, then hang BLE on the next Shutdown.
   if (createOk) {
     pageSwapEnd();
-  } else if (g2FsmPageSwapping()) {
+    if (armRequestedTextCallbacks) {
+      // Pointers first, active flag last. Event handlers key off active, so
+      // they cannot observe a half-published callback pair.
+      gTextViewExitFn = args->exitFn;
+      gTextViewTapFn  = args->tapFn;
+      g2TextViewArm();
+    }
+  } else {
     DEBUG_G2F("[G2] page-swap: CREATE failed — leaving Idle (no phantom hijack)");
-    hijackFsmDispatch(HijackEvent::HijackExit, "pageSwapCreateFail");
+    pageSwapFail("pageSwapCreateFail");
   }
   // No vTaskDelete — caller (pageSwapWorkerLoop) owns the task and
   // will return to xQueueReceive() to pick up the next job.
+  return createOk;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -14230,11 +16132,10 @@ cleanup:
 // navigation step — which was the root cause of the contiguous-block
 // exhaustion that took down the post-camera-viewer page-swap.
 //
-// Concurrency is still serialised by gPageSwapActive (set by
-// pageSwapBegin / cleared by pageSwapEnd). The queue depth is small
-// (2) because pageSwapInFlight() rejects new requests while one is
-// in flight; any backlog past depth=2 means something has wedged and
-// the right thing is to log + drop, not to keep memory growing.
+// PageSwap admission is serialized synchronously by gPageSwapAdmission
+// (claimed by pageSwapBegin and released by pageSwapEnd/Fail/Cancel). The
+// shared lens queue is depth 8 because Redraw/Notify/Custom/NativeNotif jobs
+// use it too; PageSwap producers still admit at most one swap at a time.
 
 // Notification generation counter — each g2ShowNotification call bumps
 // this; the lens applier's Notify case (and the legacy notifyClearTaskBody
@@ -14245,15 +16146,97 @@ cleanup:
 // can read it; the original site near g2ShowNotification just uses it.
 static volatile uint32_t gNotifyGen = 0;
 
-// Step 3: queue now carries LensUiJob* instead of PageSwapArgs*. The legacy
+// The queue carries LensUiJob* instead of PageSwapArgs*. The legacy
 // names ("gPageSwapQueue", "pageSwapWorkerLoop", task name "g2_page_swap_w")
-// are retained to minimise churn against in-flight branch work; functionally
-// this is the lens applier from G2_REFACTOR_PROPOSAL.md §5.2. Depth raised
-// from 2 to 8 because future LensJobKind variants (Redraw/Toast/Notify/
-// Custom — steps 4+) will share this queue alongside PageSwap.
+// are retained to minimise churn; functionally this is the lens applier from
+// G2_REFACTOR_PROPOSAL.md §5.2. Depth 8 is shared by PageSwap, Redraw,
+// Notify, Custom and NativeNotif work. Toast is reserved but unimplemented.
 static QueueHandle_t gPageSwapQueue   = nullptr;   // holds LensUiJob*
 static TaskHandle_t  gPageSwapTaskH   = nullptr;
+static G2WorkerInitState gPageSwapInitState = G2WorkerInitState::Uninitialized;
 static const size_t  kPageSwapQueueDepth = 8;
+static_assert(kPageSwapQueueDepth * sizeof(LensUiJob*) == 32,
+              "Lens queue payload storage changed; re-audit internal DRAM");
+static volatile uint32_t gLensAccepted = 0;
+static volatile uint32_t gLensProcessed = 0;
+static volatile uint32_t gLensDropped = 0;
+static volatile uint32_t gLensQueueDepthPeak = 0;
+static volatile uint32_t gLensQueueAgePeakMs = 0;
+static volatile uint32_t gLensRuntimePeakMs = 0;
+static volatile bool gLensJobActive = false;
+static volatile uint32_t gUiQuiesceGeneration = 0;
+static volatile uint32_t gLensQuiescedGeneration = 0;
+static volatile uint32_t gTapQuiescedGeneration = 0;
+
+// Publish/read the runtime as one lifecycle-protected unit. The raw globals
+// remain for diagnostics and same-file task identity checks, but producers
+// must use this snapshot so they never observe STARTING or submit during
+// teardown. Tasks/queues are boot-lifetime once READY.
+static bool pageSwapRuntimeSnapshot(QueueHandle_t* queueOut,
+                                    TaskHandle_t* taskOut = nullptr) {
+  if (queueOut) *queueOut = nullptr;
+  if (taskOut) *taskOut = nullptr;
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool ready = gPageSwapInitState == G2WorkerInitState::Ready &&
+      gPageSwapQueue != nullptr && gPageSwapTaskH != nullptr &&
+      gControlStartBlocks == 0 && gG2State && gG2State->initialized &&
+      gUiSubmitters < 0xFF;
+  if (ready) {
+    gUiSubmitters++;
+    if (queueOut) *queueOut = gPageSwapQueue;
+    if (taskOut) *taskOut = gPageSwapTaskH;
+  }
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return ready;
+}
+
+static const char* lensJobKindName(LensJobKind kind) {
+  switch (kind) {
+    case LensJobKind::PageSwap:    return "page-swap";
+    case LensJobKind::Redraw:      return "redraw";
+    case LensJobKind::Toast:       return "toast";
+    case LensJobKind::Notify:      return "notify";
+    case LensJobKind::Custom:      return "custom";
+    case LensJobKind::NativeNotif: return "native-notif";
+    case LensJobKind::Barrier:     return "barrier";
+  }
+  return "unknown";
+}
+
+// Memory-only disposer used by stale/drop/drain paths. PageSwap lifecycle
+// (admission + FSM + text-view state) must be finalized separately by the
+// caller because dropping one is not equivalent to running it.
+static void destroyLensUiJob(LensUiJob* job) {
+  if (!job) return;
+  switch (job->kind) {
+    case LensJobKind::PageSwap:
+      freePageSwapArgs(job->payload.swap);
+      break;
+    case LensJobKind::Redraw:
+      delete job->payload.redraw;
+      break;
+    case LensJobKind::Notify:
+      delete job->payload.notify;
+      break;
+    case LensJobKind::Custom:
+      delete job->payload.custom;
+      break;
+    case LensJobKind::NativeNotif:
+      delete job->payload.nativeNotif;
+      break;
+    case LensJobKind::Toast:
+      // No ToastSpec definition or producer exists yet. Do not claim ownership
+      // of an incomplete type; require the reserved payload to stay null.
+      if (job->payload.toast) {
+        DEBUG_G2F("[lens.applier] BUG: non-null Toast payload has no disposer");
+      }
+      break;
+    case LensJobKind::Barrier:
+      // No heap payload. The envelope itself is still owned by the queue.
+      break;
+  }
+  delete job;
+}
 
 // =============================================================================
 // Native G2 notification (Even File Service) — Phase 1 send path
@@ -14271,7 +16254,7 @@ static const size_t  kPageSwapQueueDepth = 8;
 //   4. RESULT_CHECK  [0x02] on sid 0xC4
 // All four use flag byte 0x00 (reserveFlag=false) — NOT G2_FLAG_REQUEST(0x20).
 // Runs ONLY on the lens-applier worker (blocking + inter-frame delays); never
-// call inline from the main loop or the BLE notify task.
+// call inline from the main loop, G2 control/ACK owner, or BLE callback task.
 
 // Flag byte for EFS frames: reserveFlag=false → 0x00 (the reference app sends
 // the file-service frames this way; it is NOT the 0x20 request flag the
@@ -14466,19 +16449,33 @@ static bool g2SendNativeNotification(const char* appId, const char* displayName,
 // measurement stayed in the inflated frame.
 static constexpr uint32_t kG2PageSwapStackBytes = 8192;
 
-static void pageSwapWorkerLoop(void* /*arg*/) {
+static void pageSwapWorkerLoop(void* arg) {
+  // The queue is passed directly because xTaskCreate may schedule this task
+  // before pageSwapInit has published the globals. Producers cannot see the
+  // queue yet, but the consumer can safely block on its private startup copy.
+  QueueHandle_t queue = (QueueHandle_t)arg;
+  if (!queue) {
+    DEBUG_G2F("[G2] page-swap: worker started without a queue");
+    vTaskDelete(nullptr);
+    return;
+  }
   for (;;) {
     LensUiJob* job = nullptr;
-    if (xQueueReceive(gPageSwapQueue, &job, portMAX_DELAY) != pdTRUE) {
+    if (xQueueReceive(queue, &job, portMAX_DELAY) != pdTRUE) {
       continue;  // spurious wake — try again
     }
     if (!job) continue;
 
+    __atomic_store_n(&gLensJobActive, true, __ATOMIC_RELEASE);
+    const uint32_t startedMs = millis();
+    const uint32_t queueAgeMs = startedMs - job->enqueuedAtMs;
+    observeHwm(&gLensQueueAgePeakMs, queueAgeMs);
+    const LensJobKind completedKind = job->kind;
+
     // Staleness check: a bumped menuGen between enqueue and dispatch means
-    // the user navigated away. Step 3 logs only and still dispatches; step 4
-    // will flip G2_LENS_GEN_GUARD once cmd-completion callbacks depend on
-    // the drop semantics (and will add per-kind payload-free for the drop
-    // path so we don't leak when the guard fires).
+    // the user navigated away. Policy is intentionally per-kind: Redraw jobs
+    // hard-drop below, PageSwap logs and continues, and the remaining kinds
+    // use their own applicability rules.
     const uint32_t liveGen = g2CurrentMenuGen();
     if (job->submitMenuGen != liveGen) {
       DEBUG_G2F("[lens.applier] gen mismatch: job=%u live=%u kind=%d (logging only)",
@@ -14487,16 +16484,16 @@ static void pageSwapWorkerLoop(void* /*arg*/) {
 
     switch (job->kind) {
       case LensJobKind::PageSwap:
-        if (job->payload.swap) pageSwapJobBody(job->payload.swap);
-        // pageSwapJobBody owns + frees the PageSwapArgs.
+        if (job->payload.swap) {
+          (void)pageSwapJobBody(job->payload.swap);
+        }
         break;
 
       case LensJobKind::Redraw: {
         // Redraw kind ALWAYS enforces the staleness guard — these are
         // command-completion redraws and must not snap the user back to a
-        // stale view if they navigated away. (PageSwap kind only logs the
-        // mismatch above for now — see G2_LENS_GEN_GUARD note in
-        // G2_HijackCmd.h.)
+        // stale view if they navigated away. (PageSwap only logs the mismatch
+        // above.)
         RedrawSpec* spec = job->payload.redraw;
         if (job->submitMenuGen != liveGen) {
           DEBUG_G2F("[lens.applier] Redraw dropped: stale gen "
@@ -14508,6 +16505,7 @@ static void pageSwapWorkerLoop(void* /*arg*/) {
           spec->render();
         }
         delete spec;
+        job->payload.redraw = nullptr;
         break;
       }
 
@@ -14530,25 +16528,27 @@ static void pageSwapWorkerLoop(void* /*arg*/) {
           }
         }
         delete spec;
+        job->payload.notify = nullptr;
         break;
       }
 
       case LensJobKind::Custom: {
         // Run an arbitrary function on the lens applier context. Used for
         // hijack bootstrap (Group D) and any future one-shot work that
-        // belongs off the BLE notify task. NOT gen-guarded — the run fn
+        // belongs off the G2 control/ACK owner. NOT gen-guarded — the run fn
         // must do its own state checks. spec is freed after the call.
         CustomSpec* spec = job->payload.custom;
         if (spec && spec->run) {
           spec->run();
         }
         delete spec;
+        job->payload.custom = nullptr;
         break;
       }
 
       case LensJobKind::NativeNotif: {
         // Firmware-native EFS notification card. Runs the blocking 4-frame
-        // send off the BLE notify task. NOT gen-guarded — an OS-style
+        // send off its producer's task. NOT gen-guarded — an OS-style
         // notification is not tied to the interactive menu page.
         NativeNotifSpec* spec = job->payload.nativeNotif;
         if (spec) {
@@ -14556,16 +16556,38 @@ static void pageSwapWorkerLoop(void* /*arg*/) {
                                    spec->subtitle, spec->body);
         }
         delete spec;
+        job->payload.nativeNotif = nullptr;
         break;
       }
 
-      // Step 6+ will populate this.
+      case LensJobKind::Barrier:
+        // This entry was queued only after teardown closed producer admission
+        // and drained queued work. Reaching it proves every job that had
+        // already been dequeued when teardown took its snapshot has returned.
+        __atomic_store_n(&gLensQuiescedGeneration,
+                         job->payload.barrierGeneration, __ATOMIC_RELEASE);
+        break;
+
       case LensJobKind::Toast:
         DEBUG_G2F("[lens.applier] kind=%d not implemented — dropping job",
                   (int)job->kind);
         break;
     }
-    delete job;
+    destroyLensUiJob(job);
+    __atomic_store_n(&gLensJobActive, false, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&gLensProcessed, 1, __ATOMIC_RELAXED);
+    const uint32_t runtimeMs = millis() - startedMs;
+    const uint32_t prevRuntimePeak = gLensRuntimePeakMs;
+    observeHwm(&gLensRuntimePeakMs, runtimeMs);
+    if (gLensRuntimePeakMs != prevRuntimePeak) {
+      DEBUG_G2F("[lens.applier] runtime peak %u ms kind=%s queue-age=%u ms "
+                "processed=%u accepted=%u dropped=%u",
+                (unsigned)gLensRuntimePeakMs,
+                lensJobKindName(completedKind), (unsigned)queueAgeMs,
+                (unsigned)__atomic_load_n(&gLensProcessed, __ATOMIC_RELAXED),
+                (unsigned)__atomic_load_n(&gLensAccepted, __ATOMIC_RELAXED),
+                (unsigned)__atomic_load_n(&gLensDropped, __ATOMIC_RELAXED));
+    }
 
     // Stack peak after each job — the datum that decides whether
     // kG2PageSwapStackBytes is right. Mirrors the tap dispatcher's block for
@@ -14599,59 +16621,88 @@ static void pageSwapWorkerLoop(void* /*arg*/) {
   }
 }
 
-// Idempotent — safe to call multiple times. The first page/lens job creates
-// the queue + spawns the worker; subsequent calls are no-ops.
-static void pageSwapInit() {
-  if (gPageSwapQueue) return;
-  gPageSwapQueue = xQueueCreate(kPageSwapQueueDepth, sizeof(LensUiJob*));
-  if (!gPageSwapQueue) {
+// Race-safe, retryable initializer. Only the winner of the lifecycle claim
+// allocates. Queue/task handles are built as locals and published together
+// after the consumer exists, so concurrent producers can never enqueue into a
+// queue that is about to be deleted after task-create failure.
+static bool pageSwapInit() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gPageSwapInitState == G2WorkerInitState::Ready) {
+    const bool ready = gPageSwapQueue != nullptr && gPageSwapTaskH != nullptr;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return ready;
+  }
+  if (gPageSwapInitState != G2WorkerInitState::Uninitialized ||
+      gControlStartBlocks != 0) {
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
+  }
+  gPageSwapInitState = G2WorkerInitState::Starting;
+  if (gUiWorkerInitters < 0xFF) gUiWorkerInitters++;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+
+  QueueHandle_t queue = xQueueCreate(kPageSwapQueueDepth, sizeof(LensUiJob*));
+  if (!queue) {
     DEBUG_G2F("[G2] page-swap: queue create FAILED (depth=%u)",
               (unsigned)kPageSwapQueueDepth);
-    return;
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gPageSwapInitState = G2WorkerInitState::Uninitialized;
+    if (gUiWorkerInitters > 0) gUiWorkerInitters--;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
   }
   // Stack: kG2PageSwapStackBytes — BYTES, and the sizing evidence lives with
   // the constant above pageSwapWorkerLoop. Raised from 3584 on 2026-07-29:
   // static analysis put the deepest Redraw chain at 3696 B, i.e. 112 B past
   // the end of the old allocation. This is the ONLY xTaskCreate on the
   // page-swap path now — all navigation re-uses this worker via the queue.
-  BaseType_t rc = xTaskCreatePinnedToCore(pageSwapWorkerLoop, "g2_page_swap_w",
-                              /*stack bytes*/ kG2PageSwapStackBytes, nullptr,
+  TaskHandle_t task = nullptr;
+  BaseType_t rc = xTaskCreateLogged(pageSwapWorkerLoop, "g2_page_swap_w",
+                              /*stack bytes*/ kG2PageSwapStackBytes, queue,
                               /*prio*/  tskIDLE_PRIORITY + 2,
-                              &gPageSwapTaskH, APP_CORE);
+                              &task, "g2.page-swap", APP_CORE);
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] page-swap: worker xTaskCreate FAILED (rc=%d)", (int)rc);
-    vQueueDelete(gPageSwapQueue);
-    gPageSwapQueue = nullptr;
-    gPageSwapTaskH = nullptr;
-  } else {
-    DEBUG_G2F("[G2] page-swap: persistent worker started (queue depth=%u, msg=LensUiJob*)",
-              (unsigned)kPageSwapQueueDepth);
+    vQueueDelete(queue);
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gPageSwapInitState = G2WorkerInitState::Uninitialized;
+    if (gUiWorkerInitters > 0) gUiWorkerInitters--;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
   }
+
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  gPageSwapQueue = queue;
+  gPageSwapTaskH = task;
+  gPageSwapInitState = G2WorkerInitState::Ready;
+  if (gUiWorkerInitters > 0) gUiWorkerInitters--;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+
+  DEBUG_G2F("[G2] page-swap: persistent worker started (queue depth=%u, msg=LensUiJob*)",
+            (unsigned)kPageSwapQueueDepth);
+  return true;
 }
 
 // Hand a job to the persistent worker. Caller must have already done
 // pageSwapBegin() and prepared a fully-populated heap-allocated
 // PageSwapArgs (with all string ownership transferred). On success,
 // the worker takes ownership and frees the args after running. On
-// failure, ownership stays with the caller — they must run the same
-// cleanup the spawn-failure path used to do (free strings, delete
-// args, pageSwapEnd, clear gTextView callbacks).
+// failure, ownership stays with the caller — it must freePageSwapArgs(args)
+// and pageSwapCancel(). The still-visible page's callbacks have not been
+// touched and must remain armed.
 //
-// Returns false if the queue is uninitialised (init wasn't called)
-// or full (something has wedged the worker — the existing
-// pageSwapInFlight guard normally prevents this from happening).
-//
-// Step 3: producers still pass PageSwapArgs*; this function wraps it in a
-// LensUiJob and stamps the menuGen / targetPage cookie before pushing. The
-// 5 producer sites in this file therefore stay unchanged.
+// Returns false if the worker is unavailable during initialization/teardown
+// or the queue is full. Producers pass PageSwapArgs*; this function wraps it
+// in a LensUiJob and stamps the menuGen / targetPage cookie before pushing.
 static bool pageSwapEnqueue(PageSwapArgs* args) {
-  if (!gPageSwapQueue) {
-    pageSwapInit();
-  }
-  if (!gPageSwapQueue) {
+  (void)pageSwapInit();
+  QueueHandle_t queue = nullptr;
+  TaskHandle_t task = nullptr;
+  if (!pageSwapRuntimeSnapshot(&queue, &task)) {
     DEBUG_G2F("[G2] page-swap enqueue: worker unavailable");
     return false;
   }
+  G2UiSubmitClaim submitClaim;
   LensUiJob* job = new (std::nothrow) LensUiJob{};
   if (!job) {
     DEBUG_G2F("[G2] page-swap enqueue: LensUiJob alloc failed");
@@ -14659,37 +16710,52 @@ static bool pageSwapEnqueue(PageSwapArgs* args) {
   }
   job->kind          = LensJobKind::PageSwap;
   job->submitMenuGen = g2CurrentMenuGen();
+  job->enqueuedAtMs  = millis();
   job->cmdSeq        = 0;                       // navigation-origin
   job->targetPage    = g2GetHijackPage();
   job->targetNetSub  = 0;                       // not captured for navigation-origin
   job->payload.swap  = args;
 
-  // Short timeout: if the worker is wedged, fail fast and let the
-  // caller log + clean up rather than blocking the BLE notify task.
-  if (xQueueSend(gPageSwapQueue, &job, pdMS_TO_TICKS(50)) != pdTRUE) {
+  // Short timeout: if the worker is wedged, fail fast and let the caller log
+  // and clean up. A render invoked by this same worker cannot wait for itself
+  // to make queue space, so that path is strictly non-blocking.
+  const TickType_t ticks = xTaskGetCurrentTaskHandle() == task
+                             ? 0 : pdMS_TO_TICKS(50);
+  if (xQueueSend(queue, &job, ticks) != pdTRUE) {
     DEBUG_G2F("[G2] page-swap enqueue: queue full (depth=%u, worker stuck?)",
               (unsigned)kPageSwapQueueDepth);
     delete job;   // give back to caller; caller still owns `args` per the contract above
+    __atomic_add_fetch(&gLensDropped, 1, __ATOMIC_RELAXED);
     return false;
   }
+  __atomic_add_fetch(&gLensAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&gLensQueueDepthPeak,
+             (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
 
 // Generic LensUiJob enqueue — for cmd-completion callbacks (step 4+) and
 // non-PageSwap kinds. Caller-allocated, applier-freed on success.
-bool g2EnqueueLensJob(LensUiJob* job) {
+bool g2EnqueueLensJob(LensUiJob* job, G2LensEnqueueWait wait) {
   if (!job) return false;
-  if (!gPageSwapQueue) {
-    pageSwapInit();
-  }
-  if (!gPageSwapQueue) {
+  (void)pageSwapInit();
+  QueueHandle_t queue = nullptr;
+  if (!pageSwapRuntimeSnapshot(&queue)) {
     DEBUG_G2F("[lens.applier] g2EnqueueLensJob: worker unavailable");
     return false;
   }
-  if (xQueueSend(gPageSwapQueue, &job, pdMS_TO_TICKS(50)) != pdTRUE) {
+  G2UiSubmitClaim submitClaim;
+  job->enqueuedAtMs = millis();
+  const TickType_t ticks = wait == G2LensEnqueueWait::NoWait
+                             ? 0 : pdMS_TO_TICKS(50);
+  if (xQueueSend(queue, &job, ticks) != pdTRUE) {
     DEBUG_G2F("[lens.applier] g2EnqueueLensJob: queue full (kind=%d)", (int)job->kind);
+    __atomic_add_fetch(&gLensDropped, 1, __ATOMIC_RELAXED);
     return false;   // caller still owns the job + its payload
   }
+  __atomic_add_fetch(&gLensAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&gLensQueueDepthPeak,
+             (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
 
@@ -14697,56 +16763,97 @@ bool g2EnqueueLensJob(LensUiJob* job) {
 // Tap dispatcher — runs handleHijackMenuTap() on its own worker task
 // =============================================================================
 // Why this exists:
-//   handleDevEvent() is invoked from the Bluedroid notify-task stack —
-//   that context already holds GATT/heap/scheduler spinlocks owned by
-//   the BLE stack. Calling handleHijackMenuTap() inline from there
-//   chains into invokePageFromMain → page handlers → g2ShowTextAsList,
-//   which performs heap allocations (operator new, ps_alloc) and
-//   xTaskCreate (the page-swap worker spin-up path). Any of those
-//   internally take spinlocks that may already be held by this CPU,
-//   triggering the spinlock_acquire (lock->count == 0) assert observed
-//   on 2026-05-03 ~3 s after a Blocks-hijack menu tap.
+//   The Bluedroid callback is copy-only; g2_ctrl_owner drains and parses the
+//   RX ring. Calling handleHijackMenuTap inline on that 6144-byte task would
+//   run formatting, settings, filesystem, and page builders on the same task
+//   that must keep draining CREATE/REBUILD responses.
 //
 // The fix:
 //   handleDevEvent now enqueues the tap idx and returns immediately —
-//   no allocations, no task spawns on the BLE callback stack. The
+//   no allocations or deep UI work on the control/ACK-owner stack. The
 //   persistent worker below drains the queue from a normal FreeRTOS
 //   task context where the allocator can take its locks safely.
 //
 // Lifecycle:
-//   * Spawned lazily on first tap dispatch, after the glasses are connected
-//     and the hijack UI is actually being used.
+//   * Created eagerly with the lens-applier worker during initG2Client while
+//     INTERNAL DRAM is comparatively contiguous. A failed eager allocation
+//     remains retryable from the first later producer.
 //   * Persistent: never torn down. With G2 off / disconnected the queue
 //     is empty and the worker just sleeps on the receive — costs only
 //     kG2TapDispatchStackBytes of stack plus the queue (8 × sizeof
-//     TapDispatchEntry ≈ 352 B). Cheap insurance.
+//     TapDispatchEntry). Cheap insurance.
 //   * Survives BT/G2 enable/disable cycles without re-init churn.
 
 // Queue payload carries the tap idx plus the wire-reported item name;
 // handleHijackMenuTap emits the "Hijack tap: …" BROADCAST_PRINTF on the
-// worker (off the small BTC stack), not on the BLE notify task.
+// worker, not on the control/ACK-owner task.
 //
 // The TAP_IDX variant is the original use — hijack list-tap dispatch.
 // The EXIT_FN variant carries a TEXT-view exit callback (function pointer
 // only; no args). It exists for the same reason: the exit-handler call
-// chain (file chooser redraw, page swap, FS access) overflows BTC_TASK's
-// 4 KB stack when invoked synchronously from the BLE notify path.
+// chain (file chooser redraw, page swap, FS access) does not belong on the
+// smaller control/ACK-owner stack.
 enum TapDispatchKind : uint8_t {
   TAP_DISPATCH_IDX     = 0,  // hijack list-tap by index + iname
   TAP_DISPATCH_EXIT_FN = 1,  // TEXT-view exit handler (function pointer)
+  TAP_DISPATCH_NAV_FN  = 2,  // paginated TEXT navigation callback + direction
+  TAP_DISPATCH_BARRIER = 3,  // lifecycle-only in-band queue fence
 };
 
 struct TapDispatchEntry {
   TapDispatchKind kind;
-  uint32_t        idx;       // valid when kind == TAP_DISPATCH_IDX
-  char            iname[32]; // valid when kind == TAP_DISPATCH_IDX
-  void          (*exitFn)(); // valid when kind == TAP_DISPATCH_EXIT_FN
+  uint32_t        presentationEpoch;
+  uint32_t        enqueuedAtMs;
+  union Payload {
+    struct Index {
+      uint32_t idx;
+      char iname[32];
+    } index;
+    void (*exitFn)();
+    struct Nav {
+      G2TapFn fn;
+      G2TapKind direction;
+    } nav;
+    uint32_t barrierGeneration;
+  } payload;
 };
+static_assert(sizeof(TapDispatchEntry) == 48,
+              "TapDispatchEntry layout changed; re-audit queue/stack sizing");
+static_assert(alignof(TapDispatchEntry) == 4,
+              "TapDispatchEntry alignment changed; re-audit queue storage");
+static_assert(sizeof(TapDispatchEntry::Payload) == 36,
+              "Tap payload changed; re-audit allocation-free queue entries");
 
 static QueueHandle_t gTapQueue       = nullptr;
 static TaskHandle_t  gTapTaskHandle  = nullptr;
+static G2WorkerInitState gTapInitState = G2WorkerInitState::Uninitialized;
 static const size_t  kTapQueueDepth  = 8;
+static_assert(kTapQueueDepth * sizeof(TapDispatchEntry) == 384,
+              "Tap queue payload storage changed; re-audit internal DRAM");
 static volatile uint32_t gTapDropped = 0;
+static volatile uint32_t gTapAccepted = 0;
+static volatile uint32_t gTapProcessed = 0;
+static volatile uint32_t gTapStaleDropped = 0;
+static volatile uint32_t gTapQueueDepthPeak = 0;
+static volatile uint32_t gTapQueueAgePeakMs = 0;
+static volatile uint32_t gTapRuntimePeakMs = 0;
+static volatile uint8_t gTextNavPending = 0;
+static volatile bool gTapJobActive = false;
+
+static bool tapRuntimeSnapshot(QueueHandle_t* queueOut) {
+  if (queueOut) *queueOut = nullptr;
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool ready = gTapInitState == G2WorkerInitState::Ready &&
+      gTapQueue != nullptr && gTapTaskHandle != nullptr &&
+      gControlStartBlocks == 0 && gG2State && gG2State->initialized &&
+      gUiSubmitters < 0xFF;
+  if (ready) {
+    gUiSubmitters++;
+    if (queueOut) *queueOut = gTapQueue;
+  }
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return ready;
+}
 
 // Stack budget for the tap worker. The number is BYTES: ESP-IDF's
 // xTaskCreate() takes usStackDepth in bytes, an explicit deviation from vanilla
@@ -14823,35 +16930,100 @@ static volatile uint32_t gTapDropped = 0;
 // the xTaskCreate call but left the prose above it contradicting the code.
 static constexpr uint32_t kG2TapDispatchStackBytes = 10240;
 
-static void tapDispatcherWorkerLoop(void* /*arg*/) {
+static void tapDispatcherWorkerLoop(void* arg) {
+  QueueHandle_t queue = (QueueHandle_t)arg;
+  if (!queue) {
+    DEBUG_G2F("[G2] tap-dispatch: worker started without a queue");
+    vTaskDelete(nullptr);
+    return;
+  }
   TapDispatchEntry e;
   uint32_t lastDroppedSeen = 0;
   for (;;) {
-    if (xQueueReceive(gTapQueue, &e, portMAX_DELAY) != pdTRUE) {
+    if (xQueueReceive(queue, &e, portMAX_DELAY) != pdTRUE) {
       // Spurious wake — try again.
+      continue;
+    }
+    __atomic_store_n(&gTapJobActive, true, __ATOMIC_RELEASE);
+    const uint32_t startedMs = millis();
+    const uint32_t queueAgeMs = startedMs - e.enqueuedAtMs;
+    observeHwm(&gTapQueueAgePeakMs, queueAgeMs);
+    if (e.kind == TAP_DISPATCH_BARRIER) {
+      // Unlike presentation work, a lifecycle fence must acknowledge even
+      // while a page transition is active or its presentation epoch is stale.
+      __atomic_store_n(&gTapQuiescedGeneration,
+                       e.payload.barrierGeneration, __ATOMIC_RELEASE);
+      __atomic_add_fetch(&gTapProcessed, 1, __ATOMIC_RELAXED);
+      __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
+      continue;
+    }
+    const uint32_t liveEpoch = g2PresentationEpochCurrent();
+    if (e.presentationEpoch != liveEpoch || pageSwapInFlight()) {
+      __atomic_add_fetch(&gTapStaleDropped, 1, __ATOMIC_RELAXED);
+      if (e.kind == TAP_DISPATCH_NAV_FN) {
+        __atomic_store_n(&gTextNavPending, 0, __ATOMIC_RELEASE);
+      }
+      DEBUG_G2F("[G2] tap-dispatch: stale/transition work dropped "
+                "(kind=%u epoch=%u live=%u swapping=%d age=%u ms)",
+                (unsigned)e.kind, (unsigned)e.presentationEpoch,
+                (unsigned)liveEpoch, pageSwapInFlight() ? 1 : 0,
+                (unsigned)queueAgeMs);
+      __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
       continue;
     }
     switch (e.kind) {
       case TAP_DISPATCH_IDX: {
         // Run the heavy handler from this safe task context. handleHijackMenuTap
         // may allocate, enqueue page swaps, send BLE frames, etc. — all legal
-        // here because we're not on the Bluedroid notify-task stack. It also
+        // here because we're not on the control/ACK-owner stack. It also
         // emits the resolved "Hijack tap: item N (label) → target" BROADCAST
-        // itself (still on this worker, same off-BTC guarantee); e.iname rides
+        // itself (still on this worker); e.iname rides
         // along so a wire-reported item name (rarely populated) beats the
         // tap-label cache.
-        handleHijackMenuTap(e.idx, e.iname);
+        handleHijackMenuTap(e.payload.index.idx, e.payload.index.iname);
         break;
       }
       case TAP_DISPATCH_EXIT_FN: {
-        // TEXT-view exit handler deferred off BTC_TASK. The exit fn
+        // TEXT-view exit handler deferred off g2_ctrl_owner. The exit fn
         // typically redraws the previous page (file chooser, menu, …) which
         // is a heavy call chain: G2HijackCtxGuard → FS access → page-swap
-        // enqueue → BLE frame send. Producer cleared gTextViewActive
-        // synchronously on BTC so further notify events skip the dead view.
-        if (e.exitFn) e.exitFn();
+        // enqueue → BLE frame send. The producer transfers the callback
+        // first and disarms only after a successful queue send.
+        if (e.payload.exitFn) e.payload.exitFn();
         break;
       }
+      case TAP_DISPATCH_NAV_FN: {
+        // Only run if the callback is still the one armed for this visible
+        // presentation. A new page may replace it before this lower-priority
+        // worker drains the control owner's enqueue.
+        G2TapFn fn = e.payload.nav.fn;
+        if (fn && gTextViewTapFn == fn && gTextViewActive) {
+          fn(e.payload.nav.direction);
+        } else {
+          __atomic_add_fetch(&gTapStaleDropped, 1, __ATOMIC_RELAXED);
+          DEBUG_G2F("[G2] tap-dispatch: TEXT nav callback no longer armed — dropped");
+        }
+        __atomic_store_n(&gTextNavPending, 0, __ATOMIC_RELEASE);
+        break;
+      }
+      case TAP_DISPATCH_BARRIER:
+        // Handled before presentation applicability checks above.
+        break;
+    }
+    __atomic_add_fetch(&gTapProcessed, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
+    const uint32_t runtimeMs = millis() - startedMs;
+    const uint32_t prevRuntimePeak = gTapRuntimePeakMs;
+    observeHwm(&gTapRuntimePeakMs, runtimeMs);
+    if (gTapRuntimePeakMs != prevRuntimePeak) {
+      DEBUG_G2F("[G2] tap-dispatch: runtime peak %u ms kind=%u age=%u ms "
+                "processed=%u accepted=%u stale=%u dropped=%u",
+                (unsigned)gTapRuntimePeakMs, (unsigned)e.kind,
+                (unsigned)queueAgeMs,
+                (unsigned)__atomic_load_n(&gTapProcessed, __ATOMIC_RELAXED),
+                (unsigned)__atomic_load_n(&gTapAccepted, __ATOMIC_RELAXED),
+                (unsigned)__atomic_load_n(&gTapStaleDropped, __ATOMIC_RELAXED),
+                (unsigned)__atomic_load_n(&gTapDropped, __ATOMIC_RELAXED));
     }
 
     // Stack peak after each dispatch — the datum that decides whether
@@ -14893,100 +17065,291 @@ static void tapDispatcherWorkerLoop(void* /*arg*/) {
   }
 }
 
-// Idempotent. Creates the queue + spawns the persistent worker on first
-// call; subsequent calls are no-ops. Same priority as the page-swap worker so
-// taps and page swaps drain at parity (neither preempts the other; both sit
-// above idle and below the BLE stack).
-static void tapDispatcherInit() {
-  if (gTapQueue) return;
-  gTapQueue = xQueueCreate(kTapQueueDepth, sizeof(TapDispatchEntry));
-  if (!gTapQueue) {
+// Same race-safe publication protocol as pageSwapInit. The queue is passed to
+// the new task as its argument, and neither global handle becomes visible
+// until task creation has succeeded.
+static bool tapDispatcherInit() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gTapInitState == G2WorkerInitState::Ready) {
+    const bool ready = gTapQueue != nullptr && gTapTaskHandle != nullptr;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return ready;
+  }
+  if (gTapInitState != G2WorkerInitState::Uninitialized ||
+      gControlStartBlocks != 0) {
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
+  }
+  gTapInitState = G2WorkerInitState::Starting;
+  if (gUiWorkerInitters < 0xFF) gUiWorkerInitters++;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+
+  QueueHandle_t queue = xQueueCreate(kTapQueueDepth, sizeof(TapDispatchEntry));
+  if (!queue) {
     DEBUG_G2F("[G2] tap-dispatch: queue create FAILED (depth=%u)",
               (unsigned)kTapQueueDepth);
-    return;
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gTapInitState = G2WorkerInitState::Uninitialized;
+    if (gUiWorkerInitters > 0) gUiWorkerInitters--;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
   }
-  BaseType_t rc = xTaskCreatePinnedToCore(tapDispatcherWorkerLoop, "g2_tap_disp",
-                              /*stack bytes*/ kG2TapDispatchStackBytes, nullptr,
+  TaskHandle_t task = nullptr;
+  BaseType_t rc = xTaskCreateLogged(tapDispatcherWorkerLoop, "g2_tap_disp",
+                              /*stack bytes*/ kG2TapDispatchStackBytes, queue,
                               /*prio*/  tskIDLE_PRIORITY + 2,
-                              &gTapTaskHandle, APP_CORE);
+                              &task, "g2.tap-dispatch", APP_CORE);
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] tap-dispatch: worker xTaskCreate FAILED (rc=%d)", (int)rc);
-    vQueueDelete(gTapQueue);
-    gTapQueue      = nullptr;
-    gTapTaskHandle = nullptr;
-  } else {
-    DEBUG_G2F("[G2] tap-dispatch: persistent worker started (queue depth=%u)",
-              (unsigned)kTapQueueDepth);
+    vQueueDelete(queue);
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gTapInitState = G2WorkerInitState::Uninitialized;
+    if (gUiWorkerInitters > 0) gUiWorkerInitters--;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
   }
+
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  gTapQueue = queue;
+  gTapTaskHandle = task;
+  gTapInitState = G2WorkerInitState::Ready;
+  if (gUiWorkerInitters > 0) gUiWorkerInitters--;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+
+  DEBUG_G2F("[G2] tap-dispatch: persistent worker started (queue depth=%u)",
+            (unsigned)kTapQueueDepth);
+  return true;
 }
 
-// Producer. Called from handleDevEvent on the BLE notify-task stack.
+// Producer. Called from handleDevEvent on g2_ctrl_owner.
 // Non-blocking: zero-tick send, drop on full. Falling back to inline
-// handleHijackMenuTap() would re-introduce the BTC stack overflow /
-// reentrancy hazards the dispatcher exists to prevent, so the failure
+// handleHijackMenuTap() would re-introduce deep work and ACK self-deadlock
+// hazards on the control owner, so the failure
 // path drops + counts instead.
 //
 // Stack-discipline note: this function is intentionally tiny (one
 // struct on stack + one xQueueSend). Anything that snprintfs or
 // allocates belongs on the worker side, not here.
 static bool tapDispatcherEnqueue(uint32_t idx, const char* iname) {
-  if (!gTapQueue) {
-    tapDispatcherInit();
-  }
-  if (!gTapQueue) {
+  (void)tapDispatcherInit();
+  QueueHandle_t queue = nullptr;
+  if (!tapRuntimeSnapshot(&queue)) {
     DEBUG_G2F("[G2] tap-dispatch: worker unavailable — tap idx=%u dropped",
               (unsigned)idx);
     return false;
   }
+  G2UiSubmitClaim submitClaim;
   TapDispatchEntry e{};
-  e.kind = TAP_DISPATCH_IDX;
-  e.idx  = idx;
+  e.kind              = TAP_DISPATCH_IDX;
+  e.presentationEpoch = g2PresentationEpochCurrent();
+  e.enqueuedAtMs      = millis();
+  e.payload.index.idx = idx;
   // Bounded copy — iname source is already decoded into a 32-byte
   // buffer in handleDevEvent, but use strncpy + null-term defensively
   // for any future caller. No vsnprintf here (would defeat the point).
   if (iname) {
     size_t n = 0;
-    while (iname[n] && n + 1 < sizeof(e.iname)) { e.iname[n] = iname[n]; ++n; }
-    e.iname[n] = '\0';
+    while (iname[n] && n + 1 < sizeof(e.payload.index.iname)) {
+      e.payload.index.iname[n] = iname[n];
+      ++n;
+    }
+    e.payload.index.iname[n] = '\0';
   } else {
-    e.iname[0] = '\0';
+    e.payload.index.iname[0] = '\0';
   }
-  if (xQueueSend(gTapQueue, &e, 0) != pdPASS) {
+  if (xQueueSend(queue, &e, 0) != pdPASS) {
     __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
     return false;
   }
+  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&gTapQueueDepthPeak,
+             (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
 
 // Producer for the TEXT-view exit handler. Same rationale as
 // tapDispatcherEnqueue: the exit fn does heavy work (file chooser redraw,
-// page swap, FS access) that overflows BTC_TASK's small stack when invoked
-// inline from the BLE notify path. The BTC-side caller must clear
-// gTextViewActive / gTextViewExitFn / gTextViewTapFn *before* this returns
-// so further notify events ignore the now-closing view in the window
-// between enqueue and worker execution.
+// page swap, FS access) that does not belong on g2_ctrl_owner. The caller
+// disarms the view only after this zero-time enqueue succeeds; failure leaves
+// the callback retryable.
 //
 // On queue-full or pre-init we drop (don't fall back to inline) — calling
-// fn() from BTC_TASK is exactly the hazard this dispatcher exists to
+// fn() from g2_ctrl_owner is exactly the hazard this dispatcher exists to
 // prevent. User can re-tap to retry. The drop counter surfaces in the
 // worker log so a stuck dispatcher is visible.
 static bool tapDispatcherEnqueueExit(void (*fn)()) {
   if (!fn) return false;
-  if (!gTapQueue) {
-    tapDispatcherInit();
-  }
-  if (!gTapQueue) {
+  (void)tapDispatcherInit();
+  QueueHandle_t queue = nullptr;
+  if (!tapRuntimeSnapshot(&queue)) {
     DEBUG_G2F("[G2] tap-dispatch: worker unavailable — exit-fn dropped");
     return false;
   }
+  G2UiSubmitClaim submitClaim;
   TapDispatchEntry e{};
-  e.kind   = TAP_DISPATCH_EXIT_FN;
-  e.exitFn = fn;
-  if (xQueueSend(gTapQueue, &e, 0) != pdPASS) {
+  e.kind              = TAP_DISPATCH_EXIT_FN;
+  e.presentationEpoch = g2PresentationEpochCurrent();
+  e.enqueuedAtMs      = millis();
+  e.payload.exitFn    = fn;
+  if (xQueueSend(queue, &e, 0) != pdPASS) {
     __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
     return false;
   }
+  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&gTapQueueDepthPeak,
+             (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
+}
+
+// Paginated TEXT navigation. The control/ACK owner may see matching gestures
+// from both temples before this lower-priority worker runs, so a single atomic
+// pending claim deduplicates that burst. The worker releases it after the
+// callback returns or after the entry is rejected as stale.
+static bool tapDispatcherEnqueueNav(G2TapFn fn, G2TapKind direction) {
+  if (!fn || pageSwapInFlight()) return false;
+  uint8_t expected = 0;
+  if (!__atomic_compare_exchange_n(&gTextNavPending, &expected, 1, false,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    return false;
+  }
+  (void)tapDispatcherInit();
+  QueueHandle_t queue = nullptr;
+  if (!tapRuntimeSnapshot(&queue)) {
+    __atomic_store_n(&gTextNavPending, 0, __ATOMIC_RELEASE);
+    DEBUG_G2F("[G2] tap-dispatch: worker unavailable — TEXT nav dropped");
+    return false;
+  }
+  G2UiSubmitClaim submitClaim;
+  TapDispatchEntry e{};
+  e.kind                  = TAP_DISPATCH_NAV_FN;
+  e.presentationEpoch     = g2PresentationEpochCurrent();
+  e.enqueuedAtMs          = millis();
+  e.payload.nav.fn        = fn;
+  e.payload.nav.direction = direction;
+  if (xQueueSend(queue, &e, 0) != pdPASS) {
+    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&gTextNavPending, 0, __ATOMIC_RELEASE);
+    return false;
+  }
+  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&gTapQueueDepthPeak,
+             (uint32_t)uxQueueMessagesWaiting(queue));
+  return true;
+}
+
+// Close and drain the boot-lifetime UI workers without deleting their tasks or
+// queues. deinitG2Client() has already raised gControlStartBlocks before calling
+// this function, so no producer can acquire a fresh runtime snapshot while the
+// queues are being drained. An active job is allowed to finish normally; if it
+// does not acknowledge idle within the bound, teardown is deferred rather than
+// freeing state underneath it.
+static bool g2UiWorkersQuiesce(uint32_t timeoutMs) {
+  // Invalidate queued tap/navigation work before draining it. Active workers
+  // also observe the new epoch at their normal applicability boundaries.
+  g2PresentationEpochAdvance();
+  __atomic_store_n(&gTextNavPending, 0, __ATOMIC_RELEASE);
+  gCamStreamPendingTap = 0;
+
+  QueueHandle_t lensQueue = nullptr;
+  QueueHandle_t tapQueue = nullptr;
+  TaskHandle_t lensTask = nullptr;
+  TaskHandle_t tapTask = nullptr;
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  lensQueue = gPageSwapQueue;
+  tapQueue = gTapQueue;
+  lensTask = gPageSwapTaskH;
+  tapTask = gTapTaskHandle;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+
+  if (lensQueue) {
+    LensUiJob* job = nullptr;
+    while (xQueueReceive(lensQueue, &job, 0) == pdTRUE) {
+      if (!job) continue;
+      if (job->kind == LensJobKind::PageSwap) {
+        // A queued PageSwap owns the synchronous admission claim even though
+        // its worker body never ran.
+        pageSwapCancel();
+      }
+      destroyLensUiJob(job);
+      __atomic_add_fetch(&gLensDropped, 1, __ATOMIC_RELAXED);
+    }
+  }
+
+  if (tapQueue) {
+    TapDispatchEntry dropped{};
+    while (xQueueReceive(tapQueue, &dropped, 0) == pdTRUE) {
+      __atomic_add_fetch(&gTapStaleDropped, 1, __ATOMIC_RELAXED);
+    }
+  }
+
+  // A queue-empty/active=false snapshot is not a sufficient teardown barrier:
+  // a worker can have dequeued an entry and be pre-empted before publishing its
+  // active bit. Put a generation marker behind that possible in-flight entry
+  // and wait until each persistent worker consumes it. Timed-out markers are
+  // harmless because acknowledgements live in static generation counters.
+  uint32_t generation =
+      __atomic_add_fetch(&gUiQuiesceGeneration, 1, __ATOMIC_ACQ_REL);
+  if (generation == 0) {
+    generation = __atomic_add_fetch(&gUiQuiesceGeneration, 1,
+                                    __ATOMIC_ACQ_REL);
+  }
+
+  const bool needLensAck = lensQueue && lensTask;
+  const bool needTapAck = tapQueue && tapTask;
+  if (needLensAck) {
+    LensUiJob* barrier = new (std::nothrow) LensUiJob{};
+    if (!barrier) {
+      DEBUG_G2F("[G2] UI quiesce: lens barrier allocation failed");
+      return false;
+    }
+    barrier->kind = LensJobKind::Barrier;
+    barrier->submitMenuGen = g2CurrentMenuGen();
+    barrier->enqueuedAtMs = millis();
+    barrier->payload.barrierGeneration = generation;
+    if (xQueueSend(lensQueue, &barrier, pdMS_TO_TICKS(50)) != pdPASS) {
+      delete barrier;
+      DEBUG_G2F("[G2] UI quiesce: lens barrier enqueue failed");
+      return false;
+    }
+  }
+  if (needTapAck) {
+    TapDispatchEntry barrier{};
+    barrier.kind = TAP_DISPATCH_BARRIER;
+    barrier.presentationEpoch = g2PresentationEpochCurrent();
+    barrier.enqueuedAtMs = millis();
+    barrier.payload.barrierGeneration = generation;
+    if (xQueueSend(tapQueue, &barrier, pdMS_TO_TICKS(50)) != pdPASS) {
+      DEBUG_G2F("[G2] UI quiesce: tap barrier enqueue failed");
+      return false;
+    }
+  }
+
+  const uint32_t started = millis();
+  for (;;) {
+    const bool lensActive =
+        __atomic_load_n(&gLensJobActive, __ATOMIC_ACQUIRE);
+    const bool tapActive =
+        __atomic_load_n(&gTapJobActive, __ATOMIC_ACQUIRE);
+    const bool lensAcked = !needLensAck ||
+        __atomic_load_n(&gLensQuiescedGeneration, __ATOMIC_ACQUIRE) ==
+            generation;
+    const bool tapAcked = !needTapAck ||
+        __atomic_load_n(&gTapQuiescedGeneration, __ATOMIC_ACQUIRE) ==
+            generation;
+    if (lensAcked && tapAcked && !lensActive && !tapActive &&
+        !pageSwapInFlight()) {
+      return true;
+    }
+    if ((uint32_t)(millis() - started) >= timeoutMs) {
+      DEBUG_G2F("[G2] UI quiesce timeout (lens=%d/%d tap=%d/%d swap=%d)",
+                lensAcked ? 1 : 0,
+                lensActive ? 1 : 0, tapAcked ? 1 : 0,
+                tapActive ? 1 : 0,
+                pageSwapInFlight() ? 1 : 0);
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
 }
 
 // Public entry. Enqueues the swap and returns immediately. `items` must
@@ -15015,18 +17378,26 @@ bool g2ShowListPage(const char* const* items, size_t itemCount,
               (unsigned)itemCount);
     return false;
   }
-  PageSwapArgs* args = new PageSwapArgs;
+  PageSwapArgs* args = new (std::nothrow) PageSwapArgs{};
+  if (!args) {
+    freePageSwapItems(itemsCopy, itemCount);
+    DEBUG_G2F("[G2] g2ShowListPage: PageSwapArgs alloc failed");
+    return false;
+  }
   args->kind      = PSK_LIST;
   args->items     = itemsCopy;
   args->itemCount = itemCount;
   args->text      = nullptr;
   args->geom      = geom;
-  pageSwapBegin();
+  if (!pageSwapBegin()) {
+    DEBUG_G2F("[G2] g2ShowListPage: admission lost to another swap");
+    freePageSwapArgs(args);
+    return false;
+  }
   if (!pageSwapEnqueue(args)) {
     DEBUG_G2F("[G2] g2ShowListPage: enqueue failed");
-    freePageSwapItems(itemsCopy, itemCount);
-    delete args;
-    pageSwapEnd();
+    freePageSwapArgs(args);
+    pageSwapCancel();
     return false;
   }
   return true;
@@ -15068,29 +17439,30 @@ bool g2ShowTextPage(const char* content, const G2ContainerGeom& geom,
   }
   memcpy(copy, content, len + 1);
 
-  PageSwapArgs* args = new PageSwapArgs;
+  PageSwapArgs* args = new (std::nothrow) PageSwapArgs{};
+  if (!args) {
+    free(copy);
+    DEBUG_G2F("[G2] g2ShowTextPage: PageSwapArgs alloc failed");
+    return false;
+  }
   args->kind         = PSK_TEXT;
   args->items        = nullptr;
   args->itemCount    = 0;
   args->text         = copy;
   args->followUpText = nullptr;  // no follow-up REBUILD by default
   args->geom         = geom;
+  args->exitFn       = exitFn;
+  args->tapFn        = tapFn;
 
-  // Arm the fallback exit + optional tap handler before flagging the
-  // swap active so the dispatcher can't see a stale state even briefly.
-  // The worker sets gTextViewActive after CREATE acks; we just stash
-  // the function pointers up front.
-  gTextViewExitFn = exitFn;
-  gTextViewTapFn  = tapFn;
-
-  pageSwapBegin();
+  if (!pageSwapBegin()) {
+    DEBUG_G2F("[G2] g2ShowTextPage: admission lost to another swap");
+    freePageSwapArgs(args);
+    return false;
+  }
   if (!pageSwapEnqueue(args)) {
     DEBUG_G2F("[G2] g2ShowTextPage: enqueue failed");
-    free(copy);
-    delete args;
-    pageSwapEnd();
-    gTextViewExitFn = nullptr;
-    gTextViewTapFn  = nullptr;
+    freePageSwapArgs(args);
+    pageSwapCancel();
     return false;
   }
   return true;
@@ -15193,25 +17565,31 @@ bool g2ShowTextPageRebuildProbe(const char* placeholder,
   memcpy(placeholderCopy, placeholder, plen + 1);
   memcpy(contentCopy,     content,     clen + 1);
 
-  PageSwapArgs* args = new PageSwapArgs;
+  PageSwapArgs* args = new (std::nothrow) PageSwapArgs{};
+  if (!args) {
+    free(placeholderCopy);
+    free(contentCopy);
+    DEBUG_G2F("[G2] g2ShowTextPageRebuildProbe: PageSwapArgs alloc failed");
+    return false;
+  }
   args->kind         = PSK_TEXT;
   args->items        = nullptr;
   args->itemCount    = 0;
   args->text         = placeholderCopy;
   args->followUpText = contentCopy;     // worker will REBUILD this in
   args->geom         = geom;
+  args->exitFn       = exitFn;
+  args->tapFn        = nullptr;
 
-  gTextViewExitFn = exitFn;
-  gTextViewTapFn  = nullptr;
-
-  pageSwapBegin();
+  if (!pageSwapBegin()) {
+    DEBUG_G2F("[G2] g2ShowTextPageRebuildProbe: admission lost to another swap");
+    freePageSwapArgs(args);
+    return false;
+  }
   if (!pageSwapEnqueue(args)) {
     DEBUG_G2F("[G2] g2ShowTextPageRebuildProbe: enqueue failed");
-    free(placeholderCopy);
-    free(contentCopy);
-    delete args;
-    pageSwapEnd();
-    gTextViewExitFn = nullptr;
+    freePageSwapArgs(args);
+    pageSwapCancel();
     return false;
   }
   return true;
@@ -15251,8 +17629,11 @@ bool g2ShowMultiTextPage(const G2TextChildSpec* children, size_t childCount,
   // PSRAM via ps_alloc; the spec array itself is small enough that
   // either pool is fine (ps_alloc falls back to internal heap if
   // PSRAM is exhausted, which is also fine here).
+  // Zero the entire array up front. The allocation-failure rollback below
+  // intentionally walks childCount entries; calloc keeps every not-yet-filled
+  // pointer null if a later per-child string allocation fails.
   G2TextChildSpec* specCopy =
-      (G2TextChildSpec*)ps_alloc(sizeof(G2TextChildSpec) * childCount,
+      (G2TextChildSpec*)ps_calloc(childCount, sizeof(G2TextChildSpec),
                                   AllocPref::PreferPSRAM,
                                   "g2.showMultiText.specs");
   if (!specCopy) {
@@ -15281,7 +17662,16 @@ bool g2ShowMultiTextPage(const G2TextChildSpec* children, size_t childCount,
   }
 
   {
-    PageSwapArgs* args = new PageSwapArgs;
+    PageSwapArgs* args = new (std::nothrow) PageSwapArgs{};
+    if (!args) {
+      for (size_t i = 0; i < childCount; i++) {
+        free((void*)specCopy[i].containerName);
+        free((void*)specCopy[i].content);
+      }
+      free(specCopy);
+      DEBUG_G2F("[G2] g2ShowMultiTextPage: PageSwapArgs alloc failed");
+      return false;
+    }
     args->kind       = PSK_MULTITEXT;
     args->items      = nullptr;
     args->itemCount  = 0;
@@ -15289,23 +17679,18 @@ bool g2ShowMultiTextPage(const G2TextChildSpec* children, size_t childCount,
     args->multiSpecs = specCopy;
     args->multiCount = childCount;
     args->geom       = G2_GEOM_LARGE;   // unused for PSK_MULTITEXT
+    args->exitFn     = exitFn;
+    args->tapFn      = tapFn;
 
-    gTextViewExitFn = exitFn;
-    gTextViewTapFn  = tapFn;
-
-    pageSwapBegin();
+    if (!pageSwapBegin()) {
+      DEBUG_G2F("[G2] g2ShowMultiTextPage: admission lost to another swap");
+      freePageSwapArgs(args);
+      return false;
+    }
     if (!pageSwapEnqueue(args)) {
       DEBUG_G2F("[G2] g2ShowMultiTextPage: enqueue failed");
-      // Worker would have freed these — do it ourselves on the failure path.
-      for (size_t i = 0; i < childCount; i++) {
-        free((void*)specCopy[i].containerName);
-        free((void*)specCopy[i].content);
-      }
-      free(specCopy);
-      delete args;
-      pageSwapEnd();
-      gTextViewExitFn = nullptr;
-      gTextViewTapFn  = nullptr;
+      freePageSwapArgs(args);
+      pageSwapCancel();
       return false;
     }
     return true;
@@ -15374,7 +17759,14 @@ bool g2ShowMixedListText(const char* const* items, size_t itemCount,
   memcpy(nameDup, nameSrc, nameLen + 1);
   memcpy(contDup, contSrc, contLen + 1);
 
-  PageSwapArgs* args = new PageSwapArgs;
+  PageSwapArgs* args = new (std::nothrow) PageSwapArgs{};
+  if (!args) {
+    free(nameDup);
+    free(contDup);
+    freePageSwapItems(itemsCopy, itemCount);
+    DEBUG_G2F("[G2] g2ShowMixedListText: PageSwapArgs alloc failed");
+    return false;
+  }
   args->kind         = PSK_LIST_TEXT;
   args->items        = itemsCopy;
   args->itemCount    = itemCount;
@@ -15389,14 +17781,15 @@ bool g2ShowMixedListText(const char* const* items, size_t itemCount,
   args->listGeom     = listGeom;
   args->geom         = listGeom;   // unused but populated for safety
 
-  pageSwapBegin();
+  if (!pageSwapBegin()) {
+    DEBUG_G2F("[G2] g2ShowMixedListText: admission lost to another swap");
+    freePageSwapArgs(args);
+    return false;
+  }
   if (!pageSwapEnqueue(args)) {
     DEBUG_G2F("[G2] g2ShowMixedListText: enqueue failed");
-    free(nameDup);
-    free(contDup);
-    freePageSwapItems(itemsCopy, itemCount);
-    delete args;
-    pageSwapEnd();
+    freePageSwapArgs(args);
+    pageSwapCancel();
     return false;
   }
   return true;
@@ -15428,8 +17821,15 @@ bool g2RelistMixedListText(const char* const* items, size_t itemCount,
   // rare list-content changes (text-entry group switch), wrong for
   // per-keystroke use (that's what g2UpdateMixedTextChild is for).
   G2TextChildSpec children[1] = { title };
-  return sendRebuildMixedListMultiTextAndWait(*arm, items, itemCount,
-                                              listGeom, children, 1);
+  const bool rebuilt = sendRebuildMixedListMultiTextAndWait(
+      *arm, items, itemCount, listGeom, children, 1);
+  if (rebuilt) {
+    // This synchronous REBUILD can replace the selectable row mapping without
+    // passing through g2NoteCreateSuccess/pageSwapJobBody. Invalidate any tap
+    // that was queued against the prior keyboard group before the ACK landed.
+    g2PresentationEpochAdvance();
+  }
+  return rebuilt;
 }
 
 bool g2UpdateMixedTextChild(const char* containerName, uint32_t containerId,
@@ -15485,8 +17885,8 @@ bool g2UpdateMixedTextChild(const char* containerName, uint32_t containerId,
 //   * "FAIL REBUILD-text rejected/timeout" — child name not routed, or rejected
 //
 // Synchronous ack-waits: spawn from imgProbeWorker (separate task).
-// G2_ASSERT_NOT_NOTIFY_TASK guard catches a misuse from the BLE notify
-// task.
+// G2_ASSERT_NOT_ACK_OWNER_TASK catches misuse from the control/ACK owner or
+// the BLE callback task.
 const char* g2ProbeRebuildTextChild() {
   EXT_RAM_BSS_ATTR static char result[96];
   result[0] = '\0';
@@ -15710,7 +18110,7 @@ static AuthContext         gLivePageOwnerCtx;
 // Persistent session worker (defined after live-text globals — needs both
 // stop flags). Forward decls so live-list start can enqueue before the
 // full implementation appears in the file.
-static void g2SessionEnsureWorker();
+static bool g2SessionEnsureWorker();
 static bool g2SessionShutdown();
 static bool g2SessionSubmit(void (*run)(void*), void* payload,
                             void (*drop)(void*), const char* tag);
@@ -15825,6 +18225,9 @@ static void livePageWorker(void* /*arg*/) {
     }
 
     if (sendRebuildListAndWait(*arm, ptrs, n, G2_GEOM_LARGE)) {
+      // A live refresh may replace/reorder selectable rows. Invalidate input
+      // queued against the previous list before exposing the next tap.
+      g2PresentationEpochAdvance();
       DEBUG_G2F("[G2] live-page: REBUILD-list tick (%u rows)", (unsigned)n);
     } else {
       DEBUG_G2F("[G2] live-page: REBUILD-list failed — aborting worker");
@@ -15891,7 +18294,7 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   gLivePageStopFlag   = false;
   gLivePageActive     = true;
 
-  // Runs on persistent g2_session_w (8 KB). Heap buffers keep stack pressure low.
+  // Runs on persistent g2_session_w (kG2SessionStackBytes). Heap buffers keep stack pressure low.
   if (!g2SessionSubmit(livePageWorker, nullptr, nullptr, "live_page")) {
     DEBUG_G2F("[G2] live-page: session enqueue failed");
     gLivePageActive = false;
@@ -16021,6 +18424,7 @@ static constexpr uint32_t    kG2SessionStackBytes = 10240;
 
 static QueueHandle_t     gSessionQueue   = nullptr;
 static TaskHandle_t      gSessionTaskH   = nullptr;
+static G2WorkerInitState gSessionInitState = G2WorkerInitState::Uninitialized;
 static volatile bool     gSessionBusy    = false;
 static volatile bool     gSessionStop    = false;
 static uint8_t*          gSessionScratch = nullptr;
@@ -16084,12 +18488,13 @@ static void g2SessionWaitIdle(uint32_t timeoutMs) {
   }
 }
 
-static void g2SessionWorkerLoop(void* /*arg*/) {
+static void g2SessionWorkerLoop(void* arg) {
+  QueueHandle_t const queue = static_cast<QueueHandle_t>(arg);
   DEBUG_G2F("[G2] session: worker started (stack=%u B)",
             (unsigned)kG2SessionStackBytes);
   for (;;) {
     G2SessionJob* job = nullptr;
-    if (xQueueReceive(gSessionQueue, &job, portMAX_DELAY) != pdTRUE) continue;
+    if (xQueueReceive(queue, &job, portMAX_DELAY) != pdTRUE) continue;
     if (gSessionStop) {
       if (job) {
         if (job->drop && job->payload) job->drop(job->payload);
@@ -16116,33 +18521,54 @@ static void g2SessionWorkerLoop(void* /*arg*/) {
   vTaskDelete(nullptr);
 }
 
-static void g2SessionEnsureWorker() {
-  if (gSessionQueue && gSessionTaskH) return;
-  if (gSessionQueue && !gSessionTaskH) {
-    g2SessionDrainQueue();
-    vQueueDelete(gSessionQueue);
-    gSessionQueue = nullptr;
+static bool g2SessionEnsureWorker() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gSessionInitState == G2WorkerInitState::Ready) {
+    const bool ready = gSessionQueue && gSessionTaskH;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return ready;
   }
-  gSessionStop = false;
-  gSessionQueue = xQueueCreate(kG2SessionQueueDepth, sizeof(G2SessionJob*));
-  if (!gSessionQueue) {
+  if (gSessionInitState != G2WorkerInitState::Uninitialized ||
+      gControlStartBlocks != 0) {
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
+  }
+  gSessionInitState = G2WorkerInitState::Starting;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+
+  QueueHandle_t queue =
+      xQueueCreate(kG2SessionQueueDepth, sizeof(G2SessionJob*));
+  if (!queue) {
     DEBUG_G2F("[G2] session: queue create FAILED");
-    return;
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gSessionInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
   }
-  BaseType_t rc = xTaskCreatePinnedToCore(
+  TaskHandle_t task = nullptr;
+  gSessionStop = false;
+  BaseType_t rc = xTaskCreateLogged(
       g2SessionWorkerLoop, "g2_session_w",
-      /*stack bytes*/ kG2SessionStackBytes, nullptr,
+      /*stack bytes*/ kG2SessionStackBytes, queue,
       /*prio*/ tskIDLE_PRIORITY + 2,
-      &gSessionTaskH, APP_CORE);
+      &task, "g2.session", APP_CORE);
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] session: xTaskCreate FAILED (rc=%d)", (int)rc);
-    vQueueDelete(gSessionQueue);
-    gSessionQueue = nullptr;
-    gSessionTaskH = nullptr;
+    vQueueDelete(queue);
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gSessionInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
   } else {
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    gSessionQueue = queue;
+    gSessionTaskH = task;
+    gSessionInitState = G2WorkerInitState::Ready;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
     DEBUG_G2F("[G2] session: persistent worker ready (queue depth=%u)",
               (unsigned)kG2SessionQueueDepth);
   }
+  return true;
 }
 
 static bool g2SessionShutdown() {
@@ -16180,7 +18606,10 @@ static bool g2SessionShutdown() {
   }
   if (gSessionQueue) {
     vQueueDelete(gSessionQueue);
+    portENTER_CRITICAL(&gControlLifecycleMux);
     gSessionQueue = nullptr;
+    gSessionInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
   }
   gSessionBusy = false;
   gSessionStop = false;
@@ -16198,8 +18627,17 @@ static bool g2SessionSubmit(void (*run)(void*), void* payload,
     DEBUG_G2F("[G2] session: submission rejected during teardown");
     return false;
   }
-  g2SessionEnsureWorker();
-  if (!gSessionQueue || !gSessionTaskH || gSessionStop) {
+  if (!g2SessionEnsureWorker()) {
+    g2SessionSubmitDone();
+    return false;
+  }
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  QueueHandle_t queue = gSessionQueue;
+  TaskHandle_t task = gSessionTaskH;
+  const bool workerReady = gSessionInitState == G2WorkerInitState::Ready &&
+      queue && task && !gSessionStop;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  if (!workerReady) {
     g2SessionSubmitDone();
     return false;
   }
@@ -16233,7 +18671,7 @@ static bool g2SessionSubmit(void (*run)(void*), void* payload,
   job->payload = payload;
   job->tag = tag ? tag : "session";
 
-  if (xQueueSend(gSessionQueue, &job, 0) != pdTRUE) {
+  if (xQueueSend(queue, &job, 0) != pdTRUE) {
     DEBUG_G2F("[G2] session: queue full — drop '%s'", job->tag);
     delete job;
     g2SessionSubmitDone();
@@ -16619,14 +19057,8 @@ static void liveTextWorker(void* /*arg*/) {
     }
   }
 
-  // ── Initial tearDown + CREATE — runs HERE, on the worker task,
-  // not on the BLE notify task that called g2StartLiveTextPage.
-  // tearDownActiveContainer's vTaskDelay and sendCreateAndWait's
-  // 1.5 s semaphore wait would otherwise stall the notify task,
-  // and since the CreateResp is delivered BY that same task,
-  // the wait would always time out — Shutdown gets sent, no CREATE
-  // follows, lens shows "Connection lost". Doing the handshake on
-  // this worker keeps the notify task free to deliver the response.
+  // ── Initial tearDown + CREATE runs HERE, on the session worker. The
+  // control owner must remain free to parse and signal the CREATE response.
   G2Temple* initArm = nullptr;
   if (gR.connected && !gR.pluginDead)      initArm = &gR;
   else if (gL.connected && !gL.pluginDead) initArm = &gL;
@@ -16825,9 +19257,8 @@ bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // Stash worker config BEFORE xTaskCreate so the worker can read it
   // immediately. The synchronous tearDown + initial CREATE handshake
   // runs INSIDE liveTextWorker — see the prologue there for why we
-  // can't do it here. Common caller is handleHijackMenuTap, which
-  // runs on the BLE notify task; doing sendCreateAndWait there would
-  // deadlock because the CreateResp is delivered by that same task.
+  // can't do it here. The common caller is g2_tap_disp; this also keeps the
+  // session lifetime and blocking ACK wait out of the tap lane.
   gLiveTextBuildFn    = buildFn;
   gLiveTextRenderFn   = renderFn;
   gLiveTextIntervalMs = intervalMs;
@@ -16997,6 +19428,9 @@ void g2LensClearContainer() {
   // g2NoteContainerCleared both call it), which makes it the one place that
   // knows the glasses just dropped the mic stream.
   g2MicNoteStreamStoppedByTeardown();
+  // Central physical-invalidation hook for queued taps/navigation. The next
+  // visible presentation will receive another epoch when its swap succeeds.
+  g2PresentationEpochAdvance();
   hijackFsmDispatch(HijackEvent::ContainerCleared, "g2LensClearContainer");
 }
 
@@ -17088,7 +19522,7 @@ static void notifyClearTimerCb(void* /*arg*/) {
   job->targetNetSub   = 0;
   job->payload.notify = spec;
 
-  if (!g2EnqueueLensJob(job)) {
+  if (!g2EnqueueLensJob(job, G2LensEnqueueWait::NoWait)) {
     DEBUG_G2F("[G2] notify-clear: lens job enqueue FAILED — display won't auto-clear");
     delete spec;
     delete job;
@@ -17288,7 +19722,6 @@ static const char* cmd_g2connect(const String& argsInput) {
   // Stamping eagerly means even if the actual BLE connect fails, we've
   // captured intent. Idempotent: helper no-ops if already owned.
   bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
-
   // `openg2 saved` — boot/glasses "Reconnect G2" path: connect by persisted
   // peer MACs (no name scan). Same as g2ConnectSaved() used at boot.
   if (arg == "saved" || arg == "mac") {
@@ -17329,8 +19762,7 @@ static const char* cmd_g2disconnect(const String& argsInput) {
   String arg = argsInput; arg.trim(); arg.toLowerCase();
   const bool fullReset = (arg == "full");
   if (fullReset) g2ControlStartBlockAcquire();
-  blePeerNoteUserDisconnect(BLE_PEER_G2_GLASSES);
-  const bool disconnectSafe = g2Disconnect();
+  const bool disconnectSafe = g2Disconnect(/*userInitiated=*/true);
   if (fullReset) {
     if (!disconnectSafe) {
       g2ControlStartBlockRelease();
@@ -17349,7 +19781,7 @@ static const char* cmd_g2disconnect(const String& argsInput) {
 
 static const char* cmd_g2status(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  EXT_RAM_BSS_ATTR static char buf[256];
+  EXT_RAM_BSS_ATTR static char buf[384];
   getG2Status(buf, sizeof(buf));
   return buf;
 }
@@ -17840,18 +20272,32 @@ static const char* cmd_g2evenai(const String& argsInput) {
     return "OK: EvenAI exchange-id-v1 verbs=askid,replyid,replypartid,replyendid,exitid legacy=fail-closed";
   }
   // bare / "status"
-  EXT_RAM_BSS_ATTR static char buf[192];
+  EXT_RAM_BSS_ATTR static char buf[384];
   const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
   char id[17] = "-";
   if (s.active) g2EvenAiFormatExchangeId(s.exchangeId, id);
   const uint32_t idle = s.active ? (millis() - s.lastActMs) : 0;
+  const bool uartRunning = uartLinkIsRunning();
+  const UartLinkSessionDiagnostics uartSession =
+      uartLinkSessionDiagnostics();
+  const Cm5PresenceSnapshot cm5 =
+      cm5PresenceSnapshotForSession(uartSession.activeEpoch, millis());
   snprintf(buf, sizeof(buf),
-           "EvenAI session: %s id=%s arm=%c gen=%lu uart_epoch=%lu "
+           "EvenAI session: %s id=%s arm=%c gen=%lu bound_epoch=%lu "
+           "host_uart=%s active_epoch=%lu last_epoch=%lu last_event=%s "
+           "cm5=%s cm5_fresh=%d cm5_seen=%d cm5_age=%lums cm5_cmd=%d "
            "(hb=%lu, idle=%lums)",
            s.active ? "active" : "idle", id,
            s.active ? s.armSide : '-',
            (unsigned long)(s.active ? s.armGeneration : 0),
            (unsigned long)s.uartSessionEpoch,
+           uartRunning ? "running" : "stopped",
+           (unsigned long)uartSession.activeEpoch,
+           (unsigned long)uartSession.lastEpoch,
+           uartSession.lastEvent,
+           cm5PresenceModeName(cm5.mode), cm5.fresh ? 1 : 0,
+           cm5.seenForSession ? 1 : 0, (unsigned long)cm5.ageMs,
+           cm5.commandInFlight ? 1 : 0,
            (unsigned long)s.hbCnt, (unsigned long)idle);
   return buf;
 }
@@ -19595,12 +22041,13 @@ static const char* cmd_g2recover(const String& /*argsInput*/) {
     return "Error: G2: both temples down — use 'openg2 auto' for a full reconnect";
   }
   resetRecoveryBackoff();
-  const bool ok = attemptMissingArmRecovery();
-  // Schedule the next auto-retry from now if this manual one missed,
-  // so the heartbeat tick takes over without waiting on a stale deadline.
-  if (!ok) gNextRecoveryAttemptMs = millis() + kRecoveryBackoffMs[0];
-  return ok ? "G2 recovery: missing temple reconnected"
-            : "G2 recovery: missing temple not seen — auto-retries scheduled";
+  if (!queueMissingArmRecovery(/*manualIntent=*/true)) {
+    portENTER_CRITICAL(&gRecoveryMux);
+    gNextRecoveryAttemptMs = millis() + 1000;
+    portEXIT_CRITICAL(&gRecoveryMux);
+    return "G2 recovery: central worker busy — retry retained";
+  }
+  return "G2 recovery: missing-temple repair queued — use g2status to watch";
 }
 
 // Manual recovery for the "hijack ended abnormally and won't re-launch"
@@ -23230,7 +25677,7 @@ static const char* cmd_g2health(const String& argsInput) {
 }
 #endif  // ENABLE_R1_HEALTH
 
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
 // ─────────────────────────────────────────────────────────────────────
 // LLM viewer (g2LlmPageWorker) — read-only streaming LLM output on the
 // lens. Left ~1/3: control list "lstLlm". Right ~2/3: a live text pane
@@ -23281,28 +25728,65 @@ static EXT_RAM_BSS_ATTR char sLlmScratch[1536];
 // turns, keeping the LAST (cap-1) bytes so newest content wins on the small
 // pane. Reads chat turns (internally mutexed) + the finished-turn fallback
 // so an answer that completed before the first poll still shows.
+// Append to sLlmScratch, dropping from the FRONT when it is full, so the
+// scratch always holds the NEWEST bytes regardless of turn order or turn size.
+//
+// This replaces a write-until-full loop that carried two defects, both of which
+// only became reachable once the 127-byte truncation below was fixed:
+//
+//  1. The tag went in via snprintf and advanced `pos` by its RETURN value —
+//     which is the WOULD-BE length, not what was written. Enter a turn with
+//     pos == 1534 (legal; the guard was pos < 1535), snprintf writes one byte
+//     and returns 5, pos becomes 1539, and the terminator write lands 4 bytes
+//     past a 1536-byte PSRAM allocation. Swept: reachable in 0.49% of turn-length
+//     combinations, worst write index 1539. Reproduced under ASan.
+//  2. The per-turn clamp truncated at the TAIL, so a long OLDEST turn filled the
+//     scratch and the newest turn — the streaming answer, the only part anyone
+//     is looking at — contributed nothing. Measured: 0 of 60 bytes.
+//
+// `pos` can no longer exceed sizeof(sLlmScratch) - 1, so the terminator write is
+// in bounds by construction rather than by argument.
+static void g2LlmScratchAppend(size_t& pos, const char* src, size_t n) {
+  if (!src || n == 0) return;
+  const size_t capacity = sizeof(sLlmScratch) - 1;
+  if (n >= capacity) {                       // fragment alone overflows: keep its tail
+    memcpy(sLlmScratch, src + (n - capacity), capacity);
+    pos = capacity;
+    return;
+  }
+  if (pos + n > capacity) {                  // make room by dropping the oldest bytes
+    const size_t drop = pos + n - capacity;
+    memmove(sLlmScratch, sLlmScratch + drop, pos - drop);
+    pos -= drop;
+  }
+  memcpy(sLlmScratch + pos, src, n);
+  pos += n;
+}
+
 static size_t g2LlmBuildChatTail(char* out, size_t cap) {
   if (!out || cap == 0) return 0;
   size_t pos = 0;
   const int turns = chatGetTurnCount();
   const int startTurn = (turns > 4) ? turns - 4 : 0;  // last ~2 exchanges
-  for (int i = startTurn; i < turns && pos < sizeof(sLlmScratch) - 1; i++) {
+  for (int i = startTurn; i < turns; i++) {
     ChatTurnInfo info;
     if (!chatGetTurnInfo(i, &info)) continue;
     const char* tag = (info.role == ChatTurnRole::USER) ? "You: " : "AI: ";
-    int tn = snprintf(sLlmScratch + pos, sizeof(sLlmScratch) - pos, "%s", tag);
-    if (tn > 0) pos += (size_t)tn;
+    g2LlmScratchAppend(pos, tag, strlen(tag));
     int off = 0, r;
     char tb[128];
-    while (pos < sizeof(sLlmScratch) - 1 &&
-           (r = chatReadTurn(i, off, tb, sizeof(tb))) > 0) {
-      size_t n = (size_t)r;
-      if (pos + n > sizeof(sLlmScratch) - 1) n = sizeof(sLlmScratch) - 1 - pos;
-      memcpy(sLlmScratch + pos, tb, n);
-      pos += n; off += r;
-      if ((size_t)r < (int)sizeof(tb)) break;
+    while ((r = chatReadTurn(i, off, tb, sizeof(tb))) > 0) {
+      g2LlmScratchAppend(pos, tb, (size_t)r);
+      off += r;
+      // chatReadTurn returns min(avail, maxLen-1), so a read STRICTLY SHORTER
+      // than maxLen-1 is the end of the turn. The old test compared r against
+      // sizeof(tb) — which r can never reach — so it was always true and every
+      // turn was cut at 127 bytes. Measured: 127 of a 900-byte turn reached the
+      // pane, and because the sender suppresses an unchanged tail the lens then
+      // stopped updating entirely (3 distinct frames across a stream, vs 15).
+      if (r < (int)sizeof(tb) - 1) break;
     }
-    if (pos < sizeof(sLlmScratch) - 1) sLlmScratch[pos++] = '\n';
+    g2LlmScratchAppend(pos, "\n", 1);
   }
   sLlmScratch[pos] = '\0';
 
@@ -23334,7 +25818,13 @@ static size_t g2LlmBuildChatTail(char* out, size_t cap) {
     return n;
   }
 
-  const size_t start = (pos > cap - 1) ? pos - (cap - 1) : 0;
+  size_t start = (pos > cap - 1) ? pos - (cap - 1) : 0;
+  // The window is cut at a byte offset, so it can BEGIN inside a multi-byte
+  // sequence — the G2 renders UTF-8 correctly, so that shows up as a stray glyph
+  // at the top of the pane. Skip to the next lead byte. Unlike the tail trim at
+  // the serving edges, this may consume the whole (<=3 byte) window, which is
+  // fine here: the slice is recomputed from an absolute buffer every frame.
+  start += (size_t)utf8AlignHead(sLlmScratch + start, (int)(pos - start));
   const size_t n = pos - start;
   memcpy(out, sLlmScratch + start, n);
   out[n] = '\0';
@@ -23444,7 +25934,7 @@ static bool g2ShowLlmPage(void (*onDone)()) {
   }
   return true;
 }
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_BACKEND
 
 // ─────────────────────────────────────────────────────────────────────
 // Camera viewer — capture one JPEG, decode to RGB888 via
@@ -25627,13 +28117,11 @@ const char* g2ProbeImageQ14LiveText() {
 // arm-picker for image-push helpers.
 //
 // Caveats observed in our setup:
-//   * On firmware 2.2.0.24, ALL notify traffic (incl. cmd=4 ImageRawResp
-//     acks) arrives on the RIGHT pipe — see docs/G2_PROTOCOL.md "Notify
-//     channel topology on firmware 2.2.0.24 — right-only" and
-//     g2-kit-unofficial/ble/docs/gotchas.md "Arms" section. So even
-//     when we TX to LEFT, acks come back via RIGHT and the existing
-//     ack-tracking path still works.
-//   * Because L never acks heartbeats on this firmware, beatOne()
+//   * On firmware 2.2.0.24 and 2.2.7.14, ALL notify traffic (incl. cmd=4
+//     ImageRawResp acks) arrives on the RIGHT pipe — see docs/G2_PROTOCOL.md
+//     "Notify channel topology — right-only". So even when we TX to LEFT,
+//     acks come back via RIGHT and the existing ack-tracking path still works.
+//   * Because L never receives heartbeat acks on these firmware builds, beatOne()
 //     skips the miss-counter for L (firmwareSilencesLeftNotify gate),
 //     keeping gL.pluginDead=false in steady state. The pluginDead
 //     check below remains as a safety net for the case where some

@@ -10,12 +10,31 @@
  */
 
 #include <Arduino.h>
+#include <ctype.h>
 #include <esp_app_desc.h>
 #include <esp_heap_caps.h>
 #if CONFIG_HEAP_TASK_TRACKING
 #include <esp_heap_task_info.h>   // heap_task_totals_t, heap_caps_get_per_task_info
 #endif
 #include "System_BuildConfig.h"
+
+// ---------------------------------------------------------------------------
+// ESP-NOW-off stub
+// ---------------------------------------------------------------------------
+// isEspNowInitialized() is DEFINED in System_ESPNow.cpp, which CMake drops when
+// ENABLE_ESPNOW is 0 — but three always-compiled TUs call it unconditionally:
+// System_WiFi.cpp (radio-ownership decisions, via a local `extern` declaration),
+// System_RamFlush.cpp (RF_ESPNOW resume) and WebPage_Sensors.cpp. So the
+// ESPNOW=0 configuration has never actually linked; the flag existed but the
+// build was never tried.
+//
+// Answering false here is correct, not merely convenient: with ESP-NOW compiled
+// out nothing ever claims the radio for it, so every caller's "is ESP-NOW
+// holding the radio / does it need resuming / is it active" question has the
+// same true answer.
+#if !ENABLE_ESPNOW
+bool isEspNowInitialized() { return false; }
+#endif
 #if ENABLE_WIFI
   #include <WiFi.h>
 #endif
@@ -32,6 +51,8 @@
 #include "System_I2C.h"
 #include "HAL_Input.h"          // For INPUT_TASK_NAME (gamepad vs ANO)
 #include "System_User.h"
+#include "System_UartLink.h"
+#include "System_Dictation.h"     // dictationAvailable — command-module gate
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
 #include "System_BootState.h"     // bootStateGetBootCount / bootStateResetBootCount (NVS boot counter)
 #include "System_CrashRecord.h"   // crashRecord* — RTC post-mortem record for `crashlog`
@@ -54,11 +75,13 @@
 #if ENABLE_WIFI && ENABLE_MQTT
 #include "System_MQTT.h"        // isMqttConnected()
 #endif
-#if ENABLE_G2_GLASSES
+// Unconditional: G2_Glasses.h is self-guarding (it supplies inline no-op stubs
+// when BT/G2 are compiled out), and this TU calls into it from ungated code
+// (e.g. the EvenAI authority fence in the command executor). Gating the include
+// on a bare ENABLE_G2_GLASSES left those calls undeclared when G2 was off.
 #include "G2_Glasses.h"         // isG2ClientInitialized(), isG2Connected()
-#endif
-#if ENABLE_ONDEVICE_LLM
-#include "System_LLM.h"         // LLMStatus, llmGetStatus()
+#if ENABLE_LLM_BACKEND
+#include "System_LLMBackend.h"         // LLMStatus, llmBackendStatus()
 #endif
 #if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"   // server, gServerIsHttps, gSessions, MAX_SESSIONS
@@ -237,6 +260,10 @@ extern const size_t edgeImpulseCommandsCount;
 #if ENABLE_MICROPHONE
 extern const CommandEntry micCommands[];
 extern const size_t micCommandsCount;
+#if ENABLE_DICTATION
+extern const CommandEntry dictationCommands[];
+extern const size_t dictationCommandsCount;
+#endif
 extern bool micConnected;
 bool audioAnySourceAvailable();   // HAL_Audio — a mic source (PDM or G2) is reachable
 #endif
@@ -244,6 +271,10 @@ extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
 extern const CommandEntry sensorLoggingCommands[];
 extern const size_t sensorLoggingCommandsCount;
+#if ENABLE_R1_HEALTH
+extern const CommandEntry healthCommands[];
+extern const size_t healthCommandsCount;
+#endif
 #if ENABLE_NEOPIXEL
 extern const CommandEntry ledCommands[];
 extern const size_t ledCommandsCount;
@@ -260,12 +291,10 @@ extern const CommandEntry mapsSettingCommands[];
 extern const size_t mapsSettingCommandsCount;
 extern const CommandEntry powerCommands[];
 extern const size_t powerCommandsCount;
-#if ENABLE_RASPBERRY_PI_HOST_POWER
-extern const CommandEntry raspberryPiHostPowerCommands[];
-extern const size_t raspberryPiHostPowerCommandsCount;
-#endif
 extern const CommandEntry liveAudioCommands[];
 extern const size_t liveAudioCommandsCount;
+extern const CommandEntry cm5PresenceCommands[];
+extern const size_t cm5PresenceCommandsCount;
 extern const CommandEntry otaCommands[];
 extern const size_t otaCommandsCount;
 #if ENABLE_OLED_DISPLAY
@@ -876,6 +905,7 @@ static bool isQuietPollCommand(const char* cmd) {
   // Match the leading verb; ignore any trailing args (json modifiers, etc.)
   static const char* const kQuiet[] = {
     "g2status", "ringstatus", "blestatus",
+    "cm5 status", "cm5 capabilities",
   };
   for (size_t i = 0; i < sizeof(kQuiet) / sizeof(kQuiet[0]); i++) {
     size_t n = strlen(kQuiet[i]);
@@ -1036,15 +1066,6 @@ namespace {
     String (*handler)(const String&); // optional specialized handler
   };
 
-  static int indexOfNthSpace(const String& s, int n, int startIdx = 0) {
-    int idx = startIdx - 1;
-    for (int i = 0; i < n; i++) {
-      idx = s.indexOf(' ', idx + 1);
-      if (idx < 0) return -1;
-    }
-    return idx;
-  }
-
   // Quote-aware token walk — mirrors CommandArgs: tokens split on spaces,
   // but a token opening with '"' runs to its closing quote (spaces inside
   // are token content, not separators). Redaction positions MUST agree with
@@ -1058,14 +1079,14 @@ namespace {
     const int len = (int)s.length();
     start = 0; end = 0;
     for (int t = 0; t < n; t++) {
-      while (i < len && s[i] == ' ') i++;
+      while (i < len && isspace(static_cast<unsigned char>(s[i]))) i++;
       if (i >= len) return false;
       start = i;
       if (s[i] == '"') {
         int close = s.indexOf('"', i + 1);
         i = (close < 0) ? len : close + 1;
       } else {
-        while (i < len && s[i] != ' ') i++;
+        while (i < len && !isspace(static_cast<unsigned char>(s[i]))) i++;
       }
       end = i;
     }
@@ -1073,23 +1094,39 @@ namespace {
   }
 
   // Shared handler for peer-credential commands: "<cmd> <target> <username>
-  // <password> <rest>..." (espnowremote / espnowbrowse / espnowfetch). Redact
-  // ONLY the password — the username is audit-relevant (WHO ran it) and <rest>
-  // (the remote command / path) stays visible (WHAT was run).
+  // <password> <rest>..." (espnowremote / roomcmd / tagcmd / browse / fetch).
+  // Mask the peer password. For command-forwarding forms, recursively redact
+  // the nested command too: it may itself be `login ...` or another credential
+  // verb.
   static String redactPeerCredCmd(const String& in) {
     String c = in;
-    int base = c.indexOf(' ');                      // after "espnowremote"
-    if (base > 0) {
-      int t1 = c.indexOf(' ', base + 1);                 // end of <target>
-      int t2 = (t1 > 0) ? c.indexOf(' ', t1 + 1) : -1;   // end of <username>
-      int t3 = (t2 > 0) ? c.indexOf(' ', t2 + 1) : -1;   // end of <password>
-      if (t2 > 0) {
-        String head = c.substring(0, t2 + 1);  // "espnowremote <target> <username> "
-        String afterPass = (t3 > 0) ? c.substring(t3) : String();  // " <command>..."
-        return head + "***" + afterPass;
-      }
+    CommandArgs parsed(c);
+    String safe;
+    for (int i = 0; i < 3 && i < parsed.count(); ++i) {
+      if (i) safe += " ";
+      safe += parsed.arg(i);
     }
-    return c;
+    safe += " ***";
+
+    const bool forwarding = parsed.count() > 0 &&
+        (parsed.arg(0).equalsIgnoreCase("espnowremote") ||
+         parsed.arg(0).equalsIgnoreCase("espnowroomcmd") ||
+         parsed.arg(0).equalsIgnoreCase("espnowtagcmd"));
+    // Preserve a nested command only when tokenization is unambiguous. Any
+    // quote adjacency/unterminated form is treated as secret tail in full.
+    int passwordStart = 0, passwordEnd = 0;
+    if (!forwarding || parsed.unterminatedQuote() ||
+        !nthTokenBounds(c, 4, passwordStart, passwordEnd)) {
+      return safe;
+    }
+    if (passwordEnd < c.length() &&
+        !isspace(static_cast<unsigned char>(c[passwordEnd]))) {
+      return safe;
+    }
+    String tail = c.substring(passwordEnd);
+    tail.trim();
+    if (tail.length()) safe += String(" ") + redactCmdForAudit(tail);
+    return safe;
   }
 
   // usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
@@ -1100,30 +1137,43 @@ namespace {
     const int kPwTokens[] = { 7, 6, 3 };  // high → low so edits don't shift earlier tokens
     for (int k = 0; k < 3; k++) {
       int pos = kPwTokens[k];
-      int prevSpace = indexOfNthSpace(c, pos - 1);
-      if (prevSpace < 0) continue;
-      int nextSpace = c.indexOf(' ', prevSpace + 1);
-      String head = c.substring(0, prevSpace + 1);
-      String tail = (nextSpace > 0) ? c.substring(nextSpace) : String();
-      c = head + "***" + tail;
+      int start = 0, end = 0;
+      if (!nthTokenBounds(c, pos, start, end)) continue;
+      c = c.substring(0, start) + "***" + c.substring(end);
     }
     return c;
+  }
+
+  static bool redactRuleMatches(const String& command,
+                                const char* rulePrefix) {
+    CommandArgs actual(command);
+    String expectedLine(rulePrefix ? rulePrefix : "");
+    expectedLine.trim();
+    CommandArgs expected(expectedLine);
+    if (expected.count() == 0 || actual.count() < expected.count())
+      return false;
+    for (int i = 0; i < expected.count(); ++i) {
+      if (!actual.arg(i).equalsIgnoreCase(expected.arg(i))) return false;
+    }
+    return true;
   }
 
   // Rule table (extend here to add new redactions)
   // Columns: prefix (lowercase cmd prefix), type (MASK_TOKEN_AT_POS|MASK_AFTER_TOKEN_POS|CALL_HANDLER), param (1-based token index), handler (custom fn or nullptr)
   static const RedactRule kRules[] = {
     { "wifiadd ",          MASK_TOKEN_AT_POS,    3, nullptr },  // wifiadd <ssid> <password>
-    { "mqttpassword ",     MASK_TOKEN_AT_POS,    2, nullptr },  // mqttpassword <password>
+    { "mqttpassword ",     MASK_AFTER_TOKEN_POS, 1, nullptr },  // mqttpassword <password>
     { "login ",            MASK_TOKEN_AT_POS,    3, nullptr },  // login <user> <password>
-    { "testencryption ",   MASK_TOKEN_AT_POS,    2, nullptr },  // testencryption <secret>
-    { "testpassword ",     MASK_TOKEN_AT_POS,    2, nullptr },  // testpassword <secret>
+    { "testencryption ",   MASK_AFTER_TOKEN_POS, 1, nullptr },  // testencryption <secret>
+    { "testpassword ",     MASK_AFTER_TOKEN_POS, 1, nullptr },  // testpassword <secret>
     { "otapin ",           MASK_AFTER_TOKEN_POS, 1, nullptr },  // otapin <recovery passphrase>
     { "userrequest ",      MASK_AFTER_TOKEN_POS, 2, nullptr },  // userrequest <name> <pass> ...
     { "espnowremote ",     CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> <cmd>
+    { "espnowroomcmd ",    CALL_HANDLER,         0, &redactPeerCredCmd },  // <room> <user> <pass> <cmd>
+    { "espnowtagcmd ",     CALL_HANDLER,         0, &redactPeerCredCmd },  // <tag> <user> <pass> <cmd>
     { "espnowbrowse ",     CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> [path]
     { "espnowfetch ",      CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> <path>
-    { "blesecret ",        MASK_TOKEN_AT_POS,    2, nullptr },  // blesecret <passphrase>
+    { "blesecret ",        MASK_AFTER_TOKEN_POS, 1, nullptr },  // blesecret <passphrase>
     // Passphrase setters — MASK_AFTER_TOKEN_POS masks the whole rest of the line
     // (robust to quoted / spaced passphrases), keeping the mesh label visible.
     { "espnowsetpassphrase ",        MASK_AFTER_TOKEN_POS, 2, nullptr },  // espnowsetpassphrase <mesh> <passphrase>
@@ -1139,6 +1189,12 @@ namespace {
     { "useradd ",            MASK_TOKEN_AT_POS,    3, nullptr },  // <username> <password> [0|1] [role]
     // usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
     { "usersync ",           CALL_HANDLER,         0, &redactUserSyncCmd },  // mask pw tokens 3,6,7
+    // Automation definitions may embed arbitrary future command lines and are
+    // copied into several durable/debug sinks before execution. Preserve only
+    // the wrapper identity; the nested payload is opaque secret material here.
+    { "automation add ",     MASK_AFTER_TOKEN_POS, 2, nullptr },
+    { "automationadd ",      MASK_AFTER_TOKEN_POS, 1, nullptr },
+    { "validate-conditions ", MASK_AFTER_TOKEN_POS, 1, nullptr },
   };
 }
 
@@ -1182,9 +1238,37 @@ String redactCmdForAudit(const String& argsInput) {
   String c = argsInput;
   String cl = c; cl.toLowerCase();
 
+  // Credential verbs accept the command registry's full whitespace grammar.
+  // Mask login's password before the legacy literal-prefix rule table so a
+  // tab/CR/VT/FF separator cannot bypass redaction.
+  int verbStart = 0;
+  while (verbStart < cl.length() &&
+         isspace(static_cast<unsigned char>(cl[verbStart]))) verbStart++;
+  int verbEnd = verbStart;
+  while (verbEnd < cl.length() &&
+         !isspace(static_cast<unsigned char>(cl[verbEnd]))) verbEnd++;
+  if (cl.substring(verbStart, verbEnd) == "login") {
+    CommandArgs loginArgs(c);
+    // Login grammar has no escaping. Treat malformed or surprising input as
+    // entirely secret after the username instead of trying to preserve an
+    // ambiguous tail (e.g. `login bob "pa"ss word`). For an exact targeted
+    // form retain only the non-secret target label.
+    String safe = "login";
+    if (loginArgs.count() > 1) {
+      safe += " ";
+      safe += loginArgs.arg(1);
+    }
+    safe += " ***";
+    if (!loginArgs.unterminatedQuote() && loginArgs.count() == 4) {
+      safe += " ";
+      safe += loginArgs.arg(3);
+    }
+    return safe;
+  }
+
   for (size_t i = 0; i < (sizeof(kRules) / sizeof(kRules[0])); ++i) {
     const RedactRule& r = kRules[i];
-    if (!cl.startsWith(r.prefix)) continue;
+    if (!redactRuleMatches(c, r.prefix)) continue;
 
     if (r.type == CALL_HANDLER && r.handler) {
       return r.handler(c);
@@ -1214,8 +1298,9 @@ String redactCmdForAudit(const String& argsInput) {
   // them all. Recognized commands keep full args (that's the audit value);
   // an unknown verb's args have none.
   if (!findCommand(c)) {
-    int sp = c.indexOf(' ');
-    if (sp > 0) return c.substring(0, sp) + " ***";
+    if (verbEnd > verbStart && verbEnd < c.length()) {
+      return c.substring(0, verbEnd) + " ***";
+    }
   }
 
   return c;
@@ -1666,7 +1751,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   // remain inline — those are constants for the build, not duplicated state.
   JsonObject mem = doc["mem"].to<JsonObject>();
   mem["heap_free_kb"] = (int)(SelfDevice::freeHeapBytes() / 1024);
-  mem["heap_total_kb"] = (int)(ESP.getHeapSize() / 1024);
+  mem["heap_total_kb"] = (int)(hw1InternalTotalBytes() / 1024);
   mem["psram_total_kb"] = (int)(ESP.getPsramSize() / 1024);
   mem["psram_free_kb"] = (int)(SelfDevice::psramFreeBytes() / 1024);
 
@@ -1729,7 +1814,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     bt["running"] = bleSubsystemActive();
     bt["state"]   = bleSubsystemStateString();
     bt["mode"]    = getBleModeString();   // "server" | "client"
-    bt["server"]  = isBLERunning();
+    bt["server"]  = isBleServerInitialized();
 #if ENABLE_G2_GLASSES
     bt["client"]    = isG2ClientInitialized();
     bt["g2Connected"] = isG2Connected();
@@ -1791,9 +1876,9 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   }
 #endif
 
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
   {
-    LLMStatus llmSt = llmGetStatus();
+    LLMStatus llmSt = llmBackendStatus();
     const char* llmStateStr = "UNLOADED";
     switch (llmSt.state) {
       case LLMState::LOADING:    llmStateStr = "LOADING"; break;
@@ -2103,10 +2188,8 @@ const char* cmd_testencryption(const String& argsInput) {
   String encrypted = encryptString(args);
   String decrypted = decryptString(encrypted);
 
-  broadcastOutput("AES String Encryption Test:");
-  BROADCAST_PRINTF("Original:  '%s'", args.c_str());
-  BROADCAST_PRINTF("Encrypted: '%s'", encrypted.c_str());
-  BROADCAST_PRINTF("Decrypted: '%s'", decrypted.c_str());
+  broadcastOutput("AES String Encryption Test (secret material hidden):");
+  BROADCAST_PRINTF("Input length: %u", (unsigned)args.length());
   BROADCAST_PRINTF("Match: %s", (args == decrypted) ? "YES" : "NO");
 
   return "[System] Encryption test complete";
@@ -2126,9 +2209,8 @@ const char* cmd_testpassword(const String& argsInput) {
   bool verified = verifyUserPassword(args, hashed);
   bool wrongVerified = verifyUserPassword("wrongpassword", hashed);
 
-  broadcastOutput("Password Hashing Test:");
-  BROADCAST_PRINTF("Original:  '%s'", args.c_str());
-  BROADCAST_PRINTF("Hashed:    '%s'", hashed.c_str());
+  broadcastOutput("Password Hashing Test (secret material hidden):");
+  BROADCAST_PRINTF("Input length: %u", (unsigned)args.length());
   BROADCAST_PRINTF("Verify Correct: %s", verified ? "YES" : "NO");
   BROADCAST_PRINTF("Verify Wrong:   %s", wrongVerified ? "YES" : "NO");
   BROADCAST_PRINTF("System Status: %s", (verified && !wrongVerified) ? "WORKING" : "ERROR");
@@ -2323,7 +2405,7 @@ const char* cmd_factoryreset(const String& argsInput) {
                          nullptr)) {
     return "Error: cannot request confirm (another interactive mode is active)";
   }
-  return "Type 'yes' to confirm or anything else to cancel.";
+  return cliConfirmPromptResponse();
 }
 
 const char* cmd_broadcast(const String& argsInput) {
@@ -2483,7 +2565,7 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
   // window; a boot whose clock is already valid shouldn't stall the caller —
   // the background daemon keeps retrying either way.
   bool ntpSynced = false;
-  const int maxWaitSeconds = preSet ? 3 : 15;
+  const int maxWaitSeconds = preSet ? 7 : 15;
   const int iterationsPerSecond = 10;  // 100ms per iteration
   const int maxIterations = maxWaitSeconds * iterationsPerSecond;
   DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting %d-second wait loop for NTP reply", maxWaitSeconds);
@@ -2781,7 +2863,7 @@ extern const size_t mqttCommandsCount;
 #endif
 
 // LLM commands (from System_LLM.cpp)
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
 extern const CommandEntry llmCommands[];
 extern const size_t llmCommandsCount;
 #endif
@@ -3106,6 +3188,17 @@ static const CommandModule gCommandModules[] = {
     "and micbitdepth (16 or 32), each usable as a getter with no argument; micautostart "
     "on|off persists whether the mic powers up automatically at boot.", micCommands,          micCommandsCount, CMD_MODULE_SENSOR, []() { return audioAnySourceAvailable(); } },
 #endif
+#if ENABLE_DICTATION
+  { "dictation", "Speech as a text input method", "Host half of the OLED keyboard's mic page. The wearer arms a capture from the keyboard "
+    "(whichever mic the source layer has resolved — on-board PDM or the G2 glasses), the firmware records it with VAD auto-stop and pushes a "
+    "dictate_request <id> <path> event on the authenticated UART link, and the CM5 host voicefetches the WAV, transcribes it, and returns the "
+    "words with dictate result <id> <text> — the text runs to end of line, so it needs no quoting or escaping. dictate fail <id> [reason] "
+    "reports a transcription that could not be produced, and dictate status reports the current state, active mic source and elapsed time. "
+    "The id is single-use and bound to the display session that armed it, so a transcript can never land in a field belonging to a different "
+    "user; the recording is deleted once its words are delivered. This device cannot transcribe speech on its own, so the whole command "
+    "family is UART-only and inert without a logged-in host.", dictationCommands, dictationCommandsCount,
+    CMD_MODULE_SENSOR, []() { return dictationAvailable(nullptr); } },
+#endif
 #if ENABLE_EDGE_IMPULSE
   { "edgeimpulse", "Edge Impulse ML inference", "On-device machine-learning image inference using TensorFlow Lite Micro models "
     "exported from Edge Impulse. Two things must be in place before inference: a model "
@@ -3246,6 +3339,15 @@ static const CommandModule gCommandModules[] = {
     "sensorlog autostart [on|off] makes logging "
     "resume on the next boot using the last-used parameters; the "
     "format/maxsize/rotations/sensors/autostart choices are persisted.", sensorLoggingCommands, sensorLoggingCommandsCount, 0, nullptr },
+#if ENABLE_R1_HEALTH
+  { "health",     "R1 ring health vitals and local health logging", "Live vitals from a paired R1 ring (HR, HRV, SpO2, temperature, battery) "
+    "plus the on-device health logger. healthstatus reads live values, ring control state, "
+    "logging state and typed-history status; healthstatus json is what the app and web page consume. "
+    "healthlogging drives the local CSV logger independently of the ring's own health-collection "
+    "privacy setting, and healthlogmerge stitches captures together. The ring rides the G2 BLE "
+    "transport, so this whole family requires Bluetooth + G2; connect via ringconnect.",
+    healthCommands, healthCommandsCount, 0, nullptr },
+#endif
   { "users",      "User authentication and management", "The users subsystem provides admin-gated account management, authentication, "
     "sessions, and bans. Accounts have two roles, admin and standard; the first account "
     "is the owner-admin, and userpromote/userdemote change roles while useradd creates "
@@ -3323,28 +3425,27 @@ static const CommandModule gCommandModules[] = {
     "while the radio stays up so the device remains reachable, and powercooldown "
     "<0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid "
     "back-to-back sleep transitions. All of these values persist.", powerCommands,        powerCommandsCount, 0, nullptr },
-#if ENABLE_RASPBERRY_PI_HOST_POWER
-  { "hostpower",  "Raspberry Pi/CM5 host power control", "Controls the Linux host over the authenticated UART link using a finite, asynchronous "
-    "request/ACK protocol. hostpower status requests fresh CM5 state; hostpower profile "
-    "<eco|balanced|performance|auto> requests a power profile; bare hostpower or hostpower "
-    "show displays the current request and last CM5 report. These operations require an "
-    "admin. reboot, halt, suspend, and sleep_for <1..1440 minutes> additionally require "
-    "superadmin plus a literal same-command confirm token; recover confirm clears only an "
-    "inspected fail-closed transition. ACK/report callbacks are accepted "
-    "from a real authenticated UART session only, allowing the CM5 service account to remain "
-    "user-tier. Request IDs combine a random per-boot nonce with a monotonic counter; one "
-    "request may be pending at a time and delivery retries are finite. Destructive execution "
-    "requires confirmed accepted and committed ACK phases, while a normalized Linux boot ID "
-    "distinguishes a daemon restart from a completed host boot.",
-    raspberryPiHostPowerCommands, raspberryPiHostPowerCommandsCount,
-    CMD_MODULE_NETWORK, nullptr },
-#endif
   { "liveaudio",  "Opt-in live PCM transport and recorder shadow", "Exercises the live-pcm-v1 UART framing and bounded receiver path. "
     "A real authenticated UART host first acquires a renewable 3-second controller lease with liveaudio ready. liveaudio synth schedules "
     "deterministic 16 kHz signed-16-bit mono PCM; an explicit, exact-ID liveaudio shadow arm can instead tee an owned 16 kHz PDM or G2 "
     "recording through a fixed 16 KiB PSRAM queue. Shadow transport is disabled by default, never delays or replaces the WAV writer, and a "
     "transport fault aborts only the live copy while the finalized WAV remains authoritative. This diagnostic transport does not enable "
     "production streaming STT, LLM, or lens delivery.", liveAudioCommands, liveAudioCommandsCount,
+    CMD_MODULE_NETWORK, nullptr },
+  { "cm5", "CM5 service presence and host power/fan control", "Everything that talks to the CM5 Linux host over the authenticated UART link. "
+    "cm5 status exposes the current named-UART epoch binding, freshness, state, command bridge, monitor transitions, and task stack watermark; "
+    "cm5 capabilities reports the heartbeat protocol constants. The five-second heartbeat itself is authenticated UART control-plane traffic, "
+    "not a user command, so it remains responsive even while the shared command executor is occupied. "
+    "cm5 power and cm5 fan drive the host through two independent finite request/ACK/report state machines that share one ID space: "
+    "cm5 power status requests fresh CM5 state, cm5 power profile <eco|balanced|performance|auto> requests a power profile, and cm5 fan "
+    "<quiet|max> pins a fan mode while cm5 fan auto returns control to the Linux temperature curve. Bare cm5 power / cm5 fan (or their show "
+    "form) display local delivery state and the last CM5 report. Initiation requires an admin; reboot, halt, suspend, and sleep_for "
+    "<1..1440 minutes> additionally require superadmin plus a literal same-command confirm token, and recover confirm clears only an "
+    "inspected fail-closed transition. ACK/report callbacks are accepted from a real authenticated UART session only, which lets the CM5 "
+    "service account stay user-tier. One request per protocol may be pending at a time and delivery retries are finite; destructive "
+    "execution additionally requires confirmed accepted and committed ACK phases, while a normalized Linux boot ID distinguishes a daemon "
+    "restart from a completed host boot. A max fan request may supersede one pending non-max request.",
+    cm5PresenceCommands, cm5PresenceCommandsCount,
     CMD_MODULE_NETWORK, nullptr },
   { "ota",        "Signed firmware recovery and update", "Native ESP-IDF signed OTA support. otastatus reports the journal, "
     "partition identity, staged pair, and last result. A superadmin sets a persistent recovery credential with otapin - "
@@ -3397,7 +3498,7 @@ static const CommandModule gCommandModules[] = {
     "deliberately unavailable -- the commands exist in the code but are intentionally "
     "left unregistered because both approaches proved to be dead ends.", g2RingCommands,    g2RingCommandsCount, 0, nullptr },
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
   { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "
     "device (model weights held in PSRAM). A model must be loaded before generation: "
     "llmload [file.bin] loads one (bare filenames are looked up on the SD card under "
@@ -3616,11 +3717,17 @@ extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
 
 // Comprehensive memory report - shows what's consuming memory (like Task Manager)
 void printMemoryReport() {
-  size_t dram_total = ESP.getHeapSize();
-  size_t dram_free = ESP.getFreeHeap();
-  size_t dram_used = dram_total - dram_free;
-  size_t dram_min = ESP.getMinFreeHeap();
-  size_t dram_peak_used = dram_total - dram_min;
+  // 8-bit-capable internal RAM only. ESP.getHeapSize()/getFreeHeap() are
+  // MALLOC_CAP_INTERNAL without MALLOC_CAP_8BIT, so they fold in the IRAM-only
+  // heap that no malloc/new/task stack can use, and getHeapSize() additionally
+  // double-counts the DMA reserve pool. See hw1InternalFreeBytes() in
+  // System_MemUtil.h. On feather_esp32_v2 the old calls overstated free by
+  // ~25.8 KB and total by ~59.4 KB.
+  size_t dram_total = hw1InternalTotalBytes();
+  size_t dram_free = hw1InternalFreeBytes();
+  size_t dram_used = (dram_total > dram_free) ? (dram_total - dram_free) : 0;
+  size_t dram_min = hw1InternalMinFreeBytes();
+  size_t dram_peak_used = (dram_total > dram_min) ? (dram_total - dram_min) : 0;
 
   bool has_ps = psramFound();
   size_t ps_total = has_ps ? ESP.getPsramSize() : 0;
@@ -4169,15 +4276,16 @@ const char* cmd_memreport(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
-    size_t dramTotal = ESP.getHeapSize();
-    size_t dramFree  = ESP.getFreeHeap();
-    size_t dramMin   = ESP.getMinFreeHeap();
+    // 8-bit-capable internal RAM only (see hw1InternalFreeBytes, System_MemUtil.h).
+    size_t dramTotal = hw1InternalTotalBytes();
+    size_t dramFree  = hw1InternalFreeBytes();
+    size_t dramMin   = hw1InternalMinFreeBytes();
     JsonObject dram = doc["dram"].to<JsonObject>();
     dram["total"]    = (unsigned long)dramTotal;
-    dram["used"]     = (unsigned long)(dramTotal - dramFree);
+    dram["used"]     = (unsigned long)(dramTotal > dramFree ? dramTotal - dramFree : 0);
     dram["free"]     = (unsigned long)dramFree;
     dram["minFree"]  = (unsigned long)dramMin;
-    dram["peakUsed"] = (unsigned long)(dramTotal - dramMin);
+    dram["peakUsed"] = (unsigned long)(dramTotal > dramMin ? dramTotal - dramMin : 0);
     JsonObject ps = doc["psram"].to<JsonObject>();
     bool hasPs = psramFound();
     ps["available"] = hasPs;
@@ -4258,6 +4366,14 @@ const char* cmd_taskstats(const String& originalCmd) {
       // usStackHighWaterMark is already BYTES under ESP-IDF — emit raw, never
       // *4 (see System_TaskUtils.h / feedback_task_stack_bytes_not_words).
       t["stackFree"] = (unsigned)taskArray[i].usStackHighWaterMark;
+      // Total allocated stack, also BYTES. FreeRTOS can't report it (pxEndOfStack
+      // is compiled out on this down-growing port), so it comes from the
+      // creation-time registry and only covers tasks HardwareOne creates.
+      // Emitted only when known — the key is ABSENT for IDF-owned tasks
+      // (ipc0/ipc1, esp_timer, IDLEn, wifi, BT), which consumers render as
+      // headroom-only rather than assuming a total.
+      uint32_t stackTotal = taskStackLookup(taskArray[i].pcTaskName);
+      if (stackTotal > 0) t["stackSize"] = (unsigned)stackTotal;
     }
     serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
     return getDebugBuffer();
@@ -4439,7 +4555,6 @@ const char* cmd_perftop(const String& originalCmd) {
 // ============================================================================
 // External dependencies for command execution
 extern bool gAutomationLogActive;
-extern CLIState gCLIState;
 extern bool gCLIValidateOnly;
 extern QueueHandle_t gCmdExecQ;
 
@@ -4455,36 +4570,164 @@ extern bool isAdminUser(const String& user);
 
 // Helper function: check if command requires admin privileges
 bool adminRequiredForLine(const String& line) {
-  // Handle help navigation commands specially (they don't require admin)
-  String lc = line;
-  lc.toLowerCase();
-  lc.trim();
-  if (gCLIState != CLI_NORMAL) {
-    if (lc == "system" || lc == "wifi" || lc == "automations" || 
-        lc == "espnow" || lc == "sensors" || lc == "settings") {
-      return false;
-    }
-  }
-  
   // Use centralized commandRequiresAdmin()
   return commandRequiresAdmin(line);
 }
 
-// Guest accounts may authenticate, but the command surface is login/logout
-// only. View-only UX lives in web/OLED; this is the CLI chokepoint shared by
-// every transport that funnels through executeCommand.
+// Guest accounts may authenticate, but the command surface is caller-local
+// login/logout plus whoami only. View-only UX lives in web/OLED; this is the
+// CLI chokepoint shared by every transport that funnels through executeCommand.
 static bool commandAllowedForGuest(const String& line) {
-  String lc = line;
-  lc.toLowerCase();
-  lc.trim();
-  int sp = lc.indexOf(' ');
-  String cmd = (sp > 0) ? lc.substring(0, sp) : lc;
-  return cmd == "login" || cmd == "logout";
+  CommandArgs args(line);
+  if (args.unterminatedQuote() || args.count() == 0) return false;
+
+  // Guest is a real authenticated role, not anonymous/AuthBypass. It may
+  // replace or end only its own submitting transport session. Any explicit
+  // target is session administration and is deliberately outside the
+  // view-only Guest surface.
+  if (args.arg(0).equalsIgnoreCase("login")) {
+    return args.count() == 3;  // login <user> <pass>
+  }
+  if (args.arg(0).equalsIgnoreCase("logout")) {
+    return args.count() == 1;  // logout
+  }
+  if (args.arg(0).equalsIgnoreCase("whoami")) {
+    return args.count() == 1;
+  }
+  return false;
+}
+
+enum class SessionControlForm : uint8_t {
+  Other,
+  BareLogin,
+  TargetedLogin,
+  BareLogout,
+  TargetedLogout,
+  MalformedLogin,
+  MalformedLogout,
+};
+
+// Classify the complete command line once so authorization and the handlers
+// cannot disagree about whether a target transport was supplied.
+static SessionControlForm classifySessionControlLine(const String& line) {
+  CommandArgs args(line);
+  if (args.count() == 0) return SessionControlForm::Other;
+  if (args.arg(0).equalsIgnoreCase("login")) {
+    if (args.unterminatedQuote() || args.count() < 3 || args.count() > 4) {
+      return SessionControlForm::MalformedLogin;
+    }
+    return args.count() == 4 ? SessionControlForm::TargetedLogin
+                             : SessionControlForm::BareLogin;
+  }
+  if (args.arg(0).equalsIgnoreCase("logout")) {
+    if (args.unterminatedQuote() || args.count() > 2) {
+      return SessionControlForm::MalformedLogout;
+    }
+    return args.count() == 2 ? SessionControlForm::TargetedLogout
+                             : SessionControlForm::BareLogout;
+  }
+  return SessionControlForm::Other;
+}
+
+static const char* commandSourceSessionName(CommandSource source) {
+  switch (source) {
+    case SOURCE_SERIAL: return "serial";
+    case SOURCE_UART: return "uart";
+    case SOURCE_LOCAL_DISPLAY: return "display";
+    default: return nullptr;
+  }
+}
+
+// Explicitly controlling another transport is available only to a real,
+// named, still-live Serial/UART/OLED session. This deliberately distinguishes
+// a stored Guest role from the anonymous AuthBypass identity used when a
+// transport's require-auth toggle is off.
+static bool callerMayTargetAnotherSession(const AuthContext& auth,
+                                          const char** denialOut) {
+  auto deny = [&](const char* reason) {
+    if (denialOut) *denialOut = reason;
+    return false;
+  };
+
+  if (auth.user.length() == 0 || auth.user == "AuthBypass") {
+    return deny("Error: sign in on this interface before targeting another session.");
+  }
+  if (!userMayControlOtherSessions(auth.user)) {
+    return deny("Error: a known, unbanned, non-Guest account is required to target another session.");
+  }
+  if (!commandSourceSessionName(auth.transport)) {
+    return deny("Error: targeted login/logout is available only from Serial, UART, or the local display.");
+  }
+
+  const CommandContext* commandCtx =
+      static_cast<const CommandContext*>(currentCommandContext());
+  if (!commandCtx ||
+      !(commandCtx->behaviorFlags & COMMAND_CONTEXT_REQUIRE_LIVE_SESSION) ||
+      commandCtx->transportSessionEpoch == 0 ||
+      commandCtx->auth.transport != auth.transport ||
+      commandCtx->auth.user != auth.user ||
+      !transportSessionEpochIsLive(auth.transport,
+                                   commandCtx->transportSessionEpoch)) {
+    return deny("Error: the submitting session is no longer current.");
+  }
+  const bool originMatches =
+      (auth.transport == SOURCE_SERIAL &&
+       commandCtx->origin == ORIGIN_SERIAL) ||
+      (auth.transport == SOURCE_UART &&
+       commandCtx->origin == ORIGIN_UART) ||
+      (auth.transport == SOURCE_LOCAL_DISPLAY &&
+       commandCtx->origin == ORIGIN_LOCAL_DISPLAY);
+  if (!originMatches) {
+    return deny("Error: command origin does not match the submitting session.");
+  }
+
+  String liveUser;
+  bool liveAuthed = false;
+  TransportSessionEpoch liveEpoch = 0;
+  if (auth.transport == SOURCE_SERIAL) {
+    liveEpoch = serialTransportSessionSnapshot(liveUser, liveAuthed);
+  } else if (auth.transport == SOURCE_LOCAL_DISPLAY) {
+    liveEpoch = localDisplayTransportSessionSnapshot(liveUser, liveAuthed);
+  } else {
+    char uartUser[65] = {};
+    uint32_t namedEpoch = 0;
+    uint32_t transportEpoch = 0;
+    liveAuthed = uartLinkSessionSnapshot(
+        uartUser, sizeof(uartUser), &namedEpoch, &transportEpoch);
+    liveUser = uartUser;
+    liveEpoch = transportEpoch;
+    liveAuthed = liveAuthed && namedEpoch != 0;
+  }
+
+  if (!liveAuthed || liveEpoch != commandCtx->transportSessionEpoch ||
+      liveUser != auth.user) {
+    return deny("Error: a live named login on the submitting interface is required.");
+  }
+  return true;
 }
 
 // Centralized authorization for a command line and context.
 // Returns true if authorized, otherwise writes an error to 'out' and returns false.
 static bool authorizeCommand(const AuthContext& ctx, const String& line, char* out, size_t outSize) {
+  const SessionControlForm sessionForm = classifySessionControlLine(line);
+  if (sessionForm == SessionControlForm::TargetedLogin ||
+      sessionForm == SessionControlForm::TargetedLogout) {
+    const char* denial = nullptr;
+    if (!callerMayTargetAnotherSession(ctx, &denial)) {
+      snprintf(out, outSize, "%s", denial ? denial : "Error: targeted session control denied.");
+      char auditBuf[180];
+      snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s",
+               redactCmdForAudit(line).c_str());
+      logAuthAttempt(false, ctx.path.c_str(),
+                     ctx.user.length() ? ctx.user : String("(anonymous)"),
+                     ctx.ip, auditBuf);
+      systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(),
+                      sessionForm == SessionControlForm::TargetedLogin
+                          ? "login" : "logout");
+      return false;
+    }
+  }
+
   // Trusted internal identity (status REST facades, system FS). Same privilege
   // model as FsRole::SYSTEM — never a loginable account.
   if (ctx.transport == SOURCE_INTERNAL && ctx.user == "system") {
@@ -4507,13 +4750,32 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
       return false;
     }
   }
+  // Named account role resolution is fail-closed. A missing/corrupt role store
+  // must not temporarily turn an already-live Guest into an ordinary User.
+  String liveRole;
+  const bool liveBondIdentity =
+      ctx.transport == SOURCE_ESPNOW && ctx.user == kBondAdminUser &&
+      isSuperAdminUser(ctx.user);
+  const bool liveG2UartSessionIdentity =
+      ctx.transport == SOURCE_INTERNAL && ctx.user == "uart-session" &&
+      ctx.path == "/g2evenai";
+  if (ctx.user.length() > 0 && ctx.user != "AuthBypass" &&
+      !liveBondIdentity &&
+      !liveG2UartSessionIdentity &&
+      !getUserAuthorizationRole(ctx.user, liveRole)) {
+    snprintf(out, outSize, "Error: unable to verify the current account role.");
+    logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip,
+                   "account_role_unavailable");
+    systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), "role_unavailable");
+    return false;
+  }
   // Guest: authenticated but view-only. Deny before admin/super checks so a
   // guest never reaches an admin-gated handler by accident.
-  if (ctx.user.length() > 0 && isGuestUser(ctx.user) && !commandAllowedForGuest(line)) {
+  if (liveRole == "guest" && !commandAllowedForGuest(line)) {
     String cmdName = line;
     int spacePos = line.indexOf(' ');
     if (spacePos > 0) cmdName = line.substring(0, spacePos);
-    snprintf(out, outSize, "Error: Guest accounts are view-only. Only login/logout are allowed.");
+    snprintf(out, outSize, "Error: Guest accounts are view-only. Only local login/logout and whoami are allowed.");
     { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
     return false;
@@ -4631,6 +4893,11 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // Clear output buffer
   out[0] = '\0';
 
+  // Resolve the immutable queue-admission metadata before any side effect.
+  // A logout, reconnect or same-user re-login invalidates the captured
+  // generation, so stale queued work cannot inherit the replacement session.
+  CommandContext* cmdCtx = static_cast<CommandContext*>(currentCommandContext());
+
   // A real user/peer command resets the power-save idle timer (and wakes the
   // device if it's dark). SOURCE_INTERNAL (automations, scheduler, internal
   // helpers) is excluded so background command execution can't pin the device
@@ -4654,18 +4921,77 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // this command's identity or notification context.
   CommandIdentityScope scope(ctx);
 
-  // Resolve the full CommandContext so we can read automationName.
+  // The full CommandContext also carries automationName.
   // cmd_exec_task always calls setCurrentCommandContext(&r->ctx) before
   // invoking executeCommand, so this returns the correct ctx for queued
   // automation sub-commands. Direct callers that don't set it get nullptr,
   // which correctly suppresses autolog (non-automation paths).
-  CommandContext* cmdCtx = static_cast<CommandContext*>(currentCommandContext());
-
   // Create command String once — reuse everywhere (avoids 5+ String(cmd) temporaries)
   String command = cmd;
   command.trim();
 
-  DEBUG_CMD_FLOWF("[execCmd] user=%s ip=%s path=%s cmd=%.80s", ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), cmd);
+  const String safeCommandForTrace = redactCmdForAudit(command);
+  DEBUG_CMD_FLOWF("[execCmd] user=%s ip=%s path=%s cmd=%.80s", ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), safeCommandForTrace.c_str());
+
+  const bool requiresLiveSession =
+      cmdCtx && (cmdCtx->behaviorFlags &
+                 COMMAND_CONTEXT_REQUIRE_LIVE_SESSION);
+  const bool staleTransportSession = cmdCtx &&
+      ((requiresLiveSession && cmdCtx->transportSessionEpoch == 0) ||
+       (cmdCtx->transportSessionEpoch != 0 &&
+        (cmdCtx->auth.transport != ctx.transport ||
+         !transportSessionEpochIsLive(ctx.transport,
+                                      cmdCtx->transportSessionEpoch))));
+  if (staleTransportSession) {
+    snprintf(out, outSize,
+             "Error: transport session changed before command execution.");
+    char auditBuf[180];
+    snprintf(auditBuf, sizeof(auditBuf), "stale_session cmd=%.150s",
+             redactCmdForAudit(command).c_str());
+    logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf);
+    return false;
+  }
+
+  // G2 EvenAI's internal capture commands are not generic SOURCE_INTERNAL
+  // work. They carry a one-shot capability bound to the active exchange and
+  // the named UART login that admitted it. Revalidate at executor admission so
+  // queued microphone work cannot survive host logout/re-login.
+  if (cmdCtx &&
+      (cmdCtx->behaviorFlags &
+       COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY)) {
+    const bool exactSyntheticIdentity =
+        ctx.transport == SOURCE_INTERNAL && ctx.user == "uart-session" &&
+        ctx.path == "/g2evenai";
+    if (!exactSyntheticIdentity || cmdCtx->authorityId == 0 ||
+        cmdCtx->authoritySessionEpoch == 0 ||
+        !g2EvenAiExchangeBoundToUartSession(
+            cmdCtx->authorityId, cmdCtx->authoritySessionEpoch)) {
+      snprintf(out, outSize,
+               "Error: G2 EvenAI UART authority changed before command execution.");
+      logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip,
+                     "stale_g2_evenai_authority");
+      return false;
+    }
+  }
+
+  // AuthBypass is an execution-time policy, not a durable permission. A
+  // command admitted while authentication was disabled must not run after an
+  // administrator enables it ahead of the command in the shared executor.
+  if (ctx.user == "AuthBypass") {
+    const bool authNowRequired =
+        (ctx.transport == SOURCE_SERIAL && gSettings.serialRequireAuth) ||
+        (ctx.transport == SOURCE_UART && gSettings.uartRequireAuth) ||
+        (ctx.transport == SOURCE_LOCAL_DISPLAY &&
+         gSettings.localDisplayRequireAuth) ||
+        (ctx.transport == SOURCE_BLUETOOTH && gSettings.bleRequireAuth);
+    if (authNowRequired) {
+      snprintf(out, outSize,
+               "Error: authentication policy changed before command execution.");
+      logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip,
+                     "stale_auth_bypass");
+      return false;
+    }
+  }
 
   // Centralized authorization (admin-required and future policies)
   if (!authorizeCommand(ctx, command, out, outSize)) {
@@ -4676,7 +5002,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // carries an automationName (i.e. it was queued as an automation sub-command).
   if (gAutomationLogActive && cmdCtx && cmdCtx->automationName[0]) {
     char logBuf[300];
-    snprintf(logBuf, sizeof(logBuf), "[%s] %s", cmdCtx->automationName, cmd);
+    snprintf(logBuf, sizeof(logBuf), "[%s] %s", cmdCtx->automationName,
+             safeCommandForTrace.c_str());
     appendAutoLogEntry("COMMAND", logBuf);
   }
 
@@ -4717,14 +5044,19 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
         return false;
       }
     }
-    // The forwarded command runs on the bonded peer as the bond identity
-    // (kBondAdminUser = super). Bonding treats the two devices as ONE unit, so
-    // the bond session token IS the trust — the local caller's role is NOT
-    // re-checked here (the slave typically has no logged-in user at all; the
-    // owner logs into the master and drives the pair). The nested-wrapper reject
-    // above is the only guard, and it stays: it stops a command from looping
-    // back (origin→peer→origin) to run as super on the ORIGIN, which would let a
-    // local non-super escape the master's own super tier.
+
+    // The peer necessarily authenticates the wire envelope as the bonded
+    // device identity, which is super-admin. That transport identity must not
+    // become a privilege elevator for the human who submitted this wrapper.
+    // Apply the ordinary command policy to the unwrapped line *locally* before
+    // placing it in the bond envelope. This includes admin/super flags and the
+    // exact-session policy for targeted login/logout. The peer still validates
+    // the authenticated envelope and runs its own authorization as defense in
+    // depth.
+    if (!authorizeCommand(ctx, actualCommand, out, outSize)) {
+      return false;
+    }
+
     #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
     extern bool isBondSynced();
     extern bool isBondSessionTokenValid();
@@ -4813,6 +5145,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // Find command handler (findCommand does its own case-insensitive matching).
   const CommandEntry* found = nullptr;
   size_t foundLen = 0;
+  bool registrySuccess = false;
 
   // Interactive CLI modes (help today; wizard/confirm in the future) get
   // first crack at the input. The dispatch function returns true when the
@@ -4838,53 +5171,14 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   }
 
   if (found) {
-    // Handle help mode exit for non-help commands
-    if (gCLIState != CLI_NORMAL) {
-      if (!isHelpModeCommand(found->name)) {
-        // Exit help mode first, then execute command
-        String exitBanner = exitToNormalBanner();
-        broadcastOutput(exitBanner);
-        helpSuppressedPrintAndReset();
-        // Extract args only (everything after command name)
-        String args;
-        if (command.length() > foundLen) {
-          args = command.substring(foundLen);
-          args.trim();
-        }
-        const char* commandResult = found->handler(args);
-        snprintf(out, outSize, "%s", commandResult);
-
-        // Log output if this is an automation sub-command with logging active.
-        if (gAutomationLogActive && cmdCtx && cmdCtx->automationName[0]) {
-          char logBuf[201];
-          snprintf(logBuf, sizeof(logBuf), "%.197s%s", out, strlen(out) > 197 ? "..." : "");
-          for (char* c = logBuf; *c; c++) { if (*c == '\n' || *c == '\r') *c = ' '; }
-          appendAutoLogEntry("OUTPUT", logBuf);
-        }
-
-        // Command audit logging (always-on)
-        bool success = (strncmp(out, "Error", 5) != 0) && (strncmp(out, "ERROR", 5) != 0);
-        logCommandExecution(ctx, cmd, success, out);
-        stampOkStatus(out, outSize, success);  // stamp AFTER audit so the log keeps the raw result
-
-        {
-          char auditBuf[180];
-          snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(command).c_str());
-          logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf);
-        }
-        DEBUG_CMD_FLOWF("[execCmd] out_len=%zu", strlen(out));
-        return true;
-      }
-    }
-
     // Execute handler - pass only args, not full command
     String args;
     if (command.length() > foundLen) {
       args = command.substring(foundLen);
       args.trim();
     }
-    DEBUG_CMD_FLOWF("[registry_exec] executing: %s (args: %s)", found->name, args.c_str());
-    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s (args: %s)", found->name, args.c_str());
+    DEBUG_CMD_FLOWF("[registry_exec] executing: %s", found->name);
+    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s", found->name);
 
     // Capture CLIMode state BEFORE the handler runs. If the handler enters
     // a mode (e.g. cmd_filedelete -> cliRequestConfirm) the command hasn't
@@ -4892,7 +5186,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // (and the right moment to audit) is when the user resolves the prompt
     // and the mode's onInput composes the audit line with full context.
     // See System_CLIConfirm::confirm_onInput for the resolution audit.
-    bool modeWasActiveBeforeHandler = cliInModeActive();
+    const uint32_t modeInstanceBeforeHandler = cliModeInstanceId();
 
     const char* result = found->handler(args);
     // Delivery ceiling — see CMD_RESULT_MAX (System_CommandTypes.h). Every
@@ -4920,19 +5214,27 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // log doesn't claim a destructive action completed when it only asked
     // for confirmation. The mode is responsible for auditing the
     // resolution if it wants to (confirm mode does; help mode doesn't).
-    const bool handlerEnteredMode = !modeWasActiveBeforeHandler && cliInModeActive();
+    const uint32_t modeInstanceAfterHandler = cliModeInstanceId();
+    const bool handlerEnteredMode =
+        modeInstanceAfterHandler != 0 &&
+        modeInstanceAfterHandler != modeInstanceBeforeHandler &&
+        cliModeCurrentCommandOwns();
     if (!handlerEnteredMode) {
-      bool success = (strncmp(out, "Error", 5) != 0) && (strncmp(out, "ERROR", 5) != 0);
-      logCommandExecution(ctx, cmd, success, out);
-      stampOkStatus(out, outSize, success);  // stamp AFTER audit so the log keeps the raw result
+      registrySuccess = (strncmp(out, "Error", 5) != 0) &&
+                        (strncmp(out, "ERROR", 5) != 0);
+      logCommandExecution(ctx, cmd, registrySuccess, out);
+      stampOkStatus(out, outSize, registrySuccess);  // stamp AFTER audit so the log keeps the raw result
     } else {
+      registrySuccess = true;  // accepted prompt; resolution is audited later
       DEBUG_CMD_FLOWF("[execCmd] suppressing audit -- handler entered mode '%s'",
                       cliCurrentMode() && cliCurrentMode()->name
                         ? cliCurrentMode()->name : "(unnamed)");
     }
   } else {
     // Command not found
-    snprintf(out, outSize, "Unknown command: %s\nType 'help' for available commands", command.c_str());
+    const String safeUnknown = redactCmdForAudit(command);
+    snprintf(out, outSize, "Unknown command: %s\nType 'help' for available commands",
+             safeUnknown.c_str());
     
     // Log failed command lookup
     logCommandExecution(ctx, cmd, false, out);
@@ -4941,26 +5243,32 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 
   // Log command output if this is an automation sub-command with logging active.
   if (gAutomationLogActive && cmdCtx && cmdCtx->automationName[0]) {
+    const String safeAutomationOutput = redactOutputForLog(String(out));
     char logBuf[201];
-    snprintf(logBuf, sizeof(logBuf), "%.197s%s", out, strlen(out) > 197 ? "..." : "");
+    snprintf(logBuf, sizeof(logBuf), "%.197s%s",
+             safeAutomationOutput.c_str(),
+             safeAutomationOutput.length() > 197 ? "..." : "");
     for (char* c = logBuf; *c; c++) { if (*c == '\n' || *c == '\r') *c = ' '; }
     appendAutoLogEntry("OUTPUT", logBuf);
   }
 
-  // We don't have structured success/failure from registry handlers; assume success for audit purposes
+  // Registry handlers use the uniform Error:/ERROR prefix contract. Reuse the
+  // same result that drives command audit and status stamping so a denied
+  // targeted login/logout is never recorded as an authorization success.
   {
     char auditBuf[180];
     snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(command).c_str());
-    logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf);
+    logAuthAttempt(registrySuccess, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf);
   }
   DEBUG_CMD_FLOWF("[execCmd] out_len=%zu", strlen(out));
-  return true;
+  return registrySuccess;
 }
 
 // Queued command execution with deadlock avoidance
 bool submitAndExecuteSync(const Command& cmd, String& out) {
+  const String safeLineForTrace = redactCmdForAudit(cmd.line);
   DEBUG_CMD_FLOWF("[submitSync] cmd='%.80s' origin=%d user='%s'",
-                  cmd.line.c_str(), (int)cmd.ctx.origin, cmd.ctx.auth.user.c_str());
+                  safeLineForTrace.c_str(), (int)cmd.ctx.origin, cmd.ctx.auth.user.c_str());
 
   // If executor queue isn't ready (very early boot) fallback to direct call
   if (gCmdExecQ == nullptr) {
@@ -5029,7 +5337,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
   BaseType_t queueResult = xQueueSend(gCmdExecQ, &r, pdMS_TO_TICKS(2000));
   
   if (queueResult != pdTRUE) {
-    DEBUG_CMD_FLOWF("[submitSync] queue full for '%.40s'", r->line);
+    DEBUG_CMD_FLOWF("[submitSync] queue full for '%.40s'", safeLineForTrace.c_str());
     vSemaphoreDelete(r->done);
     r->~ExecReq();
     free(r);
@@ -5037,7 +5345,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     return false;
   }
   
-  DEBUG_CMD_FLOWF("[submitSync] queued '%.40s' waiting...", r->line);
+  DEBUG_CMD_FLOWF("[submitSync] queued '%.40s' waiting...", safeLineForTrace.c_str());
 
   // Publish "the httpd task is blocked on cmd_exec_task" for the duration of
   // the wait. A command running on cmd_exec_task that tears down the HTTP
@@ -5064,9 +5372,9 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
 
   if (syncTaken != pdTRUE) {
     Serial.printf("[DBG_CMD] [submitSync] TIMEOUT — abandoning r=%p line='%.60s'\n",
-                  r, r->line);
+                  r, safeLineForTrace.c_str());
     DEBUG_CMD_FLOWF("[submitSync] TIMEOUT for '%.40s' — handing ownership to cmd_exec_task",
-                    r->line);
+                    safeLineForTrace.c_str());
     // CRITICAL: cmd_exec_task may still be inside executeCommand at this
     // point. We MUST NOT free `r` or delete the semaphore — that would
     // produce a use-after-free or double-free. Instead, mark `r` as
@@ -5093,7 +5401,8 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
 // Returns true if successfully queued, false on error
 // Callback receives: (bool ok, const char* result, void* userData)
 bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData) {
-  DEBUG_CMD_FLOWF("[submitAsync] enter: cmd.line='%s'", cmd.line.c_str());
+  const String safeLineForTrace = redactCmdForAudit(cmd.line);
+  DEBUG_CMD_FLOWF("[submitAsync] enter: cmd.line='%s'", safeLineForTrace.c_str());
   
   if (gCmdExecQ == nullptr) {
     DEBUG_CMD_FLOWF("[submitAsync] ERROR: gCmdExecQ is NULL");
@@ -5167,7 +5476,8 @@ bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg) {
 
 // Convenience wrapper: execute a command with an existing context and return output
 String execCommandUnified(const CommandContext& baseCtx, const String& line) {
-  DEBUG_CMD_FLOWF("[exec] enter origin=%d user=%s path=%s cmd=%s", (int)baseCtx.origin, baseCtx.auth.user.c_str(), baseCtx.auth.path.c_str(), line.c_str());
+  const String safeLineForTrace = redactCmdForAudit(line);
+  DEBUG_CMD_FLOWF("[exec] enter origin=%d user=%s path=%s cmd=%s", (int)baseCtx.origin, baseCtx.auth.user.c_str(), baseCtx.auth.path.c_str(), safeLineForTrace.c_str());
   Command c;
   c.line = line;
   c.ctx = baseCtx;
@@ -5209,11 +5519,29 @@ bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& 
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
   uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
+  uc.ctx.transportSessionEpoch = captureTransportSessionEpoch(ctx);
+  if (ctx.sid.length()) {
+    uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
+  }
+  // REST/settings facades are request/response machine calls, not keystrokes.
+  // They must never be consumed as an answer to an outstanding prompt or
+  // leave an interactive mode behind.
+  uc.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
   uc.ctx.validateOnly = false;
   uc.ctx.replyHandle = nullptr;
   uc.ctx.httpReq = req;
   bool ok = submitAndExecuteSync(uc, out);
-  broadcastOutput(out, uc.ctx);
+  const bool webSessionStillLive =
+      !ctx.sid.length() ||
+      transportSessionEpochIsLive(SOURCE_WEB,
+                                  uc.ctx.transportSessionEpoch);
+  if (!webSessionStillLive) {
+    out = "Error: web session changed before command result delivery.";
+    return false;
+  }
+  if (!cliModeOwnedBySession(ctx.transport, uc.ctx.transportSessionEpoch)) {
+    broadcastOutput(redactOutputForLog(out), uc.ctx);
+  }
   return ok;
 }
 
@@ -5423,46 +5751,158 @@ bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, u
 // Authentication Commands (critical system functions)
 // ============================================================================
 
-const char* cmd_login(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-
-  // Cross-transport session-minting guard: this command's transport argument
-  // DEFAULTS to serial, so without this check an authenticated (or
-  // AuthBypass) UART host-link caller could run `login u p` and mint a live
-  // USB-console session with no one at the physical console. The UART link
-  // has its own in-band login (System_UartLink.cpp drain intrinsic) — that is
-  // the only way its session is established, and it must also be the only
-  // login a UART caller can reach.
-  if (currentAuthContext().transport == SOURCE_UART) {
-    return "Error: use the UART link's in-band login (send: login <user> <pass> as the first line)";
+static bool parseSessionCommandTarget(const String& raw,
+                                      CommandSource& sourceOut,
+                                      String& canonicalOut) {
+  canonicalOut = raw;
+  canonicalOut.toLowerCase();
+  if (canonicalOut == "serial") {
+    sourceOut = SOURCE_SERIAL;
+    return true;
   }
+  if (canonicalOut == "uart") {
+    sourceOut = SOURCE_UART;
+    return true;
+  }
+  if (canonicalOut == "display") {
+    sourceOut = SOURCE_LOCAL_DISPLAY;
+    return true;
+  }
+  return false;
+}
 
-  // Parse: <username> <password> [transport]
-  // transport can be: serial, display, bluetooth
+static bool sessionCommandTargetAvailable(CommandSource source) {
+  if (source == SOURCE_SERIAL) return true;
+  if (source == SOURCE_UART) return uartLinkIsRunning();
+  if (source == SOURCE_LOCAL_DISPLAY) {
+#if ENABLE_OLED_DISPLAY
+    extern bool oledConnected;
+    // gOledRunning is deliberately false while idle power-save has blanked a
+    // still-connected panel.  Sleeping is not a transport teardown and must
+    // not make its live session impossible to administer.
+    return oledConnected;
+#else
+    return false;
+#endif
+  }
+  return false;
+}
+
+struct TargetLoginThrottle {
+  CommandSource source = SOURCE_INTERNAL;
+  char user[kPublicUsernameMaxLen + 1] = {};
+  uint8_t failures = 0;
+  uint32_t lockedUntilMs = 0;
+};
+static TargetLoginThrottle sTargetLoginThrottle[3];
+
+static TargetLoginThrottle& targetLoginThrottleFor(const AuthContext& caller) {
+  size_t index = caller.transport == SOURCE_SERIAL ? 0 :
+                 caller.transport == SOURCE_UART ? 1 : 2;
+  TargetLoginThrottle& slot = sTargetLoginThrottle[index];
+  if (slot.source != caller.transport || caller.user != slot.user) {
+    slot = TargetLoginThrottle{};
+    slot.source = caller.transport;
+    strlcpy(slot.user, caller.user.c_str(), sizeof(slot.user));
+  }
+  return slot;
+}
+
+static bool targetedLoginThrottleAllows(const AuthContext& caller,
+                                        uint32_t& retrySecondsOut) {
+  TargetLoginThrottle& slot = targetLoginThrottleFor(caller);
+  const uint32_t now = millis();
+  if (slot.lockedUntilMs != 0 &&
+      static_cast<int32_t>(slot.lockedUntilMs - now) > 0) {
+    retrySecondsOut = (slot.lockedUntilMs - now + 999) / 1000;
+    return false;
+  }
+  if (slot.lockedUntilMs != 0) {
+    slot.failures = 0;
+    slot.lockedUntilMs = 0;
+  }
+  retrySecondsOut = 0;
+  return true;
+}
+
+static void targetedLoginThrottleRecord(const AuthContext& caller,
+                                        bool success) {
+  TargetLoginThrottle& slot = targetLoginThrottleFor(caller);
+  if (success) {
+    slot.failures = 0;
+    slot.lockedUntilMs = 0;
+    return;
+  }
+  if (slot.failures < UINT8_MAX) slot.failures++;
+  if (slot.failures >= 5) slot.lockedUntilMs = millis() + 60000UL;
+}
+
+const char* cmd_login(const String& originalCmd) {
+  // Bare login is caller-relative. A supplied target is a distinct,
+  // privileged operation and is authorized against the exact live source
+  // session both in authorizeCommand() and again here for direct callers.
   CommandArgs a(originalCmd);
-  if (!a.hasMinArgs(2)) {
-    return "Error: invalid arguments — Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth";
+  if (a.unterminatedQuote() || a.count() < 2 || a.count() > 3) {
+    return "Error: invalid arguments — Usage: login <username> <password> [serial|uart|display]";
   }
 
   String username = a.arg(0);
   String password = a.arg(1);
-  String transportStr = a.has(2) ? a.arg(2) : String("serial");
-  transportStr.toLowerCase();
+  const AuthContext& caller = currentAuthContext();
+  const bool targeted = a.count() == 3;
+  CommandSource transport = caller.transport;
+  String transportStr;
 
-  // Map transport string to enum
-  CommandSource transport = SOURCE_SERIAL;
-  if (transportStr == "display") {
-    transport = SOURCE_LOCAL_DISPLAY;
-  } else if (transportStr == "bluetooth") {
-    transport = SOURCE_BLUETOOTH;
-  } else if (transportStr == "serial") {
-    transport = SOURCE_SERIAL;
+  if (targeted) {
+    const char* denial = nullptr;
+    if (!callerMayTargetAnotherSession(caller, &denial)) {
+      return denial ? denial : "Error: targeted session control denied.";
+    }
+    if (!parseSessionCommandTarget(a.arg(2), transport, transportStr)) {
+      return "Error: Invalid transport. Use: serial, uart, or display";
+    }
+    if (transport == caller.transport) {
+      return "Error: use bare login <username> <password> to replace this interface's own session.";
+    }
+    if (!sessionCommandTargetAvailable(transport)) {
+      return "Error: target transport is not available.";
+    }
   } else {
-    return "Error: Invalid transport. Use: serial, display, or bluetooth";
+    const char* callerName = commandSourceSessionName(caller.transport);
+    if (!callerName) {
+      return "Error: use this interface's native login flow.";
+    }
+    transportStr = callerName;
   }
 
-  // Attempt login
-  if (loginTransport(transport, username, password)) {
+  // Validation must agree with execution about syntax and target policy, but
+  // it must stop before lockout counters, password verification, or mutation.
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (targeted) {
+    uint32_t retrySeconds = 0;
+    if (!targetedLoginThrottleAllows(caller, retrySeconds)) {
+      EXT_RAM_BSS_ATTR static char throttleBuf[96];
+      snprintf(throttleBuf, sizeof(throttleBuf),
+               "Error: targeted login locked out. Retry in %lu seconds.",
+               static_cast<unsigned long>(retrySeconds));
+      return throttleBuf;
+    }
+  }
+
+  bool loginOk = false;
+  if (targeted) {
+    const CommandContext* commandCtx =
+        static_cast<const CommandContext*>(currentCommandContext());
+    loginOk = commandCtx && loginTransportFromNamedSession(
+        transport, username, password, caller.transport, caller.user,
+        commandCtx->transportSessionEpoch);
+    targetedLoginThrottleRecord(caller, loginOk);
+  } else {
+    loginOk = loginTransport(transport, username, password);
+  }
+
+  if (loginOk) {
     bool isAdmin = isAdminUser(username);
     systemEventPost(SYSEVT_LOGIN_OK, username.c_str(), transportStr.c_str());
     EXT_RAM_BSS_ATTR static char buf[128];
@@ -5476,46 +5916,50 @@ const char* cmd_login(const String& originalCmd) {
 }
 
 const char* cmd_logout(const String& originalCmd) {
+  CommandArgs a(originalCmd);
+  if (a.unterminatedQuote() || a.count() > 1) {
+    return "Error: invalid arguments — Usage: logout [serial|uart|display]";
+  }
+
+  const AuthContext& caller = currentAuthContext();
+  const bool targeted = a.count() == 1;
+  CommandSource transport = caller.transport;
+  String transportStr;
+  if (targeted) {
+    const char* denial = nullptr;
+    if (!callerMayTargetAnotherSession(caller, &denial)) {
+      return denial ? denial : "Error: targeted session control denied.";
+    }
+    if (!parseSessionCommandTarget(a.arg(0), transport, transportStr)) {
+      return "Error: Invalid transport. Use: serial, uart, or display";
+    }
+    if (transport == caller.transport) {
+      return "Error: use bare logout to end this interface's own session.";
+    }
+    if (!sessionCommandTargetAvailable(transport)) {
+      return "Error: target transport is not available.";
+    }
+  } else {
+    const char* callerName = commandSourceSessionName(caller.transport);
+    if (!callerName) return "Error: use this interface's native logout flow.";
+    transportStr = callerName;
+  }
+
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  // Mirror of the cmd_login guard: a UART caller running `logout serial`
-  // (any arg form reaches the registry; the drain only intercepts the bare
-  // word) would kill the physical console's session cross-transport. The
-  // link's own session ends via its in-band bare `logout`.
-  if (currentAuthContext().transport == SOURCE_UART) {
-    return "Error: use the UART link's in-band logout (send: logout)";
-  }
-
-  String cmd = originalCmd;
-  cmd.trim();
-
-  // Parse: [transport]
-  String rest = cmd;
-  rest.trim();
-  rest.toLowerCase();
-
-  CommandSource transport = SOURCE_SERIAL;  // default
-  if (rest.length() > 0) {
-    if (rest == "display") {
-      transport = SOURCE_LOCAL_DISPLAY;
-    } else if (rest == "bluetooth") {
-      transport = SOURCE_BLUETOOTH;
-    } else if (rest == "serial") {
-      transport = SOURCE_SERIAL;
-    } else if (rest == "g2") {
-      // G2 has no credential login (pairing IS auth), but admins may want
-      // to clear pairedByUser without un-pairing the lens. logoutTransport
-      // calls g2PairedUserClear(); recovery is a fresh stamp via
-      // `bleautoreconnect g2-glasses on` from any authenticated session.
-      transport = SOURCE_G2_GLASSES;
-    } else {
-      return "Error: Invalid transport. Use: serial, display, bluetooth, or g2";
+  if (targeted) {
+    const CommandContext* commandCtx =
+        static_cast<const CommandContext*>(currentCommandContext());
+    if (!commandCtx || !logoutTransportFromNamedSession(
+            transport, caller.transport, caller.user,
+            commandCtx->transportSessionEpoch)) {
+      return "Error: submitting session changed before logout.";
     }
+  } else {
+    logoutTransport(transport);
   }
-
-  logoutTransport(transport);
   EXT_RAM_BSS_ATTR static char buf[64];
-  snprintf(buf, sizeof(buf), "Logged out from %s", rest.length() > 0 ? rest.c_str() : "serial");
+  snprintf(buf, sizeof(buf), "Logged out from %s", transportStr.c_str());
   return buf;
 }
 

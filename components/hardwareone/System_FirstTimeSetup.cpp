@@ -181,52 +181,38 @@ extern int getOLEDArchetypeSelection();  // Level-2 deployment picker; -1 = back
 static bool serialWifiSelectionForRestore(String& outSSID) {
   outSSID = "";
   while (true) {
-    WiFi.mode(WIFI_STA);
-    int n = WiFi.scanNetworks(false, true);
-
-    // Number only NAMED networks; group hidden (empty-SSID) ones into a count —
-    // mirrors the OLED picker so a numbered pick can never yield a blank SSID (a
-    // blank SSID fails to connect, which is what crashed the import flow). Hidden
-    // networks are joined by typing the exact SSID. Loop (not recurse) on rescan.
-    int named[20];
-    int namedCount = 0;
-    int hiddenCount = 0;
-    for (int i = 0; i < n; i++) {
-      if (WiFi.SSID(i).length() == 0) { hiddenCount++; continue; }
-      if (namedCount < 20) named[namedCount++] = i;
-    }
-
-    if (namedCount > 0) {
-      broadcastOutput(String("Found ") + namedCount + " network(s):");
-      for (int j = 0; j < namedCount; j++) {
-        char line[96];
-        snprintf(line, sizeof(line), "  %d. %-24s  %lddBm",
-                 j + 1, WiFi.SSID(named[j]).c_str(), (long)WiFi.RSSI(named[j]));
-        broadcastOutput(line);
-      }
-    } else {
-      broadcastOutput("No named WiFi networks found.");
-    }
-    if (hiddenCount > 0) {
-      broadcastOutput(String("  (+") + hiddenCount + " hidden network" +
-                      (hiddenCount == 1 ? "" : "s") + " - type the exact SSID to join one)");
-    }
+    // The shared helper copies only the numbered SSIDs to PSRAM and releases
+    // Arduino's global scan result before this human-input wait begins.
+    int namedCount = wifiScanPrintNamed(20);
     broadcastOutput("Enter a number, type an SSID to join manually, 'rescan', or 'b' to go back:");
 
     String input = waitForSerialInputBlocking();
     input.trim();
 
-    if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) { WiFi.scanDelete(); return false; }
-    if (input.length() == 0) { WiFi.scanDelete(); return false; }
-    if (input.equalsIgnoreCase("rescan")) { WiFi.scanDelete(); continue; }
+    if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) {
+      wifiScanClearNamed();
+      return false;
+    }
+    if (input.length() == 0) {
+      wifiScanClearNamed();
+      return false;
+    }
+    if (input.equalsIgnoreCase("rescan")) {
+      wifiScanClearNamed();
+      continue;
+    }
 
     // Bare in-range integer -> Nth named network; anything else -> typed SSID.
     String ssid = input;
     int idx = input.toInt();
     if (idx >= 1 && idx <= namedCount && String(idx) == input) {
-      ssid = WiFi.SSID(named[idx - 1]);
+      if (!wifiScanGetNamedSSID(idx - 1, ssid)) {
+        wifiScanClearNamed();
+        broadcastOutput("WiFi list expired; scanning again.");
+        continue;
+      }
     }
-    WiFi.scanDelete();
+    wifiScanClearNamed();
     ssid.trim();
     if (ssid.length() == 0) {
       broadcastOutput("SSID cannot be empty - please try again.");
@@ -268,8 +254,27 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   admin["bootCount"] = 1;
   // Boot anchors live in their own file (BOOT_ANCHORS_FILE), not users.json.
 
+  // ORDER IS LOAD-BEARING — mirrors the note in firstTimeSetupIfNeeded().
+  // detectFirstTimeSetupState() keys strictly on users.json, so users.json is
+  // the "setup complete" commit token. Writing it before the credential would
+  // let a power cut in between leave a device that believes setup is done but
+  // can authenticate nobody, and never re-runs setup — an unrecoverable lockout.
+  // Credential first; users.json last and only on success.
   {
-    // Atomic create (tmp + rename).
+    // Per-user settings hold the (hashed) password and theme.
+    PSRAM_JSON_DOC(defaults);
+    defaults["theme"] = useDarkTheme ? "dark" : "light";
+    defaults["password"] = hashedPassword;
+    if (!saveUserSettings(1, defaults)) {
+      broadcastOutput("ERROR: Failed to create user settings");
+      // Withhold users.json so the device stays SETUP_REQUIRED and the owner
+      // gets another attempt, rather than committing an unusable account.
+      return false;
+    }
+  }
+
+  {
+    // Atomic create (tmp + rename) — the commit token.
     String json;
     serializeJson(doc, json);
     if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
@@ -278,14 +283,6 @@ static bool createInitialAdminUser(const String& username, const String& plainte
     }
   }
   broadcastOutput("Saved /system/users/users.json");
-
-  // Per-user settings hold the (hashed) password and theme.
-  PSRAM_JSON_DOC(defaults);
-  defaults["theme"] = useDarkTheme ? "dark" : "light";
-  defaults["password"] = hashedPassword;
-  if (!saveUserSettings(1, defaults)) {
-    broadcastOutput("ERROR: Failed to create user settings");
-  }
 
   // Re-sync the RAM global to the authoritative NVS counter (loadAndIncrementBootSeq
   // already loaded it). Must NOT hardcode 1 — the device may have power-cycled
@@ -902,34 +899,52 @@ void firstTimeSetupIfNeeded() {
   DEBUG_SYSTEMF("FTS: Writing initial users.json: admin.bootCount=%u, gNTPAnchorId=%lu",
                 1, (unsigned long)gNTPAnchorId);
 
+  // ORDER IS LOAD-BEARING — the credential must be durable BEFORE users.json.
+  //
+  // detectFirstTimeSetupState() keys strictly on USERS_JSON_FILE existing (see
+  // the top of this file), so users.json IS the "setup complete" commit token.
+  // If it landed first and power was cut before the password file did, the next
+  // boot would report SETUP_NOT_NEEDED, fail every login (user 1 has no stored
+  // hash, so isValidUser() rejects it), and never re-run first-time setup —
+  // a permanent, unrecoverable lockout with no path back except reflashing.
+  //
+  // Writing the credential first inverts that: a power cut in the same window
+  // leaves an orphan user-1 settings file and no users.json, so the device
+  // stays SETUP_REQUIRED and simply runs setup again, overwriting it.
+  // saveUserSettings() is path-based and never reads users.json, so it is safe
+  // to call before the user record exists.
+  bool credentialStored = false;
+  {
+    // Create user settings with password and theme
+    PSRAM_JSON_DOC(defaults);
+    defaults["theme"] = useDarkTheme ? "dark" : "light";
+    defaults["password"] = hashedPassword;  // Store password in user settings
+    credentialStored = saveUserSettings(1, defaults);
+    if (!credentialStored) {
+      broadcastOutput("ERROR: Failed to create user settings");
+    }
+  }
+
   // Write atomically (tmp + rename).
   String usersJson;
   serializeJson(doc, usersJson);
-  if (usersJson.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, usersJson)) {
+  if (!credentialStored) {
+    // Refuse to commit. Withholding users.json keeps the device in
+    // SETUP_REQUIRED so the owner gets another attempt on the next boot,
+    // instead of committing an account nobody can ever authenticate as.
+    broadcastOutput("ERROR: credential not stored — users.json withheld; setup will re-run on next boot");
+  } else if (usersJson.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, usersJson)) {
     broadcastOutput("ERROR: Failed to write users.json");
   } else {
-    {
-      broadcastOutput("Saved /system/users/users.json");
+    broadcastOutput("Saved /system/users/users.json");
 
-      {
-        String settingsPath = getUserSettingsPath(1);
-        // Create user settings with password and theme
-        PSRAM_JSON_DOC(defaults);
-        defaults["theme"] = useDarkTheme ? "dark" : "light";
-        defaults["password"] = hashedPassword;  // Store password in user settings
-        if (!saveUserSettings(1, defaults)) {
-          broadcastOutput("ERROR: Failed to create user settings");
-        }
-      }
-
-      // Re-sync the RAM global to the authoritative NVS counter (loadAndIncrementBootSeq
-      // already loaded it). Must NOT hardcode 1 — telemetry/heartbeats read this.
-      gBootCounter = bootStateGetBootCount();
-      DEBUG_SYSTEMF("FTS: Re-synced gBootCounter to %lu from NVS", (unsigned long)gBootCounter);
-      // If NTP already synced, resolve the creation timestamp immediately
-      if (time(nullptr) > 0) {
-        resolvePendingUserCreationTimes();
-      }
+    // Re-sync the RAM global to the authoritative NVS counter (loadAndIncrementBootSeq
+    // already loaded it). Must NOT hardcode 1 — telemetry/heartbeats read this.
+    gBootCounter = bootStateGetBootCount();
+    DEBUG_SYSTEMF("FTS: Re-synced gBootCounter to %lu from NVS", (unsigned long)gBootCounter);
+    // If NTP already synced, resolve the creation timestamp immediately
+    if (time(nullptr) > 0) {
+      resolvePendingUserCreationTimes();
     }
   }
 

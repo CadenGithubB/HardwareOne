@@ -14,9 +14,9 @@ All marked with `[hardwareone local patch YYYY-MM-DD]` comments:
 
 | File | Markers | What |
 |---|---|---|
-| `libraries/BLE/src/BLEClient.cpp` | 12 | Raise-only local-MTU guard in `setMTU` (the per-link MTU fix — without it, ring-first glasses discovery fails with `pkt size: 102, PDU size: 64`); `m_conn_id`/`m_mtu` reset on disconnect and failed open; REG_EVT app_id filter (stops a parked client capturing another client's registration); bounded REG/OPEN/SEARCH waits; semaphore-leak fixes; stale-rc-on-timeout fix; **`~BLEClient()` clears the static `BLEDevice::m_pClient` alias if it points at this client — stops the double-free that rebooted the device on the `openble`↔G2-client role flip (multi-client alias never nulled by the library)** |
-| `libraries/BLE/src/BLEDevice.cpp` | 1 | Sync `m_localMTU` cache to Bluedroid's real boot value (517) at init, so the raise-only guards compare against the truth |
-| `libraries/BLE/src/BLERemoteCharacteristic.cpp` | 5 | Semaphore-leak + bounded-wait + failure-delivery fixes |
+| `libraries/BLE/src/BLEClient.cpp` | 13 | Raise-only local-MTU guard in `setMTU` (the per-link MTU fix — without it, ring-first glasses discovery fails with `pkt size: 102, PDU size: 64`); `m_conn_id`/`m_mtu` reset on disconnect and failed open; REG_EVT app_id filter (stops a parked client capturing another client's registration); bounded REG/OPEN/SEARCH waits; semaphore-leak fixes; stale-rc-on-timeout fix; structured connect-stage telemetry; acknowledged GATTC unregister that retains routing until completion; **`~BLEClient()` clears the static `BLEDevice::m_pClient` alias if it points at this client — stops the double-free that rebooted the device on the `openble`↔G2-client role flip (multi-client alias never nulled by the library)** |
+| `libraries/BLE/src/BLEDevice.cpp` | 2 | Sync `m_localMTU` cache to Bluedroid's real boot value (517) at init; checked, phase-ordered host/controller teardown that reports incomplete retirement and quarantines an unsafe client instead of deleting through callbacks |
+| `libraries/BLE/src/BLERemoteCharacteristic.cpp` | 6 | Semaphore-leak + bounded-wait + failure-delivery fixes, including a bounded write overload and a 30-second bound for the legacy write API |
 | `libraries/BLE/src/BLERemoteDescriptor.cpp` | 4 | Same family |
 | `libraries/Network/src/NetworkEvents.cpp` | 0 (unmarked) | arduino_events task stack fix (see wifirm/arduino_events memory) |
 | `CMakeLists.txt`, `Kconfig.projbuild`, `idf_component.yml` | — | Build-integration tweaks |

@@ -87,14 +87,14 @@ struct NotificationContextGuard {
 // Families — the grouping every surface renders by
 // ---------------------------------------------------------------------------
 // The kind list below was already grouped by comment blocks, but comments are
-// invisible to consumers, so every UI showed one flat 134-row wall. The family
-// is now DATA on each entry, generated from the same X-macro as the enum and
-// the names, so it cannot drift either.
+// invisible to consumers, so every UI showed one long flat wall. The family is
+// now DATA on each entry, generated from the same X-macro as the enum and the
+// names, so it cannot drift either.
 //
 // The old comment blocks were not a taxonomy — the "(coverage)" and "(tier 2)"
 // suffixes record when a batch was ADDED, which split ESP-NOW across two
-// blocks, Sensors across three, Voice across two. These 11 families are the
-// collapsed version; a kind lives with what it is ABOUT, not when it landed.
+// blocks, Sensors across three, Voice across two. The family list is the
+// collapsed taxonomy; a kind lives with what it is ABOUT, not when it landed.
 //
 // Order here is display order. Within a family, kinds stay in declaration
 // order so natural pairs (peer_online/peer_offline, charging_started/stopped)
@@ -155,7 +155,7 @@ uint8_t systemEventKindFamily(uint8_t kind);
   X(SYSEVT_MQTT_DISCONNECTED,   "mqtt_disconnected", SYSEVT_FAM_NETWORK)    /* subject=seconds connected */ \
   X(SYSEVT_BLE_CONNECTED,       "ble_connected", SYSEVT_FAM_NETWORK)        /* companion BLE central connected  subject=type detail=mac */ \
   X(SYSEVT_BLE_DISCONNECTED,    "ble_disconnected", SYSEVT_FAM_NETWORK)     /* subject=remaining connection count */ \
-  X(SYSEVT_TIME_SYNCED,         "time_synced", SYSEVT_FAM_NETWORK)          /* clock first became valid  subject=ntp|rtc detail=time */ \
+  X(SYSEVT_TIME_SYNCED,         "time_synced", SYSEVT_FAM_NETWORK)          /* clock first became valid  subject=ntp|rtc|manual|ring|cm5 detail=time */ \
   /* --- G2 glasses --- */ \
   X(SYSEVT_G2_CONNECTED,        "g2_connected", SYSEVT_FAM_GLASSES)         /* subject=sides (L+R/L/R) */ \
   X(SYSEVT_G2_DISCONNECTED,     "g2_disconnected", SYSEVT_FAM_GLASSES)      /* subject=side that dropped */ \
@@ -221,7 +221,8 @@ uint8_t systemEventKindFamily(uint8_t kind);
   X(SYSEVT_LLM_GEN_DONE,        "llm_gen_done", SYSEVT_FAM_MEDIA)         /* subject=stop reason detail=tokens */ \
   X(SYSEVT_LLM_MODEL_LOADED,    "llm_model_loaded", SYSEVT_FAM_MEDIA)     /* subject=model filename */ \
   /* --- Lifecycle --- */ \
-  X(SYSEVT_BOOT,                "boot", SYSEVT_FAM_SYSTEM)                 /* device finished booting — posted at end of setup  subject=reset-reason detail="boot #N" */ \
+  X(SYSEVT_BOOT_STARTED,        "boot_started", SYSEVT_FAM_SYSTEM)         /* setup entered  subject=reset-reason (boot counter is not loaded yet) */ \
+  X(SYSEVT_BOOT_FINISHED,       "boot_finished", SYSEVT_FAM_SYSTEM)        /* setup completed and is returning  subject=reset-reason detail="boot #N" */ \
   X(SYSEVT_REBOOT,              "reboot", SYSEVT_FAM_SYSTEM)               /* intentional restart — posted on the NEXT boot (the ring can't survive the restart)  subject=reason(command|setup|g2|factory|software) detail=reset-reason */ \
   X(SYSEVT_CRASH,               "crash", SYSEVT_FAM_SYSTEM)                /* unexpected reset (panic/watchdog/brownout/lockup) — posted on next boot  subject=reset-reason detail="boot #N crashCount=M" */ \
   /* --- Security / trust (coverage) --- */ \

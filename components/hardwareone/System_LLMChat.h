@@ -31,11 +31,12 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include "System_LLM.h"
+#include "System_LLMBackend.h"   // dispatch to whichever source owns the turn
+#include "System_LLMTypes.h"
 
 // Ring depth — older turns roll off when this is exceeded.
 #define LLM_CHAT_MAX_TURNS 16
@@ -126,6 +127,8 @@ int  chatGetTurnCount();
 // chatGetTurnCount()-1) for the most recent turn.
 bool chatGetTurnInfo(int index, ChatTurnInfo* out);
 
+#include "System_LLMUtf8.h"   // utf8TrimPartialTail / jsonSanitizeServedBytes
+
 // Copy up to (maxLen-1) bytes of turn text starting at byte `offset` into buf
 // (NUL-terminated). Returns bytes copied (0 = no data at that offset).
 // For the live streaming turn, this pulls fresh tokens from the engine before
@@ -162,5 +165,5 @@ int  chatGetSessionId();
 // hand to llmStartAsync().
 void chatResolveParams(const ChatParamOverride& override, LLMGenParams* out);
 
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_BACKEND
 #endif // SYSTEM_LLM_CHAT_H

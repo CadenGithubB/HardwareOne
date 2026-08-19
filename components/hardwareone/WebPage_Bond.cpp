@@ -1125,8 +1125,8 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     webBondSendChunkf(req, "\"sensors\":\"%s\",", lSensors.c_str());
     webBondSendChunkf(req, "\"featureMask\":%lu,", (unsigned long)localFeatures);
     webBondSendChunkf(req, "\"sensorMask\":%lu,", (unsigned long)localSensors);
-    webBondSendChunkf(req, "\"freeHeap\":%lu,", (unsigned long)ESP.getFreeHeap());
-    webBondSendChunkf(req, "\"minFreeHeap\":%lu,", (unsigned long)ESP.getMinFreeHeap());
+    webBondSendChunkf(req, "\"freeHeap\":%lu,", (unsigned long)hw1InternalFreeBytes());
+    webBondSendChunkf(req, "\"minFreeHeap\":%lu,", (unsigned long)hw1InternalMinFreeBytes());
     webBondSendChunkf(req, "\"flashMB\":%lu,", (unsigned long)(ESP.getFlashChipSize() / (1024 * 1024)));
     uint32_t psramBytes = ESP.getPsramSize();
     webBondSendChunkf(req, "\"psramMB\":%lu,", (unsigned long)((psramBytes + 524288) / (1024 * 1024)));
@@ -1472,6 +1472,25 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
 static esp_err_t handleBondCliBatch(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
 
+  // Keep one immutable cookie generation for the whole request. The generic
+  // command facade fences each individual command, but a batch also owns all
+  // earlier accumulated results and must revalidate immediately before its
+  // final HTTP response.
+  const TransportSessionEpoch requestSessionEpoch =
+      captureTransportSessionEpoch(ctx);
+  auto requestSessionLive = [&]() {
+    return !ctx.sid.length() ||
+           (requestSessionEpoch != 0 &&
+            transportSessionEpochIsLive(SOURCE_WEB, requestSessionEpoch));
+  };
+  if (!requestSessionLive()) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(
+        req, "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    return ESP_OK;
+  }
+
   if (!gSettings.bondModeEnabled || !isBondMaster()) {
     httpd_resp_send(req, "{\"ok\":false,\"error\":\"Bonded master required\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -1502,28 +1521,94 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
     return ESP_OK;
   }
 
+  JsonArray commands = doc["commands"].as<JsonArray>();
+  const bool interactive = doc["interactive"] | false;
   std::vector<String> results;
   int count = 0;
-  for (JsonVariant v : doc["commands"].as<JsonArray>()) {
-    String cmd = v.as<String>();
-    cmd.trim();
-    if (cmd.length() == 0) { results.push_back(""); continue; }
 
-    // Route through the bond session — same "remote:" prefix that
-    // executeUnifiedWebCommand uses in handleBondExec / handleBondRole.
+  if (interactive) {
+    // A CLIMode is deliberately local to one transport-session generation;
+    // it cannot span web -> ESP-NOW -> peer. The browser has already obtained
+    // an explicit human confirmation, so translate only the destructive verbs
+    // with supported one-shot forms. Preserve the two-result shape expected by
+    // hw.cliConfirm: slot 0 is the local prompt phase and slot 1 is forwarding.
+    String answer = commands.size() == 2 ? commands[1].as<String>() : String();
+    answer.trim();
+    answer.toLowerCase();
+    String cmd = commands.size() > 0 ? commands[0].as<String>() : String();
+    cmd.trim();
+    String lower = cmd;
+    lower.toLowerCase();
+    const bool supported =
+        lower.startsWith("filedelete ") || lower.startsWith("userdelete ");
+    if (commands.size() != 2 || answer != "yes" || !supported) {
+      httpd_resp_set_status(req, "400 Bad Request");
+      httpd_resp_send(
+          req,
+          "{\"ok\":false,\"error\":\"bond interactive confirmation supports only filedelete/userdelete [command, yes]\"}",
+          HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+    if (!lower.endsWith(" confirm")) cmd += " confirm";
+
     String remoteCmd = "remote:";
     remoteCmd += cmd;
     String out;
-    bool ok = executeUnifiedWebCommand(req, ctx, remoteCmd, out);
-    if (!ok && out.length() == 0) out = "command failed";
+    const bool ok = executeUnifiedWebCommand(req, ctx, remoteCmd, out);
+    if (!requestSessionLive()) {
+      results.clear();
+      httpd_resp_set_status(req, "401 Unauthorized");
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_sendstr(
+          req, "{\"ok\":false,\"error\":\"web_session_changed\"}");
+      return ESP_OK;
+    }
+    if (!ok && out.length() == 0) out = "Error: command delivery failed";
+    if (ok && out.startsWith("Remote command sent:")) {
+      out = "Pending: remote deletion accepted for delivery; verify the bonded device state.";
+    }
+    results.push_back("OK: confirmed in the local browser");
     results.push_back(out);
-    count++;
+    count = 2;
+  } else {
+    for (JsonVariant v : commands) {
+      if (!requestSessionLive()) {
+        results.clear();
+        break;
+      }
+      String cmd = v.as<String>();
+      cmd.trim();
+      if (cmd.length() == 0) { results.push_back(""); continue; }
 
-    if (server == NULL) break;
-    vTaskDelay(pdMS_TO_TICKS(2));
+      // Route through the bond session — same "remote:" prefix that
+      // executeUnifiedWebCommand uses in handleBondExec / handleBondRole.
+      String remoteCmd = "remote:";
+      remoteCmd += cmd;
+      String out;
+      bool ok = executeUnifiedWebCommand(req, ctx, remoteCmd, out);
+      if (!requestSessionLive()) {
+        results.clear();
+        break;
+      }
+      if (!ok && out.length() == 0) out = "command failed";
+      results.push_back(out);
+      count++;
+
+      if (server == NULL) break;
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
   }
 
   if (server == NULL) return ESP_OK;
+
+  if (!requestSessionLive()) {
+    results.clear();
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(
+        req, "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    return ESP_OK;
+  }
 
   PSRAM_JSON_DOC(respDoc);
   respDoc["ok"] = true;
@@ -1532,6 +1617,14 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
   for (const String& r : results) arr.add(r);
   String respStr;
   serializeJson(respDoc, respStr);
+  if (!requestSessionLive()) {
+    respStr = String();
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(
+        req, "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    return ESP_OK;
+  }
   httpd_resp_sendstr(req, respStr.c_str());
   return ESP_OK;
 }

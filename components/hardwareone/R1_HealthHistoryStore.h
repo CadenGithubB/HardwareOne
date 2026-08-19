@@ -87,8 +87,10 @@ struct R1HealthActivityBucket {
 
 struct R1HealthActivityDay {
   bool have;
-  // False for the currently proven single-frame page (maximum 35 of 144
-  // slots). Only a future evidence-backed paging coordinator may set true.
+  // True once an activity-daily message has been parsed and CRC-validated in
+  // full. The ring sends the whole day as one logical message (fragmented over
+  // several BLE notifications when it exceeds ~35 slots; the transport stitches
+  // and validates it), so a successful parse is a verified full day, not a page.
   bool fullDayVerified;
   uint16_t count;
   uint16_t sourceSerial;

@@ -18,6 +18,7 @@
 #include "System_Clock.h"  // Clock::syncSource ledger for ntpstatus
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
+#include <atomic>
 #include <ArduinoJson.h>
 #include "System_Command.h"
 #include "System_Notifications.h"
@@ -25,12 +26,16 @@
 #include "System_Mutex.h"       // FsLockGuard — certificate File operations
 #include "System_I2C_Manager.h"  // I2CDeviceManager — pause polling around WiFi mode changes
 #include <WiFi.h>
+#include <WiFiGeneric.h>
+#include <esp_err.h>
 #include <esp_wifi.h>
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
 #endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #if ENABLE_HTTPS
 #include <LittleFS.h>
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
@@ -53,6 +58,15 @@ extern bool wifiConnected;
 extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
 #endif
 extern volatile uint32_t gOutputFlags;
+
+// Defined in System_ESPNow.cpp when that transport is compiled. The
+// implementation is a cheap flag set; the actual channel re-derive/re-pin
+// stays on espnow_task. WiFi-only profiles need no channel follower.
+#if ENABLE_ESPNOW
+extern void espnowNoteWifiChannelMayHaveChanged();
+#else
+static inline void espnowNoteWifiChannelMayHaveChanged() {}
+#endif
 
 // Debug system globals and macros from debug_system.h (gDebugFlags, gDebugOutputQueue, DEBUG_WIFIF, etc.)
 
@@ -80,7 +94,254 @@ extern volatile bool gWifiUserCancelled;
 extern bool gSkipNTPInWifiConnect;
 
 // WiFi initialization state (lazy initialization like sensor tasks)
-static bool wifiInitialized = false;
+static std::atomic<bool> wifiInitialized{false};
+
+namespace {
+
+// One static recursive lock coordinates explicit scans with driver/mode
+// mutations. The metadata mux makes waiter preference deterministic: once a
+// writer announces itself, a later scan cannot continually jump ahead of it.
+static portMUX_TYPE sWifiCoordinatorMux = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t sWifiCoordinatorMutexStorage;
+static SemaphoreHandle_t sWifiCoordinatorMutex = nullptr;
+static uint32_t sWifiMutationWaiters = 0;
+static TaskHandle_t sWifiMutationOwner = nullptr;
+static uint16_t sWifiMutationDepth = 0;
+static bool sWifiScanActive = false;
+static TaskHandle_t sWifiScanOwner = nullptr;
+
+static SemaphoreHandle_t wifiCoordinatorMutex() {
+  SemaphoreHandle_t mutex = nullptr;
+  portENTER_CRITICAL(&sWifiCoordinatorMux);
+  if (!sWifiCoordinatorMutex) {
+    sWifiCoordinatorMutex =
+        xSemaphoreCreateRecursiveMutexStatic(&sWifiCoordinatorMutexStorage);
+  }
+  mutex = sWifiCoordinatorMutex;
+  portEXIT_CRITICAL(&sWifiCoordinatorMux);
+  return mutex;
+}
+
+static TickType_t wifiCoordinatorTicks(uint32_t timeoutMs) {
+  if (timeoutMs == 0) return 0;
+  TickType_t ticks = pdMS_TO_TICKS(timeoutMs);
+  return ticks == 0 ? 1 : ticks;
+}
+
+static WifiScanStatus wifiScanStatusForDriverError(esp_err_t err) {
+  switch (err) {
+    case ESP_ERR_WIFI_STATE:
+      return WifiScanStatus::BUSY;
+    case ESP_ERR_WIFI_NOT_INIT:
+    case ESP_ERR_WIFI_NOT_STARTED:
+    case ESP_ERR_WIFI_MODE:
+      return WifiScanStatus::RADIO_UNAVAILABLE;
+    default:
+      return WifiScanStatus::DRIVER_ERROR;
+  }
+}
+
+static void wifiScanCoordinatorRelease() {
+  portENTER_CRITICAL(&sWifiCoordinatorMux);
+  sWifiScanActive = false;
+  sWifiScanOwner = nullptr;
+  portEXIT_CRITICAL(&sWifiCoordinatorMux);
+  xSemaphoreGiveRecursive(sWifiCoordinatorMutex);
+}
+
+}  // namespace
+
+WifiRadioMutationGuard::WifiRadioMutationGuard(uint32_t timeoutMs) {
+  SemaphoreHandle_t mutex = wifiCoordinatorMutex();
+  if (!mutex) return;
+
+  const TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  bool recursiveFromScan = false;
+  portENTER_CRITICAL(&sWifiCoordinatorMux);
+  recursiveFromScan = sWifiScanActive && sWifiScanOwner == self;
+  if (!recursiveFromScan) ++sWifiMutationWaiters;
+  portEXIT_CRITICAL(&sWifiCoordinatorMux);
+  if (recursiveFromScan) return;
+
+  const bool locked =
+      xSemaphoreTakeRecursive(mutex, wifiCoordinatorTicks(timeoutMs)) == pdTRUE;
+
+  portENTER_CRITICAL(&sWifiCoordinatorMux);
+  if (sWifiMutationWaiters > 0) --sWifiMutationWaiters;
+  if (locked) {
+    if (sWifiMutationDepth == 0) sWifiMutationOwner = self;
+    ++sWifiMutationDepth;
+  }
+  portEXIT_CRITICAL(&sWifiCoordinatorMux);
+  acquired_ = locked;
+}
+
+WifiRadioMutationGuard::~WifiRadioMutationGuard() {
+  release();
+}
+
+void WifiRadioMutationGuard::release() {
+  if (!acquired_) return;
+  acquired_ = false;
+  portENTER_CRITICAL(&sWifiCoordinatorMux);
+  if (sWifiMutationDepth > 0) {
+    --sWifiMutationDepth;
+    if (sWifiMutationDepth == 0) sWifiMutationOwner = nullptr;
+  }
+  portEXIT_CRITICAL(&sWifiCoordinatorMux);
+  xSemaphoreGiveRecursive(sWifiCoordinatorMutex);
+}
+
+const char* wifiScanStatusText(WifiScanStatus status) {
+  switch (status) {
+    case WifiScanStatus::OK: return "ok";
+    case WifiScanStatus::BUSY: return "busy";
+    case WifiScanStatus::RADIO_UNAVAILABLE: return "radio unavailable";
+    case WifiScanStatus::DRIVER_ERROR: return "driver error";
+    case WifiScanStatus::INVALID_ARGUMENT: return "invalid argument";
+  }
+  return "unknown";
+}
+
+WifiScanResult wifiScanForEach(bool includeHidden, WifiScanVisitor visitor,
+                               void* context, uint32_t acquireTimeoutMs) {
+  WifiScanResult result{WifiScanStatus::INVALID_ARGUMENT, 0, 0,
+                        ESP_ERR_INVALID_ARG};
+  if (!visitor) return result;
+
+  SemaphoreHandle_t mutex = wifiCoordinatorMutex();
+  if (!mutex) {
+    result.status = WifiScanStatus::DRIVER_ERROR;
+    result.driverError = ESP_ERR_NO_MEM;
+    return result;
+  }
+
+  const TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  bool reject = false;
+  portENTER_CRITICAL(&sWifiCoordinatorMux);
+  reject = (sWifiScanActive && sWifiScanOwner == self) ||
+           (sWifiMutationDepth > 0 && sWifiMutationOwner == self) ||
+           sWifiMutationWaiters > 0;
+  portEXIT_CRITICAL(&sWifiCoordinatorMux);
+  if (reject ||
+      xSemaphoreTakeRecursive(mutex,
+                              wifiCoordinatorTicks(acquireTimeoutMs)) != pdTRUE) {
+    result.status = WifiScanStatus::BUSY;
+    result.driverError = ESP_ERR_WIFI_STATE;
+    return result;
+  }
+
+  // Re-check after acquiring: a mutation may have announced itself while this
+  // scan was blocked behind a prior holder. Yield to it instead of leapfrogging.
+  portENTER_CRITICAL(&sWifiCoordinatorMux);
+  reject = sWifiMutationWaiters > 0 || sWifiMutationDepth > 0 ||
+           sWifiScanActive;
+  if (!reject) {
+    sWifiScanActive = true;
+    sWifiScanOwner = self;
+  }
+  portEXIT_CRITICAL(&sWifiCoordinatorMux);
+  if (reject) {
+    xSemaphoreGiveRecursive(mutex);
+    result.status = WifiScanStatus::BUSY;
+    result.driverError = ESP_ERR_WIFI_STATE;
+    return result;
+  }
+
+  // A scan started through Arduino owns different global status/result state.
+  // Do not touch its bit or buffer; fail closed until that foreign scan ends.
+  if (WiFiGenericClass::getStatusBits() & WIFI_SCANNING_BIT) {
+    wifiScanCoordinatorRelease();
+    result.status = WifiScanStatus::BUSY;
+    result.driverError = ESP_ERR_WIFI_STATE;
+    return result;
+  }
+
+  bool scanAttempted = false;
+  bool scanOwnsApList = false;
+  if (!WiFi.enableSTA(true)) {
+    result.status = WifiScanStatus::RADIO_UNAVAILABLE;
+    result.driverError = ESP_ERR_WIFI_NOT_STARTED;
+  } else {
+    wifi_scan_config_t config = {};
+    config.channel = 0;
+    config.show_hidden = includeHidden;
+    config.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    config.scan_time.active.min = 100;
+    config.scan_time.active.max = 300;
+
+    scanAttempted = true;
+    esp_err_t err = esp_wifi_scan_start(&config, /*block=*/true);
+    if (err == ESP_ERR_WIFI_TIMEOUT) {
+      // A timed-out blocking call may leave the driver scan alive and its AP
+      // list allocated. Stop it before clearing and releasing the coordinator.
+      const esp_err_t stopErr = esp_wifi_scan_stop();
+      if (stopErr != ESP_OK) {
+        DEBUG_WIFIF("[WiFi scan] timeout cleanup stop returned %s (%ld)",
+                    esp_err_to_name(stopErr), (long)stopErr);
+      }
+      scanOwnsApList = true;
+      result.status = WifiScanStatus::DRIVER_ERROR;
+      result.driverError = err;
+    } else if (err != ESP_OK) {
+      result.status = wifiScanStatusForDriverError(err);
+      result.driverError = err;
+    } else {
+      scanOwnsApList = true;
+      uint16_t count = 0;
+      err = esp_wifi_scan_get_ap_num(&count);
+      if (err != ESP_OK) {
+        result.status = wifiScanStatusForDriverError(err);
+        result.driverError = err;
+      } else {
+        result.status = WifiScanStatus::OK;
+        result.driverError = ESP_OK;
+        result.found = count;
+        for (uint16_t i = 0; i < count; ++i) {
+          wifi_ap_record_t ap = {};
+          err = esp_wifi_scan_get_ap_record(&ap);
+          if (err != ESP_OK) {
+            result.status = wifiScanStatusForDriverError(err);
+            result.driverError = err;
+            break;
+          }
+
+          WifiScanRecord record = {};
+          memcpy(record.ssid, ap.ssid, sizeof(record.ssid));
+          record.ssid[sizeof(record.ssid) - 1] = '\0';
+          memcpy(record.bssid, ap.bssid, sizeof(record.bssid));
+          record.rssi = ap.rssi;
+          record.channel = ap.primary;
+          record.authMode = static_cast<uint8_t>(ap.authmode);
+
+          ++result.delivered;
+          if (!visitor(record, i, count, context)) break;
+        }
+        // get_ap_record() releases each record as it is consumed. A complete
+        // walk (including a zero-result scan) leaves no driver list to clear;
+        // an early visitor stop or read error leaves cleanup ownership here.
+        if (result.delivered == count) scanOwnsApList = false;
+      }
+    }
+  }
+
+  if (scanOwnsApList) {
+    const esp_err_t clearErr = esp_wifi_clear_ap_list();
+    if (clearErr != ESP_OK) {
+      DEBUG_WIFIF("[WiFi scan] AP-list cleanup returned %s (%ld)",
+                  esp_err_to_name(clearErr), (long)clearErr);
+      // Never report a successful bounded-lifetime scan if its driver-owned
+      // tail could not be released. Radio teardown errors typically mean the
+      // driver already freed it, but callers still receive an honest failure.
+      result.status = WifiScanStatus::DRIVER_ERROR;
+      result.driverError = clearErr;
+    }
+  }
+
+  wifiScanCoordinatorRelease();
+  if (scanAttempted) espnowNoteWifiChannelMayHaveChanged();
+  return result;
+}
 
 // ============================================================================
 // WiFi Command Handlers
@@ -295,7 +556,17 @@ bool connectToBestWiFiNetwork() {
   // WIFI_AP_STA — keep that (WIFI_STA would drop the hidden AP that parks the
   // ESP-NOW channel); otherwise ensure STA.
   extern bool isEspNowInitialized();
-  WiFi.mode(isEspNowInitialized() ? WIFI_AP_STA : WIFI_STA);
+  {
+    WifiRadioMutationGuard radioGuard;
+    if (!radioGuard.acquired()) {
+      WARN_WIFIF("[WiFi] radio busy; cannot re-arm STA for connection");
+      return false;
+    }
+    if (!WiFi.mode(isEspNowInitialized() ? WIFI_AP_STA : WIFI_STA)) {
+      ERROR_WIFIF("[WiFi] failed to re-arm STA mode for connection");
+      return false;
+    }
+  }
 
   sortWiFiByPriority();
   gWifiUserCancelled = false;
@@ -306,11 +577,24 @@ bool connectToBestWiFiNetwork() {
       // Brief pause between trying different saved networks
       delay(2000);
     }
-    connected = connectWiFiIndex(i, 12000, true);
+    // 25 s, not 12 s. The driver's own 4-way-handshake timeout is 10 s and it
+    // retries internally; a 12 s budget (12.5 s from esp_wifi_connect() — the
+    // 500 ms settle is spent before the deadline clock starts) fits exactly ONE
+    // handshake cycle and then kills the driver's second attempt mid-flight.
+    // MEASURED 2026-08-18: 204 at 10.0 s, driver re-attempted at 10.1 s, and
+    // this timeout disconnected it 2.4 s later — logged as "run -> init (0x0)",
+    // reason 0 meaning WE dropped it, not the AP. A fresh attempt then joined
+    // in 40 ms. 25 s gives the driver room for two full cycles.
+    connected = connectWiFiIndex(i, 25000, true);
     
     if (gWifiUserCancelled) {
-      esp_wifi_disconnect();
-      WiFi.disconnect();
+      WifiRadioMutationGuard radioGuard;
+      if (radioGuard.acquired()) {
+        esp_wifi_disconnect();
+        WiFi.disconnect();
+      } else {
+        WARN_WIFIF("[WiFi] cancellation cleanup deferred: radio busy");
+      }
       delay(100);
       broadcastOutput("*** WiFi connection cancelled by user ***");
       return false;
@@ -332,6 +616,10 @@ bool connectToBestWiFiNetwork() {
 static bool gRadioForcedOff  = false;
 static bool gRadioPrevEspNow = false;  // ESP-NOW was up when we powered off
 static bool gRadioPrevWifi   = false;  // WiFi was active (connected OR auto-reconnecting) when we powered off
+// A failed bounded ESP-NOW close leaves a retryable live lifecycle even though
+// its public initialized flag is already false. Preserve the original restore
+// snapshot until radiopower off either completes or is explicitly superseded.
+static bool gRadioPowerOffPending = false;
 
 const char* cmd_wificonnect(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -346,7 +634,13 @@ const char* cmd_wificonnect(const String& originalCmd) {
   // whether we connect at boot, wifiAutoReconnect decides whether we keep
   // hunting after an unexpected drop.
   WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);
-  gRadioForcedOff = false;  // radio is coming up — invalidate any stale radiopower-off snapshot
+  // An explicit open supersedes a previously failed radiopower-off transaction.
+  // ESP-NOW's own pending close remains visible through espnowShutdownPending;
+  // only the stale "restore what was running" snapshot is discarded here.
+  gRadioForcedOff = false;
+  gRadioPowerOffPending = false;
+  gRadioPrevEspNow = false;
+  gRadioPrevWifi = false;
 
   CommandArgs a(originalCmd);
   String prevSSID = WiFi.isConnected() ? WiFi.SSID() : String("");
@@ -382,7 +676,15 @@ const char* cmd_wificonnect(const String& originalCmd) {
     // Use shared connection logic
     connected = connectToBestWiFiNetwork();
   } else if (index1 > 0) {
-    connected = connectWiFiIndex(index1 - 1, 12000);
+    // 25 s, not 12 s. The driver's own 4-way-handshake timeout is 10 s and it
+    // retries internally; a 12 s budget (12.5 s from esp_wifi_connect() — the
+    // 500 ms settle is spent before the deadline clock starts) fits exactly ONE
+    // handshake cycle and then kills the driver's second attempt mid-flight.
+    // MEASURED 2026-08-18: 204 at 10.0 s, driver re-attempted at 10.1 s, and
+    // this timeout disconnected it 2.4 s later — logged as "run -> init (0x0)",
+    // reason 0 meaning WE dropped it, not the AP. A fresh attempt then joined
+    // in 40 ms. 25 s gives the driver room for two full cycles.
+    connected = connectWiFiIndex(index1 - 1, 25000);
     if (!connected && prevSSID.length() > 0) {
       connectWiFiSSID(prevSSID, 15000);
     }
@@ -409,15 +711,10 @@ const char* cmd_wifidisconnect(const String& argsInput) {
     return "Error: WiFi is not initialized";
   }
 
-  // Stop HTTP server to free heap. httpServerStopSafe() also clears the
-  // runtime web lane (it tracks the server lifecycle) and posts the stopped
-  // event. It stops inline unless a web request is mid-flight waiting on this
-  // very task, in which case the main loop finishes the job a pass later —
-  // see WebServer_Handle.h for why blocking here would deadlock.
- #if ENABLE_HTTP_SERVER
-  httpServerStopSafe();
- #endif
-  // Note: Web mirror buffer clearing removed - handled by debug_system.cpp
+  WifiRadioMutationGuard radioGuard;
+  if (!radioGuard.acquired()) {
+    return "Error: WiFi radio busy (scan or connection in progress); retry closewifi";
+  }
 
   // Stop the RUNTIME reconnect hunt so the driver stops scanning for the lost AP.
   // On a single radio that scan hops channels and can knock a pinned ESP-NOW
@@ -427,12 +724,28 @@ const char* cmd_wifidisconnect(const String& argsInput) {
   WiFi.setAutoReconnect(false);
 
   extern bool isEspNowInitialized();
-  if (isEspNowInitialized()) {
+  const bool espnowHoldsRadio = isEspNowInitialized();
+  if (espnowHoldsRadio) {
     // ESP-NOW owns the radio — drop the association but KEEP the radio up (mode,
     // driver, PS untouched). The WIFI_STA_DISCONNECTED event re-pins the ESP-NOW
     // channel on espnow_task.
     WiFi.disconnect();   // association drop only
-    systemEventPost(SYSEVT_WIFI_DISCONNECTED);
+  } else {
+    // Nothing else needs the radio — power it down fully.
+    WiFi.disconnect(true);   // true = also power down the radio
+  }
+  radioGuard.release();
+
+  // Stop HTTP only after the guarded radio mutation succeeds. A BUSY result
+  // above must leave the existing network service usable, not partially close
+  // it. httpServerStopSafe() itself remains outside the WiFi coordinator.
+ #if ENABLE_HTTP_SERVER
+  httpServerStopSafe();
+ #endif
+  // Note: Web mirror buffer clearing removed - handled by debug_system.cpp
+  systemEventPost(SYSEVT_WIFI_DISCONNECTED);
+
+  if (espnowHoldsRadio) {
  #if ENABLE_HTTP_SERVER
     return "WiFi disconnected (radio held for ESP-NOW). HTTP server stopped, web output off.";
  #else
@@ -440,9 +753,6 @@ const char* cmd_wifidisconnect(const String& argsInput) {
  #endif
   }
 
-  // Nothing else needs the radio — power it down fully.
-  WiFi.disconnect(true);   // true = also power down the radio
-  systemEventPost(SYSEVT_WIFI_DISCONNECTED);
  #if ENABLE_HTTP_SERVER
   return "WiFi off. HTTP server stopped and web output disabled to free heap.";
  #else
@@ -478,37 +788,60 @@ bool wifiRadioOn() { return wifiRadioState() != WIFI_RADIO_OFF; }
 // ---------------------------------------------------------------------------
 #if ENABLE_ESPNOW
 extern bool isEspNowInitialized();
+extern bool espnowShutdownPending();
 extern const char* cmd_espnow_init(const String&);
 extern const char* cmd_espnow_deinit(const String&);
 #endif
 
+enum class RadioPowerOffResult : uint8_t {
+  OK,
+  ESPNOW_BUSY,
+  WIFI_BUSY,
+};
+
 // Fully power the radio DOWN: drop WiFi, tear ESP-NOW down (it holds the radio),
 // and WIFI_OFF so even ESP-NOW's parked hidden AP stops transmitting.
-static void radioPowerOff() {
+static RadioPowerOffResult radioPowerOff() {
   // Capture WiFi INTENT, not just association: an armed auto-reconnect means WiFi
   // is "active" even while out of range (the out-and-about case), so it must be
   // restored on power-on — otherwise the device would never rejoin home range.
-  gRadioPrevWifi = WiFi.isConnected() || WiFi.getAutoReconnect();
+  if (!gRadioPowerOffPending) {
+    gRadioPrevWifi = WiFi.isConnected() || WiFi.getAutoReconnect();
 #if ENABLE_ESPNOW
-  gRadioPrevEspNow = isEspNowInitialized();
+    gRadioPrevEspNow = isEspNowInitialized();
 #else
-  gRadioPrevEspNow = false;
+    gRadioPrevEspNow = false;
 #endif
-  gRadioForcedOff = true;  // we own this power-down — radioPowerOn will restore the snapshot
-
-  // Stop the runtime reconnect hunt (runtime-only; boot autostart untouched).
-  WiFi.setAutoReconnect(false);
-
-  // The radio is going away — tear down HTTP + web output exactly like closewifi.
- #if ENABLE_HTTP_SERVER
-  httpServerStopSafe();
- #endif
+    gRadioPowerOffPending = true;
+  }
 
 #if ENABLE_ESPNOW
   // Stop ESP-NOW FIRST — it parks the radio in AP_STA. deinit leaves the radio
-  // in AP_STA, so we still have to power it down explicitly below.
-  if (gRadioPrevEspNow) cmd_espnow_deinit("");
+  // in AP_STA, so we still have to power it down explicitly below. A bounded
+  // quiescence failure retains live/retryable ESP-NOW resources; never kill the
+  // WiFi driver underneath them or falsely report airplane mode success.
+  if (isEspNowInitialized() || espnowShutdownPending()) {
+    const char* closeResult = cmd_espnow_deinit("");
+    if (!closeResult || strstr(closeResult, "successfully") == nullptr) {
+      gRadioForcedOff = false;
+      return RadioPowerOffResult::ESPNOW_BUSY;
+    }
+  }
 #endif
+
+  // Do not hold the WiFi coordinator across ESP-NOW quiescence or HTTP
+  // teardown. Only the final destructive driver transition needs exclusion
+  // from a live explicit scan.
+  WifiRadioMutationGuard radioGuard;
+  if (!radioGuard.acquired()) {
+    // Preserve the pending restore snapshot exactly as captured. A retry can
+    // finish the transaction after the scan/connection releases the radio.
+    return RadioPowerOffResult::WIFI_BUSY;
+  }
+
+  // Stop the runtime reconnect hunt only after the fence succeeds. A BUSY
+  // result must not partially alter the still-live WiFi runtime state.
+  WiFi.setAutoReconnect(false);
 
   // Power the radio fully down. WiFi.mode(WIFI_OFF) is required (not just
   // disconnect) so ESP-NOW's hidden AP also stops. A WiFi mode change disables
@@ -519,8 +852,18 @@ static void radioPowerOff() {
   WiFi.disconnect(true);          // drop association + power down the STA
   WiFi.mode(WIFI_OFF);            // NULL mode — kills the hidden AP too
   if (mgr) mgr->resumePolling();
+  radioGuard.release();
 
+  // The radio mutation succeeded; now tear down HTTP + web output without
+  // holding the coordinator (httpServerStopSafe may defer to the main loop).
+ #if ENABLE_HTTP_SERVER
+  httpServerStopSafe();
+ #endif
+
+  gRadioPowerOffPending = false;
+  gRadioForcedOff = true;  // completed off-state now owns the restore snapshot
   systemEventPost(SYSEVT_WIFI_DISCONNECTED);
+  return RadioPowerOffResult::OK;
 }
 
 // Bring the radio back UP. If WE powered it off (gRadioForcedOff), restore exactly
@@ -528,16 +871,21 @@ static void radioPowerOff() {
 // trustworthy snapshot, so bring up the configured default.
 static void radioPowerOn() {
   const bool ownedOff = gRadioForcedOff;   // did radiopower off cause this off-state?
+  const bool restoreEspNow = gRadioPrevEspNow;
+  const bool restoreWifi = gRadioPrevWifi;
   gRadioForcedOff = false;
+  gRadioPowerOffPending = false;
+  gRadioPrevEspNow = false;
+  gRadioPrevWifi = false;
 
   if (ownedOff) {
     // Restore exactly what was torn down. ESP-NOW first: cmd_espnow_init sets
     // WIFI_AP_STA + PS_NONE + re-inits the mesh itself (no prior WiFi connect
     // needed); identity/keys survive in RAM so no re-provision is required.
 #if ENABLE_ESPNOW
-    if (gRadioPrevEspNow && !isEspNowInitialized()) cmd_espnow_init("");
+    if (restoreEspNow && !isEspNowInitialized()) cmd_espnow_init("");
 #endif
-    if (gRadioPrevWifi) {
+    if (restoreWifi) {
       WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);  // honour the user's hunt preference
       setupWiFi();                  // sets mode (AP_STA if ESP-NOW up, else STA), re-associates
     }
@@ -572,12 +920,26 @@ const char* cmd_radiopower(const String& originalCmd) {
   else return "Usage: radiopower [on|off|toggle]";
 
   if (wantOn) {
-    if (wifiRadioOn()) return "Radio already on.";
+    if (wifiRadioOn()) {
+      // Treat an explicit ON as cancellation of a failed OFF transaction. The
+      // radio never went down, so there is nothing to restore later.
+      gRadioPowerOffPending = false;
+      gRadioForcedOff = false;
+      gRadioPrevEspNow = false;
+      gRadioPrevWifi = false;
+      return "Radio already on.";
+    }
     radioPowerOn();
     return "Radio on (runtime only).";
   }
-  if (!wifiRadioOn()) return "Radio already off.";
-  radioPowerOff();
+  if (!wifiRadioOn() && !gRadioPowerOffPending) return "Radio already off.";
+  const RadioPowerOffResult offResult = radioPowerOff();
+  if (offResult == RadioPowerOffResult::ESPNOW_BUSY) {
+    return "Error: ESP-NOW did not quiesce; radio remains on. Retry radiopower off.";
+  }
+  if (offResult == RadioPowerOffResult::WIFI_BUSY) {
+    return "Error: WiFi scan/connection is busy; radio remains on. Retry radiopower off.";
+  }
   return "Radio off — WiFi + ESP-NOW powered down (runtime only; radio returns on next boot).";
 }
 
@@ -591,10 +953,66 @@ const char* cmd_wifidrop(const String& argsInput) {
   if (esp_wifi_get_mode(&mode) != ESP_OK) {
     return "Error: WiFi is not initialized";
   }
+  WifiRadioMutationGuard radioGuard;
+  if (!radioGuard.acquired()) {
+    return "Error: WiFi radio busy (scan or connection in progress); retry wifidisconnect";
+  }
   WiFi.disconnect(false);   // false = do NOT power down the radio
+  radioGuard.release();
   systemEventPost(SYSEVT_WIFI_DISCONNECTED);
   return "WiFi disconnected (radio still on).";
 }
+
+namespace {
+
+static void formatWifiBssid(const uint8_t bssid[6], char out[18]) {
+  snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+           bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+}
+
+struct WifiScanJsonContext {
+  JsonArray networks;
+};
+
+static bool appendWifiScanJson(const WifiScanRecord& record,
+                               uint16_t /*index*/, uint16_t /*total*/,
+                               void* opaque) {
+  auto* context = static_cast<WifiScanJsonContext*>(opaque);
+  JsonObject object = context->networks.add<JsonObject>();
+  char bssid[18];
+  char auth[4];
+  formatWifiBssid(record.bssid, bssid);
+  snprintf(auth, sizeof(auth), "%u", (unsigned)record.authMode);
+  object["ssid"] = record.ssid;
+  object["rssi"] = (long)record.rssi;
+  object["bssid"] = bssid;
+  object["channel"] = (long)record.channel;
+  object["auth"] = auth;  // numeric string, preserving the command schema
+  return true;
+}
+
+struct WifiScanTextContext {
+  bool headerPrinted;
+};
+
+static bool emitWifiScanText(const WifiScanRecord& record, uint16_t index,
+                             uint16_t total, void* opaque) {
+  auto* context = static_cast<WifiScanTextContext*>(opaque);
+  if (!context->headerPrinted) {
+    snprintf(getDebugBuffer(), 1024, "%u networks found:", (unsigned)total);
+    broadcastOutput(getDebugBuffer());
+    context->headerPrinted = true;
+  }
+
+  char bssid[18];
+  formatWifiBssid(record.bssid, bssid);
+  snprintf(getDebugBuffer(), 1024, "  %u) '%s'  RSSI=%ld  BSSID=%s",
+           (unsigned)index + 1, record.ssid, (long)record.rssi, bssid);
+  broadcastOutput(getDebugBuffer());
+  return true;
+}
+
+}  // namespace
 
 const char* cmd_wifiscan(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -607,8 +1025,6 @@ const char* cmd_wifiscan(const String& argsInput) {
   String args = argsInput;
   args.trim();
   bool json = argWantsJson(args);
-  int n = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
-  if (n < 0) return "Error: WiFi scan failed";
 
   if (json) {
     // Build {"schema":1,"networks":[...]} (array under a key, per the
@@ -624,36 +1040,44 @@ const char* cmd_wifiscan(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray nets = doc["networks"].to<JsonArray>();
-    for (int i = 0; i < n; ++i) {
-      JsonObject o = nets.add<JsonObject>();
-      o["ssid"]    = WiFi.SSID(i);          // escaped by the serializer
-      o["rssi"]    = (long)WiFi.RSSI(i);
-      o["bssid"]   = WiFi.BSSIDstr(i);
-      o["channel"] = (long)WiFi.channel(i);
-      o["auth"]    = String((int)WiFi.encryptionType(i));  // string, as before
+    WifiScanJsonContext context{nets};
+    const WifiScanResult scan = wifiScanForEach(
+        /*includeHidden=*/true, appendWifiScanJson, &context);
+    if (!scan.ok()) {
+      // Preserve a valid JSON response on BUSY/driver failures so API callers
+      // can distinguish "scan unavailable" from a genuinely empty RF
+      // environment. Discard any prefix delivered before a cursor error.
+      nets.clear();
+      doc["error"] = wifiScanStatusText(scan.status);
+      doc["driverError"] = scan.driverError;
     }
+
     PSRAM_STATIC_BUF(jbuf, CMD_RESULT_MAX);
     // Trim the array to fit BEFORE serializing the wrapper. The reserve covers
     // {"schema":1,"networks":} plus the "dropped" field added below.
     const size_t kWrapperReserve = 64;
-    int dropped = serializeJsonArrayWithRepair(nets, jbuf, jbuf_SIZE - kWrapperReserve, "wifiscan");
+    int dropped = serializeJsonArrayWithRepair(
+        nets, jbuf, jbuf_SIZE - kWrapperReserve, "wifiscan");
     if (dropped > 0) doc["dropped"] = dropped;   // say so rather than truncate in silence
     size_t len = serializeJson(doc, jbuf, jbuf_SIZE);
     if (len == 0 || len >= jbuf_SIZE - 1) return "Error: wifi scan result outgrew the response buffer";
     return jbuf;
   } else {
-    snprintf(getDebugBuffer(), 1024, "%d networks found:", n);
-    broadcastOutput(getDebugBuffer());
-    for (int i = 0; i < n; ++i) {
-      snprintf(getDebugBuffer(), 1024, "  %d) '%s'  RSSI=%ld  BSSID=%s",
-               i + 1, WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i), WiFi.BSSIDstr(i).c_str());
+    WifiScanTextContext context{false};
+    const WifiScanResult scan = wifiScanForEach(
+        /*includeHidden=*/true, emitWifiScanText, &context);
+    if (!scan.ok()) return "Error: WiFi scan failed";
+    if (!context.headerPrinted) {
+      snprintf(getDebugBuffer(), 1024, "%u networks found:",
+               (unsigned)scan.found);
       broadcastOutput(getDebugBuffer());
     }
-  }
 
-  emitListingTrailer("nearby WiFi networks", "current connection: 'wifistatus'; connect: 'openwifi'");
-  snprintf(getDebugBuffer(), 1024, "Scan complete: %d networks found", n);
-  return getDebugBuffer();
+    emitListingTrailer("nearby WiFi networks", "current connection: 'wifistatus'; connect: 'openwifi'");
+    snprintf(getDebugBuffer(), 1024, "Scan complete: %u networks found",
+             (unsigned)scan.found);
+    return getDebugBuffer();
+  }
 }
 
 const char* cmd_wifitxpower(const String& argsInput) {
@@ -833,6 +1257,24 @@ static void normalizeWiFiPriorities() {
   }
 }
 
+// Arduino-ESP32 deliberately replaces IDF's large static WiFi buffer profile
+// with this leaner runtime profile unless the application explicitly requests
+// static buffers. Raw recovery calls must do the same: WIFI_INIT_CONFIG_DEFAULT
+// alone would try to reserve the sdkconfig defaults after BLE and the rest of
+// the firmware are already resident, which can fail with ESP_ERR_NO_MEM.
+static wifi_init_config_t makeArduinoCompatibleWifiInitConfig() {
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  if (!WiFiGenericClass::useStaticBuffers()) {
+    cfg.static_tx_buf_num = 0;
+    cfg.dynamic_tx_buf_num = 32;
+    cfg.tx_buf_type = 1;
+    cfg.cache_tx_buf_num = 4;
+    cfg.static_rx_buf_num = 4;
+    cfg.dynamic_rx_buf_num = 32;
+  }
+  return cfg;
+}
+
 // Returns false when the persist did not happen (filesystem not ready, or
 // writeSettingsJson failed) — callers must not report success on false, or a
 // RAM-only change silently reverts on reboot. Matches the extern decls in the
@@ -861,6 +1303,17 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
     BROADCAST_PRINTF("Connecting to '%s' (priority %d) ...", nw.ssid.c_str(), nw.priority);
   } else {
     BROADCAST_PRINTF("Connecting to [%d] '%s'...", index0based + 1, nw.ssid.c_str());
+  }
+
+  // Connection setup, retries, and the IDLE-bug recovery path all mutate the
+  // same single driver used by explicit scans. Keep that full transaction
+  // indivisible; bounded acquisition makes callers retry instead of waiting
+  // behind a multi-channel scan indefinitely.
+  WifiRadioMutationGuard radioGuard;
+  if (!radioGuard.acquired()) {
+    WARN_WIFIF("[connectWiFiIndex] WiFi radio busy; connection not started");
+    broadcastOutput("WiFi radio busy (scan or another connection in progress); retrying later.");
+    return false;
   }
 
   // Ensure previous attempts are not in-progress
@@ -967,6 +1420,45 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
     }
 
     // Step 6: Connect
+    //
+    // Power save MUST be off before the 4-way handshake, not after it.
+    // MEASURED 2026-08-18: joins to a marginal AP failed with
+    // WIFI_REASON_HANDSHAKE_TIMEOUT (204 — logged by the driver as
+    // "run -> init (0xcc00)") exactly 10000 ms after "assoc -> run", with no
+    // intermediate state change, i.e. the handshake made ZERO progress. The
+    // same AP then joined in 40 ms at an equal or WORSE RSSI, so this was never
+    // a signal threshold.
+    //
+    // Cause: the stop/start above fires ARDUINO_EVENT_WIFI_STA_START, and the
+    // Arduino core's STA event handler unconditionally re-applies its cached
+    // sleep mode — which defaults to WIFI_PS_MIN_MODEM. So the station dozed
+    // between DTIMs across the exact window the AP sends EAPOL M1. A missed M1
+    // (and its retries) leaves the supplicant waiting out the full 10 s timer.
+    //
+    // setSleep() rather than a bare esp_wifi_set_ps(): it updates the core's
+    // CACHED value, so a later STA_START re-applies NONE instead of reverting
+    // to MIN_MODEM. A bare set_ps here would be silently undone by the next
+    // start. This also matches what the success path at the bottom of this
+    // function already wanted for an unrelated reason (periph_spinlock
+    // contention vs I2C recovery tripping the interrupt WDT) — it was just
+    // applied too late to help the handshake.
+    // esp_wifi_set_ps() DIRECTLY, not WiFi.setSleep(): the Arduino core's
+    // setSleep(wifi_ps_type_t) IGNORES ITS ARGUMENT when the STA is already
+    // started — it only assigns _sleepEnabled on the !started() branch, then
+    // calls esp_wifi_set_ps(_sleepEnabled) with the OLD cached value
+    // (WiFiGeneric.cpp:681-695). Since we call this after esp_wifi_start(),
+    // setSleep(WIFI_PS_NONE) silently re-applied MIN_MODEM — observed on
+    // hardware as "Set ps type: 1" immediately after the call.
+    //
+    // HONEST SCOPE: this did NOT fix the handshake timeouts. Attempts that ran
+    // with PS confirmed off (type 0) still hit reason 204 on their first
+    // handshake cycle, so modem sleep was not the cause. Kept because running
+    // the 4-way handshake under modem sleep is wrong regardless, and because
+    // the success path below wants PS off anyway for the interrupt-WDT reason
+    // documented there. The fix that actually works is the 25 s window.
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    DEBUG_WIFIF("[connectWiFiIndex] power save disabled before connect");
+
     DEBUG_WIFIF("[connectWiFiIndex] Calling esp_wifi_connect()...");
     err = esp_wifi_connect();
     DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_connect() returned: %d (%s)", err,
@@ -1035,9 +1527,14 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
           delay(500);         // Wait for full cleanup
 
           DEBUG_WIFIF("[connectWiFiIndex] Re-initializing WiFi subsystem...");
-          wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+          wifi_init_config_t cfg = makeArduinoCompatibleWifiInitConfig();
           err = esp_wifi_init(&cfg);
           DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_init() returned: %d", err);
+          if (err != ESP_OK) {
+            ERROR_WIFIF("[connectWiFiIndex] WiFi recovery init failed: %s (%d)",
+                        esp_err_to_name(err), (int)err);
+            break;
+          }
 
           err = esp_wifi_set_mode(WIFI_MODE_STA);
           DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_mode(STA) returned: %d", err);
@@ -1092,6 +1589,7 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
                      nw.ssid.c_str(), WiFi.localIP().toString().c_str());
       systemEventPost(SYSEVT_WIFI_CONNECTED, WiFi.localIP().toString().c_str());
       gWifiNetworks[index0based].lastConnected = millis();
+      radioGuard.release();
       saveWiFiNetworks();
       return true;
     }
@@ -1144,11 +1642,20 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
   wifi_mode_t mode;
   if (esp_wifi_get_mode(&mode) != ESP_OK) {
     DEBUG_WIFIF("[connectWiFiIndex] WiFi was deinitialized, reinitializing...");
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
-    delay(100);
+    wifi_init_config_t cfg = makeArduinoCompatibleWifiInitConfig();
+    err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+      ERROR_WIFIF("[connectWiFiIndex] Final WiFi repair init failed: %s (%d)",
+                  esp_err_to_name(err), (int)err);
+    } else {
+      err = esp_wifi_set_mode(WIFI_MODE_STA);
+      DEBUG_WIFIF("[connectWiFiIndex] Final repair set_mode returned: %d", err);
+      if (err == ESP_OK) {
+        err = esp_wifi_start();
+        DEBUG_WIFIF("[connectWiFiIndex] Final repair start returned: %d", err);
+        if (err == ESP_OK) delay(100);
+      }
+    }
   }
   
   if (showPriority) {
@@ -1162,6 +1669,7 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
     snprintf(det, sizeof(det), "%d attempts, status=%d", kMaxWifiAttempts, (int)WiFi.status());
     systemEventPost(SYSEVT_WIFI_CONNECT_FAILED, nw.ssid.c_str(), det);
   }
+  radioGuard.release();
   return false;
 }
 
@@ -1608,7 +2116,7 @@ const CommandEntry wifiCommands[] = {
   { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", true, cmd_wifidrop },
   { "radiopower", "Power the whole 2.4GHz radio on/off (airplane mode; also stops/restores ESP-NOW; runtime only, not persisted): [on|off|toggle]", true, cmd_radiopower, "Usage: radiopower [on|off|toggle]" },
   { "wifiscan", "Scan for available WiFi networks. (add 'json' for JSON output)", false, cmd_wifiscan },
-  { "wifigettxpower", "Set WiFi TX power: <dBm> (alias of wifitxpower; admin)", true, cmd_wifitxpower, "Usage: wifigettxpower <dBm>  (sets TX power; clamps to ~2..21 dBm)" },
+  { "wifigettxpower", "Report the current WiFi TX power in dBm (read-only; set it with 'wifitxpower').", true, cmd_wifigettxpower, "Usage: wifigettxpower  (no arguments)" },
   
   // Network Services
   { "ntpsync",   "Sync time with NTP server.",               false, cmd_ntpsync },
@@ -1652,12 +2160,6 @@ static volatile bool sWifiDiscPending = false;
 static char          sWifiDiscSsid[33];
 static int           sWifiDiscReason = 0;
 static uint32_t      sWifiDiscConnSecs = 0;
-
-// Defined in System_ESPNow.cpp — forward-declared here to avoid pulling the
-// heavy ESP-NOW header into the WiFi TU. Just sets a volatile flag; the actual
-// channel re-derive/re-pin runs on espnow_task (single-radio: the ESP-NOW
-// channel follows the STA association, so it must re-sync on any join/drop).
-extern void espnowNoteWifiChannelMayHaveChanged();
 
 static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info) {
   static bool sWasConnected = false;
@@ -1711,6 +2213,19 @@ bool ensureWiFiInitialized() {
     return true;
   }
 
+  WifiRadioMutationGuard radioGuard;
+  if (!radioGuard.acquired()) {
+    WARN_WIFIF("[WiFi] initialization deferred: radio busy");
+    return false;
+  }
+
+  // Another task may have completed lazy initialization while this task was
+  // waiting for the radio fence.
+  if (wifiInitialized) {
+    DEBUG_WIFIF("[WiFi] Already initialized");
+    return true;
+  }
+
   DEBUG_WIFIF("[WiFi] Initializing WiFi subsystem (lazy init)");
   // Register the log-only event handler once per boot (guarded in case
   // wifiInitialized is ever reset by a future deinit path).
@@ -1724,9 +2239,13 @@ bool ensureWiFiInitialized() {
   // WIFI_STA would drop the hidden AP that parks the ESP-NOW channel. This lazy
   // init only owns the STA-side event handler + latch in that case.
   extern bool isEspNowInitialized();
-  WiFi.mode(isEspNowInitialized() ? WIFI_AP_STA : WIFI_STA);
+  if (!WiFi.mode(isEspNowInitialized() ? WIFI_AP_STA : WIFI_STA)) {
+    ERROR_WIFIF("[WiFi] failed to initialize WiFi radio mode");
+    return false;
+  }
   DEBUG_WIFIF("[WiFi] Mode set to %s", isEspNowInitialized() ? "WIFI_AP_STA (ESP-NOW up)" : "WIFI_STA");
   wifiInitialized = true;
+  radioGuard.release();
 
   broadcastOutput("WiFi subsystem initialized");
   return true;

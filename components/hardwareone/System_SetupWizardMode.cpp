@@ -91,19 +91,14 @@ static struct {
   WizardSubMode subMode;
   SetupWizardResult result;
 
-  // WiFi sub-mode scratch. wifiNamed[] holds the scan indices of the NAMED
-  // networks shown in the last list (hidden/empty-SSID APs are excluded), so a
-  // numbered pick maps choice K -> WiFi.SSID(wifiNamed[K-1]) and can never
-  // resolve to a blank SSID. Must survive between the prompt render (which
-  // scans + fills it) and the onInput parse (which reads it) — the WiFi scan
-  // result stays alive until WiFi.scanDelete() in the parser.
-  int   wifiNamed[24];
+  // WiFi sub-mode scratch. The numbered SSIDs themselves live in the shared
+  // PSRAM choice cache owned by System_SetupWizard.cpp; no Arduino scan index
+  // or global scan result survives between painting this prompt and parsing
+  // the later user response.
   int   wifiNamedCount;      // valid numeric range for the printed list
-  // True while a live WiFi scan + printed list are valid for the current
-  // WIFI_SSID view. Gates the scan/print in paintAfterTransition() so a
-  // repaint of the same page does NOT kick off another blocking scan + list
-  // dump. Cleared on every WiFi.scanDelete() (back/skip/pick/rescan) and at
-  // reset, so genuine (re)entry rescans, but idle repaints don't.
+  // Gates scan/list printing so an idle repaint does not repeat a blocking
+  // scan and console dump. Cleared whenever the copied choice list is
+  // consumed or abandoned, so genuine (re)entry rescans.
   bool  wifiScanValid;
   String wifiPendingSsid;    // SSID selected, awaiting password
 
@@ -111,6 +106,14 @@ static struct {
   // skip path can disable ESP-NOW entirely.
   bool espnowConfiguring;
 } sWizard;
+
+static void clearWizardWifiChoices() {
+#if ENABLE_WIFI
+  wifiScanClearNamed();
+#endif
+  sWizard.wifiNamedCount = 0;
+  sWizard.wifiScanValid = false;
+}
 
 // OLED tick state -- declared up-front because both wizardMode_onEnter
 // (which resets them) and wizardMode_onTick (which reads/writes them)
@@ -259,11 +262,9 @@ static const char* paintAfterTransition() {
 
     case WizardSubMode::WIFI_SSID: {
 #if ENABLE_WIFI
-      // Scan + dump the list ONCE per view. wifiScanPrintNamed() runs a
-      // blocking WiFi.scanNetworks() and broadcasts the whole list, so doing
-      // it on every repaint floods the console (and the async list vs. the
-      // sync prompt interleave). Gate it: scan on (re)entry, reuse the live
-      // scan buffer on idle repaints. Cleared at every scanDelete + reset.
+      // Scan + dump the list once per view. The coordinated helper copies the
+      // numbered SSIDs to PSRAM and releases Arduino's scan result before it
+      // returns, so waiting for input holds no WiFi scan allocation.
       if (!sWizard.wifiScanValid) {
         int pageNum = getWizardPageNumber(WIZARD_PAGE_WIFI);
         int totalPages = getWizardTotalPages();
@@ -272,7 +273,7 @@ static const char* paintAfterTransition() {
                  pageNum, totalPages);
         broadcastOutput("");
         broadcastOutput(header);
-        sWizard.wifiNamedCount = wifiScanPrintNamed(sWizard.wifiNamed, 24);
+        sWizard.wifiNamedCount = wifiScanPrintNamed(24);
         broadcastOutput("----------------------------------------");
         sWizard.wifiScanValid = true;
       }
@@ -331,6 +332,7 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
   // Universal cancel: 'cancel' at ANY sub-mode aborts the wizard with
   // no changes saved.
   if (line.equalsIgnoreCase("cancel")) {
+    clearWizardWifiChoices();
     snprintf(out, outSize, "Wizard cancelled. No changes saved.");
     sWizard.result.completed = false;
     return CLI_MODE_HANDLED_AND_EXIT;
@@ -677,22 +679,19 @@ static CLIModeInputResult dispatchWiFi(const String& line,
     case WizardSubMode::WIFI_SSID: {
 #if ENABLE_WIFI
       if (lc == "b" || lc == "back") {
-        WiFi.scanDelete();
-        sWizard.wifiScanValid = false;
+        clearWizardWifiChoices();
         wizardPrevPage();
         sWizard.subMode = subModeForPage(getWizardCurrentPage());
         appendPromptTo(out, outSize);
         return CLI_MODE_HANDLED;
       }
       if (lc == "rescan") {
-        WiFi.scanDelete();
-        sWizard.wifiScanValid = false;        // force a fresh scan on the repaint
+        clearWizardWifiChoices();             // force a fresh scan on repaint
         appendPromptTo(out, outSize);  // re-paints scan results
         return CLI_MODE_HANDLED;
       }
       if (lc == "skip" || raw.length() == 0) {
-        WiFi.scanDelete();
-        sWizard.wifiScanValid = false;
+        clearWizardWifiChoices();
         sWizard.result.completed = true;
         snprintf(out, outSize, "WiFi configuration skipped.");
         return CLI_MODE_HANDLED_AND_EXIT;
@@ -702,10 +701,14 @@ static CLIModeInputResult dispatchWiFi(const String& line,
       String ssid = raw;
       int idx = raw.toInt();
       if (idx >= 1 && idx <= sWizard.wifiNamedCount && String(idx) == raw) {
-        ssid = WiFi.SSID(sWizard.wifiNamed[idx - 1]);
+        if (!wifiScanGetNamedSSID(idx - 1, ssid)) {
+          clearWizardWifiChoices();
+          snprintf(out, outSize, "WiFi list expired; scanning again.");
+          appendPromptTo(out, outSize);
+          return CLI_MODE_HANDLED;
+        }
       }
-      WiFi.scanDelete();
-      sWizard.wifiScanValid = false;
+      clearWizardWifiChoices();
       if (ssid.length() == 0) {
         snprintf(out, outSize, "Empty SSID; type a number, an SSID, "
                                "or 'rescan'/'skip'/'b'.");
@@ -772,8 +775,7 @@ static void wizardMode_onEnter(void* /*ud*/) {
   sWizard.result.deviceName = "HardwareOne";
   sWizard.result.timezoneOffset = -240;
   sWizard.result.timezoneAbbrev = "EDT";
-  sWizard.wifiNamedCount    = 0;
-  sWizard.wifiScanValid     = false;
+  clearWizardWifiChoices();
   sWizard.wifiPendingSsid   = "";
   sWizard.espnowConfiguring = false;
 
@@ -805,6 +807,8 @@ extern bool writeSettingsJson();
 extern void applySettings();
 
 static void wizardMode_onExit(void* /*ud*/) {
+  // onExit also covers timeout/session-owner loss and cliExitMode().
+  clearWizardWifiChoices();
   if (sWizard.result.completed) {
     // Apply collected results (mirrors what runAndApplyFeatureWizard does
     // after runSetupWizard returns).
@@ -855,8 +859,8 @@ static void wizardMode_onExit(void* /*ud*/) {
 //   1. OLED joystick polling on devices with a display attached
 //   2. OLED page rendering for the current sub-mode
 //
-// On non-OLED builds this is a no-op. Text input from any transport
-// still flows through wizardMode_onInput via cliModeDispatchInput.
+// On non-OLED builds this is a no-op. Text input from the exact session that
+// opened the wizard flows through wizardMode_onInput via cliModeDispatchInput.
 //
 // Keep this fast -- runs every loop tick. The persistent tick-state
 // (sLastButtons, sLastRendered, ...) is declared at the top of the
@@ -890,10 +894,10 @@ static void wizardMode_onTick(void* /*ud*/) {
     bool hasInput = (newButtons != 0) || nav.up || nav.down || nav.left || nav.right;
 
     if (hasInput) {
+      (void)cliModeNoteActivity();
       // Translate joystick event into wizard state change. Only meaningful
       // on the top-level pages -- sub-pages (ESPNOW / MQTT / WiFi) require
-      // text-entry input which the joystick can't provide. Users on those
-      // pages should drop to serial / web / etc.
+      // text entry which the joystick cannot provide.
       switch (sWizard.subMode) {
         case WizardSubMode::PAGE_FEATURES:
           handleFeaturesInput(newButtons, nav);
@@ -913,9 +917,18 @@ static void wizardMode_onTick(void* /*ud*/) {
           }
           break;
         default:
-          // Sub-page sub-modes -- joystick is not the right input here.
-          // The user can't enter SSIDs or device names with the joystick;
-          // text input via serial/web/BLE is required.
+          // Text-entry sub-pages cannot safely borrow another transport's
+          // login: that would defeat exact-session ownership. Left always
+          // provides a physical escape back to the prior page; to enter text,
+          // cancel and reopen the wizard from a text-capable interface.
+          if (nav.left) {
+            if (sWizard.subMode == WizardSubMode::WIFI_SSID ||
+                sWizard.subMode == WizardSubMode::WIFI_PASSWORD) {
+              clearWizardWifiChoices();
+            }
+            wizardPrevPage();
+            sWizard.subMode = subModeForPage(getWizardCurrentPage());
+          }
           break;
       }
       // Sync our sub-mode to whatever wizardNextPage/Prev changed under us.
@@ -947,6 +960,7 @@ static const CLIMode kWizardMode = {
   wizardMode_onExit,
   wizardMode_onTick,
   nullptr,  // userData lives in sWizard static
+  10u * 60u * 1000u,
 };
 
 // ============================================================================

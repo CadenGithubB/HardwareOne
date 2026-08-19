@@ -206,6 +206,11 @@ static void wizResetAll() {
   sWizCursor = sWizScroll = 0;
 }
 
+void oledAutomationsModeResetSessionState() {
+  wizResetAll();
+  memset(sWizResultMsg, 0, sizeof(sWizResultMsg));
+}
+
 // Open a keyboard step. `numbers` preselects the digits/symbols mode (the mode
 // is not locked — the user can still cycle it — so numeric fields are
 // re-validated on completion).

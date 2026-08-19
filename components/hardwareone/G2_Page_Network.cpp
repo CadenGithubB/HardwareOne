@@ -76,9 +76,20 @@ static inline void setNetSub(NetworkSubMode m) {
 // SSID was at index N. Populated when the user taps "Scan Networks".
 // Capped at 8 — anything beyond that and the user can re-scan after
 // physically moving closer to fewer APs.
-struct CachedAp { String ssid; int rssi; bool secured; };
-static CachedAp gScanCache[8];
+struct CachedAp {
+  char ssid[33];
+  int8_t rssi;
+  bool secured;
+};
+// The result list survives only until the user taps it. Keep its fixed payload
+// in PSRAM so dense/long SSIDs never allocate or retain Arduino String buffers
+// in internal heap after a scan.
+EXT_RAM_BSS_ATTR static CachedAp gScanCache[8];
 static size_t   gScanCacheCount = 0;
+// Empty means the most recent scan completed successfully. A short failure
+// message is kept separately so BUSY/driver failures are not presented as an
+// empty RF environment.
+static char     gScanFailure[32] = {};
 
 // "Pending..." overlay state for the WiFi toggle row.
 //
@@ -104,9 +115,13 @@ static volatile bool     gWifiPendingTaskActive = false;
 // KICKED, but the scan+connect+auth finishes ~5-8 s later with no completion
 // event — so the immediate menu re-render showed "disconnected" and never
 // updated. While pending, showBluetoothR1Menu() renders "Ring: connecting..."
-// and a watchdog polls g2RingIsConnected() until it flips (or the deadline).
+// and a watchdog polls g2RingIsConnected() until it flips. The 12-second
+// deadline is only the command-kick grace: once the unified BLE worker owns
+// the job, the watchdog renews it while g2RingConnectInFlight() remains true,
+// including while a real G2 recording delays the connect.
 static volatile uint32_t gRingPendingDeadlineMs = 0;
 static volatile bool     gRingPendingTaskActive = false;
+static constexpr uint32_t RING_PENDING_HARD_TIMEOUT_MS = 230000;
 
 // -----------------------------------------------------------------------------
 // Info text (used by the CLI direct-invocation path)
@@ -329,7 +344,7 @@ static void showWiFiStatusPage() {
 #endif
 }
 
-// Fallback while WiFi.scanNetworks runs: back-pane list when the Even-AI
+// Fallback while the coordinated WiFi scan runs: back-pane list when the Even-AI
 // front card could not be opened (e.g. CTRL ENTER error 7). Primary path
 // is g2ShowEvenAIReplyNoAsk("Scanning networks...") in runNetworkScanFlow.
 static void showWiFiScanningPlaceholder() {
@@ -355,15 +370,17 @@ static void showScanResults() {
   size_t n = 1;
   for (size_t i = 0; i < gScanCacheCount && i < 8; i++) {
     snprintf(rows[1 + i], sizeof(rows[1 + i]),
-             "%s %s %ddBm",
+             "%s %.32s %ddBm",
              gScanCache[i].secured ? "L" : " ",
-             gScanCache[i].ssid.length() > 0
-                 ? gScanCache[i].ssid.c_str() : "<hidden>",
+             gScanCache[i].ssid[0] ? gScanCache[i].ssid : "<hidden>",
              gScanCache[i].rssi);
     ptrs[n++] = rows[1 + i];
   }
   if (n == 1) {
-    static const char* empty[] = { "<- WiFi", "(no networks found)" };
+    const char* empty[] = {
+      "<- WiFi",
+      gScanFailure[0] ? gScanFailure : "(no networks found)",
+    };
     g2ShowListPage(empty, 2);
   } else {
     g2ShowListPage(ptrs, n);
@@ -525,6 +542,16 @@ static void showEspNowDevices() {
 // G2-specific rows (mode/conn, boot AutoReconnect, saved-MAC reconnect,
 // disconnect) live here so the parent Bluetooth list stays short. Parent
 // keeps BLE on/off, Auto Start, and R1 ring rows only.
+static bool bluetoothClientRoleForUi() {
+  const bool serverUp = isBleServerInitialized();
+  const bool clientUp = isG2ClientInitialized();
+  // Runtime ownership wins while exactly one role is initialized. Persisted
+  // mode is only the role to start when neither role is live (and a fallback
+  // for the invariant-violation case where both claim ownership).
+  if (serverUp != clientUp) return clientUp;
+  return gSettings.bleMode == BLE_MODE_G2_CLIENT;
+}
+
 static void showBluetoothG2Menu() {
   setNetSub(NET_SUB_BLUETOOTH_G2);
   static char connLine[40];
@@ -534,7 +561,7 @@ static void showBluetoothG2Menu() {
   // Bluetooth menu as a toggle 2026-05-09 so the user can flip
   // server↔client without drilling through G2-specific controls. The
   // G2 submenu now stays focused on G2-specific actions only.
-  const bool active = bleSubsystemActive();
+  const bool active = isG2ClientInitialized();
   if (active) {
     snprintf(connLine, sizeof(connLine), "Conn: %s",
              isG2Connected() ? "yes" : "no");
@@ -542,7 +569,7 @@ static void showBluetoothG2Menu() {
     snprintf(connLine, sizeof(connLine), "BLE: stopped");
   }
   snprintf(autoReconnLine, sizeof(autoReconnLine), "G2 AutoReconnect: %s",
-           gBlePeerData[BLE_PEER_G2_GLASSES].autoReconnect ? "ON" : "OFF");
+           blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES) ? "ON" : "OFF");
 
   if (active) {
     const char* items[] = {
@@ -573,7 +600,7 @@ static void showBluetoothR1Menu() {
   static char connLine[40];
   static char autoReconnLine[44];
 
-  const bool active = bleSubsystemActive();
+  const bool active = isG2ClientInitialized();
   const bool ringUp = g2RingIsConnected();
   // "connecting..." while a fresh connect is in flight (async, no completion
   // event) so the user gets feedback instead of a stale "disconnected".
@@ -586,7 +613,7 @@ static void showBluetoothR1Menu() {
     snprintf(connLine, sizeof(connLine), "BLE: stopped");
   }
   snprintf(autoReconnLine, sizeof(autoReconnLine), "R1 AutoReconnect: %s",
-           gBlePeerData[BLE_PEER_R1_RING].autoReconnect ? "ON" : "OFF");
+           blePeerAutoReconnectEnabled(BLE_PEER_R1_RING) ? "ON" : "OFF");
 
   if (active) {
     if (ringUp) {
@@ -632,9 +659,9 @@ static void showBluetoothMenu() {
   // Without this, viewing the menu from the lens (which means G2 client
   // is connected) showed "BLE: OFF" — confusing and wrong.
   const bool active   = bleSubsystemActive();
-  const bool isClient = (gSettings.bleMode == BLE_MODE_G2_CLIENT);
+  const bool isClient = bluetoothClientRoleForUi();
   const bool clientUp = isG2ClientInitialized();
-  const bool serverUp = isBLERunning();
+  const bool serverUp = isBleServerInitialized();
   snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
            gSettings.bleAutoStart ? "ON" : "OFF");
   // Per-mode "connected" semantics: server cares about phone connection,
@@ -732,8 +759,8 @@ static void showBluetoothMenu() {
 
 #if ENABLE_WIFI
 // Only one scan flow at a time: each tap used to spawn another `g2_net_scan`
-// task. Two workers interleave WiFi.scanNetworks (not safe concurrently),
-// gScanCache String writes, and EvenAI ENTER/ANALYSE/REPLY/HIDE — that
+// task. Two workers used to interleave uncoordinated scans,
+// gScanCache writes, and EvenAI ENTER/ANALYSE/REPLY/HIDE — that
 // produced empty results, missing "Scanning..." cards, and (under load)
 // heap asserts (tlsf double-free) in field logs.
 static portMUX_TYPE s_netScanMux = portMUX_INITIALIZER_UNLOCKED;
@@ -743,6 +770,17 @@ static void netScanMarkFinished(void) {
   portENTER_CRITICAL(&s_netScanMux);
   s_netScanRunning = false;
   portEXIT_CRITICAL(&s_netScanMux);
+}
+
+static bool cacheG2ScanRecord(const WifiScanRecord& record,
+                              uint16_t /*index*/, uint16_t /*total*/,
+                              void* /*context*/) {
+  if (gScanCacheCount >= 8) return false;
+  CachedAp& cached = gScanCache[gScanCacheCount++];
+  strlcpy(cached.ssid, record.ssid, sizeof(cached.ssid));
+  cached.rssi = record.rssi;
+  cached.secured = record.authMode != WIFI_AUTH_OPEN;
+  return gScanCacheCount < 8;
 }
 
 // Body of the scan flow — split out from the FreeRTOS task entry so the
@@ -770,22 +808,29 @@ static void runNetworkScanFlow() {
     showWiFiScanningPlaceholder();
   }
 
-  // 3. Run the synchronous scan. Hidden=true so we capture every SSID
-  //    in range even if the AP isn't broadcasting; the user picks
-  //    from the result list afterwards.
-  int n = WiFi.scanNetworks(/*async*/ false, /*hidden*/ true);
-  if (n < 0) n = 0;
+  // 3. Run the coordinated synchronous scan. Hidden=true preserves the old
+  //    raw-order behavior: hidden entries count toward the first-eight cap and
+  //    appear as "<hidden>" in the result list. An OK coordinator result has
+  //    released the driver's scan records; a cleanup failure is non-OK and the
+  //    copied prefix is discarded below.
+  memset(gScanCache, 0, sizeof(gScanCache));
   gScanCacheCount = 0;
-  for (int i = 0; i < n && gScanCacheCount < 8; i++) {
-    gScanCache[gScanCacheCount].ssid    = WiFi.SSID(i);
-    gScanCache[gScanCacheCount].rssi    = WiFi.RSSI(i);
-    gScanCache[gScanCacheCount].secured = (WiFi.encryptionType(i)
-                                           != WIFI_AUTH_OPEN);
-    gScanCacheCount++;
+  gScanFailure[0] = '\0';
+  const WifiScanResult result = wifiScanForEach(
+      /*includeHidden=*/true, cacheG2ScanRecord, nullptr,
+      /*acquireTimeoutMs=*/0);
+  if (!result.ok()) {
+    // A mid-drain driver failure is not a successful partial scan. Discard the
+    // copied prefix so the page cannot present stale/incomplete AP choices.
+    memset(gScanCache, 0, sizeof(gScanCache));
+    gScanCacheCount = 0;
+    const char* status = wifiScanStatusText(result.status);
+    snprintf(gScanFailure, sizeof(gScanFailure), "(scan %s; retry)", status);
+    DEBUG_G2F("[G2] Network: scan failed (%s, driver=%ld)", status,
+              (long)result.driverError);
   }
-  WiFi.scanDelete();
-  DEBUG_G2F("[G2] Network: scan finished, cached %u APs",
-            (unsigned)gScanCacheCount);
+  DEBUG_G2F("[G2] Network: scan finished, cached %u/%u APs",
+            (unsigned)gScanCacheCount, (unsigned)result.found);
 
   // 4. Dismiss the front-pane card explicitly so it disappears the
   //    moment the back-pane swap happens, rather than lingering for
@@ -812,9 +857,10 @@ static void spawnNetworkScanWorker() {
   s_netScanRunning = true;
   portEXIT_CRITICAL(&s_netScanMux);
 
-  // 4 KB stack: WiFi.scanNetworks itself uses ~1 KB, EvenAI builders
+  // 4 KB stack: the blocking scan path uses ~1 KB, EvenAI builders
   // need ~400 B for the pb buffer, plus FreeRTOS overhead. Same budget
   // as the AI test worker.
+  taskStackRecord("g2_net_scan", 4096);
   if (xTaskCreatePinnedToCore(networkScanWorker, "g2_net_scan", 4096, nullptr,
                   /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] Network: scan worker xTaskCreate failed — "
@@ -1022,15 +1068,18 @@ static void onBluetoothG2MenuRefreshDone(bool ok,
 
 // Watchdog for the R1 ring connect — mirror of wifiPendingWatchdogTask. Polls
 // g2RingIsConnected() every 500 ms and re-renders the R1 submenu the moment the
-// ring actually connects (scan+connect+auth completes well after `ringconnect`
-// returns OK), or once more when the deadline expires so "connecting..." drops
-// back to "disconnected" instead of getting stuck. Runs on its own task (the
-// poll yields with vTaskDelay); g2ShowListPage off the tap dispatcher is fine —
-// the BLE write path is mutex-guarded (same rationale as the WiFi watchdog).
+// ring actually connects. After the initial command-kick grace it follows the
+// worker's in-flight flag, so a job queued behind a real recording does not
+// falsely revert to "disconnected". A 230 s hard bound prevents a wedged worker
+// from pinning the overlay forever. Runs on its own task (the poll yields with
+// vTaskDelay); g2ShowListPage off the tap dispatcher is fine — the BLE write
+// path is mutex-guarded (same rationale as the WiFi watchdog).
 static void ringPendingWatchdogTask(void* /*arg*/) {
   bool rerendered = false;
-  while (gRingPendingDeadlineMs > 0 &&
-         (int32_t)(millis() - gRingPendingDeadlineMs) < 0) {
+  bool sawWorkerInFlight = false;
+  const uint32_t watchdogStartedMs = millis();
+  while ((uint32_t)(millis() - watchdogStartedMs) <
+         RING_PENDING_HARD_TIMEOUT_MS) {
     vTaskDelay(pdMS_TO_TICKS(500));
     if (g2RingIsConnected()) {
       gRingPendingDeadlineMs = 0;
@@ -1039,6 +1088,17 @@ static void ringPendingWatchdogTask(void* /*arg*/) {
       if (gNetSub == NET_SUB_BLUETOOTH_R1) { showBluetoothR1Menu(); rerendered = true; }
       break;
     }
+    if (g2RingConnectInFlight()) {
+      sawWorkerInFlight = true;
+      // Keep the renderer's simple, rollover-safe deadline predicate true
+      // while the worker owns the job. Hard-timeout cleanup below writes zero.
+      gRingPendingDeadlineMs = millis() + 1000u;
+      continue;
+    }
+    if (sawWorkerInFlight) break;  // completed unsuccessfully; repaint now
+    const bool kickoffPending = gRingPendingDeadlineMs > 0 &&
+                                (int32_t)(millis() - gRingPendingDeadlineMs) < 0;
+    if (!kickoffPending) break;
   }
   if (!rerendered && gNetSub == NET_SUB_BLUETOOTH_R1) {
     gRingPendingDeadlineMs = 0;
@@ -1131,6 +1191,7 @@ static void handleWiFiTap(uint32_t idx) {
           // Watchdog only when the kick actually queued — only one alive
           // at a time; subsequent taps re-arm gWifiPendingDeadlineMs.
           gWifiPendingTaskActive = true;
+          taskStackRecord("g2_wifi_pending", 4096);
           if (xTaskCreatePinnedToCore(wifiPendingWatchdogTask, "g2_wifi_pending",
                           4096, nullptr, /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
             DEBUG_G2F("[G2] WiFi pending: xTaskCreate failed — "
@@ -1296,14 +1357,14 @@ static void handleWiFiScanTap(uint32_t idx) {
   // Hidden APs scan with an empty SSID — nothing to add. An SSID containing a
   // double-quote can't survive the quoted command line (CommandArgs has no
   // escape support) — refuse rather than mangle it.
-  if (ap.ssid.length() == 0 || ap.ssid.indexOf('"') >= 0) {
+  if (ap.ssid[0] == '\0' || strchr(ap.ssid, '"') != nullptr) {
     DEBUG_G2F("[G2] WiFi: tapped hidden/unquotable SSID — ignored");
     return;
   }
   // Snapshot at tap time: the keyboard overlay blocks page taps but NOT the
   // scan worker, so this gScanCache entry can be rewritten while the
   // keyboard is open.
-  strncpy(sWifiAddSsid, ap.ssid.c_str(), sizeof(sWifiAddSsid) - 1);
+  strncpy(sWifiAddSsid, ap.ssid, sizeof(sWifiAddSsid) - 1);
   sWifiAddSsid[sizeof(sWifiAddSsid) - 1] = '\0';
   if (!ap.secured) {
     DEBUG_G2F("[G2] WiFi: open AP '%s' — saving without password", sWifiAddSsid);
@@ -1364,6 +1425,7 @@ static void handleWiFiSavedActionTap(uint32_t idx) {
       showWiFiMenu();
     } else if (!gWifiPendingTaskActive) {
       gWifiPendingTaskActive = true;
+      taskStackRecord("g2_wifi_pending", 4096);
       if (xTaskCreatePinnedToCore(wifiPendingWatchdogTask, "g2_wifi_pending",
                       4096, nullptr, /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
         gWifiPendingTaskActive = false;
@@ -1532,7 +1594,7 @@ static void handleBluetoothG2Tap(uint32_t idx) {
   // Layout (after 2026-05-09 Mode-row promotion to parent menu):
   //   active:    0=Back 1=Conn(info) 2=AutoReconnect 3=Reconnect 4=Disconnect
   //   inactive:  0=Back 1=BLE-stopped(info) 2=AutoReconnect
-  const bool active = bleSubsystemActive();
+  const bool active = isG2ClientInitialized();
   if (idx == 0) {
     showBluetoothMenu();
     return;
@@ -1550,7 +1612,7 @@ static void handleBluetoothG2Tap(uint32_t idx) {
     // ON from a freshly-paired set — which is fine, since the very first
     // flip would have come from a real admin via the web UI or CLI to
     // pair them in the first place.
-    const bool prev = gBlePeerData[BLE_PEER_G2_GLASSES].autoReconnect;
+    const bool prev = blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES);
     const char* arg = prev ? "off" : "on";
     char line[64];
     snprintf(line, sizeof(line), "bleautoreconnect g2-glasses %s", arg);
@@ -1610,7 +1672,7 @@ static void handleBluetoothR1Tap(uint32_t idx) {
   //   active+ringUp:    0=Back 1=Conn 2=AutoReconnect 3=Reconnect 4=Disconnect
   //   active+ringDown:  0=Back 1=Conn 2=AutoReconnect 3=Connect
   //   inactive:         0=Back 1=BLE-stopped 2=AutoReconnect
-  const bool active = bleSubsystemActive();
+  const bool active = isG2ClientInitialized();
   const bool ringUp = g2RingIsConnected();
   if (idx == 0) {
     showBluetoothMenu();
@@ -1623,7 +1685,7 @@ static void handleBluetoothR1Tap(uint32_t idx) {
   if (idx == 2) {
     // R1 AutoReconnect — same cmd_exec pattern as G2 AutoReconnect, just
     // targeting the r1-ring peer instead of g2-glasses.
-    const bool prev = gBlePeerData[BLE_PEER_R1_RING].autoReconnect;
+    const bool prev = blePeerAutoReconnectEnabled(BLE_PEER_R1_RING);
     const char* arg = prev ? "off" : "on";
     char line[64];
     snprintf(line, sizeof(line), "bleautoreconnect r1-ring %s", arg);
@@ -1669,6 +1731,7 @@ static void handleBluetoothR1Tap(uint32_t idx) {
       if (!ringUp) showBluetoothR1Menu();
     } else if (!ringUp && !gRingPendingTaskActive) {
       gRingPendingTaskActive = true;
+      taskStackRecord("g2_ring_pending", 4096);
       if (xTaskCreatePinnedToCore(ringPendingWatchdogTask, "g2_ring_pending",
                       4096, nullptr, /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
         DEBUG_G2F("[G2] Ring pending: xTaskCreate failed — menu won't auto-refresh on connect");
@@ -1702,12 +1765,12 @@ static void handleBluetoothTap(uint32_t idx) {
   //   inactive + server:         0=Back 1=BLE 2=Mode 3=Auto
   //   inactive + client:         0=Back 1=BLE 2=Mode 3=G2>> 4=R1>> 5=Auto
   const bool active   = bleSubsystemActive();
-  const bool isClient = (gSettings.bleMode == BLE_MODE_G2_CLIENT);
+  const bool isClient = bluetoothClientRoleForUi();
   if (idx == 0) { g2ShowNetworkMenu(); return; }
 
   if (idx == 1) {  // toggle — mode-aware, routed via cmd_exec
     // Map (mode, active) → CLI command name:
-    //   client + active   → closeg2   (yanks the lens out from under the user)
+    //   client + active   → g2deinit  (yanks the lens out from under the user)
     //   client + !active  → openg2
     //   server + active   → closeble
     //   server + !active  → openble
@@ -1716,7 +1779,7 @@ static void handleBluetoothTap(uint32_t idx) {
     // lens disconnected and the redraw will skip silently in
     // g2EnqueueLensJob, which is fine.
     const char* line;
-    if (active) line = isClient ? "closeg2" : "closeble";
+    if (active) line = isClient ? "g2deinit" : "closeble";
     else        line = isClient ? "openg2"  : "openble";
 
     G2CmdCookie cookie{};

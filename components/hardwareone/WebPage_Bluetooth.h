@@ -1047,7 +1047,10 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       });
 
       bind('btn-g2-nav', function(){
-        // g2nav with no arg toggles — we mirror the state locally and let the
+        // Always send an explicit on/off — never a bare `g2nav`. Bare is a
+        // READ (cmd_g2nav in G2_Glasses.cpp only assigns on "on"/"off"/"toggle",
+        // otherwise it just returns current state), which is why page-load uses
+        // it below to populate the buttons. Mirror optimistically, then let the
         // response text confirm.
         navState = !navState;
         updateToggle('btn-g2-nav', navState);

@@ -241,6 +241,10 @@ struct LLMRuntime {
   // every load/unload; populated by loadInfoBlockFromFile() when present. Fixed
   // storage — llmModelDescription()/llmModelIcon() hand out zero-copy pointers.
   char    modelDesc[256];   // NUL-terminated UTF-8 description ("" if none)
+  // Capabilities the MODEL declares about itself (CAPS section, id 5). Zero when
+  // the section is absent, malformed, or carries an unrecognised version --
+  // i.e. a model that does not say it is capable is treated as not capable.
+  uint16_t modelCaps;
   uint8_t modelIcon[128];   // 1bpp MSB-first, row-major; up to 32x32
   uint8_t modelIconW;       // icon width in pixels (0 if no icon)
   uint8_t modelIconH;       // icon height in pixels (0 if no icon)

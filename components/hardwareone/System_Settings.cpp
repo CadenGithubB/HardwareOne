@@ -22,6 +22,7 @@
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() — Stage 1 consolidation
 #include "System_SensorLogging.h"  // gSensorLogMask / gSensorLogFormat sync from settings editors
 #include "System_UartLink.h"       // uartLinkStart/Stop/StatusLine — cmd_uartlink live apply
+#include "System_User.h"           // rotate transport generations on auth-policy changes
 #include <LittleFS.h>
 #include "System_VFS.h"      // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <esp_system.h>
@@ -745,9 +746,9 @@ static constexpr DebugFlagMapping kDebugMappings[] = {
 #undef DBG_MAP_ROW_0
 static constexpr size_t kDebugMappingCount = sizeof(kDebugMappings) / sizeof(kDebugMappings[0]);
 
-// 117 = 116 settings-bearing flag rows + 1 extra; the ALWAYS control row
+// 128 = 127 settings-bearing flag rows + 1 extra; the ALWAYS control row
 // contributes nothing. Row-for-row the hand table this replaces.
-static_assert(kDebugMappingCount == 117,
+static_assert(kDebugMappingCount == 128,
               "settings→flag map row count changed — reconcile the settingsField column and DBG_FLAG_EXTRA_SETTINGS");
 
 // Two rows mapping one Settings field means a transposed settingsField
@@ -1753,14 +1754,14 @@ const char* cmd_httpsEnabled(const String& argsInput) {
 // debug.json keys.
 //
 // Deliberately unconditional (zero conditional compilation inside generated
-// tables): the former ENABLE_ONDEVICE_LLM and ENABLE_BLUETOOTH+ENABLE_G2_GLASSES
+// tables): the former ENABLE_LLM_BACKEND and ENABLE_BLUETOOTH+ENABLE_G2_GLASSES
 // gates around the llm and g2 groups are gone, so gated-off builds carry their
 // 13 keys as inert-but-present settings — plan-sanctioned
 // (docs/DEBUG_FLAG_XMACRO_PLAN.md §3), and one green build proves the whole
 // registry.
 //
 // intDefault is the constant 0 for every generated row — the C2 defaults audit
-// found registry-0 is the effective persisted default for all 156 bools
+// found registry-0 is the effective persisted default for all 159 bools
 // (applyRegisteredDefaults() stomps every field with the registry default at
 // each boot before debug.json loads). The one dissenter, debugStoragePermissions'
 // NSDMI {true} (System_Settings.h), already loses to the registry every boot
@@ -1845,6 +1846,10 @@ static constexpr SettingEntry debugSettingEntries[] = {
   DBG_ROW(BLUETOOTH_CORE),
   DBG_ROW(BLUETOOTH_GATT),
   DBG_ROW(BLUETOOTH_DATA),
+  // --- uart group ---
+  DBG_ROW(UART),
+  DBG_ROW(UART_LIFECYCLE),
+  DBG_ROW(UART_CONTROL),
   // --- system group ---
   DBG_ROW(SYSTEM),
   DBG_SUBROW(SYSTEM_BOOT),
@@ -1986,6 +1991,15 @@ static constexpr SettingEntry debugSettingEntries[] = {
   DBG_ROW(G2_PAGES),
   DBG_ROW(G2_HEARTBEAT),
   DBG_ROW(G2_DUMP),
+  // --- ring group (Even Realities R1 health ring) ---
+  DBG_ROW(RING),
+  DBG_ROW(RING_LIFECYCLE),
+  DBG_ROW(RING_SETUP),
+  DBG_ROW(RING_PROTOCOL),
+  DBG_ROW(RING_TXN),
+  DBG_ROW(RING_HEALTH),
+  DBG_ROW(RING_BRIDGE),
+  DBG_ROW(RING_DUMP),
   // --- espsr group (ESP-SR speech recognition) ---
   DBG_ROW(SR),
   DBG_ROW(SR_WAKE),
@@ -2015,7 +2029,7 @@ static constexpr SettingEntry debugSettingEntries[] = {
 #undef DBG_SUBROW
 #undef DBG_ROW
 
-// Row accounting, pinned: 159 = 116 flag-backed + 40 bitless-sub + 3 hand rows.
+// Row accounting, pinned: 162 = 119 flag-backed + 40 bitless-sub + 3 hand rows.
 static constexpr size_t kDbgRegGeneratedRows = (DBG_FLAG_COUNT - 1) + DBG_SUBBOOL_COUNT;  // ALWAYS emits no row
 static constexpr size_t kDbgRegHandRows = 3;  // memorysampleintervalsec, webconsole, loglevel
 static_assert(sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0])
@@ -2144,18 +2158,32 @@ static const SettingEntry* findOutputEntry(const char* key) {
 
 const char* cmd_serialrequireauth(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return handleSettingCommand(findOutputEntry("serialRequireAuth"), a);
+  const bool before = gSettings.serialRequireAuth;
+  const char* result =
+      handleSettingCommand(findOutputEntry("serialRequireAuth"), a);
+  if (gSettings.serialRequireAuth != before)
+    serialTransportAuthPolicyChanged();
+  return result;
 }
 
 const char* cmd_displayrequireauth(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return handleSettingCommand(findOutputEntry("displayRequireAuth"), a);
+  const bool before = gSettings.localDisplayRequireAuth;
+  const char* result =
+      handleSettingCommand(findOutputEntry("displayRequireAuth"), a);
+  if (gSettings.localDisplayRequireAuth != before)
+    localDisplayTransportAuthPolicyChanged();
+  return result;
 }
 
 #ifdef UART_LINK_PORT
 const char* cmd_uartrequireauth(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return handleSettingCommand(findOutputEntry("uartRequireAuth"), a);
+  const bool before = gSettings.uartRequireAuth;
+  const char* result =
+      handleSettingCommand(findOutputEntry("uartRequireAuth"), a);
+  if (gSettings.uartRequireAuth != before) uartLinkAuthPolicyChanged();
+  return result;
 }
 
 // UART host link control: status (no args) / on / off. Persists via the
@@ -2433,7 +2461,7 @@ void registerAllSettingsModules() {
   extern const SettingsModule notifSettingsModule;
   registerSettingsModule(&notifSettingsModule);
 
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND   // the FEATURE, not the engine: a CM5-only build still has these
   extern const SettingsModule llmSettingsModule;
   registerSettingsModule(&llmSettingsModule);
 #endif
@@ -3082,6 +3110,7 @@ SETTING_EDITOR_CMD(cmd_set_notifydevicebanners,        "notifydevicebanners")
 SETTING_EDITOR_CMD(cmd_set_notifydevicetoasts,         "notifydevicetoasts")
 SETTING_EDITOR_CMD(cmd_set_notifydevicequeue,          "notifydevicequeue")
 SETTING_EDITOR_CMD(cmd_set_notifydeviceg2,             "notifydeviceg2")
+SETTING_EDITOR_CMD(cmd_set_notifydeviceapp,            "notifydeviceapp")
 // ESP-NOW frame capture. Both settings are READ by the capture path
 // (System_ESPNow.cpp:5813) but nothing ever wrote them: their SettingEntry rows
 // named these commands and the commands were never added, so the feature could
@@ -3172,6 +3201,8 @@ const CommandEntry settingEditorCommands[] = {
   { "notifydevicetoasts",         "Enable/disable web notification toasts",     true, cmd_set_notifydevicetoasts,         "Usage: notifydevicetoasts <0|1>" },
   { "notifydevicequeue",          "Enable/disable the notification-center queue", true, cmd_set_notifydevicequeue,        "Usage: notifydevicequeue <0|1>" },
   { "notifydeviceg2",             "Enable/disable G2 lens notification cards",  true, cmd_set_notifydeviceg2,             "Usage: notifydeviceg2 <0|1>" },
+  { "notifydeviceapp",            "Enable/disable Android app notification cards", true, cmd_set_notifydeviceapp,
+    "Usage: notifydeviceapp <0|1>\n  Cards go only to BLE sessions that are logged in; an unauthenticated app sees none." },
   { "espnowcapturetosd",          "Capture ESP-NOW frames to the SD card",      true, cmd_set_espnowcapturetosd,          "Usage: espnowcapturetosd <0|1>\n  Needs an SD card mounted; frames are appended as they arrive." },
   { "espnowcaptureskipheartbeats", "Omit heartbeat frames from the ESP-NOW capture", true, cmd_set_espnowcaptureskipheartbeats, "Usage: espnowcaptureskipheartbeats <0|1>" },
   { "wifienabled", "Enable/disable WiFi entirely (ESP-NOW unaffected): <0|1>", true, cmd_set_wifienabled, "Usage: wifienabled <0|1>" },

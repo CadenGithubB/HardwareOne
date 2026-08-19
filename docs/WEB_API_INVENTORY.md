@@ -1765,7 +1765,7 @@ Read the cached schema file from disk. The schema describes the structure of the
 - **Parameters:** _none_
 - **Request body:** none
 - **Response:** application/json (the cached schema file). Returns the raw JSON the peer emitted, byte-for-byte, from the cache at /system/espnow/peers/<MAC>/schema.json. On error: {"error":"<reason>"}.
-- **Observations:** Read-only — does NOT trigger a sync. Just reads the on-disk cache file via BondedPeer::readCachedSchemaJson(). If cache is missing or unreadable, returns error object with message from BondedPeer::lastError(). The schema JSON is the peer's native schema structure (not wrapped). No pagination; schema files are small (~8 KB typical).
+- **Observations:** Read-only — does NOT trigger a sync. Just reads the on-disk cache file via BondedPeer::readCachedSchemaJson(). If cache is missing or unreadable, returns error object with message from BondedPeer::lastError(). The schema JSON is the peer's native schema structure (not wrapped). No pagination. Schema size is board-dependent (see /api/settings/schema notes); it is NOT ~8 KB.
 
 <a id="post-api-bond-settings-schema-sync"></a>
 
@@ -1779,7 +1779,7 @@ Force a fresh pull of the peer's settings schema (form field definitions). Reset
 - **Parameters:** _none_
 - **Request body:** none
 - **Response:** application/json. On success: {"ok":true,"elapsedMs":<N>}. On error: {"ok":false,"error":"<reason>"}.
-- **Observations:** Master-only (implicit via BondedPeer::requestSchemaSync()). No params — always triggers a full schema resync. Synchronous HTTP handler that blocks while waiting for file transfer. ~1-2s typical transfer time covered by 6s timeout. Error strings come from BondedPeer layer. Schema transport uses V4 file pipeline (same as settings) because schema is ~8 KB and the unified-command buffer caps at 4 KB.
+- **Observations:** Master-only (implicit via BondedPeer::requestSchemaSync()). No params — always triggers a full schema resync. Synchronous HTTP handler that blocks while waiting for file transfer. ~1-2s typical transfer time covered by 6s timeout. Error strings come from BondedPeer layer. Schema transport uses V4 file pipeline (same as settings) because the schema far exceeds the 4 KB unified-command buffer cap.
 
 <a id="get-api-bond-settings"></a>
 

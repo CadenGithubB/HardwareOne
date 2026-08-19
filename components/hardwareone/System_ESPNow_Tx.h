@@ -93,12 +93,14 @@
 //
 // Callers that genuinely need synchronous "did this leave the box?" semantics
 // have submitSync() (and the sendAeadSync() helper) below — the dispatcher wakes
-// the caller with the wire result via xTaskNotify. CMD_RESP already sends this
+// the caller through a per-job completion object. CMD_RESP already sends this
 // way. Note the constraint that comes with it: sync callers must not be on
 // espnow_task, since blocking there stalls the RX drain.
 // ============================================================================
 
 namespace espnowtx {
+
+struct SyncCompletion;
 
 enum JobKind : uint8_t {
   JOB_AEAD_SMART = 0,    // -> v4_send_payload_smart  (encrypted, auto-session)
@@ -117,17 +119,23 @@ struct Job {
   uint8_t* payload;      // heap-allocated (prefer PSRAM); tx task takes
                          // ownership and free()s after send. May be nullptr
                          // if payloadLen == 0.
-  TaskHandle_t notifyTask; // INTERNAL — set by submitSync() to the caller's
-                         // task handle so the dispatcher can wake it with the
-                         // result. Leave nullptr for fire-and-forget submit().
-                         // Zero-initialize the Job (`Job j = {};`) and this is
-                         // correctly null.
+  SyncCompletion* completion; // INTERNAL — owned jointly by submitSync() and
+                         // the dispatcher. Leave nullptr for fire-and-forget
+                         // submit(). Zero-initialize the Job (`Job j = {};`).
 };
 
 // One-time init. Creates the job queue and spawns espnow_tx task. Call
 // AFTER ESP-NOW is initialized but BEFORE any task that might submit().
 // Returns true if already initialized.
 bool init();
+
+// Stop accepting jobs, fail and retire every queued job, join the dispatcher,
+// and release its queue/task/completion resources. A job already executing is
+// allowed to finish; stop() waits for it. Accepted synchronous jobs are woken
+// with failure. Returns false if the dispatcher did not quiesce within the
+// timeout; in that case resources remain intact and a later stop() can retry.
+// After a successful stop(), init() may be called again.
+bool stop(uint32_t timeoutMs);
 
 // Enqueue a job. Non-blocking: returns false immediately if the queue is
 // full. On false, the CALLER retains ownership of job.payload (must free
@@ -145,22 +153,22 @@ bool submit(const Job& job);
 // caller blocks here instead of dropping, so a burst producer throttles to
 // the dispatcher's drain rate.
 //
-// Mechanism: the job carries the caller's TaskHandle; after the send the
-// dispatcher wakes it via xTaskNotify (result in the notification value).
-// No shared heap object, so a timeout cannot cause a use-after-free.
+// Mechanism: the job carries a slot from a lifecycle-owned completion pool.
+// Each slot has a private EventGroup bit and explicit caller/dispatcher
+// ownership. A timeout marks the caller gone; the dispatcher retires the slot
+// later, so completion never touches a task handle or satisfies a future call.
 //
 // DEADLOCK RULE: never call submitSync() while holding the session seal /
 // rekey lock — the dispatcher needs that lock to send. Handshake/crypto sends
 // must use fire-and-forget submit() instead.
 //
-// CAVEAT (one notification slot on this build): the calling task's task-
-// notification value must be otherwise unused for the duration of the call.
-// Our sync callers (cmd_exec, file-tx) drive their queues via xQueueReceive,
-// not notifications, so this holds. submitSync clears any stale notification
-// before waiting.
-//
 // OWNERSHIP: submitSync takes ownership of job.payload and frees it on EVERY
 // path (success, enqueue failure, or wait timeout). The caller must not free it.
+//
+// CALLER LIFETIME: the calling task must remain alive until submitSync returns.
+// A task that is externally force-deleted while blocked cannot release its
+// completion slot. The dispatcher will retain the lifecycle safely (no stale
+// task notification or UAF), and stop() will fail rather than free that slot.
 //
 // Safe to call from any task except an ISR. Must NOT be called from the
 // espnow_tx dispatcher task itself (would self-deadlock).
@@ -208,9 +216,11 @@ struct Stats {
 };
 void getStats(Stats* out);
 
-// Optional accessor — currently used only by reportAllTaskStacks() to include
-// espnow_tx in the periodic stack-usage report. Returns nullptr until init().
-TaskHandle_t getTaskHandle();
+// Atomically sample the task handle and stack high-water mark while holding the
+// stable lifecycle-owner mutex, so stop() cannot delete the task between handle
+// lookup and the FreeRTOS query. The returned handle is an opaque snapshot key
+// only; callers must not dereference it or issue later task API calls with it.
+bool getTaskStackSnapshot(TaskHandle_t* outHandle, UBaseType_t* outWatermark);
 
 }  // namespace espnowtx
 

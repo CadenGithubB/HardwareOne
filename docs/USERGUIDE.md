@@ -180,7 +180,7 @@ The main menu mirrors the OLED's six categories:
 | Category | Rows |
 | -------- | ---- |
 | **System** | Status, System Events, Logging, Tests |
-| **Config** | Settings, Users (admin only), OLED Login |
+| **Config** | Settings, Users (admin only) |
 | **Connect** | WiFi >>, Bluetooth >>, ESP-NOW >> |
 | **Hardware** | Sensor list (one row per compiled sensor), LED, FM tuner |
 | **Apps** | ESP-NOW, Files, Maps, LLM, Automations, Health, Pet |
@@ -217,7 +217,7 @@ Pair the ring under Connect -> Bluetooth. The same vitals appear on the OLED
 
 ### Text entry
 
-Pages that need input (WiFi join, file rename, login) open an on-lens keyboard.
+Pages that need input (WiFi join and file rename) open an on-lens keyboard.
 Two things to know: it deliberately has **no double-quote key**, and a
 pre-filled value longer than 32 characters is silently truncated.
 
@@ -247,7 +247,7 @@ are what comparisons use.
 
 | Role | Rank | Can do |
 | ---- | :--: | ------ |
-| `guest` | 0 | Authenticated but view-only. `login` / `logout` only for commands; filesystem access is masked to read |
+| `guest` | 0 | A real, named account with view-only authorization. It may use caller-local `login`, `logout`, and `whoami`; filesystem access is masked to read |
 | `user` | 1 | Ordinary commands; not admin-gated ones |
 | `admin` | 2 | Admin commands - user management, most settings, device control |
 | `superadmin` | 3 | Additionally the identity / crypto / destructive / auth-posture command set |
@@ -257,6 +257,7 @@ Rules that hold everywhere:
 - **You cannot grant a role above your own.** Granting or removing `superadmin` requires a super-admin caller.
 - A command marked super-admin-only is refused for an ordinary admin - `blerequireauth`, `serialrequireauth`, and `displayrequireauth` are examples, since they change whether the device demands a login at all.
 - An unrecognised role name collapses to `user`.
+- The stored `guest` role is not a username and is not the internal `AuthBypass` sentinel. `AuthBypass` appears only when a transport's require-auth policy is disabled; it is not an account and never grants cross-transport session control.
 
 Set roles with `useradd ... [role]`, `userpromote`, and `userdemote` - see the
 [users command block](#command-reference).
@@ -265,6 +266,25 @@ Set roles with `useradd ... [role]`, `userpromote`, and `userdemote` - see the
 
 Each way in has its own switch for whether a login is required, and its own
 idle-logout timer. All the `*requireauth` switches are super-admin-only.
+
+`login`, `logout`, and `whoami` are caller-relative by default: a bare command
+always acts on the Serial, UART, BLE, or OLED interface that submitted it. A
+named, non-Guest account already signed in on Serial, UART, or OLED may manage
+one of the other local command interfaces explicitly:
+
+```
+login <user> <pass> <serial|uart|display>
+logout <serial|uart|display>
+```
+
+Explicit same-interface forms are rejected; use the bare form instead. BLE,
+G2, web, anonymous, `AuthBypass`, and Guest-role callers cannot administer a
+different interface. The old G2 -> OLED Login menu has been removed; sign in
+on an eligible command interface before performing any cross-interface login.
+
+Queued commands and replies are fenced by boot-local session counters. These
+epochs are sequence numbers, not login timestamps: NTP may be absent at boot or
+may become available between commands without changing their meaning.
 
 ```
 serialrequireauth <0|1>         - Require login on the serial console
@@ -1072,6 +1092,11 @@ banuser <user> [reason]         - Ban a user account (admin)
 unbanuser <user>                - Remove a user account ban (admin)
 login <user> <pass>             - Log in
 logout                          - Log out
+whoami                          - Show the user on the submitting interface
+login <user> <pass> <serial|uart|display>
+                                - Log another local interface in (named non-Guest
+                                  Serial/UART/OLED session required)
+logout <serial|uart|display>    - Log another local interface out (same requirement)
 ```
 </details>
 

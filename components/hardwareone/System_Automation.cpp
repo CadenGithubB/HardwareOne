@@ -34,6 +34,7 @@
 
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <ctype.h>
 #include <string.h>
 
 #include "System_Command.h"
@@ -64,7 +65,7 @@
 #include "Bluetooth.h"             // BLE: isBLEConnected() (stub returns false when BT disabled)
 #include "System_ESPNow.h"         // PEERS/bond/pairing: gMeshPeers, isBondModeOnline, espnowPairModeActive, gEspNow
 #include "System_BondedPeer.h"     // BOND_PAIRED: BondedPeer::isPaired()
-#include "System_LLM.h"            // LLM: llmGetStatus() (header self-guards on ENABLE_ONDEVICE_LLM)
+#include "System_LLMBackend.h"            // LLM: llmBackendStatus() (header self-guards on ENABLE_LLM_SOURCE_ONBOARD)
 #if ENABLE_WIFI
 #include <WiFi.h>                  // WIFI / RSSI: WiFi.isConnected() / WiFi.RSSI()
 #endif
@@ -84,6 +85,8 @@ extern void runUnifiedSystemCommand(const String& argsInput);
 #include "System_CommandTypes.h"
 extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
 
+static String redactAutomationCommandForAudit(const String& command);
+
 // Queue an automation sub-command through the FreeRTOS command queue (async, non-blocking).
 // This avoids deadlock when already on cmd_exec task and avoids blocking the main loop.
 // `owner` is the automation's createdBy user — stamped into cmd.ctx.auth so VFS permission
@@ -92,13 +95,15 @@ extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, v
 // executeCommand can write COMMAND/OUTPUT autolog entries attributed to this automation,
 // with no race against the scheduler advancing to the next automation before the command runs.
 static void queueAutomationSubCommand(const char* cmd, const char* owner, const char* autoName = nullptr) {
+  const String safeCmd = redactAutomationCommandForAudit(
+      String(cmd ? cmd : ""));
   Command uc;
   uc.line = cmd;
   uc.ctx.origin = ORIGIN_SYSTEM;
   uc.ctx.auth.transport = SOURCE_INTERNAL;
   uc.ctx.auth.user = owner ? owner : "";
   DEBUGF(DEBUG_AUTOMATIONS, "[autos queue] Queueing cmd='%s' user='%s' automation='%s'",
-         cmd, owner ? owner : "", autoName ? autoName : "");
+         safeCmd.c_str(), owner ? owner : "", autoName ? autoName : "");
   uc.ctx.auth.ip = "";
   uc.ctx.auth.path = "/automation";
   uc.ctx.auth.sid = "";
@@ -114,7 +119,7 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
     uc.ctx.automationName[sizeof(uc.ctx.automationName) - 1] = '\0';
   }
   if (!submitCommandAsync(uc, nullptr, nullptr)) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos] FAILED to queue sub-command: %s", cmd);
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos] FAILED to queue sub-command: %s", safeCmd.c_str());
     // Durable: a scheduled automation silently half-ran — one of its commands
     // never reached cmd_exec (queue full). Attribute to the automation so it's
     // clear which scheduled run was truncated. Rate-limited: one automation
@@ -128,11 +133,11 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
     if (sLastDropLogMs == 0 || (nowMs - sLastDropLogMs) >= 5000) {
       if (sDropsSuppressed > 0) {
         logSystemEvent("AUTO", "sub-command DROPPED (exec queue full) in automation '%s': %s (+%lu more since last)",
-                       (autoName && autoName[0]) ? autoName : "?", cmd ? cmd : "?",
+                       (autoName && autoName[0]) ? autoName : "?", safeCmd.c_str(),
                        (unsigned long)sDropsSuppressed);
       } else {
         logSystemEvent("AUTO", "sub-command DROPPED (exec queue full) in automation '%s': %s",
-                       (autoName && autoName[0]) ? autoName : "?", cmd ? cmd : "?");
+                       (autoName && autoName[0]) ? autoName : "?", safeCmd.c_str());
       }
       // SYSTEM-EVENT: a scheduled automation half-ran — this action never
       // reached cmd_exec. Share the durable log's 5 s throttle so a flooded
@@ -151,8 +156,136 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
       sDropsSuppressed++;
     }
   } else {
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos] Queued sub-command: %s", cmd);
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos] Queued sub-command: %s", safeCmd.c_str());
   }
+}
+
+// Locate a whole-word conditional keyword outside quoted text. Automation
+// conditions and commands are user-controlled, so a quoted value containing
+// " THEN " / " ELSE " must not shift the branch boundary used for redaction.
+static int findAutomationKeywordOutsideQuotes(const String& line,
+                                              const char* keyword,
+                                              int from,
+                                              int* outEnd = nullptr) {
+  if (!keyword || !keyword[0]) return -1;
+  const int keyLen = (int)strlen(keyword);
+  bool quoted = false;
+  for (int i = from < 0 ? 0 : from; i + keyLen <= (int)line.length(); ++i) {
+    const char ch = line[i];
+    if (ch == '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
+    if (i > 0 && !isspace(static_cast<unsigned char>(line[i - 1]))) continue;
+    int k = 0;
+    for (; k < keyLen; ++k) {
+      char a = line[i + k];
+      char b = keyword[k];
+      if (a >= 'a' && a <= 'z') a = (char)(a - ('a' - 'A'));
+      if (b >= 'a' && b <= 'z') b = (char)(b - ('a' - 'A'));
+      if (a != b) break;
+    }
+    if (k != keyLen) continue;
+    const int end = i + keyLen;
+    if (end < (int)line.length() &&
+        !isspace(static_cast<unsigned char>(line[end]))) continue;
+    if (outEnd) *outEnd = end;
+    return i;
+  }
+  return -1;
+}
+
+static String redactAutomationCommandForAuditImpl(const String& command,
+                                                   unsigned depth) {
+  CommandArgs outer(command);
+  if (outer.count() > 0 &&
+      (outer.arg(0).equalsIgnoreCase("automationadd") ||
+       outer.arg(0).equalsIgnoreCase("validate-conditions"))) {
+    return outer.arg(0) + " ***";
+  }
+  if (outer.count() > 1 && outer.arg(0).equalsIgnoreCase("automation") &&
+      outer.arg(1).equalsIgnoreCase("add")) {
+    return outer.arg(0) + " " + outer.arg(1) + " ***";
+  }
+
+  int verbStart = 0;
+  while (verbStart < (int)command.length() &&
+         isspace(static_cast<unsigned char>(command[verbStart]))) verbStart++;
+  const bool conditional =
+      verbStart + 2 <= (int)command.length() &&
+      (command[verbStart] == 'I' || command[verbStart] == 'i') &&
+      (command[verbStart + 1] == 'F' || command[verbStart + 1] == 'f') &&
+      verbStart + 2 < (int)command.length() &&
+      isspace(static_cast<unsigned char>(command[verbStart + 2]));
+  if (!conditional) return redactCmdForAudit(command);
+
+  int thenEnd = 0;
+  const int thenStart =
+      findAutomationKeywordOutsideQuotes(command, "THEN", verbStart + 2,
+                                         &thenEnd);
+  if (thenStart < 0) return redactCmdForAudit(command);
+  // A deliberately bounded recursion prevents a malicious stored automation
+  // from turning a diagnostic/JSON request into unbounded stack consumption.
+  if (depth >= 4) return command.substring(0, thenEnd) + " ***";
+
+  int elseEnd = 0;
+  const int elseStart =
+      findAutomationKeywordOutsideQuotes(command, "ELSE", thenEnd, &elseEnd);
+  String thenCommand = command.substring(
+      thenEnd, elseStart >= 0 ? elseStart : (int)command.length());
+  thenCommand.trim();
+
+  String safe = command.substring(0, thenEnd);
+  safe += " ";
+  safe += redactAutomationCommandForAuditImpl(thenCommand, depth + 1);
+  if (elseStart >= 0) {
+    String elseCommand = command.substring(elseEnd);
+    elseCommand.trim();
+    safe += " ELSE ";
+    safe += redactAutomationCommandForAuditImpl(elseCommand, depth + 1);
+  }
+  return safe;
+}
+
+static String redactAutomationCommandForAudit(const String& command) {
+  return redactAutomationCommandForAuditImpl(command, 0);
+}
+
+String redactAutomationsJsonForResponse(const String& json) {
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) return String();
+
+  auto redactObject = [](JsonObject obj) {
+    JsonArray commands = obj["commands"].as<JsonArray>();
+    if (!commands.isNull()) {
+      for (JsonVariant command : commands) {
+        if (!command.is<const char*>()) continue;
+        command.set(redactAutomationCommandForAudit(
+            String(command.as<const char*>())));
+      }
+    }
+    if (obj["command"].is<const char*>()) {
+      obj["command"] = redactAutomationCommandForAudit(
+          String(obj["command"].as<const char*>()));
+    }
+  };
+
+  if (doc["automations"].is<JsonArray>()) {
+    for (JsonObject automation : doc["automations"].as<JsonArray>()) {
+      redactObject(automation);
+    }
+  } else if (doc.is<JsonArray>()) {
+    for (JsonObject automation : doc.as<JsonArray>()) redactObject(automation);
+  } else if (doc.is<JsonObject>()) {
+    redactObject(doc.as<JsonObject>());
+  } else {
+    return String();
+  }
+
+  String safeJson;
+  serializeJson(doc, safeJson);
+  return safeJson;
 }
 
 // Helper: check if executeConditionalCommand result is an internal status (not user-facing output)
@@ -1040,7 +1173,12 @@ const char* cmd_automation_list(const String& argsInput) {
     broadcastOutput("Error: failed to read automations.json");
     return "ERROR";
   }
-  broadcastOutput(json);
+  const String safeJson = redactAutomationsJsonForResponse(json);
+  if (!safeJson.length()) {
+    broadcastOutput("Error: malformed automations.json");
+    return "ERROR";
+  }
+  broadcastOutput(safeJson);
   cliHint("to run one of these now, use 'automation run id=<id>'; to enable or disable one, use 'automation enable id=<id>' / 'automation disable id=<id>'");
   return "OK";
 }
@@ -1137,7 +1275,8 @@ const char* cmd_automation_add(const String& argsInput) {
           // already-deep stack and causes an overflow on 24 KB budgets.
           // findCommand() is a plain registry walk with no stack-heavy setup.
           if (!findCommand(part)) {
-            BROADCAST_PRINTF("Error: Unknown command '%s'", part.c_str());
+            const String safePart = redactAutomationCommandForAudit(part);
+            BROADCAST_PRINTF("Error: Unknown command '%s'", safePart.c_str());
             return "ERROR";
           }
         }
@@ -1897,11 +2036,12 @@ const char* cmd_automation_run(const String& argsInput) {
 
   // Execute all commands (with conditional logic support)
   for (int ci = 0; ci < cmdsCount; ++ci) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s cmd[%d]='%s'", idStr.c_str(), ci, cmdsList[ci].c_str());
+    const String safeRunCmd = redactAutomationCommandForAudit(cmdsList[ci]);
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s cmd[%d]='%s'", idStr.c_str(), ci, safeRunCmd.c_str());
     
     // Protect against malformed commands
     if (cmdsList[ci].length() == 0 || cmdsList[ci] == "\\") {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos run] skipping malformed command: '%s'", cmdsList[ci].c_str());
+      DEBUGF(DEBUG_AUTOMATIONS, "[autos run] skipping malformed command: '%s'", safeRunCmd.c_str());
       continue;
     }
     
@@ -2590,7 +2730,9 @@ const char* validateConditionSyntax(const char* condition) {
   const char* cond = condition;
   size_t len = strlen(condition);
   
-  DEBUGF(DEBUG_AUTOMATIONS, "[validate] Input condition: '%s'", condition);
+  const String safeConditionForTrace =
+      redactAutomationCommandForAudit(String(condition ? condition : ""));
+  DEBUGF(DEBUG_AUTOMATIONS, "[validate] Input condition: '%s'", safeConditionForTrace.c_str());
   
   // Skip leading whitespace
   while (*cond == ' ' || *cond == '\t') { cond++; len--; }
@@ -3039,8 +3181,8 @@ bool evaluateCondition(const char* condition) {
   } else if (strcmp(sensor, "LLM") == 0) {
     // On-device model state -> READY / BUSY / NONE
     isNumeric = false;
- #if ENABLE_ONDEVICE_LLM
-    LLMState st = llmGetStatus().state;
+ #if ENABLE_LLM_BACKEND
+    LLMState st = llmBackendStatus().state;
     const char* v = (st == LLMState::READY) ? "READY"
                   : (st == LLMState::GENERATING || st == LLMState::LOADING) ? "BUSY" : "NONE";
     strncpy(currentStringValue, v, sizeof(currentStringValue) - 1);
@@ -3561,13 +3703,15 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
       // Execute appropriate command via async queue (avoids deadlock)
       if (conditionMet) {
         if (thenCmdStart[0] != '\0') {
-          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing THEN: %s", thenCmdStart);
+          const String safeThenCmd = redactAutomationCommandForAudit(String(thenCmdStart));
+          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing THEN: %s", safeThenCmd.c_str());
           queueAutomationSubCommand(thenCmdStart, owner, autoName);
           return "Conditional THEN queued";
         }
       } else {
         if (elseBuf[0] != '\0') {
-          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing ELSE: %s", elseBuf);
+          const String safeElseCmd = redactAutomationCommandForAudit(String(elseBuf));
+          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing ELSE: %s", safeElseCmd.c_str());
           queueAutomationSubCommand(elseBuf, owner, autoName);
           return "Conditional ELSE queued";
         }
@@ -4153,7 +4297,8 @@ void schedulerTickMinute() {
 
         // Execute commands (with conditional logic support)
         for (int ci = 0; ci < cmdsCount; ++ci) {
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld run cmd[%d]='%s'", id, ci, cmdsList[ci].c_str());
+          const String safeRunCmd = redactAutomationCommandForAudit(cmdsList[ci]);
+          DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld run cmd[%d]='%s'", id, ci, safeRunCmd.c_str());
 
           // Queue command for execution (async, non-blocking)
           const char* result = executeConditionalCommand(cmdsList[ci].c_str(), _createdByBuf, autoName.c_str());

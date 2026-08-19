@@ -9,10 +9,13 @@
 
 #if ENABLE_ESPNOW
 
+#include <atomic>
+#include <ctype.h>
 #include <time.h>
 #include <new>                       // placement new — construct EspNowState's C++ members
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
+#include <freertos/semphr.h>
 #include <esp_chip_info.h>
 #include <esp_flash.h>
 #include <esp_crc.h>                 // esp_crc32_le for bond settings hash
@@ -55,6 +58,7 @@
 #include "System_TaskUtils.h"
 #include "System_UserSettings.h"
 #include "System_Utils.h"
+#include "System_WiFi.h"          // WifiRadioMutationGuard — serialize scan/mode/channel work
 #include "System_I2C.h"  // For ConnectedDevice struct
 #include "System_Filesystem.h"  // For canRead() security check
 #include "System_VFS.h"         // For SD-capture routing (captureEspNowFrame)
@@ -90,6 +94,116 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
 // ESP-NOW Global State (owned by this module)
 // ============================================================================
 EspNowState* gEspNow = nullptr;  // Allocated on-demand when ESP-NOW is initialized
+
+// Runtime boundary shared by every first-party send path. Admission starts
+// CLOSED and stays closed while ESP-NOW is stopped. Enabled/count live behind
+// one mux so close cannot observe zero in-flight users while an entrant sees
+// the old enabled value on another atomic and admits itself concurrently.
+static portMUX_TYPE gEspNowRuntimeLock = portMUX_INITIALIZER_UNLOCKED;
+static bool gEspNowRuntimeEnabled = false;
+static std::atomic<bool> gEspNowDeinitInProgress{false};
+static uint32_t gEspNowRuntimeOpsInFlight = 0;
+static bool gEspNowRadioDeinitialized = false;  // cmd_exec lifecycle only
+
+class EspNowRuntimeOpGuard {
+ public:
+  EspNowRuntimeOpGuard() {
+    taskENTER_CRITICAL(&gEspNowRuntimeLock);
+    if (gEspNowRuntimeEnabled) {
+      ++gEspNowRuntimeOpsInFlight;
+      held_ = true;
+    }
+    taskEXIT_CRITICAL(&gEspNowRuntimeLock);
+  }
+  ~EspNowRuntimeOpGuard() {
+    if (!held_) return;
+    taskENTER_CRITICAL(&gEspNowRuntimeLock);
+    configASSERT(gEspNowRuntimeOpsInFlight > 0);
+    --gEspNowRuntimeOpsInFlight;
+    taskEXIT_CRITICAL(&gEspNowRuntimeLock);
+  }
+  bool held() const { return held_; }
+
+ private:
+  bool held_ = false;
+};
+
+static bool waitForEspNowRuntimeOps(uint32_t timeoutMs) {
+  const uint32_t started = (uint32_t)millis();
+  for (;;) {
+    uint32_t active;
+    taskENTER_CRITICAL(&gEspNowRuntimeLock);
+    active = gEspNowRuntimeOpsInFlight;
+    taskEXIT_CRITICAL(&gEspNowRuntimeLock);
+    if (active == 0) return true;
+    if ((uint32_t)((uint32_t)millis() - started) >= timeoutMs) return false;
+    vTaskDelay(1);
+  }
+}
+
+static void setEspNowRuntimeEnabled(bool enabled) {
+  taskENTER_CRITICAL(&gEspNowRuntimeLock);
+  gEspNowRuntimeEnabled = enabled;
+  taskEXIT_CRITICAL(&gEspNowRuntimeLock);
+}
+
+bool espnowDeletePeerRuntime(const uint8_t mac[6]) {
+  if (!mac) return false;
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return false;
+  esp_err_t err = esp_now_del_peer(mac);
+  return err == ESP_OK || err == ESP_ERR_ESPNOW_NOT_FOUND;
+}
+
+// Callback admission is independent from runtime-send admission so it stays
+// disabled after teardown until a future init has allocated a fresh RX ring.
+// Disabling under the same mux as admission gives closeespnow a real resource
+// quiescence boundary: admitted callbacks are counted; every later/queued
+// callback returns without touching gEspNow or the RX ring.
+static portMUX_TYPE gEspNowCallbackLock = portMUX_INITIALIZER_UNLOCKED;
+static bool gEspNowCallbacksEnabled = false;
+static uint32_t gEspNowCallbacksInFlight = 0;
+
+class EspNowCallbackGuard {
+ public:
+  EspNowCallbackGuard() {
+    taskENTER_CRITICAL(&gEspNowCallbackLock);
+    if (gEspNowCallbacksEnabled) {
+      ++gEspNowCallbacksInFlight;
+      held_ = true;
+    }
+    taskEXIT_CRITICAL(&gEspNowCallbackLock);
+  }
+  ~EspNowCallbackGuard() {
+    if (!held_) return;
+    taskENTER_CRITICAL(&gEspNowCallbackLock);
+    --gEspNowCallbacksInFlight;
+    taskEXIT_CRITICAL(&gEspNowCallbackLock);
+  }
+  bool held() const { return held_; }
+
+ private:
+  bool held_ = false;
+};
+
+static void setEspNowCallbacksEnabled(bool enabled) {
+  taskENTER_CRITICAL(&gEspNowCallbackLock);
+  gEspNowCallbacksEnabled = enabled;
+  taskEXIT_CRITICAL(&gEspNowCallbackLock);
+}
+
+static bool waitForEspNowCallbacks(uint32_t timeoutMs) {
+  const uint32_t started = (uint32_t)millis();
+  for (;;) {
+    uint32_t active;
+    taskENTER_CRITICAL(&gEspNowCallbackLock);
+    active = gEspNowCallbacksInFlight;
+    taskEXIT_CRITICAL(&gEspNowCallbackLock);
+    if (active == 0) return true;
+    if ((uint32_t)((uint32_t)millis() - started) >= timeoutMs) return false;
+    vTaskDelay(1);
+  }
+}
 
 // Forward declarations for ESP-NOW helper functions (implemented below)
 // RX processing functions
@@ -433,8 +547,8 @@ static volatile uint8_t gEspNowRxTail = 0;
 // ~2.1 KB of internal DRAM, allocated in initEspNow so devices with ESP-NOW off
 // never pay for it. Must be INTERNAL and must exist before the recv callback is
 // registered: onEspNowDataReceived runs on the WiFi task and can neither
-// allocate nor fault. Never freed — deinit cannot prove an in-flight callback
-// isn't inside the ring, so this is allocate-once-and-keep.
+// allocate nor fault. closeespnow disables callback admission, waits admitted
+// callbacks to retire, then frees this ring; re-init allocates it again.
 static InboundRxItem* gEspNowRxRing = nullptr;
 static volatile uint32_t gEspNowRxDrops = 0;
 
@@ -877,9 +991,9 @@ static bool validateBondSessionToken(const uint8_t* token, size_t tokenLen) {
   }
   bool match = (memcmp(token, s->bondToken, 16) == 0);
   if (!match) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Token mismatch: recv=%02X%02X%02X%02X... local=%02X%02X%02X%02X...",
-           token[0], token[1], token[2], token[3],
-           s->bondToken[0], s->bondToken[1], s->bondToken[2], s->bondToken[3]);
+    // A bond token is a bearer credential.  Prefixes are still credential
+    // material and add no value beyond the mismatch itself.
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Token mismatch");
   } else {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Token validated OK");
   }
@@ -933,7 +1047,9 @@ String buildBondedCommandPayload(const String& command) {
   payload += tokenStr;
   payload += ":";
   payload += command;
-  DEBUG_ESPNOWF("[BOND_AUTH] buildPayload: token=%.8s... cmd=%s", tokenStr, command.c_str());
+  const String safeCommand = redactCmdForAudit(command);
+  DEBUG_ESPNOWF("[BOND_AUTH] buildPayload: token=present cmd=%s",
+                safeCommand.c_str());
   return payload;
 }
 #else
@@ -987,7 +1103,7 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool /*useEncryption
 // Set by the WiFi event handler (System_WiFi.cpp) when an association changes;
 // drained in processMeshHeartbeats() on espnow_task (safe context, not the tiny
 // arduino_events stack). Also re-checked periodically as a cheap safety net.
-static volatile bool gEspNowChannelResyncPending = false;
+static std::atomic<bool> gEspNowChannelResyncPending{false};
 
 // Decide the effective ESP-NOW channel for the current WiFi state.
 static uint8_t espnowComputeChannel() {
@@ -1015,24 +1131,63 @@ static uint8_t espnowComputeChannel() {
 // soft-AP's channel (the governing value in AP+STA while the STA is idle) and
 // esp_wifi_set_channel — belt-and-suspenders, since which one holds depends on
 // driver state. (Exact behavior warrants a bench check on real hardware.)
-static void espnowApplyChannel(uint8_t ch) {
-  if (!gEspNow || ch < 1 || ch > 13) return;
-  gEspNow->channel = ch;
-  if (WiFi.status() != WL_CONNECTED) {
+static bool espnowApplyChannel(uint8_t ch, uint32_t lockTimeoutMs = 0) {
+  if (!gEspNow || ch < 1 || ch > 13) return false;
+
+  // Channel correction runs on espnow_task, which must never block behind an
+  // explicit WiFi scan: radio shutdown may be waiting to join this task. A
+  // failed zero-time claim simply re-arms the pending bit for the next lap.
+  // initEspNow already owns this recursive guard, so its nested claim succeeds.
+  WifiRadioMutationGuard radioGuard(lockTimeoutMs);
+  if (!radioGuard.acquired()) {
+    gEspNowChannelResyncPending.store(true, std::memory_order_release);
+    return false;
+  }
+
+  bool applied = true;
+  if (WiFi.status() == WL_CONNECTED) {
+    // The joined AP owns the channel. Verify the hardware caught up before
+    // publishing the cached channel or reporting a successful re-sync.
+    uint8_t hwChannel = 0;
+    wifi_second_chan_t secondary = WIFI_SECOND_CHAN_NONE;
+    applied = esp_wifi_get_channel(&hwChannel, &secondary) == ESP_OK &&
+              hwChannel == ch;
+  } else {
     wifi_config_t ap_config;
     memset(&ap_config, 0, sizeof(ap_config));
-    if (esp_wifi_get_config(WIFI_IF_AP, &ap_config) == ESP_OK && ap_config.ap.channel != ch) {
+    const esp_err_t getConfigErr = esp_wifi_get_config(WIFI_IF_AP, &ap_config);
+    if (getConfigErr != ESP_OK) {
+      applied = false;
+    } else if (ap_config.ap.channel != ch) {
       ap_config.ap.channel = ch;
-      esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+      if (esp_wifi_set_config(WIFI_IF_AP, &ap_config) != ESP_OK) {
+        applied = false;
+      }
     }
-    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    if (esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE) != ESP_OK) {
+      applied = false;
+    }
+    uint8_t hwChannel = 0;
+    wifi_second_chan_t secondary = WIFI_SECOND_CHAN_NONE;
+    if (esp_wifi_get_channel(&hwChannel, &secondary) != ESP_OK ||
+        hwChannel != ch) {
+      applied = false;
+    }
   }
+
+  if (!applied) {
+    gEspNowChannelResyncPending.store(true, std::memory_order_release);
+    return false;
+  }
+
+  gEspNow->channel = ch;
+  return true;
 }
 
 // Called from the WiFi event handler (any association change) — snapshot only,
 // the real work runs on espnow_task. Cheap enough for the small event stack.
 void espnowNoteWifiChannelMayHaveChanged() {
-  gEspNowChannelResyncPending = true;
+  gEspNowChannelResyncPending.store(true, std::memory_order_release);
 }
 
 // Send ESP-NOW response via router (v2 JSON RESPONSE messages)
@@ -1076,6 +1231,9 @@ uint32_t gCurrentStreamCmdId = 0;  // Set during command execution on cmd_exec t
 void sendEspNowStreamMessage(const String& message) {
   if (!gEspNow || !gEspNow->initialized) return;
   if (gEspNow->streamingSuspended) return;
+  // STREAM is itself a remote/log sink. Redact before truncation or chunking so
+  // a sensitive JSON field cannot be split across frames ahead of the filter.
+  const String safeMessage = redactOutputForLog(message);
 
   // Check for session-based streaming first (V3 CMD output).
   //
@@ -1092,9 +1250,9 @@ void sendEspNowStreamMessage(const String& message) {
   // streamed command actually runs and emits its real output.
   extern TaskHandle_t gCmdExecTaskHandle;
   if (gCurrentStreamCmdId != 0 && xTaskGetCurrentTaskHandle() == gCmdExecTaskHandle) {
-    size_t msgLen = message.length();
+    size_t msgLen = safeMessage.length();
     if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
-    if (trySendToStreamSession(gCurrentStreamCmdId, message.c_str(), msgLen)) {
+    if (trySendToStreamSession(gCurrentStreamCmdId, safeMessage.c_str(), msgLen)) {
       return;  // Sent via session
     }
   }
@@ -1110,7 +1268,7 @@ void sendEspNowStreamMessage(const String& message) {
   }
   gEspNow->lastStreamSendTime = now;
 
-  size_t msgLen = message.length();
+  size_t msgLen = safeMessage.length();
   if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
   
   // Legacy global stream (startstream/stopstream) is uncorrelated live telemetry,
@@ -1119,18 +1277,20 @@ void sendEspNowStreamMessage(const String& message) {
   // Command-session output uses the command's msgId instead (see sendSessionStreamFrame).
   uint32_t msgId = 0;
   bool sent = espnowtx::sendAead(gEspNow->streamTarget, ESPNOW_V4_TYPE_STREAM, 0, msgId,
-                                  (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
+                                  (const uint8_t*)safeMessage.c_str(), (uint16_t)msgLen, 1);
 
   if (sent) {
     gEspNow->streamSentCount++;
     DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Legacy sent | sent=%lu | %.50s",
-           (unsigned long)gEspNow->streamSentCount, message.c_str());
+           (unsigned long)gEspNow->streamSentCount, safeMessage.c_str());
   }
 }
 
 // Minimal RX callback: enqueue raw frame into tiny ring and return immediately
 static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8_t* incomingData, int len) {
   if (!recv_info || !incomingData || len <= 0) return;
+  EspNowCallbackGuard callback;
+  if (!callback.held()) return;
   // Ring absent means initEspNow bailed before allocating it, so a frame should
   // not be able to reach us — drop rather than fault on the WiFi task. The bump
   // is defence-in-depth; espnowstats surfaces the counter as "RX Ring Drops".
@@ -1251,8 +1411,8 @@ static int gV4DedupIdx = 0;
 
 // Broadcast ACK tracking. ~1.2 KB of internal DRAM (touched from RX ACK
 // processing), allocated in initEspNow so devices with ESP-NOW off never pay
-// for it. Never freed — the RX path can be mid-lookup when deinit runs, so this
-// is allocate-once-and-keep and every reader null-guards instead.
+// for it. closeespnow stops the RX drainer and waits guarded broadcasters
+// before freeing it; every reader still null-guards for partial init/failure.
 static BroadcastTracker* gBroadcastTrackers = nullptr;
 static uint32_t gBroadcastsTracked = 0;
 static uint32_t gBroadcastsCompleted = 0;
@@ -1689,6 +1849,8 @@ bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t ms
 static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                              const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
                              bool allowRoute) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return false;
   if (!dst || (payloadLen > 0 && !payload)) return false;
   EspNowV4Header h = {};
   h.magic = (uint16_t)ESPNOW_V4_MAGIC; h.ver = ESPNOW_V4_VERSION; h.type = type; h.flags = flags;
@@ -1777,6 +1939,8 @@ static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, u
 // as a peer we had been relaying to becomes audible again, its hops == 1 route
 // reappears and traffic returns to the direct link on the very next send.
 static bool v4_radio_emit(const uint8_t* dst, const uint8_t* frame, size_t len, bool allowRoute) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return false;
   if (!dst || !frame || len == 0) return false;
 
   static const uint8_t kBcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
@@ -1913,6 +2077,11 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
                              uint32_t msgId,
                              const uint8_t* plaintext, uint16_t plaintextLen,
                              uint8_t ttl, char* errOut, size_t errOutLen) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) {
+    if (errOut && errOutLen) snprintf(errOut, errOutLen, "ESP-NOW closing");
+    return false;
+  }
   auto setErr = [&](const char* msg) {
     if (errOut && errOutLen) { strncpy(errOut, msg, errOutLen - 1); errOut[errOutLen - 1] = 0; }
   };
@@ -2014,6 +2183,11 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
                                 const uint8_t* plaintext, uint16_t plaintextLen,
                                 uint8_t ttl,
                                 char* outStatus, size_t outStatusLen) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) {
+    if (outStatus && outStatusLen) snprintf(outStatus, outStatusLen, "ESP-NOW closing");
+    return false;
+  }
   auto setStatus = [&](const char* msg) {
     if (outStatus && outStatusLen) { strncpy(outStatus, msg, outStatusLen - 1); outStatus[outStatusLen - 1] = 0; }
   };
@@ -2110,6 +2284,8 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
  * If ESPNOW_V4_FLAG_ACK_REQ is set, tracks ACKs for delivery confirmation
  */
 bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return false;
   if (!gEspNow || !gEspNow->initialized) return false;
   
   bool anySuccess = false;
@@ -2197,6 +2373,8 @@ static uint32_t meshHeartbeatMinInterval(uint32_t silentMs) {
 bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
                            uint32_t category, int* outAttempted) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return false;
   if (outAttempted) *outAttempted = 0;
   if (!gEspNow || !gEspNow->initialized) return false;
 
@@ -2295,6 +2473,8 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
                                uint32_t msgId,
                                const uint8_t* payload, uint16_t payloadLen,
                                uint8_t ttl) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return false;
   if (!dst || (payloadLen > 0 && !payload)) return false;
 
   // Routed destinations pay for the envelope out of every fragment, so both the
@@ -2495,6 +2675,8 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
                            uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen,
                            uint8_t ttl) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return false;
   if (!dst) return false;
 
   // A routed destination has a smaller single-frame budget than a direct one:
@@ -4992,6 +5174,8 @@ static bool v4_routed_type_allowed(uint8_t type) {
 static void v4_relay_fanout(const uint8_t* frame, size_t len,
                             const uint8_t* arrivedFrom, const uint8_t* origin,
                             uint16_t meshFingerprint) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return;
   if (!gMeshPeers) return;   // reachable before init completes; slots would be 0 anyway
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (!gMeshPeers[i].isActive) continue;
@@ -5633,8 +5817,11 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // (and a routed KEY_EX is how a far pair gets paired in the first place).
   { ESPNOW_V4_TYPE_RELAY_DATA,       V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_relay_data        },
   { ESPNOW_V4_TYPE_PEER_LIST,        V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_peer_list         },
-  { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED,                               v4h_cmd               },
-  { ESPNOW_V4_TYPE_CMD_RESP,         0,                                                    v4h_cmd_resp          },
+  // Command payloads contain credentials, while response/stream payloads are
+  // persisted and broadcast locally. Current senders are encrypt-or-fail, so
+  // enforce that confidentiality/integrity invariant on receive as well.
+  { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_cmd               },
+  { ESPNOW_V4_TYPE_CMD_RESP,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_cmd_resp          },
   { ESPNOW_V4_TYPE_HEARTBEAT,        0,                                                    v4h_heartbeat         },
   // Discovery beacon carries a mesh-group-key BROADCAST_AUTH HMAC (see sendPairBeacon).
   // REQ_AUTHENTICATED gates auto-pair to same-passphrase devices so an outsider cannot
@@ -5662,7 +5849,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_METADATA_REQ,     0,                                                    v4h_metadata_req      },
   { ESPNOW_V4_TYPE_METADATA_RESP,    0,                                                    v4h_metadata_resp_push},
   { ESPNOW_V4_TYPE_METADATA_PUSH,    0,                                                    v4h_metadata_resp_push},
-  { ESPNOW_V4_TYPE_STREAM,           0,                                                    v4h_stream            },
+  { ESPNOW_V4_TYPE_STREAM,           V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_stream            },
   // FILE_*: TX encrypt-or-fails via v4_send_payload_smart; RX requires matching
   // session AEAD so a spoofed paired MAC cannot inject plaintext transfers
   // (including bond magic filenames on FILE_END) or forged cancel notices.
@@ -6390,6 +6577,20 @@ struct V3CmdAsyncCtx {
   uint32_t cmdMsgId;  // For session-based streaming correlation
 };
 
+static String redactEspNowCommandResult(const String& output) {
+  String safe = redactOutputForLog(output);
+  static const char kUnknownPrefix[] = "Unknown command: ";
+  if (!safe.startsWith(kUnknownPrefix)) return safe;
+  const int lineEnd = safe.indexOf('\n');
+  const int commandStart = strlen(kUnknownPrefix);
+  const String echoed = lineEnd >= 0
+                            ? safe.substring(commandStart, lineEnd)
+                            : safe.substring(commandStart);
+  String rebuilt = String(kUnknownPrefix) + redactCmdForAudit(echoed);
+  if (lineEnd >= 0) rebuilt += safe.substring(lineEnd);
+  return rebuilt;
+}
+
 // ExecAsyncCallback, CommandOrigin, CommandContext, Command defined in System_CommandTypes.h (included above)
 
 // External async command submission
@@ -6413,8 +6614,14 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   // Send CMD_RESP with success/fail byte + actual command result text.
   // v4_send_encrypted_chunked handles fragmentation for large results
   // automatically. The receiver reassembles fragments before processing.
-  const char* resultText = (result && resultLen > 0) ? result : 
-                           (ctx->cmdName[0] ? ctx->cmdName : (ok ? "OK" : "FAIL"));
+  String safeResult;
+  if (result && resultLen > 0) {
+    safeResult = redactEspNowCommandResult(String(result));
+  }
+  const char* resultText = safeResult.length() > 0
+                               ? safeResult.c_str()
+                               : (ctx->cmdName[0] ? ctx->cmdName
+                                                  : (ok ? "OK" : "FAIL"));
   size_t textLen = strlen(resultText);
   // Transmit bound, derived rather than hand-typed. In practice CMD_RESULT_MAX
   // binds first — `result` is ExecReq::out, so textLen is already <= 4095 and
@@ -6507,6 +6714,10 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     return;
   }
 
+  // Keep a separately redacted representation for every local diagnostic,
+  // event, and response echo.  `actualCmd` remains untouched for execution.
+  const String safeActualCmd = redactCmdForAudit(String(actualCmd));
+
 #if ENABLE_BONDED_MODE
   if (strncmp(cmdPayload, "@BOND:", 6) == 0) {
     DEBUG_ESPNOWF("[BOND_AUTH] Received bonded command from %s", deviceName);
@@ -6517,12 +6728,11 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       char tokenStr[33];
       memcpy(tokenStr, firstColon + 1, 32);
       tokenStr[32] = '\0';
-      DEBUG_ESPNOWF("[BOND_AUTH]   recvToken=%.8s...", tokenStr);
+      DEBUG_ESPNOWF("[BOND_AUTH]   token received");
       
       uint8_t token[16];
       if (parseSessionToken(tokenStr, token)) {
-        DEBUG_ESPNOWF("[BOND_AUTH]   parsed: %02X%02X%02X%02X...",
-                      token[0], token[1], token[2], token[3]);
+        DEBUG_ESPNOWF("[BOND_AUTH]   token parsed");
         if (validateBondSessionToken(token, 16)) {
           authOk = true;
           // The bonded master is a trusted administrator for the life of the bond
@@ -6533,14 +6743,15 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
           // silently failed admin commands.
           strncpy(username, kBondAdminUser, sizeof(username) - 1);
           username[sizeof(username) - 1] = '\0';
-          BROADCAST_PRINTF("[ESP-NOW] Bonded command from %s (session token): %s", deviceName, actualCmd);
+          BROADCAST_PRINTF("[ESP-NOW] Bonded command from %s (session token): %s",
+                           deviceName, safeActualCmd.c_str());
         } else {
           BROADCAST_PRINTF("[ESP-NOW] Invalid session token from %s", deviceName);
           WARN_ESPNOWF("[BOND_AUTH]   MISMATCH - check passphrase on both devices");
         }
       } else {
         BROADCAST_PRINTF("[ESP-NOW] Malformed session token from %s", deviceName);
-        WARN_ESPNOWF("[BOND_AUTH]   parse failed for: %s", tokenStr);
+        WARN_ESPNOWF("[BOND_AUTH]   token parse failed");
       }
     } else {
       BROADCAST_PRINTF("[ESP-NOW] Wrong token length from %s: %zu (expected 32)", deviceName, tokenLen);
@@ -6590,7 +6801,8 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     memcpy(username, cmdPayload, userLen); username[userLen] = '\0';
     memcpy(password, firstColon + 1, passLen); password[passLen] = '\0';
     
-    BROADCAST_PRINTF("[ESP-NOW] Remote command from %s (user=%s): %s", deviceName, username, actualCmd);
+    BROADCAST_PRINTF("[ESP-NOW] Remote command from %s (user=%s): %s",
+                     deviceName, username, safeActualCmd.c_str());
     
     // Quick auth check (runs in espnow_task - small stack usage)
     if (isValidUser(String(username), String(password))) {
@@ -6637,17 +6849,17 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   strncpy(asyncCtx->deviceName, deviceName, sizeof(asyncCtx->deviceName) - 1);
   asyncCtx->deviceName[sizeof(asyncCtx->deviceName) - 1] = '\0';
   asyncCtx->cmdMsgId = msgId;
-  // Extract command name (first word of actualCmd) for inclusion in CMD_RESP
-  const char* cmdSpace = strchr(actualCmd, ' ');
-  if (cmdSpace) {
-    size_t nameLen = cmdSpace - actualCmd;
-    if (nameLen > sizeof(asyncCtx->cmdName) - 1) nameLen = sizeof(asyncCtx->cmdName) - 1;
-    memcpy(asyncCtx->cmdName, actualCmd, nameLen);
-    asyncCtx->cmdName[nameLen] = '\0';
-  } else {
-    strncpy(asyncCtx->cmdName, actualCmd, sizeof(asyncCtx->cmdName) - 1);
-    asyncCtx->cmdName[sizeof(asyncCtx->cmdName) - 1] = '\0';
-  }
+  // Extract only the verb for the allocation-failure CMD_RESP fallback. The
+  // command grammar accepts all ASCII whitespace, so splitting on a literal
+  // space could copy a tab-delimited login and its credentials into the echo.
+  const char* cmdStart = actualCmd;
+  while (*cmdStart && isspace(static_cast<unsigned char>(*cmdStart))) cmdStart++;
+  const char* cmdEnd = cmdStart;
+  while (*cmdEnd && !isspace(static_cast<unsigned char>(*cmdEnd))) cmdEnd++;
+  size_t nameLen = (size_t)(cmdEnd - cmdStart);
+  if (nameLen > sizeof(asyncCtx->cmdName) - 1) nameLen = sizeof(asyncCtx->cmdName) - 1;
+  memcpy(asyncCtx->cmdName, cmdStart, nameLen);
+  asyncCtx->cmdName[nameLen] = '\0';
   
   // Send STREAM_BEGIN frame to signal output is starting
   sendSessionStreamFrame(msgId, nullptr, 0, ESPNOW_V4_FLAG_STREAM_BEGIN);
@@ -6660,7 +6872,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   cmd.line = actualCmd;
   cmd.ctx.origin = ORIGIN_ESPNOW;
   cmd.ctx.auth.transport = SOURCE_ESPNOW;
-  cmd.ctx.auth.path = actualCmd;
+  // Authentication/audit routing is a stable endpoint identity, never a
+  // credential-bearing command line.
+  cmd.ctx.auth.path = "/espnow/command";
   cmd.ctx.auth.user = username;
   cmd.ctx.auth.sid = "";
   cmd.ctx.auth.opaque = (void*)asyncCtx->srcMac;
@@ -6680,7 +6894,7 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   cmd.ctx.httpReq = nullptr;
   
   // Authenticated remote command is about to run on this device.
-  systemEventPost(SYSEVT_REMOTE_CMD_RX, deviceName, actualCmd);
+  systemEventPost(SYSEVT_REMOTE_CMD_RX, deviceName, safeActualCmd.c_str());
 
   // Queue for execution on cmd_exec task (has large stack)
   if (!submitCommandAsync(cmd, v4CmdResultCallback, asyncCtx)) {
@@ -6854,7 +7068,7 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* i
  * @brief ESP-NOW send status callback (registered with ESP-IDF)
  * @param tx_info Transmission info structure (ESP-IDF v5.x)
  * @param status Send result (ESP_NOW_SEND_SUCCESS or ESP_NOW_SEND_FAIL)
- * @note Called in interrupt context - keep processing minimal
+ * @note Called on the high-priority WiFi task - keep processing minimal
  * @note Updates routerMetrics TX counters (messagesSent / messagesFailed)
  * @warning Do not call blocking functions or allocate memory
  */
@@ -6862,6 +7076,8 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* i
 // (= wifi_tx_info_t; dest MAC at tx_info->des_addr) instead of const uint8_t* mac.
 // This callback doesn't use the MAC, so it's a straight signature swap.
 void onEspNowDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t status) {
+  EspNowCallbackGuard callback;
+  if (!callback.held()) return;
   // This callback fires once per esp_now_send() completion regardless of the
   // call path (single-frame / fragmented / encrypted / ACK / …) and is the only
   // single point where TX accounting can be done correctly without touching
@@ -7489,6 +7705,13 @@ static void sendBondSettings(const uint8_t* peerMac) {
   // Heap check: ensure we have enough memory for JSON generation
   size_t freeHeap = ESP.getFreeHeap();
   if (freeHeap < SETTINGS_MIN_HEAP) {
+    // Arm the debounce on refusal too. sLast*SendMs is otherwise only stamped on
+    // the success path below, so a declined send leaves the cooldown un-armed and
+    // the master's next retry re-runs this whole path immediately, re-emitting the
+    // warning with no backoff. Inert today (the guard cannot fire while the heap
+    // query is the inflated ESP.getFreeHeap reading) but required the moment that
+    // query becomes honest.
+    sLastSettingsSendMs = now;
     WARN_ESPNOWF("[SETTINGS_SEND] SKIP: low heap (%u < %lu required)", 
                   freeHeap, (unsigned long)SETTINGS_MIN_HEAP);
     return;
@@ -7581,13 +7804,25 @@ static void sendBondSettings(const uint8_t* peerMac) {
 //
 // Why a separate file (not folded into settings.json): schema is compile-time
 // metadata that only changes on reflash; settings.json changes on every save.
-// Coupling them would force every save to rewrite ~8 KB of unchanging schema
+// Coupling them would force every save to rewrite the whole unchanging schema
 // and every settings reader to step past it. Two files, same pipeline.
 
 static uint32_t sLastSchemaSendMs = 0;
 static volatile bool sSchemaTransferInProgress = false;
 static const uint32_t SCHEMA_DEBOUNCE_MS = 3000;  // 3s cooldown between schema sends
-static const uint32_t SCHEMA_MIN_HEAP    = 20000; // 20KB heap headroom for JSON build
+// Schema size: DO NOT assume a fixed figure. buildSettingsSchemaJson()
+// (System_Settings.cpp) emits every registered SettingEntry across every
+// COMPILED-IN module, so the size moves with build flags — a board with sensors
+// disabled emits far less than a fully-populated one. ~295 entry rows exist
+// in-tree at ~120-180 B each; on the web path the same helper overflowed a
+// 32,768 B buffer (see WebServer_Server.h), so it is well above 32 KB there.
+// Older comments claiming "~8 KB" were wrong and are what mis-set this value.
+// If you need the real number, call measureJson() — do not guess.
+//
+// This threshold is a system-health floor, NOT a payload-size estimate: the doc
+// is built with PSRAM_JSON_DOC and the String falls back to PSRAM (see
+// heap_caps_malloc_default), so payload size does not drive internal-heap demand.
+static const uint32_t SCHEMA_MIN_HEAP    = 20000; // internal-heap floor for the send path
 
 // Send schema to bonded peer (response to SCHEMA_REQ). The peer caches it
 // under peers/<MAC>/schema.json for the bonded settings panel to render
@@ -7615,6 +7850,13 @@ static void sendBondSchema(const uint8_t* peerMac) {
   }
   size_t freeHeap = ESP.getFreeHeap();
   if (freeHeap < SCHEMA_MIN_HEAP) {
+    // Arm the debounce on refusal too. sLast*SendMs is otherwise only stamped on
+    // the success path below, so a declined send leaves the cooldown un-armed and
+    // the master's next retry re-runs this whole path immediately, re-emitting the
+    // warning with no backoff. Inert today (the guard cannot fire while the heap
+    // query is the inflated ESP.getFreeHeap reading) but required the moment that
+    // query becomes honest.
+    sLastSchemaSendMs = now;
     WARN_ESPNOWF("[SCHEMA_SEND] SKIP: low heap (%u < %lu required)",
                  freeHeap, (unsigned long)SCHEMA_MIN_HEAP);
     return;
@@ -7670,7 +7912,7 @@ static void sendBondSchema(const uint8_t* peerMac) {
 
 // ============================================================================
 // Bond file-prep deferral — 9d/9e/9e2 in processMeshHeartbeats used to build
-// JSON (~8 KB schema, ~10 KB settings, up to ~44 KB manifest), write it to a
+// JSON (schema: see note below; settings ~10 KB; manifest up to ~44 KB), write it to a
 // temp file under FsLockGuard, kick sendFileToMac, and clean up — all inline
 // on the espnow_task super-loop's stack. That stalled the RX drainer for tens
 // to hundreds of ms per fire. cmd_exec has the deeper stack and already runs
@@ -9110,6 +9352,15 @@ void checkTopologyCollectionWindow() {
 // ============================================================================
 
 static TaskHandle_t gEspNowHbTaskHandle = nullptr;
+static std::atomic<bool> gEspNowHbStopRequested{false};
+static StaticSemaphore_t gEspNowHbStopDoneStorage;
+static SemaphoreHandle_t gEspNowHbStopDone = nullptr;
+static portMUX_TYPE gEspNowHbLifecycleLock = portMUX_INITIALIZER_UNLOCKED;
+// Stable process-lifetime owner for the full start/create/publish and
+// stop/join/delete transactions. The portMUX remains only for short snapshots.
+static StaticSemaphore_t gEspNowHbLifecycleMutexStorage;
+static SemaphoreHandle_t gEspNowHbLifecycleMutex =
+    xSemaphoreCreateMutexStatic(&gEspNowHbLifecycleMutexStorage);
 
 // True if a file transfer FROM `mac` is currently mid-flight (RECEIVING).
 // Used by the bond-sync retry logic so we don't fire a duplicate MANIFEST_REQ
@@ -9216,17 +9467,19 @@ void processMeshHeartbeats() {
     static uint32_t sLastChannelCheckMs = 0;
     static uint8_t  sDriftStrikes = 0;
     uint32_t nowCh = (uint32_t)millis();
-    if (gEspNowChannelResyncPending || (nowCh - sLastChannelCheckMs >= 15000)) {
-      gEspNowChannelResyncPending = false;
+    const bool resyncRequested =
+        gEspNowChannelResyncPending.exchange(false, std::memory_order_acq_rel);
+    if (resyncRequested || (nowCh - sLastChannelCheckMs >= 15000)) {
       sLastChannelCheckMs = nowCh;
       if (gEspNow && gEspNow->initialized) {
         uint8_t prev = gEspNow->channel;
         uint8_t want = espnowComputeChannel();
         if (want != prev) {
-          espnowApplyChannel(want);
-          logSystemEvent("ESPNOW", "channel re-synced %u -> %u (%s)",
-                         (unsigned)prev, (unsigned)want,
-                         WiFi.status() == WL_CONNECTED ? "following AP" : "pinned offline");
+          if (espnowApplyChannel(want)) {
+            logSystemEvent("ESPNOW", "channel re-synced %u -> %u (%s)",
+                           (unsigned)prev, (unsigned)want,
+                           WiFi.status() == WL_CONNECTED ? "following AP" : "pinned offline");
+          }
         }
         // Cheap drift self-heal: when the user has deliberately pinned a channel
         // (setting 1-13) and the STA isn't associated, verify the ACTUAL radio
@@ -9243,9 +9496,10 @@ void processMeshHeartbeats() {
           if (esp_wifi_get_channel(&hwCh, &drs) == ESP_OK && hwCh != 0 && hwCh != want) {
             if (++sDriftStrikes >= 2) {
               sDriftStrikes = 0;
-              espnowApplyChannel(want);
-              logSystemEvent("ESPNOW", "channel drift corrected: radio %u -> pinned %u",
-                             (unsigned)hwCh, (unsigned)want);
+              if (espnowApplyChannel(want)) {
+                logSystemEvent("ESPNOW", "channel drift corrected: radio %u -> pinned %u",
+                               (unsigned)hwCh, (unsigned)want);
+              }
             }
           } else {
             sDriftStrikes = 0;
@@ -9672,16 +9926,20 @@ void processMeshHeartbeats() {
       if (entry.used) {
         String devName = String(entry.deviceName);
         if (devName.length() == 0) devName = formatMacAddress(entry.srcMac);
+        // Treat a paired peer as a separate trust domain. Mixed-version peers
+        // may not redact streamed command output before transmission.
+        const String safeStreamContent =
+            redactOutputForLog(String(entry.content));
         // reqId = the originating command's msgId so remote command output
         // correlates to its command (streaming preserved — this only tags it).
         // Legacy startstream sends msgId 0, so its telemetry stays "unsolicited".
         storeMessageInPeerHistory(entry.srcMac,
                                   devName.c_str(),
-                                  entry.content,
+                                  safeStreamContent.c_str(),
                                   true,
                                   MSG_CMD_RESULT,   // remote-command stream output, not chat
                                   entry.cmdMsgId);
-        BROADCAST_PRINTF("[STREAM:%s] %s", devName.c_str(), entry.content);
+        BROADCAST_PRINTF("[STREAM:%s] %s", devName.c_str(), safeStreamContent.c_str());
         entry.used = false;
       }
       tail = (tail + 1) & gEspNow->streamQueueMask;
@@ -9695,20 +9953,25 @@ void processMeshHeartbeats() {
     gEspNow->deferredCmdRespPending = false;
     String deviceName = String(gEspNow->deferredCmdRespDeviceName);
     if (deviceName.length() == 0) deviceName = formatMacAddress(gEspNow->deferredCmdRespSrcMac);
+    // Re-redact at the receiving trust boundary. This protects mixed-version
+    // meshes (or a compromised paired peer) whose response may still echo a
+    // credential-bearing unknown command.
+    const String safeDeferredResult =
+        redactEspNowCommandResult(String(gEspNow->deferredCmdRespResult));
     // Chunk the result: a command's output can exceed the 256 B record slot
     // (e.g. `files json` for a non-trivial dir). Storing it whole truncated it
     // mid-JSON; chunking lets the client reassemble by reqId.
     storeReceivedMessageChunked(gEspNow->deferredCmdRespSrcMac,
                                 deviceName.c_str(),
-                                gEspNow->deferredCmdRespResult,
+                                safeDeferredResult.c_str(),
                                 true,
                                 MSG_CMD_RESULT,   // remote-command result, not chat — preserve the CMD_RESP class
                                 gEspNow->deferredCmdRespReqId);
     
     if (gEspNow->deferredCmdRespSuccess) {
-      BROADCAST_PRINTF("[ESP-NOW] Command result from %s: %s", deviceName.c_str(), gEspNow->deferredCmdRespResult);
+      BROADCAST_PRINTF("[ESP-NOW] Command result from %s: %s", deviceName.c_str(), safeDeferredResult.c_str());
     } else {
-      BROADCAST_PRINTF("[ESP-NOW] Command FAILED from %s: %s", deviceName.c_str(), gEspNow->deferredCmdRespResult);
+      BROADCAST_PRINTF("[ESP-NOW] Command FAILED from %s: %s", deviceName.c_str(), safeDeferredResult.c_str());
     }
 
     // Bus event: the result of a remote command we sent came back. Event-only
@@ -9720,7 +9983,7 @@ void processMeshHeartbeats() {
       snprintf(resDetail, sizeof(resDetail), "#%lu %s %s",
                (unsigned long)gEspNow->deferredCmdRespReqId,
                gEspNow->deferredCmdRespSuccess ? "ok" : "failed",
-               gEspNow->deferredCmdRespResult);
+               safeDeferredResult.c_str());
       systemEventPost(SYSEVT_REMOTE_CMD_RESULT, deviceName.c_str(), resDetail);
     }
   }
@@ -10188,14 +10451,46 @@ void processMeshHeartbeats() {
 
 static void espnowHeartbeatTaskFn(void* pvParam) {
   (void)pvParam;
-  for (;;) {
+  while (!gEspNowHbStopRequested.load(std::memory_order_acquire)) {
     processMeshHeartbeats();
+    if (gEspNowHbStopRequested.load(std::memory_order_acquire)) break;
     vTaskDelay(pdMS_TO_TICKS(10));
   }
+
+  // The lifecycle owner deletes us only after this explicit join point. Park
+  // after publishing completion so no RAII runtime guard or RX-ring reference
+  // can be stranded by a force-delete in the middle of processMeshHeartbeats.
+  xSemaphoreGive(gEspNowHbStopDone);
+  vTaskSuspend(nullptr);
 }
 
 bool startEspNowTask() {
-  if (gEspNowHbTaskHandle != nullptr) return true;
+  if (!gEspNowHbLifecycleMutex ||
+      xSemaphoreTake(gEspNowHbLifecycleMutex, portMAX_DELAY) != pdTRUE) {
+    return false;
+  }
+  struct HbLifecycleGuard {
+    ~HbLifecycleGuard() { xSemaphoreGive(gEspNowHbLifecycleMutex); }
+  } lifecycleGuard;
+
+  taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
+  if (gEspNowHbTaskHandle != nullptr) {
+    bool running = !gEspNowHbStopRequested.load(std::memory_order_relaxed);
+    taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+    return running;
+  }
+  if (!gEspNowHbStopDone) {
+    gEspNowHbStopDone = xSemaphoreCreateBinaryStatic(&gEspNowHbStopDoneStorage);
+  }
+  SemaphoreHandle_t stopDone = gEspNowHbStopDone;
+  taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+  if (!stopDone) return false;
+
+  // A timed-out stop may leave a completion token for the retrying lifecycle
+  // owner. A genuinely stopped instance has no task, so drain before reuse.
+  (void)xSemaphoreTake(stopDone, 0);
+  gEspNowHbStopRequested.store(false, std::memory_order_release);
+  taskStackRecord("espnow_task", ESPNOW_HB_STACK_WORDS);
   BaseType_t ret = xTaskCreatePinnedToCore(
     espnowHeartbeatTaskFn,
     "espnow_task",
@@ -10205,18 +10500,80 @@ bool startEspNowTask() {
     &gEspNowHbTaskHandle,
     0
   );
+  if (ret != pdPASS) {
+    taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
+    gEspNowHbTaskHandle = nullptr;
+    taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+    gEspNowHbStopRequested.store(true, std::memory_order_release);
+  }
   return (ret == pdPASS);
 }
 
-void stopEspNowTask() {
-  if (gEspNowHbTaskHandle) {
-    vTaskDelete(gEspNowHbTaskHandle);
-    gEspNowHbTaskHandle = nullptr;
+bool stopEspNowTask(uint32_t timeoutMs) {
+  if (!gEspNowHbLifecycleMutex ||
+      xSemaphoreTake(gEspNowHbLifecycleMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
+    return false;
   }
+  struct HbLifecycleGuard {
+    ~HbLifecycleGuard() { xSemaphoreGive(gEspNowHbLifecycleMutex); }
+  } lifecycleGuard;
+
+  TaskHandle_t task = nullptr;
+  SemaphoreHandle_t stopDone = nullptr;
+  taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
+  task = gEspNowHbTaskHandle;
+  stopDone = gEspNowHbStopDone;
+  if (!task) {
+    taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+    return true;
+  }
+  if (task == xTaskGetCurrentTaskHandle()) {
+    taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+    DEBUGF(DEBUG_ESPNOW_CORE, "[ESP-NOW] heartbeat stop rejected from heartbeat task");
+    return false;
+  }
+  gEspNowHbStopRequested.store(true, std::memory_order_release);
+  taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+
+  // Wake its normal 10 ms delay. If it is in a handler, the stop flag is seen
+  // immediately after processMeshHeartbeats returns and all stack guards unwind.
+  (void)xTaskAbortDelay(task);
+  if (!stopDone || xSemaphoreTake(stopDone, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
+    DEBUGF(DEBUG_ESPNOW_CORE,
+           "[ESP-NOW] heartbeat stop TIMEOUT after %ums; task retained for retry",
+           (unsigned)timeoutMs);
+    return false;
+  }
+
+  vTaskDelete(task);
+  taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
+  if (gEspNowHbTaskHandle == task) gEspNowHbTaskHandle = nullptr;
+  taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+  return true;
 }
 
-TaskHandle_t getEspNowTaskHandle() {
-  return gEspNowHbTaskHandle;
+bool getEspNowTaskStackSnapshot(TaskHandle_t* outHandle,
+                                UBaseType_t* outWatermark) {
+  if (!outHandle || !outWatermark || !gEspNowHbLifecycleMutex ||
+      xSemaphoreTake(gEspNowHbLifecycleMutex, portMAX_DELAY) != pdTRUE) {
+    return false;
+  }
+
+  taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
+  TaskHandle_t task = gEspNowHbTaskHandle;
+  taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+  if (!task) {
+    xSemaphoreGive(gEspNowHbLifecycleMutex);
+    return false;
+  }
+
+  // The lifecycle mutex spans both operations, so stopEspNowTask cannot delete
+  // this task generation while the FreeRTOS query dereferences its TCB.
+  const UBaseType_t watermark = uxTaskGetStackHighWaterMark(task);
+  *outHandle = task;
+  *outWatermark = watermark;
+  xSemaphoreGive(gEspNowHbLifecycleMutex);
+  return true;
 }
 
 // =============================================================================
@@ -10314,9 +10671,19 @@ void espnowAppPingClear() {
 // usable from any context. Cleared on each new init attempt.
 EXT_RAM_BSS_ATTR static char gLastInitErrorReason[96];
 
+// Used by the heartbeat-create failure path to unwind a fully registered radio
+// instance. False suppresses an ESP-NOW-OFF event because ON was never posted.
+static bool deinitEspNow(bool publishOffEvent = true);
+
 // Helper: Initialize ESP-NOW subsystem (static - internal use only)
 static bool initEspNow() {
   gLastInitErrorReason[0] = '\0';
+  if (gEspNowDeinitInProgress.load(std::memory_order_acquire)) {
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             "previous shutdown is still in progress");
+    broadcastOutput("[ESP-NOW] Cannot start: previous shutdown is still in progress");
+    return false;
+  }
   // Capture heap before initialization
   size_t heapBefore = ESP.getFreeHeap();
   
@@ -10517,6 +10884,19 @@ static bool initEspNow() {
     return false;
   }
 
+  // Serialize the radio-mode/AP/channel transaction with explicit WiFi scans.
+  // Do not acquire this until the non-radio allocations above are complete,
+  // and do not retain it through the rest of ESP-NOW initialization. A scan or
+  // connection already using the single radio makes this init attempt fail
+  // cleanly and retryably instead of mutating the driver underneath it.
+  WifiRadioMutationGuard radioGuard(250);
+  if (!radioGuard.acquired()) {
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             "WiFi radio busy (scan or connection in progress)");
+    broadcastOutput("[ESP-NOW] Cannot start: WiFi radio is busy; retry openespnow");
+    return false;
+  }
+
   // Pause I2C sensor polling during WiFi mode change.
   // WiFi.mode(WIFI_AP_STA) temporarily disables interrupts on Core 0;
   // if an I2C transaction's ISR is pending, the interrupt watchdog fires.
@@ -10524,10 +10904,18 @@ static bool initEspNow() {
   if (mgr) mgr->pausePolling();
   vTaskDelay(pdMS_TO_TICKS(50));  // Let in-flight I2C transactions complete
 
-  // Set WiFi mode to STA+AP to enable ESP-NOW
-  WiFi.mode(WIFI_AP_STA);
+  // ESP-NOW peers use WIFI_IF_STA. Keep AP+STA here only because this project
+  // uses a hidden, non-connectable AP to park the shared radio on the mesh
+  // channel while the station is not associated.
+  const bool modeReady = WiFi.mode(WIFI_AP_STA);
 
   if (mgr) mgr->resumePolling();
+  if (!modeReady) {
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             "failed to place WiFi radio in AP+STA mode");
+    broadcastOutput("[ESP-NOW] Cannot start: WiFi AP+STA mode change failed");
+    return false;
+  }
 
   // Keep the radio awake whenever ESP-NOW is up. The default WIFI_PS_MIN_MODEM
   // sleeps the modem between beacons, which silently drops asynchronous ESP-NOW
@@ -10541,24 +10929,44 @@ static bool initEspNow() {
   // channel (gSettings.espnowChannel) or the derived fallback. See espnowComputeChannel.
   uint8_t effectiveChannel = espnowComputeChannel();
 
-  // Hide the soft AP so it doesn't broadcast an SSID (ESP_XXXXXX) in WiFi scans.
-  // ESP-NOW requires AP mode but we don't want devices appearing as access
-  // points. Park the hidden AP on the effective channel so the shared radio
-  // sits there while the STA is not associated.
+  // Hide the channel-parking soft AP so it doesn't broadcast an SSID
+  // (ESP_XXXXXX) in WiFi scans. AP mode is not required by ESP-NOW itself;
+  // this project keeps it solely to hold the effective mesh channel while the
+  // STA is not associated.
   {
     wifi_config_t ap_config;
     memset(&ap_config, 0, sizeof(ap_config));
-    esp_wifi_get_config(WIFI_IF_AP, &ap_config);
+    const esp_err_t getApErr = esp_wifi_get_config(WIFI_IF_AP, &ap_config);
+    if (getApErr != ESP_OK) {
+      snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+               "failed to read channel-parking AP config (%s)",
+               esp_err_to_name(getApErr));
+      broadcastOutput("[ESP-NOW] Cannot start: channel-parking AP is unavailable");
+      return false;
+    }
     ap_config.ap.ssid_hidden = 1;       // Hide SSID from scan results
     ap_config.ap.max_connection = 0;     // Reject all STA connections
     ap_config.ap.channel = effectiveChannel;  // park radio here when STA offline
-    esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    const esp_err_t setApErr = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    if (setApErr != ESP_OK) {
+      snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+               "failed to configure channel-parking AP (%s)",
+               esp_err_to_name(setApErr));
+      broadcastOutput("[ESP-NOW] Cannot start: channel-parking AP configuration failed");
+      return false;
+    }
   }
 
   // Set gEspNow->channel and pin the radio when the STA is offline (no-op while
   // joined — the AP owns the channel). Peers are added with channel 0 so they
   // follow whatever the radio lands on.
-  espnowApplyChannel(effectiveChannel);
+  if (!espnowApplyChannel(effectiveChannel)) {
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             "failed to apply ESP-NOW channel %u",
+             (unsigned)effectiveChannel);
+    broadcastOutput("[ESP-NOW] Cannot start: radio channel could not be applied");
+    return false;
+  }
 
   // Initialize ESP-NOW. Translate the esp_err_t into a plain-English
   // explanation of what's actually wrong so the user doesn't have to look
@@ -10599,6 +11007,8 @@ static bool initEspNow() {
     logSystemEvent("ESPNOW", "init FAILED — mesh unavailable: %s (heap=%uB)", reason, (unsigned)heapNow);
     return false;
   }
+  gEspNowRadioDeinitialized = false;
+  radioGuard.release();
 
   // Inbound RX ring. INTERNAL DRAM, not PSRAM: the WiFi-task recv callback
   // writes it on every frame. It is claimed here rather than at link time so
@@ -10614,16 +11024,58 @@ static bool initEspNow() {
       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
                "out of internal DRAM (RX ring)");
       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate inbound RX ring");
-      esp_now_deinit();
+      const esp_err_t cleanupErr = esp_now_deinit();
+      if (cleanupErr == ESP_OK || cleanupErr == ESP_ERR_ESPNOW_NOT_INIT) {
+        gEspNowRadioDeinitialized = true;
+      } else {
+        gEspNowDeinitInProgress.store(true, std::memory_order_release);
+        broadcastOutput("[ESP-NOW] WARNING: radio cleanup is pending; run closeespnow");
+      }
       return false;
     }
     gEspNowRxHead = 0;
     gEspNowRxTail = 0;
   }
 
-  // Register callbacks (direct handler)
-  esp_now_register_recv_cb(onEspNowDataReceived);
-  esp_now_register_send_cb(onEspNowDataSent);
+  // Enable callback admission only after the RX ring exists. Registration can
+  // deliver immediately on the WiFi task, so admission must precede the first
+  // register call; a partial failure disables admission before unwinding.
+  setEspNowCallbacksEnabled(true);
+  esp_err_t recvCbErr = esp_now_register_recv_cb(onEspNowDataReceived);
+  esp_err_t sendCbErr = esp_now_register_send_cb(onEspNowDataSent);
+  if (recvCbErr != ESP_OK || sendCbErr != ESP_OK) {
+    setEspNowCallbacksEnabled(false);
+    esp_now_unregister_recv_cb();
+    esp_now_unregister_send_cb();
+    const esp_err_t cleanupErr = esp_now_deinit();
+    const bool radioClean =
+        cleanupErr == ESP_OK || cleanupErr == ESP_ERR_ESPNOW_NOT_INIT;
+    if (radioClean) gEspNowRadioDeinitialized = true;
+    // A callback admitted before the disable edge still owns the ring. Free it
+    // only after a proven join; on timeout retain it for the next init/close
+    // attempt rather than turning a registration error into a delayed UAF.
+    const bool callbacksClean = waitForEspNowCallbacks(1000);
+    if (callbacksClean) {
+      heap_caps_free(gEspNowRxRing);
+      gEspNowRxRing = nullptr;
+      gEspNowRxHead = 0;
+      gEspNowRxTail = 0;
+    } else {
+      broadcastOutput("[ESP-NOW] WARNING: callback cleanup timed out; RX ring retained");
+    }
+    if (!radioClean || !callbacksClean) {
+      // Expose a retryable close path even though initialized was never
+      // published. closeespnow can now finish the driver/callback join and
+      // release any retained ring instead of stranding it until reboot.
+      gEspNowDeinitInProgress.store(true, std::memory_order_release);
+    }
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             "callback registration failed (recv=%s send=%s%s)",
+             esp_err_to_name(recvCbErr), esp_err_to_name(sendCbErr),
+             (!radioClean || !callbacksClean) ? "; cleanup pending" : "");
+    BROADCAST_PRINTF("[ESP-NOW] ERROR: %s", gLastInitErrorReason);
+    return false;
+  }
 
   gEspNow->initialized = true;
 
@@ -10633,7 +11085,14 @@ static bool initEspNow() {
   // every bonded sensor frame, and streaming silently breaks. See
   // System_ESPNow_Tx.h.
   if (!espnowtx::init()) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] WARN: dispatcher init failed — sends fall back to producer tasks");
+    broadcastOutput("[ESP-NOW] ERROR: TX dispatcher failed to start; unwinding ESP-NOW init");
+    logSystemEvent("ESPNOW", "init FAILED — TX dispatcher did not start (out of memory?)");
+    const bool unwound = deinitEspNow(false);
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             unwound
+                 ? "TX dispatcher creation failed (cleanup complete; retry is safe)"
+                 : "TX dispatcher creation failed (cleanup pending; run closeespnow)");
+    return false;
   }
 
   // Apply persisted mesh/direct mode from settings (applySettings runs before gEspNow exists at boot)
@@ -10776,12 +11235,16 @@ static bool initEspNow() {
     broadcastOutput("[ESP-NOW] WARNING: Device name not set in settings");
   }
 
-  // Broadcast boot notification to all peers. This happens BEFORE the
-  // heartbeat-task start below: gEspNow->initialized is already true by this
-  // point, so a task-start failure returns with the mesh half-up and every
-  // retry short-circuits on the "Already initialized" early-return — if the
-  // notification only fired after the task start, that boot would never
-  // announce itself. The TX path (espnowtx::init) is already up here.
+  // The driver, callback admission/RX ring, tracker table, and restored peers
+  // now belong to this instance. Publish send admission only at this point;
+  // while stopped (and throughout partial init) low-level v4 callers fail at
+  // their guard even if they forgot to check gEspNow->initialized.
+  setEspNowRuntimeEnabled(true);
+
+  // Broadcast boot notification to all peers before starting the heartbeat
+  // task. The TX path is already live here. If task creation fails below, the
+  // bounded deinit path closes the dispatcher/callbacks/driver again so a later
+  // openespnow can retry instead of inheriting a half-initialized instance.
   {
     extern uint32_t gBootCounter;
     time_t now = time(nullptr);
@@ -10793,11 +11256,14 @@ static bool initEspNow() {
 
   // Start ESP-NOW heartbeat task (parallel processing)
   if (!startEspNowTask()) {
-    broadcastOutput("[ESP-NOW] WARNING: Failed to start heartbeat task - mesh features may not work");
-    // gEspNow->initialized was already set true above, so without this the device
-    // is left half-initialized (no 'init OK', no 'init FAILED') — a heap-starved
-    // heartbeat-task failure would otherwise be durably invisible.
+    setEspNowRuntimeEnabled(false);
+    broadcastOutput("[ESP-NOW] ERROR: Failed to start heartbeat task; unwinding ESP-NOW init");
     logSystemEvent("ESPNOW", "init FAILED — heartbeat task did not start (out of memory?), mesh features unavailable");
+    const bool unwound = deinitEspNow(false);
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             unwound
+                 ? "heartbeat task creation failed (cleanup complete; retry is safe)"
+                 : "heartbeat task creation failed (cleanup pending; run closeespnow)");
     return false;
   }
   
@@ -10807,7 +11273,7 @@ static bool initEspNow() {
   
   broadcastOutput("[ESP-NOW] System initialized successfully");
   BROADCAST_PRINTF("[ESP-NOW] Heap allocated: ~%u KB (includes task stack, buffers, peer storage)", (unsigned)(heapUsed / 1024));
-  broadcastOutput("[ESP-NOW] NOTE: This heap remains allocated until device reboot. Disable and re-init will not free all memory.");
+  broadcastOutput("[ESP-NOW] NOTE: closeespnow releases the TX dispatcher, RX ring, and broadcast tracker; durable peer/state caches remain for fast re-init.");
 
   systemEventPost(SYSEVT_ESPNOW_ON);
   logSystemEvent("ESPNOW", "init OK — mesh online on channel %d (mode=%s)",
@@ -10880,26 +11346,76 @@ const char* cmd_espnow_init(const String& argsInput) {
 }
 
 // Helper: Deinitialize ESP-NOW subsystem (static - internal use only)
-static bool deinitEspNow() {
-  if (!gEspNow || !gEspNow->initialized) {
+static bool deinitEspNow(bool publishOffEvent) {
+  if (!gEspNow || (!gEspNow->initialized &&
+                   !gEspNowDeinitInProgress.load(std::memory_order_acquire))) {
     broadcastOutput("[ESP-NOW] Not initialized, nothing to deinit");
     return false;
   }
 
+  gEspNowDeinitInProgress.store(true, std::memory_order_release);
   size_t heapBefore = ESP.getFreeHeap();
 
-  // 1. Stop heartbeat/mesh task
-  stopEspNowTask();
-  broadcastOutput("[ESP-NOW] Heartbeat task stopped");
-
-  // 2. Stop any active output streaming
+  // Reject the high-level producers that use the public initialized gate, but
+  // deliberately leave RX callbacks and espnow_task alive while the dispatcher
+  // joins: an already-executing fragmented send may still need its final ACK.
+  gEspNow->initialized = false;
   if (gEspNow->streamActive) {
     gEspNow->streamActive = false;
     gEspNow->streamTarget = nullptr;
     broadcastOutput("[ESP-NOW] Output streaming stopped");
   }
 
-  // 3. Cleanup active file transfers (Phase 4 multi-slot: walk + release all
+  // A worker-side sensor broadcaster is a producer outside espnow_tx. Stop it
+  // without emitting per-sensor OFF frames, join it, and release its shared
+  // PSRAM buffer before closing the dispatcher. This also clears bond-master
+  // UI/lease flags so re-init starts from a clean streaming state.
+  if (!shutdownSensorDataStreamingForEspNowClose()) {
+    broadcastOutput("[ESP-NOW] ERROR: sensor broadcaster did not quiesce; shutdown remains pending");
+    return false;
+  }
+
+  // CLOSING rejects every new queue claim. Queued jobs are failed/freed and
+  // synchronous waiters are woken; only the one job already executing may
+  // finish. The queue/task/pool are deleted only after the explicit join.
+  if (!espnowtx::stop(20000)) {
+    broadcastOutput("[ESP-NOW] ERROR: TX dispatcher did not quiesce; shutdown remains pending");
+    return false;
+  }
+
+  // Close admission for every direct/holdout send, but keep callbacks and the
+  // RX drainer alive until the pre-close count reaches zero: an already-admitted
+  // fragmented holdout may still require its final ACK. Once it retires, close
+  // callback admission so an RF flood cannot replenish the ring indefinitely.
+  setEspNowRuntimeEnabled(false);
+  if (!waitForEspNowRuntimeOps(5000)) {
+    broadcastOutput("[ESP-NOW] ERROR: ESP-NOW send paths did not quiesce; shutdown remains pending");
+    return false;
+  }
+  setEspNowCallbacksEnabled(false);
+
+  // Unregister now (before joining the sole RX consumer) to stop new driver
+  // callbacks. The registered wrappers still protect any callback already in
+  // flight; their count is waited after the task join.
+  if (!gEspNowRadioDeinitialized) {
+    esp_err_t recvErr = esp_now_unregister_recv_cb();
+    esp_err_t sendErr = esp_now_unregister_send_cb();
+    if (recvErr != ESP_OK && recvErr != ESP_ERR_ESPNOW_NOT_INIT) {
+      BROADCAST_PRINTF("[ESP-NOW] WARNING: unregister recv callback returned %s",
+                       esp_err_to_name(recvErr));
+    }
+    if (sendErr != ESP_OK && sendErr != ESP_ERR_ESPNOW_NOT_INIT) {
+      BROADCAST_PRINTF("[ESP-NOW] WARNING: unregister send callback returned %s",
+                       esp_err_to_name(sendErr));
+    }
+  }
+  if (!stopEspNowTask(5000)) {
+    broadcastOutput("[ESP-NOW] ERROR: heartbeat/RX task did not quiesce; shutdown remains pending");
+    return false;
+  }
+  broadcastOutput("[ESP-NOW] Heartbeat task stopped");
+
+  // Cleanup active file transfers (Phase 4 multi-slot: walk + release all
   // slots; equivalent to the old single-slot delete).
   {
     uint8_t active = fileSlotsActiveCount();
@@ -10920,7 +11436,7 @@ static bool deinitEspNow() {
     }
   }
 
-  // 4. Clear retry queue entries
+  // Clear retry queue entries.
   {
     MeshRetryGuard guard("stopESPNow");
     if (guard.held) {
@@ -10928,20 +11444,45 @@ static bool deinitEspNow() {
     }
   }
 
-  // 6. Unregister callbacks and deinit ESP-NOW
-  esp_now_unregister_recv_cb();
-  esp_now_unregister_send_cb();
-  esp_err_t err = esp_now_deinit();
-  if (err != ESP_OK) {
-    BROADCAST_PRINTF("[ESP-NOW] WARNING: esp_now_deinit returned error %d", (int)err);
+  // Deinit after unregister/join, then wait the admission count. Late queued
+  // callbacks still enter the wrapper but admission is disabled, so they return
+  // without dereferencing freed subsystem storage.
+  if (!gEspNowRadioDeinitialized) {
+    esp_err_t err = esp_now_deinit();
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_NOT_INIT) {
+      BROADCAST_PRINTF("[ESP-NOW] ERROR: esp_now_deinit returned %s; shutdown remains pending",
+                       esp_err_to_name(err));
+      return false;
+    }
+    gEspNowRadioDeinitialized = true;
+  }
+  if (!waitForEspNowCallbacks(2000)) {
+    broadcastOutput("[ESP-NOW] ERROR: ESP-NOW callbacks did not quiesce; resources retained");
+    return false;
   }
 
-  // 7. Reset state (keep gEspNow struct allocated for potential re-init)
+  // The callback producer and RX consumer are both fenced. Broadcast writers
+  // were covered by the runtime-op wait, so both internal-DRAM tables can now
+  // be released without a callback/heartbeat/broadcaster UAF.
+  if (gEspNowRxRing) {
+    heap_caps_free(gEspNowRxRing);
+    gEspNowRxRing = nullptr;
+  }
+  gEspNowRxHead = 0;
+  gEspNowRxTail = 0;
+  if (gBroadcastTrackers) {
+    heap_caps_free(gBroadcastTrackers);
+    gBroadcastTrackers = nullptr;
+  }
+  gBroadcastsTracked = 0;
+  gBroadcastsCompleted = 0;
+  gBroadcastsTimedOut = 0;
+
+  // Reset state (keep the large PSRAM gEspNow struct allocated for re-init).
   // Routes describe radio reachability; with the radio down every one of them
   // is a lie. Clearing here also means a re-init starts from a clean table
   // rather than inheriting paths through peers that may have moved on.
   meshRouterReset();
-  gEspNow->initialized = false;
   gEspNow->channel = 0;
   gEspNow->encryptionEnabled = false;
   gEspNow->passphrase = "";
@@ -10951,14 +11492,23 @@ static bool deinitEspNow() {
   size_t heapFreed = heapAfter - heapBefore;
   BROADCAST_PRINTF("[ESP-NOW] Deinitialized. Freed ~%u KB heap", (unsigned)(heapFreed / 1024));
 
-  systemEventPost(SYSEVT_ESPNOW_OFF);
+  if (publishOffEvent) systemEventPost(SYSEVT_ESPNOW_OFF);
+  gEspNowRadioDeinitialized = false;  // next successful init owns a fresh driver instance
+  // Runtime admission deliberately remains CLOSED while stopped. Publish IDLE
+  // last; a future init reopens admission only after its resources are valid.
+  gEspNowDeinitInProgress.store(false, std::memory_order_release);
   return true;
+}
+
+bool espnowShutdownPending() {
+  return gEspNowDeinitInProgress.load(std::memory_order_acquire);
 }
 
 // ESP-NOW deinit command
 const char* cmd_espnow_deinit(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow || !gEspNow->initialized) {
+  if (!gEspNow || (!gEspNow->initialized &&
+                   !gEspNowDeinitInProgress.load(std::memory_order_acquire))) {
     return "Error: ESP-NOW is not initialized";
   }
 
@@ -12198,7 +12748,9 @@ const char* cmd_espnow_channel(const String& argsInput) {
     if (!(gEspNow && gEspNow->initialized))
       return "Error: ESP-NOW not running (run 'openespnow' first)";
     uint8_t want = espnowComputeChannel();
-    espnowApplyChannel(want);
+    if (!espnowApplyChannel(want, 250)) {
+      return "Error: WiFi radio busy; ESP-NOW channel re-sync is pending. Retry shortly.";
+    }
     uint8_t hwCh = 0; wifi_second_chan_t sec2;
     if (esp_wifi_get_channel(&hwCh, &sec2) != ESP_OK) hwCh = 0;
     if (!ensureDebugBuffer()) return "Error";
@@ -12225,7 +12777,9 @@ const char* cmd_espnow_channel(const String& argsInput) {
 
   // Apply live so the change takes effect without a re-init.
   if (gEspNow && gEspNow->initialized) {
-    espnowApplyChannel(espnowComputeChannel());
+    if (!espnowApplyChannel(espnowComputeChannel(), 250)) {
+      return "ESP-NOW channel preference saved; live re-sync is pending because the WiFi radio is busy.";
+    }
     radioCh = (int)gEspNow->channel;
   }
 
@@ -12777,6 +13331,7 @@ const char* cmd_espnow_roomcmd(const String& argsInput) {
   String user = a.arg(1);
   String pass = a.arg(2);
   String command = a.remaining(2);
+  const String safeCommand = redactCmdForAudit(command);
 
   char* buf = getDebugBuffer();
   int pos = 0;
@@ -12818,7 +13373,7 @@ const char* cmd_espnow_roomcmd(const String& argsInput) {
   } else {
     cliHint("each device's reply returns asynchronously - read them with 'espnowmessages json'");
     pos += snprintf(buf + pos, 1024 - pos, "Sent '%s' to %d device(s) in %s",
-                    command.c_str(), sent, targetRoom.c_str());
+                    safeCommand.c_str(), sent, targetRoom.c_str());
   }
   return buf;
 }
@@ -12832,6 +13387,7 @@ const char* cmd_espnow_tagcmd(const String& argsInput) {
   String user = a.arg(1);
   String pass = a.arg(2);
   String command = a.remaining(2);
+  const String safeCommand = redactCmdForAudit(command);
 
   targetTag.toLowerCase();
   char* buf = getDebugBuffer();
@@ -12881,7 +13437,7 @@ const char* cmd_espnow_tagcmd(const String& argsInput) {
   } else {
     cliHint("each device's reply returns asynchronously - read them with 'espnowmessages json'");
     pos += snprintf(buf + pos, 1024 - pos, "Sent '%s' to %d device(s) with tag '%s'",
-                    command.c_str(), sent, targetTag.c_str());
+                    safeCommand.c_str(), sent, targetTag.c_str());
   }
   return buf;
 }
@@ -14027,10 +14583,10 @@ const char* cmd_espnow_unpair(const String& argsInput) {
 
   String deviceName = getEspNowDeviceName(mac);
 
-  esp_err_t result = esp_now_del_peer(mac);
-  if (result != ESP_OK) {
+  if (!espnowDeletePeerRuntime(mac)) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to unpair device: %d", result);
+    snprintf(getDebugBuffer(), 1024,
+             "Error: Failed to unpair device (ESP-NOW closing or peer delete failed)");
     return getDebugBuffer();
   }
 
@@ -15242,6 +15798,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
   String username = a.arg(1);
   String password = a.arg(2);
   String command = a.remaining(2);
+  const String safeCommand = redactCmdForAudit(command);
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
@@ -15292,7 +15849,8 @@ const char* cmd_espnow_remote(const String& argsInput) {
   // the later remote_cmd_result by the "#reqId" prefix.
   {
     char sentDetail[96];
-    snprintf(sentDetail, sizeof(sentDetail), "#%lu %s", (unsigned long)msgId, command.c_str());
+    snprintf(sentDetail, sizeof(sentDetail), "#%lu %s",
+             (unsigned long)msgId, safeCommand.c_str());
     systemEventPost(SYSEVT_REMOTE_CMD_SENT, target.c_str(), sentDetail);
   }
 
@@ -15302,8 +15860,10 @@ const char* cmd_espnow_remote(const String& argsInput) {
   {
     char cmdName[32];
     const char* cstr = command.c_str();
-    const char* sp = strchr(cstr, ' ');
-    size_t nlen = sp ? (size_t)(sp - cstr) : strlen(cstr);
+    while (*cstr && isspace(static_cast<unsigned char>(*cstr))) cstr++;
+    const char* cmdEnd = cstr;
+    while (*cmdEnd && !isspace(static_cast<unsigned char>(*cmdEnd))) cmdEnd++;
+    size_t nlen = (size_t)(cmdEnd - cstr);
     if (nlen > sizeof(cmdName) - 1) nlen = sizeof(cmdName) - 1;
     memcpy(cmdName, cstr, nlen);
     cmdName[nlen] = '\0';
@@ -15319,7 +15879,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
   }
   snprintf(remoteBuffer, sizeof(remoteBuffer),
            "Sent '%s' to %s. Output is ASYNC - read it with:  espnowmessages json 0 %02X:%02X:%02X:%02X:%02X:%02X  (match reqId %lu)",
-           command.c_str(), target.c_str(),
+           safeCommand.c_str(), target.c_str(),
            targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5],
            (unsigned long)msgId);
   return remoteBuffer;

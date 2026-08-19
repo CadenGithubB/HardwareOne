@@ -82,6 +82,20 @@ static bool mqttClientRunning = false;
 static unsigned long lastPublishTime = 0;
 static String lastError = "";
 
+static String redactMQTTCommandResult(const String& output) {
+  String safe = redactOutputForLog(output);
+  static const char kUnknownPrefix[] = "Unknown command: ";
+  if (!safe.startsWith(kUnknownPrefix)) return safe;
+  const int lineEnd = safe.indexOf('\n');
+  const int commandStart = strlen(kUnknownPrefix);
+  const String echoed = lineEnd >= 0
+                            ? safe.substring(commandStart, lineEnd)
+                            : safe.substring(commandStart);
+  String rebuilt = String(kUnknownPrefix) + redactCmdForAudit(echoed);
+  if (lineEnd >= 0) rebuilt += safe.substring(lineEnd);
+  return rebuilt;
+}
+
 // ============================================================================
 // External Sensor Storage
 // ============================================================================
@@ -439,7 +453,10 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   
   if (payload.length() == 0) return;
   
-  DEBUG_MQTT_COMMANDSF("Command payload: %s", payload.c_str());
+  // The JSON envelope carries both the MQTT password and the raw command.
+  // Never put it in diagnostics, even when command tracing is enabled.
+  DEBUG_MQTT_COMMANDSF("Command payload received: %d bytes",
+                       (int)payload.length());
   
   // Parse JSON payload
   PSRAM_JSON_DOC(doc);
@@ -465,8 +482,10 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   
   // Check for target field (mesh bridge routing)
   const char* target = doc["target"] | "";
+  const String safeCommand = redactCmdForAudit(String(command));
   
-  INFO_MQTT_COMMANDSF("Command from user '%s': %s%s%s", username, command,
+  INFO_MQTT_COMMANDSF("Command from user '%s': %s%s%s", username,
+               safeCommand.c_str(),
                strlen(target) > 0 ? " target=" : "", target);
   
   // Authenticate user
@@ -481,39 +500,72 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   }
   
   DEBUG_MQTT_COMMANDSF("Authentication successful for user '%s'", username);
+
+  extern bool submitAndExecuteSync(const Command& cmd, String& out);
+  auto executeMqttRegistryLine = [&](const String& line,
+                                     String& resultOut) -> bool {
+    Command queued;
+    queued.line = line;
+    queued.ctx.origin = ORIGIN_MQTT;
+    queued.ctx.auth.transport = SOURCE_MQTT;
+    queued.ctx.auth.user = username;
+    queued.ctx.auth.ip = "mqtt:" + gSettings.mqttHost;
+    queued.ctx.auth.path = "/mqtt/command";
+    queued.ctx.auth.opaque = nullptr;
+    queued.ctx.id = (uint32_t)millis();
+    queued.ctx.timestampMs = (uint32_t)millis();
+    queued.ctx.outputMask = MSG_ROUTE_FILE;
+    queued.ctx.validateOnly = false;
+    queued.ctx.captureOutput = false;
+    queued.ctx.replyHandle = nullptr;
+    queued.ctx.httpReq = nullptr;
+    return submitAndExecuteSync(queued, resultOut);
+  };
   
 #if ENABLE_ESPNOW
   // If target is specified, route command to mesh devices instead of executing locally
   if (strlen(target) > 0 && gSettings.meshRole == MESH_ROLE_MASTER) {
     String targetStr = target;
-    String cmdStr = command;
-    
+    String routedLine;
+    const char* routedKind = nullptr;
+
     // Route based on target prefix: "room:<name>", "tag:<name>", "device:<name_or_mac>"
     if (targetStr.startsWith("room:")) {
-      char argBuf[256];
-      snprintf(argBuf, sizeof(argBuf), "%s %s %s %s", targetStr.substring(5).c_str(), username, password, command);
-      const char* result = cmd_espnow_roomcmd(String(argBuf));
-      char respBuf[256];
-      snprintf(respBuf, sizeof(respBuf), "{\"ok\":true,\"routed\":\"room\",\"result\":\"%s\"}", result);
-      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), respBuf, 0, 0, false);
+      routedKind = "room";
+      routedLine = "espnowroomcmd " + targetStr.substring(5);
     } else if (targetStr.startsWith("tag:")) {
-      char argBuf[256];
-      snprintf(argBuf, sizeof(argBuf), "%s %s %s %s", targetStr.substring(4).c_str(), username, password, command);
-      const char* result = cmd_espnow_tagcmd(String(argBuf));
-      char respBuf[256];
-      snprintf(respBuf, sizeof(respBuf), "{\"ok\":true,\"routed\":\"tag\",\"result\":\"%s\"}", result);
-      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), respBuf, 0, 0, false);
+      routedKind = "tag";
+      routedLine = "espnowtagcmd " + targetStr.substring(4);
     } else if (targetStr.startsWith("device:")) {
-      char argBuf[256];
-      snprintf(argBuf, sizeof(argBuf), "%s %s %s %s", targetStr.substring(7).c_str(), username, password, command);
-      const char* result = cmd_espnow_remote(String(argBuf));
-      char respBuf[256];
-      snprintf(respBuf, sizeof(respBuf), "{\"ok\":true,\"routed\":\"device\",\"result\":\"%s\"}", result);
-      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), respBuf, 0, 0, false);
+      routedKind = "device";
+      routedLine = "espnowremote " + targetStr.substring(7);
     } else {
       esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
         "{\"ok\":false,\"error\":\"Unknown target prefix. Use room:, tag:, or device:\"}", 0, 0, false);
+      return;
     }
+
+    // These are admin-only registry commands. Never call their handlers
+    // directly from the MQTT callback: that bypasses authorization and cmd_exec
+    // serialization. The target credentials remain in the raw line only for
+    // encrypted peer delivery; every local sink sees the redacted form.
+    routedLine += " "; routedLine += username;
+    routedLine += " "; routedLine += password;
+    routedLine += " "; routedLine += command;
+    String routedResult;
+    const bool routedOk = executeMqttRegistryLine(routedLine, routedResult);
+    const String safeRoutedResult = redactMQTTCommandResult(routedResult);
+    PSRAM_JSON_DOC(routeResponse);
+    routeResponse["ok"] = routedOk;
+    routeResponse["routed"] = routedKind;
+    if (routedOk) routeResponse["result"] = safeRoutedResult;
+    else routeResponse["error"] = safeRoutedResult.length()
+                                      ? safeRoutedResult
+                                      : String("Command execution failed");
+    String routeJson;
+    serializeJson(routeResponse, routeJson);
+    esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
+                            routeJson.c_str(), 0, 0, false);
     return;
   }
 #endif
@@ -523,36 +575,24 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   // commands with every other command source (no concurrent-handler races on shared
   // state / static response buffers) and runs them on cmd_exec's 8 KB stack. The
   // mesh-routing path (room:/tag:/device:) above is unchanged.
-  extern bool submitAndExecuteSync(const Command& cmd, String& out);
-  Command uc;
-  uc.line = command;
-  uc.ctx.origin = ORIGIN_MQTT;
-  uc.ctx.auth.transport = SOURCE_MQTT;
-  uc.ctx.auth.user = username;
-  uc.ctx.auth.ip = "mqtt:" + gSettings.mqttHost;
-  uc.ctx.auth.path = "/mqtt/command";
-  uc.ctx.auth.opaque = nullptr;
-  uc.ctx.id = (uint32_t)millis();
-  uc.ctx.timestampMs = (uint32_t)millis();
-  uc.ctx.outputMask = MSG_ROUTE_FILE;  // audit to file log; response is the return value
-  uc.ctx.validateOnly = false;
-  uc.ctx.captureOutput = false;
-  uc.ctx.replyHandle = nullptr;
-  uc.ctx.httpReq = nullptr;
-
-  systemEventPost(SYSEVT_REMOTE_CMD_RX, username, command);
+  systemEventPost(SYSEVT_REMOTE_CMD_RX, username, safeCommand.c_str());
   String cmdResult;
-  bool success = submitAndExecuteSync(uc, cmdResult);
+  bool success = executeMqttRegistryLine(command, cmdResult);
+  const String safeResult = redactMQTTCommandResult(cmdResult);
 
   // Build and publish response
   PSRAM_JSON_DOC(respDoc);
   respDoc["ok"] = success;
   respDoc["user"] = username;
-  respDoc["cmd"] = command;
+  // Keep command correlation without reflecting a login password (or any
+  // other registered secret-bearing argument) back over MQTT.
+  respDoc["cmd"] = safeCommand;
   if (success) {
-    respDoc["result"] = cmdResult;
+    respDoc["result"] = safeResult;
   } else {
-    respDoc["error"] = cmdResult.length() > 0 ? cmdResult : String("Command execution failed");
+    respDoc["error"] = safeResult.length() > 0
+                           ? safeResult
+                           : String("Command execution failed");
   }
   
   String respStr;

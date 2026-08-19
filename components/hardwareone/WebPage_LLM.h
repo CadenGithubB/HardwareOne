@@ -11,13 +11,13 @@
   typedef void* httpd_handle_t;
 #endif
 
-#if ENABLE_ONDEVICE_LLM && ENABLE_HTTP_SERVER
+#if ENABLE_LLM_BACKEND && ENABLE_HTTP_SERVER
 void registerLLMHandlers(httpd_handle_t server);
 #else
 inline void registerLLMHandlers(httpd_handle_t) {}
 #endif
 
-#if ENABLE_ONDEVICE_LLM && ENABLE_HTTP_SERVER
+#if ENABLE_LLM_BACKEND && ENABLE_HTTP_SERVER
 
 inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
@@ -39,6 +39,13 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 .dot-ready{background:#4caf50}.dot-busy{background:#ff9800;animation:qa-pulse 1s ease-in-out infinite}.dot-off{background:#555}
 @keyframes qa-pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .qa-bar-state{font-weight:600;color:var(--panel-fg)}
+/* Measured load progress. Determinate on purpose — no indeterminate sweep
+   animation, because a sweep implies motion we cannot actually observe. When
+   there is no measurement the bar is hidden entirely rather than faked. */
+.qa-load{display:inline-block;width:120px;height:6px;border-radius:3px;
+         background:var(--border);overflow:hidden;flex-shrink:0}
+.qa-load-fill{display:block;height:100%;width:0;background:var(--accent);
+              transition:width .5s linear}
 .qa-bar-meta{color:var(--muted);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .qa-bar select{
   background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);
@@ -168,6 +175,12 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     <span class='qa-bar-dot dot-off' id='qa-dot'></span>
     <span class='qa-bar-state' id='qa-state'>Connecting...</span>
     <span class='qa-bar-meta' id='qa-meta'></span>
+    <!-- Measured load progress. Hidden unless the host is actually reporting a
+         percentage, so it never implies knowledge we do not have (an onboard
+         load has no such signal, and neither does external-server mode). -->
+    <span class='qa-load' id='qa-load' style='display:none'>
+      <span class='qa-load-fill' id='qa-load-fill'></span>
+    </span>
     <select id='qa-model' data-guest-hide><option value=''>Loading...</option></select>
     <button class='btn' onclick='qaLoadModel()' data-guest-hide>Load</button>
     <button class='btn' onclick='qaUnloadModel()' data-guest-hide>Unload</button>
@@ -190,6 +203,14 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       <textarea id='qa-input' rows='2'
         placeholder='Ask about Hardware One...' disabled data-guest-hide></textarea>
       <button id='qa-ask' class='btn' disabled onclick='qaAsk()' data-guest-hide>Ask</button>
+      <!-- Do: mode, as a real button rather than only a typed prefix. It is the
+           one path where a model's answer becomes an executed device command, so
+           it must be discoverable and reachable without a pointer: this is
+           tab-focusable and Enter/Space-activatable for free. Hidden entirely
+           unless the LOADED MODEL declares it can suggest commands. -->
+      <button id='qa-do' class='btn' style='display:none' disabled onclick='qaAsk("do")'
+              title='Ask for a Hardware One command instead of an answer'
+              data-guest-hide>Do:</button>
       <button id='qa-stop' class='btn' style='display:none' onclick='qaStop()' data-guest-hide>Stop</button>
     </div>
     <div class='qa-adv-body' id='qa-adv-body' data-guest-hide>
@@ -204,6 +225,9 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 )HTML", HTTPD_RESP_USE_STRLEN);
 
   // ── JavaScript ───────────────────────────────────────────────────────────
+  // The compiler never parses what follows — it is one opaque string literal to
+  // the build. This page's logic is covered on the host instead, by
+  // tools/webui/tests/test_llm_page.py, which extracts THIS block and runs it.
   httpd_resp_send_chunk(req, R"JS(
 <script>
 (function(){
@@ -211,8 +235,11 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   var inputEl   = document.getElementById('qa-input');
   var askBtn    = document.getElementById('qa-ask');
   var stopBtn   = document.getElementById('qa-stop');
+  var doBtn     = document.getElementById('qa-do');
   var dot       = document.getElementById('qa-dot');
   var stateEl   = document.getElementById('qa-state');
+  var loadEl     = document.getElementById('qa-load');
+  var loadFillEl = document.getElementById('qa-load-fill');
   var metaEl    = document.getElementById('qa-meta');
   var modelSel  = document.getElementById('qa-model');
   var initMsg   = document.getElementById('qa-init-msg');
@@ -220,6 +247,21 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   var abortCtrl = null;
   var currentCtx = null; // Track the most recent Q&A context
   var lastShownError = null; // Avoid repeating the same error message
+  // fetchStatus now runs on a heartbeat (see below), so its addSys() lines are
+  // EDGE-TRIGGERED off this signature. Without it a poll would reprint
+  // "Model loaded: …" into the chat log every few seconds.
+  var lastAnnounced  = null;
+  var lastState      = '';   // drives the heartbeat cadence (see scheduleBeat)
+  // Last host presence seen on a status poll. Kept so a load REJECTION can say
+  // WHY — the reject arrives on its own request and carries no host context,
+  // and "not available right now" alone reads as broken when the CM5 is simply
+  // still starting. '' until the first poll, so neither branch fires blind.
+  var lastHostMode   = '';
+  var lastHostFresh  = null;
+  // Whether the ACTIVE backend supports Do:-mode. Only the on-device model
+  // does; see llmBackendSupportsCommandMode. Assumed true until the first
+  // status lands so a fast typist is not refused on a stale default.
+  var cmdModeOk      = null;   // null = no status yet; see syncDoAffordance
 
   // ── helpers ──
   function setDot(cls) {
@@ -228,6 +270,22 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   function setReady(isReady) {
     inputEl.disabled = !isReady || busy;
     askBtn.disabled  = !isReady || busy;
+    syncDoAffordance(isReady);
+  }
+
+  // The Do: button exists only while the loaded model has declared it may
+  // suggest runnable commands. Hidden rather than disabled when unavailable: a
+  // greyed-out button invites "why can't I click this", and the honest answer
+  // depends on which model is loaded, which is not something a tooltip conveys.
+  //
+  // cmdModeOk is deliberately tri-state. It starts null (no status has landed
+  // yet) and only a poll makes it true or false, so the button does not flicker
+  // into existence on page load before the device has said anything.
+  function syncDoAffordance(isReady) {
+    if (!doBtn) return;
+    var allowed = (cmdModeOk === true);
+    doBtn.style.display = allowed ? '' : 'none';
+    doBtn.disabled = !allowed || !isReady || busy;
   }
   function scrollBottom() {
     list.scrollTop = list.scrollHeight;
@@ -252,13 +310,32 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   function fetchStatus(afterGen, metaEl2) {
     hw.fetchJSON('/api/llm/status')
       .then(function(j){
+        // Narrate only real transitions. afterGen still suppresses narration
+        // entirely, but now also ADOPTS the signature it saw — it observed the
+        // state and chose not to announce it, so the next heartbeat must not
+        // announce it either. (Otherwise every finished answer, and every
+        // explicit unload, would be trailed by a stray status line.)
+        lastState = j.state;
+        // One place to retire the bar: every non-LOADING state hides it, so no
+        // branch can leave a stale fill behind after a load ends or fails.
+        if (loadEl && j.state !== 'LOADING') loadEl.style.display = 'none';
+        if (typeof j.hostMode === 'string')   lastHostMode  = j.hostMode;
+        if (typeof j.hostFresh === 'boolean') lastHostFresh = j.hostFresh;
+        if (typeof j.cmdMode === 'boolean' && j.cmdMode !== cmdModeOk) {
+          cmdModeOk = j.cmdMode;
+          syncDoAffordance(!askBtn.disabled || busy);
+        }
+        var sig = j.state + '|' + (j.model || '') + '|' + (j.error || '');
+        var announce = !afterGen && sig !== lastAnnounced;
+        lastAnnounced = sig;
+
         if (j.state === 'READY') {
           var modelName = (j.model||'').split('/').pop().replace(/\.bin$/i,'') || 'model';
           metaEl.textContent = modelName;
           setDot('dot-ready');
           stateEl.textContent = 'Ready';
           setReady(true);
-          if (!afterGen) {
+          if (announce) {
             if (initMsg) { initMsg.remove(); initMsg = null; }
             var modelName = (j.model||'').split('/').pop() || j.model || 'model';
             var details = [];
@@ -282,12 +359,36 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
         } else if (j.state === 'GENERATING') {
           setDot('dot-busy');
           stateEl.textContent = 'Generating';
+        } else if (j.state === 'LOADING') {
+          // Reachable without this page having asked for it: a remote load is a
+          // host-side llama-server restart that outlives any one request, and a
+          // load can equally be started from the OLED, the lens or the CLI.
+          // Deliberately silent — qaLoadModel() already narrated the click, and
+          // the state pill is the honest place for "still working on it".
+          setDot('dot-busy');
+          // loadPct is MEASURED on the host (resident bytes / model bytes), not
+          // a timer and not an animation — see cm5LlmLoadPercent. It is capped
+          // below 100 there because the last ~4% of wall time (KV/compute
+          // buffers + warmup) is unobservable, so the bar parks near the end
+          // rather than claiming a completion it cannot see.
+          var pct = (typeof j.loadPct === 'number') ? j.loadPct : 0;
+          if (pct > 0) {
+            stateEl.textContent = 'Loading ' + pct + '%';
+            if (loadEl)     loadEl.style.display = '';
+            if (loadFillEl) loadFillEl.style.width = pct + '%';
+          } else {
+            // No host signal (onboard engine, external-server mode, or the
+            // first second before a sample). Indeterminate, and say so.
+            stateEl.textContent = 'Loading...';
+            if (loadEl) loadEl.style.display = 'none';
+          }
+          setReady(false);
         } else if (j.state === 'UNLOADED') {
           setDot('dot-off');
           stateEl.textContent = 'No model';
           metaEl.textContent = '';
           setReady(false);
-          if (!afterGen) {
+          if (announce) {
             if (initMsg) initMsg.textContent = 'No model loaded. Select a model and click Load.';
             else addSys('No model loaded. Select a model and click Load.');
           }
@@ -296,7 +397,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
           stateEl.textContent = 'Error';
           metaEl.textContent = '';
           setReady(false);
-          if (!afterGen && j.error && j.error !== lastShownError) {
+          if (announce && j.error && j.error !== lastShownError) {
             lastShownError = j.error;
             if (initMsg) { initMsg.remove(); initMsg = null; }
             var specs = [];
@@ -324,15 +425,30 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
         }
       })
       .catch(function(){
+        lastState = '';
+        // The device itself is unreachable, so any cached host verdict is now
+        // unfounded — clear it rather than blame the CM5 for a dead web link.
+        lastHostMode = ''; lastHostFresh = null;
         setDot('dot-off');
         stateEl.textContent = 'Offline';
         setReady(false);
       });
   }
 
+  var modelSig = null;
   function fetchModels() {
     hw.fetchJSON('/api/llm/models')
       .then(function(arr){
+        // Called on every heartbeat, so rebuilding unconditionally would stomp
+        // the user's selection mid-scroll several times a minute. Diff first.
+        var sig = arr.map(function(m){
+          return m.id + '\u0001' + m.name + '\u0001' + m.size +
+                 '\u0001' + (m.available === false ? 0 : 1);
+        }).join('\u0002');
+        if (sig === modelSig) return;
+        var keep = modelSig === null ? '' : modelSel.value;   // survive a rebuild
+        modelSig = sig;
+
         modelSel.innerHTML = '';
         if (!arr.length) {
           modelSel.innerHTML = '<option value="">No models found</option>';
@@ -340,22 +456,79 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
         }
         for (var i = 0; i < arr.length; i++) {
           var o   = document.createElement('option');
-          o.value = arr[i].path || arr[i].name;
-          var kb  = Math.round(arr[i].size / 1024);
-          var pre = arr[i].storage === 'sd' ? '[SD] ' : '';
-          o.textContent = pre + arr[i].name + ' (' + kb + 'KB)';
+          o.value = arr[i].id;
+          // Sizes span an on-device .bin (~6MB) to a remote GGUF (~3.5GB), so a
+          // flat KB figure prints "3590144KB". Scale to the unit that reads.
+          var b = arr[i].size || 0, size = '';
+          if (b > 0) {
+            var k = b / 1024, m = k / 1024, g = m / 1024;
+            size = g >= 1 ? ' (' + g.toFixed(1) + 'GB)'
+                 : m >= 1 ? ' (' + m.toFixed(m < 10 ? 1 : 0) + 'MB)'
+                          : ' (' + Math.round(k) + 'KB)';
+          }
+          var pre = arr[i].storage === 'sd' ? '[SD] '
+                  : arr[i].storage === 'remote' ? '[' + arr[i].backend + '] ' : '';
+          // A remote model can be listed but not selectable right now (host
+          // offline). Show it disabled rather than dropping it, so the reason
+          // is visible instead of the model just vanishing.
+          o.textContent = pre + arr[i].name + size +
+                          (arr[i].available === false ? ' - unavailable' : '');
+          if (arr[i].available === false) o.disabled = true;
           modelSel.appendChild(o);
         }
+        if (keep) modelSel.value = keep;                      // no-op if it went away
       })
       .catch(function(){
-        modelSel.innerHTML = '<option value="">Error</option>';
+        // Don't let one dropped poll wipe a list we already have — only claim
+        // an error when there is nothing to fall back to.
+        if (modelSig === null) modelSel.innerHTML = '<option value="">Error</option>';
       });
   }
+
+  // ── liveness heartbeat ───────────────────────────────────────────────────
+  // This page used to be a snapshot: the catalog fetched once at load, the
+  // status only after a user action. Both assumptions hold only for the onboard
+  // engine, where the models are local files that are already there and a load
+  // is synchronous with the POST that requested it. A remote source breaks both
+  // — the CM5's catalog arrives over UART once the host link is up (so a model
+  // can appear, or flip from unavailable to selectable, at any moment) and its
+  // load is a llama-server restart taking tens of seconds, ending in a `ready`
+  // the device learns about long after /api/llm/load returned. Neither showed
+  // up without an F5.
+  //
+  // The cadence follows state, because each poll is an httpd request on a
+  // device where httpd is one of the few things that can preempt the LLM task:
+  //   generating → SUSPENDED. pollResult() is already running a 150ms loop;
+  //                a second request stream would compete for the httpd worker
+  //                during the most latency-sensitive window on the device.
+  //   hidden tab → SUSPENDED, with an immediate catch-up on re-show.
+  //   loading    → FAST, so a host-side switch lands on screen as it finishes.
+  //   otherwise  → SLOW.
+  var BEAT_FAST = 1000, BEAT_SLOW = 5000;
+  var beatTimer = null;
+
+  function scheduleBeat(ms) {
+    if (beatTimer) clearTimeout(beatTimer);
+    beatTimer = setTimeout(beat, ms !== undefined ? ms
+                                 : (lastState === 'LOADING' ? BEAT_FAST : BEAT_SLOW));
+  }
+  function beat() {
+    beatTimer = null;
+    // Re-arm even when skipping: a suspended heartbeat must not be a stopped one.
+    if (busy || document.hidden) { scheduleBeat(BEAT_SLOW); return; }
+    fetchStatus(false, null);
+    fetchModels();
+    scheduleBeat();
+  }
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden) scheduleBeat(0);
+  });
 
   // ── generate (shared by ask and retry) — async poll architecture ──
   function doGenerate(ctx) {
     busy = true;
     askBtn.style.display = 'none';
+    if (doBtn) doBtn.style.display = 'none';
     stopBtn.style.display = '';
     inputEl.disabled = true;
     if (ctx.retryBtn) ctx.retryBtn.style.display = 'none';
@@ -382,6 +555,8 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
     ctx.pollOffset  = 0;
     ctx.pollSession = 0;
+    ctx.failCount   = 0;
+    ctx.failMs      = 0;
     ctx.stopped     = false;
     // Fake AbortController so qaStop() can set stopped = true
     abortCtrl = { abort: function() { ctx.stopped = true; } };
@@ -410,30 +585,119 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       });
   }
 
-  function schedulePoll(ctx) {
+  // Poll cadence, and what happens when polls stop landing.
+  //
+  // A transport failure does NOT lose data: the retry re-polls the SAME byte
+  // cursor, so the answer still assembles exactly (verified with 25 consecutive
+  // dropped polls mid-answer). The problem with the old code was that it retried
+  // at 150ms FOREVER with no feedback — a device that rebooted or dropped off
+  // WiFi left a blinking cursor and half an answer, at ~6.7 requests/second, and
+  // only Stop escaped.
+  //
+  // WHY THIS CANNOT FIRE ON A SLOW FIRST TOKEN: hw.fetchJSON sets no timeout and
+  // no AbortController, so a device that is merely slow does not reject — the
+  // poll SUCCEEDS and returns empty text, and any success resets the streak. The
+  // only way to accumulate failures is transport-level: connection refused, the
+  // socket dropped, or a non-2xx status. A cold model load can starve httpd into
+  // that territory, which is exactly why the backoff matters: it stops hammering
+  // a device that is already struggling, and the two thresholds are sized so a
+  // starved-then-recovered device is a transient warning, never a lost turn.
+  // ONE threshold, one outcome. An earlier version warned at 10s and kept the
+  // turn alive until 60s, which created a 50-second stretch where the page
+  // looked alive and was not, and then resumed a stream the user had already
+  // given up on. Terminating is fewer moving parts and a clearer promise.
+  //
+  // The backoff stays, because a SINGLE dropped poll is normal and costs
+  // nothing -- the retry re-reads the same byte cursor, and 25 consecutive
+  // drops still reassemble the answer exactly. Ending a turn on the first
+  // failure would kill generations during ordinary radio blips.
+  var POLL_MS = 150, POLL_MAX_MS = 2000;
+  var LOST_GIVEUP_MS = 20000;
+
+  function schedulePoll(ctx, delayMs) {
     if (ctx.stopped) { finishGen(ctx); return; }
-    setTimeout(function() { pollResult(ctx); }, 150);
+    setTimeout(function() { pollResult(ctx); }, delayMs === undefined ? POLL_MS : delayMs);
+  }
+
+  function pollSucceeded(ctx) {
+    // Any success at all clears the streak. This is the whole anti-false-trigger
+    // mechanism: only an UNBROKEN run of failures counts toward giving up.
+    ctx.failCount = 0;
+    ctx.failMs = 0;
+  }
+
+  function pollFailed(ctx) {
+    ctx.failCount = (ctx.failCount || 0) + 1;
+    // 150, 300, 600, 1200, then hold at 2000.
+    var delay = Math.min(POLL_MS * Math.pow(2, Math.min(ctx.failCount - 1, 4)), POLL_MAX_MS);
+    ctx.failMs = (ctx.failMs || 0) + delay;
+
+    if (ctx.failMs >= LOST_GIVEUP_MS) {
+      // Unbroken failure for the whole budget: the link is down, not stuttering.
+      // End the turn and leave whatever text arrived on screen -- it is real
+      // output. The turn is NOT resumed if the device comes back; a new question
+      // is the way forward, which is what "ended" should mean.
+      var gone = document.createElement('div');
+      gone.className = 'qa-err';
+      gone.textContent = '[connection lost]';
+      ctx.pair.appendChild(gone);
+      finishGen(ctx);
+      return;
+    }
+    schedulePoll(ctx, delay);
   }
 
   function pollResult(ctx) {
     if (ctx.stopped) { finishGen(ctx); return; }
     hw.fetchJSON('/api/llm/result?session=' + ctx.pollSession + '&offset=' + ctx.pollOffset)
       .then(function(j) {
+        pollSucceeded(ctx);
         if (j.stale) { finishGen(ctx); return; }
         if (j.text && j.text.length > 0) {
           ctx.aText.textContent += j.text;
-          ctx.pollOffset += j.text.length;
           scrollBottom();
         }
+        // OUTSIDE the text guard on purpose: a zero-byte poll must still adopt
+        // the device's cursor.
+        //
+        // The device reports the absolute byte cursor it served up to. Prefer it
+        // over any client-side measurement: it is the only party that knows how
+        // many BYTES it copied, and it deliberately passes malformed bytes
+        // through untouched (an invalid lead, a stray byte from a byte-fallback
+        // token), for which decoded length and served length differ — the
+        // browser substitutes U+FFFD, which re-encodes to 3 bytes.
+        //
+        // The fallback is unreachable against matched firmware, since this JS is
+        // streamed from the same image that serves the endpoint. Keep it anyway:
+        // without it a missing field makes pollOffset NaN, the query becomes
+        // offset=NaN, atoi() reads 0, and the device re-serves from byte 0 on
+        // every poll forever.
+        if (typeof j.next === 'number') {
+          ctx.pollOffset = j.next;
+        } else {
+          try { console.warn('/api/llm/result omitted next'); } catch (e) {}
+          ctx.pollOffset += unescape(encodeURIComponent(j.text || '')).length;
+        }
         if (j.done) {
+          // The device only sends this when the turn ended badly. Render it
+          // against THIS pair rather than as a global status line: it explains
+          // this answer, and an empty answer with no explanation is the worst
+          // outcome the streaming path can produce.
+          if (j.error) {
+            var why = document.createElement('div');
+            why.className = 'qa-err';
+            why.textContent = '[' + j.error + ']';
+            ctx.pair.appendChild(why);
+          }
           finishGen(ctx);
         } else {
           schedulePoll(ctx);
         }
       })
       .catch(function() {
-        // Network hiccup — retry the poll rather than give up
-        if (!ctx.stopped) schedulePoll(ctx);
+        // Retry the SAME cursor — no data is lost by a failed poll. Backs off
+        // and eventually gives up; see schedulePoll.
+        if (!ctx.stopped) pollFailed(ctx);
       });
   }
 
@@ -443,6 +707,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     ctx.aText.classList.remove('streaming');
     askBtn.style.display = '';
     stopBtn.style.display = 'none';
+    syncDoAffordance(!inputEl.disabled);
     inputEl.disabled = false;
     askBtn.disabled  = false;
     inputEl.focus();
@@ -575,14 +840,33 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   }
 
   // ── ask ──
-  window.qaAsk = function() {
+  window.qaAsk = function(mode) {
     var q = inputEl.value.trim();
     if (!q || busy) return;
     inputEl.value = '';
 
     // Detect Do: prefix (case-insensitive)
-    var isDoMode = /^do:\s*/i.test(q);
-    var intent = isDoMode ? q.replace(/^do:\s*/i, '') : q;
+    // Three ways in, one meaning. The typed "do:" prefix stays exactly as it
+    // was -- it is the keyboard path, the guided strip composes through it, and
+    // the device parses the same marker independently -- and the Do: button
+    // selects the same mode explicitly.
+    var typedDo  = /^do:\s*/i.test(q);
+    var isDoMode = (mode === 'do') || typedDo;
+    var intent   = typedDo ? q.replace(/^do:\s*/i, '') : q;
+
+    // Do:-mode is on-device only. The device refuses it for a remote model too,
+    // but stopping here means the user gets the reason instead of a round trip
+    // that comes back looking like a failure. Say what to do about it, and put
+    // the text back so a long intent is not lost to a mode they cannot use.
+    if (isDoMode && cmdModeOk === false) {
+      addSys('Do: mode needs the on-device model — ' +
+             (metaEl.textContent || 'the current model') +
+             ' does not know this device\'s commands. Load a local model, or ask ' +
+             'it as a normal question.');
+      inputEl.value = q;
+      scrollBottom();
+      return;
+    }
 
     // Hide retry button from previous Q&A pair
     if (currentCtx && currentCtx.retryBtn) {
@@ -616,9 +900,23 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
     list.appendChild(pair);
 
-    // Create new context and track it as current
+    // Create new context and track it as current.
+    //
+    // Send the prompt UNFRAMED. The device frames per backend at one chokepoint
+    // (llmBackendFramePrompt): the onboard engine gets its "Q: ...\nA:"
+    // scaffolding, and a remote source deliberately gets none, because it
+    // applies its own chat template and the local scaffolding would otherwise
+    // show up verbatim in the answer.
+    //
+    // This page used to frame client-side. That was invisible on the onboard
+    // path only because llmFramePrompt passes through anything already starting
+    // with "Q:" — but nothing stripped it on the way to the CM5, so the remote
+    // model received the local scaffolding despite the backend going out of its
+    // way not to add any. "Do: " is kept because it is the user's INTENT
+    // marker, not scaffolding: llmFramePrompt consumes that prefix and turns it
+    // into the same "Q: <intent>\nDo:" this used to build by hand.
     currentCtx = {
-      prompt: isDoMode ? 'Q: ' + intent + '\nDo:' : 'Q: ' + q + '\nA:',
+      prompt: isDoMode ? 'Do: ' + intent : q,
       isDoMode: isDoMode,
       pair: pair,
       aText: aText,
@@ -644,10 +942,30 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     addSys('Loading ' + name + '...');
     hw.postJSON('/api/llm/load', {model: path})   // no max_ctx: server auto-fits to PSRAM (or the saved llmmaxcontext cap)
       .then(function(j){
-        if (j.ok) { fetchStatus(false, null); }
-        else { fetchStatus(false, null); }
+        // A rejected selection comes back as {"ok":false,"error":...}
+        // (WebPage_LLM.cpp handleLLMLoad). Discarding it made the page go quiet
+        // with no reason given: a select that fails WITHOUT changing device
+        // state leaves the status signature identical, so the edge-triggered
+        // announcer below correctly stays silent too, and the only feedback the
+        // user got was the pill dropping back to "No model".
+        // "not available right now" is true but reads as broken when the host is
+        // merely still starting — the case that looks like a bug on a cold boot,
+        // because the daemon withholds readiness for the ~40s llama-server takes
+        // to come up. hostMode already distinguishes the two, so say which it is
+        // instead of leaving the user to guess.
+        if (j && j.ok === false) {
+          var why = j.error || 'unknown error';
+          if (lastHostMode === 'starting') {
+            why += ' — the CM5 is still starting up; try again in a moment';
+          } else if (lastHostFresh === false) {
+            why += ' — the CM5 is not reachable right now';
+          }
+          addSys('Load failed: ' + why);
+        }
+        fetchStatus(false, null);
+        scheduleBeat(BEAT_FAST);   // a remote load resolves asynchronously; watch for it
       })
-      .catch(function(){ addSys('Load request failed'); });
+      .catch(function(){ addSys('Load request failed'); fetchStatus(false, null); });
   };
 
   window.qaUnloadModel = function() {
@@ -805,10 +1123,14 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   // Tag the Q&A pair qaAsk() just created as "guided" WITHOUT touching qaAsk
   // itself — the retry branch reads ctx.isGuided to skip suppress[].
   var _qaAskOrig = window.qaAsk;
-  window.qaAsk = function() {
+  // MUST forward the mode. This wrapper used to call _qaAskOrig() with no
+  // arguments, which was invisible while qaAsk took none -- and silently turned
+  // the Do: button into an ordinary Ask the moment one was added, because the
+  // button's mode never reached the real handler.
+  window.qaAsk = function(mode) {
     var wasGuided = guidedComposedActive;
     var prevCtx   = currentCtx;
-    _qaAskOrig();
+    _qaAskOrig(mode);
     if (currentCtx && currentCtx !== prevCtx) {   // an ask actually started (not an empty/busy no-op)
       guidedComposedActive = false;
       if (wasGuided) currentCtx.isGuided = true;
@@ -817,10 +1139,11 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
   fetchStatus(false, null);
   fetchModels();
+  scheduleBeat();
 })();
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // ENABLE_ONDEVICE_LLM && ENABLE_HTTP_SERVER
+#endif // ENABLE_LLM_BACKEND && ENABLE_HTTP_SERVER
 #endif // WEBPAGE_LLM_H

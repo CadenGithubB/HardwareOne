@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct BlePeerConnectRequest;
+
 // =============================================================================
 // Even Realities R1 Ring — BLE central module
 // =============================================================================
@@ -252,9 +254,13 @@ bool g2RingInit();
 // lives in G2_Glasses.cpp — can dispatch RING_* job kinds to it without
 // reaching into Ring's static implementation. If `savedMac` is non-empty,
 // skips scan and tries to connect directly to that address; empty means
-// "scan-then-connect any matching ring." Returns true on successful link.
-// MUST run in a normal task context (allocations, blocking BLE calls).
-bool ringPerformConnect(const String& savedMac = String());
+// "scan-then-connect any matching ring." If an actual G2 recording is active,
+// the already-queued job waits for recorder IDLE before touching BLE; an
+// idle-open/autostarted mic does not block it. Returns true on successful link.
+// MUST run in a normal task context (allocations, delays, blocking BLE calls).
+bool ringPerformConnect(const String& savedMac = String(),
+                        const BlePeerConnectRequest* expectedRequest = nullptr,
+                        uint32_t cancelGeneration = 0);
 
 // Clear the per-family in-flight flag that the public g2RingConnect*
 // wrappers set before submitting to the unified worker. The worker calls
@@ -279,7 +285,12 @@ bool g2RingConnect();
 // `timeoutSec` seconds (or until a ring is found, whichever comes first).
 // Returns true if a ring was stashed (either freshly seen or already
 // present from a prior scan). `timeoutSec` is clamped to [1, 300].
-bool g2RingScan(uint32_t timeoutSec);
+bool g2RingScan(uint32_t timeoutSec, uint32_t cancelGeneration = 0);
+
+// Queue a ring-only scan on the shared central-operation worker. This is the
+// public/manual entry point; it prevents a CLI scan from replacing the
+// process-global BLEScan callback while a temple connect is in flight.
+bool g2RingScanAsync(uint32_t timeoutSec);
 
 // Saved-MAC reconnect. Reads gSettings.bleRingMAC and connects directly
 // without requiring a prior scan-cached advertisement. Used by the boot
@@ -299,12 +310,18 @@ bool g2RingConnectSaved();
 bool g2RingConnectMac(const String& mac);
 
 // Tear down the BLE connection. Safe to call from any context.
-void g2RingDisconnect();
+void g2RingDisconnect(bool userInitiated = false);
 
 // Drop ring GATT pointers without touching the controller. Call before
 // BLEDevice::deinit / controller restart (e.g. openg2 tearing down server
 // mode) so Health polls cannot write through a freed characteristic.
 void g2RingInvalidateLink();
+
+// Close Ring producer admission and wait until the persistent owner cannot
+// dereference GATT objects, then invalidate them under the normal TX lock
+// order. Required before a full BLE host teardown. Returns false rather than
+// allowing teardown to free objects still reachable by r1_owner.
+bool g2RingPrepareForStackTeardown(uint32_t timeoutMs);
 
 // Non-blocking compatibility hook: wake the serialized ring owner so queued
 // semantic transactions can retry the shared controller gate.
@@ -450,9 +467,11 @@ inline bool g2RingInit()         { return false; }
 inline bool g2RingConnect()      { return false; }
 inline bool g2RingConnectSaved() { return false; }
 inline bool g2RingConnectMac(const String& /*mac*/) { return false; }
-inline bool g2RingScan(uint32_t /*timeoutSec*/) { return false; }
-inline void g2RingDisconnect()   {}
+inline bool g2RingScan(uint32_t /*timeoutSec*/, uint32_t /*cancelGeneration*/ = 0) { return false; }
+inline bool g2RingScanAsync(uint32_t /*timeoutSec*/) { return false; }
+inline void g2RingDisconnect(bool = false)   {}
 inline void g2RingInvalidateLink() {}
+inline bool g2RingPrepareForStackTeardown(uint32_t /*timeoutMs*/) { return true; }
 inline bool g2RingConnectInFlight() { return false; }
 inline void g2RingTryDrainPendingTx() {}
 inline bool g2RingIsConnected()  { return false; }

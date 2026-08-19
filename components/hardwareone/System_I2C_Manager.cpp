@@ -16,6 +16,7 @@
 #include "System_Logging.h"
 #include "System_Settings.h"
 #include "System_PollPause.h"   // pollPause/pollResume — global sensor-poll pause
+#include "System_TaskUtils.h"   // taskStackRecord — taskstats stack-size registry
 
 // I2C bus configuration (defaults, overridden by settings at runtime)
 #define I2C_WIRE1_DEFAULT_FREQ 100000
@@ -241,6 +242,7 @@ static void beginBusOnCpu1(TwoWire* wire, int sda, int scl) {
   if (!done) { wire->begin(sda, scl); return; }
   BusBeginReq req{ wire, sda, scl, done };
   TaskHandle_t th = nullptr;
+  taskStackRecord("i2c0_begin", 4096);
   BaseType_t ok = xTaskCreatePinnedToCore(busBeginTask, "i2c0_begin", 4096,
                                           &req, 10, &th, 1 /* CPU1 */);
   if (ok != pdPASS) {

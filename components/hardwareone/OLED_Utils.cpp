@@ -14,10 +14,31 @@
 #include "System_Utils.h"  // For AuthContext
 #include "System_CommandTypes.h"  // For Command, CommandContext
 #include "System_FirstTimeSetup.h"
+#include "System_Dictation.h"  // KEYBOARD_MODE_MIC: dictation state + control
 #include "OLED_ConsoleBuffer.h"
+
+#include <atomic>
 
 // Forward declaration for memory stats display
 void displayMemoryStats();
+
+#if ENABLE_OLED_DISPLAY
+// Auth/session changes may originate on cmd_exec. That task owns the
+// synchronous authority cutover, but it must never mutate Arduino Strings,
+// keyboard state, navigation, or the framebuffer owned by the main OLED loop.
+// A generation counter coalesces requests and cannot lose a boundary that
+// arrives while the main loop is applying the previous one.
+static std::atomic<uint32_t> sOledSessionBoundaryRequested{0};
+static uint32_t sOledSessionBoundaryApplied = 0;  // main-loop owned
+static bool sOledSessionMirrorInitialized = false;  // main-loop owned
+static TransportSessionEpoch sOledUiSessionEpoch = kNoTransportSessionEpoch;
+static bool sOledUiSessionAuthed = false;
+static std::atomic<TaskHandle_t> sOledOwnerTask{nullptr};
+static void oledApplyPendingSessionBoundary();
+static void oledBindOwnerTask();
+static bool oledIsOwnerTask();
+static bool oledSessionBoundaryPending();
+#endif
 
 #if !ENABLE_OLED_DISPLAY
 bool oledBootModeActive = false;
@@ -1549,6 +1570,9 @@ static char getCharAt(int row, int col) {
 OLEDKeyboardState gOledKeyboardState;
 
 void oledKeyboardInit(const char* title, const char* initialText, int maxLength) {
+  // A new field starts clean: a FAILED dictation left over from the last one
+  // must not greet the user on a page they just opened.
+  dictationCancel();
   memset(gOledKeyboardState.text, 0, sizeof(gOledKeyboardState.text));
   gOledKeyboardState.textLength = 0;
   gOledKeyboardState.cursorX = 0;
@@ -1576,11 +1600,27 @@ void oledKeyboardInit(const char* title, const char* initialText, int maxLength)
 }
 
 void oledKeyboardReset() {
+  // The keyboard is going away, so nothing is left to dictate INTO. Cheap
+  // no-op unless a capture/transcription is actually in flight; catches the
+  // consumers that reset directly without going through the mic-mode buttons.
+  dictationCancel();
   gOledKeyboardState.active = false;
   gOledKeyboardState.cancelled = false;
   gOledKeyboardState.completed = false;
   memset(gOledKeyboardState.text, 0, sizeof(gOledKeyboardState.text));
   gOledKeyboardState.textLength = 0;
+  gOledKeyboardState.cursorX = 0;
+  gOledKeyboardState.cursorY = 0;
+  gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
+  secureClearString(gOledKeyboardState.title);
+  gOledKeyboardState.maxLength = 0;
+  gOledKeyboardState.autocompleteFunc = nullptr;
+  gOledKeyboardState.autocompleteUserData = nullptr;
+  gOledKeyboardState.showingSuggestions = false;
+  memset(gOledKeyboardState.suggestions, 0,
+         sizeof(gOledKeyboardState.suggestions));
+  gOledKeyboardState.suggestionCount = 0;
+  gOledKeyboardState.selectedSuggestion = 0;
 }
 
 void oledKeyboardDisplay(Adafruit_SSD1306* display) {
@@ -1685,11 +1725,74 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     return;
   }
 
+  // Mic mode display (replaces grid with a record control + dictation state)
+  if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC) {
+    display->setCursor(0, keyboardStartY);
+    display->print(gOledKeyboardState.title);
+
+    const DictationSnapshot snap = dictationSnapshotNow();
+
+    // Which mic is actually live, right-aligned where the mode indicator sits
+    // on the grid pages. The wearer needs to know whether they are talking to
+    // the board or to the glasses — the answer changes where they should aim
+    // their voice, and it can change between one dictation and the next.
+    const char* src = snap.sourceName;
+    display->setCursor(128 - ((int)strlen(src) * 6), keyboardStartY);
+    display->print(src);
+
+    // Text preview box, same geometry as every other keyboard page.
+    display->drawRect(0, keyboardStartY + 9, 128, 11, DISPLAY_COLOR_WHITE);
+    display->setCursor(2, keyboardStartY + 11);
+    int micTextLen = strlen(gOledKeyboardState.text);
+    const char* micStart = gOledKeyboardState.text;
+    if (micTextLen > 20) micStart = gOledKeyboardState.text + (micTextLen - 20);
+    display->print(micStart);
+    if ((millis() / 500) % 2 == 0) display->print("_");
+
+    const int micY = keyboardStartY + 24;
+    switch (snap.state) {
+      case DictationState::RECORDING: {
+        // Filled dot + elapsed seconds reads as "live" at a glance.
+        display->fillCircle(5, micY + 3, 3, DISPLAY_COLOR_WHITE);
+        display->setCursor(14, micY);
+        char buf[24];
+        snprintf(buf, sizeof(buf), "REC %lus",
+                 (unsigned long)(snap.elapsedMs / 1000));
+        display->print(buf);
+
+        // Level meter: the one honest signal that audio is arriving at all.
+        // A flat bar on a G2 source is how a dead BLE mic stream looks.
+        const int barX = 66, barW = 60, barH = 7;
+        display->drawRect(barX, micY - 1, barW, barH, DISPLAY_COLOR_WHITE);
+        int fill = (snap.level * (barW - 2)) / 100;
+        if (fill > 0) display->fillRect(barX + 1, micY, fill, barH - 2, DISPLAY_COLOR_WHITE);
+        break;
+      }
+      case DictationState::WAITING:
+        display->setCursor(0, micY);
+        display->print("Transcribing");
+        for (uint32_t i = 0; i < ((millis() / 400) % 4); ++i) display->print(".");
+        break;
+      case DictationState::FAILED:
+        display->setCursor(0, micY);
+        display->print("Failed:");
+        display->setCursor(0, micY + 9);
+        display->print(snap.failure[0] ? snap.failure : "unknown");
+        break;
+      case DictationState::IDLE:
+      default:
+        display->setCursor(0, micY);
+        display->print("A: start speaking");
+        break;
+    }
+    return;
+  }
+
   // Normal keyboard display
   // Draw title at top
   display->setCursor(0, keyboardStartY);
   display->print(gOledKeyboardState.title);
-  
+
   // Show mode indicator at right edge (compact format)
   const char* modeStr = "";
   switch (gOledKeyboardState.mode) {
@@ -1698,6 +1801,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     case KEYBOARD_MODE_NUMBERS: modeStr = "123"; break;
     case KEYBOARD_MODE_SYMBOLS: modeStr = "sym"; break;
     case KEYBOARD_MODE_PATTERN: modeStr = "PAT"; break;
+    case KEYBOARD_MODE_MIC: modeStr = "MIC"; break;  // drawn by its own block
     case KEYBOARD_MODE_COUNT: break; // Should never happen
   }
   // Right-align mode indicator (3 chars + padding)
@@ -1823,6 +1927,51 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     return inputHandled;
   }
   
+  // Mic mode: no grid, so the joystick does nothing and A is the record toggle.
+  if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC) {
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+      const DictationSnapshot snap = dictationSnapshotNow();
+      if (snap.state == DictationState::RECORDING) {
+        // Second press ends the take early; the VAD would have done it on its
+        // own after a pause. Non-blocking — the recorder finalizes on its task.
+        dictationRequestStop();
+      } else if (snap.state != DictationState::WAITING) {
+        // IDLE or FAILED: a new attempt clears the previous failure.
+        String sessionUser;
+        bool sessionAuthed = false;
+        TransportSessionEpoch epoch =
+            localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
+        secureClearString(sessionUser);
+        if (!sessionAuthed) epoch = kNoTransportSessionEpoch;
+        dictationBegin(epoch);
+      }
+      // WAITING is deliberately inert: the host owns the exchange until it
+      // answers or dictationTick() times it out.
+      inputHandled = true;
+    }
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
+      oledKeyboardBackspace();
+      inputHandled = true;
+    }
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X) ||
+        INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
+      dictationCancel();
+      oledKeyboardComplete();
+      inputHandled = true;
+    }
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+      dictationCancel();
+      oledKeyboardCancel();
+      inputHandled = true;
+    }
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_SELECT)) {
+      // Cancels any in-flight dictation on the way out (see toggleMode).
+      oledKeyboardToggleMode();
+      inputHandled = true;
+    }
+    return inputHandled;
+  }
+
   // Pattern mode: joystick directions add direction characters directly
   if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
     static bool patternWasDeflected = false;
@@ -2091,7 +2240,9 @@ void oledKeyboardAdvance(int steps) {
     return;
   }
 
-  if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) return;
+  // Neither of these pages has a character grid to scan.
+  if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN ||
+      gOledKeyboardState.mode == KEYBOARD_MODE_MIC) return;
 
   const int total = OLED_KEYBOARD_ROWS * OLED_KEYBOARD_COLS;
   int linear = gOledKeyboardState.cursorY * OLED_KEYBOARD_COLS + gOledKeyboardState.cursorX;
@@ -2153,14 +2304,35 @@ void oledKeyboardCancel() {
   DEBUG_DISPLAYF("[KEYBOARD] Cancelled");
 }
 
+// Can this mode be entered right now? Every mode is unconditional except MIC,
+// which needs a mic source and an authenticated host link behind it.
+static bool oledKeyboardModeUsable(OLEDKeyboardMode mode) {
+  if (mode == KEYBOARD_MODE_MIC) return dictationAvailable(nullptr);
+  return true;
+}
+
 void oledKeyboardToggleMode() {
   // Cycle through every mode in enum order:
-  //   lowercase -> uppercase -> numbers -> symbols -> pattern -> lowercase
+  //   lowercase -> uppercase -> numbers -> symbols -> pattern -> mic -> lowercase
   // PATTERN is intentionally part of the rotation — it is how the login keyboard
   // switches to gamepad-pattern entry, since the login screen accepts a pattern
-  // in place of a text password (see OLEDKeyboardMode in OLED_Utils.h). From
-  // pattern, one more MODE press wraps back to lowercase, as it always did.
-  gOledKeyboardState.mode = (OLEDKeyboardMode)((gOledKeyboardState.mode + 1) % KEYBOARD_MODE_COUNT);
+  // in place of a text password (see OLEDKeyboardMode in OLED_Utils.h).
+  //
+  // Unusable modes are skipped rather than shown-and-broken. The loop is bounded
+  // by KEYBOARD_MODE_COUNT so that even if every mode were somehow unusable it
+  // terminates on the mode we started from instead of spinning.
+  OLEDKeyboardMode next = gOledKeyboardState.mode;
+  for (int step = 0; step < KEYBOARD_MODE_COUNT; ++step) {
+    next = (OLEDKeyboardMode)((next + 1) % KEYBOARD_MODE_COUNT);
+    if (oledKeyboardModeUsable(next)) break;
+  }
+
+  // Leaving MIC abandons anything in flight: the wearer navigated away, so a
+  // capture must not keep running (or a transcript land) behind a grid page.
+  if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC && next != KEYBOARD_MODE_MIC) {
+    dictationCancel();
+  }
+  gOledKeyboardState.mode = next;
 
   const char* modeName = "unknown";
   switch (gOledKeyboardState.mode) {
@@ -2169,10 +2341,41 @@ void oledKeyboardToggleMode() {
     case KEYBOARD_MODE_NUMBERS: modeName = "123"; break;
     case KEYBOARD_MODE_SYMBOLS: modeName = "symbols"; break;
     case KEYBOARD_MODE_PATTERN: modeName = "PATTERN"; break;
+    case KEYBOARD_MODE_MIC: modeName = "MIC"; break;
     case KEYBOARD_MODE_COUNT: break; // Should never happen
   }
-  
+
   DEBUG_DISPLAYF("[KEYBOARD] Mode changed to: %s\n", modeName);
+}
+
+void oledKeyboardDictationTick() {
+  if (!gOledKeyboardState.active) return;
+  if (gOledKeyboardState.mode != KEYBOARD_MODE_MIC) return;
+
+  dictationTick();
+
+  // Append rather than replace, so a dictated phrase can be corrected with the
+  // character grid afterwards. The field's own maxLength still wins.
+  char text[DICTATION_MAX_TEXT + 1];
+  if (dictationTakeText(text, sizeof(text))) {
+    for (const char* p = text; *p; ++p) {
+      if (gOledKeyboardState.textLength >= gOledKeyboardState.maxLength) break;
+      gOledKeyboardState.text[gOledKeyboardState.textLength++] = *p;
+    }
+    gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
+    DEBUG_DISPLAYF("[KEYBOARD] Dictation appended: textLength=%d\n",
+                   gOledKeyboardState.textLength);
+    oledMarkDirty();
+    return;
+  }
+
+  // Keep the frame moving only while something is actually happening — the
+  // level meter and elapsed counter animate, an idle "ready" page does not.
+  const DictationSnapshot snap = dictationSnapshotNow();
+  if (snap.state == DictationState::RECORDING ||
+      snap.state == DictationState::WAITING) {
+    oledMarkDirty();
+  }
 }
 
 // ============================================================================
@@ -2267,6 +2470,18 @@ bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallbac
 
 bool oledConfirmIsActive() {
   return gOledConfirmState.active;
+}
+
+// Identity replacement is not a user cancellation: callbacks captured by the
+// old identity must be dropped, never invoked under its successor.
+static void oledConfirmResetForSessionBoundary() {
+  gOledConfirmState.active = false;
+  gOledConfirmState.line1 = nullptr;
+  gOledConfirmState.line2 = nullptr;
+  gOledConfirmState.selectYes = true;
+  gOledConfirmState.onYes = nullptr;
+  gOledConfirmState.userData = nullptr;
+  gOledConfirmState.onNo = nullptr;
 }
 
 static void oledConfirmClose(bool confirmed) {
@@ -2421,7 +2636,7 @@ void OLEDConsoleBuffer::init() {
     // MALLOC_CAP_INTERNAL is spelled out rather than going through
     // ps_alloc(PreferInternal), which degrades to plain malloc() and would hand
     // this ring to PSRAM once it grew past CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL.
-    // The ring holds echoed CLI credentials (see the header), so internal is a
+    // The ring holds identity-private command history, so internal is a
     // requirement, not a preference.
     char (*newLines)[OLED_CONSOLE_LINE_LEN] =
       (char (*)[OLED_CONSOLE_LINE_LEN])heap_caps_calloc(eff, OLED_CONSOLE_LINE_LEN,
@@ -2507,6 +2722,16 @@ void OLEDConsoleBuffer::append(const char* text, uint32_t timestamp) {
     
     xSemaphoreGive(mutex);
   }
+}
+
+void OLEDConsoleBuffer::clear() {
+  if (!mutex || !lines) return;
+  if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
+  memset(lines, 0, static_cast<size_t>(capacity) * OLED_CONSOLE_LINE_LEN);
+  memset(timestamps, 0, static_cast<size_t>(capacity) * sizeof(uint32_t));
+  head = 0;
+  count = 0;
+  xSemaphoreGive(mutex);
 }
 
 // Get number of valid lines in buffer
@@ -2649,6 +2874,9 @@ void drawOLEDFooter() {
     extern OLEDKeyboardState gOledKeyboardState;
     if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
       oledDisplay->print("A:Done Y:Undo B:");
+      drawBackArrowIcon(oledDisplay, footerY);
+    } else if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC) {
+      oledDisplay->print("A:Rec Y:Del X:OK B:");
       drawBackArrowIcon(oledDisplay, footerY);
     } else if (gOledKeyboardState.showingSuggestions) {
       oledDisplay->print("A:Pick B:");
@@ -2903,7 +3131,13 @@ bool shouldBlockForDisplayAuth() {
 }
 
 bool oledIsGuestSession() {
-  return gLocalDisplayAuthed && isGuestUser(gLocalDisplayUser);
+  if (!gLocalDisplayAuthed) return false;
+  // This is a security gate, so require positive account resolution. A real
+  // Guest is view-only; a deleted/banned/malformed/unreadable named identity
+  // is also fail-closed view-only until the revocation boundary catches up.
+  String role;
+  return !getUserAuthorizationRole(gLocalDisplayUser, role) ||
+         role == "guest";
 }
 
 bool oledModeAllowedForGuest(OLEDMode mode) {
@@ -2977,7 +3211,12 @@ bool oledGuestBlocksMutate() {
 AuthContext oledAuthContext(const char* path) {
   AuthContext ctx;
   ctx.transport = SOURCE_LOCAL_DISPLAY;
-  ctx.user      = gLocalDisplayAuthed ? gLocalDisplayUser : String("AuthBypass");
+  // Bind actions to the identity currently visible to the physical operator,
+  // not to a newer authority generation that may have arrived midway through
+  // input handling. buildOLEDCommand() pairs this mirror with its exact epoch;
+  // if authority changed, the central live-session fence rejects the command.
+  ctx.user      = gLocalDisplayAuthed ? gLocalDisplayUser
+                                      : String("AuthBypass");
   ctx.ip        = "oled";
   ctx.path      = path ? path : "/oled";
   ctx.sid       = "";
@@ -2995,6 +3234,10 @@ static Command buildOLEDCommand(const String& cmdLine) {
   uc.ctx.auth = oledAuthContext("/oled/command");
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
+  uc.ctx.transportSessionEpoch = sOledUiSessionEpoch;
+  // The local display is a stateful endpoint. Requiring its exact boot-local
+  // generation makes an allocation/capture failure fail closed.
+  uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
   uc.ctx.outputMask = MSG_ROUTE_FILE;  // file log + OLED console (via MSG_ROUTE_OLED), no serial echo
   uc.ctx.validateOnly = false;
   uc.ctx.replyHandle = nullptr;
@@ -3014,21 +3257,53 @@ void executeOLEDCommand(const String& argsInput) {
   }
 }
 
-bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t outSize) {
+static bool executeOLEDCommandWithResultImpl(
+    const String& argsInput, TransportSessionEpoch expectedEpoch,
+    bool requireExpectedEpoch, char* out, size_t outSize) {
   extern bool submitAndExecuteSync(const Command& cmd, String& outStr);
 
+  if (!out || outSize == 0) return false;
+  out[0] = '\0';
+
   Command uc = buildOLEDCommand(argsInput);
+  if (requireExpectedEpoch &&
+      (expectedEpoch == kNoTransportSessionEpoch ||
+       uc.ctx.transportSessionEpoch != expectedEpoch)) {
+    return false;
+  }
   String outStr;
   bool success = submitAndExecuteSync(uc, outStr);
+
+  // A remote login/logout may replace this display session while cmd_exec is
+  // working. Never expose an old identity's result to the replacement user.
+  if (!localDisplayTransportSessionBeginDelivery(
+          uc.ctx.transportSessionEpoch)) {
+    out[0] = '\0';
+    return false;
+  }
 
   // Copy result to caller's buffer
   strncpy(out, outStr.c_str(), outSize - 1);
   out[outSize - 1] = '\0';
+  localDisplayTransportSessionEndDelivery();
 
   if (!success && outStr.length() > 0) {
     DEBUG_DISPLAYF("[OLED_CMD] Command failed: %s", out);
   }
   return success;
+}
+
+bool executeOLEDCommandWithResult(const String& argsInput, char* out,
+                                  size_t outSize) {
+  return executeOLEDCommandWithResultImpl(
+      argsInput, kNoTransportSessionEpoch, false, out, outSize);
+}
+
+bool executeOLEDCommandWithResultForSession(
+    const String& argsInput, TransportSessionEpoch expectedEpoch,
+    char* out, size_t outSize) {
+  return executeOLEDCommandWithResultImpl(
+      argsInput, expectedEpoch, true, out, outSize);
 }
 
 
@@ -3064,10 +3339,9 @@ static void drawProgressBar(int percent);
 // mark that arrives mid-frame leaves seq != consumed and renders next frame.
 static uint32_t oledLastRenderedGamepadSeq = 0;
 static unsigned long oledLastRenderedSensorSeq = 0;
-// Bumped by oledMarkDirty() from any task. A raced read-modify-write can merge
-// two bumps into one, which is harmless: both writers store consumedSeq+n, so
-// the result can never land back ON consumedSeq and read as "clean".
-static volatile uint32_t oledDirtySeq = 1;
+// Bumped atomically by oledMarkDirty() from any task. Release/acquire also
+// makes an auth-boundary request's repaint visible to the main-loop reader.
+static std::atomic<uint32_t> oledDirtySeq{1};
 static uint32_t oledConsumedDirtySeq = 0;    // != oledDirtySeq → forces the first render
 static unsigned long oledDirtyUntilMs = 0;  // Keep rendering dirty until this time (for timed popups)
 
@@ -3085,7 +3359,7 @@ static volatile bool oledRotationPending = false;
 
 // Manual dirty flag for non-sensor changes (menu state, settings, etc.)
 void oledMarkDirty() {
-  oledDirtySeq++;
+  oledDirtySeq.fetch_add(1, std::memory_order_release);
 }
 
 void oledMarkDirtyMode(OLEDMode mode) {
@@ -3101,7 +3375,8 @@ bool oledIsDirty() {
   extern volatile unsigned long gSensorStatusSeq;
   extern InputCache gInputCache;
 
-  if (oledDirtySeq != oledConsumedDirtySeq) return true;
+  if (oledDirtySeq.load(std::memory_order_acquire) !=
+      oledConsumedDirtySeq) return true;
   if (gInputCache.seq != oledLastRenderedGamepadSeq) return true;
   if (gSensorStatusSeq != oledLastRenderedSensorSeq) return true;
   if (oledPairingRibbonActive()) return true;  // Continuous render during notification animations
@@ -3115,7 +3390,7 @@ static void oledSnapshotFrameSeqs() {
   extern volatile unsigned long gSensorStatusSeq;
   extern InputCache gInputCache;
 
-  oledFrameDirtySeq   = oledDirtySeq;
+  oledFrameDirtySeq   = oledDirtySeq.load(std::memory_order_acquire);
   oledFrameGamepadSeq = gInputCache.seq;
   oledFrameSensorSeq  = gSensorStatusSeq;
 }
@@ -3400,7 +3675,7 @@ extern void oledR1HealthModeInit();    // OLED_Mode_R1_Health.cpp
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
 extern void oledRemoteSettingsModeInit();   // OLED_Mode_RemoteSettings.cpp
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
 extern void oledLLMModeInit();
 extern void oledUserManagerModeInit();   // OLED_Mode_UserManager.cpp
 #endif
@@ -3428,7 +3703,7 @@ void printRegisteredOLEDModes() {
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
   oledRemoteSettingsModeInit();   // keep OLED_Mode_RemoteSettings.cpp from being GC'd
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
   oledLLMModeInit();
   oledUserManagerModeInit();   // keep OLED_Mode_UserManager.cpp from being GC'd
 #endif
@@ -3567,6 +3842,13 @@ bool initOLEDDisplay() {
 }
 
 void stopOLEDDisplay() {
+  // A full transport teardown is an authentication boundary. Sleeping or
+  // power-save blanking intentionally preserves the login; close/disable does
+  // not. Close authority even when the panel was already absent so a ghost
+  // display session can never be inherited by a later hot start. Always
+  // publish the boundary, including epoch zero: the owner may still have a
+  // stale UI mirror/callback cache that must be wiped before any later start.
+  localDisplayTransportSessionCleared();
   if (!oledConnected || gDisplay == nullptr) {
     return;
   }
@@ -3663,6 +3945,19 @@ void tryAutoStartInputForMenu();
 void updateOLEDDisplay() {
   // animationLastUpdate, animationFrame, animationFPS are now defined at top of file
   extern void displayAnimation();
+
+  // The framebuffer, navigation tree, keyboards and legacy display-session
+  // mirror are single-owner state. Command handlers may request a redraw from
+  // cmd_exec, but they must never run the render/input pump themselves.
+  if (!oledIsOwnerTask()) {
+    oledMarkDirty();
+    return;
+  }
+
+  // Must be the first OLED state operation in the frame. Remote auth changes
+  // only bump an atomic generation; the main loop performs every teardown and
+  // navigation mutation here, before input or rendering can touch old state.
+  oledApplyPendingSessionBoundary();
   
   if (!gOledRunning || !oledConnected || oledDisplay == nullptr) {
     return;
@@ -3687,6 +3982,12 @@ void updateOLEDDisplay() {
   if (inputProcessed) {
     oledMarkDirty();
   }
+
+  // Native OLED login/logout happens inside the input pump. Apply that
+  // transition only after the handler unwinds, so its String buffers are not
+  // erased out from under an active stack frame, and before any content from
+  // the old UI incarnation is rendered.
+  oledApplyPendingSessionBoundary();
 
   unsigned long now = millis();
   
@@ -3907,7 +4208,28 @@ void updateOLEDDisplay() {
     // Mark mode as clean after successful render
     oledClearDirty();
 
+    // Linearize the physical frame commit with the authoritative display
+    // session. CPU-side drawing above is harmless scratch work, but pixels
+    // rendered for epoch N must never be pushed after a remote replacement has
+    // published epoch N+1. This short lease cannot deadlock cmd_exec: all
+    // synchronous command work and mode callbacks have already completed.
+    String commitUser;
+    bool commitAuthed = false;
+    const TransportSessionEpoch commitEpoch =
+        localDisplayTransportSessionBeginUiSync(commitUser, commitAuthed);
+    const bool commitAllowed =
+        !oledSessionBoundaryPending() &&
+        commitEpoch == sOledUiSessionEpoch &&
+        commitAuthed == sOledUiSessionAuthed &&
+        (!commitAuthed || commitUser == gLocalDisplayUser);
+    secureClearString(commitUser);
+    if (!commitAllowed) {
+      localDisplayTransportSessionEndUiSync();
+      oledMarkDirty();
+      return;
+    }
     displayUpdate();
+    localDisplayTransportSessionEndUiSync();
     }
 }
 
@@ -3948,11 +4270,8 @@ const char* cmd_oled_enabled(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "OLED display enabled (mode: %s)", gSettings.oledDefaultMode.c_str());
   } else {
     // Full teardown (same as closeoled), not just blanking the panel.
-    if (oledConnected) {
-      stopOLEDDisplay();
-    } else {
-      gOledRunning = false;
-    }
+    stopOLEDDisplay();
+    gOledRunning = false;
     snprintf(getDebugBuffer(), 1024, "OLED display disabled");
   }
   return getDebugBuffer();
@@ -3965,7 +4284,9 @@ const char* cmd_oled_requireauth(const String& argsInput) {
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledrequireauth <0|1>";
   const char* p = _arg.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
+  const bool changed = gSettings.localDisplayRequireAuth != enabled;
   setSetting(gSettings.localDisplayRequireAuth, enabled);
+  if (changed) localDisplayTransportAuthPolicyChanged();
   snprintf(getDebugBuffer(), 1024, "Local display require auth %s", enabled ? "enabled" : "disabled");
   return getDebugBuffer();
 }
@@ -4141,13 +4462,10 @@ const char* cmd_oledstart(const String& argsInput) {
 const char* cmd_oledstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (!oledConnected) {
-    broadcastOutput("OLED display not running");
-    return "OK";
-  }
-
+  const bool wasConnected = oledConnected;
   stopOLEDDisplay();
-  broadcastOutput("OLED display stopped");
+  broadcastOutput(wasConnected ? "OLED display stopped"
+                               : "OLED display not running; session cleared");
   return "OK";
 }
 
@@ -4971,7 +5289,7 @@ const OLEDMenuItem oledMenuCategory4[] = {
   // render tiles (the mode is also file-gated in OLED_Mode_Map.cpp).
   { "Maps",       "compass",           OLED_GPS_MAP },
 #endif
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
   // LLM Chat — visible unconditionally when compiled in. The mode itself
   // shows a model-picker when no model is loaded, so the entry is useful
   // even on a fresh boot before any model has been selected.
@@ -6630,10 +6948,19 @@ void oledSetBootProgress(int percent, const char* label) {
 
 void oledUpdate() {
 #if ENABLE_OLED_DISPLAY
+  oledBindOwnerTask();
+  if (!oledIsOwnerTask()) {
+    oledMarkDirty();
+    return;
+  }
+  // Apply even while the panel is stopped/disconnected so credentials,
+  // callbacks, and back-stack state cannot survive until a later wake.
+  oledApplyPendingSessionBoundary();
   if (gOledRunning && oledConnected) {
 #if ENABLE_ESPNOW
     oledEspNowPollPairRequest();   // pop the accept/reject dialog on an incoming pair request
 #endif
+    oledKeyboardDictationTick();   // service KEYBOARD_MODE_MIC (no-op otherwise)
     updateOLEDDisplay();
   }
 #endif
@@ -6641,6 +6968,9 @@ void oledUpdate() {
 
 void oledEarlyInit() {
 #if ENABLE_OLED_DISPLAY
+  // Boot/setup calls this on the Arduino main loop before command transports
+  // can drive the OLED. Bind the one task allowed to own mutable UI state.
+  oledBindOwnerTask();
   earlyOLEDInit();
   printRegisteredOLEDModes();
 #endif
@@ -6714,11 +7044,14 @@ void localDisplaySessionTick() {
 
   if (seq != lastSeenSeq) {          // real physical input → refresh idle clock
     lastSeenSeq = seq;
-    gLocalDisplayLastInteractionMs = sessionStampNow();
+    gLocalDisplayLastInteractionMs.store(sessionStampNow(),
+                                          std::memory_order_release);
     return;
   }
 
-  if (sessionIdleExpired(SOURCE_LOCAL_DISPLAY, gLocalDisplayLastInteractionMs)) {
+  if (sessionIdleExpired(
+          SOURCE_LOCAL_DISPLAY,
+          gLocalDisplayLastInteractionMs.load(std::memory_order_acquire))) {
     // Clears gLocalDisplayAuthed/User and forces the OLED_LOGIN screen via
     // oledNotifyLocalDisplayAuthChanged() (or the auth guard on next render if
     // the panel is currently asleep).
@@ -6728,39 +7061,151 @@ void localDisplaySessionTick() {
 #endif
 }
 
+#if ENABLE_OLED_DISPLAY
+extern void oledAuthModeResetSessionState();
+extern void oledChangePasswordModeResetSessionState();
+extern void oledCLIInputResetSessionState();
+extern void oledSetPatternModeResetSessionState();
+extern void oledNetworkModeResetSessionState();
+extern void oledUserManagerModeResetSessionState();
+extern void oledFileBrowserResetSessionState();
+#if ENABLE_AUTOMATION
+extern void oledAutomationsModeResetSessionState();
+#endif
+
+static void oledResetLocalDisplaySessionTransients() {
+  // Drop action callbacks before clearing their backing buffers. These
+  // callbacks were admitted by the previous identity and must never execute
+  // after a remote/local replacement, even if the new user presses A.
+  oledConfirmResetForSessionBoundary();
+
+  // A dictation armed by the departing identity must not keep recording, and
+  // its transcript must never land in the new identity's field. Discards the
+  // WAV as well — the words in it belong to whoever spoke them.
+  dictationResetForSessionBoundary();
+
+  // Every keyboard-backed mode keeps a small owner-specific state machine in
+  // addition to the shared keyboard buffer. Reset both layers so a stale
+  // `active` flag cannot resurrect text after the new identity revisits it.
+  oledAuthModeResetSessionState();
+  oledChangePasswordModeResetSessionState();
+  oledCLIInputResetSessionState();
+  oledSetPatternModeResetSessionState();
+  oledNetworkModeResetSessionState();
+  oledUserManagerModeResetSessionState();
+  oledFileBrowserResetSessionState();
+#if ENABLE_AUTOMATION
+  oledAutomationsModeResetSessionState();
+#endif
+  cancelRemoteCommandInput();
+  oledKeyboardReset();
+
+  // Navigation and console history are identity-owned too. Do this even when
+  // the panel is asleep/disconnected; otherwise waking it could revive an old
+  // back-stack or old command result without another auth callback.
+  clearOLEDModeStack();
+  gOledConsole.clear();
+}
+
+static void oledBindOwnerTask() {
+  TaskHandle_t expected = nullptr;
+  const TaskHandle_t current = xTaskGetCurrentTaskHandle();
+  (void)sOledOwnerTask.compare_exchange_strong(
+      expected, current, std::memory_order_release,
+      std::memory_order_acquire);
+}
+
+static bool oledIsOwnerTask() {
+  const TaskHandle_t owner =
+      sOledOwnerTask.load(std::memory_order_acquire);
+  // During the single-threaded early boot, a few progress paths can reach the
+  // renderer before oledEarlyInit() has bound the owner. Claim it once there;
+  // after binding, foreign tasks only mark the next main-loop frame dirty.
+  if (owner == nullptr) {
+    oledBindOwnerTask();
+    return sOledOwnerTask.load(std::memory_order_acquire) ==
+           xTaskGetCurrentTaskHandle();
+  }
+  return owner == xTaskGetCurrentTaskHandle();
+}
+
+static bool oledSessionBoundaryPending() {
+  return !sOledSessionMirrorInitialized ||
+         sOledSessionBoundaryRequested.load(std::memory_order_acquire) !=
+             sOledSessionBoundaryApplied;
+}
+
+static void oledApplyPendingSessionBoundary() {
+  if (!oledIsOwnerTask()) return;
+
+  for (;;) {
+    const uint32_t requested =
+        sOledSessionBoundaryRequested.load(std::memory_order_acquire);
+    if (sOledSessionMirrorInitialized &&
+        requested == sOledSessionBoundaryApplied) return;
+
+    // The authority publisher takes the display lifecycle writer before it
+    // bumps `requested`. Acquire that same writer even for epoch-zero logout:
+    // this snapshots one stable authority generation and holds subsequent
+    // replacements out while the OLED owner wipes the previous UI identity.
+    String sessionUser;
+    bool sessionAuthed = false;
+    const TransportSessionEpoch sessionEpoch =
+        localDisplayTransportSessionBeginUiSync(sessionUser, sessionAuthed);
+
+    const bool hadUiIdentity = sOledSessionMirrorInitialized;
+    secureClearString(gLocalDisplayUser);
+    gLocalDisplayUser = sessionAuthed ? sessionUser : String();
+    gLocalDisplayAuthed = sessionAuthed;
+    sOledUiSessionEpoch = sessionEpoch;
+    sOledUiSessionAuthed = sessionAuthed;
+    secureClearString(sessionUser);
+    sOledSessionBoundaryApplied = requested;
+    sOledSessionMirrorInitialized = true;
+    localDisplayTransportSessionEndUiSync();
+
+    // The first owner-side snapshot establishes the mirror; it is not a user
+    // replacement. Every later notification (including auth-policy rotation)
+    // is a hard identity boundary and discards all prior-session UI state.
+    if (hadUiIdentity || requested != 0) {
+      oledResetLocalDisplaySessionTransients();
+
+      if (shouldBlockForDisplayAuth()) {
+        if (currentOLEDMode != OLED_LOGIN) {
+          requestOLEDMode(OLED_LOGIN, "auth.guard.notify", false);
+        }
+      } else {
+        if (currentOLEDMode != OLED_MENU) {
+          requestOLEDMode(OLED_MENU, "auth.notify.identity_changed", false);
+        }
+        resetOLEDMenu();
+        if (gOledRunning && oledConnected) tryAutoStartInputForMenu();
+      }
+#if ENABLE_OLED_INPUT
+      // Prevent the login-confirm A press from being interpreted as a
+      // menu-select on the replacement identity's first frame.
+      lastButtonStateInitialized = false;
+      lastButtonState = 0xFFFFFFFF;
+#endif
+      oledMarkDirty();
+    }
+
+    // If another auth transition arrived during teardown, loop and apply its
+    // UI mirror/reset too. The lifecycle writer is deliberately released
+    // before requestOLEDMode()/role checks above: those can take FsLock, while
+    // credential publication uses the opposite FS -> display-writer order.
+    // The caller performs this whole loop before admitting input or rendering.
+  }
+}
+#endif
+
 void oledNotifyLocalDisplayAuthChanged() {
 #if ENABLE_OLED_DISPLAY
-  if (!gOledRunning || !oledConnected) {
-    return;
-  }
-
-  // If auth is required and the display is not authenticated, force the login screen.
-  if (shouldBlockForDisplayAuth()) {
-    if (currentOLEDMode != OLED_LOGIN) {
-      requestOLEDMode(OLED_LOGIN, "auth.guard.notify", false);
-      updateOLEDDisplay();
-    }
-    return;
-  }
-
-  // Guest login: drop any pre-login back-stack so B cannot re-enter a mutate mode.
-  if (gLocalDisplayAuthed && oledIsGuestSession()) {
-    clearOLEDModeStack();
-  }
-
-  // If we just became authenticated while on the login screen, return to the menu.
-  if (gLocalDisplayAuthed && currentOLEDMode == OLED_LOGIN) {
-    requestOLEDMode(OLED_MENU, "auth.notify.loggedin", false);
-    resetOLEDMenu();
-    tryAutoStartInputForMenu();
-#if ENABLE_OLED_INPUT
-    // Prevent the login-confirm A press from being interpreted as a menu-select
-    // on the first menu frame (avoids a brief flash into the first menu item).
-    lastButtonStateInitialized = false;
-    lastButtonState = 0xFFFFFFFF;
-#endif
-    updateOLEDDisplay();
-  }
+  // Session authority has already been cut over synchronously by System_User.
+  // Only schedule its UI consequences here: this callback commonly runs on
+  // cmd_exec, while all mutable OLED state belongs to the main render loop.
+  sOledSessionBoundaryRequested.fetch_add(1, std::memory_order_release);
+  oledMarkDirty();
 #endif
 }
 

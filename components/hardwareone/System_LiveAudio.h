@@ -6,6 +6,26 @@
 
 struct CommandEntry;
 
+// UART control-plane fast path for the high-frequency `liveaudio ready`
+// renewal.  A healthy, already-created lease can be extended without
+// allocating, entering cmd_exec, or marking the CM5 application busy.
+// Initial acquisition, expiry recovery, and every mismatched request return
+// NotHandled so the ordinary registry command retains full lifecycle and
+// authorization semantics.
+enum class LiveAudioReadyIntrinsicResult : uint8_t {
+  NotHandled,
+  Handled,
+};
+LiveAudioReadyIntrinsicResult liveAudioHandleReadyIntrinsic(
+    const char* line, uint32_t namedSessionEpoch,
+    bool namedSessionMayControl, char* reply, size_t replySize);
+
+// Read-only machine inspection that must not extend the CM5 command-busy
+// bridge or displace useful human commands from the web feed. Healthy ready
+// renewals return from the intrinsic above before this classifier is reached;
+// initial/repair ready plus shadow/release/synth/abort remain ordinary work.
+bool liveAudioIsHousekeepingCommand(const char* line);
+
 // True from synth admission through END/ABORT finalization. Bulk voicefetch is
 // rejected during this window so two high-volume producers cannot contend for
 // the UART TX ring.

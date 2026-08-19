@@ -2,7 +2,9 @@
 
 #if ENABLE_ESPNOW
 
+#include <atomic>
 #include <ArduinoJson.h>
+#include <freertos/semphr.h>
 
 #include "OLED_Display.h"
 #include "System_AuthIdentity.h"      // currentAuthContext() — D1 local-console-only gate
@@ -67,19 +69,21 @@ static bool gSensorStreamingEnabled[REMOTE_SENSOR_MAX] = {false};
 
 // Broadcaster task state
 static TaskHandle_t gSensorBroadcasterTask = nullptr;
-// Serializes claiming the broadcaster handle for deletion so an external teardown
-// (stopSensorBroadcaster, core 0) and the in-task lease-lapse self-teardown (core 1)
-// can never both vTaskDelete the same handle (BUG-2 double-free fix).
+// Serializes the broadcaster lifecycle. Explicit stop is cooperative: the task
+// finishes its current builder/send, publishes a join semaphore, then parks so
+// the lifecycle owner can delete it without stranding a mutex/runtime guard.
 static portMUX_TYPE gSensorBcastTaskMux = portMUX_INITIALIZER_UNLOCKED;
-// Atomically take the handle: exactly one caller gets it (non-null) and owns the
-// vTaskDelete; every other caller gets nullptr and must not delete.
-static TaskHandle_t claimBroadcasterForDelete() {
-  taskENTER_CRITICAL(&gSensorBcastTaskMux);
-  TaskHandle_t h = gSensorBroadcasterTask;
-  gSensorBroadcasterTask = nullptr;
-  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
-  return h;
-}
+static std::atomic<bool> gSensorBroadcasterStopRequested{false};
+static std::atomic<bool> gSensorStreamingShutdown{true};
+static bool gSensorBroadcasterExternalStop = false;  // under gSensorBcastTaskMux
+static StaticSemaphore_t gSensorBroadcasterStopDoneStorage;
+static SemaphoreHandle_t gSensorBroadcasterStopDone = nullptr;
+// Serializes the whole create/publish and stop/join/free transactions. A
+// portMUX only protects tiny handle/flag snapshots; it cannot be held across
+// allocation, xTaskCreate, a join wait, or free.
+static StaticSemaphore_t gSensorBroadcasterLifecycleMutexStorage;
+static SemaphoreHandle_t gSensorBroadcasterLifecycleMutex =
+    xSemaphoreCreateMutexStatic(&gSensorBroadcasterLifecycleMutexStorage);
 
 // Per-sensor "last transmit" timestamps so each sensor paces independently.
 // Reset to 0 in startSensorDataStreaming() so the first tick after enable
@@ -210,6 +214,21 @@ bool initRemoteSensorSystem() {
   // we've received). The worker-side wire cache is gone — sensors are read on
   // demand by the broadcaster, so there's no chalkboard to keep in sync.
   memset(gRemoteSensorCache, 0, cacheBytes);
+
+  if (!gSensorBroadcasterLifecycleMutex ||
+      xSemaphoreTake(gSensorBroadcasterLifecycleMutex, portMAX_DELAY) != pdTRUE) {
+    return false;
+  }
+  if (!gSensorBroadcasterStopDone) {
+    gSensorBroadcasterStopDone =
+        xSemaphoreCreateBinaryStatic(&gSensorBroadcasterStopDoneStorage);
+  }
+  if (!gSensorBroadcasterStopDone) {
+    xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
+    return false;
+  }
+  gSensorStreamingShutdown.store(false, std::memory_order_release);
+  xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
 
   DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] System initialized (%u bytes)",
          (unsigned)cacheBytes);
@@ -357,8 +376,9 @@ void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled) {
 }
 
 // Forward declarations
-static bool startSensorBroadcaster();
-static void stopSensorBroadcaster();
+// Callers hold gSensorBroadcasterLifecycleMutex across these transactions.
+static bool startSensorBroadcasterLocked();
+static bool stopSensorBroadcasterLocked(uint32_t timeoutMs);
 
 void startSensorDataStreaming(RemoteSensorType sensorType) {
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] startSensorDataStreaming() called with type=%d (%s)", sensorType, sensorTypeToString(sensorType));
@@ -367,7 +387,18 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] ERROR: Invalid sensor type %d (max=%d)", sensorType, REMOTE_SENSOR_MAX);
     return;
   }
-  
+  // Serialize every flag update and the full task create/publish transaction
+  // against closeespnow's stop/join/free transaction.
+  if (!gSensorBroadcasterLifecycleMutex ||
+      xSemaphoreTake(gSensorBroadcasterLifecycleMutex, portMAX_DELAY) != pdTRUE) {
+    return;
+  }
+  if (gSensorStreamingShutdown.load(std::memory_order_acquire)) {
+    xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] start rejected during ESP-NOW shutdown");
+    return;
+  }
+
 #if ENABLE_BONDED_MODE
   // Bond master: send STREAM_CTRL to worker — master doesn't have the sensors locally
   if (gSettings.bondModeEnabled && isBondMaster()) {
@@ -381,30 +412,39 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
     } else {
       BROADCAST_PRINTF("[ESP-NOW] Failed to send stream request to worker (peer offline?)");
     }
+    xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
     return;
   }
 #endif
   
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Setting streaming flag for %s to TRUE", sensorTypeToString(sensorType));
   
-  // Ensure master broadcast flag is enabled so sensor data reaches the cache
-  if (!gSensorBroadcastEnabled) {
-    setSensorBroadcastEnabled(true);
-  }
+  // Ensure master broadcast flag is enabled so sensor data reaches the cache.
+  // We already own the lifecycle mutex; write directly rather than re-entering
+  // the public setter.
+  if (!gSensorBroadcastEnabled) gSensorBroadcastEnabled = true;
   
+  // Publish the flag before task creation so a newly scheduled broadcaster
+  // cannot observe an empty set and self-delete in the start-up window.
+  gSensorStreamingEnabled[sensorType] = true;
+  // Reset lastTxMs before task creation so the first broadcaster lap observes
+  // the intended immediate-send state.
+  gLastTxMs[sensorType] = 0;
+
   // Start broadcaster task if not already running
-  if (!gSensorBroadcasterTask) {
-    if (!startSensorBroadcaster()) {
+  bool taskPresent;
+  taskENTER_CRITICAL(&gSensorBcastTaskMux);
+  taskPresent = gSensorBroadcasterTask != nullptr;
+  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+  if (!taskPresent) {
+    if (!startSensorBroadcasterLocked()) {
+      gSensorStreamingEnabled[sensorType] = false;
+      xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
       BROADCAST_PRINTF("[ESP-NOW] ERROR: Failed to start sensor broadcaster task");
       return;
     }
   }
-  
-  gSensorStreamingEnabled[sensorType] = true;
-
-  // Reset lastTxMs so the broadcaster's next tick (within ~50ms) fires immediately
-  // for this sensor. No separate force-send flag needed.
-  gLastTxMs[sensorType] = 0;
+  xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
 
   // Tell masters right away that this sensor is now streaming, so their dot/cards
   // flip without waiting for the next 5s presence announce or first data frame.
@@ -427,26 +467,27 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
     return;
   }
   
+  if (!gSensorBroadcasterLifecycleMutex ||
+      xSemaphoreTake(gSensorBroadcasterLifecycleMutex, portMAX_DELAY) != pdTRUE) {
+    return;
+  }
+
 #if ENABLE_BONDED_MODE
-  // Bond master: send STREAM_CTRL OFF to worker
+  // Bond master: send STREAM_CTRL OFF to worker. Lifecycle serialization keeps
+  // the local UI flag from racing closeespnow's all-flags clear.
   if (gSettings.bondModeEnabled && isBondMaster()) {
     extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s OFF to worker", sensorTypeToString(sensorType));
     sendBondStreamCtrl(sensorType, false);
-    // Update local flag so UI reflects the stopped streaming state
     gSensorStreamingEnabled[sensorType] = false;
+    xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
     BROADCAST_PRINTF("[ESP-NOW] Requested worker to stop streaming %s sensor data", sensorTypeToString(sensorType));
     return;
   }
 #endif
-  
+
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Setting streaming flag for %s to FALSE", sensorTypeToString(sensorType));
   gSensorStreamingEnabled[sensorType] = false;
-  // Tell masters immediately that this sensor stopped streaming (don't wait for
-  // the 5s presence announce) — this is what makes the remote dot go red and stay.
-  broadcastSensorStatus(sensorType, false);
-
-  // Check if all sensors are now disabled - if so, stop broadcaster task
   bool anyEnabled = false;
   for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
     if (gSensorStreamingEnabled[i]) {
@@ -454,9 +495,17 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
       break;
     }
   }
+  xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
+  // Tell masters immediately that this sensor stopped streaming (don't wait for
+  // the 5s presence announce) — this is what makes the remote dot go red and stay.
+  broadcastSensorStatus(sensorType, false);
+
+  // If this was the last sensor, the broadcaster observes the cleared flags on
+  // its next 50 ms lap and self-deletes. Do not synchronously join it here:
+  // subscription updates can run on espnow_task, whose RX drain must not block.
   if (!anyEnabled) {
-    stopSensorBroadcaster();
-    DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] All sensors disabled, task stopped");
+    DEBUGF(DEBUG_ESPNOW_CORE,
+           "[SENSOR_BROADCASTER] All sensors disabled; task retirement requested");
   }
   
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Streaming disabled: %s (flag=%d)",
@@ -501,22 +550,43 @@ void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
     DEBUG_ESPNOW_STREAMF("[SENSOR_SUB] ignoring unknown mode %u", mode);
     return;
   }
-  // subscribe/oneshot record the controller as the encrypted-reply target.
+  // The deferred apply still runs on espnow_task. Never block that RX drainer
+  // behind closeespnow's task join: shutdown publishes its atomic gate before
+  // taking this mutex, and an ordinary short-lived creator conflict is retried
+  // on the next super-loop lap using the already-staged request fields.
+  if (gSensorStreamingShutdown.load(std::memory_order_acquire)) return;
+  if (!gSensorBroadcasterLifecycleMutex ||
+      xSemaphoreTake(gSensorBroadcasterLifecycleMutex, 0) != pdTRUE) {
+    if (!gSensorStreamingShutdown.load(std::memory_order_acquire) && gEspNow) {
+      gEspNow->meshSensorReqPending = true;
+    }
+    return;
+  }
+  if (gSensorStreamingShutdown.load(std::memory_order_acquire)) {
+    xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
+    return;
+  }
+
+  // Subscribe/oneshot record the controller as the encrypted-reply target.
   if ((mode == SENSOR_REQ_SUBSCRIBE || mode == SENSOR_REQ_ONESHOT) && controllerMac) {
     memcpy(gSensorControllerMac, controllerMac, 6);
   }
+  uint32_t statusMask = 0;
+  uint32_t enabledMask = 0;
   for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
     if (!(sensorMask & (1u << i))) continue;
-    RemoteSensorType t = (RemoteSensorType)i;
+    statusMask |= 1u << i;
     if (mode == SENSOR_REQ_UNSUBSCRIBE) {
       gSensorLeaseExpiresAt[i] = 0;
       gSensorReqIntervalMs[i]  = 0;
-      // Safe here: we run on espnow_task (super-loop), NOT the broadcaster task, so
-      // stopSensorDataStreaming's task-teardown deletes a *different* handle (H3).
-      stopSensorDataStreaming(t);
+      gSensorStreamingEnabled[i] = false;
     } else {
-      // subscribe or oneshot: start streaming and stamp the lease.
-      startSensorDataStreaming(t);
+      // Subscribe or oneshot: publish every task-observed field before creating
+      // the broadcaster, then stamp the lease.
+      gSensorBroadcastEnabled = true;
+      gSensorStreamingEnabled[i] = true;
+      gLastTxMs[i] = 0;
+      enabledMask |= 1u << i;
       gSensorReqIntervalMs[i] = intervalMs;
       uint32_t leaseFor = (mode == SENSOR_REQ_ONESHOT)
                             ? (uint32_t)(intervalMs ? intervalMs : 500)  // ~one push then expire
@@ -524,6 +594,34 @@ void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
       uint32_t exp = (uint32_t)millis() + leaseFor;
       if (exp == 0) exp = 1;  // 0 is reserved for "manual / no lease"
       gSensorLeaseExpiresAt[i] = exp;
+    }
+  }
+
+  bool taskReady = true;
+  if (enabledMask) {
+    bool taskPresent;
+    taskENTER_CRITICAL(&gSensorBcastTaskMux);
+    taskPresent = gSensorBroadcasterTask != nullptr;
+    taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+    taskReady = taskPresent || startSensorBroadcasterLocked();
+    if (!taskReady) {
+      for (int i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+        if (!(enabledMask & (1u << i))) continue;
+        gSensorStreamingEnabled[i] = false;
+        gSensorLeaseExpiresAt[i] = 0;
+        gSensorReqIntervalMs[i] = 0;
+      }
+    }
+  }
+  xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
+
+  // Radio notifications happen after releasing lifecycle state. A concurrent
+  // close may reject them through the runtime gate; the local state is already
+  // coherent either way.
+  for (int i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+    if (statusMask & (1u << i)) {
+      broadcastSensorStatus((RemoteSensorType)i,
+                            taskReady && (mode != SENSOR_REQ_UNSUBSCRIBE));
     }
   }
   DEBUG_ESPNOW_STREAMF("[SENSOR_SUB] applied mode=%u mask=0x%lx interval=%u lease=%u",
@@ -668,6 +766,10 @@ static void sensorBroadcasterTask(void* param) {
   DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BCAST_TASK] Started on core %d", xPortGetCoreID());
 
   for (;;) {
+    if (gSensorBroadcasterStopRequested.load(std::memory_order_acquire) ||
+        gSensorStreamingShutdown.load(std::memory_order_acquire)) {
+      break;
+    }
     const unsigned long now = millis();
 
     // Stack HWM diagnostic. uxTaskGetStackHighWaterMark returns the *free* stack
@@ -740,36 +842,88 @@ static void sensorBroadcasterTask(void* param) {
       gLastTxMs[i] = now;
     }
 
+    if (gSensorBroadcasterStopRequested.load(std::memory_order_acquire) ||
+        gSensorStreamingShutdown.load(std::memory_order_acquire)) {
+      break;
+    }
+
     // H3: if every sensor has stopped (e.g. all leases lapsed above), tear the task
-    // down cleanly — NULL our own handle FIRST, then vTaskDelete(nullptr) (which never
-    // returns). Never vTaskDelete our own cached handle, or the global keeps a stale
-    // pointer and startSensorBroadcaster() can never recreate the task until reboot.
+    // down cleanly. The lifecycle mux decides whether this is an unowned natural
+    // exit (self-delete) or an explicit stop whose owner will join/delete us.
     bool anyStillEnabled = false;
     for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
       if (gSensorStreamingEnabled[i]) { anyStillEnabled = true; break; }
     }
     if (!anyStillEnabled) {
-      // H3 + BUG-2: claim the handle atomically. If we win, self-delete. If an external
-      // stopSensorBroadcaster already claimed our handle it will delete us, so we must
-      // stop running WITHOUT self-deleting (a second vTaskDelete on the same task would
-      // fault) — park until that delete lands.
-      TaskHandle_t self = claimBroadcasterForDelete();
-      DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BCAST_TASK] all sensors stopped — self-teardown (won=%d)",
-             (int)(self != nullptr));
-      if (self) {
-        vTaskDelete(nullptr);  // we own the claim — never returns
-      } else {
-        for (;;) vTaskDelay(portMAX_DELAY);  // external stop holds our handle; it deletes us
+      // Serialize the final recheck/detach with a concurrent start. Use a
+      // zero-timeout take: closeespnow holds this mutex while it requests and
+      // joins an explicit stop, so blocking here would deadlock that join.
+      if (!gSensorBroadcasterLifecycleMutex ||
+          xSemaphoreTake(gSensorBroadcasterLifecycleMutex, 0) != pdTRUE) {
+        vTaskDelay(1);
+        continue;
       }
+      anyStillEnabled = false;
+      for (int i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+        if (gSensorStreamingEnabled[i]) {
+          anyStillEnabled = true;
+          break;
+        }
+      }
+      if (anyStillEnabled ||
+          gSensorBroadcasterStopRequested.load(std::memory_order_acquire) ||
+          gSensorStreamingShutdown.load(std::memory_order_acquire)) {
+        xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
+        continue;
+      }
+      TaskHandle_t self = xTaskGetCurrentTaskHandle();
+      taskENTER_CRITICAL(&gSensorBcastTaskMux);
+      const bool externallyOwned = gSensorBroadcasterExternalStop;
+      if (!externallyOwned && gSensorBroadcasterTask == self) {
+        gSensorBroadcasterTask = nullptr;
+      }
+      taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+      xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
+      if (!externallyOwned) {
+        DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BCAST_TASK] all sensors stopped — self-teardown");
+        vTaskDelete(nullptr);  // natural exit; no external join owner
+      }
+      break;
     }
 
     vTaskDelay(pdMS_TO_TICKS(50));
   }
+
+  // Explicit cooperative stop. All builders/sends and their guards have
+  // returned. Publish the join point and park; the lifecycle owner retains the
+  // handle and performs the actual delete before any shared buffer is freed.
+  xSemaphoreGive(gSensorBroadcasterStopDone);
+  vTaskSuspend(nullptr);
 }
 
 // Start the broadcaster task
-static bool startSensorBroadcaster() {
-  if (gSensorBroadcasterTask) return true;
+static bool startSensorBroadcasterLocked() {
+  if (gSensorStreamingShutdown.load(std::memory_order_acquire)) return false;
+
+  taskENTER_CRITICAL(&gSensorBcastTaskMux);
+  if (gSensorBroadcasterTask) {
+    const bool running = !gSensorBroadcasterExternalStop;
+    taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+    return running;
+  }
+  if (gSensorBroadcasterExternalStop) {
+    taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+    return false;
+  }
+  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+
+  if (!gSensorBroadcasterStopDone) {
+    gSensorBroadcasterStopDone =
+        xSemaphoreCreateBinaryStatic(&gSensorBroadcasterStopDoneStorage);
+  }
+  if (!gSensorBroadcasterStopDone) return false;
+  (void)xSemaphoreTake(gSensorBroadcasterStopDone, 0);
+  gSensorBroadcasterStopRequested.store(false, std::memory_order_release);
 
   // Allocate the shared broadcaster buffer in PSRAM, sized to the largest
   // sensor's bufBytes. One allocation, reused forever — no per-tick churn.
@@ -787,34 +941,107 @@ static bool startSensorBroadcaster() {
     gBroadcasterBufSize = maxBuf;
   }
 
+  TaskHandle_t createdTask = nullptr;
+  taskStackRecord("sensor_bcast", SENSOR_BCAST_STACK_WORDS);
   BaseType_t ret = xTaskCreatePinnedToCore(
     sensorBroadcasterTask,
     "sensor_bcast",
     SENSOR_BCAST_STACK_WORDS,
     nullptr,
     TASK_PRIORITY_HIGH,
-    &gSensorBroadcasterTask,
+    &createdTask,
     1      // Core 1 (opposite of ESP-NOW callback which is core 0)
   );
 
   if (ret == pdPASS) {
+    taskENTER_CRITICAL(&gSensorBcastTaskMux);
+    gSensorBroadcasterTask = createdTask;
+    taskEXIT_CRITICAL(&gSensorBcastTaskMux);
     DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Task started");
     return true;
   } else {
+    taskENTER_CRITICAL(&gSensorBcastTaskMux);
+    gSensorBroadcasterTask = nullptr;
+    taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+    gSensorBroadcasterStopRequested.store(true, std::memory_order_release);
     DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Failed to create task");
     return false;
   }
 }
 
 // Stop the broadcaster task
-static void stopSensorBroadcaster() {
-  // Race-safe (BUG-2): claim the handle atomically. If another task — or the broadcaster's
-  // own lease-lapse self-teardown — already claimed it, h is nullptr and we do nothing.
-  TaskHandle_t h = claimBroadcasterForDelete();
-  if (h) {
-    vTaskDelete(h);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Task stopped");
+static bool stopSensorBroadcasterLocked(uint32_t timeoutMs) {
+  TaskHandle_t task = nullptr;
+  SemaphoreHandle_t stopDone = nullptr;
+  taskENTER_CRITICAL(&gSensorBcastTaskMux);
+  task = gSensorBroadcasterTask;
+  stopDone = gSensorBroadcasterStopDone;
+  if (!task) {
+    taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+    return true;
   }
+  if (task == xTaskGetCurrentTaskHandle()) {
+    taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+    DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] stop rejected from broadcaster task");
+    return false;
+  }
+  // A retrying close may adopt the same explicit stop and wait for the task's
+  // already-published join token. The lifecycle mutex permits only one owner.
+  gSensorBroadcasterExternalStop = true;
+  gSensorBroadcasterStopRequested.store(true, std::memory_order_release);
+  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+
+  (void)xTaskAbortDelay(task);
+  if (!stopDone || xSemaphoreTake(stopDone, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
+    DEBUGF(DEBUG_ESPNOW_CORE,
+           "[SENSOR_BROADCASTER] stop TIMEOUT after %ums; resources retained for retry",
+           (unsigned)timeoutMs);
+    return false;
+  }
+
+  vTaskDelete(task);
+  taskENTER_CRITICAL(&gSensorBcastTaskMux);
+  if (gSensorBroadcasterTask == task) gSensorBroadcasterTask = nullptr;
+  gSensorBroadcasterExternalStop = false;
+  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+  DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Task stopped");
+  return true;
+}
+
+bool shutdownSensorDataStreamingForEspNowClose() {
+  // Close admission first, then clear every local/bond-master UI and lease bit
+  // in one short critical section. Do not call stopSensorDataStreaming(): it
+  // emits one radio status frame per sensor (and a bond master emits STREAM_CTRL).
+  gSensorStreamingShutdown.store(true, std::memory_order_release);
+  if (!gSensorBroadcasterLifecycleMutex ||
+      xSemaphoreTake(gSensorBroadcasterLifecycleMutex, portMAX_DELAY) != pdTRUE) {
+    return false;
+  }
+  taskENTER_CRITICAL(&gSensorBcastTaskMux);
+  gSensorBroadcastEnabled = false;
+  memset(gSensorStreamingEnabled, 0, sizeof(gSensorStreamingEnabled));
+  memset(gSensorLeaseExpiresAt, 0, sizeof(gSensorLeaseExpiresAt));
+  memset(gSensorReqIntervalMs, 0, sizeof(gSensorReqIntervalMs));
+  memset(gSensorControllerMac, 0, sizeof(gSensorControllerMac));
+  memset(gLastTxMs, 0, sizeof(gLastTxMs));
+  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+
+  if (!stopSensorBroadcasterLocked(2000)) {
+    xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
+    return false;
+  }
+
+  // The task has reached its explicit join and has been deleted; no builder can
+  // still be using the shared buffer. Detach before free so a future init/start
+  // allocates a fresh correctly-sized buffer.
+  taskENTER_CRITICAL(&gSensorBcastTaskMux);
+  char* buffer = gBroadcasterBuf;
+  gBroadcasterBuf = nullptr;
+  gBroadcasterBufSize = 0;
+  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+  if (buffer) free(buffer);
+  xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
+  return true;
 }
 
 String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType) {

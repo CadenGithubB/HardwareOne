@@ -16,6 +16,7 @@
 #include "System_Utils.h"         // everyMs
 #include "System_Debug.h"
 
+#include <esp_attr.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +37,7 @@ struct Anchor {
   time_t   epochAtSync;
 };
 constexpr size_t kMaxAnchors = 32;
-static Anchor  gAnchors[kMaxAnchors];
+EXT_RAM_BSS_ATTR static Anchor gAnchors[kMaxAnchors];
 static size_t  gAnchorCount   = 0;
 static bool    gRegistryLoaded = false;
 

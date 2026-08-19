@@ -1,6 +1,8 @@
 #include "System_LiveAudio.h"
 
 #include <atomic>
+#include <ctype.h>
+#include <esp_attr.h>
 #include <esp_crc.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -135,7 +137,7 @@ static LastState sLast;
 static ShadowStats sShadowStats;
 static bool sBulkTransferActive = false;
 static TaskHandle_t sTxTask = nullptr;
-static char sReply[1024];
+EXT_RAM_BSS_ATTR static char sReply[1024];
 
 // Strict SPSC queue. Storage is exactly 16 KiB of PSRAM and is never silently
 // replaced by DRAM. The recorder task is the sole producer; live_audio_tx is
@@ -178,6 +180,71 @@ bool parseStrictId(const String& token, uint64_t& out) {
   if (high == 0 || low == 0) return false;
   out = (static_cast<uint64_t>(high) << 32) | low;
   return true;
+}
+
+bool parseStrictIdSpan(const char* text, size_t len, uint64_t& out) {
+  if (!text || len != 16) return false;
+  uint32_t high = 0;
+  uint32_t low = 0;
+  for (size_t i = 0; i < 16; ++i) {
+    const int nibble = hexNibble(text[i]);
+    if (nibble < 0) return false;
+    if (i < 8) high = (high << 4) | static_cast<uint32_t>(nibble);
+    else low = (low << 4) | static_cast<uint32_t>(nibble);
+  }
+  if (high == 0 || low == 0) return false;
+  out = (static_cast<uint64_t>(high) << 32) | low;
+  return true;
+}
+
+struct TextToken {
+  const char* ptr = nullptr;
+  size_t len = 0;
+};
+
+bool nextTextToken(const char*& cursor, TextToken& token) {
+  if (!cursor) return false;
+  while (*cursor && isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+  if (!*cursor) {
+    token = {};
+    return false;
+  }
+  token.ptr = cursor;
+  while (*cursor && !isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+  token.len = static_cast<size_t>(cursor - token.ptr);
+  return true;
+}
+
+bool textTokenEquals(const TextToken& token, const char* literal) {
+  if (!literal) return false;
+  const size_t len = strlen(literal);
+  return token.len == len && memcmp(token.ptr, literal, len) == 0;
+}
+
+bool textTokenEqualsIgnoreCase(const TextToken& token, const char* literal) {
+  if (!literal) return false;
+  const size_t len = strlen(literal);
+  if (token.len != len) return false;
+  for (size_t i = 0; i < len; ++i) {
+    const unsigned char lhs = static_cast<unsigned char>(token.ptr[i]);
+    const unsigned char rhs = static_cast<unsigned char>(literal[i]);
+    if (tolower(lhs) != tolower(rhs)) return false;
+  }
+  return true;
+}
+
+bool parseCanonicalReadyLine(const char* line, uint64_t& controller) {
+  const char* cursor = line;
+  TextToken root;
+  TextToken verb;
+  TextToken version;
+  TextToken id;
+  TextToken extra;
+  return nextTextToken(cursor, root) && textTokenEquals(root, "liveaudio") &&
+         nextTextToken(cursor, verb) && textTokenEquals(verb, "ready") &&
+         nextTextToken(cursor, version) && textTokenEquals(version, "1") &&
+         nextTextToken(cursor, id) && parseStrictIdSpan(id.ptr, id.len, controller) &&
+         !nextTextToken(cursor, extra);
 }
 
 void formatId(uint64_t id, char out[17]) {
@@ -687,6 +754,65 @@ void countShadowSkip() {
 
 }  // namespace
 
+bool liveAudioIsHousekeepingCommand(const char* line) {
+  const char* cursor = line;
+  TextToken root;
+  TextToken verb;
+  if (!nextTextToken(cursor, root) ||
+      !textTokenEqualsIgnoreCase(root, "liveaudio") ||
+      !nextTextToken(cursor, verb)) {
+    return false;
+  }
+  return textTokenEqualsIgnoreCase(verb, "status") ||
+         textTokenEqualsIgnoreCase(verb, "capabilities");
+}
+
+LiveAudioReadyIntrinsicResult liveAudioHandleReadyIntrinsic(
+    const char* line, uint32_t namedSessionEpoch,
+    bool namedSessionMayControl, char* reply, size_t replySize) {
+  uint64_t controller = 0;
+  if (!parseCanonicalReadyLine(line, controller) ||
+      !namedSessionMayControl || namedSessionEpoch == 0 || !reply ||
+      replySize == 0 || !uartLinkIsRunning() ||
+      uartLinkEffectiveBaud() < static_cast<int>(kMinBaud)) {
+    return LiveAudioReadyIntrinsicResult::NotHandled;
+  }
+
+  // Renewal only.  Never create or resurrect authority here: initial setup,
+  // an expired lease, a changed login epoch, or a different controller must
+  // retain the ordinary command's CRC/task/lifecycle path.
+  bool renewed = false;
+  portENTER_CRITICAL(&sStateMux);
+  // Sample after acquiring the lease lock. A timestamp captured before a
+  // preemption or lock wait could make a lease that expired in the meantime
+  // appear current and let this renewal-only path resurrect it.
+  const uint32_t now = millis();
+  // A valid lease can only be minted by the ordinary ready path after
+  // ensureTxTask() succeeds, so the lease itself is the synchronized proof
+  // that the persistent transmitter exists. Do not read sTxTask here: its
+  // one-time publication belongs to the serialized setup path.
+  if (sLease.valid && sLease.controller == controller &&
+      sLease.sessionEpoch == namedSessionEpoch &&
+      namedSessionEpoch == uartLinkSessionEpoch() &&
+      !timeReached(now, sLease.deadlineMs)) {
+    sLease.deadlineMs = now + kLeaseTtlMs;
+    renewed = true;
+  }
+  portEXIT_CRITICAL(&sStateMux);
+  if (!renewed) return LiveAudioReadyIntrinsicResult::NotHandled;
+
+  char controllerText[17];
+  formatId(controller, controllerText);
+  snprintf(reply, replySize,
+           "OK: liveaudio ready version=1 controller=%s session_epoch=%lu "
+           "renew_direct=1 lease_ttl_ms=%lu renew_ms=%lu baud=%d",
+           controllerText, static_cast<unsigned long>(namedSessionEpoch),
+           static_cast<unsigned long>(kLeaseTtlMs),
+           static_cast<unsigned long>(kLeaseRenewMs),
+           uartLinkEffectiveBaud());
+  return LiveAudioReadyIntrinsicResult::Handled;
+}
+
 bool liveAudioStreamActive() {
   portENTER_CRITICAL(&sStateMux);
   const bool active = sStream.active;
@@ -946,11 +1072,14 @@ const char* cmd_liveaudio(const String& argsInput) {
     snprintf(sReply, sizeof(sReply),
              "OK: live-pcm-v1 synthetic=1 recorder_shadow=1 "
              "shadow_default=off protocol=1 frames=0x10/0x11/0x12/0x13 "
-             "source=0 recorder_source=1/2 format=1 rate=16000 lease_ttl_ms=3000 "
-             "lease_renew_ms=1000 min_baud=921600 "
+             "source=0 recorder_source=1/2 format=1 rate=16000 "
+             "renew_direct=1 lease_ttl_ms=%lu lease_renew_ms=%lu "
+             "min_baud=921600 "
              "logical_chunk_samples=2048 physical_frame_samples=500 "
              "shadow_slots=4 shadow_bytes=16384 max_duration_ms=60000 "
-             "id=hex16 crc32=CBF43926");
+             "id=hex16 crc32=CBF43926",
+             static_cast<unsigned long>(kLeaseTtlMs),
+             static_cast<unsigned long>(kLeaseRenewMs));
     return sReply;
   }
 
@@ -1079,7 +1208,7 @@ const char* cmd_liveaudio(const String& argsInput) {
     formatId(controller, controllerText);
     snprintf(sReply, sizeof(sReply),
              "OK: liveaudio ready version=1 controller=%s session_epoch=%lu "
-             "lease_ttl_ms=%lu renew_ms=%lu baud=%d",
+             "renew_direct=1 lease_ttl_ms=%lu renew_ms=%lu baud=%d",
              controllerText, static_cast<unsigned long>(sessionEpoch),
              static_cast<unsigned long>(kLeaseTtlMs),
              static_cast<unsigned long>(kLeaseRenewMs),

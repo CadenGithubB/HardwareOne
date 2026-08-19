@@ -64,8 +64,8 @@
 #if ENABLE_BLUETOOTH
 #include "Bluetooth.h"
 #endif
-#if ENABLE_ONDEVICE_LLM
-#include "System_LLM.h"
+#if ENABLE_LLM_BACKEND
+#include "System_LLMBackend.h"
 #endif
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
@@ -164,11 +164,11 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
 
     case RF_HTTP:       return isHttpServerRunning();
 
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND
     // READY alone is insufficient: GENERATING is a distinct state, so a capture
     // taken mid-generation would read a loaded model as unloaded.
     case RF_LLM: {
-      LLMState s = llmGetStatus().state;   // llmGetStatus() returns LLMStatus{ state, ... }
+      LLMState s = llmBackendStatus().state;   // llmBackendStatus() returns LLMStatus{ state, ... }
       return (s == LLMState::READY || s == LLMState::GENERATING);
     }
 #else
@@ -184,12 +184,9 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
 #endif
 
 #if ENABLE_BLUETOOTH
-    // NEVER isBLERunning(): it deliberately reports true for bare controller
-    // activity, so a G2/ring client auto-reconnect (bleAutoStart == false)
-    // would look like divergence and the next boot would replay SERVER init,
-    // silently changing the user's BLE role. gBLEState->initialized is
-    // server-mode-only, which is what bleAutoStart actually controls.
-    case RF_BLUETOOTH:  return (gBLEState && gBLEState->initialized);
+    // bleAutoStart owns only the phone-facing server. A G2/ring client must not
+    // look like server divergence and silently change the user's role at boot.
+    case RF_BLUETOOTH:  return isBleServerInitialized();
 #else
     case RF_BLUETOOTH:  return false;
 #endif

@@ -51,3 +51,24 @@ CONFIG_PARTITION_TABLE_OFFSET=0x8000
 # fuller feature set). Revert this + the two BuildConfig flags to rebuild the
 # camera+PDM-only variant.
 CONFIG_BT_ENABLED=y
+
+# Camera sensor policy — the XIAO Sense fleet uses the OV family. Keep all
+# three OV variants supported by HardwareOne and compile out unrelated sensor
+# drivers whose register tables otherwise consume internal DRAM permanently.
+CONFIG_OV2640_SUPPORT=y
+CONFIG_OV3660_SUPPORT=y
+CONFIG_OV5640_SUPPORT=y
+CONFIG_OV7670_SUPPORT=n
+CONFIG_OV7725_SUPPORT=n
+CONFIG_NT99141_SUPPORT=n
+CONFIG_GC2145_SUPPORT=n
+CONFIG_GC032A_SUPPORT=n
+CONFIG_GC0308_SUPPORT=n
+CONFIG_BF3005_SUPPORT=n
+CONFIG_BF20A6_SUPPORT=n
+CONFIG_SC101IOT_SUPPORT=n
+CONFIG_SC030IOT_SUPPORT=n
+CONFIG_SC031GS_SUPPORT=n
+CONFIG_HM1055_SUPPORT=n
+CONFIG_HM0360_SUPPORT=n
+CONFIG_MEGA_CCM_SUPPORT=n

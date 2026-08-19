@@ -235,19 +235,21 @@ extern volatile bool gWizardOwnsSerial;
 // share identical paint output.
 void printSerialPageStatus();
 
-// Shared WiFi scan-and-list printer for the serial/CLI wizard paths
-// (handleSerialWiFiPage and the CLIMode WIFI_SSID state). Scans, then prints
-// "Found N network(s):" with NAMED-ONLY numbering
-// plus a "(+H hidden ...)" line — mirroring the OLED picker so a numbered pick
-// can never resolve to a blank SSID (the bug that let typing a list number for
-// a hidden AP save an empty/NO_SSID_AVAIL SSID). Fills namedScanIdx[] with the
-// scan indices of named APs so the caller maps choice K -> WiFi.SSID(
-// namedScanIdx[K-1]); returns the count stored (== the valid numeric range).
-// Does NOT delete the scan — the caller owns WiFi.scanDelete() once it has read
-// the chosen SSID. Output goes through broadcastOutput so every transport
-// (serial, web CLI, BLE, OLED console) sees the same list.
+// Shared WiFi scan-and-list helper for the serial/CLI wizard paths. It prints
+// named networks with 1-based numbering, counts hidden networks separately,
+// and copies at most namedCap SSIDs into a 24-entry module-owned PSRAM cache.
+// The native IDF scan cursor is released before this function
+// returns, so no raw scan index or global scan buffer survives while waiting
+// for human input. Output goes through broadcastOutput so every transport sees
+// the same list. Returns the valid numeric-choice count.
+//
+// wifiScanGetNamedSSID uses a zero-based cache index and copies the SSID into
+// outSSID; it returns false for an invalid/stale index. Call
+// wifiScanClearNamed whenever the list is abandoned or a choice is consumed.
 #if ENABLE_WIFI
-int wifiScanPrintNamed(int* namedScanIdx, int namedCap);
+int wifiScanPrintNamed(int namedCap = 24);
+bool wifiScanGetNamedSSID(int zeroBasedIndex, String& outSSID);
+void wifiScanClearNamed();
 #endif
 
 // ============================================================================

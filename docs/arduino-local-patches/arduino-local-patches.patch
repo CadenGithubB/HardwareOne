@@ -207,26 +207,111 @@ index fc83e00af..20cbc19e4 100644
    - path: ./idf_component_examples/hello_world
    - path: ./idf_component_examples/hw_cdc_hello_world
 diff --git a/libraries/BLE/src/BLEClient.cpp b/libraries/BLE/src/BLEClient.cpp
-index 808614ba5..2f246845d 100644
+index 808614ba5..3f279ee7b 100644
 --- a/libraries/BLE/src/BLEClient.cpp
 +++ b/libraries/BLE/src/BLEClient.cpp
-@@ -118,6 +118,15 @@ BLEClient::BLEClient() {
+@@ -114,10 +114,88 @@ BLEClient::BLEClient() {
+ #endif
+ }  // BLEClient
+ 
++// [hardwareone local patch 2026-08-14] Allocation-free connect telemetry and
++// acknowledged GATTC-unregister state used by checked HardwareOne teardown.
++BLEClientConnectOutcome BLEClient::getLastConnectOutcome() const {
++  BLEClientConnectOutcome outcome;
++  portENTER_CRITICAL(&m_connectOutcomeMux);
++  outcome = m_lastConnectOutcome;
++  portEXIT_CRITICAL(&m_connectOutcomeMux);
++  return outcome;
++}
++
++const char *BLEClient::connectStageToString(BLEClientConnectStage stage) {
++  switch (stage) {
++    case BLEClientConnectStage::NONE:               return "none";
++    case BLEClientConnectStage::PRECHECK:           return "precheck";
++    case BLEClientConnectStage::APP_REGISTER_API:   return "app-register-api";
++    case BLEClientConnectStage::APP_REGISTER_EVENT: return "app-register-event";
++    case BLEClientConnectStage::APP_REGISTER_TIMEOUT: return "app-register-timeout";
++    case BLEClientConnectStage::OPEN_API:           return "open-api";
++    case BLEClientConnectStage::OPEN_EVENT:         return "open-event";
++    case BLEClientConnectStage::OPEN_TIMEOUT:       return "open-timeout";
++    case BLEClientConnectStage::COMPLETE:           return "complete";
++    default:                                        return "unknown";
++  }
++}
++
++const char *BLEClient::unregisterStateToString(BLEClientUnregisterState state) {
++  switch (state) {
++    case BLEClientUnregisterState::NOT_REQUESTED:      return "not-requested";
++    case BLEClientUnregisterState::REQUESTED:          return "requested";
++    case BLEClientUnregisterState::COMPLETED:          return "completed";
++    case BLEClientUnregisterState::REQUEST_FAILED:     return "request-failed";
++    case BLEClientUnregisterState::COMPLETION_TIMEOUT: return "completion-timeout";
++    case BLEClientUnregisterState::COMPLETED_LATE:     return "completed-late";
++    default:                                           return "unknown";
++  }
++}
++
++void BLEClient::resetConnectOutcome() {
++  m_connectStartedMs = millis();
++  portENTER_CRITICAL(&m_connectOutcomeMux);
++  m_lastConnectOutcome = BLEClientConnectOutcome{};
++  portEXIT_CRITICAL(&m_connectOutcomeMux);
++}
++
++void BLEClient::setConnectOutcomeStage(
++  BLEClientConnectStage stage, int32_t espStatus, int32_t gattStatus, int32_t hostStatus
++) {
++  portENTER_CRITICAL(&m_connectOutcomeMux);
++  m_lastConnectOutcome.stage = stage;
++  if (espStatus != BLE_CLIENT_STATUS_NOT_SET) {
++    m_lastConnectOutcome.espStatus = espStatus;
++  }
++  if (gattStatus != BLE_CLIENT_STATUS_NOT_SET) {
++    m_lastConnectOutcome.gattStatus = gattStatus;
++  }
++  if (hostStatus != BLE_CLIENT_STATUS_NOT_SET) {
++    m_lastConnectOutcome.hostStatus = hostStatus;
++  }
++  m_lastConnectOutcome.elapsedMs = millis() - m_connectStartedMs;
++  portEXIT_CRITICAL(&m_connectOutcomeMux);
++}
++
++void BLEClient::finishConnectOutcome(bool success) {
++  portENTER_CRITICAL(&m_connectOutcomeMux);
++  m_lastConnectOutcome.success = success;
++  if (success) {
++    m_lastConnectOutcome.stage = BLEClientConnectStage::COMPLETE;
++  }
++  m_lastConnectOutcome.elapsedMs = millis() - m_connectStartedMs;
++  portEXIT_CRITICAL(&m_connectOutcomeMux);
++}
++
+ /**
   * @brief Destructor.
   */
  BLEClient::~BLEClient() {
-+  // [hardwareone local patch 2026-08-08] this library keeps ONE static
-+  // BLEDevice::m_pClient alias, set by createClient() but never cleared when a
-+  // client is destroyed.
-+  // We create/destroy multiple clients (G2 temples + R1 ring), so a manual
-+  // `delete` here — or BLEDevice::deinit()'s own `delete m_pClient` — can leave
-+  // m_pClient dangling, and the NEXT deinit double-frees it (tlsf "block already
-+  // marked as free" -> reboot; the openble<->G2-client role flip). Clear the
-+  // alias if it points at us. BLEClient is a friend of BLEDevice (BLEDevice.h).
-+  if (BLEDevice::m_pClient == this) BLEDevice::m_pClient = nullptr;
++  // [hardwareone local patch 2026-08-14] The global dispatcher owns counted
++  // references. A legacy raw delete therefore waits for positive GATTC-route
++  // retirement and callback drain; BLEDevice::deleteClient() is preferred
++  // because it reports false rather than blocking while an app registration
++  // is still outstanding.
++  BLEDevice::prepareClientDestruction(this, true);
    // We may have allocated service references associated with this client.  Before we are finished
    // with the client, we must release resources.
    for (auto &myPair : m_servicesMap) {
-@@ -352,13 +361,16 @@ bool BLEClient::setMTU(uint16_t mtu) {
+@@ -162,7 +240,10 @@ bool BLEClient::connectTimeout(BLEAdvertisedDevice *device, uint32_t timeoutMs)
+ 
+ esp_gatt_if_t BLEClient::getGattcIf() {
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+-  return m_gattc_if;
++  portENTER_CRITICAL(&m_connectOutcomeMux);
++  const esp_gatt_if_t gattcIf = m_gattc_if;
++  portEXIT_CRITICAL(&m_connectOutcomeMux);
++  return gattcIf;
+ #endif
+ 
+ #if defined(CONFIG_NIMBLE_ENABLED)
+@@ -352,13 +433,16 @@ bool BLEClient::setMTU(uint16_t mtu) {
    log_v(">> setMTU: %d", mtu);
    esp_err_t err = ESP_OK;
  
@@ -250,7 +335,7 @@ index 808614ba5..2f246845d 100644
  
    if (err == ESP_OK) {
  #ifdef CONFIG_BLUEDROID_ENABLED
-@@ -379,8 +391,6 @@ bool BLEClient::setMTU(uint16_t mtu) {
+@@ -379,8 +463,6 @@ bool BLEClient::setMTU(uint16_t mtu) {
    }
    log_v("<< setMTU");
  
@@ -259,9 +344,128 @@ index 808614ba5..2f246845d 100644
    return true;
  }
  
-@@ -433,10 +443,24 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+@@ -412,6 +494,93 @@ void BLEClientCallbacks::onDisconnect(BLEClient *pClient) {
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+ 
++static constexpr uint32_t kGattcUnregisterWaitMs = 2000;
++
++void BLEClient::setUnregisterState(BLEClientUnregisterState state, int32_t espStatus) {
++  const uint32_t elapsedMs = millis() - m_unregisterStartedMs;
++  portENTER_CRITICAL(&m_connectOutcomeMux);
++  if (state == BLEClientUnregisterState::COMPLETED
++      && m_lastConnectOutcome.unregisterState == BLEClientUnregisterState::COMPLETION_TIMEOUT) {
++    state = BLEClientUnregisterState::COMPLETED_LATE;
++  }
++  m_lastConnectOutcome.unregisterState = state;
++  if (espStatus != BLE_CLIENT_STATUS_NOT_SET) {
++    m_lastConnectOutcome.unregisterEspStatus = espStatus;
++  }
++  m_lastConnectOutcome.unregisterElapsedMs = elapsedMs;
++  portEXIT_CRITICAL(&m_connectOutcomeMux);
++}
++
++esp_err_t BLEClient::requestGattcUnregister() {
++  const esp_gatt_if_t gattcIf = getGattcIf();
++  if (gattcIf == ESP_GATT_IF_NONE) {
++    return ESP_OK;
++  }
++
++  const BLEClientConnectOutcome previous = getLastConnectOutcome();
++  if (previous.unregisterState == BLEClientUnregisterState::REQUESTED
++      || previous.unregisterState == BLEClientUnregisterState::COMPLETION_TIMEOUT) {
++    return ESP_ERR_INVALID_STATE;
++  }
++
++  m_unregisterStartedMs = millis();
++  // Consume the initially-given semaphore before requesting deregistration so
++  // an ESP_GATTC_UNREG_EVT can be acknowledged without a lost-wakeup race.
++  if (!m_semaphoreUnregEvt.take((uint32_t)0, "gattc-unregister")) {
++    setUnregisterState(BLEClientUnregisterState::REQUEST_FAILED, ESP_ERR_INVALID_STATE);
++    return ESP_ERR_INVALID_STATE;
++  }
++
++  setUnregisterState(BLEClientUnregisterState::REQUESTED);
++  const esp_err_t errRc = ::esp_ble_gattc_app_unregister(gattcIf);
++  if (errRc != ESP_OK) {
++    // No completion event is promised when the API rejects the request. Keep
++    // m_gattc_if and the BLEDevice routing entry intact so callers quarantine
++    // this client instead of deleting an object which may still receive events.
++    setUnregisterState(BLEClientUnregisterState::REQUEST_FAILED, errRc);
++    m_semaphoreUnregEvt.give();
++    return errRc;
++  }
++
++  // Store the synchronous request result without changing a COMPLETED state if
++  // the callback raced the API return.
++  portENTER_CRITICAL(&m_connectOutcomeMux);
++  m_lastConnectOutcome.unregisterEspStatus = errRc;
++  portEXIT_CRITICAL(&m_connectOutcomeMux);
++  return ESP_OK;
++}
++
++bool BLEClient::waitForGattcUnregister(uint32_t timeoutMs) {
++  const BLEClientConnectOutcome before = getLastConnectOutcome();
++  if (before.unregisterState == BLEClientUnregisterState::COMPLETED
++      || before.unregisterState == BLEClientUnregisterState::COMPLETED_LATE) {
++    return true;
++  }
++  if (before.unregisterState != BLEClientUnregisterState::REQUESTED) {
++    return false;
++  }
++
++  const bool acknowledged = m_semaphoreUnregEvt.timedWait(
++    "gattc-unregister", timeoutMs == portMAX_DELAY ? portMAX_DELAY : pdMS_TO_TICKS(timeoutMs)
++  );
++  if (!acknowledged) {
++    const uint32_t elapsedMs = millis() - m_unregisterStartedMs;
++    portENTER_CRITICAL(&m_connectOutcomeMux);
++    if (m_lastConnectOutcome.unregisterState == BLEClientUnregisterState::REQUESTED) {
++      m_lastConnectOutcome.unregisterState = BLEClientUnregisterState::COMPLETION_TIMEOUT;
++      m_lastConnectOutcome.unregisterElapsedMs = elapsedMs;
++    }
++    const bool completed = m_lastConnectOutcome.unregisterState == BLEClientUnregisterState::COMPLETED
++                           || m_lastConnectOutcome.unregisterState == BLEClientUnregisterState::COMPLETED_LATE;
++    portEXIT_CRITICAL(&m_connectOutcomeMux);
++    return completed;
++  }
++
++  const BLEClientConnectOutcome after = getLastConnectOutcome();
++  return after.unregisterState == BLEClientUnregisterState::COMPLETED
++         || after.unregisterState == BLEClientUnregisterState::COMPLETED_LATE;
++}
++
+ /**
+  * @brief Connect to the partner (BLE Server).
+  * @param [in] address The address of the partner.
+@@ -421,6 +590,17 @@ void BLEClientCallbacks::onDisconnect(BLEClient *pClient) {
+  */
+ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+   log_v(">> connect(%s)", address.toString().c_str());
++  resetConnectOutcome();
++  setConnectOutcomeStage(BLEClientConnectStage::PRECHECK);
++
++  // Reusing a client whose previous GATT application is still registered can
++  // create two application registrations and makes late events ambiguous.
++  if (getGattcIf() != ESP_GATT_IF_NONE || m_isConnected || BLEDevice::clientHasRouting(this)) {
++    setConnectOutcomeStage(BLEClientConnectStage::PRECHECK, ESP_ERR_INVALID_STATE);
++    finishConnectOutcome(false);
++    log_e("connect: client still connected or GATT application cleanup pending");
++    return false;
++  }
+ 
+   // We need the connection handle that we get from registering the application.  We register the app
+   // and then block on its completion.  When the event has arrived, we will have the handle.
+@@ -429,18 +609,47 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+   m_semaphoreRegEvt.take("connect");
+ 
+   // clearServices(); // we dont need to delete services since every client is unique?
++  setConnectOutcomeStage(BLEClientConnectStage::APP_REGISTER_API);
+   esp_err_t errRc = ::esp_ble_gattc_app_register(m_appId);
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_app_register: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
++    setConnectOutcomeStage(BLEClientConnectStage::APP_REGISTER_API, errRc);
++    finishConnectOutcome(false);
      BLEDevice::removePeerDevice(m_appId, true);
 +    // [hardwareone local patch 2026-07-27] Release the semaphore taken above.
 +    // Upstream leaks it here, so a single failed app_register wedged every
@@ -276,29 +480,80 @@ index 808614ba5..2f246845d 100644
 +  // and normally arrives within ms; if Bluedroid ever fails to deliver it the
 +  // old unbounded wait() wedged the caller — and the shared BLE-connect worker
 +  // task with it — forever. 10s is orders of magnitude past normal.
-+  if (!m_semaphoreRegEvt.timedWait("connect", 10000)) {
++  setConnectOutcomeStage(BLEClientConnectStage::APP_REGISTER_EVENT, errRc);
++  if (!m_semaphoreRegEvt.timedWait("connect", pdMS_TO_TICKS(10000))) {
 +    log_e("connect: REG_EVT never arrived (10s) — aborting");
-+    BLEDevice::removePeerDevice(m_appId, true);
++    setConnectOutcomeStage(BLEClientConnectStage::APP_REGISTER_TIMEOUT);
++    finishConnectOutcome(false);
++    // Keep the app-id route alive. Registration was accepted synchronously,
++    // so a late REG_EVT is still permitted and must reach this object long
++    // enough to unregister the newly assigned gattc_if. Whichever side wins
++    // the timeout/event race requests that unregister.
++    if (getGattcIf() != ESP_GATT_IF_NONE) requestGattcUnregister();
 +    return false;
 +  }
 +  uint32_t rc = m_semaphoreRegEvt.value();
  
    if (rc != ESP_GATT_OK) {
      // fixes ESP_GATT_NO_RESOURCES error mostly
-@@ -461,6 +485,10 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+     log_e("esp_ble_gattc_app_register_error: rc=%d", rc);
++    setConnectOutcomeStage(BLEClientConnectStage::APP_REGISTER_EVENT, BLE_CLIENT_STATUS_NOT_SET, (int32_t)rc);
++    finishConnectOutcome(false);
++    portENTER_CRITICAL(&m_connectOutcomeMux);
++    m_gattc_if = ESP_GATT_IF_NONE;
++    portEXIT_CRITICAL(&m_connectOutcomeMux);
+     BLEDevice::removePeerDevice(m_appId, true);
+     // not sure if this is needed here
+     // esp_ble_gattc_app_unregister(m_gattc_if);
+@@ -452,28 +661,53 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+ 
+   // Perform the open connection request against the target BLE Server.
+   m_semaphoreOpenEvt.take("connect");
++  setConnectOutcomeStage(BLEClientConnectStage::OPEN_API);
+   errRc = ::esp_ble_gattc_open(
+-    m_gattc_if,
++    getGattcIf(),
+     getPeerAddress().getNative(),  // address
+     (esp_ble_addr_type_t)type,     // Note: This was added on 2018-04-03 when the latest ESP-IDF was detected to have changed the signature.
+     1                              // direct connection <-- maybe needs to be changed in case of direct indirect connection???
+   );
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_open: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
-     BLEDevice::removePeerDevice(m_appId, true);
+-    BLEDevice::removePeerDevice(m_appId, true);
++    setConnectOutcomeStage(BLEClientConnectStage::OPEN_API, errRc);
++    finishConnectOutcome(false);
 +    // [hardwareone local patch 2026-07-27] Same leak as the app_register path
 +    // above — release m_semaphoreOpenEvt or every later connect() on this
 +    // client blocks forever at line 454.
 +    m_semaphoreOpenEvt.give();
++    if (requestGattcUnregister() == ESP_OK) {
++      waitForGattcUnregister(kGattcUnregisterWaitMs);
++    }
      return false;
    }
  
-@@ -472,8 +500,13 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
-     esp_ble_gattc_app_unregister(m_gattc_if);
-     m_gattc_if = ESP_GATT_IF_NONE;
+-  bool got_sem = m_semaphoreOpenEvt.timedWait("connect", timeoutMs);  // Wait for the connection to complete.
++  setConnectOutcomeStage(BLEClientConnectStage::OPEN_EVENT, errRc);
++  const uint32_t timeoutTicks = timeoutMs == portMAX_DELAY ? portMAX_DELAY : pdMS_TO_TICKS(timeoutMs);
++  bool got_sem = m_semaphoreOpenEvt.timedWait("connect", timeoutTicks);  // Wait for the connection to complete.
+   rc = m_semaphoreOpenEvt.value();
+   // check the status of the connection and cleanup in case of failure
+   if (!got_sem || rc != ESP_GATT_OK) {
+-    BLEDevice::removePeerDevice(m_appId, true);
+-    esp_ble_gattc_app_unregister(m_gattc_if);
+-    m_gattc_if = ESP_GATT_IF_NONE;
++    if (!got_sem) {
++      setConnectOutcomeStage(BLEClientConnectStage::OPEN_TIMEOUT);
++    } else {
++      setConnectOutcomeStage(BLEClientConnectStage::OPEN_EVENT, BLE_CLIENT_STATUS_NOT_SET, (int32_t)rc);
++    }
++    finishConnectOutcome(false);
++    if (requestGattcUnregister() == ESP_OK) {
++      waitForGattcUnregister(kGattcUnregisterWaitMs);
++    }
++  } else {
++    setConnectOutcomeStage(BLEClientConnectStage::OPEN_EVENT, BLE_CLIENT_STATUS_NOT_SET, (int32_t)rc);
++    finishConnectOutcome(true);
    }
 -  log_v("<< connect(), rc=%d", rc == ESP_GATT_OK);
 -  return rc == ESP_GATT_OK;
@@ -312,8 +567,54 @@ index 808614ba5..2f246845d 100644
  }  // connect
  
  /**
-@@ -539,6 +572,13 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
-       BLEDevice::removePeerDevice(m_appId, true);
+@@ -499,7 +733,11 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+   log_d("gattClientEventHandler [esp_gatt_if: %d] ... %s", gattc_if, BLEUtils::gattClientEventTypeToString(event).c_str());
+ 
+   // it is possible to receive events from other connections while waiting for registration
+-  if (m_gattc_if == ESP_GATT_IF_NONE && event != ESP_GATTC_REG_EVT) {
++  const esp_gatt_if_t currentGattcIf = getGattcIf();
++  if (event == ESP_GATTC_REG_EVT) {
++    if (evtParam->reg.app_id != m_appId) return;
++  } else if (currentGattcIf == ESP_GATT_IF_NONE
++             || (gattc_if != ESP_GATT_IF_NONE && gattc_if != currentGattcIf)) {
+     return;
+   }
+ 
+@@ -515,6 +753,23 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+       break;
+     }
+ 
++    case ESP_GATTC_UNREG_EVT:
++    {
++      // ESP_GATTC_UNREG_EVT has no callback parameter/status in ESP-IDF.  Its
++      // delivery is the acknowledgement.  Keep the routing-map entry and the
++      // real gattc_if until this point so BLEDevice can deliver the event.
++      if (gattc_if != getGattcIf()) {
++        break;
++      }
++      setUnregisterState(BLEClientUnregisterState::COMPLETED);
++      portENTER_CRITICAL(&m_connectOutcomeMux);
++      m_gattc_if = ESP_GATT_IF_NONE;
++      portEXIT_CRITICAL(&m_connectOutcomeMux);
++      BLEDevice::removePeerDevice(m_appId, true);
++      m_semaphoreUnregEvt.give();
++      break;
++    }
++
+     //
+     // ESP_GATTC_DISCONNECT_EVT
+     //
+@@ -531,14 +786,19 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+       // no longer connected.
+       bool m_wasConnected = m_isConnected;
+       m_isConnected = false;
+-      esp_ble_gattc_app_unregister(m_gattc_if);
+-      m_gattc_if = ESP_GATT_IF_NONE;
++      requestGattcUnregister();
+       m_semaphoreOpenEvt.give(ESP_GATT_IF_NONE);
+       m_semaphoreRssiCmplEvt.give();
+       m_semaphoreSearchCmplEvt.give(1);
+-      BLEDevice::removePeerDevice(m_appId, true);
        // Reset security state on disconnect
        BLESecurity::resetSecurity();
 +      // [hardwareone local patch 2026-07-28] Clear per-connection state.
@@ -326,17 +627,23 @@ index 808614ba5..2f246845d 100644
        if (m_wasConnected && m_pClientCallbacks != nullptr) {
          m_pClientCallbacks->onDisconnect(this);
        }
-@@ -555,13 +595,20 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+@@ -555,14 +815,30 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
      //
      case ESP_GATTC_OPEN_EVT:
      {
 -      m_conn_id = evtParam->open.conn_id;
++      // Preserve the raw GATT result even when this is a late event arriving
++      // after connect() reported OPEN_TIMEOUT. Do not change the terminal
++      // stage here; callers need to distinguish timeout from event failure.
++      portENTER_CRITICAL(&m_connectOutcomeMux);
++      m_lastConnectOutcome.gattStatus = (int32_t)evtParam->open.status;
++      portEXIT_CRITICAL(&m_connectOutcomeMux);
 +      // [hardwareone local patch 2026-07-28] Only latch conn_id on success.
 +      // Upstream stamped it unconditionally, so a failed open left a stale id
 +      // that could match a later link in CONNECT_EVT (same duplicate-MTU-req
 +      // hazard as the DISCONNECT_EVT reset above). Nothing reads
-+      // m_conn_id after a failed open: connect() resets m_gattc_if, which
-+      // gates this whole handler.
++      // m_conn_id after a failed open; connect() requests GATT application
++      // unregister and keeps the real interface only until UNREG is observed.
        if (evtParam->open.status == ESP_GATT_OK) {
 +        m_conn_id = evtParam->open.conn_id;
          m_isConnected = true;  // Flag us as connected.
@@ -344,27 +651,46 @@ index 808614ba5..2f246845d 100644
            m_pClientCallbacks->onConnect(this);
          }
        } else {
+-        log_e("Failed to connect, status=%s", GeneralUtils::errorToString(evtParam->open.status));
 +        m_conn_id = ESP_GATT_IF_NONE;
-         log_e("Failed to connect, status=%s", GeneralUtils::errorToString(evtParam->open.status));
++        log_e(
++          "Failed to connect, gatt_status=0x%04x (%s)", (unsigned)evtParam->open.status,
++          BLEUtils::gattStatusToString(evtParam->open.status).c_str()
++        );
        }
        m_semaphoreOpenEvt.give(evtParam->open.status);
-@@ -577,6 +624,15 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+       break;
+@@ -577,9 +853,28 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
      //
      case ESP_GATTC_REG_EVT:
      {
+-      m_gattc_if = gattc_if;
 +      // [hardwareone local patch 2026-07-28] Only latch OUR registration.
 +      // BLEDevice's dispatcher routes REG_EVT to every client whose gattc_if
 +      // is still ESP_GATT_IF_NONE, so a parked client (e.g. one waiting to
 +      // retry after a failed open) could capture ANOTHER client's gattc_if
 +      // here and then mirror that client's OPEN/DISCONNECT events — firing
 +      // ghost callbacks for a link it was never part of.
-+      if (evtParam->reg.app_id != m_appId) {
-+        break;
-+      }
-       m_gattc_if = gattc_if;
++      const BLEClientConnectOutcome outcomeBeforeEvent = getLastConnectOutcome();
++      portENTER_CRITICAL(&m_connectOutcomeMux);
++      m_gattc_if = evtParam->reg.status == ESP_GATT_OK ? gattc_if : ESP_GATT_IF_NONE;
++      portEXIT_CRITICAL(&m_connectOutcomeMux);
        // pass on the registration status result, in case of failure
        m_semaphoreRegEvt.give(evtParam->reg.status);
-@@ -626,6 +682,12 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
++      if (evtParam->reg.status != ESP_GATT_OK) {
++        // No application exists to unregister after a failed REG event.
++        // This is also the positive retirement path for a late failed event.
++        BLEDevice::removePeerDevice(m_appId, true);
++      } else if (outcomeBeforeEvent.stage == BLEClientConnectStage::APP_REGISTER_TIMEOUT
++                 || getLastConnectOutcome().stage == BLEClientConnectStage::APP_REGISTER_TIMEOUT) {
++        // A late successful registration is cleanup-only. Never make this
++        // timed-out client appear reusable while the native app can callback.
++        requestGattcUnregister();
++      }
+       break;
+     }  // ESP_GATTC_REG_EVT
+ 
+@@ -626,6 +921,12 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
        esp_ble_gattc_cb_param_t *p_data = (esp_ble_gattc_cb_param_t *)evtParam;
        if (p_data->search_cmpl.status != ESP_GATT_OK) {
          log_e("search service failed, error status = %x", p_data->search_cmpl.status);
@@ -377,7 +703,7 @@ index 808614ba5..2f246845d 100644
          break;
        }
  #ifndef ARDUINO_ARCH_ESP32
-@@ -703,10 +765,19 @@ std::map<std::string, BLERemoteService *> *BLEClient::getServices() {
+@@ -703,10 +1004,19 @@ std::map<std::string, BLERemoteService *> *BLEClient::getServices() {
    m_semaphoreSearchCmplEvt.take("getServices");
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_search_service: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
@@ -398,11 +724,428 @@ index 808614ba5..2f246845d 100644
    log_v("<< getServices");
    return &m_servicesMap;
  }  // getServices
+@@ -764,14 +1074,20 @@ void BLEClient::dcTimerCb(ble_npl_event *event) {
+  */
+ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+   log_v(">> connect(%s)", address.toString().c_str());
++  resetConnectOutcome();
++  setConnectOutcomeStage(BLEClientConnectStage::PRECHECK);
+ 
+   if (!BLEDevice::m_synced) {
+     log_d("BLEClient", "Host reset, wait for sync.");
++    setConnectOutcomeStage(BLEClientConnectStage::PRECHECK, BLE_CLIENT_STATUS_NOT_SET, BLE_CLIENT_STATUS_NOT_SET, BLE_HS_ENOTSYNCED);
++    finishConnectOutcome(false);
+     return false;
+   }
+ 
+   if (m_conn_id != BLE_HS_CONN_HANDLE_NONE || m_isConnected || m_pTaskData != nullptr) {
+     log_e("Client busy, connected to %s, id=%d", m_peerAddress.toString().c_str(), getConnId());
++    setConnectOutcomeStage(BLEClientConnectStage::PRECHECK, BLE_CLIENT_STATUS_NOT_SET, BLE_CLIENT_STATUS_NOT_SET, BLE_HS_EBUSY);
++    finishConnectOutcome(false);
+     return false;
+   }
+ 
+@@ -780,11 +1096,15 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+   peerAddr_t.type = address.getType();
+   if (ble_gap_conn_find_by_addr(&peerAddr_t, NULL) == 0) {
+     log_e("A connection to %s already exists", address.toString().c_str());
++    setConnectOutcomeStage(BLEClientConnectStage::PRECHECK, BLE_CLIENT_STATUS_NOT_SET, BLE_CLIENT_STATUS_NOT_SET, BLE_HS_EDONE);
++    finishConnectOutcome(false);
+     return false;
+   }
+ 
+   if (address == BLEAddress("")) {
+     log_e("Invalid peer address (NULL)");
++    setConnectOutcomeStage(BLEClientConnectStage::PRECHECK, BLE_CLIENT_STATUS_NOT_SET, BLE_CLIENT_STATUS_NOT_SET, BLE_HS_EINVAL);
++    finishConnectOutcome(false);
+     return false;
+   }
+ 
+@@ -792,6 +1112,7 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+   m_peerAddress = address;
+ 
+   int rc = 0;
++  setConnectOutcomeStage(BLEClientConnectStage::OPEN_API);
+ 
+   /* Try to connect the the advertiser.  Allow 30 seconds (30000 ms) for
+    *  timeout (default value of m_connectTimeout).
+@@ -828,9 +1149,12 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+ 
+   if (rc != 0) {
+     m_lastErr = rc;
++    setConnectOutcomeStage(BLEClientConnectStage::OPEN_API, BLE_CLIENT_STATUS_NOT_SET, BLE_CLIENT_STATUS_NOT_SET, rc);
++    finishConnectOutcome(false);
+     return false;
+   }
+ 
++  setConnectOutcomeStage(BLEClientConnectStage::OPEN_EVENT);
+   BLETaskData taskData(this);
+   m_pTaskData = &taskData;
+ 
+@@ -844,6 +1168,7 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+       log_e("Connect timeout - canceling");
+       ble_gap_conn_cancel();
+       taskData.m_flags = BLE_HS_ETIMEOUT;
++      setConnectOutcomeStage(BLEClientConnectStage::OPEN_TIMEOUT, BLE_CLIENT_STATUS_NOT_SET, BLE_CLIENT_STATUS_NOT_SET, BLE_HS_ETIMEOUT);
+     }
+   }
+ 
+@@ -853,6 +1178,10 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+   if (rc != 0) {
+     log_e("Connection failed; status=%d %s", rc, BLEUtils::returnCodeToString(rc));
+     m_lastErr = rc;
++    if (getLastConnectOutcome().stage != BLEClientConnectStage::OPEN_TIMEOUT) {
++      setConnectOutcomeStage(BLEClientConnectStage::OPEN_EVENT, BLE_CLIENT_STATUS_NOT_SET, BLE_CLIENT_STATUS_NOT_SET, rc);
++    }
++    finishConnectOutcome(false);
+     return false;
+   }
+ 
+@@ -863,7 +1192,12 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+ 
+   BLEDevice::addPeerDevice(this, true, m_appId);
+   // Check if still connected before returning
+-  return isConnected();
++  const bool connected = isConnected();
++  if (!connected) {
++    setConnectOutcomeStage(BLEClientConnectStage::OPEN_EVENT, BLE_CLIENT_STATUS_NOT_SET, BLE_CLIENT_STATUS_NOT_SET, BLE_HS_ENOTCONN);
++  }
++  finishConnectOutcome(connected);
++  return connected;
+ }
+ 
+ /**
+@@ -982,13 +1316,16 @@ int BLEClient::handleGAPEvent(struct ble_gap_event *event, void *arg) {
+ 
+       log_i("BLEClient", "disconnect; reason=%d, %s", rc, BLEUtils::returnCodeToString(rc));
+ 
+-      BLEDevice::removePeerDevice(client->m_appId, true);
+       client->m_isConnected = false;
+       // Reset security state on disconnect
+       BLESecurity::resetSecurity();
+       if (client->m_pClientCallbacks != nullptr) {
+         client->m_pClientCallbacks->onDisconnect(client);
+       }
++      // Keep the route as the lifetime reference through the user callback.
++      // Checked deletion invoked by another task cannot free `client` until
++      // this callback returns and the route is positively retired.
++      BLEDevice::removePeerDevice(client->m_appId, true);
+       break;
+     }  // BLE_GAP_EVENT_DISCONNECT
+ 
+diff --git a/libraries/BLE/src/BLEClient.h b/libraries/BLE/src/BLEClient.h
+index cbe0bde7e..886ce2902 100644
+--- a/libraries/BLE/src/BLEClient.h
++++ b/libraries/BLE/src/BLEClient.h
+@@ -22,8 +22,10 @@
+  ***************************************************************************/
+ 
+ #include <string.h>
++#include <stdint.h>
+ #include <map>
+ #include <string>
++#include <freertos/FreeRTOS.h>
+ #include "BLERemoteService.h"
+ #include "BLEService.h"
+ #include "BLEAddress.h"
+@@ -69,6 +71,64 @@ class BLEClientCallbacks;
+ class BLEAdvertisedDevice;
+ struct BLETaskData;
+ 
++// [hardwareone local patch 2026-08-14] Preserve structured connect and GATTC
++// unregister outcomes so the firmware can distinguish a real RF failure from
++// a locally wedged/cancelled host transaction without parsing log strings.
++/**
++ * @brief The last lower-level stage reached by BLEClient::connect().
++ *
++ * A failed result deliberately remains at the stage which failed.  A
++ * successful result advances to COMPLETE.  The raw status fields in
++ * BLEClientConnectOutcome identify whether the failure was returned by an
++ * ESP-IDF API, a Bluedroid GATT event, or the NimBLE host.
++ */
++enum class BLEClientConnectStage : uint8_t {
++  NONE = 0,
++  PRECHECK,
++  APP_REGISTER_API,
++  APP_REGISTER_EVENT,
++  APP_REGISTER_TIMEOUT,
++  OPEN_API,
++  OPEN_EVENT,
++  OPEN_TIMEOUT,
++  COMPLETE,
++};
++
++/**
++ * @brief State of the GATT client application unregister which follows a
++ * failed Bluedroid OPEN or a disconnect.
++ */
++enum class BLEClientUnregisterState : uint8_t {
++  NOT_REQUESTED = 0,
++  REQUESTED,
++  COMPLETED,
++  REQUEST_FAILED,
++  COMPLETION_TIMEOUT,
++  COMPLETED_LATE,
++};
++
++static constexpr int32_t BLE_CLIENT_STATUS_NOT_SET = INT32_MIN;
++
++/**
++ * @brief Allocation-free snapshot of the most recent connect attempt.
++ *
++ * `espStatus` is a raw esp_err_t from a synchronous ESP-IDF API.
++ * `gattStatus` is a raw esp_gatt_status_t received in a Bluedroid event.
++ * `hostStatus` is a raw NimBLE host status.  A field which did not apply is
++ * BLE_CLIENT_STATUS_NOT_SET.  No status is formatted through esp_err_to_name.
++ */
++struct BLEClientConnectOutcome {
++  uint32_t elapsedMs = 0;
++  uint32_t unregisterElapsedMs = 0;
++  int32_t espStatus = BLE_CLIENT_STATUS_NOT_SET;
++  int32_t gattStatus = BLE_CLIENT_STATUS_NOT_SET;
++  int32_t hostStatus = BLE_CLIENT_STATUS_NOT_SET;
++  int32_t unregisterEspStatus = BLE_CLIENT_STATUS_NOT_SET;
++  BLEClientConnectStage stage = BLEClientConnectStage::NONE;
++  BLEClientUnregisterState unregisterState = BLEClientUnregisterState::NOT_REQUESTED;
++  bool success = false;
++};
++
+ /**
+  * @brief A model of a %BLE client.
+  */
+@@ -105,6 +165,9 @@ public:
+   esp_gatt_if_t getGattcIf();
+   uint16_t getMTU();
+   bool setMTU(uint16_t mtu);
++  BLEClientConnectOutcome getLastConnectOutcome() const;
++  static const char *connectStageToString(BLEClientConnectStage stage);
++  static const char *unregisterStateToString(BLEClientUnregisterState state);
+ 
+   /***************************************************************************
+    *                           Bluedroid public declarations                 *
+@@ -142,9 +205,22 @@ private:
+   FreeRTOS::Semaphore m_semaphoreOpenEvt = FreeRTOS::Semaphore("OpenEvt");
+   FreeRTOS::Semaphore m_semaphoreSearchCmplEvt = FreeRTOS::Semaphore("SearchCmplEvt");
+   FreeRTOS::Semaphore m_semaphoreRssiCmplEvt = FreeRTOS::Semaphore("RssiCmplEvt");
++  // Held (empty) while at least one dispatcher callback owns this object.
++  // Deletion waits for it after closing callback admission.
++  FreeRTOS::Semaphore m_callbackDrainEvt = FreeRTOS::Semaphore("ClientCallbackDrain");
++  // Held while this client has an entry in BLEDevice's GATTC routing map.
++  // Direct destruction waits for positive route retirement; checked deletion
++  // reports busy instead of guessing with a fixed delay.
++  FreeRTOS::Semaphore m_routingDrainEvt = FreeRTOS::Semaphore("ClientRoutingDrain");
+   std::map<std::string, BLERemoteService *> m_servicesMap;
+   std::map<BLERemoteService *, uint16_t> m_servicesMapByInstID;
+   uint16_t m_mtu = 23;
++  mutable portMUX_TYPE m_connectOutcomeMux = portMUX_INITIALIZER_UNLOCKED;
++  BLEClientConnectOutcome m_lastConnectOutcome;
++  uint32_t m_connectStartedMs = 0;
++  uint32_t m_callbackInFlight = 0;
++  bool m_callbackRetiring = false;
++  bool m_deletionClaimed = false;
+ 
+   /***************************************************************************
+    *                           Bluedroid private properties                  *
+@@ -152,6 +228,8 @@ private:
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+   esp_gatt_if_t m_gattc_if;
++  FreeRTOS::Semaphore m_semaphoreUnregEvt = FreeRTOS::Semaphore("UnregEvt");
++  uint32_t m_unregisterStartedMs = 0;
+ #endif
+ 
+   /***************************************************************************
+@@ -171,12 +249,21 @@ private:
+    ***************************************************************************/
+ 
+   void clearServices();
++  void resetConnectOutcome();
++  void setConnectOutcomeStage(
++    BLEClientConnectStage stage, int32_t espStatus = BLE_CLIENT_STATUS_NOT_SET,
++    int32_t gattStatus = BLE_CLIENT_STATUS_NOT_SET, int32_t hostStatus = BLE_CLIENT_STATUS_NOT_SET
++  );
++  void finishConnectOutcome(bool success);
+ 
+   /***************************************************************************
+    *                          Bluedroid private declarations                 *
+    ***************************************************************************/
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
++  esp_err_t requestGattcUnregister();
++  bool waitForGattcUnregister(uint32_t timeoutMs);
++  void setUnregisterState(BLEClientUnregisterState state, int32_t espStatus = BLE_CLIENT_STATUS_NOT_SET);
+   void gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
+ #endif
+ 
 diff --git a/libraries/BLE/src/BLEDevice.cpp b/libraries/BLE/src/BLEDevice.cpp
-index c184fada2..17b729532 100644
+index c184fada2..53987f009 100644
 --- a/libraries/BLE/src/BLEDevice.cpp
 +++ b/libraries/BLE/src/BLEDevice.cpp
-@@ -394,6 +394,15 @@ void BLEDevice::init(String deviceName) {
+@@ -30,6 +30,8 @@
+ 
+ #include <esp_err.h>
+ #include <map>
++#include <set>
++#include <vector>
+ #include <sstream>
+ #include <iomanip>
+ 
+@@ -93,6 +95,46 @@ BLEServer *BLEDevice::m_pServer = nullptr;
+ BLEScan *BLEDevice::m_pScan = nullptr;
+ BLEClient *BLEDevice::m_pClient = nullptr;
+ static bool initialized = false;
++static bool lifecycleTransitionInProgress = false;
++
++namespace {
++// A task mutex (not a spinlock) is required here: copying a std::map or
++// growing the tracked-client set can allocate. Callback bodies are always
++// invoked after this mutex is released.
++StaticSemaphore_t s_clientRegistryMutexStorage;
++SemaphoreHandle_t s_clientRegistryMutex = xSemaphoreCreateRecursiveMutexStatic(&s_clientRegistryMutexStorage);
++std::set<BLEClient *> s_allClients;
++bool s_clientCreationBlocked = false;
++
++class BLEClientRegistryGuard {
++public:
++  BLEClientRegistryGuard() {
++    configASSERT(s_clientRegistryMutex != nullptr);
++    m_locked = xSemaphoreTakeRecursive(s_clientRegistryMutex, portMAX_DELAY) == pdTRUE;
++    configASSERT(m_locked);
++  }
++  ~BLEClientRegistryGuard() {
++    if (m_locked) xSemaphoreGiveRecursive(s_clientRegistryMutex);
++  }
++
++private:
++  bool m_locked = false;
++};
++}  // namespace
++
++class BLELifecycleTransitionGuard {
++public:
++  BLELifecycleTransitionGuard(portMUX_TYPE *lock, bool *inProgress) : m_lock(lock), m_inProgress(inProgress) {}
++  ~BLELifecycleTransitionGuard() {
++    portENTER_CRITICAL(m_lock);
++    *m_inProgress = false;
++    portEXIT_CRITICAL(m_lock);
++  }
++
++private:
++  portMUX_TYPE *m_lock;
++  bool *m_inProgress;
++};
+ BLESecurityCallbacks *BLEDevice::m_securityCallbacks = nullptr;
+ uint16_t BLEDevice::m_localMTU = 23;  // not sure if this variable is useful
+ BLEAdvertising *BLEDevice::m_bleAdvertising = nullptr;
+@@ -136,6 +178,11 @@ BLEClient *BLEDevice::createClient() {
+   abort();
+ #endif  // CONFIG_GATTC_ENABLE
+ 
++  BLEClientRegistryGuard registryGuard;
++  if (s_clientCreationBlocked) {
++    log_e("Unable to create client while BLE teardown is in progress");
++    return nullptr;
++  }
+ #ifdef CONFIG_NIMBLE_ENABLED
+   if (m_connectedClientsMap.size() >= CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
+     log_e("Unable to create client. Max connections reached. Cur=%d Max=%d", m_connectedClientsMap.size(), CONFIG_BT_NIMBLE_MAX_CONNECTIONS);
+@@ -144,11 +191,78 @@ BLEClient *BLEDevice::createClient() {
+ #endif
+   {
+     m_pClient = new BLEClient();
++    trackClient(m_pClient);
+   }
+   log_v("<< createClient");
+   return m_pClient;
+ }  // createClient
+ 
++void BLEDevice::trackClient(BLEClient *client) {
++  if (client == nullptr) return;
++  BLEClientRegistryGuard registryGuard;
++  s_allClients.insert(client);
++}
++
++bool BLEDevice::clientHasRouting(BLEClient *client) {
++  if (client == nullptr) return false;
++  BLEClientRegistryGuard registryGuard;
++  for (const auto &entry : m_connectedClientsMap) {
++    if (entry.second.peer_device == client) return true;
++  }
++  return false;
++}
++
++bool BLEDevice::prepareClientDestruction(BLEClient *client, bool waitForRouting) {
++  if (client == nullptr) return false;
++
++  while (true) {
++    bool routed = false;
++    {
++      BLEClientRegistryGuard registryGuard;
++      for (const auto &entry : m_connectedClientsMap) {
++        if (entry.second.peer_device == client) {
++          routed = true;
++          break;
++        }
++      }
++
++      if (routed) {
++        if (!waitForRouting) return false;
++        // A raw destructor cannot return a failure to its caller. Claim it so
++        // terminal deinit will not also delete it, then wait for the positive
++        // routing acknowledgement instead of racing a fixed delay.
++        client->m_deletionClaimed = true;
++      } else {
++        // Checked deletion is non-blocking by contract. If a dispatcher owns
++        // a reference (possibly because this call came from another client's
++        // callback), leave admission open and let the caller retry. Terminal
++        // deinit is the path which positively waits for in-flight callbacks.
++        if (!waitForRouting && client->m_callbackInFlight != 0) return false;
++        if (client->m_deletionClaimed && !waitForRouting) return false;
++        client->m_deletionClaimed = true;
++        client->m_callbackRetiring = true;
++        s_allClients.erase(client);
++        if (m_pClient == client) m_pClient = nullptr;
++      }
++    }
++
++    if (!routed) break;
++    client->m_routingDrainEvt.wait("BLEClient destruction route drain");
++  }
++
++  // Callback admission was closed under the same mutex used by the
++  // dispatcher. The semaphore is given only when the counted references hit
++  // zero, so this is a positive lifetime handoff rather than a grace period.
++  client->m_callbackDrainEvt.wait("BLEClient destruction callback drain");
++  return true;
++}
++
++bool BLEDevice::deleteClient(BLEClient *client) {
++  if (!prepareClientDestruction(client, false)) return false;
++  delete client;
++  return true;
++}
++
+ /**
+  * @brief Create a new instance of a server.
+  * @return A new instance of the server.
+@@ -243,6 +357,16 @@ String BLEDevice::getValue(BLEAddress bdAddress, BLEUUID serviceUUID, BLEUUID ch
+  */
+ void BLEDevice::init(String deviceName) {
+   if (!initialized) {
++    portENTER_CRITICAL(&mux);
++    if (lifecycleTransitionInProgress) {
++      portEXIT_CRITICAL(&mux);
++      log_e("BLE lifecycle transition already in progress; init rejected");
++      return;
++    }
++    lifecycleTransitionInProgress = true;
++    portEXIT_CRITICAL(&mux);
++    BLELifecycleTransitionGuard lifecycleGuard(&mux, &lifecycleTransitionInProgress);
++
+     log_i("Initializing BLE stack: %s", getBLEStackString().c_str());
+ 
+     esp_err_t errRc = ESP_OK;
+@@ -394,6 +518,19 @@ void BLEDevice::init(String deviceName) {
        ble_npl_time_delay(1);
      }
  #endif                   // CONFIG_NIMBLE_ENABLED
@@ -415,49 +1158,916 @@ index c184fada2..17b729532 100644
 +    // global from 517 to N. No esp call needed; 517 is already the stack's value.
 +    m_localMTU = 517;
 +#endif
++    {
++      BLEClientRegistryGuard registryGuard;
++      s_clientCreationBlocked = false;
++    }
      initialized = true;  // Set the initialization flag to ensure we are only initialized once.
    }
    vTaskDelay(200 / portTICK_PERIOD_MS);  // Delay for 200 msecs as a workaround to an apparent Arduino environment issue.
-diff --git a/libraries/BLE/src/BLERemoteCharacteristic.cpp b/libraries/BLE/src/BLERemoteCharacteristic.cpp
-index 70a91288a..7084b3bf5 100644
---- a/libraries/BLE/src/BLERemoteCharacteristic.cpp
-+++ b/libraries/BLE/src/BLERemoteCharacteristic.cpp
-@@ -238,6 +238,11 @@ void BLERemoteCharacteristic::registerForNotify(notify_callback notifyCallback,
+@@ -808,6 +945,7 @@ void BLEDevice::stopAdvertising() {
+ /* multi connect support */
+ /* requires a little more work */
+ std::map<uint16_t, conn_status_t> BLEDevice::getPeerDevices(bool _client) {
++  BLEClientRegistryGuard registryGuard;
+   return m_connectedClientsMap;
+ }
  
-     if (errRc != ESP_OK) {
-       log_e("esp_ble_gattc_register_for_notify: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
-+      // [hardwareone local patch 2026-07-28] Deliver the failure to the wait
-+      // below — no REG_FOR_NOTIFY_EVT ever follows a failed call, so upstream
-+      // blocked forever on a semaphore nothing would give (wedging the shared
-+      // BLE-connect worker, which subscribes during connect).
-+      m_semaphoreRegForNotifyEvt.give(errRc);
+@@ -816,11 +954,14 @@ BLEClient *BLEDevice::getClientByID(uint16_t conn_id) {
+ }
+ 
+ BLEClient *BLEDevice::getClientByGattIf(uint16_t conn_id) {
+-  return (BLEClient *)m_connectedClientsMap.find(conn_id)->second.peer_device;
++  BLEClientRegistryGuard registryGuard;
++  const auto it = m_connectedClientsMap.find(conn_id);
++  return it == m_connectedClientsMap.end() ? nullptr : (BLEClient *)it->second.peer_device;
+ }
+ 
+ BLEClient *BLEDevice::getClientByAddress(BLEAddress address) {
+-  for (auto &it : m_connectedClientsMap) {
++  BLEClientRegistryGuard registryGuard;
++  for (const auto &it : m_connectedClientsMap) {
+     if (((BLEClient *)it.second.peer_device)->getPeerAddress() == address) {
+       return (BLEClient *)it.second.peer_device;
      }
+@@ -830,6 +971,7 @@ BLEClient *BLEDevice::getClientByAddress(BLEAddress address) {
  
-     uint8_t val[] = {0x01, 0x00};
-@@ -256,6 +261,8 @@ void BLERemoteCharacteristic::registerForNotify(notify_callback notifyCallback,
- 
-     if (errRc != ESP_OK) {
-       log_e("esp_ble_gattc_unregister_for_notify: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
-+      // [hardwareone local patch 2026-07-28] Same as the register branch above.
-+      m_semaphoreRegForNotifyEvt.give(errRc);
-     }
- 
-     uint8_t val[] = {0x00, 0x00};
-@@ -265,7 +272,12 @@ void BLERemoteCharacteristic::registerForNotify(notify_callback notifyCallback,
-     }
-   }  // End Unregister
- 
--  m_semaphoreRegForNotifyEvt.wait("registerForNotify");
-+  // [hardwareone local patch 2026-07-28] Bounded: a link dropping between the
-+  // register call and its event left this waiting forever — DISCONNECT_EVT is
-+  // never forwarded to this semaphore.
-+  if (!m_semaphoreRegForNotifyEvt.timedWait("registerForNotify", 10000)) {
-+    log_e("registerForNotify: REG_FOR_NOTIFY_EVT never arrived (10s)");
+ void BLEDevice::updatePeerDevice(void *peer, bool _client, uint16_t conn_id) {
+   log_d("update conn_id: %d, GATT role: %s", conn_id, _client ? "client" : "server");
++  BLEClientRegistryGuard registryGuard;
+   std::map<uint16_t, conn_status_t>::iterator it = m_connectedClientsMap.find(ESP_GATT_IF_NONE);
+   if (it != m_connectedClientsMap.end()) {
+     std::swap(m_connectedClientsMap[conn_id], it->second);
+@@ -847,100 +989,285 @@ void BLEDevice::updatePeerDevice(void *peer, bool _client, uint16_t conn_id) {
+ void BLEDevice::addPeerDevice(void *peer, bool _client, uint16_t conn_id) {
+   log_i("add conn_id: %d, GATT role: %s", conn_id, _client ? "client" : "server");
+   conn_status_t status = {.peer_device = peer, .connected = true, .mtu = 23};
+-
+-  m_connectedClientsMap.insert(std::pair<uint16_t, conn_status_t>(conn_id, status));
++  BLEClientRegistryGuard registryGuard;
++  BLEClient *client = _client ? static_cast<BLEClient *>(peer) : nullptr;
++  if (client != nullptr && (client->m_callbackRetiring || client->m_deletionClaimed)) {
++    log_e("refusing to route a retiring BLEClient");
++    return;
 +  }
++  bool alreadyRouted = false;
++  if (client != nullptr) {
++    for (const auto &entry : m_connectedClientsMap) {
++      if (entry.second.peer_device == client) {
++        alreadyRouted = true;
++        break;
++      }
++    }
++  }
++  const auto inserted = m_connectedClientsMap.insert(std::pair<uint16_t, conn_status_t>(conn_id, status));
++  if (client != nullptr && inserted.second && !alreadyRouted) {
++    if (!client->m_routingDrainEvt.take((uint32_t)0, "BLEClient route active")) {
++      log_e("BLEClient routing drain gate was unexpectedly closed");
++    }
++  }
+ }
  
+ //there may have some situation that invoking this function simultaneously, that will cause CORRUPT HEAP
+ //let this function serializable
+ portMUX_TYPE BLEDevice::mux = portMUX_INITIALIZER_UNLOCKED;
+ void BLEDevice::removePeerDevice(uint16_t conn_id, bool _client) {
+-  portENTER_CRITICAL(&mux);
+   log_i("remove: %d, GATT role %s", conn_id, _client ? "client" : "server");
+-  if (m_connectedClientsMap.find(conn_id) != m_connectedClientsMap.end()) {
+-    m_connectedClientsMap.erase(conn_id);
++  BLEClientRegistryGuard registryGuard;
++  const auto it = m_connectedClientsMap.find(conn_id);
++  BLEClient *client = nullptr;
++  if (it != m_connectedClientsMap.end()) {
++    if (_client) client = static_cast<BLEClient *>(it->second.peer_device);
++    m_connectedClientsMap.erase(it);
++  }
++  if (client != nullptr) {
++    bool stillRouted = false;
++    for (const auto &entry : m_connectedClientsMap) {
++      if (entry.second.peer_device == client) {
++        stillRouted = true;
++        break;
++      }
++    }
++    if (!stillRouted) client->m_routingDrainEvt.give();
+   }
+-  portEXIT_CRITICAL(&mux);
+ }
+ 
+ /* multi connect support */
+ 
++// [hardwareone local patch 2026-08-14] Normalize Bluedroid and controller
++// state in legal order, retain callback targets until host shutdown, and make
++// incomplete client retirement explicit instead of deleting through a race.
+ /**
+  * @brief de-Initialize the %BLE environment.
+  * @param release_memory release the internal BT stack memory (prevents reinitialization)
+  */
+-void BLEDevice::deinit(bool release_memory) {
+-  if (!initialized) {
+-    return;
+-  }
++BLEDeviceDeinitResult BLEDevice::deinitChecked(bool release_memory) {
++  BLEDeviceDeinitResult result;
++  result.wasInitialized = initialized;
+ 
+-  // Stop advertising and scanning first
+-  if (m_bleAdvertising != nullptr) {
+-    m_bleAdvertising->stop();
++  // Serialize teardown attempts without holding a spinlock across blocking
++  // controller/host calls. Client routing has its own task mutex and can
++  // therefore continue draining during shutdown.
++  portENTER_CRITICAL(&mux);
++  if (lifecycleTransitionInProgress) {
++    result.alreadyInProgress = true;
++    portEXIT_CRITICAL(&mux);
++    return result;
+   }
+-
+-  if (m_pScan != nullptr) {
+-    m_pScan->stop();
++  lifecycleTransitionInProgress = true;
++  portEXIT_CRITICAL(&mux);
++  BLELifecycleTransitionGuard lifecycleGuard(&mux, &lifecycleTransitionInProgress);
++  {
++    BLEClientRegistryGuard registryGuard;
++    s_clientCreationBlocked = true;
+   }
+ 
+-  // Delete all BLE objects
+-  if (m_bleAdvertising != nullptr) {
+-    delete m_bleAdvertising;
+-    m_bleAdvertising = nullptr;
+-  }
++  bool transitionCallsSucceeded = true;
++  bool hostTerminal = false;
++  bool hostedTerminal = true;
++  bool controllerTerminal = true;
++  bool hostCanReceiveCallbacks = initialized;
+ 
+-  if (m_pScan != nullptr) {
+-    delete m_pScan;
+-    m_pScan = nullptr;
+-  }
++#if defined(CONFIG_BLUEDROID_ENABLED)
++  esp_bluedroid_status_t hostState = esp_bluedroid_get_status();
++  result.hostStatusBefore = static_cast<int32_t>(hostState);
++  hostCanReceiveCallbacks = hostState == ESP_BLUEDROID_STATUS_ENABLED;
++#endif
+ 
+-  if (m_pServer != nullptr) {
+-    delete m_pServer;
+-    m_pServer = nullptr;
++  result.phase = BLEDeviceDeinitPhase::STOP_ACTIVITY;
++  if (hostCanReceiveCallbacks && m_bleAdvertising != nullptr) {
++    result.advertisingStopAttempted = true;
++    result.advertisingStopSucceeded = m_bleAdvertising->stop();
+   }
+-
+-  if (m_pClient != nullptr) {
+-    delete m_pClient;
+-    m_pClient = nullptr;
++  if (hostCanReceiveCallbacks && m_pScan != nullptr) {
++    result.scanStopAttempted = true;
++    result.scanStopSucceeded = m_pScan->stop();
+   }
+ 
+-  // Clear the connected clients map
+-  m_connectedClientsMap.clear();
+-
+-  // Always deinit the BLE stack
+-#ifdef CONFIG_BLUEDROID_ENABLED
+-  esp_bluedroid_disable();
+-  esp_bluedroid_deinit();
+-#endif
+-
+-#if defined(CONFIG_NIMBLE_ENABLED)
+-  nimble_port_stop();
+-  nimble_port_deinit();
++#if defined(CONFIG_BLUEDROID_ENABLED)
++  // Normalize from the actual host state. In particular, never deinitialize an
++  // ENABLED host merely because a preceding disable call was attempted.
++  if (hostState == ESP_BLUEDROID_STATUS_ENABLED) {
++    result.phase = BLEDeviceDeinitPhase::STOP_HOST;
++    result.bluedroidDisableAttempted = true;
++    result.bluedroidDisableStatus = esp_bluedroid_disable();
++    transitionCallsSucceeded &= result.bluedroidDisableStatus == ESP_OK;
++    hostState = esp_bluedroid_get_status();
++  }
++  if (hostState == ESP_BLUEDROID_STATUS_INITIALIZED) {
++    result.phase = BLEDeviceDeinitPhase::DEINIT_HOST;
++    result.bluedroidDeinitAttempted = true;
++    result.bluedroidDeinitStatus = esp_bluedroid_deinit();
++    transitionCallsSucceeded &= result.bluedroidDeinitStatus == ESP_OK;
++    hostState = esp_bluedroid_get_status();
++  }
++  result.hostStatusAfter = static_cast<int32_t>(hostState);
++  hostTerminal = hostState == ESP_BLUEDROID_STATUS_UNINITIALIZED;
++#elif defined(CONFIG_NIMBLE_ENABLED)
++  // NimBLE has no public host-state query. Only call deinit after its stop
++  // procedure succeeds; when our wrapper was already down, treat it as the
++  // only state that can be established without guessing at private state.
++  if (initialized) {
++    result.phase = BLEDeviceDeinitPhase::STOP_HOST;
++    result.nimbleStopAttempted = true;
++    result.nimbleStopStatus = nimble_port_stop();
++    transitionCallsSucceeded &= result.nimbleStopStatus == 0;
++    if (result.nimbleStopStatus == 0) {
++      result.phase = BLEDeviceDeinitPhase::DEINIT_HOST;
++      result.nimbleDeinitAttempted = true;
++      result.nimbleDeinitStatus = nimble_port_deinit();
++      transitionCallsSucceeded &= result.nimbleDeinitStatus == ESP_OK;
++      hostTerminal = result.nimbleDeinitStatus == ESP_OK;
++    }
++  } else {
++    hostTerminal = true;
++  }
++#else
++  hostTerminal = true;
  #endif
  
-@@ -596,6 +608,12 @@ String BLERemoteCharacteristic::readValue() {
+ #if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
+-  hostedDeinitBLE();
++  if (hostTerminal && initialized) {
++    result.hostedDeinitAttempted = true;
++    result.hostedDeinitSucceeded = hostedDeinitBLE();
++    transitionCallsSucceeded &= result.hostedDeinitSucceeded;
++    hostedTerminal = result.hostedDeinitSucceeded;
++  }
+ #endif
+ 
+-#if CONFIG_BT_CONTROLLER_ENABLED
+-  esp_bt_controller_disable();
+-  esp_bt_controller_deinit();
++#if SOC_BLE_SUPPORTED && CONFIG_BT_CONTROLLER_ENABLED
++  esp_bt_controller_status_t controllerState = esp_bt_controller_get_status();
++  result.controllerStatusBefore = static_cast<int32_t>(controllerState);
++  controllerTerminal = controllerState == ESP_BT_CONTROLLER_STATUS_IDLE;
++
++  // The controller must remain alive while the host can still issue HCI work.
++  if (hostTerminal) {
++    if (controllerState == ESP_BT_CONTROLLER_STATUS_ENABLED) {
++      result.phase = BLEDeviceDeinitPhase::STOP_CONTROLLER;
++      result.controllerDisableAttempted = true;
++      result.controllerDisableStatus = esp_bt_controller_disable();
++      transitionCallsSucceeded &= result.controllerDisableStatus == ESP_OK;
++      controllerState = esp_bt_controller_get_status();
++    }
++    if (controllerState == ESP_BT_CONTROLLER_STATUS_INITED) {
++      result.phase = BLEDeviceDeinitPhase::DEINIT_CONTROLLER;
++      result.controllerDeinitAttempted = true;
++      result.controllerDeinitStatus = esp_bt_controller_deinit();
++      transitionCallsSucceeded &= result.controllerDeinitStatus == ESP_OK;
++      controllerState = esp_bt_controller_get_status();
++    }
++    controllerTerminal = controllerState == ESP_BT_CONTROLLER_STATUS_IDLE;
++  }
++  result.controllerStatusAfter = static_cast<int32_t>(controllerState);
+ #endif
+ 
+-  // Only release memory if requested (this prevents reinitialization)
+-  if (release_memory) {
+-#ifdef ARDUINO_ARCH_ESP32
+-    // Require tests because we released classic BT memory and this can cause crash (most likely not, esp-idf takes care of it)
+-#if CONFIG_BT_CONTROLLER_ENABLED
+-    esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
++  result.terminalState = hostTerminal && hostedTerminal && controllerTerminal;
++  if (result.terminalState) {
++    result.phase = BLEDeviceDeinitPhase::RETIRE_OBJECTS;
++
++    // Host deinit is the acknowledgement that no new native callback can be
++    // admitted. Retire every factory-created client, not merely m_pClient
++    // (which is only the most-recent alias). The set also deduplicates clients
++    // which appeared under more than one temporary routing key.
++    result.callbacksRetired = true;
++    std::vector<BLEClient *> clientsToDelete;
++    {
++      BLEClientRegistryGuard registryGuard;
++      std::set<BLEClient *> routedClients;
++      for (const auto &entry : m_connectedClientsMap) {
++        BLEClient *client = static_cast<BLEClient *>(entry.second.peer_device);
++        if (client != nullptr) routedClients.insert(client);
++      }
++      m_connectedClientsMap.clear();
++      for (BLEClient *client : routedClients) {
++        client->m_routingDrainEvt.give();
++      }
++      result.routingRetired = true;
++
++      clientsToDelete.reserve(s_allClients.size());
++      for (BLEClient *client : s_allClients) {
++        if (client == nullptr) continue;
++        if (client->m_deletionClaimed) {
++          // A direct destructor already owns this object and was waiting for
++          // the route acknowledgement just issued above. Never double-delete;
++          // host terminality makes its remaining object-only cleanup safe to
++          // overlap this return without quarantining the next stack generation.
++          continue;
++        }
++        client->m_deletionClaimed = true;
++        client->m_callbackRetiring = true;
++        clientsToDelete.push_back(client);
++      }
++      s_allClients.clear();
++      m_pClient = nullptr;
++    }
++
++    for (BLEClient *client : clientsToDelete) {
++      // Admission was closed under the registry mutex. Positively drain every
++      // callback which took a reference before freeing the GATT object tree.
++      client->m_callbackDrainEvt.wait("BLE deinit callback drain");
++      delete client;
++      result.clientDeleted = true;
++    }
++
++    if (m_bleAdvertising != nullptr) {
++      delete m_bleAdvertising;
++      m_bleAdvertising = nullptr;
++      result.advertisingDeleted = true;
++    }
++    if (m_pScan != nullptr) {
++      delete m_pScan;
++      m_pScan = nullptr;
++      result.scanDeleted = true;
++    }
++    if (m_pServer != nullptr) {
++      delete m_pServer;
++      m_pServer = nullptr;
++      result.serverDeleted = true;
++    }
++
++#ifdef CONFIG_NIMBLE_ENABLED
++    m_synced = false;
+ #endif
++    // Never let the wrapper claim to be down while either actual native state
++    // can still dispatch or perform controller work.
++    initialized = false;
++
++    if (release_memory) {
++      result.phase = BLEDeviceDeinitPhase::RELEASE_MEMORY;
++#if defined(ARDUINO_ARCH_ESP32) && SOC_BLE_SUPPORTED && CONFIG_BT_CONTROLLER_ENABLED
++      result.memoryReleaseAttempted = true;
++      result.memoryReleaseStatus = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
++      transitionCallsSucceeded &= result.memoryReleaseStatus == ESP_OK;
+ #endif
++    }
+   }
+ 
+-#ifdef CONFIG_NIMBLE_ENABLED
+-  m_synced = false;
+-#endif
+-  initialized = false;
++  result.success = result.terminalState && transitionCallsSucceeded && !result.clientQuarantined;
++  if (result.success) {
++    result.phase = BLEDeviceDeinitPhase::COMPLETE;
++  }
++
++  return result;
++}
++
++void BLEDevice::deinit(bool release_memory) {
++  const BLEDeviceDeinitResult result = deinitChecked(release_memory);
++  if (!result.success) {
++    log_e(
++      "BLE deinit incomplete: phase=%u terminal=%d host=%ld->%ld controller=%ld->%ld "
++      "bd_disable=%ld bd_deinit=%ld ctl_disable=%ld ctl_deinit=%ld quarantined=%d busy=%d",
++      static_cast<unsigned>(result.phase), result.terminalState, static_cast<long>(result.hostStatusBefore),
++      static_cast<long>(result.hostStatusAfter), static_cast<long>(result.controllerStatusBefore),
++      static_cast<long>(result.controllerStatusAfter), static_cast<long>(result.bluedroidDisableStatus),
++      static_cast<long>(result.bluedroidDeinitStatus), static_cast<long>(result.controllerDisableStatus),
++      static_cast<long>(result.controllerDeinitStatus), result.clientQuarantined, result.alreadyInProgress
++    );
++  }
+ }
+ 
+ void BLEDevice::setCustomGapHandler(gap_event_handler handler) {
+@@ -1052,14 +1379,40 @@ void BLEDevice::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+ 
+     default: break;
+   }  // switch
+-  for (auto &myPair : BLEDevice::getPeerDevices(true)) {
+-    conn_status_t conn_status = (conn_status_t)myPair.second;
+-    if (((BLEClient *)conn_status.peer_device)->getGattcIf() == gattc_if || ((BLEClient *)conn_status.peer_device)->getGattcIf() == ESP_GATT_IF_NONE
+-        || gattc_if == ESP_GATT_IF_NONE) {
+-      ((BLEClient *)conn_status.peer_device)->gattClientEventHandler(event, gattc_if, param);
++  std::vector<BLEClient *> targets;
++  {
++    BLEClientRegistryGuard registryGuard;
++    targets.reserve(m_connectedClientsMap.size());
++    for (const auto &entry : m_connectedClientsMap) {
++      BLEClient *client = static_cast<BLEClient *>(entry.second.peer_device);
++      if (client == nullptr || client->m_callbackRetiring) continue;
++      bool duplicate = false;
++      for (BLEClient *existing : targets) {
++        if (existing == client) {
++          duplicate = true;
++          break;
++        }
++      }
++      if (duplicate) continue;
++
++      if (client->m_callbackInFlight == 0
++          && !client->m_callbackDrainEvt.take((uint32_t)0, "GATTC callback active")) {
++        log_e("BLEClient callback drain gate was unexpectedly closed");
++        continue;
++      }
++      ++client->m_callbackInFlight;
++      targets.push_back(client);
+     }
+   }
+ 
++  for (BLEClient *client : targets) {
++    client->gattClientEventHandler(event, gattc_if, param);
++    BLEClientRegistryGuard registryGuard;
++    configASSERT(client->m_callbackInFlight > 0);
++    --client->m_callbackInFlight;
++    if (client->m_callbackInFlight == 0) client->m_callbackDrainEvt.give();
++  }
++
+   if (m_customGattcHandler != nullptr) {
+     m_customGattcHandler(event, gattc_if, param);
+   }
+@@ -1186,8 +1539,26 @@ void BLEDevice::gapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_par
+     }
+   }  // switch
+ 
+-  if (BLEDevice::m_pClient != nullptr) {
+-    BLEDevice::m_pClient->handleGAPEvent(event, param);
++  BLEClient *gapClient = nullptr;
++  {
++    BLEClientRegistryGuard registryGuard;
++    if (m_pClient != nullptr && !m_pClient->m_callbackRetiring) {
++      gapClient = m_pClient;
++      if (gapClient->m_callbackInFlight == 0
++          && !gapClient->m_callbackDrainEvt.take((uint32_t)0, "GAP callback active")) {
++        log_e("BLEClient callback drain gate was unexpectedly closed");
++        gapClient = nullptr;
++      } else {
++        ++gapClient->m_callbackInFlight;
++      }
++    }
++  }
++  if (gapClient != nullptr) {
++    gapClient->handleGAPEvent(event, param);
++    BLEClientRegistryGuard registryGuard;
++    configASSERT(gapClient->m_callbackInFlight > 0);
++    --gapClient->m_callbackInFlight;
++    if (gapClient->m_callbackInFlight == 0) gapClient->m_callbackDrainEvt.give();
+   }
+ 
+   if (BLEDevice::m_pScan != nullptr) {
+diff --git a/libraries/BLE/src/BLEDevice.h b/libraries/BLE/src/BLEDevice.h
+index 5d4a16295..f3a4dde44 100644
+--- a/libraries/BLE/src/BLEDevice.h
++++ b/libraries/BLE/src/BLEDevice.h
+@@ -22,6 +22,7 @@
+  ***************************************************************************/
+ 
+ #include <map>
++#include <esp_err.h>
+ 
+ #if defined(SOC_BLE_SUPPORTED)
+ #include <esp_bt.h>
+@@ -56,6 +57,75 @@ enum class BLEStack {
+   UNKNOWN
+ };
+ 
++// [hardwareone local patch 2026-08-14] Report each host/controller teardown
++// phase so callers never infer success from the Arduino initialized flag.
++/**
++ * Last phase reached by BLEDevice::deinitChecked().
++ */
++enum class BLEDeviceDeinitPhase : uint8_t {
++  NONE,
++  STOP_ACTIVITY,
++  STOP_HOST,
++  DEINIT_HOST,
++  STOP_CONTROLLER,
++  DEINIT_CONTROLLER,
++  RETIRE_OBJECTS,
++  RELEASE_MEMORY,
++  COMPLETE
++};
++
++/**
++ * Detailed, non-throwing result for BLE stack teardown.
++ *
++ * Status fields are meaningful when their corresponding `*Attempted` flag is
++ * true. Host/controller states are stored as their raw enum values so this
++ * common API also remains available in NimBLE and hosted builds.
++ */
++struct BLEDeviceDeinitResult {
++  BLEDeviceDeinitPhase phase = BLEDeviceDeinitPhase::NONE;
++  bool success = false;
++  bool terminalState = false;
++  bool wasInitialized = false;
++  bool alreadyInProgress = false;
++
++  bool advertisingStopAttempted = false;
++  bool advertisingStopSucceeded = true;
++  bool scanStopAttempted = false;
++  bool scanStopSucceeded = true;
++
++  bool bluedroidDisableAttempted = false;
++  esp_err_t bluedroidDisableStatus = ESP_ERR_NOT_SUPPORTED;
++  bool bluedroidDeinitAttempted = false;
++  esp_err_t bluedroidDeinitStatus = ESP_ERR_NOT_SUPPORTED;
++  int32_t hostStatusBefore = -1;
++  int32_t hostStatusAfter = -1;
++
++  bool nimbleStopAttempted = false;
++  int nimbleStopStatus = 0;
++  bool nimbleDeinitAttempted = false;
++  esp_err_t nimbleDeinitStatus = ESP_ERR_NOT_SUPPORTED;
++  bool hostedDeinitAttempted = false;
++  bool hostedDeinitSucceeded = true;
++
++  bool controllerDisableAttempted = false;
++  esp_err_t controllerDisableStatus = ESP_ERR_NOT_SUPPORTED;
++  bool controllerDeinitAttempted = false;
++  esp_err_t controllerDeinitStatus = ESP_ERR_NOT_SUPPORTED;
++  int32_t controllerStatusBefore = -1;
++  int32_t controllerStatusAfter = -1;
++
++  bool callbacksRetired = false;
++  bool routingRetired = false;
++  bool advertisingDeleted = false;
++  bool scanDeleted = false;
++  bool serverDeleted = false;
++  bool clientDeleted = false;
++  bool clientQuarantined = false;
++
++  bool memoryReleaseAttempted = false;
++  esp_err_t memoryReleaseStatus = ESP_ERR_NOT_SUPPORTED;
++};
++
+ /***************************************************************************
+  *                           Bluedroid includes                            *
+  ***************************************************************************/
+@@ -176,6 +246,11 @@ public:
+    ***************************************************************************/
+ 
+   static BLEClient *createClient();
++  // [hardwareone local patch 2026-08-14] Retire a client only after its
++  // GATTC route is gone and all dispatcher callbacks have drained. A false
++  // result means the caller must retain the pointer and retry later (or let a
++  // terminal deinit retire it).
++  static bool deleteClient(BLEClient *client);
+   static BLEServer *createServer();
+   static BLEAddress getAddress();
+   static BLEServer *getServer();
+@@ -207,6 +282,7 @@ public:
+   static BLEClient *getClientByAddress(BLEAddress address);
+   static BLEClient *getClientByGattIf(uint16_t conn_id);
+   static void setCustomGapHandler(gap_event_handler handler);
++  static BLEDeviceDeinitResult deinitChecked(bool release_memory = false);
+   static void deinit(bool release_memory = false);
+   static BLEStack getBLEStack();
+   static String getBLEStackString();
+@@ -259,6 +335,13 @@ private:
+   static std::map<uint16_t, conn_status_t> m_connectedClientsMap;
+   static portMUX_TYPE mux;
+ 
++  // Client registry/routing lifetime helpers. The implementation uses one
++  // recursive task mutex for every map, registry, alias, and callback-ref
++  // transition; callback bodies are never invoked while it is held.
++  static void trackClient(BLEClient *client);
++  static bool prepareClientDestruction(BLEClient *client, bool waitForRouting);
++  static bool clientHasRouting(BLEClient *client);
++
+   /***************************************************************************
+    *                        NimBLE private properties                        *
+    ***************************************************************************/
+diff --git a/libraries/BLE/src/BLERemoteCharacteristic.cpp b/libraries/BLE/src/BLERemoteCharacteristic.cpp
+index 70a91288a..76998e821 100644
+--- a/libraries/BLE/src/BLERemoteCharacteristic.cpp
++++ b/libraries/BLE/src/BLERemoteCharacteristic.cpp
+@@ -221,56 +221,21 @@ float BLERemoteCharacteristic::readFloat() {
+  * @brief Register for notifications.
+  * @param [in] notifyCallback A callback to be invoked for a notification.  If NULL is provided then we are
+  * unregistering a notification.
+- * @return N/A.
++ * @return Checked synchronous and asynchronous completion status.
+  */
+-void BLERemoteCharacteristic::registerForNotify(notify_callback notifyCallback, bool notifications, bool descriptorRequiresRegistration) {
++BLERemoteNotifyResult BLERemoteCharacteristic::registerForNotify(
++  notify_callback notifyCallback, bool notifications, bool descriptorRequiresRegistration
++) {
+   log_v(">> registerForNotify(): %s", toString().c_str());
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+-  m_notifyCallback = notifyCallback;  // Save the notification callback.
+-
+-  m_semaphoreRegForNotifyEvt.take("registerForNotify");
+-
+-  if (notifyCallback != nullptr) {  // If we have a callback function, then this is a registration.
+-    esp_err_t errRc = ::esp_ble_gattc_register_for_notify(
+-      m_pRemoteService->getClient()->getGattcIf(), m_pRemoteService->getClient()->getPeerAddress().getNative(), getHandle()
+-    );
+-
+-    if (errRc != ESP_OK) {
+-      log_e("esp_ble_gattc_register_for_notify: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
+-    }
+-
+-    uint8_t val[] = {0x01, 0x00};
+-    if (!notifications) {
+-      val[0] = 0x02;
+-    }
+-    BLERemoteDescriptor *desc = getDescriptor(BLEUUID((uint16_t)0x2902));
+-    if (desc != nullptr && descriptorRequiresRegistration) {
+-      desc->writeValue(val, 2, true);
+-    }
+-  }  // End Register
+-  else {  // If we weren't passed a callback function, then this is an unregistration.
+-    esp_err_t errRc = ::esp_ble_gattc_unregister_for_notify(
+-      m_pRemoteService->getClient()->getGattcIf(), m_pRemoteService->getClient()->getPeerAddress().getNative(), getHandle()
+-    );
+-
+-    if (errRc != ESP_OK) {
+-      log_e("esp_ble_gattc_unregister_for_notify: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
+-    }
+-
+-    uint8_t val[] = {0x00, 0x00};
+-    BLERemoteDescriptor *desc = getDescriptor((uint16_t)0x2902);
+-    if (desc != nullptr && descriptorRequiresRegistration) {
+-      desc->writeValue(val, 2, true);
+-    }
+-  }  // End Unregister
+-
+-  m_semaphoreRegForNotifyEvt.wait("registerForNotify");
+-
++  return registerForNotify(notifyCallback, notifications, descriptorRequiresRegistration, DEFAULT_NOTIFY_TIMEOUT_MS);
+ #endif
+ 
+ #if defined(CONFIG_NIMBLE_ENABLED)
+-  bool success;
++  BLERemoteNotifyResult result;
++  result.registering = notifyCallback != nullptr;
++  bool success = false;
+   if (notifyCallback != nullptr) {
+     success = subscribe(notifications, notifyCallback, descriptorRequiresRegistration);
+   } else {
+@@ -280,10 +245,161 @@ void BLERemoteCharacteristic::registerForNotify(notify_callback notifyCallback,
+   if (!success) {
+     log_e("Failed to subscribe/unsubscribe for notify");
+   }
+-#endif
++  result.apiStatus = success ? 0 : ESP_FAIL;
++  result.apiAccepted = success;
++  result.eventReceived = success;
++  result.eventStatus = success ? 0 : ESP_FAIL;
++  result.success = success;
+   log_v("<< registerForNotify()");
++  return result;
++#endif
+ }  // registerForNotify
+ 
++#if defined(CONFIG_BLUEDROID_ENABLED)
++
++BLERemoteNotifyResult BLERemoteCharacteristic::getLastNotifyResult() const {
++  portENTER_CRITICAL(&m_notifyResultMux);
++  const BLERemoteNotifyResult result = m_lastNotifyResult;
++  portEXIT_CRITICAL(&m_notifyResultMux);
++  return result;
++}
++
++BLERemoteNotifyResult BLERemoteCharacteristic::registerForNotify(
++  notify_callback notifyCallback, bool notifications, bool descriptorRequiresRegistration, uint32_t timeoutMs
++) {
++  BLERemoteNotifyResult result;
++  result.registering = notifyCallback != nullptr;
++
++  if (!getRemoteService()->getClient()->isConnected()) {
++    result.apiStatus = ESP_ERR_INVALID_STATE;
++    log_e("registerForNotify: disconnected");
++    return result;
++  }
++
++  // This gate remains closed after a timeout. Only the matching late event or
++  // disconnect reopens it, so an old completion can never satisfy a later
++  // generation for the same characteristic handle.
++  if (!m_semaphoreRegForNotifyEvt.take(timeoutMs, "registerForNotify-gate")) {
++    result.apiStatus = ESP_ERR_TIMEOUT;
++    result.timedOut = true;
++    log_e("registerForNotify: previous notify operation has not quiesced within %lu ms", (unsigned long)timeoutMs);
++    return result;
++  }
++
++  portENTER_CRITICAL(&m_notifyResultMux);
++  ++m_notifyGeneration;
++  if (m_notifyGeneration == 0) ++m_notifyGeneration;
++  result.generation = m_notifyGeneration;
++  m_notifyPendingGeneration = result.generation;
++  m_notifyCompletedGeneration = 0;
++  m_notifyPendingRegister = result.registering;
++  m_lastNotifyResult = result;
++  portEXIT_CRITICAL(&m_notifyResultMux);
++
++  m_notifyPreviousCallback = m_notifyCallback;
++  if (result.registering) m_notifyCallback = notifyCallback;
++
++  const esp_err_t errRc = result.registering
++                            ? ::esp_ble_gattc_register_for_notify(
++                                m_pRemoteService->getClient()->getGattcIf(),
++                                m_pRemoteService->getClient()->getPeerAddress().getNative(), getHandle())
++                            : ::esp_ble_gattc_unregister_for_notify(
++                                m_pRemoteService->getClient()->getGattcIf(),
++                                m_pRemoteService->getClient()->getPeerAddress().getNative(), getHandle());
++
++  // [hardwareone local patch 2026-07-28] A synchronous registration rejection
++  // promises no completion event; record it and reopen the generation gate.
++  portENTER_CRITICAL(&m_notifyResultMux);
++  if (m_notifyPendingGeneration == result.generation) {
++    m_lastNotifyResult.apiStatus = errRc;
++    m_lastNotifyResult.apiAccepted = errRc == ESP_OK;
++  }
++  portEXIT_CRITICAL(&m_notifyResultMux);
++
++  if (errRc != ESP_OK) {
++    log_e(
++      "%s_for_notify: rc=%d %s", result.registering ? "esp_ble_gattc_register" : "esp_ble_gattc_unregister", errRc,
++      GeneralUtils::errorToString(errRc)
++    );
++    if (result.registering) m_notifyCallback = m_notifyPreviousCallback;
++    portENTER_CRITICAL(&m_notifyResultMux);
++    if (m_notifyPendingGeneration == result.generation) {
++      m_notifyPendingGeneration = 0;
++      m_lastNotifyResult.success = false;
++      result = m_lastNotifyResult;
++    }
++    portEXIT_CRITICAL(&m_notifyResultMux);
++    m_semaphoreRegForNotifyEvt.give();
++    return result;
++  }
++
++  if (descriptorRequiresRegistration) {
++    uint8_t val[] = {0x00, 0x00};
++    if (result.registering) val[0] = notifications ? 0x01 : 0x02;
++    BLERemoteDescriptor *desc = getDescriptor(BLEUUID((uint16_t)0x2902));
++    BLERemoteDescriptorWriteResult descriptorResult;
++    const bool attempted = true;
++    bool succeeded = false;
++    if (desc == nullptr) {
++      descriptorResult.apiStatus = ESP_ERR_NOT_FOUND;
++      log_e("registerForNotify: required CCCD (0x2902) is missing");
++    } else {
++      descriptorResult = desc->writeValueChecked(val, sizeof(val), true, timeoutMs);
++      succeeded = descriptorResult.success;
++    }
++    portENTER_CRITICAL(&m_notifyResultMux);
++    if (m_notifyPendingGeneration == result.generation) {
++      m_lastNotifyResult.descriptorAttempted = attempted;
++      m_lastNotifyResult.descriptorSucceeded = succeeded;
++      m_lastNotifyResult.descriptorGeneration = descriptorResult.generation;
++      m_lastNotifyResult.descriptorApiStatus = descriptorResult.apiStatus;
++      m_lastNotifyResult.descriptorEventStatus = descriptorResult.eventStatus;
++      m_lastNotifyResult.descriptorTimedOut = descriptorResult.timedOut;
++    }
++    portEXIT_CRITICAL(&m_notifyResultMux);
++  }
++
++  // [hardwareone local patch 2026-07-28] Bound the completion wait so a link
++  // drop cannot wedge the shared BLE worker indefinitely.
++  // take() deliberately leaves the binary semaphore closed on timeout. A
++  // matching event stores its generation/status before giving the semaphore.
++  if (!m_semaphoreRegForNotifyEvt.take(timeoutMs, "registerForNotify-event")) {
++    portENTER_CRITICAL(&m_notifyResultMux);
++    if (m_notifyPendingGeneration == result.generation) {
++      m_lastNotifyResult.timedOut = true;
++      m_lastNotifyResult.success = false;
++      result = m_lastNotifyResult;
++    }
++    portEXIT_CRITICAL(&m_notifyResultMux);
++    log_e("registerForNotify: completion event never arrived within %lu ms", (unsigned long)timeoutMs);
++    return result;
++  }
++
++  portENTER_CRITICAL(&m_notifyResultMux);
++  if (m_notifyCompletedGeneration == result.generation) {
++    result = m_lastNotifyResult;
++    result.success = result.apiAccepted && result.eventReceived
++                     && result.eventStatus == ESP_GATT_OK
++                     && result.descriptorSucceeded && !result.disconnected
++                     && !result.timedOut;
++    m_lastNotifyResult = result;
++    if (m_notifyPendingGeneration == result.generation) m_notifyPendingGeneration = 0;
++  } else {
++    // Defensive: no unmatched event should give the gate.
++    result = m_lastNotifyResult;
++    result.success = false;
++  }
++  portEXIT_CRITICAL(&m_notifyResultMux);
++
++  if (!result.success && result.registering) m_notifyCallback = m_notifyPreviousCallback;
++  if (result.success && !result.registering) m_notifyCallback = nullptr;
++  m_semaphoreRegForNotifyEvt.give();
++  log_v("<< registerForNotify(): generation=%lu success=%d", (unsigned long)result.generation, result.success);
++  return result;
++}
++
++#endif  // CONFIG_BLUEDROID_ENABLED
++
+ /**
+  * @brief Delete the descriptors in the descriptor map.
+  * We maintain a map called m_descriptorMap that contains pointers to BLERemoteDescriptors
+@@ -464,8 +580,28 @@ void BLERemoteCharacteristic::gattClientEventHandler(esp_gattc_cb_event_t event,
+         break;
+       }
+ 
+-      // We have processed the notify registration and can unlock the semaphore.
+-      m_semaphoreRegForNotifyEvt.give();
++      // [hardwareone local patch 2026-08-14] Match the event to the sole
++      // admitted generation before it can release a waiter.
++      bool matched = false;
++      bool restorePreviousCallback = false;
++      portENTER_CRITICAL(&m_notifyResultMux);
++      if (m_notifyPendingGeneration != 0 && m_notifyPendingRegister
++          && m_notifyCompletedGeneration != m_notifyPendingGeneration) {
++        const uint32_t generation = m_notifyPendingGeneration;
++        m_notifyCompletedGeneration = generation;
++        m_lastNotifyResult.eventReceived = true;
++        m_lastNotifyResult.eventStatus = evtParam->reg_for_notify.status;
++        if (m_lastNotifyResult.timedOut) {
++          m_lastNotifyResult.lateEvent = true;
++          m_lastNotifyResult.success = false;
++          m_notifyPendingGeneration = 0;
++        }
++        restorePreviousCallback = evtParam->reg_for_notify.status != ESP_GATT_OK;
++        matched = true;
++      }
++      portEXIT_CRITICAL(&m_notifyResultMux);
++      if (restorePreviousCallback) m_notifyCallback = m_notifyPreviousCallback;
++      if (matched) m_semaphoreRegForNotifyEvt.give(evtParam->reg_for_notify.status);
+       break;
+     }  // ESP_GATTC_REG_FOR_NOTIFY_EVT
+ 
+@@ -479,8 +615,26 @@ void BLERemoteCharacteristic::gattClientEventHandler(esp_gattc_cb_event_t event,
+       if (evtParam->unreg_for_notify.handle != getHandle()) {
+         break;
+       }
+-      // We have processed the notify un-registration and can unlock the semaphore.
+-      m_semaphoreRegForNotifyEvt.give();
++      bool matched = false;
++      bool clearCallback = false;
++      portENTER_CRITICAL(&m_notifyResultMux);
++      if (m_notifyPendingGeneration != 0 && !m_notifyPendingRegister
++          && m_notifyCompletedGeneration != m_notifyPendingGeneration) {
++        const uint32_t generation = m_notifyPendingGeneration;
++        m_notifyCompletedGeneration = generation;
++        m_lastNotifyResult.eventReceived = true;
++        m_lastNotifyResult.eventStatus = evtParam->unreg_for_notify.status;
++        if (m_lastNotifyResult.timedOut) {
++          m_lastNotifyResult.lateEvent = true;
++          m_lastNotifyResult.success = false;
++          m_notifyPendingGeneration = 0;
++        }
++        clearCallback = evtParam->unreg_for_notify.status == ESP_GATT_OK;
++        matched = true;
++      }
++      portEXIT_CRITICAL(&m_notifyResultMux);
++      if (clearCallback) m_notifyCallback = nullptr;
++      if (matched) m_semaphoreRegForNotifyEvt.give(evtParam->unreg_for_notify.status);
+       break;
+     }  // ESP_GATTC_UNREG_FOR_NOTIFY_EVT:
+ 
+@@ -499,7 +653,7 @@ void BLERemoteCharacteristic::gattClientEventHandler(esp_gattc_cb_event_t event,
+ 
+       // There is nothing further we need to do here.  This is merely an indication
+       // that the write has completed and we can unlock the caller.
+-      m_semaphoreWriteCharEvt.give();
++      m_semaphoreWriteCharEvt.give((uint32_t)evtParam->write.status);
+       break;
+     }  // ESP_GATTC_WRITE_CHAR_EVT
+ 
+@@ -514,6 +668,26 @@ void BLERemoteCharacteristic::gattClientEventHandler(esp_gattc_cb_event_t event,
+       // Cleanup semaphores to avoid deadlocks.
+       m_semaphoreReadCharEvt.give(1);
+       m_semaphoreWriteCharEvt.give(1);
++      for (auto &myPair : m_descriptorMap) {
++        myPair.second->gattClientEventHandler(event, gattc_if, evtParam);
++      }
++      {
++        bool notifyPending = false;
++        portENTER_CRITICAL(&m_notifyResultMux);
++        if (m_notifyPendingGeneration != 0) {
++          m_notifyCompletedGeneration = m_notifyPendingGeneration;
++          m_lastNotifyResult.eventStatus = ESP_GATT_ERROR;
++          m_lastNotifyResult.disconnected = true;
++          m_lastNotifyResult.success = false;
++          if (m_lastNotifyResult.timedOut) {
++            m_lastNotifyResult.lateEvent = true;
++            m_notifyPendingGeneration = 0;
++          }
++          notifyPending = true;
++        }
++        portEXIT_CRITICAL(&m_notifyResultMux);
++        if (notifyPending) m_semaphoreRegForNotifyEvt.give(ESP_GATT_ERROR);
++      }
+       break;
+ 
+     default: break;
+@@ -596,6 +770,12 @@ String BLERemoteCharacteristic::readValue() {
  
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_read_char: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
@@ -470,13 +2080,47 @@ index 70a91288a..7084b3bf5 100644
      return "";
    }
  
-@@ -637,6 +655,20 @@ bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool resp
+@@ -615,6 +795,21 @@ String BLERemoteCharacteristic::readValue() {
+  * @return True if successful
+  */
+ bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool response) {
++  return writeValue(data, length, response, DEFAULT_WRITE_TIMEOUT_MS);
++}
++
++// [hardwareone local patch 2026-08-14] Bound both the writer gate and event
++// completion so a lost callback cannot pin BLE lifecycle teardown forever.
++/**
++ * @brief Write a value with a bounded wait for both serialization and the
++ * Bluedroid completion event.
++ * @param [in] data A pointer to a data buffer.
++ * @param [in] length The length of the data in the data buffer.
++ * @param [in] response Whether we require a response from the write.
++ * @param [in] timeoutMs Maximum milliseconds to wait at each semaphore gate.
++ * @return True only when ESP_GATTC_WRITE_CHAR_EVT reports ESP_GATT_OK.
++ */
++bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool response, uint32_t timeoutMs) {
+   // writeValue(String((char*)data, length), response);
+   log_v(">> writeValue(), length: %d", length);
+ 
+@@ -628,7 +823,10 @@ bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool resp
+   // This prevents the write request from being made while pairing is in progress
+   BLESecurity::waitForAuthenticationComplete();
+ 
+-  m_semaphoreWriteCharEvt.take("writeValue");
++  if (!m_semaphoreWriteCharEvt.take(timeoutMs, "writeValue-gate")) {
++    log_e("writeValue: previous write did not quiesce within %lu ms", (unsigned long)timeoutMs);
++    return false;
++  }
+   // Invoke the ESP-IDF API to perform the write.
+   esp_err_t errRc = ::esp_ble_gattc_write_char(
+     m_pRemoteService->getClient()->getGattcIf(), m_pRemoteService->getClient()->getConnId(), getHandle(), length, data,
+@@ -637,10 +835,38 @@ bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool resp
  
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_write_char: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
 +    // [hardwareone local patch 2026-07-27] Release the semaphore we took above.
-+    // Upstream returns here without giving it back. It is a binary semaphore
-+    // taken with portMAX_DELAY, and the only other givers are
++    // Upstream returns here without giving it back. It is a binary semaphore,
++    // and the only other givers are
 +    // ESP_GATTC_WRITE_CHAR_EVT (which never fires — nothing was queued) and
 +    // ESP_GATTC_DISCONNECT_EVT. So ONE failed write left this characteristic's
 +    // write semaphore permanently taken and the NEXT writeValue() blocked
@@ -491,11 +2135,172 @@ index 70a91288a..7084b3bf5 100644
      return false;
    }
  
+-  m_semaphoreWriteCharEvt.wait("writeValue");
++  // Use take rather than Semaphore::timedWait here. On timeout, take leaves the
++  // gate closed until a late WRITE_CHAR_EVT or DISCONNECT_EVT arrives. This
++  // prevents a late completion from an unknown prior write satisfying the next
++  // write's completion wait.
++  if (!m_semaphoreWriteCharEvt.take(timeoutMs, "writeValue-complete")) {
++    log_e("writeValue: WRITE_CHAR_EVT never arrived within %lu ms", (unsigned long)timeoutMs);
++    return false;
++  }
++
++  const esp_gatt_status_t status = (esp_gatt_status_t)m_semaphoreWriteCharEvt.value();
++  m_semaphoreWriteCharEvt.give();
++  if (status != ESP_GATT_OK) {
++    log_e("writeValue: gatt_status=0x%04x (%s)", (unsigned)status, BLEUtils::gattStatusToString(status).c_str());
++    return false;
++  }
+ 
+   log_v("<< writeValue");
+   return true;
+diff --git a/libraries/BLE/src/BLERemoteCharacteristic.h b/libraries/BLE/src/BLERemoteCharacteristic.h
+index 7b04a15c7..c91718208 100644
+--- a/libraries/BLE/src/BLERemoteCharacteristic.h
++++ b/libraries/BLE/src/BLERemoteCharacteristic.h
+@@ -68,6 +68,30 @@
+ 
+ typedef std::function<void(BLERemoteCharacteristic *pBLERemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify)> notify_callback;
+ 
++// [hardwareone local patch 2026-08-14] Checked notification registration
++// telemetry. Ignoring the returned value remains source-compatible with the
++// former void API, while lifecycle-sensitive callers can distinguish a
++// synchronous rejection, event failure, timeout, descriptor failure, and a
++// completion which arrived only after the caller timed out.
++struct BLERemoteNotifyResult {
++  uint32_t generation = 0;
++  uint32_t descriptorGeneration = 0;
++  int32_t apiStatus = INT32_MIN;
++  int32_t eventStatus = INT32_MIN;
++  int32_t descriptorApiStatus = INT32_MIN;
++  int32_t descriptorEventStatus = INT32_MIN;
++  bool success = false;
++  bool registering = false;
++  bool apiAccepted = false;
++  bool eventReceived = false;
++  bool descriptorAttempted = false;
++  bool descriptorSucceeded = true;
++  bool descriptorTimedOut = false;
++  bool timedOut = false;
++  bool lateEvent = false;
++  bool disconnected = false;
++};
++
+ /***************************************************************************
+  *                             NimBLE types                                *
+  ***************************************************************************/
+@@ -91,6 +115,9 @@ class BLERemoteDescriptor;
+  */
+ class BLERemoteCharacteristic {
+ public:
++  static constexpr uint32_t DEFAULT_WRITE_TIMEOUT_MS = 30000;
++  static constexpr uint32_t DEFAULT_NOTIFY_TIMEOUT_MS = 10000;
++
+   /***************************************************************************
+    *                       Common public declarations                        *
+    ***************************************************************************/
+@@ -112,8 +139,21 @@ public:
+   uint16_t readUInt16();
+   uint32_t readUInt32();
+   float readFloat();
+-  void registerForNotify(notify_callback _callback, bool notifications = true, bool descriptorRequiresRegistration = true);
++  BLERemoteNotifyResult registerForNotify(
++    notify_callback _callback, bool notifications = true, bool descriptorRequiresRegistration = true
++  );
++#if defined(CONFIG_BLUEDROID_ENABLED)
++  BLERemoteNotifyResult registerForNotify(
++    notify_callback _callback, bool notifications, bool descriptorRequiresRegistration, uint32_t timeoutMs
++  );
++  BLERemoteNotifyResult getLastNotifyResult() const;
++#endif
+   bool writeValue(uint8_t *data, size_t length, bool response = false);
++#if defined(CONFIG_BLUEDROID_ENABLED)
++  // [hardwareone local patch 2026-08-14] Explicit bounded variant used by
++  // lifecycle-sensitive callers; the legacy overload also has a safe bound.
++  bool writeValue(uint8_t *data, size_t length, bool response, uint32_t timeoutMs);
++#endif
+   bool writeValue(String newValue, bool response = false);
+   bool writeValue(uint8_t newValue, bool response = false);
+   String toString();
+@@ -173,6 +213,13 @@ private:
+    ***************************************************************************/
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
++  mutable portMUX_TYPE m_notifyResultMux = portMUX_INITIALIZER_UNLOCKED;
++  BLERemoteNotifyResult m_lastNotifyResult;
++  uint32_t m_notifyGeneration = 0;
++  uint32_t m_notifyPendingGeneration = 0;
++  uint32_t m_notifyCompletedGeneration = 0;
++  bool m_notifyPendingRegister = false;
++  notify_callback m_notifyPreviousCallback;
+   BLERemoteCharacteristic(uint16_t handle, BLEUUID uuid, uint8_t charProp, BLERemoteService *pRemoteService);
+   void retrieveDescriptors();
+   void gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *evtParam);
 diff --git a/libraries/BLE/src/BLERemoteDescriptor.cpp b/libraries/BLE/src/BLERemoteDescriptor.cpp
-index e7cd3af38..26a7feaf4 100644
+index e7cd3af38..d5dff4f9e 100644
 --- a/libraries/BLE/src/BLERemoteDescriptor.cpp
 +++ b/libraries/BLE/src/BLERemoteDescriptor.cpp
-@@ -197,12 +197,22 @@ String BLERemoteDescriptor::readValue() {
+@@ -139,6 +139,13 @@ void BLERemoteDescriptor::setAuth(uint8_t auth) {
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+ 
++BLERemoteDescriptorWriteResult BLERemoteDescriptor::getLastWriteResult() const {
++  portENTER_CRITICAL(&m_writeResultMux);
++  const BLERemoteDescriptorWriteResult result = m_lastWriteResult;
++  portEXIT_CRITICAL(&m_writeResultMux);
++  return result;
++}
++
+ void BLERemoteDescriptor::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *evtParam) {
+   switch (event) {
+     // ESP_GATTC_READ_DESCR_EVT
+@@ -170,7 +177,44 @@ void BLERemoteDescriptor::gattClientEventHandler(esp_gattc_cb_event_t event, esp
+       if (evtParam->write.handle != getHandle()) {
+         break;
+       }
+-      m_semaphoreWriteDescrEvt.give();
++      {
++        bool matched = false;
++        portENTER_CRITICAL(&m_writeResultMux);
++        if (m_writePendingGeneration != 0
++            && m_writeCompletedGeneration != m_writePendingGeneration) {
++          m_writeCompletedGeneration = m_writePendingGeneration;
++          m_lastWriteResult.eventReceived = true;
++          m_lastWriteResult.eventStatus = evtParam->write.status;
++          if (m_lastWriteResult.timedOut) {
++            m_lastWriteResult.lateEvent = true;
++            m_lastWriteResult.success = false;
++            m_writePendingGeneration = 0;
++          }
++          matched = true;
++        }
++        portEXIT_CRITICAL(&m_writeResultMux);
++        if (matched) m_semaphoreWriteDescrEvt.give(evtParam->write.status);
++      }
++      break;
++
++    case ESP_GATTC_DISCONNECT_EVT:
++      {
++        bool writePending = false;
++        portENTER_CRITICAL(&m_writeResultMux);
++        if (m_writePendingGeneration != 0) {
++          m_writeCompletedGeneration = m_writePendingGeneration;
++          m_lastWriteResult.eventStatus = ESP_GATT_ERROR;
++          m_lastWriteResult.disconnected = true;
++          m_lastWriteResult.success = false;
++          if (m_lastWriteResult.timedOut) {
++            m_lastWriteResult.lateEvent = true;
++            m_writePendingGeneration = 0;
++          }
++          writePending = true;
++        }
++        portEXIT_CRITICAL(&m_writeResultMux);
++        if (writePending) m_semaphoreWriteDescrEvt.give(ESP_GATT_ERROR);
++      }
+       break;
+     default: break;
+   }
+@@ -197,12 +241,22 @@ String BLERemoteDescriptor::readValue() {
  
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_read_char: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
@@ -519,30 +2324,170 @@ index e7cd3af38..26a7feaf4 100644
  
    log_v("<< readValue(): length: %d", m_value.length());
    return m_value;
-@@ -233,11 +243,21 @@ bool BLERemoteDescriptor::writeValue(uint8_t *data, size_t length, bool response
+@@ -216,14 +270,39 @@ String BLERemoteDescriptor::readValue() {
+  * @return True if successful
+  */
+ bool BLERemoteDescriptor::writeValue(uint8_t *data, size_t length, bool response) {
++  return writeValueChecked(data, length, response, DEFAULT_WRITE_TIMEOUT_MS).success;
++}
++
++BLERemoteDescriptorWriteResult BLERemoteDescriptor::writeValueChecked(
++  uint8_t *data, size_t length, bool response, uint32_t timeoutMs
++) {
++  BLERemoteDescriptorWriteResult result;
+   log_v(">> writeValue: %s", toString().c_str());
+   // Check to see that we are connected.
+   if (!getRemoteCharacteristic()->getRemoteService()->getClient()->isConnected()) {
+     log_e("Disconnected");
+-    return false;
++    result.apiStatus = ESP_ERR_INVALID_STATE;
++    result.disconnected = true;
++    return result;
++  }
++
++  // The gate is deliberately not reopened on timeout. A late completion must
++  // retire its own generation before another descriptor write can begin.
++  if (!m_semaphoreWriteDescrEvt.take(timeoutMs, "writeValue(descr)-gate")) {
++    result.apiStatus = ESP_ERR_TIMEOUT;
++    result.timedOut = true;
++    log_e("writeValue(descr): prior write did not quiesce within %lu ms", (unsigned long)timeoutMs);
++    return result;
+   }
+ 
+-  m_semaphoreWriteDescrEvt.take("writeValue");
++  portENTER_CRITICAL(&m_writeResultMux);
++  ++m_writeGeneration;
++  if (m_writeGeneration == 0) ++m_writeGeneration;
++  result.generation = m_writeGeneration;
++  m_writePendingGeneration = result.generation;
++  m_writeCompletedGeneration = 0;
++  m_lastWriteResult = result;
++  portEXIT_CRITICAL(&m_writeResultMux);
+ 
+   esp_err_t errRc = ::esp_ble_gattc_write_char_descr(
+     m_pRemoteCharacteristic->getRemoteService()->getClient()->getGattcIf(), m_pRemoteCharacteristic->getRemoteService()->getClient()->getConnId(), getHandle(),
+@@ -231,13 +310,65 @@ bool BLERemoteDescriptor::writeValue(uint8_t *data, size_t length, bool response
+     data,    // Data
+     response ? ESP_GATT_WRITE_TYPE_RSP : ESP_GATT_WRITE_TYPE_NO_RSP, (esp_gatt_auth_req_t)m_auth
    );
++  portENTER_CRITICAL(&m_writeResultMux);
++  if (m_writePendingGeneration == result.generation) {
++    m_lastWriteResult.apiStatus = errRc;
++    m_lastWriteResult.apiAccepted = errRc == ESP_OK;
++  }
++  portEXIT_CRITICAL(&m_writeResultMux);
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_write_char_descr: %d", errRc);
 +    // [hardwareone local patch 2026-07-28] Same leak family as readValue above
 +    // — upstream left the semaphore taken on a failed submit, wedging every
 +    // later descriptor write (and the shared BLE-connect worker, which writes
 +    // the CCCD during connect-time notify subscription).
++    portENTER_CRITICAL(&m_writeResultMux);
++    if (m_writePendingGeneration == result.generation) {
++      m_writePendingGeneration = 0;
++      result = m_lastWriteResult;
++    }
++    portEXIT_CRITICAL(&m_writeResultMux);
 +    m_semaphoreWriteDescrEvt.give();
-+    return false;
++    return result;
    }
  
 -  m_semaphoreWriteDescrEvt.wait("writeValue");
-+  // [hardwareone local patch 2026-07-28] Bounded: DISCONNECT is never
-+  // forwarded to descriptors, so a drop between issuing the write and its
-+  // WRITE_DESCR_EVT wedged this forever.
-+  bool gotEvt = m_semaphoreWriteDescrEvt.timedWait("writeValue", 10000);
-+  if (!gotEvt) log_e("writeValue(descr): WRITE_DESCR_EVT never arrived (10s)");
++  // [hardwareone local patch 2026-07-28] A bounded event wait prevents a
++  // mid-write disconnect from pinning the connect worker forever.
++  if (!m_semaphoreWriteDescrEvt.take(timeoutMs, "writeValue(descr)-event")) {
++    portENTER_CRITICAL(&m_writeResultMux);
++    if (m_writePendingGeneration == result.generation) {
++      m_lastWriteResult.timedOut = true;
++      m_lastWriteResult.success = false;
++      result = m_lastWriteResult;
++    }
++    portEXIT_CRITICAL(&m_writeResultMux);
++    log_e("writeValue(descr): WRITE_DESCR_EVT never arrived within %lu ms", (unsigned long)timeoutMs);
++    return result;
++  }
++
++  portENTER_CRITICAL(&m_writeResultMux);
++  if (m_writeCompletedGeneration == result.generation) {
++    result = m_lastWriteResult;
++    result.success = result.apiAccepted && result.eventReceived
++                     && result.eventStatus == ESP_GATT_OK
++                     && !result.disconnected && !result.timedOut;
++    m_lastWriteResult = result;
++    if (m_writePendingGeneration == result.generation) m_writePendingGeneration = 0;
++  } else {
++    result = m_lastWriteResult;
++    result.success = false;
++  }
++  portEXIT_CRITICAL(&m_writeResultMux);
++
++  m_semaphoreWriteDescrEvt.give();
++  if (!result.success) {
++    log_e(
++      "writeValue(descr): generation=%lu gatt_status=0x%04lx", (unsigned long)result.generation,
++      (unsigned long)result.eventStatus
++    );
++  }
    log_v("<< writeValue");
 -  return (errRc == ESP_OK);
-+  return gotEvt && (errRc == ESP_OK);
++  return result;
  }  // writeValue
  
  #endif
+diff --git a/libraries/BLE/src/BLERemoteDescriptor.h b/libraries/BLE/src/BLERemoteDescriptor.h
+index ea55fb815..f03de011b 100644
+--- a/libraries/BLE/src/BLERemoteDescriptor.h
++++ b/libraries/BLE/src/BLERemoteDescriptor.h
+@@ -41,6 +41,22 @@
+ 
+ class BLERemoteCharacteristic;
+ 
++// [hardwareone local patch 2026-08-14] Checked Bluedroid descriptor-write
++// outcome. A timed-out generation keeps the descriptor gate closed until its
++// late WRITE_DESCR event (or disconnect) is observed, so it cannot satisfy a
++// later write to the same handle.
++struct BLERemoteDescriptorWriteResult {
++  uint32_t generation = 0;
++  int32_t apiStatus = INT32_MIN;
++  int32_t eventStatus = INT32_MIN;
++  bool success = false;
++  bool apiAccepted = false;
++  bool eventReceived = false;
++  bool timedOut = false;
++  bool lateEvent = false;
++  bool disconnected = false;
++};
++
+ /**
+  * @brief A model of remote %BLE descriptor.
+  */
+@@ -68,6 +84,11 @@ public:
+    ***************************************************************************/
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
++  static constexpr uint32_t DEFAULT_WRITE_TIMEOUT_MS = 10000;
++  BLERemoteDescriptorWriteResult writeValueChecked(
++    uint8_t *data, size_t length, bool response = false, uint32_t timeoutMs = DEFAULT_WRITE_TIMEOUT_MS
++  );
++  BLERemoteDescriptorWriteResult getLastWriteResult() const;
+   void gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *evtParam);
+ #endif
+ 
+@@ -85,6 +106,14 @@ private:
+   FreeRTOS::Semaphore m_semaphoreReadDescrEvt = FreeRTOS::Semaphore("ReadDescrEvt");
+   FreeRTOS::Semaphore m_semaphoreWriteDescrEvt = FreeRTOS::Semaphore("WriteDescrEvt");
+ 
++#if defined(CONFIG_BLUEDROID_ENABLED)
++  mutable portMUX_TYPE m_writeResultMux = portMUX_INITIALIZER_UNLOCKED;
++  BLERemoteDescriptorWriteResult m_lastWriteResult;
++  uint32_t m_writeGeneration = 0;
++  uint32_t m_writePendingGeneration = 0;
++  uint32_t m_writeCompletedGeneration = 0;
++#endif
++
+   /***************************************************************************
+    *                       Common private declarations                       *
+    ***************************************************************************/
 diff --git a/libraries/Network/src/NetworkEvents.cpp b/libraries/Network/src/NetworkEvents.cpp
 index 195499c51..e302251f2 100644
 --- a/libraries/Network/src/NetworkEvents.cpp

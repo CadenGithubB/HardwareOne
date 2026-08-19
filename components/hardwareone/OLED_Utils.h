@@ -225,7 +225,12 @@ void oledScrollSetSplitPane(OLEDScrollState* state, int listWidth, int separator
 
 // ============= Virtual Keyboard =============
 
-#define OLED_KEYBOARD_MAX_LENGTH 32
+// Raised from 32 to hold a dictated phrase (KEYBOARD_MODE_MIC). This is one
+// global struct, so the cost is ~96 bytes of DRAM. Note that callers already
+// asked for more than 32 — OLED_ESPNow's message field requests 128 and its
+// remote form 64 — and were silently clamped by the min() in oledKeyboardInit;
+// those fields get the length they always asked for as a side effect.
+#define OLED_KEYBOARD_MAX_LENGTH 128
 #define OLED_KEYBOARD_COLS 10
 #define OLED_KEYBOARD_ROWS 3
 
@@ -235,16 +240,22 @@ enum OLEDKeyboardMode {
   KEYBOARD_MODE_NUMBERS = 2,
   KEYBOARD_MODE_SYMBOLS = 3,
   KEYBOARD_MODE_PATTERN = 4,
-  KEYBOARD_MODE_COUNT = 5
+  KEYBOARD_MODE_MIC = 5,
+  KEYBOARD_MODE_COUNT = 6
 };
 
 // The MODE key (SELECT / in-grid '*') cycles through every mode in enum order:
-// lowercase -> uppercase -> numbers -> symbols -> pattern -> lowercase. PATTERN
-// stays in the rotation on purpose: the OLED login screen accepts a gamepad
-// pattern in place of a text password (isValidUser() checks both hashes), so the
-// login keyboard MUST be able to reach it via SELECT. Keep PATTERN last so it
-// sits just before the wrap back to lowercase, exactly as it did before the
-// SYMBOLS page was inserted ahead of it.
+// lowercase -> uppercase -> numbers -> symbols -> pattern -> mic -> lowercase.
+// PATTERN stays in the rotation on purpose: the OLED login screen accepts a
+// gamepad pattern in place of a text password (isValidUser() checks both
+// hashes), so the login keyboard MUST be able to reach it via SELECT.
+//
+// MIC is the one CONDITIONAL member. Every other mode works with the device
+// standing alone, but dictation needs a mic source AND an authenticated CM5
+// host link (nothing on this device turns speech into arbitrary text — see
+// System_Dictation.h). oledKeyboardToggleMode() therefore skips it whenever
+// dictationAvailable() is false, so the wearer never cycles into a page that
+// cannot do anything. Do not "simplify" that skip away.
 
 // Autocomplete provider callback types
 // Returns number of suggestions found, fills results array (up to maxResults)
@@ -308,6 +319,13 @@ void oledKeyboardComplete();
 void oledKeyboardCancel();
 void oledKeyboardToggleMode();
 
+// Per-tick service for KEYBOARD_MODE_MIC: supervises the dictation timeouts and
+// appends a delivered transcript into the field. Called from oledUpdate() on
+// the display task, so the text lands on the same task that owns the keyboard
+// state — the `dictate` command itself only stages it. Cheap no-op when the
+// keyboard is inactive or in any other mode.
+void oledKeyboardDictationTick();
+
 // Autocomplete support (Select button triggers suggestions)
 void oledKeyboardSetAutocomplete(OLEDKeyboardAutocompleteFunc func, void* userData = nullptr);
 void oledKeyboardTriggerAutocomplete();
@@ -332,6 +350,12 @@ void oledEspNowPollPairRequest();
 void executeOLEDCommand(const String& argsInput);
 // Execute a CLI command and return success status + output (for callers that need the result)
 bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t outSize);
+// Session-bound variant for stateful OLED UI flows. `expectedEpoch` is the
+// exact display incarnation that collected the input; submission fails closed
+// if another identity replaced it before admission or result delivery.
+bool executeOLEDCommandWithResultForSession(
+    const String& argsInput, TransportSessionEpoch expectedEpoch,
+    char* out, size_t outSize);
 
 // ============= OLED AuthContext Builder =============
 // Single source of truth for "what AuthContext represents OLED-originated

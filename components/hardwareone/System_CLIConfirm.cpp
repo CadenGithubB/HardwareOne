@@ -6,19 +6,27 @@
 
 #include "System_CLIConfirm.h"
 #include "System_CLIMode.h"
+#include "System_CommandTypes.h"
 #include "System_Debug.h"
 #include "System_Utils.h"          // broadcastOutput, logCommandExecution
 #include "System_AuthIdentity.h"   // currentAuthContext — audit attribution for the confirmer
+#include "System_User.h"
 
-// Single-slot state for the pending confirm. Touched only from cmd_exec
-// (the same task that runs every CLI handler and the CLIMode dispatch
-// hook), so no synchronization is needed today. If the framework ever
-// runs on multiple tasks concurrently this becomes per-task state -- but
-// that's the same redesign trigger noted in System_CLIMode.cpp.
+// Single-slot state for the pending confirm. Publication is committed under
+// the CLIMode mutex only after the exact owner and empty slot are validated.
+// A losing foreign request therefore cannot overwrite the winning payload.
 static struct {
+  enum Resolution : uint8_t {
+    None,
+    Confirmed,
+    Cancelled,
+    PrivilegeLost,
+  } resolution;
   CLIConfirmCallback onConfirm;
   CLIConfirmCallback onCancel;
   void* userData;
+  char* responseOut;
+  size_t responseOutSize;
   // Stored prompt for re-display from onEnter. Sized large enough for
   // "Confirm delete of /some/long/path? (cannot be undone)" with
   // headroom. Truncated with snprintf if a caller passes more.
@@ -27,17 +35,22 @@ static struct {
   // for the resolution audit so forensic logs show what was confirmed,
   // not just the bare "yes" / "no". Empty when the caller opted out.
   char originatingCmd[160];
-} sConfirm = { nullptr, nullptr, nullptr, "", "" };
+  char responseText[384];
+  int requiredRoleRank;
+} sConfirm = { decltype(sConfirm)::None, nullptr, nullptr, nullptr, nullptr, 0,
+               "", "", "", kRoleRankGuest };
 
 static void confirm_onEnter(void* /*userData*/) {
-  // Print the prompt and a hint. The destructive command itself returns
-  // a short acknowledgement after this so the user sees:
-  //   <prompt>
-  //   Type 'yes' to confirm or anything else to cancel.
-  //   Type 'yes' to confirm or anything else to cancel.   <-- command result
-  // Wait -- that would double-print the hint. So onEnter only prints the
-  // prompt; the destructive command returns the hint as its response.
-  broadcastOutput(sConfirm.prompt);
+  // The initiating handler returns responseText through the normal addressed
+  // result channel. Do not broadcast a potentially sensitive prompt into the
+  // shared web/BLE/debug lanes.
+  const CommandContext* ctx =
+      static_cast<const CommandContext*>(currentCommandContext());
+  if (ctx && ctx->auth.transport == SOURCE_LOCAL_DISPLAY) {
+    broadcastOutputCore_Routed(sConfirm.responseText,
+                               strlen(sConfirm.responseText),
+                               MSG_ROUTE_OLED);
+  }
 }
 
 static CLIModeInputResult confirm_onInput(const String& line, void* /*userData*/,
@@ -53,47 +66,53 @@ static CLIModeInputResult confirm_onInput(const String& line, void* /*userData*/
   const bool yes = (lc == "yes" || lc == "y" || lc == "true" ||
                     lc == "1"   || lc == "on");
 
-  const char* response = nullptr;
-
   if (yes) {
-    if (sConfirm.onConfirm) {
-      response = sConfirm.onConfirm(sConfirm.userData);
+    if (userAccountRank(currentAuthContext().user) < sConfirm.requiredRoleRank) {
+      sConfirm.resolution = decltype(sConfirm)::PrivilegeLost;
     } else {
-      // Misconfigured caller -- no action wired. Don't pretend something
-      // happened.
-      response = "Confirmed (no action registered).";
+      sConfirm.resolution = decltype(sConfirm)::Confirmed;
     }
   } else {
-    if (sConfirm.onCancel) {
-      response = sConfirm.onCancel(sConfirm.userData);
+    sConfirm.resolution = decltype(sConfirm)::Cancelled;
+  }
+  // The dispatcher drains onExit synchronously on cmd_exec before returning
+  // from this input. Keep the caller's live response buffer so onExit can run
+  // the potentially blocking/destructive callback *outside* the global mode
+  // mutex, then place the final result into the normal addressed reply.
+  sConfirm.responseOut = out;
+  sConfirm.responseOutSize = outSize;
+
+  // Mode is done either way -- exit so the next user input goes through
+  // normal command dispatch again.
+  return CLI_MODE_HANDLED_AND_EXIT;
+}
+
+static void confirm_onExit(void* /*userData*/) {
+  if (sConfirm.resolution != decltype(sConfirm)::None) {
+    const bool yes = sConfirm.resolution == decltype(sConfirm)::Confirmed ||
+                     sConfirm.resolution == decltype(sConfirm)::PrivilegeLost;
+    const char* response = nullptr;
+    if (sConfirm.resolution == decltype(sConfirm)::PrivilegeLost) {
+      response = "Error: session privileges changed; confirmation cancelled.";
+    } else if (sConfirm.resolution == decltype(sConfirm)::Confirmed) {
+      response = sConfirm.onConfirm
+                     ? sConfirm.onConfirm(sConfirm.userData)
+                     : "Confirmed (no action registered).";
     } else {
-      response = "Cancelled.";
+      response = sConfirm.onCancel
+                     ? sConfirm.onCancel(sConfirm.userData)
+                     : "Cancelled.";
     }
-  }
+    if (!response) response = "Error: confirmation callback returned no result.";
 
-  if (response && out && outSize > 0) {
-    strncpy(out, response, outSize - 1);
-    out[outSize - 1] = '\0';
-  }
+    if (response && sConfirm.responseOut && sConfirm.responseOutSize > 0) {
+      strncpy(sConfirm.responseOut, response, sConfirm.responseOutSize - 1);
+      sConfirm.responseOut[sConfirm.responseOutSize - 1] = '\0';
+    }
 
-  // Audit the confirm resolution with full context. The prompt step
-  // (e.g. "filedelete /foo") was deliberately NOT audited by the
-  // dispatcher because it only requested confirmation -- no action
-  // completed. Now that the user has resolved the prompt and a real
-  // action (or cancellation) has happened, write the audit entry.
-  //
-  // The composed line shows what was asked + what was answered:
-  //   filedelete /foo (confirm: yes)    -> Deleted file: /foo
-  //   filedelete /foo (confirm: no)     -> Cancelled. /foo not deleted.
-  //   userdelete bob  (confirm: yes)    -> Deleted user 'bob'
-  //
-  // Attribution is the CONFIRMER's identity (currentAuthContext) -- the
-  // person who answered yes/no -- because that's the auditable decision
-  // point. The originating command author is reflected in the cmd
-  // string itself. Destructive actions ran against the ORIGINAL caller's
-  // captured AuthContext for permission purposes (see filedelete_confirmed
-  // etc.), but the audit attribution lives with the confirmer.
-  if (response) {
+    // Audit the resolution only after the action/cancellation callback has
+    // actually completed. Attribution remains the exact confirmer whose
+    // CommandContext is still installed on cmd_exec during this drain.
     char auditCmd[224];
     if (sConfirm.originatingCmd[0] != '\0') {
       snprintf(auditCmd, sizeof(auditCmd), "%s (confirm: %s)",
@@ -108,19 +127,18 @@ static CLIModeInputResult confirm_onInput(const String& line, void* /*userData*/
     logCommandExecution(currentAuthContext(), auditCmd, actionSucceeded, response);
   }
 
-  // Mode is done either way -- exit so the next user input goes through
-  // normal command dispatch again.
-  return CLI_MODE_HANDLED_AND_EXIT;
-}
-
-static void confirm_onExit(void* /*userData*/) {
   // Defensive zeroing so a stale callback can't be invoked accidentally
   // if cliEnterMode is called again before the next cliRequestConfirm.
+  sConfirm.resolution        = decltype(sConfirm)::None;
   sConfirm.onConfirm         = nullptr;
   sConfirm.onCancel          = nullptr;
   sConfirm.userData          = nullptr;
+  sConfirm.responseOut       = nullptr;
+  sConfirm.responseOutSize   = 0;
   sConfirm.prompt[0]         = '\0';
   sConfirm.originatingCmd[0] = '\0';
+  sConfirm.responseText[0]   = '\0';
+  sConfirm.requiredRoleRank  = kRoleRankGuest;
   DEBUGF(DEBUG_CLI, "[climode/confirm] exited");
 }
 
@@ -131,37 +149,59 @@ static const CLIMode kConfirmMode = {
   confirm_onExit,
   nullptr,  // onTick — confirm is purely input-driven
   nullptr,  // userData — state lives in sConfirm static
+  2u * 60u * 1000u,
 };
+
+struct ConfirmPrepare {
+  const String* prompt;
+  const String* originatingCmd;
+  CLIConfirmCallback onConfirm;
+  CLIConfirmCallback onCancel;
+  void* userData;
+  CLIConfirmAcceptedCallback onAccepted;
+  void* acceptedData;
+  int requiredRoleRank;
+};
+
+static void confirmCommit(void* opaque) {
+  ConfirmPrepare* p = static_cast<ConfirmPrepare*>(opaque);
+  if (!p) return;
+  sConfirm.onConfirm = p->onConfirm;
+  sConfirm.onCancel = p->onCancel;
+  sConfirm.userData = p->userData;
+  snprintf(sConfirm.prompt, sizeof(sConfirm.prompt), "%s",
+           p->prompt ? p->prompt->c_str() : "");
+  snprintf(sConfirm.originatingCmd, sizeof(sConfirm.originatingCmd), "%s",
+           p->originatingCmd ? p->originatingCmd->c_str() : "");
+  snprintf(sConfirm.responseText, sizeof(sConfirm.responseText),
+           "%s\nType 'yes' to confirm or anything else to cancel.",
+           sConfirm.prompt);
+  sConfirm.requiredRoleRank = p->requiredRoleRank;
+  if (p->onAccepted) p->onAccepted(p->acceptedData);
+}
 
 bool cliRequestConfirm(const String& prompt,
                        const String& originatingCmd,
                        CLIConfirmCallback onConfirm,
                        CLIConfirmCallback onCancel,
-                       void* userData) {
-  if (cliInModeActive()) {
-    // Another mode (help, wizard, or a prior outstanding confirm) holds
-    // the slot. Caller must surface this to the user and abort.
-    DEBUGF(DEBUG_CLI, "[climode/confirm] rejected: '%s' already active",
-           cliCurrentMode() && cliCurrentMode()->name ? cliCurrentMode()->name : "(unnamed)");
-    return false;
-  }
+                       void* userData,
+                       CLIConfirmAcceptedCallback onAccepted,
+                       void* acceptedData) {
+  ConfirmPrepare prepare{
+      &prompt,
+      &originatingCmd,
+      onConfirm,
+      onCancel,
+      userData,
+      onAccepted,
+      acceptedData,
+      userAccountRank(currentAuthContext().user),
+  };
+  return cliEnterModePrepared(&kConfirmMode, confirmCommit, &prepare);
+}
 
-  // Stash the callbacks + audit context BEFORE entering the mode so
-  // onEnter (which prints the prompt) sees the populated buffers.
-  sConfirm.onConfirm = onConfirm;
-  sConfirm.onCancel  = onCancel;
-  sConfirm.userData  = userData;
-  snprintf(sConfirm.prompt,         sizeof(sConfirm.prompt),         "%s", prompt.c_str());
-  snprintf(sConfirm.originatingCmd, sizeof(sConfirm.originatingCmd), "%s", originatingCmd.c_str());
-
-  if (!cliEnterMode(&kConfirmMode)) {
-    // Defensive: cliEnterMode rejected for some other reason. Clear state.
-    sConfirm.onConfirm         = nullptr;
-    sConfirm.onCancel          = nullptr;
-    sConfirm.userData          = nullptr;
-    sConfirm.prompt[0]         = '\0';
-    sConfirm.originatingCmd[0] = '\0';
-    return false;
-  }
-  return true;
+const char* cliConfirmPromptResponse() {
+  return sConfirm.responseText[0]
+             ? sConfirm.responseText
+             : "Type 'yes' to confirm or anything else to cancel.";
 }

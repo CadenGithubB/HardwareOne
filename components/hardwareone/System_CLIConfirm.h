@@ -10,29 +10,34 @@
 // First concrete user of the CLIMode framework after help. Pattern:
 //
 //   1. A "destructive" CLI command (filedelete, userdelete, factoryreset)
-//      validates its arguments, but instead of executing the action it
-//      stashes what it would do in static state and calls
-//      cliRequestConfirm() with a callback.
+//      validates its arguments, but instead of executing the action it stages
+//      the payload locally and calls cliRequestConfirm() with a callback plus
+//      an accepted-payload publisher. Shared pending state is committed only
+//      when mode entry succeeds.
 //   2. cliRequestConfirm enters a CLIMode that:
 //        a. prints the prompt + a yes/no hint
 //        b. captures the user's NEXT command line as the response
-//        c. on "yes"/"y"/"true"/"1" -> runs the onConfirm callback
-//        d. on anything else        -> runs the onCancel callback (or
+//        c. on "yes"/"y"/"true"/"1" -> schedules the onConfirm callback
+//        d. on anything else        -> schedules the onCancel callback (or
 //                                      returns a default "Cancelled" msg)
 //        e. exits the mode after either branch fires
 //   3. The destructive command returns immediately with a short hint
 //      string ("Type 'yes' to confirm..."); the cmd_exec task is free
 //      between the prompt and the user's response.
 //
-// Caller pattern (file-statics keep state alive across the two calls):
+// Caller pattern (file-statics keep accepted state alive across both calls):
 //
-//   static String   sPendingPath;
-//   static AuthContext sPendingCtx;  // capture original caller identity
+//   static String      sPendingPath;
+//   static AuthContext sPendingCtx;
+//   struct Candidate { const String* path; const AuthContext* ctx; };
+//   static void commitCandidate(void* opaque) {
+//     Candidate* c = static_cast<Candidate*>(opaque);
+//     sPendingPath = *c->path;
+//     sPendingCtx = *c->ctx;
+//   }
 //
 //   static const char* doDelete(void* /*ud*/) {
-//     // sPendingPath was set before cliRequestConfirm in the caller.
-//     // sPendingCtx is the ORIGINAL caller's auth context -- the
-//     // confirmer may be a different user/transport (see security note).
+//     // Pending values were atomically published when mode entry succeeded.
 //     if (!VFS::removeGuarded(sPendingPath, sPendingCtx))
 //       return "Error: delete failed";
 //     static char buf[80]; snprintf(buf, sizeof(buf), "Deleted %s",
@@ -42,11 +47,12 @@
 //
 //   const char* cmd_filedelete(const String& args) {
 //     // ...validate args, compute path...
-//     sPendingPath = path;
-//     sPendingCtx  = currentAuthContext();  // capture by VALUE
+//     AuthContext caller = currentAuthContext();
+//     Candidate candidate{&path, &caller};
 //     if (!cliRequestConfirm("Delete " + path + "?",
 //                            "filedelete " + path,   // originatingCmd for audit
-//                            doDelete, nullptr, nullptr))
+//                            doDelete, nullptr, nullptr,
+//                            commitCandidate, &candidate))
 //       return "Error: another interactive mode is active";
 //     return "Type 'yes' to confirm or anything else to cancel.";
 //   }
@@ -63,26 +69,14 @@
 //   false when a mode is already active.
 //
 // ----------------------------------------------------------------------------
-// Security note (deliberate Phase 3 limitation):
+// Security boundary:
 //
-//   The "yes" response is processed by whoever submits the next command
-//   on whichever transport routes it. That's typically the same user on
-//   the same transport, but the framework doesn't enforce it -- an
-//   automation, BLE peer, or other transport could submit "yes" in
-//   between the prompt and the human's response.
-//
-//   The destructive action runs against the captured AuthContext from
-//   the ORIGINAL caller (so permission checks reflect who *asked* for
-//   the action, not who confirmed it). This means an automation that
-//   submits "yes" can't elevate its own privileges -- but it CAN confirm
-//   a pending action that a human admin initiated.
-//
-//   Mitigation if you ever need it: have the confirm mode also capture
-//   the original caller's transport+user, and have confirm_onInput
-//   reject "yes" responses that don't match. Not done in this iteration
-//   because it complicates the BLE/MQTT-confirm-from-the-same-user case
-//   and the practical attack window is small (one command line, one
-//   active mode at a time).
+//   The framework binds the prompt to the exact transport-session generation
+//   that opened it. A different browser cookie, physical-console login, or
+//   same-user re-login cannot answer it. Effective role is re-checked when
+//   "yes" arrives, and stateless/machine sources (including BLE in this phase)
+//   cannot open an interactive prompt. The action/cancel callback runs on
+//   cmd_exec after the global mode mutex is released.
 //
 // ----------------------------------------------------------------------------
 
@@ -92,6 +86,7 @@
 // next CLI command returns -- the dispatcher copies the string out
 // before that. File-static char buffers are the simplest choice.
 typedef const char* (*CLIConfirmCallback)(void* userData);
+typedef void (*CLIConfirmAcceptedCallback)(void* acceptedData);
 
 // Request a yes/no confirmation. See header comment for the typical
 // caller pattern.
@@ -101,10 +96,9 @@ typedef const char* (*CLIConfirmCallback)(void* userData);
 // confirm) -- caller must NOT execute the destructive action and should
 // surface an error to the user.
 //
-// `prompt`         - displayed to the user via broadcastOutput when the
-//                    mode is entered. Keep it under ~150 chars; the
-//                    confirm framework copies it into a fixed-size
-//                    buffer.
+// `prompt`         - returned to the initiating caller through the addressed
+//                    command result. Keep it under ~150 chars; the confirm
+//                    framework copies it into a fixed-size buffer.
 // `originatingCmd` - the command line that triggered this confirm prompt
 //                    (e.g. "filedelete /system/foo"). The confirm
 //                    framework includes this in the audit log entry that
@@ -126,6 +120,12 @@ bool cliRequestConfirm(const String& prompt,
                        const String& originatingCmd,
                        CLIConfirmCallback onConfirm,
                        CLIConfirmCallback onCancel,
-                       void* userData);
+                       void* userData,
+                       CLIConfirmAcceptedCallback onAccepted = nullptr,
+                       void* acceptedData = nullptr);
+
+// Addressed response prepared by the last successful cliRequestConfirm().
+// Destructive handlers should return this instead of broadcasting the prompt.
+const char* cliConfirmPromptResponse();
 
 #endif // SYSTEM_CLICONFIRM_H

@@ -26,13 +26,16 @@
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
 
-#if ENABLE_OLED_DISPLAY && ENABLE_ONDEVICE_LLM
+#if ENABLE_OLED_DISPLAY && ENABLE_LLM_BACKEND
 
 #include <Adafruit_SSD1306.h>
 
 #include "OLED_Utils.h"
 #include "HAL_Input.h"          // INPUT_CHECK, INPUT_BUTTON_*, gNavEvents
-#include "System_LLM.h"
+#if ENABLE_LLM_SOURCE_ONBOARD
+  #include "System_LLM.h"   // engine-only; the shared vocabulary is in System_LLMTypes.h
+#endif
+#include "System_LLMBackend.h"   // registry + source dispatch
 #include "System_LLMChat.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
@@ -60,6 +63,12 @@ enum class LLMUIState : uint8_t {
   LOADING,
   READY,
   GENERATING,
+  // Action menu + model picker. MENU is reached with X from READY (where X was
+  // previously inert whenever the model shipped no guided menu); PICK_MODEL is
+  // reached from MENU or with A from NO_MODEL. Both are list pickers over
+  // OLEDScrollState, the same shape as the three guided levels below.
+  MENU,
+  PICK_MODEL,
   // Guided-input menu pickers (LLM_GUIDED_MENU_SPEC §8) — nested sub-states
   // entered with X from READY when the loaded model ships a menu. Back (B) pops
   // one level: ENTITY -> TEMPLATE -> GROUP -> READY.
@@ -105,6 +114,17 @@ EXT_RAM_BSS_ATTR static OLEDScrollState sTplScroll;
 EXT_RAM_BSS_ATTR static OLEDScrollState sEntScroll;
 static bool sPickScrollInit = false;
 
+// Action menu + model picker. sModelDescs is the selection source of truth —
+// rows are display text only, and every choice is made by INDEX into this array,
+// so no pointer into a rebuilt list can go stale.
+#define LLM_MODEL_ROWS 12
+EXT_RAM_BSS_ATTR static OLEDScrollState sMenuScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sModelScroll;
+EXT_RAM_BSS_ATTR static char         sModelRows[LLM_MODEL_ROWS][LLM_CHARS + 1];
+EXT_RAM_BSS_ATTR static LlmModelDesc sModelDescs[LLM_MODEL_ROWS];
+static int  sModelCount = 0;
+static const char* sMenuStatus = nullptr;
+
 EXT_RAM_BSS_ATTR static char sGroupRows[8][LLM_CHARS + 1];
 EXT_RAM_BSS_ATTR static char sTplRows[OLED_SCROLL_MAX_ITEMS][LLM_CHARS + 1];
 EXT_RAM_BSS_ATTR static char sEntRows[LLM_ENT_PAGE][LLM_CHARS + 1];
@@ -141,29 +161,58 @@ static int  sGuidedAskSession = 0;
 // State transitions
 // ============================================================================
 
+// True for every sub-state that owns the screen until the user leaves it.
+// Keep in sync with the switch inside syncStateFromEngine().
+static bool stateOwnsUI(LLMUIState s) {
+  return s == LLMUIState::MENU        || s == LLMUIState::PICK_MODEL ||
+         s == LLMUIState::PICK_GROUP  || s == LLMUIState::PICK_TEMPLATE ||
+         s == LLMUIState::PICK_ENTITY;
+}
+
 // Refresh state from the engine + chat module. Called at the top of
 // displayLLM() each frame so transitions land within one render tick.
 static void syncStateFromEngine() {
   if (sKeyboardActive) return;  // keyboard owns the UI
 
-  LLMStatus st = llmGetStatus();
+  LLMStatus st = llmBackendStatus();
 
-  // Guided-menu pickers own the UI while active (spec §8). They leave only on an
-  // explicit button — a submit sets GENERATING, B pops a level — or when the model
-  // or its menu vanishes underneath us: an unload/swap bumps menuGeneration, and an
-  // unload drops the engine out of READY. Checked before the generic transitions so
-  // a background generation (another surface) or the reflect-engine branch below
-  // can't yank the user out of the picker mid-selection.
-  if (sUIState == LLMUIState::PICK_GROUP ||
-      sUIState == LLMUIState::PICK_TEMPLATE ||
-      sUIState == LLMUIState::PICK_ENTITY) {
-    if (st.state != LLMState::READY ||
-        llmMenuGroupCount() == 0 ||
-        llmMenuGeneration() != sPickGen) {
-      // Model unloaded / swapped / menu gone — drop back to the chat view (which
-      // itself renders the NO_MODEL screen when the model is truly gone).
-      sUIState = (st.state == LLMState::READY) ? LLMUIState::READY : LLMUIState::NO_MODEL;
-      sPickStatus = nullptr;
+  // Sub-states that OWN the UI. This function is a fully-enumerated dispatcher
+  // with no leave-alone default — anything that falls through to the
+  // reflect-engine block at the bottom is overwritten from engine state on the
+  // very next frame. So a new sub-state MUST be claimed here or it renders for
+  // zero frames, and every symptom of that would be invisible in review: the
+  // enum, the switch case, the populate function and the input case all look
+  // correct in isolation.
+  //
+  // Each owning state carries its OWN exit condition; they are deliberately not
+  // one shared test, because PICK_MODEL is entered precisely when NO model is
+  // loaded and the guided levels require one.
+  if (stateOwnsUI(sUIState)) {
+    switch (sUIState) {
+      case LLMUIState::PICK_MODEL:
+        // No engine precondition at all — this screen is how a model gets
+        // chosen in the first place. Leaves only on select or back.
+        break;
+      case LLMUIState::MENU:
+        // Actions here act on a loaded model; if it went away, so does the menu.
+        if (st.state != LLMState::READY) {
+          sUIState = (st.state == LLMState::LOADING) ? LLMUIState::LOADING
+                                                     : LLMUIState::NO_MODEL;
+          sMenuStatus = nullptr;
+        }
+        break;
+      default:
+        // Guided levels (spec §8): an unload/swap bumps menuGeneration and an
+        // unload drops the engine out of READY, either of which invalidates the
+        // indices the user is picking with.
+        if (st.state != LLMState::READY ||
+            llmMenuGroupCount() == 0 ||
+            llmMenuGeneration() != sPickGen) {
+          sUIState = (st.state == LLMState::READY) ? LLMUIState::READY
+                                                   : LLMUIState::NO_MODEL;
+          sPickStatus = nullptr;
+        }
+        break;
     }
     return;
   }
@@ -203,51 +252,130 @@ static void syncStateFromEngine() {
   }
 }
 
-// ============================================================================
-// Model picker — shared file-browser-based picker, callback-driven
-// ============================================================================
+// Defined with the guided pickers below; all five scroll states share one
+// lazy init so the visible-line count is computed once.
+static void ensurePickScrollInit();
 
-// Filter: only show files ending in .bin (case-insensitive on the extension —
-// the LLM engine accepts any name but expects the LLM1 binary format, which
-// the converter writes as .bin). Folders are passed through by the picker
-// layer regardless of this filter so the user can navigate.
-static bool isLLMModelFile(const FileEntry& entry) {
-  const char* dot = strrchr(entry.name, '.');
-  if (!dot) return false;
-  return (strcasecmp(dot, ".bin") == 0);
+// ============================================================================
+// Model picker — a real list over the shared registry
+// ============================================================================
+// Was a FilePickerRequest into the generic file browser. That could only ever
+// offer things that are FILES on this device, so a remote model — which has no
+// path here at all — was literally unrepresentable. This is the same
+// OLEDScrollState pattern the guided levels below already use.
+
+// Fit a model name into `cap` columns, dropping a known extension and, if still
+// too long, eliding the MIDDLE. Model families differ in their SUFFIX
+// ("…-Q3_K_XL" vs "…-Q4_0"), so a plain head-truncation renders two different
+// quantisations of one model as the same row.
+static void modelDisplayName(const char* name, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  char base[LLM_MODEL_NAME_LEN];
+  strlcpy(base, name ? name : "", sizeof(base));
+  char* dot = strrchr(base, '.');
+  if (dot && (strcasecmp(dot, ".gguf") == 0 || strcasecmp(dot, ".bin") == 0)) *dot = '\0';
+
+  const size_t len = strlen(base);
+  if (len < cap) { strlcpy(out, base, cap); return; }
+  // head + '~' + tail
+  const size_t keep = cap - 2;              // room for the '~' and the NUL
+  const size_t head = (keep + 1) / 2;
+  const size_t tail = keep - head;
+  memcpy(out, base, head);
+  out[head] = '~';
+  memcpy(out + head + 1, base + len - tail, tail);
+  out[head + 1 + tail] = '\0';
 }
 
-// Callback for when the user picks a model file (or cancels). Runs after the
-// file browser has popped back to OLED_LLM. llmLoadModel is synchronous and
-// blocks for several seconds reading weights into PSRAM — during that window
-// the OLED freezes on whatever frame was last drawn (the file browser at
-// selection). State transitions to LOADING for completeness even though no
-// LOADING frame is rendered in practice; if a future async-load API arrives,
-// the state machine is ready for it.
-static void onLLMModelPicked(const char* fullPath, bool cancelled) {
-  if (cancelled || !fullPath) {
-    sUIState = LLMUIState::NO_MODEL;
+static void populateModelPicker() {
+  ensurePickScrollInit();
+  oledScrollClearKeepSelection(&sModelScroll);
+  sModelCount = (int)llmEnumerateModels(sModelDescs, LLM_MODEL_ROWS);
+
+  for (int i = 0; i < sModelCount; i++) {
+    const LlmModelDesc& d = sModelDescs[i];
+    // 21 glyphs total, and oledScrollRenderSimple prints a 2-char "> " cursor
+    // first, so 19 are usable. Budget the tag first, then give the rest to the
+    // name — the tag is what tells you WHERE the model runs, which matters more
+    // than the last few characters of its name.
+    const char* tag = (d.backend == LlmBackendKind::Cm5) ? "[pi]"
+                    : (d.storage == LLM_STORAGE_SD)      ? "[sd]" : "";
+    char nameBuf[LLM_CHARS + 1];
+    const size_t tagLen  = strlen(tag) ? strlen(tag) + 1 : 0;   // tag + space
+    const size_t markLen = d.available ? 0 : 2;                 // trailing " x"
+    size_t room = 19;
+    room = (room > tagLen + markLen) ? room - tagLen - markLen : 1;
+    modelDisplayName(d.name, nameBuf, room + 1);
+    snprintf(sModelRows[i], sizeof(sModelRows[i]), "%s%s%s%s",
+             tag, tagLen ? " " : "", nameBuf, d.available ? "" : " x");
+    oledScrollAddItem(&sModelScroll, sModelRows[i], nullptr, true,
+                      (void*)(uintptr_t)(i + 1));   // +1 so index 0 isn't nullptr
+  }
+  if (sModelCount == 0) {
+    strlcpy(sModelRows[0], "(no models found)", sizeof(sModelRows[0]));
+    oledScrollAddItem(&sModelScroll, sModelRows[0], nullptr, false, nullptr);
+  }
+}
+
+static void enterPickModel() {
+  ensurePickScrollInit();
+  sModelScroll.selectedIndex = 0;
+  sModelScroll.scrollOffset  = 0;
+  sMenuStatus = nullptr;
+  populateModelPicker();
+  sUIState = LLMUIState::PICK_MODEL;
+}
+
+// Commit the highlighted row. Selection is BY INDEX into sModelDescs, so a
+// rebuild between frames cannot leave us holding a stale pointer.
+static void commitModelPick() {
+  OLEDScrollItem* sel = oledScrollGetSelected(&sModelScroll);
+  if (!sel || !sel->userData) return;
+  const int idx = (int)((uintptr_t)sel->userData) - 1;
+  if (idx < 0 || idx >= sModelCount) return;
+  if (!sModelDescs[idx].available) { sMenuStatus = "not available"; return; }
+
+  char err[64] = {0};
+  // Local selection blocks for seconds reading weights, so no LOADING frame is
+  // drawn in practice; a remote selection returns immediately with the host
+  // still switching, which is exactly what the LOADING state is for.
+  sUIState = LLMUIState::LOADING;
+  const bool ok = llmBackendSelect(sModelDescs[idx].id, err, sizeof(err));
+  if (!ok) {
+    sUIState = LLMUIState::PICK_MODEL;
+    sMenuStatus = "load failed";
     return;
   }
-  sUIState = LLMUIState::LOADING;
-  bool ok = llmLoadModel(fullPath, 0);  // 0 = use compile-time / settings max ctx
-  sUIState = ok ? LLMUIState::READY : LLMUIState::NO_MODEL;
+  sUIState = llmBackendIsReady() ? LLMUIState::READY : LLMUIState::LOADING;
 }
 
-// Push the model-pick file picker request and transition to OLED_FILE_BROWSER.
-// Called when the user presses A in the NO_MODEL state.
-static void openModelPicker() {
-  FilePickerRequest req = {};
-  strlcpy(req.title, "Pick model", sizeof(req.title));
-  // Start in /system/llm — the conventional model directory. The user can
-  // navigate up to / and into /sd/llm if their model lives on SD.
-  strlcpy(req.startPath, "/system/llm", sizeof(req.startPath));
-  req.filter = isLLMModelFile;
-  req.onPicked = onLLMModelPicked;
-  req.requesterMode = OLED_LLM;
-  if (oledFilePickerPush(req)) {
-    requestOLEDMode(OLED_FILE_BROWSER, "llm.pickModel", true);
-  }
+// ============================================================================
+// Action menu (X from READY)
+// ============================================================================
+// X used to open the guided menu and was INERT whenever the model shipped none,
+// which is most of them. Reusing it for a small action list costs no affordance
+// and gives the model picker a home — the ANO encoder has only A/B/X/Y plus a
+// chorded START, all already assigned, so a new button was not available.
+
+enum : uintptr_t { MENU_ROW_ASK = 1, MENU_ROW_GUIDED, MENU_ROW_MODEL, MENU_ROW_UNLOAD };
+
+static void populateMenuPicker() {
+  ensurePickScrollInit();
+  oledScrollClearKeepSelection(&sMenuScroll);
+  oledScrollAddItem(&sMenuScroll, "Ask a question", nullptr, true, (void*)MENU_ROW_ASK);
+  if (llmMenuGroupCount() > 0)   // 0 on every remote model, and on local ones with no MENU blob
+    oledScrollAddItem(&sMenuScroll, "Guided questions", nullptr, true, (void*)MENU_ROW_GUIDED);
+  oledScrollAddItem(&sMenuScroll, "Switch model",   nullptr, true, (void*)MENU_ROW_MODEL);
+  oledScrollAddItem(&sMenuScroll, "Unload model",   nullptr, true, (void*)MENU_ROW_UNLOAD);
+}
+
+static void enterMenu() {
+  ensurePickScrollInit();
+  sMenuScroll.selectedIndex = 0;
+  sMenuScroll.scrollOffset  = 0;
+  sMenuStatus = nullptr;
+  populateMenuPicker();
+  sUIState = LLMUIState::MENU;
 }
 
 // ============================================================================
@@ -258,6 +386,8 @@ static void ensurePickScrollInit() {
   if (sPickScrollInit) return;
   int vis = OLED_CONTENT_HEIGHT / 8;   // single-line (8px) rows in the content area
   if (vis < 1) vis = 1;
+  oledScrollInit(&sMenuScroll,  nullptr, vis);
+  oledScrollInit(&sModelScroll, nullptr, vis);
   oledScrollInit(&sGroupScroll, nullptr, vis);
   oledScrollInit(&sTplScroll,   nullptr, vis);
   oledScrollInit(&sEntScroll,   nullptr, vis);
@@ -424,6 +554,16 @@ static void rebuildRenderLines() {
       spans[i].lineCount = 0;
       continue;
     }
+    // Fold to the ASCII the classic GFX font can actually draw, BEFORE counting
+    // lines. This pass and the emit pass below must fold identically or the
+    // line count and the emitted text disagree and the view scrolls wrong.
+    //
+    // Folding is what makes the byte arithmetic below correct: post-fold one
+    // byte is one glyph, so ceil(copied / LLM_CHARS) is a real line count and
+    // the memcpy slice is a real 21-glyph line. Un-folded, a multi-byte
+    // character both drew as garbage AND stole glyphs from the line.
+    copied = (int)utf8FoldToAscii(turnBuf, (size_t)copied);
+    turnBuf[copied] = '\0';
     // Count wrapped lines = ceil(copied / LLM_CHARS), minimum 1 if any chars.
     int lc = (copied + LLM_CHARS - 1) / LLM_CHARS;
     if (lc < 1) lc = 1;
@@ -447,6 +587,9 @@ static void rebuildRenderLines() {
 
     int copied = chatReadTurn(i, 0, turnBuf, sizeof(turnBuf));
     if (copied <= 0) continue;
+    // Must match the fold in the counting pass above exactly.
+    copied = (int)utf8FoldToAscii(turnBuf, (size_t)copied);
+    turnBuf[copied] = '\0';
 
     for (int line = firstWantedLineInTurn;
          line < spans[i].lineCount && emitted < LLM_RENDER_LINES;
@@ -619,6 +762,18 @@ static void displayLLM_chat(bool generating) {
   }
 }
 
+static void displayLLM_menu() {
+  populateMenuPicker();
+  oledScrollRenderSimple(oledDisplay, &sMenuScroll);
+  drawFooter(sMenuStatus ? sMenuStatus : "A: pick  B: back");
+}
+
+static void displayLLM_pickModel() {
+  populateModelPicker();
+  oledScrollRenderSimple(oledDisplay, &sModelScroll);
+  drawFooter(sMenuStatus ? sMenuStatus : "A: load  B: back");
+}
+
 // Guided-menu picker views — refill the level's list, render it single-line, and
 // footer the standard picker hints (or a transient busy status).
 static void displayLLM_pickGroup() {
@@ -657,6 +812,8 @@ static void displayLLM() {
     case LLMUIState::LOADING:       displayLLM_loading();      break;
     case LLMUIState::READY:         displayLLM_chat(false);    break;
     case LLMUIState::GENERATING:    displayLLM_chat(true);     break;
+    case LLMUIState::MENU:          displayLLM_menu();         break;
+    case LLMUIState::PICK_MODEL:    displayLLM_pickModel();    break;
     case LLMUIState::PICK_GROUP:    displayLLM_pickGroup();    break;
     case LLMUIState::PICK_TEMPLATE: displayLLM_pickTemplate(); break;
     case LLMUIState::PICK_ENTITY:   displayLLM_pickEntity();   break;
@@ -693,25 +850,27 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
   switch (sUIState) {
     case LLMUIState::NO_MODEL: {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-        // Push the shared file picker scoped to /system/llm with *.bin filter.
-        // The callback (onLLMModelPicked) handles the actual model load when
-        // the file browser pops back here. (X no longer aliases A — it is now the
-        // guided-menu button, inert here since no model means no menu.)
-        openModelPicker();
+        // A real list over every source, not a file browser: a remote model has
+        // no file on this device and cannot be represented as one.
+        enterPickModel();
         return true;
       }
       return false;  // B falls through to global back-handler
     }
 
     case LLMUIState::LOADING:
-      // llmLoadModel blocks the calling task during weights read, so the
-      // input handler doesn't run while loading. The case is here for
-      // completeness — and so a hypothetical async-load future doesn't
-      // strand keys at this state.
-      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        sUIState = LLMUIState::NO_MODEL;
-        return true;
-      }
+      // The "hypothetical async-load future" this case was written for is here:
+      // a CM5-routed select returns immediately and the host may take tens of
+      // seconds to restart llama-server, so this is now a long-lived state that
+      // the input handler DOES run in.
+      //
+      // The old body could not escape it. Setting NO_MODEL achieved nothing —
+      // syncStateFromEngine re-derives LOADING from the engine on the very next
+      // frame — and returning true swallowed B, so the central dispatcher's
+      // "handler declined and B was pressed" path never ran oledMenuBack() and
+      // the user could not leave the mode at all short of the global Quick
+      // Settings key. Decline B so that back-handler fires.
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) return false;
       return true;
 
     case LLMUIState::GENERATING: {
@@ -733,9 +892,10 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-        // X opens the guided-input menu (spec §8) — only when the loaded model
-        // ships one. Otherwise X is inert (it used to alias A; that alias is gone).
-        if (llmMenuGroupCount() > 0) enterPickGroup();
+        // X opens the action menu, which is where guided questions now live
+        // alongside Switch model / Unload. Previously X went straight to the
+        // guided picker and was inert whenever the model shipped no menu.
+        enterMenu();
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
@@ -763,6 +923,55 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       if (gNavEvents.up)   { sScrollOffset++; return true; }
       if (gNavEvents.down) { if (sScrollOffset > 0) sScrollOffset--; return true; }
       return false;
+    }
+
+    case LLMUIState::MENU: {
+      if (oledScrollHandleNav(&sMenuScroll)) { sMenuStatus = nullptr; return true; }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+        OLEDScrollItem* sel = oledScrollGetSelected(&sMenuScroll);
+        if (!sel) return true;
+        switch ((uintptr_t)sel->userData) {
+          case MENU_ROW_ASK:
+            oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH);
+            sKeyboardActive = true;
+            sUIState = LLMUIState::READY;   // keyboard overlay owns the screen
+            break;
+          case MENU_ROW_GUIDED:
+            if (llmMenuGroupCount() > 0) enterPickGroup();
+            break;
+          case MENU_ROW_MODEL:
+            enterPickModel();
+            break;
+          case MENU_ROW_UNLOAD:
+            llmBackendUnload();
+            sUIState = LLMUIState::NO_MODEL;
+            break;
+          default: break;
+        }
+        return true;
+      }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+        sUIState = LLMUIState::READY;
+        sMenuStatus = nullptr;
+        return true;
+      }
+      return true;   // modal — don't leak keys to the global handlers
+    }
+
+    case LLMUIState::PICK_MODEL: {
+      if (oledScrollHandleNav(&sModelScroll)) { sMenuStatus = nullptr; return true; }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+        commitModelPick();
+        return true;
+      }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+        // Back goes wherever we came from: the chat view if a model is already
+        // live, otherwise the empty-state screen.
+        sUIState = llmBackendIsReady() ? LLMUIState::READY : LLMUIState::NO_MODEL;
+        sMenuStatus = nullptr;
+        return true;
+      }
+      return true;
     }
 
     case LLMUIState::PICK_GROUP: {
@@ -857,7 +1066,7 @@ void resetLLMOLEDState() {
   }
   sPickStatus = nullptr;   // drop any stale guided-picker busy status
   // Snap state to whatever the engine is actually doing right now.
-  LLMStatus st = llmGetStatus();
+  LLMStatus st = llmBackendStatus();
   if (chatIsGenerating())                                sUIState = LLMUIState::GENERATING;
   else if (st.state == LLMState::READY)                  sUIState = LLMUIState::READY;
   else if (st.state == LLMState::LOADING)                sUIState = LLMUIState::LOADING;
@@ -870,7 +1079,7 @@ void resetLLMOLEDState() {
 // ============================================================================
 
 // Entry hook (was an inline reset inside requestOLEDMode, guarded by
-// ENABLE_ONDEVICE_LLM — now owned here, where the whole file is already gated).
+// ENABLE_LLM_SOURCE_ONBOARD — now owned here, where the whole file is already gated).
 static void llmOnEnter(bool /*isForward*/) {
   resetLLMOLEDState();
 }
@@ -892,4 +1101,4 @@ REGISTER_OLED_MODE_MODULE(&sLLMModeEntry, 1, "LLM");
 
 void oledLLMModeInit() {}
 
-#endif // ENABLE_OLED_DISPLAY && ENABLE_ONDEVICE_LLM
+#endif // ENABLE_OLED_DISPLAY && ENABLE_LLM_BACKEND

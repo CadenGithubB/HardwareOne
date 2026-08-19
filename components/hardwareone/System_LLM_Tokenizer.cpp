@@ -3,7 +3,7 @@
  * Extracted verbatim from System_LLM.cpp (no behavioral change).
  */
 #include "System_BuildConfig.h"
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
 
 #include "System_LLM_Tokenizer.h"
 #include "System_LLM_Internal.h"
@@ -408,4 +408,4 @@ const char* decode(int prev_token, int token) {
 }
 
 
-#endif // ENABLE_ONDEVICE_LLM
+#endif // ENABLE_LLM_SOURCE_ONBOARD

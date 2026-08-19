@@ -427,7 +427,7 @@ static void displayR1Ring() {
     oledDisplay->print(i == sR1Sel ? "> " : "  ");
     if (i == 0)      { oledDisplay->print("Connect"); if (conn) oledDisplay->print(" *"); }
     else if (i == 1) oledDisplay->print("Disconnect");
-    else             { oledDisplay->print("AutoRecon "); oledDisplay->print(gBlePeerData[BLE_PEER_R1_RING].autoReconnect ? "ON" : "OFF"); }
+    else             { oledDisplay->print("AutoRecon "); oledDisplay->print(blePeerAutoReconnectEnabled(BLE_PEER_R1_RING) ? "ON" : "OFF"); }
   }
 }
 
@@ -444,7 +444,7 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         if (g2RingIsConnected()) executeOLEDCommand("ringdisconnect");
         break;
       case 2:  // AutoReconnect toggle — dispatch the opposite of the current state
-        executeOLEDCommand(gBlePeerData[BLE_PEER_R1_RING].autoReconnect
+        executeOLEDCommand(blePeerAutoReconnectEnabled(BLE_PEER_R1_RING)
                            ? "bleautoreconnect r1-ring off"
                            : "bleautoreconnect r1-ring on");
         break;

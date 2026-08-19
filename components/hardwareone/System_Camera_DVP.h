@@ -17,6 +17,9 @@
 extern bool gCameraRunning;
 extern bool cameraConnected;
 extern bool cameraStreaming;
+// Sticky: set by initCamera's SCCB probe, never cleared. Answers "is a sensor
+// physically here?" — cameraConnected only answers "is it running right now?".
+extern bool cameraDetected;
 
 // Camera info
 extern const char* cameraModel;
@@ -37,14 +40,16 @@ void stopCamera(bool isRecovery = false);
 // G2 tap path uses *_Async; CLI / web use *_Sync so callers block until done.
 typedef void (*CameraPowerPostHook)(void);
 void cameraPowerSetPostHook(CameraPowerPostHook hook);
-// Spawn cam_pwr task + queue on first power request (idempotent). Not called
-// from G2 init — idle Sense builds keep the ~10 KB stack until opencamera /
-// Sensors CAM ON / equivalent.
-void cameraPowerWorkerEnsureStarted();
+// Spawn cam_pwr task + queue on demand (idempotent). The worker cooperatively
+// retires after its queue has remained drained for an idle interval, so a later
+// request may recreate it. Returns false when either allocation fails.
+bool cameraPowerWorkerEnsureStarted();
 bool cameraPowerRequestStartAsync();
 bool cameraPowerRequestStopAsync();
+// Sync requests use a bounded static completion pool and return false on pool
+// exhaustion, queue/allocation failure, operation failure, or timeout.
 bool cameraPowerRequestStartSync(uint32_t waitMs);
-void cameraPowerRequestStopSync(uint32_t waitMs);
+bool cameraPowerRequestStopSync(uint32_t waitMs);
 bool cameraPowerRequestRestartSync(uint32_t waitMs);
 
 // Capture a single frame (returns JPEG data)

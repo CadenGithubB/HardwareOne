@@ -24,10 +24,12 @@
 #include "System_Settings.h"   // gSettings + setSetting() for MAC persistence
 #include "BLE_Events.h"        // CompactJson + blePushEvent
 #include "BLE_Peers.h"         // peer registry
+#include "Bluetooth.h"         // explicit BLE role/transition ownership
 #include "BLE_CentralTx.h"     // controller-level TX gate (shared with G2)
 #include "G2_Glasses.h"        // g2SetAllTemplesConnPriority, g2WaitForBothConnected
 #if ENABLE_MICROPHONE
-#include "HAL_Audio.h"         // audioCaptureActive/audioGetSource — connect deferral gate
+#include "HAL_Audio.h"         // audioGetSource/audioCaptureOwnedBy — audio arbitration
+#include "System_Microphone.h" // micRecordingBusy — real recording lifecycle
 #endif
 #include "System_R1_Protocol.h"  // R1Encoder + decoder (real wire format)
 #include "System_G2_Protocol.h"  // g2BuildRingRawDataPush + G2RingPushFields
@@ -43,6 +45,10 @@
 #include <freertos/semphr.h>
 #include <string.h>
 #include <ctype.h>
+
+#if !CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+#error "G2/R1 transport slabs require external BSS in PSRAM"
+#endif
 
 // =============================================================================
 // Shared state with the G2 scanner
@@ -61,16 +67,19 @@ volatile bool        gRingScanFound       = false;
 // BLE peer registry binding
 // =============================================================================
 static bool ringPeerConnectSavedThunk() { return g2RingConnectSaved(); }
+static BlePeerConnectAdmission ringPeerConnectSavedAdmissionThunk(
+    const BlePeerConnectRequest& request);
+static bool ringPublishedConnected();
 static void ringPeerDisconnectThunk() {
   // Intentional tear-down (registry / CLI paths that use ops->disconnect).
-  blePeerNoteUserDisconnect(BLE_PEER_R1_RING);
-  g2RingDisconnect();
+  g2RingDisconnect(/*userInitiated=*/true);
 }
-static bool ringPeerIsConnectedThunk()  { return g2RingIsConnected(); }
+static bool ringPeerIsConnectedThunk()  { return ringPublishedConnected(); }
 static const BlePeerOps ringPeerOps = {
   ringPeerConnectSavedThunk,
   ringPeerDisconnectThunk,
   ringPeerIsConnectedThunk,
+  ringPeerConnectSavedAdmissionThunk,
 };
 static const BlePeerSpec ringPeerSpec = {
   BLE_PEER_R1_RING,
@@ -100,10 +109,56 @@ struct G2RingState {
 };
 static G2RingState gRing;
 
+// Fixed, task-level transition fence for final UP versus DOWN publication.
+// It adds no task or stack. Never hold it across BLE/GATT calls, central-TX,
+// or the Ring write mutex.
+static StaticSemaphore_t gRingCompletionMutexStorage;
+static SemaphoreHandle_t gRingCompletionMutex = nullptr;
+static portMUX_TYPE gRingCompletionInitMux = portMUX_INITIALIZER_UNLOCKED;
+static bool gRingUpEventPublished = false;
+
+static SemaphoreHandle_t ringCompletionMutex() {
+  portENTER_CRITICAL(&gRingCompletionInitMux);
+  if (!gRingCompletionMutex) {
+    gRingCompletionMutex =
+        xSemaphoreCreateRecursiveMutexStatic(&gRingCompletionMutexStorage);
+  }
+  SemaphoreHandle_t mutex = gRingCompletionMutex;
+  portEXIT_CRITICAL(&gRingCompletionInitMux);
+  return mutex;
+}
+
+class RingCompletionGuard {
+ public:
+  explicit RingCompletionGuard(TickType_t wait = portMAX_DELAY) {
+    SemaphoreHandle_t mutex = ringCompletionMutex();
+    locked_ = mutex && xSemaphoreTakeRecursive(mutex, wait) == pdTRUE;
+  }
+  ~RingCompletionGuard() {
+    if (locked_) xSemaphoreGiveRecursive(gRingCompletionMutex);
+  }
+  explicit operator bool() const { return locked_; }
+ private:
+  bool locked_ = false;
+};
+
+static bool ringPublishedConnected() {
+  RingCompletionGuard completion;
+  return completion && gRingUpEventPublished;
+}
+
 static constexpr uint32_t RING_CENTRAL_TX_MS = 50;
 static constexpr uint32_t RING_WRITE_MUTEX_MS = 1500;
 static constexpr uint32_t RING_TRANSACTION_TIMEOUT_MS = 5000;
 static constexpr uint32_t RING_SETUP_TIMEOUT_MS = 7000;
+#if ENABLE_MICROPHONE
+// A WAV/EvenAI recording has a hard 60 s capture cap. Keep its already-queued
+// ring job alive through finalization, but bound the wait so a wedged recorder
+// cannot pin the shared BLE-connect worker forever. The full saved-ring path
+// remains below the separate 240 s in-flight watchdog.
+static constexpr uint32_t RING_AUDIO_DEFER_TIMEOUT_MS = 90000;
+static constexpr uint32_t RING_AUDIO_DEFER_POLL_MS = 100;
+#endif
 static constexpr uint32_t RING_OWNER_STACK_BYTES = 6144;
 static constexpr uint8_t  RING_INTENT_QUEUE_DEPTH = 12;
 static constexpr uint8_t  RING_TRANSACTION_HISTORY_DEPTH = 24;
@@ -146,14 +201,11 @@ struct RingIntent {
   uint8_t payloadSlot = 0xFF;
   uint16_t payloadLen = 0;
   uint32_t epoch = 0;
+  int16_t tzMin = 0;   // configured tz (minutes), captured at enqueue for SYNC_TIME
   uint32_t timeoutMs = RING_TRANSACTION_TIMEOUT_MS;
 };
 
 static constexpr uint8_t RING_RAW_PAYLOAD_SLOTS = 4;
-struct RingRawPayloadSlot {
-  bool used;
-  uint8_t bytes[R1_MAX_PAYLOAD];
-};
 
 struct RingActiveTransaction {
   bool valid = false;
@@ -175,6 +227,8 @@ struct RingSetupOwner {
   G2RingSetupState stage = G2_RING_SETUP_IDLE;
   R1Frame frame{};
   uint32_t deadlineMs = 0;
+  uint8_t darkProbesSent = 0;    // in-setup hr/point solicits this ritual (cap 3)
+  uint32_t darkProbeLastMs = 0;  // last solicit attempt, rate-limits retries
 };
 
 struct RingRxFrame {
@@ -185,8 +239,10 @@ struct RingRxFrame {
 
 struct RingPacketAckPending {
   uint32_t generation;
-  R1Decoded received;
+  R1PacketAckDescriptor descriptor;
 };
+static_assert(sizeof(RingPacketAckPending) == 12,
+              "packet ACK queue entries must stay compact");
 
 struct RingActivePacketAck {
   bool valid = false;
@@ -217,14 +273,38 @@ struct RingHistoryCoordinator {
 static RingIntent sIntentQueue[RING_INTENT_QUEUE_DEPTH];
 static uint8_t sIntentQueueHead = 0;
 static uint8_t sIntentQueueCount = 0;
-static RingRawPayloadSlot sRawPayloadSlots[RING_RAW_PAYLOAD_SLOTS];
+// Ownership is transport metadata and remains in internal DRAM. The 1 KiB of
+// raw command payload is task-context data, so place it unconditionally in the
+// configured external-BSS segment. No PSRAM byte is touched while
+// sTransportMux is held.
+static bool sRawPayloadUsed[RING_RAW_PAYLOAD_SLOTS];
+EXT_RAM_BSS_ATTR static uint8_t
+    sRawPayloadBytes[RING_RAW_PAYLOAD_SLOTS][R1_MAX_PAYLOAD];
 static G2RingTransactionStatus sTransactionHistory[RING_TRANSACTION_HISTORY_DEPTH];
 static uint8_t sTransactionCursor = 0;
 static uint32_t sNextTransactionId = 1;
 static portMUX_TYPE sTransportMux = portMUX_INITIALIZER_UNLOCKED;
 
+static constexpr uint8_t RING_RX_SLAB_COUNT = RING_RX_QUEUE_DEPTH + 1;
+static_assert(RING_RX_SLAB_COUNT <= UINT8_MAX,
+              "RX slab indices must fit in a uint8_t queue item");
+enum RingRxSlabState : uint8_t {
+  RING_RX_SLAB_FREE = 0,
+  RING_RX_SLAB_WRITING,
+  RING_RX_SLAB_QUEUED,
+  RING_RX_SLAB_PROCESSING,
+};
+// The FreeRTOS queue carries only slab indices. Its control object, one-byte
+// items, and per-slot ownership state stay in internal DRAM; complete frames
+// live in external BSS. One extra slab preserves the previous capacity of
+// eight queued frames plus one frame being processed by the owner. The
+// callback reserves under sRxSlabMux, fills PSRAM after unlocking, then
+// zero-wait enqueues the index.
+EXT_RAM_BSS_ATTR static RingRxFrame sRxSlabs[RING_RX_SLAB_COUNT];
+static uint8_t sRxSlabState[RING_RX_SLAB_COUNT];
+static portMUX_TYPE sRxSlabMux = portMUX_INITIALIZER_UNLOCKED;
 static StaticQueue_t sRxQueueStorage;
-static uint8_t sRxQueueBytes[RING_RX_QUEUE_DEPTH * sizeof(RingRxFrame)];
+static uint8_t sRxQueueBytes[RING_RX_QUEUE_DEPTH * sizeof(uint8_t)];
 static QueueHandle_t sRxQueue = nullptr;
 static TaskHandle_t sRingOwnerTask = nullptr;
 static SemaphoreHandle_t sSetupDone = nullptr;
@@ -243,6 +323,27 @@ static RingRxFingerprint sRxFingerprints[RING_RX_DUPLICATE_DEPTH];
 static uint8_t sRxFingerprintCursor = 0;
 static volatile uint32_t sRxQueueDropped = 0;
 static G2RingControlStatus sControlStatus;
+
+// Activity-daily is sized for a full 144-slot day (~2.3 KB) — too large for the
+// ring owner task's stack. Every activity parse runs serialized on that task
+// (single-frame validity check, single-frame ingest, and reassembly finalize
+// never overlap), so one PSRAM-backed scratch serves all three.
+EXT_RAM_BSS_ATTR static R1ActivityDailyResult sRingActivityScratch;
+
+// Large ring frames (activity-daily today) exceed one BLE notification and
+// arrive fragmented as [countdown:1][crc32:4][chunk]: countdown decrements to 0
+// on the last fragment, every fragment repeats the whole-model CRC32, and the
+// chunks concatenate into the model (version…payload). We stitch them into
+// sRingReasmBuf, then validate the CRC32 and parse exactly once.
+struct RingReassembly {
+  bool active;
+  uint32_t crc32;         // whole-model CRC32 shared by every fragment
+  uint8_t nextCountdown;  // countdown expected on the next fragment
+  uint32_t generation;    // link generation this session belongs to
+  size_t len;             // model bytes accumulated so far
+};
+static RingReassembly sRingReasm;
+EXT_RAM_BSS_ATTR static uint8_t sRingReasmBuf[R1_ACTIVITY_REASSEMBLED_MODEL_MAX];
 static RingHistoryCoordinator sHistoryCoordinator;
 static bool sHistoryRefreshRequested = false;
 static bool sHistoryRefreshForce = false;
@@ -261,6 +362,204 @@ static void ringClockCustodyReset();
 static void ringWakeOwner() {
   TaskHandle_t owner = sRingOwnerTask;
   if (owner) xTaskNotifyGive(owner);
+}
+
+static int ringReserveRxSlab() {
+  int slot = -1;
+  portENTER_CRITICAL(&sRxSlabMux);
+  for (uint8_t i = 0; i < RING_RX_SLAB_COUNT; ++i) {
+    if (sRxSlabState[i] == RING_RX_SLAB_FREE) {
+      sRxSlabState[i] = RING_RX_SLAB_WRITING;
+      slot = i;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&sRxSlabMux);
+  return slot;
+}
+
+static bool ringPublishRxSlab(uint8_t slot) {
+  if (slot >= RING_RX_SLAB_COUNT) return false;
+  bool publish = false;
+  portENTER_CRITICAL(&sRxSlabMux);
+  if (sRxSlabState[slot] == RING_RX_SLAB_WRITING) {
+    sRxSlabState[slot] = RING_RX_SLAB_QUEUED;
+    publish = true;
+  }
+  portEXIT_CRITICAL(&sRxSlabMux);
+  return publish;
+}
+
+static bool ringClaimQueuedRxSlab(uint8_t slot) {
+  if (slot >= RING_RX_SLAB_COUNT) return false;
+  bool claimed = false;
+  portENTER_CRITICAL(&sRxSlabMux);
+  if (sRxSlabState[slot] == RING_RX_SLAB_QUEUED) {
+    sRxSlabState[slot] = RING_RX_SLAB_PROCESSING;
+    claimed = true;
+  }
+  portEXIT_CRITICAL(&sRxSlabMux);
+  return claimed;
+}
+
+static bool ringRxSlabAllFree() {
+  bool allFree = true;
+  portENTER_CRITICAL(&sRxSlabMux);
+  for (uint8_t i = 0; i < RING_RX_SLAB_COUNT; ++i) {
+    if (sRxSlabState[i] != RING_RX_SLAB_FREE) {
+      allFree = false;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&sRxSlabMux);
+  return allFree;
+}
+
+static void ringReleaseRxSlab(uint8_t slot) {
+  if (slot >= RING_RX_SLAB_COUNT) return;
+  portENTER_CRITICAL(&sRxSlabMux);
+  sRxSlabState[slot] = RING_RX_SLAB_FREE;
+  portEXIT_CRITICAL(&sRxSlabMux);
+}
+
+// Called only while gRing.initialized is false, before any notify callback can
+// be registered. It makes a failed partial init retry deterministic without
+// touching external memory or inventing a disconnect-time ABA reset.
+static void ringResetRxIngressForInit() {
+  if (sRxQueue) xQueueReset(sRxQueue);
+  portENTER_CRITICAL(&sRxSlabMux);
+  memset(sRxSlabState, 0, sizeof(sRxSlabState));
+  portEXIT_CRITICAL(&sRxSlabMux);
+}
+
+static bool ringSnapshotLink(uint32_t& generation) {
+  portENTER_CRITICAL(&sTransportMux);
+  const bool online = sLinkOnline;
+  generation = sLinkGeneration;
+  portEXIT_CRITICAL(&sTransportMux);
+  return online;
+}
+
+static int ringReserveRawPayload(const uint8_t* payload, size_t payloadLen);
+static void ringReleaseRawPayload(uint8_t slot);
+static bool ringRawPayloadOwned(uint8_t slot);
+
+// Exercises the production storage primitives before the BLE callback or
+// owner task can run. This is deliberately hardware-independent: it validates
+// fixed-pool copy/ownership, FIFO publication, queue-full rollback, the ninth
+// processing slab that preserves prior burst capacity, and complete cleanup.
+static bool ringStorageSelfTest() {
+  bool ok = true;
+  if (!sRxQueue) return false;
+  ringResetRxIngressForInit();
+
+  uint8_t rawSource[RING_RAW_PAYLOAD_SLOTS][4]{};
+  int rawSlots[RING_RAW_PAYLOAD_SLOTS] = {-1, -1, -1, -1};
+  for (uint8_t i = 0; i < RING_RAW_PAYLOAD_SLOTS; ++i) {
+    rawSource[i][0] = (uint8_t)(0x40 + i);
+    rawSource[i][1] = (uint8_t)(0x50 + i);
+    rawSlots[i] = ringReserveRawPayload(rawSource[i], sizeof(rawSource[i]));
+    if (rawSlots[i] < 0) {
+      ok = false;
+      continue;
+    }
+    rawSource[i][0] = 0;
+    ok &= sRawPayloadBytes[rawSlots[i]][0] == (uint8_t)(0x40 + i) &&
+          sRawPayloadBytes[rawSlots[i]][1] == (uint8_t)(0x50 + i);
+  }
+  const uint8_t overflowPayload = 0xEE;
+  ok &= ringReserveRawPayload(&overflowPayload, 1) < 0;
+  if (rawSlots[1] >= 0) {
+    ringReleaseRawPayload((uint8_t)rawSlots[1]);
+    rawSlots[1] = ringReserveRawPayload(&overflowPayload, 1);
+    ok &= rawSlots[1] >= 0 &&
+          sRawPayloadBytes[rawSlots[1]][0] == overflowPayload;
+  }
+  for (uint8_t i = 0; i < RING_RAW_PAYLOAD_SLOTS; ++i) {
+    if (rawSlots[i] >= 0) ringReleaseRawPayload((uint8_t)rawSlots[i]);
+  }
+  for (uint8_t i = 0; i < RING_RAW_PAYLOAD_SLOTS; ++i) {
+    ok &= !ringRawPayloadOwned(i);
+  }
+
+  // Fill the depth-eight descriptor queue in FIFO order.
+  for (uint8_t marker = 0; marker < RING_RX_QUEUE_DEPTH; ++marker) {
+    const int reserved = ringReserveRxSlab();
+    if (reserved < 0) {
+      ok = false;
+      break;
+    }
+    const uint8_t slot = (uint8_t)reserved;
+    sRxSlabs[slot].generation = (uint32_t)(10 + marker);
+    sRxSlabs[slot].length = 1;
+    sRxSlabs[slot].bytes[0] = marker;
+    if (!ringPublishRxSlab(slot) ||
+        xQueueSend(sRxQueue, &slot, 0) != pdTRUE) {
+      ringReleaseRxSlab(slot);
+      ok = false;
+      break;
+    }
+  }
+  ok &= uxQueueMessagesWaiting(sRxQueue) == RING_RX_QUEUE_DEPTH;
+
+  // The ninth slab can be filled, but queue publication must fail while all
+  // eight descriptors wait; rollback must make that slot immediately reusable.
+  int reserved = ringReserveRxSlab();
+  ok &= reserved >= 0;
+  if (reserved >= 0) {
+    const uint8_t overflowSlot = (uint8_t)reserved;
+    sRxSlabs[overflowSlot].generation = 99;
+    sRxSlabs[overflowSlot].length = 1;
+    sRxSlabs[overflowSlot].bytes[0] = 0xFE;
+    const bool published = ringPublishRxSlab(overflowSlot);
+    ok &= published && xQueueSend(sRxQueue, &overflowSlot, 0) != pdTRUE;
+    ringReleaseRxSlab(overflowSlot);
+  }
+
+  // Hold the oldest slab in PROCESSING while refilling its queue position.
+  uint8_t processingSlot = UINT8_MAX;
+  ok &= xQueueReceive(sRxQueue, &processingSlot, 0) == pdTRUE;
+  ok &= ringClaimQueuedRxSlab(processingSlot);
+  if (processingSlot < RING_RX_SLAB_COUNT) {
+    ok &= sRxSlabs[processingSlot].bytes[0] == 0 &&
+          sRxSlabs[processingSlot].generation == 10;
+  }
+  reserved = ringReserveRxSlab();
+  ok &= reserved >= 0;
+  if (reserved >= 0) {
+    const uint8_t refillSlot = (uint8_t)reserved;
+    sRxSlabs[refillSlot].generation = 18;
+    sRxSlabs[refillSlot].length = 1;
+    sRxSlabs[refillSlot].bytes[0] = 8;
+    if (!ringPublishRxSlab(refillSlot) ||
+        xQueueSend(sRxQueue, &refillSlot, 0) != pdTRUE) {
+      ringReleaseRxSlab(refillSlot);
+      ok = false;
+    }
+  }
+  ok &= ringReserveRxSlab() < 0;
+  if (processingSlot < RING_RX_SLAB_COUNT) ringReleaseRxSlab(processingSlot);
+
+  for (uint8_t expected = 1; expected <= 8; ++expected) {
+    uint8_t slot = UINT8_MAX;
+    ok &= xQueueReceive(sRxQueue, &slot, 0) == pdTRUE;
+    if (slot >= RING_RX_SLAB_COUNT || !ringClaimQueuedRxSlab(slot)) {
+      ok = false;
+      continue;
+    }
+    ok &= sRxSlabs[slot].bytes[0] == expected &&
+          sRxSlabs[slot].generation == (uint32_t)(10 + expected);
+    ringReleaseRxSlab(slot);
+  }
+  ok &= uxQueueMessagesWaiting(sRxQueue) == 0 && ringRxSlabAllFree();
+
+  // Leave retryable init in a known-empty state even when an assertion fails.
+  ringResetRxIngressForInit();
+  for (uint8_t i = 0; i < RING_RAW_PAYLOAD_SLOTS; ++i) {
+    ringReleaseRawPayload(i);
+  }
+  DEBUG_RING_LIFECYCLEF("[RING] Storage self-test: %s", ok ? "PASS" : "FAIL");
+  return ok;
 }
 
 static G2RingTransactionStatus* ringFindTransactionLocked(
@@ -323,33 +622,45 @@ static int ringReserveRawPayload(const uint8_t* payload, size_t payloadLen) {
   int slot = -1;
   portENTER_CRITICAL(&sTransportMux);
   for (uint8_t i = 0; i < RING_RAW_PAYLOAD_SLOTS; ++i) {
-    if (!sRawPayloadSlots[i].used) {
-      sRawPayloadSlots[i].used = true;
+    if (!sRawPayloadUsed[i]) {
+      sRawPayloadUsed[i] = true;
       slot = i;
       break;
     }
   }
   portEXIT_CRITICAL(&sTransportMux);
-  if (slot >= 0) memcpy(sRawPayloadSlots[slot].bytes, payload, payloadLen);
+  if (slot >= 0) memcpy(sRawPayloadBytes[slot], payload, payloadLen);
   return slot;
 }
 
 static void ringReleaseRawPayload(uint8_t slot) {
   if (slot >= RING_RAW_PAYLOAD_SLOTS) return;
   portENTER_CRITICAL(&sTransportMux);
-  sRawPayloadSlots[slot].used = false;
+  sRawPayloadUsed[slot] = false;
   portEXIT_CRITICAL(&sTransportMux);
+}
+
+static bool ringRawPayloadOwned(uint8_t slot) {
+  if (slot >= RING_RAW_PAYLOAD_SLOTS) return false;
+  portENTER_CRITICAL(&sTransportMux);
+  const bool owned = sRawPayloadUsed[slot];
+  portEXIT_CRITICAL(&sTransportMux);
+  return owned;
 }
 
 static bool ringEnqueueIntent(RingIntent intent,
                               G2RingTransactionHandle* outHandle = nullptr,
                               bool wakeOwner = true) {
   if (outHandle) *outHandle = G2RingTransactionHandle{};
-  if (!sLinkOnline || !gRing.connected || !gRing.writeChar || gRing.clientStale) {
+  if (!gRing.connected || !gRing.writeChar || gRing.clientStale) {
     return false;
   }
 
   portENTER_CRITICAL(&sTransportMux);
+  if (!sLinkOnline) {
+    portEXIT_CRITICAL(&sTransportMux);
+    return false;
+  }
   const uint32_t generation = sLinkGeneration;
   if (intent.coalesceKey != 0) {
     for (uint8_t i = 0; i < sIntentQueueCount; ++i) {
@@ -420,7 +731,7 @@ static void ringMarkGenerationDisconnected(uint32_t generation) {
     const RingIntent intent = sIntentQueue[readIndex];
     if (intent.handle.generation == generation) {
       if (intent.payloadSlot < RING_RAW_PAYLOAD_SLOTS) {
-        sRawPayloadSlots[intent.payloadSlot].used = false;
+        sRawPayloadUsed[intent.payloadSlot] = false;
       }
       continue;
     }
@@ -445,7 +756,9 @@ static void ringMarkGenerationDisconnected(uint32_t generation) {
 }
 
 static void ringTransportDisconnected() {
+  portENTER_CRITICAL(&sTransportMux);
   sLinkOnline = false;
+  portEXIT_CRITICAL(&sTransportMux);
   ringWakeOwner();
 }
 
@@ -585,6 +898,8 @@ static bool ringEnqueueSystemQuery(uint8_t subCmd, uint8_t coalesceKey,
   return ringEnqueueIntent(intent, outHandle);
 }
 
+static bool ringConfiguredTimezoneMinutes(int16_t& out);  // defined just below
+
 static bool ringEnqueueTimeSync(uint32_t epoch,
                                 G2RingTransactionHandle* outHandle = nullptr) {
   RingIntent intent{};
@@ -594,6 +909,10 @@ static bool ringEnqueueTimeSync(uint32_t epoch,
   intent.subCmd = R1_SUB_SYSTEM_TIME;
   intent.statusMethod = R1_STATUS_METHOD_SET;
   intent.epoch = epoch;
+  // Capture the configured tz alongside the epoch so the frame the owner task
+  // later builds carries THIS instant's offset, and completion records exactly
+  // what was sent — the tick keys tz-change re-pushes off that recorded value.
+  if (!ringConfiguredTimezoneMinutes(intent.tzMin)) return false;
   return ringEnqueueIntent(intent, outHandle);
 }
 
@@ -759,11 +1078,6 @@ bool g2RingRequestHistoryRefresh(bool force) {
   return true;
 }
 
-// Runtime verbose flag — toggle with `ringverbose on/off` if we ever need
-// to silence the byte-dump once we've characterised the stream. Default is
-// on because we're still learning what the ring emits.
-static bool gRingDumpVerbose = true;
-
 // =============================================================================
 // Telemetry cache — what we've decoded from ring notify frames so far
 // =============================================================================
@@ -841,11 +1155,16 @@ static int32_t ringSampleAgeSec(uint32_t ringTs, uint32_t rxMs) {
 // only ever holds what some synced host once pushed into it — but that is
 // exactly what a DS3231 with a coin cell is, too. Two rules keep the chain
 // alive:
-//   1. NEVER overwrite the ring's clock with a dark epoch. The connect
+//   1. NEVER overwrite a GOOD ring clock with a dark epoch. The connect
 //      ritual's systemTime frame is mandatory (RE'd sequence — frames are
-//      not dropped from it), so when the host is dark, setup waits a bounded
-//      window for g2RingTimeSyncTick() to adopt the ring's time first; the
-//      frame then echoes the ring's own clock back at it.
+//      not dropped from it), so when the host is dark the TIME stage holds
+//      while the setup owner itself solicits an hr/point (the ring
+//      volunteers no timestamps unpolled, and the tick's own solicit is
+//      gated on setup being finished). A plausible stamp is adopted by
+//      g2RingTimeSyncTick() and echoed back; a pre-2020 stamp proves the
+//      ring is dark too, so the ritual completes with our dark epoch
+//      (nothing to protect, keep the link); only a SILENT ring fails
+//      closed with clock-unavailable.
 //   2. Whenever the host clock disagrees with what the ring was last told
 //      by more than 2 minutes, send a corrective systemTime. This covers
 //      the dark push corrected by NTP, an adoption-echo (which carries the
@@ -856,6 +1175,7 @@ static int32_t ringSampleAgeSec(uint32_t ringTs, uint32_t rxMs) {
 static volatile bool sRingSetupDone        = false;  // standard setup finished this link
 static volatile uint32_t sLastPushedEpoch  = 0;      // epoch of the last systemTime SET (0 = none yet)
 static volatile uint32_t sLastPushedAtMs   = 0;      // millis() when that SET was written
+static volatile int16_t  sLastPushedTzMin  = INT16_MIN;  // tz (minutes) last SET (sentinel = none)
 static volatile uint8_t sDarkProbesSent    = 0;      // post-setup hr/point solicits this link (cap 3)
 // Adoption is once per boot. Without this, a user who deliberately sets a
 // pre-2020 clock (`timeset 1999-…`, which leaves Clock::isSynced() false)
@@ -871,6 +1191,7 @@ static void ringClockCustodyReset() {
   sRingSetupDone   = false;
   sLastPushedEpoch = 0;
   sLastPushedAtMs  = 0;
+  sLastPushedTzMin = INT16_MIN;
   sDarkProbesSent  = 0;
   sRingTsSeen      = 0;
   sRingTsSeenRxMs  = 0;
@@ -933,7 +1254,7 @@ static bool ringAdoptClockIfDark(void) {
   if (localtime_r(&adopted, &tmNow)) {
     strftime(tsStr, sizeof(tsStr), "%Y-%m-%d %H:%M", &tmNow);
   }
-  BROADCAST_PRINTF("[RING] Adopted ring clock: %s (no local time source)", tsStr);
+  INFO_RINGF("Adopted ring clock: %s (no local time source)", tsStr);
 
   Clock::clockStepped(Clock::SYNC_RING, before);
   return true;
@@ -957,7 +1278,7 @@ void g2RingTimeSyncTick(void) {
     static uint32_t sProbeMs = 0;
     if (everyMs(&sProbeMs, 5000) && g2RingPollVital(0)) {
       sDarkProbesSent = (uint8_t)(sDarkProbesSent + 1);
-      DEBUG_G2F("[RING] dark-clock: TX hr/point solicit %u/3",
+      DEBUG_RING_SETUPF("[RING] dark-clock: TX hr/point solicit %u/3",
                 (unsigned)sDarkProbesSent);
     }
   }
@@ -974,7 +1295,13 @@ void g2RingTimeSyncTick(void) {
         (int64_t)(((uint32_t)millis() - pushedAtMs) / 1000u);
     int64_t drift = (int64_t)now - expected;
     if (drift < 0) drift = -drift;
-    if (pushedEpoch == 0 || drift > 120) {
+    // Also re-push when the configured timezone changed since the ring was last
+    // told: the R1 keys its local daily pages off this offset, and a pure tz
+    // edit never moves the epoch, so the drift test alone can't catch it.
+    int16_t tzMin = 0;
+    const bool tzChanged =
+        ringConfiguredTimezoneMinutes(tzMin) && tzMin != sLastPushedTzMin;
+    if (pushedEpoch == 0 || drift > 120 || tzChanged) {
       static G2RingTransactionHandle pending{};
       if (pending.id != 0) {
         G2RingTransactionStatus status{};
@@ -985,9 +1312,11 @@ void g2RingTimeSyncTick(void) {
         pending = G2RingTransactionHandle{};
       }
       if (ringEnqueueTimeSync((uint32_t)now, &pending)) {
-        DEBUG_G2F("[RING] queued corrective systemTime epoch=%lu drift=%llds tx=%lu",
+        DEBUG_RING_SETUPF("[RING] queued corrective systemTime epoch=%lu drift=%llds "
+                  "tz=%d->%d tx=%lu",
                   (unsigned long)now,
                   (long long)(pushedEpoch == 0 ? 0 : drift),
+                  (int)sLastPushedTzMin, (int)tzMin,
                   (unsigned long)pending.id);
       }
     }
@@ -1015,9 +1344,69 @@ static volatile bool  gRingConnectTaskActive = false;
 // out around 53s (20s glasses wait + 3s settle + ~30s connect timeout);
 // anything much past that means the worker is stuck.
 static volatile uint32_t gRingConnectTaskSinceMs = 0;
+static portMUX_TYPE gRingConnectMux = portMUX_INITIALIZER_UNLOCKED;
+// Every Ring central job carries the generation it was admitted under.
+// Explicit disconnect/stack teardown advances it before touching the link,
+// fencing queued and in-flight manual jobs as well as scheduler requests.
+static uint32_t gRingConnectCancelGeneration = 1;
+static bool gRingDisconnecting = false;
 
-void g2RingConnectMarkComplete() { gRingConnectTaskActive = false; }
-bool g2RingConnectInFlight()     { return gRingConnectTaskActive; }
+static uint32_t ringConnectCancelGenerationSnapshot() {
+  portENTER_CRITICAL(&gRingConnectMux);
+  const uint32_t generation = gRingConnectCancelGeneration;
+  portEXIT_CRITICAL(&gRingConnectMux);
+  return generation;
+}
+
+static bool ringConnectGenerationCurrent(uint32_t expected) {
+  if (expected == 0) return false;
+  portENTER_CRITICAL(&gRingConnectMux);
+  const bool current = expected == gRingConnectCancelGeneration;
+  portEXIT_CRITICAL(&gRingConnectMux);
+  return current;
+}
+
+// Caller holds RingCompletionGuard. Keep the task-level mutex outside this
+// brief spinlock so cancel generation, scheduler commit, and event publication
+// are one ordered transaction.
+static void ringConnectCancelAdvanceLocked() {
+  portENTER_CRITICAL(&gRingConnectMux);
+  ++gRingConnectCancelGeneration;
+  if (gRingConnectCancelGeneration == 0) gRingConnectCancelGeneration = 1;
+  portEXIT_CRITICAL(&gRingConnectMux);
+}
+
+static void ringCopyAddressText(
+    char (&dst)[BLE_PEER_ADDRESS_TEXT_CAPACITY], const char* src) {
+  memset(dst, 0, sizeof(dst));
+  if (src) strncpy(dst, src, sizeof(dst) - 1);
+}
+
+static void ringRequestToJob(const BlePeerConnectRequest& request,
+                             BleConnectJob& job) {
+  job.peerIntentGeneration = request.intentGeneration;
+  job.peerIdentityGeneration = request.identityGeneration;
+  job.peerAutoReconnect = request.autoReconnect;
+  job.peerExplicitReseek = request.explicitReseek;
+  ringCopyAddressText(job.mac, request.savedTarget.mac1);
+  ringCopyAddressText(job.mac2, request.savedTarget.mac2);
+  job.addressType1 = request.savedTarget.addressType1;
+  job.addressType2 = request.savedTarget.addressType2;
+  job.addressType1Known = request.savedTarget.addressType1Known;
+  job.addressType2Known = request.savedTarget.addressType2Known;
+}
+
+void g2RingConnectMarkComplete() {
+  portENTER_CRITICAL(&gRingConnectMux);
+  gRingConnectTaskActive = false;
+  portEXIT_CRITICAL(&gRingConnectMux);
+}
+bool g2RingConnectInFlight() {
+  portENTER_CRITICAL(&gRingConnectMux);
+  const bool active = gRingConnectTaskActive;
+  portEXIT_CRITICAL(&gRingConnectMux);
+  return active;
+}
 
 // Failed-connect visibility. Every failure broadcasts on regular output, but
 // the persisted bus event is throttled to the first failure of a streak plus
@@ -1040,31 +1429,42 @@ static void ringNoteConnectFailure(const char* reason, uint32_t elapsedMs) {
 }
 
 // Gate shared by the three public connect entry points. Returns true when
-// clear to submit. Rejects while an attempt is in flight — but past the
-// watchdog bound it assumes the worker lost its completion path, clears the
-// flag loudly, and lets this attempt proceed. 240s is well beyond the worst
-// legitimate job (20s glasses wait + 3s settle + 35s connect + 30s discovery
-// + bounded subscribe/setup ≈ 100s). ringPerformConnect's already-connected
-// guard makes a duplicate queued job harmless; if the worker is genuinely
-// dead the queue backs up at depth 4 and submit failures surface it.
-static bool ringConnectGateOpen() {
-  if (!gRingConnectTaskActive) return true;
-  const uint32_t inflightS = (millis() - gRingConnectTaskSinceMs) / 1000;
-  if (inflightS > 240) {
-    BROADCAST_PRINTF("[RING] WATCHDOG: connect attempt stuck for %lus — "
-                     "clearing in-flight flag and retrying",
-                     (unsigned long)inflightS);
+// clear to submit. It never clears an in-flight flag beneath a live job: a
+// duplicate create-connection is exactly the failure this coordinator exists
+// to prevent. 360s covers the public 300s manual scan plus scheduling jitter;
+// an overdue job is reported as reboot-required if it cannot finish safely.
+static bool ringConnectGateOpen(uint32_t* generationOut) {
+  if (generationOut) *generationOut = 0;
+  if (!isG2ClientInitialized() || isBleServerInitialized() ||
+      bleRoleTransitionState() != BleRoleTransition::IDLE) {
+    DEBUG_RING_LIFECYCLEF("[RING] Connect deferred: G2 central role is not ready");
+    return false;
+  }
+  portENTER_CRITICAL(&gRingConnectMux);
+  if (!gRingConnectTaskActive && !gRingDisconnecting) {
+    gRingConnectTaskActive = true;
+    gRingConnectTaskSinceMs = millis();
+    if (generationOut) *generationOut = gRingConnectCancelGeneration;
+    portEXIT_CRITICAL(&gRingConnectMux);
+    return true;
+  }
+  const uint32_t since = gRingConnectTaskSinceMs;
+  portEXIT_CRITICAL(&gRingConnectMux);
+  const uint32_t inflightS = (millis() - since) / 1000;
+  if (inflightS > 360) {
+    WARN_RINGF("WATCHDOG: central job stuck for %lus — "
+               "duplicate admission blocked; reboot may be required",
+               (unsigned long)inflightS);
     char d[40];
-    snprintf(d, sizeof(d), "watchdog clear after %lus",
+    snprintf(d, sizeof(d), "watchdog blocked after %lus",
              (unsigned long)inflightS);
     systemEventPost(SYSEVT_RING_RECONNECT_FAILED,
                     gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
                     d);
-    gRingConnectTaskActive = false;
-    return true;
+    return false;
   }
-  BROADCAST_PRINTF("[RING] Connect skipped — attempt already in flight (%lus)",
-                   (unsigned long)inflightS);
+  WARN_RINGF("Connect skipped — attempt already in flight (%lus)",
+             (unsigned long)inflightS);
   if (inflightS > 120) ringNoteConnectFailure("stuck", inflightS * 1000);
   return false;
 }
@@ -1098,6 +1498,44 @@ static void ringPushStatusEvent(const char* reason) {
    .kv("s",  gRingScanFound ? "found" : "not-found")
    .kv("w",  reason ? reason : "");
   blePushEvent("ring-status", j);
+}
+
+struct RingDownTransition {
+  bool wasConnected = false;
+  bool downEventPublished = false;
+};
+
+// Completion mutex is outermost; no BLE method or TX/write lock is used here.
+// Callers may physically disconnect and clear GATT pointers only after return.
+static RingDownTransition ringBeginLogicalDown(
+    const char* reason, bool userInitiated = false) {
+  RingDownTransition transition;
+  RingCompletionGuard completion;
+  if (!completion) return transition;
+
+  if (userInitiated) blePeerNoteUserDisconnect(BLE_PEER_R1_RING);
+  ringConnectCancelAdvanceLocked();
+  transition.wasConnected = gRing.connected;
+  ringTransportDisconnected();
+  gRing.connected = false;
+  transition.downEventPublished = gRingUpEventPublished;
+  gRingUpEventPublished = false;
+  if (transition.downEventPublished) {
+    WARN_RINGF("Dropped BLE link — ring is no longer connected");
+    ringPushStatusEvent(reason ? reason : "disconnect");
+    systemEventPost(
+        SYSEVT_RING_DISCONNECTED,
+        gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
+        gRingDeviceAddress.length() > 0 ? gRingDeviceAddress.c_str() : nullptr);
+    sRingWearPosted = 0;
+    blePeerNoteLinkLost(BLE_PEER_R1_RING);
+  } else if (transition.wasConnected) {
+    // Setup may have made the transport usable before final UP publication.
+    // Surface the live status change, but never emit a durable DOWN without a
+    // corresponding published UP.
+    ringPushStatusEvent(reason ? reason : "disconnect");
+  }
+  return transition;
 }
 
 // =============================================================================
@@ -1206,9 +1644,11 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
   // reach this path successfully.
   if (d.module == R1_MODULE_HEALTH && d.subCmd == R1_SUB_DAILY &&
       d.cmd == R1_CMD_ACTIVITY) {
-    R1ActivityDailyResult daily{};
-    if (r1ParseActivityDaily(sR1Profile, d, daily) == R1_PARSE_OK) {
-      (void)g2HealthApplyActivityDaily(daily);
+    // Single-frame activity (<=35 slots). Larger days arrive fragmented and are
+    // ingested by the reassembly finalize instead. Parse into the shared PSRAM
+    // scratch to keep the full-day-sized result off this task's stack.
+    if (r1ParseActivityDaily(sR1Profile, d, sRingActivityScratch) == R1_PARSE_OK) {
+      (void)g2HealthApplyActivityDaily(sRingActivityScratch);
     }
     return;
   }
@@ -1430,7 +1870,7 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
     }
   }
 
-  DEBUG_G2F("[RING] cache (forwarded) batt=%s%u hr=%s%u hrv=%s%d spo2=%s%u temp=%s%d",
+  DEBUG_RING_HEALTHF("[RING] cache (forwarded) batt=%s%u hr=%s%u hrv=%s%d spo2=%s%u temp=%s%d",
             gR1Cache.batteryValid ? "" : "?", (unsigned)gR1Cache.battery,
             gR1Cache.hrValid      ? "" : "?", (unsigned)gR1Cache.hr,
             gR1Cache.hrvValid     ? "" : "?", (int)gR1Cache.hrv,
@@ -1483,7 +1923,7 @@ static void ringFinishSetup(bool success, uint8_t error) {
   ringSetSetupState(success ? G2_RING_SETUP_READY : G2_RING_SETUP_ERROR,
                     success ? (uint8_t)G2_RING_ERR_NONE : error);
   if (sSetupDone) xSemaphoreGive(sSetupDone);
-  DEBUG_G2F("[RING] setup %s profile=%s error=%s",
+  DEBUG_RING_SETUPF("[RING] setup %s profile=%s error=%s",
             success ? "ready" : "failed",
             r1ProtocolProfileName(sR1Profile),
             g2RingTransactionErrorName(error));
@@ -1553,29 +1993,36 @@ static bool ringRememberRx(const R1Decoded& d, uint32_t generation) {
   return true;
 }
 
-static void ringQueuePacketAck(const R1Decoded& d, uint32_t generation) {
-  // The profile-aware encoder performs the final eligibility gate. Avoid
-  // duplicate pending entries while still ACKing a retransmit after its prior
-  // ACK has left this reserved lane.
+static void ringQueuePacketAck(const R1PacketAckDescriptor& descriptor,
+                               uint32_t generation) {
+  // Only the protocol factory can stamp this descriptor, after validating the
+  // complete decoded frame. Avoid duplicate pending entries while still ACKing
+  // a retransmit after its prior ACK has left this reserved lane.
+  if (!descriptor.valid()) return;
   for (uint8_t i = 0; i < sPacketAckCount; ++i) {
     const RingPacketAckPending& pending = sPacketAckQueue[i];
     if (pending.generation == generation &&
-        pending.received.serial == d.serial &&
-        pending.received.module == d.module && pending.received.cmd == d.cmd &&
-        pending.received.subCmd == d.subCmd) return;
+        pending.descriptor.receivedSerial() == descriptor.receivedSerial() &&
+        pending.descriptor.module() == descriptor.module() &&
+        pending.descriptor.cmd() == descriptor.cmd() &&
+        pending.descriptor.subCmd() == descriptor.subCmd()) return;
   }
   if (sActivePacketAck.valid &&
       sActivePacketAck.pending.generation == generation &&
-      sActivePacketAck.pending.received.serial == d.serial &&
-      sActivePacketAck.pending.received.module == d.module &&
-      sActivePacketAck.pending.received.cmd == d.cmd &&
-      sActivePacketAck.pending.received.subCmd == d.subCmd) return;
-  if (sPacketAckCount >= RING_PACKET_ACK_DEPTH) {
-    DEBUG_G2F("[RING] packetAck lane full; RX ser=%u left unacked",
-              (unsigned)d.serial);
+      sActivePacketAck.pending.descriptor.receivedSerial() ==
+          descriptor.receivedSerial() &&
+      sActivePacketAck.pending.descriptor.module() == descriptor.module() &&
+      sActivePacketAck.pending.descriptor.cmd() == descriptor.cmd() &&
+      sActivePacketAck.pending.descriptor.subCmd() == descriptor.subCmd()) {
     return;
   }
-  sPacketAckQueue[sPacketAckCount++] = RingPacketAckPending{generation, d};
+  if (sPacketAckCount >= RING_PACKET_ACK_DEPTH) {
+    DEBUG_RING_PROTOCOLF("[RING] packetAck lane full; RX ser=%u left unacked",
+              (unsigned)descriptor.receivedSerial());
+    return;
+  }
+  sPacketAckQueue[sPacketAckCount++] =
+      RingPacketAckPending{generation, descriptor};
 }
 
 static bool ringApplyControlObservation(const R1Decoded& d,
@@ -1636,7 +2083,7 @@ static void ringHandleSetupRx(const R1Decoded& d) {
     sControlStatus.protocolProfile = ringPublicProfile(sR1Profile);
     sControlStatus.protocolProfileKnown = sR1Profile != R1_PROFILE_UNKNOWN;
     portEXIT_CRITICAL(&sTransportMux);
-    DEBUG_G2F("[RING] deviceInfo fw='%s' hw='%s' profile=%s",
+    DEBUG_RING_SETUPF("[RING] deviceInfo fw='%s' hw='%s' profile=%s",
               info.firmware, info.hardware, r1ProtocolProfileName(sR1Profile));
     if (sR1Profile == R1_PROFILE_UNKNOWN) {
       ringFinishSetup(false, G2_RING_ERR_PROFILE_UNKNOWN);
@@ -1670,8 +2117,9 @@ static bool ringDailyPayloadValid(const R1Decoded& d) {
     return r1ParseHrvDaily(sR1Profile, d, result) == R1_PARSE_OK;
   }
   if (d.cmd == R1_CMD_ACTIVITY) {
-    R1ActivityDailyResult result{};
-    return r1ParseActivityDaily(sR1Profile, d, result) == R1_PARSE_OK;
+    // Serialized on the ring owner task; reuses the shared PSRAM scratch (the
+    // parsed value is discarded — only the OK/rejected verdict is needed here).
+    return r1ParseActivityDaily(sR1Profile, d, sRingActivityScratch) == R1_PARSE_OK;
   }
   if (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_SPO2) {
     R1CommonDailyResult result{};
@@ -1761,9 +2209,151 @@ static void ringHandleActiveRx(const R1Decoded& d,
   ringCompleteActive(G2_RING_TX_VERIFIED);
 }
 
+static void ringReasmReset(void) {
+  sRingReasm.active = false;
+  sRingReasm.crc32 = 0;
+  sRingReasm.nextCountdown = 0;
+  sRingReasm.generation = 0;
+  sRingReasm.len = 0;
+}
+
+// Complete the in-flight history-sweep transaction for an activity-daily NOTIFY
+// proven via reassembly. The normal ringHandleActiveRx path never sees it (the
+// fragments don't decode as single frames), so mirror its verified-payload tail
+// for the independent-daily-data case: the command ACK already advanced the
+// transaction to ACKED, and proving the payload arrived marks it VERIFIED so the
+// sweep advances instead of timing out.
+static void ringCompleteReassembledDaily(uint8_t moduleId, uint8_t cmd,
+                                         uint8_t subCmd) {
+  if (!sActiveTransaction.valid || !sActiveTransaction.written ||
+      sActiveTransaction.intent.handle.generation != sLinkGeneration) return;
+  const RingIntent& intent = sActiveTransaction.intent;
+  if (intent.module != moduleId || intent.cmd != cmd ||
+      intent.subCmd != subCmd) return;
+  if (!sActiveTransaction.commandAcked || !intent.expectsPayload) return;
+  ringCompleteActive(G2_RING_TX_VERIFIED);
+}
+
+// Validate + ingest a fully stitched activity-daily model.
+static void ringReasmFinalize(uint32_t generation) {
+  const R1ParseError e = r1ParseReassembledActivityDaily(
+      sR1Profile, sRingReasmBuf, sRingReasm.len, sRingReasm.crc32,
+      sRingActivityScratch);
+  if (e != R1_PARSE_OK) {
+    // Wire-RE diagnostics: the fragment framing is reverse-engineered, so on
+    // rejection show how the stitched length/CRC compare to the header's
+    // declared model. `declared` should equal the model size; `crc@declared`
+    // and `crc@accum` bracket where a padding/off-by-one byte would land.
+    const size_t declared = sRingReasm.len >= 10
+        ? ((size_t)sRingReasmBuf[8] | ((size_t)sRingReasmBuf[9] << 8)) : 0;
+    const uint32_t crcDeclared = (declared >= 12 && declared <= sRingReasm.len)
+        ? r1Crc32(sRingReasmBuf, declared) : 0;
+    const uint32_t crcAccum = r1Crc32(sRingReasmBuf, sRingReasm.len);
+    DEBUG_RING_PROTOCOLF("[RING] reasm activity/daily rejected: %s accum=%u declared=%u "
+              "hdrCrc=%08lX crc@declared=%08lX crc@accum=%08lX hdr=[%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X]",
+              r1ParseErrorName(e), (unsigned)sRingReasm.len, (unsigned)declared,
+              (unsigned long)sRingReasm.crc32, (unsigned long)crcDeclared,
+              (unsigned long)crcAccum,
+              sRingReasmBuf[0], sRingReasmBuf[1], sRingReasmBuf[2],
+              sRingReasmBuf[3], sRingReasmBuf[4], sRingReasmBuf[5],
+              sRingReasmBuf[6], sRingReasmBuf[7], sRingReasmBuf[8],
+              sRingReasmBuf[9]);
+    return;
+  }
+  DEBUG_RING_PROTOCOLF("[RING] reasm activity/daily OK: count=%u ser=%u (%u B model)",
+            (unsigned)sRingActivityScratch.count,
+            (unsigned)sRingActivityScratch.sourceSerial,
+            (unsigned)sRingReasm.len);
+  (void)g2HealthApplyActivityDaily(sRingActivityScratch);
+  // Flow control: the ring expects a packetAck for each accepted daily NOTIFY.
+  R1PacketAckDescriptor descriptor;
+  if (r1MakeDailyPacketAckDescriptor(sR1Profile,
+                                     sRingActivityScratch.sourceSerial,
+                                     R1_CMD_ACTIVITY, descriptor)) {
+    ringQueuePacketAck(descriptor, generation);
+  }
+  ringCompleteReassembledDaily(R1_MODULE_HEALTH, R1_CMD_ACTIVITY, R1_SUB_DAILY);
+}
+
+// Feed one inbound frame to the fragment reassembler. Returns true when the
+// frame was consumed as a fragment (the caller must NOT also treat it as a
+// standalone frame); false for an ordinary single-notification frame.
+static bool ringReasmConsume(const uint8_t* data, size_t len,
+                             uint32_t generation) {
+  if (!data || len < 5) return false;  // too short to carry [countdown][crc32]
+  const uint8_t countdown = data[0];
+  const uint32_t crc32 = (uint32_t)data[1] | ((uint32_t)data[2] << 8) |
+                         ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
+  const uint8_t* chunk = data + 5;
+  const size_t chunkLen = len - 5;
+
+  auto append = [&](void) -> bool {
+    if (sRingReasm.len + chunkLen > sizeof(sRingReasmBuf)) {
+      DEBUG_RING_PROTOCOLF("[RING] reasm overflow (%u+%u > %u) — abandoned",
+                (unsigned)sRingReasm.len, (unsigned)chunkLen,
+                (unsigned)sizeof(sRingReasmBuf));
+      ringReasmReset();
+      return false;
+    }
+    memcpy(sRingReasmBuf + sRingReasm.len, chunk, chunkLen);
+    sRingReasm.len += chunkLen;
+    return true;
+  };
+
+  if (sRingReasm.active) {
+    const bool continues = crc32 == sRingReasm.crc32 &&
+                           countdown == sRingReasm.nextCountdown &&
+                           generation == sRingReasm.generation;
+    if (continues) {
+      DEBUG_RING_PROTOCOLF("[RING] reasm frag cont cd=%u crc=%08lX chunk=%u [%02X %02X %02X %02X] (total=%u)",
+                (unsigned)countdown, (unsigned long)crc32, (unsigned)chunkLen,
+                chunk[0], chunkLen > 1 ? chunk[1] : 0,
+                chunkLen > 2 ? chunk[2] : 0, chunkLen > 3 ? chunk[3] : 0,
+                (unsigned)(sRingReasm.len + chunkLen));
+      if (!append()) return true;  // overflow already reset; frame consumed
+      if (countdown == 0) {
+        ringReasmFinalize(generation);
+        ringReasmReset();
+      } else {
+        sRingReasm.nextCountdown = (uint8_t)(countdown - 1);
+      }
+      return true;
+    }
+    // Desync: a lost, interleaved, or mismatched fragment. Abandon this session
+    // and re-evaluate the current frame from scratch below.
+    DEBUG_RING_PROTOCOLF("[RING] reasm desync (want cd=%u crc=%08lX; got cd=%u crc=%08lX) — abandoned",
+              (unsigned)sRingReasm.nextCountdown,
+              (unsigned long)sRingReasm.crc32, (unsigned)countdown,
+              (unsigned long)crc32);
+    ringReasmReset();
+  }
+
+  // A standalone frame carries transferType 0. Only countdown > 0 starts a new
+  // multi-fragment message (a final fragment's countdown 0 is handled above,
+  // while a session is active).
+  if (countdown == 0) return false;
+
+  DEBUG_RING_PROTOCOLF("[RING] reasm frag start cd=%u crc=%08lX chunk=%u [%02X %02X %02X %02X %02X %02X %02X %02X]",
+            (unsigned)countdown, (unsigned long)crc32, (unsigned)chunkLen,
+            chunk[0], chunkLen > 1 ? chunk[1] : 0, chunkLen > 2 ? chunk[2] : 0,
+            chunkLen > 3 ? chunk[3] : 0, chunkLen > 4 ? chunk[4] : 0,
+            chunkLen > 5 ? chunk[5] : 0, chunkLen > 6 ? chunk[6] : 0,
+            chunkLen > 7 ? chunk[7] : 0);
+  ringReasmReset();
+  sRingReasm.active = true;
+  sRingReasm.crc32 = crc32;
+  sRingReasm.nextCountdown = (uint8_t)(countdown - 1);
+  sRingReasm.generation = generation;
+  sRingReasm.len = 0;
+  (void)append();
+  return true;
+}
+
 static void ringProcessRxFrame(const uint8_t* data, size_t len,
                                uint32_t generation) {
-  if (!data || len == 0 || generation != sLinkGeneration || !sLinkOnline) return;
+  uint32_t currentGeneration = 0;
+  if (!data || len == 0 || !ringSnapshotLink(currentGeneration) ||
+      generation != currentGeneration) return;
   gRing.packetsReceived++;
 
   // Ring1Error short-frame fast-path. The ring emits this 6-byte form on
@@ -1771,7 +2361,7 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
   // transfer-type byte (0x00) followed by the offending request's CRC32
   // and a 1-byte errorCode. r1Decode rejects anything < 17 B, so without
   // this branch the meaning is lost (only visible as raw bytes under
-  // `ringverbose`). Format observed in the community RE decoder at
+  // `debugringdump`). Format observed in the community RE decoder at
   // docs/FlutterApp-main/lib/src/protocol/r1_messages.dart:390 with a
   // pinned test fixture `00 D4 C9 BA 70 07` → errorCode=0x07.
   if (len == 6 && data[0] == 0x00) {
@@ -1780,7 +2370,7 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
                          | ((uint32_t)data[3] << 16)
                          | ((uint32_t)data[4] << 24);
     const uint8_t errorCode = data[5];
-    DEBUG_G2F("[RING] RX Ring1Error errorCode=0x%02X crc32=0x%08lX",
+    DEBUG_RING_PROTOCOLF("[RING] RX Ring1Error errorCode=0x%02X crc32=0x%08lX",
               (unsigned)errorCode, (unsigned long)crc32);
     auto frameCrc32 = [](const R1Frame& frame) -> uint32_t {
       if (frame.length < 5) return 0;
@@ -1802,6 +2392,10 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
     return;
   }
 
+  // Multi-notification fragments (activity-daily today) are stitched here; a
+  // consumed fragment never proceeds to the single-frame decoder below.
+  if (ringReasmConsume(data, len, generation)) return;
+
   R1Decoded d;
   bool sensitivePayload = false;
   if (r1Decode(data, len, d)) {
@@ -1811,7 +2405,7 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
     // CRC16 mismatch is expected on every ring→phone frame (the firmware
     // emits a wrong CRC16 — see R1Decoded crc16Valid comment). Only flag
     // CRC?! when CRC32 (the real integrity check) actually fails.
-    DEBUG_G2F("[RING] RX %s/%s/%s ser=%u status=%s/%s/%s pLen=%u%s%s",
+    DEBUG_RING_PROTOCOLF("[RING] RX %s/%s/%s ser=%u status=%s/%s/%s pLen=%u%s%s",
               mod, cmd, sub,
               (unsigned)d.serial,
               r1StatusTypeName(d.statusType),
@@ -1842,18 +2436,18 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
         off += snprintf(pbuf + off, sizeof(pbuf) - off, "%02X ", d.payload[i]);
       }
       if (off > 0) pbuf[off - 1] = '\0';
-      DEBUG_G2F("[RING]   payload[%u]=[%s%s]",
+      DEBUG_RING_DUMPF("[RING]   payload[%u]=[%s%s]",
                 (unsigned)d.payloadLength, pbuf,
                 d.payloadLength > showMax ? " ..." : "");
 
     } else if (d.payloadLength > 0) {
-      DEBUG_G2F("[RING]   payload[%u]=<redacted>",
+      DEBUG_RING_DUMPF("[RING]   payload[%u]=<redacted>",
                 (unsigned)d.payloadLength);
     }
 
     const R1ParseError integrity = r1ValidateDecoded(d);
     if (integrity != R1_PARSE_OK) {
-      DEBUG_G2F("[RING] RX rejected before ingestion: %s",
+      DEBUG_RING_PROTOCOLF("[RING] RX rejected before ingestion: %s",
                 r1ParseErrorName(integrity));
     } else {
       const bool packetAckEligible =
@@ -1864,11 +2458,16 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
           (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_HRV ||
            d.cmd == R1_CMD_SPO2 || d.cmd == R1_CMD_SLEEP ||
            d.cmd == R1_CMD_ACTIVITY);
-      if (packetAckEligible) ringQueuePacketAck(d, generation);
+      if (packetAckEligible) {
+        R1PacketAckDescriptor descriptor;
+        if (r1PacketAckDescriptorFromDecoded(sR1Profile, d, descriptor)) {
+          ringQueuePacketAck(descriptor, generation);
+        }
+      }
 
       const bool firstCopy = ringRememberRx(d, generation);
       if (!firstCopy) {
-        DEBUG_G2F("[RING] RX duplicate ser=%u crc32=0x%08lX (typed ingestion skipped)",
+        DEBUG_RING_PROTOCOLF("[RING] RX duplicate ser=%u crc32=0x%08lX (typed ingestion skipped)",
                   (unsigned)d.serial, (unsigned long)d.crc32Received);
       } else {
         ringHandleSetupRx(d);
@@ -1883,18 +2482,19 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
           char abuf[256];
           const size_t alen = r1AnnotatePayload(sR1Profile, d, abuf,
                                                 sizeof(abuf));
-          if (alen > 0) DEBUG_G2F("[RING]   parsed: %s", abuf);
+          if (alen > 0) DEBUG_RING_PROTOCOLF("[RING]   parsed: %s", abuf);
         }
       }
     }
   } else {
-    DEBUG_G2F("[RING] RX undecodeable len=%u (<17 B for envelope)",
+    DEBUG_RING_PROTOCOLF("[RING] RX undecodeable len=%u (<17 B for envelope)",
               (unsigned)len);
   }
 
-  if (!gRingDumpVerbose) return;
+  // Raw byte dumps are gated by RING_DUMP (off unless the ring parent or
+  // debugringdump is on); redaction below still applies regardless.
   if (sensitivePayload) {
-    DEBUG_G2F("[RING] RX bytes=<redacted sensitive payload> len=%u",
+    DEBUG_RING_DUMPF("[RING] RX bytes=<redacted sensitive payload> len=%u",
               (unsigned)len);
     return;
   }
@@ -1909,22 +2509,35 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
     off += snprintf(buf + off, sizeof(buf) - off, "%02X ", data[i]);
   }
   if (off > 0) buf[off - 1] = '\0';
-  DEBUG_G2F("[RING] RX bytes=[%s%s]", buf, len > showMax ? " ..." : "");
+  DEBUG_RING_DUMPF("[RING] RX bytes=[%s%s]", buf, len > showMax ? " ..." : "");
 }
 
 // Notify callback shim — Arduino BLE hands us (char*, data, len, isNotify).
 static void ringNotifyThunk(BLERemoteCharacteristic* /*c*/, uint8_t* data,
                             size_t len, bool /*isNotify*/) {
   QueueHandle_t queue = sRxQueue;
-  if (!queue || !data || len == 0 || len > R1_MAX_FRAME || !sLinkOnline) {
+  uint32_t generation = 0;
+  if (!queue || !data || len == 0 || len > R1_MAX_FRAME ||
+      !ringSnapshotLink(generation)) {
     sRxQueueDropped = sRxQueueDropped + 1;
     return;
   }
-  RingRxFrame frame{};
-  frame.generation = sLinkGeneration;
+
+  const int reserved = ringReserveRxSlab();
+  if (reserved < 0) {
+    sRxQueueDropped = sRxQueueDropped + 1;
+    return;
+  }
+  const uint8_t slot = (uint8_t)reserved;
+  // External-memory writes are deliberately outside both short critical
+  // sections. Queue publication follows the complete frame copy, so the owner
+  // never observes a partially initialized slab.
+  RingRxFrame& frame = sRxSlabs[slot];
+  frame.generation = generation;
   frame.length = (uint16_t)len;
   memcpy(frame.bytes, data, len);
-  if (xQueueSend(queue, &frame, 0) != pdTRUE) {
+  if (!ringPublishRxSlab(slot) || xQueueSend(queue, &slot, 0) != pdTRUE) {
+    ringReleaseRxSlab(slot);
     sRxQueueDropped = sRxQueueDropped + 1;
     return;
   }
@@ -1958,6 +2571,7 @@ static uint32_t ringStartGenerationAndSetup() {
   if (!gRing.connected || !gRing.writeChar || !sSetupDone) return 0;
   while (xSemaphoreTake(sSetupDone, 0) == pdTRUE) {}
   ringClockCustodyReset();
+  ringReasmReset();  // drop any half-open fragment session from a prior link
   if (gRingDeviceAddress.length() > 0) {
     // RAM-only identity seed; secure-store load/merge stays on the main loop.
     g2HealthSetHistoryPeerId(gRingDeviceAddress.c_str());
@@ -1991,7 +2605,7 @@ static bool ringRunStandardSetup() {
   if (generation == 0) return false;
   const TickType_t wait = pdMS_TO_TICKS(RING_SETUP_TIMEOUT_MS * 4U + 4000U);
   if (xSemaphoreTake(sSetupDone, wait) != pdTRUE) {
-    DEBUG_G2F("[RING] setup coordinator wait timed out gen=%lu",
+    DEBUG_RING_SETUPF("[RING] setup coordinator wait timed out gen=%lu",
               (unsigned long)generation);
     return false;
   }
@@ -2015,7 +2629,7 @@ static void ringBeginOwnedGeneration(uint32_t generation) {
   memset(sRxFingerprints, 0, sizeof(sRxFingerprints));
   sRxFingerprintCursor = 0;
   ringSetSetupState(G2_RING_SETUP_AUTH);
-  DEBUG_G2F("[RING] setup begin gen=%lu", (unsigned long)generation);
+  DEBUG_RING_SETUPF("[RING] setup begin gen=%lu", (unsigned long)generation);
 }
 
 static void ringDropOwnedGeneration(uint32_t generation) {
@@ -2042,9 +2656,8 @@ static bool ringServicePacketAck() {
   if (!sActivePacketAck.valid && sPacketAckCount > 0) {
     sActivePacketAck.valid = true;
     sActivePacketAck.pending = sPacketAckQueue[0];
-    if (sPacketAckCount > 1) {
-      memmove(&sPacketAckQueue[0], &sPacketAckQueue[1],
-              (sPacketAckCount - 1) * sizeof(sPacketAckQueue[0]));
+    for (uint8_t i = 1; i < sPacketAckCount; ++i) {
+      sPacketAckQueue[i - 1] = sPacketAckQueue[i];
     }
     --sPacketAckCount;
   }
@@ -2055,7 +2668,7 @@ static bool ringServicePacketAck() {
   }
   if (!sActivePacketAck.frameReady) {
     sActivePacketAck.frame = gR1Encoder.buildPacketAck(
-        sR1Profile, sActivePacketAck.pending.received);
+        sR1Profile, sActivePacketAck.pending.descriptor);
     if (sActivePacketAck.frame.length == 0) {
       sActivePacketAck = RingActivePacketAck{};
       return true;
@@ -2065,14 +2678,63 @@ static bool ringServicePacketAck() {
   const RingWriteResult result = ringOwnerWrite(
       sActivePacketAck.frame.bytes, sActivePacketAck.frame.length);
   if (result == RING_WRITE_OK) {
-    DEBUG_G2F("[RING] TX packetAck ser=%u rxSer=%u",
+    DEBUG_RING_TXNF("[RING] TX packetAck ser=%u rxSer=%u",
               (unsigned)sActivePacketAck.frame.serial,
-              (unsigned)sActivePacketAck.pending.received.serial);
+              (unsigned)sActivePacketAck.pending.descriptor.receivedSerial());
     sActivePacketAck = RingActivePacketAck{};
   } else if (result == RING_WRITE_DISCONNECTED) {
     sActivePacketAck = RingActivePacketAck{};
   }
   return true;
+}
+
+// Dark-clock solicit from INSIDE the setup ritual. Custody rule 1 makes the
+// TIME stage hold rather than push an invalid epoch, waiting for
+// g2RingTimeSyncTick() to adopt the ring's clock — but the tick can only
+// adopt a stamp it has SEEN, the ring volunteers nothing unpolled, and the
+// tick's own solicit is gated on sRingSetupDone. Without this probe the wait
+// is circular and every dark-boot connect dies at the stage deadline with
+// clock-unavailable. So the setup owner asks for an hr/point here; the
+// response's stamp feeds sRingTsSeen via ringExtractTelemetryCache no matter
+// what setup stage is active, and adoption follows within one 500 ms tick —
+// comfortably inside the stage's 7 s deadline (HW legs answered in ~250 ms).
+// A ring that answers with a dark stamp is handled by ringSetupRingProvenDark
+// below; only a SILENT ring still ends at the deadline with clock-unavailable.
+// Probes consume encoder serials, so systemTime rides a higher serial on dark
+// boots only (known-good on HW).
+static void ringSetupServiceDarkProbe() {
+  if (sSetupOwner.darkProbesSent >= 3) return;
+  const uint32_t nowMs = millis();
+  if (sSetupOwner.darkProbeLastMs != 0 &&
+      (uint32_t)(nowMs - sSetupOwner.darkProbeLastMs) < 1500u) return;
+  const R1Frame probe =
+      gR1Encoder.buildHealthQuery(R1_CMD_HEARTRATE, R1_SUB_POINT);
+  if (probe.length == 0) return;
+  const RingWriteResult result = ringOwnerWrite(probe.bytes, probe.length);
+  if (result == RING_WRITE_DISCONNECTED) {
+    ringFinishSetup(false, G2_RING_ERR_DISCONNECTED);
+    return;
+  }
+  sSetupOwner.darkProbeLastMs = nowMs;  // rate-limit BUSY/FAILED retries too
+  if (result != RING_WRITE_OK) return;
+  sSetupOwner.darkProbesSent = (uint8_t)(sSetupOwner.darkProbesSent + 1);
+  DEBUG_RING_SETUPF("[RING] setup dark-clock probe TX hr/point ser=%u (%u/3)",
+            (unsigned)probe.serial, (unsigned)sSetupOwner.darkProbesSent);
+}
+
+// TRUE only when a probe answered THIS link with a pre-2020 stamp: positive
+// evidence the ring's clock is as dark as ours. Custody rule 1 protects a
+// GOOD ring clock from a dark host — echoing darkness at darkness destroys
+// nothing, so the TIME stage completes the ritual with our dark epoch
+// instead of dropping the link (the July design's explicit fallback). The
+// drift-based corrective push then trues ring and host together the moment
+// any real source lands mid-session. A SILENT ring proves nothing and stays
+// fail-closed. sRingTsSeen is per-link (ringClockCustodyReset), so the stamp
+// judged here always came from this connection's own probes.
+static bool ringSetupRingProvenDark() {
+  if (sSetupOwner.darkProbesSent == 0) return false;
+  const uint32_t ts = sRingTsSeen;
+  return ts != 0 && !Clock::isValidEpoch((time_t)ts);
 }
 
 static void ringServiceSetup() {
@@ -2096,7 +2758,20 @@ static void ringServiceSetup() {
         break;
       case G2_RING_SETUP_TIME: {
         const time_t now = time(nullptr);
-        if (!Clock::isValidEpoch(now)) return;  // fail closed at stage deadline
+        if (!Clock::isValidEpoch(now)) {
+          if (!ringSetupRingProvenDark()) {
+            // Hold while soliciting the ring's clock; adoption on the main
+            // loop makes the epoch valid, a dark answer flips the branch
+            // below, and a silent ring rides the stage deadline into
+            // clock-unavailable (fail closed — never push blind).
+            ringSetupServiceDarkProbe();
+            return;
+          }
+          DEBUG_RING_SETUPF("[RING] ring clock is dark too (ts=%lu) — completing "
+                    "ritual with dark epoch; drift push trues both when "
+                    "time arrives",
+                    (unsigned long)sRingTsSeen);
+        }
         int16_t timezoneMinutes = 0;
         if (!ringConfiguredTimezoneMinutes(timezoneMinutes)) {
           ringFinishSetup(false, G2_RING_ERR_ENCODE);
@@ -2147,8 +2822,12 @@ static void ringServiceSetup() {
     if (sSetupOwner.stage == G2_RING_SETUP_TIME) {
       sLastPushedEpoch = (uint32_t)time(nullptr);
       sLastPushedAtMs = millis();
+      // Record the tz the ritual just sent so the tick does not immediately
+      // re-push it as a "timezone changed" correction. Connect-time: stable.
+      int16_t tzMin = 0;
+      if (ringConfiguredTimezoneMinutes(tzMin)) sLastPushedTzMin = tzMin;
     }
-    DEBUG_G2F("[RING] setup TX stage=%s ser=%u len=%u",
+    DEBUG_RING_SETUPF("[RING] setup TX stage=%s ser=%u len=%u",
               g2RingSetupStateName(sSetupOwner.stage),
               (unsigned)sSetupOwner.frame.serial,
               (unsigned)sSetupOwner.frame.length);
@@ -2163,8 +2842,8 @@ static R1Frame ringBuildIntentFrame(const RingIntent& intent,
       const uint8_t* payload = nullptr;
       if (intent.payloadLen > 0) {
         if (intent.payloadSlot >= RING_RAW_PAYLOAD_SLOTS ||
-            !sRawPayloadSlots[intent.payloadSlot].used) return R1Frame{};
-        payload = sRawPayloadSlots[intent.payloadSlot].bytes;
+            !ringRawPayloadOwned(intent.payloadSlot)) return R1Frame{};
+        payload = sRawPayloadBytes[intent.payloadSlot];
       }
       return gR1Encoder.build(intent.module, intent.cmd, intent.subCmd,
                               intent.statusType, intent.statusMethod,
@@ -2182,9 +2861,11 @@ static R1Frame ringBuildIntentFrame(const RingIntent& intent,
       // Official-app captures send the configured signed minute offset here;
       // the ring then keys local daily pages to local midnight expressed in
       // UTC. Sending zero forced HardwareOne fetches onto UTC day boundaries.
-      int16_t timezoneMinutes = 0;
-      if (!ringConfiguredTimezoneMinutes(timezoneMinutes)) return R1Frame{};
-      return gR1Encoder.buildSyncTime(timezoneMinutes, intent.epoch);
+      // tz was captured + validated at enqueue (ringEnqueueTimeSync), so the
+      // frame reflects the offset in effect when the push was decided — not
+      // whatever the setting happens to be by the time this retry-safe build
+      // runs (which may be a later owner-task pass than the enqueue).
+      return gR1Encoder.buildSyncTime(intent.tzMin, intent.epoch);
     }
     case RING_INTENT_ADV_START: {
       uint8_t right[6]{};
@@ -2276,8 +2957,9 @@ static void ringServiceNormalTransaction() {
       if (sActiveTransaction.intent.kind == RING_INTENT_SYNC_TIME) {
         sLastPushedEpoch = sActiveTransaction.intent.epoch;
         sLastPushedAtMs = millis();
+        sLastPushedTzMin = sActiveTransaction.intent.tzMin;
       }
-      DEBUG_G2F("[RING] TX transaction id=%lu gen=%lu ser=%u %s/%s/%s%s",
+      DEBUG_RING_TXNF("[RING] TX transaction id=%lu gen=%lu ser=%u %s/%s/%s%s",
                 (unsigned long)sActiveTransaction.intent.handle.id,
                 (unsigned long)sActiveTransaction.intent.handle.generation,
                 (unsigned)sActiveTransaction.frame.serial,
@@ -2340,7 +3022,7 @@ static void ringServiceHistoryCoordinator() {
   portEXIT_CRITICAL(&sTransportMux);
   if (sHistoryCoordinator.active && !sHistoryCoordinator.force &&
       healthDesired == G2_RING_OFF) {
-    DEBUG_G2F("[RING] normal history sweep cancelled: health collection desired Off");
+    DEBUG_RING_HEALTHF("[RING] normal history sweep cancelled: health collection desired Off");
     ringFinishHistorySweep(false, G2_RING_ERR_NONE);
     return;
   }
@@ -2358,14 +3040,14 @@ static void ringServiceHistoryCoordinator() {
     portEXIT_CRITICAL(&sTransportMux);
     if (!requested) return;
     if (!force && healthDesired == G2_RING_OFF) {
-      DEBUG_G2F("[RING] normal history refresh skipped: health collection desired Off");
+      DEBUG_RING_HEALTHF("[RING] normal history refresh skipped: health collection desired Off");
       return;
     }
     if (!force) {
       const uint32_t nowMs = millis();
       if (sLastHistoryAttemptMs != 0 &&
           (uint32_t)(nowMs - sLastHistoryAttemptMs) < 10U * 60U * 1000U) {
-        DEBUG_G2F("[RING] normal history refresh throttled (<10 min since attempt)");
+        DEBUG_RING_HEALTHF("[RING] normal history refresh throttled (<10 min since attempt)");
         return;
       }
       G2HealthHistorySummary summary{};
@@ -2380,7 +3062,7 @@ static void ringServiceHistoryCoordinator() {
                                  ? (uint32_t)now - newest
                                  : 0;
         if (age < 10U * 60U) {
-          DEBUG_G2F("[RING] normal history refresh skipped: RAM history is %lus old",
+          DEBUG_RING_HEALTHF("[RING] normal history refresh skipped: RAM history is %lus old",
                     (unsigned long)age);
           return;
         }
@@ -2398,7 +3080,7 @@ static void ringServiceHistoryCoordinator() {
     sHistoryRefreshForce = false;
     portEXIT_CRITICAL(&sTransportMux);
     g2HealthHistoryFetchStarted();
-    DEBUG_G2F("[RING] history sweep started%s", force ? " (force)" : "");
+    DEBUG_RING_HEALTHF("[RING] history sweep started%s", force ? " (force)" : "");
   }
 
   if (sHistoryCoordinator.generation != sLinkGeneration || !sLinkOnline) {
@@ -2424,7 +3106,7 @@ static void ringServiceHistoryCoordinator() {
   if (sHistoryCoordinator.metricIndex >= sizeof(kMetrics)) {
     const bool success = sHistoryCoordinator.firstError == G2_RING_ERR_NONE;
     const uint8_t error = sHistoryCoordinator.firstError;
-    DEBUG_G2F("[RING] history sweep %s error=%s",
+    DEBUG_RING_HEALTHF("[RING] history sweep %s error=%s",
               success ? "complete" : "partial",
               g2RingTransactionErrorName(error));
     ringFinishHistorySweep(success, error);
@@ -2441,10 +3123,9 @@ static void ringServiceHistoryCoordinator() {
 
 static void ringOwnerTask(void* /*arg*/) {
   uint32_t ownedGeneration = 0;
-  RingRxFrame rx{};
   for (;;) {
-    const uint32_t currentGeneration = sLinkGeneration;
-    const bool online = sLinkOnline;
+    uint32_t currentGeneration = 0;
+    const bool online = ringSnapshotLink(currentGeneration);
     if (ownedGeneration != 0 &&
         (!online || currentGeneration != ownedGeneration)) {
       ringDropOwnedGeneration(ownedGeneration);
@@ -2456,14 +3137,52 @@ static void ringOwnerTask(void* /*arg*/) {
       ringBeginOwnedGeneration(ownedGeneration);
     }
 
-    while (sRxQueue && xQueueReceive(sRxQueue, &rx, 0) == pdTRUE) {
-      if (rx.generation == ownedGeneration && sLinkOnline) {
-        ringProcessRxFrame(rx.bytes, rx.length, rx.generation);
+    // Packet ACK is a protocol flow-control lane, not ordinary traffic. Retry
+    // an already-pending ACK before admitting more RX. If the GATT writer is
+    // busy, leave queued frames in their slabs and retry on the next lap;
+    // otherwise a sustained notify burst could outrun the depth-eight lane.
+    uint32_t serviceGeneration = 0;
+    const bool serviceLinkOnline = ringSnapshotLink(serviceGeneration);
+    if (ownedGeneration != 0 && serviceLinkOnline &&
+        serviceGeneration == ownedGeneration &&
+        (sActivePacketAck.valid || sPacketAckCount != 0)) {
+      (void)ringServicePacketAck();
+      if (sActivePacketAck.valid || sPacketAckCount != 0) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        continue;
       }
     }
 
-    if (ownedGeneration != 0 && sLinkOnline &&
-        ownedGeneration == sLinkGeneration) {
+    uint8_t rxSlot = 0;
+    uint8_t rxBudget = RING_RX_QUEUE_DEPTH;
+    while (rxBudget-- > 0 && sRxQueue &&
+           xQueueReceive(sRxQueue, &rxSlot, 0) == pdTRUE) {
+      if (!ringClaimQueuedRxSlab(rxSlot)) {
+        sRxQueueDropped = sRxQueueDropped + 1;
+        continue;
+      }
+
+      // The PROCESSING state retains exclusive ownership while the owner reads
+      // directly from PSRAM. Release on every stale/offline/invalid path only
+      // after parsing (when eligible) is complete.
+      const RingRxFrame& rx = sRxSlabs[rxSlot];
+      uint32_t rxGeneration = 0;
+      if (rx.length <= R1_MAX_FRAME && rx.generation == ownedGeneration &&
+          ringSnapshotLink(rxGeneration) && rxGeneration == ownedGeneration) {
+        ringProcessRxFrame(rx.bytes, rx.length, rx.generation);
+      }
+      ringReleaseRxSlab(rxSlot);
+
+      // ringProcessRxFrame may have admitted a daily-data packet ACK. Yield
+      // immediately after releasing the PSRAM slab so the reserved lane is
+      // serviced before another eligible notify can consume an entry.
+      if (sActivePacketAck.valid || sPacketAckCount != 0) break;
+    }
+
+    uint32_t currentServiceGeneration = 0;
+    if (ownedGeneration != 0 &&
+        ringSnapshotLink(currentServiceGeneration) &&
+        ownedGeneration == currentServiceGeneration) {
       if (ringServicePacketAck()) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
         continue;
@@ -2492,31 +3211,26 @@ static void ringOwnerTask(void* /*arg*/) {
 
 class RingClientCallbacks : public BLEClientCallbacks {
   void onConnect(BLEClient* /*c*/) override {
-    DEBUG_G2F("[RING] BLE onConnect callback fired");
+    DEBUG_RING_LIFECYCLEF("[RING] BLE onConnect callback fired");
   }
-  void onDisconnect(BLEClient* /*c*/) override {
-    const bool wasConnected = gRing.connected;
-    DEBUG_G2F("[RING] BLE onDisconnect — connected-was=%d", wasConnected ? 1 : 0);
+  void onDisconnect(BLEClient* c) override {
+    if (c != gRing.client) {
+      DEBUG_RING_LIFECYCLEF("[RING] Ignoring stale-client disconnect callback");
+      return;
+    }
+    const RingDownTransition down = ringBeginLogicalDown("disconnect");
+    g2CancelActiveRingScan();
+    DEBUG_RING_LIFECYCLEF("[RING] BLE onDisconnect — connected-was=%d",
+              down.wasConnected ? 1 : 0);
     // Drop all GATT handles; client object may still exist until reconnect
     // replaces it, but must not be used for writes after this.
-    gRing.connected   = false;
     gRing.writeChar   = nullptr;
     gRing.notifyChar  = nullptr;
     gRing.clientStale = true;
-    ringTransportDisconnected();
     // No corrective time push into a dead link, and no ring timestamp from
     // THIS link surviving into the next one (this is the common teardown —
     // link lost — so it must clear as much as ringClearGattPointers does).
     ringClockCustodyReset();
-    if (wasConnected) {
-      BROADCAST_PRINTF("[RING] Dropped BLE link — ring is no longer connected");
-      ringPushStatusEvent("disconnect");
-      systemEventPost(SYSEVT_RING_DISCONNECTED,
-                      gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
-                      gRingDeviceAddress.length() > 0 ? gRingDeviceAddress.c_str() : nullptr);
-      sRingWearPosted = 0;
-      blePeerNoteLinkLost(BLE_PEER_R1_RING);
-    }
   }
 };
 
@@ -2539,9 +3253,99 @@ class RingClientCallbacks : public BLEClientCallbacks {
 // already be paired with another central (phone) and refusing connectable
 // advertising.
 
+static portMUX_TYPE gRingScanCallbackMux = portMUX_INITIALIZER_UNLOCKED;
+static bool gRingScanCallbackAdmission = false;
+static uint16_t gRingScanCallbacksInFlight = 0;
+static uint32_t gRingScanEpoch = 0;
+static uint32_t gRingScanCancelGeneration = 0;
+static bool gRingScanCallbackQuarantined = false;
+
+class RingScanCallbackClaim {
+ public:
+  RingScanCallbackClaim() {
+    portENTER_CRITICAL(&gRingScanCallbackMux);
+    if (gRingScanCallbackAdmission && !gRingScanCallbackQuarantined &&
+        gRingScanCallbacksInFlight < UINT16_MAX) {
+      ++gRingScanCallbacksInFlight;
+      held_ = true;
+      epoch_ = gRingScanEpoch;
+      cancelGeneration_ = gRingScanCancelGeneration;
+    }
+    portEXIT_CRITICAL(&gRingScanCallbackMux);
+  }
+  ~RingScanCallbackClaim() {
+    if (!held_) return;
+    portENTER_CRITICAL(&gRingScanCallbackMux);
+    if (gRingScanCallbacksInFlight > 0) --gRingScanCallbacksInFlight;
+    portEXIT_CRITICAL(&gRingScanCallbackMux);
+  }
+  explicit operator bool() const { return held_; }
+  bool current() const {
+    if (!held_) return false;
+    portENTER_CRITICAL(&gRingScanCallbackMux);
+    const bool value = gRingScanCallbackAdmission &&
+        !gRingScanCallbackQuarantined && epoch_ == gRingScanEpoch;
+    portEXIT_CRITICAL(&gRingScanCallbackMux);
+    return value && ringConnectGenerationCurrent(cancelGeneration_);
+  }
+ private:
+  bool held_ = false;
+  uint32_t epoch_ = 0;
+  uint32_t cancelGeneration_ = 0;
+};
+
+static uint32_t ringScanCallbackBegin(uint32_t cancelGeneration) {
+  const bool lifecycleFaulted = bleStackLifecycleFaulted();
+  if (lifecycleFaulted ||
+      !ringConnectGenerationCurrent(cancelGeneration)) return 0;
+  portENTER_CRITICAL(&gRingScanCallbackMux);
+  if (gRingScanCallbackQuarantined &&
+      !gRingScanCallbackAdmission && gRingScanCallbacksInFlight == 0) {
+    ++gRingScanEpoch;
+    if (gRingScanEpoch == 0) gRingScanEpoch = 1;
+    gRingScanCallbackQuarantined = false;
+  }
+  if (gRingScanCallbackQuarantined || gRingScanCallbackAdmission ||
+      gRingScanCallbacksInFlight != 0) {
+    portEXIT_CRITICAL(&gRingScanCallbackMux);
+    return 0;
+  }
+  ++gRingScanEpoch;
+  if (gRingScanEpoch == 0) gRingScanEpoch = 1;
+  gRingScanCancelGeneration = cancelGeneration;
+  gRingScanCallbackAdmission = true;
+  const uint32_t epoch = gRingScanEpoch;
+  portEXIT_CRITICAL(&gRingScanCallbackMux);
+  return epoch;
+}
+
+static bool ringScanCallbackEnd(uint32_t epoch, uint32_t timeoutMs = 500) {
+  if (epoch == 0) return false;
+  portENTER_CRITICAL(&gRingScanCallbackMux);
+  if (gRingScanEpoch == epoch) gRingScanCallbackAdmission = false;
+  portEXIT_CRITICAL(&gRingScanCallbackMux);
+  const uint32_t deadline = millis() + timeoutMs;
+  for (;;) {
+    portENTER_CRITICAL(&gRingScanCallbackMux);
+    const bool idle = gRingScanCallbacksInFlight == 0;
+    portEXIT_CRITICAL(&gRingScanCallbackMux);
+    if (idle) return true;
+    if ((int32_t)(millis() - deadline) >= 0) {
+      portENTER_CRITICAL(&gRingScanCallbackMux);
+      gRingScanCallbackQuarantined = true;
+      portEXIT_CRITICAL(&gRingScanCallbackMux);
+      bleStackSetLifecycleFault(true);
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
 class RingScanCallbacks : public BLEAdvertisedDeviceCallbacks {
 public:
   void onResult(BLEAdvertisedDevice advertisedDevice) override {
+    RingScanCallbackClaim callbackClaim;
+    if (!callbackClaim || !callbackClaim.current()) return;
     if (!advertisedDevice.haveName()) return;
     String name = advertisedDevice.getName().c_str();
     // Inline mirror of classifyRingName() in G2_Glasses.cpp:
@@ -2562,11 +3366,18 @@ public:
     if (hex != 6 || *s != '\0') return;
 
     if (gRingAdvertisedDevice) return;  // already stashed (perhaps by G2 scan)
-    gRingAdvertisedDevice = new BLEAdvertisedDevice(advertisedDevice);
+    BLEAdvertisedDevice* copy =
+        new (std::nothrow) BLEAdvertisedDevice(advertisedDevice);
+    if (!copy) return;
+    if (!callbackClaim.current() || gRingAdvertisedDevice) {
+      delete copy;
+      return;
+    }
+    gRingAdvertisedDevice = copy;
     gRingDeviceName       = name;
     gRingDeviceAddress    = advertisedDevice.getAddress().toString().c_str();
     gRingScanFound        = true;
-    DEBUG_G2F("[RING] ringscan: Found %s @ %s (RSSI %d) — stashed",
+    DEBUG_RING_LIFECYCLEF("[RING] ringscan: Found %s @ %s (RSSI %d) — stashed",
               name.c_str(), gRingDeviceAddress.c_str(),
               advertisedDevice.getRSSI());
     BLEDevice::getScan()->stop();  // got it; bail out of remaining timeout
@@ -2574,22 +3385,26 @@ public:
 };
 static RingScanCallbacks gRingScanCallbacks;
 
-bool g2RingScan(uint32_t timeoutSec) {
+bool g2RingScan(uint32_t timeoutSec, uint32_t cancelGeneration) {
+  if (cancelGeneration == 0) {
+    cancelGeneration = ringConnectCancelGenerationSnapshot();
+  }
+  if (!ringConnectGenerationCurrent(cancelGeneration)) return false;
   if (!g2RingInit()) return false;
   if (gRingAdvertisedDevice) {
-    DEBUG_G2F("[RING] ringscan: advert already stashed (%s @ %s); skipping",
+    DEBUG_RING_LIFECYCLEF("[RING] ringscan: advert already stashed (%s @ %s); skipping",
               gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
     return true;
   }
   if (timeoutSec == 0) timeoutSec = 1;
   if (timeoutSec > 300) timeoutSec = 300;
 
-  DEBUG_G2F("[RING] ringscan: scanning for EVEN R1_* (timeout=%us)",
+  DEBUG_RING_LIFECYCLEF("[RING] ringscan: scanning for EVEN R1_* (timeout=%us)",
             (unsigned)timeoutSec);
 
   BLEScan* scan = BLEDevice::getScan();
   if (!scan) {
-    DEBUG_G2F("[RING] ringscan: BLEDevice::getScan() returned null");
+    DEBUG_RING_LIFECYCLEF("[RING] ringscan: BLEDevice::getScan() returned null");
     return false;
   }
 
@@ -2600,20 +3415,53 @@ bool g2RingScan(uint32_t timeoutSec) {
   // BLEScan::start(durationSec, continueScanning=false) blocks the calling
   // task until the scan completes — either by `timeoutSec` elapsing or by
   // a callback calling stop() (which we do on first ring match).
+  const uint32_t scanEpoch = ringScanCallbackBegin(cancelGeneration);
+  if (scanEpoch == 0) {
+    DEBUG_RING_LIFECYCLEF("[RING] ringscan: callback generation unavailable");
+    return false;
+  }
   scan->start(timeoutSec, /*continueScanning*/ false);
+  if (!ringScanCallbackEnd(scanEpoch)) {
+    DEBUG_RING_LIFECYCLEF("[RING] ringscan: callback did not quiesce; host quarantined");
+    return false;
+  }
   scan->clearResults();
 
+  if (!ringConnectGenerationCurrent(cancelGeneration)) {
+    DEBUG_RING_LIFECYCLEF("[RING] ringscan: cancelled by disconnect/teardown");
+    return false;
+  }
+
   if (gRingAdvertisedDevice) {
-    BROADCAST_PRINTF("[RING] ringscan: found %s @ %s",
-                     gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
+    INFO_RINGF("ringscan: found %s @ %s",
+               gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
     return true;
   }
 
-  DEBUG_G2F("[RING] ringscan: timed out after %us — ring not advertising. "
+  DEBUG_RING_LIFECYCLEF("[RING] ringscan: timed out after %us — ring not advertising. "
             "Try: tap the ring to wake it, check battery, move it closer, "
             "or run 'ringscan 60' for a longer window.",
             (unsigned)timeoutSec);
   return false;
+}
+
+bool g2RingScanAsync(uint32_t timeoutSec) {
+  if (!g2RingInit()) return false;
+  uint32_t cancelGeneration = 0;
+  if (!ringConnectGateOpen(&cancelGeneration)) return false;
+  if (timeoutSec == 0) timeoutSec = 1;
+  if (timeoutSec > 300) timeoutSec = 300;
+
+  BleConnectJob job{};
+  job.kind = BleConnectKind::RING_SCAN_ONLY;
+  job.scanSeconds = (uint16_t)timeoutSec;
+  job.cancelEpoch = cancelGeneration;
+  if (!g2SubmitBleConnect(job)) {
+    ERROR_RINGF("Scan submit FAILED — central worker unavailable");
+    g2RingConnectMarkComplete();
+    return false;
+  }
+  return true;
 }
 
 // =============================================================================
@@ -2648,27 +3496,83 @@ struct GlassesPriorityGuard {
 // unified BLE-connect worker (in G2_Glasses.cpp) can dispatch RING_*
 // jobs to it. Internal callers (the now-deleted ring*TaskBody functions)
 // are gone; only the worker calls this.
-bool ringPerformConnect(const String& savedMac /* = String() */) {
-#if ENABLE_MICROPHONE
-  // Defer while a G2 mic capture is running: this guard's BALANCED window
-  // (40-60 ms intervals, up to ~30 s) was measured delivering only ~15
-  // notifications/s vs the 20/s a capture needs — it would degrade a live
-  // STT exchange to protect a telemetry connect. Captures are VAD-bounded
-  // (seconds); the caller's retry/backoff simply lands after it. The
-  // inverse race (a connect already holding BALANCED when a capture
-  // starts) is accepted and surfaced by the delivered-rate watchdog.
-  if (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT) {
-    // User-visible (not debug-gated): a manual `ringconnect` has no per-job
-    // retry — without this line it would silently no-op. The auto-reseek
-    // path retries on its own backoff and just lands after the capture.
-    BROADCAST_PRINTF("[RING] connect deferred: G2 mic capture active — "
-                     "retry after the capture ends");
+static bool ringRequestCurrent(const BlePeerConnectRequest* request,
+                               uint32_t cancelGeneration) {
+  if (!ringConnectGenerationCurrent(cancelGeneration)) return false;
+  if (!request) return true;
+  if (!request->autoReconnect && !request->explicitReseek) {
+    return blePeerIntentIsCurrent(BLE_PEER_R1_RING,
+                                  request->intentGeneration,
+                                  request->identityGeneration);
+  }
+  return blePeerConnectRequestIsCurrent(BLE_PEER_R1_RING, *request);
+}
+
+static bool ringAbortSupersededRequest(
+    const BlePeerConnectRequest* request, uint32_t cancelGeneration,
+    const char* phase) {
+  if (ringRequestCurrent(request, cancelGeneration)) return false;
+  DEBUG_RING_LIFECYCLEF("[RING] Connect superseded/cancelled during %s — closing new link",
+            phase ? phase : "connect");
+  ringTransportDisconnected();
+  if (gRing.client && gRing.client->isConnected()) gRing.client->disconnect();
+  ringClearGattPointers(/*dropClientPtr=*/false);
+  return true;
+}
+
+bool ringPerformConnect(const String& savedMac /* = String() */,
+                        const BlePeerConnectRequest* expectedRequest,
+                        uint32_t cancelGeneration) {
+  if (cancelGeneration == 0) {
+    cancelGeneration = ringConnectCancelGenerationSnapshot();
+  }
+  if (!ringRequestCurrent(expectedRequest, cancelGeneration)) {
+    DEBUG_RING_LIFECYCLEF("[RING] Connect request stale/cancelled before dispatch");
     return false;
   }
+#if ENABLE_MICROPHONE
+  // BALANCED ring-connect intervals deliver only ~15 G2 mic notifications/s
+  // versus the 20/s required by a live recorder, so an actual G2 recording
+  // gets priority. `audioCaptureActive()` is deliberately NOT the authority:
+  // mic autostart/openmic holds that HAL lease indefinitely even while the
+  // recorder is IDLE. ESP-SR is a separate continuous consumer and remains a
+  // throughput-critical reason to wait.
+  auto g2AudioThroughputCritical = []() {
+    return audioGetSource() == AUDIO_SRC_G2_LEFT &&
+           (micRecordingBusy() || audioCaptureOwnedBy("sr"));
+  };
+
+  if (g2AudioThroughputCritical()) {
+    const uint32_t waitStartedMs = millis();
+    INFO_RINGF("connect queued: active G2 audio session — "
+               "waiting to start safely");
+    while (g2AudioThroughputCritical()) {
+      if (!ringRequestCurrent(expectedRequest, cancelGeneration)) return false;
+      const uint32_t waitedMs = (uint32_t)(millis() - waitStartedMs);
+      if (waitedMs >= RING_AUDIO_DEFER_TIMEOUT_MS) {
+        WARN_RINGF("queued connect expired after %lus waiting "
+                   "for G2 audio to become idle",
+                   (unsigned long)(waitedMs / 1000u));
+        ringNoteConnectFailure("audio-wait", waitedMs);
+        return false;
+      }
+      vTaskDelay(pdMS_TO_TICKS(RING_AUDIO_DEFER_POLL_MS));
+    }
+    const uint32_t waitedMs = (uint32_t)(millis() - waitStartedMs);
+    INFO_RINGF("G2 audio idle — starting queued connect after "
+               "%lu.%03lus",
+               (unsigned long)(waitedMs / 1000u),
+               (unsigned long)(waitedMs % 1000u));
+  }
+  // A recorder can still start immediately after this check. Preserving an
+  // already-started voice request would require a cross-subsystem admission
+  // fence; the existing delivered-rate watchdog surfaces that narrow race.
 #endif
   // Drop glasses to BALANCED for the entire connect attempt. Auto-restored
   // on any return path. Cheap no-op if no glasses are connected.
   GlassesPriorityGuard prio_guard;
+
+  if (!ringRequestCurrent(expectedRequest, cancelGeneration)) return false;
 
   const bool useSavedMac = (savedMac.length() > 0);
   if (!useSavedMac && !gRingAdvertisedDevice) {
@@ -2676,25 +3580,26 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
     // matches the doc comment in G2_Ring.h:75 ("Scan for the ring advert
     // or use one already discovered"). The shared G2 scan early-terminates
     // on glasses-found which often misses the ring's slower advert cycle.
-    DEBUG_G2F("[RING] connect: no advertisedDevice stashed; running "
+    DEBUG_RING_LIFECYCLEF("[RING] connect: no advertisedDevice stashed; running "
               "dedicated ring scan (15s)...");
-    if (!g2RingScan(15) || !gRingAdvertisedDevice) {
-      DEBUG_G2F("[RING] connect: ring not visible — try 'ringscan 60' with "
+    if (!g2RingScan(15, cancelGeneration) || !gRingAdvertisedDevice) {
+      DEBUG_RING_LIFECYCLEF("[RING] connect: ring not visible — try 'ringscan 60' with "
                 "the ring close + woken (tap it) first, then retry "
                 "'ringconnect'");
       return false;
     }
+    if (!ringRequestCurrent(expectedRequest, cancelGeneration)) return false;
   }
   if (gRing.connected) {
-    DEBUG_G2F("[RING] connect: already connected");
+    DEBUG_RING_LIFECYCLEF("[RING] connect: already connected");
     return true;
   }
 
   if (useSavedMac) {
-    DEBUG_G2F("[RING] Connecting by saved MAC %s (heap=%u)",
+    DEBUG_RING_LIFECYCLEF("[RING] Connecting by saved MAC %s (heap=%u)",
               savedMac.c_str(), (unsigned)ESP.getFreeHeap());
   } else {
-    DEBUG_G2F("[RING] Connecting to %s @ %s (heap=%u)",
+    DEBUG_RING_LIFECYCLEF("[RING] Connecting to %s @ %s (heap=%u)",
               gRingDeviceName.c_str(), gRingDeviceAddress.c_str(),
               (unsigned)ESP.getFreeHeap());
   }
@@ -2703,7 +3608,7 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   // as the glasses path — Arduino BLE's BLEClient doesn't reliably survive
   // peer-initiated disconnects.
   if (gRing.client && gRing.clientStale) {
-    DEBUG_G2F("[RING] Replacing stale BLEClient from prior drop");
+    DEBUG_RING_LIFECYCLEF("[RING] Replacing stale BLEClient from prior drop");
     // Nulling without delete orphans the client and its cached GATT tree
     // (measured ~10-14 KB per drop on the glasses path) — but freeing it is
     // only legal once nothing can still reach it:
@@ -2721,33 +3626,24 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
     //
     // If either gate fails, leak the object rather than free memory the BLE
     // dispatcher or a wedged writer may still touch.
-    BLEClient* dead = gRing.client;
-    gRing.client    = nullptr;
-    bool libReleased = false;
-    for (uint32_t waited = 0; ; waited += 50) {
-      if (dead->getGattcIf() == ESP_GATT_IF_NONE) { libReleased = true; break; }
-      if (waited >= 3000) break;
-      vTaskDelay(pdMS_TO_TICKS(50));
-    }
     const bool locked = gRing.writeMutex &&
         xSemaphoreTake(gRing.writeMutex, pdMS_TO_TICKS(2000)) == pdTRUE;
-    if (libReleased && locked) {
-      // One extra poll interval: gattc_if drops mid-DISCONNECT-case on the
-      // BTC task, a hair before the routing-map removal and onDisconnect
-      // callback finish with the object (cross-core, so genuinely parallel).
-      vTaskDelay(pdMS_TO_TICKS(50));
-      delete dead;
-    } else {
-      DEBUG_G2F("[RING] Stale client NOT freed (libReleased=%d locked=%d) — "
-                "leaked by design", (int)libReleased, (int)locked);
+    if (!locked) {
+      DEBUG_RING_LIFECYCLEF("[RING] Stale client retirement deferred: owner write active");
+      return false;
     }
-    if (locked) xSemaphoreGive(gRing.writeMutex);
+    const bool retired = bleRetireClientForReplacement(
+        gRing.client, BLE_CLIENT_RETIRE_R1,
+        (uint8_t)BLE_PEER_R1_RING, "RING");
+    xSemaphoreGive(gRing.writeMutex);
+    if (!retired) return false;
     gRing.clientStale = false;
   }
   if (!gRing.client) {
+    gRing.clientStale = false;
     gRing.client = BLEDevice::createClient();
     if (!gRing.client) {
-      DEBUG_G2F("[RING] BLEDevice::createClient() returned null");
+      DEBUG_RING_LIFECYCLEF("[RING] BLEDevice::createClient() returned null");
       return false;
     }
     // Static: the callbacks keep no per-connection state (they write gRing
@@ -2770,8 +3666,12 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
     // cached-advert path doesn't hit this because BLEAdvertisedDevice
     // carries the discovered address type.
     BLEAddress addr(savedMac.c_str());
-    uint8_t addrType = BLE_ADDR_TYPE_PUBLIC;
-    {
+    uint8_t addrType = expectedRequest &&
+            expectedRequest->savedTarget.addressType1Known
+        ? expectedRequest->savedTarget.addressType1
+        : static_cast<uint8_t>(BLE_ADDR_TYPE_PUBLIC);
+    if (!expectedRequest ||
+        !expectedRequest->savedTarget.addressType1Known) {
       unsigned msb = 0;
       if (sscanf(savedMac.c_str(), "%2x", &msb) == 1 && (msb & 0xC0) == 0xC0) {
         addrType = BLE_ADDR_TYPE_RANDOM;
@@ -2796,16 +3696,22 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   // Classify BOTH overloads above (the saved-MAC path takes a BLEAddress, so
   // bleConnectWatched's advertised-device wrapper can't cover it — and saved
   // MAC is exactly the unattended auto-reconnect path where a wedge builds).
-  bleNoteConnectOutcome(connOk, millis() - t0, "RING");
+  bleNoteClientConnectOutcome(gRing.client, connOk, millis() - t0, "RING");
   if (!connOk) {
     const uint32_t dt = millis() - t0;
-    BROADCAST_PRINTF("[RING] BLE connect FAILED after %u ms (%s)",
-                     (unsigned)dt,
-                     useSavedMac ? savedMac.c_str() : "scan target");
+    ERROR_RINGF("BLE connect FAILED after %u ms (%s)",
+                (unsigned)dt,
+                useSavedMac ? savedMac.c_str() : "scan target");
     ringNoteConnectFailure("link", dt);
+    (void)bleQuarantineClientAfterFailedConnect(
+        gRing.client, BLE_CLIENT_RETIRE_R1,
+        (uint8_t)BLE_PEER_R1_RING, "RING");
     return false;
   }
-  DEBUG_G2F("[RING] BLE connect OK in %u ms", (unsigned)(millis() - t0));
+  if (ringAbortSupersededRequest(expectedRequest, cancelGeneration, "OPEN")) {
+    return false;
+  }
+  DEBUG_RING_LIFECYCLEF("[RING] BLE connect OK in %u ms", (unsigned)(millis() - t0));
 
   // Prefer the same high local ATT MTU as glasses (G2_BLE_LOCAL_MTU_PREF).
   // Never setMTU(64) — that lowered the process-global local MTU and broke
@@ -2813,53 +3719,74 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   // this link down to ~64; that value lands in gRing.mtu.
   gRing.mtu = bleNegotiateConnMtu(gRing.client, G2_BLE_LOCAL_MTU_PREF, 1000, "RING");
 
-  DEBUG_G2F("[RING] Looking up service %s", G2RING_SERVICE_UUID);
+  DEBUG_RING_LIFECYCLEF("[RING] Looking up service %s", G2RING_SERVICE_UUID);
   BLERemoteService* svc = gRing.client->getService(BLEUUID(G2RING_SERVICE_UUID));
   if (!svc) {
-    BROADCAST_PRINTF("[RING] Connect FAILED — ring service not found");
+    ERROR_RINGF("Connect FAILED — ring service not found");
     ringNoteConnectFailure("service", millis() - t0);
-    DEBUG_G2F("[RING] Service %s NOT FOUND (listing all services below)",
+    DEBUG_RING_LIFECYCLEF("[RING] Service %s NOT FOUND (listing all services below)",
               G2RING_SERVICE_UUID);
     auto* services = gRing.client->getServices();
     if (services) {
       for (const auto& entry : *services) {
-        DEBUG_G2F("[RING]   svc: %s", entry.first.c_str());
+        DEBUG_RING_LIFECYCLEF("[RING]   svc: %s", entry.first.c_str());
       }
     }
     gRing.client->disconnect();
     return false;
   }
-  DEBUG_G2F("[RING] Service found, getting characteristics");
+  DEBUG_RING_LIFECYCLEF("[RING] Service found, getting characteristics");
 
   gRing.writeChar  = svc->getCharacteristic(BLEUUID(G2RING_CHAR_WRITE_UUID));
   gRing.notifyChar = svc->getCharacteristic(BLEUUID(G2RING_CHAR_NOTIFY_UUID));
-  DEBUG_G2F("[RING] writeChar=%p notifyChar=%p", gRing.writeChar, gRing.notifyChar);
+  DEBUG_RING_LIFECYCLEF("[RING] writeChar=%p notifyChar=%p", gRing.writeChar, gRing.notifyChar);
 
   if (!gRing.notifyChar) {
-    BROADCAST_PRINTF("[RING] Connect FAILED — notify characteristic not found");
+    ERROR_RINGF("Connect FAILED — notify characteristic not found");
     ringNoteConnectFailure("notify-char", millis() - t0);
-    DEBUG_G2F("[RING] Notify char %s NOT FOUND (listing all chars):",
+    DEBUG_RING_LIFECYCLEF("[RING] Notify char %s NOT FOUND (listing all chars):",
               G2RING_CHAR_NOTIFY_UUID);
     auto* chars = svc->getCharacteristics();
     if (chars) {
       for (const auto& entry : *chars) {
-        DEBUG_G2F("[RING]   char: %s", entry.first.c_str());
+        DEBUG_RING_LIFECYCLEF("[RING]   char: %s", entry.first.c_str());
       }
     }
     gRing.client->disconnect();
     return false;
   }
-  DEBUG_G2F("[RING] Chars: write.canWriteNR=%d notify.canNotify=%d canIndicate=%d",
+  DEBUG_RING_LIFECYCLEF("[RING] Chars: write.canWriteNR=%d notify.canNotify=%d canIndicate=%d",
             gRing.writeChar  ? gRing.writeChar->canWriteNoResponse() : 0,
             gRing.notifyChar ? gRing.notifyChar->canNotify()         : 0,
             gRing.notifyChar ? gRing.notifyChar->canIndicate()       : 0);
 
-  if (gRing.notifyChar->canNotify()) {
-    DEBUG_G2F("[RING] Subscribing to notifications on %s", G2RING_CHAR_NOTIFY_UUID);
-    gRing.notifyChar->registerForNotify(ringNotifyThunk);
-  } else {
-    DEBUG_G2F("[RING] WARN: notifyChar cannot notify — no incoming data");
+  if (!gRing.writeChar || !gRing.notifyChar->canNotify()) {
+    ERROR_RINGF("Connect FAILED — mandatory write/notify capability missing");
+    ringNoteConnectFailure("notify-capability", millis() - t0);
+    if (gRing.client) gRing.client->disconnect();
+    ringClearGattPointers(/*dropClientPtr=*/false);
+    return false;
   }
+  DEBUG_RING_LIFECYCLEF("[RING] Subscribing to notifications on %s",
+            G2RING_CHAR_NOTIFY_UUID);
+  const BLERemoteNotifyResult ringNotify =
+      gRing.notifyChar->registerForNotify(ringNotifyThunk);
+  if (!ringNotify.success) {
+    ERROR_RINGF("Connect FAILED — notify registration api=%ld evt=%ld "
+                "descApi=%ld descEvt=%ld timeout=%d",
+                (long)ringNotify.apiStatus,
+                (long)ringNotify.eventStatus,
+                (long)ringNotify.descriptorApiStatus,
+                (long)ringNotify.descriptorEventStatus,
+                (int)ringNotify.timedOut);
+    ringNoteConnectFailure("notify-register", millis() - t0);
+    if (gRing.client) gRing.client->disconnect();
+    ringClearGattPointers(/*dropClientPtr=*/false);
+    return false;
+  }
+
+  if (ringAbortSupersededRequest(expectedRequest, cancelGeneration,
+                                 "discovery")) return false;
 
   gRing.connected      = true;
   // Belt for the invalidate path: g2RingInvalidateLink nulls the client and
@@ -2875,9 +3802,9 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   if (!ringRunStandardSetup()) {
     G2RingControlStatus setup{};
     g2RingGetControlStatus(setup);
-    BROADCAST_PRINTF("[RING] Connect FAILED — setup %s (%s)",
-                     g2RingSetupStateName(setup.setupState),
-                     g2RingTransactionErrorName(setup.setupLastError));
+    ERROR_RINGF("Connect FAILED — setup %s (%s)",
+                g2RingSetupStateName(setup.setupState),
+                g2RingTransactionErrorName(setup.setupLastError));
     ringNoteConnectFailure("setup", millis() - t0);
     ringTransportDisconnected();
     if (gRing.client) gRing.client->disconnect();
@@ -2885,22 +3812,51 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
     return false;
   }
 
-  BROADCAST_PRINTF("[RING] Connected to %s (setup verified, profile %s)",
-                   gRingDeviceName.c_str(), r1ProtocolProfileName(sR1Profile));
-  ringPushStatusEvent("connect-ok");
-  // Mirror G2_Glasses: SSE status push + typed bus event for automations /
-  // `events` / system_events consumers. subject=name, detail=mac.
-  systemEventPost(SYSEVT_RING_CONNECTED,
-                  gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
-                  gRingDeviceAddress.length() > 0 ? gRingDeviceAddress.c_str() : nullptr);
+  if (ringAbortSupersededRequest(expectedRequest, cancelGeneration,
+                                 "setup")) return false;
 
-  // Persist ring MAC into the BLE peer registry. bleSavePeerMac is a
-  // no-op when the value already matches — auto-reconnect is gated
-  // separately by the peer's autoReconnect flag.
-  if (gRingDeviceAddress.length() > 0) {
-    bleSavePeerMac(BLE_PEER_R1_RING, gRingDeviceAddress);
-    blePeerNoteLinkUp(BLE_PEER_R1_RING);
+  bool completionCurrent = false;
+  bool persistNeeded = false;
+  {
+    RingCompletionGuard completion;
+    if (completion && ringConnectGenerationCurrent(cancelGeneration)) {
+      const bool learnsTarget = expectedRequest &&
+          !expectedRequest->autoReconnect &&
+          !expectedRequest->explicitReseek;
+      completionCurrent = learnsTarget
+          ? blePeerCommitLearnedTargetIfCurrent(
+                BLE_PEER_R1_RING,
+                expectedRequest->intentGeneration,
+                expectedRequest->identityGeneration,
+                gRingDeviceAddress, String(),
+                /*replaceMask=*/0x01,
+                /*completeTopology=*/true, &persistNeeded)
+          : (!expectedRequest ||
+             blePeerNoteLinkUpIfCurrent(BLE_PEER_R1_RING,
+                                        *expectedRequest));
+      if (completionCurrent) {
+        if (!expectedRequest) blePeerNoteLinkUp(BLE_PEER_R1_RING);
+        gRingUpEventPublished = true;
+        INFO_RINGF("Connected to %s (setup verified, profile %s)",
+                   gRingDeviceName.c_str(),
+                   r1ProtocolProfileName(sR1Profile));
+        ringPushStatusEvent("connect-ok");
+        // Mirror G2_Glasses: SSE status push + typed bus event for
+        // automations / `events` / system_events consumers.
+        systemEventPost(
+            SYSEVT_RING_CONNECTED,
+            gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
+            gRingDeviceAddress.length() > 0
+                ? gRingDeviceAddress.c_str() : nullptr);
+      }
+    }
   }
+  if (!completionCurrent) {
+    (void)ringAbortSupersededRequest(expectedRequest, cancelGeneration,
+                                     "completion");
+    return false;
+  }
+  if (persistNeeded) (void)writeSettingsJson();
   return true;
 }
 
@@ -2927,13 +3883,18 @@ bool g2RingInit() {
   }
   if (!gRing.writeMutex) return false;
   if (!sRxQueue) {
-    sRxQueue = xQueueCreateStatic(RING_RX_QUEUE_DEPTH, sizeof(RingRxFrame),
+    sRxQueue = xQueueCreateStatic(RING_RX_QUEUE_DEPTH, sizeof(uint8_t),
                                   sRxQueueBytes, &sRxQueueStorage);
   }
   if (!sSetupDone) {
     sSetupDone = xSemaphoreCreateBinaryStatic(&sSetupDoneStorage);
   }
   if (!sRxQueue || !sSetupDone) return false;
+  ringResetRxIngressForInit();
+  if (!ringStorageSelfTest()) {
+    DEBUG_RING_LIFECYCLEF("[RING] Module disabled: storage self-test failed");
+    return false;
+  }
 
   // Clamp erased/corrupt persisted values to the fail-safe Preserve policy.
   if (gSettings.ringHealthCollectionDesired < (int)G2_RING_PRESERVE ||
@@ -2958,36 +3919,46 @@ bool g2RingInit() {
   // captured wire bytes. Logs PASS/FAIL inline; on FAIL the encoder is
   // unsafe to use against real hardware (we'd send malformed frames).
   if (!r1ProtocolSelfTest()) {
-    DEBUG_G2F("[RING] Module disabled: protocol self-test failed");
+    DEBUG_RING_LIFECYCLEF("[RING] Module disabled: protocol self-test failed");
     return false;
   }
   if (!sRingOwnerTask &&
       xTaskCreateLogged(ringOwnerTask, "r1_owner", RING_OWNER_STACK_BYTES,
                         nullptr, 4,
                         &sRingOwnerTask, "r1.owner", PRO_CORE) != pdPASS) {
-    DEBUG_G2F("[RING] Module disabled: owner task creation failed");
+    DEBUG_RING_LIFECYCLEF("[RING] Module disabled: owner task creation failed");
     return false;
   }
   gRing.initialized = true;
 
-  DEBUG_G2F("[RING] Module initialised (full R1 protocol — auth + telemetry)");
+  DEBUG_RING_LIFECYCLEF("[RING] Module initialised (full R1 protocol — auth + telemetry)");
   return true;
 }
 
 bool g2RingConnect() {
   if (!g2RingInit()) return false;
-  if (!ringConnectGateOpen()) return false;
+  uint32_t cancelGeneration = 0;
   // Group B: submit to the unified worker. Active flag flips true here so
   // duplicate g2RingConnect* calls reject before we ever hit the queue;
   // the worker's dispatch clears it after ringPerformConnect returns.
-  gRingConnectTaskActive = true;
-  gRingConnectTaskSinceMs = millis();
   BleConnectJob job{};
   job.kind = BleConnectKind::RING_SCAN;
+  {
+    RingCompletionGuard completion;
+    if (!completion || !ringConnectGateOpen(&cancelGeneration)) return false;
+    job.cancelEpoch = cancelGeneration;
+    if (!blePeerBeginManualLearn(BLE_PEER_R1_RING,
+                                 job.peerIntentGeneration,
+                                 job.peerIdentityGeneration)) {
+      DEBUG_RING_LIFECYCLEF("[RING] Connect rejected — no current peer owner authority");
+      g2RingConnectMarkComplete();
+      return false;
+    }
+  }
   if (!g2SubmitBleConnect(job)) {
-    BROADCAST_PRINTF("[RING] Connect submit FAILED (scan) — worker queue full or BLE not ready");
+    ERROR_RINGF("Connect submit FAILED (scan) — worker queue full or BLE not ready");
     ringNoteConnectFailure("submit", 0);
-    gRingConnectTaskActive = false;
+    g2RingConnectMarkComplete();
     return false;
   }
   return true;
@@ -2995,74 +3966,206 @@ bool g2RingConnect() {
 
 bool g2RingConnectSaved() {
   if (!g2RingInit()) return false;
-  if (!ringConnectGateOpen()) return false;
-  if (gBlePeerData[BLE_PEER_R1_RING].mac1.length() == 0) {
-    DEBUG_G2F("[RING] g2RingConnectSaved: no saved MAC, skipping");
-    return false;
-  }
-  gRingConnectTaskActive = true;
-  gRingConnectTaskSinceMs = millis();
+  uint32_t cancelGeneration = 0;
+  BlePeerConnectRequest request;
   BleConnectJob job{};
   job.kind = BleConnectKind::RING_SAVED;
+  {
+    RingCompletionGuard completion;
+    if (!completion || !ringConnectGateOpen(&cancelGeneration)) return false;
+    job.cancelEpoch = cancelGeneration;
+    if (!blePeerBeginManualConnectRequest(BLE_PEER_R1_RING, request)) {
+      DEBUG_RING_LIFECYCLEF("[RING] g2RingConnectSaved: no owned saved MAC, skipping");
+      g2RingConnectMarkComplete();
+      return false;
+    }
+    ringRequestToJob(request, job);
+  }
   if (!g2SubmitBleConnect(job)) {
-    BROADCAST_PRINTF("[RING] Connect submit FAILED (saved) — worker queue full or BLE not ready");
+    ERROR_RINGF("Connect submit FAILED (saved) — worker queue full or BLE not ready");
     ringNoteConnectFailure("submit", 0);
-    gRingConnectTaskActive = false;
+    g2RingConnectMarkComplete();
     return false;
   }
   return true;
 }
 
+static BlePeerConnectAdmission ringPeerConnectSavedAdmissionThunk(
+    const BlePeerConnectRequest& request) {
+  if (!isG2ClientInitialized() || isBleServerInitialized() ||
+      bleRoleTransitionState() != BleRoleTransition::IDLE) {
+    return BlePeerConnectAdmission::ROLE_BLOCKED;
+  }
+  if (ringPublishedConnected()) {
+    return BlePeerConnectAdmission::ALREADY_UP;
+  }
+  if (!request.savedTarget.mac1[0]) {
+    return BlePeerConnectAdmission::NO_TARGET;
+  }
+  if (!blePeerConnectRequestIsCurrent(BLE_PEER_R1_RING, request)) {
+    return BlePeerConnectAdmission::ROLE_BLOCKED;
+  }
+  uint32_t cancelGeneration = 0;
+  if (!ringConnectGateOpen(&cancelGeneration)) {
+    return BlePeerConnectAdmission::COALESCED;
+  }
+
+  BleConnectJob job{};
+  job.kind = BleConnectKind::RING_SAVED;
+  job.cancelEpoch = cancelGeneration;
+  ringRequestToJob(request, job);
+  if (!g2SubmitBleConnect(job)) {
+    g2RingConnectMarkComplete();
+    return BlePeerConnectAdmission::BUSY;
+  }
+  return BlePeerConnectAdmission::STARTED;
+}
+
 bool g2RingConnectMac(const String& mac) {
-  if (!g2RingInit()) return false;
-  if (!ringConnectGateOpen()) return false;
   String m = mac;
   m.trim();
   // Loose validation — full BLEAddress parsing happens inside ringPerformConnect.
   // Just reject obviously-wrong inputs here (need at least "aa:bb:cc:dd:ee:ff"
   // = 17 chars; BleConnectJob.mac is a 18-byte buffer including NUL).
   if (m.length() < 17 || m.length() > 17) {
-    DEBUG_G2F("[RING] connect-mac: invalid MAC '%s' (need aa:bb:cc:dd:ee:ff)",
+    DEBUG_RING_LIFECYCLEF("[RING] connect-mac: invalid MAC '%s' (need aa:bb:cc:dd:ee:ff)",
               m.c_str());
     return false;
   }
-  gRingConnectTaskActive = true;
-  gRingConnectTaskSinceMs = millis();
+  if (!g2RingInit()) return false;
+  uint32_t cancelGeneration = 0;
   BleConnectJob job{};
   job.kind = BleConnectKind::RING_MAC;
+  {
+    RingCompletionGuard completion;
+    if (!completion || !ringConnectGateOpen(&cancelGeneration)) return false;
+    job.cancelEpoch = cancelGeneration;
+    if (!blePeerBeginManualLearn(BLE_PEER_R1_RING,
+                                 job.peerIntentGeneration,
+                                 job.peerIdentityGeneration)) {
+      DEBUG_RING_LIFECYCLEF("[RING] Direct connect rejected — no current peer owner authority");
+      g2RingConnectMarkComplete();
+      return false;
+    }
+  }
   // 17 chars + NUL fits exactly in the 18-byte mac buffer.
   memcpy(job.mac, m.c_str(), 17);
   job.mac[17] = '\0';
   if (!g2SubmitBleConnect(job)) {
-    BROADCAST_PRINTF("[RING] Connect submit FAILED (mac) — worker queue full or BLE not ready");
+    ERROR_RINGF("Connect submit FAILED (mac) — worker queue full or BLE not ready");
     ringNoteConnectFailure("submit", 0);
-    gRingConnectTaskActive = false;
+    g2RingConnectMarkComplete();
     return false;
   }
   return true;
 }
 
+bool g2RingPrepareForStackTeardown(uint32_t timeoutMs) {
+  (void)ringBeginLogicalDown("disconnect");
+  // A manual scan can occupy the sole central worker for up to 300 seconds.
+  // Stop it only after releasing the completion mutex.
+  g2CancelActiveRingScan();
+  portENTER_CRITICAL(&gRingScanCallbackMux);
+  const bool scanCallbacksIdle = !gRingScanCallbackAdmission &&
+      gRingScanCallbacksInFlight == 0;
+  portEXIT_CRITICAL(&gRingScanCallbackMux);
+  if (!scanCallbacksIdle) {
+    DEBUG_RING_LIFECYCLEF("[RING] stack teardown deferred: scan callback active");
+    return false;
+  }
+  // Logical down was published before the callback/owner barriers. Any
+  // producer which has not entered a write now fails its cheap online check.
+  ringWakeOwner();
+
+  const uint32_t started = millis();
+  if (!bleCentralTxTake(timeoutMs)) {
+    DEBUG_RING_LIFECYCLEF("[RING] stack teardown deferred: central TX gate busy");
+    return false;
+  }
+
+  bool writeLocked = false;
+  if (gRing.writeMutex) {
+    const uint32_t elapsed = millis() - started;
+    const uint32_t left = elapsed < timeoutMs ? timeoutMs - elapsed : 0;
+    writeLocked = xSemaphoreTake(gRing.writeMutex, pdMS_TO_TICKS(left)) == pdTRUE;
+    if (!writeLocked) {
+      DEBUG_RING_LIFECYCLEF("[RING] stack teardown deferred: owner write still active");
+      bleCentralTxGive();
+      return false;
+    }
+  }
+
+  // A notify callback may have published a slab immediately before the
+  // offline transition. It never dereferences GATT pointers, but waiting for
+  // the owner to release all published/processing slabs gives teardown an
+  // explicit callback/owner hand-off barrier instead of relying on a delay.
+  while (!ringRxSlabAllFree() && (millis() - started) < timeoutMs) {
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  const bool rxDrained = ringRxSlabAllFree();
+  if (rxDrained) {
+    ringClearGattPointers(/*dropClientPtr=*/true);
+  }
+
+  if (writeLocked) xSemaphoreGive(gRing.writeMutex);
+  bleCentralTxGive();
+  if (!rxDrained) {
+    DEBUG_RING_LIFECYCLEF("[RING] stack teardown deferred: RX owner did not quiesce");
+  }
+  return rxDrained;
+}
+
 void g2RingInvalidateLink() {
   // No GATT calls — stack may already be dead.
   const bool wasConnected = gRing.connected;
-  // Drop the pointer: BLEDevice::deinit frees/invalidates the object, so
-  // keeping it for reaping would leave a dangling pointer.
-  ringClearGattPointers(/*dropClientPtr=*/true);
+  // Drop the pointer only after the boot-lifetime owner has crossed the same
+  // TX/write exclusion used by normal traffic. A raw pointer clear here used
+  // to race ringOwnerWrite() during BLEDevice::deinit().
+  if (!g2RingPrepareForStackTeardown(2000)) {
+    WARN_RINGF("Link invalidation deferred — owner still active; "
+               "full BLE teardown is unsafe");
+    return;
+  }
   if (wasConnected) {
-    DEBUG_G2F("[RING] Link invalidated (BLE stack teardown)");
-    ringPushStatusEvent("disconnect");
-    systemEventPost(SYSEVT_RING_DISCONNECTED,
-                    gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
-                    gRingDeviceAddress.length() > 0 ? gRingDeviceAddress.c_str() : nullptr);
-    sRingWearPosted = 0;
-    blePeerNoteLinkLost(BLE_PEER_R1_RING);
+    DEBUG_RING_LIFECYCLEF("[RING] Link invalidated (BLE stack teardown)");
   }
 }
 
-void g2RingDisconnect() {
-  // After BLEDevice::deinit the client pointer is dangling — never touch it.
-  if (gRing.client && !gRing.clientStale && gRing.connected) {
-    DEBUG_G2F("[RING] Disconnecting");
+void g2RingDisconnect(bool userInitiated) {
+  // Linearize explicit user-down before any pending scan/OPEN can publish a
+  // new link. The worker checks this generation at every blocking boundary.
+  {
+    RingCompletionGuard completion;
+    if (!completion) return;
+    portENTER_CRITICAL(&gRingConnectMux);
+    gRingDisconnecting = true;
+    portEXIT_CRITICAL(&gRingConnectMux);
+    (void)ringBeginLogicalDown("disconnect", userInitiated);
+  }
+  g2CancelActiveRingScan();
+  // Producer admission is now closed. The owner is a boot-lifetime task, so a
+  // connected boolean alone is not a teardown barrier.
+  if (!bleCentralTxTake(2000)) {
+    DEBUG_RING_LIFECYCLEF("[RING] Disconnect deferred: central TX gate busy");
+    portENTER_CRITICAL(&gRingConnectMux);
+    gRingDisconnecting = false;
+    portEXIT_CRITICAL(&gRingConnectMux);
+    return;
+  }
+  const bool writeLocked = !gRing.writeMutex ||
+      xSemaphoreTake(gRing.writeMutex, pdMS_TO_TICKS(2000)) == pdTRUE;
+  if (!writeLocked) {
+    DEBUG_RING_LIFECYCLEF("[RING] Disconnect deferred: owner write still active");
+    bleCentralTxGive();
+    portENTER_CRITICAL(&gRingConnectMux);
+    gRingDisconnecting = false;
+    portEXIT_CRITICAL(&gRingConnectMux);
+    return;
+  }
+  // After BLEDevice::deinit the client pointer is dangling — callers must use
+  // g2RingPrepareForStackTeardown before host teardown so it is nulled first.
+  if (gRing.client && !gRing.clientStale && gRing.client->isConnected()) {
+    DEBUG_RING_LIFECYCLEF("[RING] Disconnecting");
     gRing.client->disconnect();  // onDisconnect clears chars when stack is live
   }
   // Keep the client object for the next connect's stale-replacement reap:
@@ -3072,6 +4175,11 @@ void g2RingDisconnect() {
   // manual ringdisconnect → ringconnect came up connected-but-mute (every TX
   // gate checks clientStale).
   ringClearGattPointers(/*dropClientPtr=*/false);
+  if (gRing.writeMutex) xSemaphoreGive(gRing.writeMutex);
+  bleCentralTxGive();
+  portENTER_CRITICAL(&gRingConnectMux);
+  gRingDisconnecting = false;
+  portEXIT_CRITICAL(&gRingConnectMux);
 }
 
 bool g2RingIsConnected() {
@@ -3111,7 +4219,7 @@ bool g2RingPollVital(uint8_t which) {
     default: return false;
   }
   if (queued) {
-    DEBUG_G2F("[RING] page poll queued %s tx=%lu gen=%lu", tag,
+    DEBUG_RING_TXNF("[RING] page poll queued %s tx=%lu gen=%lu", tag,
               (unsigned long)handle.id, (unsigned long)handle.generation);
   }
   return queued;
@@ -3127,7 +4235,7 @@ bool g2RingQueryDaily(uint8_t cmd) {
   const bool queued = ringEnqueueHealthDataQuery(
       cmd, R1_SUB_DAILY, (uint8_t)(0x20 + cmd), &handle);
   if (queued) {
-    DEBUG_G2F("[RING] daily query queued cmd=0x%02X tx=%lu gen=%lu",
+    DEBUG_RING_TXNF("[RING] daily query queued cmd=0x%02X tx=%lu gen=%lu",
               (unsigned)cmd, (unsigned long)handle.id,
               (unsigned long)handle.generation);
   }
@@ -3184,7 +4292,7 @@ void g2RingGetStatus(char* buf, size_t cap) {
       : 0;
   snprintf(buf, cap,
            "ring=%s name='%s' addr=%s mtu=%u rx=%lu up=%u.%03us "
-           "stack=%lu/%luB (scan=%s)",
+           "stack=%lu/%luB (scan=%s pending=%u)",
            gRing.connected ? "up" : "down",
            gRingDeviceName.length() ? gRingDeviceName.c_str() : "<unknown>",
            gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : "--",
@@ -3193,7 +4301,8 @@ void g2RingGetStatus(char* buf, size_t cap) {
            (unsigned)(upMs / 1000), (unsigned)(upMs % 1000),
            (unsigned long)stackUsed,
            (unsigned long)RING_OWNER_STACK_BYTES,
-           gRingScanFound ? "found" : "not-found");
+           gRingScanFound ? "found" : "not-found",
+           (unsigned)gRingConnectTaskActive);
 }
 
 // =============================================================================
@@ -3212,7 +4321,7 @@ void g2RingGetStatus(char* buf, size_t cap) {
 // temple isn't connected.
 static bool ringSpoofSendOnce(uint32_t magic) {
   if (!gRing.connected) {
-    DEBUG_G2F("[RING] spoof: ring not connected, skipping push");
+    DEBUG_RING_BRIDGEF("[RING] spoof: ring not connected, skipping push");
     return false;
   }
 
@@ -3240,7 +4349,7 @@ static bool ringSpoofSendOnce(uint32_t magic) {
   }
 
   if (!f.battery_valid && !f.hr_valid && !f.hrv_valid && !f.spo2_valid) {
-    DEBUG_G2F("[RING] spoof: cache empty (no fresh telemetry yet) "
+    DEBUG_RING_BRIDGEF("[RING] spoof: cache empty (no fresh telemetry yet) "
               "— nothing to push at t=%lu", (unsigned long)now);
     return false;
   }
@@ -3249,11 +4358,11 @@ static bool ringSpoofSendOnce(uint32_t magic) {
   uint8_t seq = g2AllocSeq();
   size_t envLen = g2BuildRingRawDataPush(seq, magic, f, env, sizeof(env));
   if (envLen == 0) {
-    DEBUG_G2F("[RING] spoof: builder failed (envelope buffer too small?)");
+    DEBUG_RING_BRIDGEF("[RING] spoof: builder failed (envelope buffer too small?)");
     return false;
   }
   bool ok = g2SendToRightTemple(env, envLen);
-  DEBUG_G2F("[RING] spoof TX seq=0x%02X envLen=%u %s — "
+  DEBUG_RING_BRIDGEF("[RING] spoof TX seq=0x%02X envLen=%u %s — "
             "batt=%s%d hr=%s%d hrv=%s%d spo2=%s%d",
             seq, (unsigned)envLen, ok ? "sent" : "DROPPED(R-temple down?)",
             f.battery_valid ? "" : "?", f.battery,
@@ -3277,7 +4386,7 @@ static bool ringSpoofSendOnce(uint32_t magic) {
 // avoiding per-action tasks): one persistent task, multiple sequenced
 // writes inside it. DRAM cost is one task TCB + 4KB stack.
 static void ringSpoofTaskBody(void* /*arg*/) {
-  DEBUG_G2F("[RING] spoof task: started, interval=%us", (unsigned)gSpoofIntervalSec);
+  DEBUG_RING_BRIDGEF("[RING] spoof task: started, interval=%us", (unsigned)gSpoofIntervalSec);
   uint32_t magicCounter = 0;
   while (gSpoofEnabled) {
     if (gRing.connected && gRing.writeChar) {
@@ -3286,7 +4395,7 @@ static void ringSpoofTaskBody(void* /*arg*/) {
       auto sendQ = [](uint8_t cmd, uint8_t sub, uint8_t ckey, const char* tag) {
         G2RingTransactionHandle handle{};
         if (ringEnqueueHealthDataQuery(cmd, sub, ckey, &handle)) {
-          DEBUG_G2F("[RING] spoof poll queued %s tx=%lu", tag,
+          DEBUG_RING_BRIDGEF("[RING] spoof poll queued %s tx=%lu", tag,
                     (unsigned long)handle.id);
         }
       };
@@ -3302,7 +4411,7 @@ static void ringSpoofTaskBody(void* /*arg*/) {
         G2RingTransactionHandle handle{};
         if (ringEnqueueSystemQuery(R1_SUB_DEVICE_STATUS,
                                    /*coalesceKey=*/5, &handle)) {
-          DEBUG_G2F("[RING] spoof poll queued deviceStatus tx=%lu",
+          DEBUG_RING_BRIDGEF("[RING] spoof poll queued deviceStatus tx=%lu",
                     (unsigned long)handle.id);
         }
       }
@@ -3313,7 +4422,7 @@ static void ringSpoofTaskBody(void* /*arg*/) {
       uint32_t mag = G2_MAGIC_RING_RAW_PUSH + (magicCounter++ & 0x7F);
       ringSpoofSendOnce(mag);
     } else {
-      DEBUG_G2F("[RING] spoof task: ring not connected — skipping cycle");
+      DEBUG_RING_BRIDGEF("[RING] spoof task: ring not connected — skipping cycle");
     }
 
     // Sleep the remainder of the interval. Small ticks so an `off` flip
@@ -3327,7 +4436,7 @@ static void ringSpoofTaskBody(void* /*arg*/) {
       remain -= step;
     }
   }
-  DEBUG_G2F("[RING] spoof task: exiting");
+  DEBUG_RING_BRIDGEF("[RING] spoof task: exiting");
   gSpoofTaskHandle = nullptr;
   vTaskDelete(nullptr);
 }
@@ -3338,11 +4447,12 @@ static bool ringSpoofStart(uint32_t intervalSec) {
   if (intervalSec > 600) intervalSec = 600;
   gSpoofIntervalSec = intervalSec;
   gSpoofEnabled     = true;
+  taskStackRecord("ring_spoof", 4096);
   BaseType_t rc = xTaskCreatePinnedToCore(ringSpoofTaskBody, "ring_spoof",
                               /*stack*/ 4096, nullptr,
                               /*prio*/  4,    &gSpoofTaskHandle, APP_CORE);
   if (rc != pdPASS) {
-    DEBUG_G2F("[RING] spoof task: xTaskCreate failed (rc=%d)", (int)rc);
+    DEBUG_RING_BRIDGEF("[RING] spoof task: xTaskCreate failed (rc=%d)", (int)rc);
     gSpoofEnabled    = false;
     gSpoofTaskHandle = nullptr;
     return false;
@@ -3375,6 +4485,7 @@ static const char* cmd_ringstatus(const String& args) {
     CompactJson j(buf, sizeof(buf));
     j.kv("schema", 1)
      .kv("connected", (bool)gRing.connected)
+     .kv("connectPending", (bool)gRingConnectTaskActive)
      .kv("name", gRingDeviceName.length() ? gRingDeviceName.c_str() : "")
      .kv("addr", gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : "")
      .kv("mtu", (unsigned)gRing.mtu)
@@ -3403,6 +4514,10 @@ static const char* cmd_ringstatus(const String& args) {
 //     - Hangs ~30s then times out → no response from peer at that address
 static const char* cmd_ringconnect(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // This authenticated, user-originated command is the Ring pairing intent.
+  // Automatic reconnect and passive MAC persistence must never manufacture
+  // owner authority on their own.
+  bleStampPairedByIfBlank(BLE_PEER_R1_RING);
   CommandArgs ca(args);
   String a0 = ca.arg(0);
   a0.toLowerCase();
@@ -3424,7 +4539,7 @@ static const char* cmd_ringconnect(const String& args) {
       return g2RingIsConnected() ? "RING: already connected"
                                  : "Error: RING: reconnect failed to start connect task";
     }
-    return "RING: reconnect started — use ringstatus to watch";
+    return "RING: reconnect queued — use ringstatus to watch";
   }
 
   if (ca.count() >= 1) {
@@ -3434,7 +4549,7 @@ static const char* cmd_ringconnect(const String& args) {
     }
     EXT_RAM_BSS_ATTR static char buf[200];
     snprintf(buf, sizeof(buf),
-             "RING: direct-connect to %s started (no scan) — watch ringstatus / log",
+             "RING: direct-connect to %s queued (no scan) — watch ringstatus / log",
              mac.c_str());
     return buf;
   }
@@ -3442,32 +4557,19 @@ static const char* cmd_ringconnect(const String& args) {
     return gRing.connected ? "RING: already connected"
                            : "RING: connect failed (see log)";
   }
-  return "RING: connect task started — use ringstatus to watch";
+  return "RING: connect queued — use ringstatus to watch";
 }
 
 static const char* cmd_ringdisconnect(const String& /*args*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  blePeerNoteUserDisconnect(BLE_PEER_R1_RING);
-  g2RingDisconnect();
+  g2RingDisconnect(/*userInitiated=*/true);
   return "RING: disconnect requested";
 }
 
-static const char* cmd_ringverbose(const String& args) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(args);
-  String a = ca.arg(0); a.toLowerCase();
-  if (a == "on")        gRingDumpVerbose = true;
-  else if (a == "off")  gRingDumpVerbose = false;
-  else                  gRingDumpVerbose = !gRingDumpVerbose;
-  return gRingDumpVerbose ? "RING verbose: on (full hex dump of every notify)"
-                          : "RING verbose: off (header decode only)";
-}
-
 // ringscan [seconds]
-// Dedicated ring-only scan. Default 30s, max 300s. Doesn't early-terminate
-// on glasses-found like the shared g2scan does. Blocks the CLI worker for
-// up to `seconds` seconds while scanning. Use a larger value if the ring
-// is being elusive.
+// Dedicated ring-only scan. It is queued on the same central-operation
+// worker as G2/Ring connects so it cannot replace BLEScan's process-global
+// callback during an in-flight create-connection.
 static const char* cmd_ringscan(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(args);
@@ -3476,16 +4578,12 @@ static const char* cmd_ringscan(const String& args) {
     long n = ca.argInt(0, 30);
     if (n > 0 && n <= 300) seconds = (uint32_t)n;
   }
-  EXT_RAM_BSS_ATTR static char buf[200];
-  if (g2RingScan(seconds)) {
-    snprintf(buf, sizeof(buf),
-             "RING: scan found %s @ %s — run 'ringconnect' to connect",
-             gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
-    return buf;
+  if (!g2RingScanAsync(seconds)) {
+    return "Error: RING: scan already queued/running or BLE worker unavailable";
   }
+  EXT_RAM_BSS_ATTR static char buf[128];
   snprintf(buf, sizeof(buf),
-           "RING: scan timed out after %us — ring not advertising. "
-           "Tap to wake / check battery / move closer, then retry.",
+           "RING: %us scan queued — use ringstatus, then ringconnect",
            (unsigned)seconds);
   return buf;
 }
@@ -3504,6 +4602,12 @@ struct RingPendingRawSet {
   uint8_t payload[R1_MAX_PAYLOAD]{};
 };
 static RingPendingRawSet sPendingRawSet;
+
+static void ringRawSetConfirmAccepted(void* opaque) {
+  const RingPendingRawSet* candidate =
+      static_cast<const RingPendingRawSet*>(opaque);
+  if (candidate) sPendingRawSet = *candidate;
+}
 
 static const char* ringConfirmRawSet(void* /*userData*/) {
   static char reply[180];
@@ -3654,7 +4758,7 @@ static const char* cmd_ringquery(const String& args) {
       }
       // Debug breadcrumb so future "status= didn't take" mysteries can be
       // verified at a glance instead of guessing.
-      DEBUG_G2F("[RING] raw-args: count=%d payloadHex='%s' statusByte=0x%02X",
+    DEBUG_RING_DUMPF("[RING] raw-args: count=%d payloadHex='%s' statusByte=0x%02X",
                 ca.count(), raw.c_str(), (unsigned)statusByte);
       // Pass 2: parse the hex payload from whatever remains. Strip everything
       // that isn't a hex digit (handles "0x", spaces, colons in the input).
@@ -3703,7 +4807,7 @@ static const char* cmd_ringquery(const String& args) {
     }
 
     tag = "raw";
-    DEBUG_G2F("[RING] raw: mod=%lu cmd=%lu sub=%lu status=0x%02X (%s/%s/%s) payloadLen=%u",
+    DEBUG_RING_DUMPF("[RING] raw: mod=%lu cmd=%lu sub=%lu status=0x%02X (%s/%s/%s) payloadLen=%u",
               (unsigned long)mod, (unsigned long)cmd, (unsigned long)sub,
               (unsigned)statusByte,
               r1StatusTypeName(statusType),
@@ -3711,18 +4815,18 @@ static const char* cmd_ringquery(const String& args) {
               r1StatusAckName(statusAck),
               (unsigned)payloadLen);
     if (statusMethod == R1_STATUS_METHOD_SET) {
-      sPendingRawSet = RingPendingRawSet{};
-      sPendingRawSet.active = true;
-      sPendingRawSet.originalAdmin = currentExecIsAdmin();
-      sPendingRawSet.auth = currentAuthContext();
-      sPendingRawSet.module = (uint8_t)mod;
-      sPendingRawSet.cmd = (uint8_t)cmd;
-      sPendingRawSet.subCmd = (uint8_t)sub;
-      sPendingRawSet.statusType = statusType;
-      sPendingRawSet.statusMethod = statusMethod;
-      sPendingRawSet.statusAck = statusAck;
-      sPendingRawSet.payloadLen = (uint16_t)payloadLen;
-      if (payloadLen) memcpy(sPendingRawSet.payload, payload, payloadLen);
+      RingPendingRawSet candidate{};
+      candidate.active = true;
+      candidate.originalAdmin = currentExecIsAdmin();
+      candidate.auth = currentAuthContext();
+      candidate.module = (uint8_t)mod;
+      candidate.cmd = (uint8_t)cmd;
+      candidate.subCmd = (uint8_t)sub;
+      candidate.statusType = statusType;
+      candidate.statusMethod = statusMethod;
+      candidate.statusAck = statusAck;
+      candidate.payloadLen = (uint16_t)payloadLen;
+      if (payloadLen) memcpy(candidate.payload, payload, payloadLen);
       String prompt = "Send raw R1 SET ";
       prompt += String((unsigned)mod);
       prompt += "/";
@@ -3731,11 +4835,11 @@ static const char* cmd_ringquery(const String& args) {
       prompt += String((unsigned)sub);
       prompt += "? This may change ring state.";
       if (!cliRequestConfirm(prompt, String("ringquery ") + args,
-                             ringConfirmRawSet, ringCancelRawSet, nullptr)) {
-        sPendingRawSet.active = false;
+                             ringConfirmRawSet, ringCancelRawSet, nullptr,
+                             ringRawSetConfirmAccepted, &candidate)) {
         return "Error: another interactive mode is active; raw SET not queued";
       }
-      return "Type 'yes' to queue this raw SET, or anything else to cancel.";
+      return cliConfirmPromptResponse();
     }
     queued = g2RingSubmitRawTransaction(
         (uint8_t)mod, (uint8_t)cmd, (uint8_t)sub,
@@ -3764,7 +4868,7 @@ static const char* cmd_ringquery(const String& args) {
   }
 
   if (!queued) return "Error: RING: transaction was not queued";
-  DEBUG_G2F("[RING] query queued '%s' tx=%lu gen=%lu",
+  DEBUG_RING_TXNF("[RING] query queued '%s' tx=%lu gen=%lu",
             tag, (unsigned long)handle.id, (unsigned long)handle.generation);
   snprintf(ret, sizeof(ret),
            "RING: query '%s' queued (tx=%lu gen=%lu). Inspect status/log for the response.",
@@ -3856,7 +4960,7 @@ static volatile bool   gBridgeHbEnabled    = false;
 static TaskHandle_t    gBridgeHbTaskHandle = nullptr;
 
 static void ringBridgeHeartbeatBody(void* /*arg*/) {
-  DEBUG_G2F("[RING] bridge-heartbeat task: started (30s cadence)");
+  DEBUG_RING_BRIDGEF("[RING] bridge-heartbeat task: started (30s cadence)");
   while (gBridgeHbEnabled) {
     uint8_t env[40];
     size_t envLen = g2BuildDevCfgHeartbeat(g2AllocSeq(),
@@ -3864,7 +4968,7 @@ static void ringBridgeHeartbeatBody(void* /*arg*/) {
                                            env, sizeof(env));
     if (envLen > 0) {
       bool ok = g2SendToRightTemple(env, envLen);
-      DEBUG_G2F("[RING] bridge-heartbeat → R: %s",
+      DEBUG_RING_BRIDGEF("[RING] bridge-heartbeat → R: %s",
                 ok ? "sent" : "DROPPED (R-temple down)");
     }
     // Sleep 30s in 500ms slices so an `off` flip lands quickly.
@@ -3875,7 +4979,7 @@ static void ringBridgeHeartbeatBody(void* /*arg*/) {
       remain -= step;
     }
   }
-  DEBUG_G2F("[RING] bridge-heartbeat task: exiting");
+  DEBUG_RING_BRIDGEF("[RING] bridge-heartbeat task: exiting");
   gBridgeHbTaskHandle = nullptr;
   vTaskDelete(nullptr);
 }
@@ -3883,11 +4987,12 @@ static void ringBridgeHeartbeatBody(void* /*arg*/) {
 static bool ringBridgeHeartbeatStart() {
   if (gBridgeHbEnabled) return true;
   gBridgeHbEnabled = true;
+  taskStackRecord("ring_bridge_hb", 3072);
   BaseType_t rc = xTaskCreatePinnedToCore(ringBridgeHeartbeatBody, "ring_bridge_hb",
                               /*stack*/ 3072, nullptr,
                               /*prio*/  3,    &gBridgeHbTaskHandle, APP_CORE);
   if (rc != pdPASS) {
-    DEBUG_G2F("[RING] bridge-heartbeat: xTaskCreate failed (rc=%d)", (int)rc);
+    DEBUG_RING_BRIDGEF("[RING] bridge-heartbeat: xTaskCreate failed (rc=%d)", (int)rc);
     gBridgeHbEnabled    = false;
     gBridgeHbTaskHandle = nullptr;
     return false;
@@ -3966,6 +5071,8 @@ static const char* cmd_ringbridge(const String& args) {
   EXT_RAM_BSS_ATTR static char ret[300];
   CommandArgs ca(args);
   String sub = ca.arg(0); sub.toLowerCase();
+  BlePeerSavedTargetSnapshot savedRing{};
+  (void)blePeerSavedTargetSnapshot(BLE_PEER_R1_RING, savedRing);
 
   if (sub == "" || sub == "status") {
     // Decode the most recent connRet for a friendly hint.
@@ -3988,7 +5095,7 @@ static const char* cmd_ringbridge(const String& args) {
              "tempStatus: connectRing=%s%u connRet=%u(%s)%s "
              "fwd-cache: hr=%s%u hrv=%s%d spo2=%s%u batt=%s%u",
              gBridgeRequested ? "BRIDGE (temple owns ring)" : "DIRECT (we own ring)",
-             gBlePeerData[BLE_PEER_R1_RING].autoReconnect ? "on" : "off",
+             blePeerAutoReconnectEnabled(BLE_PEER_R1_RING) ? "on" : "off",
              gRing.connected ? "up" : "down",
              gBridgeHbEnabled ? "on" : "off",
              gBridgeProgress.hasConnectRing ? "" : "?",
@@ -4011,7 +5118,7 @@ static const char* cmd_ringbridge(const String& args) {
       mac  = gRingDeviceAddress;
       name = gRingDeviceName;
     } else {
-      mac = gBlePeerData[BLE_PEER_R1_RING].mac1;
+      mac = savedRing.target.mac1;
     }
     mac.trim(); name.trim();
     if (mac.length() < 17) {
@@ -4062,7 +5169,7 @@ static const char* cmd_ringbridge(const String& args) {
     {
       G2RingTransactionHandle advHandle{};
       if (!ringEnqueueAdvStart(&advHandle)) {
-        DEBUG_G2F("[RING] ringbridge: WARN dual-MAC advStart not queued; "
+        DEBUG_RING_BRIDGEF("[RING] ringbridge: WARN dual-MAC advStart not queued; "
                   "trigger will go without refresh");
       } else {
         // Dormant diagnostic path: wait only for the owner-correlated ACK;
@@ -4108,7 +5215,7 @@ static const char* cmd_ringbridge(const String& args) {
     // Same payload shape as `on`, but connectRing=false — releases the
     // ring on the temple side. Use cached MAC/name.
     String mac  = gRingDeviceAddress.length() ? gRingDeviceAddress
-                                              : gBlePeerData[BLE_PEER_R1_RING].mac1;
+                                              : String(savedRing.target.mac1);
     String name = gRingDeviceName.length() ? gRingDeviceName : String("EVEN R1");
     mac.trim();
     if (mac.length() < 17) {
@@ -4151,7 +5258,6 @@ extern const CommandEntry g2RingCommands[] = {
   { "ringscan",       "Scan for the R1 ring: ringscan [seconds] (default 30, max 300)", false, cmd_ringscan, "Usage: ringscan [seconds] (1..300, default 30)" },
   { "ringconnect",    "Connect to the R1 ring: ringconnect [mac|reconnect]", true, cmd_ringconnect, "Usage: ringconnect [mac|reconnect]  (no arg = scan-then-connect; mac = direct; reconnect = drop+settle+connect)" },
   { "ringdisconnect", "Disconnect from the R1 ring",               true, cmd_ringdisconnect },
-  { "ringverbose",    "Toggle full hex dump of ring notify frames", false, cmd_ringverbose, "Usage: ringverbose [<on|off>]  (bare = toggle)" },
   { "ringquery",      "Queue an R1 query: ringquery <wear|hr|hrv|spo2|temp|activity|sleep|raw> [type]", false, cmd_ringquery, "Usage: ringquery <wear|hr|hrv|spo2|temp|activity|sleep> [daily|point|measure] | raw <module> <cmd> <subCmd> [hex_payload] [status=NN]  (raw is admin-only; SET requires confirmation)" },
   // NOTE: `ringtoglasses` and `ringbridge` are UNREGISTERED on purpose.
   // Both targeted getting ring data onto the G2's built-in health UI, and

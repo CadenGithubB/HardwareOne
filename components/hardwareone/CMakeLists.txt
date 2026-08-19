@@ -14,7 +14,9 @@ set(HW_CFG_DISPLAY_TYPE 0)
 set(HW_CFG_INPUT_DEVICE_TYPE 0)  # 0 = NONE; header values 1/2 select a driver
 set(HW_CFG_ENABLE_MQTT 0)
 set(HW_CFG_ENABLE_HTTPS 0)
-set(HW_CFG_ENABLE_LLM 0)
+set(HW_CFG_ENABLE_LLM_BACKEND 0)         # the LLM feature (registry/chat/commands/surfaces)
+set(HW_CFG_ENABLE_LLM_SOURCE_ONBOARD 0)  # on-device PSRAM engine as a source
+set(HW_CFG_ENABLE_LLM_SOURCE_CM5 0)      # CM5 co-processor as a source
 set(HW_CFG_ENABLE_MAPS 0)
 set(HW_CFG_ENABLE_AUTOMATION 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
@@ -25,6 +27,7 @@ set(HW_CFG_ENABLE_BLUETOOTH 0)
 set(HW_CFG_ENABLE_G2_GLASSES 0)
 set(HW_CFG_ENABLE_R1_HEALTH 0)
 set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER 0)
+set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_FAN 0)
 
 if(EXISTS "${hw_cfg_file}")
     file(READ "${hw_cfg_file}" HW_CFG_CONTENT)
@@ -68,9 +71,23 @@ if(EXISTS "${hw_cfg_file}")
         set(HW_CFG_ENABLE_HTTPS "${CMAKE_MATCH_1}")
     endif()
 
-    string(REGEX MATCH "#define[ \t]+ENABLE_ONDEVICE_LLM[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    # LLM: one feature flag plus one flag per answer SOURCE. Each must stay a
+    # plain literal in the header — these regexes require whitespace then digits
+    # straight after the name, so ENABLE_LLM_BACKEND cannot swallow a longer
+    # name like ENABLE_LLM_BACKEND_FOO, and the three never alias each other.
+    string(REGEX MATCH "#define[ \t]+ENABLE_LLM_BACKEND[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_LLM "${CMAKE_MATCH_1}")
+        set(HW_CFG_ENABLE_LLM_BACKEND "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_LLM_SOURCE_ONBOARD[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_LLM_SOURCE_ONBOARD "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_LLM_SOURCE_CM5[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_LLM_SOURCE_CM5 "${CMAKE_MATCH_1}")
     endif()
 
     string(REGEX MATCH "#define[ \t]+ENABLE_MAPS[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
@@ -121,6 +138,11 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+ENABLE_RASPBERRY_PI_HOST_POWER[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_RASPBERRY_PI_HOST_FAN[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_FAN "${CMAKE_MATCH_1}")
     endif()
 endif()
 
@@ -241,6 +263,7 @@ set(hardwareone_srcs
         System_TaskUtils.cpp
         System_User.cpp
         System_UartLink.cpp
+        System_Cm5Presence.cpp
         System_LiveAudio.cpp
         System_WiFi.cpp
         System_Camera_DVP.cpp
@@ -249,6 +272,7 @@ set(hardwareone_srcs
         System_ESPSR.cpp
         System_VFS.cpp
         System_Microphone.cpp
+        System_Dictation.cpp
         HAL_Audio.cpp
         System_SensorRegistry.cpp
         System_Notifications.cpp
@@ -260,11 +284,14 @@ set(hardwareone_srcs
         System_Clock.cpp
 )
 
-if(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER GREATER 0)
-    list(APPEND hardwareone_srcs System_RaspberryPi.cpp)
-    message(STATUS "Raspberry Pi/CM5 host-power control ENABLED")
+# cm5 power and cm5 fan share one module (System_Cm5HostControl.cpp) but keep
+# independent flags, so the source is compiled when either one is on and the
+# in-file guards drop whichever protocol is off.
+if(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER GREATER 0 OR HW_CFG_ENABLE_RASPBERRY_PI_HOST_FAN GREATER 0)
+    list(APPEND hardwareone_srcs System_Cm5HostControl.cpp)
+    message(STATUS "Raspberry Pi/CM5 host control ENABLED (power=${HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER} fan=${HW_CFG_ENABLE_RASPBERRY_PI_HOST_FAN})")
 else()
-    message(STATUS "Raspberry Pi/CM5 host-power control DISABLED (skipping System_RaspberryPi.cpp)")
+    message(STATUS "Raspberry Pi/CM5 host control DISABLED (skipping System_Cm5HostControl.cpp)")
 endif()
 
 # ── Per-feature source lists (added below based on HW_CFG_* flags) ──
@@ -452,22 +479,50 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
     endif()
 endif()
 
-if(HW_CFG_ENABLE_LLM GREATER 0)
+# ---------------------------------------------------------------------------
+# LLM: one feature, N sources.
+#
+#   ENABLE_LLM_BACKEND        the feature — model registry, conversation layer,
+#                             CLI commands, and every UI surface.
+#   ENABLE_LLM_SOURCE_ONBOARD the on-device PSRAM inference engine, as ONE source
+#                             of answers. Its weight is the engine TUs below plus
+#                             the esp-dsp dependency.
+#   ENABLE_LLM_SOURCE_CM5     the CM5 co-processor as another source (no TU of its
+#                             own yet — lands with the backend registry).
+#
+# Illegal combinations are rejected by #error in System_BuildConfig.h, not here;
+# CMake only decides which files reach the compiler. Surfaces follow the feature
+# flag plus whatever capability flag they already depended on, which is the §5
+# "USER-FACING APPS" convention in the header.
+# ---------------------------------------------------------------------------
+if(HW_CFG_ENABLE_LLM_SOURCE_ONBOARD GREATER 0)
     list(APPEND hardwareone_srcs System_LLM.cpp)
     list(APPEND hardwareone_srcs System_LLM_Kernels.cpp)
     list(APPEND hardwareone_srcs System_LLM_Sampler.cpp)
     list(APPEND hardwareone_srcs System_LLM_Tokenizer.cpp)
     list(APPEND hardwareone_srcs System_LLM_Model.cpp)
     list(APPEND hardwareone_srcs System_LLM_Menu.cpp)
-    list(APPEND hardwareone_srcs System_LLMChat.cpp)
     list(APPEND hardwareone_requires espressif__esp-dsp)
+    message(STATUS "LLM source: ONBOARD engine ENABLED")
+endif()
+
+if(HW_CFG_ENABLE_LLM_BACKEND GREATER 0)
+    list(APPEND hardwareone_srcs System_LLMBackend.cpp)
+    list(APPEND hardwareone_srcs System_LLMCommands.cpp)
+    list(APPEND hardwareone_srcs System_LLMChat.cpp)
+    if(HW_CFG_ENABLE_LLM_SOURCE_CM5 GREATER 0)
+        list(APPEND hardwareone_srcs System_LLMCm5.cpp)
+        message(STATUS "LLM source: CM5 co-processor ENABLED")
+    endif()
     if(HW_CFG_ENABLE_HTTP_SERVER)
         list(APPEND hardwareone_srcs WebPage_LLM.cpp)
     endif()
+    # OLED modes are always compiled and self-gate on ENABLE_OLED_DISPLAY —
+    # see the OLED block above; no CMake-side display gate belongs here.
     list(APPEND hardwareone_srcs OLED_Mode_LLM.cpp)
-    message(STATUS "On-device LLM ENABLED")
+    message(STATUS "LLM feature ENABLED (sources: onboard=${HW_CFG_ENABLE_LLM_SOURCE_ONBOARD} cm5=${HW_CFG_ENABLE_LLM_SOURCE_CM5})")
 else()
-    message(STATUS "On-device LLM DISABLED")
+    message(STATUS "LLM feature DISABLED")
 endif()
 
 idf_component_register(

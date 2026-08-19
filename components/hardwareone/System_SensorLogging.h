@@ -12,6 +12,14 @@
 #define SENSOR_LOGGING_H
 
 #include <Arduino.h>
+// Required: this header gates the R1 health declarations on ENABLE_R1_HEALTH.
+// Without it the macro is undefined here, every `#if ENABLE_R1_HEALTH` below
+// silently evaluates false, and the skipped `extern` leaves the matching
+// `const CommandEntry healthCommands[]` definition with INTERNAL linkage
+// (const implies static at namespace scope in C++) — which links fine until
+// another TU that does see the macro references it. Same trap as any
+// gated-include/ungated-use pair.
+#include "System_BuildConfig.h"
 
 // Sensor selection bitmask
 #define LOG_THERMAL  (1 << 0)
@@ -133,12 +141,16 @@ void sensorLogAutoStart();
 // Off removes LOG_R1; stops logging when no other sensors remain.
 bool healthLoggingIsActive();
 const char* healthLoggingSet(bool on);   // returns SUCCESS:/Error: message (static/debug buf)
+// The three R1 health commands exist only when the feature is compiled — they
+// are registered through healthCommands[] below, not sensorLoggingCommands[].
+#if ENABLE_R1_HEALTH
 const char* cmd_healthlogging(const String& argsInput);
 const char* cmd_healthstatus(const String& argsInput);
 // Byte-concatenate sensor logs in the caller's order (same pattern as
 // gpstrackmerge — and the same defects; see that command's usage text).
 // Not TEXT-only despite the name: an extensionless output gets .csv appended.
 const char* cmd_healthlogmerge(const String& argsInput);
+#endif
 // At-rest sealing mode/status/export — docs/HEALTH_AT_REST_ENCRYPTION_PLAN.md
 const char* cmd_capturecrypt(const String& argsInput);
 
@@ -171,6 +183,10 @@ const char* cmd_sensorlog(const String& originalCmd);
 struct CommandEntry;
 extern const CommandEntry sensorLoggingCommands[];
 extern const size_t sensorLoggingCommandsCount;
+#if ENABLE_R1_HEALTH
+extern const CommandEntry healthCommands[];
+extern const size_t healthCommandsCount;
+#endif
 
 // Settings module
 struct SettingsModule;

@@ -520,13 +520,14 @@ static void spawnAIWorker(AIWorkerKind kind, const char* heading, const char* bo
   } else {
     a->body[0] = '\0';
   }
+  taskStackRecord("g2_ai_test", 4096);
   if (xTaskCreatePinnedToCore(aiWorker, "g2_ai_test", 4096, a, 5, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] AI test: xTaskCreate failed (kind=%u)", (unsigned)kind);
     free(a);
   }
 }
 
-// imgProbeWorker / spawnImgProbeWorker are defined further down, after
+// imgProbeWorkerImpl / spawnImgProbeWorker are defined further down, after
 // buildImageRows() and gRowPtrs[] (the worker calls into both to redraw
 // the picker when a probe burst finishes). Forward-decl so the
 // dispatcher branch can reference spawnImgProbeWorker.
@@ -936,11 +937,11 @@ static size_t buildImageAnimatedChooseRows() {
   return row;
 }
 
-// Forward-decl: imgProbeWorker (below) rebuilds whichever sub-list the
+// Forward-decl: imgProbeWorkerImpl (below) rebuilds whichever sub-list the
 // probe was launched from, including DISPLAY_COMBO whose builder is
 // defined further down with the rest of the Display section.
 static size_t buildDisplayComboRows();
-// Selection Edges bucket — needed by imgProbeWorker so it can rebuild
+// Selection Edges bucket — needed by imgProbeWorkerImpl so it can rebuild
 // the right picker after the dual-pane CREATE probe (test S) returns.
 // Defined further down with the rest of the Selection Patterns
 // builders.
@@ -957,12 +958,6 @@ static size_t buildSelectionEdgesRows();
 // reason the existing AI tests use spawnAIWorker. Mirror that pattern:
 // the worker runs the probe AND rebuilds the picker afterward, so the
 // dispatcher returns immediately and the notify thread stays live.
-
-struct ImgProbeTaskCtx {
-  ImgProbeFn     fn;
-  StackType_t*   stack;
-  StaticTask_t*  tcb;
-};
 
 // Captured at spawn time so the async worker (which runs after the tap
 // dispatcher returns and its G2HijackCtxGuard has expired) can re-apply
@@ -1042,17 +1037,7 @@ static void imgProbeWorkerImpl(ImgProbeFn fn) {
   g2ShowListPage(gRowPtrs, n);
 }
 
-// xTaskCreateStatic entry: frees SPIRAM stack + static TCB, then deletes self.
-static void imgProbeWorker(void* arg) {
-  ImgProbeTaskCtx* ctx = static_cast<ImgProbeTaskCtx*>(arg);
-  imgProbeWorkerImpl(ctx->fn);
-  heap_caps_free(ctx->stack);
-  heap_caps_free(ctx->tcb);
-  heap_caps_free(ctx);
-  vTaskDelete(nullptr);
-}
-
-// Fallback when SPIRAM stack alloc fails: same 8 KB from internal heap.
+// Task entry: runs the probe on a normal internal-heap stack.
 static void imgProbeWorkerInternalStack(void* arg) {
   // void* → function pointer: reinterpret_cast only (not static_cast).
   imgProbeWorkerImpl(reinterpret_cast<ImgProbeFn>(arg));
@@ -1084,48 +1069,19 @@ static bool spawnImgProbeWorker(ImgProbeFn fn) {
   // the rule backwards, though the arithmetic happened to come out right.)
   const uint32_t kStackWords = kStackBytes / sizeof(StackType_t);
 
-  // Prefer normal internal stack first (no SPIRAM stack quirks). When dual
-  // G2 + WiFi leaves too little contiguous internal heap, xTaskCreate fails
-  // and we fall back to an 8 KB stack in PSRAM (sdkconfig:
-  // CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y) via xTaskCreateStatic.
+  // Internal-heap stack only. This used to fall back to an 8 KB PSRAM stack
+  // under memory pressure; removed 2026-08-11 — task stacks in PSRAM are
+  // prohibited on this hardware (see feedback: historically caused crashes
+  // during flash ops/ISRs). Under pressure the probe now fails loudly and
+  // the picker stays usable, instead of running on a risky stack.
+  taskStackRecord("g2_img_probe", kStackWords);
   if (xTaskCreatePinnedToCore(imgProbeWorkerInternalStack, "g2_img_probe", kStackWords,
                   reinterpret_cast<void*>(fn), 5, nullptr, APP_CORE) == pdPASS) {
     return true;
   }
 
-  ImgProbeTaskCtx* ctx = static_cast<ImgProbeTaskCtx*>(
-      heap_caps_malloc(sizeof(ImgProbeTaskCtx), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (!ctx) {
-    DEBUG_G2F("[G2] Image probe: ctx malloc failed (internal) dram=%u largest=%u",
-              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    return false;
-  }
-  ctx->fn = fn;
-  ctx->stack = static_cast<StackType_t*>(
-      heap_caps_malloc(kStackBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  ctx->tcb = static_cast<StaticTask_t*>(heap_caps_malloc(
-      sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-
-  if (ctx->stack && ctx->tcb) {
-    TaskHandle_t h = xTaskCreateStaticPinnedToCore(imgProbeWorker, "g2_img_probe", kStackWords,
-                                       ctx, 5, ctx->stack, ctx->tcb, APP_CORE);
-    if (h) {
-      DEBUG_G2F("[G2] Image probe: using PSRAM stack (internal xTaskCreate failed)");
-      return true;
-    }
-    DEBUG_G2F("[G2] Image probe: xTaskCreateStatic failed");
-    heap_caps_free(ctx->stack);
-    heap_caps_free(ctx->tcb);
-    heap_caps_free(ctx);
-  } else {
-    if (ctx->stack) heap_caps_free(ctx->stack);
-    if (ctx->tcb) heap_caps_free(ctx->tcb);
-    heap_caps_free(ctx);
-    DEBUG_G2F("[G2] Image probe: SPIRAM stack/tcb alloc failed");
-  }
-
-  DEBUG_G2F("[G2] Image probe: all spawn paths failed (internal dram=%u largest=%u)",
+  DEBUG_G2F("[G2] Image probe: spawn failed — internal heap too fragmented "
+            "(dram=%u largest=%u); probe skipped",
             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   return false;
@@ -3007,8 +2963,8 @@ static void actionToggleMicFeed() {
 // + min-ever-free so a single tap shows both current pressure and
 // the worst point this session has hit.
 static void actionHeapSnapshot() {
-  const uint32_t freeNow = ESP.getFreeHeap();
-  const uint32_t minEver = ESP.getMinFreeHeap();
+  const uint32_t freeNow = hw1InternalFreeBytes();
+  const uint32_t minEver = hw1InternalMinFreeBytes();
   DEBUG_G2F("[G2] Heap: free=%u B  min-ever=%u B  used-since-min=%u B",
             (unsigned)freeNow, (unsigned)minEver,
             (unsigned)(freeNow > minEver ? freeNow - minEver : 0));

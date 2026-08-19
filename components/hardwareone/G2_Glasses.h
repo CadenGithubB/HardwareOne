@@ -159,12 +159,31 @@ enum class BleConnectKind : uint8_t {
   RING_SCAN  = 2,   // scan + connect any ring
   RING_SAVED = 3,   // saved MAC reconnect (waits for glasses up first)
   RING_MAC   = 4,   // direct MAC connect; uses `mac` field
+  G2_REPAIR  = 5,   // topology-aware missing-temple repair
+  RING_SCAN_ONLY = 6, // manual discovery only; uses `scanSeconds`
+  BARRIER    = 7,   // internal worker-owned teardown acknowledgement
 };
 
 struct BleConnectJob {
   BleConnectKind kind;
   uint8_t        eye;        // valid for G2_EYE only (cast from G2Eye)
-  char           mac[18];    // valid for RING_MAC only ("AA:BB:CC:DD:EE:FF\0")
+  // Immutable targets captured at admission. mac=G2 LEFT / Ring primary;
+  // mac2=G2 RIGHT. They must never be repopulated from mutable settings after
+  // the job enters the queue.
+  char           mac[18];
+  char           mac2[18];
+  uint8_t        addressType1;
+  uint8_t        addressType2;
+  bool           addressType1Known;
+  bool           addressType2Known;
+  uint16_t       scanSeconds; // valid for RING_SCAN_ONLY (1..300)
+  // Coordinator epoch captured at admission. BARRIER jobs reuse this field
+  // for their acknowledgement generation; they never enter peer logic.
+  uint32_t       cancelEpoch;
+  uint32_t       peerIntentGeneration;
+  uint32_t       peerIdentityGeneration;
+  bool           peerAutoReconnect;
+  bool           peerExplicitReseek;
 };
 
 // Heap-copies the job and pushes onto the BLE-connect queue, lazily starting
@@ -175,6 +194,11 @@ struct BleConnectJob {
 // BEFORE calling this and clear it from the worker's dispatch only after
 // the underlying *Sync function returns.
 bool g2SubmitBleConnect(const BleConnectJob& job);
+
+// Stop the singleton scanner only when the shared worker is currently running
+// a Ring scan. Used by ringdisconnect to pre-empt a queued/manual scan without
+// accidentally stopping an unrelated G2 temple scan.
+void g2CancelActiveRingScan();
 
 // Local preferred ATT MTU for G2 client mode (temples + ring). Process-global
 // via esp_ble_gatt_set_local_mtu — never lower this for a peer that negotiates
@@ -199,12 +223,47 @@ class BLEAdvertisedDevice;
 bool bleConnectWatched(BLEClient* client, BLEAdvertisedDevice* dev,
                        uint32_t timeoutMs, const char* logTag);
 
+// True only after the Arduino client has no GATTC interface and any requested
+// application unregister has been acknowledged. `getGattcIf()==NONE` alone
+// used to become true before UNREG delivery, allowing use-after-free.
+bool bleClientCallbackRoutingRetired(BLEClient* client);
+
 // The classifier behind bleConnectWatched, for connect paths that can't use
 // the wrapper — BLEClient::connect(BLEAddress,...) has a different signature,
 // and the ring's saved-MAC reconnect (the unattended path where a wedge
 // actually builds) goes through it. Time the connect call yourself and hand
 // the outcome here.
 void bleNoteConnectOutcome(bool ok, uint32_t elapsedMs, const char* logTag);
+void bleNoteClientConnectOutcome(BLEClient* client, bool ok,
+                                 uint32_t elapsedMs, const char* logTag);
+
+// A failed APP registration or GATTC unregister can leave the native routing
+// entry alive even though connect() returned false. Such a BLEClient may not
+// be reused: its next connect fails PRECHECK forever. Detach that client from
+// the application slot, delete it only if the library positively proves all
+// callback routing retired, and otherwise leave it in BLEDevice's terminal
+// teardown registry. Returns true when `client` was consumed and nulled.
+bool bleQuarantineClientAfterFailedConnect(BLEClient*& client,
+                                           uint8_t retirementSlot,
+                                           uint8_t peerKind,
+                                           const char* logTag);
+// Fixed retirement slots for the only three central BLEClient owners. A
+// false return means deletion is not yet safe: the pointer was transferred to
+// a bounded retry slot (or retained on a slot collision), so callers must not
+// allocate a replacement in the same admission.
+enum BleClientRetirementSlot : uint8_t {
+  BLE_CLIENT_RETIRE_G2_LEFT = 0,
+  BLE_CLIENT_RETIRE_G2_RIGHT = 1,
+  BLE_CLIENT_RETIRE_R1 = 2,
+  BLE_CLIENT_RETIRE_SLOT_COUNT = 3,
+};
+bool bleRetireClientForReplacement(BLEClient*& client,
+                                   uint8_t retirementSlot,
+                                   uint8_t peerKind,
+                                   const char* logTag);
+// Call only after BLEDevice::deinitChecked reports a terminal successful
+// host/controller teardown. All library-owned retired clients are then gone.
+void bleCentralClientsTerminalTeardownAcknowledged();
 
 // Count of consecutive synchronous connect refusals since the last successful
 // link. Non-zero means the host stack is suspect; >= 2 trips a recycle.
@@ -218,12 +277,12 @@ bool bleStackRecycleIfWedged(void);
 
 // Connection management
 bool g2Connect(G2Eye eye = G2_EYE_LEFT);
-// Saved-MAC reconnect. Uses gSettings.bleGlasses{Left,Right}MAC and matches
-// scan adverts by MAC only (no name fallback). Returns false if no MACs are
-// saved or a connect is already in flight. Used by the boot auto-reconnect
-// hook; safe to call from any context (spawns its own background task).
+// Saved-MAC reconnect. Uses the G2 peer registry's saved left/right MACs and
+// matches scan adverts by MAC only (no name fallback). Returns false if no
+// MACs are saved or a connect is already in flight. Used by boot reconnect;
+// task-context only, and enqueues onto the shared BLE-connect worker.
 bool g2ConnectSaved();
-bool g2Disconnect();
+bool g2Disconnect(bool userInitiated = false);
 bool isG2Connected();
 G2State getG2State();
 const char* getG2StateString();
@@ -430,7 +489,8 @@ bool g2EvenAiExchangeBoundToUartSession(uint64_t exchangeId,
 // effect on the CREATE half of the swap, so callers can change geom
 // freely between successive g2ShowListPage calls without an extra step.
 //
-// Returns true if the swap worker was successfully spawned.
+// Returns true if synchronous admission succeeded and the boot-lifetime lens
+// worker accepted ownership. CREATE/REBUILD can still fail asynchronously.
 bool g2ShowListPage(const char* const* items, size_t itemCount,
                     const G2ContainerGeom& geom = G2_GEOM_LARGE);
 
@@ -470,7 +530,8 @@ enum G2TapKind : uint8_t {
 };
 typedef void (*G2TapFn)(G2TapKind kind);
 
-// Returns true if the swap worker was successfully spawned.
+// Returns true if synchronous admission succeeded and the boot-lifetime lens
+// worker accepted ownership. CREATE/REBUILD can still fail asynchronously.
 bool g2ShowTextPage(const char* content,
                     const G2ContainerGeom& geom = G2_GEOM_LARGE,
                     void (*exitFn)() = nullptr,
@@ -572,9 +633,9 @@ bool g2UpdateMixedTextChild(const char* containerName, uint32_t containerId,
 // → hold 1.5 s → REBUILD-text(name="title", content="Updated: bar") →
 // wait ack → hold 4 s for visual observation → Shutdown.
 //
-// Returns a static result string. Synchronous; MUST be called from a
-// worker task, not the BLE notify task. The G2_ASSERT_NOT_NOTIFY_TASK
-// guard inside the helpers will catch a misuse.
+// Returns a static result string. Synchronous; MUST be called from a worker
+// task, not the G2 control/ACK owner or BLE callback task. The internal ACK
+// owner guard catches misuse.
 //
 // (Replaces the retired g2ProbeDualPaneCreate; see G2_PROTOCOL.md note
 // on single-container-per-widget for why that experiment was closed.)
@@ -596,12 +657,13 @@ bool g2ShowTextAsList(const char* text, const char* backLabel = nullptr);
 
 // Display a BMP from VFS as a one-shot image probe — same transport as
 // the `g2bmp` CLI command but async with a completion callback. Path is
-// heap-copied so the caller's buffer can be reused. Spawns a worker;
-// returns true on successful task creation. The worker holds the image
+// heap-copied so the caller's buffer can be reused. Enqueues onto the
+// persistent G2 session worker and returns true when it accepts ownership.
+// The worker holds the image
 // until the user double-taps (or 60 s safety cap) and then fires the
 // optional `onDone` callback so the caller can re-render its own page
 // (e.g. the Files page re-CREATEs the file list). `onDone` is called
-// from the worker task, NOT the BLE notify task, so it can call other
+// from the session worker, NOT the BLE callback/control owner, so it can call other
 // page-swap APIs safely.
 bool g2ShowBmpFile(const char* path, void (*onDone)() = nullptr);
 
@@ -619,9 +681,9 @@ bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)() = nullptr);
 // img_converters.h::fmt2rgb888 to RGB888, downsamples + quantizes to a
 // 288×144 4-bpp grayscale BMP (same buildBmp4bppFromRgb888 path the
 // camera viewer uses), then pushes through the same wire transport as
-// the BMP viewers. Returns true on worker spawn, false on heap-low /
-// alloc fail. Requires ENABLE_CAMERA_SENSOR (the JPEG decoder lives
-// in the esp32-camera component).
+// the BMP viewers. Returns true when the persistent session worker accepts
+// ownership, false on heap-low / allocation failure. File JPEG decode is
+// available even when ENABLE_CAMERA_SENSOR is off.
 bool g2ShowJpgFile(const char* path, void (*onDone)() = nullptr);
 bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)() = nullptr);
 
@@ -629,7 +691,8 @@ bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)() = nullptr);
 // small 288×144 image container and hold until the user double-taps.
 // One-shot: there's no live-feed refresh and no single-tap recapture
 // (image-only widget state on this firmware only emits DOUBLE_CLICK,
-// so single-tap is silent). Returns true if the worker spawned;
+// so single-tap is silent). Returns true if the persistent session worker
+// accepted the job;
 // returns false if camera is disabled / heap is too low. `onDone` is
 // invoked from the worker task once the user dismisses or the 60 s
 // safety cap fires — caller typically uses it to redraw its menu.
@@ -640,7 +703,8 @@ bool g2ShowCameraViewer(void (*onDone)() = nullptr);
 // per-frame BLE push time (~2.7 s per 7-fragment 288×144 BMP), so
 // expect ~0.4 fps. Same dismiss contract as g2ShowCameraViewer
 // (firmware only emits DOUBLE_CLICK on image-only state). Returns
-// true if the worker spawned. `onDone` fires on stop / error.
+// true if the persistent session worker accepted the job. `onDone` fires on
+// stop / error.
 bool g2ShowCameraStream(void (*onDone)() = nullptr);
 
 // When the camera stream's "Settings >>" row is tapped, the worker sets
@@ -653,7 +717,7 @@ bool g2ShowCameraStream(void (*onDone)() = nullptr);
 extern volatile bool g2CamStreamSettingsExitRelaunch;
 
 // MIC detail compound page entry / tap handler. Reached from
-// Sensors → MIC tap; spawns the live-text worker with a render fn
+// Sensors → MIC tap; submits a live-text session with a render fn
 // that does the initial list+text CREATE, then per-tick UPDATE_TEXT
 // (Cmd=5) on the readout child only — list child is never touched
 // after CREATE so row selection persists indefinitely. Tap handler
@@ -662,8 +726,8 @@ extern volatile bool g2CamStreamSettingsExitRelaunch;
 bool g2ShowMicDetail();
 void g2MicDetailHandleTap(uint32_t idx);
 
-// Generic sensor-detail LIVE compound (all non-camera sensors). Spawns the
-// shared live-text worker with a render fn that CREATEs a selectable list
+// Generic sensor-detail LIVE compound (all non-camera sensors). Submits a
+// live-text session with a render fn that CREATEs a selectable list
 // (back / Auto Start) + a live readout child, then per-tick UPDATE_TEXTs the
 // readout only (selection persists). Reuses the Sensors hijack page + tap
 // handler (no new page module). Entry: showSensorDetail() in G2_Page_Sensors.cpp.
@@ -769,6 +833,10 @@ bool g2MicCaptureDegraded();
 // Device millis at the most recent native "Hey Even" WAKE_UP decode. Timing
 // anchor for the recorder's `evenai_timing` EVT; 0 until the first wake.
 uint32_t g2EvenAiLastWakeMs();
+// Wake the G2 control owner after the CM5 presence monitor observes a fresh or
+// stale edge. This makes lease expiry prompt without giving presence code any
+// ownership of G2 state.
+void g2EvenAiHostStateChanged();
 // The LIVE native EvenAI exchange id, 0 when no session is active. The
 // recorder's since-wake preroll gate compares the recording owner to this.
 uint64_t g2EvenAiActiveExchangeId();
@@ -882,9 +950,10 @@ enum G2HijackPage : uint8_t {
   // OLED's "System" category. Stateless: each row forwards to another page's
   // show*Menu() / live-page start. Impl inline in G2_Glasses.cpp.
   G2_HIJACK_PAGE_SYSTEM          = 19,
-  // Config launcher — groups the configuration pages (Settings, Users, OLED
-  // Login) under one top-level menu entry, mirroring the OLED's "Config"
-  // category. Stateless. Impl inline in G2_Glasses.cpp.
+  // Config launcher — groups Settings and the admin-gated Users page under
+  // one top-level menu entry, mirroring the OLED's "Config" category. It no
+  // longer exposes a G2-to-OLED login action. Stateless; impl inline in
+  // G2_Glasses.cpp.
   G2_HIJACK_PAGE_CONFIG          = 20,
   // Status dashboard — live-text compound (body + battery corner). Given its
   // own id (rather than the shared TEXT_VIEW) by the menu reorg so its back
@@ -894,7 +963,7 @@ enum G2HijackPage : uint8_t {
   // LLM guided-input submenu (Apps -> LLM): Open chat / Ask (guided) /
   // Re-run last / Model select. Reached via the Apps launcher (hidden from
   // the main menu). Impl inline in G2_Glasses.cpp under
-  // #if ENABLE_ONDEVICE_LLM. NOTE: this id must live here, not as a local
+  // #if ENABLE_LLM_BACKEND. NOTE: this id must live here, not as a local
   // cast in the .cpp — a local `(G2HijackPage)N` silently aliases whichever
   // real member owns N once the enum grows, and the tap dispatcher resolves
   // pages by id (first match wins), so the collision hands this page's taps
@@ -1337,9 +1406,14 @@ inline bool bleConnectWatched(class BLEClient*, class BLEAdvertisedDevice*, uint
 inline void bleNoteConnectOutcome(bool, uint32_t, const char*) {}
 inline uint8_t bleStackWedgeStreak(void) { return 0; }
 inline bool bleStackRecycleIfWedged(void) { return false; }
+// No central BLEClient owners exist when G2 is compiled out (every retirement
+// slot is G2/R1), so there is nothing to release after a host teardown. Called
+// unconditionally from Bluetooth.cpp's deinit paths.
+inline void bleCentralClientsTerminalTeardownAcknowledged() {}
+inline void g2CancelActiveRingScan() {}
 inline bool g2Connect(G2Eye eye = G2_EYE_LEFT) { return false; }
 inline bool g2ConnectSaved() { return false; }
-inline bool g2Disconnect() { return true; }
+inline bool g2Disconnect(bool = false) { return true; }
 inline bool isG2Connected() { return false; }
 inline bool g2LeftConnected() { return false; }
 inline G2State getG2State() { return G2_STATE_IDLE; }
@@ -1376,6 +1450,7 @@ inline void g2MicReleaseCaptureContainer() {}
 inline bool g2MicKickStream() { return false; }
 inline bool g2MicCaptureDegraded() { return false; }
 inline uint32_t g2EvenAiLastWakeMs() { return 0; }
+inline void g2EvenAiHostStateChanged() {}
 inline uint64_t g2EvenAiActiveExchangeId() { return 0; }
 inline size_t g2MicReadPcmSamples(int16_t*, size_t, uint32_t) { return 0; }
 inline size_t g2MicTrimAfeRingToNewest(size_t) { return 0; }

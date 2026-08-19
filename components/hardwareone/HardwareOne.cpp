@@ -87,6 +87,8 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_SelfDevice.h"
 #include "System_Clock.h"
 #include "System_CLI.h"
+#include "System_Cm5Presence.h"
+#include "System_LiveAudio.h"
 #include "System_I2C.h"
 #include "System_Logging.h"
 #include "System_Debug.h"
@@ -107,8 +109,9 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_FirstTimeSetup.h"
 #include "System_SetupWizard.h"  // gWizardOwnsSerial — main loop yields Serial while legacy wizard is running
 #include "System_UartLink.h"     // UART host link (CM5 command channel) — drain ticked from loop()
-#if ENABLE_RASPBERRY_PI_HOST_POWER
-  #include "System_RaspberryPi.h"  // finite CM5 host-power request/ACK state machine
+#include "System_LLMBackend.h"   // llmBackendTick() — remote-generation stall timeout
+#if ENABLE_RASPBERRY_PI_HOST_POWER || ENABLE_RASPBERRY_PI_HOST_FAN
+  #include "System_Cm5HostControl.h"  // finite CM5 host-power/host-fan request/ACK/report state machines
 #endif
 #include "System_CLIMode.h"      // cliModeTick — periodic tick for active CLIMode (Phase 5 wizard)
 #include "System_TaskUtils.h"
@@ -323,7 +326,7 @@ String gSerialUser = String();
 // there's no interaction classifier here (unlike web). One session only, so
 // this is a flat global alongside gSerialAuthed/gSerialUser rather than a
 // struct field. Drives the shared idle-logout policy (sessionIdleExpired).
-static unsigned long gSerialLastInteractionMs = 0;
+std::atomic<unsigned long> gSerialLastInteractionMs{0};
 
 bool gLocalDisplayAuthed = false;
 String gLocalDisplayUser = String();
@@ -332,7 +335,7 @@ String gLocalDisplayUser = String();
 // gamepad/ANO button or encoder edge). Network commands never touch it, so an
 // OLED login still goes idle while the box is busy serving web/ESP-NOW. Drives
 // the shared per-transport idle-logout policy (sessionIdleExpired).
-unsigned long gLocalDisplayLastInteractionMs = 0;
+std::atomic<unsigned long> gLocalDisplayLastInteractionMs{0};
 
 esp_err_t handleSensorsStatus(httpd_req_t* req);
 
@@ -407,6 +410,7 @@ volatile unsigned long gWebMirrorSeq = 0;
 Settings gSettings;
 
 String gSerialCLI = "";
+static TransportSessionEpoch gSerialCLIEpoch = 0;
 
 #if ENABLE_WIFI
 WifiNetwork* gWifiNetworks = nullptr;
@@ -493,6 +497,11 @@ static inline void printToSerial(const String& s) {
 }
 
 void appendCommandToFeed(const char* source, const String& cmd, const String& user = String(), const String& ip = String()) {
+  // Machine CM5/live-audio inspection may be polled from UART, web, serial,
+  // or a future interface. Keep this policy at the shared feed boundary so no
+  // transport can evict useful human history with status/capability polls.
+  if (cm5PresenceIsProtocolCommand(cmd.c_str()) ||
+      liveAudioIsHousekeepingCommand(cmd.c_str())) return;
   char prefix[128];
   if (user.length() || ip.length()) {
     snprintf(prefix, sizeof(prefix), "[%s %s%s%s] $ ",
@@ -695,6 +704,10 @@ static void commandExecTask(void* pv) {
   // returned in bytes on this port — no word->byte scaling. See System_TaskUtils.h.
   constexpr uint32_t stackBytes = CMD_EXEC_STACK_WORDS;
   for (;;) {
+    // Mode cleanup is executor-affine: transport callbacks and read-only
+    // queries only request cancellation. Drain before receiving new work so
+    // owner loss/idle timeout is handled even while the command queue is idle.
+    (void)cliModeExecutorDrainPending();
     // The OTA probation gate uses this as proof that the command worker is
     // scheduled and able to return to its receive loop. A bounded receive wait
     // keeps the heartbeat fresh while the queue is idle; a wedged command leaves
@@ -731,8 +744,9 @@ static void commandExecTask(void* pv) {
         continue;
       }
 
+      const String safeExecLine = redactCmdForAudit(String(r->line));
       DEBUG_CMD_FLOWF("[cmd_exec] exec '%.80s' user='%s' heap=%lu",
-                  r->line, r->ctx.auth.user.c_str(), (unsigned long)ESP.getFreeHeap());
+                  safeExecLine.c_str(), r->ctx.auth.user.c_str(), (unsigned long)ESP.getFreeHeap());
 
       setCurrentCommandContext(&r->ctx);
       bool prevValidate = gCLIValidateOnly;
@@ -746,7 +760,8 @@ static void commandExecTask(void* pv) {
       static constexpr size_t CAPTURE_BUF_SIZE = 4096;
       char* captureBuf = nullptr;
       if (r->ctx.captureOutput) {
-        captureBuf = (char*)malloc(CAPTURE_BUF_SIZE);
+        captureBuf = (char*)ps_alloc(CAPTURE_BUF_SIZE, AllocPref::PreferPSRAM,
+                                     "cmd.capture");
         if (captureBuf) {
           captureBuf[0] = '\0';
           setCaptureBuffer(captureBuf, CAPTURE_BUF_SIZE);
@@ -787,6 +802,7 @@ static void commandExecTask(void* pv) {
 
       gCLIValidateOnly = prevValidate;
       clearCurrentCommandContext();
+      (void)cliModeExecutorDrainPending();
       DEBUG_CMD_FLOWF("[cmd_exec] done ok=%d out_len=%zu heap=%lu",
                   r->ok ? 1 : 0, strlen(r->out), (unsigned long)ESP.getFreeHeap());
       
@@ -848,9 +864,10 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   }
 
   String prefix = originPrefix(source, ctx.auth.user, ctx.auth.ip);
+  const String safeOutputForTrace = redactOutputForLog(s);
   DEBUG_CMD_FLOWF("[BROADCAST_CTX] origin=%s user=%s mask=0x%02lX msg='%.50s'",
                   source, ctx.auth.user.c_str(),
-                  (unsigned long)ctx.outputMask, s.c_str());
+                  (unsigned long)ctx.outputMask, safeOutputForTrace.c_str());
 
   // outputMask holds MSG_ROUTE_* bits directly; keep only the sinks a
   // command may address. OLED and G2 always included for command return values.
@@ -895,6 +912,23 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
 // today, so nothing else changes shape. Non-serial origins pass through to
 // broadcastOutput(s, ctx) untouched.
 void deliverCommandResult(const String& result, const CommandContext& ctx) {
+  // A queued command may finish after logout/re-login/revocation. Execution
+  // has its own admission fence, but result delivery is a separate authority
+  // boundary: never hand an old session's result to the replacement console or
+  // to shared mirrors. Stateless producers do not set REQUIRE_LIVE_SESSION.
+  const bool requiresLiveSession =
+      (ctx.behaviorFlags & COMMAND_CONTEXT_REQUIRE_LIVE_SESSION) != 0;
+  if (requiresLiveSession &&
+      (ctx.transportSessionEpoch == 0 ||
+       !transportSessionEpochIsLive(ctx.auth.transport,
+                                    ctx.transportSessionEpoch))) {
+    DEBUG_CMD_FLOWF(
+        "[deliver] dropping stale result origin=%d transport=%d epoch=%lu",
+        static_cast<int>(ctx.origin), static_cast<int>(ctx.auth.transport),
+        static_cast<unsigned long>(ctx.transportSessionEpoch));
+    return;
+  }
+
   const bool serialDirect = (ctx.origin == ORIGIN_SERIAL) && (ctx.outputMask & MSG_ROUTE_SERIAL);
   if (!serialDirect) {
     broadcastOutput(result, ctx);
@@ -905,14 +939,13 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
   // pipeline's own gates: validate-only suppression (per-command
   // ctx.validateOnly — the race-free equivalent of the gCLIValidateOnly
   // global broadcastOutputCore checks, which cmd_exec may already have
-  // re-set for its NEXT queued command by the time we run), help-mode
-  // suppression (step 3 — the mirror call below records the suppressed
-  // line, so no double bookkeeping here), and the outSerial kill-switch
-  // the drain applies per line (System_Debug.cpp serial sink).
+  // re-set for its NEXT queued command by the time we run), and the outSerial
+  // kill-switch the drain applies per line (System_Debug.cpp serial sink).
   const bool writeSerial = result.length() > 0
                         && !ctx.validateOnly
-                        && (gOutputFlags & MSG_ROUTE_SERIAL)
-                        && (gCLIState == CLI_NORMAL || gInHelpRender);
+                        && (gOutputFlags & MSG_ROUTE_SERIAL);
+
+  String framed;
 
   if (writeSerial) {
     // Let lines the command streamed during execution drain first, so the
@@ -931,10 +964,22 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
     // (QT Py / Feather V2) instead block until fully sent (~350 ms for 4 KB
     // at 115200) while holding the UART lock, pausing the drain for that
     // window — accepted cost on those secondary targets.
-    String framed;
     framed.reserve(result.length() + 1);
     framed = result;
     framed += '\n';
+  }
+
+  // Final admission and delivery are one serial-session transaction. A web
+  // revocation or live auth-policy change that wins before this point drops
+  // everything; one that arrives later waits for the bounded physical write
+  // and mirror enqueue, so a result can never cross into its replacement
+  // session between a check and the actual output.
+  if (requiresLiveSession &&
+      !serialTransportSessionBeginDelivery(ctx.transportSessionEpoch)) {
+    return;
+  }
+
+  if (writeSerial) {
     if (framed.length() == result.length() + 1) {
       const size_t wrote = Serial.write((const uint8_t*)framed.c_str(), framed.length());
       if (wrote < framed.length()) {
@@ -959,7 +1004,11 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
   // write above.
   CommandContext mirrorCtx = ctx;
   mirrorCtx.outputMask &= ~(uint32_t)MSG_ROUTE_SERIAL;
-  broadcastOutput(result, mirrorCtx);
+  if (!cliModeOwnedBySession(ctx.auth.transport,
+                             ctx.transportSessionEpoch)) {
+    broadcastOutput(result, mirrorCtx);
+  }
+  if (requiresLiveSession) serialTransportSessionEndDelivery();
 }
 
 char* gFileReadBuf = nullptr;
@@ -1211,12 +1260,17 @@ extern struct ConnectedDevice connectedDevices[];
 static bool gDebugMemSummary = false;
 
 static void heapLogSummary(const char* tag) {
-  size_t dram_free = ESP.getFreeHeap();
-  size_t dram_min = ESP.getMinFreeHeap();
-  size_t dram_maxalloc = ESP.getMaxAllocHeap();
-  // MALLOC_CAP_8BIT alone matches PSRAM too; restrict to internal so this
-  // reports the actual DRAM largest free block (was returning ~1.9 MB PSRAM).
-  size_t dram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  // All four must carry MALLOC_CAP_8BIT. dram_largest was already fixed once
+  // (MALLOC_CAP_8BIT alone matches PSRAM too, so it must be INTERNAL|8BIT), but
+  // free/min/maxalloc were left on ESP.* which is MALLOC_CAP_INTERNAL with no
+  // 8BIT — that sweeps in the IRAM-only heap and read ~25.8 KB high. See
+  // hw1InternalFreeBytes() in System_MemUtil.h.
+  size_t dram_free = hw1InternalFreeBytes();
+  size_t dram_min = hw1InternalMinFreeBytes();
+  // What a plain malloc()/new could actually get right now: stricter than
+  // dram_largest because the DMA reserve pool carries no MALLOC_CAP_DEFAULT.
+  size_t dram_maxalloc = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL);
+  size_t dram_largest = hw1InternalLargestBlock();
   bool has_ps = psramFound();
   size_t ps_total = has_ps ? ESP.getPsramSize() : 0;
   size_t ps_free = has_ps ? ESP.getFreePsram() : 0;
@@ -1322,6 +1376,12 @@ void hardwareone_setup() {
       rtcCrashCount++;
     }
     rtcLastResetReason = (uint32_t)reason;
+
+    // First typed lifecycle edge. The event register is static and usable this
+    // early, before the filesystem, settings, queues, or worker tasks exist.
+    // gBootCounter is deliberately absent: its NVS increment happens later
+    // inside initFilesystem(), so stamping it here would report a false #0.
+    systemEventPost(SYSEVT_BOOT_STARTED, resetReasonName(rtcLastResetReason));
 
     // Decode anything __wrap_esp_panic_handler left in RTC, latch the previous
     // boot's phase before this boot overwrites it, and maintain the CONSECUTIVE
@@ -1807,7 +1867,10 @@ void hardwareone_setup() {
   // unprovisioned device (no users.json → nothing to authenticate against).
   uartLinkInitFromSettings();
 #if ENABLE_RASPBERRY_PI_HOST_POWER
-  raspberryPiHostPowerInit();
+  cm5HostPowerInit();
+#endif
+#if ENABLE_RASPBERRY_PI_HOST_FAN
+  cm5HostFanInit();
 #endif
 
   // (Removed: legacy Basic-Auth gAuthUser/gAuthPass priming via
@@ -2076,7 +2139,7 @@ void hardwareone_setup() {
   // On-device LLM - auto-load the default model at boot if enabled in settings.
   // Mirrors the sensor/SR auto-start pattern (gSettings.<x>AutoStart -> runtime
   // start command). Loading is heavy (PSRAM + time), so it's opt-in (default off).
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_SOURCE_ONBOARD
   if (gSettings.llmEnabled && ramFlushResolve(RF_LLM, gSettings.llmAutoStart)) {
     broadcastOutput("Auto-loading on-device LLM model...");
     String llmAutoCmd = "llmload " + gSettings.llmDefaultModel;
@@ -2104,16 +2167,6 @@ void hardwareone_setup() {
 #endif
 
   oledSetBootProgress(100, "Boot complete!");
-
-  // Typed "device booted" event — posted here at the end of setup (the device is
-  // up and ready), the counterpart to the NTP time_synced event and the reboot
-  // event. Subject = reset reason; an intentional restart ALSO got a richer
-  // SYSEVT_REBOOT earlier with the actor, so automations can run on any startup.
-  {
-    char bootDetail[24];
-    snprintf(bootDetail, sizeof(bootDetail), "boot #%lu", (unsigned long)gBootCounter);
-    systemEventPost(SYSEVT_BOOT, resetReasonName(rtcLastResetReason), bootDetail);
-  }
 
   // Run LED startup effect if enabled (compiled only when the NeoPixel feature
   // is — the pin test alone would break user-override ENABLE_NEOPIXEL=0 builds
@@ -2280,6 +2333,16 @@ void hardwareone_setup() {
   // Last lines of boot: nudge to provision the BLE passphrase if encryption is wanted
   // but unset (so the operator can't miss that Bluetooth is currently plaintext).
   bleSecurityBootNotice();
+
+  // Final typed lifecycle edge. Keep this as the last action before setup()
+  // returns so the pair brackets LED effects, boot automations, ESP-NOW setup,
+  // diagnostics, and the transition to CRASH_PHASE_RUNNING. An intentional
+  // restart also has the richer SYSEVT_REBOOT event posted earlier in setup.
+  {
+    char bootDetail[24];
+    snprintf(bootDetail, sizeof(bootDetail), "boot #%lu", (unsigned long)gBootCounter);
+    systemEventPost(SYSEVT_BOOT_FINISHED, resetReasonName(rtcLastResetReason), bootDetail);
+  }
 }
 
 
@@ -2429,7 +2492,31 @@ static void powerSaveTick() {
   // above. Only switch if the floor is actually below the live clock (never
   // raise here).
   savedCpuMhz = getCpuFrequencyMhz();
-  const uint32_t idleFloorMhz = getPowerModeIdleCpuFreq(gSettings.powerMode);
+  uint32_t idleFloorMhz = getPowerModeIdleCpuFreq(gSettings.powerMode);
+
+  // A UART host link running above REF_TICK is clocked from APB, and on chips
+  // whose HAL has that fallback (ESP32 / ESP32-S2) APB follows the CPU clock
+  // once it sinks below 80 MHz. UltraSaver's 40 MHz idle floor would therefore
+  // halve the link's effective baud and corrupt every byte — including the
+  // CM5's heartbeat, so freshness would lapse with no way to recover: UART
+  // traffic deliberately does not wake the device (see the SOURCE_UART
+  // exclusion in executeCommand), and a garbled command cannot be parsed into
+  // a wake in the first place. Clamp to the interactive floor instead; 240/160/
+  // 80 are all PLL-derived and pin APB at 80 MHz, so 80 is enough — the other
+  // three power modes already idle there. Costs UltraSaver some deep-idle
+  // saving only while a fast link is actually up.
+#if SOC_UART_SUPPORT_REF_TICK
+  if (idleFloorMhz < POWER_INTERACTIVE_FLOOR_MHZ && uartLinkIsRunning() &&
+      uartLinkEffectiveBaud() > UART_LINK_REF_TICK_BAUD_LIMIT) {
+    DEBUG_SYSTEMF("[POWER] idle floor %lu -> %lu MHz: UART link at %d baud is "
+                  "APB-clocked and cannot survive a sub-80 MHz CPU",
+                  (unsigned long)idleFloorMhz,
+                  (unsigned long)POWER_INTERACTIVE_FLOOR_MHZ,
+                  uartLinkEffectiveBaud());
+    idleFloorMhz = POWER_INTERACTIVE_FLOOR_MHZ;
+  }
+#endif
+
   if (idleFloorMhz < savedCpuMhz) {
     // Guard the clock switch. setCpuFrequencyMhz() swaps the CPU clock and
     // fires clock-change callbacks; unguarded, doing that while gps_task was
@@ -2504,6 +2591,8 @@ void hardwareone_loop() {
   sensorLogTick();
   timeAnchorsTick();   // retro-date boot-named captures once the clock syncs
   g2RingTimeSyncTick(); // ring-clock custody: adopt when dark / correct ring after sync
+  cm5TimeSyncTick();    // CM5 carrier RTC: adopt when dark / correct after sync (authoritative)
+  g2Tick();             // glasses: overlay auto-dismiss + adaptive clock/tz re-push (self-throttled)
   ntpSyncDrainTick();   // hand real SNTP replies to the clock-step chokepoint
   Clock::clockDutiesTick(); // drain filesystem-touching clock-step chores
 #if ENABLE_BLUETOOTH
@@ -2657,9 +2746,36 @@ void hardwareone_loop() {
   while (!gWizardOwnsSerial && Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
+    const TransportSessionEpoch liveSerialInputEpoch =
+        serialTransportInputEpoch();
+    if (gSerialCLIEpoch != 0 &&
+        gSerialCLIEpoch != liveSerialInputEpoch) {
+      // A remote login/logout replaced the identity while this line was only
+      // partially typed. Drop it instead of completing it as the successor.
+      gSerialCLI = "";
+      gSerialCLIEpoch = 0;
+    }
     if (c == '\n') {
+      if (gSerialCLIEpoch == 0 ||
+          gSerialCLIEpoch != liveSerialInputEpoch) {
+        gSerialCLI = "";
+        gSerialCLIEpoch = 0;
+        continue;
+      }
+      const TransportSessionEpoch admittedSerialEpoch = gSerialCLIEpoch;
       String cmd = gSerialCLI;
       cmd.trim();
+      String admittedSerialUser;
+      bool admittedSerialAuthed = false;
+      if (serialTransportSessionSnapshot(admittedSerialUser,
+                                         admittedSerialAuthed) !=
+          admittedSerialEpoch) {
+        // The identity changed after newline admission but before parsing.
+        // Treat the whole line as belonging to the old incarnation.
+        gSerialCLI = "";
+        gSerialCLIEpoch = 0;
+        continue;
+      }
 
       // Serial idle-logout: drop an idle session before processing this line.
       // Serial has no passive traffic, so this only fires when the user types
@@ -2667,81 +2783,123 @@ void hardwareone_loop() {
       // they just typed then falls through to the login gate and is rejected.
       // No-op when auth is off (gSerialAuthed false) or window=0 (see
       // sessionIdleExpired); never-stamped (0) is treated as fresh.
-      if (gSerialAuthed && sessionIdleExpired(SOURCE_SERIAL, gSerialLastInteractionMs)) {
-        gSerialAuthed = false;
-        gSerialUser = String();
-        broadcastOutput("[serial] Signed out due to inactivity. Please log in again.");
+      if (admittedSerialAuthed && sessionIdleExpired(
+              SOURCE_SERIAL,
+              gSerialLastInteractionMs.load(std::memory_order_acquire))) {
+        if (serialTransportSessionClearAndBeginDelivery(
+                admittedSerialEpoch)) {
+          Serial.println(
+              "[serial] Signed out due to inactivity. Please log in again.");
+          serialTransportSessionEndDelivery();
+        }
+        gSerialCLI = "";
+        gSerialCLIEpoch = 0;
+        Serial.print("$ ");
+        break;
       }
 
-      // Serial auth gate: require login before executing any commands (if enabled)
-      if (gSettings.serialRequireAuth && !gSerialAuthed) {
-        if (cmd.startsWith("login ")) {
-          // Parse: login <user> <pass>
-          String rest = cmd.substring(6);
-          rest.trim();
-          int sp = rest.indexOf(' ');
-          if (sp <= 0) {
-            broadcastOutput("Usage: login <username> <password>");
-          } else {
-            String u = rest.substring(0, sp);
-            String p = rest.substring(sp + 1);
-            // Serial console uses the literal "local" as the brute-force key
-            // so failed attempts from the console accumulate against one
-            // tier counter (separate from any web/BLE attempts).
-            const char* serialIp = "local";
+      CommandArgs serialLineArgs(cmd);
+      const bool serialLoginVerb =
+          serialLineArgs.count() > 0 &&
+          serialLineArgs.arg(0).equalsIgnoreCase("login");
+      const bool serialLocalLogin =
+          serialLoginVerb && !serialLineArgs.unterminatedQuote() &&
+          serialLineArgs.count() == 3;
+
+      // A bare login always belongs to this physical Serial endpoint, both
+      // before authentication and when replacing an existing/AuthBypass
+      // session. Supplying a fourth token is an explicit target operation;
+      // it is allowed to reach the registry only after this source has a
+      // named, non-Guest login.
+      auto handleSerialLocalLogin = [&]() {
+        const String u = serialLineArgs.arg(1);
+        const String p = serialLineArgs.arg(2);
+        const char* serialIp = "local";
+
+        // Serialize credential validation through publication so a password
+        // reset cannot revoke an empty slot and then have the old credential
+        // publish a replacement session afterward.
+        FsLockGuard authGuard("serial.login");
+        if (!authGuard.held) {
+          broadcastOutput("[serial] Authentication temporarily unavailable.");
+          return;
+        }
 
 #if ENABLE_HTTP_SERVER
-            unsigned long lockoutRemainingMs = 0;
-            bool locked = isLoginLocked(serialIp, &lockoutRemainingMs);
+        unsigned long lockoutRemainingMs = 0;
+        bool locked = isLoginLocked(serialIp, &lockoutRemainingMs);
 #else
-            bool locked = false;
+        bool locked = false;
 #endif
-            if (locked) {
+        if (locked) {
 #if ENABLE_HTTP_SERVER
-              BROADCAST_PRINTF("[serial] Login locked out. Retry in %lu seconds.",
-                               lockoutRemainingMs / 1000UL);
-              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false, "Locked out");
+          BROADCAST_PRINTF("[serial] Login locked out. Retry in %lu seconds.",
+                           lockoutRemainingMs / 1000UL);
+          recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false, "Locked out");
 #endif
-            } else if (isValidUser(u, p)) {
-              AuthContext ctx;
-              ctx.transport = SOURCE_SERIAL;
-              ctx.user = u;
-              ctx.ip = serialIp;
-              ctx.path = "serial/login";
-              ctx.sid = String();
+        } else if (isValidUser(u, p)) {
 #if ENABLE_HTTP_SERVER
-              // authSuccessUnified sets gSerialAuthed = true and gSerialUser
-              // internally for SOURCE_SERIAL; no need to duplicate that here.
-              clearLoginAttempts(serialIp);
-              authSuccessUnified(ctx, nullptr);
-#else
-              // Stub build: minimal local state set since authSuccessUnified is a no-op stub.
-              gSerialAuthed = true;
-              gSerialUser = u;
+          clearLoginAttempts(serialIp);
 #endif
-              // Outside the guard: the audit trail must survive a headless build.
-              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, true, "Login successful");
-              bool isCurrentlyAdmin = isAdminUser(u);
-              BROADCAST_PRINTF("[serial] Login successful. User: %s%s", u.c_str(), isCurrentlyAdmin ? " (admin)" : "");
-            } else {
-#if ENABLE_HTTP_SERVER
-              recordFailedLogin(serialIp);
-#endif
-              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false, "Invalid credentials");
-              broadcastOutput("[serial] Authentication failed.");
-            }
+          const TransportSessionEpoch newEpoch =
+              serialTransportSessionAuthenticatedIfEpoch(
+                  admittedSerialEpoch, u);
+          if (newEpoch != 0 && serialTransportSessionBeginDelivery(newEpoch)) {
+            recordLoginAttempt(SOURCE_SERIAL, u, serialIp, true,
+                               "Login successful");
+            const bool isCurrentlyAdmin = isAdminUser(u);
+            Serial.printf("[serial] Login successful. User: %s%s\n", u.c_str(),
+                          isCurrentlyAdmin ? " (admin)" : "");
+            serialTransportSessionEndDelivery();
+          } else {
+            Serial.println("[serial] Session changed before login completed.");
           }
+        } else {
+#if ENABLE_HTTP_SERVER
+          recordFailedLogin(serialIp);
+#endif
+          recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false,
+                             "Invalid credentials");
+          broadcastOutput("[serial] Authentication failed.");
+        }
+      };
+
+      // Serial auth gate: require login before executing any commands (if enabled)
+      if (gSettings.serialRequireAuth && !admittedSerialAuthed) {
+        if (serialLocalLogin) {
+          handleSerialLocalLogin();
+        } else if (serialLoginVerb) {
+          broadcastOutput("Serial - Sign in first with bare: login <username> <password>");
         } else if (cmd.length() > 0) {
           broadcastOutput("Serial - Authentication required. Use: login <username> <password>");
         }
       } else {
-        if (cmd == "logout") {
-          gSerialAuthed = false;
-          gSerialUser = String();
-          broadcastOutput("Logged out.");
-        } else if (cmd == "whoami") {
-          bool isCurrentlyAdmin = gSerialUser.length() ? isAdminUser(gSerialUser) : false;
-          BROADCAST_PRINTF("You are %s%s", gSerialUser.length() ? gSerialUser.c_str() : "(unknown)", isCurrentlyAdmin ? " (admin)" : "");
+        if (serialLocalLogin) {
+          handleSerialLocalLogin();
+        } else if (serialLineArgs.count() == 1 &&
+                   serialLineArgs.arg(0).equalsIgnoreCase("logout")) {
+          if (serialTransportSessionClearAndBeginDelivery(
+                  admittedSerialEpoch)) {
+            Serial.println("Logged out.");
+            serialTransportSessionEndDelivery();
+          }
+        } else if (serialLineArgs.count() == 1 &&
+                   serialLineArgs.arg(0).equalsIgnoreCase("whoami")) {
+          String liveSerialUser;
+          bool liveSerialAuthed = false;
+          const TransportSessionEpoch whoamiEpoch =
+              serialTransportSessionSnapshot(liveSerialUser,
+                                             liveSerialAuthed);
+          const bool isCurrentlyAdmin =
+              liveSerialAuthed && isAdminUser(liveSerialUser);
+          if (whoamiEpoch == admittedSerialEpoch &&
+              serialTransportSessionBeginDelivery(whoamiEpoch)) {
+            Serial.printf("You are %s%s\n",
+                          liveSerialAuthed && liveSerialUser.length()
+                              ? liveSerialUser.c_str() : "AuthBypass",
+                          isCurrentlyAdmin ? " (admin)" : "");
+            serialTransportSessionEndDelivery();
+          }
         } else {
           appendCommandToFeed("serial", cmd);
 
@@ -2753,7 +2911,10 @@ void hardwareone_loop() {
           // origin) instead of `[CMD] @serial: ...` (ambiguous). Reserved
           // username; see adminCreateUser. Matches the OLED sentinel pattern
           // in buildOLEDCommand.
-          actx.user = gSerialUser.length() > 0 ? gSerialUser : String("AuthBypass");
+          const TransportSessionEpoch commandSessionEpoch =
+              admittedSerialEpoch;
+          actx.user = admittedSerialAuthed && admittedSerialUser.length()
+                          ? admittedSerialUser : String("AuthBypass");
           actx.ip = "local";
           actx.path = "serial";
           Command uc;
@@ -2762,6 +2923,11 @@ void hardwareone_loop() {
           uc.ctx.auth = actx;
           uc.ctx.id = (uint32_t)millis();
           uc.ctx.timestampMs = (uint32_t)millis();
+          uc.ctx.transportSessionEpoch = commandSessionEpoch;
+          // Serial is a stateful physical endpoint even when authentication is
+          // disabled. A failed epoch capture must therefore fail closed rather
+          // than silently turning this queued command into an unbound caller.
+          uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
           uc.ctx.outputMask = MSG_ROUTE_SERIAL | MSG_ROUTE_FILE;
           uc.ctx.validateOnly = false;
           uc.ctx.replyHandle = nullptr;
@@ -2776,12 +2942,22 @@ void hardwareone_loop() {
       // idle clock whenever we end this line authenticated. One stamp covers
       // both a fresh successful login and any subsequent command. Skipped when
       // not authed (failed login / logout / auth disabled) — nothing to age.
-      if (gSerialAuthed) gSerialLastInteractionMs = sessionStampNow();
+      String completedSerialUser;
+      bool completedSerialAuthed = false;
+      const TransportSessionEpoch completedSerialEpoch =
+          serialTransportSessionSnapshot(completedSerialUser,
+                                         completedSerialAuthed);
+      if (completedSerialAuthed &&
+          completedSerialEpoch == admittedSerialEpoch)
+        gSerialLastInteractionMs.store(sessionStampNow(),
+                                       std::memory_order_release);
 
       gSerialCLI = "";
+      gSerialCLIEpoch = 0;
       Serial.print("$ ");
       break;  // Process at most one command per loop() iteration to avoid starving WDT
     } else {
+      if (gSerialCLIEpoch == 0) gSerialCLIEpoch = liveSerialInputEpoch;
       gSerialCLI += c;
     }
   }
@@ -2792,7 +2968,15 @@ void hardwareone_loop() {
   // commands don't queue behind a wizard-occupied cmd_exec and time out.
   uartLinkTick();
 #if ENABLE_RASPBERRY_PI_HOST_POWER
-  raspberryPiHostPowerTick();
+  cm5HostPowerTick();
+#endif
+#if ENABLE_RASPBERRY_PI_HOST_FAN
+  cm5HostFanTick();
+#endif
+#if ENABLE_LLM_BACKEND
+  // Times out a remote generation whose host went silent. Without it one lost
+  // `cm5 llm end` line strands the chat layer's streaming turn on EVERY surface.
+  llmBackendTick();
 #endif
 
   perfMarkSection(5);  // section 6: USER INPUT

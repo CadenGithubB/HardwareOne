@@ -29,6 +29,7 @@ struct Settings {
       notifToasts(true),
       notifQueue(true),
       notifG2(true),
+      notifApp(true),
       thermalPollingMs(250),
       tofPollingMs(220),
       tofStabilityThreshold(3),
@@ -112,6 +113,9 @@ struct Settings {
       debugBluetoothCore(false),
       debugBluetoothGatt(false),
       debugBluetoothData(false),
+      debugUart(false),
+      debugUartLifecycle(false),
+      debugUartControl(false),
       debugFmRadio(false),
       debugG2(false),  // G2 smart glasses BLE connection (master)
       debugG2Lifecycle(false),
@@ -120,6 +124,14 @@ struct Settings {
       debugG2Pages(false),
       debugG2Heartbeat(false),
       debugG2Dump(false),
+      debugRing(false),  // Even Realities R1 health ring (master)
+      debugRingLifecycle(false),
+      debugRingSetup(false),
+      debugRingProtocol(false),
+      debugRingTxn(false),
+      debugRingHealth(false),
+      debugRingBridge(false),
+      debugRingDump(false),
       debugCamera(false),
       debugCameraLifecycle(false),
       debugCameraCapture(false),
@@ -235,9 +247,7 @@ struct Settings {
       bondStreamRtc(false),
       bondStreamPresence(false),
 #endif
-#if ENABLE_AUTOMATION
-      automationEnabled(true),
-#endif
+      automationEnabled(true),   // unconditional — see the field declaration
       i2cEnabled(true),
       i2c2Enabled(I2C2_BUS_ENABLED_DEFAULT),  // auto-on for boards with valid I2C2 pins
       // Per-device bus assignments — all default to bus 0 (primary), so an
@@ -419,7 +429,7 @@ struct Settings {
       mqttPublishInput(false),
       crashCount(0),
       lastResetReason(0)
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND   // the FEATURE, not the engine: a CM5-only build still has these
       ,llmTemperature(0.5f)
       ,llmTopP(0.8f)
       ,llmMinP(0.0f)
@@ -466,6 +476,7 @@ struct Settings {
   bool notifToasts;    // web SSE toasts
   bool notifQueue;     // notification-center queue view
   bool notifG2;        // G2 lens cards
+  bool notifApp;       // Android companion app cards (BLE command link)
   // Sensors UI (non-advanced)
   int thermalPollingMs;
   int tofPollingMs;
@@ -559,6 +570,9 @@ struct Settings {
   bool debugBluetoothCore;
   bool debugBluetoothGatt;
   bool debugBluetoothData;
+  bool debugUart;           // UART host link (master)
+  bool debugUartLifecycle;  // Link/session/auth lifecycle
+  bool debugUartControl;    // CM5 heartbeat/liveaudio control-plane intrinsics
   bool debugFmRadio;
   bool debugG2;  // G2 smart glasses BLE connection (master)
   bool debugG2Lifecycle;  // Scan, BLE connect/disconnect, MTU, service enumeration
@@ -567,6 +581,14 @@ struct Settings {
   bool debugG2Pages;      // Page-swap worker, hijack, CREATE-list/text, lens state
   bool debugG2Heartbeat;  // Heartbeat TX + HeartbeatAck (every ~5 s; loud)
   bool debugG2Dump;       // [G2-DUMP] diagnostic ring buffer dumps on errors
+  bool debugRing;           // Even Realities R1 health ring (master)
+  bool debugRingLifecycle;  // Scan, connect admission, GATT discovery, notify subscribe, disconnect
+  bool debugRingSetup;      // Auth/deviceInfo/advStart ritual, clock custody, protocol self-test
+  bool debugRingProtocol;   // Per-frame envelope decode, rejects, dup serial, reassembly
+  bool debugRingTxn;        // Intent queued + TX writes + packetAck
+  bool debugRingHealth;     // Telemetry cache, history sweep coordinator, model ingest
+  bool debugRingBridge;     // sid=0x90 RingDataPackage spoof push, spoof task, bridge heartbeat
+  bool debugRingDump;       // Raw notify/payload/fragment hex (redaction still applies)
   bool debugCamera;
   bool debugCameraLifecycle;  // initCamera/stopCamera, PWDN/RESET, GPIO state
   bool debugCameraCapture;    // captureFrame, JPEG validation, fb buffer, recovery
@@ -804,9 +826,14 @@ struct Settings {
   bool bondStreamPresence;             // Auto-stream presence sensor data to bonded peer
 #endif
   // ESP-NOW buffer size settings (runtime tuning)
-#if ENABLE_AUTOMATION
+  // NOTE: kept OUTSIDE the #if ENABLE_AUTOMATION block so the always-compiled
+  // feature registry can reference &gSettings.automationEnabled in any build.
+  // The registry row MUST stay unconditional: a consumer treats a missing id as
+  // "assume present" (so old firmware doesn't hide half the UI), which makes an
+  // #if'd row indistinguishable from old firmware — it would gate nothing.
+  // Same reason ledStartupEnabled and llmAutoStart are unconditional; the
+  // boot-flag pair automationAutoStart already was.
   bool automationEnabled;  // Enable/disable automation scheduler (runs from main loop)
-#endif
   // I2C Hardware system
   // bus 0 = primary STEMMA QT — Wire1 internally, "I2C1" in the UI.
   bool i2cEnabled;       // Enable/disable bus 0 hardware (Wire1 init and transactions)
@@ -958,7 +985,7 @@ struct Settings {
   String systemLogFlags;        // Last-used debug flag mask for system log (empty = leave gDebugFlags)
   bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
   bool micAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
-  // NOTE: kept OUTSIDE the #if ENABLE_ONDEVICE_LLM block below so the always-
+  // NOTE: kept OUTSIDE the #if ENABLE_LLM_BACKEND block below so the always-
   // compiled feature registry can reference &gSettings.llmAutoStart in any build.
   bool llmAutoStart;            // Auto-load the default LLM model at boot (default: false)
   // Microphone settings
@@ -1101,7 +1128,7 @@ struct Settings {
   // Crash / reset tracking (persisted from RTC memory on next healthy boot)
   uint32_t crashCount;          // Accumulated abnormal resets (WDT, panic, brownout)
   uint32_t lastResetReason;     // esp_reset_reason_t value from last boot
-#if ENABLE_ONDEVICE_LLM
+#if ENABLE_LLM_BACKEND   // the FEATURE, not the engine: a CM5-only build still has these
   // On-device LLM generation defaults (System_LLM)
   float llmTemperature;         // Sampling temperature (default: 0.5)
   float llmTopP;                // Nucleus sampling threshold (default: 0.8)

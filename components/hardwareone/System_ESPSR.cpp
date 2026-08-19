@@ -1447,6 +1447,7 @@ static bool srSnipInit() {
     ERROR_SRF("Failed to create snippet queue");
     return false;
   }
+  taskStackRecord("sr_snip_wr", SR_SNIP_STACK_WORDS);
   BaseType_t ret = xTaskCreatePinnedToCore(srSnipWriterTask, "sr_snip_wr", SR_SNIP_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gSrSnipWriterTask, 0);
   if (ret != pdPASS) {
     ERROR_SRF("Failed to create snippet writer task");
@@ -2740,6 +2741,7 @@ bool startESPSR() {
   WARN_SYSTEMF("[SR_START] Step 4: Creating srTask (stack=%u, priority=%d, core=1)",
                (unsigned)SR_STACK_WORDS, (int)SR_TASK_PRIORITY_LEVEL);
   gSRTaskShouldRun = true;
+  taskStackRecord("sr_task", SR_STACK_WORDS);
   BaseType_t ret = xTaskCreatePinnedToCore(
     srTask,
     "sr_task",

@@ -23,6 +23,10 @@
 #include "System_AuthIdentity.h"  // currentExecUser (notifyusermute acts on the caller)
 #include "System_MemUtil.h"       // PSRAM_JSON_DOC
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
+#if ENABLE_BLUETOOTH
+#include "Bluetooth.h"     // blePushNotification / bleGetAuthenticatedSessionInfo — app sink
+#include "BLE_Types.h"     // BLE_MAX_CONNECTIONS — bound on the app-sink session sweep
+#endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #include "G2_Glasses.h"    // g2SendNativeNotificationAsync / isG2Connected — native-card sink
 #include "G2_HijackCmd.h"  // g2HijackAuthContext — G2 lens viewer identity
@@ -133,10 +137,11 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
 // ============================================================================
 // Device policy + viewer resolution (see System_Notifications.h for layers)
 // ============================================================================
-// Two 4x32 masks hold the per-kind device levels (bit index = kind value,
-// same layout as the automation subscription mask). The persisted form is
-// name-keyed JSON — kind numbers are internal-only and free to move between
-// builds, so the masks are rebuilt from names at boot and on every edit.
+// Two NOTIF_KIND_MASK_WORDS-wide masks hold the per-kind device levels (bit
+// index = kind value, same layout as the automation subscription mask). The
+// persisted form is name-keyed JSON — kind numbers are internal-only and free
+// to move between builds, so the masks are rebuilt from names at boot and on
+// every edit.
 #define NOTIF_POLICY_FILE "/system/notifications.json"
 
 static volatile uint32_t gNotifOffMask[NOTIF_KIND_MASK_WORDS]   = {0};  // level: off
@@ -230,7 +235,7 @@ void notifUserPrefsInvalidate() {
   if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
 }
 
-// Turn a kind-name array under `key` into a 4x32 mask (bit index = kind).
+// Turn a kind-name array under `key` into a per-kind mask (bit index = kind).
 static void loadKindMaskFromDoc(JsonDocument& doc, const char* key,
                                 uint32_t out[NOTIF_KIND_MASK_WORDS]) {
   memset(out, 0, NOTIF_KIND_MASK_WORDS * sizeof(uint32_t));
@@ -371,12 +376,16 @@ static NotifRule notifDeviceRuleFor(uint8_t kind) {
   // interrupts (OLED banner or web toast), so banner/toast/G2 fire on the same
   // kinds. The per-user importance floor (notifRuleForViewer) then curates all
   // three uniformly — nothing here hard-limits what the glasses may show.
-  if (r.sinks & (NSINK_BANNER | NSINK_TOAST)) r.sinks |= NSINK_G2;
+  // The companion app is an interrupt surface too, and rides the same grant for
+  // the same reason: the app should show what the lens and the web UI show, and
+  // the per-user floor curates all of them together.
+  if (r.sinks & (NSINK_BANNER | NSINK_TOAST)) r.sinks |= (NSINK_G2 | NSINK_APP);
   if (maskTest(gNotifOffMask, kind)) { r.sinks = NSINK_NONE; return r; }
   if (!gSettings.notifBanners) r.sinks &= (uint8_t)~NSINK_BANNER;
   if (!gSettings.notifToasts)  r.sinks &= (uint8_t)~NSINK_TOAST;
   if (!gSettings.notifQueue)   r.sinks &= (uint8_t)~NSINK_QUEUE;
   if (!gSettings.notifG2)      r.sinks &= (uint8_t)~NSINK_G2;
+  if (!gSettings.notifApp)     r.sinks &= (uint8_t)~NSINK_APP;
   return r;
 }
 
@@ -387,6 +396,7 @@ static uint8_t notifDeviceInterruptSinks() {
   if (!gSettings.notifBanners) s &= (uint8_t)~NSINK_BANNER;
   if (!gSettings.notifToasts)  s &= (uint8_t)~NSINK_TOAST;
   if (!gSettings.notifG2)      s &= (uint8_t)~NSINK_G2;
+  if (!gSettings.notifApp)     s &= (uint8_t)~NSINK_APP;
   return s;
 }
 
@@ -422,6 +432,7 @@ static const SettingEntry notifSettingEntries[] = {
   { "notifToasts",  SETTING_BOOL, &gSettings.notifToasts,  1, 0, nullptr, 0, 1, "Web toasts", nullptr, false, nullptr, "notifydevicetoasts" },
   { "notifQueue",   SETTING_BOOL, &gSettings.notifQueue,   1, 0, nullptr, 0, 1, "Notification center", nullptr, false, nullptr, "notifydevicequeue" },
   { "notifG2",      SETTING_BOOL, &gSettings.notifG2,      1, 0, nullptr, 0, 1, "G2 lens cards", nullptr, false, nullptr, "notifydeviceg2" },
+  { "notifApp",     SETTING_BOOL, &gSettings.notifApp,     1, 0, nullptr, 0, 1, "Android app cards", nullptr, false, nullptr, "notifydeviceapp" },
 };
 extern const SettingsModule notifSettingsModule = {
   "notifications", "system.notifications", notifSettingEntries,
@@ -450,8 +461,9 @@ const char* cmd_notifydevicekind(const String& argsInput) {
       // The old form listed every kind as {"n":..,"l":..} and reached 4362 B —
       // over CMD_RESULT_MAX, so it could not be delivered on ANY transport and
       // the settings page had been dead behind a bogus "admin login required".
-      // Worst case here (every one of 134 kinds non-default) is ~3290 B; the
-      // realistic case is a handful of entries.
+      // Worst case grows with the vocabulary; the serialization guard below
+      // fails loudly if it reaches CMD_RESULT_MAX. The realistic policy is a
+      // handful of non-default entries.
       PSRAM_JSON_DOC(doc);
       JsonObject kinds = doc["kinds"].to<JsonObject>();
       for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
@@ -734,6 +746,9 @@ struct NotifPipeStats {
   uint32_t g2Pushed;         // native G2 cards enqueued to the lens worker
   uint32_t g2Filtered;       // G2 viewer rule denied the card (policy/mute)
   uint32_t g2Dropped;        // enqueue failed (worker queue full / disconnect race)
+  uint32_t appPushed;        // cards written to an authenticated companion-app session
+  uint32_t appFiltered;      // app viewer rule denied the card (policy/mute/floor)
+  uint32_t appDropped;       // link busy (tx mutex held) or session died mid-send
   uint32_t staleDropped;     // waited >10s in the ring; transient render skipped
   uint32_t cooldownSupp;     // suppressed by per-kind cooldown
   uint32_t ringSkipped;      // ring overwrote events before the tick read them
@@ -773,19 +788,21 @@ const char* cmd_notifstats(const String& argsInput) {
                    (unsigned long)systemEventRingSkippedTotal());
   BROADCAST_PRINTF("  Tick: fetched=%lu, slowest drain %lu us",
                    (unsigned long)gNotifPipe.fetched, (unsigned long)gNotifPipe.drainMaxUs);
-  BROADCAST_PRINTF("  Rendered: banners=%lu toasts=%lu (toast events offered to web sessions) g2-cards=%lu",
+  BROADCAST_PRINTF("  Rendered: banners=%lu toasts=%lu (toast events offered to web sessions) g2-cards=%lu app-cards=%lu",
                    (unsigned long)gNotifPipe.bannersShown, (unsigned long)gNotifPipe.toastsBroadcast,
-                   (unsigned long)gNotifPipe.g2Pushed);
+                   (unsigned long)gNotifPipe.g2Pushed, (unsigned long)gNotifPipe.appPushed);
   BROADCAST_PRINTF("  LOSS: ring_skip=%lu stale=%lu sse_drop=%lu (sse = current sessions)",
                    (unsigned long)gNotifPipe.ringSkipped,
                    (unsigned long)gNotifPipe.staleDropped,
                    (unsigned long)sseEventDropsTotal());
-  BROADCAST_PRINTF("  Suppressed (benign): cooldown=%lu | Filtered (policy/mutes, intentional): banner=%lu toast-sessions=%lu g2=%lu | g2-drop(enqueue-fail)=%lu",
+  BROADCAST_PRINTF("  Suppressed (benign): cooldown=%lu | Filtered (policy/mutes, intentional): banner=%lu toast-sessions=%lu g2=%lu app=%lu | g2-drop(enqueue-fail)=%lu app-drop(link-busy)=%lu",
                    (unsigned long)gNotifPipe.cooldownSupp,
                    (unsigned long)gNotifPipe.bannersFiltered,
                    (unsigned long)gNotifPipe.toastsFiltered,
                    (unsigned long)gNotifPipe.g2Filtered,
-                   (unsigned long)gNotifPipe.g2Dropped);
+                   (unsigned long)gNotifPipe.appFiltered,
+                   (unsigned long)gNotifPipe.g2Dropped,
+                   (unsigned long)gNotifPipe.appDropped);
   cliHint("watch these live with 'debugnotifications 1' (one [NOTIF] line per 10s); zero them with 'notifstats reset'");
   return "OK";
 }
@@ -813,6 +830,27 @@ void systemEventsNotifyTick() {
   const bool g2Connected = isG2Connected();
   bool g2ViewerResolved = false;
   NotifViewer g2Viewer;
+#endif
+#if ENABLE_BLUETOOTH
+  // The companion-app sink fans out to every AUTHENTICATED BLE session, each
+  // judged by its own logged-in user — the same shape as the per-session web
+  // toast predicate, not the single-viewer G2 sink. An unauthenticated app sees
+  // nothing at all: bleGetAuthenticatedSessionInfo only enumerates sessions
+  // that are both authed and carry a username, so "suppress until logged in"
+  // falls out of the enumeration rather than needing a separate gate.
+  //
+  // Resolved lazily once per tick like the other viewers. The snapshot is
+  // static, not stack: this function already keeps per-tick statics (sCursor,
+  // sKindLastShownMs) and is main-loop-only, so this costs no main-loop stack.
+  struct AppSinkSession {
+    uint16_t              connId;
+    TransportSessionEpoch epoch;
+    NotifViewer           viewer;
+  };
+  static AppSinkSession sAppSinks[BLE_MAX_CONNECTIONS];
+  int  appSinkCount    = 0;
+  bool appSinksResolved = false;
+  const bool appLinkUp = isBLEConnected() && bleHasAuthenticatedSession();
 #endif
   // Diagnostics: timing starts lazily on the first non-empty fetch, so idle
   // main-loop laps (the overwhelmingly common case) pay nothing.
@@ -902,6 +940,41 @@ void systemEventsNotifyTick() {
         }
       }
       #endif
+
+      #if ENABLE_BLUETOOTH
+      if (appLinkUp) {
+        if (!appSinksResolved) {
+          for (int s = 0; s < BLE_MAX_CONNECTIONS; s++) {
+            uint16_t connId = 0;
+            String   user;
+            if (!bleGetAuthenticatedSessionInfo(s, connId, user)) break;
+            sAppSinks[appSinkCount].connId = connId;
+            sAppSinks[appSinkCount].epoch  = bleSessionEpochForConnection(connId);
+            notifViewerResolve(user.c_str(), sAppSinks[appSinkCount].viewer);
+            appSinkCount++;
+          }
+          appSinksResolved = true;
+        }
+        for (int s = 0; s < appSinkCount; s++) {
+          if (!(notifRuleForViewer(e.kind, sAppSinks[s].viewer).sinks & NSINK_APP)) {
+            if (r.sinks & NSINK_APP) gNotifPipe.appFiltered++;
+            continue;
+          }
+          // Title = event family, body = the shared one-liner — identical to the
+          // lens card, so the two surfaces read the same. The kind NAME travels
+          // with it so the app can offer "mute this kind" without a lookup table
+          // (names are the contract; kind numbers are internal only).
+          const char* title = systemEventFamilyName(systemEventKindFamily(e.kind));
+          if (blePushNotification(sAppSinks[s].connId, sAppSinks[s].epoch,
+                                  systemEventKindName(e.kind), levelName(r.level),
+                                  title, msg, r.durMs)) {
+            gNotifPipe.appPushed++;
+          } else {
+            gNotifPipe.appDropped++;
+          }
+        }
+      }
+      #endif
     }
     if (n < 8) break;  // ring drained
   }
@@ -919,12 +992,13 @@ void systemEventsNotifyTick() {
     static uint32_t sReportMs = 0;
     if (everyMs(&sReportMs, 10000)) {
       DEBUG_NOTIFICATIONSF(
-          "[NOTIF] fetched=%lu banner=%lu toast=%lu g2=%lu | LOSS ring_skip=%lu stale=%lu sse_drop=%lu"
-          " | supp cooldown=%lu filtered=b%lu/t%lu/g%lu g2_drop=%lu | lag_hwm=%lu/%d (%s) drain_max=%luus",
+          "[NOTIF] fetched=%lu banner=%lu toast=%lu g2=%lu app=%lu | LOSS ring_skip=%lu stale=%lu sse_drop=%lu"
+          " | supp cooldown=%lu filtered=b%lu/t%lu/g%lu/a%lu g2_drop=%lu app_drop=%lu | lag_hwm=%lu/%d (%s) drain_max=%luus",
           (unsigned long)gNotifPipe.fetched,
           (unsigned long)gNotifPipe.bannersShown,
           (unsigned long)gNotifPipe.toastsBroadcast,
           (unsigned long)gNotifPipe.g2Pushed,
+          (unsigned long)gNotifPipe.appPushed,
           (unsigned long)gNotifPipe.ringSkipped,
           (unsigned long)gNotifPipe.staleDropped,
           (unsigned long)sseEventDropsTotal(),
@@ -932,7 +1006,9 @@ void systemEventsNotifyTick() {
           (unsigned long)gNotifPipe.bannersFiltered,
           (unsigned long)gNotifPipe.toastsFiltered,
           (unsigned long)gNotifPipe.g2Filtered,
+          (unsigned long)gNotifPipe.appFiltered,
           (unsigned long)gNotifPipe.g2Dropped,
+          (unsigned long)gNotifPipe.appDropped,
           (unsigned long)gNotifPipe.ringLagHwm, SYSEVT_RING_SIZE,
           saturationLabel(gNotifPipe.ringLagHwm, SYSEVT_RING_SIZE),
           (unsigned long)gNotifPipe.drainMaxUs);

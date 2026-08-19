@@ -91,6 +91,11 @@ void startSensorDataStreaming(RemoteSensorType sensorType);
 // Stop streaming sensor data
 void stopSensorDataStreaming(RemoteSensorType sensorType);
 
+// closeespnow lifecycle hook: reject new local stream starts, clear all worker
+// and bond-master stream/lease state without emitting radio messages, join the
+// broadcaster task, and release its shared PSRAM buffer. Retry-safe on timeout.
+bool shutdownSensorDataStreamingForEspNowClose();
+
 bool isSensorDataStreamingEnabled(RemoteSensorType sensorType);
 
 // ---- Secure sensor fetcher (docs/ESPNOW_SENSOR_FETCHER_DESIGN.md) ----

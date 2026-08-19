@@ -36,8 +36,8 @@
 
 // ---------------------------------------------------------------------------
 // Banks — one byte-aligned bank per family (16 bits for the fast growers),
-// so a printed hex mask reads family-per-byte. Bits 216-247 are four spare
-// whole banks (deliberately unnamed) for future sensors/subsystems.
+// so a printed hex mask reads family-per-byte. Bits 240-247 are one spare
+// whole bank (deliberately unnamed) for a future sensor/subsystem.
 // ---------------------------------------------------------------------------
 //   F(sym, base, width, "Label")
 #define DBG_BANK_LIST(F) \
@@ -64,6 +64,8 @@
   F(FMRADIO,     192,  8, "FM Radio")     \
   F(MICROPHONE,  200,  8, "Microphone")   \
   F(ANO_ENCODER, 208,  8, "ANO Encoder")  \
+  F(UART,        216,  8, "UART")         \
+  F(RING,        224, 16, "R1 Ring")      \
   F(CONTROL,     248,  8, "Control")
 
 enum DbgBank : uint8_t {
@@ -339,7 +341,24 @@ inline constexpr const char* kDbgBankLabel[DBG_BANK_COUNT] = { DBG_BANK_LIST(DBG
   X(ANO_ENCODER_LIFECYCLE, 209, ANO_ENCODER, 208, "ANO_LIFE",        debugAnoEncoderLifecycle, debuganoencoderlifecycle,  "anoencoder",     "lifecycle",  "Lifecycle")                                                                                 \
   X(ANO_ENCODER_POLLING,   210, ANO_ENCODER, 208, "ANO_POLL",        debugAnoEncoderPolling,  debuganoencoderpolling,    "anoencoder",     "polling",    "Polling")                                                                                    \
   X(ANO_ENCODER_VALUES,    211, ANO_ENCODER, 208, "ANO_VAL",         debugAnoEncoderValues,   debuganoencodervalues,     "anoencoder",     "values",     "Values")                                                                                     \
-  /* Bits 216-247: spare (four whole banks for future sensors/subsystems)     */                                                                                                                                                                       \
+  /* Bits 216-223: authenticated CM5 UART host link. The parent is an        */                                                                                                                                                                       \
+  /* explicit master; sub-macros gate on parent|sub like the sensor banks.   */                                                                                                                                                                       \
+  X(UART,                  216, UART,        255, "UART",             debugUart,               debuguart,                "uart",           "enabled",    "All UART")                                                                                   \
+  X(UART_LIFECYCLE,        217, UART,        216, "UART_LIFE",        debugUartLifecycle,      debuguartlifecycle,       "uart",           "lifecycle",  "Lifecycle")                                                                                  \
+  X(UART_CONTROL,          218, UART,        216, "UART_CTRL",        debugUartControl,        debuguartcontrol,         "uart",           "control",    "Control plane") /* heartbeat, lease renewal, CM5 ACK/report and EVT summaries */            \
+  /* Bits 219-223: spare (UART)                                               */                                                                                                                                                                       \
+  /* Bits 224-239: Even Realities R1 ring (BLE health ring). The parent is an */                                                                                                                                                                       \
+  /* explicit master; sub-macros gate on parent|sub like the G2/sensor banks. */                                                                                                                                                                       \
+  X(RING,                  224, RING,        255, "RING",             debugRing,               debugring,                "ring",           "enabled",    "All R1 Ring")                                                                                \
+  X(RING_LIFECYCLE,        225, RING,        224, "RING_LIFE",        debugRingLifecycle,      debugringlifecycle,       "ring",           "lifecycle",  "Lifecycle") /* scan, connect admission, GATT discovery, notify subscribe, disconnect */     \
+  X(RING_SETUP,            226, RING,        224, "RING_SETUP",       debugRingSetup,          debugringsetup,           "ring",           "setup",      "Setup ritual") /* auth/deviceInfo/advStart stages, clock custody, protocol self-test */    \
+  X(RING_PROTOCOL,         227, RING,        224, "RING_PROTO",       debugRingProtocol,       debugringprotocol,        "ring",           "protocol",   "Protocol") /* per-frame envelope decode, rejects, dup serial, reassembly */               \
+  X(RING_TXN,              228, RING,        224, "RING_TXN",         debugRingTxn,            debugringtxn,             "ring",           "txn",        "Transactions") /* intent queued + TX writes + packetAck */                                \
+  X(RING_HEALTH,           229, RING,        224, "RING_HEALTH",      debugRingHealth,         debugringhealth,          "ring",           "health",     "Health data") /* telemetry cache, history sweep coordinator, model ingest */             \
+  X(RING_BRIDGE,           230, RING,        224, "RING_BRIDGE",      debugRingBridge,         debugringbridge,          "ring",           "bridge",     "Spoof bridge") /* sid=0x90 RingDataPackage push, spoof task, bridge heartbeat */          \
+  X(RING_DUMP,             231, RING,        224, "RING_DUMP",        debugRingDump,           debugringdump,            "ring",           "dump",       "Hex dumps") /* raw notify/payload/fragment hex; redaction still applies */               \
+  /* Bits 232-239: spare (RING)                                               */                                                                                                                                                                       \
+  /* Bits 240-247: spare (one whole bank for a future sensor/subsystem)       */                                                                                                                                                                       \
   /* Bits 248-255: Control. Not subsystems — never name one of these as a     */                                                                                                                                                                       \
   /* message's only flag. Control rows carry an empty TAG (deliberately       */                                                                                                                                                                       \
   /* absent from the category-name walk): the tag must resolve to the real    */                                                                                                                                                                       \
@@ -510,7 +529,7 @@ inline constexpr DbgAggModeTable kDbgAggMode = [] {
 }();
 
 // --- Compile-time invariants — a bad row is a build error, not a runtime
-// mystery. O(n^2) over 117 rows is well under the constexpr step limit. -----
+// mystery. O(n^2) over 120 rows is well under the constexpr step limit. -----
 
 constexpr bool dbgStrEq(const char* a, const char* b) {
   while (*a != '\0' && *a == *b) { ++a; ++b; }
@@ -611,7 +630,7 @@ constexpr bool dbgAggFamiliesWellFormed() {
   return n == 14;
 }
 
-static_assert(DBG_FLAG_COUNT == 117, "debug-flag row count changed — re-check every kDbg* consumer and the settings/CLI/web layers before accepting");
+static_assert(DBG_FLAG_COUNT == 128, "debug-flag row count changed — re-check every kDbg* consumer and the settings/CLI/web layers before accepting");
 static_assert(DBG_SUBBOOL_COUNT == 40, "bitless-sub row count changed — re-check DebugSubFlags, the CLI sub handlers, and dbgRecomputeParent consumers");
 static_assert(dbgBitsUnique(),          "two debug-flag rows claim the same bit");
 static_assert(dbgBitsInDeclaredBank(),  "a debug-flag bit falls outside its declared bank");

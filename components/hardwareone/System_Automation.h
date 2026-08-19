@@ -58,6 +58,10 @@ bool automationEventsPending();
 
 // Automation file operations
 bool sanitizeAutomationsJson(String& jsonRef);
+// Redact credential-bearing command strings in an automations JSON document
+// before it crosses a CLI/HTTP/log boundary. Returns an empty String on parse
+// failure so callers fail closed instead of echoing malformed raw storage.
+String redactAutomationsJsonForResponse(const String& json);
 bool writeAutomationsJsonAtomic(const String& json);
 bool streamParseAutomations(const char* path, AutomationCallback callback, void* userData);
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
@@ -116,6 +120,7 @@ inline bool automationsAnyDue(time_t) { return false; }
 inline void automationOnSystemEvent(uint8_t) {}
 inline bool automationEventsPending() { return false; }
 inline bool sanitizeAutomationsJson(String&) { return false; }
+inline String redactAutomationsJsonForResponse(const String&) { return String(); }
 inline bool writeAutomationsJsonAtomic(const String&) { return false; }
 inline void schedulerTickMinute() {}
 inline const char* executeConditionalCommand(const char*, const char*) { return "disabled"; }

@@ -1232,8 +1232,21 @@ int  espnowGetPairCandidateCount();                                             
 bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6], int* rssi);
 bool espnowGetIncomingPairRequest(char* name, size_t nameCap);                   // pending accept/reject
 bool startEspNowTask();        // Start ESP-NOW heartbeat task
-void stopEspNowTask();         // Stop ESP-NOW heartbeat task
-TaskHandle_t getEspNowTaskHandle();  // Get task handle for stack monitoring
+// Cooperatively stop and join the heartbeat/RX task. On timeout the task and
+// its resources remain intact so closeespnow can retry safely.
+bool stopEspNowTask(uint32_t timeoutMs);
+// Safe diagnostic snapshot: holds the heartbeat lifecycle owner across task
+// lookup + HWM query so closeespnow cannot delete the task between them. The
+// returned handle is an opaque identity key only; do not query it later.
+bool getEspNowTaskStackSnapshot(TaskHandle_t* outHandle,
+                                UBaseType_t* outWatermark);
+
+// True while a bounded close retained live resources for a later retry.
+bool espnowShutdownPending();
+
+// Centralized driver-peer deletion boundary for UI/first-party callers. It
+// rejects while ESP-NOW is stopped/closing and is included in close quiescence.
+bool espnowDeletePeerRuntime(const uint8_t mac[6]);
 
 // Message handling (for command execution)
 void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& result, const String& senderName);

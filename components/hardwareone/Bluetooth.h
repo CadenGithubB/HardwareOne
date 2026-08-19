@@ -4,6 +4,7 @@
 #include <Arduino.h>
 
 #include "System_BuildConfig.h"
+#include "System_User.h"
 
 // =============================================================================
 // BLE MODE CONSTANTS (available regardless of ENABLE_BLUETOOTH)
@@ -142,8 +143,25 @@ uint32_t getBLEConnectionDuration();
 // try-lock (best-effort; used by the debug console mirror so it never stalls the debug task).
 bool sendBLEResponse(const char* data, size_t len, bool blocking = true);
 
-// Send response to a specific BLE connection (preferred for interactive CLI)
+// Send to the connection's current session, or to an explicitly captured
+// session epoch.  The latter is required for deferred callbacks: a stale result
+// is dropped if the peer disconnected, logged out, or connId was reused.
 bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len);
+// blocking=false makes the secure-channel send try-lock, exactly like the
+// sendBLEResponse console-mirror path: a best-effort producer (the notification
+// sink, called from the main loop) must never stall behind a paced multi-frame
+// command result that currently holds the tx mutex. Command results keep the
+// default and must not drop.
+bool sendBLEResponseToSession(uint16_t connId,
+                              TransportSessionEpoch expectedEpoch,
+                              const char* data, size_t len, bool blocking = true);
+
+// Push one notification card to a specific authenticated session. The line is
+// framed as `#NOTIF {json}\n` — see the wire-format contract at the definition
+// in Bluetooth.cpp. Best-effort: returns false if the link is busy or gone.
+bool blePushNotification(uint16_t connId, TransportSessionEpoch expectedEpoch,
+                         const char* kindName, const char* level,
+                         const char* title, const char* msg, uint16_t durMs);
 
 // BLE auth/session maintenance
 void bleClearConnectionByConnId(uint16_t connId);
@@ -156,6 +174,12 @@ bool bleGetAuthenticatedUser(uint16_t connId, String& outUser);
 bool bleGetAuthenticatedSessionInfo(int authedIndex, uint16_t& outConnId, String& outUser);
 int bleRevokeUserSessions(const String& username);
 int bleRevokeAllSessions();
+TransportSessionEpoch bleSessionEpochForConnection(uint16_t connId);
+bool bleSessionEpochMatches(uint16_t connId, TransportSessionEpoch epoch);
+bool bleSessionEpochIsLive(TransportSessionEpoch epoch);
+// Rotate every unauthenticated connection incarnation after a live auth-policy
+// change; named logged-in sessions remain intact.
+void bleAuthPolicyChanged();
 
 // Data streaming pipeline API
 bool blePushSensorData(const char* jsonData, size_t len);
@@ -171,7 +195,38 @@ bool bleIsStreamEnabled(uint8_t streamFlag);
 // Auto-streaming (call from main loop)
 void bleUpdateStreams();
 
-// Status
+// Runtime status. These predicates deliberately answer different questions:
+// controller/host report physical stack state, server reports ownership of the
+// phone-facing GATT profile, and bleSubsystemActive() reports either logical
+// application role (server or G2 client) initialized.
+bool isBleControllerEnabled();
+bool isBluedroidHostEnabled();
+bool isBleServerInitialized();
+
+// Exclusive application-role transition token. It is recursive for the
+// owning task (server start may call G2 deinit, and host recovery calls G2
+// deinit/init as one transaction) and rejects unrelated tasks immediately.
+// BLE callbacks never acquire it; they observe the published state and
+// finish/drop work through their normal lifecycle epochs.
+enum class BleRoleTransition : uint8_t {
+  IDLE = 0,
+  SERVER_START,
+  SERVER_STOP,
+  G2_START,
+  G2_STOP,
+  RECOVERING,
+};
+bool bleRoleTransitionBegin(BleRoleTransition state);
+void bleRoleTransitionEnd();
+BleRoleTransition bleRoleTransitionState();
+bool bleRoleTransitionHeldByCurrentTask();
+// Set only after a destructive host/controller transition fails to reach a
+// verified terminal state. Normal init paths must fail closed until reboot;
+// the recovery transaction clears it only after a fully verified re-init.
+bool bleStackLifecycleFaulted();
+void bleStackSetLifecycleFault(bool faulted);
+// Compatibility-only historical predicate. It remains controller-wide; new
+// call sites must use one of the explicit predicates above.
 bool isBLERunning();
 void getBLEStatus(char* buffer, size_t bufferSize);
 const char* getBLEStateString();
@@ -220,6 +275,11 @@ inline void disconnectBLE() {}
 inline uint32_t getBLEConnectionDuration() { return 0; }
 inline bool sendBLEResponse(const char*, size_t, bool = true) { return false; }
 inline bool sendBLEResponseToConn(uint16_t, const char*, size_t) { return false; }
+inline bool sendBLEResponseToSession(uint16_t, TransportSessionEpoch,
+                                     const char*, size_t, bool = true) { return false; }
+inline bool blePushNotification(uint16_t, TransportSessionEpoch, const char*,
+                                const char*, const char*, const char*,
+                                uint16_t) { return false; }
 inline void bleClearConnectionByConnId(uint16_t) {}
 inline void bleSessionTick() {}
 inline bool bleHasAuthenticatedSession() { return false; }
@@ -227,6 +287,22 @@ inline bool bleGetAuthenticatedUser(uint16_t, String&) { return false; }
 inline bool bleGetAuthenticatedSessionInfo(int, uint16_t&, String&) { return false; }
 inline int bleRevokeUserSessions(const String&) { return 0; }
 inline int bleRevokeAllSessions() { return 0; }
+inline TransportSessionEpoch bleSessionEpochForConnection(uint16_t) { return 0; }
+inline bool bleSessionEpochMatches(uint16_t, TransportSessionEpoch) { return false; }
+inline bool bleSessionEpochIsLive(TransportSessionEpoch) { return false; }
+inline void bleAuthPolicyChanged() {}
+inline bool isBleControllerEnabled() { return false; }
+inline bool isBluedroidHostEnabled() { return false; }
+inline bool isBleServerInitialized() { return false; }
+enum class BleRoleTransition : uint8_t {
+  IDLE = 0, SERVER_START, SERVER_STOP, G2_START, G2_STOP, RECOVERING,
+};
+inline bool bleRoleTransitionBegin(BleRoleTransition) { return false; }
+inline void bleRoleTransitionEnd() {}
+inline BleRoleTransition bleRoleTransitionState() { return BleRoleTransition::IDLE; }
+inline bool bleRoleTransitionHeldByCurrentTask() { return false; }
+inline bool bleStackLifecycleFaulted() { return false; }
+inline void bleStackSetLifecycleFault(bool) {}
 inline bool isBLERunning() { return false; }
 inline void getBLEStatus(char* buffer, size_t) { if (buffer) buffer[0] = '\0'; }
 inline const char* getBLEStateString() { return "disabled"; }
