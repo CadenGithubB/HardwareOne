@@ -1,0 +1,216 @@
+{
+  "families": [
+    {
+      "n": "Mesh & ESP-NOW",
+      "k": [
+        "peer_online",
+        "peer_offline",
+        "peer_paired",
+        "text_rx",
+        "file_rx",
+        "bond_online",
+        "bond_offline",
+        "bond_reject",
+        "espnow_on",
+        "espnow_off",
+        "pair_window_open",
+        "pair_window_closed",
+        "mesh_promoted",
+        "mesh_demoted",
+        "remote_cmd_rx",
+        "remote_cmd_sent",
+        "remote_cmd_result",
+        "mesh_passphrase_changed",
+        "remote_stream_started",
+        "file_rx_failed"
+      ]
+    },
+    {
+      "n": "Connectivity",
+      "k": [
+        "wifi_connected",
+        "wifi_disconnected",
+        "wifi_connect_failed",
+        "wifi_net_added",
+        "wifi_net_removed",
+        "mqtt_connected",
+        "mqtt_disconnected",
+        "ble_connected",
+        "ble_disconnected",
+        "time_synced",
+        "ble_stack_recycled",
+        "mqtt_start_failed",
+        "http_server_started",
+        "http_server_stopped",
+        "ble_on",
+        "ble_off",
+        "mqtt_ext_sensor_new",
+        "cert_generated"
+      ]
+    },
+    {
+      "n": "Glasses",
+      "k": [
+        "g2_connected",
+        "g2_disconnected",
+        "g2_worn",
+        "g2_not_worn",
+        "ring_connected",
+        "ring_disconnected",
+        "ring_worn",
+        "ring_not_worn",
+        "ring_reconnect_failed",
+        "g2_reconnect_failed",
+        "g2_silent_mode",
+        "g2_hijack_entered",
+        "g2_hijack_exited"
+      ]
+    },
+    {
+      "n": "Sensors",
+      "k": [
+        "sensor_started",
+        "sensor_stopped",
+        "sensor_start_failed",
+        "sensor_fault",
+        "presence_detected",
+        "presence_cleared",
+        "gesture",
+        "imu_shake",
+        "imu_tap",
+        "imu_freefall",
+        "imu_orientation",
+        "gps_fix",
+        "gps_lost",
+        "button",
+        "fm_rds_station",
+        "motion_detected",
+        "rtc_power_loss",
+        "thermal_hot_alert",
+        "tof_object_detected",
+        "fm_tuned",
+        "imu_walking"
+      ]
+    },
+    {
+      "n": "Voice, AI & Media",
+      "k": [
+        "voice_wake",
+        "voice_command",
+        "ei_detected",
+        "ei_lost",
+        "photo_saved",
+        "video_saved",
+        "mic_saved",
+        "llm_gen_done",
+        "llm_model_loaded",
+        "voice_armed",
+        "llm_load_failed",
+        "llm_state_corrupt",
+        "mic_record_started",
+        "video_record_started",
+        "ei_continuous_started",
+        "voice_disarmed",
+        "llm_model_unloaded"
+      ]
+    },
+    {
+      "n": "Auth & Users",
+      "k": [
+        "login_ok",
+        "login_fail",
+        "user_request",
+        "user_added",
+        "user_deleted",
+        "user_approved",
+        "password_changed",
+        "logout",
+        "user_rejected",
+        "command_denied",
+        "auth_db_fault"
+      ]
+    },
+    {
+      "n": "Security",
+      "k": [
+        "peer_unpaired",
+        "identity_regenerated",
+        "user_promoted",
+        "user_demoted",
+        "user_banned",
+        "ip_banned",
+        "login_locked"
+      ]
+    },
+    {
+      "n": "Power & Battery",
+      "k": [
+        "usb_on",
+        "usb_off",
+        "charging_started",
+        "charging_stopped",
+        "battery_low",
+        "battery_critical",
+        "power_save_enter",
+        "power_save_exit",
+        "power_mode_changed",
+        "battery_full"
+      ]
+    },
+    {
+      "n": "Storage",
+      "k": [
+        "sd_mounted",
+        "sd_unmounted",
+        "sd_write_failed",
+        "fs_low_space",
+        "file_deleted",
+        "settings_save_failed",
+        "storage_formatted",
+        "sd_write_recovered"
+      ]
+    },
+    {
+      "n": "Automation",
+      "k": [
+        "automation_fired",
+        "automation_added",
+        "automation_deleted",
+        "automation_action_dropped"
+      ]
+    },
+    {
+      "n": "Firmware & OTA",
+      "k": [
+        "firmware_changed",
+        "ota_result",
+        "ota_credential_changed",
+        "ota_upload_started",
+        "ota_upload_finished",
+        "ota_staged",
+        "ota_stage_rejected",
+        "ota_trial_started",
+        "ota_accepted",
+        "ota_rolled_back",
+        "ota_recovery_entered"
+      ]
+    },
+    {
+      "n": "System",
+      "k": [
+        "setting_changed",
+        "boot_started",
+        "boot_finished",
+        "reboot",
+        "crash",
+        "factory_reset",
+        "feature_toggled",
+        "backup_created",
+        "backup_restored",
+        "config_file_corrupt",
+        "secret_decrypt_failed",
+        "display_init_failed"
+      ]
+    }
+  ]
+}

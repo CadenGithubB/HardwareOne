@@ -1,6 +1,9 @@
 #include "System_Settings.h"        // Settings struct definition and function declarations
+#include "System_UserSettings.h"   // Per-user settings declarations + transaction contract
+#include <cerrno>            // errno/ENOENT — distinguish absence from stat failure
 #include <cmath>             // floorf — whole-number check in settingsTypeAccepted
 #include <climits>           // INT_MIN/INT_MAX — same
+#include <sys/stat.h>        // stat — fail-closed per-user settings existence probe
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"   // ENABLE_WIFI, ENABLE_ESPNOW flags
 #include "System_PollPause.h"     // pollPause/pollResume — global sensor-poll pause
@@ -29,6 +32,7 @@
 #include <esp_app_desc.h>
 #include <esp_log.h>
 #include "mbedtls/aes.h"
+#include "mbedtls/platform_util.h"
 #include "mbedtls/sha256.h"
 #include "esp_flash.h"
 #if ENABLE_WIFI
@@ -376,7 +380,8 @@ String encryptString(const String& password) {
 
   // PKCS#7 padding
   int paddedLen = ((password.length() / 16) + 1) * 16;
-  uint8_t* plaintext = (uint8_t*)ps_alloc(paddedLen, AllocPref::PreferPSRAM, "aes.enc.plain");
+  // RequireInternal: this buffer holds the PLAINTEXT secret pre-encryption.
+  uint8_t* plaintext = (uint8_t*)ps_alloc(paddedLen, AllocPref::RequireInternal, "aes.enc.plain");
   if (!plaintext) {
     ERROR_MEMORYF("[AES] Failed to allocate plaintext buffer");
     return "";
@@ -395,6 +400,7 @@ String encryptString(const String& password) {
 
   uint8_t* ciphertext = (uint8_t*)ps_alloc(paddedLen, AllocPref::PreferPSRAM, "aes.enc.cipher");
   if (!ciphertext) {
+    mbedtls_platform_zeroize(plaintext, paddedLen);
     free(plaintext);
     mbedtls_aes_free(&aes);
     ERROR_MEMORYF("[AES] Failed to allocate ciphertext buffer");
@@ -409,7 +415,7 @@ String encryptString(const String& password) {
   mbedtls_aes_free(&aes);
   
   // Securely clear plaintext
-  memset(plaintext, 0, paddedLen);
+  mbedtls_platform_zeroize(plaintext, paddedLen);
   free(plaintext);
 
   if (ret != 0) {
@@ -502,7 +508,8 @@ String decryptString(const String& encryptedPassword) {
   mbedtls_aes_init(&aes);
   mbedtls_aes_setkey_dec(&aes, key, 128);
 
-  uint8_t* plaintext = (uint8_t*)ps_alloc(ciphertextLen, AllocPref::PreferPSRAM, "aes.dec.plain");
+  // RequireInternal: decrypted secret scratch must never spill to PSRAM.
+  uint8_t* plaintext = (uint8_t*)ps_alloc(ciphertextLen, AllocPref::RequireInternal, "aes.dec.plain");
   if (!plaintext) {
     free(ciphertext);
     mbedtls_aes_free(&aes);
@@ -519,6 +526,7 @@ String decryptString(const String& encryptedPassword) {
   free(ciphertext);
 
   if (ret != 0) {
+    mbedtls_platform_zeroize(plaintext, ciphertextLen);
     free(plaintext);
     ERROR_STORAGEF("[AES] Decryption failed: %d", ret);
     return "";
@@ -527,6 +535,7 @@ String decryptString(const String& encryptedPassword) {
   // Remove PKCS#7 padding
   uint8_t padValue = plaintext[ciphertextLen - 1];
   if (padValue < 1 || padValue > 16) {
+    mbedtls_platform_zeroize(plaintext, ciphertextLen);
     free(plaintext);
     ERROR_STORAGEF("[AES] Invalid padding value: %d", padValue);
     return "";
@@ -537,6 +546,7 @@ String decryptString(const String& encryptedPassword) {
   // that associates but loops on the 4-way handshake forever.
   for (int pi = ciphertextLen - padValue; pi < ciphertextLen; pi++) {
     if (plaintext[pi] != padValue) {
+      mbedtls_platform_zeroize(plaintext, ciphertextLen);
       free(plaintext);
       ERROR_STORAGEF("[AES] Corrupt padding — wrong key or damaged blob");
       return "";
@@ -544,22 +554,17 @@ String decryptString(const String& encryptedPassword) {
   }
 
   int plaintextLen = ciphertextLen - padValue;
-  char* result = (char*)malloc(plaintextLen + 1);
-  if (!result) {
-    free(plaintext);
-    ERROR_MEMORYF("[AES] Failed to allocate result buffer");
+  // Construct the return value directly from the length-delimited plaintext;
+  // avoid a second temporary heap buffer containing the same secret.
+  String output((const char*)plaintext, (unsigned int)plaintextLen);
+  const bool outputOk = (plaintextLen == 0) || (output.length() == (unsigned int)plaintextLen);
+  mbedtls_platform_zeroize(plaintext, ciphertextLen);
+  free(plaintext);
+  if (!outputOk) {
+    secureClearString(output);
+    ERROR_MEMORYF("[AES] Failed to allocate decrypted result string");
     return "";
   }
-
-  memcpy(result, plaintext, plaintextLen);
-  result[plaintextLen] = '\0';
-
-  // Securely clear plaintext
-  memset(plaintext, 0, ciphertextLen);
-  free(plaintext);
-
-  String output = String(result);
-  free(result);
 
   DEBUG_STORAGEF("[AES] String decrypted successfully (len=%d)", output.length());
   return output;
@@ -587,6 +592,17 @@ int secretLoadFailureCount() { return gSecretLoadFailures; }
 static bool gSettingsLoadedOk = false;
 
 void settingsMarkLoadedOk() { gSettingsLoadedOk = true; }
+
+// Same contract as gSettingsLoadedOk, for debug.json. writeDebugJson() rebuilds
+// the whole file from gSettings RAM, which after a failed read holds nothing but
+// COMPILED DEFAULTS — so one corrupt debug.json plus one flag change silently
+// flattens the operator's entire flag set. Absent counts as loaded (RAM is
+// legitimately the truth on a fresh device), so bootstrap still works.
+// Consequence, matching the settings precedent: after a failed read the device
+// refuses debug saves until it reboots with a readable file. The damaged file is
+// preserved for inspection rather than being flattened.
+static bool gDebugLoadedOk = false;
+void debugSettingsMarkLoadedOk() { gDebugLoadedOk = true; }
 
 // Guarded secret write: never replaces a stored "AES:" blob with "" after a
 // damaged load, and never persists an empty result from a FAILED encryption
@@ -644,7 +660,8 @@ static bool aesBlobDecryptsWith(const String& keyMaterial, const char* blob) {
   if (ctLen <= 0 || (ctLen % 16) != 0) return false;
 
   uint8_t* ct = (uint8_t*)ps_alloc(ctLen, AllocPref::PreferPSRAM, "aes.epoch.ct");
-  uint8_t* pt = (uint8_t*)ps_alloc(ctLen, AllocPref::PreferPSRAM, "aes.epoch.pt");
+  // pt is decrypted-secret scratch; ciphertext may remain in PSRAM.
+  uint8_t* pt = (uint8_t*)ps_alloc(ctLen, AllocPref::RequireInternal, "aes.epoch.pt");
   if (!ct || !pt) {
     if (ct) free(ct);
     if (pt) free(pt);
@@ -671,7 +688,7 @@ static bool aesBlobDecryptsWith(const String& keyMaterial, const char* blob) {
       }
     }
   }
-  memset(pt, 0, ctLen);
+  mbedtls_platform_zeroize(pt, ctLen);
   free(ct);
   free(pt);
   return ok;
@@ -903,9 +920,12 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
   }
 #endif
 
-  // NOTE: ntpServer, tzOffsetMinutes, wifiAutoStart are owned by the wifi
-  //       module (written under "wifi" section). The legacy single-network
-  //       wifiSSID/wifiPassword fields are gone (removed 2026-07-20).
+  // NOTE: wifiAutoStart is owned by the wifi module (written under the
+  //       "network.wifi" section). The legacy single-network wifiSSID/
+  //       wifiPassword fields are gone (removed 2026-07-20).
+  // NOTE: ntpServer + tzOffsetMinutes are owned by the clock module
+  //       ("system.time"), which is registered unconditionally so the timezone
+  //       still persists on a build with ENABLE_WIFI == 0.
   // NOTE: automationEnabled is owned by the automation module.
   // NOTE: power{} is owned by the power module.
 
@@ -1218,6 +1238,13 @@ static void buildDebugJsonDoc(JsonDocument& doc) {
 
 bool writeDebugJson() {
   if (!filesystemReady) return false;
+  if (!gDebugLoadedOk) {
+    ERROR_STORAGEF("debug save REFUSED: this boot never loaded %s; writing compiled "
+                   "defaults would destroy the operator's flag set", DEBUG_JSON_FILE);
+    logSystemEvent("SETTINGS", "debug.json save REFUSED - this boot never loaded it");
+    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "load_failed", DEBUG_JSON_FILE);
+    return false;
+  }
   pollPause();
 
   PSRAM_JSON_DOC(doc);
@@ -1286,6 +1313,9 @@ bool writeDebugJson() {
 bool readDebugJson() {
   if (!filesystemReady) return false;
   if (!VFS::existsGuarded(DEBUG_JSON_FILE, VFS::systemAuth("settings.read"))) {
+    // Absent is a SAVABLE state — RAM is legitimately the truth on a fresh
+    // device, and without this the first save could never create the file.
+    gDebugLoadedOk = true;
     return false;  // absent → debug stays on the defaults applied by settingsDefaults()
   }
   pollPause();
@@ -1309,6 +1339,7 @@ bool readDebugJson() {
   size_t n = readRegisteredSettings(doc, DEBUG_JSON_FILE, /*allFiles=*/false);
   DEBUG_STORAGEF("[Settings] Applied %zu debug settings from debug.json", n);
 
+  gDebugLoadedOk = true;   // parsed cleanly — RAM is now a trustworthy source
   pollResume();
   return true;
 }
@@ -2357,6 +2388,7 @@ extern const SettingsModule edgeImpulseSettingsModule;
 extern const SettingsModule espsrSettingsModule;
 #endif
 
+extern const SettingsModule clockSettingsModule;  // System_Clock.cpp - always registered
 extern const SettingsModule sensorLogSettingsModule;
 extern const SettingsModule systemLogSettingsModule;
 extern const SettingsModule batteryLogSettingsModule;
@@ -2377,6 +2409,8 @@ void registerAllSettingsModules() {
   registerSettingsModule(&automationSettingsModule);
 #endif
   registerSettingsModule(&powerSettingsModule);
+  // Timezone must persist on radioless builds, so this is never #if-gated.
+  registerSettingsModule(&clockSettingsModule);
 #if ENABLE_NEOPIXEL
   registerSettingsModule(&ledSettingsModule);
 #endif
@@ -3231,9 +3265,9 @@ const CommandEntry settingEditorCommands[] = {
   { "notifydevicekind",           "Set per-event notification visibility (device-wide)", true, cmd_notifydevicekind,
     "Usage: notifydevicekind [list [json]] | <kind> [all|admin|off]\n  Bare: show non-default kinds; list: show every kind (json = machine form)\n  <kind> alone shows its level; with a level, sets and persists it\n  admin: only admin viewers see it; off: hidden for everyone\n  Levels affect banners/toasts/queue only - events and automations still fire" },
   { "notifyusermute",           "Mute event kinds from notifications for YOUR user", false, cmd_notifyusermute,
-    "Usage: notifyusermute [<kind,kind,...>|none]\n  Bare: show your muted kinds; none: clear\n  Applies only to the logged-in user (stored with your dashboard preferences)\n  List valid kinds with 'events kinds'" },
+    "Usage: notifyusermute [<kind,kind,...>|set <kind> <on|off>|patch <+kind,-kind>|all|none]\n  Bare: show; legacy list: replace; set: change one; patch: change several\n  all/none: mute every current kind/clear; applies only to your logged-in user\n  List valid kinds with 'events kinds'" },
   { "notifyusershow",           "Force event kinds through YOUR importance floor", false, cmd_notifyusershow,
-    "Usage: notifyusershow [<kind,kind,...>|none]\n  Bare: show your forced kinds; none: clear\n  Opposite of notifyusermute: these interrupt even below your notifylevel\n  List valid kinds with 'events kinds'" },
+    "Usage: notifyusershow [<kind,kind,...>|set <kind> <on|off>|patch <+kind,-kind>|all|none]\n  Bare: show; legacy list: replace; set: change one; patch: change several\n  all/none: force every current kind/clear; overrides your notifylevel\n  List valid kinds with 'events kinds'" },
   { "notifylevel",              "Set YOUR notification importance floor",     false, cmd_notifylevel,
     "Usage: notifylevel [verbose|standard|alert]\n  Bare: show your current floor (default: standard)\n  verbose: everything; standard: skip routine chatter; alert: security/safety only\n  Nothing is lost - filtered kinds still reach the notification center and automations" },
 };
@@ -3462,7 +3496,16 @@ bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
   String path = getUserSettingsPath(userId);
   {
     FsLockGuard guard("user_settings.load");
-    if (!VFS::existsGuarded(path.c_str(), VFS::systemAuth("user_settings.load"))) {
+    // `existsGuarded()==false` conflates genuine absence with storage/access
+    // failures. A transaction must create `{}` only for confirmed ENOENT;
+    // otherwise a transient probe failure could overwrite a real settings
+    // file with a sparse patch. This physical path is trusted: it is derived
+    // only from the numeric user ID and remains under the held FS mutex.
+    const String physicalPath = String("/littlefs") + path;
+    struct stat fileInfo = {};
+    errno = 0;
+    if (::stat(physicalPath.c_str(), &fileInfo) != 0) {
+      if (errno != ENOENT) return false;
       doc.to<JsonObject>();
       return true;
     }
@@ -3476,14 +3519,38 @@ bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
     }
   }
 
-  if (doc.isNull()) {
-    doc.to<JsonObject>();
+  // A present settings file must be an object. JSON null/arrays/scalars are
+  // parseable but structurally corrupt; never flatten them into a new object
+  // and save a credential or preference patch over the original bytes.
+  if (!doc.is<JsonObject>()) {
+    doc.clear();
+    return false;
   }
   return true;
 }
 
+namespace {
+
+// Per-user notification preferences are a read-through cache over these files.
+// Invalidate on every save outcome, including failures: a direct-overwrite
+// fallback may already have truncated or partially replaced the destination
+// before the failure becomes observable.
+struct UserPrefsInvalidateOnExit {
+  ~UserPrefsInvalidateOnExit() { notifUserPrefsInvalidate(); }
+};
+
+}  // namespace
+
 bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
+  UserPrefsInvalidateOnExit invalidateOnExit;
   if (!filesystemReady) return false;
+  if (doc.overflowed()) return false;
+
+  // Arduino FS does not expose a checked flush/fsync result. One pre-measured
+  // expected length, the serializer's accepted-byte count, and File::size()
+  // after the existing flush are the observable completeness checks available.
+  const size_t expected = measureJson(doc);
+  if (expected == 0) return false;
 
   String path = getUserSettingsPath(userId);
   String tmp = path + ".tmp";
@@ -3492,10 +3559,11 @@ bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
     FsLockGuard guard("user_settings.save");
     File f = VFS::openGuarded(tmp.c_str(), "w", VFS::systemAuth("user_settings.save"));
     if (!f) return false;
-    size_t written = serializeJson(doc, f);
+    const size_t written = serializeJson(doc, f);
     f.flush();
+    const size_t observed = f.size();
     f.close();
-    if (written == 0) {
+    if (written != expected || observed != expected) {
       VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
       return false;
     }
@@ -3508,32 +3576,73 @@ bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
         VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
         return false;
       }
-      written = serializeJson(doc, direct);
+      const size_t directWritten = serializeJson(doc, direct);
       direct.flush();
+      const size_t directObserved = direct.size();
       direct.close();
       VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
-      if (written > 0) notifUserPrefsInvalidate();
-      return written > 0;
+      return directWritten == expected && directObserved == expected;
     }
   }
 
-  // Any user-settings write may change notification prefs — flush the
-  // per-user cache (covers web /api/user/settings, notifyusermute, password ops).
-  notifUserPrefsInvalidate();
   return true;
 }
 
-bool mergeAndSaveUserSettings(uint32_t userId, const JsonDocument& patch) {
-  if (!filesystemReady) return false;
-  if (!patch.is<JsonObjectConst>()) return false;
+UserSettingsTxnStatus runUserSettingsTransaction(uint32_t userId,
+                                                 UserSettingsMutator mutator,
+                                                 void* context) {
+  if (!mutator) return UserSettingsTxnStatus::InvalidArgument;
+  if (!filesystemReady) return UserSettingsTxnStatus::FilesystemUnavailable;
+
+  // loadUserSettings() and saveUserSettings() take this same global lock. The
+  // guard is task-reentrant, so this outer ownership spans the complete
+  // load→mutate→save sequence without deadlocking the nested helpers.
+  FsLockGuard transactionGuard("user_settings.transaction");
+  if (!transactionGuard.held && !isFsLockedByCurrentTask()) {
+    return UserSettingsTxnStatus::LockUnavailable;
+  }
 
   PSRAM_JSON_DOC(base);
-  if (!loadUserSettings(userId, base)) return false;
-  if (!base.is<JsonObject>()) base.to<JsonObject>();
+  if (!loadUserSettings(userId, base)) {
+    return UserSettingsTxnStatus::LoadFailed;
+  }
+  if (!mutator(base, context) || base.overflowed()) {
+    return UserSettingsTxnStatus::MutationRejected;
+  }
+  if (!saveUserSettings(userId, base)) {
+    return UserSettingsTxnStatus::SaveFailed;
+  }
+  return UserSettingsTxnStatus::Committed;
+}
+
+namespace {
+
+struct UserSettingsMergeContext {
+  const JsonDocument* patch;
+};
+
+bool mergeUserSettingsMutation(JsonDocument& base, void* opaque) {
+  const auto* context = static_cast<const UserSettingsMergeContext*>(opaque);
+  if (!context || !context->patch || !context->patch->is<JsonObjectConst>()) {
+    return false;
+  }
+  if (!base.is<JsonObject>()) return false;
 
   JsonObject dst = base.as<JsonObject>();
-  for (JsonPairConst kv : patch.as<JsonObjectConst>()) {
+  for (JsonPairConst kv : context->patch->as<JsonObjectConst>()) {
     dst[kv.key()] = kv.value();
+    if (base.overflowed()) return false;
   }
-  return saveUserSettings(userId, base);
+  return true;
+}
+
+}  // namespace
+
+bool mergeAndSaveUserSettings(uint32_t userId, const JsonDocument& patch) {
+  if (!filesystemReady) return false;
+  if (!patch.is<JsonObjectConst>() || patch.overflowed()) return false;
+
+  UserSettingsMergeContext context{&patch};
+  return runUserSettingsTransaction(userId, mergeUserSettingsMutation, &context) ==
+         UserSettingsTxnStatus::Committed;
 }

@@ -25,6 +25,7 @@
 #include "System_MemUtil.h"         // ps_alloc — PSRAM-backed reply buffer (off espnow_task stack)
 #include "System_Mutex.h"           // FsLockGuard
 #include "System_VFS.h"             // VFS::openGuarded, listVirtualEntries, etc.
+#include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 // v4_send_payload_smart is the universal "send this payload to that MAC"
 // helper — picks encrypted-chunked under a session, plaintext-fragmented
@@ -99,7 +100,7 @@ struct DeferredReply {
   } req;
 };
 
-static DeferredReply sDeferred = {};
+EXT_RAM_BSS_ATTR static DeferredReply sDeferred;  // PSRAM: mutex-guarded task context only (initializer dropped: .ext_ram.bss is zeroed)
 
 // ============================================================================
 // Mutex — protects sPending[] and sDeferred against concurrent access from

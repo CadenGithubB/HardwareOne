@@ -51,14 +51,16 @@ void oledSetPatternModeResetSessionState() {
 }
 
 static void startPatternKeyboard(const char* title) {
-  oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH);
+  oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH,
+                   OLEDKeyboardDictationPolicy::DENY);
   // Force pattern mode as default for this flow
   gOledKeyboardState.mode = KEYBOARD_MODE_PATTERN;
   sKeyboardActive = true;
 }
 
 static void startTextKeyboard(const char* title) {
-  oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH);
+  oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH,
+                   OLEDKeyboardDictationPolicy::DENY);
   // Use lowercase mode for text password entry
   gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
   sKeyboardActive = true;

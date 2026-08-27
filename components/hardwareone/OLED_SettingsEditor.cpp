@@ -768,7 +768,10 @@ void settingsEditorSelect() {
         const char* label = gSettingsEditor.currentEntry->label
                                 ? gSettingsEditor.currentEntry->label
                                 : gSettingsEditor.currentEntry->jsonKey;
-        oledKeyboardInit(label, cur.c_str(), OLED_KEYBOARD_MAX_LENGTH);
+        // isEditableEntry() excludes SettingEntry::isSecret, so every string
+        // that reaches this branch is an explicitly non-secret setting.
+        oledKeyboardInit(label, cur.c_str(), OLED_KEYBOARD_MAX_LENGTH,
+                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gSettingsEditor.hasChanges = false;
         gSettingsEditor.state = SETTINGS_VALUE_EDIT;
       } else {

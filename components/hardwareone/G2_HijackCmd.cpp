@@ -192,7 +192,10 @@ bool g2SubmitHijackCommand(const char* line,
             (unsigned long)owner.generation,
             (unsigned long)owner.transportEpoch);
   if (!submitCommandAsync(cmd, g2HijackInternalCallback, ctx)) {
-    WARN_COMMANDF("g2.hijack.cmd: queue full line='%s'", safeLineForTrace.c_str());
+    WARN_COMMANDF("g2.hijack.cmd: %s line='%s'",
+                  commandInputLengthAccepted(cmd.line.length())
+                      ? "executor unavailable" : "input limit exceeded",
+                  safeLineForTrace.c_str());
     delete ctx;
     return false;
   }

@@ -148,17 +148,17 @@ void releaseLocked(FileTransferSlotImpl& s) {
     }
     for (uint8_t b = 0; b < kFileStreamBufs; b++) {
       if (s.streamBuf[b]) {
-        heap_caps_free(s.streamBuf[b]);
+        ps_free(s.streamBuf[b]);
         s.streamBuf[b] = nullptr;
       }
     }
   }
   if (s.dataBuffer) {
-    heap_caps_free(s.dataBuffer);
+    ps_free(s.dataBuffer);
     s.dataBuffer = nullptr;
   }
   if (s.chunkMap) {
-    heap_caps_free(s.chunkMap);
+    ps_free(s.chunkMap);
     s.chunkMap = nullptr;
   }
   memset(&s, 0, sizeof(s));
@@ -389,12 +389,13 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
     // ZERO flash here. Bond config files never reach here (< 128 KB → RAM path).
     bool allocOk = true;
     for (uint8_t b = 0; b < kFileStreamBufs; b++) {
-      s.streamBuf[b] = (uint8_t*)heap_caps_malloc(kFileStreamBufSize, MALLOC_CAP_SPIRAM);
+      s.streamBuf[b] = (uint8_t*)ps_alloc(kFileStreamBufSize, AllocPref::RequirePSRAM,
+                                          "espnow.file.streambuf");
       if (!s.streamBuf[b]) { allocOk = false; break; }
     }
     if (!allocOk) {
       for (uint8_t b = 0; b < kFileStreamBufs; b++) {
-        if (s.streamBuf[b]) { heap_caps_free(s.streamBuf[b]); s.streamBuf[b] = nullptr; }
+        if (s.streamBuf[b]) { ps_free(s.streamBuf[b]); s.streamBuf[b] = nullptr; }
       }
       ERROR_ESPNOWF("[FileSlots] stream buffer alloc failed (%u x %lu bytes)",
                     (unsigned)kFileStreamBufs, (unsigned long)kFileStreamBufSize);
@@ -428,7 +429,8 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
                  (unsigned)freeIdx, filename, s.partPath, (unsigned long)fileSize);
   } else {
     uint32_t allocSize = fileSize > 0 ? fileSize : 1;
-    s.dataBuffer = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM);
+    s.dataBuffer = (uint8_t*)ps_alloc(allocSize, AllocPref::RequirePSRAM,
+                                      "espnow.file.data");
     if (!s.dataBuffer) {
       ERROR_ESPNOWF("[FileSlots] PSRAM alloc failed (%lu bytes)", (unsigned long)allocSize);
       setErr(kFileSlotErrAlloc);
@@ -438,10 +440,11 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
 
     s.chunkMapBytes = (uint16_t)((chunkCount + 7) / 8);
     if (s.chunkMapBytes == 0) s.chunkMapBytes = 1;
-    s.chunkMap = (uint8_t*)heap_caps_malloc(s.chunkMapBytes, MALLOC_CAP_SPIRAM);  // PSRAM, matches dataBuffer
+    s.chunkMap = (uint8_t*)ps_alloc(s.chunkMapBytes, AllocPref::RequirePSRAM,
+                                    "espnow.file.chunkmap");  // PSRAM, matches dataBuffer
     if (!s.chunkMap) {
       ERROR_ESPNOWF("[FileSlots] chunkMap alloc failed (%u bytes)", (unsigned)s.chunkMapBytes);
-      heap_caps_free(s.dataBuffer);
+      ps_free(s.dataBuffer);
       s.dataBuffer = nullptr;
       setErr(kFileSlotErrAlloc);
       return nullptr;

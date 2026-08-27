@@ -62,6 +62,7 @@
 #include <esp_bt_main.h>       // esp_bluedroid_get_status()
 #include <stdlib.h>
 #include <string.h>
+#include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 // Memory allocation
 
@@ -895,7 +896,7 @@ static void bleLoginDeferred(void* arg) {
 #define BLE_MSG_HISTORY_SIZE 4
 #define BLE_MSG_MAX_LEN 32
 
-static char bleMessageHistory[BLE_MSG_HISTORY_SIZE][BLE_MSG_MAX_LEN];
+EXT_RAM_BSS_ATTR static char bleMessageHistory[BLE_MSG_HISTORY_SIZE][BLE_MSG_MAX_LEN];  // PSRAM: BTC/cmd_exec task context; entries are pre-redacted previews
 static uint8_t bleMessageCount = 0;
 static uint8_t bleMessageHead = 0;
 
@@ -926,18 +927,40 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
   if (!bleSessionEpochMatches(connId, ingressEpoch)) return;
   // Build printable command string (filter non-printable bytes) - stack buffer, zero heap allocations
   char cmdBuf[512];
+  if (len > sizeof(cmdBuf) - 1) {
+    const char* msg = "Error: BLE command exceeds 511-byte input limit; discarded";
+    sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+    return;
+  }
   size_t outIdx = 0;
+  bool lineTooLong = false;
   
-  for (size_t i = 0; i < len && outIdx < sizeof(cmdBuf) - 1; i++) {
+  for (size_t i = 0; i < len; i++) {
     uint8_t b = ((const uint8_t*)data)[i];
     if (b == 0) continue;  // Skip NUL bytes
+    char normalized = 0;
     if (b == '\r' || b == '\n' || b == '\t') {
-      cmdBuf[outIdx++] = ' ';
+      normalized = ' ';
     } else if (b >= 32 && b <= 126) {  // Printable ASCII only
-      cmdBuf[outIdx++] = (char)b;
+      normalized = (char)b;
     }
+    if (normalized == 0) continue;
+    if (outIdx >= sizeof(cmdBuf) - 1) {
+      lineTooLong = true;
+      break;
+    }
+    cmdBuf[outIdx++] = normalized;
   }
   cmdBuf[outIdx] = '\0';
+
+  // A transport may be narrower than CMD_INPUT_MAX, but it must never turn an
+  // over-limit command into an executable prefix. Discard the complete BLE
+  // record and make the rejection visible to the exact admitted session.
+  if (lineTooLong) {
+    const char* msg = "Error: BLE command exceeds 511-byte input limit; discarded";
+    sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+    return;
+  }
   
   // Trim leading spaces
   char* cmdStart = cmdBuf;
@@ -1009,14 +1032,11 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
     // Defer to cmd_exec_task — isValidUser() uses too much stack for BTC_TASK.
     // This job carries the PLAINTEXT password until bleLoginDeferred runs, so
     // it must live in internal DRAM, never PSRAM: flash encryption is off on
-    // most boards and external PSRAM is a probeable chip. PreferInternal goes
-    // through malloc(), which for a ~140 B block is served from internal DRAM
-    // (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384); it could only spill to
-    // PSRAM if internal DRAM had no 140 B block left, at which point the BT
-    // host itself is already failing. bleLoginJobFree wipes the password
-    // before free.
+    // most boards and external PSRAM is a probeable chip. RequireInternal
+    // makes that placement a hard requirement; bleLoginJobFree wipes the
+    // password before free.
     BleLoginAsyncJob* job = (BleLoginAsyncJob*)ps_alloc(sizeof(BleLoginAsyncJob),
-                                                       AllocPref::PreferInternal,
+                                                       AllocPref::RequireInternal,
                                                        "ble.loginAsyncJob");
     if (!job) {
       const char* msg = "Error: out of memory";
@@ -1168,7 +1188,12 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
   if (ingressEpoch == 0) return;
   const uint8_t t = (len > 0) ? (uint8_t)data[0] : 0;
   const bool isFrame = (t == 0x01 /*HELLO*/ || t == 0x03 /*CONFIRM*/ || t == 0x10 /*DATA*/);
-  if (isFrame && len <= sizeof(((BleScDeferred*)0)->buf)) {
+  if (isFrame) {
+    if (len > sizeof(((BleScDeferred*)0)->buf)) {
+      const char* msg = "Error: BLE secure frame exceeds 517-byte input limit; discarded";
+      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+      return;
+    }
     BleScDeferred* d = (BleScDeferred*)ps_alloc(sizeof(BleScDeferred), AllocPref::PreferPSRAM, "ble.sc.rx");
     if (d) {
       d->connId = connId;
@@ -1360,6 +1385,10 @@ bool initBluetooth() {
     BLE_CMD_REQUEST_CHAR_UUID,
     BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
   );
+  // One characteristic value is one executable or secure-channel record.
+  // Refuse ATT prepared writes: the generic Arduino accumulator is shared by
+  // connections and an allocation failure can otherwise commit a prefix.
+  pCmdRequestChar->setPreparedWriteEnabled(false);
   pCmdRequestChar->setCallbacks(new CmdRequestCallbacks());
   
   // Response characteristic (notify to client - command results)
@@ -2050,10 +2079,10 @@ static const char* cmd_blestart(const String& argsInput) {
 
 static const char* cmd_blestop(const String& argsInput) {
   deinitBluetooth();
-  // Stopping the server returns the device to its default (G2 client) role so
-  // the glasses can auto-reconnect again — closeble means "stop the server,"
-  // not "stay off BLE" (use `bleenabled 0` for that). Re-opens the tick guard.
-  setSetting(gSettings.bleMode, (int)BLE_MODE_G2_CLIENT);
+  // Return to the role this build can use by default. G2 builds select client
+  // so glasses can auto-reconnect; server-only builds must not persist the
+  // unavailable client role (which also suppresses the server security notice).
+  setSetting(gSettings.bleMode, kBleModeDefaultForBuild);
   BLE_DEBUGF(DEBUG_BLE_CORE, "BLE stopped");
   return "Bluetooth stopped";
 }
@@ -2695,7 +2724,7 @@ const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bleRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, "blename" },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
-  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               1,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0|Server,1|Client (G2)", false, nullptr, "blemode" },
+  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               kBleModeDefaultForBuild, 0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0|Server,1|Client (G2)", false, nullptr, "blemode" },
   { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
   { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" },
 };

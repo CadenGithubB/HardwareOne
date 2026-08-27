@@ -660,6 +660,13 @@ const char* cmd_tofautostart(const String& argsInput) {
 }
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+// Bus routing for this device. Lives here rather than in System_I2C.cpp so it
+// compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
+static const char* cmd_tofbus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.tofBus, a, "tofBus");
+}
+
 const CommandEntry tofCommands[] = {
   // Start/Stop/Read (3-level voice: "sensor" -> "time of flight" -> "open/close")
   { "opentof", "Start VL53L4CX ToF sensor.", false, cmd_tofstart },
@@ -677,6 +684,7 @@ const CommandEntry tofCommands[] = {
   
   // Auto-start
   { "tofautostart", "Enable/disable ToF auto-start after boot [on|off]", false, cmd_tofautostart, "Usage: tofautostart [on|off]" },
+  { "tofbus",      "Route VL53L4CX ToF to bus: <0|1> (reboot required)", true, cmd_tofbus,      "Usage: tofBus <0|1>" },
 };
 
 const size_t tofCommandsCount = sizeof(tofCommands) / sizeof(tofCommands[0]);

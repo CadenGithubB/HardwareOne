@@ -6,14 +6,6 @@ static void streamSettingsInner(httpd_req_t* req) {
   // Define togglePane early - before any HTML that uses it
   httpd_resp_send_chunk(req, R"EARLYJS(
 <script>
-window.togglePane = function(paneId, btnId) {
-  var p = document.getElementById(paneId);
-  var b = document.getElementById(btnId);
-  if (!p || !b) { console.warn('[togglePane] Element not found:', paneId, btnId); return; }
-  var isHidden = (p.style.display === 'none' || !p.style.display);
-  p.style.display = isHidden ? 'block' : 'none';
-  b.textContent = isHidden ? 'Collapse' : 'Expand';
-};
 // Baseline snapshot: track what was loaded so saves only send changed values
 window._settingsBaseline = {};
 window._debugBaseline = {};
@@ -79,7 +71,7 @@ window.postSettingsCli = function(cmd) {
   httpd_resp_send_chunk(req, R"LEDLIVEJS(
 // LED live control — fire-and-forget commands (no settings save flow)
 window.ledLiveSetBrightness = function() {
-  var val = parseInt(document.getElementById('led-live-brightness').value);
+  var val = parseInt(hw.$('led-live-brightness').value);
   if (isNaN(val)) return;
   if (val < 0) val = 0;
   if (val > 100) val = 100;
@@ -87,20 +79,20 @@ window.ledLiveSetBrightness = function() {
     .catch(function(e) { alert('LED brightness failed: ' + e.message); });
 };
 window.ledLiveApplyColor = function() {
-  var color = document.getElementById('led-live-color').value;
+  var color = hw.$('led-live-color').value;
   postSettingsCli('ledcolor ' + color)
     .catch(function(e) { alert('LED color failed: ' + e.message); });
 };
 window.ledLiveEffectChanged = function() {
-  var needsTwo = document.getElementById('led-live-effect').value === 'fade';
-  var w = document.getElementById('led-live-color2-wrap');
-  if (w) w.style.display = needsTwo ? '' : 'none';
+  var needsTwo = hw.$('led-live-effect').value === 'fade';
+  var w = hw.$('led-live-color2-wrap');
+  hw.toggle(w, (needsTwo));
 };
 window.ledLiveRunEffect = function() {
-  var effect   = document.getElementById('led-live-effect').value;
-  var color1   = document.getElementById('led-live-eff-color1').value;
-  var color2   = document.getElementById('led-live-eff-color2').value;
-  var duration = parseInt(document.getElementById('led-live-duration').value) || 3000;
+  var effect   = hw.$('led-live-effect').value;
+  var color1   = hw.$('led-live-eff-color1').value;
+  var color2   = hw.$('led-live-eff-color2').value;
+  var duration = parseInt(hw.$('led-live-duration').value) || 3000;
   var cmd = effect === 'fade'
     ? ('ledeffect fade ' + color1 + ' ' + color2 + ' ' + duration)
     : ('ledeffect ' + effect + ' ' + color1 + ' ' + duration);
@@ -394,7 +386,7 @@ window.SchemaPanel = (function(){
     }
     // Enum picker — `options` is a CSV of "value|label" pairs (label-only OK).
     if (entry.options) {
-      var html = '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<select id="' + id + '"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;min-width:200px">';
+      var html = '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<select id="' + id + '" class="input-fit input-m"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;min-width:200px">';
       var current = (val !== undefined && val !== null) ? String(val) : '';
       entry.options.split(',').forEach(function(tok){
         var bar = tok.indexOf('|');
@@ -419,7 +411,7 @@ window.SchemaPanel = (function(){
     }
     if (entry.type === 'string' && entry.secret) {
       var placeholder = entry.set ? '(set - leave blank to keep)' : '(not set)';
-      return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="password" id="' + id + '" placeholder="' + placeholder + '"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:240px"></label>';
+      return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="password" id="' + id + '" placeholder="' + placeholder + '" class="input-fit input-m"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:240px"></label>';
     }
     if (entry.type === 'int' || entry.type === 'float' ||
         entry.type === 'u8'  || entry.type === 'u16'   || entry.type === 'u32') {
@@ -427,10 +419,10 @@ window.SchemaPanel = (function(){
       var minAttr = entry.min !== undefined && entry.min !== null ? ' min="' + entry.min + '"' : '';
       var maxAttr = entry.max !== undefined && entry.max !== null ? ' max="' + entry.max + '"' : '';
       var current = (val !== undefined && val !== null) ? val : (entry['default'] || 0);
-      return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="number" id="' + id + '" value="' + current + '"' + minAttr + maxAttr + ' step="' + step + '"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:140px"></label>';
+      return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="number" id="' + id + '" value="' + current + '"' + minAttr + maxAttr + ' step="' + step + '" class="input-fit"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:140px"></label>';
     }
     // string fallback
-    return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="text" id="' + id + '" value="' + (val == null ? '' : val) + '"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:240px"></label>';
+    return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="text" id="' + id + '" value="' + (val == null ? '' : val) + '" class="input-fit input-m"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:240px"></label>';
   }
 
   function build(cont, opts, schema, settings){
@@ -486,8 +478,8 @@ window.SchemaPanel = (function(){
     cont.innerHTML = html;
     window._snapshotContainer(cont);
 
-    document.getElementById(btnId).addEventListener('click', function(){
-      var msg = document.getElementById(msgId);
+    hw.$(btnId).addEventListener('click', function(){
+      var msg = hw.$(msgId);
       var cmds = [];
       var skipped = [];
       var usedIds = {};
@@ -514,13 +506,13 @@ window.SchemaPanel = (function(){
         cmds.push(verb + ' ' + val);
       });
       log(pfx, 'Save click — ' + cmds.length + ' change(s), ' + skipped.length + ' unchanged');
-      if (cmds.length === 0) { if (msg) msg.textContent = 'No changes to save.'; return; }
+      if (cmds.length === 0) { hw.setText(msg, 'No changes to save.'); return; }
       log(pfx, 'Dispatching batch: ' + cmds.join(' ; '));
-      if (msg) msg.textContent = 'Saving ' + cmds.length + ' change(s)…';
+      hw.setText(msg, 'Saving ' + cmds.length + ' change(s)…');
       sendSequential(cmds,
         function(){
           log(pfx, 'Save OK');
-          if (msg) msg.textContent = 'Saved ' + cmds.length + ' change(s).';
+          hw.setText(msg, 'Saved ' + cmds.length + ' change(s).');
           window._snapshotContainer(cont);
           // Bonded save: worker just wrote its settings.json, so the master's
           // cache is stale. Force a fresh /api/bond/settings/sync + invalidate
@@ -537,11 +529,11 @@ window.SchemaPanel = (function(){
               })
               .catch(function(e){ warn(pfx, 'Post-save bonded sync failed: ' + e.message); });
           }
-          setTimeout(function(){ if (msg) msg.textContent = ''; }, 4000);
+          setTimeout(function(){ hw.setText(msg, ''); }, 4000);
         },
         function(e){
           errp(pfx, 'Save failed: ' + (e ? e.message : 'unknown'));
-          if (msg) msg.textContent = 'Save failed: ' + (e ? e.message : 'unknown');
+          hw.setText(msg, 'Save failed: ' + (e ? e.message : 'unknown'));
         }
       );
     });
@@ -550,7 +542,7 @@ window.SchemaPanel = (function(){
   return {
     render: function(opts){
       var pfx = opts.logPrefix || opts.containerId;
-      var cont = document.getElementById(opts.containerId);
+      var cont = hw.$(opts.containerId);
       if (!cont) { errp(pfx, 'Container #' + opts.containerId + ' not found in DOM'); return Promise.reject(new Error('container not found')); }
       var target = opts.target || 'local';
       log(pfx, 'render() called for module=' + opts.moduleName + ' target=' + target);
@@ -598,7 +590,7 @@ window.SchemaPanel = (function(){
   </div>
   <div id='time-pane' style='display:none;margin-top:0.75rem'>
     <!-- Schema-driven: the IIFE below fills this container at page load from
-         the wifi module's tzOffsetMinutes + ntpServer schema entries. All
+         the clock module's tzOffsetMinutes + ntpServer schema entries. All
          save dispatch flows through sendSequential (beginwrite/savesettings
          batched) instead of the old per-field Update buttons. -->
     <div id='system-time-container' style='color:var(--panel-fg)'>Loading…</div>
@@ -608,8 +600,8 @@ window.SchemaPanel = (function(){
 // System Time — schema-driven via the shared SchemaPanel helper.
 window.SchemaPanel.render({
   containerId: 'system-time-container',
-  moduleName: 'wifi',
-  sectionPath: 'network.wifi',
+  moduleName: 'clock',
+  sectionPath: 'system.time',
   keys: ['tzOffsetMinutes', 'ntpServer'],
   saveLabel: 'Save System Time',
   logPrefix: 'System Time'
@@ -668,14 +660,14 @@ window.SchemaPanel.render({
         <div id='wifi-scan-results' style='margin-top:1rem'></div>
         <div id='wifi-connect-panel' style='display:none;margin-top:0.75rem'>
           <div style='margin-bottom:0.5rem'>Selected SSID: <strong id='sel-ssid'>-</strong></div>
-          <input type='password' id='sel-pass' placeholder='WiFi password (leave blank if open)' class='form-input input-medium'>
-          <button class='btn' onclick="(function(){ var ssid=(document.getElementById('sel-ssid')||{}).textContent||''; var pass=(document.getElementById('sel-pass')||{}).value||''; if(!ssid){ alert('No SSID selected'); return; } var cmd1='wifiadd &quot;'+ssid+'&quot; &quot;'+pass+'&quot; 1 0'; postSettingsCli(cmd1).then(function(t1){ return hwConfirm('Credentials saved for \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return postSettingsCli('wificonnect'); }); }).then(function(t){ return t || ''; }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
+          <input type='password' id='sel-pass' placeholder='WiFi password (leave blank if open)' class='form-input input-medium input-fit input-m'>
+          <button class='btn' onclick='wifiConnectSelected()'>Connect</button>
         </div>
         <div id='wifi-manual-panel' style='display:none;margin-top:0.75rem'>
           <div style='margin-bottom:0.5rem'>Enter hidden network credentials</div>
-          <input type='text' id='manual-ssid' placeholder='Hidden SSID' class='form-input input-medium' style='margin-right:6px'>
-          <input type='password' id='manual-pass' placeholder='Password (leave blank if open)' class='form-input input-medium' style='margin-right:6px'>
-          <button class='btn' onclick="(function(){ var ssid=(document.getElementById('manual-ssid')||{}).value||''; var pass=(document.getElementById('manual-pass')||{}).value||''; if(!ssid){ alert('Enter SSID'); return; } var cmd1='wifiadd &quot;'+ssid+'&quot; &quot;'+pass+'&quot; 1 1'; postSettingsCli(cmd1).then(function(t1){ return hwConfirm('Credentials saved for hidden network \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return postSettingsCli('wificonnect'); }); }).then(function(t){ return t || ''; }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
+          <input type='text' id='manual-ssid' placeholder='Hidden SSID' class='form-input input-medium input-fit input-m' style='margin-right:6px'>
+          <input type='password' id='manual-pass' placeholder='Password (leave blank if open)' class='form-input input-medium input-fit input-m' style='margin-right:6px'>
+          <button class='btn' onclick='wifiConnectManual()'>Connect</button>
         </div>
       </div>
     </div>
@@ -731,7 +723,7 @@ window.SchemaPanel.render({
     // `value|label` pairs (label-only tokens accepted; value defaults to
     // label). Renders a <select> regardless of underlying type (int / string).
     if (e.options) {
-      var html = '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;min-width:200px">';
+      var html = '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '" class="input-fit input-m"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;min-width:200px">';
       var current = (val !== undefined && val !== null) ? String(val) : '';
       e.options.split(',').forEach(function(tok){
         var bar = tok.indexOf('|');
@@ -746,14 +738,14 @@ window.SchemaPanel.render({
       return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + cmdAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
     } else if (e.type === 'string' && e.secret) {
       var placeholder = e.set ? '(set - leave blank to keep)' : '(not set)';
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '" class="input-fit input-m"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     } else if (e.type === 'int' || e.type === 'float') {
       var step = e.type === 'float' ? '0.01' : '1';
       var minAttr = e.min !== undefined ? ' min="' + e.min + '"' : '';
       var maxAttr = e.max !== undefined ? ' max="' + e.max + '"' : '';
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="number" id="' + id + '" value="' + (val !== undefined ? val : e.default) + '"' + minAttr + maxAttr + ' step="' + step + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="number" id="' + id + '" value="' + (val !== undefined ? val : e.default) + '"' + minAttr + maxAttr + ' step="' + step + '" class="input-fit"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px"></label>';
     } else {
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="text" id="' + id + '" value="' + (val || '') + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="text" id="' + id + '" value="' + (val || '') + '" class="input-fit input-m"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     }
   }
   
@@ -835,13 +827,13 @@ window.SchemaPanel.render({
     var settingsResp = results[1];
     var sysStatus = results[2] || {};
     var settings = settingsResp.settings || {};
-    var container = document.getElementById('network-dynamic-container');
+    var container = hw.$('network-dynamic-container');
     if (!container) return;
 
     // Two separate axes. CONNECTION badge from the schema's wifi module connected
     // flag (isWifiConnected() server-side); RADIO-power badge from /api/system
     // net.radioOn (the radio can be ON while WiFi is Disconnected — ESP-NOW).
-    var wifiBadge = document.getElementById('wifi-status-badge');
+    var wifiBadge = hw.$('wifi-status-badge');
     if (wifiBadge) {
       var wifiMod = (schema.modules || []).find(function(m) { return m.name === 'wifi'; });
       if (wifiMod && typeof wifiMod.connected === 'boolean') {
@@ -855,8 +847,8 @@ window.SchemaPanel.render({
     // Radio power is its OWN section, not a WiFi property: the radio can be on
     // with WiFi disconnected because ESP-NOW is holding it up, which is exactly
     // why this used to need a "(ESP-NOW)" suffix on the WiFi card to make sense.
-    var radioBadge = document.getElementById('radio-status-badge');
-    var radioDetail = document.getElementById('radio-detail');
+    var radioBadge = hw.$('radio-status-badge');
+    var radioDetail = hw.$('radio-detail');
     if (sysStatus.net && typeof sysStatus.net.radioOn === 'boolean') {
       var rOn = sysStatus.net.radioOn;
       var heldForEspnow = !!sysStatus.net.radioHeldForEspnow;
@@ -923,12 +915,12 @@ window.SchemaPanel.render({
     window._snapshotContainer(container);
   }).catch(function(err) {
     console.error('[Network Settings] Schema load error:', err);
-    var container = document.getElementById('network-dynamic-container');
-    if (container) container.innerHTML = '<div style="text-align:center;padding:2rem;color:#dc3545">Failed to load network settings</div>';
+    var container = hw.$('network-dynamic-container');
+    hw.setHTML(container, '<div style="text-align:center;padding:2rem;color:#dc3545">Failed to load network settings</div>');
   });
   
   window.saveNetworkSettings = function(modName, section) {
-    var container = document.getElementById('network-dynamic-container');
+    var container = hw.$('network-dynamic-container');
     var inputs = container.querySelectorAll('[id^="net-"]:not([disabled])');
     var updates = {};
     inputs.forEach(function(el) {
@@ -1045,12 +1037,12 @@ window.SchemaPanel.render({
     } else if (e.type === 'string' && e.secret) {
       // Secret field: use password input, show placeholder if set, blank = unchanged
       var placeholder = e.set ? '(set - leave blank to keep)' : '(not set)';
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '" class="input-fit input-m"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     } else if (e.type === 'string' && e.options) {
       var opts = e.options.split(',').map(function(o) {
         return '<option value="' + o + '"' + (val === o ? ' selected' : '') + '>' + o.charAt(0).toUpperCase() + o.slice(1) + '</option>';
       }).join('');
-      return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:160px">' + opts + '</select></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '" class="input-fit input-m"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:160px">' + opts + '</select></label>';
     } else if ((e.type === 'int' || e.type === 'float') && e.options) {
       // Int/float with named options - render as dropdown (supports value|label or value:label)
       var opts = e.options.split(',').map(function(o) {
@@ -1060,14 +1052,14 @@ window.SchemaPanel.render({
         var optLabel = parts.length > 1 ? parts[1] : optVal;
         return '<option value="' + optVal + '"' + (parseInt(val) === parseInt(optVal) ? ' selected' : '') + '>' + optLabel + '</option>';
       }).join('');
-      return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px">' + opts + '</select></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '" class="input-fit input-m"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px">' + opts + '</select></label>';
     } else if (e.type === 'int' || e.type === 'float') {
       var step = e.type === 'float' ? '0.01' : '1';
       var minAttr = e.min !== undefined ? ' min="' + e.min + '"' : '';
       var maxAttr = e.max !== undefined ? ' max="' + e.max + '"' : '';
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="number" id="' + id + '" value="' + (val !== undefined ? val : e.default) + '"' + minAttr + maxAttr + ' step="' + step + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="number" id="' + id + '" value="' + (val !== undefined ? val : e.default) + '"' + minAttr + maxAttr + ' step="' + step + '" class="input-fit"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px"></label>';
     } else {
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="text" id="' + id + '" value="' + (val || '') + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="text" id="' + id + '" value="' + (val || '') + '" class="input-fit input-m"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     }
   }
   
@@ -1117,14 +1109,14 @@ window.SchemaPanel.render({
     // Brightness row
     h += '<div style="' + row + '">';
     h += '<div><label style="' + lbl + '">Brightness (0–100)</label>';
-    h += '<input type="number" id="led-live-brightness" value="100" min="0" max="100" step="1" style="' + num + '"></div>';
+    h += '<input type="number" id="led-live-brightness" value="100" min="0" max="100" step="1" class="input-fit" style="' + num + '"></div>';
     h += '<button class="btn" onclick="ledLiveSetBrightness()">Set Brightness</button>';
     h += '</div>';
 
     // Solid color + clear row
     h += '<div style="' + row + '">';
     h += '<div><label style="' + lbl + '">Solid Color</label>';
-    h += '<select id="led-live-color" style="' + sel + '">' + colorOpts + '</select></div>';
+    h += '<select id="led-live-color" class="input-fit input-m" style="' + sel + '">' + colorOpts + '</select></div>';
     h += '<button class="btn" onclick="ledLiveApplyColor()">Apply Color</button>';
     h += '<button class="btn" onclick="ledLiveClear()">Clear LED</button>';
     h += '</div>';
@@ -1132,16 +1124,16 @@ window.SchemaPanel.render({
     // Effect row
     h += '<div style="' + row + '">';
     h += '<div><label style="' + lbl + '">Effect</label>';
-    h += '<select id="led-live-effect" style="' + sel + '" onchange="ledLiveEffectChanged()">';
+    h += '<select id="led-live-effect" class="input-fit" style="' + sel + '" onchange="ledLiveEffectChanged()">';
     h += '<option value="blink">Blink</option><option value="pulse">Pulse</option>';
     h += '<option value="strobe">Strobe</option><option value="fade">Fade</option>';
     h += '</select></div>';
     h += '<div><label style="' + lbl + '">Color</label>';
-    h += '<select id="led-live-eff-color1" style="' + sel + '">' + colorOpts + '</select></div>';
+    h += '<select id="led-live-eff-color1" class="input-fit input-m" style="' + sel + '">' + colorOpts + '</select></div>';
     h += '<div id="led-live-color2-wrap" style="display:none"><label style="' + lbl + '">Color 2</label>';
-    h += '<select id="led-live-eff-color2" style="' + sel + '">' + color2Opts + '</select></div>';
+    h += '<select id="led-live-eff-color2" class="input-fit input-m" style="' + sel + '">' + color2Opts + '</select></div>';
     h += '<div><label style="' + lbl + '">Duration (ms)</label>';
-    h += '<input type="number" id="led-live-duration" value="3000" min="100" max="60000" step="500" style="' + num + '"></div>';
+    h += '<input type="number" id="led-live-duration" value="3000" min="100" max="60000" step="500" class="input-fit" style="' + num + '"></div>';
     h += '<button class="btn" onclick="ledLiveRunEffect()">Run Effect</button>';
     h += '</div>';
 
@@ -1305,7 +1297,7 @@ window.SchemaPanel.render({
     var schema = results[0];
     var settingsResp = results[1];
     var settings = settingsResp.settings || {};
-    var container = document.getElementById('sensors-dynamic-container');
+    var container = hw.$('sensors-dynamic-container');
 
     if (!container) return;
 
@@ -1405,41 +1397,39 @@ window.SchemaPanel.render({
     });
 
     // Populate logging container
-    var loggingCont = document.getElementById('logging-dynamic-container');
+    var loggingCont = hw.$('logging-dynamic-container');
     if (loggingCont) {
       loggingCont.innerHTML = loggingHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">Logging settings not available</div>';
       if (loggingHtml) window._snapshotContainer(loggingCont);
     }
 
     // Populate i2c container
-    var i2cCont = document.getElementById('i2c-bus-dynamic-container');
-    if (i2cCont) {
-      i2cCont.innerHTML = i2cHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">I2C settings not available</div>';
-    }
+    var i2cCont = hw.$('i2c-bus-dynamic-container');
+    hw.setHTML(i2cCont, i2cHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">I2C settings not available</div>');
 
     // Populate Hardware LED card host (sibling of Sensors/I2C inside Hardware)
-    var hwLedCont = document.getElementById('hw-led-container');
+    var hwLedCont = hw.$('hw-led-container');
     if (hwLedCont) {
       hwLedCont.innerHTML = hwLedHtml || '';
       if (hwLedHtml) window._snapshotContainer(hwLedCont);
     }
 
     // Populate output container
-    var outputCont = document.getElementById('output-dynamic-container');
+    var outputCont = hw.$('output-dynamic-container');
     if (outputCont) {
       outputCont.innerHTML = outputHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">Output channel settings not available</div>';
       if (outputHtml) window._snapshotContainer(outputCont);
     }
 
     // Populate notifications container
-    var notifCont = document.getElementById('notif-dynamic-container');
+    var notifCont = hw.$('notif-dynamic-container');
     if (notifCont) {
       notifCont.innerHTML = notifHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">Notification settings not available</div>';
       if (notifHtml) window._snapshotContainer(notifCont);
     }
 
     // Populate Apps container (automation, llm, espsr, edgeimpulse)
-    var appsCont = document.getElementById('apps-dynamic-container');
+    var appsCont = hw.$('apps-dynamic-container');
     if (appsCont) {
       appsCont.innerHTML = appsHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">No apps available in this build</div>';
       if (appsHtml) window._snapshotContainer(appsCont);
@@ -1455,12 +1445,12 @@ window.SchemaPanel.render({
     if (i2cCont) window._snapshotContainer(i2cCont);
   }).catch(function(err) {
     console.error('[Settings] Schema load error:', err);
-    var container = document.getElementById('sensors-dynamic-container');
-    if (container) container.innerHTML = '<div style="text-align:center;padding:2rem;color:#dc3545">Failed to load sensor settings</div>';
+    var container = hw.$('sensors-dynamic-container');
+    hw.setHTML(container, '<div style="text-align:center;padding:2rem;color:#dc3545">Failed to load sensor settings</div>');
   });
   
   window.saveDynamicSettings = function(modName, section) {
-    var pane = document.getElementById(modName + '-pane');
+    var pane = hw.$(modName + '-pane');
     if (!pane) { alert('Settings pane not found for: ' + modName); return; }
     var cmds = [];
     var usedIds = {};
@@ -1493,7 +1483,7 @@ window.SchemaPanel.render({
 
     // For camera: if enabling auto-capture and folder is empty, set default and update UI
     if (modName === 'camera' && updates['cameraAutoCapture'] === 1) {
-      var folderInput = document.getElementById('dyn-cameraCaptureFolder');
+      var folderInput = hw.$('dyn-cameraCaptureFolder');
       if (folderInput && !folderInput.value.trim()) {
         folderInput.value = '/photos';
         updates['cameraCaptureFolder'] = '/photos';
@@ -1622,27 +1612,24 @@ window.SchemaPanel.render({
 <script>
 var _notifPolicyBaseline = null;
 function notifFamToggle(gid) {
-  var body = document.getElementById(gid), caret = document.getElementById(gid + '-c');
+  var body = hw.$(gid), caret = hw.$(gid + '-c');
   if (!body) return;
   var open = body.style.display !== 'none';
   body.style.display = open ? 'none' : '';
-  if (caret) caret.innerHTML = open ? '&#9656;' : '&#9662;';
+  hw.setHTML(caret, open ? '&#9656;' : '&#9662;');
 }
 function loadNotifPolicy() {
   // Two calls: the VOCABULARY (every kind) and the POLICY (non-default levels
   // only, matching the on-disk shape). A kind absent from the policy is 'all'.
   // The policy is sparse precisely so it can never outgrow the response buffer.
   Promise.all([
-    hw.fetchJSON('/api/events/kinds'),
+    hw.getEventKindFamilies(),
     hw.postFormText('/api/cli', { cmd: 'notifydevicekind list json' })
   ])
   .then(function(res) {
-    if (!res[0] || !Array.isArray(res[0].families)) {
-      throw new Error('no event-kind families in response');
-    }
     var pm = res[1].match(/\{"kinds":\{[\s\S]*\}\}/);
     if (!pm) throw new Error('no notification policy in response (' + res[1].length + ' B)');
-    var fams   = res[0].families || [];
+    var fams   = res[0] || [];
     var levels = JSON.parse(pm[0]).kinds || {};
     _notifPolicyBaseline = {};
     /* Grouped by family, collapsed by default — 134 selects in one flat list is
@@ -1660,7 +1647,7 @@ function loadNotifPolicy() {
         _notifPolicyBaseline[name] = lvl;
         rows += "<div style='display:flex;justify-content:space-between;align-items:center;padding:2px 0 2px 1.2rem'>" +
                 "<span style='font-size:0.85em'>" + name + "</span>" +
-                "<select data-kind='" + name + "' class='notif-policy-sel'>" +
+                "<select data-kind='" + name + "' class='notif-policy-sel input-fit'>" +
                 ['all','admin','off'].map(function(l){ return "<option value='" + l + "'" + (l === lvl ? " selected" : "") + ">" + l + "</option>"; }).join('') +
                 "</select></div>";
       });
@@ -1670,7 +1657,7 @@ function loadNotifPolicy() {
                   "<span id='" + gid + "-c' style='width:1em;flex:none;opacity:0.7'>&#9656;</span>" +
                   "<span style='flex:1'>" + f.n + " (" + kinds.length +
                     (nonDefault ? ", " + nonDefault + " changed" : "") + ")</span>" +
-                  "<select class='notif-fam-set' data-fam='" + gid + "' onclick='event.stopPropagation()'>" +
+                  "<select class='notif-fam-set input-fit' data-fam='" + gid + "' onclick='event.stopPropagation()'>" +
                     "<option value=''>set all…</option><option value='all'>all</option>" +
                     "<option value='admin'>admin</option><option value='off'>off</option>" +
                   "</select>" +
@@ -1679,11 +1666,11 @@ function loadNotifPolicy() {
               "</div>";
     });
     if (!total) html = "<div style='opacity:0.7;font-style:italic'>No event kinds available.</div>";
-    document.getElementById('notif-policy-list').innerHTML = html;
-    document.querySelectorAll('.notif-fam-set').forEach(function(sel) {
+    hw.$('notif-policy-list').innerHTML = html;
+    hw.qsa('.notif-fam-set').forEach(function(sel) {
       sel.onchange = function() {
         var v = sel.value; if (!v) return;
-        document.querySelectorAll('#' + sel.getAttribute('data-fam') + ' .notif-policy-sel')
+        hw.qsa('#' + sel.getAttribute('data-fam') + ' .notif-policy-sel')
           .forEach(function(s) { s.value = v; });
         sel.value = '';
       };
@@ -1696,20 +1683,20 @@ function loadNotifPolicy() {
     var msg = (e && e.message && e.message.indexOf('403') !== -1)
       ? 'Not available (admin access required).'
       : 'Error: ' + (e && e.message ? e.message : 'unknown');
-    document.getElementById('notif-policy-list').textContent = msg;
+    hw.$('notif-policy-list').textContent = msg;
   });
 }
 function saveNotifPolicy() {
   if (!_notifPolicyBaseline) return;
   var cmds = [];
-  document.querySelectorAll('.notif-policy-sel').forEach(function(sel) {
+  hw.qsa('.notif-policy-sel').forEach(function(sel) {
     var kind = sel.getAttribute('data-kind');
     if (sel.value !== _notifPolicyBaseline[kind]) cmds.push('notifydevicekind ' + kind + ' ' + sel.value);
   });
   if (cmds.length === 0) { alert('No changes to save.'); return; }
   sendSequential(cmds,
     function() {
-      document.querySelectorAll('.notif-policy-sel').forEach(function(sel) { _notifPolicyBaseline[sel.getAttribute('data-kind')] = sel.value; });
+      hw.qsa('.notif-policy-sel').forEach(function(sel) { _notifPolicyBaseline[sel.getAttribute('data-kind')] = sel.value; });
       alert('Event visibility saved.');
     },
     function(e) { alert('Save failed: ' + (e ? e.message : 'unknown')); });
@@ -1953,7 +1940,7 @@ function saveNotifPolicy() {
     hw.fetchJSON('/api/settings/schema'),
     hw.fetchJSON('/api/settings')
   ]).then(function(res){
-    var schema=res[0],settings=(res[1].settings||{}),c=document.getElementById('debug-dynamic-container');
+    var schema=res[0],settings=(res[1].settings||{}),c=hw.$('debug-dynamic-container');
     if(!c)return;
     var dm=null;(schema.modules||[]).forEach(function(m){if(m.name==='debug')dm=m;});
     if(!dm){c.innerHTML='<div>Debug module not found</div>';return;}
@@ -1987,7 +1974,7 @@ function saveNotifPolicy() {
           var mi = e.min !== undefined ? ' min="'+e.min+'"' : '';
           var ma = e.max !== undefined ? ' max="'+e.max+'"' : '';
           h+='<div class="dbg-row" title="'+rowTip+'"><span class="lbl">'+lbl+'</span>';
-          h+='<input type="number" class="dbg-input form-input" data-cmd="'+cmd+'" value="'+nv+'" step="'+step+'"'+mi+ma+' style="width:80px"></div>';
+          h+='<input type="number" class="dbg-input form-input input-fit" data-cmd="'+cmd+'" value="'+nv+'" step="'+step+'"'+mi+ma+' style="width:80px"></div>';
         } else {
           // Bool / default — render as toggle switch.
           var v=!!(e.key==='enabled'?gd.enabled:gd[e.key]);
@@ -2015,7 +2002,7 @@ function saveNotifPolicy() {
         var tAttr = cfgTip ? ' title="'+cfgTip+'"' : '';
         if(e.key==='logLevel'){
           h+='<div style="display:flex;align-items:center;gap:0.5rem"'+tAttr+'><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
-          h+='<select class="dbg-input form-input" data-cmd="'+cmd+'" style="width:130px"'+tAttr+'>';
+          h+='<select class="dbg-input form-input input-fit" data-cmd="'+cmd+'" style="width:130px"'+tAttr+'>';
           h+='<option value="0"'+(v===0?' selected':'')+'>Error</option>';
           h+='<option value="1"'+(v===1?' selected':'')+'>Warn</option>';
           h+='<option value="2"'+(v===2?' selected':'')+'>Info</option>';
@@ -2023,7 +2010,7 @@ function saveNotifPolicy() {
         } else {
           h+='<div style="display:flex;align-items:center;gap:0.5rem"'+tAttr+'><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
           var mi=e.min!==undefined?' min="'+e.min+'"':'',ma=e.max!==undefined?' max="'+e.max+'"':'';
-          h+='<input type="number" class="dbg-input form-input" data-cmd="'+cmd+'" value="'+v+'"'+mi+ma+' style="width:80px"'+tAttr+'></div>';
+          h+='<input type="number" class="dbg-input form-input input-fit" data-cmd="'+cmd+'" value="'+v+'"'+mi+ma+' style="width:80px"'+tAttr+'></div>';
         }
       });
       h+='</div>';
@@ -2040,15 +2027,15 @@ function saveNotifPolicy() {
     c.addEventListener('change',function(ev){
       var t=ev.target;if(!t.classList.contains('dbg-cb'))return;
       var g=t.getAttribute('data-group');
-      if(g){var card=document.getElementById('dbg-'+g.replace(/[^a-z0-9]/g,''));if(card){if(t.hasAttribute('data-all')){card.querySelectorAll('.dbg-cb').forEach(function(x){x.checked=t.checked;});}var on=false;card.querySelectorAll('.dbg-cb').forEach(function(x){if(x.checked)on=true;});card.classList.toggle('on',on);}}
+      if(g){var card=hw.$('dbg-'+g.replace(/[^a-z0-9]/g,''));if(card){if(t.hasAttribute('data-all')){card.querySelectorAll('.dbg-cb').forEach(function(x){x.checked=t.checked;});}var on=false;card.querySelectorAll('.dbg-cb').forEach(function(x){if(x.checked)on=true;});card.classList.toggle('on',on);}}
       else{var p=t.closest('.dbg-pill');if(p)p.classList.toggle('on',t.checked);}
     });
   }).catch(function(err){
-    var c=document.getElementById('debug-dynamic-container');
-    if(c)c.innerHTML='<div style="color:#f55">Error loading debug settings: '+err.message+'</div>';
+    var c=hw.$('debug-dynamic-container');
+    hw.setHTML(c, '<div style="color:#f55">Error loading debug settings: '+err.message+'</div>');
   });
   window.dbgToggleAll=function(gn){
-    var card=document.getElementById('dbg-'+gn.replace(/[^a-z0-9]/g,''));if(!card)return;
+    var card=hw.$('dbg-'+gn.replace(/[^a-z0-9]/g,''));if(!card)return;
     var cbs=card.querySelectorAll('.dbg-cb'),any=false;
     cbs.forEach(function(x){if(x.checked)any=true;});
     cbs.forEach(function(x){x.checked=!any;});
@@ -2057,28 +2044,28 @@ function saveNotifPolicy() {
   window.saveDebugSettings=function(){
     var cmds=[];
     var bl=window._debugBaseline||{};
-    document.querySelectorAll('.dbg-cb').forEach(function(cb){
+    hw.qsa('.dbg-cb').forEach(function(cb){
       var cmd=cb.getAttribute('data-cmd');if(!cmd)return;
       var val=cb.checked?1:0;
       if(cmd in bl && bl[cmd]===val)return;
       cmds.push(cmd+' '+val);
     });
-    document.querySelectorAll('.dbg-input').forEach(function(el){
+    hw.qsa('.dbg-input').forEach(function(el){
       var cmd=el.getAttribute('data-cmd');if(!cmd)return;
       var val=el.value;
       if(cmd in bl && bl[cmd]===val)return;
       cmds.push(cmd+' '+val);
     });
     if(!cmds.length){
-      var msg=document.getElementById('dbg-save-msg');
+      var msg=hw.$('dbg-save-msg');
       if(msg){msg.textContent='No changes';msg.style.opacity='1';setTimeout(function(){msg.style.opacity='0';},1500);}
       return;
     }
-    var msg=document.getElementById('dbg-save-msg');
+    var msg=hw.$('dbg-save-msg');
     if(msg){msg.textContent='Saving...';msg.style.opacity='1';}
     sendSequential(cmds,
       function(){
-        document.querySelectorAll('.dbg-cb,.dbg-input').forEach(function(el){
+        hw.qsa('.dbg-cb,.dbg-input').forEach(function(el){
           var cmd=el.getAttribute('data-cmd');
           if(cmd) window._debugBaseline[cmd]=el.type==='checkbox'?(el.checked?1:0):el.value;
         });
@@ -2236,15 +2223,15 @@ function saveNotifPolicy() {
 <script>
 (function(){
   function updateCertPresenceFlag() {
-    var certEl = document.getElementById('https-cert-status');
-    var keyEl = document.getElementById('https-key-status');
+    var certEl = hw.$('https-cert-status');
+    var keyEl = hw.$('https-key-status');
     window._httpsCertsPresent = !!(certEl && certEl.textContent === 'Present' &&
                                    keyEl  && keyEl.textContent  === 'Present');
   }
   function checkCertFile(path, statusId) {
     hw.fetchJSON('/api/files/list?path=' + encodeURIComponent('/system/certs'))
       .then(function(j){
-        var el = document.getElementById(statusId);
+        var el = hw.$(statusId);
         if (!el) return;
         var found = false;
         var fname = path.split('/').pop();
@@ -2260,7 +2247,7 @@ function saveNotifPolicy() {
         el.style.color = 'var(--accent)';
       })
       .catch(function(){
-        var el = document.getElementById(statusId);
+        var el = hw.$(statusId);
         if (el) {
           el.textContent = 'Unknown';
           el.style.color = '#a0aec0';
@@ -2277,7 +2264,7 @@ function saveNotifPolicy() {
       ];
       var allPresent = true;
       checks.forEach(function(c){
-        var el = document.getElementById(c.id);
+        var el = hw.$(c.id);
         if (!el) return;
         var found = false;
         var fname = c.path.split('/').pop();
@@ -2291,11 +2278,11 @@ function saveNotifPolicy() {
         el.style.color = 'var(--accent)';
       });
       window._httpsCertsPresent = allPresent;
-      if (allPresent) document.getElementById('https-nocert-row').style.display = 'none';
+      if (allPresent) hw.$('https-nocert-row').style.display = 'none';
     })
     .catch(function(){
       ['https-cert-status','https-key-status'].forEach(function(id){
-        var el = document.getElementById(id);
+        var el = hw.$(id);
         if (el) { el.textContent='Unknown'; el.style.color='#a0aec0'; }
       });
     });
@@ -2306,7 +2293,7 @@ function saveNotifPolicy() {
       .then(function(j){
         var val = j && j.settings && j.settings.network && j.settings.network.http && j.settings.network.http.httpsEnabled;
         window._httpsCurrentValue = !!val;
-        var el = document.getElementById('https-enabled-value');
+        var el = hw.$('https-enabled-value');
         if(el){ el.textContent = val ? 'Enabled' : 'Disabled'; el.style.color = 'var(--accent)'; }
       });
   }
@@ -2316,21 +2303,21 @@ function saveNotifPolicy() {
     var newVal = !window._httpsCurrentValue;
     // Block enabling if certs aren't present
     if (newVal && !window._httpsCertsPresent) {
-      document.getElementById('https-reboot-row').style.display = 'none';
-      document.getElementById('https-nocert-row').style.display = 'block';
+      hw.$('https-reboot-row').style.display = 'none';
+      hw.$('https-nocert-row').style.display = 'block';
       return;
     }
-    document.getElementById('https-nocert-row').style.display = 'none';
+    hw.$('https-nocert-row').style.display = 'none';
     var cmd = 'httpsEnabled ' + (newVal ? '1' : '0');
     sendSequential([cmd], function(){
       window._httpsCurrentValue = newVal;
-      var el = document.getElementById('https-enabled-value');
+      var el = hw.$('https-enabled-value');
       if(el){ el.textContent = newVal ? 'Enabled' : 'Disabled'; el.style.color = 'var(--accent)'; }
-      document.getElementById('https-reboot-row').style.display = 'block';
+      hw.$('https-reboot-row').style.display = 'block';
     }, function(err){ alert('Failed to toggle HTTPS: ' + err.message); });
   };
   function uploadHttpsFile(file, destPath, statusId, inputEl) {
-    var statusEl = document.getElementById(statusId);
+    var statusEl = hw.$(statusId);
     if (statusEl) { statusEl.textContent = 'Uploading...'; statusEl.style.color = '#a0aec0'; }
     var reader = new FileReader();
     reader.onload = function(evt) {
@@ -2342,7 +2329,7 @@ function saveNotifPolicy() {
           if (statusEl) { statusEl.textContent = 'Uploaded'; statusEl.style.color = 'var(--accent)'; }
           var fname = destPath.split('/').pop();
           var certId = destPath.indexOf('.crt') >= 0 ? 'https-cert-status' : 'https-key-status';
-          var certEl = document.getElementById(certId);
+          var certEl = hw.$(certId);
           if (certEl) { certEl.textContent = 'Present'; certEl.style.color = 'var(--accent)'; }
           updateCertPresenceFlag();
         } else {
@@ -2368,8 +2355,8 @@ function saveNotifPolicy() {
 
   window.generateCerts = async function(){
     if(!await hwConfirm('Generate a self-signed ECDSA P-256 certificate? This will overwrite any existing cert/key files.')) return;
-    var btn = document.getElementById('https-certgen-btn');
-    var status = document.getElementById('https-certgen-status');
+    var btn = hw.$('https-certgen-btn');
+    var status = hw.$('https-certgen-status');
     if(btn) btn.disabled = true;
     if(status){ status.textContent = 'Generating...'; status.style.color = '#a0aec0'; }
     postSettingsCli('certgen')
@@ -2382,7 +2369,7 @@ function saveNotifPolicy() {
           checkCertFile('/system/certs/https_server.crt', 'https-cert-status');
           checkCertFile('/system/certs/https_server.key', 'https-key-status');
           window._httpsCertsPresent = true;
-          document.getElementById('https-nocert-row').style.display = 'none';
+          hw.$('https-nocert-row').style.display = 'none';
         }
       })
       .catch(function(e){
@@ -2427,9 +2414,6 @@ console.log('[SETTINGS] Part 1: Core init starting...');
   try {
     window.settingsBuildTag = 'settings-streaming-v1';
     window.__S = window.__S || {};
-    window.$ = function(id) {
-      return document.getElementById(id);
-    };
     __S.state = {
       savedSSIDs: [],
       currentSSID: ''
@@ -2466,7 +2450,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         // single-network settings fields (removed 2026-07-20).
         var wifiSect = (s.network && s.network.wifi) || {};
         __S.state.currentSSID = (s.wifiPrimarySSID || '');
-        $('wifi-ssid').textContent = __S.state.currentSSID;
+        hw.$('wifi-ssid').textContent = __S.state.currentSSID;
         var primary = __S.state.currentSSID || '';
         var netList = wifiSect.networks || s.wifiNetworks || [];
         var list = Array.isArray(netList)
@@ -2486,10 +2470,10 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         for (var wi = 0; wi < wifiFlags.length; wi++) {
           var wkey = wifiFlags[wi][0];
           var on = (wifiSect[wkey] !== undefined) ? !!wifiSect[wkey] : !!s[wkey];
-          var vEl = $(wifiFlags[wi][1]);
-          var bEl = $(wifiFlags[wi][2]);
-          if (vEl) vEl.textContent = on ? 'Enabled' : 'Disabled';
-          if (bEl) bEl.textContent = on ? 'Disable' : 'Enable';
+          var vEl = hw.$(wifiFlags[wi][1]);
+          var bEl = hw.$(wifiFlags[wi][2]);
+          hw.setText(vEl, on ? 'Enabled' : 'Disabled');
+          hw.setText(bEl, on ? 'Disable' : 'Enable');
         }
         // Timezone + NTP are now schema-driven (System Time panel is rendered
         // from /api/settings/schema by the IIFE near the top of the page).
@@ -2503,10 +2487,8 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         var isAdm = (s && s.user && (s.user.isAdmin === true)) || (__S && __S.user && (__S.user.isAdmin === true));
         var hasFeat = (__S && __S.features && __S.features.adminSessions === true);
         var admin = isAdm && hasFeat;
-        var sec = document.getElementById('admin-section');
-        if (sec) {
-          sec.style.display = admin ? 'block' : 'none';
-        }
+        var sec = hw.$('admin-section');
+        hw.toggle(sec, (admin));
         if (admin) {
           try {
             if (typeof window.refreshUsers === 'function') {
@@ -2521,13 +2503,13 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             var outAuthSect  = outSectV093.auth || outSectV093;
             var btSect       = (s.network && s.network.bluetooth) || s.bluetooth || {};
             var el;
-            el = document.getElementById('auth-serial');    if (el) el.checked = outAuthSect.serialRequireAuth  !== false;
-            el = document.getElementById('auth-display');   if (el) el.checked = outAuthSect.displayRequireAuth !== false;
-            el = document.getElementById('auth-bluetooth'); if (el) el.checked = btSect.bleRequireAuth !== false;
+            el = hw.$('auth-serial');    if (el) el.checked = outAuthSect.serialRequireAuth  !== false;
+            el = hw.$('auth-display');   if (el) el.checked = outAuthSect.displayRequireAuth !== false;
+            el = hw.$('auth-bluetooth'); if (el) el.checked = btSect.bleRequireAuth !== false;
             // Hide bluetooth row if module not present in settings
             var btPresent = (s.network && s.network.bluetooth !== undefined) || (s.bluetooth !== undefined);
-            var btWrap = document.getElementById('auth-bluetooth-wrap');
-            if (btWrap) btWrap.style.display = btPresent ? '' : 'none';
+            var btWrap = hw.$('auth-bluetooth-wrap');
+            hw.toggle(btWrap, (btPresent));
           } catch(e) {}
         }
       } catch(e) {
@@ -2611,7 +2593,7 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     // afterwards rather than assuming the write landed.
     window.wifiSetFlag = function(cmd) {
       var map = { wifienabled: 'wifi-enabled-btn', wifiautostart: 'wifi-autostart-btn', wifiautoreconnect: 'wifi-btn' };
-      var btn = $(map[cmd]);
+      var btn = hw.$(map[cmd]);
       var v = (btn && btn.textContent === 'Disable') ? 0 : 1;
       if (cmd === 'wifienabled' && v === 0) {
         // Disabling the master switch stops connect AND scan, so say so.
@@ -2637,13 +2619,13 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
 
     // Save authentication settings
     window.saveAuthSettings = function() {
-      var serial  = document.getElementById('auth-serial');
-      var display = document.getElementById('auth-display');
-      var ble     = document.getElementById('auth-bluetooth');
+      var serial  = hw.$('auth-serial');
+      var display = hw.$('auth-display');
+      var ble     = hw.$('auth-bluetooth');
       var cmds = [];
       if (serial)  cmds.push('serialrequireauth '  + (serial.checked  ? '1' : '0'));
       if (display) cmds.push('displayrequireauth ' + (display.checked ? '1' : '0'));
-      if (ble && document.getElementById('auth-bluetooth-wrap').style.display !== 'none') {
+      if (ble && hw.$('auth-bluetooth-wrap').style.display !== 'none') {
         cmds.push('bluetoothrequireauth ' + (ble.checked ? '1' : '0'));
       }
       Promise.all(cmds.map(function(cmd) { return postSettingsCli(cmd); }))
@@ -2711,18 +2693,18 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
     // Save hardware settings
     // Helper functions for hardware settings
     var getInt = function(id) {
-      var el = $(id);
+      var el = hw.$(id);
       if (!el) return null;
       var n = parseInt(el.value, 10);
       return isNaN(n) ? null : n;
     };
     var getStr = function(id) {
-      var el = $(id);
+      var el = hw.$(id);
       if (!el) return null;
       return String(el.value || '');
     };
     var getBool = function(id) {
-      var el = $(id);
+      var el = hw.$(id);
       if (!el) return null;
       return el.checked ? 1 : 0;
     };
@@ -2745,7 +2727,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
   try {
     window.scanNetworks = function() {
       console.log('[SETTINGS] scanNetworks called');
-      var container = $('wifi-scan-results');
+      var container = hw.$('wifi-scan-results');
       container.innerHTML = 'Scanning...';
       postSettingsCli('wifiscan json')
       .then(function(txt) {
@@ -2798,7 +2780,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             var esc = encodeURIComponent(ssid);
             var needsPass = (ap.auth && ap.auth !== '0') ? 'true' : 'false';
             var btnCls = isCur ? ' vis-hidden' : '';
-            html += '<div style="background:var(--panel-bg);color:var(--panel-fg);border:1px solid ' + border + ';border-radius:6px;padding:0.5rem;display:flex;align-items:center;justify-content:space-between">' + '<div><div style="font-weight:bold">' + ssid + ' ' + badge + '</div><div style="color:var(--panel-fg);font-size:0.85rem">RSSI ' + rssi + ' | CH ' + ch + '</div></div>' + '<button class="btn' + btnCls + '" data-ssid="' + esc + '" data-locked="' + needsPass + '" onclick="(function(b){selectSsid(decodeURIComponent(b.dataset.ssid), b.dataset.locked===\\"true\\");})(this)">Select</button>' + '</div>';
+            html += '<div style="background:var(--panel-bg);color:var(--panel-fg);border:1px solid ' + border + ';border-radius:6px;padding:0.5rem;display:flex;align-items:center;justify-content:space-between">' + '<div><div style="font-weight:bold">' + ssid + ' ' + badge + '</div><div style="color:var(--panel-fg);font-size:0.85rem">RSSI ' + rssi + ' | CH ' + ch + '</div></div>' + '<button class="btn' + btnCls + '" data-ssid="' + esc + '" data-locked="' + needsPass + '" onclick="selectSsid(decodeURIComponent(this.dataset.ssid), this.dataset.locked===\'true\')">Select</button>' + '</div>';
           });
           html += '</div>';
         }
@@ -2815,15 +2797,11 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     
     window.selectSsid = function(ssid, needsPass) {
       try {
-        var p = $('wifi-connect-panel');
-        if (p) {
-          p.style.display = 'block';
-        }
-        var s = $('sel-ssid');
-        if (s) {
-          s.textContent = ssid || '';
-        }
-        var inp = $('sel-pass');
+        var p = hw.$('wifi-connect-panel');
+        hw.show(p);
+        var s = hw.$('sel-ssid');
+        hw.setText(s, ssid || '');
+        var inp = hw.$('sel-pass');
         if (inp) {
           inp.value = '';
           if (needsPass) {
@@ -2838,13 +2816,56 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     };
     
     window.toggleManualConnect = function() {
-      var p = $('wifi-manual-panel');
+      var p = hw.$('wifi-manual-panel');
       if (!p) return;
       p.style.display = (p.style.display === 'none' || !p.style.display) ? 'block' : 'none';
     };
-    
+
+    // Handlers for the two WiFi Connect buttons (scan-select and hidden-network
+    // panels). Must stay named functions: an inline onclick attribute cannot
+    // hold JS containing a double quote — the first " ends the attribute no
+    // matter how it is escaped.
+    function wifiSaveAndConnect(ssid, pass, hidden) {
+      var label = (hidden ? 'hidden network "' : '"') + ssid + '"';
+      var cmd1 = 'wifiadd "' + ssid + '" "' + pass + '" 1 ' + (hidden ? '1' : '0');
+      postSettingsCli(cmd1)
+      .then(function(t1) {
+        return hwConfirm('Credentials saved for ' + label + '. Attempt to connect now? You may temporarily lose access while switching.')
+        .then(function(ok) {
+          if (!ok) {
+            alert('Saved. You can connect later from this page.');
+            if (typeof refreshSettings === 'function') refreshSettings();
+            return null;
+          }
+          return postSettingsCli('openwifi');
+        });
+      })
+      .then(function(t) { return t || ''; })
+      .then(function(t2) {
+        if (t2) { alert(t2 || 'Connect attempted'); }
+        if (typeof refreshSettings === 'function') refreshSettings();
+      })
+      .catch(function(e) {
+        alert('Action failed: ' + e.message);
+      });
+    }
+
+    window.wifiConnectSelected = function() {
+      var ssid = (hw.$('sel-ssid') || {}).textContent || '';
+      var pass = (hw.$('sel-pass') || {}).value || '';
+      if (!ssid) { alert('No SSID selected'); return; }
+      wifiSaveAndConnect(ssid, pass, false);
+    };
+
+    window.wifiConnectManual = function() {
+      var ssid = (hw.$('manual-ssid') || {}).value || '';
+      var pass = (hw.$('manual-pass') || {}).value || '';
+      if (!ssid) { alert('Enter SSID'); return; }
+      wifiSaveAndConnect(ssid, pass, true);
+    };
+
     window.toggleUserDropdown = function(id) {
-      var dropdown = $('dropdown-' + id);
+      var dropdown = hw.$('dropdown-' + id);
       if (!dropdown) return;
       var isVisible = dropdown.style.display === 'block';
       dropdown.style.display = isVisible ? 'none' : 'block';
@@ -2913,9 +2934,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     }
 
     window.openAddUserModal = function() {
-      var m = $('add-user-modal');
+      var m = hw.$('add-user-modal');
       if (!m) return;
-      var n = $('add-user-name'), p = $('add-user-pass'), p2 = $('add-user-pass2'), c = $('add-user-mustch');
+      var n = hw.$('add-user-name'), p = hw.$('add-user-pass'), p2 = hw.$('add-user-pass2'), c = hw.$('add-user-mustch');
       if (n) n.value = '';
       if (p) p.value = '';
       if (p2) p2.value = '';
@@ -2927,7 +2948,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
          A disabled row with a reason says "this exists and you can't grant it".
          __hwRoleRank / __hwRank come from the page renderer (same constants as
          kRoleRank* in System_User.h). Advisory only — cmd_user_add re-checks. */
-      var sel = $('add-user-role'), hint = $('add-user-role-hint');
+      var sel = hw.$('add-user-role'), hint = hw.$('add-user-role-hint');
       if (sel) {
         var R = window.__hwRoleRank || { guest: 0, user: 1, admin: 2, superadmin: 3 };
         var rank = (typeof window.__hwRank === 'number') ? window.__hwRank : R.admin;
@@ -2943,20 +2964,18 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
                  o.t + (blocked ? ' (requires higher role)' : '') + "</option>";
         }).join('');
         sel.value = 'user';
-        if (hint) {
-          hint.textContent = (rank >= R.superadmin)
+        hw.setText(hint, (rank >= R.superadmin)
             ? 'Super Admin bypasses all filesystem permissions, on every transport.'
-            : 'You can only grant a role up to your own - Super Admin requires a Super Admin.';
-        }
+            : 'You can only grant a role up to your own - Super Admin requires a Super Admin.');
       }
       m.style.display = 'flex';
     };
     window.closeAddUserModal = function() {
-      var m = $('add-user-modal');
-      if (m) m.style.display = 'none';
+      var m = hw.$('add-user-modal');
+      hw.hide(m);
     };
     window.submitAddUser = function() {
-      var n = $('add-user-name'), p = $('add-user-pass'), p2 = $('add-user-pass2'), c = $('add-user-mustch');
+      var n = hw.$('add-user-name'), p = hw.$('add-user-pass'), p2 = hw.$('add-user-pass2'), c = hw.$('add-user-mustch');
       var username = n && n.value ? n.value.trim() : '';
       var pass = p && p.value ? p.value : '';
       var pass2 = p2 && p2.value ? p2.value : '';
@@ -2964,7 +2983,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!username) { hwAlert('Enter a username'); return; }
       if (pass.length < 6) { hwAlert('Password must be at least 6 characters'); return; }
       if (pass !== pass2) { hwAlert('Passwords do not match'); return; }
-      var roleSel = $('add-user-role');
+      var roleSel = hw.$('add-user-role');
       var role = (roleSel && roleSel.value) ? roleSel.value : 'user';
       var cmd = 'useradd ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0') + ' ' + role;
       postSettingsCli(cmd)
@@ -2981,24 +3000,24 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     };
 
     window.openResetPasswordModal = function(username) {
-      var m = $('reset-pw-modal');
-      var lab = $('reset-pw-for-user');
-      var p = $('reset-pw-pass'), p2 = $('reset-pw-pass2'), c = $('reset-pw-mustch');
+      var m = hw.$('reset-pw-modal');
+      var lab = hw.$('reset-pw-for-user');
+      var p = hw.$('reset-pw-pass'), p2 = hw.$('reset-pw-pass2'), c = hw.$('reset-pw-mustch');
       window._resetPwTargetUser = username || '';
-      if (lab) lab.textContent = username ? ('User: ' + username) : '';
+      hw.setText(lab, username ? ('User: ' + username) : '');
       if (p) p.value = '';
       if (p2) p2.value = '';
       if (c) c.checked = false;
       if (m) m.style.display = 'flex';
     };
     window.closeResetPasswordModal = function() {
-      var m = $('reset-pw-modal');
-      if (m) m.style.display = 'none';
+      var m = hw.$('reset-pw-modal');
+      hw.hide(m);
       window._resetPwTargetUser = '';
     };
     window.submitResetPassword = function() {
       var username = window._resetPwTargetUser || '';
-      var p = $('reset-pw-pass'), p2 = $('reset-pw-pass2'), c = $('reset-pw-mustch');
+      var p = hw.$('reset-pw-pass'), p2 = hw.$('reset-pw-pass2'), c = hw.$('reset-pw-mustch');
       var pass = p && p.value ? p.value : '';
       var pass2 = p2 && p2.value ? p2.value : '';
       var mustCh = !!(c && c.checked);
@@ -3052,7 +3071,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     };
 
     window.refreshUsers = function() {
-      var container = $('users-list');
+      var container = hw.$('users-list');
       if (!container) return;
       container.innerHTML = 'Loading...';
       Promise.all([
@@ -3084,7 +3103,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           sessionsByUser[u].push(s);
         });
         // Update pending badge on the User Management header
-        var badge = $('pending-badge');
+        var badge = hw.$('pending-badge');
         if (badge) {
           if (pending.length > 0) {
             badge.textContent = pending.length + ' pending';
@@ -3400,7 +3419,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     // toggleSerialAuth, toggleBleAuth, toggleDisplayAuth removed - auth settings now in respective module panels
 
     window.toggleUserSync = function() {
-      var current = $('usersync-enabled-value') && $('usersync-enabled-value').textContent === 'Enabled';
+      var current = hw.$('usersync-enabled-value') && hw.$('usersync-enabled-value').textContent === 'Enabled';
       var cmd = current ? 'espnowusersync off' : 'espnowusersync on';
       postSettingsCli(cmd)
       .then(function(t) {
@@ -3411,11 +3430,11 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
            doesn't have. */
         if (t && t.indexOf('Error') >= 0) { alert(t); return; }
         var nowEnabled = !current;
-        var el = $('usersync-enabled-value');
+        var el = hw.$('usersync-enabled-value');
         if (el) { el.textContent = nowEnabled ? 'Enabled' : 'Disabled'; el.style.color = 'var(--accent)'; }
-        var btn = $('usersync-enabled-btn');
-        if (btn) btn.textContent = nowEnabled ? 'Disable' : 'Enable';
-        var form = $('usersync-form');
+        var btn = hw.$('usersync-enabled-btn');
+        hw.setText(btn, nowEnabled ? 'Disable' : 'Enable');
+        var form = hw.$('usersync-form');
         if (form) form.style.display = nowEnabled ? 'block' : 'none';
         if (nowEnabled) { refreshSyncUsers(); refreshSyncPeers(); }
       })
@@ -3427,7 +3446,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       .then(function(t) {
         var users = [];
         try { var ru = JSON.parse(t); users = Array.isArray(ru) ? ru : (ru && ru.users) || []; } catch(e) {}
-        var sel = $('usersync-user');
+        var sel = hw.$('usersync-user');
         if (!sel) return;
         sel.innerHTML = '';
         if (!Array.isArray(users) || !users.length) {
@@ -3448,7 +3467,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     };
     
     window.refreshSyncPeers = function() {
-      var sel = $('usersync-device');
+      var sel = hw.$('usersync-device');
       if (!sel) return;
       sel.innerHTML = '<option value="">Loading...</option>';
       postSettingsCli('espnowdevices')
@@ -3477,12 +3496,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     };
     
     window.syncUserToDevice = function() {
-      var username = $('usersync-user') ? $('usersync-user').value : '';
-      var device = $('usersync-device') ? $('usersync-device').value : '';
-      var adminPass = $('usersync-admin-password') ? $('usersync-admin-password').value : '';
-      var userPass = $('usersync-user-password') ? $('usersync-user-password').value : '';
-      var recvAdminUser = $('usersync-recv-admin-user') ? $('usersync-recv-admin-user').value : '';
-      var recvAdminPass = $('usersync-recv-admin-pass') ? $('usersync-recv-admin-pass').value : '';
+      var username = hw.$('usersync-user') ? hw.$('usersync-user').value : '';
+      var device = hw.$('usersync-device') ? hw.$('usersync-device').value : '';
+      var adminPass = hw.$('usersync-admin-password') ? hw.$('usersync-admin-password').value : '';
+      var userPass = hw.$('usersync-user-password') ? hw.$('usersync-user-password').value : '';
+      var recvAdminUser = hw.$('usersync-recv-admin-user') ? hw.$('usersync-recv-admin-user').value : '';
+      var recvAdminPass = hw.$('usersync-recv-admin-pass') ? hw.$('usersync-recv-admin-pass').value : '';
       if (!username || !device || !adminPass || !userPass || !recvAdminUser || !recvAdminPass) {
         alert('Select a user and device, then fill in your admin password, the user\'s password, and the target device admin username + password');
         return;
@@ -3492,15 +3511,15 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       postSettingsCli(cmd)
       .then(function(t) {
         alert(t || 'Sync complete');
-        if ($('usersync-admin-password')) $('usersync-admin-password').value = '';
-        if ($('usersync-user-password')) $('usersync-user-password').value = '';
-        if ($('usersync-recv-admin-pass')) $('usersync-recv-admin-pass').value = '';
+        if (hw.$('usersync-admin-password')) hw.$('usersync-admin-password').value = '';
+        if (hw.$('usersync-user-password')) hw.$('usersync-user-password').value = '';
+        if (hw.$('usersync-recv-admin-pass')) hw.$('usersync-recv-admin-pass').value = '';
       })
       .catch(function(e) { alert('Error: ' + e.message); });
     };
 
     window.refreshSyncPeersFor = function(uid) {
-      var sel = $('sync-device-' + uid);
+      var sel = hw.$('sync-device-' + uid);
       if (!sel) return;
       sel.innerHTML = '<option value="">Loading...</option>';
       postSettingsCli('espnowdevices')
@@ -3529,11 +3548,11 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     };
 
     window.syncUserToDeviceFor = function(uid, username) {
-      var device = $('sync-device-' + uid) ? $('sync-device-' + uid).value : '';
-      var adminPass = $('sync-admin-pass-' + uid) ? $('sync-admin-pass-' + uid).value : '';
-      var userPass = $('sync-user-pass-' + uid) ? $('sync-user-pass-' + uid).value : '';
-      var recvAdminUser = $('sync-recv-admin-user-' + uid) ? $('sync-recv-admin-user-' + uid).value : '';
-      var recvAdminPass = $('sync-recv-admin-pass-' + uid) ? $('sync-recv-admin-pass-' + uid).value : '';
+      var device = hw.$('sync-device-' + uid) ? hw.$('sync-device-' + uid).value : '';
+      var adminPass = hw.$('sync-admin-pass-' + uid) ? hw.$('sync-admin-pass-' + uid).value : '';
+      var userPass = hw.$('sync-user-pass-' + uid) ? hw.$('sync-user-pass-' + uid).value : '';
+      var recvAdminUser = hw.$('sync-recv-admin-user-' + uid) ? hw.$('sync-recv-admin-user-' + uid).value : '';
+      var recvAdminPass = hw.$('sync-recv-admin-pass-' + uid) ? hw.$('sync-recv-admin-pass-' + uid).value : '';
       if (!device || !adminPass || !userPass || !recvAdminUser || !recvAdminPass) {
         alert('Select a device, then fill in your admin password, the user\'s password, and the target device admin username + password');
         return;
@@ -3543,9 +3562,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       postSettingsCli(cmd)
       .then(function(t) {
         alert(t || 'Sync complete');
-        if ($('sync-admin-pass-' + uid)) $('sync-admin-pass-' + uid).value = '';
-        if ($('sync-user-pass-' + uid)) $('sync-user-pass-' + uid).value = '';
-        if ($('sync-recv-admin-pass-' + uid)) $('sync-recv-admin-pass-' + uid).value = '';
+        if (hw.$('sync-admin-pass-' + uid)) hw.$('sync-admin-pass-' + uid).value = '';
+        if (hw.$('sync-user-pass-' + uid)) hw.$('sync-user-pass-' + uid).value = '';
+        if (hw.$('sync-recv-admin-pass-' + uid)) hw.$('sync-recv-admin-pass-' + uid).value = '';
       })
       .catch(function(e) { alert('Error: ' + e.message); });
     };
@@ -3609,16 +3628,16 @@ console.log('[SETTINGS] All parts loaded successfully');
 (function(){
   // Toggle helpers — mirror the Files/CLI page pattern.
   function setSettingsButtons(local){
-    var bl = document.getElementById('settings-btn-local');
-    var bb = document.getElementById('settings-btn-bonded');
+    var bl = hw.$('settings-btn-local');
+    var bb = hw.$('settings-btn-bonded');
     if (bl) bl.style.opacity = local ? '1' : '0.55';
     if (bb) bb.style.opacity = local ? '0.55' : '1';
   }
   window.showLocalSettings = function(){
-    var lc = document.getElementById('settings-local-container');
-    var bc = document.getElementById('settings-bonded-container');
-    if (lc) lc.style.display = '';
-    if (bc) bc.style.display = 'none';
+    var lc = hw.$('settings-local-container');
+    var bc = hw.$('settings-bonded-container');
+    hw.show(lc);
+    hw.hide(bc);
     setSettingsButtons(true);
     stopDirtyPoll();  // no need to poll while the bonded view isn't visible
     // postSettingsCli / sendSequential route based on this — local view
@@ -3627,10 +3646,10 @@ console.log('[SETTINGS] All parts loaded successfully');
     console.log('[Settings] target → local');
   };
   window.showBondedSettings = function(){
-    var lc = document.getElementById('settings-local-container');
-    var bc = document.getElementById('settings-bonded-container');
-    if (lc) lc.style.display = 'none';
-    if (bc) bc.style.display = '';
+    var lc = hw.$('settings-local-container');
+    var bc = hw.$('settings-bonded-container');
+    hw.hide(lc);
+    hw.show(bc);
     setSettingsButtons(false);
     // From now on every postSettingsCli / sendSequential dispatch (from any
     // panel inside settings-bonded-container, including SchemaPanel.render
@@ -3640,8 +3659,8 @@ console.log('[SETTINGS] All parts loaded successfully');
     // Hide form fields every time the user enters the bonded view — the
     // cached values may be stale (e.g. worker edited locally since last
     // sync). User must click Re-sync to acknowledge they want fresh data.
-    var content = document.getElementById('bond-settings-content');
-    if (content) content.style.display = 'none';
+    var content = hw.$('bond-settings-content');
+    hw.hide(content);
     statusSet('Click Re-sync to pull fresh settings from the worker');
     saveStatusSet('');
     // Reset dirty state — banner and poller restart only after a successful
@@ -3651,7 +3670,7 @@ console.log('[SETTINGS] All parts loaded successfully');
     stopDirtyPoll();
   };
 
-  function statusSet(msg){ var s=document.getElementById('bond-settings-status'); if(s) s.textContent=msg; }
+  function statusSet(msg){ var s=hw.$('bond-settings-status'); hw.setText(s, msg); }
   // saveStatusSet kept as a no-op for legacy callers (the old global Save
   // button is gone; each SchemaPanel now shows its own status next to its
   // Save button).
@@ -3668,8 +3687,8 @@ console.log('[SETTINGS] All parts loaded successfully');
   var isDirty = false;
   function setDirty(d){
     isDirty = !!d;
-    var b = document.getElementById('bond-settings-dirty-banner');
-    if (b) b.style.display = isDirty ? '' : 'none';
+    var b = hw.$('bond-settings-dirty-banner');
+    hw.toggle(b, (isDirty));
   }
   function checkDirty(){
     if (formLoadedHash === null) return;
@@ -3689,7 +3708,7 @@ console.log('[SETTINGS] All parts loaded successfully');
     if(!d || d.role !== 1 || !d.bonded || !d.peerMac) return;
     if(d.peerMac === '00:00:00:00:00:00') return;
     bondPeerMac = d.peerMac;
-    var t = document.getElementById('settings-source-toggle');
+    var t = hw.$('settings-source-toggle');
     if (t) t.style.display = 'flex';
     setSettingsButtons(true);  // Default to "This Device" highlighted
   }).catch(function(){});
@@ -3700,15 +3719,22 @@ console.log('[SETTINGS] All parts loaded successfully');
   // excluded because reconfiguring bond over its own session would
   // self-destruct. If a future refactor splits credential-bearing entries
   // out, we can re-add some of these.
-  var BONDED_MODULE_DENYLIST = ['users', 'bond'];
+  // 'wifi' is here because the only rows it still exposes are wifiEnabled /
+  // wifiAutoStart / wifiAutoReconnect — toggling those on a bonded worker drops
+  // the very link being used to manage it. Its time settings moved to 'clock'
+  // (whitelisted below), so the bonded view exposes exactly what it did before.
+  var BONDED_MODULE_DENYLIST = ['users', 'bond', 'wifi'];
 
   // Per-module key whitelist for the bonded view. Modules listed here render
   // ONLY the keys named — used for partial exposure when a module has both
-  // safe-to-edit fields and risky ones. WiFi is the canonical case: tz/NTP
-  // are fine to push to the worker, but SSID/password/enabled would cut the
-  // network out from under the bond.
+  // safe-to-edit fields and risky ones.
+  //
+  // NOTE: this filter FAILS OPEN — renderBondedModules() only applies it when
+  // the module name is a key here, and SchemaPanel renders every entry when no
+  // keys array is passed. So dropping a module from this table exposes all of
+  // its rows rather than none. Prefer BONDED_MODULE_DENYLIST to hide a module.
   var BONDED_KEY_WHITELIST = {
-    wifi: ['ntpServer', 'tzOffsetMinutes']
+    clock: ['ntpServer', 'tzOffsetMinutes']
   };
 
   // After a successful sync, fetch the worker's schema and render one
@@ -3717,7 +3743,7 @@ console.log('[SETTINGS] All parts loaded successfully');
   // through sendSequential → /api/bond/cli/batch because
   // window._settingsTarget is 'bonded' while this view is active.
   function renderBondedModules(){
-    var host = document.getElementById('bond-modules-host');
+    var host = hw.$('bond-modules-host');
     if(!host) return;
     host.innerHTML = '<span style="opacity:0.7">Loading worker schema…</span>';
     hw.fetchJSON('/api/bond/settings/schema')
@@ -3790,9 +3816,8 @@ console.log('[SETTINGS] All parts loaded successfully');
   // Parallel because the two transfers are independent on the wire and the
   // master/worker can pipeline them — typical wall time is max(2s, 2s)
   // rather than sum.
-  var resyncBtn = document.getElementById('btn-bond-settings-resync');
-  if(resyncBtn){
-    resyncBtn.addEventListener('click', function(){
+  var resyncBtn = hw.$('btn-bond-settings-resync');
+  hw.on(resyncBtn, 'click', function(){
       resyncBtn.disabled = true;
       statusSet('Syncing values + schema from worker…');
       Promise.all([
@@ -3809,13 +3834,12 @@ console.log('[SETTINGS] All parts loaded successfully');
         // Both file caches are now fresh on disk; invalidate the browser
         // SchemaPanel cache so the next render fetches the new bytes.
         window.SchemaPanelInvalidate('bonded');
-        document.getElementById('bond-settings-content').style.display = '';
+        hw.$('bond-settings-content').style.display = '';
         setDirty(false);
         startDirtyPoll();
         renderBondedModules();
       }).catch(function(e){ resyncBtn.disabled=false; statusSet('Sync error: '+e.message); });
     });
-  }
 })();
 </script>
 )BONDSETTAIL", HTTPD_RESP_USE_STRLEN);

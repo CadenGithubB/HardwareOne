@@ -281,3 +281,68 @@ void clockDutiesTick()  { drainDuties(); }
 void clockDutiesFlush() { drainDuties(); }
 
 } // namespace Clock
+
+// ---------------------------------------------------------------------------
+// Clock settings module — ALWAYS registered.
+//
+// tzOffsetMinutes previously lived in wifiSettingsEntries[], inside
+// System_WiFi.cpp's file-wide #if ENABLE_WIFI. Its CLI command
+// ("tzoffsetminutes") and every consumer (Clock::tzOffsetMinutes,
+// i2csensor_ds3231, G2_Ring, System_R1_Protocol, WebPage_Sensors) are ungated,
+// so on a radioless build the user could set the timezone and have it silently
+// revert on the next boot — the registry walk that persists settings had no row
+// to write. Timezone belongs to the clock, not the radio.
+//
+// ntpServer moves with it so the web "System Time" pane stays a single
+// SchemaPanel (one module per panel, one Save button), but it keeps its
+// ENABLE_WIFI gate: NTP genuinely needs the radio, and sizeof/sizeof adapts the
+// entry count when the row compiles out.
+// ---------------------------------------------------------------------------
+
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
+static const SettingEntry clockSettingsEntries[] = {
+#if ENABLE_WIFI
+  { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
+#endif
+  // Timezone offsets as "minutes|label" pairs — the schema renderer's enum
+  // widget reads this and produces a select dropdown. CLI verb stays "tz".
+  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   0, 0, nullptr, -720, 840, "Timezone",
+    "-720|UTC-12 (Baker Island),"
+    "-660|UTC-11 (Samoa),"
+    "-600|UTC-10 (Hawaii/HST),"
+    "-540|UTC-9 (Alaska/AKST),"
+    "-480|UTC-8 (Pacific/PST),"
+    "-420|UTC-7 (Mountain/MST · Pacific/PDT),"
+    "-360|UTC-6 (Central/CST · Mountain/MDT),"
+    "-300|UTC-5 (Eastern/EST · Central/CDT),"
+    "-240|UTC-4 (Atlantic/AST · Eastern/EDT),"
+    "-180|UTC-3 (Argentina · Atlantic/ADT),"
+    "-120|UTC-2 (Mid-Atlantic),"
+    "-60|UTC-1 (Azores),"
+    "0|UTC+0 (London/GMT · Dublin),"
+    "60|UTC+1 (Berlin/Paris/CET · London/BST),"
+    "120|UTC+2 (Cairo/Athens/EET · Paris/CEST),"
+    "180|UTC+3 (Moscow/Baghdad),"
+    "240|UTC+4 (Dubai/Baku),"
+    "300|UTC+5 (Karachi/Tashkent),"
+    "330|UTC+5:30 (Mumbai/Delhi/IST),"
+    "360|UTC+6 (Dhaka/Almaty),"
+    "420|UTC+7 (Bangkok/Jakarta),"
+    "480|UTC+8 (Beijing/Singapore),"
+    "540|UTC+9 (Tokyo/Seoul/JST),"
+    "570|UTC+9:30 (Adelaide/ACST),"
+    "600|UTC+10 (Sydney/AEST),"
+    "660|UTC+11 (Solomon Islands),"
+    "720|UTC+12 (Fiji/Auckland/NZST)",
+    false, nullptr, "tzoffsetminutes" }
+};
+
+extern const SettingsModule clockSettingsModule = {
+  "clock",
+  "system.time",
+  clockSettingsEntries,
+  sizeof(clockSettingsEntries) / sizeof(clockSettingsEntries[0]),
+  nullptr,  // always available — no connection precondition
+  "System time: timezone and NTP server"
+};
+

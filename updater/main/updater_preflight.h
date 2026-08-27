@@ -17,7 +17,14 @@ extern "C" {
 
 #define HW1_UPDATER_STAGED_IMAGE_PATH "/littlefs/system/ota/candidate.bin"
 #define HW1_UPDATER_STAGED_MANIFEST_PATH "/littlefs/system/ota/manifest.json"
-#define HW1_UPDATER_OTA0_SIZE 0x5A0000u
+/*
+ * ota_0 capacity, supplied by updater/CMakeLists.txt from the partition csv.
+ * The literal that lived here (0x5A0000u) did not match ANY current layout:
+ * the 16 MB board's ota_0 is 0x620000 and the 8 MB board's is 0x500000.
+ */
+#ifndef HW1_UPDATER_OTA0_SIZE
+#error "HW1_UPDATER_OTA0_SIZE must come from the build; see updater/CMakeLists.txt"
+#endif
 #define HW1_UPDATER_DATA_SCHEMA 1u
 #define HW1_UPDATER_IMAGE_PREFIX_SIZE (24u + 8u + sizeof(esp_app_desc_t))
 

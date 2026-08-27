@@ -1,0 +1,34 @@
+# HW_TARGET: esp32
+#
+# Recovery updater board file — Adafruit QT Py ESP32 (ESP32-PICO-V3-02).
+#
+# Flash size is load-bearing twice: it configures esptool AND selects the
+# shared partition CSV in updater/CMakeLists.txt. It must agree with
+# boards/qtpy_esp32.defaults. Same 8 MB as the Feather V2, so both boards
+# compile the identical partitions_ota_no_sr_8mb.csv.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_OFFSET=0x9000
+
+# Revision 3 minimum, for the RSA-3072 reason in boards/qtpy_esp32.ota.defaults.
+# The updater embeds the public key and verifies every candidate, so without
+# this it cannot be built at all.
+CONFIG_ESP32_REV_MIN_3=y
+
+# Never flash-encrypted; only feathers3_fe is.
+CONFIG_SECURE_FLASH_ENC_ENABLED=n
+CONFIG_NVS_ENCRYPTION=n
+
+# Console: the classic ESP32 has no USB-Serial/JTAG peripheral. UART0, reached
+# through the QT Py's onboard bridge at 115200.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# Power interlock: this board has NO battery hardware — no connector, no gauge,
+# no VBAT divider (BATTERY_MONITOR_AVAILABLE is 0 in System_BuildConfig.h).
+# There is nothing to sample, so the interlock reports external power. See the
+# HW1_UPDATER_POWER_NONE help text for why refusing on absent telemetry would
+# be the wrong call.
+CONFIG_HW1_UPDATER_POWER_NONE=y
+
+# No PSRAM in the recovery image; it verifies and writes one partition.
+CONFIG_SPIRAM=n

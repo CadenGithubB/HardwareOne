@@ -7,3 +7,10 @@ CONFIG_SECURE_FLASH_ENC_ENABLED=y
 CONFIG_SECURE_FLASH_ENCRYPTION_AES128=y
 CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
 CONFIG_NVS_ENCRYPTION=y
+
+# Console: the S3 exposes a native USB-Serial/JTAG peripheral, and the updater
+# installs its interrupt-driven driver so a blocking stdio read waits for a
+# whole line. Declared per-board because the classic-ESP32 board has no such
+# peripheral and must use UART0 instead.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

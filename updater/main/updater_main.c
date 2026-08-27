@@ -9,8 +9,13 @@
 #include <sys/stat.h>
 
 #include "cJSON.h"
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#else
+#include "driver/uart.h"
+#include "driver/uart_vfs.h"
+#endif
 #include "esp_app_desc.h"
 #include "esp_err.h"
 #include "esp_littlefs.h"
@@ -2070,17 +2075,29 @@ static void console_task(void *argument)
     }
 }
 
+/*
+ * The recovery console is a blocking line reader, and BOTH backends need the
+ * same thing from the VFS: an interrupt-driven driver behind stdio.
+ *
+ * The startup VFS for either peripheral polls the hardware FIFO and every read
+ * is nonblocking. In that mode fgets() may return a one-character "line", and
+ * an idle console repeatedly returns EWOULDBLOCK. Installing the real driver
+ * makes a blocking stdio read wait for a complete line, exactly as the console
+ * parser expects.
+ *
+ * Which peripheral is a board property, not a code property: the ESP32-S3
+ * boards use the native USB-Serial/JTAG, and the classic ESP32 has no such
+ * peripheral at all, so the Feather V2 reaches the console over UART0 through
+ * its CP2102N bridge. The choice follows CONFIG_ESP_CONSOLE_* from
+ * updater/boards/<board>.defaults so the two can never disagree.
+ */
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 static esp_err_t initialize_console_io(void)
 {
     usb_serial_jtag_driver_config_t config =
         USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     esp_err_t err;
 
-    /* The startup USB-Serial/JTAG VFS polls the hardware FIFO and every read
-     * is nonblocking. In that mode fgets() may return a one-character
-     * "line", and an idle console repeatedly returns EWOULDBLOCK. Install the
-     * interrupt-driven driver so a blocking stdio read waits for a complete
-     * line exactly as the console parser expects. */
     if (fcntl(fileno(stdin), F_SETFL, 0) != 0 ||
         fcntl(fileno(stdout), F_SETFL, 0) != 0) {
         return ESP_FAIL;
@@ -2092,6 +2109,40 @@ static esp_err_t initialize_console_io(void)
     usb_serial_jtag_vfs_use_driver();
     return ESP_OK;
 }
+#elif CONFIG_ESP_CONSOLE_UART_DEFAULT || CONFIG_ESP_CONSOLE_UART_CUSTOM
+#define CONSOLE_UART_RX_BUFFER 1024
+static esp_err_t initialize_console_io(void)
+{
+    const int uart_num = CONFIG_ESP_CONSOLE_UART_NUM;
+    esp_err_t err;
+
+    if (fcntl(fileno(stdin), F_SETFL, 0) != 0 ||
+        fcntl(fileno(stdout), F_SETFL, 0) != 0) {
+        return ESP_FAIL;
+    }
+    /* A terminal sends CR for Enter; the parser wants LF-terminated lines.
+     * Without this translation every console command arrives with a trailing
+     * CR and matches none of the exact strings the parser compares against. */
+    err = uart_driver_install(uart_num, CONSOLE_UART_RX_BUFFER, 0, 0, NULL, 0);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uart_vfs_dev_port_set_rx_line_endings(uart_num, ESP_LINE_ENDINGS_CR);
+    uart_vfs_dev_port_set_tx_line_endings(uart_num, ESP_LINE_ENDINGS_CRLF);
+    uart_vfs_dev_use_driver(uart_num);
+    /* Drop anything typed at UART0 before the driver existed. Those bytes sit
+     * in the hardware FIFO with no line terminator, so the first real command
+     * gets glued onto them: a "help" typed during boot plus a "help" typed at
+     * the prompt arrives as the single token "helphelp", and the console
+     * answers "unknown command". Harmless but alarming on a recovery console,
+     * where the operator is already worried about the device. */
+    uart_flush_input(uart_num);
+    return ESP_OK;
+}
+#else
+#error "The recovery console needs either a USB-Serial/JTAG or a UART channel. \
+        Set CONFIG_ESP_CONSOLE_* in updater/boards/<board>.defaults."
+#endif
 
 void app_main(void)
 {

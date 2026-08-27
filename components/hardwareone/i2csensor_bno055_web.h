@@ -39,7 +39,7 @@ inline void streamBNO055ImuSensorJs(httpd_req_t* req) {
     "    var url = '/api/sensors?sensor=imu&ts=' + Date.now();\n"
     "    return hw.fetchJSON(url)\n"
     "      .then(function(j) {\n"
-    "        var el = document.getElementById('gyro-data');\n"
+    "        var el = hw.$('gyro-data');\n"
     "        if (el) {\n"
     "          if (j && j.error) {\n"
     "            el.textContent = 'IMU error: ' + j.error;\n"
@@ -84,7 +84,7 @@ inline void streamBNO055ImuSensorJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req,
     "class DeviceRotationViz {\n"
     "  constructor(canvasId) {\n"
-    "    this.canvas = document.getElementById(canvasId);\n"
+    "    this.canvas = hw.$(canvasId);\n"
     "    if (!this.canvas) return;\n"
     "    this.ctx = this.canvas.getContext('2d');\n"
     "    this.size = 80;\n"

@@ -183,7 +183,10 @@ inline String renderTwoFieldForm(
 // Generic File Explorer Utility
 // This provides reusable JavaScript functions for browsing and selecting files from the filesystem
 // Usage: Call createFileExplorer(containerId, onSelectCallback) to create a file explorer in any element
-inline String getFileBrowserScript() {
+// Returns the static file-explorer script (one raw literal, no interpolation).
+// const char* on purpose: the bytes live in flash and are streamed zero-copy;
+// the old String return copied all ~49.6 KB to heap on every request.
+inline const char* getFileBrowserScript() {
   return R"FBSCRIPT(
 <script>
 // Generic File Explorer Utility
@@ -252,7 +255,7 @@ inline String getFileBrowserScript() {
       if (dbgIcons()) {
         setTimeout(function(){
           try {
-            var img = document.getElementById(imgId);
+            var img = hw.$(imgId);
             if (!img) { console.warn('[icons] element not found id=', imgId, 'icon=', iconName); return; }
             img.addEventListener('load', function(){ console.log('[icons] load ok', iconName, 'id', imgId); });
             img.addEventListener('error', function(){
@@ -361,7 +364,7 @@ inline String getFileBrowserScript() {
     //   lockToPath: string - optional path to lock navigation to (prevents browsing outside this directory)
     // }
     
-    var container = document.getElementById(config.containerId);
+    var container = hw.$(config.containerId);
     if (!container) {
       console.error('[FileExplorer] Container not found:', config.containerId);
       return;
@@ -387,8 +390,8 @@ inline String getFileBrowserScript() {
     
     container.innerHTML = html;
     
-    var breadcrumbDiv = document.getElementById(breadcrumbId);
-    var listDiv = document.getElementById(listId);
+    var breadcrumbDiv = hw.$(breadcrumbId);
+    var listDiv = hw.$(listId);
     
     function renderBreadcrumb() {
       breadcrumbDiv.innerHTML = window.FileBrowser.breadcrumbHtml(currentPath,
@@ -667,7 +670,7 @@ inline String getFileBrowserScript() {
     if (config.selectFilesOnly === undefined) config.selectFilesOnly = true;
     
     config.onSelect = function(filePath) {
-      var input = document.getElementById(inputId);
+      var input = hw.$(inputId);
       if (input) {
         input.value = filePath;
       }
@@ -742,7 +745,7 @@ inline String getFileBrowserScript() {
     //   onRefresh: function() - callback after operations
     // }
     
-    var container = document.getElementById(config.containerId);
+    var container = hw.$(config.containerId);
     if (!container) {
       console.error('[FileManager] Container not found:', config.containerId);
       return;
@@ -793,22 +796,22 @@ inline String getFileBrowserScript() {
     
     container.innerHTML = html;
     
-    var explorerDiv = document.getElementById(explorerId);
-    var statusDiv = document.getElementById(statusId);
+    var explorerDiv = hw.$(explorerId);
+    var statusDiv = hw.$(statusId);
     
     // Permission flags (must match FilePermission enum in System_Filesystem.h)
     var PERM_CREATE = 0x10;
     var PERM_IMPORT = 0x20;
     
     function updateToolbar(dirPerms) {
-      var bb = document.getElementById(managerId + '_back_btn');
-      var fb = document.getElementById(managerId + '_folder_btn');
-      var fi = document.getElementById(managerId + '_file_btn');
-      var ub = document.getElementById(managerId + '_upload_btn');
-      if (bb) bb.style.display = (currentPath !== '/') ? '' : 'none';
-      if (fb) fb.style.display = (dirPerms & PERM_CREATE) ? '' : 'none';
-      if (fi) fi.style.display = (dirPerms & PERM_CREATE) ? '' : 'none';
-      if (ub) ub.style.display = (dirPerms & PERM_IMPORT) ? '' : 'none';
+      var bb = hw.$(managerId + '_back_btn');
+      var fb = hw.$(managerId + '_folder_btn');
+      var fi = hw.$(managerId + '_file_btn');
+      var ub = hw.$(managerId + '_upload_btn');
+      hw.toggle(bb, (currentPath !== '/'));
+      hw.toggle(fb, (dirPerms & PERM_CREATE));
+      hw.toggle(fi, (dirPerms & PERM_CREATE));
+      hw.toggle(ub, (dirPerms & PERM_IMPORT));
     }
     
     function setStatus(msg, isError) {
@@ -880,7 +883,7 @@ inline String getFileBrowserScript() {
     
     // Action: Upload file
     window[managerId + 'UploadFile'] = function() {
-      var input = document.getElementById(managerId + '_upload_input');
+      var input = hw.$(managerId + '_upload_input');
       input.onchange = function(e) {
         var file = e.target.files[0];
         if (!file) return;
@@ -906,18 +909,18 @@ inline String getFileBrowserScript() {
           var targetPath = currentPath === '/' ? '/' + file.name : currentPath + '/' + file.name;
           hwUploadFile(file, targetPath, {
             onProgress: function(pct, label) {
-              var wrap = document.getElementById(progressId);
-              var bar = document.getElementById(progressId + '_bar');
-              var pctEl = document.getElementById(progressId + '_pct');
-              var lblEl = document.getElementById(progressId + '_label');
-              if (wrap) wrap.style.display = '';
+              var wrap = hw.$(progressId);
+              var bar = hw.$(progressId + '_bar');
+              var pctEl = hw.$(progressId + '_pct');
+              var lblEl = hw.$(progressId + '_label');
+              hw.show(wrap);
               if (bar) bar.style.width = pct + '%';
-              if (pctEl) pctEl.textContent = pct + '%';
-              if (lblEl) lblEl.textContent = label || ('Uploading ' + file.name + '...');
+              hw.setText(pctEl, pct + '%');
+              hw.setText(lblEl, label || ('Uploading ' + file.name + '...'));
             },
             onDone: function(ok, msg) {
-              var wrap = document.getElementById(progressId);
-              if (wrap) wrap.style.display = 'none';
+              var wrap = hw.$(progressId);
+              hw.hide(wrap);
               setStatus(ok ? 'Uploaded: ' + file.name : msg, !ok);
               if (ok) { loadExplorer(); if (config.onRefresh) config.onRefresh(currentPath); }
               input.value = '';
@@ -1115,7 +1118,7 @@ window.BondFs = (function(){
   // icons from /api/icon, formatted sizes, hover rows, status bar.
   // opts: { onNavigate:function(path), fileActions:[{label, fn:function(fullPath)}], status }
   function renderExplorer(containerId, path, entries, opts){
-    opts=opts||{}; var c=document.getElementById(containerId); if(!c) return;
+    opts=opts||{}; var c=hw.$(containerId); if(!c) return;
     var key=containerId.replace(/[^A-Za-z0-9_]/g,'_');
     var navName='__bondNav_'+key, actName='__bondAct_'+key;
     window[navName]=opts.onNavigate||function(){};
@@ -1465,6 +1468,17 @@ inline void streamCommonCSS(httpd_req_t* req) {
     ".sys-card-row{display:flex;justify-content:space-between;align-items:center;gap:0.5rem;min-width:0}"
     ".sys-card-row>strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}"
     ".input-medium{width:260px}"
+    // Content-fit inputs: a size FLOOR (s/m/l) plus grow-to-content. Modern
+    // engines do the growing in pure CSS (field-sizing:content); a tiny
+    // fallback in the hw bundle covers the rest. max-width keeps long paths
+    // from escaping their card.
+    // Standalone on purpose: most fields in the corpus are NOT .form-input,
+    // and adopting the fit behaviour must not restyle them. !important beats
+    // page-local width rules (input[type=x]{width:100%} etc.); inline
+    // style="width:100%" still wins and must be removed at the tag.
+    ".input-fit{width:auto!important;max-width:100%;field-sizing:content;min-width:9ch;align-self:start}"
+    ".input-fit.input-m{min-width:18ch}"
+    ".input-fit.input-l{min-width:36ch}"
     ".settings-panel{background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:1rem 0;color:var(--panel-fg);border:1px solid var(--border)}"
     ".settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem}"
     ".alert{padding:12px;border-radius:8px;margin-bottom:15px;border:1px solid}"
@@ -1517,11 +1531,11 @@ inline void streamCommonDialogs(httpd_req_t* req) {
     "<button id='hw-dlg-ok' class='btn'>OK</button>"
     "</div></div></div>"
     "<script>(function(){"
-    "var d=document.getElementById('hw-dlg');"
-    "var m=document.getElementById('hw-dlg-msg');"
-    "var inp=document.getElementById('hw-dlg-inp');"
-    "var ok=document.getElementById('hw-dlg-ok');"
-    "var ca=document.getElementById('hw-dlg-cancel');"
+    "var d=hw.$('hw-dlg');"
+    "var m=hw.$('hw-dlg-msg');"
+    "var inp=hw.$('hw-dlg-inp');"
+    "var ok=hw.$('hw-dlg-ok');"
+    "var ca=hw.$('hw-dlg-cancel');"
     "var res=null;"
     "function show(msg,mode,def){"
       "return new Promise(function(resolve){"

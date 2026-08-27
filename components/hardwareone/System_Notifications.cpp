@@ -13,6 +13,7 @@
 #include <Arduino.h>
 #include <cstdio>
 #include <cstring>
+#include <string_view>
 
 #include "System_BuildConfig.h"
 #include "System_Settings.h"      // gSettings.notif* + SettingEntry/SettingsModule
@@ -23,6 +24,8 @@
 #include "System_AuthIdentity.h"  // currentExecUser (notifyusermute acts on the caller)
 #include "System_MemUtil.h"       // PSRAM_JSON_DOC
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
+#include "System_EventKindMask.h"
+#include "System_NotificationKindListCore.h"
 #if ENABLE_BLUETOOTH
 #include "Bluetooth.h"     // blePushNotification / bleGetAuthenticatedSessionInfo — app sink
 #include "BLE_Types.h"     // BLE_MAX_CONNECTIONS — bound on the app-sink session sweep
@@ -151,15 +154,6 @@ static volatile uint32_t gNotifPrefsGen = 1;
 // the OLED task). Created in notifPolicyLoad() before render tasks contend.
 static SemaphoreHandle_t gUserPrefsMutex = nullptr;
 
-static inline bool maskTest(const volatile uint32_t* m, uint8_t kind) {
-  return kind < NOTIF_KIND_MASK_BITS && (m[kind >> 5] & (1UL << (kind & 31)));
-}
-static inline void maskSet(volatile uint32_t* m, uint8_t kind, bool on) {
-  if (kind >= NOTIF_KIND_MASK_BITS) return;
-  if (on) m[kind >> 5] |= (1UL << (kind & 31));
-  else    m[kind >> 5] &= ~(1UL << (kind & 31));
-}
-
 // Read-side accessors for on-device config screens (the masks are file-static
 // and cmd_notifydevicekind's show path prints via broadcast, so a renderer
 // can't screen-scrape it). Level: 0=all, 1=admin, 2=off. No locking — same
@@ -167,8 +161,8 @@ static inline void maskSet(volatile uint32_t* m, uint8_t kind, bool on) {
 // exactly the argument cmd_notifydevicekind accepts, so displayed text ==
 // command argument (single vocabulary).
 uint8_t notifDeviceKindLevel(uint8_t kind) {
-  if (maskTest(gNotifOffMask, kind)) return 2;
-  if (maskTest(gNotifAdminMask, kind)) return 1;
+  if (eventKindMaskTest(gNotifOffMask, kind)) return 2;
+  if (eventKindMaskTest(gNotifAdminMask, kind)) return 1;
   return 0;
 }
 
@@ -178,13 +172,31 @@ const char* notifLevelToken(uint8_t level) {
 
 uint32_t notifPrefsGeneration() { return gNotifPrefsGen; }
 
+// Set only when this boot either parsed the policy file cleanly or established
+// that it is legitimately ABSENT. notifPolicySave() refuses to write otherwise:
+// the locals below are zero-initialised, and all-zero masks are byte-identical
+// to "no policy file", so committing them after a failed parse and letting the
+// next `notifydevicekind` write them back silently erases every per-kind
+// override. Absent must stay savable or a fresh device could never create the
+// file at all.
+static bool gNotifLoadedOk = false;
+
 void notifPolicyLoad() {
   if (!gUserPrefsMutex) gUserPrefsMutex = xSemaphoreCreateMutex();
   uint32_t off[NOTIF_KIND_MASK_WORDS] = {0}, adm[NOTIF_KIND_MASK_WORDS] = {0};
   String json;
   if (readText(NOTIF_POLICY_FILE, json) && json.length() > 0) {
     PSRAM_JSON_DOC(doc);
-    if (deserializeJson(doc, json) == DeserializationError::Ok) {
+    DeserializationError perr = deserializeJson(doc, json);
+    if (perr) {
+      // Do NOT fall through to the commit below.
+      gNotifLoadedOk = false;
+      ERROR_STORAGEF("[notif] %s unreadable (%s) - keeping current masks, policy saves refused",
+                     NOTIF_POLICY_FILE, perr.c_str());
+      systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, NOTIF_POLICY_FILE, perr.c_str());
+      return;
+    }
+    {
       JsonObjectConst kinds = doc["kinds"].as<JsonObjectConst>();
       for (JsonPairConst kv : kinds) {
         int k = systemEventKindFromName(kv.key().c_str());
@@ -197,16 +209,22 @@ void notifPolicyLoad() {
     }
   }
   for (int i = 0; i < NOTIF_KIND_MASK_WORDS; i++) { gNotifOffMask[i] = off[i]; gNotifAdminMask[i] = adm[i]; }
+  gNotifLoadedOk = true;   // parsed cleanly, or the file is legitimately absent
   gNotifPrefsGen++;
 }
 
 // Serialize the current masks back to the policy file (non-default kinds only).
 static bool notifPolicySave() {
+  if (!gNotifLoadedOk) {
+    ERROR_STORAGEF("[notif] policy save REFUSED - %s never loaded cleanly this boot",
+                   NOTIF_POLICY_FILE);
+    return false;
+  }
   PSRAM_JSON_DOC(doc);
   JsonObject kinds = doc["kinds"].to<JsonObject>();
   for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-    if (maskTest(gNotifOffMask, (uint8_t)k))        kinds[systemEventKindName((uint8_t)k)] = "off";
-    else if (maskTest(gNotifAdminMask, (uint8_t)k)) kinds[systemEventKindName((uint8_t)k)] = "admin";
+    if (eventKindMaskTest(gNotifOffMask, (uint8_t)k))        kinds[systemEventKindName((uint8_t)k)] = "off";
+    else if (eventKindMaskTest(gNotifAdminMask, (uint8_t)k)) kinds[systemEventKindName((uint8_t)k)] = "admin";
   }
   String out;
   serializeJson(doc, out);
@@ -238,17 +256,23 @@ struct UserPrefsCacheEntry {
 };
 EXT_RAM_BSS_ATTR static UserPrefsCacheEntry gUserPrefsCache[4];
 static uint8_t gUserPrefsCacheNext = 0;
+// Guards publication of an out-of-lock flash load. A save may invalidate the
+// cache while a resolver is reading the old file; that resolver may publish
+// only if this generation still matches the one captured before its read.
+// This is cache-only state; gNotifPrefsGen separately drives UI redraws.
+static uint32_t gUserPrefsCacheGeneration = 1;
 
 void notifUserPrefsInvalidate() {
   if (gUserPrefsMutex) xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);
   for (auto& e : gUserPrefsCache) e.valid = false;
+  ++gUserPrefsCacheGeneration;
   gNotifPrefsGen++;
   if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
 }
 
 // Turn a kind-name array under `key` into a per-kind mask (bit index = kind).
 static void loadKindMaskFromDoc(JsonDocument& doc, const char* key,
-                                uint32_t out[NOTIF_KIND_MASK_WORDS]) {
+                                uint32_t (&out)[NOTIF_KIND_MASK_WORDS]) {
   memset(out, 0, NOTIF_KIND_MASK_WORDS * sizeof(uint32_t));
   JsonArrayConst arr = doc[key].as<JsonArrayConst>();
   if (arr.isNull()) return;
@@ -256,7 +280,7 @@ static void loadKindMaskFromDoc(JsonDocument& doc, const char* key,
     const char* n = v.as<const char*>();
     if (!n) continue;
     int k = systemEventKindFromName(n);
-    if (k > 0 && k < NOTIF_KIND_MASK_BITS) out[k >> 5] |= (1UL << (k & 31));
+    if (k > 0) (void)eventKindMaskSet(out, (size_t)k, true);
   }
 }
 
@@ -265,8 +289,8 @@ static void loadKindMaskFromDoc(JsonDocument& doc, const char* key,
 // Missing file / keys resolve to the defaults (nothing muted/forced, floor =
 // NTIER_DEFAULT). One flash read serves all three.
 static void loadUserNotifPrefs(const char* username,
-                               uint32_t mute[NOTIF_KIND_MASK_WORDS],
-                               uint32_t force[NOTIF_KIND_MASK_WORDS],
+                               uint32_t (&mute)[NOTIF_KIND_MASK_WORDS],
+                               uint32_t (&force)[NOTIF_KIND_MASK_WORDS],
                                uint8_t* minTier) {
   memset(mute, 0, NOTIF_KIND_MASK_WORDS * sizeof(uint32_t));
   memset(force, 0, NOTIF_KIND_MASK_WORDS * sizeof(uint32_t));
@@ -293,34 +317,69 @@ void notifViewerResolve(const char* username, NotifViewer& out) {
   out.known = true;
   out.isAdmin = isAdminUser(String(username));  // live — roles change mid-session
 
-  if (gUserPrefsMutex) xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);
-  for (auto& e : gUserPrefsCache) {
-    if (e.valid && e.username.equals(username)) {
-      memcpy(out.muteMask, e.muteMask, sizeof(out.muteMask));
-      memcpy(out.forceMask, e.forceMask, sizeof(out.forceMask));
-      out.minTier = e.minTier;
-      if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
-      return;
-    }
+  // A missing mutex means cache synchronization could not be established;
+  // serve the request directly without touching shared cache state.
+  if (!gUserPrefsMutex) {
+    loadUserNotifPrefs(username, out.muteMask, out.forceMask, &out.minTier);
+    return;
   }
-  if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
 
-  // Miss: load outside the lock (flash read), then publish.
-  uint32_t mute[NOTIF_KIND_MASK_WORDS], force[NOTIF_KIND_MASK_WORDS];
-  uint8_t minTier;
-  loadUserNotifPrefs(username, mute, force, &minTier);
-  if (gUserPrefsMutex) xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);
-  UserPrefsCacheEntry& slot = gUserPrefsCache[gUserPrefsCacheNext];
-  gUserPrefsCacheNext = (uint8_t)((gUserPrefsCacheNext + 1) % 4);
-  slot.username = username;
-  memcpy(slot.muteMask, mute, sizeof(slot.muteMask));
-  memcpy(slot.forceMask, force, sizeof(slot.forceMask));
-  slot.minTier = minTier;
-  slot.valid = true;
-  if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
-  memcpy(out.muteMask, mute, sizeof(out.muteMask));
-  memcpy(out.forceMask, force, sizeof(out.forceMask));
-  out.minTier = minTier;
+  for (;;) {
+    xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);
+    for (auto& e : gUserPrefsCache) {
+      if (e.valid && e.username.equals(username)) {
+        memcpy(out.muteMask, e.muteMask, sizeof(out.muteMask));
+        memcpy(out.forceMask, e.forceMask, sizeof(out.forceMask));
+        out.minTier = e.minTier;
+        xSemaphoreGive(gUserPrefsMutex);
+        return;
+      }
+    }
+    const uint32_t loadGeneration = gUserPrefsCacheGeneration;
+    xSemaphoreGive(gUserPrefsMutex);
+
+    // Miss: load outside the cache lock. This may take the filesystem mutex.
+    uint32_t mute[NOTIF_KIND_MASK_WORDS], force[NOTIF_KIND_MASK_WORDS];
+    uint8_t minTier;
+    loadUserNotifPrefs(username, mute, force, &minTier);
+
+    xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);
+    if (loadGeneration != gUserPrefsCacheGeneration) {
+      // A save/invalidation completed after our read began. Discard this old
+      // snapshot and load the newly committed state; never republish it.
+      xSemaphoreGive(gUserPrefsMutex);
+      continue;
+    }
+
+    // Another resolver may have filled the same user while our flash read was
+    // in progress. Prefer that already-published value and avoid duplicate
+    // cache slots.
+    for (auto& e : gUserPrefsCache) {
+      if (e.valid && e.username.equals(username)) {
+        memcpy(out.muteMask, e.muteMask, sizeof(out.muteMask));
+        memcpy(out.forceMask, e.forceMask, sizeof(out.forceMask));
+        out.minTier = e.minTier;
+        xSemaphoreGive(gUserPrefsMutex);
+        return;
+      }
+    }
+
+    UserPrefsCacheEntry& slot = gUserPrefsCache[gUserPrefsCacheNext];
+    gUserPrefsCacheNext = (uint8_t)((gUserPrefsCacheNext + 1) % 4);
+    slot.username = username;
+    memcpy(slot.muteMask, mute, sizeof(slot.muteMask));
+    memcpy(slot.forceMask, force, sizeof(slot.forceMask));
+    slot.minTier = minTier;
+    slot.valid = true;
+
+    // Copy to the caller under the same mutex as publication. This is the
+    // resolver's linearization point with respect to invalidation.
+    memcpy(out.muteMask, slot.muteMask, sizeof(out.muteMask));
+    memcpy(out.forceMask, slot.forceMask, sizeof(out.forceMask));
+    out.minTier = slot.minTier;
+    xSemaphoreGive(gUserPrefsMutex);
+    return;
+  }
 }
 
 // Cross-cutting importance tier for a kind (NTIER_*) — orthogonal to family,
@@ -391,7 +450,7 @@ static NotifRule notifDeviceRuleFor(uint8_t kind) {
   // the same reason: the app should show what the lens and the web UI show, and
   // the per-user floor curates all of them together.
   if (r.sinks & (NSINK_BANNER | NSINK_TOAST)) r.sinks |= (NSINK_G2 | NSINK_APP);
-  if (maskTest(gNotifOffMask, kind)) { r.sinks = NSINK_NONE; return r; }
+  if (eventKindMaskTest(gNotifOffMask, kind)) { r.sinks = NSINK_NONE; return r; }
   if (!gSettings.notifBanners) r.sinks &= (uint8_t)~NSINK_BANNER;
   if (!gSettings.notifToasts)  r.sinks &= (uint8_t)~NSINK_TOAST;
   if (!gSettings.notifQueue)   r.sinks &= (uint8_t)~NSINK_QUEUE;
@@ -416,12 +475,12 @@ NotifRule notifRuleForViewer(uint8_t kind, const NotifViewer& v) {
   // Event-only kinds and device-"off" kinds (NONE here) can't be resurrected by
   // a user preference — force-on only promotes real NOTIFICATION kinds.
   if (r.sinks == NSINK_NONE) return r;
-  if (maskTest(gNotifAdminMask, kind) && !v.isAdmin) { r.sinks = NSINK_NONE; return r; }
+  if (eventKindMaskTest(gNotifAdminMask, kind) && !v.isAdmin) { r.sinks = NSINK_NONE; return r; }
   // Force-off (personal mute): the viewer never wants this kind, on any surface.
-  if (v.known && maskTest(v.muteMask, kind)) { r.sinks = NSINK_NONE; return r; }
+  if (v.known && eventKindMaskTest(v.muteMask, kind)) { r.sinks = NSINK_NONE; return r; }
 
   const uint8_t floor    = v.known ? v.minTier : NTIER_DEFAULT;
-  const bool    forcedOn = v.known && maskTest(v.forceMask, kind);
+  const bool    forcedOn = v.known && eventKindMaskTest(v.forceMask, kind);
   if (forcedOn) {
     // "Always show me this" — promote to every device-enabled interrupt surface,
     // even for kinds that are queue-only (history-only) by default. Overrides
@@ -478,8 +537,8 @@ const char* cmd_notifydevicekind(const String& argsInput) {
       PSRAM_JSON_DOC(doc);
       JsonObject kinds = doc["kinds"].to<JsonObject>();
       for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-        if (maskTest(gNotifOffMask, (uint8_t)k))        kinds[systemEventKindName((uint8_t)k)] = "off";
-        else if (maskTest(gNotifAdminMask, (uint8_t)k)) kinds[systemEventKindName((uint8_t)k)] = "admin";
+        if (eventKindMaskTest(gNotifOffMask, (uint8_t)k))        kinds[systemEventKindName((uint8_t)k)] = "off";
+        else if (eventKindMaskTest(gNotifAdminMask, (uint8_t)k)) kinds[systemEventKindName((uint8_t)k)] = "admin";
       }
       PSRAM_STATIC_BUF(jbuf, CMD_RESULT_MAX);
       size_t n = serializeJson(doc, jbuf, jbuf_SIZE);
@@ -488,8 +547,8 @@ const char* cmd_notifydevicekind(const String& argsInput) {
     }
     int shown = 0;
     for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-      bool off = maskTest(gNotifOffMask, (uint8_t)k);
-      bool adm = maskTest(gNotifAdminMask, (uint8_t)k);
+      bool off = eventKindMaskTest(gNotifOffMask, (uint8_t)k);
+      bool adm = eventKindMaskTest(gNotifAdminMask, (uint8_t)k);
       if (!all && !off && !adm) continue;
       BROADCAST_PRINTF("  %-22s %s", systemEventKindName((uint8_t)k),
                        off ? "off" : adm ? "admin" : "all");
@@ -518,8 +577,8 @@ const char* cmd_notifydevicekind(const String& argsInput) {
   }
   if (level.length() == 0) {
     BROADCAST_PRINTF("%s = %s", kindName.c_str(),
-                     maskTest(gNotifOffMask, (uint8_t)k) ? "off"
-                   : maskTest(gNotifAdminMask, (uint8_t)k) ? "admin" : "all");
+                     eventKindMaskTest(gNotifOffMask, (uint8_t)k) ? "off"
+                   : eventKindMaskTest(gNotifAdminMask, (uint8_t)k) ? "admin" : "all");
     return "OK";
   }
 
@@ -529,8 +588,8 @@ const char* cmd_notifydevicekind(const String& argsInput) {
   else if (level == "off")   { off = true;  adm = false; }
   else return "Error: level must be all, admin, or off";
 
-  maskSet(gNotifOffMask, (uint8_t)k, off);
-  maskSet(gNotifAdminMask, (uint8_t)k, adm);
+  (void)eventKindMaskSet(gNotifOffMask, (uint8_t)k, off);
+  (void)eventKindMaskSet(gNotifAdminMask, (uint8_t)k, adm);
   gNotifPrefsGen++;
   if (!notifPolicySave()) return "Error: failed to write " NOTIF_POLICY_FILE;
   systemEventPost(SYSEVT_SETTING_CHANGED, kindName.c_str(), level.c_str());
@@ -538,13 +597,178 @@ const char* cmd_notifydevicekind(const String& argsInput) {
   return "[Settings] Configuration updated";
 }
 
-// notifyusermute — personal mute list for the EXECUTING user (per-task identity),
-// stored as a JSON array in the user's settings file next to the dashboard
-// layout prefs. Bare = show, 'none' = clear, else a validated kind list.
-// Shared body for the per-user kind-list prefs. `key` is the user-settings JSON
-// array (notificationMuted = force-off, notificationForced = force-on); `noun`
-// labels the output; `hint` shows on the bare/list form. Both lists apply
-// uniformly on every interface. Bare = show; "none" = clear; else set.
+// notifyusermute — personal mute list for the EXECUTING user (per-task
+// identity), stored as a JSON array in the user's settings file next to the
+// dashboard layout prefs. The dependency-light core owns grammar, alias
+// canonicalization, bounded mutation, and unknown-token preservation. This
+// wrapper owns identity, catalog adaptation, JSON, persistence, and events.
+namespace {
+
+namespace notif_kind_core = hw1_notification_kind_list;
+
+static_assert((size_t)(SYSEVT_COUNT - 1) <= notif_kind_core::kMaxEntries,
+              "event catalog outgrew personal notification list core");
+
+bool notifKindTokenEqualsIgnoreCase(notif_kind_core::TokenView input,
+                                    const char* expected) {
+  if (!input.data || !expected) return false;
+  const size_t expectedLength = strlen(expected);
+  if (input.length != expectedLength) return false;
+  for (size_t i = 0; i < input.length; ++i) {
+    char actualChar = input.data[i];
+    char expectedChar = expected[i];
+    if (actualChar >= 'A' && actualChar <= 'Z') actualChar += 'a' - 'A';
+    if (expectedChar >= 'A' && expectedChar <= 'Z') expectedChar += 'a' - 'A';
+    if (actualChar != expectedChar) return false;
+  }
+  return true;
+}
+
+bool notifKindCatalogResolve(void*, notif_kind_core::TokenView input,
+                             notif_kind_core::CanonicalToken& out) {
+  int kind = -1;
+  if (notifKindTokenEqualsIgnoreCase(input, "boot")) {
+    kind = SYSEVT_BOOT_FINISHED;  // persisted compatibility alias
+  } else {
+    for (int candidate = SYSEVT_NONE + 1; candidate < SYSEVT_COUNT;
+         ++candidate) {
+      if (notifKindTokenEqualsIgnoreCase(
+              input, systemEventKindName((uint8_t)candidate))) {
+        kind = candidate;
+        break;
+      }
+    }
+  }
+  if (kind <= SYSEVT_NONE || kind >= SYSEVT_COUNT) return false;
+  const char* canonical = systemEventKindName((uint8_t)kind);
+  out.token = {canonical, strlen(canonical)};
+  out.kindIndex = (uint16_t)kind;
+  return true;
+}
+
+bool notifKindCatalogAt(void*, size_t ordinal,
+                        notif_kind_core::CanonicalToken& out) {
+  const size_t kind = ordinal + (size_t)SYSEVT_NONE + 1u;
+  if (kind >= (size_t)SYSEVT_COUNT) return false;
+  const char* canonical = systemEventKindName((uint8_t)kind);
+  out.token = {canonical, strlen(canonical)};
+  out.kindIndex = (uint16_t)kind;
+  return true;
+}
+
+notif_kind_core::CatalogView notifKindCatalogView() {
+  return {nullptr, &notifKindCatalogResolve, (size_t)(SYSEVT_COUNT - 1),
+          &notifKindCatalogAt};
+}
+
+struct NotifCurrentKindList {
+  JsonArrayConst array;
+  bool invalidTarget = false;
+};
+
+bool notifCurrentKindAt(void* opaque, size_t index,
+                        notif_kind_core::TokenView& out) {
+  auto* current = static_cast<NotifCurrentKindList*>(opaque);
+  if (!current) return false;
+  if (current->invalidTarget) {
+    if (index != 0) return false;
+    out = {nullptr, 1};  // visited, but intentionally invalid stored token
+    return true;
+  }
+  if (index >= current->array.size()) return false;
+  JsonVariantConst value = current->array[index];
+  if (!value.is<JsonString>()) {
+    out = {nullptr, 1};
+    return true;
+  }
+  JsonString token = value.as<JsonString>();
+  out = {token.c_str(), token.size()};
+  return true;
+}
+
+struct NotifJsonKindSink {
+  JsonArray array;
+};
+
+bool notifJsonKindEmit(void* opaque, notif_kind_core::TokenView token) {
+  auto* sink = static_cast<NotifJsonKindSink*>(opaque);
+  if (!sink || !token.data || token.length == 0) return false;
+  return sink->array.add(std::string_view(token.data, token.length));
+}
+
+struct NotifUserKindMutation {
+  const char* key = nullptr;
+  const notif_kind_core::PreparedMutation* prepared = nullptr;
+  JsonDocument* replacement = nullptr;
+  notif_kind_core::Result coreResult{};
+  bool coreAttempted = false;
+};
+
+bool applyNotifUserKindMutation(JsonDocument& settings, void* opaque) {
+  auto* mutation = static_cast<NotifUserKindMutation*>(opaque);
+  if (!mutation || !mutation->key || !mutation->prepared ||
+      !mutation->replacement || !settings.is<JsonObject>()) {
+    return false;
+  }
+
+  bool targetPresent = false;
+  JsonArrayConst currentArray;
+  for (JsonPairConst pair : settings.as<JsonObjectConst>()) {
+    if (strcmp(pair.key().c_str(), mutation->key) == 0) {
+      targetPresent = true;
+      currentArray = pair.value().as<JsonArrayConst>();
+      break;
+    }
+  }
+  NotifCurrentKindList current{currentArray,
+                               targetPresent && currentArray.isNull()};
+  const size_t currentCount = current.invalidTarget ? 1 : currentArray.size();
+  notif_kind_core::TokenSequence currentSequence{
+      &current, currentCount, &notifCurrentKindAt};
+
+  mutation->replacement->clear();
+  JsonArray replacementArray = mutation->replacement->to<JsonArray>();
+  if (replacementArray.isNull()) return false;
+  NotifJsonKindSink jsonSink{replacementArray};
+  notif_kind_core::OutputSink outputSink{&jsonSink, &notifJsonKindEmit};
+  mutation->coreAttempted = true;
+  mutation->coreResult = notif_kind_core::apply(
+      *mutation->prepared, currentSequence, notifKindCatalogView(), outputSink);
+  if (!mutation->coreResult.ok() || mutation->replacement->overflowed()) {
+    return false;
+  }
+
+  // The replacement was completely validated and built in a separate PSRAM
+  // document. Only now remove the old target and deep-copy the new array into
+  // the transaction-owned settings document. A failed copy rejects the whole
+  // in-memory transaction and never reaches saveUserSettings().
+  settings.remove(mutation->key);
+  settings[mutation->key] = replacementArray;
+  JsonArrayConst committed = settings[mutation->key].as<JsonArrayConst>();
+  return !settings.overflowed() && !committed.isNull() &&
+         committed.size() == mutation->coreResult.outputCount;
+}
+
+const char* notifKindMutationError(const notif_kind_core::Result& result) {
+  static char error[112];
+  if (result.errorIndex == notif_kind_core::kNoErrorIndex) {
+    snprintf(error, sizeof(error),
+             "Error: invalid notification kind mutation (%s)",
+             notif_kind_core::statusName(result.status));
+  } else {
+    snprintf(error, sizeof(error),
+             "Error: invalid notification kind mutation (%s at %lu)",
+             notif_kind_core::statusName(result.status),
+             (unsigned long)result.errorIndex);
+  }
+  return error;
+}
+
+}  // namespace
+
+// Shared body for the per-user kind-list prefs. `key` is the user-settings
+// JSON array (notificationMuted = force-off, notificationForced = force-on);
+// `noun` labels output and `hint` describes the complete shared grammar.
 static const char* notifUserKindListCmd(const String& argsInput, const char* key,
                                         const char* noun, const char* hint) {
   const String& user = currentExecUser();
@@ -574,40 +798,36 @@ static const char* notifUserKindListCmd(const String& argsInput, const char* key
     return "OK";
   }
 
-  PSRAM_JSON_DOC(patch);
-  JsonArray arr = patch[key].to<JsonArray>();
-  if (!args.equalsIgnoreCase("none")) {
-    bool seen[SYSEVT_COUNT] = {false};
-    int start = 0;
-    while (start <= (int)args.length()) {
-      int comma = args.indexOf(',', start);
-      String tok = (comma < 0) ? args.substring(start) : args.substring(start, comma);
-      tok.trim();
-      tok.toLowerCase();
-      if (tok.length() > 0) {
-        int k = systemEventKindFromName(tok.c_str());
-        if (k <= 0 || k >= SYSEVT_COUNT) {
-          static char err[80];
-          snprintf(err, sizeof(err), "Error: unknown event kind '%.40s'", tok.c_str());
-          cliHint("list valid kinds with 'events kinds'");
-          return err;
-        }
-        // Store the canonical name (static X-macro string) — dedup via bitmap.
-        if (!seen[k]) {
-          seen[k] = true;
-          arr.add(systemEventKindName((uint8_t)k));
-        }
-      }
-      if (comma < 0) break;
-      start = comma + 1;
-    }
-    if (arr.size() == 0) return "Error: no event kinds given";
+  notif_kind_core::PreparedMutation prepared;
+  const notif_kind_core::Result preparedResult = notif_kind_core::prepare(
+      {args.c_str(), args.length()}, notifKindCatalogView(), prepared);
+  if (!preparedResult.ok()) {
+    cliHint("list valid kinds with 'events kinds'");
+    return notifKindMutationError(preparedResult);
   }
 
-  if (!mergeAndSaveUserSettings(uid, patch)) return "Error: failed to save user settings";
+  PSRAM_JSON_DOC(replacement);
+  NotifUserKindMutation mutation{key, &prepared, &replacement};
+  const UserSettingsTxnStatus transaction =
+      runUserSettingsTransaction(uid, applyNotifUserKindMutation, &mutation);
+  if (transaction != UserSettingsTxnStatus::Committed) {
+    if (mutation.coreAttempted && !mutation.coreResult.ok()) {
+      cliHint("list valid kinds with 'events kinds'");
+      return notifKindMutationError(mutation.coreResult);
+    }
+    if (transaction == UserSettingsTxnStatus::LoadFailed) {
+      return "Error: user settings are unreadable; no changes saved";
+    }
+    if (transaction == UserSettingsTxnStatus::MutationRejected) {
+      return "Error: failed to build notification preference list";
+    }
+    return "Error: failed to save user settings";
+  }
+
   // saveUserSettings() flushed the prefs cache via notifUserPrefsInvalidate().
   systemEventPost(SYSEVT_SETTING_CHANGED, key, user.c_str());
-  BROADCAST_PRINTF("%s's %s kinds updated (%d)", user.c_str(), noun, (int)arr.size());
+  BROADCAST_PRINTF("%s's %s kinds updated (%d)", user.c_str(), noun,
+                   (int)mutation.coreResult.outputCount);
   return "[Settings] Configuration updated";
 }
 
@@ -615,7 +835,7 @@ static const char* notifUserKindListCmd(const String& argsInput, const char* key
 const char* cmd_notifyusermute(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return notifUserKindListCmd(argsInput, "notificationMuted", "muted",
-      "mute with 'notifyusermute <kind,...>', clear with 'notifyusermute none' - list kinds with 'events kinds'");
+      "replace: notifyusermute <kind,...>; one: set <kind> <on|off>; many: patch <+kind,-kind>; or all|none");
 }
 
 // Force-ON: kinds this user always wants to interrupt them, even below their
@@ -623,7 +843,7 @@ const char* cmd_notifyusermute(const String& argsInput) {
 const char* cmd_notifyusershow(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return notifUserKindListCmd(argsInput, "notificationForced", "always-show",
-      "always-show with 'notifyusershow <kind,...>' (overrides your notifylevel), clear with 'notifyusershow none'");
+      "replace: notifyusershow <kind,...>; one: set <kind> <on|off>; many: patch <+kind,-kind>; or all|none");
 }
 
 // Per-user importance floor — the ONE knob that decides what interrupts you

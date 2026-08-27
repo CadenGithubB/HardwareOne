@@ -887,7 +887,8 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
 
     case LLMUIState::READY: {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-        oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH);
+        oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
+                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         sKeyboardActive = true;
         return true;
       }
@@ -932,7 +933,8 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         if (!sel) return true;
         switch ((uintptr_t)sel->userData) {
           case MENU_ROW_ASK:
-            oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH);
+            oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
+                             OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
             sKeyboardActive = true;
             sUIState = LLMUIState::READY;   // keyboard overlay owns the screen
             break;

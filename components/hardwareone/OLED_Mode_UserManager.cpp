@@ -242,7 +242,11 @@ void displayUserManager() {
 // ----------------------------------------------------------------------------
 static void umStartKeyboard(uint8_t stage, const char* title, int maxLen) {
   gUmKbStage = stage;
-  oledKeyboardInit(title, "", maxLen);
+  // Stage 0 is a public username; stage 1 is the new account password.
+  const OLEDKeyboardDictationPolicy policy =
+      stage == 0 ? OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT
+                 : OLEDKeyboardDictationPolicy::DENY;
+  oledKeyboardInit(title, "", maxLen, policy);
   gUmKbActive = true;
 }
 

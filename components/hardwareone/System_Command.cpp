@@ -155,7 +155,8 @@ bool isHelpModeCommand(const char* cmdName) {
   // Check if command belongs to the CLI module (CMD_MODULE_CORE)
   for (size_t i = 0; i < moduleCount; i++) {
     if (!(modules[i].flags & CMD_MODULE_CORE)) continue;
-    for (size_t j = 0; j < modules[i].count; j++) {
+    const size_t commandCount = modules[i].commandCount();
+    for (size_t j = 0; j < commandCount; j++) {
       if (strcasecmp(modules[i].commands[j].name, cmdName) == 0) return true;
     }
   }
@@ -299,22 +300,23 @@ void initializeCommandSystem() {
   DEBUG_COMMAND_SYSTEMF("[CMDREG] Total modules to process: %zu", moduleCount);
 
   for (size_t i = 0; i < moduleCount; ++i) {
+    const size_t commandCount = modules[i].commandCount();
     DEBUG_COMMAND_SYSTEMF("[CMDREG] Module[%zu] '%s': commands=%p count=%zu",
-                          i, modules[i].name, modules[i].commands, modules[i].count);
+                          i, modules[i].name, modules[i].commands, commandCount);
 
-    if (!modules[i].commands || modules[i].count == 0) {
+    if (!modules[i].commands || commandCount == 0) {
       DEBUG_COMMAND_SYSTEMF("[CMDREG] SKIPPING module '%s' (commands=%p count=%zu)",
-                          modules[i].name, modules[i].commands, modules[i].count);
+                          modules[i].name, modules[i].commands, commandCount);
       continue;
     }
     
-    DEBUG_COMMAND_SYSTEMF("[CommandSystem] Registering module '%s' with %zu commands", modules[i].name, modules[i].count);
+    DEBUG_COMMAND_SYSTEMF("[CommandSystem] Registering module '%s' with %zu commands", modules[i].name, commandCount);
     
-    registerCommands(modules[i].commands, modules[i].count);
+    registerCommands(modules[i].commands, commandCount);
     if (registeredModuleCount < MAX_MODULES) {
       registeredModules[registeredModuleCount].name = modules[i].name;
       registeredModules[registeredModuleCount].commands = modules[i].commands;
-      registeredModules[registeredModuleCount].count = modules[i].count;
+      registeredModules[registeredModuleCount].count = commandCount;
       registeredModuleCount++;
     } else {
       gModuleSummaryDropped++;

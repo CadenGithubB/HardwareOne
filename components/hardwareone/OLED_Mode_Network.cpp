@@ -402,13 +402,15 @@ static void startWifiAddSSID() {
   sWifiAddConnectAfter = false;  // manual Add = save only (unchanged behavior)
   secureClearString(sWifiAddSSID);
   secureClearString(sWifiAddPass);
-  oledKeyboardInit("Enter SSID:", "");
+  oledKeyboardInit("Enter SSID:", "", OLED_KEYBOARD_MAX_LENGTH,
+                   OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
   sWifiKeyboardActive = true;
 }
 
 static void startWifiAddPass() {
   sWifiAddStep = WIFI_ADD_PASS;
-  oledKeyboardInit("Enter Password:", "");
+  oledKeyboardInit("Enter Password:", "", OLED_KEYBOARD_MAX_LENGTH,
+                   OLEDKeyboardDictationPolicy::DENY);
   sWifiKeyboardActive = true;
 }
 
@@ -439,7 +441,8 @@ static void startWifiAddFromScan(const char* ssid) {
   sWifiAddConnectAfter = true;   // scan pick = save AND connect
   sWifiAddSSID = String(ssid);
   secureClearString(sWifiAddPass);
-  oledKeyboardInit("Enter Password:", "");
+  oledKeyboardInit("Enter Password:", "", OLED_KEYBOARD_MAX_LENGTH,
+                   OLEDKeyboardDictationPolicy::DENY);
   sWifiKeyboardActive = true;
 }
 

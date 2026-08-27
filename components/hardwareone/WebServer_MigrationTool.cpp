@@ -64,7 +64,6 @@ static const char* DEBUG_FILE        = "/system/debug.json";  // debug flags spl
 static const char* USERS_FILE        = "/system/users/users.json";
 static const char* AUTOMATIONS_FILE  = "/system/automations.json";
 static const char* ESPNOW_DEVICES    = "/system/espnow/devices.json";
-static const char* ESPNOW_MESH_PEERS = "/system/espnow/mesh_peers.json";
 static const char* USER_SETTINGS_DIR  = "/system/users/user_settings";
 static const char* BOOT_ANCHORS_FILE  = "/system/boot_anchors.json";  // pending-user NTP anchors (split out of users.json)
 static const char* MAPS_DIR          = "/maps";
@@ -299,16 +298,11 @@ static esp_err_t handleBackup(httpd_req_t* req) {
 
   DEBUG_HTTPF("[Backup] Request received from client");
   
-  // Log Authorization header if present
+  // Presence is useful for diagnosing migration clients; never copy or log
+  // the credential-bearing header itself.
   size_t hdr_len = httpd_req_get_hdr_value_len(req, "Authorization");
   if (hdr_len > 0) {
-    char* auth_hdr = (char*)malloc(hdr_len + 1);
-    if (auth_hdr && httpd_req_get_hdr_value_str(req, "Authorization", auth_hdr, hdr_len + 1) == ESP_OK) {
-      DEBUG_HTTPF("[Backup] Authorization header present (len=%d): %.20s...", hdr_len, auth_hdr);
-      free(auth_hdr);
-    } else {
-      free(auth_hdr);
-    }
+    DEBUG_HTTPF("[Backup] Authorization header present (len=%u)", (unsigned)hdr_len);
   } else {
     DEBUG_HTTPF("[Backup] No Authorization header present");
   }
@@ -418,7 +412,6 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   if (wantAutomations) addFileToBackup(files, warnings, AUTOMATIONS_FILE);
   if (wantEspnow) {
     addFileToBackup(files, warnings, ESPNOW_DEVICES);
-    addFileToBackup(files, warnings, ESPNOW_MESH_PEERS);
   }
   if (wantMaps) addDirectoryToBackup(files, warnings, MAPS_DIR, ctx);
   if (wantCerts) addDirectoryToBackup(files, warnings, "/system/certs", ctx);
@@ -509,7 +502,21 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
     String curSettings;
     if (readText(SETTINGS_FILE, curSettings)) {
       DeserializationError derr = deserializeJson(deviceSettingsDoc, curSettings);
-      if (!derr && deviceSettingsDoc["network"]["wifi"]["networks"].is<JsonArray>()) {
+      if (derr) {
+        // Falling through with haveDeviceWifi == false keeps the SOURCE device's
+        // wifiNetworks — encrypted with the SOURCE device's key, so useless here —
+        // and silently discards the credentials the user just entered. Abort
+        // instead; the import is restartable, a lost WiFi config is not.
+        ERROR_STORAGEF("[migrate] local %s is unreadable (%s) - aborting restore rather than "
+                       "discarding this device's WiFi credentials",
+                       SETTINGS_FILE, derr.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, SETTINGS_FILE,
+                        "unreadable at migration restore");
+        if (outWritten) *outWritten = 0;
+        if (outErrored) *outErrored = 0;
+        return false;   // caller reports the failure to the client
+      }
+      if (deviceSettingsDoc["network"]["wifi"]["networks"].is<JsonArray>()) {
         haveDeviceWifi = true;
       }
     }
@@ -666,11 +673,11 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Allocate buffer for the payload (prefer PSRAM) — kept until confirm/discard
-  char* buf = (char*)heap_caps_calloc(req->content_len + 1, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!buf) {
-    buf = (char*)heap_caps_calloc(req->content_len + 1, 1, MALLOC_CAP_DEFAULT);
-  }
+  // Allocate buffer for the payload (prefer PSRAM) — kept until confirm/discard.
+  // PreferPSRAM already falls back to internal DRAM, and routes that fallback
+  // through the shared counter instead of dropping it silently.
+  char* buf = (char*)ps_calloc(req->content_len + 1, 1, AllocPref::PreferPSRAM,
+                               "migrate.payload");
   if (!buf) {
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");

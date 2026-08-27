@@ -1,4 +1,7 @@
 #include "System_LiveAudio.h"
+#include "System_MemUtil.h"  // ps_alloc / AllocPref
+
+#if ENABLE_UART_HOST_LINK   // whole module: the live-pcm-v1 UART transport
 
 #include <atomic>
 #include <ctype.h>
@@ -718,8 +721,8 @@ bool ensureTxTask() {
 
 bool ensureShadowQueue() {
   if (sShadowStorage) return true;
-  void* allocation = heap_caps_malloc(
-      kShadowBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  void* allocation = ps_alloc(kShadowBytes, AllocPref::RequirePSRAM,
+                              "liveaudio.shadow");
   if (!allocation) {
     portENTER_CRITICAL(&sStateMux);
     ++sShadowStats.allocFailures;
@@ -1407,3 +1410,5 @@ const CommandEntry liveAudioCommands[] = {
 
 const size_t liveAudioCommandsCount =
     sizeof(liveAudioCommands) / sizeof(liveAudioCommands[0]);
+
+#endif  // ENABLE_UART_HOST_LINK

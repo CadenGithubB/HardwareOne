@@ -12,6 +12,12 @@
 #include "System_OTASafety.h"
 #include "System_CommandTypes.h"
 #include "System_CrashRecord.h"
+/* logSystemEvent() lives here. This include used to arrive only by accident,
+ * via Bluetooth.h under #if ENABLE_BLUETOOTH further down -- so the file built
+ * on every board that happened to have Bluetooth on, and failed to compile the
+ * moment one did not (qtpy_esp32 sets CONFIG_BT_ENABLED=n). A translation unit
+ * must include the declarations it uses. */
+#include "System_Debug.h"
 #include "System_Events.h"
 #include "System_SelfDevice.h"
 #include "System_MemUtil.h"  // ps_alloc — image hashing must not use cmd_exec_task's stack
@@ -53,7 +59,6 @@ constexpr char kManifestPart[] = "/system/ota/manifest.part";
 constexpr char kCandidatePath[] = "/system/ota/candidate.bin";
 constexpr char kManifestPath[] = "/system/ota/manifest.json";
 constexpr size_t kManifestEnvelopeMax = 2048;
-constexpr uint32_t kOtaSlotSize = 0x5A0000U;
 constexpr uint32_t kDataSchemaV1 = 1;
 constexpr uint32_t kFreshPowerMs = 30000;
 constexpr float kMinimumBatteryPercent = 30.0f;
@@ -72,15 +77,53 @@ constexpr uint32_t kBleUploadIdleTimeoutMs = 60000;
 
 #if HW1_OTA_LAYOUT
 
-#if defined(HW1_OTA_BOARD_ID) && defined(HW1_OTA_LAYOUT_ID)
-#if defined(CONFIG_SECURE_FLASH_ENC_ENABLED) && CONFIG_SECURE_FLASH_ENC_ENABLED
-constexpr char kRequiredVersionSuffix[] = HW1_OTA_VERSION_SUFFIX_FEATHERS3_FLASH_ENCRYPTED;
+#if defined(HW1_OTA_BOARD_ID) && defined(HW1_OTA_LAYOUT_ID) && \
+    defined(HW1_OTA_VERSION_SUFFIX)
+/*
+ * The build-metadata suffix an acceptable image must carry, handed down from
+ * the recovery-OTA registry in the root CMakeLists.txt -- the same row that
+ * stamps PROJECT_VER, so the value the device demands and the value the build
+ * produces come from one place.
+ *
+ * This was previously selected by flash encryption:
+ *     #if CONFIG_SECURE_FLASH_ENC_ENABLED -> "+f3feo1" else -> "+f3o1"
+ * which is only correct while exactly two boards exist and they differ by
+ * encryption. Any third board fell into the "else" and demanded the plain
+ * FeatherS3 suffix, so it would have rejected every correctly-built image of
+ * itself with a policy mismatch -- on a device whose whole purpose is to be
+ * updated without a cable.
+ */
+constexpr char kRequiredVersionSuffix[] = HW1_OTA_VERSION_SUFFIX;
 #else
-constexpr char kRequiredVersionSuffix[] = HW1_OTA_VERSION_SUFFIX_FEATHERS3_PLAIN;
+#error "The OTA layout requires HW1_OTA_BOARD_ID, HW1_OTA_LAYOUT_ID and HW1_OTA_VERSION_SUFFIX"
 #endif
-#else
-#error "The OTA layout requires HW1_OTA_BOARD_ID and HW1_OTA_LAYOUT_ID"
-#endif
+
+/*
+ * Capacity of the ota_0 slot, read from the partition table this firmware is
+ * running under.
+ *
+ * It was a literal: constexpr uint32_t kOtaSlotSize = 0x5A0000U. That number
+ * was already stale for the 16 MB layout (ota_0 grew to 0x620000 on
+ * 2026-08-16), and on the 8 MB Feather V2 layout it is LARGER than the real
+ * 0x500000 slot -- so the size check would have passed an image ~650 KiB too
+ * big to fit, and the failure would have surfaced as a write error partway
+ * through flashing rather than as a clean rejection.
+ *
+ * Asking the partition table costs one lookup, cached, and cannot go stale.
+ * A missing partition yields 0, which fails every size check closed rather
+ * than open.
+ */
+static uint32_t otaSlotSize() {
+  static uint32_t cached = 0;
+  if (cached == 0) {
+    const esp_partition_t* slot = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
+    if (slot != nullptr) {
+      cached = slot->size;
+    }
+  }
+  return cached;
+}
 
 extern "C" const uint8_t _binary_hw1_ota_public_key_pem_start[];
 extern "C" const uint8_t _binary_hw1_ota_public_key_pem_end[];
@@ -486,7 +529,7 @@ bool hashAndDescribeImage(const char* path, CandidateInfo& candidate,
     return false;
   }
   const size_t fileSize = file.size();
-  if (fileSize == 0 || fileSize > kOtaSlotSize || fileSize > UINT32_MAX) {
+  if (fileSize == 0 || fileSize > otaSlotSize() || fileSize > UINT32_MAX) {
     file.close();
     snprintf(reason, reasonSize, "Error: candidate image size does not fit ota_0");
     return false;
@@ -504,10 +547,11 @@ bool hashAndDescribeImage(const char* path, CandidateInfo& candidate,
     return false;
   }
   if (header.magic != ESP_IMAGE_HEADER_MAGIC || header.segment_count == 0 ||
-      header.chip_id != ESP_CHIP_ID_ESP32S3 ||
+      header.chip_id != HW1_OTA_EXPECTED_CHIP_ID ||
       candidate.appDesc.magic_word != ESP_APP_DESC_MAGIC_WORD) {
     file.close();
-    snprintf(reason, reasonSize, "Error: candidate is not an ESP32-S3 application image");
+    snprintf(reason, reasonSize, "Error: candidate is not a %s application image",
+             HW1_OTA_EXPECTED_CHIP_NAME);
     return false;
   }
 
@@ -578,7 +622,7 @@ bool validateCandidate(const char* imagePath, const char* manifestPath,
       .project_name = "hardwareone-idf",
       .required_version_suffix = kRequiredVersionSuffix,
       .current_updater_version = updaterVersion,
-      .maximum_image_size = kOtaSlotSize,
+      .maximum_image_size = otaSlotSize(),
       .minimum_data_schema = kDataSchemaV1,
       .maximum_data_schema = kDataSchemaV1,
   };
@@ -681,9 +725,79 @@ bool clearCredential(char* reason = nullptr, size_t reasonSize = 0) {
   return err == ESP_OK;
 }
 
+/*
+ * Is it safe to start an OTA write right now?
+ *
+ * Two board classes answer this very differently, and the percentage test
+ * below is only meaningful for one of them.
+ *
+ * BATTERY_BACKEND_FUEL_GAUGE (FeatherS3): a MAX17048 reports true coulomb-
+ * counted state-of-charge and a VBUS-sense GPIO reports USB presence
+ * deterministically. Both terms of the original test are real. Unchanged.
+ *
+ * BATTERY_BACKEND_ADC (Feather ESP32 V2): the board has a VBAT divider and
+ * nothing else. `percentage` is NEVER POPULATED on this path -- adcBackendSample()
+ * fills voltage / isCharging / usbPresent and leaves percentage at its 0.0f
+ * initialiser, because classifyAndNotify() works off a voltage ladder instead.
+ * So `percentage >= 30` is `0 >= 30` on every single call, and the second test
+ * can never pass.
+ *
+ * That leaves usbPresent, which on this board is itself inferred from voltage
+ * (there is no VBUS pin). On a mains-powered unit with NO cell fitted the
+ * divider reads ~0 V, so usbPresent is false, status is BATTERY_NOT_PRESENT,
+ * percentage is 0 -- and every routine `otaupdate confirm` refuses for want of
+ * power, on a permanently-powered device. The only way through would be
+ * `force-power` on every update, which turns a deliberate override into
+ * routine muscle memory and disarms the interlock it exists to enforce.
+ *
+ * So for the voltage-only class, decide from what the board can actually
+ * measure: no cell wired means the power is external, and the device is
+ * demonstrably running. Otherwise require the cell to be above the MEDIUM band
+ * rather than a percentage that does not exist.
+ */
 bool powerIsSafe(bool force, char* reason, size_t reasonSize) {
+#if !ENABLE_BATTERY_MONITOR
+  /*
+   * The board has no battery subsystem at all (QT Py ESP32:
+   * BATTERY_MONITOR_AVAILABLE 0). It is running, so it is on external power --
+   * initBattery() says exactly that, seeding usbPresent=true.
+   *
+   * The freshness test below cannot be used here. updateBattery() returns
+   * immediately on this build, BEFORE `gBatteryState.lastReadMs = millis()`,
+   * so lastReadMs stays 0 for the life of the boot. Thirty seconds after
+   * startup `age` therefore exceeds kFreshPowerMs forever and EVERY branch
+   * fails -- otaupdate would refuse for want of fresh power telemetry that
+   * this board can never produce, permanently, with force-power the only way
+   * through. There is no reading to be stale about; say so and allow.
+   */
+  (void)force;
+  (void)reason;
+  (void)reasonSize;
+  return true;
+#else
   const uint32_t age = millis() - gBatteryState.lastReadMs;
   if (age <= kFreshPowerMs && gBatteryState.usbPresent) return true;
+
+#if BATTERY_BACKEND_ADC
+  if (age <= kFreshPowerMs) {
+    if (gBatteryState.status == BATTERY_NOT_PRESENT) {
+      // Executing this code proves the board is powered; a sub-2 V reading on
+      // VBAT proves it is not the cell doing it.
+      return true;
+    }
+    if (gBatteryState.status != BATTERY_UNKNOWN &&
+        gBatteryState.voltage >= VBAT_BAND_MEDIUM) {
+      return true;
+    }
+  }
+  if (force) return true;
+  snprintf(reason, reasonSize,
+           "Error: unsafe or stale power state; cell at %.2fV is below the %.2fV "
+           "minimum and this board cannot sense USB "
+           "(force-power is an explicit recorded override)",
+           (double)gBatteryState.voltage, (double)VBAT_BAND_MEDIUM);
+  return false;
+#else
   if (age <= kFreshPowerMs && gBatteryState.status != BATTERY_NOT_PRESENT &&
       gBatteryState.status != BATTERY_UNKNOWN &&
       gBatteryState.percentage >= kMinimumBatteryPercent) {
@@ -694,6 +808,8 @@ bool powerIsSafe(bool force, char* reason, size_t reasonSize) {
            "Error: unsafe or stale power state; connect USB or use a fresh battery >=30%% "
            "(force-power is an explicit recorded override)");
   return false;
+#endif  /* BATTERY_BACKEND_ADC */
+#endif  /* ENABLE_BATTERY_MONITOR */
 }
 
 void removeStagedFiles() {
@@ -787,7 +903,7 @@ const char* cmdOtaWrite(const String& argsInput) {
     uint32_t sizeLimit = 0;
     if (member == "candidate") {
       path = kCandidatePart;
-      sizeLimit = kOtaSlotSize;
+      sizeLimit = otaSlotSize();
     } else if (member == "manifest") {
       path = kManifestPart;
       sizeLimit = kManifestEnvelopeMax;
@@ -1644,11 +1760,11 @@ const char* cmdOtaAcknowledge(const String& argsInput) {
 #else  // !HW1_OTA_LAYOUT
 
 const char* unavailable(const String&) {
-  return "Error: OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a supported 16 MB FeatherS3.";
+  return "Error: OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a board in the recovery-OTA registry (feathers3, feathers3_fe, feather_esp32_v2).";
 }
 
 const char* unavailableStatus(const String&) {
-  return "OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a supported 16 MB FeatherS3.";
+  return "OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a board in the recovery-OTA registry (feathers3, feathers3_fe, feather_esp32_v2).";
 }
 
 #endif  // HW1_OTA_LAYOUT

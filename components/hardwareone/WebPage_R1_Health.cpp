@@ -79,9 +79,20 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
   const bool admin = isAdminUser(ctx.user);
 
   if (action == "poll") {
-    return healthStartPollBurst()
-        ? healthActionReply(req, "202 Accepted", "vitals poll queued")
-        : healthActionReply(req, "409 Conflict", "ring is not connected");
+    if (healthStartPollBurst()) {
+      return healthActionReply(req, "202 Accepted", "health refresh queued");
+    }
+    if (!g2RingIsConnected()) {
+      return healthActionReply(req, "409 Conflict", "ring is not connected");
+    }
+    G2RingControlStatus status{};
+    g2RingGetControlStatus(status);
+    const bool refreshSupported = g2RingHealthPageRefreshSupported();
+    return status.protocolProfileKnown && !refreshSupported
+        ? healthActionReply(req, "409 Conflict",
+              "health refresh is unsupported on the active ring profile; no command was sent")
+        : healthActionReply(req, "409 Conflict",
+              "ring setup/profile is not ready for health refresh; no command was sent");
   }
   if (action == "logging-toggle") {
     const char* result = healthLoggingSet(!gSettings.healthLoggingEnabled);
@@ -89,8 +100,15 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
     return healthActionReply(req, ok ? nullptr : "409 Conflict", result);
   }
   if (action == "control-refresh") {
-    return g2RingRefreshControlStatus()
-        ? healthActionReply(req, "202 Accepted", "ring control refresh queued")
+    if (g2RingRefreshControlStatus()) {
+      return healthActionReply(req, "202 Accepted",
+                               "ring control refresh queued");
+    }
+    G2RingControlStatus status{};
+    g2RingGetControlStatus(status);
+    return status.lowPowerLastError == G2_RING_ERR_FEATURE_UNSUPPORTED
+        ? healthActionReply(req, "409 Conflict",
+              "low-power status is unsupported on the active ring profile; no command was sent")
         : healthActionReply(req, "409 Conflict", "control refresh not queued");
   }
   if (action == "history-refresh") {
@@ -116,6 +134,18 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
         : g2RingSetLowPowerDesired(desired);
     if (!queued)
       return healthActionReply(req, "409 Conflict", "desired policy not accepted");
+    G2RingControlStatus status{};
+    g2RingGetControlStatus(status);
+    const bool unsupported = action == "collection"
+        ? status.healthLastError == G2_RING_ERR_FEATURE_UNSUPPORTED
+        : status.lowPowerLastError == G2_RING_ERR_FEATURE_UNSUPPORTED;
+    if (unsupported) {
+      return action == "collection"
+          ? healthActionReply(req, "202 Accepted",
+                "health collection preference saved; this operation is unsupported on the active ring profile, so no command was sent")
+          : healthActionReply(req, "202 Accepted",
+                "low-power preference saved; unsupported on the active ring profile, so no command was sent");
+    }
     return action == "collection"
         ? healthActionReply(req, "202 Accepted",
               "health collection policy accepted; 0x0E has no proven readback, so ACK is not observed state")
@@ -154,7 +184,7 @@ static void streamR1HealthContent(httpd_req_t* req, const String& username) {
     <div><span style='opacity:.7'>Wear</span> <b id='rh-wear' style='font-size:1.6rem'>--</b></div>
   </div>
   <div style='margin-top:1rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center'>
-    <button class='btn' id='rh-poll' data-guest-hide>Poll Now</button>
+    <button class='btn' id='rh-poll' data-guest-hide disabled>Poll unavailable</button>
     <button class='btn' id='rh-logging' data-guest-hide>Health logging: --</button>
     <span id='rh-logging-meta' style='font-size:.85em;opacity:.8'></span>
   </div>
@@ -170,7 +200,7 @@ static void streamR1HealthContent(httpd_req_t* req, const String& username) {
     <div>
       <label for='rh-collection'>Ring health collection</label>
       <div style='display:flex;gap:.4rem;margin-top:.25rem'>
-        <select id='rh-collection' class='form-input' data-guest-hide>
+        <select id='rh-collection' class='form-input input-fit' data-guest-hide>
           <option value='preserve'>Preserve</option><option value='on'>On</option><option value='off'>Off</option>
         </select>
         <button class='btn' id='rh-collection-apply' data-guest-hide>Apply</button>
@@ -180,7 +210,7 @@ static void streamR1HealthContent(httpd_req_t* req, const String& username) {
     <div>
       <label for='rh-low-power'>Ring low power</label>
       <div style='display:flex;gap:.4rem;margin-top:.25rem'>
-        <select id='rh-low-power' class='form-input' data-guest-hide>
+        <select id='rh-low-power' class='form-input input-fit' data-guest-hide>
           <option value='preserve'>Preserve</option><option value='on'>On</option><option value='off'>Off</option>
         </select>
         <button class='btn' id='rh-low-power-apply' data-guest-hide>Apply</button>
@@ -257,19 +287,30 @@ static void streamR1HealthContent(httpd_req_t* req, const String& username) {
     hw.setText('rh-bat',v(s.batteryValid,s.battery,'%'));
     hw.setText('rh-bat-age',age(s.batteryAgeSec));
     hw.setText('rh-wear',wear(s));
-    var btn=hw._ge('rh-logging');
+    var poll=hw.$('rh-poll');
+    if(poll){
+      var canPoll=up&&!!s.healthRefreshSupported;
+      poll.disabled=!canPoll;
+      poll.textContent=s.healthRefreshSupported?'Poll Now':
+        (up&&s.protocolProfileKnown?'Poll unsupported':'Poll unavailable');
+      poll.title=canPoll?'Refresh from 2.2.9 DAILY data and device status':
+        'Poll Now requires R1 firmware 2.2.9.0003';
+    }
+    var btn=hw.$('rh-logging');
     if(btn)btn.textContent=s.healthLoggingActive?'Health logging: ON':
       (s.healthLoggingEnabled?'Health logging: armed':'Health logging: off');
     var meta=[];
-    if(s.healthLoggingPollIntervalSec!=null)meta.push('poll '+s.healthLoggingPollIntervalSec+'s');
+    if(s.healthLoggingTimedPollSupported&&s.healthLoggingPollIntervalSec!=null)
+      meta.push('poll '+s.healthLoggingPollIntervalSec+'s');
+    else meta.push('passive/on-demand');
     if(s.healthLoggingWorkerRunning)meta.push('logger running');
     if(s.healthLoggingAtRest)meta.push('at-rest '+s.healthLoggingAtRest);
     hw.setText('rh-logging-meta',meta.join(' · '));
     hw.setText('rh-setup',(s.setupState||'--')+(s.setupError&&s.setupError!=='none'?' ('+s.setupError+')':''));
     hw.setText('rh-profile',s.protocolProfile||'unknown');
-    var collection=hw._ge('rh-collection');
+    var collection=hw.$('rh-collection');
     if(collection&&document.activeElement!==collection)collection.value=s.healthCollectionDesired||'preserve';
-    var low=hw._ge('rh-low-power');
+    var low=hw.$('rh-low-power');
     if(low&&document.activeElement!==low)low.value=s.lowPowerDesired||'preserve';
     hw.setText('rh-collection-state',ctl(s.healthCollectionDesired,s.healthCollectionObserved,
       s.healthCollectionPending,s.healthCollectionError,s.healthCollectionObservedAgeSec,
@@ -285,7 +326,7 @@ static void streamR1HealthContent(httpd_req_t* req, const String& username) {
     if(s.activityAvailable){
       hw.setText('rh-activity','Steps '+s.activitySteps+' · kcal active '+s.activityActiveKcal+
         ', resting '+s.activityRestingKcal+', total '+s.activityTotalKcal+' · '+
-        s.activityBucketCount+'/144 slots · '+(s.activityFullDayVerified?'full day verified':'partial / paging unverified'));
+        s.activityBucketCount+'/144 slots · '+(s.activityFullDayVerified?'message verified':'unverified'));
     }else hw.setText('rh-activity','Steps -- · calories -- · no activity page');
     hw.setText('rh-history-store','Store '+(s.historyStoreAvailable?'available':'unavailable')+
       (s.historyStorePending?' · commit pending':'')+
@@ -304,13 +345,13 @@ static void streamR1HealthContent(httpd_req_t* req, const String& username) {
   hw.fetchJSON('/api/health/status').then(apply).catch(function(e){console.error('[R1H]',e);});
   hw.pollJSON('/api/health/status',2000,apply);
 
-  hw.on(hw._ge('rh-poll'),'click',function(){action('poll');});
-  hw.on(hw._ge('rh-logging'),'click',function(){action('logging-toggle');});
-  hw.on(hw._ge('rh-control-refresh'),'click',function(){action('control-refresh');});
-  hw.on(hw._ge('rh-collection-apply'),'click',function(){action('collection',hw._ge('rh-collection').value);});
-  hw.on(hw._ge('rh-low-power-apply'),'click',function(){action('low-power',hw._ge('rh-low-power').value);});
-  hw.on(hw._ge('rh-history-refresh'),'click',function(){action('history-refresh');});
-  hw.on(hw._ge('rh-history-force'),'click',function(){action('history-force');});
+  hw.on(hw.$('rh-poll'),'click',function(){action('poll');});
+  hw.on(hw.$('rh-logging'),'click',function(){action('logging-toggle');});
+  hw.on(hw.$('rh-control-refresh'),'click',function(){action('control-refresh');});
+  hw.on(hw.$('rh-collection-apply'),'click',function(){action('collection',hw.$('rh-collection').value);});
+  hw.on(hw.$('rh-low-power-apply'),'click',function(){action('low-power',hw.$('rh-low-power').value);});
+  hw.on(hw.$('rh-history-refresh'),'click',function(){action('history-refresh');});
+  hw.on(hw.$('rh-history-force'),'click',function(){action('history-force');});
 })();</script>
 )JS", HTTPD_RESP_USE_STRLEN);
 

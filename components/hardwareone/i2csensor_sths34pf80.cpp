@@ -495,6 +495,13 @@ const char* cmd_presenceautostart(const String& argsInput) {
 }
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+// Bus routing for this device. Lives here rather than in System_I2C.cpp so it
+// compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
+static const char* cmd_presencebus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.presenceBus, a, "presenceBus");
+}
+
 const CommandEntry presenceCommands[] = {
   // 3-level voice: "sensor" -> "presence" -> "open/close"
   { "openpresence", "Start STHS34PF80 IR presence/motion sensor.", false, cmd_presencestart },
@@ -504,6 +511,7 @@ const CommandEntry presenceCommands[] = {
   
   // Auto-start
   { "presenceautostart", "Enable/disable presence auto-start after boot [on|off]", false, cmd_presenceautostart, "Usage: presenceautostart [on|off]" },
+  { "presencebus", "Route STHS34PF80 presence to bus: <0|1> (reboot required)", true, cmd_presencebus, "Usage: presenceBus <0|1>" },
 };
 
 const size_t presenceCommandsCount = sizeof(presenceCommands) / sizeof(presenceCommands[0]);

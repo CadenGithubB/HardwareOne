@@ -383,6 +383,17 @@ static void micRecordingPublishIdle(bool publishResult = false,
   gMicRecordingControl.shadowAuth = LiveAudioRecorderAuthorization{};
   gMicRecordingControl.state = MicRecordingState::IDLE;
   portEXIT_CRITICAL(&gMicRecordingMux);
+
+  // Dictation's EVT is an immediate invitation to voicefetch. Publish it only
+  // after the exact result and IDLE are visible, and pass the local result copy:
+  // currentRecordingPath may be overwritten as soon as IDLE admits a new take.
+  // The hook only copies/notifies; UART and cleanup run on its service worker.
+  if (publishResult) {
+    const bool saved = !completed.failed && !completed.discarded &&
+                       completed.path[0] != '\0';
+    dictationOnCapturePublished(completed.owner, completed.path, saved,
+                                completed.failure);
+  }
 }
 
 static MicRecordingResult micRecordingLastResult() {
@@ -567,7 +578,7 @@ static int32_t  gRecLatchAvg      = 0;   // the avg that latched it
 // sample inside it, short enough that the estimate recovers within a few
 // seconds of a room-level change.
 static const size_t kRecFloorWinChunks = 40;
-static int32_t  gRecFloorWin[kRecFloorWinChunks];
+EXT_RAM_BSS_ATTR static int32_t gRecFloorWin[kRecFloorWinChunks];  // PSRAM: recording-task loop only, never under gMicRecordingMux (verified 2026-08-19)
 static size_t   gRecFloorWinIdx   = 0;
 static size_t   gRecFloorWinCount = 0;
 static const int32_t  kRecSpeechFloorAvg  = 120; // avg above this => speech present
@@ -1467,20 +1478,6 @@ static void recordingTask(void* param) {
     }
   }
 
-  // Dictation captures (keyboard voice input) terminate here too, but on their
-  // own terms: unlike the EvenAI flow above this fires whether the VAD ended
-  // the capture or the wearer stopped it by hand, and it is NOT fenced to
-  // disposition.admissionSessionEpoch — a wearer-armed capture has no admitting
-  // UART session, so that epoch is zero. The hook re-checks that this exact
-  // owner is the pending dictation before it does anything observable, and
-  // no-ops for every other owner. See System_Dictation.h for why the fence
-  // differs and how narrowly the difference is scoped.
-  //
-  // Placed alongside the pushes above for the same reason they are here: the
-  // WAV is closed and immediately fetchable, and we are outside every
-  // FsLockGuard.
-  dictationOnCaptureClosed(disposition.owner, currentRecordingPath, saved);
-
   // Recording over: drop the FAST hold and tear down our container (if we
   // created one) BEFORE publishing IDLE. Recorder-task context; the ~200 ms
   // page shutdown is fine here. Latched no-ops for PDM captures and when the
@@ -1815,6 +1812,57 @@ MicRecordingOwnedOp deleteRecordingOwned(
   return micRecordingDiscardCompleted(owner, expectedFilename);
 }
 
+MicRecordingOwnedOp deleteRecordingOwnedPublished(MicRecordingOwner owner,
+                                                  const char* exactPath) {
+  if (!micRecordingOwnerValid(owner)) {
+    return MicRecordingOwnedOp::INVALID_OWNER;
+  }
+  if (!exactPath || !exactPath[0]) return MicRecordingOwnedOp::PATH_MISMATCH;
+
+  char ownerHex[17];
+  char derived[32];
+  micRecordingOwnerHex(owner, ownerHex);
+  snprintf(derived, sizeof(derived), "rec_%s.wav", ownerHex);
+
+  const char* relative = nullptr;
+  static constexpr char kFlashPrefix[] = "/recordings/";
+  static constexpr char kSdPrefix[] = "/sd/recordings/";
+  if (strncmp(exactPath, kFlashPrefix, sizeof(kFlashPrefix) - 1) == 0) {
+    relative = exactPath + sizeof(kFlashPrefix) - 1;
+  } else if (strncmp(exactPath, kSdPrefix, sizeof(kSdPrefix) - 1) == 0) {
+    relative = exactPath + sizeof(kSdPrefix) - 1;
+  }
+  // Require a direct child of the recorder directory, not merely a matching
+  // prefix and basename. This keeps the post-ring-eviction fallback narrower
+  // than a generic caller-selected path delete.
+  if (!relative || strchr(relative, '/') || strchr(relative, '\\') ||
+      strcmp(relative, derived) != 0) {
+    return MicRecordingOwnedOp::PATH_MISMATCH;
+  }
+
+  MicRecordingResult result{};
+  const MicRecordingOwnedOp resultOp = getRecordingResultOwned(owner, &result);
+  if (resultOp == MicRecordingOwnedOp::NOT_READY) return resultOp;
+  if (resultOp == MicRecordingOwnedOp::OK) {
+    if (result.path[0] && strcmp(result.path, exactPath) != 0) {
+      return MicRecordingOwnedOp::PATH_MISMATCH;
+    }
+    return micRecordingDiscardCompleted(owner, relative);
+  }
+  if (resultOp != MicRecordingOwnedOp::NOT_FOUND &&
+      resultOp != MicRecordingOwnedOp::OWNER_MISMATCH) {
+    return resultOp;
+  }
+
+  // Result-ring eviction cannot erase the independent owner/path proof: every
+  // machine capture filename is the complete 64-bit token. The FS lock inside
+  // micRecordingRemoveExactPath serializes this against other recorders.
+  return micRecordingRemoveExactPath(exactPath,
+                                     "mic.record.published_cleanup")
+             ? MicRecordingOwnedOp::OK
+             : MicRecordingOwnedOp::DELETE_FAILED;
+}
+
 MicRecordingOwnedOp requestStopRecordingOwned(MicRecordingOwner owner,
                                               bool discard) {
   return micRecordingRequestStopOwned(owner, discard);
@@ -1843,29 +1891,6 @@ MicRecordingOwnedOp stopRecordingOwned(MicRecordingOwner owner,
     return micRecordingDiscardCompleted(owner);
   }
   return MicRecordingOwnedOp::OK;
-}
-
-int getRecordingCount() {
-  FsLockGuard fsGuard("mic.record.count");
-  int count = 0;
-  String seen = ",";
-  auto walk = [&](const String& folder) {
-    if (!VFS::existsGuarded(folder, currentAuthContext())) return;
-    File dir = VFS::openGuarded(folder, "r", currentAuthContext());
-    if (!dir || !dir.isDirectory()) return;
-    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-      if (f.isDirectory()) continue;
-      String name = f.name();
-      if (!name.endsWith(".wav")) continue;
-      String token = "," + name + ",";
-      if (seen.indexOf(token) >= 0) continue;
-      seen += name + ",";
-      count++;
-    }
-  };
-  walk(String(kMicRecSD));
-  walk(String(kMicRecLittleFS));
-  return count;
 }
 
 String getRecordingsList() {
@@ -2677,9 +2702,12 @@ const char* cmd_miclist(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
-    doc["count"] = getRecordingCount();
+    doc["count"] = 0;  // patched in place below, once the single walk is parsed
     JsonArray arr = doc["recordings"].to<JsonArray>();
+    // One walk only — see the note in handleMicRecordingsList. A count-only
+    // pass would re-enumerate both folders, and enumerating opens every file.
     String list = getRecordingsList();  // "name:size,name:size,..."
+    int count = 0;
     int start = 0;
     while (start < (int)list.length()) {
       int comma = list.indexOf(',', start);
@@ -2690,20 +2718,24 @@ const char* cmd_miclist(const String& argsInput) {
         JsonObject o = arr.add<JsonObject>();
         if (colon > 0) { o["filename"] = entry.substring(0, colon); o["size"] = entry.substring(colon + 1).toInt(); }
         else           { o["filename"] = entry; }
+        count++;
       }
       if (comma < 0) break;
       start = comma + 1;
     }
+    doc["count"] = count;  // in-place update: keeps "count" first in the object
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
 
-  int count = getRecordingCount();
-  if (count == 0) {
+  // Single walk; entries are comma-joined, so the count follows from the string.
+  String list = getRecordingsList();
+  if (list.length() == 0) {
     return "No recordings found";
   }
 
-  String list = getRecordingsList();
+  int count = 1;
+  for (int i = 0; i < (int)list.length(); i++) if (list[i] == ',') count++;
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Recordings (%d):\n%s", count, list.c_str());
   return gMicCmdBuffer;
 }
@@ -2906,7 +2938,8 @@ static TaskHandle_t gMicVisualizerTask = nullptr;
 
 static void micVisualizerTaskFunc(void* param) {
   const size_t bufSize = 512;
-  int16_t* samples = (int16_t*)heap_caps_malloc(bufSize * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  int16_t* samples = (int16_t*)ps_alloc(bufSize * sizeof(int16_t),
+                                        AllocPref::RequirePSRAM, "mic.visualizer");
   if (!samples) {
     gMicVisualizerRunning = false;
     gMicVisualizerTask = nullptr;

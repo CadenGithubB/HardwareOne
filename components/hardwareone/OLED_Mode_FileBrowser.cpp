@@ -216,7 +216,7 @@ static const unsigned long OLED_FILE_BROWSER_DEBOUNCE = 200; // ms
 // Stored as a single static request slot — only one picker can be active at
 // a time. Push transitions: viewer (nothing pending) → push() → active until
 // callback fires (file pick) OR cancel fires (back at root).
-static FilePickerRequest sPickerReq = {};
+EXT_RAM_BSS_ATTR static FilePickerRequest sPickerReq;  // PSRAM: display/cmd task context (initializer dropped: .ext_ram.bss is zeroed)
 static bool sPickerActive = false;
 
 void oledFileBrowserResetSessionState() {
@@ -375,7 +375,14 @@ enum class PeerListStatus : uint8_t {
   ERR_OTHER   = 8,
 };
 
-static char           sPeerPath[FILE_MANAGER_MAX_PATH] = "/";
+// Zero-init BSS in PSRAM. "/" is established at BOTH PEER-entry sites (the
+// X-cycle in the input handler and oledFileBrowserStartEspnowReceive) before
+// any PEER-gated reader can run; initFileBrowser() re-roots it per entry as
+// before. Do NOT rely on init alone: the input pump runs every
+// updateOLEDDisplay pass while prepare/init sits behind the render throttle.
+// If a third `sCurrentSource = FsSource::PEER` site is ever added, it MUST
+// also root this path.
+EXT_RAM_BSS_ATTR static char sPeerPath[FILE_MANAGER_MAX_PATH];
 static V4PayloadFsEntry* sPeerEntries = nullptr;  // ps_alloc on demand
 static int            sPeerEntryCount = 0;
 static int            sPeerSelectedIdx = 0;
@@ -598,7 +605,7 @@ static void espnowSendOnPicked(const char* fullPath, bool cancelled) {
   sEspnowCtx = EspnowFileCtx::NONE;
   if (cancelled || !fullPath || ctx != EspnowFileCtx::SEND) return;
   EspnowSendFileJob* j = (EspnowSendFileJob*)ps_alloc(
-      sizeof(EspnowSendFileJob), AllocPref::PreferInternal, "oled.espnow.sendfile.job");
+      sizeof(EspnowSendFileJob), AllocPref::DefaultHeap, "oled.espnow.sendfile.job");
   if (!j) { oledToastShow("Send failed"); return; }
   memcpy(j->mac, mac, 6);
   strlcpy(j->path, fullPath, sizeof(j->path));
@@ -614,6 +621,7 @@ void oledFileBrowserStartEspnowReceive(const uint8_t mac[6]) {
   sGetUi = FsGetUi::NONE;
   sCurrentSource = FsSource::PEER;     // browse the remote peer
   sSourceChangePending = true;         // make initFileBrowser issue the root FS_LIST_REQ
+  strlcpy(sPeerPath, "/", sizeof(sPeerPath));  // zero-init BSS: root before any PEER-gated read
   oledFileBrowserNeedsInit = true;
   // Caller transitions: requestOLEDMode(OLED_FILE_BROWSER, "espnow.receive").
 }
@@ -1373,7 +1381,9 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
       } else if (strcmp(pick, "Rename") == 0) {
         if (!oledGuestBlocksMutate()) {
           sFbRenameActive = true;
-          oledKeyboardInit("Rename:", sFbActionName, OLED_KEYBOARD_MAX_LENGTH);
+          oledKeyboardInit("Rename:", sFbActionName,
+                           OLED_KEYBOARD_MAX_LENGTH,
+                           OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         }
       } else if (strcmp(pick, "Delete") == 0) {
         if (!oledGuestBlocksMutate()) {
@@ -1416,6 +1426,12 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   // to their own startPath and shouldn't get yanked elsewhere).
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X) && !sPickerActive) {
     cycleSourceForward();
+#if ENABLE_ESPNOW
+    // sPeerPath is zero-init BSS: root it the moment the source becomes PEER.
+    // initFileBrowser()'s reset waits on the render throttle, so a fast
+    // follow-up B/A press could otherwise read it before init runs.
+    if (sCurrentSource == FsSource::PEER) strlcpy(sPeerPath, "/", sizeof(sPeerPath));
+#endif
     return true;
   }
 

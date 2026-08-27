@@ -14,7 +14,7 @@
 
 #include "G2_Page_Automations.h"
 
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_AUTOMATION
 
 #include <Arduino.h>
 #include "G2_Glasses.h"        // g2ShowListPage / g2ShowTextAsList / g2Set/GetHijackPage
@@ -315,4 +315,4 @@ void g2BuildAutomationsInfo(char* out, size_t cap) {
   snprintf(out, cap, "Automations (list / run / enable / disable on lens)");
 }
 
-#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_AUTOMATION

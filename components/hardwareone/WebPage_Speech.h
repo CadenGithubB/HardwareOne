@@ -176,7 +176,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
       <div style='display:grid;grid-template-columns:1fr 1fr;gap:10px'>
         <div>
           <label style='font-size:0.8em;color:var(--panel-fg)'>AFE Gain</label>
-          <select id='sr-afe-gain' style='width:100%;padding:6px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)'>
+          <select id='sr-afe-gain' class='input-fit' style='padding:6px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)'>
             <option value='1.0'>1.0x (Default)</option>
             <option value='2.0'>2.0x</option>
             <option value='3.0'>3.0x</option>
@@ -186,7 +186,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
         </div>
         <div>
           <label style='font-size:0.8em;color:var(--panel-fg)'>Dynamic Gain Max</label>
-          <select id='sr-dyngain-max' style='width:100%;padding:6px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)'>
+          <select id='sr-dyngain-max' class='input-fit' style='padding:6px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)'>
             <option value='0'>Disabled</option>
             <option value='1.5'>1.5x</option>
             <option value='2.0'>2.0x</option>
@@ -220,7 +220,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
     <div id='sr-files-section' style='display:none;margin-top:10px;padding:15px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:8px'>
       <div style='margin-bottom:12px'>
         <label style='display:block;margin-bottom:6px;font-size:0.9em;color:var(--panel-fg)'>Model Directory:</label>
-        <select id='sr-model-select' style='width:100%;padding:8px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)' data-guest-hide>
+        <select id='sr-model-select' class='input-fit input-l' style='padding:8px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)' data-guest-hide>
           <option value=''>-- Select Model File --</option>
         </select>
         <div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>
@@ -271,12 +271,12 @@ inline void streamSpeechInner(httpd_req_t* req) {
   }
   
   function setStatus(text){
-    var box=document.getElementById('sr-status-box');
-    if(box) box.textContent=text||'';
+    var box=hw.$('sr-status-box');
+    hw.setText(box,text||'');
   }
   
   function setIndicator(state){
-    var el=document.getElementById('sr-status-indicator');
+    var el=hw.$('sr-status-indicator');
     if(!el) return;
     el.className='status-indicator';
     if(state==='wake') el.classList.add('status-wake');
@@ -285,8 +285,8 @@ inline void streamSpeechInner(httpd_req_t* req) {
   }
   
   function updateButtons(running){
-    var startBtn=document.getElementById('btn-sr-start');
-    var stopBtn=document.getElementById('btn-sr-stop');
+    var startBtn=hw.$('btn-sr-start');
+    var stopBtn=hw.$('btn-sr-stop');
     if(startBtn) startBtn.style.display=running?'none':'inline-block';
     if(stopBtn) stopBtn.style.display=running?'inline-block':'none';
   }
@@ -299,7 +299,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   }
   
   function renderLog(){
-    var logEl = document.getElementById('sr-log');
+    var logEl = hw.$('sr-log');
     if(!logEl) return;
     if(logEntries.length === 0){
       logEl.innerHTML = '<div class="sr-log-entry" style="color:var(--muted)">No detections yet...</div>';
@@ -329,20 +329,20 @@ inline void streamSpeechInner(httpd_req_t* req) {
       updateButtons(running);
       
       // Update stats
-      var wakeEl = document.getElementById('sr-wake-count');
-      var cmdEl = document.getElementById('sr-cmd-count');
-      var confEl = document.getElementById('sr-confidence');
-      var rejectEl = document.getElementById('sr-rejects');
-      if(wakeEl) wakeEl.textContent = data.wakeCount || 0;
-      if(cmdEl) cmdEl.textContent = data.commandCount || 0;
-      if(confEl) confEl.textContent = data.lastConfidence ? Math.round(data.lastConfidence * 100) + '%' : '-';
-      if(rejectEl) rejectEl.textContent = data.lowConfidenceRejects || 0;
+      var wakeEl = hw.$('sr-wake-count');
+      var cmdEl = hw.$('sr-cmd-count');
+      var confEl = hw.$('sr-confidence');
+      var rejectEl = hw.$('sr-rejects');
+      hw.setText(wakeEl, data.wakeCount || 0);
+      hw.setText(cmdEl, data.commandCount || 0);
+      hw.setText(confEl, data.lastConfidence ? Math.round(data.lastConfidence * 100) + '%' : '-');
+      hw.setText(rejectEl, data.lowConfidenceRejects || 0);
       
       // Update audio level meter
-      var audioBar = document.getElementById('sr-audio-bar');
-      var audioDb = document.getElementById('sr-audio-db');
-      var vadInd = document.getElementById('sr-vad-indicator');
-      var micgainDisp = document.getElementById('sr-micgain-display');
+      var audioBar = hw.$('sr-audio-bar');
+      var audioDb = hw.$('sr-audio-db');
+      var vadInd = hw.$('sr-vad-indicator');
+      var micgainDisp = hw.$('sr-micgain-display');
       if(audioBar && audioDb){
         var volDb = data.volumeDb || -60;
         // Map dB to percentage: -60dB=0%, 0dB=100%
@@ -354,11 +354,11 @@ inline void streamSpeechInner(httpd_req_t* req) {
         if(data.vadState && data.vadState > 0) vadInd.classList.add('vad-active');
         else vadInd.classList.remove('vad-active');
       }
-      if(micgainDisp) micgainDisp.textContent = data.micgain || '--';
+      hw.setText(micgainDisp, data.micgain || '--');
       
       // Update voice state display
-      var stateEl = document.getElementById('sr-voice-state');
-      var pathEl = document.getElementById('sr-voice-path');
+      var stateEl = hw.$('sr-voice-state');
+      var pathEl = hw.$('sr-voice-path');
       if(stateEl && pathEl){
         var state = data.state || 'idle';
         if(state !== 'idle' && running){
@@ -390,7 +390,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
       // "wn9_hilexin", "mn7_en") so users know which models are baked
       // into the partition. Falls back to a green check if name unknown
       // (older firmware), or "Not loaded" / "Disabled" when absent.
-      var modelsEl = document.getElementById('sr-models-info');
+      var modelsEl = hw.$('sr-models-info');
       if(modelsEl){
         var wnLabel = data.hasAFE
           ? '✓ ' + (data.wnModelName || 'Loaded')
@@ -475,32 +475,32 @@ inline void streamSpeechInner(httpd_req_t* req) {
   }
   
   // Event handlers
-  document.getElementById('btn-sr-start').onclick = startSR;
-  document.getElementById('btn-sr-stop').onclick = stopSR;
-  document.getElementById('btn-sr-refresh').onclick = refreshStatus;
+  hw.$('btn-sr-start').onclick = startSR;
+  hw.$('btn-sr-stop').onclick = stopSR;
+  hw.$('btn-sr-refresh').onclick = refreshStatus;
   
   // File explorer toggle
-  document.getElementById('btn-sr-files-toggle').onclick = function(){
-    var panel = document.getElementById('sr-files-section');
+  hw.$('btn-sr-files-toggle').onclick = function(){
+    var panel = hw.$('sr-files-section');
     if(panel) panel.style.display = (panel.style.display === 'none') ? 'block' : 'none';
   };
   
   // Model file functions
   function setFileStatus(msg){ 
-    var el = document.getElementById('sr-file-status'); 
-    if(el) el.textContent = msg; 
+    var el = hw.$('sr-file-status');
+    hw.setText(el, msg);
   }
   function setUploadStatus(msg){ 
-    var el = document.getElementById('sr-upload-status'); 
-    if(el) el.textContent = msg; 
+    var el = hw.$('sr-upload-status');
+    hw.setText(el, msg);
   }
   
   function refreshModelList(){
     setFileStatus('Loading files...');
     postCli('ls /sd/ESP-SR Models').then(function(out){
       var lines = out.split('\n').filter(function(l){ return l.trim().length > 0; });
-      var select = document.getElementById('sr-model-select');
-      var fileList = document.getElementById('sr-file-list');
+      var select = hw.$('sr-model-select');
+      var fileList = hw.$('sr-file-list');
       
       // Parse file entries
       var files = [];
@@ -559,7 +559,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   }
   
   function loadSelectedModel(){
-    var select = document.getElementById('sr-model-select');
+    var select = hw.$('sr-model-select');
     if(!select || !select.value){
       setFileStatus('Please select a model file first');
       return;
@@ -587,7 +587,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   }
   
   function uploadModelFile(){
-    var fileInput = document.getElementById('sr-model-file');
+    var fileInput = hw.$('sr-model-file');
     if(!fileInput || !fileInput.files || !fileInput.files.length){
       setUploadStatus('Please select a file first');
       return;
@@ -615,10 +615,10 @@ inline void streamSpeechInner(httpd_req_t* req) {
     });
   }
   
-  document.getElementById('btn-sr-refresh-models').onclick = refreshModelList;
-  document.getElementById('btn-sr-load-model').onclick = loadSelectedModel;
-  document.getElementById('btn-sr-open-folder').onclick = openModelFolder;
-  document.getElementById('btn-sr-upload-model').onclick = uploadModelFile;
+  hw.$('btn-sr-refresh-models').onclick = refreshModelList;
+  hw.$('btn-sr-load-model').onclick = loadSelectedModel;
+  hw.$('btn-sr-open-folder').onclick = openModelFolder;
+  hw.$('btn-sr-upload-model').onclick = uploadModelFile;
   
   // Debug & Tuning controls
   var rawEnabled = false;
@@ -626,13 +626,13 @@ inline void streamSpeechInner(httpd_req_t* req) {
   
   function updateTuningStatus(){
     postCli('srtuning').then(function(out){
-      var el = document.getElementById('sr-tuning-status');
-      if(el) el.textContent = out;
+      var el = hw.$('sr-tuning-status');
+      hw.setText(el, out);
     });
   }
   
   function updateRawButton(){
-    var btn = document.getElementById('btn-sr-raw-toggle');
+    var btn = hw.$('btn-sr-raw-toggle');
     if(btn){
       btn.textContent = rawEnabled ? 'Disable Raw' : 'Enable Raw';
       btn.style.background = rawEnabled ? 'var(--warning)' : '';
@@ -640,14 +640,14 @@ inline void streamSpeechInner(httpd_req_t* req) {
   }
   
   function updateAutotuneButton(){
-    var btn = document.getElementById('btn-sr-autotune-toggle');
+    var btn = hw.$('btn-sr-autotune-toggle');
     if(btn){
       btn.textContent = autotuneActive ? 'Stop Auto-Tune' : 'Start Auto-Tune';
       btn.style.background = autotuneActive ? 'var(--warning)' : '';
     }
   }
   
-  document.getElementById('btn-sr-raw-toggle').onclick = function(){
+  hw.$('btn-sr-raw-toggle').onclick = function(){
     var cmd = rawEnabled ? 'srraw off' : 'srraw on';
     postCli(cmd).then(function(out){
       rawEnabled = !rawEnabled;
@@ -656,7 +656,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
     });
   };
   
-  document.getElementById('btn-sr-autotune-toggle').onclick = function(){
+  hw.$('btn-sr-autotune-toggle').onclick = function(){
     var cmd = autotuneActive ? 'srautotune stop' : 'srautotune start';
     postCli(cmd).then(function(out){
       autotuneActive = !autotuneActive;
@@ -665,9 +665,9 @@ inline void streamSpeechInner(httpd_req_t* req) {
     });
   };
   
-  document.getElementById('btn-sr-apply-gain').onclick = function(){
-    var afeGain = document.getElementById('sr-afe-gain').value;
-    var dynMax = document.getElementById('sr-dyngain-max').value;
+  hw.$('btn-sr-apply-gain').onclick = function(){
+    var afeGain = hw.$('sr-afe-gain').value;
+    var dynMax = hw.$('sr-dyngain-max').value;
     
     // Apply AFE gain via tuning command
     postCli('srtuninggain ' + afeGain).then(function(){

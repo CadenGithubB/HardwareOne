@@ -120,7 +120,8 @@ static bool initExternalSensorStorage() {
 
   if (externalSensors) return true;
 
-  void* storage = ps_malloc(sizeof(ExternalSensor) * MAX_EXTERNAL_SENSORS);
+  void* storage = ps_alloc(sizeof(ExternalSensor) * MAX_EXTERNAL_SENSORS,
+                           AllocPref::RequirePSRAM, "mqtt.sensor.table");
   if (!storage) {
     ERROR_MQTTF("Failed to allocate external sensor table (%u bytes)",
                 (unsigned)(sizeof(ExternalSensor) * MAX_EXTERNAL_SENSORS));

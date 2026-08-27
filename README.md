@@ -6,7 +6,7 @@
   <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
 </picture>
 
-# Hardware One v0.99.9
+# Hardware One v0.99.92
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
 
@@ -48,12 +48,13 @@ Hardware One can be used in several different ways depending on the hardware you
 ### 5) Wearable Companion
 - Board + Bluetooth, paired with Even Realities G2 smart glasses and/or an R1 smart ring.
 - The firmware drives the G2 lens directly as a full six-category UI - not a notification mirror - so the device in your pocket is operable without taking out a phone.
-- With an R1 ring, adds health vitals (heart rate, HRV, SpO2, temperature) with on-lens graphs and background Health Track logging.
+- On-lens text entry is an arrow-pad QWERTY keyboard: taps move a cursor around a three-page key grid, a ring double-tap types the highlighted key, and a Mic row hands the field to the Pi co-processor's speech-to-text when one is attached.
+- With an R1 ring, adds health vitals (heart rate, HRV, SpO2, temperature) with on-lens graphs and background health logging; which of those a ring can be polled for on demand depends on its firmware profile.
 - Composes with any of the above: the glasses are another interface onto the same command system, not a separate build.
 
 ### 6) Pi Co-Processor Pair
 - Board + a Raspberry Pi (Compute Module 5 or Pi 5) wired over a dedicated UART. The ESP32 stays the device - same CLI, same auth, same mesh - and the Pi is a co-processor it can hand work to.
-- The Pi runs one Linux daemon that speaks the link, does speech-to-text and LLM generation, and bridges power/fan control. The firmware treats it as a selectable LLM source (`cm5:<model>`), a dictation engine for the OLED keyboard, the answering side of a native "Hey Even" voice session on the G2 glasses, and a time source.
+- The Pi runs one Linux daemon that speaks the link, does speech-to-text and LLM generation, and bridges power/fan control. The firmware treats it as a selectable LLM source (`cm5:<model>`), a dictation engine for the OLED and on-lens keyboards, the answering side of a native "Hey Even" voice session on the G2 glasses, and a time source.
 - The Pi logs into the device like any other user, sends a heartbeat so the firmware knows when it is actually ready, and its power state is driven by confirmed `cm5 power` / `cm5 fan` requests.
 - The Pi-side software lives in its own repository: **[HardwareOne_RaspPi_CoProcessor](https://github.com/CadenGithubB/HardwareOne_RaspPi_CoProcessor)**. Wiring, setup and commands are in the [User Guide](docs/USERGUIDE.md#raspberry-pi-co-processor-cm5).
 
@@ -63,7 +64,7 @@ Hardware One can be used in several different ways depending on the hardware you
 
 <ins>Key</ins>: ✅ Intended for this deployment &nbsp; ❌ Not Available &nbsp; ⚙️ Configurable
 
-> All features can be enabled or disabled via `System_BuildConfig.h` to match your hardware and use case.
+> Features are turned on and off in `System_BuildConfig.h` to match your hardware and use case. That file is yours to edit, so whatever values it happens to carry in a fresh clone are a starting point, not a fixed set of defaults. A few options are chosen at build time instead of in that file; where that is the case, the row below names the switch.
 
 > The **Wearable Companion** configuration is not a column here - the G2 glasses and R1 ring are interfaces that compose with any of the four builds below.
 
@@ -78,6 +79,7 @@ Hardware One can be used in several different ways depending on the hardware you
 | HTTPS (TLS web server, self-signed or uploaded certs) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Notifications (OLED banners, web toasts, G2 cards, notification center) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | Backup & restore (`.hwbackup` migration between devices) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Signed OTA firmware updates - opt-in `HW_OTA_LAYOUT=1` build-time layout, not a `System_BuildConfig.h` flag (staged to the filesystem, over Bluetooth on builds that include it, or uploaded to the recovery SoftAP; applied by a factory recovery image) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | ESP-NOW V3 (peer discovery, pairing, bonding) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | ESP-NOW metadata sync & file transfer | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | MQTT (Home Assistant integration) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
@@ -97,7 +99,7 @@ Hardware One can be used in several different ways depending on the hardware you
 | TEA5767 FM Radio receiver | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | ESP-SR voice commands (wake word + command recognition) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;✅ |
 | BLE server + Even Realities G2 glasses client | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| R1 smart ring - health vitals, graphs, Health Track logging | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| R1 smart ring - health vitals, graphs, health logging | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Offline maps + waypoints | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Browser games (Tilt Maze or A Dark Room - one per build) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | LLM assistant (tiny on-device model on ESP32-S3 + PSRAM, and/or answered by the Pi co-processor) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
@@ -124,6 +126,8 @@ Each device in your setup runs one board. Multiple boards can coexist on the sam
 | Adafruit QT Py ESP32 | 8 / 2 MB | ❌ | ❌ | ❌ | ESP32-PICO; STEMMA QT onboard; compact |
 
 > A **generic ESP32** fallback build also exists for unlisted boards - it compiles, but verify the I2C pins match your hardware.
+
+> The opt-in **recovery OTA layout** (`HW_OTA_LAYOUT=1`) is available for the FeatherS3, the Feather ESP32 V2 and the QT Py ESP32. The XIAO ESP32-S3 has no OTA layout yet, so it updates over the cable.
 
 ### Peripherals - Stemma QT / I2C
 
@@ -163,7 +167,7 @@ A Raspberry Pi (CM5 or Pi 5) can sit beside the ESP32 on a dedicated UART and ta
 
 > **https://github.com/CadenGithubB/HardwareOne_RaspPi_CoProcessor**
 
-What you get with the pair: ask the Pi questions from the web LLM page, the OLED, or the glasses; dictate into any OLED text field; answer "Hey Even" on the G2 glasses with no phone involved; `cm5 power` / `cm5 fan` control with confirmed request/ACK; and a clock source for dark boots. Wiring, setup steps and the command list are in the [User Guide](docs/USERGUIDE.md#raspberry-pi-co-processor-cm5).
+What you get with the pair: ask the Pi questions from the web LLM page, the OLED, or the glasses; dictate into any OLED or on-lens text field; answer "Hey Even" on the G2 glasses with no phone involved; `cm5 power` / `cm5 fan` control with confirmed request/ACK; and a clock source for dark boots. Wiring, setup steps and the command list are in the [User Guide](docs/USERGUIDE.md#raspberry-pi-co-processor-cm5).
 
 ---
 
@@ -178,9 +182,14 @@ cd HardwareOne
 
 # Build and flash (replace PORT with your device's serial port)
 idf.py -p PORT flash monitor
+
+# Or build one specific board (see boards/ for the list)
+tools/build_board.sh xiao_s3 -p PORT flash monitor
 ```
 
-All user-configurable options (which sensors, which web modules, which network features) live in one file: `components/hardwareone/System_BuildConfig.h`. Flip the flags, rebuild, done.
+`tools/build_board.sh <board> [idf.py args...]` gives each board its own `build-<board>/` directory and its own sdkconfig, so switching boards never needs an `idf.py fullclean`.
+
+The feature flags (which sensors, which web modules, which network features) live in one file: `components/hardwareone/System_BuildConfig.h`. Set the flags for the device you are building, rebuild, done - the values already in that file are one example configuration, not a contract. The recovery OTA layout is the exception: it is selected at build time with `HW_OTA_LAYOUT=1`, not by a flag in that file.
 
 If your build enables the G2 glasses / R1 ring Bluetooth support, first apply the small local patches to the managed Arduino BLE component: see [docs/arduino-local-patches/](docs/arduino-local-patches/) (patch file, verify script, and instructions). Building those features against a stock copy of the library fails to link.
 

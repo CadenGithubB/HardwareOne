@@ -9,7 +9,10 @@
 #include "HAL_Input.h"           // For INPUT_TASK_NAME / INPUT_TASK_TAG
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>      // task stack-size registry mutex
 #include <esp_heap_caps.h>
+#include <esp_attr.h>             // EXT_RAM_BSS_ATTR (task stack-size registry)
+#include <cassert>                // ISR-context guard on the registry lock
 #include <cstdio>                 // snprintf (per-interval CPU% formatting)
 #include <cstring>                // strncmp/strlcpy (task stack-size registry)
 
@@ -98,9 +101,41 @@ struct TaskStackEntry {
   uint32_t bytes;
 };
 
-static TaskStackEntry sTaskStackReg[TASK_STACK_REG_MAX];
-static size_t         sTaskStackRegCount = 0;
-static portMUX_TYPE   sTaskStackRegMux   = portMUX_INITIALIZER_UNLOCKED;
+// PSRAM: cold diagnostic data, touched ~40 times per boot at task-creation
+// time and by taskstats. Guarded by a FreeRTOS mutex (below), NOT a spinlock —
+// strncmp'ing up to 56 entries of PSRAM under taskENTER_CRITICAL would put
+// cache-missing reads under masked interrupts. The 2026-08-19 44-site caller
+// sweep found every caller is plain task context (each already blocks on the
+// heap mutex via xTaskCreate*), so a blocking take is legal everywhere.
+EXT_RAM_BSS_ATTR static TaskStackEntry sTaskStackReg[TASK_STACK_REG_MAX];
+static size_t sTaskStackRegCount = 0;
+
+// Kernel object storage — must stay INTERNAL (Static*_t refusal rule), which
+// is also what makes the mutex usable from the first statement of app_main:
+// otaSafetyInitEarly() registers "ota_probation" there on OTA-verify boots,
+// before initArduino(). The Meyers static makes first-create race-free
+// (__cxa_guard) with no heap dependency.
+static StaticSemaphore_t sTaskStackRegMuxStorage;
+static SemaphoreHandle_t taskStackRegMutex() {
+  static SemaphoreHandle_t m = xSemaphoreCreateMutexStatic(&sTaskStackRegMuxStorage);
+  return m;
+}
+
+// Leaf lock: never call out (log/broadcast/alloc) while holding it — the
+// esp_timer task can reach taskStackRecord via g2EnqueueLensJob→pageSwapInit,
+// so anything slow or re-entrant under this lock stalls every esp_timer in
+// the firmware. ISR context is illegal for a mutex, hence the loud assert
+// (today's callers are all task-context; this catches a future regression).
+// Pre-scheduler the system is single-threaded, so proceeding unlocked is safe.
+static bool taskStackRegLock() {
+  assert(!xPortInIsrContext());
+  if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return false;
+  xSemaphoreTake(taskStackRegMutex(), portMAX_DELAY);
+  return true;
+}
+static void taskStackRegUnlock(bool locked) {
+  if (locked) xSemaphoreGive(taskStackRegMutex());
+}
 
 // Names are copied under sizeof(name) == configMAX_TASK_NAME_LEN, the same
 // bound prvInitialiseNewTask() uses for the TCB copy, so a name the kernel
@@ -108,11 +143,11 @@ static portMUX_TYPE   sTaskStackRegMux   = portMUX_INITIALIZER_UNLOCKED;
 void taskStackRecord(const char* name, uint32_t allocatedBytes) {
   if (!name || !name[0] || allocatedBytes == 0) return;
 
-  taskENTER_CRITICAL(&sTaskStackRegMux);
+  const bool locked = taskStackRegLock();
   for (size_t i = 0; i < sTaskStackRegCount; i++) {
     if (strncmp(sTaskStackReg[i].name, name, configMAX_TASK_NAME_LEN - 1) == 0) {
       sTaskStackReg[i].bytes = allocatedBytes;  // re-created, possibly resized
-      taskEXIT_CRITICAL(&sTaskStackRegMux);
+      taskStackRegUnlock(locked);
       return;
     }
   }
@@ -122,22 +157,96 @@ void taskStackRecord(const char* name, uint32_t allocatedBytes) {
     e.bytes = allocatedBytes;
     sTaskStackRegCount++;
   }
-  taskEXIT_CRITICAL(&sTaskStackRegMux);
+  taskStackRegUnlock(locked);
 }
 
 uint32_t taskStackLookup(const char* name) {
   if (!name || !name[0]) return 0;
 
   uint32_t bytes = 0;
-  taskENTER_CRITICAL(&sTaskStackRegMux);
+  const bool locked = taskStackRegLock();
   for (size_t i = 0; i < sTaskStackRegCount; i++) {
     if (strncmp(sTaskStackReg[i].name, name, configMAX_TASK_NAME_LEN - 1) == 0) {
       bytes = sTaskStackReg[i].bytes;
       break;
     }
   }
-  taskEXIT_CRITICAL(&sTaskStackRegMux);
+  taskStackRegUnlock(locked);
   return bytes;
+}
+
+// ============================================================================
+// Live-heap measurement of a task snapshot (see System_TaskUtils.h)
+// ============================================================================
+
+// The walker below equates a TLSF block's start (what tlsf_walk_pool hands
+// heap_caps_walk) with the pointer the kernel holds in pxStackBase / xHandle.
+// That is only true while nothing sits between the block header and the user
+// data: heap poisoning prepends a poison_head_t and task tracking prepends
+// the owner handle (heap_caps_base.c MULTI_HEAP_ADD_BLOCK_OWNER_OFFSET). No
+// board profile in this repo sets either, and the failure mode would be
+// SILENT — every task reads '?', both reports sum zero — so refuse to build
+// rather than guess an offset nobody has tested here.
+#if CONFIG_HEAP_POISONING_LIGHT || CONFIG_HEAP_POISONING_COMPREHENSIVE || CONFIG_HEAP_TASK_TRACKING
+#error "taskHeapMeasureSnapshot(): heap poisoning / task tracking shift user pointers off the TLSF block start; add the offset before enabling"
+#endif
+
+namespace {
+
+struct TaskHeapWalkCtx {
+  const TaskStatus_t* snapshot;
+  TaskHeapMeasure*    out;
+  size_t              count;
+};
+
+// One call per block per heap, under that heap's lock (multi_heap_walk takes
+// portENTER_CRITICAL on the heap's portMUX), so this stays a pointer compare
+// loop: no logging, no allocation, no registry lookups in here.
+//
+// THE CAP SET IS LOAD-BEARING. The caller walks MALLOC_CAP_INTERNAL |
+// MALLOC_CAP_8BIT — the same set hw1InternalTotalBytes()/FreeBytes() describe.
+// Never MALLOC_CAP_INVALID: that means "every heap" (heap_caps.c:600) and would
+// let a PSRAM or RTCRAM block be measured and folded into a DRAM-only total.
+// CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY and
+// CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM are set on every board profile, so
+// a PSRAM stack is one xTaskCreateWithCaps away; with the narrow set it simply
+// stays 0 (unmeasured) and the caller reports it rather than mis-adding it.
+bool taskHeapWalker(walker_heap_into_t heap_info, walker_block_info_t block, void* user) {
+  (void)heap_info;
+  if (!block.used) return true;
+  const TaskHeapWalkCtx* ctx = static_cast<const TaskHeapWalkCtx*>(user);
+  for (size_t i = 0; i < ctx->count; i++) {
+    if (block.ptr == (const void*)ctx->snapshot[i].pxStackBase) {
+      ctx->out[i].stackBytes = (uint32_t)block.size;
+    }
+    if (block.ptr == (const void*)ctx->snapshot[i].xHandle) {
+      ctx->out[i].tcbBytes = (uint32_t)block.size;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+void taskHeapMeasureSnapshot(const TaskStatus_t* snapshot, TaskHeapMeasure* out, size_t count) {
+  if (!snapshot || !out || count == 0) return;
+  for (size_t i = 0; i < count; i++) {
+    out[i].stackBytes = 0;
+    out[i].tcbBytes   = 0;
+    out[i].regBytes   = 0;
+  }
+  // Walk FIRST: the pointer reads are the time-sensitive part (a task that
+  // deletes itself after the snapshot has its blocks freed by IDLE), so they
+  // go before the N mutex-guarded registry lookups, not after.
+  TaskHeapWalkCtx ctx{ snapshot, out, count };
+  heap_caps_walk(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, taskHeapWalker, &ctx);
+  for (size_t i = 0; i < count; i++) {
+    // pcTaskName points INTO the TCB (&pxTCB->pcTaskName[0]). The address
+    // guard is the one reportAllTaskStacks() has always used against a
+    // snapshot row whose TCB was torn down after uxTaskGetSystemState().
+    const char* name = snapshot[i].pcTaskName;
+    out[i].regBytes = (name && (uintptr_t)name >= 0x3F000000) ? taskStackLookup(name) : 0;
+  }
 }
 
 // ============================================================================
@@ -534,10 +643,11 @@ void reportAllTaskStacks() {
   // Get all tasks from system
   UBaseType_t taskCount = uxTaskGetNumberOfTasks();
   static TaskStatus_t* taskArray = nullptr;
+  static TaskHeapMeasure* taskMeasure = nullptr;   // parallel to taskArray
   static UBaseType_t taskCap = 0;
   UBaseType_t numTasks = 0;
   uint32_t totalRuntime = 0;
-  
+
   // Take a consistent snapshot. Tasks can be created/deleted while we're printing.
   // If the task count grows between calls, retry with a larger buffer.
   for (int attempt = 0; attempt < 3; attempt++) {
@@ -545,17 +655,19 @@ void reportAllTaskStacks() {
     // Add headroom so we don't thrash allocations if tasks are created concurrently.
     UBaseType_t needed = taskCount + 4;
     if (needed > taskCap) {
-      if (taskArray) {
-        free(taskArray);
-        taskArray = nullptr;
-        taskCap = 0;
-      }
-      taskArray = (TaskStatus_t*)ps_alloc(needed * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "task.pressure");
-      if (taskArray) {
+      if (taskArray)   { free(taskArray);   taskArray   = nullptr; }
+      if (taskMeasure) { free(taskMeasure); taskMeasure = nullptr; }
+      taskCap = 0;
+      taskArray   = (TaskStatus_t*)ps_alloc(needed * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "task.pressure");
+      taskMeasure = (TaskHeapMeasure*)ps_alloc(needed * sizeof(TaskHeapMeasure), AllocPref::PreferPSRAM, "task.measure");
+      if (taskArray && taskMeasure) {
         taskCap = needed;
+      } else {                       // partial failure must not leave a half-armed pair
+        if (taskArray)   { free(taskArray);   taskArray   = nullptr; }
+        if (taskMeasure) { free(taskMeasure); taskMeasure = nullptr; }
       }
     }
-    if (!taskArray) {
+    if (!taskArray || !taskMeasure) {
       broadcastOutput("ERROR: Cannot allocate task array");
       return;
     }
@@ -583,17 +695,32 @@ void reportAllTaskStacks() {
   // Per-interval CPU: elapsed run-time clock since the previous report (wrap-safe).
   uint32_t totalDelta = sRunPrevValid ? (uint32_t)(totalRuntime - sPrevTotalRun) : 0;
 
+  // Measure every task's stack and TCB block off the live allocator, in one
+  // walk, BEFORE any printing (the same helper the boot memory report uses,
+  // so the two reporters can never disagree on what a task costs). The old
+  // code carried a hardcoded TCB_SIZE = 104 (the real TCB_t is 376 B on this
+  // IDF — 3.6x low) and assumed a 4 KB "used" margin for every kernel task.
+  taskHeapMeasureSnapshot(taskArray, taskMeasure, numTasks);
+
   broadcastOutput("");
   BROADCAST_PRINTF("-- TASK BREAKDOWN (%u tasks) --", (unsigned)numTasks);
   broadcastOutput("  Name              Stack(KB)  Used(KB)  Free(KB)  Used%  CPU%  dCPU%  TCB(B)");
   broadcastOutput("  ----------------  ---------  --------  --------  -----  ----  -----  ------");
-  broadcastOutput("  ('~' = estimate: kernel tasks report no stack size, so Stack/Used/Used% assume a 4 KB margin; only Free is measured)");
-  
+  broadcastOutput("  (Stack and TCB are measured allocator blocks; '?' = not a live internal-heap block, not summed)");
+
   uint32_t totalStackAllocated = 0;
   uint32_t totalStackUsed = 0;
   uint32_t totalTCBOverhead = 0;
-  const uint32_t TCB_SIZE = 104;  // ESP32 FreeRTOS TCB is ~104 bytes
-  
+  unsigned tcbMeasured = 0;
+  unsigned stackUnmeasured = 0;
+
+  // TCB column: measured bytes, or "?" when the TCB is not a live internal
+  // heap block (never a fabricated constant).
+  auto fmtTcb = [](char* buf, size_t n, uint32_t bytes) {
+    if (bytes) snprintf(buf, n, "%u", (unsigned)bytes);
+    else       snprintf(buf, n, "?");
+  };
+
   // Known sensor tasks with their stack sizes
   struct KnownTask {
     const char* name;
@@ -677,28 +804,54 @@ void reportAllTaskStacks() {
         ? espnowWatermark
         : (ktIdx == 2) ? espnowTxWatermark
                        : uxTaskGetStackHighWaterMark(kt.handle);
-    uint32_t allocBytes = kt.stackWords;
-    uint32_t freeBytes = (uint32_t)watermark;
-    uint32_t usedBytes = allocBytes - freeBytes;
-    uint32_t usedPercent = (usedBytes * 100) / allocBytes;
-    
-    // Find CPU usage by handle (names can be stale/duplicate). cpuPercent is
-    // lifetime; dCpu is the per-interval delta (n/a until a baseline exists).
+
+    // Find the snapshot row by handle (names can be stale/duplicate): it
+    // carries the measured stack/TCB blocks and the CPU counters. cpuPercent
+    // is lifetime; dCpu is the per-interval delta (n/a until a baseline exists).
     uint32_t cpuPercent = 0;
     int dCpu = -1;
+    uint32_t measuredStack = 0;
+    uint32_t measuredTcb = 0;
     for (UBaseType_t i = 0; i < numTasks; i++) {
       if (taskArray[i].xHandle == kt.handle) {
         uint32_t curRun = (uint32_t)taskArray[i].ulRunTimeCounter;
         cpuPercent = (totalRuntime > 0) ? (uint32_t)((uint64_t)curRun * 100 / totalRuntime) : 0;  // uint64: curRun*100 overflows uint32 after ~43s uptime
         dCpu = deltaCpuPercent(kt.handle, curRun, totalDelta);
+        measuredStack = taskMeasure[i].stackBytes;
+        measuredTcb = taskMeasure[i].tcbBytes;
         break;
       }
     }
     char dc[16];  // sized for worst-case %4d%% so -Wformat-truncation stays quiet
     if (dCpu < 0) snprintf(dc, sizeof(dc), "%5s", "-");
     else          snprintf(dc, sizeof(dc), "%4d%%", dCpu);
+    char tcb[12];
+    fmtTcb(tcb, sizeof(tcb), measuredTcb);
+    if (measuredTcb) { totalTCBOverhead += measuredTcb; tcbMeasured++; }
 
-    BROADCAST_PRINTF("  %-16s  %4u      %4u      %4u      %3u%%   %2u%%  %5s   %3u",
+    // Same rule as every other row and as the boot memory report: the stack
+    // size is the MEASURED allocator block or it is '?'. The compile-time
+    // constant is NOT substituted here — that would fold an unmeasured figure
+    // into a total the summary labels "(measured)". For a stack the allocator
+    // does not own (PSRAM via xTaskCreateWithCaps, caller-owned buffer) the
+    // constant still drives the WARNINGS pass below, which is a threshold
+    // check, not an accounting.
+    uint32_t freeBytes = (uint32_t)watermark;
+    uint32_t allocBytes = measuredStack;
+    if (allocBytes == 0) {
+      stackUnmeasured++;
+      BROADCAST_PRINTF("  %-16s     ?         ?      %4u         ?   %2u%%  %5s   %4s",
+        kt.name,
+        (unsigned)(freeBytes/1024),
+        (unsigned)cpuPercent,
+        dc,
+        tcb);
+      continue;
+    }
+    uint32_t usedBytes = (allocBytes > freeBytes) ? (allocBytes - freeBytes) : 0;
+    uint32_t usedPercent = (usedBytes * 100) / allocBytes;
+
+    BROADCAST_PRINTF("  %-16s  %4u      %4u      %4u      %3u%%   %2u%%  %5s   %4s",
       kt.name,
       (unsigned)(allocBytes/1024),
       (unsigned)(usedBytes/1024),
@@ -706,11 +859,10 @@ void reportAllTaskStacks() {
       (unsigned)usedPercent,
       (unsigned)cpuPercent,
       dc,
-      (unsigned)TCB_SIZE);
-    
+      tcb);
+
     totalStackAllocated += allocBytes;
     totalStackUsed += usedBytes;
-    totalTCBOverhead += TCB_SIZE;
   }
   
   // Print system tasks
@@ -732,25 +884,36 @@ void reportAllTaskStacks() {
     if (isKnown) continue;
     
     UBaseType_t watermark = taskArray[i].usStackHighWaterMark;
-    
-    // Estimate allocated stack (we don't know the exact size for system tasks):
-    // assume alloc = free + a 4 KB margin. BYTES throughout — the watermark is
-    // already bytes on this port (see System_TaskUtils.h), so the old
-    // "(watermark + 1024) * 4" both mis-scaled AND only granted a 1 KB margin.
-    // NOTE: usedBytes is therefore the ASSUMED margin, not a measurement — the
-    // only real datum here is freeBytes (the HWM).
-    constexpr uint32_t kAssumedUsedBytes = 4096;
-    uint32_t freeBytes = (uint32_t)watermark;
-    uint32_t allocBytes = freeBytes + kAssumedUsedBytes;
-    uint32_t usedBytes = kAssumedUsedBytes;
-    uint32_t usedPercent = (usedBytes * 100) / allocBytes;
     uint32_t cpuPercent = (totalRuntime > 0) ? (uint32_t)((uint64_t)taskArray[i].ulRunTimeCounter * 100 / totalRuntime) : 0;  // uint64: *100 overflows uint32 after ~43s uptime
     int dCpu = deltaCpuPercent(taskArray[i].xHandle, (uint32_t)taskArray[i].ulRunTimeCounter, totalDelta);
     char dc[16];  // sized for worst-case %4d%% so -Wformat-truncation stays quiet
     if (dCpu < 0) snprintf(dc, sizeof(dc), "%5s", "-");
     else          snprintf(dc, sizeof(dc), "%4d%%", dCpu);
+    char tcb[12];
+    fmtTcb(tcb, sizeof(tcb), taskMeasure[i].tcbBytes);
+    if (taskMeasure[i].tcbBytes) { totalTCBOverhead += taskMeasure[i].tcbBytes; tcbMeasured++; }
 
-    BROADCAST_PRINTF("  %-16s ~%4u     ~%4u      %4u     ~%3u%%   %2u%%  %5s   %3u",
+    // Allocated stack is the MEASURED block behind pxStackBase — BYTES
+    // throughout (the watermark is bytes on this port, see System_TaskUtils.h).
+    // A task whose stack is not a live internal-heap block (PSRAM stack,
+    // caller-owned buffer, or torn down since the snapshot) prints '?' and is
+    // not summed: the only real datum for it is the HWM.
+    uint32_t freeBytes = (uint32_t)watermark;
+    uint32_t allocBytes = taskMeasure[i].stackBytes;
+    if (allocBytes == 0) {
+      stackUnmeasured++;
+      BROADCAST_PRINTF("  %-16s     ?         ?      %4u         ?   %2u%%  %5s   %4s",
+        name,
+        (unsigned)(freeBytes/1024),
+        (unsigned)cpuPercent,
+        dc,
+        tcb);
+      continue;
+    }
+    uint32_t usedBytes = (allocBytes > freeBytes) ? (allocBytes - freeBytes) : 0;
+    uint32_t usedPercent = (usedBytes * 100) / allocBytes;
+
+    BROADCAST_PRINTF("  %-16s  %4u      %4u      %4u      %3u%%   %2u%%  %5s   %4s",
       name,
       (unsigned)(allocBytes/1024),
       (unsigned)(usedBytes/1024),
@@ -758,19 +921,23 @@ void reportAllTaskStacks() {
       (unsigned)usedPercent,
       (unsigned)cpuPercent,
       dc,
-      (unsigned)TCB_SIZE);
-    
+      tcb);
+
     totalStackAllocated += allocBytes;
     totalStackUsed += usedBytes;
-    totalTCBOverhead += TCB_SIZE;
   }
-  
+
   broadcastOutput("  ----------------  ---------  --------  --------  -----  ----  -----  ------");
-  BROADCAST_PRINTF("  TOTALS:           %5u     %5u      %5u                  %4u",
+  // TCB total widened %4u -> %6u: at 376 B per TCB a ~40-task build is five digits.
+  BROADCAST_PRINTF("  TOTALS:           %5u     %5u      %5u                      %6u",
     (unsigned)(totalStackAllocated/1024),
     (unsigned)(totalStackUsed/1024),
     (unsigned)((totalStackAllocated - totalStackUsed)/1024),
     (unsigned)totalTCBOverhead);
+  if (stackUnmeasured > 0) {
+    BROADCAST_PRINTF("  (%u task stack(s) not a live internal-heap block - not in the totals)",
+      stackUnmeasured);
+  }
 
   // -- CPU (per-interval, since last report) --
   // Lifetime CPU% converges to a meaningless average over long uptimes; the
@@ -801,11 +968,11 @@ void reportAllTaskStacks() {
   // Accounting summary packed: header+3 lines (1 msg), then frag+waste (1 msg) — was 6.
   BROADCAST_PRINTF(
     "\n-- MEMORY ACCOUNTING SUMMARY --\n"
-    "  Task Stacks:          %6u KB\n"
-    "  Task Control Blocks:  %6u B  (%u tasks x %u bytes)\n"
+    "  Task Stacks:          %6u KB  (measured)\n"
+    "  Task Control Blocks:  %6u B   (%u of %u tasks measured)\n"
     "  Total Task Overhead:  %6u KB",
     (unsigned)(totalStackAllocated/1024),
-    (unsigned)totalTCBOverhead, (unsigned)taskCount, (unsigned)TCB_SIZE,
+    (unsigned)totalTCBOverhead, tcbMeasured, (unsigned)numTasks,
     (unsigned)((totalStackAllocated + totalTCBOverhead)/1024));
   unsigned fragPercent = 0;
   if (heapFree > 0) {

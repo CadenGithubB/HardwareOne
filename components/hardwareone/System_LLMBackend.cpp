@@ -13,6 +13,7 @@
 #include "System_Mutex.h"        // FsLockGuard
 #include "System_Settings.h"
 #include "System_VFS.h"
+#include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 #if ENABLE_LLM_SOURCE_ONBOARD
   #include "System_LLM.h"
@@ -29,7 +30,7 @@
 // their own internal locks, so no extra mutex is warranted here.
 
 static LlmBackendKind sActiveKind = LlmBackendKind::None;
-static LlmModelDesc   sActiveDesc = {};
+EXT_RAM_BSS_ATTR static LlmModelDesc sActiveDesc;  // PSRAM: task-context select/unload/read only (initializer dropped: .ext_ram.bss is zeroed)
 
 const char* llmBackendKindName(LlmBackendKind k) {
   switch (k) {

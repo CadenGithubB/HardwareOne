@@ -76,9 +76,9 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
   // --- live status poll (capability-driven) ---
   function applyStatus(s){
     if(!s){return;}
-    var absent=hw._ge('bat-absent'),live=hw._ge('bat-live');
-    if(s.present===false){if(absent)absent.style.display='';if(live)live.style.display='none';return;}
-    if(absent)absent.style.display='none';if(live)live.style.display='flex';
+    var absent=hw.$('bat-absent'),live=hw.$('bat-live');
+    if(s.present===false){hw.show(absent);hw.hide(live);return;}
+    hw.hide(absent);if(live)live.style.display='flex';
     hw.setText('bat-pct',fmt(s.percentage,1));
     hw.setText('bat-volt',fmt(s.voltage,3));
     hw.setText('bat-status',s.status||'--');
@@ -101,7 +101,7 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
   }
   function col(hdr,name){for(var i=0;i<hdr.length;i++){if(hdr[i].replace(/\[.*\]/,'').trim()===name)return i;}return -1;}
   function renderTable(d){
-    var t=hw._ge('bat-table');if(!t)return;
+    var t=hw.$('bat-table');if(!t)return;
     var cell='padding:2px 4px;overflow:hidden;text-overflow:ellipsis;word-break:break-word;vertical-align:top';
     // Sticky header: needs border-collapse:separate on the table (set in HTML)
     // and an opaque background so scrolling rows don't bleed through.
@@ -113,7 +113,7 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
     t.innerHTML=h;
   }
   function drawChart(d){
-    var cv=hw._ge('bat-chart');if(!cv||!cv.getContext)return;var ctx=cv.getContext('2d');
+    var cv=hw.$('bat-chart');if(!cv||!cv.getContext)return;var ctx=cv.getContext('2d');
     var W=cv.width,H=cv.height,padL=34,padR=10,padT=10,padB=6;
     ctx.clearRect(0,0,W,H);
     var ci=col(d.hdr,'pct'),ei=col(d.hdr,'event');
@@ -132,13 +132,13 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
     ctx.stroke();
   }
   function loadLog(){
-    var info=hw._ge('bat-log-info');if(info)info.textContent='loading…';
+    var info=hw.$('bat-log-info');hw.setText(info,'loading…');
     hw.fetchText('/api/files/view?name=battery.csv&mode=raw').then(function(text){
       var d=parseCSV(text);renderTable(d);drawChart(d);
-      if(info)info.textContent=d.rows.length+' samples';
-    }).catch(function(e){if(info)info.textContent='no log data yet';console.error('[BATTERY] log',e);});
+      hw.setText(info,d.rows.length+' samples');
+    }).catch(function(e){hw.setText(info,'no log data yet');console.error('[BATTERY] log',e);});
   }
-  hw.on(hw._ge('bat-refresh'),'click',loadLog);
+  hw.on(hw.$('bat-refresh'),'click',loadLog);
   loadLog();
 })();</script>
 )JS", HTTPD_RESP_USE_STRLEN);

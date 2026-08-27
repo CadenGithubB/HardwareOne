@@ -20,8 +20,10 @@
 #include "System_Settings.h"    // gSettings.eventLogEnabled
 #include "System_Filesystem.h"  // filesystemReady
 #include "System_Utils.h"       // everyMs, argWantsJson
-#include "System_MemUtil.h"     // PSRAM_JSON_DOC / PSRAM_STATIC_BUF — json branch returns the document
-#include "System_CommandTypes.h"  // CMD_RESULT_MAX — the json branch's ceiling
+#include "System_MemUtil.h"     // PSRAM_STATIC_BUF — command JSON return storage
+#include "System_CommandLimits.h"  // CMD_RESULT_MAX — command adapter ceiling
+#include "System_EventCatalogJson.h"
+#include "System_EventCatalogTextCore.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"  // vTaskSetThreadLocalStoragePointerAndDelCallback
@@ -134,61 +136,6 @@ NotificationContextGuard::~NotificationContextGuard() {
 EXT_RAM_BSS_ATTR static SystemEvent gEventRing[SYSEVT_RING_SIZE];
 static uint32_t gEventNextSeq = 1;  // seq of the NEXT event to be posted
 static portMUX_TYPE gEventMux = portMUX_INITIALIZER_UNLOCKED;
-
-// Kind names — generated from SYSEVT_KIND_LIST so the strings can never
-// drift from the enum. These are what automation event triggers use in
-// their "on" field; keep them stable (see System_Events.h).
-static const char* const kEventKindNames[SYSEVT_COUNT] = {
-    "none",
-#define SYSEVT_X(sym, name, fam) name,
-    SYSEVT_KIND_LIST(SYSEVT_X)
-#undef SYSEVT_X
-};
-
-// Family per kind — same X-macro, so a kind can never carry a family that
-// disagrees with its declaration. Index 0 (SYSEVT_NONE) is a filler.
-static const uint8_t kEventKindFamily[SYSEVT_COUNT] = {
-    SYSEVT_FAM_SYSTEM,
-#define SYSEVT_X(sym, name, fam) fam,
-    SYSEVT_KIND_LIST(SYSEVT_X)
-#undef SYSEVT_X
-};
-
-// Family display labels, generated from SYSEVT_FAMILY_LIST.
-static const char* const kEventFamilyNames[SYSEVT_FAM_COUNT] = {
-#define SYSEVT_FAM_X(sym, label) label,
-    SYSEVT_FAMILY_LIST(SYSEVT_FAM_X)
-#undef SYSEVT_FAM_X
-};
-
-const char* systemEventFamilyName(uint8_t family) {
-  if (family >= SYSEVT_FAM_COUNT) return "?";
-  return kEventFamilyNames[family];
-}
-
-uint8_t systemEventKindFamily(uint8_t kind) {
-  if (kind >= SYSEVT_COUNT) return SYSEVT_FAM_SYSTEM;
-  return kEventKindFamily[kind];
-}
-
-const char* systemEventKindName(uint8_t kind) {
-  if (kind >= SYSEVT_COUNT) return "?";
-  return kEventKindNames[kind];
-}
-
-int systemEventKindFromName(const char* name) {
-  if (!name || !name[0]) return -1;
-  // Event names are persisted by automations and notification policy. Keep the
-  // former single boot event as a read-time alias for the completion edge so
-  // upgrades do not silently orphan existing `on: "boot"` configuration. New
-  // listings and writes use only the two canonical boot_started/boot_finished
-  // names generated from SYSEVT_KIND_LIST.
-  if (strcasecmp(name, "boot") == 0) return SYSEVT_BOOT_FINISHED;
-  for (int i = SYSEVT_NONE + 1; i < SYSEVT_COUNT; i++) {
-    if (strcasecmp(name, kEventKindNames[i]) == 0) return i;
-  }
-  return -1;
-}
 
 const char* systemEventSourceName(uint8_t source) {
   switch (source) {
@@ -357,6 +304,54 @@ bool systemEventGetBySeq(uint32_t seq, SystemEvent* out) {
 // `events` CLI command — inspect the ring (newest first, with attribution)
 // ============================================================================
 
+namespace {
+
+namespace catalog_text = hw1_event_catalog_text_core;
+
+size_t eventCatalogTextFamilyCount(void* /*context*/) {
+  return systemEventCatalogFamilyCount();
+}
+
+bool eventCatalogTextFamilyAt(void* /*context*/, size_t index,
+                              catalog_text::FamilyView* out) {
+  if (!out) return false;
+  SystemEventCatalogFamilyInfo family{};
+  if (!systemEventCatalogFamilyAt(index, &family) || !family.label) {
+    return false;
+  }
+  out->key = static_cast<size_t>(family.id);
+  out->label = {family.label, strlen(family.label)};
+  out->kindCount = family.kindCount;
+  return true;
+}
+
+bool eventCatalogTextFamilyKindAt(void* /*context*/, size_t familyKey,
+                                  size_t index,
+                                  catalog_text::KindView* out) {
+  if (!out || familyKey >= systemEventCatalogFamilyCount()) return false;
+  SystemEventCatalogKindInfo kind{};
+  if (!systemEventCatalogFamilyKindAt(
+          static_cast<SystemEventFamily>(familyKey), index, &kind) ||
+      !kind.name) {
+    return false;
+  }
+  out->name = {kind.name, strlen(kind.name)};
+  return true;
+}
+
+bool broadcastEventCatalogTextLine(void* /*context*/, const char* line,
+                                   size_t length) {
+  if (!line || length > DEBUG_MSG_SIZE - 1u || line[length] != '\0') {
+    return false;
+  }
+  // broadcastOutput() has no queue-acceptance result. Reaching this boundary
+  // preserves its existing best-effort downstream delivery semantics.
+  broadcastOutput(line);
+  return true;
+}
+
+}  // namespace
+
 const char* cmd_events(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -371,61 +366,34 @@ const char* cmd_events(const String& argsInput) {
       // see the JSON contract in System_Utils.cpp. Broadcasting it meant the
       // addressed reply on every transport was a bare "OK", since only the
       // return value reaches those.
-      // Per-transport reality for this multi-kilobyte payload:
-      //   web /api/cli, BLE  — ExecReq::out[4096], full document. OK.
-      //   ESP-NOW            — 6143 B fragmenting. OK.
-      //   MQTT               — TRUNCATED. System_MQTT.cpp hands executeCommand a
-      //                        2048 B buffer and System_Utils.cpp strncpy's into
-      //                        it silently, so MQTT gets a torn 2047 B fragment.
-      //                        Fix belongs in that buffer, not here.
-      //   serial console     — still [CUT]. The return value is echoed via
-      //                        broadcastOutput(), which clamps a line to 255 B.
-      //                        Platform line limit, not this command's bug.
       // GROUPED ONLY — one shape, not two. Emitting a flat `kinds` array beside
       // the grouped copy would repeat every name and can push the result over
       // CMD_RESULT_MAX. A consumer that only wants the flat vocabulary can
       // flatten the groups, so the second copy buys nothing and costs headroom.
-      PSRAM_JSON_DOC(doc);
-      JsonArray fams = doc["families"].to<JsonArray>();
-      for (int f = 0; f < SYSEVT_FAM_COUNT; f++) {
-        JsonObject fo = fams.add<JsonObject>();
-        fo["n"] = systemEventFamilyName((uint8_t)f);
-        JsonArray fk = fo["k"].to<JsonArray>();
-        for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-          // static tables — ArduinoJson stores const char* by pointer, no copy
-          if (systemEventKindFamily((uint8_t)k) == f) fk.add(systemEventKindName((uint8_t)k));
-        }
-      }
       PSRAM_STATIC_BUF(jbuf, CMD_RESULT_MAX);
-      size_t n = serializeJson(doc, jbuf, jbuf_SIZE);
-      // serializeJson truncates silently when it runs out of room; a short list
-      // would look like a real answer, so fail loudly instead.
-      if (n == 0 || n >= jbuf_SIZE - 1) return "Error: event-kind list outgrew the response buffer";
+      size_t written = 0;
+      size_t required = 0;
+      const SystemEventCatalogJsonStatus status =
+          systemEventCatalogJsonToBuffer(jbuf, jbuf_SIZE, &written, &required);
+      if (status != SystemEventCatalogJsonStatus::Ok ||
+          required != written + 1u) {
+        return "Error: event-kind list outgrew the response buffer";
+      }
       return jbuf;
     }
-    BROADCAST_PRINTF("OK: %d event kinds in %d families:",
-                     (int)SYSEVT_COUNT - 1, (int)SYSEVT_FAM_COUNT);
-    // One family per section, names packed into <=255 B lines at the call site
-    // (there is no runtime splitter — see System_Debug.cpp).
-    char line[120];
-    for (int f = 0; f < SYSEVT_FAM_COUNT; f++) {
-      int count = 0;
-      for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-        if (systemEventKindFamily((uint8_t)k) == f) count++;
-      }
-      if (count == 0) continue;
-      BROADCAST_PRINTF("  %s (%d):", systemEventFamilyName((uint8_t)f), count);
-      int len = 0;
-      for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-        if (systemEventKindFamily((uint8_t)k) != f) continue;
-        const char* n = systemEventKindName((uint8_t)k);
-        if (len > 0 && len + 1 + (int)strlen(n) > (int)sizeof(line) - 1) {
-          broadcastOutput(line);
-          len = 0;
-        }
-        len += snprintf(line + len, sizeof(line) - len, len ? " %s" : "    %s", n);
-      }
-      if (len > 0) broadcastOutput(line);
+
+    const catalog_text::ProviderView provider{
+        nullptr, eventCatalogTextFamilyCount, eventCatalogTextFamilyAt,
+        eventCatalogTextFamilyKindAt};
+    char line[DEBUG_MSG_SIZE];
+    const catalog_text::Status textStatus = catalog_text::writeCatalog(
+        provider, broadcastEventCatalogTextLine, nullptr, line, sizeof(line),
+        DEBUG_MSG_SIZE - 1u);
+    if (textStatus == catalog_text::Status::LineTooLong) {
+      return "Error: event-kind name outgrew the output line limit";
+    }
+    if (textStatus != catalog_text::Status::Ok) {
+      return "Error: failed to enumerate event kinds";
     }
     cliHint("drive automations with 'automation add ... type=event on=<kind>' or mute notifications with 'notifyusermute <kind,...>'");
     return "OK";

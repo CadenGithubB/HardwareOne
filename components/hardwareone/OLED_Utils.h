@@ -244,18 +244,27 @@ enum OLEDKeyboardMode {
   KEYBOARD_MODE_COUNT = 6
 };
 
+// Dictation is an input method, so every field must opt in explicitly. Keep
+// DENY as zero: the global keyboard state and any partially initialized copy
+// fail closed. Secret fields and opaque command payloads must never allow a
+// microphone transcript to cross into their buffer.
+enum class OLEDKeyboardDictationPolicy : uint8_t {
+  DENY = 0,
+  ALLOW_PLAINTEXT = 1,
+};
+
 // The MODE key (SELECT / in-grid '*') cycles through every mode in enum order:
 // lowercase -> uppercase -> numbers -> symbols -> pattern -> mic -> lowercase.
 // PATTERN stays in the rotation on purpose: the OLED login screen accepts a
 // gamepad pattern in place of a text password (isValidUser() checks both
 // hashes), so the login keyboard MUST be able to reach it via SELECT.
 //
-// MIC is the one CONDITIONAL member. Every other mode works with the device
-// standing alone, but dictation needs a mic source AND an authenticated CM5
-// host link (nothing on this device turns speech into arbitrary text — see
-// System_Dictation.h). oledKeyboardToggleMode() therefore skips it whenever
-// dictationAvailable() is false, so the wearer never cycles into a page that
-// cannot do anything. Do not "simplify" that skip away.
+// MIC is the one CONDITIONAL member. Every field must explicitly allow
+// dictation, and an allowed field still needs a mic source AND an authenticated
+// CM5 host link (nothing on this device turns speech into arbitrary text — see
+// System_Dictation.h). oledKeyboardToggleMode() therefore skips it when either
+// the field policy denies it or dictationAvailable() is false. Do not
+// "simplify" either gate away.
 
 // Autocomplete provider callback types
 // Returns number of suggestions found, fills results array (up to maxResults)
@@ -269,6 +278,7 @@ struct OLEDKeyboardState {
   int cursorX;
   int cursorY;
   OLEDKeyboardMode mode;
+  OLEDKeyboardDictationPolicy dictationPolicy;
   bool active;
   bool cancelled;
   bool completed;
@@ -290,7 +300,10 @@ extern const char OLED_KEYBOARD_CHARS_NUMBERS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_
 extern const char OLED_KEYBOARD_CHARS_SYMBOLS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
 extern OLEDKeyboardState gOledKeyboardState;
 
-void oledKeyboardInit(const char* title = nullptr, const char* initialText = nullptr, int maxLength = OLED_KEYBOARD_MAX_LENGTH);
+// No default is intentional: adding a text field requires an explicit
+// dictation security decision at its call site.
+void oledKeyboardInit(const char* title, const char* initialText, int maxLength,
+                      OLEDKeyboardDictationPolicy dictationPolicy);
 void oledKeyboardReset();
 void oledKeyboardDisplay(Adafruit_SSD1306* display);
 // Convenience "curtain": if the keyboard overlay is active, draw it and return

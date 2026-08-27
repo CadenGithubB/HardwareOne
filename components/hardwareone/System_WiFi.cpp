@@ -467,11 +467,28 @@ const char* cmd_wifiadd(const String& originalCmd) {
   if (pri <= 0 && a.has(2)) pri = 1;
   bool hid = a.argBool(3, ssid.length() == 0);
   // Networks already in memory from settings.json. upsert fails for exactly
-  // two reasons — distinguish them, or a full list shows the blank-SSID text
+  // four reasons — distinguish them, or a full list shows the blank-SSID text
   // (the real "list full" line only went to broadcastOutput, which G2/web
   // callers reading the return value never see).
   if (!upsertWiFiNetwork(ssid, pass, pri, hid)) {
     if (ssid.length() == 0) return "Error: cannot add a WiFi network with a blank SSID";
+    // Mirror upsertWiFiNetwork's length guards. Without these the caller would
+    // fall through to the list-full text and report the wrong reason.
+    if (ssid.length() > 32) {
+      snprintf(getDebugBuffer(), 1024,
+               "Error: WiFi name is %u characters — the 802.11 maximum is 32",
+               (unsigned)ssid.length());
+      return getDebugBuffer();
+    }
+    if (pass.length() > 64) {
+      snprintf(getDebugBuffer(), 1024,
+               "Error: WiFi password is %u characters — the maximum is 64",
+               (unsigned)pass.length());
+      return getDebugBuffer();
+    }
+    if (ssid.indexOf('"') >= 0 || pass.indexOf('"') >= 0) {
+      return "Error: WiFi name and password cannot contain a double-quote (\")";
+    }
     snprintf(getDebugBuffer(), 1024,
              "Error: saved-network list is full (%d) — remove one with wifirm first", MAX_WIFI_NETWORKS);
     return getDebugBuffer();
@@ -495,6 +512,15 @@ const char* cmd_wifirm(const String& originalCmd) {
   
   String ssid = originalCmd;
   ssid.trim();
+  // Strip one layer of surrounding quotes. cmd_wifiadd parses through the
+  // quote-aware CommandArgs, but this takes the raw remainder so an SSID can be
+  // added quoted and then never removed quoted — OLED_Mode_Network.cpp:554
+  // builds `wifirm "<ssid>"` unconditionally, so its Forget action failed every
+  // time (G2_Page_Network.cpp:1598 sends it unquoted and worked). Keep the raw
+  // remainder otherwise, so an UNQUOTED SSID containing spaces still resolves.
+  if (ssid.length() >= 2 && ssid.startsWith("\"") && ssid.endsWith("\"")) {
+    ssid = ssid.substring(1, ssid.length() - 1);
+  }
   if (ssid.length() == 0) return "Error: invalid arguments — Usage: wifirm <ssid>";
   // Networks already in memory from settings.json
   bool ok = removeWiFiNetwork(ssid);
@@ -546,15 +572,12 @@ const char* cmd_wifipromote(const String& originalCmd) {
 // Core WiFi connection logic - shared by command and boot sequence
 // Returns true if connected, false otherwise
 bool connectToBestWiFiNetwork() {
-  if (gWifiNetworkCount == 0) {
-    return false;
-  }
-
   // Defensively re-arm the STA interface. If a caller previously did
   // WiFi.disconnect(true) / WIFI_OFF, WiFi.status() would report WL_STOPPED for
   // the whole timeout. When ESP-NOW owns the radio it is already up in
   // WIFI_AP_STA — keep that (WIFI_STA would drop the hidden AP that parks the
-  // ESP-NOW channel); otherwise ensure STA.
+  // ESP-NOW channel); otherwise ensure STA. Do this even with no saved networks:
+  // an explicit openwifi still means "enable WiFi" and must leave Scan usable.
   extern bool isEspNowInitialized();
   {
     WifiRadioMutationGuard radioGuard;
@@ -567,6 +590,8 @@ bool connectToBestWiFiNetwork() {
       return false;
     }
   }
+
+  if (gWifiNetworkCount == 0) return false;
 
   sortWiFiByPriority();
   gWifiUserCancelled = false;
@@ -585,7 +610,7 @@ bool connectToBestWiFiNetwork() {
     // this timeout disconnected it 2.4 s later — logged as "run -> init (0x0)",
     // reason 0 meaning WE dropped it, not the AP. A fresh attempt then joined
     // in 40 ms. 25 s gives the driver room for two full cycles.
-    connected = connectWiFiIndex(i, 25000, true);
+    connected = connectWiFiIndex(i, 35000, true);
     
     if (gWifiUserCancelled) {
       WifiRadioMutationGuard radioGuard;
@@ -616,10 +641,19 @@ bool connectToBestWiFiNetwork() {
 static bool gRadioForcedOff  = false;
 static bool gRadioPrevEspNow = false;  // ESP-NOW was up when we powered off
 static bool gRadioPrevWifi   = false;  // WiFi was active (connected OR auto-reconnecting) when we powered off
+static bool gRadioPrevStaIdle = false; // STA was powered but intentionally unassociated
 // A failed bounded ESP-NOW close leaves a retryable live lifecycle even though
 // its public initialized flag is already false. Preserve the original restore
 // snapshot until radiopower off either completes or is explicitly superseded.
 static bool gRadioPowerOffPending = false;
+
+static void clearRadioRestoreSnapshot() {
+  gRadioForcedOff = false;
+  gRadioPowerOffPending = false;
+  gRadioPrevEspNow = false;
+  gRadioPrevWifi = false;
+  gRadioPrevStaIdle = false;
+}
 
 const char* cmd_wificonnect(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -637,10 +671,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
   // An explicit open supersedes a previously failed radiopower-off transaction.
   // ESP-NOW's own pending close remains visible through espnowShutdownPending;
   // only the stale "restore what was running" snapshot is discarded here.
-  gRadioForcedOff = false;
-  gRadioPowerOffPending = false;
-  gRadioPrevEspNow = false;
-  gRadioPrevWifi = false;
+  clearRadioRestoreSnapshot();
 
   CommandArgs a(originalCmd);
   String prevSSID = WiFi.isConnected() ? WiFi.SSID() : String("");
@@ -684,7 +715,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
     // this timeout disconnected it 2.4 s later — logged as "run -> init (0x0)",
     // reason 0 meaning WE dropped it, not the AP. A fresh attempt then joined
     // in 40 ms. 25 s gives the driver room for two full cycles.
-    connected = connectWiFiIndex(index1 - 1, 25000);
+    connected = connectWiFiIndex(index1 - 1, 35000);
     if (!connected && prevSSID.length() > 0) {
       connectWiFiSSID(prevSSID, 15000);
     }
@@ -724,15 +755,66 @@ const char* cmd_wifidisconnect(const String& argsInput) {
   WiFi.setAutoReconnect(false);
 
   extern bool isEspNowInitialized();
-  const bool espnowHoldsRadio = isEspNowInitialized();
+  bool espnowHoldsRadio = isEspNowInitialized();
+#if ENABLE_ESPNOW
+  // deinitEspNow clears `initialized` BEFORE its bounded waits, so a closeespnow
+  // that timed out leaves espnow_task/espnow_tx and the esp_now driver alive with
+  // isEspNowInitialized() == false. Powering the radio down under them would
+  // esp_wifi_deinit() beneath a live esp_now_send(). radioPowerOff already pairs
+  // these two checks; match it.
+  {
+    extern bool espnowShutdownPending();
+    if (espnowShutdownPending()) espnowHoldsRadio = true;
+  }
+#endif
   if (espnowHoldsRadio) {
     // ESP-NOW owns the radio — drop the association but KEEP the radio up (mode,
     // driver, PS untouched). The WIFI_STA_DISCONNECTED event re-pins the ESP-NOW
     // channel on espnow_task.
     WiFi.disconnect();   // association drop only
   } else {
-    // Nothing else needs the radio — power it down fully.
-    WiFi.disconnect(true);   // true = also power down the radio
+    // Nothing else needs the radio — power it down for real.
+    //
+    // WiFi.disconnect(true) ALONE is not a power-down. It reaches STAClass::end()
+    // -> enableSTA(false) -> mode(current & ~WIFI_MODE_STA) (WiFiGeneric.cpp),
+    // which only clears the STA bit. From plain WIFI_MODE_STA that lands in NULL
+    // and does stop the radio — but from the WIFI_MODE_APSTA a previous ESP-NOW
+    // session leaves behind (deinitEspNow restores no mode), it lands in
+    // WIFI_MODE_AP: radio still powered, hidden channel-parking AP still
+    // beaconing, while this command reported "WiFi off."
+    //
+    // ORDER IS LOAD-BEARING — a bare WiFi.mode(WIFI_OFF) here PANICS.
+    // mode(NULL) from a mode that still has the AP bit takes WiFiGeneric.cpp's
+    // `cm && !m` branch -> espWiFiStop() -> esp_wifi_stop() AND, with no drain in
+    // between, wifiLowLevelDeinit(), which esp_netif_destroy_default_wifi()s BOTH
+    // netifs. But esp_wifi_stop() only POSTS WIFI_EVENT_AP_STOP; the AP netif's
+    // dhcps_stop() runs later on sys_evt out of esp_netif_action_stop() — against
+    // an esp_netif this task already freed. Observed as a use-after-free: the
+    // freed block was reused for JSON and the stale callback jumped to 0x222c226e
+    // ('n","'), IllegalInstruction. Only the AP carries a DHCP server, which is
+    // why the plain-STA shape below has always been safe.
+    //
+    // So: drop the AP as a REAL mode change (mode stays non-NULL -> no deinit),
+    // let AP_STOP drain, then do the historically safe STA power-down.
+    // WiFi.mode(WIFI_STA) rather than a raw esp_wifi_set_mode so AP.onDisable()
+    // runs and Arduino's own AP netif bookkeeping does not dangle.
+    //
+    // A WiFi mode change also disables Core-0 interrupts, so pause I2C polling
+    // first (same discipline as radioPowerOff and initEspNow).
+    I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+    if (mgr) mgr->pausePolling();
+    vTaskDelay(pdMS_TO_TICKS(50));  // let in-flight I2C transactions complete
+
+    wifi_mode_t curMode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&curMode) == ESP_OK && (curMode & WIFI_MODE_AP)) {
+      WiFi.mode(WIFI_STA);              // AP down, driver still up — no deinit
+      vTaskDelay(pdMS_TO_TICKS(150));   // sys_evt drains AP_STOP -> dhcps_stop
+    }
+
+    // STA -> NULL. This does deinit, but with no AP netif left there is no
+    // pending stop to race. WIFI_OFF afterwards would be a no-op.
+    WiFi.disconnect(true);
+    if (mgr) mgr->resumePolling();
   }
   radioGuard.release();
 
@@ -766,15 +848,16 @@ WifiRadioState wifiRadioState() {
   if (WiFi.isConnected()) return WIFI_RADIO_CONNECTED;
   wifi_mode_t mode = WIFI_MODE_NULL;
   if (esp_wifi_get_mode(&mode) != ESP_OK) mode = WIFI_MODE_NULL;
+  if (mode == WIFI_MODE_NULL) return WIFI_RADIO_OFF;
   extern bool isEspNowInitialized();
-  if (mode != WIFI_MODE_NULL && isEspNowInitialized()) return WIFI_RADIO_UP_FOR_ESPNOW;
-  return WIFI_RADIO_OFF;
+  if (isEspNowInitialized()) return WIFI_RADIO_UP_FOR_ESPNOW;
+  return WIFI_RADIO_UP_DISCONNECTED;
 }
 
 // True whenever the 2.4GHz radio is powered up at all — connected to an AP,
-// OR up-but-unassociated because ESP-NOW holds it. False ONLY when the radio is
-// fully powered down. This is the RADIO axis; WiFi.isConnected() is the separate
-// CONNECTION axis. Every surface shows the two side by side.
+// up-but-unassociated for WiFi, OR held by ESP-NOW. False ONLY when the radio
+// is fully powered down. This is the RADIO axis; WiFi.isConnected() is the
+// separate CONNECTION axis. Every surface shows the two side by side.
 bool wifiRadioOn() { return wifiRadioState() != WIFI_RADIO_OFF; }
 
 // ---------------------------------------------------------------------------
@@ -806,7 +889,15 @@ static RadioPowerOffResult radioPowerOff() {
   // is "active" even while out of range (the out-and-about case), so it must be
   // restored on power-on — otherwise the device would never rejoin home range.
   if (!gRadioPowerOffPending) {
-    gRadioPrevWifi = WiFi.isConnected() || WiFi.getAutoReconnect();
+    gRadioPrevStaIdle = wifiRadioState() == WIFI_RADIO_UP_DISCONNECTED;
+    // wifiInitialized gates getAutoReconnect() because Arduino's STAClass
+    // constructor defaults _autoReconnect to TRUE (STA.cpp:231) and this
+    // firmware only ever writes it from a WiFi lifecycle path. Without the
+    // guard, a device that never armed WiFi this boot (ESP-NOW up, WiFi idle)
+    // captured intent=true and a later `radiopower on` ran a full blocking
+    // connect sweep nobody asked for. Same guarded expression, same reason, as
+    // cmd_wifiautoreconnect below.
+    gRadioPrevWifi = WiFi.isConnected() || (wifiInitialized && WiFi.getAutoReconnect());
 #if ENABLE_ESPNOW
     gRadioPrevEspNow = isEspNowInitialized();
 #else
@@ -843,14 +934,24 @@ static RadioPowerOffResult radioPowerOff() {
   // result must not partially alter the still-live WiFi runtime state.
   WiFi.setAutoReconnect(false);
 
-  // Power the radio fully down. WiFi.mode(WIFI_OFF) is required (not just
-  // disconnect) so ESP-NOW's hidden AP also stops. A WiFi mode change disables
-  // Core-0 interrupts, so pause I2C polling exactly like initEspNow does.
+  // Power the radio fully down, AP first. See the long note in
+  // cmd_wifidisconnect: mode(NULL) while the AP bit is still set frees both
+  // esp_netifs synchronously while WIFI_EVENT_AP_STOP is still queued on
+  // sys_evt, and the AP netif's deferred dhcps_stop() then runs against freed
+  // memory. ESP-NOW is torn down above, so its channel-parking AP is exactly
+  // the AP at risk here. A WiFi mode change disables Core-0 interrupts, so
+  // pause I2C polling exactly like initEspNow does.
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (mgr) mgr->pausePolling();
   vTaskDelay(pdMS_TO_TICKS(50));  // let in-flight I2C transactions complete
-  WiFi.disconnect(true);          // drop association + power down the STA
-  WiFi.mode(WIFI_OFF);            // NULL mode — kills the hidden AP too
+
+  wifi_mode_t curMode = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&curMode) == ESP_OK && (curMode & WIFI_MODE_AP)) {
+    WiFi.mode(WIFI_STA);              // AP down, driver still up — no deinit
+    vTaskDelay(pdMS_TO_TICKS(150));   // sys_evt drains AP_STOP -> dhcps_stop
+  }
+
+  WiFi.disconnect(true);          // STA -> NULL; no AP netif left to race
   if (mgr) mgr->resumePolling();
   radioGuard.release();
 
@@ -866,17 +967,39 @@ static RadioPowerOffResult radioPowerOff() {
   return RadioPowerOffResult::OK;
 }
 
+// Power an unassociated STA back up without starting a connection attempt. This
+// is intentionally separate from ensureWiFiInitialized(): after radiopower off,
+// the application-level initialization latch can still be true while the live
+// driver mode is WIFI_OFF. The master WiFi switch remains authoritative.
+static bool ensureStaRadioMode() {
+  if (!gSettings.wifiEnabled) {
+    WARN_WIFIF("[WiFi] radio enable refused: WiFi is disabled in Settings");
+    return false;
+  }
+  if (wifiRadioOn()) return true;
+
+  WifiRadioMutationGuard radioGuard;
+  if (!radioGuard.acquired()) {
+    WARN_WIFIF("[WiFi] radio busy; cannot enable STA mode");
+    return false;
+  }
+  if (!WiFi.mode(WIFI_STA)) {
+    ERROR_WIFIF("[WiFi] failed to enable STA mode");
+    return false;
+  }
+  return true;
+}
+
 // Bring the radio back UP. If WE powered it off (gRadioForcedOff), restore exactly
 // what was running; otherwise the radio reached OFF by another path and there is no
-// trustworthy snapshot, so bring up the configured default.
-static void radioPowerOn() {
+// trustworthy snapshot, so bring up the configured default. Keep an owned restore
+// snapshot until the live radio is actually up, so a busy coordinator or mode
+// failure remains retryable and cannot be reported as success.
+static bool radioPowerOn() {
   const bool ownedOff = gRadioForcedOff;   // did radiopower off cause this off-state?
   const bool restoreEspNow = gRadioPrevEspNow;
   const bool restoreWifi = gRadioPrevWifi;
-  gRadioForcedOff = false;
-  gRadioPowerOffPending = false;
-  gRadioPrevEspNow = false;
-  gRadioPrevWifi = false;
+  const bool restoreStaIdle = gRadioPrevStaIdle;
 
   if (ownedOff) {
     // Restore exactly what was torn down. ESP-NOW first: cmd_espnow_init sets
@@ -885,11 +1008,19 @@ static void radioPowerOn() {
 #if ENABLE_ESPNOW
     if (restoreEspNow && !isEspNowInitialized()) cmd_espnow_init("");
 #endif
-    if (restoreWifi) {
+    // ESP-NOW may already have brought the shared radio up. Otherwise restore
+    // the prior WiFi-owned radio state only while the master switch permits it.
+    if ((restoreStaIdle || restoreWifi) && gSettings.wifiEnabled &&
+        !wifiRadioOn() && !ensureStaRadioMode()) {
+      return false;
+    }
+    if (restoreWifi && gSettings.wifiEnabled) {
       WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);  // honour the user's hunt preference
       setupWiFi();                  // sets mode (AP_STA if ESP-NOW up, else STA), re-associates
     }
-    return;
+    const bool restored = wifiRadioOn();
+    if (restored) clearRadioRestoreSnapshot();
+    return restored;
   }
 
   // The radio was off for some OTHER reason (closewifi/closeespnow, or boot-idle),
@@ -898,10 +1029,16 @@ static void radioPowerOn() {
   // but do NOT auto-start ESP-NOW — that sensitive auth/RCE channel must be started
   // explicitly (openespnow), never silently resurrected. Reads gSettings only;
   // never ramFlushResolve, never writes settings (boot autostart stays independent).
-  if (gSettings.wifiEnabled && gSettings.wifiAutoStart) {
+  // "Radio ON" must power the radio even when boot auto-start is disabled; it
+  // simply leaves STA unassociated in that case. This also makes Scan usable.
+  if (!ensureStaRadioMode()) return false;
+  if (gSettings.wifiAutoStart) {
     WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);
     setupWiFi();
   }
+  const bool enabled = wifiRadioOn();
+  if (enabled) clearRadioRestoreSnapshot();
+  return enabled;
 }
 
 // `radiopower [on|off|toggle]` — the airplane-mode switch. Distinct from
@@ -923,13 +1060,12 @@ const char* cmd_radiopower(const String& originalCmd) {
     if (wifiRadioOn()) {
       // Treat an explicit ON as cancellation of a failed OFF transaction. The
       // radio never went down, so there is nothing to restore later.
-      gRadioPowerOffPending = false;
-      gRadioForcedOff = false;
-      gRadioPrevEspNow = false;
-      gRadioPrevWifi = false;
+      clearRadioRestoreSnapshot();
       return "Radio already on.";
     }
-    radioPowerOn();
+    if (!radioPowerOn()) {
+      return "Error: radio could not be enabled (WiFi disabled, radio busy, or restore failed).";
+    }
     return "Radio on (runtime only).";
   }
   if (!wifiRadioOn() && !gRadioPowerOffPending) return "Radio already off.";
@@ -979,11 +1115,17 @@ static bool appendWifiScanJson(const WifiScanRecord& record,
                                void* opaque) {
   auto* context = static_cast<WifiScanJsonContext*>(opaque);
   JsonObject object = context->networks.add<JsonObject>();
+  // ArduinoJson copies mutable char* into the document but stores const char*
+  // by pointer. record lives on the scan walker's stack and is reused for
+  // every AP, so its ssid must be staged through a mutable buffer (as bssid
+  // and auth already are) or all rows alias one dead stack slot.
+  char ssid[sizeof(record.ssid)];
   char bssid[18];
   char auth[4];
+  strlcpy(ssid, record.ssid, sizeof(ssid));
   formatWifiBssid(record.bssid, bssid);
   snprintf(auth, sizeof(auth), "%u", (unsigned)record.authMode);
-  object["ssid"] = record.ssid;
+  object["ssid"] = ssid;
   object["rssi"] = (long)record.rssi;
   object["bssid"] = bssid;
   object["channel"] = (long)record.channel;
@@ -1100,17 +1242,28 @@ const char* cmd_wifitxpower(const String& argsInput) {
   return getDebugBuffer();
 }
 
+esp_err_t wifiFormatTxPower(char* buf, size_t cap, int8_t* rawOut) {
+  if (!buf || cap == 0) return ESP_ERR_INVALID_ARG;
+  int8_t q = 0;
+  esp_err_t err = esp_wifi_get_max_tx_power(&q);
+  if (err != ESP_OK) return err;
+  if (rawOut) *rawOut = q;
+  snprintf(buf, cap, "%.2f dBm", q / 4.0f);  // quarter-dBm -> dBm, the one divide
+  return ESP_OK;
+}
+
 const char* cmd_wifigettxpower(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
+  char txt[24];
   int8_t q = 0;
-  esp_err_t err = esp_wifi_get_max_tx_power(&q);
+  esp_err_t err = wifiFormatTxPower(txt, sizeof(txt), &q);
   if (err != ESP_OK) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to get tx power: %d", err);
     return getDebugBuffer();
   }
-  snprintf(getDebugBuffer(), 1024, "TX power: %.2f dBm (raw=%d)", q / 4.0f, (int)q);
+  snprintf(getDebugBuffer(), 1024, "TX power: %s (raw=%d)", txt, (int)q);
   return getDebugBuffer();
 }
 
@@ -1210,6 +1363,36 @@ bool upsertWiFiNetwork(const String& ssid, const String& password, int priority,
     broadcastOutput("ERROR: cannot save a WiFi network with a blank name");
     return false;
   }
+  // Reject over-long credentials loudly rather than silently mangling them at
+  // connect time. 32 octets is the 802.11 SSID maximum and 64 the WPA2 password
+  // maximum (a raw hex PSK); both match the wifi_sta_config_t field widths, so
+  // anything longer could never have been stored usefully.
+  if (ssid.length() > 32) {
+    ERROR_WIFIF("Refusing to save WiFi network: SSID is %u chars (max 32)",
+                (unsigned)ssid.length());
+    broadcastOutput("ERROR: WiFi name is too long (max 32 characters)");
+    return false;
+  }
+  if (password.length() > 64) {
+    ERROR_WIFIF("Refusing to save WiFi network '%s': password is %u chars (max 64)",
+                ssid.c_str(), (unsigned)password.length());
+    broadcastOutput("ERROR: WiFi password is too long (max 64 characters)");
+    return false;
+  }
+  // A double-quote in either field cannot survive the quoted command line every
+  // UI builds (`wifiadd "<ssid>" "<pass>"`). CommandArgs has no escape support,
+  // so the quote ENDS the token early and the rest becomes a separate argument:
+  // `wifiadd "My"Net" pass123` stores ssid="My", password='Net"' — the WRONG
+  // CREDENTIALS, silently. It also shifts the audit redactor's token positions.
+  // G2 already refuses this at its own entry (G2_Page_Network.cpp); doing it
+  // here covers OLED, web, CLI, the wizard and first-time setup from the one
+  // chokepoint every save path funnels through.
+  if (ssid.indexOf('"') >= 0 || password.indexOf('"') >= 0) {
+    ERROR_WIFIF("Refusing to save WiFi network: SSID or password contains a double-quote");
+    broadcastOutput("ERROR: WiFi name and password cannot contain a double-quote");
+    return false;
+  }
+
   int idx = findWiFiNetwork(ssid);
   if (idx >= 0) {
     if (password.length() == 0 && gWifiNetworks[idx].password.length() > 0) {
@@ -1379,14 +1562,25 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
   memset(&wifi_config, 0, sizeof(wifi_config_t));
 
   // Copy SSID
-  size_t ssid_len = min((size_t)nw.ssid.length(), sizeof(wifi_config.sta.ssid) - 1);
+  // Fixed-width fields, NOT C strings: a full-width value carries no NUL.
+  // wifi_sta_config_t has no ssid_len companion (unlike wifi_ap_config_t), so
+  // the driver derives the length as min(strnlen(ssid,32),32) — reserving a
+  // terminator with `- 1` made a legal 32-char SSID join as 31 chars and fail
+  // forever. Arduino's own fill does the same full-width copy
+  // (libraries/WiFi/src/STA.cpp:35-47, called with 32/64 at :394/:397).
+  //
+  // Do NOT re-add a `buf[len] = 0` here: at full width that writes
+  // sta.ssid[32], which IS sta.password[0] (the two arrays are adjacent in
+  // esp_wifi_types_generic.h). The memset above already supplies the
+  // terminator for anything shorter than the field.
+  size_t ssid_len = min((size_t)nw.ssid.length(), sizeof(wifi_config.sta.ssid));
   memcpy(wifi_config.sta.ssid, nw.ssid.c_str(), ssid_len);
-  wifi_config.sta.ssid[ssid_len] = '\0';
 
   // Copy password (use decrypted version)
-  size_t pass_len = min((size_t)actualPassword.length(), sizeof(wifi_config.sta.password) - 1);
+  // Same contract as the SSID above. Only a 64-hex-digit raw PSK reaches full
+  // width; every legal 8-63 char ASCII passphrase is unaffected either way.
+  size_t pass_len = min((size_t)actualPassword.length(), sizeof(wifi_config.sta.password));
   memcpy(wifi_config.sta.password, actualPassword.c_str(), pass_len);
-  wifi_config.sta.password[pass_len] = '\0';
 
   // Try WPA_WPA2_PSK (auto-detect) instead of forcing WPA2
   wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA_WPA2_PSK;
@@ -1399,15 +1593,67 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
   wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;  // Connect to strongest signal
 
   DEBUG_WIFIF("[connectWiFiIndex] Configuring WiFi:");
-  DEBUG_WIFIF("[connectWiFiIndex]   SSID: '%s' (len=%d)", wifi_config.sta.ssid, ssid_len);
-  DEBUG_WIFIF("[connectWiFiIndex]   Password: '%s' (len=%d)", wifi_config.sta.password, pass_len);
+  // %.*s, never %s: a full-width SSID has no terminator and sta.password
+  // follows it in memory, so %s would print the plaintext PSK into the
+  // PSRAM-backed debug queue — defeating the redaction two lines below.
+  DEBUG_WIFIF("[connectWiFiIndex]   SSID: '%.*s' (len=%d)",
+              (int)ssid_len, wifi_config.sta.ssid, ssid_len);
+  // Length only — the plaintext PSK must not enter the (PSRAM-backed) debug
+  // queue. Same redaction rationale as the commented-out line above at the
+  // String-level dump.
+  DEBUG_WIFIF("[connectWiFiIndex]   Password: (redacted, len=%d)", pass_len);
   DEBUG_WIFIF("[connectWiFiIndex]   Auth mode: WPA_WPA2_PSK");
   DEBUG_WIFIF("[connectWiFiIndex]   Scan method: FAST, Sort: BY_SIGNAL");
 
   err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
   DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_config() returned: %d", err);
 
-  // Multi-attempt retry loop with exponential backoff
+  // Multi-attempt retry loop with exponential backoff.
+  //
+  // WINDOW SIZING (callers pass 35000 ms; see :587 and :692). The driver's own
+  // handshake timer is 10 s and it retries INTERNALLY, so a per-attempt window
+  // must be a whole multiple of 10 s plus slack. Anything else guarantees that
+  // one driver cycle gets cut off mid-flight, which the log shows as
+  // "run -> init (0x0)" -- reason 0, i.e. WE hung up, not the AP.
+  //
+  // History: 12 s clipped cycle 2 (fixed 2026-08-18 by moving to 25 s, when
+  // cycle 2 was succeeding at ~10.15 s). MEASURED 2026-08-26 on the same board
+  // and AP, the link degraded to needing cycle 3, and 25 s clipped THAT one at
+  // 5.12 s in -- the same bug one cycle deeper. 35 s fits three full cycles
+  // with 5 s of slack, so a cycle completing at 30.x s is not clipped by
+  // timing jitter. 30 s would be exactly three cycles and no margin.
+  //
+  // This buys time for a link that is genuinely marginal; it does not make the
+  // link better. The root cause is still open.
+  //
+  // PHY CALIBRATION IS EXONERATED -- do not chase it. An earlier version of
+  // this comment, and the project memory note, blamed "the PHY calibration blob
+  // that never survives a power cycle". That is factually wrong and cost time:
+  //   * The cold-boot log line reads mode(0). phy_init.c:916 forces
+  //     calibration_mode to PHY_RF_CAL_FULL(=2) whenever the NVS load fails, so
+  //     mode(0) PROVES esp_phy_load_cal_data_from_nvs() returned ESP_OK. The
+  //     blob persists, and its version/MAC/length all matched.
+  //   * register_chipv7_phy (closed-source libphy, disassembled 2026-08-26) has
+  //     two paths to ESP_CAL_DATA_CHECK_FAIL: a checksum at +0x11a, and a DRIFT
+  //     check at +0x20c that compares a pre-calibration snapshot against live
+  //     values after rf_init/bb_init, flagging any field that moved by >= 5
+  //     (11 `blti a10,5` guards). The checksum path reads only bytes identical
+  //     on warm and cold boots, so it would fire on EVERY boot; the message
+  //     appears only on cold boots, so the DRIFT path is the one firing.
+  //   * rf_cal_data_recovery at +0x1b6 loads the stored trim into hardware
+  //     BEFORE rf_init. The radio then runs on freshly measured values. The
+  //     message means the drift detector worked, not that anything was lost.
+  //   * Observed directly: boot #50 (soft reset) ACCEPTED its calibration and
+  //     still failed the handshake identically to boot #51, which rejected and
+  //     recalibrated. Calibration state does not predict the WiFi outcome.
+  //
+  // BETTER LEAD, untested: makeArduinoCompatibleWifiInitConfig() below sets
+  // cfg.static_rx_buf_num = 4 while CONFIG_ESP_WIFI_RX_BA_WIN stays 16.
+  // esp_wifi/Kconfig:39 says static RX buffers should be >= the BA window.
+  // Starving RX under a retransmit-heavy weak link is a plausible way to drop
+  // EAPOL frames and produce exactly this reason-204 signature. Needs an A/B,
+  // and 16 static RX buffers are internal-DRAM DMA memory on a DRAM-tight
+  // board -- measure the heap before committing to it.
   const int kMaxWifiAttempts = 3;
   unsigned long retryBackoffMs = 1500;
 
@@ -1693,10 +1939,17 @@ const char* cmd_ntpsync(const String& argsInput) {
     cliHint("NTP needs an internet connection - check 'wifistatus' and connect with 'openwifi' if offline");
     return "Error: NTP sync failed";
   }
+  const NtpRuntimeStatus runtime = getNtpRuntimeStatus();
   switch (outcome) {
     case NtpSyncOutcome::Reply:       return "NTP sync complete (server replied)";
-    case NtpSyncOutcome::KeptPrior:   return "No NTP reply yet — clock kept its current time; retrying in background";
-    case NtpSyncOutcome::RtcFallback: return "No NTP reply — time taken from RTC instead";
+    case NtpSyncOutcome::KeptPrior:
+      return runtime.clientArmed
+                 ? "No NTP reply within wait window — clock kept; SNTP client remains armed"
+                 : "No NTP reply within wait window — clock kept; SNTP client is stopped";
+    case NtpSyncOutcome::RtcFallback:
+      return runtime.clientArmed
+                 ? "No NTP reply within wait window — time taken from RTC; SNTP client remains armed"
+                 : "No NTP reply within wait window — time taken from RTC; SNTP client is stopped";
     default:                          return "NTP sync complete";
   }
 }
@@ -1708,6 +1961,17 @@ const char* cmd_ntpstatus(const String& argsInput) {
   extern uint32_t gNTPAnchorId;
   extern uint32_t gBootCounter;
   extern bool gTimeSyncedMarkerWritten;
+
+  const NtpRuntimeStatus runtime = getNtpRuntimeStatus();
+
+  char backupServers[64];
+#if CONFIG_LWIP_SNTP_MAX_SERVERS >= 3
+  strlcpy(backupServers, "time.google.com, time.cloudflare.com", sizeof(backupServers));
+#elif CONFIG_LWIP_SNTP_MAX_SERVERS == 2
+  strlcpy(backupServers, "time.google.com", sizeof(backupServers));
+#else
+  strlcpy(backupServers, "disabled in this build", sizeof(backupServers));
+#endif
 
   // Shared tz label (the hand-rolled "UTC%+d:%02d" here lost the sign for
   // negative sub-hour offsets: -30 min printed as UTC+0:30).
@@ -1725,22 +1989,48 @@ const char* cmd_ntpstatus(const String& argsInput) {
     strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
   }
 
+  char lastReplyStr[72] = "none this boot";
+  if (runtime.replyCount > 0) {
+    time_t replyTime = static_cast<time_t>(runtime.lastReplyEpoch);
+    char replyWall[32] = "time unavailable";
+    struct tm replyInfo;
+    if (Clock::isValidEpoch(replyTime) && localtime_r(&replyTime, &replyInfo)) {
+      strftime(replyWall, sizeof(replyWall), "%Y-%m-%d %H:%M:%S", &replyInfo);
+    }
+    snprintf(lastReplyStr, sizeof(lastReplyStr), "%s (%llus ago)",
+             replyWall,
+             static_cast<unsigned long long>(runtime.lastReplyAgeMs / 1000ULL));
+  }
+
   snprintf(getDebugBuffer(), 1024,
     "NTP Status:\n"
     "  Primary server : %s\n"
-    "  Backup servers : time.google.com, time.cloudflare.com\n"
+    "  Backup servers : %s\n"
     "  Timezone       : %s (%+d min)\n"
     "  Current time   : %s\n"
     "  Time source    : %s\n"
-    "  Synced this boot: %s\n"
+    "  SNTP client    : %s\n"
+    "  NTP replies    : %lu this boot\n"
+    "  Last NTP reply : %s\n"
+    "  Foreground timeouts: %lu\n"
+    "  Late replies   : %lu\n"
+    "  Late-reply watch: %s\n"
+    "  Clock marker   : %s\n"
     "  Boot anchor ID : %lu\n"
     "  Boot counter   : %lu\n"
     "  WiFi           : %s",
     gSettings.ntpServer.c_str(),
+    backupServers,
     tzStr, tzMin,
     timeStr,
     Clock::syncSourceName(Clock::syncSource()),
-    gTimeSyncedMarkerWritten ? "yes" : "no",
+    runtime.clientArmed ? "armed" : "stopped",
+    static_cast<unsigned long>(runtime.replyCount),
+    lastReplyStr,
+    static_cast<unsigned long>(runtime.foregroundTimeoutCount),
+    static_cast<unsigned long>(runtime.lateReplyCount),
+    runtime.awaitingLateReply ? "armed" : "not armed",
+    gTimeSyncedMarkerWritten ? "written" : "not written",
     (unsigned long)gNTPAnchorId,
     (unsigned long)gBootCounter,
     WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "not connected"
@@ -1911,10 +2201,10 @@ const char* cmd_certgen(const String& argsInput) {
   // mbedtls_entropy_context alone is ~1KB, plus ctr_drbg + x509write_cert + internal call depth
   // Use PSRAM instead of DRAM to preserve precious internal RAM
   int ret = 0;
-  mbedtls_pk_context* key = (mbedtls_pk_context*)heap_caps_malloc(sizeof(mbedtls_pk_context), MALLOC_CAP_SPIRAM);
-  mbedtls_x509write_cert* crt = (mbedtls_x509write_cert*)heap_caps_malloc(sizeof(mbedtls_x509write_cert), MALLOC_CAP_SPIRAM);
-  mbedtls_entropy_context* entropy = (mbedtls_entropy_context*)heap_caps_malloc(sizeof(mbedtls_entropy_context), MALLOC_CAP_SPIRAM);
-  mbedtls_ctr_drbg_context* ctr_drbg = (mbedtls_ctr_drbg_context*)heap_caps_malloc(sizeof(mbedtls_ctr_drbg_context), MALLOC_CAP_SPIRAM);
+  mbedtls_pk_context* key = (mbedtls_pk_context*)ps_alloc(sizeof(mbedtls_pk_context), AllocPref::RequirePSRAM, "wifi.cert.key");
+  mbedtls_x509write_cert* crt = (mbedtls_x509write_cert*)ps_alloc(sizeof(mbedtls_x509write_cert), AllocPref::RequirePSRAM, "wifi.cert.crt");
+  mbedtls_entropy_context* entropy = (mbedtls_entropy_context*)ps_alloc(sizeof(mbedtls_entropy_context), AllocPref::RequirePSRAM, "wifi.cert.entropy");
+  mbedtls_ctr_drbg_context* ctr_drbg = (mbedtls_ctr_drbg_context*)ps_alloc(sizeof(mbedtls_ctr_drbg_context), AllocPref::RequirePSRAM, "wifi.cert.drbg");
   unsigned char* certPem = NULL;
   unsigned char* keyPem = NULL;
 
@@ -2019,8 +2309,8 @@ const char* cmd_certgen(const String& argsInput) {
   mbedtls_x509write_crt_set_authority_key_identifier(crt);
 
   // Write certificate and key to PEM format (PSRAM-allocated)
-  certPem = (unsigned char*)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
-  keyPem = (unsigned char*)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+  certPem = (unsigned char*)ps_alloc(4096, AllocPref::RequirePSRAM, "wifi.cert.pem");
+  keyPem = (unsigned char*)ps_alloc(4096, AllocPref::RequirePSRAM, "wifi.key.pem");
   if (!certPem || !keyPem) {
     snprintf(gDebugBuffer, 1024, "Error: Failed to allocate PEM buffers in PSRAM");
     goto cleanup;
@@ -2332,38 +2622,11 @@ static const SettingEntry wifiSettingsEntries[] = {
   // command could reach them (cmdKey=nullptr + readOnly) and real credentials
   // live in network.wifi.networks[]. Their only visible effect was a confusing
   // empty "WiFi SSID" row on every settings surface.
-  { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
-  // Timezone offsets as "minutes|label" pairs — the schema renderer's enum
-  // widget reads this and produces a select dropdown. CLI verb stays "tz".
-  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   0, 0, nullptr, -720, 840, "Timezone",
-    "-720|UTC-12 (Baker Island),"
-    "-660|UTC-11 (Samoa),"
-    "-600|UTC-10 (Hawaii/HST),"
-    "-540|UTC-9 (Alaska/AKST),"
-    "-480|UTC-8 (Pacific/PST),"
-    "-420|UTC-7 (Mountain/MST · Pacific/PDT),"
-    "-360|UTC-6 (Central/CST · Mountain/MDT),"
-    "-300|UTC-5 (Eastern/EST · Central/CDT),"
-    "-240|UTC-4 (Atlantic/AST · Eastern/EDT),"
-    "-180|UTC-3 (Argentina · Atlantic/ADT),"
-    "-120|UTC-2 (Mid-Atlantic),"
-    "-60|UTC-1 (Azores),"
-    "0|UTC+0 (London/GMT · Dublin),"
-    "60|UTC+1 (Berlin/Paris/CET · London/BST),"
-    "120|UTC+2 (Cairo/Athens/EET · Paris/CEST),"
-    "180|UTC+3 (Moscow/Baghdad),"
-    "240|UTC+4 (Dubai/Baku),"
-    "300|UTC+5 (Karachi/Tashkent),"
-    "330|UTC+5:30 (Mumbai/Delhi/IST),"
-    "360|UTC+6 (Dhaka/Almaty),"
-    "420|UTC+7 (Bangkok/Jakarta),"
-    "480|UTC+8 (Beijing/Singapore),"
-    "540|UTC+9 (Tokyo/Seoul/JST),"
-    "570|UTC+9:30 (Adelaide/ACST),"
-    "600|UTC+10 (Sydney/AEST),"
-    "660|UTC+11 (Solomon Islands),"
-    "720|UTC+12 (Fiji/Auckland/NZST)",
-    false, nullptr, "tzoffsetminutes" }
+  // ntpServer + tzOffsetMinutes moved to clockSettingsModule ("system.time",
+  // System_Clock.cpp): the timezone is meaningful on a radioless build (RTC +
+  // manual time), but this module is inside #if ENABLE_WIFI, so a
+  // NET_LEVEL_DISABLED / CUSTOM_ENABLE_NET_WIFI=0 build had no row to persist
+  // it through and the setting reverted on every reboot.
 };
 
 static bool isWifiConnected() { return WiFi.status() == WL_CONNECTED; }

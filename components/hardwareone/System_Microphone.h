@@ -29,6 +29,12 @@ enum class MicRecordingState : uint8_t {
 using MicRecordingOwner = uint64_t;
 static constexpr MicRecordingOwner MIC_RECORDING_OWNER_MANUAL = 0;
 
+// User-facing speech-to-text captures share one hard recording ceiling. The
+// generic/manual recorder retains its separate 60-second safety cap; STT
+// callers stop sooner so a noisy room cannot strand the microphone for a full
+// minute. Keep the CM5 AudioConfig ceiling in sync with this value.
+static constexpr uint32_t MIC_STT_MAX_CAPTURE_MS = 30000u;
+
 // Result of an owner-scoped operation. OWNER_MISMATCH is deliberately distinct
 // from NOT_FOUND: callers must never fall back to the global/manual last result
 // after discovering that another capture owns the recorder.
@@ -137,10 +143,15 @@ MicRecordingOwnedOp getRecordingResultOwned(MicRecordingOwner owner,
 // absolute path is removed; a delayed cleanup therefore cannot cross owners.
 MicRecordingOwnedOp deleteRecordingOwned(MicRecordingOwner owner,
                                          const char* expectedFilename);
+// Internal post-publication cleanup fallback. `exactPath` must be the trusted
+// path copied from micRecordingPublishIdle for this owner; the implementation
+// independently requires the recorder directory and token-derived basename.
+// This remains safe if unrelated completions evict the owner's result-ring slot.
+MicRecordingOwnedOp deleteRecordingOwnedPublished(MicRecordingOwner owner,
+                                                  const char* exactPath);
 // Non-blocking source-loss hook for BLE/HAL callbacks. It never touches the
 // filesystem; the recorder task owns FINALIZING and publishes IDLE last.
 void microphoneNotifySourceLost();
-int getRecordingCount();
 String getRecordingsList();
 bool deleteRecording(const char* filename);
 

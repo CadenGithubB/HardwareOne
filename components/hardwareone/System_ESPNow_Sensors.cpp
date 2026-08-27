@@ -933,7 +933,8 @@ static bool startSensorBroadcasterLocked() {
       if (gSensorSpecs[i].bufBytes > maxBuf) maxBuf = gSensorSpecs[i].bufBytes;
     }
     if (maxBuf == 0) maxBuf = 256;  // defensive; should not happen if any sensor is enabled
-    gBroadcasterBuf = (char*)ps_malloc(maxBuf);
+    gBroadcasterBuf = (char*)ps_alloc(maxBuf, AllocPref::RequirePSRAM,
+                                      "espnow.sensor.broadcast");
     if (!gBroadcasterBuf) {
       DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Failed to alloc %u-byte PSRAM buffer", (unsigned)maxBuf);
       return false;

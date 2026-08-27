@@ -204,6 +204,12 @@ volatile uint32_t gFsmDropped = 0;
 
 void copyTag(char* dst, size_t dstSize, const char* src) {
   if (dstSize == 0) return;
+  // The tag's only consumers are DEBUG_G2F lines in applyEvent — skip the
+  // copy under the same gate (applyEvent prints "?" for an empty tag).
+  if (!(getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2))) {
+    dst[0] = '\0';
+    return;
+  }
   if (!src) { dst[0] = '\0'; return; }
   size_t n = 0;
   while (src[n] && n + 1 < dstSize) { dst[n] = src[n]; ++n; }

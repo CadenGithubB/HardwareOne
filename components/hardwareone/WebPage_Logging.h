@@ -7,8 +7,7 @@
 // Streamed inner content for logging page
 inline void streamLoggingInner(httpd_req_t* req) {
   // Load file browser script for log viewer
-  String fbScript = getFileBrowserScript();
-  httpd_resp_send_chunk(req, fbScript.c_str(), fbScript.length());
+  httpd_resp_send_chunk(req, getFileBrowserScript(), HTTPD_RESP_USE_STRLEN);
   
   // HTML structure
   httpd_resp_send_chunk(req, R"HTML(
@@ -86,17 +85,17 @@ inline void streamLoggingInner(httpd_req_t* req) {
     <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.75rem'>Logging Parameters</div>
         <label style='display:block;margin-bottom:1rem'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>File Path:</div>
-          <input id='config-path' type='text' placeholder='Generating timestamp...' class='form-input' style='width:100%;font-family:monospace' data-guest-hide>
+          <input id='config-path' type='text' placeholder='Generating timestamp...' class='form-input input-fit input-l' style='font-family:monospace' data-guest-hide>
           <small style='color:var(--panel-fg)'>Auto-generated with timestamp (NTP or uptime)</small>
         </label>
         <label style='display:block;margin-bottom:1rem'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Interval (ms):</div>
-          <input id='config-interval' type='number' value='5000' min='100' max='3600000' class='form-input' style='width:100%' data-guest-hide>
+          <input id='config-interval' type='number' value='5000' min='100' max='3600000' class='form-input input-fit' data-guest-hide>
           <small style='color:var(--panel-fg)'>Min: 100ms, Max: 1 hour (3600000ms)</small>
         </label>
         <label style='display:block;margin-bottom:1rem'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Format:</div>
-          <select id='config-format' class='form-input' style='width:100%' data-guest-hide>
+          <select id='config-format' class='form-input input-fit input-m' data-guest-hide>
             <option value='text'>Text (Human-readable)</option>
             <option value='csv'>CSV (Structured data)</option>
             <option value='track'>Track (GPS-only compact with signal loss dedup)</option>
@@ -104,12 +103,12 @@ inline void streamLoggingInner(httpd_req_t* req) {
         </label>
         <label style='display:block;margin-bottom:1rem'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Max File Size (bytes):</div>
-          <input id='config-maxsize' type='number' value='256000' min='10240' max='10485760' class='form-input' style='width:100%' data-guest-hide>
+          <input id='config-maxsize' type='number' value='256000' min='10240' max='10485760' class='form-input input-fit input-m' data-guest-hide>
           <small style='color:var(--panel-fg)'>Min: 10KB, Max: 10MB</small>
         </label>
         <label style='display:block'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Rotations (old logs to keep):</div>
-          <input id='config-rotations' type='number' value='3' min='0' max='9' class='form-input' style='width:100%' data-guest-hide>
+          <input id='config-rotations' type='number' value='3' min='0' max='9' class='form-input input-fit' data-guest-hide>
           <small style='color:var(--panel-fg)'>0 = delete old logs, 1-9 = keep N old files</small>
         </label>
     
@@ -271,7 +270,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
     <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.75rem'>File Path & Options</div>
       <label style='display:block;margin-bottom:1rem'>
         <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Log File Path:</div>
-        <input id='sys-config-path' type='text' placeholder='Generating timestamp...' class='form-input' style='width:100%;font-family:monospace' data-guest-hide>
+        <input id='sys-config-path' type='text' placeholder='Generating timestamp...' class='form-input input-fit input-l' style='font-family:monospace' data-guest-hide>
         <small style='color:var(--panel-fg)'>Auto-generated with timestamp (NTP or uptime)</small>
       </label>
       <label style='display:flex;align-items:center;gap:0.5rem;cursor:pointer'>
@@ -412,7 +411,7 @@ window.onload = function() {
     hw.fetchJSON('/api/settings')
       .then(function(data) {
         if (data && data.user && data.user.isAdmin === true) {
-          document.getElementById('btn-switch-logs').style.display = '';
+          hw.$('btn-switch-logs').style.display = '';
         }
       })
       .catch(function(e) {
@@ -477,10 +476,10 @@ function generateDefaultFilename(preloadedTimeText) {
       console.log('[LOGGING] Section 3d: Using browser time:', timestamp);
       filename += timestamp;
     }
-    const format = document.getElementById('config-format').value;
+    const format = hw.$('config-format').value;
     filename += (format === 'csv' ? '.csv' : format === 'track' ? '.txt' : '.log');
     console.log('[LOGGING] Section 3e: Generated filename:', filename);
-    document.getElementById('config-path').value = filename;
+    hw.$('config-path').value = filename;
   }
   if (preloadedTimeText !== undefined) {
     applyTime(preloadedTimeText);
@@ -497,9 +496,9 @@ function generateDefaultFilename(preloadedTimeText) {
       String(now.getHours()).padStart(2, '0') + '-' +
       String(now.getMinutes()).padStart(2, '0') + '-' +
       String(now.getSeconds()).padStart(2, '0');
-    const format = document.getElementById('config-format').value;
+    const format = hw.$('config-format').value;
     const filename = '/logging_captures/sensors/sensors-' + timestamp + (format === 'csv' ? '.csv' : format === 'track' ? '.txt' : '.log');
-    document.getElementById('config-path').value = filename;
+    hw.$('config-path').value = filename;
   });
 }
 console.log('[LOGGING] Section 3g: generateDefaultFilename defined');
@@ -513,21 +512,21 @@ function refreshStatus(preloadedStatusText) {
     console.log('[LOGGING] Section 4c: Status response text:', text);
     if (text.includes('Unknown command') || text.includes('not found')) {
       console.log('[LOGGING] Section 4d: sensorlog command not available');
-      const statusDot = document.getElementById('status-dot');
-      const statusText = document.getElementById('status-text');
+      const statusDot = hw.$('status-dot');
+      const statusText = hw.$('status-text');
       statusDot.style.background = '#ffc107';
       statusText.textContent = 'Not Available';
       statusText.style.color = '#ffc107';
-      document.getElementById('btn-start').style.display = 'none';
-      document.getElementById('btn-stop').style.display = 'none';
+      hw.$('btn-start').style.display = 'none';
+      hw.$('btn-stop').style.display = 'none';
       return;
     }
     const isActive = text.includes('logging ACTIVE');
     console.log('[LOGGING] Section 4d: Logging active:', isActive);
-    const statusDot = document.getElementById('status-dot');
-    const statusText = document.getElementById('status-text');
-    const btnStart = document.getElementById('btn-start');
-    const btnStop = document.getElementById('btn-stop');
+    const statusDot = hw.$('status-dot');
+    const statusText = hw.$('status-text');
+    const btnStart = hw.$('btn-start');
+    const btnStop = hw.$('btn-stop');
     if (isActive) {
       statusDot.style.background = 'var(--success)';
       statusText.textContent = 'ACTIVE';
@@ -542,18 +541,18 @@ function refreshStatus(preloadedStatusText) {
       const sensorsMatch = text.match(/Sensors:\s*(.+)/);
       const lastwriteMatch = text.match(/Last write:\s*(.+)/);
       console.log('[LOGGING] Section 4e: Parsed active status - File:', fileMatch?.[1], 'Interval:', intervalMatch?.[1], 'Format:', formatMatch?.[1], 'Sensors:', sensorsMatch?.[1]);
-      document.getElementById('detail-file').textContent = fileMatch ? fileMatch[1] : '—';
-      document.getElementById('detail-interval').textContent = intervalMatch ? intervalMatch[1] + 'ms' : '—';
-      document.getElementById('detail-format').textContent = formatMatch ? formatMatch[1] : '—';
-      document.getElementById('detail-maxsize').textContent = maxsizeMatch ? parseInt(maxsizeMatch[1]).toLocaleString() + ' bytes' : '—';
-      document.getElementById('detail-rotations').textContent = rotationsMatch ? rotationsMatch[1] : '—';
-      document.getElementById('detail-sensors').textContent = sensorsMatch ? sensorsMatch[1].trim() : '—';
-      document.getElementById('detail-lastwrite').textContent = lastwriteMatch ? lastwriteMatch[1] : '—';
-      if (fileMatch) document.getElementById('config-path').value = fileMatch[1].trim();
-      if (intervalMatch) document.getElementById('config-interval').value = intervalMatch[1];
-      if (formatMatch) document.getElementById('config-format').value = formatMatch[1].toLowerCase();
-      if (maxsizeMatch) document.getElementById('config-maxsize').value = maxsizeMatch[1];
-      if (rotationsMatch) document.getElementById('config-rotations').value = rotationsMatch[1];
+      hw.$('detail-file').textContent = fileMatch ? fileMatch[1] : '—';
+      hw.$('detail-interval').textContent = intervalMatch ? intervalMatch[1] + 'ms' : '—';
+      hw.$('detail-format').textContent = formatMatch ? formatMatch[1] : '—';
+      hw.$('detail-maxsize').textContent = maxsizeMatch ? parseInt(maxsizeMatch[1]).toLocaleString() + ' bytes' : '—';
+      hw.$('detail-rotations').textContent = rotationsMatch ? rotationsMatch[1] : '—';
+      hw.$('detail-sensors').textContent = sensorsMatch ? sensorsMatch[1].trim() : '—';
+      hw.$('detail-lastwrite').textContent = lastwriteMatch ? lastwriteMatch[1] : '—';
+      if (fileMatch) hw.$('config-path').value = fileMatch[1].trim();
+      if (intervalMatch) hw.$('config-interval').value = intervalMatch[1];
+      if (formatMatch) hw.$('config-format').value = formatMatch[1].toLowerCase();
+      if (maxsizeMatch) hw.$('config-maxsize').value = maxsizeMatch[1];
+      if (rotationsMatch) hw.$('config-rotations').value = rotationsMatch[1];
     } else {
       statusDot.style.background = '#6c757d';
       statusText.textContent = 'INACTIVE';
@@ -565,12 +564,12 @@ function refreshStatus(preloadedStatusText) {
       const rotationsMatch = text.match(/Rotations:\s*(\d+)/);
       const sensorsMatch = text.match(/Sensors:\s*(.+)/);
       console.log('[LOGGING] Section 4f: Parsed inactive settings - Format:', formatMatch?.[1], 'MaxSize:', maxsizeMatch?.[1], 'Sensors:', sensorsMatch?.[1]);
-      if (formatMatch) document.getElementById('config-format').value = formatMatch[1].toLowerCase();
-      if (maxsizeMatch) document.getElementById('config-maxsize').value = maxsizeMatch[1];
-      if (rotationsMatch) document.getElementById('config-rotations').value = rotationsMatch[1];
+      if (formatMatch) hw.$('config-format').value = formatMatch[1].toLowerCase();
+      if (maxsizeMatch) hw.$('config-maxsize').value = maxsizeMatch[1];
+      if (rotationsMatch) hw.$('config-rotations').value = rotationsMatch[1];
       if (sensorsMatch) {
         const sensorStr = sensorsMatch[1].toLowerCase();
-        document.querySelectorAll('#sensors-pane input[type=checkbox]').forEach(function(cb) {
+        hw.qsa('#sensors-pane input[type=checkbox]').forEach(function(cb) {
           cb.checked = sensorStr.includes(cb.value);
         });
       }
@@ -585,8 +584,8 @@ function refreshStatus(preloadedStatusText) {
   .then(applyStatus)
   .catch(e => {
     console.error('[LOGGING] Section 4g: Status refresh error:', e);
-    document.getElementById('status-text').textContent = 'Error: ' + e.message;
-    document.getElementById('status-text').style.color = 'var(--danger)';
+    hw.$('status-text').textContent = 'Error: ' + e.message;
+    hw.$('status-text').style.color = 'var(--danger)';
   });
   // Also update auto-start status
   updateAutoStartStatus();
@@ -596,7 +595,7 @@ console.log('[LOGGING] Section 4h: refreshStatus defined');
 function updateAutoStartStatus(preloadedText) {
   function applyAutoStart(text) {
     const autostartMatch = text.match(/Auto-start:\s*(ON|OFF)/i);
-    const statusSpan = document.getElementById('autostart-status');
+    const statusSpan = hw.$('autostart-status');
     if (autostartMatch) {
       const isOn = autostartMatch[1].toUpperCase() === 'ON';
       statusSpan.textContent = isOn ? 'ON' : 'OFF';
@@ -628,8 +627,8 @@ function toggleAutoStart() {
 console.log('[LOGGING] Section 6: Start logging function');
 async function startLogging() {
   console.log('[LOGGING] Section 6a: startLogging called');
-  const path = document.getElementById('config-path').value;
-  const interval = document.getElementById('config-interval').value;
+  const path = hw.$('config-path').value;
+  const interval = hw.$('config-interval').value;
   console.log('[LOGGING] Section 6b: Start params - Path:', path, 'Interval:', interval);
 
   if (!path || !path.startsWith('/')) {
@@ -691,21 +690,21 @@ console.log('[LOGGING] Section 7g: stopLogging defined');
 console.log('[LOGGING] Section 8: Apply configuration function');
 function applyConfig() {
   console.log('[LOGGING] Section 8a: applyConfig called');
-  const format = document.getElementById('config-format').value;
-  const maxsize = document.getElementById('config-maxsize').value;
-  const rotations = document.getElementById('config-rotations').value;
+  const format = hw.$('config-format').value;
+  const maxsize = hw.$('config-maxsize').value;
+  const rotations = hw.$('config-rotations').value;
   console.log('[LOGGING] Section 8b: Config values - Format:', format, 'MaxSize:', maxsize, 'Rotations:', rotations);
   
   // Build sensor list dynamically from compiled-in checkboxes
   const sensors = [];
-  document.querySelectorAll('#sensors-pane input[type=checkbox]').forEach(function(cb) {
+  hw.qsa('#sensors-pane input[type=checkbox]').forEach(function(cb) {
     if (cb.checked) sensors.push(cb.value);
   });
   const sensorList = sensors.length > 0 ? sensors.join(',') : 'none';
   console.log('[LOGGING] Section 8c: Selected sensors:', sensorList);
   
-  document.getElementById('config-status').textContent = 'Applying...';
-  document.getElementById('config-status').style.color = 'var(--accent)';
+  hw.$('config-status').textContent = 'Applying...';
+  hw.$('config-status').style.color = 'var(--accent)';
   
   const commands = [
     'sensorlog format ' + format,
@@ -721,10 +720,10 @@ function applyConfig() {
   function runCommand(index) {
     if (index >= commands.length) {
       console.log('[LOGGING] Section 8e: All commands completed successfully');
-      document.getElementById('config-status').textContent = 'Configuration applied!';
-      document.getElementById('config-status').style.color = 'var(--success)';
+      hw.$('config-status').textContent = 'Configuration applied!';
+      hw.$('config-status').style.color = 'var(--success)';
       setTimeout(() => {
-        document.getElementById('config-status').textContent = '';
+        hw.$('config-status').textContent = '';
         refreshStatus();
       }, 2000);
       return;
@@ -740,8 +739,8 @@ function applyConfig() {
     })
     .catch(e => {
       console.error('[LOGGING] Section 8h: Command', index + 1, 'error:', e);
-      document.getElementById('config-status').textContent = 'Error: ' + e.message;
-      document.getElementById('config-status').style.color = 'var(--danger)';
+      hw.$('config-status').textContent = 'Error: ' + e.message;
+      hw.$('config-status').style.color = 'var(--danger)';
     });
   }
   
@@ -754,13 +753,13 @@ console.log('[LOGGING] Section 8i: applyConfig defined');
 console.log('[LOGGING] Section 10: Sensor selection helpers');
 function selectAllSensors() {
   console.log('[LOGGING] Section 10a: selectAllSensors called');
-  document.querySelectorAll('#sensors-pane input[type=checkbox]').forEach(function(cb) { cb.checked = true; });
+  hw.qsa('#sensors-pane input[type=checkbox]').forEach(function(cb) { cb.checked = true; });
   console.log('[LOGGING] Section 10b: All sensors selected');
 }
 
 function selectNoSensors() {
   console.log('[LOGGING] Section 10c: selectNoSensors called');
-  document.querySelectorAll('#sensors-pane input[type=checkbox]').forEach(function(cb) { cb.checked = false; });
+  hw.qsa('#sensors-pane input[type=checkbox]').forEach(function(cb) { cb.checked = false; });
   console.log('[LOGGING] Section 10d: All sensors deselected');
 }
 console.log('[LOGGING] Section 10e: Sensor selection helpers defined');
@@ -768,14 +767,6 @@ console.log('[LOGGING] Section 10e: Sensor selection helpers defined');
 
 <script>
 console.log('[LOGGING] Section 11: Toggle functions');
-function togglePane(paneId, btnId) {
-  var p = document.getElementById(paneId);
-  var b = document.getElementById(btnId);
-  if (!p || !b) { console.warn('[togglePane] Element not found:', paneId, btnId); return; }
-  var isHidden = (p.style.display === 'none' || !p.style.display);
-  p.style.display = isHidden ? 'block' : 'none';
-  b.textContent = isHidden ? 'Collapse' : 'Expand';
-}
 
 console.log('[LOGGING] Section 11g: Toggle functions defined');
 </script>
@@ -808,7 +799,7 @@ function generateSystemFilename(preloadedTimeText) {
       filename += timestamp;
     }
     filename += '.log';
-    document.getElementById('sys-config-path').value = filename;
+    hw.$('sys-config-path').value = filename;
   }
   if (preloadedTimeText !== undefined) {
     applyTime(preloadedTimeText);
@@ -826,7 +817,7 @@ function generateSystemFilename(preloadedTimeText) {
       String(now.getMinutes()).padStart(2, '0') + '-' +
       String(now.getSeconds()).padStart(2, '0');
     const filename = '/logging_captures/system/system-' + timestamp + '.log';
-    document.getElementById('sys-config-path').value = filename;
+    hw.$('sys-config-path').value = filename;
   });
 }
 
@@ -836,20 +827,20 @@ function refreshSystemStatus(preloadedStatusText) {
     console.log('[LOGGING] System status response:', text);
     if (text.includes('Unknown command') || text.includes('not found')) {
       console.log('[LOGGING] log command not available');
-      const statusDot = document.getElementById('sys-status-dot');
-      const statusText = document.getElementById('sys-status-text');
+      const statusDot = hw.$('sys-status-dot');
+      const statusText = hw.$('sys-status-text');
       statusDot.style.background = '#ffc107';
       statusText.textContent = 'Not Available';
       statusText.style.color = '#ffc107';
-      document.getElementById('sys-btn-start').style.display = 'none';
-      document.getElementById('sys-btn-stop').style.display = 'none';
+      hw.$('sys-btn-start').style.display = 'none';
+      hw.$('sys-btn-stop').style.display = 'none';
       return;
     }
     const isActive = text.includes('logging ACTIVE');
-    const statusDot = document.getElementById('sys-status-dot');
-    const statusText = document.getElementById('sys-status-text');
-    const btnStart = document.getElementById('sys-btn-start');
-    const btnStop = document.getElementById('sys-btn-stop');
+    const statusDot = hw.$('sys-status-dot');
+    const statusText = hw.$('sys-status-text');
+    const btnStart = hw.$('sys-btn-start');
+    const btnStop = hw.$('sys-btn-stop');
     if (isActive) {
       statusDot.style.background = 'var(--success)';
       statusText.textContent = 'ACTIVE';
@@ -859,19 +850,19 @@ function refreshSystemStatus(preloadedStatusText) {
       const fileMatch = text.match(/File:\s*(.+)/);
       const lastwriteMatch = text.match(/Last write:\s*(\d+)s ago/);
       const flagsMatch = text.match(/Output flags:\s*0x([0-9A-Fa-f]+)/);
-      document.getElementById('sys-detail-file').textContent = fileMatch ? fileMatch[1].trim() : '—';
-      document.getElementById('sys-detail-lastwrite').textContent = lastwriteMatch ? lastwriteMatch[1] + 's ago' : '—';
-      document.getElementById('sys-detail-flags').textContent = flagsMatch ? '0x' + flagsMatch[1] : '—';
-      if (fileMatch) document.getElementById('sys-config-path').value = fileMatch[1].trim();
+      hw.$('sys-detail-file').textContent = fileMatch ? fileMatch[1].trim() : '—';
+      hw.$('sys-detail-lastwrite').textContent = lastwriteMatch ? lastwriteMatch[1] + 's ago' : '—';
+      hw.$('sys-detail-flags').textContent = flagsMatch ? '0x' + flagsMatch[1] : '—';
+      if (fileMatch) hw.$('sys-config-path').value = fileMatch[1].trim();
     } else {
       statusDot.style.background = '#6c757d';
       statusText.textContent = 'INACTIVE';
       statusText.style.color = 'var(--panel-fg)';
       btnStart.style.display = 'inline-block';
       btnStop.style.display = 'none';
-      document.getElementById('sys-detail-file').textContent = '—';
-      document.getElementById('sys-detail-lastwrite').textContent = '—';
-      document.getElementById('sys-detail-flags').textContent = '—';
+      hw.$('sys-detail-file').textContent = '—';
+      hw.$('sys-detail-lastwrite').textContent = '—';
+      hw.$('sys-detail-flags').textContent = '—';
     }
   }
   if (preloadedStatusText !== undefined) {
@@ -883,8 +874,8 @@ function refreshSystemStatus(preloadedStatusText) {
   .then(applySystemStatus)
   .catch(e => {
     console.error('[LOGGING] System status refresh error:', e);
-    document.getElementById('sys-status-text').textContent = 'Error: ' + e.message;
-    document.getElementById('sys-status-text').style.color = 'var(--danger)';
+    hw.$('sys-status-text').textContent = 'Error: ' + e.message;
+    hw.$('sys-status-text').style.color = 'var(--danger)';
   });
   // Also update auto-start status
   updateSystemAutoStartStatus();
@@ -892,7 +883,7 @@ function refreshSystemStatus(preloadedStatusText) {
 
 function startSystemLogging() {
   console.log('[LOGGING] startSystemLogging called');
-  const filepath = document.getElementById('sys-config-path').value;
+  const filepath = hw.$('sys-config-path').value;
   if (!filepath) {
     alert('Please specify a log file path');
     return;
@@ -900,7 +891,7 @@ function startSystemLogging() {
   
   // Get selected debug flags
   const flags = [];
-  document.querySelectorAll('#sys-flags-pane input[type="checkbox"]:checked').forEach(cb => {
+  hw.qsa('#sys-flags-pane input[type="checkbox"]:checked').forEach(cb => {
     flags.push(cb.value);
   });
   
@@ -911,7 +902,7 @@ function startSystemLogging() {
   });
   
   // Get category tags setting
-  const categoryTags = document.getElementById('sys-config-tags').checked ? 1 : 0;
+  const categoryTags = hw.$('sys-config-tags').checked ? 1 : 0;
   
   // Build command with optional flags and tags
   let cmd = 'log start ' + filepath;
@@ -959,13 +950,13 @@ function applySystemConfig() {
   
   // Get selected debug flags
   const flags = [];
-  document.querySelectorAll('#sys-flags-pane input[type="checkbox"]:checked').forEach(cb => {
+  hw.qsa('#sys-flags-pane input[type="checkbox"]:checked').forEach(cb => {
     flags.push(cb.value);
   });
   
   if (flags.length === 0) {
-    document.getElementById('sys-config-status').textContent = 'Warning: No debug categories selected. No messages will be logged.';
-    document.getElementById('sys-config-status').style.color = '#ffc107';
+    hw.$('sys-config-status').textContent = 'Warning: No debug categories selected. No messages will be logged.';
+    hw.$('sys-config-status').style.color = '#ffc107';
     return;
   }
   
@@ -978,16 +969,16 @@ function applySystemConfig() {
   console.log('[LOGGING] Setting debug flags to:', '0x' + flagValue.toString(16));
   
   // Store for use when starting logging
-  document.getElementById('sys-config-status').textContent = 'Configuration saved. Click "Start System Logging" to apply with these flags.';
-  document.getElementById('sys-config-status').style.color = 'var(--success)';
+  hw.$('sys-config-status').textContent = 'Configuration saved. Click "Start System Logging" to apply with these flags.';
+  hw.$('sys-config-status').style.color = 'var(--success)';
 }
 
 function selectAllFlags() {
-  document.querySelectorAll('#sys-flags-pane input[type="checkbox"]').forEach(cb => cb.checked = true);
+  hw.qsa('#sys-flags-pane input[type="checkbox"]').forEach(cb => cb.checked = true);
 }
 
 function selectNoFlags() {
-  document.querySelectorAll('#sys-flags-pane input[type="checkbox"]').forEach(cb => cb.checked = false);
+  hw.qsa('#sys-flags-pane input[type="checkbox"]').forEach(cb => cb.checked = false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,7 +1007,7 @@ var gBankColor = {
 };
 
 function populateFlagsPane() {
-  var pane = document.getElementById('sys-flags-pane');
+  var pane = hw.$('sys-flags-pane');
   if (!pane) return;
   hw.fetchJSON('/api/debug/flags')
     .then(function(data) {
@@ -1061,7 +1052,7 @@ function populateFlagsPane() {
 function updateSystemAutoStartStatus(preloadedText) {
   function applySysAutoStart(text) {
     const autostartMatch = text.match(/Auto-start:\s*(ON|OFF)/i);
-    const statusSpan = document.getElementById('sys-autostart-status');
+    const statusSpan = hw.$('sys-autostart-status');
     if (autostartMatch) {
       const isOn = autostartMatch[1].toUpperCase() === 'ON';
       statusSpan.textContent = isOn ? 'ON' : 'OFF';
@@ -1112,8 +1103,8 @@ function loadLogFile(filepath) {
   hw.fetchText('/api/files/view?name=' + encodeURIComponent(filepath) + '&mode=raw&dec=1')
     .then(text => {
       parseLogFile(text);
-      document.getElementById('viewer-filters').style.display = 'block';
-      document.getElementById('viewer-display').style.display = 'block';
+      hw.$('viewer-filters').style.display = 'block';
+      hw.$('viewer-display').style.display = 'block';
     })
     .catch(e => {
       console.error('[LOGGING] Failed to load log file:', e);
@@ -1321,7 +1312,7 @@ function parseLogFile(text) {
   });
   
   // Populate category filter
-  const categoryFilter = document.getElementById('viewer-category-filter');
+  const categoryFilter = hw.$('viewer-category-filter');
   categoryFilter.innerHTML = '<option value="">All Categories</option>';
   Array.from(categories).sort().forEach(cat => {
     const opt = document.createElement('option');
@@ -1335,9 +1326,9 @@ function parseLogFile(text) {
 }
 
 function applyLogFilters() {
-  const categoryFilter = document.getElementById('viewer-category-filter').value;
-  const levelFilter = document.getElementById('viewer-level-filter').value;
-  const searchText = document.getElementById('viewer-search').value.toLowerCase();
+  const categoryFilter = hw.$('viewer-category-filter').value;
+  const levelFilter = hw.$('viewer-level-filter').value;
+  const searchText = hw.$('viewer-search').value.toLowerCase();
   
   gFilteredLines = gLogLines.filter(line => {
     // Category filter
@@ -1357,7 +1348,7 @@ function applyLogFilters() {
 }
 
 function displayLogLines() {
-  const content = document.getElementById('viewer-content');
+  const content = hw.$('viewer-content');
   
   if (gFilteredLines.length === 0) {
     content.innerHTML = '<div style="color:#888">No matching log entries</div>';
@@ -1473,7 +1464,7 @@ function escapeHtml(text) {
 }
 
 function updateViewerStats() {
-  const stats = document.getElementById('viewer-stats');
+  const stats = hw.$('viewer-stats');
   const total = gLogLines.length;
   const filtered = gFilteredLines.length;
   
@@ -1507,7 +1498,7 @@ function populateLogViewerFileList() {
     });
   } else {
     console.error('[LOGGING] createFileExplorer not available');
-    document.getElementById('log-viewer-file-explorer').innerHTML = 
+    hw.$('log-viewer-file-explorer').innerHTML = 
       '<div style="padding:1rem;color:#c00;border:1px solid #c00;border-radius:4px">File explorer component not loaded. Please refresh the page.</div>';
   }
 }
@@ -1516,17 +1507,17 @@ function switchLogSource() {
   // Toggle between /logging_captures and /system/sys_logs
   if (currentLogSource === '/logging_captures') {
     currentLogSource = '/system/sys_logs';
-    document.getElementById('btn-switch-logs').textContent = 'View User Logs';
+    hw.$('btn-switch-logs').textContent = 'View User Logs';
   } else {
     currentLogSource = '/logging_captures';
-    document.getElementById('btn-switch-logs').textContent = 'View Admin Logs';
+    hw.$('btn-switch-logs').textContent = 'View Admin Logs';
   }
   
   // Reload file explorer with new source
   populateLogViewerFileList();
   
   // Clear current log viewer
-  document.getElementById('viewer-content').innerHTML = '<div style="padding:1rem;color:var(--panel-fg)">Select a log file to view</div>';
+  hw.$('viewer-content').innerHTML = '<div style="padding:1rem;color:var(--panel-fg)">Select a log file to view</div>';
 }
 
 console.log('[LOGGING] Section 14a: Log viewer functions defined');
@@ -1543,8 +1534,8 @@ function initBondedLogs(){
   if (!window.BondFs) return;
   window.BondFs.checkAvailable(function(ok){
     if (!ok) return;
-    var p = document.getElementById('bonded-logs-panel');
-    if (p) p.style.display = '';
+    var p = hw.$('bonded-logs-panel');
+    hw.show(p);
   });
 }
 
@@ -1558,7 +1549,7 @@ function toggleBondLogs(){
 }
 
 function bondLogStatus(){
-  var el = document.getElementById('bondlog-status');
+  var el = hw.$('bondlog-status');
   if (!window.BondFs || !el) return;
   el.textContent = 'Loading status…';
   window.BondFs.exec('sensorlog status', { onResult: function(lines, err){
@@ -1571,7 +1562,7 @@ function bondLogStatus(){
 }
 
 function bondLogCtl(cmd){
-  var el = document.getElementById('bondlog-status');
+  var el = hw.$('bondlog-status');
   if (!window.BondFs || !el) return;
   el.textContent = 'Running: ' + cmd + ' …';
   window.BondFs.exec(cmd, { onResult: function(lines, err){
@@ -1606,10 +1597,10 @@ function bondLogView(remotePath){
   if (!window.BondFs) return;
   window.BondFs.pull(remotePath, function(res, err){
     if (err || !res){ alert('Pull failed: ' + (err || 'unknown')); return; }
-    var content = document.getElementById('content-viewer');
+    var content = hw.$('content-viewer');
     if (content && content.style.display === 'none'){ togglePane('content-viewer','btn-viewer-section-toggle'); }
     if (typeof loadLogFile === 'function') loadLogFile(res.localPath);
-    var disp = document.getElementById('viewer-display');
+    var disp = hw.$('viewer-display');
     if (disp) disp.scrollIntoView({ behavior: 'smooth' });
   });
 }

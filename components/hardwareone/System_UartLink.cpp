@@ -3,9 +3,11 @@
 #include "System_UartLink.h"
 #include "System_Cm5HostControl.h"
 #include "System_Cm5Presence.h"
+#include "System_Dictation.h"  // direct keyboard-dictation control plane
 #include "System_LLMCm5.h"   // cm5 llm push/end intrinsic (no-op header when off)
 #include "System_Debug.h"
 #include "System_User.h"  // sessionStampNow + shared auth/session helpers
+#include "System_CommandLimits.h"
 
 #include <atomic>
 #include <freertos/semphr.h>
@@ -441,13 +443,13 @@ static void uartLinkRequeueIfNone(UartLinkPending request) {
       std::memory_order_release, std::memory_order_relaxed);
 }
 
-// Inbound line cap, set to the executor's own capacity (ExecReq::line[2048]
-// holds 2047 chars + NUL). At exactly this bound an over-long line is
+// Inbound line cap, set to the executor's own capacity (CMD_INPUT_MAX chars
+// plus NUL in ExecReq::line). At exactly this bound an over-long line is
 // discarded whole rather than silently strncpy-truncated into a shorter,
 // still-executable command. Also stops a newline-less byte stream from
 // growing the accumulator without bound — a machine peer hits that far more
 // easily than a human on the USB console.
-static const size_t kUartLineCap = 2047;
+static const size_t kUartLineCap = CMD_INPUT_MAX;
 
 // Brute-force tier key for the link. The serial console uses "local"; a
 // separate key means a CM5 retry storm can't lock out the bench operator and
@@ -901,6 +903,60 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
                         strncmp(sUartControlReply, "OK", 2) == 0
                             ? "OK" : "ERROR",
                         sent ? "sent" : "dropped");
+    return;
+  }
+  // `cm5 linkhealth 1 <k=v> ...`: the host's fault tally, mirrored here so the
+  // counters are readable from this device's CLI. Same control-plane placement
+  // as the heartbeat and the clock push — a periodic diagnostic must not take
+  // the command lock or write a durable audit line every 30s. Inert by
+  // construction: nothing in firmware reads the stored values back.
+  if (cm5LinkHealthHandleIntrinsic(
+          cmd.c_str(), heartbeatNamedEpoch, heartbeatAllowed,
+          sUartControlReply, sizeof(sUartControlReply)) ==
+      Cm5LinkHealthIntrinsicResult::Handled) {
+    const bool sent = uartWriteLineForTransportSession(
+        sUartControlReply, heartbeatTransportEpoch);
+    DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.linkhealth epoch=%lu -> %s reply=%s",
+                        static_cast<unsigned long>(heartbeatNamedEpoch),
+                        strncmp(sUartControlReply, "OK", 2) == 0
+                            ? "OK" : "ERROR",
+                        sent ? "sent" : "dropped");
+    return;
+  }
+  // Keyboard dictation is a CM5 control protocol, not a human CLI command.
+  // Keep it off cmd_exec/feed/audit just like heartbeat and streamed LLM
+  // callbacks. Pin the physical incarnation across state mutation and reply;
+  // the handler stores/compares only the coherent named epoch.
+  if (dictationIsUartProtocolLine(cmd.c_str())) {
+    const bool dictationSessionPinned =
+        uartLinkTransportSessionBeginUse(heartbeatTransportEpoch);
+    if (!dictationSessionPinned) return;
+    uint32_t dictationNamedEpoch = 0;
+    uint32_t dictationTransportEpoch = 0;
+    bool dictationAllowed = false;
+    (void)uartLinkSessionSnapshot(
+        nullptr, 0, &dictationNamedEpoch, &dictationTransportEpoch,
+        &dictationAllowed);
+    if (dictationTransportEpoch != heartbeatTransportEpoch) {
+      uartLinkTransportSessionEndUse();
+      return;
+    }
+    const DictationUartIntrinsicResult dictationResult =
+        dictationHandleUartIntrinsic(
+            cmd.c_str(), dictationNamedEpoch, dictationAllowed,
+            sUartControlReply, sizeof(sUartControlReply));
+    if (dictationResult != DictationUartIntrinsicResult::Handled) {
+      snprintf(sUartControlReply, sizeof(sUartControlReply),
+               "Error: dictation protocol is not available");
+    }
+    const bool sent = uartWriteLineForTransportSession(
+        sUartControlReply, dictationTransportEpoch);
+    uartLinkTransportSessionEndUse();
+    DEBUG_UART_CONTROLF(
+        "[UART-CTRL] RX dictate epoch=%lu -> %s reply=%s",
+        static_cast<unsigned long>(dictationNamedEpoch),
+        strncmp(sUartControlReply, "OK", 2) == 0 ? "OK" : "ERROR",
+        sent ? "sent" : "dropped");
     return;
   }
   const bool powerCallback =
@@ -1377,7 +1433,7 @@ bool uartLinkTryPushEventForSession(uint32_t sessionEpoch, const char* text) {
 // whole-file CRC for end-to-end verification.
 const char* cmd_voicefetch(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char sReply[128];
+  EXT_RAM_BSS_ATTR static char sReply[128];  // PSRAM: cmd_exec only; copied twice before the wire
 
   const AuthContext& ctx = currentAuthContext();
   if (ctx.transport != SOURCE_UART)

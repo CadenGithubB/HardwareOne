@@ -1,5 +1,6 @@
 #include "System_BuildConfig.h"
 #include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
+#include "System_MapViewportCore.h"
 #include "System_Maps.h"
 #include "System_Clock.h"  // Clock::isValidEpoch — one epoch-validity vocabulary
 
@@ -69,43 +70,32 @@ float gMapZoom = 1.0f;
 // =============================================================================
 // Discrete map panning (shared)
 // =============================================================================
-// Nudges the map center one step in a screen-space direction. Used by surfaces
-// that pan via discrete taps rather than an analog stick (the G2 lens map page's
-// Pan N/S/E/W rows). The math mirrors the OLED joystick pan (OLED_Mode_Map.cpp):
-// one isotropic degree step scaled by 1/zoom, run through the rotation matrix,
-// then clamped to the map bounds with half a viewport of overscroll. OLED keeps
-// its own momentum path; this is the reusable "move by one step" core.
-void mapPanStep(float dx, float dy, float frac) {
+// Moves the map center by accumulated screen-space steps. The viewport helper
+// shares projection constants with renderMap(), so one tap is a stable fraction
+// of what is actually visible rather than a fraction of the loaded map bounds.
+void mapPanViewportSteps(int32_t stepsX, int32_t stepsY,
+                         int viewportWidth, int viewportHeight,
+                         float renderZoom, float frac) {
   const LoadedMap& m = MapCore::getCurrentMap();
-  if (!m.valid) return;
+  if (!m.valid || (stepsX == 0 && stepsY == 0)) return;
 
-  const float minLat = m.header.minLat / 1000000.0f;
-  const float maxLat = m.header.maxLat / 1000000.0f;
-  const float minLon = m.header.minLon / 1000000.0f;
-  const float maxLon = m.header.maxLon / 1000000.0f;
-  const float spanLat = maxLat - minLat;
-  const float spanLon = maxLon - minLon;
-
-  // Isotropic degree step ~ `frac` of the viewport (viewport span ~ map span /
-  // zoom), matching the OLED pan which uses a single accel scalar for both axes.
-  const float step = frac * 0.5f * (spanLat + spanLon) / gMapZoom;
-
-  // Rotation-aware screen->geo mapping. lat subtracts so the direction stays
-  // correct at any gMapRotation (identical sign convention to OLED_Mode_Map).
-  const float rad  = -gMapRotation * (float)M_PI / 180.0f;
-  const float cosR = cosf(rad);
-  const float sinR = sinf(rad);
-  gMapCenterLon += (dx * cosR - dy * sinR) * step;
-  gMapCenterLat -= (dx * sinR + dy * cosR) * step;
-
-  // Clamp to map bounds, allowing panning up to half a viewport past the edge.
-  const float marginLat = spanLat * 0.5f / gMapZoom;
-  const float marginLon = spanLon * 0.5f / gMapZoom;
-  gMapCenterLat = fmaxf(minLat - marginLat, fminf(maxLat + marginLat, gMapCenterLat));
-  gMapCenterLon = fmaxf(minLon - marginLon, fminf(maxLon + marginLon, gMapCenterLon));
-
-  gMapCenterSet      = true;
-  gMapManuallyPanned = true;
+  const hw1_map_viewport::PanRequest request = {
+      stepsX,
+      stepsY,
+      viewportWidth,
+      viewportHeight,
+      renderZoom,
+      gMapRotation,
+      frac,
+      m.header.minLat / 1000000.0f,
+      m.header.maxLat / 1000000.0f,
+      m.header.minLon / 1000000.0f,
+      m.header.maxLon / 1000000.0f,
+  };
+  if (hw1_map_viewport::applyPan(gMapCenterLat, gMapCenterLon, request)) {
+    gMapCenterSet = true;
+    gMapManuallyPanned = true;
+  }
 }
 
 // =============================================================================
@@ -485,7 +475,8 @@ bool MapCore::loadMapFile(const char* path) {
     }
   }
   if (header.nameCount > 0 && header.nameCount <= MAX_MAP_NAMES) {
-    MapNameEntry* names = (MapNameEntry*)ps_malloc(sizeof(MapNameEntry) * header.nameCount);
+    MapNameEntry* names = (MapNameEntry*)ps_alloc(sizeof(MapNameEntry) * header.nameCount,
+                                                  AllocPref::RequirePSRAM, "maps.names");
     if (names) {
       f.seek(sizeof(HWMapHeader));
       uint16_t parsed = 0;
@@ -517,7 +508,9 @@ bool MapCore::loadMapFile(const char* path) {
   }
   if (_currentMap.tileCount > 0 && _currentMap.tileCount <= HWMAP_MAX_TILES) {
     size_t tileDirSize = sizeof(HWMapTileDirEntry) * _currentMap.tileCount;
-    HWMapTileDirEntry* tileDir = (HWMapTileDirEntry*)ps_malloc(tileDirSize);
+    HWMapTileDirEntry* tileDir = (HWMapTileDirEntry*)ps_alloc(tileDirSize,
+                                                              AllocPref::RequirePSRAM,
+                                                              "maps.tiledir");
     
     if (tileDir) {
       f.seek(nameTableEnd);
@@ -634,7 +627,7 @@ bool MapCore::loadMapFile(const char* path) {
   if (poolSize > 8 * 1024 * 1024) poolSize = 8 * 1024 * 1024; // sanity cap
   uint8_t* pool = nullptr;
   while (poolSize >= tierSpecs[0].slotSize && !pool) {
-    pool = (uint8_t*)ps_malloc(poolSize);
+    pool = (uint8_t*)ps_alloc(poolSize, AllocPref::RequirePSRAM, "maps.tilecache.pool");
     if (!pool) {
       poolSize /= 2;
     }
@@ -698,7 +691,8 @@ bool MapCore::loadMapFile(const char* path) {
   }
 
   // Allocate slot metadata array
-  TileCacheSlot* slots = (TileCacheSlot*)ps_malloc(sizeof(TileCacheSlot) * totalSlots);
+  TileCacheSlot* slots = (TileCacheSlot*)ps_alloc(sizeof(TileCacheSlot) * totalSlots,
+                                                  AllocPref::RequirePSRAM, "maps.tilecache.slots");
   if (!slots) {
     free(pool);
     ERROR_MAPSF("Failed to allocate %u tile cache slot entries", totalSlots);
@@ -1180,19 +1174,13 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
   int32_t centerLatMicro = (int32_t)(centerLat * 1000000);
   int32_t centerLonMicro = (int32_t)(centerLon * 1000000);
   
-  // Calculate scale: how many microdegrees per pixel
-  int32_t baseScaleY = 188;   // Microdegrees per pixel (latitude) at 1x
-  int32_t baseScaleX = 246;   // Microdegrees per pixel (longitude) at 1x
-  int32_t scaleY = (int32_t)(baseScaleY / zoom);
-  int32_t scaleX = (int32_t)(baseScaleX / zoom);
-  // Max-zoom-in clamp, proportional to viewport density: 10 udeg/px on the
-  // 128-wide OLED, 4 on the 288-wide G2. The G2 renders at zoom*2.25 for its
-  // native resolution; a fixed clamp of 10 would saturate its zoom (and skew
-  // its aspect) 2.25x earlier than the OLED at the same gMapZoom.
-  int32_t minScale = (10 * 128) / viewWidth;
-  if (minScale < 1) minScale = 1;
-  if (scaleX < minScale) scaleX = minScale;
-  if (scaleY < minScale) scaleY = minScale;
+  // Calculate scale through the dependency-light viewport helper also used by
+  // discrete panning. This prevents the visible span and pan distance from
+  // drifting apart when projection constants or zoom clamping change.
+  const hw1_map_viewport::Scale viewportScale =
+      hw1_map_viewport::computeScale(viewWidth, zoom);
+  int32_t scaleX = viewportScale.lonMicroPerPixel;
+  int32_t scaleY = viewportScale.latMicroPerPixel;
   
   // Pre-compute values for fast coordinate transform (avoids per-point division + trig)
   const float invScaleX = 1.0f / (float)scaleX;
@@ -2260,10 +2248,12 @@ static void sanitizeWaypointTextCopy(char* dst, size_t dstSize, const char* src,
 
 Waypoint* WaypointManager::_waypoints = nullptr;
 int WaypointManager::_selectedTarget = -1;
+bool WaypointManager::_waypointsLoadedOk = false;
 
 bool WaypointManager::ensureStorage() {
   if (_waypoints) return true;
-  _waypoints = (Waypoint*)ps_malloc(MAX_WAYPOINTS * sizeof(Waypoint));
+  _waypoints = (Waypoint*)ps_alloc(MAX_WAYPOINTS * sizeof(Waypoint),
+                                   AllocPref::RequirePSRAM, "maps.waypoints");
   if (!_waypoints) {
     ERROR_MAPSF("[WAYPOINTS] Failed to allocate %u-byte waypoint table",
                 (unsigned)(MAX_WAYPOINTS * sizeof(Waypoint)));
@@ -2311,6 +2301,7 @@ bool WaypointManager::loadWaypoints() {
     // No waypoints file for this map — clear any stale data from a previous map
     if (_waypoints) memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
     _selectedTarget = -1;
+    _waypointsLoadedOk = true;   // absent is savable — this is how a map gets its first waypoint
     return false;
   }
   
@@ -2326,6 +2317,13 @@ bool WaypointManager::loadWaypoints() {
   
   if (err) {
     WARN_MAPSF("Waypoint JSON parse error: %s", err.c_str());
+    // Clear BEFORE returning. This return sits above the memset below, so the
+    // PREVIOUS map's waypoints are still live in _waypoints — and saveWaypoints()
+    // would write them into THIS map's file. Cross-map contamination on top of a
+    // wipe.
+    if (_waypoints) memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
+    _selectedTarget = -1;
+    _waypointsLoadedOk = false;
     return false;
   }
   
@@ -2335,6 +2333,7 @@ bool WaypointManager::loadWaypoints() {
   memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
   _selectedTarget = -1;
   
+  _waypointsLoadedOk = true;   // parsed cleanly
   JsonArray arr = doc["waypoints"].as<JsonArray>();
   int i = 0;
   for (JsonObject wp : arr) {
@@ -2374,6 +2373,10 @@ bool WaypointManager::loadWaypoints() {
 bool WaypointManager::saveWaypoints() {
   const LoadedMap& map = MapCore::getCurrentMap();
   if (!map.valid) return false;
+  if (!_waypointsLoadedOk) {
+    WARN_MAPSF("waypoint save REFUSED - this map's waypoint file never loaded cleanly");
+    return false;
+  }
 
   FsLockGuard fsGuard("WaypointManager.saveWaypoints");
   

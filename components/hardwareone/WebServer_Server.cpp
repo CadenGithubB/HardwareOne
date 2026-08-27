@@ -15,6 +15,8 @@
 #include <arpa/inet.h>
 #include <LittleFS.h>
 #include <mbedtls/base64.h>
+#include <mbedtls/platform_util.h>
+#include <ctype.h>
 #include <memory>
 #include <atomic>
 #include <netinet/in.h>
@@ -41,6 +43,7 @@
 #include "System_Utils.h"
 #include "System_Notifications.h"  // notifyLoginSuccess/Failed — web login parity with CLI/OLED
 #include "System_Events.h"         // systemEventPost — server up/down + logout events
+#include "System_EventCatalogJson.h"  // shared event-kind JSON output adapter
 #include "System_UartLink.h"       // exact UART login-generation publication
 #include "WebServer_Utils.h"
 #include "WebServer_Server.h"
@@ -718,6 +721,38 @@ void clearSession(httpd_req_t* req, const char* logoutReason) {
 bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& headerPresent);
 extern bool isValidUser(const String& username, const String& password);
 
+static void zeroizeString(String& value) {
+  if (value.length() > 0) {
+    mbedtls_platform_zeroize(value.begin(), value.length());
+  }
+  value.clear();
+}
+
+class ScopedStringZeroize {
+ public:
+  explicit ScopedStringZeroize(String& value) : value_(value) {}
+  ~ScopedStringZeroize() { zeroizeString(value_); }
+
+  ScopedStringZeroize(const ScopedStringZeroize&) = delete;
+  ScopedStringZeroize& operator=(const ScopedStringZeroize&) = delete;
+
+ private:
+  String& value_;
+};
+
+class ScopedBufferZeroize {
+ public:
+  ScopedBufferZeroize(void* data, size_t size) : data_(data), size_(size) {}
+  ~ScopedBufferZeroize() { mbedtls_platform_zeroize(data_, size_); }
+
+  ScopedBufferZeroize(const ScopedBufferZeroize&) = delete;
+  ScopedBufferZeroize& operator=(const ScopedBufferZeroize&) = delete;
+
+ private:
+  void* data_;
+  size_t size_;
+};
+
 // Classify a request as a REAL user interaction vs. automatic/passive chatter.
 // Only real interactions stamp SessionEntry::lastInteractionMs and thus keep an
 // authenticated session alive under the shared idle-logout policy. The web UI
@@ -762,6 +797,7 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
   if (sid.length() == 0) {
     // No session cookie — try Basic Auth fallback (for API clients like Migration Tool)
     String baUser, baPass;
+    ScopedStringZeroize baPassZeroize(baPass);
     bool hdrPresent = false;
     if (decodeBasicAuth(req, baUser, baPass, hdrPresent) && hdrPresent) {
       // Check lockout before attempting credential validation
@@ -897,10 +933,19 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
 
 // isAdminUser moved to user_system.cpp
 
-// Build JSON for all sessions (admin view)
+static void appendNamedTransportSession(JsonArray& sessions,
+                                        const String& user,
+                                        const char* transport) {
+  if (!user.length()) return;
+  JsonObject session = sessions.add<JsonObject>();
+  session["user"] = user;
+  session["transport"] = transport;
+}
+
+// Build JSON for every authenticated user session (admin view). Web sessions
+// own rich cookie/IP/timestamp metadata; the other transports expose a
+// synchronized username snapshot plus their transport identifier.
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions) {
-  WebSessionFenceGuard sessionGuard;
-  if (!sessionGuard || !gSessions) return;
   // Convert boot millis to epoch millis for display
   time_t now = time(nullptr);
   unsigned long currentMillis = millis();
@@ -908,24 +953,53 @@ void buildAllSessionsJson(const String& currentSid, JsonArray& sessions) {
   if (now > 0) {
     epochMillis = (int64_t)now * 1000LL - (int64_t)currentMillis;
   }
-  
-  // Build JSON array directly (no String allocation)
-  for (int i = 0; i < MAX_SESSIONS; ++i) {
-    const struct SessionEntry& s = gSessions[i];
-    if (!s.sid.length()) continue;
-    
-    JsonObject session = sessions.add<JsonObject>();
-    // A SID is the live bearer cookie, not an administrative identifier. Keep
-    // only the diagnostic hint used elsewhere by auth logs.
-    session["sid"] = s.sid.substring(0, 8) + "...";
-    session["user"] = s.user;
-    // Convert boot-relative millis to epoch millis for JavaScript Date()
-    session["createdAt"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.createdAt) : s.createdAt;
-    session["lastSeen"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.lastSeen) : s.lastSeen;
-    session["expiresAt"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.expiresAt) : s.expiresAt;
-    session["ip"] = s.ip.length() ? s.ip : "-";
-    session["current"] = (s.sid == currentSid);
+
+  // Do not hold the web-session fence while taking any transport-owned
+  // snapshot. Keeping the lock domains disjoint avoids creating a lock-order
+  // dependency between HTTP, UART, display, and Bluetooth session state.
+  {
+    WebSessionFenceGuard sessionGuard;
+    if (sessionGuard && gSessions) {
+      for (int i = 0; i < MAX_SESSIONS; ++i) {
+        const struct SessionEntry& s = gSessions[i];
+        if (!s.sid.length()) continue;
+
+        JsonObject session = sessions.add<JsonObject>();
+        // A SID is the live bearer cookie, not an administrative identifier.
+        // Keep only the diagnostic hint used elsewhere by auth logs.
+        session["sid"] = s.sid.substring(0, 8) + "...";
+        session["user"] = s.user;
+        session["transport"] = "web";
+        // Convert boot-relative millis to epoch millis for JavaScript Date().
+        session["createdAt"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.createdAt) : s.createdAt;
+        session["lastSeen"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.lastSeen) : s.lastSeen;
+        session["expiresAt"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.expiresAt) : s.expiresAt;
+        session["ip"] = s.ip.length() ? s.ip : "-";
+        session["current"] = (s.sid == currentSid);
+      }
+    }
   }
+
+  appendNamedTransportSession(
+      sessions, getTransportUser(SOURCE_SERIAL), "serial");
+  appendNamedTransportSession(
+      sessions, getTransportUser(SOURCE_UART), "uart");
+  appendNamedTransportSession(
+      sessions, getTransportUser(SOURCE_LOCAL_DISPLAY), "oled");
+  appendNamedTransportSession(
+      sessions, getTransportUser(SOURCE_G2_GLASSES), "g2");
+
+#if ENABLE_BLUETOOTH
+  for (int i = 0;; ++i) {
+    uint16_t connId = 0;
+    String user;
+    if (!bleGetAuthenticatedSessionInfo(i, connId, user)) break;
+    JsonObject session = sessions.add<JsonObject>();
+    session["user"] = user;
+    session["transport"] = "bluetooth";
+    session["sid"] = String(connId);
+  }
+#endif
 }
 
 // Store logout reason for IP address (with rate limiting)
@@ -1620,22 +1694,36 @@ bool sseSendLogs(httpd_req_t* req, unsigned long seq, const String& buf) {
 
 // Decode basic auth header and extract user/pass
 bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& headerPresent) {
+  static constexpr size_t kMaxDecodedBytes = 256;
+  static constexpr size_t kMaxEncodedBytes = 4 * ((kMaxDecodedBytes + 2) / 3);
+  static constexpr char kBasicPrefix[] = "Basic ";
+  static constexpr size_t kBasicPrefixLen = sizeof(kBasicPrefix) - 1;
+  static constexpr size_t kMaxHeaderBytes = kBasicPrefixLen + kMaxEncodedBytes;
+
   headerPresent = false;
-  size_t bufLen = httpd_req_get_hdr_value_len(req, "Authorization");
-  if (bufLen == 0) return false;
-  bufLen++;
-  char* buf = (char*)malloc(bufLen);
-  if (!buf) return false;
-  if (httpd_req_get_hdr_value_str(req, "Authorization", buf, bufLen) != ESP_OK) {
-    free(buf);
+  userOut.clear();
+  zeroizeString(passOut);
+
+  const size_t headerLen = httpd_req_get_hdr_value_len(req, "Authorization");
+  if (headerLen == 0 || headerLen > kMaxHeaderBytes) return false;
+
+  // The HTTP server caps all request headers at 1024 bytes, but Basic Auth has
+  // a much smaller protocol bound: at most 256 decoded bytes. Keeping the raw
+  // header in this bounded stack buffer avoids an attacker-sized heap request
+  // and avoids a second credential-bearing heap copy.
+  char headerBuf[kMaxHeaderBytes + 1] = {};
+  ScopedBufferZeroize headerZeroize(headerBuf, sizeof(headerBuf));
+  if (httpd_req_get_hdr_value_str(req, "Authorization", headerBuf,
+                                  headerLen + 1) != ESP_OK ||
+      strlen(headerBuf) != headerLen) {
     return false;
   }
   headerPresent = true;
-  String header(buf);
-  free(buf);
-  
-  // Expect: "Basic base64"
-  if (!header.startsWith("Basic ")) return false;
+
+  if (headerLen < kBasicPrefixLen ||
+      memcmp(headerBuf, kBasicPrefix, kBasicPrefixLen) != 0) {
+    return false;
+  }
 
   // Decode the base64 payload to (user, pass). The caller validates via
   // isValidUser() — this function is just a parser. The legacy "fast path"
@@ -1645,8 +1733,18 @@ bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& h
   // precomputed header had been frozen at literal "admin/admin" for ages
   // and the fast path never actually matched the real admin's credentials.
   // See AUTH_ASSESSMENT_REPORT.md §4 #6 for the full history.
-  String b64 = header.substring(6);
-  b64.trim();
+  const char* encodedBegin = headerBuf + kBasicPrefixLen;
+  const char* encodedEnd = headerBuf + headerLen;
+  while (encodedBegin < encodedEnd &&
+         isspace(static_cast<unsigned char>(*encodedBegin))) {
+    encodedBegin++;
+  }
+  while (encodedEnd > encodedBegin &&
+         isspace(static_cast<unsigned char>(encodedEnd[-1]))) {
+    encodedEnd--;
+  }
+  const size_t encodedLen = (size_t)(encodedEnd - encodedBegin);
+  if (encodedLen == 0 || encodedLen > kMaxEncodedBytes) return false;
   
   // Decode base64. mbedtls_base64_decode's bound test is `dlen < *olen`
   // (mbedtls/library/base64.c), so it ACCEPTS a decode that exactly fills the
@@ -1659,18 +1757,27 @@ bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& h
   // remote reboot. Hand mbedtls one less than the array size so the terminator
   // always has a home; the accepted credential ceiling stays exactly 256 bytes.
   size_t out_len = 0;
-  unsigned char out_buf[257];
-  int ret = mbedtls_base64_decode(out_buf, sizeof(out_buf) - 1, &out_len,
-                                  (const unsigned char*)b64.c_str(), b64.length());
+  unsigned char out_buf[kMaxDecodedBytes + 1] = {};
+  ScopedBufferZeroize decodedZeroize(out_buf, sizeof(out_buf));
+  int ret = mbedtls_base64_decode(out_buf, kMaxDecodedBytes, &out_len,
+                                  (const unsigned char*)encodedBegin, encodedLen);
   if (ret != 0 || out_len == 0 || out_len >= sizeof(out_buf)) return false;
-  out_buf[out_len] = '\0';
-  
-  String decoded = String((const char*)out_buf);
-  int colon = decoded.indexOf(':');
-  if (colon <= 0) return false;
-  
-  userOut = decoded.substring(0, colon);
-  passOut = decoded.substring(colon + 1);
+  // Credentials are textual. Reject embedded NUL rather than silently
+  // truncating one of the fields through a String constructor.
+  if (memchr(out_buf, '\0', out_len) != nullptr) return false;
+
+  const unsigned char* colon =
+      (const unsigned char*)memchr(out_buf, ':', out_len);
+  if (!colon || colon == out_buf) return false;
+
+  const size_t userLen = (size_t)(colon - out_buf);
+  const size_t passLen = out_len - userLen - 1;
+  if (!userOut.concat((const char*)out_buf, (unsigned int)userLen) ||
+      !passOut.concat((const char*)colon + 1, (unsigned int)passLen)) {
+    userOut.clear();
+    zeroizeString(passOut);
+    return false;
+  }
   return true;
 }
 
@@ -3247,27 +3354,54 @@ static bool runInternalStatusCmd(const char* cmd, char* out, size_t outSize) {
 
 // GET /api/events/kinds — vocabulary for notif/automation editors (was CLI
 // `events kinds json`). Guests may read it; mutation stays on CLI.
+struct EventsKindsHttpSink {
+  httpd_req_t* req;
+  bool attempted;
+};
+
+static bool writeEventsKindsHttpChunk(void* context, const char* data,
+                                      size_t length) {
+  EventsKindsHttpSink* sink = static_cast<EventsKindsHttpSink*>(context);
+  if (!sink || !sink->req || (!data && length != 0)) return false;
+  sink->attempted = true;
+  return httpd_resp_send_chunk(sink->req, data, length) == ESP_OK;
+}
+
 static esp_err_t handleEventsKinds(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
+
+  // Preflight the immutable production view before the first response-body
+  // chunk. HTTP is deliberately not constrained by the command result buffer.
+  const size_t expectedBytes = systemEventCatalogJsonSize();
   httpd_resp_set_type(req, "application/json");
-  PSRAM_JSON_DOC(doc);
-  JsonArray fams = doc["families"].to<JsonArray>();
-  for (int f = 0; f < SYSEVT_FAM_COUNT; f++) {
-    JsonObject fo = fams.add<JsonObject>();
-    fo["n"] = systemEventFamilyName((uint8_t)f);
-    JsonArray fk = fo["k"].to<JsonArray>();
-    for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-      if (systemEventKindFamily((uint8_t)k) == f) fk.add(systemEventKindName((uint8_t)k));
-    }
-  }
-  EXT_RAM_BSS_ATTR static char buf[CMD_RESULT_MAX];
-  size_t n = serializeJson(doc, buf, sizeof(buf));
-  if (n == 0 || n >= sizeof(buf) - 1) {
-    httpd_resp_send(req, "{\"error\":\"event-kind list outgrew buffer\"}", HTTPD_RESP_USE_STRLEN);
+
+  if (expectedBytes == 0) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_send(req, "{\"error\":\"event-kind serialization failed\"}",
+                    HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  httpd_resp_send(req, buf, n);
-  return ESP_OK;
+
+  EventsKindsHttpSink sink{req, false};
+  size_t written = 0;
+  const SystemEventCatalogJsonStatus status = systemEventCatalogWriteJson(
+      writeEventsKindsHttpChunk, &sink, &written);
+  if (status != SystemEventCatalogJsonStatus::Ok ||
+      written != expectedBytes) {
+    // An internal validation error can still receive a small 500 response if
+    // no body attempt occurred. Once the first chunk is attempted, abort the
+    // connection: never append an error object or a success terminator to a
+    // partial JSON prefix.
+    if (!sink.attempted) {
+      httpd_resp_set_status(req, "500 Internal Server Error");
+      httpd_resp_send(req, "{\"error\":\"event-kind serialization failed\"}",
+                      HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+    return ESP_FAIL;
+  }
+
+  return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
 // GET /api/debug/flags — read-only reflection of the generated debug-flag
@@ -4657,7 +4791,8 @@ esp_err_t handleFileView(httpd_req_t* req) {
 
   // Allocate streaming buffer from PSRAM for better throughput
   const size_t VIEW_BUF_SIZE = 4096;  // 4KB instead of 512 bytes
-  char* viewBuf = (char*)ps_alloc(VIEW_BUF_SIZE, AllocPref::PreferPSRAM);
+  char* viewBuf = (char*)ps_alloc(
+      VIEW_BUF_SIZE, AllocPref::PreferPSRAM, "http.file.view.chunk");
   if (!viewBuf) {
     file.close();
     pollResume();
@@ -4720,58 +4855,74 @@ esp_err_t handleFileView(httpd_req_t* req) {
     httpd_resp_set_type(req, mime);
     String disposition = "inline; filename=\"" + dispFilename + "\"";
     httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
-    httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
     const size_t kSinglePassMax = 5u * 1024u * 1024u;  // 5 MB
-    if (fileSize <= kSinglePassMax) {
-      char* buf = (char*)heap_caps_malloc(fileSize,
-                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-      if (!buf) buf = (char*)malloc(fileSize);
-      if (!buf) {
-        file.close();
-        free(viewBuf);
-        pollResume();
-        DEBUG_STORAGEF("[handleFileView] ERROR: audio buf alloc failed (%d B)",
-                       fileSize);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "Memory allocation failed",
-                        HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
-      }
-      char clBuf[16];
-      snprintf(clBuf, sizeof(clBuf), "%u", (unsigned)fileSize);
-      httpd_resp_set_hdr(req, "Content-Length", clBuf);
-      size_t bytesRead = file.read((uint8_t*)buf, fileSize);
+    if (fileSize == 0) {
       file.close();
       free(viewBuf);
-      httpd_resp_send(req, buf, bytesRead);
-      free(buf);
-      DEBUG_STORAGEF("[handleFileView] Audio sent: %d B in single shot, "
-                     "dur=%u ms", (int)bytesRead, (unsigned)(millis() - tVStart));
+      esp_err_t sendErr = httpd_resp_send(req, "", 0);
+      DEBUG_STORAGEF("[handleFileView] Empty audio send: err=%d", (int)sendErr);
       pollResume();
       return ESP_OK;
     }
 
-    // Fallback for large files — chunked stream (no Content-Length, no seek).
-    DEBUG_STORAGEF("[handleFileView] Audio file >5 MB, chunked fallback");
+    if (fileSize <= kSinglePassMax) {
+      char* buf = (char*)ps_alloc(fileSize, AllocPref::RequirePSRAM,
+                                  "http.file.audio.whole");
+      if (buf) {
+        size_t bytesRead = file.read((uint8_t*)buf, fileSize);
+        file.close();
+        free(viewBuf);
+        if (bytesRead != fileSize) {
+          ps_free(buf);
+          pollResume();
+          ERROR_STORAGEF("[handleFileView] Audio short read: got=%u expected=%u",
+                         (unsigned)bytesRead, (unsigned)fileSize);
+          httpd_resp_set_status(req, "500 Internal Server Error");
+          httpd_resp_set_type(req, "text/plain");
+          httpd_resp_send(req, "Failed to read complete audio file",
+                          HTTPD_RESP_USE_STRLEN);
+          return ESP_OK;
+        }
+
+        // httpd_resp_send emits the matching Content-Length itself. Advertise
+        // seekability only for this complete, single-response path.
+        httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
+        esp_err_t sendErr = httpd_resp_send(req, buf, fileSize);
+        ps_free(buf);
+        DEBUG_STORAGEF("[handleFileView] Audio sent: %d B in single shot, "
+                       "err=%d dur=%u ms", (int)fileSize, (int)sendErr,
+                       (unsigned)(millis() - tVStart));
+        pollResume();
+        return ESP_OK;
+      }
+      DEBUG_STORAGEF("[handleFileView] Strict PSRAM audio alloc failed (%u B); "
+                     "using chunked fallback", (unsigned)fileSize);
+    } else {
+      DEBUG_STORAGEF("[handleFileView] Audio file >5 MB; using chunked fallback");
+    }
+
+    // Large files and PSRAM pressure both use bounded chunked streaming. Do
+    // not attach Content-Length/Accept-Ranges to this transfer-encoding path.
     size_t totalSent = 0;
     int chunkCount = 0;
+    esp_err_t sendErr = ESP_OK;
     while (true) {
       size_t n = file.readBytes(viewBuf, VIEW_BUF_SIZE);
       if (n == 0) break;
       chunkCount++;
+      sendErr = httpd_resp_send_chunk(req, viewBuf, n);
+      if (sendErr != ESP_OK) break;
       totalSent += n;
-      httpd_resp_send_chunk(req, viewBuf, n);
       if ((chunkCount % 8) == 0) delay(0);
     }
     file.close();
     free(viewBuf);
-    httpd_resp_send_chunk(req, NULL, 0);
+    if (sendErr == ESP_OK) sendErr = httpd_resp_send_chunk(req, NULL, 0);
     DEBUG_STORAGEF("[handleFileView] Audio (chunked) sent: %d B in %d chunks, "
-                   "dur=%u ms", (int)totalSent, chunkCount,
-                   (unsigned)(millis() - tVStart));
+                   "err=%d dur=%u ms", (int)totalSent, chunkCount,
+                   (int)sendErr, (unsigned)(millis() - tVStart));
     pollResume();
     return ESP_OK;
   }
@@ -4928,18 +5079,9 @@ esp_err_t handleIconGet(httpd_req_t* req) {
 
   DEBUG_HTTPF("[Icon] SEND name='%s' pngSize=%u", name, (unsigned)pngSize);
 
-  // Safari can be picky about chunked binary responses; these icons are tiny, so send in one response.
-  uint8_t* tmp = (uint8_t*)malloc(pngSize);
-  if (!tmp) {
-    ERROR_MEMORYF("OOM for icon: name='%s' pngSize=%u", name, (unsigned)pngSize);
-    httpd_resp_set_status(req, "500");
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_send(req, "OOM", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  memcpy_P(tmp, pngPtr, pngSize);
-  esp_err_t r = httpd_resp_send(req, (const char*)tmp, pngSize);
-  free(tmp);
+  // On ESP32 PROGMEM is directly addressable, and httpd_resp_send consumes
+  // the complete body synchronously before returning. No staging copy needed.
+  esp_err_t r = httpd_resp_send(req, (const char*)pngPtr, pngSize);
   if (r != ESP_OK) {
     DEBUG_HTTPF("[Icon] SEND FAIL name='%s' err=%d", name, (int)r);
     return ESP_OK;

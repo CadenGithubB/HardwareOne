@@ -165,6 +165,15 @@ static void rebootWithMessage(const char* message) {
   rebootDevice("setup", detail, 1000);
 }
 
+static void noteNtpStateBeforeSetupReboot() {
+#if ENABLE_WIFI
+  const NtpRuntimeStatus status = getNtpRuntimeStatus();
+  if (status.awaitingLateReply) {
+    broadcastOutput("No NTP reply arrived before restart; reboot ends this SNTP client instance.");
+  }
+#endif
+}
+
 // ============================================================================
 // First-Time Setup Implementation
 // ============================================================================
@@ -986,17 +995,18 @@ void firstTimeSetupIfNeeded() {
   writeSettingsJson();
   applySettings();  // Apply log level and other debug settings immediately
 
-  // Connect WiFi and sync NTP before any potential reboot.
+  // Connect WiFi and check for an NTP reply before any potential reboot.
   // WiFi was already initialized for network scanning during setup.
   // This ensures user creation timestamps are resolved to real dates
   // even when the setup wizard triggers a reboot (I2C/OLED/gamepad).
   if (wifiConfigured) {
-    broadcastOutput("Connecting WiFi and syncing time before reboot...");
+    broadcastOutput("Connecting WiFi and checking for an NTP reply before setup finishes...");
     connectToBestWiFiNetwork();  // Handles WiFi connect + NTP sync + timestamp resolution
   }
 
   // If user disabled I2C, reboot so it takes effect from boot
   if (i2cDisabledByUser) {
+    noteNtpStateBeforeSetupReboot();
     // Clear the OLED before reboot so the previous setup text doesn't remain
     // visible on the next boot when OLED init is skipped.
     rebootWithMessage("Rebooting to apply I2C disabled setting...");
@@ -1025,6 +1035,7 @@ void firstTimeSetupIfNeeded() {
 #endif
 
   if (needsRebootForHardware) {
+    noteNtpStateBeforeSetupReboot();
     rebootWithMessage("Rebooting to apply hardware settings...");
     // Will not return - device reboots
   }

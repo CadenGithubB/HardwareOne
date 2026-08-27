@@ -1,4 +1,4 @@
-# Hardware One v0.99.9 - User Guide
+# Hardware One v0.99.92 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -26,34 +26,40 @@ This is the full reference for Hardware One. It covers every subsystem, all CLI 
 
 ## Build Configuration
 
-All feature flags live in one file: `components/hardwareone/System_BuildConfig.h`. Edit it before building to enable or disable any subsystem. No other files need to change.
+All feature flags live in one file: `components/hardwareone/System_BuildConfig.h`. That header is *your* configuration surface - edit it before building to enable or disable any subsystem. No other files need to change.
 
-| Flag | Default | Description |
-| ---- | :-----: | ----------- |
-| `I2C_FEATURE_LEVEL` | `4` (Custom) | `0`=disabled, `1`=OLED only, `2`=OLED+gamepad, `3`=all sensors, `4`=custom selection |
-| `NETWORK_FEATURE_LEVEL` | `4` (Custom) | `0`=disabled, `1`=WiFi only, `2`=WiFi+HTTP, `3`=WiFi+HTTP+ESP-NOW, `4`=custom |
-| `WEB_FEATURE_LEVEL` | `4` (Custom) | `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
-| `DISPLAY_TYPE` | `1` (SSD1306) | `0`=none, `1`=SSD1306 OLED, `2`=ST7789 TFT, `3`=ILI9341 TFT. SSD1306 is the tested path; the TFT branches exist in `HAL_Display.cpp` but ILI9341 is a placeholder and the `OLED_Mode_*` UI is SSD1306-shaped |
-| `INPUT_DEVICE_TYPE` | `1` (gamepad) | Physical input controller, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder |
-| `ENABLE_HTTPS` | `1` | TLS for the web server; certs in `/system/certs/`. Runtime toggle: `httpsEnabled` |
-| `ENABLE_MAPS` | `1` | Offline maps and waypoints |
-| `ENABLE_GAMES` | `0` | Browser games page. Pick exactly one game: `ENABLE_WEB_GAME_MAZE` or `ENABLE_WEB_GAME_DARKROOM` - both at once overflows the app partition and is rejected at build time |
-| `ENABLE_ESP_SR` | `0` | ESP-SR voice: WakeNet wake word + MultiNet command grammar |
-| `ENABLE_BLUETOOTH` | `0` | BLE server with GATT services |
-| `ENABLE_G2_GLASSES` | `0` | Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) |
-| `ENABLE_R1_HEALTH` | `1` | R1 Health vitals UI (G2 Apps->Health, OLED, Web `/r1-health`) + Health Track. Requires Bluetooth + G2; auto-off if either is off. Ring connect stays under `ENABLE_G2_GLASSES`. |
-| `ENABLE_MQTT` | `1` | Home Assistant MQTT integration |
-| `ENABLE_AUTOMATION` | `1` | Scheduled tasks and conditional commands |
-| `ENABLE_CAMERA_SENSOR` | `0` | ESP32-S3 DVP camera (OV2640/OV5640) |
-| `ENABLE_MICROPHONE_SENSOR` | `0` | PDM microphone via I2S |
-| `ENABLE_BATTERY_MONITOR` | `0` | LiPo voltage monitoring via ADC |
-| `ENABLE_EDGE_IMPULSE` | `0` | Edge Impulse ML inference |
-| `ENABLE_BONDED_MODE` | `0` | Bonded Microcontrollers - two devices share command registries and the controller shows a Remote tab with the paired device's features |
-| `ENABLE_LLM_BACKEND` | `1` | The LLM feature (web LLM page, OLED LLM mode, `llm*` commands, lens viewer). Needs at least one source below; a build error tells you if not. |
-| `ENABLE_LLM_SOURCE_ONBOARD` | `0` | Tiny transformer running on this chip (ESP32-S3 + PSRAM only). Requires a model file on LittleFS or SD card. |
-| `ENABLE_LLM_SOURCE_CM5` | `1` | Answers come from the Raspberry Pi co-processor over the UART link. Requires a board with a `UART_LINK_PORT` (all supported boards). |
-| `ENABLE_RASPBERRY_PI_HOST_POWER` | `1` | `cm5 power` - profile, reboot, halt, suspend, timed sleep of the Pi with confirmed request/ACK |
-| `ENABLE_RASPBERRY_PI_HOST_FAN` | `1` | `cm5 fan` - quiet/auto/max with temperature, PWM, RPM and health readback |
+> **The values committed in that header are incidental, not a contract.** They are
+> whatever the last working tree happened to be built with, and they change from
+> commit to commit. This guide therefore does not state what any flag "is" - open
+> the header to read your own tree's values. The table below describes what each
+> flag *does*; you choose the value.
+
+| Flag | What it controls |
+| ---- | ---------------- |
+| `I2C_FEATURE_LEVEL` | How much of the I2C stack is compiled: `0`=disabled, `1`=OLED only, `2`=OLED+gamepad, `3`=all sensors, `4`=custom selection via the `CUSTOM_ENABLE_*` flags below |
+| `NETWORK_FEATURE_LEVEL` | How much of the network stack is compiled: `0`=disabled, `1`=WiFi only, `2`=WiFi+HTTP, `3`=WiFi+HTTP+ESP-NOW, `4`=custom |
+| `WEB_FEATURE_LEVEL` | How much of the web UI is compiled: `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
+| `DISPLAY_TYPE` | Which panel driver is compiled: `0`=none, `1`=SSD1306 OLED, `2`=ST7789 TFT, `3`=ILI9341 TFT. SSD1306 is the tested path; the TFT branches exist in `HAL_Display.cpp` but ILI9341 is a placeholder and the `OLED_Mode_*` UI is SSD1306-shaped |
+| `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder |
+| `ENABLE_HTTPS` | Set to `1` for TLS on the web server; certs in `/system/certs/`. Runtime toggle: `httpsEnabled` |
+| `ENABLE_MAPS` | Set to `1` to build offline maps and waypoints |
+| `ENABLE_GAMES` | Set to `1` to build the browser games page. Pick exactly one game: `ENABLE_WEB_GAME_MAZE` or `ENABLE_WEB_GAME_DARKROOM` - both at once overflows the app partition and is rejected at build time |
+| `ENABLE_ESP_SR` | Set to `1` to build ESP-SR voice: WakeNet wake word + MultiNet command grammar |
+| `ENABLE_BLUETOOTH` | Set to `1` to build the BLE server with GATT services. It gates *our* code only - to actually reclaim the Bluedroid stack's flash/RAM you also need `CONFIG_BT_ENABLED=n` in sdkconfig, and on a board whose sdkconfig drops the stack the header's derived rules force this flag back to `0` |
+| `ENABLE_G2_GLASSES` | Set to `1` to build the Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) |
+| `ENABLE_R1_HEALTH` | Set to `1` to build the R1 Health vitals UI (G2 Apps->Health, OLED, Web `/r1-health`) + health logging. Requires Bluetooth + G2; forced off if either is off. Ring connect stays under `ENABLE_G2_GLASSES`. |
+| `ENABLE_MQTT` | Set to `1` to build the Home Assistant MQTT integration |
+| `ENABLE_AUTOMATION` | Set to `1` to build scheduled tasks and conditional commands |
+| `ENABLE_CAMERA_SENSOR` | Set to `1` to build the ESP32-S3 DVP camera driver (OV2640/OV5640) |
+| `ENABLE_MICROPHONE_SENSOR` | Set to `1` to build the PDM microphone via I2S |
+| `ENABLE_BATTERY_MONITOR` | Set to `1` to build LiPo voltage monitoring via ADC |
+| `ENABLE_EDGE_IMPULSE` | Set to `1` to build Edge Impulse ML inference |
+| `ENABLE_BONDED_MODE` | Set to `1` to build Bonded Microcontrollers - two devices share command registries and the controller shows a Remote tab with the paired device's features |
+| `ENABLE_LLM_BACKEND` | Master switch for the LLM feature (web LLM page, OLED LLM mode, `llm*` commands, lens viewer). Set to `1` *and* turn on at least one source below; a build error tells you if you forget. |
+| `ENABLE_LLM_SOURCE_ONBOARD` | Set to `1` to build the tiny transformer that runs on this chip (ESP32-S3 + PSRAM only). Requires a model file on LittleFS or SD card. |
+| `ENABLE_LLM_SOURCE_CM5` | Set to `1` to answer from the Raspberry Pi co-processor over the UART link. Requires a board with a `UART_LINK_PORT` (all supported boards). |
+| `ENABLE_RASPBERRY_PI_HOST_POWER` | Set to `1` to build `cm5 power` - profile, reboot, halt, suspend, timed sleep of the Pi with confirmed request/ACK |
+| `ENABLE_RASPBERRY_PI_HOST_FAN` | Set to `1` to build `cm5 fan` - quiet/auto/max with temperature, PWM, RPM and health readback |
 
 When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABLE_*` flags:
 
@@ -132,11 +138,11 @@ Which pages exist depends on the per-page compile gates (`CUSTOM_ENABLE_WEB_*` w
 | **Logging** | `/logging` | core | Browse the capture tree (`/logging_captures`), sensor logs, GPS tracks |
 | **Maps** | `/maps` | `WEB_MAPS` | Offline map viewer, waypoints, GPS track logging (requires `ENABLE_MAPS`) |
 | **Bluetooth** | `/bluetooth` | `WEB_BLUETOOTH` | BLE status and controls, G2 and R1 ring connect (requires `ENABLE_BLUETOOTH`) |
-| **R1 Health** | `/r1-health` | `WEB_R1_HEALTH` | Ring vitals, graphs, Health Track (requires `ENABLE_R1_HEALTH`) |
+| **R1 Health** | `/r1-health` | `WEB_R1_HEALTH` | Ring vitals, graphs, health logging (requires `ENABLE_R1_HEALTH`) |
 | **Battery** | `/battery` | `WEB_BATTERY` | Voltage, charge level, battery log |
 | **MQTT** | `/mqtt` | `WEB_MQTT` | Broker config, topic preview, Home Assistant status (requires `ENABLE_MQTT`) |
 | **Speech** | `/speech` | `WEB_SPEECH` | ESP-SR status and tuning (requires `ENABLE_ESP_SR`) |
-| **LLM** | `/llm` | `ENABLE_ONDEVICE_LLM` | On-device model chat - load/unload, ask, temperature and sampling |
+| **LLM** | `/llm` | `ENABLE_LLM_BACKEND` | Model chat - load/unload, ask, temperature and sampling. Answers come from whichever source the build enables (on-chip model and/or the CM5 co-processor) |
 | **Games** | `/games` or `/darkroom` | `WEB_GAMES` | Browser game (requires `ENABLE_GAMES`; exactly one game per build) |
 | **Settings** | `/settings` | core | All device settings, debug flags, user management |
 | **CLI** | `/cli` | core | Full command interface in the browser, with history |
@@ -168,8 +174,7 @@ Notes on placement, which changed in the menu reorg:
 - **Maps** lives under **Apps** and needs both `ENABLE_GPS_SENSOR` and `ENABLE_MAPS`.
 - **Sensors** is a submenu: Data, List, then one row per compiled sensor (Thermal, ToF, IMU, APDS, GPS, Gamepad, FM Radio, RTC, Presence, Camera).
 - **Users** is hidden for non-admins, and the mode refuses to open without an admin session.
-- **Health** (R1 ring vitals, Poll Now, Health Track) requires `ENABLE_R1_HEALTH`. Ring *pairing* is under Connect -> Bluetooth.
-- **Pet** is G2-only - it has no OLED mode, so the lens Apps launcher has one row this menu does not.
+- **Health** (R1 ring vitals, Poll Now, Health Logging) requires `ENABLE_R1_HEALTH`. Ring *pairing* is under Connect -> Bluetooth.
 
 ---
 
@@ -184,11 +189,11 @@ The main menu mirrors the OLED's six categories:
 
 | Category | Rows |
 | -------- | ---- |
-| **System** | Status, System Events, Logging, Tests |
+| **System** | Status, System Events, Logging, Tests (only on an `ENABLE_G2_TESTSUITE` build) |
 | **Config** | Settings, Users (admin only) |
 | **Connect** | WiFi >>, Bluetooth >>, ESP-NOW >> |
 | **Hardware** | Sensor list (one row per compiled sensor), LED, FM tuner |
-| **Apps** | ESP-NOW, Files, Maps, LLM, Automations, Health, Pet |
+| **Apps** | ESP-NOW, Files, Maps, LLM, Automations, Health |
 | **Power** | CPU presets, restart, power off |
 
 Sub-pages are registered but hidden from the top level - they are reached
@@ -203,33 +208,119 @@ deeper still: **Camera settings** is reached from Hardware -> sensor list -> `CA
 | **ESP-NOW** | Peer messaging. Distinct from Connect -> ESP-NOW, which owns the settings |
 | **Files** | Browse, view, rename, delete. Folders carry an item-count badge |
 | **Maps** | Pan/zoom offline map viewer. Row reads `Maps (none)` when no map files are present (requires `ENABLE_MAPS`) |
-| **LLM** | Read-only streaming viewer plus a guided-input picker (requires `ENABLE_ONDEVICE_LLM`) |
-| **Automations** | List, view, and run automations |
+| **LLM** | Submenu: Open chat / Ask (Mic / Keys) / Ask (guided) / Re-run last / Select Model (requires `ENABLE_LLM_BACKEND`) - see [LLM](#llm) |
+| **Automations** | List, view, and run automations (requires `ENABLE_AUTOMATION`) |
 | **Health** | R1 ring vitals + sparkline graphs (requires `ENABLE_R1_HEALTH`) - see below |
-| **Pet** | Virtual-creature app with an animated tile renderer |
 
 ### Apps -> Health
 
-Left column is a metric list, right side a 288x144 graph: Overview, Trends,
-Heart Rate, HRV, SpO2, Temperature, Battery, Poll Now, Toggle Track.
+Left column is a metric list, right side a 288x144 graph: Overview, Activity,
+Trends, Heart Rate, HRV, SpO2, Temperature, Battery, Poll Now, Health Logging.
 
 - **Overview** - native-text vitals with wear state and one shared recentness figure on the status line.
 - **Trends** - submenu graphing the ring's daily-history payload (HR / HRV / SpO2 today + Refresh), kept separate from the live sparklines.
-- **Toggle Track** - starts Health Track logging (`healthtrack on`). While on, the ring is mined every `healthTrackPollIntervalSec` (default 15 min). Opening the page or **Poll Now** also logs a sample when R1 logging is active.
+- **Poll Now** - one composite refresh: a full daily sweep plus a correlated device-status read, under a 75-second ceiling. The status line walks `Refreshing...` -> `Refreshed`, or reports `Refresh incomplete` / `Refresh failed` / `Refresh unsupported`, so "Refreshed" means the sweep finished rather than "the requests were sent". Simply *opening* the page no longer fires a poll burst - it reads the freshness-throttled history lane instead.
+- **Health Logging** - toggles local R1 logging (`healthlogging on` / `healthlogging off`). While on, the ring is mined every `healthLoggingPollIntervalSec` seconds (default 900 = 15 min). Opening the page or **Poll Now** also logs a sample when R1 logging is active.
+
+On-demand refresh is a per-firmware capability. Only R1 firmware **2.2.9.0003**
+is admitted for it; on any other profile the row reads `Poll unsupported` (or
+`Passive only` on the metric readouts) and no command is sent, instead of arming
+a request whose only outcome is a timeout. The same gate applies on the web page
+(**Poll Now** renders disabled as `Poll unavailable` / `Poll unsupported`) and on
+the OLED R1 Health page. Live sparklines are right-anchored: the newest sample
+sits at the right edge and any slack shows on the left, where it reads as "no
+data that far back". Trends keeps its own left-anchored day window.
 
 Pair the ring under Connect -> Bluetooth. The same vitals appear on the OLED
 (**Apps -> Health**) and the web (**`/r1-health`**).
 
+### Config -> Users
+
+Admin only. The list carries a `+ Add User` row; the add flow is username ->
+role -> password -> confirm.
+
+Opening an account always shows two rows first: **`Role: <role>`** and a
+**`Status: Active/Banned`** line. The role row is only *editable* - it gains a
+`>` and opens the role picker - when the target is none of: the founder, the
+identity that currently owns the lens, or an account of higher rank than you.
+Otherwise it is a read-only info row.
+
+What comes after those two rows is **one of four mutually exclusive branches**,
+not a single menu - you never see the whole set on one account:
+
+| The account is | Rows you get |
+| -------------- | ------------ |
+| Higher rank than you | `Higher role - protected` and nothing else |
+| The founder | `Founder - protected`; plus **Change Password** only if the founder is *you* |
+| The lens owner's identity | `Current G2 owner` if it is you, else `G2 owner name collision`; plus **Change Password** only if it is you |
+| Anything else | **Reset Password**, **Kick Sessions**, **Ban/Unban User**, **Delete User** |
+
+So a normal account offers the four admin actions and **no Change Password row**;
+Change Password appears *only* on the founder-self and lens-owner-self branches,
+where it is the single available action. Reset Password (admin) offers a
+`Save Password` or `Save + Require Change` choice, and every destructive row
+goes through an explicit on-lens confirm row. Kick and ban appear only on builds
+with `ENABLE_HTTP_SERVER`, which provides their handlers.
+
+The name-collision case is worth knowing about: if a username differs from the
+lens owner's only by letter case it lands in the owner-identity branch as
+`G2 owner name collision` and offers nothing at all, because account lookup is
+case-sensitive but session revocation is not - the destructive rows would act on
+the wrong account.
+
 ### Text entry
 
-Pages that need input (WiFi join and file rename) open an on-lens keyboard.
-Two things to know: it deliberately has **no double-quote key**, and a
-pre-filled value longer than 32 characters is silently truncated.
+Pages that need input - WiFi join, file rename, ESP-NOW name and messages, a
+settings value, a user password, the Maps search box, the LLM's
+`Ask (Mic / Keys)` row - open the shared on-lens keyboard. Since v0.99.92 that
+is an **arrow-pad QWERTY grid** as the default surface; the old grouped cycling
+keyboard is still in the firmware as the last-resort fallback (see below).
+
+The layout is a 288x144 key grid on the right and a 7-row nav list on the left,
+with a live text pane showing the prompt, the buffer and a character count:
+
+| Nav row | Does |
+| ------- | ---- |
+| **X Cancel** | Abandon the field |
+| **Done** | Commit what is in the buffer |
+| **Up** / **Down** | Move the cursor one grid row (wraps) |
+| **Left** / **Right** | Move the cursor one grid cell (wraps) |
+| **Mic / Keys** | Toggle between the key grid and the speech page - see below |
+
+**Selecting the highlighted key is an R1 ring double-tap**, not a list row.
+The captured firmware reports that gesture with no row index, so the pad takes
+the rowless double-click directly - no Select row is needed, and the nav list
+never has to be rebuilt while you type. The gesture only reaches the firmware
+when the ring is BLE-paired to the glasses; temple taps drive the nav rows.
+
+The grid is 5 rows x 10 columns across **three pages** - lowercase, uppercase,
+and symbols. Shift, the page toggle (`#!` on the letter pages, `ab` on the
+symbol page), backspace and the space bar are grid *cells*, so the whole
+character set is reachable without any list rebuild. The cursor starts on `q`.
+Two things to know: the grid deliberately has **no double-quote key** (text
+entry has to stay safe to wrap in a quoted CLI argument), and a pre-filled value
+longer than the field's own limit is silently truncated - most fields cap at 32
+characters, and the surface's ceiling is 256.
+
+If the lens refuses the four-band grid, the firmware falls back to a single
+keyboard image, and then to the legacy grouped character list, without telling
+you - the field still works.
+
+**Mic row (dictation).** Tapping **Mic / Keys** from a key page opens a speech
+page: a short `GET READY` countdown, then `SPEAK NOW` (`AUTO-STOPS AFTER
+SILENCE`), then `TRANSCRIBING` while the Pi works. The transcript is appended to
+the field you were typing in. Tapping the same row again stops an in-progress
+recording, cancels a transcription, or returns you to the keys. The row reads
+**`Mic disabled`** when the field is a secret (passwords and PSKs never
+dictate) or when no paired-user session owns the lens. Dictation needs a
+microphone build *and* a logged-in Raspberry Pi co-processor that has advertised
+its capability - see [Raspberry Pi Co-Processor](#raspberry-pi-co-processor-cm5).
+Captures are capped at 30 seconds.
 
 ### CLI
 
 Most lens pages have a CLI equivalent - `g2status`, `g2show`, `g2clear`,
-`g2nav`, `g2health`, `g2pet`, `g2map`, `g2files`, `g2sensors`, `g2settings`,
+`g2nav`, `g2health`, `g2map`, `g2files`, `g2sensors`, `g2settings`,
 `g2network`, `g2battery`, and the `g2ai*` / `g2mic*` / `g2notify*` families.
 Run `help g2` on the device for the full list.
 
@@ -655,11 +746,12 @@ The firmware half is this repository. The Pi half is a single Linux daemon, `hw1
 
 - **Ask the Pi** - the Pi's models appear as an LLM source with a `cm5:` prefix (`llmmodels`, `llmload cm5:<name>`) on the web LLM page, the OLED LLM mode and the lens; answers stream back to whichever surface asked. See [LLM](#llm).
 - **"Hey Even" without a phone** - with G2 glasses paired, the wake word opens a native voice session: the device records, streams the audio to the Pi, the Pi transcribes and answers, and the reply lands on the lens. The firmware only accepts a wake while the Pi is logged in over the link *and* its heartbeat says `ready`; otherwise the glasses are told to fall back to their own timeout instead of showing a listening card nobody will answer. `g2evenai status` shows the current exchange and why a wake was declined.
-- **Dictation** - the OLED keyboard gains a MIC page (cycle modes with SELECT until `MIC`; A records, Y deletes, X accepts). Speak, the Pi transcribes, and the text lands in the field you were typing in. Only offered while the microphone, the link and a logged-in Pi are all present.
+- **Dictation** - speak into any text field. On the OLED, cycle keyboard modes with SELECT until `MIC` (A records, Y deletes, X accepts). On the G2 lens, tap the keyboard's **Mic / Keys** row (see [Text entry](#text-entry)). Speak, the Pi transcribes, and the text lands in the field you were typing in. Each surface drains only its own transcript, so an OLED login or logout can no longer cancel a glasses-owned dictation. Only offered while the microphone, the link and a logged-in Pi are all present - and the daemon must additionally announce `dictate hostready v1` after each login, so a Pi that cannot transcribe is refused up front (`host not present` / `host stale` / `host not ready`) instead of arming a capture nobody will answer. Captures are capped at 30 seconds; the firmware waits up to 90 seconds for the transcript, which covers a cold model load on the Pi. Dictation is compiled in whenever the build has a microphone *and* at least one keyboard surface - an OLED panel **or** G2 glasses - so a glasses-only build (no panel) still gets it.
 - **Power and fan** - `cm5 power` (profile, reboot, halt, suspend, timed sleep) and `cm5 fan` (quiet / auto / max with temperature, PWM, RPM and health readback). Every request is a confirmed request/ACK exchange reconciled against the Pi's boot-id, so a lost ACK is completed, never re-executed; an ambiguous outcome fails closed until `cm5 power recover confirm`. Destructive verbs are super-admin and need `confirm` on the same line.
 - **Presence** - the daemon sends `cm5 heartbeat` every 5 s (`starting` / `ready` / `busy` / `degraded`); the firmware holds a 15 s lease (75 s while the Pi is busy). `cm5 status` shows the lease, `cm5 capabilities` the protocol version. A stale lease means voice sessions and remote LLM calls are declined rather than left hanging.
 - **Clock** - a Pi that knows the time can set the device clock over the link (source `cm5` in clock status). A dark boot adopts it; an already-synced clock is only corrected when the Pi is NTP-synced, the current source is neither manual nor NTP, and the drift is over two minutes.
 - **Bulk audio** - `voicefetch "<path>"` streams a finished recording to the Pi as framed binary with a whole-file CRC; `liveaudio` is an opt-in real-time PCM transport for the S3 boards.
+- **Link diagnostics** - `cm5 linkhealth [json]` prints the *Pi daemon's own* UART fault tally (garbage, corrupt and stray frames, timeouts, logins, resets, tx/rx line counts, host uptime). The daemon pushes it over the authenticated link, so the numbers that name a link fault are readable from this device's CLI even when the Pi has no network. Counters are parsed by key, so a counter the daemon adds later reaches an existing build without a reflash; a malformed report is rejected whole, because damage is exactly what these counters measure. Diagnostics only - nothing in the firmware reads the stored values back.
 
 ### Wiring
 
@@ -698,23 +790,31 @@ uartlink [status|on|off]            - UART host link on/off; status shows sessio
 uartlinkbaud <0|9600-max>           - baud (0 = board default); persisted
 uartrequireauth <0|1>               - require login on the link (super admin; default 1)
 cm5 [status|capabilities]           - presence lease / protocol (cm5-presence-v1)
+cm5 linkhealth [json]               - the Pi daemon's UART fault tally (diagnostics only)
 cm5 power [show|status|profile <eco|balanced|performance|auto>]
 cm5 power reboot|halt|suspend confirm
 cm5 power sleep_for <1..1440> confirm
 cm5 power recover confirm           - clear a fail-closed uncertain transition
 cm5 fan [show|status|quiet|auto|max]
 llmmodels / llmload cm5:<name>      - the Pi's models carry a cm5: prefix (see LLM)
-dictate status                      - pending dictation (result/fail are sent by the Pi)
+dictate status|result|fail          - UART-only; not a CLI command. See below
 voicefetch "<path>"                 - stream a recording to the Pi (paths under /recordings)
 liveaudio status|capabilities       - live PCM transport (S3 boards, >= 921600 baud)
 g2evenai status|capabilities        - native "Hey Even" exchange and host-gate state
 ```
 
+> `dictate` is **not** in the command registry - it does not appear in `help`,
+> and typing it at a serial or web CLI gets you nothing. The verb is claimed
+> directly on the authenticated UART control plane, so only a logged-in Pi
+> session can use it. Daemons keep sending the same `dictate result` / `dictate
+> fail` lines, but must now send `dictate hostready v1` after each login before
+> the firmware will arm a capture.
+
 ---
 
 ## LLM
 
-Requires `ENABLE_LLM_BACKEND=1` plus at least one answer source: `ENABLE_LLM_SOURCE_ONBOARD` (a tiny transformer running on this chip - ESP32-S3 with PSRAM only) and/or `ENABLE_LLM_SOURCE_CM5` (answers from the [Raspberry Pi co-processor](#raspberry-pi-co-processor-cm5) over the UART link). The default build ships the CM5 source on and the on-board engine off. Every surface - web page, OLED mode, lens viewer, `llm*` commands - talks to whichever source holds the current model; models are addressed by `<source>:<name>` ids such as `onboard:model.bin` or `cm5:Qwen3-1.7B-Q4_0.gguf` (a bare filename still resolves).
+Requires `ENABLE_LLM_BACKEND=1` plus at least one answer source: `ENABLE_LLM_SOURCE_ONBOARD` (a tiny transformer running on this chip - ESP32-S3 with PSRAM only) and/or `ENABLE_LLM_SOURCE_CM5` (answers from the [Raspberry Pi co-processor](#raspberry-pi-co-processor-cm5) over the UART link). Every surface - web page, OLED mode, lens viewer, `llm*` commands - talks to whichever source holds the current model; models are addressed by `<source>:<name>` ids such as `onboard:model.bin` or `cm5:Qwen3-1.7B-Q4_0.gguf` (a bare filename still resolves).
 
 ### Model files (on-board source)
 
@@ -732,6 +832,22 @@ Models and KV cache are allocated in PSRAM. The firmware automatically reduces t
 ### Web UI
 
 The **LLM** tab provides a chat interface. Select a model from the dropdown (Pi models are tagged `[cm5]`, SD-card models `[SD]`; unavailable ones are listed but disabled), click **Load**, then type a prompt and click **Ask**. A **Do:** button appears only when the loaded model declares command-mode support. Adjustable settings: temperature, sentence limit, and repetition penalty. The page shows a measured load bar while a Pi model loads and reports `[connection lost]` if the device stops answering.
+
+### On the lens
+
+**Apps -> LLM** opens a submenu rather than dropping straight into the viewer:
+
+| Row | Does |
+| --- | ---- |
+| **Open chat** | The read-only streaming answer viewer |
+| **Ask (Mic / Keys)** | New in v0.99.92 - a free-text or spoken turn, typed on the shared [arrow-pad keyboard](#text-entry) or dictated from its Mic row |
+| **Ask (guided)** | The drill-down prompt picker. Hidden when the loaded model publishes no menu |
+| **Re-run last** | Retry the previous turn |
+| **Select Model** | Unload, or pick a model; the row label shows the loaded model's filename |
+
+**Re-run last** follows the surface the question came from: a keyboard or mic
+turn is retried through the chat path, and only a guided turn is re-asked as a
+plain guided turn.
 
 ### Generation modes
 
@@ -804,9 +920,12 @@ Available debug modules (type `help debug` on device for full list):
 ## Command Reference
 
 > **This section is a curated tour of the commands you reach for most - it is
-> not the complete list.** The device registers **893 commands across 44
-> modules**. For every command, generated directly from the `CommandEntry`
-> tables, see **[COMMAND_REFERENCE.md](COMMAND_REFERENCE.md)**.
+> not the complete list.** For every command your build actually registers, see
+> **[COMMAND_REFERENCE.md](COMMAND_REFERENCE.md)** - it is generated directly
+> from the `CommandEntry` tables, so it reflects the build flags that were set
+> when it was produced. Regenerate it for your own configuration with
+> `python3 tools/command_registry.py reference`; the command and module counts
+> move with your flags, which is why they are not repeated here.
 
 Type `help` on the device to enter the interactive help system. Type a module name to see its commands. Type `help all` to include disconnected sensors.
 
@@ -1204,18 +1323,19 @@ sensorlog interval <ms>                   - Poll interval (100-3600000)
 sensorlog autostart [on|off]              - Auto-start on boot with last-used path/mask
 ```
 
-**R1 Health Track (preferred):** `healthtrack on` (or Apps -> Health / OLED R1 Health /
-Web R1 Health -> Track) enables R1 in the sensorlog mask, starts capture under
+**R1 health logging (preferred):** `healthlogging on` (or the **Health Logging** row on
+Apps -> Health, the OLED R1 Health page, or the **Health logging** button on Web
+R1 Health) enables R1 in the sensorlog mask, starts capture under
 `/logging_captures/sensors/`, and persists so boot resumes. The exact path is
 shaped per session: a dated per-day file (`YYYY-MM-DD/health-YYYY-MM-DD.csv`)
 once the clock is set, or a `boot-NNNNNN/` subfolder while it is still dark -
 those are retro-dated automatically when real time arrives.
-While Track is on, the ring is polled/mined on a timer (default **900 s / 15 min**)
-and **only those mines write rows** (plus Poll Now / opening Health). There are no
-5 s empty timestamp heartbeats in R1-only Track sessions. Adjust with
-`healthtrack interval <sec>` or setting `healthTrackPollIntervalSec` (60-86400).
-`healthtrack off` removes R1; stops logging if nothing else is selected.
-Settings: `logging.sensorlog` -> **R1 Health Track** / **R1 Health poll interval (sec)**.
+While health logging is on, the ring is polled/mined on a timer (default **900 s /
+15 min**) and **only those mines write rows** (plus Poll Now / opening Health). There
+are no 5 s empty timestamp heartbeats in R1-only sessions. Adjust with
+`healthlogging interval <sec>` or setting `healthLoggingPollIntervalSec` (60-86400).
+`healthlogging off` removes R1; stops logging if nothing else is selected.
+Settings: `logging.sensorlog` -> **Health logging** / **Health logging poll interval (sec)**.
 
 **Surfaces** (requires `ENABLE_R1_HEALTH`): G2 Apps -> Health (graphs), OLED **R1 Health**,
 Web **`/r1-health`**. Ring connect remains under Bluetooth (OLED / Web). Snapshot CLI
@@ -1227,17 +1347,17 @@ inputs, and does not check that the inputs share a format or sensor mask. Per-da
 same-day sessions already land in one file, so stitching is only for spanning days.
 
 **Keep the ring up:** `bleautoreconnect r1-ring on` reconnects at boot **and** reseeks after
-unexpected drops (backoff). While Health Track is on, each due mine (default 15 min)
+unexpected drops (backoff). While health logging is on, each due mine (default 15 min)
 also nudges a ring reseek if the link is down (one non-blocking connect attempt;
 not a continuous scan). `ringdisconnect` / `closeg2` do not reseek.
 
 You can still use raw `sensorlog sensors r1` + `sensorlog start ...` if you want
-manual control without the Health Track product switch (that path still uses the
+manual control without the `healthlogging` product switch (that path still uses the
 normal sensorlog interval / heartbeats).
 </details>
 
 <details>
-<summary><strong>llm - On-device LLM inference (requires ENABLE_ONDEVICE_LLM)</strong></summary>
+<summary><strong>llm - LLM inference, on-chip or via the CM5 co-processor (requires ENABLE_LLM_BACKEND)</strong></summary>
 
 ```
 llmstatus                       - Show LLM state, model config, PSRAM usage, last generation stats
@@ -1430,21 +1550,20 @@ g2deinit                        - Deinitialize G2 client mode
 g2nav [on|off]                  - Map G2 gestures to OLED menu navigation
 g2verbose [on|off]              - Toggle verbose packet logging
 g2health                        - Open Apps -> Health (R1 vitals + graphs) on the lens (ENABLE_R1_HEALTH)
-g2pet                           - Open Apps -> Pet on the lens
 ```
 
-**Apps -> Health** (lens, `ENABLE_R1_HEALTH`): left list (Overview / Trends / Heart Rate / HRV /
-SpO2 / Temperature / Battery / Poll Now / Toggle Track). **Overview** shows native-text
+**Apps -> Health** (lens, `ENABLE_R1_HEALTH`): left list (Overview / Activity / Trends / Heart Rate /
+HRV / SpO2 / Temperature / Battery / Poll Now / Health Logging). **Overview** shows native-text
 vitals (wear + one shared recentness on the status line); live metric rows show
 title/value/age above a line graph. **Trends** opens a submenu (HR/HRV/SpO2 today +
 Refresh) that graphs the ring's daily-history payload separately from the live
 sparklines (weekly aggregation later).
-**Toggle Track** starts Health Track logging (`healthtrack on`); while on, the ring is
-mined every `healthTrackPollIntervalSec` (default 15 min). Opening the page or **Poll Now**
+**Health Logging** toggles local R1 logging (`healthlogging on`); while on, the ring is
+mined every `healthLoggingPollIntervalSec` seconds (default 900 = 15 min). Opening the page or **Poll Now**
 also logs a sample when R1 logging is active. Pair the R1 under Bluetooth -> R1 Ring;
 vitals also on OLED **R1 Health** and Web **`/r1-health`**.
 Ring/Health CLI: `ringconnect`, `ringstatus`, `ringquery hr|temp|wear`,
-`healthstatus [json|poll]`, `healthtrack status|interval`. A Bluetooth App can call the
+`healthstatus [json|poll]`, `healthlogging status|interval`. A Bluetooth App can call the
 same commands over GATT (no dedicated phone UI yet).
 3-pane list+text+image experiments: Tests -> Image -> Com2 (LZ4 multi) -> Q30*.
 </details>

@@ -34,83 +34,6 @@ inline void getPresenceDataJson(JsonObject& doc) {
   }
 }
 
-// Web page HTML fragment for presence sensor card
-inline const char* getPresenceWebCard() {
-  return R"HTML(
-<div class="card" id="presence-card">
-  <h3>IR Presence Sensor</h3>
-  <div class="sensor-status">
-    <span id="presence-status">Checking...</span>
-  </div>
-  <div class="sensor-data" id="presence-data">
-    <div class="data-row">
-      <span class="label">Ambient:</span>
-      <span class="value" id="presence-ambient">--</span>
-    </div>
-    <div class="data-row">
-      <span class="label">Presence:</span>
-      <span class="value" id="presence-presence">--</span>
-    </div>
-    <div class="data-row">
-      <span class="label">Motion:</span>
-      <span class="value" id="presence-motion">--</span>
-    </div>
-    <div class="data-row">
-      <span class="label">Temp Shock:</span>
-      <span class="value" id="presence-shock">--</span>
-    </div>
-  </div>
-  <div class="sensor-controls">
-    <button onclick="togglePresence()" id="presence-toggle">Start</button>
-  </div>
-</div>
-)HTML";
-}
-
-// JavaScript for presence sensor web interface
-inline const char* getPresenceWebScript() {
-  return R"JS(
-function updatePresenceCard(data) {
-  const statusEl = document.getElementById('presence-status');
-  const toggleBtn = document.getElementById('presence-toggle');
-  
-  if (data.connected && data.enabled) {
-    statusEl.textContent = 'Active';
-    statusEl.className = 'status-active';
-    toggleBtn.textContent = 'Close';
-    
-    if (data.dataValid) {
-      document.getElementById('presence-ambient').textContent = data.ambientTemp.toFixed(1) + '°C';
-      
-      let presText = data.presenceValue.toString();
-      if (data.presenceDetected) presText += ' [DETECTED]';
-      document.getElementById('presence-presence').textContent = presText;
-      
-      let motionText = data.motionValue.toString();
-      if (data.motionDetected) motionText += ' [DETECTED]';
-      document.getElementById('presence-motion').textContent = motionText;
-      
-      let shockText = data.tempShockValue.toString();
-      if (data.tempShockDetected) shockText += ' [DETECTED]';
-      document.getElementById('presence-shock').textContent = shockText;
-    }
-  } else if (data.connected) {
-    statusEl.textContent = 'Connected (Idle)';
-    statusEl.className = 'status-idle';
-    toggleBtn.textContent = 'Open';
-  } else {
-    statusEl.textContent = 'Not Connected';
-    statusEl.className = 'status-disconnected';
-    toggleBtn.textContent = 'Open';
-  }
-}
-
-function togglePresence() {
-  const cmd = document.getElementById('presence-toggle').textContent === 'Open' ? 'openpresence' : 'closepresence';
-  hw.postFormText('/api/cli', { cmd: cmd }).then(t => console.log('Presence:', t)).catch(e => console.warn('Presence toggle failed:', e));
-}
-)JS";
-}
 
 // Stream presence sensor card HTML
 inline void streamSTHS34PF80PresenceSensorCard(httpd_req_t* req) {
@@ -151,9 +74,9 @@ inline void streamSTHS34PF80PresenceSensorJs(httpd_req_t* req) {
     "window._sensorPollingIntervals = window._sensorPollingIntervals || {};\n"
     "window._sensorPollingIntervals.presence = 500;\n"
     "window._sensorReaders.presence = function() {\n"
-    "  var ambEl = document.getElementById('presence-ambient');\n"
-    "  var presEl = document.getElementById('presence-presence');\n"
-    "  var motEl = document.getElementById('presence-motion');\n"
+    "  var ambEl = hw.$('presence-ambient');\n"
+    "  var presEl = hw.$('presence-presence');\n"
+    "  var motEl = hw.$('presence-motion');\n"
     "  if (!ambEl && !presEl && !motEl) return Promise.resolve();\n"
     "  return hw.fetchJSON('/api/sensors?sensor=presence&ts=' + Date.now())\n"
     "    .then(function(data) {\n"

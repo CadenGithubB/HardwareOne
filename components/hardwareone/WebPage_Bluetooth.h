@@ -474,8 +474,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     });
   }
 
-  function el(id){ return document.getElementById(id); }
-  function setText(id,v){ var e=el(id); if(e) e.textContent=v||''; }
+  function el(id){ return hw.$(id); }
+  function setText(id,v){ var e=el(id); hw.setText(e,v||''); }
 
   // ── state ─────────────────────────────────────────────────────────────────
   var bleMode = 'server';  // 'server' | 'client' — tracks gSettings.bleMode
@@ -497,29 +497,33 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   }
 
   function applyMode(mode){
-    bleMode = (mode === 'client') ? 'client' : 'server';
+    var next = (mode === 'client') ? 'client' : 'server';
+    // No-op when the mode is unchanged. Load-bearing: refresh()'s handler
+    // calls applyMode(d.mode) on every status response (the server always
+    // includes mode), and the trailing refresh() below would otherwise
+    // recurse refresh→applyMode→refresh at HTTP round-trip speed (~330 ms
+    // observed), bypassing the pollTick cadence entirely and flooding
+    // command-audit.log with `bleinfo json` lines.
+    if (next === bleMode) return;
+    bleMode = next;
 
     var modePill = el('bt-mode-pill');
-    if(modePill){
-      modePill.textContent = (bleMode === 'client') ? 'G2 Client' : 'Server';
-    }
+    hw.setText(modePill, (bleMode === 'client') ? 'G2 Client' : 'Server');
     var modeBtn = el('btn-bt-mode');
-    if(modeBtn){
-      modeBtn.textContent = 'Mode: ' + (bleMode === 'client' ? 'G2 Client' : 'Server');
-    }
+    hw.setText(modeBtn, 'Mode: ' + (bleMode === 'client' ? 'G2 Client' : 'Server'));
 
     // Swap the not-init copy to match the mode the user is about to act on.
     var nit = el('bt-not-init-title');
     var nib = el('bt-not-init-body');
     var ob2 = el('btn-bt-open2');
     if(bleMode === 'client'){
-      if(nit) nit.textContent = 'G2 client is not running';
-      if(nib) nib.textContent = 'Initialize the BLE central stack to scan for and connect to Even Realities G2 glasses.';
-      if(ob2) ob2.textContent = 'Initialize G2';
+      hw.setText(nit, 'G2 client is not running');
+      hw.setText(nib, 'Initialize the BLE central stack to scan for and connect to Even Realities G2 glasses.');
+      hw.setText(ob2, 'Initialize G2');
     } else {
-      if(nit) nit.textContent = 'Bluetooth is not running';
-      if(nib) nib.textContent = 'Enable the BLE server to begin advertising and accept connections from clients.';
-      if(ob2) ob2.textContent = 'Enable Bluetooth';
+      hw.setText(nit, 'Bluetooth is not running');
+      hw.setText(nib, 'Enable the BLE server to begin advertising and accept connections from clients.');
+      hw.setText(ob2, 'Enable Bluetooth');
     }
 
     // The Advertise button is server-only; hide it up-front in client mode
@@ -559,23 +563,23 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     var g2Panels  = el('bt-g2-panels');
     var notInit   = el('bt-not-init');
     if(bleMode === 'server'){
-      if(srvPanels) srvPanels.style.display = isOn ? '' : 'none';
-      if(g2Panels)  g2Panels.style.display  = 'none';
+      hw.toggle(srvPanels, (isOn));
+      hw.hide(g2Panels);
     } else {
-      if(srvPanels) srvPanels.style.display = 'none';
-      if(g2Panels)  g2Panels.style.display  = isOn ? '' : 'none';
+      hw.hide(srvPanels);
+      hw.toggle(g2Panels, (isOn));
     }
-    if(notInit) notInit.style.display = isOn ? 'none' : 'flex';
+    hw.toggle(notInit, !(isOn));
 
     var openBtn  = el('btn-bt-open');
     var closeBtn = el('btn-bt-close');
     var advBtn   = el('btn-bt-adv');
     var discBtn  = el('btn-bt-disconnect');
-    if(openBtn)  openBtn.style.display  = isOn ? 'none' : '';
-    if(closeBtn) closeBtn.style.display = isOn ? ''     : 'none';
+    hw.toggle(openBtn, !(isOn));
+    hw.toggle(closeBtn, (isOn));
     // Advertise / Disconnect-client are server-only.
-    if(advBtn)   advBtn.style.display   = (bleMode === 'server' && isOn && state !== 'connected') ? '' : 'none';
-    if(discBtn)  discBtn.style.display  = (bleMode === 'server' && state === 'connected') ? '' : 'none';
+    hw.toggle(advBtn, (bleMode === 'server' && isOn && state !== 'connected'));
+    hw.toggle(discBtn, (bleMode === 'server' && state === 'connected'));
   }
 
   // Derive the pill state from STRUCTURED bleinfo-json fields — no text parsing.
@@ -854,7 +858,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   function closeCmd(){ return (bleMode === 'client') ? 'g2deinit' : 'closeble'; }
 
   function bind(id, fn){
-    var e = el(id); if(e) e.addEventListener('click', fn);
+    var e = el(id); hw.on(e, 'click', fn);
   }
 
   // ── event bindings ────────────────────────────────────────────────────────
@@ -1042,7 +1046,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       bind('btn-g2-mic-toggle', function(){
         micState = !micState;
         var btn = el('btn-g2-mic-toggle');
-        if(btn) btn.textContent = 'Mic: ' + (micState ? 'On' : 'Off');
+        hw.setText(btn, 'Mic: ' + (micState ? 'On' : 'Off'));
         cli('g2mic ' + (micState ? 'on' : 'off')).then(function(o){ setText('g2-display-status', o); });
       });
 
@@ -1069,7 +1073,9 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       });
     }
 
-    // Initial load — determine mode first, which triggers refresh(); then pull
+    // Initial load — determine mode first (applyMode triggers a refresh()
+    // only when the reported mode differs from the 'server' default; the
+    // immediate pollTick below fires the first refresh either way); then pull
     // the saved server config so toggles show their real state regardless of
     // which mode we end up in.
     loadMode();
@@ -1099,30 +1105,31 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     // (and BLE/WiFi work queues) don't get hammered while nothing is
     // happening:
     //
-    //   FAST  (6000 ms) — when something is actively in motion: a
+    //   FAST  (1500 ms) — when something is actively in motion: a
     //                     temple is down, in 'dead' state, or a state
     //                     transition just happened. Surfaces tap /
-    //                     connect / disconnect feedback within ~6 s.
-    //   SLOW (60000 ms) — when both temples are 'up' and we've seen
+    //                     connect / disconnect feedback within ~1.5 s.
+    //   SLOW (15000 ms) — when both temples are 'up' and we've seen
     //                     three consecutive stable ticks. Drops the
     //                     CLI load by 10× during the long boring
     //                     stretches (which is most of the time during
     //                     normal use). The next state change kicks
     //                     back into FAST instantly.
     //
-    // Both cadences were quartered from 1500/15000: each tick lands one
-    // audited `bleinfo json` in command-audit.log, and an overnight-run
-    // review found a setup session writing ~800 audit lines in 4 min.
-    // Action-triggered refresh bursts below cover the snappy-feedback
-    // cases, so the background cadence can afford to be lazy.
+    // These cadences were once quartered to 6000/60000 after an
+    // overnight-run review found a setup session writing ~800 audit
+    // lines in 4 min (each tick lands one audited `bleinfo json`).
+    // That flood was ~3.3 Hz — far faster than this poll ever ran —
+    // and was traced to the refresh→applyMode→refresh recursion now
+    // guarded in applyMode(), so the original cadences are restored.
     //
     // Why not pure SSE: the EventSource handle wedged in readyState=0
     // (CONNECTING) across WiFi-reconnect cycles. Polling has no long-
     // lived connection to break, so a transient network blip costs at
     // most one missed update — exactly the same robustness model as
     // Sensors page.
-    var FAST_MS = 6000;
-    var SLOW_MS = 60000;
+    var FAST_MS = 1500;
+    var SLOW_MS = 15000;
     var STABLE_TICKS_TO_SLOW = 3;
 
     var pollLastL = '?', pollLastR = '?';

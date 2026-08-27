@@ -1,0 +1,76 @@
+# Reviewed wheel-only closure for the repository Secure BLE companion tools.
+# Supported runner: standard (GIL) CPython 3.12-3.14 on Darwin/Linux,
+# x86_64 or arm64/aarch64.  The wrapper rejects other environments before pip.
+# Update versions and hashes together from the official PyPI release metadata.
+
+bleak==3.0.2 \
+    --hash=sha256:39092feb9e83f1df5ad2f88e837723c7211c982ce9e9cda6235104bc2ebe0d0d
+
+PyNaCl==1.6.2 \
+    --hash=sha256:c949ea47e4206af7c8f604b8278093b674f7c79ed0d4719cc836902bf4517465 \
+    --hash=sha256:8845c0631c0be43abdd865511c41eab235e0be69c81dc66a50911594198679b0 \
+    --hash=sha256:22de65bb9010a725b0dac248f353bb072969c94fa8d6b1f34b87d7953cf7bbe4 \
+    --hash=sha256:46065496ab748469cdd999246d17e301b2c24ae2fdf739132e580a0e94c94a87 \
+    --hash=sha256:8a66d6fb6ae7661c58995f9c6435bda2b1e68b54b598a6a10247bfcdadac996c \
+    --hash=sha256:26bfcd00dcf2cf160f122186af731ae30ab120c18e8375684ec2670dccd28130 \
+    --hash=sha256:c8a231e36ec2cab018c4ad4358c386e36eede0319a0c41fed24f840b1dac59f6 \
+    --hash=sha256:68be3a09455743ff9505491220b64440ced8973fe930f270c8e07ccfa25b1f9e \
+    --hash=sha256:8b097553b380236d51ed11356c953bf8ce36a29a3e596e934ecabe76c985a577
+
+cffi==2.0.0 \
+    --hash=sha256:6d02d6655b0e54f54c4ef0b94eb6be0607b70853c45ce98bd278dc7de718be5d \
+    --hash=sha256:8eca2a813c1cb7ad4fb74d368c2ffbbb4789d377ee5bb8df98373c2cc0dee76c \
+    --hash=sha256:b21e08af67b8a103c71a250401c78d5e0893beff75e28c53c98f4de42f774062 \
+    --hash=sha256:3e17ed538242334bf70832644a32a7aae3d83b57567f9fd60a26257e992b79ba \
+    --hash=sha256:3925dd22fa2b7699ed2617149842d2e6adde22b262fcbfada50e3d195e4b3a94 \
+    --hash=sha256:2c8f814d84194c9ea681642fd164267891702542f028a15fc97d4674b6206187 \
+    --hash=sha256:00bdf7acc5f795150faa6957054fbbca2439db2f775ce831222b66f192f03beb \
+    --hash=sha256:45d5e886156860dc35862657e1494b9bae8dfa63bf56796f2fb56e1679fc0bca \
+    --hash=sha256:d48a880098c96020b02d5a1f7d9251308510ce8858940e6fa99ece33f610838b \
+    --hash=sha256:c8d3b5532fc71b7a77c09192b4a5a200ea992702734a2e9279a37f2478236f26 \
+    --hash=sha256:d9b29c1f0ae438d5ee9acb31cadee00a58c46cc9c0b2f9038c6b0b3470877a8c \
+    --hash=sha256:6d50360be4546678fc1b79ffe7a66265e28667840010348dd69a314145807a1b \
+    --hash=sha256:fc33c5141b55ed366cfaad382df24fe7dcbc686de5be719b207bb248e3053dc5 \
+    --hash=sha256:c654de545946e0db659b3400168c9ad31b5d29593291482c43e3564effbcee13 \
+    --hash=sha256:24b6f81f1983e6df8db3adc38562c83f7d4a0c36162885ec7f7b77c7dcbec97b \
+    --hash=sha256:afb8db5439b81cf9c9d0c80404b60c3cc9c3add93e114dcae767f1477cb53775 \
+    --hash=sha256:737fe7d37e1a1bffe70bd5754ea763a62a066dc5913ca57e957824b72a85e205 \
+    --hash=sha256:38100abb9d1b1435bc4cc340bb4489635dc2f0da7456590877030c9b3d40b0c1
+
+pycparser==2.23 \
+    --hash=sha256:e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934
+
+dbus-fast==5.0.22 ; sys_platform == "linux" \
+    --hash=sha256:8f0bcad7f71d2304a68a5b0bc0d24c3fcc14710a2ffcf5f2a27521e3aece71ca \
+    --hash=sha256:4ffcf16034f71a801bd2108aeffb6337d104c9459e8b1a218d16a917c8a2d2e9 \
+    --hash=sha256:b013437b66dc22b8d9aca5e0b0d46bf1980208a143409469fe482d9684a2a717 \
+    --hash=sha256:7d1c42963235cfc015a2d2b8c5fe42b65387493b4ad4ce0ec122601c805e6742 \
+    --hash=sha256:de10ff3b3cb2acb1c09fe17158a470519000d37bb5ee5fd69c4075e81ce8dcf5 \
+    --hash=sha256:979761985fe343c701f2b7575285d6e370123f7231d4656209ef7824bb686bbb \
+    --hash=sha256:b67a02037eb58bcf9e445df60ea0d9d7346fd334abde3aa62e03c75823b53979 \
+    --hash=sha256:279d212e9fb262d595af2e4b5b9e951bc00c73a5c8eeb50f158caa13705b9c84 \
+    --hash=sha256:703e0f8f9af52e8e053394ee2b578042be0c3d8ea2b1488f9db8cb14393cc13f \
+    --hash=sha256:eb1d7e8e65561d0fd438004fd9e0f981c8a862912fed58dd4e29db1936c39d73 \
+    --hash=sha256:eb31c5ff339a7071b914617a69d5b7c6ba7d411da4b01a5f9b5b2fe51e9d1301 \
+    --hash=sha256:856f0543c593f3480e93e67bcd1aa4ddc1d94a6076cfd3ad4e0f5e2b01b33dc3 \
+    --hash=sha256:595bd3ccfd8318cbafff79f33a15709fee3728724fd61d5fa220080d73b574cb
+
+pyobjc-core==12.1 ; sys_platform == "darwin" \
+    --hash=sha256:818bcc6723561f207e5b5453efe9703f34bc8781d11ce9b8be286bb415eb4962 \
+    --hash=sha256:01c0cf500596f03e21c23aef9b5f326b9fb1f8f118cf0d8b66749b6cf4cbb37a \
+    --hash=sha256:844515f5d86395b979d02152576e7dee9cc679acc0b32dc626ef5bda315eaa43
+
+pyobjc-framework-cocoa==12.1 ; sys_platform == "darwin" \
+    --hash=sha256:547c182837214b7ec4796dac5aee3aa25abc665757b75d7f44f83c994bcb0858 \
+    --hash=sha256:5a3dcd491cacc2f5a197142b3c556d8aafa3963011110102a093349017705118 \
+    --hash=sha256:03342a60fc0015bcdf9b93ac0b4f457d3938e9ef761b28df9564c91a14f0129a
+
+pyobjc-framework-corebluetooth==12.1 ; sys_platform == "darwin" \
+    --hash=sha256:fe72c9732ee6c5c793b9543f08c1f5bdd98cd95dfc9d96efd5708ec9d6eeb213 \
+    --hash=sha256:5a894f695e6c672f0260327103a31ad8b98f8d4fb9516a0383db79a82a7e58dc \
+    --hash=sha256:15ba5207ca626dffe57ccb7c1beaf01f93930159564211cb97d744eaf0d812aa
+
+pyobjc-framework-libdispatch==12.1 ; sys_platform == "darwin" \
+    --hash=sha256:0e9570d7a9a3136f54b0b834683bf3f206acd5df0e421c30f8fd4f8b9b556789 \
+    --hash=sha256:58ffce5e6bcd7456b4311009480b195b9f22107b7682fb0835d4908af5a68ad0 \
+    --hash=sha256:0ebfd9e4446ab6528126bff25cfb09e4213ddf992b3208978911cfd3152e45f5

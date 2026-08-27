@@ -47,8 +47,8 @@ inline void streamVL53L4CXTofSensorJs(httpd_req_t* req) {
     "        var valid = 0;\n"
     "        for (var i = 0; i < 4; i++) {\n"
     "          var obj = byId[i + 1];\n"
-    "          var bar = document.getElementById('distance-bar-' + (i + 1));\n"
-    "          var info = document.getElementById('object-info-' + (i + 1));\n"
+    "          var bar = hw.$('distance-bar-' + (i + 1));\n"
+    "          var info = hw.$('object-info-' + (i + 1));\n"
     "          var st = tofObjectStates[i];\n"
     "          if (obj && obj.valid) {\n"
     "            var mm = obj.distance_mm || 0;\n"
@@ -95,7 +95,7 @@ inline void streamVL53L4CXTofSensorJs(httpd_req_t* req) {
     "            }\n"
     "          }\n"
     "        }\n"
-    "        var sum = document.getElementById('tof-objects-summary');\n"
+    "        var sum = hw.$('tof-objects-summary');\n"
     "        if (sum) {\n"
     "          sum.textContent = valid + ' object(s) detected';\n"
     "        }\n"
@@ -105,8 +105,8 @@ inline void streamVL53L4CXTofSensorJs(httpd_req_t* req) {
     "      console.error('[ToF] Fetch error:', e);\n"
     "    });\n"
     "}\n", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "function startToFPolling(){console.log('[SENSORS] startToFPolling called');if(tofPollingInterval){console.log('[SENSORS] ToF already polling');return}var d=document.getElementById('tof-objects-display');if(d)d.style.display='block';var ph=document.getElementById('tof-data');if(ph)ph.style.display='none';updateToFObjects();tofPollingInterval=setInterval(function(){updateToFObjects()},tofPollingMs);console.log('[SENSORS] ToF polling started with interval:',tofPollingMs+'ms')}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "function stopToFPolling(){console.log('[SENSORS] stopToFPolling called');if(tofPollingInterval){clearInterval(tofPollingInterval);tofPollingInterval=null;console.log('[SENSORS] ToF polling stopped')}var d=document.getElementById('tof-objects-display');if(d)d.style.display='none';var ph=document.getElementById('tof-data');if(ph){ph.textContent='ToF sensor data will appear here...';ph.style.display=''}}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "function startToFPolling(){console.log('[SENSORS] startToFPolling called');if(tofPollingInterval){console.log('[SENSORS] ToF already polling');return}var d=hw.$('tof-objects-display');hw.show(d);var ph=hw.$('tof-data');hw.hide(ph);updateToFObjects();tofPollingInterval=setInterval(function(){updateToFObjects()},tofPollingMs);console.log('[SENSORS] ToF polling started with interval:',tofPollingMs+'ms')}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "function stopToFPolling(){console.log('[SENSORS] stopToFPolling called');if(tofPollingInterval){clearInterval(tofPollingInterval);tofPollingInterval=null;console.log('[SENSORS] ToF polling stopped')}var d=hw.$('tof-objects-display');hw.hide(d);var ph=hw.$('tof-data');if(ph){ph.textContent='ToF sensor data will appear here...';ph.style.display=''}}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "try{console.log('[SENSORS] Chunk 5: ToF functions ready');}catch(_){ }", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
 }

@@ -35,11 +35,11 @@ static void streamAutomationsInner(httpd_req_t* req) {
 #auto_form .row-inline input,#auto_form .row-inline select{margin:0;}
 </style>
 <h3 style='margin-top:0;color:var(--panel-fg)'>Create Automation</h3>
-<input id='a_name' class='input-tall' placeholder='Name' style='width:100%;box-sizing:border-box;margin-bottom:0.6rem'>
+<input id='a_name' class='input-tall input-fit input-m' placeholder='Name' style='box-sizing:border-box;margin-bottom:0.6rem'>
 <div style='font-weight:600;color:var(--panel-fg);margin:0.35rem 0 0.45rem'>Triggers <span style='font-size:0.8em;font-weight:400;color:var(--muted)'>when this automation fires (up to 4)</span></div>
 <div style='display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center'>
 <span style='font-size:0.82em;color:var(--muted)'>Trigger 1</span>
-<select id='a_type' class='input-tall' onchange='autoTypeChanged()'>
+<select id='a_type' class='input-tall input-fit' onchange='autoTypeChanged()'>
   <option value='atTime'>At Time</option>
   <option value='afterDelay'>After Delay</option>
   <option value='interval'>Interval</option>
@@ -50,7 +50,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
 <div style='display:flex;flex-direction:column;gap:0.5rem'>
   <div class='row-inline'>
     <label style='font-size:0.9em;color:var(--panel-fg)'>Repeat:</label>
-    <select id='a_recur' class='input-tall' onchange='recurChanged()'>
+    <select id='a_recur' class='input-tall input-fit input-m' onchange='recurChanged()'>
       <option value='daily' selected>Every day</option>
       <option value='weekly'>Certain days of the week</option>
       <option value='monthly'>Once a month</option>
@@ -92,7 +92,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
 <div id='yearly_wrap' style='display:none;flex-direction:column;gap:0.25rem;margin-top:0.5rem'>
   <div class='row-inline'>
     <label style='font-size:0.9em;color:var(--panel-fg);margin-right:0.5rem'>Month:</label>
-    <select id='a_month_of_year' class='input-tall'>
+    <select id='a_month_of_year' class='input-tall input-fit'>
       <option value='1'>January</option><option value='2'>February</option><option value='3'>March</option>
       <option value='4'>April</option><option value='5'>May</option><option value='6'>June</option>
       <option value='7'>July</option><option value='8'>August</option><option value='9'>September</option>
@@ -109,7 +109,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
 <div id='grp_afterDelay' class='vis-gone'>
 <div class='row-inline' style='gap:0.3rem'>
   <input id='a_delay' class='input-tall' placeholder='Delay' style='width:160px'>
-  <select id='a_delay_unit' class='input-tall'>
+  <select id='a_delay_unit' class='input-tall input-fit'>
     <option value='ms' selected>ms</option>
     <option value='s'>seconds</option>
     <option value='min'>minutes</option>
@@ -120,7 +120,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
 </div>
 <div id='grp_interval' class='vis-gone row-inline' style='gap:0.3rem'>
   <input id='a_interval' class='input-tall' placeholder='Interval' style='width:160px'>
-  <select id='a_interval_unit' class='input-tall'>
+  <select id='a_interval_unit' class='input-tall input-fit'>
     <option value='ms' selected>ms</option>
     <option value='s'>seconds</option>
     <option value='min'>minutes</option>
@@ -129,7 +129,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
   </select>
 </div>
 <div id='grp_event' class='vis-gone row-inline' style='gap:0.3rem;flex-wrap:wrap'>
-  <select id='a_event_on' class='input-tall'></select>
+  <select id='a_event_on' class='input-tall input-fit input-m'></select>
   <input id='a_event_match' class='input-tall' maxlength='48' placeholder='match (optional)' title='Only fire when the event&#39;s subject or detail contains this text (case-insensitive). Leave empty to fire on every event of this kind.' style='width:160px'>
 </div>
 <div id='secondary_triggers_section' style='margin-top:0.5rem'>
@@ -139,7 +139,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
 <template id='secondary_trigger_template'>
   <div class='secondary-trigger' style='display:flex;align-items:center;gap:0.4rem;padding:0.5rem;border:1px solid var(--border);border-radius:4px;margin-bottom:0.3rem;flex-wrap:wrap'>
     <span class='st-num' style='font-size:0.82em;color:var(--muted)'>Trigger</span>
-    <select class='st-type input-tall' onchange='stTypeChanged(this)' style='min-width:120px'>
+    <select class='st-type input-tall input-fit input-m' onchange='stTypeChanged(this)' style='min-width:120px'>
       <option value='time'>At Time</option>
       <option value='interval'>Interval</option>
       <option value='manual'>Manual (After Delay)</option>
@@ -148,7 +148,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
     </select>
     <span class='st-fields st-fields-time' style='display:inline-flex;gap:0.3rem;align-items:center;flex-wrap:wrap'>
       <input type='time' class='st-time input-tall' style='width:120px'>
-      <select class='st-recur input-tall' onchange='stRecurChanged(this)'>
+      <select class='st-recur input-tall input-fit' onchange='stRecurChanged(this)'>
         <option value='daily' selected>Every day</option>
         <option value='weekly'>Certain days</option>
       </select>
@@ -165,14 +165,14 @@ static void streamAutomationsInner(httpd_req_t* req) {
     <span class='st-fields st-fields-interval' style='display:none;gap:0.3rem;align-items:center'>
       <label style='font-size:0.85em'>Every</label>
       <input type='number' class='st-interval-value input-tall' placeholder='Value' min='1' style='width:80px'>
-      <select class='st-interval-unit input-tall'>
+      <select class='st-interval-unit input-tall input-fit'>
         <option value='s' selected>seconds</option><option value='min'>minutes</option><option value='hr'>hours</option><option value='ms'>ms</option>
       </select>
     </span>
     <span class='st-fields st-fields-manual' style='display:none;gap:0.3rem;align-items:center'>
       <label style='font-size:0.85em'>Delay:</label>
       <input type='number' class='st-delay-value input-tall' placeholder='Delay' min='0' style='width:80px'>
-      <select class='st-delay-unit input-tall'>
+      <select class='st-delay-unit input-tall input-fit'>
         <option value='s' selected>seconds</option><option value='min'>minutes</option><option value='ms'>ms</option>
       </select>
     </span>
@@ -182,7 +182,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
       <span style='font-size:0.85em'>ms</span>
     </span>
     <span class='st-fields st-fields-event' style='display:none;gap:0.3rem;align-items:center;flex-wrap:wrap'>
-      <select class='st-event-on input-tall'></select>
+      <select class='st-event-on input-tall input-fit input-m'></select>
       <input class='st-event-match input-tall' maxlength='48' placeholder='match (optional)' style='width:140px'>
     </span>
     <button type='button' class='btn btn-small' onclick='removeSecondaryTrigger(this)' style='color:var(--danger);margin-left:auto'>Remove</button>
@@ -193,9 +193,9 @@ static void streamAutomationsInner(httpd_req_t* req) {
     <div style='margin-top:0.5rem'>
       <label style='font-size:0.9em;color:var(--panel-fg);margin-bottom:0.25rem;display:block'>Fire when (optional sensor condition):</label>
       <div class='row-inline' style='gap:0.3rem;align-items:center;flex-wrap:wrap'>
-        <select id='a_cond_var' class='input-tall' onchange='updateFireWhenWpName()'><option value=''>— none —</option><optgroup label="Sensors"><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option></optgroup><optgroup label="Time"><option value="time">Time of day</option><option value="hour">Hour (0-23)</option><option value="day">Day of week</option><option value="ntp">Clock synced</option></optgroup><optgroup label="System"><option value="battery">Battery %</option><option value="heap">Free heap KB</option><option value="psram">Free PSRAM KB</option><option value="fsfree">Free storage KB</option><option value="uptime">Uptime min</option><option value="chiptemp">Chip temp C</option></optgroup><optgroup label="Network"><option value="wifi">WiFi state</option><option value="rssi">WiFi RSSI dBm</option><option value="peers">ESP-NOW peers</option><option value="ble">BLE state</option></optgroup><optgroup label="Location"><option value="gps">GPS fix</option><option value="speed">GPS speed kn</option><option value="sats">GPS satellites</option><option value="wp_dist">Dist to waypoint (m)</option></optgroup><optgroup label="AI"><option value="llm">LLM state</option></optgroup><optgroup label="ESP-NOW / Bond"><option value="espnow">ESP-NOW up</option><option value="bond_mode">Bond mode</option><option value="bond_role">Bond role</option><option value="bond_paired">Bond paired</option><option value="bond_online">Bond online</option><option value="bond_synced">Bond synced</option><option value="bond_rssi">Bond RSSI dBm</option><option value="bond_peer_heap">Bond peer heap KB</option><option value="bond_peer_uptime">Bond peer uptime min</option><option value="pairmode">Pairing mode</option><option value="pairmode_secs">Pairing secs left</option><option value="peersknown">Peers known</option><option value="stalestpeerage">Stalest peer age s</option></optgroup><optgroup label="ESP-NOW metadata"><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></optgroup></select>
+        <select id='a_cond_var' class='input-tall input-fit input-m' onchange='updateFireWhenWpName()'><option value=''>— none —</option><optgroup label="Sensors"><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option></optgroup><optgroup label="Time"><option value="time">Time of day</option><option value="hour">Hour (0-23)</option><option value="day">Day of week</option><option value="ntp">Clock synced</option></optgroup><optgroup label="System"><option value="battery">Battery %</option><option value="heap">Free heap KB</option><option value="psram">Free PSRAM KB</option><option value="fsfree">Free storage KB</option><option value="uptime">Uptime min</option><option value="chiptemp">Chip temp C</option></optgroup><optgroup label="Network"><option value="wifi">WiFi state</option><option value="rssi">WiFi RSSI dBm</option><option value="peers">ESP-NOW peers</option><option value="ble">BLE state</option></optgroup><optgroup label="Location"><option value="gps">GPS fix</option><option value="speed">GPS speed kn</option><option value="sats">GPS satellites</option><option value="wp_dist">Dist to waypoint (m)</option></optgroup><optgroup label="AI"><option value="llm">LLM state</option></optgroup><optgroup label="ESP-NOW / Bond"><option value="espnow">ESP-NOW up</option><option value="bond_mode">Bond mode</option><option value="bond_role">Bond role</option><option value="bond_paired">Bond paired</option><option value="bond_online">Bond online</option><option value="bond_synced">Bond synced</option><option value="bond_rssi">Bond RSSI dBm</option><option value="bond_peer_heap">Bond peer heap KB</option><option value="bond_peer_uptime">Bond peer uptime min</option><option value="pairmode">Pairing mode</option><option value="pairmode_secs">Pairing secs left</option><option value="peersknown">Peers known</option><option value="stalestpeerage">Stalest peer age s</option></optgroup><optgroup label="ESP-NOW metadata"><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></optgroup></select>
         <input id='a_cond_wpname' class='input-tall' maxlength='11' placeholder='Home' style='width:90px;display:none' title='Waypoint name'>
-        <select id='a_cond_op' class='input-tall'><option value=">">&gt;</option><option value="<">&lt;</option><option value="=">=</option><option value=">=">&gt;=</option><option value="<=">&lt;=</option><option value="!=">!=</option><option value="CONTAINS">CONTAINS</option></select>
+        <select id='a_cond_op' class='input-tall input-fit'><option value=">">&gt;</option><option value="<">&lt;</option><option value="=">=</option><option value=">=">&gt;=</option><option value="<=">&lt;=</option><option value="!=">!=</option><option value="CONTAINS">CONTAINS</option></select>
         <input id='a_cond_val' class='input-tall' placeholder='value' style='width:90px'>
       </div>
       <div style='font-size:0.78em;color:var(--panel-fg);opacity:0.7;margin:0.2rem 0 0.4rem 0'>Pair with an Interval trigger to set how often the condition is checked.</div>
@@ -241,7 +241,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
 <div id='import_file_status' style='font-size:0.8em;margin-bottom:0.75rem'></div>
 <p style='margin:0.5rem 0;color:var(--panel-fg);font-size:0.9em'>Or import from a GitHub URL:</p>
 <div style='margin-bottom:0.5rem'>
-<input type='text' id='github_url' placeholder='https://github.com/user/repo/blob/main/automation.json' style='width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.9em;box-sizing:border-box;background:var(--input-bg,var(--panel-bg));color:var(--panel-fg)' data-guest-hide>
+<input type='text' id='github_url' class='input-fit input-l' placeholder='https://github.com/user/repo/blob/main/automation.json' style='padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.9em;box-sizing:border-box;background:var(--input-bg,var(--panel-bg));color:var(--panel-fg)' data-guest-hide>
 </div>
 <div style='display:flex;gap:0.5rem;align-items:stretch;flex-wrap:wrap;margin-bottom:0.5rem'>
 <input type='text' id='github_name' placeholder='Custom name (optional)' style='flex:1;min-width:150px;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.9em;height:auto;background:var(--input-bg,var(--panel-bg));color:var(--panel-fg)' data-guest-hide>
@@ -281,13 +281,13 @@ window.refreshAutomationSystemStatus = function() {
   hw.fetchJSON('/api/automations')
   .then(data => {
     console.log('[AUTOMATIONS] System status response:', data);
-    const statusDot = document.getElementById('auto-status-dot');
-    const statusText = document.getElementById('auto-status-text');
-    const enableBtn = document.getElementById('btn-auto-enable-system');
-    const warningDiv = document.getElementById('auto-system-warning');
-    const autoForm = document.getElementById('auto_form');
-    const autosList = document.getElementById('autos_list');
-    const disableBtn = document.getElementById('btn-auto-disable-system');
+    const statusDot = hw.$('auto-status-dot');
+    const statusText = hw.$('auto-status-text');
+    const enableBtn = hw.$('btn-auto-enable-system');
+    const warningDiv = hw.$('auto-system-warning');
+    const autoForm = hw.$('auto_form');
+    const autosList = hw.$('autos_list');
+    const disableBtn = hw.$('btn-auto-disable-system');
 
     const isEnabled = !!(data && data.systemEnabled);
 
@@ -298,7 +298,7 @@ window.refreshAutomationSystemStatus = function() {
       disableBtn.style.display = hw.isGuest() ? 'none' : 'inline-block';
       warningDiv.style.display = 'none';
       autoForm.style.display = hw.isGuest() ? 'none' : 'block';
-      if (autosList) autosList.style.display = 'block';
+      hw.show(autosList);
       if (typeof loadAutos === 'function') {
         loadAutos();
       }
@@ -309,12 +309,12 @@ window.refreshAutomationSystemStatus = function() {
       disableBtn.style.display = 'none';
       warningDiv.style.display = 'block';
       autoForm.style.display = 'none';
-      if (autosList) autosList.style.display = 'none';
+      hw.hide(autosList);
     }
   })
   .catch(error => {
     console.error('[AUTOMATIONS] Status check error:', error);
-    document.getElementById('auto-status-text').textContent = 'Error checking status: ' + error;
+    hw.$('auto-status-text').textContent = 'Error checking status: ' + error;
   });
 };
 
@@ -328,20 +328,20 @@ window.disableAutomationSystem = async function() {
     console.log('[AUTOMATIONS] Disable response:', output);
     // Immediately reflect disabled state in UI
     try {
-      const statusDot = document.getElementById('auto-status-dot');
-      const statusText = document.getElementById('auto-status-text');
-      const enableBtn = document.getElementById('btn-auto-enable-system');
-      const disableBtn = document.getElementById('btn-auto-disable-system');
-      const warningDiv = document.getElementById('auto-system-warning');
-      const autoForm = document.getElementById('auto_form');
-      const autosList = document.getElementById('autos_list');
+      const statusDot = hw.$('auto-status-dot');
+      const statusText = hw.$('auto-status-text');
+      const enableBtn = hw.$('btn-auto-enable-system');
+      const disableBtn = hw.$('btn-auto-disable-system');
+      const warningDiv = hw.$('auto-system-warning');
+      const autoForm = hw.$('auto_form');
+      const autosList = hw.$('autos_list');
       if (statusDot) statusDot.className = 'status-indicator status-disabled';
-      if (statusText) statusText.textContent = 'Automation system is disabled';
+      hw.setText(statusText, 'Automation system is disabled');
       if (enableBtn) enableBtn.style.display = 'inline-block';
-      if (disableBtn) disableBtn.style.display = 'none';
-      if (warningDiv) warningDiv.style.display = 'block';
-      if (autoForm) autoForm.style.display = 'none';
-      if (autosList) autosList.style.display = 'none';
+      hw.hide(disableBtn);
+      hw.show(warningDiv);
+      hw.hide(autoForm);
+      hw.hide(autosList);
     } catch(e) {}
     alert('Automation system disabled successfully. Scheduler suspended.');
     // Re-check status after updating UI
@@ -362,20 +362,20 @@ window.enableAutomationSystem = async function() {
     console.log('[AUTOMATIONS] Enable response:', output);
     // Immediately reflect enabled state in UI (expand panels like ESP-NOW)
     try {
-      const statusDot = document.getElementById('auto-status-dot');
-      const statusText = document.getElementById('auto-status-text');
-      const enableBtn = document.getElementById('btn-auto-enable-system');
-      const disableBtn = document.getElementById('btn-auto-disable-system');
-      const warningDiv = document.getElementById('auto-system-warning');
-      const autoForm = document.getElementById('auto_form');
-      const autosList = document.getElementById('autos_list');
+      const statusDot = hw.$('auto-status-dot');
+      const statusText = hw.$('auto-status-text');
+      const enableBtn = hw.$('btn-auto-enable-system');
+      const disableBtn = hw.$('btn-auto-disable-system');
+      const warningDiv = hw.$('auto-system-warning');
+      const autoForm = hw.$('auto_form');
+      const autosList = hw.$('autos_list');
       if (statusDot) statusDot.className = 'status-indicator status-enabled';
-      if (statusText) statusText.textContent = 'Automation system is enabled and running';
-      if (enableBtn) enableBtn.style.display = 'none';
+      hw.setText(statusText, 'Automation system is enabled and running');
+      hw.hide(enableBtn);
       if (disableBtn) disableBtn.style.display = 'inline-block';
-      if (warningDiv) warningDiv.style.display = 'none';
-      if (autoForm) autoForm.style.display = 'block';
-      if (autosList) autosList.style.display = 'block';
+      hw.hide(warningDiv);
+      hw.show(autoForm);
+      hw.show(autosList);
       if (typeof loadAutos === 'function') loadAutos();
     } catch(e) {}
     alert('Automation system enabled and started successfully!');
@@ -390,19 +390,13 @@ window.enableAutomationSystem = async function() {
 
 // Set up button handlers
 document.addEventListener('DOMContentLoaded', function() {
-  const refreshBtn = document.getElementById('btn-auto-refresh-status');
-  const enableBtn = document.getElementById('btn-auto-enable-system');
-  const disableBtn = document.getElementById('btn-auto-disable-system');
+  const refreshBtn = hw.$('btn-auto-refresh-status');
+  const enableBtn = hw.$('btn-auto-enable-system');
+  const disableBtn = hw.$('btn-auto-disable-system');
   
-  if (refreshBtn) {
-    refreshBtn.addEventListener('click', refreshAutomationSystemStatus);
-  }
-  if (enableBtn) {
-    enableBtn.addEventListener('click', enableAutomationSystem);
-  }
-  if (disableBtn) {
-    disableBtn.addEventListener('click', disableAutomationSystem);
-  }
+  hw.on(refreshBtn, 'click', refreshAutomationSystemStatus);
+  hw.on(enableBtn, 'click', enableAutomationSystem);
+  hw.on(disableBtn, 'click', disableAutomationSystem);
   
   // Delay the initial status check slightly so the page-load TLS connection
   // has time to close before we open a second one (ESP32 HTTPS has a small
@@ -427,91 +421,13 @@ window.onload = function() {
   // Don't auto-load automations here - let status check handle it
 };
 console.log('[AUTOMATIONS] onload registered');
-// System event kinds (kept in sync with SystemEventKind in System_Events.h;
-// the backend validates on= against its table, so a stale list here fails
-// loudly at add time rather than silently).
-const EVENT_KINDS=[
-  ['peer_online','Mesh peer online'],['peer_offline','Mesh peer offline'],
-  ['peer_paired','Peer paired (pair mode)'],['text_rx','ESP-NOW text received'],
-  ['file_rx','ESP-NOW file received'],['bond_online','Bond peer online'],
-  ['bond_offline','Bond peer offline'],['espnow_on','ESP-NOW started'],
-  ['espnow_off','ESP-NOW stopped'],['wifi_connected','WiFi connected'],
-  ['wifi_disconnected','WiFi disconnected'],['wifi_net_added','WiFi network saved'],
-  ['wifi_net_removed','WiFi network removed'],['login_ok','Login success'],
-  ['login_fail','Login failed'],['usb_on','USB power connected'],
-  ['usb_off','USB power removed'],['battery_low','Battery low'],
-  ['battery_critical','Battery critical'],['setting_changed','Setting changed'],
-  ['sensor_started','Sensor started'],['sensor_stopped','Sensor stopped'],
-  ['reboot','Device rebooted (intentional)'],['boot_started','Device boot started'],
-  ['boot_finished','Device boot finished'],['crash','Device crashed'],['ota_result','Firmware update result'],
-  ['peer_unpaired','Peer unpaired'],['identity_regenerated','ESP-NOW identity rotated'],
-  ['user_promoted','User promoted to admin'],['user_demoted','User demoted'],['user_banned','User banned'],
-  ['ip_banned','IP banned'],['login_locked','Login lockout (brute-force)'],['voice_armed','Voice control armed'],
-  ['storage_formatted','Storage formatted'],['g2_silent_mode','Glasses silent mode'],
-  ['mqtt_start_failed','MQTT start failed'],['llm_load_failed','Model load failed'],['llm_state_corrupt','LLM engine fault'],
-  ['motion_detected','Motion detected'],['rtc_power_loss','RTC lost power'],
-  ['mic_record_started','Recording started'],['automation_fired','Automation fired'],
-  ['http_server_started','Web server started'],['http_server_stopped','Web server stopped'],
-  ['ble_on','Bluetooth on'],['ble_off','Bluetooth off'],['mqtt_ext_sensor_new','MQTT sensor discovered'],
-  ['cert_generated','TLS cert generated'],['logout','Session logout'],['user_rejected','User request denied'],
-  ['command_denied','Command denied'],['auth_db_fault','User database fault'],
-  ['factory_reset','Factory reset'],['feature_toggled','Feature toggled'],['firmware_changed','Firmware updated'],
-  ['backup_created','Backup created'],['backup_restored','Backup restored'],['config_file_corrupt','Config file corrupt'],
-  ['secret_decrypt_failed','Secret decrypt failed'],['sd_write_recovered','SD writes recovered'],
-  ['power_mode_changed','Power mode changed'],['battery_full','Battery full'],
-  ['mesh_passphrase_changed','Mesh passphrase changed'],['remote_stream_started','Remote output tap started'],
-  ['file_rx_failed','File transfer failed'],['g2_hijack_entered','Glasses session started'],
-  ['g2_hijack_exited','Glasses session ended'],['video_record_started','Video recording started'],
-  ['thermal_hot_alert','Thermal hotspot'],['tof_object_detected','Object near/far (ToF)'],['fm_tuned','FM tuned'],
-  ['ei_continuous_started','Camera-AI detection on'],['imu_walking','Walking started/stopped'],
-  ['voice_disarmed','Voice control disarmed'],['llm_model_unloaded','Model unloaded'],['display_init_failed','Display init failed'],
-  ['automation_added','Automation created'],['automation_deleted','Automation deleted'],['automation_action_dropped','Automation action dropped'],
-  ['file_deleted','File deleted'],['voice_wake','Voice wake word'],
-  ['voice_command','Voice command'],
-  ['pair_window_open','Pairing window opened'],['pair_window_closed','Pairing window closed'],
-  ['bond_reject','Bond probe from unpaired device'],
-  ['mesh_promoted','Promoted to mesh master'],['mesh_demoted','Demoted (master returned)'],
-  ['remote_cmd_rx','Remote command ran here'],
-  ['remote_cmd_sent','Remote command sent'],['remote_cmd_result','Remote command result'],
-  ['mqtt_connected','MQTT connected'],['mqtt_disconnected','MQTT disconnected'],
-  ['wifi_connect_failed','WiFi connect failed'],
-  ['time_synced','Clock synced (first valid)'],
-  ['ble_connected','BLE device connected'],['ble_disconnected','BLE device disconnected'],
-  ['g2_connected','Glasses connected'],['g2_disconnected','Glasses disconnected'],
-  ['g2_worn','Glasses picked up'],['g2_not_worn','Glasses set down'],
-  ['ring_connected','R1 ring connected'],['ring_disconnected','R1 ring disconnected'],
-  ['ring_worn','R1 ring on finger'],['ring_not_worn','R1 ring off finger'],
-  ['sd_mounted','SD card mounted'],['sd_unmounted','SD card unmounted'],
-  ['sd_write_failed','SD write failed'],['fs_low_space','Flash storage low'],
-  ['presence_detected','Presence detected'],['presence_cleared','Presence cleared'],
-  ['gesture','Gesture (APDS swipe)'],
-  ['imu_shake','Device shaken'],['imu_tap','Device tapped'],
-  ['imu_freefall','Device dropped'],['imu_orientation','Orientation changed'],
-  ['gps_fix','GPS fix acquired'],['gps_lost','GPS fix lost'],
-  ['sensor_fault','Sensor auto-disabled'],['sensor_start_failed','Sensor start failed'],
-  ['button','Button pressed'],
-  ['fm_rds_station','FM station identified'],
-  ['ei_detected','Camera AI: object detected'],['ei_lost','Camera AI: object lost'],
-  ['photo_saved','Photo saved'],['video_saved','Video saved'],['mic_saved','Recording saved'],
-  ['llm_gen_done','LLM generation done'],['llm_model_loaded','LLM model loaded'],
-  ['charging_started','Charging started'],['charging_stopped','Charging stopped'],
-  ['power_save_enter','Power save entered'],['power_save_exit','Power save exited'],
-  ['user_request','Account request submitted'],
-  ['user_added','User added'],['user_deleted','User deleted'],['user_approved','User approved'],
-  ['password_changed','Password changed'],
-  ['settings_save_failed','Settings save failed']];
-function fillEventKindSelect(sel){
-  if(!sel||sel.options.length) return;
-  EVENT_KINDS.forEach(k=>{const o=document.createElement('option');o.value=k[0];o.textContent=k[1]+' ('+k[0]+')';sel.appendChild(o);});
-}
-fillEventKindSelect(document.getElementById('a_event_on'));
-function autoTypeChanged(){
+function autoTypeChanged(selectedEventKind){
   try {
-    var t=document.getElementById('a_type').value;
-    var g1=document.getElementById('grp_atTime');
-    var g2=document.getElementById('grp_afterDelay');
-    var g3=document.getElementById('grp_interval');
-    var g4=document.getElementById('grp_event');
+    var t=hw.$('a_type').value;
+    var g1=hw.$('grp_atTime');
+    var g2=hw.$('grp_afterDelay');
+    var g3=hw.$('grp_interval');
+    var g4=hw.$('grp_event');
     if(g4) g4.classList.add('vis-gone');
     if(t==='atTime'){
       g1.classList.remove('vis-gone');
@@ -530,12 +446,18 @@ function autoTypeChanged(){
       g1.classList.add('vis-gone');
       g2.classList.add('vis-gone');
       g3.classList.add('vis-gone');
-      var rb=document.getElementById('a_runatboot'); if(rb){ rb.checked=true; }
+      var rb=hw.$('a_runatboot'); if(rb){ rb.checked=true; }
     } else if(t==='event'){
       g1.classList.add('vis-gone');
       g2.classList.add('vis-gone');
       g3.classList.add('vis-gone');
       if(g4) g4.classList.remove('vis-gone');
+      var eventSelect=hw.$('a_event_on');
+      var eventOptions={};
+      if(typeof selectedEventKind==='string') eventOptions.selected=selectedEventKind;
+      hw.fillEventKindSelect(eventSelect,eventOptions).catch(function(e){
+        console.error('[AUTOMATIONS] event-kind catalog:',e);
+      });
     }
   }catch(e){
     console.error('autoTypeChanged error:', e);
@@ -543,19 +465,19 @@ function autoTypeChanged(){
 }
 function recurChanged(){
   try {
-    var r=document.getElementById('a_recur').value;
-    var dw=document.getElementById('dow_wrap');
-    var mw=document.getElementById('monthly_wrap');
-    var yw=document.getElementById('yearly_wrap');
+    var r=hw.$('a_recur').value;
+    var dw=hw.$('dow_wrap');
+    var mw=hw.$('monthly_wrap');
+    var yw=hw.$('yearly_wrap');
     if(dw) dw.style.display=(r==='weekly')?'flex':'none';
-    if(mw) mw.style.display=(r==='monthly')?'block':'none';
+    hw.toggle(mw,(r==='monthly'));
     if(yw) yw.style.display=(r==='yearly')?'flex':'none';
   }catch(e){
     console.error('recurChanged error:', e);
   }
 }
 function addTimeField(){ 
-  const container=document.getElementById('time_fields'); 
+  const container=hw.$('time_fields'); 
   const newField=document.createElement('div'); 
   newField.className='time-field row-inline'; 
   newField.style.cssText='gap:0.5rem;margin-bottom:0.3rem'; 
@@ -570,8 +492,8 @@ function removeTimeField(btn){
   updateMainTimeRemove(); 
 }
 function removeMainTimeField(){ 
-  const mainInput=document.querySelector('#grp_atTime .time-input'); 
-  const additionalFields=document.querySelectorAll('.time-field'); 
+  const mainInput=hw.qs('#grp_atTime .time-input'); 
+  const additionalFields=hw.qsa('.time-field'); 
   if(additionalFields.length>0){ 
     const firstAdditional=additionalFields[0]; 
     const firstAdditionalInput=firstAdditional.querySelector('.time-input'); 
@@ -586,8 +508,8 @@ function removeMainTimeField(){
   updateMainTimeRemove(); 
 }
 function updateTimeRemoveButtons(){ 
-  const fields=document.querySelectorAll('.time-field'); 
-  const allTimeInputs=document.querySelectorAll('.time-input'); 
+  const fields=hw.qsa('.time-field'); 
+  const allTimeInputs=hw.qsa('.time-input'); 
   const totalTimeFields=allTimeInputs.length; 
   fields.forEach((field,idx)=>{ 
     const btn=field.querySelector('button'); 
@@ -599,8 +521,8 @@ function updateTimeRemoveButtons(){
   }); 
 }
 function updateMainTimeRemove(){ 
-  const allTimeInputs=document.querySelectorAll('.time-input'); 
-  const mainRemoveBtn=document.querySelector('#btn_remove_main_time'); 
+  const allTimeInputs=hw.qsa('.time-input'); 
+  const mainRemoveBtn=hw.qs('#btn_remove_main_time'); 
   if(mainRemoveBtn){ 
     if(allTimeInputs.length<=1){ 
       mainRemoveBtn.style.visibility='hidden'; 
@@ -614,8 +536,8 @@ function updateMainTimeRemove(){
   // Part 4: Command and wait field functions
   httpd_resp_send_chunk(req, R"AUTOPART4(<script>
 function addWaitField(){ 
-  const container=document.getElementById('command_fields'); 
-  const buttonsDiv=document.getElementById('command_buttons'); 
+  const container=hw.$('command_fields'); 
+  const buttonsDiv=hw.$('command_buttons'); 
   const div=document.createElement('div'); 
   div.className='wait-field row-inline'; 
   div.style.cssText='gap:0.5rem;margin-bottom:0.3rem;align-items:center'; 
@@ -639,8 +561,8 @@ function addWaitField(){
 }
 function removeWaitField(btn){ btn.parentElement.remove(); }
 function addCommandField(){ 
-  const container=document.getElementById('command_fields'); 
-  const buttonsDiv=document.getElementById('command_buttons'); 
+  const container=hw.$('command_fields'); 
+  const buttonsDiv=hw.$('command_buttons'); 
   const div=document.createElement('div'); 
   div.className='cmd-field row-inline'; 
   div.style.cssText='gap:0.5rem;margin-bottom:0.3rem'; 
@@ -649,8 +571,8 @@ function addCommandField(){
 }
 function removeCommandField(btn){ btn.parentElement.remove(); }
 function addPrintField(){ 
-  const container=document.getElementById('command_fields'); 
-  const buttonsDiv=document.getElementById('command_buttons'); 
+  const container=hw.$('command_fields'); 
+  const buttonsDiv=hw.$('command_buttons'); 
   const div=document.createElement('div'); 
   div.className='cmd-field row-inline'; 
   div.style.cssText='gap:0.5rem;margin-bottom:0.3rem'; 
@@ -677,8 +599,8 @@ function addPrintField(){
   // Part 5: Logic field functions
   httpd_resp_send_chunk(req, R"AUTOPART5(<script>
 function addLogicField(){ 
-  const container=document.getElementById('command_fields'); 
-  const buttonsDiv=document.getElementById('command_buttons'); 
+  const container=hw.$('command_fields'); 
+  const buttonsDiv=hw.$('command_buttons'); 
   const newField=document.createElement('div'); 
   newField.className='logic-field row-inline'; 
   newField.style.cssText='gap:0.5rem;margin-bottom:0.3rem;align-items:center;flex-wrap:wrap'; 
@@ -780,9 +702,9 @@ function updateValuePlaceholder(varSelect){
 }
 function updateFireWhenWpName(){
   try {
-    const cv=document.getElementById('a_cond_var');
-    const wn=document.getElementById('a_cond_wpname');
-    const vv=document.getElementById('a_cond_val');
+    const cv=hw.$('a_cond_var');
+    const wn=hw.$('a_cond_wpname');
+    const vv=hw.$('a_cond_val');
     if(!cv||!wn) return;
     const show=(cv.value==='wp_dist');
     wn.style.display=show?'inline-block':'none';
@@ -811,7 +733,7 @@ function updateLogicField(selectElement){
     const thenText=field.querySelector('.then-text'); 
     if(logicType==='ELSE'){ 
       varSelect.style.display='none'; 
-      if(wpNameInput) wpNameInput.style.display='none';
+      hw.hide(wpNameInput);
       operatorSelect.style.display='none'; 
       valueInput.style.display='none'; 
       thenText.style.display='none'; 
@@ -904,7 +826,7 @@ function tickNextRunCells() {
   let anyOverdue = false;
   gLastAutos.forEach(a => {
     const id = (typeof a.id !== 'undefined') ? a.id : '';
-    const cell = document.querySelector('[data-next-run-id="' + id + '"]');
+    const cell = hw.qs('[data-next-run-id="' + id + '"]');
     if (!cell) return;
     const sched = a.trigger || {};
     let rawType = (sched.type || a.type || '').toLowerCase();
@@ -1057,9 +979,9 @@ function renderAutos(json) {
       });
     }
     html += '</table>';
-    document.getElementById('autos').innerHTML = html;
+    hw.$('autos').innerHTML = html;
   } catch (e) {
-    document.getElementById('autos').innerHTML = 'Error parsing automations: ' + e.message;
+    hw.$('autos').innerHTML = 'Error parsing automations: ' + e.message;
   }
 }
 function loadAutos(){
@@ -1070,7 +992,7 @@ function loadAutos(){
     renderAutos(txt);
   }).catch(e => {
     console.error('[AUTOMATIONS] Load error:',e);
-    document.getElementById('autos').innerHTML = 'Error loading automations: ' + e.message;
+    hw.$('autos').innerHTML = 'Error loading automations: ' + e.message;
   }).finally(() => {
     gAutosFetchInFlight = false;
   });
@@ -1096,23 +1018,23 @@ function postCLIValidate(cmd){
 // submit time by scanning primary + all secondaries.
 
 function addSecondaryTrigger(initial){
-  const primaryType=document.getElementById('a_type').value;
-  const secondaryCount=document.querySelectorAll('#secondary_triggers_container .secondary-trigger').length;
+  const primaryType=hw.$('a_type').value;
+  const secondaryCount=hw.qsa('#secondary_triggers_container .secondary-trigger').length;
   // Primary + runAtBoot-synthesized boot + secondaries. runAtBoot counts as 1
   // boot trigger if checked, so the cap is 4 - 1 - (runAtBoot?1:0) secondaries.
-  const runBootChecked=(document.getElementById('a_runatboot')||{}).checked===true;
+  const runBootChecked=(hw.$('a_runatboot')||{}).checked===true;
   const maxSecondaries=4-1-(runBootChecked?1:0);
   if(secondaryCount>=maxSecondaries){
     alert('Maximum of 4 triggers per automation reached.');
     return;
   }
-  const tpl=document.getElementById('secondary_trigger_template');
+  const tpl=hw.$('secondary_trigger_template');
   if(!tpl) return;
   const node=tpl.content.cloneNode(true).firstElementChild;
-  document.getElementById('secondary_triggers_container').appendChild(node);
-  fillEventKindSelect(node.querySelector('.st-event-on'));
+  hw.$('secondary_triggers_container').appendChild(node);
   if(initial){ populateSecondaryTrigger(node,initial); }
-  stTypeChanged(node.querySelector('.st-type'));
+  const selectedEventKind=(initial&&String(initial.type).toLowerCase()==='event')?(initial.on||''):'';
+  stTypeChanged(node.querySelector('.st-type'),selectedEventKind);
   renumberTriggers();
 }
 
@@ -1122,11 +1044,11 @@ function removeSecondaryTrigger(btn){
   renumberTriggers();
 }
 function renumberTriggers(){
-  const rows=document.querySelectorAll('#secondary_triggers_container .secondary-trigger');
-  rows.forEach(function(r,i){ const lbl=r.querySelector('.st-num'); if(lbl) lbl.textContent='Trigger '+(i+2); });
+  const rows=hw.qsa('#secondary_triggers_container .secondary-trigger');
+  rows.forEach(function(r,i){ const lbl=r.querySelector('.st-num'); hw.setText(lbl,'Trigger '+(i+2)); });
 }
 
-function stTypeChanged(sel){
+function stTypeChanged(sel,selectedEventKind){
   const row=sel.closest('.secondary-trigger');
   if(!row) return;
   const type=sel.value;
@@ -1134,6 +1056,14 @@ function stTypeChanged(sel){
   const show=row.querySelector('.st-fields-'+type);
   if(show) show.style.display='inline-flex';
   if(type==='time'){ stRecurChanged(row.querySelector('.st-recur')); }
+  if(type==='event'){
+    const eventSelect=row.querySelector('.st-event-on');
+    const eventOptions={};
+    if(typeof selectedEventKind==='string') eventOptions.selected=selectedEventKind;
+    hw.fillEventKindSelect(eventSelect,eventOptions).catch(function(e){
+      console.error('[AUTOMATIONS] event-kind catalog:',e);
+    });
+  }
 }
 
 function stRecurChanged(sel){
@@ -1216,14 +1146,13 @@ function populateSecondaryTrigger(row,t){
   } else if(t.type==='boot'){
     row.querySelector('.st-boot-delay').value=(typeof t.bootDelayMs!=='undefined')?t.bootDelayMs:0;
   } else if(t.type==='event'){
-    const onSel=row.querySelector('.st-event-on'); if(onSel) onSel.value=t.on||'';
     const mIn=row.querySelector('.st-event-match'); if(mIn) mIn.value=t.match||'';
   }
 }
 
 // Collect secondary trigger objects for submit. Returns null on validation fail.
 function collectSecondaryTriggers(){
-  const rows=document.querySelectorAll('#secondary_triggers_container .secondary-trigger');
+  const rows=hw.qsa('#secondary_triggers_container .secondary-trigger');
   const result=[];
   for(const row of rows){
     const data=getSecondaryTriggerData(row);
@@ -1236,71 +1165,71 @@ function collectSecondaryTriggers(){
 }
 
 async function createAutomation(){
-  const name=document.getElementById('a_name').value.trim(); 
-  const type=document.getElementById('a_type').value; 
-  const delayRaw=document.getElementById('a_delay').value.trim(); 
-  const delayUnit=(document.getElementById('a_delay_unit')?document.getElementById('a_delay_unit').value:'ms'); 
-  const intervalRaw=document.getElementById('a_interval').value.trim(); 
-  const intervalUnit=(document.getElementById('a_interval_unit')?document.getElementById('a_interval_unit').value:'ms'); 
-  const en=document.getElementById('a_enabled').checked; 
-  const runAtBoot=document.getElementById('a_runatboot').checked; 
-  const editIdEl=document.getElementById('a_edit_id');
+  const name=hw.$('a_name').value.trim(); 
+  const type=hw.$('a_type').value; 
+  const delayRaw=hw.$('a_delay').value.trim(); 
+  const delayUnit=(hw.$('a_delay_unit')?hw.$('a_delay_unit').value:'ms'); 
+  const intervalRaw=hw.$('a_interval').value.trim(); 
+  const intervalUnit=(hw.$('a_interval_unit')?hw.$('a_interval_unit').value:'ms'); 
+  const en=hw.$('a_enabled').checked; 
+  const runAtBoot=hw.$('a_runatboot').checked; 
+  const editIdEl=hw.$('a_edit_id');
   const editId=editIdEl?editIdEl.value.trim():'';
-  document.getElementById('a_error').textContent=''; document.getElementById('a_error').style.display='none'; 
-  const recur=(document.getElementById('a_recur')?document.getElementById('a_recur').value:'daily');
+  hw.$('a_error').textContent=''; hw.$('a_error').style.display='none'; 
+  const recur=(hw.$('a_recur')?hw.$('a_recur').value:'daily');
   let dayOfMonth=0, monthOfYear=0;
   if(type==='atTime'&&recur==='monthly'){
-    const dEl=document.getElementById('a_day_of_month');
+    const dEl=hw.$('a_day_of_month');
     dayOfMonth=dEl?parseInt(dEl.value,10):0;
     if(!(dayOfMonth>=1&&dayOfMonth<=31)){
-      document.getElementById('a_error').textContent='Monthly requires a day of month (1-31).';
-      document.getElementById('a_error').style.display='block';
+      hw.$('a_error').textContent='Monthly requires a day of month (1-31).';
+      hw.$('a_error').style.display='block';
       return;
     }
   }
   if(type==='atTime'&&recur==='yearly'){
-    const dEl=document.getElementById('a_day_of_month_yearly');
-    const mEl=document.getElementById('a_month_of_year');
+    const dEl=hw.$('a_day_of_month_yearly');
+    const mEl=hw.$('a_month_of_year');
     dayOfMonth=dEl?parseInt(dEl.value,10):0;
     monthOfYear=mEl?parseInt(mEl.value,10):0;
     if(!(dayOfMonth>=1&&dayOfMonth<=31)||!(monthOfYear>=1&&monthOfYear<=12)){
-      document.getElementById('a_error').textContent='Yearly requires a month and day (1-12, 1-31).';
-      document.getElementById('a_error').style.display='block';
+      hw.$('a_error').textContent='Yearly requires a month and day (1-12, 1-31).';
+      hw.$('a_error').style.display='block';
       return;
     }
   }
   const selectedDays=[]; 
   if(type==='atTime'&&recur==='weekly'){ 
     ['mon','tue','wed','thu','fri','sat','sun'].forEach(day=>{ 
-      if(document.getElementById('day_'+day).checked) selectedDays.push(day); 
+      if(hw.$('day_'+day).checked) selectedDays.push(day); 
     }); 
     if(selectedDays.length===0){ 
-      document.getElementById('a_error').textContent='Please select at least one day for a weekly schedule.'; document.getElementById('a_error').style.display='block';
+      hw.$('a_error').textContent='Please select at least one day for a weekly schedule.'; hw.$('a_error').style.display='block';
       return; 
     } 
   } 
   const days=selectedDays.join(',');
   let weekInterval=1;
   if(type==='atTime'&&recur==='weekly'){
-    const wiEl=document.getElementById('a_week_interval');
+    const wiEl=hw.$('a_week_interval');
     if(wiEl){
       const v=parseInt(wiEl.value,10);
       if(!isNaN(v)&&v>=1&&v<=12) weekInterval=v;
     }
   }
-  const timeInputs=document.querySelectorAll('.time-input'); 
+  const timeInputs=hw.qsa('.time-input'); 
   const times=[]; 
   timeInputs.forEach(input=>{ 
     const val=input.value.trim(); 
     if(val) times.push(val); 
   }); 
-  const cmdInputs=document.querySelectorAll('.cmd-input'); 
+  const cmdInputs=hw.qsa('.cmd-input'); 
   const cmds=[]; 
   cmdInputs.forEach(inp=>{ 
     const v=inp.value.trim(); 
     if(v) cmds.push(v); 
   }); 
-  const waitFields=document.querySelectorAll('.wait-field'); 
+  const waitFields=hw.qsa('.wait-field'); 
   waitFields.forEach(field=>{ 
     const select=field.querySelector('.wait-ms-select'); 
     if(select){ 
@@ -1308,7 +1237,7 @@ async function createAutomation(){
       if(ms) cmds.push('wait '+ms); 
     } 
   }); 
-  const logicFields=document.querySelectorAll('.logic-field'); 
+  const logicFields=hw.qsa('.logic-field'); 
   const conditionalChain=[]; 
   let logicError=false;
   logicFields.forEach(field=>{ 
@@ -1338,7 +1267,7 @@ async function createAutomation(){
       } 
     } 
   }); 
-  if(logicError){ document.getElementById('a_error').textContent='Logic field incomplete: all fields (variable, operator, value, action) are required. Dist to waypoint also needs a waypoint name.'; document.getElementById('a_error').style.display='block'; return; }
+  if(logicError){ hw.$('a_error').textContent='Logic field incomplete: all fields (variable, operator, value, action) are required. Dist to waypoint also needs a waypoint name.'; hw.$('a_error').style.display='block'; return; }
   if(conditionalChain.length>0){ 
     cmds.push(conditionalChain.join(' ')); 
   } 
@@ -1353,9 +1282,9 @@ async function createAutomation(){
       parts.push('type='+type);
     }
     if(type==='event'){
-      const eo=(document.getElementById('a_event_on')||{}).value||'';
+      const eo=(hw.$('a_event_on')||{}).value||'';
       parts.push('on='+eo);
-      const em=((document.getElementById('a_event_match')||{}).value||'').trim();
+      const em=((hw.$('a_event_match')||{}).value||'').trim();
       if(em) parts.push('match="'+em.replace(/"/g,'\\"')+'"');
     }
     if(time) parts.push('time='+time); 
@@ -1394,9 +1323,9 @@ async function createAutomation(){
     parts.push('commands="'+cmdsParam.replace(/"/g,'\\"')+'"');
     parts.push('enabled='+(en?1:0));
     // Option 2: top-level "Fire when" condition gate.
-    { const cv=(document.getElementById('a_cond_var')||{}).value||''; const co=(document.getElementById('a_cond_op')||{}).value||'>'; const cval=((document.getElementById('a_cond_val')||{}).value||'').trim();
-      const cwn=((document.getElementById('a_cond_wpname')||{}).value||'').trim();
-      if(cv==='wp_dist' && !cwn){ document.getElementById('a_error').textContent='Dist to waypoint requires a waypoint name.'; document.getElementById('a_error').style.display='block'; throw new Error('wp_dist name'); }
+    { const cv=(hw.$('a_cond_var')||{}).value||''; const co=(hw.$('a_cond_op')||{}).value||'>'; const cval=((hw.$('a_cond_val')||{}).value||'').trim();
+      const cwn=((hw.$('a_cond_wpname')||{}).value||'').trim();
+      if(cv==='wp_dist' && !cwn){ hw.$('a_error').textContent='Dist to waypoint requires a waypoint name.'; hw.$('a_error').style.display='block'; throw new Error('wp_dist name'); }
       if(cv && cval){ const sensorTok=(cv==='wp_dist')?(cv+':'+cwn):cv; parts.push('condition="'+(sensorTok+co+cval).replace(/"/g,'\\"')+'"'); } }
     if(runAtBoot) parts.push('runatboot=1');
     // Secondary triggers: append as a JSON array via the `secondarytriggers`
@@ -1404,21 +1333,21 @@ async function createAutomation(){
     // into the triggers[] array, with a cap of 4 total.
     const secondaries=collectSecondaryTriggers();
     if(secondaries===null){
-      document.getElementById('a_error').textContent='One or more triggers is incomplete. Fill in all fields or remove the row.';
-      document.getElementById('a_error').style.display='block';
+      hw.$('a_error').textContent='One or more triggers is incomplete. Fill in all fields or remove the row.';
+      hw.$('a_error').style.display='block';
       throw new Error('Invalid secondary');
     }
     const primaryIsManual=(type==='afterDelay');
     const manualSecCount=secondaries.filter(s=>s.type==='manual').length;
     if((primaryIsManual?1:0)+manualSecCount>1){
-      document.getElementById('a_error').textContent='Only one manual (After Delay) trigger is allowed per automation.';
-      document.getElementById('a_error').style.display='block';
+      hw.$('a_error').textContent='Only one manual (After Delay) trigger is allowed per automation.';
+      hw.$('a_error').style.display='block';
       throw new Error('Manual cap');
     }
     const totalTriggers=1+(runAtBoot?1:0)+secondaries.length;
     if(totalTriggers>4){
-      document.getElementById('a_error').textContent='Maximum of 4 triggers per automation.';
-      document.getElementById('a_error').style.display='block';
+      hw.$('a_error').textContent='Maximum of 4 triggers per automation.';
+      hw.$('a_error').style.display='block';
       throw new Error('Total cap');
     }
     if(secondaries.length>0){
@@ -1434,7 +1363,7 @@ async function createAutomation(){
     for(let i=0;i<vals.length;i++){ 
       const v=(vals[i]||'').trim(); 
       if(v!=='VALID'){ 
-        document.getElementById('a_error').textContent=v; document.getElementById('a_error').style.display='block';
+        hw.$('a_error').textContent=v; hw.$('a_error').style.display='block';
         throw new Error('Invalid'); 
       } 
     } 
@@ -1442,33 +1371,31 @@ async function createAutomation(){
   }).then(results=>{ 
     const err=results.find(t=>t.toLowerCase().indexOf('error:')>=0); 
     if(err){ 
-      document.getElementById('a_error').textContent=err; document.getElementById('a_error').style.display='block';
+      hw.$('a_error').textContent=err; hw.$('a_error').style.display='block';
       return; 
     } 
     const resetForm=()=>{
-      document.getElementById('a_name').value=''; 
-      document.querySelectorAll('.time-input').forEach(input=>input.value=''); 
+      hw.$('a_name').value=''; 
+      hw.qsa('.time-input').forEach(input=>input.value=''); 
       ['mon','tue','wed','thu','fri','sat','sun'].forEach(day=>{ 
-        let el=document.getElementById('day_'+day); 
+        let el=hw.$('day_'+day); 
         if(el) el.checked=false; 
       }); 
-      document.getElementById('a_delay').value='';
-      document.getElementById('a_interval').value='';
-      var elEvMatch=document.getElementById('a_event_match'); if(elEvMatch) elEvMatch.value='';
-      var elRunBoot=document.getElementById('a_runatboot'); if(elRunBoot) elRunBoot.checked=false;
-      { var cvr=document.getElementById('a_cond_var'); if(cvr) cvr.value=''; var cvv=document.getElementById('a_cond_val'); if(cvv) cvv.value=''; var cwn=document.getElementById('a_cond_wpname'); if(cwn){ cwn.value=''; cwn.style.display='none'; } } 
-      const cwrap=document.getElementById('command_fields'); 
-      if(cwrap){ 
-        cwrap.innerHTML='<div id="command_buttons" class="row-inline" style="gap:0.5rem;margin-top:0.5rem"><button id="btn_add_cmd" type="button" class="btn btn-small" onclick="addCommandField()" title="Add another command to execute (e.g., ledcolor red, status, broadcast message)">+ Add Command</button><button id="btn_add_print" type="button" class="btn btn-small" onclick="addPrintField()" title="Add a print/broadcast message statement">+ Add Print</button><button id="btn_add_logic" type="button" class="btn btn-small" onclick="addLogicField()" title="Add conditional logic (IF/THEN statements for sensor-based automation)">+ Add Logic</button><button id="btn_add_wait" type="button" class="btn btn-small" onclick="addWaitField()" title="Add a wait/pause command with dropdown timing">+ Add Wait</button></div>'; 
-      } 
-      const eidEl=document.getElementById('a_edit_id'); if(eidEl) eidEl.value='';
-      const addBtn=document.querySelector('button[onclick="createAutomation()"]'); if(addBtn) addBtn.textContent='Add';
+      hw.$('a_delay').value='';
+      hw.$('a_interval').value='';
+      var elEvMatch=hw.$('a_event_match'); if(elEvMatch) elEvMatch.value='';
+      var elRunBoot=hw.$('a_runatboot'); if(elRunBoot) elRunBoot.checked=false;
+      { var cvr=hw.$('a_cond_var'); if(cvr) cvr.value=''; var cvv=hw.$('a_cond_val'); if(cvv) cvv.value=''; var cwn=hw.$('a_cond_wpname'); if(cwn){ cwn.value=''; cwn.style.display='none'; } } 
+      const cwrap=hw.$('command_fields'); 
+      hw.setHTML(cwrap,'<div id="command_buttons" class="row-inline" style="gap:0.5rem;margin-top:0.5rem"><button id="btn_add_cmd" type="button" class="btn btn-small" onclick="addCommandField()" title="Add another command to execute (e.g., ledcolor red, status, broadcast message)">+ Add Command</button><button id="btn_add_print" type="button" class="btn btn-small" onclick="addPrintField()" title="Add a print/broadcast message statement">+ Add Print</button><button id="btn_add_logic" type="button" class="btn btn-small" onclick="addLogicField()" title="Add conditional logic (IF/THEN statements for sensor-based automation)">+ Add Logic</button><button id="btn_add_wait" type="button" class="btn btn-small" onclick="addWaitField()" title="Add a wait/pause command with dropdown timing">+ Add Wait</button></div>');
+      const eidEl=hw.$('a_edit_id'); if(eidEl) eidEl.value='';
+      const addBtn=hw.qs('button[onclick="createAutomation()"]'); hw.setText(addBtn,'Add');
       loadAutos();
     };
     resetForm();
   }).catch(e=>{ 
-    if(!document.getElementById('a_error').textContent){ 
-      document.getElementById('a_error').textContent='Validation error: '+e.message; document.getElementById('a_error').style.display='block';
+    if(!hw.$('a_error').textContent){ 
+      hw.$('a_error').textContent='Validation error: '+e.message; hw.$('a_error').style.display='block';
     } 
   }); 
 }
@@ -1509,8 +1436,8 @@ function autoEdit(id){
     const sched=a.trigger||{};
     // Clear any previous secondary trigger rows, then re-populate from the
     // saved triggers array (excluding the primary and the synthesized boot).
-    const secCont=document.getElementById('secondary_triggers_container');
-    if(secCont) secCont.innerHTML='';
+    const secCont=hw.$('secondary_triggers_container');
+    hw.setHTML(secCont,'');
     if(Array.isArray(a.triggers) && a.triggers.length > 0){
       // The primary trigger (first non-boot) and a runAtBoot-derived boot
       // trigger are already handled by the main form. Everything else goes
@@ -1524,7 +1451,7 @@ function autoEdit(id){
         addSecondaryTrigger(t);
       }
     }
-    document.getElementById('a_name').value=a.name||'';
+    hw.$('a_name').value=a.name||'';
     const typeRaw=((sched.type||a.type||'time')).toLowerCase();
     let typeVal='atTime';
     // Accept both legacy (atTime/afterDelay/onBoot) and v1 (time/manual/boot) type names.
@@ -1533,48 +1460,47 @@ function autoEdit(id){
     else if(typeRaw==='event') typeVal='event';
     else if(typeRaw==='onboot'||typeRaw==='boot') typeVal='onBoot';
     else if(a.runAtBoot===true) typeVal='onBoot';
-    document.getElementById('a_type').value=typeVal;
-    autoTypeChanged();
-    const recurEl=document.getElementById('a_recur');
+    hw.$('a_type').value=typeVal;
+    autoTypeChanged(typeVal==='event'?(sched.on||''):'');
+    const recurEl=hw.$('a_recur');
     if(recurEl){recurEl.value=(sched.recurrence||a.recurrence||'daily');recurChanged();}
     const allTimes=sched.times||a.times||(sched.time?[sched.time]:a.time?[a.time]:[]);
     if(typeVal==='atTime'&&allTimes.length>0){
-      const mainInput=document.querySelector('#grp_atTime .time-input');
+      const mainInput=hw.qs('#grp_atTime .time-input');
       if(mainInput) mainInput.value=allTimes[0];
-      const addlCont=document.getElementById('time_fields');
-      if(addlCont) addlCont.innerHTML='';
-      for(let i=1;i<allTimes.length;i++){addTimeField();const tf=document.querySelectorAll('.time-field .time-input');if(tf[i-1])tf[i-1].value=allTimes[i];}
+      const addlCont=hw.$('time_fields');
+      hw.setHTML(addlCont,'');
+      for(let i=1;i<allTimes.length;i++){addTimeField();const tf=hw.qsa('.time-field .time-input');if(tf[i-1])tf[i-1].value=allTimes[i];}
     }
     if((sched.recurrence||a.recurrence||'')==='weekly'){
-      ['mon','tue','wed','thu','fri','sat','sun'].forEach(d=>{const el=document.getElementById('day_'+d);if(el)el.checked=false;});
-      (sched.days||a.days||[]).forEach(d=>{const el=document.getElementById('day_'+d.toLowerCase().substring(0,3));if(el)el.checked=true;});
-      const wiEl=document.getElementById('a_week_interval');
+      ['mon','tue','wed','thu','fri','sat','sun'].forEach(d=>{const el=hw.$('day_'+d);if(el)el.checked=false;});
+      (sched.days||a.days||[]).forEach(d=>{const el=hw.$('day_'+d.toLowerCase().substring(0,3));if(el)el.checked=true;});
+      const wiEl=hw.$('a_week_interval');
       if(wiEl){const wi=sched.weekInterval||a.weekInterval||1;wiEl.value=(wi>=1&&wi<=12)?wi:1;}
     }
     if((sched.recurrence||a.recurrence||'')==='monthly'){
-      const dEl=document.getElementById('a_day_of_month');
+      const dEl=hw.$('a_day_of_month');
       if(dEl){const dom=sched.dayOfMonth||a.dayOfMonth||1;dEl.value=(dom>=1&&dom<=31)?dom:1;}
     }
     if((sched.recurrence||a.recurrence||'')==='yearly'){
-      const dEl=document.getElementById('a_day_of_month_yearly');
-      const mEl=document.getElementById('a_month_of_year');
+      const dEl=hw.$('a_day_of_month_yearly');
+      const mEl=hw.$('a_month_of_year');
       if(dEl){const dom=sched.dayOfMonth||a.dayOfMonth||1;dEl.value=(dom>=1&&dom<=31)?dom:1;}
       if(mEl){const moy=sched.month||a.month||1;mEl.value=(moy>=1&&moy<=12)?moy:1;}
     }
-    if(typeVal==='afterDelay') document.getElementById('a_delay').value=sched.delayMs||a.delayMs||0;
-    if(typeVal==='interval') document.getElementById('a_interval').value=sched.intervalMs||a.intervalMs||0;
+    if(typeVal==='afterDelay') hw.$('a_delay').value=sched.delayMs||a.delayMs||0;
+    if(typeVal==='interval') hw.$('a_interval').value=sched.intervalMs||a.intervalMs||0;
     if(typeVal==='event'){
-      const eo=document.getElementById('a_event_on'); if(eo) eo.value=sched.on||'';
-      const em=document.getElementById('a_event_match'); if(em) em.value=sched.match||'';
+      const em=hw.$('a_event_match'); if(em) em.value=sched.match||'';
     }
     // Option 2: populate the "Fire when" condition from the record.
-    { var cvr=document.getElementById('a_cond_var'); var cor=document.getElementById('a_cond_op'); var cvv=document.getElementById('a_cond_val'); var cwn=document.getElementById('a_cond_wpname');
+    { var cvr=hw.$('a_cond_var'); var cor=hw.$('a_cond_op'); var cvv=hw.$('a_cond_val'); var cwn=hw.$('a_cond_wpname');
       if(cvr&&cor&&cvv){ cvr.value='';cor.value='>';cvv.value=''; if(cwn){ cwn.value=''; cwn.style.display='none'; }
         var cond=(a.condition||'').trim();
         if(cond){ var ops=['CONTAINS','>=','<=','!=','>','<','=']; for(var oi=0;oi<ops.length;oi++){ var ix=cond.indexOf(ops[oi]); if(ix>0){ var left=cond.substring(0,ix).trim().toLowerCase(); var colon=left.indexOf(':'); if(colon>0&&left.substring(0,colon)==='wp_dist'){ cvr.value='wp_dist'; if(cwn){ cwn.value=left.substring(colon+1); cwn.style.display='inline-block'; } } else { cvr.value=left; } cor.value=ops[oi]; cvv.value=cond.substring(ix+ops[oi].length).trim(); break; } } } }
       }
     const commands=Array.isArray(a.commands)?a.commands:(a.command?[a.command]:[]);
-    const cwrap=document.getElementById('command_fields');
+    const cwrap=hw.$('command_fields');
     if(cwrap){
       cwrap.innerHTML='<div id="command_buttons" class="row-inline" style="gap:0.5rem;margin-top:0.5rem"><button id="btn_add_cmd" type="button" class="btn btn-small" onclick="addCommandField()" title="Add another command to execute (e.g., ledcolor red, status, broadcast message)">+ Add Command</button><button id="btn_add_print" type="button" class="btn btn-small" onclick="addPrintField()" title="Add a print/broadcast message statement">+ Add Print</button><button id="btn_add_logic" type="button" class="btn btn-small" onclick="addLogicField()" title="Add conditional logic (IF/THEN statements for sensor-based automation)">+ Add Logic</button><button id="btn_add_wait" type="button" class="btn btn-small" onclick="addWaitField()" title="Add a wait/pause command with dropdown timing">+ Add Wait</button></div>';
       commands.forEach(cmd=>{
@@ -1584,15 +1510,15 @@ function autoEdit(id){
         if(inp.length>0) inp[inp.length-1].value=cmdStr;
       });
     }
-    document.getElementById('a_enabled').checked=a.enabled!==false;
-    const rbEl=document.getElementById('a_runatboot');
+    hw.$('a_enabled').checked=a.enabled!==false;
+    const rbEl=hw.$('a_runatboot');
     if(rbEl) rbEl.checked=(sched.runAtBoot===true||a.runAtBoot===true);
-    let eidEl=document.getElementById('a_edit_id');
-    if(!eidEl){eidEl=document.createElement('input');eidEl.type='hidden';eidEl.id='a_edit_id';document.getElementById('a_name').parentElement.appendChild(eidEl);}
+    let eidEl=hw.$('a_edit_id');
+    if(!eidEl){eidEl=document.createElement('input');eidEl.type='hidden';eidEl.id='a_edit_id';hw.$('a_name').parentElement.appendChild(eidEl);}
     eidEl.value=id;
-    const addBtn=document.querySelector('button[onclick="createAutomation()"]');
-    if(addBtn) addBtn.textContent='Save Changes';
-    document.getElementById('a_name').scrollIntoView({behavior:'smooth',block:'center'});
+    const addBtn=hw.qs('button[onclick="createAutomation()"]');
+    hw.setText(addBtn,'Save Changes');
+    hw.$('a_name').scrollIntoView({behavior:'smooth',block:'center'});
   }).catch(e=>console.error('autoEdit:',e));
 }
 </script>)AUTOPART7", HTTPD_RESP_USE_STRLEN);
@@ -1603,13 +1529,13 @@ function autoEdit(id){
 function importAutomationFromJson(autoJson, statusEl){
   const name=(autoJson.name||'').trim();
   if(!name){
-    if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">Error: missing name</span>';
+    hw.setHTML(statusEl,'<span style="color:var(--danger)">Error: missing name</span>');
     return Promise.reject(new Error('missing name'));
   }
   const sched=autoJson.trigger||{};
   const rawType=(sched.type||autoJson.type||'').toLowerCase();
   if(!rawType){
-    if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">Error: missing schedule.type</span>';
+    hw.setHTML(statusEl,'<span style="color:var(--danger)">Error: missing schedule.type</span>');
     return Promise.reject(new Error('missing type'));
   }
   const parts=['automation add'];
@@ -1649,7 +1575,7 @@ function importAutomationFromJson(autoJson, statusEl){
   if(condition) parts.push('condition="'+condition.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
   const commands=Array.isArray(autoJson.commands)?autoJson.commands:(autoJson.command?[autoJson.command]:[]);
   if(commands.length===0){
-    if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">Error: missing commands</span>';
+    hw.setHTML(statusEl,'<span style="color:var(--danger)">Error: missing commands</span>');
     return Promise.reject(new Error('missing commands'));
   }
   const cmdsParam=commands.map(c=>typeof c==='object'?(c.conditional||JSON.stringify(c)):c).join(';');
@@ -1657,9 +1583,9 @@ function importAutomationFromJson(autoJson, statusEl){
   parts.push('enabled='+(autoJson.enabled!==false?1:0));
   const cmd=parts.join(' ');
   function showImportError(msg){
-    const errEl=document.getElementById('a_error');
+    const errEl=hw.$('a_error');
     if(errEl){ errEl.textContent=msg; errEl.style.display='block'; }
-    if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">'+msg+'</span>';
+    hw.setHTML(statusEl,'<span style="color:var(--danger)">'+msg+'</span>');
   }
   console.log('[importAutomationFromJson] Validating import for "'+name+'":', cmd);
   return postCLIValidate(cmd).then(v=>{
@@ -1683,11 +1609,11 @@ function importAutomationFromJson(autoJson, statusEl){
   });
 }
 function importFromFile(input){
-  const status=document.getElementById('import_file_status');
-  const label=document.getElementById('import_filename');
+  const status=hw.$('import_file_status');
+  const label=hw.$('import_filename');
   if(!input.files||input.files.length===0) return;
   const file=input.files[0];
-  if(label) label.textContent=file.name;
+  hw.setText(label,file.name);
   status.innerHTML='<span style="color:var(--accent)">Reading...</span>';
   const reader=new FileReader();
   reader.onload=function(e){
@@ -1704,7 +1630,7 @@ function importFromFile(input){
         else status.innerHTML='<span style="color:var(--danger)">Import failed ('+errs+' error'+(errs!==1?'s':'')+')</span>';
         if(done>0) loadAutos();
         input.value='';
-        if(label) label.textContent='No file chosen';
+        hw.setText(label,'No file chosen');
         return;
       }
       importAutomationFromJson(items[idx],null).then(()=>{done++;next(idx+1);}).catch(()=>{errs++;next(idx+1);});
@@ -1715,9 +1641,9 @@ function importFromFile(input){
   reader.readAsText(file);
 }
 function downloadFromGitHub(){
-  const urlEl=document.getElementById('github_url');
-  const nameEl=document.getElementById('github_name');
-  const status=document.getElementById('download_status');
+  const urlEl=hw.$('github_url');
+  const nameEl=hw.$('github_name');
+  const status=hw.$('download_status');
   let url=(urlEl?urlEl.value.trim():'');
   const customName=(nameEl?nameEl.value.trim():'');
   if(!url){ status.innerHTML='<span style="color:var(--danger)">Please enter a GitHub URL</span>'; return; }
@@ -1743,8 +1669,8 @@ function downloadFromGitHub(){
     });
 }
 function exportAllAutomations(){ 
-  const status=document.getElementById('export_status'); 
-  const separateFiles=document.getElementById('export_separate').checked; 
+  const status=hw.$('export_status'); 
+  const separateFiles=hw.$('export_separate').checked; 
   status.innerHTML='<span style="color:var(--accent)">Preparing export...</span>'; 
   if(separateFiles){
     hw.fetchJSON('/api/automations').then(data=>{

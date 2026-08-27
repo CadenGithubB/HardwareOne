@@ -26,14 +26,18 @@ the peer-metadata items shipped earlier in v0.95.10).
   (frames <=195 B payload); reassemble frames as you do today.
 - **WARNING: 4 KB result ceiling (important).** Every command that runs through the
   cmd_exec path - **both BLE and the web `/api/cli`** - copies the handler's result
-  into a fixed **4096-byte** buffer (`ExecReq.out` = `CMD_RESULT_MAX`; `strncpy` cap).
-  A reply longer than ~4095 bytes is **silently truncated -> invalid JSON**. (This
-  section said 2048 until the buffer was raised alongside `GLOBAL_DEBUG_BUFFER_SIZE`;
-  the inbound `ExecReq.line` array is the one that is still 2048.) This is upstream of the
-  BLE framing, so chunking does not save it. Almost every command's JSON is well
-  under 2 KB; the one that can exceed it is the **aggregate `sensors json`** when
-  several sensors are active (ToF's data alone is ~1 KB). See sec. 6 - fetch sensors
-  per-sensor, not via the aggregate, over BLE.
+  into a fixed **4096-byte** buffer (`ExecReq.out` = `CMD_RESULT_MAX`), including
+  the trailing NUL. The central registry checks `resultLen >= outSize` and returns
+  `Error: result too large...` instead of copying a torn/truncated handler result;
+  transports may supply an output buffer smaller than the 4,096-byte maximum. The
+  System Event catalog adapter additionally preflights its exact size against the
+  fixed command-result buffer. (This section said 2048 until the buffer was raised
+  alongside `GLOBAL_DEBUG_BUFFER_SIZE`; the inbound `ExecReq.line` array is the one
+  that is still 2048 bytes including its trailing NUL.) This ceiling is upstream of
+  BLE framing, so chunking does not rescue an oversized command result. Almost every
+  command's JSON is well under 2 KB; the one that can exceed the result budget is the
+  **aggregate `sensors json`** when several sensors are active (ToF's data alone is
+  ~1 KB). See sec. 6 - fetch sensors per-sensor, not via the aggregate, over BLE.
 - **Feature compiled out -> never a crash.** A command whose feature is not in the
   build resolves to ONE of:
   - **Not registered** -> `"Unknown command"` reply (most features), or
@@ -60,6 +64,9 @@ the peer-metadata items shipped earlier in v0.95.10).
    `whereami`.
 7. **Sensors** - every live sensor read now has JSON, and `sensors json` is the
    preferred aggregate (see sec. 6).
+8. **System Event vocabulary** - `events kinds json` and
+   `GET /api/events/kinds` now use one shared, allocation-free serializer over
+   the native typed catalog (see sec. 10).
 
 ---
 
@@ -138,9 +145,10 @@ Note: read the global on/off via `automation system status json`, not from
 
 **Over BLE, fetch each sensor individually and load them one at a time.** The
 aggregate `sensors json` embeds every active sensor's `data` in one reply, which can
-exceed the 2 KB result ceiling (sec. 1) and truncate to invalid JSON. Each per-sensor
-`<x>read json` returns a single sensor (<= ~1 KB), always safely under the ceiling,
-and self-describes `valid` / `enabled` / `connected`.
+exceed the command transport's result budget (sec. 1) and fail with an explicit
+`Error:` reply. Each per-sensor `<x>read json` returns a single sensor (<= ~1 KB),
+stays safely under the ceiling, and self-describes `valid` / `enabled` /
+`connected`.
 
 **Discovery / loading pattern:**
 1. Call **`sensors json brief`** once -> a small, bounded enumeration (state only, **no
@@ -343,8 +351,66 @@ Device-side controls: `notifydeviceapp <0|1>` (admin, master switch for this sin
 `notifstats`, whose `app-cards` / `app` / `app-drop` counters are the ground truth for
 "did the device actually send it".
 
-## 10. Status
+## 10. System Event kind catalog
 
-All of the above builds clean and is pending on-device validation; on confirmation it
-will be committed with a version bump. If a shape here doesn't match what the device
-emits, the device is authoritative - report the mismatch.
+The stable command is:
+
+```text
+events kinds json
+```
+
+It returns the compact v1 vocabulary shape below. This response intentionally
+has no numeric ids, aliases, flat duplicate array, `schema`, or revision field:
+
+```json
+{"families":[{"n":"Connectivity","k":["wifi_connected","wifi_disconnected"]}]}
+```
+
+The complete current response is exactly **2,877 UTF-8 bytes** and contains
+**12 families / 152 unique canonical kinds**. The command buffer therefore
+needs 2,878 bytes including its trailing NUL and has 1,218 usable payload bytes
+of headroom beneath the 4,095-byte command-result ceiling. Family order,
+within-family order, labels, and canonical snake_case names match the reviewed
+v1 fixture. The exact tokens `boot`, `none`, `set`, `patch`, `all`, and `list`
+are reserved because they already mean an alias, sentinel, or notification
+command operation; none can be a canonical row or appear in catalog JSON.
+Process-local numeric ids are also never serialized. Persist and compare
+canonical names, never enum values.
+
+Both command JSON and HTTP use the same serializer over the immutable typed
+provider:
+
+- The guest-readable `GET /api/events/kinds` endpoint (subject to the normal web
+  authentication policy) streams the response in chunks and is not limited by
+  `CMD_RESULT_MAX`. The handler preflights the exact size; after streaming
+  starts, a sink failure aborts/closes the response instead of appending a JSON
+  error tail or a success terminator.
+- UART and authenticated command clients receive the same bytes through the
+  ordinary command result lane. The command adapter checks the 4,096-byte
+  buffer and fails explicitly if future catalog growth no longer fits.
+- A phone companion may fetch the full v1 response only after establishing the
+  application Secure Channel and must reassemble its paced reply fragments.
+  The request is small; the multi-frame response is what needs reassembly.
+- **Do not request the full catalog over plaintext BLE.** That reply path sends
+  one unfragmented notification, whose ATT payload is far smaller than 2,877
+  bytes. Full-catalog plaintext delivery is unsupported; firmware may attempt
+  the oversized notification without propagating its asynchronous send failure
+  back into command success. A future plaintext client needs a separately
+  versioned paged protocol.
+
+The serializer/text migration and the restoring five-profile Phase 2 artifact
+matrix are complete. Host verification passes all 18 registered tests,
+including exact typed↔JSON fixture parity, escaping, sizing, sink failure,
+checked human-text packing, and ownership boundaries. The matrix passes all
+five board/gate rows, rebuilds ordinary FeatherS3 and XIAO-S3 artifacts, and
+restores the source config exactly. The physical Secure-BLE client run and
+deterministic live HTTP sink-failure test remain pending and are not implied by
+those automated results.
+
+## 11. Status
+
+These contracts describe the current source. The Phase 2 catalog path passes
+the complete artifact matrix, while physical transport/fault acceptance remains
+pending as stated above. If a shape here does not match what a device emits,
+the flashed device revision is authoritative - report the mismatch instead of
+silently adapting the client.

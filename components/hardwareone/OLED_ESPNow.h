@@ -52,12 +52,6 @@ struct OLEDEspNowState {
   OLEDEspNowView currentView;
   OLEDEspNowMode interactionMode;
   
-  // Device list scrolling
-  OLEDScrollState deviceList;
-  
-  // Message history scrolling
-  OLEDScrollState messageList;
-  
   // Currently selected device (MAC address)
   uint8_t selectedDeviceMac[6];
   String selectedDeviceName;

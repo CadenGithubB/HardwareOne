@@ -6,6 +6,11 @@
 
 #include "System_BuildConfig.h"
 
+// Persisted BLE role encoding: 0 = phone-facing GATT server, 1 = G2 client.
+// G2-capable builds retain the client-first default; a build with no G2 client
+// must default to the only application role it actually contains.
+static constexpr int kBleModeDefaultForBuild = ENABLE_G2_GLASSES ? 1 : 0;
+
 // CommandEntry is defined in system_utils.h (included by files that need it)
 // Forward declare here for header-only usage
 struct CommandEntry;
@@ -386,7 +391,7 @@ struct Settings {
       bleRequireAuth(true),
       bleDeviceName("HardwareOne"),
       bleTxPower(3),
-      bleMode(1),  // 1 = BLE_MODE_G2_CLIENT — default BLE role is G2 client (central)
+      bleMode(kBleModeDefaultForBuild),
       bleRequireSecureChannel(true),
       bleSecureChannelSecret(""),
       // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
@@ -1194,6 +1199,7 @@ bool settingsRestampFirmwareVersion();
 // sets the same flag itself on a successful load; while unset, the save path
 // skips the wifi-networks rebuild so it can't wipe the file after a failed load.
 void settingsMarkLoadedOk();
+void debugSettingsMarkLoadedOk();
 bool writeDebugJson();   // persist the debug module to DEBUG_JSON_FILE
 bool readDebugJson();    // load the debug module from DEBUG_JSON_FILE
 
@@ -1396,7 +1402,7 @@ struct SettingsModule {
 // Maximum number of settings modules that can be registered.
 //
 // Must stay ahead of the registerSettingsModule() call count in
-// registerAllSettingsModules(), which is 35 - most behind #if guards, so no
+// registerAllSettingsModules(), which is 36 - most behind #if guards, so no
 // shipping board reaches the cap today. Overflow is not loud: the registration
 // simply logs and returns (System_Settings.cpp), and a dropped module then
 // neither loads nor persists ANY of its settings - it silently runs on
@@ -1407,7 +1413,7 @@ struct SettingsModule {
 // also the destination bound for the bonded-peer module list (that source
 // array is heap-allocated from the peer's own count, so the two must be raised
 // together - they already are, both keying off this macro).
-#define MAX_SETTINGS_MODULES 36
+#define MAX_SETTINGS_MODULES 40
 
 // Register a settings module (call during setup or static init)
 void registerSettingsModule(const SettingsModule* module);

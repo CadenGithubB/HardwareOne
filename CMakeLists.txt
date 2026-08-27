@@ -30,7 +30,15 @@ endif()
 if(NOT _inferred_target)
     set(_inferred_target "$ENV{IDF_TARGET}")
 endif()
-set(_sdkconfig "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig")
+# The saved config lives in config/, not at the project root. IDF would otherwise
+# default SDKCONFIG to ${project_dir}/sdkconfig, so claim it here BEFORE
+# project.cmake runs. tools/build_board.sh still overrides this per board with
+# -DSDKCONFIG=build-<board>/sdkconfig; this default only serves a bare idf.py.
+set(_sdkconfig "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig")
+if(NOT DEFINED SDKCONFIG OR "${SDKCONFIG}" STREQUAL "")
+    set(SDKCONFIG "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig" CACHE FILEPATH
+        "HardwareOne saved sdkconfig" FORCE)
+endif()
 if(DEFINED SDKCONFIG AND NOT "${SDKCONFIG}" STREQUAL "")
     if(IS_ABSOLUTE "${SDKCONFIG}")
         set(_sdkconfig "${SDKCONFIG}")
@@ -135,6 +143,7 @@ endif()
 # Two axes: SR vs no_sr (from #define ENABLE_ESP_SR in System_BuildConfig.h)
 # and flash size (from the active board file, defaulted to 8mb for ESP32
 # boards and as a fallback). The four combinations are:
+#   partitions/ holds the source tables (the root partitions.csv is generated):
 #   partitions_no_sr_8mb.csv    factory 4948K + littlefs 3180K
 #   partitions_no_sr_16mb.csv   factory 4948K + littlefs 11628K  (FeatherS3[D])
 #   partitions_sr_8mb.csv       factory 4992K + model 3008K + littlefs 128K
@@ -153,13 +162,80 @@ if(DEFINED ENV{HW_OTA_LAYOUT})
     endif()
 endif()
 
-if(_ota_layout AND
-   (NOT _inferred_target STREQUAL "esp32s3" OR
-    NOT _flash_size STREQUAL "16mb" OR
-    NOT (_hw_board STREQUAL "feathers3" OR _hw_board STREQUAL "feathers3_fe")))
-    message(FATAL_ERROR
-        "HW_OTA_LAYOUT=1 currently supports only 16 MB FeatherS3 boards "
-        "(HW_BOARD=feathers3 or feathers3_fe, target esp32s3).")
+# Recovery-OTA board registry.
+#
+# Adding a row here is NOT sufficient on its own. Each supported board also
+# needs, in lock-step:
+#   * partitions_ota_<sr>_<flash>.csv     the partition picker below, AND the
+#                                         updater, both compile this one file
+#   * updater/boards/<board>.defaults     recovery updater board file: chip
+#                                         marker, flash size, console channel
+#   * a matching row in updater/CMakeLists.txt's own board registry
+#   * board/layout/suffix ids in components/hw1_ota_protocol/include/...
+#   * BOARD_CONTRACT / BOARD_LAYOUTS / BOARD_SUFFIXES under tools/ota
+#   * boards/<board>.ota.defaults         OPTIONAL: chip deltas that apply only
+#                                         to the OTA layout. The S3 boards need
+#                                         none; feather_esp32_v2 needs one.
+# A partial addition produces artifacts that build and then fail the paired
+# audit, or worse, pass it while disagreeing about where partitions live.
+#
+# _ota_updater_max_bytes is a release gate, not a physical limit: it is the
+# point past which the updater is too close to filling its factory slot to be
+# safely grown. For feather_esp32_v2 the factory partition is itself the
+# tightest constraint (1144 KiB), so the gate equals the partition size.
+set(_ota_expected_target "")
+set(_ota_expected_flash "")
+set(_ota_layout_id "")
+set(_ota_version_suffix "")
+set(_ota_expect_flash_encryption FALSE)
+set(_ota_updater_max_bytes 0)
+if(_hw_board STREQUAL "feathers3")
+    set(_ota_expected_target "esp32s3")
+    set(_ota_expected_flash "16mb")
+    set(_ota_layout_id "hw1-f3-ota-v1")
+    set(_ota_version_suffix "f3o1")
+    set(_ota_updater_max_bytes 1205862)
+elseif(_hw_board STREQUAL "feathers3_fe")
+    set(_ota_expected_target "esp32s3")
+    set(_ota_expected_flash "16mb")
+    set(_ota_layout_id "hw1-f3fe-ota-v1")
+    set(_ota_version_suffix "f3feo1")
+    set(_ota_expect_flash_encryption TRUE)
+    set(_ota_updater_max_bytes 1205862)
+elseif(_hw_board STREQUAL "feather_esp32_v2")
+    set(_ota_expected_target "esp32")
+    set(_ota_expected_flash "8mb")
+    set(_ota_layout_id "hw1-fv2-ota-v1")
+    set(_ota_version_suffix "fv2o1")
+    set(_ota_updater_max_bytes 1171456)
+elseif(_hw_board STREQUAL "qtpy_esp32")
+    # Same die and same 8 MB flash as feather_esp32_v2, so it shares
+    # partitions_ota_no_sr_8mb.csv. It differs in two ways that matter:
+    # CONFIG_BT_ENABLED=n (so the BLE otawrite path compiles out entirely --
+    # recovery SoftAP upload is the ONLY way to get an image on), and no
+    # battery hardware at all (CONFIG_HW1_UPDATER_POWER_NONE).
+    set(_ota_expected_target "esp32")
+    set(_ota_expected_flash "8mb")
+    set(_ota_layout_id "hw1-qtpy-ota-v1")
+    set(_ota_version_suffix "qtpyo1")
+    set(_ota_updater_max_bytes 1171456)
+endif()
+
+if(_ota_layout)
+    if(_ota_layout_id STREQUAL "")
+        message(FATAL_ERROR
+            "HW_OTA_LAYOUT=1 does not support HW_BOARD=${_hw_board}. Supported "
+            "recovery-OTA boards: feathers3, feathers3_fe (16 MB, esp32s3), "
+            "feather_esp32_v2, qtpy_esp32 (8 MB, esp32).")
+    endif()
+    if(NOT _inferred_target STREQUAL _ota_expected_target OR
+       NOT _flash_size STREQUAL _ota_expected_flash)
+        message(FATAL_ERROR
+            "HW_BOARD=${_hw_board} recovery OTA expects target "
+            "'${_ota_expected_target}' with ${_ota_expected_flash} flash, but "
+            "this configure resolved target='${_inferred_target}' "
+            "flash='${_flash_size}'.")
+    endif()
 endif()
 
 # A CMake build directory must never change between the ordinary and recovery-
@@ -189,11 +265,11 @@ if(_ota_layout)
     # cached default SDKCONFIG from an older ordinary configure must be replaced
     # too; otherwise explicit `# ... is not set` lines defeat OTA defaults.
     get_filename_component(_ordinary_sdkconfig
-        "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig" ABSOLUTE)
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig" ABSOLUTE)
     get_filename_component(_active_sdkconfig "${_sdkconfig}" ABSOLUTE)
     if(NOT DEFINED SDKCONFIG OR "${SDKCONFIG}" STREQUAL "" OR
        "${_active_sdkconfig}" STREQUAL "${_ordinary_sdkconfig}")
-        set(SDKCONFIG "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.ota" CACHE FILEPATH
+        set(SDKCONFIG "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig.ota" CACHE FILEPATH
             "HardwareOne OTA sdkconfig" FORCE)
         set(_sdkconfig "${SDKCONFIG}")
     else()
@@ -213,10 +289,10 @@ if(EXISTS "${_buildconfig}")
     endif()
     if(_ota_layout)
         set(_partitions_src
-            "${CMAKE_CURRENT_SOURCE_DIR}/partitions_ota_${_sr_flag}_${_flash_size}.csv")
+            "${CMAKE_CURRENT_SOURCE_DIR}/partitions/partitions_ota_${_sr_flag}_${_flash_size}.csv")
     else()
         set(_partitions_src
-            "${CMAKE_CURRENT_SOURCE_DIR}/partitions_${_sr_flag}_${_flash_size}.csv")
+            "${CMAKE_CURRENT_SOURCE_DIR}/partitions/partitions_${_sr_flag}_${_flash_size}.csv")
     endif()
     if(NOT EXISTS "${_partitions_src}")
         message(FATAL_ERROR
@@ -224,6 +300,9 @@ if(EXISTS "${_buildconfig}")
             "Add it (and any sibling _8mb / _16mb file you may have missed).")
     endif()
     message(STATUS "ENABLE_ESP_SR=${_espsr_val}, flash=${_flash_size} → ${_partitions_src}")
+    # Source tables live in partitions/; the GENERATED table stays at the project
+    # root because CONFIG_PARTITION_TABLE_CUSTOM_FILENAME (sdkconfig.defaults:22)
+    # resolves "partitions.csv" relative to the project dir.
     set(_partitions_dst "${CMAKE_CURRENT_SOURCE_DIR}/partitions.csv")
     file(READ "${_partitions_src}" _src_content)
     set(_dst_content "")
@@ -237,14 +316,31 @@ if(EXISTS "${_buildconfig}")
 endif()
 
 # --- 4. SDKCONFIG_DEFAULTS layering + sdkconfig auto-recovery ---
+# Defaults live in config/. IDF derives the chip-family file by appending
+# .<target> to EACH entry of SDKCONFIG_DEFAULTS (esp-idf kconfig.cmake:175),
+# not by a fixed project-root lookup, so config/sdkconfig.defaults.<target>
+# is picked up automatically by moving its parent.
 # Runs whenever a board file was selected in step 2 (any target).
 if(_board_file)
     set(SDKCONFIG_DEFAULTS
-        "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults"
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig.defaults"
         "${_board_file}")
     if(_ota_layout)
         list(APPEND SDKCONFIG_DEFAULTS
-            "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.ota.defaults")
+            "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig.ota.defaults")
+
+        # Chip deltas that apply ONLY to the OTA layout. These must not live in
+        # boards/<board>.defaults: CONFIG_ESP32_REV_MIN_3 bakes a minimum chip
+        # revision into the bootloader, and a board file is shared with the
+        # ordinary build, which has no reason to refuse older silicon. The
+        # overlay is optional -- the S3 boards need no such delta.
+        set(_board_ota_file
+            "${CMAKE_CURRENT_SOURCE_DIR}/boards/${_hw_board}.ota.defaults")
+        if(EXISTS "${_board_ota_file}")
+            list(APPEND SDKCONFIG_DEFAULTS "${_board_ota_file}")
+            set_property(DIRECTORY APPEND PROPERTY
+                CMAKE_CONFIGURE_DEPENDS "${_board_ota_file}")
+        endif()
 
         # Keep workstation-specific key paths out of tracked configuration.
         # A conventional ignored local filename is supported for convenience;
@@ -341,7 +437,7 @@ if(_board_file)
         endif()
     endforeach()
     set(_family_defaults
-        "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.${_inferred_target}")
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig.defaults.${_inferred_target}")
     if(EXISTS "${_family_defaults}")
         set_property(DIRECTORY APPEND PROPERTY
             CMAKE_CONFIGURE_DEPENDS "${_family_defaults}")
@@ -418,13 +514,9 @@ endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 if(_ota_layout)
-    if(_hw_board STREQUAL "feathers3_fe")
-        set(PROJECT_VER "0.99.91.1+f3feo1")
-    else()
-        set(PROJECT_VER "0.99.91.1+f3o1")
-    endif()
+    set(PROJECT_VER "0.99.92+${_ota_version_suffix}")
 else()
-    set(PROJECT_VER "0.99.91.1")
+    set(PROJECT_VER "0.99.92")
 endif()
 project(hardwareone-idf)
 
@@ -529,49 +621,73 @@ if(_ota_layout)
                 "Recovery OTA requires ${_ota_forbidden_option}=n.")
         endif()
     endforeach()
-    if(NOT CONFIG_IDF_TARGET STREQUAL "esp32s3" OR
-       NOT CONFIG_ESPTOOLPY_FLASHSIZE STREQUAL "16MB" OR
+    string(TOUPPER "${_ota_expected_flash}" _ota_expected_flash_upper)
+    if(NOT CONFIG_IDF_TARGET STREQUAL "${_ota_expected_target}" OR
+       NOT CONFIG_ESPTOOLPY_FLASHSIZE STREQUAL "${_ota_expected_flash_upper}" OR
        NOT CONFIG_PARTITION_TABLE_OFFSET STREQUAL "0x9000")
         message(FATAL_ERROR
-            "Recovery OTA requires ESP32-S3, 16MB flash, and partition table "
-            "offset 0x9000; the active sdkconfig does not match.")
+            "HW_BOARD=${_hw_board} recovery OTA requires target "
+            "${_ota_expected_target}, ${_ota_expected_flash_upper} flash, and "
+            "partition table offset 0x9000; the active sdkconfig has "
+            "${CONFIG_IDF_TARGET} / ${CONFIG_ESPTOOLPY_FLASHSIZE} / "
+            "${CONFIG_PARTITION_TABLE_OFFSET}.")
     endif()
-    if(_hw_board STREQUAL "feathers3_fe")
+    # Signed-app verification on the classic ESP32 is only available from
+    # silicon revision 3 (SECURE_BOOT_V2_RSA_SUPPORTED in the IDF bootloader
+    # Kconfig depends on ESP32_REV_MIN_FULL >= 300). Without this the RSA
+    # scheme silently drops out of the choice group and the required-option
+    # loop above fails with a confusing "set RSA scheme" message instead of
+    # naming the real cause.
+    if(CONFIG_IDF_TARGET STREQUAL "esp32" AND
+       (NOT DEFINED CONFIG_ESP32_REV_MIN_FULL OR
+        CONFIG_ESP32_REV_MIN_FULL LESS 300))
+        message(FATAL_ERROR
+            "Classic-ESP32 recovery OTA requires CONFIG_ESP32_REV_MIN_3=y "
+            "(RSA-3072 signed apps need silicon revision 3+). Set it in "
+            "boards/${_hw_board}.ota.defaults.")
+    endif()
+    if(_ota_expect_flash_encryption)
         if(NOT CONFIG_SECURE_FLASH_ENC_ENABLED OR
            NOT CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT OR
            NOT CONFIG_SECURE_FLASH_ENCRYPTION_AES128 OR
            NOT CONFIG_NVS_ENCRYPTION OR
            NOT CONFIG_NVS_SEC_KEY_PROTECT_USING_FLASH_ENC)
             message(FATAL_ERROR
-                "feathers3_fe recovery OTA requires Development-mode flash "
+                "${_hw_board} recovery OTA requires Development-mode flash "
                 "encryption and flash-encryption-protected NVS keys.")
         endif()
     elseif(CONFIG_SECURE_FLASH_ENC_ENABLED OR CONFIG_NVS_ENCRYPTION)
         message(FATAL_ERROR
-            "Plain feathers3 recovery OTA must not inherit flash/NVS encryption.")
+            "Recovery OTA on ${_hw_board} must not inherit flash/NVS encryption.")
     endif()
 
-    if(_hw_board STREQUAL "feathers3_fe")
-        set(_ota_layout_id "hw1-f3fe-ota-v1")
-    else()
-        set(_ota_layout_id "hw1-f3-ota-v1")
-    endif()
+    # HW1_OTA_VERSION_SUFFIX is as load-bearing as the board and layout ids.
+    # System_OTA.cpp used to derive the required suffix from whether flash
+    # encryption was on -- "+f3feo1" if yes, "+f3o1" if no -- which silently
+    # assigned the plain-FeatherS3 suffix to every non-encrypted board. On
+    # feather_esp32_v2 that meant the device would have demanded "+f3o1" while
+    # its own build stamped "+fv2o1", and it would have rejected every
+    # correctly-built image of itself. The suffix now comes from the same
+    # registry row that produces PROJECT_VER, so the two cannot disagree.
     add_compile_definitions(
         HW1_OTA_LAYOUT=1
         HW1_OTA_BOARD_ID="${_hw_board}"
         HW1_OTA_LAYOUT_ID="${_ota_layout_id}"
+        HW1_OTA_VERSION_SUFFIX="+${_ota_version_suffix}"
     )
     target_compile_definitions(${_hw1_app_component} PRIVATE
         HW1_OTA_LAYOUT=1
         HW1_OTA_BOARD_ID="${_hw_board}"
         HW1_OTA_LAYOUT_ID="${_ota_layout_id}"
+        HW1_OTA_VERSION_SUFFIX="+${_ota_version_suffix}"
     )
     get_target_property(_hw1_app_compile_definitions
         ${_hw1_app_component} COMPILE_DEFINITIONS)
     foreach(_hw1_required_definition IN ITEMS
             "HW1_OTA_LAYOUT=1"
             "HW1_OTA_BOARD_ID=\"${_hw_board}\""
-            "HW1_OTA_LAYOUT_ID=\"${_ota_layout_id}\"")
+            "HW1_OTA_LAYOUT_ID=\"${_ota_layout_id}\""
+            "HW1_OTA_VERSION_SUFFIX=\"+${_ota_version_suffix}\"")
         list(FIND _hw1_app_compile_definitions
             "${_hw1_required_definition}" _hw1_definition_index)
         if(_hw1_definition_index EQUAL -1)
@@ -639,10 +755,10 @@ if(_ota_layout)
                 "HW1_UPDATER_BIN does not exist: ${_ota_updater_bin}")
         endif()
         file(SIZE "${_ota_updater_bin}" _ota_updater_size)
-        if(_ota_updater_size GREATER 1205862)
+        if(_ota_updater_size GREATER _ota_updater_max_bytes)
             message(FATAL_ERROR
-                "Updater exceeds the 1.15 MiB release gate: "
-                "${_ota_updater_size} bytes")
+                "Updater exceeds the ${_hw_board} release gate "
+                "(${_ota_updater_max_bytes} bytes): ${_ota_updater_size} bytes")
         endif()
         get_filename_component(_ota_updater_build
             "${_ota_updater_bin}" DIRECTORY)

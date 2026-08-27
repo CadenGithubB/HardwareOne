@@ -39,8 +39,16 @@ docs/NewCapture/
 # OTA signing material and isolated OTA sdkconfig.  The private key must never
 # enter version control; OTA builds use this conventional local filename unless
 # HW1_OTA_SIGNING_KEY points at a key kept elsewhere.
-ota_signing_key.pem
-ota_signing_key.pem.pub
+# Private keys, by extension rather than by one exact filename.
+#
+# This used to list only "ota_signing_key.pem", which protects exactly one
+# name. A production key copied in under any other name -- hw1-ota-prod.pem,
+# say -- showed up as an ordinary untracked file that `git add -A` would
+# happily stage. An OTA signing key is the trust root for devices that cannot
+# be recovered over a cable; committing one is not a recoverable mistake.
+*.pem
+*.pem.pub
+*.key
 sdkconfig.ota
 sdkconfig.updater
 build-ota/
@@ -74,3 +82,11 @@ docs/even-g2-protocol-main/
 
 # Private firmware documentation (docs2/): generated from source, never published.
 docs2/
+
+# Scratch/render output — large binaries (CAD, datasheets, PNG renders).
+# Kept local: git never forgets a 77 MB blob.
+output/
+tmp/
+
+# screen(1) session log — captured locally, never part of the source
+screenlog.*

@@ -5,6 +5,7 @@
 // Contains all OLED-specific map rendering and menu code
 
 #include "OLED_Display.h"
+#include "System_MemUtil.h"  // ps_alloc / AllocPref
 #include "System_BuildConfig.h"
 
 // Gate the ENTIRE Map mode on ENABLE_MAPS — when maps aren't compiled in
@@ -928,9 +929,10 @@ static void initAsyncMapRenderer() {
   if (sMapBufA) return;  // Already initialized
   
   // Allocate double buffers + shade scratch in PSRAM
-  sMapBufA = (uint8_t*)ps_malloc(SSD1306_BUF_SIZE);
-  sMapBufB = (uint8_t*)ps_malloc(SSD1306_BUF_SIZE);
-  sMapShadeBuf = (uint8_t*)ps_malloc(MAP_SHADE_BUF_SIZE);
+  sMapBufA = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePSRAM, "oled.map.bufA");
+  sMapBufB = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePSRAM, "oled.map.bufB");
+  sMapShadeBuf = (uint8_t*)ps_alloc(MAP_SHADE_BUF_SIZE, AllocPref::RequirePSRAM,
+                                    "oled.map.shade");
   if (!sMapBufA || !sMapBufB || !sMapShadeBuf) {
     DEBUG_MAPSF("[MAP_ASYNC] PSRAM alloc failed for double buffers!");
     return;
@@ -1473,7 +1475,9 @@ static void executeSubmenuAction(int submenuType, int action) {
           {
             char defaultName[WAYPOINT_NAME_LEN];
             snprintf(defaultName, sizeof(defaultName), "WP%d", WaypointManager::getActiveCount());
-            oledKeyboardInit("Name Waypoint", defaultName, WAYPOINT_NAME_LEN - 1);
+            oledKeyboardInit(
+                "Name Waypoint", defaultName, WAYPOINT_NAME_LEN - 1,
+                OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
             gOledKeyboardState.active = true;
             gMapMenuOpen = false;
             gMapSubmenuLevel = 0;
@@ -1569,7 +1573,8 @@ static void executeSubmenuAction(int submenuType, int action) {
         case 2:  // Search Names
           gMapSearchMode = true;
           gMapMenuOpen = false;
-          oledKeyboardInit("Search:", "", 20);
+          oledKeyboardInit("Search:", "", 20,
+                           OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
           oledKeyboardSetAutocomplete(mapNameAutocomplete, nullptr);
           break;
         case 3:  // Transit Routes

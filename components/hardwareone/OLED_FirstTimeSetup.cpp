@@ -88,7 +88,10 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
   }
 
   // Initialize keyboard
-  oledKeyboardInit(prompt, initialText, maxLength);
+  oledKeyboardInit(
+      prompt, initialText, maxLength,
+      isPassword ? OLEDKeyboardDictationPolicy::DENY
+                 : OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
 
   // Also echo prompt to serial so users monitoring via terminal know to type here
   Serial.print(prompt);

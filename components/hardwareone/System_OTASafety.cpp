@@ -353,9 +353,44 @@ void otaSafetyLoopHeartbeat(bool coreHealthy) {
   sPhase.store(ProbationPhase::Running, std::memory_order_release);
 }
 
+namespace {
+bool partitionViewAllFF(const esp_partition_t* part, bool rawView) {
+  uint8_t buf[256];
+  for (size_t off = 0; off < part->size; off += sizeof(buf)) {
+    const size_t chunk = (part->size - off) < sizeof(buf) ? (part->size - off) : sizeof(buf);
+    const esp_err_t err = rawView ? esp_partition_read_raw(part, off, buf, chunk)
+                                  : esp_partition_read(part, off, buf, chunk);
+    if (err != ESP_OK) {
+      ESP_LOGE(kTag, "blank-probe %s read of '%s' failed at offset %u; assuming data present",
+               rawView ? "raw" : "decrypted", part->label, (unsigned)off);
+      return false;
+    }
+    for (size_t i = 0; i < chunk; ++i) {
+      if (buf[i] != 0xFF) return false;
+    }
+  }
+  return true;
+}
+}  // namespace
+
+bool otaSafetyPartitionIsBlank(const esp_partition_t* part) {
+  if (!part) return false;
+  if (partitionViewAllFF(part, /*rawView=*/true)) return true;
+  if (part->encrypted && partitionViewAllFF(part, /*rawView=*/false)) return true;
+  return false;
+}
+
 // Some vendored stacks automatically bulk-erase NVS after an init error. Block
 // only whole-partition erase attempts on every boot; ordinary page erases used
 // by NVS garbage collection remain legal.
+//
+// One exception: a whole-partition erase of an NVS partition that is provably
+// blank is allowed. Nothing can be lost (the flash already reads 0xFF), and IDF
+// requires it — nvs_flash_generate_keys() erases the nvs_keys partition before
+// writing fresh keys, so after `esptool erase_flash` on a board with NVS
+// encryption the keys could never be created, NVS never initialised, and
+// everything NVS-backed (WiFi included) stayed dead. A partition that holds
+// anything at all is still blocked.
 extern "C" esp_err_t __real_nvs_flash_erase(void);
 extern "C" esp_err_t __wrap_nvs_flash_erase(void) {
   ESP_EARLY_LOGE(kTag, "Blocked automatic full NVS erase; retained data preserved");
@@ -367,6 +402,12 @@ extern "C" esp_err_t __real_esp_partition_erase_range(
 extern "C" esp_err_t __wrap_esp_partition_erase_range(
     const esp_partition_t* partition, size_t offset, size_t size) {
   if (isNvsPartition(partition) && offset == 0 && size == partition->size) {
+    if (otaSafetyPartitionIsBlank(partition)) {
+      ESP_EARLY_LOGW(kTag,
+                     "Allowing full erase of blank NVS partition '%s' (nothing to preserve)",
+                     partition->label[0] ? partition->label : "?");
+      return __real_esp_partition_erase_range(partition, offset, size);
+    }
     ESP_EARLY_LOGE(kTag,
                    "Blocked automatic full erase of NVS partition '%s'",
                    partition && partition->label[0] ? partition->label : "?");

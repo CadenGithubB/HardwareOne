@@ -20,7 +20,12 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
 
     <div class='sensor-card' id='sensor-card-camera'>
-      <div class='sensor-title'><span>Camera (DVP)</span><span class='status-indicator status-disabled' id='camera-status-indicator' title='Camera Enabled'></span><span class='status-indicator status-disabled' id='camera-streaming-indicator' title='Streaming/Capturing' style='margin-left:4px'></span><span class='status-indicator status-disabled' id='camera-ml-indicator' title='ML Inference' style='margin-left:4px'></span></div>
+      <div class='sensor-title'><span>Camera (DVP)</span><span class='status-indicator status-disabled' id='camera-status-indicator' title='Camera Enabled'></span><span class='status-indicator status-disabled' id='camera-streaming-indicator' title='Streaming/Capturing' style='margin-left:4px'></span>)HTML", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_EDGE_IMPULSE
+  // ML inference dot only exists when the inference engine is compiled in.
+  httpd_resp_send_chunk(req, R"HTML(<span class='status-indicator status-disabled' id='camera-ml-indicator' title='ML Inference' style='margin-left:4px'></span>)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, R"HTML(</div>
       <div class='sensor-description'>ESP32-S3 DVP camera sensor (OV2640/OV3660/OV5640).</div>
       <div id='camera-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
       <div class='sensor-controls'>
@@ -50,7 +55,7 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
         </div>
         <div style='margin-bottom:8px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Resolution:</label>
-          <select id='camera-framesize' style='width:100%'>
+          <select id='camera-framesize' class='input-fit input-m'>
             <option value='6'>96x96</option>
             <option value='7'>160x120 (QQVGA)</option>
             <option value='8'>176x144 (QCIF)</option>
@@ -90,6 +95,11 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
           <button class='btn' id='btn-rotate' onclick="applyCameraAdjustment('camerarotate', 'toggle')" style='flex:1;min-width:100px'>Rotate 180°</button>
         </div>
       </div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_EDGE_IMPULSE
+  // Machine Learning panel — the controls below drive the Edge Impulse
+  // inference engine, so they are only emitted when it is compiled in.
+  httpd_resp_send_chunk(req, R"HTML(
       <div style='margin-top:10px'>
         <button class='btn' id='btn-camera-ml-toggle' style='width:100%;background:var(--panel-bg);border:1px solid #dee2e6'>Machine Learning</button>
       </div>
@@ -111,7 +121,7 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
         </div>
         <div style='margin-bottom:10px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Model:</label>
-          <select id='ei-model-select' style='width:100%'>
+          <select id='ei-model-select' class='input-fit input-l'>
             <option value=''>-- Select Model --</option>
           </select>
           <div style='display:flex;gap:6px;margin-top:6px;flex-wrap:wrap'>
@@ -129,6 +139,9 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
         </div>
         <div id='ei-detections' style='color:var(--panel-fg);margin-top:8px'></div>
       </div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, R"HTML(
       <div class='sensor-data' id='camera-data'>
         <div id='camera-stats' style='color:var(--panel-fg)'>Model: <span id='cameraModel'>--</span>, Resolution: <span id='cameraRes'>--</span>, PSRAM: <span id='cameraPsram'>--</span></div>
         <div id='camera-preview' style='margin-top:10px;text-align:center'>
@@ -148,9 +161,9 @@ inline void streamCameraSensorBindButtons(httpd_req_t* req) {
     "bind('btn-camera-stop','closecamera');"
     // Video recording — bind directly rather than via CLI so we can refresh
     // the recordings list right after stop.
-    "(function(){var b=document.getElementById('btn-camera-record');if(b){b.onclick=function(){hw.postFormText('/api/cli',{cmd:'camerarecord start'});};}"
-    "var s=document.getElementById('btn-camera-record-stop');if(s){s.onclick=function(){hw.postFormText('/api/cli',{cmd:'camerarecord stop'}).then(function(){setTimeout(loadCameraRecordings,500);});};}"
-    "var t=document.getElementById('btn-camera-recordings-toggle');var d=document.getElementById('camera-recordings');if(t&&d){t.onclick=function(){if(d.style.display==='none'){d.style.display='block';loadCameraRecordings();}else{d.style.display='none';}};}"
+    "(function(){var b=hw.$('btn-camera-record');if(b){b.onclick=function(){hw.postFormText('/api/cli',{cmd:'camerarecord start'});};}"
+    "var s=hw.$('btn-camera-record-stop');if(s){s.onclick=function(){hw.postFormText('/api/cli',{cmd:'camerarecord stop'}).then(function(){setTimeout(loadCameraRecordings,500);});};}"
+    "var t=hw.$('btn-camera-recordings-toggle');var d=hw.$('camera-recordings');if(t&&d){t.onclick=function(){if(d.style.display==='none'){d.style.display='block';loadCameraRecordings();}else{d.style.display='none';}};}"
     "})();",
     HTTPD_RESP_USE_STRLEN);
 }
@@ -165,10 +178,10 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
   // opened and after a recording stops.
   httpd_resp_send_chunk(req,
     "window.loadCameraRecordings = function() {\n"
-    "  var listEl = document.getElementById('camera-recordings-list');\n"
-    "  var countEl = document.getElementById('camera-recordings-count');\n"
+    "  var listEl = hw.$('camera-recordings-list');\n"
+    "  var countEl = hw.$('camera-recordings-count');\n"
     "  hw.fetchJSON('/api/videos').then(function(j){\n"
-    "    if (countEl) countEl.textContent = j.count || 0;\n"
+    "    hw.setText(countEl, j.count || 0);\n"
     "    if (!listEl) return;\n"
     "    if (!j.sdAvailable) { listEl.textContent = 'SD card unavailable.'; return; }\n"
     "    if (!j.files || j.files.length === 0) { listEl.textContent = 'No recordings.'; return; }\n"
@@ -185,7 +198,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "      html += '</div>';\n"
     "    });\n"
     "    listEl.innerHTML = html;\n"
-    "  }).catch(function(e){ if(listEl) listEl.textContent = 'Load failed: ' + e; });\n"
+    "  }).catch(function(e){ hw.setText(listEl, 'Load failed: ' + e); });\n"
     "};\n"
     "window.deleteCameraRecording = function(name) {\n"
     "  if (!confirm('Delete ' + name + '?')) return;\n"
@@ -205,18 +218,18 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "    var url = '/api/sensors?sensor=camera&ts=' + Date.now();\n"
     "    return hw.fetchJSON(url)\n"
     "      .then(function(j) {\n"
-    "        var el = document.getElementById('camera-data');\n"
+    "        var el = hw.$('camera-data');\n"
     "        if (el) {\n"
     "          if (j && j.error) {\n"
     "            el.textContent = 'Camera error: ' + j.error;\n"
     "          } else if (j && j.enabled) {\n"
-    "            var s = function(id, v) { var e = document.getElementById(id); if (e) e.textContent = v; };\n"
+    "            var s = function(id, v) { var e = hw.$(id); hw.setText(e, v); };\n"
     "            s('cameraModel', j.model || 'Unknown');\n"
     "            s('cameraRes', (j.width || 0) + 'x' + (j.height || 0));\n"
     "            s('cameraPsram', j.psram ? 'Yes' : 'No');\n"
     "          } else {\n"
-    "            var stats = document.getElementById('camera-stats');\n"
-    "            if (stats) stats.textContent = 'Camera not enabled (use Open Camera button)';\n"
+    "            var stats = hw.$('camera-stats');\n"
+    "            hw.setText(stats, 'Camera not enabled (use Open Camera button)');\n"
     "          }\n"
     "        }\n"
     "        return j;\n"
@@ -267,14 +280,21 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  } catch(e) { }\n"
     "}\n"
     "function toggleCameraAdjustments() {\n"
-    "  var panel = document.getElementById('camera-adjustments');\n"
+    "  var panel = hw.$('camera-adjustments');\n"
     "  if (panel) panel.style.display = (panel.style.display === 'none') ? 'block' : 'none';\n"
     "}\n"
+    , HTTPD_RESP_USE_STRLEN);
+#if ENABLE_EDGE_IMPULSE
+  // Only bound when the ML panel above was emitted.
+  httpd_resp_send_chunk(req,
     "function toggleCameraML() {\n"
-    "  var panel = document.getElementById('camera-ml-section');\n"
+    "  var panel = hw.$('camera-ml-section');\n"
     "  if (panel) panel.style.display = (panel.style.display === 'none') ? 'block' : 'none';\n"
     "}\n"
-    "document.getElementById('btn-camera-ml-toggle').onclick = toggleCameraML;\n"
+    "hw.$('btn-camera-ml-toggle').onclick = toggleCameraML;\n"
+    , HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req,
     "var __cameraStreamTimer = null;\n"
     "var __cameraStreamRunning = false;\n"
     "var __cameraStreamPollMs = 200;\n"
@@ -288,7 +308,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "function __cameraStreamTick() {\n"
     "  try {\n"
     "    if (!__cameraStreamRunning) return;\n"
-    "    var img = document.getElementById('camera-image');\n"
+    "    var img = hw.$('camera-image');\n"
     "    if (!img) return;\n"
     "    img.onload = function(){ __cameraStreamScheduleNext(); };\n"
     "    img.onerror = function(){ __cameraStreamScheduleNext(500); };\n"
@@ -298,28 +318,28 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "}\n"
     "function __cameraStopStreamUi() {\n"
     "  try {\n"
-    "    var streamBtn = document.getElementById('btn-camera-stream');\n"
-    "    var streamStopBtn = document.getElementById('btn-camera-stream-stop');\n"
+    "    var streamBtn = hw.$('btn-camera-stream');\n"
+    "    var streamStopBtn = hw.$('btn-camera-stream-stop');\n"
     "    if (__cameraStreamTimer) { clearTimeout(__cameraStreamTimer); __cameraStreamTimer = null; }\n"
     "    __cameraStreamRunning = false;\n"
     "    /* Leave img.src alone so the last loaded frame stays visible. */\n"
     "    if (streamBtn) streamBtn.style.display = 'inline-block';\n"
-    "    if (streamStopBtn) streamStopBtn.style.display = 'none';\n"
+    "    hw.hide(streamStopBtn);\n"
     "  } catch(e) { console.error('[Camera] stop stream UI error', e); }\n"
     "}\n"
     "function __cameraStartStreamUi() {\n"
     "  try {\n"
-    "    var img = document.getElementById('camera-image');\n"
-    "    var streamBtn = document.getElementById('btn-camera-stream');\n"
-    "    var streamStopBtn = document.getElementById('btn-camera-stream-stop');\n"
-    "    var saveBtn = document.getElementById('btn-camera-save');\n"
+    "    var img = hw.$('camera-image');\n"
+    "    var streamBtn = hw.$('btn-camera-stream');\n"
+    "    var streamStopBtn = hw.$('btn-camera-stream-stop');\n"
+    "    var saveBtn = hw.$('btn-camera-save');\n"
     "    if (!img) return;\n"
     "    if (__cameraStreamTimer) { clearTimeout(__cameraStreamTimer); __cameraStreamTimer = null; }\n"
     "    __cameraStreamRunning = true;\n"
     "    __cameraStreamTick();\n"
-    "    if (streamBtn) streamBtn.style.display = 'none';\n"
+    "    hw.hide(streamBtn);\n"
     "    if (streamStopBtn) streamStopBtn.style.display = 'inline-block';\n"
-    "    if (saveBtn) saveBtn.style.display = 'none';\n"
+    "    hw.hide(saveBtn);\n"
     "  } catch(e) { console.error('[Camera] start stream UI error', e); }\n"
     "}\n"
     "function __cameraRestartStreamIfNeeded() {\n"
@@ -329,7 +349,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  } catch(e) { console.error('[Camera] restart stream error', e); }\n"
     "}\n"
     "function updateToggleButtonStyle(btnId, isActive) {\n"
-    "  var btn = document.getElementById(btnId);\n"
+    "  var btn = hw.$(btnId);\n"
     "  if (btn) {\n"
     "    if (isActive) {\n"
     "      btn.style.outline = '2px solid var(--link)';\n"
@@ -344,7 +364,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  }\n"
     "}\n"
     "function applyCameraAdjustment(cmd, value) {\n"
-    "  var img = document.getElementById('camera-image');\n"
+    "  var img = hw.$('camera-image');\n"
     "  var wasStreaming = (__cameraStreamRunning === true);\n"
     "  var needsStreamRestart = (cmd === 'camerahmirror' || cmd === 'cameravflip' || cmd === 'camerarotate' || cmd === 'cameraframesize');\n"
     "  var fullCmd = cmd;\n"
@@ -383,22 +403,22 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "    .catch(function(e) { console.error('[Camera] Adjustment error:', e); });\n"
     "}\n"
     "document.addEventListener('DOMContentLoaded', function() {\n"
-    "  var captureBtn = document.getElementById('btn-camera-capture');\n"
-    "  var startBtn = document.getElementById('btn-camera-start');\n"
-    "  var streamBtn = document.getElementById('btn-camera-stream');\n"
-    "  var streamStopBtn = document.getElementById('btn-camera-stream-stop');\n"
-    "  var saveBtn = document.getElementById('btn-camera-save');\n"
-    "  var stopBtn = document.getElementById('btn-camera-stop');\n"
-    "  var img = document.getElementById('camera-image');\n"
+    "  var captureBtn = hw.$('btn-camera-capture');\n"
+    "  var startBtn = hw.$('btn-camera-start');\n"
+    "  var streamBtn = hw.$('btn-camera-stream');\n"
+    "  var streamStopBtn = hw.$('btn-camera-stream-stop');\n"
+    "  var saveBtn = hw.$('btn-camera-save');\n"
+    "  var stopBtn = hw.$('btn-camera-stop');\n"
+    "  var img = hw.$('camera-image');\n"
     "  var isStreaming = false;\n"
     "  \n"
-    "  var exposureSlider = document.getElementById('camera-exposure');\n"
-    "  var brightnessSlider = document.getElementById('camera-brightness');\n"
-    "  var contrastSlider = document.getElementById('camera-contrast');\n"
-    "  var saturationSlider = document.getElementById('camera-saturation');\n"
-    "  var qualitySlider = document.getElementById('camera-quality');\n"
-    "  var fpsSlider = document.getElementById('camera-fps');\n"
-    "  var framesizeSel = document.getElementById('camera-framesize');\n"
+    "  var exposureSlider = hw.$('camera-exposure');\n"
+    "  var brightnessSlider = hw.$('camera-brightness');\n"
+    "  var contrastSlider = hw.$('camera-contrast');\n"
+    "  var saturationSlider = hw.$('camera-saturation');\n"
+    "  var qualitySlider = hw.$('camera-quality');\n"
+    "  var fpsSlider = hw.$('camera-fps');\n"
+    "  var framesizeSel = hw.$('camera-framesize');\n"
     "  \n"
     "  __cameraCli('camerafps').then(function(t){\n"
     "    try {\n"
@@ -409,8 +429,8 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "          __cameraStreamPollMs = Math.round(1000 / fps);\n"
     "          if (fpsSlider) {\n"
     "            fpsSlider.value = fps;\n"
-    "            var fpsVal = document.getElementById('fps-val');\n"
-    "            if (fpsVal) fpsVal.textContent = fps;\n"
+    "            var fpsVal = hw.$('fps-val');\n"
+    "            hw.setText(fpsVal, fps);\n"
     "          }\n"
     "        }\n"
     "      }\n"
@@ -431,7 +451,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  \n"
     "  if (exposureSlider) {\n"
     "    exposureSlider.addEventListener('input', function() {\n"
-    "      document.getElementById('exposure-val').textContent = this.value;\n"
+    "      hw.$('exposure-val').textContent = this.value;\n"
     "      __cameraDebouncedApply('cameraexposure', this.value, 150);\n"
     "    });\n"
     "    exposureSlider.addEventListener('change', function() {\n"
@@ -441,7 +461,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  }\n"
     "  if (brightnessSlider) {\n"
     "    brightnessSlider.addEventListener('input', function() {\n"
-    "      document.getElementById('brightness-val').textContent = this.value;\n"
+    "      hw.$('brightness-val').textContent = this.value;\n"
     "      __cameraDebouncedApply('camerabrightness', this.value, 150);\n"
     "    });\n"
     "    brightnessSlider.addEventListener('change', function() {\n"
@@ -451,7 +471,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  }\n"
     "  if (contrastSlider) {\n"
     "    contrastSlider.addEventListener('input', function() {\n"
-    "      document.getElementById('contrast-val').textContent = this.value;\n"
+    "      hw.$('contrast-val').textContent = this.value;\n"
     "      __cameraDebouncedApply('cameracontrast', this.value, 150);\n"
     "    });\n"
     "    contrastSlider.addEventListener('change', function() {\n"
@@ -461,7 +481,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  }\n"
     "  if (saturationSlider) {\n"
     "    saturationSlider.addEventListener('input', function() {\n"
-    "      document.getElementById('saturation-val').textContent = this.value;\n"
+    "      hw.$('saturation-val').textContent = this.value;\n"
     "      __cameraDebouncedApply('camerasaturation', this.value, 150);\n"
     "    });\n"
     "    saturationSlider.addEventListener('change', function() {\n"
@@ -471,7 +491,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  }\n"
     "  if (qualitySlider) {\n"
     "    qualitySlider.addEventListener('input', function() {\n"
-    "      document.getElementById('quality-val').textContent = this.value;\n"
+    "      hw.$('quality-val').textContent = this.value;\n"
     "      __cameraDebouncedApply('cameraquality', this.value, 300);\n"
     "    });\n"
     "    qualitySlider.addEventListener('change', function() {\n"
@@ -482,8 +502,8 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  if (fpsSlider) {\n"
     "    fpsSlider.addEventListener('input', function() {\n"
     "      var fps = parseInt(this.value, 10);\n"
-    "      var fpsVal = document.getElementById('fps-val');\n"
-    "      if (fpsVal) fpsVal.textContent = fps;\n"
+    "      var fpsVal = hw.$('fps-val');\n"
+    "      hw.setText(fpsVal, fps);\n"
     "      __cameraStreamPollMs = Math.round(1000 / fps);\n"
     "    });\n"
     "    fpsSlider.addEventListener('change', function() {\n"
@@ -492,8 +512,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "    });\n"
     "  }\n"
     "  \n"
-    "  if (captureBtn) {\n"
-    "    captureBtn.addEventListener('click', function() {\n"
+    "  hw.on(captureBtn, 'click', function() {\n"
     "      console.log('[Camera] Capture requested');\n"
     "      if (!img) return;\n"
     "      captureBtn.disabled = true;\n"
@@ -506,11 +525,9 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "      };\n"
     "      img.src = '/api/sensors/camera/frame?t=' + Date.now();\n"
     "      img.style.display = 'block';\n"
-    "    });\n"
-    "  }\n"
+    "  });\n"
     "  \n"
-    "  if (saveBtn) {\n"
-    "    saveBtn.addEventListener('click', function() {\n"
+    "  hw.on(saveBtn, 'click', function() {\n"
     "      console.log('[Camera] Save requested');\n"
     "      saveBtn.disabled = true;\n"
     "      saveBtn.textContent = 'Saving...';\n"
@@ -525,8 +542,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "          saveBtn.textContent = 'Save Failed';\n"
     "          setTimeout(function() { saveBtn.textContent = 'Save Image'; saveBtn.disabled = false; }, 2000);\n"
     "        });\n"
-    "    });\n"
-    "  }\n"
+    "  });\n"
     "  \n"
     "  if (streamBtn && streamStopBtn && img) {\n"
     "    streamBtn.addEventListener('click', function() {\n"
@@ -544,18 +560,14 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  }\n"
 
     "  // Ensure 'Stop Camera' also stops any active stream UI immediately.\n"
-    "  if (stopBtn) {\n"
-    "    stopBtn.addEventListener('click', function(){\n"
+    "  hw.on(stopBtn, 'click', function(){\n"
     "      __cameraStopStreamUi();\n"
     "      isStreaming = false;\n"
-    "    });\n"
-    "  }\n"
+    "  });\n"
 
     "  // Sync button states against the device so on/off commands are correct.\n"
     "  __cameraSyncFlipStates();\n"
-    "  if (startBtn) {\n"
-    "    startBtn.addEventListener('click', function(){ setTimeout(__cameraSyncFlipStates, 750); });\n"
-    "  }\n"
+    "  hw.on(startBtn, 'click', function(){ setTimeout(__cameraSyncFlipStates, 750); });\n"
     "});\n", HTTPD_RESP_USE_STRLEN);
 
   httpd_resp_send_chunk(req, "window._sensorDataIds = window._sensorDataIds || {};\nwindow._sensorDataIds['camera'] = 'camera-data';\n", HTTPD_RESP_USE_STRLEN);

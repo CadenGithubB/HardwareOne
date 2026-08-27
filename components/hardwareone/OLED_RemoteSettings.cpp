@@ -238,8 +238,14 @@ void freeRemoteSettingsModules() {
 const SettingsModule** getRemoteSettingsModules(size_t& count) {
   static const SettingsModule* modulePointers[MAX_SETTINGS_MODULES];
   
-  count = gRemoteModuleCount;
-  for (size_t i = 0; i < gRemoteModuleCount && i < MAX_SETTINGS_MODULES; i++) {
+  // Clamp BOTH the reported count and the fill. These used to disagree: count
+  // was the peer's raw gRemoteModuleCount while the loop stopped at
+  // MAX_SETTINGS_MODULES, so a peer advertising more modules than we can hold
+  // would hand callers a count covering never-written .bss slots — which they
+  // would then dereference as SettingsModule* and call isConnected() through.
+  count = (gRemoteModuleCount < MAX_SETTINGS_MODULES) ? gRemoteModuleCount
+                                                      : MAX_SETTINGS_MODULES;
+  for (size_t i = 0; i < count; i++) {
     modulePointers[i] = &gRemoteModules[i];
   }
   

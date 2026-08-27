@@ -51,7 +51,7 @@ inline void streamMicrophoneSensorCard(httpd_req_t* req) {
         </div>
         <div class="adjustment-row">
           <label for="mic-samplerate-select">Sample Rate:</label>
-          <select id="mic-samplerate-select" class="form-select">
+          <select id="mic-samplerate-select" class="form-select input-fit">
             <option value="8000">8 kHz</option>
             <option value="16000" selected>16 kHz</option>
             <option value="22050">22.05 kHz</option>
@@ -61,7 +61,7 @@ inline void streamMicrophoneSensorCard(httpd_req_t* req) {
         </div>
         <div class="adjustment-row">
           <label for="mic-bitdepth-select">Bit Depth:</label>
-          <select id="mic-bitdepth-select" class="form-select">
+          <select id="mic-bitdepth-select" class="form-select input-fit">
             <option value="16" selected>16-bit</option>
             <option value="32">32-bit</option>
           </select>
@@ -97,13 +97,13 @@ inline void streamMicrophoneSensorJS(httpd_req_t* req) {
     "  return hw.fetchJSON(url)\n"
     "    .then(function(data) {\n"
     "      if (!data) return data;\n"
-    "      var statusInd = document.getElementById('mic-status-indicator');\n"
-    "      var recInd = document.getElementById('mic-recording-indicator');\n"
-    "      var srEl = document.getElementById('mic-samplerate');\n"
-    "      var bdEl = document.getElementById('mic-bitdepth');\n"
-    "      var chEl = document.getElementById('mic-channels');\n"
-    "      var levelBar = document.getElementById('mic-level-bar');\n"
-    "      var levelText = document.getElementById('mic-level-text');\n"
+    "      var statusInd = hw.$('mic-status-indicator');\n"
+    "      var recInd = hw.$('mic-recording-indicator');\n"
+    "      var srEl = hw.$('mic-samplerate');\n"
+    "      var bdEl = hw.$('mic-bitdepth');\n"
+    "      var chEl = hw.$('mic-channels');\n"
+    "      var levelBar = hw.$('mic-level-bar');\n"
+    "      var levelText = hw.$('mic-level-text');\n"
     "      if (statusInd) {\n"
     "        if (data.enabled) {\n"
     "          statusInd.className = 'status-indicator status-enabled';\n"
@@ -122,9 +122,9 @@ inline void streamMicrophoneSensorJS(httpd_req_t* req) {
     "          recInd.title = 'Not recording';\n"
     "        }\n"
     "      }\n"
-    "      if (srEl) srEl.textContent = data.sampleRate ? data.sampleRate + ' Hz' : '--';\n"
-    "      if (bdEl) bdEl.textContent = data.bitDepth ? data.bitDepth + '-bit' : '--';\n"
-    "      if (chEl) chEl.textContent = data.channels ? (data.channels == 1 ? 'Mono' : 'Stereo') : '--';\n"
+    "      hw.setText(srEl, data.sampleRate ? data.sampleRate + ' Hz' : '--');\n"
+    "      hw.setText(bdEl, data.bitDepth ? data.bitDepth + '-bit' : '--');\n"
+    "      hw.setText(chEl, data.channels ? (data.channels == 1 ? 'Mono' : 'Stereo') : '--');\n"
     "      if (levelBar && data.level !== undefined) {\n"
     "        levelBar.style.width = data.level + '%';\n"
     "        if (data.level > 80) {\n"
@@ -154,11 +154,11 @@ inline void streamMicrophoneSensorJS(httpd_req_t* req) {
     "window.loadMicRecordings = function() {\n"
     "  hw.fetchJSON('/api/recordings')\n"
     "    .then(function(data){\n"
-    "      var list = document.getElementById('mic-recordings-list');\n"
-    "      var countEl = document.getElementById('mic-rec-count');\n"
+    "      var list = hw.$('mic-recordings-list');\n"
+    "      var countEl = hw.$('mic-rec-count');\n"
     "      if(!list) return;\n"
     "      var count = data.count || 0;\n"
-    "      if(countEl) countEl.textContent = '(' + count + ')';\n"
+    "      hw.setText(countEl, '(' + count + ')');\n"
     "      if(window.__lastRecCount === count) return;\n"
     "      window.__lastRecCount = count;\n"
     "      list.innerHTML = '';\n"
@@ -187,8 +187,21 @@ inline void streamMicrophoneSensorJS(httpd_req_t* req) {
     "    })\n"
     "    .catch(function(e){console.error('Failed to load recordings',e);});\n"
     "};"
+    // /api/recordings walks BOTH /sd/recordings and /recordings on the httpd
+    // worker, and ESP-IDF's httpd is single-task — every other request (notably
+    // the camera preview poll) is blocked for the duration. Measured 1.2 s at 46
+    // recordings, and it grows linearly with the file count. So poll only while
+    // the panel is actually open. The one startup load keeps the count badge on
+    // the collapsed toggle populated; opening the panel refreshes immediately
+    // (see btn-mic-recordings-toggle below).
+    "window.__micRecPanelOpen = function(){\n"
+    "  var d = hw.$('mic-recordings');\n"
+    "  return !!d && d.style.display !== 'none';\n"
+    "};\n"
     "setTimeout(window.loadMicRecordings, 1000);\n"
-    "setInterval(window.loadMicRecordings, 5000);\n", HTTPD_RESP_USE_STRLEN);
+    "setInterval(function(){\n"
+    "  if (window.__micRecPanelOpen()) window.loadMicRecordings();\n"
+    "}, 5000);\n", HTTPD_RESP_USE_STRLEN);
   
   // Add microphone settings event handlers
   httpd_resp_send_chunk(req,
@@ -204,42 +217,40 @@ inline void streamMicrophoneSensorJS(httpd_req_t* req) {
     "  });\n"
     "}\n"
     "(function initMicSettings() {\n"
-    "  var micSettingsToggle = document.getElementById('btn-mic-settings-toggle');\n"
-    "  var micSettingsDiv = document.getElementById('mic-settings');\n"
+    "  var micSettingsToggle = hw.$('btn-mic-settings-toggle');\n"
+    "  var micSettingsDiv = hw.$('mic-settings');\n"
     "  if (micSettingsToggle && micSettingsDiv) {\n"
     "    micSettingsToggle.onclick = function() {\n"
     "      micSettingsDiv.style.display = (micSettingsDiv.style.display === 'none') ? 'block' : 'none';\n"
     "    };\n"
     "  }\n"
-    "  var micRecordingsToggle = document.getElementById('btn-mic-recordings-toggle');\n"
-    "  var micRecordingsDiv = document.getElementById('mic-recordings');\n"
+    "  var micRecordingsToggle = hw.$('btn-mic-recordings-toggle');\n"
+    "  var micRecordingsDiv = hw.$('mic-recordings');\n"
     "  if (micRecordingsToggle && micRecordingsDiv) {\n"
     "    micRecordingsToggle.onclick = function() {\n"
-    "      micRecordingsDiv.style.display = (micRecordingsDiv.style.display === 'none') ? 'block' : 'none';\n"
+    "      var opening = (micRecordingsDiv.style.display === 'none');\n"
+    "      micRecordingsDiv.style.display = opening ? 'block' : 'none';\n"
+    "      if (opening && window.loadMicRecordings) window.loadMicRecordings();\n"
     "    };\n"
     "  }\n"
-    "  var gainSlider = document.getElementById('mic-gain-slider');\n"
-    "  var gainValue = document.getElementById('mic-gain-value');\n"
-    "  var sampleRateSelect = document.getElementById('mic-samplerate-select');\n"
-    "  var bitDepthSelect = document.getElementById('mic-bitdepth-select');\n"
+    "  var gainSlider = hw.$('mic-gain-slider');\n"
+    "  var gainValue = hw.$('mic-gain-value');\n"
+    "  var sampleRateSelect = hw.$('mic-samplerate-select');\n"
+    "  var bitDepthSelect = hw.$('mic-bitdepth-select');\n"
     "  if (gainSlider) {\n"
     "    gainSlider.addEventListener('input', function() {\n"
-    "      if (gainValue) gainValue.textContent = this.value;\n"
+    "      hw.setText(gainValue, this.value);\n"
     "    });\n"
     "    gainSlider.addEventListener('change', function() {\n"
     "      applyMicAdjustment('micgain ' + this.value);\n"
     "    });\n"
     "  }\n"
-    "  if (sampleRateSelect) {\n"
-    "    sampleRateSelect.addEventListener('change', function() {\n"
+    "  hw.on(sampleRateSelect, 'change', function() {\n"
     "      applyMicAdjustment('micsamplerate ' + this.value);\n"
     "    });\n"
-    "  }\n"
-    "  if (bitDepthSelect) {\n"
-    "    bitDepthSelect.addEventListener('change', function() {\n"
+    "  hw.on(bitDepthSelect, 'change', function() {\n"
     "      applyMicAdjustment('micbitdepth ' + this.value);\n"
     "    });\n"
-    "  }\n"
     "})();\n", HTTPD_RESP_USE_STRLEN);
   
   httpd_resp_send_chunk(req, "try{console.log('[SENSORS] Microphone sensor module ready');}catch(_){ }", HTTPD_RESP_USE_STRLEN);

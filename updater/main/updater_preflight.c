@@ -15,13 +15,19 @@
 #include "mbedtls/base64.h"
 #include "mbedtls/sha256.h"
 
-#define HW1_FACTORY_OFFSET 0x10000u
-#define HW1_FACTORY_SIZE 0x14E000u
-#define HW1_OTADATA_OFFSET 0x15E000u
-#define HW1_OTADATA_SIZE 0x2000u
-#define HW1_OTA0_OFFSET 0x160000u
-#define HW1_LITTLEFS_OFFSET 0x700000u
-#define HW1_LITTLEFS_SIZE 0x900000u
+/*
+ * Expected partition geometry. Supplied by updater/CMakeLists.txt, parsed out
+ * of the same partitions_ota_*.csv this firmware is built against -- see the
+ * comment there. These were literals holding one board's numbers, and three of
+ * them had already gone stale for that board.
+ */
+#if !defined(HW1_FACTORY_OFFSET) || !defined(HW1_FACTORY_SIZE) || \
+    !defined(HW1_OTADATA_OFFSET) || !defined(HW1_OTADATA_SIZE) || \
+    !defined(HW1_OTA0_OFFSET) || !defined(HW1_LITTLEFS_OFFSET) || \
+    !defined(HW1_LITTLEFS_SIZE)
+#error "The recovery layout gate needs HW1_* partition geometry from the build. \
+        Build via updater/CMakeLists.txt; do not define these by hand."
+#endif
 #define HW1_MANIFEST_ENVELOPE_MAX 2048u
 #define HW1_HASH_CHUNK 4096u
 
@@ -330,7 +336,7 @@ esp_err_t updater_validate_image_prefix(
     memcpy(app_desc, prefix + offset, sizeof(*app_desc));
     if (header.magic != ESP_IMAGE_HEADER_MAGIC || header.segment_count == 0 ||
         header.segment_count > ESP_IMAGE_MAX_SEGMENTS ||
-        header.chip_id != ESP_CHIP_ID_ESP32S3 || header.hash_appended != 1 ||
+        header.chip_id != HW1_OTA_EXPECTED_CHIP_ID || header.hash_appended != 1 ||
         first_segment.data_len < sizeof(*app_desc) ||
         app_desc->magic_word != ESP_APP_DESC_MAGIC_WORD ||
         !fixed_field_to_string(app_desc->project_name,

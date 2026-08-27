@@ -1,0 +1,67 @@
+Board,Qty,Ref,Value,MPN,Package,Notes
+A,2,J1 J2,100-pin 0.4mm plug 1.5mm stack,10164228-1001A1RLF or DF40C-100DP-0.4V(51),SMD,Bottom side. Must match carrier receptacle stack height.
+A,1,U1,3.3V LDO 600mA,AP2112K-3.3TRG1,SOT-23-5,EN via SW1. AMS1117-3.3 SOT-223 is a worse substitute (dropout).
+A,1,U2,Quad comparator,LM339DR,SOIC-14,VCC=5V
+A,1,U3,2.5V shunt ref,TL431A,SOT-23,2.495V typical
+A,1,F1,500mA PTC,0805 PTC 500mA,0805,LDO output
+A,1,SW1,SPDT slide,generic 2.54mm slide,TH,3V3 EMU default OFF
+A,1,SW2,DIP-10 SPST,generic DIP-10,TH,Stimulus bits including LED sinks/sources
+A,1,SW3,momentary tactile,generic 6x6,TH,LAMP TEST — all carrier status LEDs
+A,1,Q1,NPN,2N3904,SOT-23,1V8 fault LED
+A,1,D1,LED yellow,0603 yellow,0603,5V present
+A,1,D2,LED red,0603 red,0603,5V LO
+A,1,D3,LED red,0603 red,0603,5V HI
+A,1,D4,LED green,0603 green,0603,3V3 OK
+A,1,D5,LED green,0603 green,0603,VREF OK
+A,1,D6,LED red,0603 red,0603,1V8 fault
+A,1,D7,LED yellow,0603 yellow,0603,PWR_Button low
+A,1,D8,LED yellow,0603 yellow,0603,nRPIBOOT low
+A,1,C1,100uF 16V,generic 16V X5R,1206,5V bulk near pins 77-87
+A,4,C2-C5,10uF 16V,generic 16V X5R,0805,5V / 3V3 / TL431 / LDO
+A,6,C6-C11,100nF,generic,0402,IC decouple
+A,4,C12-C15,100pF,generic,0402,Divider taps
+A,1,R1,9.53k 1%,generic,0603,5V LO divider top
+A,1,R2,10.5k 1%,generic,0603,5V LO divider bot
+A,1,R3,11.0k 1%,generic,0603,5V HI divider top
+A,1,R4,10.0k 1%,generic,0603,5V HI divider bot
+A,1,R5,5.11k 1%,generic,0603,3V3 divider top
+A,1,R6,20.0k 1%,generic,0603,3V3 divider bot
+A,1,R7,5.11k 1%,generic,0603,VREF divider top
+A,1,R8,24.9k 1%,generic,0603,VREF divider bot
+A,8,R9-R16,1.5k 1%,generic,0603,LED series (D1-D8)
+A,7,R17-R23,100R 1%,generic,0603,DIP high-side: VBUS, SDPWR, OS, LINK, ERR + two spare
+A,6,R_SINK,47R 1%,generic,0603,Open-drain: nPWR, nACT, ETHY, ETHG, SW3 parallels
+A,2,R24 R25,10k 1%,generic,0603,PWR_Button and nRPIBOOT pull-ups
+A,1,R26,100k 1%,generic,0603,SW1 EN pulldown / PMIC_Enable pull-up (second 100k as R27)
+A,1,R27,100k 1%,generic,0603,PMIC_Enable pin 99 pull-up to 5V
+A,1,R28,4.7k 1%,generic,0603,Q1 base
+A,1,R29,10k 1%,generic,0603,USB_OTG_ID pull-up to 3V3
+A,1,J_LOAD,2-pin 5.08mm,generic,TH,External 1-2A load
+A,2,J_CON J_U2,1x3 2.54mm,generic,TH,Console and uart2
+A,11,TP*,1.0mm test point,generic,TH,See design brief §6
+B,2,P1 P2,1x7 2.54mm male,generic,TH,Rows 15.24mm apart
+B,1,U4,USB-UART,CH340E or CP2102N,MSOP-10 / QFN,Dummy serial
+B,1,J_USB,USB-C receptacle,16-pin USB-C,SMD,CC1/CC2 each 5.1k to GND
+B,2,R_CC,5.1k 1%,generic,0603,USB-C Rd
+B,1,SW3,SPDT slide,generic,TH,INJECT VBUS
+B,1,D_OR,Schottky,BAT54 or SS14,SOT-23 / SMA,VBUS inject into 5V pin
+B,1,D9,LED yellow,0603 yellow,0603,Module 5V present
+B,1,D10,LED red,0603 red,0603,Module 3V3 present = FAULT
+B,2,R_LED,1.5k 1%,generic,0603,D9 D10
+B,2,R_UART,33R 1%,generic,0603,TX/RX if carrier 33R not fitted
+B,1,U_ESD,USB ESD,USBLC6-2SC6,SOT-23-6,D+/D-
+B,2,C_USB,100nF,generic,0402,UART IC decouple
+A,1,U_MCU,RP2040 or STM32G031,RP2040-QFN60 / STM32G031G8U6,QFN,v1.1 DNP-ok. Native USB. Own 3.3V LDO from 5V pour, not CM5-emu.
+A,1,U_MCU_LDO,3.3V 300mA,AP2112K-3.3TRG1,SOT-23-5,v1.1 MCU_3V3 always-on
+A,1,J_MCU_USB,USB-C data only,16-pin USB-C,SMD,v1.1 VBUS unconnected. D+/D- to MCU.
+A,1,U_INA1,56V bidirectional power monitor,INA226AIDGSR,VSSOP-10,v1.1 dummy 5V shunt
+A,1,U_INA2,56V bidirectional power monitor,INA226AIDGSR,VSSOP-10,v1.1 CM5-emu 3.3V shunt, detects back-feed
+A,2,R_SHUNT5,10mOhm 1% 1W,generic 1206,1206,v1.1 5V pour shunt for INA1; or per-pin 10mOhm x6
+A,1,R_SHUNT3,20mOhm 1%,generic 0805,0805,v1.1 3.3V LDO output
+A,1,U_ADC,4ch 16-bit I2C ADC,ADS1115IDGSR,VSSOP-10,v1.1 VREF/1V8/CC/sense mux
+A,1,U_MUX,8:1 analog mux,74HC4051,SOIC-16,v1.1 5V pin kelvin + J_SENSE
+A,1,R_RD1,5.1k 1%,generic,0603,v1.1 CC1 Rd, jumper default ON
+A,1,R_RD2,5.1k 1%,generic,0603,v1.1 CC2 Rd, jumper default ON
+A,1,J_SENSE,8-pin 1.27mm,JST-GH or similar,SMD,v1.1 flying leads to carrier TPs
+A,1,U_OLED,128x32 I2C OLED,SSD1306 0.91in,module,v1.1 DNP if no space
+A,6,R_PIN5,0R or 10mOhm,generic 0603,0603,v1.1 each 5V pin to pour. 0R for v0, 10mOhm for imbalance.

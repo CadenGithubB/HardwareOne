@@ -15,6 +15,7 @@
 #if ENABLE_BLUETOOTH
 
 #include "WebServer_Server.h"   // broadcastEventToAllSessions
+#include "System_SensorStubs.h"  // ...whose no-op stub lives here when ENABLE_HTTP_SERVER=0 (BT-on/web-off builds)
 #include "System_Debug.h"
 
 #include <stdio.h>

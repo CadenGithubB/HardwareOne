@@ -1,0 +1,178 @@
+# Step 1 — FINAL PLAN
+
+Verified against the working tree at `/Users/morgan/esp/hardwareone-idf`, branch `main` (dirty). Every anchor below was re-opened; every contested claim in the three attack reports was independently checked before being accepted or rejected. Paths are relative to `components/hardwareone/` unless noted.
+
+Engines, named once: **A** = `System_SetupWizard.cpp` (blocking, FTS-at-boot only — sole caller `System_FirstTimeSetup.cpp:824`). **B** = `System_SetupWizardMode.cpp` (CLIMode, the only thing `featuresetup` reaches — `System_FeatureRegistry.cpp:664`). **C** = `OLED_SetupWizard.cpp` (peer implementation of the ESP-NOW/MQTT pages, called from A, **not** a renderer for it).
+
+---
+
+## 1. Findings ACCEPTED, with the amendment
+
+### A1 · Item 12's sed anchor cannot match — the ESP-NOW=0 pass would report green having built ESP-NOW=1
+*(raised by Attack A and Attack C independently)*
+
+**Verified.** `System_BuildConfig.h:71` is `␣␣#define CUSTOM_ENABLE_NET_ESPNOW   1   // ESP-NOW mesh networking` — two leading spaces, because `:68` opens `#if NETWORK_FEATURE_LEVEL == 4`. `grep -n` confirms the indentation; the four flags the script already flips (`:105`, `:128`, `:153`, `:165`) are genuinely at column 0, which is why the `^#define` shape was copied onto a target it cannot match. `sed -i ''` exits 0 on no-match, so `set -euo pipefail` (`tools/build_coverage.sh:24`) does not trip, and the script's only signal is `compile-errors=$ERRS` (`:68`), which is 0 for the unchanged build. The plan's own suggested verification echo is anchored identically and would print nothing rather than a wrong value.
+
+**Amendment:** indentation-tolerant pattern **plus a post-condition assert on the final value** (not on the substitution — per `feedback_verify_tree_after_agent_sweeps` the user edits these flags live, so a flag already at the coverage value makes its sed a legitimate no-op). Apply the assert to all five flags. See E12.
+
+### A2 · The ESPNOW=0 pass must also carry the OLED/I2C/input flags or it still does not compile B6
+**Verified.** `OLED_SetupWizard.cpp:11` wraps the whole file in `#if ENABLE_OLED_DISPLAY`, *and* the file is CMake-excluded on the default profile. A pass flipping only `CUSTOM_ENABLE_NET_ESPNOW` leaves `renderSystemPage` absent, so the newly-enabled device-name row is compiled by nothing — the exact gap item 12 exists to close.
+
+**Amendment:** pass 2 = pass 1's four flags **plus** `CUSTOM_ENABLE_NET_ESPNOW=0`. And the coverage proof becomes a **gate**, not a print: fail if `OLED_SetupWizard.cpp.obj` < 100 KB in either pass, and fail if `System_ESPNow.cpp.obj` in pass 2 is not strictly smaller than in pass 1.
+
+### A3 · The B9 clamp misses the two device-name dispatch lines and creates a new split-brain
+**Verified, and this is the sharpest finding in the set.** Both numeric-entry sites clamp and then immediately re-derive from the **raw** index:
+
+- `System_SetupWizard.cpp:1702` `setWizardCurrentSelection(num - 1);` → `:1703` `if (getSystemItemAt(num - 1) == SYS_ITEM_DEVICE_NAME)`
+- `System_SetupWizardMode.cpp:424` → `:427`, identical shape
+
+`getSystemItemAt` falls through to `SYS_ITEM_TIMEZONE` at `:299` for out-of-range, while `wizardCycleOption()` (`:782`) re-derives from the **clamped** `currentSelection`. On an ESPNOW=0 build (count 5, device-name at index 4), typing `9` clamps to 4 = Device Name, the branch test reads index 8 = fallback, the else branch runs `wizardCycleOption()` which sees Device Name and returns false — silent no-op, and the row becomes unreachable by number. The plan cites v1 known-error #3 as its justification for a setter-only fix and then reproduces that failure on the line below each call site it named.
+
+**Amendment:** keep the setter clamp *and* read the value back at both sites (`getWizardCurrentSelection()`), two lines total. `OLED_SetupWizard.cpp:557` already reads back and needs no change.
+
+### A4 · The stated mechanism for eliminating the `maxItems` warning does not eliminate it
+**Verified.** `wizardMoveUp` (`:746-761`) computes `maxItems` across `:747-751` and its only guard is `if (currentSelection > 0)` (`:753`) — the value is never read. Replacing the four-way chain with `int maxItems = wizardCurrentPageItemCount();` leaves an unused variable and the warning still fires, so the plan's own 4→0 gate would report 1 and read as "Step 1 incomplete". Only `wizardMoveDown` consumes the count (`:770`).
+
+**Amendment:** delete the count computation from `wizardMoveUp` entirely; call `wizardCurrentPageItemCount()` only from `wizardMoveDown`. The 4→0 gate stands.
+
+### A5 · B2's fix still clobbers `gSettings.espnowStationary` on the exact keystroke it is fixing
+**Verified, and it is three-engine, not B-only.** `applyAndAdvance` has **three** unconditional `gSettings` writes, not two: `Mode:506` `bleDeviceName`, `:507` `espnowDeviceName`, and `:514` `gSettings.espnowStationary = sWizard.result.espnowStationary;`. `sWizard.result` is value-initialised at `Mode:773`, so `espnowStationary` is false for the whole run unless `ESPNOW_STATIONARY` is reached — and the path B2 fixes (`INTRO → 'c' → NAME → 'n'`) never reaches it. Engine A has the identical defect: `:1132` `if (deviceName.equalsIgnoreCase("n")) { deviceName = currentName; goto espnow_done; }` jumps past the stationary prompt to the unconditional write at `:1187`, with `result.espnowStationary` still false from `:1522`. So "match Engine A" does not fix the class. The value is a registry setting with its own command (`System_ESPNow.cpp:17491`, cmdKey `espnowstationary`) and it goes on the wire: `System_ESPNow.cpp:8290` `payload->stationary = gSettings.espnowStationary ? 1 : 0;` — a node deliberately marked stationary is silently re-advertised as mobile, invisible from the device you ran the wizard on. Calling edit 6b "the invariant" while it covers 2 of 3 writes is the dangerous part: it will read as done.
+
+**Amendment — and I reject the attacker's proposed fix in favour of a simpler one.** Do **not** add a `stationaryAnswered` flag to three engines. **Seed the result from current settings** at page entry, so an unvisited prompt writes back the value that is already there:
+- B: `sWizard.result.espnowStationary = gSettings.espnowStationary;` in both branches that enter the configure flow (`Mode:522`, `Mode:545`)
+- A: same, at the top of `handleSerialESPNowPage` (`:1093`)
+- C: same, at the equivalent entry in `handleOLEDESPNowPage`
+
+Three lines, no new state, and it makes the unconditional write at `Mode:514` / `:1187` semantically correct instead of merely guarded. Edit 6b's `length() > 0` guards on `:506-507` still land.
+
+### A6 · B4's acceptance criterion is unsatisfiable, and item 7's test needs Engine A (i.e. an erase)
+*(Attack B finding 1 + Attack C finding 7 — same root, merged)*
+
+**Verified.** `calibrateWizardBaseline()` (`System_SetupWizard.cpp:326-336`) derives the baseline from a **live** reading — `(ESP.getHeapSize() - ESP.getFreeHeap())/1024` minus a *compile-time* infra estimate — and `initSetupWizard()` (`:376-378`) zeroes `sWizardBaselineCalibrated` and force-recalibrates on every entry. Engine A runs at FTS boot before WiFi/HTTP/BLE/sensors start; Engine B runs on a fully-running device. `getWizardInfrastructureCostKB()` subtracts modelled cost for *compiled* features, not *running* services, so B's baseline is materially larger and its printed `totalKB - usedKB` materially smaller. The two numbers cannot match. Separately, `runAndApplyFeatureWizard` has exactly one caller (`System_FirstTimeSetup.cpp:824`), so producing Engine A's line at all requires a fresh-device FTS — an erase, which Step 1 is defined as not requiring.
+
+**Amendment:** drop the cross-engine equality criterion entirely. Item 7's test becomes: the line appears exactly once, immediately after `Timezone: `, before the WiFi-credentials block, and its value equals `getHeapBarData()`'s model for that feature set. Commit message must state that Engine B's number is *expected* to be lower than A's for the same selection, so nobody "fixes" a shared function later. Engine A parity is code-review-only.
+
+### A7 · Item 10's hardware test is not performable on the engine it names
+**Verified.** Engine B's OLED repaint is gated at `Mode:942` on `curPage != sLastRendered || curSel != sLastRenderedSel`; pressing A to cycle an option changes neither, so the OLED does not redraw. The serial side does not redraw on tick either — `printSerialPageStatus()` is reached only from `paintCurrentPage()` (`Mode:141`), called from `onEnter` (`:793`) and from `paintAfterTransition()` (`:178`) on the `onInput` path. So a joystick-driven walk produces no `>`-marked serial row to compare against. Engine A re-renders unconditionally each loop (`:1641`), which is why the test *reads* as valid — but A is FTS-only.
+
+**Amendment:** drive item 10's test **by typed numbers from the owning session**. A number changes `curSel` (repainting the OLED) *and* goes through `appendPromptTo` → `paintAfterTransition` → `printSerialPageStatus` (repainting serial) — giving a genuine side-by-side. Delete the "cycling changes the visible NTP text" step; file the missing-repaint-on-option-change as a separate Engine-B defect. Item 10 is verifiable for row **mapping** only.
+
+### A8 · Item 5's serial test calls functions with no serial reachability
+**Verified.** `wizardMoveUp`/`wizardMoveDown` have exactly six call sites repo-wide — `OLED_SetupWizard.cpp:512, 513, 536, 537, 573, 578` — all inside `#if ENABLE_OLED_DISPLAY`, all JoystickNav-driven. Neither engine's serial input handler has a move verb (`System_SetupWizard.cpp:1699`, `Mode:415`).
+
+**Amendment:** the serial-testable half is: type `99`, confirm the next `printSerialPageStatus` puts `>` on the **last** System row, and that a subsequent valid number still selects correctly. Move the moveUp/moveDown assertions to Tier 4.
+
+### A9 · `build_coverage.sh` cannot deliver the runtime MQTT build items 8 and 9-MQTT need
+**Verified.** The script's own header (`:13-14`) says *"It produces a throwaway binary; the point is the COMPILER, not the image. Do not flash the result."* and `trap restore EXIT` (`:44`) reverts `System_BuildConfig.h` to `ENABLE_MQTT 0` on every exit path, md5-verified.
+
+**Amendment:** Tier 3 is renamed and made explicit — a **separate, user-approved bench image**: ask the user before touching `ENABLE_MQTT` (they edit it live), flip it, `tools/build_board.sh <board> build` + flash, run the tests, restore. If the user declines, items 8 and 9-MQTT drop to Tier 1 (compile + review) and the commit message says so.
+
+### A10 · `SetupWizardResult` size arithmetic is wrong (cosmetic)
+**Verified.** `System_SetupWizard.h:32-35` is `bool completed; bool wifiEnabled; bool wifiConfigured; String wifiSSID;` — three bools in one 4-byte alignment slot ahead of a pointer-containing member. Removing one bool frees zero; adding two back costs zero. The struct never passes through 192-then-193. The 208 B baseline (`docs2/MEASURED_SIZES.md:49`) is correct; only the deltas are wrong.
+
+**Amendment:** state it as — removing `String deviceName` frees one String's storage in each of the two long-lived instances (`sWizard.result` in `.bss`; `sDummyResult` in `.bss` on OLED builds) plus one fewer global String ctor on OLED builds; `wifiEnabled`'s removal and the two new bools are free. Do not quote 192/193.
+
+### A11 · `firmware-dead-functions.csv` line numbers are stale
+**Verified.** Row 64 records `printSerialFeaturePage` at 903 (actual 920); the other rows are off by 6–17 lines the same way. It is the only artefact in the repo naming these five functions as dead, so it is the natural thing to open — and following it puts a deletion in the wrong place.
+
+**Amendment:** one clause in §5 of the commit notes — the CSV is *evidence* the symbols are dead, not a *map* to where they are. Locate deletions from this plan's anchors.
+
+### A12 · `enum class WizardStartResult` puts `Started` at 0
+**Accepted.** Give `Started` an explicit non-zero value so a stray cast-to-bool reads correctly.
+
+### A13 · Three PLAN-IS-CORRECT confirmations, adopted as evidence
+- **The six deletions are safe.** Attack A applied them, compiled in three configurations (default: 4 warnings → 1, 0 errors; coverage: 0 errors including `OLED_SetupWizard.cpp` at 426,760 bytes; coverage+ESPNOW=0: 0 errors), then restored byte-identically. `nm` on `System_SetupWizard.cpp.obj` emits only `printSerialPageStatus()`. The repo-root OLED-enabled images `hardwareone-idf-gamepad-current.elf` / `-ano-current.elf` contain `runSetupWizard`, `handleOLEDMQTTPage`, `handleSystemInput`, `renderWiFiPage` and do **not** contain `runOLEDSetupWizard` or `printSerialSystemPage` — the zero-flash claim is true on a genuine OLED link. I independently re-confirmed the field-read sweep: `result.deviceName` / `result.wifiEnabled` have **5 write sites and 0 reads** tree-wide, and `:845`/`:850` are complete single-line `if (cond) stmt;` forms, so whole-line deletion cannot capture a following statement.
+- **8b's function-local static prompt buffer is safe.** `appendPromptTo` (`Mode:315-325`) takes the pointer from `paintAfterTransition()` and immediately `strncpy`s its contents into `out`; the pointer is never retained. Ship 8b as written and drop the "fall back to a `sWizard`-owned buffer" hedge.
+- **The B6/B7 rewrite regresses no configuration.** `getWizardSystemPageCount()` (`:274-280`) and `getSystemItemAt()` (`:284-300`) share the same three predicates, and the render loop's bound *is* `getWizardSystemPageCount()`, so the rewrite is consistent by construction. RTC is not an axis. Two things to record: on `ENABLE_WIFI=1 && wifiEnabled==false && led compiled && ESPNOW=1` the count is 4 with `maxVisible` 3, so restoring NTP to index 2 pushes the LED row off the first screen (not a regression — pressing A there cycled NTP anyway); and `wizardMoveDown` does its scroll math with a hardcoded window of 4 (`:770-772`) while `renderSystemPage` uses `maxVisible = 3` — pre-existing, deliberately untouched.
+
+---
+
+## 2. Findings REJECTED
+
+### R1 · "Item 6c widens the unvalidated device-name write" — hazard accepted, fix rejected, **6c dropped from Step 1**
+**The hazard is real and verified:** `cmd_blename` accepts 1–29 characters of any kind (`Bluetooth.cpp:2416-2418` — length check only), `cmd_espnow_setname` accepts ≤20 chars restricted to alnum/`-`/`_` (`System_ESPNow.cpp:12907-12917`), and the ESP-NOW name lands in `char deviceName[20]` wire fields.
+
+**But both proposed fixes are wrong for Step 1.** Sanitising inside a new helper (option b) adds a validation policy that does not exist anywhere today and would silently differ from `cmd_espnow_setname`'s error-返 behaviour. And the attacker's premise that "today the write is a known-good literal" is only true of the *fallback* — Engine A already writes whatever the user typed straight into `espnowDeviceName` (`:1183`), unvalidated, any length.
+
+**Resolution: drop 6c's third step.** `wizardCurrentDeviceName()` ships as the **exact two-step chain Engine A already uses** (`:1124`: `espnowDeviceName.length() > 0 ? espnowDeviceName : "HardwareOne"`), deduplicating the three copies at `:1124`, `OLED:708`, `Mode:559-560` with **zero behaviour change**. `initSetupWizard():370-372`'s three-step chain stays as-is — it feeds `wizardDeviceName[]`, a different consumer. Step 1 is parity plus safe cleanup; introducing a new cross-field data flow between two fields with incompatible validation domains is a new behaviour, and §2.5 already defers the related device-name gap for the same reason.
+
+### R2 · "Item 9's deferral needs a latch-and-warn against concurrent writers" — **rejected, with a counterexample**
+The concurrency observation is verified (`System_ESPNow.cpp:17481`, `G2_Page_Network.cpp:1535`, `System_MQTT.cpp:274` are all independent writers). **But the proposed latch is actively wrong.** The wizard's own Network page binds the row directly to the flag: `System_SetupWizard.cpp:516` `networkPage[networkPageCount].boolSetting = &gSettings.mqttAutoStart;`, and `wizardShouldShowMQTT()` (`:561`) reads that same flag. A user who skips MQTT, presses `'b'` back to the Network page and toggles that row would trip the latch and be told "MQTT was re-enabled elsewhere during setup" — a false positive generated from **inside the wizard**. A latch that misfires on the wizard's own canonical toggle is worse than no latch.
+
+**Accepted sub-claim:** after a skip, the Network row renders ON while the pending decision is OFF. That is user-visible mid-run and goes in the commit message as a declared diff. It self-heals, because reaching the end re-enters the MQTT page. The contract stays "the wizard's decision wins at commit", which is what a modal configuration session should mean.
+
+### R3 · "Item 8 removes the only in-firmware repair for a clamped `mqttPort`" — **fix split: display guard accepted, repair line rejected**
+**Verified fact:** `settingsLoadClampInt` (`System_Settings.cpp:2535-2547`) clamps rather than rejects, and `mqttPort`'s registry row declares `minVal 1` (`System_MQTT.cpp:276`), so an on-disk `0` loads as **1**, not 1883 — and 8b's `> 0` guard would then advertise `[1]` as the offered default.
+
+**Accepted:** change the display guard in 8b/8c/8d from `> 0` to `> 1` (fall back to 1883 at or below the clamp floor). One character, removes the lie.
+
+**Rejected:** adding `if (gSettings.mqttPort <= 1) gSettings.mqttPort = 1883;` to all three engines' apply blocks. That is a settings-repair concern wearing a wizard costume — it makes the wizard silently mutate a field the user did not touch on that page, which is precisely the class of bug items 6, 8 and 9 exist to remove. `mqttport 8883` already exists as the repair (`System_MQTT.cpp:1449`) and the scenario requires a corrupt or foreign `settings.json`. **File it** as a settings-loader concern.
+
+### R4 · The brief's D-a-first ordering, and D-e — **rejected, as the plan already argued; re-confirmed**
+`printSerialHeapBar` (`:905`) is called from `:923`, `:942`, `:960` — GCC proves it by warning on the other three and not on it. It must be deleted *with* them, not first. And `runOLEDSetupWizard` (`OLED_SetupWizard.cpp:1309-1311`) stays: it is genuinely dead but not revert-independent once Step 7 deletes `runSetupWizard`, and it costs zero flash today.
+
+---
+
+## 3. Final ordered edit list
+
+Order is load-bearing: **E4 after its internal callers**; **E2 before E6** (removes the `deviceName` decoy); **E5 before E10** (an out-of-range selection misdraws and reads as a B7 regression); **E10 subsumes B6**; **E8 before E9** (once MQTT is skipped you cannot `'b'` back into the port field); **E12 before E10 is verified**. One commit, per `feedback_no_incremental_commits_during_refactor`.
+
+| # | Edit | Anchors | Verified by |
+|---|---|---|---|
+| **E1** | Stale comments. `:1398` timeout comment (the sole caller passes 0; `featuresetup` never reaches this code). `System_SetupWizard.h:203-206` (`cmd_featuresetup` does not call this). `System_Utils.cpp:713-714` (both claims false). **Plus** `Mode:135-140`, which claims `printSerialPageStatus()` writes to `broadcastOutput` and fans out to every transport — the body (`System_SetupWizard.cpp:990-1090`) is 22 direct `Serial` calls and zero `broadcastOutput`. That comment is why N3 will be re-litigated in Step 3. | 4 sites | read |
+| **E2** | Delete `SetupWizardResult::deviceName` / `::wifiEnabled`. Decls `System_SetupWizard.h:34, :38`; writes `:845, :850, :1515, :1519`, `Mode:775`. **Do not touch** the local `String deviceName` at `:1107` or `OLED:709-714`, or any `gSettings.wifiEnabled`. | 7 lines | compile (hard error if a read was missed) |
+| **E3** | Delete `sWizard.espnowConfiguring`: decl `Mode:107` + comment `:105-106`, writes `:523`, `:545`, reset `:780`. Zero reads. Delete the comment **with** the field — the intent it describes is unimplemented (`INTRO → 'c' → NAME → 'b' → … → 'n' → INTRO → Enter` still disables ESP-NOW after configuring began) and belongs to Step 4's D-13c. | 5 lines | compile |
+| **E4** | Delete `System_SetupWizard.cpp:901-982` inclusive — banner `:901-903`, blank `:904`, `printSerialHeapBar :905-918`, `printSerialFeaturePage :920-937`, `printSerialNetworkPage :939-955`, `printSerialSystemPage :957-981`, blank `:982`. All `static`, all outside every `#if`. **`printSerialPageStatus` (`:990`) must survive** — non-static, declared `System_SetupWizard.h:236`, called `:1653` and `Mode:141`. No secondary deletions: every static the dead code touched has a surviving user in `printSerialPageStatus`'s SYSTEM case (`:1045-1068`). | one block | warning count **4 → 1**; `nm` shows only `printSerialPageStatus` |
+| **E5** | **B9.** Add `wizardCurrentPageItemCount()` above `:218` (switch on `currentPage`: FEATURES/SENSORS/NETWORK counts, `getWizardSystemPageCount()` for SYSTEM, `default: 0` — every sub-page uses a local `selection`). Clamp inside `setWizardCurrentSelection` (`:218`). Delete the count computation from `wizardMoveUp` (`:747-751`) **entirely**; `wizardMoveDown` (`:764-768`) calls the helper. **Then fix both call sites to read back**: `System_SetupWizard.cpp:1702-1703` and `Mode:424-427` must pass `getWizardCurrentSelection()` to `getSystemItemAt`, not `num - 1`. | 5 sites | warning count **1 → 0**; serial: type `99` on the System page, `>` lands on the last row; type a valid number, device-name row still reachable |
+| **E6** | **B2 + A5.** (a) `Mode:556`: `'n'` fills `espnowFriendlyName` from `wizardCurrentDeviceName()` before `applyAndAdvance()` — mirrors A `:1132`. (b) `Mode:506-507`: guard both writes under `length() > 0`, matching `:508-513`. (c) **Seed stationary from current settings** at configure-entry: `Mode:522`, `Mode:545`, `System_SetupWizard.cpp:1093`, and C's equivalent — so the unconditional writes at `Mode:514` / `:1187` become no-ops on unvisited prompts. (d) Add `wizardCurrentDeviceName()` (two-step chain only — see R1) next to `:302`, decl near `System_SetupWizard.h:158`, used at `:1124`, `OLED:708`, `Mode:559-560` and the new `:556`. | 4 files | **shipping build, plain serial:** `espnowsetname BenchOne`; `espnowstationary 1`; `featuresetup`; ESP-NOW page → `c` → `n` at Name; finish. Then `espnowsetname` reads `BenchOne`, `espnowstationary` reads true, and **`openespnow` succeeds** (before the fix it returns `checkEspNowFirstTimeSetup`'s "No device name configured", `System_ESPNow.cpp:8815`) |
+| **E7** | **B4.** Insert the heap summary immediately after `Mode:823`, inside `if (sWizard.result.completed)`, before the `#if ENABLE_WIFI` block — `getHeapBarData()` → `broadcastOutput("Heap estimate: ~%lu KB")`. No new include (`System_SetupWizard.h:260`, already included at `Mode:29`). Exactly-once is structural: `onExit` runs only from `cliModeExecutorDrainPending` under `claimExitLocked` (`System_CLIMode.cpp:392-413`). | 1 site | serial: line appears **once**, after `Timezone:`, value matches `getHeapBarData`'s model. **No cross-engine comparison** (see A6) |
+| **E8** | **B3.** `Mode:646-647` → `sWizard.result.mqttPort = raw.toInt();` (blank = 0 = unchanged, exactly A `:1243`). `Mode:257` prompt built from the current value, function-local `static char p[64]` (safe — `appendPromptTo` copies, `Mode:315-325`), guard **`> 1`** not `> 0` (R3). `OLED:830` prefill from the current value, same guard. `System_SetupWizard.cpp:1236` prompt likewise. **Do not remove** the `> 0` apply guards at `:1274`, `OLED:848`, `Mode:613` — `gSettings.mqttPort == 0` means nothing to `System_MQTT.cpp:1046`. | 4 sites | bench MQTT image: `mqttport 8883` → `featuresetup` → MQTT page → `c` → host `x` → **Enter** at port → finish → `mqttport` still 8883. Re-run typing `1884` → 1884 |
+| **E9** | **B1 + D-15.** Two `bool` fields after `System_SetupWizard.h:33`; applied at the **top of `wizardFinalize()`** (`:869`), the chokepoint both engines share (`:1779`, `Mode:823`). Six set/clear sites: A `:1093`/`:1115` and `:1198`/`:1218`; B `:522`+`:545`/`:534` and `:623`/`:631`; C `:699` and `:816`. Add `result.espnowSkipped = false; result.mqttSkipped = false;` to A's hand-zeroed block at `:1513-1523` (B value-inits at `Mode:773`; C's `sDummyResult` is static-zeroed). **Not** the brief's literal one-liner — clearing at the keystroke removes the page from `wizardIsPageVisible()`, and `wizardRetreatFrom` (`:687-695`) filters on visibility, so `'b'` could never return and `SETUP n/N` would shrink under the running header. | 4 files | bench MQTT image: skip MQTT → `'b'` on the next page → **lands back on MQTT**, denominator unchanged; complete → `mqttautostart` off; cancel instead → `mqttautostart` unchanged. ESP-NOW half runs on the **shipping** build |
+| **E10** | **B6 + B7.** Replace the hand-rolled ladder at `OLED_SetupWizard.cpp:326-392` with a `switch (getSystemItemAt(idx))`, `line[0]='\0'` first, **no `default:`** (a future `SystemPageItem` becomes a hard build error there — the flags are `-Wall -Werror=all` with `-Wno-error=` only for unused-function/variable/but-set). This deletes the `#ifndef ENABLE_ESPNOW` typo (`:384`; the same header writes `#if !ENABLE_ESPNOW` at `:689`/`:755`) and the `isFeatureEnabled(wf)` NTP gate (`:356`) in one edit. Also delete the dead `bool hasNTP = (getNTPPresetCount() > 0);` (`:350`, overwritten by both `#if` arms) and the redundant local `extern`s (`:353-354`, `:371-372` — `System_FeatureRegistry.h` is included at `:16`). | 1 function | **physical hardware** (SSD1306 + Seesaw): `featuresetup`, turn WiFi **off** on page 1, walk to System, then **select rows by typed number** and confirm each highlighted OLED label matches the `>`-marked serial row (A7) |
+| **E11** | `enum class WizardStartResult { ModeActive = 1, NoInteractiveSession, Started }` — `Started` explicitly non-zero (A12). `Mode:971-976` returns the three cases; `System_FeatureRegistry.cpp:664` reports the real cause instead of "another interactive mode is active" for every failure. Update the decl `System_SetupWizardMode.h:66` and the `if (!setupWizardMode_start())` example at `:51-58`, or the header teaches the old contract. Consider a `cliHint` for `NoInteractiveSession` — a genuine dead end for that transport, which is the convention's criterion. | 3 files | serial: `featuresetup` twice → `ModeActive`; from an automation/MQTT → the new message |
+| **E12** | `tools/build_coverage.sh`: two separately-reported passes. Pass 2 = pass 1's four flags **plus** `CUSTOM_ENABLE_NET_ESPNOW=0`. Indentation-tolerant sed for the ESP-NOW flag; **assert the final value of all five flags** after the seds and hard-fail otherwise. Turn the coverage proof into a gate: fail if `OLED_SetupWizard.cpp.obj` < 100 KB in either pass; record `System_ESPNow.cpp.obj` in pass 1 and fail pass 2 if it is not strictly smaller. Keep `trap restore EXIT` + the md5 check untouched. | tools | run it; first ESPNOW=0 pass will surface **pre-existing** breaks — triage and file, do not fix inside Step 1 (`feedback_board_gated_code_hides_compile_breaks`) |
+
+### The oracle (unchanged, and it is the sharpest free gate)
+```bash
+cd /Users/morgan/esp/hardwareone-idf/build-xiao_s3
+python3 -c "import json;print([e['command'] for e in json.load(open('compile_commands.json')) if e['file'].endswith('System_SetupWizard.cpp')][0])" \
+  | sed 's| -o [^ ]*\.obj| -o /tmp/sw.obj|' > /tmp/run.sh
+bash /tmp/run.sh 2>&1 | grep -cE 'warning:'      # today 4 → after E4 1 → after E5 0
+```
+Today it emits exactly four: `:747` `maxItems`, `:920`/`:939`/`:957` dead functions. I reproduced this. **Never use `-fsyntax-only`** — it reports only `maxItems`; GCC emits `-Wunused-function` at cgraph finalization. And every one of these warnings is `-Wno-error=`d, so **exit status will not tell you** if Step 1 orphaned a static. Grep the log.
+
+---
+
+## 4. DEFERRED out of Step 1
+
+| Item | Why |
+|---|---|
+| **D-e `runOLEDSetupWizard`** (`OLED_SetupWizard.cpp:1309-1311` + `.h:61`) | Genuinely dead and absent from both real OLED ELFs, but the only Step-1 candidate that is not revert-independent: Step 7 deletes `runSetupWizard`, so a post-Step-7 revert of Step 1 restores a call to a deleted symbol — invisible on every current board because `DISPLAY_TYPE 0`. Zero flash saved. **Step 7 already lists it.** |
+| **6c's `bleDeviceName` fallback step** | R1 — new cross-field flow between fields with incompatible validation domains (`blename` 1–29 any char vs `setname` ≤20 alnum/`-`/`_`, into `char[20]` wire fields). |
+| **Wizard bypasses `cmd_espnow_setname` validation** (`System_ESPNow.cpp:12907-12917`) | Pre-existing on all three engines; a wizard user can set `"Living Room"`, silently truncated to 19 chars + NUL. Needs a shared validator, which is Step 4's job. |
+| **`systemPageHasDeviceName()` → runtime** (`:266-272`) | Real gap — on shipping builds a user who turns ESP-NOW **off** on the Features page has no device-name path anywhere in the wizard. But making it runtime changes `getWizardSystemPageCount()` mid-run, which is exactly the input E5's clamp depends on. |
+| **`mqttPort` clamp repair** | R3 — settings-loader concern (`System_Settings.cpp:2535-2547`), not a wizard concern. |
+| **Latch-and-warn for concurrent flag writers** | R2 — false-positives on the wizard's own Network row (`:516`). |
+| **Engine B does not repaint on option-change** (`Mode:942`) | Found while invalidating item 10's test (A7). Separate defect; file it. |
+| **`wizardMoveDown` window 4 vs renderer `maxVisible` 3** (`:770-772` vs `OLED:287`) | Pre-existing; only the renderer's own clamp hides it. Note in the commit, do not touch. |
+| **All of §2.7** | N1/D-02 DONE-latch, the five `applyAndAdvance` hard-returns, uniform `'b'`/`'n'`/blank vocabulary (D-13c), A storing the literal `"n"` into `mqttHost` (`:1234`→`:1273`), C's early device-name write (`OLED:713-714`), the `getOLEDTextInput`-from-tick OTA hazard (D-20), the `handleSerialModePage` cancel busy-loop (D-19), A/C prompting for MQTT password only when a user was entered (`:1254`, `OLED:840`) vs B always visiting `MQTT_PASS` (`Mode:655`). |
+| **Docs** | `docs2/*` and `firmware-dead-functions.csv` are untracked and go stale. Per `feedback_no_publishing_docs_or_capture_data` that is steady state. **No `git add -A`.** Affected: `docs2/files/OLED_SetupWizard.cpp.md:46`, `docs2/files/System_SetupWizard.cpp.md:212`, `docs2/files/System_SetupWizard.h.md`, `docs2/files/System_SetupWizardMode.cpp.md:170`, `docs2/systems/onboarding-and-setup-wizard.md`, `docs2/UNCERTAIN.md:978`, `docs2/MEASURED_SIZES.md:49`, `docs2/browse.html`, CSV rows 64, 65, 66, 557, 2951. |
+| **Commit / push** | Per `feedback_no_autonomous_commits_or_actions` — finish, hand to the user for hardware test, they commit. Style `vX.Y.Z: what it does`. |
+
+**Also not doing:** converting any wizard write to `setSetting()` (it calls `writeSettingsJson()` synchronously per field — `System_Settings.h:1223` — during FTS before `users.json` exists; raw assignment is deliberate, see `project_fts_lockout_window_fix`); unifying OLED and serial row-label strings (21-char `char line[22]` vs unbounded serial — unify the index→item mapping only, which is what E10 is); touching any `SettingEntry` row (so `docs/SETTINGS_MATRIX.md` and `tools/settings_registry.py` need no regeneration).
+
+---
+
+## 5. What no build will catch — watch list for the hardware pass
+
+1. **E12's flag flip.** A no-op sed reports green. The assert in E12 is the only thing standing between "we covered ESPNOW=0" and "we never built it". If the assert is dropped or weakened, E10's B6 half and the `SYS_ITEM_DEVICE_NAME` switch arm ship unbuilt. **Read the assert output, not the exit code.**
+2. **E6's damage is invisible from the device under test.** `bleDeviceName` is compensated everywhere (`length() > 0 ? … : "HardwareOne"` at `Bluetooth.cpp:1281`, `OLED_Mode_Bluetooth.cpp:106`, `System_SetupWizard.cpp:371`), so the box still advertises correctly over BLE and any single-device test passes. `espnowDeviceName` is **not** compensated — `checkEspNowFirstTimeSetup` (`System_ESPNow.cpp:8815-8825`) hard-fails and gates both `openespnow` (`:10839`) and boot autostart (`HardwareOne.cpp:2282`). **`openespnow` succeeding is the pass/fail, not what `settings` prints.**
+3. **A5's stationary clobber is only observable from a peer.** `payload->stationary` (`System_ESPNow.cpp:8290`) goes on the wire; the local device shows nothing wrong. Check `espnowstationary` explicitly after the E6 test sequence.
+4. **E7's number will differ between engines and that is correct.** Live baseline, recalibrated per entry (`:326-336`, `:376-378`). Engine B (running device) prints a *lower* free estimate than Engine A (FTS boot) for the identical feature set. Say it in the commit or someone "fixes" `calibrateWizardBaseline`, which also feeds the OLED heap bar (`OLED_SetupWizard.cpp:53`) and A's own print (`:1834`).
+5. **E9's two declared behaviour diffs.** (a) Pages now stay visible for the whole run — skip MQTT, press `'b'`, you land back on MQTT; `SETUP n/N` stops shrinking. New capability on all three engines. (b) Cancel-after-skip no longer disables **in Engine B only**: `wizardFinalize` runs unconditionally in A (`:1779`, even on a cancelled run) but under `if (sWizard.result.completed)` in B (`Mode:818-823`). A is unchanged. (c) Between a skip and finalize, the Network page's MQTT row (`:516`) renders ON while the pending decision is OFF — self-heals, but it is user-visible.
+6. **`mqttAutoStart` has no UI on the default profile.** `System_MQTT.cpp` is CMake-gated (`CMakeLists.txt:417`) so there is no registry row, no web row, no OLED row, no `mqttautostart` command — while the struct field persists and `HardwareOne.cpp:2148` still reads it. A wizard write there mutates a persisted flag with zero way to inspect or undo it from that build. And the `"MQTT host not configured"` compensator (`System_MQTT.cpp:1025-1029`) is host-shaped, not flag-shaped: `mqttHost` survives a skip, so a *reconfigured* device auto-connects at boot to the stale broker the user just declined.
+7. **E10 is mapping-only.** The OLED row ladder has no serial trace, `renderSystemPage` runs only under `oledDisplay && oledConnected` (`:1636`, `Mode:870`), and Engine B does not repaint on option-change. A green build proves nothing; a joystick walk proves nothing. **Typed numbers only.**
+8. **The four `printSerial*` deletions are one prefix-match from killing the wizard.** `printSerialPageStatus` (`:990`) is the only surviving symbol with that prefix and it is called by both engines. A careless `grep -l printSerial | xargs sed` is fatal on both.
+9. **E2's decoys.** `System_SetupWizard.cpp:1107` and `OLED:709` are *local* `String deviceName`; every other `wifiEnabled` in the tree is `gSettings.wifiEnabled` (`System_Settings.h:462`). A naive grep sweep breaks the build — loudly, which is the good case; the bad case is a whole-line deletion that captures a following statement, which is why `:845`/`:850` were checked to be complete single-line `if`s.
+10. **A's hand-zeroed result block (`:1513-1523`) is fragile.** Add a field, forget a line, get an indeterminate bool with no warning. E9 adds two. Note it in the commit.
+11. **After the first ESPNOW=0 pass, expect unrelated breaks.** `project_build_gate_matrix_fixes` recorded 30 latent `#if ENABLE_G2_GLASSES` defects found exactly this way. Triage and file; fixing them inside Step 1 makes the commit unreviewable.

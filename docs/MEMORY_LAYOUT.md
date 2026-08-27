@@ -215,7 +215,15 @@ Mechanisms in code:
 
 ## 7. How to re-measure
 
-- On device: run `memreport` (the `BOOT MEMORY REPORT`).
+- On device: run `memreport` (the `BOOT MEMORY REPORT`). Since 2026-08-23 its
+  `[2] LIVE HEAP ATTRIBUTION` and `TOTALS` sections are measured, not estimated:
+  every task's stack and TCB block is read off the allocator (kernel tasks
+  included), allocator metadata is derived from `heap_caps_get_info`, and the
+  `UNATTRIBUTED` residual is a signed difference that is deliberately not padded
+  to zero. Figures quoted in this file from earlier reports understate task cost
+  by ~21 KB (the seven IDF system-task stacks were printed but never summed) —
+  re-measure before acting on any number here. See
+  `docs/MEMORY_REPORT_FIX_PLAN.md` and `docs/DRAM_UNACCOUNTED_CENSUS_2026-08-23.md`.
 - Static breakdown: `idf.py size`, `idf.py size-components`, `idf.py size-files`.
 - Biggest internal-DRAM static symbols:
   ```

@@ -1,0 +1,24 @@
+# OTA-layout-only sdkconfig deltas — Adafruit QT Py ESP32 (ESP32-PICO-V3-02).
+#
+# Layered by CMakeLists.txt AFTER sdkconfig.ota.defaults and ONLY when
+# HW_OTA_LAYOUT=1; the ordinary build of this board is unaffected.
+
+# HW_TARGET: esp32
+
+# Minimum silicon revision 3 — MANDATORY, not an optimization. RSA-3072
+# signed-app verification is the whole basis of the OTA trust model, and on the
+# classic ESP32 the IDF gates it behind revision 3:
+#   config SECURE_BOOT_V2_RSA_SUPPORTED
+#       depends on (IDF_TARGET_ESP32 && ESP32_REV_MIN_FULL >= 300) || ...
+# Without this, CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME cannot be selected at all.
+#
+# The QT Py ESP32 carries an ESP32-PICO-V3-02, which is revision 3 — the same
+# die family as the Feather ESP32 V2, whose hardware reported v3.1 on
+# 2026-08-25. If a unit ever reports lower the bootloader refuses to boot it and
+# says so, which is a cable-time discovery during provisioning.
+CONFIG_ESP32_REV_MIN_3=y
+
+# Same side effect as the Feather V2: revision 3 drops
+# CONFIG_SPIRAM_CACHE_WORKAROUND (it depends on ESP32_REV_MIN_FULL < 300), so
+# -mfix-esp32-psram-cache-issue goes away and newlib comes from ROM again.
+# Sound only on rev-3 silicon. Hardware-test the OTA image on its own merits.

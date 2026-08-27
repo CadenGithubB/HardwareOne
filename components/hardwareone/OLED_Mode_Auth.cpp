@@ -231,7 +231,11 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
         initialText = passwordBuffer.c_str();
       }
       
-      oledKeyboardInit(title, initialText, 32);
+      const OLEDKeyboardDictationPolicy policy =
+          currentField == FIELD_USERNAME
+              ? OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT
+              : OLEDKeyboardDictationPolicy::DENY;
+      oledKeyboardInit(title, initialText, 32, policy);
       loginKeyboardActive = true;
     }
     handled = true;

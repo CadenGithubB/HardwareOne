@@ -27,10 +27,49 @@ APP_DESC_MAGIC = 0xABCD5432
 PAYLOAD_MAGIC = 0x314D3148  # "H1M1", little-endian
 PAYLOAD_SIZE = 224
 SIGNATURE_SIZE = 384
+# One row per recovery-OTA board. Keep in step with the registry in the root
+# CMakeLists.txt, BOARD_CONTRACT in check_ota_builds.py, and the id constants in
+# components/hw1_ota_protocol/include/hw1_ota_protocol.h.
 BOARD_LAYOUTS = {
     "feathers3": "hw1-f3-ota-v1",
     "feathers3_fe": "hw1-f3fe-ota-v1",
+    "feather_esp32_v2": "hw1-fv2-ota-v1",
+    "qtpy_esp32": "hw1-qtpy-ota-v1",
 }
+
+# The build-metadata suffix each board's images must carry. This used to be
+# written inline as `"+f3feo1" if board == "feathers3_fe" else "+f3o1"` in three
+# separate files, which silently assigned the plain-FeatherS3 suffix to every
+# board that was not the flash-encrypted one -- so a third board would have been
+# validated against the wrong suffix rather than rejected.
+# Which partition CSV defines each board's slot sizes. Mirrors BOARD_CONTRACT in
+# check_ota_builds.py; both read the CSV rather than restating the numbers.
+BOARD_PARTITION_CSV = {
+    "feathers3": "partitions_ota_no_sr_16mb.csv",
+    "feathers3_fe": "partitions_ota_no_sr_16mb.csv",
+    "feather_esp32_v2": "partitions_ota_no_sr_8mb.csv",
+    "qtpy_esp32": "partitions_ota_no_sr_8mb.csv",
+}
+
+BOARD_SUFFIXES = {
+    "feathers3": "+f3o1",
+    "feathers3_fe": "+f3feo1",
+    "feather_esp32_v2": "+fv2o1",
+    "qtpy_esp32": "+qtpyo1",
+}
+
+
+def board_slot_size(board: str) -> int:
+    """ota_0 capacity for a board, read from its partition CSV."""
+    repository = pathlib.Path(__file__).resolve().parents[2]
+    # Source tables live in partitions/ (the root partitions.csv is the generated one).
+    csv_path = repository / "partitions" / BOARD_PARTITION_CSV[board]
+    for raw in csv_path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) >= 5 and fields[0] == "ota_0":
+            return int(fields[4], 0)
+    raise ValueError(f"{csv_path.name} has no ota_0 partition")
 
 
 def _c_string(raw: bytes) -> str:
@@ -245,16 +284,19 @@ def create(args: argparse.Namespace) -> None:
         raise SystemExit(
             f"unexpected ESP project name {project_name!r}; expected 'hardwareone-idf'"
         )
-    expected_suffix = "+f3feo1" if args.board == "feathers3_fe" else "+f3o1"
+    expected_suffix = BOARD_SUFFIXES[args.board]
     if not version.endswith(expected_suffix):
         raise SystemExit(
             f"image version {version!r} lacks required layout suffix {expected_suffix!r}"
         )
 
     image_size = image.stat().st_size
-    if image_size <= 0 or image_size > args.slot_size:
+    slot_size = args.slot_size
+    if slot_size is None:
+        slot_size = board_slot_size(args.board)
+    if image_size <= 0 or image_size > slot_size:
         raise SystemExit(
-            f"image size {image_size} does not fit OTA slot ({args.slot_size} bytes)"
+            f"image size {image_size} does not fit OTA slot ({slot_size} bytes)"
         )
 
     expected_layout = BOARD_LAYOUTS[args.board]
@@ -339,7 +381,7 @@ def parser() -> argparse.ArgumentParser:
     make.add_argument("--output", type=pathlib.Path, required=True)
     make.add_argument("--public-key-out", type=pathlib.Path)
     make.add_argument(
-        "--board", choices=("feathers3", "feathers3_fe"), required=True
+        "--board", choices=sorted(BOARD_LAYOUTS), required=True
     )
     make.add_argument(
         "--layout",
@@ -347,7 +389,13 @@ def parser() -> argparse.ArgumentParser:
     )
     make.add_argument("--min-updater", default="1.0.0")
     make.add_argument("--data-schema", type=int, default=1)
-    make.add_argument("--slot-size", type=lambda value: int(value, 0), default=0x5A0000)
+    # Default None, resolved per board from the authoritative partition CSV.
+    # A fixed 0x5A0000 default was the fifth copy of the ota_0 size in this
+    # tree; it was already stale for the 16 MB layout (real slot 0x620000) and
+    # is 650 KiB too LARGE for the 8 MB Feather V2 layout (real slot 0x500000),
+    # so it would have signed a manifest for an image that cannot fit the slot
+    # it names.
+    make.add_argument("--slot-size", type=lambda value: int(value, 0), default=None)
     make.set_defaults(func=create)
 
     check = sub.add_parser("verify", help="verify a manifest and its image")

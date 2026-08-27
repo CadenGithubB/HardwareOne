@@ -42,13 +42,11 @@ enum G2EventType {
   G2_EVENT_TAP,
   G2_EVENT_LONG_PRESS,
   G2_EVENT_DOUBLE_TAP,
-  // Coarse-grained signals from the sid=0x0D channel. Empirical findings
-  // (2026-04-24) show the firmware does NOT distinguish gesture type here —
-  // head-up wake, tap, double-tap, swipe all emit the same 6-byte
-  // SysEvent{EventType=1} payload. Exposed as USER_ACTIVITY so consumers
-  // can treat it as a generic "user did something" signal without pretending
-  // we know the specific gesture. DISPLAY_OFF fires when the display
-  // transitions on→off (either inactivity timeout or user close).
+  // Legacy public values retained for ABI/API stability. Earlier reverse-
+  // engineering treated sid=0x0D as coarse USER_ACTIVITY / DISPLAY_OFF, but
+  // current schema and 2.2.9 captures prove that channel is SyncInfo app
+  // lifecycle. The current decoder never emits either value from sid=0x0D;
+  // gestures and terminal events are decoded from sid=0xE0 instead.
   G2_EVENT_USER_ACTIVITY,
   G2_EVENT_DISPLAY_OFF,
   // Device-side system notification (NOT a user gesture). Observed
@@ -283,14 +281,17 @@ bool g2Connect(G2Eye eye = G2_EYE_LEFT);
 // task-context only, and enqueues onto the shared BLE-connect worker.
 bool g2ConnectSaved();
 bool g2Disconnect(bool userInitiated = false);
+// Functional connection state: true once at least one physical temple link has
+// completed native AUTH and the retained AppLaunch settle for its current
+// generation. A transport that is still being promoted is intentionally false.
 bool isG2Connected();
 G2State getG2State();
 const char* getG2StateString();
 
-// Stricter than isG2Connected(): true iff BOTH temples have an active BLE
-// link. Useful when an operation needs full glasses presence (e.g. waiting
-// for boot-time reconnect to finish before kicking off a competing BLE
-// activity).
+// Stricter than isG2Connected(): true iff BOTH temples are promoted and ready
+// on their current BLE generations. Useful when an operation needs full
+// glasses presence (e.g. waiting for boot-time reconnect to finish before
+// kicking off a competing BLE activity).
 bool g2BothConnected();
 
 enum G2ControlDesired : uint8_t {
@@ -340,9 +341,10 @@ struct G2ControlStatus {
 // Coherent, allocation-free snapshot for web/OLED/status consumers.
 bool g2ControlStatusSnapshot(G2ControlStatus* out);
 
-// True iff the LEFT temple — the audio arm — has an active BLE link AND its
-// audio-notify char (6402) is subscribed. This is the microphone-availability
-// predicate for HAL_Audio (the G2 mic is LEFT-temple only on FW 2.2.0.24).
+// True iff the LEFT temple — the audio arm — is promoted on its current BLE
+// generation AND its audio-notify char (6402) is subscribed. This is the
+// microphone-availability predicate for HAL_Audio (the G2 mic is LEFT-temple
+// only on FW 2.2.0.24).
 // Deliberately NOT isG2Connected() (OR-of-temples → false-positive when only
 // RIGHT is up) nor g2BothConnected() (false-negative when RIGHT is absent).
 bool g2LeftConnected();
@@ -621,6 +623,55 @@ bool g2RelistMixedListText(const char* const* items, size_t itemCount,
 // no ack wait.
 bool g2UpdateMixedTextChild(const char* containerName, uint32_t containerId,
                             const char* content);
+
+// Arrow-pad keyboard surface (G2_Page_TextEntry's preferred renderer): a
+// 7-row static nav list + live buffer text child + a 288x144 QWERTY grid.
+// Four horizontal IMAGE children are the default; the original one-image
+// surface is the automatic compatibility fallback. Begin returns false
+// (fully cleaned up) so the caller can fall back to the legacy list keyboard.
+// HandleTap runs indexed ListEvent CLICK navigation on the tap dispatcher.
+// The rowless ring SysEvent DOUBLE_CLICK is routed internally to select the
+// current grid key, removing the need for a separate Select row. End frees the
+// render buffers.
+bool g2KbdPadBegin(const char* bufText);
+void g2KbdPadNoteBufferText(const char* bufText);
+void g2KbdPadHandleTap(uint32_t idx);
+void g2KbdPadEnd();
+
+// Text-entry lifecycle coordinator. G2_Page_TextEntry owns its buffer/render
+// state; this module owns exact widget/link identity and terminal tombstones.
+// Publication/finish are linearized against terminal/cmd17. Cleanup claim and
+// completion are used only by the tap-worker callback-free teardown path.
+uint32_t g2TextEntrySessionAllocateSerial();
+bool g2TextEntryCaptureAdmissionFence(uint32_t* lifecycleEpoch,
+                                      uint32_t* connectionGeneration,
+                                      char* side);
+bool g2TextEntrySessionPublish(uint32_t serial, uint32_t lifecycleEpoch,
+                               uint32_t connectionGeneration, char side);
+bool g2TextEntrySessionIsCurrent(uint32_t serial, uint32_t lifecycleEpoch,
+                                 uint32_t connectionGeneration, char side);
+bool g2TextEntrySessionFinishClaim(uint32_t serial,
+                                   uint32_t lifecycleEpoch,
+                                   uint32_t connectionGeneration, char side);
+bool g2TextEntrySessionCleanupClaim(uint32_t serial,
+                                    uint32_t lifecycleEpoch,
+                                    uint32_t connectionGeneration, char side);
+void g2TextEntrySessionCleanupComplete(uint32_t serial,
+                                       uint32_t lifecycleEpoch,
+                                       uint32_t connectionGeneration,
+                                       char side);
+
+// Interactive Tests → Display → Keyboard Tests chunking A/B page. Runs on
+// the persistent G2 session worker, independently of production text entry.
+// The page can switch between four horizontal image bands and the one-tile
+// compatibility control, inject the automatic fallback boundary, and run a
+// fixed benchmark.
+// `onDone` is invoked from the session worker after a normal Back/failure so
+// the caller can restore its picker. It returns true when that restore was
+// accepted; false leaves a presentation-bound tap-to-retry escape hatch on
+// the still-visible Q33 list.
+bool g2ShowKeyboardChunkTest(bool (*onDone)() = nullptr);
+bool g2KeyboardChunkTestRunning();
 
 // REBUILD-text child probe — given a single compound container hosting
 // both a TextObject ("title") and a ListObject (the test R shape), can
@@ -1481,6 +1532,30 @@ inline bool g2ShowMultiTextPage(const void*, size_t,
                                 void (*)() = nullptr,
                                 G2TapFn = nullptr) { return false; }
 inline bool g2ShowMixedListText(const char* const*, size_t) { return false; }
+inline bool g2KbdPadBegin(const char*) { return false; }
+inline void g2KbdPadNoteBufferText(const char*) {}
+inline void g2KbdPadHandleTap(uint32_t) {}
+inline void g2KbdPadEnd() {}
+inline uint32_t g2TextEntrySessionAllocateSerial() { return 0; }
+inline bool g2TextEntryCaptureAdmissionFence(uint32_t*, uint32_t*, char*) {
+  return false;
+}
+inline bool g2TextEntrySessionPublish(uint32_t, uint32_t, uint32_t, char) {
+  return false;
+}
+inline bool g2TextEntrySessionIsCurrent(uint32_t, uint32_t, uint32_t, char) {
+  return false;
+}
+inline bool g2TextEntrySessionFinishClaim(uint32_t, uint32_t, uint32_t, char) {
+  return false;
+}
+inline bool g2TextEntrySessionCleanupClaim(uint32_t, uint32_t, uint32_t, char) {
+  return false;
+}
+inline void g2TextEntrySessionCleanupComplete(uint32_t, uint32_t, uint32_t,
+                                              char) {}
+inline bool g2ShowKeyboardChunkTest(bool (*)() = nullptr) { return false; }
+inline bool g2KeyboardChunkTestRunning() { return false; }
 // Geom/spec params dropped (same NB as above — those types are gated out).
 inline bool g2RelistMixedListText(const char* const*, size_t) { return false; }
 inline bool g2UpdateMixedTextChild(const char*, uint32_t, const char*) { return false; }

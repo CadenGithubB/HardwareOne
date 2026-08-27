@@ -14,6 +14,15 @@ class String;
 // Global filesystem ready flag (defined in filesystem.cpp)
 extern bool filesystemReady;
 
+// Partition-table name of the internal LittleFS volume. Anything that calls
+// esp_littlefs_* directly must key off this rather than its own literal: the
+// Arduino wrapper carries the label the mount actually used, so a duplicated
+// string is a silent-divergence surface. A mismatch is not a mount failure —
+// esp_littlefs_info() just returns ESP_ERR_NOT_FOUND and storage stats read
+// 0/0/0 while every file operation keeps working, which surfaces as
+// "free space: 0" and rejected uploads with nothing in the log to explain it.
+inline constexpr char kLittleFsPartitionLabel[] = "littlefs";
+
 // ============================================================================
 // Filesystem Helper Functions
 // ============================================================================

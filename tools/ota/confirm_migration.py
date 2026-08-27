@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import argparse
 import os
+import pathlib
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import make_manifest  # noqa: E402  (path set above)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--board", choices=("feathers3", "feathers3_fe"), required=True
+        "--board", choices=sorted(make_manifest.BOARD_LAYOUTS), required=True
     )
     args = parser.parse_args()
     expected = f"MIGRATE {args.board}"
@@ -24,6 +29,8 @@ def main() -> int:
     if args.board == "feathers3_fe":
         print("  - This target must be invoked as encrypted-migration-flash.")
 
+    sys.stdout.flush()
+
     if os.environ.get("HW1_OTA_MIGRATION_CONFIRM") == expected:
         print("Migration confirmation accepted from HW1_OTA_MIGRATION_CONFIRM.")
         return 0
@@ -34,8 +41,20 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    # The prompt goes to stderr, and stdout is flushed first.
+    #
+    # This runs as a ninja subcommand, so stdout is a pipe, not a terminal.
+    # Python block-buffers a piped stdout, and input()'s prompt goes to
+    # stdout -- so the prompt sat in the buffer while the process blocked on
+    # a read the operator could not see they were being asked for. The
+    # observed result was a migration that appeared to hang, then printed
+    # "Migration cancelled" followed by the question it had never shown.
+    # stderr is unbuffered, so the prompt is visible before the read blocks.
+    sys.stdout.flush()
+    sys.stderr.write(f"Type {expected!r} to continue: ")
+    sys.stderr.flush()
     try:
-        answer = input(f"Type {expected!r} to continue: ")
+        answer = input()
     except (EOFError, KeyboardInterrupt):
         print("\nMigration cancelled.", file=sys.stderr)
         return 2

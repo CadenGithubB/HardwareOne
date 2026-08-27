@@ -10,7 +10,7 @@
 #include "HAL_Input.h"
 #include "System_Automation.h"
 #include "System_Settings.h"
-#include "System_Events.h"   // systemEventKindName/Family — create-wizard event picker
+#include "System_EventCatalog.h"  // shared indexed event picker
 #include "OLED_Utils.h"   // executeOLEDCommand (was a local inline extern)
 
 // External references
@@ -112,7 +112,6 @@ static char sWizTime[8]     = {0};   // "HH:MM"
 static int  sWizTypeIdx     = 0;     // index into kWizTypes
 static unsigned long sWizIntervalMs = 0;
 static unsigned long sWizDelayMs    = 0;
-static char sWizEventKind[40] = {0}; // chosen event kind name
 static int  sWizCursor = 0;          // pick-list cursor
 static int  sWizScroll = 0;          // pick-list scroll offset
 static char sWizResultMsg[24] = {0}; // failure toast (autoActionMsg points here)
@@ -141,19 +140,35 @@ static const WizPreset kWizDelays[] = {
 };
 static const int kWizDelayCount = (int)(sizeof(kWizDelays) / sizeof(kWizDelays[0]));
 
-// Event-kind list for the selected family (built on family select). Kind name
-// pointers are static-table const char* (System_Events) — safe to store.
-EXT_RAM_BSS_ATTR static const char* sWizKindPtrs[24];
-static int sWizKindCount = 0;
+// The selected family is an immutable provider ordinal, not a copied list.
+// Every visible kind resolves directly through the shared family index, so a
+// future family can grow beyond the former 24-pointer cache without truncation.
+static size_t sWizEventFamilyIndex = SIZE_MAX;
+static size_t sWizEventKindIndex = SIZE_MAX;
 
-static void wizBuildKindList(int fam) {
-  sWizKindCount = 0;
-  const int cap = (int)(sizeof(sWizKindPtrs) / sizeof(sWizKindPtrs[0]));
-  for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT && sWizKindCount < cap; k++) {
-    if (systemEventKindFamily((uint8_t)k) == (uint8_t)fam) {
-      sWizKindPtrs[sWizKindCount++] = systemEventKindName((uint8_t)k);
-    }
-  }
+static bool wizFamilyAt(int index, SystemEventCatalogFamilyInfo* out) {
+  return index >= 0 &&
+         systemEventCatalogFamilyAt(static_cast<size_t>(index), out);
+}
+
+static bool wizSelectedFamily(SystemEventCatalogFamilyInfo* out) {
+  return systemEventCatalogFamilyAt(sWizEventFamilyIndex, out);
+}
+
+static bool wizKindAt(int index, SystemEventCatalogKindInfo* out) {
+  if (index < 0 || !out) return false;
+  SystemEventCatalogFamilyInfo family{};
+  return wizSelectedFamily(&family) &&
+         systemEventCatalogFamilyKindAt(
+             family.id, static_cast<size_t>(index), out);
+}
+
+static bool wizSelectedKind(SystemEventCatalogKindInfo* out) {
+  if (!out) return false;
+  SystemEventCatalogFamilyInfo family{};
+  return wizSelectedFamily(&family) &&
+         systemEventCatalogFamilyKindAt(
+             family.id, sWizEventKindIndex, out);
 }
 
 static int wizListCount() {
@@ -161,8 +176,14 @@ static int wizListCount() {
     case AW_TYPE:       return kWizTypeCount;
     case AW_INTERVAL:   return kWizIntervalCount;
     case AW_DELAY:      return kWizDelayCount;
-    case AW_EVENT_FAM:  return SYSEVT_FAM_COUNT;
-    case AW_EVENT_KIND: return sWizKindCount;
+    case AW_EVENT_FAM:
+      return static_cast<int>(systemEventCatalogFamilyCount());
+    case AW_EVENT_KIND: {
+      SystemEventCatalogFamilyInfo family{};
+      return wizSelectedFamily(&family)
+                 ? static_cast<int>(family.kindCount)
+                 : 0;
+    }
     default:            return 0;
   }
 }
@@ -172,8 +193,14 @@ static const char* wizListLabel(int idx) {
     case AW_TYPE:       return kWizTypes[idx].label;
     case AW_INTERVAL:   return kWizIntervals[idx].label;
     case AW_DELAY:      return kWizDelays[idx].label;
-    case AW_EVENT_FAM:  return systemEventFamilyName((uint8_t)idx);
-    case AW_EVENT_KIND: return (idx < sWizKindCount) ? sWizKindPtrs[idx] : "";
+    case AW_EVENT_FAM: {
+      SystemEventCatalogFamilyInfo family{};
+      return wizFamilyAt(idx, &family) ? family.label : "";
+    }
+    case AW_EVENT_KIND: {
+      SystemEventCatalogKindInfo kind{};
+      return wizKindAt(idx, &kind) ? kind.name : "";
+    }
     default:            return "";
   }
 }
@@ -201,8 +228,10 @@ static void wizAbort() {
 
 static void wizResetAll() {
   wizAbort();
-  sWizName[0] = sWizCommand[0] = sWizTime[0] = sWizEventKind[0] = '\0';
+  sWizName[0] = sWizCommand[0] = sWizTime[0] = '\0';
   sWizTypeIdx = 0; sWizIntervalMs = sWizDelayMs = 0;
+  sWizEventFamilyIndex = SIZE_MAX;
+  sWizEventKindIndex = SIZE_MAX;
   sWizCursor = sWizScroll = 0;
 }
 
@@ -216,7 +245,13 @@ void oledAutomationsModeResetSessionState() {
 // re-validated on completion).
 static void wizStartKeyboard(AutoWizStep step, const char* title, bool numbers) {
   sWizStep = step;
-  oledKeyboardInit(title, "");
+  // Automation names/times are plain labels. The command step is an opaque
+  // executable payload and may itself contain credentials, so it never admits
+  // microphone text.
+  const OLEDKeyboardDictationPolicy policy =
+      step == AW_COMMAND ? OLEDKeyboardDictationPolicy::DENY
+                         : OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT;
+  oledKeyboardInit(title, "", OLED_KEYBOARD_MAX_LENGTH, policy);
   if (numbers) gOledKeyboardState.mode = KEYBOARD_MODE_NUMBERS;
   sWizKbActive = true;
 }
@@ -250,7 +285,15 @@ static void wizCreate() {
   cmd += wt;
   if (strcmp(wt, "interval") == 0)          cmd += " intervalms=" + String(sWizIntervalMs);
   else if (strcmp(wt, "atTime") == 0)       cmd += " time=" + String(sWizTime);
-  else if (strcmp(wt, "event") == 0)        cmd += " on=" + String(sWizEventKind);
+  else if (strcmp(wt, "event") == 0) {
+    SystemEventCatalogKindInfo kind{};
+    if (!wizSelectedKind(&kind)) {
+      snprintf(sWizResultMsg, sizeof(sWizResultMsg), "Event unavailable");
+      autoShowToast(sWizResultMsg);
+      return;
+    }
+    cmd += " on=" + String(kind.name);
+  }
   else if (strcmp(wt, "afterDelay") == 0)   cmd += " delayms=" + String(sWizDelayMs);
   cmd += " command=";
   cmd += wizQuote(sWizCommand);
@@ -291,16 +334,23 @@ static void wizListSelect() {
       wizStartKeyboard(AW_COMMAND, "Command:", false);
       break;
     case AW_EVENT_FAM:
-      wizBuildKindList(sWizCursor);
-      wizEnterList(AW_EVENT_KIND);
-      break;
-    case AW_EVENT_KIND:
-      if (sWizCursor < sWizKindCount) {
-        strncpy(sWizEventKind, sWizKindPtrs[sWizCursor], sizeof(sWizEventKind) - 1);
-        sWizEventKind[sizeof(sWizEventKind) - 1] = '\0';
+      {
+        SystemEventCatalogFamilyInfo family{};
+        if (wizFamilyAt(sWizCursor, &family) && family.kindCount > 0) {
+          sWizEventFamilyIndex = static_cast<size_t>(sWizCursor);
+          sWizEventKindIndex = SIZE_MAX;
+          wizEnterList(AW_EVENT_KIND);
+        }
       }
-      wizStartKeyboard(AW_COMMAND, "Command:", false);
       break;
+    case AW_EVENT_KIND: {
+      SystemEventCatalogKindInfo kind{};
+      if (wizKindAt(sWizCursor, &kind)) {
+        sWizEventKindIndex = static_cast<size_t>(sWizCursor);
+        wizStartKeyboard(AW_COMMAND, "Command:", false);
+      }
+      break;
+    }
     default: break;
   }
 }
@@ -396,7 +446,11 @@ static void wizDrawConfirm() {
   const char* wt = kWizTypes[sWizTypeIdx].wireType;
   if (strcmp(wt, "interval") == 0)        snprintf(line, sizeof(line), "Every %lum", (unsigned long)(sWizIntervalMs / 60000UL));
   else if (strcmp(wt, "atTime") == 0)     snprintf(line, sizeof(line), "Daily %s", sWizTime);
-  else if (strcmp(wt, "event") == 0)      snprintf(line, sizeof(line), "On %.16s", sWizEventKind);
+  else if (strcmp(wt, "event") == 0) {
+    SystemEventCatalogKindInfo kind{};
+    snprintf(line, sizeof(line), "On %.16s",
+             wizSelectedKind(&kind) ? kind.name : "unavailable");
+  }
   else                                    snprintf(line, sizeof(line), "Delay %lus", (unsigned long)(sWizDelayMs / 1000UL));
   oledDisplay->setCursor(0, y); oledDisplay->print(line); y += 9;
 

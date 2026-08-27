@@ -1,9 +1,13 @@
 # HardwareOne factory recovery updater: common ESP-IDF-only defaults.
+#
+# BOARD-SPECIFIC SETTINGS DO NOT BELONG HERE. Flash size, partition-table
+# offset, console peripheral and chip revision all live in
+# updater/boards/<board>.defaults; the partition table filename is generated
+# by updater/CMakeLists.txt so the updater and the main application always
+# compile the SAME csv. A 16 MB flash size and a USB-Serial/JTAG console used
+# to be pinned in this file, which is why the project could only ever be built
+# for an ESP32-S3: the classic ESP32 has no such console peripheral.
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=n
@@ -17,8 +21,7 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 CONFIG_FREERTOS_HZ=1000
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
-CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# Console channel is per-board (see above); only the shared baud rate is here.
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=512

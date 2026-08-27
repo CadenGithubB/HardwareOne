@@ -14,7 +14,6 @@
 #include <freertos/semphr.h>
 
 #include "System_CaptureCrypto.h"
-#include "System_R1_Protocol.h"
 #include "System_Settings.h"
 #include "System_VFS.h"
 
@@ -507,9 +506,10 @@ bool parseStoredLine(const char* line, R1HealthHistoryDay& day,
         sscanf(line, "D,%17[^,],%u,%lu,%d,%u,%u,%lu,%lu,%u%c",
                peer, &profile, &start, &tz, &sleep, &fetch,
                &success, &partial, &error, &tail) != 9 ||
-        profile != R1_PROFILE_FW_2_2_7_0005 ||
+        profile != R1_HISTORY_LAYOUT_DAILY_V1 ||
         sleep > R1_HISTORY_SLEEP_PRESENT || fetch > R1_HISTORY_UNSUPPORTED ||
-        error > UINT8_MAX || tz < -840 || tz > 840) return false;
+        error > UINT8_MAX || tz < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
+        tz > R1_HEALTH_TIMEZONE_MINUTES_MAX) return false;
     state.sawDay = true;
     snprintf(day.peerId, sizeof(day.peerId), "%s", peer);
     day.protocolProfile = static_cast<uint8_t>(profile);
@@ -708,9 +708,11 @@ bool r1HealthHistoryDayValidate(const R1HealthHistoryDay& day,
   if (day.schemaVersion != R1_HEALTH_HISTORY_SCHEMA_VERSION)
     return fail(R1_HISTORY_STORE_SCHEMA_MISMATCH);
   if (!canonicalPeerId(day.peerId)) return fail(R1_HISTORY_STORE_BAD_IDENTITY);
-  if (day.dayStart == 0 || day.timezoneMinutes < -840 || day.timezoneMinutes > 840)
+  if (day.dayStart == 0 ||
+      day.timezoneMinutes < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
+      day.timezoneMinutes > R1_HEALTH_TIMEZONE_MINUTES_MAX)
     return fail(R1_HISTORY_STORE_BAD_DAY);
-  if (day.protocolProfile != R1_PROFILE_FW_2_2_7_0005)
+  if (day.protocolProfile != R1_HISTORY_LAYOUT_DAILY_V1)
     return fail(R1_HISTORY_STORE_BAD_DAY);
   if (day.sleepState > R1_HISTORY_SLEEP_PRESENT ||
       day.fetchState > R1_HISTORY_UNSUPPORTED)
@@ -743,9 +745,13 @@ bool r1HealthHistoryDayValidate(const R1HealthHistoryDay& day,
         b.restingKcal != static_cast<uint16_t>(b.totalKcal - b.activeKcal))
       return fail(R1_HISTORY_STORE_BAD_BUCKET);
   }
+  // fullDayVerified means "the ring's activity-daily message for this day was
+  // received in full and CRC-verified"; it does NOT imply all 144 slots are
+  // present. Official-app HCI captures (2026-08-03) and bench sweeps show the
+  // ring answers with a sparse delta — only slots that have data and have not
+  // yet been acknowledged — so a verified day is routinely far short of 144.
   if (activityCount != day.activity.count ||
-      (day.activity.have != (activityCount != 0)) ||
-      (day.activity.fullDayVerified && activityCount != R1_HEALTH_ACTIVITY_SLOTS))
+      (day.activity.have != (activityCount != 0)))
     return fail(R1_HISTORY_STORE_BAD_BUCKET);
   if (day.fetchState == R1_HISTORY_COMPLETE &&
       (!day.activity.have || !day.activity.fullDayVerified))
@@ -883,7 +889,8 @@ R1HealthHistoryStoreError r1HealthHistoryStoreLoadExact(
     R1HealthHistoryDay& out) {
   r1HealthHistoryDayClear(out);
   if (!canonicalPeerId(peerId) || dayStart == 0 ||
-      timezoneMinutes < -840 || timezoneMinutes > 840) {
+      timezoneMinutes < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
+      timezoneMinutes > R1_HEALTH_TIMEZONE_MINUTES_MAX) {
     setStatusError(R1_HISTORY_STORE_BAD_IDENTITY);
     return R1_HISTORY_STORE_BAD_IDENTITY;
   }

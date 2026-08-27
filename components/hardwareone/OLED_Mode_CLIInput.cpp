@@ -63,7 +63,8 @@ static void startInputKeyboard() {
       localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
   secureClearString(sessionUser);
   if (!sessionAuthed) sInputEpoch = kNoTransportSessionEpoch;
-  oledKeyboardInit("Command:", nullptr, OLED_KEYBOARD_MAX_LENGTH);
+  oledKeyboardInit("Command:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
+                   OLEDKeyboardDictationPolicy::DENY);
   sKeyboardActive = true;
 }
 

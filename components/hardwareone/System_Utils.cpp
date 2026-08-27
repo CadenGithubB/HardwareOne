@@ -49,7 +49,6 @@ bool isEspNowInitialized() { return false; }
 #include "System_Debug.h"
 #include "System_TaskUtils.h"
 #include "System_I2C.h"
-#include "HAL_Input.h"          // For INPUT_TASK_NAME (gamepad vs ANO)
 #include "System_User.h"
 #include "System_UartLink.h"
 #include "System_Dictation.h"     // dictationAvailable — command-module gate
@@ -194,6 +193,7 @@ void secureClearString(String& s) {
 #include "System_Mutex.h"   // For FsLockGuard
 #include "System_I2C.h"     // For I2CSensorEntry, ConnectedDevice, MAX_CONNECTED_DEVICES
 #include "System_MemUtil.h"       // For AllocPref
+#include "System_MemTracker.h"
 
 // Extern declarations for logging functions (implemented in .ino)
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
@@ -260,10 +260,6 @@ extern const size_t edgeImpulseCommandsCount;
 #if ENABLE_MICROPHONE
 extern const CommandEntry micCommands[];
 extern const size_t micCommandsCount;
-#if ENABLE_DICTATION
-extern const CommandEntry dictationCommands[];
-extern const size_t dictationCommandsCount;
-#endif
 extern bool micConnected;
 bool audioAnySourceAvailable();   // HAL_Audio — a mic source (PDM or G2) is reachable
 #endif
@@ -1093,6 +1089,41 @@ namespace {
     return true;
   }
 
+  // True when tokenization up to `uptoToken` cannot be trusted to put the secret
+  // where the rule says it is. EVERY token up to the masked one is checked, not
+  // just the masked one: the split that shifts the secret happens EARLIER in the
+  // line. In `wifiadd "My"Net" pass123` token 3 ends at a space quite happily; it
+  // is token 2 (`"My"` butted straight against `Net`) that did the damage.
+  static bool redactTokensAmbiguous(const String& c, int uptoToken) {
+    CommandArgs parsed(c);
+    if (parsed.unterminatedQuote()) return true;
+    for (int t = 1; t <= uptoToken; ++t) {
+      int ts = 0, te = 0;
+      if (!nthTokenBounds(c, t, ts, te)) return true;
+      // must be followed by whitespace or end-of-line
+      if (te < (int)c.length() &&
+          !isspace(static_cast<unsigned char>(c[te]))) return true;
+      // a bare token may contain no quote at all; a quoted token may contain
+      // exactly its two delimiters and nothing else
+      const bool isQuoted = (c[ts] == '"');
+      for (int k = ts; k < te; ++k) {
+        if (c[k] != '"') continue;
+        if (isQuoted && (k == ts || k == te - 1)) continue;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Ambiguous tokenization => keep the verb only and mask the whole tail. A rule
+  // that matched a credential command must NEVER fall back to returning the raw
+  // line; "we could not find the secret" and "there is no secret" are different.
+  static String redactFailClosed(const String& c) {
+    int vs = 0, ve = 0;
+    if (nthTokenBounds(c, 1, vs, ve)) return c.substring(0, ve) + " ***";
+    return String("***");
+  }
+
   // Shared handler for peer-credential commands: "<cmd> <target> <username>
   // <password> <rest>..." (espnowremote / roomcmd / tagcmd / browse / fetch).
   // Mask the peer password. For command-forwarding forms, recursively redact
@@ -1135,13 +1166,45 @@ namespace {
   static String redactUserSyncCmd(const String& in) {
     String c = in;
     const int kPwTokens[] = { 7, 6, 3 };  // high → low so edits don't shift earlier tokens
+    // CALL_HANDLER rules run BEFORE the generic dispatch guard, so this needs its
+    // own. It also used to `continue` when a token could not be bounded — leaving
+    // that password in the clear. Three secrets on one line: if the positions are
+    // not trustworthy, none of them are.
+    if (redactTokensAmbiguous(c, kPwTokens[0])) return redactFailClosed(c);
     for (int k = 0; k < 3; k++) {
       int pos = kPwTokens[k];
       int start = 0, end = 0;
-      if (!nthTokenBounds(c, pos, start, end)) continue;
+      if (!nthTokenBounds(c, pos, start, end)) continue;  // line simply ends early
       c = c.substring(0, start) + "***" + c.substring(end);
     }
     return c;
+  }
+
+  // `dictate result` carries user-authored field text and `dictate fail`
+  // carries a potentially sensitive host diagnosis. Keep the operation and a
+  // syntactically valid correlation ID useful to the audit trail, but never
+  // retain the free-form tail. A malformed ID is masked too so invalid command
+  // attempts cannot repurpose the nominal ID position as an unredacted field.
+  static String redactDictateCmd(const String& in) {
+    CommandArgs parsed(in);
+    String safe = "dictate";
+    if (parsed.count() > 1) {
+      safe += " ";
+      safe += parsed.arg(1);
+    }
+    if (parsed.count() > 2) {
+      const String& id = parsed.arg(2);
+      bool validId = id.length() == 16;
+      for (size_t i = 0; validId && i < id.length(); ++i) {
+        validId = isxdigit(static_cast<unsigned char>(id[i]));
+      }
+      if (validId) {
+        safe += " ";
+        safe += id;
+      }
+    }
+    safe += " ***";
+    return safe;
   }
 
   static bool redactRuleMatches(const String& command,
@@ -1189,6 +1252,8 @@ namespace {
     { "useradd ",            MASK_TOKEN_AT_POS,    3, nullptr },  // <username> <password> [0|1] [role]
     // usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
     { "usersync ",           CALL_HANDLER,         0, &redactUserSyncCmd },  // mask pw tokens 3,6,7
+    { "dictate result ",     CALL_HANDLER,         0, &redactDictateCmd },  // preserve exact id; mask transcript
+    { "dictate fail ",       CALL_HANDLER,         0, &redactDictateCmd },  // preserve exact id; mask reason
     // Automation definitions may embed arbitrary future command lines and are
     // copied into several durable/debug sinks before execution. Preserve only
     // the wrapper identity; the nested payload is opaque secret material here.
@@ -1278,15 +1343,27 @@ String redactCmdForAudit(const String& argsInput) {
     // CommandArgs) so a quoted argument containing spaces can't shift the
     // positions. Token positions are 1-based over the entire line
     // (including the command words).
-    if (r.type == MASK_TOKEN_AT_POS) {
+    // FAIL CLOSED on any tokenization ambiguity. Both branches below used to
+    // `return c` -- the RAW line -- whenever nthTokenBounds failed, so
+    // `wifiadd "My Net pass123` (unterminated quote) consumed the rest of the
+    // line as one token and logged the password verbatim.
+    //
+    // And a quote INSIDE a value splits it in two, shifting the secret PAST the
+    // masked index: `wifiadd "My"Net" pass123` tokenizes as
+    // wifiadd / My / Net" / pass123, so masking token 3 hit an SSID fragment and
+    // left the PSK in the clear. The parser and nthTokenBounds agree here -- it
+    // is the RULE's "the secret is always token N" assumption that breaks.
+    //
+    // Same three-part guard redactPeerCredCmd already applies above.
+    if (r.type == MASK_TOKEN_AT_POS || r.type == MASK_AFTER_TOKEN_POS) {
       int start = 0, end = 0;
-      if (!nthTokenBounds(c, r.param, start, end)) return c;
-      return c.substring(0, start) + "***" + c.substring(end);
-    }
-
-    if (r.type == MASK_AFTER_TOKEN_POS) {
-      int start = 0, end = 0;
-      if (!nthTokenBounds(c, r.param, start, end)) return c;
+      if (redactTokensAmbiguous(c, (int)r.param) ||
+          !nthTokenBounds(c, r.param, start, end)) {
+        return redactFailClosed(c);
+      }
+      if (r.type == MASK_TOKEN_AT_POS) {
+        return c.substring(0, start) + "***" + c.substring(end);
+      }
       return c.substring(0, end) + " ***";
     }
   }
@@ -2439,45 +2516,137 @@ extern void logTimeSyncedMarkerIfReady(const char* source);
 
 // ---------------------------------------------------------------------------
 // SNTP sync notification — the only honest "an NTP server actually replied"
-// signal. lwIP's daemon steps the clock itself (first request after a short
-// startup delay, then hourly per CONFIG_LWIP_SNTP_UPDATE_DELAY), and before
-// this callback existed those steps were completely invisible: no event, no
-// log, and syncNTPAndResolve's old getLocalTime() "success" test couldn't
-// tell a reply from a clock that was already set.
+// signal. lwIP's daemon steps the clock itself after a valid reply and can
+// schedule later updates per CONFIG_LWIP_SNTP_UPDATE_DELAY. Before this
+// callback existed those steps were completely invisible: no event, no log,
+// and syncNTPAndResolve's old getLocalTime() "success" test couldn't tell a
+// reply from a clock that was already set.
 //
 // The callback runs on lwIP's tcpip task (~3 KB stack): STORE-ONLY — no
 // broadcast, no filesystem, no event post. ntpSyncDrainTick() (main loop,
 // the ONLY caller) hands the stored facts to Clock::clockStepped(), which
 // owns every post-step duty.
 // ---------------------------------------------------------------------------
-static volatile uint32_t gSntpSyncCount    = 0;
-static volatile bool     gSntpDrainPending = false;
-// 64-bit on a 32-bit core — written on lwIP's task, read on the main loop.
-// Guarded by its own mux so the drain can never see a torn half-write.
-static portMUX_TYPE      gSntpMux          = portMUX_INITIALIZER_UNLOCKED;
-static int64_t           gSntpPrevProjUs   = 0;
+// Every field shared with lwIP's callback is covered by this mux. In
+// particular, publishing the counter and drain flag together avoids losing a
+// callback that lands while the main loop is clearing the previous one.
+static portMUX_TYPE gSntpMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t gSntpSyncCount = 0;
+static uint32_t gSntpForegroundTimeoutCount = 0;
+static uint32_t gSntpLateReplyCount = 0;
+static uint32_t gSntpLateNoticeReplyCount = 0;
+static bool gSntpDrainPending = false;
+static bool gSntpAwaitingLateReply = false;
+static bool gSntpLateNoticePending = false;
+static int64_t gSntpPrevProjUs = 0;
+static int64_t gSntpLastReplyEpoch = 0;
+static int64_t gSntpLastReplyMonotonicUs = 0;
+
+static uint32_t beginSntpForegroundWait() {
+  portENTER_CRITICAL(&gSntpMux);
+  // A new explicit attempt supersedes an unanswered older wait, but never
+  // erase a late-reply notice that a callback has already made pending.
+  gSntpAwaitingLateReply = false;
+  const uint32_t startCount = gSntpSyncCount;
+  portEXIT_CRITICAL(&gSntpMux);
+  return startCount;
+}
+
+static uint32_t sntpReplyCountSnapshot() {
+  portENTER_CRITICAL(&gSntpMux);
+  const uint32_t count = gSntpSyncCount;
+  portEXIT_CRITICAL(&gSntpMux);
+  return count;
+}
+
+// Atomically closes the deadline race. If the callback won the mux first,
+// the caller observes a reply. If this transition wins, that callback is
+// classified as late and the main-loop drain will announce it exactly once.
+static bool markSntpForegroundTimeout(uint32_t startCount, bool clientArmed) {
+  portENTER_CRITICAL(&gSntpMux);
+  const bool noReply = (gSntpSyncCount == startCount);
+  if (noReply) {
+    ++gSntpForegroundTimeoutCount;
+    gSntpAwaitingLateReply = clientArmed;
+  }
+  portEXIT_CRITICAL(&gSntpMux);
+  return noReply;
+}
 
 static void onSntpTimeSync(struct timeval* tv) {
-  (void)tv;
   // lwIP already stepped the real clock before invoking us; the projection
   // reference is the only remaining evidence of the PRE-step clock.
   const int64_t prev = Clock::projectedEpochUs();
+  const int64_t replyEpoch = tv ? static_cast<int64_t>(tv->tv_sec) : 0;
+  const int64_t replyMonotonicUs = esp_timer_get_time();
+  Clock::refreshProjection();
+
   portENTER_CRITICAL(&gSntpMux);
   gSntpPrevProjUs = prev;
+  gSntpLastReplyEpoch = replyEpoch;
+  gSntpLastReplyMonotonicUs = replyMonotonicUs;
+  ++gSntpSyncCount;
+  gSntpDrainPending = true;
+  if (gSntpAwaitingLateReply) {
+    gSntpAwaitingLateReply = false;
+    ++gSntpLateReplyCount;
+    gSntpLateNoticeReplyCount = gSntpSyncCount;
+    gSntpLateNoticePending = true;
+  }
   portEXIT_CRITICAL(&gSntpMux);
-  Clock::refreshProjection();
-  gSntpSyncCount = gSntpSyncCount + 1;
-  gSntpDrainPending = true;  // release: flag last
+}
+
+NtpRuntimeStatus getNtpRuntimeStatus() {
+  NtpRuntimeStatus status{};
+  const int64_t nowUs = esp_timer_get_time();
+
+  portENTER_CRITICAL(&gSntpMux);
+  status.replyCount = gSntpSyncCount;
+  status.foregroundTimeoutCount = gSntpForegroundTimeoutCount;
+  status.lateReplyCount = gSntpLateReplyCount;
+  status.lastReplyEpoch = gSntpLastReplyEpoch;
+  status.awaitingLateReply = gSntpAwaitingLateReply;
+  const int64_t lastReplyUs = gSntpLastReplyMonotonicUs;
+  portEXIT_CRITICAL(&gSntpMux);
+
+  status.clientArmed = esp_sntp_enabled();
+  if (status.replyCount > 0 && lastReplyUs > 0 && nowUs >= lastReplyUs) {
+    status.lastReplyAgeMs = static_cast<uint64_t>(nowUs - lastReplyUs) / 1000ULL;
+  }
+  return status;
 }
 
 void ntpSyncDrainTick() {
-  if (!gSntpDrainPending) return;
-  gSntpDrainPending = false;
+  bool drainPending = false;
+  bool lateNoticePending = false;
+  int64_t prevUs = 0;
+  uint32_t lateReplyNumber = 0;
+
   portENTER_CRITICAL(&gSntpMux);
-  const int64_t prevUs = gSntpPrevProjUs;
+  if (gSntpDrainPending) {
+    drainPending = true;
+    prevUs = gSntpPrevProjUs;
+    gSntpDrainPending = false;
+  }
+  if (gSntpLateNoticePending) {
+    lateNoticePending = true;
+    lateReplyNumber = gSntpLateNoticeReplyCount;
+    gSntpLateNoticePending = false;
+  }
   portEXIT_CRITICAL(&gSntpMux);
-  const time_t before = (time_t)(prevUs / 1000000LL);
-  Clock::clockStepped(Clock::SYNC_NTP, before);
+
+  if (!drainPending && !lateNoticePending) return;
+  if (drainPending) {
+    const time_t before = static_cast<time_t>(prevUs / 1000000LL);
+    Clock::clockStepped(Clock::SYNC_NTP, before);
+  }
+  if (lateNoticePending) {
+    char message[96];
+    snprintf(message, sizeof(message),
+             "[OK] NTP reply received after foreground timeout (reply #%lu)",
+             static_cast<unsigned long>(lateReplyNumber));
+    broadcastOutput(message);
+  }
   // Duties (step log, edge event, marker, anchor, resolve, scheduler wake,
   // RTC write-back) drain via Clock::clockDutiesTick() on this same lap.
 }
@@ -2512,9 +2681,9 @@ void setupNTP() {
   static char sNtpServer[64];
   strlcpy(sNtpServer, gSettings.ntpServer.c_str(), sizeof(sNtpServer));
 
-  // NOTE: only server slot 0 is real until CONFIG_LWIP_SNTP_MAX_SERVERS>1
-  // lands; the two extras below are silently ignored by lwIP when the slot
-  // count is 1. Kept in the call so raising the config makes them live.
+  // configTime forwards all three names. lwIP uses as many as the board's
+  // CONFIG_LWIP_SNTP_MAX_SERVERS provides (the current XIAO build provides
+  // all three); any extras remain harmless on a smaller-slot build.
   configTime(gmtOffset, 0,
              sNtpServer,             // Primary (usually pool.ntp.org)
              "time.google.com",      // Backup (needs MAX_SERVERS >= 2)
@@ -2526,8 +2695,8 @@ void setupNTP() {
   // the hook that keeps a future DST rule alive across NTP restarts.
   Clock::applyTimezone();
 
-  DEBUG_NTP_SETUPF("[NTP Setup] configTime() done; primary=%s (backups live once MAX_SERVERS>1)",
-                   sNtpServer);
+  DEBUG_NTP_SETUPF("[NTP Setup] configTime() done; primary=%s, server slots=%d",
+                   sNtpServer, CONFIG_LWIP_SNTP_MAX_SERVERS);
 }
 
 bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
@@ -2550,7 +2719,7 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
   // land between sntp_init and our first poll.
   const time_t preSyncTime = time(nullptr);
   const bool preSet = Clock::isValidEpoch(preSyncTime);
-  const uint32_t startCount = gSntpSyncCount;
+  const uint32_t startCount = beginSntpForegroundWait();
 
   broadcastOutput("Synchronizing time with NTP server...");
   setupNTP();
@@ -2562,8 +2731,9 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
   // "NTP synchronized" without a single packet coming back.
   //
   // Wait budget: a dark boot has nothing better to do than wait the full
-  // window; a boot whose clock is already valid shouldn't stall the caller —
-  // the background daemon keeps retrying either way.
+  // window; a boot whose clock is already valid shouldn't stall the caller.
+  // Reaching the deadline proves only "no reply during this wait". The live
+  // client state is reported separately as armed/stopped below.
   bool ntpSynced = false;
   const int maxWaitSeconds = preSet ? 7 : 15;
   const int iterationsPerSecond = 10;  // 100ms per iteration
@@ -2580,12 +2750,21 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
       broadcastOutput(progressMsg);
     }
 
-    if (gSntpSyncCount != startCount) {
+    const uint32_t replyCount = sntpReplyCountSnapshot();
+    if (replyCount != startCount) {
       DEBUG_NTP_SYNCF("[syncNTPAndResolve] SNTP reply received (count %lu)",
-                      (unsigned long)gSntpSyncCount);
+                      static_cast<unsigned long>(replyCount));
       ntpSynced = true;
       break;
     }
+  }
+
+  // Close the final-check race under the same mux as the callback. A callback
+  // that wins first turns this into foreground success; one that arrives
+  // after this transition is counted and announced as a late reply.
+  const bool clientArmedAtDeadline = esp_sntp_enabled();
+  if (!ntpSynced) {
+    ntpSynced = !markSntpForegroundTimeout(startCount, clientArmedAtDeadline);
   }
 
   if (ntpSynced) {
@@ -2616,26 +2795,18 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
                   WiFi.dnsIP().toString().c_str(),
                   WiFi.gatewayIP().toString().c_str());
 
-  // A reply can land in the milliseconds between the loop's final check and
-  // here; without this re-check the dark path below would immediately
-  // overwrite the just-corrected clock with drifted RTC time.
-  if (gSntpSyncCount != startCount) {
-    broadcastOutput("[OK] NTP time synchronized");
-    if (preSet) {
-      writeBootAnchor();
-      resolvePendingUserCreationTimes();
-      logTimeSyncedMarkerIfReady("ntp");
-    }
-    if (outcomeOut) *outcomeOut = NtpSyncOutcome::Reply;
-    return true;
+  if (clientArmedAtDeadline) {
+    BROADCAST_PRINTF("[INFO] No NTP reply within %d seconds; SNTP client remains armed",
+                     maxWaitSeconds);
+  } else {
+    BROADCAST_PRINTF("[WARN] No NTP reply within %d seconds; SNTP client is stopped",
+                     maxWaitSeconds);
   }
 
   if (preSet) {
-    // Honest version of what used to print "[OK] NTP time synchronized
-    // successfully" on iteration 0: no reply yet, but the clock is valid
-    // from an earlier source, so nothing is wrong — the daemon keeps
-    // retrying in the background and the drain reports when it lands.
-    broadcastOutput("[OK] Clock keeps its current time; NTP still trying in background");
+    // No reply yet, but a prior source already supplied a valid clock. Keep
+    // that distinct from both an NTP success and the armed client state.
+    broadcastOutput("[OK] Clock kept its existing time");
     writeBootAnchor();
     resolvePendingUserCreationTimes();
     // Marker names WHO supplied this boot's clock: the ledger when a real
@@ -2653,7 +2824,7 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
 #if ENABLE_RTC_SENSOR
   if (gRtcRunning && gRtcConnected) {
     if (rtcSyncToSystem()) {
-      broadcastOutput("[OK] System time set from RTC (NTP unavailable)");
+      broadcastOutput("[OK] System time set from RTC (no NTP reply in foreground window)");
       if (outcomeOut) *outcomeOut = NtpSyncOutcome::RtcFallback;
       return true;
     }
@@ -2661,7 +2832,7 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
 #endif
 
   broadcastOutput("[ERROR] NTP sync timeout - no other time source");
-  broadcastOutput("  Note: Your router may be blocking NTP (UDP port 123)");
+  broadcastOutput("  Check internet access, DNS, and whether UDP port 123 is blocked");
   return false;
 }
 
@@ -2871,8 +3042,10 @@ extern const size_t llmCommandsCount;
 // Module registry - collects all command tables from modules
 // Now includes metadata: description, flags, isConnected callback
 // Order matters for help display; longest-match search handles conflicts
-// Columns: name, description, commands, count, flags, isConnected
-static const CommandModule gCommandModules[] = {
+// Columns: name, description, long description, commands, count pointer,
+// flags, isConnected. Count addresses are link-time constants, so this whole
+// build-specific registry remains in flash instead of writable DRAM.
+static constexpr CommandModule gCommandModules[] = {
   { "cli",        "Help and CLI navigation", "The cli module is the on-device help and CLI navigation layer, not a feature "
     "subsystem. help opens a paged help browser: bare help shows the main menu listing "
     "every registered module, help <module> drills into one module command page (and "
@@ -2881,7 +3054,7 @@ static const CommandModule gCommandModules[] = {
     "including hidden ones), and help tail (dump suppressed output) cover the rest. "
     "While the browser is open the CLI is in a help state, so back steps from a module "
     "page up to the main menu, exit leaves help mode entirely and returns to the normal "
-    "prompt, and clear wipes the CLI scrollback/history.", cliCommands,          cliCommandsCount, CMD_MODULE_CORE, nullptr },
+    "prompt, and clear wipes the CLI scrollback/history.", cliCommands,          &cliCommandsCount, CMD_MODULE_CORE, nullptr },
   { "system",     "Core system commands", "The system module holds core device commands that do not belong to any peripheral. "
     "Status and inspection: status (WiFi, filesystem, memory summary), uptime, time "
     "(uptime plus NTP wall-clock if synced), temperature and voltage (ESP32 internal "
@@ -2896,7 +3069,7 @@ static const CommandModule gCommandModules[] = {
     "connected output interfaces, and factoryreset deletes the user-accounts file so "
     "the first-boot setup wizard re-runs on next reboot while deliberately preserving "
     "WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, "
-    "reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.", commands,             commandsCount, 0, nullptr },
+    "reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.", commands,             &commandsCount, 0, nullptr },
 #if ENABLE_WIFI
   { "wifi",       "Network management (connect, scan, add/remove networks)", "The WiFi subsystem manages station-mode network connections plus the network "
     "services that ride on top of them: NTP time sync and the on-device HTTP/HTTPS "
@@ -2906,10 +3079,11 @@ static const CommandModule gCommandModules[] = {
     "previously connected network. Note two distinct disconnects: closewifi tears down "
     "the link AND stops the HTTP server and web output to free heap, while "
     "wifidisconnect (drop) leaves the radio and web server up so you can move to "
-    "another network. wifiscan lists nearby APs, ntpsync/ntpstatus handle clock sync, "
+    "another network. closewifi powers the radio down only when ESP-NOW is not "
+    "using it; 'radiopower off' is the unconditional airplane switch. wifiscan lists nearby APs, ntpsync/ntpstatus handle clock sync, "
     "and openhttp/closehttp/httpstatus run the web server (compiled in only when the "
     "HTTP server is enabled). certinfo and certgen (admin-only) manage the self-signed "
-    "HTTPS certificate.", wifiCommands,         wifiCommandsCount, CMD_MODULE_NETWORK, nullptr },
+    "HTTPS certificate.", wifiCommands,         &wifiCommandsCount, CMD_MODULE_NETWORK, nullptr },
 #endif
 #if ENABLE_ESPNOW
   { "espnow",     "ESP-NOW wireless communication (peer-to-peer, mesh)",
@@ -2923,7 +3097,7 @@ static const CommandModule gCommandModules[] = {
     "(espnowmode mesh) adds routing with a TTL and master/worker/backup roles; each "
     "device carries identity metadata (name, friendly name, room, zone, tags) queried "
     "with espnowdeviceinfo locally or espnowrequestmeta for a peer.",
-    espNowCommands,       espNowCommandsCount, CMD_MODULE_NETWORK, nullptr },
+    espNowCommands,       &espNowCommandsCount, CMD_MODULE_NETWORK, nullptr },
 #endif
 #if ENABLE_MQTT
   { "mqtt",       "MQTT broker connection for Home Assistant", "The MQTT subsystem connects the device to a broker, primarily to publish its "
@@ -2936,7 +3110,7 @@ static const CommandModule gCommandModules[] = {
     "a live session. openmqtt and closemqtt start and stop the client, mqttstatus shows "
     "connection state, and mqttautostart controls whether it connects at boot. For "
     "inbound data, enable mqttSubscribeExternal with mqttSubscribeTopics; values "
-    "received from those topics are cached and read back with mqttExternalSensors.", mqttCommands,         mqttCommandsCount, CMD_MODULE_NETWORK, nullptr },
+    "received from those topics are cached and read back with mqttExternalSensors.", mqttCommands,         &mqttCommandsCount, CMD_MODULE_NETWORK, nullptr },
 #endif
   #if ENABLE_BLUETOOTH
   { "bluetooth",  "Bluetooth LE control and status", "The Bluetooth subsystem runs the device BLE stack in one of two mutually exclusive "
@@ -2951,7 +3125,7 @@ static const CommandModule gCommandModules[] = {
     "ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and "
     "required with blesecure; both are admin-only, as is blerequireauth. Boot "
     "reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] "
-    "(see blepeers for names).", bluetoothCommands, bluetoothCommandsCount, CMD_MODULE_NETWORK, nullptr },
+    "(see blepeers for names).", bluetoothCommands, &bluetoothCommandsCount, CMD_MODULE_NETWORK, nullptr },
   #endif
   { "filesystem", "File operations and storage management", "Manages files and directories on the device internal LittleFS flash. Browse with "
     "files [\"/path\"] (add json for app/BLE, or files stats json for storage usage); "
@@ -2966,7 +3140,7 @@ static const CommandModule gCommandModules[] = {
     "post-save hooks. Access is permission-gated per path: system trees like /system "
     "are read-only (or browse-only) for admins, while user data is fully writable; "
     "logtier reports whether logs are writing to LittleFS or have spilled into SD "
-    "overflow.", filesystemCommands,   filesystemCommandsCount, 0, nullptr },
+    "overflow.", filesystemCommands,   &filesystemCommandsCount, 0, nullptr },
 #if defined(SD_CS_PIN)
   { "sd",         "SD card mount, format, and info", "Controls the optional microSD card, which mounts at /sd and serves as "
     "overflow/bulk storage (and is only compiled in on boards that wire a "
@@ -2975,7 +3149,7 @@ static const CommandModule gCommandModules[] = {
     "runs a raw-SPI hardware diagnostic to troubleshoot a card that will not mount. "
     "sdformat erases the entire card and reformats it as FAT32 and therefore requires "
     "sdformat confirm to proceed. Once mounted, file commands address the card through "
-    "its /sd/... path prefix.", sdCommands,           sdCommandsCount, 0, []() { return VFS::isSDAvailable(); } },
+    "its /sd/... path prefix.", sdCommands,           &sdCommandsCount, 0, []() { return VFS::isSDAvailable(); } },
 #endif
   { "oled",       "OLED display control and graphics", "Drives the small SSD1306 OLED display: its lifecycle, the live screen contents, "
     "and persistent appearance settings. oledstart/oledstop (aliases "
@@ -2990,7 +3164,7 @@ static const CommandModule gCommandModules[] = {
     "oledflip, oledbootduration, oledupdateinterval, oledthermalscale, "
     "oledthermalcolormode, and oledenabled tune appearance and timing. oledrequireauth "
     "<0|1> (admin-only) controls whether a user must log in at the display before "
-    "interacting with it.", oledCommands,         oledCommandsCount, 0, nullptr },
+    "interacting with it.", oledCommands,         &oledCommandsCount, 0, nullptr },
 #if ENABLE_NEOPIXEL
   { "neopixel",   "RGB LED strip and effects", "Controls the addressable RGB status LED (WS2812/NeoPixel). ledcolor <name> lights "
     "it a solid color from a fixed palette (red, green, blue, yellow, magenta, cyan, "
@@ -2999,7 +3173,7 @@ static const CommandModule gCommandModules[] = {
     "effect (defaults: red/blue, 3000 ms; ledeffect off clears it). These commands "
     "change the LED immediately and are not saved -- the persistent power-on brightness "
     "and startup animation live in the led settings module, not here. Note the effect "
-    "call runs synchronously for its full duration before returning.", neopixelCommands,     neopixelCommandsCount, 0, nullptr },
+    "call runs synchronously for its full duration before returning.", neopixelCommands,     &neopixelCommandsCount, 0, nullptr },
   { "led",        "LED brightness and startup effects", "Configures the board onboard single LED -- its brightness and the one-shot effect "
     "played at startup. These are persistent settings written to flash, not live "
     "controls: ledbrightness <0-100> sets the global brightness, ledstartupenabled "
@@ -3007,7 +3181,7 @@ static const CommandModule gCommandModules[] = {
     "<none|rainbow|pulse|fade|blink|strobe> with ledstartupcolor, ledstartupcolor2, and "
     "ledstartupduration <100-10000ms> define what plays on power-up. (The live, "
     "immediate RGB controls are the separate ledcolor/ledeffect commands in the "
-    "neopixel module.)", ledCommands,           ledCommandsCount, 0, nullptr },
+    "neopixel module.)", ledCommands,           &ledCommandsCount, 0, nullptr },
 #endif  // ENABLE_NEOPIXEL (neopixel + led modules)
 #if ENABLE_SERVO
   { "servo",      "PCA9685 servo motor control", "The PCA9685 is a 16-channel I2C PWM driver used to control hobby servos (and "
@@ -3018,7 +3192,7 @@ static const CommandModule gCommandModules[] = {
     "servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name> stores a per-channel "
     "calibration that maps angles to the correct pulse widths (servolist shows the "
     "saved profiles), and servocalibrate <channel> opens an interactive mode to find "
-    "those pulse limits by hand.", servoCommands,        servoCommandsCount, 0, nullptr },
+    "those pulse limits by hand.", servoCommands,        &servoCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_THERMAL_SENSOR
   { "thermal",    "MLX90640 thermal camera (32x24)", "The MLX90640 is a 32x24 (768-pixel) infrared thermal camera. openthermal starts "
@@ -3033,7 +3207,7 @@ static const CommandModule gCommandModules[] = {
     "the 32x24 grid for the web/OLED view. Frame readings are stabilized by "
     "temporal/EWMA smoothing, per-pixel outlier rejection, and an optional rolling "
     "min/max auto-scale that keeps the color scale from flickering; thermaldiag prints "
-    "a hardware self-check.", thermalCommands,      thermalCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("thermal"); } },
+    "a hardware self-check.", thermalCommands,      &thermalCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("thermal"); } },
 #endif
 #if ENABLE_TOF_SENSOR
   { "tof",        "VL53L4CX time-of-flight distance sensor", "The VL53L4CX is a laser time-of-flight ranging sensor that measures distance to "
@@ -3046,7 +3220,7 @@ static const CommandModule gCommandModules[] = {
     "reported. Most tunables are client-side visualization knobs rather than sensor "
     "settings: tofpollingms, toftransitionms, and tofmaxdistancemm shape the UI, "
     "tofstabilitythreshold sets how steady a reading must be, and tofdevicepollms "
-    "controls how often the firmware reads the hardware.", tofCommands,          tofCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("tof"); } },
+    "controls how often the firmware reads the hardware.", tofCommands,          &tofCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("tof"); } },
 #endif
 #if ENABLE_IMU_SENSOR
   { "imu",        "BNO055 9-DOF orientation sensor", "The BNO055 is a 9-DOF inertial measurement unit providing fused absolute "
@@ -3060,7 +3234,7 @@ static const CommandModule gCommandModules[] = {
     "pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, "
     "90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles "
     "that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in "
-    "degrees.", imuCommands,          imuCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("imu"); } },
+    "degrees.", imuCommands,          &imuCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("imu"); } },
 #endif
 #if ENABLE_OLED_INPUT
   { "input",      "Input device (gamepad or ANO encoder)", "Device-agnostic abstraction for the OLED input controller, which is either the "
@@ -3071,7 +3245,7 @@ static const CommandModule gCommandModules[] = {
     "and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default "
     "90). Driver-specific debugging and tuning live in the gamepad and anoencoder "
     "modules; this module holds only the shared settings (poll interval and "
-    "auto-start).", inputCommands,       inputCommandsCount,       CMD_MODULE_SENSOR, []() { return gInputConnected; } },
+    "auto-start).", inputCommands,       &inputCommandsCount,       CMD_MODULE_SENSOR, []() { return gInputConnected; } },
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   { "gamepad",    "Seesaw gamepad — raw debug commands", "Adafruit Seesaw I2C gamepad (analog joystick plus buttons), exposed here as a "
@@ -3082,7 +3256,7 @@ static const CommandModule gCommandModules[] = {
     "with backoff if the device is not yet initialized. A background task polls the "
     "gamepad at roughly 50 ms and caches the latest reading for the OLED UI and sensor "
     "JSON. This module is mutually exclusive at build time with anoencoder; only one "
-    "input device is compiled in per firmware (see input).", gamepadCommands,      gamepadCommandsCount, CMD_MODULE_SENSOR, []() { return gInputConnected; } },
+    "input device is compiled in per firmware (see input).", gamepadCommands,      &gamepadCommandsCount, CMD_MODULE_SENSOR, []() { return gInputConnected; } },
 #endif
 #if ENABLE_ANO_ENCODER
   { "anoencoder", "ANO rotary encoder — debug + driver-specific config", "Adafruit ANO directional navigation rotary encoder on Seesaw I2C: a click wheel "
@@ -3095,7 +3269,7 @@ static const CommandModule gCommandModules[] = {
     "rotation direction, and anoencoderswapud / anoencoderswaplr [on|off|toggle] swap "
     "the UP/DOWN and LEFT/RIGHT button pairs. A polling task accumulates encoder "
     "detents so fast spins do not drop clicks. Mutually exclusive at build time with "
-    "the Seesaw gamepad.", anoEncoderCommands, anoEncoderCommandsCount, CMD_MODULE_SENSOR, []() { return gAnoEncoderConnected; } },
+    "the Seesaw gamepad.", anoEncoderCommands, &anoEncoderCommandsCount, CMD_MODULE_SENSOR, []() { return gAnoEncoderConnected; } },
 #endif
 #if ENABLE_APDS_SENSOR
   { "apds",       "APDS9960 color, proximity, gesture sensor", "The APDS9960 is a combined RGB color, proximity, and gesture sensor. openapds "
@@ -3107,7 +3281,7 @@ static const CommandModule gCommandModules[] = {
     "gesture also turns proximity on, since the gesture engine needs it. Dedicated "
     "reads apdscolor, apdsproximity, and apdsgesture print a single sample on demand "
     "(gesture returns UP/DOWN/LEFT/RIGHT), and apdsdevicepollms sets how often the "
-    "background task samples the hardware.", apdsCommands,         apdsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("apds"); } },
+    "background task samples the hardware.", apdsCommands,         &apdsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("apds"); } },
 #endif
 #if ENABLE_GPS_SENSOR
   { "gps",        "PA1010D GPS module", "PA1010D I2C GPS receiver. Lifecycle: opengps starts the parser task, gpsread "
@@ -3119,7 +3293,7 @@ static const CommandModule gCommandModules[] = {
     "distinctive gpslog [interval_ms] command is a one-shot setup that turns on "
     "gpsAutoStart, configures sensorlog to format=track with sensors=gps, then "
     "immediately starts both the GPS sensor and the logger to record a track (default "
-    "1000 ms, minimum 100 ms) that persists across reboots.", gpsCommands,          gpsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("gps"); } },
+    "1000 ms, minimum 100 ms) that persists across reboots.", gpsCommands,          &gpsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("gps"); } },
 #endif
 #if ENABLE_FM_RADIO
   { "fmradio",    "RDA5807 FM radio receiver", "RDA5807M I2C FM radio receiver. Lifecycle: openfmradio starts it, fmradioread "
@@ -3133,7 +3307,7 @@ static const CommandModule gCommandModules[] = {
     "'fmradioread' (JSON field \"seeking\") or the OLED FM screen. fmradiovolume <0-15> "
     "sets output level, and fmradiomute / fmradiounmute toggle audio. The OLED FM "
     "screen drives all of this from the gamepad: L/R tune, Up/Down seek, A mute, "
-    "Y volume, X power.", fmRadioCommands,      fmRadioCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("fmradio"); } },
+    "Y volume, X power.", fmRadioCommands,      &fmRadioCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("fmradio"); } },
 #endif
 #if ENABLE_RTC_SENSOR
   { "rtc",        "DS3231 precision RTC", "DS3231 precision I2C real-time clock with battery backup and an on-chip "
@@ -3145,7 +3319,7 @@ static const CommandModule gCommandModules[] = {
     "between the RTC and the system clock: to (the default) copies RTC -> system, from "
     "copies system -> RTC (use this after an NTP sync to persist accurate time into the "
     "battery-backed chip). Setting the time via rtcset or rtcsync from also marks the "
-    "RTC as calibrated so later boots trust it as a time source.", rtcCommands,          rtcCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("rtc"); } },
+    "RTC as calibrated so later boots trust it as a time source.", rtcCommands,          &rtcCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("rtc"); } },
 #endif
 #if ENABLE_PRESENCE_SENSOR
   { "presence",   "STHS34PF80 IR presence/motion sensor", "The STHS34PF80 is an infrared presence and motion sensor that detects warm bodies "
@@ -3155,7 +3329,7 @@ static const CommandModule gCommandModules[] = {
     "boot. The sensor is initialized at an 8 Hz output data rate with block-data-update "
     "enabled, and its on-chip presence/motion/ambient-shock detection engines provide "
     "the detection flags directly; presencestatus prints connection and data-validity "
-    "diagnostics, and presencedevicepollms controls the hardware read interval.", presenceCommands,     presenceCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("presence"); } },
+    "diagnostics, and presencedevicepollms controls the hardware read interval.", presenceCommands,     &presenceCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("presence"); } },
 #endif
 #if ENABLE_CAMERA_SENSOR
   { "camera",     "ESP32-S3 DVP camera sensor", "Driver and CLI for the attached DVP camera sensor (OV2640/OV3660 class). The "
@@ -3173,7 +3347,7 @@ static const CommandModule gCommandModules[] = {
     "register writes) adjust the live image. Automation settings (cameraautostart, "
     "cameraautocapture/cameraautocaptureinterval, "
     "camerasendaftercapture/cameratargetdevice) drive timed capture and optional "
-    "ESP-NOW delivery to a named peer.", cameraCommands,       cameraCommandsCount, CMD_MODULE_SENSOR, []() { return cameraConnected; } },
+    "ESP-NOW delivery to a named peer.", cameraCommands,       &cameraCommandsCount, CMD_MODULE_SENSOR, []() { return cameraConnected; } },
 #endif
 #if ENABLE_MICROPHONE
   { "microphone", "Microphone (PDM or G2 glasses)", "Driver and CLI for the microphone — the on-board PDM mic and/or the G2 glasses mic, selected with micsource. The mic must be started with "
@@ -3186,18 +3360,7 @@ static const CommandModule gCommandModules[] = {
     "lists saved recordings, while micdelete and micdeleteid remove manual or exact "
     "owner-scoped results. Audio format is configured with micsamplerate (8000-48000), micgain (0-100), "
     "and micbitdepth (16 or 32), each usable as a getter with no argument; micautostart "
-    "on|off persists whether the mic powers up automatically at boot.", micCommands,          micCommandsCount, CMD_MODULE_SENSOR, []() { return audioAnySourceAvailable(); } },
-#endif
-#if ENABLE_DICTATION
-  { "dictation", "Speech as a text input method", "Host half of the OLED keyboard's mic page. The wearer arms a capture from the keyboard "
-    "(whichever mic the source layer has resolved — on-board PDM or the G2 glasses), the firmware records it with VAD auto-stop and pushes a "
-    "dictate_request <id> <path> event on the authenticated UART link, and the CM5 host voicefetches the WAV, transcribes it, and returns the "
-    "words with dictate result <id> <text> — the text runs to end of line, so it needs no quoting or escaping. dictate fail <id> [reason] "
-    "reports a transcription that could not be produced, and dictate status reports the current state, active mic source and elapsed time. "
-    "The id is single-use and bound to the display session that armed it, so a transcript can never land in a field belonging to a different "
-    "user; the recording is deleted once its words are delivered. This device cannot transcribe speech on its own, so the whole command "
-    "family is UART-only and inert without a logged-in host.", dictationCommands, dictationCommandsCount,
-    CMD_MODULE_SENSOR, []() { return dictationAvailable(nullptr); } },
+    "on|off persists whether the mic powers up automatically at boot.", micCommands,          &micCommandsCount, CMD_MODULE_SENSOR, []() { return audioAnySourceAvailable(); } },
 #endif
 #if ENABLE_EDGE_IMPULSE
   { "edgeimpulse", "Edge Impulse ML inference", "On-device machine-learning image inference using TensorFlow Lite Micro models "
@@ -3212,7 +3375,7 @@ static const CommandModule gCommandModules[] = {
     "background, eiconfidence <0.0-1.0> sets the minimum confidence to report, and "
     "eistatus shows current state. The eitrack family (eitrackenable, eitrackstatus, "
     "eitrackclear) adds cross-frame state tracking of detected objects on top of raw "
-    "detections.", edgeImpulseCommands,  edgeImpulseCommandsCount, CMD_MODULE_SENSOR, nullptr },
+    "detections.", edgeImpulseCommands,  &edgeImpulseCommandsCount, CMD_MODULE_SENSOR, nullptr },
 #endif
 
  #if ENABLE_ESP_SR
@@ -3230,7 +3393,7 @@ static const CommandModule gCommandModules[] = {
     "srtimeout, the srtuning* audio controls (gain, AGC, VAD, filters), and srdebug* "
     "telemetry; the mic feed follows the device-wide source (set with `micsource "
     "auto|pdm|g2` — onboard PDM or the G2 glasses left-temple mic), and the srsnip* commands capture audio "
-    "snippets (by default on the wake word) for debugging.", espsrCommands,  espsrCommandsCount, CMD_MODULE_SENSOR, nullptr },
+    "snippets (by default on the wake word) for debugging.", espsrCommands,  &espsrCommandsCount, CMD_MODULE_SENSOR, nullptr },
  #endif
 #if ENABLE_I2C_SYSTEM
   { "i2c",        "I2C bus diagnostics and scanning", "The i2c module configures and diagnoses up to two I2C buses and the sensor device "
@@ -3238,7 +3401,9 @@ static const CommandModule gCommandModules[] = {
     "(Arduino Wire1, the primary STEMMA QT / sensor bus) and bus 1 is I2C2 (Wire, the "
     "optional secondary bus); each has its own enable flag and SDA/SCL pin settings, "
     "and bus/pin changes require a reboot. Each sensor can be routed to either bus with "
-    "a per-device command (oledBus, gpsBus, rtcBus, imuBus, thermalBus, tofBus, etc.), "
+    "a per-device command. Each sensor's routing verb now lives in that sensor's own "
+    "module (run 'help gps' for gpsBus, 'help rtc' for rtcBus, and so on); oledBus, "
+    "inputBus and fuelGaugeBus stay here. The persisted setting names are unchanged. "
     "all taking 0 or 1 and needing a reboot. Discovery and diagnostics: i2cscan dumps "
     "raw addresses found on each active bus; detect reports configured-vs-present "
     "hardware and detect apply (admin) auto-enables newly detected cheap devices; "
@@ -3247,7 +3412,7 @@ static const CommandModule gCommandModules[] = {
     "does a pause-recover-resume cycle, and i2crecover <address> clears a single device "
     "degraded state. The device registry is exposed via sensors [filter|json], "
     "sensorinfo <name>, devices, discover, and devicefile; sensorautostart [sensor] "
-    "[on|off] controls which sensors start polling automatically at boot.", i2cCommands,          i2cCommandsCount, 0, nullptr },
+    "[on|off] controls which sensors start polling automatically at boot.", i2cCommands,          &i2cCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_AUTOMATION
   { "automation", "Scheduled tasks and conditional commands", "The automation module runs saved jobs (stored in automations.json) that execute "
@@ -3278,7 +3443,7 @@ static const CommandModule gCommandModules[] = {
     "string/enum variables use = != CONTAINS. A true condition fires every time its "
     "trigger is due. Supporting commands: validate-conditions checks conditional syntax without "
     "running it, autolog records automation activity to a file, and print <message> "
-    "broadcasts text to all outputs.", automationCommands,   automationCommandsCount, 0, nullptr },
+    "broadcasts text to all outputs.", automationCommands,   &automationCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_BATTERY_MONITOR
   { "battery",    "Battery voltage and charge monitoring", "The battery module reports cell state and keeps a time-series log; it is only "
@@ -3292,7 +3457,7 @@ static const CommandModule gCommandModules[] = {
     "shows status, and subcommands are on/off (enable/disable), interval <5..3600> "
     "seconds (sampling period), tail (show the most recent rows), and clear (erase the "
     "log); significant events such as sleep/wake are always recorded regardless of the "
-    "interval. batterycalibrate (admin) re-calibrates the ADC-based readings.", batteryCommands,      batteryCommandsCount, 0, nullptr },
+    "interval. batterycalibrate (admin) re-calibrates the ADC-based readings.", batteryCommands,      &batteryCommandsCount, 0, nullptr },
 #endif
   { "debug",      "System debugging and diagnostics", "The debug subsystem controls diagnostic logging verbosity across every part of the "
     "firmware. Its core is a large set of per-subsystem debug-flag toggles (for example "
@@ -3308,7 +3473,7 @@ static const CommandModule gCommandModules[] = {
     "runtime CLI streams to G2 glasses / BLE clients (session-only, reset on "
     "reboot), log starts/stops system-wide logging to a file, loglink routes ESP-IDF "
     "framework logs through the unified output queue, and debugstack/debugbuffer expose "
-    "low-level trace and queue diagnostics.", debugCommands,        debugCommandsCount, 0, nullptr },
+    "low-level trace and queue diagnostics.", debugCommands,        &debugCommandsCount, 0, nullptr },
   { "settings",   "Device configuration and preferences", "The settings subsystem holds the device persisted configuration and the commands "
     "that change it. Each setting command (for example outserial, "
     "serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, "
@@ -3322,7 +3487,7 @@ static const CommandModule gCommandModules[] = {
     "machine-readable JSON descriptor of a module settable controls for UI use. Note "
     "that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) "
     "are owned and registered by their own modules; this module hosts the cross-cutting "
-    "CLI/output/auth/time settings plus the batch-write machinery.", settingsCommands,     settingsCommandsCount, 0, nullptr },
+    "CLI/output/auth/time settings plus the batch-write machinery.", settingsCommands,     &settingsCommandsCount, 0, nullptr },
   { "sensorlog", "Sensor data logging to files", "Periodically samples the onboard sensors and appends readings to a file, driven by "
     "the single multiplexed sensorlog <subcommand> command. sensorlog start <filepath> "
     "[interval_ms] begins logging (default 5000 ms; the filepath must start with / and "
@@ -3338,7 +3503,7 @@ static const CommandModule gCommandModules[] = {
     "deletes the active file at the size cap rather than pruning older generations. "
     "sensorlog autostart [on|off] makes logging "
     "resume on the next boot using the last-used parameters; the "
-    "format/maxsize/rotations/sensors/autostart choices are persisted.", sensorLoggingCommands, sensorLoggingCommandsCount, 0, nullptr },
+    "format/maxsize/rotations/sensors/autostart choices are persisted.", sensorLoggingCommands, &sensorLoggingCommandsCount, 0, nullptr },
 #if ENABLE_R1_HEALTH
   { "health",     "R1 ring health vitals and local health logging", "Live vitals from a paired R1 ring (HR, HRV, SpO2, temperature, battery) "
     "plus the on-device health logger. healthstatus reads live values, ring control state, "
@@ -3346,7 +3511,7 @@ static const CommandModule gCommandModules[] = {
     "healthlogging drives the local CSV logger independently of the ring's own health-collection "
     "privacy setting, and healthlogmerge stitches captures together. The ring rides the G2 BLE "
     "transport, so this whole family requires Bluetooth + G2; connect via ringconnect.",
-    healthCommands, healthCommandsCount, 0, nullptr },
+    healthCommands, &healthCommandsCount, 0, nullptr },
 #endif
   { "users",      "User authentication and management", "The users subsystem provides admin-gated account management, authentication, "
     "sessions, and bans. Accounts have two roles, admin and standard; the first account "
@@ -3363,7 +3528,7 @@ static const CommandModule gCommandModules[] = {
     "banuser/unbanuser suspend a user account so it cannot log in until unbanned; the "
     "primary admin account cannot be banned. usersync pushes a user credentials to "
     "another device over ESP-NOW, authenticated by an admin account on the receiving "
-    "device.", userSystemCommands,         userSystemCommandsCount, CMD_MODULE_ADMIN, nullptr },
+    "device.", userSystemCommands,         &userSystemCommandsCount, CMD_MODULE_ADMIN, nullptr },
   { "features",   "System feature management", "The features subsystem enables or disables compiled-in capabilities at runtime and "
     "reports their memory cost. features with no argument lists every feature grouped "
     "by category (Network, Display, Sensors, System) with an approximate heap estimate "
@@ -3374,7 +3539,7 @@ static const CommandModule gCommandModules[] = {
     "flagged reboot required so the toggle persists but the capability does not "
     "actually start or stop until the next restart. featuresetup launches an "
     "interactive, admin-only wizard that walks through the same toggles and works from "
-    "any CLI transport.", featureCommands,      featureCommandsCount, 0, nullptr },
+    "any CLI transport.", featureCommands,      &featureCommandsCount, 0, nullptr },
 #if ENABLE_CAMERA_SENSOR
   { "image",      "Image capture and management", "Captures stills from the camera and manages the saved photo library. capture grabs "
     "a frame and saves it as a JPG (target storage chosen by argument: littlefs/lfs, "
@@ -3384,7 +3549,7 @@ static const CommandModule gCommandModules[] = {
     "sd to list the card, json for app/BLE output); imagedelete \"<path>\" removes one "
     "(path must be quoted). imagesend transmits a photo to another device over ESP-NOW: "
     "imagesend <device> \"<path>\" resolves the device by name or MAC and sends the "
-    "named file (path required).", imageCommands,        imageCommandsCount, 0, nullptr },
+    "named file (path required).", imageCommands,        &imageCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_MAPS
   { "map",        "Map navigation and waypoints", "On-device offline map subsystem backed by region map files stored under /maps/ "
@@ -3398,7 +3563,7 @@ static const CommandModule gCommandModules[] = {
     "(list/add/del/goto/clear/clearall/rename/notes) and can have files attached via "
     "waypointfile/waypointfiles; gpstrack loads, inspects, or clears a recorded GPS "
     "breadcrumb track (and rejects tracks that fall outside the loaded map bounds), and "
-    "maporganize sorts loose files in /maps into subdirectories.", mapCommands,          mapCommandsCount, 0, nullptr },
+    "maporganize sorts loose files in /maps into subdirectories.", mapCommands,          &mapCommandsCount, 0, nullptr },
   { "mapsettings","Maps app settings (zoom, layers, cache)", "Persisted rendering defaults for the maps app, stored under apps.maps and applied "
     "to the live map at boot. mapzoom <0.5..20.0> sets the initial zoom, maplayers "
     "<0..1023> sets a bitmask controlling which feature layers are drawn, and "
@@ -3406,7 +3571,7 @@ static const CommandModule gCommandModules[] = {
     "also mirror immediately into the running renderer so changes take effect without a "
     "reboot, but the cache size only re-applies on the next map load (or reboot). All "
     "three are admin-only and, run from the CLI, write to flash immediately so they "
-    "survive a reboot.", mapsSettingCommands, mapsSettingCommandsCount, 0, nullptr },
+    "survive a reboot.", mapsSettingCommands, &mapsSettingCommandsCount, 0, nullptr },
 #endif
   { "power",      "Power management", "The power subsystem manages CPU frequency and battery-oriented power saving. The "
     "main command is power: power alone prints the current mode, CPU clock, display "
@@ -3424,13 +3589,13 @@ static const CommandModule gCommandModules[] = {
     "0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) "
     "while the radio stays up so the device remains reachable, and powercooldown "
     "<0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid "
-    "back-to-back sleep transitions. All of these values persist.", powerCommands,        powerCommandsCount, 0, nullptr },
+    "back-to-back sleep transitions. All of these values persist.", powerCommands,        &powerCommandsCount, 0, nullptr },
   { "liveaudio",  "Opt-in live PCM transport and recorder shadow", "Exercises the live-pcm-v1 UART framing and bounded receiver path. "
     "A real authenticated UART host first acquires a renewable 3-second controller lease with liveaudio ready. liveaudio synth schedules "
     "deterministic 16 kHz signed-16-bit mono PCM; an explicit, exact-ID liveaudio shadow arm can instead tee an owned 16 kHz PDM or G2 "
     "recording through a fixed 16 KiB PSRAM queue. Shadow transport is disabled by default, never delays or replaces the WAV writer, and a "
     "transport fault aborts only the live copy while the finalized WAV remains authoritative. This diagnostic transport does not enable "
-    "production streaming STT, LLM, or lens delivery.", liveAudioCommands, liveAudioCommandsCount,
+    "production streaming STT, LLM, or lens delivery.", liveAudioCommands, &liveAudioCommandsCount,
     CMD_MODULE_NETWORK, nullptr },
   { "cm5", "CM5 service presence and host power/fan control", "Everything that talks to the CM5 Linux host over the authenticated UART link. "
     "cm5 status exposes the current named-UART epoch binding, freshness, state, command bridge, monitor transitions, and task stack watermark; "
@@ -3445,7 +3610,7 @@ static const CommandModule gCommandModules[] = {
     "service account stay user-tier. One request per protocol may be pending at a time and delivery retries are finite; destructive "
     "execution additionally requires confirmed accepted and committed ACK phases, while a normalized Linux boot ID distinguishes a daemon "
     "restart from a completed host boot. A max fan request may supersede one pending non-max request.",
-    cm5PresenceCommands, cm5PresenceCommandsCount,
+    cm5PresenceCommands, &cm5PresenceCommandsCount,
     CMD_MODULE_NETWORK, nullptr },
   { "ota",        "Signed firmware recovery and update", "Native ESP-IDF signed OTA support. otastatus reports the journal, "
     "partition identity, staged pair, and last result. A superadmin sets a persistent recovery credential with otapin - "
@@ -3456,7 +3621,7 @@ static const CommandModule gCommandModules[] = {
     "allow-downgrade option is required for older signed releases. otacancel replaces a staged request safely, and "
     "otaack <result-sequence> confirm acknowledges exactly the durable result that was reviewed. Mutating OTA "
     "commands are forbidden from automations and require the opt-in 16 MB OTA partition layout.",
-    otaCommands, otaCommandsCount, CMD_MODULE_ADMIN | CMD_MODULE_CORE, nullptr },
+    otaCommands, &otaCommandsCount, CMD_MODULE_ADMIN | CMD_MODULE_CORE, nullptr },
 #if ENABLE_OLED_DISPLAY
   { "setpattern", "OLED gamepad password entry", "Provides the single admin-only command setgamepadpassword, which opens the "
     "gamepad-pattern password setup flow on the OLED screen. A pattern is a sequence of "
@@ -3465,7 +3630,7 @@ static const CommandModule gCommandModules[] = {
     "first (the command errors otherwise); the guided on-screen flow then "
     "re-authenticates you, prompts you to enter the new pattern and confirm it, and "
     "saves it to your account. This command only launches the OLED mode -- the actual "
-    "entry and confirmation happen on the device screen.", setPatternCommands,   setPatternCommandsCount, 0, nullptr },
+    "entry and confirmation happen on the device screen.", setPatternCommands,   &setPatternCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "even_g2",    "Even G2 smart glasses control", "This subsystem drives Even Reality G2 smart glasses while Bluetooth is in client "
@@ -3483,7 +3648,7 @@ static const CommandModule gCommandModules[] = {
     "start/stop/status lifecycle that needs an SD card. closeg2 disconnects but keeps "
     "the GATT cache for fast reconnect; closeg2 full also frees the cache to recover "
     "about 30 KB. The remaining g2* commands are low-level protocol probes and "
-    "diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).", g2Commands,           g2CommandsCount, 0, nullptr },
+    "diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).", g2Commands,           &g2CommandsCount, 0, nullptr },
   { "even_r1",    "Even R1 ring link, health, and controls", "This subsystem talks to the Even R1 smart ring over BLE through a serialized, "
     "profile-gated transaction owner. ringscan [seconds] discovers the ring and "
     "ringconnect [mac] connects "
@@ -3496,7 +3661,7 @@ static const CommandModule gCommandModules[] = {
     "ACKed-unverified while low power has capture-proven readback. debugringdump toggles "
     "a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is "
     "deliberately unavailable -- the commands exist in the code but are intentionally "
-    "left unregistered because both approaches proved to be dead ends.", g2RingCommands,    g2RingCommandsCount, 0, nullptr },
+    "left unregistered because both approaches proved to be dead ends.", g2RingCommands,    &g2RingCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_LLM_BACKEND
   { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "
@@ -3514,13 +3679,13 @@ static const CommandModule gCommandModules[] = {
     "(temperature, topp, minp, maxtokens, sentencelimit, hardcap, reppenalty/repwindow, "
     "maxcontext, kvprec, norepeatngram, confthreshold, contentboost) are admin-only "
     "sampler and KV-cache defaults that persist to flash; kvprec and maxcontext only take "
-    "effect on the next model load.", llmCommands,          llmCommandsCount, 0, nullptr },
+    "effect on the next model load.", llmCommands,          &llmCommandsCount, 0, nullptr },
 #endif
   { "settingsedit", "Per-field settings save commands",
     "Static CLI commands the web/OLED settings screen uses to persist individual settings fields that have no dedicated module command. Each writes one setting via handleSettingCommand; the value is read live or applied on next start. Fields that need a live apply action are routed to their module command instead of getting one of these.",
-    settingEditorCommands, settingEditorCommandsCount, 0, nullptr },
+    settingEditorCommands, &settingEditorCommandsCount, 0, nullptr },
  };
-static const size_t gCommandModulesCount = sizeof(gCommandModules) / sizeof(gCommandModules[0]);
+static constexpr size_t gCommandModulesCount = sizeof(gCommandModules) / sizeof(gCommandModules[0]);
 
 const CommandModule* getCommandModules(size_t& count) {
   count = gCommandModulesCount;
@@ -3700,10 +3865,6 @@ size_t calculateSensorSystemMemory() {
 // System Diagnostic Commands
 // ============================================================================
 
-// AllocEntry struct + gAllocTracker declared in System_MemUtil.h
-extern int gAllocTrackerCount;
-extern bool gAllocTrackerEnabled;
-
 // External task watermark globals
 extern volatile UBaseType_t gTofWatermarkNow, gTofWatermarkMin;
 extern volatile UBaseType_t gImuWatermarkNow, gImuWatermarkMin;
@@ -3717,6 +3878,12 @@ extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
 
 // Comprehensive memory report - shows what's consuming memory (like Task Manager)
 void printMemoryReport() {
+  static constexpr size_t kMemReportTopCount = 15;
+  MemTrackerSnapshot allocationTraffic{};
+  MemTrackerEntry allocationTop[kMemReportTopCount]{};
+  const bool haveAllocationTraffic = memTrackerSnapshot(
+      allocationTraffic, allocationTop, kMemReportTopCount);
+
   // 8-bit-capable internal RAM only. ESP.getHeapSize()/getFreeHeap() are
   // MALLOC_CAP_INTERNAL without MALLOC_CAP_8BIT, so they fold in the IRAM-only
   // heap that no malloc/new/task stack can use, and getHeapSize() additionally
@@ -3728,6 +3895,30 @@ void printMemoryReport() {
   size_t dram_used = (dram_total > dram_free) ? (dram_total - dram_free) : 0;
   size_t dram_min = hw1InternalMinFreeBytes();
   size_t dram_peak_used = (dram_total > dram_min) ? (dram_total - dram_min) : 0;
+
+  // The allocator's own view of the SAME heap set, sampled here beside
+  // dram_total/dram_free so every figure in TOTALS comes from one moment.
+  //
+  // RAW heap_caps_get_total_size(), NOT hw1InternalTotalBytes(): the helper
+  // subtracts CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL to cancel the reserve
+  // pool's double registration (System_MemUtil.h). Allocator metadata is a
+  // property of the physical spans, so the helper would understate it by
+  // exactly the reserve size.
+  //
+  // Per heap, span = heap_t + TLSF control_t + allocated + free + 4 B per
+  // live block (multi_heap.c, multi_heap_get_info_impl), so
+  // span - free - allocated IS the bookkeeping, over the identical cap
+  // predicate heap_caps_get_total_size/get_info both apply. This is memory
+  // nobody allocated that still counts as "used": an empty heap reports its
+  // own control structures as consumed. dram_used already nets the reserve
+  // pool out, so the residual in TOTALS cancels it without naming it — exact
+  // to within one byte per reserve chunk.
+  multi_heap_info_t dram_info{};
+  heap_caps_get_info(&dram_info, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t dram_span_raw  = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t dram_span_used = dram_info.total_free_bytes + dram_info.total_allocated_bytes;
+  const size_t alloc_meta =
+      (dram_span_raw > dram_span_used) ? (dram_span_raw - dram_span_used) : 0;
 
   bool has_ps = psramFound();
   size_t ps_total = has_ps ? ESP.getPsramSize() : 0;
@@ -3741,8 +3932,6 @@ void printMemoryReport() {
   if (((uintptr_t)(&_ext_ram_noinit_start) != 0) && ((uintptr_t)(&_ext_ram_noinit_end) != 0)) {
     noinit_psram_bytes = (size_t)(&(_ext_ram_noinit_end) - &(_ext_ram_noinit_start));
   }
-
-  bool useDynamicTracking = gAllocTrackerEnabled && gAllocTrackerCount > 0;
 
   // Header + DRAM summary packed into 2 envelopes (was 8). DRAM value group
   // worst case ~172 B (4 lines), safely under the 255 B slot.
@@ -3791,8 +3980,11 @@ void printMemoryReport() {
   // diverges from total free, the heap is fragmented and big allocs
   // (page-swap workers, image probes) will fail even with apparent
   // headroom.
-  size_t cap_int_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  size_t cap_int_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  // Derived from the single sample above, not re-queried: get_free_size sums
+  // the same per-heap free_bytes get_info reports, and get_largest_free_block
+  // IS get_info(...).largest_free_block. One fewer full TLSF block walk.
+  size_t cap_int_free = dram_info.total_free_bytes;
+  size_t cap_int_largest = dram_info.largest_free_block;
   size_t cap_dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
   size_t cap_dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
   // Heap-caps header + INTERNAL + DMA packed into 1 envelope (was 4). ~161 B.
@@ -3814,210 +4006,239 @@ void printMemoryReport() {
   }
 
   broadcastOutput("");
-  broadcastOutput("-- MEMORY BREAKDOWN (Hybrid Tracking) --");
+  broadcastOutput("-- MEMORY BREAKDOWN (measured live heap + cumulative allocation traffic) --");
 
-  size_t total_known = 0;
-  size_t tracked_total = 0;
-  size_t tracked_dram = 0;  // DRAM-only subset — only this rolls into total_known
-
-  // ========== SECTION 1: Dynamic Allocations (ps_alloc tracked) ==========
-  if (useDynamicTracking) {
+  // ========== SECTION 1: Cumulative allocation traffic ==========
+  // This registry has no free hook and is deliberately not a live-ownership
+  // ledger.  Never add these values to the live heap accounting below.
+  if (haveAllocationTraffic &&
+      (allocationTraffic.enabled || allocationTraffic.entryCount > 0 ||
+       allocationTraffic.contentionDrops > 0 ||
+       allocationTraffic.invalidTagEvents > 0)) {
     broadcastOutput("");
-    broadcastOutput("[1] DYNAMIC ALLOCATIONS (ps_alloc tracked):");
+    broadcastOutput("[1] ALLOCATION TRAFFIC (cumulative since tracker reset; not live):");
+    BROADCAST_PRINTF("  State: %s  tags=%u/%u attempts=%llu successes=%llu failures=%llu fallbacks=%llu",
+                     allocationTraffic.enabled ? "ON" : "OFF",
+                     (unsigned)allocationTraffic.entryCount,
+                     (unsigned)allocationTraffic.capacity,
+                     (unsigned long long)(allocationTraffic.successCount +
+                                          allocationTraffic.failureCount),
+                     (unsigned long long)allocationTraffic.successCount,
+                     (unsigned long long)allocationTraffic.failureCount,
+                     (unsigned long long)allocationTraffic.fallbackCount);
 
-    // Sort by size (descending)
-    int sorted[64];  // MAX_ALLOC_ENTRIES
-    for (int i = 0; i < gAllocTrackerCount; i++) sorted[i] = i;
-    for (int i = 0; i < gAllocTrackerCount - 1; i++) {
-      for (int j = i + 1; j < gAllocTrackerCount; j++) {
-        if (gAllocTracker[sorted[j]].totalBytes > gAllocTracker[sorted[i]].totalBytes) {
-          int temp = sorted[i];
-          sorted[i] = sorted[j];
-          sorted[j] = temp;
-        }
-      }
-    }
-
-    int displayed = 0;
-    for (int i = 0; i < gAllocTrackerCount && displayed < 15; i++) {
-      int idx = sorted[i];
-      if (!gAllocTracker[idx].isActive) continue;
-
-      tracked_total += gAllocTracker[idx].totalBytes;
-      tracked_dram += gAllocTracker[idx].dramBytes;
-
-      // Show actual memory type breakdown
+    for (size_t i = 0; i < allocationTraffic.topCount; ++i) {
       char location[12];
-      if (gAllocTracker[idx].psramBytes > 0 && gAllocTracker[idx].dramBytes > 0) {
+      if (allocationTop[i].psramBytes > 0 && allocationTop[i].dramBytes > 0) {
         snprintf(location, sizeof(location), "PS+DR");
-      } else if (gAllocTracker[idx].psramBytes > 0) {
+      } else if (allocationTop[i].psramBytes > 0) {
         snprintf(location, sizeof(location), "PSRAM");
       } else {
         snprintf(location, sizeof(location), "DRAM");
       }
 
-      BROADCAST_PRINTF("  %-20s %6lu bytes (%2ux) %-5s",
-                      gAllocTracker[idx].tag,
-                      (unsigned long)gAllocTracker[idx].totalBytes,
-                      (unsigned)gAllocTracker[idx].count,
-                      location);
-      displayed++;
+      BROADCAST_PRINTF("  %-31.31s %8llu B ok:%llu fail:%llu fb:%llu %-5s",
+                       allocationTop[i].tag,
+                       (unsigned long long)(allocationTop[i].dramBytes +
+                                            allocationTop[i].psramBytes),
+                       (unsigned long long)allocationTop[i].successCount,
+                       (unsigned long long)allocationTop[i].failureCount,
+                       (unsigned long long)allocationTop[i].fallbackCount,
+                       location);
     }
 
-    if (displayed < gAllocTrackerCount) {
-      BROADCAST_PRINTF("  ... and %d more allocations",
-                      gAllocTrackerCount - displayed);
-      // Add remaining to totals
-      for (int i = displayed; i < gAllocTrackerCount; i++) {
-        int idx = sorted[i];
-        if (gAllocTracker[idx].isActive) {
-          tracked_total += gAllocTracker[idx].totalBytes;
-          tracked_dram += gAllocTracker[idx].dramBytes;
-        }
-      }
+    if (allocationTraffic.topCount < allocationTraffic.entryCount) {
+      BROADCAST_PRINTF("  ... and %u more tags",
+                       (unsigned)(allocationTraffic.entryCount -
+                                  allocationTraffic.topCount));
     }
 
-    BROADCAST_PRINTF("  Subtotal (tracked): %6lu bytes (%3lu KB)  [DRAM %lu B, PSRAM %lu B]",
-                    (unsigned long)tracked_total, (unsigned long)(tracked_total / 1024),
-                    (unsigned long)tracked_dram, (unsigned long)(tracked_total - tracked_dram));
-    // Only the DRAM portion contributes to the DRAM "TOTAL ACCOUNTED" roll-up.
-    // PSRAM is accounted separately further down in this report.
-    total_known += tracked_dram;
+    BROADCAST_PRINTF("  Cumulative requested: %llu B [DRAM %llu B, PSRAM %llu B]",
+                     (unsigned long long)(allocationTraffic.dramBytes +
+                                          allocationTraffic.psramBytes),
+                     (unsigned long long)allocationTraffic.dramBytes,
+                     (unsigned long long)allocationTraffic.psramBytes);
+    BROADCAST_PRINTF("  Drops: lock=%llu invalid-tag=%llu registry-full=%llu",
+                     (unsigned long long)allocationTraffic.contentionDrops,
+                     (unsigned long long)allocationTraffic.invalidTagEvents,
+                     (unsigned long long)allocationTraffic.overflowEvents);
   }
 
-  // ========== SECTION 2: System Components ==========
+  // ========== SECTION 2: LIVE HEAP ATTRIBUTION ==========
+  // Everything summed here is MEASURED off the live allocator. Lines marked
+  // '~' are estimates and are deliberately NOT summed — an estimate folded
+  // into a measured total corrupts the measurement, which is exactly how the
+  // old hardcoded "FreeRTOS ~8192" credit hid a 24 KB shortfall
+  // (docs/MEMORY_REPORT_FIX_PLAN.md, defects 1, 2 and 4).
   broadcastOutput("");
-  broadcastOutput("[2] SYSTEM COMPONENTS (not ps_alloc):");
+  broadcastOutput("[2] LIVE HEAP ATTRIBUTION (measured; '~' lines are estimates, not summed):");
 
-  size_t static_total = 0;
-
-  // Task Stacks
-  UBaseType_t taskCount = uxTaskGetNumberOfTasks();
-  static TaskStatus_t* taskStatusArray = nullptr;
-  static UBaseType_t taskStatusCap = 0;
+  // Task snapshot buffer plus a parallel measurement buffer. Both persist
+  // across calls (the report runs at boot and from `memreport`) and grow
+  // only when the task count does.
+  // +4 headroom, as reportAllTaskStacks() does: uxTaskGetSystemState() returns
+  // 0 — not a partial fill — when the array is smaller than the live task
+  // count, and at boot the radio stacks are still spawning tasks on the other
+  // core while this runs.
+  UBaseType_t taskCount = uxTaskGetNumberOfTasks() + 4;
+  static TaskStatus_t*    taskStatusArray = nullptr;
+  static TaskHeapMeasure* taskMeasure     = nullptr;
+  static UBaseType_t      taskStatusCap   = 0;
   if (taskCount > taskStatusCap) {
-    if (taskStatusArray) {
-      free(taskStatusArray);
-      taskStatusArray = nullptr;
-      taskStatusCap = 0;
-    }
-    taskStatusArray = (TaskStatus_t*)ps_alloc(taskCount * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "memreport.tasks");
-    if (taskStatusArray) {
+    if (taskStatusArray) { free(taskStatusArray); taskStatusArray = nullptr; }
+    if (taskMeasure)     { free(taskMeasure);     taskMeasure     = nullptr; }
+    taskStatusCap = 0;
+    taskStatusArray = (TaskStatus_t*)ps_alloc(taskCount * sizeof(TaskStatus_t),
+                                              AllocPref::PreferPSRAM, "memreport.tasks");
+    taskMeasure     = (TaskHeapMeasure*)ps_alloc(taskCount * sizeof(TaskHeapMeasure),
+                                                 AllocPref::PreferPSRAM, "memreport.taskmeas");
+    if (taskStatusArray && taskMeasure) {
       taskStatusCap = taskCount;
+    } else {                       // partial failure must not leave a half-armed pair
+      if (taskStatusArray) { free(taskStatusArray); taskStatusArray = nullptr; }
+      if (taskMeasure)     { free(taskMeasure);     taskMeasure     = nullptr; }
     }
   }
-  size_t app_tasks_total = 0;
-  size_t system_tasks_total = 0;
 
-  if (taskStatusArray) {
-    UBaseType_t actualCount = uxTaskGetSystemState(taskStatusArray, taskCount, NULL);
+  size_t   app_stacks_total   = 0;
+  size_t   other_stacks_total = 0;
+  size_t   tcb_total          = 0;
+  unsigned app_task_count     = 0;
+  unsigned other_task_count   = 0;
+  unsigned tcb_count          = 0;
+  unsigned unmeasured_tasks   = 0;
+  bool     tasks_measured     = false;   // TOTALS must not print 0 as a measurement
 
-    // Application tasks we created
-    struct {
-      const char* name;
-      uint32_t words;
-    } appTasks[] = {
-      { "cmd_exec_task", CMD_EXEC_STACK_WORDS },
-      { "sensor_queue_task", SENSOR_QUEUE_STACK_WORDS },
-      { "espnow_task", ESPNOW_HB_STACK_WORDS },        // ESP-NOW heartbeat task (mesh processing)
-      { "thermal_task", THERMAL_STACK_WORDS },
-      { "imu_task", IMU_STACK_WORDS },
-      { "tof_task", TOF_STACK_WORDS },
-      { INPUT_TASK_NAME, INPUT_STACK_WORDS },
-      { "debug_out", DEBUG_OUT_STACK_WORDS },        // Debug output queue processor
-      { "apds_task", APDS_STACK_WORDS },             // APDS color/proximity/gesture sensor
-      { "gps_task", GPS_STACK_WORDS },               // GPS polling task
-    };
+  if (taskStatusArray && taskMeasure) {
+    // taskStatusCap, not taskCount: cap is only ever set on a successful
+    // pair-alloc, so it is always the true capacity of both arrays.
+    UBaseType_t actualCount = uxTaskGetSystemState(taskStatusArray, taskStatusCap, NULL);
+    tasks_measured = (actualCount > 0);
 
-    broadcastOutput("  Application Task Stacks:");
+    // MEASURE FIRST, PRINT SECOND. The snapshot's pxStackBase / xHandle are
+    // raw pointers into memory the IDLE task frees asynchronously after
+    // vTaskDelete(NULL). One allocator walk here, before ~80 queue messages
+    // of printing, keeps the snapshot-to-measure window at microseconds; the
+    // walk itself only reports a LIVE block that starts exactly at the
+    // pointer (System_TaskUtils.h, taskHeapMeasureSnapshot).
+    taskHeapMeasureSnapshot(taskStatusArray, taskMeasure, actualCount);
 
-    // First pass: show application tasks
+    // First pass: tasks this firmware created (present in the creation
+    // registry). Both columns are measured; the registry only classifies.
+    broadcastOutput("  Application task stacks (used / allocated):");
+
     for (UBaseType_t i = 0; i < actualCount; i++) {
-      bool isAppTask = false;
-      uint32_t allocatedWords = 0;
+      if (taskMeasure[i].regBytes == 0) continue;   // not in our creation registry
+      const char*  name      = taskStatusArray[i].pcTaskName;
+      const size_t freeBytes = taskStatusArray[i].usStackHighWaterMark;  // BYTES on this port
 
-      for (size_t j = 0; j < sizeof(appTasks) / sizeof(appTasks[0]); j++) {
-        if (strcmp(taskStatusArray[i].pcTaskName, appTasks[j].name) == 0) {
-          isAppTask = true;
-          allocatedWords = appTasks[j].words;
-          break;
-        }
+      if (taskMeasure[i].tcbBytes) { tcb_total += taskMeasure[i].tcbBytes; tcb_count++; }
+
+      if (taskMeasure[i].stackBytes == 0) {
+        // Registry knows the requested size, but the block is not in internal
+        // heap (PSRAM stack, or a caller-owned buffer), so it is NOT part of
+        // dram_used. Shown, never summed.
+        unmeasured_tasks++;
+        BROADCAST_PRINTF("    %-20s     ? / ~%5lu bytes (not internal heap; free %lu)",
+                         name, (unsigned long)taskMeasure[i].regBytes,
+                         (unsigned long)freeBytes);
+        continue;
       }
-
-      if (isAppTask) {
-        // BYTES: the *_STACK_WORDS constants hold byte counts (ESP-IDF's
-        // xTaskCreate takes usStackDepth in BYTES), and usStackHighWaterMark is
-        // bytes too on this port. The old "* 4" printed 4x the real allocation
-        // and was the bulk of this report's own "Static Over-Estimate".
-        // See System_TaskUtils.h.
-        size_t allocatedBytes = allocatedWords;
-        size_t freeBytes = taskStatusArray[i].usStackHighWaterMark;
-        size_t usedBytes = allocatedBytes - freeBytes;
-        app_tasks_total += allocatedBytes;
-
-        BROADCAST_PRINTF("    %-20s %5lu / %5lu bytes (%2u%% used)",
-                        taskStatusArray[i].pcTaskName,
-                        (unsigned long)usedBytes,
-                        (unsigned long)allocatedBytes,
-                        (unsigned)((usedBytes * 100) / allocatedBytes));
-      }
+      const size_t allocatedBytes = taskMeasure[i].stackBytes;
+      const size_t usedBytes = (allocatedBytes > freeBytes) ? (allocatedBytes - freeBytes) : 0;
+      app_stacks_total += allocatedBytes;
+      app_task_count++;
+      BROADCAST_PRINTF("    %-20s %5lu / %5lu bytes (%2u%% used)",
+                       name, (unsigned long)usedBytes, (unsigned long)allocatedBytes,
+                       (unsigned)((usedBytes * 100) / allocatedBytes));
     }
 
-    BROADCAST_PRINTF("  Subtotal (app): %6lu bytes (%3lu KB)",
-                    (unsigned long)app_tasks_total, (unsigned long)(app_tasks_total / 1024));
-    static_total += app_tasks_total;
-
-    // Second pass: show system tasks
+    // Second pass: everything not in our creation registry. The header does
+    // NOT claim kernel ownership — the registry is a membership test, and a
+    // task created without taskStackRecord (e.g. "llm_gen") or dropped by
+    // registry overflow lands here too. These stacks AND TCBs are heap, not
+    // .bss: ESP-IDF pvPortMallocs both even for the "static" IDLE and Tmr Svc
+    // tasks (port_common.c). The old report printed their HWM and summed
+    // NOTHING — 20,992 B of live heap silently dropped on the minimal build,
+    // more on every feature-enabled one.
     broadcastOutput("");
-    broadcastOutput("  System Task Stacks:");
+    broadcastOutput("  Other task stacks (kernel / unregistered, used / allocated):");
 
     for (UBaseType_t i = 0; i < actualCount; i++) {
-      bool isSystemTask = true;
+      if (taskMeasure[i].regBytes != 0) continue;   // shown above
+      const char*  name      = taskStatusArray[i].pcTaskName;
+      const size_t freeBytes = taskStatusArray[i].usStackHighWaterMark;
 
-      // Check if it's an app task
-      for (size_t j = 0; j < sizeof(appTasks) / sizeof(appTasks[0]); j++) {
-        if (strcmp(taskStatusArray[i].pcTaskName, appTasks[j].name) == 0) {
-          isSystemTask = false;
-          break;
-        }
-      }
+      if (taskMeasure[i].tcbBytes) { tcb_total += taskMeasure[i].tcbBytes; tcb_count++; }
 
-      if (isSystemTask) {
-        // usStackHighWaterMark is in BYTES on this port — the old "* 4" made
-        // these look 4x roomier than they are. See System_TaskUtils.h.
-        size_t freeBytes = taskStatusArray[i].usStackHighWaterMark;
-        BROADCAST_PRINTF("    %-20s HWM: %5lu bytes",
-                        taskStatusArray[i].pcTaskName,
-                        (unsigned long)freeBytes);
+      if (taskMeasure[i].stackBytes == 0) {
+        unmeasured_tasks++;
+        BROADCAST_PRINTF("    %-20s     ? /     ? bytes (not internal heap; free %lu)",
+                         name, (unsigned long)freeBytes);
+        continue;
       }
+      const size_t allocatedBytes = taskMeasure[i].stackBytes;
+      const size_t usedBytes = (allocatedBytes > freeBytes) ? (allocatedBytes - freeBytes) : 0;
+      other_stacks_total += allocatedBytes;
+      other_task_count++;
+      BROADCAST_PRINTF("    %-20s %5lu / %5lu bytes (%2u%% used)",
+                       name, (unsigned long)usedBytes, (unsigned long)allocatedBytes,
+                       (unsigned)((usedBytes * 100) / allocatedBytes));
     }
 
+    // 3 lines, ~150 B expanded against the 256 B BROADCAST_PRINTF stack
+    // buffer (System_Debug.h, where overflow truncates SILENTLY).
+    BROADCAST_PRINTF(
+      "  Stacks (application): %6lu bytes  (%2u tasks)\n"
+      "  Stacks (other):       %6lu bytes  (%2u tasks)\n"
+      "  Task control blocks:  %6lu bytes  (%2u of %2u tasks measured)",
+      (unsigned long)app_stacks_total,   app_task_count,
+      (unsigned long)other_stacks_total, other_task_count,
+      (unsigned long)tcb_total,          tcb_count, (unsigned)actualCount);
+
+    if (unmeasured_tasks > 0) {
+      BROADCAST_PRINTF("  (%u task stack(s) outside every registered internal heap - NOT attributed)",
+                       unmeasured_tasks);
+    }
+    if (actualCount == 0) {
+      // uxTaskGetSystemState also has a weak stub in this component that
+      // returns 0 unconditionally (System_TaskUtils.cpp).
+      broadcastOutput("  !! uxTaskGetSystemState returned 0 - task memory NOT attributed this run");
+    }
+  } else {
+    broadcastOutput("  !! task snapshot allocation failed - task memory NOT attributed this run");
   }
 
-  // WiFi driver estimate
-  size_t wifi_estimate = 32 * 1024;  // WiFi driver ~ 32KB
-  BROADCAST_PRINTF("  WiFi Driver:   ~ %6lu bytes (%2lu KB)",
-                  (unsigned long)wifi_estimate, (unsigned long)(wifi_estimate / 1024));
-  static_total += wifi_estimate;
-
-  // LVGL estimate
-  size_t lvgl_estimate = 0;
-  BROADCAST_PRINTF("  UI Framework:  ~ %6lu bytes (%2lu KB) (untracked)",
-                  (unsigned long)lvgl_estimate, (unsigned long)(lvgl_estimate / 1024));
-
-  // FreeRTOS estimate
-  size_t freertos_estimate = 8 * 1024;  // FreeRTOS ~ 8KB
-  BROADCAST_PRINTF("  FreeRTOS:      ~ %6lu bytes (%2lu KB)",
-                  (unsigned long)freertos_estimate, (unsigned long)(freertos_estimate / 1024));
-  static_total += freertos_estimate;
-
-  BROADCAST_PRINTF("  Subtotal (static): %6lu bytes (%3lu KB)",
-                  (unsigned long)static_total, (unsigned long)(static_total / 1024));
-  total_known += static_total;
+  // WiFi driver estimate. Omitted entirely when WiFi is compiled out — the
+  // driver is not linked, so reporting 32 KB of it was a flat lie on a
+  // WiFi-less build. Gated rather than zeroed so the line does not read as
+  // "the WiFi driver is using nothing", which is a different claim. Print-only:
+  // an estimate is never folded into the measured totals.
+  //
+  // Runtime-gated too: compiled-in is not started. On a boot where WiFi stays
+  // off (no wifi/tiT/sys_evt task exists) the driver holds nothing, and the
+  // HW-observed residual with WiFi up (~34.7 KB minus the ~10.4 KB base) puts
+  // the driver's INTERNAL heap nearer 24 KB than 32 KB — WiFi/LWIP prefer
+  // SPIRAM. So the figure is an upper bound, and it is only claimed when the
+  // radio is actually up.
+#if ENABLE_WIFI
+  if (wifiRadioState() != WIFI_RADIO_OFF) {
+    size_t wifi_estimate = 32 * 1024;  // upper bound; see comment above
+    BROADCAST_PRINTF("  WiFi Driver:   ~ %6lu bytes (%2lu KB) (upper-bound estimate; inside UNATTRIBUTED)",
+                    (unsigned long)wifi_estimate, (unsigned long)(wifi_estimate / 1024));
+  } else {
+    broadcastOutput("  WiFi Driver:   (compiled in, radio off - holds nothing)");
+  }
+#endif
 
   // ========== SECTION 3: STATIC VARIABLES BY MODULE ==========
+  // .bss/.data, NOT heap. .dram0.bss ends exactly where .dram0.heap_start
+  // begins (the base of heap region 1), so no static byte can ever be inside
+  // ACTUAL DRAM USED. Printed for scale, excluded from the totals — adding
+  // these to a heap-only figure was a category error (defect 3 in
+  // docs/MEMORY_REPORT_FIX_PLAN.md).
   broadcastOutput("");
-  broadcastOutput("[3] STATIC VARIABLES BY MODULE:");
+  broadcastOutput("[3] STATIC VARIABLES BY MODULE (.bss/.data - NOT heap, excluded from totals):");
   
   size_t static_vars_total = 0;
   
@@ -4104,26 +4325,14 @@ void printMemoryReport() {
   
   BROADCAST_PRINTF("  Subtotal (static vars): %6lu bytes (%3lu KB)",
                   (unsigned long)static_vars_total, (unsigned long)(static_vars_total / 1024));
-  total_known += static_vars_total;
 
-  // Connected devices
+  // Connected devices. printConnectedDevicesLibraries() fills an ESTIMATE
+  // table (i2cSensors[].libraryHeapBytes), not a measurement — shown, never
+  // summed into the measured totals below.
   size_t devices_lib_total = 0;
   printConnectedDevicesLibraries(devices_lib_total);
-  BROADCAST_PRINTF("  Device Libraries: %6lu bytes (%3lu KB)",
+  BROADCAST_PRINTF("  Device Libraries: ~%6lu bytes (%3lu KB) (estimate; inside UNATTRIBUTED)",
                   (unsigned long)devices_lib_total, (unsigned long)(devices_lib_total / 1024));
-  if (devices_lib_total > 0) {
-    total_known += devices_lib_total;
-  }
-
-  // Tracked PSRAM usage
-  size_t tracked_psram = 0;
-  if (useDynamicTracking) {
-    for (int i = 0; i < gAllocTrackerCount; i++) {
-      if (gAllocTracker[i].isActive) {
-        tracked_psram += gAllocTracker[i].psramBytes;
-      }
-    }
-  }
 
   // ========== SECTION 4: MODULAR SENSOR BUILD CONFIGURATION ==========
   broadcastOutput("");
@@ -4234,38 +4443,57 @@ void printMemoryReport() {
                   enabled_count, disabled_count);
 
   // ========== TOTALS ==========
-  // TOTALS — grouped: header+DRAM (1 envelope), over-budget block (1), PSRAM (1+opt).
+  // Only MEASURED quantities are summed here. dram_used and alloc_meta were
+  // sampled together at the top of this function, and the task rows come from
+  // one allocator walk, so this is one snapshot — not figures taken ~500
+  // lines of queue traffic apart.
+  const size_t tasks_total = app_stacks_total + other_stacks_total + tcb_total;
+  const size_t attributed  = tasks_total + alloc_meta;
+
+  if (!tasks_measured) {
+    // No snapshot (allocation failed, or the kernel returned 0 because the
+    // task count outran the array). Printing tasks_total = 0 here would read
+    // as "tasks cost nothing, measured" — the exact lie this report is meant
+    // not to tell. State the gap and stop.
+    BROADCAST_PRINTF(
+      "\n---------- TOTALS ----------\n"
+      "  ACTUAL DRAM USED:     %6lu bytes (%4lu KB)\n"
+      "  Allocator metadata:   %6lu bytes (%4lu KB)  measured\n"
+      "  Task stacks + TCBs:   NOT MEASURED this run (no task snapshot) - rerun memreport",
+      (unsigned long)dram_used,  (unsigned long)(dram_used / 1024),
+      (unsigned long)alloc_meta, (unsigned long)(alloc_meta / 1024));
+    broadcastOutput("\n========== END MEMORY REPORT ==========\n");
+    return;
+  }
+
+  // SIGNED on purpose. The old block lived inside `if (dram_used >
+  // total_known)`, so an over-count printed NOTHING; and its "Static
+  // Over-Estimate" line subtracted two unrelated quantities and read 0 only
+  // because it clamped. ATTRIBUTED + UNATTRIBUTED == ACTUAL DRAM USED always
+  // holds, because the residual is a difference, never assembled from parts.
+  // The residual is NOT padded to zero: on the minimal build ~3 KB of it is
+  // genuinely unexplained (docs/DRAM_UNACCOUNTED_CENSUS_2026-08-23.md) and an
+  // honest "unattributed" beats a figure engineered to close.
+  const long residual = (long)dram_used - (long)attributed;
+  const unsigned attr_pct =
+      dram_used ? (unsigned)((attributed * 100 + dram_used / 2) / dram_used) : 0;
+
+  // 2 envelopes, ~180 B and ~150 B expanded, against BROADCAST_PRINTF's
+  // 256 B stack buffer where overflow truncates silently.
   BROADCAST_PRINTF(
     "\n---------- TOTALS ----------\n"
-    "  TOTAL ACCOUNTED:      %6lu bytes (%3lu KB)\n"
-    "  ACTUAL DRAM USED:     %6lu bytes (%3lu KB)",
-                  (unsigned long)total_known, (unsigned long)(total_known / 1024),
-                  (unsigned long)dram_used,   (unsigned long)(dram_used / 1024));
+    "  ACTUAL DRAM USED:     %6lu bytes (%4lu KB)\n"
+    "  Task stacks + TCBs:   %6lu bytes (%4lu KB)  measured\n"
+    "  Allocator metadata:   %6lu bytes (%4lu KB)  measured",
+    (unsigned long)dram_used,   (unsigned long)(dram_used / 1024),
+    (unsigned long)tasks_total, (unsigned long)(tasks_total / 1024),
+    (unsigned long)alloc_meta,  (unsigned long)(alloc_meta / 1024));
 
-  if (dram_used > total_known) {
-    size_t unaccounted = dram_used - total_known;
-    size_t overestimate = (static_total > unaccounted) ? (static_total - unaccounted) : 0;
-    BROADCAST_PRINTF(
-      "  Unaccounted DRAM:     %6lu bytes (%3lu KB)\n"
-      "  Static Over-Estimate: %6lu bytes (%3lu KB)\n"
-      "  (Static estimates are conservative upper bounds)",
-                    (unsigned long)unaccounted,  (unsigned long)(unaccounted / 1024),
-                    (unsigned long)overestimate, (unsigned long)(overestimate / 1024));
-  }
-
-  // Show PSRAM accounting if available
-  if (has_ps && useDynamicTracking) {
-    BROADCAST_PRINTF(
-      "\n  PSRAM ACCOUNTED:      %6lu bytes (%3lu KB)\n"
-      "  ACTUAL PSRAM USED:    %6lu bytes (%3lu KB)",
-                    (unsigned long)tracked_psram, (unsigned long)(tracked_psram / 1024),
-                    (unsigned long)ps_used,       (unsigned long)(ps_used / 1024));
-    if (ps_used > tracked_psram) {
-      size_t unaccounted_psram = ps_used - tracked_psram;
-      BROADCAST_PRINTF("  Unaccounted PSRAM:    %6lu bytes (%3lu KB)",
-                      (unsigned long)unaccounted_psram, (unsigned long)(unaccounted_psram / 1024));
-    }
-  }
+  BROADCAST_PRINTF(
+    "  ATTRIBUTED:           %6lu bytes (%4lu KB) [%2u%%]\n"
+    "  UNATTRIBUTED:       %8ld bytes  (kernel objs, libc/VFS/FS/NVS, C++ ctors, driver heap)",
+    (unsigned long)attributed, (unsigned long)(attributed / 1024), attr_pct,
+    residual);
 
   broadcastOutput("\n========== END MEMORY REPORT ==========\n");
 }
@@ -4301,6 +4529,25 @@ const char* cmd_memreport(const String& argsInput) {
     hc["internalLargest"] = (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     hc["dmaFree"]         = (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA);
     hc["dmaLargest"]      = (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    MemTrackerSnapshot tracker{};
+    if (memTrackerSnapshot(tracker)) {
+      JsonObject at = doc["allocationTraffic"].to<JsonObject>();
+      at["semantics"] = "cumulative_requested_since_reset";
+      at["enabled"] = tracker.enabled;
+      at["generation"] = tracker.generation;
+      at["tags"] = (unsigned)tracker.entryCount;
+      at["capacity"] = (unsigned)tracker.capacity;
+      at["attempts"] =
+          (unsigned long long)(tracker.successCount + tracker.failureCount);
+      at["successes"] = (unsigned long long)tracker.successCount;
+      at["failures"] = (unsigned long long)tracker.failureCount;
+      at["fallbacks"] = (unsigned long long)tracker.fallbackCount;
+      at["dramBytes"] = (unsigned long long)tracker.dramBytes;
+      at["psramBytes"] = (unsigned long long)tracker.psramBytes;
+      at["contentionDrops"] = (unsigned long long)tracker.contentionDrops;
+      at["invalidTagEvents"] = (unsigned long long)tracker.invalidTagEvents;
+      at["overflowEvents"] = (unsigned long long)tracker.overflowEvents;
+    }
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
@@ -5266,6 +5513,21 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 
 // Queued command execution with deadlock avoidance
 bool submitAndExecuteSync(const Command& cmd, String& out) {
+  const size_t inputLength = cmd.line.length();
+  if (!commandInputLengthAccepted(inputLength)) {
+    if (inputLength == 0) {
+      out = "Error: Empty command";
+      broadcastOutput("[ERROR] Empty command");
+    } else {
+      out = "Error: Command exceeds input limit";
+      DEBUG_CMD_FLOWF("[submitSync] rejected %lu-byte command (max=%lu)",
+                      (unsigned long)inputLength,
+                      (unsigned long)CMD_INPUT_MAX);
+      broadcastOutput("[ERROR] Command exceeds input limit");
+    }
+    return false;
+  }
+
   const String safeLineForTrace = redactCmdForAudit(cmd.line);
   DEBUG_CMD_FLOWF("[submitSync] cmd='%.80s' origin=%d user='%s'",
                   safeLineForTrace.c_str(), (int)cmd.ctx.origin, cmd.ctx.auth.user.c_str());
@@ -5304,16 +5566,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
   // Initialize the structure (placement new for C++ objects)
   new (r) ExecReq();
   
-  // Validate cmd.line before proceeding
-  if (cmd.line.length() == 0) {
-    r->~ExecReq();
-    free(r);
-    broadcastOutput("[ERROR] Empty command");
-    return false;
-  }
-  
-  strncpy(r->line, cmd.line.c_str(), sizeof(r->line) - 1);
-  r->line[sizeof(r->line) - 1] = '\0';
+  memcpy(r->line, cmd.line.c_str(), inputLength + 1);
   r->ctx = cmd.ctx;
   
   r->done = xSemaphoreCreateBinary();
@@ -5401,16 +5654,19 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
 // Returns true if successfully queued, false on error
 // Callback receives: (bool ok, const char* result, void* userData)
 bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData) {
+  const size_t inputLength = cmd.line.length();
+  if (!commandInputLengthAccepted(inputLength)) {
+    DEBUG_CMD_FLOWF("[submitAsync] ERROR: invalid command length=%lu max=%lu",
+                    (unsigned long)inputLength,
+                    (unsigned long)CMD_INPUT_MAX);
+    return false;
+  }
+
   const String safeLineForTrace = redactCmdForAudit(cmd.line);
   DEBUG_CMD_FLOWF("[submitAsync] enter: cmd.line='%s'", safeLineForTrace.c_str());
   
   if (gCmdExecQ == nullptr) {
     DEBUG_CMD_FLOWF("[submitAsync] ERROR: gCmdExecQ is NULL");
-    return false;
-  }
-  
-  if (cmd.line.length() == 0) {
-    DEBUG_CMD_FLOWF("[submitAsync] ERROR: Empty command line");
     return false;
   }
   
@@ -5423,8 +5679,7 @@ bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* us
   new (r) ExecReq();
   
   // Setup request
-  strncpy(r->line, cmd.line.c_str(), sizeof(r->line) - 1);
-  r->line[sizeof(r->line) - 1] = '\0';
+  memcpy(r->line, cmd.line.c_str(), inputLength + 1);
   r->ctx = cmd.ctx;
   r->done = nullptr;  // No semaphore - async mode
   r->asyncCallback = callback;
@@ -5789,12 +6044,15 @@ static bool sessionCommandTargetAvailable(CommandSource source) {
 }
 
 struct TargetLoginThrottle {
-  CommandSource source = SOURCE_INTERNAL;
+  CommandSource source = SOURCE_WEB;  // == 0 so the static array below is a
+                                      // valid all-zero NOLOAD image; a virgin
+                                      // zero slot mismatches every reachable
+                                      // caller exactly like the old sentinel
   char user[kPublicUsernameMaxLen + 1] = {};
   uint8_t failures = 0;
   uint32_t lockedUntilMs = 0;
 };
-static TargetLoginThrottle sTargetLoginThrottle[3];
+EXT_RAM_BSS_ATTR static TargetLoginThrottle sTargetLoginThrottle[3];  // PSRAM: cmd_exec only; holds public usernames + counters, no secrets
 
 static TargetLoginThrottle& targetLoginThrottleFor(const AuthContext& caller) {
   size_t index = caller.transport == SOURCE_SERIAL ? 0 :

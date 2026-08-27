@@ -45,11 +45,8 @@ uint32_t    videoLastRecordingFrames();
 
 // ── Viewer API (base experience — every build) ───────────────────────────────
 // Listing/serving recordings needs only an SD card, not a camera, so these are
-// available on all boards. They return 0/empty/false when SD is unavailable or
+// available on all boards. They return empty/false when SD is unavailable or
 // no recordings exist.
-
-// Count of .avi files in /sd/videos/.
-int getVideoRecordingCount();
 
 // Enumerate recordings as a colon-delimited "filename:size" list joined by
 // newlines, matching the mic recordings format.

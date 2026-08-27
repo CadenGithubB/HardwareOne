@@ -3,6 +3,7 @@
 #define SYSTEM_LIVEAUDIO_H
 
 #include <Arduino.h>
+#include "System_BuildConfig.h"
 
 struct CommandEntry;
 
@@ -16,6 +17,7 @@ enum class LiveAudioReadyIntrinsicResult : uint8_t {
   NotHandled,
   Handled,
 };
+#if ENABLE_UART_HOST_LINK
 LiveAudioReadyIntrinsicResult liveAudioHandleReadyIntrinsic(
     const char* line, uint32_t namedSessionEpoch,
     bool namedSessionMayControl, char* reply, size_t replySize);
@@ -36,6 +38,7 @@ bool liveAudioStreamActive();
 // live stream already owns the framed lane. Callers must release on every exit.
 bool liveAudioTryBeginBulkTransfer();
 void liveAudioEndBulkTransfer();
+#endif  // ENABLE_UART_HOST_LINK
 
 // Recorder shadow is deliberately best-effort: these entry points never own
 // the recorder lifecycle or its WAV. They only mirror an exact, non-manual
@@ -59,6 +62,13 @@ struct LiveAudioRecorderAuthorization {
   uint32_t sessionEpoch = 0;
 };
 
+// ---------------------------------------------------------------------------
+// Everything below needs the module itself. The TYPES above stay unconditional:
+// System_Microphone.cpp holds LiveAudioRecorderAuthorization BY VALUE and takes
+// the enums by reference in eight places, so they must exist on every build.
+// ---------------------------------------------------------------------------
+#if ENABLE_UART_HOST_LINK
+
 bool liveAudioRecorderBegin(uint64_t exchangeId,
                             LiveAudioRecorderSource source,
                             uint32_t sampleRate,
@@ -79,6 +89,39 @@ bool liveAudioRecorderCaptureEligible(
 
 // Registry command and module table. The command remains registered on boards
 // without a UART host link and fails cleanly there.
+#else  // UART host link compiled out — inert stubs
+//
+// Every return value is behaviourally exact, not merely safe: with the module
+// gone the `liveaudio` command is unregistered, so NotHandled / false are what
+// the live code would have returned anyway. liveAudioTryBeginBulkTransfer()
+// returning true cannot lose mutual exclusion — its only caller is inside
+// System_UartLink.cpp's port arm, which rides this same flag.
+
+inline LiveAudioReadyIntrinsicResult liveAudioHandleReadyIntrinsic(
+    const char*, uint32_t, bool, char*, size_t) {
+  return LiveAudioReadyIntrinsicResult::NotHandled;
+}
+inline bool liveAudioIsHousekeepingCommand(const char*) { return false; }
+inline bool liveAudioStreamActive() { return false; }
+inline bool liveAudioTryBeginBulkTransfer() { return true; }
+inline void liveAudioEndBulkTransfer() {}
+inline bool liveAudioRecorderBegin(uint64_t, LiveAudioRecorderSource, uint32_t,
+                                   const LiveAudioRecorderAuthorization&) { return false; }
+inline bool liveAudioRecorderOffer(uint64_t, const int16_t*, size_t) { return false; }
+inline void liveAudioRecorderFinish(uint64_t, LiveAudioRecorderOutcome) {}
+inline void liveAudioRecorderAbort(uint64_t) {}
+inline bool liveAudioRecorderArmNative(uint64_t, uint32_t) { return false; }
+inline bool liveAudioRecorderCaptureEligible(
+    uint64_t, LiveAudioRecorderAuthorization* outAuth) {
+  if (outAuth) *outAuth = LiveAudioRecorderAuthorization{};
+  return false;
+}
+
+#endif  // ENABLE_UART_HOST_LINK
+
+// Stays unconditional: the command remains REGISTERED on builds without the
+// link and fails cleanly there (definition in System_SensorStubs.cpp when the
+// module is not built).
 const char* cmd_liveaudio(const String& argsInput);
 extern const CommandEntry liveAudioCommands[];
 extern const size_t liveAudioCommandsCount;

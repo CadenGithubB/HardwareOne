@@ -29,7 +29,7 @@ def canonical_fields(image: pathlib.Path, board: str) -> dict[str, object]:
     project, version = make_manifest.read_app_descriptor(image)
     if project != "hardwareone-idf":
         raise ValueError(f"unexpected app project {project!r}")
-    suffix = "+f3feo1" if board == "feathers3_fe" else "+f3o1"
+    suffix = make_manifest.BOARD_SUFFIXES[board]
     if not version.endswith(suffix):
         raise ValueError(
             f"image version {version!r} does not belong to board {board!r}"
@@ -140,7 +140,13 @@ def generate(args: argparse.Namespace) -> pathlib.Path:
     invalid_signature = manifests / "invalid-signature.json"
     mutate_manifest_signature(good_manifest, invalid_signature)
 
-    other_board = "feathers3_fe" if args.board == "feathers3" else "feathers3"
+    # Any board that is not this one works as the negative case; picking it
+    # from the table means a newly added board is covered automatically instead
+    # of falling through a two-way ternary.
+    other_board = next(
+        board for board in sorted(make_manifest.BOARD_LAYOUTS)
+        if board != args.board
+    )
     variants: dict[str, dict[str, object]] = {}
     wrong_board = dict(fields)
     wrong_board["boardId"] = other_board

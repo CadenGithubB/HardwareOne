@@ -214,9 +214,9 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       <button id='qa-stop' class='btn' style='display:none' onclick='qaStop()' data-guest-hide>Stop</button>
     </div>
     <div class='qa-adv-body' id='qa-adv-body' data-guest-hide>
-      <label title='Temperature override — blank uses the saved llmtemperature setting'>Temp:<input type='number' id='qa-temp' placeholder='saved' min='0' max='2' step='0.05'></label>
-      <label title='Sentence-limit override — blank uses the saved llmsentencelimit setting'>Sentences:<input type='number' id='qa-sentlimit' placeholder='saved' min='0' max='20'></label>
-      <label title='Rep-penalty override — blank uses the saved llmreppenalty setting'>Rep:<input type='number' id='qa-repen' placeholder='saved' min='1' max='5' step='0.05'></label>
+      <label title='Temperature override — blank uses the saved llmtemperature setting'>Temp:<input type='number' id='qa-temp' class='input-fit' placeholder='saved' min='0' max='2' step='0.05'></label>
+      <label title='Sentence-limit override — blank uses the saved llmsentencelimit setting'>Sentences:<input type='number' id='qa-sentlimit' class='input-fit' placeholder='saved' min='0' max='20'></label>
+      <label title='Rep-penalty override — blank uses the saved llmreppenalty setting'>Rep:<input type='number' id='qa-repen' class='input-fit' placeholder='saved' min='1' max='5' step='0.05'></label>
       <div class='qa-adv-hint'>Blank fields use your saved device settings. Type a value to override it for this one message.</div>
     </div>
   </div>
@@ -231,18 +231,18 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, R"JS(
 <script>
 (function(){
-  var list      = document.getElementById('qa-list');
-  var inputEl   = document.getElementById('qa-input');
-  var askBtn    = document.getElementById('qa-ask');
-  var stopBtn   = document.getElementById('qa-stop');
-  var doBtn     = document.getElementById('qa-do');
-  var dot       = document.getElementById('qa-dot');
-  var stateEl   = document.getElementById('qa-state');
-  var loadEl     = document.getElementById('qa-load');
-  var loadFillEl = document.getElementById('qa-load-fill');
-  var metaEl    = document.getElementById('qa-meta');
-  var modelSel  = document.getElementById('qa-model');
-  var initMsg   = document.getElementById('qa-init-msg');
+  var list      = hw.$('qa-list');
+  var inputEl   = hw.$('qa-input');
+  var askBtn    = hw.$('qa-ask');
+  var stopBtn   = hw.$('qa-stop');
+  var doBtn     = hw.$('qa-do');
+  var dot       = hw.$('qa-dot');
+  var stateEl   = hw.$('qa-state');
+  var loadEl     = hw.$('qa-load');
+  var loadFillEl = hw.$('qa-load-fill');
+  var metaEl    = hw.$('qa-meta');
+  var modelSel  = hw.$('qa-model');
+  var initMsg   = hw.$('qa-init-msg');
   var busy      = false;
   var abortCtrl = null;
   var currentCtx = null; // Track the most recent Q&A context
@@ -300,8 +300,8 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
   // ── advanced toggle ──
   window.qaToggleAdv = function() {
-    var b = document.getElementById('qa-adv-body');
-    var t = document.getElementById('qa-adv-btn');
+    var b = hw.$('qa-adv-body');
+    var t = hw.$('qa-adv-btn');
     var open = b.classList.toggle('open');
     t.textContent = open ? 'Hide Advanced' : 'Advanced';
   };
@@ -374,13 +374,13 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
           var pct = (typeof j.loadPct === 'number') ? j.loadPct : 0;
           if (pct > 0) {
             stateEl.textContent = 'Loading ' + pct + '%';
-            if (loadEl)     loadEl.style.display = '';
+            hw.show(loadEl);
             if (loadFillEl) loadFillEl.style.width = pct + '%';
           } else {
             // No host signal (onboard engine, external-server mode, or the
             // first second before a sample). Indeterminate, and say so.
             stateEl.textContent = 'Loading...';
-            if (loadEl) loadEl.style.display = 'none';
+            hw.hide(loadEl);
           }
           setReady(false);
         } else if (j.state === 'UNLOADED') {
@@ -528,10 +528,10 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   function doGenerate(ctx) {
     busy = true;
     askBtn.style.display = 'none';
-    if (doBtn) doBtn.style.display = 'none';
+    hw.hide(doBtn);
     stopBtn.style.display = '';
     inputEl.disabled = true;
-    if (ctx.retryBtn) ctx.retryBtn.style.display = 'none';
+    hw.hide(ctx.retryBtn);
 
     ctx.aText.textContent = '';
     ctx.aText.classList.add('streaming');
@@ -544,9 +544,9 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     // top_p / rep_window / min_p / hard_cap which the resolver pulls from
     // settings). This is why a blank panel now honours your saved settings.
     var body = { prompt: ctx.prompt };
-    var tempStr = document.getElementById('qa-temp').value.trim();
-    var sentStr = document.getElementById('qa-sentlimit').value.trim();
-    var repStr  = document.getElementById('qa-repen').value.trim();
+    var tempStr = hw.$('qa-temp').value.trim();
+    var sentStr = hw.$('qa-sentlimit').value.trim();
+    var repStr  = hw.$('qa-repen').value.trim();
     if (tempStr !== '') body.temperature    = parseFloat(tempStr);
     if (sentStr !== '') body.sentence_limit = parseInt(sentStr);
     if (repStr  !== '') body.rep_penalty    = parseFloat(repStr);
@@ -823,7 +823,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     hw.postFormText('/api/cli', { cmd: cmd, capture: '1' })
       .then(function(t) {
         resultDiv.textContent = t || '(no output)';
-        if (runBtn) runBtn.textContent = 'Ran \u2713';
+        hw.setText(runBtn, 'Ran \u2713');
       })
       .catch(function(e) {
         resultDiv.textContent = 'Error: ' + e.message;
@@ -988,10 +988,10 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   // + entity rosters. Three chained selects compose a corpus-exact question
   // straight into the free-text box; the untouched qaAsk() then submits it
   // through the normal generate pipeline. See LLM_GUIDED_MENU_SPEC §7.
-  var guidedStrip  = document.getElementById('qa-guided');
-  var groupSel     = document.getElementById('qa-group');
-  var tplSel       = document.getElementById('qa-tpl');
-  var entSel       = document.getElementById('qa-ent');
+  var guidedStrip  = hw.$('qa-guided');
+  var groupSel     = hw.$('qa-group');
+  var tplSel       = hw.$('qa-tpl');
+  var entSel       = hw.$('qa-ent');
   var guidedGen    = -1;              // cached menu generation (from /api/llm/status)
   var guidedGroups = [];             // [{i,name,mode,templates,entities}]
   var curGroup     = null;           // selected group object

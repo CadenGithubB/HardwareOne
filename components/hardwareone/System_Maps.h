@@ -833,6 +833,11 @@ public:
 private:
   static Waypoint* _waypoints;
   static int _selectedTarget;  // -1 = none
+  // True when this map's waypoint file either parsed cleanly or is legitimately
+  // ABSENT. saveWaypoints() refuses otherwise: a parse error used to return with
+  // the PREVIOUS map's waypoints still live in _waypoints, and the next mutation
+  // wrote them into THIS map's file.
+  static bool _waypointsLoadedOk;
 
   // Allocate the waypoint table on first map/waypoint use. Read-only paths
   // treat a null table as "no waypoints loaded".
@@ -849,15 +854,14 @@ private:
 
 extern float gMapRotation;  // Rotation angle in degrees (0-360)
 
-// Move the map center one discrete step in a screen-space direction, scaled by
-// zoom and rotation and clamped to the loaded map's bounds. Shared by any
-// surface that pans via discrete input (the G2 lens map page's Pan N/S/E/W
-// rows today; OLED still pans via its own analog-stick momentum path). The
-// (dx,dy) are unit screen deltas: (0,-1)=N (0,+1)=S (+1,0)=E (-1,0)=W — screen
-// +y is down/south, mirroring the OLED joystick mapping. `frac` is the fraction
-// of the current viewport moved per call (0.10 = one-tenth of the viewport per
-// G2 Pan tap). Sets gMapCenterSet + gMapManuallyPanned.
-void mapPanStep(float dx, float dy, float frac = 0.10f);
+// Move the map center by accumulated screen-space steps using the dimensions
+// and effective zoom of the surface that will render the result. The deltas use
+// (0,-1)=N, (0,+1)=S, (+1,0)=E, (-1,0)=W. `frac` is the visible-axis fraction
+// moved per step (0.10 = one-tenth of that axis). The shared projection helper
+// keeps this geometry aligned with MapCore::renderMap.
+void mapPanViewportSteps(int32_t stepsX, int32_t stepsY,
+                         int viewportWidth, int viewportHeight,
+                         float renderZoom, float frac = 0.10f);
 
 // Command handlers
 const char* cmd_map(const String& argsInput);

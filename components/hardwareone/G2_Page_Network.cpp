@@ -93,12 +93,10 @@ static char     gScanFailure[32] = {};
 
 // "Pending..." overlay state for the WiFi toggle row.
 //
-// Rationale: WiFi.disconnect() returns immediately so the OFF render
-// snaps in place, but connectToBestWiFiNetwork() is async — by the
-// time it returns the kick is in flight but the connection isn't up
-// yet. Without this overlay the user sees "WiFi: OFF" for 3-4 s after
-// tapping (until DHCP completes and a later render picks it up),
-// which feels like the tap was ignored.
+// Rationale: WiFi.disconnect() returns immediately, while openwifi runs the
+// potentially long connection transaction on cmd_exec_task. Without this
+// overlay, the user sees the prior state until that command completes, which
+// feels like the tap was ignored.
 //
 // While `millis() < gWifiPendingDeadlineMs`, showWiFiMenu() renders
 // the toggle row as "WiFi: Pending..." regardless of the live
@@ -109,6 +107,39 @@ static char     gScanFailure[32] = {};
 // while pending arms a fresh deadline + watchdog.
 static volatile uint32_t gWifiPendingDeadlineMs = 0;
 static volatile bool     gWifiPendingTaskActive = false;
+
+static uint32_t wifiPendingOverlayDeadline() {
+  return __atomic_load_n(&gWifiPendingDeadlineMs, __ATOMIC_ACQUIRE);
+}
+
+static void cancelWifiPendingOverlay() {
+  __atomic_store_n(&gWifiPendingDeadlineMs, 0, __ATOMIC_RELEASE);
+}
+
+static uint32_t armWifiPendingOverlay() {
+  uint32_t deadline = millis() + 10000u;
+  if (deadline == 0) deadline = 1;  // zero is the inactive sentinel
+  __atomic_store_n(&gWifiPendingDeadlineMs, deadline, __ATOMIC_RELEASE);
+  return deadline;
+}
+
+// A slow openwifi can outlive the 10-second overlay and a later tap can arm a
+// new attempt. Only the command that owns the current deadline may clear it;
+// otherwise an older completion would erase the newer attempt's feedback.
+static bool clearWifiPendingOverlayIfOwned(uint32_t deadline) {
+  if (deadline == 0) return false;
+  uint32_t expected = deadline;
+  return __atomic_compare_exchange_n(&gWifiPendingDeadlineMs, &expected, 0,
+                                     false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE);
+}
+
+static bool claimWifiPendingWatchdog() {
+  bool expected = false;
+  return __atomic_compare_exchange_n(&gWifiPendingTaskActive, &expected, true,
+                                     false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE);
+}
 
 // Same "Pending..." treatment for the R1 ring connect (see showBluetoothR1Menu /
 // handleBluetoothR1Tap). `ringconnect` returns OK the instant the connect is
@@ -223,6 +254,25 @@ void g2ShowNetworkMenu() {
 // WiFi submenu
 // -----------------------------------------------------------------------------
 
+// The WiFi menu has a compact radio-off layout, so visible row indices are not
+// stable. Keep the action bound to the exact accepted layout instead of
+// reconstructing it from live WiFi state when a later tap arrives (the radio
+// may have changed in between).
+enum WifiMenuAction : uint8_t {
+  WIFI_MENU_BACK = 0,
+  WIFI_MENU_TOGGLE_RADIO,
+  WIFI_MENU_TOGGLE_CONNECTION,
+  WIFI_MENU_DISCONNECT,
+  WIFI_MENU_STATUS,
+  WIFI_MENU_SCAN,
+  WIFI_MENU_SAVED,
+  WIFI_MENU_AUTO_START,
+  WIFI_MENU_HTTP,
+  WIFI_MENU_ESPNOW,
+};
+static WifiMenuAction gWifiMenuActionByRow[10] = {};
+static volatile uint8_t gWifiMenuRowCount = 0;
+
 static void showWiFiMenu() {
   setNetSub(NET_SUB_WIFI);
   static char radioLine[24];  // "Radio: ON/OFF" — whole-radio power (airplane mode)
@@ -233,10 +283,12 @@ static void showWiFiMenu() {
 
 #if ENABLE_WIFI
   // Two separate axes shown as two rows: RADIO power vs WiFi CONNECTION.
-  snprintf(radioLine, sizeof(radioLine), "Radio: %s", wifiRadioOn() ? "ON" : "OFF");
+  const bool radioOn = wifiRadioOn();
+  snprintf(radioLine, sizeof(radioLine), "Radio: %s", radioOn ? "ON" : "OFF");
   bool connected = WiFi.isConnected();
-  const bool pending = !connected && gWifiPendingDeadlineMs > 0 &&
-                       (int32_t)(millis() - gWifiPendingDeadlineMs) < 0;
+  const uint32_t pendingDeadline = wifiPendingOverlayDeadline();
+  const bool pending = !connected && pendingDeadline > 0 &&
+                       (int32_t)(millis() - pendingDeadline) < 0;
   if (connected) {
     String ssid = WiFi.SSID();
     // Truncate long SSIDs so the row still fits the ~32-char visible width.
@@ -244,11 +296,18 @@ static void showWiFiMenu() {
     snprintf(wifiLine, sizeof(wifiLine), "WiFi: %s", shown.c_str());
   } else if (pending) {
     snprintf(wifiLine, sizeof(wifiLine), "WiFi: Pending...");
+  } else if (!gSettings.wifiEnabled) {
+    snprintf(wifiLine, sizeof(wifiLine), "WiFi: Disabled in Settings");
+  } else if (!radioOn) {
+    snprintf(wifiLine, sizeof(wifiLine),
+             "WiFi: Disabled (tap to enable)");
   } else {
     snprintf(wifiLine, sizeof(wifiLine), "WiFi: Disconnected");
   }
 #else
+  const bool radioOn = false;
   bool connected = false;
+  const bool pending = false;
   snprintf(radioLine, sizeof(radioLine), "Radio: n/a");
   snprintf(wifiLine, sizeof(wifiLine), "WiFi: not compiled");
 #endif
@@ -268,27 +327,55 @@ static void showWiFiMenu() {
 #endif
 #if ENABLE_ESPNOW
   snprintf(espnowLine, sizeof(espnowLine), "ESP-NOW >>%s",
-           wifiRadioOn() ? "" : " (radio off)");
+           radioOn ? "" : " (radio off)");
 #else
   snprintf(espnowLine, sizeof(espnowLine), "ESP-NOW: n/a");
 #endif
 
-  // Item indices MUST match the dispatch switch in handleWiFiTap.
-  const char* items[] = {
-    "<- Connect",      // 0 — back to Network top-level chooser
-    radioLine,         // 1 (toggle: radio power on/off — airplane mode)
-    wifiLine,          // 2 (toggle: tap = connect best / disconnect)
-    "Disconnect",      // 3 — explicit disconnect (works while Pending too)
-    "Status",          // 4 (drill into detailed info dump)
-    "Scan Networks",   // 5
-    "List Saved",      // 6
-    autoLine,          // 7 (toggle wifiAutoStart — boot-time)
-    httpLine,          // 8 — opens HTTP(S) submenu
-    espnowLine,        // 9 — opens ESP-NOW submenu
+  const char* items[10];
+  WifiMenuAction actions[10];
+  size_t n = 0;
+  auto addItem = [&](const char* label, WifiMenuAction action) {
+    items[n] = label;
+    actions[n] = action;
+    ++n;
   };
-  g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-  DEBUG_G2F("[G2] WiFi submenu shown (connected=%d, auto=%d)",
-            connected ? 1 : 0, gSettings.wifiAutoStart ? 1 : 0);
+
+  addItem("<- Connect", WIFI_MENU_BACK);
+  addItem(radioLine, WIFI_MENU_TOGGLE_RADIO);
+  addItem(wifiLine, WIFI_MENU_TOGGLE_CONNECTION);
+
+  // With the whole radio down neither action is useful. The WiFi row above is
+  // the deliberate way back in: it runs openwifi, after which the refreshed
+  // radio-on menu exposes Disconnect and Scan again. The persisted master
+  // switch still gates Scan; Disconnect remains available for a live/pending
+  // connection so the user can always stop it.
+  const bool showDisconnect = connected || pending ||
+                              (gSettings.wifiEnabled && radioOn);
+  if (showDisconnect)
+    addItem("Disconnect", WIFI_MENU_DISCONNECT);
+
+  addItem("Status", WIFI_MENU_STATUS);
+  if (gSettings.wifiEnabled && (radioOn || connected || pending))
+    addItem("Scan Networks", WIFI_MENU_SCAN);
+
+  addItem("List Saved", WIFI_MENU_SAVED);
+  addItem(autoLine, WIFI_MENU_AUTO_START);
+  addItem(httpLine, WIFI_MENU_HTTP);
+  addItem(espnowLine, WIFI_MENU_ESPNOW);
+
+  if (g2ShowListPage(items, n)) {
+    // g2ShowListPage has claimed page-swap admission before returning true, so
+    // tap dispatch is fenced while this map is published.
+    for (size_t i = 0; i < n; ++i) {
+      __atomic_store_n(&gWifiMenuActionByRow[i], actions[i],
+                       __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&gWifiMenuRowCount, (uint8_t)n, __ATOMIC_RELEASE);
+  }
+  DEBUG_G2F("[G2] WiFi submenu shown (radio=%d connected=%d rows=%u auto=%d)",
+            radioOn ? 1 : 0, connected ? 1 : 0, (unsigned)n,
+            gSettings.wifiAutoStart ? 1 : 0);
 }
 
 // Detailed WiFi status — shown when the user taps "Status" on the WiFi
@@ -329,8 +416,13 @@ static void showWiFiStatusPage() {
     snprintf(rows[n], sizeof(rows[n]), "RSSI %lddBm  ch%ld",
              (long)WiFi.RSSI(), (long)WiFi.channel());
     ptrs[n] = rows[n]; n++;
-    snprintf(rows[n], sizeof(rows[n]), "TX: %ddBm",
-             (int)WiFi.getTxPower());
+    // Quarter-dBm: printing the raw value here used to read "TX: 84dBm".
+    char txPower[24];
+    if (wifiFormatTxPower(txPower, sizeof(txPower)) == ESP_OK) {
+      snprintf(rows[n], sizeof(rows[n]), "TX: %s", txPower);
+    } else {
+      snprintf(rows[n], sizeof(rows[n]), "TX: unavailable");
+    }
     ptrs[n] = rows[n]; n++;
   }
   snprintf(rows[n], sizeof(rows[n]), "MAC: %s", WiFi.macAddress().c_str());
@@ -900,44 +992,46 @@ static void handleMainTap(uint32_t idx) {
 // Watchdog spawned by the WiFi-toggle ON branch. Polls WiFi.isConnected()
 // every 500 ms for up to ~10 s and re-renders the menu the moment the
 // connection comes up — replaces the "WiFi: Pending..." overlay with
-// the live "WiFi: ON | <ssid>" text. If the deadline expires without a
+// the live SSID. If the deadline expires without a
 // successful connect (no saved network, AP out of range, wrong creds),
-// it re-renders one final time so the menu drops back to "WiFi: OFF"
-// instead of getting stuck on "Pending...".
+// it re-renders one final time so the menu shows the live Disabled or
+// Disconnected state instead of getting stuck on "Pending...".
 //
 // Runs on its own task, not the BLE notify task, because the polling
 // loop yields with vTaskDelay — calling g2ShowListPage from a task
 // other than the original tap dispatcher is fine; the BLE write path
 // is already mutex-guarded.
 static void wifiPendingWatchdogTask(void* /*arg*/) {
-  bool wasConnected = false;
-  bool rerendered   = false;
-  while (gWifiPendingDeadlineMs > 0 &&
-         (int32_t)(millis() - gWifiPendingDeadlineMs) < 0) {
-    vTaskDelay(pdMS_TO_TICKS(500));
-    const bool nowConnected = WiFi.isConnected();
-    if (nowConnected && !wasConnected) {
-      gWifiPendingDeadlineMs = 0;
-      // Only re-render if the user is still on the WiFi submenu —
-      // otherwise we'd clobber whatever they navigated to next.
-      if (gNetSub == NET_SUB_WIFI) {
-        showWiFiMenu();
-        rerendered = true;
+  for (;;) {
+    // Monitor whichever attempt currently owns the overlay. A later tap may
+    // replace the deadline while this task is asleep; ownership-CAS prevents
+    // the older attempt from clearing or redrawing over the newer one.
+    for (;;) {
+      const uint32_t watchedDeadline = wifiPendingOverlayDeadline();
+      if (watchedDeadline == 0) break;
+
+      if ((int32_t)(millis() - watchedDeadline) >= 0) {
+        if (!clearWifiPendingOverlayIfOwned(watchedDeadline)) continue;
+        if (gNetSub == NET_SUB_WIFI) showWiFiMenu();
+        break;
       }
+
+      vTaskDelay(pdMS_TO_TICKS(500));
+      if (!WiFi.isConnected()) continue;
+      if (!clearWifiPendingOverlayIfOwned(watchedDeadline)) continue;
+      // Only re-render if the user is still on the WiFi submenu — otherwise
+      // we'd clobber whatever they navigated to next.
+      if (gNetSub == NET_SUB_WIFI) showWiFiMenu();
       break;
     }
-    wasConnected = nowConnected;
+
+    // Publish inactivity, then close the handoff race: a tap that re-armed
+    // while this task still looked active either starts a replacement task or
+    // is reclaimed here. Exactly one watchdog remains responsible.
+    __atomic_store_n(&gWifiPendingTaskActive, false, __ATOMIC_RELEASE);
+    if (wifiPendingOverlayDeadline() == 0) break;
+    if (!claimWifiPendingWatchdog()) break;
   }
-  // Final re-render when the deadline expired without a state change,
-  // so the menu drops the "Pending..." text and reflects whatever
-  // stuck (usually "OFF" if the connect failed).
-  if (!rerendered && gNetSub == NET_SUB_WIFI) {
-    gWifiPendingDeadlineMs = 0;
-    showWiFiMenu();
-  } else {
-    gWifiPendingDeadlineMs = 0;
-  }
-  gWifiPendingTaskActive = false;
   vTaskDelete(nullptr);
 }
 #endif  // ENABLE_WIFI
@@ -993,6 +1087,22 @@ static void onWifiMenuRefreshDone(bool ok,
   enqueueWifiRedrawFromCallback(cookie, &showWiFiMenu, "WiFi-menu refresh");
 }
 
+// openwifi is a synchronous command on cmd_exec_task: by callback time it has
+// either associated or finished failing. End the optimistic overlay here so a
+// no-saved-network/auth failure immediately reveals the live radio state rather
+// than leaving "Pending..." on the lens until the watchdog deadline.
+static void onWifiConnectRefreshDone(bool ok,
+                                     const char* result,
+                                     const G2CmdCookie& cookie,
+                                     void* userData) {
+  const uint32_t pendingDeadline = (uint32_t)(uintptr_t)userData;
+  const bool ownedPending = clearWifiPendingOverlayIfOwned(pendingDeadline);
+  DEBUG_G2F("[G2] WiFi-connect refresh cmd done: ok=%d pending=%d seq=%llu menuGen=%u result='%s'",
+            (int)ok, (int)ownedPending, (unsigned long long)cookie.seq,
+            (unsigned)cookie.menuGen, result ? result : "");
+  enqueueWifiRedrawFromCallback(cookie, &showWiFiMenu, "WiFi-connect refresh");
+}
+
 static void onWifiSavedListRefreshDone(bool ok,
                                        const char* result,
                                        const G2CmdCookie& cookie,
@@ -1043,6 +1153,38 @@ static void onEspNowOpenDone(bool ok,
           sizeof(sEspNowOpenMsg) - 1);
   sEspNowOpenMsg[sizeof(sEspNowOpenMsg) - 1] = '\0';
   enqueueWifiRedrawFromCallback(cookie, &showEspNowOpenMsg, "ESP-NOW open failed");
+}
+
+// After the first-time name is persisted, start ESP-NOW. If the user has
+// already left this submenu, still issue openespnow (that was the tap) but
+// skip the lens redraw so we don't clobber whatever they navigated to.
+static void onEspNowNameThenOpenDone(bool ok,
+                                     const char* result,
+                                     const G2CmdCookie& cookie,
+                                     void* /*userData*/) {
+  DEBUG_G2F("[G2] ESP-NOW name-then-open: setname ok=%d result='%s' name='%s'",
+            (int)ok, result ? result : "",
+            gSettings.espnowDeviceName.c_str());
+  if (gSettings.espnowDeviceName.length() == 0) {
+    strncpy(sEspNowOpenMsg,
+            (result && result[0]) ? result : "ESP-NOW needs a device name",
+            sizeof(sEspNowOpenMsg) - 1);
+    sEspNowOpenMsg[sizeof(sEspNowOpenMsg) - 1] = '\0';
+    enqueueWifiRedrawFromCallback(cookie, &showEspNowOpenMsg,
+                                  "ESP-NOW setname failed");
+    return;
+  }
+  const bool stillHere =
+      (g2GetHijackPage() == cookie.targetPage &&
+       gNetSub == NET_SUB_ESPNOW);
+  G2HijackCmdCallback cb = stillHere ? onEspNowOpenDone : nullptr;
+  if (!g2SubmitHijackCommand("openespnow", cookie, cb, nullptr)) {
+    DEBUG_G2F("[G2] ESP-NOW name-then-open: openespnow submit FAILED");
+    if (stillHere) {
+      enqueueWifiRedrawFromCallback(cookie, &showEspNowMenu,
+                                    "ESP-NOW open submit failed");
+    }
+  }
 }
 #endif
 
@@ -1126,19 +1268,29 @@ static void onBluetoothR1MenuRefreshDone(bool ok,
 }
 
 static void handleWiFiTap(uint32_t idx) {
-  switch (idx) {
-    case 0:  // <- Back to top-level
+  const uint8_t rowCount =
+      __atomic_load_n(&gWifiMenuRowCount, __ATOMIC_ACQUIRE);
+  if (idx >= rowCount) {
+    DEBUG_G2F("[G2] WiFi: stale/unknown row idx=%u count=%u",
+              (unsigned)idx, (unsigned)rowCount);
+    return;
+  }
+  const WifiMenuAction action =
+      __atomic_load_n(&gWifiMenuActionByRow[idx], __ATOMIC_ACQUIRE);
+
+  switch (action) {
+    case WIFI_MENU_BACK:  // <- Back to top-level
       g2ShowNetworkMenu();
       break;
 
-    case 1: {  // Radio power toggle (airplane mode) — routed via cmd_exec.
+    case WIFI_MENU_TOGGLE_RADIO: {  // Airplane-mode radio toggle via cmd_exec.
 #if ENABLE_WIFI
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;
       const char* rcmd = wifiRadioOn() ? "radiopower off" : "radiopower on";
       DEBUG_G2F("[G2] Radio toggle: %s via cmd_exec", rcmd);
-      gWifiPendingDeadlineMs = 0;   // radio power is not the WiFi "Pending" overlay
+      cancelWifiPendingOverlay();   // radio power is not the WiFi "Pending" overlay
       if (!g2SubmitHijackCommand(rcmd, cookie, onWifiMenuRefreshDone, nullptr)) {
         DEBUG_G2F("[G2] Radio toggle: submit FAILED — no inline mutate");
       }
@@ -1146,12 +1298,23 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 2: {  // WiFi: connect best / disconnect — toggle. Group A: routed via cmd_exec.
+    case WIFI_MENU_TOGGLE_CONNECTION: {  // Connect best / disconnect toggle.
 #if ENABLE_WIFI
       bool connected = WiFi.isConnected();
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;
+
+      // The persisted master switch is intentionally stronger than the
+      // runtime radio toggle. Do not promise/animate a connection attempt that
+      // ensureWiFiInitialized() must reject; the row already directs the user
+      // to Settings in this state.
+      if (!connected && !gSettings.wifiEnabled) {
+        DEBUG_G2F("[G2] WiFi toggle ignored: WiFi disabled in Settings");
+        cancelWifiPendingOverlay();
+        showWiFiMenu();
+        break;
+      }
 
       if (connected) {
         // Disconnect path. Submit `closewifi`; callback re-renders the
@@ -1160,7 +1323,7 @@ static void handleWiFiTap(uint32_t idx) {
         // and from then on WiFi.isConnected() is false so the redraw
         // shows the right state.
         DEBUG_G2F("[G2] WiFi toggle: closewifi via cmd_exec");
-        gWifiPendingDeadlineMs = 0;   // clear stale pending overlay
+        cancelWifiPendingOverlay();   // clear stale pending overlay
         if (!g2SubmitHijackCommand("closewifi", cookie,
                                    onWifiMenuRefreshDone, nullptr)) {
           // Never mutate WiFi on the tap/BLE task — queue full / OOM /
@@ -1170,34 +1333,32 @@ static void handleWiFiTap(uint32_t idx) {
       } else {
         // Connect path. Optimistic UI: arm the "Pending..." deadline +
         // render synchronously BEFORE the submit so the user sees
-        // immediate feedback (callback can't fire until openwifi returns,
-        // and even that's before actual WiFi link-up). 150 ms BLE-flush
-        // breath stays as-is — the REBUILD must hit the air before WiFi
-        // takes radio coexistence. Watchdog still spawns to detect the
-        // actual link-up event (cmd_exec callback only confirms the kick,
-        // not the result; replacing the watchdog with WiFi.onEvent is a
-        // separate followup).
+        // immediate feedback; the callback cannot fire until openwifi returns.
+        // The 150 ms BLE-flush breath stays as-is — the REBUILD must hit the
+        // air before WiFi takes radio coexistence. The watchdog can reveal a
+        // successful link before openwifi finishes post-connect work; the
+        // completion callback ends the overlay on final success or failure.
         DEBUG_G2F("[G2] WiFi toggle: openwifi via cmd_exec (Pending overlay armed)");
-        gWifiPendingDeadlineMs = millis() + 10000;
+        const uint32_t pendingDeadline = armWifiPendingOverlay();
         showWiFiMenu();   // immediate "WiFi: Pending..." render
         vTaskDelay(pdMS_TO_TICKS(150));
 
         if (!g2SubmitHijackCommand("openwifi", cookie,
-                                   onWifiMenuRefreshDone, nullptr)) {
+                                   onWifiConnectRefreshDone,
+                                   (void*)(uintptr_t)pendingDeadline)) {
           DEBUG_G2F("[G2] WiFi toggle: openwifi submit FAILED — no inline mutate");
-          gWifiPendingDeadlineMs = 0;
+          clearWifiPendingOverlayIfOwned(pendingDeadline);
           showWiFiMenu();
-        } else if (!gWifiPendingTaskActive) {
+        } else if (claimWifiPendingWatchdog()) {
           // Watchdog only when the kick actually queued — only one alive
           // at a time; subsequent taps re-arm gWifiPendingDeadlineMs.
-          gWifiPendingTaskActive = true;
           taskStackRecord("g2_wifi_pending", 4096);
           if (xTaskCreatePinnedToCore(wifiPendingWatchdogTask, "g2_wifi_pending",
                           4096, nullptr, /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
             DEBUG_G2F("[G2] WiFi pending: xTaskCreate failed — "
                       "menu won't auto-refresh on connect");
-            gWifiPendingTaskActive = false;
-            gWifiPendingDeadlineMs = 0;
+            __atomic_store_n(&gWifiPendingTaskActive, false, __ATOMIC_RELEASE);
+            clearWifiPendingOverlayIfOwned(pendingDeadline);
             showWiFiMenu();
           }
         }
@@ -1206,17 +1367,15 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 3: {  // Disconnect from the AP but KEEP the radio on, so you can scan /
-               // reconnect to another network without re-enabling WiFi. Routed
-               // through the `wifidisconnect` command (cmd_exec) like every other
-               // action — this is deliberately NOT `closewifi`, which also stops
-               // the HTTP server and disables web output. Works in any state,
-               // including while "Pending...".
+    case WIFI_MENU_DISCONNECT: {  // Disconnect AP but KEEP the radio on, so a
+                                  // scan/reconnect needs no radio re-enable.
+                                  // This deliberately is not `closewifi`, which
+                                  // also stops HTTP and disables web output.
 #if ENABLE_WIFI
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;
-      gWifiPendingDeadlineMs = 0;   // cancel any pending overlay
+      cancelWifiPendingOverlay();   // cancel any pending overlay
       DEBUG_G2F("[G2] WiFi: Disconnect (radio stays on) via cmd_exec");
       if (!g2SubmitHijackCommand("wifidisconnect", cookie, onWifiMenuRefreshDone, nullptr)) {
         DEBUG_G2F("[G2] WiFi: wifidisconnect submit FAILED — no inline mutate");
@@ -1225,11 +1384,11 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 4:  // Status — drill into detailed info
+    case WIFI_MENU_STATUS:  // Drill into detailed info.
       showWiFiStatusPage();
       break;
 
-    case 5: {  // Scan Networks
+    case WIFI_MENU_SCAN: {
 #if ENABLE_WIFI
       DEBUG_G2F("[G2] WiFi: scan triggered from glasses");
       spawnNetworkScanWorker();
@@ -1237,12 +1396,12 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 6: {  // List Saved
+    case WIFI_MENU_SAVED: {
       showWiFiSavedList();
       break;
     }
 
-    case 7: {  // Auto Start toggle — first hijack tap routed through cmd_exec.
+    case WIFI_MENU_AUTO_START: {  // Boot-time Auto Start toggle via cmd_exec.
                // Submits the existing `wifiautostart <0|1>` CLI command
                // via g2SubmitHijackCommand. The completion callback enqueues
                // a Redraw job that the lens applier guards by menuGen and
@@ -1275,17 +1434,17 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 8:  // HTTP(S) >> — opens the HTTP submenu (server start/stop, HTTPS
-             //              mode, auto-start, URL display).
+    case WIFI_MENU_HTTP:  // Server start/stop, HTTPS mode, auto-start, URL.
       showHttpMenu();
       break;
 
-    case 9:  // ESP-NOW >> — opens the ESP-NOW submenu (peer list, role, etc.)
+    case WIFI_MENU_ESPNOW:  // Peer list, role, etc.
       showEspNowMenu();
       break;
 
     default:
-      DEBUG_G2F("[G2] WiFi: unknown idx=%u", (unsigned)idx);
+      DEBUG_G2F("[G2] WiFi: unknown action=%u at idx=%u",
+                (unsigned)action, (unsigned)idx);
       break;
   }
 }
@@ -1300,8 +1459,8 @@ static void handleWiFiStatusTap(uint32_t /*idx*/) {
 // password → `wifiadd "<ssid>" "<pass>" 1 0` through cmd_exec (auth + audit,
 // wifiadd is admin-gated so a non-admin pairer sees the denial text) → the
 // command's result text on the lens. Open APs skip the keyboard and save with
-// a quoted empty password. Accepted v1 limits: keyboard maxLen 32 (< the
-// 63-char PSK ceiling — longer PSKs need the web UI) and password renders
+// a quoted empty password. Accepted v1 limits: this field uses maxLen 32 (< the
+// 64-char PSK ceiling — longer PSKs need the web UI) and password renders
 // unmasked on the wearer-private lens.
 static char sWifiAddSsid[33];
 EXT_RAM_BSS_ATTR static char sWifiAddMsg[128];
@@ -1375,7 +1534,7 @@ static void handleWiFiScanTap(uint32_t idx) {
   TextEntryConfig cfg = {};
   cfg.prompt   = "WiFi Password";
   cfg.initial  = "";
-  cfg.maxLen   = 32;   // keyboard cap; >32-char PSKs need the web UI
+  cfg.maxLen   = 32;   // field cap; >32-char PSKs still use the web UI
   cfg.onCommit = wifiAddPassCommit;
   cfg.onCancel = wifiAddPassCancel;
   cfg.isSecret = true;   // PSK — keep out of debug logs
@@ -1415,21 +1574,23 @@ static void handleWiFiSavedActionTap(uint32_t idx) {
     DEBUG_G2F("[G2] WiFi: Connect saved '%s' (--index %d) via cmd_exec",
               ssid.c_str(), gWifiSavedSel + 1);
     cookie.targetNetSub   = NET_SUB_WIFI;     // land back on the WiFi menu
-    gWifiPendingDeadlineMs = millis() + 10000;
+    const uint32_t pendingDeadline = armWifiPendingOverlay();
     setNetSub(NET_SUB_WIFI);
     showWiFiMenu();                            // immediate "Pending..." feedback
     vTaskDelay(pdMS_TO_TICKS(150));
-    if (!g2SubmitHijackCommand(line, cookie, onWifiMenuRefreshDone, nullptr)) {
+    if (!g2SubmitHijackCommand(line, cookie,
+                               onWifiConnectRefreshDone,
+                               (void*)(uintptr_t)pendingDeadline)) {
       DEBUG_G2F("[G2] WiFi: Connect saved submit FAILED");
-      gWifiPendingDeadlineMs = 0;
+      clearWifiPendingOverlayIfOwned(pendingDeadline);
       showWiFiMenu();
-    } else if (!gWifiPendingTaskActive) {
-      gWifiPendingTaskActive = true;
+    } else if (claimWifiPendingWatchdog()) {
       taskStackRecord("g2_wifi_pending", 4096);
       if (xTaskCreatePinnedToCore(wifiPendingWatchdogTask, "g2_wifi_pending",
                       4096, nullptr, /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
-        gWifiPendingTaskActive = false;
-        gWifiPendingDeadlineMs = 0;
+        __atomic_store_n(&gWifiPendingTaskActive, false, __ATOMIC_RELEASE);
+        clearWifiPendingOverlayIfOwned(pendingDeadline);
+        showWiFiMenu();
       }
     }
   } else {  // idx == 2: Forget — wifirm <ssid>, return to the saved list.
@@ -1476,6 +1637,41 @@ static void espnowNameCancel() {
   DEBUG_G2F("[G2] ESP-NOW Set Name: cancelled");
   showEspNowMenu();
 }
+
+// Shared keyboard launch for the Name row and the unnamed OFF→ON tap.
+// maxLen 20 matches cmd_espnow_setname (letters, numbers, - and _ only).
+static bool beginEspNowNameEntry(TextEntryCommitFn onCommit) {
+  TextEntryConfig cfg = {};
+  cfg.prompt   = "ESPNow Name";
+  cfg.initial  = gSettings.espnowDeviceName.c_str();
+  cfg.maxLen   = 20;
+  cfg.onCommit = onCommit;
+  cfg.onCancel = espnowNameCancel;
+  if (!g2BeginTextEntry(cfg)) {
+    DEBUG_G2F("[G2] ESP-NOW: text-entry failed to start");
+    return false;
+  }
+  return true;
+}
+
+// Commit path used when the user tapped ESP-NOW: OFF with no name set:
+// persist the name, then open ESP-NOW on that command's completion.
+static void espnowNameThenOpenCommit(const char* text) {
+  if (!text || text[0] == '\0') {
+    DEBUG_G2F("[G2] ESP-NOW name-then-open: empty input — not starting");
+    showEspNowMenu();
+    return;
+  }
+  String line = String("espnowsetname \"") + text + "\"";
+  G2CmdCookie cookie{};
+  cookie.targetPage   = g2GetHijackPage();
+  cookie.targetNetSub = (uint8_t)gNetSub;
+  if (!g2SubmitHijackCommand(line.c_str(), cookie,
+                             onEspNowNameThenOpenDone, nullptr)) {
+    DEBUG_G2F("[G2] ESP-NOW name-then-open: setname submit FAILED");
+    showEspNowMenu();
+  }
+}
 #endif
 
 static void handleEspNowTap(uint32_t idx) {
@@ -1493,6 +1689,15 @@ static void handleEspNowTap(uint32_t idx) {
 
   if (idx == 1) {  // ESP-NOW state line — toggle via cmd_exec
 #if ENABLE_ESPNOW
+    if (!running && gSettings.espnowDeviceName.length() == 0) {
+      // Match OLED: ESP-NOW cannot start without a device name, so open
+      // the on-glasses keyboard first and start the radio after commit.
+      DEBUG_G2F("[G2] ESP-NOW toggle: name unset — opening keyboard");
+      if (!beginEspNowNameEntry(espnowNameThenOpenCommit)) {
+        showEspNowMenu();
+      }
+      return;
+    }
     const char* line = running ? "closeespnow" : "openespnow";
     // For the OPEN path, use a callback that surfaces the failure reason on the
     // lens (init can fail on memory/coexistence); CLOSE just re-renders.
@@ -1517,15 +1722,7 @@ static void handleEspNowTap(uint32_t idx) {
   const uint32_t kNameIdxOn  = 5;
   const uint32_t kNameIdxOff = 3;
   if ((running && idx == kNameIdxOn) || (!running && idx == kNameIdxOff)) {
-    TextEntryConfig cfg = {};
-    cfg.prompt   = "ESPNow Name";
-    cfg.initial  = gSettings.espnowDeviceName.c_str();
-    cfg.maxLen   = 24;   // ESPNow name is short — host-friendly bound
-    cfg.onCommit = espnowNameCommit;
-    cfg.onCancel = espnowNameCancel;
-    if (!g2BeginTextEntry(cfg)) {
-      DEBUG_G2F("[G2] ESP-NOW: text-entry failed to start");
-    }
+    (void)beginEspNowNameEntry(espnowNameCommit);
     return;
   }
 #endif

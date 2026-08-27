@@ -118,10 +118,17 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
     strncpy(uc.ctx.automationName, autoName, sizeof(uc.ctx.automationName) - 1);
     uc.ctx.automationName[sizeof(uc.ctx.automationName) - 1] = '\0';
   }
+  const bool inputLengthAccepted =
+      commandInputLengthAccepted(uc.line.length());
   if (!submitCommandAsync(uc, nullptr, nullptr)) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos] FAILED to queue sub-command: %s", safeCmd.c_str());
+    const char* dropReason = inputLengthAccepted
+                                 ? "exec queue unavailable"
+                                 : "command exceeds input limit";
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos] DROPPED sub-command (%s): %s",
+           dropReason, safeCmd.c_str());
     // Durable: a scheduled automation silently half-ran — one of its commands
-    // never reached cmd_exec (queue full). Attribute to the automation so it's
+    // never reached cmd_exec (queue unavailable or over the shared input
+    // ceiling). Attribute to the automation so it's
     // clear which scheduled run was truncated. Rate-limited: one automation
     // dispatches its whole command list at once and a wedged cmd_exec (or a
     // sub-second interval trigger) can drop many per pass — cap to one durable
@@ -132,21 +139,24 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
     uint32_t nowMs = millis();
     if (sLastDropLogMs == 0 || (nowMs - sLastDropLogMs) >= 5000) {
       if (sDropsSuppressed > 0) {
-        logSystemEvent("AUTO", "sub-command DROPPED (exec queue full) in automation '%s': %s (+%lu more since last)",
+        logSystemEvent("AUTO", "sub-command DROPPED (%s) in automation '%s': %s (+%lu more since last)",
+                       dropReason,
                        (autoName && autoName[0]) ? autoName : "?", safeCmd.c_str(),
                        (unsigned long)sDropsSuppressed);
       } else {
-        logSystemEvent("AUTO", "sub-command DROPPED (exec queue full) in automation '%s': %s",
+        logSystemEvent("AUTO", "sub-command DROPPED (%s) in automation '%s': %s",
+                       dropReason,
                        (autoName && autoName[0]) ? autoName : "?", safeCmd.c_str());
       }
       // SYSTEM-EVENT: a scheduled automation half-ran — this action never
-      // reached cmd_exec. Share the durable log's 5 s throttle so a flooded
-      // queue can't churn system-events; fold suppressed drops into the detail.
+      // reached cmd_exec. Share the durable log's 5 s throttle so repeated
+      // failures cannot churn system-events; fold suppressed drops into detail.
       char dropDetail[80];
       if (sDropsSuppressed > 0) {
-        snprintf(dropDetail, sizeof(dropDetail), "exec queue full (+%lu more)", (unsigned long)sDropsSuppressed);
+        snprintf(dropDetail, sizeof(dropDetail), "%s (+%lu more)", dropReason,
+                 (unsigned long)sDropsSuppressed);
       } else {
-        snprintf(dropDetail, sizeof(dropDetail), "exec queue full");
+        snprintf(dropDetail, sizeof(dropDetail), "%s", dropReason);
       }
       systemEventPost(SYSEVT_AUTOMATION_ACTION_DROPPED,
                       (autoName && autoName[0]) ? autoName : "?", dropDetail);
@@ -625,10 +635,12 @@ bool sanitizeAutomationsJson(String& jsonRef) {
 // at the end of each schedulerTickMinute, which already reads+parses the file.
 
 struct AutomationsCacheEntry {
-  long id;
   time_t nextAt;
+  long id;
   bool enabled;
 };
+static_assert(sizeof(AutomationsCacheEntry) == 16,
+              "AutomationsCacheEntry must remain within its 16-byte DRAM budget");
 
 static constexpr int AUTOMATIONS_CACHE_MAX = 64;
 static AutomationsCacheEntry* gAutomationsCache = nullptr;
@@ -639,7 +651,13 @@ static volatile bool gAutomationsCacheValid = false;
 // event trigger. 256-bit mask stored as 8x32-bit words (word = kind >> 5,
 // bit = kind & 31). Rebuilt with the cache; consulted by systemEventPost
 // (via automationOnSystemEvent) so unsubscribed events never force a tick.
-static volatile uint32_t gAutomationEventKindMask[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+static constexpr size_t AUTOMATION_EVENT_MASK_WORDS = 8;
+static constexpr size_t AUTOMATION_EVENT_MASK_BITS =
+    AUTOMATION_EVENT_MASK_WORDS * 32u;
+static_assert(static_cast<size_t>(SYSEVT_COUNT) <= AUTOMATION_EVENT_MASK_BITS,
+              "System Event catalog outgrew the automation subscription mask");
+static volatile uint32_t
+    gAutomationEventKindMask[AUTOMATION_EVENT_MASK_WORDS]{};
 // Set when a subscribed event was posted; cleared when the tick drains.
 static volatile bool gAutomationEventsPending = false;
 
@@ -655,8 +673,9 @@ bool automationEventsPending() { return gAutomationEventsPending; }
 
 static bool ensureAutomationsCache() {
   if (gAutomationsCache) return true;
-  gAutomationsCache = (AutomationsCacheEntry*)heap_caps_calloc(
-      AUTOMATIONS_CACHE_MAX, sizeof(AutomationsCacheEntry), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  gAutomationsCache = (AutomationsCacheEntry*)ps_calloc(
+      AUTOMATIONS_CACHE_MAX, sizeof(AutomationsCacheEntry),
+      AllocPref::RequireInternal, "auto.cache");
   if (!gAutomationsCache) {
     ERROR_SYSTEMF("[automations] Failed to allocate scheduler cache (%u bytes)",
                   (unsigned)(AUTOMATIONS_CACHE_MAX * sizeof(AutomationsCacheEntry)));
@@ -669,12 +688,14 @@ static bool ensureAutomationsCache() {
 
 static void releaseAutomationsCache() {
   if (gAutomationsCache) {
-    heap_caps_free(gAutomationsCache);
+    ps_free(gAutomationsCache);
     gAutomationsCache = nullptr;
   }
   gAutomationsCacheCount = 0;
   gAutomationsCacheValid = false;
-  for (int w = 0; w < 8; w++) gAutomationEventKindMask[w] = 0;
+  for (size_t w = 0; w < AUTOMATION_EVENT_MASK_WORDS; ++w) {
+    gAutomationEventKindMask[w] = 0;
+  }
 }
 
 // Re-read automations.json and refill the cache. Called at the end of the
@@ -695,7 +716,7 @@ static void rebuildAutomationsCache() {
   }
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
   int n = 0;
-  uint32_t evtMask[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  uint32_t evtMask[AUTOMATION_EVENT_MASK_WORDS]{};
   for (JsonObjectConst a : autos) {
     if (n >= AUTOMATIONS_CACHE_MAX) break;
     gAutomationsCache[n].id = a["id"].as<long>();
@@ -727,7 +748,9 @@ static void rebuildAutomationsCache() {
     n++;
   }
   gAutomationsCacheCount = n;
-  for (int w = 0; w < 8; w++) gAutomationEventKindMask[w] = evtMask[w];
+  for (size_t w = 0; w < AUTOMATION_EVENT_MASK_WORDS; ++w) {
+    gAutomationEventKindMask[w] = evtMask[w];
+  }
   gAutomationsCacheValid = true;
 }
 
@@ -3925,25 +3948,23 @@ static bool automationEventTriggersMatch(const char* automationJson, const Syste
 // gSettings.automationEnabled, so a disabled device never runs a tick and
 // never pays for this.
 //
-// INTERNAL, not PSRAM — but for a weaker reason than this comment used to
-// claim, so the history matters (updated 2026-08-19):
-//  * The old reason 1 ("fetch fills this under taskENTER_CRITICAL") is GONE:
-//    systemEventFetchSince is now chunked at 4 slots per lock hold and the
-//    ring itself lives in PSRAM (see System_Events.cpp).
-//  * The old reason 2 ("login <user> <pass> lands here in plaintext") has been
-//    FALSE since 7e347401: both SYSEVT_REMOTE_CMD_RX posters run detail through
-//    redactCmdForAudit before posting, so credentials are masked at the source.
-// What remains: this is a 7.9 KB drain buffer written 48 slots at a time on the
-// loop task; keeping it INTERNAL keeps the automation minute-tick off the PSRAM
-// bus for no structural reason other than cheap latency margin. Moving it to
-// ps_alloc(PreferPSRAM) is now a legitimate future option if internal DRAM gets
-// tight again — nothing blocks it anymore.
+// PSRAM-preferred: on PSRAM builds the ring itself already lives there, and
+// systemEventFetchSince bounds each spinlock hold to four 164-byte records, so
+// making the destination external introduces no new cache-access class or
+// unbounded critical section. The rest of the minute tick is CPU-only work on
+// the custom main task; no ISR, DMA, driver, panic, or cache-off path receives
+// this pointer. Event payloads also gain no new exposure: the authoritative ring
+// already stores the same records externally, and credential-bearing remote
+// commands are redacted before posting.
 //
-// Deliberately never freed. cmd_automation flips automationEnabled from the
-// command tasks (cmd_exec/web, core 0) while a tick may be mid-scan on the loop
-// task (core 1), so releasing it on disable would hand a live reader a dangling
-// pointer. Allocate-on-first-use-and-keep buys back the DRAM for anyone who
-// leaves automations off, with no teardown race to get wrong.
+// ps_calloc falls back to the ordinary heap when PSRAM is absent/exhausted or
+// globally bypassed, preserving event triggers on boards without usable PSRAM.
+//
+// Deliberately never freed. cmd_automation can flip automationEnabled from a
+// command task while the custom main task is mid-scan, so releasing it on
+// disable would hand a live reader a dangling pointer. Allocate-on-first-use-
+// and-keep buys back the memory for anyone who leaves automations off, with no
+// teardown race to get wrong.
 static SystemEvent* sEventBuf = nullptr;
 
 // Core scheduler logic - extracted for reuse
@@ -3959,13 +3980,9 @@ void schedulerTickMinute() {
   static uint32_t sEventRingSkipped = 0;  // ring overwrote events before we read them
   gAutomationEventsPending = false;  // posts after this point re-set it for the next tick
   if (!sEventBuf) {
-    // heap_caps_calloc, not ps_alloc(PreferInternal): the latter degrades to
-    // plain malloc(), which lands in PSRAM once an allocation clears
-    // CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL. This buffer must never go there
-    // (see above), so state the requirement instead of inheriting it from a
-    // tunable that happens to be larger than we are today.
-    sEventBuf = (SystemEvent*)heap_caps_calloc(SYSEVT_RING_SIZE, sizeof(SystemEvent),
-                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    sEventBuf = static_cast<SystemEvent*>(
+        ps_calloc(SYSEVT_RING_SIZE, sizeof(SystemEvent),
+                  AllocPref::PreferPSRAM, "auto.eventDrain"));
     if (!sEventBuf) {
       static uint32_t sAllocWarnMs = 0;
       if (everyMs(&sAllocWarnMs, 10000)) {

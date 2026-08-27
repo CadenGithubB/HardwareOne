@@ -37,6 +37,12 @@ static const int ESPNOW_MENU_ITEM_COUNT = 6;
 // Global state
 OLEDEspNowState gOledEspNowState;
 
+// Match the rest of the OLED subsystem: the large pointer/metadata-only scroll
+// states live in external BSS, while gOledEspNowState keeps its non-trivial
+// String fields (including the remote-login form) in internal DRAM.
+EXT_RAM_BSS_ATTR static OLEDScrollState sEspNowDeviceListScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sEspNowMessageListScroll;
+
 // Sent text is now recorded in the SHARED per-peer history (sent[] ring) at the
 // cmd_espnow_send chokepoint, so the OLED no longer keeps a private sent ring —
 // it reads the unified conversation via espnowGetConversation(). This is what
@@ -119,11 +125,11 @@ void oledEspNowInit() {
   oledEspNowScrubRemoteForm();
   
   // Initialize scrolling lists
-  oledScrollInit(&gOledEspNowState.deviceList, "ESP-NOW Devices", 3);
-  oledScrollInit(&gOledEspNowState.messageList, nullptr, 3);
+  oledScrollInit(&sEspNowDeviceListScroll, "ESP-NOW Devices", 3);
+  oledScrollInit(&sEspNowMessageListScroll, nullptr, 3);
   // Truthful visible-row count (footer-aware) so the shared scroll helpers and the
   // follow-tail restore never push the selection into/below the footer.
-  gOledEspNowState.messageList.visibleLines = oledEspNowMsgVisibleRows();
+  sEspNowMessageListScroll.visibleLines = oledEspNowMsgVisibleRows();
   
   // Settings menu state (local)
   gOledEspNowState.settingsMenuIndex = 0;
@@ -164,7 +170,8 @@ void oledEspNowShowNameKeyboard() {
   if (gSettings.espnowDeviceName.length() > 0) {
     initialText = gSettings.espnowDeviceName.c_str();
   }
-  oledKeyboardInit("Device Name:", initialText, 20);
+  oledKeyboardInit("Device Name:", initialText, 20,
+                   OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
 }
 
 void oledEspNowDisplay(Adafruit_SSD1306* display) {
@@ -772,10 +779,10 @@ void oledEspNowDisplayDeviceList(Adafruit_SSD1306* display) {
   } else {
     snprintf(titleBuf, sizeof(titleBuf), "ESP-NOW %s %s:%s", roleStr, filterStr[0] ? filterStr : "A", sortStr);
   }
-  gOledEspNowState.deviceList.title = titleBuf;
+  sEspNowDeviceListScroll.title = titleBuf;
   
   // Render device list using scrolling system
-  oledScrollRender(display, &gOledEspNowState.deviceList, true, true);
+  oledScrollRender(display, &sEspNowDeviceListScroll, true, true);
 }
 
 void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
@@ -814,21 +821,21 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   
   // Render message list below the global header. The visible window, the per-row
   // clip and the scrollbar all derive from the SAME footer geometry as
-  // messageList.visibleLines (see kMsgList* above), so a scrolled-to row can never
-  // land in or below the global footer.
+  // sEspNowMessageListScroll.visibleLines (see kMsgList* above), so a
+  // scrolled-to row can never land in or below the global footer.
   const int yOffset    = kMsgListTopY;
   const int footerTopY = oledEspNowMsgFooterTopY();
   const int lineHeight = 8;
-  int visibleStart = gOledEspNowState.messageList.scrollOffset;
-  int visibleEnd = min(gOledEspNowState.messageList.itemCount,
-                       visibleStart + gOledEspNowState.messageList.visibleLines);
+  int visibleStart = sEspNowMessageListScroll.scrollOffset;
+  int visibleEnd = min(sEspNowMessageListScroll.itemCount,
+                       visibleStart + sEspNowMessageListScroll.visibleLines);
 
   int yPos = yOffset;
 
   const int rightEdge = SCREEN_WIDTH - 4;  // leave room for the scrollbar
   for (int i = visibleStart; i < visibleEnd && (yPos + kMsgRowHeight) <= footerTopY; i++) {
-    OLEDScrollItem* item = &gOledEspNowState.messageList.items[i];
-    bool isSelected = (i == gOledEspNowState.messageList.selectedIndex);
+    OLEDScrollItem* item = &sEspNowMessageListScroll.items[i];
+    bool isSelected = (i == sEspNowMessageListScroll.selectedIndex);
     bool isSent = gOledRowMeta[i].isSent;  // left = received, right = sent (web-style)
 
     // Line 1: message text (truncated). Sent right-aligned, received left-aligned.
@@ -872,18 +879,18 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   }
   
   // Show scrollbar if needed
-  if (gOledEspNowState.messageList.itemCount > gOledEspNowState.messageList.visibleLines) {
+  if (sEspNowMessageListScroll.itemCount > sEspNowMessageListScroll.visibleLines) {
     int scrollbarX = SCREEN_WIDTH - 1;
     int scrollbarY = yOffset;
     int scrollbarHeight = footerTopY - yOffset;  // content band, above the global footer
     
     display->drawFastVLine(scrollbarX, scrollbarY, scrollbarHeight, DISPLAY_COLOR_WHITE);
     
-    int thumbHeight = max(4, (scrollbarHeight * gOledEspNowState.messageList.visibleLines) / 
-                            gOledEspNowState.messageList.itemCount);
+    int thumbHeight = max(4, (scrollbarHeight * sEspNowMessageListScroll.visibleLines) /
+                            sEspNowMessageListScroll.itemCount);
     int thumbY = scrollbarY + (scrollbarHeight - thumbHeight) * 
-                 gOledEspNowState.messageList.scrollOffset / 
-                 max(1, gOledEspNowState.messageList.itemCount - gOledEspNowState.messageList.visibleLines);
+                 sEspNowMessageListScroll.scrollOffset /
+                 max(1, sEspNowMessageListScroll.itemCount - sEspNowMessageListScroll.visibleLines);
     
     display->fillRect(scrollbarX - 1, thumbY, 3, thumbHeight, DISPLAY_COLOR_WHITE);
   }
@@ -1077,11 +1084,11 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     case ESPNOW_VIEW_DEVICE_LIST:
       // Navigate device list using centralized navigation events
       if (gNavEvents.up) {
-        oledScrollUp(&gOledEspNowState.deviceList);
+        oledScrollUp(&sEspNowDeviceListScroll);
         return true;
       }
       if (gNavEvents.down) {
-        oledScrollDown(&gOledEspNowState.deviceList);
+        oledScrollDown(&sEspNowDeviceListScroll);
         return true;
       }
       
@@ -1206,17 +1213,18 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
           gOledEspNowState.currentView = ESPNOW_VIEW_TEXT_KEYBOARD;
           gOledEspNowState.textMessageBuffer = "";
-          oledKeyboardInit("Send Message:", "", 128);
+          oledKeyboardInit("Send Message:", "", 128,
+                           OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
           return true;
         }
         
         // Navigate message list using centralized navigation events
         if (gNavEvents.up) {
-          oledScrollUp(&gOledEspNowState.messageList);
+          oledScrollUp(&sEspNowMessageListScroll);
           return true;
         }
         if (gNavEvents.down) {
-          oledScrollDown(&gOledEspNowState.messageList);
+          oledScrollDown(&sEspNowMessageListScroll);
           return true;
         }
         
@@ -1236,11 +1244,11 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         
         // Navigate message list using centralized navigation events
         if (gNavEvents.up) {
-          oledScrollUp(&gOledEspNowState.messageList);
+          oledScrollUp(&sEspNowMessageListScroll);
           return true;
         }
         if (gNavEvents.down) {
-          oledScrollDown(&gOledEspNowState.messageList);
+          oledScrollDown(&sEspNowMessageListScroll);
           return true;
         }
         
@@ -1317,7 +1325,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 void oledEspNowSelectDevice() {
-  OLEDScrollItem* selected = oledScrollGetSelected(&gOledEspNowState.deviceList);
+  OLEDScrollItem* selected = oledScrollGetSelected(&sEspNowDeviceListScroll);
   if (!selected || !selected->userData) return;
   
   // Store selected device MAC
@@ -1422,7 +1430,7 @@ void oledEspNowRefreshDeviceList() {
   // Keep the cursor across this rebuild — this runs on a 1s timer while the
   // device list is open, so a plain oledScrollClear() (which resets selectedIndex
   // to 0) would snap the selection back to the top every second.
-  oledScrollClearKeepSelection(&gOledEspNowState.deviceList);
+  oledScrollClearKeepSelection(&sEspNowDeviceListScroll);
   
   // Get own MAC to skip self
   uint8_t myMac[6];
@@ -1512,7 +1520,7 @@ void oledEspNowRefreshDeviceList() {
                entry->device->encrypted ? " E" : "");
     }
     
-    oledScrollAddItem(&gOledEspNowState.deviceList, line1Bufs[i], line2Bufs[i], true, entry->device);
+    oledScrollAddItem(&sEspNowDeviceListScroll, line1Bufs[i], line2Bufs[i], true, entry->device);
   }
   
   // If no visible devices (excluding self), show message
@@ -1524,11 +1532,11 @@ void oledEspNowRefreshDeviceList() {
     } else {
       noDevLine2 = "Pair via web UI";
     }
-    oledScrollAddItem(&gOledEspNowState.deviceList, noDevLine1, noDevLine2, false, nullptr);
+    oledScrollAddItem(&sEspNowDeviceListScroll, noDevLine1, noDevLine2, false, nullptr);
   }
 
   // Clamp the preserved cursor back into range (device count may have shrunk).
-  oledScrollClampSelection(&gOledEspNowState.deviceList);
+  oledScrollClampSelection(&sEspNowDeviceListScroll);
 }
 
 void oledEspNowRefreshMessages() {
@@ -1539,11 +1547,11 @@ void oledEspNowRefreshMessages() {
   // preserving position the user would get snapped to the top of the message
   // list every tick, making it impossible to scroll up to read older messages
   // while a peer is actively chatting.
-  int savedSelectedIndex = gOledEspNowState.messageList.selectedIndex;
-  int savedScrollOffset  = gOledEspNowState.messageList.scrollOffset;
-  int prevItemCount      = gOledEspNowState.messageList.itemCount;
+  int savedSelectedIndex = sEspNowMessageListScroll.selectedIndex;
+  int savedScrollOffset  = sEspNowMessageListScroll.scrollOffset;
+  int prevItemCount      = sEspNowMessageListScroll.itemCount;
 
-  oledScrollClear(&gOledEspNowState.messageList);
+  oledScrollClear(&sEspNowMessageListScroll);
 
   // Build the conversation from the SHARED store: the core merges this peer's
   // received + sent rings into one time-ordered list (espnowGetConversation), so
@@ -1582,7 +1590,7 @@ void oledEspNowRefreshMessages() {
       meta = (msg->senderName[0]) ? msg->senderName : "Unknown";
     }
 
-    oledScrollAddItem(&gOledEspNowState.messageList, msg->message, meta, true, nullptr);
+    oledScrollAddItem(&sEspNowMessageListScroll, msg->message, meta, true, nullptr);
     m++;
   }
 
@@ -1590,7 +1598,7 @@ void oledEspNowRefreshMessages() {
     static const char* noMsgLine1 = "No messages yet";
     static const char* noMsgLine2 = "Start chatting!";
     gOledRowMeta[0].isSent = false; gOledRowMeta[0].msgId = 0;
-    oledScrollAddItem(&gOledEspNowState.messageList, noMsgLine1, noMsgLine2, false, nullptr);
+    oledScrollAddItem(&sEspNowMessageListScroll, noMsgLine1, noMsgLine2, false, nullptr);
     return;
   }
 
@@ -1611,9 +1619,9 @@ void oledEspNowRefreshMessages() {
   // index. This intentionally matches the moment the most-recent message
   // is on screen, not just a strict equality, so it works whether the list
   // fits entirely on screen or only the tail does.
-  int newCount = gOledEspNowState.messageList.itemCount;
+  int newCount = sEspNowMessageListScroll.itemCount;
   if (newCount > 0) {
-    int vis = gOledEspNowState.messageList.visibleLines;
+    int vis = sEspNowMessageListScroll.visibleLines;
     bool wasAtBottom = (prevItemCount > 0 &&
                         (savedScrollOffset + vis) >= prevItemCount);
     bool messageArrived = (newCount > prevItemCount);
@@ -1633,8 +1641,8 @@ void oledEspNowRefreshMessages() {
       if (off > maxOff) off = maxOff;
       if (off < 0)      off = 0;
     }
-    gOledEspNowState.messageList.selectedIndex = idx;
-    gOledEspNowState.messageList.scrollOffset  = off;
+    sEspNowMessageListScroll.selectedIndex = idx;
+    sEspNowMessageListScroll.scrollOffset  = off;
   }
 }
 
@@ -1826,7 +1834,13 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
         break;
     }
     
-    oledKeyboardInit(title, initialText, 64);
+    // A remote username is plain identity metadata. Passwords and arbitrary
+    // command payloads can contain secrets and must never accept dictation.
+    const OLEDKeyboardDictationPolicy policy =
+        gOledEspNowState.remoteFormField == 0
+            ? OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT
+            : OLEDKeyboardDictationPolicy::DENY;
+    oledKeyboardInit(title, initialText, 64, policy);
     return true;
   }
   
@@ -2144,7 +2158,11 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
         break;
     }
     
-    oledKeyboardInit(prompt, initialValue.c_str(), maxLen);
+    const OLEDKeyboardDictationPolicy policy =
+        gOledEspNowState.settingsEditField == 6
+            ? OLEDKeyboardDictationPolicy::DENY
+            : OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT;
+    oledKeyboardInit(prompt, initialValue.c_str(), maxLen, policy);
     gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS_KEYBOARD;
     return true;
   }
@@ -2289,31 +2307,38 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
         
       case 1: // Set Role
         gOledEspNowState.deviceConfigEditField = 1;
-        oledKeyboardInit("Role (master/backup/worker):", "", 16);
+        oledKeyboardInit(
+            "Role (master/backup/worker):", "", 16,
+            OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 2: // Set Name
         gOledEspNowState.deviceConfigEditField = 2;
-        oledKeyboardInit("Device Name:", gOledEspNowState.selectedDeviceName.c_str(), 16);
+        oledKeyboardInit(
+            "Device Name:", gOledEspNowState.selectedDeviceName.c_str(), 16,
+            OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 3: // Set Room
         gOledEspNowState.deviceConfigEditField = 3;
-        oledKeyboardInit("Room:", "", 16);
+        oledKeyboardInit("Room:", "", 16,
+                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 4: // Set Zone
         gOledEspNowState.deviceConfigEditField = 4;
-        oledKeyboardInit("Zone:", "", 16);
+        oledKeyboardInit("Zone:", "", 16,
+                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 5: // Set Pretty Name
         gOledEspNowState.deviceConfigEditField = 5;
-        oledKeyboardInit("Pretty Name:", "", 24);
+        oledKeyboardInit("Pretty Name:", "", 24,
+                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         

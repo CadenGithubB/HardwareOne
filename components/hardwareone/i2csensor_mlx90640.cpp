@@ -1402,6 +1402,13 @@ const char* cmd_thermalautostart(const String& argsInput) {
 }
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+// Bus routing for this device. Lives here rather than in System_I2C.cpp so it
+// compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
+static const char* cmd_thermalbus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.thermalBus, a, "thermalBus");
+}
+
 const CommandEntry thermalCommands[] = {
   // Start/Stop (3-level voice: "sensor" -> "thermal camera" -> "open/close")
   { "openthermal", "Start MLX90640 thermal sensor.", false, cmd_thermalstart },
@@ -1436,6 +1443,7 @@ const CommandEntry thermalCommands[] = {
   
   // Auto-start
   { "thermalautostart", "Enable/disable thermal auto-start after boot [on|off]", false, cmd_thermalautostart, "Usage: thermalautostart [on|off]" },
+  { "thermalbus",  "Route MLX90640 thermal to bus: <0|1> (reboot required)", true, cmd_thermalbus, "Usage: thermalBus <0|1>" },
 };
 
 const size_t thermalCommandsCount = sizeof(thermalCommands) / sizeof(thermalCommands[0]);

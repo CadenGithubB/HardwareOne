@@ -42,7 +42,7 @@ inline void streamEdgeImpulseSensorCard(httpd_req_t* req) {
         </div>
         <div style='margin-bottom:10px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Model:</label>
-          <select id='ei-model-select' style='width:100%'>
+          <select id='ei-model-select' class='input-fit input-l'>
             <option value=''>-- Select Model --</option>
           </select>
           <div style='display:flex;gap:6px;margin-top:6px;flex-wrap:wrap'>
@@ -90,8 +90,8 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req,
     "(function(){\n"
     "var settingsVisible = false;\n"
-    "var toggleBtn = document.getElementById('btn-ei-settings-toggle');\n"
-    "var settingsDiv = document.getElementById('ei-settings');\n"
+    "var toggleBtn = hw.$('btn-ei-settings-toggle');\n"
+    "var settingsDiv = hw.$('ei-settings');\n"
     "if(toggleBtn && settingsDiv) {\n"
     "  toggleBtn.onclick = function() {\n"
     "    settingsVisible = !settingsVisible;\n"
@@ -103,8 +103,8 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
   // Confidence slider
   httpd_resp_send_chunk(req,
     "(function(){\n"
-    "var slider = document.getElementById('ei-confidence');\n"
-    "var valSpan = document.getElementById('ei-confidence-val');\n"
+    "var slider = hw.$('ei-confidence');\n"
+    "var valSpan = hw.$('ei-confidence-val');\n"
     "if(slider && valSpan) {\n"
     "  slider.oninput = function() { valSpan.textContent = parseFloat(this.value).toFixed(2); };\n"
     "  slider.onchange = function() {\n"
@@ -116,8 +116,8 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
   // Interval slider
   httpd_resp_send_chunk(req,
     "(function(){\n"
-    "var slider = document.getElementById('ei-interval');\n"
-    "var valSpan = document.getElementById('ei-interval-val');\n"
+    "var slider = hw.$('ei-interval');\n"
+    "var valSpan = hw.$('ei-interval-val');\n"
     "if(slider && valSpan) {\n"
     "  slider.oninput = function() { valSpan.textContent = this.value; };\n"
     "  slider.onchange = function() {\n"
@@ -129,7 +129,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
   // Model list loading
   httpd_resp_send_chunk(req,
     "window._eiLoadModels = function() {\n"
-    "  var select = document.getElementById('ei-model-select');\n"
+    "  var select = hw.$('ei-model-select');\n"
     "  if(!select) return;\n"
     "  hw.postFormText('/api/cli', {cmd:'ei model list'})\n"
     "    .then(function(txt) {\n"
@@ -146,13 +146,13 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "      });\n"
     "    });\n"
     "};\n"
-    "document.getElementById('btn-ei-refresh-models').onclick = window._eiLoadModels;\n"
+    "hw.$('btn-ei-refresh-models').onclick = window._eiLoadModels;\n"
     "window._eiLoadModels();\n", HTTPD_RESP_USE_STRLEN);
 
   // Model load button
   httpd_resp_send_chunk(req,
-    "document.getElementById('btn-ei-load-model').onclick = function() {\n"
-    "  var select = document.getElementById('ei-model-select');\n"
+    "hw.$('btn-ei-load-model').onclick = function() {\n"
+    "  var select = hw.$('ei-model-select');\n"
     "  if(!select || !select.value) { alert('Select a model first'); return; }\n"
     "  hw.postFormText('/api/cli', {cmd:'ei model load '+select.value})\n"
     "    .then(function(txt) {\n"
@@ -164,21 +164,21 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
 
   // Model upload handler
   httpd_resp_send_chunk(req,
-    "document.getElementById('btn-ei-upload-model').onclick = function() {\n"
-    "  var fileInput = document.getElementById('ei-model-file');\n"
-    "  var statusEl = document.getElementById('ei-upload-status');\n"
+    "hw.$('btn-ei-upload-model').onclick = function() {\n"
+    "  var fileInput = hw.$('ei-model-file');\n"
+    "  var statusEl = hw.$('ei-upload-status');\n"
     "  if(!fileInput || !fileInput.files || fileInput.files.length === 0) {\n"
-    "    if(statusEl) statusEl.textContent = 'Please select a .tflite file first';\n"
+    "    hw.setText(statusEl, 'Please select a .tflite file first');\n"
     "    return;\n"
     "  }\n"
     "  var file = fileInput.files[0];\n"
     "  if(!file.name.endsWith('.tflite')) {\n"
-    "    if(statusEl) statusEl.textContent = 'File must be a .tflite model';\n"
+    "    hw.setText(statusEl, 'File must be a .tflite model');\n"
     "    return;\n"
     "  }\n"
-    "  var btn = document.getElementById('btn-ei-upload-model');\n"
+    "  var btn = hw.$('btn-ei-upload-model');\n"
     "  btn.disabled = true;\n"
-    "  if(statusEl) statusEl.textContent = 'Uploading ' + file.name + '...';\n"
+    "  hw.setText(statusEl, 'Uploading ' + file.name + '...');\n"
     "  var reader = new FileReader();\n"
     "  reader.onload = function(e) {\n"
     "    var b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(e.target.result)));\n"
@@ -187,44 +187,44 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "      .then(function(data) {\n"
     "        btn.disabled = false;\n"
     "        if(data.success) {\n"
-    "          if(statusEl) statusEl.innerHTML = '<span style=\"color:#28a745\">Uploaded! Now select and load it.</span>';\n"
+    "          hw.setHTML(statusEl, '<span style=\"color:#28a745\">Uploaded! Now select and load it.</span>');\n"
     "          window._eiLoadModels();\n"
     "        } else {\n"
-    "          if(statusEl) statusEl.innerHTML = '<span style=\"color:#dc3545\">Error: ' + (data.error||'Unknown') + '</span>';\n"
+    "          hw.setHTML(statusEl, '<span style=\"color:#dc3545\">Error: ' + (data.error||'Unknown') + '</span>');\n"
     "        }\n"
     "      })\n"
     "      .catch(function(err) {\n"
     "        btn.disabled = false;\n"
-    "        if(statusEl) statusEl.innerHTML = '<span style=\"color:#dc3545\">Upload failed: ' + err + '</span>';\n"
+    "        hw.setHTML(statusEl, '<span style=\"color:#dc3545\">Upload failed: ' + err + '</span>');\n"
     "      });\n"
     "  };\n"
     "  reader.onerror = function() {\n"
     "    btn.disabled = false;\n"
-    "    if(statusEl) statusEl.innerHTML = '<span style=\"color:#dc3545\">Failed to read file</span>';\n"
+    "    hw.setHTML(statusEl, '<span style=\"color:#dc3545\">Failed to read file</span>');\n"
     "  };\n"
     "  reader.readAsArrayBuffer(file);\n"
     "};\n", HTTPD_RESP_USE_STRLEN);
 
   // Organize models button
   httpd_resp_send_chunk(req,
-    "document.getElementById('btn-ei-organize-models').onclick = function() {\n"
-    "  var statusEl = document.getElementById('ei-organize-status');\n"
-    "  var btn = document.getElementById('btn-ei-organize-models');\n"
+    "hw.$('btn-ei-organize-models').onclick = function() {\n"
+    "  var statusEl = hw.$('ei-organize-status');\n"
+    "  var btn = hw.$('btn-ei-organize-models');\n"
     "  btn.disabled = true;\n"
-    "  if(statusEl) statusEl.textContent = 'Organizing...';\n"
+    "  hw.setText(statusEl, 'Organizing...');\n"
     "  hw.postJSON('/api/ei/organize', {})\n"
     "    .then(function(data) {\n"
     "      btn.disabled = false;\n"
     "      if(data.success) {\n"
-    "        if(statusEl) statusEl.innerHTML = '<span style=\"color:#28a745\">Moved '+data.moved+' files</span>';\n"
+    "        hw.setHTML(statusEl, '<span style=\"color:#28a745\">Moved '+data.moved+' files</span>');\n"
     "        window._eiLoadModels();\n"
     "      } else {\n"
-    "        if(statusEl) statusEl.innerHTML = '<span style=\"color:#dc3545\">Error: '+(data.error||'Unknown')+'</span>';\n"
+    "        hw.setHTML(statusEl, '<span style=\"color:#dc3545\">Error: '+(data.error||'Unknown')+'</span>');\n"
     "      }\n"
     "    })\n"
     "    .catch(function(err) {\n"
     "      btn.disabled = false;\n"
-    "      if(statusEl) statusEl.innerHTML = '<span style=\"color:#dc3545\">Failed: '+err+'</span>';\n"
+    "      hw.setHTML(statusEl, '<span style=\"color:#dc3545\">Failed: '+err+'</span>');\n"
     "    });\n"
     "};\n", HTTPD_RESP_USE_STRLEN);
 
@@ -234,20 +234,20 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "  hw.postFormText('/api/cli', {cmd:'ei status'})\n"
     "    .then(function(txt) {\n"
     "      var modelMatch = txt.match(/Model path:\\s*(.+)/i);\n"
-    "      var modelEl = document.getElementById('eiModelPath');\n"
-    "      if(modelEl) modelEl.textContent = modelMatch ? modelMatch[1].trim() : 'Not loaded';\n"
-    "      var indicator = document.getElementById('ei-status-indicator');\n"
+    "      var modelEl = hw.$('eiModelPath');\n"
+    "      hw.setText(modelEl, modelMatch ? modelMatch[1].trim() : 'Not loaded');\n"
+    "      var indicator = hw.$('ei-status-indicator');\n"
     "      var enabledMatch = txt.match(/Enabled:\\s*(yes|no)/i);\n"
     "      var isEnabled = enabledMatch && enabledMatch[1].toLowerCase() === 'yes';\n"
     "      if(indicator) indicator.className = 'status-indicator ' + (isEnabled ? 'status-enabled' : 'status-disabled');\n"
-    "      var btnEnable = document.getElementById('btn-ei-enable');\n"
-    "      var btnDisable = document.getElementById('btn-ei-disable');\n"
+    "      var btnEnable = hw.$('btn-ei-enable');\n"
+    "      var btnDisable = hw.$('btn-ei-disable');\n"
     "      if(btnEnable) btnEnable.style.display = isEnabled ? 'none' : 'inline-block';\n"
     "      if(btnDisable) btnDisable.style.display = isEnabled ? 'inline-block' : 'none';\n"
     "      var contMatch = txt.match(/Continuous:\\s*(running|stopped)/i);\n"
     "      var isRunning = contMatch && contMatch[1].toLowerCase() === 'running';\n"
-    "      var btnStart = document.getElementById('btn-ei-continuous-start');\n"
-    "      var btnStop = document.getElementById('btn-ei-continuous-stop');\n"
+    "      var btnStart = hw.$('btn-ei-continuous-start');\n"
+    "      var btnStop = hw.$('btn-ei-continuous-stop');\n"
     "      if(btnStart) btnStart.style.display = isRunning ? 'none' : 'inline-block';\n"
     "      if(btnStop) btnStop.style.display = isRunning ? 'inline-block' : 'none';\n"
     "    });\n"
@@ -262,7 +262,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "window._eiBoxFrameCount = 0;\n"
     "window._eiSetupOverlay = function() {\n"
     "  if(window._eiOverlayCanvas) return;\n"
-    "  var camImg = document.getElementById('camera-stream-img');\n"
+    "  var camImg = hw.$('camera-stream-img');\n"
     "  if(!camImg) return;\n"
     "  var wrapper = camImg.parentElement;\n"
     "  if(!wrapper) return;\n"
@@ -280,7 +280,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "  window._eiSetupOverlay();\n"
     "  var canvas = window._eiOverlayCanvas;\n"
     "  if(!canvas) return;\n"
-    "  var camImg = document.getElementById('camera-stream-img');\n"
+    "  var camImg = hw.$('camera-stream-img');\n"
     "  if(!camImg) return;\n"
     "  var rect = camImg.getBoundingClientRect();\n"
     "  canvas.width = rect.width;\n"
@@ -317,7 +317,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
   // Detection display
   httpd_resp_send_chunk(req,
     "window._eiShowDetections = function(data) {\n"
-    "  var el = document.getElementById('ei-detections');\n"
+    "  var el = hw.$('ei-detections');\n"
     "  if(!el) return;\n"
     "  if(!data || !data.success) {\n"
     "    el.innerHTML = '<span style=\"color:#dc3545\">Error: ' + (data && data.error ? data.error : 'Unknown') + '</span>';\n"
@@ -346,7 +346,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
   // Tracked objects display
   httpd_resp_send_chunk(req,
     "window._eiShowTracked = function(data) {\n"
-    "  var el = document.getElementById('ei-tracked-list');\n"
+    "  var el = hw.$('ei-tracked-list');\n"
     "  if(!el) return;\n"
     "  if(!data || !data.trackedObjects || data.trackedObjects.length === 0) {\n"
     "    el.textContent = 'None';\n"
@@ -372,7 +372,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "  var now = new Date().toLocaleTimeString();\n"
     "  window._eiStateLog.unshift({time: now, prev: prev, curr: curr, x: x, y: y});\n"
     "  if(window._eiStateLog.length > 20) window._eiStateLog.pop();\n"
-    "  var el = document.getElementById('ei-state-log');\n"
+    "  var el = hw.$('ei-state-log');\n"
     "  if(!el) return;\n"
     "  var html = '';\n"
     "  window._eiStateLog.forEach(function(entry) {\n"
@@ -416,7 +416,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
   // Single detect button override - use capturing to intercept before generic handler
   httpd_resp_send_chunk(req,
     "document.addEventListener('DOMContentLoaded', function() {\n"
-    "  var btn = document.getElementById('btn-ei-detect');\n"
+    "  var btn = hw.$('btn-ei-detect');\n"
     "  if(btn) {\n"
     "    btn.addEventListener('click', function(e) {\n"
     "      e.stopImmediatePropagation();\n"
@@ -435,8 +435,8 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
   // Start/stop polling when continuous buttons clicked
   httpd_resp_send_chunk(req,
     "(function(){\n"
-    "var btnStart = document.getElementById('btn-ei-continuous-start');\n"
-    "var btnStop = document.getElementById('btn-ei-continuous-stop');\n"
+    "var btnStart = hw.$('btn-ei-continuous-start');\n"
+    "var btnStop = hw.$('btn-ei-continuous-stop');\n"
     "if(btnStart) {\n"
     "  var origClick = btnStart.onclick;\n"
     "  btnStart.onclick = function(e) {\n"

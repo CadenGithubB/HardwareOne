@@ -26,6 +26,7 @@ set(HW_CFG_ENABLE_WEB_GAME_DARKROOM 0)
 set(HW_CFG_ENABLE_BLUETOOTH 0)
 set(HW_CFG_ENABLE_G2_GLASSES 0)
 set(HW_CFG_ENABLE_R1_HEALTH 0)
+set(HW_CFG_ENABLE_G2_TESTSUITE 0)
 set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER 0)
 set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_FAN 0)
 
@@ -135,6 +136,11 @@ if(EXISTS "${hw_cfg_file}")
         set(HW_CFG_ENABLE_R1_HEALTH "${CMAKE_MATCH_1}")
     endif()
 
+    string(REGEX MATCH "#define[ \t]+ENABLE_G2_TESTSUITE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_G2_TESTSUITE "${CMAKE_MATCH_1}")
+    endif()
+
     string(REGEX MATCH "#define[ \t]+ENABLE_RASPBERRY_PI_HOST_POWER[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER "${CMAKE_MATCH_1}")
@@ -146,9 +152,20 @@ if(EXISTS "${hw_cfg_file}")
     endif()
 endif()
 
-# R1 Health needs BT + G2 (matches System_BuildConfig.h derived rule).
+# The active board's sdkconfig is ground truth for whether the Bluedroid stack
+# exists — mirror of the System_BuildConfig.h derived rule. A board that drops
+# the stack (boards/qtpy_esp32.defaults: CONFIG_BT_ENABLED=n) force-downgrades
+# the app-side BT flag so this file's source-list filter matches what the
+# per-file #if gates resolve to. CONFIG_* comes from the per-board sdkconfig;
+# during early expansion it is unset, which only affects the early no-op pass.
+if(NOT CONFIG_BT_ENABLED OR NOT CONFIG_BT_BLUEDROID_ENABLED)
+    set(HW_CFG_ENABLE_BLUETOOTH 0)
+endif()
+
+# R1 Health / Pet / Tests need BT + G2 (matches System_BuildConfig.h derived rules).
 if(NOT (HW_CFG_ENABLE_BLUETOOTH GREATER 0 AND HW_CFG_ENABLE_G2_GLASSES GREATER 0))
     set(HW_CFG_ENABLE_R1_HEALTH 0)
+    set(HW_CFG_ENABLE_G2_TESTSUITE 0)
 endif()
 
 set(HW_CFG_ENABLE_HTTP_SERVER 0)
@@ -196,13 +213,10 @@ set(hardwareone_srcs
         G2_Page_Files.cpp
         G2_Page_Power.cpp
         G2_Page_CameraSettings.cpp
-        G2_Page_TestSuite.cpp
         G2_Page_TextEntry.cpp
         G2_Page_ESPNow.cpp
-        G2_Page_Automations.cpp
         G2_Page_Users.cpp
         G2_Page_LED.cpp
-        G2_Pet.cpp
         G2_Health.cpp
         R1_HealthHistoryStore.cpp
         G2_HijackFsm.cpp
@@ -247,6 +261,8 @@ set(hardwareone_srcs
         # files (handled below) only appear when a display is actually
         # selected.
         OLED_Utils.cpp
+        System_MemUtil.cpp
+        System_MemTracker.cpp
         System_MemoryMonitor.cpp
         System_Hardware.cpp
         System_SensorLogging.cpp
@@ -276,6 +292,8 @@ set(hardwareone_srcs
         HAL_Audio.cpp
         System_SensorRegistry.cpp
         System_Notifications.cpp
+        System_EventCatalog.cpp
+        System_EventCatalogJson.cpp
         System_Events.cpp
         System_AuthIdentity.cpp
         System_BondedPeer.cpp
@@ -311,6 +329,30 @@ if(HW_CFG_BUILD_G2 GREATER 0)
     message(STATUS "G2 protocol (R1 ring + glasses wire format) ENABLED")
 else()
     message(STATUS "G2 protocol DISABLED — saves ~2.7 KLOC of compile per build")
+endif()
+
+# Optional G2 lens page: its own TU with an internal
+# `#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_G2_TESTSUITE` guard.
+# It is reached only from a launcher row gated on the same flag, so dropping
+# the file drops the whole feature — nothing else calls in.
+if(HW_CFG_BUILD_G2 GREATER 0 AND HW_CFG_ENABLE_G2_TESTSUITE GREATER 0)
+    list(APPEND hardwareone_srcs G2_Page_TestSuite.cpp)
+    message(STATUS "G2 transport test bench ENABLED")
+else()
+    message(STATUS "G2 transport test bench EXCLUDED")
+endif()
+
+# Optional G2 lens page: Automations app. Needs the automation engine
+# (System_Automation.cpp supplies AUTOMATIONS_JSON_FILE and the
+# `automation ...` commands the taps submit), so it layers ENABLE_AUTOMATION
+# on top of the G2 gate — G2-without-automation used to link-fail on the
+# AUTOMATIONS_JSON_FILE extern. Internal guard + header stubs mirror
+# G2_Page_TestSuite; its Apps row is gated on the same flag.
+if(HW_CFG_BUILD_G2 GREATER 0 AND HW_CFG_ENABLE_AUTOMATION GREATER 0)
+    list(APPEND hardwareone_srcs G2_Page_Automations.cpp)
+    message(STATUS "G2 Automations app page ENABLED")
+else()
+    message(STATUS "G2 Automations app page EXCLUDED")
 endif()
 
 if(HW_CFG_ENABLE_MAPS GREATER 0)

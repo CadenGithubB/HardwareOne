@@ -1021,7 +1021,6 @@ struct EspNowState {
 const char* checkEspNowFirstTimeSetup();
 
 // Maintenance functions
-bool saveMeshPeers();
 
 // Device management
 String getEspNowDeviceName(const uint8_t* mac);

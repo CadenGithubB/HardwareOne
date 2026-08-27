@@ -35,7 +35,7 @@
 //          │     │     │       │        │     │      └── flag (0x20 request, 0x00 response,
 //          │     │     │       │        │     │          0x01/0x06 async notify)
 //          │     │     │       │        │     └── sid (0x01 app-launch, 0x09 settings,
-//          │     │     │       │        │         0x0d state events, 0xe0 EvenCore — the
+//          │     │     │       │        │         0x0d SyncInfo, 0xe0 EvenCore — the
 //          │     │     │       │        │         firmware's main rendering subsystem, named
 //          │     │     │       │        │         `evenhub_main_msg_ctx` in Even's pb schema)
 //          │     │     │       │        └── fragment index within this message (1-based)
@@ -113,8 +113,9 @@
                                   // PREP_NOTE_LIST response (cmd=3).
 #define G2_SID_SETTINGS     0x09  // UI_SETTING_APP_ID — we use it for battery/version
                                   // reads on the side; the wider schema is broader.
-#define G2_SID_STATE_EVENT  0x0D  // SERVICE_SYNC_INFO_APP_ID — non-rendering event
-                                  // channel (gestures, foreground transitions).
+#define G2_SID_SYNC_INFO    0x0D  // SERVICE_SYNC_INFO_APP_ID — app lifecycle state
+                                  // (background/foreground application IDs).
+#define G2_SID_STATE_EVENT  G2_SID_SYNC_INFO  // deprecated compatibility alias
 #define G2_SID_WIDGET_XFORM 0x0E  // UI_HEALTH_APP_ID per the firmware enum, but we
                                   // empirically see widget-transform-shaped traffic
                                   // here. Disagreement worth a labelled capture.
@@ -153,13 +154,11 @@
 #define G2_CMD_MENU_FAILED        18  // APP_RESPONSE_MENU_STARTUP_FAILED_PACKET (host → glasses)
 
 // ── Default MagicRandom values per message type ──────────────────────────────
-// Firmware only compares the low byte of MagicRandom when matching acks, so
-// any u8 works. The reference uses fixed per-type constants rather than a
-// rolling counter so the ack-matching layer can be stateless ("expecting
-// REBUILD ack? look for magic=202"). We mirror that convention. These
-// values are safe when only one message of each type is in flight at a
-// time, which is our operating assumption for everything except image
-// streaming — image fragments must each pass a unique magic.
+// Most non-CREATE message families retain their reference-style defaults.
+// ACK transactions still bind a fresh token at the caller when required.
+// CREATE is special: every production CREATE path now uses the shared
+// rotating nonzero-u8 allocator so a delayed response cannot satisfy a later
+// transaction that reused this historical default.
 #define G2_MAGIC_CREATE           201
 #define G2_MAGIC_REBUILD          202
 #define G2_MAGIC_REBUILD_LIST     203
@@ -310,6 +309,26 @@ bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire);
 bool g2ParseCommandMagic(const uint8_t* payload, size_t payloadLen,
                          uint32_t* outCommand, uint32_t* outMagic);
 
+// Presence-aware decoder for SERVICE_SYNC_INFO_APP_ID (sid=0x0D).
+// `data` is an optional nested message, so hasData distinguishes an absent
+// body from a present-but-empty body. App IDs are protobuf int32 values and
+// deliberately remain signed/opaque; callers must not use them as indices.
+// On malformed input the function returns false and zeros the whole result.
+struct G2SyncInfo {
+  bool     hasCommand;
+  uint32_t command;
+  bool     hasMagic;
+  int32_t  magic;
+  bool     hasData;
+  bool     hasBackgroundAppId;
+  int32_t  backgroundAppId;
+  bool     hasForegroundAppId;
+  int32_t  foregroundAppId;
+};
+
+bool g2ParseSyncInfo(const uint8_t* payload, size_t payloadLen,
+                     G2SyncInfo* out);
+
 // ── Container geometry presets ───────────────────────────────────────────────
 // The list/text container's on-lens rectangle is a free parameter in the
 // pb schema (X/Y/W/H, lens is 576×288). The reference's
@@ -357,6 +376,14 @@ static constexpr G2ContainerGeom G2_GEOM_BOTTOM_HALF = {   8, 150, 560, 130 };
 // containers tile cleanly.
 static constexpr G2ContainerGeom G2_GEOM_LEFT_HALF   = {   8,   8, 280, 272 };
 static constexpr G2ContainerGeom G2_GEOM_RIGHT_HALF  = { 288,   8, 280, 272 };
+
+// Production list+text(+image) split — Files, Health, Maps, keyboard pad.
+// 264px nav list, 8px gutter, 288px right column ending at x=568 (same
+// right edge as G2_GEOM_LARGE). Distinct from LEFT_HALF/RIGHT_HALF, which
+// tile the midline with no gutter and a narrower 280px right pane.
+static constexpr G2ContainerGeom G2_GEOM_SPLIT_LIST      = {   8,   8, 264, 272 };
+static constexpr G2ContainerGeom G2_GEOM_SPLIT_RIGHT     = { 280,   8, 288, 272 };
+static constexpr G2ContainerGeom G2_GEOM_SPLIT_RIGHT_TOP = { 280,   8, 288, 112 };
 
 // Quadrant presets — quarter-lens rectangles. Together they tile the
 // full lens with consistent 8 px edge margins and 0 px interior gutter.
@@ -435,8 +462,8 @@ size_t g2BuildRebuildTextPb(uint32_t magic,
 
 // EvenCore CREATE_STARTUP_PAGE (Cmd=0) carrying a ListContainerProperty with
 // N selectable items instead of a TextContainer. Firmware draws a native
-// selection box around the focused item and routes touchpad gestures into a
-// List_ItemEvent sub-message on sid=0x0D. Reference: ListContainerProperty /
+// selection box around the focused item and routes touchpad gestures into
+// EvenCore event notifications. Reference: ListContainerProperty /
 // List_ItemContainerProperty in ble/gen/EvenHub_pb.ts; `captureEvents=true`
 // default in buildCreateStartUpPageContainer.
 size_t g2BuildCreateListPage(uint8_t seq, uint32_t magic,
@@ -473,8 +500,8 @@ size_t g2BuildCreateListPagePb(uint32_t magic,
 // `eventCapture=true` sets IsEventCapture=1 in the pb. The reference
 // keeps it 0 ("we don't tap text areas") so this is a guess; if the
 // firmware honors it we get TextEvent CLICK on tap and can route that
-// to a back-handler. If it doesn't, callers should fall back to a
-// state-event-driven exit (any sid=0x0D user-activity → return).
+// to a back-handler. SID 0x0D is SyncInfo lifecycle state, not a gesture
+// fallback, so callers need an explicit navigation path if it does not.
 //
 // Returns the pb body byte count, or 0 on buffer overflow.
 size_t g2BuildCreateTextPagePb(uint32_t magic,
@@ -919,6 +946,25 @@ size_t g2BuildCreateMixedListTextImagePb(uint32_t magic,
                                          uint32_t widgetId,
                                          G2ListTextImageOrder order,
                                          uint8_t* pbOut, size_t pbCap);
+
+// CREATE compound with one ListObject + one TextObject + 1..4 ImageObjects.
+// This is the multi-image form of g2BuildCreateMixedListTextImagePb and is
+// used by the production keyboard and its on-lens chunking A/B test.
+// `imageTileCount` is capped at four to match the glasses firmware's
+// documented image-child limit.
+// The one-image builder above delegates here, so tileCount=1 retains the
+// established wire shape byte-for-byte.
+size_t g2BuildCreateMixedListTextImagesPb(uint32_t magic,
+                                          const char* listName,
+                                          const char* const* listItems,
+                                          size_t listItemCount,
+                                          const G2ContainerGeom& listGeom,
+                                          const G2TextChildSpec& textChild,
+                                          const G2ImageTile* imageTiles,
+                                          size_t imageTileCount,
+                                          uint32_t widgetId,
+                                          G2ListTextImageOrder order,
+                                          uint8_t* pbOut, size_t pbCap);
 size_t g2BuildCreateMixedListTextImage(uint8_t seq, uint32_t magic,
                                        const char* listName,
                                        const char* const* listItems,
@@ -981,7 +1027,9 @@ const char* g2sidName(uint8_t sid);
 // empirically identified are named; unknowns are numbered but not
 // labelled. Exposed here so the verbose-dump callback in G2_Glasses
 // can label known fields without hard-coding the numbers.
-#define G2_SET_REQ_F_VER   5   // string — firmware version (e.g. "2.1.1.10")
+#define G2_SET_REQ_F_VER_LEFT   5  // string — LEFT firmware version
+#define G2_SET_REQ_F_VER_RIGHT  6  // string — RIGHT firmware version
+#define G2_SET_REQ_F_VER   G2_SET_REQ_F_VER_LEFT  // compatibility alias
 #define G2_SET_REQ_F_BATT  12  // uint32 — battery percentage (0-100)
 
 // Outer-wrapper field carrying device→app async settings telemetry
@@ -1017,6 +1065,21 @@ bool g2ParseSettingSilentMode(const uint8_t* payload, size_t payloadLen,
 // rather than "glasses have no version."
 bool g2ParseSettingVersion(const uint8_t* payload, size_t payloadLen,
                            char* versionOut, size_t versionCap);
+
+// Decode the independent LEFT (inner f5) and RIGHT (inner f6) version strings
+// from DeviceReceiveRequestFromAPP (wrapper f4). Presence is reported per arm;
+// each string is truncated to fit and always NUL-terminated. Malformed input
+// returns false with the complete result zeroed. The singular API above remains
+// the compatibility accessor for the historical LEFT/f5 value.
+struct G2SettingVersions {
+  bool hasLeft;
+  char left[32];
+  bool hasRight;
+  char right[32];
+};
+
+bool g2ParseSettingVersions(const uint8_t* payload, size_t payloadLen,
+                            G2SettingVersions* out);
 
 // Diagnostic sid=0x09 inner-field iterator. Calls `logFn` once per
 // decoded field inside the DeviceReceiveRequestFromAPP body with
@@ -1205,11 +1268,34 @@ bool g2ParseSettingWriteAck(const uint8_t* payload, size_t payloadLen,
 #define G2_MAGIC_DEVCFG_RING_CONNECT   223
 #define G2_MAGIC_DEVCFG_PIPE_ROLE      224
 
+// Presence-aware DevCfgDataPackage wrapper decode. `body` points into the
+// caller-owned payload and remains valid only as long as that payload does.
+// A valid empty nested body has hasBody=true and bodyLen=0. Malformed input,
+// including more than one nested body, returns false and zeros the result.
+struct G2DevCfgRx {
+  bool           hasCommand;
+  uint32_t       command;
+  bool           hasMagic;
+  uint32_t       magic;
+  bool           hasBody;
+  uint32_t       bodyField;
+  const uint8_t* body;
+  size_t         bodyLen;
+};
+
+bool g2ParseDevCfgRx(const uint8_t* payload, size_t payloadLen,
+                     G2DevCfgRx* out);
+
 // BASE_CONNECT_HEART_BEAT (cmd=14). Empty body. Safest possible message —
 // no payload to corrupt. Use this first when validating that sid=0x80 TX
 // is non-bricking on a given firmware revision.
 size_t g2BuildDevCfgHeartbeat(uint8_t seq, uint32_t magic,
                               uint8_t* out, size_t outCap);
+
+// Explicit-envelope-flag form used by session negotiation. The compatibility
+// API above retains its historical G2_FLAG_REQUEST (0x20) wire shape.
+size_t g2BuildDevCfgHeartbeatWithFlag(uint8_t seq, uint32_t magic, uint8_t flag,
+                                      uint8_t* out, size_t outCap);
 
 // AUTHENTICATION (cmd=4). Sends fixed payload: AuthMgr {
 //   secAuth=true, phoneType=PHONE_ANDROID
@@ -1217,6 +1303,11 @@ size_t g2BuildDevCfgHeartbeat(uint8_t seq, uint32_t magic,
 // envelope shape.
 size_t g2BuildDevCfgAuth(uint8_t seq, uint32_t magic,
                          uint8_t* out, size_t outCap);
+
+// Explicit-envelope-flag form used by session negotiation. The compatibility
+// API above retains its historical G2_FLAG_REQUEST (0x20) wire shape.
+size_t g2BuildDevCfgAuthWithFlag(uint8_t seq, uint32_t magic, uint8_t flag,
+                                 uint8_t* out, size_t outCap);
 
 // PIPE_ROLE_CHANGE (cmd=5). `role` must be one of
 // G2_DEVCFG_ROLE_{BOTH,RIGHT,LEFT}; out-of-range values are rejected

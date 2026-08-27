@@ -480,8 +480,8 @@ static bool growDebugPoolIfNeeded(bool force) {
   // Expansion is optional and must never spill ~28 KB into scarce internal
   // DRAM if PSRAM is fragmented. In that case retain the 96-slot pool and let
   // the existing drop accounting surface any later saturation.
-  DebugMessage* extra = (DebugMessage*)heap_caps_malloc(
-      (size_t)addCount * sizeof(DebugMessage), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  DebugMessage* extra = (DebugMessage*)ps_alloc(
+      (size_t)addCount * sizeof(DebugMessage), AllocPref::RequirePSRAM, "debug.pool.growth");
   if (!extra) {
     taskENTER_CRITICAL(&gDebugPoolMux);
     gDebugPoolGrowthState = DEBUG_POOL_GROW_FAILED;
@@ -665,7 +665,7 @@ void initDebugSystem() {
     }
 
     // Pre-allocate the pool itself (prefer PSRAM if available)
-    AllocPref allocPref = hasPsram ? AllocPref::PreferPSRAM : AllocPref::PreferInternal;
+    AllocPref allocPref = hasPsram ? AllocPref::PreferPSRAM : AllocPref::DefaultHeap;
     gDebugPoolPrimary = (DebugMessage*)ps_alloc(
         (size_t)initialPoolSize * sizeof(DebugMessage), allocPref, "debug.pool");
     if (!gDebugPoolPrimary) {
@@ -2613,49 +2613,72 @@ void systemLogAutoStart() {
 // family boundary. Persistence is untouched: the stored systemLogFlags value
 // stays a hex mask string; only this display vocabulary is regenerated.
 //
-// Assembled at init rather than pasted as an adjacent-string literal because a
-// checkbox's value is the MASK (1<<bit) while the table stores only the decimal
-// bit, and the preprocessor cannot turn bit 128 into its 33-hex-digit mask. The
-// mask is built inline: lead hex digit is "1248"[bit&3], then (bit>>2) zeros
-// (1<<0=0x1, 1<<4=0x10, 1<<32=0x100000000, ...).
-static void dbgAppendLogFlagOption(String& s, int bit, DbgBank bank, const char* label,
-                                   bool& first, DbgBank& lastBank) {
-  if (bank == DBG_BANK_CONTROL) return;  // control bits are not subsystems — no checkbox, no header
-  if (bank != lastBank) {                // family boundary → a "#|<Bank>" section separator
-    if (!first) s += ',';
-    s += "#|";
-    s += kDbgBankLabel[bank];
-    first = false;
-    lastBank = bank;
-  }
-  if (!first) s += ',';
-  first = false;
-  s += "0x";
-  char lead = "1248"[bit & 3];
-  s += lead;
-  for (int z = bit >> 2; z > 0; --z) s += '0';
-  s += '|';
-  s += label;
-}
+// Baked at COMPILE TIME into flash .rodata (2026-08-19). The old runtime
+// builder assembled this into a static Arduino String at static-init because
+// the preprocessor cannot turn bit 128 into its 33-hex-digit mask — but
+// constexpr can. The runtime version cost ~5.5 KB of internal heap forever
+// (a reserve(5000) buffer the ~5.5 KB string then outgrew and reallocated)
+// and its runtime-initialized pointer dragged the whole otherwise-const
+// SettingEntry table below into .data. Mask digits are built the same way:
+// lead hex digit "1248"[bit&3], then (bit>>2) zeros (1<<0=0x1, 1<<4=0x10,
+// 1<<32=0x100000000, ...). Output is byte-identical to the old builder.
+namespace {
 
-static String buildSystemLogFlagsBitmaskOptions() {
-  String s;
-  s.reserve(5000);
-  s = "bitmask:";
-  bool first = true;
-  DbgBank lastBank = DBG_BANK_COUNT;     // sentinel: no bank emitted yet
-#define DBG_X(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label) \
-  dbgAppendLogFlagOption(s, (bit), DBG_BANK_##BANK, (label), first, lastBank);
-  DBG_FLAG_LIST(DBG_X)
+#define DBG_X(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label) label,
+constexpr const char* kDbgOptLabel[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_X) };
 #undef DBG_X
-  return s;
+
+// Emit the BitmaskField options dialect into `out` (nullptr = dry run),
+// returning the emitted length (excluding the NUL). Same algorithm as the
+// old runtime builder; iterates the generated kDbgBank/kDbgBit columns,
+// which share DBG_FLAG_LIST's order by construction.
+constexpr size_t dbgEmitLogFlagOptions(char* out) {
+  size_t n = 0;
+  auto put = [&](char c) { if (out) out[n] = c; n++; };
+  auto puts_ = [&](const char* str) { for (size_t i = 0; str[i]; i++) put(str[i]); };
+  puts_("bitmask:");
+  bool first = true;
+  DbgBank lastBank = DBG_BANK_COUNT;   // sentinel: no bank emitted yet
+  for (size_t i = 0; i < DBG_FLAG_COUNT; i++) {
+    const DbgBank bank = kDbgBank[i];
+    if (bank == DBG_BANK_CONTROL) continue;   // control bits: no checkbox, no header
+    if (bank != lastBank) {                   // family boundary -> "#|<Bank>" separator
+      if (!first) put(',');
+      puts_("#|");
+      puts_(kDbgBankLabel[bank]);
+      first = false;
+      lastBank = bank;
+    }
+    if (!first) put(',');
+    first = false;
+    const int bit = kDbgBit[i];
+    puts_("0x");
+    put("1248"[bit & 3]);
+    for (int z = bit >> 2; z > 0; --z) put('0');
+    put('|');
+    puts_(kDbgOptLabel[i]);
+  }
+  if (out) out[n] = '\0';
+  return n;
 }
 
-// Built once at static-init from the table above; the SettingEntry below points
-// its `options` at this stable buffer. Regenerated, never deleted — it is LIVE
-// (drives the systemLogFlags BitmaskField grid on the web Settings page).
-static const String gSystemLogFlagsBitmaskOptions = buildSystemLogFlagsBitmaskOptions();
-static const char* kSystemLogFlagsBitmaskOptions = gSystemLogFlagsBitmaskOptions.c_str();
+constexpr size_t kSystemLogFlagsOptionsLen = dbgEmitLogFlagOptions(nullptr);
+
+struct SystemLogFlagsOptionsBuf { char s[kSystemLogFlagsOptionsLen + 1]; };
+
+constexpr SystemLogFlagsOptionsBuf dbgBuildLogFlagOptions() {
+  SystemLogFlagsOptionsBuf b{};
+  dbgEmitLogFlagOptions(b.s);
+  return b;
+}
+
+// Flash-resident (.rodata) options string; the SettingEntry below points its
+// `options` at kSystemLogFlagsOptions.s. Regenerated at every build from
+// DBG_FLAG_LIST — drift is impossible. It is LIVE (drives the systemLogFlags
+// BitmaskField grid on the web Settings page).
+constexpr SystemLogFlagsOptionsBuf kSystemLogFlagsOptions = dbgBuildLogFlagOptions();
+
+}  // namespace
 
 static const SettingEntry systemLogSettingEntries[] = {
   { "systemLogEnabled", SETTING_BOOL, &gSettings.systemLogEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "systemlogenabled" },
@@ -2663,7 +2686,7 @@ static const SettingEntry systemLogSettingEntries[] = {
   { "systemLogPath", SETTING_STRING, &gSettings.systemLogPath, 0, 0, "", 0, 0, "Log file path (empty = auto-generate)", nullptr, false, nullptr, nullptr },
   { "systemLogCategoryTags", SETTING_BOOL, &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags", nullptr, false, nullptr, "logcategorytags" },
   { "systemLogFlags", SETTING_STRING, &gSettings.systemLogFlags, 0, 0, "", 0, 0, "Debug message categories",
-    kSystemLogFlagsBitmaskOptions, false, nullptr, "systemlogflags" },
+    kSystemLogFlagsOptions.s, false, nullptr, "systemlogflags" },
   { "eventLog", SETTING_BOOL, &gSettings.eventLogEnabled, 1, 0, nullptr, 0, 1, "Structured event history (events.log)", nullptr, false, nullptr, "eventlog" },
 };
 

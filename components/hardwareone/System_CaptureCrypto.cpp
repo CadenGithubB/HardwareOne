@@ -15,6 +15,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "System_Events.h"   // systemEventPost — SYSEVT_SECRET_DECRYPT_FAILED
 
 namespace {
 
@@ -116,10 +117,27 @@ bool captureCryptoEnsureKey() {
   nvs_handle_t h;
   size_t len = sizeof(sKey);
   if (nvs_open(kNvsNamespace, NVS_READONLY, &h) == ESP_OK) {
-    if (nvs_get_blob(h, kNvsKeyName, sKey, &len) == ESP_OK && len == sizeof(sKey)) {
+    esp_err_t rc = nvs_get_blob(h, kNvsKeyName, sKey, &len);
+    if (rc == ESP_OK && len == sizeof(sKey)) {
       nvs_close(h);
       sKeyLoaded = true;
       return true;
+    }
+    // A blob EXISTS but could not be read as a whole key — wrong length returns
+    // ESP_ERR_NVS_INVALID_LENGTH, and a short blob succeeds with len != sizeof.
+    // Falling through to the mint below would overwrite the REAL key and strand
+    // every capture and health file already sealed with it, unrecoverably. There
+    // is no way back from that: the plaintext does not exist anywhere else.
+    // Refuse instead, and leave the stored blob untouched so it can be recovered.
+    // ESP_ERR_NVS_NOT_FOUND is the genuine first-use case and must still mint.
+    if (rc != ESP_ERR_NVS_NOT_FOUND) {
+      nvs_close(h);
+      ERROR_SYSTEMF("[CapCrypt] stored capture key unreadable (0x%x, len=%u) - refusing to mint "
+                    "a replacement; sealed captures would be permanently unreadable",
+                    (unsigned)rc, (unsigned)len);
+      systemEventPost(SYSEVT_SECRET_DECRYPT_FAILED, "capture_key", "stored blob unreadable");
+      sodium_memzero(sKey, sizeof(sKey));
+      return false;
     }
     nvs_close(h);
   }

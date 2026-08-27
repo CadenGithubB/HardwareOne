@@ -14,6 +14,7 @@
 
 #include <LittleFS.h>
 #include <SD.h>
+#include "esp_littlefs.h"  // esp_littlefs_info — total+used in one traverse
 #include <SPI.h>
 
 #include <stdarg.h>
@@ -545,8 +546,21 @@ bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint6
   }
 
   if (!filesystemReady) return false;
-  totalBytes = LittleFS.totalBytes();
-  usedBytes = LittleFS.usedBytes();
+  // One traverse, not two. LittleFS.totalBytes() and LittleFS.usedBytes() both
+  // call esp_littlefs_info() with a non-NULL `used` pointer, and
+  // get_total_and_used_bytes() runs lfs_fs_size() -- a full walk of every
+  // metadata pair and every file's CTZ block chain -- whenever that pointer is
+  // set. So the Arduino pair costs two full traverses and throws one result
+  // away, even though `total` is just block_size * block_count. Calling
+  // esp_littlefs_info() once also makes the pair atomic: total and used now
+  // come from one driver lock window instead of two, so they can no longer
+  // straddle a concurrent write and produce used > total.
+  size_t lfsTotal = 0, lfsUsed = 0;
+  // On failure the values stay 0, which is exactly what the Arduino getters
+  // returned in that case -- deliberately unchanged.
+  (void)esp_littlefs_info(kLittleFsPartitionLabel, &lfsTotal, &lfsUsed);
+  totalBytes = lfsTotal;
+  usedBytes = lfsUsed;
   freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
   return true;
 }
@@ -590,8 +604,12 @@ static size_t refreshLittleFsFreeCached() {
   const bool writePressure = gLogFreeBytesWrittenSinceRefresh >= LOG_FREE_CACHE_BYTES_THRESHOLD;
   if (gLogFreeCheckCached == SIZE_MAX || stale || writePressure) {
     FsLockGuard guard("VFS.overflowFreeCheck");
-    size_t total = LittleFS.totalBytes();
-    size_t used  = LittleFS.usedBytes();
+    // Same one-traverse-not-two rule as VFS::getStats above, and it matters
+    // more here: this runs on a 2 s cadence (plus write-pressure forcing)
+    // while holding the global FS mutex, and ESP-IDF's httpd is single-task,
+    // so every extra lfs_fs_size() here stalls every pending web request.
+    size_t total = 0, used = 0;
+    (void)esp_littlefs_info(kLittleFsPartitionLabel, &total, &used);
     gLogFreeCheckCached = (total > used) ? (total - used) : 0;
     gLogFreeCheckLastMs = now;
     gLogFreeBytesWrittenSinceRefresh = 0;

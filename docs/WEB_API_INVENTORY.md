@@ -1125,7 +1125,7 @@ Lists all microphone recordings available on the device (WAV files in /sd/record
 - **Parameters:** _none_
 - **Request body:** none
 - **Response:** application/json. {count:int, files:[{name:string, size:int}, ...]} or {count:0, files:[], error:"not_compiled"} if ENABLE_MICROPHONE_SENSOR not set
-- **Observations:** Conditional on ENABLE_MICROPHONE_SENSOR. Wraps getRecordingCount() and getRecordingsList() calls in ExecIdentityGuard(ctx) to install authenticated web user's identity for the duration, allowing read access to /sd/recordings with user's permissions (not system bypass). Parses 'name:size,name:size' format from getRecordingsList(). No pagination — returns all recordings at once.
+- **Observations:** Conditional on ENABLE_MICROPHONE_SENSOR. Wraps a single getRecordingsList() call in ExecIdentityGuard(ctx) to install authenticated web user's identity for the duration, allowing read access to /sd/recordings with user's permissions (not system bypass). Parses 'name:size,name:size' format from getRecordingsList(), deriving `count` from that same parse. No pagination — returns all recordings at once. **Perf note (2026-08-25):** this previously also called a separate getRecordingCount(), doubling the directory walk; measured 1218 ms for 46 recordings, now 714 ms. That function has been deleted — do not reintroduce a count-only pass. Enumerating a directory fopen()s every file in it (~11 ms/entry), and httpd is single-task, so this blocks every other request for its duration. The browser-side poll is now gated on the recordings panel being open (System_Microphone_Web.h).
 
 <a id="get-api-recordings-file"></a>
 

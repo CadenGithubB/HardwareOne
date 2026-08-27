@@ -78,8 +78,8 @@ struct NotifRule {
 // are silently unmaskable — they can be neither muted nor forced — so this
 // MUST stay ahead of SYSEVT_COUNT.
 //
-// It didn't. The masks were 4 words / 128 bits while the kind list grew past
-// 140, so the tail of SYSEVT_KIND_LIST (everything from SYSEVT_FILE_RX_FAILED
+// It didn't. The masks were 4 words / 128 bits while the catalog grew past
+// 140, so the tail of the catalog (everything from SYSEVT_FILE_RX_FAILED
 // on: hijack enter/exit, thermal alert, ToF, FM, IMU walking, voice disarm,
 // automation CRUD, ...) quietly ignored every mute and force request. Nothing
 // failed loudly; those kinds just weren't tunable. 8 words matches the
@@ -90,7 +90,7 @@ struct NotifRule {
 #define NOTIF_KIND_MASK_WORDS 8
 #define NOTIF_KIND_MASK_BITS  (NOTIF_KIND_MASK_WORDS * 32)
 static_assert(SYSEVT_COUNT <= NOTIF_KIND_MASK_BITS,
-              "SYSEVT_KIND_LIST outgrew the notification per-kind masks — "
+              "System Event catalog outgrew the notification per-kind masks — "
               "raise NOTIF_KIND_MASK_WORDS");
 
 struct NotifViewer {

@@ -9,10 +9,86 @@ config HW1_UPDATER_AP_CHANNEL
     range 1 13
     default 6
 
+choice HW1_UPDATER_POWER_BACKEND
+    prompt "Recovery power-sense backend"
+    default HW1_UPDATER_POWER_GAUGE if IDF_TARGET_ESP32S3
+    default HW1_UPDATER_POWER_ADC
+    help
+        How the recovery updater decides whether it is safe to start writing
+        flash. This is a property of the board, so set it in
+        updater/boards/<board>.defaults, not here.
+
+    config HW1_UPDATER_POWER_GAUGE
+        bool "VBUS sense GPIO + MAX17048 fuel gauge"
+        help
+            FeatherS3 class. A real USB-presence pin plus a gauge reporting
+            true state-of-charge, so the interlock can be strict.
+
+    config HW1_UPDATER_POWER_ADC
+        bool "Battery voltage divider on ADC1, no USB sense"
+        help
+            Adafruit Feather ESP32 V2 class. The board exposes VBAT through a
+            2:1 divider and NOTHING that reports USB presence -- see the
+            comment in System_Battery.cpp: "the divider can't tell us whether
+            VBUS is connected". The interlock is necessarily weaker here.
+
+    config HW1_UPDATER_POWER_NONE
+        bool "No power sensing (externally powered board)"
+        help
+            Adafruit QT Py ESP32 class: no battery connector, no gauge, no
+            VBAT divider -- BATTERY_MONITOR_AVAILABLE is 0 for this board in
+            System_BuildConfig.h. There is no measurement to take, so the
+            interlock reports "external power" and allows the write. This is
+            honest rather than permissive: a board with no cell that is
+            executing code is on external power, and an interlock that
+            refuses on absent telemetry would block recovery forever on
+            exactly the hardware that can never produce it.
+endchoice
+
 config HW1_UPDATER_MIN_BATTERY_PERCENT
     int "Minimum battery percentage when USB is absent"
+    depends on HW1_UPDATER_POWER_GAUGE
     range 1 100
     default 30
+
+config HW1_UPDATER_BATTERY_ADC_CHANNEL
+    int "ADC1 channel carrying VBAT/2"
+    depends on HW1_UPDATER_POWER_ADC
+    range 0 9
+    default 7
+    help
+        Feather ESP32 V2: GPIO35 is ADC1 channel 7. Keep this in step with
+        BATTERY_ADC_CHANNEL in components/hardwareone/System_Battery.h.
+
+config HW1_UPDATER_BATTERY_DIVIDER_X100
+    int "VBAT divider ratio, x100"
+    depends on HW1_UPDATER_POWER_ADC
+    range 100 1000
+    default 200
+    help
+        200 means the pin sees VBAT/2. Matches VBAT_DIVIDER in
+        components/hardwareone/System_Battery.h.
+
+config HW1_UPDATER_MIN_BATTERY_MILLIVOLTS
+    int "Minimum cell millivolts before a write is refused"
+    depends on HW1_UPDATER_POWER_ADC
+    range 3000 4200
+    default 3600
+    help
+        Only applied when a cell actually appears to be attached (see
+        HW1_UPDATER_BATTERY_ABSENT_MILLIVOLTS).
+
+config HW1_UPDATER_BATTERY_ABSENT_MILLIVOLTS
+    int "Reading below which no cell is considered attached"
+    depends on HW1_UPDATER_POWER_ADC
+    range 500 3000
+    default 2500
+    help
+        A board that is executing this code is, by definition, powered. If the
+        VBAT divider reads below this, no usable cell is attached and the power
+        must be coming from USB -- so the write is ALLOWED. Refusing here would
+        permanently block recovery on a mains-powered unit with no battery
+        fitted, which is the exact deployment this backend exists for.
 
 config HW1_UPDATER_IDLE_TIMEOUT_SEC
     int "Authenticated recovery idle timeout"

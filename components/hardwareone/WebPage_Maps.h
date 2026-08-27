@@ -18,8 +18,7 @@ void streamMapsPageLodZoomConstants(httpd_req_t* req);
 // Streamed inner content for maps page
 inline void streamMapsInner(httpd_req_t* req) {
   // Include shared file browser scripts
-  String fbScript = getFileBrowserScript();
-  httpd_resp_send_chunk(req, fbScript.c_str(), fbScript.length());
+  httpd_resp_send_chunk(req, getFileBrowserScript(), HTTPD_RESP_USE_STRLEN);
   
   httpd_resp_send_chunk(req, R"HTML(
 <h2>Map Viewer</h2>
@@ -72,7 +71,7 @@ inline void streamMapsInner(httpd_req_t* req) {
     <div id='maps-panel' style='display:none;position:absolute;bottom:84px;left:10px;min-width:320px;max-width:min(480px,calc(100% - 20px));background:var(--menu-item-bg);color:var(--menu-item-fg);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.5);z-index:20;overflow:hidden'>
       <div style='padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center'>
         <span style='font-size:0.85rem;font-weight:600;flex:1'>Maps</span>
-        <button class='btn' onclick='document.getElementById("maps-upload-input").click()' style='padding:4px 8px;font-size:0.8rem' data-guest-hide>Upload</button>
+        <button class='btn' onclick='hw.$("maps-upload-input").click()' style='padding:4px 8px;font-size:0.8rem' data-guest-hide>Upload</button>
         <button class='btn' onclick='unloadDeviceMap()' title='Free map cache on device (PSRAM)' style='padding:4px 8px;font-size:0.8rem' data-guest-hide>Unload Map</button>
         <input type='file' id='maps-upload-input' accept='.hwmap' style='display:none' onchange='uploadMapFile(this)'>
         <button class='btn' onclick='toggleMapsPanel()' style='padding:4px 8px;min-height:unset'>✕</button>
@@ -177,7 +176,7 @@ inline void streamMapsInner(httpd_req_t* req) {
   <div style='display:flex;gap:8px;margin-bottom:0.5rem;align-items:center'>
     <span style='font-size:0.85rem;color:var(--panel-fg)'>Track Color:</span>
     <input type='color' id='track-color' value='#00d9ff' onchange='updateTrackColor()' style='width:40px;height:28px;border:none;background:none;cursor:pointer' />
-    <select id='track-color-preset' onchange='applyColorPreset()' style='padding:4px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg);font-size:0.85rem'>
+    <select id='track-color-preset' class='input-fit' onchange='applyColorPreset()' style='padding:4px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg);font-size:0.85rem'>
       <option value='#00d9ff'>Cyan</option>
       <option value='#ff6b6b'>Red</option>
       <option value='#ffd93d'>Yellow</option>
@@ -295,17 +294,17 @@ window.addEventListener('blur', stopSearchNavHold);
 // Toggle waypoint add mode
 function toggleWaypointMode() {
   waypointMode = !waypointMode;
-  const btn = document.getElementById('btn-add-waypoint');
+  const btn = hw.$('btn-add-waypoint');
   if (waypointMode) {
     btn.style.background = 'var(--crumb-bg)';
     btn.style.borderColor = 'var(--panel-fg)';
     btn.style.color = '';
-    document.getElementById('map-canvas').style.cursor = 'crosshair';
+    hw.$('map-canvas').style.cursor = 'crosshair';
   } else {
     btn.style.background = '';
     btn.style.borderColor = '';
     btn.style.color = '';
-    document.getElementById('map-canvas').style.cursor = 'grab';
+    hw.$('map-canvas').style.cursor = 'grab';
   }
 }
 
@@ -315,7 +314,7 @@ async function addMapWaypoint(canvasX, canvasY) {
   if (!currentMap) { wpWarn('addMapWaypoint() — no map loaded, ignoring'); return; }
   
   // Convert canvas coords to geo coords (inverse of toCanvas in renderMap)
-  const canvas = document.getElementById('map-canvas');
+  const canvas = hw.$('map-canvas');
   const m = currentMap;
   const mapWidth = m.maxLon - m.minLon;
   const mapHeight = m.maxLat - m.minLat;
@@ -428,7 +427,7 @@ function mapHasHeaderBit(hfBit) {
 }
 
 function setLayerAvailabilityState(layerId, available) {
-  const input = document.getElementById(layerId);
+  const input = hw.$(layerId);
   if (!input) return;
   input.disabled = !available;
   input.title = available ? '' : 'Not present in this map';
@@ -528,7 +527,7 @@ let mapsExplorer = null;
 function initMapsFileBrowser() {
   if (typeof window.createFileExplorer !== 'function') {
     console.error('[MAPS] createFileExplorer not available');
-    document.getElementById('maps-file-browser').innerHTML = '<p style="color:#ff6b6b">File browser not available</p>';
+    hw.$('maps-file-browser').innerHTML = '<p style="color:#ff6b6b">File browser not available</p>';
     return;
   }
   
@@ -541,7 +540,7 @@ function initMapsFileBrowser() {
       // When user clicks a .hwmap file, load it into the viewer
       if (filePath.endsWith('.hwmap')) {
         // Show immediate visual feedback before blocking load
-        const canvas = document.getElementById('map-canvas');
+        const canvas = hw.$('map-canvas');
         const ctx = canvas.getContext('2d');
         const lbg = getComputedStyle(document.documentElement).getPropertyValue('--code-bg').trim() || '#1e1e1e';
         ctx.fillStyle = lbg;
@@ -572,11 +571,11 @@ function uploadMapFile(input) {
   const file = input.files[0];
   const targetPath = '/maps/' + file.name;
   // Show inline progress in the maps panel status area
-  const statusEl = document.getElementById('map-upload-status');
+  const statusEl = hw.$('map-upload-status');
   if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Preparing upload...'; }
   hwUploadFile(file, targetPath, {
     onProgress: function(pct, label) {
-      if (statusEl) statusEl.textContent = label || ('Uploading ' + pct + '%');
+      hw.setText(statusEl, label || ('Uploading ' + pct + '%'));
     },
     onDone: function(ok, msg) {
       if (statusEl) { statusEl.textContent = ok ? 'Uploaded: ' + file.name : msg; setTimeout(function(){ statusEl.style.display = 'none'; }, 3000); }
@@ -601,8 +600,8 @@ async function unloadDeviceMap() {
       return;
     }
     if (typeof hw !== 'undefined' && hw.notify) hw.notify('success', msg || 'Device map unloaded');
-    const wpStatus = document.getElementById('waypoint-status');
-    if (wpStatus) wpStatus.textContent = msg || 'Device map unloaded — waypoints API inactive until you load a map again';
+    const wpStatus = hw.$('waypoint-status');
+    hw.setText(wpStatus, msg || 'Device map unloaded — waypoints API inactive until you load a map again');
   } catch (e) {
     alert(e.message || 'Unload failed');
   }
@@ -620,8 +619,8 @@ async function loadMap(path) {
     searchResults = [];
     searchResultIndex = 0;
     stopSearchNavHold();
-    const infoDiv = document.getElementById('feature-info');
-    if (infoDiv) infoDiv.style.display = 'none';
+    const infoDiv = hw.$('feature-info');
+    hw.hide(infoDiv);
     updateLayerAvailability();
     
     if (currentMap) {
@@ -630,13 +629,13 @@ async function loadMap(path) {
         const selText = await selResp.text();
         if (!selResp.ok || (selText && selText.startsWith('Error'))) {
           console.warn('[MAP] Device map load failed:', selText);
-          const wpStatus = document.getElementById('waypoint-status');
-          if (wpStatus) wpStatus.textContent = 'Warning: Device map load failed — waypoints unavailable';
+          const wpStatus = hw.$('waypoint-status');
+          hw.setText(wpStatus, 'Warning: Device map load failed — waypoints unavailable');
         }
       } catch (e) {
         console.warn('[MAP] Device map select error:', e);
       }
-      document.getElementById('map-info').style.display = 'block';
+      hw.$('map-info').style.display = 'block';
 
       // --- Computed stats ---
       const latSpan = currentMap.maxLat - currentMap.minLat;
@@ -687,7 +686,7 @@ async function loadMap(path) {
             <strong style="color:#aaa">${c.toLocaleString()}</strong>
           </span>`).join('');
 
-      document.getElementById('map-details').innerHTML = `
+      hw.$('map-details').innerHTML = `
         <div style="font-size:0.8rem;color:#888;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:10px;align-items:center">
           <strong style="color:var(--panel-fg)">${currentMap.filename}</strong>
           <span style="color:#555">|</span>
@@ -931,7 +930,7 @@ function parseHWMap(buffer, filename) {
 
 // Render map to canvas
 function renderMap() {
-  const canvas = document.getElementById('map-canvas');
+  const canvas = hw.$('map-canvas');
   const ctx = canvas.getContext('2d');
   
   // Enable anti-aliasing
@@ -951,7 +950,7 @@ function renderMap() {
 
     // Arrowhead pointing down toward the Maps button
     const w = canvas.width, h = canvas.height;
-    const mapsBtn = document.getElementById('btn-maps-panel');
+    const mapsBtn = hw.$('btn-maps-panel');
     if (mapsBtn) {
       const canvasRect = canvas.getBoundingClientRect();
       const btnRect = mapsBtn.getBoundingClientRect();
@@ -1021,7 +1020,7 @@ function renderMap() {
   ctx.lineJoin = 'round';
 
   const isOn = (id, def = true) => {
-    const el = document.getElementById(id);
+    const el = hw.$(id);
     return el ? el.checked !== false : def;
   };
 
@@ -1690,8 +1689,8 @@ function renderMap() {
   }
   
   ctx.setLineDash([]);
-  document.getElementById('zoom-info').textContent = 'Zoom: ' + zoom.toFixed(1) + 'x';
-  document.getElementById('rotation-info').textContent = 'Rot: ' + rotation + '°';
+  hw.$('zoom-info').textContent = 'Zoom: ' + zoom.toFixed(1) + 'x';
+  hw.$('rotation-info').textContent = 'Rot: ' + rotation + '°';
 }
 
 // Controls - adjust pan to maintain center point when zooming
@@ -1719,7 +1718,7 @@ function resetView() { zoom = 10; panX = 0; panY = 0; rotation = 0; renderMap();
 function centerOnGPS() {
   if (!currentMap || gpsLat === null) return;
   const m = currentMap;
-  const canvas = document.getElementById('map-canvas');
+  const canvas = hw.$('map-canvas');
   const mapWidth = m.maxLon - m.minLon;
   const mapHeight = m.maxLat - m.minLat;
   const scaleX = (canvas.width * 0.9) / mapWidth;
@@ -1749,7 +1748,7 @@ function centerOnGPS() {
 }
 
 // Mouse controls for panning
-const canvas = document.getElementById('map-canvas');
+const canvas = hw.$('map-canvas');
 function getCanvasXYFromMouseEvent(e) {
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
@@ -1821,7 +1820,7 @@ function showWaypointPopup(idx) {
   if (!wp) return;
   
   // Remove any existing popup
-  const existingPopup = document.getElementById('waypoint-popup');
+  const existingPopup = hw.$('waypoint-popup');
   if (existingPopup) existingPopup.remove();
   
   // Create popup
@@ -1868,7 +1867,7 @@ function showWaypointPopup(idx) {
 }
 
 function closeWaypointPopup() {
-  const popup = document.getElementById('waypoint-popup');
+  const popup = hw.$('waypoint-popup');
   if (popup) popup.remove();
   selectedWaypointIndex = -1;
   renderMap();
@@ -1979,7 +1978,7 @@ async function checkSystemStatus() {
 }
 
 function updateGPSStatusDisplay() {
-  const el = document.getElementById('gps-info');
+  const el = hw.$('gps-info');
   if (!i2cEnabled) {
     el.textContent = 'GPS: I2C disabled';
     el.style.color = '#868e96';
@@ -2000,31 +1999,31 @@ async function updateGPS() {
     const data = await hw.fetchJSON('/api/sensors/status');
 
     if (!data.gps) {
-      document.getElementById('gps-info').textContent = 'GPS: Not available';
-      document.getElementById('gps-info').style.color = '#868e96';
+      hw.$('gps-info').textContent = 'GPS: Not available';
+      hw.$('gps-info').style.color = '#868e96';
       return;
     }
     
     if (!data.gps.enabled) {
       gpsEnabled = false;
-      document.getElementById('gps-info').textContent = 'GPS: Disabled';
-      document.getElementById('gps-info').style.color = '#868e96';
+      hw.$('gps-info').textContent = 'GPS: Disabled';
+      hw.$('gps-info').style.color = '#868e96';
       return;
     }
     
     if (data.gps.fix) {
       gpsLat = data.gps.lat;
       gpsLon = data.gps.lon;
-      document.getElementById('gps-info').textContent = `GPS: ${gpsLat.toFixed(5)}, ${gpsLon.toFixed(5)}`;
-      document.getElementById('gps-info').style.color = '#69db7c';
+      hw.$('gps-info').textContent = `GPS: ${gpsLat.toFixed(5)}, ${gpsLon.toFixed(5)}`;
+      hw.$('gps-info').style.color = '#69db7c';
       renderMap();
     } else {
-      document.getElementById('gps-info').textContent = `GPS: No fix (${data.gps.satellites || 0} sats)`;
-      document.getElementById('gps-info').style.color = '#ffd93d';
+      hw.$('gps-info').textContent = `GPS: No fix (${data.gps.satellites || 0} sats)`;
+      hw.$('gps-info').style.color = '#ffd93d';
     }
   } catch (e) {
-    document.getElementById('gps-info').textContent = 'GPS: Error';
-    document.getElementById('gps-info').style.color = '#ff6b6b';
+    hw.$('gps-info').textContent = 'GPS: Error';
+    hw.$('gps-info').style.color = '#ff6b6b';
   }
 }
 
@@ -2067,8 +2066,8 @@ function cleanName(s) {
 async function loadWaypoints() {
   wpLog('loadWaypoints() — currentMap:', currentMap ? currentMap.filename : 'null');
   if (!currentMap) {
-    document.getElementById('waypoint-status').textContent = '';
-    document.getElementById('waypoint-list').innerHTML = '<p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0">Load a map to manage waypoints</p>';
+    hw.$('waypoint-status').textContent = '';
+    hw.$('waypoint-list').innerHTML = '<p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0">Load a map to manage waypoints</p>';
     return;
   }
   
@@ -2080,12 +2079,12 @@ async function loadWaypoints() {
     if (data.success) {
       if (data.deviceMapLoaded === false) {
         wpWarn('Device map not loaded — waypoints unavailable on device');
-        document.getElementById('waypoint-status').textContent = 'Device has no map loaded — waypoints unavailable';
+        hw.$('waypoint-status').textContent = 'Device has no map loaded — waypoints unavailable';
       }
       waypoints = data.waypoints || [];
       targetWaypointIndex = (typeof data.target === 'number') ? data.target : -1;
       wpLog('Loaded', waypoints.length, 'waypoints, target:', targetWaypointIndex);
-      document.getElementById('waypoint-status').textContent = `Map: ${data.mapName || '(none)'} | Waypoints: ${data.count}/${data.max}${data.deviceMapLoaded === false ? ' ⚠ device map not loaded' : ''}`;
+      hw.$('waypoint-status').textContent = `Map: ${data.mapName || '(none)'} | Waypoints: ${data.count}/${data.max}${data.deviceMapLoaded === false ? ' ⚠ device map not loaded' : ''}`;
       
       if (waypoints.length > 0) {
         let html = '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">';
@@ -2111,19 +2110,19 @@ async function loadWaypoints() {
           html += '</td></tr>';
         });
         html += '</table>';
-        document.getElementById('waypoint-list').innerHTML = html;
+        hw.$('waypoint-list').innerHTML = html;
       } else {
-        document.getElementById('waypoint-list').innerHTML = '<p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0">No waypoints for this map</p>';
+        hw.$('waypoint-list').innerHTML = '<p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0">No waypoints for this map</p>';
       }
       renderMap();
       if (typeof updateRoutesList === 'function') updateRoutesList();
     } else {
       wpError('loadWaypoints failed:', data.error);
-      document.getElementById('waypoint-status').textContent = 'Error: ' + (data.error || 'Failed to load');
+      hw.$('waypoint-status').textContent = 'Error: ' + (data.error || 'Failed to load');
     }
   } catch (e) {
     wpError('loadWaypoints exception:', e);
-    document.getElementById('waypoint-status').textContent = 'Error loading waypoints: ' + e.message;
+    hw.$('waypoint-status').textContent = 'Error loading waypoints: ' + e.message;
   }
 }
 
@@ -2132,7 +2131,7 @@ function centerOnWaypoint(idx) {
   const wp = waypoints[idx];
   if (!wp) return;
   const m = currentMap;
-  const canvas = document.getElementById('map-canvas');
+  const canvas = hw.$('map-canvas');
   const mapWidth = m.maxLon - m.minLon;
   const mapHeight = m.maxLat - m.minLat;
   const scaleX = (canvas.width * 0.9) / mapWidth;
@@ -2157,10 +2156,10 @@ function centerOnWaypoint(idx) {
 }
 
 async function addWaypoint() {
-  const name = document.getElementById('wp-name').value.trim();
-  const lat = parseFloat(document.getElementById('wp-lat').value);
-  const lon = parseFloat(document.getElementById('wp-lon').value);
-  const notes = (document.getElementById('wp-notes').value || '').trim();
+  const name = hw.$('wp-name').value.trim();
+  const lat = parseFloat(hw.$('wp-lat').value);
+  const lon = parseFloat(hw.$('wp-lon').value);
+  const notes = (hw.$('wp-notes').value || '').trim();
   wpLog('addWaypoint() — name:', name, 'lat:', lat, 'lon:', lon, 'notes:', notes);
   
   if (!name || isNaN(lat) || isNaN(lon)) {
@@ -2171,10 +2170,10 @@ async function addWaypoint() {
 
   try {
     await addWaypointViaAPI(name, lat, lon, notes);
-    document.getElementById('wp-name').value = '';
-    document.getElementById('wp-lat').value = '';
-    document.getElementById('wp-lon').value = '';
-    document.getElementById('wp-notes').value = '';
+    hw.$('wp-name').value = '';
+    hw.$('wp-lat').value = '';
+    hw.$('wp-lon').value = '';
+    hw.$('wp-notes').value = '';
   } catch (e) {
     wpError('addWaypoint() failed:', e);
     alert('Failed to add waypoint: ' + (e && e.message ? e.message : e));
@@ -2339,7 +2338,7 @@ async function clearTarget() {
 }
 
 function updateRoutesList() {
-  const el = document.getElementById('routes-list');
+  const el = hw.$('routes-list');
   if (!el) return;
 
   if (!currentMap || !currentMap.features) {
@@ -2402,31 +2401,31 @@ function updateRoutesList() {
 
 // Search functionality
 function toggleMapsPanel() {
-  const p = document.getElementById('maps-panel');
+  const p = hw.$('maps-panel');
   const open = p.style.display !== 'none' && p.style.display !== '';
-  document.getElementById('maps-panel').style.display = 'none';
-  document.getElementById('layers-panel').style.display = 'none';
+  hw.$('maps-panel').style.display = 'none';
+  hw.$('layers-panel').style.display = 'none';
   hideSearchDialog();
   if (!open) p.style.display = 'block';
 }
 
 function toggleLayersPanel() {
-  const p = document.getElementById('layers-panel');
+  const p = hw.$('layers-panel');
   const open = p.style.display !== 'none' && p.style.display !== '';
-  document.getElementById('maps-panel').style.display = 'none';
-  document.getElementById('layers-panel').style.display = 'none';
+  hw.$('maps-panel').style.display = 'none';
+  hw.$('layers-panel').style.display = 'none';
   hideSearchDialog();
   if (!open) p.style.display = 'block';
 }
 
 function showSearchDialog() {
-  document.getElementById('maps-panel').style.display = 'none';
-  document.getElementById('layers-panel').style.display = 'none';
-  const dlg = document.getElementById('search-dialog');
+  hw.$('maps-panel').style.display = 'none';
+  hw.$('layers-panel').style.display = 'none';
+  const dlg = hw.$('search-dialog');
   dlg.style.display = 'block';
-  const inp = document.getElementById('search-input');
+  const inp = hw.$('search-input');
   inp.value = '';
-  document.getElementById('search-results').innerHTML = '';
+  hw.$('search-results').innerHTML = '';
   inp.focus();
   // Dismiss on click outside
   setTimeout(() => {
@@ -2435,7 +2434,7 @@ function showSearchDialog() {
 }
 
 function _searchOutside(e) {
-  const dlg = document.getElementById('search-dialog');
+  const dlg = hw.$('search-dialog');
   if (dlg && !dlg.contains(e.target)) {
     hideSearchDialog();
   } else {
@@ -2444,14 +2443,14 @@ function _searchOutside(e) {
 }
 
 function hideSearchDialog() {
-  document.getElementById('search-dialog').style.display = 'none';
-  document.getElementById('search-input').value = '';
-  document.getElementById('search-results').innerHTML = '';
+  hw.$('search-dialog').style.display = 'none';
+  hw.$('search-input').value = '';
+  hw.$('search-results').innerHTML = '';
 }
 
 function searchMapNames() {
-  const query = document.getElementById('search-input').value.trim().toLowerCase();
-  const resultsDiv = document.getElementById('search-results');
+  const query = hw.$('search-input').value.trim().toLowerCase();
+  const resultsDiv = hw.$('search-results');
   
   if (!currentMap || query.length < 2) {
     resultsDiv.innerHTML = query.length > 0 && query.length < 2 ? 
@@ -2519,7 +2518,7 @@ function centerOnSearchResult(index) {
   const feature = searchResults[index];
   const midIdx = Math.floor(feature.points.length / 2);
   const point = feature.points[midIdx];
-  const canvas = document.getElementById('map-canvas');
+  const canvas = hw.$('map-canvas');
   const m = currentMap;
   
   // Calculate scale (same as renderMap)
@@ -2580,13 +2579,13 @@ function nextSearchResult() {
 
 function showFeatureInfo() {
   if (!selectedFeature) return;
-  let infoDiv = document.getElementById('feature-info');
+  let infoDiv = hw.$('feature-info');
   if (!infoDiv) {
     infoDiv = document.createElement('div');
     infoDiv.id = 'feature-info';
     infoDiv.style.cssText = 'position:absolute;top:10px;right:10px;background:rgba(0,0,0,0.85);border:1px solid var(--border);border-radius:8px;padding:12px;color:#fff;font-size:0.9rem;max-width:280px;z-index:100';
-    document.getElementById('map-canvas').parentElement.style.position = 'relative';
-    document.getElementById('map-canvas').parentElement.appendChild(infoDiv);
+    hw.$('map-canvas').parentElement.style.position = 'relative';
+    hw.$('map-canvas').parentElement.appendChild(infoDiv);
   }
   
   // Build navigation HTML if multiple results
@@ -2620,15 +2619,15 @@ function showFeatureInfo() {
 function clearSelectedFeature() {
   stopSearchNavHold();
   selectedFeature = null;
-  const infoDiv = document.getElementById('feature-info');
-  if (infoDiv) infoDiv.style.display = 'none';
+  const infoDiv = hw.$('feature-info');
+  hw.hide(infoDiv);
   renderMap();
 }
 
 // Load map features from API
 async function loadMapFeatures() {
-  const panel = document.getElementById('map-features');
-  const list = document.getElementById('features-list');
+  const panel = hw.$('map-features');
+  const list = hw.$('features-list');
 
   try {
     const data = await hw.fetchJSON('/api/maps/features');
@@ -2689,7 +2688,7 @@ async function loadGPSTrackFiles() {
   try {
     const data = await hw.fetchJSON('/api/gps/tracks');
 
-    const select = document.getElementById('track-file');
+    const select = hw.$('track-file');
     select.innerHTML = '<option value="">Select GPS log file...</option>';
     
     if (data.success && data.files && data.files.length > 0) {
@@ -2706,7 +2705,7 @@ async function loadGPSTrackFiles() {
 }
 
 async function loadGPSTrack() {
-  const filepath = document.getElementById('track-file').value;
+  const filepath = hw.$('track-file').value;
   if (!filepath) {
     alert('Please select a GPS log file');
     return;
@@ -2731,7 +2730,7 @@ async function loadGPSTrack() {
       gpsTrack = data.points;
       
       // Show validation message with appropriate color
-      const infoEl = document.getElementById('track-info');
+      const infoEl = hw.$('track-info');
       infoEl.textContent = `Loaded ${data.count} GPS points. ${data.message}`;
       
       if (data.validation === 'valid') {
@@ -2751,8 +2750,8 @@ async function loadGPSTrack() {
 
 function clearGPSTrack() {
   gpsTrack = null;
-  document.getElementById('track-info').textContent = '';
-  document.getElementById('track-file').value = '';
+  hw.$('track-info').textContent = '';
+  hw.$('track-file').value = '';
   renderMap();
 }
 
@@ -2766,7 +2765,7 @@ const STITCH_MAX = 9;  // CommandArgs caps at 10 tokens: 1 output + 9 inputs
 function stitchBase(p) { return (p || '').split('/').pop(); }
 
 function renderStitchList() {
-  const el = document.getElementById('stitch-list');
+  const el = hw.$('stitch-list');
   if (!el) return;
   if (stitchOrder.length === 0) {
     el.innerHTML = '<span style="color:var(--muted)">Pick a file above, then "+ Add selected". List order (top&rarr;bottom) = stitch order.</span>';
@@ -2786,7 +2785,7 @@ function renderStitchList() {
 }
 
 function addToStitch() {
-  const sel = document.getElementById('track-file');
+  const sel = hw.$('track-file');
   const p = sel ? sel.value : '';
   if (!p) { alert('Select a GPS log file in the dropdown above first.'); return; }
   if (stitchOrder.length >= STITCH_MAX) {
@@ -2808,13 +2807,13 @@ function stitchRemove(i) { stitchOrder.splice(i, 1); renderStitchList(); }
 
 async function doStitch() {
   if (stitchOrder.length < 2) { alert('Add at least 2 files to stitch (pick one in the dropdown, hit "+ Add selected", repeat).'); return; }
-  let name = (document.getElementById('stitch-name').value || '').trim();
+  let name = (hw.$('stitch-name').value || '').trim();
   if (!name) name = 'stitched-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   name = name.replace(/[^A-Za-z0-9._-]/g, '_');
   if (!/\.(log|csv|txt)$/i.test(name)) name += '.log';
   const outPath = '/logging_captures/tracks/' + name;
   const cmd = 'gpstrackmerge "' + outPath + '" ' + stitchOrder.map(p => '"' + p + '"').join(' ');
-  const statusEl = document.getElementById('stitch-status');
+  const statusEl = hw.$('stitch-status');
   statusEl.style.color = 'var(--panel-fg)';
   statusEl.textContent = 'Stitching ' + stitchOrder.length + ' files...';
   try {
@@ -2830,7 +2829,7 @@ async function doStitch() {
     stitchOrder = [];
     renderStitchList();
     await loadGPSTrackFiles();
-    const sel = document.getElementById('track-file');
+    const sel = hw.$('track-file');
     if (sel) sel.value = outPath;
     loadGPSTrack();  // auto-load the stitched track onto the map
   } catch (e) {
@@ -2843,9 +2842,9 @@ renderStitchList();
 
 // Track color functions
 function updateTrackColor() {
-  trackColor = document.getElementById('track-color').value;
+  trackColor = hw.$('track-color').value;
   // Update preset dropdown to match
-  const preset = document.getElementById('track-color-preset');
+  const preset = hw.$('track-color-preset');
   let found = false;
   for (let i = 0; i < preset.options.length; i++) {
     if (preset.options[i].value.toLowerCase() === trackColor.toLowerCase()) {
@@ -2856,17 +2855,17 @@ function updateTrackColor() {
   }
   if (!found) preset.selectedIndex = -1;
   // Update legend color
-  const legend = document.getElementById('track-legend-color');
+  const legend = hw.$('track-legend-color');
   if (legend) legend.style.background = trackColor;
   renderMap();
 }
 
 function applyColorPreset() {
-  const preset = document.getElementById('track-color-preset');
+  const preset = hw.$('track-color-preset');
   trackColor = preset.value;
-  document.getElementById('track-color').value = trackColor;
+  hw.$('track-color').value = trackColor;
   // Update legend color
-  const legend = document.getElementById('track-legend-color');
+  const legend = hw.$('track-legend-color');
   if (legend) legend.style.background = trackColor;
   renderMap();
 }
@@ -2886,7 +2885,7 @@ async function pollLiveTrack() {
         gpsTrack = data.points;
         
         // Update track info with live stats
-        const infoEl = document.getElementById('track-info');
+        const infoEl = hw.$('track-info');
         const dist = data.distance >= 1000 ? (data.distance/1000).toFixed(2) + 'km' : data.distance.toFixed(0) + 'm';
         const mins = Math.floor(data.duration / 60);
         const secs = Math.floor(data.duration % 60);
@@ -2900,7 +2899,7 @@ async function pollLiveTrack() {
       // Live tracking stopped on device
       clearInterval(liveTrackInterval);
       liveTrackInterval = null;
-      document.getElementById('track-info').textContent = 'Live tracking stopped';
+      hw.$('track-info').textContent = 'Live tracking stopped';
     }
   } catch (e) {
     console.error('Live track poll error:', e);
@@ -2912,13 +2911,13 @@ async function toggleLiveTrack() {
     clearInterval(liveTrackInterval);
     liveTrackInterval = null;
     await hw.fetchJSON('/api/gps/tracks?live=stop').catch(()=>{});
-    document.getElementById('track-info').textContent = 'Live tracking stopped';
+    hw.$('track-info').textContent = 'Live tracking stopped';
   } else {
     await hw.fetchJSON('/api/gps/tracks?live=start').catch(()=>{});
     lastLiveUpdate = 0;
     liveTrackInterval = setInterval(pollLiveTrack, 1000);
     pollLiveTrack();
-    document.getElementById('track-info').innerHTML = '<span style="color:#69db7c">LIVE</span> Connecting...';
+    hw.$('track-info').innerHTML = '<span style="color:#69db7c">LIVE</span> Connecting...';
   }
 }
 

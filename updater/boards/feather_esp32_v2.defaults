@@ -1,0 +1,32 @@
+# HW_TARGET: esp32
+#
+# Recovery updater board file - Adafruit Feather ESP32 V2 (ESP32-PICO-MINI-02).
+#
+# The flash size here is load-bearing twice over: it configures esptool AND it
+# is what updater/CMakeLists.txt reads to pick the shared partition CSV
+# (../partitions_ota_no_sr_8mb.csv). It must agree with
+# boards/feather_esp32_v2.defaults in the main project.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_OFFSET=0x9000
+
+# Minimum silicon revision 3, for the same mandatory reason as
+# boards/feather_esp32_v2.ota.defaults: RSA-3072 signed-app support on the
+# classic ESP32 is gated behind ESP32_REV_MIN_FULL >= 300. The updater embeds
+# the public key and verifies every candidate, so without this it cannot be
+# built at all.
+CONFIG_ESP32_REV_MIN_3=y
+
+# This board must never build with flash encryption; only feathers3_fe does.
+CONFIG_SECURE_FLASH_ENC_ENABLED=n
+CONFIG_NVS_ENCRYPTION=n
+
+# Console: the classic ESP32 has no USB-Serial/JTAG peripheral, so the shared
+# updater defaults cannot pick it here. UART0 is the recovery console, reached
+# through the Feather's CP2102N bridge at 115200 baud.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# No PSRAM in the recovery image. The updater's job is to verify and write one
+# partition; keeping SPIRAM out avoids pulling in the PSRAM init path (and,
+# on this chip, its revision-dependent cache workarounds) for no benefit.
+CONFIG_SPIRAM=n

@@ -67,16 +67,23 @@ G2HealthMetric g2HealthSelectedMetric(void);
 // True when the current view is list+text only (MAIN Overview or Trends landing).
 bool g2HealthWantTextOnlyShape(void);
 
-// True when the worker should kick a vitals poll burst (entry or Poll Now).
+// True when the worker should start an explicit Poll Now refresh. Page entry
+// uses the separate normal, freshness-throttled history lane.
 bool g2HealthConsumePollRequest(void);
 
-// Worker lifecycle: suppress parallel ring polls (sensorlog) while open, and
-// drive "Polling…/Updated" status in Overview/metric text so Poll Now is visible
-// even when vitals values are unchanged.
+// Worker lifecycle: suppress parallel ring traffic (sensorlog) while open, and
+// drive "Refreshing…/Refreshed" status in Overview/metric text so Poll Now is
+// visible even when vitals values are unchanged.
 void g2HealthSetPageActive(bool active);
 bool g2HealthPageIsActive(void);
 void g2HealthNotePollStarted(void);
 void g2HealthNotePollFinished(void);
+void g2HealthNotePollFailed(bool partial);
+void g2HealthNotePollUnsupported(void);
+
+// A new direct-ring connection generation must not inherit live point-series
+// samples from the prior peer/profile. Typed persisted trends are separate.
+void g2HealthResetLiveTelemetry(void);
 
 // One-shot graph push scheduling. Metric views push the sparkline once
 // (after a short settle so daily backfill can land), not on every live
@@ -125,6 +132,9 @@ void g2HealthBuildTextOnly(char* out, size_t cap);
 // fixed-capacity PSRAM. The normal main-loop loads the exact persisted
 // peer/day/timezone key before merging or displaying a page, then stages only
 // a terminal COMPLETE/PARTIAL/ERROR generation for the secure store.
+// Pure boot invariant test for desired-peer deferral/reassertion ordering; it
+// does not read or mutate the live history model.
+bool g2HealthHistoryPeerCustodySelfTest(void);
 void g2HealthSetHistoryPeerId(const char* canonicalMac);
 bool g2HealthApplyCommonDaily(const R1CommonDailyResult& result);
 bool g2HealthApplyHrvDaily(const R1HrvDailyResult& result);
@@ -134,7 +144,7 @@ void g2HealthHistoryFetchFinished(bool successfulSweep, uint8_t errorCode);
 void g2HealthHistorySetSleepState(R1HealthSleepState state);
 struct G2HealthHistorySummary {
   bool available;
-  uint8_t protocolProfile;
+  uint8_t protocolProfile;  // persisted R1HealthHistoryLayout ID (legacy name)
   uint32_t dayStart;
   int16_t timezoneMinutes;
   R1HealthHistoryFetchState fetchState;
@@ -186,6 +196,9 @@ inline void g2HealthSetPageActive(bool) {}
 inline bool g2HealthPageIsActive(void) { return false; }
 inline void g2HealthNotePollStarted(void) {}
 inline void g2HealthNotePollFinished(void) {}
+inline void g2HealthNotePollFailed(bool) {}
+inline void g2HealthNotePollUnsupported(void) {}
+inline void g2HealthResetLiveTelemetry(void) {}
 inline void g2HealthArmGraphPush(uint32_t) {}
 inline bool g2HealthConsumeGraphPush(void) { return false; }
 inline void g2HealthClearGraphPush(void) {}
@@ -199,6 +212,7 @@ inline void g2HealthBuildOverviewText(char* out, size_t cap) { if (out && cap) o
 inline void g2HealthBuildMetricText(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
 inline void g2HealthBuildTrendsOverviewText(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
 inline void g2HealthBuildTextOnly(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
+inline bool g2HealthHistoryPeerCustodySelfTest(void) { return true; }
 inline void g2HealthSetHistoryPeerId(const char*) {}
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 inline bool g2HealthApplyCommonDaily(const R1CommonDailyResult&) { return false; }
@@ -210,7 +224,7 @@ inline void g2HealthHistoryFetchFinished(bool, uint8_t) {}
 inline void g2HealthHistorySetSleepState(R1HealthSleepState) {}
 struct G2HealthHistorySummary {
   bool available;
-  uint8_t protocolProfile;
+  uint8_t protocolProfile;  // persisted R1HealthHistoryLayout ID (legacy name)
   uint32_t dayStart;
   int16_t timezoneMinutes;
   R1HealthHistoryFetchState fetchState;

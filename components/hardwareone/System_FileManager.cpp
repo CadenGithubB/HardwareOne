@@ -391,10 +391,13 @@ bool FileManager::getStorageStats(uint32_t& total, uint32_t& used, uint32_t& fre
     return true;
   }
   
-  // Fallback to LittleFS stats
-  total = LittleFS.totalBytes();
-  used = LittleFS.usedBytes();
-  free = total - used;
+  // Fallback to LittleFS stats. One traverse instead of two, and getStats
+  // guards the subtraction that used to be a bare `total - used`.
+  uint64_t lfsTotal = 0, lfsUsed = 0, lfsFree = 0;
+  (void)VFS::getStats(VFS::INTERNAL, lfsTotal, lfsUsed, lfsFree);
+  total = (uint32_t)lfsTotal;
+  used = (uint32_t)lfsUsed;
+  free = (uint32_t)lfsFree;
   return true;
 }
 

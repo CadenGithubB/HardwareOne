@@ -71,6 +71,49 @@ index a2761749e..5e9bdaafe 100644
  choice ARDUINO_RUNNING_CORE
      bool "Core on which Arduino's setup() and loop() are running"
      default ARDUINO_RUN_CORE0 if FREERTOS_UNICORE
+diff --git a/cores/esp32/esp32-hal-i2c-ng.c b/cores/esp32/esp32-hal-i2c-ng.c
+index 8a55b369d..d4e550994 100644
+--- a/cores/esp32/esp32-hal-i2c-ng.c
++++ b/cores/esp32/esp32-hal-i2c-ng.c
+@@ -41,7 +41,13 @@ typedef volatile struct {
+   i2c_master_dev_handle_t dev_handles[128];
+ } i2c_bus_t;
+ 
+-static i2c_bus_t bus[SOC_I2C_NUM];
++// [hardwareone local patch 2026-08-19] Driver bookkeeping (handles + scalars)
++// moved to PSRAM: every mutating access is under bus[n].lock (a FreeRTOS
++// mutex => task context), data buffers are caller-owned, and classic-ESP32
++// I2C does no DMA retention of this array. Saves 1,064 B of internal DRAM
++// (dev_handles[128] x SOC_I2C_NUM dominates). Cost: ~1-2 us of cache misses
++// per transaction against 100 us - 25 ms of bus time.
++EXT_RAM_BSS_ATTR static i2c_bus_t bus[SOC_I2C_NUM];
+ 
+ static bool i2cDetachBus(void *bus_i2c_num) {
+   uint8_t i2c_num = (int)bus_i2c_num - 1;
+diff --git a/cores/esp32/esp32-hal-periman.c b/cores/esp32/esp32-hal-periman.c
+index bec88b0fd..12027ebe7 100644
+--- a/cores/esp32/esp32-hal-periman.c
++++ b/cores/esp32/esp32-hal-periman.c
+@@ -16,8 +16,17 @@ typedef struct ATTR_PACKED {
+   int8_t bus_channel;
+ } peripheral_pin_item_t;
+ 
+-static peripheral_bus_deinit_cb_t deinit_functions[ESP32_BUS_TYPE_MAX] = {NULL};
+-static peripheral_pin_item_t pins[SOC_GPIO_PIN_COUNT];
++// [hardwareone local patch 2026-08-19] Both tables moved to PSRAM (856 B of
++// internal DRAM): writers run only from driver attach/detach in task context,
++// and this firmware registers no GPIO ISRs (ARDUINO_ISR_ATTR expands empty
++// with CONFIG_ARDUINO_ISR_IRAM unset, and there are zero attachInterrupt /
++// gpio_isr_handler_add users). Latent caveat: a FUTURE GPIO ISR calling
++// digitalRead/digitalWrite would take PSRAM cache misses in a cache-on ISR —
++// jitter, not corruption. Revisit if an ISR user ever appears.
++// [hardwareone local patch 2026-08-19] esp_attr.h for EXT_RAM_BSS_ATTR.
++#include "esp_attr.h"
++EXT_RAM_BSS_ATTR static peripheral_bus_deinit_cb_t deinit_functions[ESP32_BUS_TYPE_MAX] = {NULL};
++EXT_RAM_BSS_ATTR static peripheral_pin_item_t pins[SOC_GPIO_PIN_COUNT];
+ 
+ #define GPIO_NOT_VALID(p) ((p >= SOC_GPIO_PIN_COUNT) || ((SOC_GPIO_VALID_GPIO_MASK & (1ULL << p)) == 0))
+ 
 diff --git a/idf_component.yml b/idf_component.yml
 index fc83e00af..20cbc19e4 100644
 --- a/idf_component.yml
@@ -206,6 +249,85 @@ index fc83e00af..20cbc19e4 100644
  examples:
    - path: ./idf_component_examples/hello_world
    - path: ./idf_component_examples/hw_cdc_hello_world
+diff --git a/libraries/BLE/src/BLECharacteristic.cpp b/libraries/BLE/src/BLECharacteristic.cpp
+index cb971796b..a95589c0a 100644
+--- a/libraries/BLE/src/BLECharacteristic.cpp
++++ b/libraries/BLE/src/BLECharacteristic.cpp
+@@ -150,6 +150,21 @@ void BLECharacteristic::setAccessPermissions(uint16_t perm) {
+ #endif
+ }
+ 
++#if defined(CONFIG_BLUEDROID_ENABLED)
++void BLECharacteristic::setPreparedWriteEnabled(bool value) {
++  // [hardwareone local patch 2026-08-25] Executable record endpoints must not
++  // use BLEValue's characteristic-global, allocation-fallible long-write
++  // accumulator: a failed append can otherwise commit an executable prefix.
++  // Disabling before service start is the intended use; cancel defensively so
++  // a runtime disable cannot commit previously accumulated bytes.
++  m_preparedWriteEnabled = value;
++  if (!value) {
++    m_value.cancel();
++    m_writeEvt = false;
++  }
++}
++#endif
++
+ esp_gatt_char_prop_t BLECharacteristic::getProperties() const {
+   return m_properties;
+ }  // getProperties
+@@ -567,6 +582,24 @@ void BLECharacteristic::handleGATTServerEvent(esp_gatts_cb_event_t event, esp_ga
+       // to send a response.  If we do, then we formulate a response and send it.
+       if (param->write.handle == m_handle) {
+ 
++        // [hardwareone local patch 2026-08-25] Some characteristics represent
++        // a complete command/security record. Reject prepare fragments before
++        // they reach BLEValue's shared accumulator when that endpoint opted
++        // out; an error response is load-bearing, and no callback may run.
++        if (param->write.is_prep && !m_preparedWriteEnabled) {
++          if (param->write.need_rsp) {
++            esp_err_t errRc = ::esp_ble_gatts_send_response(
++              gatts_if, param->write.conn_id, param->write.trans_id,
++              ESP_GATT_NOT_LONG, nullptr
++            );
++            if (errRc != ESP_OK) {
++              log_e("esp_ble_gatts_send_response (prepared write disabled): rc=%d %s",
++                    errRc, GeneralUtils::errorToString(errRc));
++            }
++          }
++          return;
++        }
++
+         // Check for authorization requirement
+         if (m_permissions & ESP_GATT_PERM_WRITE_AUTHORIZATION) {
+           bool authorized = false;
+diff --git a/libraries/BLE/src/BLECharacteristic.h b/libraries/BLE/src/BLECharacteristic.h
+index f7f61cde3..1c9fee84c 100644
+--- a/libraries/BLE/src/BLECharacteristic.h
++++ b/libraries/BLE/src/BLECharacteristic.h
+@@ -209,6 +209,13 @@ public:
+   void setBroadcastProperty(bool value);
+   void setIndicateProperty(bool value);
+   void setWriteNoResponseProperty(bool value);
++#if defined(CONFIG_BLUEDROID_ENABLED)
++  // [hardwareone local patch 2026-08-25] Prepared writes are enabled by
++  // default for compatibility. Protocol
++  // endpoints that treat one characteristic value as one authenticated or
++  // executable record can disable them and require a single bounded ATT write.
++  void setPreparedWriteEnabled(bool value);
++#endif
+ 
+ private:
+   friend class BLEServer;
+@@ -228,6 +235,9 @@ private:
+   BLEService *m_pService;
+   BLEValue m_value;
+   bool m_writeEvt = false;
++#if defined(CONFIG_BLUEDROID_ENABLED)
++  bool m_preparedWriteEnabled = true;
++#endif
+   FreeRTOS::Semaphore m_semaphoreConfEvt = FreeRTOS::Semaphore("ConfEvt");
+   FreeRTOS::Semaphore m_semaphoreSetValue = FreeRTOS::Semaphore("SetValue");
+ 
 diff --git a/libraries/BLE/src/BLEClient.cpp b/libraries/BLE/src/BLEClient.cpp
 index 808614ba5..3f279ee7b 100644
 --- a/libraries/BLE/src/BLEClient.cpp
@@ -1740,7 +1862,7 @@ index 5d4a16295..f3a4dde44 100644
     *                        NimBLE private properties                        *
     ***************************************************************************/
 diff --git a/libraries/BLE/src/BLERemoteCharacteristic.cpp b/libraries/BLE/src/BLERemoteCharacteristic.cpp
-index 70a91288a..76998e821 100644
+index 70a91288a..fd2b4e6ac 100644
 --- a/libraries/BLE/src/BLERemoteCharacteristic.cpp
 +++ b/libraries/BLE/src/BLERemoteCharacteristic.cpp
 @@ -221,56 +221,21 @@ float BLERemoteCharacteristic::readFloat() {
@@ -2067,7 +2189,23 @@ index 70a91288a..76998e821 100644
        break;
  
      default: break;
-@@ -596,6 +770,12 @@ String BLERemoteCharacteristic::readValue() {
+@@ -533,7 +707,14 @@ void BLERemoteCharacteristic::retrieveDescriptors() {
+   uint16_t offset = 0;
+   esp_gattc_descr_elem_t result;
+   while (true) {
+-    uint16_t count = 10;
++    // [hardwareone local patch 2026-08-19] was `count = 10` against a SINGLE-element
++    // `result` on the stack. count is an in/out capacity argument, so this told
++    // esp_ble_gattc_get_all_descr() it could write ten esp_gattc_descr_elem_t
++    // (~20 B each) into room for one — a ~180 B stack smash on any
++    // characteristic exposing more than one descriptor. Upstream
++    // arduino-esp32 bug; the buffer is one element, so the capacity is 1.
++    // Reached on every G2/R1 connect via the ctor's retrieveDescriptors().
++    uint16_t count = 1;
+     esp_gatt_status_t status = ::esp_ble_gattc_get_all_descr(
+       getRemoteService()->getClient()->getGattcIf(), getRemoteService()->getClient()->getConnId(), getHandle(), &result, &count, offset
+     );
+@@ -596,6 +777,12 @@ String BLERemoteCharacteristic::readValue() {
  
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_read_char: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
@@ -2080,7 +2218,7 @@ index 70a91288a..76998e821 100644
      return "";
    }
  
-@@ -615,6 +795,21 @@ String BLERemoteCharacteristic::readValue() {
+@@ -615,6 +802,21 @@ String BLERemoteCharacteristic::readValue() {
   * @return True if successful
   */
  bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool response) {
@@ -2102,7 +2240,7 @@ index 70a91288a..76998e821 100644
    // writeValue(String((char*)data, length), response);
    log_v(">> writeValue(), length: %d", length);
  
-@@ -628,7 +823,10 @@ bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool resp
+@@ -628,7 +830,10 @@ bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool resp
    // This prevents the write request from being made while pairing is in progress
    BLESecurity::waitForAuthenticationComplete();
  
@@ -2114,7 +2252,7 @@ index 70a91288a..76998e821 100644
    // Invoke the ESP-IDF API to perform the write.
    esp_err_t errRc = ::esp_ble_gattc_write_char(
      m_pRemoteService->getClient()->getGattcIf(), m_pRemoteService->getClient()->getConnId(), getHandle(), length, data,
-@@ -637,10 +835,38 @@ bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool resp
+@@ -637,10 +842,38 @@ bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool resp
  
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_write_char: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));

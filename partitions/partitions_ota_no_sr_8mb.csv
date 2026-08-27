@@ -1,0 +1,33 @@
+# HardwareOne recovery-OTA layout for 8 MB classic-ESP32 boards without ESP-SR
+# (Adafruit Feather ESP32 V2). Migration to this layout is cable-only and
+# relocates LittleFS. Back up data before the first flash. Subsequent OTA
+# writes touch ota_0 and otadata only.
+#
+# factory:  golden pure-IDF recovery updater (1144 KiB)
+# otadata:  two-sector ESP-IDF OTA selection journal
+# ota_0:    HardwareOne application (5120 KiB)
+# littlefs: user/system data (1856 KiB)
+#
+# Sizing note: the 16 MB S3 layout gives the recovery updater 1336 KiB and the
+# app 5760 KiB. Neither fits here, so both shrink. factory 1144 KiB is still
+# above the ~900 KiB the S3 updater builds to, but it is BELOW the shared
+# 1.15 MiB release gate in CMakeLists.txt -- the gate for this board is the
+# partition size itself, not that constant. ota_0 5120 KiB leaves roughly 5%
+# headroom over the LLM-off Feather V2 image (~4.73 MB as of 2026-08-25).
+#
+# This table is exact: 0xA000 through 0x800000 with zero slack. There is no
+# spare flash to grow a partition into later, and this board is deployed
+# without cable access, so the split cannot be revised in the field. ota_0 is
+# deliberately the generous side of the trade.
+#
+# app-partition offsets must stay 64 KiB aligned; factory's 1144 KiB size is
+# chosen so otadata lands exactly where it keeps ota_0 on a 64 KiB boundary
+# with no wasted gap.
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0xA000,    0x4000,
+nvs_key,    data, nvs_keys, 0xE000,    0x1000,    encrypted
+phy_init,   data, phy,      0xF000,    0x1000,
+factory,    app,  factory,  0x10000,   0x11E000,
+otadata,    data, ota,      0x12E000,  0x2000,    encrypted
+ota_0,      app,  ota_0,    0x130000,  0x500000,
+littlefs,   data, littlefs, 0x630000,  0x1D0000,  encrypted

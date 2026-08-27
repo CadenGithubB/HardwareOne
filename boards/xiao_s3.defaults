@@ -50,7 +50,11 @@ CONFIG_PARTITION_TABLE_OFFSET=0x8000
 # Was CONFIG_BT_ENABLED=n (binary overflowed the 5332K factory with BT + the
 # fuller feature set). Revert this + the two BuildConfig flags to rebuild the
 # camera+PDM-only variant.
-CONFIG_BT_ENABLED=y
+#
+# 2026-08-24: back to n — ENABLE_LLM_SOURCE_ONBOARD=1 (SD-card models on the
+# standalone XIAO) overflowed the factory partition by 0x3ff0 with BT in.
+# G2/ring/BLE are dropped from THIS image; flip back to y for the carrier use.
+CONFIG_BT_ENABLED=n
 
 # Camera sensor policy — the XIAO Sense fleet uses the OV family. Keep all
 # three OV variants supported by HardwareOne and compile out unrelated sensor
