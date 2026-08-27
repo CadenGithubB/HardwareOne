@@ -10,6 +10,7 @@ idf_component_register(
         app_update
         bootloader_support
         driver
+        esp_adc
         esp_app_format
         esp_event
         esp_http_server

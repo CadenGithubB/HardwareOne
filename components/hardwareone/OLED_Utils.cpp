@@ -1,6 +1,7 @@
 #include "WebServer_Handle.h"
 #include "OLED_Utils.h"
 #include "System_Events.h"  // systemEventPost — SYSEVT_DISPLAY_INIT_FAILED
+#include "System_EventCatalog.h"  // shared indexed notification picker
 #include "OLED_Display.h"
 #include <esp_app_desc.h>
 #include "OLED_UI.h"
@@ -13,6 +14,7 @@
 #include "System_ESPNow.h"
 #include "System_Utils.h"  // For AuthContext
 #include "System_CommandTypes.h"  // For Command, CommandContext
+#include "System_EventKindMask.h"
 #include "System_FirstTimeSetup.h"
 #include "System_Dictation.h"  // KEYBOARD_MODE_MIC: dictation state + control
 #include "OLED_ConsoleBuffer.h"
@@ -479,14 +481,13 @@ static bool sNotificationsShowingDetail = false;
 // ---------------------------------------------------------------------------
 // Notification config sub-tree (Y from the list view). Two flows on the
 // settings-editor pick-list pattern:
-//   My mutes     — any logged-in user; boolean toggle per kind; saves the
-//                  FULL list via `notifyusermute <k,k,...|none>` (the command
-//                  is replace-not-incremental — same path the web uses).
+//   My mutes     — any logged-in user; boolean toggle per kind; saves one
+//                  bounded delta via `notifyusermute set <kind> <on|off>`.
 //   Device kinds — admin only; A cycles all→admin→off per kind via
 //                  `notifydevicekind <kind> <level>`.
-// Kind pickers are family-first (12 families, largest family 21 kinds) —
-// 151 kinds never render as one flat wall. State lives at file scope so the
-// central hint fallback switch can read it.
+// Kind pickers are family-first, so the complete catalog never renders as one
+// flat wall. State lives at file scope so the central hint fallback switch can
+// read it.
 // ---------------------------------------------------------------------------
 enum NcLevel : uint8_t { NC_NONE = 0, NC_ROOT, NC_FAM, NC_KINDS };
 static NcLevel sNcLevel = NC_NONE;
@@ -494,63 +495,61 @@ static bool    sNcFlowDevice = false;    // false = My mutes, true = Device kind
 static bool    sNcIsAdmin = false;       // snapshotted on config entry
 static int     sNcCursor = 0;
 static int     sNcScroll = 0;
-static int     sNcFam = 0;               // selected family
-EXT_RAM_BSS_ATTR static const char* sNcKindNames[24];     // static X-macro pointers, no copies
-static uint8_t     sNcKindIds[24];
-static int         sNcKindCount = 0;
+static size_t  sNcFamilyIndex = SIZE_MAX;  // selected provider ordinal
 static NotifViewer sNcViewer;            // mute-mask snapshot for rendering
 static uint32_t    sNcViewerGen = 0;
-
-static inline bool ncMuteTest(const uint32_t* m, uint8_t kind) {
-  return kind < 128 && (m[kind >> 5] & (1UL << (kind & 31)));
-}
 
 static void ncResolveViewer() {
   notifViewerResolve(gLocalDisplayAuthed ? gLocalDisplayUser.c_str() : "", sNcViewer);
   sNcViewerGen = notifPrefsGeneration();
 }
 
-static void ncBuildKindList(int fam) {
-  sNcKindCount = 0;
-  for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT && sNcKindCount < 24; k++) {
-    if (systemEventKindFamily((uint8_t)k) == fam) {
-      sNcKindIds[sNcKindCount]   = (uint8_t)k;
-      sNcKindNames[sNcKindCount] = systemEventKindName((uint8_t)k);
-      sNcKindCount++;
-    }
-  }
+static bool ncFamilyAt(int index, SystemEventCatalogFamilyInfo* out) {
+  return index >= 0 &&
+         systemEventCatalogFamilyAt(static_cast<size_t>(index), out);
 }
 
-// Toggle one kind in MY mute list. notifyusermute replaces the whole list,
-// so rebuild it from the viewer mask with this kind's bit flipped. The
-// transient String is heap-side (~2 KB worst case), not stack.
-static void ncToggleMute(uint8_t kind) {
-  uint32_t mask[4];
-  memcpy(mask, sNcViewer.muteMask, sizeof(mask));
-  mask[kind >> 5] ^= (1UL << (kind & 31));
-  String cmd;
-  cmd.reserve(2400);
-  cmd = "notifyusermute ";
-  bool any = false;
-  for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-    if (ncMuteTest(mask, (uint8_t)k)) {
-      if (any) cmd += ',';
-      cmd += systemEventKindName((uint8_t)k);
-      any = true;
-    }
-  }
-  if (!any) cmd += "none";
+static bool ncSelectedFamily(SystemEventCatalogFamilyInfo* out) {
+  return systemEventCatalogFamilyAt(sNcFamilyIndex, out);
+}
+
+static int ncKindCount() {
+  SystemEventCatalogFamilyInfo family{};
+  return ncSelectedFamily(&family)
+             ? static_cast<int>(family.kindCount)
+             : 0;
+}
+
+static bool ncKindAt(int index, SystemEventCatalogKindInfo* out) {
+  if (index < 0 || !out) return false;
+  SystemEventCatalogFamilyInfo family{};
+  return ncSelectedFamily(&family) &&
+         systemEventCatalogFamilyKindAt(
+             family.id, static_cast<size_t>(index), out);
+}
+
+// Toggle one kind in MY mute list through the shared bounded mutation path.
+// This deliberately never rebuilds a whole-catalog command: that can exceed
+// CMD_INPUT_MAX and historically copied the viewer through a four-word mask.
+static void ncToggleMute(const SystemEventCatalogKindInfo& kind) {
+  const uint8_t kindId = static_cast<uint8_t>(kind.id);
+  const bool selectedWasMuted = eventKindMaskTest(sNcViewer.muteMask, kindId);
+  String cmd = String("notifyusermute set ") + kind.name +
+               (selectedWasMuted ? " off" : " on");
   char out[96];
   if (!executeOLEDCommandWithResult(cmd, out, sizeof(out)) || strncmp(out, "Error", 5) == 0) {
     oledToastShow("Save failed", 2000);
+    return;
   }
-  // saveUserSettings invalidated the prefs cache — re-resolve for the redraw.
+  // The committed save invalidated the prefs cache; only a successful command
+  // may replace the viewer snapshot used for the next redraw.
   ncResolveViewer();
 }
 
-static void ncCycleDeviceLevel(uint8_t kind) {
-  uint8_t next = (uint8_t)((notifDeviceKindLevel(kind) + 1) % 3);  // all→admin→off→all
-  String cmd = String("notifydevicekind ") + systemEventKindName(kind) + " " + notifLevelToken(next);
+static void ncCycleDeviceLevel(const SystemEventCatalogKindInfo& kind) {
+  const uint8_t kindId = static_cast<uint8_t>(kind.id);
+  uint8_t next = (uint8_t)((notifDeviceKindLevel(kindId) + 1) % 3);  // all→admin→off→all
+  String cmd = String("notifydevicekind ") + kind.name + " " + notifLevelToken(next);
   char out[96];
   if (!executeOLEDCommandWithResult(cmd, out, sizeof(out)) || strncmp(out, "Error", 5) == 0) {
     oledToastShow("Save failed", 2000);
@@ -575,13 +574,16 @@ static void ncDraw() {
   oledDisplay->setCursor(0, y);
   if (sNcLevel == NC_ROOT)      oledDisplay->print("Notif config");
   else if (sNcLevel == NC_FAM)  oledDisplay->print(sNcFlowDevice ? "Device: family" : "Mutes: family");
-  else                          oledDisplay->print(systemEventFamilyName((uint8_t)sNcFam));
+  else {
+    SystemEventCatalogFamilyInfo family{};
+    oledDisplay->print(ncSelectedFamily(&family) ? family.label : "?");
+  }
   y += lineH;
 
   int count;
   if (sNcLevel == NC_ROOT)     count = sNcIsAdmin ? 2 : 1;
-  else if (sNcLevel == NC_FAM) count = SYSEVT_FAM_COUNT;
-  else                         count = sNcKindCount;
+  else if (sNcLevel == NC_FAM) count = static_cast<int>(systemEventCatalogFamilyCount());
+  else                         count = ncKindCount();
 
   if (sNcCursor >= count) sNcCursor = count > 0 ? count - 1 : 0;
   if (sNcCursor < sNcScroll) sNcScroll = sNcCursor;
@@ -596,17 +598,25 @@ static void ncDraw() {
     if (sNcLevel == NC_ROOT) {
       oledDisplay->print(i == 0 ? "My mutes" : "Device kinds");
     } else if (sNcLevel == NC_FAM) {
-      oledDisplay->print(systemEventFamilyName((uint8_t)i));
-    } else if (!sNcFlowDevice) {
-      // "[x] kind" — checkbox from my mute mask
-      oledDisplay->print(ncMuteTest(sNcViewer.muteMask, sNcKindIds[i]) ? "[x] " : "[ ] ");
-      oledDisplay->printf("%.15s", sNcKindNames[i]);
+      SystemEventCatalogFamilyInfo family{};
+      oledDisplay->print(ncFamilyAt(i, &family) ? family.label : "?");
     } else {
-      // "kind" + right-aligned level token
-      oledDisplay->printf("%.13s", sNcKindNames[i]);
-      const char* tok = notifLevelToken(notifDeviceKindLevel(sNcKindIds[i]));
-      oledDisplay->setCursor(128 - (int)strlen(tok) * 6, y);
-      oledDisplay->print(tok);
+      SystemEventCatalogKindInfo kind{};
+      if (!ncKindAt(i, &kind)) {
+        oledDisplay->print("?");
+      } else if (!sNcFlowDevice) {
+        // "[x] kind" — checkbox from my mute mask
+        oledDisplay->print(eventKindMaskTest(
+            sNcViewer.muteMask, static_cast<uint8_t>(kind.id)) ? "[x] " : "[ ] ");
+        oledDisplay->printf("%.15s", kind.name);
+      } else {
+        // "kind" + right-aligned level token
+        oledDisplay->printf("%.13s", kind.name);
+        const char* tok = notifLevelToken(
+            notifDeviceKindLevel(static_cast<uint8_t>(kind.id)));
+        oledDisplay->setCursor(128 - (int)strlen(tok) * 6, y);
+        oledDisplay->print(tok);
+      }
     }
     y += lineH;
   }
@@ -617,11 +627,18 @@ static void ncDraw() {
 static bool ncHandleInput(uint32_t newlyPressed) {
   int count;
   if (sNcLevel == NC_ROOT)     count = sNcIsAdmin ? 2 : 1;
-  else if (sNcLevel == NC_FAM) count = SYSEVT_FAM_COUNT;
-  else                         count = sNcKindCount;
+  else if (sNcLevel == NC_FAM) count = static_cast<int>(systemEventCatalogFamilyCount());
+  else                         count = ncKindCount();
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    if (sNcLevel == NC_KINDS)      { sNcLevel = NC_FAM;  sNcCursor = sNcFam; sNcScroll = 0; }
+    if (sNcLevel == NC_KINDS) {
+      SystemEventCatalogFamilyInfo family{};
+      sNcLevel = NC_FAM;
+      sNcCursor = ncSelectedFamily(&family)
+                      ? static_cast<int>(sNcFamilyIndex)
+                      : 0;
+      sNcScroll = 0;
+    }
     else if (sNcLevel == NC_FAM)   { sNcLevel = NC_ROOT; sNcCursor = 0; sNcScroll = 0; }
     else                           { sNcLevel = NC_NONE; }
     return true;
@@ -632,14 +649,20 @@ static bool ncHandleInput(uint32_t newlyPressed) {
     if (sNcLevel == NC_ROOT) {
       sNcFlowDevice = (sNcCursor == 1);
       if (!sNcFlowDevice) ncResolveViewer();
+      sNcFamilyIndex = SIZE_MAX;
       sNcLevel = NC_FAM; sNcCursor = 0; sNcScroll = 0;
     } else if (sNcLevel == NC_FAM) {
-      sNcFam = sNcCursor;
-      ncBuildKindList(sNcFam);
-      sNcLevel = NC_KINDS; sNcCursor = 0; sNcScroll = 0;
-    } else if (sNcKindCount > 0) {
-      if (sNcFlowDevice) ncCycleDeviceLevel(sNcKindIds[sNcCursor]);
-      else               ncToggleMute(sNcKindIds[sNcCursor]);
+      SystemEventCatalogFamilyInfo family{};
+      if (ncFamilyAt(sNcCursor, &family) && family.kindCount > 0) {
+        sNcFamilyIndex = static_cast<size_t>(sNcCursor);
+        sNcLevel = NC_KINDS; sNcCursor = 0; sNcScroll = 0;
+      }
+    } else {
+      SystemEventCatalogKindInfo kind{};
+      if (ncKindAt(sNcCursor, &kind)) {
+        if (sNcFlowDevice) ncCycleDeviceLevel(kind);
+        else               ncToggleMute(kind);
+      }
     }
     return true;
   }
@@ -860,6 +883,7 @@ bool handleNotificationsInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     }
     sNcIsAdmin = isAdminUser(gLocalDisplayUser);  // snapshot once, not per frame
     ncResolveViewer();
+    sNcFamilyIndex = SIZE_MAX;
     sNcLevel = NC_ROOT;
     sNcCursor = 0;
     sNcScroll = 0;
@@ -941,7 +965,10 @@ static bool notificationsRegisteredInputHandler(int deltaX, int deltaY, uint32_t
 // Reset the config sub-tree on forward entry so a Home-escape mid-config
 // can't leak state into the next visit (automationsOnEnter idiom).
 static void notificationsOnEnter(bool isForward) {
-  if (isForward) sNcLevel = NC_NONE;
+  if (isForward) {
+    sNcLevel = NC_NONE;
+    sNcFamilyIndex = SIZE_MAX;
+  }
 }
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter
@@ -1569,7 +1596,8 @@ static char getCharAt(int row, int col) {
 // Global keyboard state
 OLEDKeyboardState gOledKeyboardState;
 
-void oledKeyboardInit(const char* title, const char* initialText, int maxLength) {
+void oledKeyboardInit(const char* title, const char* initialText, int maxLength,
+                      OLEDKeyboardDictationPolicy dictationPolicy) {
   // A new field starts clean: a FAILED dictation left over from the last one
   // must not greet the user on a page they just opened.
   dictationCancel();
@@ -1578,6 +1606,7 @@ void oledKeyboardInit(const char* title, const char* initialText, int maxLength)
   gOledKeyboardState.cursorX = 0;
   gOledKeyboardState.cursorY = 0;
   gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;  // Start with lowercase
+  gOledKeyboardState.dictationPolicy = dictationPolicy;
   gOledKeyboardState.active = true;
   gOledKeyboardState.cancelled = false;
   gOledKeyboardState.completed = false;
@@ -1612,6 +1641,8 @@ void oledKeyboardReset() {
   gOledKeyboardState.cursorX = 0;
   gOledKeyboardState.cursorY = 0;
   gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
+  gOledKeyboardState.dictationPolicy =
+      OLEDKeyboardDictationPolicy::DENY;
   secureClearString(gOledKeyboardState.title);
   gOledKeyboardState.maxLength = 0;
   gOledKeyboardState.autocompleteFunc = nullptr;
@@ -1750,6 +1781,13 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     if ((millis() / 500) % 2 == 0) display->print("_");
 
     const int micY = keyboardStartY + 24;
+    if (snap.ownerSource != SOURCE_LOCAL_DISPLAY &&
+        (snap.state == DictationState::RECORDING ||
+         snap.state == DictationState::WAITING)) {
+      display->setCursor(0, micY);
+      display->print("Mic busy on G2");
+      return;
+    }
     switch (snap.state) {
       case DictationState::RECORDING: {
         // Filled dot + elapsed seconds reads as "live" at a glance.
@@ -1929,13 +1967,33 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   // Mic mode: no grid, so the joystick does nothing and A is the record toggle.
   if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC) {
+    // Defense in depth: callers cannot normally enter MIC under a denied
+    // policy, but the state is exported for legacy mode overrides. Never let a
+    // raw mode write bypass the field's explicit permission.
+    if (gOledKeyboardState.dictationPolicy !=
+        OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT) {
+      dictationCancel();
+      gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
+      oledMarkDirty();
+      return true;
+    }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
       const DictationSnapshot snap = dictationSnapshotNow();
-      if (snap.state == DictationState::RECORDING) {
+      const bool ownedElsewhere =
+          snap.ownerSource != SOURCE_LOCAL_DISPLAY &&
+          (snap.state == DictationState::RECORDING ||
+           snap.state == DictationState::WAITING);
+      if (ownedElsewhere) {
+        // The G2 page owns the singleton; never let the OLED stop or drain it.
+      } else if (snap.state == DictationState::RECORDING) {
         // Second press ends the take early; the VAD would have done it on its
         // own after a pause. Non-blocking — the recorder finalizes on its task.
         dictationRequestStop();
-      } else if (snap.state != DictationState::WAITING) {
+      } else if (snap.state == DictationState::WAITING) {
+        // Cancel the already-offered host job as well as the local exchange.
+        // System_Dictation fences dictate_cancel to the request's UART epoch.
+        dictationCancel();
+      } else {
         // IDLE or FAILED: a new attempt clears the previous failure.
         String sessionUser;
         bool sessionAuthed = false;
@@ -1945,8 +2003,6 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         if (!sessionAuthed) epoch = kNoTransportSessionEpoch;
         dictationBegin(epoch);
       }
-      // WAITING is deliberately inert: the host owns the exchange until it
-      // answers or dictationTick() times it out.
       inputHandled = true;
     }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
@@ -2305,9 +2361,13 @@ void oledKeyboardCancel() {
 }
 
 // Can this mode be entered right now? Every mode is unconditional except MIC,
-// which needs a mic source and an authenticated host link behind it.
+// which needs field permission, a mic source, and an authenticated host link.
 static bool oledKeyboardModeUsable(OLEDKeyboardMode mode) {
-  if (mode == KEYBOARD_MODE_MIC) return dictationAvailable(nullptr);
+  if (mode == KEYBOARD_MODE_MIC) {
+    return gOledKeyboardState.dictationPolicy ==
+               OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT &&
+           dictationAvailable(nullptr);
+  }
   return true;
 }
 
@@ -2350,6 +2410,17 @@ void oledKeyboardToggleMode() {
 
 void oledKeyboardDictationTick() {
   if (!gOledKeyboardState.active) return;
+  if (gOledKeyboardState.dictationPolicy !=
+      OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT) {
+    // A denied field must neither keep a local capture alive nor drain a staged
+    // transcript, even if another module wrote KEYBOARD_MODE_MIC directly.
+    if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC) {
+      dictationCancel();
+      gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
+      oledMarkDirty();
+    }
+    return;
+  }
   if (gOledKeyboardState.mode != KEYBOARD_MODE_MIC) return;
 
   dictationTick();
@@ -2633,16 +2704,16 @@ void OLEDConsoleBuffer::init() {
     // and the failure path below can free without racing that gate. calloc
     // zeroes the ring, so there is nothing further to clear.
     //
-    // MALLOC_CAP_INTERNAL is spelled out rather than going through
-    // ps_alloc(PreferInternal), which degrades to plain malloc() and would hand
-    // this ring to PSRAM once it grew past CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL.
-    // The ring holds identity-private command history, so internal is a
-    // requirement, not a preference.
+    // RequireInternal, not PreferInternal: the ring holds identity-private
+    // command history, and PreferInternal still spills to PSRAM once the
+    // internal heap is exhausted. Internal is a requirement, not a preference.
     char (*newLines)[OLED_CONSOLE_LINE_LEN] =
-      (char (*)[OLED_CONSOLE_LINE_LEN])heap_caps_calloc(eff, OLED_CONSOLE_LINE_LEN,
-                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    uint32_t* newStamps = (uint32_t*)heap_caps_calloc(eff, sizeof(uint32_t),
-                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      (char (*)[OLED_CONSOLE_LINE_LEN])ps_calloc(eff, OLED_CONSOLE_LINE_LEN,
+                                                 AllocPref::RequireInternal,
+                                                 "oled.console.lines");
+    uint32_t* newStamps = (uint32_t*)ps_calloc(eff, sizeof(uint32_t),
+                                               AllocPref::RequireInternal,
+                                               "oled.console.stamps");
     if (newLines && newStamps) {
       head = 0;
       count = 0;
@@ -5387,7 +5458,8 @@ static char gPendingRemoteCommand[64] = "";
   // Initialize keyboard with command pre-filled, add space for parameters
   char initialText[OLED_KEYBOARD_MAX_LENGTH];
   snprintf(initialText, sizeof(initialText), "%s ", baseCommand);
-  oledKeyboardInit("Remote Command", initialText, OLED_KEYBOARD_MAX_LENGTH);
+  oledKeyboardInit("Remote Command", initialText, OLED_KEYBOARD_MAX_LENGTH,
+                   OLEDKeyboardDictationPolicy::DENY);
   
   gRemoteCommandInputActive = true;
   DEBUG_DISPLAYF("[RMENU] Started command input for: %s\n", baseCommand);

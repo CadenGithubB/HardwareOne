@@ -15,6 +15,7 @@
 #include <LittleFS.h>
 #include <SD.h>
 #include <SPI.h>
+#include <esp_heap_caps.h>
 #include <time.h>
 
 #if ENABLE_CAMERA_SENSOR
@@ -196,13 +197,10 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
   }
   if (location == IMAGE_STORAGE_LITTLEFS || location == IMAGE_STORAGE_BOTH) {
     if (littleFSAvailable) {
-      size_t total = 0, used = 0;
-      {
-        FsLockGuard guard("ImageManager.saveImage.stats");
-        total = LittleFS.totalBytes();
-        used = LittleFS.usedBytes();
-      }
-      size_t freeLFS = (total > used) ? (total - used) : 0;
+      // getStats takes the FS lock itself and resolves total+used in a
+      // single traverse; the old pair walked the whole volume twice.
+      uint64_t total = 0, used = 0, freeLFS = 0;
+      (void)VFS::getStats(VFS::INTERNAL, total, used, freeLFS);
       if (freeLFS < requiredSpace) {
         ERROR_STORAGEF("[ImageManager] LittleFS low on space: %lu free, need %lu", (unsigned long)freeLFS, (unsigned long)requiredSpace);
         if (location == IMAGE_STORAGE_LITTLEFS) return "";
@@ -377,37 +375,88 @@ int ImageManager::getImageCount(ImageStorageLocation location) {
 
 uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
   if (outLen) *outLen = 0;
-  
-  File f;
-  bool isSD = path.startsWith("/sd");
-  
-  if (isSD) {
-    if (!sdAvailable) return nullptr;
-    f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image"));  // path is /sd/...
-  } else {
-    if (!littleFSAvailable) return nullptr;
-    FsLockGuard guard("ImageManager.getImage.open");
-    f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image"));
+
+  String normalizedPath;
+  if (!normalizeFsPath(path, normalizedPath)) {
+    WARN_STORAGEF("[ImageManager] Rejected invalid image path: %s", path.c_str());
+    return nullptr;
   }
-  
+
+  const bool isSD = normalizedPath.startsWith("/sd/");
+  const ImageStorageLocation location =
+      isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+  String normalizedRoot;
+  if (!normalizeFsPath(getCaptureFolder(location), normalizedRoot)) {
+    ERROR_STORAGEF("[ImageManager] Invalid configured capture folder");
+    return nullptr;
+  }
+  const bool underCaptureRoot =
+      normalizedRoot == "/"
+          ? normalizedPath.length() > 1 && normalizedPath[0] == '/'
+          : normalizedPath.length() > normalizedRoot.length() &&
+                normalizedPath.startsWith(normalizedRoot) &&
+                normalizedPath[normalizedRoot.length()] == '/';
+  if (!underCaptureRoot ||
+      !(normalizedPath.endsWith(".jpg") || normalizedPath.endsWith(".jpeg"))) {
+    WARN_STORAGEF("[ImageManager] Rejected path outside managed JPEG folder: %s",
+                  normalizedPath.c_str());
+    return nullptr;
+  }
+
+  File f;
+  size_t len = 0;
+  {
+    FsLockGuard guard("ImageManager.getImage.open");
+    if (isSD) {
+      if (!sdAvailable) return nullptr;
+    } else if (!littleFSAvailable) {
+      return nullptr;
+    }
+    f = VFS::openGuarded(normalizedPath, "r",
+                         VFS::systemAuth("imgmgr.get_image"));
+    if (f) len = f.size();
+  }
   if (!f) return nullptr;
-  
-  size_t len = f.size();
-  uint8_t* buf = (uint8_t*)malloc(len);
-  if (!buf) {
+
+  if (len < 2) {
+    WARN_STORAGEF("[ImageManager] Rejected image length %u for %s",
+                  (unsigned)len, normalizedPath.c_str());
+    FsLockGuard guard("ImageManager.getImage.close_invalid_length");
     f.close();
     return nullptr;
   }
-  
-  if (isSD) {
-    f.read(buf, len);
+
+  const uint32_t imageCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+  if (len > heap_caps_get_largest_free_block(imageCaps)) {
+    WARN_STORAGEF("[ImageManager] No contiguous PSRAM block for %u-byte image",
+                  (unsigned)len);
+    FsLockGuard guard("ImageManager.getImage.close_no_psram_block");
     f.close();
-  } else {
+    return nullptr;
+  }
+
+  uint8_t* buf = (uint8_t*)ps_alloc(len, AllocPref::RequirePSRAM,
+                                    "image.manager.jpeg");
+  if (!buf) {
+    FsLockGuard guard("ImageManager.getImage.close_psram_oom");
+    f.close();
+    return nullptr;
+  }
+
+  size_t bytesRead = 0;
+  {
     FsLockGuard guard("ImageManager.getImage.read");
-    f.read(buf, len);
+    bytesRead = f.read(buf, len);
     f.close();
   }
-  
+
+  if (bytesRead != len || buf[0] != 0xFF || buf[1] != 0xD8) {
+    WARN_STORAGEF("[ImageManager] Invalid/short JPEG read: got=%u expected=%u path=%s",
+                  (unsigned)bytesRead, (unsigned)len, normalizedPath.c_str());
+    ps_free(buf);
+    return nullptr;
+  }
+
   if (outLen) *outLen = len;
   return buf;
 }
@@ -503,11 +552,15 @@ StorageStats ImageManager::getStorageStats(ImageStorageLocation location) {
   } else {
     if (!littleFSAvailable) return stats;
     {
-      FsLockGuard guard("ImageManager.getStorageStats.lfs");
-      stats.totalBytes = LittleFS.totalBytes();
-      stats.usedBytes = LittleFS.usedBytes();
+      // One traverse instead of two, and getStats guards the subtraction —
+      // the old `total - used` here could underflow if the two samples
+      // straddled a concurrent write.
+      uint64_t t = 0, u = 0, f = 0;
+      (void)VFS::getStats(VFS::INTERNAL, t, u, f);
+      stats.totalBytes = t;
+      stats.usedBytes = u;
+      stats.freeBytes = f;
     }
-    stats.freeBytes = stats.totalBytes - stats.usedBytes;
     stats.imageCount = getImageCount(IMAGE_STORAGE_LITTLEFS);
     stats.available = true;
   }

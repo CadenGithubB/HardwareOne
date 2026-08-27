@@ -22,11 +22,12 @@ import tempfile
 
 APP_DESC_OFFSET = 24 + 8
 APP_DESC_MAGIC = 0xABCD5432
-OTA0_SIZE = 0x5A0000
-UPDATER_SLOT_SIZE = 0x14E000
-UPDATER_RELEASE_GATE = 0x126666  # 1.15 MiB, deliberately below slot capacity.
 OTADATA_SIZE = 0x2000
-EXPECTED_PARTITION_CSV = "partitions_ota_no_sr_16mb.csv"
+
+# The updater release gate is deliberately below slot capacity: an updater that
+# only just fits its factory partition has no room to be fixed. Where a board's
+# factory slot is itself smaller than this, the slot wins -- see slot_sizes().
+UPDATER_RELEASE_GATE = 0x126666  # 1.15 MiB
 
 BOARD_CONTRACT = {
     "feathers3": {
@@ -34,14 +35,69 @@ BOARD_CONTRACT = {
         "main_suffix": "+f3o1",
         "updater_suffix": "+f3o1",
         "flash_encryption": False,
+        "target": "esp32s3",
+        "flash_size": "16MB",
+        "partition_csv": "partitions_ota_no_sr_16mb.csv",
     },
     "feathers3_fe": {
         "layout": "hw1-f3fe-ota-v1",
         "main_suffix": "+f3feo1",
         "updater_suffix": "+f3feo1",
         "flash_encryption": True,
+        "target": "esp32s3",
+        "flash_size": "16MB",
+        "partition_csv": "partitions_ota_no_sr_16mb.csv",
+    },
+    "feather_esp32_v2": {
+        "layout": "hw1-fv2-ota-v1",
+        "main_suffix": "+fv2o1",
+        "updater_suffix": "+fv2o1",
+        "flash_encryption": False,
+        "target": "esp32",
+        "flash_size": "8MB",
+        "partition_csv": "partitions_ota_no_sr_8mb.csv",
+    },
+    "qtpy_esp32": {
+        "layout": "hw1-qtpy-ota-v1",
+        "main_suffix": "+qtpyo1",
+        "updater_suffix": "+qtpyo1",
+        "flash_encryption": False,
+        "target": "esp32",
+        "flash_size": "8MB",
+        "partition_csv": "partitions_ota_no_sr_8mb.csv",
     },
 }
+
+
+def slot_sizes(csv_path: pathlib.Path) -> dict[str, int]:
+    """Read the app-slot capacities straight out of the authoritative CSV.
+
+    These used to be module constants (OTA0_SIZE = 0x5A0000, UPDATER_SLOT_SIZE
+    = 0x14E000). Both had gone stale: the CSV grew ota_0 to 0x620000 on
+    2026-08-16 and the constant here was never updated, so the audit was
+    checking main images against a slot 512 KiB smaller than the one they
+    would actually be flashed into. Reading the sizes from the same file the
+    build compiles removes the possibility of that drift returning, and makes
+    a second board with different slot sizes free rather than another constant
+    to forget.
+    """
+    sizes: dict[str, int] = {}
+    for raw in csv_path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) < 5:
+            continue
+        name, size = fields[0], fields[4]
+        try:
+            sizes[name] = int(size, 0)
+        except ValueError:
+            continue
+    for required in ("factory", "ota_0", "otadata"):
+        if required not in sizes:
+            raise ValueError(f"{csv_path.name} has no {required} partition")
+    return sizes
 
 
 class Audit:
@@ -145,7 +201,7 @@ def verify_signed_binary(public_key: pathlib.Path, image: pathlib.Path) -> str |
 
 
 def expected_partition_binary(
-    description: dict[str, object], source_csv: pathlib.Path
+    description: dict[str, object], source_csv: pathlib.Path, flash_size: str
 ) -> bytes:
     """Compile the authoritative CSV with the exact ESP-IDF used by the build."""
     idf_value = description.get("idf_path")
@@ -163,7 +219,7 @@ def expected_partition_binary(
                 sys.executable,
                 str(generator),
                 "--flash-size",
-                "16MB",
+                flash_size,
                 str(source_csv),
                 str(output),
             ],
@@ -186,10 +242,12 @@ def check_value(
     audit.require(actual == expected, f"{owner}: {key}={actual!r}, expected {expected!r}")
 
 
-def check_common_config(audit: Audit, config: dict[str, str], owner: str) -> None:
+def check_common_config(
+    audit: Audit, config: dict[str, str], owner: str, contract: dict[str, object]
+) -> None:
     required = {
-        "CONFIG_IDF_TARGET": "esp32s3",
-        "CONFIG_ESPTOOLPY_FLASHSIZE": "16MB",
+        "CONFIG_IDF_TARGET": str(contract["target"]),
+        "CONFIG_ESPTOOLPY_FLASHSIZE": str(contract["flash_size"]),
         "CONFIG_PARTITION_TABLE_OFFSET": "0x9000",
         "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE": "y",
         "CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK": "n",
@@ -265,8 +323,11 @@ def main() -> int:
             updater_build / "partition_table/partition-table.bin"
         ).read_bytes()
         repository = pathlib.Path(__file__).resolve().parents[2]
+        # Source tables live in partitions/ (root partitions.csv is generated).
+        partition_csv = repository / "partitions" / str(contract["partition_csv"])
+        slots = slot_sizes(partition_csv)
         expected_partition_table = expected_partition_binary(
-            main_description, repository / EXPECTED_PARTITION_CSV
+            main_description, partition_csv, str(contract["flash_size"])
         )
         main_otadata = (main_build / "ota_data_initial.bin").read_bytes()
         updater_otadata = (updater_build / "ota_data_initial.bin").read_bytes()
@@ -278,8 +339,8 @@ def main() -> int:
         print(f"OTA build audit failed: {exc}", file=sys.stderr)
         return 2
 
-    check_common_config(audit, main_config, "main")
-    check_common_config(audit, updater_config, "updater")
+    check_common_config(audit, main_config, "main", contract)
+    check_common_config(audit, updater_config, "updater", contract)
     check_fe_contract(
         audit,
         main_config,
@@ -303,10 +364,10 @@ def main() -> int:
     )
     audit.require(
         main_partition_table == expected_partition_table,
-        f"emitted partition table is not the exact {EXPECTED_PARTITION_CSV} layout",
+        f"emitted partition table is not the exact {partition_csv.name} layout",
     )
     audit.require(
-        main_otadata == updater_otadata == (b"\xff" * OTADATA_SIZE),
+        main_otadata == updater_otadata == (b"\xff" * slots["otadata"]),
         "main/updater OTA-data initializers are not identical blank 8 KiB images",
     )
 
@@ -336,14 +397,21 @@ def main() -> int:
         updater_version.endswith(str(contract["updater_suffix"])),
         f"updater version {updater_version!r} lacks {contract['updater_suffix']!r}",
     )
-    audit.require(main_bin.stat().st_size <= OTA0_SIZE, "main image exceeds ota_0 slot")
+    updater_gate = min(UPDATER_RELEASE_GATE, slots["factory"])
     audit.require(
-        updater_bin.stat().st_size <= UPDATER_SLOT_SIZE,
-        "updater image exceeds factory slot",
+        main_bin.stat().st_size <= slots["ota_0"],
+        f"main image {main_bin.stat().st_size} B exceeds the "
+        f"{slots['ota_0']} B ota_0 slot",
     )
     audit.require(
-        updater_bin.stat().st_size <= UPDATER_RELEASE_GATE,
-        "updater image exceeds the 1.15 MiB release gate",
+        updater_bin.stat().st_size <= slots["factory"],
+        f"updater image {updater_bin.stat().st_size} B exceeds the "
+        f"{slots['factory']} B factory slot",
+    )
+    audit.require(
+        updater_bin.stat().st_size <= updater_gate,
+        f"updater image {updater_bin.stat().st_size} B exceeds the "
+        f"{updater_gate} B release gate",
     )
 
     if audit.errors:

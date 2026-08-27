@@ -190,21 +190,12 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <vector>
 #include <functional>
 #include "System_MemUtil.h"
+#include "System_MemTracker.h"
 
 bool createInputTask();
 bool isSensorConnected(const char* moduleName);
 bool gamepadInit();
 
-
-// Pre-allocation snapshots (used by mem_util.h)
-size_t gAllocHeapBefore = 0;
-size_t gAllocPsBefore = 0;
-
-// AllocEntry struct defined in System_MemUtil.h
-extern const int MAX_ALLOC_ENTRIES = 64;
-EXT_RAM_BSS_ATTR AllocEntry gAllocTracker[MAX_ALLOC_ENTRIES];
-int gAllocTrackerCount = 0;
-bool gAllocTrackerEnabled = false;
 
 // Global flag to indicate CLI dry-run validation mode (no side effects)
 bool gCLIValidateOnly = false;
@@ -418,38 +409,9 @@ int gWifiNetworkCount = 0;
 #endif
 
 extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, size_t size,
-                                                    bool requestedPS, bool usedPS, const char* tag) {
-  (void)op;
-  (void)requestedPS;
-  if (!gAllocTrackerEnabled || !tag || !ptr) return;
-
-  // Find-or-insert by tag. No mutex: tracker is a diagnostic accumulator and
-  // races at worst produce slightly wrong byte totals — never crashes.
-  int idx = -1;
-  for (int i = 0; i < gAllocTrackerCount; i++) {
-    if (strcmp(gAllocTracker[i].tag, tag) == 0) {
-      idx = i;
-      break;
-    }
-  }
-  if (idx == -1) {
-    if (gAllocTrackerCount >= MAX_ALLOC_ENTRIES) return;
-    idx = gAllocTrackerCount++;
-    strncpy(gAllocTracker[idx].tag, tag, sizeof(gAllocTracker[idx].tag) - 1);
-    gAllocTracker[idx].tag[sizeof(gAllocTracker[idx].tag) - 1] = '\0';
-    gAllocTracker[idx].totalBytes = 0;
-    gAllocTracker[idx].psramBytes = 0;
-    gAllocTracker[idx].dramBytes = 0;
-    gAllocTracker[idx].count = 0;
-    gAllocTracker[idx].isActive = true;
-  }
-  gAllocTracker[idx].totalBytes += size;
-  gAllocTracker[idx].count++;
-  if (usedPS) {
-    gAllocTracker[idx].psramBytes += size;
-  } else {
-    gAllocTracker[idx].dramBytes += size;
-  }
+                                                    bool requestedPS, bool usedPS, bool fellBack,
+                                                    const char* tag) {
+  memTrackerRecord(op, ptr, size, requestedPS, usedPS, fellBack, tag);
 }
 
 #if ENABLE_HTTP_SERVER
@@ -1090,7 +1052,7 @@ struct LoopPerfState {
   struct WorstStall { uint32_t ms; uint32_t atMs; uint8_t dom; bool inLoop; } worst[5];
   uint8_t  worstCount;
 };
-static LoopPerfState gLoopPerf;   // zero-initialised (static storage)
+EXT_RAM_BSS_ATTR static LoopPerfState gLoopPerf;  // PSRAM: loop-task only; ~10 warm cache lines re-touched per lap (worst all-miss ~10-20 us, verified 2026-08-19)
 
 // Unlike millis()-since-power-on, this timestamp starts only after setup has
 // actually reached CRASH_PHASE_RUNNING. It owns the existing crash-counter
@@ -1426,10 +1388,12 @@ void hardwareone_setup() {
   // degrade to no-ops, even if boot sequencing gains another task later.
   initMutexes();
 
-  // Enable allocation tracking BEFORE any allocations
-  gAllocTrackerEnabled = true;
-  gAllocTrackerCount = 0;
-  memset(gAllocTracker, 0, sizeof(gAllocTracker));
+  // Enable cumulative allocation-traffic tracking before subsystem startup.
+  // The tracker uses a statically-backed mutex and never allocates while
+  // recording, so initializing it cannot recurse through ps_alloc.
+  if (!memTrackerInit(true)) {
+    Serial.println("[MEM] Allocation tracker unavailable");
+  }
 
   // Filesystem FIRST to enable early allocation logging
   if (!initFilesystem()) {
@@ -1450,7 +1414,12 @@ void hardwareone_setup() {
 #if ENABLE_WIFI
   // WiFi networks array must exist before readSettingsJson deserializes into it
   if (!gWifiNetworks) {
-    gWifiNetworks = (WifiNetwork*)ps_alloc(MAX_WIFI_NETWORKS * sizeof(WifiNetwork), AllocPref::PreferPSRAM, "wifi.networks");
+    // RequireInternal keeps inline/SSO password bytes out of probeable PSRAM.
+    // A String that allocates a separate payload still follows Arduino's
+    // ordinary allocator; this protects the WifiNetwork object storage itself.
+    gWifiNetworks = (WifiNetwork*)ps_alloc(
+        MAX_WIFI_NETWORKS * sizeof(WifiNetwork),
+        AllocPref::RequireInternal, "wifi.networks");
     if (!gWifiNetworks) {
       Serial.println("FATAL: Failed to allocate WiFi networks array");
       while (1) delay(1000);
@@ -1922,7 +1891,7 @@ void hardwareone_setup() {
 #endif
   } else {
     // WiFi initialization deferred - will initialize on first use
-    broadcastOutput("WiFi disabled by default. Use quick settings (SELECT button) or 'wificonnect' to connect.");
+    broadcastOutput("WiFi disabled by default. Use quick settings (SELECT button) or 'openwifi' to connect.");
   }
 
   // Update OLED animation after WiFi attempt
@@ -1952,7 +1921,7 @@ void hardwareone_setup() {
       // NTP can still be triggered manually via 'ntpsync' command
       oledSetBootProgress(50, "Time from RTC");
       DEBUG_NTPF("[DEBUG] Skipping NTP sync - RTC already provided valid time");
-      // Still set up NTP for background sync (non-blocking)
+      // Arm lwIP SNTP without blocking for a foreground reply.
       setupNTP();
     } else {
       oledSetBootProgress(45, "Syncing NTP");
@@ -1963,7 +1932,7 @@ void hardwareone_setup() {
       const char* ntpMsg = "Time unavailable";
       switch (ntpOutcome) {
         case NtpSyncOutcome::Reply:       ntpMsg = "Time synced"; break;
-        case NtpSyncOutcome::KeptPrior:   ntpMsg = "Time kept, NTP pending"; break;
+        case NtpSyncOutcome::KeptPrior:   ntpMsg = "Time kept; no NTP reply"; break;
         case NtpSyncOutcome::RtcFallback: ntpMsg = "Time from RTC"; break;
         default: break;
       }
@@ -2297,7 +2266,7 @@ void hardwareone_setup() {
     if (setupError && strlen(setupError) > 0) {
       broadcastOutput("[ESP-NOW] Auto-init skipped - first-time setup required:");
       broadcastOutput(setupError);
-      broadcastOutput("[ESP-NOW] Set device name with: espnow setname <name>");
+      broadcastOutput("[ESP-NOW] Set device name with: espnowsetname <name>");
     } else {
       broadcastOutput("[ESP-NOW] Initializing...");
       const char* result = cmd_espnow_init("");

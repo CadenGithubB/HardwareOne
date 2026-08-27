@@ -62,6 +62,29 @@ def main() -> int:
 
     port = (os.environ.get("ESPPORT") or "").strip()
     if port:
+        # Trusting ESPPORT blindly defeated the entire point of this guard. A
+        # copy-pasted placeholder -- ESPPORT=/dev/cu.usbserial-XXXX -- was
+        # accepted and the guard printed "writing hw1-layout-program to
+        # /dev/cu.usbserial-XXXX" for a device that does not exist. The one
+        # line an operator reads to confirm where a destructive one-time
+        # migration is about to go must not be able to name a nonexistent
+        # port with total confidence.
+        if not os.path.exists(port):
+            hint = ""
+            try:
+                import serial.tools.list_ports as _lp
+                found = [p.device for p in sorted(_lp.comports(), key=lambda p: p.device)
+                         if p.vid is not None]
+                if found:
+                    hint = "\n\nAttached USB serial devices:\n" + "\n".join(
+                        f"    ESPPORT={d}" for d in found)
+            except Exception:
+                pass
+            return _fail(
+                f"Refusing to run {target}: ESPPORT={port} does not exist.\n"
+                "Nothing was written. If that looks like a placeholder from a "
+                "pasted command, substitute the real port." + hint
+            )
         print(f"[flash-port] ESPPORT={port} -> writing {target} to {port}")
         return 0
 

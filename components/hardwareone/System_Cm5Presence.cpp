@@ -490,6 +490,7 @@ bool cm5PresenceIsProtocolCommand(const char* line) {
   return tokenEqualsNoCase(verb, "status") ||
          tokenEqualsNoCase(verb, "capabilities") ||
          tokenEqualsNoCase(verb, "heartbeat") ||
+         tokenEqualsNoCase(verb, "linkhealth") ||
          tokenEqualsNoCase(verb, "time");
 }
 
@@ -756,12 +757,214 @@ void cm5TimeSyncTick() {
   cm5TimeConsumeStash(stash.rxMs);
 }
 
+// ===========================================================================
+// CM5 LINK HEALTH — the host's fault tally, mirrored here for the CLI.
+// See System_Cm5Presence.h for the contract and for why this is inert.
+// ===========================================================================
+
+namespace {
+
+struct Cm5LinkHealthRecord {
+  bool     seen = false;
+  uint32_t rxMs = 0;
+  uint32_t sessionEpoch = 0;
+  uint32_t reports = 0;
+  uint32_t garbage = 0;
+  uint32_t corrupt = 0;
+  uint32_t timeouts = 0;
+  uint32_t strays = 0;
+  uint32_t logins = 0;
+  uint32_t resets = 0;
+  uint32_t tx = 0;
+  uint32_t rx = 0;
+  uint32_t uptimeS = 0;
+  uint32_t unknownKeys = 0;
+};
+
+// ~56 bytes of internal .bss. Deliberately NOT in PSRAM: it is copied inside a
+// critical section, and the point of the section is to be short.
+static Cm5LinkHealthRecord sLinkHealth;
+static portMUX_TYPE sLinkHealthMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Split one `key=value` token. Returns false for anything that is not exactly
+// one '=' with a non-empty canonical-decimal u32 on the right.
+static bool parseKeyValue(const Token& token, Token& key, uint32_t& value) {
+  if (!token.ptr || token.len == 0) return false;
+  size_t eq = 0;
+  while (eq < token.len && token.ptr[eq] != '=') ++eq;
+  if (eq == 0 || eq >= token.len - 1) return false;
+  for (size_t i = eq + 1; i < token.len; ++i) {
+    if (token.ptr[i] == '=') return false;      // a second '=' is malformed
+  }
+  key.ptr = token.ptr;
+  key.len = eq;
+  Token rhs{token.ptr + eq + 1, token.len - eq - 1};
+  return parseU32(rhs, value);
+}
+
+}  // namespace
+
+Cm5LinkHealthSnapshot cm5LinkHealthSnapshot() {
+  Cm5LinkHealthRecord record;
+  portENTER_CRITICAL(&sLinkHealthMux);
+  record = sLinkHealth;
+  portEXIT_CRITICAL(&sLinkHealthMux);
+
+  Cm5LinkHealthSnapshot out{};
+  out.seen = record.seen;
+  out.ageMs = record.seen
+                  ? static_cast<uint32_t>(millis() - record.rxMs) : 0;
+  out.sessionEpoch = record.sessionEpoch;
+  out.reports = record.reports;
+  out.garbage = record.garbage;
+  out.corrupt = record.corrupt;
+  out.timeouts = record.timeouts;
+  out.strays = record.strays;
+  out.logins = record.logins;
+  out.resets = record.resets;
+  out.tx = record.tx;
+  out.rx = record.rx;
+  out.uptimeS = record.uptimeS;
+  out.unknownKeys = record.unknownKeys;
+  return out;
+}
+
+Cm5LinkHealthIntrinsicResult cm5LinkHealthHandleIntrinsic(
+    const char* line, uint32_t activeSessionEpoch,
+    bool sessionMayPublishPresence,
+    char* reply, size_t replySize) {
+  if (!line || !reply || replySize == 0)
+    return Cm5LinkHealthIntrinsicResult::NotLinkHealth;
+
+  const char* cursor = line;
+  Token root{}, verb{};
+  if (!nextToken(cursor, root) || !tokenEqualsNoCase(root, "cm5"))
+    return Cm5LinkHealthIntrinsicResult::NotLinkHealth;
+  if (!nextToken(cursor, verb) || !tokenEqualsNoCase(verb, "linkhealth"))
+    return Cm5LinkHealthIntrinsicResult::NotLinkHealth;
+
+  // A bare `cm5 linkhealth` is the HUMAN read command and belongs to the
+  // registry row, not to this control-plane intrinsic. Only a versioned push
+  // is ours.
+  Token version{};
+  if (!nextToken(cursor, version))
+    return Cm5LinkHealthIntrinsicResult::NotLinkHealth;
+
+  // From here the line is OURS on every path, refusals included: a host retry
+  // must never fall through to cmd_exec and land in the durable audit.
+  auto fail = [&](const char* msg) {
+    snprintf(reply, replySize, "Error: %s", msg);
+    return Cm5LinkHealthIntrinsicResult::Handled;
+  };
+
+  if (!tokenEquals(version, "1"))
+    return fail("Usage: cm5 linkhealth 1 <key>=<u32> ...");
+  if (activeSessionEpoch == 0)
+    return fail("cm5 linkhealth requires an authenticated uart session");
+  if (!sessionMayPublishPresence)
+    return fail("this session may not publish CM5 link health");
+
+  Cm5LinkHealthRecord parsed;
+  uint32_t known = 0;
+  Token token{};
+  while (nextToken(cursor, token)) {
+    Token key{};
+    uint32_t value = 0;
+    if (!parseKeyValue(token, key, value))
+      return fail("Usage: cm5 linkhealth 1 <key>=<u32> ...");
+    if      (tokenEqualsNoCase(key, "garbage"))  parsed.garbage  = value;
+    else if (tokenEqualsNoCase(key, "corrupt"))  parsed.corrupt  = value;
+    else if (tokenEqualsNoCase(key, "timeouts")) parsed.timeouts = value;
+    else if (tokenEqualsNoCase(key, "strays"))   parsed.strays   = value;
+    else if (tokenEqualsNoCase(key, "logins"))   parsed.logins   = value;
+    else if (tokenEqualsNoCase(key, "resets"))   parsed.resets   = value;
+    else if (tokenEqualsNoCase(key, "tx"))       parsed.tx       = value;
+    else if (tokenEqualsNoCase(key, "rx"))       parsed.rx       = value;
+    else if (tokenEqualsNoCase(key, "up"))       parsed.uptimeS  = value;
+    else { ++parsed.unknownKeys; continue; }
+    ++known;
+  }
+  if (known == 0) return fail("Usage: cm5 linkhealth 1 <key>=<u32> ...");
+
+  parsed.seen = true;
+  parsed.rxMs = millis();
+  parsed.sessionEpoch = activeSessionEpoch;
+
+  portENTER_CRITICAL(&sLinkHealthMux);
+  // Reports are counted HERE, not carried on the wire: this is the device's
+  // own count of what it actually accepted, which is the number that says
+  // whether the reporter is reaching it.
+  parsed.reports = sLinkHealth.reports + 1u;
+  sLinkHealth = parsed;
+  portEXIT_CRITICAL(&sLinkHealthMux);
+
+  snprintf(reply, replySize, "OK: cm5 linkhealth version=1 keys=%lu unknown=%lu",
+           static_cast<unsigned long>(known),
+           static_cast<unsigned long>(parsed.unknownKeys));
+  return Cm5LinkHealthIntrinsicResult::Handled;
+}
+
 namespace {
 EXT_RAM_BSS_ATTR static char sCm5CommandReply[384];
 
 static const char* cmdCm5Status(const String& argsInput) {
   if (argsInput.length() != 0) return "Error: Usage: cm5 status";
   writeStatus(sCm5CommandReply, sizeof(sCm5CommandReply));
+  return sCm5CommandReply;
+}
+
+static void writeLinkHealth(char* reply, size_t replySize, bool json) {
+  const Cm5LinkHealthSnapshot h = cm5LinkHealthSnapshot();
+  if (json) {
+    snprintf(reply, replySize,
+             "{\"seen\":%s,\"age_ms\":%lu,\"session_epoch\":%lu,"
+             "\"reports\":%lu,\"garbage\":%lu,\"corrupt\":%lu,"
+             "\"timeouts\":%lu,\"strays\":%lu,\"logins\":%lu,"
+             "\"resets\":%lu,\"tx\":%lu,\"rx\":%lu,\"host_up_s\":%lu,"
+             "\"unknown_keys\":%lu}",
+             h.seen ? "true" : "false",
+             (unsigned long)h.ageMs, (unsigned long)h.sessionEpoch,
+             (unsigned long)h.reports, (unsigned long)h.garbage,
+             (unsigned long)h.corrupt, (unsigned long)h.timeouts,
+             (unsigned long)h.strays, (unsigned long)h.logins,
+             (unsigned long)h.resets, (unsigned long)h.tx,
+             (unsigned long)h.rx, (unsigned long)h.uptimeS,
+             (unsigned long)h.unknownKeys);
+    return;
+  }
+  if (!h.seen) {
+    // Name the two ordinary reasons, because "no data" here is far more often
+    // a daemon that has not reported yet than a link that is broken.
+    snprintf(reply, replySize,
+             "CM5 link health: no report yet (the host pushes one at link-up, "
+             "every 30s, and after a fault; an older daemon never will)");
+    return;
+  }
+  snprintf(reply, replySize,
+           "CM5 link health: age=%lums epoch=%lu reports=%lu | garbage=%lu "
+           "corrupt=%lu timeouts=%lu strays=%lu | logins=%lu resets=%lu | "
+           "tx=%lu rx=%lu host_up=%lus unknown_keys=%lu",
+           (unsigned long)h.ageMs, (unsigned long)h.sessionEpoch,
+           (unsigned long)h.reports, (unsigned long)h.garbage,
+           (unsigned long)h.corrupt, (unsigned long)h.timeouts,
+           (unsigned long)h.strays, (unsigned long)h.logins,
+           (unsigned long)h.resets, (unsigned long)h.tx, (unsigned long)h.rx,
+           (unsigned long)h.uptimeS, (unsigned long)h.unknownKeys);
+}
+
+static const char* cmdCm5LinkHealth(const String& argsInput) {
+  String a = argsInput;
+  a.trim();
+  // The host's own push is a control-plane line consumed before cmd_exec. If a
+  // human types one here, say so rather than answering with a usage line that
+  // reads like the push was malformed — same courtesy `cm5 heartbeat` gets.
+  if (a.startsWith("1 ") || a == "1") {
+    return "Error: the cm5 linkhealth report is accepted only on the "
+           "authenticated UART host link";
+  }
+  a.toLowerCase();
+  if (a.length() && a != "json") return "Error: Usage: cm5 linkhealth [json]";
+  writeLinkHealth(sCm5CommandReply, sizeof(sCm5CommandReply), a == "json");
   return sCm5CommandReply;
 }
 
@@ -780,7 +983,8 @@ static const char* cmdCm5Root(const String& argsInput) {
   }
   if (verb == "status") return cmdCm5Status(String());
   if (verb == "capabilities") return cmdCm5Capabilities(String());
-  return "Error: Usage: cm5 <status|capabilities" CM5_ROOT_VERB_HINT
+  if (verb == "linkhealth") return cmdCm5LinkHealth(String());
+  return "Error: Usage: cm5 <status|capabilities|linkhealth" CM5_ROOT_VERB_HINT
          "> (heartbeat is UART control-plane only)";
 }
 }  // namespace
@@ -799,6 +1003,8 @@ const CommandEntry cm5PresenceCommands[] = {
      false, cmdCm5Status, "Usage: cm5 status"},
     {"cm5 capabilities", "Show the CM5 presence protocol capabilities.",
      false, cmdCm5Capabilities, "Usage: cm5 capabilities"},
+    {"cm5 linkhealth", "Show the CM5 host's UART link fault tally.",
+     false, cmdCm5LinkHealth, "Usage: cm5 linkhealth [json]"},
 #if ENABLE_RASPBERRY_PI_HOST_POWER
     {"cm5 power ack", "Accept a CM5 delivery/application ACK (UART session only).",
      false, cmdCm5PowerAck,
@@ -836,9 +1042,9 @@ const CommandEntry cm5PresenceCommands[] = {
     {"cm5 fan", "Inspect or request CM5 fan mode/readback.", true,
      cmdCm5Fan, "Usage: cm5 fan [show|status|quiet|auto|max]"},
 #endif
-    {"cm5", "Inspect CM5 service presence, and host power/fan control.",
+    {"cm5", "Inspect CM5 service presence, link health, and host power/fan control.",
      false, cmdCm5Root,
-     "Usage: cm5 <status|capabilities" CM5_ROOT_VERB_HINT
+     "Usage: cm5 <status|capabilities|linkhealth" CM5_ROOT_VERB_HINT
      "> (heartbeat is UART control-plane only)"},
 };
 

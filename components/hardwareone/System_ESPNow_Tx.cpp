@@ -372,8 +372,8 @@ bool init() {
     return false;
   }
 
-  LifecycleControl* control = (LifecycleControl*)heap_caps_calloc(
-      1, sizeof(LifecycleControl), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  LifecycleControl* control = (LifecycleControl*)ps_calloc(
+      1, sizeof(LifecycleControl), AllocPref::RequireInternal, "espnow.tx.lifecycle");
   SyncCompletion* completionPool = (SyncCompletion*)ps_alloc(
       sizeof(SyncCompletion) * kSyncCompletionSlots,
       AllocPref::PreferPSRAM, "espnow.tx.completions");

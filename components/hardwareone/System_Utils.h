@@ -99,9 +99,13 @@ struct CommandModule {
   const char* description;                    // short one-line blurb for the `help` module list (can be nullptr)
   const char* long_description;               // full subsystem overview shown atop `help <module>` (can be nullptr)
   const CommandEntry* commands;               // pointer to command array
-  size_t count;                               // number of commands in array
+  const size_t* countPtr;                     // address of immutable command-array count
   uint8_t flags;                              // module flags (CMD_MODULE_*)
   bool (*isConnected)();                      // optional connection check (can be nullptr)
+
+  size_t commandCount() const {
+    return countPtr ? *countPtr : 0;
+  }
 };
 
 // Get the global module registry (defined in system_utils.cpp)
@@ -164,17 +168,33 @@ enum class NtpSyncOutcome : uint8_t {
   RtcFallback,  // dark timeout, adopted the DS3231's time instead
   Failed,       // no reply and no other source — clock still dark
 };
+
+// Runtime facts captured from the real lwIP SNTP reply callback. "Armed"
+// means esp_sntp_enabled() sees a client PCB; it deliberately does not claim a
+// packet is in flight, retries are progressing, or the network can deliver one.
+struct NtpRuntimeStatus {
+  uint32_t replyCount;       // actual server replies observed this boot
+  uint32_t foregroundTimeoutCount;
+  uint32_t lateReplyCount;
+  int64_t lastReplyEpoch;    // reply-supplied Unix epoch; 0 until first reply
+  uint64_t lastReplyAgeMs;   // monotonic age at snapshot time
+  bool clientArmed;          // client PCB exists; not proof of traffic/reachability
+  bool awaitingLateReply;    // a foreground wait elapsed with no reply
+};
+
 // Synchronous - runs in calling task's stack. Returns true when the clock is
 // valid on exit (any outcome but Failed).
 bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut = nullptr);
 
 #if ENABLE_WIFI
+NtpRuntimeStatus getNtpRuntimeStatus();
 // Main-loop drain (HardwareOne loop is the ONLY caller — a second consumer
 // would race the pending flag): hands stored SNTP-reply facts to
-// Clock::clockStepped(). Covers both foreground syncs and the silent
-// background corrections the lwIP daemon makes hourly.
+// Clock::clockStepped(). Covers both foreground syncs and later corrections
+// the lwIP daemon can make after this foreground caller has returned.
 void ntpSyncDrainTick();
 #else
+inline NtpRuntimeStatus getNtpRuntimeStatus() { return {}; }
 inline void ntpSyncDrainTick() {}
 #endif
 

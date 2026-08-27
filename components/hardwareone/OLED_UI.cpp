@@ -11,6 +11,7 @@
 #include "HAL_Input.h"
 #include "System_Icons.h"
 #include <cstring>
+#include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 // Spinlock for thread-safe toast access (called from ESP-NOW, ESP-SR, BLE, main loop)
 static portMUX_TYPE sToastMux = portMUX_INITIALIZER_UNLOCKED;
@@ -20,7 +21,9 @@ static portMUX_TYPE sToastMux = portMUX_INITIALIZER_UNLOCKED;
 // ============================================================================
 
 OledToast gOledToast = {{0}, 0, OledUIIcon::NONE, false};
-OledDialog gOledDialog = {{0}, {{0}}, 0, {OledUIButton::NONE}, 0, 0, {nullptr}, nullptr, OledUIIcon::NONE, false};
+// PSRAM; the old aggregate initializer was all-zero (NONE enums are 0) and is
+// dropped because .ext_ram.bss is zeroed — identical boot image.
+EXT_RAM_BSS_ATTR OledDialog gOledDialog;
 OledProgress gOledProgress = {{0}, 0, 0, false, false};
 
 // ============================================================================
@@ -490,7 +493,10 @@ void oledProgressRender() {
 // Pairing Ribbon Component
 // ============================================================================
 
-OledPairingRibbon gOledPairingRibbon = {{0}, PairingRibbonState::HIDDEN, PairingRibbonIcon::LINK, 0, 3000, -20, false, 0};
+// Zero image == hidden ribbon (HIDDEN==0, LINK==0). oledPairingRibbonShow()
+// rewrites every field before any state leaves HIDDEN, so the old {3000,-20}
+// initializer values were dead; .ext_ram.bss is zeroed before C++ ctors run.
+EXT_RAM_BSS_ATTR OledPairingRibbon gOledPairingRibbon;
 
 // Ribbon dimensions
 static const int RIBBON_WIDTH = 80;    // Width of the ribbon

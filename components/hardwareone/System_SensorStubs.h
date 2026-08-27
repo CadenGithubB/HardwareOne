@@ -275,7 +275,6 @@
                : MicRecordingOwnedOp::INVALID_OWNER;
   }
   inline void microphoneNotifySourceLost() {}
-  inline int getRecordingCount() { return 0; }
   inline String getRecordingsList() { return "[]"; }
   inline bool deleteRecording(const char* filename) { return false; }
 #endif
@@ -305,7 +304,12 @@
   public:
     bool isConnected() { return false; }
     String SSID() { return ""; }
-    String localIP() { return "0.0.0.0"; }
+    // Returns IPAddress, not String: callers do WiFi.localIP().toString(),
+    // matching the real API (buildSystemInfoJson in System_Utils.cpp).
+    IPAddress localIP() { return IPAddress(); }
+    int8_t  RSSI() { return 0; }
+    int32_t channel() { return 0; }
+    String  macAddress() { return ""; }
     bool hostByName(const char*, IPAddress&) { return false; }
     void mode(int) {}
   };

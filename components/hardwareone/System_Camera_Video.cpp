@@ -7,6 +7,7 @@
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_VFS.h"
 #include "System_TaskUtils.h"  // taskStackRecord — taskstats stack-size registry
+#include "System_MemUtil.h"  // ps_alloc — PSRAM-first HTTP download chunk
 #include <strings.h>   // strcasecmp (used by the always-compiled viewer below)
 
 // Exposed to System_I2C.cpp status builder so UI can gate SD-dependent
@@ -43,7 +44,6 @@ static const char* VIDEO_FOLDER_SD = "/sd/VIDEOS";
 #include "System_Camera_DVP.h"
 #include "System_Settings.h"
 #include "System_Debug.h"
-#include "System_MemUtil.h"
 #include "System_Mutex.h"  // FsLockGuard — serialize SD with mic/sensorlog
 #include <SD.h>
 #include <freertos/FreeRTOS.h>
@@ -572,24 +572,6 @@ uint32_t    videoLastRecordingFrames() { return s_frameCount; }
 // live outside the camera gate. They return empty/false when SD is unavailable
 // or no recordings exist, matching the graceful-degradation pattern used by the
 // camera status/frame endpoints.
-int getVideoRecordingCount() {
-  if (!VFS::isSDAvailable()) return 0;
-  int count = 0;
-  File root = VFS::openGuarded(VIDEO_FOLDER_SD, FILE_READ, VFS::systemAuth(VFS::Scopes::VIDEOS, "video.list"));
-  if (!root || !root.isDirectory()) return 0;
-  File f = root.openNextFile();
-  while (f) {
-    if (!f.isDirectory()) {
-      const char* name = f.name();
-      size_t n = strlen(name);
-      if (n >= 4 && strcasecmp(name + n - 4, ".avi") == 0) count++;
-    }
-    f = root.openNextFile();
-  }
-  root.close();
-  return count;
-}
-
 String getVideoRecordingsList() {
   String out;
   if (!VFS::isSDAvailable()) return out;
@@ -628,36 +610,44 @@ bool deleteVideoRecording(const String& filename) {
 esp_err_t handleVideoRecordingsList(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
+  // Count is a by-product of the single walk, deliberately not a second helper.
+  // Enumerating a directory fopen()s and fclose()s every file it visits (~11 ms
+  // per entry on this hardware), so a separate counting pass doubles the cost of
+  // the whole request. Measured 1218 -> 714 ms over 46 recordings. ESP-IDF's
+  // httpd is single-task, so that time blocks every other request, including the
+  // camera preview. Do not reintroduce a count-only walk.
   String raw = getVideoRecordingsList();
-  int count = getVideoRecordingCount();
 
-  // Build JSON — list items are newline-separated "name:size".
-  String json = "{\"count\":";
-  json += count;
-  json += ",\"sdAvailable\":";
-  json += VFS::isSDAvailable() ? "true" : "false";
-  json += ",\"files\":[";
-
-  if (count > 0 && raw.length() > 0) {
+  // Build the files array first so the count falls out of the same parse.
+  // List items are newline-separated "name:size".
+  String files = "";
+  int count = 0;
+  if (raw.length() > 0) {
     int start = 0;
-    bool first = true;
     while (start < (int)raw.length()) {
       int nl = raw.indexOf('\n', start);
       if (nl < 0) nl = raw.length();
       String item = raw.substring(start, nl);
       int colon = item.indexOf(':');
       if (colon > 0) {
-        if (!first) json += ",";
-        json += "{\"name\":\"";
-        json += item.substring(0, colon);
-        json += "\",\"size\":";
-        json += item.substring(colon + 1);
-        json += "}";
-        first = false;
+        if (count) files += ",";
+        files += "{\"name\":\"";
+        files += item.substring(0, colon);
+        files += "\",\"size\":";
+        files += item.substring(colon + 1);
+        files += "}";
+        count++;
       }
       start = nl + 1;
     }
   }
+
+  String json = "{\"count\":";
+  json += count;
+  json += ",\"sdAvailable\":";
+  json += VFS::isSDAvailable() ? "true" : "false";
+  json += ",\"files\":[";
+  json += files;
   json += "]}";
 
   httpd_resp_set_type(req, "application/json");
@@ -710,9 +700,13 @@ esp_err_t handleVideoRecordingFile(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
   // Stream in 8KB chunks — AVI files can easily exceed PSRAM if we tried to
-  // slurp them whole (unlike mic WAVs which are capped at ~2MB).
+  // slurp them whole (unlike mic WAVs which are capped at ~2MB). The HTTP
+  // server consumes each chunk synchronously, and File::read supports external
+  // destinations (using a sector-sized DMA bounce buffer where required), so
+  // this staging allocation can prefer PSRAM without changing its lifetime.
   const size_t CHUNK = 8192;
-  uint8_t* buf = (uint8_t*)malloc(CHUNK);
+  uint8_t* buf = static_cast<uint8_t*>(
+      ps_alloc(CHUNK, AllocPref::PreferPSRAM, "video.http.chunk"));
   if (!buf) {
     f.close();
     httpd_resp_set_status(req, "500 Internal Server Error");

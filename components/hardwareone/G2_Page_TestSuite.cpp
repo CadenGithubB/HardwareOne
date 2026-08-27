@@ -86,7 +86,7 @@
 #include "G2_Page_TestSuite.h"
 #include "System_Mutex.h"
 
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_G2_TESTSUITE
 
 #include "G2_Glasses.h"
 #include "HAL_Audio.h"   // audioCaptureActive/Owner — guard the diagnostic ring probe against a real capture
@@ -252,13 +252,12 @@ static constexpr size_t kActionCount =
 // -----------------------------------------------------------------------------
 // Each entry fires a named pipeline against a fixed sample. The pipelines
 // inside g2ShowEvenAIReply* do four sequential BLE sends with vTaskDelays
-// between them — that cannot run in the BLE notify task that dispatches
-// our tap handlers, otherwise the writes deadlock against the BT stack
-// servicing the same task (verified on hardware 2026-04-26: only the
-// first envelope leaves and the firmware tears down our hijack with
-// "Connection lost" while the worker hangs). Mirror the page-swap-worker
-// pattern: tap handler spawns a one-shot task, returns immediately, the
-// worker runs the multi-step send and exits.
+// between them. Tap handlers now run on g2_tap_disp, not the BLE callback,
+// but holding that serialized input lane for the whole exchange would still
+// stall every other lens gesture. Mirror the page-swap-worker pattern: the tap
+// handler spawns a one-shot task, returns immediately, and the worker runs the
+// multi-step send and exits. The separate G2 control owner remains free to
+// receive replies throughout.
 //
 // Stack: 4 KB is plenty — the longest call path is sendEnvelope (~1 KB
 // stack high water on bench) plus pb-builder buffers (~400 B) plus
@@ -496,8 +495,8 @@ static void aiWorker(void* arg) {
   vTaskDelete(nullptr);
 }
 
-// Spawn the worker so the BLE notify task that ran the tap handler can
-// return immediately. Heap-allocates args; the worker frees them.
+// Spawn the worker so g2_tap_disp can return immediately. Heap-allocates args;
+// the worker frees them.
 static void spawnAIWorker(AIWorkerKind kind, const char* heading, const char* body) {
   // Worker args (~340 B) — short-lived, freed by the worker. PSRAM is fine
   // here: the worker reads them once at task entry, no DMA / ISR.
@@ -662,6 +661,8 @@ enum TestLevel : uint8_t {
   TEST_LEVEL_IMAGE_COM2                = 26, // Mixed / multi — list+text+image canaries
   TEST_LEVEL_IMAGE_MOTION              = 27, // Q31b — recreate-move (safe path)
   TEST_LEVEL_IMAGE_COMPRESSION         = 28, // Q32 — LZ4 bare-block solo A/B
+  TEST_LEVEL_DISPLAY_KBD_AB            = 29, // interactive 4-band vs 1-tile keyboard
+  TEST_LEVEL_DISPLAY_KEYBOARD          = 30, // Keyboard Tests picker
 };
 static TestLevel gTestLevel = TEST_LEVEL_ROOT;
 
@@ -683,7 +684,7 @@ static TestLevel gTestLevel = TEST_LEVEL_ROOT;
 
 // Row buffers live in PSRAM via EXT_RAM_BSS_ATTR — they're 7.6 KB +
 // 0.4 KB total and only touched from regular task context (page
-// builders + BLE notify task), no DMA, no ISR. Frees ~8 KB of DRAM
+// builders + tap/lens workers), no DMA, no ISR. Frees ~8 KB of DRAM
 // for BLE/WiFi/HTTP runtime allocations.
 EXT_RAM_BSS_ATTR static char        gRows[TEST_MAX_ROWS][TEST_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gRowPtrs[TEST_MAX_ROWS];
@@ -987,18 +988,20 @@ static void imgProbeWorkerImpl(ImgProbeFn fn) {
     DEBUG_G2F("[G2] Image probe done → %s", result ? result : "(null)");
   }
   // Settle window before rebuilding the picker. The probe's own
-  // teardown (typically a final Shutdown) often triggers firmware
-  // SYSTEM_EXIT + DISPLAY_OFF echoes that arrive ~300-500 ms later.
+  // teardown (typically a final Shutdown) often triggers a reason-1
+  // SYSTEM_EXIT echo plus transient SyncInfo ownership snapshots that arrive
+  // ~300-500 ms later. Sid 0x0D SyncInfo is not a DISPLAY_OFF event.
   // Those echoes can race our picker-rebuild CREATE for the BLE
   // write mutex, ending in a "sendPbFragmented: mutex timeout" and
   // a wedged hijack state (observed 2026-04-30 with Selection-S
   // dual-pane + REBUILD-text-child probes). 500 ms is enough for the
-  // echoes to land and our DISPLAY_OFF→sendHijackShutdown handler
-  // to complete before we contend for the wire.
+  // terminal/expected-echo reduction to settle before we contend for the
+  // wire.
   vTaskDelay(pdMS_TO_TICKS(500));
 
   // Sanity check: if the firmware tore down the hijack while we were
-  // probing (DISPLAY_OFF / SYSTEM_EXIT cleared lens.hijackActive), we
+  // probing (a real SYSTEM_EXIT or confirmed ownership loss cleared
+  // lens.hijackActive), we
   // shouldn't push more content — there's no widget to host it. The
   // user has effectively exited; rebuilding the picker would just
   // re-establish a fresh hijack they didn't ask for, and on the
@@ -1087,7 +1090,7 @@ static bool spawnImgProbeWorker(ImgProbeFn fn) {
   return false;
 }
 
-// DISPLAY: parent picker — TEXT / LIST / Combo / Selection patterns.
+// DISPLAY: parent picker — TEXT / LIST / Combo / Selection / Keyboard.
 static size_t buildDisplayRows() {
   writeBackRow("<- Tests");
   size_t row = 1;
@@ -1099,7 +1102,33 @@ static size_t buildDisplayRows() {
   gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Selection patterns >>");
   gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Keyboard Tests >>");
+  gRowPtrs[row] = gRows[row]; row++;
   return row;
+}
+
+// DISPLAY / Keyboard — interactive keyboard rendering and input experiments.
+// Keep these separate from Image / Mixed, whose rows are protocol-shape
+// canaries rather than complete input surfaces.
+static size_t buildDisplayKeyboardRows() {
+  writeBackRow("<- Display");
+  size_t row = 1;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q33: keyboard 4-band A/B");
+  gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// Normal completion callback for the interactive Q33 session. It runs on the
+// persistent G2 session worker after Q33 has shut its compound down, so it may
+// safely queue the standard list-page swap back to the Keyboard Tests picker.
+static bool keyboardAbReturnToKeyboardTests() {
+  size_t n = buildDisplayKeyboardRows();
+  if (g2ShowListPage(gRowPtrs, n)) {
+    gTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
+    return true;
+  }
+  DEBUG_G2F("[G2] Q33: failed to restore Keyboard Tests picker");
+  return false;
 }
 
 // DISPLAY/SELECTION: picker for "how should a 2-choice prompt look
@@ -1576,8 +1605,8 @@ static size_t buildDisplayComboRows() {
 }
 
 // Exit handler for TEXT-widget display tests. Wired as the exitFn arg
-// to g2ShowTextPage so any tap (USER_ACTIVITY post-grace, SysEvent
-// CLICK / SCROLL / DOUBLE_CLICK, TextEvent CLICK) returns the user to
+// to g2ShowTextPage so an admitted TextEvent/SysEvent gesture (CLICK /
+// SCROLL / DOUBLE_CLICK) returns the user to
 // the appropriate sub-picker. Without this, the TEXT widget had no
 // exit route and left the firmware to timeout-tear-down at ~8 s with
 // "Connection lost" on the lens.
@@ -1963,6 +1992,7 @@ void g2BuildTestSuiteInfo(char* out, size_t cap) {
     s += line;
     if (s.length() > cap - 32) break;
   }
+  s += "Display Tests (Keyboard): Q33 keyboard 4-band / 1-tile A/B\n";
   strncpy(out, s.c_str(), cap - 1);
   out[cap - 1] = '\0';
 }
@@ -2060,9 +2090,9 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_DISPLAY: {
-      // Parent picker: TEXT widget / LIST widget / Combo. No tests fire
-      // from here — each row drills into a sub-list whose dispatcher
-      // case actually runs the tests.
+      // Parent picker: TEXT widget / LIST widget / Combo / Selection /
+      // Keyboard. No tests fire from here — each row drills into a sub-list
+      // whose dispatcher case actually runs the tests.
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
@@ -2090,12 +2120,42 @@ void g2TestSuiteHandleTap(uint32_t idx) {
           gInDisplayTest = false;
           n = buildSelectionRows();
           break;
+        case 5:
+          gTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
+          gInDisplayTest = false;
+          n = buildDisplayKeyboardRows();
+          break;
         default:
           DEBUG_G2F("[G2] Test suite DISPLAY: tap idx=%u out of range",
                     (unsigned)idx);
           return;
       }
       g2ShowListPage(gRowPtrs, n);
+      return;
+    }
+
+    case TEST_LEVEL_DISPLAY_KEYBOARD: {
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_DISPLAY;
+        size_t n = buildDisplayRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      if (idx == 1) {
+        // Claim the logical level before the async worker can finish. A fast
+        // startup failure invokes keyboardAbReturnToKeyboardTests on another
+        // core; assigning KBD_AB after submit would overwrite that repair.
+        gTestLevel = TEST_LEVEL_DISPLAY_KBD_AB;
+        DEBUG_G2F("[G2] Q33 keyboard chunk A/B → persistent session worker");
+        if (!g2ShowKeyboardChunkTest(keyboardAbReturnToKeyboardTests)) {
+          gTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
+          size_t n = buildDisplayKeyboardRows();
+          g2ShowListPage(gRowPtrs, n);
+        }
+        return;
+      }
+      DEBUG_G2F("[G2] Test suite DISPLAY/KEYBOARD: tap idx=%u out of range",
+                (unsigned)idx);
       return;
     }
 
@@ -2488,6 +2548,21 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       }
       return;
     }
+
+    case TEST_LEVEL_DISPLAY_KBD_AB:
+      // Q33 controls use run-scoped kbABLst0/1 ListObjects and are consumed by
+      // its session worker before the generic Tests dispatcher. A tap reaches
+      // here only while the old "app" Keyboard picker is still visible. If
+      // startup was dropped/failed, repair the logical level and handle that
+      // visible row; otherwise it is a presentation-boundary stale event.
+      if (!g2KeyboardChunkTestRunning()) {
+        DEBUG_G2F("[G2] Q33: inactive with app picker visible; self-healing");
+        gTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
+        g2TestSuiteHandleTap(idx);
+      } else {
+        DEBUG_G2F("[G2] Q33: ignored stale app tap idx=%u", (unsigned)idx);
+      }
+      return;
 
     case TEST_LEVEL_IMAGE_ANIMATED_ICONS: {
       if (idx == 0) {
@@ -2925,8 +3000,8 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 // Force-dismiss the front-pane EvenAI card. Card normally auto-
 // dismisses after ~10 s but a stuck card (firmware-side) blocks
 // subsequent CTRL ENTER calls with errorCode=7. Sends CTRL EXIT,
-// which is a no-op if no card is active. Single envelope — runs on
-// the BLE notify task without a worker.
+// which is a no-op if no card is active. Single envelope — runs directly on
+// g2_tap_disp without a worker.
 static void actionHideAICard() {
   const bool ok = g2HideEvenAICard();
   DEBUG_G2F("[G2] Hide AI Card: %s", ok ? "sent CTRL EXIT" : "send failed");
@@ -2982,4 +3057,4 @@ static void actionLensStateDump() {
             (unsigned)s.containerWidgetId, (unsigned)s.overlayKind);
 }
 
-#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_G2_TESTSUITE

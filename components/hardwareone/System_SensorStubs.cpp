@@ -1,6 +1,7 @@
 #include "System_SensorStubs.h"
 #include "System_Utils.h"
 #include "WebServer_Utils.h"
+#include "System_LiveAudio.h"
 
 // Forward declarations for stubs
 class Adafruit_GPS;
@@ -236,4 +237,19 @@ const size_t espNowCommandsCount = 0;
 // MQTT stub variables (global definitions)
 const struct CommandEntry mqttCommands[] = {};
 const size_t mqttCommandsCount = 0;
+#endif
+
+#if !ENABLE_UART_HOST_LINK
+// System_LiveAudio.cpp is not built. Keep the registry surface alive and
+// failing cleanly — the contract stated at System_LiveAudio.h, and the same
+// shape as cmd_voicefetch's fallback in System_UartLink.cpp.
+const char* cmd_liveaudio(const String&) {
+  return "Error: liveaudio requires the UART host link, which is not compiled in this build";
+}
+const struct CommandEntry liveAudioCommands[] = {
+    {"liveaudio", "Live PCM UART transport (not compiled in this build)", false,
+     cmd_liveaudio, nullptr},
+};
+const size_t liveAudioCommandsCount =
+    sizeof(liveAudioCommands) / sizeof(liveAudioCommands[0]);
 #endif

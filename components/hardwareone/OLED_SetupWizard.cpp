@@ -19,6 +19,7 @@
 #include "HAL_Input.h"
 #include "i2csensor_seesaw.h"
 #include "System_I2C.h"
+#include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 // OLED_I2C_ADDRESS, OLED_TRANSACTION, and oledConnected from OLED_Display.h
 extern InputCache gInputCache;
@@ -526,7 +527,7 @@ static bool handleTogglePageInput(uint32_t buttons, JoystickNav& nav, SetupWizar
 }
 
 // We need a dummy result for pages that don't need it
-static SetupWizardResult sDummyResult;
+EXT_RAM_BSS_ATTR static SetupWizardResult sDummyResult;  // PSRAM: only wifiEnabled/completed bools ever written — no credential can land here (verified 2026-08-19)
 
 bool handleFeaturesInput(uint32_t buttons, JoystickNav& nav) {
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {

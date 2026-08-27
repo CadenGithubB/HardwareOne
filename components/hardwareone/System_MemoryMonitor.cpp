@@ -6,6 +6,7 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_MemoryMonitor.h"
+#include "System_MemTracker.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_SensorStubs.h"
@@ -48,10 +49,6 @@
 
 // Command-exec task handle is NOT a sensor — declared separately.
 extern TaskHandle_t gCmdExecTaskHandle;
-
-// AllocEntry struct + gAllocTracker declared in System_MemUtil.h
-extern int gAllocTrackerCount;
-extern bool gAllocTrackerEnabled;
 
 // ============================================================================
 // Memory Threshold Registry
@@ -208,7 +205,7 @@ static size_t gLowestHeapSeen = UINT32_MAX;
 static const size_t HEAP_WARNING_THRESHOLD = 25600;  // 25KB warning threshold
 
 void sampleMemoryState(bool forceFullScan) {
-  // ── Combined heap (DRAM + PSRAM when SPIRAM_USE_MALLOC) ──
+  // ── Internal heap (NOT combined — PSRAM is reported separately below) ──
   // Internal 8-bit RAM only. Previously: ESP.* (MALLOC_CAP_INTERNAL, no 8BIT)
   // folded in the unusable IRAM-only heap, and largestBlock used bare
   // MALLOC_CAP_8BIT which ALSO matches PSRAM — so it reported the ~1.5 MB PSRAM
@@ -228,13 +225,24 @@ void sampleMemoryState(bool forceFullScan) {
   int psramUsedPercent = (hasPsram && totalPsram) ? (int)(((totalPsram - freePsram) * 100) / totalPsram) : 0;
   
   // ── DRAM-specific (internal only) ──
-  // Note: heap_caps_get_total_size() not available in ESP-IDF v5.3.1
-  // Compute DRAM total as combined heap total minus PSRAM total
-  size_t dramFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  size_t dramTotal = totalHeap - totalPsram;
-  size_t dramMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  size_t dramLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  int dramUsedPercent = dramTotal ? (int)(((dramTotal - dramFree) * 100) / dramTotal) : 0;
+  // Was: dramTotal = totalHeap - totalPsram, with the free/min/largest trio
+  // re-querying heap_caps_* directly. That subtraction was only correct while
+  // totalHeap came from ESP.getHeapSize(), which under CONFIG_SPIRAM_USE_MALLOC
+  // folds PSRAM into the total. v0.99.9 switched totalHeap to the honest
+  // internal-only hw1InternalTotalBytes() but left the subtraction behind, so
+  // it underflowed size_t on every PSRAM board: xiao_s3 printed
+  // "DRAM: 101/4186839 KB" (= 2^32 - ~7.9 MB of PSRAM, / 1024).
+  //
+  // The trio was already querying MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT — exactly
+  // what the hw1Internal* helpers above wrap — so this is the same pool the
+  // freeHeap/totalHeap group reports. Reuse those values: one source of truth,
+  // and four fewer walks of the heap under its lock per sample.
+  size_t dramFree = freeHeap;
+  size_t dramTotal = totalHeap;
+  size_t dramMinFree = minFreeHeap;
+  size_t dramLargest = largestBlock;
+  int dramUsedPercent = (dramTotal && dramTotal > dramFree)
+                          ? (int)(((dramTotal - dramFree) * 100) / dramTotal) : 0;
   
   // ── Heap pressure monitoring ──
   bool isNewLow = false;
@@ -389,46 +397,39 @@ void sampleMemoryState(bool forceFullScan) {
     }
   }
   
-  // ── Allocation tracker summary (if enabled and has entries) ──
-  if (gAllocTrackerEnabled && gAllocTrackerCount > 0) {
-    size_t totalTracked = 0, totalDram = 0, totalPsramTracked = 0;
-    int activeCount = 0;
-    for (int i = 0; i < gAllocTrackerCount; i++) {
-      if (!gAllocTracker[i].isActive) continue;
-      activeCount++;
-      totalTracked += gAllocTracker[i].totalBytes;
-      totalDram += gAllocTracker[i].dramBytes;
-      totalPsramTracked += gAllocTracker[i].psramBytes;
+  // ── Allocation traffic (cumulative since tracker reset, not live bytes) ──
+  static constexpr size_t kMemSampleTopCount = 5;
+  MemTrackerSnapshot tracker{};
+  MemTrackerEntry top[kMemSampleTopCount]{};
+  if (memTrackerSnapshot(tracker, top, kMemSampleTopCount,
+                         pdMS_TO_TICKS(25)) &&
+      (tracker.enabled || tracker.entryCount > 0 ||
+       tracker.contentionDrops > 0 || tracker.invalidTagEvents > 0)) {
+    BROADCAST_PRINTF("[MEMSAMPLE] AllocTracker: %s, %u/%u tags, %llu attempts",
+                     tracker.enabled ? "ON" : "OFF",
+                     (unsigned)tracker.entryCount, (unsigned)tracker.capacity,
+                     (unsigned long long)(tracker.successCount +
+                                          tracker.failureCount));
+    BROADCAST_PRINTF("  cumulative requested: %llu B (DRAM:%llu PSRAM:%llu)",
+                     (unsigned long long)(tracker.dramBytes + tracker.psramBytes),
+                     (unsigned long long)tracker.dramBytes,
+                     (unsigned long long)tracker.psramBytes);
+    BROADCAST_PRINTF("  failures:%llu fallbacks:%llu drops(lock:%llu invalid:%llu full:%llu)",
+                     (unsigned long long)tracker.failureCount,
+                     (unsigned long long)tracker.fallbackCount,
+                     (unsigned long long)tracker.contentionDrops,
+                     (unsigned long long)tracker.invalidTagEvents,
+                     (unsigned long long)tracker.overflowEvents);
+    for (size_t i = 0; i < tracker.topCount; ++i) {
+      BROADCAST_PRINTF("    %-31.31s %8llu B (D:%llu P:%llu) ok:%llu fail:%llu fb:%llu",
+                       top[i].tag,
+                       (unsigned long long)(top[i].dramBytes + top[i].psramBytes),
+                       (unsigned long long)top[i].dramBytes,
+                       (unsigned long long)top[i].psramBytes,
+                       (unsigned long long)top[i].successCount,
+                       (unsigned long long)top[i].failureCount,
+                       (unsigned long long)top[i].fallbackCount);
     }
-    BROADCAST_PRINTF("[MEMSAMPLE] AllocTracker: %d entries, %u KB total (DRAM: %u KB, PSRAM: %u KB)",
-                     activeCount, (unsigned)(totalTracked / 1024),
-                     (unsigned)(totalDram / 1024), (unsigned)(totalPsramTracked / 1024));
-    // Show top 5 by size (selection sort with temporary marking)
-    bool wasActive[64];
-    int limit = gAllocTrackerCount < 64 ? gAllocTrackerCount : 64;
-    for (int i = 0; i < limit; i++) wasActive[i] = gAllocTracker[i].isActive;
-    
-    for (int shown = 0; shown < 5; shown++) {
-      size_t maxBytes = 0;
-      int maxIdx = -1;
-      for (int i = 0; i < limit; i++) {
-        if (!gAllocTracker[i].isActive) continue;
-        if (gAllocTracker[i].totalBytes > maxBytes) {
-          maxBytes = gAllocTracker[i].totalBytes;
-          maxIdx = i;
-        }
-      }
-      if (maxIdx < 0) break;
-      BROADCAST_PRINTF("    %-20s %6u B (D:%u P:%u) x%u",
-                       gAllocTracker[maxIdx].tag,
-                       (unsigned)gAllocTracker[maxIdx].totalBytes,
-                       (unsigned)gAllocTracker[maxIdx].dramBytes,
-                       (unsigned)gAllocTracker[maxIdx].psramBytes,
-                       (unsigned)gAllocTracker[maxIdx].count);
-      gAllocTracker[maxIdx].isActive = false;
-    }
-    // Restore active flags
-    for (int i = 0; i < limit; i++) gAllocTracker[i].isActive = wasActive[i];
   }
 }
 
@@ -444,35 +445,41 @@ const char* cmd_memsample(const String& argsInput) {
     trackCmd.trim();
     
     if (trackCmd == "on") {
-      if (!gAllocTrackerEnabled) {
-        gAllocTrackerCount = 0;
-        memset(gAllocTracker, 0, 64 * sizeof(AllocEntry));
-      }
-      gAllocTrackerEnabled = true;
-      return "Allocation tracking enabled (will track future ps_alloc calls)";
+      return memTrackerSetEnabled(true)
+          ? "Allocation tracking enabled (cumulative window preserved)"
+          : "Error: allocation tracker unavailable";
     } else if (trackCmd == "off") {
-      gAllocTrackerEnabled = false;
-      return "Allocation tracking disabled";
+      return memTrackerSetEnabled(false)
+          ? "Allocation tracking disabled (cumulative window preserved)"
+          : "Error: allocation tracker unavailable";
     } else if (trackCmd == "reset") {
-      gAllocTrackerCount = 0;
-      memset(gAllocTracker, 0, 64 * sizeof(AllocEntry));
-      return "Allocation tracker reset";
+      return memTrackerReset()
+          ? "Allocation tracker cumulative window reset"
+          : "Error: allocation tracker unavailable";
     } else if (trackCmd == "status") {
-      char statusBuf[256];
-      snprintf(statusBuf, sizeof(statusBuf), 
-               "Allocation tracking: %s | Tracked: %d allocations",
-               gAllocTrackerEnabled ? "ENABLED" : "DISABLED",
-               gAllocTrackerCount);
-      if (gAllocTrackerCount > 0) {
-        size_t total = 0;
-        for (int i = 0; i < gAllocTrackerCount; i++) {
-          total += gAllocTracker[i].totalBytes;
-        }
-        char totalBuf[128];
-        snprintf(totalBuf, sizeof(totalBuf), " | Total: %lu bytes", (unsigned long)total);
-        strncat(statusBuf, totalBuf, sizeof(statusBuf) - strlen(statusBuf) - 1);
+      MemTrackerSnapshot tracker{};
+      if (!memTrackerSnapshot(tracker)) {
+        return "Error: allocation tracker unavailable";
       }
+      char statusBuf[256];
+      snprintf(statusBuf, sizeof(statusBuf),
+               "Allocation tracking: %s | Tags: %u/%u | Attempts: %llu | Cumulative: %llu bytes",
+               tracker.enabled ? "ENABLED" : "DISABLED",
+               (unsigned)tracker.entryCount, (unsigned)tracker.capacity,
+               (unsigned long long)(tracker.successCount +
+                                    tracker.failureCount),
+               (unsigned long long)(tracker.dramBytes + tracker.psramBytes));
       broadcastOutput(statusBuf);
+      BROADCAST_PRINTF("[Memory] DRAM:%llu PSRAM:%llu failures:%llu fallbacks:%llu",
+                       (unsigned long long)tracker.dramBytes,
+                       (unsigned long long)tracker.psramBytes,
+                       (unsigned long long)tracker.failureCount,
+                       (unsigned long long)tracker.fallbackCount);
+      BROADCAST_PRINTF("[Memory] Drops lock:%llu invalid:%llu full:%llu generation:%u",
+                       (unsigned long long)tracker.contentionDrops,
+                       (unsigned long long)tracker.invalidTagEvents,
+                       (unsigned long long)tracker.overflowEvents,
+                       (unsigned)tracker.generation);
       return "[Memory] Tracking status displayed";
     } else {
       return "Error: invalid arguments — Usage: memsample track [on|off|reset|status]";

@@ -38,6 +38,7 @@
 #include "G2_Page_TextEntry.h"   // on-lens keyboard for Rename
 #include "System_FileManager.h"
 #include "System_Filesystem.h"
+#include "System_VFS.h"          // internal / SD capacity + mount state
 #include "System_CaptureCrypto.h"  // reveal sealed captures on the lens viewer
 #include "System_MemUtil.h"   // ps_alloc — gFilesFm lives in PSRAM (placement-new)
 #include <new>                // placement-new
@@ -71,16 +72,18 @@ static FileManager* gFilesFm = nullptr;
 // the same top-left position as you browse (/photos vs /sd, etc.).
 static constexpr size_t kFilesMinRenderRows = 8;
 
-// Row buffers in PSRAM — ~1 KB total. Filled by buildRows() from the
-// page worker, read by the BLE notify task; both run in regular task
-// context, no DMA / ISR access.
+// Row buffers in PSRAM — ~1 KB total. Filled/read by the serialized lens and
+// tap-dispatch work paths; never by the BLE callback. Regular task context
+// only, with no DMA / ISR access.
 EXT_RAM_BSS_ATTR static char        gFilesRows[FILES_MAX_ROWS][FILES_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gFilesRowPtrs[FILES_MAX_ROWS];
-// Path title is shown in its own TextObject (not a list row). Needs room for
-// multi-line wrap of deep VFS paths; FILES_ROW_LEN was only enough for one
-// truncated line and the old 40 px-tall box scrolled uselessly.
+// Path is shown in the right-hand TextObject (not a list row). Keep its own
+// bound so deep VFS paths can wrap without consuming the complete CREATE
+// payload. The surrounding sidebar also carries compact storage rows.
 #define FILES_PATH_TITLE_LEN  96
 EXT_RAM_BSS_ATTR static char        gFilesPathTitleBuf[FILES_PATH_TITLE_LEN];
+#define FILES_SIDEBAR_LEN  192
+EXT_RAM_BSS_ATTR static char        gFilesSidebarBuf[FILES_SIDEBAR_LEN];
 static size_t      gFilesRowCount = 0;
 
 // Current paginator page for the directory listing. Reset to 0 on any
@@ -89,15 +92,15 @@ static size_t      gFilesRowCount = 0;
 // g2PaginatorPrepare clamps it if the directory shrank meanwhile.
 static size_t      gFilesPage = 0;
 
-// Mixed list+text layout: keep the path in a TextObject at top-right while
-// pinning the list to the top-left quadrant/half (not vertically centered).
-// LEFT_HALF is {8,8,280,272}, so row 0 starts near the top edge.
-static constexpr G2ContainerGeom kFilesListGeom = G2_GEOM_LEFT_HALF;
-// Path readout on the right. Was {280,8,288,40} — one-line height with a
-// firmware scrollbar when the path wrapped; focus stays on the list so that
-// scrollbar was unusable. Align with RIGHT_HALF x/w and give ~2–3 lines of
-// height so wrapped paths stay fully visible.
-static constexpr G2ContainerGeom kFilesPathGeom = { 288,   8, 280, 100 };
+// Mixed list+text layout: storage + path in a TextObject at right, list
+// pinned top-left (not vertically centered). Uses the production split
+// (264px list / 288px right column) shared with Health, Maps, and the
+// keyboard pad — not LEFT_HALF/RIGHT_HALF, whose 280px right pane is
+// narrower than that column. The rename keyboard is a separate page.
+static constexpr G2ContainerGeom kFilesListGeom    = G2_GEOM_SPLIT_LIST;
+static constexpr G2ContainerGeom kFilesSidebarGeom = G2_GEOM_SPLIT_RIGHT;
+static constexpr size_t kFilesSidebarCols =
+    (G2_GEOM_SPLIT_RIGHT.w * G2_TEXT_DEFAULT_COLS) / G2_GEOM_LARGE.w;
 
 // Indices we keep so taps know what idx → which directory entry. -1 = not a
 // real entry (back / blank); -2 = parent row ".. (up)"; -3 = "<< Prev page";
@@ -162,6 +165,29 @@ static char gFilesActionName[FILE_MANAGER_MAX_NAME];
 static bool gFilesConfirmActive = false;   // delete-confirm list is up
 static char gFilesConfirmRow[FILE_MANAGER_MAX_NAME + 12];
 EXT_RAM_BSS_ATTR static char gFilesMutateMsg[112];          // result banner text
+
+// Capacity calls are intentionally snapshot-based. LittleFS.usedBytes() walks
+// the filesystem, so doing it on every quick folder / chooser redraw makes the
+// explorer sluggish. More importantly, Files shares the physical G2 widget
+// with Rename's keyboard: there must be no background timer that can repaint
+// this page while TextEntry owns it. Re-entry and SD mount transitions force a
+// sample; browsing reuses one for at most 10 seconds, and successful mutations
+// invalidate it immediately.
+struct FilesStorageSnapshot {
+  bool     valid;
+  bool     sdMounted;
+  bool     internalOk;
+  bool     sdOk;
+  uint32_t sampledAtMs;
+  uint64_t internalTotal;
+  uint64_t internalFree;
+  uint64_t sdTotal;
+  uint64_t sdFree;
+};
+static FilesStorageSnapshot gFilesStorage = {};
+static portMUX_TYPE gFilesStorageMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t gFilesStorageInvalidateGen = 0;
+static constexpr uint32_t kFilesStorageTtlMs = 10000;
 
 // Paged text viewer (JSON pretty/raw, .txt, .csv). Shares the TextPager
 // engine in G2_Page_Common.h with Settings JSON + ESPNow chat: one flat PSRAM
@@ -231,6 +257,203 @@ static void truncateInto(char* dst, size_t cap, const char* src,
     memcpy(dst, src, take);
     dst[take] = '~';
     dst[take + 1] = '\0';
+  }
+}
+
+// Compact binary-unit formatter for the narrow right pane. One decimal is
+// retained while it is useful ("2.6M"); large / exact values stay shorter
+// ("128M"). This is display-only — capacity math remains full uint64_t.
+static void formatStorageAmount(uint64_t bytes, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+
+  uint64_t divisor = 1;
+  char unit = 'B';
+  if (bytes >= (1ULL << 40)) {
+    divisor = 1ULL << 40;
+    unit = 'T';
+  } else if (bytes >= (1ULL << 30)) {
+    divisor = 1ULL << 30;
+    unit = 'G';
+  } else if (bytes >= (1ULL << 20)) {
+    divisor = 1ULL << 20;
+    unit = 'M';
+  } else if (bytes >= (1ULL << 10)) {
+    divisor = 1ULL << 10;
+    unit = 'K';
+  }
+
+  if (divisor == 1) {
+    snprintf(out, cap, "%lluB", (unsigned long long)bytes);
+    return;
+  }
+
+  uint64_t whole = bytes / divisor;
+  uint64_t tenth = ((bytes % divisor) * 10ULL + divisor / 2ULL) / divisor;
+  if (tenth == 10) {
+    whole++;
+    tenth = 0;
+  }
+  // With the unit ladder above, even UINT64_MAX is only ~16.7 million T.
+  // Narrowing here gives snprintf an honest bounded type and avoids a false
+  // truncation warning based on an impossible 17-digit post-scaling value.
+  const uint32_t displayWhole = (uint32_t)whole;
+  if (whole >= 100 || tenth == 0) {
+    snprintf(out, cap, "%lu%c", (unsigned long)displayWhole, unit);
+  } else {
+    snprintf(out, cap, "%lu.%u%c", (unsigned long)displayWhole,
+             (unsigned)tenth, unit);
+  }
+}
+
+// Six cells fit alongside "Internal" and a human-readable free amount in the
+// 288 px right column. Follow the conventional capacity-bar vocabulary: '#' is used
+// space and '.' is free space. The heading and numeric amount still report
+// free capacity, so a volume with 8.7 MB free no longer looks nearly full.
+static void formatStorageUsageBar(uint64_t total, uint64_t freeBytes,
+                                  char out[9]) {
+  static constexpr size_t kCells = 6;
+  uint64_t filled = 0;
+  if (total > 0) {
+    if (freeBytes > total) freeBytes = total;
+    const uint64_t usedBytes = total - freeBytes;
+    filled = (usedBytes * kCells + total / 2ULL) / total;
+    if (filled > kCells) filled = kCells;
+  }
+
+  out[0] = '[';
+  for (size_t i = 0; i < kCells; i++) {
+    out[i + 1] = (i < filled) ? '#' : '.';
+  }
+  out[kCells + 1] = ']';
+  out[kCells + 2] = '\0';
+}
+
+static void invalidateFilesStorageSnapshot() {
+  portENTER_CRITICAL(&gFilesStorageMux);
+  gFilesStorageInvalidateGen++;
+  gFilesStorage.valid = false;
+  portEXIT_CRITICAL(&gFilesStorageMux);
+}
+
+static FilesStorageSnapshot getFilesStorageSnapshot(bool force) {
+  FilesStorageSnapshot lastSample = {};
+
+  // A mutation can invalidate the cache while LittleFS.usedBytes() is walking
+  // the volume. Retry once with the new generation; if it races twice, render
+  // the latest local sample but leave the global cache invalid for next draw.
+  for (uint8_t attempt = 0; attempt < 2; attempt++) {
+    FilesStorageSnapshot current = {};
+    uint32_t invalidateGen = 0;
+    portENTER_CRITICAL(&gFilesStorageMux);
+    current = gFilesStorage;
+    invalidateGen = gFilesStorageInvalidateGen;
+    portEXIT_CRITICAL(&gFilesStorageMux);
+
+    const uint32_t now = millis();
+    bool refresh = force || !current.valid ||
+        (uint32_t)(now - current.sampledAtMs) >= kFilesStorageTtlMs;
+
+    // Only the fresh-cache path needs a separate cheap mount query. Recheck
+    // time after it because the accessor may wait behind an active FS user.
+    if (!refresh) {
+      const bool sdMountedNow = VFS::isSDAvailable();
+      const uint32_t checkedAt = millis();
+      refresh = current.sdMounted != sdMountedNow ||
+          (uint32_t)(checkedAt - current.sampledAtMs) >=
+              kFilesStorageTtlMs;
+    }
+    if (!refresh) return current;
+
+    FilesStorageSnapshot next = {};
+    uint64_t ignoredUsed = 0;
+    next.internalOk = VFS::getStats(
+        VFS::INTERNAL, next.internalTotal, ignoredUsed, next.internalFree) &&
+        next.internalTotal > 0;
+
+    // Query SD unconditionally on a refresh. getStats owns the FS lock and
+    // therefore gives an authoritative mount result at query time. A mounted
+    // but unreadable FAT volume can surface as 0/0; omit that optional row.
+    const bool sdStatsOk = VFS::getStats(
+        VFS::SDCARD, next.sdTotal, ignoredUsed, next.sdFree);
+    next.sdMounted = sdStatsOk;
+    next.sdOk = sdStatsOk && next.sdTotal > 0;
+    next.sampledAtMs = millis();
+    next.valid = true;
+    lastSample = next;
+
+    // g2ShowFilesMenu has legacy call sites on more than one task. Publish the
+    // complete uint64_t snapshot under a spinlock so readers never observe a
+    // torn or half-updated capacity sample. Filesystem I/O stays outside it.
+    bool published = false;
+    portENTER_CRITICAL(&gFilesStorageMux);
+    // An invalidation that landed during the filesystem scan wins; publishing
+    // the earlier sample would otherwise silently lose a completed mutation.
+    if (gFilesStorageInvalidateGen == invalidateGen) {
+      gFilesStorage = next;
+      published = true;
+    }
+    current = gFilesStorage;
+    portEXIT_CRITICAL(&gFilesStorageMux);
+
+    if (published) return next;
+    if (current.valid) return current;  // another task already refreshed it
+  }
+
+  return lastSample;
+}
+
+// Build the complete non-interactive right pane in one TextObject. Keeping
+// storage rows and the path together avoids adding another compound child,
+// preserves the list's row indices / hit testing, and keeps the worst current
+// page within the 1 KB CREATE protobuf ceiling.
+static void buildFilesSidebar(const char* path, bool forceStorageRefresh) {
+  truncateInto(gFilesPathTitleBuf, sizeof(gFilesPathTitleBuf),
+               path ? path : "/", FILES_PATH_TITLE_LEN - 1);
+
+  // Hard-wrap the location at the right-column budget so a long VFS path
+  // uses the 288px pane instead of firmware-wrapping short of its edge.
+  char wrappedPath[FILES_PATH_TITLE_LEN + 8];
+  textWrapInto(wrappedPath, sizeof(wrappedPath), gFilesPathTitleBuf,
+               kFilesSidebarCols, /*contIndent=*/0, /*stripCtrl=*/true,
+               nullptr);
+
+  const FilesStorageSnapshot storage =
+      getFilesStorageSnapshot(forceStorageRefresh);
+  const bool intOk = storage.valid && storage.internalOk;
+  const bool sdOk = storage.valid && storage.sdOk;
+
+  char intAmount[16] = {};
+  char intBar[9] = {};
+  if (intOk) {
+    formatStorageAmount(storage.internalFree,
+                        intAmount, sizeof(intAmount));
+    formatStorageUsageBar(storage.internalTotal,
+                          storage.internalFree, intBar);
+  }
+
+  char sdAmount[16] = {};
+  char sdBar[9] = {};
+  if (sdOk) {
+    formatStorageAmount(storage.sdFree, sdAmount, sizeof(sdAmount));
+    formatStorageUsageBar(storage.sdTotal, storage.sdFree, sdBar);
+  }
+
+  if (intOk && sdOk) {
+    snprintf(gFilesSidebarBuf, sizeof(gFilesSidebarBuf),
+             "Free space\nInternal %s %s\nSD %s %s\nLocation\n%s",
+             intBar, intAmount, sdBar, sdAmount, wrappedPath);
+  } else if (intOk) {
+    snprintf(gFilesSidebarBuf, sizeof(gFilesSidebarBuf),
+             "Free space\nInternal %s %s\nLocation\n%s",
+             intBar, intAmount, wrappedPath);
+  } else if (sdOk) {
+    snprintf(gFilesSidebarBuf, sizeof(gFilesSidebarBuf),
+             "Free space\nInternal unavailable\nSD %s %s\nLocation\n%s",
+             sdBar, sdAmount, wrappedPath);
+  } else {
+    snprintf(gFilesSidebarBuf, sizeof(gFilesSidebarBuf),
+             "Free space\nInternal unavailable\nLocation\n%s",
+             wrappedPath);
   }
 }
 
@@ -486,6 +709,7 @@ static void onFilesMutateDone(bool ok, const char* result,
   if (success) {
     FileManager* fm = ensureFm();
     if (fm) fm->forceRescan();
+    invalidateFilesStorageSnapshot();
   }
   if (g2GetHijackPage() == G2_HIJACK_PAGE_FILES) g2ShowFilesMenu();
 }
@@ -499,8 +723,8 @@ static void filesSubmitMutate(const char* line) {
   }
 }
 
-// Keyboard callbacks (BLE notify task — String build + submit only; the
-// list redraw on cancel is cache-hot, no FS scan).
+// Keyboard callbacks run on g2_tap_disp — String build + submit only; the
+// list redraw on cancel is cache-hot, no FS scan.
 static void filesRenameCommit(const char* text) {
   if (!text || text[0] == '\0' || strcmp(text, gFilesActionName) == 0) {
     DEBUG_G2F("[G2] Files: rename empty/unchanged — cancelled");
@@ -595,8 +819,9 @@ static bool filesRenderTextPage() {
 // tap/scroll page navigation. NEXT (tap / scroll-down) advances; PREV
 // (scroll-up) goes back; both wrap. Re-renders after moving.
 static void filesTextNav(G2TapKind kind) {
+  const int oldPage = gFilesPager.curPage;
   textNavPage(gFilesPager, kind != G2_TAP_PAGE_PREV);
-  filesRenderTextPage();
+  if (!filesRenderTextPage()) gFilesPager.curPage = oldPage;
 }
 
 static void exitTextViewBackToFiles() {
@@ -794,6 +1019,8 @@ void g2ShowFilesMenu() {
   // the task's TLS identity stays at ANON (the safe default) and
   // FileManager::navigate() denies every read.
   G2HijackCtxGuard ctxGuard;
+  const bool enteringFiles =
+      g2GetHijackPage() != G2_HIJACK_PAGE_FILES;
 
   // Directory cache policy for the per-boot FileManager singleton:
   //
@@ -808,7 +1035,7 @@ void g2ShowFilesMenu() {
   //     ANON-first-tap → later-paired empty-cache case without paying
   //     the full VFS permission walk on every in-page redraw.
   if (FileManager* fmRefresh = ensureFm()) {
-    if (g2GetHijackPage() != G2_HIJACK_PAGE_FILES) {
+    if (enteringFiles) {
       fmRefresh->forceRescan();
       gFilesPage = 0;  // re-entry from outside → start at the first page
     } else {
@@ -826,17 +1053,15 @@ void g2ShowFilesMenu() {
   const char* path = "/";
   FileManager* fmMenu = ensureFm();
   if (fmMenu) path = fmMenu->getCurrentPath();
-  // Fit ~2–3 wrapped lines in kFilesPathGeom (280×100); still bound the
-  // string so a pathological deep path cannot blow the CREATE pb.
-  truncateInto(gFilesPathTitleBuf, sizeof(gFilesPathTitleBuf), path,
-               FILES_PATH_TITLE_LEN - 1);
+  buildFilesSidebar(path, enteringFiles);
 
-  const G2TextChildSpec pathTitle = {
-      "filesPath", gFilesPathTitleBuf, 99, kFilesPathGeom, false };
+  const G2TextChildSpec sidebar = {
+      "filesSidebar", gFilesSidebarBuf, 99, kFilesSidebarGeom, false };
 
-  if (g2ShowMixedListText(gFilesRowPtrs, n, kFilesListGeom, pathTitle)) {
+  if (g2ShowMixedListText(gFilesRowPtrs, n, kFilesListGeom, sidebar)) {
     g2SetHijackPage(G2_HIJACK_PAGE_FILES);
-    DEBUG_G2F("[G2] Files menu shown (list+path title, rows=%u)", (unsigned)n);
+    DEBUG_G2F("[G2] Files menu shown (list+storage/path, rows=%u)",
+              (unsigned)n);
   } else {
     DEBUG_G2F("[G2] Files menu show FAILED");
   }
@@ -952,7 +1177,7 @@ void g2FilesHandleTap(uint32_t idx) {
           return;
         }
         if (strlen(gFilesActionName) > 32) {
-          // Keyboard cap is 32 and the pre-fill silently truncates — an
+          // This rename field is capped at 32 and pre-fill truncates — an
           // unguarded Done would rename to the 32-char prefix.
           g2ShowTextAsList("Name too long - rename on web", "<- Back");
           return;

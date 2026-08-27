@@ -972,10 +972,29 @@ bool isKnownUserRole(const String& role) {
   return role == "guest" || role == "user" || role == "admin" || role == "superadmin";
 }
 
-// CM5 readiness is stronger than ordinary guest login: it can admit native
-// device work, so an unreadable/missing/malformed account must never default
-// to the ordinary-user role. This lookup runs only at UART login, not at the
-// five-second heartbeat cadence.
+// Authoritative role lookup at the access boundary: an unreadable, missing or
+// malformed account must never default to the ordinary-user role, so this
+// fails closed rather than falling back the way the older
+// isAdminUser()/isGuestUser() chain does.
+//
+// THIS IS A HOT PATH, despite reading and parsing users.json on every call.
+// It is reached from:
+//   - resolveRole (System_Filesystem.cpp) -> checkPerm, so once per *guarded
+//     VFS operation*, and once per *directory entry* from the listing walks
+//     in FileManager::loadDirectory and buildFilesListing;
+//   - authorizeCommand (System_Utils.cpp), so once per command from a named
+//     account on every transport;
+//   - WebServer_Utils.cpp, so once per authenticated HTTP request;
+//   - BLE_Peers.cpp and OLED_Utils.cpp.
+// resolveRole then calls isSuperAdminUser() as well, which reads the same file
+// a second time, so a single directory entry costs two roster reads.
+//
+// Do NOT add a naive cache here. Every caller depends on this reading LIVE
+// state so that a ban, demotion or delete takes effect immediately; a cache
+// that outlives a mutation is an authorization bypass, not a slow render. Any
+// memoisation must be keyed on gIdentityGeneration (see System_AuthIdentity.h)
+// AND must also cover out-of-band writes to users.json through generic file
+// operations, which a superadmin can perform and which bump nothing today.
 bool getUserAuthorizationRole(const String& username, String& roleOut) {
   roleOut = String();
   if (!filesystemReady || username.length() == 0) return false;
@@ -1034,6 +1053,12 @@ static bool userMayPublishCm5Presence(const String& username) {
   return userMayControlOtherSessions(username);
 }
 
+// CM5 readiness is stronger than ordinary guest login: it can admit native
+// device work, so an unreadable/missing/malformed account must never default
+// to the ordinary-user role. That is why the permission is resolved here, once
+// at UART login, and then latched into the session — it is deliberately NOT
+// re-evaluated at the five-second heartbeat cadence, so the roster read below
+// happens once per login rather than once per heartbeat.
 uint32_t publishUartAccountSession(const String& username,
                                    uint32_t* transportEpochOut) {
   if (transportEpochOut) *transportEpochOut = 0;
@@ -1539,6 +1564,36 @@ bool verifyUserPassword(const String& inputPassword, const String& storedHash) {
   return (inputHash == storedHash);
 }
 
+namespace {
+
+struct UserPasswordMutationContext {
+  const String* hashed;
+  bool requireChangeOnNextLogin;
+};
+
+bool applyUserPasswordMutation(JsonDocument& settings, void* opaque) {
+  const auto* context = static_cast<const UserPasswordMutationContext*>(opaque);
+  if (!context || !context->hashed || context->hashed->length() == 0) return false;
+  if (!settings.is<JsonObject>()) return false;
+  settings["password"] = *context->hashed;
+  settings["mustChangePassword"] = context->requireChangeOnNextLogin;
+  return !settings.overflowed();
+}
+
+struct UserGamepadPasswordMutationContext {
+  const String* hashed;
+};
+
+bool applyUserGamepadPasswordMutation(JsonDocument& settings, void* opaque) {
+  const auto* context = static_cast<const UserGamepadPasswordMutationContext*>(opaque);
+  if (!context || !context->hashed || context->hashed->length() == 0) return false;
+  if (!settings.is<JsonObject>()) return false;
+  settings["gamepad_password"] = *context->hashed;
+  return !settings.overflowed();
+}
+
+}  // namespace
+
 // Update a user's text password in per-user settings file
 bool setUserPassword(const String& username, const String& newPasswordRaw, bool requireChangeOnNextLogin) {
   if (!filesystemReady || username.length() == 0 || newPasswordRaw.length() == 0) return false;
@@ -1549,17 +1604,29 @@ bool setUserPassword(const String& username, const String& newPasswordRaw, bool 
   
   // Hash the password
   String hashed = hashUserPassword(newPasswordRaw);
+  if (hashed.length() == 0) return false;
   
-  // Load existing user settings
-  PSRAM_JSON_DOC(settings);
-  loadUserSettings(userId, settings);  // OK if doesn't exist yet
-  
-  // Set the password field
-  settings["password"] = hashed;
-  settings["mustChangePassword"] = requireChangeOnNextLogin;
-
-  // Save back to user settings file
-  return saveUserSettings(userId, settings);
+  // Mutate existing user settings in one guarded load→patch→save transaction.
+  //
+  // The return value is LOAD-BEARING and used to be dropped here. loadUserSettings
+  // returns true with an empty object when the file is legitimately ABSENT (the
+  // bootstrap case the old "// OK if doesn't exist yet" comment was thinking of),
+  // but on a PARSE FAILURE it returns false with the document CLEARED. Continuing
+  // from a cleared doc writes a file containing only the one key set below,
+  // silently destroying every other per-user setting — including, on the gamepad
+  // path, the account's own login credential.
+  UserPasswordMutationContext mutation{&hashed, requireChangeOnNextLogin};
+  const UserSettingsTxnStatus status =
+      runUserSettingsTransaction(userId, applyUserPasswordMutation, &mutation);
+  if (status == UserSettingsTxnStatus::LoadFailed) {
+    ERROR_STORAGEF("[user] password change REFUSED: user_settings/%lu.json is unreadable - "
+                   "refusing to overwrite it",
+                   (unsigned long)userId);
+    systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, "user_settings",
+                    "unreadable at password change");
+    return false;
+  }
+  return status == UserSettingsTxnStatus::Committed;
 }
 
 bool userMustChangePassword(const String& username) {
@@ -1741,16 +1808,25 @@ bool setUserGamepadPassword(const String& username, const String& newPatternRaw)
   
   // Hash the pattern (same as text password)
   String hashed = hashUserPassword(newPatternRaw);
+  if (hashed.length() == 0) return false;
   
-  // Load existing user settings
-  PSRAM_JSON_DOC(settings);
-  loadUserSettings(userId, settings);  // OK if doesn't exist yet
-  
-  // Set the gamepad password field
-  settings["gamepad_password"] = hashed;
-  
-  // Save back to user settings file
-  return saveUserSettings(userId, settings);
+  // Mutate existing user settings transactionally. See the note in
+  // setUserPassword: a dropped
+  // return value here destroys the account's "password" key, because a failed
+  // parse leaves the document cleared and the save below writes only this key.
+  UserGamepadPasswordMutationContext mutation{&hashed};
+  const UserSettingsTxnStatus status =
+      runUserSettingsTransaction(userId, applyUserGamepadPasswordMutation, &mutation);
+  if (status == UserSettingsTxnStatus::LoadFailed) {
+    ERROR_STORAGEF("[user] gamepad-pattern change REFUSED: user_settings/%lu.json is "
+                   "unreadable - refusing to overwrite it (the stored login hash "
+                   "would be lost)",
+                   (unsigned long)userId);
+    systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, "user_settings",
+                    "unreadable at gamepad-pattern change");
+    return false;
+  }
+  return status == UserSettingsTxnStatus::Committed;
 }
 
 // Check if a user has a gamepad password set (in per-user settings file)
@@ -3258,47 +3334,9 @@ const char* cmd_session_list(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray sessions = doc["sessions"].to<JsonArray>();
+    // This is the single all-transport aggregator: web plus Serial, UART,
+    // OLED, G2, and every authenticated BLE connection.
     buildAllSessionsJson("", sessions);
-    // Append active transport (non-web) sessions as synthetic entries
-    String serialUser;
-    bool serialAuthed = false;
-    (void)serialTransportSessionSnapshot(serialUser, serialAuthed);
-    if (serialAuthed && serialUser.length()) {
-      JsonObject t = sessions.add<JsonObject>();
-      t["user"]      = serialUser;
-      t["transport"] = "serial";
-    }
-    const String uartUser = uartSessionUserSnapshot();
-    if (uartUser.length()) {
-      JsonObject t = sessions.add<JsonObject>();
-      t["user"]      = uartUser;
-      t["transport"] = "uart";
-    }
-    String displayUser;
-    bool displayAuthed = false;
-    (void)localDisplayTransportSessionSnapshot(displayUser, displayAuthed);
-    if (displayAuthed && displayUser.length()) {
-      JsonObject t = sessions.add<JsonObject>();
-      t["user"]      = displayUser;
-      t["transport"] = "oled";
-    }
-    {
-      String g2User = g2PairedUserGet();
-      if (g2User.length()) {
-        JsonObject t = sessions.add<JsonObject>();
-        t["user"]      = g2User;
-        t["transport"] = "g2";
-      }
-    }
-    for (int i = 0;; ++i) {
-      uint16_t connId = 0;
-      String user;
-      if (!bleGetAuthenticatedSessionInfo(i, connId, user)) break;
-      JsonObject t = sessions.add<JsonObject>();
-      t["user"]      = user;
-      t["transport"] = "bluetooth";
-      t["sid"]       = String(connId);
-    }
     size_t len = serializeJson(doc, jsonBuf, kBufSize);
     if (len >= kBufSize) {
       ERROR_MEMORYF("session list JSON truncated: %zu >= %zu", len, kBufSize);
@@ -3980,7 +4018,15 @@ void cleanupOldBootAnchors(void* usersDocPtr) {
         if (!err) usersDoc = &localUsers;
       }
     }
-    if (usersDoc) {
+    if (!usersDoc) {
+      // Fail CLOSED. A read failure of users.json is not evidence that no user is
+      // pending — and pruning on that assumption destroys the anchor those users
+      // need to resolve their createdAt. This is a read failure of file A
+      // triggering a destructive write of file B.
+      WARN_SESSIONF("[anchor] users.json unreadable - skipping anchor prune this pass");
+      return;
+    }
+    {
       JsonArray usersArray = (*usersDoc)["users"];
       if (usersArray) {
         for (JsonObject user : usersArray) {
@@ -4164,12 +4210,19 @@ void writeBootAnchor() {
   // task's write of the same file.
   FsLockGuard fsGuard("user.bootAnchor");
 
-  // Load existing anchors (start empty if the file is absent or corrupt).
+  // Load existing anchors. ABSENT is fine — start empty and create the file.
+  // CORRUPT is not: "start empty" collapses up to 16 anchors to one and
+  // permanently breaks timestamp resolution for every user still pending.
   PSRAM_JSON_DOC(doc);
   String existing;
   if (readText(BOOT_ANCHORS_FILE, existing) && existing.length() > 0) {
     DeserializationError error = deserializeJson(doc, existing);
-    if (error) doc.clear();
+    if (error) {
+      ERROR_STORAGEF("[anchor] %s unreadable (%s) - anchor NOT written; file preserved",
+                     BOOT_ANCHORS_FILE, error.c_str());
+      systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, BOOT_ANCHORS_FILE, error.c_str());
+      return;
+    }
   }
 
   JsonArray bootAnchorsArray = doc["bootAnchors"];

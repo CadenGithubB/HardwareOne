@@ -287,10 +287,10 @@ static bool isR1HealthCompiled() {
 // - Runtime data structures
 
 // Columns: id, displayName, category, heapEstimateKB, flags, settingPtr, isCompiledFn, description
-static const FeatureEntry featureRegistry[] = {
+static constexpr FeatureEntry featureRegistry[] = {
   // === NETWORK FEATURES ===
   { "wifi", "WiFi", FEATURE_CAT_NETWORK, 24,
-    FEATURE_FLAG_REQUIRES_REBOOT,
+    FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
     &gSettings.wifiEnabled, isWiFiCompiled,
     "WiFi connectivity and network stack" },
     
@@ -339,7 +339,7 @@ static const FeatureEntry featureRegistry[] = {
 
   // === DISPLAY FEATURES ===
   { "oled", "OLED Display", FEATURE_CAT_DISPLAY, 4,
-    FEATURE_FLAG_REQUIRES_REBOOT,
+    FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
     &gSettings.oledEnabled, isOledCompiled,
     "128x64 OLED display interface" },
     
@@ -521,8 +521,8 @@ static const FeatureEntry featureRegistry[] = {
 #endif
 
   // === HARDWARE FEATURES (shown on first page) ===
-  { "i2c", "I2C Bus", FEATURE_CAT_NETWORK, 4,
-    FEATURE_FLAG_REQUIRES_REBOOT,
+  { "i2c", "I2C Bus", FEATURE_CAT_CORE, 4,
+    FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
     &gSettings.i2cEnabled, isI2CCompiled,
     "I2C hardware bus (required for OLED and sensors)" },
     
@@ -572,6 +572,11 @@ static const FeatureEntry featureRegistry[] = {
 
 static const size_t featureRegistryCount = sizeof(featureRegistry) / sizeof(featureRegistry[0]);
 
+// Must match CMD_RESULT_MAX (System_CommandTypes.h). That header is deliberately
+// NOT #included here — see the note at cmd_features()'s jbuf for why neither this
+// nor CMD_RESULT_MAX may be raised.
+static constexpr size_t kFeaturesJsonBuf = 4096;
+
 // ============================================================================
 // Registry Access Functions
 // ============================================================================
@@ -618,7 +623,11 @@ bool isFeatureEnabled(const FeatureEntry* feature) {
 bool canToggleFeature(const FeatureEntry* feature) {
   if (!feature) return false;
   if (!isFeatureCompiled(feature)) return false;
-  if (feature->flags & FEATURE_FLAG_COMPILE_TIME) return false;
+  // RUNTIME_TOGGLE is the authority. It agrees with the enabledSetting check
+  // below on every row (COMPILE_TIME <=> enabledSetting == nullptr), so this
+  // cannot diverge — but reading the positive bit is what lets the JSON
+  // `toggleable` field be the same expression instead of a second opinion.
+  if (!(feature->flags & FEATURE_FLAG_RUNTIME_TOGGLE)) return false;
   if (!feature->enabledSetting) return false;
   return true;
 }
@@ -661,7 +670,7 @@ uint32_t getCategoryHeapEstimate(FeatureCategory cat) {
 // CLI Command: features
 // ============================================================================
 
-static const char* getCategoryName(FeatureCategory cat) {
+static constexpr const char* getCategoryName(FeatureCategory cat) {
   switch (cat) {
     case FEATURE_CAT_CORE:    return "Core";
     case FEATURE_CAT_NETWORK: return "Network";
@@ -671,6 +680,60 @@ static const char* getCategoryName(FeatureCategory cat) {
     default: return "Unknown";
   }
 }
+
+// Heap cost AS REPORTED. A feature that is not compiled cannot consume heap, so
+// it reports 0. `compiled` travels in the same object/record, so 0 is never
+// ambiguous — and every functional reader in the firmware already gates on
+// compiled before spending this number. Before this, summing the per-row column
+// counted features that are not in the binary.
+static inline uint16_t reportedHeapKB(const FeatureEntry* f) {
+  return (f && isFeatureCompiled(f)) ? f->heapCostKB : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time overflow tripwire for `features json`.
+//
+// The list is ONE round trip by contract: a client treats a missing id as
+// "assume present", so a dropped page or a truncated document is a silent false
+// capability claim. That makes the buffer a hard ceiling rather than a tuning
+// knob, and it means the failure must be caught at BUILD time, not in the field.
+// Same shape as the DBG_FLAG_COUNT drift assert in System_DebugFlags.h.
+// ---------------------------------------------------------------------------
+constexpr size_t ceSlen(const char* s) { size_t n = 0; while (s[n]) ++n; return n; }
+constexpr size_t ceDigits(uint32_t v)  { size_t n = 1; while (v >= 10) { v /= 10; ++n; } return n; }
+
+constexpr size_t kFeaturesJsonWorstCase() {
+  size_t n = ceSlen("{\"schema\":1,\"features\":[]}");
+  for (size_t i = 0; i < featureRegistryCount; i++) {
+    if (i) n += 1;   // inter-object comma
+    // Field skeleton. EDIT THIS STRING IF YOU ADD OR REMOVE A FIELD.
+    n += ceSlen("{\"id\":\"\",\"name\":\"\",\"category\":\"\",\"heapKB\":,"
+                "\"compiled\":,\"enabled\":,\"toggleable\":}");
+    n += ceSlen(featureRegistry[i].id)
+       + ceSlen(featureRegistry[i].name)
+       + ceSlen(getCategoryName(featureRegistry[i].category));
+    // Take the max of both shapes: `false` is a byte longer than `true`, but a
+    // compiled row spends digits(heapKB) where a compiled-out row spends "0".
+    // Today the not-compiled shape wins; a 5-digit heapCostKB would flip it.
+    const bool tog = (featureRegistry[i].flags & FEATURE_FLAG_RUNTIME_TOGGLE) != 0;
+    const size_t notCompiled = 5 + 5 + 5 + 1;                       // false,false,false,"0"
+    const size_t compiled    = 4 + 5 + (tog ? 4 : 5)
+                             + ceDigits(featureRegistry[i].heapCostKB);
+    n += (notCompiled > compiled) ? notCompiled : compiled;
+  }
+  return n;
+}
+
+// The runtime guard in cmd_features() rejects len >= kFeaturesJsonBuf - 1, so the
+// largest ACCEPTED document is kFeaturesJsonBuf - 2. The 256 B reserve is runway
+// on purpose: the BUILD breaks while roughly two rows of DELIVERABLE headroom
+// still exist, so the fix can land before the payload becomes undeliverable.
+static_assert(kFeaturesJsonWorstCase() + 256 <= kFeaturesJsonBuf - 2,
+  "features json worst case no longer leaves runway. Do NOT raise this buffer or "
+  "CMD_RESULT_MAX, and do NOT page the list: a client reads a missing id as "
+  "\"assume present\", so a dropped page is a silent false capability claim. Move "
+  "the list behind a dedicated endpoint instead - see /api/devices -> "
+  "buildDeviceRegistryJson for the shape.");
 
 const char* cmd_features(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -699,10 +762,14 @@ const char* cmd_features(const String& argsInput) {
       o["id"]         = f->id;
       o["name"]       = f->name;
       o["category"]   = getCategoryName(f->category);
-      o["heapKB"]     = f->heapCostKB;
+      o["heapKB"]     = reportedHeapKB(f);
       o["compiled"]   = isFeatureCompiled(f);
       o["enabled"]    = isFeatureEnabled(f);
-      o["toggleable"] = (bool)(f->flags & FEATURE_FLAG_RUNTIME_TOGGLE);
+      // Same expression the text detail path uses, so the two can never drift.
+      // NOT the raw RUNTIME_TOGGLE bit: that ignores whether the feature is even
+      // compiled, so it used to answer "toggleable":true for features that
+      // reply "Feature not compiled in this build."
+      o["toggleable"] = canToggleFeature(f);
     }
     // Stays at 4096 to MATCH CMD_RESULT_MAX, and must not be raised past it.
     // 4 KB is not a local choice: executeCommand() copies every handler result
@@ -725,7 +792,7 @@ const char* cmd_features(const String& argsInput) {
     // NOT a bigger buffer and NOT paging: a partially-fetched list is
     // indistinguishable from "those features exist", so a dropped page becomes
     // a silent false capability claim.
-    PSRAM_STATIC_BUF(jbuf, 4096);
+    PSRAM_STATIC_BUF(jbuf, kFeaturesJsonBuf);
     // serializeJson truncates in silence when it runs out of room, producing a
     // half-sentence that still looks like data — and ArduinoJson's
     // StaticStringWriter does not null-terminate when the output exactly fills
@@ -773,7 +840,7 @@ const char* cmd_features(const String& argsInput) {
 
       pos += snprintf(buf + pos, buf_SIZE - pos,
         " %-12s ~%2dKB  %s\n",
-        f->id, f->heapCostKB, status);
+        f->id, reportedHeapKB(f), status);
     }
     
     pos += snprintf(buf + pos, buf_SIZE - pos,
@@ -801,17 +868,23 @@ const char* cmd_features(const String& argsInput) {
     bool compiled = isFeatureCompiled(f);
     bool enabled = isFeatureEnabled(f);
     
+    // A compiled-out feature reports 0 KB (it cannot consume heap), but the
+    // build-planning number is still useful — keep it as prose, not as the field.
+    char heapNote[40];
+    if (compiled) heapNote[0] = '\0';
+    else snprintf(heapNote, sizeof(heapNote), " (~%dKB if built in)", f->heapCostKB);
+
     snprintf(buf, sizeof(buf),
       "[%s] %s\n"
       "Category: %s\n"
-      "Heap cost: ~%dKB\n"
+      "Heap cost: ~%dKB%s\n"
       "Compiled: %s\n"
       "Enabled: %s\n"
       "Toggleable: %s\n"
       "%s",
       f->id, f->name,
       getCategoryName(f->category),
-      f->heapCostKB,
+      reportedHeapKB(f), heapNote,
       compiled ? "yes" : "no",
       enabled ? "yes" : "no",
       canToggleFeature(f) ? "yes" : "no",

@@ -1,34 +1,26 @@
 #pragma once
+
 #include <Arduino.h>
-#include <esp_log.h>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+
 extern "C" {
   #include "esp_heap_caps.h"
   #include "esp_memory_utils.h"
 }
 
-// ── Correct internal-heap queries ─────────────────────────────────────────
+// ── Correct internal-heap queries ──────────────────────────────────────
 // Do NOT use ESP.getFreeHeap()/getHeapSize()/getMinFreeHeap()/getMaxAllocHeap()
 // for internal-RAM decisions or reporting. Arduino defines them as
 // heap_caps_*(MALLOC_CAP_INTERNAL) with NO MALLOC_CAP_8BIT
 // (components/arduino/cores/esp32/Esp.cpp:159-176).
 //
-// On ESP32 classic that sweeps in the IRAM-only heap (_iram_end..0x400A0000 =
-// 26,600 B) whose caps are {MALLOC_CAP_INTERNAL|EXEC|32BIT} — no MALLOC_CAP_8BIT
-// (heap/port/esp32/memory_layout.c). Nothing a malloc(), new, String or FreeRTOS
-// task stack needs can ever be served from it, so those APIs read up to 25,864 B
-// HIGH (26,600 minus multi_heap/TLSF metadata).
-//
-// getHeapSize() is worse: it ALSO double-counts CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL,
-// because esp_psram_extram_reserve_dma_pool() heap_caps_malloc's that block out of
-// the main heap and then re-registers the SAME bytes as their own heap, while
-// heap_caps_get_total_size() just sums (heap->end - heap->start) over every
-// matching heap (heap/heap_caps.c).
-//
-// Measured on feather_esp32_v2 (ESP32-PICO-V3-02, 2MB PSRAM): the boot report
-// printed "Free: 121775" while genuinely-usable 8-bit internal free was 95,835 —
-// and "Total: 280479" against 221,112 B of physical 8-bit internal RAM.
+// On ESP32 classic that includes an IRAM-only heap which malloc(), new, String,
+// and FreeRTOS task stacks cannot use. The helpers below deliberately describe
+// byte-addressable internal RAM only.
 
-// True 8-bit-capable internal free — use for REPORTING internal RAM.
 inline size_t hw1InternalFreeBytes() {
   return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
@@ -47,340 +39,105 @@ inline size_t hw1InternalLargestBlock() {
 inline size_t hw1InternalTotalBytes() {
   size_t total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 #if defined(CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL) && (CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL > 0)
-  const size_t reserved = (size_t)CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL;
+  const size_t reserved = static_cast<size_t>(CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL);
   if (total > reserved) total -= reserved;
 #endif
   return total;
 }
 
-// DIAGNOSTIC ONLY — do NOT use this to guard an allocation on this board.
-// It reports the internal pool that heap_caps_malloc_default() PREFERS, which is
-// not the pool it is limited to. heap_caps_malloc_default() (heap/heap_caps.c)
-// tries DEFAULT|INTERNAL for size <= CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL, then
-// DEFAULT|SPIRAM above it, and finally retries bare MALLOC_CAP_DEFAULT — which
-// matches the SPIRAM heap (heap/port/esp32/memory_layout.c). With SPIRAM_USE_MALLOC=y
-// and ~1.5 MB of PSRAM free, a plain malloc()/new/String therefore cannot fail
-// regardless of internal DRAM, so a guard built on this number refuses work that
-// would have succeeded.
-//
-// What genuinely CANNOT fall back to PSRAM: FreeRTOS task stacks/TCBs/queues
-// (freertos/heap_idf.c pins MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT), explicit
-// heap_caps_malloc(INTERNAL|8BIT) callers, and the BT controller. All of those are
-// exactly hw1InternalFreeBytes()'s cap set — use that for guards, and
-// hw1InternalLargestBlock() when the allocation must be contiguous (a task stack).
-inline size_t hw1MallocableInternalBytes() {
-  return heap_caps_get_free_size(MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL);
-}
+// ── Allocation policy and malloc-family API ────────────────────────────
 
-// ── PSRAM fallback diagnostics ────────────────────────────────────────────
-// Incremented every time a ps_alloc/ps_calloc/ps_realloc request that asked
-// for PSRAM had to fall back to the internal DRAM heap. This makes an
-// otherwise silent failure mode observable. Previously a depleted PSRAM pool
-// would silently redirect large buffers into the ~300 KB internal heap and
-// starve other subsystems with no log trail; surfacing the count and logging
-// the specific caller turns that into a grep-able event.
-//
-// Header-inline variable (C++17) avoids the need for a companion .cpp.
-inline volatile uint32_t gPsAllocFallbacks = 0;
-
-inline void __psAllocReportFallback(size_t size, const char* tag) {
-  gPsAllocFallbacks = gPsAllocFallbacks + 1;
-  ESP_LOGW("mem", "ps_alloc fallback to internal heap: %u bytes%s%s",
-           (unsigned)size,
-           tag ? " tag=" : "",
-           tag ? tag : "");
-}
-
-// Pre-allocation snapshots (defined in main sketch)
-extern size_t gAllocHeapBefore;
-extern size_t gAllocPsBefore;
-
-inline void __capture_mem_before() {
-  gAllocHeapBefore = ESP.getFreeHeap();
-  size_t psTot = ESP.getPsramSize();
-  gAllocPsBefore = (psTot > 0) ? ESP.getFreePsram() : 0;
-}
-
-// Optional allocation debug hook (defined weakly elsewhere).
-// Do not implement here to allow an override in the main sketch.
-// Signature: op ("malloc"/"calloc"/"realloc"), returned ptr, size (or new size),
-// requestedPS indicates if the call preferred PSRAM, usedPS is derived from ptr.
-extern "C" void memAllocDebug(const char* op, void* ptr, size_t size,
-                              bool requestedPS, bool usedPS, const char* tag);
-
-// Compute usedPS from the returned pointer and dispatch to memAllocDebug.
-// usedPS is decided by the actual region of the pointer (esp_ptr_external_ram),
-// not by which branch produced it — under CONFIG_SPIRAM_USE_MALLOC, a plain
-// malloc() can still land in PSRAM for sizes above CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL.
-inline void __memAllocReport(const char* op, void* ptr, size_t size,
-                             bool requestedPS, const char* tag) {
-  const bool usedPS = (ptr != nullptr) && esp_ptr_external_ram(ptr);
-  memAllocDebug(op, ptr, size, requestedPS, usedPS, tag);
-}
+// Keep the historical AllocPref type and the first two numeric values intact.
+// AllocPolicy is the clearer spelling for new code.
+enum class AllocPref : uint8_t {
+  PreferPSRAM     = 0,  // SPIRAM|8BIT, then INTERNAL|8BIT
+  PreferInternal  = 1,  // INTERNAL|8BIT, then SPIRAM|8BIT
+  RequirePSRAM    = 2,  // SPIRAM|8BIT only
+  RequireInternal = 3,  // INTERNAL|8BIT only
+  DefaultHeap     = 4   // libc allocator, unless the global bypass is enabled
+};
+using AllocPolicy = AllocPref;
 
 inline bool hasPSRAMAvail() {
-#if defined(BOARD_HAS_PSRAM) || defined(CONFIG_SPIRAM)
+#if defined(BOARD_HAS_PSRAM) || (defined(CONFIG_SPIRAM) && CONFIG_SPIRAM)
   return true;
 #else
   return false;
 #endif
 }
 
-inline void* ps_try_malloc(size_t size) {
-  if (hasPSRAMAvail()) {
-    __capture_mem_before();
-    void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      // Best-effort logging; function may not be defined (weak)
-      return p;
-    }
-  }
-  __capture_mem_before();
-  void* p2 = malloc(size);
-  return p2;
+// True when a byte-addressable external heap is registered. This deliberately
+// tests total size, not current free size: an exhausted pool still exists and a
+// preferred allocation should be observable as a fallback.
+bool psramAvailableRuntime();
+
+// When enabled, no allocation in this API may enter or migrate into PSRAM.
+// Common legacy syntax (`psramBypassGlobal() = true`) remains valid.
+std::atomic_bool& psramBypassGlobal();
+inline bool psramBypassEnabled() {
+  return psramBypassGlobal().load(std::memory_order_relaxed);
+}
+inline void setPsramBypass(bool enabled) {
+  psramBypassGlobal().store(enabled, std::memory_order_relaxed);
 }
 
-inline void* ps_try_calloc(size_t n, size_t size) {
-  if (hasPSRAMAvail()) {
-    __capture_mem_before();
-    void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      return p;
-    }
-  }
-  __capture_mem_before();
-  void* p2 = calloc(n, size);
-  return p2;
+// Counts successful PreferPSRAM allocations that had to use internal DRAM.
+// Updates are atomic; logging is rate-limited in System_MemUtil.cpp.
+extern std::atomic<uint32_t> gPsAllocFallbacks;
+uint32_t psAllocFallbackCount();
+
+// Optional allocation debug hook, defined weakly in HardwareOne.cpp. The
+// requestedPS records caller policy, usedPS comes from the returned pointer's
+// actual memory region, and fellBack is true only when an attempted
+// PreferPSRAM allocation succeeds from internal DRAM.
+extern "C" void memAllocDebug(const char* op, void* ptr, size_t size,
+                              bool requestedPS, bool usedPS, bool fellBack,
+                              const char* tag);
+
+// Canonical forms. New call sites should always supply a stable descriptive
+// tag such as "video.http.chunk".
+void* ps_alloc(size_t size, AllocPolicy policy, const char* tag);
+void* ps_calloc(size_t n, size_t size, AllocPolicy policy, const char* tag);
+void* ps_realloc(void* ptr, size_t size, AllocPolicy policy, const char* tag);
+void ps_free(void* ptr);
+
+// Compatibility forms used by the current tree. calloc/realloc intentionally
+// have no two-argument default: Arduino declares C functions with those exact
+// signatures, so a C++ overload with a default policy is ambiguous.
+inline void* ps_alloc(size_t size, AllocPref pref) {
+  return ps_alloc(size, static_cast<AllocPolicy>(pref), nullptr);
+}
+inline void* ps_alloc(size_t size) {
+  return ps_alloc(size, AllocPolicy::PreferPSRAM, nullptr);
+}
+inline void* ps_calloc(size_t n, size_t size, AllocPref pref) {
+  return ps_calloc(n, size, static_cast<AllocPolicy>(pref), nullptr);
+}
+inline void* ps_realloc(void* ptr, size_t size, AllocPref pref) {
+  return ps_realloc(ptr, size, static_cast<AllocPolicy>(pref), nullptr);
 }
 
-inline void* ps_try_realloc(void* ptr, size_t size) {
-  if (hasPSRAMAvail()) {
-    __capture_mem_before();
-    void* p = heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      return p;
-    }
-  }
-  __capture_mem_before();
-  void* p2 = realloc(ptr, size);
-  return p2;
-}
-
-// ----------------------------------------------------------------------------
-// New allocation API (scaffolding only) — prefer PSRAM with per-call control
-// ----------------------------------------------------------------------------
-
-// Global bypass switch: when true, force allocations to internal heap
-// (helpful for performance testing or when PSRAM proves problematic).
-inline bool& psramBypassGlobal() {
-  static bool gBypass = false;
-  return gBypass;
-}
-
-enum class AllocPref : uint8_t {
-  PreferPSRAM,
-  PreferInternal
-};
-
-// Runtime availability check (compile-time + runtime free check)
-inline bool psramAvailableRuntime() {
-  if (!hasPSRAMAvail()) return false;
-#if defined(ESP_ARDUINO_VERSION) || defined(ESP_PLATFORM)
-  // Guard against platforms without these APIs; if not present, fall back to compile-time check
-  size_t freePs = 0;
-  // heap_caps_get_free_size is available via esp_heap_caps.h
-  freePs = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-  return freePs > 0;
-#else
-  return true;
-#endif
-}
-
-inline void* ps_alloc(size_t size, AllocPref pref = AllocPref::PreferPSRAM) {
-  const bool wantPS = (pref == AllocPref::PreferPSRAM) && !psramBypassGlobal() && psramAvailableRuntime();
-  if (wantPS) {
-    __capture_mem_before();
-    void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      __memAllocReport("malloc", p, size, wantPS, nullptr);
-      return p;
-    }
-  }
-  __capture_mem_before();
-  void* p2 = malloc(size);
-  if (p2 && wantPS) __psAllocReportFallback(size, nullptr);
-  __memAllocReport("malloc", p2, size, wantPS, nullptr);
-  return p2;
-}
-
-// Tagged overload: record a human-readable name for this allocation
-inline void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
-  const bool wantPS = (pref == AllocPref::PreferPSRAM) && !psramBypassGlobal() && psramAvailableRuntime();
-  if (wantPS) {
-    __capture_mem_before();
-    void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      __memAllocReport("malloc", p, size, wantPS, tag);
-      return p;
-    }
-  }
-  __capture_mem_before();
-  void* p2 = malloc(size);
-  if (p2 && wantPS) __psAllocReportFallback(size, tag);
-  __memAllocReport("malloc", p2, size, wantPS, tag);
-  return p2;
-}
-
-inline void* ps_calloc(size_t n, size_t size, AllocPref pref = AllocPref::PreferPSRAM) {
-  const bool wantPS = (pref == AllocPref::PreferPSRAM) && !psramBypassGlobal() && psramAvailableRuntime();
-  if (wantPS) {
-    __capture_mem_before();
-    void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      __memAllocReport("calloc", p, n * size, wantPS, nullptr);
-      return p;
-    }
-  }
-  __capture_mem_before();
-  void* p2 = calloc(n, size);
-  if (p2 && wantPS) __psAllocReportFallback(n * size, nullptr);
-  __memAllocReport("calloc", p2, n * size, wantPS, nullptr);
-  return p2;
-}
-
-// Tagged overload
-inline void* ps_calloc(size_t n, size_t size, AllocPref pref, const char* tag) {
-  const bool wantPS = (pref == AllocPref::PreferPSRAM) && !psramBypassGlobal() && psramAvailableRuntime();
-  if (wantPS) {
-    __capture_mem_before();
-    void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      __memAllocReport("calloc", p, n * size, wantPS, tag);
-      return p;
-    }
-  }
-  __capture_mem_before();
-  void* p2 = calloc(n, size);
-  if (p2 && wantPS) __psAllocReportFallback(n * size, tag);
-  __memAllocReport("calloc", p2, n * size, wantPS, tag);
-  return p2;
-}
-
-inline void* ps_realloc(void* ptr, size_t size, AllocPref pref = AllocPref::PreferPSRAM) {
-  const bool wantPS = (pref == AllocPref::PreferPSRAM) && !psramBypassGlobal() && psramAvailableRuntime();
-  if (wantPS) {
-    __capture_mem_before();
-    void* p = heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      __memAllocReport("realloc", p, size, wantPS, nullptr);
-      return p;
-    }
-    // Fall through to internal realloc if PSRAM attempt failed
-  }
-  __capture_mem_before();
-  void* p2 = realloc(ptr, size);
-  if (p2 && wantPS) __psAllocReportFallback(size, nullptr);
-  __memAllocReport("realloc", p2, size, wantPS, nullptr);
-  return p2;
-}
-
-// Tagged overload
-inline void* ps_realloc(void* ptr, size_t size, AllocPref pref, const char* tag) {
-  const bool wantPS = (pref == AllocPref::PreferPSRAM) && !psramBypassGlobal() && psramAvailableRuntime();
-  if (wantPS) {
-    __capture_mem_before();
-    void* p = heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      __memAllocReport("realloc", p, size, wantPS, tag);
-      return p;
-    }
-  }
-  __capture_mem_before();
-  void* p2 = realloc(ptr, size);
-  __memAllocReport("realloc", p2, size, wantPS, tag);
-  return p2;
-}
-
-// C++ helpers: placement-new style wrappers for objects
-template <typename T, typename... Args>
-inline T* ps_new(AllocPref pref, Args&&... args) {
-  void* mem = ps_alloc(sizeof(T), pref);
-  if (!mem) return nullptr;
-  return new (mem) T(std::forward<Args>(args)...);
-}
-
+// Destroy a placement-new object allocated by ps_alloc, then release storage.
 template <typename T>
 inline void ps_delete(T* obj) {
   if (!obj) return;
   obj->~T();
-  free((void*)obj);
+  ps_free(static_cast<void*>(obj));
 }
 
 // ============================================================================
-// Allocation Tracker Entry
-// ============================================================================
-// Shared struct for tracking per-tag allocation statistics.
-// Defined once here; used by HardwareOne.cpp, System_MemoryMonitor.cpp, System_Utils.cpp
-
-struct AllocEntry {
-  char tag[24];
-  size_t totalBytes;
-  size_t psramBytes;
-  size_t dramBytes;
-  uint16_t count;
-  bool isActive;
-};
-
-extern const int MAX_ALLOC_ENTRIES;
-extern AllocEntry gAllocTracker[];
-
-// ============================================================================
-// ArduinoJson PSRAM Allocator
-// ============================================================================
-// Custom allocator for ArduinoJson v7 that uses PSRAM instead of internal heap.
-// This moves all JSON parsing/building memory to PSRAM, freeing internal RAM.
-//
-// Usage:
-//   JsonDocument doc(psramJsonAllocator());  // Uses PSRAM
-//   JsonDocument doc;                         // Uses internal heap (default)
-//
-// Or use the convenience macro:
-//   PSRAM_JSON_DOC(doc);                      // Equivalent to above
+// ArduinoJson PSRAM allocator
 // ============================================================================
 
 #include <ArduinoJson.h>
 
 class PsramJsonAllocator : public ArduinoJson::Allocator {
 public:
-  void* allocate(size_t size) override {
-    // Try PSRAM first, fall back to internal heap
-    if (psramAvailableRuntime() && !psramBypassGlobal()) {
-      void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-      if (p) return p;
-    }
-    return malloc(size);
-  }
+  void* allocate(size_t size) override;
+  void deallocate(void* ptr) override;
+  void* reallocate(void* ptr, size_t newSize) override;
 
-  void deallocate(void* ptr) override {
-    free(ptr);  // Works for both PSRAM and internal heap
-  }
-
-  void* reallocate(void* ptr, size_t new_size) override {
-    // Try PSRAM first, fall back to internal heap
-    if (!ptr) {
-      return allocate(new_size);
-    }
-    if (psramAvailableRuntime() && !psramBypassGlobal() && esp_ptr_external_ram(ptr)) {
-      void* p = heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM);
-      if (p) return p;
-    }
-    return realloc(ptr, new_size);
-  }
-
-  static PsramJsonAllocator* instance() {
-    static PsramJsonAllocator allocator;
-    return &allocator;
-  }
+  static PsramJsonAllocator* instance();
 
 private:
   PsramJsonAllocator() = default;
@@ -395,48 +152,13 @@ inline ArduinoJson::Allocator* psramJsonAllocator() {
 // ============================================================================
 // PSRAM-backed static command output buffers
 // ============================================================================
-// These replace large static char[] buffers that would otherwise live in .bss
-// (internal RAM). The buffer is lazily allocated on first use and persists.
+// Each expansion lazily creates one persistent buffer for its call site.
 
-// Generic PSRAM buffer helper - returns a persistent PSRAM-backed buffer
-// Usage: char* buf = getPsramBuffer<4096>("sddiag");
-template<size_t SIZE>
-inline char* getPsramBuffer(const char* tag = nullptr) {
-  static char* buf = nullptr;
-  if (!buf) {
-    buf = (char*)ps_alloc(SIZE, AllocPref::PreferPSRAM, tag);
-    if (buf) {
-      buf[0] = '\0';
-    }
-  }
-  return buf;
-}
-
-// Pre-defined buffer sizes for common use cases
-// 1KB buffer for small command outputs
-inline char* getPsramBuffer1K(const char* tag = nullptr) {
-  return getPsramBuffer<1024>(tag);
-}
-
-// 2KB buffer for medium command outputs  
-inline char* getPsramBuffer2K(const char* tag = nullptr) {
-  return getPsramBuffer<2048>(tag);
-}
-
-// 4KB buffer for large command outputs
-inline char* getPsramBuffer4K(const char* tag = nullptr) {
-  return getPsramBuffer<4096>(tag);
-}
-
-// Macro for easy static buffer replacement
-// Usage: PSRAM_STATIC_BUF(buf, 2048) replaces: static char buf[2048]
-// Note: Also defines buf_SIZE constant for use instead of sizeof(buf)
 #define PSRAM_STATIC_BUF(name, size) \
   static char* name = nullptr; \
   static constexpr size_t name##_SIZE = size; \
   if (!name) { \
-    name = (char*)ps_alloc(size, AllocPref::PreferPSRAM, #name); \
+    name = (char*)ps_alloc(size, AllocPolicy::PreferPSRAM, #name); \
     if (name) name[0] = '\0'; \
   } \
   if (!name) return "Error: Failed to allocate buffer"
-

@@ -57,6 +57,7 @@ enum G2RingTransactionError : uint8_t {
   G2_RING_ERR_PROFILE_UNKNOWN,
   G2_RING_ERR_IDENTITY_UNKNOWN,
   G2_RING_ERR_CLOCK_UNAVAILABLE,
+  G2_RING_ERR_FEATURE_UNSUPPORTED,
 };
 
 enum G2RingDesiredState : uint8_t {
@@ -89,6 +90,7 @@ enum G2RingSetupState : uint8_t {
 enum G2RingProtocolProfile : uint8_t {
   G2_RING_PROFILE_UNKNOWN = 0,
   G2_RING_PROFILE_FW_2_2_7_0005 = 1,
+  G2_RING_PROFILE_FW_2_2_9_0003 = 2,
 };
 
 struct G2RingTransactionHandle {
@@ -107,6 +109,26 @@ struct G2RingTransactionStatus {
   uint32_t                queuedAtMs;
   uint32_t                writtenAtMs;
   uint32_t                completedAtMs;
+};
+
+// One exact-profile Health-page refresh. The handle fences the request to the
+// live ring generation and to the history-sweep completion sequence that was
+// current before admission, so the UI reports a completed sweep rather than
+// merely reporting that requests were queued.
+struct G2RingHealthRefreshHandle {
+  uint32_t id;
+  uint32_t generation;
+};
+
+struct G2RingHealthRefreshStatus {
+  bool pending;
+  bool completed;
+  bool successful;
+  // True when at least one DAILY/device-status stage verified before a later
+  // stage failed. This lets the page distinguish a useful partial refresh
+  // from a request that never obtained any trusted response.
+  bool partial;
+  uint8_t errorCode;  // G2RingTransactionError
 };
 
 struct G2RingControlStatus {
@@ -161,6 +183,7 @@ inline const char* g2RingTransactionErrorName(uint8_t errorCode) {
     case G2_RING_ERR_PROFILE_UNKNOWN:   return "profile-unknown";
     case G2_RING_ERR_IDENTITY_UNKNOWN:  return "identity-unknown";
     case G2_RING_ERR_CLOCK_UNAVAILABLE: return "clock-unavailable";
+    case G2_RING_ERR_FEATURE_UNSUPPORTED:return "feature-unsupported";
     default:                            return "unknown";
   }
 }
@@ -197,6 +220,7 @@ inline const char* g2RingSetupStateName(G2RingSetupState state) {
 inline const char* g2RingProtocolProfileName(G2RingProtocolProfile profile) {
   switch (profile) {
     case G2_RING_PROFILE_FW_2_2_7_0005: return "2.2.7.0005";
+    case G2_RING_PROFILE_FW_2_2_9_0003: return "2.2.9.0003";
     default:                            return "unknown";
   }
 }
@@ -351,6 +375,15 @@ bool g2RingRefreshControlStatus(
 // `force` is retained when any caller requests it.
 bool g2RingRequestHistoryRefresh(bool force = false);
 
+// HardwareOne's 2.2.9 Health refresh: compose the capture-proven DAILY
+// primitives and deviceStatus into one request. This is deliberately not the
+// legacy POINT query. Only exact R1 firmware 2.2.9.0003 is admitted.
+bool g2RingHealthPageRefreshSupported(void);
+bool g2RingStartHealthPageRefresh(G2RingHealthRefreshHandle& out);
+bool g2RingGetHealthPageRefreshStatus(
+    const G2RingHealthRefreshHandle& handle,
+    G2RingHealthRefreshStatus& out);
+
 // Internal/diagnostic escape hatch. This only submits a transaction; policy
 // gates (admin + confirmation for SETs) live at the CLI boundary.
 bool g2RingSubmitRawTransaction(
@@ -364,10 +397,14 @@ bool g2RingSubmitRawTransaction(
 void g2RingGetStatus(char* buf, size_t cap);
 
 // Snapshot of the live R1 telemetry cache for read-only display (e.g. the
-// G2 Ring dashboard). Copies the notify-updated values; a *Valid flag of
-// false means "no sample seen yet" — render "--", not 0. Telemetry updates
-// are minute-scale so a plain field copy (no lock) is fine.
-// Poll cursor count for a full vitals refresh (HR→HRV→SpO2→Temp→deviceStatus).
+// G2 Ring dashboard). The implementation copies cache source, transport
+// generation, online state, and profile under the telemetry→transport lock
+// order. Direct-cache data is publishable only for its matching online link;
+// disconnected direct data is zeroed. Source-identified sid-0x90 forwarded
+// data remains publishable with connected=false. Otherwise a *Valid flag of
+// false means "no sample seen yet" — render "--", not 0.
+// Cursor count for the legacy POINT miner
+// (HR→HRV→SpO2→Temp→deviceStatus). This is not the 2.2.9 Poll Now path.
 static constexpr uint8_t G2_RING_POLL_VITAL_COUNT = 5;
 
 struct G2RingTelemetry {
@@ -399,19 +436,24 @@ struct G2RingTelemetry {
 };
 void g2RingGetTelemetry(G2RingTelemetry& out);
 
-// Send ONE vitals point-query to the ring: 0=HR, 1=HRV, 2=SpO2, 3=Temp,
+// Send ONE legacy vitals point-query to the ring: 0=HR, 1=HRV, 2=SpO2, 3=Temp,
 // 4=deviceStatus (battery + wear). The request is queued to the transaction
 // owner; the reply arrives via notify and lands in the telemetry cache above.
 // Returns false when not connected/queueable or `which` is out of range. Callers wanting a
 // full refresh send 0..G2_RING_POLL_VITAL_COUNT-1 spaced ≥700 ms apart.
 bool g2RingPollVital(uint8_t which);
 
+// True only when the exact active profile admits both point queries and typed
+// point ingestion. False while profile selection is pending and for 2.2.9,
+// whose point lane was not present in the compatibility capture.
+bool g2RingPointPollingSupported(void);
+
 // Fire a health/{cmd}/daily query (empty payload). `cmd` is R1_CMD_HEARTRATE /
 // HRV / SPO2 / etc. Reply arrives via notify; parsers may call into Health
 // history backfill. Returns false when not connected or not queueable.
 bool g2RingQueryDaily(uint8_t cmd);
 
-// Paced vital poll for background logging: advances an internal cursor
+// Paced legacy vital poll for background logging: advances an internal cursor
 // (HR→HRV→SpO2→Temp→battery/wear) at most once per call when ≥700 ms have
 // elapsed. No-op when not connected. Used by sensorLogTick when LOG_R1 is on.
 void g2RingPollVitalForLogging(void);
@@ -488,6 +530,17 @@ inline bool g2RingRefreshControlStatus(
     G2RingTransactionHandle* = nullptr,
     G2RingTransactionHandle* = nullptr) { return false; }
 inline bool g2RingRequestHistoryRefresh(bool = false) { return false; }
+inline bool g2RingHealthPageRefreshSupported(void) { return false; }
+inline bool g2RingStartHealthPageRefresh(G2RingHealthRefreshHandle& out) {
+  out = G2RingHealthRefreshHandle{};
+  return false;
+}
+inline bool g2RingGetHealthPageRefreshStatus(
+    const G2RingHealthRefreshHandle&,
+    G2RingHealthRefreshStatus& out) {
+  out = G2RingHealthRefreshStatus{};
+  return false;
+}
 inline bool g2RingSubmitRawTransaction(
     uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t,
     const uint8_t*, size_t, G2RingTransactionHandle* = nullptr) { return false; }
@@ -516,6 +569,7 @@ struct G2RingTelemetry {
 };
 inline void g2RingGetTelemetry(G2RingTelemetry& out) { out = G2RingTelemetry{}; }
 inline bool g2RingPollVital(uint8_t) { return false; }
+inline bool g2RingPointPollingSupported(void) { return false; }
 inline bool g2RingQueryDaily(uint8_t) { return false; }
 inline void g2RingPollVitalForLogging(void) {}
 inline void g2RingTimeSyncTick(void) {}

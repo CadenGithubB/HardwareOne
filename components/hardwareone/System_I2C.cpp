@@ -785,7 +785,7 @@ const char* cmd_i2c2sclpin(const String& argsInput) {
 // per-command stub is one line. The helper does NOT include the
 // RETURN_VALID_IF_VALIDATE_CSTR macro because that returns from its caller
 // — must stay at each cmd_* entry point.
-static const char* setDeviceBusAndReport(int& target, const String& argsInput, const char* settingName) {
+const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput, const char* settingName) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) {
@@ -807,18 +807,9 @@ static const char* setDeviceBusAndReport(int& target, const String& argsInput, c
   return "set (reboot required)";
 }
 
-const char* cmd_oledbus(const String& a)     { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.oledBus,     a, "oledBus"); }
-const char* cmd_inputbus(const String& a)    { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.inputBus,  a, "inputBus"); }
-const char* cmd_gpsbus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.gpsBus,      a, "gpsBus"); }
-const char* cmd_rtcbus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.rtcBus,      a, "rtcBus"); }
-const char* cmd_fmradiobus(const String& a)  { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.fmRadioBus,  a, "fmRadioBus"); }
-const char* cmd_presencebus(const String& a) { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.presenceBus, a, "presenceBus"); }
-const char* cmd_imubus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.imuBus,      a, "imuBus"); }
-const char* cmd_thermalbus(const String& a)  { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.thermalBus,  a, "thermalBus"); }
-const char* cmd_tofbus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.tofBus,      a, "tofBus"); }
-const char* cmd_apdsbus(const String& a)     { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.apdsBus,     a, "apdsBus"); }
-const char* cmd_servobus(const String& a)    { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.servoBus,    a, "servoBus"); }
-const char* cmd_fuelgaugebus(const String& a){ RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.fuelGaugeBus, a, "fuelGaugeBus"); }
+const char* cmd_oledbus(const String& a)     { RETURN_VALID_IF_VALIDATE_CSTR(); return i2cSetDeviceBusAndReport(gSettings.oledBus,     a, "oledBus"); }
+const char* cmd_inputbus(const String& a)    { RETURN_VALID_IF_VALIDATE_CSTR(); return i2cSetDeviceBusAndReport(gSettings.inputBus,  a, "inputBus"); }
+const char* cmd_fuelgaugebus(const String& a){ RETURN_VALID_IF_VALIDATE_CSTR(); return i2cSetDeviceBusAndReport(gSettings.fuelGaugeBus, a, "fuelGaugeBus"); }
 
 // Sensor-specific I2C clock commands moved to their respective sensor modules:
 // - thermalI2cClockHz -> i2csensor_mlx90640.cpp (thermal module)
@@ -2266,18 +2257,14 @@ const CommandEntry i2cCommands[] = {
   { "i2c2busenabled", "Enable/disable I2C2 bus: <0|1> (reboot required)", true, cmd_i2c2busenabled, "Usage: i2c2BusEnabled <0|1>" },
   { "i2c2sdapin", "Set I2C2 SDA pin: <-1.." HW_GPIO_MAX_STR "> (-1=unavailable)", true, cmd_i2c2sdapin, "Usage: i2c2SdaPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable)" },
   { "i2c2sclpin", "Set I2C2 SCL pin: <-1.." HW_GPIO_MAX_STR "> (-1=unavailable)", true, cmd_i2c2sclpin, "Usage: i2c2SclPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable)" },
-  // Per-device bus assignment — route a sensor to bus 0 (I2C1) or bus 1 (I2C2).
+  // Per-device bus assignment — route a device to bus 0 (I2C1) or bus 1 (I2C2).
+  // Only devices whose driver is NOT its own build-gated module live here.
+  // Each sensor's own <sensor>bus command lives in that sensor's .cpp next to
+  // its other commands (i2csensor_pa1010d.cpp etc.), so it compiles out with
+  // the driver instead of needing a guard here — same move the sensor-specific
+  // I2C clock commands already made.
   { "oledbus",     "Route OLED to bus: <0|1> (reboot required)",         true, cmd_oledbus,     "Usage: oledBus <0|1>" },
   { "inputbus",    "Route input device to bus: <0|1> (reboot required)",  true, cmd_inputbus,    "Usage: inputBus <0|1>" },
-  { "gpsbus",      "Route PA1010D GPS to bus: <0|1> (reboot required)",  true, cmd_gpsbus,      "Usage: gpsBus <0|1>" },
-  { "rtcbus",      "Route DS3231 RTC to bus: <0|1> (reboot required)",   true, cmd_rtcbus,      "Usage: rtcBus <0|1>" },
-  { "fmradiobus",  "Route RDA5807 FM radio to bus: <0|1> (reboot required)", true, cmd_fmradiobus, "Usage: fmRadioBus <0|1>" },
-  { "presencebus", "Route STHS34PF80 presence to bus: <0|1> (reboot required)", true, cmd_presencebus, "Usage: presenceBus <0|1>" },
-  { "imubus",      "Route BNO055 IMU to bus: <0|1> (reboot required)",   true, cmd_imubus,      "Usage: imuBus <0|1>" },
-  { "thermalbus",  "Route MLX90640 thermal to bus: <0|1> (reboot required)", true, cmd_thermalbus, "Usage: thermalBus <0|1>" },
-  { "tofbus",      "Route VL53L4CX ToF to bus: <0|1> (reboot required)", true, cmd_tofbus,      "Usage: tofBus <0|1>" },
-  { "apdsbus",     "Route APDS9960 gesture to bus: <0|1> (reboot required)", true, cmd_apdsbus, "Usage: apdsBus <0|1>" },
-  { "servobus",    "Route PCA9685 servo to bus: <0|1> (reboot required)", true, cmd_servobus,  "Usage: servoBus <0|1>" },
   { "fuelgaugebus","Route MAX17048 fuel gauge to bus: <0|1> (reboot required)", true, cmd_fuelgaugebus, "Usage: fuelGaugeBus <0|1>" },
   // Note: Sensor-specific I2C clock commands (thermalI2cClockHz, tofI2cClockHz) are in their respective sensor modules
   
@@ -3000,17 +2987,42 @@ static const SettingEntry i2cSettingEntries[] = {
   // Per-device bus assignment (0=I2C1/Wire1, 1=I2C2/Wire). Reboot required.
   // `options = "0|I2C1,1|I2C2"` makes the Settings page render each as a
   // labeled <select> dropdown instead of a 0..1 number input.
+  // Per-device bus rows. The <sensor>bus COMMANDS now live in each sensor's own
+  // (build-gated) .cpp, so these rows are guarded on the same flags — a row whose
+  // cmdKey names a command that is not compiled would leave the OLED settings
+  // editor firing an unknown command (setSettingValue routes through cmdKey with
+  // no fallback). Rows stay in THIS table rather than moving to the sensor files
+  // so their JSON identity — and therefore the persisted settings keys — is
+  // unchanged.
   { "oledBus",     SETTING_INT, &gSettings.oledBus,     OLED_BUS_DEFAULT, 0, nullptr, 0, 1, "OLED bus (reboot required)",            "0|I2C1,1|I2C2", false, nullptr, "oledbus" },
   { "inputBus",    SETTING_INT, &gSettings.inputBus,    0, 0, nullptr, 0, 1, "Input device bus (reboot required)",     "0|I2C1,1|I2C2", false, nullptr, "inputbus" },
+#if ENABLE_GPS_SENSOR
   { "gpsBus",      SETTING_INT, &gSettings.gpsBus,      0, 0, nullptr, 0, 1, "GPS bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "gpsbus" },
+#endif
+#if ENABLE_RTC_SENSOR
   { "rtcBus",      SETTING_INT, &gSettings.rtcBus,      0, 0, nullptr, 0, 1, "RTC bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "rtcbus" },
+#endif
+#if ENABLE_FM_RADIO
   { "fmRadioBus",  SETTING_INT, &gSettings.fmRadioBus,  0, 0, nullptr, 0, 1, "FM radio bus (reboot required)",        "0|I2C1,1|I2C2", false, nullptr, "fmradiobus" },
+#endif
+#if ENABLE_PRESENCE_SENSOR
   { "presenceBus", SETTING_INT, &gSettings.presenceBus, 0, 0, nullptr, 0, 1, "Presence bus (reboot required)",        "0|I2C1,1|I2C2", false, nullptr, "presencebus" },
+#endif
+#if ENABLE_IMU_SENSOR
   { "imuBus",      SETTING_INT, &gSettings.imuBus,      0, 0, nullptr, 0, 1, "IMU bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "imubus" },
+#endif
+#if ENABLE_THERMAL_SENSOR
   { "thermalBus",  SETTING_INT, &gSettings.thermalBus,  0, 0, nullptr, 0, 1, "Thermal bus (reboot required)",         "0|I2C1,1|I2C2", false, nullptr, "thermalbus" },
+#endif
+#if ENABLE_TOF_SENSOR
   { "tofBus",      SETTING_INT, &gSettings.tofBus,      0, 0, nullptr, 0, 1, "ToF bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "tofbus" },
+#endif
+#if ENABLE_APDS_SENSOR
   { "apdsBus",     SETTING_INT, &gSettings.apdsBus,     0, 0, nullptr, 0, 1, "APDS bus (reboot required)",            "0|I2C1,1|I2C2", false, nullptr, "apdsbus" },
+#endif
+#if ENABLE_SERVO
   { "servoBus",    SETTING_INT, &gSettings.servoBus,    0, 0, nullptr, 0, 1, "Servo bus (reboot required)",           "0|I2C1,1|I2C2", false, nullptr, "servobus" },
+#endif
   { "fuelGaugeBus",SETTING_INT, &gSettings.fuelGaugeBus,0, 0, nullptr, 0, 1, "Fuel gauge bus (reboot required)",      "0|I2C1,1|I2C2", false, nullptr, "fuelgaugebus" }
 };
 

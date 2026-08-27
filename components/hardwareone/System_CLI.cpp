@@ -109,32 +109,68 @@ const char* renderHelpMain(bool showAll) {
   size_t moduleCount;
   const CommandModule* modules = getCommandModules(moduleCount);
   
+  // Detection-gated help is deliberate and is KEPT: an inactive sensor module
+  // still gets no row and no command block. What changed (2026-08-22) is that
+  // its NAME is no longer swallowed entirely — a user cannot type `help gps` for
+  // a module they were never told exists, and each sensor's own setup verbs
+  // (gpsbus, gpsautostart, ...) now live in that module rather than in `i2c`.
+  //
+  // The label is "Not active", NOT "Not detected": only the isSensorConnected()
+  // predicates are detection results. input / gamepad / anoencoder / camera read
+  // a flag that ONLY a successful driver open sets, and microphone reads source
+  // reachability — for those, "not detected" would be a false claim.
+  char inactive[192];   // 15 module names = 92 chars + 28 separators = 120 worst case
+  size_t inactiveLen = 0;
+  bool   inactiveTrunc = false;
+  inactive[0] = '\0';
+
   for (size_t i = 0; i < moduleCount; i++) {
     // Skip core modules (CLI internal commands)
     if (modules[i].flags & CMD_MODULE_CORE) {
       continue;
     }
-    
+
     const char* moduleName = modules[i].name;
     const char* description = modules[i].description ? modules[i].description : "No description";
-    
-    // Show all modules, or filter sensors by connection status
-    if (showAll) {
-      // Show all modules with descriptions
+    const bool  isSensor = (modules[i].flags & CMD_MODULE_SENSOR) != 0;
+
+    // A sensor row with a NULL predicate cannot be tested, so assert neither
+    // state — print it plainly. This also matches renderModuleHelp, which
+    // already treats a NULL predicate as connected.
+    if (!isSensor || !modules[i].isConnected) {
       BROADCAST_PRINTF("  %-12s - %s", moduleName, description);
-    } else {
-      // For sensor modules, show connection status
-      if (modules[i].flags & CMD_MODULE_SENSOR) {
-        bool connected = modules[i].isConnected ? modules[i].isConnected() : false;
-        if (connected) {
-          BROADCAST_PRINTF("  %-12s - %s (Connected)", moduleName, description);
-        }
-        // Skip disconnected sensors unless showAll is true
-      } else {
-        // Non-sensor modules always shown
-        BROADCAST_PRINTF("  %-12s - %s", moduleName, description);
-      }
+      continue;
     }
+
+    if (modules[i].isConnected()) {
+      BROADCAST_PRINTF("  %-12s - %s (Connected)", moduleName, description);
+      continue;
+    }
+
+    if (showAll) {
+      // `help all` used to print every module with no suffix at all, so it
+      // listed the inactive ones without saying which were missing.
+      BROADCAST_PRINTF("  %-12s - %s (Not active)", moduleName, description);
+      continue;
+    }
+
+    const size_t nameLen = strlen(moduleName);
+    const size_t sep = inactiveLen ? 2 : 0;
+    if (inactiveLen + sep + nameLen < sizeof(inactive)) {
+      if (sep) { inactive[inactiveLen++] = ','; inactive[inactiveLen++] = ' '; }
+      memcpy(inactive + inactiveLen, moduleName, nameLen);
+      inactiveLen += nameLen;
+      inactive[inactiveLen] = '\0';
+    } else {
+      inactiveTrunc = true;
+    }
+  }
+
+  if (inactiveLen) {
+    broadcastOutput("");
+    BROADCAST_PRINTF("  Not active: %s%s", inactive, inactiveTrunc ? ", ..." : "");
+    broadcastOutput("    (not detected, or detected but not started)");
+    broadcastOutput("    'help <name>' still lists their setup verbs - e.g. 'help gps' for gpsbus");
   }
   
   broadcastOutput("");
@@ -376,7 +412,7 @@ static void broadcastHelpUsageIndented(const char* usage) {
 static void renderModuleHelp(const CommandModule* module, bool showAll) {
   const char* moduleName = module->name;
   const CommandEntry* commands = module->commands;
-  size_t count = module->count;
+  const size_t count = module->commandCount();
   bool isSensorModule = (module->flags & CMD_MODULE_SENSOR) != 0;
   
   bool isConnected = true;

@@ -349,7 +349,7 @@ struct V4FragAckWait {
   uint32_t sentMs;
 };
 
-static V4FragAckWait gV4FragAckWait[V4_FRAG_ACK_WAIT_MAX];
+EXT_RAM_BSS_ATTR static V4FragAckWait gV4FragAckWait[V4_FRAG_ACK_WAIT_MAX];  // PSRAM: espnow_task/sender tasks only; RX callback never touches it (verified 2026-08-19)
 
 static V4FragAckWait* v4_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint8_t fragIdx) {
   // Serialize the slot scan + claim against the RX ACK handler (which marks
@@ -472,7 +472,6 @@ extern int connectedDeviceCount;
 
 // File paths
 static const char* ESPNOW_DEVICES_FILE = "/system/espnow/devices.json";
-static const char* MESH_PEERS_FILE = "/system/espnow/mesh_peers.json";
 
 // ============================================================================
 // GLOBAL VARIABLES
@@ -630,73 +629,6 @@ bool macEqual6(const uint8_t a[6], const uint8_t b[6]) {
   return memcmp(a, b, 6) == 0;
 }
 
-// Save mesh peer MAC addresses to filesystem (topology only, not health metrics)
-// This is called only when topology changes (new peer discovered, peer removed, mode change)
-// Health metrics (timestamps, counters) rebuild naturally from heartbeats after reboot
-bool saveMeshPeers() {
-  if (!filesystemReady) return false;
-
-  // Pause sensor polling during file I/O (RAII — resumes on every return path;
-  // from System_PollPause.h via System_I2C.h).
-  PollPauseGuard pollGuard;
-
-  FsLockGuard fsGuard("mesh.peers.save");
-  File file = VFS::openGuarded(MESH_PEERS_FILE, "w", VFS::systemAuth("espnow.mesh_peers_save"), true);
-  if (!file) {
-    return false;
-  }
-  int skipped = 0;
-
-  file.println("{");
- 
-  file.println("  \"peers\": [");
-
-  int count = 0;
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;  // Don't save self-entry
-    
-    if (count > 0) file.println(",");
-    
-    String peerName = "";
-    if (gEspNow) {
-      for (int j = 0; j < gEspNow->deviceCount; j++) {
-        if (memcmp(gEspNow->devices[j].mac, gMeshPeers[i].mac, 6) == 0) {
-          peerName = gEspNow->devices[j].name;
-          break;
-        }
-      }
-    }
-    char rawMacBuf[18];
-    formatMacAddressBuf(gMeshPeers[i].mac, rawMacBuf, sizeof(rawMacBuf));
-    String encMac = encryptString(String(rawMacBuf));
-    if (encMac.length() == 0) {
-      ERROR_ESPNOWF("[MESH] Failed to encrypt peer MAC, skipping entry");
-      skipped++;
-      continue;
-    }
-    file.print("    {\"mac\": \"");
-    file.print(encMac);
-    file.print("\"");
-    if (peerName.length() > 0) {
-      file.print(", \"name\": \"");
-      file.print(peerName);
-      file.print("\"");
-    }
-    file.print("}");
-
-    count++;
-  }
-
-  file.println();
-  file.println("  ]");
-  file.println("}");
-  file.close();
-  // pollGuard resumes sensor polling on return.
-
-  DEBUGF(DEBUG_ESPNOW_MESH, "[MESH] Saved role=%s, %d peer MAC addresses to filesystem",
-                getMeshRoleString(gSettings.meshRole), count);
-  return skipped == 0;
-}
 
 // Save named ESP-NOW devices (paired devices with names/keys) to filesystem
 static bool saveEspNowDevices() {
@@ -772,93 +704,6 @@ static bool saveEspNowDevices() {
 // Forward declaration for parseMacAddress (defined later in file)
 bool parseMacAddress(const String& macStr, uint8_t mac[6]);
 
-// Health metrics (timestamps, counters) will be initialized to zero and rebuild from heartbeats
-static void loadMeshPeers() {
-  if (!filesystemReady) return;
-
-  // Pause sensor polling during file I/O. Kept as explicit pause/resume (not the
-  // RAII guard) because this function deliberately resumes BEFORE the parse step
-  // below — the guard would hold the pause too long. Symbols from
-  // System_PollPause.h via System_I2C.h.
-  pollPause();
-
-  FsLockGuard fsGuard("mesh.peers.load");
-  File file = VFS::openGuarded(MESH_PEERS_FILE, "r", VFS::systemAuth("espnow.mesh_peers_load"));
-  if (!file) {
-    pollResume();
-    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH] No saved peer list found");
-    return;
-  }
-
-  String content = file.readString();
-  file.close();
-  
-  // Resume sensor polling before parsing
-  pollResume();
-
-  // NOTE: mesh_peers.json is topology-only. Role/master/backup are persisted via settings.json.
-
-  // Clear existing peers (except self-entry which will be recreated)
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
-      gMeshPeers[i].isActive = false;
-    }
-  }
-
-  // Simple JSON parsing for peer list
-  int count = 0;
-  int pos = 0;
-  while ((pos = content.indexOf("\"mac\":", pos)) >= 0) {
-    // Extract MAC address (may be AES-encrypted)
-    int macStart = content.indexOf("\"", pos + 6) + 1;
-    int macEnd = content.indexOf("\"", macStart);
-    if (macStart <= 0 || macEnd <= macStart) break;
-
-    String macStr = content.substring(macStart, macEnd);
-
-    // Decrypt if stored encrypted (AES: prefix)
-    if (macStr.startsWith("AES:")) {
-      String decrypted = decryptString(macStr);
-      if (decrypted.length() > 0) {
-        macStr = decrypted;
-      } else {
-        WARN_ESPNOWF("[MESH] Failed to decrypt peer MAC, skipping");
-        pos = macEnd;
-        continue;
-      }
-    }
-
-    uint8_t mac[6];
-    if (!parseMacAddress(macStr, mac)) {
-      pos = macEnd;
-      continue;
-    }
-
-    // Don't load self-entry (will be created automatically)
-    if (isSelfMac(mac)) {
-      pos = macEnd;
-      continue;
-    }
-
-    // Create peer entry with zero health metrics (will rebuild from heartbeats)
-    MeshPeerHealth* peer = getMeshPeerHealth(mac, true);
-    if (peer) {
-      peer->lastMeshHeartbeatMs = 0;
-      peer->lastRxActivityMs = 0;
-      peer->lastAckMs = 0;
-      peer->heartbeatCount = 0;
-      peer->ackCount = 0;
-      // Restored from persisted state, not heard from — a claim about direct
-      // audibility would be unfounded until a frame actually arrives.
-      peer->everHeardDirect = false;
-      count++;
-    }
-
-    pos = macEnd;
-  }
-  
-  DEBUGF(DEBUG_ESPNOW_MESH, "[MESH] Loaded %d peer MAC addresses from filesystem", count);
-}
 
 // Restore ESP-NOW peers from saved devices
 static void restoreEspNowPeers() {
@@ -6912,14 +6757,19 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   systemEventPost(SYSEVT_REMOTE_CMD_RX, deviceName, safeActualCmd.c_str());
 
   // Queue for execution on cmd_exec task (has large stack)
+  const bool inputLengthAccepted =
+      commandInputLengthAccepted(cmd.line.length());
   if (!submitCommandAsync(cmd, v4CmdResultCallback, asyncCtx)) {
-    BROADCAST_PRINTF("[ESP-NOW] Failed to queue CMD from %s", deviceName);
+    BROADCAST_PRINTF("[ESP-NOW] Rejected CMD from %s: %s", deviceName,
+                     inputLengthAccepted ? "executor unavailable"
+                                         : "command exceeds input limit");
     gCurrentStreamCmdId = 0;
     destroyStreamSession(msgId);
     free(asyncCtx);
     uint8_t respPayload[32];
     respPayload[0] = 0;
-    const char* errMsg = "Queue failed";
+    const char* errMsg = inputLengthAccepted ? "Queue failed"
+                                             : "Command too long";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
     // Step 3c: espnow_task RX-handler context — fire-and-forget.
     espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
@@ -7467,12 +7317,13 @@ static String generateDeviceManifest() {
   const CommandModule* modules = getCommandModules(moduleCount);
   
   for (size_t m = 0; m < moduleCount; m++) {
+    const size_t commandCount = modules[m].commandCount();
     JsonObject module = cliModules.add<JsonObject>();
     module["name"] = modules[m].name ? modules[m].name : "";
     module["description"] = modules[m].description ? modules[m].description : "";
 
     JsonArray commands = module["commands"].to<JsonArray>();
-    for (size_t c = 0; c < modules[m].count; c++) {
+    for (size_t c = 0; c < commandCount; c++) {
       JsonObject cmd = commands.add<JsonObject>();
       // Guard each const char*: a null name/help => strlen(NULL) crash in
       // ArduinoJson serialize (it stores the pointer, not a copy).
@@ -8862,7 +8713,7 @@ const char* checkEspNowFirstTimeSetup() {
   }
   
   // No device name configured — require the user to set one before ESP-NOW can start.
-  return "Error: No device name configured. Set one with: espnow setname <name>";
+  return "Error: No device name configured. Set one with: espnowsetname <name>";
 }
 
 // Load named ESP-NOW devices (paired devices with names/keys) from filesystem
@@ -9005,6 +8856,29 @@ void macFromHexString(const String& s, uint8_t out[6]) {
 // an associated activity event, but if a code path ever does create meta
 // solo, we'd then also need the inverse — left as a future cleanup if it
 // becomes a problem; current call sites don't exercise it.
+// Seed a health slot for every paired device in the registry. This is the
+// bootstrap that lets a freshly rebooted node reach its peers before any of them
+// has been heard from: gMeshPeers starts empty, and both the boot notification
+// fan-out and the heartbeat tick iterate gMeshPeers only. Idempotent —
+// getMeshPeerHealth returns the existing slot if there is one.
+//
+// Sourced from gEspNow->devices[] (devices.json, the pairing registry), which is
+// strictly better than the old mesh_peers.json: that file was written from the
+// same registry, so it could only ever be a stale subset of it.
+static void meshBootstrapSlotsFromRegistry(uint8_t* outPairedCount) {
+  uint8_t n = 0;
+  if (gEspNow && gEspNow->deviceCount > 0) {
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (!isSelfMac(gEspNow->devices[i].mac)) {
+        n++;
+        getMeshPeerHealth(gEspNow->devices[i].mac, true);
+      }
+    }
+  }
+  if (outPairedCount) *outPairedCount = n;
+}
+
+
 MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing) {
   if (!gMeshPeers) return nullptr;
   for (int i = 0; i < gMeshPeerSlots; i++) {
@@ -9712,14 +9586,7 @@ void processMeshHeartbeats() {
     // existing slot if already present. peerIdentityWantsEvent() defaults to true for
     // peers with no explicit subscription, so the bootstrapped peer is sent, not skipped.
     uint8_t pairedDeviceCount = 0;
-    if (gEspNow && gEspNow->deviceCount > 0) {
-      for (int i = 0; i < gEspNow->deviceCount; i++) {
-        if (!isSelfMac(gEspNow->devices[i].mac)) {
-          pairedDeviceCount++;
-          getMeshPeerHealth(gEspNow->devices[i].mac, true);  // bootstrap slot so the heartbeat reaches it
-        }
-      }
-    }
+    meshBootstrapSlotsFromRegistry(&pairedDeviceCount);
     // Send heartbeat if we have either active peers OR paired devices
     if (activePeerCount > 0 || pairedDeviceCount > 0) {
       V4PayloadHeartbeat hb = {};
@@ -10802,7 +10669,8 @@ static bool initEspNow() {
     gEspNow->streamQueue = nullptr;
     if (psramAvailableRuntime()) {
       size_t sqBytes = sizeof(EspNowState::StreamQueueEntry) * EspNowState::STREAM_QUEUE_SIZE_PSRAM;
-      gEspNow->streamQueue = (EspNowState::StreamQueueEntry*)heap_caps_malloc(sqBytes, MALLOC_CAP_SPIRAM);
+      gEspNow->streamQueue = (EspNowState::StreamQueueEntry*)ps_alloc(
+          sqBytes, AllocPref::RequirePSRAM, "espnow.streamQueue.psram");
       if (gEspNow->streamQueue) {
         memset(gEspNow->streamQueue, 0, sqBytes);
         gEspNow->streamQueueCap = EspNowState::STREAM_QUEUE_SIZE_PSRAM;
@@ -10811,7 +10679,8 @@ static bool initEspNow() {
     }
     if (!gEspNow->streamQueue) {
       size_t sqBytes = sizeof(EspNowState::StreamQueueEntry) * EspNowState::STREAM_QUEUE_SIZE_FALLBACK;
-      gEspNow->streamQueue = (EspNowState::StreamQueueEntry*)ps_alloc(sqBytes, AllocPref::PreferInternal, "espnow.streamQueue");
+      gEspNow->streamQueue = (EspNowState::StreamQueueEntry*)ps_alloc(
+          sqBytes, AllocPref::RequireInternal, "espnow.streamQueue.internal");
       if (gEspNow->streamQueue) memset(gEspNow->streamQueue, 0, sqBytes);
       gEspNow->streamQueueCap = EspNowState::STREAM_QUEUE_SIZE_FALLBACK;
       gEspNow->streamDrainMax = 8;
@@ -11033,8 +10902,8 @@ static bool initEspNow() {
   // come up deaf (no ACKs, no sessions, no heartbeats) while reporting success,
   // which is worse than refusing to start.
   if (!gEspNowRxRing) {
-    gEspNowRxRing = (InboundRxItem*)heap_caps_calloc(ESPNOW_RX_RING_SLOTS, sizeof(InboundRxItem),
-                                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    gEspNowRxRing = (InboundRxItem*)ps_calloc(ESPNOW_RX_RING_SLOTS, sizeof(InboundRxItem),
+                                              AllocPref::RequireInternal, "espnow.rx.ring");
     if (!gEspNowRxRing) {
       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
                "out of internal DRAM (RX ring)");
@@ -11120,8 +10989,9 @@ static bool initEspNow() {
   // doesn't inherit stale in-flight trackers from the previous session.
   size_t trackerBytes = sizeof(BroadcastTracker) * BROADCAST_TRACKER_SLOTS;
   if (!gBroadcastTrackers) {
-    gBroadcastTrackers = (BroadcastTracker*)heap_caps_calloc(BROADCAST_TRACKER_SLOTS, sizeof(BroadcastTracker),
-                                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    gBroadcastTrackers = (BroadcastTracker*)ps_calloc(BROADCAST_TRACKER_SLOTS, sizeof(BroadcastTracker),
+                                                      AllocPref::RequireInternal,
+                                                      "espnow.broadcast.trackers");
   }
   if (gBroadcastTrackers) {
     memset(gBroadcastTrackers, 0, trackerBytes);
@@ -11178,8 +11048,13 @@ static bool initEspNow() {
   loadEspNowDevices();
   restoreEspNowPeers();
   
-  // Load mesh peer health data
-  loadMeshPeers();
+  // Seed health slots from the paired registry. This replaced loadMeshPeers():
+  // mesh_peers.json was written FROM this same registry, so it could only ever be
+  // a stale subset of it — and it was rewritten on every boot, which made a
+  // corrupt copy actively destructive rather than merely useless.
+  // Registration itself is already done: restoreEspNowPeers() above is what talks
+  // to the radio, from devices.json. loadMeshPeers() never did.
+  meshBootstrapSlotsFromRegistry(nullptr);
   
 #if ENABLE_BONDED_MODE
   // Dump bond settings at init so we can verify what was loaded from flash
@@ -11208,7 +11083,7 @@ static bool initEspNow() {
 #endif
   
   // Register own device name for topology display
-  // Use the device name from settings (set via 'espnow setname')
+  // Use the device name from settings (set via 'espnowsetname')
   uint8_t myMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, myMac);
   String myName = gSettings.espnowDeviceName;
@@ -11222,7 +11097,6 @@ static bool initEspNow() {
         // Update name if it changed
         if (gEspNow->devices[i].name != myName) {
           gEspNow->devices[i].name = myName;
-          saveMeshPeers();
           BROADCAST_PRINTF("[ESP-NOW] Updated own device name: %s", myName.c_str());
         }
         break;
@@ -11231,7 +11105,6 @@ static bool initEspNow() {
     
     if (!alreadyRegistered) {
       addEspNowDevice(myMac, myName, false, nullptr);
-      saveMeshPeers();
       BROADCAST_PRINTF("[ESP-NOW] Registered own device name: %s", myName.c_str());
     }
   } else {
@@ -12555,14 +12428,13 @@ const char* cmd_espnow_pair(const String& argsInput) {
     v4_send_payload_smart(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
                           (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
-  bool peersOk   = saveMeshPeers();
   bool devicesOk = saveEspNowDevices();
 
   // Peer is committed to the registry — announce the (unencrypted) pair.
   systemEventPost(SYSEVT_PEER_PAIRED, name.c_str(), macStr.c_str());
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  if (!peersOk || !devicesOk) {
+  if (!devicesOk) {
     snprintf(getDebugBuffer(), 1024,
       "Paired %s (%s) but failed to encrypt and save peer data — device encryption key unavailable. "
       "Peer will not persist across reboot.", name.c_str(), macStr.c_str());
@@ -12897,7 +12769,6 @@ const char* cmd_espnow_mode(const String& argsInput) {
     if (gEspNow) {
       gEspNow->mode = ESPNOW_MODE_DIRECT;  // Update runtime state immediately
     }
-    saveMeshPeers();
     BROADCAST_PRINTF("[ESP-NOW] mode set to %s", getEspNowModeString());
     return "ESP-NOW mode set to direct";
   } else if (mode == "mesh") {
@@ -12905,7 +12776,6 @@ const char* cmd_espnow_mode(const String& argsInput) {
     if (gEspNow) {
       gEspNow->mode = ESPNOW_MODE_MESH;  // Update runtime state immediately
     }
-    saveMeshPeers();
     BROADCAST_PRINTF("[ESP-NOW] mode set to %s", getEspNowModeString());
     return "ESP-NOW mode set to mesh";
   }
@@ -12960,8 +12830,6 @@ const char* cmd_espnow_setname(const String& argsInput) {
     if (!found) {
       addEspNowDevice(myMac, name, false, nullptr);
     }
-
-    saveMeshPeers();
   }
 
   snprintf(getDebugBuffer(), 1024, "Device name set to: %s", name.c_str());
@@ -13781,18 +13649,6 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Mesh save command
-const char* cmd_espnow_meshsave(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!meshEnabled()) {
-    return "Error: Mesh mode not enabled.";
-  }
-  
-  saveMeshPeers();
-  return "Mesh peer topology saved to filesystem.";
-}
-
 // Topology results command
 const char* cmd_espnow_toporesults(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -14033,7 +13889,7 @@ const char* cmd_espnow_list(const String& argsInput) {
 
   // Build JSON from gEspNow->devices[] — the authoritative source of truth.
   // esp_now_fetch_peer() only reflects the hardware peer table which may lag
-  // behind after a reboot until loadMeshPeers() re-registers all peers.
+  // behind after a reboot until restoreEspNowPeers() re-registers all peers.
   PSRAM_JSON_DOC(doc);
   doc["schema"] = 1;
   JsonArray devices = doc["devices"].to<JsonArray>();
@@ -14586,14 +14442,13 @@ const char* cmd_espnow_unpair(const String& argsInput) {
     }
   }
 
-  bool peersOk   = saveMeshPeers();
   bool devicesOk = saveEspNowDevices();
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  if (!peersOk || !devicesOk) {
+  if (!devicesOk) {
     snprintf(getDebugBuffer(), 1024,
-      "Unpaired device but failed to encrypt and save peer data — device encryption key unavailable. "
-      "Peer list may not persist correctly across reboot.");
+      "Unpaired device but failed to encrypt and save the registry — device encryption key "
+      "unavailable. The pairing may not persist across reboot.");
     return getDebugBuffer();
   }
   if (deviceName.length() > 0) {
@@ -15480,7 +15335,6 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     v4_send_payload_smart(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
                           (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
-  bool peersOk   = saveMeshPeers();
   bool devicesOk = saveEspNowDevices();
 
   // Registry pairing is committed (radio peer + name/key saved) — announce it.
@@ -15519,7 +15373,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   }
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  if (!peersOk || !devicesOk) {
+  if (!devicesOk) {
     snprintf(getDebugBuffer(), 1024,
       "Paired %s (%s) but failed to encrypt and save peer data — device encryption key unavailable. "
       "Peer will not persist across reboot.", deviceName.c_str(), macStr.c_str());
@@ -17367,7 +17221,6 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowtoporesults", "Get topology discovery results.", false, cmd_espnow_toporesults },
   { "espnowtimesync", "Broadcast NTP time to mesh (intended for the master; role not enforced). (async broadcast; delivery only, no reply)", false, cmd_espnow_timesync },
   { "espnowtimestatus", "Show time synchronization status.", false, cmd_espnow_timestatus },
-  { "espnowmeshsave", "Manually save mesh peer topology to filesystem.", false, cmd_espnow_meshsave },
   
   // ---- Device Metadata ----
   { "espnowroom", "Get/set device room: 'espnowroom [name]'.", false, cmd_espnow_room, "Usage: espnowroom [Kitchen|Bedroom|...]\n       espnowroom clear" },

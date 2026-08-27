@@ -1270,14 +1270,12 @@ const char* cmd_sensorlog(const String& argsInput) {
     // LittleFS OR SD card (if mounted) to allow start. Writes will route
     // transparently to whichever tier has room via the overflow system.
     {
-      extern void fsLock(const char* tag);
-      extern void fsUnlock();
-      fsLock("sensorlog.spacecheck");
-      size_t totalBytes = LittleFS.totalBytes();
-      size_t usedBytes = LittleFS.usedBytes();
-      fsUnlock();
-      size_t freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
-      bool littleFsOk = (freeBytes >= gSensorLogMaxSize);
+      // Same accessor as the SD branch below. It takes the FS lock itself and
+      // resolves total+used in a single filesystem traverse; the old
+      // totalBytes()/usedBytes() pair walked the whole volume twice.
+      uint64_t lfsTotal = 0, lfsUsed = 0, freeBytes = 0;
+      (void)VFS::getStats(VFS::INTERNAL, lfsTotal, lfsUsed, freeBytes);
+      bool littleFsOk = (freeBytes >= (uint64_t)gSensorLogMaxSize);
       bool sdOk = false;
       if (!littleFsOk && VFS::isSDAvailable()) {
         uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
@@ -1573,20 +1571,33 @@ void healthLoggingNotePageRefresh() {
 }
 
 #if ENABLE_R1_HEALTH
-// On-demand poll burst (healthstatus poll / web Poll Now) — independent of Track.
-enum : uint8_t { HT_OD_IDLE = 0, HT_OD_POLLING, HT_OD_SETTLE };
+// On-demand refresh (healthstatus poll / web / OLED Poll Now), independent of
+// Track. This public action is exact-2.2.9-only and uses the correlated
+// DAILY+deviceStatus composite. Legacy POINT remains internal to legacy timed
+// mining; it is not a fallback for the new Poll Now contract.
+enum : uint8_t { HT_OD_IDLE = 0, HT_OD_PROFILE_REFRESH };
 static uint8_t  sHtOdState = HT_OD_IDLE;
-static uint8_t  sHtOdCursor = 0;
-static uint32_t sHtOdLastMs = 0;
+static G2RingHealthRefreshHandle sHtOdRefresh{};
 #endif
 
 bool healthStartPollBurst(void) {
 #if ENABLE_R1_HEALTH
   if (!g2RingIsConnected()) return false;
-  sHtOdState = HT_OD_POLLING;
-  sHtOdCursor = 0;
-  sHtOdLastMs = 0;
-  return true;
+  G2RingHealthRefreshHandle refresh{};
+  if (g2RingStartHealthPageRefresh(refresh)) {
+    sHtOdRefresh = refresh;
+    sHtOdState = HT_OD_PROFILE_REFRESH;
+    return true;
+  }
+  return false;
+#else
+  return false;
+#endif
+}
+
+bool healthPollBurstActive(void) {
+#if ENABLE_R1_HEALTH
+  return sHtOdState != HT_OD_IDLE;
 #else
   return false;
 #endif
@@ -1619,6 +1630,8 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
   j.kv("schema", 1)
    .kv("ringConnected", (bool)t.connected)
    .kv("protocolProfile", g2RingProtocolProfileName(control.protocolProfile))
+   .kv("protocolProfileKnown", (bool)control.protocolProfileKnown)
+   .kv("healthRefreshSupported", g2RingHealthPageRefreshSupported())
    .kv("setupState", g2RingSetupStateName(control.setupState))
    .kv("setupError", g2RingTransactionErrorName(control.setupLastError))
    .kv("hrValid", (bool)t.hrValid)
@@ -1656,6 +1669,7 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
    .kv("healthLoggingEnabled", (bool)gSettings.healthLoggingEnabled)
    .kv("healthLoggingActive", healthLoggingIsActive())
    .kv("healthLoggingPollIntervalSec", (unsigned)gSettings.healthLoggingPollIntervalSec)
+   .kv("healthLoggingTimedPollSupported", g2RingPointPollingSupported())
    .kv("healthLoggingR1Selected", (bool)((gSensorLogMask & LOG_R1) != 0))
    .kv("healthLoggingWorkerRunning", (bool)gSensorLoggingRunning)
    .kv("healthLoggingAtRest", captureEncryptModeName(gSettings.captureEncryptMode))
@@ -1710,8 +1724,19 @@ const char* cmd_healthstatus(const String& argsInput) {
   sub.toLowerCase();
 
   if (sub == "poll") {
-    if (!healthStartPollBurst()) return "Error: ring not connected — connect via Bluetooth → R1 Ring";
-    return "SUCCESS: R1 Health poll burst started (HR/HRV/SpO2/temp/battery)";
+    if (!healthStartPollBurst()) {
+      if (!g2RingIsConnected()) {
+        return "Error: ring not connected — connect via Bluetooth → R1 Ring";
+      }
+      G2RingControlStatus control{};
+      g2RingGetControlStatus(control);
+      const bool refreshSupported = g2RingHealthPageRefreshSupported();
+      return control.protocolProfileKnown &&
+                     !refreshSupported
+                 ? "Error: health refresh is unsupported on the active ring profile; no command sent"
+                 : "Error: ring setup/profile is not ready for health refresh; no command sent";
+    }
+    return "SUCCESS: R1 Health refresh started";
   }
   if (sub == "history") {
     if (!g2RingRequestHistoryRefresh(false))
@@ -1787,7 +1812,7 @@ const char* cmd_healthstatus(const String& argsInput) {
            r1HealthHistoryFetchStateName(history.fetchState),
            (unsigned long)history.dayStart,
            (unsigned)history.activity.bucketCount,
-           history.activity.fullDayVerified ? "full verified" : "partial/unverified",
+           history.activity.fullDayVerified ? "message verified" : "unverified",
            store.available ? "available" : "unavailable",
            r1HealthHistoryStoreErrorName(store.error),
            captureEncryptModeName(gSettings.captureEncryptMode),
@@ -1812,26 +1837,19 @@ void healthLoggingTick() {
     }
   }
 
-  // On-demand poll burst (CLI/web/OLED can also poll locally).
-  // Yield the ring TX while the Health page owns Poll Now / entry burst.
-  if (sHtOdState == HT_OD_POLLING) {
-    if (!g2RingIsConnected()) {
+  // On-demand exact-profile refresh uses the same generation-bound composite
+  // as the lens page.
+  if (sHtOdState == HT_OD_PROFILE_REFRESH) {
+    G2RingHealthRefreshStatus status{};
+    if (!g2RingGetHealthPageRefreshStatus(sHtOdRefresh, status)) {
       sHtOdState = HT_OD_IDLE;
-    } else if (g2HealthPageIsActive()) {
-      // Pause — resume next tick when page closes.
-    } else if (sHtOdLastMs == 0 || (long)(now - sHtOdLastMs) >= 700) {
-      (void)g2RingPollVital(sHtOdCursor);
-      sHtOdCursor++;
-      sHtOdLastMs = now;
-      if (sHtOdCursor >= G2_RING_POLL_VITAL_COUNT) {
-        sHtOdState = HT_OD_SETTLE;
-        sHtOdLastMs = now;
+      sHtOdRefresh = G2RingHealthRefreshHandle{};
+    } else if (status.completed) {
+      sHtOdState = HT_OD_IDLE;
+      sHtOdRefresh = G2RingHealthRefreshHandle{};
+      if (status.successful || status.partial) {
+        healthLoggingNotePageRefresh();
       }
-    }
-  } else if (sHtOdState == HT_OD_SETTLE) {
-    if ((long)(now - sHtOdLastMs) >= 1500) {
-      sHtOdState = HT_OD_IDLE;
-      healthLoggingNotePageRefresh();
     }
   }
 
@@ -1866,6 +1884,13 @@ void healthLoggingTick() {
         }
       }
     }
+    return;
+  }
+
+  if (!g2RingPointPollingSupported()) {
+    // Health logging must not manufacture a successful point-poll cycle on a
+    // profile whose point query/ingestion contract is unproven.
+    sHtMineState = HT_MINE_IDLE;
     return;
   }
 
@@ -2499,13 +2524,14 @@ const CommandEntry healthCommands[] = {
     "  on: enable LOG_R1, force format=CSV, start under /logging_captures/sensors/, persist for boot\n"
     "      (one dated per-day file when the clock is set, boot-<N>/ until sync then roll)\n"
     "  off: remove LOG_R1; stop logging if no other sensors remain\n"
-    "  interval <sec>: how often local logging polls/mines the ring (default 900 = 15 min)\n"
-    "  R1-only sessions write ONLY on that mine (and Poll Now) — no 5s empty heartbeats\n"
+    "  interval <sec>: legacy POINT mining interval (default 900 = 15 min)\n"
+    "  On 2.2.9, logging is passive/on-demand and records Poll Now refreshes; it sends no timed POINT query\n"
+    "  R1-only sessions write only on an admitted mine/refresh — no 5s empty heartbeats\n"
     "  This does not change the ring's health-collection privacy setting." },
   { "healthstatus", "R1 live vitals, ring controls, local logging, and typed history status", false, cmd_healthstatus,
     "Usage: healthstatus [json|poll|history|force-history|refresh-controls]\n"
     "  bare/json: live values, desired/observed controls, local logging, history/store\n"
-    "  poll: kick HR→HRV→SpO2→battery point queries (replies via notify)\n"
+    "  poll: exact-2.2.9 DAILY HR/HRV/SpO2/sleep/activity + deviceStatus refresh\n"
     "  history: normal typed history refresh; force-history: admin freshness bypass\n"
     "  refresh-controls: read low-power state; health collection has no proven GET and stays Unknown\n"
     "  BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page" },

@@ -11,6 +11,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Filesystem.h"
+#include "System_OTASafety.h"   // otaSafetyPartitionIsBlank — shared blank-partition probe
 #include "System_Logging.h"
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
@@ -61,21 +62,16 @@ bool filesystemReady = false;
 // partition holding real data costs a few microseconds to reject. A genuinely
 // blank partition costs one full read of the region — acceptable because this
 // only ever runs after a mount has already failed, which is not a hot path.
+//
+// "Logically blank" has two physical shapes on a flash-encrypted board
+// (boards/feathers3_fe) — raw all-0xFF after `esptool erase_flash`, or
+// decrypted all-0xFF after the first-ever encryption boot encrypted an erased
+// region in place — and the decrypting esp_partition_read() would never see
+// the first one as 0xFF. otaSafetyPartitionIsBlank() checks both views (raw
+// first, decrypted only when part->encrypted) and is shared with the NVS
+// full-erase guard, which has the same "is there anything to lose?" question.
 static bool littlefsPartitionIsBlank(const esp_partition_t* part) {
-  if (!part) return false;
-  static uint8_t buf[512];
-  for (size_t off = 0; off < part->size; off += sizeof(buf)) {
-    const size_t chunk = (part->size - off) < sizeof(buf) ? (part->size - off) : sizeof(buf);
-    if (esp_partition_read(part, off, buf, chunk) != ESP_OK) {
-      // Cannot prove blankness — fail closed and preserve.
-      ESP_LOGE("FS", "blank-probe read failed at offset %u; assuming data present", (unsigned)off);
-      return false;
-    }
-    for (size_t i = 0; i < chunk; ++i) {
-      if (buf[i] != 0xFF) return false;
-    }
-  }
-  return true;
+  return otaSafetyPartitionIsBlank(part);
 }
 
 bool initFilesystem() {
@@ -83,7 +79,7 @@ bool initFilesystem() {
   delay(50);  // Allow USB serial to attach before early boot logs
 
   // Configure LittleFS using ESP-IDF native API (bypasses Arduino wrapper issues)
-  bool mounted = LittleFS.begin(false, "/littlefs", 10, "littlefs");
+  bool mounted = LittleFS.begin(false, "/littlefs", 10, kLittleFsPartitionLabel);
 
   if (!mounted) {
     // Retained data and cryptographic material live here. Never turn a mount
@@ -95,11 +91,11 @@ bool initFilesystem() {
     // erased board unable to boot at all (there is no other format path in the
     // firmware). Corruption of real data still fails closed, exactly as before.
     const esp_partition_t* part = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "littlefs");
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, kLittleFsPartitionLabel);
     if (part && littlefsPartitionIsBlank(part)) {
       ESP_LOGW("FS", "LittleFS partition is blank (erased) — formatting once for first boot");
       logSystemEvent("FS", "LittleFS blank after erase — formatting for first boot");
-      mounted = LittleFS.begin(true, "/littlefs", 10, "littlefs");
+      mounted = LittleFS.begin(true, "/littlefs", 10, kLittleFsPartitionLabel);
       if (mounted) {
         ESP_LOGI("FS", "LittleFS formatted and mounted");
         logSystemEvent("FS", "LittleFS formatted (first boot)");
@@ -216,17 +212,34 @@ bool initFilesystem() {
   // Boot-time JSON validation: warn about corrupt critical config files
   {
     AuthContext sys = VFS::systemAuth("fs.init.json_validate");
-    const char* criticalFiles[] = { "/settings.json", "/system/debug.json", "/system/automations.json", "/system/users/users.json" };
+    // "/settings.json" removed: it is DEAD. The real path is "/system/settings.json"
+    // and a repo-wide grep for this literal finds only this line — so settings.json
+    // has never actually been validated here. Do NOT repoint it: settings already
+    // carries two strictly better guards (the gSettingsLoadedOk save refusal and the
+    // merge-read abort), and a first-character check cannot see truncation, which is
+    // the dominant corruption mode.
+    const char* criticalFiles[] = { "/system/debug.json", "/system/automations.json", "/system/users/users.json" };
     for (const char* path : criticalFiles) {
       if (!VFS::existsGuarded(path, sys)) continue;
       String content;
       if (readText(path, content) && content.length() > 0) {
         content.trim();
         if (content.length() > 0 && content[0] != '{' && content[0] != '[') {
-          ESP_LOGW("FS", "%s appears corrupt (not valid JSON), removing", path);
-          logSystemEvent("FS", "%s failed boot JSON check — DELETED", path);
-          VFS::removeGuarded(path, sys);
-          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, path, "failed boot JSON check - deleted");
+          // QUARANTINE, do not delete. Deleting turns "corrupt" into "absent", and
+          // every load gate treats absent as the legitimate bootstrap case — so the
+          // next save writes defaults straight over what was still recoverable. That
+          // silently defeats the debug.json / notifications / anchors gates. For
+          // users.json it is unrecoverable account loss with no seeder.
+          // The .corrupt copy stays readable via the file manager for recovery.
+          String quarantine = String(path) + ".corrupt";
+          ESP_LOGW("FS", "%s appears corrupt (not valid JSON), quarantining", path);
+          logSystemEvent("FS", "%s failed boot JSON check — renamed to %s", path,
+                         quarantine.c_str());
+          VFS::removeGuarded(quarantine.c_str(), sys);   // clear any older quarantine
+          if (!VFS::renameGuarded(path, quarantine, sys)) {
+            logSystemEvent("FS", "%s quarantine rename FAILED — file left in place", path);
+          }
+          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, path, "failed boot JSON check - quarantined");
         }
       }
     }
@@ -239,9 +252,11 @@ bool initFilesystem() {
 
   // Now safe to broadcast (this may trigger CLI history allocation, which will be logged)
   // Show FS stats
-  size_t total = LittleFS.totalBytes();
-  size_t used = LittleFS.usedBytes();
-  BROADCAST_PRINTF("FS Total: %zu bytes, Used: %zu, Free: %zu", total, used, total - used);
+  uint64_t total = 0, used = 0, freeBytes = 0;
+  (void)VFS::getStats(VFS::INTERNAL, total, used, freeBytes);
+  BROADCAST_PRINTF("FS Total: %llu bytes, Used: %llu, Free: %llu",
+                   (unsigned long long)total, (unsigned long long)used,
+                   (unsigned long long)freeBytes);
 
 #if ENABLE_AUTOMATION
   // Boot-time automations.json sanitation: ensure no duplicate IDs persist from manual edits

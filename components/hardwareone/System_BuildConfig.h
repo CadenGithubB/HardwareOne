@@ -1,6 +1,16 @@
 #ifndef SYSTEM_BUILDCONFIG_H
 #define SYSTEM_BUILDCONFIG_H
 
+// The active board's sdkconfig is ground truth for which ESP-IDF stacks exist —
+// the DERIVED section at the bottom reads it (see the CONFIG_BT_ENABLED rule).
+// Guarded so host-side tooling that preprocesses this header without the IDF
+// include paths still parses; such a run keeps the literals un-derived.
+#if defined(__has_include)
+#  if __has_include("sdkconfig.h")
+#    include "sdkconfig.h"
+#  endif
+#endif
+
 // ╔═══════════════════════════════════════════════════════════════════════════╗
 // ║                     USER CONFIGURATION - EDIT HERE                        ║
 // ╠═══════════════════════════════════════════════════════════════════════════╣
@@ -33,6 +43,7 @@
 //     ENABLE_MQTT, ENABLE_HTTPS,
 //     ENABLE_LLM_BACKEND, ENABLE_LLM_SOURCE_ONBOARD, ENABLE_LLM_SOURCE_CM5,
 //     ENABLE_MAPS, ENABLE_AUTOMATION, ENABLE_EDGE_IMPULSE, ENABLE_GAMES,
+//     ENABLE_G2_TESTSUITE,
 //     ENABLE_RASPBERRY_PI_HOST_POWER, ENABLE_RASPBERRY_PI_HOST_FAN
 //
 // The regex expects EXACTLY this shape, on a single non-indented line:
@@ -91,7 +102,7 @@
   #define CUSTOM_ENABLE_WEB_BOND       0
   #define CUSTOM_ENABLE_WEB_MQTT       0
   #define CUSTOM_ENABLE_WEB_GAMES      0
-  #define CUSTOM_ENABLE_WEB_MAPS       0
+  #define CUSTOM_ENABLE_WEB_MAPS       1
   #define CUSTOM_ENABLE_WEB_BATTERY    1
   #define CUSTOM_ENABLE_WEB_R1_HEALTH  1
 #endif
@@ -103,7 +114,7 @@
 
 // MQTT: Home Assistant integration via MQTT broker.
 // Auto-disabled if WiFi is off.
-#define ENABLE_MQTT             0
+#define ENABLE_MQTT             1
 
 
 // =============================================================================
@@ -126,7 +137,7 @@
 // build (camera + mic only) — level 0 also zeroes ENABLE_OLED_DISPLAY and every
 // ENABLE_*_SENSOR below (see the level table further down), so the screen and the
 // sensor drivers fall out on their own.
-#define I2C_FEATURE_LEVEL       4   // CARRIER BUILD: XIAO Sense setting (drops OLED + sensor/I2C layer for BT flash headroom); was 4 (FeatherS3 CUSTOM)
+#define I2C_FEATURE_LEVEL       4   // CARRIER BUILD: XIAO Sense setting
 
 #if I2C_FEATURE_LEVEL == 4
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
@@ -175,6 +186,13 @@
 // Harmless to leave set on other boards: every site that reads it is already
 // nested inside `defined(ARDUINO_XIAO_ESP32S3_DEV)`, so it goes inert on the
 // FeatherS3 rather than needing to be flipped back.
+//
+// 2026-08-23: the gates below test the VALUE, not defined(). They used to test
+// `defined(XIAO_ESP32S3_SENSE_ENABLED)`, which meant setting this to 0 left the
+// camera + PDM mic fully compiled in (~114 KB: System_Camera_DVP 37,924 +
+// System_Microphone 34,932 + libespressif__esp32-camera 30,916 + System_LiveAudio
+// 10,566). An undefined macro evaluates to 0 in #if, so reading the value is
+// safe whether or not the define exists.
 #define XIAO_ESP32S3_SENSE_ENABLED 1
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640). PICO board has none.
@@ -183,7 +201,7 @@
 // System_Camera_DVP.cpp). Still overridable by a pre-define; all other boards
 // default off.
 #ifndef ENABLE_CAMERA_SENSOR
-  #if defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && defined(XIAO_ESP32S3_SENSE_ENABLED))
+  #if defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && XIAO_ESP32S3_SENSE_ENABLED)
     #define ENABLE_CAMERA_SENSOR  1
   #else
     #define ENABLE_CAMERA_SENSOR  0
@@ -194,7 +212,7 @@
 // XIAO ESP32S3 Sense, which has an onboard PDM mic (CLK=GPIO42, DATA=GPIO41).
 // Overridable by a pre-define; all other boards default off.
 #ifndef ENABLE_MICROPHONE_SENSOR
-  #if defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && defined(XIAO_ESP32S3_SENSE_ENABLED))
+  #if defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && XIAO_ESP32S3_SENSE_ENABLED)
     #define ENABLE_MICROPHONE_SENSOR  1
   #else
     #define ENABLE_MICROPHONE_SENSOR  0
@@ -221,7 +239,9 @@
 // **NB:** this flag only gates OUR application code. To actually free the
 // ~14 KB IRAM + ~70 KB flash + ~80 KB DRAM that the ESP-IDF Bluedroid
 // stack consumes, you also need `CONFIG_BT_ENABLED=n` in sdkconfig.
-// (Both flags are kept in sync below — see sdkconfig.defaults.)
+// The reverse direction is automatic: on a board whose sdkconfig drops the
+// stack (boards/qtpy_esp32.defaults), the DERIVED section forces this flag
+// to 0 — a 1 here is a *request*, honored only where Bluedroid exists.
 // CARRIER BUILD (2026-08-07): BT enabled so the G2 glasses mic can reach the
 // CM5 over the UART link. Flash recovered by dropping maps + I2C sensors
 // (already off) below; camera kept.
@@ -237,6 +257,16 @@
 // stack). Plain 0/1 for CMake grep; auto-forced off in DERIVED rules when
 // BT or G2 is off. Ring connect stays under ENABLE_G2_GLASSES.
 #define ENABLE_R1_HEALTH        1
+
+// G2 on-glasses transport test bench (System -> Tests) and the g2probe /
+// g2imgprobe wire probes. Sends payloads of known sizes through the CREATE-list
+// path to observe single-fragment, near-ceiling and multi-fragment behaviour
+// without recompiling. ON by default — it is used on hardware. Turn it off for
+// a tight build: it also drops the Q-series image probes, whose only caller is
+// this page's dispatch table, so --gc-sections takes them too. Measured on the
+// XIAO carrier build: 25,566 B for the page + ~42 KB of probes = ~68 KB.
+// Requires Bluetooth + G2; auto-forced off in DERIVED rules below.
+#define ENABLE_G2_TESTSUITE     0
 
 // VFS root for G2 animated icon packs (BMP frames): SD card (`/sd/...`).
 // Keeps pack data off LittleFS; requires SD mounted (web + lens picker use VFS).
@@ -310,6 +340,18 @@
 // Automation: scheduled tasks + conditional commands.
 #define ENABLE_AUTOMATION       1
 
+// Authenticated UART host link (System_UartLink.cpp): the machine-command
+// channel for a Linux host on this board's UART_LINK_* pins. Carries
+// voicefetch, dictation, live PCM and the CM5 presence heartbeat. Setting this
+// to 0 undefines UART_LINK_PORT in the DERIVED section, which drives every
+// guard the codebase already has — no separate stub campaign needed.
+// Compile-time only: the runtime switch is gSettings.uartLinkEnabled, which
+// still defaults off, so 1 changes nothing on any board.
+// Deliberately NOT in the CMake-parsed list at the top of this file — the #if
+// does the work, and a second copy of the condition in a second language is
+// exactly the silent-regex-failure mode that list warns about.
+#define ENABLE_UART_HOST_LINK   1
+
 // Raspberry Pi 5 / CM5 host-power control over the authenticated UART host
 // link. This compiles the `cm5 power` command family and its finite EVT/ACK
 // protocol; it does not enable the UART link at runtime by itself.
@@ -367,7 +409,7 @@
 //   still be read as its literal and compile the engine with the feature off.
 //   The dependency between them is enforced by #error in §8 instead.
 #define ENABLE_LLM_BACKEND          1
-#define ENABLE_LLM_SOURCE_ONBOARD   0
+#define ENABLE_LLM_SOURCE_ONBOARD   1
 #define ENABLE_LLM_SOURCE_CM5       1
 
 #if ENABLE_LLM_SOURCE_ONBOARD
@@ -378,7 +420,7 @@
 #endif
 
 // Maps: offline maps and waypoints web page.
-#define ENABLE_MAPS             0   // CARRIER BUILD: dropped for BT flash headroom; was 1
+#define ENABLE_MAPS             1   // CARRIER BUILD: dropped for BT flash headroom; was 1
 
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -666,6 +708,24 @@
 // Adding a new rule: pick the right prerequisite, undef + redefine each
 // dependent. Don't try to predict combinations — let the rules compose.
 
+// BLE app code requires the Bluedroid stack in the active board's sdkconfig.
+// ENABLE_BLUETOOTH=1 above only *requests* BT; a board whose sdkconfig drops
+// the stack (boards/qtpy_esp32.defaults sets CONFIG_BT_ENABLED=n to reclaim
+// ~80 KB DRAM on the classic ESP32) would otherwise fail every BT translation
+// unit with `esp_gap_ble_api.h: No such file or directory`. Downgrading here
+// keeps the ONE shared header correct for every per-board build lane, and the
+// dependent rules below (WEB_BLUETOOTH, G2_GLASSES → R1_HEALTH/TESTSUITE)
+// cascade off the derived value. components/hardwareone/CMakeLists.txt applies
+// the same downgrade to its grepped copy (HW_CFG_ENABLE_BLUETOOTH), so the
+// coarse source-list filter and these compile-time gates cannot disagree.
+// CONFIG_IDF_TARGET doubles as the "sdkconfig.h was actually loaded" sentinel
+// (see the guarded include at the top of this file).
+#if defined(CONFIG_IDF_TARGET) && \
+    (!defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BT_BLUEDROID_ENABLED))
+  #undef ENABLE_BLUETOOTH
+  #define ENABLE_BLUETOOTH 0
+#endif
+
 // HTTP server gates the entire web surface.
 #if !ENABLE_HTTP_SERVER
   #undef ENABLE_WEB_SENSORS
@@ -766,6 +826,13 @@
 #if !ENABLE_R1_HEALTH
   #undef ENABLE_WEB_R1_HEALTH
   #define ENABLE_WEB_R1_HEALTH 0
+#endif
+
+// The Tests page is a G2 lens page: it needs BT + G2 for the same reason R1
+// Health does. Plain literal above for CMake; this is the compile truth.
+#if !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
+  #undef ENABLE_G2_TESTSUITE
+  #define ENABLE_G2_TESTSUITE 0
 #endif
 
 // MQTT subsystem itself requires WiFi (broker is over TCP).
@@ -906,7 +973,7 @@
 // Note: Sense uses same variant as base XIAO ESP32S3, expansion board is add-on hardware
 // To enable Sense-specific features, define XIAO_ESP32S3_SENSE_ENABLED in your build
 // IMPORTANT: This block MUST come before the base XIAO block so it matches first
-#elif defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && defined(XIAO_ESP32S3_SENSE_ENABLED))
+#elif defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && XIAO_ESP32S3_SENSE_ENABLED)
   #define BOARD_SUPPORTED       1
   #define BOARD_NAME            "Seeed XIAO ESP32S3 Sense"
   
@@ -1279,7 +1346,15 @@
 // the firmware runs. uartLinkIsRunning() stubs to false on boards with no
 // UART_LINK_* pins, so dictationAvailable() refuses there too and the keyboard
 // skips the mode. Source-agnostic: PDM or G2, whichever the mic layer resolves.
-#define ENABLE_DICTATION        (ENABLE_MICROPHONE && ENABLE_OLED_DISPLAY)
+// Dictation needs a mic and a KEYBOARD to dictate into — not specifically a
+// panel. The module is display-agnostic by design (4 of its 1221 lines mention
+// the OLED at all) and G2_Glasses.cpp:30097 arms it with
+// dictationBeginFor(SOURCE_G2_GLASSES, ...), with full filtering/append and
+// secret-field refusal in G2_Page_TextEntry. Gating on the OLED alone compiled
+// the whole feature out of the XIAO carrier build — glasses present, no panel —
+// which is the one configuration it was written for.
+#define ENABLE_DICTATION        (ENABLE_MICROPHONE && \
+                                 (ENABLE_OLED_DISPLAY || ENABLE_G2_GLASSES))
 
 // =============================================================================
 // LLM FEATURE / SOURCE CONSISTENCY  (see §5 ENABLE_LLM_BACKEND)
@@ -1296,6 +1371,30 @@
 #endif
 #if ENABLE_LLM_SOURCE_CM5 && !defined(UART_LINK_PORT)
   #error "ENABLE_LLM_SOURCE_CM5 requires the authenticated UART host link, and this board defines no UART_LINK_PORT."
+#endif
+
+// A board with no UART_LINK_* pins cannot host the link. Force the flag off so
+// a bare `#if ENABLE_UART_HOST_LINK` is correct everywhere — same shape as the
+// ENABLE_G2_GLASSES rule earlier in this file.
+#if ENABLE_UART_HOST_LINK && !defined(UART_LINK_PORT)
+  #undef ENABLE_UART_HOST_LINK
+  #define ENABLE_UART_HOST_LINK 0
+#endif
+
+// cm5 power, cm5 fan and the CM5 LLM source all ride the link. Fail loudly
+// rather than shipping three gutted features.
+#if (ENABLE_LLM_SOURCE_CM5 || ENABLE_RASPBERRY_PI_HOST_POWER || ENABLE_RASPBERRY_PI_HOST_FAN) && !ENABLE_UART_HOST_LINK
+  #error "cm5 power/fan and ENABLE_LLM_SOURCE_CM5 all require the authenticated UART host link. Set ENABLE_UART_HOST_LINK 1 (on a board that defines UART_LINK_PORT), or turn those features off."
+#endif
+
+// THE GATE. Undefining the port macro activates every guard that already
+// exists: the inert stubs in System_UartLink.h, the cmd_voicefetch fallback in
+// System_UartLink.cpp, and all seven guarded regions in System_Settings.cpp.
+// ~72% of System_UartLink.cpp falls out; the session/auth prologue at its top
+// is unconditional BY DESIGN (see that file's header comment) so revocation
+// sweeps and tgRequireAuth keep linking on every board.
+#if !ENABLE_UART_HOST_LINK && defined(UART_LINK_PORT)
+  #undef UART_LINK_PORT
 #endif
 
 // =============================================================================

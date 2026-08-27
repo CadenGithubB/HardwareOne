@@ -51,9 +51,17 @@ constexpr int kMaxRenamesPerPass = 4;
 static bool gAnchoredThisBoot = false;
 static bool gSweepDone        = false;
 
+// Set when registryLoad() skipped at least one line it could not parse. The
+// dominant corruption mode here is a TRUNCATED FINAL LINE from a power loss
+// mid-append, which leaves a partial table — and registryPrune() would then
+// persist that partial table over the good file, dropping the anchors that were
+// never read. A bool is enough because the only consumer refuses outright.
+static bool gRegistryPartial = false;
+
 static void registryLoad() {
   gAnchorCount = 0;
   gRegistryLoaded = true;
+  gRegistryPartial = false;
   File f = VFS::openGuarded(kAnchorsPath, "r",
                             VFS::systemAuth("timeanchor.load"));
   if (!f) return;
@@ -67,10 +75,15 @@ static void registryLoad() {
       continue;
     }
     line[ll] = '\0';
+    const bool ll_had_content = (ll > 0);
     ll = 0;
     unsigned long b = 0, ms = 0;
     long long ep = 0;
-    if (sscanf(line, "%lu,%lu,%lld", &b, &ms, &ep) == 3) {
+    if (sscanf(line, "%lu,%lu,%lld", &b, &ms, &ep) != 3) {
+      // Unparseable line — almost always a truncated tail. Remember it so the
+      // partial table is never written back over the file it came from.
+      if (ll_had_content) gRegistryPartial = true;
+    } else {
       if (gAnchorCount == kMaxAnchors) {
         // Cap hit — drop the OLDEST (front) so recent boots always fit.
         memmove(&gAnchors[0], &gAnchors[1],
@@ -126,7 +139,15 @@ static void registryPrune(uint32_t boot) {
       break;
     }
   }
-  if (changed) registryPersist();
+  if (changed) {
+    if (gRegistryPartial) {
+      // Refuse: the in-RAM table is missing whatever the unparseable lines held,
+      // and persisting it would make that loss permanent.
+      WARN_SYSTEMF("[anchor] registry parsed only partially - skipping persist");
+    } else {
+      registryPersist();
+    }
+  }
 }
 
 // Append this boot's anchor line (once per boot; caller guards).

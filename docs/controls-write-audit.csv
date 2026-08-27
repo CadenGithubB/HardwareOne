@@ -1,0 +1,408 @@
+module,jsonKey,verdict,wireLine,matchedVerb,admin,accepts10,acceptsOnOff,verify,symptom
+crash,crashCount,APP_READONLY,(none — app renders ReadingRow; no write is ever sent),none — no write is sent; hypothetical li,False,na,na,confirmed,"Display-only row in the app (correct behavior). Value is populated by the boot path from RTC memory (comment System_Settings.cpp:1861-1863, HardwareOne.cpp:1044"
+crash,lastResetReason,APP_READONLY,(none — app renders ReadingRow; no write is ever sent),none — no write is sent; hypothetical li,False,na,na,confirmed,Display-only row in the app (correct behavior). Populated at boot from RTC memory (System_Settings.cpp:1861-1863); no user write path exists on either side.
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,"toggle flips, snaps back on 700ms re-fetch; 'Unknown command: enabled on' in console log"
+debug,sessions,DEAD,sessions on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,cookies,DEAD,cookies on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,login,MISFIRE,login on,login,False,no,no,confirmed,toggle snaps back; login usage error in console. Harmless only because 'on'/'off' is a single arg — a 2-word token would trigger a real authentication attempt (
+debug,bootId,DEAD,bootId on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,handlers,DEAD,handlers on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,requests,DEAD,requests on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,responses,DEAD,responses on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,streaming,DEAD,streaming on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,connection,DEAD,connection on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,events,MISFIRE,events on,none,False,na,na,corrected,value snaps back on re-fetch; 'Unknown command' in console
+debug,broadcast,MISFIRE,broadcast on,none,False,na,na,corrected,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,connection,DEAD,connection on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,config,DEAD,config on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,scanning,DEAD,scanning on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,driver,DEAD,driver on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,files,MISFIRE,files on,files,True,no,no,confirmed,toggle snaps back; filesystem 'files' usage/quoting error (or admin-denied) in console; debugStorageFiles never written
+debug,json,DEAD,json on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,settings,DEAD,settings on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,migration,DEAD,migration on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,permissions,DEAD,permissions on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,stream,DEAD,stream on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,core,DEAD,core on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,router,DEAD,router on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,mesh,DEAD,mesh on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,topology,DEAD,topology on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,metadata,DEAD,metadata on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,core,DEAD,core on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,gatt,DEAD,gatt on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,data,DEAD,data on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,boot,DEAD,boot on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,config,DEAD,config on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,tasks,DEAD,tasks on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,hardware,DEAD,hardware on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,management,DEAD,management on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,registration,DEAD,registration on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,query,DEAD,query on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,execution,DEAD,execution on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,queue,DEAD,queue on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,validation,DEAD,validation on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,system,DEAD,system on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,routing,DEAD,routing on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,queue,DEAD,queue on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,context,DEAD,context on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,stack,DEAD,stack on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,heap,DEAD,heap on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,timing,DEAD,timing on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,scheduler,DEAD,scheduler on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,execution,DEAD,execution on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,condition,DEAD,condition on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,timing,DEAD,timing on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,capture,MISFIRE,capture on,capture,False,no,no,confirmed,"toggling the camera 'Capture' debug flag TAKES A REAL PHOTO and saves it to storage (reply 'Captured: <file>'), or 'Error: Capture failed' if camera closed; the"
+debug,settings,DEAD,settings on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,video,DEAD,video on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,polling,DEAD,polling on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,values,DEAD,values on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,loading,DEAD,loading on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,rendering,DEAD,rendering on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,perf,DEAD,perf on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,load,DEAD,load on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,tokenizer,DEAD,tokenizer on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,forward,DEAD,forward on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,generate,DEAD,generate on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,memory,DEAD,memory on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,sync,DEAD,sync on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,setup,DEAD,setup on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,anchor,DEAD,anchor on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,resolve,DEAD,resolve on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,heap,DEAD,heap on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,stack,DEAD,stack on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,buffers,DEAD,buffers on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,sampleIntervalSec,DEAD,sampleIntervalSec 30,none,False,na,na,confirmed,slider snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,protocol,DEAD,protocol on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,events,MISFIRE,events on,none,False,na,na,corrected,value snaps back on re-fetch; 'Unknown command' in console
+debug,pages,DEAD,pages on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,heartbeat,DEAD,heartbeat on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,dump,DEAD,dump on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,wake,DEAD,wake on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,command,DEAD,command on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,afe,DEAD,afe on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,lifecycle,DEAD,lifecycle on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,tuning,DEAD,tuning on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,bus,DEAD,bus on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,discovery,DEAD,discovery on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,autoStart,DEAD,autoStart on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,enabled,DEAD,enabled on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,connection,DEAD,connection on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,pubsub,DEAD,pubsub on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,discovery,DEAD,discovery on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,commands,DEAD,commands on,none,False,na,na,confirmed,value snaps back on re-fetch; 'Unknown command' in console
+debug,webConsole,WRONG_VALUE,webConsole on,webconsole,True,yes,no,confirmed,turning the switch ON silently stores false and reports success ('disabled (persistent)'); re-fetch shows it snapped back OFF. Turning OFF works only by coincid
+debug,logLevel,REJECTED,"logLevel 0:error (select sends the raw option token, e.g. '3:debug')",loglevel,True,na,no,confirmed,select snaps back to previous value on re-fetch; 'Error: Invalid level' plus usage appended (System_Command.cpp:243-256) in console
+output,serial,DEAD,serial on,none — searched every CommandEntry table,False,na,na,confirmed,"Toggle appears to do nothing: 'Unknown command' lands only in the Console log lane, no error surfaces on the settings card, and the toggle snaps back on the 700"
+output,serialRequireAuth,WRONG_VALUE,serialRequireAuth on,serialrequireauth — System_Settings.cpp:,True,yes,no,confirmed,Turning the toggle ON writes false — i.e. attempting to ENABLE the serial auth gate actually DISABLES it — with a success reply; the toggle snaps back to off on
+output,displayRequireAuth,WRONG_VALUE,displayRequireAuth on,displayrequireauth — System_Settings.cpp,True,yes,no,confirmed,Toggle ON writes false (display auth gate disabled) while reporting success; snaps back to off on the 700 ms re-fetch. Toggle OFF works by accident. Verb is req
+output,sessionIdleWeb,WORKS,sessionIdleWeb 60,"sessionidleweb — settingEditorCommands, ",True,na,no,confirmed,"Slider works: clean integer token always in 0..1440, applied and persisted; re-fetch confirms"
+output,sessionIdleSerial,WORKS,sessionIdleSerial 60,sessionidleserial — settingEditorCommand,True,na,no,confirmed,Slider works: in-range integer applied and persisted
+output,sessionIdleBle,WORKS,sessionIdleBle 15,"sessionidleble — settingEditorCommands, ",True,na,no,confirmed,Slider works: in-range integer applied and persisted. Note this one governs the very BLE session the app writes over — setting it low can log the app itself out
+output,sessionIdleDisplay,WORKS,sessionIdleDisplay 60,sessionidledisplay — settingEditorComman,True,na,no,confirmed,Slider works: in-range integer applied and persisted
+i2c,i2cBusEnabled,WRONG_VALUE,i2cBusEnabled on,i2cbusenabled,True,yes,no,confirmed,"Toggling ON sends ""on"" which writes false: device replies ""i2cBusEnabled set to 0 (reboot required)"" and the switch snaps back to off on the 700 ms re-fetch. To"
+i2c,i2cSdaPin,WORKS,i2cSdaPin 8,i2csdapin,True,na,na,confirmed,"None — slider (min 0/max 48 emitted per buildModuleControlsJson System_Settings.cpp:2663-2667) sends a clean int; handler clamps silently instead of erroring, b"
+i2c,i2cSclPin,WORKS,i2cSclPin 9,i2csclpin,True,na,na,confirmed,None — clean numeric slider write within the clamp range. Reboot required.
+i2c,i2c2BusEnabled,WRONG_VALUE,i2c2BusEnabled on,i2c2busenabled,True,yes,no,confirmed,Identical to i2cBusEnabled: toggle-on writes false and snaps back to off after re-fetch; toggle-off works coincidentally. The app can never enable the second I2
+i2c,i2c2SdaPin,WORKS,i2c2SdaPin -1,i2c2sdapin,True,na,na,confirmed,"None — slider covers -1..48 (min=-1/max emitted since both nonzero), handler clamp range matches. The -1 ""unavailable"" sentinel round-trips correctly. Reboot re"
+i2c,i2c2SclPin,WORKS,i2c2SclPin 41,i2c2sclpin,True,na,na,confirmed,None — clean numeric slider write. Reboot required.
+i2c,oledBus,WORKS_QUIRK,oledBus 1|I2C2,oledbus,True,na,na,confirmed,"Correct value stored, but only by luck: the raw select token ""0|I2C1""/""1|I2C2"" parses right because the digit leads and toInt() ignores the '|label' tail. A lab"
+i2c,inputBus,WORKS_QUIRK,inputBus 0|I2C1,inputbus,True,na,na,confirmed,Same as oledBus: correct write only because option tokens are digit-first; dropdown shows raw 0/1 after re-fetch. Reboot required.
+i2c,gpsBus,WORKS_QUIRK,gpsBus 0|I2C1,gpsbus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+i2c,rtcBus,WORKS_QUIRK,rtcBus 0|I2C1,rtcbus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+i2c,fmRadioBus,WORKS_QUIRK,fmRadioBus 0|I2C1,fmradiobus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+i2c,presenceBus,WORKS_QUIRK,presenceBus 0|I2C1,presencebus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+i2c,imuBus,WORKS_QUIRK,imuBus 0|I2C1,imubus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+i2c,thermalBus,WORKS_QUIRK,thermalBus 0|I2C1,thermalbus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+i2c,tofBus,WORKS_QUIRK,tofBus 0|I2C1,tofbus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+i2c,apdsBus,WORKS_QUIRK,apdsBus 0|I2C1,apdsbus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+i2c,servoBus,WORKS_QUIRK,servoBus 0|I2C1,servobus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+i2c,fuelGaugeBus,WORKS_QUIRK,fuelGaugeBus 0|I2C1,fuelgaugebus,True,na,na,confirmed,Same digit-first-token luck as oledBus. Reboot required.
+cli,oledHistorySize,DEAD,oledHistorySize 60,none — searched all CommandEntry tables ,False,na,na,confirmed,"Slider write silently fails: firmware replies 'Unknown command: oledHistorySize <n>' (visible only in the app's Console log), no value stored, and the ~700 ms l"
+automation,automationsEnabled,DEAD,automationsEnabled on,none — searched all CommandEntry tables,False,na,na,confirmed,"Toggle flips in the UI, firmware replies 'Unknown command: automationsEnabled on' into the BLE console lane, and after the 700 ms loadControls re-fetch (Console"
+power,mode,DEAD,mode Performance,none,False,na,na,confirmed,"Select shows the chosen option briefly, then snaps back to the old value on the 700 ms re-fetch (ConsoleViewModel.kt:1329-1335). Only trace is 'Unknown command:"
+power,autoMode,DEAD,autoMode on,none,False,na,na,confirmed,"Toggle flips visually, then snaps back after the 700 ms controls re-fetch; 'Unknown command: autoMode on' visible only in Console log."
+power,batteryThreshold,DEAD,batteryThreshold 50,none,False,na,na,confirmed,Slider snaps back to previous value after the 700 ms re-fetch; 'Unknown command: batteryThreshold 50' in Console log only.
+power,displayDimLevel,DEAD,displayDimLevel 30,none,False,na,na,confirmed,Slider snaps back after the 700 ms re-fetch; 'Unknown command: displayDimLevel 30' in Console log only.
+power,transitionCooldownMs,DEAD,transitionCooldownMs 5000,none,False,na,na,confirmed,Slider snaps back after the 700 ms re-fetch; 'Unknown command: transitionCooldownMs 5000' in Console log only.
+power,powerSaveMinutes,DEAD,powerSaveMinutes 10,none,False,na,na,confirmed,Slider snaps back after the 700 ms re-fetch; 'Unknown command: powerSaveMinutes 10' in Console log only.
+led,ledBrightness,WORKS,ledBrightness 75,ledbrightness,False,na,na,confirmed,Slider works; value persists and brightness changes on the strip immediately
+led,ledStartupEnabled,WRONG_VALUE,ledStartupEnabled on,ledstartupenabled,False,yes,no,confirmed,Toggling ON silently writes false; after the 700 ms re-fetch the switch snaps back to OFF. Toggling OFF coincidentally works (off -> false). The setting can nev
+led,ledStartupEffect,WORKS,ledStartupEffect rainbow,ledstartupeffect,False,na,na,confirmed,"Select works; every app option token (none,rainbow,pulse,fade,blink,strobe from SettingEntry options, System_NeoPixel.cpp:523) is exactly the handler's whitelis"
+led,ledStartupColor,WORKS_QUIRK,ledStartupColor cyan,ledstartupcolor,False,na,na,confirmed,"Free-text field stores any string, including typos/garbage; the value persists and re-fetch shows it, but unknown color names silently render as cyan at boot (g"
+led,ledStartupColor2,WORKS_QUIRK,ledStartupColor2 magenta,ledstartupcolor2,False,na,na,confirmed,Same as ledStartupColor: any text is stored verbatim; unknown names silently fall back to magenta at boot (HardwareOne.cpp:1826-1827)
+led,ledStartupDuration,WORKS,ledStartupDuration 1000,ledstartupduration,False,na,na,confirmed,"Slider works; app slider bounds (min 100, max 10000 from SettingEntry System_NeoPixel.cpp:526) exactly match the handler's accepted range"
+wifi,enabled,APP_READONLY,"n/a — app renders ReadingRow, no write ever sent (hypothetical 'enabled on' would match no verb)",none — readOnly:true is the 14th column ,False,na,na,confirmed,Row is display-only in the app; value cannot be changed from this card (by design).
+wifi,autoReconnect,DEAD,autoReconnect on,none — searched all CommandEntry tables,False,na,na,confirmed,"Toggle flips in the UI, firmware replies 'Unknown command: autoreconnect on' into the BLE console lane, and after the app's 700 ms re-fetch the toggle snaps bac"
+wifi,ntpServer,WORKS_QUIRK,ntpServer pool.ntp.org   (text field sends raw string; ControlWidgets.kt:54),"ntpserver — settingsCommands[], System_S",True,na,na,confirmed,"Works when the device is on WiFi and the host resolves and answers NTP. If the device is offline/host bad: handler errors, no write, app field snaps back after "
+wifi,tzOffsetMinutes,WORKS_QUIRK,"tzOffsetMinutes -480|UTC-8 (Pacific/PST)   (options present, so select branch beats slider — ControlWidgets.kt:50-53 — and sends the raw option token)","tzoffsetminutes — settingsCommands[], Sy",True,na,na,confirmed,"Correct offset is applied and persisted for all 28 options, and NTP re-syncs immediately — but only because atoi happens to prefix-parse the ugly 'value|label' "
+http,httpAutoStart,WRONG_VALUE,httpAutoStart on,httpAutoStart,True,yes,no,confirmed,"Toggling ON silently writes false: firmware replies success ('httpAutoStart set to 0'), app's 700 ms re-fetch snaps the toggle back to OFF. Toggling OFF works o"
+http,httpsEnabled,WRONG_VALUE,httpsEnabled on,httpsEnabled,True,yes,no,confirmed,Toggling ON writes false with a success reply ('httpsEnabled set to 0 (takes effect after reboot)'); toggle snaps back to OFF after re-fetch. App can disable HT
+http,webCliHistorySize,WORKS,webCliHistorySize 50,webclihistorysize,True,na,na,confirmed,Works: entry has min=1 max=100 (System_WiFi.cpp:1623) so the app renders a slider sending a clean integer already inside the handler's clamp range; value applie
+espnow,enabled,DEAD,enabled on,none,False,na,na,confirmed,"Toggle flips, firmware replies 'Unknown command: enabled' in the console lane only; value snaps back on the 700 ms re-fetch (ConsoleViewModel.kt:1329-1335)"
+espnow,mesh,DEAD,mesh on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; 'Unknown command: mesh' only in console log
+espnow,userSyncEnabled,DEAD,userSyncEnabled on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,captureToSd,DEAD,captureToSd on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,captureSkipHeartbeats,DEAD,captureSkipHeartbeats on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,deviceName,DEAD,deviceName node-42,none,False,na,na,confirmed,Text field reverts to stored value after re-fetch; unknown-command reply in console only
+espnow,room,DEAD,room kitchen,none,False,na,na,confirmed,Text field reverts after re-fetch; unknown-command reply in console only
+espnow,zone,DEAD,zone upstairs,none,False,na,na,confirmed,Text field reverts after re-fetch; unknown-command reply in console only
+espnow,tags,DEAD,"tags sensor,mobile",none,False,na,na,confirmed,Text field reverts after re-fetch; unknown-command reply in console only
+espnow,friendlyName,DEAD,friendlyName Kitchen Node,none,False,na,na,confirmed,Text field reverts after re-fetch; unknown-command reply in console only
+espnow,stationary,DEAD,stationary on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,firstTimeSetup,DEAD,firstTimeSetup on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,meshRole,DEAD,meshRole 1:Master,none,False,na,na,confirmed,Select snaps back after re-fetch; unknown-command reply in console only
+espnow,masterMAC,DEAD,masterMAC AA:BB:CC:DD:EE:FF,none,False,na,na,confirmed,Text field reverts after re-fetch; unknown-command reply in console only
+espnow,backupMAC,DEAD,backupMAC AA:BB:CC:DD:EE:FF,none,False,na,na,confirmed,Text field reverts after re-fetch; unknown-command reply in console only
+espnow,backupEnabled,DEAD,backupEnabled on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,masterHeartbeatInterval,DEAD,masterHeartbeatInterval 10000,none,False,na,na,confirmed,Slider snaps back after re-fetch; unknown-command reply in console only
+espnow,failoverTimeout,DEAD,failoverTimeout 20000,none,False,na,na,confirmed,Slider snaps back after re-fetch; unknown-command reply in console only
+espnow,workerStatusInterval,DEAD,workerStatusInterval 30000,none,False,na,na,confirmed,Slider snaps back after re-fetch; unknown-command reply in console only
+espnow,topoDiscoveryInterval,DEAD,topoDiscoveryInterval 60000,none,False,na,na,confirmed,Slider snaps back after re-fetch; unknown-command reply in console only
+espnow,topoAutoRefresh,DEAD,topoAutoRefresh on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,heartbeatBroadcast,DEAD,heartbeatBroadcast on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,meshTTL,DEAD,meshTTL 3,none,False,na,na,confirmed,Slider snaps back after re-fetch; unknown-command reply in console only
+espnow,meshAdaptiveTTL,DEAD,meshAdaptiveTTL on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,meshPeerMax,DEAD,meshPeerMax 8,none,False,na,na,confirmed,Slider snaps back after re-fetch; unknown-command reply in console only
+espnow,sensorBroadcastIntervalMs,DEAD,sensorBroadcastIntervalMs 1000,none,False,na,na,confirmed,Slider snaps back after re-fetch; unknown-command reply in console only
+espnow,bondModeEnabled,DEAD,bondModeEnabled on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; unknown-command reply in console only
+espnow,bondRole,REJECTED,bondRole 1:Master (display/gamepad),"""bondrole"" — System_ESPNow.cpp:14855",True,yes,no,confirmed,Select shows no change; console gets 'Error: invalid arguments — Usage: bondrole ...' plus appended usage (System_Command.cpp:244-254); value snaps back on re-f
+espnow,bondPeerMac,DEAD,bondPeerMac AA:BB:CC:DD:EE:FF,none,False,na,na,confirmed,Text field reverts after re-fetch; unknown-command reply in console only
+espnow,bondStreamThermal,WRONG_VALUE,bondStreamThermal on,"""bondstreamthermal"" — System_ESPNow.cpp:",True,yes,no,confirmed,Turning ON writes false with a success reply — toggle snaps back to off on re-fetch; turning OFF 'works' only because off also parses false. Cannot be enabled f
+espnow,bondStreamTof,WRONG_VALUE,bondStreamTof on,"""bondstreamtof"" — System_ESPNow.cpp:1489",True,yes,no,confirmed,Turning ON silently writes false; toggle snaps back to off. Turning OFF works by coincidence
+espnow,bondStreamImu,WRONG_VALUE,bondStreamImu on,"""bondstreamimu"" — System_ESPNow.cpp:1489",True,yes,no,confirmed,Turning ON silently writes false; toggle snaps back to off. Turning OFF works by coincidence
+espnow,bondStreamGps,WRONG_VALUE,bondStreamGps on,"""bondstreamgps"" — System_ESPNow.cpp:1489",True,yes,no,confirmed,Turning ON silently writes false; toggle snaps back to off. Turning OFF works by coincidence
+espnow,bondStreamInput,WRONG_VALUE,bondStreamInput on,"""bondstreaminput"" — System_ESPNow.cpp:14",True,yes,no,confirmed,Turning ON silently writes false; toggle snaps back to off. Turning OFF works by coincidence
+espnow,bondStreamFmradio,WRONG_VALUE,bondStreamFmradio on,"""bondstreamfmradio"" — System_ESPNow.cpp:",True,yes,no,confirmed,Turning ON silently writes false; toggle snaps back to off. Turning OFF works by coincidence
+espnow,bondStreamRtc,WRONG_VALUE,bondStreamRtc on,"""bondstreamrtc"" — System_ESPNow.cpp:1490",True,yes,no,confirmed,Turning ON silently writes false; toggle snaps back to off. Turning OFF works by coincidence
+espnow,bondStreamPresence,WRONG_VALUE,bondStreamPresence on,"""bondstreampresence"" — System_ESPNow.cpp",True,yes,no,confirmed,Turning ON silently writes false; toggle snaps back to off. Turning OFF works by coincidence
+mqtt,mqttClientEnabled,WORKS,mqttClientEnabled on,mqttclientenabled — System_MQTT.cpp:1659,True,yes,yes,confirmed,Toggle applies and persists. Turning OFF also stops a running MQTT client immediately; turning ON only sets the flag (client starts via openmqtt or autostart at
+mqtt,mqttAutoStart,WORKS,mqttAutoStart on,mqttautostart — System_MQTT.cpp:1663,True,yes,yes,confirmed,Toggle applies and persists correctly.
+mqtt,mqttHost,WORKS_QUIRK,mqttHost broker.example.com,mqttHost — System_MQTT.cpp:1664,True,na,na,confirmed,Normal text writes apply verbatim. Clearing the field and pressing Set sends an empty arg = display-only no-op; old value reappears after the 700 ms re-fetch. H
+mqtt,mqttPort,WORKS,mqttPort 1883,mqttPort — System_MQTT.cpp:1665,True,na,na,confirmed,Slider integer lands in range and persists. UX caveat only: a 1-65535 Material slider is extremely coarse for picking an exact port.
+mqtt,mqttTLSMode,REJECTED,"mqttTLSMode 0:None (also ""1:TLS"", ""2:TLS+Verify"")",mqttTLSMode — System_MQTT.cpp:1666,True,na,na,confirmed,"Every app write fails: user picks an option, firmware replies a usage error (visible only in the Console log), and the select snaps back to the old value on the"
+mqtt,mqttCACertPath,WORKS_QUIRK,mqttCACertPath /system/certs/mqtt_ca.crt,mqttCACertPath — System_MQTT.cpp:1667,True,na,na,confirmed,"Normal path writes apply (even to nonexistent files, with a warning only in the Console log). Typing literal ""clear"" or ""none"" clears the path and silently down"
+mqtt,mqttSubscribeExternal,WORKS,mqttSubscribeExternal on,mqttSubscribeExternal — System_MQTT.cpp:,True,yes,yes,confirmed,"Toggle applies and persists. Firmware notes ""restart MQTT to apply"" when enabling. Strictest bool parser in the module — garbage is rejected instead of coerced "
+mqtt,mqttSubscribeTopics,WORKS_QUIRK,"mqttSubscribeTopics home/+/temp,home/+/humidity",mqttSubscribeTopics — System_MQTT.cpp:16,True,na,na,confirmed,"Comma-separated topic list stores verbatim and persists. Typing literal ""clear"" empties the list instead of subscribing to a topic named clear. Empty submit is "
+mqtt,mqttUser,WORKS_QUIRK,mqttUser homeassistant,mqttUser — System_MQTT.cpp:1671,True,na,na,confirmed,"Normal usernames apply and persist. Literal ""clear"" or ""none"" clears the username (a broker user actually named none cannot be set). Empty submit is a no-op; sn"
+mqtt,mqttPassword,APP_READONLY,"(none — entry is isSecret, never emitted in controls json, app renders no control)",mqttPassword — System_MQTT.cpp:1672,True,na,na,confirmed,The MQTT password simply does not appear in the app's mqtt settings card; it can only be set via the raw console command mqttPassword <pass>.
+mqtt,mqttBaseTopic,WORKS_QUIRK,mqttBaseTopic hardwareone/office,mqttBaseTopic — System_MQTT.cpp:1673,True,na,na,confirmed,"Normal topics apply and persist. Literal ""clear"" or ""auto"" resets to auto-generated (a base topic literally named auto cannot be set). Empty submit is a no-op; "
+mqtt,mqttDiscoveryPrefix,WORKS_QUIRK,mqttDiscoveryPrefix homeassistant,mqttDiscoveryPrefix — System_MQTT.cpp:16,True,na,na,confirmed,"Normal prefixes apply and persist. Empty submit is a silent no-op (cannot reset to the ""homeassistant"" default from the app); snaps back on re-fetch."
+mqtt,mqttPublishIntervalMs,WORKS,mqttPublishIntervalMs 10000,mqttPublishIntervalMs — System_MQTT.cpp:,True,na,na,confirmed,Slider integer lands in range and persists; handler bounds (1000-300000) equal the SettingEntry min/max so slider values can never be rejected.
+mqtt,mqttPublishWiFi,WORKS,mqttPublishWiFi on,mqttPublishWiFi — System_MQTT.cpp:1676,True,yes,yes,confirmed,"Toggle applies and persists; ""off"" writes false via fallthrough (any unrecognized token also writes false, never rejected)."
+mqtt,mqttPublishSystem,WORKS,mqttPublishSystem on,mqttPublishSystem — System_MQTT.cpp:1677,True,yes,yes,confirmed,Toggle applies and persists.
+mqtt,mqttPublishThermal,WORKS,mqttPublishThermal on,mqttPublishThermal — System_MQTT.cpp:167,True,yes,yes,confirmed,Toggle applies and persists.
+mqtt,mqttPublishToF,WORKS,mqttPublishToF on,mqttPublishToF — System_MQTT.cpp:1679,True,yes,yes,confirmed,Toggle applies and persists.
+mqtt,mqttPublishIMU,WORKS,mqttPublishIMU on,mqttPublishIMU — System_MQTT.cpp:1680,True,yes,yes,confirmed,Toggle applies and persists.
+mqtt,mqttPublishPresence,WORKS,mqttPublishPresence on,mqttPublishPresence — System_MQTT.cpp:16,True,yes,yes,confirmed,Toggle applies and persists.
+mqtt,mqttPublishGPS,WORKS,mqttPublishGPS on,mqttPublishGPS — System_MQTT.cpp:1682,True,yes,yes,confirmed,Toggle applies and persists.
+mqtt,mqttPublishAPDS,WORKS,mqttPublishAPDS on,mqttPublishAPDS — System_MQTT.cpp:1683,True,yes,yes,confirmed,Toggle applies and persists.
+mqtt,mqttPublishRTC,WORKS,mqttPublishRTC on,mqttPublishRTC — System_MQTT.cpp:1684,True,yes,yes,confirmed,Toggle applies and persists.
+mqtt,mqttPublishInput,WORKS,mqttPublishInput on,mqttPublishInput — System_MQTT.cpp:1685,True,yes,yes,confirmed,Toggle applies and persists.
+bluetooth,bluetoothAutoStart,DEAD,bluetoothAutoStart on,none,False,na,na,confirmed,"Toggle flips, firmware replies 'Unknown command: bluetoothAutoStart on' (visible only in Console log), 700 ms later loadControls re-fetch snaps the toggle back;"
+bluetooth,bluetoothRequireAuth,DEAD,bluetoothRequireAuth on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; 'Unknown command' in Console log; no write.
+bluetooth,bluetoothDeviceName,DEAD,bluetoothDeviceName MyDevice,none,False,na,na,confirmed,Text field entry snaps back to stored name after re-fetch; 'Unknown command' in Console log; no write.
+bluetooth,bluetoothTxPower,DEAD,bluetoothTxPower 5,none,False,na,na,confirmed,Slider snaps back to stored level after re-fetch; 'Unknown command' in Console log; no write.
+bluetooth,bluetoothMode,DEAD,bluetoothMode 1|Client (G2),none,False,na,na,confirmed,Select snaps back to stored mode after re-fetch; 'Unknown command: bluetoothMode 1|Client (G2)' in Console log; no write.
+bluetooth,bleRequireSecureChannel,DEAD,bleRequireSecureChannel on,none,False,na,na,confirmed,Toggle snaps back after re-fetch; 'Unknown command' in Console log; no write.
+bluetooth,bleSecureChannelSecret,APP_READONLY,(none — entry never emitted in controls json; app renders no editor),none,False,na,na,confirmed,Setting is invisible in the app; not writable from the controls UI at all.
+oled,oledEnabled,WRONG_VALUE,oledEnabled on,oledenabled,False,yes,no,confirmed,"Toggle ON writes FALSE: switch snaps back to off after the 700 ms re-fetch and the display is actively cleared/disabled (:3833-3841, reply 'OLED display disable"
+oled,oledRequireAuth,WRONG_VALUE,oledRequireAuth on,oledrequireauth,True,yes,no,confirmed,"Security-relevant: toggling the auth requirement ON writes FALSE (reply 'Local display require auth disabled'), switch snaps back to off on re-fetch. The requir"
+oled,oledBootMode,WORKS,oledBootMode thermal,oledbootmode,False,na,na,confirmed,"Correct value stored and persisted for every one of the app's raw option tokens (options list OLED_Settings.cpp:17 exactly matches the handler's accepted set, c"
+oled,oledDefaultMode,WORKS,oledDefaultMode status,oleddefaultmode,False,na,na,confirmed,Correct value stored and persisted; option list (OLED_Settings.cpp:18) matches the handler's accepted set 1:1.
+oled,oledBootDuration,WORKS,oledBootDuration 2000,oledbootduration,False,na,na,confirmed,"Slider (min=500,max=10000 emitted since both nonzero, OLED_Settings.cpp:19) sends a clean integer inside the handler's identical range; value applied and persis"
+oled,oledUpdateInterval,WORKS,oledUpdateInterval 125,oledupdateinterval,False,na,na,confirmed,"Slider range (10..1000, OLED_Settings.cpp:20) equals handler range; value applied ('applies on next update') and persisted."
+oled,oledBrightness,WORKS,oledBrightness 128,oledbrightness,False,na,na,confirmed,"Slider (min=0,max=255; emitted because max!=0, OLED_Settings.cpp:21) sends an integer inside the handler's identical range; value applied and persisted."
+oled,oledFlipped,DEAD,oledFlipped on,none — searched all CommandEntry tables,False,na,na,confirmed,"Toggle appears to do nothing: 'Unknown command' goes to the Console log, no write occurs, switch snaps back to its old value on the 700 ms re-fetch."
+oled,oledThermalScale,WORKS,oledThermalScale 2.5,oledthermalscale,False,na,na,confirmed,"FLOAT slider (min=1,max=10, OLED_Settings.cpp:23) sends a trimmed float; slider range is a strict subset of the handler's 0.1..10.0, so every app value is accep"
+oled,oledThermalColorMode,WORKS,oledThermalColorMode grayscale,oledthermalcolormode,False,na,na,confirmed,Both raw option tokens (OLED_Settings.cpp:24) accepted case-insensitively; correct value stored and persisted.
+thermal,thermalAutoStart,WORKS,thermalAutoStart on,thermalautostart,False,yes,yes,confirmed,Toggle works both directions; correct value stored and persisted
+thermal,thermalPollingMs,WORKS,thermalPollingMs 250,thermalpollingms,True,na,na,confirmed,Slider value applied and persisted; range matches SettingEntry 50..5000 (line 38)
+thermal,thermalPaletteDefault,WORKS,thermalPaletteDefault iron,thermalpalettedefault,True,na,na,confirmed,Select token accepted case-insensitively; canonical palette name stored
+thermal,thermalEWMAFactor,WORKS,thermalEWMAFactor 0.2,thermalewmafactor,True,na,na,confirmed,"Slider float (trimFloat, e.g. '0.2') parsed and stored; range matches 0..1 (line 40)"
+thermal,thermalTransitionMs,WORKS,thermalTransitionMs 80,thermaltransitionms,True,na,na,confirmed,Slider value applied and persisted; range matches 0..5000 (line 41)
+thermal,thermalWebMaxFps,WORKS,thermalWebMaxFps 10,thermalwebmaxfps,True,na,na,confirmed,Slider value applied and persisted; range matches 1..30 (line 42)
+thermal,thermalUpscaleFactor,WORKS,thermalUpscaleFactor 2,thermalupscalefactor,True,na,na,confirmed,Slider value applied and persisted; range matches 1..4 (line 43)
+thermal,thermalRollingMinMaxEnabled,WRONG_VALUE,thermalRollingMinMaxEnabled on,thermalrollingminmaxenabled,True,yes,no,confirmed,"Toggling ON shows success ('[Thermal] Setting updated', broadcast 'set to 0') but stores false; toggle snaps back to Off on the 700ms re-fetch. Toggling OFF wor"
+thermal,thermalRollingMinMaxAlpha,WORKS,thermalRollingMinMaxAlpha 0.6,thermalrollingminmaxalpha,True,na,na,confirmed,Slider float applied and persisted; range matches 0..1 (line 45)
+thermal,thermalRollingMinMaxGuardC,WORKS,thermalRollingMinMaxGuardC 0.3,thermalrollingminmaxguardc,True,na,na,confirmed,Slider float applied and persisted; range matches 0..10 (line 46)
+thermal,thermalInterpolationEnabled,WRONG_VALUE,thermalInterpolationEnabled on,thermalinterpolationenabled,True,yes,no,confirmed,Toggling ON shows success but stores false; toggle snaps back to Off on re-fetch. Toggling OFF works only coincidentally
+thermal,thermalInterpolationSteps,WORKS,thermalInterpolationSteps 5,thermalinterpolationsteps,True,na,na,confirmed,Slider value applied and persisted; range matches 1..8 (line 48)
+thermal,thermalInterpolationBufferSize,WORKS,thermalInterpolationBufferSize 2,thermalinterpolationbuffersize,True,na,na,confirmed,Slider value applied and persisted; range matches 1..10 (line 49)
+thermal,thermalTargetFps,WORKS,thermalTargetFps 8,thermaltargetfps,True,na,na,confirmed,Slider value applied and persisted; slider bounds 1..8 (line 50) match the clamp so clamping never triggers from the app
+thermal,thermalDevicePollMs,WORKS,thermalDevicePollMs 100,thermaldevicepollms,True,na,na,confirmed,Slider value applied and persisted; slider bounds 100..2000 (line 51) match the clamp
+thermal,thermalTemporalAlpha,WORKS,thermalTemporalAlpha 0.5,thermaltemporalalpha,True,na,na,confirmed,Slider float applied and persisted; range matches 0..1 (line 52)
+thermal,thermalRotation,WORKS,thermalRotation 2,thermalrotation,True,na,na,confirmed,Slider value applied and persisted; range matches 0..3 (line 53)
+thermal,thermalI2cClockHz,WORKS,thermalI2cClockHz 400000,thermali2cclockhz,True,na,na,confirmed,Slider value applied and persisted; range matches 100000..1000000 (line 54). Distinct from the 'thermalbus' verb (System_I2C.cpp:2230) which cannot shadow it (n
+tof,tofAutoStart,WORKS,tofAutoStart on,tofautostart,False,yes,yes,confirmed,Toggle works both directions; correct value applied and persisted
+tof,tofPollingMs,WORKS,tofPollingMs 220,tofpollingms,True,na,na,confirmed,Slider value applied and persisted; slider bounds (50..5000 from SettingEntry :804) match handler's hard range check exactly
+tof,tofStabilityThreshold,WORKS,tofStabilityThreshold 3,tofstabilitythreshold,True,na,na,confirmed,"Slider value applied and persisted; app slider range (0..50 from SettingEntry :805, maxVal!=0 so min/max emitted) matches handler check"
+tof,tofTransitionMs,WORKS,tofTransitionMs 200,toftransitionms,True,na,na,confirmed,Slider value applied and persisted; range 0..5000 (SettingEntry :806) matches handler
+tof,tofMaxDistanceMm,WORKS,tofMaxDistanceMm 3400,tofmaxdistancemm,True,na,na,confirmed,"Slider value applied and persisted; handler writes gSettings.tofUiMaxDistanceMm, the same field the SettingEntry (:807) points at, so re-fetch reflects the writ"
+tof,tofDevicePollMs,WORKS,tofDevicePollMs 220,tofdevicepollms,True,na,na,confirmed,Slider value applied and persisted; slider bounds 100..2000 (SettingEntry :808) mean the clamp branch is never hit from the app
+tof,tofI2cClockHz,WORKS,tofI2cClockHz 200000,tofi2cclockhz,True,na,na,confirmed,Slider value applied and persisted; slider bounds 50000..400000 (SettingEntry :809) match the entry's own min/max used by the range check
+imu,imuAutoStart,WORKS,imuAutoStart on,imuautostart — i2csensor_bno055.cpp:1083,False,yes,yes,confirmed,Toggle applies and persists; re-fetch shows the new state.
+imu,imuPollingMs,WORKS,imuPollingMs 200,imupollingms — i2csensor_bno055.cpp:1069,True,na,na,confirmed,"Slider value applies and persists (slider range 50..2000 matches handler's range check exactly). If the BLE session lacks admin, gate at System_Utils.cpp:4233 r"
+imu,imuEWMAFactor,WORKS_QUIRK,imuEWMAFactor 0.35,imuewmafactor — i2csensor_bno055.cpp:107,True,na,na,corrected,"Slider float applies and persists. trimFloat's '%.3f'-then-strip format (ControlWidgets.kt:180) is plain decimal, parsed cleanly by strtof. Admin gate applies a"
+imu,imuTransitionMs,WORKS,imuTransitionMs 100,imutransitionms — i2csensor_bno055.cpp:1,True,na,na,confirmed,Slider value applies and persists (ranges match). Admin gate applies as above.
+imu,imuWebMaxFps,WORKS,imuWebMaxFps 15,imuwebmaxfps — i2csensor_bno055.cpp:1072,True,na,na,confirmed,Slider value applies and persists. Cosmetic only: broadcast line says 'imuWebMaxRefreshRate set to %d' (:948) though it sets imuWebMaxFps. Admin gate applies as
+imu,imuDevicePollMs,WORKS,imuDevicePollMs 200,imudevicepollms — i2csensor_bno055.cpp:1,True,na,na,confirmed,Slider value applies and persists; slider range 50..1000 equals the clamp range so clamping never triggers from the app. Admin gate applies as above.
+imu,imuOrientationMode,WORKS_QUIRK,imuOrientationMode 5:Roll 180 Fix   (select sends the raw option token verbatim),imuorientationmode — i2csensor_bno055.cp,True,na,na,confirmed,Correct value applied and persisted — but only by accident: toInt('5:Roll 180 Fix') stops at the ':' and yields 5. Every option token leads with its own digit (
+imu,imuOrientationCorrectionEnabled,DEAD,imuOrientationCorrectionEnabled on,none — searched all CommandEntry tables,False,na,na,confirmed,"Toggle does nothing on the device; 'Unknown command: imuOrientationCorrectionEnabled on' appears only in the Console log, and the switch snaps back when loadCon"
+imu,imuPitchOffset,WORKS_QUIRK,imuPitchOffset -10.5,imupitchoffset — i2csensor_bno055.cpp:10,True,na,na,corrected,Slider float (incl. negatives) applies and persists. Admin gate applies as above.
+imu,imuRollOffset,WORKS_QUIRK,imuRollOffset 5.25,imurolloffset — i2csensor_bno055.cpp:107,True,na,na,corrected,Slider float applies and persists. Admin gate applies as above.
+imu,imuYawOffset,WORKS_QUIRK,imuYawOffset 90,imuyawoffset — i2csensor_bno055.cpp:1080,True,na,na,corrected,Slider float applies and persists. Admin gate applies as above.
+input,inputDevicePollMs,WORKS,inputDevicePollMs 250,inputdevicepollms,True,na,na,confirmed,"Slider write applies and persists; re-fetch shows the new value. Caveat: verb is admin-gated, so on a non-admin BLE session authorizeCommand (System_Utils.cpp:4"
+input,inputAutoStart,WORKS,inputAutoStart on,inputautostart,False,yes,yes,confirmed,"Toggle works exactly as intended: app's on/off tokens map to true/false, value persists, re-fetch confirms. This custom handler avoids the generic handleSetting"
+anoencoder,anoEncoderI2cAddr,WORKS_QUIRK,anoEncoderI2cAddr 74,anoencoderi2caddr,True,na,no,confirmed,"Slider value in 1..127 is parsed, range-checked, applied and persisted; re-fetch shows the new value. Two caveats: (1) verb has requiresAdmin=true — a non-admin"
+anoencoder,anoEncoderInvert,WORKS,anoEncoderInvert on,anoencoderinvert,False,yes,yes,confirmed,"Toggle works exactly as intended: 'on' sets true, 'off' sets false, applied via setSetting and persisted; re-fetch confirms."
+anoencoder,anoEncoderSwapUpDown,DEAD,anoEncoderSwapUpDown on,none — searched all CommandEntry tables,False,na,na,confirmed,"Toggle flips optimistically in the UI, firmware replies 'Unknown command' into the BLE output lane (visible only in the Console log), no write occurs, and the 7"
+anoencoder,anoEncoderSwapLeftRight,DEAD,anoEncoderSwapLeftRight on,none — searched all CommandEntry tables,False,na,na,confirmed,"Identical to anoEncoderSwapUpDown: toggle flips, 'Unknown command' lands in the Console log lane, nothing is written, toggle snaps back on the 700 ms re-fetch."
+apds,apdsAutoStart,WORKS,apdsAutoStart on,apdsautostart — i2csensor_apds9960.cpp:4,False,yes,yes,confirmed,"Toggle works correctly: 'on'/'off' both parsed as intended, value applied and persisted, re-fetch after 700 ms shows the new state."
+apds,apdsDevicePollMs,WORKS_QUIRK,apdsDevicePollMs 500,apdsdevicepollms — System_Settings.cpp:2,True,no,no,corrected,"Slider works: app sends a clean integer already clamped to the 50..5000 slider range, atoi parses it, range check passes, value applied and persisted."
+gps,gpsAutoStart,WORKS,gpsAutoStart on,gpsautostart — i2csensor_pa1010d.cpp:741,False,yes,yes,confirmed,"Toggle applies and persists correctly; re-fetch after 700 ms shows the new state. Off path equally correct (""gpsAutoStart off"")."
+gps,gpsDevicePollMs,WORKS,gpsDevicePollMs 200,gpsdevicepollms — System_Settings.cpp:25,True,na,no,confirmed,Slider (INT with min=50 max=10000 -> hasMinMax) sends a clean in-range integer; value applies and persists for an admin session. For a NON-admin BLE session the
+fmradio,fmRadioAutoStart,WORKS,fmRadioAutoStart on,fmradioautostart — i2csensor_rda5807.cpp,False,yes,yes,confirmed,"Toggle works correctly: 'on' enables, 'off' disables, value persists and re-fetch confirms."
+fmradio,fmRadioDevicePollMs,WORKS,fmRadioDevicePollMs 250,fmradiodevicepollms — System_Settings.cp,True,na,na,confirmed,"Slider works: sends a clean integer already clamped to 100..5000 by the app slider (min/max emitted), atoi parses it, range check passes, value stored and persi"
+rtc,rtcAutoStart,WORKS,rtcAutoStart on,rtcautostart,False,yes,yes,confirmed,"Toggle works: value applied and persisted, re-fetch confirms; device replies '[RTC] Auto-start enabled/disabled'"
+rtc,rtcTimeHasBeenSet,APP_READONLY,"(none — firmware emits readOnly:true, app renders ReadingRow, no write path)",none — searched all CommandEntry tables,False,na,na,confirmed,"App shows read-only status row; no editor, no wire traffic"
+presence,presenceAutoStart,WORKS,presenceAutoStart on,presenceautostart — i2csensor_sths34pf80,False,yes,yes,confirmed,"Toggle works correctly: on->true, off->false, persisted; re-fetch shows toggled state"
+presence,presenceDevicePollMs,WORKS,presenceDevicePollMs 250,presencedevicepollms — System_Settings.c,True,no,no,confirmed,"Slider works: min=50/max=5000 emitted so the app renders a slider sending a clamped clean integer, always inside the handler's range check; value applies and pe"
+camera,cameraAutoStart,WORKS,cameraAutoStart on,cameraautostart,True,yes,yes,confirmed,"Toggle applies and persists; explicit on/off branches, no camera-running gate"
+camera,cameraFramesize,WORKS_QUIRK,cameraFramesize 4:1280x1024 (SXGA),cameraframesize,True,na,na,confirmed,"Correct index stored, but only because Arduino String::toInt() happens to stop at the ':' in the app's raw option token; also triggers a synchronous camera rest"
+camera,cameraBrightness,WORKS_QUIRK,cameraBrightness 1,camerabrightness,False,na,na,confirmed,Slider works while camera is running; with camera stopped the handler errors and the value snaps back on the 700 ms re-fetch (reachable via SensorsScreen camera
+camera,cameraContrast,WORKS_QUIRK,cameraContrast -1,cameracontrast,False,na,na,confirmed,"Works while camera running; camera stopped -> 'Error: Camera not enabled', no write, slider snaps back"
+camera,cameraSaturation,WORKS_QUIRK,cameraSaturation 2,camerasaturation,False,na,na,confirmed,"Works while camera running; camera stopped -> error, no write, slider snaps back"
+camera,cameraAELevel,DEAD,cameraAELevel -1,none — searched all CommandEntry tables,False,na,na,confirmed,"Slider moves, 'Unknown command' lands in the Console log, value snaps back on the 700 ms re-fetch"
+camera,cameraWBMode,DEAD,cameraWBMode 2:Cloudy,none — 'camerawb',False,na,na,confirmed,"Select shows chosen option briefly, Unknown command in console, snaps back on re-fetch"
+camera,cameraSharpness,WORKS_QUIRK,cameraSharpness 1,camerasharpness,True,na,na,confirmed,"Persists only on OV3660 with camera running; on OV2640 or camera stopped -> error, no write, slider snaps back"
+camera,cameraDenoise,WORKS_QUIRK,cameraDenoise 3,cameradenoise,True,na,na,confirmed,Persists only on OV3660 with camera running; otherwise error and snap-back
+camera,cameraSpecialEffect,DEAD,cameraSpecialEffect 6:Sepia,none — no verb 'cameraspecialeffect'; 'c,False,na,na,confirmed,Select snaps back after Unknown command
+camera,cameraHMirror,WORKS_QUIRK,cameraHMirror on,camerahmirror,False,yes,yes,confirmed,"on/off both interpreted correctly while camera running; camera stopped -> 'Error: Camera not enabled', toggle snaps back"
+camera,cameraVFlip,WORKS_QUIRK,cameraVFlip off,cameravflip,False,yes,yes,confirmed,Works while camera running; camera stopped -> error and snap-back
+camera,cameraQuality,WORKS,cameraQuality 12,cameraquality,False,na,na,confirmed,Persists whether camera is running or not
+camera,cameraStreamFps,DEAD,cameraStreamFps 10,none — no verb 'camerastreamfps'; 'camer,False,na,na,confirmed,Slider snaps back after Unknown command
+camera,g2StreamToneMap,WORKS,g2StreamToneMap on,g2streamtonemap,False,yes,yes,confirmed,Toggle applies and persists; invalid tokens error instead of silently writing false
+camera,g2PackRateMs,DEAD,g2PackRateMs 80,none — 'g2packrate',False,na,na,confirmed,Slider snaps back after Unknown command
+camera,cameraStorageLocation,WORKS_QUIRK,cameraStorageLocation 1:SD Card,camerastoragelocation,True,na,na,confirmed,"Correct value stored, but only because toInt truncates the raw select token at the ':'"
+camera,cameraCaptureFolder,WORKS,cameraCaptureFolder /photos,cameracapturefolder,True,na,na,confirmed,Text writes and persists verbatim; no path validation; an empty string cannot be written (bare command just reports)
+camera,cameraMaxStoredImages,WORKS,cameraMaxStoredImages 100,cameramaxstoredimages,True,na,na,confirmed,Slider applies and persists
+camera,cameraAutoCapture,WORKS,cameraAutoCapture on,cameraautocapture,True,yes,yes,confirmed,Toggle applies and persists; no camera-running gate
+camera,cameraAutoCaptureInterval,WORKS,cameraAutoCaptureInterval 60,cameraautocaptureinterval,True,na,na,confirmed,Slider applies and persists (app slider range 10-3600 matches handler range)
+camera,cameraSendAfterCapture,WORKS,cameraSendAfterCapture on,camerasendaftercapture,True,yes,yes,confirmed,Toggle applies and persists
+camera,cameraTargetDevice,WORKS,cameraTargetDevice nodeA,cameratargetdevice,True,na,na,confirmed,Text writes and persists verbatim; cannot be cleared to empty from the app (bare command reports instead of clearing)
+microphone,microphoneAutoStart,DEAD,microphoneAutoStart on,none — searched all CommandEntry tables,False,na,na,confirmed,"Toggle flips in UI, firmware replies ""Unknown command: microphoneAutoStart on"" (visible only in Console log), no write occurs, toggle snaps back on the 700 ms l"
+edgeimpulse,enabled,DEAD,enabled on,none,False,na,na,confirmed,Firmware replies 'Unknown command' (visible only in Console log); toggle snaps back to stored value on the 700 ms loadControls re-fetch. Nothing written.
+edgeimpulse,requireLabels,DEAD,requireLabels on,none,False,na,na,confirmed,'Unknown command' in console lane; toggle snaps back after 700 ms re-fetch. Nothing written.
+edgeimpulse,minConfidence,DEAD,minConfidence 0.6,none,False,na,na,confirmed,'Unknown command' in console lane; slider snaps back to stored value after 700 ms re-fetch. Nothing written.
+edgeimpulse,maxDetections,DEAD,maxDetections 5,none,False,na,na,confirmed,'Unknown command' in console lane; slider snaps back after 700 ms re-fetch. Nothing written.
+edgeimpulse,inputSize,DEAD,inputSize 96,none,False,na,na,confirmed,'Unknown command' in console lane; slider snaps back after 700 ms re-fetch. Nothing written.
+edgeimpulse,continuous,DEAD,continuous on,none,False,na,na,corrected,'Unknown command' in console lane; toggle snaps back after 700 ms re-fetch. Nothing written.
+edgeimpulse,intervalMs,DEAD,intervalMs 1000,none,False,na,na,confirmed,'Unknown command' in console lane; slider snaps back after 700 ms re-fetch. Nothing written.
+espsr,srAutoStart,WRONG_VALUE,srAutoStart on   (toggle off sends: srAutoStart off),"srautostart — settingEditorCommands, Sys",True,yes,no,confirmed,Toggling ON reports success in the console lane but writes false; after the 700 ms loadControls re-fetch the switch snaps back to off. Toggling OFF appears to w
+espsr,srModelSource,WORKS_QUIRK,"srModelSource 1|SD   (other options send: srModelSource 0|Partition, srModelSource 2|LittleFS)","srmodelsource — settingEditorCommands, S",True,na,no,confirmed,None visible — selection sticks and persists. But correctness is accidental: it only works because every option token happens to LEAD with the numeric value and
+espsr,srCommandTimeout,DEAD,"srCommandTimeout 6000   (slider, clean int in 1000..30000 via roundToInt; ControlWidgets.kt:52-53,78 — options null, min/max present -> slider path)",none — searched all CommandEntry tables,False,na,na,confirmed,"Dragging the slider silently does nothing: ""Unknown command"" lands only in the Console log, and the 700 ms re-fetch snaps the slider back to the device's stored"
+sensorlog,sensorLogAutoStart,DEAD,sensorLogAutoStart on,none — registered sensorlog* verbs are o,False,na,na,confirmed,"Toggle flips, firmware replies 'Unknown command' (visible only in Console log), value snaps back on the 700 ms re-fetch (ConsoleViewModel.kt:1329-1335). Setting"
+sensorlog,sensorLogPath,WORKS_QUIRK,sensorLogPath /logging_captures/sensors/mylog.txt,sensorlogpath,True,na,na,corrected,Correct value stored and persisted; re-fetch shows it. Caveats: an empty text field sends 'sensorLogPath' bare → handler just prints the current value (System_S
+sensorlog,sensorLogIntervalMs,DEAD,sensorLogIntervalMs 5000,none — 'sensorlog' fails the boundary ch,False,na,na,confirmed,Slider snaps back to the previous value after the 700 ms re-fetch; 'Unknown command' only in Console log. Setting unreachable from the app.
+sensorlog,sensorLogMask,WRONG_VALUE,"sensorLogMask bitmask:1|Thermal  (first option) / sensorLogMask 2|ToF (others) — raw select tokens from comma-split of the options string (SensorControls.kt:60-62, sent verbatim ControlWidgets.kt:130)",sensorlogmask,True,na,na,corrected,"Selecting 'Thermal' (the FIRST dropdown option) shows success but stores 0 — every sensor deselected, persisted AND applied live to gSensorLogMask. The other si"
+sensorlog,sensorLogFormat,WORKS_QUIRK,"sensorLogFormat 1|CSV  (raw select token; options 0|Text, 1|CSV, 2|Track)",sensorlogformat,True,na,na,corrected,"Correct value stored, persisted, and applied live for all three options — but only because atoi silently discards the '|Label' tail of the app's raw token. Work"
+sensorlog,sensorLogMaxSize,DEAD,sensorLogMaxSize 256000,none — 'sensorlog' fails boundary,False,na,na,confirmed,Slider snaps back after the 700 ms re-fetch; error visible only in Console log. Setting unreachable from the app.
+sensorlog,sensorLogMaxRotations,DEAD,sensorLogMaxRotations 3,none — 'sensorlog' fails boundary,False,na,na,confirmed,Slider snaps back after the 700 ms re-fetch; error visible only in Console log. Setting unreachable from the app.
+systemlog,systemLogAutoStart,DEAD,systemLogAutoStart on,none,False,na,na,confirmed,"Toggle flips, firmware replies 'Unknown command' (visible only in Console log), nothing written; 700 ms later loadControls re-fetch snaps the toggle back."
+systemlog,systemLogPath,DEAD,systemLogPath /sdcard/logs/mylog.txt,none,False,na,na,confirmed,"Text field + Set button renders (STRING, no options -> ControlText, ControlWidgets.kt:54), user types a path, firmware replies 'Unknown command', value snaps ba"
+systemlog,systemLogCategoryTags,DEAD,systemLogCategoryTags on,none,False,na,na,confirmed,"Toggle flips, 'Unknown command' in console lane, no write, toggle snaps back after the 700 ms re-fetch."
+systemlog,systemLogFlags,MANGLED,systemLogFlags 0x4|HTTP Requests   (first option sends: systemLogFlags bitmask:0x1|Authentication; header rows send: systemLogFlags #|I2C Sensors),systemlogflags,True,na,na,confirmed,Select shows success and the stored setting becomes the raw ugly token (e.g. '0x4|HTTP Requests' instead of canonical formatSystemLogFlags '0x0000...:...:...:00
+systemlog,eventLog,WRONG_VALUE,eventLog on,eventlog,True,yes,no,confirmed,"Turning the toggle ON reports success but writes false — the toggle snaps back OFF after the 700 ms re-fetch, looking like a UI glitch. Turning it OFF 'works' o"
+batteryLog,enabled,DEAD,enabled on,none,False,na,na,confirmed,"Toggle flips locally, firmware replies 'Unknown command' into the Console log, and the value snaps back on the 700 ms loadControls re-fetch (ConsoleViewModel.kt"
+batteryLog,intervalMs,DEAD,intervalMs 60000,none,False,na,na,confirmed,"Slider moves, firmware replies 'Unknown command' (visible only in Console log), value snaps back on the 700 ms re-fetch."
+notifications,notifBanners,DEAD,notifBanners on,none,False,na,na,confirmed,"Toggle flips in UI, firmware replies 'Unknown command: notifbanners on' into the BLE console lane, nothing is written, and the 700 ms loadControls re-fetch snap"
+notifications,notifToasts,DEAD,notifToasts on,none,False,na,na,confirmed,"Toggle flips in UI, firmware replies 'Unknown command: notiftoasts on' in the console log, no write occurs, toggle snaps back on the 700 ms re-fetch."
+notifications,notifQueue,DEAD,notifQueue on,none,False,na,na,confirmed,"Toggle flips in UI, firmware replies 'Unknown command: notifqueue on' in the console log, no write occurs, toggle snaps back on the 700 ms re-fetch."
+llm,temperature,APP_READONLY,"(never sent) — hypothetical ""temperature 0.6""",n/a — no write possible; a write WOULD m,False,na,na,confirmed,App shows Temperature as a read-only value; not editable from the app at all
+llm,topP,DEAD,topP 0.8,none,False,na,na,confirmed,"Slider appears to accept; ""Unknown command"" lands in Console log; value snaps back on the 700 ms re-fetch"
+llm,maxTokens,DEAD,maxTokens 256,none,False,na,na,confirmed,Slider appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,sentenceLimit,DEAD,sentenceLimit 2,none,False,na,na,confirmed,Slider appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,hardCap,DEAD,hardCap 80,none,False,na,na,confirmed,Slider appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,repPenalty,DEAD,repPenalty 1.3,none,False,na,na,confirmed,Slider appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,repWindow,DEAD,repWindow 32,none,False,na,na,confirmed,Slider appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,maxContext,DEAD,maxContext 1024,none,False,na,na,confirmed,Slider appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,defaultModel,DEAD,defaultModel model.bin,none,False,na,na,confirmed,Text field appears to accept; Unknown command in Console log; text snaps back after re-fetch
+llm,minP,DEAD,minP 0.05,none,False,na,na,confirmed,Slider appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,kvPrecision,DEAD,kvPrecision 1:FP16,none,False,na,na,confirmed,Select appears to accept; Unknown command in Console log; selection snaps back after re-fetch
+llm,autoStart,DEAD,autoStart on,none,False,na,na,confirmed,Toggle flips visually; Unknown command in Console log; toggle snaps back after re-fetch
+llm,noRepeatNgram,DEAD,noRepeatNgram 3,none,False,na,na,confirmed,Slider appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,confThreshold,DEAD,confThreshold -1.5,none,False,na,na,confirmed,Slider (range -8..0) appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,contentBoost,DEAD,contentBoost 1.5,none,False,na,na,confirmed,Slider appears to accept; Unknown command in Console log; snaps back after re-fetch
+llm,domainGate,DEAD,domainGate on,none,False,na,na,confirmed,Toggle flips visually; Unknown command in Console log; toggle snaps back after re-fetch
+llm,profile,DEAD,profile on,none,False,na,na,confirmed,Toggle flips visually; Unknown command in Console log; toggle snaps back after re-fetch
+maps,zoom,APP_READONLY,"(none — app renders no editor; a hypothetical ""zoom 2.5"" would get Unknown command)",none — no write is ever sent; for the re,False,na,na,confirmed,Settings card shows 'Default zoom (0.5-20.0)' as a read-only value row; user cannot edit it at all despite the label advertising a range
+maps,layers,DEAD,layers 512,none — searched all CommandEntry tables,False,na,na,confirmed,"Slider (0-1023) appears to work, then snaps back to the stored value after the ~700 ms loadControls re-fetch (ConsoleViewModel.kt:1329-1335); 'Unknown command' "
+maps,cacheSizeKB,DEAD,cacheSizeKB 2048,none — lowercased line 'cachesizekb 2048,False,na,na,confirmed,Slider (256-4096) snaps back to stored value after the ~700 ms re-fetch; failure visible only as 'Unknown command' in the Console log

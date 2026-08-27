@@ -771,22 +771,23 @@ static void chatBuildPages(int rc) {
 // (Re)render the current page through the shared engine. With >1 page,
 // scroll/tap pages (navFn); with one page, a tap exits. Chrome preserves the
 // chat-specific hints + empty text (no separator rule).
-static void chatRenderPage(G2TapFn navFn) {
+static bool chatRenderPage(G2TapFn navFn) {
   static const G2TextPageChrome chrome = {
       gChatTitle,               // title (mutated in place before render)
       "scroll=page 2x=exit",    // multi-page hint
       "(tap=back)",             // single-page hint
       "",                       // no separator rule
       "(no messages yet)" };    // empty-slice text
-  g2TextPagerRender(gChatPager, gChatPageBuf, sizeof(gChatPageBuf),
-                    chrome, G2_GEOM_LARGE, gChatExitFn, navFn);
+  return g2TextPagerRender(gChatPager, gChatPageBuf, sizeof(gChatPageBuf),
+                           chrome, G2_GEOM_LARGE, gChatExitFn, navFn);
 }
 
 // Scroll/tap page navigation: scroll-up (PREV) = older, scroll-down/tap (NEXT) =
 // newer. Wraps around, matching the JSON viewer.
 static void chatNavPage(G2TapKind kind) {
+  const int oldPage = gChatPager.curPage;
   textNavPage(gChatPager, kind != G2_TAP_PAGE_PREV);
-  chatRenderPage(chatNavPage);
+  if (!chatRenderPage(chatNavPage)) gChatPager.curPage = oldPage;
 }
 #endif  // ENABLE_ESPNOW
 
@@ -840,6 +841,40 @@ static void onMainRedrawDone(bool ok,
             (unsigned)cookie.menuGen, result ? result : "");
   enqueueRedrawFromCallback(cookie, &showMainMenu, "main redraw");
 }
+
+#if ENABLE_ESPNOW
+EXT_RAM_BSS_ATTR static char sAppOpenMsg[128];
+static void showAppOpenMsg() { g2ShowText(sAppOpenMsg); }
+
+// First-time enable: name was just persisted; now start the radio. If the
+// user already left this page, still open ESP-NOW but skip the lens redraw.
+static void onNameThenOpenDone(bool ok,
+                               const char* result,
+                               const G2CmdCookie& cookie,
+                               void* /*userData*/) {
+  DEBUG_G2F("[G2-ESP-NOW-APP] name-then-open: setname ok=%d result='%s' name='%s'",
+            (int)ok, result ? result : "",
+            gSettings.espnowDeviceName.c_str());
+  if (gSettings.espnowDeviceName.length() == 0) {
+    strncpy(sAppOpenMsg,
+            (result && result[0]) ? result : "ESP-NOW needs a device name",
+            sizeof(sAppOpenMsg) - 1);
+    sAppOpenMsg[sizeof(sAppOpenMsg) - 1] = '\0';
+    enqueueRedrawFromCallback(cookie, &showAppOpenMsg, "setname failed");
+    return;
+  }
+  const bool stillHere =
+      (g2GetHijackPage() == cookie.targetPage &&
+       gSub == ESPN_APP_SUB_MAIN);
+  G2HijackCmdCallback cb = stillHere ? onMainRedrawDone : nullptr;
+  if (!g2SubmitHijackCommand("openespnow", cookie, cb, nullptr)) {
+    DEBUG_G2F("[G2-ESP-NOW-APP] name-then-open: openespnow submit FAILED");
+    if (stillHere) {
+      enqueueRedrawFromCallback(cookie, &showMainMenu, "open submit failed");
+    }
+  }
+}
+#endif
 
 static void onPeerDetailRedrawDone(bool ok,
                                    const char* result,
@@ -1000,6 +1035,36 @@ static void broadcastTypedCommit(const char* text) {
   }
 }
 static void broadcastTypedCancel() { showBroadcastMenu(); }
+
+static void nameThenOpenCancel() { showMainMenu(); }
+
+static void nameThenOpenCommit(const char* text) {
+  if (!text || text[0] == '\0') {
+    DEBUG_G2F("[G2-ESP-NOW-APP] name-then-open: empty input — not starting");
+    showMainMenu();
+    return;
+  }
+  String line = String("espnowsetname \"") + text + "\"";
+  G2CmdCookie cookie = buildCookie();
+  if (!g2SubmitHijackCommand(line.c_str(), cookie, onNameThenOpenDone, nullptr)) {
+    DEBUG_G2F("[G2-ESP-NOW-APP] name-then-open: setname submit FAILED");
+    showMainMenu();
+  }
+}
+
+static bool beginNameThenOpenEntry() {
+  TextEntryConfig cfg = {};
+  cfg.prompt   = "ESPNow Name";
+  cfg.initial  = gSettings.espnowDeviceName.c_str();
+  cfg.maxLen   = 20;  // matches cmd_espnow_setname
+  cfg.onCommit = nameThenOpenCommit;
+  cfg.onCancel = nameThenOpenCancel;
+  if (!g2BeginTextEntry(cfg)) {
+    DEBUG_G2F("[G2-ESP-NOW-APP] name-then-open: text-entry start FAILED");
+    return false;
+  }
+  return true;
+}
 #endif
 
 // -----------------------------------------------------------------------------
@@ -1033,6 +1098,11 @@ static void handleMainTap(uint32_t idx) {
     }
 #if ENABLE_ESPNOW
     bool running = (p == EspNowAppPhase::On);
+    if (!running && gSettings.espnowDeviceName.length() == 0) {
+      DEBUG_G2F("[G2-ESP-NOW-APP] state-tap: name unset — opening keyboard");
+      if (!beginNameThenOpenEntry()) showMainMenu();
+      return;
+    }
     submitToggleEspNow(running);
 #endif
     return;
@@ -1107,7 +1177,7 @@ static void handlePeerDetailTap(uint32_t idx) {
       TextEntryConfig cfg = {};
       cfg.prompt   = "Send to peer";
       cfg.initial  = "";
-      cfg.maxLen   = 32;  // g2BeginTextEntry rejects maxLen > 32
+      cfg.maxLen   = 32;  // intentionally compact G2 message field
       cfg.onCommit = sendTypedToPeerCommit;
       cfg.onCancel = sendTypedToPeerCancel;
       if (!g2BeginTextEntry(cfg)) {
@@ -1139,7 +1209,7 @@ static void handleBroadcastTap(uint32_t idx) {
       TextEntryConfig cfg = {};
       cfg.prompt   = "Broadcast";
       cfg.initial  = "";
-      cfg.maxLen   = 32;  // g2BeginTextEntry rejects maxLen > 32
+      cfg.maxLen   = 32;  // intentionally compact G2 message field
       cfg.onCommit = broadcastTypedCommit;
       cfg.onCancel = broadcastTypedCancel;
       if (!g2BeginTextEntry(cfg)) {

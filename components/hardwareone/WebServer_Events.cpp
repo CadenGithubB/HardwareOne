@@ -124,30 +124,6 @@ bool sseDequeueEvent(SessionEntry& s, String& outEventName, String& outData) {
   return true;
 }
 
-static bool sseSendFetch(httpd_req_t* req, const String& jsonPayload) {
-  // Build SSE frame with snprintf instead of String concat.
-  // Fixed cost is 21 bytes: "event: fetch\n" (13) + "data: " (6) + "\n\n" (2).
-  // This used to be counted as 17, so for payloads that pushed `needed` past
-  // the stack buffer the heap allocation was 4 bytes short and snprintf
-  // truncated the frame — dropping the blank line that terminates an SSE
-  // event, which stalls the client's parse of everything after it.
-  const size_t kFetchFrameOverhead = 13 + 6 + 2;
-  size_t needed = kFetchFrameOverhead + jsonPayload.length();
-  char stackBuf[512];
-  char* buf = stackBuf;
-  bool heapAlloc = false;
-  if (needed >= sizeof(stackBuf)) {
-    buf = (char*)malloc(needed + 1);
-    if (!buf) return false;
-    heapAlloc = true;
-  }
-  snprintf(buf, heapAlloc ? (needed + 1) : sizeof(stackBuf), "event: fetch\ndata: %s\n\n", jsonPayload.c_str());
-  bool ok = sseWrite(req, buf);
-  if (heapAlloc) free(buf);
-  DEBUG_SSEF("sendFetch: %s json_len=%u", ok ? "OK" : "FAIL", (unsigned)jsonPayload.length());
-  return ok;
-}
-
 // SSE endpoint: push per-session notices without polling
 esp_err_t handleEvents(httpd_req_t* req) {
   if (!req) {

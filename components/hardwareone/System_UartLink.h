@@ -216,7 +216,7 @@ bool uartLinkPushEventForSession(uint32_t sessionEpoch, const char* text);
 bool uartLinkTryPushEvent(const char* text);
 bool uartLinkTryPushEventForSession(uint32_t sessionEpoch, const char* text);
 
-#else  // no UART_LINK_* pins for this board — inert stubs
+#else  // link compiled out (no pins, or ENABLE_UART_HOST_LINK 0) — inert stubs
 
 inline bool uartLinkStart() { return false; }
 inline void uartLinkStop() {}
@@ -226,7 +226,7 @@ inline void uartLinkRequestRestart() {}
 inline void uartLinkInitFromSettings() {}
 inline void uartLinkTick() {}
 inline bool uartLinkIsRunning() { return false; }
-inline const char* uartLinkStatusLine() { return "UART link: unsupported on this board"; }
+inline const char* uartLinkStatusLine() { return "UART link: not available in this build (no UART_LINK_* pins, or ENABLE_UART_HOST_LINK 0)"; }
 inline bool uartLinkWriteFrame(uint8_t, uint16_t, const uint8_t*, size_t) { return false; }
 inline bool uartLinkWriteFrameForSession(uint32_t, uint8_t, uint16_t,
                                          const uint8_t*, size_t) { return false; }

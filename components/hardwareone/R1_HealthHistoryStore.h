@@ -15,6 +15,16 @@ static constexpr size_t R1_HEALTH_ACTIVITY_SLOTS = 144;
 static constexpr uint16_t R1_HEALTH_HISTORY_RETENTION_DAYS = 30;
 static constexpr uint16_t R1_HEALTH_HISTORY_MAX_FILES = 96;
 static constexpr size_t R1_HEALTH_HISTORY_MAX_FILE_BYTES = 65536;
+static constexpr int16_t R1_HEALTH_TIMEZONE_MINUTES_MIN = -720;  // UTC-12
+static constexpr int16_t R1_HEALTH_TIMEZONE_MINUTES_MAX = 840;   // UTC+14
+
+// Persisted wire-layout family, deliberately independent of exact runtime
+// firmware identity. ID 1 is already on disk and must never be renumbered;
+// raw ID 2 is not a valid stored layout even though runtime profile 2 exists.
+enum R1HealthHistoryLayout : uint8_t {
+  R1_HISTORY_LAYOUT_UNKNOWN = 0,
+  R1_HISTORY_LAYOUT_DAILY_V1 = 1,
+};
 
 enum R1HealthHistoryMetric : uint8_t {
   R1_HISTORY_HEART_RATE = 1,
@@ -88,9 +98,10 @@ struct R1HealthActivityBucket {
 struct R1HealthActivityDay {
   bool have;
   // True once an activity-daily message has been parsed and CRC-validated in
-  // full. The ring sends the whole day as one logical message (fragmented over
-  // several BLE notifications when it exceeds ~35 slots; the transport stitches
-  // and validates it), so a successful parse is a verified full day, not a page.
+  // full (single notification or reassembled fragments). This is "message
+  // verified", NOT "all 144 slots present": the ring answers with a sparse
+  // delta — slots that have data and have not yet been acknowledged — so a
+  // verified day is routinely far short of 144 slots. Coverage is `count`.
   bool fullDayVerified;
   uint16_t count;
   uint16_t sourceSerial;
@@ -101,6 +112,8 @@ struct R1HealthActivityDay {
 struct R1HealthHistoryDay {
   uint32_t schemaVersion;
   char peerId[18];                 // canonical ring MAC; never emitted by status JSON
+  // Historical field name retained so schema/hash/source users stay stable.
+  // The stored value is R1HealthHistoryLayout, not an exact runtime profile.
   uint8_t protocolProfile;
   uint32_t dayStart;
   int16_t timezoneMinutes;
@@ -146,6 +159,8 @@ struct R1HealthHistoryStoreStatus {
 
 static_assert(R1_HEALTH_HOURLY_SLOTS == 24, "R1 history hourly schema is fixed");
 static_assert(R1_HEALTH_ACTIVITY_SLOTS == 144, "R1 activity day must retain all ten-minute slots");
+static_assert(R1_HISTORY_LAYOUT_DAILY_V1 == 1,
+              "persisted R1 daily-v1 layout ID must stay 1");
 
 #if ENABLE_R1_HEALTH
 

@@ -92,8 +92,7 @@ inline void streamCLIInner(httpd_req_t* req, const String& username) {
   // Shared file-browser / BondFs helpers (defines window.BondFs for the
   // bonded-device CLI toggle below).
   {
-    String fbScript = getFileBrowserScript();
-    httpd_resp_send_chunk(req, fbScript.c_str(), fbScript.length());
+    httpd_resp_send_chunk(req, getFileBrowserScript(), HTTPD_RESP_USE_STRLEN);
   }
 
   // HTML structure
@@ -129,14 +128,14 @@ inline void streamCLIInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, R"JS(
 <script>
 try{console.log('[CLI] Core init start');}catch(_){}
-var cliInput = document.getElementById('cli-input');
-var cliOutput = document.getElementById('cli-output');
-var cliExecBtn = document.getElementById('cli-exec');
+var cliInput = hw.$('cli-input');
+var cliOutput = hw.$('cli-output');
+var cliExecBtn = hw.$('cli-exec');
 window.addEventListener('error', function(e){ try { if(cliOutput){ cliOutput.textContent += ('[JS Error] ' + e.message + '\n'); } } catch(_){} });
 var commandHistory = []; var historyIndex = -1; var currentCommand=''; var outputHistory=''; var inHelp=false; var outputBackup=''; var scrolledOnce=false;
 var cliBondMode = false;
-if(cliExecBtn){ cliExecBtn.addEventListener('click', function(){ if(window.executeCommand) executeCommand(); }); }
-if(cliInput){ cliInput.addEventListener('keydown', function(e){ if(e.key==='Enter' && window.executeCommand){ executeCommand(); } }); }
+hw.on(cliExecBtn, 'click', function(){ if(window.executeCommand) executeCommand(); });
+hw.on(cliInput, 'keydown', function(e){ if(e.key==='Enter' && window.executeCommand){ executeCommand(); } });
 try{console.log('[CLI] Core init ready');}catch(_){}
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);
@@ -221,7 +220,7 @@ function executeCommand(){
   // This is the human terminal. Other /api/cli users default to machine mode
   // so their polls/buttons cannot answer a pending confirmation.
   hw.postFormText('/api/cli', { cmd: command, capture: '1', interactive: '1' })
-  .then(function(result){ try { console.debug('[CLI] fetch ok, len=' + (result ? result.length : 0)); } catch(_){} var ESC=String.fromCharCode(27); var clearSeq = ESC+'[2J'+ESC+'[H'; if (result && result.indexOf(clearSeq) !== -1) { var cleanResult = result.split(clearSeq).join(''); if (exitingHelp && inHelp) { if (cliOutput) { cliOutput.textContent = outputBackup || ''; } inHelp = false; try{ localStorage.setItem('cliInHelp','false'); localStorage.removeItem('cliOutputHistoryBackup'); }catch(_){} if (cleanResult && cliOutput) { cliOutput.textContent += cleanResult; } try{ localStorage.setItem('cliOutputHistory', cliOutput ? cliOutput.textContent : ''); }catch(_){} } else { if (cliOutput) { cliOutput.textContent = cleanResult; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } } else { if (cliOutput) { cliOutput.textContent += result + '\n'; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } if (cliInput) { cliInput.value=''; cliInput.focus(); } })
+  .then(function(result){ try { console.debug('[CLI] fetch ok, len=' + (result ? result.length : 0)); } catch(_){} var ESC=String.fromCharCode(27); var clearSeq = ESC+'[2J'+ESC+'[H'; if (result && result.indexOf(clearSeq) !== -1) { var cleanResult = result.split(clearSeq).join(''); if (exitingHelp && inHelp) { hw.setText(cliOutput, outputBackup || ''); inHelp = false; try{ localStorage.setItem('cliInHelp','false'); localStorage.removeItem('cliOutputHistoryBackup'); }catch(_){} if (cleanResult && cliOutput) { cliOutput.textContent += cleanResult; } try{ localStorage.setItem('cliOutputHistory', cliOutput ? cliOutput.textContent : ''); }catch(_){} } else { if (cliOutput) { cliOutput.textContent = cleanResult; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } } else { if (cliOutput) { cliOutput.textContent += result + '\n'; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } if (cliInput) { cliInput.value=''; cliInput.focus(); } })
   .catch(function(e){ try { console.debug('[CLI] fetch error: ' + e.message); } catch(_){} var errorMsg='Error: ' + e.message + '\n'; if (cliOutput) { cliOutput.textContent += errorMsg; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } if (cliInput) { cliInput.value=''; cliInput.focus(); } });
 }
 try { console.debug('[CLI] EOF'); } catch(_){}
@@ -242,7 +241,7 @@ function cliInitBondToggle(){
   if (!window.BondFs) return;
   window.BondFs.checkAvailable(function(ok){
     if (!ok) return;
-    var t = document.getElementById('cli-target-toggle');
+    var t = hw.$('cli-target-toggle');
     if (t) t.style.display = 'flex';
     cliSetTarget(false);
   });
@@ -253,8 +252,8 @@ function cliSetTarget(bonded){
   // Free up a socket for the bonded fetches; resume local log polling when back
   // on "This Device". See cliStartLogPoller() for why this matters.
   try { if (cliBondMode) { cliStopLogPoller(); } else { cliStartLogPoller(); } } catch(_){}
-  var bl = document.getElementById('cli-btn-local');
-  var bb = document.getElementById('cli-btn-bonded');
+  var bl = hw.$('cli-btn-local');
+  var bb = hw.$('cli-btn-bonded');
   if (bl) bl.style.opacity = cliBondMode ? '0.55' : '1';
   if (bb) bb.style.opacity = cliBondMode ? '1' : '0.55';
   if (cliOutput) {

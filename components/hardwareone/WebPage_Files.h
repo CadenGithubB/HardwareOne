@@ -7,8 +7,7 @@
 // Streamed inner content for files page
 inline void streamFilesInner(httpd_req_t* req) {
   // Stream shared file browser scripts
-  String fbScript = getFileBrowserScript();
-  httpd_resp_send_chunk(req, fbScript.c_str(), fbScript.length());
+  httpd_resp_send_chunk(req, getFileBrowserScript(), HTTPD_RESP_USE_STRLEN);
   // HTML structure
   httpd_resp_send_chunk(req, R"HTML(
 <h2>File Manager</h2>
@@ -96,21 +95,21 @@ function applyStorageStats(used, total, free, percent, prefix) {
   const usedMB = (used / 1024 / 1024).toFixed(2);
   const totalMB = (total / 1024 / 1024).toFixed(2);
   const freeMB = (free / 1024 / 1024).toFixed(2);
-  document.getElementById('storage-text').textContent = (prefix || '') + usedMB + ' MB / ' + totalMB + ' MB (' + freeMB + ' MB free)';
-  document.getElementById('storage-bar').style.width = percent + '%';
+  hw.$('storage-text').textContent = (prefix || '') + usedMB + ' MB / ' + totalMB + ' MB (' + freeMB + ' MB free)';
+  hw.$('storage-bar').style.width = percent + '%';
   if (percent > 80) {
-    document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#dc3545,#c82333)';
+    hw.$('storage-bar').style.background = 'linear-gradient(90deg,#dc3545,#c82333)';
   } else if (percent > 45) {
-    document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#ffc107,#ff9800)';
+    hw.$('storage-bar').style.background = 'linear-gradient(90deg,#ffc107,#ff9800)';
   } else {
-    document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#28a745,#20c997)';
+    hw.$('storage-bar').style.background = 'linear-gradient(90deg,#28a745,#20c997)';
   }
 }
 
 function setStorageError(msg) {
-  document.getElementById('storage-text').textContent = msg || 'Storage unavailable';
-  document.getElementById('storage-bar').style.width = '0%';
-  document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#666,#444)';
+  hw.$('storage-text').textContent = msg || 'Storage unavailable';
+  hw.$('storage-bar').style.width = '0%';
+  hw.$('storage-bar').style.background = 'linear-gradient(90deg,#666,#444)';
 }
 
 function updateStorageStats(path) {
@@ -138,36 +137,36 @@ function updateBondedStorageStats() {
 }
 function editFile(filePath) {
   currentEditPath = filePath;
-  document.getElementById('editor-title').textContent = 'Edit File';
-  document.getElementById('editor-path').textContent = currentEditPath;
-  document.getElementById('editor-status').textContent = 'Loading...';
-  document.getElementById('editor-text').value = '';
-  document.getElementById('editor-modal').style.display = 'block';
+  hw.$('editor-title').textContent = 'Edit File';
+  hw.$('editor-path').textContent = currentEditPath;
+  hw.$('editor-status').textContent = 'Loading...';
+  hw.$('editor-text').value = '';
+  hw.$('editor-modal').style.display = 'block';
   isJsonEdit = currentEditPath.toLowerCase().endsWith('.json');
-  document.getElementById('btn-pretty').style.display = isJsonEdit ? 'inline-block' : 'none';
-  document.getElementById('btn-raw').style.display = isJsonEdit ? 'inline-block' : 'none';
-  hw.fetchText('/api/files/read?name=' + encodeURIComponent(currentEditPath)).then(txt=>{ document.getElementById('editor-text').value = txt; document.getElementById('editor-status').textContent=''; }).catch(e=>{ document.getElementById('editor-status').textContent = 'Error: ' + e.message; });
+  hw.$('btn-pretty').style.display = isJsonEdit ? 'inline-block' : 'none';
+  hw.$('btn-raw').style.display = isJsonEdit ? 'inline-block' : 'none';
+  hw.fetchText('/api/files/read?name=' + encodeURIComponent(currentEditPath)).then(txt=>{ hw.$('editor-text').value = txt; hw.$('editor-status').textContent=''; }).catch(e=>{ hw.$('editor-status').textContent = 'Error: ' + e.message; });
 }
-function closeEditor(){ document.getElementById('editor-modal').style.display = 'none'; }
+function closeEditor(){ hw.$('editor-modal').style.display = 'none'; }
 function saveEditor(){
-  const content = document.getElementById('editor-text').value;
+  const content = hw.$('editor-text').value;
   if (isJsonEdit) {
-    try { JSON.parse(content); } catch (e) { document.getElementById('editor-status').textContent = 'Invalid JSON: ' + e.message; return; }
+    try { JSON.parse(content); } catch (e) { hw.$('editor-status').textContent = 'Invalid JSON: ' + e.message; return; }
   }
-  document.getElementById('editor-status').textContent = 'Saving...';
+  hw.$('editor-status').textContent = 'Saving...';
   hw.postForm('/api/files/write', { name: currentEditPath, content: content })
     .then(r=>r.json()).then(j=>{
       if(j && j.success){ 
-        document.getElementById('editor-status').textContent='Saved.'; 
+        hw.$('editor-status').textContent='Saved.'; 
         if(fileManager) fileManager.refresh(); 
       } else { 
-        document.getElementById('editor-status').textContent = 'Error: ' + (j && j.error ? j.error : 'Unknown'); 
+        hw.$('editor-status').textContent = 'Error: ' + (j && j.error ? j.error : 'Unknown'); 
       } 
     })
-    .catch(e=>{ document.getElementById('editor-status').textContent = 'Error: ' + e.message; });
+    .catch(e=>{ hw.$('editor-status').textContent = 'Error: ' + e.message; });
 }
-function prettyJSON(){ if(!isJsonEdit) return; const ta=document.getElementById('editor-text'); try{ const obj=JSON.parse(ta.value); ta.value = JSON.stringify(obj, null, 2); document.getElementById('editor-status').textContent='Pretty-printed JSON.'; } catch(e){ document.getElementById('editor-status').textContent='Invalid JSON: ' + e.message; } }
-function rawJSON(){ if(!isJsonEdit) return; const ta=document.getElementById('editor-text'); try{ const obj=JSON.parse(ta.value); ta.value = JSON.stringify(obj); document.getElementById('editor-status').textContent='Minified JSON.'; } catch(e){ document.getElementById('editor-status').textContent='Invalid JSON: ' + e.message; } }
+function prettyJSON(){ if(!isJsonEdit) return; const ta=hw.$('editor-text'); try{ const obj=JSON.parse(ta.value); ta.value = JSON.stringify(obj, null, 2); hw.$('editor-status').textContent='Pretty-printed JSON.'; } catch(e){ hw.$('editor-status').textContent='Invalid JSON: ' + e.message; } }
+function rawJSON(){ if(!isJsonEdit) return; const ta=hw.$('editor-text'); try{ const obj=JSON.parse(ta.value); ta.value = JSON.stringify(obj); hw.$('editor-status').textContent='Minified JSON.'; } catch(e){ hw.$('editor-status').textContent='Invalid JSON: ' + e.message; } }
 
 // ===========================================================================
 // Bonded-device file browser (master only). Browse + download the peer's FS
@@ -181,33 +180,33 @@ function checkBondedFsAvailable(){
   if (!window.BondFs) return;
   window.BondFs.checkAvailable(function(ok){
     if (!ok) return;
-    var t = document.getElementById('fs-source-toggle');
+    var t = hw.$('fs-source-toggle');
     if (t) t.style.display = 'flex';
     showLocalFs();
   });
 }
 
 function setFsButtons(local){
-  var bl = document.getElementById('fs-btn-local');
-  var bb = document.getElementById('fs-btn-bonded');
+  var bl = hw.$('fs-btn-local');
+  var bb = hw.$('fs-btn-bonded');
   if (bl) bl.style.opacity = local ? '1' : '0.55';
   if (bb) bb.style.opacity = local ? '0.55' : '1';
 }
 
 function showLocalFs(){
-  var lc = document.getElementById('file-manager-container');
-  var bc = document.getElementById('bonded-fs-container');
-  if (lc) lc.style.display = '';
-  if (bc) bc.style.display = 'none';
+  var lc = hw.$('file-manager-container');
+  var bc = hw.$('bonded-fs-container');
+  hw.show(lc);
+  hw.hide(bc);
   setFsButtons(true);
   updateStorageStats('/');
 }
 
 function showBondedFs(){
-  var lc = document.getElementById('file-manager-container');
-  var bc = document.getElementById('bonded-fs-container');
-  if (lc) lc.style.display = 'none';
-  if (bc) bc.style.display = '';
+  var lc = hw.$('file-manager-container');
+  var bc = hw.$('bonded-fs-container');
+  hw.hide(lc);
+  hw.show(bc);
   setFsButtons(false);
   // Do NOT also call updateBondedStorageStats() here. bondBrowse's onResult
   // already calls it after the listing completes — serializing the two execs

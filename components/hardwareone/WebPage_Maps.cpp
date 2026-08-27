@@ -591,7 +591,7 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
     
   } else if (req->method == HTTP_POST) {
     // Parse form data — buffer on PSRAM to avoid httpd stack overflow
-    char* buf = (char*)ps_malloc(512);
+    char* buf = (char*)ps_alloc(512, AllocPref::RequirePSRAM, "web.maps.form");
     if (!buf) {
       httpd_resp_set_status(req, "503 Service Unavailable");
       httpd_resp_send(req, "{\"success\":false,\"error\":\"OOM\"}", HTTPD_RESP_USE_STRLEN);

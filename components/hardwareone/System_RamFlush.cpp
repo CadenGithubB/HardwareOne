@@ -1,7 +1,13 @@
 #include "System_RamFlush.h"
 
 #include <Arduino.h>
+#include "System_BuildConfig.h"
+#if ENABLE_WIFI
+// Ungated, this redefines the stub WiFiClass in System_SensorStubs.h on a
+// WiFi-off build. The only use here is WiFi.isConnected() at RF_WIFI, which
+// the stub provides.
 #include <WiFi.h>
+#endif
 #include <esp_attr.h>
 #include <esp_system.h>
 #include <string.h>

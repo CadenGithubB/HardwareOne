@@ -18,6 +18,7 @@
 #include "System_VFS.h"
 #include "System_AuthIdentity.h"
 #include "System_Mutex.h"
+#include "System_I2C.h"        // sensorStatusBumpWith
 
 // TensorFlow Lite Micro includes
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -1964,6 +1965,7 @@ void buildDetectionJson(const EIResults& results, String& output) {
 #if ENABLE_HTTP_SERVER
 
 #include "WebServer_Server.h"
+#include "WebServer_Utils.h"  // WEB_AUTH_OR_RETURN
 #include "System_User.h"
 
 // Organize EI model files: move loose .tflite and .labels.txt into proper /EI Models/<name>/ folders
@@ -2498,6 +2500,18 @@ const char* cmd_ei_track_clear(const String& argsInput) {
   return gEICmdBuffer;
 }
 
+#endif  // ENABLE_HTTP_SERVER
+// ---------------------------------------------------------------------------
+// Everything below is gated on ENABLE_EDGE_IMPULSE ALONE.
+//
+// The command table must NOT sit inside the ENABLE_HTTP_SERVER region above:
+// gCommandModules[] in System_Utils.cpp references edgeImpulseCommands under
+// `#if ENABLE_EDGE_IMPULSE` only, with no stub in System_SensorStubs.h, so a
+// build with ENABLE_EDGE_IMPULSE=1 and ENABLE_HTTP_SERVER=0 failed to LINK.
+// That was latent only because System_BuildConfig.h pins ENABLE_EDGE_IMPULSE
+// to 0 — the CLI commands have nothing to do with the web server.
+// ---------------------------------------------------------------------------
+
 // ============================================================================
 // Command Registration
 // ============================================================================
@@ -2527,6 +2541,7 @@ const size_t edgeImpulseCommandsCount = sizeof(edgeImpulseCommands) / sizeof(edg
 // Auto-register commands at startup
 // Registration handled by gCommandModules[] in System_Utils.cpp
 
+#if ENABLE_HTTP_SERVER
 // =============================================================================
 // Register Edge Impulse Web Handlers
 // =============================================================================

@@ -265,12 +265,14 @@ static bool llmEnsureWorker() {
     // logs and loads anyway, llmStartAsync bails and re-enters on the next
     // generation, by which point the heap may have recovered.
     if (!gLLMWorkerStack) {
-      gLLMWorkerStack = (StackType_t*)heap_caps_malloc(LLM_TASK_STACK_SIZE,
-                                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      gLLMWorkerStack = (StackType_t*)ps_alloc(LLM_TASK_STACK_SIZE,
+                                               AllocPref::RequireInternal,
+                                               "llm.task.stack");
     }
     if (!gLLMWorkerTcb) {
-      gLLMWorkerTcb = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t),
-                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      gLLMWorkerTcb = (StaticTask_t*)ps_alloc(sizeof(StaticTask_t),
+                                              AllocPref::RequireInternal,
+                                              "llm.task.tcb");
     }
     if (gLLMWorkerStack && gLLMWorkerTcb) {
       // xTaskCreateStatic* only returns null on invalid params, never on OOM.
@@ -298,7 +300,7 @@ static bool llmEnsureWorker() {
 // ============================================================================
 
 void* llmPsramAlloc(size_t size, const char* tag) {
-  void* p = heap_caps_calloc(1, size, MALLOC_CAP_SPIRAM);
+  void* p = ps_calloc(1, size, AllocPref::RequirePSRAM, tag);
   if (!p) {
     ERROR_LLMF("PSRAM alloc failed: %s (%u bytes)", tag, (unsigned)size);
   }
@@ -2489,7 +2491,8 @@ int llmStartAsync(const char* prompt, const LLMGenParams& params) {
 
   // Allocate PSRAM result buffer on first call
   if (!gLLMResultBuf) {
-    gLLMResultBuf = (char*)heap_caps_malloc(LLM_RESULT_BUF_SIZE, MALLOC_CAP_SPIRAM);
+    gLLMResultBuf = (char*)ps_alloc(LLM_RESULT_BUF_SIZE, AllocPref::RequirePSRAM,
+                                    "llm.result.buf");
     if (!gLLMResultBuf) return 0;
   }
 

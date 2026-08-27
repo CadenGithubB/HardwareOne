@@ -1,0 +1,39 @@
+# OTA-layout-only sdkconfig deltas — Adafruit Feather ESP32 V2.
+#
+# Layered by CMakeLists.txt AFTER sdkconfig.ota.defaults, and ONLY when
+# HW_OTA_LAYOUT=1. The ordinary (non-OTA) build of this board is unaffected.
+#
+# Why this file exists at all: CONFIG_ESP32_REV_MIN_3 bakes a minimum silicon
+# revision into the bootloader, which then refuses to boot on older chips.
+# That is the correct trade for the OTA build and the wrong one to force on
+# the shared board file, so it lives here rather than in
+# boards/feather_esp32_v2.defaults.
+
+# HW_TARGET: esp32
+
+# Minimum silicon revision 3.
+#
+# MANDATORY, not an optimization: RSA-3072 signed-app verification is what the
+# whole recovery-OTA trust model rests on, and on the classic ESP32 the IDF
+# gates it behind revision 3 —
+#   config SECURE_BOOT_V2_RSA_SUPPORTED
+#       depends on (IDF_TARGET_ESP32 && ESP32_REV_MIN_FULL >= 300) || ...
+# (components/bootloader/Kconfig.projbuild). Without this line
+# CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME cannot be selected at all, and the
+# required-options loop in CMakeLists.txt fails the configure.
+#
+# The Feather ESP32 V2 carries an ESP32-PICO-MINI-02, i.e. a PICO-V3 die,
+# which is revision 3 — the same reasoning as the QT Py's PICO-V3-02. If a
+# unit ever reports a lower revision, the bootloader refuses to boot it and
+# says so; that is a cable-time discovery during provisioning, not a field
+# failure.
+CONFIG_ESP32_REV_MIN_3=y
+
+# SIDE EFFECT worth knowing about, because it makes the OTA image differ from
+# the ordinary image by more than a partition table: CONFIG_SPIRAM_CACHE_WORKAROUND
+# depends on ESP32_REV_MIN_FULL < 300, so declaring revision 3 drops it. That
+# removes -mfix-esp32-psram-cache-issue from every compile and lets newlib come
+# from ROM again instead of being linked into flash. Both are wins here (less
+# flash, less IRAM, faster code) and both are only sound on rev-3 silicon.
+# Hardware-test the OTA image on its own merits; do not assume codegen parity
+# with the non-OTA build.

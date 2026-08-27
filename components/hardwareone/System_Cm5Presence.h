@@ -117,6 +117,65 @@ Cm5TimeIntrinsicResult cm5TimeHandleTimeIntrinsic(
 // no-op when nothing is stashed. Main-loop task only (calls settimeofday).
 void cm5TimeSyncTick();
 
+// ---------------------------------------------------------------------------
+// CM5 link health (host-reported diagnostics).
+//
+// The link's TEXT channel carries no integrity check — only the P2 binary
+// frames get a CRC — so damage on it never announces itself. It arrives as a
+// strange reply, and the daemon's actors recover from it quietly. Those
+// recoveries are tallied on the HOST (ai-service link/health.py) and pushed
+// here, so the numbers are readable from this device's own CLI instead of only
+// from a journal on a Pi that may have no network at all. That was the whole
+// problem on 2026-08-25: the counters that would have named the fault existed,
+// and were unreachable from the bench.
+//
+// DIAGNOSTICS ONLY, and structurally so: these values are stored, printed, and
+// read by nothing else. No lease, guard, freshness test or LLM decision looks
+// at them, which is what makes a damaged or hostile push harmless — the worst
+// it can do is print a wrong number.
+//
+// Wire form (host -> device), parsed BY KEY so a counter added on the host
+// reaches an existing build without a firmware flash:
+//
+//   cm5 linkhealth 1 garbage=<u32> corrupt=<u32> timeouts=<u32> strays=<u32>
+//                    logins=<u32> resets=<u32> tx=<u32> rx=<u32> up=<u32>
+//
+// A malformed token rejects the WHOLE report rather than storing a partial
+// one. Damage is the thing these counters measure; a damaged report must not
+// be displayed as truth.
+struct Cm5LinkHealthSnapshot {
+  bool     seen;          // a report has landed since boot
+  uint32_t ageMs;         // since the last accepted report
+  uint32_t sessionEpoch;  // UART login epoch it arrived under
+  uint32_t reports;       // reports accepted since boot
+  uint32_t garbage;       // host-side framing/COBS incidents
+  uint32_t corrupt;       // replies that echoed a verb the host never wrote
+  uint32_t timeouts;      // host commands that got no reply in time
+  uint32_t strays;        // unmatched reply lines the host dropped
+  uint32_t logins;        // successful UART logins the host performed
+  uint32_t resets;        // reconnects the host observed
+  uint32_t tx;            // command lines the host wrote
+  uint32_t rx;            // text lines the host read
+  uint32_t uptimeS;       // daemon uptime in seconds
+  uint32_t unknownKeys;   // keys this build did not recognize (newer host)
+};
+
+Cm5LinkHealthSnapshot cm5LinkHealthSnapshot();
+
+enum class Cm5LinkHealthIntrinsicResult : uint8_t {
+  NotLinkHealth,
+  Handled,
+};
+
+// Recognize + validate the authenticated `cm5 linkhealth 1 <k=v> ...` push.
+// Auth-gated identically to the heartbeat and the clock push (nonzero named
+// session + non-Guest role), and consumed on the control plane so a periodic
+// diagnostic never takes the command lock or writes a durable audit line.
+Cm5LinkHealthIntrinsicResult cm5LinkHealthHandleIntrinsic(
+    const char* line, uint32_t activeSessionEpoch,
+    bool sessionMayPublishPresence,
+    char* reply, size_t replySize);
+
 // Handle only the authenticated, allocation-free UART control-plane renewal:
 //   cm5 heartbeat 1 <nonzero-u32-sequence> <starting|ready|busy|degraded>
 // Status and capabilities are ordinary registry commands below. `reply`

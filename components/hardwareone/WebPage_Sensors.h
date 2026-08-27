@@ -190,8 +190,8 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 
   // Small script: detect devices and toggle card visibility (using shared hw helpers)
   httpd_resp_send_chunk(req, "<script>console.log('[SENSORS] Section 1: Pre-script sentinel');</script><script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "console.log('[SENSORS] Device detection starting...');(function(){try{var loading=hw._ge('sensors-loading');var grid=hw._ge('sensors-grid');", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "var setVis=function(id,show){var el=hw._ge(id);if(el){el.style.display=show?'':'none';}};", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "console.log('[SENSORS] Device detection starting...');(function(){try{var loading=hw.$('sensors-loading');var grid=hw.$('sensors-grid');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var setVis=function(id,show){var el=hw.$(id);hw.toggle(el,(show));};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "Promise.all([hw.fetchJSON('/api/devices'),hw.fetchJSON('/api/sensors/status')]).then(function(rs){var d=rs[0]||{};var st=rs[1]||{};console.log('[SENSORS] Devices response:',d);console.log('[SENSORS] Status response:',st);", HTTPD_RESP_USE_STRLEN);
   // `gamepad` and `anoencoder` are both keyed by the Seesaw chip on the bus —
   // only one card exists in DOM at a time (whichever driver was compiled in),
@@ -221,12 +221,12 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "grid.insertBefore(banner,grid.firstChild);"
     "}",
     HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "}).catch(function(e){console.error('[SENSORS] Device/status fetch error:',e);}).finally(function(){if(loading)loading.style.display='none';if(grid)grid.style.display='grid';});", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "}).catch(function(e){console.error('[SENSORS] Device/status fetch error:',e);}).finally(function(){hw.hide(loading);hw.show(grid);});", HTTPD_RESP_USE_STRLEN);
 
   // Control helpers
-  httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up control helpers');var setClass=function(id,enabled){var el=hw._ge(id);if(!el)return;var c=enabled?'status-indicator status-enabled':'status-indicator status-disabled';if(el.className!==c)el.className=c};", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up control helpers');var setClass=function(id,enabled){var el=hw.$(id);if(!el)return;var c=enabled?'status-indicator status-enabled':'status-indicator status-disabled';if(el.className!==c)el.className=c};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req,
-    "var bind=function(id,cmd){var el=hw._ge(id);if(el){hw.on(el,'click',function(){console.log('[SENSORS] Button clicked:',id,'cmd:',cmd);hw.postForm('/api/cli',{cmd:cmd}).then(function(r){console.log('[SENSORS] Command result:',r);try{var action=(/start$/.test(cmd)||/^open/.test(cmd)?'start':(/stop$/.test(cmd)||/^close/.test(cmd)?'stop':''));var sensor='';var c=cmd.replace(/^(open|close)/,'');if(/^imu/i.test(c))sensor='imu';else if(/^thermal/i.test(c))sensor='thermal';else if(/^tof/i.test(c))sensor='tof';else if(/^gamepad/i.test(c))sensor='gamepad';else if(/^input/i.test(c))sensor='"
+    "var bind=function(id,cmd){var el=hw.$(id);if(el){hw.on(el,'click',function(){console.log('[SENSORS] Button clicked:',id,'cmd:',cmd);hw.postForm('/api/cli',{cmd:cmd}).then(function(r){console.log('[SENSORS] Command result:',r);try{var action=(/start$/.test(cmd)||/^open/.test(cmd)?'start':(/stop$/.test(cmd)||/^close/.test(cmd)?'stop':''));var sensor='';var c=cmd.replace(/^(open|close)/,'');if(/^imu/i.test(c))sensor='imu';else if(/^thermal/i.test(c))sensor='thermal';else if(/^tof/i.test(c))sensor='tof';else if(/^gamepad/i.test(c))sensor='gamepad';else if(/^input/i.test(c))sensor='"
 #if ENABLE_ANO_ENCODER
     "anoencoder"
 #else
@@ -273,10 +273,22 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "console.log('[SENSORS] Button bindings complete');", HTTPD_RESP_USE_STRLEN);
 
   // Status poller - also toggle button visibility based on enabled state
-  httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up status poller');var apply=function(s){console.log('[SENSORS] Status update:',s);try{setClass('gyro-status-indicator',!!s.imuRunning);setClass('thermal-status-indicator',!!s.thermalRunning);setClass('tof-status-indicator',!!s.tofRunning);setClass('gamepad-status-indicator',!!s.inputRunning);setClass('ano-status-indicator',!!s.inputRunning);setClass('gps-status-indicator',!!s.gpsRunning);setClass('rtc-status-indicator',!!s.rtcRunning);setClass('presence-status-indicator',!!s.presenceRunning);setClass('fmradio-status-indicator',!!s.fmRadioRunning);setClass('servo-status-indicator',!!s.pwmDriverConnected);setClass('camera-status-indicator',!!s.cameraRunning);setClass('camera-streaming-indicator',!!s.cameraStreaming);setClass('camera-ml-indicator',!!s.eiEnabled);setClass('mic-status-indicator',!!s.micRunning);setClass('ei-status-indicator',!!s.eiEnabled);var rec=hw._ge('mic-recording-indicator');if(rec){var cls=(s.micRecording?'status-indicator status-recording':'status-indicator status-disabled');if(rec.className!==cls)rec.className=cls}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up status poller');var apply=function(s){console.log('[SENSORS] Status update:',s);try{setClass('gyro-status-indicator',!!s.imuRunning);setClass('thermal-status-indicator',!!s.thermalRunning);setClass('tof-status-indicator',!!s.tofRunning);setClass('gamepad-status-indicator',!!s.inputRunning);setClass('ano-status-indicator',!!s.inputRunning);setClass('gps-status-indicator',!!s.gpsRunning);setClass('rtc-status-indicator',!!s.rtcRunning);setClass('presence-status-indicator',!!s.presenceRunning);setClass('fmradio-status-indicator',!!s.fmRadioRunning);setClass('servo-status-indicator',!!s.pwmDriverConnected);setClass('camera-status-indicator',!!s.cameraRunning);setClass('camera-streaming-indicator',!!s.cameraStreaming);", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_EDGE_IMPULSE
+  httpd_resp_send_chunk(req, "setClass('camera-ml-indicator',!!s.eiEnabled);", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, "setClass('mic-status-indicator',!!s.micRunning);", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_EDGE_IMPULSE
+  httpd_resp_send_chunk(req, "setClass('ei-status-indicator',!!s.eiEnabled);", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, "var rec=hw.$('mic-recording-indicator');if(rec){var cls=(s.micRecording?'status-indicator status-recording':'status-indicator status-disabled');if(rec.className!==cls)rec.className=cls}", HTTPD_RESP_USE_STRLEN);
   // Button visibility toggling
-  httpd_resp_send_chunk(req, "var toggleBtns=function(startId,stopId,isOn){var startBtn=hw._ge(startId);var stopBtn=hw._ge(stopId);if(startBtn)startBtn.style.display=isOn?'none':'inline-block';if(stopBtn)stopBtn.style.display=isOn?'inline-block':'none';};toggleBtns('btn-gamepad-start','btn-gamepad-stop',!!s.inputRunning);toggleBtns('btn-ano-start','btn-ano-stop',!!s.inputRunning);toggleBtns('btn-gps-start','btn-gps-stop',!!s.gpsRunning);toggleBtns('btn-rtc-start','btn-rtc-stop',!!s.rtcRunning);toggleBtns('btn-presence-start','btn-presence-stop',!!s.presenceRunning);toggleBtns('btn-imu-start','btn-imu-stop',!!s.imuRunning);toggleBtns('btn-thermal-start','btn-thermal-stop',!!s.thermalRunning);toggleBtns('btn-tof-start','btn-tof-stop',!!s.tofRunning);toggleBtns('btn-camera-start','btn-camera-stop',!!s.cameraRunning);toggleBtns('btn-mic-start','btn-mic-stop',!!s.micRunning);toggleBtns('btn-ei-enable','btn-ei-disable',!!s.eiEnabled);var camRec=hw._ge('btn-camera-record');var camRecStop=hw._ge('btn-camera-record-stop');var camRecHint=hw._ge('camera-record-hint');if(camRec){camRec.style.display=(s.cameraRunning&&!s.cameraRecording)?'inline-block':'none';camRec.disabled=!s.sdWritable;if(camRec.title){if(s.sdWritable)camRec.title='Record stream to SD card as MJPEG AVI';else if(s.sdAvailable)camRec.title='SD mounted but writes are failing (card may be flaky)';else camRec.title='Requires SD card';}}if(camRecStop){camRecStop.style.display=(s.cameraRunning&&s.cameraRecording)?'inline-block':'none';}if(camRecHint){if(s.cameraRunning&&!s.sdWritable){camRecHint.style.display='block';camRecHint.textContent=s.sdAvailable?'SD card is mounted but writes are failing — card may be flaky, full, or write-protected.':'SD card required to record video.';}else{camRecHint.style.display='none';}}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "if(s.fmRadioRunning){if(typeof startFMRadioPolling==='function')startFMRadioPolling()}else{if(typeof stopFMRadioPolling==='function')stopFMRadioPolling()}var servoStatus=hw._ge('servo-connection-status');if(servoStatus){servoStatus.textContent=s.pwmDriverConnected?'Initialized & ready':'Not initialized (use servo command to start)';servoStatus.style.color=s.pwmDriverConnected?'#28a745':'#ffc107';}}catch(_){}};", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var toggleBtns=function(startId,stopId,isOn){var startBtn=hw.$(startId);var stopBtn=hw.$(stopId);if(startBtn)startBtn.style.display=isOn?'none':'inline-block';if(stopBtn)stopBtn.style.display=isOn?'inline-block':'none';};toggleBtns('btn-gamepad-start','btn-gamepad-stop',!!s.inputRunning);toggleBtns('btn-ano-start','btn-ano-stop',!!s.inputRunning);toggleBtns('btn-gps-start','btn-gps-stop',!!s.gpsRunning);toggleBtns('btn-rtc-start','btn-rtc-stop',!!s.rtcRunning);toggleBtns('btn-presence-start','btn-presence-stop',!!s.presenceRunning);toggleBtns('btn-imu-start','btn-imu-stop',!!s.imuRunning);toggleBtns('btn-thermal-start','btn-thermal-stop',!!s.thermalRunning);toggleBtns('btn-tof-start','btn-tof-stop',!!s.tofRunning);toggleBtns('btn-camera-start','btn-camera-stop',!!s.cameraRunning);toggleBtns('btn-mic-start','btn-mic-stop',!!s.micRunning);", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_EDGE_IMPULSE
+  httpd_resp_send_chunk(req, "toggleBtns('btn-ei-enable','btn-ei-disable',!!s.eiEnabled);", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, "var camRec=hw.$('btn-camera-record');var camRecStop=hw.$('btn-camera-record-stop');var camRecHint=hw.$('camera-record-hint');if(camRec){camRec.style.display=(s.cameraRunning&&!s.cameraRecording)?'inline-block':'none';camRec.disabled=!s.sdWritable;if(camRec.title){if(s.sdWritable)camRec.title='Record stream to SD card as MJPEG AVI';else if(s.sdAvailable)camRec.title='SD mounted but writes are failing (card may be flaky)';else camRec.title='Requires SD card';}}if(camRecStop){camRecStop.style.display=(s.cameraRunning&&s.cameraRecording)?'inline-block':'none';}if(camRecHint){if(s.cameraRunning&&!s.sdWritable){camRecHint.style.display='block';camRecHint.textContent=s.sdAvailable?'SD card is mounted but writes are failing — card may be flaky, full, or write-protected.':'SD card required to record video.';}else{camRecHint.style.display='none';}}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "if(s.fmRadioRunning){if(typeof startFMRadioPolling==='function')startFMRadioPolling()}else{if(typeof stopFMRadioPolling==='function')stopFMRadioPolling()}var servoStatus=hw.$('servo-connection-status');if(servoStatus){servoStatus.textContent=s.pwmDriverConnected?'Initialized & ready':'Not initialized (use servo command to start)';servoStatus.style.color=s.pwmDriverConnected?'#28a745':'#ffc107';}}catch(_){}};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "hw.fetchJSON('/api/sensors/status').then(apply).catch(function(e){console.error('[SENSORS] Status fetch error:',e);})", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, ";hw.pollJSON('/api/sensors/status',1000,apply);console.log('[SENSORS] Status poller started');", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "}catch(e){console.error('[SENSORS] Init error:',e);}})();", HTTPD_RESP_USE_STRLEN);
@@ -319,7 +331,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "      if (tofSect.tofMaxDistanceMm !== undefined) {\n"
     "        tofMaxDistance = tofSect.tofMaxDistanceMm;\n"
     "        console.log('[Settings] ToF max distance: ' + tofMaxDistance + 'mm');\n"
-    "        var rng = document.getElementById('tof-range-mm');\n"
+    "        var rng = hw.$('tof-range-mm');\n"
     "        if (rng) {\n"
     "          rng.textContent = String(tofMaxDistance);\n"
     "        }\n"
@@ -403,7 +415,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "  if (!status) return;\n"
     "  console.log('[Queue] Applying sensor status:', status);\n"
     "  ['thermal', 'tof', 'imu', 'gps', 'gamepad', 'ano', 'fmradio', 'presence'].forEach(function(sensor) {\n"
-    "    var queueEl = document.getElementById(sensor + '-queue-status');\n"
+    "    var queueEl = hw.$(sensor + '-queue-status');\n"
     "    if (!queueEl) return;\n"
     "    var isQueued = status[sensor + 'Queued'];\n"
     "    var queuePos = status[sensor + 'QueuePos'];\n"
@@ -479,16 +491,30 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "    } else if (status.cameraCompiled) {\n"
     "      stopSensorPolling('camera');\n"
     "    }\n"
-    "    // Update Edge Impulse UI when status changes\n"
+    , HTTPD_RESP_USE_STRLEN);
+#if ENABLE_EDGE_IMPULSE
+  // Update Edge Impulse UI when status changes
+  httpd_resp_send_chunk(req,
     "    if (typeof window._eiUpdateStatus === 'function') {\n"
-    "      var btnEnable = document.getElementById('btn-ei-enable');\n"
-    "      var btnDisable = document.getElementById('btn-ei-disable');\n"
+    "      var btnEnable = hw.$('btn-ei-enable');\n"
+    "      var btnDisable = hw.$('btn-ei-disable');\n"
     "      if(btnEnable) btnEnable.style.display = status.eiEnabled ? 'none' : 'inline-block';\n"
     "      if(btnDisable) btnDisable.style.display = status.eiEnabled ? 'inline-block' : 'none';\n"
     "    }\n"
+    , HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req,
     "  } catch (_) {}\n"
     "};\n", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "function updateStatusIndicators(status){if(!status){console.warn('[Sensors] updateStatusIndicators called with null/undefined status');return}var t=document.getElementById('thermal-status-indicator');var f=document.getElementById('tof-status-indicator');var i=document.getElementById('gyro-status-indicator');var g=document.getElementById('gamepad-status-indicator');var r=document.getElementById('fmradio-status-indicator');var c=document.getElementById('camera-status-indicator');if(t){t.className=status.thermalRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(f){f.className=status.tofRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(i){i.className=status.imuRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(g){g.className=status.inputRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var g2=document.getElementById('ano-status-indicator');if(g2){g2.className=status.inputRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(r){r.className=status.fmRadioRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(c){c.className=status.cameraRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var cs=document.getElementById('camera-streaming-indicator');if(cs){cs.className=status.cameraStreaming?'status-indicator status-recording':'status-indicator status-disabled'}var cml=document.getElementById('camera-ml-indicator');if(cml){cml.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var m=document.getElementById('mic-status-indicator');if(m){m.className=status.micRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var mr=document.getElementById('mic-recording-indicator');if(mr){mr.className=status.micRecording?'status-indicator status-recording':'status-indicator status-disabled'}var ei=document.getElementById('ei-status-indicator');if(ei){ei.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "function updateStatusIndicators(status){if(!status){console.warn('[Sensors] updateStatusIndicators called with null/undefined status');return}var t=hw.$('thermal-status-indicator');var f=hw.$('tof-status-indicator');var i=hw.$('gyro-status-indicator');var g=hw.$('gamepad-status-indicator');var r=hw.$('fmradio-status-indicator');var c=hw.$('camera-status-indicator');if(t){t.className=status.thermalRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(f){f.className=status.tofRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(i){i.className=status.imuRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(g){g.className=status.inputRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var g2=hw.$('ano-status-indicator');if(g2){g2.className=status.inputRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(r){r.className=status.fmRadioRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(c){c.className=status.cameraRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var cs=hw.$('camera-streaming-indicator');if(cs){cs.className=status.cameraStreaming?'status-indicator status-recording':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_EDGE_IMPULSE
+  httpd_resp_send_chunk(req, "var cml=hw.$('camera-ml-indicator');if(cml){cml.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, "var m=hw.$('mic-status-indicator');if(m){m.className=status.micRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var mr=hw.$('mic-recording-indicator');if(mr){mr.className=status.micRecording?'status-indicator status-recording':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_EDGE_IMPULSE
+  httpd_resp_send_chunk(req, "var ei=hw.$('ei-status-indicator');if(ei){ei.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, "}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req,
     "function checkAlreadyActiveSensors() {\n"
     "  console.log('[Sensors] Checking for already-active sensors...');\n"
@@ -530,7 +556,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "      console.log('[Sensors] Checking', device.name, 'enabled=', status[map.enabledKey]);\n"
     "      if (status[map.enabledKey]) {\n"
     "        console.log('[Sensors] ' + device.name + ' connected and enabled - starting client polling');\n"
-    "        var ind = document.getElementById(map.indicatorId);\n"
+    "        var ind = hw.$(map.indicatorId);\n"
     "        if (ind) ind.className = 'status-indicator status-enabled';\n"
     "        startSensorPolling(map.type);\n"
     "      }\n"
@@ -582,9 +608,9 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "function updateRemoteSensor(deviceMac,sensorType){\n"
     "  try{\n"
     "    var id='remote-'+String(deviceMac).replace(/:/g,'')+'-'+sensorType;\n"
-    "    var el=hw._ge(id);\n"
+    "    var el=hw.$(id);\n"
     "    if(!el)return;\n"
-    "    var setDot=function(ok){var dot=hw._ge(id+'-dot');if(!dot)return;var c=ok?'status-indicator status-enabled':'status-indicator status-disabled';if(dot.className!==c)dot.className=c;};\n"
+    "    var setDot=function(ok){var dot=hw.$(id+'-dot');if(!dot)return;var c=ok?'status-indicator status-enabled':'status-indicator status-disabled';if(dot.className!==c)dot.className=c;};\n"
     "    var url='/api/sensors/remote?device='+encodeURIComponent(deviceMac)+'&sensor='+encodeURIComponent(sensorType);\n"
     "    hw.fetchJSON(url).then(function(d){\n"
     "      if(!el)return;\n"
@@ -595,7 +621,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "      if(payload===null||payload===undefined){el.textContent=en?'No data yet':'Disabled';return;}\n"
     "      if(typeof payload==='string'){try{payload=JSON.parse(payload);}catch(_){}}\n"
     "      if(sensorType==='input'&&payload&&typeof payload==='object'){\n"
-    "        var host=document.getElementById(id+'-widget');\n"
+    "        var host=hw.$(id+'-widget');\n"
     "        var isAno=(payload.pos!==undefined);\n"
     "        var kind=isAno?'ano':'gp';\n"
     "        if(host&&host.getAttribute('data-kind')!==kind){\n"
@@ -611,7 +637,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "        return;\n"
     "      }\n"
     "      try{window.hwRenderGenericSensor(el,payload);}catch(_){try{el.textContent=JSON.stringify(payload);}catch(_2){el.textContent=String(payload);}}\n"
-    "    }).catch(function(_e){if(el)el.textContent='Error';setDot(false);});\n"
+    "    }).catch(function(_e){hw.setText(el,'Error');setDot(false);});\n"
     "  }catch(_){}\n"
     "}\n"
     "function startRemoteSensorsPolling(devices){\n"
@@ -627,8 +653,8 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "  window._remoteSensorsTimer=setInterval(tick,1000);\n"
     "}\n"
     "function loadRemoteSensors() {\n"
-    "  var statusDiv = hw._ge('remote-sensors-status');\n"
-    "  var gridDiv = hw._ge('remote-sensors-grid');\n"
+    "  var statusDiv = hw.$('remote-sensors-status');\n"
+    "  var gridDiv = hw.$('remote-sensors-grid');\n"
     "  console.log('[REMOTE_SENSORS] Loading remote sensors...');\n"
     "  hw.fetchJSON('/api/sensors/remote').then(function(data) {\n"
     "    console.log('[REMOTE_SENSORS] Response:', data);\n"
@@ -640,11 +666,11 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "        statusDiv.innerHTML = '<div style=\"text-align:center;padding:1rem;color:var(--panel-fg)\">' + msg + '</div>';\n"
     "        statusDiv.style.display = 'block';\n"
     "      }\n"
-    "      if (gridDiv) gridDiv.style.display = 'none';\n"
+    "      hw.hide(gridDiv);\n"
     "      stopRemoteSensorsPolling();\n"
     "      return;\n"
     "    }\n"
-    "    if (statusDiv) statusDiv.style.display = 'none';\n"
+    "    hw.hide(statusDiv);\n"
     "    if (gridDiv) {\n"
     "      gridDiv.innerHTML = '';\n"
     "      data.devices.forEach(function(device) {\n"

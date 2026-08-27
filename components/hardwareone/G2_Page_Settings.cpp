@@ -877,10 +877,10 @@ static void settingsEditEntry(int moduleIdx, int entryIdx) {
 //                          → render page 0 via CREATE-text
 //                          → arm exit fn (back to module list) AND
 //                            tap fn (advance page)
-//   USER_ACTIVITY post-grace → tap fn fires → page index ++ (wrap)
+//   TextEvent/SysEvent NAV  → tap fn fires → page index ++ (wrap)
 //                            → rebuild body → g2ShowText (REBUILD_PAGE,
 //                              flicker-free)
-//   SysEvent CLICK/etc.    → exit fn fires → back to module list
+//   SysEvent exit gesture  → exit fn fires → back to module list
 
 #define JSON_MAX_PAGES     16
 #define JSON_PAGE_BUDGET   176   // < 180 proven-safe single-fragment body
@@ -950,11 +950,12 @@ static bool settingsRenderJsonPage() {
 // Page navigation. NEXT (lens tap / ring scroll-down) advances, PREV
 // (scroll-up) goes back; both wrap at the ends so the user can cycle.
 static void settingsJsonNav(G2TapKind kind) {
+  const int oldPage = gJsonPager.curPage;
   textNavPage(gJsonPager, kind != G2_TAP_PAGE_PREV);
   DEBUG_G2F("[G2] Settings JSON: %s → page %d/%d",
             kind == G2_TAP_PAGE_PREV ? "prev" : "next",
             gJsonPager.curPage + 1, gJsonPager.pageCount);
-  settingsRenderJsonPage();
+  if (!settingsRenderJsonPage()) gJsonPager.curPage = oldPage;
 }
 
 // Build the JSON content for `moduleIdx`, split into pages, and ship

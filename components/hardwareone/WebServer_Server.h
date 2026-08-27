@@ -260,7 +260,9 @@ inline AuthContext makeWebAuthCtx(httpd_req_t* req) {
   return ctx;
 }
 
-// Session JSON building
+// Build the admin-facing session array across web, Serial, UART, OLED, G2,
+// and all authenticated BLE connections. Web entries carry their richer
+// cookie/IP/timestamp metadata; native transport entries carry user+transport.
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
 // Defined in System_Utils.cpp (moved out of the web TU so the CLI `status json`
 // can build it without ENABLE_HTTP_SERVER). includeDeviceList=false yields the

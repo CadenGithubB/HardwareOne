@@ -1,4 +1,5 @@
 #include "System_R1_Protocol.h"
+#include "System_MemUtil.h"  // ps_alloc / AllocPref
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -117,6 +118,7 @@ static inline void writeU32LE(uint8_t* p, uint32_t value) {
 const char* r1ProtocolProfileName(R1ProtocolProfile profile) {
   switch (profile) {
     case R1_PROFILE_FW_2_2_7_0005: return "2.2.7.0005";
+    case R1_PROFILE_FW_2_2_9_0003: return "2.2.9.0003";
     case R1_PROFILE_UNKNOWN:
     default:                       return "unknown";
   }
@@ -126,7 +128,110 @@ R1ProtocolProfile r1ProfileForFirmware(const char* firmware) {
   if (firmware && strcmp(firmware, "2.2.7.0005") == 0) {
     return R1_PROFILE_FW_2_2_7_0005;
   }
+  if (firmware && strcmp(firmware, "2.2.9.0003") == 0) {
+    return R1_PROFILE_FW_2_2_9_0003;
+  }
   return R1_PROFILE_UNKNOWN;
+}
+
+namespace {
+bool r1Captured229DailyDataCmd(uint8_t cmd) {
+  return cmd == R1_CMD_HEARTRATE || cmd == R1_CMD_HRV ||
+         cmd == R1_CMD_SPO2 || cmd == R1_CMD_ACTIVITY;
+}
+
+bool r1Captured229DailyQueryCmd(uint8_t cmd) {
+  return r1Captured229DailyDataCmd(cmd) || cmd == R1_CMD_SLEEP;
+}
+}  // namespace
+
+bool r1ProfileSupportsAdvStart(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_2_7_0005 ||
+         profile == R1_PROFILE_FW_2_2_9_0003;
+}
+
+bool r1ProfileSupportsHealthCollectionSet(R1ProtocolProfile profile,
+                                          bool enabled) {
+  if (profile == R1_PROFILE_FW_2_2_7_0005) return true;
+  // The 2.2.9 capture contains the enabled form only. Do not infer OFF.
+  return profile == R1_PROFILE_FW_2_2_9_0003 && enabled;
+}
+
+bool r1ProfileSupportsHealthQuery(R1ProtocolProfile profile, uint8_t cmd,
+                                  uint8_t subCmd) {
+  // Preserve the established 2.2.7 diagnostic builder behavior exactly.
+  if (profile == R1_PROFILE_FW_2_2_7_0005) return true;
+  if (profile != R1_PROFILE_FW_2_2_9_0003 || subCmd != R1_SUB_DAILY) {
+    return false;
+  }
+  return r1Captured229DailyQueryCmd(cmd);
+}
+
+bool r1ProfileSupportsPointMeasureQuery(R1ProtocolProfile profile) {
+  // The existing 2.2.7 builder intentionally permits diagnostic point/measure
+  // combinations. No point or measure request was captured on 2.2.9.
+  return profile == R1_PROFILE_FW_2_2_7_0005;
+}
+
+bool r1ProfileSupportsPointIngestion(R1ProtocolProfile profile) {
+  // Preserve the capture-established legacy consumer for existing internal
+  // logging/OLED users. The shipping 2.2.9 app also retains a passive
+  // BleRing1HealthPoint consumer, but outbound 2.2.9 POINT/MEASURE remains
+  // unsupported and Health-page Poll Now is separately new-profile-only.
+  return profile == R1_PROFILE_FW_2_2_7_0005 ||
+         profile == R1_PROFILE_FW_2_2_9_0003;
+}
+
+bool r1ProfileSupportsHealthPageRefresh(R1ProtocolProfile profile) {
+  // Even 2.2.9 build 230 exposes getDailyData (not a POINT/MEASURE sender),
+  // and the matching 2.2.9.0003 capture uses DAILY for HR/HRV/SpO2/sleep/
+  // activity. HardwareOne composes those proven primitives into its refresh;
+  // the capture does not claim a causal stock-app page action.
+  return profile == R1_PROFILE_FW_2_2_9_0003;
+}
+
+bool r1ProfileSupportsSingleFrameDaily(R1ProtocolProfile profile, uint8_t cmd) {
+  if (profile == R1_PROFILE_FW_2_2_7_0005) {
+    return cmd == R1_CMD_HEARTRATE || cmd == R1_CMD_HRV ||
+           cmd == R1_CMD_SPO2 || cmd == R1_CMD_ACTIVITY;
+  }
+  return profile == R1_PROFILE_FW_2_2_9_0003 &&
+         r1Captured229DailyDataCmd(cmd);
+}
+
+bool r1ProfileSupportsDailyPacketAck(R1ProtocolProfile profile, uint8_t cmd) {
+  if (profile == R1_PROFILE_FW_2_2_7_0005) {
+    return cmd == R1_CMD_HEARTRATE || cmd == R1_CMD_HRV ||
+           cmd == R1_CMD_SPO2 || cmd == R1_CMD_SLEEP ||
+           cmd == R1_CMD_ACTIVITY;
+  }
+  return profile == R1_PROFILE_FW_2_2_9_0003 &&
+         r1Captured229DailyDataCmd(cmd);
+}
+
+bool r1ProfileSupportsActivityReassembly(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_2_7_0005;
+}
+
+bool r1ProfileSupportsSleepDataIngestion(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_2_7_0005;
+}
+
+bool r1ProfileSupportsLowPower(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_2_7_0005;
+}
+
+bool r1ProfileSupportsUserInfo(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_2_7_0005;
+}
+
+bool r1ProfileSupportsDeviceStatusIngestion(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_2_7_0005 ||
+         profile == R1_PROFILE_FW_2_2_9_0003;
+}
+
+bool r1ProfileSupportsWearStatus(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_2_7_0005;
 }
 
 const char* r1ParseErrorName(R1ParseError error) {
@@ -242,7 +347,7 @@ R1Frame R1Encoder::buildSyncTime(int16_t tzOffsetMinutes, uint32_t epochSeconds)
 R1Frame R1Encoder::buildAdvStart(R1ProtocolProfile profile,
                                  const uint8_t* rightMac6,
                                  const uint8_t* leftMac6) {
-  if (profile != R1_PROFILE_FW_2_2_7_0005 || !rightMac6 || !leftMac6) {
+  if (!r1ProfileSupportsAdvStart(profile) || !rightMac6 || !leftMac6) {
     return R1Frame{};
   }
   uint8_t payload[12];
@@ -270,7 +375,9 @@ R1Frame R1Encoder::buildDeviceInfoQuery() {
 R1Frame R1Encoder::buildHealthCollectionSet(R1ProtocolProfile profile,
                                             uint32_t epochSeconds,
                                             bool enabled) {
-  if (profile != R1_PROFILE_FW_2_2_7_0005) return R1Frame{};
+  if (!r1ProfileSupportsHealthCollectionSet(profile, enabled)) {
+    return R1Frame{};
+  }
   uint8_t payload[12] = {};
   writeU32LE(payload, epochSeconds);
   payload[4] = enabled ? 1 : 0;
@@ -279,7 +386,8 @@ R1Frame R1Encoder::buildHealthCollectionSet(R1ProtocolProfile profile,
                payload, sizeof(payload));
 }
 
-R1Frame R1Encoder::buildLowPowerQuery() {
+R1Frame R1Encoder::buildLowPowerQuery(R1ProtocolProfile profile) {
+  if (!r1ProfileSupportsLowPower(profile)) return R1Frame{};
   return build(R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_SYSTEM_SETTINGS,
                R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_GET, R1_STATUS_ACK_OK,
                nullptr, 0);
@@ -288,7 +396,7 @@ R1Frame R1Encoder::buildLowPowerQuery() {
 R1Frame R1Encoder::buildLowPowerSet(R1ProtocolProfile profile,
                                     uint32_t epochSeconds,
                                     bool enabled) {
-  if (profile != R1_PROFILE_FW_2_2_7_0005) return R1Frame{};
+  if (!r1ProfileSupportsLowPower(profile)) return R1Frame{};
   uint8_t payload[12] = {};
   writeU32LE(payload, epochSeconds);
   payload[4] = 0;  // Captured switchType; no other value is supported.
@@ -298,13 +406,20 @@ R1Frame R1Encoder::buildLowPowerSet(R1ProtocolProfile profile,
                payload, sizeof(payload));
 }
 
-R1Frame R1Encoder::buildWearStatusQuery() {
+R1Frame R1Encoder::buildWearStatusQuery(R1ProtocolProfile profile) {
+  if (!r1ProfileSupportsWearStatus(profile)) return R1Frame{};
   return build(R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_WEAR_STATUS,
                R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_GET, R1_STATUS_ACK_OK,
                nullptr, 0);
 }
 
-R1Frame R1Encoder::buildHealthQuery(uint8_t cmd, uint8_t subCmd) {
+R1Frame R1Encoder::buildHealthQuery(R1ProtocolProfile profile, uint8_t cmd,
+                                    uint8_t subCmd) {
+  if (((subCmd == R1_SUB_POINT || subCmd == R1_SUB_MEASURE) &&
+       !r1ProfileSupportsPointMeasureQuery(profile)) ||
+      !r1ProfileSupportsHealthQuery(profile, cmd, subCmd)) {
+    return R1Frame{};
+  }
   return build(R1_MODULE_HEALTH, cmd, subCmd,
                R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_GET, R1_STATUS_ACK_OK,
                nullptr, 0);
@@ -312,7 +427,8 @@ R1Frame R1Encoder::buildHealthQuery(uint8_t cmd, uint8_t subCmd) {
 
 R1Frame R1Encoder::buildPacketAck(
     R1ProtocolProfile profile, const R1PacketAckDescriptor& received) {
-  if (profile != R1_PROFILE_FW_2_2_7_0005 || !received.valid()) {
+  if (!received.valid() ||
+      !r1ProfileSupportsDailyPacketAck(profile, received.cmd_)) {
     return R1Frame{};
   }
 
@@ -432,14 +548,14 @@ bool r1PacketAckDescriptorFromDecoded(R1ProtocolProfile profile,
                                       const R1Decoded& decoded,
                                       R1PacketAckDescriptor& out) {
   out = R1PacketAckDescriptor{};
-  if (profile != R1_PROFILE_FW_2_2_7_0005 ||
-      !r1DecodedIsTrusted(decoded) ||
+  if (!r1DecodedIsTrusted(decoded) ||
       decoded.module != R1_MODULE_HEALTH ||
       decoded.subCmd != R1_SUB_DAILY ||
       decoded.statusType != R1_STATUS_TYPE_NOTIFY ||
       decoded.statusMethod != R1_STATUS_METHOD_SET ||
       decoded.statusAck != R1_STATUS_ACK_OK ||
-      !r1PacketAckCmdAllowed(decoded.cmd)) {
+      !r1PacketAckCmdAllowed(decoded.cmd) ||
+      !r1ProfileSupportsDailyPacketAck(profile, decoded.cmd)) {
     return false;
   }
 
@@ -613,9 +729,9 @@ static bool bytesAreZero(const uint8_t* p, size_t len) {
   return true;
 }
 
-static R1ParseError validateKnownProfileAndFrame(R1ProtocolProfile profile,
-                                                  const R1Decoded& decoded) {
-  if (profile != R1_PROFILE_FW_2_2_7_0005) return R1_PARSE_WRONG_PROFILE;
+static R1ParseError validateProfileAndFrame(bool supported,
+                                            const R1Decoded& decoded) {
+  if (!supported) return R1_PARSE_WRONG_PROFILE;
   return r1ValidateDecoded(decoded);
 }
 
@@ -629,7 +745,8 @@ R1ParseError r1ParseLowPowerStatus(R1ProtocolProfile profile,
                                    const R1Decoded& decoded,
                                    R1LowPowerStatus& out) {
   out = R1LowPowerStatus{};
-  const R1ParseError gate = validateKnownProfileAndFrame(profile, decoded);
+  const R1ParseError gate = validateProfileAndFrame(
+      r1ProfileSupportsLowPower(profile), decoded);
   if (gate != R1_PARSE_OK) return gate;
   if (decoded.module != R1_MODULE_SYSTEM || decoded.cmd != R1_CMD_SYSTEM ||
       decoded.subCmd != R1_SUB_SYSTEM_SETTINGS || !isAckSetOk(decoded)) {
@@ -650,7 +767,8 @@ R1ParseError r1ParseUserInfo(R1ProtocolProfile profile,
                              const R1Decoded& decoded,
                              R1UserInfo& out) {
   out = R1UserInfo{};
-  const R1ParseError gate = validateKnownProfileAndFrame(profile, decoded);
+  const R1ParseError gate = validateProfileAndFrame(
+      r1ProfileSupportsUserInfo(profile), decoded);
   if (gate != R1_PARSE_OK) return gate;
   if (decoded.module != R1_MODULE_SYSTEM || decoded.cmd != R1_CMD_SYSTEM ||
       decoded.subCmd != R1_SUB_USER_INFO ||
@@ -801,13 +919,14 @@ static size_t annotateHealthPoint(uint8_t cmd, const uint8_t* p, size_t len,
       tsBuf, state, (int)value);
 }
 
-// Firmware 2.2.7.0005 daily pages. These parsers intentionally accept a full
-// decoded frame, not a naked payload: CRC32/model-length/status/profile gates
-// cannot be accidentally bypassed by a telemetry caller.
+// Capability-approved daily-v1 pages. These parsers intentionally accept a
+// full decoded frame, not a naked payload: CRC32/model-length/status/profile
+// gates cannot be accidentally bypassed by a telemetry caller.
 static R1ParseError validateDailyFrame(R1ProtocolProfile profile,
                                        const R1Decoded& decoded,
                                        uint8_t expectedCmd) {
-  const R1ParseError gate = validateKnownProfileAndFrame(profile, decoded);
+  const R1ParseError gate = validateProfileAndFrame(
+      r1ProfileSupportsSingleFrameDaily(profile, expectedCmd), decoded);
   if (gate != R1_PARSE_OK) return gate;
   if (decoded.module != R1_MODULE_HEALTH || decoded.cmd != expectedCmd ||
       decoded.subCmd != R1_SUB_DAILY ||
@@ -920,7 +1039,13 @@ R1ParseError r1ParseCommonDaily(R1ProtocolProfile profile,
                                 const R1Decoded& decoded,
                                 R1CommonDailyResult& out) {
   out = R1CommonDailyResult{};
-  const R1ParseError integrity = validateKnownProfileAndFrame(profile, decoded);
+  // Preserve the established 2.2.7 error ordering for a trusted but unsupported
+  // opcode: it reaches the explicit layout check below. New profiles must have
+  // the exact incoming command capability before reaching any layout parser.
+  const R1ParseError integrity = validateProfileAndFrame(
+      profile == R1_PROFILE_FW_2_2_7_0005 ||
+          r1ProfileSupportsSingleFrameDaily(profile, decoded.cmd),
+      decoded);
   if (integrity != R1_PARSE_OK) return integrity;
   if (decoded.cmd != R1_CMD_HEARTRATE && decoded.cmd != R1_CMD_SPO2) {
     return R1_PARSE_UNSUPPORTED_LAYOUT;
@@ -1155,7 +1280,9 @@ R1ParseError r1ParseReassembledActivityDaily(R1ProtocolProfile profile,
                                              uint32_t crc32Whole,
                                              R1ActivityDailyResult& out) {
   out = R1ActivityDailyResult{};
-  if (profile != R1_PROFILE_FW_2_2_7_0005) return R1_PARSE_WRONG_PROFILE;
+  if (!r1ProfileSupportsActivityReassembly(profile)) {
+    return R1_PARSE_WRONG_PROFILE;
+  }
   // 12-byte model header + at least the 7-byte daily prefix start.
   if (!model || modelLen < 12) return R1_PARSE_LENGTH;
 
@@ -1190,7 +1317,8 @@ R1ParseError r1ParseReassembledActivityDaily(R1ProtocolProfile profile,
 bool r1MakeDailyPacketAckDescriptor(R1ProtocolProfile profile, uint16_t serial,
                                     uint8_t cmd, R1PacketAckDescriptor& out) {
   out = R1PacketAckDescriptor{};
-  if (profile != R1_PROFILE_FW_2_2_7_0005 || !r1PacketAckCmdAllowed(cmd)) {
+  if (!r1PacketAckCmdAllowed(cmd) ||
+      !r1ProfileSupportsDailyPacketAck(profile, cmd)) {
     return false;
   }
   out.serial_ = serial;
@@ -1253,8 +1381,8 @@ static size_t annotateActivityDaily(R1ProtocolProfile profile,
   // borrow the buffer transiently instead of keeping a resident static.
   // INTERNAL, not PSRAM: on a live frame this holds decoded health records,
   // which project policy bars from PSRAM.
-  R1ActivityDailyResult* parsed = (R1ActivityDailyResult*)heap_caps_malloc(
-      sizeof(R1ActivityDailyResult), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  R1ActivityDailyResult* parsed = (R1ActivityDailyResult*)ps_alloc(
+      sizeof(R1ActivityDailyResult), AllocPref::RequireInternal, "r1.activity.debug");
   if (!parsed) {
     return (size_t)snprintf(out, cap, "activityDaily skipped=alloc");
   }
@@ -1426,17 +1554,13 @@ bool r1ProtocolSelfTest() {
   // R1ActivityDailyResult is full-day sized (~2.3 KB). This one-shot boot
   // self-test runs single-threaded, so its activity sub-tests share one
   // TRANSIENT scratch (aliased below) — heap, not static, so the 2.3 KB is
-  // returned after boot instead of staying resident forever. Synthetic
-  // fixtures only (no real health data), so PSRAM is fine; fall back to
-  // internal on a PSRAM-less config.
+  // returned after boot instead of staying resident forever. Fixtures are
+  // synthetic or capture-sanitized and contain no device/user identifiers, so
+  // PSRAM is fine; fall back to internal on a PSRAM-less config.
   R1ActivityDailyResult* activityScratchP =
-      (R1ActivityDailyResult*)heap_caps_malloc(
-          sizeof(R1ActivityDailyResult),
-          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!activityScratchP) {
-    activityScratchP = (R1ActivityDailyResult*)heap_caps_malloc(
-        sizeof(R1ActivityDailyResult), MALLOC_CAP_8BIT);
-  }
+      (R1ActivityDailyResult*)ps_alloc(sizeof(R1ActivityDailyResult),
+                                       AllocPref::PreferPSRAM,
+                                       "r1.selftest.activity");
   if (!activityScratchP) {
     DEBUG_RING_SETUPF("[R1-selftest] FAIL activity scratch alloc (%u B)",
                       (unsigned)sizeof(R1ActivityDailyResult));
@@ -1492,10 +1616,16 @@ bool r1ProtocolSelfTest() {
         R1_PROFILE_UNKNOWN, syntheticRight, syntheticLeft);
     R1Frame adv = advEncoder.buildAdvStart(
         R1_PROFILE_FW_2_2_7_0005, syntheticRight, syntheticLeft);
+    R1Encoder adv229Encoder;
+    R1Frame adv229 = adv229Encoder.buildAdvStart(
+        R1_PROFILE_FW_2_2_9_0003, syntheticRight, syntheticLeft);
     ok &= selfTestExpect("advStart unknown fails without serial",
                          rejectedAdv.length == 0 && adv.serial == 1);
     ok &= selfTestCompare("advStart dual reversed golden",
                           adv.bytes, adv.length,
+                          expectedAdvStart, sizeof(expectedAdvStart));
+    ok &= selfTestCompare("advStart 2.2.9 layout golden",
+                          adv229.bytes, adv229.length,
                           expectedAdvStart, sizeof(expectedAdvStart));
   }
 
@@ -1514,12 +1644,23 @@ bool r1ProtocolSelfTest() {
         R1_PROFILE_FW_2_2_7_0005, 0x65000001UL, true);
     R1Frame healthOff = healthOffEncoder.buildHealthCollectionSet(
         R1_PROFILE_FW_2_2_7_0005, 0x65000001UL, false);
+    R1Encoder health229Encoder;
+    R1Frame rejectedHealth229Off = health229Encoder.buildHealthCollectionSet(
+        R1_PROFILE_FW_2_2_9_0003, 0x65000001UL, false);
+    R1Frame health229On = health229Encoder.buildHealthCollectionSet(
+        R1_PROFILE_FW_2_2_9_0003, 0x65000001UL, true);
     ok &= selfTestCompare("health collection on golden", healthOn.bytes,
                           healthOn.length, expectedHealthOn,
                           sizeof(expectedHealthOn));
     ok &= selfTestCompare("health collection off golden", healthOff.bytes,
                           healthOff.length, expectedHealthOff,
                           sizeof(expectedHealthOff));
+    ok &= selfTestExpect("health collection 2.2.9 off fails without serial",
+                         rejectedHealth229Off.length == 0 &&
+                         health229On.serial == 1);
+    ok &= selfTestCompare("health collection 2.2.9 on golden",
+                          health229On.bytes, health229On.length,
+                          expectedHealthOn, sizeof(expectedHealthOn));
   }
 
   {
@@ -1542,6 +1683,31 @@ bool r1ProtocolSelfTest() {
     ok &= selfTestCompare("low power off golden", lowOff.bytes,
                           lowOff.length, expectedLowPowerOff,
                           sizeof(expectedLowPowerOff));
+
+    R1Encoder unsupported229Encoder;
+    R1Frame candidate = unsupported229Encoder.buildLowPowerQuery(
+        R1_PROFILE_FW_2_2_9_0003);
+    bool rejected229 = candidate.length == 0;
+    candidate = unsupported229Encoder.buildLowPowerSet(
+        R1_PROFILE_FW_2_2_9_0003, 0x65000001UL, true);
+    rejected229 = rejected229 && candidate.length == 0;
+    candidate = unsupported229Encoder.buildWearStatusQuery(
+        R1_PROFILE_FW_2_2_9_0003);
+    rejected229 = rejected229 && candidate.length == 0;
+    candidate = unsupported229Encoder.buildHealthQuery(
+        R1_PROFILE_FW_2_2_9_0003, R1_CMD_HEARTRATE, R1_SUB_POINT);
+    rejected229 = rejected229 && candidate.length == 0;
+    candidate = unsupported229Encoder.buildHealthQuery(
+        R1_PROFILE_FW_2_2_9_0003, R1_CMD_TEMPERATURE, R1_SUB_DAILY);
+    rejected229 = rejected229 && candidate.length == 0;
+    const R1Frame hrDaily229 = unsupported229Encoder.buildHealthQuery(
+        R1_PROFILE_FW_2_2_9_0003, R1_CMD_HEARTRATE, R1_SUB_DAILY);
+    const R1Frame sleepDaily229 = unsupported229Encoder.buildHealthQuery(
+        R1_PROFILE_FW_2_2_9_0003, R1_CMD_SLEEP, R1_SUB_DAILY);
+    ok &= selfTestExpect(
+        "2.2.9 unsupported builders fail without serial",
+        rejected229 && hrDaily229.serial == 1 &&
+        sleepDaily229.serial == 2);
   }
 
   {
@@ -1566,8 +1732,54 @@ bool r1ProtocolSelfTest() {
         strcmp(deviceInfo.firmware, "2.2.7.0005") == 0 &&
         strcmp(deviceInfo.hardware, "SYNTH-HW") == 0 &&
         deviceInfo.profile == R1_PROFILE_FW_2_2_7_0005 &&
-        r1ProfileForFirmware("2.2.7.0006") == R1_PROFILE_UNKNOWN);
+        r1ProfileForFirmware("2.2.7.0006") == R1_PROFILE_UNKNOWN &&
+        r1ProfileForFirmware("2.2.9.0003") == R1_PROFILE_FW_2_2_9_0003 &&
+        r1ProfileForFirmware("2.2.9.000") == R1_PROFILE_UNKNOWN &&
+        r1ProfileForFirmware("2.2.9.00030") == R1_PROFILE_UNKNOWN &&
+        r1ProfileForFirmware(nullptr) == R1_PROFILE_UNKNOWN);
+
+    memset(deviceInfoPayload, 0, sizeof(deviceInfoPayload));
+    memcpy(deviceInfoPayload, "2.2.9.0003", sizeof("2.2.9.0003"));
+    memcpy(deviceInfoPayload + 16, "SYNTH-HW2", 9);
+    ok &= selfTestExpect(
+        "deviceInfo 2.2.9 exact profile",
+        selfTestDecoded(2, R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
+                        R1_SUB_DEVICE_INFO, R1_STATUS_TYPE_ACK,
+                        R1_STATUS_METHOD_SET, deviceInfoPayload,
+                        sizeof(deviceInfoPayload), deviceInfoDecoded) &&
+        r1ParseDeviceInfo(deviceInfoDecoded, deviceInfo) == R1_PARSE_OK &&
+        strcmp(deviceInfo.firmware, "2.2.9.0003") == 0 &&
+        deviceInfo.profile == R1_PROFILE_FW_2_2_9_0003);
   }
+
+  ok &= selfTestExpect(
+      "2.2.9 capability matrix",
+      r1ProfileSupportsAdvStart(R1_PROFILE_FW_2_2_9_0003) &&
+      r1ProfileSupportsHealthCollectionSet(R1_PROFILE_FW_2_2_9_0003, true) &&
+      !r1ProfileSupportsHealthCollectionSet(R1_PROFILE_FW_2_2_9_0003, false) &&
+      r1ProfileSupportsHealthQuery(R1_PROFILE_FW_2_2_9_0003,
+                                   R1_CMD_SLEEP, R1_SUB_DAILY) &&
+      !r1ProfileSupportsHealthQuery(R1_PROFILE_FW_2_2_9_0003,
+                                    R1_CMD_TEMPERATURE, R1_SUB_DAILY) &&
+      !r1ProfileSupportsPointMeasureQuery(R1_PROFILE_FW_2_2_9_0003) &&
+      r1ProfileSupportsPointIngestion(R1_PROFILE_FW_2_2_9_0003) &&
+      r1ProfileSupportsHealthPageRefresh(R1_PROFILE_FW_2_2_9_0003) &&
+      r1ProfileSupportsDeviceStatusIngestion(
+          R1_PROFILE_FW_2_2_9_0003) &&
+      !r1ProfileSupportsActivityReassembly(R1_PROFILE_FW_2_2_9_0003) &&
+      !r1ProfileSupportsSleepDataIngestion(R1_PROFILE_FW_2_2_9_0003) &&
+      !r1ProfileSupportsLowPower(R1_PROFILE_FW_2_2_9_0003) &&
+      !r1ProfileSupportsUserInfo(R1_PROFILE_FW_2_2_9_0003) &&
+      !r1ProfileSupportsWearStatus(R1_PROFILE_FW_2_2_9_0003));
+
+  ok &= selfTestExpect(
+      "Health-page refresh is 2.2.9-only",
+      !r1ProfileSupportsHealthPageRefresh(R1_PROFILE_UNKNOWN) &&
+      !r1ProfileSupportsHealthPageRefresh(R1_PROFILE_FW_2_2_7_0005) &&
+      r1ProfileSupportsPointIngestion(R1_PROFILE_FW_2_2_7_0005) &&
+      !r1ProfileSupportsDeviceStatusIngestion(R1_PROFILE_UNKNOWN) &&
+      r1ProfileSupportsDeviceStatusIngestion(
+          R1_PROFILE_FW_2_2_7_0005));
 
   {
     // Routine annotations must never echo identifier or key material.
@@ -1639,7 +1851,12 @@ bool r1ProtocolSelfTest() {
         r1ParseUserInfo(R1_PROFILE_FW_2_2_7_0005,
                         userInfoDecoded, userInfo) == R1_PARSE_OK &&
         userInfo.gender == 2 && userInfo.age == 0 &&
-        userInfo.heightCm == 0x1234 && userInfo.weightKg == 0x5678);
+        userInfo.heightCm == 0x1234 && userInfo.weightKg == 0x5678 &&
+        r1ParseLowPowerStatus(R1_PROFILE_FW_2_2_9_0003,
+                              lowStateDecoded, lowState) ==
+            R1_PARSE_WRONG_PROFILE &&
+        r1ParseUserInfo(R1_PROFILE_FW_2_2_9_0003,
+                        userInfoDecoded, userInfo) == R1_PARSE_WRONG_PROFILE);
   }
 
   // Sanitized daily pages: same field widths/order as the official app, with
@@ -1743,6 +1960,92 @@ bool r1ProtocolSelfTest() {
         parsed.records[1].tenMinuteSlot == 143 &&
         parsed.dayMode == R1_DAILY_DAY_EPOCH &&
         parsed.records[1].bucketEpoch == 0x69571638UL);
+  }
+
+  {
+    // Sanitized exact payloads from the 2.2.9.0003 capture. These pin the four
+    // observed single-frame layouts and their opaque trailer value (6), rather
+    // than merely exercising the new profile with synthetic 2.2.7 fixtures.
+    static const uint8_t hr229Payload[] = {
+      0x02,0x10,0xFF,0xC0,0x1E,0x89,0x6A,0xD7,0x73,0x89,0x6A,0x5A,
+      0x05,0x5B,0x5B,0x5B,0x06,0x5A,0x5A,0x5A,0x06,0x00,0x00,0x00,
+    };
+    static const uint8_t hrv229Payload[] = {
+      0x02,0x10,0xFF,0xC0,0x1E,0x89,0x6A,0x63,0x73,0x89,0x6A,0x14,0x00,
+      0x05,0x34,0x00,0x34,0x00,0x34,0x00,0x06,0x14,0x00,0x14,0x00,0x14,
+      0x00,0x06,0x00,0x00,0x00,
+    };
+    static const uint8_t spo2229Payload[] = {
+      0x02,0x10,0xFF,0xC0,0x1E,0x89,0x6A,0x5E,0x73,0x89,0x6A,0x60,
+      0x05,0x60,0x60,0x60,0x06,0x60,0x60,0x60,0x06,0x00,0x00,0x00,
+    };
+    static const uint8_t activity229Payload[] = {
+      0x03,0x10,0xFF,0xC0,0x1E,0x89,0x6A,0x21,0x1F,0x00,0x0A,0x00,0x18,
+      0x00,0x23,0x00,0x00,0x09,0x00,0x1C,0x00,0x24,0x15,0x00,0x03,0x00,
+      0x08,0x00,0x06,0x00,0x00,0x00,
+    };
+    static const uint8_t deviceStatus229Payload[] = {
+      0x62,0x02,0x01,0x00,0x00,0x00,0x00,
+    };
+    R1Decoded hrDecoded{};
+    R1Decoded hrvDecoded{};
+    R1Decoded spo2Decoded{};
+    R1Decoded activityDecoded{};
+    R1Decoded deviceStatusDecoded{};
+    R1CommonDailyResult common{};
+    R1HrvDailyResult hrv{};
+    bool parsed229 = selfTestDecoded(
+        61, R1_MODULE_HEALTH, R1_CMD_HEARTRATE, R1_SUB_DAILY,
+        R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET,
+        hr229Payload, sizeof(hr229Payload), hrDecoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_9_0003,
+                           hrDecoded, common) == R1_PARSE_OK &&
+        common.profile == R1_PROFILE_FW_2_2_9_0003 &&
+        common.trailer == 6 && common.count == 2;
+    parsed229 = parsed229 && selfTestDecoded(
+        62, R1_MODULE_HEALTH, R1_CMD_HRV, R1_SUB_DAILY,
+        R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET,
+        hrv229Payload, sizeof(hrv229Payload), hrvDecoded) &&
+        r1ParseHrvDaily(R1_PROFILE_FW_2_2_9_0003,
+                        hrvDecoded, hrv) == R1_PARSE_OK &&
+        hrv.profile == R1_PROFILE_FW_2_2_9_0003 && hrv.count == 2 &&
+        hrv.trailer == 6;
+    parsed229 = parsed229 && selfTestDecoded(
+        63, R1_MODULE_HEALTH, R1_CMD_SPO2, R1_SUB_DAILY,
+        R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET,
+        spo2229Payload, sizeof(spo2229Payload), spo2Decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_9_0003,
+                           spo2Decoded, common) == R1_PARSE_OK &&
+        common.profile == R1_PROFILE_FW_2_2_9_0003 && common.count == 2 &&
+        common.trailer == 6;
+    parsed229 = parsed229 && selfTestDecoded(
+        64, R1_MODULE_HEALTH, R1_CMD_ACTIVITY, R1_SUB_DAILY,
+        R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET,
+        activity229Payload, sizeof(activity229Payload), activityDecoded) &&
+        r1ParseActivityDaily(R1_PROFILE_FW_2_2_9_0003,
+                             activityDecoded, activityScratch) == R1_PARSE_OK &&
+        activityScratch.profile == R1_PROFILE_FW_2_2_9_0003 &&
+        activityScratch.count == 3 && activityScratch.trailer == 6;
+    parsed229 = parsed229 && selfTestDecoded(
+        7, R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_DEVICE_STATUS,
+        R1_STATUS_TYPE_ACK, R1_STATUS_METHOD_SET,
+        deviceStatus229Payload, sizeof(deviceStatus229Payload),
+        deviceStatusDecoded) &&
+        deviceStatusDecoded.statusAck == R1_STATUS_ACK_OK &&
+        deviceStatusDecoded.payloadLength == sizeof(deviceStatus229Payload) &&
+        deviceStatusDecoded.payload[0] == 0x62 &&
+        deviceStatusDecoded.payload[1] == 0x02;
+    ok &= selfTestExpect("2.2.9 captured daily/status layouts",
+                         parsed229);
+
+    R1ActivityDailyResult& rejectedReassembly = activityScratch;
+    ok &= selfTestExpect(
+      "2.2.9 activity reassembly remains disabled",
+      r1ParseReassembledActivityDaily(
+            R1_PROFILE_FW_2_2_9_0003, activity229Payload,
+            sizeof(activity229Payload), r1Crc32(activity229Payload,
+                                                sizeof(activity229Payload)),
+            rejectedReassembly) == R1_PARSE_WRONG_PROFILE);
   }
 
   // Sanitized capture regressions for the mixed timestamp modes observed in
@@ -1966,6 +2269,22 @@ bool r1ProtocolSelfTest() {
         R1_PROFILE_FW_2_2_7_0005, source);
     ok &= selfTestCompare("packetAck decoded wrapper", decodedPacketAck.bytes,
                           decodedPacketAck.length, expectedPacketAck,
+                          sizeof(expectedPacketAck));
+
+    R1PacketAckDescriptor descriptor229;
+    R1Encoder packetAck229Encoder;
+    const bool descriptor229Ok = r1PacketAckDescriptorFromDecoded(
+        R1_PROFILE_FW_2_2_9_0003, source, descriptor229);
+    const R1Frame packetAck229 = packetAck229Encoder.buildPacketAck(
+        R1_PROFILE_FW_2_2_9_0003, descriptor229);
+    ok &= selfTestExpect(
+        "2.2.9 packetAck target matrix",
+        descriptor229Ok && descriptor229.valid() &&
+        !r1MakeDailyPacketAckDescriptor(R1_PROFILE_FW_2_2_9_0003,
+                                        45, R1_CMD_SLEEP, descriptor229) &&
+        !descriptor229.valid());
+    ok &= selfTestCompare("packetAck 2.2.9 HR golden", packetAck229.bytes,
+                          packetAck229.length, expectedPacketAck,
                           sizeof(expectedPacketAck));
   }
 

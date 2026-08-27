@@ -890,6 +890,13 @@ const char* cmd_rtcautostart(const String& argsInput) {
 }
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+// Bus routing for this device. Lives here rather than in System_I2C.cpp so it
+// compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
+static const char* cmd_rtcbus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.rtcBus, a, "rtcBus");
+}
+
 const CommandEntry rtcCommands[] = {
   { "openrtc",  "Start DS3231 RTC sensor.",                    false, cmd_rtcstart },
   { "closertc", "Stop DS3231 RTC sensor.",                     false, cmd_rtcstop },
@@ -899,6 +906,7 @@ const CommandEntry rtcCommands[] = {
   
   // Auto-start
   { "rtcautostart", "Enable/disable RTC auto-start after boot [on|off]", false, cmd_rtcautostart, "Usage: rtcautostart [on|off]" },
+  { "rtcbus",      "Route DS3231 RTC to bus: <0|1> (reboot required)",   true, cmd_rtcbus,      "Usage: rtcBus <0|1>" },
 };
 const size_t rtcCommandsCount = sizeof(rtcCommands) / sizeof(rtcCommands[0]);
 

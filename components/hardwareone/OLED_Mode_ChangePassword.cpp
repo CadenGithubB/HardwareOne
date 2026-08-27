@@ -390,7 +390,8 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         initialText = confirmPassBuffer.c_str();
       }
       
-      oledKeyboardInit(title, initialText, 32);
+      oledKeyboardInit(title, initialText, 32,
+                       OLEDKeyboardDictationPolicy::DENY);
       changePasswordKeyboardActive = true;
     }
     handled = true;

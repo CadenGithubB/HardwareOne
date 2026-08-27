@@ -2,6 +2,7 @@
 #define WEBPAGE_DASHBOARD_H
 
 #include "System_BuildConfig.h"
+#include "System_CommandLimits.h"
 #include "System_User.h"  // For isAdminUser declaration
 #if ENABLE_WIFI
   #include <WiFi.h>
@@ -44,6 +45,351 @@
     #include "i2csensor_sths34pf80_web.h"
   #endif
 #endif
+
+// Test-extractable shipping logic for the notification-kind editor.  Keep the
+// command planner and batch-result validation in this named raw-string block:
+// tools/webui/tests/test_notification_kind_editor.py executes these exact
+// bytes, so the browser behavior is not reimplemented in the test suite.
+static constexpr char kDashboardNotificationKindEditorJs[] = R"DASHNOTIFJS(
+function installDashboardNotificationKindEditor(COMMAND_INPUT_MAX, testHooks) {
+  'use strict';
+  if (!(COMMAND_INPUT_MAX > 0) || Math.floor(COMMAND_INPUT_MAX) !== COMMAND_INPUT_MAX) {
+    throw new Error('invalid command input limit');
+  }
+
+  window.Dash = window.Dash || {};
+  var _fams = null;
+  var _knownKinds = [];
+  var _muted = {};
+  var _initialKnownMuted = {};
+  var _open = {};
+  var _saving = false;
+  var _needsReload = false;
+  var _bulkIntent = null;
+
+  function own(obj, key) {
+    return Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
+  function flattenKnownKinds(families) {
+    var result = [];
+    var seen = {};
+    (families || []).forEach(function(family) {
+      (family && Array.isArray(family.k) ? family.k : []).forEach(function(kind) {
+        kind = String(kind || '');
+        if (!kind || own(seen, kind)) return;
+        seen[kind] = true;
+        result.push(kind);
+      });
+    });
+    return result;
+  }
+
+  function copyKnownMuted(source) {
+    var result = {};
+    _knownKinds.forEach(function(kind) {
+      if (source && source[kind]) result[kind] = true;
+    });
+    return result;
+  }
+
+  // Plan a bounded mutation from the state captured when the editor opened.
+  // Only an explicit global bulk action may replace the complete stored list:
+  // inferring `none` from zero known mutes would erase unknown tokens merely by
+  // opening an unchanged editor on an older catalog.  Manual edits, including
+  // manually reaching an all/none state, remain known-kind deltas.
+  function buildMutationCommands(knownKinds, initialMuted, finalMuted, bulkIntent) {
+    if (bulkIntent === 'none') return ['notifyusermute none'];
+    if (bulkIntent === 'all') return ['notifyusermute all'];
+    var deltas = [];
+    for (var j = 0; j < knownKinds.length; j++) {
+      var kind = knownKinds[j];
+      var before = !!(initialMuted && initialMuted[kind]);
+      var after = !!(finalMuted && finalMuted[kind]);
+      if (before !== after) deltas.push((after ? '+' : '-') + kind);
+    }
+    if (!deltas.length) return [];
+
+    var prefix = 'notifyusermute patch ';
+    var commands = [];
+    var current = '';
+    for (var d = 0; d < deltas.length; d++) {
+      var token = deltas[d];
+      var candidate = current ? current + ',' + token : prefix + token;
+      if (candidate.length <= COMMAND_INPUT_MAX) {
+        current = candidate;
+        continue;
+      }
+      if (current) commands.push(current);
+      current = prefix + token;
+      if (current.length > COMMAND_INPUT_MAX) {
+        throw new Error('event kind cannot fit in one command: ' + token.substring(1));
+      }
+    }
+    if (current) commands.push(current);
+    return commands;
+  }
+
+  // The endpoint's top-level `ok` only means the batch handler returned.  A
+  // command inside the batch can still fail, so cardinality and every result
+  // slot are part of the success contract for this editor.
+  function batchFailure(commands, response) {
+    if (!response || response.ok !== true) {
+      return response && response.error ? String(response.error) : 'batch failed';
+    }
+    if (response.count !== commands.length) {
+      return 'partial batch: expected ' + commands.length + ' results, count was ' + response.count;
+    }
+    if (!Array.isArray(response.results) || response.results.length !== commands.length) {
+      return 'partial batch: expected ' + commands.length + ' result items';
+    }
+
+    var failures = [];
+    for (var i = 0; i < response.results.length; i++) {
+      var output = String(response.results[i] == null ? '' : response.results[i]);
+      // notifyusermute's committed response is deliberately strict.  An empty,
+      // generic, truncated, or error result is not proof that this mutation
+      // reached flash, even when another result in the batch did.
+      if (output !== '[Settings] Configuration updated') {
+        failures.push('result ' + i + ' for "' + commands[i] + '": ' + (output || '(empty)'));
+      }
+    }
+    return failures.length ? failures.join('; ') : '';
+  }
+
+  function setFamilies(families) {
+    _fams = Array.isArray(families) ? families : [];
+    _knownKinds = flattenKnownKinds(_fams);
+  }
+
+  function applySettingsSnapshot(response) {
+    if (!response || response.success !== true || !response.settings ||
+        typeof response.settings !== 'object' || Array.isArray(response.settings)) {
+      var reason = response && response.error ? ': ' + String(response.error) : '';
+      throw new Error('authoritative user settings unavailable' + reason);
+    }
+    _bulkIntent = null;
+    _muted = {};
+    var settings = response.settings;
+    var values = settings && Array.isArray(settings.notificationMuted)
+      ? settings.notificationMuted : [];
+    values.forEach(function(kind) {
+      kind = String(kind || '');
+      if (kind) _muted[kind] = true;
+    });
+    _initialKnownMuted = copyKnownMuted(_muted);
+  }
+
+  function syncEditorControls() {
+    var save = hw.$('dash-notif-save');
+    if (save) {
+      save.disabled = _saving || _needsReload;
+      save.textContent = _saving ? 'Saving...' : (_needsReload ? 'Reload required' : 'Save');
+    }
+    var list = hw.$('dash-notif-list');
+    if (list && list.style) {
+      list.style.pointerEvents = (_saving || _needsReload) ? 'none' : '';
+      list.style.opacity = (_saving || _needsReload) ? '0.65' : '';
+    }
+  }
+
+  function renderNotifEditor() {
+    var list = hw.$('dash-notif-list');
+    if (!list || !_fams) return;
+    list.innerHTML = '';
+    var total = 0;
+    _fams.forEach(function(f) {
+      var kinds = f.k || [];
+      if (!kinds.length) return;
+      total += kinds.length;
+      var mutedN = 0;
+      kinds.forEach(function(k) { if (_muted[k]) mutedN++; });
+      var card = document.createElement('div');
+      card.className = 'notif-fam';
+      var hdr = document.createElement('div');
+      hdr.className = 'notif-fam-hdr';
+      var caret = document.createElement('span');
+      caret.textContent = _open[f.n] ? '\u25BE' : '\u25B8';
+      caret.style.cssText = 'width:1em;flex:none;opacity:0.7';
+      var ttl = document.createElement('span');
+      ttl.style.flex = '1';
+      ttl.textContent = f.n + '  (' + (mutedN ? mutedN + ' of ' + kinds.length + ' muted' : kinds.length) + ')';
+      if (mutedN === kinds.length) ttl.style.opacity = '0.5';
+      hdr.appendChild(caret);
+      hdr.appendChild(ttl);
+      hdr.onclick = function() {
+        if (_saving || _needsReload) return;
+        _open[f.n] = !_open[f.n];
+        renderNotifEditor();
+      };
+
+      var bulk = document.createElement('button');
+      bulk.className = 'btn';
+      var allMuted = mutedN === kinds.length;
+      bulk.textContent = allMuted ? 'Unmute all' : 'Mute all';
+      bulk.style.cssText = 'width:auto;padding:2px 10px;font-size:0.75rem';
+      bulk.onclick = function(ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        if (_saving || _needsReload) return;
+        _bulkIntent = null;
+        kinds.forEach(function(k) { _muted[k] = !allMuted; });
+        renderNotifEditor();
+      };
+      hdr.appendChild(bulk);
+      card.appendChild(hdr);
+
+      if (_open[f.n]) {
+        kinds.forEach(function(k) {
+          var div = document.createElement('div');
+          div.className = 'layout-item';
+          div.style.margin = '0.2rem 0 0.2rem 1.2rem';
+          var sp = document.createElement('span');
+          sp.textContent = k;
+          if (_muted[k]) sp.className = 'layout-hidden';
+          div.appendChild(sp);
+          var button = document.createElement('button');
+          button.className = 'btn';
+          button.textContent = _muted[k] ? 'Unmute' : 'Mute';
+          button.style.cssText = 'width:auto;padding:2px 10px;font-size:0.8rem';
+          button.onclick = function() {
+            if (_saving || _needsReload) return;
+            _bulkIntent = null;
+            _muted[k] = !_muted[k];
+            renderNotifEditor();
+          };
+          div.appendChild(button);
+          card.appendChild(div);
+        });
+      }
+      list.appendChild(card);
+    });
+    if (!total) {
+      list.innerHTML = "<div style='opacity:0.7;font-style:italic;padding:0.6rem 0'>No event kinds available.</div>";
+    }
+    syncEditorControls();
+  }
+
+  function reloadAfterFailure(saveError) {
+    _needsReload = true;
+    syncEditorControls();
+    return hw.fetchJSON('/api/user/settings').then(function(response) {
+      applySettingsSnapshot(response);
+      _saving = false;
+      _needsReload = false;
+      renderNotifEditor();
+      alert('Save failed; notification settings were reloaded from the device. ' + saveError.message);
+    }).catch(function(reloadError) {
+      _saving = false;
+      _needsReload = true;
+      syncEditorControls();
+      var list = hw.$('dash-notif-list');
+      if (list) list.textContent = 'Save may be partial and settings could not be reloaded. Close and reopen this editor.';
+      alert('Save failed and settings reload failed: ' + saveError.message + '; ' + (reloadError && reloadError.message ? reloadError.message : reloadError));
+    });
+  }
+
+  window.Dash._openNotifEditorImpl = function() {
+    _saving = false;
+    _needsReload = false;
+    _bulkIntent = null;
+    syncEditorControls();
+    var modal = hw.$('dash-notif-modal');
+    if (modal) modal.classList.add('open');
+    var list = hw.$('dash-notif-list');
+    if (list) list.textContent = 'Loading...';
+    Promise.all([
+      hw.getEventKindFamilies(),
+      hw.fetchJSON('/api/user/settings')
+    ]).then(function(results) {
+      setFamilies(results[0]);
+      applySettingsSnapshot(results[1]);
+      renderNotifEditor();
+    }).catch(function(error) {
+      _needsReload = true;
+      syncEditorControls();
+      if (list) list.textContent = 'Error: ' + error.message;
+    });
+  };
+
+  window.Dash.closeNotifEditor = function() {
+    var modal = hw.$('dash-notif-modal');
+    if (modal) modal.classList.remove('open');
+  };
+
+  window.Dash.notifMuteAll = function(value) {
+    if (!_fams || _saving || _needsReload) return;
+    _bulkIntent = value ? 'all' : 'none';
+    _knownKinds.forEach(function(kind) { _muted[kind] = !!value; });
+    renderNotifEditor();
+  };
+
+  window.Dash.saveNotifPrefs = function() {
+    if (!_fams || _saving || _needsReload) return;
+    var commands;
+    try {
+      commands = buildMutationCommands(
+          _knownKinds, _initialKnownMuted, copyKnownMuted(_muted), _bulkIntent);
+    } catch (error) {
+      alert('Save failed: ' + error.message);
+      return;
+    }
+    if (!commands.length) {
+      window.Dash.closeNotifEditor();
+      return;
+    }
+
+    _saving = true;
+    syncEditorControls();
+    hw.postJSON('/api/cli/batch', {commands: commands}).then(function(response) {
+      var failure = batchFailure(commands, response);
+      if (failure) throw new Error(failure);
+      _saving = false;
+      _bulkIntent = null;
+      syncEditorControls();
+      window.Dash.closeNotifEditor();
+    }).catch(reloadAfterFailure);
+  };
+
+  if (testHooks) {
+    testHooks.buildMutationCommands = buildMutationCommands;
+    testHooks.batchFailure = batchFailure;
+    testHooks.applySettingsSnapshot = applySettingsSnapshot;
+    testHooks.setState = function(families, initialMuted, finalMuted) {
+      setFamilies(families);
+      _muted = {};
+      _knownKinds.forEach(function(kind) {
+        if (finalMuted && finalMuted[kind]) _muted[kind] = true;
+      });
+      _initialKnownMuted = {};
+      _knownKinds.forEach(function(kind) {
+        if (initialMuted && initialMuted[kind]) _initialKnownMuted[kind] = true;
+      });
+      _saving = false;
+      _needsReload = false;
+      _bulkIntent = null;
+      renderNotifEditor();
+    };
+    testHooks.setCurrentMuted = function(finalMuted) {
+      _bulkIntent = null;
+      _knownKinds.forEach(function(kind) {
+        if (finalMuted && finalMuted[kind]) _muted[kind] = true;
+        else delete _muted[kind];
+      });
+      renderNotifEditor();
+    };
+    testHooks.getState = function() {
+      return {
+        knownKinds: _knownKinds.slice(),
+        muted: copyKnownMuted(_muted),
+        initialMuted: copyKnownMuted(_initialKnownMuted),
+        bulkIntent: _bulkIntent,
+        saving: _saving,
+        needsReload: _needsReload
+      };
+    };
+  }
+}
+)DASHNOTIFJS";
 
 inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   // Header
@@ -91,7 +437,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "      window.__lastSensorStatus=sensorStatus||null;\n"
     "      var r=origCreate(sensorStatus,deviceRegistry);\n"
     "      try{\n"
-    "        var grid=document.getElementById('sensor-grid');\n"
+    "        var grid=hw.$('sensor-grid');\n"
     "        if(!grid)return r;\n"
     "        var s=sensorStatus||{};\n"
     "        var devNames={};\n"
@@ -366,10 +712,10 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
 
   // JS sections (identical to legacy)
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 1: Pre-script sentinel');</script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 2: Starting core object definition');(function(){console.log('[Dashboard] Section 2a: Inside IIFE wrapper');const Dash={log:function(){try{console.log.apply(console,arguments)}catch(_){ }},setText:function(id,v){var el=document.getElementById(id);if(el)el.textContent=v}};console.log('[Dashboard] Section 2b: Basic Dash object created');window.Dash=Dash;})();</script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 3: Adding indicator functions');if(window.Dash){window.Dash.setIndicator=function(id,on){var el=document.getElementById(id);if(el){el.className=on?'status-indicator status-enabled':'status-indicator status-disabled'}};console.log('[Dashboard] Section 3a: setIndicator added')}else{console.error('[Dashboard] Section 3: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 4: Adding sensor status functions');if(window.Dash){window.Dash.updateSensorStatus=function(d){if(!d)return;try{var imuOn=!!(d.imuRunning||d.imu);var thermOn=!!(d.thermalRunning||d.thermal);var tofOn=!!(d.tofRunning||d.tof);var apdsOn=!!(d.apdsColorRunning||d.apdsProximityRunning||d.apdsGestureRunning);var inputOn=!!(d.inputRunning);var pwmOn=!!(d.pwmDriverConnected);var gpsOn=!!(d.gpsRunning);var fmOn=!!(d.fmRadioRunning);window.Dash.setIndicator('dash-imu-status',imuOn);window.Dash.setIndicator('dash-thermal-status',thermOn);window.Dash.setIndicator('dash-tof-status',tofOn);window.Dash.setIndicator('dash-apds-status',apdsOn);window.Dash.setIndicator('dash-input-status',inputOn);window.Dash.setIndicator('dash-pwm-status',pwmOn);window.Dash.setIndicator('dash-gps-status',gpsOn);window.Dash.setIndicator('dash-fmradio-status',fmOn);window.Dash.setIndicator('dash-mic-status',!!(d.micRunning));var micRec=document.getElementById('dash-mic-recording');if(micRec){micRec.className=(d.micRecording)?'status-indicator status-recording':'status-indicator status-disabled'}}catch(e){console.warn('[Dashboard] Sensor status update error',e)}};window.Dash.updateDeviceVisibility=function(registry){if(!registry||!registry.devices)return;try{var devices=registry.devices;var hasIMU=devices.some(function(d){return d.name==='BNO055'});var hasThermal=devices.some(function(d){return d.name==='MLX90640'});var hasToF=devices.some(function(d){return d.name==='VL53L4CX'});var hasAPDS=devices.some(function(d){return d.name==='APDS9960'});var hasInputDev=devices.some(function(d){return d.name==='Seesaw'});var hasDRV=devices.some(function(d){return d.name==='DRV2605'});var hasPCA9685=devices.some(function(d){return d.name==='PCA9685'});var hasGPS=devices.some(function(d){return d.name==='PA1010D'});var hasFMRadio=devices.some(function(d){return d.name==='RDA5807'});window.Dash.showHideCard('dash-imu-card',hasIMU);window.Dash.showHideCard('dash-thermal-card',hasThermal);window.Dash.showHideCard('dash-tof-card',hasToF);window.Dash.showHideCard('dash-apds-card',hasAPDS);window.Dash.showHideCard('dash-input-card',hasInputDev);window.Dash.showHideCard('dash-drv-card',hasDRV);window.Dash.showHideCard('dash-pwm-card',hasPCA9685);window.Dash.showHideCard('dash-gps-card',hasGPS);window.Dash.showHideCard('dash-fmradio-card',hasFMRadio)}catch(e){console.warn('[Dashboard] Device visibility update error',e)}};console.log('[Dashboard] Section 4a: updateSensorStatus and updateDeviceVisibility added')}else{console.error('[Dashboard] Section 4: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 5: Adding system status functions');if(window.Dash){window.Dash.updateSystem=function(d){try{if(!d)return;if(d.system_time){var parts=d.system_time.split(' ');window.Dash.setText('sys-date',parts[0]||d.system_time);window.Dash.setText('sys-time',parts[1]||'')}else{window.Dash.setText('sys-date','Not synced');window.Dash.setText('sys-time','--')}if(d.uptime_hms)window.Dash.setText('sys-uptime',d.uptime_hms);if(d.net){if(d.net.ssid!=null)window.Dash.setText('sys-ssid',d.net.ssid);if(d.net.ip!=null)window.Dash.setText('sys-ip',d.net.ip)}if(d.mem){var heapTxt=null;if(d.mem.heap_free_kb!=null&&d.mem.heap_total_kb!=null){var heapUsed=d.mem.heap_total_kb-d.mem.heap_free_kb;heapTxt=heapUsed+' / '+d.mem.heap_total_kb+' KB'}else if(d.mem.heap_free_kb!=null){heapTxt=d.mem.heap_free_kb+' KB free'}if(heapTxt!=null)window.Dash.setText('sys-heap',heapTxt);var psTxt=null;var hasPs=(d.mem.psram_free_kb!=null)||(d.mem.psram_total_kb!=null);if(hasPs){var pf=(d.mem.psram_free_kb!=null)?d.mem.psram_free_kb:null;var pt=(d.mem.psram_total_kb!=null)?d.mem.psram_total_kb:null;if(pf!=null&&pt!=null)psTxt=(pt-pf)+' / '+pt+' KB';else if(pf!=null)psTxt=pf+' KB free'}if(psTxt!=null)window.Dash.setText('sys-psram',psTxt)}if(d.storage){if(d.storage.used_kb!=null){var usedTxt=d.storage.used_kb;if(d.storage.total_kb!=null)usedTxt+=' / '+d.storage.total_kb+' KB';window.Dash.setText('sys-storage-used',usedTxt)}if(d.storage.sd){var sd=d.storage.sd;var sdTxt=sd.used_mb+' / '+sd.total_mb+' MB';window.Dash.setText('sys-storage-sd',sdTxt);var sdRow=document.getElementById('sys-sd-row');if(sdRow)sdRow.style.display='';}else{var sdRow=document.getElementById('sys-sd-row');if(sdRow)sdRow.style.display='none';}}}catch(e){console.warn('[Dashboard] System update error',e)}};console.log('[Dashboard] Section 5a: updateSystem added')}else{console.error('[Dashboard] Section 5: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 2: Starting core object definition');(function(){console.log('[Dashboard] Section 2a: Inside IIFE wrapper');const Dash={log:function(){try{console.log.apply(console,arguments)}catch(_){ }},setText:function(id,v){var el=hw.$(id);hw.setText(el,v)}};console.log('[Dashboard] Section 2b: Basic Dash object created');window.Dash=Dash;})();</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 3: Adding indicator functions');if(window.Dash){window.Dash.setIndicator=function(id,on){var el=hw.$(id);if(el){el.className=on?'status-indicator status-enabled':'status-indicator status-disabled'}};console.log('[Dashboard] Section 3a: setIndicator added')}else{console.error('[Dashboard] Section 3: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 4: Adding sensor status functions');if(window.Dash){window.Dash.updateSensorStatus=function(d){if(!d)return;try{var imuOn=!!(d.imuRunning||d.imu);var thermOn=!!(d.thermalRunning||d.thermal);var tofOn=!!(d.tofRunning||d.tof);var apdsOn=!!(d.apdsColorRunning||d.apdsProximityRunning||d.apdsGestureRunning);var inputOn=!!(d.inputRunning);var pwmOn=!!(d.pwmDriverConnected);var gpsOn=!!(d.gpsRunning);var fmOn=!!(d.fmRadioRunning);window.Dash.setIndicator('dash-imu-status',imuOn);window.Dash.setIndicator('dash-thermal-status',thermOn);window.Dash.setIndicator('dash-tof-status',tofOn);window.Dash.setIndicator('dash-apds-status',apdsOn);window.Dash.setIndicator('dash-input-status',inputOn);window.Dash.setIndicator('dash-pwm-status',pwmOn);window.Dash.setIndicator('dash-gps-status',gpsOn);window.Dash.setIndicator('dash-fmradio-status',fmOn);window.Dash.setIndicator('dash-mic-status',!!(d.micRunning));var micRec=hw.$('dash-mic-recording');if(micRec){micRec.className=(d.micRecording)?'status-indicator status-recording':'status-indicator status-disabled'}}catch(e){console.warn('[Dashboard] Sensor status update error',e)}};window.Dash.updateDeviceVisibility=function(registry){if(!registry||!registry.devices)return;try{var devices=registry.devices;var hasIMU=devices.some(function(d){return d.name==='BNO055'});var hasThermal=devices.some(function(d){return d.name==='MLX90640'});var hasToF=devices.some(function(d){return d.name==='VL53L4CX'});var hasAPDS=devices.some(function(d){return d.name==='APDS9960'});var hasInputDev=devices.some(function(d){return d.name==='Seesaw'});var hasDRV=devices.some(function(d){return d.name==='DRV2605'});var hasPCA9685=devices.some(function(d){return d.name==='PCA9685'});var hasGPS=devices.some(function(d){return d.name==='PA1010D'});var hasFMRadio=devices.some(function(d){return d.name==='RDA5807'});window.Dash.showHideCard('dash-imu-card',hasIMU);window.Dash.showHideCard('dash-thermal-card',hasThermal);window.Dash.showHideCard('dash-tof-card',hasToF);window.Dash.showHideCard('dash-apds-card',hasAPDS);window.Dash.showHideCard('dash-input-card',hasInputDev);window.Dash.showHideCard('dash-drv-card',hasDRV);window.Dash.showHideCard('dash-pwm-card',hasPCA9685);window.Dash.showHideCard('dash-gps-card',hasGPS);window.Dash.showHideCard('dash-fmradio-card',hasFMRadio)}catch(e){console.warn('[Dashboard] Device visibility update error',e)}};console.log('[Dashboard] Section 4a: updateSensorStatus and updateDeviceVisibility added')}else{console.error('[Dashboard] Section 4: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 5: Adding system status functions');if(window.Dash){window.Dash.updateSystem=function(d){try{if(!d)return;if(d.system_time){var parts=d.system_time.split(' ');window.Dash.setText('sys-date',parts[0]||d.system_time);window.Dash.setText('sys-time',parts[1]||'')}else{window.Dash.setText('sys-date','Not synced');window.Dash.setText('sys-time','--')}if(d.uptime_hms)window.Dash.setText('sys-uptime',d.uptime_hms);if(d.net){if(d.net.ssid!=null)window.Dash.setText('sys-ssid',d.net.ssid);if(d.net.ip!=null)window.Dash.setText('sys-ip',d.net.ip)}if(d.mem){var heapTxt=null;if(d.mem.heap_free_kb!=null&&d.mem.heap_total_kb!=null){var heapUsed=d.mem.heap_total_kb-d.mem.heap_free_kb;heapTxt=heapUsed+' / '+d.mem.heap_total_kb+' KB'}else if(d.mem.heap_free_kb!=null){heapTxt=d.mem.heap_free_kb+' KB free'}if(heapTxt!=null)window.Dash.setText('sys-heap',heapTxt);var psTxt=null;var hasPs=(d.mem.psram_free_kb!=null)||(d.mem.psram_total_kb!=null);if(hasPs){var pf=(d.mem.psram_free_kb!=null)?d.mem.psram_free_kb:null;var pt=(d.mem.psram_total_kb!=null)?d.mem.psram_total_kb:null;if(pf!=null&&pt!=null)psTxt=(pt-pf)+' / '+pt+' KB';else if(pf!=null)psTxt=pf+' KB free'}if(psTxt!=null)window.Dash.setText('sys-psram',psTxt)}if(d.storage){if(d.storage.used_kb!=null){var usedTxt=d.storage.used_kb;if(d.storage.total_kb!=null)usedTxt+=' / '+d.storage.total_kb+' KB';window.Dash.setText('sys-storage-used',usedTxt)}if(d.storage.sd){var sd=d.storage.sd;var sdTxt=sd.used_mb+' / '+sd.total_mb+' MB';window.Dash.setText('sys-storage-sd',sdTxt);var sdRow=hw.$('sys-sd-row');hw.show(sdRow);}else{var sdRow=hw.$('sys-sd-row');hw.hide(sdRow);}}}catch(e){console.warn('[Dashboard] System update error',e)}};console.log('[Dashboard] Section 5a: updateSystem added')}else{console.error('[Dashboard] Section 5: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>"
     "if(window.Dash){"
       "var _origUpdateSystem=window.Dash.updateSystem||function(){};"
@@ -378,7 +724,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
         "try{"
           "if(!d||!d.connectivity)return;"
           "var c=d.connectivity;"
-          "if(d.net){var wifiUp=(d.net.wifiConnected!=null)?!!d.net.wifiConnected:!!(d.net.ip&&d.net.ip!='0.0.0.0');window.Dash.setIndicator('conn-wifi-dot',wifiUp);if(d.net.radioOn!=null)window.Dash.setText('conn-wifi-radio',d.net.radioOn?(d.net.radioHeldForEspnow?'On (ESP-NOW)':'On'):'Off');if(d.net.channel)window.Dash.setText('conn-wifi-channel',d.net.channel);if(d.net.mac)window.Dash.setText('conn-wifi-mac',d.net.mac);var badge=document.getElementById('https-badge');if(badge){badge.style.display=(location.protocol==='https:')?'inline-block':'none';}}"
+          "if(d.net){var wifiUp=(d.net.wifiConnected!=null)?!!d.net.wifiConnected:!!(d.net.ip&&d.net.ip!='0.0.0.0');window.Dash.setIndicator('conn-wifi-dot',wifiUp);if(d.net.radioOn!=null)window.Dash.setText('conn-wifi-radio',d.net.radioOn?(d.net.radioHeldForEspnow?'On (ESP-NOW)':'On'):'Off');if(d.net.channel)window.Dash.setText('conn-wifi-channel',d.net.channel);if(d.net.mac)window.Dash.setText('conn-wifi-mac',d.net.mac);var badge=hw.$('https-badge');if(badge){badge.style.display=(location.protocol==='https:')?'inline-block':'none';}}"
           "if(c.espnow){"
             "var en=c.espnow;"
             "window.Dash.setIndicator('conn-espnow-dot',!!en.running);"
@@ -426,7 +772,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
             "window.Dash.setText('conn-i2c-devices',(i2.devices!=null)?String(i2.devices)+' compiled':'--');"
             "window.Dash.setText('conn-i2c-active',(i2.activeDevices!=null)?String(i2.activeDevices):'--');"
             "window.Dash.setText('conn-i2c-pins',(i2.sdaPin!=null)?(i2.sdaPin+' / '+i2.sclPin):'--');"
-            "var dl=document.getElementById('conn-i2c-devlist');"
+            "var dl=hw.$('conn-i2c-devlist');"
             "if(dl){if(i2.deviceList&&i2.deviceList.length){dl.innerHTML=i2.deviceList.map(function(x){var a='0x'+(x.addr||0).toString(16).toUpperCase();var busTag=x.bus?' I2C2':' I2C1';return '<div>'+(x.name||'device')+' '+a+busTag+'</div>';}).join('');}else{dl.textContent='--';}}"
           "}"
           "if(c.llm){"
@@ -444,14 +790,14 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 6: Setting up global variables');window.__sensorStatusSeq=0;window.__probeCooldownMs=10000;window.__lastProbeAt=0;console.log('[Dashboard] Section 6a: Global variables set');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7a: Adding applySensorStatus function');window.applySensorStatus=function(s){console.log('[Dashboard] applySensorStatus called with:',s);if(!s)return;window.__sensorStatusSeq=s.seq||0;window.__lastSensorStatus=s;};console.log('[Dashboard] Section 7a: applySensorStatus function added');</script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7b: Adding sensor card creation');window.createSensorCards=function(sensorStatus,deviceRegistry){console.log('[Dashboard] createSensorCards called with status:',sensorStatus,'registry:',deviceRegistry);var loading=document.getElementById('sensor-loading');var grid=document.getElementById('sensor-grid');if(loading)loading.style.display='none';if(grid){grid.style.display='grid';grid.innerHTML=''}var availableSensors=window.getAvailableSensors(deviceRegistry);console.log('[Dashboard] Available sensors from getAvailableSensors:',availableSensors);var cardCount=0;for(var i=0;i<availableSensors.length;i++){var sensor=availableSensors[i];var enabled=window.getSensorEnabled(sensor.key,sensorStatus);var card=document.createElement('div');card.className='sensor-status-card';card.id='dash-'+sensor.key+'-card';card.dataset.panel=sensor.key;card.style.cssText='background:rgba(255,255,255,0.1);border-radius:8px;padding:1rem;border:1px solid rgba(255,255,255,0.2)';var statusText=enabled?'Running':'Available';var statusColor=enabled?'#28a745':'#87ceeb';var dotsHtml='';if(sensor&&sensor.key==='mic'){var enabledClass=enabled?'status-enabled':'status-disabled';var recordingClass=(sensorStatus&&sensorStatus.micRecording)?'status-recording':'status-disabled';dotsHtml='<span class=\"status-indicator '+enabledClass+'\" id=\"dash-mic-status\"></span><span class=\"status-indicator '+recordingClass+'\" id=\"dash-mic-recording\" style=\"margin-left:4px\"></span>';if(sensorStatus&&sensorStatus.micRecording){statusText='Recording';statusColor='#e74c3c'}}else if(sensor&&sensor.key==='camera'){var enabledClass=enabled?'status-enabled':'status-disabled';var streamClass=(sensorStatus&&sensorStatus.cameraStreaming)?'status-recording':'status-disabled';var mlClass=(sensorStatus&&sensorStatus.eiEnabled)?'status-enabled':'status-disabled';dotsHtml='<span class=\"status-indicator '+enabledClass+'\" id=\"dash-camera-status\" title=\"Enabled\"></span><span class=\"status-indicator '+streamClass+'\" id=\"dash-camera-stream\" title=\"Streaming\" style=\"margin-left:4px\"></span><span class=\"status-indicator '+mlClass+'\" id=\"dash-camera-ml\" title=\"ML Inference\" style=\"margin-left:4px\"></span>'}else{var statusClass=enabled?'status-enabled':'status-disabled';dotsHtml='<span class=\"status-indicator '+statusClass+'\" id=\"dash-'+sensor.key+'-status\"></span>'}card.innerHTML='<div style=\"display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem\">'+dotsHtml+'<strong style=\"line-height:1.2\">'+sensor.name+'</strong></div>'+'<div style=\"font-size:0.85rem;opacity:0.8;margin-bottom:0.5rem\">'+sensor.desc+'</div>'+'<div style=\"font-size:0.9rem;color:'+statusColor+'\">'+statusText+'</div>';if(grid)grid.appendChild(card);cardCount++}if(cardCount===0&&grid){grid.innerHTML='<div style=\"grid-column:1/-1;text-align:center;padding:2rem;color:#87ceeb;font-style:italic\">No sensors are currently available.</div>'}console.log('[Dashboard] Created '+cardCount+' sensor cards')};console.log('[Dashboard] Section 7b: createSensorCards added');</script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7c: Adding helper functions');window.getAvailableSensors=function(deviceRegistry){var sensors=[];var defs=window.__dashSensorDefs||[];var seen={};if(deviceRegistry&&deviceRegistry.devices){for(var di=0;di<deviceRegistry.devices.length;di++){var dev=deviceRegistry.devices[di];for(var i=0;i<defs.length;i++){var d=defs[i];if(!d||!d.device||!d.key)continue;if(d.device===dev.name){if(!seen[d.key]){seen[d.key]=1;sensors.push({key:d.key,name:d.name,desc:d.desc})}}}}}var status=window.__lastSensorStatus||{};for(var i=0;i<defs.length;i++){var d=defs[i];if(!d||!d.key)continue;if(d.key==='camera'&&status.cameraCompiled&&!seen['camera']){seen['camera']=1;sensors.push({key:'camera',name:d.name||'Camera (DVP)',desc:d.desc||'ESP32-S3 DVP Camera'})}}return sensors};window.getSensorEnabled=function(key,status){if(!status)return false;switch(key){case'imu':return !!status.imuRunning;case'thermal':return !!status.thermalRunning;case'tof':return !!status.tofRunning;case'apds':return !!(status.apdsColorRunning||status.apdsProximityRunning||status.apdsGestureRunning);case'input':return !!status.inputRunning;case'haptic':return !!status.hapticEnabled;case'pwm':return !!status.pwmDriverConnected;case'gps':return !!status.gpsRunning;case'fmradio':return !!status.fmRadioRunning;case'camera':return !!status.cameraRunning;case'mic':return !!status.micRunning;case'rtc':return !!status.rtcRunning;case'presence':return !!status.presenceRunning;default:return false}};window.Dash.showHideCard=function(cardId,show){var c=document.getElementById(cardId);if(c)c.style.display=show?'':'none'};console.log('[Dashboard] Section 7c: Helper functions added');</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7b: Adding sensor card creation');window.createSensorCards=function(sensorStatus,deviceRegistry){console.log('[Dashboard] createSensorCards called with status:',sensorStatus,'registry:',deviceRegistry);var loading=hw.$('sensor-loading');var grid=hw.$('sensor-grid');hw.hide(loading);if(grid){grid.style.display='grid';grid.innerHTML=''}var availableSensors=window.getAvailableSensors(deviceRegistry);console.log('[Dashboard] Available sensors from getAvailableSensors:',availableSensors);var cardCount=0;for(var i=0;i<availableSensors.length;i++){var sensor=availableSensors[i];var enabled=window.getSensorEnabled(sensor.key,sensorStatus);var card=document.createElement('div');card.className='sensor-status-card';card.id='dash-'+sensor.key+'-card';card.dataset.panel=sensor.key;card.style.cssText='background:rgba(255,255,255,0.1);border-radius:8px;padding:1rem;border:1px solid rgba(255,255,255,0.2)';var statusText=enabled?'Running':'Available';var statusColor=enabled?'#28a745':'#87ceeb';var dotsHtml='';if(sensor&&sensor.key==='mic'){var enabledClass=enabled?'status-enabled':'status-disabled';var recordingClass=(sensorStatus&&sensorStatus.micRecording)?'status-recording':'status-disabled';dotsHtml='<span class=\"status-indicator '+enabledClass+'\" id=\"dash-mic-status\"></span><span class=\"status-indicator '+recordingClass+'\" id=\"dash-mic-recording\" style=\"margin-left:4px\"></span>';if(sensorStatus&&sensorStatus.micRecording){statusText='Recording';statusColor='#e74c3c'}}else if(sensor&&sensor.key==='camera'){var enabledClass=enabled?'status-enabled':'status-disabled';var streamClass=(sensorStatus&&sensorStatus.cameraStreaming)?'status-recording':'status-disabled';var mlClass=(sensorStatus&&sensorStatus.eiEnabled)?'status-enabled':'status-disabled';dotsHtml='<span class=\"status-indicator '+enabledClass+'\" id=\"dash-camera-status\" title=\"Enabled\"></span><span class=\"status-indicator '+streamClass+'\" id=\"dash-camera-stream\" title=\"Streaming\" style=\"margin-left:4px\"></span><span class=\"status-indicator '+mlClass+'\" id=\"dash-camera-ml\" title=\"ML Inference\" style=\"margin-left:4px\"></span>'}else{var statusClass=enabled?'status-enabled':'status-disabled';dotsHtml='<span class=\"status-indicator '+statusClass+'\" id=\"dash-'+sensor.key+'-status\"></span>'}card.innerHTML='<div style=\"display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem\">'+dotsHtml+'<strong style=\"line-height:1.2\">'+sensor.name+'</strong></div>'+'<div style=\"font-size:0.85rem;opacity:0.8;margin-bottom:0.5rem\">'+sensor.desc+'</div>'+'<div style=\"font-size:0.9rem;color:'+statusColor+'\">'+statusText+'</div>';if(grid)grid.appendChild(card);cardCount++}if(cardCount===0&&grid){grid.innerHTML='<div style=\"grid-column:1/-1;text-align:center;padding:2rem;color:#87ceeb;font-style:italic\">No sensors are currently available.</div>'}console.log('[Dashboard] Created '+cardCount+' sensor cards')};console.log('[Dashboard] Section 7b: createSensorCards added');</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7c: Adding helper functions');window.getAvailableSensors=function(deviceRegistry){var sensors=[];var defs=window.__dashSensorDefs||[];var seen={};if(deviceRegistry&&deviceRegistry.devices){for(var di=0;di<deviceRegistry.devices.length;di++){var dev=deviceRegistry.devices[di];for(var i=0;i<defs.length;i++){var d=defs[i];if(!d||!d.device||!d.key)continue;if(d.device===dev.name){if(!seen[d.key]){seen[d.key]=1;sensors.push({key:d.key,name:d.name,desc:d.desc})}}}}}var status=window.__lastSensorStatus||{};for(var i=0;i<defs.length;i++){var d=defs[i];if(!d||!d.key)continue;if(d.key==='camera'&&status.cameraCompiled&&!seen['camera']){seen['camera']=1;sensors.push({key:'camera',name:d.name||'Camera (DVP)',desc:d.desc||'ESP32-S3 DVP Camera'})}}return sensors};window.getSensorEnabled=function(key,status){if(!status)return false;switch(key){case'imu':return !!status.imuRunning;case'thermal':return !!status.thermalRunning;case'tof':return !!status.tofRunning;case'apds':return !!(status.apdsColorRunning||status.apdsProximityRunning||status.apdsGestureRunning);case'input':return !!status.inputRunning;case'haptic':return !!status.hapticEnabled;case'pwm':return !!status.pwmDriverConnected;case'gps':return !!status.gpsRunning;case'fmradio':return !!status.fmRadioRunning;case'camera':return !!status.cameraRunning;case'mic':return !!status.micRunning;case'rtc':return !!status.rtcRunning;case'presence':return !!status.presenceRunning;default:return false}};window.Dash.showHideCard=function(cardId,show){var c=hw.$(cardId);hw.toggle(c,(show))};console.log('[Dashboard] Section 7c: Helper functions added');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7d: Updating applySensorStatus to use helpers');window.__deviceRegistry=null;window.applySensorStatus=function(s){console.log('[Dashboard] applySensorStatus called with:',s);if(!s)return;window.__sensorStatusSeq=s.seq||0;if(window.__deviceRegistry){console.log('[Dashboard] Using cached device registry:',window.__deviceRegistry);window.createSensorCards(s,window.__deviceRegistry)}else{console.log('[Dashboard] Device registry not loaded yet, fetching...');window.fetchDeviceRegistry().then(function(registry){console.log('[Dashboard] Fetch complete, calling createSensorCards with:',registry);window.createSensorCards(s,registry||window.__deviceRegistry)})}if(window.Dash)window.Dash.updateSensorStatus(s)};window.fetchDeviceRegistry=function(){console.log('[Dashboard] fetchDeviceRegistry called');return hw.fetchJSON('/api/devices').then(function(d){console.log('[Dashboard] Setting window.__deviceRegistry to:',d);window.__deviceRegistry=d;console.log('[Dashboard] Device registry loaded and stored:',window.__deviceRegistry);if(window.Dash)window.Dash.updateDeviceVisibility(d);return d}).catch(function(e){console.warn('[Dashboard] Device registry fetch failed:',e);return null})};console.log('[Dashboard] Section 7d: applySensorStatus updated');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7e: Adding fetchSensorStatus');window.fetchSensorStatus=function(){console.log('[Dashboard] Fetching sensor status...');return fetch('/api/sensors/status',{credentials:'include',cache:'no-store'}).then(function(r){console.log('[Dashboard] Sensor status response:',r.status);if(r.status===404){console.log('[Dashboard] Sensor endpoints not available (sensors disabled)');window.applySensorStatus({sensorsDisabled:true});return}return r.json()}).then(function(j){if(!j)return;console.log('[Dashboard] Raw sensor status data:',JSON.stringify(j,null,2));console.log('[Dashboard] Individual sensor states:');console.log('  - imuRunning:',j.imuRunning);console.log('  - thermalRunning:',j.thermalRunning);console.log('  - tofRunning:',j.tofRunning);console.log('  - apdsColorRunning:',j.apdsColorRunning);window.applySensorStatus(j)}).catch(function(e){console.warn('[Dashboard] sensor status fetch failed (sensors may be disabled)',e);window.applySensorStatus({sensorsDisabled:true})})};console.log('[Dashboard] Section 7e: fetchSensorStatus added');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 8: Adding SSE functions');window.createSSEIfNeeded=function(){try{console.log('[Dashboard] Creating SSE connection...');if(!window.EventSource){console.warn('[Dashboard] EventSource not supported');return false}if(window.__es){var rs=-1;try{if(typeof window.__es.readyState!=='undefined')rs=window.__es.readyState}catch(_){}console.log('[Dashboard] Existing SSE readyState:',rs);if(rs===2){console.log('[Dashboard] Closing existing SSE connection');try{window.__es.close()}catch(_){}window.__es=null}}if(window.__es){console.log('[Dashboard] Using existing SSE connection');return true}console.log('[Dashboard] Opening new SSE to /api/events');var es=new EventSource('/api/events', { withCredentials: true });es.onopen=function(){console.log('[Dashboard] SSE connection opened')};es.onerror=function(e){console.warn('[Dashboard] SSE error:',e);try{es.close()}catch(_){}window.__es=null};window.__es=es;return true}catch(e){console.error('[Dashboard] SSE creation failed:',e);return false}};console.log('[Dashboard] Section 8a: createSSEIfNeeded added');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 9: Adding SSE attachment');window.attachSSE=function(){try{console.log('[Dashboard] Attaching SSE event listeners...');if(!window.__es){console.warn('[Dashboard] No SSE connection to attach to');return false}var handler=function(e){try{console.log('[Dashboard] Received sensor-status event:',e.data);var dj=JSON.parse(e.data||'{}');var seq=(dj&&dj.seq)?dj.seq:0;var cur=window.__sensorStatusSeq||0;if(seq<=cur)return;window.__sensorStatusSeq=seq;if(window.applySensorStatus)window.applySensorStatus(dj)}catch(err){console.warn('[Dashboard] SSE sensor-status parse error',err)}};window.__es.addEventListener('sensor-status',handler);console.log('[Dashboard] Added sensor-status listener');window.__es.addEventListener('system',function(e){try{console.log('[Dashboard] Received system event:',e.data);var dj=JSON.parse(e.data||'{}');if(window.Dash){console.log('[Dashboard] Calling updateSystem with:',dj);window.Dash.updateSystem(dj)}else{console.warn('[Dashboard] Dash object not available for system update')}}catch(err){console.warn('[Dashboard] SSE system parse error',err)}});console.log('[Dashboard] Added system listener');return true}catch(e){console.error('[Dashboard] SSE attachment failed:',e);return false}};console.log('[Dashboard] Section 9a: attachSSE added');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 10: Adding utility functions');window.fetchSystemStatus=function(){console.log('[Dashboard] Fetching system status via API...');return hw.fetchJSON('/api/system').then(function(j){console.log('[Dashboard] System status data:',j);if(window.Dash)window.Dash.updateSystem(j)}).catch(function(e){console.warn('[Dashboard] System status fetch failed:',e)})};window.setupSensorSSE=function(){console.log('[Dashboard] Setting up sensor-only SSE...');if(window.createSSEIfNeeded)window.createSSEIfNeeded();if(window.attachSSE)window.attachSSE()};console.log('[Dashboard] Section 10a: Utility functions added');</script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 10b: Adding signed-in users fetch');window.fetchSignedInUsers=function(){try{var card=document.getElementById('sys-signedin-card');if(!card)return;return hw.fetchJSON('/api/sessions').then(function(j){var users='--';try{if(j&&j.success===true&&Array.isArray(j.sessions)){var seen={};var list=[];for(var i=0;i<j.sessions.length;i++){var u=j.sessions[i]&&j.sessions[i].user?String(j.sessions[i].user):'';if(u&&!seen[u]){seen[u]=1;list.push(u)}}users=list.length?list.join(', '):'--'}}catch(_){users='--'}if(window.Dash)window.Dash.setText('sys-signedin',users)}).catch(function(e){console.log('[Dashboard] Sessions fetch failed:',e);if(window.Dash)window.Dash.setText('sys-signedin','--')})}catch(e){console.log('[Dashboard] fetchSignedInUsers error:',e)}};</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 10b: Adding signed-in users fetch');window.fetchSignedInUsers=function(){try{var card=hw.$('sys-signedin-card');if(!card)return;return hw.fetchJSON('/api/sessions').then(function(j){var users='--';try{if(j&&j.success===true&&Array.isArray(j.sessions)){var seen={};var order=[];for(var i=0;i<j.sessions.length;i++){var s=j.sessions[i]||{};var u=s.user?String(s.user):'';if(!u)continue;var t=s.transport?String(s.transport):'web';if(!seen[u]){seen[u]={};order.push(u)}seen[u][t]=1}var list=[];for(var k=0;k<order.length;k++){var un=order[k];var ts=[];for(var tk in seen[un])ts.push(tk);list.push(un+' ('+ts.join(', ')+')')}users=list.length?list.join(', '):'--'}}catch(_){users='--'}if(window.Dash)window.Dash.setText('sys-signedin',users)}).catch(function(e){console.log('[Dashboard] Sessions fetch failed:',e);if(window.Dash)window.Dash.setText('sys-signedin','--')})}catch(e){console.log('[Dashboard] fetchSignedInUsers error:',e)}};</script>", HTTPD_RESP_USE_STRLEN);
   // Dashboard layout customization (load/apply/save panel order per user)
   httpd_resp_send_chunk(req,
     "<style>"
@@ -495,99 +841,27 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "<div class='layout-actions'>"
     "<button class='btn' onclick='window.Dash.notifMuteAll(false)'>Unmute all</button>"
     "<button class='btn' onclick='window.Dash.closeNotifEditor()'>Cancel</button>"
-    "<button class='btn' onclick='window.Dash.saveNotifPrefs()'>Save</button>"
-    "</div></div></div>"
-    "<script>"
-    "(function(){"
-    "var _fams=null,_muted={};"
-    /* Grouped by family (from the device — the taxonomy is not duplicated here).
-       Collapsed by default: 134 rows in one scroll is what made this unusable. */
-    "var _open={};"
-    "function renderNotifEditor(){"
-    "var list=document.getElementById('dash-notif-list');"
-    "if(!list||!_fams)return;"
-    "list.innerHTML='';"
-    "var total=0;"
-    "_fams.forEach(function(f){"
-    "var kinds=f.k||[];if(!kinds.length)return;"
-    "total+=kinds.length;"
-    "var mutedN=0;kinds.forEach(function(k){if(_muted[k])mutedN++;});"
-    "var card=document.createElement('div');card.className='notif-fam';"
-    "var hdr=document.createElement('div');hdr.className='notif-fam-hdr';"
-    "var caret=document.createElement('span');caret.textContent=_open[f.n]?'\\u25BE':'\\u25B8';"
-    "caret.style.cssText='width:1em;flex:none;opacity:0.7';"
-    "var ttl=document.createElement('span');ttl.style.flex='1';"
-    "ttl.textContent=f.n+'  ('+(mutedN?mutedN+' of '+kinds.length+' muted':kinds.length)+')';"
-    "if(mutedN===kinds.length)ttl.style.opacity='0.5';"
-    "hdr.appendChild(caret);hdr.appendChild(ttl);"
-    "hdr.onclick=function(){_open[f.n]=!_open[f.n];renderNotifEditor();};"
-    /* Family-level bulk action — the whole point of grouping. Muting a family
-       is one click instead of one per kind. */
-    "var bulk=document.createElement('button');bulk.className='btn';"
-    "var allMuted=(mutedN===kinds.length);"
-    "bulk.textContent=allMuted?'Unmute all':'Mute all';"
-    "bulk.style.cssText='width:auto;padding:2px 10px;font-size:0.75rem';"
-    "bulk.onclick=function(ev){ev.stopPropagation();"
-    "kinds.forEach(function(k){_muted[k]=!allMuted;});renderNotifEditor();};"
-    "hdr.appendChild(bulk);"
-    "card.appendChild(hdr);"
-    "if(_open[f.n]){"
-    "kinds.forEach(function(k){"
-    "var div=document.createElement('div');div.className='layout-item';"
-    "div.style.margin='0.2rem 0 0.2rem 1.2rem';"
-    "var sp=document.createElement('span');sp.textContent=k;"
-    "if(_muted[k])sp.className='layout-hidden';"
-    "div.appendChild(sp);"
-    "var b=document.createElement('button');b.className='btn';"
-    "b.textContent=_muted[k]?'Unmute':'Mute';"
-    "b.style.cssText='width:auto;padding:2px 10px;font-size:0.8rem';"
-    "b.onclick=function(){_muted[k]=!_muted[k];renderNotifEditor();};"
-    "div.appendChild(b);"
-    "card.appendChild(div);"
-    "});"
-    "}"
-    "list.appendChild(card);"
-    "});"
-    /* An empty array is truthy, so a failed fetch used to render as silent
-       blankness — indistinguishable from "no kinds exist". Say so out loud. */
-    "if(!total){"
-    "list.innerHTML=\"<div style='opacity:0.7;font-style:italic;padding:0.6rem 0'>No event kinds available.</div>\";"
-    "}"
-    "}"
-    "window.Dash=window.Dash||{};"
-    "window.Dash.openNotifEditor=function(){"
-    "document.getElementById('dash-notif-modal').classList.add('open');"
-    "document.getElementById('dash-notif-list').textContent='Loading...';"
-    "Promise.all(["
-    "hw.fetchJSON('/api/events/kinds'),"
-    "hw.fetchJSON('/api/user/settings')"
-    "]).then(function(res){"
-    "if(!res[0]||!Array.isArray(res[0].families))throw new Error('no event-kind families in response');"
-    "_fams=res[0].families||[];"
-    "_muted={};"
-    "var arr=(res[1]&&res[1].settings&&Array.isArray(res[1].settings.notificationMuted))?res[1].settings.notificationMuted:[];"
-    "arr.forEach(function(n){_muted[n]=true;});"
-    "renderNotifEditor();"
-    "}).catch(function(e){document.getElementById('dash-notif-list').textContent='Error: '+e.message;});"
-    "};"
-    "window.Dash.closeNotifEditor=function(){document.getElementById('dash-notif-modal').classList.remove('open');};"
-    "window.Dash.notifMuteAll=function(v){if(!_fams)return;"
-    "_fams.forEach(function(f){(f.k||[]).forEach(function(k){_muted[k]=v;});});renderNotifEditor();};"
-    "window.Dash.saveNotifPrefs=function(){"
-    /* Save through the notifyusermute COMMAND (not the raw user-settings POST) so
-       every interface shares one validated write path. */
-    "var arr=[];for(var k in _muted){if(_muted[k])arr.push(k);}"
-    "var cmd='notifyusermute '+(arr.length?arr.join(','):'none');"
-    "hw.postFormText('/api/cli',{cmd:cmd})"
-    ".then(function(text){"
-    "if(text&&text.toLowerCase().indexOf('error')!==-1){alert('Save failed: '+text);return;}"
-    "window.Dash.closeNotifEditor();"
-    "})"
-    ".catch(function(e){alert('Save failed: '+(e?e.message:'unknown'));});"
-    "};"
-    "})();"
-    "</script>",
+    "<button id='dash-notif-save' class='btn' onclick='window.Dash.saveNotifPrefs()'>Save</button>"
+    "</div></div></div>",
     HTTPD_RESP_USE_STRLEN);
+
+  // CMD_INPUT_MAX is injected from the executor's shared native contract; the
+  // page does not carry a second magic number that can drift from ExecReq.
+  httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, kDashboardNotificationKindEditorJs,
+                        HTTPD_RESP_USE_STRLEN);
+  String notifEditorInstall =
+      String("\ninstallDashboardNotificationKindEditor(") +
+      String((unsigned long)CMD_INPUT_MAX) + String(");\n");
+  httpd_resp_send_chunk(req, notifEditorInstall.c_str(),
+                        notifEditorInstall.length());
+  // Keep the public click handler in the ordinary streamed-literal corpus as
+  // a tiny delegating wrapper; the existing concat-JS syntax tripwire mutates
+  // this exact anchor to prove Dashboard quoted strings are still parsed.
+  httpd_resp_send_chunk(req,
+      "window.Dash.openNotifEditor=function(){"
+      "return window.Dash._openNotifEditorImpl();};</script>",
+      HTTPD_RESP_USE_STRLEN);
 
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req,
@@ -614,7 +888,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
 
     "function applyOrder(gridId,order){"
     "if(!order||!order.length)return;"
-    "var grid=document.getElementById(gridId);"
+    "var grid=hw.$(gridId);"
     "if(!grid)return;"
     "var children=Array.prototype.slice.call(grid.children);"
     "var map={};"
@@ -633,7 +907,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
 
     "function applyHidden(gridId,hidden){"
     "if(!hidden)return;"
-    "var grid=document.getElementById(gridId);"
+    "var grid=hw.$(gridId);"
     "if(!grid)return;"
     "var ch=grid.children;"
     "for(var i=0;i<ch.length;i++){"
@@ -643,7 +917,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "}"
 
     "function getCurrentOrder(gridId){"
-    "var grid=document.getElementById(gridId);"
+    "var grid=hw.$(gridId);"
     "if(!grid)return[];"
     "var order=[];"
     "var children=grid.children;"
@@ -667,10 +941,10 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "}"
 
     "function renderEditor(){"
-    "var list=document.getElementById('dash-layout-list');"
+    "var list=hw.$('dash-layout-list');"
     "if(!list)return;"
     "list.innerHTML='';"
-    "var grid=document.getElementById(_editingGridId);"
+    "var grid=hw.$(_editingGridId);"
     "if(!grid)return;"
     "var labelMap={};"
     "var ch=grid.children;"
@@ -720,20 +994,20 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "_editingGridId=gridId;"
     "_editOrder=getCurrentOrder(gridId);"
     "_editHidden={};"
-    "var grid=document.getElementById(gridId);"
+    "var grid=hw.$(gridId);"
     "if(grid){var ch=grid.children;"
     "for(var i=0;i<ch.length;i++){var p=ch[i].dataset.panel;"
     "if(p&&ch[i].style.display==='none')_editHidden[p]=true;"
     "}}"
-    "var title=document.getElementById('dash-layout-title');"
-    "if(title)title.textContent=getGridTitle(gridId)+' Layout';"
+    "var title=hw.$('dash-layout-title');"
+    "hw.setText(title,getGridTitle(gridId)+' Layout');"
     "renderEditor();"
-    "var modal=document.getElementById('dash-layout-modal');"
+    "var modal=hw.$('dash-layout-modal');"
     "if(modal)modal.classList.add('open');"
     "};"
 
     "window.Dash.closeLayoutEditor=function(){"
-    "var modal=document.getElementById('dash-layout-modal');"
+    "var modal=hw.$('dash-layout-modal');"
     "if(modal)modal.classList.remove('open');"
     "_editingGridId=null;_editOrder=[];_editHidden={};"
     "};"
@@ -742,7 +1016,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "if(!_editingGridId)return;"
     "applyOrder(_editingGridId,_editOrder);"
     "applyHidden(_editingGridId,_editHidden);"
-    "var grid=document.getElementById(_editingGridId);"
+    "var grid=hw.$(_editingGridId);"
     "if(grid){var ch=grid.children;"
     "for(var i=0;i<ch.length;i++){var p=ch[i].dataset.panel;"
     "if(p&&!_editHidden[p])ch[i].style.display='';"
@@ -809,7 +1083,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
 
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 11: DOM initialization');document.addEventListener('DOMContentLoaded',function(){try{console.log('[Dashboard] Section 11a: DOM loaded, initializing...');var grids=['system-grid','conn-grid'];for(var gi=0;gi<grids.length;gi++){var g=document.getElementById(grids[gi]);if(g)g.style.visibility='hidden';}function revealGrids(){for(var gi=0;gi<grids.length;gi++){var g=document.getElementById(grids[gi]);if(g)g.style.visibility='';}}var layoutP=(window.Dash&&window.Dash.loadSavedLayouts)?window.Dash.loadSavedLayouts():Promise.resolve();if(layoutP&&typeof layoutP.then==='function'){layoutP.then(revealGrids).catch(revealGrids)}else{revealGrids()}if(window.fetchDeviceRegistry)window.fetchDeviceRegistry();if(window.fetchSensorStatus)window.fetchSensorStatus();if(window.fetchSystemStatus)window.fetchSystemStatus();if(window.fetchSignedInUsers&&document.getElementById('sys-signedin-card'))window.fetchSignedInUsers();if(window.createSSEIfNeeded)window.createSSEIfNeeded();if(window.attachSSE)window.attachSSE();try{if(window.__sessionsTimer){clearInterval(window.__sessionsTimer)}window.__sessionsTimer=setInterval(function(){if(window.fetchSignedInUsers&&document.getElementById('sys-signedin-card'))window.fetchSignedInUsers()},15000)}catch(_){ }console.log('[Dashboard] Section 11b: All initialization complete')}catch(e){console.error('[Dashboard] DOM init error',e)}});console.log('[Dashboard] Section 11c: DOM listener registered');</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 11: DOM initialization');document.addEventListener('DOMContentLoaded',function(){try{console.log('[Dashboard] Section 11a: DOM loaded, initializing...');var grids=['system-grid','conn-grid'];for(var gi=0;gi<grids.length;gi++){var g=hw.$(grids[gi]);if(g)g.style.visibility='hidden';}function revealGrids(){for(var gi=0;gi<grids.length;gi++){var g=hw.$(grids[gi]);if(g)g.style.visibility='';}}var layoutP=(window.Dash&&window.Dash.loadSavedLayouts)?window.Dash.loadSavedLayouts():Promise.resolve();if(layoutP&&typeof layoutP.then==='function'){layoutP.then(revealGrids).catch(revealGrids)}else{revealGrids()}if(window.fetchDeviceRegistry)window.fetchDeviceRegistry();if(window.fetchSensorStatus)window.fetchSensorStatus();if(window.fetchSystemStatus)window.fetchSystemStatus();if(window.fetchSignedInUsers&&hw.$('sys-signedin-card'))window.fetchSignedInUsers();if(window.createSSEIfNeeded)window.createSSEIfNeeded();if(window.attachSSE)window.attachSSE();try{if(window.__sessionsTimer){clearInterval(window.__sessionsTimer)}window.__sessionsTimer=setInterval(function(){if(window.fetchSignedInUsers&&hw.$('sys-signedin-card'))window.fetchSignedInUsers()},15000)}catch(_){ }console.log('[Dashboard] Section 11b: All initialization complete')}catch(e){console.error('[Dashboard] DOM init error',e)}});console.log('[Dashboard] Section 11c: DOM listener registered');</script>", HTTPD_RESP_USE_STRLEN);
 }
 
 #endif

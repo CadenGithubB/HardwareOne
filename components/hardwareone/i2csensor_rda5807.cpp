@@ -882,6 +882,13 @@ const char* cmd_fmradioautostart(const String& argsInput) {
 }
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+// Bus routing for this device. Lives here rather than in System_I2C.cpp so it
+// compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
+static const char* cmd_fmradiobus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.fmRadioBus, a, "fmRadioBus");
+}
+
 const CommandEntry fmRadioCommands[] = {
   // 3-level voice: "sensor" -> "radio" -> "open/close"
   { "openfmradio", "Start FM Radio sensor.", false, cmd_fmradio_start },
@@ -895,6 +902,7 @@ const CommandEntry fmRadioCommands[] = {
   
   // Auto-start
   { "fmradioautostart", "Enable/disable FM Radio auto-start after boot [on|off]", false, cmd_fmradioautostart, "Usage: fmradioautostart [on|off]" },
+  { "fmradiobus",  "Route RDA5807 FM radio to bus: <0|1> (reboot required)", true, cmd_fmradiobus, "Usage: fmRadioBus <0|1>" },
 };
 
 const size_t fmRadioCommandsCount = sizeof(fmRadioCommands) / sizeof(fmRadioCommands[0]);

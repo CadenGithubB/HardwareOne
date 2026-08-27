@@ -9,6 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "esp_partition.h"
+
 // Why a trial image was rejected. All five of these previously reached the
 // recovery updater as one generic `rollback_detected`, so an operator could see
 // THAT an image was rolled back but never WHICH check rejected it - and the
@@ -77,6 +79,17 @@ bool otaSafetyIsPendingVerification();
 // Destructive automatic storage recovery is always forbidden. Kept as a named
 // policy hook so storage callers cannot silently reintroduce erase-on-error.
 bool otaSafetyAllowsDestructiveStorageRecovery();
+
+// True when a data partition provably holds nothing: every byte reads 0xFF in
+// the raw flash view, or — on a flash-encrypted board, for a partition flagged
+// `encrypted` — in the decrypted view (the first-ever encryption boot encrypts
+// an erased region in place, so raw is ciphertext-of-0xFF while decrypted is
+// 0xFF). Either way no plaintext was ever stored, so formatting or erasing it
+// cannot lose data. Any read failure returns false (fail closed). Reads the
+// whole partition only when it really is blank; real data rejects at the
+// first non-0xFF byte. Used by the LittleFS first-boot format and by the NVS
+// full-erase guard.
+bool otaSafetyPartitionIsBlank(const esp_partition_t* part);
 
 // Call once, immediately after HardwareOne advances its crash phase to RUNNING.
 // The 60-second probation interval starts here, never from power-on uptime.

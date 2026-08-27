@@ -27,9 +27,11 @@ CONFIG_PICO_PSRAM_CS_IO=10
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 
-# Bluetooth disabled for this build (ENABLE_BLUETOOTH=0 in System_BuildConfig.h
-# only gates our app code; this drops the Bluedroid stack + controller to
-# actually free ~14 KB IRAM / ~80 KB DRAM / ~70 KB flash on the memory-tight
-# classic ESP32). The CMakeLists HW_BOARD auto-recovery clears the stale
-# CONFIG_BT_ENABLED=y so this value re-applies.
+# Bluetooth disabled for this build: dropping the Bluedroid stack + controller
+# frees ~14 KB IRAM / ~80 KB DRAM / ~70 KB flash on the memory-tight classic
+# ESP32. No manual System_BuildConfig.h edit is needed — its DERIVED rules see
+# CONFIG_BT_ENABLED missing from sdkconfig.h and force ENABLE_BLUETOOTH (plus
+# the G2/R1/TestSuite dependents) to 0, and components/hardwareone/CMakeLists.txt
+# applies the same downgrade to its grepped flag copy. The CMakeLists HW_BOARD
+# auto-recovery clears a stale CONFIG_BT_ENABLED=y so this value re-applies.
 CONFIG_BT_ENABLED=n

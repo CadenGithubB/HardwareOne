@@ -427,6 +427,13 @@ const char* cmd_apdsautostart(const String& argsInput) {
 }
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+// Bus routing for this device. Lives here rather than in System_I2C.cpp so it
+// compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
+static const char* cmd_apdsbus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.apdsBus, a, "apdsBus");
+}
+
 const CommandEntry apdsCommands[] = {
   // Primary commands (3-level voice: "sensor" -> "gesture" -> "open/close")
   { "openapds", "Start APDS9960 sensor.", false, cmd_apdsstart },
@@ -441,6 +448,7 @@ const CommandEntry apdsCommands[] = {
   
   // Auto-start
   { "apdsautostart", "Enable/disable APDS auto-start after boot [on|off]", false, cmd_apdsautostart, "Usage: apdsautostart [on|off]" },
+  { "apdsbus",     "Route APDS9960 gesture to bus: <0|1> (reboot required)", true, cmd_apdsbus, "Usage: apdsBus <0|1>" },
 };
 
 const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);

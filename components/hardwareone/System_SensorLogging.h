@@ -158,18 +158,22 @@ const char* cmd_capturecrypt(const String& argsInput);
 // Shared by `healthstatus json` CLI/BLE and GET /api/health/status.
 const char* buildHealthStatusJson(char* buf, size_t cap);
 
-// Kick a one-shot 4-vital poll burst (HR/HRV/SpO2/battery). Advances in
-// healthLoggingTick; returns false if ring not connected or Health off in build.
+// Kick the exact-2.2.9 one-shot refresh (DAILY HR/HRV/SpO2/sleep/activity,
+// followed by deviceStatus). Advances in healthLoggingTick; returns false if
+// the ring is disconnected, setup/profile is not ready, the exact profile is
+// unsupported, or Health is off in this build. This public action never falls
+// back to the legacy POINT lane.
 bool healthStartPollBurst(void);
+bool healthPollBurstActive(void);
 
-// Main-loop tick: when Health logging is on, periodically mines the R1
-// (HR/HRV/SpO2/battery poll burst) at healthLoggingPollIntervalSec and forces
-// a sensorlog sample after replies settle. Also advances on-demand poll bursts.
+// Main-loop tick: advances the exact-2.2.9 on-demand refresh above. Legacy
+// timed logging retains its profile-gated POINT miner and therefore sends no
+// timed query when POINT is unsupported on the active profile.
 void healthLoggingTick();
 
-// Call after a Health-page vitals refresh (entry / Poll Now burst completes).
-// Schedules a log sample once notify replies have had time to land — so
-// on-demand checks are persisted, not only the timed mine.
+// Call after a Health-page refresh completes. Schedules a log sample once
+// notify replies have had time to land, so successful/partial on-demand checks
+// are persisted rather than relying on the legacy timed miner.
 void healthLoggingNotePageRefresh();
 
 // Request an immediate sensorlog write on the next sensorLogTick (bypasses

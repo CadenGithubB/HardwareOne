@@ -1061,6 +1061,13 @@ const char* cmd_imuautostart(const String& argsInput) {
 // IMU Command Registry (Sensor-Specific)
 // ============================================================================
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+// Bus routing for this device. Lives here rather than in System_I2C.cpp so it
+// compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
+static const char* cmd_imubus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.imuBus, a, "imuBus");
+}
+
 const CommandEntry imuCommands[] = {
   // Start/Stop (3-level voice: "sensor" -> "motion sensor" -> "open/close")
   { "openimu", "Start BNO055 IMU sensor.", false, cmd_imustart },
@@ -1086,6 +1093,7 @@ const CommandEntry imuCommands[] = {
   
   // Auto-start
   { "imuautostart", "Enable/disable IMU auto-start after boot [on|off]", false, cmd_imuautostart, "Usage: imuautostart [on|off]" },
+  { "imubus",      "Route BNO055 IMU to bus: <0|1> (reboot required)",   true, cmd_imubus,      "Usage: imuBus <0|1>" },
 };
 
 const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);

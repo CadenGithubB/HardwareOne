@@ -265,6 +265,45 @@ void taskStackRecord(const char* name, uint32_t allocatedBytes);
 uint32_t taskStackLookup(const char* name);
 
 // ============================================================================
+// Live-heap measurement of a task snapshot
+// ============================================================================
+// What the allocator actually holds for each task in a uxTaskGetSystemState()
+// snapshot: the block behind pxStackBase (the stack) and the block behind
+// xHandle (the TCB). This is a MEASUREMENT, not a lookup — it is correct for
+// kernel tasks that never touch the registry (main, IDLEn, ipcN, esp_timer,
+// Tmr Svc), and it tracks a changed CONFIG_* stack size automatically.
+//
+// Why a measurement is needed at all: on Xtensa portSTACK_GROWTH is -1, so
+// TaskStatus_t carries pxStackBase but NOT pxEndOfStack (task.h gates it on
+// portSTACK_GROWTH > 0), and the kernel exposes no "allocated depth" for a
+// running task. The allocator does know: xTaskCreate* and ESP-IDF's own
+// IDLE/timer-task hooks (port_common.c) pvPortMalloc both the stack and the
+// TCB, and pvPortMalloc is heap_caps_malloc(INTERNAL|8BIT).
+//
+// How: ONE walk of the registered INTERNAL|8BIT heaps, matching each live
+// block's start address against the snapshot pointers. Never
+// heap_caps_get_allocated_size(): it asserts (aborts) on a pointer outside
+// every registered heap — a .bss stack, or a PSRAM stack via
+// xTaskCreateWithCaps — and it does no used/free check, so a task that
+// deleted itself between snapshot and query would return the size of the
+// coalesced FREE block. The walk only reports a block that is live AND starts
+// exactly at the pointer.
+//
+// 0 means UNKNOWN — the block is not a live INTERNAL|8BIT heap block — never
+// "zero bytes". Callers must show it as unmeasured, not fold it in as nothing.
+struct TaskHeapMeasure {
+  uint32_t stackBytes;  // allocated stack block, measured; 0 = not internal heap
+  uint32_t tcbBytes;    // allocated TCB block, measured; 0 = same
+  uint32_t regBytes;    // taskStackLookup(name): size recorded at creation; 0 = not ours
+};
+
+// Fills out[i] for snapshot[i], i < count. Calls taskStackLookup() exactly
+// once per task (it is a mutex-guarded linear scan of a PSRAM registry, not a
+// table index) and does all pointer reads in one tight walk so the
+// snapshot-to-measure window is microseconds. Task context only.
+void taskHeapMeasureSnapshot(const TaskStatus_t* snapshot, TaskHeapMeasure* out, size_t count);
+
+// ============================================================================
 // Sensor Task Creation Helpers
 // ============================================================================
 

@@ -30,6 +30,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <string.h>
+#include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 // -----------------------------------------------------------------------------
 // Storage
@@ -40,7 +41,11 @@ struct BlePeerData {
   String mac2;
   bool autoReconnect = false;
 };
-static BlePeerData gBlePeerData[BLE_PEER_MAX] = {};
+// PSRAM: every access holds the recursive PeerDataGuard mutex (task context
+// only), and peerConfigApply snapshots effAuto before taking sReconnectMux,
+// so no byte of this array is read or written inside a spinlock window.
+// The rollback writes in the bail paths run AFTER portEXIT — keep it that way.
+static EXT_RAM_BSS_ATTR BlePeerData gBlePeerData[BLE_PEER_MAX] = {};
 
 namespace {
 
@@ -163,6 +168,10 @@ PeerConfigApplyResult peerConfigApply(
   if (replaceMac1) data.mac1 = requestedMac1;
   if (replaceMac2) data.mac2 = requestedMac2;
   if (replaceAutoReconnect) data.autoReconnect = requestedAutoReconnect;
+  // gBlePeerData lives in PSRAM: capture the effective (post-update) policy
+  // before portENTER_CRITICAL so the spinlock window never touches external
+  // RAM. Must stay AFTER the conditional write above.
+  const bool effAuto = data.autoReconnect;
 
   BlePeerSavedTarget target;
   const bool mac1Representable = copySavedAddress(data.mac1, target.mac1);
@@ -197,12 +206,12 @@ PeerConfigApplyResult peerConfigApply(
       state.savedTarget.addressType2 != target.addressType2 ||
       state.savedTarget.addressType1Known != target.addressType1Known ||
       state.savedTarget.addressType2Known != target.addressType2Known;
-  result.policyChanged = state.autoReconnect != data.autoReconnect;
-  state.autoReconnect = data.autoReconnect;
+  result.policyChanged = state.autoReconnect != effAuto;
+  state.autoReconnect = effAuto;
   state.hasSavedTarget = hasSavedTarget;
   state.savedTarget = target;
   if (!hasSavedTarget ||
-      (!data.autoReconnect && !state.reseekEvenIfNoAuto)) {
+      (!effAuto && !state.reseekEvenIfNoAuto)) {
     state.wantReconnect = false;
     state.launchedAttempts = 0;
     state.dueMs = 0;
@@ -271,7 +280,9 @@ struct PeerOwnerAuthority {
   TransportSessionEpoch transportEpoch = kNoTransportSessionEpoch;
 };
 
-PeerOwnerAuthority sPeerOwner[BLE_PEER_MAX];
+// PSRAM: every access takes the recursive PeerOwnerGuard mutex itself (verified
+// 2026-08-19). The adjacent mutex storage + init spinlock MUST stay internal.
+EXT_RAM_BSS_ATTR PeerOwnerAuthority sPeerOwner[BLE_PEER_MAX];
 StaticSemaphore_t sPeerOwnerMutexStorage;
 SemaphoreHandle_t sPeerOwnerMutex = nullptr;
 portMUX_TYPE sPeerOwnerInitMux = portMUX_INITIALIZER_UNLOCKED;

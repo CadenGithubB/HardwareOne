@@ -80,9 +80,17 @@ static bool sHistoryRefreshForce = false;
 static uint32_t sLastSyncMs = 0;
 static bool sLoggedHint = false;
 static bool sPageActive = false;
-// Lens feedback for Poll Now / entry burst (values often unchanged → text
+static bool sRefreshSupportedLast = false;
+// Lens feedback for Poll Now (values often unchanged → text
 // strcmp would otherwise skip UPDATE_TEXT and look like a dead tap).
-enum : uint8_t { POLL_UI_IDLE = 0, POLL_UI_ACTIVE, POLL_UI_DONE };
+enum : uint8_t {
+  POLL_UI_IDLE = 0,
+  POLL_UI_ACTIVE,
+  POLL_UI_DONE,
+  POLL_UI_PARTIAL,
+  POLL_UI_FAILED,
+  POLL_UI_UNSUPPORTED,
+};
 static uint8_t sPollUi = POLL_UI_IDLE;
 static uint32_t sPollUiMs = 0;
 // One-shot metric graph: armed on metric select / Poll Now; consumed by
@@ -104,9 +112,16 @@ static std::atomic<bool> sHistoryDirty{false};
 static std::atomic<uint32_t> sHistoryDirtyGeneration{0};
 static std::atomic<uint8_t> sTypedTrendSuppressMask{0};
 static std::atomic<bool> sTypedHistoryFetchActive{false};
-static char sHistoryPeerId[18] = {};
-static char sDeferredHistoryPeerId[18] = {};
-static bool sHistoryPeerSwitchPending = false;
+// Desired-peer custody is changed only under sHistoryMutex. Keeping current
+// and deferred identity in one state object makes a request linearizable with
+// the commit tick that eventually installs it after dirty data is durable.
+struct HistoryPeerCustody {
+  char current[18];
+  char requested[18];
+  bool requestPending;
+  uint32_t requestRevision;
+};
+static HistoryPeerCustody sHistoryPeerCustody;
 static bool sHistoryLoadedExact = false;
 static bool sDropCurrentHistoryFetch = false;
 static R1HealthHistoryFetchState sHistoryUiFetchState = R1_HISTORY_FETCH_IDLE;
@@ -118,7 +133,7 @@ struct PendingHistorySession {
   bool terminalSuccessful;
   uint8_t terminalError;
   bool keyKnown;
-  uint8_t profile;
+  uint8_t layout;
   uint32_t dayStart;
   int16_t timezoneMinutes;
   uint32_t loadRetryAtMs;
@@ -188,6 +203,117 @@ static bool historyPeerIdValid(const char* id) {
     }
   }
   return true;
+}
+
+enum class HistoryPeerRequestResult : uint8_t {
+  UNCHANGED = 0,
+  DEFERRED,
+  SWITCHED,
+};
+
+static void historyClearRequestedPeerLocked(HistoryPeerCustody& custody) {
+  memset(custody.requested, 0, sizeof(custody.requested));
+  custody.requestPending = false;
+}
+
+static void historyBumpPeerRequestRevisionLocked(HistoryPeerCustody& custody) {
+  ++custody.requestRevision;
+  if (custody.requestRevision == 0) custody.requestRevision = 1;
+}
+
+// Pure custody transition; caller holds sHistoryMutex for the live instance.
+// A request for the already-current peer is still meaningful: it supersedes
+// and cancels any older deferred request from a connection that lost custody.
+static HistoryPeerRequestResult historyRequestPeerLocked(
+    HistoryPeerCustody& custody, const char* normalized, bool historyDirty) {
+  if (!historyPeerIdValid(normalized))
+    return HistoryPeerRequestResult::UNCHANGED;
+  historyBumpPeerRequestRevisionLocked(custody);
+  if (strcmp(custody.current, normalized) == 0) {
+    historyClearRequestedPeerLocked(custody);
+    return HistoryPeerRequestResult::UNCHANGED;
+  }
+  if (historyDirty) {
+    memcpy(custody.requested, normalized, sizeof(custody.requested));
+    custody.requestPending = true;
+    return HistoryPeerRequestResult::DEFERRED;
+  }
+  memcpy(custody.current, normalized, sizeof(custody.current));
+  historyClearRequestedPeerLocked(custody);
+  return HistoryPeerRequestResult::SWITCHED;
+}
+
+using HistoryPeerApplyInterleaveHook = void (*)(HistoryPeerCustody& custody);
+
+// Select, revalidate, and install the deferred target as one locked action.
+// The revision check is defensive and gives the boot self-test a deterministic
+// model of the former extraction/unlock/apply race.
+static bool historyApplyRequestedPeerLocked(
+    HistoryPeerCustody& custody, bool historyDirty,
+    HistoryPeerApplyInterleaveHook interleaveHook = nullptr) {
+  if (historyDirty || !custody.requestPending ||
+      !historyPeerIdValid(custody.requested)) return false;
+  char requested[18];
+  memcpy(requested, custody.requested, sizeof(requested));
+  const uint32_t revision = custody.requestRevision;
+  if (interleaveHook) interleaveHook(custody);
+  if (historyDirty || !custody.requestPending ||
+      custody.requestRevision != revision ||
+      strcmp(custody.requested, requested) != 0) return false;
+  return historyRequestPeerLocked(custody, requested, false) ==
+         HistoryPeerRequestResult::SWITCHED;
+}
+
+static void historyPeerCustodyReassertCurrentTestHook(
+    HistoryPeerCustody& custody) {
+  char current[18];
+  memcpy(current, custody.current, sizeof(current));
+  (void)historyRequestPeerLocked(custody, current, false);
+}
+
+static bool historyCommitMatchesDirtyGeneration(
+    bool historyDirty, uint32_t dirtyGeneration,
+    uint32_t committedGeneration) {
+  return historyDirty && dirtyGeneration != 0 && committedGeneration != 0 &&
+         dirtyGeneration == committedGeneration;
+}
+
+bool g2HealthHistoryPeerCustodySelfTest(void) {
+  static constexpr char kPeerA[] = "aa:bb:cc:dd:ee:01";
+  static constexpr char kPeerB[] = "aa:bb:cc:dd:ee:02";
+  HistoryPeerCustody custody{};
+  memcpy(custody.current, kPeerA, sizeof(kPeerA));
+  bool ok = true;
+
+  // Dirty A -> deferred B -> reconnect A before extraction. A must cancel B.
+  ok &= historyRequestPeerLocked(custody, kPeerB, true) ==
+        HistoryPeerRequestResult::DEFERRED;
+  ok &= custody.requestPending && strcmp(custody.requested, kPeerB) == 0;
+  ok &= historyRequestPeerLocked(custody, kPeerA, true) ==
+        HistoryPeerRequestResult::UNCHANGED;
+  ok &= !custody.requestPending && custody.requested[0] == '\0' &&
+        strcmp(custody.current, kPeerA) == 0;
+  ok &= !historyApplyRequestedPeerLocked(custody, false) &&
+        strcmp(custody.current, kPeerA) == 0;
+
+  // Recreate the former extraction/apply gap. Reasserting A after B has been
+  // selected invalidates the captured revision, so stale B cannot win later.
+  ok &= historyRequestPeerLocked(custody, kPeerB, true) ==
+        HistoryPeerRequestResult::DEFERRED;
+  ok &= !historyApplyRequestedPeerLocked(
+      custody, false, historyPeerCustodyReassertCurrentTestHook);
+  ok &= !custody.requestPending && strcmp(custody.current, kPeerA) == 0;
+
+  // With no superseding request, the deferred peer installs normally.
+  ok &= historyRequestPeerLocked(custody, kPeerB, true) ==
+        HistoryPeerRequestResult::DEFERRED;
+  ok &= historyApplyRequestedPeerLocked(custody, false) &&
+        !custody.requestPending && strcmp(custody.current, kPeerB) == 0;
+  // An older store acknowledgement cannot clear a newer terminal generation.
+  ok &= historyCommitMatchesDirtyGeneration(true, 8, 8);
+  ok &= !historyCommitMatchesDirtyGeneration(true, 8, 7);
+  ok &= !historyCommitMatchesDirtyGeneration(false, 8, 8);
+  return ok;
 }
 
 // Pixel grid in PSRAM BSS (~41 KB).
@@ -407,10 +533,15 @@ void g2HealthApplyTrendDaily(G2HealthMetric metric,
 }
 
 static bool validateCommonDaily(const R1CommonDailyResult& result) {
-  if (result.profile != R1_PROFILE_FW_2_2_7_0005 ||
+  const uint8_t cmd = result.metric == R1_DAILY_METRIC_HEART_RATE
+      ? R1_CMD_HEARTRATE
+      : result.metric == R1_DAILY_METRIC_SPO2 ? R1_CMD_SPO2 : 0;
+  if (cmd == 0 ||
+      !r1ProfileSupportsSingleFrameDaily(result.profile, cmd) ||
       result.count > R1_COMMON_DAILY_MAX_RECORDS ||
       result.dayMode != R1_DAILY_DAY_EPOCH || result.dayStart == 0 ||
-      result.timezoneMinutes < -840 || result.timezoneMinutes > 840 ||
+      result.timezoneMinutes < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
+      result.timezoneMinutes > R1_HEALTH_TIMEZONE_MINUTES_MAX ||
       (result.metric != R1_DAILY_METRIC_HEART_RATE &&
        result.metric != R1_DAILY_METRIC_SPO2)) return false;
   bool seen[R1_HEALTH_HOURLY_SLOTS] = {};
@@ -426,11 +557,12 @@ static bool validateCommonDaily(const R1CommonDailyResult& result) {
 }
 
 static bool validateHrvDaily(const R1HrvDailyResult& result) {
-  if (result.profile != R1_PROFILE_FW_2_2_7_0005 ||
+  if (!r1ProfileSupportsSingleFrameDaily(result.profile, R1_CMD_HRV) ||
       result.metric != R1_DAILY_METRIC_HRV ||
       result.count > R1_HRV_DAILY_MAX_RECORDS ||
       result.dayMode != R1_DAILY_DAY_EPOCH || result.dayStart == 0 ||
-      result.timezoneMinutes < -840 || result.timezoneMinutes > 840) return false;
+      result.timezoneMinutes < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
+      result.timezoneMinutes > R1_HEALTH_TIMEZONE_MINUTES_MAX) return false;
   bool seen[R1_HEALTH_HOURLY_SLOTS] = {};
   for (uint8_t i = 0; i < result.count; ++i) {
     const R1HrvDailyRecord& record = result.records[i];
@@ -444,11 +576,12 @@ static bool validateHrvDaily(const R1HrvDailyResult& result) {
 }
 
 static bool validateActivityDaily(const R1ActivityDailyResult& result) {
-  if (result.profile != R1_PROFILE_FW_2_2_7_0005 ||
+  if (!r1ProfileSupportsSingleFrameDaily(result.profile, R1_CMD_ACTIVITY) ||
       result.metric != R1_DAILY_METRIC_ACTIVITY ||
       result.count > R1_ACTIVITY_DAILY_MAX_RECORDS ||
       result.dayMode != R1_DAILY_DAY_EPOCH || result.dayStart == 0 ||
-      result.timezoneMinutes < -840 || result.timezoneMinutes > 840) return false;
+      result.timezoneMinutes < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
+      result.timezoneMinutes > R1_HEALTH_TIMEZONE_MINUTES_MAX) return false;
   bool seen[R1_HEALTH_ACTIVITY_SLOTS] = {};
   for (uint8_t i = 0; i < result.count; ++i) {
     const R1ActivityDailyRecord& record = result.records[i];
@@ -464,38 +597,124 @@ static bool validateActivityDaily(const R1ActivityDailyResult& result) {
   return true;
 }
 
-static bool pendingKeyAcceptLocked(uint8_t profile, uint32_t dayStart,
+static R1HealthHistoryLayout historyLayoutForProfile(
+    R1ProtocolProfile profile) {
+  switch (profile) {
+    case R1_PROFILE_FW_2_2_7_0005:
+    case R1_PROFILE_FW_2_2_9_0003:
+      return R1_HISTORY_LAYOUT_DAILY_V1;
+    default:
+      return R1_HISTORY_LAYOUT_UNKNOWN;
+  }
+}
+
+static bool pendingKeyAcceptLocked(R1HealthHistoryLayout layout,
+                                   uint32_t dayStart,
                                    int16_t timezoneMinutes) {
-  if (!sPendingHistory.active || sHistoryPeerSwitchPending ||
-      !historyPeerIdValid(sHistoryPeerId) ||
-      profile != R1_PROFILE_FW_2_2_7_0005 || dayStart == 0) return false;
+  if (!sPendingHistory.active || sHistoryPeerCustody.requestPending ||
+      !historyPeerIdValid(sHistoryPeerCustody.current) ||
+      layout == R1_HISTORY_LAYOUT_UNKNOWN || dayStart == 0) return false;
   if (!sPendingHistory.keyKnown) {
     sPendingHistory.keyKnown = true;
-    sPendingHistory.profile = profile;
+    sPendingHistory.layout = static_cast<uint8_t>(layout);
     sPendingHistory.dayStart = dayStart;
     sPendingHistory.timezoneMinutes = timezoneMinutes;
     sPendingHistory.loadRetryAtMs = 0;
     sPendingHistory.loadError = R1_HISTORY_STORE_OK;
     return true;
   }
-  return sPendingHistory.profile == profile &&
+  return sPendingHistory.layout == static_cast<uint8_t>(layout) &&
          sPendingHistory.dayStart == dayStart &&
          sPendingHistory.timezoneMinutes == timezoneMinutes;
+}
+
+template <typename Result>
+static void mergePendingHourlyResult(Result& dst, const Result& incoming,
+                                     uint8_t capacity) {
+  // Multiple valid notifies can be drained by the owner before the main loop
+  // applies this pending session. Accumulate by slot here as well as in the
+  // persisted day; otherwise the last pending page could erase an earlier,
+  // disjoint page before applyCommon/HrvToDayLocked ever sees it.
+  dst.profile = incoming.profile;
+  dst.metric = incoming.metric;
+  dst.sourceSerial = incoming.sourceSerial;
+  dst.sourceCrc32 = incoming.sourceCrc32;
+  dst.timezoneMinutes = incoming.timezoneMinutes;
+  dst.dayMode = incoming.dayMode;
+  dst.dayStart = incoming.dayStart;
+  dst.trailer = incoming.trailer;
+  if (incoming.latestTimestamp != 0 &&
+      (dst.latestTimestamp == 0 ||
+       incoming.latestTimestamp >= dst.latestTimestamp)) {
+    dst.latestTimestampMode = incoming.latestTimestampMode;
+    dst.latestTimestampRaw = incoming.latestTimestampRaw;
+    dst.latestTimestamp = incoming.latestTimestamp;
+    dst.latestValue = incoming.latestValue;
+  }
+  for (uint8_t i = 0; i < incoming.count; ++i) {
+    const auto& src = incoming.records[i];
+    uint8_t slot = 0;
+    while (slot < dst.count && dst.records[slot].hourSlot != src.hourSlot) {
+      ++slot;
+    }
+    if (slot == dst.count) {
+      // Both inputs were independently validated with unique 0..23 slots, so
+      // their union cannot exceed the fixed daily capacity.
+      if (dst.count >= capacity) continue;
+      ++dst.count;
+    }
+    dst.records[slot] = src;
+  }
+}
+
+static void mergePendingActivityResult(R1ActivityDailyResult& dst,
+                                       const R1ActivityDailyResult& incoming) {
+  dst.profile = incoming.profile;
+  dst.metric = incoming.metric;
+  dst.sourceSerial = incoming.sourceSerial;
+  dst.sourceCrc32 = incoming.sourceCrc32;
+  dst.timezoneMinutes = incoming.timezoneMinutes;
+  dst.dayMode = incoming.dayMode;
+  dst.dayStart = incoming.dayStart;
+  dst.trailer = incoming.trailer;
+  for (uint8_t i = 0; i < incoming.count; ++i) {
+    const R1ActivityDailyRecord& src = incoming.records[i];
+    uint8_t slot = 0;
+    while (slot < dst.count &&
+           dst.records[slot].tenMinuteSlot != src.tenMinuteSlot) {
+      ++slot;
+    }
+    if (slot == dst.count) {
+      if (dst.count >= R1_ACTIVITY_DAILY_MAX_RECORDS) continue;
+      ++dst.count;
+    }
+    dst.records[slot] = src;
+  }
 }
 
 bool g2HealthApplyCommonDaily(const R1CommonDailyResult& result) {
   if (!validateCommonDaily(result)) return false;
   HistoryLock lock(false);
   if (!lock.locked() ||
-      !pendingKeyAcceptLocked(static_cast<uint8_t>(result.profile),
+      !pendingKeyAcceptLocked(historyLayoutForProfile(result.profile),
                               result.dayStart, result.timezoneMinutes)) return false;
   const G2HealthMetric graphMetric = result.metric == R1_DAILY_METRIC_HEART_RATE
       ? HEALTH_METRIC_HR : HEALTH_METRIC_SPO2;
   if (result.metric == R1_DAILY_METRIC_HEART_RATE) {
-    sPendingHistory.heartRate = result;
+    if (sPendingHistory.heartRatePending) {
+      mergePendingHourlyResult(sPendingHistory.heartRate, result,
+                               R1_COMMON_DAILY_MAX_RECORDS);
+    } else {
+      sPendingHistory.heartRate = result;
+    }
     sPendingHistory.heartRatePending = true;
   } else {
-    sPendingHistory.spo2 = result;
+    if (sPendingHistory.spo2Pending) {
+      mergePendingHourlyResult(sPendingHistory.spo2, result,
+                               R1_COMMON_DAILY_MAX_RECORDS);
+    } else {
+      sPendingHistory.spo2 = result;
+    }
     sPendingHistory.spo2Pending = true;
   }
   sTypedTrendSuppressMask.fetch_or(
@@ -508,9 +727,14 @@ bool g2HealthApplyHrvDaily(const R1HrvDailyResult& result) {
   if (!validateHrvDaily(result)) return false;
   HistoryLock lock(false);
   if (!lock.locked() ||
-      !pendingKeyAcceptLocked(static_cast<uint8_t>(result.profile),
+      !pendingKeyAcceptLocked(historyLayoutForProfile(result.profile),
                               result.dayStart, result.timezoneMinutes)) return false;
-  sPendingHistory.hrv = result;
+  if (sPendingHistory.hrvPending) {
+    mergePendingHourlyResult(sPendingHistory.hrv, result,
+                             R1_HRV_DAILY_MAX_RECORDS);
+  } else {
+    sPendingHistory.hrv = result;
+  }
   sPendingHistory.hrvPending = true;
   sTypedTrendSuppressMask.fetch_or(
       static_cast<uint8_t>(1u << static_cast<uint8_t>(HEALTH_METRIC_HRV)),
@@ -522,9 +746,13 @@ bool g2HealthApplyActivityDaily(const R1ActivityDailyResult& result) {
   if (!validateActivityDaily(result)) return false;
   HistoryLock lock(false);
   if (!lock.locked() ||
-      !pendingKeyAcceptLocked(static_cast<uint8_t>(result.profile),
+      !pendingKeyAcceptLocked(historyLayoutForProfile(result.profile),
                               result.dayStart, result.timezoneMinutes)) return false;
-  sPendingHistory.activity = result;
+  if (sPendingHistory.activityPending) {
+    mergePendingActivityResult(sPendingHistory.activity, result);
+  } else {
+    sPendingHistory.activity = result;
+  }
   sPendingHistory.activityPending = true;
   return true;
 }
@@ -532,12 +760,15 @@ bool g2HealthApplyActivityDaily(const R1ActivityDailyResult& result) {
 static void applyCommonToDayLocked(const R1CommonDailyResult& result) {
   R1HealthHourlyMetricDay* metric = result.metric == R1_DAILY_METRIC_HEART_RATE
       ? &sHistoryDay.heartRate : &sHistoryDay.spo2;
-  memset(metric, 0, sizeof(*metric));
   metric->sourceSerial = result.sourceSerial;
   metric->sourceCrc32 = result.sourceCrc32;
-  metric->latestValid = result.latestTimestamp != 0;
-  metric->latestTimestamp = result.latestTimestamp;
-  metric->latestValue = result.latestValue;
+  if (result.latestTimestamp != 0 &&
+      (!metric->latestValid ||
+       result.latestTimestamp >= metric->latestTimestamp)) {
+    metric->latestValid = true;
+    metric->latestTimestamp = result.latestTimestamp;
+    metric->latestValue = result.latestValue;
+  }
   for (uint8_t i = 0; i < result.count; ++i) {
     const R1CommonDailyRecord& src = result.records[i];
     R1HealthHourlyBucket& dst = metric->slots[src.hourSlot];
@@ -547,19 +778,24 @@ static void applyCommonToDayLocked(const R1CommonDailyResult& result) {
     dst.minimum = src.minimum;
     dst.maximum = src.maximum;
     dst.bucketEpoch = src.bucketEpoch;
-    ++metric->count;
+  }
+  metric->count = 0;
+  for (size_t i = 0; i < R1_HEALTH_HOURLY_SLOTS; ++i) {
+    if (metric->slots[i].valid) ++metric->count;
   }
   metric->have = metric->count != 0;
 }
 
 static void applyHrvToDayLocked(const R1HrvDailyResult& result) {
   R1HealthHourlyMetricDay& metric = sHistoryDay.hrv;
-  memset(&metric, 0, sizeof(metric));
   metric.sourceSerial = result.sourceSerial;
   metric.sourceCrc32 = result.sourceCrc32;
-  metric.latestValid = result.latestTimestamp != 0;
-  metric.latestTimestamp = result.latestTimestamp;
-  metric.latestValue = result.latestValue;
+  if (result.latestTimestamp != 0 &&
+      (!metric.latestValid || result.latestTimestamp >= metric.latestTimestamp)) {
+    metric.latestValid = true;
+    metric.latestTimestamp = result.latestTimestamp;
+    metric.latestValue = result.latestValue;
+  }
   for (uint8_t i = 0; i < result.count; ++i) {
     const R1HrvDailyRecord& src = result.records[i];
     R1HealthHourlyBucket& dst = metric.slots[src.hourSlot];
@@ -569,7 +805,10 @@ static void applyHrvToDayLocked(const R1HrvDailyResult& result) {
     dst.minimum = src.minimum;
     dst.maximum = src.maximum;
     dst.bucketEpoch = src.bucketEpoch;
-    ++metric.count;
+  }
+  metric.count = 0;
+  for (size_t i = 0; i < R1_HEALTH_HOURLY_SLOTS; ++i) {
+    if (metric.slots[i].valid) ++metric.count;
   }
   metric.have = metric.count != 0;
 }
@@ -578,11 +817,12 @@ static void applyActivityToDayLocked(const R1ActivityDailyResult& result) {
   R1HealthActivityDay& activity = sHistoryDay.activity;
   activity.sourceSerial = result.sourceSerial;
   activity.sourceCrc32 = result.sourceCrc32;
-  // The ring answers an activity-daily query with one logical message covering
-  // the whole day — small days fit a single notification, larger ones arrive
-  // fragmented and are stitched by the transport's reassembler. Either way the
-  // parse+CRC-validated result is the complete day (not one page of several),
-  // so it is honest to mark it verified.
+  // The ring answers an activity-daily query with one logical message — small
+  // ones fit a single notification, larger ones arrive fragmented and are
+  // stitched by the transport's reassembler. What it contains is a sparse delta
+  // (slots with data that have not yet been acknowledged), never a zero-padded
+  // 144-slot day, so "verified" here means the message was received in full and
+  // CRC-checked — it says nothing about slot coverage (see `count`).
   activity.fullDayVerified = true;
   for (uint8_t i = 0; i < result.count; ++i) {
     const R1ActivityDailyRecord& src = result.records[i];
@@ -655,6 +895,32 @@ static void clearTypedTrends() {
   memset(&sTrendMetaSpo2, 0, sizeof(sTrendMetaSpo2));
 }
 
+void g2HealthResetLiveTelemetry(void) {
+  SeriesLock lock;
+  if (!lock.locked()) return;
+  seriesClear(&sHr);
+  seriesClear(&sHrv);
+  seriesClear(&sSpo2);
+  seriesClear(&sTemp);
+  seriesClear(&sBat);
+  sPollUi = POLL_UI_IDLE;
+  sPollUiMs = 0;
+}
+
+// Caller holds sHistoryMutex and has already installed a different current
+// peer in sHistoryPeerCustody. Persistent I/O remains deferred to the main
+// loop; this only resets the RAM model bound to the former identity.
+static void historyResetForPeerSwitchLocked() {
+  r1HealthHistoryDayClear(sHistoryDay);
+  memset(&sPendingHistory, 0, sizeof(sPendingHistory));
+  sHistoryLoadedExact = false;
+  sHistoryUiFetchState = R1_HISTORY_FETCH_IDLE;
+  sHistoryUiFetchError = 0;
+  sHistoryDirty.store(false, std::memory_order_release);
+  sHistoryDirtyGeneration.store(0, std::memory_order_release);
+  markHistoryChangedLocked();
+}
+
 void g2HealthSetHistoryPeerId(const char* canonicalMac) {
   if (!historyPeerIdValid(canonicalMac)) return;
   char normalized[18];
@@ -667,23 +933,11 @@ void g2HealthSetHistoryPeerId(const char* canonicalMac) {
     HistoryLock lock(false);
     if (!lock.locked()) return;
     ensureHistoryInitializedLocked();
-    if (strcmp(sHistoryPeerId, normalized) == 0) return;
-    if (sHistoryDirty.load(std::memory_order_acquire)) {
-      memcpy(sDeferredHistoryPeerId, normalized, sizeof(normalized));
-      sHistoryPeerSwitchPending = true;
-      return;
-    }
-    memcpy(sHistoryPeerId, normalized, sizeof(normalized));
-    memset(sDeferredHistoryPeerId, 0, sizeof(sDeferredHistoryPeerId));
-    sHistoryPeerSwitchPending = false;
-    r1HealthHistoryDayClear(sHistoryDay);
-    memset(&sPendingHistory, 0, sizeof(sPendingHistory));
-    sHistoryLoadedExact = false;
-    sHistoryUiFetchState = R1_HISTORY_FETCH_IDLE;
-    sHistoryUiFetchError = 0;
-    sHistoryDirty.store(false, std::memory_order_release);
-    sHistoryDirtyGeneration.store(0, std::memory_order_release);
-    markHistoryChangedLocked();
+    const HistoryPeerRequestResult result = historyRequestPeerLocked(
+        sHistoryPeerCustody, normalized,
+        sHistoryDirty.load(std::memory_order_acquire));
+    if (result != HistoryPeerRequestResult::SWITCHED) return;
+    historyResetForPeerSwitchLocked();
     changed = true;
   }
   if (changed) clearTypedTrends();
@@ -745,18 +999,18 @@ void g2HealthHistorySetSleepState(R1HealthSleepState state) {
   sPendingHistory.sleepState = state;
 }
 
-static bool historyKeyMatchesLocked(uint8_t profile, uint32_t dayStart,
+static bool historyKeyMatchesLocked(uint8_t layout, uint32_t dayStart,
                                     int16_t timezoneMinutes) {
   return sHistoryLoadedExact &&
-      strcmp(sHistoryDay.peerId, sHistoryPeerId) == 0 &&
-      sHistoryDay.protocolProfile == profile &&
+      strcmp(sHistoryDay.peerId, sHistoryPeerCustody.current) == 0 &&
+      sHistoryDay.protocolProfile == layout &&
       sHistoryDay.dayStart == dayStart &&
       sHistoryDay.timezoneMinutes == timezoneMinutes;
 }
 
 static void processPendingHistoryMainTask() {
   char peer[18] = {};
-  uint8_t profile = 0;
+  uint8_t layout = R1_HISTORY_LAYOUT_UNKNOWN;
   uint32_t dayStart = 0;
   int16_t timezoneMinutes = 0;
   bool needLoad = false;
@@ -766,11 +1020,11 @@ static void processPendingHistoryMainTask() {
     const uint32_t now = millis();
     if (sPendingHistory.loadRetryAtMs != 0 &&
         (int32_t)(now - sPendingHistory.loadRetryAtMs) < 0) return;
-    memcpy(peer, sHistoryPeerId, sizeof(peer));
-    profile = sPendingHistory.profile;
+    memcpy(peer, sHistoryPeerCustody.current, sizeof(peer));
+    layout = sPendingHistory.layout;
     dayStart = sPendingHistory.dayStart;
     timezoneMinutes = sPendingHistory.timezoneMinutes;
-    needLoad = !historyKeyMatchesLocked(profile, dayStart, timezoneMinutes);
+    needLoad = !historyKeyMatchesLocked(layout, dayStart, timezoneMinutes);
   }
 
   bool installed = false;
@@ -780,13 +1034,13 @@ static void processPendingHistoryMainTask() {
     if (loadError == R1_HISTORY_STORE_NOT_FOUND) {
       r1HealthHistoryDayClear(sHistoryWorkDay);
       memcpy(sHistoryWorkDay.peerId, peer, sizeof(sHistoryWorkDay.peerId));
-      sHistoryWorkDay.protocolProfile = profile;
+      sHistoryWorkDay.protocolProfile = layout;
       sHistoryWorkDay.dayStart = dayStart;
       sHistoryWorkDay.timezoneMinutes = timezoneMinutes;
     } else if (loadError != R1_HISTORY_STORE_OK) {
       HistoryLock lock(false);
       if (lock.locked() && sPendingHistory.keyKnown &&
-          sPendingHistory.profile == profile &&
+          sPendingHistory.layout == layout &&
           sPendingHistory.dayStart == dayStart &&
           sPendingHistory.timezoneMinutes == timezoneMinutes) {
         sPendingHistory.loadError = loadError;
@@ -802,10 +1056,10 @@ static void processPendingHistoryMainTask() {
     clearTypedTrends();
     HistoryLock lock(false);
     if (!lock.locked() || !sPendingHistory.keyKnown ||
-        sPendingHistory.profile != profile ||
+        sPendingHistory.layout != layout ||
         sPendingHistory.dayStart != dayStart ||
         sPendingHistory.timezoneMinutes != timezoneMinutes ||
-        strcmp(sHistoryPeerId, peer) != 0) return;
+        strcmp(sHistoryPeerCustody.current, peer) != 0) return;
     memcpy(&sHistoryDay, &sHistoryWorkDay, sizeof(sHistoryDay));
     sHistoryLoadedExact = true;
     sPendingHistory.loadError = R1_HISTORY_STORE_OK;
@@ -818,7 +1072,7 @@ static void processPendingHistoryMainTask() {
   bool terminalApplied = false;
   {
     HistoryLock lock(false);
-    if (!lock.locked() || !historyKeyMatchesLocked(profile, dayStart,
+    if (!lock.locked() || !historyKeyMatchesLocked(layout, dayStart,
                                                     timezoneMinutes)) return;
     if (sPendingHistory.heartRatePending) {
       applyCommonToDayLocked(sPendingHistory.heartRate);
@@ -851,9 +1105,10 @@ static void processPendingHistoryMainTask() {
           sHistoryDay.spo2.have || sHistoryDay.activity.have ||
           sHistoryDay.sleepState != R1_HISTORY_SLEEP_UNKNOWN;
       const uint32_t now = static_cast<uint32_t>(time(nullptr));
-      // Activity paging is not proven. A sweep is complete only when activity
-      // itself is present and explicitly full-day verified; absent activity is
-      // partial, never complete.
+      // A sweep is complete only when activity itself is present and its
+      // message was received in full and CRC-verified; absent activity is
+      // partial, never complete. (Coverage of the day's slots is separate —
+      // the ring sends a sparse delta, see applyActivityToDayLocked.)
       if (sPendingHistory.terminalSuccessful && sHistoryDay.activity.have &&
           sHistoryDay.activity.fullDayVerified) {
         sHistoryDay.fetchState = R1_HISTORY_COMPLETE;
@@ -944,22 +1199,32 @@ void g2HealthHistoryCommitTick(void) {
   r1HealthHistoryStoreTick();
   R1HealthHistoryStoreStatus store{};
   r1HealthHistoryStoreGetStatus(store);
-  if (store.committedGeneration != 0 &&
-      store.committedGeneration ==
-          sHistoryDirtyGeneration.load(std::memory_order_acquire)) {
-    sHistoryDirty.store(false, std::memory_order_release);
-  }
-  char deferredPeer[18] = {};
+  bool peerChanged = false;
   {
     HistoryLock lock(false);
-    if (lock.locked() && sHistoryPeerSwitchPending &&
-        !sHistoryDirty.load(std::memory_order_acquire)) {
-      memcpy(deferredPeer, sDeferredHistoryPeerId, sizeof(deferredPeer));
-      sHistoryPeerSwitchPending = false;
-      memset(sDeferredHistoryPeerId, 0, sizeof(sDeferredHistoryPeerId));
+    if (lock.locked()) {
+      // Terminal ingress publishes dirtyGeneration+dirty while holding this
+      // same mutex. Revalidate and clear the committed generation here, then
+      // decide peer custody without a D2/true -> false lost-update window.
+      const uint32_t currentDirtyGeneration =
+          sHistoryDirtyGeneration.load(std::memory_order_relaxed);
+      if (historyCommitMatchesDirtyGeneration(
+            sHistoryDirty.load(std::memory_order_relaxed),
+            currentDirtyGeneration, store.committedGeneration)) {
+        sHistoryDirty.store(false, std::memory_order_release);
+      }
+    }
+    if (lock.locked() && historyApplyRequestedPeerLocked(
+          sHistoryPeerCustody,
+          sHistoryDirty.load(std::memory_order_relaxed))) {
+      // Selection and installation stay inside this one HistoryLock scope.
+      // A reconnect request cannot slip between extraction and reset, then be
+      // overwritten by an older deferred identity after the mutex is released.
+      historyResetForPeerSwitchLocked();
+      peerChanged = true;
     }
   }
-  if (historyPeerIdValid(deferredPeer)) g2HealthSetHistoryPeerId(deferredPeer);
+  if (peerChanged) clearTypedTrends();
   // Merge/load incoming pages only after any older terminal generation has
   // been staged and acknowledged, so a new sweep cannot erase retry state.
   if (!sHistoryDirty.load(std::memory_order_acquire))
@@ -1020,6 +1285,19 @@ const char* const* g2HealthMenuRows(size_t* count) {
     "Poll Now",
     "Health Logging",
   };
+  static const char* const mainRowsNoPoll[] = {
+    "<- Apps",
+    "Overview",
+    "Activity",
+    "Trends",
+    "Heart Rate",
+    "HRV",
+    "SpO2",
+    "Temperature",
+    "Battery",
+    "Poll unsupported",
+    "Health Logging",
+  };
   // Rows carry no day claim — the ring's daily window is only "today" when
   // its clock is real; the text panel shows the honest label (date / boot N).
   static const char* const trendRows[] = {
@@ -1034,7 +1312,7 @@ const char* const* g2HealthMenuRows(size_t* count) {
     return trendRows;
   }
   if (count) *count = sizeof(mainRows) / sizeof(mainRows[0]);
-  return mainRows;
+  return g2RingHealthPageRefreshSupported() ? mainRows : mainRowsNoPoll;
 }
 
 uint32_t g2HealthMenuGeneration(void) { return sMenuGen; }
@@ -1054,10 +1332,15 @@ void g2HealthOpen(void) {
   sNav = HEALTH_NAV_MAIN;
   sSelected = HEALTH_METRIC_OVERVIEW;
   bumpMenuGen();
-  sPollRequest = true;
-  sHistoryRefreshRequest = false;
+  // Even 2.2.9 refreshes Health with DAILY reads. Page entry may use the
+  // normal freshness-throttled sweep; only explicit Poll Now forces it.
+  sPollRequest = false;
+  sHistoryRefreshRequest = true;
   sHistoryRefreshForce = false;
+  sPollUi = POLL_UI_IDLE;
+  sPollUiMs = 0;
   sLastSyncMs = 0;
+  sRefreshSupportedLast = g2RingHealthPageRefreshSupported();
   g2HealthClearGraphPush();
   syncFromTelemetry();
   if (!sLoggedHint && !healthLoggingIsActive()) {
@@ -1068,6 +1351,11 @@ void g2HealthOpen(void) {
 
 void g2HealthTick(void) {
   const uint32_t now = millis();
+  const bool refreshSupported = g2RingHealthPageRefreshSupported();
+  if (refreshSupported != sRefreshSupportedLast) {
+    sRefreshSupportedLast = refreshSupported;
+    bumpMenuGen();
+  }
   if (sLastSyncMs == 0 || (long)(now - sLastSyncMs) >= 1000) {
     syncFromTelemetry();
     sLastSyncMs = now;
@@ -1178,12 +1466,15 @@ void g2HealthAction(uint32_t rowIdx) {
       g2HealthArmGraphPush(400);  // no daily for battery
       break;
     case 9:
+      if (!g2RingHealthPageRefreshSupported()) {
+        g2HealthNotePollUnsupported();
+        DEBUG_RING_HEALTHF(
+            "[HEALTH] Poll Now unsupported on active profile; no request armed");
+        break;
+      }
       sPollRequest = true;
-      // Poll Now is the user's explicit "refresh what I'm looking at". The live
-      // point-poll only feeds Overview/vitals; also arm the typed-history sweep
-      // so Poll Now can populate the Activity screen (and refresh trend graphs)
-      // rather than silently doing nothing on those views.
-      requestHistoryRefresh(false);
+      // The worker turns explicit Poll Now into a forced exact-profile DAILY
+      // sweep and deviceStatus read. Do not also arm the normal throttled lane.
       DEBUG_RING_HEALTHF("[HEALTH] Poll Now requested");
       break;
     case 10: {
@@ -1220,20 +1511,43 @@ void g2HealthNotePollStarted(void) {
 
 void g2HealthNotePollFinished(void) {
   sPollUi = POLL_UI_DONE;
-  // Refresh the sparkline once after a poll burst — not on every live sample.
+  // Refresh the sparkline once after the composite refresh, not on every
+  // individual DAILY/status response.
   if (sNav == HEALTH_NAV_MAIN && sSelected != HEALTH_METRIC_OVERVIEW) {
     g2HealthArmGraphPush(300);
   }
   sPollUiMs = millis();
 }
 
-// Status line under vitals / metric readout. Ages "Updated" back to Track.
+void g2HealthNotePollFailed(bool partial) {
+  sPollUi = partial ? POLL_UI_PARTIAL : POLL_UI_FAILED;
+  if (partial && sNav == HEALTH_NAV_MAIN &&
+      sSelected != HEALTH_METRIC_OVERVIEW) {
+    // A failed sweep can still have delivered earlier metrics.
+    g2HealthArmGraphPush(300);
+  }
+  sPollUiMs = millis();
+}
+
+void g2HealthNotePollUnsupported(void) {
+  sPollUi = POLL_UI_UNSUPPORTED;
+  sPollUiMs = millis();
+}
+
+// Status line under vitals / metric readout. A successful refresh can return
+// the same recorded sample, so do not claim the value itself was updated.
 static const char* healthPollStatusLine(const char* fallback) {
   const uint32_t now = millis();
-  if (sPollUi == POLL_UI_ACTIVE) return "Polling...";
-  if (sPollUi == POLL_UI_DONE) {
-    if ((long)(now - sPollUiMs) < 4000) return "Updated";
+  if (sPollUi == POLL_UI_ACTIVE) return "Refreshing...";
+  if (sPollUi == POLL_UI_DONE || sPollUi == POLL_UI_PARTIAL ||
+      sPollUi == POLL_UI_FAILED || sPollUi == POLL_UI_UNSUPPORTED) {
+    const char* status = sPollUi == POLL_UI_DONE ? "Refreshed" :
+        sPollUi == POLL_UI_PARTIAL ? "Refresh incomplete" :
+        sPollUi == POLL_UI_FAILED ? "Refresh failed" :
+        "Refresh unsupported";
+    if ((long)(now - sPollUiMs) < 4000) return status;
     sPollUi = POLL_UI_IDLE;
+    return fallback ? fallback : "";
   }
   return fallback ? fallback : "";
 }
@@ -1380,10 +1694,10 @@ static inline uint32_t sampleAgeMs(const HealthSeries* s, size_t start, size_t i
   return (age > kAgePlausibleMs) ? 0u : age;
 }
 
-// Plot span snaps UP to a rung, so appending a sample doesn't re-space what is
-// already drawn — the picture only rescales when the trail outgrows its rung.
-// Roughly doubling on purpose: a finer ladder rescales more often (which is the
-// motion this removes) and each step compresses the trace by at most 2x.
+// Plot span snaps UP to a rung, so the window — and with it the axis labels —
+// reframes only when the trail outgrows its rung, and labels stay round
+// values. Roughly doubling on purpose: a finer ladder reframes more often and
+// each step compresses the trace by at most 2x.
 static const uint32_t kSpanRungsMs[] = {
      30u*1000u,    60u*1000u,   120u*1000u,   240u*1000u,   480u*1000u,
     900u*1000u,  1800u*1000u,  3600u*1000u,  7200u*1000u, 14400u*1000u,
@@ -1431,10 +1745,13 @@ static_assert(HEALTH_HIST_CAP <= 255, "drawSparkline draw-order index is uint8_t
 
 static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
                           int16_t softMin, int16_t softMax, int16_t minSpan,
-                          int shade, int16_t* usedMin, int16_t* usedMax,
-                          uint32_t* outOldestMs, uint32_t* outWindowMs) {
+                          int shade, bool anchorNewest,
+                          int16_t* usedMin, int16_t* usedMax,
+                          uint32_t* outNewestMs, uint32_t* outOldestMs,
+                          uint32_t* outWindowMs) {
   // Out-params default to "no time domain" so every early return leaves the
   // caller's X axis suppressed rather than labelling stale values.
+  if (outNewestMs) *outNewestMs = 0;
   if (outOldestMs) *outOldestMs = 0;
   if (outWindowMs) *outWindowMs = 0;
   if (!s || s->count < 2 || w < 4 || h < 4) return;
@@ -1475,10 +1792,14 @@ static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
     order[j] = v;
   }
 
-  // X is elapsed time from the oldest sample over a rung-snapped window, so
-  // the mapping is independent of the render instant: an unchanged buffer
-  // reproduces the picture exactly, and an append inside the current rung
-  // moves nothing.
+  // X is offset inside a rung-snapped window — a pure function of buffer +
+  // window, so an unchanged buffer reproduces the picture exactly regardless
+  // of the render instant. anchorNewest (live views) pins the time-newest
+  // sample to the RIGHT edge — window [newest − rung, newest] — so the trace
+  // ends at the plot edge and rung-padding slack sits on the left, where it
+  // reads as "no data that far back". The oldest-at-left anchor
+  // ([oldest, oldest + rung]) remains for Trends, whose axis labels the ring
+  // day from the first bucket — slack must stay on the right there.
   const uint32_t ageMax = sampleAgeMs(s, start, order[0], nowMs);
   const uint32_t ageMin = sampleAgeMs(s, start, order[n - 1], nowMs);
   const uint32_t spanMs = ageMax - ageMin;
@@ -1486,8 +1807,10 @@ static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
   // no domain at all — space those evenly so the trail is still legible.
   const bool uniform      = (spanMs == 0);
   const uint32_t windowMs = uniform ? 1u : seriesSpanWindowMs(spanMs);  // 1 = unused
-  // For the X axis: the time-oldest sample's raw stamp (the window's left
-  // edge) and the rung. Window 0 = uniform spacing, nothing truthful to label.
+  // For the X axis: both edge samples' raw stamps (the anchored one is the
+  // labelled window edge; the oldest also gates the backfill taint) and the
+  // rung. Window 0 = uniform spacing, nothing truthful to label.
+  if (outNewestMs) *outNewestMs = seriesAt(s, start, order[n - 1]).ms;
   if (outOldestMs) *outOldestMs = seriesAt(s, start, order[0]).ms;
   if (outWindowMs) *outWindowMs = uniform ? 0u : windowMs;
   const int plotW = w - 3;
@@ -1499,6 +1822,9 @@ static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
     int px_;
     if (uniform) {
       px_ = x + 1 + (int)((int64_t)plotW * (int)k / (int)(n - 1));
+    } else if (anchorNewest) {
+      const uint32_t back = sampleAgeMs(s, start, i, nowMs) - ageMin;
+      px_ = x + 1 + plotW - (int)((uint64_t)(uint32_t)plotW * back / windowMs);
     } else {
       const uint32_t off = ageMax - sampleAgeMs(s, start, i, nowMs);
       px_ = x + 1 + (int)((uint64_t)(uint32_t)plotW * off / windowMs);
@@ -1747,12 +2073,13 @@ static void fmtWallLabel(char* out, size_t cap, int64_t epochMs, uint32_t window
     snprintf(out, cap, "%d:%02d", tm.tm_hour, tm.tm_min);
 }
 
-// Labels the plot WINDOW (left edge = oldest sample, right edge = oldest +
-// rung), never the trace tip: all three tick positions are constants, and the
-// text changes only when the data genuinely reframes (eviction, rung crossing,
-// backfill) — the same repaint-moves-nothing contract as the trace itself.
-// Every mode is a pure function of buffer + window, never of the render
-// instant:
+// Labels the plot WINDOW, never the trace tip: all three tick positions are
+// constants, and the text changes only when the data genuinely reframes
+// (eviction, rung crossing, backfill) — the same repaint-stability contract
+// as the trace itself. Live views are right-anchored (window =
+// [newest − rung, newest]; anchorMs = the time-newest sample's stamp);
+// Trends stays left-anchored on its day window and ignores anchorMs. Every
+// mode is a pure function of buffer + window, never of the render instant:
 //
 //  - Trends (trendMeta != null): hours into the ring's UTC day, from the meta
 //    window. Trend .ms is FETCH-anchored (backfillSampleMs pins the newest
@@ -1760,15 +2087,18 @@ static void fmtWallLabel(char* out, size_t cap, int64_t epochMs, uint32_t window
 //    the fetch time; the meta is the only honest source. Skipped when the
 //    window fails backfill's own honoured-window gate — the trace was laid on
 //    the nominal 60 s ladder and day labels would misplace it.
-//  - Live, synced host, window ≥ 5 min: local wall clock. epochMillis() and
-//    millis() advance in lockstep, so epochNow − age is repaint-stable; it
-//    steps only when the clock itself steps (NTP / ring-clock custody), which
-//    is exactly when the frame SHOULD reframe.
-//  - Otherwise elapsed-from-start ("0 / 2h / 4h"): dark host, or a window too
-//    small for distinct H:MM marks. Anchored to the window start, not "now",
-//    so even a dark-host repaint stays pixel-identical.
+//  - Live, synced host, window ≥ 5 min: local wall clock, the window ending
+//    at the newest sample's real receive time. epochMillis() and millis()
+//    advance in lockstep, so the conversion is repaint-stable; it steps only
+//    when the clock itself steps (NTP / ring-clock custody), which is exactly
+//    when the frame SHOULD reframe.
+//  - Otherwise ago-form ("-2h / -1h / now"): dark host, or a window too small
+//    for distinct H:MM marks. "now" names the window's right edge — the
+//    time-newest sample, the freshest thing this push can show. The label
+//    text is still buffer-pure, so even a dark-host repaint stays
+//    pixel-identical; the tip's age (if any) lives in the text pane.
 static void drawTimeAxis(int plotX, int plotW, int tickY, int labelY,
-                         uint32_t oldestMs, uint32_t windowMs,
+                         uint32_t anchorMs, uint32_t windowMs,
                          bool syntheticMs, const TrendMeta* trendMeta) {
   if (windowMs == 0) return;  // uniform spacing — no time domain to label
 
@@ -1793,16 +2123,17 @@ static void drawTimeAxis(int plotX, int plotW, int tickY, int labelY,
     // Millis-wrap caveat: a stamp from before a 49.7-day millis() wrap
     // converts 2^32 ms early; exposure is bounded by kAgePlausibleMs and
     // accepted, like the age clamp itself.
-    const int64_t leftEpochMs = wallOffsetMs() + (int64_t)oldestMs;
+    const int64_t rightEpochMs = wallOffsetMs() + (int64_t)anchorMs;
+    const int64_t leftEpochMs = rightEpochMs - (int64_t)windowMs;
     fmtWallLabel(left, sizeof(left), leftEpochMs, windowMs);
     fmtWallLabel(mid, sizeof(mid), leftEpochMs + (int64_t)(windowMs / 2u), windowMs);
-    fmtWallLabel(right, sizeof(right), leftEpochMs + (int64_t)windowMs, windowMs);
+    fmtWallLabel(right, sizeof(right), rightEpochMs, windowMs);
     // The 24 h rung is the one H:MM window whose endpoints print identical
     // text (exactly a day apart). Append the date to the right label so
-    // "7:41 … 7:41" reads as next-day, not as a broken axis. Still a pure
-    // function of leftEpochMs + windowMs — repaint-stable.
+    // "7:41 … 7:41" reads as day-apart, not as a broken axis. Still a pure
+    // function of anchorMs + windowMs — repaint-stable.
     if (windowMs >= 24u * 3600u * 1000u && windowMs < 48u * 3600u * 1000u) {
-      const time_t rt = (time_t)((leftEpochMs + (int64_t)windowMs) / 1000);
+      const time_t rt = (time_t)(rightEpochMs / 1000);
       struct tm rtm;
       localtime_r(&rt, &rtm);
       const size_t len = strlen(right);
@@ -1810,9 +2141,13 @@ static void drawTimeAxis(int plotX, int plotW, int tickY, int labelY,
                rtm.tm_mon + 1, rtm.tm_mday);
     }
   } else {
-    snprintf(left, sizeof(left), "0");
-    fmtElapsedLabel(mid, sizeof(mid), windowMs / 2u);
-    fmtElapsedLabel(right, sizeof(right), windowMs);
+    // Ago-form: distance behind the newest sample, which sits AT the right
+    // edge — so "now" is the one buffer-pure name for that tick.
+    left[0] = '-';
+    fmtElapsedLabel(left + 1, sizeof(left) - 1, windowMs);
+    mid[0] = '-';
+    fmtElapsedLabel(mid + 1, sizeof(mid) - 1, windowMs / 2u);
+    snprintf(right, sizeof(right), "now");
   }
 
   // Tick stubs under the bottom border, mirroring the Y ticks' 6/5/6 shades.
@@ -1833,25 +2168,27 @@ static void drawTimeAxis(int plotX, int plotW, int tickY, int labelY,
 
 // Graph-only tile — title/value live in the native text pane above.
 // Y axis uses each metric's auto-scaled bounds (HR ≠ battery 0–100).
-static void composeMetricGraph(const HealthSeries* s,
+static void composeMetricGraph(const HealthSeries* s, bool ringConnected,
                                int16_t softMin, int16_t softMax, int16_t minSpan,
                                bool tenthsAxis = false,
-                               const char* emptyHint = "Poll Now",
+                               const char* emptyHint = nullptr,
                                const TrendMeta* trendMeta = nullptr) {
   clearGrid(0);
-  G2RingTelemetry t;
-  g2RingGetTelemetry(t);
   // Empty / offline copy uses the same 2× glyphs as the Y-axis numbers
   // (3×5 → 6×10). Unscaled 1× text was hard to read on the lens.
   constexpr int kEmptyScale = 2;
   constexpr int kEmptyH     = 5 * kEmptyScale;
   constexpr int kEmptyGap   = 6;
-  if (!t.connected) {
+  if (!ringConnected) {
     drawTextScaled("offline", 8, HEALTH_TILE_H / 2 - kEmptyH / 2, 14, kEmptyScale);
     return;
   }
   if (!s || s->count < 2) {
-    const char* hint = emptyHint ? emptyHint : "Poll Now";
+    const char* hint = emptyHint
+        ? emptyHint
+        : (g2RingHealthPageRefreshSupported()
+               ? "Poll Now"
+               : "Poll unsupported");
     const int y1 = HEALTH_TILE_H / 2 - kEmptyH - kEmptyGap / 2;
     const int y2 = HEALTH_TILE_H / 2 + kEmptyGap / 2;
     drawTextScaled("no samples", 8, y1, 14, kEmptyScale);
@@ -1868,18 +2205,23 @@ static void composeMetricGraph(const HealthSeries* s,
   constexpr int kPlotH  = HEALTH_TILE_H - 22;  // was -8; 14 px ceded to X axis
   constexpr int kLabelH = 10;  // 5×2
 
+  // Live views anchor the newest sample to the right edge (rung slack lands
+  // on the left as "no data that far back"); Trends keeps the oldest-first
+  // day window its axis labels describe.
+  const bool anchorNewest = (trendMeta == nullptr);
   int16_t usedMin = softMin, usedMax = softMax;
-  uint32_t oldestMs = 0, windowMs = 0;
+  uint32_t newestMs = 0, oldestMs = 0, windowMs = 0;
   drawSparkline(s, kPlotX, kPlotY, kPlotW, kPlotH,
-                softMin, softMax, minSpan, 13, &usedMin, &usedMax,
-                &oldestMs, &windowMs);
+                softMin, softMax, minSpan, 13, anchorNewest,
+                &usedMin, &usedMax, &newestMs, &oldestMs, &windowMs);
 
-  // Wall labels are only honest when the window's left edge is a real receive
+  // Wall labels are only honest when every plotted position is a real receive
   // stamp. While the time-oldest sample doesn't post-date the last backfill's
-  // fetch instant the buffer still holds synthetic (or pre-backfill) stamps;
-  // once those evict, the signed diff goes positive and wall labels return on
-  // their own. ±24.8 d modular horizon — same accepted class as
-  // kAgePlausibleMs.
+  // fetch instant the buffer still holds synthetic (or pre-backfill) stamps —
+  // sample positions inside the window are then payload-claimed, and wall
+  // text would confidently timestamp them; once those evict, the signed diff
+  // goes positive and wall labels return on their own. ±24.8 d modular
+  // horizon — same accepted class as kAgePlausibleMs.
   const bool syntheticMs =
       s->hasBackfill && (int32_t)(oldestMs - s->backfillAnchorMs) <= 0;
 
@@ -1895,7 +2237,7 @@ static void composeMetricGraph(const HealthSeries* s,
   drawHLine(kPlotX, kPlotX + 3, kPlotY + kPlotH - 1, 6);
 
   drawTimeAxis(kPlotX, kPlotW, kPlotY + kPlotH, kPlotY + kPlotH + 5,
-               oldestMs, windowMs, syntheticMs, trendMeta);
+               newestMs, windowMs, syntheticMs, trendMeta);
 }
 
 static void metricParams(G2HealthMetric m,
@@ -2073,10 +2415,14 @@ static void g2HealthBuildActivityText(char* out, size_t cap) {
                "Device clock not set\n"
                "Set time to log a day");
     } else {
+      const char* refreshHint = g2RingHealthPageRefreshSupported()
+                                    ? "Tap Poll Now"
+                                    : "Poll unsupported";
       snprintf(out, cap,
                "Activity\n"
                "No activity yet today\n"
-               "Tap Poll Now");
+               "%s",
+               refreshHint);
     }
     return;
   }
@@ -2103,7 +2449,7 @@ static void g2HealthBuildActivityText(char* out, size_t cap) {
            static_cast<unsigned long>(summary.restingKcal),
            static_cast<unsigned long>(summary.totalKcal),
            static_cast<unsigned>(summary.bucketCount),
-           summary.fullDayVerified ? "Full day verified" : "Partial - paging unverified");
+           summary.fullDayVerified ? "Message verified" : "Unverified");
 }
 
 void g2HealthBuildTextOnly(char* out, size_t cap) {
@@ -2224,17 +2570,23 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
   // Sized for healthTwoCol's compiler-visible worst case, as above.
   char line1[76], line2[104];
   //   Heart Rate              n=24
-  //   72 bpm · 3m         TRACK on / Polling... / Updated
+  //   72 bpm · 3m         TRACK on / Refreshing... / Refreshed
   healthTwoCol(line1, sizeof(line1), title, nbuf);
   healthTwoCol(line2, sizeof(line2), val, status);
   if (sampleCount >= 2) {
     snprintf(out, cap, "%s\n%s", line1, line2);
   } else {
-    snprintf(out, cap, "%s\n%s\nTap Poll Now", line1, line2);
+    const bool refreshSupported = g2RingHealthPageRefreshSupported();
+    const char* hint = sSelected == HEALTH_METRIC_TEMP && refreshSupported
+                           ? "Passive only"
+                           : (refreshSupported
+                                  ? "Tap Poll Now"
+                                  : "Poll unsupported");
+    snprintf(out, cap, "%s\n%s\n%s", line1, line2, hint);
   }
 }
 
-static void composeGrid(void) {
+static void composeGrid(bool ringConnected) {
   // Overview has no image; metric / Trends BMP is graph-only.
   if (sSelected == HEALTH_METRIC_OVERVIEW) {
     clearGrid(0);
@@ -2243,13 +2595,16 @@ static void composeGrid(void) {
   if (sNav == HEALTH_NAV_TRENDS) {
     switch (sSelected) {
       case HEALTH_METRIC_HR:
-        composeMetricGraph(&sTrendHr, 30, 200, 12, false, "Refresh", &sTrendMetaHr);
+        composeMetricGraph(&sTrendHr, ringConnected, 30, 200, 12, false,
+                           "Refresh", &sTrendMetaHr);
         break;
       case HEALTH_METRIC_HRV:
-        composeMetricGraph(&sTrendHrv, 0, 250, 10, false, "Refresh", &sTrendMetaHrv);
+        composeMetricGraph(&sTrendHrv, ringConnected, 0, 250, 10, false,
+                           "Refresh", &sTrendMetaHrv);
         break;
       case HEALTH_METRIC_SPO2:
-        composeMetricGraph(&sTrendSpo2, 70, 100, 4, false, "Refresh", &sTrendMetaSpo2);
+        composeMetricGraph(&sTrendSpo2, ringConnected, 70, 100, 4, false,
+                           "Refresh", &sTrendMetaSpo2);
         break;
       default:
         clearGrid(0);
@@ -2259,19 +2614,22 @@ static void composeGrid(void) {
   }
   switch (sSelected) {
     case HEALTH_METRIC_HR:
-      composeMetricGraph(&sHr, 30, 200, 12);
+      composeMetricGraph(&sHr, ringConnected, 30, 200, 12);
       break;
     case HEALTH_METRIC_HRV:
-      composeMetricGraph(&sHrv, 0, 250, 10);
+      composeMetricGraph(&sHrv, ringConnected, 0, 250, 10);
       break;
     case HEALTH_METRIC_SPO2:
-      composeMetricGraph(&sSpo2, 70, 100, 4);
+      composeMetricGraph(&sSpo2, ringConnected, 70, 100, 4);
       break;
     case HEALTH_METRIC_TEMP:
-      composeMetricGraph(&sTemp, 250, 420, 10, true);
+      composeMetricGraph(&sTemp, ringConnected, 250, 420, 10, true,
+                         g2RingHealthPageRefreshSupported()
+                             ? "Passive only"
+                             : "Poll unsupported");
       break;
     case HEALTH_METRIC_BATTERY:
-      composeMetricGraph(&sBat, 0, 100, 5);
+      composeMetricGraph(&sBat, ringConnected, 0, 100, 5);
       break;
     default:
       clearGrid(0);
@@ -2313,9 +2671,14 @@ static size_t healthPackBmp(uint8_t* out, size_t cap) {
 
 size_t g2RenderHealthBmp(uint8_t* out, size_t cap) {
   if (sSelected == HEALTH_METRIC_OVERVIEW) return 0;
+  // Snapshot ring state before taking sSeriesMutex. Direct notify ingestion
+  // and new-link reset deliberately take the telemetry fence before the
+  // series lock; reversing that order here would deadlock rendering with RX.
+  G2RingTelemetry telemetry{};
+  g2RingGetTelemetry(telemetry);
   SeriesLock lock;
   if (!lock.locked()) return 0;
-  composeGrid();
+  composeGrid(telemetry.connected);
   return healthPackBmp(out, cap);
 }
 

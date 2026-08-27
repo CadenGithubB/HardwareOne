@@ -2,8 +2,8 @@
 // OLED R1 Health — vitals, local logging, ring controls, typed history
 // ============================================================================
 // Hybrid surface: connect stays under Bluetooth → R1 Ring. This mode shows
-// live HR/HRV/SpO2/temp/battery/wear from g2RingGetTelemetry, entry/Poll
-// bursts via g2RingPollVital. Ring collection/low-power controls use the
+// live HR/HRV/SpO2/temp/battery/wear from g2RingGetTelemetry, with entry/Poll
+// refresh delegated to the exact-profile coordinator. Ring collection/low-power controls use the
 // transport's async desired/observed contract; local logging is independent.
 
 #include "OLED_Display.h"
@@ -35,9 +35,7 @@ enum HealthAction : uint8_t {
 
 static uint8_t  sHealthSel        = 0;
 static uint8_t  sHealthActionTop  = 0;
-static uint8_t  sHealthPollCursor = G2_RING_POLL_VITAL_COUNT;  // idle when == COUNT
 static bool     sHealthWasConn    = false;
-static uint32_t sHealthLastPollMs = 0;
 static uint32_t sHealthAdminDeniedUntilMs = 0;
 
 static bool healthAdminAllowed() {
@@ -61,15 +59,14 @@ static void healthOnEnter(bool isForward) {
   if (!isForward) return;
   sHealthSel        = 0;
   sHealthActionTop  = 0;
-  sHealthPollCursor = g2RingIsConnected() ? 0 : G2_RING_POLL_VITAL_COUNT;
   sHealthWasConn    = g2RingIsConnected();
-  sHealthLastPollMs = 0;
+  if (sHealthWasConn && g2RingHealthPageRefreshSupported()) {
+    (void)healthStartPollBurst();
+  }
 }
 
 static void healthKickPollBurst() {
-  if (!g2RingIsConnected()) return;
-  sHealthPollCursor = 0;
-  sHealthLastPollMs = 0;
+  (void)healthStartPollBurst();
 }
 
 static void fmtAgeShort(char* out, size_t cap, int32_t ageSec) {
@@ -103,18 +100,11 @@ static void displayR1Health() {
   oledDisplay->setTextColor(SSD1306_WHITE);
 
   const bool conn = g2RingIsConnected();
-  if (conn && !sHealthWasConn) sHealthPollCursor = 0;
-  sHealthWasConn = conn;
-  if (conn && sHealthPollCursor < G2_RING_POLL_VITAL_COUNT) {
-    const uint32_t now = millis();
-    if (sHealthLastPollMs == 0 || now - sHealthLastPollMs >= 800) {
-      g2RingPollVital(sHealthPollCursor++);
-      sHealthLastPollMs = now;
-      if (sHealthPollCursor >= G2_RING_POLL_VITAL_COUNT) {
-        healthLoggingNotePageRefresh();
-      }
-    }
+  if (conn && !sHealthWasConn &&
+      g2RingHealthPageRefreshSupported()) {
+    (void)healthStartPollBurst();
   }
+  sHealthWasConn = conn;
 
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print("R1 HEALTH ");
@@ -208,8 +198,12 @@ static void displayR1Health() {
       else if (action == HEALTH_ACTION_HISTORY_FORCE) oledDisplay->print("Force Hist [admin]");
       else oledDisplay->print("LowP [admin]");
     } else if (action == HEALTH_ACTION_POLL) {
-      oledDisplay->print("Poll Now");
-      if (sHealthPollCursor < G2_RING_POLL_VITAL_COUNT) oledDisplay->print("...");
+      if (conn && !g2RingHealthPageRefreshSupported()) {
+        oledDisplay->print("Poll unsupported");
+      } else {
+        oledDisplay->print("Poll Now");
+        if (healthPollBurstActive()) oledDisplay->print("...");
+      }
     } else if (action == HEALTH_ACTION_LOGGING) {
       oledDisplay->print("Logging ");
       oledDisplay->print(healthLoggingIsActive() ? "ON" :

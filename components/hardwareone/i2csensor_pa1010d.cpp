@@ -744,6 +744,13 @@ const char* cmd_gpslog(const String& argsInput) {
 }
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+// Bus routing for this device. Lives here rather than in System_I2C.cpp so it
+// compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
+static const char* cmd_gpsbus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.gpsBus, a, "gpsBus");
+}
+
 const CommandEntry gpsCommands[] = {
   // 3-level voice: "sensor" -> "GPS" -> "open/close"
   { "opengps", "Start PA1010D GPS module.", false, cmd_gpsstart },
@@ -761,6 +768,7 @@ const CommandEntry gpsCommands[] = {
     "  interval_ms: log interval in ms (default 1000, min 100)\n"
     "  Example: gpslog        (1-second logging)\n"
     "           gpslog 500   (500ms logging)" },
+  { "gpsbus",      "Route PA1010D GPS to bus: <0|1> (reboot required)",  true, cmd_gpsbus,      "Usage: gpsBus <0|1>" },
 };
 
 const size_t gpsCommandsCount = sizeof(gpsCommands) / sizeof(gpsCommands[0]);

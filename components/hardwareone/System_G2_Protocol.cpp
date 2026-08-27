@@ -330,6 +330,86 @@ bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire) {
   }
 }
 
+// Bounded protobuf varint reader for parsers that make state decisions. The
+// shared legacy reader above is intentionally left API-compatible; this form
+// additionally rejects values that overflow uint64 in their tenth byte.
+static bool g2PbReadVarintStrict(const uint8_t* buf, size_t len, size_t* pos,
+                                 uint64_t* value) {
+  if (!buf || !pos || !value || *pos > len) return false;
+  uint64_t result = 0;
+  for (unsigned i = 0; i < 10; i++) {
+    if (*pos >= len) return false;
+    const uint8_t byte = buf[(*pos)++];
+    if (i == 9 && (byte & 0xFEu) != 0) return false;
+    result |= (uint64_t)(byte & 0x7Fu) << (i * 7);
+    if ((byte & 0x80u) == 0) {
+      *value = result;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool g2PbReadTagStrict(const uint8_t* buf, size_t len, size_t* pos,
+                              uint32_t* field, uint8_t* wire) {
+  if (!field || !wire) return false;
+  uint64_t tag = 0;
+  if (!g2PbReadVarintStrict(buf, len, pos, &tag)) return false;
+  const uint64_t decodedField = tag >> 3;
+  if (decodedField == 0 || decodedField > 0x1FFFFFFFu) return false;
+  *field = (uint32_t)decodedField;
+  *wire = (uint8_t)(tag & 0x07u);
+  return true;
+}
+
+// Read one bounded length-delimited value without the `pos + length`
+// overflow hazard. The returned span aliases `buf`.
+static bool g2PbReadDelimited(const uint8_t* buf, size_t len, size_t* pos,
+                              const uint8_t** bytes, size_t* byteLen) {
+  if (!buf || !pos || !bytes || !byteLen || *pos > len) return false;
+  uint64_t encodedLen = 0;
+  if (!g2PbReadVarintStrict(buf, len, pos, &encodedLen)) return false;
+  if (encodedLen > (uint64_t)(len - *pos)) return false;
+  *bytes = buf + *pos;
+  *byteLen = (size_t)encodedLen;
+  *pos += *byteLen;
+  return true;
+}
+
+static bool g2PbSkipFieldStrict(const uint8_t* buf, size_t len, size_t* pos,
+                                uint8_t wire) {
+  switch (wire) {
+    case G2_PB_WIRE_VARINT: {
+      uint64_t ignored = 0;
+      return g2PbReadVarintStrict(buf, len, pos, &ignored);
+    }
+    case G2_PB_WIRE_FIXED64:
+      if (!pos || *pos > len || len - *pos < 8) return false;
+      *pos += 8;
+      return true;
+    case G2_PB_WIRE_LEN_DELIM: {
+      const uint8_t* ignored = nullptr;
+      size_t ignoredLen = 0;
+      return g2PbReadDelimited(buf, len, pos, &ignored, &ignoredLen);
+    }
+    case G2_PB_WIRE_FIXED32:
+      if (!pos || *pos > len || len - *pos < 4) return false;
+      *pos += 4;
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Protobuf int32 varints are decoded from the low 32 bits. Express the signed
+// conversion arithmetically so it does not depend on an implementation-defined
+// unsigned-to-signed cast for values above INT32_MAX.
+static int32_t g2PbDecodeInt32(uint64_t value) {
+  const uint32_t bits = (uint32_t)value;
+  if (bits <= 0x7FFFFFFFu) return (int32_t)bits;
+  return (int32_t)(-1 - (int64_t)(~bits));
+}
+
 bool g2ParseCommandMagic(const uint8_t* payload, size_t payloadLen,
                          uint32_t* outCommand, uint32_t* outMagic) {
   if (!payload || !outCommand || !outMagic) return false;
@@ -346,6 +426,83 @@ bool g2ParseCommandMagic(const uint8_t* payload, size_t payloadLen,
       field != 2 || wire != G2_PB_WIRE_VARINT ||
       !g2PbReadVarint(payload, payloadLen, &pos, &value)) return false;
   *outMagic = (uint32_t)value;
+  return true;
+}
+
+static bool g2ParseSyncInfoData(const uint8_t* data, size_t dataLen,
+                                G2SyncInfo* parsed) {
+  size_t pos = 0;
+  while (pos < dataLen) {
+    uint32_t field = 0;
+    uint8_t wire = 0;
+    if (!g2PbReadTagStrict(data, dataLen, &pos, &field, &wire)) {
+      return false;
+    }
+    if (field == 1 || field == 2) {
+      if (wire != G2_PB_WIRE_VARINT) return false;
+      uint64_t value = 0;
+      if (!g2PbReadVarintStrict(data, dataLen, &pos, &value)) return false;
+      if (field == 1) {
+        parsed->hasBackgroundAppId = true;
+        parsed->backgroundAppId = g2PbDecodeInt32(value);
+      } else {
+        parsed->hasForegroundAppId = true;
+        parsed->foregroundAppId = g2PbDecodeInt32(value);
+      }
+      continue;
+    }
+    if (!g2PbSkipFieldStrict(data, dataLen, &pos, wire)) return false;
+  }
+  return true;
+}
+
+bool g2ParseSyncInfo(const uint8_t* payload, size_t payloadLen,
+                     G2SyncInfo* out) {
+  if (!out) return false;
+  memset(out, 0, sizeof(*out));
+  if (!payload) return false;
+
+  G2SyncInfo parsed = {};
+  size_t pos = 0;
+  while (pos < payloadLen) {
+    uint32_t field = 0;
+    uint8_t wire = 0;
+    if (!g2PbReadTagStrict(payload, payloadLen, &pos, &field, &wire)) {
+      return false;
+    }
+
+    if (field == 1 || field == 2) {
+      if (wire != G2_PB_WIRE_VARINT) return false;
+      uint64_t value = 0;
+      if (!g2PbReadVarintStrict(payload, payloadLen, &pos, &value)) return false;
+      if (field == 1) {
+        parsed.hasCommand = true;
+        parsed.command = (uint32_t)value;
+      } else {
+        parsed.hasMagic = true;
+        parsed.magic = g2PbDecodeInt32(value);
+      }
+      continue;
+    }
+
+    if (field == 3) {
+      if (wire != G2_PB_WIRE_LEN_DELIM) return false;
+      const uint8_t* data = nullptr;
+      size_t dataLen = 0;
+      if (!g2PbReadDelimited(payload, payloadLen, &pos, &data, &dataLen) ||
+          !g2ParseSyncInfoData(data, dataLen, &parsed)) {
+        return false;
+      }
+      // Singular embedded messages merge when repeated. Do not clear presence
+      // or values learned from an earlier f3 occurrence.
+      parsed.hasData = true;
+      continue;
+    }
+
+    if (!g2PbSkipFieldStrict(payload, payloadLen, &pos, wire)) return false;
+  }
+
+  *out = parsed;
   return true;
 }
 
@@ -593,8 +750,8 @@ static constexpr uint32_t G2_LIST_DEF_CID   = 1;
 
 // Emit a ListContainerProperty (wrapper field 2 of RebuildPage/CreateStartup)
 // with N selectable items. Firmware draws a native selection highlight when
-// IsItemSelectBorderEn=1, and routes touchpad gestures to a List_ItemEvent
-// sub-message on sid=0x0D when IsEventCapture=1. This is the one widget the
+// IsItemSelectBorderEn=1, and routes touchpad gestures to EvenCore event
+// notifications when IsEventCapture=1. This is the one widget the
 // reference explicitly supports for scrollable menus.
 static bool writeListObjectWithItems(uint8_t* buf, size_t cap, size_t* pos,
                                      const char* containerName,
@@ -625,7 +782,7 @@ static bool writeListObjectWithItems(uint8_t* buf, size_t cap, size_t* pos,
   if (!g2PbEndNested(buf, cap, pos, itemStart)) return false;
 
   // IsEventCapture=1 → firmware routes touchpad gestures to this container
-  // as List_ItemEvent sub-messages on sid=0x0D.
+  // through EvenCore event notifications.
   if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_EVCAP, 1)) return false;
   return g2PbEndNested(buf, cap, pos, listStart);
 }
@@ -1442,7 +1599,58 @@ static bool writeImageTileObject(uint8_t* pbOut, size_t pbCap, size_t* pos,
   return g2PbEndNested(pbOut, pbCap, pos, imgStart);
 }
 
-// 3-pane CREATE: list + text + image. See header for schema-risk notes.
+// Mixed CREATE: list + text + 1..4 image children. See the header for the
+// firmware child-count constraints. Keeping the one-image API as a delegate
+// below makes this extension wire-compatible with the Q30/Health path.
+size_t g2BuildCreateMixedListTextImagesPb(uint32_t magic,
+                                          const char* listName,
+                                          const char* const* listItems,
+                                          size_t listItemCount,
+                                          const G2ContainerGeom& listGeom,
+                                          const G2TextChildSpec& textChild,
+                                          const G2ImageTile* imageTiles,
+                                          size_t imageTileCount,
+                                          uint32_t widgetId,
+                                          G2ListTextImageOrder order,
+                                          uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0) return 0;
+  if (!listName || !listItems || listItemCount == 0) return 0;
+  if (!imageTiles || imageTileCount == 0 || imageTileCount > 4) return 0;
+  for (size_t i = 0; i < imageTileCount; i++) {
+    // Preserve the one-image builder's historical contract: null is invalid,
+    // while an empty string is serialized as an empty protobuf string.
+    if (!imageTiles[i].containerName) return 0;
+  }
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD,   G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL,
+                       (uint32_t)(2 + imageTileCount))) return 0;
+
+  if (!writeListObjectWithItems(pbOut, pbCap, &pos,
+                                listName, listItems, listItemCount,
+                                listGeom)) return 0;
+
+  if (order == G2_LTI_ORDER_LIST_IMAGE_TEXT) {
+    for (size_t i = 0; i < imageTileCount; i++)
+      if (!writeImageTileObject(pbOut, pbCap, &pos, imageTiles[i])) return 0;
+    if (!writeTextChildSpec(pbOut, pbCap, &pos, textChild)) return 0;
+  } else {
+    if (!writeTextChildSpec(pbOut, pbCap, &pos, textChild)) return 0;
+    for (size_t i = 0; i < imageTileCount; i++)
+      if (!writeImageTileObject(pbOut, pbCap, &pos, imageTiles[i])) return 0;
+  }
+
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+// 3-pane compatibility entry point: exactly the same ordered writers as the
+// prior implementation, now routed through the N-image core with N=1.
 size_t g2BuildCreateMixedListTextImagePb(uint32_t magic,
                                          const char* listName,
                                          const char* const* listItems,
@@ -1453,32 +1661,9 @@ size_t g2BuildCreateMixedListTextImagePb(uint32_t magic,
                                          uint32_t widgetId,
                                          G2ListTextImageOrder order,
                                          uint8_t* pbOut, size_t pbCap) {
-  if (!pbOut || pbCap == 0) return 0;
-  if (!listName || !listItems || listItemCount == 0) return 0;
-  if (!imageTile.containerName) return 0;
-
-  size_t pos = 0;
-  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD,   G2_CMD_CREATE_STARTUP)) return 0;
-  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
-  size_t pageStart;
-  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
-  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 3)) return 0;
-
-  if (!writeListObjectWithItems(pbOut, pbCap, &pos,
-                                listName, listItems, listItemCount,
-                                listGeom)) return 0;
-
-  if (order == G2_LTI_ORDER_LIST_IMAGE_TEXT) {
-    if (!writeImageTileObject(pbOut, pbCap, &pos, imageTile)) return 0;
-    if (!writeTextChildSpec(pbOut, pbCap, &pos, textChild)) return 0;
-  } else {
-    if (!writeTextChildSpec(pbOut, pbCap, &pos, textChild)) return 0;
-    if (!writeImageTileObject(pbOut, pbCap, &pos, imageTile)) return 0;
-  }
-
-  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
-  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
-  return pos;
+  return g2BuildCreateMixedListTextImagesPb(
+      magic, listName, listItems, listItemCount, listGeom, textChild,
+      &imageTile, 1, widgetId, order, pbOut, pbCap);
 }
 
 size_t g2BuildCreateMixedListTextImage(uint8_t seq, uint32_t magic,
@@ -1614,7 +1799,7 @@ const char* g2sidName(uint8_t sid) {
     case 0x0A: return "Transcribe";
     case 0x0B: return "Conversate";
     case 0x0C: return "QuickList";
-    case 0x0D: return "StateEvent (sync)";
+    case 0x0D: return "SyncInfo";
     case 0x0E: return "Health / WidgetXform";
     case 0x10: return "Onboarding";
     case 0x21: return "ForegroundSystemAlert";
@@ -1811,6 +1996,75 @@ bool g2ParseSettingVersion(const uint8_t* payload, size_t payloadLen,
   const size_t copy = (slen < versionCap - 1) ? (size_t)slen : versionCap - 1;
   memcpy(versionOut, sub + sp, copy);
   versionOut[copy] = '\0';
+  return true;
+}
+
+static void g2CopySettingVersion(char (&dest)[32],
+                                 const uint8_t* src, size_t srcLen) {
+  const size_t copyLen = srcLen < sizeof(dest) - 1 ? srcLen : sizeof(dest) - 1;
+  if (copyLen > 0) memcpy(dest, src, copyLen);
+  dest[copyLen] = '\0';
+}
+
+bool g2ParseSettingVersions(const uint8_t* payload, size_t payloadLen,
+                            G2SettingVersions* out) {
+  if (!out) return false;
+  memset(out, 0, sizeof(*out));
+  if (!payload) return false;
+
+  G2SettingVersions parsed = {};
+  size_t pos = 0;
+  while (pos < payloadLen) {
+    uint32_t field = 0;
+    uint8_t wire = 0;
+    if (!g2PbReadTagStrict(payload, payloadLen, &pos, &field, &wire)) {
+      return false;
+    }
+    if (field != G2_SET_F_REQ) {
+      if (!g2PbSkipFieldStrict(payload, payloadLen, &pos, wire)) return false;
+      continue;
+    }
+    if (wire != G2_PB_WIRE_LEN_DELIM) return false;
+
+    const uint8_t* body = nullptr;
+    size_t bodyLen = 0;
+    if (!g2PbReadDelimited(payload, payloadLen, &pos, &body, &bodyLen)) {
+      return false;
+    }
+
+    // Repeated wrapper-f4 messages merge just like protobuf singular message
+    // fields. Within them, repeated scalar/string leaves use the last value.
+    size_t bodyPos = 0;
+    while (bodyPos < bodyLen) {
+      uint32_t innerField = 0;
+      uint8_t innerWire = 0;
+      if (!g2PbReadTagStrict(body, bodyLen, &bodyPos,
+                             &innerField, &innerWire)) {
+        return false;
+      }
+      if (innerField == G2_SET_REQ_F_VER_LEFT ||
+          innerField == G2_SET_REQ_F_VER_RIGHT) {
+        if (innerWire != G2_PB_WIRE_LEN_DELIM) return false;
+        const uint8_t* version = nullptr;
+        size_t versionLen = 0;
+        if (!g2PbReadDelimited(body, bodyLen, &bodyPos,
+                               &version, &versionLen)) {
+          return false;
+        }
+        if (innerField == G2_SET_REQ_F_VER_LEFT) {
+          parsed.hasLeft = true;
+          g2CopySettingVersion(parsed.left, version, versionLen);
+        } else {
+          parsed.hasRight = true;
+          g2CopySettingVersion(parsed.right, version, versionLen);
+        }
+        continue;
+      }
+      if (!g2PbSkipFieldStrict(body, bodyLen, &bodyPos, innerWire)) return false;
+    }
+  }
+
+  *out = parsed;
   return true;
 }
 
@@ -2110,8 +2364,64 @@ static bool g2PbWriteInt64(uint8_t* buf, size_t cap, size_t* pos,
   return g2PbWriteVarint(buf, cap, pos, (uint64_t)v);
 }
 
-size_t g2BuildDevCfgHeartbeat(uint8_t seq, uint32_t magic,
-                              uint8_t* out, size_t outCap) {
+static bool g2DevCfgIsBodyField(uint32_t field) {
+  // Every currently defined field from authMgr through quickRestart is an
+  // embedded message; TimeSync and AudControl use the sparse f128/f129 slots.
+  return (field >= 3 && field <= 14) || field == 128 || field == 129;
+}
+
+bool g2ParseDevCfgRx(const uint8_t* payload, size_t payloadLen,
+                     G2DevCfgRx* out) {
+  if (!out) return false;
+  memset(out, 0, sizeof(*out));
+  if (!payload) return false;
+
+  G2DevCfgRx parsed = {};
+  size_t pos = 0;
+  while (pos < payloadLen) {
+    uint32_t field = 0;
+    uint8_t wire = 0;
+    if (!g2PbReadTagStrict(payload, payloadLen, &pos, &field, &wire)) {
+      return false;
+    }
+
+    if (field == G2_WRAP_F_CMD || field == G2_WRAP_F_MAGIC) {
+      if (wire != G2_PB_WIRE_VARINT) return false;
+      uint64_t value = 0;
+      if (!g2PbReadVarintStrict(payload, payloadLen, &pos, &value)) return false;
+      if (field == G2_WRAP_F_CMD) {
+        parsed.hasCommand = true;
+        parsed.command = (uint32_t)value;
+      } else {
+        parsed.hasMagic = true;
+        parsed.magic = (uint32_t)value;
+      }
+      continue;
+    }
+
+    if (g2DevCfgIsBodyField(field)) {
+      if (wire != G2_PB_WIRE_LEN_DELIM || parsed.hasBody) return false;
+      const uint8_t* body = nullptr;
+      size_t bodyLen = 0;
+      if (!g2PbReadDelimited(payload, payloadLen, &pos, &body, &bodyLen)) {
+        return false;
+      }
+      parsed.hasBody = true;
+      parsed.bodyField = field;
+      parsed.body = body;
+      parsed.bodyLen = bodyLen;
+      continue;
+    }
+
+    if (!g2PbSkipFieldStrict(payload, payloadLen, &pos, wire)) return false;
+  }
+
+  *out = parsed;
+  return true;
+}
+
+size_t g2BuildDevCfgHeartbeatWithFlag(uint8_t seq, uint32_t magic, uint8_t flag,
+                                      uint8_t* out, size_t outCap) {
   uint8_t pb[16];
   size_t pos = 0;
   if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
@@ -2122,12 +2432,18 @@ size_t g2BuildDevCfgHeartbeat(uint8_t seq, uint32_t magic,
   if (!g2PbBeginNested(pb, sizeof(pb), &pos,
                        G2_DEVCFG_WRAP_F_BASE_HEARTBEAT, &inner)) return 0;
   if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
-  return g2BuildEnvelope(seq, G2_SID_DEV_CONFIG, G2_FLAG_REQUEST,
+  return g2BuildEnvelope(seq, G2_SID_DEV_CONFIG, flag,
                          pb, pos, out, outCap);
 }
 
-size_t g2BuildDevCfgAuth(uint8_t seq, uint32_t magic,
-                         uint8_t* out, size_t outCap) {
+size_t g2BuildDevCfgHeartbeat(uint8_t seq, uint32_t magic,
+                              uint8_t* out, size_t outCap) {
+  return g2BuildDevCfgHeartbeatWithFlag(seq, magic, G2_FLAG_REQUEST,
+                                        out, outCap);
+}
+
+size_t g2BuildDevCfgAuthWithFlag(uint8_t seq, uint32_t magic, uint8_t flag,
+                                 uint8_t* out, size_t outCap) {
   uint8_t pb[32];
   size_t pos = 0;
   if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
@@ -2142,8 +2458,14 @@ size_t g2BuildDevCfgAuth(uint8_t seq, uint32_t magic,
                        G2_DEVCFG_AUTHMGR_F_PHONE_TYPE,
                        G2_DEVCFG_PHONE_TYPE_ANDROID)) return 0;
   if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
-  return g2BuildEnvelope(seq, G2_SID_DEV_CONFIG, G2_FLAG_REQUEST,
+  return g2BuildEnvelope(seq, G2_SID_DEV_CONFIG, flag,
                          pb, pos, out, outCap);
+}
+
+size_t g2BuildDevCfgAuth(uint8_t seq, uint32_t magic,
+                         uint8_t* out, size_t outCap) {
+  return g2BuildDevCfgAuthWithFlag(seq, magic, G2_FLAG_REQUEST,
+                                   out, outCap);
 }
 
 size_t g2BuildDevCfgPipeRoleChange(uint8_t seq, uint32_t magic, uint8_t role,
@@ -2365,7 +2687,114 @@ static bool g2GoldenEquals(const uint8_t* actual, size_t actualLen,
          memcmp(actual, expected, expectedLen) == 0;
 }
 
+static bool g2GoldenAllZero(const void* value, size_t valueLen) {
+  const uint8_t* bytes = static_cast<const uint8_t*>(value);
+  for (size_t i = 0; i < valueLen; i++) {
+    if (bytes[i] != 0) return false;
+  }
+  return true;
+}
+
+static bool g2GoldenSync(const uint8_t* payload, size_t payloadLen,
+                         bool hasCommand, uint32_t command,
+                         bool hasMagic, int32_t magic,
+                         bool hasData,
+                         bool hasBackground, int32_t background,
+                         bool hasForeground, int32_t foreground) {
+  G2SyncInfo value;
+  if (!g2ParseSyncInfo(payload, payloadLen, &value)) return false;
+  return value.hasCommand == hasCommand && value.command == command &&
+         value.hasMagic == hasMagic && value.magic == magic &&
+         value.hasData == hasData &&
+         value.hasBackgroundAppId == hasBackground &&
+         value.backgroundAppId == background &&
+         value.hasForegroundAppId == hasForeground &&
+         value.foregroundAppId == foreground;
+}
+
+static bool g2GoldenDevCfgFrame(const uint8_t* frame, size_t frameLen,
+                                bool isTx, uint8_t seq, uint8_t flag,
+                                uint32_t command, uint32_t magic,
+                                uint32_t bodyField, size_t bodyLen) {
+  G2EnvelopeView view;
+  if (!g2ParseEnvelope(frame, frameLen, &view) ||
+      view.isTx != isTx || view.seq != seq ||
+      view.sid != G2_SID_DEV_CONFIG || view.flag != flag) {
+    return false;
+  }
+  G2DevCfgRx parsed;
+  return g2ParseDevCfgRx(view.payload, view.payloadLen, &parsed) &&
+         parsed.hasCommand && parsed.command == command &&
+         parsed.hasMagic && parsed.magic == magic &&
+         parsed.hasBody && parsed.bodyField == bodyField &&
+         parsed.body != nullptr && parsed.bodyLen == bodyLen;
+}
+
 bool g2ProtocolGoldenSelfTest() {
+  // Sanitized session-establishment frames captured from the official 2.2.9
+  // app. Transport sequence and protobuf magic are deliberately retained:
+  // their independence on RX is part of the ACK-correlation contract.
+  static const uint8_t kDevCfgAuthTx[] = {
+    0xaa,0x21,0x01,0x0c,0x01,0x01,0x80,0x00,0x08,0x04,
+    0x10,0x01,0x1a,0x04,0x08,0x01,0x10,0x04,0xcc,0x56
+  };
+  static const uint8_t kDevCfgAuthAck[] = {
+    0xaa,0x12,0x79,0x08,0x01,0x01,0x80,0x00,0x08,0x04,
+    0x10,0x01,0x1a,0x00,0x7b,0x4a
+  };
+  static const uint8_t kDevCfgAuthStatus[] = {
+    0xaa,0x12,0xdd,0x0b,0x01,0x01,0x80,0x01,0x08,0x04,
+    0x10,0xdd,0x01,0x1a,0x02,0x08,0x01,0xd9,0xcd
+  };
+  static const uint8_t kDevCfgRoleTx[] = {
+    0xaa,0x21,0x03,0x0a,0x01,0x01,0x80,0x20,0x08,0x05,
+    0x10,0x03,0x22,0x02,0x08,0x01,0xdb,0x8f
+  };
+  static const uint8_t kDevCfgRoleAck[] = {
+    0xaa,0x12,0x99,0x08,0x01,0x01,0x80,0x00,0x08,0x05,
+    0x10,0x03,0x22,0x00,0x76,0x02
+  };
+  static const uint8_t kDevCfgTimeTx[] = {
+    0xaa,0x21,0x04,0x1b,0x01,0x01,0x80,0x20,0x08,0x80,
+    0x01,0x10,0x04,0x82,0x08,0x11,0x08,0x82,0xe8,0xa5,
+    0xd4,0x06,0x10,0xf0,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0x01,0x87,0x7f
+  };
+  static const uint8_t kDevCfgTimeAck[] = {
+    0xaa,0x12,0xf7,0x0a,0x01,0x01,0x80,0x00,0x08,0x80,
+    0x01,0x10,0x04,0x82,0x08,0x00,0x85,0xd3
+  };
+  static const uint8_t kDevCfgHeartbeatTx[] = {
+    0xaa,0x21,0x33,0x08,0x01,0x01,0x80,0x00,0x08,0x0e,
+    0x10,0x33,0x6a,0x00,0x49,0xaf
+  };
+  static const uint8_t kDevCfgHeartbeatAck[] = {
+    0xaa,0x12,0x72,0x08,0x01,0x01,0x80,0x00,0x08,0x0e,
+    0x10,0x33,0x6a,0x00,0x49,0xaf
+  };
+
+  // Exact independent f5/f6 version payload from the same sanitized capture.
+  static const uint8_t kSettingVersionsPb[] = {
+    0x08,0x02,0x10,0x0f,0x22,0x25,0x08,0x01,0x10,0x23,
+    0x18,0x08,0x2a,0x08,0x32,0x2e,0x32,0x2e,0x39,0x2e,
+    0x32,0x32,0x32,0x08,0x32,0x2e,0x32,0x2e,0x39,0x2e,
+    0x32,0x32,0x38,0x01,0x40,0x32,0x50,0x01,0x60,0x64,
+    0x90,0x01,0x01
+  };
+
+  // Exact SERVICE_SYNC_INFO_APP_ID payloads. These are lifecycle snapshots,
+  // not gesture bytes; present-empty f3 is intentionally represented.
+  static const uint8_t kSyncRequest[]       = {0x08,0x00,0x10,0x05};
+  static const uint8_t kSyncResponse[]      = {0x10,0x05,0x1a,0x00};
+  static const uint8_t kSyncBg1[]           = {0x08,0x01,0x1a,0x02,0x08,0x01};
+  static const uint8_t kSyncFg3[]           = {0x08,0x01,0x1a,0x02,0x10,0x03};
+  static const uint8_t kSyncEmpty[]         = {0x08,0x01,0x1a,0x00};
+  static const uint8_t kSync224_3[]         = {0x08,0x01,0x1a,0x05,0x08,0xe0,0x01,0x10,0x03};
+  static const uint8_t kSync224_273[]       = {0x08,0x01,0x1a,0x06,0x08,0xe0,0x01,0x10,0x91,0x02};
+  static const uint8_t kSync224_34[]        = {0x08,0x01,0x1a,0x05,0x08,0xe0,0x01,0x10,0x22};
+  static const uint8_t kSync4094[]          = {0x08,0x01,0x1a,0x03,0x08,0xfe,0x1f};
+  static const uint8_t kSync4094_34[]       = {0x08,0x01,0x1a,0x05,0x08,0xfe,0x1f,0x10,0x22};
+
   // Sanitized settings-only vectors copied byte-for-byte from the 2026-07-31
   // official-app capture. They contain no names, addresses, content, or other
   // user data.
@@ -2452,7 +2881,171 @@ bool g2ProtocolGoldenSelfTest() {
   };
 
   uint8_t out[96];
-  size_t n = g2BuildHeadUpSwitch(0x68, 0x6b, false, out, sizeof(out));
+  size_t n = g2BuildDevCfgAuthWithFlag(0x01, 0x01, G2_FLAG_RESPONSE,
+                                       out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kDevCfgAuthTx, sizeof(kDevCfgAuthTx))) return false;
+  n = g2BuildDevCfgPipeRoleChange(0x03, 0x03, G2_DEVCFG_ROLE_RIGHT,
+                                  out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kDevCfgRoleTx, sizeof(kDevCfgRoleTx))) return false;
+  n = g2BuildDevCfgTimeSync(0x04, 0x04, 1787393026u, -16,
+                            out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kDevCfgTimeTx, sizeof(kDevCfgTimeTx))) return false;
+  n = g2BuildDevCfgHeartbeatWithFlag(0x33, 0x33, G2_FLAG_RESPONSE,
+                                     out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kDevCfgHeartbeatTx,
+                      sizeof(kDevCfgHeartbeatTx))) return false;
+
+  // The original APIs remain byte-for-byte request-flag compatibility entry
+  // points, while the explicit forms permit the capture-proven flag 0x00.
+  uint8_t legacy[96];
+  size_t legacyLen = g2BuildDevCfgAuth(0x45, 0x145, legacy, sizeof(legacy));
+  n = g2BuildDevCfgAuthWithFlag(0x45, 0x145, G2_FLAG_REQUEST,
+                                out, sizeof(out));
+  if (!g2GoldenEquals(out, n, legacy, legacyLen)) return false;
+  legacyLen = g2BuildDevCfgHeartbeat(0x46, 0x146, legacy, sizeof(legacy));
+  n = g2BuildDevCfgHeartbeatWithFlag(0x46, 0x146, G2_FLAG_REQUEST,
+                                     out, sizeof(out));
+  if (!g2GoldenEquals(out, n, legacy, legacyLen)) return false;
+
+  if (!g2GoldenDevCfgFrame(kDevCfgAuthAck, sizeof(kDevCfgAuthAck),
+                           false, 0x79, G2_FLAG_RESPONSE,
+                           G2_DEVCFG_CMD_AUTHENTICATION, 1,
+                           G2_DEVCFG_WRAP_F_AUTH_MGR, 0) ||
+      !g2GoldenDevCfgFrame(kDevCfgAuthStatus, sizeof(kDevCfgAuthStatus),
+                           false, 0xdd, G2_FLAG_NOTIFY,
+                           G2_DEVCFG_CMD_AUTHENTICATION, 221,
+                           G2_DEVCFG_WRAP_F_AUTH_MGR, 2) ||
+      !g2GoldenDevCfgFrame(kDevCfgRoleAck, sizeof(kDevCfgRoleAck),
+                           false, 0x99, G2_FLAG_RESPONSE,
+                           G2_DEVCFG_CMD_PIPE_ROLE_CHANGE, 3,
+                           G2_DEVCFG_WRAP_F_ROLE_CHANGE, 0) ||
+      !g2GoldenDevCfgFrame(kDevCfgTimeAck, sizeof(kDevCfgTimeAck),
+                           false, 0xf7, G2_FLAG_RESPONSE,
+                           G2_DEVCFG_CMD_TIME_SYNC, 4,
+                           G2_DEVCFG_WRAP_F_TIME_SYNC, 0) ||
+      !g2GoldenDevCfgFrame(kDevCfgHeartbeatAck,
+                           sizeof(kDevCfgHeartbeatAck),
+                           false, 0x72, G2_FLAG_RESPONSE,
+                           G2_DEVCFG_CMD_BASE_HEART_BEAT, 0x33,
+                           G2_DEVCFG_WRAP_F_BASE_HEARTBEAT, 0)) {
+    return false;
+  }
+
+  static const uint8_t kDevCfgUnknownField[] = {
+    0x08,0x0e,0x10,0x33,0x6a,0x00,0x98,0x06,0x01
+  };
+  G2DevCfgRx devCfg;
+  if (!g2ParseDevCfgRx(kDevCfgUnknownField, sizeof(kDevCfgUnknownField),
+                        &devCfg) ||
+      !devCfg.hasCommand || devCfg.command != G2_DEVCFG_CMD_BASE_HEART_BEAT ||
+      !devCfg.hasMagic || devCfg.magic != 0x33 ||
+      !devCfg.hasBody || devCfg.bodyField != G2_DEVCFG_WRAP_F_BASE_HEARTBEAT ||
+      devCfg.bodyLen != 0) return false;
+  static const uint8_t kBadDevCfgWire[] = {0x0a,0x00};
+  static const uint8_t kBadDevCfgLength[] = {0x08,0x04,0x1a,0x01};
+  static const uint8_t kBadDevCfgBodies[] = {0x08,0x04,0x1a,0x00,0x22,0x00};
+  memset(&devCfg, 0xa5, sizeof(devCfg));
+  if (g2ParseDevCfgRx(kBadDevCfgWire, sizeof(kBadDevCfgWire), &devCfg) ||
+      !g2GoldenAllZero(&devCfg, sizeof(devCfg))) return false;
+  memset(&devCfg, 0xa5, sizeof(devCfg));
+  if (g2ParseDevCfgRx(kBadDevCfgLength, sizeof(kBadDevCfgLength), &devCfg) ||
+      !g2GoldenAllZero(&devCfg, sizeof(devCfg))) return false;
+  memset(&devCfg, 0xa5, sizeof(devCfg));
+  if (g2ParseDevCfgRx(kBadDevCfgBodies, sizeof(kBadDevCfgBodies), &devCfg) ||
+      !g2GoldenAllZero(&devCfg, sizeof(devCfg))) return false;
+
+  if (!g2GoldenSync(kSyncRequest, sizeof(kSyncRequest),
+                    true, 0, true, 5, false, false, 0, false, 0) ||
+      !g2GoldenSync(kSyncResponse, sizeof(kSyncResponse),
+                    false, 0, true, 5, true, false, 0, false, 0) ||
+      !g2GoldenSync(kSyncBg1, sizeof(kSyncBg1),
+                    true, 1, false, 0, true, true, 1, false, 0) ||
+      !g2GoldenSync(kSyncFg3, sizeof(kSyncFg3),
+                    true, 1, false, 0, true, false, 0, true, 3) ||
+      !g2GoldenSync(kSyncEmpty, sizeof(kSyncEmpty),
+                    true, 1, false, 0, true, false, 0, false, 0) ||
+      !g2GoldenSync(kSync224_3, sizeof(kSync224_3),
+                    true, 1, false, 0, true, true, 224, true, 3) ||
+      !g2GoldenSync(kSync224_273, sizeof(kSync224_273),
+                    true, 1, false, 0, true, true, 224, true, 273) ||
+      !g2GoldenSync(kSync224_34, sizeof(kSync224_34),
+                    true, 1, false, 0, true, true, 224, true, 34) ||
+      !g2GoldenSync(kSync4094, sizeof(kSync4094),
+                    true, 1, false, 0, true, true, 4094, false, 0) ||
+      !g2GoldenSync(kSync4094_34, sizeof(kSync4094_34),
+                    true, 1, false, 0, true, true, 4094, true, 34)) {
+    return false;
+  }
+
+  static const uint8_t kSyncReorderedUnknown[] = {
+    0x1a,0x04,0x08,0x02,0x10,0x07,0x48,0x63,0x10,0x05,0x08,0x01
+  };
+  static const uint8_t kSyncMerged[] = {
+    0x08,0x00,0x08,0x01,0x1a,0x02,0x08,0x01,
+    0x1a,0x04,0x08,0x02,0x10,0x03
+  };
+  static const uint8_t kSyncNegative[] = {
+    0x1a,0x0b,0x08,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x01
+  };
+  if (!g2GoldenSync(kSyncReorderedUnknown, sizeof(kSyncReorderedUnknown),
+                    true, 1, true, 5, true, true, 2, true, 7) ||
+      !g2GoldenSync(kSyncMerged, sizeof(kSyncMerged),
+                    true, 1, false, 0, true, true, 2, true, 3) ||
+      !g2GoldenSync(kSyncNegative, sizeof(kSyncNegative),
+                    false, 0, false, 0, true, true, -1, false, 0)) {
+    return false;
+  }
+
+  G2SyncInfo syncInfo;
+  static const uint8_t kBadSyncWire[] = {0x0a,0x00};
+  static const uint8_t kBadSyncNestedWire[] = {0x1a,0x02,0x12,0x00};
+  static const uint8_t kBadSyncVarint[] = {0x08,0x80};
+  static const uint8_t kBadSyncLength[] = {0x1a,0x02,0x08};
+  static const uint8_t kBadSyncOverflow[] = {
+    0x08,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x02
+  };
+  memset(&syncInfo, 0xa5, sizeof(syncInfo));
+  if (g2ParseSyncInfo(kBadSyncWire, sizeof(kBadSyncWire), &syncInfo) ||
+      !g2GoldenAllZero(&syncInfo, sizeof(syncInfo))) return false;
+  memset(&syncInfo, 0xa5, sizeof(syncInfo));
+  if (g2ParseSyncInfo(kBadSyncNestedWire, sizeof(kBadSyncNestedWire),
+                      &syncInfo) ||
+      !g2GoldenAllZero(&syncInfo, sizeof(syncInfo))) return false;
+  memset(&syncInfo, 0xa5, sizeof(syncInfo));
+  if (g2ParseSyncInfo(kBadSyncVarint, sizeof(kBadSyncVarint), &syncInfo) ||
+      !g2GoldenAllZero(&syncInfo, sizeof(syncInfo))) return false;
+  memset(&syncInfo, 0xa5, sizeof(syncInfo));
+  if (g2ParseSyncInfo(kBadSyncLength, sizeof(kBadSyncLength), &syncInfo) ||
+      !g2GoldenAllZero(&syncInfo, sizeof(syncInfo))) return false;
+  memset(&syncInfo, 0xa5, sizeof(syncInfo));
+  if (g2ParseSyncInfo(kBadSyncOverflow, sizeof(kBadSyncOverflow), &syncInfo) ||
+      !g2GoldenAllZero(&syncInfo, sizeof(syncInfo))) return false;
+
+  G2SettingVersions versions;
+  if (!g2ParseSettingVersions(kSettingVersionsPb, sizeof(kSettingVersionsPb),
+                              &versions) ||
+      !versions.hasLeft || strcmp(versions.left, "2.2.9.22") != 0 ||
+      !versions.hasRight || strcmp(versions.right, "2.2.9.22") != 0) {
+    return false;
+  }
+  char legacyVersion[32];
+  if (!g2ParseSettingVersion(kSettingVersionsPb, sizeof(kSettingVersionsPb),
+                             legacyVersion, sizeof(legacyVersion)) ||
+      strcmp(legacyVersion, "2.2.9.22") != 0) return false;
+  static const uint8_t kMergedSettingVersions[] = {
+    0x22,0x03,0x2a,0x01,0x4c,0x22,0x03,0x32,0x01,0x52
+  };
+  if (!g2ParseSettingVersions(kMergedSettingVersions,
+                              sizeof(kMergedSettingVersions), &versions) ||
+      !versions.hasLeft || strcmp(versions.left, "L") != 0 ||
+      !versions.hasRight || strcmp(versions.right, "R") != 0) return false;
+  static const uint8_t kBadSettingVersion[] = {0x22,0x02,0x28,0x01};
+  memset(&versions, 0xa5, sizeof(versions));
+  if (g2ParseSettingVersions(kBadSettingVersion,
+                             sizeof(kBadSettingVersion), &versions) ||
+      !g2GoldenAllZero(&versions, sizeof(versions))) return false;
+
+  n = g2BuildHeadUpSwitch(0x68, 0x6b, false, out, sizeof(out));
   if (!g2GoldenEquals(out, n, kHeadOff, sizeof(kHeadOff))) return false;
   n = g2BuildHeadUpSwitch(0x6d, 0x70, true, out, sizeof(out));
   if (!g2GoldenEquals(out, n, kHeadOn, sizeof(kHeadOn))) return false;

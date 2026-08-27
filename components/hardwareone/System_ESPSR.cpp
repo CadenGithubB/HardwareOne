@@ -5,6 +5,7 @@
 #include "OLED_UI.h"  // oledNotificationBannerShow — voice-failure banner
 #endif
 #include <esp_attr.h>
+#include <esp_heap_caps.h>
 
 #if ENABLE_ESP_SR
 
@@ -1287,7 +1288,7 @@ static void srSnipWriterTask(void* param) {
       File f = VFS::openGuarded(fname, FILE_WRITE, VFS::systemAuth("espsr.snip_writer"), true);
       if (!f) {
         ERROR_SRF("SnipWriter: failed to open %s", fname);
-        free(job.pcm);
+        ps_free(job.pcm);
         continue;
       }
       uint32_t dataSize = job.samples * sizeof(int16_t);
@@ -1298,7 +1299,7 @@ static void srSnipWriterTask(void* param) {
         written = f.write((const uint8_t*)job.pcm, dataSize);
         f.close();
       }
-      free(job.pcm);
+      ps_free(job.pcm);
       uint32_t durationMs = (job.samples * 1000) / job.sample_rate;
       uint32_t bitrate = (job.sample_rate * job.bits * job.channels) / 1000;
       INFO_SRF("SnipWriter: saved %s (%u samples, %u ms, %u kbps, %u bytes written)",
@@ -1311,12 +1312,11 @@ static bool srSnipInitRingBuffer() {
   if (gSrSnipRing) return true;
   size_t preSamples = (I2S_SR_SAMPLE_RATE * gSrSnipPreMs) / 1000;
   gSrSnipRingSamples = preSamples;
-  gSrSnipRing = (int16_t*)heap_caps_malloc(gSrSnipRingSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  gSrSnipRing = (int16_t*)ps_alloc(gSrSnipRingSamples * sizeof(int16_t),
+                                   AllocPref::RequirePSRAM, "sr.snip.ring");
   if (!gSrSnipRing) {
-    gSrSnipRing = (int16_t*)malloc(gSrSnipRingSamples * sizeof(int16_t));
-  }
-  if (!gSrSnipRing) {
-    ERROR_SRF("Failed to allocate snippet ring buffer (%u samples)", (unsigned)gSrSnipRingSamples);
+    ERROR_SRF("Failed to allocate PSRAM snippet ring buffer (%u samples); snippet capture disabled",
+              (unsigned)gSrSnipRingSamples);
     gSrSnipRingSamples = 0;
     return false;
   }
@@ -1329,7 +1329,7 @@ static bool srSnipInitRingBuffer() {
 
 static void srSnipFreeRingBuffer() {
   if (gSrSnipRing) {
-    free(gSrSnipRing);
+    ps_free(gSrSnipRing);
     gSrSnipRing = nullptr;
   }
   gSrSnipRingSamples = 0;
@@ -1350,12 +1350,12 @@ static void srSnipStartSession(const char* reason, int cmdId, const char* phrase
     srSnipEndSession(true);
   }
   size_t maxSamples = (I2S_SR_SAMPLE_RATE * gSrSnipMaxMs) / 1000;
-  gSrSnipSessionBuf = (int16_t*)heap_caps_malloc(maxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  gSrSnipSessionBuf = (int16_t*)ps_alloc(maxSamples * sizeof(int16_t),
+                                         AllocPref::RequirePSRAM,
+                                         "sr.snip.session");
   if (!gSrSnipSessionBuf) {
-    gSrSnipSessionBuf = (int16_t*)malloc(maxSamples * sizeof(int16_t));
-  }
-  if (!gSrSnipSessionBuf) {
-    ERROR_SRF("SnipSession: failed to allocate session buffer (%u samples)", (unsigned)maxSamples);
+    ERROR_SRF("SnipSession: failed to allocate PSRAM session buffer (%u samples); speech remains active",
+              (unsigned)maxSamples);
     return;
   }
   gSrSnipSessionSamplesCap = maxSamples;
@@ -1405,14 +1405,14 @@ static void srSnipEndSession(bool save) {
   if (!save || gSrSnipSessionSamplesWritten == 0 || !gSrSnipSessionBuf) {
     SR_DBG_L(1, "SnipSession: ended without saving (save=%d, samples=%u)", save, (unsigned)gSrSnipSessionSamplesWritten);
     if (gSrSnipSessionBuf) {
-      free(gSrSnipSessionBuf);
+      ps_free(gSrSnipSessionBuf);
       gSrSnipSessionBuf = nullptr;
     }
     return;
   }
   if (!gSrSnipQueue) {
     WARN_SRF("SnipSession: no queue, discarding");
-    free(gSrSnipSessionBuf);
+    ps_free(gSrSnipSessionBuf);
     gSrSnipSessionBuf = nullptr;
     return;
   }
@@ -1434,7 +1434,7 @@ static void srSnipEndSession(bool save) {
   gSrSnipSessionSamplesWritten = 0;
   if (xQueueSend(gSrSnipQueue, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
     WARN_SRF("SnipSession: queue full, discarding");
-    free(job.pcm);
+    ps_free(job.pcm);
   } else {
     SR_DBG_L(1, "SnipSession: queued %u samples for writing", (unsigned)job.samples);
   }
@@ -1473,7 +1473,7 @@ static void srSnipDeinit() {
   if (gSrSnipQueue) {
     SrSnipJob job;
     while (xQueueReceive(gSrSnipQueue, &job, 0) == pdTRUE) {
-      if (job.pcm) free(job.pcm);
+      if (job.pcm) ps_free(job.pcm);
     }
     vQueueDelete(gSrSnipQueue);
     gSrSnipQueue = nullptr;
@@ -1701,6 +1701,11 @@ static bool loadCommandsFileLocked(size_t& outAdded, size_t& outErrors) {
   f.close();
   return true;
 }
+
+// False while the live MultiNet table is known NOT to reflect the commands file:
+// a reload clears the table before repopulating it, so a failed or partial reload
+// leaves it empty or short. Saving then would commit that over the real file.
+static bool gMnTableTrusted = true;
 
 static bool saveCommandsFileLocked(size_t& outSaved) {
   outSaved = 0;
@@ -2070,31 +2075,16 @@ static void srTask(void* param) {
   WARN_SYSTEMF("[SR_TASK] Allocating buffers: i2sRead=%u bytes, afeFeed=%u bytes, ring=%u samples, mn=%u bytes",
                (unsigned)i2sReadBytes, (unsigned)feedChunkBytes, (unsigned)(feedChunkSamples * 16), (unsigned)mnBufBytes);
   
-  int16_t* i2sReadBuf = (int16_t*)heap_caps_malloc(i2sReadBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  WARN_SYSTEMF("[SR_TASK] i2sReadBuf (PSRAM): %p", i2sReadBuf);
-  if (!i2sReadBuf) {
-    i2sReadBuf = (int16_t*)malloc(i2sReadBytes);
-    WARN_SYSTEMF("[SR_TASK] i2sReadBuf (fallback heap): %p", i2sReadBuf);
-  }
-  int16_t* afeFeedBuf = (int16_t*)heap_caps_malloc(feedChunkBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  WARN_SYSTEMF("[SR_TASK] afeFeedBuf (PSRAM): %p", afeFeedBuf);
-  if (!afeFeedBuf) {
-    afeFeedBuf = (int16_t*)malloc(feedChunkBytes);
-    WARN_SYSTEMF("[SR_TASK] afeFeedBuf (fallback heap): %p", afeFeedBuf);
-  }
+  int16_t* i2sReadBuf = (int16_t*)ps_alloc(i2sReadBytes, AllocPref::PreferPSRAM, "sr.afe.i2sread");
+  WARN_SYSTEMF("[SR_TASK] i2sReadBuf: %p", i2sReadBuf);
+  int16_t* afeFeedBuf = (int16_t*)ps_alloc(feedChunkBytes, AllocPref::PreferPSRAM, "sr.afe.feed");
+  WARN_SYSTEMF("[SR_TASK] afeFeedBuf: %p", afeFeedBuf);
   size_t ringSamplesCap = feedChunkSamples * 16;
-  int16_t* ringBuf = (int16_t*)heap_caps_malloc(ringSamplesCap * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  WARN_SYSTEMF("[SR_TASK] ringBuf (PSRAM): %p", ringBuf);
-  if (!ringBuf) {
-    ringBuf = (int16_t*)malloc(ringSamplesCap * sizeof(int16_t));
-    WARN_SYSTEMF("[SR_TASK] ringBuf (fallback heap): %p", ringBuf);
-  }
-  int16_t* mnInputBuf = (int16_t*)heap_caps_malloc(mnBufBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  WARN_SYSTEMF("[SR_TASK] mnInputBuf (PSRAM): %p", mnInputBuf);
-  if (!mnInputBuf) {
-    mnInputBuf = (int16_t*)malloc(mnBufBytes);
-    WARN_SYSTEMF("[SR_TASK] mnInputBuf (fallback heap): %p", mnInputBuf);
-  }
+  int16_t* ringBuf = (int16_t*)ps_alloc(ringSamplesCap * sizeof(int16_t),
+                                        AllocPref::PreferPSRAM, "sr.afe.ring");
+  WARN_SYSTEMF("[SR_TASK] ringBuf: %p", ringBuf);
+  int16_t* mnInputBuf = (int16_t*)ps_alloc(mnBufBytes, AllocPref::PreferPSRAM, "sr.mn.input");
+  WARN_SYSTEMF("[SR_TASK] mnInputBuf: %p", mnInputBuf);
   if (!i2sReadBuf || !afeFeedBuf || !ringBuf || !mnInputBuf) {
     ERROR_SRF("Failed to allocate SR buffers (read=%u, feed=%u, ring=%u samples, mn=%u bytes)",
              (unsigned)i2sReadBytes, (unsigned)feedChunkBytes, (unsigned)ringSamplesCap, (unsigned)mnBufBytes);
@@ -3221,10 +3211,15 @@ static const char* cmd_sr_cmds_reload(const String& argsInput) {
     return "Error: busy";
   }
 
+  // The clear must precede the load (loadCommandsFileLocked appends), so a failed
+  // load leaves the LIVE table empty. Mark it untrusted for the duration so
+  // `sr cmds save` cannot serialise that emptiness over the commands file.
+  gMnTableTrusted = false;
   esp_mn_commands_clear();
   size_t added = 0;
   size_t parseErrors = 0;
   bool ok = loadCommandsFileLocked(added, parseErrors);
+  if (ok && parseErrors == 0) gMnTableTrusted = true;
   esp_mn_error_t* errList = mnUpdateLocked();
   unlockMN();
 
@@ -3245,6 +3240,11 @@ static const char* cmd_sr_cmds_save(const String& argsInput) {
   }
   if (!lockMN(6000)) {
     return "Error: busy";
+  }
+  if (!gMnTableTrusted) {
+    unlockMN();
+    return "Error: the live command table did not load cleanly - refusing to overwrite the "
+           "commands file. Reload with `sr cmds reload`, or fix the file first.";
   }
   size_t saved = 0;
   bool ok = saveCommandsFileLocked(saved);

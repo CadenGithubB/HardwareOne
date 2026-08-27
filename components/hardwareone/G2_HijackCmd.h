@@ -181,7 +181,11 @@ struct ToastSpec;
 // yet to "redraw"). Not gen-guarded by the applier; the run function is
 // expected to do its own state checks if it cares.
 struct CustomSpec {
-  void (*run)();
+  void (*run)(uint32_t lifecycleEpoch);
+  // Optional widget-lifecycle fence. Zero keeps legacy unbound semantics;
+  // fresh Blocks bootstrap stamps a nonzero epoch so queued work from a prior
+  // physical app lifecycle is dropped by the lens applier.
+  uint32_t lifecycleEpoch;
 };
 
 // Native-notification payload — the fields for one G2 firmware-NATIVE

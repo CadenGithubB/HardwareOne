@@ -4,6 +4,7 @@
  * System_LLM.cpp (no behavioral change).
  */
 #include "System_BuildConfig.h"
+#include "System_MemUtil.h"  // ps_alloc / AllocPref
 #if ENABLE_LLM_SOURCE_ONBOARD
 
 #include "System_LLM_Model.h"
@@ -95,11 +96,12 @@ static bool readChunked(File& f, uint8_t* dest, size_t bytes) {
   return true;
 }
 
-// Read a single tensor from file into an FP32 destination buffer.
-// If the file stores INT8, dequantizes on the fly.
-// force_fp32: norm tensors are always FP32 in file regardless of quant_type.
+// Read a single FP32 tensor. Quantized matrix tensors are routed through
+// readTensorQ8/readTensorQ4; norms set force_fp32 because they remain FP32 in
+// every file format. Keep the guard fail-closed so a future quantized caller
+// cannot accidentally interpret scales/data as floats.
 static bool readTensor(File& f, float* dest, uint32_t expected_elements,
-                       uint8_t quant_type, uint16_t group_size, bool force_fp32) {
+                       uint8_t quant_type, uint16_t /*group_size*/, bool force_fp32) {
   uint32_t n_elements = 0;
   if (f.read((uint8_t*)&n_elements, 4) != 4) return false;
 
@@ -109,43 +111,11 @@ static bool readTensor(File& f, float* dest, uint32_t expected_elements,
     return false;
   }
 
-  if (quant_type == 0 || force_fp32) {
-    // FP32: read directly
-    return readChunked(f, (uint8_t*)dest, n_elements * sizeof(float));
-  }
-
-  // INT8: read scales, then dequantize int8 values
-  uint32_t n_groups = (n_elements + group_size - 1) / group_size;
-
-  // Read scales into temp buffer (heap, not stack — could be large)
-  float* scales = (float*)malloc(n_groups * sizeof(float));
-  if (!scales) return false;
-  if (!readChunked(f, (uint8_t*)scales, n_groups * sizeof(float))) {
-    free(scales);
+  if (quant_type != 0 && !force_fp32) {
+    ERROR_LLMF("FP32 tensor reader used for quantized tensor type %u", quant_type);
     return false;
   }
-
-  // Read and dequantize one group at a time
-  int8_t* tmp = (int8_t*)malloc(group_size);
-  if (!tmp) { free(scales); return false; }
-
-  for (uint32_t g = 0; g < n_groups; g++) {
-    uint32_t start = g * (uint32_t)group_size;
-    uint32_t count = ((n_elements - start) < group_size) ? (n_elements - start) : group_size;
-    if (f.read((uint8_t*)tmp, count) != count) {
-      free(scales); free(tmp);
-      return false;
-    }
-    float scale = scales[g];
-    for (uint32_t i = 0; i < count; i++) {
-      dest[start + i] = (float)tmp[i] * scale;
-    }
-    if (g % 64 == 0) vTaskDelay(1);
-  }
-
-  free(scales);
-  free(tmp);
-  return true;
+  return readChunked(f, (uint8_t*)dest, n_elements * sizeof(float));
 }
 
 // Read an INT8 tensor directly into pre-allocated int8 data and float scale buffers.
@@ -707,7 +677,8 @@ static bool allocateRunState(LoadContext& ctx) {
   const int kv_dim = ctx.kv_dim;
   int seq_ctx = gLLM.seq_ctx;
 
-  gLLM.stateHotData = (float*)heap_caps_calloc(1, ctx.hotSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  gLLM.stateHotData = (float*)ps_calloc(1, ctx.hotSize, AllocPref::RequireInternal,
+                                        "llm.state.hot.internal");
   if (!gLLM.stateHotData) {
     DEBUG_LLM_MEMORYF("[LLM] Internal RAM alloc failed (%uB), falling back to PSRAM for hot state", (unsigned)ctx.hotSize);
     gLLM.stateHotData = (float*)llmPsramAlloc(ctx.hotSize, "llm.state.hot");

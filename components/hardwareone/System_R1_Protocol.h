@@ -45,9 +45,9 @@
 //   2. Read deviceInfo and select an exact protocol profile
 //   3. Send systemTime (subCmd=0x05 payload=tz_min(i16 LE)+epoch_s(u32 LE),
 //      status=notify/SET/ok)
-//   4. On firmware 2.2.7.0005, send advStart (subCmd=0x0A payload=
-//      reversed G2 right MAC + reversed G2 left MAC, 12 B total,
-//      status=notify/get/ok)
+//   4. When the selected exact profile supports it (2.2.7.0005 and
+//      2.2.9.0003), send advStart (subCmd=0x0A payload=reversed G2 right MAC
+//      + reversed G2 left MAC, 12 B total, status=notify/get/ok)
 //
 // After step 1 the ring acks with status=ack/set/ok and begins emitting
 // telemetry frames on its notify char (HR, HRV, temperature, activity,
@@ -125,16 +125,45 @@
 #define R1_MAX_PAYLOAD             256
 #define R1_MAX_FRAME              (1 + 4 + 12 + R1_MAX_PAYLOAD)
 
-// Firmware-specific payloads are never selected by shape. Only the exact
-// deviceInfo firmware string below enables the 2.2.7.0005 settings/history
-// layouts; every other string remains read/diagnostic-only.
+// Firmware-specific payloads are never selected by shape. Exact deviceInfo
+// firmware strings select an identity, then each operation is admitted through
+// the capability helpers below. Every other string remains diagnostic-only.
 enum R1ProtocolProfile : uint8_t {
   R1_PROFILE_UNKNOWN = 0,
   R1_PROFILE_FW_2_2_7_0005 = 1,
+  R1_PROFILE_FW_2_2_9_0003 = 2,
 };
 
 const char* r1ProtocolProfileName(R1ProtocolProfile profile);
 R1ProtocolProfile r1ProfileForFirmware(const char* firmware);
+
+// Per-operation policy. The 2.2.9 capture proves only a strict subset of the
+// 2.2.7 traffic, so callers must not turn profile recognition into a blanket
+// wire-layout alias. Generic pair-auth/device-info/time/device-status traffic
+// remains profile-independent.
+bool r1ProfileSupportsAdvStart(R1ProtocolProfile profile);
+bool r1ProfileSupportsHealthCollectionSet(R1ProtocolProfile profile,
+                                          bool enabled);
+bool r1ProfileSupportsHealthQuery(R1ProtocolProfile profile, uint8_t cmd,
+                                  uint8_t subCmd);
+bool r1ProfileSupportsPointMeasureQuery(R1ProtocolProfile profile);
+bool r1ProfileSupportsPointIngestion(R1ProtocolProfile profile);
+// Exact-profile HardwareOne UI refresh contract, composed from the DAILY
+// primitives observed in the 2.2.9 app/capture. This is deliberately separate
+// from the legacy POINT/MEASURE experiment; no causal stock-page action is
+// inferred from the capture.
+bool r1ProfileSupportsHealthPageRefresh(R1ProtocolProfile profile);
+bool r1ProfileSupportsSingleFrameDaily(R1ProtocolProfile profile, uint8_t cmd);
+bool r1ProfileSupportsDailyPacketAck(R1ProtocolProfile profile, uint8_t cmd);
+bool r1ProfileSupportsActivityReassembly(R1ProtocolProfile profile);
+bool r1ProfileSupportsSleepDataIngestion(R1ProtocolProfile profile);
+bool r1ProfileSupportsLowPower(R1ProtocolProfile profile);
+bool r1ProfileSupportsUserInfo(R1ProtocolProfile profile);
+// Ingestion of wear/battery from the capture-proven seven-byte deviceStatus
+// response is independent from permission to transmit the dedicated,
+// unproven wearStatus query.
+bool r1ProfileSupportsDeviceStatusIngestion(R1ProtocolProfile profile);
+bool r1ProfileSupportsWearStatus(R1ProtocolProfile profile);
 
 // Structured parser result used by every typed decoder. These values are
 // stable diagnostic/API identifiers; callers must not infer success from a
@@ -266,8 +295,8 @@ uint32_t r1Crc32(const uint8_t* data, size_t len);
 uint16_t r1ModelCrc16(const uint8_t* model, size_t modelLen);
 
 // One-shot self-test against sanitized golden vectors. It anchors both CRC
-// algorithms, exact 2.2.7.0005 builders, typed settings/daily decoders, strict
-// profile/integrity gates, and representative malformed pages. It contains no
+// algorithms, exact-profile builders, capability-gated settings/daily decoders,
+// strict profile/integrity gates, and representative malformed pages. It contains no
 // real device identifier or health value. Logs pass/fail via DEBUG_G2F; callers
 // decide whether a failure should disable ring writes for the session.
 bool r1ProtocolSelfTest();
@@ -306,7 +335,7 @@ public:
   // Status notify/SET/ok (the only setup step that uses set, per FlutterApp).
   R1Frame buildSyncTime(int16_t tzOffsetMinutes, uint32_t epochSeconds);
 
-  // Firmware 2.2.7.0005 advStart. Inputs are the natural six-byte temple MACs;
+  // Capability-gated advStart. Inputs are the natural six-byte temple MACs;
   // payload order is reversed-right followed by reversed-left. Unknown profile
   // or a missing MAC fails closed with length=0 and does not consume a serial.
   R1Frame buildAdvStart(R1ProtocolProfile profile,
@@ -328,16 +357,16 @@ public:
   R1Frame buildHealthCollectionSet(R1ProtocolProfile profile,
                                    uint32_t epochSeconds, bool enabled);
 
-  // Ring low-power setting (system/system/0x0F), switchType=0. As above, GET is
-  // safe while SET fails closed unless the exact firmware profile is active.
-  R1Frame buildLowPowerQuery();
+  // Ring low-power setting (system/system/0x0F), switchType=0. Both GET and SET
+  // fail closed unless the exact profile has capture-proven support.
+  R1Frame buildLowPowerQuery(R1ProtocolProfile profile);
   R1Frame buildLowPowerSet(R1ProtocolProfile profile,
                            uint32_t epochSeconds, bool enabled);
 
   // Probe: ask the ring whether it currently detects skin contact.
   // Response payload should be a 1-byte BleRing1SystemWearStatus value
   // (0=unknown, 1=notWear, 2=wear) per the proto enum.
-  R1Frame buildWearStatusQuery();
+  R1Frame buildWearStatusQuery(R1ProtocolProfile profile);
 
   // Health-data requests. All three request flavours share an empty payload
   // and use status notify/get/ok. The ring may take a few seconds to respond
@@ -352,9 +381,10 @@ public:
   // Note: the ring rejects unsupported (cmd, subCmd) pairs with status=ack/
   // refuse — e.g. activity has no `measure` mode. That's fine, just
   // informative; we'll see the refusal in the decoded log.
-  R1Frame buildHealthQuery(uint8_t cmd, uint8_t subCmd);
+  R1Frame buildHealthQuery(R1ProtocolProfile profile, uint8_t cmd,
+                           uint8_t subCmd);
 
-  // Acknowledge one trusted firmware-2.2.7.0005 health daily data notify. The
+  // Acknowledge one trusted, capability-approved health daily data notify. The
   // payload echoes module/cmd/subCmd and received serial; byte 3 and bytes 6..9
   // are capture-proven zero but their semantics remain unknown. Invalid CRC,
   // length, status/opcode, or profile fails closed without consuming a serial.
@@ -423,7 +453,7 @@ size_t r1AnnotatePayload(R1ProtocolProfile profile, const R1Decoded& d,
                          char* out, size_t cap);
 
 // -----------------------------------------------------------------------------
-// Exact firmware-2.2.7.0005 settings/profile decoders
+// Capability-gated settings/profile decoders
 // -----------------------------------------------------------------------------
 struct R1LowPowerStatus {
   uint32_t epochSeconds;
@@ -450,7 +480,7 @@ R1ParseError r1ParseUserInfo(R1ProtocolProfile profile,
                              R1UserInfo& out);
 
 // -----------------------------------------------------------------------------
-// Exact firmware-2.2.7.0005 daily page models
+// Capability-gated daily page models
 // -----------------------------------------------------------------------------
 enum R1DailyMetric : uint8_t {
   R1_DAILY_METRIC_HEART_RATE = R1_CMD_HEARTRATE,

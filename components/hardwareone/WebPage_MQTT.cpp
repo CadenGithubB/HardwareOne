@@ -333,26 +333,26 @@ void streamMqttInner(httpd_req_t* req) {
 <script>
 // ── Service Status (enable / disable) ──────────────────────────────────────
 function mqttApplySvcState(enabled) {
-  var dot  = document.getElementById('mqtt-svc-dot');
-  var txt  = document.getElementById('mqtt-svc-text');
-  var enBtn  = document.getElementById('btn-mqtt-enable-svc');
-  var disBtn = document.getElementById('btn-mqtt-disable-svc');
-  var warn = document.getElementById('mqtt-svc-warning');
-  var body = document.getElementById('mqtt-body');
+  var dot  = hw.$('mqtt-svc-dot');
+  var txt  = hw.$('mqtt-svc-text');
+  var enBtn  = hw.$('btn-mqtt-enable-svc');
+  var disBtn = hw.$('btn-mqtt-disable-svc');
+  var warn = hw.$('mqtt-svc-warning');
+  var body = hw.$('mqtt-body');
   if (enabled) {
     dot.className = 'status-indicator status-enabled';
     txt.textContent = 'MQTT service is enabled';
-    if (enBtn)  enBtn.style.display  = 'none';
+    hw.hide(enBtn);
     if (disBtn) disBtn.style.display = 'inline-block';
-    if (warn)   warn.style.display   = 'none';
-    if (body)   body.style.display   = 'block';
+    hw.hide(warn);
+    hw.show(body);
   } else {
     dot.className = 'status-indicator status-disabled';
     txt.textContent = 'MQTT service is disabled';
     if (enBtn)  enBtn.style.display  = 'inline-block';
-    if (disBtn) disBtn.style.display = 'none';
-    if (warn)   warn.style.display   = 'block';
-    if (body)   body.style.display   = 'none';
+    hw.hide(disBtn);
+    hw.show(warn);
+    hw.hide(body);
   }
 }
 
@@ -361,8 +361,8 @@ window.refreshMqttSvcStatus = function() {
     .then(d => {
       mqttApplySvcState(!!(d && d.enabled));
       // Keep connection pill in sync from the same payload.
-      var dot = document.querySelector('.status-dot');
-      var txt = document.getElementById('mqtt-status');
+      var dot = hw.qs('.status-dot');
+      var txt = hw.$('mqtt-status');
       if (dot && txt) {
         if (d && d.connected) {
           dot.className = 'status-dot status-active';
@@ -374,7 +374,7 @@ window.refreshMqttSvcStatus = function() {
       }
     })
     .catch(e => {
-      document.getElementById('mqtt-svc-text').textContent = 'Error: ' + e.message;
+      hw.$('mqtt-svc-text').textContent = 'Error: ' + e.message;
     });
 };
 
@@ -418,8 +418,8 @@ function mqttDisconnect() {
 function mqttRefresh() {
   hw.fetchJSON('/api/mqtt/status')
     .then(d => {
-      var dot = document.querySelector('.status-dot');
-      var txt = document.getElementById('mqtt-status');
+      var dot = hw.qs('.status-dot');
+      var txt = hw.$('mqtt-status');
       if (d && d.connected) {
         dot.className = 'status-dot status-active';
         txt.textContent = 'Connected';
@@ -433,12 +433,12 @@ function mqttRefresh() {
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function() {
-  var refreshBtn = document.getElementById('btn-mqtt-refresh-svc');
-  var enableBtn  = document.getElementById('btn-mqtt-enable-svc');
-  var disableBtn = document.getElementById('btn-mqtt-disable-svc');
-  if (refreshBtn) refreshBtn.addEventListener('click', refreshMqttSvcStatus);
-  if (enableBtn)  enableBtn.addEventListener('click',  enableMqttService);
-  if (disableBtn) disableBtn.addEventListener('click', disableMqttService);
+  var refreshBtn = hw.$('btn-mqtt-refresh-svc');
+  var enableBtn  = hw.$('btn-mqtt-enable-svc');
+  var disableBtn = hw.$('btn-mqtt-disable-svc');
+  hw.on(refreshBtn, 'click', refreshMqttSvcStatus);
+  hw.on(enableBtn, 'click', enableMqttService);
+  hw.on(disableBtn, 'click', disableMqttService);
   refreshMqttSvcStatus();
 });
 

@@ -139,13 +139,13 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <div id='devices-pane' style='display:none' class='en-pane-content'>
 <div style='display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px'>
 <button class='btn' onclick="openBroadcastPanel()" data-guest-hide>Broadcast</button>
-<button class='btn' id='btn-add-device-toggle' onclick="(function(){var p=document.getElementById('add-device-pane');var b=document.getElementById('btn-add-device-toggle');var show=p.style.display==='none'||!p.style.display;p.style.display=show?'block':'none';b.textContent=show?'Cancel':'+ Add Device';})()" >+ Add Device</button>
+<button class='btn' id='btn-add-device-toggle' onclick="(function(){var p=hw.$('add-device-pane');var b=hw.$('btn-add-device-toggle');var show=p.style.display==='none'||!p.style.display;p.style.display=show?'block':'none';b.textContent=show?'Cancel':'+ Add Device';})()" >+ Add Device</button>
 </div>
 <div id='add-device-pane' style='display:none' data-guest-hide>
 <div class='en-pair-inputs'>
 <input type='text' id='pair-mac' class='mac-input' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17'>
 <input type='text' id='pair-name' placeholder='Device Name'>
-<select id='pair-mesh' title='Target mesh for this pairing' style='display:none'></select>
+<select id='pair-mesh' class='input-fit input-m' title='Target mesh for this pairing' style='display:none'></select>
 <button class='btn' id='btn-pair-device'>Pair</button>
 <button class='btn' id='btn-pair-secure'>Pair Encrypted</button>
 </div>
@@ -300,14 +300,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
   // JavaScript (complete ESP-NOW logic)
   httpd_resp_send_chunk(req, R"JS(
 <script>
-window.togglePane = function(paneId, btnId) {
-  var p = document.getElementById(paneId);
-  var b = document.getElementById(btnId);
-  if (!p || !b) { console.warn('[togglePane] Element not found:', paneId, btnId); return; }
-  var isHidden = (p.style.display === 'none' || !p.style.display);
-  p.style.display = isHidden ? 'block' : 'none';
-  b.textContent = isHidden ? 'Collapse' : 'Expand';
-};
 </script>
 <script>console.log('[ESP-NOW] Section 1: Pre-script sentinel');</script>
 <script>
@@ -334,7 +326,7 @@ window.togglePane = function(paneId, btnId) {
     };
     window.__autoFetchState = window.__autoFetchState || {};
     window.setAutoButtonState = function(mac, opts) {
-      var btn = document.getElementById('btn-load-autos-' + mac);
+      var btn = hw.$('btn-load-autos-' + mac);
       if (!btn) return;
       if (!btn.dataset.defaultLabel) btn.dataset.defaultLabel = btn.textContent || 'Load Automations';
       if (opts && opts.text) {
@@ -361,7 +353,7 @@ window.togglePane = function(paneId, btnId) {
       .then(output => {
         console.log('[ESP-NOW] Status response:', output);
         console.log('[ESP-NOW] Response length:', output.length);
-        const indicator = document.getElementById('espnow-status-indicator');
+        const indicator = hw.$('espnow-status-indicator');
         // Check for initialization - be flexible with whitespace and case
         const isInitialized = output.match(/Initialized:\s*Yes/i) !== null;
         console.log('[ESP-NOW] Checking for initialization...');
@@ -385,15 +377,15 @@ window.togglePane = function(paneId, btnId) {
           mac = rest.substring(0, end).trim();
         }
         // Display full status output instead of just friendly summary
-        document.getElementById('espnow-status-data').textContent = output;
+        hw.$('espnow-status-data').textContent = output;
         if (isInitialized) {
           indicator.className = 'status-indicator status-enabled';
-          document.getElementById('btn-espnow-init').style.display = 'none';
-          document.getElementById('btn-espnow-disable').style.display = '';
-          document.getElementById('btn-espnow-toggle-mode').style.display = '';
-          document.getElementById('en-not-init').style.display = 'none';
-          document.getElementById('en-panels').style.display = 'block';
-          document.getElementById('espnow-status-data').style.display = 'block';
+          hw.$('btn-espnow-init').style.display = 'none';
+          hw.$('btn-espnow-disable').style.display = '';
+          hw.$('btn-espnow-toggle-mode').style.display = '';
+          hw.$('en-not-init').style.display = 'none';
+          hw.$('en-panels').style.display = 'block';
+          hw.$('espnow-status-data').style.display = 'block';
           /* Load device list */
           try { if (typeof listDevices === 'function') { listDevices(); } } catch(e) { console.warn('[ESP-NOW] listDevices not defined yet'); }
           /* Load meshes now that ESP-NOW is initialized */
@@ -406,12 +398,12 @@ window.togglePane = function(paneId, btnId) {
           if (typeof window.espnowStartPolling === 'function') { window.espnowStartPolling(); }
         } else {
           indicator.className = 'status-indicator status-disabled';
-          document.getElementById('btn-espnow-init').style.display = '';
-          document.getElementById('btn-espnow-disable').style.display = 'none';
-          document.getElementById('btn-espnow-toggle-mode').style.display = 'none';
-          document.getElementById('en-not-init').style.display = 'flex';
-          document.getElementById('en-panels').style.display = 'none';
-          document.getElementById('espnow-status-data').style.display = 'none';
+          hw.$('btn-espnow-init').style.display = '';
+          hw.$('btn-espnow-disable').style.display = 'none';
+          hw.$('btn-espnow-toggle-mode').style.display = 'none';
+          hw.$('en-not-init').style.display = 'flex';
+          hw.$('en-panels').style.display = 'none';
+          hw.$('espnow-status-data').style.display = 'none';
           if (typeof window.espnowStopPolling === 'function') { window.espnowStopPolling(); }
         }
       })
@@ -421,22 +413,22 @@ window.togglePane = function(paneId, btnId) {
       .then(modeOut => {
         try {
           console.log('[ESP-NOW] Mode response:', modeOut);
-          var btn = document.getElementById('btn-espnow-toggle-mode');
+          var btn = hw.$('btn-espnow-toggle-mode');
           if (!btn) return;
           var m = (modeOut || '').toLowerCase();
           var isMesh = m.indexOf('mesh') >= 0;
           console.log('[ESP-NOW] Detected mode:', isMesh ? 'MESH' : 'DIRECT');
           btn.textContent = 'Mode: ' + (isMesh ? 'Mesh' : 'Direct');
-          var warn = document.getElementById('mesh-warning');
+          var warn = hw.$('mesh-warning');
           if (warn) { warn.style.display = isMesh ? 'block' : 'none'; }
           
           // Show/hide mesh panels based on mode + init state
-          var indicator = document.getElementById('espnow-status-indicator');
+          var indicator = hw.$('espnow-status-indicator');
           var isInitialized = indicator && indicator.className.indexOf('status-enabled') >= 0;
-          var meshViewsCard = document.getElementById('mesh-views-card');
-          var meshRoleCard = document.getElementById('mesh-role-card');
-          if (meshViewsCard) meshViewsCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
-          if (meshRoleCard) meshRoleCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
+          var meshViewsCard = hw.$('mesh-views-card');
+          var meshRoleCard = hw.$('mesh-role-card');
+          hw.toggle(meshViewsCard, (isMesh && isInitialized));
+          hw.toggle(meshRoleCard, (isMesh && isInitialized));
           
           if (isMesh && isInitialized && typeof window.refreshMeshRole === 'function') {
             window.refreshMeshRole();
@@ -463,7 +455,7 @@ window.togglePane = function(paneId, btnId) {
         }
       })
       .catch(error => {
-        document.getElementById('espnow-status-data').textContent = 'Error: ' + error;
+        hw.$('espnow-status-data').textContent = 'Error: ' + error;
       });
     };
 
@@ -493,26 +485,26 @@ window.togglePane = function(paneId, btnId) {
 
         // --- apply espnowstatus (same logic as refreshStatus) ---
         console.log('[ESP-NOW] Batch status:', output);
-        const indicator = document.getElementById('espnow-status-indicator');
+        const indicator = hw.$('espnow-status-indicator');
         const isInitialized = output.match(/Initialized:\s*Yes/i) !== null;
-        document.getElementById('espnow-status-data').textContent = output;
+        hw.$('espnow-status-data').textContent = output;
         if (isInitialized) {
           indicator.className = 'status-indicator status-enabled';
-          document.getElementById('btn-espnow-init').style.display = 'none';
-          document.getElementById('btn-espnow-disable').style.display = '';
-          document.getElementById('btn-espnow-toggle-mode').style.display = '';
-          document.getElementById('en-not-init').style.display = 'none';
-          document.getElementById('en-panels').style.display = 'block';
-          document.getElementById('espnow-status-data').style.display = 'block';
+          hw.$('btn-espnow-init').style.display = 'none';
+          hw.$('btn-espnow-disable').style.display = '';
+          hw.$('btn-espnow-toggle-mode').style.display = '';
+          hw.$('en-not-init').style.display = 'none';
+          hw.$('en-panels').style.display = 'block';
+          hw.$('espnow-status-data').style.display = 'block';
           if (typeof window.espnowStartPolling === 'function') window.espnowStartPolling();
         } else {
           indicator.className = 'status-indicator status-disabled';
-          document.getElementById('btn-espnow-init').style.display = '';
-          document.getElementById('btn-espnow-disable').style.display = 'none';
-          document.getElementById('btn-espnow-toggle-mode').style.display = 'none';
-          document.getElementById('en-not-init').style.display = 'flex';
-          document.getElementById('en-panels').style.display = 'none';
-          document.getElementById('espnow-status-data').style.display = 'none';
+          hw.$('btn-espnow-init').style.display = '';
+          hw.$('btn-espnow-disable').style.display = 'none';
+          hw.$('btn-espnow-toggle-mode').style.display = 'none';
+          hw.$('en-not-init').style.display = 'flex';
+          hw.$('en-panels').style.display = 'none';
+          hw.$('espnow-status-data').style.display = 'none';
           if (typeof window.espnowStopPolling === 'function') window.espnowStopPolling();
         }
 
@@ -520,14 +512,14 @@ window.togglePane = function(paneId, btnId) {
         try {
           var m = (modeOut || '').toLowerCase();
           var isMesh = m.indexOf('mesh') >= 0;
-          var btn = document.getElementById('btn-espnow-toggle-mode');
-          if (btn) btn.textContent = 'Mode: ' + (isMesh ? 'Mesh' : 'Direct');
-          var warn = document.getElementById('mesh-warning');
+          var btn = hw.$('btn-espnow-toggle-mode');
+          hw.setText(btn, 'Mode: ' + (isMesh ? 'Mesh' : 'Direct'));
+          var warn = hw.$('mesh-warning');
           if (warn) warn.style.display = isMesh ? 'block' : 'none';
-          var meshViewsCard = document.getElementById('mesh-views-card');
-          var meshRoleCard = document.getElementById('mesh-role-card');
-          if (meshViewsCard) meshViewsCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
-          if (meshRoleCard) meshRoleCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
+          var meshViewsCard = hw.$('mesh-views-card');
+          var meshRoleCard = hw.$('mesh-role-card');
+          hw.toggle(meshViewsCard, (isMesh && isInitialized));
+          hw.toggle(meshRoleCard, (isMesh && isInitialized));
           window.espnowIsMesh = !!isMesh;
           if (isMesh && isInitialized) {
             if (typeof window.startMeshStatusPolling === 'function') window.startMeshStatusPolling();
@@ -569,7 +561,7 @@ window.togglePane = function(paneId, btnId) {
         if (bondMatch) { window.__bondedPeerMac = bondMatch[1].toUpperCase(); }
       }
       function applyList(output) {
-        const deviceList = document.getElementById('device-list');
+        const deviceList = hw.$('device-list');
         try { console.log('[ESP-NOW][DEV] listDevices: output length', output ? output.length : -1); } catch(e){}
         window.espnowDevices = [];
         let parsed = null;
@@ -593,7 +585,7 @@ window.togglePane = function(paneId, btnId) {
       })
       .then(applyList)
       .catch(error => {
-        document.getElementById('device-list').innerHTML = '<div style="color: #dc3545;">Error loading devices: ' + error + '</div>';
+        hw.$('device-list').innerHTML = '<div style="color: #dc3545;">Error loading devices: ' + error + '</div>';
       });
     };
     console.log('[ESP-NOW] Chunk 3A: listDevices function ready');
@@ -603,7 +595,7 @@ window.togglePane = function(paneId, btnId) {
     window.__meshPeers = window.__meshPeers || [];
     window.__meshUnpaired = window.__meshUnpaired || [];
     window.renderUnifiedDeviceList = function() {
-      var deviceList = document.getElementById('device-list');
+      var deviceList = hw.$('device-list');
       if (!deviceList) return;
       var paired = window.__pairedDevices || [];
       var meshPeers = window.__meshPeers || [];
@@ -793,7 +785,7 @@ window.togglePane = function(paneId, btnId) {
           mode: 'select',  // Select-only mode: no edit/delete/view actions
           selectFilesOnly: true,  // Only allow selecting files, not folders
           onSelect: function(filePath) {
-            var statusDiv = document.getElementById('fstat-' + mac);
+            var statusDiv = hw.$('fstat-' + mac);
             if (statusDiv && filePath) {
               statusDiv.textContent = 'Ready to send: ' + filePath;
             }
@@ -805,10 +797,10 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3D: openBroadcastPanel start');
     window.openBroadcastPanel = function() {
       try {
-        var card = document.getElementById('device-panel-card');
-        var title = document.getElementById('device-panel-title');
-        var subtitle = document.getElementById('device-panel-subtitle');
-        var content = document.getElementById('device-panel-content');
+        var card = hw.$('device-panel-card');
+        var title = hw.$('device-panel-title');
+        var subtitle = hw.$('device-panel-subtitle');
+        var content = hw.$('device-panel-content');
         if (!card || !title || !content) return;
         
         var activeKey = (card.dataset.key || '');
@@ -832,10 +824,10 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3E: toggleDevicePanel start');
     window.toggleDevicePanel = function(mac, kind) {
       try {
-        var card = document.getElementById('device-panel-card');
-        var title = document.getElementById('device-panel-title');
-        var subtitle = document.getElementById('device-panel-subtitle');
-        var content = document.getElementById('device-panel-content');
+        var card = hw.$('device-panel-card');
+        var title = hw.$('device-panel-title');
+        var subtitle = hw.$('device-panel-subtitle');
+        var content = hw.$('device-panel-content');
         if (!card || !title || !content) return;
         var activeKey = (card.dataset.key || '');
         var nextKey = mac + '|' + kind;
@@ -882,7 +874,7 @@ window.togglePane = function(paneId, btnId) {
           + '<div class="message-log" id="log-' + mac + '" style="margin-bottom:12px;max-height:300px;overflow-y:auto"><div class="message-empty">No messages yet. Start a conversation!</div></div>'
           + '<div id="text-input-' + mac + '" style="display:block" data-guest-hide>'
           + '<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">'
-          + '<textarea id="msg-' + mac + '" maxlength="1024" oninput="var c=document.getElementById(this.id.replace(\'msg-\',\'msg-count-\'));if(c)c.textContent=(1024-this.value.length)+\' characters left\';" placeholder="Message to send" style="flex:1;min-width:220px;min-height:60px;resize:vertical;font-family:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)"></textarea>'
+          + '<textarea id="msg-' + mac + '" maxlength="1024" oninput="var c=hw.$(this.id.replace(\'msg-\',\'msg-count-\'));hw.setText(c,(1024-this.value.length)+\' characters left\');" placeholder="Message to send" style="flex:1;min-width:220px;min-height:60px;resize:vertical;font-family:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)"></textarea>'
           + '<button class="btn message-action-btn" onclick="doSendMessage(\'' + mac + '\')" style="align-self:flex-start">Send</button>'
           + '</div>'
           + '<div id="msg-count-' + mac + '" style="font-size:.78em;color:var(--muted);margin-top:5px">1024 characters left</div>'
@@ -910,7 +902,7 @@ window.togglePane = function(paneId, btnId) {
           + '</div>'
           + '<div style="margin-bottom:10px">'
           + '<label style="display:block;margin-bottom:5px;font-weight:500;color:var(--panel-fg)">File Path:</label>'
-          + '<input type="text" id="fp-' + mac + '" placeholder="/path/to/file.ext or select from explorer" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)">'
+          + '<input type="text" class="input-fit input-l" id="fp-' + mac + '" placeholder="/path/to/file.ext or select from explorer" style="padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)">'
           + '<small style="color:var(--panel-fg);font-size:0.85em">Click a file in the explorer above or enter path manually</small>'
           + '</div>'
           + '<button class="btn message-action-btn" onclick="doSendFile(\'' + mac + '\')">Send File</button>'
@@ -928,7 +920,7 @@ window.togglePane = function(paneId, btnId) {
           + '</div>'
           + '<div style="margin-bottom:10px">'
           + '<label style="display:block;margin-bottom:5px;font-weight:500;color:var(--panel-fg)">Remote File Path:</label>'
-          + '<input type="text" id="remote-fp-' + mac + '" placeholder="/path/to/remote/file.ext" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)">'
+          + '<input type="text" class="input-fit input-l" id="remote-fp-' + mac + '" placeholder="/path/to/remote/file.ext" style="padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)">'
           + '</div>'
           + '<button class="btn message-action-btn" onclick="fetchRemoteFile(\'' + mac + '\')">Fetch File</button>'
           + '<div id="remote-fstat-' + mac + '" style="margin-top:8px;padding:8px;border-radius:4px;font-size:0.9em;color:var(--panel-fg)">Enter credentials and browse remote device</div>'
@@ -1000,8 +992,8 @@ window.togglePane = function(paneId, btnId) {
     // Live "N characters left" counter under the message box. The textarea's
     // oninput calls this; without it every keystroke hit an undefined function.
     window.updateMsgCounter = function(mac) {
-      var ta = document.getElementById('msg-' + mac);
-      var lbl = document.getElementById('msg-count-' + mac);
+      var ta = hw.$('msg-' + mac);
+      var lbl = hw.$('msg-count-' + mac);
       if (!ta || !lbl) return;
       var left = 1024 - ta.value.length;
       lbl.textContent = left + ' characters left';
@@ -1009,7 +1001,7 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3G: appendLogLine start');
     window.appendLogLine = function(containerId, type, message, status) {
       console.log('[appendLogLine] Called with:', {containerId, type, message, status});
-      const log = document.getElementById(containerId);
+      const log = hw.$(containerId);
       if (!log) {
         console.warn('[appendLogLine] Container not found:', containerId);
         return;
@@ -1088,11 +1080,11 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3G: appendLogLine ready');
     console.log('[ESP-NOW] Chunk 3H: doSendMessage start');
     window.doSendMessage = function(mac) {
-      const val = (document.getElementById('msg-' + mac) || {}).value || '';
+      const val = (hw.$('msg-' + mac) || {}).value || '';
       if (!val) { alert('Enter a message'); return; }
       
       // Clear input immediately
-      const input = document.getElementById('msg-' + mac);
+      const input = hw.$('msg-' + mac);
       if (input) input.value = '';
       
       // Show message as "sending" immediately
@@ -1141,8 +1133,8 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3H: doSendMessage ready');
     console.log('[ESP-NOW] Chunk 3I: doBroadcast start');
     window.doBroadcast = function(){
-      const input = document.getElementById('broadcast-msg');
-      const statusDiv = document.getElementById('broadcast-status');
+      const input = hw.$('broadcast-msg');
+      const statusDiv = hw.$('broadcast-status');
       const msg = (input || {}).value || '';
       
       if (!msg) { 
@@ -1188,13 +1180,13 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3I: doBroadcast ready');
     console.log('[ESP-NOW] Chunk 3J: doSendFile start');
     window.doSendFile = function(mac) {
-      const path = (document.getElementById('fp-' + mac) || {}).value || '';
+      const path = (hw.$('fp-' + mac) || {}).value || '';
       if (!path) { 
         alert('Enter a file path or select a file from the explorer'); 
         return; 
       }
       
-      const statDiv = document.getElementById('fstat-' + mac);
+      const statDiv = hw.$('fstat-' + mac);
       const filename = path.split('/').pop();
       
       // Show sending status
@@ -1236,7 +1228,7 @@ window.togglePane = function(paneId, btnId) {
           
           // Clear file path input on success
           if (success) {
-            const fpInput = document.getElementById('fp-' + mac);
+            const fpInput = hw.$('fp-' + mac);
             if (fpInput) fpInput.value = '';
           }
         })
@@ -1252,19 +1244,19 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3J: doSendFile ready');
     console.log('[ESP-NOW] Chunk 3K: toggleMessageType start');
     window.toggleMessageType = function(mac, type) {
-      const textInput = document.getElementById('text-input-' + mac);
-      const remoteInput = document.getElementById('remote-input-' + mac);
-      const fileInput = document.getElementById('file-input-' + mac);
-      const metadataDiv = document.getElementById('metadata-' + mac);
-      const automationsInput = document.getElementById('automations-input-' + mac);
-      const sensorsInput = document.getElementById('sensors-input-' + mac);
-      const messageLog = document.getElementById('log-' + mac);
-      const btnText = document.getElementById('btn-text-' + mac);
-      const btnRemote = document.getElementById('btn-remote-' + mac);
-      const btnFile = document.getElementById('btn-file-' + mac);
-      const btnMetadata = document.getElementById('btn-metadata-' + mac);
-      const btnAutomations = document.getElementById('btn-automations-' + mac);
-      const btnSensors = document.getElementById('btn-sensors-' + mac);
+      const textInput = hw.$('text-input-' + mac);
+      const remoteInput = hw.$('remote-input-' + mac);
+      const fileInput = hw.$('file-input-' + mac);
+      const metadataDiv = hw.$('metadata-' + mac);
+      const automationsInput = hw.$('automations-input-' + mac);
+      const sensorsInput = hw.$('sensors-input-' + mac);
+      const messageLog = hw.$('log-' + mac);
+      const btnText = hw.$('btn-text-' + mac);
+      const btnRemote = hw.$('btn-remote-' + mac);
+      const btnFile = hw.$('btn-file-' + mac);
+      const btnMetadata = hw.$('btn-metadata-' + mac);
+      const btnAutomations = hw.$('btn-automations-' + mac);
+      const btnSensors = hw.$('btn-sensors-' + mac);
       
       if (!textInput || !remoteInput || !fileInput) return;
       
@@ -1282,9 +1274,9 @@ window.togglePane = function(paneId, btnId) {
       textInput.style.display = 'none';
       remoteInput.style.display = 'none';
       fileInput.style.display = 'none';
-      if (metadataDiv) metadataDiv.style.display = 'none';
-      if (automationsInput) automationsInput.style.display = 'none';
-      if (sensorsInput) sensorsInput.style.display = 'none';
+      hw.hide(metadataDiv);
+      hw.hide(automationsInput);
+      hw.hide(sensorsInput);
       
       // messageLog already declared as const above, reuse it
       
@@ -1299,42 +1291,42 @@ window.togglePane = function(paneId, btnId) {
         if (btnRemote) btnRemote.classList.add('interact-tab-active');
       } else if (type === 'file') {
         fileInput.style.display = 'block';
-        if (messageLog) messageLog.style.display = 'none';
+        hw.hide(messageLog);
         if (btnFile) btnFile.classList.add('interact-tab-active');
         // Initialize file browser when file mode is selected
         if (typeof window.initializeFileBrowser === 'function') {
           setTimeout(function() { window.initializeFileBrowser(mac); }, 100);
         }
       } else if (type === 'metadata') {
-        if (metadataDiv) metadataDiv.style.display = 'block';
-        if (messageLog) messageLog.style.display = 'none';
+        hw.show(metadataDiv);
+        hw.hide(messageLog);
         if (btnMetadata) btnMetadata.classList.add('interact-tab-active');
         // Load cached metadata if available; don't auto-request from device
         window.loadPeerMetadata(mac);
       } else if (type === 'automations') {
-        if (automationsInput) automationsInput.style.display = 'block';
-        if (messageLog) messageLog.style.display = 'none';
+        hw.show(automationsInput);
+        hw.hide(messageLog);
         if (btnAutomations) btnAutomations.classList.add('interact-tab-active');
         // Auto-load already-received automations file if it exists
         window.tryLoadExistingAutomations(mac);
         // Pre-fill credentials from remote tab if available
-        var ruEl = document.getElementById('ru-' + mac);
-        var rpEl = document.getElementById('rp-' + mac);
-        var auEl = document.getElementById('au-' + mac);
-        var apEl = document.getElementById('ap-' + mac);
+        var ruEl = hw.$('ru-' + mac);
+        var rpEl = hw.$('rp-' + mac);
+        var auEl = hw.$('au-' + mac);
+        var apEl = hw.$('ap-' + mac);
         if (ruEl && auEl && !auEl.value && ruEl.value) auEl.value = ruEl.value;
         if (rpEl && apEl && !apEl.value && rpEl.value) apEl.value = rpEl.value;
       } else if (type === 'sensors') {
-        if (sensorsInput) sensorsInput.style.display = 'block';
-        if (messageLog) messageLog.style.display = 'none';
+        hw.show(sensorsInput);
+        hw.hide(messageLog);
         if (btnSensors) btnSensors.classList.add('interact-tab-active');
         // Reflect what the peer is currently streaming (see loadSensorStreamingState).
         if (window.loadSensorStreamingState) window.loadSensorStreamingState(mac);
         // Pre-fill credentials from remote tab if available
-        var ruEl2 = document.getElementById('ru-' + mac);
-        var rpEl2 = document.getElementById('rp-' + mac);
-        var suEl = document.getElementById('su-' + mac);
-        var spEl = document.getElementById('sp-' + mac);
+        var ruEl2 = hw.$('ru-' + mac);
+        var rpEl2 = hw.$('rp-' + mac);
+        var suEl = hw.$('su-' + mac);
+        var spEl = hw.$('sp-' + mac);
         if (ruEl2 && suEl && !suEl.value && ruEl2.value) suEl.value = ruEl2.value;
         if (rpEl2 && spEl && !spEl.value && rpEl2.value) spEl.value = rpEl2.value;
       }
@@ -1342,15 +1334,15 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3K: toggleMessageType ready');
     console.log('[ESP-NOW] Chunk 3L: loadRemoteAutomations start');
     window.loadRemoteAutomations = function(mac) {
-      var listDiv = document.getElementById('automations-list-' + mac);
+      var listDiv = hw.$('automations-list-' + mac);
       if (!listDiv) return;
       if (window.__autoFetchState && window.__autoFetchState[mac]) {
         listDiv.innerHTML = '<div style="color:var(--muted);padding:12px;text-align:center">Transfer already in progress...</div>';
         window.setAutoButtonState(mac, { disabled: true, text: 'Transferring...' });
         return;
       }
-      var u = (document.getElementById('au-' + mac) || {}).value || '';
-      var p = (document.getElementById('ap-' + mac) || {}).value || '';
+      var u = (hw.$('au-' + mac) || {}).value || '';
+      var p = (hw.$('ap-' + mac) || {}).value || '';
       var esc = (typeof hw !== 'undefined' && hw._esc)
         ? hw._esc
         : function(s){return String(s).replace(/[&<>"]/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]||c;});};
@@ -1417,9 +1409,9 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3L: loadRemoteAutomations ready');
     console.log('[ESP-NOW] Chunk 3M: doRemoteExec start');
     window.doRemoteExec = function(mac) {
-      const u = (document.getElementById('ru-' + mac) || {}).value || '';
-      const p = (document.getElementById('rp-' + mac) || {}).value || '';
-      const c = (document.getElementById('rc-' + mac) || {}).value || '';
+      const u = (hw.$('ru-' + mac) || {}).value || '';
+      const p = (hw.$('rp-' + mac) || {}).value || '';
+      const c = (hw.$('rc-' + mac) || {}).value || '';
       if (!u || !p || !c) { alert('Enter username, password, and command'); return; }
       
       // Show command being executed in message log
@@ -1451,7 +1443,7 @@ window.togglePane = function(paneId, btnId) {
           }
           
           // Clear command input
-          const cmdInput = document.getElementById('rc-' + mac);
+          const cmdInput = hw.$('rc-' + mac);
           if (cmdInput) cmdInput.value = '';
         })
         .catch(e=> {
@@ -1459,21 +1451,19 @@ window.togglePane = function(paneId, btnId) {
           if (sendingBubble) {
             sendingBubble.className = 'message-bubble message-error';
             const textDiv = sendingBubble.querySelector('.message-text');
-            if (textDiv) textDiv.textContent = 'Remote: ' + c + ' (FAILED)';
+            hw.setText(textDiv, 'Remote: ' + c + ' (FAILED)');
             const statusDiv = sendingBubble.querySelector('.message-status');
-            if (statusDiv) {
-              statusDiv.innerHTML = '<span class="status-icon">✗</span>Failed';
-            }
+            hw.setHTML(statusDiv, '<span class="status-icon">✗</span>Failed');
           }
         });
     };
     console.log('[ESP-NOW] Chunk 3M: doRemoteExec ready');
     console.log('[ESP-NOW] Chunk 3N: toggleFileMode start');
     window.toggleFileMode = function(mac, mode) {
-      const sendPanel = document.getElementById('file-send-panel-' + mac);
-      const receivePanel = document.getElementById('file-receive-panel-' + mac);
-      const btnSend = document.getElementById('btn-file-send-' + mac);
-      const btnReceive = document.getElementById('btn-file-receive-' + mac);
+      const sendPanel = hw.$('file-send-panel-' + mac);
+      const receivePanel = hw.$('file-receive-panel-' + mac);
+      const btnSend = hw.$('btn-file-send-' + mac);
+      const btnReceive = hw.$('btn-file-receive-' + mac);
       
       if (!sendPanel || !receivePanel || !btnSend || !btnReceive) return;
       
@@ -1496,19 +1486,19 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 3N: toggleFileMode ready');
     console.log('[ESP-NOW] Chunk 3O: browseRemoteFiles start');
     window.browseRemoteFiles = function(mac, path) {
-      var u = (document.getElementById('remote-user-' + mac) || {}).value || '';
-      var p = (document.getElementById('remote-pass-' + mac) || {}).value || '';
-      var container = document.getElementById('remote-fexplorer-' + mac);
-      var statusDiv = document.getElementById('remote-fstat-' + mac);
+      var u = (hw.$('remote-user-' + mac) || {}).value || '';
+      var p = (hw.$('remote-pass-' + mac) || {}).value || '';
+      var container = hw.$('remote-fexplorer-' + mac);
+      var statusDiv = hw.$('remote-fstat-' + mac);
       
       if (!u || !p) {
-        if (statusDiv) statusDiv.textContent = 'Enter username and password first';
+        hw.setText(statusDiv, 'Enter username and password first');
         return;
       }
       
       if (!container) return;
       container.innerHTML = '<div class="remote-explorer"><div class="remote-explorer-crumb">Loading...</div><div class="remote-entry remote-entry-empty" style="display:flex">Requesting directory...</div></div>';
-      if (statusDiv) statusDiv.textContent = 'Requesting directory listing from ' + mac + '...';
+      hw.setText(statusDiv, 'Requesting directory listing from ' + mac + '...');
       
       var targetMac = String(mac || '').toUpperCase();
       var browsePath = path || '/';
@@ -1534,10 +1524,10 @@ window.togglePane = function(paneId, btnId) {
       .then(function(text) {
         if (!text.includes('Remote command sent')) {
           container.innerHTML = '<pre style="margin:0;white-space:pre-wrap;font-size:0.85em">' + text + '</pre>';
-          if (statusDiv) statusDiv.textContent = text;
+          hw.setText(statusDiv, text);
           return;
         }
-        if (statusDiv) statusDiv.textContent = 'Request sent, waiting for response...';
+        hw.setText(statusDiv, 'Request sent, waiting for response...');
 
         // Poll peer messages for streamed file listing output.
         // Two notes about the polling design (mirror of the BondFs fix):
@@ -1560,7 +1550,7 @@ window.togglePane = function(paneId, btnId) {
           if (pollCount > maxPolls) {
             clearInterval(pollInterval);
             container.innerHTML = '<div class="remote-explorer"><div class="remote-explorer-crumb">' + browsePath + '</div><div class="remote-entry remote-entry-empty" style="display:flex">Timed out waiting for response</div></div>';
-            if (statusDiv) statusDiv.textContent = 'Timed out';
+            hw.setText(statusDiv, 'Timed out');
             return;
           }
 
@@ -1627,16 +1617,16 @@ window.togglePane = function(paneId, btnId) {
                     label: 'Select',
                     title: 'Select this file — then click Fetch File to download it to this device',
                     fn: function(full) {
-                      var input = document.getElementById('remote-fp-' + mac);
+                      var input = hw.$('remote-fp-' + mac);
                       if (input) input.value = full;
-                      var sd = document.getElementById('remote-fstat-' + mac);
-                      if (sd) sd.textContent = 'Selected: ' + full + ' — click Fetch File to download';
+                      var sd = hw.$('remote-fstat-' + mac);
+                      hw.setText(sd, 'Selected: ' + full + ' — click Fetch File to download');
                     }
                   }]
                 });
-                if (statusDiv) statusDiv.textContent = 'Browse complete - ' + entries.length + ' items in ' + browsePath;
+                hw.setText(statusDiv, 'Browse complete - ' + entries.length + ' items in ' + browsePath);
               } else if (pollCount > 2) {
-                if (statusDiv) statusDiv.textContent = 'Waiting for response... (' + pollCount + '/' + maxPolls + ')';
+                hw.setText(statusDiv, 'Waiting for response... (' + pollCount + '/' + maxPolls + ')');
               }
             })
             .catch(function() {});
@@ -1644,7 +1634,7 @@ window.togglePane = function(paneId, btnId) {
       })
       .catch(function(e) {
         container.innerHTML = '<div style="color:var(--danger);padding:12px">Error: ' + e.message + '</div>';
-        if (statusDiv) statusDiv.textContent = 'Browse error: ' + e.message;
+        hw.setText(statusDiv, 'Browse error: ' + e.message);
       });
       
       }); // end of .finally() from seqBefore fetch
@@ -1694,12 +1684,12 @@ window.togglePane = function(paneId, btnId) {
     };
     console.log('[ESP-NOW] Chunk 3P: parseRemoteFileListing ready');
     window.fetchRemoteFile = function(mac) {
-      var u = (document.getElementById('remote-user-' + mac) || {}).value || '';
-      var p = (document.getElementById('remote-pass-' + mac) || {}).value || '';
-      var remotePath = (document.getElementById('remote-fp-' + mac) || {}).value || '';
-      var statusDiv = document.getElementById('remote-fstat-' + mac);
+      var u = (hw.$('remote-user-' + mac) || {}).value || '';
+      var p = (hw.$('remote-pass-' + mac) || {}).value || '';
+      var remotePath = (hw.$('remote-fp-' + mac) || {}).value || '';
+      var statusDiv = hw.$('remote-fstat-' + mac);
       if (!u || !p || !remotePath) {
-        if (statusDiv) statusDiv.textContent = 'Enter username, password, and remote file path';
+        hw.setText(statusDiv, 'Enter username, password, and remote file path');
         return;
       }
       var filename = remotePath.split('/').pop();
@@ -1797,8 +1787,8 @@ window.togglePane = function(paneId, btnId) {
     // peer's interact-panel Metadata tab. Distinct from loadLocalDeviceMetadata,
     // which loads THIS device's own metadata into the settings form.
     window.loadPeerMetadata = function(mac) {
-      const container = document.getElementById('metadata-content-' + mac)
-                     || document.getElementById('metadata-' + mac);
+      const container = hw.$('metadata-content-' + mac)
+                     || hw.$('metadata-' + mac);
       if (!container) return;
       
       container.innerHTML = '<div style="text-align:center;color:var(--panel-fg);padding:20px">Loading metadata...</div>';
@@ -1853,8 +1843,8 @@ window.togglePane = function(paneId, btnId) {
         });
     };
     window.syncMetadata = function(mac) {
-      const container = document.getElementById('metadata-content-' + mac)
-                     || document.getElementById('metadata-' + mac);
+      const container = hw.$('metadata-content-' + mac)
+                     || hw.$('metadata-' + mac);
       if (!container) return;
       
       container.innerHTML = '<div style="text-align:center;color:var(--panel-fg);padding:20px">Requesting metadata from device...</div>';
@@ -1889,7 +1879,7 @@ window.togglePane = function(paneId, btnId) {
         });
     };
     window.tryLoadExistingAutomations = function(mac) {
-      var listDiv = document.getElementById('automations-list-' + mac);
+      var listDiv = hw.$('automations-list-' + mac);
       if (!listDiv) return;
       
       var macHex = mac.replace(/:/g, '').toUpperCase();
@@ -2007,15 +1997,15 @@ window.togglePane = function(paneId, btnId) {
         });
     };
     window.toggleAutoDetail = function(detailId) {
-      var d = document.getElementById(detailId);
+      var d = hw.$(detailId);
       if (d) d.style.display = d.style.display === 'none' ? 'block' : 'none';
     };
     window.runRemoteAutomation = function(detailId, btn) {
       var entry = window.__autoCache && window.__autoCache[detailId];
       if (!entry || !entry.cmds || entry.cmds.length === 0) { alert('No commands to run'); return; }
       var mac = entry.mac;
-      var u = (document.getElementById('au-' + mac) || {}).value || '';
-      var p = (document.getElementById('ap-' + mac) || {}).value || '';
+      var u = (hw.$('au-' + mac) || {}).value || '';
+      var p = (hw.$('ap-' + mac) || {}).value || '';
       if (!u || !p) { alert('Enter username and password at the top of the Automations tab first.'); return; }
       var cmds = entry.cmds;
       var total = cmds.length;
@@ -2045,13 +2035,13 @@ window.togglePane = function(paneId, btnId) {
     window.sensorActiveState = window.sensorActiveState || {};
     window.sensorPendingState = window.sensorPendingState || {};
     window.updateSensorStatus = function(mac) {
-      var statusDiv = document.getElementById('sensor-status-' + mac);
+      var statusDiv = hw.$('sensor-status-' + mac);
       if (!statusDiv) return;
       var pendingCount = Object.keys(window.sensorPendingState[mac] || {}).length;
       statusDiv.textContent = pendingCount ? ('Pending changes: ' + pendingCount) : 'Select sensors and click Apply Streaming.';
     };
     window.updateSensorPill = function(mac, sensor) {
-      var pill = document.getElementById('sensor-pill-' + sensor + '-' + mac);
+      var pill = hw.$('sensor-pill-' + sensor + '-' + mac);
       if (!pill) return;
       pill.classList.remove('sensor-active','sensor-pending');
       var activeState = window.sensorActiveState[mac] && window.sensorActiveState[mac][sensor] === 'on';
@@ -2108,12 +2098,12 @@ window.togglePane = function(paneId, btnId) {
       window.ensureSensorState(mac);
       var pendingMap = window.sensorPendingState[mac];
       var entries = Object.entries(pendingMap);
-      var statusDiv = document.getElementById('sensor-status-' + mac);
-      var u = (document.getElementById('su-' + mac) || {}).value || '';
-      var p = (document.getElementById('sp-' + mac) || {}).value || '';
+      var statusDiv = hw.$('sensor-status-' + mac);
+      var u = (hw.$('su-' + mac) || {}).value || '';
+      var p = (hw.$('sp-' + mac) || {}).value || '';
       if (!u || !p) { alert('Enter username and password in Sensor Streaming tab'); return; }
       if (entries.length === 0) {
-        if (statusDiv) statusDiv.textContent = 'No pending changes to apply';
+        hw.setText(statusDiv, 'No pending changes to apply');
         return;
       }
       var idx = 0;
@@ -2121,13 +2111,13 @@ window.togglePane = function(paneId, btnId) {
       function processNext() {
         if (idx >= entries.length) {
           window.updateSensorStatus(mac);
-          if (statusDiv) statusDiv.textContent = results.join(' | ');
+          hw.setText(statusDiv, results.join(' | '));
           return;
         }
         var sensor = entries[idx][0];
         var desired = entries[idx][1];
         idx++;
-        if (statusDiv) statusDiv.textContent = 'Applying ' + sensor + ' ' + desired + '...';
+        hw.setText(statusDiv, 'Applying ' + sensor + ' ' + desired + '...');
         var cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' espnowsensorstream ' + sensor + ' ' + desired;
         hw.postFormText('/api/cli', { cmd: cmd })
         .then(function(resp){
@@ -2169,7 +2159,7 @@ window.togglePane = function(paneId, btnId) {
           addMessageToLog('SENT', 'To ' + mac + ': ' + message);
           addMessageToLog('RESULT', text);
           if (text && text.indexOf('Message sent') >= 0) {
-            document.getElementById('send-message').value = '';
+            hw.$('send-message').value = '';
           }
         })
         .catch(error => {
@@ -2177,7 +2167,7 @@ window.togglePane = function(paneId, btnId) {
         });
     };
     window.addMessageToLog = function(type, message) {
-      const log = document.getElementById('message-log');
+      const log = hw.$('message-log');
       if (!log) return;
       const timestamp = new Date().toLocaleTimeString();
       let className = 'message-item';
@@ -2240,8 +2230,8 @@ window.togglePane = function(paneId, btnId) {
           window.__meshPeers = data.peers || [];
           window.__meshUnpaired = data.unpaired || [];
           // Show mesh views card when we have mesh data
-          var viewsCard = document.getElementById('mesh-views-card');
-          if (viewsCard) viewsCard.style.display = 'block';
+          var viewsCard = hw.$('mesh-views-card');
+          hw.show(viewsCard);
           window.renderUnifiedDeviceList();
         } catch(e) {
           console.error('[ESP-NOW] Error parsing mesh status:', e);
@@ -2290,13 +2280,13 @@ window.togglePane = function(paneId, btnId) {
       var buttons = ['btn-view-topology', 'btn-view-graph'];
       
       views.forEach(function(v, idx) {
-        var elem = document.getElementById('mesh-view-' + v);
-        var btn = document.getElementById(buttons[idx]);
+        var elem = hw.$('mesh-view-' + v);
+        var btn = hw.$(buttons[idx]);
         if (v === view) {
-          if (elem) elem.style.display = 'block';
+          hw.show(elem);
           if (btn) btn.style.background = 'var(--crumb-bg)';
         } else {
-          if (elem) elem.style.display = 'none';
+          hw.hide(elem);
           if (btn) btn.style.background = '';
         }
       });
@@ -2315,7 +2305,7 @@ window.togglePane = function(paneId, btnId) {
       hw.postFormText('/api/cli', { cmd: 'espnowtoporesults' })
       .then(output => {
         console.log('[ESP-NOW] Topology results:', output);
-        var container = document.getElementById('mesh-topology-view');
+        var container = hw.$('mesh-topology-view');
         if (!container) return;
         
         // Check if we have topology data
@@ -2456,17 +2446,15 @@ window.togglePane = function(paneId, btnId) {
       })
       .catch(error => {
         console.error('[ESP-NOW] Topology fetch error:', error);
-        var container = document.getElementById('mesh-topology-view');
-        if (container) {
-          container.innerHTML = '<div style="color:var(--danger);text-align:center;">Error loading topology: ' + error + '</div>';
-        }
+        var container = hw.$('mesh-topology-view');
+        hw.setHTML(container, '<div style="color:var(--danger);text-align:center;">Error loading topology: ' + error + '</div>');
       });
     };
     
     // Refresh network graph view
     window.refreshGraphView = function() {
       console.log('[ESP-NOW] Refreshing graph view...');
-      var container = document.getElementById('mesh-graph-view');
+      var container = hw.$('mesh-graph-view');
       if (!container) return;
       
       // Fetch both direct peers and current device status
@@ -2485,7 +2473,7 @@ window.togglePane = function(paneId, btnId) {
         if (macMatch) {
           deviceMac = macMatch[1];
           // Try to get device name from page title
-          var titleElem = document.querySelector('h1');
+          var titleElem = hw.qs('h1');
           if (titleElem && titleElem.textContent) {
             deviceName = titleElem.textContent.trim();
           }
@@ -2533,7 +2521,7 @@ window.togglePane = function(paneId, btnId) {
     // Auto-topology toggle
     window.autoTopoInterval = null;
     window.toggleAutoTopology = function() {
-      var btn = document.getElementById('btn-auto-topology');
+      var btn = hw.$('btn-auto-topology');
       if (!btn) return;
       
       if (window.autoTopoInterval) {
@@ -2565,7 +2553,7 @@ window.togglePane = function(paneId, btnId) {
       console.log('[ESP-NOW] Refreshing mesh role...');
       function applyMeshRole(output) {
         console.log('[ESP-NOW] Mesh role response:', output);
-        var statusDiv = document.getElementById('mesh-role-status');
+        var statusDiv = hw.$('mesh-role-status');
         if (!statusDiv) return;
         var roleMatch = output.match(/Mesh role:\s*(\w+)/i);
         var masterMatch = output.match(/Master MAC:\s*([A-Fa-f0-9:]{17})/i);
@@ -2581,33 +2569,33 @@ window.togglePane = function(paneId, btnId) {
           html += '<br><strong>Backup MAC:</strong> ' + backupMAC;
         }
         statusDiv.innerHTML = html;
-        var backupCheckbox = document.getElementById('backup-master-enabled');
+        var backupCheckbox = hw.$('backup-master-enabled');
         if (backupCheckbox) backupCheckbox.checked = backupEnabled;
-        var masterGroup = document.getElementById('master-mac')?.parentElement;
-        var backupMacGroup = document.getElementById('backup-mac-group');
+        var masterGroup = hw.$('master-mac')?.parentElement;
+        var backupMacGroup = hw.$('backup-mac-group');
         if (role.toLowerCase() === 'master') {
-          if (masterGroup) masterGroup.style.display = 'none';
-          if (backupMacGroup) backupMacGroup.style.display = backupEnabled ? 'flex' : 'none';
+          hw.hide(masterGroup);
+          hw.toggle(backupMacGroup, (backupEnabled));
           if (backupEnabled && backupMAC !== 'Not set') {
-            var backupInput = document.getElementById('backup-mac');
+            var backupInput = hw.$('backup-mac');
             if (backupInput) backupInput.value = backupMAC;
           }
         } else if (role.toLowerCase() === 'backup') {
-          if (masterGroup) masterGroup.style.display = 'flex';
-          if (backupMacGroup) backupMacGroup.style.display = 'none';
+          hw.show(masterGroup);
+          hw.hide(backupMacGroup);
           if (masterMAC !== 'Not set') {
-            var masterInput = document.getElementById('master-mac');
+            var masterInput = hw.$('master-mac');
             if (masterInput) masterInput.value = masterMAC;
           }
         } else {
-          if (masterGroup) masterGroup.style.display = 'flex';
-          if (backupMacGroup) backupMacGroup.style.display = backupEnabled ? 'flex' : 'none';
+          hw.show(masterGroup);
+          hw.toggle(backupMacGroup, (backupEnabled));
           if (masterMAC !== 'Not set') {
-            var masterInput = document.getElementById('master-mac');
+            var masterInput = hw.$('master-mac');
             if (masterInput) masterInput.value = masterMAC;
           }
           if (backupEnabled && backupMAC !== 'Not set') {
-            var backupInput = document.getElementById('backup-mac');
+            var backupInput = hw.$('backup-mac');
             if (backupInput) backupInput.value = backupMAC;
           }
         }
@@ -2620,8 +2608,8 @@ window.togglePane = function(paneId, btnId) {
       .then(applyMeshRole)
       .catch(error => {
         console.error('[ESP-NOW] Mesh role fetch error:', error);
-        var statusDiv = document.getElementById('mesh-role-status');
-        if (statusDiv) statusDiv.innerHTML = '<span style="color:var(--danger);">Error: ' + error + '</span>';
+        var statusDiv = hw.$('mesh-role-status');
+        hw.setHTML(statusDiv, '<span style="color:var(--danger);">Error: ' + error + '</span>');
       });
     };
     
@@ -2639,7 +2627,7 @@ window.togglePane = function(paneId, btnId) {
     };
     
     window.setMasterMAC = function() {
-      var mac = (document.getElementById('master-mac') || {}).value || '';
+      var mac = (hw.$('master-mac') || {}).value || '';
       if (!mac || mac.length !== 17) {
         alert('Enter a valid MAC address (XX:XX:XX:XX:XX:XX)');
         return;
@@ -2657,7 +2645,7 @@ window.togglePane = function(paneId, btnId) {
     };
     
     window.setBackupMAC = function() {
-      var mac = (document.getElementById('backup-mac') || {}).value || '';
+      var mac = (hw.$('backup-mac') || {}).value || '';
       if (!mac || mac.length !== 17) {
         alert('Enter a valid MAC address (XX:XX:XX:XX:XX:XX)');
         return;
@@ -2676,16 +2664,16 @@ window.togglePane = function(paneId, btnId) {
     
     window.toggleBackupMaster = function(enabled) {
       console.log('[ESP-NOW] Toggling backup master:', enabled);
-      var backupMacGroup = document.getElementById('backup-mac-group');
+      var backupMacGroup = hw.$('backup-mac-group');
       hw.postFormText('/api/cli', { cmd: 'espnowbackupenable ' + (enabled ? 'on' : 'off') })
       .then(output => {
         console.log('[ESP-NOW] Backup enable response:', output);
-        if (backupMacGroup) backupMacGroup.style.display = enabled ? 'flex' : 'none';
+        hw.toggle(backupMacGroup, (enabled));
         window.refreshMeshRole();
       })
       .catch(error => {
         console.error('[ESP-NOW] Error toggling backup master:', error);
-        var cb = document.getElementById('backup-master-enabled');
+        var cb = hw.$('backup-master-enabled');
         if (cb) cb.checked = !enabled;
       });
     };
@@ -2693,10 +2681,10 @@ window.togglePane = function(paneId, btnId) {
     window.__topoDiscoveryInterval = null;
     window.discoverTopology = function() {
       console.log('[ESP-NOW] Discovering topology...');
-      var topoDiv = document.getElementById('mesh-topology-data');
-      var resultsDiv = document.getElementById('topology-results');
-      if (topoDiv) topoDiv.style.display = 'block';
-      if (resultsDiv) resultsDiv.innerHTML = 'Discovering topology... (this may take up to 10 seconds)';
+      var topoDiv = hw.$('mesh-topology-data');
+      var resultsDiv = hw.$('topology-results');
+      hw.show(topoDiv);
+      hw.setHTML(resultsDiv, 'Discovering topology... (this may take up to 10 seconds)');
       
       // Clear any existing polling interval
       if (window.__topoDiscoveryInterval) {
@@ -2707,9 +2695,7 @@ window.togglePane = function(paneId, btnId) {
       hw.postFormText('/api/cli', { cmd: 'espnowmeshtopo' })
       .then(output => {
         console.log('[ESP-NOW] Topology discovery response:', output);
-        if (resultsDiv) {
-          resultsDiv.innerHTML = '<pre style="margin:0;white-space:pre-wrap;color:var(--panel-fg);">' + output + '</pre>';
-        }
+        hw.setHTML(resultsDiv, '<pre style="margin:0;white-space:pre-wrap;color:var(--panel-fg);">' + output + '</pre>');
         
         // Bail early if the command itself failed
         if (!output || output.indexOf('ERROR') >= 0 || output.indexOf('No topology') >= 0 || output.indexOf('not enabled') >= 0) {
@@ -2741,7 +2727,7 @@ window.togglePane = function(paneId, btnId) {
       })
       .catch(error => {
         console.error('[ESP-NOW] Topology discovery error:', error);
-        if (resultsDiv) resultsDiv.innerHTML = '<span style="color:var(--danger);">Error: ' + error + '</span>';
+        hw.setHTML(resultsDiv, '<span style="color:var(--danger);">Error: ' + error + '</span>');
       });
     };
     
@@ -2754,43 +2740,52 @@ window.togglePane = function(paneId, btnId) {
   try {
     console.log('[ESP-NOW] Chunk 5: Button handlers start');
     window.setupButtonHandlers = function() {
-      var _on = function(id, evt, fn){ var el = document.getElementById(id); if (el) el.addEventListener(evt, fn); };
-      document.getElementById('btn-espnow-init').addEventListener('click', function() {
+      var _on = function(id, evt, fn){ var el = hw.$(id); hw.on(el, evt, fn); };
+      // CLI post that preserves the device's message on failure: /api/cli
+      // signals a failed command with HTTP 400 and the REAL reason in the
+      // body, which postFormText discards as 'HTTP 400'.
+      var cliText = function(cmd){
+        return hw.postForm('/api/cli', { cmd: cmd }).then(function(r){ return r.text(); });
+      };
+      hw.$('btn-espnow-init').addEventListener('click', function() {
         // Check if first-time setup is needed
         hw.postFormText('/api/cli', { cmd: 'espnowsetname' })
         .then(text => {
           // If device name is not set, show setup modal
           if (text.indexOf('(not set)') >= 0) {
-            document.getElementById('setup-modal').classList.add('show');
-            document.getElementById('setup-device-name').focus();
+            hw.$('setup-modal').classList.add('show');
+            hw.$('setup-device-name').focus();
           } else {
             // Name is set, proceed with init
-            return hw.postFormText('/api/cli', { cmd: 'openespnow' })
+            // Explicit user init: flip the persisted enable switch first —
+            // openespnow refuses while espnowenabled=0 (the first-run default).
+            return cliText('espnowenabled 1')
+            .then(function(){ return cliText('openespnow'); })
             .then(text => {
-              document.getElementById('espnow-status-data').textContent = text;
+              hw.$('espnow-status-data').textContent = text;
               refreshStatus();
             });
           }
         })
         .catch(error => {
-          document.getElementById('espnow-status-data').textContent = 'Error: ' + error;
+          hw.$('espnow-status-data').textContent = 'Error: ' + error;
         });
       });
-      document.getElementById('btn-espnow-disable').addEventListener('click', async function() {
+      hw.$('btn-espnow-disable').addEventListener('click', async function() {
         if (!await hwConfirm('Disable ESP-NOW? This will stop all ESP-NOW communication. Memory will remain allocated until reboot.')) {
           return;
         }
         hw.postFormText('/api/cli', { cmd: 'closeespnow' })
         .then(text => {
-          document.getElementById('espnow-status-data').textContent = text;
+          hw.$('espnow-status-data').textContent = text;
           refreshStatus();
         })
         .catch(error => {
-          document.getElementById('espnow-status-data').textContent = 'Error: ' + error;
+          hw.$('espnow-status-data').textContent = 'Error: ' + error;
         });
       });
-      document.getElementById('btn-espnow-refresh').addEventListener('click', refreshStatus);
-      document.getElementById('btn-espnow-toggle-mode').addEventListener('click', function() {
+      hw.$('btn-espnow-refresh').addEventListener('click', refreshStatus);
+      hw.$('btn-espnow-toggle-mode').addEventListener('click', function() {
         /* Fetch current mode, then toggle to the other */
         hw.postFormText('/api/cli', { cmd: 'espnowmode' })
           .then(curr => {
@@ -2808,15 +2803,15 @@ window.togglePane = function(paneId, btnId) {
       // 2+ meshes are configured) AND the user picked something other than
       // the default. When omitted, the CLI uses the default mesh.
       function pairMeshArg() {
-        var sel = document.getElementById('pair-mesh');
+        var sel = hw.$('pair-mesh');
         if (!sel) return '';
         if (sel.style.display === 'none') return '';
         if (!sel.value) return '';
         return ' ' + sel.value;
       }
-      document.getElementById('btn-pair-device').addEventListener('click', function() {
-        const mac = document.getElementById('pair-mac').value.trim();
-        const name = document.getElementById('pair-name').value.trim();
+      hw.$('btn-pair-device').addEventListener('click', function() {
+        const mac = hw.$('pair-mac').value.trim();
+        const name = hw.$('pair-name').value.trim();
         if (!mac || !name) {
           alert('Please enter both MAC address and device name');
           return;
@@ -2825,8 +2820,8 @@ window.togglePane = function(paneId, btnId) {
         .then(text => {
           addMessageToLog('PAIR', text);
           if (text && text.indexOf('paired successfully') >= 0) {
-            document.getElementById('pair-mac').value = '';
-            document.getElementById('pair-name').value = '';
+            hw.$('pair-mac').value = '';
+            hw.$('pair-name').value = '';
             listDevices();
           }
         })
@@ -2834,9 +2829,9 @@ window.togglePane = function(paneId, btnId) {
           addMessageToLog('ERROR', 'Pair error: ' + error);
         });
       });
-      document.getElementById('btn-pair-secure').addEventListener('click', function() {
-        const mac = document.getElementById('pair-mac').value.trim();
-        const name = document.getElementById('pair-name').value.trim();
+      hw.$('btn-pair-secure').addEventListener('click', function() {
+        const mac = hw.$('pair-mac').value.trim();
+        const name = hw.$('pair-name').value.trim();
         if (!mac || !name) {
           alert('Please enter both MAC address and device name');
           return;
@@ -2845,8 +2840,8 @@ window.togglePane = function(paneId, btnId) {
         .then(text => {
           addMessageToLog('PAIR_SECURE', text);
           if (text && text.indexOf('paired successfully') >= 0) {
-            document.getElementById('pair-mac').value = '';
-            document.getElementById('pair-name').value = '';
+            hw.$('pair-mac').value = '';
+            hw.$('pair-name').value = '';
             listDevices();
           }
         })
@@ -2854,23 +2849,23 @@ window.togglePane = function(paneId, btnId) {
           addMessageToLog('ERROR', 'Secure pair error: ' + error);
         });
       });
-      document.getElementById('btn-refresh-mesh').addEventListener('click', function() {
+      hw.$('btn-refresh-mesh').addEventListener('click', function() {
         console.log('[ESP-NOW] Refresh mesh button clicked');
         if (typeof window.refreshMeshStatus === 'function') {
           window.refreshMeshStatus();
         }
       });
-      document.getElementById('btn-auto-topology').addEventListener('click', function() {
+      hw.$('btn-auto-topology').addEventListener('click', function() {
         if (typeof window.toggleAutoTopology === 'function') {
           window.toggleAutoTopology();
         }
       });
-      document.getElementById('btn-view-topology').addEventListener('click', function() {
+      hw.$('btn-view-topology').addEventListener('click', function() {
         if (typeof window.switchMeshView === 'function') {
           window.switchMeshView('topology');
         }
       });
-      document.getElementById('btn-view-graph').addEventListener('click', function() {
+      hw.$('btn-view-graph').addEventListener('click', function() {
         if (typeof window.switchMeshView === 'function') {
           window.switchMeshView('graph');
         }
@@ -2885,32 +2880,32 @@ window.togglePane = function(paneId, btnId) {
       _on('backup-master-enabled','change', function() { window.toggleBackupMaster(this.checked); });
       /* Device metadata button handlers */
       _on('btn-set-friendly','click', function() {
-        const val = document.getElementById('friendly-name').value;
+        const val = hw.$('friendly-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowfriendlyname "'+val+'"' })
-          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-room','click', function() {
-        const val = document.getElementById('room-name').value;
+        const val = hw.$('room-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowroom "'+val+'"' })
-          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-zone','click', function() {
-        const val = document.getElementById('zone-name').value;
+        const val = hw.$('zone-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowzone "'+val+'"' })
-          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-tags','click', function() {
-        const val = document.getElementById('tags-input').value;
+        const val = hw.$('tags-input').value;
         hw.postFormText('/api/cli', { cmd: 'espnowtags "'+val+'"' })
-          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('stationary-checkbox','change', function() {
-        const checked = document.getElementById('stationary-checkbox').checked;
+        const checked = hw.$('stationary-checkbox').checked;
         hw.postFormText('/api/cli', { cmd: 'espnowstationary '+(checked?'on':'off') })
-          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-channel','click', function() {
-        var sel = document.getElementById('channel-select');
+        var sel = hw.$('channel-select');
         if (sel && typeof window.setChannel === 'function') window.setChannel(sel.value);
       });
       // NOTE: The old single-passphrase Encryption card was replaced by the
@@ -2919,8 +2914,8 @@ window.togglePane = function(paneId, btnId) {
       // chunk below. The standalone btn-set-passphrase / btn-clear-passphrase
       // buttons no longer exist.
       _on('btn-send-message','click', function() {
-        const mac = document.getElementById('send-mac').value.trim();
-        const message = document.getElementById('send-message').value.trim();
+        const mac = hw.$('send-mac').value.trim();
+        const message = hw.$('send-message').value.trim();
         if (!message) {
           alert('Please enter a message to send');
           return;
@@ -2932,7 +2927,7 @@ window.togglePane = function(paneId, btnId) {
         sendMessage(mac, message);
       });
       _on('btn-broadcast-message','click', function() {
-        const message = document.getElementById('send-message').value.trim();
+        const message = hw.$('send-message').value.trim();
         if (!message) {
           alert('Please enter a message to broadcast');
           return;
@@ -2941,7 +2936,7 @@ window.togglePane = function(paneId, btnId) {
         .then(text => {
           addMessageToLog('BROADCAST', text);
           if (text && text.indexOf('Broadcast sent') >= 0) {
-            document.getElementById('send-message').value = '';
+            hw.$('send-message').value = '';
           }
         })
         .catch(error => {
@@ -2949,43 +2944,43 @@ window.togglePane = function(paneId, btnId) {
         });
       });
       _on('btn-clear-log','click', function() {
-        document.getElementById('message-log').innerHTML = '<div style="color:var(--muted); text-align: center;">Message log cleared</div>';
+        hw.$('message-log').innerHTML = '<div style="color:var(--muted); text-align: center;">Message log cleared</div>';
         window.messageCount = 0;
       });
       /* File transfer button handlers */
       _on('btn-send-file','click', function() {
-        const mac = document.getElementById('file-target-mac').value.trim();
-        const filepath = document.getElementById('file-path').value.trim();
+        const mac = hw.$('file-target-mac').value.trim();
+        const filepath = hw.$('file-path').value.trim();
         if (!mac || !filepath) {
-          document.getElementById('file-transfer-status').textContent = 'Error: Please enter both MAC address and file path';
+          hw.$('file-transfer-status').textContent = 'Error: Please enter both MAC address and file path';
           return;
         }
-        document.getElementById('file-transfer-status').textContent = 'Sending file...';
+        hw.$('file-transfer-status').textContent = 'Sending file...';
         hw.postFormText('/api/cli', { cmd: 'espnowsendfile ' + mac + ' "' + filepath + '"' })
         .then(text => {
-          document.getElementById('file-transfer-status').textContent = text;
+          hw.$('file-transfer-status').textContent = text;
           if (text.indexOf('successfully') >= 0) {
             addMessageToLog('FILE', text);
           }
         })
         .catch(error => {
-          document.getElementById('file-transfer-status').textContent = 'Error: ' + error;
+          hw.$('file-transfer-status').textContent = 'Error: ' + error;
         });
       });
       _on('btn-list-files','click', function() {
-        document.getElementById('file-transfer-status').textContent = 'Listing files...';
+        hw.$('file-transfer-status').textContent = 'Listing files...';
         hw.postFormText('/api/cli', { cmd: 'ls' })
         .then(text => {
-          document.getElementById('file-transfer-status').innerHTML = '<pre style="margin:0;white-space:pre-wrap;word-wrap:break-word;">' + text + '</pre>';
+          hw.$('file-transfer-status').innerHTML = '<pre style="margin:0;white-space:pre-wrap;word-wrap:break-word;">' + text + '</pre>';
         })
         .catch(error => {
-          document.getElementById('file-transfer-status').textContent = 'Error: ' + error;
+          hw.$('file-transfer-status').textContent = 'Error: ' + error;
         });
       });
       /* Remote command button handlers */
       _on('btn-send-remote','click', executeRemoteCommand);
       _on('btn-clear-remote-log','click', function() {
-        document.getElementById('remote-results-log').innerHTML = '<div style="color:var(--muted); text-align: center;">Remote command results cleared</div>';
+        hw.$('remote-results-log').innerHTML = '<div style="color:var(--muted); text-align: center;">Remote command results cleared</div>';
       });
       /* Enter key support for remote command */
       _on('remote-command','keypress', function(e) {
@@ -2996,8 +2991,8 @@ window.togglePane = function(paneId, btnId) {
       
       /* First-time setup modal handlers */
       _on('btn-setup-save','click', function() {
-        const deviceName = document.getElementById('setup-device-name').value.trim();
-        const errorDiv = document.getElementById('setup-error');
+        const deviceName = hw.$('setup-device-name').value.trim();
+        const errorDiv = hw.$('setup-error');
         
         // Validate name
         if (deviceName.length === 0) {
@@ -3024,11 +3019,17 @@ window.togglePane = function(paneId, btnId) {
             errorDiv.style.display = 'block';
           } else {
             // Success! Now initialize ESP-NOW
-            return hw.postFormText('/api/cli', { cmd: 'openespnow' })
+            return cliText('espnowenabled 1')
+            .then(function(){ return cliText('openespnow'); })
             .then(initText => {
-              document.getElementById('espnow-status-data').textContent = 'Device name set to: ' + deviceName + '\n\n' + initText;
-              document.getElementById('setup-modal').classList.remove('show');
-              document.getElementById('setup-device-name').value = '';
+              if (initText.indexOf('ERROR') === 0 || initText.indexOf('Error') === 0) {
+                errorDiv.textContent = initText;
+                errorDiv.style.display = 'block';
+                return;
+              }
+              hw.$('espnow-status-data').textContent = 'Device name set to: ' + deviceName + '\n\n' + initText;
+              hw.$('setup-modal').classList.remove('show');
+              hw.$('setup-device-name').value = '';
               errorDiv.style.display = 'none';
               refreshStatus();
             });
@@ -3041,15 +3042,15 @@ window.togglePane = function(paneId, btnId) {
       });
       
       _on('btn-setup-cancel','click', function() {
-        document.getElementById('setup-modal').classList.remove('show');
-        document.getElementById('setup-device-name').value = '';
-        document.getElementById('setup-error').style.display = 'none';
+        hw.$('setup-modal').classList.remove('show');
+        hw.$('setup-device-name').value = '';
+        hw.$('setup-error').style.display = 'none';
       });
       
       /* Enter key support for setup modal */
       _on('setup-device-name','keypress', function(e) {
         if (e.key === 'Enter') {
-          document.getElementById('btn-setup-save').click();
+          hw.$('btn-setup-save').click();
         }
       });
     };
@@ -3062,10 +3063,10 @@ window.togglePane = function(paneId, btnId) {
   try {
     console.log('[ESP-NOW] Chunk 5b: Remote command functions start');
     window.setRemoteCommand = function(command) {
-      document.getElementById('remote-command').value = command;
+      hw.$('remote-command').value = command;
     };
     window.addRemoteResultToLog = function(type, message) {
-      const log = document.getElementById('remote-results-log');
+      const log = hw.$('remote-results-log');
       if (!log) return;
       const timestamp = new Date().toLocaleTimeString();
       let className = 'message-item';
@@ -3091,10 +3092,10 @@ window.togglePane = function(paneId, btnId) {
       log.scrollTop = log.scrollHeight;
     };
     window.executeRemoteCommand = function() {
-      const device = document.getElementById('remote-device').value.trim();
-      const username = document.getElementById('remote-username').value.trim();
-      const password = document.getElementById('remote-password').value.trim();
-      const command = document.getElementById('remote-command').value.trim();
+      const device = hw.$('remote-device').value.trim();
+      const username = hw.$('remote-username').value.trim();
+      const password = hw.$('remote-password').value.trim();
+      const command = hw.$('remote-command').value.trim();
       
       if (!device || !username || !password || !command) {
         alert('Please fill in all fields: device, username, password, and command');
@@ -3126,18 +3127,18 @@ window.togglePane = function(paneId, btnId) {
     console.log('[ESP-NOW] Chunk 5c: Device metadata functions');
     window.loadLocalDeviceMetadata = function(preloadedText) {
       function applyMetadata(text) {
-        const statusDiv = document.getElementById('device-metadata-status');
-        if (statusDiv) statusDiv.textContent = text;
+        const statusDiv = hw.$('device-metadata-status');
+        hw.setText(statusDiv, text);
         const friendlyMatch = text.match(/Friendly Name:\s*(.+)/);
         const roomMatch = text.match(/Room:\s*(.+)/);
         const zoneMatch = text.match(/Zone:\s*(.+)/);
         const tagsMatch = text.match(/Tags:\s*(.+)/);
         const stationaryMatch = text.match(/Stationary:\s*(true|false|yes|no)/i);
-        const friendlyInput = document.getElementById('friendly-name');
-        const roomInput = document.getElementById('room-name');
-        const zoneInput = document.getElementById('zone-name');
-        const tagsInput = document.getElementById('tags-input');
-        const stationaryCheckbox = document.getElementById('stationary-checkbox');
+        const friendlyInput = hw.$('friendly-name');
+        const roomInput = hw.$('room-name');
+        const zoneInput = hw.$('zone-name');
+        const tagsInput = hw.$('tags-input');
+        const stationaryCheckbox = hw.$('stationary-checkbox');
         if (friendlyInput && friendlyMatch) {
           const val = friendlyMatch[1].trim();
           friendlyInput.value = (val === '(not set)') ? '' : val;
@@ -3173,7 +3174,7 @@ window.togglePane = function(paneId, btnId) {
     /* Preferred ESP-NOW radio channel: read via 'espnowchannel' (no arg) and
        populate the select + status. The select is filled once (Auto + 1-13). */
     window.refreshChannel = function() {
-      var sel = document.getElementById('channel-select');
+      var sel = hw.$('channel-select');
       if (sel && sel.options.length === 0) {
         var opts = '<option value="auto">Auto (follow Wi-Fi)</option>';
         for (var c = 1; c <= 13; c++) opts += '<option value="' + c + '">Channel ' + c + '</option>';
@@ -3181,7 +3182,7 @@ window.togglePane = function(paneId, btnId) {
       }
       hw.postFormText('/api/cli', { cmd: 'espnowchannel' })
       .then(function(text) {
-        var statusDiv = document.getElementById('channel-status');
+        var statusDiv = hw.$('channel-status');
         var prefMatch = text.match(/channel preference:\s*(auto|\d+)/i);
         var radioMatch = text.match(/Radio channel now:\s*(\d+)/i);
         var pref = prefMatch ? prefMatch[1].toLowerCase() : 'auto';
@@ -3195,8 +3196,8 @@ window.togglePane = function(paneId, btnId) {
         }
       })
       .catch(function(error) {
-        var statusDiv = document.getElementById('channel-status');
-        if (statusDiv) statusDiv.innerHTML = '<span style="color:var(--danger);">Error: ' + error + '</span>';
+        var statusDiv = hw.$('channel-status');
+        hw.setHTML(statusDiv, '<span style="color:var(--danger);">Error: ' + error + '</span>');
       });
     };
 
@@ -3246,10 +3247,10 @@ window.togglePane = function(paneId, btnId) {
     };
 
     function renderMeshesTable(data) {
-      var tbl = document.getElementById('meshes-table');
-      var addRow = document.getElementById('meshes-add-row');
-      var fullMsg = document.getElementById('meshes-full-msg');
-      var activeLabel = document.getElementById('mesh-active-label');
+      var tbl = hw.$('meshes-table');
+      var addRow = hw.$('meshes-add-row');
+      var fullMsg = hw.$('meshes-full-msg');
+      var activeLabel = hw.$('mesh-active-label');
       if (!tbl) return;
 
       // Active mesh pill
@@ -3262,13 +3263,13 @@ window.togglePane = function(paneId, btnId) {
           }
         }
       }
-      if (activeLabel) activeLabel.textContent = defLabel;
+      hw.setText(activeLabel, defLabel);
 
       // Empty state
       if (!data || !Array.isArray(data.meshes) || data.meshes.length === 0) {
         tbl.innerHTML = '<div style="color:var(--muted);font-size:.85em;padding:8px 0">No meshes configured.</div>';
-        if (addRow) addRow.style.display = '';
-        if (fullMsg) fullMsg.style.display = 'none';
+        hw.show(addRow);
+        hw.hide(fullMsg);
         return;
       }
 
@@ -3309,14 +3310,14 @@ window.togglePane = function(paneId, btnId) {
 
       // Show "+ Add mesh" form only if there's a free slot.
       var hasFreeSlot = (data.configuredCount || 0) < (data.nMeshes || 4);
-      if (addRow) addRow.style.display = hasFreeSlot ? '' : 'none';
-      if (fullMsg) fullMsg.style.display = hasFreeSlot ? 'none' : '';
+      hw.toggle(addRow, (hasFreeSlot));
+      hw.toggle(fullMsg, !(hasFreeSlot));
     }
 
     // Update the pair-form mesh chooser. Only visible when 2+ enabled meshes
     // exist (per UX decision D4). Default mesh is preselected.
     function updatePairChooser(data) {
-      var sel = document.getElementById('pair-mesh');
+      var sel = hw.$('pair-mesh');
       if (!sel) return;
       var meshes = (data && Array.isArray(data.meshes)) ? data.meshes.filter(function(m) { return m.enabled; }) : [];
       if (meshes.length < 2) {
@@ -3385,10 +3386,10 @@ window.togglePane = function(paneId, btnId) {
     function toggleActionPanel(slot, label) {
       var mesh = findMesh(slot);
       if (!mesh) return;
-      var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+      var panel = hw.qs('.mesh-row-actions[data-slot="' + slot + '"]');
       if (!panel) return;
       // Close any other open panels first
-      document.querySelectorAll('.mesh-row-actions').forEach(function(p) {
+      hw.qsa('.mesh-row-actions').forEach(function(p) {
         if (p !== panel) { p.style.display = 'none'; p.innerHTML = ''; }
       });
       // Toggle this one
@@ -3402,7 +3403,7 @@ window.togglePane = function(paneId, btnId) {
     }
 
     function closeAllActionPanels() {
-      document.querySelectorAll('.mesh-row-actions').forEach(function(p) {
+      hw.qsa('.mesh-row-actions').forEach(function(p) {
         p.style.display = 'none';
         p.innerHTML = '';
       });
@@ -3410,7 +3411,7 @@ window.togglePane = function(paneId, btnId) {
 
     // Inline-expand passphrase entry (UX decision D1).
     function showPassphraseSubform(slot, label) {
-      var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+      var panel = hw.qs('.mesh-row-actions[data-slot="' + slot + '"]');
       if (!panel) return;
       var sf = panel.querySelector('.mesh-subform');
       if (!sf) return;
@@ -3429,7 +3430,7 @@ window.togglePane = function(paneId, btnId) {
     }
 
     function showRenameSubform(slot, label) {
-      var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+      var panel = hw.qs('.mesh-row-actions[data-slot="' + slot + '"]');
       if (!panel) return;
       var sf = panel.querySelector('.mesh-subform');
       if (!sf) return;
@@ -3443,15 +3444,15 @@ window.togglePane = function(paneId, btnId) {
     }
 
     function clearSubform(slot) {
-      var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+      var panel = hw.qs('.mesh-row-actions[data-slot="' + slot + '"]');
       if (!panel) return;
       var sf = panel.querySelector('.mesh-subform');
-      if (sf) sf.innerHTML = '';
+      hw.setHTML(sf, '');
     }
 
     // ---- Event delegation: one listener for the whole meshes card ----------
     function attachMeshDelegation() {
-      var card = document.getElementById('meshes-card');
+      var card = hw.$('meshes-card');
       if (!card || card.__meshHandlersAttached) return;
       card.__meshHandlersAttached = true;
       card.addEventListener('click', function(e) {
@@ -3462,7 +3463,7 @@ window.togglePane = function(paneId, btnId) {
 
         // Add a new mesh
         if (t.id === 'btn-mesh-add') {
-          var inp = document.getElementById('mesh-add-label');
+          var inp = hw.$('mesh-add-label');
           var lbl = inp ? inp.value.trim() : '';
           if (!lbl) { alert('Please enter a mesh label'); return; }
           fireMeshCmd('espnowmeshes add ' + lbl, 'MESH_ADD').then(function() {
@@ -3491,7 +3492,7 @@ window.togglePane = function(paneId, btnId) {
           return;
         }
         if (t.classList.contains('btn-mesh-savepass')) {
-          var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+          var panel = hw.qs('.mesh-row-actions[data-slot="' + slot + '"]');
           var passInp = panel ? panel.querySelector('.mesh-pass-input') : null;
           var pw = passInp ? passInp.value : '';
           if (!pw) { alert('Please enter a passphrase'); return; }
@@ -3513,7 +3514,7 @@ window.togglePane = function(paneId, btnId) {
         }
         if (t.classList.contains('btn-mesh-saverename')) {
           var oldLabel = t.dataset.oldlabel;
-          var panel2 = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+          var panel2 = hw.qs('.mesh-row-actions[data-slot="' + slot + '"]');
           var nameInp = panel2 ? panel2.querySelector('.mesh-rename-input') : null;
           var newLabel = nameInp ? nameInp.value.trim() : '';
           if (!newLabel) { alert('Please enter a new label'); return; }
@@ -3553,8 +3554,8 @@ window.togglePane = function(paneId, btnId) {
         if (data && data.error) {
           // Most commonly "ESP-NOW not initialized" before openespnow.
           console.log('[ESP-NOW] loadMeshes: backend not ready:', data.error);
-          var tbl = document.getElementById('meshes-table');
-          if (tbl) tbl.innerHTML = '<div style="color:var(--muted);font-size:.85em;padding:8px 0">ESP-NOW not initialized.</div>';
+          var tbl = hw.$('meshes-table');
+          hw.setHTML(tbl, '<div style="color:var(--muted);font-size:.85em;padding:8px 0">ESP-NOW not initialized.</div>');
           return;
         }
         window.gMeshes = data;
@@ -3643,7 +3644,7 @@ window.togglePane = function(paneId, btnId) {
     // tagged with data-msg-id — skip it so it doesn't double. A sent message with
     // no matching bubble originated on another interface → render it as SENT.
     if (isSent && reqId &&
-        document.querySelector('.message-bubble[data-msg-id="' + reqId + '"]')) {
+        hw.qs('.message-bubble[data-msg-id="' + reqId + '"]')) {
       return;
     }
     if (of <= 1 || !reqId) { renderMessage(mac, text, false, isSent, sendState, reqId); return; }  // not chunked
@@ -3714,7 +3715,7 @@ window.togglePane = function(paneId, btnId) {
         // potent — re-applying the same delivered state is a no-op.
         if (data.deliveries && Array.isArray(data.deliveries)) {
           data.deliveries.forEach(function(d){
-            var bubble = document.querySelector('.message-bubble[data-msg-id="' + d.msgId + '"]');
+            var bubble = hw.qs('.message-bubble[data-msg-id="' + d.msgId + '"]');
             if (!bubble) return;
             var statusDiv = bubble.querySelector('.message-status');
             if (!statusDiv) return;
@@ -3768,7 +3769,7 @@ window.togglePane = function(paneId, btnId) {
 )JS", HTTPD_RESP_USE_STRLEN);
   
   // Include generic file browser utility
-  httpd_resp_send_chunk(req, getFileBrowserScript().c_str(), HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, getFileBrowserScript(), HTTPD_RESP_USE_STRLEN);
 }
 
 void registerEspNowHandlers(httpd_handle_t server);

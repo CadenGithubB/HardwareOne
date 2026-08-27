@@ -33,13 +33,36 @@ extern "C" {
 #define HW1_OTA_RSA3072_SIGNATURE_SIZE 384u
 #define HW1_OTA_PSS_SALT_LENGTH 32u
 
-/* Required HardwareOne build-metadata suffixes for the first FeatherS3 fleet. */
+/*
+ * Required HardwareOne build-metadata identities, one row per recovery-OTA
+ * board. The board id, layout id and version suffix travel together: the
+ * manifest names all three and the device refuses an image that disagrees
+ * about any of them, which is what stops a FeatherS3 image from being staged
+ * onto a Feather V2 (or an 8 MB layout image onto a 16 MB one).
+ *
+ * Every id must fit HW1_OTA_BOARD_ID_SIZE / HW1_OTA_LAYOUT_ID_SIZE including
+ * its NUL. Keep the CMake registry in the root CMakeLists.txt, the board
+ * tables under tools/ota and these constants in step.
+ */
 #define HW1_OTA_BOARD_ID_FEATHERS3 "feathers3"
 #define HW1_OTA_BOARD_ID_FEATHERS3_FLASH_ENCRYPTED "feathers3_fe"
 #define HW1_OTA_LAYOUT_ID_FEATHERS3_OTA_V1 "hw1-f3-ota-v1"
 #define HW1_OTA_LAYOUT_ID_FEATHERS3_FLASH_ENCRYPTED_OTA_V1 "hw1-f3fe-ota-v1"
 #define HW1_OTA_VERSION_SUFFIX_FEATHERS3_PLAIN "+f3o1"
 #define HW1_OTA_VERSION_SUFFIX_FEATHERS3_FLASH_ENCRYPTED "+f3feo1"
+
+/* Adafruit Feather ESP32 V2 -- classic ESP32, 8 MB flash, no flash encryption. */
+#define HW1_OTA_BOARD_ID_FEATHER_ESP32_V2 "feather_esp32_v2"
+#define HW1_OTA_LAYOUT_ID_FEATHER_ESP32_V2_OTA_V1 "hw1-fv2-ota-v1"
+#define HW1_OTA_VERSION_SUFFIX_FEATHER_ESP32_V2 "+fv2o1"
+
+/* Adafruit QT Py ESP32 -- same die and flash size as the Feather V2, but no
+ * Bluetooth and no battery hardware. Distinct ids all the same: the layout is
+ * byte-identical, yet the IMAGES are not interchangeable, and the manifest
+ * check is what stops one being staged onto the other. */
+#define HW1_OTA_BOARD_ID_QTPY_ESP32 "qtpy_esp32"
+#define HW1_OTA_LAYOUT_ID_QTPY_ESP32_OTA_V1 "hw1-qtpy-ota-v1"
+#define HW1_OTA_VERSION_SUFFIX_QTPY_ESP32 "+qtpyo1"
 
 /* Pass this expected sequence only when optimistic conflict checking is unwanted. */
 #define HW1_OTA_SEQUENCE_ANY UINT32_MAX

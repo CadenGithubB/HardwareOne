@@ -423,12 +423,18 @@ bool initCamera(bool isRecovery) {
     //   - Less peak PSRAM bandwidth during DMA → fewer NO-SOI/NO-EOI
     //     truncation errors when WiFi/BT are also touching PSRAM.
     //   - Slightly more CPU (one memcpy per frame, ~60 KB at PSRAM speed).
-    //   - Frame rate loss is small at SVGA and below.
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.jpeg_quality = jpegQ;
-    config.fb_count = 1;  // Single buffer — DMA→DRAM→FB pipeline is serial.
+    // Two buffers even with PSRAM_DMA off. cam_hal allocates frames[] over
+    // frame_cnt regardless of psram_mode — only the per-frame DMA descriptor
+    // chain is gated on it — so this costs one extra FB in PSRAM (~60 KB at
+    // VGA) and nothing else. It is not optional for frame rate: on completion
+    // cam_hal clears frames[pos].en and only then looks for a free buffer, so
+    // with one buffer it always goes IDLE and skips a whole sensor frame.
+    // Measured 216.29 ms deltas were exactly 2x the 108.19 ms sensor period.
+    config.fb_count = 2;
     config.grab_mode = CAMERA_GRAB_LATEST;
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PSRAM_DMA disabled — DMA→DRAM line buf, FB in PSRAM, fb_count=1, jpeg_quality=%d", jpegQ);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PSRAM_DMA disabled — DMA→DRAM line buf, FB in PSRAM, fb_count=2, jpeg_quality=%d", jpegQ);
   } else {
     // No PSRAM chip — use internal DRAM. Resolution is already capped
     // at VGA above, but if a future change raises that cap and PSRAM
@@ -603,7 +609,13 @@ bool initCamera(bool isRecovery) {
     if (s->set_sharpness) s->set_sharpness(s, gSettings.cameraSharpness);
     if (s->set_denoise) s->set_denoise(s, gSettings.cameraDenoise);
     s->set_exposure_ctrl(s, 1);
-    s->set_aec2(s, 1);  // Alt AEC algorithm — user-validated as part of "juiced" defaults.
+    // set_aec2 is NIGHT MODE on the OV3660 (ov3660.c writes bit 0x04 of 0x3A00),
+    // not an alternate AEC algorithm. With it on, AEC extends VTS with dummy
+    // lines up to the ceiling in 0x3A02/0x3A03 (0x0930 = 2352 lines). Against
+    // the binned VTS of 783 that is a 3.0x frame-rate cut, and it measured as
+    // pinned at the ceiling in every bench run. The sensor's own reset default
+    // is off. Runtime opt-in for dim scenes is still `cameraaec2 on`.
+    s->set_aec2(s, 0);
     s->set_ae_level(s, gSettings.cameraAELevel);  // Apply saved exposure compensation
     s->set_gain_ctrl(s, 1);
     s->set_agc_gain(s, 0);
@@ -2494,9 +2506,11 @@ const char* cmd_cameravideolist(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
-    doc["count"] = getVideoRecordingCount();
+    doc["count"] = 0;  // patched in place below, once the single walk is parsed
     JsonArray arr = doc["recordings"].to<JsonArray>();
+    // One walk only — see the note in handleVideoRecordingsList.
     String list = getVideoRecordingsList();  // "name:size\nname:size"
+    int count = 0;
     int start = 0;
     while (start < (int)list.length()) {
       int nl = list.indexOf('\n', start);
@@ -2507,17 +2521,21 @@ const char* cmd_cameravideolist(const String& argsInput) {
         JsonObject o = arr.add<JsonObject>();
         if (colon > 0) { o["filename"] = entry.substring(0, colon); o["size"] = entry.substring(colon + 1).toInt(); }
         else           { o["filename"] = entry; }
+        count++;
       }
       if (nl < 0) break;
       start = nl + 1;
     }
+    doc["count"] = count;  // in-place update: keeps "count" first in the object
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
 
-  int count = getVideoRecordingCount();
-  if (count == 0) return "No video recordings found";
+  // Single walk; entries are newline-joined, so the count follows from the string.
   String list = getVideoRecordingsList();
+  if (list.length() == 0) return "No video recordings found";
+  int count = 1;
+  for (int i = 0; i < (int)list.length(); i++) if (list[i] == '\n') count++;
   snprintf(gCameraCmdBuffer, sizeof(gCameraCmdBuffer),
            "Recordings (%d):\n%s", count, list.c_str());
   return gCameraCmdBuffer;
@@ -2562,7 +2580,7 @@ const CommandEntry cameraCommands[] = {
   {"cameragainceiling","Gainceiling: <0-6> (2X..128X)",   true,  cmd_cameragainceiling, "Usage: cameragainceiling <0..6> (2X..128X)"},
   {"camerawhitebal",   "AWB master: <on|off>",            true,  cmd_camerawhitebal, "Usage: camerawhitebal <on|off>"},
   {"cameraawbgain",    "AWB gain: <on|off>",              true,  cmd_cameraawbgain, "Usage: cameraawbgain <on|off>"},
-  {"cameraaec2",       "Alt AEC algorithm: <on|off>",     true,  cmd_cameraaec2, "Usage: cameraaec2 <on|off>"},
+  {"cameraaec2",       "Night mode (slower fps, brighter in low light): <on|off>", true,  cmd_cameraaec2, "Usage: cameraaec2 <on|off>"},
   {"cameradcw",        "Downsize crop window: <on|off>",  true,  cmd_cameradcw, "Usage: cameradcw <on|off>"},
   {"camerabpc",        "Black pixel correction: <on|off>",true,  cmd_camerabpc, "Usage: camerabpc <on|off>"},
   {"camerawpc",        "White pixel correction: <on|off>",true,  cmd_camerawpc, "Usage: camerawpc <on|off>"},

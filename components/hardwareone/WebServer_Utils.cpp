@@ -770,7 +770,191 @@ void streamBeginHtml(httpd_req_t* req,
       "try{if(window.hw&&hw.applyGuestViewOnly)hw.applyGuestViewOnly()}catch(_){}"
       "});</script>");
   }
-    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});hw.qs=function(s,c){return (c||document).querySelector(s)};hw.qsa=function(s,c){return (c||document).querySelectorAll(s)};hw.on=function(e,v,f){if(e)e.addEventListener(v,f)};hw._ge=function(x){return typeof x==='string'?document.getElementById(x):x};hw.setText=function(x,t){var el=hw._ge(x);if(el)el.textContent=t};hw.setHTML=function(x,h){var el=hw._ge(x);if(el)el.innerHTML=h};hw.show=function(x){var el=hw._ge(x);if(el)el.style.display=''};hw.hide=function(x){var el=hw._ge(x);if(el)el.style.display='none'};hw.toggle=function(x,sh){(sh?hw.show:hw.hide)(x)};hw._auth401=function(r){if(r.status!==401)return r;return r.json().then(function(d){if(d&&d.error==='auth_required'&&d.reload){w.location.href='/login'}throw new Error('auth_required')}).catch(function(){w.location.href='/login';throw new Error('auth_required')})};hw.fetchJSON=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';if(!o.headers)o.headers={};o.headers['Accept']='application/json';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})};hw.postJSON=function(u,b,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/json'},o.headers||{});o.body=JSON.stringify(b||{});return hw.fetchJSON(u,o)};hw.postForm=function(u,form,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/x-www-form-urlencoded'},o.headers||{});var b=[];for(var k in (form||{})){if(Object.prototype.hasOwnProperty.call(form,k)){b.push(encodeURIComponent(k)+'='+encodeURIComponent(form[k]))}};o.body=b.join('&');if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401)};hw.fetchText=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.postFormText=function(u,form,o){return hw.postForm(u,form,o).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.cliConfirm=function(cliCmd,userPrompt,opts){opts=opts||{};var url=(opts.target==='bond')?'/api/bond/cli/batch':'/api/cli/batch';var ask=(typeof w.hwConfirm==='function')?w.hwConfirm(userPrompt):Promise.resolve(w.confirm(userPrompt));return ask.then(function(ok){if(!ok)return {cancelled:true,ok:false,pending:false,result:''};return hw.postJSON(url,{commands:[cliCmd,'yes'],interactive:true}).then(function(data){var rs=(data&&data.results)||[];var result=rs[1]||'';var pending=/^Pending(?:\\s|:|$)/i.test(result);var failed=!result||/^(?:Error|Failed|Cancelled)(?:\\s|:|$)/i.test(result);return {cancelled:false,ok:!failed,pending:pending,result:result};});});};try{console.log('[HW] helpers ready');}catch(_){} })(window);</script>");
+    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});hw.qs=function(s,c){return (c||document).querySelector(s)};hw.qsa=function(s,c){return (c||document).querySelectorAll(s)};hw.on=function(e,v,f){if(e)e.addEventListener(v,f)};hw.$=function(x){return typeof x==='string'?document.getElementById(x):x};hw.setText=function(x,t){var el=hw.$(x);if(el)el.textContent=t};hw.setHTML=function(x,h){var el=hw.$(x);if(el)el.innerHTML=h};hw.show=function(x){var el=hw.$(x);if(el)el.style.display=''};hw.hide=function(x){var el=hw.$(x);if(el)el.style.display='none'};hw.toggle=function(x,sh){(sh?hw.show:hw.hide)(x)};hw._auth401=function(r){if(r.status!==401)return r;return r.json().then(function(d){if(d&&d.error==='auth_required'&&d.reload){w.location.href='/login'}throw new Error('auth_required')}).catch(function(){w.location.href='/login';throw new Error('auth_required')})};hw.fetchJSON=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';if(!o.headers)o.headers={};o.headers['Accept']='application/json';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})};hw.postJSON=function(u,b,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/json'},o.headers||{});o.body=JSON.stringify(b||{});return hw.fetchJSON(u,o)};hw.postForm=function(u,form,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/x-www-form-urlencoded'},o.headers||{});var b=[];for(var k in (form||{})){if(Object.prototype.hasOwnProperty.call(form,k)){b.push(encodeURIComponent(k)+'='+encodeURIComponent(form[k]))}};o.body=b.join('&');if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401)};hw.fetchText=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.postFormText=function(u,form,o){return hw.postForm(u,form,o).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.cliConfirm=function(cliCmd,userPrompt,opts){opts=opts||{};var url=(opts.target==='bond')?'/api/bond/cli/batch':'/api/cli/batch';var ask=(typeof w.hwConfirm==='function')?w.hwConfirm(userPrompt):Promise.resolve(w.confirm(userPrompt));return ask.then(function(ok){if(!ok)return {cancelled:true,ok:false,pending:false,result:''};return hw.postJSON(url,{commands:[cliCmd,'yes'],interactive:true}).then(function(data){var rs=(data&&data.results)||[];var result=rs[1]||'';var pending=/^Pending(?:\\s|:|$)/i.test(result);var failed=!result||/^(?:Error|Failed|Cancelled)(?:\\s|:|$)/i.test(result);return {cancelled:false,ok:!failed,pending:pending,result:result};});});};try{console.log('[HW] helpers ready');}catch(_){} })(window);</script>");
+    // One authoritative event-kind vocabulary for every page. Loading stays
+    // lazy: pages that never expose an event picker do not spend an HTTP
+    // request or hold a second copy of the catalog in their streamed HTML.
+    streamChunkC(req, R"HW_EVENT_KINDS(<script>
+(function(w){
+  'use strict';
+  var hw=w.hw||(w.hw={});
+  var cachedFamilies=null;
+  var pendingFamilies=null;
+
+  function validateFamilies(data){
+    if(!data||!Array.isArray(data.families)){
+      throw new Error('no event-kind families in response');
+    }
+    var seen=Object.create(null);
+    var seenFamilies=Object.create(null);
+    var families=[];
+    var total=0;
+    for(var i=0;i<data.families.length;i++){
+      var family=data.families[i];
+      if(!family||typeof family.n!=='string'||!family.n||
+         seenFamilies[family.n]||!Array.isArray(family.k)||!family.k.length){
+        throw new Error('invalid event-kind family');
+      }
+      seenFamilies[family.n]=true;
+      var kinds=[];
+      for(var j=0;j<family.k.length;j++){
+        var kind=family.k[j];
+        if(typeof kind!=='string'||!/^[a-z0-9_]+$/.test(kind)||
+           /^(?:boot|none|set|patch|all|list)$/.test(kind)||seen[kind]){
+          throw new Error('invalid or duplicate event kind');
+        }
+        seen[kind]=true;
+        kinds.push(kind);
+        total++;
+      }
+      families.push({n:family.n,k:kinds});
+    }
+    if(!total) throw new Error('event-kind catalog is empty');
+    return families;
+  }
+
+  hw.getEventKindFamilies=function(){
+    if(cachedFamilies) return Promise.resolve(cachedFamilies);
+    if(pendingFamilies) return pendingFamilies;
+    pendingFamilies=hw.fetchJSON('/api/events/kinds').then(function(data){
+      return validateFamilies(data);
+    }).then(function(families){
+      cachedFamilies=families;
+      pendingFamilies=null;
+      return cachedFamilies;
+    },function(error){
+      pendingFamilies=null;
+      throw error;
+    });
+    return pendingFamilies;
+  };
+
+  hw.eventKindDisplayName=function(kind){
+    var acronyms={
+      ai:'AI',api:'API',ble:'BLE',db:'DB',ei:'EI',espnow:'ESP-NOW',
+      fm:'FM',fs:'FS',g2:'G2',gps:'GPS',http:'HTTP',imu:'IMU',
+      ip:'IP',llm:'LLM',mqtt:'MQTT',ntp:'NTP',ota:'OTA',r1:'R1',
+      rds:'RDS',rtc:'RTC',rx:'RX',sd:'SD',tls:'TLS',tof:'ToF',
+      usb:'USB',wifi:'WiFi'
+    };
+    var parts=String(kind||'').split('_');
+    for(var i=0;i<parts.length;i++) parts[i]=acronyms[parts[i]]||parts[i];
+    var label=parts.join(' ');
+    if(label&&!acronyms[String(kind||'').split('_')[0]]){
+      label=label.charAt(0).toUpperCase()+label.slice(1);
+    }
+    return label;
+  };
+
+  function replaceWithOption(select,value,label,disabled){
+    while(select.firstChild) select.removeChild(select.firstChild);
+    var option=document.createElement('option');
+    option.value=value;
+    option.textContent=label;
+    option.disabled=!!disabled;
+    option.selected=true;
+    select.appendChild(option);
+  }
+
+  function dispatchSelectChange(select){
+    try{
+      select.dispatchEvent(new Event('change',{bubbles:true}));
+    }catch(_){
+      try{
+        var event=document.createEvent('Event');
+        event.initEvent('change',true,false);
+        select.dispatchEvent(event);
+      }catch(__){}
+    }
+  }
+
+  hw.fillEventKindSelect=function(target,options){
+    var select=hw.$(target);
+    if(!select) return Promise.reject(new Error('event-kind select not found'));
+    options=options||{};
+    var hasSelected=Object.prototype.hasOwnProperty.call(options,'selected');
+    var desired=hasSelected?String(options.selected||''):String(select.value||select.__hwEventKindSelected||'');
+    select.__hwEventKindSelected=desired;
+    var loadId=(select.__hwEventKindLoadId||0)+1;
+    select.__hwEventKindLoadId=loadId;
+    select.disabled=true;
+    replaceWithOption(select,'','Loading event kinds...',true);
+
+    return hw.getEventKindFamilies().then(function(families){
+      if(select.__hwEventKindLoadId!==loadId) return families;
+      while(select.firstChild) select.removeChild(select.firstChild);
+      var found=false;
+      for(var i=0;i<families.length;i++){
+        var family=families[i];
+        if(!family.k.length) continue;
+        var group=document.createElement('optgroup');
+        group.label=family.n;
+        for(var j=0;j<family.k.length;j++){
+          var kind=family.k[j];
+          var option=document.createElement('option');
+          option.value=kind;
+          option.textContent=hw.eventKindDisplayName(kind)+' ('+kind+')';
+          if(kind===desired){option.selected=true;found=true;}
+          group.appendChild(option);
+        }
+        select.appendChild(group);
+      }
+      if(desired&&!found){
+        var unavailable=document.createElement('optgroup');
+        unavailable.label='Unavailable';
+        var stored=document.createElement('option');
+        stored.value=desired;
+        stored.textContent='Unavailable event ('+desired+')';
+        stored.disabled=true;
+        stored.selected=true;
+        unavailable.appendChild(stored);
+        select.appendChild(unavailable);
+      }
+      select.disabled=false;
+      select.title='';
+      select.__hwEventKindSelected=select.value;
+      dispatchSelectChange(select);
+      return families;
+    }).catch(function(error){
+      if(select.__hwEventKindLoadId===loadId){
+        var message=(error&&error.message)?error.message:'unknown error';
+        if(desired){
+          replaceWithOption(select,desired,'Stored event ('+desired+') - catalog unavailable',false);
+        }else{
+          replaceWithOption(select,'','Event kinds unavailable',true);
+        }
+        select.disabled=true;
+        select.title='Unable to load event kinds: '+message;
+        dispatchSelectChange(select);
+      }
+      throw error;
+    });
+  };
+})(window);
+</script>)HW_EVENT_KINDS");
+  // Shared Expand/Collapse pane toggle. Global on purpose: pages invoke it
+  // from inline onclick attributes. Was pasted verbatim into ESP-NOW,
+  // Settings and Logging before it moved here.
+  streamChunkC(req, "<script>window.togglePane=function(paneId,btnId){var p=hw.$(paneId);var b=hw.$(btnId);if(!p||!b){console.warn('[togglePane] Element not found:',paneId,btnId);return;}var isHidden=(p.style.display==='none'||!p.style.display);p.style.display=isHidden?'block':'none';b.textContent=isHidden?'Collapse':'Expand';};</script>");
+  // Grow-to-content fallback for .input-fit fields on engines without CSS
+  // field-sizing. Event delegation, so fields added after load still work.
+  streamChunkC(req, "<script>(function(){"
+    "if(window.CSS&&CSS.supports&&CSS.supports('field-sizing','content'))return;"
+    "function fit(el){"
+      "if(!el||!el.classList||!el.classList.contains('input-fit'))return;"
+      "var min=el.classList.contains('input-l')?36:(el.classList.contains('input-m')?18:9);"
+      "var len;"
+      "if(el.tagName==='SELECT'){var o=el.options[el.selectedIndex];len=(o?o.text.length:0)+6}"
+      "else{len=String(el.value||el.placeholder||'').length+(el.type==='number'?5:3)}"
+      "el.style.width=Math.max(min,len)+'ch';"
+    "}"
+    "function all(){var n=document.querySelectorAll('.input-fit');for(var i=0;i<n.length;i++)fit(n[i])}"
+    "document.addEventListener('input',function(e){fit(e.target)});"
+    "document.addEventListener('change',function(e){fit(e.target)});"
+    "if(document.readyState!=='loading')all();"
+    "else document.addEventListener('DOMContentLoaded',all);"
+    "setTimeout(all,600);"
+  "})();</script>");
   streamChunkC(req, "<script>(function(w){var hw=w.hw||(w.hw={});hw.pollJSON=function(u,ms,cb){try{cb=cb||function(){};ms=ms||1000;var h=setInterval(function(){hw.fetchJSON(u).then(cb).catch(function(e){if(e&&e.message==='auth_required'){clearInterval(h)}})},ms);return function(){clearInterval(h)};}catch(_){return function(){}}};try{console.log('[HW] page=\"");
   streamChunkC(req, activePage.c_str());
   streamChunkC(req, "\"');}catch(_){}})(window);</script>");

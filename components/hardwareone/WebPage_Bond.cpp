@@ -243,14 +243,14 @@ void streamBondInner(httpd_req_t* req) {
   }
 
   function renderBondDashboard(data) {
-    const container = document.getElementById('remote-content');
+    const container = hw.$('remote-content');
     if (!container) return;
     
     // Preserve CLI state across re-renders
-    const cmdInput = document.getElementById('remote-cmd');
+    const cmdInput = hw.$('remote-cmd');
     const savedCmd = cmdInput ? cmdInput.value : '';
     const hadFocus = cmdInput && document.activeElement === cmdInput;
-    const outputEl = document.getElementById('remote-output');
+    const outputEl = hw.$('remote-output');
     const savedOutput = outputEl ? outputEl.textContent : '';
     
     // Check if ESP-NOW is enabled first
@@ -270,7 +270,7 @@ void streamBondInner(httpd_req_t* req) {
       // that rebuild the device list and wipe the user's selection. Once the config
       // UI is on screen, leave it (and the dropdown) untouched until the user
       // explicitly presses "Refresh List" (which calls refreshBondDevices()).
-      if (document.getElementById('bond-device-select')) {
+      if (hw.$('bond-device-select')) {
         return;
       }
       // Show bond configuration UI
@@ -280,7 +280,7 @@ void streamBondInner(httpd_req_t* req) {
       html += '<div class="remote-description">Select a paired ESP-NOW device to bond with</div>';
       html += '<div style="margin-top:15px">';
       html += '<label style="display:block;margin-bottom:8px;font-weight:500">Available Devices:</label>';
-      html += '<select id="bond-device-select" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--panel-bg);color:var(--panel-fg);font-size:0.95em">';
+      html += '<select id="bond-device-select" class="input-fit input-m" style="padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--panel-bg);color:var(--panel-fg);font-size:0.95em">';
       html += '<option value="">Loading devices...</option>';
       html += '</select>';
       html += '</div>';
@@ -602,10 +602,10 @@ void streamBondInner(httpd_req_t* req) {
     container.innerHTML = html;
     
     // Restore CLI state
-    const newInput = document.getElementById('remote-cmd');
+    const newInput = hw.$('remote-cmd');
     if (newInput && savedCmd) newInput.value = savedCmd;
     if (newInput && hadFocus) newInput.focus();
-    const newOutput = document.getElementById('remote-output');
+    const newOutput = hw.$('remote-output');
     if (newOutput && savedOutput && savedOutput !== 'Ready for commands...') {
       newOutput.textContent = savedOutput;
     }
@@ -737,7 +737,7 @@ void streamBondInner(httpd_req_t* req) {
   })();
 
   window.execRemoteCmd = function() {
-    const input = document.getElementById('remote-cmd');
+    const input = hw.$('remote-cmd');
     const cmd = input.value.trim();
     if (!cmd) return;
 
@@ -751,12 +751,12 @@ void streamBondInner(httpd_req_t* req) {
     }
 
     function getOutputEl() {
-      return document.getElementById('remote-output');
+      return hw.$('remote-output');
     }
 
     function setOutputText(text) {
       const el = getOutputEl();
-      if (el) el.textContent = text;
+      hw.setText(el, text);
     }
 
     function setOutputBorder(color) {
@@ -848,7 +848,7 @@ void streamBondInner(httpd_req_t* req) {
   
   // Bond device selection functions
   window.refreshBondDevices = function() {
-    const select = document.getElementById('bond-device-select');
+    const select = hw.$('bond-device-select');
     if (!select) return;
 
     const prevValue = select.value;  // preserve the user's selection across a manual refresh
@@ -881,9 +881,9 @@ void streamBondInner(httpd_req_t* req) {
   };
   
   window.connectBondDevice = function() {
-    const select = document.getElementById('bond-device-select');
-    const statusDiv = document.getElementById('bond-config-status');
-    const btn = document.getElementById('btn-bond-connect');
+    const select = hw.$('bond-device-select');
+    const statusDiv = hw.$('bond-config-status');
+    const btn = hw.$('btn-bond-connect');
     
     if (!select || !statusDiv || !btn) return;
     
