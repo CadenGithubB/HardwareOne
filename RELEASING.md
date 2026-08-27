@@ -1,7 +1,9 @@
 # Releasing
 
-How to cut a versioned release of this firmware. Every release has BOTH a
-`CHANGELOG.md` entry and a matching GitHub Release with the same notes.
+How to cut a versioned release of this firmware. Every release gets a commit, a tag
+and a `CHANGELOG.md` entry. A GitHub Release is OPTIONAL and occasional - cut one when
+a version is worth announcing, using the same notes as its CHANGELOG section. The
+CHANGELOG is the complete record; the Releases page is a highlights reel.
 
 This repo is trunk-based: the release commit + tag land directly on `main`.
 Commit style is plain-English and version-prefixed, like a changelog line:
@@ -37,7 +39,7 @@ PATCH = fixes/docs. MINOR = backward-compatible features. Breaking changes bump 
    leaves the release untagged on the remote - that is how v0.99.6 and v0.99.91.1 ended up with
    commits but no tags. Verify with `git ls-remote --tags origin | grep vX.Y.Z` before step 6,
    because `gh release create` needs the tag to exist on the remote.
-6. Create the GitHub Release (notes mirror the CHANGELOG section). Write notes to a file and use
+6. OPTIONAL - create a GitHub Release (notes mirror the CHANGELOG section). Write notes to a file and use
    `--notes-file` (NOT `--notes`) so backticks/quotes/apostrophes are not mangled by the shell:
    ```
    gh release create vX.Y.Z --title "vX.Y.Z - <theme>" --notes-file <file>
@@ -52,8 +54,7 @@ PATCH = fixes/docs. MINOR = backward-compatible features. Breaking changes bump 
 - Never `git add` build artifacts (`build/`, `*.bin`, `sdkconfig.<board>`) - they are gitignored; do not attach them.
 - Release notes are world-readable if this repo ever goes public: keep them user-facing - no secrets,
   credentials, internal paths, or private hostnames.
-- Two tagged releases deliberately have NO GitHub Release and are not getting one:
-  `v0.99.6` and `v0.99.91.1`. Both were tagged retroactively in 2026-08 after step 5's
-  `--follow-tags` bug left them untagged; their CHANGELOG entries are the record. Do not
-  backfill them - this was decided, not overlooked.
+- Most tags have no GitHub Release and that is fine. As of 2026-08 there are 50 tags and
+  24 Releases. A missing Release is NOT a backlog item and needs no backfill - check the
+  CHANGELOG entry instead, which always exists. Step 6 is optional by design.
 - ASCII only in docs (this repo strips em-dashes): use `-` and `->`, not unicode dashes.
