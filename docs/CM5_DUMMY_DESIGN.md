@@ -309,7 +309,9 @@ Manufacturer part numbers below are the design intent. Substitutions are fine if
 | 2 | R | 33 Ω | TX/RX if carrier series resistors are not yet fitted |
 | 1 | ESD | USBLC6-2SC6 | USB D+/D−, same family as the carrier |
 
-A filled CSV lives at `hardware/cm5-dummy/bom.csv`.
+The filled BOM CSV that used to live at `hardware/cm5-dummy/bom.csv` was removed from this
+repo - it is fabrication data, not firmware. Recover it from git history if needed:
+`git show v0.99.92:hardware/cm5-dummy/bom.csv`.
 
 ---
 
