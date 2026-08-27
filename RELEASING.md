@@ -26,7 +26,17 @@ PATCH = fixes/docs. MINOR = backward-compatible features. Breaking changes bump 
 2. Bump the version in ALL four files above so they agree.
 3. Add `## [X.Y.Z] - <date>` to the top of `CHANGELOG.md`. Get the date from `date +%F` - do not guess it.
 4. Commit the change as ONE `vX.Y.Z: <plain summary>` commit that carries the code + the version bump (all four files) + the CHANGELOG entry. The version-prefixed commit IS the release - there is no separate content vs `chore(release)` split.
-5. Tag and push: `git tag vX.Y.Z && git push origin main --follow-tags`
+5. Tag and push — push the tag EXPLICITLY, in two commands:
+   ```
+   git tag vX.Y.Z
+   git push origin main
+   git push origin vX.Y.Z
+   ```
+   Do NOT rely on `--follow-tags`: it pushes annotated tags only, and every tag in this repo is
+   lightweight (`git tag vX.Y.Z` with no `-a`/`-m`). Using it silently pushes the commit and
+   leaves the release untagged on the remote — that is how v0.99.6 and v0.99.91.1 ended up with
+   commits but no tags. Verify with `git ls-remote --tags origin | grep vX.Y.Z` before step 6,
+   because `gh release create` needs the tag to exist on the remote.
 6. Create the GitHub Release (notes mirror the CHANGELOG section). Write notes to a file and use
    `--notes-file` (NOT `--notes`) so backticks/quotes/apostrophes are not mangled by the shell:
    ```
