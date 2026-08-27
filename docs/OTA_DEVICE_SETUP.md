@@ -7,8 +7,10 @@ Procedure verified end to end on a plain FeatherS3 on 2026-08-05, from a full
 chip erase through first-time setup, on firmware v0.99.8. Every command below
 was actually run; the outputs quoted are real.
 
-For the design, threat model and qualification matrix see
-[`OTA_RECOVERY_UPDATER.md`](OTA_RECOVERY_UPDATER.md). This document is only the
+The design, threat model and qualification matrix used to live in
+`docs/OTA_RECOVERY_UPDATER.md`, which was removed from this repo along with the
+other internal planning and audit documents; read it from git history with
+`git show v0.99.92:docs/OTA_RECOVERY_UPDATER.md`. This document is only the
 provisioning path.
 
 ## Should this board have OTA?
