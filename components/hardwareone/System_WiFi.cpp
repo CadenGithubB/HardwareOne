@@ -12,7 +12,7 @@
 #if ENABLE_WIFI
 
 #include "System_WiFi.h"
-#include "System_Settings.h"      // For writeSettingsJson()
+#include "System_Settings.h"      // Unified settings persistence
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson
 #include "System_Clock.h"  // Clock::syncSource ledger for ntpstatus
@@ -1458,16 +1458,16 @@ static wifi_init_config_t makeArduinoCompatibleWifiInitConfig() {
   return cfg;
 }
 
-// Returns false when the persist did not happen (filesystem not ready, or
-// writeSettingsJson failed) — callers must not report success on false, or a
-// RAM-only change silently reverts on reboot. Matches the extern decls in the
-// setup wizards and the ENABLE_WIFI=0 stub, which were already `bool`.
+// Returns false when a persistence request could not be accepted (filesystem
+// not ready, immediate write failure, etc.). Inside an owner-scoped batch true
+// means the matching finalizer owns the eventual write result. Matches the
+// setup-wizard externs and the ENABLE_WIFI=0 stub, which are also `bool`.
 bool saveWiFiNetworks() {
   if (!filesystemReady) return false;
   sortWiFiByPriority();
   normalizeWiFiPriorities();
   // Persist via unified settings.json only
-  return writeSettingsJson();
+  return requestSettingsPersist();
 }
 
 // Connect to a saved network by index (0-based). Update lastConnected on success.
@@ -2446,7 +2446,8 @@ const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
 // heavy logging (same defer-off-the-tiny-task pattern as the BTC-task
 // tapDispatcherEnqueue* fix). Single slot is enough: the sWasConnected edge
 // gate yields at most one snapshot per association.
-static volatile bool sWifiDiscPending = false;
+static portMUX_TYPE sWifiDiscMux = portMUX_INITIALIZER_UNLOCKED;
+static bool          sWifiDiscPending = false;
 static char          sWifiDiscSsid[33];
 static int           sWifiDiscReason = 0;
 static uint32_t      sWifiDiscConnSecs = 0;
@@ -2464,11 +2465,14 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
       sWasConnected = false;
       uint8_t len = info.wifi_sta_disconnected.ssid_len;
       if (len > 32) len = 32;
+      const uint32_t connSecs = (millis() - sConnectedAtMs) / 1000;
+      portENTER_CRITICAL(&sWifiDiscMux);
       memcpy(sWifiDiscSsid, info.wifi_sta_disconnected.ssid, len);
       sWifiDiscSsid[len] = '\0';
       sWifiDiscReason   = (int)info.wifi_sta_disconnected.reason;
-      sWifiDiscConnSecs = (millis() - sConnectedAtMs) / 1000;
-      sWifiDiscPending  = true;  // set last — drain reads fields after seeing it
+      sWifiDiscConnSecs = connSecs;
+      sWifiDiscPending  = true;
+      portEXIT_CRITICAL(&sWifiDiscMux);
     }
   }
 }
@@ -2477,14 +2481,29 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
 // never get drained (esp_restart preempts the loop) — acceptable: that
 // teardown is commanded, and the reboot itself is already logged.
 void wifiEventLogDrain() {
-  if (!sWifiDiscPending) return;
+  char ssid[sizeof(sWifiDiscSsid)];
+  int reason = 0;
+  uint32_t connSecs = 0;
+  portENTER_CRITICAL(&sWifiDiscMux);
+  if (!sWifiDiscPending) {
+    portEXIT_CRITICAL(&sWifiDiscMux);
+    return;
+  }
+  memcpy(ssid, sWifiDiscSsid, sizeof(ssid));
+  reason = sWifiDiscReason;
+  connSecs = sWifiDiscConnSecs;
   sWifiDiscPending = false;
-  logSystemEvent("WIFI", "connection lost: '%s' reason=%d (connected %lus)",
-                 sWifiDiscSsid, sWifiDiscReason, (unsigned long)sWifiDiscConnSecs);
-  char det[48];
-  snprintf(det, sizeof(det), "reason=%d (connected %lus)",
-           sWifiDiscReason, (unsigned long)sWifiDiscConnSecs);
-  systemEventPost(SYSEVT_WIFI_DISCONNECTED, sWifiDiscSsid, det);
+  portEXIT_CRITICAL(&sWifiDiscMux);
+
+  const char* reasonName = WiFi.disconnectReasonName(
+      static_cast<wifi_err_reason_t>(reason));
+  if (!reasonName || !reasonName[0]) reasonName = "UNKNOWN";
+  logSystemEvent("WIFI", "connection lost: '%s' reason=%d/%s (connected %lus)",
+                 ssid, reason, reasonName, (unsigned long)connSecs);
+  char det[SYSEVT_DETAIL_LEN];
+  snprintf(det, sizeof(det), "reason=%d/%s (connected %lus)",
+           reason, reasonName, (unsigned long)connSecs);
+  systemEventPost(SYSEVT_WIFI_DISCONNECTED, ssid, det);
 }
 
 // Ensure WiFi is initialized (lazy initialization to save ~32KB at boot)

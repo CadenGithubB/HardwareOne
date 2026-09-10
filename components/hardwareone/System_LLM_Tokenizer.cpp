@@ -234,10 +234,12 @@ bool loadTokenizerFromFile(File& f) {
       }
       free(bpeReachable);
     }
-    DEBUG_LLM_TOKENIZERF("[LLM] Pre-split tokens: %d entries (from %d multi-byte vocab)", t->presplit_count, multiByteCount);
-    for (int j = 0; j < t->presplit_count && j < 10; j++) {
-      DEBUG_LLM_TOKENIZERF("[LLM]   presplit[%d] id=%d len=%d \"%s\"",
-                            j, t->presplit[j].id, t->presplit[j].len, t->presplit[j].str);
+    if (isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_TOKENIZER)) {
+      DEBUG_LLM_TOKENIZERF("[LLM] Pre-split tokens: %d entries (from %d multi-byte vocab)", t->presplit_count, multiByteCount);
+      for (int j = 0; j < t->presplit_count && j < 10; j++) {
+        DEBUG_LLM_TOKENIZERF("[LLM]   presplit[%d] id=%d len=%d \"%s\"",
+                              j, t->presplit[j].id, t->presplit[j].len, t->presplit[j].str);
+      }
     }
   }
 
@@ -268,6 +270,7 @@ void freeTokenizer() {
 int encode(const char* text, int* tokens, int maxTokens) {
   TokenizerState* t = &gLLM.tokenizer;
   int n_tokens = 0;
+  const bool tokenizerDebug = isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_TOKENIZER);
 
   DEBUG_LLM_TOKENIZERF("[LLM][encode] Input (%d chars): \"%.*s%s\"",
                         (int)strlen(text),
@@ -291,7 +294,7 @@ int encode(const char* text, int* tokens, int maxTokens) {
                               (int)(c - text), t->presplit[p].str, t->presplit[p].id);
         c += t->presplit[p].len;
         matched = true;
-        presplit_hits++;
+        if (tokenizerDebug) presplit_hits++;
         break;
       }
     }
@@ -312,7 +315,7 @@ int encode(const char* text, int* tokens, int maxTokens) {
                         n_tokens, presplit_hits);
 
   // Debug: dump pre-BPE token list
-  {
+  if (tokenizerDebug) {
     int show = (n_tokens < 30) ? n_tokens : 30;
     for (int i = 0; i < show; i++) {
       const char* piece = (tokens[i] >= 0 && tokens[i] < t->vocab_size) ?
@@ -348,7 +351,7 @@ int encode(const char* text, int* tokens, int maxTokens) {
     }
 
     if (best_pos >= 0) {
-      if (merge_rounds < 20) {
+      if (tokenizerDebug && merge_rounds < 20) {
         const char* lpiece = (tokens[best_pos] >= 0 && tokens[best_pos] < t->vocab_size) ?
                               t->vocab[tokens[best_pos]] : "?";
         const char* rpiece = (tokens[best_pos+1] >= 0 && tokens[best_pos+1] < t->vocab_size) ?
@@ -365,14 +368,14 @@ int encode(const char* text, int* tokens, int maxTokens) {
       }
       n_tokens--;
       changed = true;
-      merge_rounds++;
+      if (tokenizerDebug) merge_rounds++;
     }
   }
 
   DEBUG_LLM_TOKENIZERF("[LLM][encode] After step 2 (BPE): %d tokens, %d merge rounds", n_tokens, merge_rounds);
 
   // Debug: dump final token list with special token flags
-  {
+  if (tokenizerDebug) {
     int show = (n_tokens < 30) ? n_tokens : 30;
     for (int i = 0; i < show; i++) {
       const char* piece = (tokens[i] >= 0 && tokens[i] < t->vocab_size) ?

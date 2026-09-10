@@ -9,6 +9,7 @@
 #include <Adafruit_BNO055.h>
 #include <Adafruit_Sensor.h>
 #include <Arduino.h>
+#include <new>
 #include <utility/imumaths.h>
 
 #include "OLED_Display.h"
@@ -17,6 +18,7 @@
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
+#include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 
@@ -222,7 +224,8 @@ const char* cmd_imustart(const String& argsInput) {
     return "[IMU] Already queued";
   }
 
-  if (!i2cPingAddress(I2C_ADDR_IMU, 100000, 50)) {
+  if (!i2cPingAddress(I2C_ADDR_IMU, 100000, 50,
+                      (uint8_t)gSettings.imuBus)) {
     return "Error: [IMU] Not detected on I2C bus";
   }
 
@@ -339,22 +342,28 @@ bool imuInit() {
 
   INFO_IMU_LIFECYCLEF("Starting BNO055 IMU initialization (STEMMA QT)...");
 
-  // Reset grace period for this initialization attempt (device may have been registered at boot)
-  i2cResetGracePeriod(I2C_ADDR_IMU);
+  const uint8_t imuBus = (uint8_t)gSettings.imuBus;
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  TwoWire* imuWire = mgr ? mgr->getWire(imuBus) : nullptr;
+  if (!imuWire) return false;
+
+  // Reset the health record on the same bus this driver will use.
+  if (I2CDevice* dev = mgr->getDevice(I2C_ADDR_IMU, imuBus)) {
+    dev->resetGracePeriod();
+  }
 
   // Use i2cTransaction wrapper with long timeout for IMU init (can take several seconds with retries)
   // Probe for possible I2C addresses (A: 0x28, B: 0x29)
   uint8_t candidateAddrs[2] = { BNO055_ADDRESS_A, BNO055_ADDRESS_B };
   int foundIndex = -1;
   for (int i = 0; i < 2; i++) {
-    if (i2cPingAddress(candidateAddrs[i], 100000, 200)) {
+    if (i2cPingAddress(candidateAddrs[i], 100000, 200, imuBus)) {
       foundIndex = i;
       break;
     }
   }
 
-  return i2cDeviceTransaction(I2C_ADDR_IMU, 100000, 5000, [&]() -> bool {
-    // Wire1 already initialized in setup() - no need to call begin() again
+  return i2cDeviceTransaction(imuBus, I2C_ADDR_IMU, 100000, 5000, [&]() -> bool {
     INFO_IMU_LIFECYCLEF("Starting IMU initialization at 100kHz I2C clock");
 
     // BNO055 needs time after power-up/reset before responding reliably
@@ -378,7 +387,7 @@ bool imuInit() {
 
       // If we previously created an object, clean it up before retrying
       if (gBNO055 != nullptr) {
-        delete gBNO055;
+        ps_delete(gBNO055);
         gBNO055 = nullptr;
       }
 
@@ -387,18 +396,20 @@ bool imuInit() {
       for (int i = 0; i < 2 && !begun; i++) {
         uint8_t addr = (foundIndex >= 0) ? candidateAddrs[foundIndex] : candidateAddrs[i];
         INFO_IMU_LIFECYCLEF("Trying BNO055 address 0x%02X", addr);
-        gBNO055 = new Adafruit_BNO055(55, addr, &Wire1);
-        if (gBNO055 == nullptr) {
+        // Only the task-context wrapper moves; the library owns its I2C transport.
+        void* imuObjBuf = ps_alloc(sizeof(Adafruit_BNO055), AllocPref::PreferPSRAM, "imu.obj");
+        if (!imuObjBuf) {
           ERROR_IMUF("Error: Failed to allocate memory for BNO055 object");
           return false;
         }
+        gBNO055 = new (imuObjBuf) Adafruit_BNO055(55, addr, imuWire);
         delay(20);
         if (gBNO055->begin()) {
           begun = true;
           break;
         }
         // Failed begin on this addr
-        delete gBNO055;
+        ps_delete(gBNO055);
         gBNO055 = nullptr;
         delay(100);
       }
@@ -419,7 +430,7 @@ bool imuInit() {
 
     // All attempts failed
     if (gBNO055 != nullptr) {
-      delete gBNO055;
+      ps_delete(gBNO055);
       gBNO055 = nullptr;
     }
     ERROR_IMUF("Error: Failed to initialize BNO055 IMU sensor after %d attempts", maxAttempts);
@@ -1136,7 +1147,7 @@ void imuTask(void* parameter) {
     if (!gImuRunning) {
       gImuConnected = false;
       if (gBNO055 != nullptr) {
-        delete gBNO055;
+        ps_delete(gBNO055);
         gBNO055 = nullptr;
       }
       gImuCache.imuDataValid = false;
@@ -1182,15 +1193,18 @@ void imuTask(void* parameter) {
       }
     }
 
-    if (gImuRunning && gImuConnected && gBNO055 != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
+    const uint8_t imuBus = (uint8_t)gSettings.imuBus;
+    if (gImuRunning && gImuConnected && gBNO055 != nullptr && !pollPaused(imuBus)) {
       unsigned long imuPollMs = (gSettings.imuDevicePollMs > 0) ? (unsigned long)gSettings.imuDevicePollMs : 200;
       unsigned long nowMs = millis();
       if (nowMs - lastIMURead >= imuPollMs) {
         // IMU reads ~5ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
-        auto result = i2cTaskWithTimeout(I2C_ADDR_IMU, 100000, 100, [&]() -> bool {
+        I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+        TwoWire* imuWire = mgr ? mgr->getWire(imuBus) : nullptr;
+        auto result = imuWire && i2cTaskWithTimeout(imuBus, I2C_ADDR_IMU, 100000, 100, [&]() -> bool {
           // Probe device presence so health system can track failures
-          Wire1.beginTransmission(I2C_ADDR_IMU);
-          if (Wire1.endTransmission() != 0) return false;
+          imuWire->beginTransmission(I2C_ADDR_IMU);
+          if (imuWire->endTransmission() != 0) return false;
           imuPoll();
           return true;
         });
@@ -1205,7 +1219,7 @@ void imuTask(void* parameter) {
         
         // Auto-disable if too many consecutive failures
         if (!result) {
-          if (i2cShouldAutoDisable(I2C_ADDR_IMU)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_IMU, (uint8_t)gSettings.imuBus)) {
             ERROR_IMUF("Too many consecutive IMU failures - auto-disabling");
             gImuRunning = false;
             sensorStatusBumpWith("imu@auto_disabled");

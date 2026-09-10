@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include "System_BuildConfig.h"
 
 #if ENABLE_HTTP_SERVER
@@ -48,7 +49,7 @@ inline bool isHttpServerRunning() { return false; }
 
 // Number of httpd-task callers currently blocked waiting on cmd_exec_task.
 // Maintained by submitAndExecuteSync (System_Utils.cpp).
-extern volatile int gWebCmdWaiters;
+extern std::atomic<int> gWebCmdWaiters;
 
 // Stop the server without risking the circular wait above. Returns true if the
 // stop happened inline, false if it was deferred to the main loop. Safe to call

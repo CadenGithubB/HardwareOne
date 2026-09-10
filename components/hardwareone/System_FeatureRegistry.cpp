@@ -266,6 +266,8 @@ static bool isServoCompiled() {
 #endif
 }
 
+static bool isMatrixCompiled() { return ENABLE_LED_MATRIX; }
+
 // NOTE: ENABLE_R1_HEALTH is force-set to 0 unless BOTH Bluetooth and G2 are
 // compiled (the ring rides the G2 BLE transport — System_BuildConfig.h "R1
 // Health needs BT + G2"), so this predicate already reflects those
@@ -431,6 +433,10 @@ static constexpr FeatureEntry featureRegistry[] = {
     FEATURE_FLAG_COMPILE_TIME,
     nullptr, isServoCompiled,
     "PCA9685 16-channel servo/PWM controller" },
+
+  { "matrix", "LED Matrix", FEATURE_CAT_SENSOR, 1,
+    FEATURE_FLAG_COMPILE_TIME, nullptr, isMatrixCompiled,
+    "HT16K33 monochrome 16x8 LED matrix" },
 
   // Battery monitor has no enable/AutoStart setting of its own — the board's
   // BATTERY_MONITOR_AVAILABLE decides, so it's compile-time only (nullptr
@@ -921,7 +927,7 @@ const char* cmd_features(const String& argsInput) {
   bool wasEnabled = *f->enabledSetting;
   *f->enabledSetting = enable;
 
-  writeSettingsJson();
+  (void)requestSettingsPersist();
 
   // Runtime enable/disable — post only on an actual state transition (a no-op
   // re-set to the same value must not post). subject=feature name, detail=on|off.

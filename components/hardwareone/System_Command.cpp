@@ -12,6 +12,7 @@
 
 #include "System_CLI.h"
 #include "System_Command.h"
+#include "System_CommandLookupCore.h"
 #include "System_Debug.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
@@ -107,42 +108,26 @@ void registerCommands(const CommandEntry* commands, size_t count) {
 // Command Lookup Functions
 // ============================================================================
 
-// Find command using longest-prefix matching
-// e.g., "user list json" matches "user list" (not just "user")
+// Find command using allocation-free longest-prefix matching.
+// e.g., "user list json" matches "user list" (not just "user").
+CommandResolution resolveCommand(const String& cmdLine) {
+  const hw1_command_lookup::Match match = hw1_command_lookup::resolve(
+      cmdLine.c_str(), cmdLine.length(), commandRegistrySize,
+      [](size_t index) -> const char* {
+        const CommandEntry* entry = commandRegistry[index];
+        return entry ? entry->name : nullptr;
+      });
+
+  CommandResolution resolution;
+  resolution.matchedLength = match.matchedLength;
+  resolution.lineOffset = match.lineOffset;
+  resolution.registryOrdinal = match.registryOrdinal;
+  if (match.found()) resolution.entry = commandRegistry[match.registryOrdinal];
+  return resolution;
+}
+
 const CommandEntry* findCommand(const String& cmdLine) {
-  if (cmdLine.length() == 0) {
-    return nullptr;
-  }
-  
-  String lc = cmdLine;
-  lc.toLowerCase();
-  lc.trim();
-  
-  const CommandEntry* bestMatch = nullptr;
-  size_t bestLen = 0;
-  
-  for (size_t i = 0; i < commandRegistrySize; i++) {
-    const char* entryName = commandRegistry[i]->name;
-    size_t entryLen = strlen(entryName);
-    
-    // Convert entry name to lowercase for case-insensitive comparison
-    String lcEntry = String(entryName);
-    lcEntry.toLowerCase();
-    
-    // Check if command line starts with this entry name
-    if (lc.startsWith(lcEntry)) {
-      // Ensure it's a complete word match (followed by space, end, or nothing)
-      if (lc.length() == entryLen ||
-          isspace(static_cast<unsigned char>(lc.charAt(entryLen)))) {
-        // Prefer longer matches (e.g., "user list" over "user")
-        if (entryLen > bestLen) {
-          bestMatch = commandRegistry[i];
-          bestLen = entryLen;
-        }
-      }
-    }
-  }
-  return bestMatch;
+  return resolveCommand(cmdLine).entry;
 }
 
 // Check if a command should remain in help mode rather than exiting it.
@@ -172,20 +157,8 @@ bool isHelpModeCommand(const char* cmdName) {
 // Resolve the canonical registry command key from a full command line
 // Uses longest-prefix matching to find the command name
 String resolveRegistryCommandKey(const String& command) {
-  String cmd = command;
-  cmd.trim();
-  
-  if (cmd.length() == 0) {
-    return "";
-  }
-  
-  // Use findCommand() which does longest-prefix matching
-  const CommandEntry* found = findCommand(cmd);
-  if (found) {
-    return String(found->name);
-  }
-  
-  return "";
+  const CommandResolution resolution = resolveCommand(command);
+  return resolution.entry ? String(resolution.entry->name) : String();
 }
 
 // ============================================================================
@@ -213,44 +186,22 @@ String executeCommandThroughRegistry(const String& argsInput) {
     }
   }
 
-  const String safeCommandForTrace = redactCmdForAudit(command);
+  const CommandResolution resolution = resolveCommand(command);
+  const String safeCommandForTrace =
+      redactCmdForAudit(command, resolution);
   DEBUG_COMMAND_SYSTEMF("CommandSystem: Executing command '%s'", safeCommandForTrace.c_str());
 
-  // Step 1: Resolve canonical command key once (case-insensitive, args preserved)
-  String resolvedKey = resolveRegistryCommandKey(command);
-
-  // Prepare original for argument slicing
-  String originalForArgs = command;
-
-  // Step 2: Split key vs args (do not alter dispatch yet)
+  // Split the already-resolved key from its arguments. command was trimmed
+  // above, so the match begins at byte zero on this path.
   String resolvedArgs;
-  size_t resolvedLen = 0;
-  if (resolvedKey.length() > 0) {
-    resolvedLen = resolvedKey.length();
-    resolvedArgs = originalForArgs.substring(resolvedLen);
+  if (resolution.entry && command.length() > resolution.matchedLength) {
+    resolvedArgs = command.substring(resolution.matchedLength);
     resolvedArgs.trim();
   }
 
-  // Step 3: Find handler by exact key and rebuild normalized command (single source of truth)
-  const CommandEntry* found = nullptr;
-  if (resolvedKey.length() > 0) {
-    for (size_t i = 0; i < commandRegistrySize; ++i) {
-      if (resolvedKey == String(commandRegistry[i]->name)) {
-        // Use this entry (help navigation is now in cli_system module)
-        found = commandRegistry[i];
-        break;
-      }
-    }
-  }
+  const CommandEntry* found = resolution.entry;
 
   if (found) {
-    // Step 4: Rebuild command using canonical key + trailing args (arguments preserved)
-    command = String(found->name);
-    if (resolvedArgs.length() > 0) {
-      command += " ";
-      command += resolvedArgs;
-    }
-
     // Execute through registry handler - pass only args, not full command
     DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s", found->name);
     const char* result = found->handler(resolvedArgs);
@@ -276,7 +227,7 @@ String executeCommandThroughRegistry(const String& argsInput) {
     return String(result);
   } else {
     // Command not found in registry
-    return "Unknown command: " + redactCmdForAudit(command) +
+    return "Unknown command: " + safeCommandForTrace +
            "\nType 'help' for available commands";
   }
 }

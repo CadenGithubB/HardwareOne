@@ -44,5 +44,24 @@ bool otaBleHandleEncryptedFrame(uint16_t connId, const uint8_t* frame, size_t si
 // Cheap main-loop cleanup for abandoned/disconnected BLE upload sessions.
 void otaBleUploadHousekeeping();
 
+// True while a BLE bulk upload is mid-transfer on this exact connection.
+//
+// The idle-logout sweep uses it to leave that session alone. A 4 MB staging
+// transfer runs for minutes and is liveness by definition, so it must not
+// depend on the idle heuristic agreeing -- on 2026-08-30 a transfer died to a
+// 15-minute idle logout while checkpoints were still landing every 1.4 s.
+//
+// This cannot be used to pin a session open indefinitely: housekeepBleUpload()
+// tears the upload down after kBleUploadIdleTimeoutMs (60 s) without frames, or
+// as soon as the authenticated session goes away, so `active` is itself bounded
+// by recent traffic.
+bool otaBleUploadActiveOnConnection(uint16_t connId);
+
+// True for the single trial boot that follows an update staged over Bluetooth.
+// Latched by otaSystemInitAfterStorage() from the durable journal; a plain
+// getter, so the boot path may consult it more than once. Always false on any
+// later boot, and on an update delivered by any other transport.
+bool otaSystemResumeBleRequested();
+
 extern const CommandEntry otaCommands[];
 extern const size_t otaCommandsCount;

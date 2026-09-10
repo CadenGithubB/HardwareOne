@@ -3,7 +3,6 @@
 #if ENABLE_WEB_ESPNOW
 
 #include <Arduino.h>
-#include <LittleFS.h>
 
 #include "System_User.h"
 #include "System_VFS.h"
@@ -11,11 +10,6 @@
 #include "WebPage_ESPNow.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
-
-// Forward declarations
-extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
-extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
-extern void streamEndHtml(httpd_req_t* req);
 
 static void streamEspNowContent(httpd_req_t* req, const String& username) {
   streamBeginHtml(req, "ESP-NOW", false, username, "espnow");
@@ -40,9 +34,6 @@ static esp_err_t handleEspNowPage(httpd_req_t* req) {
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sessions.h"  // SendStatus snapshot for delivery-tracking JSON
 #include "System_MemUtil.h"
-
-extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
-extern esp_err_t handleEspNowMetadata(httpd_req_t* req);
 
 static inline esp_err_t webEspnowSendChunk(httpd_req_t* req, const char* s) {
   return httpd_resp_send_chunk(req, s, HTTPD_RESP_USE_STRLEN);
@@ -556,16 +547,15 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
 #include <ArduinoJson.h>
 #include "System_Utils.h"
 #include "System_CommandTypes.h"
-#include "System_MemUtil.h"
 
-static bool espnowRunInternal(const char* cmd, char* out, size_t outSize) {
+static void espnowRunInternal(const char* cmd, char* out, size_t outSize) {
   AuthContext sys;
   sys.transport = SOURCE_INTERNAL;
   sys.user = "system";
   sys.ip = "local";
   sys.path = cmd;
   out[0] = '\0';
-  return executeCommand(sys, cmd, out, outSize);
+  (void)executeCommand(sys, cmd, out, outSize);
 }
 
 // GET /api/espnow/status — same result slots as the old CLI batch, so the

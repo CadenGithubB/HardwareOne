@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <ctype.h>
+#include <stdarg.h>
 #include <time.h>
 #include <new>                       // placement new — construct EspNowState's C++ members
 #include <ArduinoJson.h>
@@ -472,6 +473,12 @@ extern int connectedDeviceCount;
 
 // File paths
 static const char* ESPNOW_DEVICES_FILE = "/system/espnow/devices.json";
+static const char* ESPNOW_DEVICES_TEMP_FILE = "/system/espnow/devices.json.tmp";
+static const char* ESPNOW_DEVICES_MIGRATION_BACKUP_FILE =
+    "/system/espnow/devices.pre-psram.json";
+static const char* ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE =
+    "/system/espnow/devices.pre-psram.json.tmp";
+static constexpr size_t ESPNOW_PEER_ALIAS_MAX_BYTES = 31;
 
 // ============================================================================
 // GLOBAL VARIABLES
@@ -485,9 +492,13 @@ uint32_t gTopoRequestTimeout = 0;               // Exported for .ino access
 uint32_t gTopoLastResponseTime = 0;             // Exported for .ino access
 int gTopoResponsesReceived = 0;                 // Exported for .ino access
 int gExpectedWorkerCount = 0;                   // Exported for .ino access
-const uint32_t TOPO_COLLECTION_WINDOW_MS = 3000;  // Exported for .ino access
 uint32_t gLastTopoRequest = 0;                  // Exported for .ino access
-String gTopoResultsBuffer = "";                 // Exported for .ino access
+static uint32_t gTopoCompletedRequestId = 0;
+// Command handlers must fit the shared result ceiling. Two maximum-size
+// responders fit comfortably per page; callers can request subsequent pages.
+static constexpr size_t TOPO_OUTPUT_CAPACITY = CMD_RESULT_MAX;
+static constexpr int TOPO_STREAMS_PER_PAGE = 2;
+static char* gTopoOutputBuffer = nullptr;
 
 // Time synchronization state (exported for .ino access)
 int64_t gTimeOffset = 0;           // Offset to add to millis() to get epoch time (milliseconds)
@@ -601,16 +612,15 @@ uint32_t gLastHeartbeatSentMs = 0;
 // for the topology streams — was removed 2026-08-19: it never gained a
 // producer or consumer and only survived linker GC because its String member
 // gave it a static constructor. 360 B of DRAM for nothing.)
-// PSRAM: touched only on espnow_task (RX-ring-drain handlers v4h_topo_start /
-// v4h_topo_peer, checkTopologyCollectionWindow) and cmd_exec (cmd_test_*).
-// Never from the WiFi-task recv callback, an ISR, a timer, or a critical
-// section. Non-POD (String members) is fine: .ext_ram.bss is zeroed in
-// esp_psram_bss_init() before do_global_ctors() runs the String ctors, and
-// String backing buffers are separate heap allocations either way. Same
-// mutex and same access pattern as gTopoDeviceCache on the next line, which
-// has lived in PSRAM for some time. (Verified 2026-08-19.)
+// PSRAM: bounded POD records only. RX collection and command-side rendering
+// share gTopoStreamsMutex; no topology payload allocates from internal heap.
 EXT_RAM_BSS_ATTR static TopologyStream gTopoStreams[MAX_CONCURRENT_TOPO_STREAMS];  // Array of concurrent streams
 EXT_RAM_BSS_ATTR static TopoDeviceEntry gTopoDeviceCache[MAX_TOPO_DEVICE_CACHE];
+// Stable allow-list for the active discovery. It is published before the first
+// request is sent so an immediate response cannot race ahead of registration.
+// Protected by gTopoStreamsMutex together with the stream table.
+EXT_RAM_BSS_ATTR static uint8_t gTopoExpectedTargets[MESH_PEER_MAX][6];
+static uint8_t gTopoExpectedTargetCount = 0;
 
 // Phase 4: per-transfer state moved to System_ESPNow_Files (multi-slot).
 // gFileTransferLocked / gFileTransferOwnerMac / gFileTransferLockTime
@@ -636,12 +646,13 @@ static bool saveEspNowDevices() {
   if (!filesystemReady) return false;
 
   FsLockGuard fsGuard("espnow.devices.save");
-  File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "w", VFS::systemAuth("espnow.devices_save"), true);
-  if (!f) return false;
+  // Build the complete document before opening the destination. Besides making
+  // quotes/backslashes in user metadata valid JSON, this avoids truncating a
+  // previously-good registry if encryption or PSRAM allocation fails halfway
+  // through a save.
+  PSRAM_JSON_DOC(doc);
+  JsonArray devices = doc["devices"].to<JsonArray>();
   int skipped = 0;
-
-  f.println("{");
-  f.println("  \"devices\": [");
   int count = 0;
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     if (isSelfMac(gEspNow->devices[i].mac)) continue;
@@ -654,13 +665,7 @@ static bool saveEspNowDevices() {
       skipped++;
       continue;
     }
-    if (count > 0) f.println(",");
-    f.print("    {\"mac\":\"");
-    f.print(encMac);
-    f.print("\",\"name\":\"");
-    f.print(gEspNow->devices[i].name);
-    f.print("\",\"encrypted\":");
-    f.print(gEspNow->devices[i].encrypted ? "true" : "false");
+    String encKey;
     if (gEspNow->devices[i].encrypted) {
       // Build hex key string, then encrypt it
       char keyHex[33];
@@ -668,36 +673,72 @@ static bool saveEspNowDevices() {
         snprintf(keyHex + (k * 2), 3, "%02x", gEspNow->devices[i].key[k]);
       }
       keyHex[32] = '\0';
-      String encKey = encryptString(String(keyHex));
+      encKey = encryptString(String(keyHex));
       if (encKey.length() == 0) {
         ERROR_ESPNOWF("[ESP-NOW] Failed to encrypt device key for '%s', skipping entry", gEspNow->devices[i].name.c_str());
         skipped++;
         continue;
       }
-      f.print(",\"key\":\"");
-      f.print(encKey);
-      f.print("\"");
     }
+
+    JsonObject entry = devices.add<JsonObject>();
+    entry["mac"] = encMac;
+    entry["name"] = gEspNow->devices[i].name.c_str();
+    entry["encrypted"] = gEspNow->devices[i].encrypted;
+    if (gEspNow->devices[i].encrypted) entry["key"] = encKey;
+
     // Cached metadata fields (persist across reboots)
     EspNowDevice& dev = gEspNow->devices[i];
-    if (dev.friendlyName.length()) { f.print(",\"friendlyName\":\""); f.print(dev.friendlyName); f.print("\""); }
-    if (dev.room.length())         { f.print(",\"room\":\""); f.print(dev.room); f.print("\""); }
-    if (dev.zone.length())         { f.print(",\"zone\":\""); f.print(dev.zone); f.print("\""); }
-    if (dev.tags.length())         { f.print(",\"tags\":\""); f.print(dev.tags); f.print("\""); }
-    if (dev.stationary)            { f.print(",\"stationary\":true"); }
+    if (dev.friendlyName.length()) entry["friendlyName"] = dev.friendlyName.c_str();
+    if (dev.room.length())         entry["room"] = dev.room.c_str();
+    if (dev.zone.length())         entry["zone"] = dev.zone.c_str();
+    if (dev.tags.length())         entry["tags"] = dev.tags.c_str();
+    if (dev.stationary)            entry["stationary"] = true;
     // Phase 2 multi-mesh — record which mesh this peer belongs to. Omit
     // the key when meshId==0 to keep the on-disk file compact for the
     // common single-mesh case (loader defaults missing field to 0).
-    if (dev.meshId != 0)           { f.print(",\"meshId\":"); f.print((int)dev.meshId); }
-    f.print("}");
+    if (dev.meshId != 0)           entry["meshId"] = dev.meshId;
     count++;
   }
-  f.println();
-  f.println("  ]");
-  f.println("}");
+
+  if (doc.overflowed()) {
+    ERROR_ESPNOWF("[ESP-NOW] Failed to build %s in PSRAM; existing registry preserved",
+                  ESPNOW_DEVICES_FILE);
+    return false;
+  }
+  if (skipped != 0) {
+    ERROR_ESPNOWF("[ESP-NOW] Refusing to replace %s after %d encryption failure(s); existing registry preserved",
+                  ESPNOW_DEVICES_FILE, skipped);
+    return false;
+  }
+
+  // Serialize to a sibling file, verify the complete byte count, then rename.
+  // A full filesystem, short write, or power loss therefore cannot leave the
+  // live registry truncated or missing peers.
+  File f = VFS::openGuarded(ESPNOW_DEVICES_TEMP_FILE, "w",
+                            VFS::systemAuth("espnow.devices_save"), true);
+  if (!f) return false;
+  const size_t expected = measureJson(doc);
+  const size_t written = serializeJson(doc, f);
+  f.flush();
   f.close();
+  if (written != expected) {
+    ERROR_ESPNOWF("[ESP-NOW] Incomplete registry write (%u/%u bytes); existing registry preserved",
+                  (unsigned)written, (unsigned)expected);
+    VFS::removeGuarded(ESPNOW_DEVICES_TEMP_FILE,
+                       VFS::systemAuth("espnow.devices_save"));
+    return false;
+  }
+  if (!VFS::renameGuarded(ESPNOW_DEVICES_TEMP_FILE, ESPNOW_DEVICES_FILE,
+                          VFS::systemAuth("espnow.devices_save"))) {
+    ERROR_ESPNOWF("[ESP-NOW] Failed to atomically replace %s; existing registry preserved",
+                  ESPNOW_DEVICES_FILE);
+    VFS::removeGuarded(ESPNOW_DEVICES_TEMP_FILE,
+                       VFS::systemAuth("espnow.devices_save"));
+    return false;
+  }
   DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
-  return skipped == 0;
+  return true;
 }
 
 // Load mesh peer MAC addresses from filesystem (topology only)
@@ -760,7 +801,10 @@ void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key) {
   // NOTE: Do not call broadcastOutput here - can cause watchdog timeout during init
 }
 
-// Set ESP-NOW passphrase and derive encryption key
+// Set ESP-NOW passphrase and derive the live key. Persistence is deliberately
+// owned by meshesCmd_setpassphrase() after it has also refreshed the cached
+// stretched-key tuple; writing from here would create a long power-loss window
+// where disk held the new passphrase beside the old cached key.
 // Forward decl — defined further down with other multi-mesh helpers
 static uint16_t meshFingerprintForLabel(const String& label);
 
@@ -770,14 +814,14 @@ static void setEspNowPassphrase(const String& passphrase) {
   deriveKeyFromPassphrase(passphrase, gEspNow->derivedKey);
 
   Settings::MeshIdentity& m0 = gSettings.meshes[0];
-  setSetting(m0.passphrase, passphrase);
+  m0.passphrase = passphrase;
   if (m0.label.length() == 0 && passphrase.length() > 0) {
-    setSetting(m0.label, String("primary"));
-    setSetting(m0.enabled, true);
-    setSetting(m0.isDefault, true);
+    m0.label = "primary";
+    m0.enabled = true;
+    m0.isDefault = true;
   }
   if (passphrase.length() == 0) {
-    setSetting(m0.enabled, false);
+    m0.enabled = false;
   }
   m0.fingerprint = meshFingerprintForLabel(m0.label);
 }
@@ -1118,7 +1162,7 @@ void sendEspNowStreamMessage(const String& message) {
   }
 
   // Legacy global streaming (startstream/stopstream commands)
-  if (!gEspNow->streamActive || !gEspNow->streamTarget) return;
+  if (!gEspNow->streamActive) return;
 
   // Rate limiting: max 10 messages/second
   unsigned long now = millis();
@@ -2684,7 +2728,12 @@ static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_TX_TOPO_REQ] Sending to %s msgId=%lu reqId=%lu",
          dstMac, (unsigned long)msgId, (unsigned long)reqId);
-  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_REQ, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
+  // Keep topology on its established plaintext V4 transport. Moving this
+  // multi-frame exchange through the one-deep encrypted pending queue would
+  // both break mixed-firmware discovery and overwrite START/PEER frames while
+  // a session is being established.
+  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_REQ, 0, msgId,
+                              (const uint8_t*)&payload, sizeof(payload), 2);
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_TX_TOPO_REQ] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -2843,7 +2892,8 @@ static bool v4_send_topo_start(const uint8_t* dst, uint32_t reqId, uint8_t peerC
   memset(payload.reserved, 0, sizeof(payload.reserved));
   
   uint32_t msgId = generateMessageId();
-  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_START, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
+  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_START, 0, msgId,
+                       (const uint8_t*)&payload, sizeof(payload), 2);
 }
 
 static bool v4_send_topo_peer(const uint8_t* dst, uint32_t reqId, uint8_t peerIndex, 
@@ -2860,7 +2910,8 @@ static bool v4_send_topo_peer(const uint8_t* dst, uint32_t reqId, uint8_t peerIn
   payload.name[sizeof(payload.name) - 1] = '\0';
   
   uint32_t msgId = generateMessageId();
-  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_PEER, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
+  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_PEER, 0, msgId,
+                       (const uint8_t*)&payload, sizeof(payload), 2);
 }
 
 // Broadcast sensor status to all mesh peers
@@ -3000,11 +3051,12 @@ bool v4_broadcast_text(const char* text, uint16_t textLen) {
 }
 
 // Forward declarations for static functions defined later in this file
-static TopologyStream* findTopoStream(const uint8_t* senderMac, uint32_t reqId);
-static TopologyStream* findOrCreateTopoStream(const uint8_t* senderMac, uint32_t reqId);
+static TopologyStream* findTopoStreamLocked(const uint8_t* senderMac, uint32_t reqId);
+static TopologyStream* findOrCreateTopoStreamLocked(const uint8_t* senderMac, uint32_t reqId);
+static bool            topologySenderExpectedLocked(const uint8_t* senderMac);
 static void            addTopoDeviceName(const uint8_t* mac, const char* name);
 static bool            getTopoDeviceName(const uint8_t* mac, char* outBuf, size_t outLen);
-static void            finalizeTopologyStream(TopologyStream* stream);
+static void            finalizeTopologyStreamLocked(TopologyStream* stream);
 #if ENABLE_BONDED_MODE
 static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const String& manifest);
 #endif
@@ -3628,9 +3680,10 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
            ctx.payloadLen, (unsigned)sizeof(V4PayloadTopoReq));
     return;
   }
-  const V4PayloadTopoReq* tr = (const V4PayloadTopoReq*)ctx.payload;
+  V4PayloadTopoReq tr;
+  memcpy(&tr, ctx.payload, sizeof(tr));
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] reqId=%lu requesterMeshFp=0x%04X",
-         (unsigned long)tr->reqId, ctx.h->meshFingerprint);
+         (unsigned long)tr.reqId, ctx.h->meshFingerprint);
 
   // Phase 2: filter peers by requester's mesh. If the requester stamped a
   // mesh fingerprint, only report peers belonging to that mesh. fingerprint=0
@@ -3669,7 +3722,11 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
   }
 
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] Responding with %d peer(s) in requester's mesh", peerCount);
-  v4_send_topo_start(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerCount);
+  if (!v4_send_topo_start(ctx.recv_info->src_addr, tr.reqId,
+                          (uint8_t)peerCount)) {
+    WARN_ESPNOWF("[V4_RX_TOPO_REQ] Failed to send TOPO_START; response aborted");
+    return;
+  }
 
   int peerIndex = 0;
   for (int i = 0; i < gMeshPeerSlots; i++) {
@@ -3682,7 +3739,7 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
       const char* peerNamePtr = resolvedName.length() ? resolvedName.c_str() : "Unknown";
       MeshPeerHealth* ph = getMeshPeerHealth(gMeshPeers[i].mac, false);
       int8_t rssi = ph ? ph->rssi : 0;
-      v4_send_topo_peer(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerIndex,
+      v4_send_topo_peer(ctx.recv_info->src_addr, tr.reqId, (uint8_t)peerIndex,
                         isLast, gMeshPeers[i].mac, rssi,
                         false, peerNamePtr);
       peerIndex++;
@@ -3700,19 +3757,37 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
            ctx.payloadLen, (unsigned)sizeof(V4PayloadTopoStart));
     return;
   }
-  const V4PayloadTopoStart* ts = (const V4PayloadTopoStart*)ctx.payload;
+  V4PayloadTopoStart ts;
+  memcpy(&ts, ctx.payload, sizeof(ts));
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] reqId=%lu peerCount=%u",
-         (unsigned long)ts->reqId, ts->peerCount);
-  if (ts->reqId != gTopoRequestId || millis() >= gTopoRequestTimeout) {
+         (unsigned long)ts.reqId, ts.peerCount);
+  if (ts.peerCount > MESH_PEER_MAX) {
+    WARN_ESPNOWF("[V4_RX_TOPO_START] Rejected peerCount=%u (max=%u)",
+                 ts.peerCount, (unsigned)MESH_PEER_MAX);
+    return;
+  }
+
+  TopoStreamsGuard guard("v4h_topo_start");
+  if (gTopoStreamsMutex && !guard.held) {
+    WARN_ESPNOWF("[V4_RX_TOPO_START] Topology state busy; dropping response");
+    return;
+  }
+  const uint32_t now = (uint32_t)millis();
+  if (ts.reqId != gTopoRequestId ||
+      (int32_t)(gTopoRequestTimeout - now) <= 0) {
     DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] Rejected: reqId mismatch or timeout");
     return;
   }
-  TopologyStream* stream = findOrCreateTopoStream(ctx.recv_info->src_addr, ts->reqId);
+  if (!topologySenderExpectedLocked(ctx.recv_info->src_addr)) {
+    WARN_ESPNOWF("[V4_RX_TOPO_START] Rejected response from a peer outside the request snapshot");
+    return;
+  }
+  TopologyStream* stream = findOrCreateTopoStreamLocked(ctx.recv_info->src_addr, ts.reqId);
   if (!stream || !stream->active) {
     DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] ERROR: Could not allocate stream");
     return;
   }
-  if (stream->receivedPeers == 0 && stream->totalPeers == 0) {
+  if (!stream->started) {
     const char* senderNamePtr = (ctx.deviceName && ctx.deviceName[0]) ? ctx.deviceName : nullptr;
     char senderNameFallBuf[48];
     if (!senderNamePtr && gMeshPeerMeta) {
@@ -3736,19 +3811,23 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
     }
     strncpy(stream->senderName, senderNamePtr, 31);
     stream->senderName[31] = '\0';
-    stream->totalPeers = ts->peerCount;
-    stream->accumulatedData = "";
+    stream->totalPeers = ts.peerCount;
+    stream->started = true;
     addTopoDeviceName(ctx.recv_info->src_addr, senderNamePtr);
     DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] Stream initialized for %s: expecting %d peers",
-           stream->senderName, ts->peerCount);
+           stream->senderName, ts.peerCount);
+  } else if (stream->totalPeers != ts.peerCount) {
+    WARN_ESPNOWF("[V4_RX_TOPO_START] Conflicting duplicate start for %s: had=%u new=%u",
+                 stream->senderName, stream->totalPeers, ts.peerCount);
+    return;
   }
-  if (ts->peerCount == 0) {
+  if (ts.peerCount == 0) {
     DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] 0 peers - edge device, finalizing");
-    finalizeTopologyStream(stream);
+    finalizeTopologyStreamLocked(stream);
   }
 }
 
-// TOPO_PEER — incoming topology peer entry. Appends to accumulated data.
+// TOPO_PEER — incoming topology peer entry. Stores one bounded indexed record.
 static void v4h_topo_peer(const V4RxCtx& ctx) {
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
@@ -3757,57 +3836,96 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
            ctx.payloadLen, (unsigned)sizeof(V4PayloadTopoPeer));
     return;
   }
-  const V4PayloadTopoPeer* tp = (const V4PayloadTopoPeer*)ctx.payload;
+  V4PayloadTopoPeer tp;
+  memcpy(&tp, ctx.payload, sizeof(tp));
+  char wireName[sizeof(tp.name) + 1];
+  memcpy(wireName, tp.name, sizeof(tp.name));
+  wireName[sizeof(tp.name)] = '\0';
   char peerMacStr[18];
-  formatMacAddressBuf(tp->mac, peerMacStr, sizeof(peerMacStr));
+  formatMacAddressBuf(tp.mac, peerMacStr, sizeof(peerMacStr));
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] reqId=%lu idx=%u isLast=%u mac=%s name=%s",
-         (unsigned long)tp->reqId, tp->peerIndex, tp->isLast, peerMacStr, tp->name);
-  if (tp->reqId != gTopoRequestId || millis() >= gTopoRequestTimeout) {
+         (unsigned long)tp.reqId, tp.peerIndex, tp.isLast, peerMacStr, wireName);
+  if (tp.isLast > 1) {
+    WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected invalid isLast=%u", tp.isLast);
+    return;
+  }
+
+  TopoStreamsGuard guard("v4h_topo_peer");
+  if (gTopoStreamsMutex && !guard.held) {
+    WARN_ESPNOWF("[V4_RX_TOPO_PEER] Topology state busy; dropping response");
+    return;
+  }
+  const uint32_t now = (uint32_t)millis();
+  if (tp.reqId != gTopoRequestId ||
+      (int32_t)(gTopoRequestTimeout - now) <= 0) {
     DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Rejected: reqId mismatch or timeout");
     return;
   }
-  TopologyStream* stream = findTopoStream(ctx.recv_info->src_addr, tp->reqId);
-  if (!stream || !stream->active) {
+  if (!topologySenderExpectedLocked(ctx.recv_info->src_addr)) {
+    WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected response from a peer outside the request snapshot");
+    return;
+  }
+  TopologyStream* stream = findTopoStreamLocked(ctx.recv_info->src_addr, tp.reqId);
+  if (!stream || !stream->active || !stream->started) {
     DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] No active stream for this sender");
     return;
   }
-  if (stream->accumulatedData.indexOf(peerMacStr) != -1) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Duplicate peer %s, skipping", peerMacStr);
+  if (tp.peerIndex >= stream->totalPeers || tp.peerIndex >= MESH_PEER_MAX) {
+    WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected index=%u for total=%u",
+                 tp.peerIndex, stream->totalPeers);
     return;
   }
-  const char* peerNamePtr2 = (tp->name[0] && strcmp(tp->name, "Unknown") != 0) ? tp->name : nullptr;
+  const bool expectedLast = ((uint16_t)tp.peerIndex + 1u == stream->totalPeers);
+  if ((tp.isLast != 0) != expectedLast) {
+    WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected inconsistent isLast=%u at index=%u total=%u",
+                 tp.isLast, tp.peerIndex, stream->totalPeers);
+    return;
+  }
+  const uint16_t peerBit = (uint16_t)(1u << tp.peerIndex);
+  if ((stream->receivedPeerMask & peerBit) != 0) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Duplicate index %u, skipping", tp.peerIndex);
+    return;
+  }
+
+  const char* peerNamePtr2 = (wireName[0] && strcmp(wireName, "Unknown") != 0) ? wireName : nullptr;
   char peerNameFallBuf[48];
   if (!peerNamePtr2) {
-    if (getTopoDeviceName(tp->mac, peerNameFallBuf, sizeof(peerNameFallBuf)) && peerNameFallBuf[0]) {
+    if (getTopoDeviceName(tp.mac, peerNameFallBuf, sizeof(peerNameFallBuf)) && peerNameFallBuf[0]) {
       peerNamePtr2 = peerNameFallBuf;
     }
   }
   if (!peerNamePtr2 && gMeshPeerMeta) {
     for (int _tni = 0; _tni < gMeshPeerSlots; _tni++) {
-      if (gMeshPeerMeta[_tni].isActive && memcmp(gMeshPeerMeta[_tni].mac, tp->mac, 6) == 0 && gMeshPeerMeta[_tni].name[0]) {
+      if (gMeshPeerMeta[_tni].isActive && memcmp(gMeshPeerMeta[_tni].mac, tp.mac, 6) == 0 && gMeshPeerMeta[_tni].name[0]) {
         peerNamePtr2 = gMeshPeerMeta[_tni].name; break;
       }
     }
   }
   if (!peerNamePtr2 && gEspNow) {
     for (int _tni = 0; _tni < gEspNow->deviceCount; _tni++) {
-      if (memcmp(gEspNow->devices[_tni].mac, tp->mac, 6) == 0 && gEspNow->devices[_tni].name.length()) {
+      if (memcmp(gEspNow->devices[_tni].mac, tp.mac, 6) == 0 && gEspNow->devices[_tni].name.length()) {
         strlcpy(peerNameFallBuf, gEspNow->devices[_tni].name.c_str(), sizeof(peerNameFallBuf));
         peerNamePtr2 = peerNameFallBuf; break;
       }
     }
   }
   if (peerNamePtr2) {
-    addTopoDeviceName(tp->mac, peerNamePtr2);
+    addTopoDeviceName(tp.mac, peerNamePtr2);
   }
-  char peerInfoBuf[128];
-  snprintf(peerInfoBuf, sizeof(peerInfoBuf), "  \xe2\x86\x92 %s (%s)\n    RSSI: %d dBm\n",
-           peerNamePtr2 ? peerNamePtr2 : "Unknown", peerMacStr, (int)tp->rssi);
-  stream->accumulatedData += peerInfoBuf;
+
+  TopologyPeerRecord& peer = stream->peers[tp.peerIndex];
+  memcpy(peer.mac, tp.mac, sizeof(peer.mac));
+  strlcpy(peer.name, peerNamePtr2 ? peerNamePtr2 : "Unknown", sizeof(peer.name));
+  peer.rssi = tp.rssi;
+  peer.present = true;
+  stream->receivedPeerMask |= peerBit;
   stream->receivedPeers++;
-  gTopoLastResponseTime = millis();
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Accumulated peer %d/%d: %s",
+  gTopoLastResponseTime = now;
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Stored peer %d/%d: %s",
          stream->receivedPeers, stream->totalPeers, peerNamePtr2 ? peerNamePtr2 : "Unknown");
+  if (stream->receivedPeers == stream->totalPeers) {
+    finalizeTopologyStreamLocked(stream);
+  }
 }
 
 // USER_SYNC — propagates user credentials between bonded peers; requires
@@ -4311,6 +4429,14 @@ static void v4h_metadata_req(const V4RxCtx& ctx) {
   }
 }
 
+static void normalizeMetadataWireText(V4PayloadMetadata& meta) {
+  meta.deviceName[sizeof(meta.deviceName) - 1] = '\0';
+  meta.friendlyName[sizeof(meta.friendlyName) - 1] = '\0';
+  meta.room[sizeof(meta.room) - 1] = '\0';
+  meta.zone[sizeof(meta.zone) - 1] = '\0';
+  meta.tags[sizeof(meta.tags) - 1] = '\0';
+}
+
 // METADATA_RESP / METADATA_PUSH — shared handler. Type comes from header.
 static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
   const char* metaType = (ctx.h->type == ESPNOW_V4_TYPE_METADATA_PUSH) ? "PUSH" : "RESP";
@@ -4322,16 +4448,25 @@ static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
       metaType, ctx.deviceName, ctx.payloadLen, (unsigned)sizeof(V4PayloadMetadata));
     return;
   }
-  const V4PayloadMetadata* meta = (const V4PayloadMetadata*)ctx.payload;
-  DEBUG_ESPNOW_METADATAF("[METADATA] %s payload: name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d",
-    metaType, meta->deviceName, meta->friendlyName, meta->room, meta->zone, meta->tags, (int)meta->stationary);
   if (!gEspNow) {
     WARN_ESPNOWF("[METADATA] %s from %s dropped: gEspNow is null", metaType, ctx.deviceName);
     return;
   }
+
+  // Wire char arrays are fixed-width and are not trustworthy C strings. Copy
+  // into the PSRAM-backed deferred slot, then terminate every field before its
+  // first `%s`, strcmp/strncpy, String construction, or bounded registry
+  // assignment. Legitimate senders already reserve the final byte for NUL, so
+  // this is wire-compatible while making a fully occupied field safe without
+  // adding a 202-byte temporary to espnow_task's stack.
   bool wasPending = gEspNow->deferredMetadataPending;
   memcpy(gEspNow->deferredMetadataSrcMac, ctx.recv_info->src_addr, 6);
-  memcpy(&gEspNow->deferredMetadataPayload, meta, sizeof(V4PayloadMetadata));
+  memcpy(gEspNow->deferredMetadataPayload, ctx.payload, sizeof(V4PayloadMetadata));
+  V4PayloadMetadata* meta =
+      reinterpret_cast<V4PayloadMetadata*>(gEspNow->deferredMetadataPayload);
+  normalizeMetadataWireText(*meta);
+  DEBUG_ESPNOW_METADATAF("[METADATA] %s payload: name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d",
+    metaType, meta->deviceName, meta->friendlyName, meta->room, meta->zone, meta->tags, (int)meta->stationary);
   gEspNow->deferredMetadataPending = true;
   DEBUG_ESPNOW_METADATAF("[METADATA] %s deferred for task processing (overwrote=%d)",
     metaType, (int)wasPending);
@@ -5349,7 +5484,12 @@ void espnowPairModeClose() {
   // sweep in processMeshHeartbeats.
   if (espnowPairModeActive()) systemEventPost(SYSEVT_PAIR_WINDOW_CLOSED);
   gPairModeUntilMs = 0;
-  if (gEspNow) gEspNow->unpairedDeviceCount = 0;  // discovered candidates are window-scoped
+  if (gEspNow) {
+    for (int i = 0; i < gEspNow->unpairedDeviceCount; i++) {
+      gEspNow->unpairedDevices[i] = UnpairedDevice{};
+    }
+    gEspNow->unpairedDeviceCount = 0;  // discovered candidates are window-scoped
+  }
 }
 bool espnowPairModeActive() {
   return gPairModeUntilMs != 0 && (int32_t)(gPairModeUntilMs - (uint32_t)millis()) > 0;
@@ -5370,8 +5510,8 @@ static bool pairModeIsPaired(const uint8_t* mac) {
 
 // Copy an over-the-air (attacker-controlled, maybe non-terminated) char[20] name
 // into a safe single-token label: whitelist [A-Za-z0-9_-], space->'_', drop the
-// rest. Prevents JSON-at-rest injection (saveEspNowDevices writes names raw) and
-// keeps it a single espnowpairsecure arg. Empty result => caller derives from MAC.
+// rest. Keeps it a single espnowpairsecure arg; saveEspNowDevices also performs
+// structured JSON serialization. Empty result => caller derives from MAC.
 static void pairModeSanitizeName(const char* raw, char* out, size_t outSize) {
   size_t j = 0;
   for (size_t i = 0; i < 20 && j + 1 < outSize; i++) {
@@ -5426,12 +5566,16 @@ static const uint32_t CANDIDATE_TTL_MS = 15000;  // ~10 missed 1.5s beacons
 // Drop candidates not heard within CANDIDATE_TTL_MS. Compacts in place.
 static void pruneStaleCandidates(uint32_t now) {
   if (!gEspNow) return;
+  const int oldCount = gEspNow->unpairedDeviceCount;
   int w = 0;
-  for (int r = 0; r < gEspNow->unpairedDeviceCount; r++) {
+  for (int r = 0; r < oldCount; r++) {
     if ((uint32_t)(now - gEspNow->unpairedDevices[r].lastSeenMs) <= CANDIDATE_TTL_MS) {
       if (w != r) gEspNow->unpairedDevices[w] = gEspNow->unpairedDevices[r];
       w++;
     }
+  }
+  for (int i = w; i < oldCount; i++) {
+    gEspNow->unpairedDevices[i] = UnpairedDevice{};
   }
   gEspNow->unpairedDeviceCount = w;
 }
@@ -5439,6 +5583,9 @@ static void pruneStaleCandidates(uint32_t now) {
 // Clear the whole candidate list (window close / manual flush).
 static void clearCandidates() {
   if (!gEspNow) return;
+  for (int i = 0; i < gEspNow->unpairedDeviceCount; i++) {
+    gEspNow->unpairedDevices[i] = UnpairedDevice{};
+  }
   gEspNow->unpairedDeviceCount = 0;
 }
 
@@ -5702,13 +5849,20 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // is the encrypted-unicast data reply replacing the retired plaintext SENSOR_BROADCAST TX.
   { ESPNOW_V4_TYPE_SENSOR_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_req        },
   { ESPNOW_V4_TYPE_SENSOR_ENVELOPE,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_envelope   },
+  // Keep the topology opcodes compatible with the existing plaintext V4 wire
+  // format. Their handlers enforce request IDs, deadlines, bounds and sender
+  // stream ownership before accepting any data.
   { ESPNOW_V4_TYPE_TOPO_REQ,         0,                                                    v4h_topo_req          },
   { ESPNOW_V4_TYPE_TOPO_START,       0,                                                    v4h_topo_start        },
   { ESPNOW_V4_TYPE_TOPO_PEER,        0,                                                    v4h_topo_peer         },
   { ESPNOW_V4_TYPE_USER_SYNC,        0,                                                    v4h_user_sync         },
-  { ESPNOW_V4_TYPE_METADATA_REQ,     0,                                                    v4h_metadata_req      },
-  { ESPNOW_V4_TYPE_METADATA_RESP,    0,                                                    v4h_metadata_resp_push},
-  { ESPNOW_V4_TYPE_METADATA_PUSH,    0,                                                    v4h_metadata_resp_push},
+  // Metadata contains identity/location details and every current sender uses
+  // encrypt-or-queue. Reject plaintext injection consistently in all three
+  // directions; the handler's fixed-width text normalization remains defense
+  // in depth for authenticated but malformed payloads.
+  { ESPNOW_V4_TYPE_METADATA_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_metadata_req      },
+  { ESPNOW_V4_TYPE_METADATA_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_metadata_resp_push},
+  { ESPNOW_V4_TYPE_METADATA_PUSH,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_metadata_resp_push},
   { ESPNOW_V4_TYPE_STREAM,           V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_stream            },
   // FILE_*: TX encrypt-or-fails via v4_send_payload_smart; RX requires matching
   // session AEAD so a spoofed paired MAC cannot inject plaintext transfers
@@ -8395,30 +8549,35 @@ bool shouldChunk(size_t size) {
 // ============================================================================
 
 
-// Finalize a topology stream: flush accumulated data into global results buffer
-static void finalizeTopologyStream(TopologyStream* stream) {
-  if (!stream) return;
-  char macBuf[18];
-  formatMacAddressBuf(stream->senderMac, macBuf, sizeof(macBuf));
-  char entryHeader[64];
-  snprintf(entryHeader, sizeof(entryHeader), "%s (%s):\n", stream->senderName, macBuf);
-  gTopoResultsBuffer += entryHeader;
-  if (stream->accumulatedData.length() > 0) {
-    gTopoResultsBuffer += stream->accumulatedData;
-  } else {
-    gTopoResultsBuffer += "  (no peers)\n";
+// All helpers in this block require gTopoStreamsMutex to be held by the caller.
+// Keeping lookup/create/mutation in one transaction prevents a returned stream
+// pointer from being evicted or reset by another task.
+static void finishTopologyRequestIfCompleteLocked() {
+  if (gTopoRequestId == 0 || gExpectedWorkerCount < 0 ||
+      gTopoResponsesReceived < gExpectedWorkerCount) {
+    return;
   }
-  gTopoResultsBuffer += "\n";
-  gTopoResponsesReceived++;
-  stream->active = false;
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Finalized stream for %s (%d peers)", stream->senderName, stream->receivedPeers);
+  gTopoCompletedRequestId = gTopoRequestId;
+  gTopoRequestId = 0;
+  gTopoRequestTimeout = 0;
+  memset(gTopoExpectedTargets, 0, sizeof(gTopoExpectedTargets));
+  gTopoExpectedTargetCount = 0;
 }
 
-// Helper: Find existing topology stream by sender MAC + reqId
-static TopologyStream* findTopoStream(const uint8_t* senderMac, uint32_t reqId) {
-  TopoStreamsGuard guard("findTopoStream");
+static void finalizeTopologyStreamLocked(TopologyStream* stream) {
+  if (!stream || !stream->active) return;
+  stream->active = false;
+  stream->complete = true;
+  gTopoLastResponseTime = (uint32_t)millis();
+  gTopoResponsesReceived++;
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Finalized stream for %s (%d/%d peers)",
+         stream->senderName, stream->receivedPeers, stream->totalPeers);
+  finishTopologyRequestIfCompleteLocked();
+}
+
+static TopologyStream* findTopoStreamLocked(const uint8_t* senderMac, uint32_t reqId) {
   for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-    if (gTopoStreams[i].reqId == reqId &&
+    if (gTopoStreams[i].occupied && gTopoStreams[i].reqId == reqId &&
         macEqual6(gTopoStreams[i].senderMac, senderMac)) {
       return &gTopoStreams[i];
     }
@@ -8426,49 +8585,36 @@ static TopologyStream* findTopoStream(const uint8_t* senderMac, uint32_t reqId) 
   return nullptr;
 }
 
-// Helper: Create new topology stream slot
-static TopologyStream* createTopoStream(const uint8_t* senderMac, uint32_t reqId) {
-  TopoStreamsGuard guard("createTopoStream");
-  // First, try to find an inactive slot
+static bool topologySenderExpectedLocked(const uint8_t* senderMac) {
+  if (!senderMac) return false;
+  for (uint8_t i = 0; i < gTopoExpectedTargetCount; i++) {
+    if (macEqual6(gTopoExpectedTargets[i], senderMac)) return true;
+  }
+  return false;
+}
+
+static TopologyStream* createTopoStreamLocked(const uint8_t* senderMac, uint32_t reqId) {
   for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-    if (!gTopoStreams[i].active) {
+    if (!gTopoStreams[i].occupied) {
       memset(&gTopoStreams[i], 0, sizeof(TopologyStream));
       memcpy(gTopoStreams[i].senderMac, senderMac, 6);
       gTopoStreams[i].reqId = reqId;
+      gTopoStreams[i].occupied = true;
       gTopoStreams[i].active = true;
       gTopoStreams[i].startTime = millis();
-      gTopoStreams[i].accumulatedData = "";
       return &gTopoStreams[i];
     }
   }
-  
-  // All slots full - evict oldest
-  int oldestIdx = 0;
-  unsigned long oldestTime = gTopoStreams[0].startTime;
-  for (int i = 1; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-    if (gTopoStreams[i].startTime < oldestTime) {
-      oldestTime = gTopoStreams[i].startTime;
-      oldestIdx = i;
-    }
-  }
-  
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] WARNING: All %d stream slots full, evicting oldest", MAX_CONCURRENT_TOPO_STREAMS);
-  memset(&gTopoStreams[oldestIdx], 0, sizeof(TopologyStream));
-  memcpy(gTopoStreams[oldestIdx].senderMac, senderMac, 6);
-  gTopoStreams[oldestIdx].reqId = reqId;
-  gTopoStreams[oldestIdx].active = true;
-  gTopoStreams[oldestIdx].startTime = millis();
-  gTopoStreams[oldestIdx].accumulatedData = "";
-  return &gTopoStreams[oldestIdx];
+  WARN_ESPNOWF("[TOPO] All %d bounded responder slots are occupied", MAX_CONCURRENT_TOPO_STREAMS);
+  return nullptr;
 }
 
-// Helper: Find or create topology stream
-static TopologyStream* findOrCreateTopoStream(const uint8_t* senderMac, uint32_t reqId) {
-  TopologyStream* stream = findTopoStream(senderMac, reqId);
+static TopologyStream* findOrCreateTopoStreamLocked(const uint8_t* senderMac, uint32_t reqId) {
+  TopologyStream* stream = findTopoStreamLocked(senderMac, reqId);
   if (stream) {
     return stream;
   }
-  return createTopoStream(senderMac, reqId);
+  return createTopoStreamLocked(senderMac, reqId);
 }
 
 // Helper: Add or update device name in topology cache
@@ -8590,25 +8736,24 @@ bool parseMacAddress(const String& macStr, uint8_t mac[6]) {
 // Note: Not static - used by System_ImageManager for imagesend command
 bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t mac[6]) {
   if (!gEspNow) return false;
-  
-  // First try to find by device name (case-insensitive)
+
+  // A MAC-shaped alias must never shadow the actual paired device with that
+  // address. This also makes the unique MAC aliases used by the bounded-field
+  // migration unambiguous.
+  if (parseMacAddress(nameOrMac, mac)) {
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) return true;
+    }
+  }
+
+  // Otherwise resolve the human alias (case-insensitive).
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     if (gEspNow->devices[i].name.equalsIgnoreCase(nameOrMac)) {
       memcpy(mac, gEspNow->devices[i].mac, 6);
       return true;
     }
   }
-  
-  // If not found by name, try to parse as MAC address
-  if (parseMacAddress(nameOrMac, mac)) {
-    // Verify the MAC is in the paired device list
-    for (int i = 0; i < gEspNow->deviceCount; i++) {
-      if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
-        return true;
-      }
-    }
-  }
-  
+
   return false;  // Not found by name or MAC, or not paired
 }
 
@@ -8657,6 +8802,7 @@ static void removeFromUnpairedList(const uint8_t* mac) {
         gEspNow->unpairedDevices[j] = gEspNow->unpairedDevices[j + 1];
       }
       gEspNow->unpairedDeviceCount--;
+      gEspNow->unpairedDevices[gEspNow->unpairedDeviceCount] = UnpairedDevice{};
       return;
     }
   }
@@ -8685,12 +8831,13 @@ static bool espnowPeerExists(const uint8_t* mac) {
 // Helper: Cleanup stale topology streams (call periodically)
 static void cleanupStaleTopoStreams() {
   TopoStreamsGuard guard("cleanupStaleTopoStreams");
+  if (gTopoStreamsMutex && !guard.held) return;
   unsigned long now = millis();
   for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
     if (gTopoStreams[i].active && (now - gTopoStreams[i].startTime > 10000)) {
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Timeout: Cleaning up stale stream from %s (reqId=%lu)",
+      DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Timeout: Finalizing partial stream from %s (reqId=%lu)",
                     gTopoStreams[i].senderName, (unsigned long)gTopoStreams[i].reqId);
-      gTopoStreams[i].active = false;
+      finalizeTopologyStreamLocked(&gTopoStreams[i]);
     }
   }
 }
@@ -8706,6 +8853,9 @@ static void cleanupStaleTopoStreams() {
 // Helper: Check ESP-NOW first-time setup
 const char* checkEspNowFirstTimeSetup() {
   if (gSettings.espnowDeviceName.length() > 0) {
+    if (gSettings.espnowDeviceName.length() > 19) {
+      return "Error: Configured ESP-NOW device name exceeds the 19-byte wire limit. Reset it with: espnowsetname <name>";
+    }
     if (!gSettings.espnowFirstTimeSetup) {
       setSetting(gSettings.espnowFirstTimeSetup, true);
     }
@@ -8743,11 +8893,20 @@ static void loadEspNowDevices() {
   if (!arr) return;
 
   int count = 0;
+  bool migrationBackupNeeded = false;
+  bool registryFullyRepresented = true;
   for (JsonObject entry : arr) {
-    if (gEspNow->deviceCount >= 16) break;
+    if (gEspNow->deviceCount >= 16) {
+      registryFullyRepresented = false;
+      WARN_ESPNOWF("[ESP-NOW] Saved registry exceeds the 16-device limit; migration will not overwrite it");
+      break;
+    }
     const char* rawMac = entry["mac"] | "";
     const char* name   = entry["name"] | "";
-    if (!rawMac[0]) continue;
+    if (!rawMac[0]) {
+      registryFullyRepresented = false;
+      continue;
+    }
 
     // Decrypt MAC if stored encrypted
     String macStr = String(rawMac);
@@ -8757,18 +8916,23 @@ static void loadEspNowDevices() {
         macStr = decrypted;
       } else {
         WARN_ESPNOWF("[ESP-NOW] Failed to decrypt device MAC for '%s', skipping", name);
+        registryFullyRepresented = false;
         continue;
       }
     }
 
     uint8_t mac[6];
-    if (!parseMacAddress(macStr, mac)) continue;
+    if (!parseMacAddress(macStr, mac)) {
+      registryFullyRepresented = false;
+      continue;
+    }
 
     // Check if this MAC is already loaded (prevents duplicates from corrupted JSON)
     bool alreadyLoaded = false;
     for (int i = 0; i < gEspNow->deviceCount; i++) {
       if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
         alreadyLoaded = true;
+        registryFullyRepresented = false;
         WARN_ESPNOWF("[ESP-NOW] Skipping duplicate device in saved file: %s (%s)", name, macStr.c_str());
         break;
       }
@@ -8777,34 +8941,64 @@ static void loadEspNowDevices() {
 
     EspNowDevice& dev = gEspNow->devices[gEspNow->deviceCount];
     memcpy(dev.mac, mac, 6);
-    dev.name      = String(name);
+    if (!dev.name.assign(name)) {
+      // Older builds accepted arbitrary-length aliases. Keep the pairing and
+      // eliminate prefix collisions by migrating an oversized alias to its
+      // unique MAC; retain the original JSON in a one-time backup below.
+      char fallbackName[18];
+      formatMacAddressBuf(mac, fallbackName, sizeof(fallbackName));
+      (void)dev.name.assign(fallbackName);
+      migrationBackupNeeded = true;
+      WARN_ESPNOWF("[ESP-NOW] Peer alias for %s exceeds %u bytes; using MAC alias and preserving the original registry backup",
+                   macStr.c_str(), (unsigned)ESPNOW_PEER_ALIAS_MAX_BYTES);
+    }
     dev.encrypted = entry["encrypted"] | false;
     memset(dev.key, 0, 16);
 
-    // Decrypt encryption key if present
+    // Decrypt and validate the encryption key if present. Never consider an
+    // encrypted entry safe to rewrite unless all 16 bytes were represented by
+    // exactly 32 hexadecimal characters.
     String keyStr = String(entry["key"] | "");
-    if (dev.encrypted && keyStr.length() > 0) {
-      if (keyStr.startsWith("AES:")) {
-        String decryptedKey = decryptString(keyStr);
-        if (decryptedKey.length() == 32) {
-          keyStr = decryptedKey;
-        } else {
-          WARN_ESPNOWF("[ESP-NOW] Failed to decrypt encryption key for '%s'", name);
-          keyStr = "";
-        }
+    if (dev.encrypted) {
+      if (keyStr.length() > 0 && keyStr.startsWith("AES:")) {
+        keyStr = decryptString(keyStr);
       }
-      if (keyStr.length() == 32) {
+      bool validKey = keyStr.length() == 32;
+      for (size_t i = 0; validKey && i < 32; i++) {
+        validKey = isxdigit(static_cast<unsigned char>(keyStr[i])) != 0;
+      }
+      if (validKey) {
         for (int i = 0; i < 16; i++) {
           char byte[3] = { keyStr[i*2], keyStr[i*2+1], '\0' };
           dev.key[i] = (uint8_t)strtol(byte, nullptr, 16);
         }
+      } else {
+        registryFullyRepresented = false;
+        WARN_ESPNOWF("[ESP-NOW] Missing, invalid, or undecryptable key for encrypted peer '%s'; migration will not overwrite the registry",
+                     name);
       }
     }
     // Restore cached metadata fields (backwards-compatible: missing fields default to empty)
-    dev.friendlyName = String(entry["friendlyName"] | "");
-    dev.room         = String(entry["room"] | "");
-    dev.zone         = String(entry["zone"] | "");
-    dev.tags         = String(entry["tags"] | "");
+    const char* friendlyName = entry["friendlyName"] | "";
+    const char* room = entry["room"] | "";
+    const char* zone = entry["zone"] | "";
+    const char* tags = entry["tags"] | "";
+    if (!dev.friendlyName.assign(friendlyName)) {
+      migrationBackupNeeded = true;
+      WARN_ESPNOWF("[ESP-NOW] Oversized friendlyName cache for %s cleared; metadata will be refreshed", macStr.c_str());
+    }
+    if (!dev.room.assign(room)) {
+      migrationBackupNeeded = true;
+      WARN_ESPNOWF("[ESP-NOW] Oversized room cache for %s cleared; metadata will be refreshed", macStr.c_str());
+    }
+    if (!dev.zone.assign(zone)) {
+      migrationBackupNeeded = true;
+      WARN_ESPNOWF("[ESP-NOW] Oversized zone cache for %s cleared; metadata will be refreshed", macStr.c_str());
+    }
+    if (!dev.tags.assign(tags)) {
+      migrationBackupNeeded = true;
+      WARN_ESPNOWF("[ESP-NOW] Oversized tags cache for %s cleared; metadata will be refreshed", macStr.c_str());
+    }
     dev.stationary   = entry["stationary"] | false;
     // Phase 2 multi-mesh — meshId persisted on save; default 0 (primary mesh)
     // when missing for backwards-compat with pre-Phase-2 devices.json files.
@@ -8814,6 +9008,50 @@ static void loadEspNowDevices() {
     }
     gEspNow->deviceCount++;
     count++;
+  }
+
+  if (migrationBackupNeeded) {
+    bool backupReady = VFS::existsGuarded(
+        ESPNOW_DEVICES_MIGRATION_BACKUP_FILE,
+        VFS::systemAuth("espnow.devices_migration_backup_check"));
+    if (!backupReady) {
+      // Publish the backup only after a complete write. A reset during this
+      // step leaves merely a .tmp file, so the next boot safely retries.
+      File backup = VFS::openGuarded(
+          ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE, "w",
+          VFS::systemAuth("espnow.devices_migration_backup"), true);
+      if (backup) {
+        const size_t backedUp = backup.print(content);
+        backup.flush();
+        backup.close();
+        if (backedUp == content.length() &&
+            VFS::renameGuarded(ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE,
+                               ESPNOW_DEVICES_MIGRATION_BACKUP_FILE,
+                               VFS::systemAuth("espnow.devices_migration_backup"))) {
+          backupReady = true;
+          WARN_ESPNOWF("[ESP-NOW] Preserved pre-migration registry at %s",
+                       ESPNOW_DEVICES_MIGRATION_BACKUP_FILE);
+        } else {
+          WARN_ESPNOWF("[ESP-NOW] Registry migration backup was incomplete (%u/%u bytes)",
+                       (unsigned)backedUp, (unsigned)content.length());
+          VFS::removeGuarded(ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE,
+                             VFS::systemAuth("espnow.devices_migration_backup"));
+        }
+      } else {
+        WARN_ESPNOWF("[ESP-NOW] Could not create registry migration backup at %s",
+                     ESPNOW_DEVICES_MIGRATION_BACKUP_FILE);
+      }
+    }
+
+    if (backupReady && registryFullyRepresented) {
+      if (saveEspNowDevices()) {
+        WARN_ESPNOWF("[ESP-NOW] Persisted bounded registry migration");
+      } else {
+        WARN_ESPNOWF("[ESP-NOW] Could not persist bounded registry migration; the original remains active and migration will retry");
+      }
+    } else if (!registryFullyRepresented) {
+      WARN_ESPNOWF("[ESP-NOW] Registry migration not persisted because one or more source entries could not be represented safely");
+    }
   }
   DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] Loaded %d device(s) from %s", count, ESPNOW_DEVICES_FILE);
 }
@@ -9038,7 +9276,7 @@ String getEspNowDeviceName(const uint8_t* mac) {
   if (gEspNow) {
     for (int i = 0; i < gEspNow->deviceCount; i++) {
       if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0)
-        return gEspNow->devices[i].name;
+        return String(gEspNow->devices[i].name.c_str());
     }
   }
   return "";
@@ -9144,6 +9382,7 @@ void removeEspNowDevice(const uint8_t* mac) {
       for (int j = i; j < gEspNow->deviceCount - 1; j++)
         gEspNow->devices[j] = gEspNow->devices[j + 1];
       gEspNow->deviceCount--;
+      gEspNow->devices[gEspNow->deviceCount] = EspNowDevice{};
       return;
     }
   }
@@ -9205,35 +9444,85 @@ String buildBootNotification(uint32_t msgId, const char* src,
   return out;
 }
 
-// Send V3 topology discovery requests to all active peers
+// Send topology discovery requests to a stable snapshot of active peers.
 void requestTopologyDiscovery() {
   if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return;
-  gTopoRequestId        = generateMessageId();
-  gTopoRequestTimeout   = millis() + 10000;
-  gTopoLastResponseTime = 0;
-  gTopoResponsesReceived = 0;
-  gTopoResultsBuffer    = "";
-  gLastTopoRequest      = millis();
-  V4PayloadTopoReq req  = {};
-  req.reqId = gTopoRequestId;
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac))
-      v4_send_frame(gMeshPeers[i].mac, ESPNOW_V4_TYPE_TOPO_REQ, 0,
-                    generateMessageId(), (const uint8_t*)&req, sizeof(req), 3);
+
+  uint8_t targets[MESH_PEER_MAX][6];
+  uint8_t sentTargets[MESH_PEER_MAX][6];
+  int targetCount = 0;
+  for (int i = 0; i < gMeshPeerSlots && targetCount < MESH_PEER_MAX; i++) {
+    if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
+    memcpy(targets[targetCount++], gMeshPeers[i].mac, 6);
   }
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Discovery request sent (reqId=%lu)",
-         (unsigned long)gTopoRequestId);
+
+  const uint32_t requestId = generateMessageId();
+  const uint32_t now = (uint32_t)millis();
+  {
+    TopoStreamsGuard guard("requestTopologyDiscovery");
+    if (gTopoStreamsMutex && !guard.held) {
+      WARN_ESPNOWF("[TOPO] State busy; discovery request not started");
+      return;
+    }
+    // A new request owns the complete table. This explicitly cancels any old
+    // streams so late frames cannot be rendered under the new request ID.
+    memset(gTopoStreams, 0, sizeof(gTopoStreams));
+    memset(gTopoExpectedTargets, 0, sizeof(gTopoExpectedTargets));
+    for (int i = 0; i < targetCount; i++) {
+      memcpy(gTopoExpectedTargets[i], targets[i], 6);
+    }
+    gTopoExpectedTargetCount = (uint8_t)targetCount;
+    gTopoRequestId = requestId;
+    gTopoCompletedRequestId = 0;
+    gTopoRequestTimeout = now + 10000;
+    gTopoLastResponseTime = 0;
+    gTopoResponsesReceived = 0;
+    gExpectedWorkerCount = targetCount;
+    gLastTopoRequest = now;
+  }
+
+  int sentCount = 0;
+  for (int i = 0; i < targetCount; i++) {
+    if (v4_send_topo_request(targets[i], requestId)) {
+      memcpy(sentTargets[sentCount], targets[i], 6);
+      sentCount++;
+    }
+  }
+  {
+    TopoStreamsGuard guard("requestTopologyDiscovery.sent");
+    if ((!gTopoStreamsMutex || guard.held) && gTopoRequestId == requestId) {
+      // A radio send can reject a target immediately. Do not wait ten seconds
+      // for a response to a request that was never admitted.
+      memset(gTopoExpectedTargets, 0, sizeof(gTopoExpectedTargets));
+      for (int i = 0; i < sentCount; i++) {
+        memcpy(gTopoExpectedTargets[i], sentTargets[i], 6);
+      }
+      gTopoExpectedTargetCount = (uint8_t)sentCount;
+      gExpectedWorkerCount = sentCount;
+      finishTopologyRequestIfCompleteLocked();
+    }
+  }
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Discovery request sent to %d/%d peers (reqId=%lu)",
+         sentCount, targetCount, (unsigned long)requestId);
 }
 
 // Check if the topology collection window has expired; finalize any open streams
 void checkTopologyCollectionWindow() {
+  TopoStreamsGuard guard("checkTopologyCollectionWindow");
+  if (gTopoStreamsMutex && !guard.held) return;
   if (gTopoRequestId == 0) return;
-  if ((uint32_t)millis() < gTopoRequestTimeout) return;
+  const uint32_t now = (uint32_t)millis();
+  if ((int32_t)(gTopoRequestTimeout - now) > 0) return;
+  const uint32_t requestId = gTopoRequestId;
   for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-    if (gTopoStreams[i].active)
-      finalizeTopologyStream(&gTopoStreams[i]);
+    if (gTopoStreams[i].active && gTopoStreams[i].reqId == requestId)
+      finalizeTopologyStreamLocked(&gTopoStreams[i]);
   }
+  gTopoCompletedRequestId = requestId;
   gTopoRequestId = 0;
+  gTopoRequestTimeout = 0;
+  memset(gTopoExpectedTargets, 0, sizeof(gTopoExpectedTargets));
+  gTopoExpectedTargetCount = 0;
 }
 
 // ============================================================================
@@ -10625,23 +10914,10 @@ static bool initEspNow() {
       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate state structure");
       return false;
     }
-    // EspNowState embeds C++ objects with non-trivial constructors — String
-    // members at struct level (passphrase, deviceName, ...) and 5 Strings in
-    // every devices[16] slot (name/friendlyName/room/zone/tags). ps_alloc() is
-    // raw malloc and does NOT run those constructors; a zeroed String reads as
-    // {isSSO=0, ptr.buff=NULL}, so String::c_str() returns NULL and any
-    // printf("%s", ...) / ArduinoJson consumer crashes in strlen(NULL)
-    // (LoadProhibited, EXCVADDR=0). The memset zeroes the POD members, then
-    // placement-new runs the constructors.
-    //
-    // IMPORTANT — this only rescues the STRUCT-LEVEL Strings (passphrase,
-    // deviceName, ...). It does NOT rescue devices[].* : EspNowState's ctor
-    // BODY calls memset(devices, 0, sizeof(devices)) (System_ESPNow.h), which
-    // runs AFTER the member constructors and re-zeroes all 80 device
-    // Strings back to the NULL-c_str() state. That is why the pairing paths
-    // must explicitly assign "" to friendlyName/room/zone/tags — see
-    // addEspNowDevice and the pair path below. Do not delete those assignments
-    // as redundant; the ctor actively undoes them.
+    // EspNowState still embeds top-level String objects (passphrase,
+    // deviceName, etc.), so ps_alloc's raw storage must be placement-constructed.
+    // Device registry metadata is allocation-free EspNowInlineText embedded in
+    // this PSRAM block; its constructors establish valid empty strings.
     memset(gEspNow, 0, sizeof(EspNowState));
     new (gEspNow) EspNowState();
 
@@ -11238,7 +11514,6 @@ static bool deinitEspNow(bool publishOffEvent) {
   gEspNow->initialized = false;
   if (gEspNow->streamActive) {
     gEspNow->streamActive = false;
-    gEspNow->streamTarget = nullptr;
     broadcastOutput("[ESP-NOW] Output streaming stopped");
   }
 
@@ -11290,6 +11565,29 @@ static bool deinitEspNow(bool publishOffEvent) {
     return false;
   }
   broadcastOutput("[ESP-NOW] Heartbeat task stopped");
+
+  // The sole topology producer is now stopped. Cancel collection and discard
+  // its bounded records so a later re-init cannot expose stale request data.
+  {
+    TopoStreamsGuard guard("deinitEspNow.topology");
+    if (gTopoStreamsMutex && !guard.held) {
+      broadcastOutput("[ESP-NOW] ERROR: topology state did not quiesce; shutdown remains pending");
+      return false;
+    }
+    memset(gTopoStreams, 0, sizeof(gTopoStreams));
+    memset(gTopoExpectedTargets, 0, sizeof(gTopoExpectedTargets));
+    gTopoExpectedTargetCount = 0;
+    gTopoRequestId = 0;
+    gTopoCompletedRequestId = 0;
+    gTopoRequestTimeout = 0;
+    gTopoLastResponseTime = 0;
+    gTopoResponsesReceived = 0;
+    gExpectedWorkerCount = 0;
+    if (gTopoOutputBuffer) {
+      ps_free(gTopoOutputBuffer);
+      gTopoOutputBuffer = nullptr;
+    }
+  }
 
   // Cleanup active file transfers (Phase 4 multi-slot: walk + release all
   // slots; equivalent to the old single-slot delete).
@@ -12356,6 +12654,9 @@ const char* cmd_espnow_pair(const String& argsInput) {
   // optional 3rd arg is the mesh (label or 0..N_MESHES-1). Drops support
   // for spaces in peer names via this command — use underscores instead.
   String name = a.arg(1);
+  if (name.length() > ESPNOW_PEER_ALIAS_MAX_BYTES) {
+    return "Error: Peer name must be 31 bytes or less";
+  }
   uint8_t meshId = parseMeshArgOrDefault(a.arg(2));
   if (meshId == Settings::N_MESHES) {
     return "Error: Invalid mesh. Use a configured label or numeric index 0..3.";
@@ -12394,13 +12695,7 @@ const char* cmd_espnow_pair(const String& argsInput) {
   gEspNow->devices[gEspNow->deviceCount].encrypted = false;
   memset(gEspNow->devices[gEspNow->deviceCount].key, 0, 16);
   gEspNow->devices[gEspNow->deviceCount].meshId = meshId;  // Phase 2.5
-  // Initialize the optional metadata Strings to "" (matching addEspNowDevice and
-  // the devices.json load path). REQUIRED, not redundant: EspNowState's ctor
-  // body memsets devices[] AFTER constructing these Strings, so they start
-  // zeroed — c_str() returns NULL until assigned, and any %s consumer (e.g.
-  // /api/bond/paired-devices) would strlen(NULL)->crash. This is why a freshly-
-  // paired device crashed the bond page but a reboot (which reloads from
-  // devices.json, assigning "") did not.
+  // Explicitly initialize optional metadata for this newly occupied slot.
   gEspNow->devices[gEspNow->deviceCount].friendlyName = "";
   gEspNow->devices[gEspNow->deviceCount].room = "";
   gEspNow->devices[gEspNow->deviceCount].zone = "";
@@ -12797,8 +13092,8 @@ const char* cmd_espnow_setname(const String& argsInput) {
   }
 
   String name = a.arg(0);
-  if (name.length() > 20) {
-    return "Error: Device name must be 20 characters or less";
+  if (name.length() > 19) {
+    return "Error: Device name must be 19 bytes or less";
   }
 
   for (size_t i = 0; i < name.length(); i++) {
@@ -12883,7 +13178,8 @@ const char* cmd_espnow_zone(const String& argsInput) {
 
 const char* cmd_espnow_tags(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return metaGetSet(argsInput, gSettings.espnowTags, "Tags", 63);
+  // V4PayloadMetadata::tags is 54 bytes including its NUL terminator.
+  return metaGetSet(argsInput, gSettings.espnowTags, "Tags", 53);
 }
 
 const char* cmd_espnow_friendlyname(const String& argsInput) {
@@ -13649,57 +13945,198 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Topology results command
+static bool appendTopologyOutput(char*& cursor, size_t& remaining,
+                                 const char* format, ...) {
+  if (!cursor || remaining == 0) return false;
+  va_list args;
+  va_start(args, format);
+  int written = vsnprintf(cursor, remaining, format, args);
+  va_end(args);
+  if (written < 0) return false;
+  if ((size_t)written >= remaining) {
+    cursor += remaining - 1;
+    remaining = 1;
+    return false;
+  }
+  cursor += written;
+  remaining -= (size_t)written;
+  return true;
+}
+
+// Topology results command. Formatting happens directly from bounded PSRAM
+// records into one PSRAM output buffer; there is no intermediate String.
 const char* cmd_espnow_toporesults(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  uint32_t now = millis();
-  bool collectionActive = (gTopoRequestId != 0 && now < gTopoRequestTimeout);
-  bool withinCollectionWindow = (gTopoLastResponseTime > 0 && 
-                                  (now - gTopoLastResponseTime) < TOPO_COLLECTION_WINDOW_MS);
-  
-  if (collectionActive && (withinCollectionWindow || gTopoLastResponseTime == 0)) {
+
+  TopoStreamsGuard guard("cmd_espnow_toporesults");
+  if (gTopoStreamsMutex && !guard.held) {
+    return "Topology results are busy; try again shortly.";
+  }
+
+  const uint32_t now = (uint32_t)millis();
+  if (gTopoRequestId != 0 && (int32_t)(gTopoRequestTimeout - now) <= 0) {
+    const uint32_t expiredRequestId = gTopoRequestId;
+    for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
+      if (gTopoStreams[i].active && gTopoStreams[i].reqId == expiredRequestId) {
+        finalizeTopologyStreamLocked(&gTopoStreams[i]);
+      }
+    }
+    gTopoCompletedRequestId = expiredRequestId;
+    gTopoRequestId = 0;
+    gTopoRequestTimeout = 0;
+  }
+  if (gTopoRequestId != 0) {
     return "Still collecting topology responses; run espnowtoporesults again shortly.";
   }
-  
-  if (gTopoResultsBuffer.length() == 0) {
-    return "ERROR";
+  if (gTopoCompletedRequestId == 0) {
+    return "Error: No topology discovery results are available.";
   }
-  
-  static char* topoOutputBuffer = nullptr;
-  if (!topoOutputBuffer) {
-    topoOutputBuffer = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "topo.output");
-    if (!topoOutputBuffer) {
-      broadcastOutput("Memory allocation failed for topology output");
-      return "ERROR";
+
+  int totalStreams = 0;
+  for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
+    if (gTopoStreams[i].occupied &&
+        gTopoStreams[i].reqId == gTopoCompletedRequestId) {
+      totalStreams++;
     }
   }
-  
-  char* p = topoOutputBuffer;
-  size_t remaining = 2048;
-  int written = 0;
-  
-  written = snprintf(p, remaining, "\n=== Mesh Topology Discovery Results ===\nResponses received: %d\nRequest ID: %lu\n\n",
-                     gTopoResponsesReceived, (unsigned long)gTopoRequestId);
-  if (written > 0 && (size_t)written < remaining) {
-    p += written;
-    remaining -= written;
+  const int totalPages = totalStreams > 0
+      ? (totalStreams + TOPO_STREAMS_PER_PAGE - 1) / TOPO_STREAMS_PER_PAGE
+      : 1;
+
+  CommandArgs pageArgs(argsInput);
+  if (pageArgs.count() > 2) {
+    return "Error: Usage: espnowtoporesults [page] [request-id]";
   }
-  
-  if (gTopoResultsBuffer.length() < remaining - 50) {
-    written = snprintf(p, remaining, "%s\n", gTopoResultsBuffer.c_str());
-    if (written > 0 && (size_t)written < remaining) {
-      p += written;
-      remaining -= written;
+  int requestedPage = 1;
+  if (pageArgs.count() >= 1) {
+    const String pageText = pageArgs.arg(0);
+    if (pageText.length() == 0 || pageText.length() > 2) {
+      return "Error: topology page must be a positive number";
+    }
+    for (size_t i = 0; i < pageText.length(); i++) {
+      if (pageText[i] < '0' || pageText[i] > '9') {
+        return "Error: topology page must be a positive number";
+      }
+    }
+    requestedPage = pageText.toInt();
+  }
+
+  if (pageArgs.count() == 2) {
+    const String requestText = pageArgs.arg(1);
+    if (requestText.length() == 0 || requestText.length() > 10) {
+      return "Error: topology request ID must be a positive decimal number";
+    }
+    uint32_t requestedRequestId = 0;
+    for (size_t i = 0; i < requestText.length(); i++) {
+      const char c = requestText[i];
+      if (c < '0' || c > '9') {
+        return "Error: topology request ID must be a positive decimal number";
+      }
+      const uint32_t digit = (uint32_t)(c - '0');
+      if (requestedRequestId > (UINT32_MAX - digit) / 10u) {
+        return "Error: topology request ID is out of range";
+      }
+      requestedRequestId = requestedRequestId * 10u + digit;
+    }
+    if (requestedRequestId == 0) {
+      return "Error: topology request ID must be a positive decimal number";
+    }
+    if (requestedRequestId != gTopoCompletedRequestId) {
+      return "Error: topology results changed while paging; restart from page 1";
     }
   }
-  
-  snprintf(p, remaining, "=======================================\n\nChain Interpretation:\n  Devices with mutual peer connections form a chain.\n  Example: If A lists B as peer, and B lists A and C,\n  then the chain is: A ↔ B ↔ C\n");
-  
-  // Note: result is returned via topoOutputBuffer to the HTTP caller.
+
+  if (requestedPage < 1 || requestedPage > totalPages) {
+    if (!ensureDebugBuffer()) return "Error: Invalid topology page";
+    snprintf(getDebugBuffer(), 1024,
+             "Error: topology page must be between 1 and %d", totalPages);
+    return getDebugBuffer();
+  }
+
+  // Allocate only once valid, renderable results exist. closeespnow releases
+  // the buffer; opening the topology page before discovery allocates nothing.
+  if (!gTopoOutputBuffer) {
+    gTopoOutputBuffer = (char*)ps_alloc(TOPO_OUTPUT_CAPACITY,
+                                        AllocPref::RequirePSRAM, "topo.output");
+    if (!gTopoOutputBuffer) {
+      return "Error: PSRAM allocation failed for topology output.";
+    }
+  }
+
+  char* p = gTopoOutputBuffer;
+  size_t remaining = TOPO_OUTPUT_CAPACITY;
+  bool completeOutput = appendTopologyOutput(
+      p, remaining,
+      "\n=== Mesh Topology Discovery Results ===\n"
+      "Responses received: %d/%d\nRequest ID: %lu\nPage: %d/%d\n\n",
+      gTopoResponsesReceived, gExpectedWorkerCount,
+      (unsigned long)gTopoCompletedRequestId, requestedPage, totalPages);
+
+  int renderedStreams = 0;
+  int matchingStream = 0;
+  const int firstStream = (requestedPage - 1) * TOPO_STREAMS_PER_PAGE;
+  for (int i = 0; completeOutput && i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
+    const TopologyStream& stream = gTopoStreams[i];
+    if (!stream.occupied || stream.reqId != gTopoCompletedRequestId) continue;
+    if (matchingStream++ < firstStream) continue;
+    if (renderedStreams >= TOPO_STREAMS_PER_PAGE) break;
+    char senderMac[18];
+    formatMacAddressBuf(stream.senderMac, senderMac, sizeof(senderMac));
+    completeOutput = appendTopologyOutput(
+        p, remaining, "%s (%s):%s\n", stream.senderName[0] ? stream.senderName : "Unknown",
+        senderMac, stream.receivedPeers < stream.totalPeers ? " [partial]" : "");
+    completeOutput = completeOutput && appendTopologyOutput(
+        p, remaining, "  Peers: %u\n", (unsigned)stream.totalPeers);
+    for (uint16_t peerIndex = 0;
+         completeOutput && peerIndex < stream.totalPeers && peerIndex < MESH_PEER_MAX;
+         peerIndex++) {
+      const TopologyPeerRecord& peer = stream.peers[peerIndex];
+      if (!peer.present) {
+        completeOutput = appendTopologyOutput(
+            p, remaining, "  (missing peer index %u)\n", peerIndex);
+        continue;
+      }
+      char peerMac[18];
+      formatMacAddressBuf(peer.mac, peerMac, sizeof(peerMac));
+      completeOutput = appendTopologyOutput(
+          p, remaining, "  \xe2\x86\x92 %s (%s)\n    RSSI: %d dBm\n",
+          peer.name[0] ? peer.name : "Unknown", peerMac, (int)peer.rssi);
+    }
+    if (stream.totalPeers == 0) {
+      completeOutput = appendTopologyOutput(p, remaining, "  (no peers)\n");
+    }
+    completeOutput = completeOutput && appendTopologyOutput(p, remaining, "\n");
+    renderedStreams++;
+  }
+
+  if (renderedStreams == 0 && completeOutput) {
+    completeOutput = appendTopologyOutput(p, remaining, "(no peers responded)\n\n");
+  }
+  if (completeOutput) {
+    if (requestedPage < totalPages) {
+      completeOutput = appendTopologyOutput(
+          p, remaining, "More results: espnowtoporesults %d %lu\n\n",
+          requestedPage + 1, (unsigned long)gTopoCompletedRequestId);
+    }
+  }
+  if (completeOutput) {
+    appendTopologyOutput(
+        p, remaining,
+        "=======================================\n\n"
+        "Chain Interpretation:\n"
+        "  Devices with mutual peer connections form a chain.\n"
+        "  Example: If A lists B as peer, and B lists A and C,\n"
+        "  then the chain is: A \xe2\x86\x94 B \xe2\x86\x94 C\n");
+  } else {
+    static constexpr char truncated[] = "\n[Topology output truncated]\n";
+    const size_t suffixLen = sizeof(truncated) - 1;
+    const size_t offset = TOPO_OUTPUT_CAPACITY - suffixLen - 1;
+    memcpy(gTopoOutputBuffer + offset, truncated, suffixLen + 1);
+  }
+
+  // Note: result is returned via gTopoOutputBuffer to the HTTP caller.
   // No broadcastOutput here — avoids serial spam when the web UI polls repeatedly.
-  
-  return topoOutputBuffer;
+  return gTopoOutputBuffer;
 }
 
 // ============================================================================
@@ -13709,7 +14146,10 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
 // Test stream management
 const char* cmd_test_streams(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+  TopoStreamsGuard guard("cmd_test_streams");
+  if (gTopoStreamsMutex && !guard.held) return "Error: topology state busy";
+  memset(gTopoStreams, 0, sizeof(gTopoStreams));
+
   broadcastOutput("\n=== Testing Stream Management ===");
   
   uint8_t fakeMac1[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
@@ -13717,23 +14157,23 @@ const char* cmd_test_streams(const String& argsInput) {
   uint8_t fakeMac3[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x03};
   
   BROADCAST_PRINTF("Creating stream 1 (MAC: aa:bb:cc:dd:ee:01, reqId: 100)");
-  TopologyStream* s1 = findOrCreateTopoStream(fakeMac1, 100);
+  TopologyStream* s1 = findOrCreateTopoStreamLocked(fakeMac1, 100);
   BROADCAST_PRINTF("  Result: %p, active=%d", s1, s1 ? s1->active : 0);
   
   BROADCAST_PRINTF("Creating stream 2 (MAC: aa:bb:cc:dd:ee:02, reqId: 200)");
-  TopologyStream* s2 = findOrCreateTopoStream(fakeMac2, 200);
+  TopologyStream* s2 = findOrCreateTopoStreamLocked(fakeMac2, 200);
   BROADCAST_PRINTF("  Result: %p, active=%d", s2, s2 ? s2->active : 0);
   
   BROADCAST_PRINTF("Creating stream 3 (MAC: aa:bb:cc:dd:ee:03, reqId: 300)");
-  TopologyStream* s3 = findOrCreateTopoStream(fakeMac3, 300);
+  TopologyStream* s3 = findOrCreateTopoStreamLocked(fakeMac3, 300);
   BROADCAST_PRINTF("  Result: %p, active=%d", s3, s3 ? s3->active : 0);
   
   BROADCAST_PRINTF("\nTesting findTopoStream for stream 1:");
-  TopologyStream* s1_again = findTopoStream(fakeMac1, 100);
+  TopologyStream* s1_again = findTopoStreamLocked(fakeMac1, 100);
   BROADCAST_PRINTF("  Found same pointer: %s", s1 == s1_again ? "YES" : "NO");
   
   BROADCAST_PRINTF("\nTesting findTopoStream for non-existent stream:");
-  TopologyStream* s_none = findTopoStream(fakeMac1, 999);
+  TopologyStream* s_none = findTopoStreamLocked(fakeMac1, 999);
   BROADCAST_PRINTF("  Result: %s", s_none ? "FOUND (ERROR!)" : "NULL (correct)");
   
   broadcastOutput("\nActive streams:");
@@ -13755,49 +14195,70 @@ const char* cmd_test_streams(const String& argsInput) {
 // Test concurrent streams
 const char* cmd_test_concurrent(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+  TopoStreamsGuard guard("cmd_test_concurrent");
+  if (gTopoStreamsMutex && !guard.held) return "Error: topology state busy";
+
   broadcastOutput("\n=== Testing Concurrent Streams (Simulated) ===");
   
   uint8_t mac1[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
   uint8_t mac2[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
   uint8_t mac3[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x03};
   
+  memset(gTopoStreams, 0, sizeof(gTopoStreams));
   gTopoRequestId = 12345;
+  gTopoCompletedRequestId = 0;
   gTopoRequestTimeout = millis() + 10000;
-  gTopoResultsBuffer = "";
   gTopoResponsesReceived = 0;
+  gExpectedWorkerCount = 3;
   
   BROADCAST_PRINTF("Simulating topology request (reqId=%lu)", (unsigned long)gTopoRequestId);
   
   BROADCAST_PRINTF("\nDevice 1 (2 peers):");
-  TopologyStream* s1 = findOrCreateTopoStream(mac1, 12345);
+  TopologyStream* s1 = findOrCreateTopoStreamLocked(mac1, 12345);
   strcpy(s1->senderName, "TestDevice1");
+  s1->started = true;
   s1->totalPeers = 2;
   s1->receivedPeers = 2;
-  s1->accumulatedData = "  → Peer1 (aa:bb:cc:dd:ee:11)\n    Heartbeats: 10, Last seen: 5s ago\n";
-  s1->accumulatedData += "  → Peer2 (aa:bb:cc:dd:ee:12)\n    Heartbeats: 8, Last seen: 3s ago\n";
-  finalizeTopologyStream(s1);
+  s1->receivedPeerMask = 0x0003;
+  const uint8_t peer11[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x11};
+  const uint8_t peer12[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x12};
+  memcpy(s1->peers[0].mac, peer11, 6);
+  strlcpy(s1->peers[0].name, "Peer1", sizeof(s1->peers[0].name));
+  s1->peers[0].rssi = -45;
+  s1->peers[0].present = true;
+  memcpy(s1->peers[1].mac, peer12, 6);
+  strlcpy(s1->peers[1].name, "Peer2", sizeof(s1->peers[1].name));
+  s1->peers[1].rssi = -52;
+  s1->peers[1].present = true;
+  finalizeTopologyStreamLocked(s1);
   BROADCAST_PRINTF("  Finalized");
   
   BROADCAST_PRINTF("\nDevice 2 (1 peer):");
-  TopologyStream* s2 = findOrCreateTopoStream(mac2, 12345);
+  TopologyStream* s2 = findOrCreateTopoStreamLocked(mac2, 12345);
   strcpy(s2->senderName, "TestDevice2");
+  s2->started = true;
   s2->totalPeers = 1;
   s2->receivedPeers = 1;
-  s2->accumulatedData = "  → Peer1 (aa:bb:cc:dd:ee:21)\n    Heartbeats: 15, Last seen: 2s ago\n";
-  finalizeTopologyStream(s2);
+  s2->receivedPeerMask = 0x0001;
+  const uint8_t peer21[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x21};
+  memcpy(s2->peers[0].mac, peer21, 6);
+  strlcpy(s2->peers[0].name, "Peer1", sizeof(s2->peers[0].name));
+  s2->peers[0].rssi = -48;
+  s2->peers[0].present = true;
+  finalizeTopologyStreamLocked(s2);
   BROADCAST_PRINTF("  Finalized");
   
   BROADCAST_PRINTF("\nDevice 3 (0 peers):");
-  TopologyStream* s3 = findOrCreateTopoStream(mac3, 12345);
+  TopologyStream* s3 = findOrCreateTopoStreamLocked(mac3, 12345);
   strcpy(s3->senderName, "TestDevice3");
+  s3->started = true;
   s3->totalPeers = 0;
   s3->receivedPeers = 0;
-  finalizeTopologyStream(s3);
+  finalizeTopologyStreamLocked(s3);
   BROADCAST_PRINTF("  Finalized");
   
   BROADCAST_PRINTF("\n=== Simulation Complete ===");
-  BROADCAST_PRINTF("Results buffer length: %d bytes", gTopoResultsBuffer.length());
+  BROADCAST_PRINTF("Structured responders retained: %d", gTopoResponsesReceived);
   BROADCAST_PRINTF("Responses received: %d", gTopoResponsesReceived);
   broadcastOutput("\nRun 'espnowtoporesults' to view the simulated results");
   
@@ -13811,12 +14272,16 @@ const char* cmd_test_cleanup(const String& argsInput) {
   broadcastOutput("\n=== Testing Stream Cleanup ===");
   
   int activeBefore = 0;
-  for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-    if (gTopoStreams[i].active) {
-      activeBefore++;
-      BROADCAST_PRINTF("Before: Slot %d active (reqId=%lu, age=%lums)", 
-                      i, (unsigned long)gTopoStreams[i].reqId,
-                      millis() - gTopoStreams[i].startTime);
+  {
+    TopoStreamsGuard guard("cmd_test_cleanup.before");
+    if (gTopoStreamsMutex && !guard.held) return "Error: topology state busy";
+    for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
+      if (gTopoStreams[i].active) {
+        activeBefore++;
+        BROADCAST_PRINTF("Before: Slot %d active (reqId=%lu, age=%lums)",
+                        i, (unsigned long)gTopoStreams[i].reqId,
+                        millis() - gTopoStreams[i].startTime);
+      }
     }
   }
   BROADCAST_PRINTF("Active streams before cleanup: %d", activeBefore);
@@ -13825,12 +14290,16 @@ const char* cmd_test_cleanup(const String& argsInput) {
   cleanupStaleTopoStreams();
   
   int activeAfter = 0;
-  for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-    if (gTopoStreams[i].active) {
-      activeAfter++;
-      BROADCAST_PRINTF("After: Slot %d still active (reqId=%lu, age=%lums)", 
-                      i, (unsigned long)gTopoStreams[i].reqId,
-                      millis() - gTopoStreams[i].startTime);
+  {
+    TopoStreamsGuard guard("cmd_test_cleanup.after");
+    if (gTopoStreamsMutex && !guard.held) return "Error: topology state busy";
+    for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
+      if (gTopoStreams[i].active) {
+        activeAfter++;
+        BROADCAST_PRINTF("After: Slot %d still active (reqId=%lu, age=%lums)",
+                        i, (unsigned long)gTopoStreams[i].reqId,
+                        millis() - gTopoStreams[i].startTime);
+      }
     }
   }
   BROADCAST_PRINTF("Active streams after cleanup: %d", activeAfter);
@@ -13902,7 +14371,7 @@ const char* cmd_espnow_list(const String& argsInput) {
     formatMacAddressBuf(gEspNow->devices[i].mac, listMacBuf, sizeof(listMacBuf));
     // Wrap in String() — same dangling-stack-buffer fix as meshesCmd_listjson.
     d["mac"]       = String(listMacBuf);
-    d["name"]      = gEspNow->devices[i].name;
+    d["name"]      = gEspNow->devices[i].name.c_str();
     d["encrypted"] = gEspNow->devices[i].encrypted;
     // Phase 2.8: surface which mesh slot this peer was paired into so
     // the web UI can show a "mesh: <label>" badge per row and grey out
@@ -13961,7 +14430,9 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
              gEspNow->unpairedDevices[i].mac[4], gEspNow->unpairedDevices[i].mac[5]);
     // String() wrap forces deep-copy into the doc pool (task #14 pattern).
     dev["mac"] = String(unpairedMacBuf);
-    dev["name"] = gEspNow->unpairedDevices[i].name.length() > 0 ? gEspNow->unpairedDevices[i].name : "Unknown";
+    dev["name"] = gEspNow->unpairedDevices[i].name.length() > 0
+                      ? gEspNow->unpairedDevices[i].name.c_str()
+                      : "Unknown";
     dev["rssi"] = gEspNow->unpairedDevices[i].rssi;
     dev["heartbeatCount"] = gEspNow->unpairedDevices[i].heartbeatCount;
     dev["secondsSinceLastSeen"] = elapsed / 1000;
@@ -14193,10 +14664,14 @@ static const char* meshesCmd_enable(const String& label) {
       // can still do per-peer encrypted sessions (KEY_EX + Ed25519 + X25519);
       // it just can't do BROADCAST_AUTH (no group HMAC tag on heartbeats) or
       // bootstrap KEY_EX-via-shared-secret. Set a passphrase later when ready.
-      setSetting(gSettings.meshes[i].enabled, true);
-      // Re-stamp fingerprint defensively in case the label was mutated
-      // while disabled (rename doesn't refuse renaming disabled slots).
+      // Stage both fields before persisting. Writing enabled first would put a
+      // stale fingerprint beside an enabled mesh in settings.json until some
+      // unrelated later save.
+      gSettings.meshes[i].enabled = true;
       gSettings.meshes[i].fingerprint = meshFingerprintForLabel(label);
+      if (!requestSettingsPersist()) {
+        return "Error: Mesh enabled in RAM, but its fingerprint could not be persisted.";
+      }
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024,
                "Enabled mesh '%s' (fp=0x%04X). Paired peers in this mesh "
@@ -14248,7 +14723,9 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
         // the OLD derivedKey until reboot.
         setEspNowPassphrase(passphrase);
       } else {
-        setSetting(gSettings.meshes[i].passphrase, passphrase);
+        // Stage in RAM; persist only after the label-salted stretched key and
+        // validity flag below are coherent with this passphrase.
+        gSettings.meshes[i].passphrase = passphrase;
         gSettings.meshes[i].fingerprint = meshFingerprintForLabel(label);
         // No setEspNowPassphrase call here: slot 0 alone owns the legacy
         // gEspNow->derivedKey. The per-slot mesh keys are still derived — see
@@ -14267,6 +14744,11 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
       if (passphrase.length() > 0) {
         meshKeysStretchPassphrase(i);
         meshKeysDerive(i);
+      }
+      // Persist only after the crypto state is coherent (or merely mark this
+      // owner dirty when the command is inside an owner-scoped write batch).
+      if (!requestSettingsPersist()) {
+        return "Error: Mesh passphrase changed in RAM, but the coherent key state could not be persisted.";
       }
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       if (passphrase.length() == 0) {
@@ -14303,7 +14785,9 @@ static const char* meshesCmd_rename(const String& oldLabel, const String& newLab
   }
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].label == oldLabel) {
-      setSetting(gSettings.meshes[i].label, newLabel);
+      // Stage the label in RAM; its fingerprint and label-salted stretched
+      // key must be recomputed before any settings snapshot reaches disk.
+      gSettings.meshes[i].label = newLabel;
       gSettings.meshes[i].fingerprint = meshFingerprintForLabel(newLabel);
       // Phase 3.1: salt = SHA256("...salt:" || label). Rename → new salt →
       // cached hash is wrong for the new label. Recompute now if we have a
@@ -14313,6 +14797,10 @@ static const char* meshesCmd_rename(const String& oldLabel, const String& newLab
       if (gSettings.meshes[i].passphrase.length() > 0) {
         meshKeysStretchPassphrase(i);
         meshKeysDerive(i);
+      }
+      // Make the final, internally-consistent tuple durable together.
+      if (!requestSettingsPersist()) {
+        return "Error: Mesh renamed in RAM, but the coherent key state could not be persisted.";
       }
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024,
@@ -15261,6 +15749,9 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   // 3rd arg is mesh label or numeric index. Use underscores in names if
   // you previously relied on multi-word peer names.
   String deviceName = a.arg(1);
+  if (deviceName.length() > ESPNOW_PEER_ALIAS_MAX_BYTES) {
+    return "Error: Peer name must be 31 bytes or less";
+  }
   uint8_t meshId = parseMeshArgOrDefault(a.arg(2));
   if (meshId == Settings::N_MESHES) {
     return "Error: Invalid mesh. Use a configured label or numeric index 0..3.";
@@ -15723,13 +16214,6 @@ const char* cmd_espnow_startstream(const String& argsInput) {
 
   const uint8_t* senderMac = (const uint8_t*)currentAuthContext().opaque;
 
-  if (!gEspNow->streamTarget) {
-    gEspNow->streamTarget = (uint8_t*)ps_alloc(6, AllocPref::PreferPSRAM, "espnow.mac");
-    if (!gEspNow->streamTarget) {
-      return "Error: Failed to allocate memory for stream target";
-    }
-  }
-
   memcpy(gEspNow->streamTarget, senderMac, 6);
   gEspNow->streamActive = true;
   gEspNow->lastStreamSendTime = 0;
@@ -15768,11 +16252,9 @@ const char* cmd_espnow_stopstream(const String& argsInput) {
 
   // Get target info before clearing
   String targetName = "unknown";
-  if (gEspNow->streamTarget) {
-    targetName = getEspNowDeviceName(gEspNow->streamTarget);
-    if (targetName.length() == 0) {
-      targetName = formatMacAddress(gEspNow->streamTarget);
-    }
+  targetName = getEspNowDeviceName(gEspNow->streamTarget);
+  if (targetName.length() == 0) {
+    targetName = formatMacAddress(gEspNow->streamTarget);
   }
 
   // Report statistics before stopping
@@ -15794,12 +16276,8 @@ const char* cmd_espnow_stopstream(const String& argsInput) {
          (unsigned long)gEspNow->streamSentCount,
          (unsigned long)gEspNow->streamDroppedCount);
 
-  // Stop streaming and free resources
+  // Stop streaming. The target MAC is inline in the PSRAM-resident state.
   gEspNow->streamActive = false;
-  if (gEspNow->streamTarget) {
-    free(gEspNow->streamTarget);
-    gEspNow->streamTarget = nullptr;
-  }
 
   return streamBuffer;
 }
@@ -17211,14 +17689,14 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
   { "espnowmeshttl", "Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.", false, cmd_espnow_meshttl, "Usage: espnowmeshttl [<1..10>]\n       How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop).\n       Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop." },
   { "espnowchannel", "Get/set preferred ESP-NOW channel: 'espnowchannel [1-13|auto|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.", true, cmd_espnow_channel, "Usage: espnowchannel [<1..13>|auto|resync]\n       (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check.\n       auto (0) = follow WiFi, pin fallback when offline. 1-13 = force this channel when not joined to WiFi.\n       resync   = force the radio back onto the correct channel now (no setting change).\n       Two devices only hear each other on the same channel — set both the same for field use." },
-  { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname, "Usage: espnowsetname [<name>]   (<=20 chars; letters, numbers, - and _ only)" },
+  { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname, "Usage: espnowsetname [<name>]   (<=19 bytes; letters, numbers, - and _ only)" },
   { "espnowhbmode", "Get/set heartbeat mode: 'espnowhbmode [public|private]'.", false, cmd_espnow_hbmode, "Usage: espnowhbmode [public|private]" },
   { "espnowmeshrole", "Get/set mesh role: 'espnowmeshrole [worker|master|backup]'.", true, cmd_espnow_meshrole, "Usage: espnowmeshrole [worker|master|backup]" },
   { "espnowmeshmaster", "Get/set master MAC: 'espnowmeshmaster [MAC]'.", true, cmd_espnow_meshmaster, "Usage: espnowmeshmaster [<AA:BB:CC:DD:EE:FF>]" },
   { "espnowmeshbackup", "Get/set backup MAC: 'espnowmeshbackup [MAC]'.", true, cmd_espnow_meshbackup, "Usage: espnowmeshbackup [<AA:BB:CC:DD:EE:FF>]" },
   { "espnowbackupenable", "Enable/disable backup master feature: 'espnowbackupenable [on|off]'.", true, cmd_espnow_backupenable, "Usage: espnowbackupenable [on|off]" },
   { "espnowmeshtopo", "Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults)", false, cmd_espnow_meshtopo },
-  { "espnowtoporesults", "Get topology discovery results.", false, cmd_espnow_toporesults },
+  { "espnowtoporesults", "Get topology results: 'espnowtoporesults [page] [request-id]'.", false, cmd_espnow_toporesults },
   { "espnowtimesync", "Broadcast NTP time to mesh (intended for the master; role not enforced). (async broadcast; delivery only, no reply)", false, cmd_espnow_timesync },
   { "espnowtimestatus", "Show time synchronization status.", false, cmd_espnow_timestatus },
   

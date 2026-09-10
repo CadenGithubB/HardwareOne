@@ -1,6 +1,7 @@
 #include "System_SensorStubs.h"
 #include "System_Utils.h"
 #include "WebServer_Utils.h"
+#include "WebServer_Handle.h"
 #include "System_LiveAudio.h"
 
 // Forward declarations for stubs
@@ -217,7 +218,7 @@ String gBootId = "";
 bool gServerIsHttps = false;
 // Deferred-teardown symbols (WebServer_Handle.h). Nothing can be in flight with
 // no server, so the stub stop always "succeeds" and the tick is a no-op.
-volatile int gWebCmdWaiters = 0;
+std::atomic<int> gWebCmdWaiters{0};
 bool httpServerStopSafe() { return true; }
 void httpServerStopPendingTick() {}
 #endif

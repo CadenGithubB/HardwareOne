@@ -37,6 +37,7 @@ check_markers libraries/BLE/src/BLEClient.cpp 13
 check_markers libraries/BLE/src/BLEDevice.cpp 2
 check_markers libraries/BLE/src/BLERemoteCharacteristic.cpp 7
 check_markers libraries/BLE/src/BLERemoteDescriptor.cpp 4
+check_markers libraries/WiFi/src/STA.cpp 1
 check_markers cores/esp32/esp32-hal-i2c-ng.c 1
 check_markers cores/esp32/esp32-hal-periman.c 2
 

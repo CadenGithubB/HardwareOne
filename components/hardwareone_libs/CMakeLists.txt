@@ -4,6 +4,7 @@ idf_component_register(
         Adafruit_Unified_Sensor
         Adafruit_BusIO
         Adafruit_GFX_Library
+        Adafruit_LED_Backpack_Library
         Adafruit_SSD1306
         Adafruit_NeoPixel
         Adafruit_APDS9960_Library
@@ -23,6 +24,7 @@ idf_component_register(
         Adafruit_Unified_Sensor
         Adafruit_BusIO
         Adafruit_GFX_Library
+        Adafruit_LED_Backpack_Library
         Adafruit_SSD1306
         Adafruit_NeoPixel
         Adafruit_APDS9960_Library

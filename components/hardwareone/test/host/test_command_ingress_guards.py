@@ -24,9 +24,12 @@ def function_body(source: str, signature: str) -> str:
 limits = (ROOT / "System_CommandLimits.h").read_text()
 types = (ROOT / "System_CommandTypes.h").read_text()
 utils = (ROOT / "System_Utils.cpp").read_text()
+hardwareone = (ROOT / "HardwareOne.cpp").read_text()
 uart = (ROOT / "System_UartLink.cpp").read_text()
 bluetooth = (ROOT / "Bluetooth.cpp").read_text()
 ble_secure = (ROOT / "System_BleSecureChannel.cpp").read_text()
+web_handle = (ROOT / "WebServer_Handle.h").read_text()
+web_server = (ROOT / "WebServer_Server.cpp").read_text()
 ble_characteristic_h = (
     ROOT.parent / "arduino" / "libraries" / "BLE" / "src" / "BLECharacteristic.h"
 ).read_text()
@@ -42,6 +45,19 @@ assert "char out[CMD_RESULT_MAX]" in types
 
 sync = function_body(utils, "bool submitAndExecuteSync(")
 async_body = function_body(utils, "bool submitCommandAsync(")
+executor = function_body(hardwareone, "static void commandExecTask(void* pv) {")
+
+# The bounded receive is the executor's idle wait and OTA heartbeat cadence.
+# Once it times out, loop directly back to housekeeping and another blocking
+# receive; a second delay creates an avoidable command-arrival blackout. Keep
+# the distinct post-command yield that protects Core 0 under sustained work.
+assert "xQueueReceive(gCmdExecQ, &item, pdMS_TO_TICKS(1000))" in executor
+receive_success = function_body(executor, "if (receiveResult == pdTRUE)")
+assert receive_success.rstrip().endswith(
+    "vTaskDelay(pdMS_TO_TICKS(1));\n    }"
+)
+success_offset = executor.index(receive_success)
+assert executor[success_offset + len(receive_success) :].strip() == "}\n}"
 
 sync_guard = sync.index("commandInputLengthAccepted")
 assert sync_guard < sync.index("if (gCmdExecQ == nullptr)")
@@ -49,6 +65,23 @@ assert sync_guard < sync.index("ps_alloc(")
 assert 'out = "Error: Command exceeds input limit"' in sync
 assert "memcpy(r->line, cmd.line.c_str(), inputLength + 1)" in sync
 assert "strncpy(r->line" not in sync
+
+# An HTTP shutdown command can start on cmd_exec as soon as its pointer is
+# queued. Publish the blocked-httpd guard first so closehttp/closewifi cannot
+# enter httpd_stop() in the cross-core window between enqueue and waiter setup.
+waiter_publish = sync.index("gWebCmdWaiters.fetch_add(1, std::memory_order_release)")
+queue_publish = sync.index("xQueueSend(gCmdExecQ")
+assert waiter_publish < queue_publish
+queue_failure = sync.index("if (queueResult != pdTRUE)", queue_publish)
+waiter_rollback = sync.index(
+    "gWebCmdWaiters.fetch_sub(1, std::memory_order_acq_rel)", queue_failure
+)
+assert queue_failure < waiter_rollback < sync.index(
+    'broadcastOutput("[ERROR] Command queue full - try again")', queue_failure
+)
+assert "extern std::atomic<int> gWebCmdWaiters;" in web_handle
+assert "std::atomic<int> gWebCmdWaiters{0};" in web_server
+assert "static std::atomic<bool> sHttpStopPending{false};" in web_server
 
 async_guard = async_body.index("commandInputLengthAccepted")
 assert async_guard < async_body.index("if (gCmdExecQ == nullptr)")

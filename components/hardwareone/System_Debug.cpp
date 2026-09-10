@@ -1406,8 +1406,8 @@ const char* cmd_loglink(const String& argsInput) {
 // Aggregated-parent recompute — ONE mechanism generated from the tables in
 // System_DebugFlags.h (DBG_AGG_FAMILY_LIST / DBG_SUBBOOL_LIST / the
 // settingsField column), replacing the per-family sync helpers with the
-// same per-family terms. Only the 14 listed families are ever recomputed;
-// every other parent is an explicit master switch owned by its toggle.
+// same per-family terms. Only families in that list are ever recomputed; every
+// other parent is an explicit master switch owned by its toggle.
 // ============================================================================
 
 // Persistent-layer column: each flag row's gSettings bool, nullptr for the
@@ -1473,9 +1473,6 @@ void dbgRecomputeParent(DbgFlagIdx root) {
       return;  // not an aggregated family — its bit belongs to its toggle alone
     case DBG_AGG_SUBBOOLS:       // root setting OR bitless runtime subs
       any = *kDbgSettingPtr[root] || dbgAnyRuntimeSub(root);
-      break;
-    case DBG_AGG_SETTINGS:       // family settings only (LLM)
-      any = dbgAnyFamilySetting(root);
       break;
     case DBG_AGG_SETTINGS_BITS:  // family settings OR temp-set child bits (BT, SR)
       any = dbgAnyFamilySetting(root) || dbgAnyRuntimeChildBit(root);
@@ -1543,16 +1540,6 @@ static void dbgApplyHook(DbgFlagIdx idx, bool modeTemp, int v, bool* settingPtr)
       if (!gCLIValidateOnly) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
       break;
     }
-    case DBG_LLM:
-    case DBG_LLM_LOAD:
-    case DBG_LLM_TOKENIZER:
-    case DBG_LLM_FORWARD:
-    case DBG_LLM_GENERATE:
-    case DBG_LLM_MEMORY:
-      // Persistent path only — temp LLM sub toggles never raise the parent
-      // (SETTINGS family; the DEBUG_LLM_*F macros pass the bare sub-bit).
-      if (!modeTemp) dbgRecomputeParent(DBG_LLM);
-      break;
     case DBG_SR:
       // Parent: sync the legacy gSrDebugLevel; NO recompute (owns its bit).
 #if ENABLE_ESP_SR

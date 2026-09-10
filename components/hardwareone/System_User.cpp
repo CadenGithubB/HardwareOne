@@ -27,6 +27,37 @@
 #include "System_UartLink.h"
 #include "Bluetooth.h"
 #include "BLE_Peers.h"            // synchronized G2 paired-owner authority
+#include <esp_timer.h>            // AuthPerfScope — instrumentation, see below
+#include "System_PollPause.h"   // PollPauseGuard — readRosterJson, mirrors readText
+
+// ============================================================================
+// TEMPORARY: auth-latency instrumentation
+// ============================================================================
+// Added to decide whether memoising the roster lookups is worth touching
+// authorization code. Every named-account permission check costs TWO full
+// users.json reads (getUserAuthorizationRole parses it, then isSuperAdminUser
+// reads and scans it again), and login adds getUserIdByUsername plus a
+// 10,000-iteration PBKDF2. Which of those dominates was never measured, and
+// the LOOPHEALTH stall counters cannot see it — they attribute the whole cost
+// to the loop section that happened to be running.
+//
+// Enable with `debug auth on`. When the flag is off, t0 stays 0 and neither
+// esp_timer_get_time() nor the log call runs, so this is genuinely free.
+// REMOVE once the memoisation decision is made.
+namespace {
+struct AuthPerfScope {
+  const char* name;
+  int64_t     t0;
+  explicit AuthPerfScope(const char* n)
+      : name(n), t0(isDebugFlagSet(DEBUG_AUTH) ? esp_timer_get_time() : 0) {}
+  ~AuthPerfScope() {
+    if (t0 != 0) {
+      DEBUG_AUTHF("[AUTHPERF] %-22s %8lld us", name,
+                  (long long)(esp_timer_get_time() - t0));
+    }
+  }
+};
+}  // namespace
                                   // (declarations are #if ENABLE_BLUETOOTH-gated inside)
 
 // ----------------------------------------------------------------------------
@@ -815,6 +846,14 @@ String getDeviceOwnerUsername() {
 }
 
 // Determine if the given username is admin (any user with role == admin)
+// Roster helpers — defined below, next to the other two parsers. Declared here
+// because isAdminUser sits above them in this file.
+static bool readRosterJson(const char* tag, String& out);
+static bool adminFromRosterJson(const String& json, const String& who);
+static bool superFromRosterJson(const String& json, const String& who);
+static bool roleFromRosterJson(const String& json, const String& username, String& roleOut);
+static bool legacyRoleFromRosterJson(const String& json, const String& username, String& outRole);
+
 bool isAdminUser(const String& who) {
   // An empty identity is nobody — never admin. Checked before anything else so the
   // invariant holds regardless of how the roster parses below: a users.json with no
@@ -836,10 +875,25 @@ bool isAdminUser(const String& who) {
   // Serialize with role writes (reentrant per task) so this hot-path privilege
   // check can't tear-read a users.json mid-write.
   FsLockGuard _g("user.isAdmin");
-  // Prefer JSON
-  if (VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.isAdmin"))) {
-    String json;
-    if (!readText(USERS_JSON_FILE, json)) return false;
+  // Prefer JSON. One guarded open instead of existsGuarded-then-readText:
+  // that pair resolved this 3-level path twice (~15 ms of the measured 36.5 ms
+  // per read) AND finished with an unguarded readText, so the exists probe was
+  // carrying the only permission check on the credential database.
+  String json;
+  if (!readRosterJson("user.isAdmin", json)) return false;
+  return adminFromRosterJson(json, who);
+}
+
+// Verbatim body of the old isAdminUser, from the point the file contents were
+// in hand — a THIRD parser over the same bytes, kept separate for the same
+// reason as the other two. Its first-user fallback is STRICTER than
+// superFromRosterJson's: it fires only when the first account has no role field
+// at all (firstUserHasRole), whereas the super fallback ignores the first
+// user's own role entirely. Those two rules genuinely disagree; do not merge
+// them, only the read is shared.
+static bool adminFromRosterJson(const String& json, const String& who) {
+  AuthPerfScope _perf("roster.scanAdmin");
+  {
     int usersIdx = json.indexOf("\"users\"");
     if (usersIdx < 0) return false;
     int firstUKey = json.indexOf("\"username\"", usersIdx);
@@ -895,23 +949,48 @@ bool isAdminUser(const String& who) {
 // of a valid bond session — the bond is the token-authenticated 1:1 trust
 // channel and is intentionally the *only* over-the-air path to super (a
 // regular mesh/pair account gets only its stored role, never elevated here).
-bool isSuperAdminUser(const String& who) {
-  // An empty identity is nobody — never super. See isAdminUser() for why this
-  // guards the first-user fallback below.
-  if (who.length() == 0) return false;
-#if ENABLE_BONDED_MODE
-  if (who == kBondAdminUser) {
-    extern bool isBondSessionTokenValid();
-    return isBondSessionTokenValid();
-  }
-#endif
-  if (!filesystemReady) return false;
-  // Serialize with role writes — an unlocked read can tear mid-write and
-  // misjudge privilege. Reentrant per task, so nested FS ops are fine.
-  FsLockGuard _g("user.isSuperAdmin");
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.isSuperAdmin"))) return false;
-  String json;
-  if (!readText(USERS_JSON_FILE, json)) return false;
+// ============================================================================
+// Roster access: ONE read of users.json, two independent interpretations
+// ============================================================================
+// resolveRole() asks two questions about the same file back to back — "what is
+// this account's role?" and "is this account superadmin?" — and each used to
+// open and read /system/users/users.json separately. Measured on hardware at
+// ~36.5 ms per read, so every permission check paid ~73 ms, once per directory
+// entry in a listing.
+//
+// The READ is now shared. The two PARSERS are deliberately NOT unified: they
+// disagree in ways that decide authorization.
+//   - roleFromRosterJson uses ArduinoJson: key-order independent, lowercases
+//     the role before matching, and honours "banned".
+//   - superFromRosterJson is a raw-text scan: case-SENSITIVE on "superadmin",
+//     requires "role" to appear before the next "username" in the byte stream,
+//     and ignores "banned" entirely.
+// A roster with role "SuperAdmin" is superadmin to the first and not to the
+// second. Unifying the parsing would silently change who is authorized, so
+// only the file read is shared.
+
+// One guarded open, one read. Replaces the old existsGuarded-then-open and
+// existsGuarded-then-readText pairs: those resolved this 3-level path TWICE,
+// and the readText half finished with an UNGUARDED VFS::open (System_Utils.cpp)
+// so the exists probe was carrying the only permission check on that read.
+static bool readRosterJson(const char* tag, String& out) {
+  AuthPerfScope _perf("roster.read(open+slurp)");
+  // isAdminUser and isSuperAdminUser previously read via readText(), which holds
+  // a PollPauseGuard to keep sensor polling off the I2C bus during file I/O
+  // (System_Utils.cpp:823). Sharing the read must not silently drop that.
+  PollPauseGuard pollGuard;
+  out = "";
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(tag));
+  if (!f) return false;
+  out = f.readString();
+  f.close();
+  return true;
+}
+
+// Verbatim body of the old isSuperAdminUser, from the point the file contents
+// were in hand. Do not "clean up" the string scanning — see the note above.
+static bool superFromRosterJson(const String& json, const String& who) {
+  AuthPerfScope _perf("roster.scanSuper");
   int usersIdx = json.indexOf("\"users\"");
   if (usersIdx < 0) return false;
   // First user (device owner) — for the no-explicit-super fallback below.
@@ -958,6 +1037,123 @@ bool isSuperAdminUser(const String& who) {
   return (!anyExplicitSuper && who == firstUser);
 }
 
+// Verbatim body of getUserRole, from the point the file contents were in hand.
+// A FOURTH parser, and deliberately so: unlike roleFromRosterJson it does NOT
+// honour "banned", does NOT lowercase, and does NOT validate against
+// isKnownUserRole — it returns the stored bytes as-is and defaults a missing
+// role to "user". userAccountRank's guest branch has always used exactly this.
+// Substituting roleFromRosterJson here silently RAISED a banned guest's rank by
+// a tier (roleFromRosterJson returns false on banned, so the guest branch was
+// skipped) and lowered a "Guest"-cased account's. Share the read, not the parser.
+static bool legacyRoleFromRosterJson(const String& json, const String& username,
+                                     String& outRole) {
+  AuthPerfScope _perf("roster.parseRoleLegacy");
+  outRole = "";
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) return false;
+  JsonArray users = doc["users"].as<JsonArray>();
+  if (!users) return false;
+  for (JsonObject uObj : users) {
+    const char* uname = uObj["username"] | "";
+    if (username == uname) {
+      outRole = String(uObj["role"] | "user");
+      return true;
+    }
+  }
+  return false;
+}
+
+// Verbatim body of the old getUserAuthorizationRole, from the point the file
+// contents were in hand.
+static bool roleFromRosterJson(const String& json, const String& username,
+                               String& roleOut) {
+  AuthPerfScope _perf("roster.parseRole");
+  roleOut = String();
+  PSRAM_JSON_DOC(doc);
+  const DeserializationError err = deserializeJson(doc, json);
+  if (err) return false;
+  const JsonArray users = doc["users"].as<JsonArray>();
+  if (!users) return false;
+  bool firstAccount = true;
+  for (JsonObject user : users) {
+    const char* storedName = user["username"] | "";
+    // Usernames are currently exact/case-sensitive in credential and role
+    // lookup. Do not let a case-colliding ordinary account authorize a Guest
+    // whose name differs only by case.
+    if (username != storedName) {
+      firstAccount = false;
+      continue;
+    }
+    if (user["banned"] | false) return false;
+    const JsonVariantConst roleField = user["role"];
+    String role;
+    if (roleField.isNull()) {
+      // Compatibility with pre-role rosters is deliberate elsewhere in this
+      // module: the first account remains the recovery owner, while another
+      // account with no legacy role is an ordinary user. Missing is distinct
+      // from a present-but-malformed/unknown role, which stays fail-closed.
+      role = firstAccount ? "superadmin" : "user";
+    } else if (roleField.is<const char*>()) {
+      role = String(roleField.as<const char*>());
+    } else {
+      return false;
+    }
+    role.toLowerCase();
+    if (!isKnownUserRole(role)) return false;
+    roleOut = role;
+    return true;
+  }
+  return false;
+}
+
+bool isSuperAdminUser(const String& who) {
+  AuthPerfScope _perf("isSuperAdminUser");
+  // An empty identity is nobody — never super. See isAdminUser() for why this
+  // guards the first-user fallback below.
+  if (who.length() == 0) return false;
+#if ENABLE_BONDED_MODE
+  if (who == kBondAdminUser) {
+    extern bool isBondSessionTokenValid();
+    return isBondSessionTokenValid();
+  }
+#endif
+  if (!filesystemReady) return false;
+  // Serialize with role writes — an unlocked read can tear mid-write and
+  // misjudge privilege. Reentrant per task, so nested FS ops are fine.
+  FsLockGuard _g("user.isSuperAdmin");
+  String json;
+  if (!readRosterJson("user.isSuperAdmin", json)) return false;
+  return superFromRosterJson(json, who);
+}
+
+// Combined lookup for resolveRole(): both answers from ONE read of the roster.
+// Semantically identical to calling getUserAuthorizationRole() then
+// isSuperAdminUser(), because it runs the same two parsers over the same bytes
+// — it just does not read the file twice.
+//
+// NOTE: this deliberately does NOT replicate isSuperAdminUser()'s bond-admin
+// branch. resolveRole() returns for kBondAdminUser before it ever gets here
+// (System_Filesystem.cpp), so that path cannot reach this function. If you add
+// a second caller, handle the bond identity yourself or call the two public
+// functions instead.
+bool getUserRoleAndSuper(const String& who, String& roleOut, bool& isSuperOut) {
+  AuthPerfScope _perf("getUserRoleAndSuper");
+  roleOut = String();
+  isSuperOut = false;
+  if (!filesystemReady || who.length() == 0) return false;
+  FsLockGuard guard("users.roleAndSuper");
+  if (!guard.held && !isFsLockedByCurrentTask()) return false;
+  String json;
+  if (!readRosterJson("user.roleAndSuper", json)) return false;
+  const bool haveRole = roleFromRosterJson(json, who, roleOut);
+  // Evaluated even when the role lookup fails, to match the old call order in
+  // resolveRole — which bailed to ANON on a failed role lookup and therefore
+  // never consulted super. Callers must preserve that precedence themselves.
+  isSuperOut = superFromRosterJson(json, who);
+  return haveRole;
+}
+
+
 // Privilege rank for a role *name*. See kRoleRank* in System_User.h.
 // A caller may not demote/ban/delete a target of higher rank, nor grant a
 // role above its own (enforced in the user-mutation handlers).
@@ -996,52 +1192,14 @@ bool isKnownUserRole(const String& role) {
 // AND must also cover out-of-band writes to users.json through generic file
 // operations, which a superadmin can perform and which bump nothing today.
 bool getUserAuthorizationRole(const String& username, String& roleOut) {
+  AuthPerfScope _perf("getUserAuthorizationRole");
   roleOut = String();
   if (!filesystemReady || username.length() == 0) return false;
   FsLockGuard guard("users.authorization_role");
   if (!guard.held && !isFsLockedByCurrentTask()) return false;
-  if (!VFS::existsGuarded(USERS_JSON_FILE,
-                          VFS::systemAuth("user.authorizationRole")))
-    return false;
-  File f = VFS::openGuarded(USERS_JSON_FILE, "r",
-                            VFS::systemAuth("user.authorizationRole"));
-  if (!f) return false;
-  PSRAM_JSON_DOC(doc);
-  const DeserializationError err = deserializeJson(doc, f);
-  f.close();
-  if (err) return false;
-  const JsonArray users = doc["users"].as<JsonArray>();
-  if (!users) return false;
-  bool firstAccount = true;
-  for (JsonObject user : users) {
-    const char* storedName = user["username"] | "";
-    // Usernames are currently exact/case-sensitive in credential and role
-    // lookup. Do not let a case-colliding ordinary account authorize a Guest
-    // whose name differs only by case.
-    if (username != storedName) {
-      firstAccount = false;
-      continue;
-    }
-    if (user["banned"] | false) return false;
-    const JsonVariantConst roleField = user["role"];
-    String role;
-    if (roleField.isNull()) {
-      // Compatibility with pre-role rosters is deliberate elsewhere in this
-      // module: the first account remains the recovery owner, while another
-      // account with no legacy role is an ordinary user. Missing is distinct
-      // from a present-but-malformed/unknown role, which stays fail-closed.
-      role = firstAccount ? "superadmin" : "user";
-    } else if (roleField.is<const char*>()) {
-      role = String(roleField.as<const char*>());
-    } else {
-      return false;
-    }
-    role.toLowerCase();
-    if (!isKnownUserRole(role)) return false;
-    roleOut = role;
-    return true;
-  }
-  return false;
+  String json;
+  if (!readRosterJson("user.authorizationRole", json)) return false;
+  return roleFromRosterJson(json, username, roleOut);
 }
 
 bool userMayControlOtherSessions(const String& username) {
@@ -1514,6 +1672,7 @@ bool isTransportAdmin(CommandSource transport) {
 
 // Password hashing
 String hashUserPassword(const String& password) {
+  AuthPerfScope _perf("hashUserPassword(PBKDF2)");
   if (password.length() == 0) return "";
 
   // Use PBKDF2-HMAC-SHA256 for strong password hashing
@@ -1854,7 +2013,7 @@ bool hasUserGamepadPassword(const String& username) {
 bool isUserBanned(const String& username) {
   if (!filesystemReady || username.length() == 0) return false;
   FsLockGuard guard("users.is_banned");
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.isBanned"))) return false;
+  // See getUserRole: the exists probe was a duplicate path resolution only.
   File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.isBanned"));
   if (!f) return false;
   PSRAM_JSON_DOC(doc);
@@ -2002,6 +2161,7 @@ void updateUserLastSeen(const String& username) {
 // Validate a username/password against per-user settings file
 // Checks both 'password' (text) and 'gamepad_password' (pattern) fields
 bool isValidUser(const String& u, const String& p) {
+  AuthPerfScope _perf("isValidUser(TOTAL)");
   if (!filesystemReady) return false;
   if (u.length() == 0 || p.length() == 0) return false;
 
@@ -2016,15 +2176,36 @@ bool isValidUser(const String& u, const String& p) {
   PSRAM_JSON_DOC(settings);
   if (!loadUserSettings(userId, settings)) return false;
   
-  // Check text password
-  const char* textPass = settings["password"];
-  if (textPass && verifyUserPassword(p, String(textPass))) {
+  // Derive the input hash ONCE and compare it against both stored credentials.
+  //
+  // hashUserPassword() is a pure function of the password: the salt is the
+  // device key and the iteration count is a hardcoded 10000, so hashing the
+  // same input twice produces the same string. Calling verifyUserPassword()
+  // per stored credential therefore ran a second 10,000-iteration PBKDF2 for
+  // an answer it already had — paid on every login where the text password
+  // was not the match, i.e. every wrong password and every gamepad-pattern
+  // login. Same comparisons, same values, half the derivations.
+  //
+  // Side benefit: a text-password miss no longer costs measurably more than a
+  // hit, which removes a timing signal for "the text password was wrong".
+  const char* textPass    = settings["password"];
+  const char* gamepadPass = settings["gamepad_password"];
+
+  // Preserve the old short-circuit: verifyUserPassword() rejected a
+  // non-PBKDF2 stored hash *before* hashing, so a roster with no PBKDF2
+  // credential must still cost zero derivations.
+  const bool textIsPbkdf2    = textPass    && strncmp(textPass,    "PBKDF2:", 7) == 0;
+  const bool gamepadIsPbkdf2 = gamepadPass && strncmp(gamepadPass, "PBKDF2:", 7) == 0;
+  if (!textIsPbkdf2 && !gamepadIsPbkdf2) return false;
+
+  const String inputHash = hashUserPassword(p);
+  if (inputHash.length() == 0) return false;  // derivation failed — fail closed
+
+  if (textIsPbkdf2 && inputHash == textPass) {
     return true;
   }
-  
-  // Check gamepad pattern password (if set)
-  const char* gamepadPass = settings["gamepad_password"];
-  if (gamepadPass && verifyUserPassword(p, String(gamepadPass))) {
+
+  if (gamepadIsPbkdf2 && inputHash == gamepadPass) {
     return true;
   }
   
@@ -2032,13 +2213,16 @@ bool isValidUser(const String& u, const String& p) {
 }
 
 bool getUserIdByUsername(const String& username, uint32_t& outUserId) {
+  AuthPerfScope _perf("getUserIdByUsername");
   outUserId = 0;
   if (!filesystemReady) return false;
   if (username.length() == 0) return false;
 
   {
     FsLockGuard guard("users.get_id");
-    if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.getId"))) return false;
+    // No existsGuarded probe: openGuarded already fails closed on a missing
+    // file and is still the permission check. The probe only bought a second
+    // resolution of the same 3-level path.
     File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.getId"));
     if (!f) return false;
 
@@ -2074,7 +2258,8 @@ bool getUserRole(const String& username, String& outRole) {
   if (username.length() == 0) return false;
 
   FsLockGuard guard("users.get_role");
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.getRole"))) return false;
+  // openGuarded fails closed on a missing file and is the permission check;
+  // the old existsGuarded probe just resolved this 3-level path a second time.
   File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.getRole"));
   if (!f) return false;
 
@@ -2102,10 +2287,46 @@ bool getUserRole(const String& username, String& outRole) {
 // rates the same whether you ask about the caller or the target. Guest is
 // only reachable when those predicates are false and users.json says so.
 int userAccountRank(const String& username) {
-  if (isSuperAdminUser(username)) return kRoleRankSuperAdmin;
-  if (isAdminUser(username))      return kRoleRankAdmin;
+  AuthPerfScope _perf("userAccountRank");
+  // ONE read of users.json, three parsers over the same bytes.
+  //
+  // This used to call isSuperAdminUser, then isAdminUser, then getUserRole —
+  // three independent opens of the same file to produce one integer, ~20 ms
+  // each (measured). streamBeginHtml calls this on every authenticated page
+  // load, and separately calls isAdminUser again beside it.
+  //
+  // The three predicates are NOT collapsed into one rule: each keeps its own
+  // parser and its own first-user fallback, which genuinely disagree (see the
+  // note above adminFromRosterJson). The guest branch uses
+  // legacyRoleFromRosterJson — getUserRole's parser, NOT roleFromRosterJson;
+  // they differ on "banned" and on case, and swapping them changes an account's
+  // rank. Evaluation order and short-circuiting match the original call
+  // sequence; only the file read is shared.
+  if (username.length() == 0) return kRoleRankUser;
+#if ENABLE_BONDED_MODE
+  // The bond identity is answered by the token check inside isSuperAdminUser /
+  // isAdminUser without touching the filesystem, so it cannot use the shared
+  // read below. Run the ORIGINAL three-call sequence verbatim for it — including
+  // the getUserRole guest branch, which the old code reached and which an early
+  // `return kRoleRankUser` here would have skipped. One extra read, only ever
+  // for this one reserved name.
+  if (username == kBondAdminUser) {
+    if (isSuperAdminUser(username)) return kRoleRankSuperAdmin;
+    if (isAdminUser(username))      return kRoleRankAdmin;
+    String bondRole;
+    if (getUserRole(username, bondRole) && bondRole == "guest") return kRoleRankGuest;
+    return kRoleRankUser;
+  }
+#endif
+  if (!filesystemReady) return kRoleRankUser;
+  FsLockGuard guard("users.accountRank");
+  String json;
+  if (!readRosterJson("user.accountRank", json)) return kRoleRankUser;
+
+  if (superFromRosterJson(json, username)) return kRoleRankSuperAdmin;
+  if (adminFromRosterJson(json, username)) return kRoleRankAdmin;
   String role;
-  if (getUserRole(username, role) && role == "guest") return kRoleRankGuest;
+  if (legacyRoleFromRosterJson(json, username, role) && role == "guest") return kRoleRankGuest;
   return kRoleRankUser;
 }
 

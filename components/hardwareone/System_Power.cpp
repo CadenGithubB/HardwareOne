@@ -6,11 +6,15 @@
  */
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include "System_Power.h"
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_Command.h"
 #include "System_Events.h"  // systemEventPost — event register producer
+#include "System_MemUtil.h"    // ps_alloc / PSRAM_JSON_DOC — `power json` blob
+#include "System_OTASafety.h"  // otaSafetyIsPendingVerification — sleep gate
+#include "System_Utils.h"      // argWantsJson() — opt-in JSON output
 
 // Forward declarations
 
@@ -161,11 +165,95 @@ void checkAutoPowerMode() {
 }
 
 // ============================================================================
+// Power telemetry JSON — single source of truth
+// ============================================================================
+// Used by BOTH `power json` (CLI/BLE) and the web /api/power/status, so every
+// interface returns the SAME schema. Read-only: it samples live state and
+// settings, never mutates and never stamps power-save activity (a polling web
+// page must not hold the device out of idle power-save — see the
+// SOURCE_INTERNAL/SOURCE_UART carve-out in executeCommand).
+//
+// The `modes` array is what lets a UI render the preset picker without
+// re-encoding the gPowerModes table: name, the clock actually applied while
+// the device is in use, the clock idle power-save may sink to, and the mode's
+// display brightness. Anything that hardcodes "Performance = 240 MHz" in
+// JavaScript is a duplicate of this table waiting to drift.
+//
+// No secrets; safe on any transport.
+void buildPowerJson(JsonDocument& doc) {
+  const uint8_t mode = gSettings.powerMode;
+
+  doc["schema"]            = 1;
+  doc["mode"]              = mode;
+  doc["modeName"]          = getPowerModeName(mode);
+  // Live HAL read — shows the power-save downclock, not just the mode's table
+  // value. cpuMhz < activeMhz means idle power-save has already sunk the clock.
+  doc["cpuMhz"]            = (unsigned long)getCpuFrequencyMhz();
+  doc["xtalMhz"]           = (unsigned long)getXtalFrequencyMhz();
+  doc["apbMhz"]            = (unsigned long)(getApbFrequency() / 1000000UL);
+  doc["activeMhz"]         = (unsigned long)getPowerModeActiveCpuFreq(mode);
+  doc["idleMhz"]           = (unsigned long)getPowerModeIdleCpuFreq(mode);
+  doc["interactiveFloorMhz"] = (unsigned long)POWER_INTERACTIVE_FLOOR_MHZ;
+
+  doc["autoMode"]          = (bool)gSettings.powerAutoMode;
+  doc["batteryThreshold"]  = gSettings.powerBatteryThreshold;
+  doc["displayBrightness"] = gSettings.oledBrightness;          // 0..255
+  doc["displayDimLevel"]   = gSettings.powerDisplayDimLevel;    // percent
+
+  // Idle power-save. powerSaveTick() only runs under ENABLE_OLED_DISPLAY, so
+  // on a headless build the timeout setting exists but nothing consumes it —
+  // `powerSaveSupported` tells the UI to say so instead of showing a countdown
+  // that will never fire.
+  doc["powerSaveMinutes"]  = (unsigned long)gSettings.powerSaveTimeoutMinutes;
+#if ENABLE_OLED_DISPLAY
+  doc["powerSaveSupported"] = true;
+#else
+  doc["powerSaveSupported"] = false;
+#endif
+  doc["idleMsAgo"]         = (unsigned long)(millis() - powerSaveLastActivityMs());
+
+  // Sleep gating: why a lightsleep/deepsleep request would be refused right now.
+  unsigned long cooldownRemain = 0;
+  const bool sleepAllowed = powerSleepTransitionAllowed(&cooldownRemain);
+  doc["cooldownMs"]          = (unsigned long)gSettings.powerTransitionCooldownMs;
+  doc["cooldownRemainingMs"] = cooldownRemain;
+  doc["otaProbation"]        = otaSafetyIsPendingVerification();
+  doc["sleepAllowed"]        = sleepAllowed && !otaSafetyIsPendingVerification();
+
+  JsonArray modes = doc["modes"].to<JsonArray>();
+  for (uint8_t i = 0; i < POWER_MODE_COUNT; i++) {
+    JsonObject m = modes.add<JsonObject>();
+    m["index"]      = i;
+    m["name"]       = gPowerModes[i].name;
+    m["activeMhz"]  = (unsigned long)getPowerModeActiveCpuFreq(i);
+    m["idleMhz"]    = (unsigned long)getPowerModeIdleCpuFreq(i);
+    m["brightness"] = gPowerModes[i].displayBrightnessPercent;
+  }
+}
+
+// ============================================================================
 // CLI Commands
 // ============================================================================
 
 const char* cmd_power(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // Structured path: the whole power snapshot as one verbatim JSON blob, no
+  // broadcastOutput (interleaving the stream and the blob makes it
+  // unparseable). Same builder the web /api/power/status uses.
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    buildPowerJson(doc);
+    // Worst case (widest numbers, longest mode names) serializes to 785 B and
+    // the `modes` table is fixed-size, so it cannot grow at runtime. 1 KB
+    // leaves ~230 B of headroom; serializeJson silently TRUNCATES to fit,
+    // which would emit invalid JSON rather than failing loudly.
+    static char* jbuf = nullptr;
+    if (!jbuf) jbuf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "power.json");
+    if (!jbuf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, jbuf, 1024);
+    return jbuf;
+  }
   
   DEBUG_SYSTEMF("[POWER_CMD] cmd_power called with: '%s'", argsInput.c_str());
   
@@ -379,7 +467,7 @@ static const char* cmd_powersave(const String& argsInput) {
 // Command table
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry powerCommands[] = {
-  {"power",         "Power management [mode] [auto] [threshold]", true, cmd_power,         "Usage:\n  power - show current power status\n  power mode <perf|balanced|saver|ultra|locked|0-4>\n  power auto <on|off>\n  power threshold <0-100>"},
+  {"power",         "Power management [mode] [auto] [threshold]", true, cmd_power,         "Usage:\n  power - show current power status\n  power json - status as one JSON blob (same schema as /api/power/status)\n  power mode <perf|balanced|saver|ultra|locked|0-4>\n  power auto <on|off>\n  power threshold <0-100>"},
   {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", true, cmd_powercooldown, "Usage: powercooldown <0..60000>"},
   {"powersave",     "Idle power-save: OLED off + optional downclock (0 disables)", true, cmd_powersave, "Usage: powersave <0..1440>"}
 };

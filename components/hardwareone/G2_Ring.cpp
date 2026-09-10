@@ -5508,7 +5508,7 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
                                      "completion");
     return false;
   }
-  if (persistNeeded) (void)writeSettingsJson();
+  if (persistNeeded) (void)requestSettingsPersist();
   return true;
 }
 

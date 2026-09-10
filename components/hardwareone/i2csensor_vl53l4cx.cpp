@@ -9,11 +9,13 @@
 #include <Arduino.h>
 #include <vl53l4cx_class.h>
 #include <Wire.h>
+#include <new>
 
 #include "OLED_Display.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #if ENABLE_ESPNOW
@@ -23,7 +25,6 @@
 
 // VL53L4CX ToF sensor object (owned by this module)
 VL53L4CX* gVL53L4CX = nullptr;
-extern TwoWire Wire1;
 
 // Settings and debug
 
@@ -52,7 +53,6 @@ volatile UBaseType_t gTofWatermarkNow = (UBaseType_t)0;
 
 // Forward declarations (implementations in main .ino)
 extern bool tofInit();
-extern void i2cSetDefaultWire1Clock();
 extern bool createToFTask();
 
 // Queue system functions now in System_I2C.h
@@ -76,7 +76,8 @@ float readToFDistance() {
 
   // Use i2cTransaction wrapper for safe mutex + clock management
   uint32_t clockHz = (gSettings.i2cClockToFHz > 0) ? (uint32_t)gSettings.i2cClockToFHz : 100000;
-  float result = i2cDeviceTransaction(I2C_ADDR_TOF, clockHz, 200, [&]() -> float {
+  const uint8_t tofBus = (uint8_t)gSettings.tofBus;
+  float result = i2cDeviceTransaction(tofBus, I2C_ADDR_TOF, clockHz, 200, [&]() -> float {
     VL53L4CX_MultiRangingData_t MultiRangingData;
     VL53L4CX_MultiRangingData_t* pMultiRangingData = &MultiRangingData;
     uint8_t NewDataReady = 0;
@@ -260,7 +261,8 @@ const char* cmd_tofstart(const String& argsInput) {
     return "[ToF] Already queued";
   }
 
-  if (!i2cPingAddress(I2C_ADDR_TOF, 100000, 50)) {
+  if (!i2cPingAddress(I2C_ADDR_TOF, 100000, 50,
+                      (uint8_t)gSettings.tofBus)) {
     return "Error: [ToF] Not detected on I2C bus";
   }
 
@@ -314,7 +316,7 @@ bool tofInit() {
     // Sensor object exists - clean it up and reinitialize to ensure fresh state
     INFO_TOF_LIFECYCLEF("Cleaning up existing sensor object before reinit");
     (void)gVL53L4CX->VL53L4CX_StopMeasurement();
-    delete gVL53L4CX;
+    ps_delete(gVL53L4CX);
     gVL53L4CX = nullptr;
     gTofConnected = false;
     // Fall through to reinitialize
@@ -326,27 +328,34 @@ bool tofInit() {
   if (tofHz < 50000) tofHz = 50000;
   if (tofHz > 400000) tofHz = 400000;
 
+  const uint8_t tofBus = (uint8_t)gSettings.tofBus;
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  TwoWire* tofWire = mgr ? mgr->getWire(tofBus) : nullptr;
+  if (!tofWire) return false;
+
   delay(200);
-  if (!i2cPingAddress(I2C_ADDR_TOF, tofHz, 200)) {
+  if (!i2cPingAddress(I2C_ADDR_TOF, tofHz, 200, tofBus)) {
     return false;
   }
   
-  return i2cDeviceTransaction(I2C_ADDR_TOF, tofHz, 3000, [&]() -> bool {
-    // Wire1 is configured centrally with runtime-configurable pins
-    
-    // Allocate sensor object
-    gVL53L4CX = new VL53L4CX();
-    if (!gVL53L4CX) return false;
+  return i2cDeviceTransaction(tofBus, I2C_ADDR_TOF, tofHz, 3000, [&]() -> bool {
+    // The large inline device/calibration state is used by task-context code;
+    // Wire copies I2C bytes through its own buffers, not DMA from this object.
+    // Prefer PSRAM, retaining the standard internal fallback/bypass policy.
+    // Pair placement-new with ps_delete on every teardown path below.
+    void* tofObjBuf = ps_alloc(sizeof(VL53L4CX), AllocPref::PreferPSRAM, "tof.obj");
+    if (!tofObjBuf) return false;
+    gVL53L4CX = new (tofObjBuf) VL53L4CX();
     
     // Configure and start
-    gVL53L4CX->setI2cDevice(&Wire1);
+    gVL53L4CX->setI2cDevice(tofWire);
     // XSHUT pin is optional and board-specific; guard usage on A1 definition
 #ifdef A1
     gVL53L4CX->setXShutPin(A1);
 #endif
     VL53L4CX_Error status = gVL53L4CX->begin();
     if (status != VL53L4CX_ERROR_NONE) {
-      delete gVL53L4CX;
+      ps_delete(gVL53L4CX);
       gVL53L4CX = nullptr;
       return false;
     }
@@ -354,7 +363,7 @@ bool tofInit() {
     gVL53L4CX->VL53L4CX_Off();
     status = gVL53L4CX->InitSensor(VL53L4CX_DEFAULT_DEVICE_ADDRESS);
     if (status != VL53L4CX_ERROR_NONE) {
-      delete gVL53L4CX;
+      ps_delete(gVL53L4CX);
       gVL53L4CX = nullptr;
       return false;
     }
@@ -363,7 +372,7 @@ bool tofInit() {
     (void)gVL53L4CX->VL53L4CX_SetMeasurementTimingBudgetMicroSeconds(200000);
     status = gVL53L4CX->VL53L4CX_StartMeasurement();
     if (status != VL53L4CX_ERROR_NONE) {
-      delete gVL53L4CX;
+      ps_delete(gVL53L4CX);
       gVL53L4CX = nullptr;
       return false;
     }
@@ -727,7 +736,7 @@ void tofTask(void* parameter) {
     if (!gTofRunning) {
       if (gVL53L4CX != nullptr) {
         (void)gVL53L4CX->VL53L4CX_StopMeasurement();
-        delete gVL53L4CX;
+        ps_delete(gVL53L4CX);
         gVL53L4CX = nullptr;
       }
       gTofConnected = false;
@@ -759,7 +768,8 @@ void tofTask(void* parameter) {
         DEBUG_MEMORY_HEAPF("[HEAP] tof_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
-    if (gTofRunning && gTofConnected && gVL53L4CX != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
+    const uint8_t tofBus = (uint8_t)gSettings.tofBus;
+    if (gTofRunning && gTofConnected && gVL53L4CX != nullptr && !pollPaused(tofBus)) {
       unsigned long tofPollMs = (gSettings.tofDevicePollMs > 0) ? (unsigned long)gSettings.tofDevicePollMs : 100;
       unsigned long nowMs = millis();
       if (nowMs - lastToFRead >= tofPollMs) {
@@ -767,7 +777,7 @@ void tofTask(void* parameter) {
         bool ok = false;
         
         // ToF busy-waits up to 250ms for data ready; 500ms timeout gives headroom without over-blocking
-        ok = i2cTaskWithTimeout(I2C_ADDR_TOF, tofHz, 500, [&]() -> bool {
+        ok = i2cTaskWithTimeout(tofBus, I2C_ADDR_TOF, tofHz, 500, [&]() -> bool {
           return tofPoll();
         });
         
@@ -775,7 +785,7 @@ void tofTask(void* parameter) {
         
         // Auto-disable if too many consecutive failures
         if (!ok) {
-          if (i2cShouldAutoDisable(I2C_ADDR_TOF)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_TOF, (uint8_t)gSettings.tofBus)) {
             ERROR_TOFF("Too many consecutive ToF failures - auto-disabling");
             gTofRunning = false;
             sensorStatusBumpWith("tof@auto_disabled");

@@ -40,12 +40,21 @@ typedef struct {
     esp_netif_t *ap_netif;
     recovery_network_callbacks_t callbacks;
     char token[HW1_RECOVERY_CREDENTIAL_CAPACITY];
+    bool start_complete;
     bool event_loop_created;
     bool wifi_initialized;
     auth_throttle_t auth;
 } recovery_network_context_t;
 
 static recovery_network_context_t s_network;
+
+static esp_err_t recovery_network_cleanup(void);
+
+static bool recovery_network_has_owned_resources(void)
+{
+    return s_network.server != NULL || s_network.ap_netif != NULL ||
+           s_network.wifi_initialized || s_network.event_loop_created;
+}
 
 static void log_http_stack_margin(const char *operation)
 {
@@ -527,9 +536,19 @@ esp_err_t recovery_network_start(
                               credentials->auth_token)) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_network.server != NULL || s_network.ap_netif != NULL ||
-        s_network.wifi_initialized) {
+    if (s_network.start_complete) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (recovery_network_has_owned_resources()) {
+        /* A previous failed start/stop can leave a live handle here on purpose:
+         * forgetting it would leak resources or create a second owner. Retry
+         * that teardown before beginning a fresh initialization attempt. */
+        err = recovery_network_cleanup();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "pending network cleanup still failed: %s",
+                     esp_err_to_name(err));
+            return err;
+        }
     }
     memset(&s_network, 0, sizeof(s_network));
     s_network.callbacks = *callbacks;
@@ -638,6 +657,7 @@ esp_err_t recovery_network_start(
     }
     ESP_LOGI(TAG, "Authenticated recovery SoftAP %s at http://%s/", ssid,
              CONFIG_HW1_UPDATER_AP_IP);
+    s_network.start_complete = true;
     return ESP_OK;
 
 fail:
@@ -645,13 +665,16 @@ fail:
     return err;
 }
 
-void recovery_network_stop(void)
+static esp_err_t recovery_network_cleanup(void)
 {
     if (s_network.server != NULL) {
         esp_err_t err = httpd_stop(s_network.server);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "HTTP server stop failed during cleanup: %s",
                      esp_err_to_name(err));
+            /* The live server still uses the callbacks, netif and WiFi. Keep
+             * the handle and all dependencies intact so a later stop can retry. */
+            return err;
         }
         s_network.server = NULL;
     }
@@ -660,11 +683,17 @@ void recovery_network_stop(void)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "WiFi stop failed during cleanup: %s",
                      esp_err_to_name(err));
+            /* Deinitializing after a failed stop can strand driver-owned state.
+             * Preserve the ownership flag and dependent netif for a retry. */
+            return err;
         }
         err = esp_wifi_deinit();
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "WiFi deinit failed during cleanup: %s",
                      esp_err_to_name(err));
+            /* esp_wifi_stop() is safe to repeat, so retaining this flag gives
+             * the next cleanup attempt a coherent stop/deinit sequence. */
+            return err;
         }
         s_network.wifi_initialized = false;
     }
@@ -677,8 +706,23 @@ void recovery_network_stop(void)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "default event loop deletion failed during cleanup: %s",
                      esp_err_to_name(err));
+            /* Do not forget a loop we created. Blocking a new start lets the
+             * caller retry deletion rather than silently reclassifying it as
+             * externally owned on the next esp_event_loop_create_default(). */
+            return err;
         }
         s_network.event_loop_created = false;
     }
+    /* All owning handles and lifecycle flags are gone. It is now safe to clear
+     * callback pointers, credentials and throttle state for the next start. */
     memset(&s_network, 0, sizeof(s_network));
+    return ESP_OK;
+}
+
+void recovery_network_stop(void)
+{
+    /* Once stop is requested, start() may finish a partial teardown and retry.
+     * A fully running instance still rejects accidental double-starts. */
+    s_network.start_complete = false;
+    (void)recovery_network_cleanup();
 }

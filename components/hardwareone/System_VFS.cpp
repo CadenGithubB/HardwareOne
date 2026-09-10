@@ -91,6 +91,49 @@ namespace VFS {
 static bool gSdMounted  = false;  // driver-level: SD.begin() succeeded
 static bool gSdWritable = false;  // probe-verified: a write round-trip worked
 
+// Presentation-only capacity snapshots. The cache core is dependency-free and
+// host-tested; this spinlock makes complete 64-bit snapshots safe to share on
+// the ESP32's 32-bit cores. Filesystem I/O is always outside the critical
+// section. A generation captured before each slow sample fences publication
+// against invalidateStatsSnapshot() racing that sample.
+static detail::CapacitySnapshotCache gCapacitySnapshots;
+static portMUX_TYPE gCapacitySnapshotMux = portMUX_INITIALIZER_UNLOCKED;
+
+static size_t capacityTierIndex(StorageType type) {
+  // Preserve getStats' existing AUTO behavior: every type other than SDCARD
+  // routes to the internal LittleFS tier.
+  return type == SDCARD ? 1u : 0u;
+}
+
+static bool readCapacitySnapshot(StorageType type, uint32_t maxAgeMs,
+                                 CapacitySnapshot& out) {
+  bool hit = false;
+  const size_t tier = capacityTierIndex(type);
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&gCapacitySnapshotMux);
+  hit = gCapacitySnapshots.read(tier, now, maxAgeMs, &out);
+  portEXIT_CRITICAL(&gCapacitySnapshotMux);
+  return hit;
+}
+
+static uint32_t capacitySnapshotGeneration(StorageType type) {
+  uint32_t generation = 0;
+  const size_t tier = capacityTierIndex(type);
+  portENTER_CRITICAL(&gCapacitySnapshotMux);
+  generation = gCapacitySnapshots.generation(tier);
+  portEXIT_CRITICAL(&gCapacitySnapshotMux);
+  return generation;
+}
+
+static void publishCapacitySnapshot(StorageType type,
+                                    uint32_t expectedGeneration,
+                                    const CapacitySnapshot& snapshot) {
+  const size_t tier = capacityTierIndex(type);
+  portENTER_CRITICAL(&gCapacitySnapshotMux);
+  (void)gCapacitySnapshots.publish(tier, expectedGeneration, snapshot);
+  portEXIT_CRITICAL(&gCapacitySnapshotMux);
+}
+
 // Why both flags exist:
 //   A card can be "mounted" (driver initialized OK) but not actually writable:
 //   flaky contacts, write-protect tab, wrong filesystem, full disk, card
@@ -140,6 +183,7 @@ static bool tryMountSD() {
   // Hold the global FS mutex for the complete transition so no task can enter
   // VFS::open/read/write while SPI and the FAT volume are being rebuilt.
   FsLockGuard guard("VFS.sdMount");
+  invalidateStatsSnapshot(SDCARD);
 #if defined(SD_CS_PIN)
   // Three full attempts, each with a complete SPI bus reset, walking a
   // fastest-first frequency ladder.
@@ -534,18 +578,38 @@ bool rmdir(const String& path) {
   return ok;
 }
 
-bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint64_t& freeBytes) {
-  FsLockGuard guard("VFS.getStats");
+struct FreshCapacitySample {
+  CapacitySnapshot snapshot = {};
+  bool apiOk = false;
+  bool cacheable = false;
+};
+
+// The caller owns gFsMutex. `apiOk` deliberately mirrors the legacy getStats
+// contract, including its two unusual edges: unavailable tiers return false
+// without touching outputs, while an esp_littlefs_info failure after a valid
+// mount still returns true with the zero values left in the locals. Such a
+// failed/zero sample is returned to that caller but is never cached.
+static FreshCapacitySample sampleCapacityFreshLocked(StorageType type) {
+  FreshCapacitySample result;
 
   if (type == SDCARD) {
-    if (!gSdMounted) return false;
-    totalBytes = SD.totalBytes();
-    usedBytes = SD.usedBytes();
-    freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
-    return true;
+    if (!gSdMounted) return result;
+    result.snapshot.totalBytes = SD.totalBytes();
+    result.snapshot.usedBytes = SD.usedBytes();
+    result.snapshot.freeBytes =
+        (result.snapshot.totalBytes > result.snapshot.usedBytes)
+            ? (result.snapshot.totalBytes - result.snapshot.usedBytes)
+            : 0;
+    result.snapshot.sampledAtMs = millis();
+    result.apiOk = true;
+    // Arduino SD exposes no f_getfree error code here; both accessors return 0
+    // on failure. A mounted FAT volume with zero total bytes is not a usable
+    // capacity sample, so do not let it poison later cached presentation reads.
+    result.cacheable = result.snapshot.totalBytes > 0;
+    return result;
   }
 
-  if (!filesystemReady) return false;
+  if (!filesystemReady) return result;
   // One traverse, not two. LittleFS.totalBytes() and LittleFS.usedBytes() both
   // call esp_littlefs_info() with a non-NULL `used` pointer, and
   // get_total_and_used_bytes() runs lfs_fs_size() -- a full walk of every
@@ -558,11 +622,67 @@ bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint6
   size_t lfsTotal = 0, lfsUsed = 0;
   // On failure the values stay 0, which is exactly what the Arduino getters
   // returned in that case -- deliberately unchanged.
-  (void)esp_littlefs_info(kLittleFsPartitionLabel, &lfsTotal, &lfsUsed);
-  totalBytes = lfsTotal;
-  usedBytes = lfsUsed;
-  freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
+  const esp_err_t infoErr =
+      esp_littlefs_info(kLittleFsPartitionLabel, &lfsTotal, &lfsUsed);
+  result.snapshot.totalBytes = lfsTotal;
+  result.snapshot.usedBytes = lfsUsed;
+  result.snapshot.freeBytes =
+      (result.snapshot.totalBytes > result.snapshot.usedBytes)
+          ? (result.snapshot.totalBytes - result.snapshot.usedBytes)
+          : 0;
+  result.snapshot.sampledAtMs = millis();
+  result.apiOk = true;  // Preserve the legacy post-mount return contract.
+  result.cacheable = (infoErr == ESP_OK && result.snapshot.totalBytes > 0);
+  return result;
+}
+
+bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes,
+              uint64_t& freeBytes) {
+  // This API is intentionally always fresh. Snapshot users must opt in through
+  // getStatsSnapshot with a non-zero maxAgeMs.
+  FsLockGuard guard("VFS.getStats");
+  const uint32_t generation = capacitySnapshotGeneration(type);
+  const FreshCapacitySample result = sampleCapacityFreshLocked(type);
+  if (!result.apiOk) return false;
+
+  totalBytes = result.snapshot.totalBytes;
+  usedBytes = result.snapshot.usedBytes;
+  freeBytes = result.snapshot.freeBytes;
+  if (result.cacheable) {
+    publishCapacitySnapshot(type, generation, result.snapshot);
+  }
   return true;
+}
+
+bool getStatsSnapshot(StorageType type, CapacitySnapshot& out,
+                      uint32_t maxAgeMs) {
+  // Fast presentation path: copy one complete snapshot under the short cache
+  // spinlock, without waiting behind an unrelated long filesystem operation.
+  if (maxAgeMs > 0 && readCapacitySnapshot(type, maxAgeMs, out)) return true;
+
+  FsLockGuard guard("VFS.getStatsSnapshot");
+
+  // Two callers can miss together. The first performs the slow sample while
+  // holding gFsMutex; after the second acquires it, recheck so it reuses the
+  // first result instead of immediately repeating a LittleFS traversal.
+  if (maxAgeMs > 0 && readCapacitySnapshot(type, maxAgeMs, out)) return true;
+
+  const uint32_t generation = capacitySnapshotGeneration(type);
+  const FreshCapacitySample result = sampleCapacityFreshLocked(type);
+  if (!result.apiOk) return false;  // Leave `out` untouched on failure.
+
+  out = result.snapshot;
+  if (result.cacheable) {
+    publishCapacitySnapshot(type, generation, result.snapshot);
+  }
+  return true;
+}
+
+void invalidateStatsSnapshot(StorageType type) {
+  const size_t tier = capacityTierIndex(type);
+  portENTER_CRITICAL(&gCapacitySnapshotMux);
+  gCapacitySnapshots.invalidate(tier);
+  portEXIT_CRITICAL(&gCapacitySnapshotMux);
 }
 
 // ============================================================================
@@ -598,9 +718,28 @@ static size_t gLogFreeBytesWrittenSinceRefresh = 0;
 // the cache can at worst be wrong by ~32 KB before overflow kicks in.
 static constexpr size_t LOG_FREE_CACHE_BYTES_THRESHOLD = 32 * 1024;
 
+// How long a free-space reading stays good, as a function of how much headroom
+// it reported. A full traverse costs 216-776 ms (measured) under the global FS
+// mutex, and appendLineWithCap calls this on EVERY logged line — so with a flat
+// 2 s window every interactive command typed more than 2 s after the last one
+// paid a whole volume walk before it did any work.
+//
+// The relaxation is bounded on purpose. gLogFreeBytesWrittenSinceRefresh has
+// exactly ONE caller (appendLineWithCap), so the byte counter sees log appends
+// and NOTHING else — photos, settings, captures and OTA staging all consume
+// space invisibly to it. The time-based refresh is the only thing that catches
+// those, which is why it is scaled rather than removed, and why the tight 2 s
+// cadence is kept unchanged whenever the reading is anywhere near the reserve.
+static uint32_t logFreeCheckIntervalMs(size_t cachedFree) {
+  if (cachedFree <= LOG_OVERFLOW_DEFAULT_RESERVE * 2) return 2000;   // near the edge: unchanged
+  if (cachedFree <= LOG_OVERFLOW_DEFAULT_RESERVE * 8) return 5000;   // comfortable
+  return 15000;                                                      // >800 KB spare
+}
+
 static size_t refreshLittleFsFreeCached() {
   unsigned long now = millis();
-  const bool stale       = (now - gLogFreeCheckLastMs) > 2000;
+  const bool stale = (now - gLogFreeCheckLastMs) >
+                     logFreeCheckIntervalMs(gLogFreeCheckCached);
   const bool writePressure = gLogFreeBytesWrittenSinceRefresh >= LOG_FREE_CACHE_BYTES_THRESHOLD;
   if (gLogFreeCheckCached == SIZE_MAX || stale || writePressure) {
     FsLockGuard guard("VFS.overflowFreeCheck");
@@ -698,6 +837,7 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
 
 bool unmountSD() {
   FsLockGuard guard("VFS.sdUnmount");
+  invalidateStatsSnapshot(SDCARD);
 #if defined(SD_CS_PIN)
   if (gSdMounted) {
     SD.end();
@@ -712,6 +852,7 @@ bool unmountSD() {
 
 bool remountSD() {
   FsLockGuard guard("VFS.sdRemount");
+  invalidateStatsSnapshot(SDCARD);
 #if defined(SD_CS_PIN)
   // Full teardown regardless of current mount state — guarantees a clean bus.
   spiTeardown();
@@ -727,6 +868,7 @@ bool remountSD() {
 // Format SD card as FAT32 using ESP-IDF low-level API
 bool formatSD() {
   FsLockGuard guard("VFS.sdFormat");
+  invalidateStatsSnapshot(SDCARD);
 #if defined(SD_CS_PIN)
   INFO_STORAGEF("[SD FORMAT] Starting format process...");
   

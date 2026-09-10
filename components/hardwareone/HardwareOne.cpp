@@ -61,9 +61,6 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #if ENABLE_AUTOMATION
     #include "WebPage_Automations.h"
   #endif
-  #if ENABLE_WEB_ESPNOW
-    #include "WebPage_ESPNow.h"
-  #endif
 #endif
 
 #if ENABLE_ESPNOW
@@ -633,6 +630,22 @@ static const char* originFrom(const AuthContext& ctx) {
 extern bool isAdminUser(const String& who);
 
 bool hasAdminPrivilege(const AuthContext& ctx) {
+  // When the ctx being asked about IS the identity installed on this task —
+  // which is the case for authorizeCommand, since CommandIdentityScope installs
+  // the same ctx before executeCommand reaches it — the answer is already
+  // memoised in TLS. Reuse it rather than re-opening users.json for a question
+  // this task may have answered moments ago.
+  //
+  // The username guard is defensive, not load-bearing today: authorizeCommand
+  // is the ONLY caller (System_Utils.cpp, the gate itself plus the remote:/@
+  // re-check), and both pass the very ctx that CommandIdentityScope installed,
+  // so the fast path always wins. Targeted session control does NOT come
+  // through here — it routes to callerMayTargetAnotherSession. The guard exists
+  // so that a future caller passing someone else's ctx still resolves for real
+  // rather than silently inheriting this task's answer.
+  if (ctx.user.length() > 0 && ctx.user == currentExecUser()) {
+    return currentExecIsAdmin();
+  }
   return isAdminUser(ctx.user);
 }
 
@@ -688,23 +701,23 @@ static void commandExecTask(void* pv) {
       lastStackCheck = now;
     }
 
-    ExecReq* r = nullptr;
-    BaseType_t receiveResult = xQueueReceive(gCmdExecQ, &r, pdMS_TO_TICKS(1000));
-    
-    if (receiveResult == pdTRUE) {
-      if (!r) continue;
+    CmdExecItem item;
+    BaseType_t receiveResult = xQueueReceive(gCmdExecQ, &item, pdMS_TO_TICKS(1000));
 
+    if (receiveResult == pdTRUE) {
       // Deferred-work fast path — used by espnow_task to run heavy crypto
-      // (Ed25519 sign/verify in SESSION_OPEN/CONFIRM) on cmd_exec_task's
-      // deeper stack. Skip the entire CLI execution pipeline: no auth
-      // context push, no capture buffer, no output formatting. The deferred
-      // function owns its arg's lifetime.
-      if (r->deferredFn) {
-        r->deferredFn(r->deferredArg);
-        r->~ExecReq();
-        free(r);
+      // (Ed25519 sign/verify in SESSION_OPEN/CONFIRM) and by the BLE
+      // secure-channel RX path on cmd_exec_task's deeper stack. Skip the entire
+      // CLI execution pipeline: no auth context push, no capture buffer, no
+      // output formatting. The deferred function owns its arg's lifetime.
+      // Nothing to free here — the item travelled by value.
+      if (item.deferredFn) {
+        item.deferredFn(item.deferredArg);
         continue;
       }
+
+      ExecReq* r = item.req;
+      if (!r) continue;
 
       const String safeExecLine = redactCmdForAudit(String(r->line));
       DEBUG_CMD_FLOWF("[cmd_exec] exec '%.80s' user='%s' heap=%lu",
@@ -768,21 +781,6 @@ static void commandExecTask(void* pv) {
       DEBUG_CMD_FLOWF("[cmd_exec] done ok=%d out_len=%zu heap=%lu",
                   r->ok ? 1 : 0, strlen(r->out), (unsigned long)ESP.getFreeHeap());
       
-      // 2026-05-18 — if submitSync gave up waiting (>60 s) it sets
-      // r->abandoned = true and returns without freeing. We MUST clean up
-      // here instead, otherwise the ExecReq + its `done` semaphore leak
-      // forever (and ps_alloc would eventually exhaust PSRAM).
-      if (r->abandoned) {
-        Serial.printf("[DBG_CMD] cmd_exec: r=%p was abandoned by caller — cleaning up\n", r);
-        if (r->done) {
-          vSemaphoreDelete(r->done);
-          r->done = nullptr;
-        }
-        r->~ExecReq();
-        free(r);
-        vTaskDelay(pdMS_TO_TICKS(1));
-        continue;
-      }
       // Handle completion: async callback OR semaphore
       if (r->asyncCallback) {
         r->asyncCallback(r->ok, r->out, r->asyncUserData);
@@ -791,6 +789,9 @@ static void commandExecTask(void* pv) {
         free(r);
       } else if (r->done) {
         xSemaphoreGive(r->done);
+        // The semaphore and request stay alive until this release returns;
+        // the caller independently releases after Take success or timeout.
+        releaseSyncExecReqOwner(r);
       } else {
         DEBUG_CMD_FLOWF("[cmd_exec] WARNING: No callback and no semaphore!");
         r->~ExecReq();
@@ -799,8 +800,6 @@ static void commandExecTask(void* pv) {
       // Yield between commands to prevent starving Core 0 ISRs (I2C, UART, WiFi)
       // Without this, back-to-back commands can trigger Interrupt WDT
       vTaskDelay(pdMS_TO_TICKS(1));
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(100));
     }
   }
 }
@@ -1644,15 +1643,22 @@ void hardwareone_setup() {
 
   // Command executor task (mutexes + debug system must be ready)
     if (!gCmdExecQ) {
-      // Depth 8, not 6: every inbound BLE secure-channel frame takes a slot via
+      // Depth 24. Every inbound BLE secure-channel frame takes a slot via
       // submitDeferredToCmdExec(), whose enqueue DROPS on full rather than
-      // blocking — so a burst of OTA staging chunks can starve the `otawrite
-      // status` checkpoint that rides the same queue, and a lost checkpoint
-      // fails the whole transfer. The queue holds pointers (4 B/slot), so the
-      // widening itself costs 8 bytes of internal DRAM; the real cost is up to
-      // two more in-flight ExecReq (~6.3 KB each) which ps_alloc takes from
-      // PSRAM, where there is multiple MB spare.
-      gCmdExecQ = xQueueCreate(8, sizeof(ExecReq*));
+      // blocking. The Android companion bursts OTA_BLE_BATCH_CHUNKS = 16 chunks
+      // before its `otawrite status` checkpoint, so a depth of 8 could not hold
+      // one burst by construction: the overflow was dropped, and because
+      // handleBleUploadFrame rejects any frame whose offset != the accepted
+      // offset, ONE early drop invalidated the rest of the burst. Measured
+      // 2026-08-30: ~4 KB/s sustained over BLE against a ~31-41 KB/s
+      // write-with-response ceiling.
+      //
+      // 24 = one 16-frame burst + 8 slots for the checkpoint and whatever else
+      // shares this queue (the web Bluetooth page polls `bleinfo json` every
+      // 1.5 s through here). Depth is now cheap: the queue carries a 12-byte
+      // CmdExecItem by value (288 B total) and deferred work no longer
+      // allocates an ExecReq at all, so a slot costs 12 B rather than 6.4 KB.
+      gCmdExecQ = xQueueCreate(24, sizeof(CmdExecItem));
       if (!gCmdExecQ) {
         ERROR_SYSTEMF("FATAL: Failed to create command exec queue");
         while (1) delay(1000);
@@ -1758,7 +1764,7 @@ void hardwareone_setup() {
   // OLED early init — boot animation runs during slow WiFi/NTP phases below
   oledEarlyInit();
 
-#if ENABLE_I2C_SYSTEM
+#if ENABLE_I2C_SENSOR_QUEUE
   if (gSettings.i2cEnabled && !queueProcessorTask) {
     const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;
     // Pin to Core 1 (I2C_SENSOR_CORE): this task runs the I2C device-init
@@ -2009,8 +2015,17 @@ void hardwareone_setup() {
   // them this reads `(enabled && autostart) || wantClient`, so a peer set to
   // auto-reconnect would start the radio on a device where Bluetooth is
   // explicitly disabled. Disabled has to mean disabled.
+  // One-boot resume after an update that arrived over Bluetooth. Sits beside
+  // ramFlushResolve deliberately: same shape (a transient override that never
+  // writes the autostart setting), and it stays INSIDE the bleEnabled gate for
+  // the same reason -- disabled has to mean disabled. That costs nothing in
+  // practice, since an update cannot have arrived over a radio the owner
+  // switched off.
+  const bool wantBleServerAtBoot =
+      ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart) || otaSystemResumeBleRequested();
+
   if (gSettings.bleEnabled &&
-      (ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart) || wantClientForAutoReconnect)) {
+      (wantBleServerAtBoot || wantClientForAutoReconnect)) {
     oledSetBootProgress(85, "Starting Bluetooth");
 
     // Pause sensor polling during BLE init to avoid interrupt contention
@@ -2037,9 +2052,10 @@ void hardwareone_setup() {
       }
     } else
 #endif
-    if (ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart)) {
+    if (wantBleServerAtBoot) {
       // Server-mode path only runs when the user *explicitly* asked for BT
-      // at boot. We never coerce to server from auto-reconnect flags.
+      // at boot, or when this boot is resuming the transport that just
+      // delivered an OTA. We never coerce to server from auto-reconnect flags.
       extern bool initBluetooth();
       extern bool startBLEAdvertising();
       if (initBluetooth()) {
@@ -2532,6 +2548,11 @@ void hardwareone_loop() {
   // its DEBUG_MEMORY-gated verbose sample, so a shipping device warns before
   // it OOMs even with memory debugging off.
   periodicMemorySample();
+
+  // Owner-scoped settings batches normally finish through `savesettings`.
+  // Reap abandoned transport/request scopes and retry retained write failures
+  // without adding work to the command executor's hot path.
+  settingsWriteBatchTick();
 
   // Declare this boot healthy once it has run for a while, which clears the
   // CONSECUTIVE crash counter. Without this the counter would only ever clear on

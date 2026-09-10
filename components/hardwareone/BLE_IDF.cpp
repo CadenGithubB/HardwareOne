@@ -658,10 +658,33 @@ static void bleGattcEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc
 // PUBLIC API IMPLEMENTATION
 // =============================================================================
 
+static void bleLogTeardownIncomplete(const char* phase, esp_err_t error) {
+  ESP_LOGE(TAG,
+           "BLE teardown incomplete at %s: %s (host=%d controller=%d); "
+           "state retained for retry",
+           phase,
+           esp_err_to_name(error),
+           (int)esp_bluedroid_get_status(),
+           (int)esp_bt_controller_get_status());
+}
+
 bool bleIdfInit() {
   if (gBleState.initialized) {
     ESP_LOGW(TAG, "Already initialized");
     return true;
+  }
+
+  // A failed init or deinit can leave one layer alive. Do not overwrite its
+  // handles with a second initialization attempt; bleIdfDeinit() can resume
+  // teardown from the physical host/controller states.
+  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED ||
+      esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE) {
+    ESP_LOGE(TAG,
+             "BLE stack is partially initialized (host=%d controller=%d); "
+             "call bleIdfDeinit() before retrying init",
+             (int)esp_bluedroid_get_status(),
+             (int)esp_bt_controller_get_status());
+    return false;
   }
   
   ESP_LOGI(TAG, "Initializing ESP-IDF Bluedroid BLE stack");
@@ -736,7 +759,11 @@ bool bleIdfInit() {
 }
 
 void bleIdfDeinit() {
-  if (!gBleState.initialized) {
+  esp_bluedroid_status_t hostStatus = esp_bluedroid_get_status();
+  esp_bt_controller_status_t controllerStatus = esp_bt_controller_get_status();
+  if (!gBleState.initialized &&
+      hostStatus == ESP_BLUEDROID_STATUS_UNINITIALIZED &&
+      controllerStatus == ESP_BT_CONTROLLER_STATUS_IDLE) {
     return;
   }
   
@@ -744,20 +771,72 @@ void bleIdfDeinit() {
   
   // Stop any active mode
   if (gBleState.mode == BLE_MODE_SERVER) {
-    bleIdfStopServer();
+    if (!bleIdfStopServer()) {
+      bleLogTeardownIncomplete("stop server", ESP_ERR_INVALID_STATE);
+      return;
+    }
   } else if (gBleState.mode == BLE_MODE_CLIENT) {
-    bleIdfStopClient();
+    if (!bleIdfStopClient()) {
+      bleLogTeardownIncomplete("stop client", ESP_ERR_INVALID_STATE);
+      return;
+    }
   }
-  
-  // Disable and deinit Bluedroid
-  esp_bluedroid_disable();
-  esp_bluedroid_deinit();
-  
-  // Disable and deinit BT controller
-  esp_bt_controller_disable();
-  esp_bt_controller_deinit();
-  
-  memset(&gBleState, 0, sizeof(gBleState));
+
+  // Close API admission immediately, but retain every handle until both stack
+  // layers reach their terminal states. If a phase fails, a later call resumes
+  // from the reported physical state instead of retrying an invalid earlier
+  // phase or pretending teardown succeeded.
+  gBleState.initialized = false;
+
+  esp_err_t ret = ESP_OK;
+  hostStatus = esp_bluedroid_get_status();
+  if (hostStatus == ESP_BLUEDROID_STATUS_ENABLED) {
+    ret = esp_bluedroid_disable();
+    if (ret != ESP_OK) {
+      bleLogTeardownIncomplete("disable Bluedroid", ret);
+      return;
+    }
+    hostStatus = esp_bluedroid_get_status();
+  }
+  if (hostStatus == ESP_BLUEDROID_STATUS_INITIALIZED) {
+    ret = esp_bluedroid_deinit();
+    if (ret != ESP_OK) {
+      bleLogTeardownIncomplete("deinit Bluedroid", ret);
+      return;
+    }
+    hostStatus = esp_bluedroid_get_status();
+  }
+  if (hostStatus != ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+    bleLogTeardownIncomplete("verify Bluedroid", ESP_ERR_INVALID_STATE);
+    return;
+  }
+
+  controllerStatus = esp_bt_controller_get_status();
+  if (controllerStatus == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    ret = esp_bt_controller_disable();
+    if (ret != ESP_OK) {
+      bleLogTeardownIncomplete("disable controller", ret);
+      return;
+    }
+    controllerStatus = esp_bt_controller_get_status();
+  }
+  if (controllerStatus == ESP_BT_CONTROLLER_STATUS_INITED) {
+    ret = esp_bt_controller_deinit();
+    if (ret != ESP_OK) {
+      bleLogTeardownIncomplete("deinit controller", ret);
+      return;
+    }
+    controllerStatus = esp_bt_controller_get_status();
+  }
+  if (controllerStatus != ESP_BT_CONTROLLER_STATUS_IDLE) {
+    bleLogTeardownIncomplete("verify controller", ESP_ERR_INVALID_STATE);
+    return;
+  }
+
+  // Only terminal teardown invalidates handles. Assignment is intentionally
+  // semantic rather than a raw memset so this remains safe if state later
+  // acquires a non-trivial C++ member.
+  gBleState = {};
   ESP_LOGI(TAG, "BLE stack deinitialized");
 }
 

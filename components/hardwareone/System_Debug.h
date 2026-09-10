@@ -429,6 +429,16 @@ extern uint8_t gLogLevel;
 // Direct global read for the same reason as getDebugFlags() above:
 // DebugManager::getLogLevel() just returns gLogLevel (extern above).
 inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLevel; }
+
+// Use this predicate around any computation whose only consumer is a DEBUG
+// log. Keeping the work gate identical to the output gate prevents expensive
+// diagnostics from running when the eventual log line would be suppressed.
+// DEBUG_ALWAYS retains the same semantics it has in DEBUGF_QUEUE(), while the
+// DEBUG log-level requirement still applies to DEBUGF_QUEUE_DEBUG() callers.
+inline bool isDebugOutputEnabled(DebugFlagMask flag) {
+  return getLogLevel() >= LOG_LEVEL_DEBUG &&
+         ((((flag) & DEBUG_ALWAYS) != (DebugFlagMask)0) || isDebugFlagSet(flag));
+}
 // ============================================================================
 // Debug Macros - Safe for use from any context
 // ============================================================================
@@ -453,8 +463,8 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 
 #define DEBUGF_QUEUE_DEBUG(flag, fmt, ...) \
   do { \
-    if (getLogLevel() >= LOG_LEVEL_DEBUG) { \
-      DEBUGF_QUEUE(flag, fmt, ##__VA_ARGS__); \
+    if (isDebugOutputEnabled(flag)) { \
+      debugQueuePrintf(flag, fmt, ##__VA_ARGS__); \
     } \
   } while (0)
 
@@ -555,11 +565,11 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 #define DEBUG_MAPS_RENDERINGF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS_RENDERING, fmt, ##__VA_ARGS__)
 #define DEBUG_MAPS_PERFF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS_PERF, fmt, ##__VA_ARGS__)
 #define DEBUG_LLMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM, fmt, ##__VA_ARGS__)
-#define DEBUG_LLM_LOADF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_LOAD, fmt, ##__VA_ARGS__)
-#define DEBUG_LLM_TOKENIZERF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_TOKENIZER, fmt, ##__VA_ARGS__)
-#define DEBUG_LLM_FORWARDF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_FORWARD, fmt, ##__VA_ARGS__)
-#define DEBUG_LLM_GENERATEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_GENERATE, fmt, ##__VA_ARGS__)
-#define DEBUG_LLM_MEMORYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_MEMORY, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_LOADF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM | DEBUG_LLM_LOAD, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_TOKENIZERF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM | DEBUG_LLM_TOKENIZER, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_FORWARDF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM | DEBUG_LLM_FORWARD, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_GENERATEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM | DEBUG_LLM_GENERATE, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_MEMORYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM | DEBUG_LLM_MEMORY, fmt, ##__VA_ARGS__)
 #define DEBUG_WIFIF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_WIFI, fmt, ##__VA_ARGS__)
 #define DEBUG_NTPF(fmt, ...)          DEBUGF_QUEUE_DEBUG(DEBUG_NTP, fmt, ##__VA_ARGS__)
 #define DEBUG_NTP_SYNCF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_NTP, fmt, ##__VA_ARGS__)

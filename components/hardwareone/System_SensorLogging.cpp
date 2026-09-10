@@ -1744,7 +1744,8 @@ const char* cmd_healthstatus(const String& argsInput) {
     return "SUCCESS: R1 typed history refresh queued";
   }
   if (sub == "force-history") {
-    if (!isAdminUser(currentAuthContext().user))
+    // Same identity, memoised — see System_Filesystem.cpp filesListingJsonForApp.
+    if (!currentExecIsAdmin())
       return "Error: admin required for forced history refresh";
     if (!g2RingRequestHistoryRefresh(true))
       return "Error: forced history refresh not queued — ring/setup/profile may be unavailable";
@@ -2616,7 +2617,9 @@ void sensorLogAutoStart() {
     }
     if (gSettings.sensorLogPath.length() == 0 || gSettings.sensorLogPath.indexOf("health") < 0) {
       // Keep a stable health path for resumed sessions (timestamp appended below).
-      gSettings.sensorLogPath = CAPTURE_HEALTHLOG_DEFAULT;
+      // This is a boot-time settings repair, not just a local path fallback:
+      // persist it so every later reboot starts from the same canonical base.
+      setSetting(gSettings.sensorLogPath, String(CAPTURE_HEALTHLOG_DEFAULT));
     }
   }
 

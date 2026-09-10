@@ -85,30 +85,41 @@ static int sample_topp(float* probabilities, int n, float topp, float* outChosen
     nucleus_n = i + 1;
   }
 
-  // Debug: log nucleus stats and top candidates
-  DEBUG_LLM_GENERATEF("[LLM] top-p: nucleus=%d/%d tokens, cumsum=%.4f (target=%.2f)",
-                      nucleus_n, n, cumsum, topp);
-  // Log top 5 candidates in the nucleus
-  int dbg_n = (nucleus_n < 5) ? nucleus_n : 5;
-  for (int di = 0; di < dbg_n; di++) {
-    DEBUG_LLM_GENERATEF("[LLM]   nucleus[%d]: tok=%d prob=%.4f (%.1f%%)",
-                        di, indices[di], probabilities[di], probabilities[di] * 100.0f);
+  const bool generateDebug = isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_GENERATE);
+
+  // Debug: log nucleus stats and top candidates without walking them when the
+  // output would be suppressed.
+  if (generateDebug) {
+    DEBUG_LLM_GENERATEF("[LLM] top-p: nucleus=%d/%d tokens, cumsum=%.4f (target=%.2f)",
+                        nucleus_n, n, cumsum, topp);
+    int dbg_n = (nucleus_n < 5) ? nucleus_n : 5;
+    for (int di = 0; di < dbg_n; di++) {
+      DEBUG_LLM_GENERATEF("[LLM]   nucleus[%d]: tok=%d prob=%.4f (%.1f%%)",
+                          di, indices[di], probabilities[di], probabilities[di] * 100.0f);
+    }
   }
 
   // Sample from the nucleus only (re-normalised by cumsum)
   float r = (float)esp_random() / (float)UINT32_MAX * cumsum;
   float cdf = 0.0f;
   int result = indices[nucleus_n - 1]; // fallback to last in nucleus
-  int result_rank = nucleus_n - 1;
+  int result_rank = generateDebug ? nucleus_n - 1 : 0;
   float chosen_prob = probabilities[nucleus_n - 1];
   for (int i = 0; i < nucleus_n; i++) {
     cdf += probabilities[i];
-    if (cdf > r) { result = indices[i]; result_rank = i; chosen_prob = probabilities[i]; break; }
+    if (cdf > r) {
+      result = indices[i];
+      if (generateDebug) result_rank = i;
+      chosen_prob = probabilities[i];
+      break;
+    }
   }
   if (outChosenProb) *outChosenProb = chosen_prob;
 
-  DEBUG_LLM_GENERATEF("[LLM]   sampled tok=%d at rank=%d/%d (r=%.4f)",
-                      result, result_rank, nucleus_n, r / cumsum);
+  if (generateDebug) {
+    DEBUG_LLM_GENERATEF("[LLM]   sampled tok=%d at rank=%d/%d (r=%.4f)",
+                        result, result_rank, nucleus_n, r / cumsum);
+  }
 
   return result;
 }
@@ -135,26 +146,41 @@ int sample(float* logits, int vocab_size, float temperature, float topp, float m
     logits[q] /= temperature;
   }
 
-  // Compute pre-softmax stats for debug
-  float pre_max = logits[0], pre_min = logits[0];
-  for (int q = 1; q < vocab_size; q++) {
-    if (logits[q] > pre_max) pre_max = logits[q];
-    if (logits[q] < pre_min) pre_min = logits[q];
+  const bool generateDebug = isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_GENERATE);
+
+  // Compute pre-softmax stats only when they can be emitted.
+  float pre_max = 0.0f;
+  float pre_min = 0.0f;
+  if (generateDebug) {
+    pre_max = logits[0];
+    pre_min = logits[0];
+    for (int q = 1; q < vocab_size; q++) {
+      if (logits[q] > pre_max) pre_max = logits[q];
+      if (logits[q] < pre_min) pre_min = logits[q];
+    }
   }
 
   // Softmax
   softmax(logits, vocab_size);
 
-  // Post-softmax: find max prob and compute entropy estimate
+  // The maximum is functional when min-p is active; otherwise it is diagnostic.
+  // Entropy is purely diagnostic and must not add a full-vocabulary log2f pass
+  // unless Generate debug output is enabled.
   float max_prob = 0.0f;
   int max_prob_id = 0;
   float entropy = 0.0f;
-  for (int q = 0; q < vocab_size; q++) {
-    if (logits[q] > max_prob) { max_prob = logits[q]; max_prob_id = q; }
-    if (logits[q] > 1e-8f) entropy -= logits[q] * log2f(logits[q]);
+  if (minp > 0.0f || generateDebug) {
+    for (int q = 0; q < vocab_size; q++) {
+      if (logits[q] > max_prob) { max_prob = logits[q]; max_prob_id = q; }
+      if (generateDebug && logits[q] > 1e-8f) {
+        entropy -= logits[q] * log2f(logits[q]);
+      }
+    }
   }
-  DEBUG_LLM_GENERATEF("[LLM] sample: temp=%.2f topp=%.2f pre_logit=[%.1f,%.1f] top_prob=%.3f(tok=%d) entropy=%.1f bits",
-                      temperature, topp, pre_min, pre_max, max_prob, max_prob_id, entropy);
+  if (generateDebug) {
+    DEBUG_LLM_GENERATEF("[LLM] sample: temp=%.2f topp=%.2f pre_logit=[%.1f,%.1f] top_prob=%.3f(tok=%d) entropy=%.1f bits",
+                        temperature, topp, pre_min, pre_max, max_prob, max_prob_id, entropy);
+  }
 
   // Min-p: when active (minp>0) keep only tokens with prob >= minp * p_max — a
   // relative floor that adapts to the model's confidence (tight when it's sure,
@@ -180,7 +206,6 @@ int sample(float* logits, int vocab_size, float temperature, float topp, float m
 
   if (topp <= 0.0f || topp >= 1.0f) {
     // Simple random sample (no top-p filtering)
-    //DEBUG_LLM_GENERATEF("[LLM] sample: categorical (topp=%.2f, no nucleus filter)", topp);
     float r = (float)esp_random() / (float)UINT32_MAX;
     float cdf = 0.0f;
     for (int i = 0; i < vocab_size; i++) {

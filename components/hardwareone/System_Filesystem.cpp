@@ -7,13 +7,17 @@
 
 #include <esp_log.h>
 #include <esp_partition.h>  // blank-partition probe — see littlefsPartitionIsBlank()
+#include <optional>
 
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Filesystem.h"
+#include "System_Filesystem_Internal.h"
 #include "System_OTASafety.h"   // otaSafetyPartitionIsBlank — shared blank-partition probe
 #include "System_Logging.h"
 #include "System_MemUtil.h"
+#include "System_PsramBuffer.h"
+#include "System_CommandLimits.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
@@ -299,7 +303,59 @@ bool initFilesystem() {
 // Directory Listing Helper
 // ============================================================================
 
-bool buildFilesListing(const String& inPath, String& out, bool asJson, const AuthContext& ctx, bool hideAdminPaths) {
+// Small adapter lets the existing directory/permission walk write straight to
+// caller-owned PSRAM, while retaining the public String/text API. Assignment
+// resets only this sink's body, preserving an already-written JSON envelope.
+class ListingPsramOutput {
+public:
+  explicit ListingPsramOutput(PsramBuffer& buffer)
+      : buffer_(buffer), start_(buffer.size()) {}
+  ListingPsramOutput& operator=(const char* text) {
+    buffer_.setSize(start_);
+    buffer_.append(text);
+    return *this;
+  }
+  ListingPsramOutput& operator+=(const char* text) { buffer_.append(text); return *this; }
+  ListingPsramOutput& operator+=(const String& text) {
+    buffer_.append(text.c_str(), text.length()); return *this;
+  }
+  ListingPsramOutput& operator+=(char byte) { buffer_.append(byte); return *this; }
+  ListingPsramOutput& operator+=(int number) {
+    char text[16]; snprintf(text, sizeof(text), "%d", number); return *this += text;
+  }
+  ListingPsramOutput& operator+=(unsigned int number) {
+    char text[16]; snprintf(text, sizeof(text), "%u", number); return *this += text;
+  }
+  ListingPsramOutput& operator+=(unsigned long number) {
+    char text[24]; snprintf(text, sizeof(text), "%lu", number); return *this += text;
+  }
+  size_t length() const { return buffer_.size() - start_; }
+  bool ok() const { return buffer_.ok(); }
+private:
+  PsramBuffer& buffer_;
+  const size_t start_;
+};
+
+static bool listingOutputOk(const String&) { return true; }
+static bool listingOutputOk(const ListingPsramOutput& out) { return out.ok(); }
+
+template <typename Output>
+static void appendListingJsonName(Output& out, const String& name) {
+  static const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < name.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(name.charAt(i));
+    if (c == '"' || c == '\\') { out += '\\'; out += static_cast<char>(c); }
+    else if (c < 0x20) {
+      out += "\\u00"; out += hex[c >> 4]; out += hex[c & 15];
+    } else out += static_cast<char>(c);
+  }
+}
+
+template <typename Output>
+static bool buildFilesListingImpl(
+    const String& inPath, Output& out, bool asJson, const AuthContext& ctx,
+    bool hideAdminPaths,
+    FsInternal::LockedListingPermissions* listingPermissions) {
   String dirPath = VFS::normalize(inPath);
 
   DEBUG_STORAGEF("[buildFilesListing] START path='%s' heap=%u", dirPath.c_str(), (unsigned)ESP.getFreeHeap());
@@ -325,6 +381,17 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, const Aut
     return false;
   }
 
+  // JSON listings expose one aggregate permission mask per entry. Resolve a
+  // named caller once for this locked traversal instead of reopening and
+  // reparsing users.json for every row. A caller such as buildFilesListJson may
+  // supply a view so the directory toolbar mask shares the same operation.
+  // Text listings do not render masks, so they deliberately create no view.
+  std::optional<FsInternal::LockedListingPermissions> ownedPermissions;
+  if (asJson && listingPermissions == nullptr) {
+    ownedPermissions.emplace(ctx);
+    listingPermissions = &*ownedPermissions;
+  }
+
   bool first = true;
   int fileCount = 0;
   if (!asJson) {
@@ -343,7 +410,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, const Aut
     VFS::VirtualEntry virtuals[4];
     const size_t nVirt = VFS::listVirtualEntries(
         dirPath, virtuals, sizeof(virtuals) / sizeof(virtuals[0]));
-    for (size_t v = 0; v < nVirt; v++) {
+    for (size_t v = 0; v < nVirt && listingOutputOk(out); v++) {
       char fullPath[160];
       snprintf(fullPath, sizeof(fullPath), "%s%s%s",
                dirPath.c_str(), dirPath == "/" ? "" : "/", virtuals[v].name);
@@ -357,7 +424,8 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, const Aut
         }
       }
       if (asJson) {
-        uint8_t perms = getPermissions(String(fullPath), ctx);
+        if (!first) out += ",";
+        uint8_t perms = listingPermissions->forPath(String(fullPath));
         char buf[128];
         snprintf(buf, sizeof(buf),
                  "{\"name\":\"%s\",\"type\":\"folder\",\"size\":\"%u items\",\"count\":%u,\"perms\":%u}",
@@ -376,7 +444,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, const Aut
   }
 
   File file = root.openNextFile();
-  while (file) {
+  while (file && listingOutputOk(out)) {
     // Extract display name (strip leading directory)
     String fileName = String(file.name());
     if (fsDirPath != "/") {
@@ -425,14 +493,10 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, const Aut
         String folderFullPath = dirPath;
         if (dirPath != "/") folderFullPath += "/";
         folderFullPath += fileName;
-        uint8_t folderPerms = getPermissions(folderFullPath, ctx);
+        uint8_t folderPerms = listingPermissions->forPath(folderFullPath);
         // Build JSON entry directly into out — no fixed buffer, handles any filename length
         out += "{\"name\":\"";
-        for (size_t ci = 0; ci < fileName.length(); ci++) {
-          char c = fileName.charAt(ci);
-          if (c == '"' || c == '\\') out += '\\';
-          out += c;
-        }
+        appendListingJsonName(out, fileName);
         out += "\",\"type\":\"folder\",\"size\":\"";
         out += itemCount;
         out += " items\",\"count\":";
@@ -444,13 +508,9 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, const Aut
         String fileFullPath = dirPath;
         if (dirPath != "/") fileFullPath += "/";
         fileFullPath += fileName;
-        uint8_t filePerms = getPermissions(fileFullPath, ctx);
+        uint8_t filePerms = listingPermissions->forPath(fileFullPath);
         out += "{\"name\":\"";
-        for (size_t ci = 0; ci < fileName.length(); ci++) {
-          char c = fileName.charAt(ci);
-          if (c == '"' || c == '\\') out += '\\';
-          out += c;
-        }
+        appendListingJsonName(out, fileName);
         out += "\",\"type\":\"file\",\"size\":\"";
         out += (unsigned long)file.size();
         out += " bytes\",\"perms\":";
@@ -500,39 +560,18 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, const Aut
       out += " entries";
     }
   }
-  return true;
+  return listingOutputOk(out);
+}
+
+bool buildFilesListing(const String& inPath, String& out, bool asJson,
+                       const AuthContext& ctx, bool hideAdminPaths) {
+  return buildFilesListingImpl(inPath, out, asJson, ctx, hideAdminPaths,
+                               nullptr);
 }
 
 // ============================================================================
 // Filesystem CLI Command Handlers
 // ============================================================================
-
-// Append `len` bytes of `data` to `out` as the body of a JSON string (no
-// surrounding quotes), escaping per RFC 8259. Callers only route printable
-// ASCII through here; binary / high-bit content goes out base64 instead.
-static void appendJsonStringBytes(String& out, const uint8_t* data, size_t len) {
-  static const char hex[] = "0123456789abcdef";
-  for (size_t i = 0; i < len; i++) {
-    uint8_t c = data[i];
-    switch (c) {
-      case '"':  out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\b': out += "\\b";  break;
-      case '\f': out += "\\f";  break;
-      case '\n': out += "\\n";  break;
-      case '\r': out += "\\r";  break;
-      case '\t': out += "\\t";  break;
-      default:
-        if (c < 0x20) {
-          out += "\\u00";
-          out += hex[(c >> 4) & 0xF];
-          out += hex[c & 0xF];
-        } else {
-          out += (char)c;
-        }
-    }
-  }
-}
 
 // True if the buffer holds bytes that can't sit in a UTF-8 JSON string as-is
 // (NUL, high-bit, or a control char other than tab/newline/CR). Such content is
@@ -568,20 +607,56 @@ void buildFilesStatsJson(const String& path, char* out, size_t outSize) {
 // `path` under `ctx`. Single source of truth for both the web /api/files/list
 // handler and the `files json` CLI/BLE command so the shape can't drift. The
 // transport-specific bits (HTTP 403, BLE static buffer) stay in the callers.
+bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdminPaths, PsramBuffer& out) {
+  out.clear();
+  out.append("{\"success\":true,\"dirPerms\":");
+  const size_t permsOffset = out.size();
+  out.append("0,\"files\":[");
+  if (!out.ok()) return false;
+  ListingPsramOutput body(out);
+  uint8_t dp = 0;
+  {
+    // Own one lock-bound role view across both the entry walk and the directory
+    // toolbar mask. buildFilesListingImpl reuses this task's mutex ownership.
+    // Serialization writes only to owned memory here, never to a network.
+    // The view must stay alive until the post-traversal toolbar query.
+    FsInternal::LockedListingPermissions listingPermissions(ctx);
+    bool ok = buildFilesListingImpl(path, body, /*asJson=*/true, ctx,
+                                    hideAdminPaths, &listingPermissions);
+    if (!ok) {
+      // Preserve sticky OOM/limit failures: callers must not publish a partial
+      // success envelope or allocate again merely to describe allocation failure.
+      if (!out.ok()) return false;
+      out.clear();
+      out.append("{\"success\":false,\"error\":\"Directory not found or not accessible\"}");
+      return false;
+    }
+    dp = listingPermissions.forChildOf(path);
+  }
+  // Backfill the small numeric field so key order and bytes stay unchanged,
+  // without a second full listing or an early/out-of-lock permission query.
+  char digits[4];
+  const size_t digitCount = static_cast<size_t>(snprintf(digits, sizeof(digits), "%u", (unsigned)dp));
+  const size_t oldSize = out.size();
+  if (!out.reserveAdditional(digitCount + 1)) return false;
+  memmove(out.data() + permsOffset + digitCount, out.data() + permsOffset + 1,
+          oldSize - permsOffset);  // includes existing NUL
+  memcpy(out.data() + permsOffset, digits, digitCount);
+  out.setSize(oldSize + digitCount - 1);
+  return out.append("]}");
+}
+
+// Compatibility adapter for any String-based consumers outside the two
+// migrated callers. It is intentionally not used by HTTP or command replies.
 bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdminPaths, String& out) {
-  String body;
-  bool ok = buildFilesListing(path, body, /*asJson=*/true, ctx, hideAdminPaths);
-  if (!ok) {
-    out = "{\"success\":false,\"error\":\"Directory not found or not accessible\"}";
+  PsramBuffer buffer(SIZE_MAX, "files.compat");
+  const bool ok = buildFilesListJson(path, ctx, hideAdminPaths, buffer);
+  out = "";
+  if (!buffer.ok() || !out.concat(buffer.c_str(), buffer.size())) {
+    out = "{\"success\":false,\"error\":\"Out of memory\"}";
     return false;
   }
-  uint8_t dp = getDirPerms(path, ctx);
-  out  = "{\"success\":true,\"dirPerms\":";
-  out += (int)dp;
-  out += ",\"files\":[";
-  out += body;
-  out += "]}";
-  return true;
+  return ok;
 }
 
 // Post-save hook shared by every file-write path (web write, web upload, BLE
@@ -605,14 +680,24 @@ void runFileWritePostSaveHooks(const String& path) {
 // defers to the shared buildFilesListJson(). Returns a pointer to a static
 // buffer (valid until the next call), per the command-return contract.
 static const char* filesListingJsonForApp(const String& path) {
-  static String s_listJson;
+  static PsramBuffer s_listJson(CMD_RESULT_MAX, "files.command");
   const AuthContext& ctx = currentAuthContext();
-  bool admin = isAdminUser(ctx.user);
+  // currentExecIsAdmin(), not isAdminUser(ctx.user): ctx IS the installed
+  // identity here (ExecIdentityGuard sets slot->ctx and slot->user from the
+  // same install), so this is the identical question — but the accessor reuses
+  // this task's memoised answer instead of re-opening users.json. Both return
+  // false when no identity is installed. This was a second ~24 ms roster read
+  // on every JSON file listing.
+  bool admin = currentExecIsAdmin();
   if (isAdminOnlyPath(path) && !admin) {
-    s_listJson = "{\"success\":false,\"error\":\"Admin required\"}";
-    return s_listJson.c_str();
+    return "{\"success\":false,\"error\":\"Admin required\"}";
   }
   buildFilesListJson(path, ctx, /*hideAdminPaths=*/!admin, s_listJson);
+  if (!s_listJson.ok()) {
+    return s_listJson.failure() == PsramBuffer::Failure::Limit
+        ? "Error: result too large for this transport - narrow the query or use /api/files/list"
+        : "Error: Out of memory building file listing";
+  }
   return s_listJson.c_str();
 }
 
@@ -653,14 +738,17 @@ const char* cmd_files(const String& argsInput) {
   }
 
   // Legacy human-readable listing (serial console).
-  String out;
-  bool ok = buildFilesListing(path, out, /*asJson=*/false, currentAuthContext());
+  PsramBuffer buffer(SIZE_MAX, "files.text");
+  if (!buffer.reserve(1)) return "Error: Out of memory building file listing";
+  ListingPsramOutput out(buffer);
+  bool ok = buildFilesListingImpl(path, out, /*asJson=*/false, currentAuthContext(), false, nullptr);
+  if (!buffer.ok()) return "Error: Out of memory building file listing";
   if (!ok) {
-    broadcastOutput(out);
+    broadcastOutput(buffer.c_str());
     return "ERROR";
   }
 
-  broadcastOutput(out);
+  broadcastOutput(buffer.c_str());
   emitListingTrailer("files and directories", "read a file's contents with 'fileview' or 'fileread'");
   return "[FS] Listing complete";
 }
@@ -927,6 +1015,106 @@ const char* cmd_filerename(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// These writers are deliberately private to fileread: its byte encoding and
+// 4096-byte command envelope are not the contract of HTTP's streaming reader.
+static size_t fileReadJsonStringLength(const uint8_t* data, size_t len) {
+  size_t result = 0;
+  for (size_t i = 0; i < len; ++i) {
+    const uint8_t c = data[i];
+    if (c == '"' || c == '\\' || c == '\b' || c == '\f' ||
+        c == '\n' || c == '\r' || c == '\t') result += 2;
+    else result += (c < 0x20) ? 6 : 1;
+  }
+  return result;
+}
+
+static bool fileReadAppendJsonString(PsramBuffer& out, const uint8_t* data, size_t len) {
+  static const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < len; ++i) {
+    const uint8_t c = data[i];
+    const char* escape = nullptr;
+    switch (c) {
+      case '"': escape = "\\\""; break;
+      case '\\': escape = "\\\\"; break;
+      case '\b': escape = "\\b"; break;
+      case '\f': escape = "\\f"; break;
+      case '\n': escape = "\\n"; break;
+      case '\r': escape = "\\r"; break;
+      case '\t': escape = "\\t"; break;
+    }
+    if (escape) {
+      if (!out.append(escape)) return false;
+    } else if (c < 0x20) {
+      const char encoded[] = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 0xf]};
+      if (!out.append(encoded, sizeof(encoded))) return false;
+    } else if (!out.append((char)c)) return false;
+  }
+  return out.ok();
+}
+
+static bool fileReadAppendBase64(PsramBuffer& out, const uint8_t* data, size_t len) {
+  static const char alphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (size_t i = 0; i < len; i += 3) {
+    const size_t remaining = len - i;
+    const uint32_t word = ((uint32_t)data[i] << 16) |
+        ((remaining > 1 ? (uint32_t)data[i + 1] : 0) << 8) |
+        (remaining > 2 ? data[i + 2] : 0);
+    const char encoded[] = {alphabet[(word >> 18) & 63], alphabet[(word >> 12) & 63],
+                           remaining > 1 ? alphabet[(word >> 6) & 63] : '=',
+                           remaining > 2 ? alphabet[word & 63] : '='};
+    if (!out.append(encoded, sizeof(encoded))) return false;
+  }
+  return out.ok();
+}
+
+static size_t fileReadUnsignedLength(unsigned long value) {
+  size_t length = 1;
+  while (value >= 10) { value /= 10; ++length; }
+  return length;
+}
+
+static bool fileReadAppendUnsigned(PsramBuffer& out, unsigned long value) {
+  char number[3 * sizeof(value) + 1];
+  const int length = snprintf(number, sizeof(number), "%lu", value);
+  return length > 0 && (size_t)length < sizeof(number) &&
+         out.append(number, (size_t)length);
+}
+
+// Includes the closing quote/braces, but excludes encoded payload bytes and NUL.
+// Use escaped path length, not String::length(): legal quote/control bytes in a
+// path must consume the same budget here as they do in the actual serializer.
+static size_t fileReadEnvelopeLength(size_t escapedPathLength, size_t total,
+                                     size_t offset, size_t len, bool eof,
+                                     const char* encoding, bool withData) {
+  return sizeof("{\"success\":true,\"path\":\"") - 1 + escapedPathLength +
+      sizeof("\",\"size\":") - 1 + fileReadUnsignedLength((unsigned long)total) +
+      sizeof(",\"offset\":") - 1 + fileReadUnsignedLength((unsigned long)offset) +
+      sizeof(",\"len\":") - 1 + fileReadUnsignedLength((unsigned long)len) +
+      sizeof(",\"eof\":") - 1 + (eof ? 4 : 5) +
+      sizeof(",\"enc\":\"") - 1 + strlen(encoding) +
+      (withData ? sizeof("\",\"data\":\"\"}") - 1 : sizeof("\"}") - 1);
+}
+
+static bool fileReadBuildReply(PsramBuffer& out, const String& path, size_t total,
+                               size_t offset, const uint8_t* data, size_t len,
+                               bool eof, const char* encoding, bool withData) {
+  out.clear();
+  if (!(out.append("{\"success\":true,\"path\":\"") &&
+        fileReadAppendJsonString(out, (const uint8_t*)path.c_str(), path.length()) &&
+        out.append("\",\"size\":") && fileReadAppendUnsigned(out, (unsigned long)total) &&
+        out.append(",\"offset\":") && fileReadAppendUnsigned(out, (unsigned long)offset) &&
+        out.append(",\"len\":") && fileReadAppendUnsigned(out, (unsigned long)len) &&
+        out.append(",\"eof\":") && out.append(eof ? "true" : "false") &&
+        out.append(",\"enc\":\"") && out.append(encoding))) return false;
+  if (!withData) return out.append("\"}");
+  if (!out.append("\",\"data\":\"")) return false;
+  const bool encoded = strcmp(encoding, "b64") == 0
+      ? fileReadAppendBase64(out, data, len)
+      : fileReadAppendJsonString(out, data, len);
+  return encoded && out.append("\"}");
+}
+
 // Chunked, permission-guarded file read for the companion app. The web browser
 // streams bytes over HTTP; BLE can't, so the app pulls a file in bounded windows
 // by looping on `offset` until `eof`. Returns a JSON envelope; binary / non-ASCII
@@ -935,7 +1123,9 @@ const char* cmd_fileread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
-  static String s_readJson;
+  // Commands are serialized by the executor, which copies the returned bytes
+  // before the next handler runs. HTTP /api/files/read has its own stream.
+  static PsramBuffer s_readJson(CMD_RESULT_MAX, "fileread.reply");
   CommandArgs a(argsInput);
   String path;
   if (requireQuotedPath(a, 0, path) != nullptr)
@@ -952,8 +1142,10 @@ const char* cmd_fileread(const String& argsInput) {
 #endif
 
   const size_t MAX_CHUNK = 4096;  // bound per-call memory + reply size
-  const size_t OUT_CAP   = 4096;  // must match sizeof(ExecReq::out); also caps the raw read below
+  const size_t OUT_CAP   = CMD_RESULT_MAX;  // includes the terminating NUL
   const AuthContext& ctx = currentAuthContext();
+  const size_t escapedPathLength =
+      fileReadJsonStringLength((const uint8_t*)path.c_str(), path.length());
 
   // Hold the FS lock ONLY for the open/seek/read/close below — release it before building the
   // reply or (in `bin` mode) doing the paced multi-frame BLE send, so a minutes-long map download
@@ -966,8 +1158,7 @@ const char* cmd_fileread(const String& argsInput) {
     File f = VFS::openGuarded(path, "r", ctx);
     if (!f || f.isDirectory()) {
       if (f) f.close();
-      s_readJson = "{\"success\":false,\"error\":\"Not found or access denied\"}";
-      return s_readJson.c_str();
+      return "{\"success\":false,\"error\":\"Not found or access denied\"}";
     }
     total = f.size();
 
@@ -978,25 +1169,37 @@ const char* cmd_fileread(const String& argsInput) {
     if (want > MAX_CHUNK) want = MAX_CHUNK;
     if (want > avail)     want = avail;
 
-    // The base64/utf8 JSON reply has to fit the shared command result buffer (ExecReq::out,
-    // System_CommandTypes.h — 4096 bytes). base64 expands the payload 4:3, so reading a full
-    // 4096-byte chunk builds a ~5.6 KB reply that gets truncated to invalid JSON downstream —
-    // that's the "Unexpected file-read reply" the companion app reports on a map download. Cap
-    // the RAW read so the encoded reply fits, with room for the envelope. The caller advances by
-    // the returned "len", so a short read is safe and the transfer still completes across every
-    // client. (`bin` ships the body out-of-band so it isn't bound by OUT_CAP, but the app's read
-    // window stays well under this cap anyway, so we keep one code path.)
-    size_t reserve = 192 + path.length();    // envelope: keys + numbers + quoted path
+    // Retain the existing read window for ordinary paths. Then check the exact
+    // escaped envelope, reducing only if needed for unusual paths. Even `bin`
+    // reserves room for a base64 fallback when the BLE send is unavailable/fails.
+    size_t reserve = 192 + path.length();
     size_t encBudget = (OUT_CAP > reserve) ? (OUT_CAP - reserve) : 0;
-    size_t rawCap = (encBudget / 4) * 3;     // base64-safe raw byte budget (4:3)
+    size_t rawCap = (encBudget / 4) * 3;
     if (want > rawCap) want = rawCap;
+    while (want > 0 &&
+           fileReadEnvelopeLength(escapedPathLength, total, (size_t)offset, want,
+                                  (size_t)offset + want >= total, "b64", true) +
+               ((want + 2) / 3) * 4 >= OUT_CAP) --want;
+    if ((want == 0 && avail != 0) ||
+        fileReadEnvelopeLength(escapedPathLength, total, (size_t)offset, want,
+                               (size_t)offset + want >= total, "b64", true) >= OUT_CAP) {
+      f.close();
+      return "Error: File path too long for this transport";
+    }
+
+    // Reserve once, before any binary send: writing metadata/data after this
+    // point cannot require another allocation or return a partial JSON success.
+    s_readJson.clear();
+    if (!s_readJson.reserve(OUT_CAP)) {
+      f.close();
+      return "{\"success\":false,\"error\":\"OOM\"}";
+    }
 
     if (want > 0) {
       buf = (uint8_t*)ps_alloc(want, AllocPref::PreferPSRAM, "fileread.chunk");
       if (!buf) {
         f.close();
-        s_readJson = "{\"success\":false,\"error\":\"OOM\"}";
-        return s_readJson.c_str();
+        return "{\"success\":false,\"error\":\"OOM\"}";
       }
       if (offset > 0) f.seek((uint32_t)offset);
       got = f.read(buf, want);
@@ -1017,17 +1220,17 @@ const char* cmd_fileread(const String& argsInput) {
   if (wantBin && ctx.transport == SOURCE_BLUETOOTH) {
     uint16_t connId = (uint16_t)ctx.sid.toInt();
     if (connId != 0 && bleScEstablished(connId)) {
+      // Complete checked metadata BEFORE sending a body the client could accept.
+      // The body is still transmitted first, then the executor sends this reply.
+      if (!fileReadBuildReply(s_readJson, path, total, (size_t)offset,
+                              buf, got, eof, "raw", false)) {
+        if (buf) free(buf);
+        return "Error: File response too large for this transport";
+      }
       // got==0 (empty window at eof) ships no body — the header's len:0/eof says it all.
       bool sent = (got == 0) ||
                   bleScSendEncrypted(connId, (const char*)buf, got, /*blocking=*/true, /*binaryFrame=*/true);
       if (sent) {
-        s_readJson  = "{\"success\":true,\"path\":\"";
-        appendJsonStringBytes(s_readJson, (const uint8_t*)path.c_str(), path.length());
-        s_readJson += "\",\"size\":"; s_readJson += (unsigned long)total;
-        s_readJson += ",\"offset\":"; s_readJson += (unsigned long)offset;
-        s_readJson += ",\"len\":";    s_readJson += (unsigned long)got;
-        s_readJson += ",\"eof\":";    s_readJson += (eof ? "true" : "false");
-        s_readJson += ",\"enc\":\"raw\"}";
         if (buf) free(buf);
         return s_readJson.c_str();
       }
@@ -1035,31 +1238,18 @@ const char* cmd_fileread(const String& argsInput) {
   }
 #endif
 
-  auto buildReply = [&](bool b64) {
-    s_readJson  = "{\"success\":true,\"path\":\"";
-    appendJsonStringBytes(s_readJson, (const uint8_t*)path.c_str(), path.length());
-    s_readJson += "\",\"size\":"; s_readJson += (unsigned long)total;
-    s_readJson += ",\"offset\":"; s_readJson += (unsigned long)offset;
-    s_readJson += ",\"len\":";    s_readJson += (unsigned long)got;
-    s_readJson += ",\"eof\":";    s_readJson += (eof ? "true" : "false");
-    if (b64) {
-      s_readJson += ",\"enc\":\"b64\",\"data\":\"";
-      if (got) s_readJson += base64Encode(buf, got);
-    } else {
-      s_readJson += ",\"enc\":\"utf8\",\"data\":\"";
-      if (got) appendJsonStringBytes(s_readJson, buf, got);
-    }
-    s_readJson += "\"}";
-  };
-
   bool useB64 = forceB64 || (buf && bytesNeedBase64(buf, got));
-  buildReply(useB64);
-  // JSON-escaped text can expand up to 2:1 — more than base64's 4:3. If a utf8
-  // reply would overflow the buffer, re-encode as base64 instead: it's more
-  // compact and is guaranteed to fit given the raw cap computed above.
-  if (!useB64 && s_readJson.length() >= OUT_CAP - 1) buildReply(true);
+  // Measure escaped text before writing, so the base64 fallback never builds
+  // an oversized first reply or keeps its high-water allocation alive.
+  if (!useB64 &&
+      fileReadEnvelopeLength(escapedPathLength, total, (size_t)offset, got, eof,
+                             "utf8", true) + fileReadJsonStringLength(buf, got) >= OUT_CAP - 1)
+    useB64 = true;
+  const bool built = fileReadBuildReply(s_readJson, path, total, (size_t)offset,
+                                        buf, got, eof, useB64 ? "b64" : "utf8", true);
 
   if (buf) free(buf);
+  if (!built) return "Error: File response too large for this transport";
   return s_readJson.c_str();
 }
 
@@ -1092,7 +1282,9 @@ const char* cmd_filewrite(const String& argsInput) {
   const AuthContext& ctx = currentAuthContext();
   // Keep the explicit "Admin required" response for admin-only branches, matching
   // the web handler; openGuarded would also deny but with a vaguer message.
-  if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
+  // currentExecIsAdmin() rather than isAdminUser(ctx.user) — same question on
+  // the installed identity, served from the per-task memo. See filesListingJsonForApp.
+  if (isAdminOnlyPath(path) && !currentExecIsAdmin()) {
     snprintf(respBuf, sizeof(respBuf), "{\"success\":false,\"error\":\"Admin required\"}");
     return respBuf;
   }
@@ -1678,8 +1870,16 @@ static FsRole resolveRole(const AuthContext& ctx) {
   // and preserves the legacy first-owner/missing-role compatibility rules.
   FsLockGuard roleGuard("filesystem.resolveRole");
   if (!roleGuard.held && !isFsLockedByCurrentTask()) return FsRole::ANON;
+  // ONE read of users.json answers both questions. This used to be
+  // getUserAuthorizationRole() followed by isSuperAdminUser(), each opening and
+  // reading the same file — measured on hardware at ~36.5 ms apiece, so ~73 ms
+  // per permission check, paid once per entry in a directory listing.
+  // getUserRoleAndSuper() runs the same two parsers over the same bytes; the
+  // precedence below is unchanged, including the bail-to-ANON before super is
+  // ever consulted.
   String storedRole;
-  if (!getUserAuthorizationRole(ctx.user, storedRole)) return FsRole::ANON;
+  bool isSuper = false;
+  if (!getUserRoleAndSuper(ctx.user, storedRole, isSuper)) return FsRole::ANON;
 
   // Deliberate scope, chosen by the device owner: a superadmin has unrestricted
   // filesystem access on EVERY transport. That includes over the air — the
@@ -1691,7 +1891,7 @@ static FsRole resolveRole(const AuthContext& ctx) {
   // Check the effective owner fallback only after the positive roster lookup;
   // this preserves recovery for old no-superadmin rosters without allowing an
   // unknown name to fall through as User.
-  if (isSuperAdminUser(ctx.user)) return FsRole::SUPER;
+  if (isSuper) return FsRole::SUPER;
   // Guest shares the user path-rule column but is masked to PERM_READ in
   // permsForRole — view-only surface, no separate PathRule column needed.
   if (storedRole == "guest") return FsRole::GUEST;
@@ -1738,6 +1938,84 @@ static bool pathWithinScope(const String& path, const String& scope) {
   if (path == base) return true;
   return path.startsWith(base + "/");
 }
+
+// Aggregate the six public permission decisions from inputs that have already
+// been normalized/resolved. This is shared by the ordinary one-shot query and
+// the lock-bound listing view so scope, sensitive-extension, and image masks
+// cannot drift between the two paths. Pure and intentionally silent.
+static uint8_t permissionsForResolvedRole(const String& normalizedPath,
+                                          const String& scope,
+                                          FsRole role) {
+  if (role == FsRole::ANON || !pathWithinScope(normalizedPath, scope)) return 0;
+
+  const PathRule& rule = lookupRule(normalizedPath);
+  uint8_t granted = permsForRole(rule, role);
+  if (!isUnrestrictedRole(role)) {
+    if (!rule.exemptSensitiveExt && hasSensitiveExtension(normalizedPath)) {
+      granted &= ~(PERM_READ | PERM_WRITE);
+    }
+    if (isImageFile(normalizedPath)) granted &= ~PERM_WRITE;
+  }
+  return granted;
+}
+
+namespace FsInternal {
+
+LockedListingPermissions::LockedListingPermissions(const AuthContext& ctx)
+    : lock_("filesystem.listingPermissions"),
+      scope_(ctx.scope),
+      ownerTask_(xTaskGetCurrentTaskHandle()),
+      role_(static_cast<uint8_t>(FsRole::ANON)),
+      dynamicBond_(false),
+      ready_(false) {
+  // FsLockGuard reports held=false on same-task reentry, so ownership — not
+  // lock_.held alone — is the validity condition.
+  ready_ = ownerTask_ != nullptr && isFsLockedByCurrentTask();
+  if (!ready_) return;
+
+#if ENABLE_BONDED_MODE
+  // Bond authority is a live session token protected outside gFsMutex. Mark
+  // the exact eligible tuple dynamic even when its token is currently invalid,
+  // so both valid->invalid and invalid->valid transitions are observed by the
+  // next metadata query instead of freezing a SUPER/ANON answer.
+  if (ctx.transport == SOURCE_ESPNOW && ctx.user == kBondAdminUser) {
+    dynamicBond_ = true;
+    return;
+  }
+#endif
+
+  role_ = static_cast<uint8_t>(resolveRole(ctx));
+}
+
+bool LockedListingPermissions::ready() const {
+  return ready_ && ownerTask_ == xTaskGetCurrentTaskHandle() &&
+         isFsLockedByCurrentTask();
+}
+
+uint8_t LockedListingPermissions::forPath(const String& path) const {
+  if (!ready()) return 0;
+
+  String normalizedPath;
+  if (!normalizeFsPath(path, normalizedPath)) return 0;
+
+  FsRole role = static_cast<FsRole>(role_);
+#if ENABLE_BONDED_MODE
+  if (dynamicBond_) {
+    role = isSuperAdminUser(kBondAdminUser) ? FsRole::SUPER : FsRole::ANON;
+  }
+#endif
+  return permissionsForResolvedRole(normalizedPath, scope_, role);
+}
+
+uint8_t LockedListingPermissions::forChildOf(const String& dirPath) const {
+  if (!ready()) return 0;
+  String testPath = dirPath;
+  if (!testPath.endsWith("/")) testPath += "/";
+  testPath += "_";
+  return forPath(testPath);
+}
+
+}  // namespace FsInternal
 
 // Single decision point. Pure: returns true/false, no logging. The
 // per-denial [PERM] log line is emitted only at actual-access boundaries
@@ -1838,34 +2116,18 @@ void logFsAccessDeny(const String& path, const AuthContext& ctx,
 }
 
 uint8_t getPermissions(const String& path, const AuthContext& ctx) {
-  // Hot path — called once per entry by buildFilesListing for UI button state.
-  // Naive impl was six calls to canX() each of which redid resolveRole +
-  // lookupRule + hasSensitiveExtension + isImageFile. That's 6× redundant
-  // work on every directory listing. This version computes each input once
-  // and applies the special-case masks directly.
-  FsRole role = resolveRole(ctx);
-  if (role == FsRole::ANON) return 0;
-
-  const PathRule& rule = lookupRule(path);
-  uint8_t granted = permsForRole(rule, role);
-
-  // Special-case denials, applied as bitmask filters. These mirror the
-  // sensitiveExtensionApplies / imageEditApplies flags that canRead/canEdit
-  // pass to checkPerm:
-  //   - hasSensitiveExtension blocks PERM_READ and PERM_WRITE (used by
-  //     canRead and canEdit). Other ops (delete/rename/create/import) are
-  //     unaffected — you can still delete a .key file you can't read.
-  //   - isImageFile blocks PERM_WRITE only (used by canEdit). Reading,
-  //     deleting, renaming an image stays allowed.
-  // SYSTEM and SUPER are exempt from both — internal code can read certs, and a
-  // superadmin has unrestricted access by design (see resolveRole).
-  // Paths with exemptSensitiveExt=true (e.g. /system/llm/, /system/certs/)
-  // are also exempt — they intentionally contain .bin/.pem/etc. files.
-  if (!isUnrestrictedRole(role)) {
-    if (!rule.exemptSensitiveExt && hasSensitiveExtension(path)) granted &= ~(PERM_READ | PERM_WRITE);
-    if (isImageFile(path))                                        granted &= ~PERM_WRITE;
-  }
-  return granted;
+  // One-shot/fallback UI metadata query. Repeated directory scans use the
+  // lock-bound listing view above, which shares this same resolved-role helper.
+  // The old aggregate implementation called six canX() functions, redundantly
+  // resolving the role and path rule for each permission bit.
+  // Aggregate metadata follows the same canonical-path and capability-scope
+  // contract as VFS::*Guarded. Previously this function skipped both, so a
+  // scoped system context could advertise buttons outside its own subtree even
+  // though every real operation would be denied by checkPerm().
+  String normalizedPath;
+  if (!normalizeFsPath(path, normalizedPath)) return 0;
+  return permissionsForResolvedRole(normalizedPath, ctx.scope,
+                                    resolveRole(ctx));
 }
 
 uint8_t getDirPerms(const String& dirPath, const AuthContext& ctx) {
@@ -1954,14 +2216,25 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   STACK_TRACEF("appendLineWithCap.resolved dest=%s", dest);
 
   // 1. Append the new line — fast path, same as before.
+  //
+  // Capture the post-write size from the handle we already hold. In append
+  // mode ftell() (File::position) is the offset after the write, i.e. the new
+  // file size, and it costs nothing — it reads the FILE* and accounts for
+  // buffered bytes, so no flush and no stat. This used to be a SECOND
+  // VFS::open of the same 3-level path purely to call size(), on EVERY logged
+  // line, on all 20 callers — a whole extra LittleFS open (~20 ms measured)
+  // for a number the append handle already knew. The read handle below is now
+  // opened only when a rotation is actually due.
+  size_t sz = 0;
   {
     File a = VFS::open(String(dest), "a", true);
     if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
     STACK_TRACEF("appendLineWithCap.opened_for_append");
     a.println(line);
     STACK_TRACEF("appendLineWithCap.println_done");
+    sz = a.position();
     a.close();
-    STACK_TRACEF("appendLineWithCap.close_a_done");
+    STACK_TRACEF("appendLineWithCap.close_a_done sz=%u", (unsigned)sz);
   }
 
   // Tell the VFS free-space cache how much data we just added (approximate —
@@ -1970,12 +2243,15 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   // trusting a stale 2s-old reading through a large write burst.
   VFS::noteLittleFsBytesWritten(line.length() + 2);  // +2 for CRLF
 
-  // 2. Check size. Rotate only if we've reached the hard cap.
+  // 2. Check size. Rotate only if we've reached the hard cap. The size came
+  //    from the append handle above, so the common path (no rotation) now
+  //    returns without opening the file a second time.
+  STACK_TRACEF("appendLineWithCap.size_checked sz=%u cap=%u", (unsigned)sz, (unsigned)capBytes);
+  if (sz <= capBytes) { STACK_TRACEF("appendLineWithCap.no_rotate_exit"); return true; }
+
+  // Rotation is due — only now is a read handle worth its open.
   File r = VFS::open(String(dest), "r");
   if (!r) { STACK_TRACEF("appendLineWithCap.open_r_failed"); return false; }
-  size_t sz = r.size();
-  STACK_TRACEF("appendLineWithCap.size_checked sz=%u cap=%u", (unsigned)sz, (unsigned)capBytes);
-  if (sz <= capBytes) { r.close(); STACK_TRACEF("appendLineWithCap.no_rotate_exit"); return true; }
 
   STACK_TRACEF("appendLineWithCap.rotate_begin");
   // 3. Compute trim math. Drop enough bytes that the survivors are ~85% of cap.

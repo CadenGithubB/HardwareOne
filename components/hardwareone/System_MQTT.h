@@ -13,7 +13,9 @@
 
 // MQTT lifecycle functions
 bool startMQTT();
-void stopMQTT();
+// Requests main-loop-affine teardown. Returns false only when already stopped;
+// true means shutdown is scheduled or already in progress.
+bool stopMQTT();
 void mqttTick();
 bool isMqttConnected();
 
@@ -48,7 +50,7 @@ extern const struct SettingsModule mqttSettingsModule;
 
 // Stubs when MQTT is disabled
 inline bool startMQTT() { return false; }
-inline void stopMQTT() {}
+inline bool stopMQTT() { return false; }
 inline void mqttTick() {}
 inline void publishMQTTSensorData() {}
 inline bool isMqttConnected() { return false; }

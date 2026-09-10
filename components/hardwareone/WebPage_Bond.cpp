@@ -8,7 +8,6 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <memory>
-#include <vector>
 
 #include "System_User.h"
 #include "System_Utils.h"
@@ -1523,7 +1522,12 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
 
   JsonArray commands = doc["commands"].as<JsonArray>();
   const bool interactive = doc["interactive"] | false;
-  std::vector<String> results;
+  // ArduinoJson owns reply text in PSRAM; do not retain a second String list.
+  PSRAM_JSON_DOC(respDoc);
+  respDoc["ok"] = false;
+  respDoc["count"] = 0;
+  JsonArray results = respDoc["results"].to<JsonArray>();
+  bool resultsBuffered = !results.isNull() && !respDoc.overflowed();
   int count = 0;
 
   if (interactive) {
@@ -1567,8 +1571,10 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
     if (ok && out.startsWith("Remote command sent:")) {
       out = "Pending: remote deletion accepted for delivery; verify the bonded device state.";
     }
-    results.push_back("OK: confirmed in the local browser");
-    results.push_back(out);
+    if (resultsBuffered && !results.add("OK: confirmed in the local browser")) {
+      resultsBuffered = false;
+    }
+    if (resultsBuffered && !results.add(out)) resultsBuffered = false;
     count = 2;
   } else {
     for (JsonVariant v : commands) {
@@ -1578,7 +1584,10 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
       }
       String cmd = v.as<String>();
       cmd.trim();
-      if (cmd.length() == 0) { results.push_back(""); continue; }
+      if (cmd.length() == 0) {
+        if (resultsBuffered && !results.add("")) resultsBuffered = false;
+        continue;
+      }
 
       // Route through the bond session — same "remote:" prefix that
       // executeUnifiedWebCommand uses in handleBondExec / handleBondRole.
@@ -1591,7 +1600,8 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
         break;
       }
       if (!ok && out.length() == 0) out = "command failed";
-      results.push_back(out);
+      // Keep execution order unchanged even if response buffering fails.
+      if (resultsBuffered && !results.add(out)) resultsBuffered = false;
       count++;
 
       if (server == NULL) break;
@@ -1610,11 +1620,14 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  PSRAM_JSON_DOC(respDoc);
   respDoc["ok"] = true;
   respDoc["count"] = count;
-  JsonArray arr = respDoc["results"].to<JsonArray>();
-  for (const String& r : results) arr.add(r);
+  if (!resultsBuffered || respDoc.overflowed()) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"batch_response_oom\"}");
+    return ESP_OK;
+  }
   String respStr;
   serializeJson(respDoc, respStr);
   if (!requestSessionLive()) {
@@ -1771,12 +1784,9 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
     if (!first) webBondSendChunk(req, ",");
     first = false;
 
-    // SAFETY: a freshly-paired device has `name` set but friendlyName/room/zone/
-    // tags never assigned. An unconstructed/zeroed Arduino String returns NULL
-    // from c_str(), and "%s" with NULL => strlen(NULL) => LoadProhibited crash
-    // (this is what crashes the device when the bond page lists paired devices
-    // right after a wipe+re-pair). Coerce any NULL c_str() to "".
-    auto sz = [](const String& s) -> const char* { const char* p = s.c_str(); return p ? p : ""; };
+    // Keep this helper generic across Arduino String and the allocation-free
+    // EspNowInlineText registry fields, and never pass a null C string to %s.
+    auto sz = [](const auto& s) -> const char* { const char* p = s.c_str(); return p ? p : ""; };
     webBondSendChunk(req, "{");
     webBondSendChunkf(req, "\"mac\":\"%s\",", macStr.c_str());
     webBondSendChunkf(req, "\"name\":\"%s\",", sz(dev.name));

@@ -565,9 +565,21 @@ bool sanitizeAutomationsJson(String& jsonRef) {
     return false;
   }
   
-  // Track seen IDs
+  // Track seen IDs off-stack. This sanitizer can run from schedulerTickMinute
+  // on the custom main task after a duplicate is detected; reserving 2 KB in
+  // that already-deep call chain can exceed the measured main-stack margin on
+  // lean headless builds. The scan is not an ISR/cache-off path, so the normal
+  // PSRAM-preferred allocator is appropriate and still falls back on boards
+  // without external RAM.
   const int kMax = 512;
-  unsigned long seen[kMax];
+  unsigned long* seen = static_cast<unsigned long*>(
+      ps_alloc(kMax * sizeof(unsigned long), AllocPref::PreferPSRAM,
+               "auto.sanitize.seen"));
+  if (!seen) {
+    ERROR_SYSTEMF("[sanitize] Failed to allocate duplicate-ID scratch (%u bytes)",
+                  (unsigned)(kMax * sizeof(unsigned long)));
+    return false;
+  }
   int seenCount = 0;
   bool changed = false;
   
@@ -618,7 +630,8 @@ bool sanitizeAutomationsJson(String& jsonRef) {
     jsonRef = "";
     serializeJsonPretty(doc, jsonRef);
   }
-  
+
+  ps_free(seen);
   return changed;
 }
 
@@ -660,6 +673,20 @@ static volatile uint32_t
     gAutomationEventKindMask[AUTOMATION_EVENT_MASK_WORDS]{};
 // Set when a subscribed event was posted; cleared when the tick drains.
 static volatile bool gAutomationEventsPending = false;
+
+// Publish a coherent, valid empty view when the backing file is absent or
+// malformed.  A merely-invalid cache makes automationsAnyDue() request another
+// full scheduler tick on every main-loop pass, so a device that has never had
+// Automations compiled in would otherwise hot-loop LittleFS after the feature
+// is enabled.  Clear the subscription mask too: it may still describe a file
+// that was removed or replaced with malformed content.
+static void markAutomationsCacheEmptyValid() {
+  gAutomationsCacheCount = 0;
+  for (size_t w = 0; w < AUTOMATION_EVENT_MASK_WORDS; ++w) {
+    gAutomationEventKindMask[w] = 0;
+  }
+  gAutomationsCacheValid = true;
+}
 
 void automationOnSystemEvent(uint8_t kind) {
   if (kind >= SYSEVT_COUNT) return;
@@ -704,14 +731,12 @@ static void rebuildAutomationsCache() {
   if (!ensureAutomationsCache()) return;
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) {
-    gAutomationsCacheCount = 0;
-    gAutomationsCacheValid = true;
+    markAutomationsCacheEmptyValid();
     return;
   }
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) {
-    gAutomationsCacheCount = 0;
-    gAutomationsCacheValid = true;
+    markAutomationsCacheEmptyValid();
     return;
   }
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
@@ -831,6 +856,26 @@ bool automationsAnyDue(time_t now) {
 bool writeAutomationsJsonAtomic(const String& json) {
   gAutomationsCacheValid = false;
   return writeTextAtomic(AUTOMATIONS_JSON_FILE, json);
+}
+
+// Deployment-profile migration: a provisioned device may have completed its
+// first-time setup while Automations was compiled out, so the normal setup
+// seed never created this file.  Create only when it is genuinely absent;
+// never replace an existing malformed/unreadable file and risk losing rules.
+static bool ensureAutomationsFile() {
+  if (VFS::existsGuarded(AUTOMATIONS_JSON_FILE,
+                         VFS::systemAuth("automation.init"))) {
+    return true;
+  }
+
+  const String empty = "{\n  \"version\": 2,\n  \"automations\": []\n}\n";
+  if (!writeAutomationsJsonAtomic(empty)) {
+    ERROR_SYSTEMF("[automations] Failed to create %s", AUTOMATIONS_JSON_FILE);
+    return false;
+  }
+  DEBUGF(DEBUG_AUTOMATIONS,
+         "[automations] Created empty automation store for profile migration");
+  return true;
 }
 
 // Update the nextAt field of a specific trigger within an automation.
@@ -4033,7 +4078,14 @@ void schedulerTickMinute() {
 
   // Load automations.json
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) return;
+  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+    // Missing is a valid empty deployment state (notably when upgrading a
+    // profile that previously compiled Automations out).  Publish that state
+    // so the fast due check remains I/O-free until the 60-second safety tick
+    // or a real file mutation invalidates the cache.
+    markAutomationsCacheEmptyValid();
+    return;
+  }
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] json size=%d", json.length());
 
   int evaluated = 0, executed = 0;
@@ -4412,6 +4464,11 @@ bool gAutomationSchedulerRunning = false;
 
 // Start the automation scheduler (now runs from main loop, no dedicated task)
 bool startAutomationScheduler() {
+  // This is the shared boot, resume, and runtime-enable chokepoint.  Keeping
+  // the migration here means every way of starting Automations gets a usable
+  // CLI/web store, including devices first provisioned by a profile that had
+  // the feature compiled out.
+  if (!ensureAutomationsFile()) return false;
   if (!ensureAutomationsCache()) return false;
   gAutomationSchedulerRunning = true;
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler enabled (runs from main loop)");

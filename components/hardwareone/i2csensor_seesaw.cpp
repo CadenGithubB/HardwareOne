@@ -11,6 +11,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Arduino.h>
 #include <Wire.h>
+#include <new>
  #include <esp_heap_caps.h>
 
 #include "OLED_Display.h"
@@ -29,7 +30,8 @@ TaskHandle_t gInputTaskHandle = nullptr;
 // for the gamepad's configured bus. Was a stack global with hardcoded
 // `&Wire1` pre-dual-bus; the library binds the TwoWire at construction so
 // we defer until gamepadBus is resolved. All callsites use `->` and check
-// for nullptr.
+// for nullptr. PSRAM is preferred with internal fallback. The object is retained
+// across stops/retries; any future teardown must pair placement-new with ps_delete.
 Adafruit_seesaw* gGamepadSeesaw = nullptr;
 
 // Resolve the gamepad's bus + TwoWire* from settings. Returns false if the
@@ -196,11 +198,13 @@ bool gamepadInit() {
   // Allocate the seesaw library object on the heap if we haven't yet.
   // Kept across re-init attempts so the library's internal state survives.
   if (!gGamepadSeesaw) {
-    gGamepadSeesaw = new Adafruit_seesaw(gpWire);
-    if (!gGamepadSeesaw) {
+    void* gamepadObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPSRAM,
+                                  "input.gamepad.obj");
+    if (!gamepadObjBuf) {
       ERROR_INPUTF("Failed to allocate Adafruit_seesaw");
       return false;
     }
+    gGamepadSeesaw = new (gamepadObjBuf) Adafruit_seesaw(gpWire);
     DEBUG_INPUT_LIFECYCLEF("[GAMEPAD] Allocated Adafruit_seesaw at %p on bus %u",
                              (void*)gGamepadSeesaw, gpBus);
   }
@@ -282,11 +286,13 @@ bool gamepadInitConnection() {
     return false;
   }
   if (!gGamepadSeesaw) {
-    gGamepadSeesaw = new Adafruit_seesaw(gpWire);
-    if (!gGamepadSeesaw) {
+    void* gamepadObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPSRAM,
+                                  "input.gamepad.obj");
+    if (!gamepadObjBuf) {
       WARN_INPUTF("Gamepad: failed to alloc Adafruit_seesaw");
       return false;
     }
+    gGamepadSeesaw = new (gamepadObjBuf) Adafruit_seesaw(gpWire);
   }
 
   // Quick ping first to avoid costly begin() if device not present
@@ -506,8 +512,9 @@ void inputTask(void* parameter) {
         // re-arms the command from inside the ISR — an interrupt storm that
         // trips the Int WDT. 100kHz (matching gamepad init) gives the timing
         // margin to avoid that; the slower transaction is still <1ms.
-        // 80ms timeout: must be < the gamepad bus's setTimeOut(100ms) so Wire
-        // aborts cleanly first. Bus-aware: mutex + clock route to the gamepad's bus.
+        // 80ms bus-lock budget: if another task owns this bus for too long,
+        // skip this sample and retry next poll. Wire I/O has its own separate
+        // 100ms hardware timeout. Mutex + clock both route to the gamepad bus.
         const uint8_t gpBus = (uint8_t)gSettings.inputBus;
         auto result = gGamepadSeesaw && i2cDeviceTransaction(gpBus, I2C_ADDR_GAMEPAD, 100000, 80, [&]() -> bool {
           // Exceptions are disabled (-fno-exceptions), so rely on return value only.
@@ -653,10 +660,11 @@ void inputTask(void* parameter) {
         } else if (!readSuccess) {
           // Actual I2C transaction failure
           // Note: I2CDevice::recordError() called automatically by transaction
-          uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_GAMEPAD);
+          uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_GAMEPAD,
+                                                   (uint8_t)gSettings.inputBus);
           WARN_INPUTF("[GAMEPAD_TASK] I2C read failure (consecutive: %u)", errors);
           
-          if (i2cShouldAutoDisable(I2C_ADDR_GAMEPAD)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_GAMEPAD, (uint8_t)gSettings.inputBus)) {
             ERROR_INPUTF("[GAMEPAD_TASK] Too many consecutive failures - auto-disabling");
             handleDeviceStopped(I2C_DEVICE_INPUT);
             DEBUG_INPUT_LIFECYCLEF("Gamepad auto-disabled: %u consecutive I2C failures", errors);

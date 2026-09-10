@@ -8,6 +8,7 @@
 #include "System_FileManager.h"
 #include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during file I/O
 #include "System_Filesystem.h"
+#include "System_Filesystem_Internal.h"
 #include "System_Mutex.h"
 #include "System_VFS.h"
 #include "System_AuthIdentity.h"  // currentAuthContext
@@ -434,6 +435,11 @@ bool FileManager::loadDirectory() {
     return false;
   }
 
+  // Entry masks are display metadata, not access grants. Resolve this named
+  // caller once while the existing directory-scan lock remains held; every
+  // later VFS operation still performs its own live guarded check.
+  FsInternal::LockedListingPermissions listingPermissions(ctx);
+
   // The SD library returns entry names rooted at the SD card root ("/")
   // — it doesn't know about our "/sd" mount-point convention. So when
   // currentPath is "/sd" or "/sd/foo", the prefix the underlying FS
@@ -450,9 +456,9 @@ bool FileManager::loadDirectory() {
   // Mount points (e.g. /sd at LittleFS root) — the VFS layer is the
   // authority on which synthetic entries belong at this path. Each one
   // gets translated into a FileEntry so the rest of the FileManager
-  // pipeline treats it like any other folder. Permissions are looked up
-  // per-mount via the regular getPermissions() rule table (e.g. /sd is
-  // PERM_READ — browse but don't delete the mount point).
+  // pipeline treats it like any other folder. Permissions come from the same
+  // rule table through the lock-bound listing view (e.g. /sd is PERM_READ —
+  // browse but don't delete the mount point).
   {
     VFS::VirtualEntry virtuals[4];
     const size_t nVirt = VFS::listVirtualEntries(
@@ -466,7 +472,8 @@ bool FileManager::loadDirectory() {
       cachedEntries[cachedCount].isFolder = virtuals[v].isFolder;
       cachedEntries[cachedCount].size = 0;
       String fullPath = formatPath(state.currentPath, virtuals[v].name);
-      cachedEntries[cachedCount].permissions = getPermissions(fullPath, ctx);
+      cachedEntries[cachedCount].permissions =
+          listingPermissions.forPath(fullPath);
       cachedEntries[cachedCount].childCount =
           (countFolderChildren_ && virtuals[v].isFolder) ? countFolderEntries(fullPath, ctx) : 0;
       cachedCount++;
@@ -514,7 +521,8 @@ bool FileManager::loadDirectory() {
       // Get permissions for the *current* caller — drives toolbar
       // enable/disable in the UI per actual identity.
       String fullPath = formatPath(state.currentPath, cachedEntries[cachedCount].name);
-      cachedEntries[cachedCount].permissions = getPermissions(fullPath, ctx);
+      cachedEntries[cachedCount].permissions =
+          listingPermissions.forPath(fullPath);
       cachedEntries[cachedCount].childCount =
           (countFolderChildren_ && cachedEntries[cachedCount].isFolder)
               ? countFolderEntries(fullPath, ctx) : 0;

@@ -20,6 +20,21 @@
 // Command registry functions
 void registerCommand(const CommandEntry* command);
 void registerCommands(const CommandEntry* commands, size_t count);
+
+// Immutable result of resolving one command line against the boot registry.
+// Offsets refer to the caller's input; no pointer into a temporary String is
+// retained. registryOrdinal preserves registration-order identity for equal-
+// length duplicate commands (the first registered row wins).
+struct CommandResolution {
+  const CommandEntry* entry = nullptr;
+  size_t matchedLength = 0;
+  size_t lineOffset = 0;
+  size_t registryOrdinal = static_cast<size_t>(-1);
+
+  explicit operator bool() const { return entry != nullptr; }
+};
+
+CommandResolution resolveCommand(const String& line);
 const CommandEntry* findCommand(const String& name);
 String executeCommandThroughRegistry(const String& argsInput);
 String resolveRegistryCommandKey(const String& command);

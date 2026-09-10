@@ -101,7 +101,7 @@ inline constexpr const char* kDbgBankLabel[DBG_BANK_COUNT] = { DBG_BANK_LIST(DBG
 // master switch; DEBUG_*F macros gate on parent-OR-sub. parentBit records
 // the gating that actually exists (PARENT|SUB enqueues), NOT the naming —
 // rows whose macros pass a bare sub-bit (ESPNOW_*, AUTO_*, BLUETOOTH_*,
-// LLM_*, MAPS_*, SR_WAKE/COMMAND/TUNING) have no parent link (255).
+// MAPS_*, SR_WAKE/COMMAND/TUNING) have no parent link (255).
 //
 // The top bank (bits 248-255) is CONTROL: bits that modify how a message is
 // gated rather than naming a producer. Only bit 255 is assigned. Control
@@ -245,14 +245,14 @@ inline constexpr const char* kDbgBankLabel[DBG_BANK_COUNT] = { DBG_BANK_LIST(DBG
   X(SR_LIFECYCLE,           92, SR,          88, "SR_LIFE",         debugSrLifecycle,        debugsrlifecycle,          "espsr",          "lifecycle",  "Lifecycle") /* init / start / stop verbose */                                                 \
   X(SR_TUNING,              93, SR,         255, "SR_TUNE",         debugSrTuning,           debugsrtuning,             "espsr",          "tuning",     "Tuning / threshold") /* auto-tune + confidence threshold */                                   \
   /* Bits 94-95: spare (SR)                                                   */                                                                                                                                                                       \
-  /* Bits 96-103: On-device LLM (llama2.c / System_LLM). Subs are bare bits — */                                                                                                                                                                       \
-  /* the DEBUG_LLM_*F macros pass the sub alone.                              */                                                                                                                                                                       \
+  /* Bits 96-103: On-device LLM (llama2.c / System_LLM). Subsystem macros     */                                                                                                                                                                       \
+  /* enqueue as LLM|sub so the parent remains a working master switch.        */                                                                                                                                                                       \
   X(LLM,                    96, LLM,        255, "LLM",             debugLlm,                debugllm,                  "llm",            "enabled",    "All LLM") /* parent (all LLM debug) */                                                        \
-  X(LLM_LOAD,               97, LLM,        255, "LLM_LOAD",        debugLlmLoad,            debugllmload,              "llm",            "load",       "Load / checkpoint") /* checkpoint load, header validation, weight mapping */                  \
-  X(LLM_TOKENIZER,          98, LLM,        255, "LLM_TOK",         debugLlmTokenizer,       debugllmtokenizer,         "llm",            "tokenizer",  "Tokenizer") /* tokenizer file, BPE encode/decode */                                           \
-  X(LLM_FORWARD,            99, LLM,        255, "LLM_FWD",         debugLlmForward,         debugllmforward,           "llm",            "forward",    "Forward") /* transformer forward (per-step; use sparingly) */                                 \
-  X(LLM_GENERATE,          100, LLM,        255, "LLM_GEN",         debugLlmGenerate,        debugllmgenerate,          "llm",            "generate",   "Generate") /* generation loop, sampling, throughput */                                        \
-  X(LLM_MEMORY,            101, LLM,        255, "LLM_MEM",         debugLlmMemory,          debugllmmemory,            "llm",            "memory",     "Memory / PSRAM") /* PSRAM estimates, context cap, allocations */                              \
+  X(LLM_LOAD,               97, LLM,         96, "LLM_LOAD",        debugLlmLoad,            debugllmload,              "llm",            "load",       "Load / checkpoint") /* checkpoint load, header validation, weight mapping */                  \
+  X(LLM_TOKENIZER,          98, LLM,         96, "LLM_TOK",         debugLlmTokenizer,       debugllmtokenizer,         "llm",            "tokenizer",  "Tokenizer") /* tokenizer file, BPE encode/decode */                                           \
+  X(LLM_FORWARD,            99, LLM,         96, "LLM_FWD",         debugLlmForward,         debugllmforward,           "llm",            "forward",    "Forward") /* transformer forward (per-step; use sparingly) */                                 \
+  X(LLM_GENERATE,          100, LLM,         96, "LLM_GEN",         debugLlmGenerate,        debugllmgenerate,          "llm",            "generate",   "Generate") /* generation loop, sampling, throughput */                                        \
+  X(LLM_MEMORY,            101, LLM,         96, "LLM_MEM",         debugLlmMemory,          debugllmmemory,            "llm",            "memory",     "Memory / PSRAM") /* PSRAM estimates, context cap, allocations */                              \
   /* Bits 102-103: spare (LLM)                                                */                                                                                                                                                                       \
   /* Bits 104-111: Maps. Subs are bare bits — DEBUG_MAPS_*F pass the sub alone. */                                                                                                                                                                     \
   X(MAPS,                  104, MAPS,       255, "MAPS",            debugMaps,               debugmaps,                 "maps",           "enabled",    "All Maps") /* parent */                                                                       \
@@ -483,12 +483,10 @@ inline constexpr DbgFlagIdx kDbgSubParentIdx[DBG_SUBBOOL_COUNT] = { DBG_SUBBOOL_
 // ============================================================================
 // Aggregated families — the ONLY parent bits anything recomputes. Every
 // family absent from this list is an explicit master switch (G2, MQTT,
-// CAMERA, MEMORY, MAPS, ESP-NOW, AUTO_*, I2C, HTTPS and all sensors): user
-// toggles own their bit outright and NOTHING may rederive it. Three term
+// CAMERA, MEMORY, MAPS, LLM, ESP-NOW, AUTO_*, I2C, HTTPS and all sensors): user
+// toggles own their bit outright and NOTHING may rederive it. Two term
 // shapes, verbatim from the pre-C1 sync helpers:
 //   SUBBOOLS      — parent's own setting OR the family's bitless runtime subs
-//   SETTINGS      — OR of every family row's persisted bool; NO runtime terms
-//                   (LLM: temp sub toggles deliberately never aggregate)
 //   SETTINGS_BITS — SETTINGS, plus any non-parent family-bank bit in the live
 //                   mask (BT/SR: temp-set child bits must raise the parent
 //                   because their output gates test parent alongside sub)
@@ -506,14 +504,12 @@ inline constexpr DbgFlagIdx kDbgSubParentIdx[DBG_SUBBOOL_COUNT] = { DBG_SUBBOOL_
   A(PERFORMANCE, SUBBOOLS)      \
   A(SSE,         SUBBOOLS)      \
   A(CMD_FLOW,    SUBBOOLS)      \
-  A(LLM,         SETTINGS)      \
   A(BLUETOOTH,   SETTINGS_BITS) \
   A(SR,          SETTINGS_BITS)
 
 enum DbgAggMode : uint8_t {
   DBG_AGG_NONE = 0,       // not aggregated — dbgRecomputeParent() must be a no-op
   DBG_AGG_SUBBOOLS,
-  DBG_AGG_SETTINGS,
   DBG_AGG_SETTINGS_BITS,
 };
 
@@ -619,7 +615,7 @@ constexpr bool dbgSubParentsWellFormed() {
 }
 
 // Every aggregated family names a root row, and the list carries exactly the
-// 14 pre-C1 sync-helper families — adding one is a deliberate act, not drift.
+// 13 aggregated families — adding one is a deliberate act, not drift.
 constexpr bool dbgAggFamiliesWellFormed() {
   int n = 0;
   for (int i = 0; i < DBG_FLAG_COUNT; ++i) {
@@ -627,7 +623,20 @@ constexpr bool dbgAggFamiliesWellFormed() {
     ++n;
     if (kDbgParentBit[i] != 255) return false;
   }
-  return n == 14;
+  return n == 13;
+}
+
+// LLM uses an explicit master bit plus independently selectable child bits.
+// Persisting one child must never synthesize the master (which would enable all
+// categories), while parent|child log masks must retain the child's category.
+constexpr bool dbgLlmFamilyWellFormed() {
+  if (kDbgAggMode.m[DBG_LLM] != DBG_AGG_NONE) return false;
+  const uint8_t parent = kDbgBit[DBG_LLM];
+  return kDbgParentBit[DBG_LLM_LOAD]      == parent &&
+         kDbgParentBit[DBG_LLM_TOKENIZER] == parent &&
+         kDbgParentBit[DBG_LLM_FORWARD]   == parent &&
+         kDbgParentBit[DBG_LLM_GENERATE]  == parent &&
+         kDbgParentBit[DBG_LLM_MEMORY]    == parent;
 }
 
 static_assert(DBG_FLAG_COUNT == 128, "debug-flag row count changed — re-check every kDbg* consumer and the settings/CLI/web layers before accepting");
@@ -638,4 +647,5 @@ static_assert(dbgBanksDisjoint(),       "two banks overlap in DBG_BANK_LIST");
 static_assert(dbgTagsUniqueNonEmpty(),  "tag invariant: duplicate tag, empty non-control tag, or tagged CONTROL row");
 static_assert(dbgParentsWellFormed(),   "bad parent link: parentBit must name a root row in the same bank, and bit 255 must be the single tagless control row");
 static_assert(dbgSubParentsWellFormed(),   "bitless sub's PARENT_SYM must be a root flag row marked SUBBOOLS in DBG_AGG_FAMILY_LIST");
-static_assert(dbgAggFamiliesWellFormed(),  "DBG_AGG_FAMILY_LIST must hold exactly the 14 aggregated families, each a root row");
+static_assert(dbgAggFamiliesWellFormed(),  "DBG_AGG_FAMILY_LIST must hold exactly the 13 aggregated families, each a root row");
+static_assert(dbgLlmFamilyWellFormed(),    "LLM must keep an explicit master and parent-linked independent subflags");

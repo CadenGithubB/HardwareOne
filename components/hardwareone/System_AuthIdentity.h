@@ -1,5 +1,6 @@
 // Per-task identity for guarded operations. Each FreeRTOS task gets its own
-// copy of (AuthContext, user, isAdmin) stored in its TCB's thread-local
+// copy of (AuthContext, user, lazily-resolved admin status) in its TCB's
+// thread-local
 // storage slot. Default is ANON (zero-initialized); tasks that need SYSTEM
 // access must install it explicitly via ExecIdentityGuard.
 //
@@ -26,6 +27,13 @@ const String&      currentExecUser();
 // Map a command transport to its NotificationSource (WEB→web, SERIAL→cli, …).
 // Exposed so the reboot path can stamp the actor onto the next-boot reboot event.
 uint8_t transportToNotifSource(CommandSource t);
+// NOT a plain field read. The first call for a given installed identity
+// resolves isAdminUser() — a users.json open+parse (~20-26 ms measured) that
+// takes the global FS mutex — and memoises the answer for the rest of that
+// install. Subsequent calls are free. Do not call it from an ISR, from inside
+// a critical section, or on a task that cannot afford filesystem latency.
+// It used to be resolved eagerly on every identity install instead, which cost
+// that read on every command whether or not anyone asked.
 bool               currentExecIsAdmin();
 
 // Build a SYSTEM identity AuthContext (transport=SOURCE_INTERNAL, user="system").
@@ -49,7 +57,10 @@ class ExecIdentityGuard {
  private:
   AuthContext savedCtx_;
   String      savedUser_;
-  bool        savedIsAdmin_;
+  // Tri-state, mirroring TaskIdentity::isAdminCached (-1 unknown / 0 no / 1 yes).
+  // Saving it as a bool would collapse "not yet resolved" into "not admin" and
+  // silently pin the outer scope to false after a nested install.
+  int8_t      savedIsAdmin_;
 };
 
 // Convenience: install SYSTEM for the rest of the current scope.

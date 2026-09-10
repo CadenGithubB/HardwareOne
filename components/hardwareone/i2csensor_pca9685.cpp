@@ -12,11 +12,12 @@
 #include "System_Utils.h"
 #include "System_Debug.h"  // For BROADCAST_PRINTF macro
 #include "System_Command.h"
-#include "System_MemUtil.h"  // PSRAM_JSON_DOC
+#include "System_MemUtil.h"  // PSRAM_JSON_DOC, ps_alloc, ps_delete
 #include <ArduinoJson.h>
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include <Wire.h>
+#include <new>
 
 // Note: BROADCAST_PRINTF is a macro defined in debug_system.h (included via system_utils.h)
 
@@ -34,19 +35,26 @@ EXT_RAM_BSS_ATTR ServoProfile servoProfiles[MAX_SERVO_CHANNELS];
 
 bool servoInit() {
   if (gPwmDriverConnected) return true;
-  
+
+  const uint8_t servoBus = (uint8_t)gSettings.servoBus;
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  TwoWire* servoWire = mgr ? mgr->getWire(servoBus) : nullptr;
+  if (!servoWire) return false;
+
   if (!gPwmDriver) {
-    gPwmDriver = new Adafruit_PWMServoDriver(PCA9685_I2C_ADDRESS, Wire1);
-    if (!gPwmDriver) return false;
+    // Only the task-context wrapper moves; the library owns its I2C transport.
+    void* servoObjBuf = ps_alloc(sizeof(Adafruit_PWMServoDriver), AllocPref::PreferPSRAM, "servo.obj");
+    if (!servoObjBuf) return false;
+    gPwmDriver = new (servoObjBuf) Adafruit_PWMServoDriver(PCA9685_I2C_ADDRESS, *servoWire);
   }
-  
-  bool success = i2cDeviceTransaction(PCA9685_I2C_ADDRESS, 100000, 500, [&]() -> bool {
+
+  bool success = i2cDeviceTransaction(servoBus, PCA9685_I2C_ADDRESS, 100000, 500, [&]() -> bool {
     if (!gPwmDriver->begin()) return false;
     gPwmDriver->setPWMFreq(50);  // 50Hz for standard servos
     return true;
   });
   if (!success) {
-    delete gPwmDriver;
+    ps_delete(gPwmDriver);
     gPwmDriver = nullptr;
     return false;
   }
@@ -105,7 +113,8 @@ const char* cmd_servo(const String& argsInput) {
              channel, angle, pulseWidth);
   }
   
-  i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
+                           100000, 200, [&]() {
     gPwmDriver->writeMicroseconds(channel, pulseWidth);
   });
   return getDebugBuffer();
@@ -221,7 +230,8 @@ const char* cmd_servocalibrate(const String& argsInput) {
   broadcastOutput("");
   
   // Set to safe center
-  i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
+                           100000, 200, [&]() {
     gPwmDriver->writeMicroseconds(channel, 1500);
   });
   
@@ -254,7 +264,8 @@ const char* cmd_pwm(const String& argsInput) {
   if (a.has(2)) {
     int freq = a.argInt(2, 0);
     if (freq >= 24 && freq <= 1526) {
-      i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
+      i2cDeviceTransactionVoid((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
+                               100000, 200, [&]() {
         gPwmDriver->setPWMFreq(freq);
       });
       snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d (freq: %dHz)", channel, value, freq);
@@ -265,7 +276,8 @@ const char* cmd_pwm(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d", channel, value);
   }
   
-  i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
+                           100000, 200, [&]() {
     gPwmDriver->setPWM(channel, 0, value);
   });
   return getDebugBuffer();

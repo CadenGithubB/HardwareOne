@@ -20,6 +20,9 @@
 
 // I2C bus configuration (defaults, overridden by settings at runtime)
 #define I2C_WIRE1_DEFAULT_FREQ 100000
+// Separate from every transaction's bus-lock wait. This bounds the low-level
+// Wire transfer itself and is intentionally not adapted from device health.
+static constexpr uint32_t I2C_WIRE_IO_TIMEOUT_MS = 100;
 
 // (Removed i2cPortForBus + the legacy i2c_filter_enable() calls: on IDF >= 5.4
 // Arduino's Wire uses the new i2c_master driver, which applies the glitch
@@ -96,7 +99,6 @@ I2CDeviceManager* I2CDeviceManager::getInstance() {
 // ============================================================================
 
 I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
-                                             uint32_t clockHz, uint32_t timeoutMs,
                                              uint8_t busIdx) {
   if (!managerMutex) return nullptr;
   if (busIdx >= NUM_BUSES) busIdx = 0;  // clamp invalid bus to primary
@@ -107,20 +109,12 @@ I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
     // and each gets its own I2CDevice slot with independent health tracking.
     for (int i = 0; i < deviceCount; i++) {
       if (devices[i].address == addr && devices[i].bus == busIdx) {
-        // Update name if upgrading from "Auto" to a real name
+        // Update name if upgrading from "Auto" to a real name. Transaction
+        // timing is never updated here because it is supplied per operation.
         if (strcmp(devices[i].name, "Auto") == 0 && strcmp(name, "Auto") != 0) {
           devices[i].name = name;
-          devices[i].clockHz = clockHz;
-          // Set BOTH: this upgrade is the driver declaring the device's real
-          // configured timeout, which is by definition the new base. Setting
-          // only the adaptive value would leave baseTimeoutMs holding the
-          // value from the anonymous auto-registration, and the decay in
-          // recordSuccess() would then drag the timeout back down to that
-          // stale figure on the next successful transaction.
-          devices[i].baseTimeoutMs = timeoutMs;
-          devices[i].adaptiveTimeoutMs = timeoutMs;
-          INFO_I2CF("Updated device 0x%02X bus=%u: Auto -> %s clock=%luHz timeout=%lums",
-                    addr, busIdx, name, (unsigned long)clockHz, (unsigned long)timeoutMs);
+          INFO_I2CF("Updated device 0x%02X bus=%u: Auto -> %s",
+                    addr, busIdx, name);
         }
         xSemaphoreGive(managerMutex);
         return &devices[i];
@@ -134,10 +128,9 @@ I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
     }
 
     I2CDevice* dev = &devices[deviceCount++];
-    dev->init(addr, name, clockHz, timeoutMs, busIdx);
+    dev->init(addr, name, busIdx);
 
-    INFO_I2CF("Registered device 0x%02X (%s) bus=%u clock=%luHz timeout=%lums",
-              addr, name, busIdx, (unsigned long)clockHz, (unsigned long)timeoutMs);
+    INFO_I2CF("Registered device 0x%02X (%s) bus=%u", addr, name, busIdx);
 
     xSemaphoreGive(managerMutex);
     return dev;
@@ -289,7 +282,7 @@ void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t 
   wire->setClock(hz);
   // 100ms TwoWire-level timeout — well under CONFIG_ESP_INT_WDT_TIMEOUT_MS
   // (1500ms) so a hung transaction won't trigger the interrupt watchdog.
-  wire->setTimeOut(100);
+  wire->setTimeOut(I2C_WIRE_IO_TIMEOUT_MS);
   currentClockHz[busIdx] = hz;
   defaultClockHz[busIdx] = hz;
   busInitialized[busIdx] = true;
@@ -406,6 +399,7 @@ void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
     wire->begin(sdaPin, sclPin);
   }
   wire->setClock(defaultClockHz[busIdx]);
+  wire->setTimeOut(I2C_WIRE_IO_TIMEOUT_MS);
   currentClockHz[busIdx] = defaultClockHz[busIdx];
   // Glitch filter re-applied automatically by the i2c_master driver on the
   // wire->begin() above (esp32-hal-i2c-ng.c, glitch_ignore_cnt=7).
@@ -450,6 +444,64 @@ uint8_t I2CDeviceManager::probeDeviceStatus(uint8_t bus, uint8_t addr) {
   // — does this device still ACK its address, or is the bus itself unhappy?
   wires[bus]->beginTransmission(addr);
   return wires[bus]->endTransmission(true);
+}
+
+uint8_t I2CDeviceManager::probeAddress(uint8_t busIdx, uint8_t address,
+                                       const I2CTransactionOptions& options) {
+  if (busIdx >= NUM_BUSES || !busInitialized[busIdx] || !wires[busIdx] ||
+      !busMutexes[busIdx]) {
+    return 4;
+  }
+
+  SemaphoreHandle_t mutex = busMutexes[busIdx];
+  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(options.lockWaitMs)) != pdTRUE) {
+    return 4;
+  }
+
+  const uint32_t clockHz = options.clockHz > 0 ? options.clockHz : 100000;
+  if (!clockStackPush(busIdx, clockHz)) {
+    xSemaphoreGive(mutex);
+    return 4;
+  }
+
+  setBusClock(busIdx, clockHz);
+  wires[busIdx]->beginTransmission(address);
+  const uint8_t status = wires[busIdx]->endTransmission(true);
+
+  clockStackPop(busIdx);
+  setBusClock(busIdx, clockStackTopOrDefault(busIdx));
+  xSemaphoreGive(mutex);
+  return status;
+}
+
+bool I2CDeviceManager::confirmRead(uint8_t busIdx, uint8_t address,
+                                   const I2CTransactionOptions& options) {
+  if (busIdx >= NUM_BUSES || !busInitialized[busIdx] || !wires[busIdx] ||
+      !busMutexes[busIdx]) {
+    return false;
+  }
+
+  SemaphoreHandle_t mutex = busMutexes[busIdx];
+  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(options.lockWaitMs)) != pdTRUE) {
+    return false;
+  }
+
+  const uint32_t clockHz = options.clockHz > 0 ? options.clockHz : 100000;
+  if (!clockStackPush(busIdx, clockHz)) {
+    xSemaphoreGive(mutex);
+    return false;
+  }
+
+  setBusClock(busIdx, clockHz);
+  const size_t received = wires[busIdx]->requestFrom((uint16_t)address, (size_t)1);
+  if (received >= 1) {
+    while (wires[busIdx]->available()) (void)wires[busIdx]->read();
+  }
+
+  clockStackPop(busIdx);
+  setBusClock(busIdx, clockStackTopOrDefault(busIdx));
+  xSemaphoreGive(mutex);
+  return received >= 1;
 }
 
 void I2CDeviceManager::checkBusRecoveryNeeded() {
@@ -507,10 +559,8 @@ bool I2CDeviceManager::clockStackPush(uint8_t bus, uint32_t hz) {
     // IMPORTANT: do NOT use snprintf+char buffer here. clockStackPush is on
     // the hot path (every I2C transaction); GCC eagerly reserves the full
     // function frame at entry, so any local char[N] adds N bytes to EVERY
-    // call, even when this overflow branch isn't taken. An 80-byte buffer
-    // was enough to push sensor_queue_task (11 KB stack) over during
-    // seesaw.begin() — which goes ~10 transactions deep. Surrounding log
-    // lines already identify the bus, so the literal string is fine here.
+    // call, even when this defensive branch isn't taken. Surrounding log lines
+    // already identify the bus, so the literal string is fine here.
     broadcastOutput("[I2C_MGR] CRITICAL: clock stack overflow - operation aborted");
     return false;
   }
@@ -749,18 +799,14 @@ I2CErrorType classifyI2CError(uint8_t wireStatus) {
 }
 
 I2CDevice::I2CDevice()
-  : address(0), bus(0), name(nullptr), clockHz(100000),
-    baseTimeoutMs(200), adaptiveTimeoutMs(200) {
+  : address(0), bus(0), name(nullptr) {
   memset(&health, 0, sizeof(health));
 }
 
-void I2CDevice::init(uint8_t addr, const char* deviceName, uint32_t clock, uint32_t timeout, uint8_t busIdx) {
+void I2CDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
   address = addr;
   bus = (busIdx < I2CDeviceManager::NUM_BUSES) ? busIdx : 0;
   name = deviceName;
-  clockHz = clock > 0 ? clock : 100000;
-  baseTimeoutMs = timeout > 0 ? timeout : 200;
-  adaptiveTimeoutMs = baseTimeoutMs;
   
   // Initialize health
   health.consecutiveErrors = 0;
@@ -778,18 +824,6 @@ void I2CDevice::init(uint8_t addr, const char* deviceName, uint32_t clock, uint3
 void I2CDevice::recordSuccess() {
   health.consecutiveErrors = 0;
   health.lastSuccessTime = millis();
-
-  // Decay the adaptive timeout back toward its configured base, mirroring the
-  // doubling in recordError()'s TIMEOUT branch. Without this the timeout only
-  // ever ratchets up: a single transient storm leaves the device permanently
-  // holding up to a 5s timeout, and since executeTransaction passes it to
-  // xSemaphoreTake() the calling task then blocks that long on a busy bus —
-  // while every health field still reads OK. Halved rather than snapped back
-  // so a genuinely slow device settles at the timeout it actually needs
-  // instead of oscillating between base and 2x base.
-  if (adaptiveTimeoutMs > baseTimeoutMs) {
-    adaptiveTimeoutMs = max(baseTimeoutMs, adaptiveTimeoutMs / 2);
-  }
 
   if (health.degraded) {
     health.degraded = false;
@@ -830,15 +864,6 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
       health.timeoutCount++;
       WARN_I2CF("Device 0x%02X (%s) TIMEOUT (count=%d, consecutive=%d)",
                 address, name, health.timeoutCount, health.consecutiveErrors);
-      
-      // Adaptive timeout increase
-      if (adaptiveTimeoutMs < 5000) {
-        uint32_t oldTimeout = adaptiveTimeoutMs;
-        adaptiveTimeoutMs = min(adaptiveTimeoutMs * 2, (uint32_t)5000);
-        INFO_I2CF("Device 0x%02X (%s) timeout increased: %lu -> %lu ms",
-                  address, name, (unsigned long)oldTimeout, 
-                  (unsigned long)adaptiveTimeoutMs);
-      }
       
       if (health.consecutiveErrors >= 3) {
         health.degraded = true;

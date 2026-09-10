@@ -201,6 +201,12 @@ bool isKnownUserRole(const String& role);
 bool userMayControlOtherSessions(const String& username);
 bool getUserAuthorizationRole(const String& username, String& roleOut);
 
+// Both answers from ONE read of users.json, for resolveRole()'s hot path.
+// Equivalent to getUserAuthorizationRole() followed by isSuperAdminUser() —
+// same two parsers over the same bytes, one file read instead of two.
+// Does NOT handle the bond-admin identity; see the definition.
+bool getUserRoleAndSuper(const String& who, String& roleOut, bool& isSuperOut);
+
 // Centralized transport authentication management
 bool loginTransport(CommandSource transport, const String& username, const String& password);
 // BLE validates under the users database lock, then binds an exact GATT

@@ -3925,11 +3925,13 @@ void stopOLEDDisplay() {
   }
 
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
-  // Use i2cTransaction wrapper for safe mutex + clock management.
+  // Clear the framebuffer and push it while holding exactly one bus-aware
+  // transaction. Calling displayUpdate() here would try to acquire this same
+  // non-recursive bus mutex a second time and silently skip the final frame.
   // delete/null must happen after the transaction completes, not inside it.
-  i2cOledTransactionVoid(400000, 500, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
     gDisplay->clearDisplay();
-    displayUpdate();
+    gDisplay->display();
   });
   delete gDisplay;
   gDisplay = nullptr;
@@ -4103,7 +4105,7 @@ void updateOLEDDisplay() {
   oledSnapshotFrameSeqs();
 
   // Skip if OLED is degraded (will auto-retry after recovery timeout)
-  if (i2cDeviceIsDegraded(OLED_I2C_ADDRESS)) {
+  if (i2cDeviceIsDegraded(OLED_I2C_ADDRESS, (uint8_t)gSettings.oledBus)) {
     static unsigned long lastDegradedLog = 0;
     unsigned long nowLog = millis();
     if ((isDebugFlagSet(DEBUG_MEMORY) || isDebugFlagSet(DEBUG_SYSTEM)) && (nowLog - lastDegradedLog > 2000)) {
@@ -4586,7 +4588,7 @@ const char* cmd_oledmode(const String& argsInput) {
       tryAutoStartInputForMenu();
       break;
     case OLED_OFF:
-      i2cOledTransactionVoid(400000, 500, [&]() {
+      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
         oledDisplay->clearDisplay();
         oledDisplay->display();
       });
@@ -4650,7 +4652,7 @@ const char* cmd_oledclear(const String& argsInput) {
     return "ERROR";
   }
 
-  i2cOledTransactionVoid(400000, 500, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
     oledDisplay->clearDisplay();
     oledDisplay->display();
   });
@@ -5117,6 +5119,10 @@ bool earlyOLEDInit() {
       return gDisplay->begin(SSD1306_SWITCHCAPVCC, detectedAddr);
     });
     if (beginOk) {
+      gDisplayI2cAddress = detectedAddr;
+      if (I2CDeviceManager* mgr = I2CDeviceManager::getInstance()) {
+        mgr->registerDevice(detectedAddr, "SSD1306", oledBus);
+      }
       oledConnected = true;
       gOledRunning = true;
       gOledConsole.init();
@@ -5146,7 +5152,7 @@ bool earlyOLEDInit() {
       bootProgressLabel = "Initializing...";
 
       // Clear display and render first animation frame (I2C-safe)
-      i2cOledTransactionVoid(400000, 500, [&]() {
+      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
         oledDisplay->clearDisplay();
         displayAnimation();
         oledDisplay->display();
@@ -5292,7 +5298,7 @@ const OLEDMenuItem oledMenuCategory1[] = {
   { "Settings",   "settings",          OLED_SETTINGS },
   { "Login",      "user",              OLED_LOGIN },
   { "Logout",     "user",              OLED_LOGOUT },
-  { "Change PW",  "password",          OLED_CHANGE_PASSWORD },
+  { "Change PW",  "lock",              OLED_CHANGE_PASSWORD },
   // Admin user manager — availability (getMenuAvailability) hides it for
   // non-admins; the mode itself also refuses if not a logged-in admin.
   { "Users",      "user",              OLED_USER_MANAGER },
@@ -5633,6 +5639,11 @@ static int loadRemoteMenuItems(OLEDMenuItemEx* items, int maxItems, int startIdx
     else if (strcmp(moduleName, "users") == 0) icon = "user";
     else if (strcmp(moduleName, "core") == 0) icon = "notify_system";
     else if (strcmp(moduleName, "cli") == 0) icon = "terminal";
+
+    // A peer can advertise modules that this firmware did not compile. Icon
+    // payloads follow the local feature set, so fall back instead of leaving a
+    // blank menu tile when the feature-specific asset is absent.
+    if (!iconExists(icon)) icon = "terminal";
     
     // Create display name with command count
     char displayName[24];
@@ -7052,7 +7063,7 @@ void applyOLEDBrightness() {
 #if ENABLE_OLED_DISPLAY
   if (oledConnected && gOledRunning) {
     if (gSettings.oledBrightness >= 0 && gSettings.oledBrightness <= 255) {
-      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, I2C_ADDR_OLED, 400000, 200, [&]() {
+      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 200, [&]() {
         oledDisplay->ssd1306_command(SSD1306_SETCONTRAST);
         oledDisplay->ssd1306_command(gSettings.oledBrightness);
       });
@@ -7288,7 +7299,7 @@ void oledNotifyLocalDisplayAuthChanged() {
 void oledDisplayOff() {
 #if ENABLE_OLED_DISPLAY
   if (oledDisplay && oledConnected) {
-    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, I2C_ADDR_OLED, 400000, 500, [&]() {
+    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
       oledDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
     });
   }
@@ -7386,8 +7397,8 @@ void oledResumeFromSleep() {
           WARN_SYSTEMF("[OLED] wake: begin() attempt %d failed — waiting + retrying", attempt);
           delay(100);
         }
-        ok = i2cDeviceTransaction((uint8_t)1, I2C_ADDR_OLED, 100000, 300, [&]() -> bool {
-          return oledDisplay->begin(SSD1306_SWITCHCAPVCC, I2C_ADDR_OLED);
+        ok = i2cDeviceTransaction((uint8_t)1, OLED_I2C_ADDRESS, 100000, 300, [&]() -> bool {
+          return oledDisplay->begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS);
         });
       }
       if (ok) {
@@ -7404,7 +7415,7 @@ void oledResumeFromSleep() {
         // (clean state), CHARGEPUMP=0x14 (enable internal DC-DC for
         // SWITCHCAPVCC), DISPLAYON last. Wrapped in our own transaction
         // so we own the bus lock and timing.
-        i2cDeviceTransactionVoid((uint8_t)1, I2C_ADDR_OLED, 400000, 200, [&]() {
+        i2cDeviceTransactionVoid((uint8_t)1, OLED_I2C_ADDRESS, 400000, 200, [&]() {
           oledDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
           oledDisplay->ssd1306_command(SSD1306_CHARGEPUMP);
           oledDisplay->ssd1306_command(0x14);  // enable charge pump (SWITCHCAPVCC)
@@ -7416,7 +7427,7 @@ void oledResumeFromSleep() {
         // Push an explicit blank frame — proves the chip is responsive AND
         // overwrites whatever GDDRAM ended up at after the power cycle, so
         // there's no glitchy first-frame flash before the next mode render.
-        i2cDeviceTransactionVoid((uint8_t)1, I2C_ADDR_OLED, 400000, 200, [&]() {
+        i2cDeviceTransactionVoid((uint8_t)1, OLED_I2C_ADDRESS, 400000, 200, [&]() {
           oledDisplay->clearDisplay();
           oledDisplay->display();
         });
@@ -7442,7 +7453,7 @@ void oledResumeFromSleep() {
 void oledDisplayOn() {
 #if ENABLE_OLED_DISPLAY
   if (oledDisplay && oledConnected) {
-    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, I2C_ADDR_OLED, 400000, 500, [&]() {
+    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
       oledDisplay->ssd1306_command(SSD1306_DISPLAYON);
     });
   }
@@ -7452,7 +7463,7 @@ void oledDisplayOn() {
 void oledShowSleepScreen(int seconds) {
 #if ENABLE_OLED_DISPLAY
   if (oledDisplay && oledConnected) {
-    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, I2C_ADDR_OLED, 400000, 500, [&]() {
+    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
       oledDisplay->clearDisplay();
       oledDisplay->setTextSize(1);
       oledDisplay->setCursor(0, 16);

@@ -105,6 +105,7 @@
   #define CUSTOM_ENABLE_WEB_MAPS       1
   #define CUSTOM_ENABLE_WEB_BATTERY    1
   #define CUSTOM_ENABLE_WEB_R1_HEALTH  1
+  #define CUSTOM_ENABLE_WEB_POWER      1
 #endif
 
 // HTTPS: TLS-encrypted HTTP. Self-signed or uploaded certs in /system/certs/.
@@ -152,6 +153,7 @@
   #define CUSTOM_ENABLE_RTC         0   // DS3231 precision RTC - re-enabled 2026-07-03
   #define CUSTOM_ENABLE_PRESENCE    0   // STHS34PF80 IR presence/motion — disabled 2026-06-07 (not used)
   #define CUSTOM_ENABLE_SERVO       0   // PCA9685 servo controller — not installed
+  #define CUSTOM_ENABLE_LED_MATRIX  1   // HT16K33 monochrome 16x8 backpack
 #endif
 
 // Display: hardware display selection. 0 forces all OLED_*.cpp out of the
@@ -423,6 +425,19 @@
 #define ENABLE_MAPS             1   // CARRIER BUILD: dropped for BT flash headroom; was 1
 
 
+// =============================================================================
+// CHECKED-IN DEPLOYMENT PROFILE OVERRIDE
+// =============================================================================
+// Ordinary developer builds keep using the editable values above. A deployment
+// build defines HW1_DEPLOYMENT_CONFIG_HEADER to an absolute, quoted header path;
+// that header may #undef/redefine user-facing values before the derived rules
+// below run. The root build, component source-list filter, and compiler all
+// resolve the same profile file, so a lean build never depends on temporarily
+// rewriting this shared header and restoring it afterward.
+#ifdef HW1_DEPLOYMENT_CONFIG_HEADER
+#include HW1_DEPLOYMENT_CONFIG_HEADER
+#endif
+
 // ╔═══════════════════════════════════════════════════════════════════════════╗
 // ║                    END OF USER CONFIGURATION                              ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
@@ -540,6 +555,18 @@
 
 #endif
 
+// Matrix is an independent output peripheral; it does not replace the OLED.
+#if I2C_FEATURE_LEVEL == I2C_LEVEL_FULL
+  #define ENABLE_LED_MATRIX 1
+#elif I2C_FEATURE_LEVEL == I2C_LEVEL_CUSTOM
+  #ifndef CUSTOM_ENABLE_LED_MATRIX
+    #define CUSTOM_ENABLE_LED_MATRIX 0
+  #endif
+  #define ENABLE_LED_MATRIX CUSTOM_ENABLE_LED_MATRIX
+#else
+  #define ENABLE_LED_MATRIX 0
+#endif
+
 // Override ENABLE_OLED_DISPLAY if DISPLAY_TYPE is NONE
 #if DISPLAY_TYPE == DISPLAY_TYPE_NONE
   #undef ENABLE_OLED_DISPLAY
@@ -570,6 +597,15 @@
 // The two source-specific paths inside each block stay gated on their own
 // ENABLE_* flag.
 #define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER)
+
+// The device-start queue is only used by optional sensors that initialize in
+// their own tasks. Infrastructure-only I2C builds (for example FeatherS3[D]'s
+// MAX17048 battery gauge) transact directly through I2CDeviceManager and must
+// not pay for an idle 4 KB task that wakes every 100 ms.
+#define ENABLE_I2C_SENSOR_QUEUE \
+  (ENABLE_THERMAL_SENSOR || ENABLE_TOF_SENSOR || ENABLE_IMU_SENSOR || \
+   ENABLE_OLED_INPUT || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
+   ENABLE_FM_RADIO || ENABLE_RTC_SENSOR || ENABLE_PRESENCE_SENSOR)
 
 // =============================================================================
 // DERIVED NETWORK FLAGS (based on NETWORK_FEATURE_LEVEL)
@@ -650,6 +686,7 @@
   #define ENABLE_WEB_MAPS       0
   #define ENABLE_WEB_BATTERY    0
   #define ENABLE_WEB_R1_HEALTH  0
+  #define ENABLE_WEB_POWER      0
 #elif WEB_FEATURE_LEVEL == WEB_LEVEL_CORE
   #define ENABLE_WEB_SENSORS    0
   #define ENABLE_WEB_BLUETOOTH  0
@@ -661,6 +698,7 @@
   #define ENABLE_WEB_MAPS       0
   #define ENABLE_WEB_BATTERY    0
   #define ENABLE_WEB_R1_HEALTH  0
+  #define ENABLE_WEB_POWER      0
 #elif WEB_FEATURE_LEVEL == WEB_LEVEL_STANDARD
   #define ENABLE_WEB_SENSORS    1
   #define ENABLE_WEB_BLUETOOTH  0
@@ -672,6 +710,7 @@
   #define ENABLE_WEB_MAPS       0
   #define ENABLE_WEB_BATTERY    1
   #define ENABLE_WEB_R1_HEALTH  0
+  #define ENABLE_WEB_POWER      1
 #elif WEB_FEATURE_LEVEL == WEB_LEVEL_FULL
   #define ENABLE_WEB_SENSORS    1
   #define ENABLE_WEB_BLUETOOTH  1
@@ -683,6 +722,7 @@
   #define ENABLE_WEB_MAPS       1
   #define ENABLE_WEB_BATTERY    1
   #define ENABLE_WEB_R1_HEALTH  1
+  #define ENABLE_WEB_POWER      1
 #else // WEB_LEVEL_CUSTOM
   #define ENABLE_WEB_SENSORS    CUSTOM_ENABLE_WEB_SENSORS
   #define ENABLE_WEB_BLUETOOTH  CUSTOM_ENABLE_WEB_BLUETOOTH
@@ -694,6 +734,7 @@
   #define ENABLE_WEB_MAPS       CUSTOM_ENABLE_WEB_MAPS
   #define ENABLE_WEB_BATTERY    CUSTOM_ENABLE_WEB_BATTERY
   #define ENABLE_WEB_R1_HEALTH  CUSTOM_ENABLE_WEB_R1_HEALTH
+  #define ENABLE_WEB_POWER      CUSTOM_ENABLE_WEB_POWER
 #endif
 
 // =============================================================================
@@ -738,6 +779,7 @@
   #undef ENABLE_WEB_MAPS
   #undef ENABLE_WEB_BATTERY
   #undef ENABLE_WEB_R1_HEALTH
+  #undef ENABLE_WEB_POWER
   #define ENABLE_WEB_SENSORS    0
   #define ENABLE_WEB_BLUETOOTH  0
   #define ENABLE_WEB_SPEECH     0
@@ -748,6 +790,7 @@
   #define ENABLE_WEB_MAPS       0
   #define ENABLE_WEB_BATTERY    0
   #define ENABLE_WEB_R1_HEALTH  0
+  #define ENABLE_WEB_POWER      0
 #endif
 
 // HTTPS rides on top of HTTP server.
@@ -1276,8 +1319,8 @@
 #if BATTERY_BACKEND_ADC && BATTERY_BACKEND_FUEL_GAUGE
   #error "Pick one battery backend per board — BATTERY_BACKEND_ADC and BATTERY_BACKEND_FUEL_GAUGE are mutually exclusive."
 #endif
-#if BATTERY_BACKEND_FUEL_GAUGE && !ENABLE_I2C_SYSTEM
-  #error "BATTERY_BACKEND_FUEL_GAUGE requires the I2C subsystem (I2C_FEATURE_LEVEL > 0). Raise the level or pick a different backend."
+#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE && !ENABLE_I2C_SYSTEM
+  #error "An enabled BATTERY_BACKEND_FUEL_GAUGE requires the I2C subsystem (I2C_FEATURE_LEVEL > 0). Raise the level, disable the battery monitor, or pick a different backend."
 #endif
 // If the user force-enabled the monitor on a board with no backend hardware
 // claimed, the runtime will seed USB-only and report it — no compile error.

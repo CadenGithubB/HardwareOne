@@ -30,19 +30,9 @@
  *   - Dynamic temperature per-token log
  *   - Per-generated-token sample line (pos/sampled/top/eff_temp/mu)
  *
- * Still commented out (low-level transformer internals):
- *   - Per-prompt-token position tracking
- *   - Generation boundary embedding similarity pairs
- *   - KV cache health check at generation start
- *   - Prompt token logit rank check at generation start
- *   - Pre-generation embedding norm / pairwise similarity / CONFUSER analysis
- *   - Content token listing
- *   - forward() per-layer QKV matmul stats
- *   - forward() per-layer attention pattern stats (per-head weights)
- *   - forward() post-attention residual stats
- *   - forward() pre/post-GELU FFN stats
- *   - forward() post-FFN residual stats
- *   - forward() embedding + position encoding stats
+ * Every diagnostic-only scan is outer-gated with isDebugOutputEnabled(), using
+ * the same flag mask as its eventual log macro. Explicit llmprofile timing is
+ * separately gated by the llmprofile runtime setting.
  */
 
 #include "System_BuildConfig.h"
@@ -148,6 +138,22 @@ static constexpr int HEALTH_LOG_INTERVAL = 16;   // log generation health every 
 // placement is negligible for the memory-bound engine. Mirrors gLLMAsyncCtx.
 EXT_RAM_BSS_ATTR LLMRuntime gLLM = {};
 
+// The runtime lock is process-lifetime state. Build it from static storage so
+// llmInit() can be safely repeated (or raced) without leaking a second mutex or
+// using a destructive whole-runtime reset as its initialization mechanism.
+static StaticSemaphore_t gLLMMutexStorage;
+static portMUX_TYPE gLLMMutexInitMux = portMUX_INITIALIZER_UNLOCKED;
+
+static SemaphoreHandle_t llmRuntimeMutex() {
+  portENTER_CRITICAL(&gLLMMutexInitMux);
+  if (!gLLM.mutex) {
+    gLLM.mutex = xSemaphoreCreateMutexStatic(&gLLMMutexStorage);
+  }
+  SemaphoreHandle_t mutex = gLLM.mutex;
+  portEXIT_CRITICAL(&gLLMMutexInitMux);
+  return mutex;
+}
+
 // ============================================================================
 // Async Generation State (background task + PSRAM result buffer)
 // ============================================================================
@@ -232,7 +238,8 @@ static void llmWorkerTask(void* /*pv*/) {
     // HW data instead of guesswork. uxTaskGetStackHighWaterMark returns the
     // minimum free stack ever seen (in StackType_t words == bytes on this build).
     static bool sLoggedStackHwm = false;
-    if (!sLoggedStackHwm) {
+    if (!sLoggedStackHwm &&
+        isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_GENERATE)) {
       sLoggedStackHwm = true;
       UBaseType_t freeWords = uxTaskGetStackHighWaterMark(nullptr);
       DEBUG_LLM_GENERATEF("[LLM] llm_gen stack: %u B used of %u B (min free %u B)",
@@ -361,8 +368,9 @@ static VecStats vecstats(const float* v, int n) {
 // if (x.nans||x.infs) DEBUG(...) }" blocks scattered through forward(). Pass
 // l = -1 for non-layer points. Debug-only — never touches the activations, so
 // generation output is unchanged.
-static inline void checkVec(const char* what, const float* v, int n, int pos, int l) {
-  if (!FORWARD_DBG_POS(pos)) return;
+static inline void checkVec(bool enabled, const char* what, const float* v,
+                            int n, int pos, int l) {
+  if (!enabled || !FORWARD_DBG_POS(pos)) return;
   VecStats s = vecstats(v, n);
   if (s.nans || s.infs) {
     DEBUG_LLM_FORWARDF("[LLM] CRITICAL: NaN/Inf in %s at L%d pos=%d (nan=%d inf=%d)",
@@ -370,23 +378,14 @@ static inline void checkVec(const char* what, const float* v, int n, int pos, in
   }
 }
 
-// ── Generation-time prompt diagnostics ──────────────────────────────────────
-// Tracks which prompt tokens the model attends to during generation.
-// Populated during llmGenerate(), read by forward() for detailed attention logging.
-struct PromptDiagnostics {
-  int*   tokens;            // prompt token IDs (points into prompt_tokens array)
-  int    count;             // number of prompt tokens
-  int    num_prompt_tokens; // same as count (for clarity in forward)
-  bool   active;            // set during generation only
-
-  // Embedding similarity matrix (populated during prompt processing)
-  // Stores cosine similarity between adjacent prompt token embeddings
-  // and between content tokens and each other
-  float  emb_norms[32];    // L2 norms of prompt token embeddings (capped at 32)
-  float  emb_dots[32];     // dot products between consecutive prompt token embeddings
+// Prompt-prefill state used by forward() to skip the classifier while the next
+// token is forced from the prompt. This is functional state, not diagnostics.
+struct PromptPrefillState {
+  int  num_prompt_tokens;
+  bool active;
 };
 
-static PromptDiagnostics gPromptDiag = {};
+static PromptPrefillState gPromptPrefill = {};
 
 // ============================================================================
 // Per-section forward-pass profiler (llmprofile)
@@ -413,12 +412,18 @@ static inline int64_t profNow() { return gProfActive ? esp_timer_get_time() : 0;
 // 7. Forward Pass
 // ============================================================================
 
-static float* forward(int token, int pos) {
+struct ForwardDebugLatch {
+  bool forward;
+  bool generate;
+};
+
+static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
   LLMConfig* p = &gLLM.config;
   TransformerWeights* w = &gLLM.weights;
   RunState* s = &gLLM.state;
   const int S = gLLM.seq_ctx;
   const bool isGPT2 = (p->arch_type == 1);
+  const bool forwardDebug = debug.forward;
 
   // Corruption guard: a memory overrun elsewhere can zero RunState pointers
   // (observed: s->x → null mid-generation → LoadProhibited panic in
@@ -456,7 +461,7 @@ static float* forward(int token, int pos) {
     const size_t  flat_base = (size_t)token * dim;
     for (int i = 0; i < dim; i++) s->x[i] = (float)row[i] * w->emb_sc[(flat_base + i) / gs];
 
-    if (pos == 0) {
+    if (pos == 0 && forwardDebug) {
       // Dump scale groups used for the first token's embedding row, and
       // the first few dequantized values so scale correctness is visible.
       size_t sc_idx_first = flat_base / gs;
@@ -471,34 +476,6 @@ static float* forward(int token, int pos) {
     }
   }
 
-  // Capture raw embedding (before pos encoding) for prompt diagnostics
-  // We compute the L2 norm and dot product with previous token's embedding
-  // to check whether the model can distinguish different prompt tokens.
-  if (gPromptDiag.active && pos < gPromptDiag.num_prompt_tokens && pos < 32) {
-    float norm = 0.f;
-    for (int i = 0; i < dim; i++) norm += s->x[i] * s->x[i];
-    gPromptDiag.emb_norms[pos] = sqrtf(norm);
-
-    // Dot product with previous token's embedding (stored in xb2 as temp)
-    if (pos > 0 && pos < 32) {
-      float dot = 0.f;
-      for (int i = 0; i < dim; i++) dot += s->x[i] * s->xb2[i];
-      gPromptDiag.emb_dots[pos] = dot;
-
-      // Cosine similarity
-      float prev_norm = gPromptDiag.emb_norms[pos - 1];
-      float cur_norm  = gPromptDiag.emb_norms[pos];
-      float cosim = (prev_norm > 1e-8f && cur_norm > 1e-8f) ?
-                    dot / (prev_norm * cur_norm) : 0.f;
-      //DEBUG_LLM_FORWARDF("[LLM] emb_sim: tok[%d]=%d vs tok[%d]=%d  cosine=%.4f  dot=%.3f  norms=[%.3f,%.3f]",
-      //                   pos - 1, gPromptDiag.tokens[pos - 1],
-      //                   pos, token,
-      //                   cosim, dot, prev_norm, cur_norm);
-    }
-    // Save current raw embedding into xb2 for next token's comparison
-    memcpy(s->xb2, s->x, dim * sizeof(float));
-  }
-
   // GPT-2: add learned positional embedding
   if (isGPT2 && w->pos_embedding_table) {
     float* pe = w->pos_embedding_table + pos * dim;
@@ -506,7 +483,7 @@ static float* forward(int token, int pos) {
   }
 
   // Debug: post-embedding activation health
-  checkVec("embedding", s->x, dim, pos, -1);
+  checkVec(forwardDebug, "embedding", s->x, dim, pos, -1);
 
   // Precompute this token's RoPE cos/sin once (identical across all layers).
   // Llama only — GPT-2 uses absolute positional embeddings added above.
@@ -550,9 +527,9 @@ static float* forward(int token, int pos) {
     PROF_ADD(qkv, _pqkv);
 
     // Debug: Q/K/V matmul health
-    checkVec("Q", s->q,            dim,    pos, l);
-    checkVec("K", key_cache_row,   kv_dim, pos, l);
-    checkVec("V", value_cache_row, kv_dim, pos, l);
+    checkVec(forwardDebug, "Q", s->q,            dim,    pos, l);
+    checkVec(forwardDebug, "K", key_cache_row,   kv_dim, pos, l);
+    checkVec(forwardDebug, "V", value_cache_row, kv_dim, pos, l);
 
     // RoPE relative positional encoding (Llama only — GPT-2 uses absolute pos
     // embeddings). cos/sin were precomputed once per token above.
@@ -662,98 +639,6 @@ static float* forward(int token, int pos) {
     }
     PROF_ADD(attn, _pattn);
 
-    // Debug: attention pattern diagnostics
-    if (FORWARD_DBG_POS(pos)) {
-      float worst_entropy = 999.f;
-      int worst_head = 0;
-      float max_attn_weight = 0.f;
-      int max_attn_head = 0;
-      for (int h = 0; h < p->n_heads; h++) {
-        float* att_h = s->att + h * S;
-        float h_entropy = 0.f, h_max = 0.f;
-        for (int t = 0; t <= pos; t++) {
-          float a = att_h[t];
-          if (a > h_max) h_max = a;
-          if (a > 1e-8f) h_entropy -= a * log2f(a);
-        }
-        if (h_entropy < worst_entropy) { worst_entropy = h_entropy; worst_head = h; }
-        if (h_max > max_attn_weight) { max_attn_weight = h_max; max_attn_head = h; }
-      }
-      //DEBUG_LLM_FORWARDF("[LLM] L%d pos=%d attn: worst_entropy=%.2f(h%d) max_w=%.3f(h%d) ctx=%d",
-      //                   l, pos, worst_entropy, worst_head, max_attn_weight, max_attn_head, pos + 1);
-      (void)worst_entropy; (void)worst_head; (void)max_attn_weight; (void)max_attn_head;
-
-      // ── DEEP ATTENTION HEATMAP ──────────────────────────────────────────────
-      // At the first generation position (pos == num_prompt_tokens - 1) and
-      // every 8th generated position, dump full per-head attention weights to
-      // each prompt token. This reveals whether the model actually attends to
-      // content tokens (e.g. "wifi", "off") or ignores them.
-      if (gPromptDiag.active && pos >= gPromptDiag.num_prompt_tokens - 1) {
-        int npt = gPromptDiag.num_prompt_tokens;
-        for (int h = 0; h < p->n_heads; h++) {
-          float* att_h = s->att + h * S;
-
-          // Sum attention on prompt region vs generated region
-          float prompt_attn = 0.f, gen_attn = 0.f;
-          for (int t = 0; t <= pos; t++) {
-            if (t < npt) prompt_attn += att_h[t];
-            else         gen_attn    += att_h[t];
-          }
-
-          // Find top-2 attended prompt positions
-          int top1_pos = 0, top2_pos = 0;
-          float top1_w = -1.f, top2_w = -1.f;
-          for (int t = 0; t < npt && t <= pos; t++) {
-            if (att_h[t] > top1_w) {
-              top2_pos = top1_pos; top2_w = top1_w;
-              top1_pos = t;        top1_w = att_h[t];
-            } else if (att_h[t] > top2_w) {
-              top2_pos = t;        top2_w = att_h[t];
-            }
-          }
-
-          // Get token names for readability
-          const char* top1_name = (gPromptDiag.tokens && top1_pos < npt &&
-            gPromptDiag.tokens[top1_pos] >= 0 &&
-            gPromptDiag.tokens[top1_pos] < gLLM.tokenizer.vocab_size) ?
-            gLLM.tokenizer.vocab[gPromptDiag.tokens[top1_pos]] : "?";
-          const char* top2_name = (gPromptDiag.tokens && top2_pos < npt &&
-            gPromptDiag.tokens[top2_pos] >= 0 &&
-            gPromptDiag.tokens[top2_pos] < gLLM.tokenizer.vocab_size) ?
-            gLLM.tokenizer.vocab[gPromptDiag.tokens[top2_pos]] : "?";
-
-          //DEBUG_LLM_FORWARDF("[LLM] L%d pos=%d h%d attn_to_prompt=%.3f attn_to_gen=%.3f "
-          //                   "top1=pos%d'%s'(%.3f) top2=pos%d'%s'(%.3f)",
-          //                   l, pos, h, prompt_attn, gen_attn,
-          //                   top1_pos, top1_name, top1_w,
-          //                   top2_pos, top2_name, top2_w);
-          (void)prompt_attn; (void)gen_attn; (void)top1_pos; (void)top2_pos;
-          (void)top1_w; (void)top2_w; (void)top1_name; (void)top2_name;
-
-          // For the first generation position only, dump attention to EVERY prompt token
-          // This is the most critical diagnostic — shows exactly what the model "sees"
-          if (pos == npt - 1 && l % 5 == 0) { // every 5th layer to keep output manageable
-            char attn_buf[256];
-            int bpos = 0;
-            bpos += snprintf(attn_buf + bpos, sizeof(attn_buf) - bpos,
-                             "[LLM] L%d h%d HEATMAP:", l, h);
-            for (int t = 0; t < npt && t <= pos; t++) {
-              const char* tname = (gPromptDiag.tokens[t] >= 0 &&
-                gPromptDiag.tokens[t] < gLLM.tokenizer.vocab_size) ?
-                gLLM.tokenizer.vocab[gPromptDiag.tokens[t]] : "?";
-              // Truncate token name for display
-              char short_name[8];
-              snprintf(short_name, sizeof(short_name), "%s", tname);
-              bpos += snprintf(attn_buf + bpos, sizeof(attn_buf) - bpos,
-                               " %s=%.2f", short_name, att_h[t]);
-              if (bpos >= (int)sizeof(attn_buf) - 20) break;
-            }
-            //DEBUG_LLM_FORWARDF("%s", attn_buf);
-          }
-        }
-      }
-    }
-
     // Output projection
     int64_t _pout = profNow();
     linear(s->xb2, s->xb, T.wo);
@@ -763,7 +648,7 @@ static float* forward(int token, int pos) {
     vecAddInPlace(s->x, s->xb2, dim);
 
     // Debug: post-attention residual health
-    checkVec("post_attn_res", s->x, dim, pos, l);
+    checkVec(forwardDebug, "post_attn_res", s->x, dim, pos, l);
 
     // FFN norm (LayerNorm for GPT-2, RMSNorm for Llama)
     int64_t _pfnorm = profNow();
@@ -781,7 +666,7 @@ static float* forward(int token, int pos) {
       PROF_ADD(ffnUp, _pup);
 
       // Debug: pre-GELU activation health
-      checkVec("pre_gelu", s->hb, hidden_dim, pos, l);
+      checkVec(forwardDebug, "pre_gelu", s->hb, hidden_dim, pos, l);
 
       // GELU (tanh approximation — matches HF gelu_new)
       int64_t _pact = profNow();
@@ -792,7 +677,7 @@ static float* forward(int token, int pos) {
       PROF_ADD(act, _pact);
 
       // Debug: post-GELU health
-      checkVec("post_gelu", s->hb, hidden_dim, pos, l);
+      checkVec(forwardDebug, "post_gelu", s->hb, hidden_dim, pos, l);
 
       int64_t _pdown = profNow();
       linear(s->xb, s->hb, T.w2);
@@ -820,7 +705,7 @@ static float* forward(int token, int pos) {
     vecAddInPlace(s->x, s->xb, dim);
 
     // Debug: post-FFN residual stream health (NaN/Inf = numerical blowup)
-    checkVec("post_ffn_res", s->x, dim, pos, l);
+    checkVec(forwardDebug, "post_ffn_res", s->x, dim, pos, l);
 
   }
 
@@ -834,7 +719,7 @@ static float* forward(int token, int pos) {
   PROF_ADD(norm, _pfinal);
 
   // Debug: post-final-norm activation health
-  checkVec("final_norm", s->x, dim, pos, -1);
+  checkVec(forwardDebug, "final_norm", s->x, dim, pos, -1);
 
   // Classifier into logits (always FP32 or Q8, never Q4).
   // Prompt-phase skip: during prompt ingestion (pos < num_prompt_tokens-1) the
@@ -844,10 +729,9 @@ static float* forward(int token, int pos) {
   // because the PROMPT_PRED / PROMPT_TRACK / logit-stats diagnostics read them.
   // If a real prompt-phase logit consumer is ever added (prefill perplexity,
   // speculative decode), revisit this gate.
-  const bool inPromptPrefill = gPromptDiag.active &&
-                               (pos < gPromptDiag.num_prompt_tokens - 1);
-  const bool debugWantsLogits = (getLogLevel() >= LOG_LEVEL_DEBUG) &&
-      (isDebugFlagSet(DEBUG_LLM_FORWARD) || isDebugFlagSet(DEBUG_LLM_GENERATE));
+  const bool inPromptPrefill = gPromptPrefill.active &&
+                               (pos < gPromptPrefill.num_prompt_tokens - 1);
+  const bool debugWantsLogits = forwardDebug || debug.generate;
   const bool logitsComputed = !inPromptPrefill || debugWantsLogits;
   int64_t _pcls = profNow();
   if (logitsComputed) {
@@ -859,7 +743,7 @@ static float* forward(int token, int pos) {
   // Dump logit distribution stats — healthy model has wide spread and clear top candidates.
   // Flat/uniform logits = broken weights. NaN = numerical explosion.
   // Co-gated with the skip above so a stale buffer is never scanned.
-  if (logitsComputed && FORWARD_DBG_POS(pos)) {
+  if (logitsComputed && FORWARD_DBG_POS(pos) && forwardDebug) {
     float lmin = s->logits[0], lmax = s->logits[0], lsum = 0.f;
     int top_id = 0, nan_count = 0;
     for (int i = 0; i < p->vocab_size; i++) {
@@ -915,15 +799,21 @@ static float* forward(int token, int pos) {
 // 11. Public API
 
 void llmInit() {
-  memset(&gLLM, 0, sizeof(gLLM));
-  gLLM.runState = LLMState::UNLOADED;
-  gLLM.mutex = xSemaphoreCreateMutex();
-  llmMenuInit();   // create the guided-menu lock (System_LLM_Menu.cpp)
+  // gLLM is zero-initialized in static storage, including UNLOADED == 0. Never
+  // clear it here: a repeated init may arrive while it owns model allocations,
+  // and wiping those pointers would leak them and destroy the live mutex.
+  SemaphoreHandle_t mutex = llmRuntimeMutex();
+  if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+    // Serialize the menu's lazy lock creation as part of initialization too.
+    llmMenuInit();   // create the guided-menu lock (System_LLM_Menu.cpp)
+    xSemaphoreGive(mutex);
+  }
 }
 
 bool llmLoadModel(const char* modelPath, int maxCtx) {
-  // Auto-init if not yet initialized
-  if (!gLLM.mutex) llmInit();
+  // Idempotent and cheap after first use; also waits for any concurrent
+  // initializer to finish publishing the menu lock.
+  llmInit();
 
   if (!filesystemReady) {
     setLlmError("Filesystem not ready");
@@ -934,6 +824,11 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
 
   // Unload any existing model
   llmUnload();
+  if (gLLM.runState != LLMState::UNLOADED) {
+    setLlmError("Previous generation did not quiesce; model reload deferred");
+    systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLLM.errorMsg, modelPath);
+    return false;
+  }
 
   // Store the requested context cap (0 = auto-fit to available PSRAM). Any
   // per-model context policy lives in the llmmaxcontext setting, not a
@@ -955,6 +850,14 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
 
   // loadWeights() handles header, tokenizer, and weights (all in one file)
   if (!loadWeights(modelPath)) {
+    // A loader can fail after acquiring only some of its PSRAM blocks. Preserve
+    // the useful error, release every partial allocation through the normal
+    // teardown path, then publish the failed state.
+    char loadError[sizeof(gLLM.errorMsg)];
+    strlcpy(loadError, gLLM.errorMsg, sizeof(loadError));
+    llmUnload();
+    strlcpy(gLLM.errorMsg, loadError[0] ? loadError : "Model load failed",
+            sizeof(gLLM.errorMsg));
     gLLM.runState = LLMState::ERROR;
     systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLLM.errorMsg, modelPath);
     return false;
@@ -1011,7 +914,8 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
 void llmUnload() {
   // Edge: only a real teardown (model present -> no-model) should post. A bare
   // unload with nothing loaded (pre-load cleanup, double-unload) must stay quiet.
-  const bool hadModel = (gLLM.runState != LLMState::UNLOADED);
+  const bool hadModel = (gLLM.runState == LLMState::READY ||
+                         gLLM.runState == LLMState::GENERATING);
   // Quiesce any LIVE generation before freeing the weights it reads. A gen is
   // live from llmStartAsync accepting it (gLLMResultDone=false) through the
   // worker's epilogue (gLLMResultDone=true) — a window that includes an async
@@ -1030,6 +934,13 @@ void llmUnload() {
     gLLM.stopRequested = true;     // observed per-token, breaks the gen loop
     for (int i = 0; i < 100 && (gLLM.runState == LLMState::GENERATING || !gLLMResultDone); i++) {
       vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (gLLM.runState == LLMState::GENERATING || !gLLMResultDone) {
+      // Never trade a bounded command wait for a use-after-free. The worker
+      // still owns the model; retain all allocations and let a later unload or
+      // load retry after it observes the stop request.
+      ERROR_LLMF("Unload deferred: generation did not quiesce within 1 second");
+      return;
     }
   }
 
@@ -1478,12 +1389,14 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
           }
         }
       }
-      for (int fi = 0; fi < NUM_FILLER; fi++) {
-        int fLen = strlen(FILLER_PREFIXES[fi]);
-        if (bodyLen >= fLen && strncasecmp(body, FILLER_PREFIXES[fi], fLen) == 0) {
-          DEBUG_LLM_GENERATEF("[LLM] FILLER detected '%s' (kept in prompt for KV context)",
-                              FILLER_PREFIXES[fi]);
-          break;
+      if (isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_GENERATE)) {
+        for (int fi = 0; fi < NUM_FILLER; fi++) {
+          int fLen = strlen(FILLER_PREFIXES[fi]);
+          if (bodyLen >= fLen && strncasecmp(body, FILLER_PREFIXES[fi], fLen) == 0) {
+            DEBUG_LLM_GENERATEF("[LLM] FILLER detected '%s' (kept in prompt for KV context)",
+                                FILLER_PREFIXES[fi]);
+            break;
+          }
         }
       }
     }
@@ -1501,12 +1414,14 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   }
   int num_prompt_tokens = encode(prompt, prompt_tokens, prompt_buf_n - 1);
 
-  // Debug: dump tokenized prompt
-  DEBUG_LLM_TOKENIZERF("[LLM] Encoded prompt (%d chars -> %d tokens): \"%.*s%s\"",
-                       (int)strlen(prompt), num_prompt_tokens,
-                       (int)(strlen(prompt) > 80 ? 80 : strlen(prompt)), prompt,
-                       strlen(prompt) > 80 ? "..." : "");
-  {
+  // Debug: dump tokenized prompt. Gate the whole block so token-name lookups
+  // and loop setup do not run when its output would be suppressed.
+  if (isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_TOKENIZER)) {
+    const size_t promptLen = strlen(prompt);
+    DEBUG_LLM_TOKENIZERF("[LLM] Encoded prompt (%d chars -> %d tokens): \"%.*s%s\"",
+                         (int)promptLen, num_prompt_tokens,
+                         (int)(promptLen > 80 ? 80 : promptLen), prompt,
+                         promptLen > 80 ? "..." : "");
     // Log first 20 token IDs and their decoded strings
     int show = (num_prompt_tokens < 20) ? num_prompt_tokens : 20;
     for (int ti = 0; ti < show; ti++) {
@@ -1524,121 +1439,6 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     // Use BOS token if prompt is empty
     prompt_tokens[0] = 1; // BOS
     num_prompt_tokens = 1;
-  }
-
-  // ── Pre-forward embedding analysis ────────────────────────────────────────
-  // Before any forward pass, dequantize raw embeddings for prompt tokens and
-  // compare them against each other and known confuser tokens. This reveals
-  // whether INT8 quantization collapsed semantically different tokens into
-  // similar vectors, making it impossible for the model to distinguish them.
-  {
-    const int dim = p->dim;
-    const int gs = p->group_size;
-    TransformerWeights* w = &gLLM.weights;
-
-    // Temp buffers for two embeddings. Hoisted to PSRAM .bss (was 4 KB — two
-    // float[512] — on the llm_gen task stack, the single biggest stack consumer
-    // in this whole function). Moving it off-stack is what lets the gen task run
-    // from a modest 12 KB internal stack instead of needing the 16 KB contiguous
-    // block that the fragmented heap can't supply. Safe as a shared static: this
-    // block is diagnostic-only and generation is single-flight (one persistent
-    // worker; llmGenerate early-returns unless runState==READY).
-    static EXT_RAM_BSS_ATTR float emb_a[512], emb_b[512];  // max dim we'll handle
-    if (dim <= 512) {
-      // Helper lambda: dequantize embedding for token id into buf
-      auto deq_emb = [&](int tok_id, float* buf) {
-        if (w->token_embedding_table) {
-          memcpy(buf, w->token_embedding_table + tok_id * dim, dim * sizeof(float));
-        } else {
-          const int8_t* row = w->emb_i8 + (size_t)tok_id * dim;
-          size_t flat_base = (size_t)tok_id * dim;
-          for (int i = 0; i < dim; i++)
-            buf[i] = (float)row[i] * w->emb_sc[(flat_base + i) / gs];
-        }
-      };
-
-      // Helper: cosine similarity between two vectors
-      auto cosine = [&](const float* a, const float* b, int n) -> float {
-        float dot = 0.f, na = 0.f, nb = 0.f;
-        for (int i = 0; i < n; i++) {
-          dot += a[i] * b[i];
-          na  += a[i] * a[i];
-          nb  += b[i] * b[i];
-        }
-        na = sqrtf(na); nb = sqrtf(nb);
-        return (na > 1e-8f && nb > 1e-8f) ? dot / (na * nb) : 0.f;
-      };
-
-      DEBUG_LLM_GENERATEF("[LLM] ═══ PRE-FORWARD EMBEDDING ANALYSIS ═══");
-
-      // Compare all prompt tokens pairwise (skip if too many)
-      if (num_prompt_tokens <= 20) {
-        for (int ti = 0; ti < num_prompt_tokens; ti++) {
-          deq_emb(prompt_tokens[ti], emb_a);
-          float norm_a = 0.f;
-          for (int i = 0; i < dim; i++) norm_a += emb_a[i] * emb_a[i];
-          norm_a = sqrtf(norm_a);
-          const char* name_a = (prompt_tokens[ti] >= 0 && prompt_tokens[ti] < gLLM.tokenizer.vocab_size) ?
-                                gLLM.tokenizer.vocab[prompt_tokens[ti]] : "?";
-          //DEBUG_LLM_GENERATEF("[LLM] EMB tok[%d]=%d('%s') L2=%.4f x[0..3]=[%.3f,%.3f,%.3f,%.3f]",
-          //                    ti, prompt_tokens[ti], name_a, norm_a,
-          //                    emb_a[0], dim>1?emb_a[1]:0, dim>2?emb_a[2]:0, dim>3?emb_a[3]:0);
-          (void)name_a; (void)norm_a;
-        }
-
-        // Pairwise cosine for content tokens (skip Q: and A:)
-        for (int ti = 0; ti < num_prompt_tokens; ti++) {
-          for (int tj = ti + 1; tj < num_prompt_tokens; tj++) {
-            // Only compare content tokens (skip special tokens 3=Q: and 4=A:)
-            if (prompt_tokens[ti] == 3 || prompt_tokens[ti] == 4) continue;
-            if (prompt_tokens[tj] == 3 || prompt_tokens[tj] == 4) continue;
-            deq_emb(prompt_tokens[ti], emb_a);
-            deq_emb(prompt_tokens[tj], emb_b);
-            float cs = cosine(emb_a, emb_b, dim);
-            if (cs > 0.5f || cs < -0.5f) {  // Only log notable similarities
-              const char* na = gLLM.tokenizer.vocab[prompt_tokens[ti]];
-              const char* nb = gLLM.tokenizer.vocab[prompt_tokens[tj]];
-              //DEBUG_LLM_GENERATEF("[LLM] EMB_PAIR '%s'<->'%s' cosine=%.4f %s",
-              //                    na, nb, cs, cs > 0.8f ? "HIGH_SIM!" : "");
-              (void)na; (void)nb;
-            }
-          }
-        }
-      }
-
-      // Compare prompt content tokens against known confusers.
-      // For each content token in the prompt, find similar tokens in the
-      // vocab that might cause the model to confuse topics.
-      // Strategy: check a handful of topic-adjacent tokens.
-      DEBUG_LLM_GENERATEF("[LLM] CONFUSER CHECK: comparing prompt tokens vs semantically adjacent vocab");
-      for (int ti = 0; ti < num_prompt_tokens; ti++) {
-        int ptok = prompt_tokens[ti];
-        if (ptok == 3 || ptok == 4 || ptok < 10) continue;  // skip structural tokens
-
-        deq_emb(ptok, emb_a);
-        const char* pname = gLLM.tokenizer.vocab[ptok];
-
-        // Scan vocab for high-similarity tokens (sample every 4th to keep it fast)
-        int high_sim_count = 0;
-        float best_sim = -1.f;
-        int best_tok = -1;
-        for (int vi = 5; vi < p->vocab_size && vi < gLLM.tokenizer.vocab_size; vi += 4) {
-          if (vi == ptok) continue;
-          deq_emb(vi, emb_b);
-          float cs = cosine(emb_a, emb_b, dim);
-          if (cs > best_sim) { best_sim = cs; best_tok = vi; }
-          if (cs > 0.85f) high_sim_count++;
-        }
-        const char* best_name = (best_tok >= 0 && best_tok < gLLM.tokenizer.vocab_size) ?
-                                 gLLM.tokenizer.vocab[best_tok] : "?";
-        //DEBUG_LLM_GENERATEF("[LLM] CONFUSER tok=%d('%s'): most_similar=%d('%s') cosine=%.4f  "
-        //                    "high_sim_count(>0.85)=%d",
-        //                    ptok, pname, best_tok, best_name, best_sim, high_sim_count);
-        (void)pname; (void)best_name; (void)best_sim; (void)high_sim_count;
-      }
-
-      DEBUG_LLM_GENERATEF("[LLM] ═══════════════════════════════════════════════════");
-    }
   }
 
   // ── Identify prompt content tokens for logit boosting ──────────────────────
@@ -1692,17 +1492,18 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       }
       content_tokens[content_token_count++] = tok;
     }
-    if (content_token_count > 0) {
-      DEBUG_LLM_GENERATEF("[LLM] CONTENT TOKENS for logit boost (early=%.1f late=%.1f window=%d):",
-                          CONTENT_LOGIT_BOOST, CONTENT_LOGIT_BOOST_LATE, CONTENT_BOOST_WINDOW);
-      for (int ci = 0; ci < content_token_count; ci++) {
-        const char* cname = (content_tokens[ci] < gLLM.tokenizer.vocab_size) ?
-                             gLLM.tokenizer.vocab[content_tokens[ci]] : "?";
-        DEBUG_LLM_GENERATEF("[LLM]   content[%d]=%d('%s')", ci, content_tokens[ci], cname);
-        (void)cname;
+    if (isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_GENERATE)) {
+      if (content_token_count > 0) {
+        DEBUG_LLM_GENERATEF("[LLM] CONTENT TOKENS for logit boost (early=%.1f late=%.1f window=%d):",
+                            CONTENT_LOGIT_BOOST, CONTENT_LOGIT_BOOST_LATE, CONTENT_BOOST_WINDOW);
+        for (int ci = 0; ci < content_token_count; ci++) {
+          const char* cname = (content_tokens[ci] < gLLM.tokenizer.vocab_size) ?
+                               gLLM.tokenizer.vocab[content_tokens[ci]] : "?";
+          DEBUG_LLM_GENERATEF("[LLM]   content[%d]=%d('%s')", ci, content_tokens[ci], cname);
+        }
+      } else {
+        DEBUG_LLM_GENERATEF("[LLM] CONTENT TOKENS: none extracted from prompt (all filtered as stop words or too short)");
       }
-    } else {
-      DEBUG_LLM_GENERATEF("[LLM] CONTENT TOKENS: none extracted from prompt (all filtered as stop words or too short)");
     }
   }
 
@@ -1722,14 +1523,10 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     memset(gLLM.state.value_cache, 0, kvCount * sizeof(float));
   }
 
-  // ── Initialize prompt diagnostics ─────────────────────────────────────────
-  // Makes prompt token info available to forward() for deep attention analysis.
-  gPromptDiag.tokens = prompt_tokens;
-  gPromptDiag.count  = num_prompt_tokens;
-  gPromptDiag.num_prompt_tokens = num_prompt_tokens;
-  gPromptDiag.active = true;
-  memset(gPromptDiag.emb_norms, 0, sizeof(gPromptDiag.emb_norms));
-  memset(gPromptDiag.emb_dots,  0, sizeof(gPromptDiag.emb_dots));
+  // Let forward() skip prompt-phase classifier work while prompt tokens are
+  // forced. Debug modes selectively request those logits when they need them.
+  gPromptPrefill.num_prompt_tokens = num_prompt_tokens;
+  gPromptPrefill.active = true;
 
   int token = prompt_tokens[0]; // BOS or first prompt token
   int pos = 0;
@@ -1857,6 +1654,15 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   while (pos < steps) {
     if (gLLM.stopRequested) break;
 
+    // Snapshot both diagnostic modes once for this position and use that same
+    // decision in forward() and in every post-forward scan below. Commands can
+    // toggle debug while this task yields between tokens; a change takes effect
+    // on the next position, never halfway through one with stale logits.
+    const ForwardDebugLatch stepDebug = {
+      isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_FORWARD),
+      isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_GENERATE),
+    };
+
     // Debug hook (llmcorrupttest): force one RunState-pointer corruption to prove
     // the guard + rebind + retry path end-to-end. Fires once, then self-clears.
     if (gLLM.injectCorruptOnce) {
@@ -1865,7 +1671,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       DEBUG_LLM_GENERATEF("[LLM] TEST: injected RunState corruption (s->x=null) at pos=%d — expect guard+rebound below", pos);
     }
 
-    float* logits = forward(token, pos);
+    float* logits = forward(token, pos, stepDebug);
     if (!logits) {
       // forward() bailed on a corrupted RunState. Recover by re-binding the
       // pointers from the surviving base blocks, then retry this position — the
@@ -1876,7 +1682,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         corruptionRetries++;
         DEBUG_LLM_GENERATEF("[LLM] state corruption at pos=%d — rebound RunState, retry %d/%d",
                             pos, corruptionRetries, LLM_MAX_CORRUPTION_RETRIES);
-        logits = forward(token, pos);
+        logits = forward(token, pos, stepDebug);
       }
       if (!logits) {
         setLlmError("LLM state corruption at pos=%d (recovery failed after %d tries)", pos, corruptionRetries);
@@ -1889,11 +1695,11 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       }
     }
 
+    const bool generateDebug = stepDebug.generate;
     int next;
     if (pos < num_prompt_tokens - 1) {
       // Still in prompt — force next prompt token
       next = prompt_tokens[pos + 1];
-      //DEBUG_LLM_GENERATEF("[LLM]  pos=%d prompt_token=%d", pos, next);
 
       // ── Prompt prediction tracking ────────────────────────────────────────
       // At each prompt position, check what the model WOULD predict next.
@@ -1905,8 +1711,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       // logits (see the classifier skip): with debug off, `logits` holds stale
       // values here and these scans would both lie and waste two full-vocab
       // passes per prompt token.
-      const bool promptDbg = (getLogLevel() >= LOG_LEVEL_DEBUG) &&
-                             isDebugFlagSet(DEBUG_LLM_GENERATE);
+      const bool promptDbg = generateDebug;
       if (promptDbg) {
         int actual_next = prompt_tokens[pos + 1];
         float actual_logit = (actual_next >= 0 && actual_next < p->vocab_size) ? logits[actual_next] : -999.f;
@@ -1977,29 +1782,11 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     } else {
       // ── First generation position diagnostics ────────────────────────────────
       // Fires once at the critical prompt→generation boundary. Dumps:
-      //   - Embedding similarity summary across all prompt tokens
       //   - KV cache health check (are prompt KV entries non-zero?)
       //   - Logits for prompt tokens themselves (does the model recall them?)
-      if (pos == num_prompt_tokens - 1) {
+      if (pos == num_prompt_tokens - 1 && generateDebug) {
         DEBUG_LLM_GENERATEF("[LLM] ═══ GENERATION START ═══ pos=%d after %d prompt tokens",
                             pos, num_prompt_tokens);
-
-        // Embedding similarity summary
-        //DEBUG_LLM_GENERATEF("[LLM] EMBEDDING SIMILARITY (cosine) across prompt tokens:");
-        for (int ti = 1; ti < num_prompt_tokens && ti < 32; ti++) {
-          float prev_norm = gPromptDiag.emb_norms[ti - 1];
-          float cur_norm  = gPromptDiag.emb_norms[ti];
-          float dot       = gPromptDiag.emb_dots[ti];
-          float cosim = (prev_norm > 1e-8f && cur_norm > 1e-8f) ?
-                        dot / (prev_norm * cur_norm) : 0.f;
-          const char* prev_name = (prompt_tokens[ti-1] >= 0 && prompt_tokens[ti-1] < gLLM.tokenizer.vocab_size) ?
-                                   gLLM.tokenizer.vocab[prompt_tokens[ti-1]] : "?";
-          const char* cur_name  = (prompt_tokens[ti] >= 0 && prompt_tokens[ti] < gLLM.tokenizer.vocab_size) ?
-                                   gLLM.tokenizer.vocab[prompt_tokens[ti]] : "?";
-          //DEBUG_LLM_GENERATEF("[LLM]   '%s'<->'%s': cosine=%.4f norm=[%.3f,%.3f]",
-          //                    prev_name, cur_name, cosim, prev_norm, cur_norm);
-          (void)prev_name; (void)cur_name; (void)cosim; (void)prev_norm; (void)cur_norm; (void)dot;
-        }
 
         // KV cache health: check that prompt positions have non-zero K/V.
         // FP32-only diagnostic — in FP16 mode key_cache is null (half-float store).
@@ -2071,11 +1858,13 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
             if (isContent) continue;
             if (logits[tok] > 0.0f) logits[tok] /= REP_PENALTY;
             else                     logits[tok] *= REP_PENALTY;
-            penalized++;
+            if (generateDebug) penalized++;
           }
         }
-        DEBUG_LLM_GENERATEF("[LLM] rep_penalty: penalized %d/%d tokens (window=%d penalty=%.2f, %d content-exempt)",
-                            penalized, count, REP_WINDOW, REP_PENALTY, content_token_count);
+        if (generateDebug) {
+          DEBUG_LLM_GENERATEF("[LLM] rep_penalty: penalized %d/%d tokens (window=%d penalty=%.2f, %d content-exempt)",
+                              penalized, count, REP_WINDOW, REP_PENALTY, content_token_count);
+        }
       }
 
       // ── Suppress penalty (retry mechanism) ──────────────────────────────────
@@ -2094,12 +1883,12 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
           for (int pi = 0; pi < num_prompt_tokens; pi++) {
             if (prompt_tokens[pi] == tok) { inPrompt = true; break; }
           }
-          if (inPrompt) { skipped_prompt++; continue; }
+          if (inPrompt) { if (generateDebug) skipped_prompt++; continue; }
           if (logits[tok] > 0.0f) logits[tok] /= SUPPRESS_PENALTY;
           else                     logits[tok] *= SUPPRESS_PENALTY;
-          penalized++;
+          if (generateDebug) penalized++;
         }
-        if (pos == num_prompt_tokens || pos % 16 == 0) {
+        if (generateDebug && (pos == num_prompt_tokens || pos % 16 == 0)) {
           DEBUG_LLM_GENERATEF("[LLM] suppress: penalized %d/%d tokens, skipped %d prompt tokens (penalty=%.1f)",
                               penalized, suppressTokenCount, skipped_prompt, SUPPRESS_PENALTY);
         }
@@ -2114,14 +1903,14 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       int gen_pos = pos - num_prompt_tokens + 1;  // 0-based generated token index
       if (content_token_count > 0 && CONTENT_LOGIT_BOOST > 0.0f) {
         float boost = (gen_pos < CONTENT_BOOST_WINDOW) ? CONTENT_LOGIT_BOOST : CONTENT_LOGIT_BOOST_LATE;
-        int boosted = 0;
+        const bool logBoost = generateDebug &&
+                              (pos == num_prompt_tokens - 1 || pos % 8 == 0);
         for (int ci = 0; ci < content_token_count; ci++) {
           int ctok = content_tokens[ci];
           if (ctok >= 0 && ctok < p->vocab_size) {
-            float old_logit = logits[ctok];
+            float old_logit = logBoost ? logits[ctok] : 0.f;
             logits[ctok] += boost;
-            boosted++;
-            if (pos == num_prompt_tokens - 1 || pos % 8 == 0) {
+            if (logBoost) {
               const char* cname = (ctok < gLLM.tokenizer.vocab_size) ?
                                    gLLM.tokenizer.vocab[ctok] : "?";
               DEBUG_LLM_GENERATEF("[LLM] CONTENT_BOOST pos=%d gen=%d tok=%d('%s') %.2f -> %.2f (+%.1f)",
@@ -2153,10 +1942,10 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
           if (banTok == eos_id || banTok == 3) continue;  // never ban stop tokens
           if (banTok >= 0 && banTok < p->vocab_size && logits[banTok] > -1e8f) {
             logits[banTok] = -1e9f;
-            nbanned++;
+            if (generateDebug) nbanned++;
           }
         }
-        if (nbanned > 0) {
+        if (generateDebug && nbanned > 0) {
           DEBUG_LLM_GENERATEF("[LLM] ngram_block: banned %d token(s) (n=%d hist=%d)",
                               nbanned, NGRAM_N, hist_len);
         }
@@ -2175,12 +1964,15 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         }
       }
 
+      const bool sampleDebug = generateDebug;
       int topId = 0;
-      float topLogit = logits[0];
-      for (int vi = 1; vi < p->vocab_size; vi++) {
-        if (logits[vi] > topLogit) { topLogit = logits[vi]; topId = vi; }
+      float topLogit = 0.f;
+      if (sampleDebug) {
+        topLogit = logits[0];
+        for (int vi = 1; vi < p->vocab_size; vi++) {
+          if (logits[vi] > topLogit) { topLogit = logits[vi]; topId = vi; }
+        }
       }
-      // topId and topLogit used by per-token sample debug line below
 
       // Tighten nucleus after first sentence to reduce second-sentence drift
       float effective_topp = topp;
@@ -2213,12 +2005,12 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         gLLM.genHist[hist_len++] = next;
       }
 
-      const char* piece = decode(token, next);
-      bool has_leading_space = (piece && piece[0] == ' ');
-      int piece_len = piece ? strlen(piece) : 0;
-      DEBUG_LLM_GENERATEF("[LLM]  pos=%d sampled=%d('%s') top=%d(%.2f) eff_temp=%.2f eff_topp=%.2f sent=%d gen=%d",
-                          pos, next, piece ? piece : "?", topId, topLogit,
-                          effective_temp, effective_topp, sentence_count, gen_pos);
+      if (sampleDebug) {
+        const char* piece = decode(token, next);
+        DEBUG_LLM_GENERATEF("[LLM]  pos=%d sampled=%d('%s') top=%d(%.2f) eff_temp=%.2f eff_topp=%.2f sent=%d gen=%d",
+                            pos, next, piece ? piece : "?", topId, topLogit,
+                            effective_temp, effective_topp, sentence_count, gen_pos);
+      }
     }
 
     pos++;
@@ -2344,7 +2136,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     token = next;
 
     // Periodic generation health check
-    if (generated > 0 && generated % HEALTH_LOG_INTERVAL == 0) {
+    if (generateDebug && generated > 0 && generated % HEALTH_LOG_INTERVAL == 0) {
       unsigned long nowMs = millis();
       float elapsed_s = (float)(nowMs - startMs) / 1000.0f;
       float tps = elapsed_s > 0 ? (float)generated / elapsed_s : 0;
@@ -2380,11 +2172,9 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // limit, hard cap, Q:-stop, user stop) can end inside the decision window.
   if (confHolding) confRelease();
 
-  // Clean up prompt diagnostics
-  gPromptDiag.active = false;
-  gPromptDiag.tokens = nullptr;
-  gPromptDiag.count  = 0;
-  gPromptDiag.num_prompt_tokens = 0;
+  // End prompt-prefill tracking.
+  gPromptPrefill.active = false;
+  gPromptPrefill.num_prompt_tokens = 0;
 
   unsigned long elapsed = millis() - startMs;
   if (elapsed > 0 && generated > 0) {

@@ -366,9 +366,10 @@ bool peerOwnerPublish(BlePeerKind kind, const String& user,
 }
 
 void peerOwnerPersistAfterUnlock(BlePeerKind kind, const char* reason) {
-  // Deliberately outside PeerOwnerGuard: writeSettingsJson() takes FsLock and
-  // calls blePeersWriteJson(), which takes a fresh owner snapshot.
-  if (!gDeferWrites) (void)writeSettingsJson();
+  // Deliberately outside PeerOwnerGuard: an immediate persistence request
+  // takes FsLock and calls blePeersWriteJson(), which takes a fresh owner
+  // snapshot. A scoped settings batch may instead record this write as dirty.
+  (void)requestSettingsPersist();
   bumpIdentityGeneration(reason ? reason : "ble.peer_owner");
 }
 
@@ -790,7 +791,7 @@ void bleSavePeerMac(BlePeerKind kind, const String& mac1, const String& mac2) {
       kind, mac1.length() > 0, mac1, mac2.length() > 0, mac2,
       false, false);
   if (!applied.applied) return;
-  if (applied.targetChanged && !gDeferWrites) (void)writeSettingsJson();
+  if (applied.targetChanged) (void)requestSettingsPersist();
   // Deliberately do not establish owner authority here. This function also
   // runs on anonymous auto-reconnect workers; ownership must be captured at
   // an explicit authenticated pairing or autoReconnect-enable intent site.
@@ -811,7 +812,7 @@ bool bleSavePeerMacIfIdentityCurrent(
       kind, mac1.length() > 0, mac1, mac2.length() > 0, mac2,
       false, false, expectedIdentityGeneration);
   if (!applied.applied) return false;
-  if (applied.targetChanged && !gDeferWrites) (void)writeSettingsJson();
+  if (applied.targetChanged) (void)requestSettingsPersist();
   return true;
 }
 
@@ -887,7 +888,10 @@ bool blePeerCommitLearnedTargetIfCurrent(
     }
     portEXIT_CRITICAL(&sReconnectMux);
   }
-  if (persistNeeded) *persistNeeded = targetChanged && !gDeferWrites;
+  // Report the mutation independently of the current persistence policy. The
+  // outer G2/R1 caller is already responsible for requesting persistence after
+  // releasing its completion lock; a scoped batch can safely defer it there.
+  if (persistNeeded) *persistNeeded = targetChanged;
   return true;
 }
 
@@ -1461,13 +1465,13 @@ const char* cmd_bleautoreconnect(const String& argsInput) {
   }
   if (!on) {
     // Cancellation is execution policy, not a persistence side effect. Publish
-    // it before setSetting() can block in writeSettingsJson(), otherwise the
+    // it before persistence can block in writeSettingsJson(), otherwise the
     // main-loop tick can admit one last stale attempt during that flash write.
     const PeerConfigApplyResult config = peerConfigApply(
         p->kind, false, String(), false, String(), true, false, 0,
         PeerIntentAction::UserDisconnect);
-    if (config.applied && config.policyChanged && !gDeferWrites) {
-      (void)writeSettingsJson();
+    if (config.applied && config.policyChanged) {
+      (void)requestSettingsPersist();
     }
   } else {
     // Resolve owner authority before publishing or persisting auto=true. A
@@ -1499,9 +1503,16 @@ const char* cmd_bleautoreconnect(const String& argsInput) {
       }
     }
     if (!ownerAvailable) {
-      (void)peerConfigApply(p->kind, false, String(), false, String(),
-                            true, false, 0,
-                            PeerIntentAction::UserDisconnect);
+      const PeerConfigApplyResult rollback = peerConfigApply(
+          p->kind, false, String(), false, String(), true, false, 0,
+          PeerIntentAction::UserDisconnect);
+      // The owner can disappear after an earlier path enabled reconnect but
+      // before this command establishes authority. If rollback changes the
+      // persisted policy, save it after peerConfigApply releases PeerDataGuard
+      // so reboot cannot resurrect the ownerless auto-reconnect state.
+      if (rollback.applied && rollback.policyChanged) {
+        (void)requestSettingsPersist();
+      }
       snprintf(buf, sizeof(buf),
                "[BLE] %s auto-reconnect NOT enabled — owner authority is "
                "unavailable (log in and retry, or create the device owner first)",
@@ -1514,7 +1525,7 @@ const char* cmd_bleautoreconnect(const String& argsInput) {
                p->displayName ? p->displayName : p->name);
       return buf;
     }
-    if (config.policyChanged && !gDeferWrites) (void)writeSettingsJson();
+    if (config.policyChanged) (void)requestSettingsPersist();
     // The config transaction above also clears prior user-disconnect
     // suppression. If currently down, schedule the first retry afterwards;
     // a concurrent OFF transaction will win and LinkLost will observe it.

@@ -42,7 +42,34 @@ namespace {
 struct TaskIdentity {
   AuthContext ctx;        // default-constructed: user="", transport=0 → ANON
   String      user;
-  bool        isAdmin = false;
+
+  // Admin status, resolved LAZILY. -1 = not yet computed, 0 = no, 1 = yes.
+  //
+  // This used to be a bool computed eagerly in ExecIdentityGuard's ctor, i.e.
+  // isAdminUser() — a full open+parse of users.json, ~20-26 ms — on EVERY
+  // identity install, which means every command on every transport. But only a
+  // handful of call sites ever read it (currentExecIsAdmin: automation
+  // ownership overrides, `ringquery raw`, `i2c detect apply`, `bootcount
+  // reset`). Command-level admin gating does NOT come through here — that is
+  // the registry's requiresAdmin flag going through hasAdminPrivilege. So the
+  // overwhelming majority of commands paid a roster read for an answer nothing
+  // asked for.
+  //
+  // Computed on first read and cached for the lifetime of the install, so the
+  // sites that call it two or three times in one function (a debug log line
+  // plus the actual check) still cost one read, as the eager version did.
+  //
+  // The VALUE is the same for every input; what moved is WHEN it is sampled —
+  // install time, now first use. Two inputs to isAdminUser() can change in
+  // that window: isBondSessionTokenValid() (mutated by the ESP-NOW task) and
+  // filesystemReady (monotonic false->true at boot). Sampling closer to the
+  // point of use is the safer direction, but it is not a no-op — say so rather
+  // than claiming exact equivalence.
+  //
+  // MUST stay a tri-state: a plain bool cannot distinguish "not computed"
+  // from "computed, false", which would re-read the roster on every call for
+  // every non-admin — strictly worse than what it replaces.
+  int8_t      isAdminCached = -1;
 
   // Stage 3: per-task command-execution context. Default nullptr / inactive.
   void*       currentCmdCtx = nullptr;
@@ -83,7 +110,27 @@ const TaskIdentity* getSlotReadOnly() {
 
 const AuthContext& currentAuthContext() { return getSlotReadOnly()->ctx; }
 const String&      currentExecUser()    { return getSlotReadOnly()->user; }
-bool               currentExecIsAdmin() { return getSlotReadOnly()->isAdmin; }
+bool currentExecIsAdmin() {
+  // Needs a mutable slot to memoise into, so this cannot use getSlotReadOnly().
+  // Both no-slot cases return false, matching the anon sentinel this used to
+  // read: no scheduler yet, or no identity ever installed on this task.
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  if (!self) return false;
+  TaskIdentity* slot = static_cast<TaskIdentity*>(
+      pvTaskGetThreadLocalStoragePointer(self, kAuthTlsSlot));
+  if (!slot) return false;
+  if (slot->isAdminCached < 0) {
+    // Same call the eager version made, on the same identity — only later.
+    // Copy the username out first: isAdminUser() runs a deep chain
+    // (readRosterJson -> openGuarded -> canRead -> checkPerm -> resolveRole),
+    // and handing it a reference INTO the mutable TLS slot would alias state
+    // that an identity install could reassign underneath it. Nothing does that
+    // today; the copy costs one allocation against a ~20-26 ms read.
+    const String who = slot->user;
+    slot->isAdminCached = isAdminUser(who) ? 1 : 0;
+  }
+  return slot->isAdminCached > 0;
+}
 
 AuthContext systemIdentity(const char* purpose) {
   AuthContext ctx;
@@ -99,15 +146,17 @@ AuthContext systemIdentity(const char* purpose) {
 ExecIdentityGuard::ExecIdentityGuard(const AuthContext& install)
     : savedCtx_(),
       savedUser_(),
-      savedIsAdmin_(false) {
+      savedIsAdmin_(-1) {  // -1 = unknown; NOT false, which would mean "resolved, not admin"
   TaskIdentity* slot = getOrCreateSlot();
   if (!slot) return;  // pre-scheduler — nothing to install yet
   savedCtx_     = slot->ctx;
   savedUser_    = slot->user;
-  savedIsAdmin_ = slot->isAdmin;
+  savedIsAdmin_ = slot->isAdminCached;
   slot->ctx     = install;
   slot->user    = install.user;
-  slot->isAdmin = isAdminUser(install.user);
+  // Do NOT resolve here — see TaskIdentity::isAdminCached. Mark unknown; the
+  // first currentExecIsAdmin() for this identity resolves it, if one ever comes.
+  slot->isAdminCached = -1;
 }
 
 ExecIdentityGuard::~ExecIdentityGuard() {
@@ -118,7 +167,9 @@ ExecIdentityGuard::~ExecIdentityGuard() {
   if (!slot) return;
   slot->ctx     = savedCtx_;
   slot->user    = savedUser_;
-  slot->isAdmin = savedIsAdmin_;
+  // Restore the OUTER identity's cached answer (which may itself be "unknown"),
+  // so a nested install does not leave the outer scope re-resolving.
+  slot->isAdminCached = savedIsAdmin_;
 }
 
 void initAuthIdentityForCurrentTask() { (void)getOrCreateSlot(); }

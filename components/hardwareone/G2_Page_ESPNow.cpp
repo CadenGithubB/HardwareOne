@@ -1056,7 +1056,7 @@ static bool beginNameThenOpenEntry() {
   TextEntryConfig cfg = {};
   cfg.prompt   = "ESPNow Name";
   cfg.initial  = gSettings.espnowDeviceName.c_str();
-  cfg.maxLen   = 20;  // matches cmd_espnow_setname
+  cfg.maxLen   = 19;  // V4 wire field is 20 bytes including NUL
   cfg.onCommit = nameThenOpenCommit;
   cfg.onCancel = nameThenOpenCancel;
   if (!g2BeginTextEntry(cfg)) {

@@ -1585,7 +1585,11 @@ bool loadWeights(const char* path) {
   DEBUG_LLM_LOADF("[LLM] Weights loaded successfully (%s)",
                   isMix ? "MIXED Q4/Q8" : (isQ8 ? "INT8" : "FP32"));
 
-  spotCheckWeights(ctx);
+  // The spot checks can scan entire FP32 embedding/classifier tensors.  Do not
+  // pay that diagnostic cost unless the corresponding debug output can emit.
+  if (isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_LOAD)) {
+    spotCheckWeights(ctx);
+  }
 
   // ---- Allocate run state ----
   if (!allocateRunState(ctx)) return false;

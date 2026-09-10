@@ -30,6 +30,12 @@ void taskOperationStart();
 void taskOperationComplete(uint32_t elapsedMs, uint32_t timeoutThresholdMs);
 void resetTaskMetrics();
 
+// Shared cmd_exec saturation diagnostic. The queue and BLE ingress pool have
+// different producer tasks, so all accesses go through this atomic API rather
+// than exposing a volatile counter that can lose concurrent increments.
+extern "C" void cmdExecDropCountIncrement(void);
+extern "C" uint32_t cmdExecDropCountLoad(void);
+
 // ============================================================================
 // Security Utilities
 // ============================================================================
@@ -86,6 +92,10 @@ struct CommandEntry {
                          const char* (*)(const String&),
                          const char*, const char*) = delete;
 };
+
+// Defined by System_Command.h. Kept incomplete here so command consumers that
+// only need the legacy findCommand() API do not gain another include cycle.
+struct CommandResolution;
 
 // Command module flags
 #define CMD_MODULE_SENSOR    0x01  // Module controls a sensor/peripheral
@@ -261,6 +271,10 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 // Audit / Redaction utilities
 // Centralized redaction for audit logs and debug output
 String redactCmdForAudit(const String& argsInput);
+// Reuse a resolution already computed for this exact line. The public wrapper
+// above remains the compatibility entrypoint for transports and UI surfaces.
+String redactCmdForAudit(const String& argsInput,
+                         const CommandResolution& resolution);
 String redactOutputForLog(const String& output);
 
 // CLI validation macro - returns "VALID" early when gCLIValidateOnly is set.

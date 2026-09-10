@@ -10,6 +10,7 @@
  */
 
 #include <Arduino.h>
+#include <atomic>
 #include <ctype.h>
 #include <esp_app_desc.h>
 #include <esp_heap_caps.h>
@@ -242,6 +243,10 @@ extern const size_t rtcCommandsCount;
 #if ENABLE_PRESENCE_SENSOR
 extern const CommandEntry presenceCommands[];
 extern const size_t presenceCommandsCount;
+#endif
+#if ENABLE_LED_MATRIX
+extern const CommandEntry matrixCommands[];
+extern const size_t matrixCommandsCount;
 #endif
 #if ENABLE_CAMERA_SENSOR
 extern const CommandEntry cameraCommands[];
@@ -918,12 +923,20 @@ static bool isQuietPollCommand(const char* cmd) {
  * Format: [timestamp] user@transport command -> result_status
  * Lightweight, always-enabled, no overhead when disabled
  */
-void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, const char* result) {
+static bool commandExecutionLogSuppressed(const char* cmd) {
   // Skip validation-only commands (dry-run checks)
-  if (gCLIValidateOnly) return;
+  if (gCLIValidateOnly) return true;
 
   // Skip the audit log + broadcast for noisy read-only polls.
-  if (isQuietPollCommand(cmd)) return;
+  return isQuietPollCommand(cmd);
+}
+
+static void logCommandExecutionPrepared(const AuthContext& ctx,
+                                        const char* originalCmd,
+                                        const String& redactedCmd,
+                                        bool success,
+                                        const char* result) {
+  if (commandExecutionLogSuppressed(originalCmd)) return;
 
   // Build log entry
   char entry[512];
@@ -944,9 +957,6 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
     case SOURCE_UART: source = "uart"; break;
     default: source = "unknown"; break;
   }
-  
-  // Redact sensitive data from command
-  String redactedCmd = redactCmdForAudit(cmd);
   
   // Status indicator
   const char* status = success ? "OK" : "FAIL";
@@ -983,6 +993,17 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   // interleave with the reply. The echo still reaches serial / web / file /
   // OLED / G2.
   broadcastOutputCore_Routed(auditLine, strlen(auditLine), MSG_ROUTE_ALL & ~MSG_ROUTE_BLE);
+}
+
+void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success,
+                         const char* result) {
+  // Preserve the old cheap exit: quiet/validation-only commands never pay for
+  // command recognition or redaction.
+  if (commandExecutionLogSuppressed(cmd)) return;
+  const String command = cmd ? String(cmd) : String();
+  const CommandResolution resolution = resolveCommand(command);
+  const String redactedCmd = redactCmdForAudit(command, resolution);
+  logCommandExecutionPrepared(ctx, cmd, redactedCmd, success, result);
 }
 
 // Automation logging
@@ -1300,6 +1321,12 @@ const char* settingBoolToggle(bool& field, const String& argsInput, const char* 
 }
 
 String redactCmdForAudit(const String& argsInput) {
+  const CommandResolution resolution = resolveCommand(argsInput);
+  return redactCmdForAudit(argsInput, resolution);
+}
+
+String redactCmdForAudit(const String& argsInput,
+                         const CommandResolution& resolution) {
   String c = argsInput;
   String cl = c; cl.toLowerCase();
 
@@ -1374,7 +1401,7 @@ String redactCmdForAudit(const String& argsInput) {
   // enumerate misspellings, but "unknown verb ⇒ args are opaque" catches
   // them all. Recognized commands keep full args (that's the audit value);
   // an unknown verb's args have none.
-  if (!findCommand(c)) {
+  if (!resolution.entry) {
     if (verbEnd > verbStart && verbEnd < c.length()) {
       return c.substring(0, verbEnd) + " ***";
     }
@@ -1832,22 +1859,28 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   mem["psram_total_kb"] = (int)(ESP.getPsramSize() / 1024);
   mem["psram_free_kb"] = (int)(SelfDevice::psramFreeBytes() / 1024);
 
-  // Storage info (nested object with KB values)
+  // Storage info (nested object with KB values). This builder feeds periodic
+  // web/SSE telemetry as well as explicit status responses, so repeated calls
+  // use the presentation-only capacity snapshot. Admission paths (uploads,
+  // image saves, sensor logging) continue to call fresh VFS::getStats().
+  static constexpr uint32_t kSystemInfoStatsMaxAgeMs = 5000;
   JsonObject storage = doc["storage"].to<JsonObject>();
   {
-    uint64_t totalBytes = 0, usedBytes = 0, freeBytes = 0;
-    VFS::getStats(VFS::INTERNAL, totalBytes, usedBytes, freeBytes);
-    storage["total_kb"] = (int)(totalBytes / 1024);
-    storage["used_kb"] = (int)(usedBytes / 1024);
-    storage["free_kb"] = (int)(freeBytes / 1024);
+    VFS::CapacitySnapshot stats = {};
+    (void)VFS::getStatsSnapshot(VFS::INTERNAL, stats,
+                                kSystemInfoStatsMaxAgeMs);
+    storage["total_kb"] = (int)(stats.totalBytes / 1024);
+    storage["used_kb"] = (int)(stats.usedBytes / 1024);
+    storage["free_kb"] = (int)(stats.freeBytes / 1024);
   }
   if (VFS::isSDAvailable()) {
-    uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
-    if (VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree)) {
+    VFS::CapacitySnapshot stats = {};
+    if (VFS::getStatsSnapshot(VFS::SDCARD, stats,
+                              kSystemInfoStatsMaxAgeMs)) {
       JsonObject sd = storage["sd"].to<JsonObject>();
-      sd["total_mb"] = (int)(sdTotal / (1024 * 1024));
-      sd["used_mb"] = (int)(sdUsed / (1024 * 1024));
-      sd["free_mb"] = (int)(sdFree / (1024 * 1024));
+      sd["total_mb"] = (int)(stats.totalBytes / (1024 * 1024));
+      sd["used_mb"] = (int)(stats.usedBytes / (1024 * 1024));
+      sd["free_mb"] = (int)(stats.freeBytes / (1024 * 1024));
     }
   }
 
@@ -3048,12 +3081,14 @@ extern const size_t llmCommandsCount;
 static constexpr CommandModule gCommandModules[] = {
   { "cli",        "Help and CLI navigation", "The cli module is the on-device help and CLI navigation layer, not a feature "
     "subsystem. help opens a paged help browser: bare help shows the main menu listing "
-    "every registered module, help <module> drills into one module command page (and "
-    "prints that module subsystem overview at the top), and the special topics help "
+    "every registered module, help <module> drills into page 1 of that module (and "
+    "prints its subsystem overview at the top), and help <module> p<N> opens an "
+    "explicit later page. The special topics help "
     "sensors (aggregate view across all sensor modules), help all (show every command "
     "including hidden ones), and help tail (dump suppressed output) cover the rest. "
-    "While the browser is open the CLI is in a help state, so back steps from a module "
-    "page up to the main menu, exit leaves help mode entirely and returns to the normal "
+    "While the browser is open the CLI is in a help state, so p<N>, next and prev move "
+    "within a module, back steps from a module page up to the main menu, and exit leaves "
+    "help mode entirely and returns to the normal "
     "prompt, and clear wipes the CLI scrollback/history.", cliCommands,          &cliCommandsCount, CMD_MODULE_CORE, nullptr },
   { "system",     "Core system commands", "The system module holds core device commands that do not belong to any peripheral. "
     "Status and inspection: status (WiFi, filesystem, memory summary), uptime, time "
@@ -3183,6 +3218,14 @@ static constexpr CommandModule gCommandModules[] = {
     "immediate RGB controls are the separate ledcolor/ledeffect commands in the "
     "neopixel module.)", ledCommands,           &ledCommandsCount, 0, nullptr },
 #endif  // ENABLE_NEOPIXEL (neopixel + led modules)
+#if ENABLE_LED_MATRIX
+  { "matrix", "HT16K33 monochrome LED matrix", "matrix test draws an orientation pattern. matrix text HI, matrix pixel 3 2 on, "
+    "matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; "
+    "matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. "
+    "matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. "
+    "Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.",
+    matrixCommands, &matrixCommandsCount, 0, nullptr },
+#endif
 #if ENABLE_SERVO
   { "servo",      "PCA9685 servo motor control", "The PCA9685 is a 16-channel I2C PWM driver used to control hobby servos (and "
     "generic PWM outputs) without tying up the ESP32 own timers. servo <channel> "
@@ -3477,14 +3520,17 @@ static constexpr CommandModule gCommandModules[] = {
   { "settings",   "Device configuration and preferences", "The settings subsystem holds the device persisted configuration and the commands "
     "that change it. Each setting command (for example outserial, "
     "serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, "
-    "webclihistorysize) sets one value; writes normally go to RAM and are flushed to "
-    "the settings JSON on flash. Because flash writes are costly, you can batch them: "
-    "beginwrite defers all subsequent writes, then savesettings flushes everything in a "
-    "single write and ends the batch (savesettings is also the explicit flush-now "
-    "command after individual changes). Most commands here are admin-gated. Some "
+    "webclihistorysize) sets one value and normally requests an immediate settings-file "
+    "write. Because flash writes are costly, beginwrite and savesettings can coalesce "
+    "changes made by the same request or transport session: the final save writes each "
+    "changed settings file at most once. This is write coalescing, not a RAM transaction; "
+    "unrelated sources continue to persist immediately, and their full snapshot can "
+    "include live values changed while a batch is open. Idle batches expire after two "
+    "minutes. savesettings remains an explicit flush-now command when no batch is open. "
+    "Most commands here are admin-gated. Some "
     "changes only take effect after a reboot (for example espnowenabled and "
     "httpsEnabled are marked reboot required). The controls command emits a "
-    "machine-readable JSON descriptor of a module settable controls for UI use. Note "
+    "machine-readable JSON descriptor of a module's settable controls for UI use. Note "
     "that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) "
     "are owned and registered by their own modules; this module hosts the cross-cutting "
     "CLI/output/auth/time settings plus the batch-write machinery.", settingsCommands,     &settingsCommandsCount, 0, nullptr },
@@ -4955,7 +5001,10 @@ static bool callerMayTargetAnotherSession(const AuthContext& auth,
 
 // Centralized authorization for a command line and context.
 // Returns true if authorized, otherwise writes an error to 'out' and returns false.
-static bool authorizeCommand(const AuthContext& ctx, const String& line, char* out, size_t outSize) {
+static bool authorizeCommand(const AuthContext& ctx, const String& line,
+                             const CommandResolution& resolution,
+                             const String& redactedLine,
+                             char* out, size_t outSize) {
   const SessionControlForm sessionForm = classifySessionControlLine(line);
   if (sessionForm == SessionControlForm::TargetedLogin ||
       sessionForm == SessionControlForm::TargetedLogout) {
@@ -4964,7 +5013,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
       snprintf(out, outSize, "%s", denial ? denial : "Error: targeted session control denied.");
       char auditBuf[180];
       snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s",
-               redactCmdForAudit(line).c_str());
+               redactedLine.c_str());
       logAuthAttempt(false, ctx.path.c_str(),
                      ctx.user.length() ? ctx.user : String("(anonymous)"),
                      ctx.ip, auditBuf);
@@ -4993,7 +5042,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
     cmdName.trim();
     if (!cmdName.equalsIgnoreCase("login")) {
       snprintf(out, outSize, "Error: Authentication required.");
-      { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), "(anonymous)", ctx.ip, auditBuf); }
+      { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), "(anonymous)", ctx.ip, auditBuf); }
       return false;
     }
   }
@@ -5023,7 +5072,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
     int spacePos = line.indexOf(' ');
     if (spacePos > 0) cmdName = line.substring(0, spacePos);
     snprintf(out, outSize, "Error: Guest accounts are view-only. Only local login/logout and whoami are allowed.");
-    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
+    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
     return false;
   }
@@ -5031,19 +5080,25 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
   // so a super-only command is gated even if its table entry is not adminOnly.
   // A bonded session satisfies this (bond == super); a regular mesh/pair
   // account never does — the elevation lives entirely in isSuperAdminUser.
-  if (commandRequiresSuperAdmin(line) && !hasSuperAdminPrivilege(ctx)) {
+  const bool requiresSuperAdmin =
+      resolution.entry && resolution.entry->requiresSuperAdmin;
+  if (requiresSuperAdmin && !hasSuperAdminPrivilege(ctx)) {
     String cmdName = line;
     int spacePos = line.indexOf(' ');
     if (spacePos > 0) cmdName = line.substring(0, spacePos);
     snprintf(out, outSize, "Error: Super-admin access required for command '%s'.", cmdName.c_str());
-    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
+    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     if (ctx.user.length() > 0) {
       systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
     }
     return false;
   }
   // Admin-only protection via registry
-  if (commandRequiresAdmin(line) && !hasAdminPrivilege(ctx)) {
+  const bool requiresAdmin =
+      resolution.entry &&
+      (resolution.entry->requiresAdmin ||
+       resolution.entry->requiresSuperAdmin);
+  if (requiresAdmin && !hasAdminPrivilege(ctx)) {
     // Extract command name for better error message (keep legacy format)
     String cmdStr = line;
     String cmdName = cmdStr;
@@ -5052,7 +5107,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
       cmdName = cmdStr.substring(0, spacePos);
     }
     snprintf(out, outSize, "Error: Admin access required for command '%s'. Contact an administrator.", cmdName.c_str());
-    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
+    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     // A privileged command was refused. Post only when a username is resolved
     // (a LOGGED-IN, non-admin user) — anonymous/unauthenticated denials have no
     // subject and are covered by the login-failure event elsewhere.
@@ -5177,7 +5232,9 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   String command = cmd;
   command.trim();
 
-  const String safeCommandForTrace = redactCmdForAudit(command);
+  const CommandResolution commandResolution = resolveCommand(command);
+  const String safeCommandForTrace =
+      redactCmdForAudit(command, commandResolution);
   DEBUG_CMD_FLOWF("[execCmd] user=%s ip=%s path=%s cmd=%.80s", ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), safeCommandForTrace.c_str());
 
   const bool requiresLiveSession =
@@ -5194,7 +5251,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
              "Error: transport session changed before command execution.");
     char auditBuf[180];
     snprintf(auditBuf, sizeof(auditBuf), "stale_session cmd=%.150s",
-             redactCmdForAudit(command).c_str());
+             safeCommandForTrace.c_str());
     logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf);
     return false;
   }
@@ -5241,7 +5298,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   }
 
   // Centralized authorization (admin-required and future policies)
-  if (!authorizeCommand(ctx, command, out, outSize)) {
+  if (!authorizeCommand(ctx, command, commandResolution,
+                        safeCommandForTrace, out, outSize)) {
     return false;
   }
 
@@ -5300,7 +5358,11 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // exact-session policy for targeted login/logout. The peer still validates
     // the authenticated envelope and runs its own authorization as defense in
     // depth.
-    if (!authorizeCommand(ctx, actualCommand, out, outSize)) {
+    const CommandResolution remoteResolution = resolveCommand(actualCommand);
+    const String safeRemoteCommand =
+        redactCmdForAudit(actualCommand, remoteResolution);
+    if (!authorizeCommand(ctx, actualCommand, remoteResolution,
+                          safeRemoteCommand, out, outSize)) {
       return false;
     }
 
@@ -5370,9 +5432,9 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
       // writing the password to unencrypted flash. This branch returns before
       // executeCommand's logCommandExecution calls, so it never passed through
       // any redaction at all; it has to redact for itself.
-      String safeCommand = redactCmdForAudit(actualCommand);
-      snprintf(out, outSize, "Remote command sent: %s", safeCommand.c_str());
-      broadcastOutput("[REMOTE] Sent to bonded device: " + safeCommand);
+      snprintf(out, outSize, "Remote command sent: %s",
+               safeRemoteCommand.c_str());
+      broadcastOutput("[REMOTE] Sent to bonded device: " + safeRemoteCommand);
       return true;
     } else {
       strncpy(out, "Error: Failed to send remote command", outSize - 1);
@@ -5389,9 +5451,10 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // Continue with local command execution. Non-remote commands never touch
   // actualCommand, so `command` is already the line to run — no copy-back.
 
-  // Find command handler (findCommand does its own case-insensitive matching).
-  const CommandEntry* found = nullptr;
-  size_t foundLen = 0;
+  // Reuse the immutable registry row resolved before authorization. Interactive
+  // modes still get first crack below, including arbitrary non-registry input.
+  const CommandEntry* found = commandResolution.entry;
+  const size_t foundLen = commandResolution.matchedLength;
   bool registrySuccess = false;
 
   // Interactive CLI modes (help today; wizard/confirm in the future) get
@@ -5405,16 +5468,11 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // call shape lets other modes register without each one growing its own
   // dispatcher hook line here.
   if (cliModeDispatchInput(command, out, outSize)) {
-    return true;
-  }
-
-  // Standard command lookup using centralized findCommand() from system_utils.cpp
-  // This searches all module registries with longest-match semantics
-  if (!found) {
-    found = findCommand(command);
-    if (found) {
-      foundLen = strlen(found->name);
-    }
+    // Consumption is distinct from command success. Keep the same Error:
+    // contract used by registry handlers so transports can return a failure
+    // status without forcing the interactive mode to exit.
+    return !(out && (strncmp(out, "Error", 5) == 0 ||
+                     strncmp(out, "ERROR", 5) == 0));
   }
 
   if (found) {
@@ -5469,7 +5527,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     if (!handlerEnteredMode) {
       registrySuccess = (strncmp(out, "Error", 5) != 0) &&
                         (strncmp(out, "ERROR", 5) != 0);
-      logCommandExecution(ctx, cmd, registrySuccess, out);
+      logCommandExecutionPrepared(ctx, cmd, safeCommandForTrace,
+                                  registrySuccess, out);
       stampOkStatus(out, outSize, registrySuccess);  // stamp AFTER audit so the log keeps the raw result
     } else {
       registrySuccess = true;  // accepted prompt; resolution is audited later
@@ -5479,12 +5538,11 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     }
   } else {
     // Command not found
-    const String safeUnknown = redactCmdForAudit(command);
     snprintf(out, outSize, "Unknown command: %s\nType 'help' for available commands",
-             safeUnknown.c_str());
+             safeCommandForTrace.c_str());
     
     // Log failed command lookup
-    logCommandExecution(ctx, cmd, false, out);
+    logCommandExecutionPrepared(ctx, cmd, safeCommandForTrace, false, out);
   }
   // ===== END INLINED REGISTRY LOGIC =====
 
@@ -5504,7 +5562,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // targeted login/logout is never recorded as an authorization success.
   {
     char auditBuf[180];
-    snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(command).c_str());
+    snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s",
+             safeCommandForTrace.c_str());
     logAuthAttempt(registrySuccess, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf);
   }
   DEBUG_CMD_FLOWF("[execCmd] out_len=%zu", strlen(out));
@@ -5512,7 +5571,33 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 }
 
 // Queued command execution with deadlock avoidance
-bool submitAndExecuteSync(const Command& cmd, String& out) {
+void releaseSyncExecReqOwner(ExecReq* request) {
+  if (!request) return;
+
+  const uint32_t previous =
+      request->syncOwnerRefs.fetch_sub(1, std::memory_order_acq_rel);
+  configASSERT(previous > 0);
+  if (previous != 1) return;
+
+  // The final acq_rel decrement observes the other owner's pre-release writes,
+  // including syncTimedOut. Capture the diagnostic state, then finish cleanup
+  // before logging; never expose the command text (it may contain credentials).
+  const bool timedOut = request->syncTimedOut.load(std::memory_order_acquire);
+
+  SemaphoreHandle_t done = request->done;
+  request->done = nullptr;
+  if (done) vSemaphoreDelete(done);
+  request->~ExecReq();
+  free(request);
+
+  if (timedOut) {
+    DEBUG_CMD_FLOWF("[submitSync] timed-out request cleanup complete");
+  }
+}
+
+bool submitAndExecuteSync(const Command& cmd, String& out,
+                          bool* completedOut) {
+  if (completedOut) *completedOut = false;
   const size_t inputLength = cmd.line.length();
   if (!commandInputLengthAccepted(inputLength)) {
     if (inputLength == 0) {
@@ -5552,6 +5637,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     clearCurrentCommandContext();
     out = outBuf;
     free(outBuf);
+    if (completedOut) *completedOut = true;
     return ok;
   }
 
@@ -5587,9 +5673,29 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     broadcastOutput("[ERROR] Command queue is NULL");
     return false;
   }
-  BaseType_t queueResult = xQueueSend(gCmdExecQ, &r, pdMS_TO_TICKS(2000));
+
+  // Publish "the httpd task is blocked on cmd_exec_task" before the request
+  // can become visible. cmd_exec may receive on another core immediately after
+  // xQueueSend(), and a shutdown command must not observe a transient zero and
+  // enter httpd_stop() while this handler is waiting (including for queue room).
+#if ENABLE_HTTP_SERVER
+  const char* selfTaskName = pcTaskGetName(nullptr);
+  const bool waiterIsHttpd = (selfTaskName && strcmp(selfTaskName, "httpd") == 0);
+  if (waiterIsHttpd) gWebCmdWaiters.fetch_add(1, std::memory_order_release);
+#endif
+
+  // Reserve both owners before publishing the pointer. cmd_exec_task can run
+  // and complete as soon as xQueueSend succeeds, even before this task starts
+  // waiting on the semaphore.
+  r->syncOwnerRefs.store(2, std::memory_order_relaxed);
+  CmdExecItem syncItem;
+  syncItem.req = r;
+  BaseType_t queueResult = xQueueSend(gCmdExecQ, &syncItem, pdMS_TO_TICKS(2000));
   
   if (queueResult != pdTRUE) {
+#if ENABLE_HTTP_SERVER
+    if (waiterIsHttpd) gWebCmdWaiters.fetch_sub(1, std::memory_order_acq_rel);
+#endif
     DEBUG_CMD_FLOWF("[submitSync] queue full for '%.40s'", safeLineForTrace.c_str());
     vSemaphoreDelete(r->done);
     r->~ExecReq();
@@ -5600,54 +5706,37 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
   
   DEBUG_CMD_FLOWF("[submitSync] queued '%.40s' waiting...", safeLineForTrace.c_str());
 
-  // Publish "the httpd task is blocked on cmd_exec_task" for the duration of
-  // the wait. A command running on cmd_exec_task that tears down the HTTP
-  // server (closewifi, closehttp, radio power-off) must NOT call httpd_stop
-  // while this is non-zero: httpd_stop waits for the httpd task to exit, and
-  // that task is right here waiting for the command. See WebServer_Handle.h —
-  // httpServerStopSafe() defers the stop to the main loop instead.
-#if ENABLE_HTTP_SERVER
-  extern volatile int gWebCmdWaiters;
-  const char* selfTaskName = pcTaskGetName(nullptr);
-  const bool waiterIsHttpd = (selfTaskName && strcmp(selfTaskName, "httpd") == 0);
-  if (waiterIsHttpd) gWebCmdWaiters++;
-#endif
-
   // Timeout bumped from 10s → 60s to cover PBKDF2 (~12 s) and any other
-  // long-running synchronous command. The bigger fix is the `abandoned`
-  // flag below — even if a future command runs longer than 60 s, we no
-  // longer free `r` from under cmd_exec_task. See ExecReq::abandoned.
+  // long-running synchronous command. Caller and executor retain independent
+  // references, so either side may win at the exact timeout boundary without
+  // orphaning or prematurely freeing the request/semaphore.
   const BaseType_t syncTaken = xSemaphoreTake(r->done, pdMS_TO_TICKS(60000));
 
 #if ENABLE_HTTP_SERVER
-  if (waiterIsHttpd) gWebCmdWaiters--;
+  if (waiterIsHttpd) gWebCmdWaiters.fetch_sub(1, std::memory_order_acq_rel);
 #endif
 
   if (syncTaken != pdTRUE) {
-    Serial.printf("[DBG_CMD] [submitSync] TIMEOUT — abandoning r=%p line='%.60s'\n",
-                  r, safeLineForTrace.c_str());
-    DEBUG_CMD_FLOWF("[submitSync] TIMEOUT for '%.40s' — handing ownership to cmd_exec_task",
-                    safeLineForTrace.c_str());
-    // CRITICAL: cmd_exec_task may still be inside executeCommand at this
-    // point. We MUST NOT free `r` or delete the semaphore — that would
-    // produce a use-after-free or double-free. Instead, mark `r` as
-    // abandoned; cmd_exec_task sees the flag after executeCommand returns
-    // and takes over the cleanup (vSemaphoreDelete + ~ExecReq + free).
-    r->abandoned = true;
+    r->syncTimedOut.store(true, std::memory_order_release);
+    releaseSyncExecReqOwner(r);
+    ERROR_COMMANDF("sync command timed out after 60000 ms; command execution may continue; line='%.60s'",
+                   safeLineForTrace.c_str());
     out = "[ERROR] Command timed out";
     return false;
   }
 
   out = r->out;  // Copy from char array to String
   bool ok = r->ok;
+  if (completedOut) *completedOut = true;
 
-  vSemaphoreDelete(r->done);
-  // Call destructor and free PSRAM
-  r->~ExecReq();
-  free(r);
+  releaseSyncExecReqOwner(r);
 
   DEBUG_CMD_FLOWF("[submitSync] done ok=%d len=%d", ok ? 1 : 0, out.length());
   return ok;
+}
+
+bool submitAndExecuteSync(const Command& cmd, String& out) {
+  return submitAndExecuteSync(cmd, out, nullptr);
 }
 
 // Async command execution - fires and forgets, callback called on cmd_exec task
@@ -5687,7 +5776,9 @@ bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* us
   r->ok = false;
   
   // Queue for execution
-  if (xQueueSend(gCmdExecQ, &r, 0) != pdTRUE) {
+  CmdExecItem asyncItem;
+  asyncItem.req = r;
+  if (xQueueSend(gCmdExecQ, &asyncItem, 0) != pdTRUE) {
     DEBUG_CMD_FLOWF("[submitAsync] FAILED to queue command");
     r->~ExecReq();
     free(r);
@@ -5706,24 +5797,35 @@ bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* us
 // unavailable. This path drops silently by design (the caller is a time-critical
 // radio callback that must not block), which made a dropped BLE OTA frame or
 // checkpoint indistinguishable from a dead link. Surfaced via `otawrite status`.
-extern "C" volatile uint32_t gCmdExecDropCount = 0;
+namespace {
+std::atomic<uint32_t> sCmdExecDropCount{0};
+}
+
+extern "C" void cmdExecDropCountIncrement(void) {
+  // This counter carries no state; atomicity is the only ordering requirement.
+  sCmdExecDropCount.fetch_add(1, std::memory_order_relaxed);
+}
+
+extern "C" uint32_t cmdExecDropCountLoad(void) {
+  return sCmdExecDropCount.load(std::memory_order_relaxed);
+}
 
 // Returns true if successfully queued.
 bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg) {
   if (!fn) return false;
   if (gCmdExecQ == nullptr) return false;
 
-  ExecReq* r = (ExecReq*)ps_alloc(sizeof(ExecReq), AllocPref::PreferPSRAM, "cmd.exec.deferred");
-  if (!r) { gCmdExecDropCount++; return false; }
-  new (r) ExecReq();
+  // Allocates nothing. This used to take a whole ExecReq (6,384 B, from PSRAM)
+  // to carry two pointers, on a path that reads neither line[] nor ctx nor
+  // out[] -- ~8,700 times per BLE OTA image. The item now travels by value, so
+  // this path cannot fail for want of memory and cannot fragment the heap,
+  // which is also what lets it work on a board with no PSRAM at all.
+  CmdExecItem item;
+  item.deferredFn  = fn;
+  item.deferredArg = arg;
 
-  r->deferredFn  = fn;
-  r->deferredArg = arg;
-
-  if (xQueueSend(gCmdExecQ, &r, 0) != pdTRUE) {
-    r->~ExecReq();
-    free(r);
-    gCmdExecDropCount++;
+  if (xQueueSend(gCmdExecQ, &item, 0) != pdTRUE) {
+    cmdExecDropCountIncrement();
     return false;
   }
   return true;
@@ -5956,12 +6058,6 @@ bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, u
     return false;
   }
 
-  // For scale == 1.0, use native bitmap draw (faster)
-  if (scale >= 0.99f && scale <= 1.01f) {
-    display->drawBitmap(x, y, buffer, width, height, color);
-    return true;
-  }
-
   // Calculate output dimensions
   int outWidth = (int)(width * scale);
   int outHeight = (int)(height * scale);
@@ -5987,7 +6083,9 @@ bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, u
     return true;
   }
 
-  // Generic scaling for other factors (nearest neighbor)
+  // Generic scaling for other factors (nearest neighbor). This also handles
+  // 1.0x deliberately: embedded icon rows are LSB-first, while Adafruit's
+  // drawBitmap() consumes MSB-first bytes.
   float invScale = 1.0f / scale;
   for (int dy = 0; dy < outHeight; dy++) {
     for (int dx = 0; dx < outWidth; dx++) {

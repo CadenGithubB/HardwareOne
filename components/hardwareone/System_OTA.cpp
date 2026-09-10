@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <FS.h>
+#include <atomic>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,7 +21,7 @@
 #include "System_Debug.h"
 #include "System_Events.h"
 #include "System_SelfDevice.h"
-#include "System_MemUtil.h"  // ps_alloc — image hashing must not use cmd_exec_task's stack
+#include "System_MemUtil.h"  // PSRAM-preferred replies/JSON/hash storage, with internal fallback
 #include "System_Mutex.h"
 #include "System_VFS.h"
 #include "esp_app_format.h"
@@ -164,6 +165,20 @@ struct BleUploadSession {
 BleUploadSession gBleUpload;
 SemaphoreHandle_t gBleUploadMutex = nullptr;
 
+// Lock-free lifecycle snapshot for Bluetooth's connection sweep. That sweep
+// already owns BLE lifecycle state and therefore cannot take gBleUploadMutex
+// without inverting the lock order. Publish both facts in one atomic word so it
+// never observes `active` from one session and connId from another.
+constexpr uint32_t kBleUploadOwnerActive = 1u << 31;
+std::atomic<uint32_t> gBleUploadOwnerSnapshot{0};
+
+void publishBleUploadOwnerLocked() {
+  const uint32_t snapshot = gBleUpload.active
+      ? kBleUploadOwnerActive | static_cast<uint32_t>(gBleUpload.connId)
+      : 0u;
+  gBleUploadOwnerSnapshot.store(snapshot, std::memory_order_release);
+}
+
 // Diagnostics that must outlive a teardown, so `otawrite status` can explain a
 // transfer that already collapsed. Without these the whole staging path emitted
 // no evidence at all and failures could only be inferred from the peer's side.
@@ -174,9 +189,6 @@ uint32_t gBleUploadResumedFrom = 0;
 // the 5 s task-watchdog threshold is a measurement rather than an assumption.
 uint32_t gBleUploadResumeMs = 0;
 char gBleUploadLastTeardown[40] = "none";
-// Incremented by the shared command queue whenever a submission is dropped
-// because the queue was full (System_Utils.cpp).
-extern "C" volatile uint32_t gCmdExecDropCount;
 
 bool ensureBleUploadMutex() {
   if (gBleUploadMutex) return true;
@@ -234,6 +246,7 @@ void resetBleUploadLocked(bool removePartial, const char* reason = nullptr) {
   gBleUpload.warning[0] = '\0';
   memset(gBleUpload.authUser, 0, sizeof(gBleUpload.authUser));
   gBleUpload.resumedFrom = 0;
+  publishBleUploadOwnerLocked();
 }
 
 // Sidecar naming the contract a partial was written under, so a resume can
@@ -468,7 +481,7 @@ bool loadVerifiedManifest(const char* path,
     return false;
   }
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   const DeserializationError jsonError = deserializeJson(doc, file);
   file.close();
   JsonObjectConst root = doc.as<JsonObjectConst>();
@@ -836,9 +849,9 @@ void removeAllOtaFiles() {
 }
 
 #if ENABLE_BLUETOOTH
-const char* bleUploadJson(bool success, bool final, const char* error = nullptr) {
-  static char response[320];
-  JsonDocument doc;
+const char* bleUploadJson(char* response, size_t responseSize, bool success,
+                          bool final, const char* error = nullptr) {
+  PSRAM_JSON_DOC(doc);
   doc["success"] = success;
   doc["active"] = gBleUpload.active;
   doc["member"] = gBleUpload.member;
@@ -850,13 +863,16 @@ const char* bleUploadJson(bool success, bool final, const char* error = nullptr)
   // all and the cause could only be guessed at from the peer.
   doc["framesOk"] = gBleUploadFramesAccepted;
   doc["framesBad"] = gBleUploadFramesRejected;
-  doc["queueDrops"] = gCmdExecDropCount;
+  doc["queueDrops"] = cmdExecDropCountLoad();
   doc["resumedFrom"] = gBleUploadResumedFrom;
   doc["resumeMs"] = gBleUploadResumeMs;
   doc["lastTeardown"] = gBleUploadLastTeardown;
   if (error && error[0]) doc["error"] = error;
   else if (gBleUpload.warning[0]) doc["warning"] = gBleUpload.warning;
-  serializeJson(doc, response, sizeof(response));
+  if (doc.overflowed()) {
+    return "Error: OTA response allocation failed; upload state may have changed";
+  }
+  serializeJson(doc, response, responseSize);
   return response;
 }
 
@@ -883,9 +899,12 @@ const char* cmdOtaWrite(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (commandIsAutomation()) return "Error: otawrite is forbidden from automations";
 
-  static char error[192];
+  // Allocate both persistent replies before any upload mutation. In particular,
+  // finishing an upload must not first try to allocate its reply afterwards.
+  PSRAM_STATIC_BUF(error, 192);
+  PSRAM_STATIC_BUF(response, 320);
   uint16_t connId = 0;
-  if (!currentSecureBleConnection(connId, error, sizeof(error))) return error;
+  if (!currentSecureBleConnection(connId, error, error_SIZE)) return error;
   if (!ensureBleUploadMutex()) return "Error: OTA Bluetooth upload mutex unavailable";
 
   CommandArgs args(argsInput);
@@ -921,7 +940,7 @@ const char* cmdOtaWrite(const String& argsInput) {
     if (!parseSha256Hex(args.arg(3), expectedDigest)) {
       return "Error: OTA upload requires an exact 64-character SHA-256 digest";
     }
-    if (!otaUploadJournalStartable(error, sizeof(error))) return error;
+    if (!otaUploadJournalStartable(error, error_SIZE)) return error;
 
     String owner;
     if (!bleGetAuthenticatedUser(connId, owner) || owner.length() == 0) {
@@ -1050,7 +1069,6 @@ const char* cmdOtaWrite(const String& argsInput) {
       writeUploadMeta(path, static_cast<uint32_t>(parsed), expectedDigest, auth);
     }
 
-    gBleUpload.active = true;
     gBleUpload.connId = connId;
     snprintf(gBleUpload.member, sizeof(gBleUpload.member), "%s", member.c_str());
     snprintf(gBleUpload.authUser, sizeof(gBleUpload.authUser), "%s", owner.c_str());
@@ -1061,6 +1079,8 @@ const char* cmdOtaWrite(const String& argsInput) {
     gBleUploadResumedFrom = resumeFrom;
     gBleUpload.lastActivityMs = millis();
     memcpy(gBleUpload.expectedDigest, expectedDigest, sizeof(expectedDigest));
+    gBleUpload.active = true;
+    publishBleUploadOwnerLocked();
     {
       char detail[40];
       snprintf(detail, sizeof(detail), "%lu bytes%s",
@@ -1068,7 +1088,7 @@ const char* cmdOtaWrite(const String& argsInput) {
                resumeFrom > 0 ? " (resumed)" : "");
       systemEventPost(SYSEVT_OTA_UPLOAD_STARTED, gBleUpload.member, detail);
     }
-    const char* result = bleUploadJson(true, false);
+    const char* result = bleUploadJson(response, response_SIZE, true, false);
     xSemaphoreGive(gBleUploadMutex);
     return result;
   }
@@ -1081,7 +1101,7 @@ const char* cmdOtaWrite(const String& argsInput) {
 
   if (action == "status" && args.count() == 1) {
     gBleUpload.lastActivityMs = millis();
-    const char* result = bleUploadJson(!gBleUpload.failed, false,
+    const char* result = bleUploadJson(response, response_SIZE, !gBleUpload.failed, false,
                                        gBleUpload.failed ? gBleUpload.warning : nullptr);
     xSemaphoreGive(gBleUploadMutex);
     return result;
@@ -1105,7 +1125,7 @@ const char* cmdOtaWrite(const String& argsInput) {
   if (action == "finish" && args.count() == 1) {
     if (gBleUpload.failed || gBleUpload.received != gBleUpload.expected) {
       const char* detail = gBleUpload.failed ? gBleUpload.warning : "upload length is incomplete";
-      const char* result = bleUploadJson(false, false, detail);
+      const char* result = bleUploadJson(response, response_SIZE, false, false, detail);
       xSemaphoreGive(gBleUploadMutex);
       return result;
     }
@@ -1124,7 +1144,7 @@ const char* cmdOtaWrite(const String& argsInput) {
       systemEventPost(SYSEVT_OTA_UPLOAD_FINISHED,
                       gBleUpload.member[0] ? gBleUpload.member : "member",
                       "transport SHA-256 mismatch");
-      const char* result = bleUploadJson(false, false, "transport SHA-256 mismatch");
+      const char* result = bleUploadJson(response, response_SIZE, false, false, "transport SHA-256 mismatch");
       resetBleUploadLocked(true);
       xSemaphoreGive(gBleUploadMutex);
       return result;
@@ -1139,13 +1159,14 @@ const char* cmdOtaWrite(const String& argsInput) {
       if (VFS::existsGuarded(meta, auth)) (void)VFS::removeGuarded(meta, auth);
     }
     gBleUpload.active = false;
+    publishBleUploadOwnerLocked();
     {
       char bytes[24];
       snprintf(bytes, sizeof(bytes), "%lu bytes", (unsigned long)gBleUpload.expected);
       systemEventPost(SYSEVT_OTA_UPLOAD_FINISHED,
                       gBleUpload.member[0] ? gBleUpload.member : "member", bytes);
     }
-    const char* result = bleUploadJson(true, true);
+    const char* result = bleUploadJson(response, response_SIZE, true, true);
     xSemaphoreGive(gBleUploadMutex);
     return result;
   }
@@ -1245,6 +1266,12 @@ const char* cmdOtaWrite(const String&) {
 }
 #endif
 
+// Set once, on the trial boot after a Bluetooth-delivered update. Never
+// persisted and never written back to gSettings.bleAutoStart: this is a
+// one-boot hint, so a device whose owner has Bluetooth off keeps it off from
+// the next boot onward without anyone having to undo anything.
+bool gResumeBleAfterOta = false;
+
 void postResultEvent(const hw1_ota_record_t& record) {
   char detail[SYSEVT_DETAIL_LEN];
   snprintf(detail, sizeof(detail), "%s seq=%" PRIu32 " %.48s",
@@ -1340,7 +1367,9 @@ const char* cmdOtaStatus(const String& argsInput) {
     return "Error: Usage: otastatus [json]";
   }
 
-  static char output[1536];
+  // Replies outlive the handler, just as the former static arrays did. Allocate
+  // lazily and retain each buffer; missing/full PSRAM falls back to internal RAM.
+  PSRAM_STATIC_BUF(output, 1536);
   hw1_ota_record_t record{};
   hw1_ota_nvs_info_t info{};
   char journalReason[128]{};
@@ -1349,6 +1378,8 @@ const char* cmdOtaStatus(const String& argsInput) {
   const esp_partition_t* running = esp_ota_get_running_partition();
   esp_ota_img_states_t imageState = ESP_OTA_IMG_UNDEFINED;
   if (running) (void)esp_ota_get_state_partition(running, &imageState);
+  const esp_app_desc_t* runningDesc = esp_app_get_description();
+  const char* runningVersion = runningDesc ? runningDesc->version : "unknown";
   const AuthContext auth = VFS::systemAuth(VFS::Scopes::OTA, "hwone.ota_status");
   bool candidate = false;
   bool manifest = false;
@@ -1359,11 +1390,20 @@ const char* cmdOtaStatus(const String& argsInput) {
   }
 
   if (args.equalsIgnoreCase("json")) {
-    JsonDocument doc;
+    PSRAM_JSON_DOC(doc);
     doc["v"] = 1;
     doc["available"] = true;
     doc["board"] = HW1_OTA_BOARD_ID;
     doc["layout"] = HW1_OTA_LAYOUT_ID;
+    // Published so a client sizes a candidate against THIS layout's real slot
+    // rather than a compiled-in literal. The Android companion carried
+    // 0x5A0000 -- the same stale number otaSlotSize() above exists to replace,
+    // which is too large for the headless and 8 MB layouts and so accepts an
+    // image that only fails partway through flashing.
+    doc["slotSize"] = otaSlotSize();
+    // Lets a client preview the updater's downgrade rule before paying for a
+    // multi-minute transfer the device would refuse on arrival.
+    doc["runningVersion"] = runningVersion;
     doc["runningPartition"] = running ? running->label : "unknown";
     doc["runningImageState"] = static_cast<int>(imageState);
     doc["journalOk"] = journalOk;
@@ -1391,19 +1431,21 @@ const char* cmdOtaStatus(const String& argsInput) {
         doc["lastProbationAbortUptimeMs"] = abortUptimeMs;
       }
     }
-    serializeJson(doc, output, sizeof(output));
+    if (doc.overflowed()) return "Error: OTA status response allocation failed";
+    serializeJson(doc, output, output_SIZE);
     return output;
   }
 
-  snprintf(output, sizeof(output),
+  snprintf(output, output_SIZE,
            "OTA: native ESP-IDF recovery updater\n"
-           "Board/layout: %s / %s\n"
-           "Running: %s (image state %d)\n"
+           "Board/layout: %s / %s (ota_0 slot %" PRIu32 " bytes)\n"
+           "Running: %s v%s (image state %d)\n"
            "Journal: %s, seq=%" PRIu32 ", phase=%s, operation=%" PRIu64 "\n"
            "Staged pair: %s; recovery credential: %s\n"
            "Last result: %s seq=%" PRIu32 " %s%s%s",
-           HW1_OTA_BOARD_ID, HW1_OTA_LAYOUT_ID,
-           running ? running->label : "unknown", static_cast<int>(imageState),
+           HW1_OTA_BOARD_ID, HW1_OTA_LAYOUT_ID, otaSlotSize(),
+           running ? running->label : "unknown", runningVersion,
+           static_cast<int>(imageState),
            journalOk ? "OK" : journalReason, record.sequence,
            journalOk ? phaseName(record.phase) : "unavailable", record.operation_id,
            (candidate && manifest) ? "yes" : "no",
@@ -1442,11 +1484,13 @@ const char* cmdOtaPin(const String& argsInput) {
   if (!context || context->origin != ORIGIN_SERIAL) {
     return "Error: otapin is available only on the physical serial console";
   }
+  // Allocate before copying the secret so an early allocation failure cannot
+  // bypass the existing secret-clearing paths.
+  PSRAM_STATIC_BUF(error, 160);
   String passphrase = argsInput;
   passphrase.trim();
-  static char error[160];
   if (passphrase.equalsIgnoreCase("clear confirm")) {
-    if (!clearCredential(error, sizeof(error))) return error;
+    if (!clearCredential(error, error_SIZE)) return error;
     systemEventPost(SYSEVT_OTA_CREDENTIAL_CHANGED, "cleared",
                     currentAuthContext().user.c_str());
     return "Recovery credential cleared. Recovery mode will remain offline until otapin is set again.";
@@ -1463,7 +1507,7 @@ const char* cmdOtaPin(const String& argsInput) {
       return "Error: recovery credential must contain printable ASCII only";
     }
   }
-  const bool stored = storeCredential(passphrase, error, sizeof(error));
+  const bool stored = storeCredential(passphrase, error, error_SIZE);
   secureClearString(passphrase);
   if (!stored) return error;
   // subject distinguishes set from cleared, which the command audit log cannot:
@@ -1482,9 +1526,9 @@ const char* cmdOtaStage(const String& argsInput) {
     return "Error: Usage: otastage confirm [allow-downgrade]";
   }
 
-  static char response[240];
+  PSRAM_STATIC_BUF(response, 240);
   hw1_ota_record_t record{};
-  if (!loadRecord(record, nullptr, true, response, sizeof(response))) return response;
+  if (!loadRecord(record, nullptr, true, response, response_SIZE)) return response;
   if (hw1_ota_result_pending(&record)) {
     return "Error: review otastatus and run otaack <result-sequence> confirm before starting another OTA";
   }
@@ -1503,7 +1547,7 @@ const char* cmdOtaStage(const String& argsInput) {
 
   CandidateInfo candidate{};
   if (!validateCandidate(kCandidatePart, kManifestPart, allowDowngrade,
-                         candidate, response, sizeof(response))) {
+                         candidate, response, response_SIZE)) {
     // The signature/contract refusal reason is the whole value here - a
     // rejected candidate is either an operator mistake or someone feeding the
     // device an image it should not take.
@@ -1530,7 +1574,7 @@ const char* cmdOtaStage(const String& argsInput) {
 
   CandidateInfo promoted{};
   if (!validateCandidate(kCandidatePath, kManifestPath, allowDowngrade,
-                         promoted, response, sizeof(response)) ||
+                         promoted, response, response_SIZE) ||
       memcmp(promoted.digest, candidate.digest, sizeof(candidate.digest)) != 0) {
     return response[0] ? response : "Error: promoted candidate changed during staging";
   }
@@ -1538,14 +1582,25 @@ const char* cmdOtaStage(const String& argsInput) {
   uint64_t operationId = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
   if (operationId == 0) operationId = 1;
   const uint16_t flags = allowDowngrade ? HW1_OTA_REQUEST_ALLOW_DOWNGRADE : 0;
+  // NOTE: do NOT add transport hints to request_flags. The journal record is a
+  // contract shared with the factory recovery updater, which is a SEPARATE
+  // binary flashed at provisioning time and NOT refreshed by ota0-flash. Both
+  // hw1_ota_begin() and hw1_ota_record_validate() reject any bit outside
+  // HW1_OTA_REQUEST_KNOWN_FLAGS, so a flag the deployed updater has never heard
+  // of fails the record -- and a flag added here but not to that mask fails
+  // immediately (this is exactly what broke BLE staging on 2026-08-30: bit 3
+  // was added to the enum only, so every Bluetooth-staged `otastage confirm`
+  // returned INVALID_STATE after a full 4 MB upload). The BLE-resume hint
+  // belongs in the main app's own NVS, which survives the same reboot chain
+  // without putting the updater and the app into version lockstep.
   const hw1_ota_status_t begin = hw1_ota_begin(
       &record, operationId, HW1_OTA_SOURCE_STAGED_FILE, flags, &promoted.verified);
   if (begin != HW1_OTA_OK) {
-    snprintf(response, sizeof(response),
+    snprintf(response, response_SIZE,
              "Error: another OTA operation is active (state error %d)", (int)begin);
     return response;
   }
-  if (!commitRecord(record, response, sizeof(response))) return response;
+  if (!commitRecord(record, response, response_SIZE)) return response;
 
   // Only mention the credential when it is actually missing. This line used to
   // say "after setting otapin" unconditionally, which told operators of an
@@ -1554,7 +1609,7 @@ const char* cmdOtaStage(const String& argsInput) {
   // command their transport refuses.
   systemEventPost(SYSEVT_OTA_STAGED, promoted.verified.manifest.version,
                   allowDowngrade ? "allow-downgrade" : "normal");
-  snprintf(response, sizeof(response),
+  snprintf(response, response_SIZE,
            "Staged and journaled %s (%" PRIu32 " bytes). %s",
            promoted.verified.manifest.version, promoted.size,
            credentialConfigured()
@@ -1575,9 +1630,9 @@ const char* cmdOtaUpdate(const String& argsInput) {
     return "Error: set a recovery credential first - run otapin <12..63 characters> on the serial console";
   }
 
-  static char response[240];
+  PSRAM_STATIC_BUF(response, 240);
   hw1_ota_record_t record{};
-  if (!loadRecord(record, nullptr, false, response, sizeof(response))) return response;
+  if (!loadRecord(record, nullptr, false, response, response_SIZE)) return response;
   if (record.phase != HW1_OTA_PHASE_REQUESTED || !record.candidate_present ||
       record.source != HW1_OTA_SOURCE_STAGED_FILE) {
     return "Error: no journaled staged update; run otastage confirm first";
@@ -1588,7 +1643,7 @@ const char* cmdOtaUpdate(const String& argsInput) {
     FsLockGuard guard("ota.update.revalidate");
     if (!validateCandidate(kCandidatePath, kManifestPath,
                            (record.request_flags & HW1_OTA_REQUEST_ALLOW_DOWNGRADE) != 0,
-                           candidate, response, sizeof(response)) ||
+                           candidate, response, response_SIZE) ||
         !hw1_ota_record_candidate_matches_verified(&record,
                                                     &candidate.verified)) {
       hw1_ota_transition_args_t failure{
@@ -1604,12 +1659,12 @@ const char* cmdOtaUpdate(const String& argsInput) {
     }
   }
 
-  if (!powerIsSafe(forcePower, response, sizeof(response))) return response;
+  if (!powerIsSafe(forcePower, response, response_SIZE)) return response;
   if (forcePower) {
     record.request_flags |= HW1_OTA_REQUEST_FORCED_POWER_OVERRIDE;
-    if (!commitRecord(record, response, sizeof(response))) return response;
+    if (!commitRecord(record, response, response_SIZE)) return response;
   }
-  if (!bootRecoveryForRecord(record, response, sizeof(response))) return response;
+  if (!bootRecoveryForRecord(record, response, response_SIZE)) return response;
 
   systemEventPost(SYSEVT_OTA_RESULT, "recovery_armed", candidate.verified.manifest.version);
   systemEventPost(SYSEVT_OTA_RECOVERY_ENTERED, "operator",
@@ -1629,9 +1684,9 @@ const char* cmdOtaRecovery(const String& argsInput) {
     return "Error: set a recovery credential first - run otapin <12..63 characters> on the serial console";
   }
 
-  static char response[220];
+  PSRAM_STATIC_BUF(response, 220);
   hw1_ota_record_t record{};
-  if (!loadRecord(record, nullptr, true, response, sizeof(response))) return response;
+  if (!loadRecord(record, nullptr, true, response, response_SIZE)) return response;
   if (hw1_ota_result_pending(&record)) {
     return "Error: review otastatus and run otaack <result-sequence> confirm before starting another OTA";
   }
@@ -1641,12 +1696,12 @@ const char* cmdOtaRecovery(const String& argsInput) {
   const hw1_ota_status_t begin = hw1_ota_begin(
       &record, operationId, HW1_OTA_SOURCE_RECOVERY_UPLOAD, flags, nullptr);
   if (begin != HW1_OTA_OK) {
-    snprintf(response, sizeof(response),
+    snprintf(response, response_SIZE,
              "Error: another OTA operation is active (state error %d)", (int)begin);
     return response;
   }
-  if (!commitRecord(record, response, sizeof(response)) ||
-      !bootRecoveryForRecord(record, response, sizeof(response))) {
+  if (!commitRecord(record, response, response_SIZE) ||
+      !bootRecoveryForRecord(record, response, response_SIZE)) {
     return response;
   }
 
@@ -1663,9 +1718,9 @@ const char* cmdOtaCancel(const String& argsInput) {
   args.trim();
   if (args != "confirm") return "Error: Usage: otacancel confirm";
 
-  static char response[192];
+  PSRAM_STATIC_BUF(response, 192);
   hw1_ota_record_t record{};
-  if (!loadRecord(record, nullptr, false, response, sizeof(response))) return response;
+  if (!loadRecord(record, nullptr, false, response, response_SIZE)) return response;
   if (record.phase != HW1_OTA_PHASE_REQUESTED) {
     return "Error: only a staged/requested OTA can be canceled safely";
   }
@@ -1676,7 +1731,7 @@ const char* cmdOtaCancel(const String& argsInput) {
       .detail = "operator canceled before recovery boot was armed",
   };
   if (!transitionAndCommit(record, HW1_OTA_EVENT_CANCEL, &canceled,
-                           response, sizeof(response))) {
+                           response, response_SIZE)) {
     return response;
   }
   removeAllOtaFiles();
@@ -1695,7 +1750,7 @@ const char* cmdOtaResetJournal(const String& argsInput) {
   args.trim();
   if (args != "confirm") return "Error: Usage: otaresetjournal confirm";
 
-  static char response[192];
+  PSRAM_STATIC_BUF(response, 192);
   nvs_handle_t handle = 0;
   esp_err_t err = nvs_open(HW1_OTA_NVS_NAMESPACE, NVS_READWRITE, &handle);
   if (err == ESP_OK) {
@@ -1707,7 +1762,7 @@ const char* cmdOtaResetJournal(const String& argsInput) {
   if (err == ESP_OK) err = nvs_commit(handle);
   if (handle) nvs_close(handle);
   if (err != ESP_OK) {
-    snprintf(response, sizeof(response),
+    snprintf(response, response_SIZE,
              "Error: could not reset OTA journal keys: %s", esp_err_to_name(err));
     return response;
   }
@@ -1734,12 +1789,12 @@ const char* cmdOtaAcknowledge(const String& argsInput) {
   }
   const uint32_t sequence = static_cast<uint32_t>(parsedSequence);
 
-  static char response[192];
+  PSRAM_STATIC_BUF(response, 192);
   hw1_ota_record_t record{};
-  if (!loadRecord(record, nullptr, false, response, sizeof(response))) return response;
+  if (!loadRecord(record, nullptr, false, response, response_SIZE)) return response;
   if (!hw1_ota_result_pending(&record)) return "No pending OTA result to acknowledge";
   if (record.last_result.sequence != sequence) {
-    snprintf(response, sizeof(response),
+    snprintf(response, response_SIZE,
              "Error: pending OTA result is sequence %" PRIu32
              ", not %" PRIu32 "; rerun otastatus",
              record.last_result.sequence, sequence);
@@ -1747,12 +1802,12 @@ const char* cmdOtaAcknowledge(const String& argsInput) {
   }
   const hw1_ota_status_t status = hw1_ota_acknowledge_result(&record, sequence);
   if (status != HW1_OTA_OK) {
-    snprintf(response, sizeof(response),
+    snprintf(response, response_SIZE,
              "Error: OTA result acknowledgement failed (%d)", (int)status);
     return response;
   }
-  if (!commitRecord(record, response, sizeof(response))) return response;
-  snprintf(response, sizeof(response), "Acknowledged OTA result sequence %" PRIu32,
+  if (!commitRecord(record, response, response_SIZE)) return response;
+  snprintf(response, response_SIZE, "Acknowledged OTA result sequence %" PRIu32,
            sequence);
   return response;
 }
@@ -1770,6 +1825,26 @@ const char* unavailableStatus(const String&) {
 #endif  // HW1_OTA_LAYOUT
 
 }  // namespace
+
+bool otaBleUploadActiveOnConnection(uint16_t connId) {
+#if HW1_OTA_LAYOUT && ENABLE_BLUETOOTH
+  const uint32_t snapshot =
+      gBleUploadOwnerSnapshot.load(std::memory_order_acquire);
+  return (snapshot & kBleUploadOwnerActive) != 0 &&
+         static_cast<uint16_t>(snapshot) == connId;
+#else
+  (void)connId;
+  return false;
+#endif
+}
+
+bool otaSystemResumeBleRequested() {
+#if HW1_OTA_LAYOUT
+  return gResumeBleAfterOta;
+#else
+  return false;
+#endif
+}
 
 bool otaBleHandleEncryptedFrame(uint16_t connId, const uint8_t* frame, size_t size) {
 #if HW1_OTA_LAYOUT && ENABLE_BLUETOOTH
@@ -1995,6 +2070,9 @@ void otaSystemInitAfterStorage() {
       (imageState == ESP_OTA_IMG_NEW || imageState == ESP_OTA_IMG_PENDING_VERIFY) &&
       (record.phase == HW1_OTA_PHASE_TRIAL_BOOT_ARMED ||
        record.phase == HW1_OTA_PHASE_IMAGE_VERIFIED)) {
+    // BLE-resume latch intentionally absent: see the note in cmdOtaStage. The
+    // hint must not ride the journal record, so otaSystemResumeBleRequested()
+    // stays false until it is re-homed in the main app's own NVS.
     if (!transitionAndCommit(record, HW1_OTA_EVENT_TRIAL_STARTED, nullptr,
                              reason, sizeof(reason))) {
       ESP_LOGE(kTag, "%s", reason);
