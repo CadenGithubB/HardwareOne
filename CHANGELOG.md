@@ -8,6 +8,75 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.94] - 2026-09-10
+
+This release hardens the boundaries where long-lived firmware services meet:
+command execution, settings persistence, radio teardown, filesystem output,
+I2C transactions, and web responses. It also adds an HT16K33 LED-matrix driver
+and a browser power-status surface. More task-context buffers now prefer PSRAM,
+with checked internal fallback.
+
+### Added
+- HT16K33 monochrome LED matrices support 16x8 and single-panel 8x8 layouts,
+  rotation, brightness, blink, text, pixels, selectable I2C bus/address, and a
+  diagnostic pattern through the new `matrix` command module.
+- The Power web page and `power json` expose live CPU frequency, display and
+  idle-power state, supported sleep modes, and the interlocks currently
+  preventing a sleep transition.
+- Host coverage grows to 45 sanitized tests, including production state-machine
+  cores for command lookup, help paging, settings batching, MQTT lifecycle,
+  I2C transaction policy, filesystem capacity caching, sensor lifetime, file
+  output, OTA replies, and web response policy.
+
+### Changed
+- The existing help display now keeps page boundaries stable while device state
+  changes, wraps long text safely, and respects both byte and display-frame
+  limits across serial, web, BLE, OLED, and glasses output.
+- Command lookup is allocation-free and resolved once for authorization,
+  redaction, logging, and execution. Synchronous requests now use explicit
+  shared ownership across executor completion and caller timeout.
+- Settings write batching is scoped to the originating request or session,
+  tracks main and debug files independently, verifies complete writes before
+  replacement, and retains failed persistence for bounded retry.
+- File listings, file reads, G2 file rendering, web batch replies, and OTA
+  command responses use checked caller-owned PSRAM-preferred buffers without
+  publishing partial output after allocation failure.
+- I2C device identity and health are separated from per-transaction clock,
+  bus, and lock-wait policy. Optional sensor wrapper objects prefer PSRAM and
+  pair placement construction with explicit destruction on every exit path.
+- Unused web/OLED icon representations and feature-specific assets compile out
+  with their owning feature. LLM diagnostic scans and calculations no longer
+  run when their debug output is disabled.
+
+### Fixed
+- MQTT command callbacks can no longer race client stop/destroy, and BLE stack
+  teardown resumes safely after a partially failed controller or host phase.
+- ESP-NOW registry writes are atomic, persisted metadata is bounded and safely
+  migrated, fixed-width wire strings are terminated before use, and topology
+  collection rejects unexpected, duplicate, late, or internally inconsistent
+  frames.
+- Filesystem permission metadata now uses canonical paths and capability scope;
+  presentation capacity reads use generation-fenced snapshots while admission
+  decisions remain fresh.
+- Sensor and RTC shutdown paths no longer force-delete C++ tasks that may own
+  locks. Multi-bus discovery, presence polling, FM seek completion, OLED bus
+  ownership, and sensor health attribution use the configured physical bus.
+- G2 health history deduplicates samples across the live series and its graph
+  no longer draws a false vertical spike at the newest point.
+- Recovery networking retains live resources after a partial stop failure and
+  refuses a new start until teardown can safely finish.
+
+### Security
+- Browser file responses install restrictive content security and no-store
+  policies before streaming; SVG files receive an opaque origin so embedded
+  scripts and authenticated same-origin requests cannot execute.
+- Authentication consolidates credential-roster reads, removes redundant path
+  probes, lazily resolves command admin status, and derives an entered PBKDF2
+  password only once when checking multiple credential forms.
+- Repository ignores now cover serial captures, Bluetooth snoops, private
+  signing material, and internal security-review documents that may contain
+  credentials or exploit details.
+
 ## [0.99.92] - 2026-08-26
 
 The largest release since the OTA work, and most of it is things that were quietly broken. The glasses get a real QWERTY keyboard and stop inventing taps out of app-lifecycle traffic, `closewifi` stops crashing the board outright, recovery OTA grows past the FeatherS3 to four boards, `memreport` measures what it used to estimate, dictation works from the glasses instead of only the on-device screen, a corrupt config file is quarantined instead of deleted, and credential redaction in the audit log fails closed instead of falling back to the raw line.
