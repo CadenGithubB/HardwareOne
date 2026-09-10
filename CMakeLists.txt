@@ -514,9 +514,9 @@ endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 if(_ota_layout)
-    set(PROJECT_VER "0.99.92+${_ota_version_suffix}")
+    set(PROJECT_VER "0.99.94+${_ota_version_suffix}")
 else()
-    set(PROJECT_VER "0.99.92")
+    set(PROJECT_VER "0.99.94")
 endif()
 project(hardwareone-idf)
 
