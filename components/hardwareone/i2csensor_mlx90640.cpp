@@ -24,7 +24,6 @@
 #endif
 
 // External dependencies still needed
-extern TwoWire Wire1;
 // sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h
 
 // ============================================================================
@@ -113,7 +112,6 @@ static int16_t* g_localFrame = nullptr;
 // Forward declarations (implementations in main .ino)
 extern bool thermalInit();
 extern bool thermalPoll();
-extern void i2cSetDefaultWire1Clock();
 
 // MIN_RESTART_DELAY_MS defined in System_I2C.h
 
@@ -271,7 +269,8 @@ const char* cmd_thermalstart(const String& argsInput) {
     return "[Thermal] Already queued";
   }
 
-  if (!i2cPingAddress(I2C_ADDR_THERMAL, 100000, 50)) {
+  if (!i2cPingAddress(I2C_ADDR_THERMAL, 100000, 50,
+                      (uint8_t)gSettings.thermalBus)) {
     return "Error: [Thermal] Not detected on I2C bus";
   }
 
@@ -525,17 +524,19 @@ const char* cmd_thermalrotation(const String& argsInput) {
 // ============================================================================
 
 bool thermalInit() {
-  extern void i2cSetDefaultWire1Clock();
   extern bool gMlx90640Initialized;
   
   if (gMLX90640 != nullptr) {
     return true;
   }
   
-  // Use i2cTransaction wrapper for safe mutex + clock management
-  return i2cDeviceTransaction(I2C_ADDR_THERMAL, 100000, 3000, [&]() -> bool {
-    // Wire1 is configured centrally with runtime-configurable pins
-    i2cSetDefaultWire1Clock();
+  const uint8_t thermalBus = (uint8_t)gSettings.thermalBus;
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  TwoWire* thermalWire = mgr ? mgr->getWire(thermalBus) : nullptr;
+  if (!thermalWire) return false;
+
+  // Use the same configured bus for the manager lock and the library object.
+  return i2cDeviceTransaction(thermalBus, I2C_ADDR_THERMAL, 100000, 3000, [&]() -> bool {
     
     // Allocate the sensor object in PSRAM via placement-new. Its ~4.7 KB is an
     // inline paramsMLX90640 calibration struct (alpha/offset/kta/kv[768]), so the
@@ -546,7 +547,7 @@ bool thermalInit() {
     if (!mlxBuf) return false;
     gMLX90640 = new (mlxBuf) Adafruit_MLX90640();
 
-    if (!gMLX90640->begin(MLX90640_I2CADDR_DEFAULT, &Wire1)) {
+    if (!gMLX90640->begin(MLX90640_I2CADDR_DEFAULT, thermalWire)) {
       ps_delete(gMLX90640);
       gMLX90640 = nullptr;
       return false;
@@ -722,7 +723,8 @@ bool thermalPoll() {
     
     // Check I2C health for this device
     I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-    I2CDevice* dev = mgr ? mgr->getDeviceAnyBus(I2C_ADDR_THERMAL) : nullptr;
+    I2CDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL,
+                                          (uint8_t)gSettings.thermalBus) : nullptr;
     if (dev) {
       const I2CDevice::Health& h = dev->getHealth();
       ERROR_THERMALF("  I2C Health: degraded=%d consec=%d total=%d NACK=%d TIMEOUT=%d",
@@ -1288,7 +1290,8 @@ const char* cmd_thermaldiag(const String& argsInput) {
   
   // Check I2C device health
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  I2CDevice* dev = mgr ? mgr->getDeviceAnyBus(I2C_ADDR_THERMAL) : nullptr;
+  const uint8_t thermalBus = (uint8_t)gSettings.thermalBus;
+  I2CDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL, thermalBus) : nullptr;
   
   if (dev) {
     const I2CDevice::Health& h = dev->getHealth();
@@ -1324,7 +1327,8 @@ const char* cmd_thermaldiag(const String& argsInput) {
       }
       
       // Probe the device with mutex protection
-      uint8_t result = i2cProbeAddress(I2C_ADDR_THERMAL, testClocks[i], 200);
+      uint8_t result = i2cProbeAddress(I2C_ADDR_THERMAL, testClocks[i], 200,
+                                       thermalBus);
       
       const char* resultStr = "?";
       switch (result) {
@@ -1528,7 +1532,8 @@ void thermalTask(void* parameter) {
       }
     }
 
-    if (gThermalRunning && gThermalConnected && gMLX90640 != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
+    const uint8_t thermalBus = (uint8_t)gSettings.thermalBus;
+    if (gThermalRunning && gThermalConnected && gMLX90640 != nullptr && !pollPaused(thermalBus)) {
       unsigned long nowMs = millis();
       unsigned long pollMs = (gSettings.thermalDevicePollMs > 0) ? (unsigned long)gSettings.thermalDevicePollMs : 100;
       bool ready = true;
@@ -1541,7 +1546,7 @@ void thermalTask(void* parameter) {
         bool ok = false;
         
         // Thermal frame read takes 400-800ms at 100kHz (768 pixels); needs generous timeout
-        ok = i2cTaskWithTimeout(I2C_ADDR_THERMAL, thermalHz, 1500, [&]() -> bool {
+        ok = i2cTaskWithTimeout(thermalBus, I2C_ADDR_THERMAL, thermalHz, 1500, [&]() -> bool {
           return thermalPoll();
         });
         
@@ -1549,7 +1554,7 @@ void thermalTask(void* parameter) {
         
         // Auto-disable if too many consecutive failures (like gamepad does)
         if (!ok) {
-          if (i2cShouldAutoDisable(I2C_ADDR_THERMAL)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_THERMAL, (uint8_t)gSettings.thermalBus)) {
             ERROR_THERMALF("Too many consecutive thermal failures - auto-disabling");
             gThermalRunning = false;
             sensorStatusBumpWith("thermal@auto_disabled");

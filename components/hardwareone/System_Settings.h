@@ -261,6 +261,8 @@ struct Settings {
       oledBus(OLED_BUS_DEFAULT),  // FeatherS3[D] → 1 (LDO2-gated rail); other boards → 0
       inputBus(0), gpsBus(0), rtcBus(0), fmRadioBus(0),
       presenceBus(0), imuBus(0), thermalBus(0), tofBus(0), apdsBus(0), servoBus(0),
+      matrixBus(0), matrixAddress(0x70), matrixBrightness(4), matrixRotation(1),
+      matrixSquare(false), matrixPanel(0),
       fuelGaugeBus(0),
       ledStartupEnabled(true),
 #if ENABLE_NEOPIXEL
@@ -873,6 +875,12 @@ struct Settings {
   int tofBus;               // VL53L4CX time-of-flight (compiled out)
   int apdsBus;              // APDS9960 gesture/proximity (compiled out)
   int servoBus;             // PCA9685 16-channel servo (compiled out)
+  int matrixBus;            // HT16K33: 0 = I2C1, 1 = I2C2; reboot after routing changes
+  int matrixAddress;        // 0x70..0x77, matching the backpack solder jumpers
+  int matrixBrightness;     // Global brightness 0..15 (0 is dimmest, not off)
+  int matrixRotation;       // GFX rotation 0..3; 1/3 give landscape 16x8
+  bool matrixSquare;        // Use just one 8x8 square, keeping the other blank
+  int matrixPanel;          // Physical square 0/1, unaffected by rotation
   int fuelGaugeBus;         // MAX17048G LiPo fuel gauge (FeatherS3[D] on-board)
   // Hardware settings (LED). ledStartupEnabled stays unconditional: the
   // deliberately-unconditional FeatureRegistry `led` row points at it
@@ -1203,6 +1211,24 @@ void debugSettingsMarkLoadedOk();
 bool writeDebugJson();   // persist the debug module to DEBUG_JSON_FILE
 bool readDebugJson();    // load the debug module from DEBUG_JSON_FILE
 
+// Central persistence requests used by every ordinary settings mutation.
+// They write immediately when the caller has no matching coalescing scope, or
+// mark the appropriate file dirty when it does. A coalesced request is accepted
+// and returns true; the owning savesettings/finalizer reports the eventual write.
+// Low-level boot/recovery code that deliberately requires an immediate force
+// write may continue to call writeSettingsJson()/writeDebugJson() directly.
+bool requestSettingsPersist();
+bool requestDebugSettingsPersist();
+
+// /api/cli/batch stamps one unique value into every queued CommandContext.
+// Its finalizer is submitted through the same command executor, so it stays
+// ordered behind commands whose synchronous HTTP wait may have timed out.
+uint32_t allocateSettingsWriteBatchId();
+
+// Reap abandoned owner batches and retry retained failed writes. Cheaply
+// self-throttled; call from the main loop.
+void settingsWriteBatchTick();
+
 // Fire SYSEVT_SETTING_CHANGED for a field mutated via setSetting(). setSetting() is
 // name-agnostic (it only has the field reference), so this reverse-looks-up the
 // registered SettingEntry by valuePtr for the setting's name + type. A field with no
@@ -1216,20 +1242,23 @@ void applySettings();
 // Centralized Setting Mutator — auto-persists on change
 // ============================================================================
 // Use setSetting(gSettings.field, newValue) instead of direct assignment
-// to ensure writeSettingsJson() is called automatically.
+// to ensure main-settings persistence is requested automatically.
 // Only writes to flash when the value actually changes (no churn).
 //
-// Batch mode: call beginwrite before a group of setSetting() calls, then
-// savesettings after. This defers the flash write to a single call at the end.
-// From the web UI, save buttons use this pattern automatically.
-// From the serial CLI, each setSetting() writes immediately as before.
-extern volatile bool gDeferWrites;
+// Batch mode coalesces writes: call beginwrite before a group of setSetting()
+// calls, then savesettings after. Coalescing is owned by that request/session
+// rather than a process-global switch, so another transport's mutation still
+// persists. It is not a RAM transaction: unrelated full snapshots can include
+// the current live values while a batch is open.
+// From the web UI, save buttons use a request-scoped batch automatically.
+// From the serial CLI, each setSetting() writes immediately unless the same
+// serial session explicitly opened a batch.
 
 template<typename T>
 inline void setSetting(T& field, const T& value) {
   if (field != value) {
     field = value;
-    if (!gDeferWrites) writeSettingsJson();
+    (void)requestSettingsPersist();
     notifySettingChanged(&field);  // fire setting_changed for the registered setting (if any)
   }
 }
@@ -1238,7 +1267,7 @@ inline void setSetting(T& field, const T& value) {
 inline void setSetting(String& field, const String& value) {
   if (field != value) {
     field = value;
-    if (!gDeferWrites) writeSettingsJson();
+    (void)requestSettingsPersist();
     notifySettingChanged(&field);
   }
 }
@@ -1247,20 +1276,20 @@ inline void setSetting(String& field, const String& value) {
 inline void setSetting(String& field, const char* value) {
   if (field != value) {
     field = value;
-    if (!gDeferWrites) writeSettingsJson();
+    (void)requestSettingsPersist();
     notifySettingChanged(&field);
   }
 }
 
 // Debug-module fields persist to DEBUG_JSON_FILE, not settings.json. This mirrors
-// setSetting() but routes the auto-write to writeDebugJson(), so a debug toggle
+// setSetting() but routes the persistence request to debug.json, so a debug toggle
 // only rewrites the small debug file. Used by every debug command in
 // System_Debug.cpp. (writeDebugJson() is declared above.)
 template<typename T>
 inline void setDebugSetting(T& field, const T& value) {
   if (field != value) {
     field = value;
-    if (!gDeferWrites) writeDebugJson();
+    (void)requestDebugSettingsPersist();
   }
 }
 

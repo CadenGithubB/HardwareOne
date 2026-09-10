@@ -10,6 +10,7 @@
 #include <Adafruit_seesaw.h>
 #include <Arduino.h>
 #include <Wire.h>
+#include <new>
 #include <esp_heap_caps.h>
 
 #include "OLED_Display.h"
@@ -26,6 +27,8 @@
 // Module state
 // ============================================================================
 TaskHandle_t gAnoEncoderTaskHandle = nullptr;
+// Retained across stops/retries; PSRAM-preferred placement-new needs ps_delete
+// if an explicit teardown is introduced. Wire/BusIO storage stays separate.
 Adafruit_seesaw* gAnoSeesaw = nullptr;
 AnoEncoderCache  gAnoEncoderCache;
 
@@ -151,11 +154,13 @@ bool anoEncoderInit() {
   }
 
   if (!gAnoSeesaw) {
-    gAnoSeesaw = new Adafruit_seesaw(wire);
-    if (!gAnoSeesaw) {
+    void* anoObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPSRAM,
+                              "input.ano.obj");
+    if (!anoObjBuf) {
       ERROR_ANO_ENCODERF("Failed to allocate Adafruit_seesaw for ANO");
       return false;
     }
+    gAnoSeesaw = new (anoObjBuf) Adafruit_seesaw(wire);
   }
 
   const uint8_t addr = anoI2cAddr();
@@ -650,9 +655,10 @@ void inputTask(void* parameter) {
 
           prevButtons = btns;
         } else if (!readOk) {
-          uint8_t errors = i2cGetConsecutiveErrors(anoI2cAddr());
+          uint8_t errors = i2cGetConsecutiveErrors(anoI2cAddr(),
+                                                   (uint8_t)gSettings.inputBus);
           WARN_ANO_ENCODERF("[ANO_TASK] I2C read failure (consecutive: %u)", errors);
-          if (i2cShouldAutoDisable(anoI2cAddr())) {
+          if (i2cShouldAutoDisable(anoI2cAddr(), (uint8_t)gSettings.inputBus)) {
             ERROR_ANO_ENCODERF("[ANO_TASK] Too many failures - auto-disabling");
             handleDeviceStopped(I2C_DEVICE_INPUT);
             logSystemEvent("SENSOR", "ANO Encoder auto-disabled after %u consecutive I2C failures", errors);

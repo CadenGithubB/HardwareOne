@@ -19,6 +19,9 @@
 
 // Global display instance
 DisplayDriver* gDisplay = nullptr;
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+uint8_t gDisplayI2cAddress = DISPLAY_I2C_ADDR_ALT;
+#endif
 
 /**
  * Initialize display hardware based on DISPLAY_TYPE
@@ -77,6 +80,11 @@ bool displayInit() {
     delete gDisplay;
     gDisplay = nullptr;
     return false;
+  }
+
+  gDisplayI2cAddress = detectedAddr;
+  if (I2CDeviceManager* mgr = I2CDeviceManager::getInstance()) {
+    mgr->registerDevice(detectedAddr, "SSD1306", oledBus);
   }
   
   // Clear the display buffer and push to OLED via transaction-wrapped update
@@ -167,10 +175,10 @@ void displayUpdate() {
   // Use bus-aware device transaction. Routes mutex/clock to the OLED's
   // configured bus (gSettings.oledBus). Run at 400kHz to reduce bus hold
   // time (~20ms vs ~80ms at 100kHz); SSD1306 supports up to 400kHz I2C.
-  // Short timeout (15ms) so OLED yields to higher-priority devices on the
+  // Short bus-lock wait (15ms) so OLED yields to higher-priority devices on the
   // SAME bus. If the bus is busy, this frame is skipped and retried next
   // cycle — no visible flicker.
-  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 15, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, gDisplayI2cAddress, 400000, 15, [&]() {
     gDisplay->display();  // Push framebuffer to OLED (~20ms at 400kHz)
   });
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341

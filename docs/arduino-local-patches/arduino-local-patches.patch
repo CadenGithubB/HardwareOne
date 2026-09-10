@@ -2646,3 +2646,19 @@ index 195499c51..e302251f2 100644
  #ifndef ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE
  #define ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE 4096
  #endif
+diff --git a/libraries/WiFi/src/STA.cpp b/libraries/WiFi/src/STA.cpp
+index 36577a38b..223b29082 100644
+--- a/libraries/WiFi/src/STA.cpp
++++ b/libraries/WiFi/src/STA.cpp
+@@ -73,6 +73,11 @@ static bool _is_staReconnectableReason(uint8_t reason) {
+     case WIFI_REASON_ASSOC_NOT_AUTHED:
+     case WIFI_REASON_MIC_FAILURE:
+     case WIFI_REASON_IE_IN_4WAY_DIFFERS:
++    // [hardwareone local patch 2026-08-28] MISSING_ACKS is a transient link
++    // failure, not an intentional disconnect. Without this case a device can
++    // remain offline forever after reason 34 despite auto-reconnect being on.
++    // Reason-based handling is independent of board, RSSI, and antenna type.
++    case WIFI_REASON_MISSING_ACKS:
+     case WIFI_REASON_INVALID_PMKID:
+     case WIFI_REASON_BEACON_TIMEOUT:
+     case WIFI_REASON_NO_AP_FOUND:

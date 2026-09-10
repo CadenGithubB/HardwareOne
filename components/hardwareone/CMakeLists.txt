@@ -387,6 +387,7 @@ if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
         i2csensor_ds3231.cpp
         i2csensor_sths34pf80.cpp
         i2csensor_pca9685.cpp
+        i2csensor_ht16k33.cpp
         i2csensor_max17048.cpp
     )
     # Input device: exactly one of the two drivers compiles in. Both own the
@@ -496,6 +497,7 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
             WebPage_Speech.cpp
             WebPage_MQTT.cpp
             WebPage_Battery.cpp
+            WebPage_Power.cpp
             WebServer_MigrationTool.cpp
     )
     # Maps / Games web pages: tied to their feature flags. Their .cpp
@@ -574,6 +576,8 @@ idf_component_register(
         .
     REQUIRES
         ${hardwareone_requires}
+    LDFRAGMENTS
+        esp32_camera_psram.lf
 )
 
 # Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)

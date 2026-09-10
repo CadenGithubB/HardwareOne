@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <FS.h>
 #include "System_User.h"   // AuthContext (for the *Guarded variants)
+#include "System_VFSCapacityCache.h"
 
 // ============================================================================
 // VFS — Virtual File System dispatcher
@@ -124,7 +125,29 @@ bool remove(const String& path);
 bool rename(const String& pathFrom, const String& pathTo);
 bool rmdir(const String& path);
 
+// Authoritative capacity query. This legacy API always samples the backing
+// filesystem; it never serves the snapshot cache below. Keep admission and
+// correctness decisions (uploads, captures, log start) on this API.
 bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint64_t& freeBytes);
+
+/**
+ * Opt-in capacity snapshot for presentation/telemetry callers.
+ *
+ * maxAgeMs == 0 is explicitly fresh and samples the backing filesystem. A
+ * non-zero max age may reuse the newest successful sample for that storage
+ * tier. Successful fresh getStats() calls also seed this cache, but cached
+ * calls never change getStats()'s fresh semantics.
+ *
+ * Returns false when the requested tier is unavailable. On false, `out` is
+ * left unchanged, matching the legacy out-parameter contract.
+ */
+bool getStatsSnapshot(StorageType type, CapacitySnapshot& out,
+                      uint32_t maxAgeMs = 0);
+
+/** Invalidate one tier's presentation snapshot. AUTO follows the existing
+ * getStats routing rule and addresses INTERNAL. Generation fencing prevents a
+ * slow in-flight refresh from publishing across this invalidation. */
+void invalidateStatsSnapshot(StorageType type);
 
 // ============================================================================
 // Guarded VFS — single enforcement point for filesystem permissions

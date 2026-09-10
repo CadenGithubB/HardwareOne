@@ -170,7 +170,7 @@ void oledEspNowShowNameKeyboard() {
   if (gSettings.espnowDeviceName.length() > 0) {
     initialText = gSettings.espnowDeviceName.c_str();
   }
-  oledKeyboardInit("Device Name:", initialText, 20,
+  oledKeyboardInit("Device Name:", initialText, 19,
                    OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
 }
 

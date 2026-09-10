@@ -52,18 +52,12 @@ inline void streamEspNowInner(httpd_req_t* req) {
 .interact-tab-active{background:var(--accent);color:var(--panel-bg);border-color:var(--accent)}
 .message-action-btn{background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border)}
 .message-action-btn:hover{background:var(--hover-bg)}
-.file-mode-toggle{background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);transition:background .15s,border-color .15s,color .15s}
-.file-mode-toggle.file-mode-active{background:var(--accent);color:var(--panel-bg);border-color:var(--accent)}
 .remote-explorer{border:1px solid var(--border);border-radius:8px;background:var(--panel-bg);color:var(--panel-fg);overflow:hidden}
 .remote-explorer-crumb{padding:8px;background:var(--crumb-bg);border-bottom:1px solid var(--border);font-size:0.85em;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .remote-explorer-crumb span{cursor:pointer}
-.remote-explorer-body{max-height:260px;overflow-y:auto}
 .remote-entry{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .12s}
 .remote-entry:hover{background:var(--hover-bg)}
-.remote-entry-label{font-weight:500;color:var(--panel-fg)}
-.remote-entry-meta{margin-left:auto;font-size:0.78em;color:var(--muted)}
 .remote-entry-empty{justify-content:center;color:var(--muted);font-style:italic}
-.remote-entry-icon{font-family:'Courier New',monospace;color:var(--link)}
 .sensor-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}
 .sensor-pill{display:flex;justify-content:center;align-items:center;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg);font-weight:500;cursor:pointer;transition:background .15s,border-color .15s,color .15s}
 .sensor-pill:hover{background:var(--hover-bg)}
@@ -84,8 +78,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
 .input-group{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;width:100%}
 .input-group input{flex:1 1 200px;max-width:100%;min-width:0;box-sizing:border-box}
 .mac-input{font-family:'Courier New',monospace}
-.mesh-warning{display:none;background:var(--warning-bg);border:1px solid var(--warning-border);color:var(--warning-fg);padding:10px;border-radius:8px;margin-bottom:12px;font-size:.88em}
-.en-data{background:var(--crumb-bg);border-radius:8px;padding:12px;font-family:'Courier New',monospace;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border)}
 .btn-small{padding:4px 8px;font-size:.8em}
 .setup-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:10000;align-items:center;justify-content:center}
 .setup-modal.show{display:flex}
@@ -98,7 +90,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
 .setup-modal-error{color:var(--danger);margin-bottom:10px;padding:8px;background:var(--crumb-bg);border-radius:5px;display:none;font-size:.88em}
 .setup-modal-requirements{background:var(--crumb-bg);padding:10px;border-radius:8px;margin-bottom:12px;font-size:.85em;color:var(--muted)}
 .setup-modal-requirements ul{margin:6px 0 0 20px;padding:0}
-.mesh-pane-header{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
 .mesh-view-tabs{display:flex;gap:6px;margin-bottom:12px}
 .mesh-view-tabs .btn{flex:1}
 @media(max-width:768px){
@@ -275,13 +266,13 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <div class='setup-modal-requirements'>
 <strong>Requirements:</strong>
 <ul>
-<li>1-20 characters</li>
+<li>1-19 ASCII characters</li>
 <li>Letters, numbers, hyphens, underscores only</li>
 <li>No spaces or special characters</li>
 </ul>
 </div>
 <div class='setup-modal-error' id='setup-error'></div>
-<input type='text' id='setup-device-name' class='setup-modal-input' placeholder='Enter device name (e.g., darkblue)' maxlength='20' autocomplete='off' data-guest-hide>
+<input type='text' id='setup-device-name' class='setup-modal-input' placeholder='Enter device name (e.g., darkblue)' maxlength='19' autocomplete='off' data-guest-hide>
 <div class='setup-modal-buttons'>
 <button class='btn' id='btn-setup-cancel'>Cancel</button>
 <button class='btn' id='btn-setup-save' data-guest-hide>Set Name & Initialize</button>
@@ -306,9 +297,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
 (function() {
   try {
     console.log('[ESP-NOW] Chunk 1: Global variables start');
-    window.messageCount = 0;
-    window.maxMessages = 50;
-    window.__espnowDeviceNameToMac = {};  // Map device names to MAC addresses
     window.automationsInnerHtml = function(mac) {
       if (window.__automationEnabled) {
         return '<div class="input-group" style="margin-bottom:8px">'
@@ -361,21 +349,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
         const chMatch = output.match(/Channel:\s*(\d+)/);
         const channel = chMatch ? chMatch[1] : '?';
         console.log('[ESP-NOW] Channel:', channel);
-        /* Extract MAC without regex to avoid literal issues */
-        const macLabel = 'MAC Address:';
-        let mac = null;
-        const macIdx = output.indexOf(macLabel);
-        if (macIdx >= 0) {
-          let rest = output.substring(macIdx + macLabel.length);
-          rest = rest.trimStart();
-          const nl = rest.indexOf("\n");
-          const cr = rest.indexOf("\r");
-          let end = rest.length;
-          if (nl >= 0 && cr >= 0) end = Math.min(nl, cr);
-          else if (nl >= 0) end = nl;
-          else if (cr >= 0) end = cr;
-          mac = rest.substring(0, end).trim();
-        }
         // Display full status output instead of just friendly summary
         hw.$('espnow-status-data').textContent = output;
         if (isInitialized) {
@@ -387,7 +360,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           hw.$('en-panels').style.display = 'block';
           hw.$('espnow-status-data').style.display = 'block';
           /* Load device list */
-          try { if (typeof listDevices === 'function') { listDevices(); } } catch(e) { console.warn('[ESP-NOW] listDevices not defined yet'); }
+          try { if (typeof listDevices === 'function') { listDevices(); } } catch(_) { console.warn('[ESP-NOW] listDevices not defined yet'); }
           /* Load meshes now that ESP-NOW is initialized */
           try { if (typeof window.loadMeshes === 'function') { window.loadMeshes(); } } catch(e) { console.warn('[ESP-NOW] loadMeshes call error:', e); }
           /* Load device metadata */
@@ -419,9 +392,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
           var isMesh = m.indexOf('mesh') >= 0;
           console.log('[ESP-NOW] Detected mode:', isMesh ? 'MESH' : 'DIRECT');
           btn.textContent = 'Mode: ' + (isMesh ? 'Mesh' : 'Direct');
-          var warn = hw.$('mesh-warning');
-          if (warn) { warn.style.display = isMesh ? 'block' : 'none'; }
-          
           // Show/hide mesh panels based on mode + init state
           var indicator = hw.$('espnow-status-indicator');
           var isInitialized = indicator && indicator.className.indexOf('status-enabled') >= 0;
@@ -462,16 +432,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
     // Batch version: loads all 8 ESP-NOW CLI commands in a single HTTPS request on page load.
     // Falls back to individual refreshStatus() if the batch endpoint is unavailable.
     window.refreshStatusBatch = function() {
-      var CMDS = [
-        'espnowstatus',          // 0
-        'espnowmode',            // 1
-        'bondstatus',            // 2
-        'espnowlist',            // 3
-        'espnowmeshes listjson', // 4  (was 'espnowencstatus' — replaced by multi-mesh JSON)
-        'espnowdeviceinfo',      // 5
-        'espnowmeshrole',        // 6
-        'espnowmeshstatus'       // 7
-      ];
       hw.fetchJSON('/api/espnow/status')
       .then(data => {
         if (!data || !Array.isArray(data.results) || data.results.length < 2) {
@@ -514,8 +474,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
           var isMesh = m.indexOf('mesh') >= 0;
           var btn = hw.$('btn-espnow-toggle-mode');
           hw.setText(btn, 'Mode: ' + (isMesh ? 'Mesh' : 'Direct'));
-          var warn = hw.$('mesh-warning');
-          if (warn) warn.style.display = isMesh ? 'block' : 'none';
           var meshViewsCard = hw.$('mesh-views-card');
           var meshRoleCard = hw.$('mesh-role-card');
           hw.toggle(meshViewsCard, (isMesh && isInitialized));
@@ -561,11 +519,9 @@ inline void streamEspNowInner(httpd_req_t* req) {
         if (bondMatch) { window.__bondedPeerMac = bondMatch[1].toUpperCase(); }
       }
       function applyList(output) {
-        const deviceList = hw.$('device-list');
-        try { console.log('[ESP-NOW][DEV] listDevices: output length', output ? output.length : -1); } catch(e){}
-        window.espnowDevices = [];
+        try { console.log('[ESP-NOW][DEV] listDevices: output length', output ? output.length : -1); } catch(_){}
         let parsed = null;
-        try { parsed = JSON.parse(output); } catch(e) { parsed = null; }
+        try { parsed = JSON.parse(output); } catch(_) { parsed = null; }
         const devices = (parsed && Array.isArray(parsed.devices)) ? parsed.devices : [];
         // Store parsed device list globally for unified rendering
         window.__pairedDevices = devices;
@@ -611,7 +567,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
 
       // Build unified device entries from paired list
       window.espnowDevices = [];
-      window.__espnowDeviceNameToMac = window.__espnowDeviceNameToMac || {};
       var seenMacs = {};
       var html = '';
       for (var i = 0; i < paired.length; i++) {
@@ -622,7 +577,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
         var deviceName = dev.name || '';
         var isEncrypted = !!dev.encrypted;
         var isBonded = window.__bondedPeerMac && mac === window.__bondedPeerMac;
-        if (deviceName) window.__espnowDeviceNameToMac[deviceName] = mac;
         window.espnowDevices.push({ mac: mac, name: deviceName, encrypted: isEncrypted, bonded: isBonded });
 
         // Mesh health for this device
@@ -850,9 +804,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
         content.innerHTML = renderDevicePanel(mac, kind);
         card.dataset.key = nextKey;
         card.style.display = 'block';
-        if (kind === 'file' && typeof window.initializeFileBrowser === 'function') {
-          setTimeout(function() { window.initializeFileBrowser(mac); }, 100);
-        }
         try { card.scrollIntoView({behavior:'smooth', block:'nearest'}); } catch(_) {}
       } catch(e) { console.warn('[ESP-NOW] toggleDevicePanel error:', e); }
     };
@@ -957,16 +908,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
           + '</div>'
         );
       }
-      if (kind === 'remote') {
-        // Legacy remote panel - redirect to message panel with remote mode
-        setTimeout(function() { toggleDevicePanel(mac, 'message'); toggleMessageType(mac, 'remote'); }, 0);
-        return '<div style="color:var(--panel-fg);text-align:center;padding:20px">Redirecting to unified message panel...</div>';
-      }
-      if (kind === 'file') {
-        // Legacy file panel - redirect to message panel with file mode
-        setTimeout(function() { toggleDevicePanel(mac, 'message'); toggleMessageType(mac, 'file'); }, 0);
-        return '<div style="color:var(--panel-fg);text-align:center;padding:20px">Redirecting to unified message panel...</div>';
-      }
       if (kind === 'broadcast') {
         return (
           '<div style="margin-bottom:12px">'
@@ -979,25 +920,9 @@ inline void streamEspNowInner(httpd_req_t* req) {
           + '<div id="broadcast-status" style="margin-top:12px;padding:8px;border-radius:4px;display:none;"></div>'
         );
       }
-      if (kind === 'metadata') {
-        return (
-          '<div id="metadata-' + mac + '" style="padding:12px;background:var(--crumb-bg);border-radius:8px;min-height:200px">'
-          + '<div style="text-align:center;color:var(--panel-fg);padding:20px">Loading metadata...</div>'
-          + '</div>'
-        );
-      }
       return '<div>Unknown panel</div>';
     };
     console.log('[ESP-NOW] Chunk 3F: renderDevicePanel ready');
-    // Live "N characters left" counter under the message box. The textarea's
-    // oninput calls this; without it every keystroke hit an undefined function.
-    window.updateMsgCounter = function(mac) {
-      var ta = hw.$('msg-' + mac);
-      var lbl = hw.$('msg-count-' + mac);
-      if (!ta || !lbl) return;
-      var left = 1024 - ta.value.length;
-      lbl.textContent = left + ' characters left';
-    };
     console.log('[ESP-NOW] Chunk 3G: appendLogLine start');
     window.appendLogLine = function(containerId, type, message, status) {
       console.log('[appendLogLine] Called with:', {containerId, type, message, status});
@@ -1151,7 +1076,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
       }
       
       hw.postFormText('/api/cli', { cmd: 'espnowbroadcast ' + msg })
-        .then(t=> {
+        .then(()=> {
           // Clear input
           if (input) input.value = '';
           
@@ -1446,7 +1371,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           const cmdInput = hw.$('rc-' + mac);
           if (cmdInput) cmdInput.value = '';
         })
-        .catch(e=> {
+        .catch(()=> {
           // Update sending bubble to show error
           if (sendingBubble) {
             sendingBubble.className = 'message-bubble message-error';
@@ -1774,12 +1699,11 @@ inline void streamEspNowInner(httpd_req_t* req) {
     window.unpairDevice = async function(mac) {
       if (await hwConfirm('Unpair device ' + mac + '?')) {
         hw.postFormText('/api/cli', { cmd: 'espnowunpair ' + mac })
-        .then(text => {
-          addMessageToLog('UNPAIR', text);
+        .then(() => {
           listDevices();
         })
         .catch(error => {
-          addMessageToLog('ERROR', 'Unpair error: ' + error);
+          console.error('[ESP-NOW] Unpair error:', error);
         });
       }
     };
@@ -1852,8 +1776,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
       // Send V3 METADATA_REQ to the peer - no credentials needed, it's a protocol-level request
       // The peer responds with METADATA_RESP which populates gMeshPeerMeta on our side
       hw.postFormText('/api/cli', { cmd: 'espnowrequestmeta ' + mac })
-        .then(function(result) {
-          if (typeof addMessageToLog === 'function') addMessageToLog('INFO', 'Metadata sync: ' + result);
+        .then(function() {
           appendLogLine('log-' + mac, 'RECEIVED', 'Metadata request sent', null);
           // Poll for metadata to appear (peer responds within ~1-2 seconds)
           var metaPollCount = 0;
@@ -1992,7 +1915,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
             listDiv.innerHTML = '<div style="color:var(--danger);padding:12px">Parse error: ' + esc(e.message) + '</div>';
           }
         })
-        .catch(function(e) {
+        .catch(function() {
           listDiv.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center">No automations file cached. Click "Load Automations" to request from device.</div>';
         });
     };
@@ -2023,7 +1946,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         btn.textContent = 'Running ' + (i + 1) + '/' + total + '...';
         hw.postFormText('/api/cli', { cmd: cmd })
           .then(function() { i++; next(); })
-          .catch(function(e) {
+          .catch(function() {
             btn.textContent = 'Error at cmd ' + (i + 1);
             btn.style.background = '#dc3545';
             setTimeout(function() { btn.textContent = origText; btn.style.background = ''; btn.disabled = false; }, 3000);
@@ -2120,7 +2043,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         hw.setText(statusDiv, 'Applying ' + sensor + ' ' + desired + '...');
         var cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' espnowsensorstream ' + sensor + ' ' + desired;
         hw.postFormText('/api/cli', { cmd: cmd })
-        .then(function(resp){
+        .then(function(){
           window.sensorActiveState[mac][sensor] = desired;
           delete pendingMap[sensor];
           window.updateSensorPill(mac, sensor);
@@ -2138,58 +2061,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
     };
     console.log('[ESP-NOW] Chunk 3: helpers ready');
   } catch(e) { console.error('[ESP-NOW] Chunk 3 error:', e); }
-})();
-</script>
-<script>
-(function() {
-  try {
-    console.log('[ESP-NOW] Chunk 4: Messaging functions start');
-    window.sendMessage = function(mac, message) {
-      // Fetch current mode dynamically to ensure we use the correct command
-      console.log('[ESP-NOW] sendMessage: Fetching current mode...');
-      hw.postFormText('/api/cli', { cmd: 'espnowmode' })
-        .then(modeOut => {
-          const isMesh = (modeOut || '').toLowerCase().indexOf('mesh') >= 0;
-          console.log('[ESP-NOW] sendMessage: Current mode:', isMesh ? 'MESH' : 'DIRECT');
-          var cmd = 'espnowsend ' + mac + ' ' + message;
-          console.log('[ESP-NOW] sendMessage: Command:', cmd);
-          return hw.postFormText('/api/cli', { cmd: cmd });
-        })
-        .then(text => {
-          addMessageToLog('SENT', 'To ' + mac + ': ' + message);
-          addMessageToLog('RESULT', text);
-          if (text && text.indexOf('Message sent') >= 0) {
-            hw.$('send-message').value = '';
-          }
-        })
-        .catch(error => {
-          addMessageToLog('ERROR', 'Send error: ' + error);
-        });
-    };
-    window.addMessageToLog = function(type, message) {
-      const log = hw.$('message-log');
-      if (!log) return;
-      const timestamp = new Date().toLocaleTimeString();
-      let className = 'message-item';
-      if (type === 'SENT' || type === 'BROADCAST') className += ' message-sent';
-      else if (type === 'RECEIVED') className += ' message-received';
-      else if (type === 'ERROR') className += ' message-error';
-      const messageDiv = document.createElement('div');
-      messageDiv.className = className;
-      messageDiv.textContent = '[' + timestamp + '] ' + type + ': ' + message;
-      if (log.children.length === 1 && log.children[0].textContent.includes('Message log will appear')) {
-        log.innerHTML = '';
-      }
-      log.appendChild(messageDiv);
-      window.messageCount++;
-      if (window.messageCount > window.maxMessages) {
-        log.removeChild(log.firstChild);
-        window.messageCount--;
-      }
-      log.scrollTop = log.scrollHeight;
-    };
-    console.log('[ESP-NOW] Chunk 4: Messaging functions ready');
-  } catch(e) { console.error('[ESP-NOW] Chunk 4 error:', e); }
 })();
 </script>
 <script>
@@ -2299,17 +2170,86 @@ inline void streamEspNowInner(httpd_req_t* req) {
       }
     };
     
+    window.topologyEscapeHtml = function(value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+      });
+    };
+    window.topologyResultIsError = function(value) {
+      return !value || /^\s*(?:OK:\s*)?Error(?::|\b)/i.test(String(value));
+    };
+
+    // The command result contract is 4 KiB, so topology responses are paged two
+    // responders at a time. Fetch pages serially: the command uses one reusable
+    // PSRAM render buffer and concurrent requests would race that buffer.
+    window.fetchTopologyResultsPages = function() {
+      function pageIdentity(text) {
+        var requestMatch = text && text.match(/^Request ID:\s*(\d+)\s*$/m);
+        var pageMatch = text && text.match(/^Page:\s*(\d+)\/(\d+)\s*$/m);
+        if (!requestMatch || !pageMatch) return null;
+        return {
+          requestId: requestMatch[1],
+          page: parseInt(pageMatch[1], 10),
+          pages: parseInt(pageMatch[2], 10)
+        };
+      }
+
+      function fetchSnapshot(retriesLeft) {
+        return hw.postFormText('/api/cli', { cmd: 'espnowtoporesults' })
+        .then(function(firstPage) {
+          var firstIdentity = pageIdentity(firstPage);
+          // "Still collecting" and normal command errors have no page header;
+          // preserve them for the existing polling/error classifier.
+          if (!firstIdentity) return firstPage;
+          if (firstIdentity.page !== 1 || !firstIdentity.pages) {
+            throw new Error('Invalid topology page header');
+          }
+          var pageCount = Math.min(firstIdentity.pages, 8); // MESH_PEER_MAX / 2
+          if (pageCount < 2) return firstPage;
+          var chain = Promise.resolve([firstPage]);
+          for (var page = 2; page <= pageCount; page++) {
+            (function(pageNumber) {
+              chain = chain.then(function(parts) {
+                return hw.postFormText('/api/cli', {
+                  cmd: 'espnowtoporesults ' + pageNumber + ' ' + firstIdentity.requestId
+                }).then(function(nextPage) {
+                  var nextIdentity = pageIdentity(nextPage);
+                  if (!nextIdentity || nextIdentity.requestId !== firstIdentity.requestId ||
+                      nextIdentity.page !== pageNumber || nextIdentity.pages !== firstIdentity.pages) {
+                    var changed = new Error('Topology changed while fetching pages');
+                    changed.topologySnapshotChanged = true;
+                    throw changed;
+                  }
+                  parts.push(nextPage);
+                  return parts;
+                });
+              });
+            })(page);
+          }
+          return chain.then(function(parts) { return parts.join('\n'); });
+        })
+        .catch(function(error) {
+          if (error && error.topologySnapshotChanged && retriesLeft > 0) {
+            return fetchSnapshot(retriesLeft - 1);
+          }
+          throw error;
+        });
+      }
+
+      return fetchSnapshot(1);
+    };
+
     // Refresh full topology view
     window.refreshTopologyView = function() {
       console.log('[ESP-NOW] Refreshing topology view...');
-      hw.postFormText('/api/cli', { cmd: 'espnowtoporesults' })
+      window.fetchTopologyResultsPages()
       .then(output => {
         console.log('[ESP-NOW] Topology results:', output);
         var container = hw.$('mesh-topology-view');
         if (!container) return;
         
         // Check if we have topology data
-        if (!output || output.indexOf('No topology results') >= 0 || output.indexOf('ERROR') >= 0) {
+        if (window.topologyResultIsError(output)) {
           container.innerHTML = '<div style="color:var(--panel-fg);text-align:center;padding:20px;">No topology data available.<br>Click "Discover Topology" in the Mesh Role Configuration section.</div>';
           return;
         }
@@ -2327,20 +2267,21 @@ inline void streamEspNowInner(httpd_req_t* req) {
           var line = lines[i].trim();
           
           // Match device header: "name (MAC):" format from toporesults output
-          var deviceMatch = line.match(/^(.+?)\s*\(([A-Fa-f0-9:]{17})\)\s*:$/);
+          var deviceMatch = line.match(/^(.+?)\s*\(([A-Fa-f0-9:]{17})\)\s*:\s*(\[partial\])?$/i);
           if (deviceMatch) {
             currentDevice = {
               name: deviceMatch[1],
               mac: deviceMatch[2],
               peers: [],
               peerCount: 0,
+              partial: !!deviceMatch[3],
               path: ''
             };
             continue;
           }
           
           // Match path: "Path: ..."
-          var pathMatch = line.match(/Path:\s*(.+)/i);
+          var pathMatch = line.match(/^Path:\s*(.+)$/i);
           if (pathMatch && currentDevice) {
             currentDevice.path = pathMatch[1];
             continue;
@@ -2354,7 +2295,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           }
           
           // Match peer entry: "→ name (MAC)"
-          var peerMatch = line.match(/→\s*(.+?)\s*\(([a-f0-9:]+)\)/i);
+          var peerMatch = line.match(/^→\s*(.+)\s+\(([A-Fa-f0-9:]{17})\)\s*$/);
           if (peerMatch && currentDevice) {
             var peerInfo = {
               name: peerMatch[1],
@@ -2381,14 +2322,14 @@ inline void streamEspNowInner(httpd_req_t* req) {
           }
           
           // Empty line or separator - save current device
-          if (line === '' && currentDevice && currentDevice.peers.length > 0) {
+          if (line === '' && currentDevice) {
             deviceData[currentDevice.mac] = currentDevice;
             currentDevice = null;
           }
         }
         
         // Save last device if exists
-        if (currentDevice && currentDevice.peers.length > 0) {
+        if (currentDevice) {
           deviceData[currentDevice.mac] = currentDevice;
         }
         
@@ -2406,10 +2347,10 @@ inline void streamEspNowInner(httpd_req_t* req) {
             var indentPx = hopCount * 20;
             
             html += '<div style="background:var(--panel-bg);border:2px solid var(--success);border-radius:8px;padding:12px;margin-bottom:12px;margin-left:' + indentPx + 'px;">';
-            html += '<div style="font-weight:bold;font-size:1.05em;color:var(--success);margin-bottom:8px;">' + dev.name + '</div>';
-            html += '<div style="font-size:0.85em;color:var(--panel-fg);margin-bottom:4px;">' + dev.mac + ' • ' + dev.peerCount + ' peer(s)</div>';
+            html += '<div style="font-weight:bold;font-size:1.05em;color:var(--success);margin-bottom:8px;">' + window.topologyEscapeHtml(dev.name) + (dev.partial ? ' [partial]' : '') + '</div>';
+            html += '<div style="font-size:0.85em;color:var(--panel-fg);margin-bottom:4px;">' + window.topologyEscapeHtml(dev.mac) + ' • ' + dev.peerCount + ' peer(s)</div>';
             if (dev.path) {
-              html += '<div style="font-size:0.8em;color:var(--link);margin-bottom:8px;">Path: ' + dev.path + ' (' + hopCount + ' hop' + (hopCount !== 1 ? 's' : '') + ')</div>';
+              html += '<div style="font-size:0.8em;color:var(--link);margin-bottom:8px;">Path: ' + window.topologyEscapeHtml(dev.path) + ' (' + hopCount + ' hop' + (hopCount !== 1 ? 's' : '') + ')</div>';
             }
             
             if (dev.peers.length > 0) {
@@ -2428,9 +2369,9 @@ inline void streamEspNowInner(httpd_req_t* req) {
                 var statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + signalColor + ';margin-right:6px;"></span>';
                 
                 html += '<div style="padding:6px 0;border-bottom:1px solid var(--border);">';
-                html += '<div style="font-weight:500;color:var(--panel-fg);">' + statusDot + peer.name + '</div>';
+                html += '<div style="font-weight:500;color:var(--panel-fg);">' + statusDot + window.topologyEscapeHtml(peer.name) + '</div>';
                 html += '<div style="font-size:0.8em;color:var(--panel-fg);margin-top:2px;">';
-                html += peer.mac;
+                html += window.topologyEscapeHtml(peer.mac);
                 if (detailText) html += ' • ' + detailText;
                 html += '</div></div>';
               }
@@ -2695,10 +2636,10 @@ inline void streamEspNowInner(httpd_req_t* req) {
       hw.postFormText('/api/cli', { cmd: 'espnowmeshtopo' })
       .then(output => {
         console.log('[ESP-NOW] Topology discovery response:', output);
-        hw.setHTML(resultsDiv, '<pre style="margin:0;white-space:pre-wrap;color:var(--panel-fg);">' + output + '</pre>');
+        hw.setHTML(resultsDiv, '<pre style="margin:0;white-space:pre-wrap;color:var(--panel-fg);">' + window.topologyEscapeHtml(output) + '</pre>');
         
         // Bail early if the command itself failed
-        if (!output || output.indexOf('ERROR') >= 0 || output.indexOf('No topology') >= 0 || output.indexOf('not enabled') >= 0) {
+        if (window.topologyResultIsError(output)) {
           return;
         }
         
@@ -2706,12 +2647,12 @@ inline void streamEspNowInner(httpd_req_t* req) {
         var pollCount = 0;
         window.__topoDiscoveryInterval = setInterval(function() {
           pollCount++;
-          hw.postFormText('/api/cli', { cmd: 'espnowtoporesults' })
+          window.fetchTopologyResultsPages()
           .then(results => {
             console.log('[ESP-NOW] Topology results poll ' + pollCount + ':', results);
             var hasResults = results && results.indexOf('Responses received:') >= 0 && results.indexOf('Responses received: 0') < 0;
             if (hasResults && resultsDiv) {
-              resultsDiv.innerHTML = '<pre style="margin:0;white-space:pre-wrap;color:var(--panel-fg);">' + results + '</pre>';
+              resultsDiv.innerHTML = '<pre style="margin:0;white-space:pre-wrap;color:var(--panel-fg);">' + window.topologyEscapeHtml(results) + '</pre>';
             }
             if (pollCount >= 5 || hasResults) {
               clearInterval(window.__topoDiscoveryInterval);
@@ -2795,7 +2736,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
             window.espnowIsMesh = (next === 'mesh');
             return hw.postFormText('/api/cli', { cmd: 'espnowmode ' + next });
           })
-          .then(t=>{ try { /* optional toast */ } catch(_) {}; refreshStatus(); })
+          .then(()=>{ try { /* optional toast */ } catch(_) {}; refreshStatus(); })
           .catch(e=>{ try { alert('Error: ' + e.message); } catch(_) {}; });
       });
       // Build the optional ' <meshLabel>' suffix for pair commands. Only
@@ -2818,7 +2759,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
         }
         hw.postFormText('/api/cli', { cmd: 'espnowpair ' + mac + ' ' + name + pairMeshArg() })
         .then(text => {
-          addMessageToLog('PAIR', text);
           if (text && text.indexOf('paired successfully') >= 0) {
             hw.$('pair-mac').value = '';
             hw.$('pair-name').value = '';
@@ -2826,7 +2766,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           }
         })
         .catch(error => {
-          addMessageToLog('ERROR', 'Pair error: ' + error);
+          console.error('[ESP-NOW] Pair error:', error);
         });
       });
       hw.$('btn-pair-secure').addEventListener('click', function() {
@@ -2838,7 +2778,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
         }
         hw.postFormText('/api/cli', { cmd: 'espnowpairsecure ' + mac + ' ' + name + pairMeshArg() })
         .then(text => {
-          addMessageToLog('PAIR_SECURE', text);
           if (text && text.indexOf('paired successfully') >= 0) {
             hw.$('pair-mac').value = '';
             hw.$('pair-name').value = '';
@@ -2846,7 +2785,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           }
         })
         .catch(error => {
-          addMessageToLog('ERROR', 'Secure pair error: ' + error);
+          console.error('[ESP-NOW] Secure pair error:', error);
         });
       });
       hw.$('btn-refresh-mesh').addEventListener('click', function() {
@@ -2882,27 +2821,27 @@ inline void streamEspNowInner(httpd_req_t* req) {
       _on('btn-set-friendly','click', function() {
         const val = hw.$('friendly-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowfriendlyname "'+val+'"' })
-          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-room','click', function() {
         const val = hw.$('room-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowroom "'+val+'"' })
-          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-zone','click', function() {
         const val = hw.$('zone-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowzone "'+val+'"' })
-          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-tags','click', function() {
         const val = hw.$('tags-input').value;
         hw.postFormText('/api/cli', { cmd: 'espnowtags "'+val+'"' })
-          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('stationary-checkbox','change', function() {
         const checked = hw.$('stationary-checkbox').checked;
         hw.postFormText('/api/cli', { cmd: 'espnowstationary '+(checked?'on':'off') })
-          .then(t=>{ var el=hw.$('device-metadata-status'); hw.setText(el,t); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-channel','click', function() {
         var sel = hw.$('channel-select');
@@ -2913,82 +2852,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
       // enable, disable, remove, set default) are wired in the meshes JS
       // chunk below. The standalone btn-set-passphrase / btn-clear-passphrase
       // buttons no longer exist.
-      _on('btn-send-message','click', function() {
-        const mac = hw.$('send-mac').value.trim();
-        const message = hw.$('send-message').value.trim();
-        if (!message) {
-          alert('Please enter a message to send');
-          return;
-        }
-        if (!mac) {
-          alert('Please enter a MAC address or use Broadcast button');
-          return;
-        }
-        sendMessage(mac, message);
-      });
-      _on('btn-broadcast-message','click', function() {
-        const message = hw.$('send-message').value.trim();
-        if (!message) {
-          alert('Please enter a message to broadcast');
-          return;
-        }
-        hw.postFormText('/api/cli', { cmd: 'espnowbroadcast ' + message })
-        .then(text => {
-          addMessageToLog('BROADCAST', text);
-          if (text && text.indexOf('Broadcast sent') >= 0) {
-            hw.$('send-message').value = '';
-          }
-        })
-        .catch(error => {
-          addMessageToLog('ERROR', 'Broadcast error: ' + error);
-        });
-      });
-      _on('btn-clear-log','click', function() {
-        hw.$('message-log').innerHTML = '<div style="color:var(--muted); text-align: center;">Message log cleared</div>';
-        window.messageCount = 0;
-      });
-      /* File transfer button handlers */
-      _on('btn-send-file','click', function() {
-        const mac = hw.$('file-target-mac').value.trim();
-        const filepath = hw.$('file-path').value.trim();
-        if (!mac || !filepath) {
-          hw.$('file-transfer-status').textContent = 'Error: Please enter both MAC address and file path';
-          return;
-        }
-        hw.$('file-transfer-status').textContent = 'Sending file...';
-        hw.postFormText('/api/cli', { cmd: 'espnowsendfile ' + mac + ' "' + filepath + '"' })
-        .then(text => {
-          hw.$('file-transfer-status').textContent = text;
-          if (text.indexOf('successfully') >= 0) {
-            addMessageToLog('FILE', text);
-          }
-        })
-        .catch(error => {
-          hw.$('file-transfer-status').textContent = 'Error: ' + error;
-        });
-      });
-      _on('btn-list-files','click', function() {
-        hw.$('file-transfer-status').textContent = 'Listing files...';
-        hw.postFormText('/api/cli', { cmd: 'ls' })
-        .then(text => {
-          hw.$('file-transfer-status').innerHTML = '<pre style="margin:0;white-space:pre-wrap;word-wrap:break-word;">' + text + '</pre>';
-        })
-        .catch(error => {
-          hw.$('file-transfer-status').textContent = 'Error: ' + error;
-        });
-      });
-      /* Remote command button handlers */
-      _on('btn-send-remote','click', executeRemoteCommand);
-      _on('btn-clear-remote-log','click', function() {
-        hw.$('remote-results-log').innerHTML = '<div style="color:var(--muted); text-align: center;">Remote command results cleared</div>';
-      });
-      /* Enter key support for remote command */
-      _on('remote-command','keypress', function(e) {
-        if (e.key === 'Enter') {
-          executeRemoteCommand();
-        }
-      });
-      
       /* First-time setup modal handlers */
       _on('btn-setup-save','click', function() {
         const deviceName = hw.$('setup-device-name').value.trim();
@@ -3000,8 +2863,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
           errorDiv.style.display = 'block';
           return;
         }
-        if (deviceName.length > 20) {
-          errorDiv.textContent = 'Device name must be 20 characters or less';
+        if (deviceName.length > 19) {
+          errorDiv.textContent = 'Device name must be 19 characters or less';
           errorDiv.style.display = 'block';
           return;
         }
@@ -3061,74 +2924,9 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <script>
 (function() {
   try {
-    console.log('[ESP-NOW] Chunk 5b: Remote command functions start');
-    window.setRemoteCommand = function(command) {
-      hw.$('remote-command').value = command;
-    };
-    window.addRemoteResultToLog = function(type, message) {
-      const log = hw.$('remote-results-log');
-      if (!log) return;
-      const timestamp = new Date().toLocaleTimeString();
-      let className = 'message-item';
-      if (type === 'SUCCESS') className += ' message-received';
-      else if (type === 'ERROR' || type === 'FAILED') className += ' message-error';
-      else if (type === 'SENT') className += ' message-sent';
-      const messageDiv = document.createElement('div');
-      messageDiv.className = className;
-      if (type === 'RESULT') {
-        /* Multi-line result formatting */
-        messageDiv.innerHTML = '<pre style="margin: 0; white-space: pre-wrap; font-family: inherit;">' + message + '</pre>';
-      } else {
-        messageDiv.textContent = '[' + timestamp + '] ' + type + ': ' + message;
-      }
-      if (log.children.length === 1 && log.children[0].textContent.includes('Remote command results will appear')) {
-        log.innerHTML = '';
-      }
-      log.appendChild(messageDiv);
-      /* Limit log size */
-      if (log.children.length > 20) {
-        log.removeChild(log.firstChild);
-      }
-      log.scrollTop = log.scrollHeight;
-    };
-    window.executeRemoteCommand = function() {
-      const device = hw.$('remote-device').value.trim();
-      const username = hw.$('remote-username').value.trim();
-      const password = hw.$('remote-password').value.trim();
-      const command = hw.$('remote-command').value.trim();
-      
-      if (!device || !username || !password || !command) {
-        alert('Please fill in all fields: device, username, password, and command');
-        return;
-      }
-      
-      const remoteCmd = 'espnowremote ' + device + ' ' + username + ' ' + password + ' ' + command;
-      addRemoteResultToLog('SENT', 'Executing on ' + device + ': ' + command);
-
-      hw.postFormText('/api/cli', { cmd: remoteCmd })
-      .then(text => {
-        if (text.includes('Remote command sent')) {
-          addRemoteResultToLog('SUCCESS', 'Command sent successfully - waiting for response...');
-        } else {
-          addRemoteResultToLog('ERROR', text);
-        }
-      })
-      .catch(error => {
-        addRemoteResultToLog('ERROR', 'Send error: ' + error);
-      });
-    };
-    console.log('[ESP-NOW] Chunk 5b: Remote command functions ready');
-  } catch(e) { console.error('[ESP-NOW] Chunk 5b error:', e); }
-})();
-</script>
-<script>
-(function() {
-  try {
     console.log('[ESP-NOW] Chunk 5c: Device metadata functions');
     window.loadLocalDeviceMetadata = function(preloadedText) {
       function applyMetadata(text) {
-        const statusDiv = hw.$('device-metadata-status');
-        hw.setText(statusDiv, text);
         const friendlyMatch = text.match(/Friendly Name:\s*(.+)/);
         const roomMatch = text.match(/Room:\s*(.+)/);
         const zoneMatch = text.match(/Zone:\s*(.+)/);
@@ -3336,15 +3134,11 @@ inline void streamEspNowInner(httpd_req_t* req) {
 
     // ---- CLI command bridge -------------------------------------------------
     // All mesh management actions go through this — fires the CLI command,
-    // logs the response, then refreshes the meshes table. If addMessageToLog
-    // is unavailable, fall back to console.log so we don't break anything.
+    // logs the response, then refreshes the meshes table.
     function fireMeshCmd(cmd, logTag) {
       return hw.postFormText('/api/cli', { cmd: cmd })
       .then(function(text) {
-        try {
-          if (typeof addMessageToLog === 'function') addMessageToLog(logTag || 'MESH', text);
-          else console.log('[MESH] ' + (logTag || '') + ': ' + text);
-        } catch (e) { console.warn('[MESH] log err:', e); }
+        console.log('[MESH] ' + (logTag || '') + ': ' + text);
         if (typeof window.loadMeshes === 'function') window.loadMeshes();
         // Refresh device list too — meshId stamping or mesh enable state may
         // change which peers are reachable / how badges render.
@@ -3383,7 +3177,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
       return null;
     }
 
-    function toggleActionPanel(slot, label) {
+    function toggleActionPanel(slot) {
       var mesh = findMesh(slot);
       if (!mesh) return;
       var panel = hw.qs('.mesh-row-actions[data-slot="' + slot + '"]');
@@ -3479,7 +3273,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         }
         // Open/close action panel
         if (t.classList.contains('btn-mesh-actions')) {
-          toggleActionPanel(slot, label);
+          toggleActionPanel(slot);
           return;
         }
         if (t.classList.contains('btn-mesh-close')) {

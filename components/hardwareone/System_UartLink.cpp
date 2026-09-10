@@ -1484,9 +1484,9 @@ const char* cmd_voicefetch(const String& argsInput) {
       f.close();
       return "Error: file empty or larger than the 2MB voicefetch cap";
     }
-    // Refuse a transfer that would outrun the 60s executor-abandon window:
+    // Refuse a transfer that would outrun the 60s synchronous-wait window:
     // voicefetch streams synchronously on cmd_exec_task, and if it ran past
-    // ~60s the loop task's submitAndExecuteSync would abandon and write its
+    // ~60s the loop task's submitAndExecuteSync would time out and write its
     // own reply INTO the middle of the frame stream (desync). At the classic
     // 230400 ceiling a full 2MB file is ~87s, so this bites there. ~1% frame
     // overhead + 10 wire-bits/byte; 45s ceiling leaves margin.

@@ -36,7 +36,7 @@ extern String waitForSerialInputBlocking();
 // Setup Archetypes (deployment presets) — see System_SetupWizard.h
 // ============================================================================
 static const char* const SEED_HANDHELD[] = { "wifi", "http", "i2c", "oled", "input", "automation", nullptr };
-static const char* const SEED_HEADLESS[] = { "wifi", "http", "i2c", "espnow", "automation", nullptr };
+static const char* const SEED_HEADLESS[] = { "wifi", "http", "espnow", "bluetooth", nullptr };
 static const char* const SEED_GLASSES[]  = { "wifi", "http", "i2c", "bluetooth", "automation", nullptr };
 static const char* const SEED_MESH[]     = { "wifi", "espnow", "i2c", "automation", nullptr };
 
@@ -49,8 +49,8 @@ const SetupArchetype setupArchetypes[] = {
   { "handheld", "Standard Handheld",
     "Board + OLED + gamepad + sensors. Local menu and web UI - the full handheld.",
     SEED_HANDHELD, REQ_HANDHELD },
-  { "headless", "Headless / relay",
-    "No local screen. Managed over WiFi/web + ESP-NOW. Good for relay & remote nodes.",
+  { "headless", "Headless Node",
+    "No local screen or sensor bus. Managed over WiFi/web, Bluetooth, and ESP-NOW.",
     SEED_HEADLESS, nullptr },
   { "glasses", "G2 Companion",
     "Drives Even G2 smart glasses over Bluetooth, plus WiFi + web UI.",
@@ -194,7 +194,7 @@ static int timezoneSelection = 1;  // EDT default (index 1 — US Eastern Daylig
 static int logLevelSelection = 3;  // DEBUG default (all logging enabled)
 static int ntpSelection = 0;       // pool.ntp.org default
 static int ledEffectSelection = 1; // rainbow default
-static char wizardDeviceName[21] = "";  // Device name entry (used when ESP-NOW not compiled)
+static char wizardDeviceName[20] = "";  // 19-byte name + NUL (matches V4 identity fields)
 
 // Feature items per page. Only touched during first-time setup; dormant
 // after FTS completes — safe to park in PSRAM.
@@ -1864,7 +1864,14 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
   }
 #endif
 
-  writeSettingsJson();  // flush any other wizard changes made above
+  // logLevel lives in the split debug module, not settings.json. Flush both
+  // files only after a completed wizard; the cancel/timeout returns above
+  // intentionally remain no-save paths.
+  const bool mainSaved = writeSettingsJson();
+  const bool debugSaved = writeDebugJson();
+  if (!mainSaved || !debugSaved) {
+    broadcastOutput("Warning: one or more setup settings files could not be saved.");
+  }
   applySettings();
 #if ENABLE_WIFI
   // Re-register SNTP with the wizard's NTP choice — applySettings() does

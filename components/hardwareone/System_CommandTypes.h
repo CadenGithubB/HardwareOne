@@ -5,6 +5,7 @@
 #define SYSTEM_COMMANDTYPES_H
 
 #include <Arduino.h>
+#include <atomic>
 #include "System_User.h"    // AuthContext
 #include "System_CommandLimits.h"
 
@@ -98,6 +99,11 @@ struct CommandContext {
   uint32_t id = 0;
   uint32_t timestampMs = 0;
   uint32_t outputMask = 0;
+  // Boot-local value shared by every member of one settings batch request.
+  // Zero means this command is not part of a request-scoped batch. This is a
+  // value (never an HTTP/request pointer) because CommandContext is copied into
+  // queued ExecReq objects and may outlive the submitting task on timeout.
+  uint32_t settingsBatchId = 0;
   // Boot-local incarnation of the transport session that admitted this
   // command. This is an incrementing generation, not Unix/NTP time. Zero
   // means the invocation is intentionally stateless/unbound.
@@ -153,20 +159,41 @@ struct ExecReq {
   DeferredFn deferredFn;            // If non-NULL, called instead of executeCommand
   void*      deferredArg;
 
-  // 2026-05-18 — Use-after-free fix.
-  // submitSync used to free `r` when its 10s wait timed out. cmd_exec_task,
-  // which may still be inside executeCommand on a long-running command
-  // (PBKDF2 ~12 s, or a future even-slower op), would then double-free OR
-  // ps_alloc would hand the same address back to the next submit, racing the
-  // old cmd_exec_task against new ExecReq data. Caused String::buffer
-  // corruption that surfaced as strlen(NULL) inside ArduinoJson.
+  // Synchronous-request lifetime. Before queue publication, submitSync gives
+  // one reference to the caller and one to cmd_exec_task. Each side releases
+  // exactly once; the last release deletes `done` and destroys/frees this
+  // request. This keeps both objects alive across the timeout-vs-completion
+  // boundary without a check-then-act ownership handoff.
   //
-  // Flag is set by the caller (submitSync) when it gives up. cmd_exec_task
-  // checks it after executeCommand returns; if true, cmd_exec_task owns
-  // the cleanup. If false, the caller still owns it (current behaviour).
-  // `volatile` is enough — the only mutation is a single-byte write under
-  // observation, no rmw, no atomicity needed.
-  volatile bool abandoned;
+  // These atomics may live in PSRAM. The current ESP32/ESP32-S3 IDF configs
+  // enable CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND, which implements them
+  // under an internal-RAM portMUX when their address is external.
+  std::atomic<uint32_t> syncOwnerRefs{0};
+  std::atomic<bool> syncTimedOut{false};  // diagnostic only; not ownership
 };
+
+/*
+ * What actually travels on gCmdExecQ.
+ *
+ * The queue used to carry a bare `ExecReq*`, which meant deferred work had to
+ * allocate a whole ExecReq (6,384 B, measured) to carry two pointers -- and a
+ * deferred job uses ONLY deferredFn/deferredArg; line[2048], ctx and out[4096]
+ * are dead weight on that path. At ~8,700 BLE OTA frames per 4 MB image that is
+ * ~55 MB of pointless allocator traffic per update, and it forced the queue to
+ * stay shallow (8) because each in-flight slot cost 6.4 KB.
+ *
+ * Carrying this 12-byte tagged item by value instead means a deferred job
+ * allocates NOTHING, so queue depth costs 12 B/slot rather than 6.4 KB/slot.
+ * Exactly one of `req` / `deferredFn` is set.
+ */
+struct CmdExecItem {
+  ExecReq*             req = nullptr;          // full CLI command (owns its buffers)
+  ExecReq::DeferredFn  deferredFn = nullptr;   // deferred job; `req` is null
+  void*                deferredArg = nullptr;  // callee owns this arg's lifetime
+};
+
+// Drop one synchronous-request owner. Safe from either the submitting task or
+// cmd_exec_task; the last owner performs all request/semaphore destruction.
+void releaseSyncExecReqOwner(ExecReq* request);
 
 #endif // SYSTEM_COMMANDTYPES_H

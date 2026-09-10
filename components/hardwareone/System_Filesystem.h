@@ -6,6 +6,7 @@
 
 // Forward declarations
 class String;
+class PsramBuffer;
 
 // ============================================================================
 // Filesystem State
@@ -53,6 +54,10 @@ void buildFilesStatsJson(const String& path, char* out, size_t outSize);
  * buffer, admin-only pre-checks) stay in the callers.
  */
 bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdminPaths, String& out);
+// Direct owned-output form. On allocation/capacity failure, out.ok() is false
+// and the caller must send an allocation-independent error, never its contents.
+// HTTP uses request-owned storage; command callers retain their private owner.
+bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdminPaths, PsramBuffer& out);
 
 /**
  * Post-save hook shared by every file-write path (web write, web upload, BLE
@@ -131,7 +136,8 @@ bool canImport (const String& path, const AuthContext& ctx);
 
 /**
  * Aggregate permissions for a path under the caller's identity.
- * Pure query: never logs. Use freely for UI button-state computation.
+ * Pure query: canonicalizes the path, applies ctx.scope, and never logs. Use
+ * freely for one-shot UI button-state computation.
  * @return Bitmask of FilePermission flags
  */
 uint8_t getPermissions(const String& path, const AuthContext& ctx);

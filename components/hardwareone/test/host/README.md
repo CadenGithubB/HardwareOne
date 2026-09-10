@@ -16,6 +16,145 @@ cmake --build /tmp/hw1-hardwareone-host
 ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure
 ```
 
+## Untrusted web file responses
+
+`web_file_response_policy` compiles the production CSP/header helper and the
+policy guards of both file read/view handlers with mock HTTP header storage.
+It checks both sandbox variants, MIME/cache policy, and aborting on failure of
+each header insertion before reaching file streaming, including polling cleanup.
+Source guards cover placement before all format/raw branches and prevent branch
+overrides. It does not execute firmware streaming or emulate browser security.
+
+All file responses disable scripts/forms. SVG documents additionally get an
+opaque origin. Escaped text and inert media retain their origin for authenticated
+viewer links and native playback; this does not enable scripts. The SVG decision
+uses the same decoded path suffix as the image MIME branch, including mode=raw.
+
+For real browser checks against the compiled production headers, run:
+
+```sh
+python3 -B components/hardwareone/test/host/test_web_file_response_policy.py --serve-fixture
+```
+
+Open the printed loopback URL. The unprotected baseline must execute its SVG
+script and record authenticated synthetic GET/POST/event probes. Protected SVG
+and raw SVG must retain their static picture and produce no probes, including
+after clicking the event-handler button. Check escaped text and its authenticated
+navigation link (must report True), native audio, and binary downloads. The
+home page's script and fetch of protected plain
+text must still work. The fixture uses only a synthetic cookie and local data;
+it does not contact a device. Browser checks are manual and are not part of
+CTest. SVGs requiring scripts or external resources intentionally lose those
+features; static inline styling and embedded data images remain allowed.
+
+## Web batch response buffering
+
+`web_batch_handlers` extracts and compiles the production local/bonded HTTP
+batch handlers, settings marker helpers, and settings cleanup class on every
+run. It uses the vendored ArduinoJson implementation and its Arduino String
+adapter, with host mocks for String storage, HTTP, command execution, session
+identity, and allocation. The `.cpp` harness is a template for the Python runner,
+not a separately compiled copy of the handlers. ASan/UBSan follow `HW1_SANITIZE`.
+
+Coverage includes reply ownership/escaping, empty slots and counts, ordinary
+command errors, confirmations, settings finalization, session invalidation,
+server shutdown, and response-document allocation failures. Failed buffering
+must not skip command execution/cleanup or expose partial results as success.
+The final `String` serialization path is deliberately unchanged by this
+refactor. These tests do not measure physical PSRAM placement, internal-heap
+savings, real executor races, or final-String allocation failure on hardware.
+
+## Filesystem and G2 PSRAM output
+
+`fileread_psram`, `filesystem_psram_listing`, and `g2_files_psram` compile the
+actual extracted handlers/walkers/viewer with the production `PsramBuffer`.
+They mock filesystem, authentication, HTTP/BLE/rendering and crypto-key/open
+boundaries; the listing permission source contract still checks the real
+lock-bound authorization implementation separately. ASan/UBSan follow
+`HW1_SANITIZE`.
+
+Coverage includes complete listing JSON/text parity, independent HTTP/command
+output ownership, SD naming/counts, permissions-query order, allocation and
+capacity failure, fileread encoding/offset/EOF fields and raw-BLE send ordering,
+G2 raw/pretty/parse-error output, and malformed encrypted rows that expand on
+failure. The existing String reader/decrypt/wrap APIs remain available to other
+viewers. Streaming wrap state is additive and does not change chat/event calls.
+
+`memutil_tests` and `memutil_no_psram` additionally exercise the real owned-buffer
+growth, self-append, NUL/bounds checks, sticky failures, reuse, and PSRAM fallback
+or bypass with mocked heap backends. These are not physical heap measurements.
+
+No directory pagination or new client protocol is introduced. Commands retain
+the 4096-byte result budget including NUL; HTTP listings have independently
+owned growing storage and are not capped to the command budget. Failed output
+allocation never publishes a partial successful listing. Physical PSRAM usage,
+BLE congestion/disconnects, SD I/O failures and actual G2/OLED presentation still
+require device testing.
+
+`http_feature_gates` preprocesses the actual build header using its deployment
+override hook for 100 network/web/custom-WiFi/custom-HTTP combinations. It checks
+that the web page flags, including Power, are zero whenever HTTP is disabled.
+It does not claim that all unrelated hardware combinations link or boot.
+
+## ToF PSRAM object lifecycle
+
+`tof_psram_lifecycle` extracts the production `tofInit`, `tofTask`, and
+`ps_delete` template into a host harness. Mock sensor/I2C/allocation boundaries
+verify PSRAM-preferred allocation, placement construction, initialization
+failures, reinitialization, and the task's shutdown branch. Every teardown must
+destroy the object before freeing its storage and clear the global pointer.
+ASan/UBSan follow `HW1_SANITIZE`; the existing `memutil_tests` cover the real
+allocation helper's PSRAM fallback/bypass policy with a mocked heap backend.
+
+This moves only the VL53L4CX object's inline state. The vendor driver code,
+I2C/Wire buffers, task stack, cache, and sensor timing settings are unchanged.
+Host tests cannot establish physical RAM placement, ranging accuracy, or the
+polling-time impact of PSRAM access; those require an on-device check.
+
+## Optional PSRAM for sensor objects
+
+Application-owned heap driver objects use `AllocPref::PreferPSRAM`: external
+RAM is preferred, but an absent/exhausted external heap or the PSRAM bypass
+routes them to byte-addressable internal RAM. No sensor parent allocation uses
+`RequirePSRAM`. Genuine exhaustion of available internal/external memory still
+returns allocation failure; this policy is not a guarantee that every feature
+configuration fits a board without PSRAM.
+
+`sensor_parent_lifecycle` extracts the production IMU, APDS, servo, gamepad, and
+ANO initialization functions and task shutdown blocks into host boundary mocks.
+It checks placement construction and matching destruction, failed initialization
+and retries, and Seesaw's existing retain-across-retry/stop behavior. Vendor-owned
+I2C helpers, Wire buffers, locks, static caches, and driver algorithms are outside
+this migration. The tests do not exercise real hardware or task races.
+
+`memutil_tests` and `memutil_no_psram` compile the real allocation implementation
+with and without `BOARD_HAS_PSRAM`, respectively. They cover runtime-absent
+PSRAM, exhausted-PSRAM fallback, bypass, true allocation failure, and matching
+placement construction/destruction. Heap-capability backends are mocked, and
+ASan/UBSan follow `HW1_SANITIZE` for both targets and the lifecycle harness.
+
+## OTA PSRAM replies
+
+The OTA-enabled main image lazily retains its command reply buffers using
+`PSRAM_STATIC_BUF`, preserving the old static returned-pointer lifetimes and
+capacities. The eight common replies total 2,972 bytes, with another 512 bytes
+when Bluetooth is enabled. Only their pointers remain in fixed internal BSS;
+actual buffers prefer PSRAM and fall back to internal RAM when it is absent,
+exhausted, or bypassed. Unused commands do not allocate their buffers. The
+separate recovery updater and non-OTA command stubs are unchanged.
+
+`ota_psram_replies` executes extracted production status/journal-reset handlers,
+the BLE JSON formatter, and the real buffer/JSON macros against host boundary
+mocks and vendored ArduinoJson. It checks allocation failure and retry,
+persistent reuse, capacities, JSON allocation failures, and journal allocation
+failure before mutation. Source guards cover all ten buffers, all three JSON
+documents, explicit pointer capacities, BLE reply allocation before upload
+mutations, and credential-buffer allocation before copying a secret.
+
+The existing PSRAM/no-PSRAM MemUtil tests cover the actual fallback policy.
+ASan/UBSan follow `HW1_SANITIZE`. These tests do not run a real OTA upload,
+validate hardware PSRAM placement, or simulate the full BLE/flash state machine.
+
 ## System Event catalog coverage
 
 `event_catalog_tests` links the real `System_EventCatalog.cpp` and exercises
@@ -63,7 +202,7 @@ requires the notification editor to pass the resolved typed record's full name
 to the bounded one-kind mutation command. These are source contracts: the host
 suite cannot execute the Arduino/OLED renderer or synthesize real button input.
 
-The complete host suite currently passes 18/18, with sanitizers enabled on
+The complete host suite currently passes 45/45, with sanitizers enabled on
 native targets. The restoring five-profile firmware matrix remains the Phase 2
 provider/adapter evidence, including both ordinary recovery builds and exact
 source-config restoration. The ordinary FeatherS3 build performed after the
@@ -79,6 +218,26 @@ A separate authenticated live-browser acceptance reached the ordered 12-family/
 evidence only: it did not expose the raw HTTP response/auth exchange and does
 not exercise OLED. Physical OLED/BLE/G2/UART procedures and live HTTP failure
 injection remain outside these host guarantees.
+
+## I2C transaction-policy coverage
+
+`i2c_transaction_options_tests` executes the production manager transaction
+template against deterministic host stubs. It starts with an already-registered
+gamepad identity, then proves consecutive calls independently apply 100 kHz / 80
+ms and 400 kHz / 15 ms policies to the bus clock and mutex wait. The companion
+`i2c_transaction_contract` guard keeps timing out of duplicate registration,
+requires every standard and NACK-tolerant helper to forward explicit per-call
+options, and requires boot identities to use their configured physical bus.
+
+## MQTT lifecycle coverage
+
+`mqtt_lifecycle_gate_tests` compiles the production packed atomic gate and
+checks command-first, stop-first, duplicate-stop, stop-during-start, retry, and
+two-thread admission-versus-stop orderings. The companion
+`mqtt_lifecycle_contract` guard pins the firmware integration: MQTT command
+admission precedes queue submission and lasts through response publication,
+all driver teardown is main-loop-affine, both shutdown commands use the shared
+request path, and pending teardown runs before periodic publication.
 
 To build and run only the dependency-free map geometry target (without the
 Python-backed allocation inventory):

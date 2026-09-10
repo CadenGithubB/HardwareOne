@@ -4,6 +4,7 @@
 #include <Arduino.h>
 
 #include "System_I2C.h"
+#include "System_User.h"
 #include "System_Utils.h"
 #include "WebServer_Utils.h"
 
@@ -29,6 +30,12 @@ enum CLIState {
 extern CLIState gCLIState;
 extern bool gShowAllCommands;
 extern volatile bool gInHelpRender;
+
+// Exact-owner query used by HTTP response metadata. This deliberately exposes
+// only whether the named session owns help, not the generic CLIMode pointer or
+// pagination state.
+bool cliHelpModeOwnedBySession(CommandSource source,
+                               TransportSessionEpoch epoch);
 
 // ============================================================================
 // Help Rendering Functions

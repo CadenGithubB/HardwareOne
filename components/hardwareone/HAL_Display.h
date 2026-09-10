@@ -207,6 +207,12 @@
 // Global display instance (replaces oledDisplay)
 extern DisplayDriver* gDisplay;
 
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+// Address selected by the successful 0x3D/0x3C probe. All manager wrappers
+// must key health and failure probes to the same address the library uses.
+extern uint8_t gDisplayI2cAddress;
+#endif
+
 // Legacy compatibility alias
 #define oledDisplay gDisplay
 

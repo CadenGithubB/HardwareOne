@@ -837,10 +837,14 @@ static void wizardMode_onExit(void* /*ud*/) {
     }
 #endif
 
-    // Flush settings.json and re-apply runtime settings (output flags,
-    // log level, etc.) so the wizard's choices take effect immediately
-    // without requiring a reboot. Matches the legacy flow.
-    writeSettingsJson();
+    // logLevel lives in debug.json, while the rest of the wizard settings
+    // live in settings.json. This branch runs only for completed sessions;
+    // cancelled/session-lost exits below remain no-save paths.
+    const bool mainSaved = writeSettingsJson();
+    const bool debugSaved = writeDebugJson();
+    if (!mainSaved || !debugSaved) {
+      broadcastOutput("Warning: one or more setup settings files could not be saved.");
+    }
     applySettings();
 #if ENABLE_WIFI
     // Re-register SNTP with the wizard's NTP choice — applySettings() does

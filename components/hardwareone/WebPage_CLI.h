@@ -157,12 +157,51 @@ try{ commandHistory = JSON.parse(localStorage.getItem('cliHistory') || '[]'); }c
 historyIndex = -1; currentCommand = '';
 try{ inHelp = JSON.parse(localStorage.getItem('cliInHelp') || 'false'); }catch(_){ inHelp=false; }
 try{ outputBackup = localStorage.getItem('cliOutputHistoryBackup') || ''; }catch(_){ outputBackup=''; }
+var cliResponseGeneration=0; var cliLogRequestGeneration=0; var cliCommandPending=false; var cliLogRequestPending=false;
 function __stripAnsi(s){ try{ return (s||'').replace(/\x1B\[[0-9;]*[A-Za-z]/g, ''); }catch(_){ return s; } }
 function __applyClear(s){ try{ var ESC=String.fromCharCode(27); var clearSeq=ESC+'[2J'+ESC+'[H'; var idx=(s||'').lastIndexOf(clearSeq); if(idx!==-1){ return s.substring(idx+clearSeq.length); } return s; }catch(_){ return s; } }
-try{ if(!inHelp) fetch('/api/cli/logs', { credentials: 'same-origin', cache:'no-store' })
-.then(function(r){ return r.text(); })
-.then(function(text){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t || ''; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} try{ if(!scrolledOnce){ cliOutput.scrollTop = cliOutput.scrollHeight; scrolledOnce = true; } }catch(_){} } })
-.catch(function(e){ try { console.debug('[CLI] logs fetch error: ' + e.message); } catch(_){} }); }catch(_){ }
+function __helpStateFromResponse(r){ try{ var v=r&&r.headers?r.headers.get('X-HW1-CLI-Help'):null; return v==='active'?true:(v==='inactive'?false:null); }catch(_){ return null; } }
+function __storeHelpState(active){
+  inHelp=!!active;
+  try{ localStorage.setItem('cliInHelp', inHelp?'true':'false'); if(!inHelp){ localStorage.removeItem('cliOutputHistoryBackup'); } }catch(_){}
+}
+try{ if(cliOutput){ cliOutput.textContent=localStorage.getItem('cliOutputHistory')||''; } }catch(_){}
+function __applyCliLogReply(reply,responseGeneration,logGeneration){
+  if(cliBondMode || !reply || responseGeneration!==cliResponseGeneration || logGeneration!==cliLogRequestGeneration || cliCommandPending){ return; }
+  var wasInHelp=inHelp;
+  var cleanText=__stripAnsi(__applyClear(reply.text||''));
+  if(reply.helpState===true){
+    if(!wasInHelp){
+      if(!outputBackup){ outputBackup=cleanText||(cliOutput?cliOutput.textContent:''); }
+      try{ localStorage.setItem('cliOutputHistoryBackup',outputBackup); }catch(_){}
+      var savedHelp=''; try{ savedHelp=localStorage.getItem('cliOutputHistory')||''; }catch(_){}
+      __storeHelpState(true);
+      // Help output is captured for its owning tab and deliberately omitted
+      // from the shared log mirror. Reuse the last saved terminal surface when
+      // another tab (or a reload with stale local state) already owns help.
+      if(cliOutput && savedHelp){ cliOutput.textContent=savedHelp; }
+    } else {
+      __storeHelpState(true);
+    }
+    return; // metadata may update; active help output must never be overwritten
+  }
+  if(reply.helpState===false){ __storeHelpState(false); outputBackup=''; }
+  if(inHelp){ return; } // no metadata is safer than destroying an active page
+  if(cliOutput){ cliOutput.textContent=cleanText||''; try{ localStorage.setItem('cliOutputHistory',cliOutput.textContent); }catch(_){} try{ if(!scrolledOnce){ cliOutput.scrollTop=cliOutput.scrollHeight; scrolledOnce=true; } }catch(_){} }
+}
+function __requestCliLogs(){
+  if(cliBondMode || cliCommandPending || cliLogRequestPending){ return; }
+  var responseGeneration=cliResponseGeneration;
+  var logGeneration=++cliLogRequestGeneration;
+  cliLogRequestPending=true;
+  try{ fetch('/api/cli/logs', { credentials:'same-origin', cache:'no-store' })
+  .then(function(r){ if(r.status===401){ cliStopLogPoller(); return null; } var helpState=__helpStateFromResponse(r); return r.text().then(function(text){ return {text:text,helpState:helpState}; }); })
+  .then(function(reply){ cliLogRequestPending=false; __applyCliLogReply(reply,responseGeneration,logGeneration); })
+  .catch(function(e){ cliLogRequestPending=false; try{ console.debug('[CLI] logs fetch error: '+e.message); }catch(_){} }); }catch(_){ cliLogRequestPending=false; }
+}
+// Always ask once. Periodic calls below retry a transient failure and continue
+// reading metadata while help is active without applying the mirrored body.
+__requestCliLogs();
 function cliStopLogPoller(){ try{ if(window.__cliPoller){ clearInterval(window.__cliPoller); window.__cliPoller=null; } }catch(_){} }
 function cliStartLogPoller(){
   // Exactly one local-logs poller, and NEVER while targeting the bonded peer.
@@ -174,11 +213,7 @@ function cliStartLogPoller(){
   try {
     window.__cliPoller = setInterval(function(){
       if (cliBondMode) { cliStopLogPoller(); return; }  // stopped the moment we switch to bonded
-      if (inHelp) return;  // addressed help replies own the terminal surface
-      fetch('/api/cli/logs', { credentials: 'same-origin', cache: 'no-store' })
-        .then(function(r){ if(r.status===401){ cliStopLogPoller(); return ''; } return r.text(); })
-        .then(function(text){ if(text && !cliBondMode && !inHelp){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } })
-        .catch(function(_){ });
+      __requestCliLogs();
     }, 500);
   } catch(e) { try{ console.debug('[CLI] polling init error: ' + e.message); }catch(_){} }
 }
@@ -201,15 +236,10 @@ function executeCommand(){
   var command = (cliInput && cliInput.value ? cliInput.value : '').trim();
   if (!command) return;
   if (cliBondMode) { runBondedCommand(command); return; }
-  var lower = command.toLowerCase();
-  var exitingHelp = false;
-  if (!inHelp && (lower === 'help' || lower === 'menu' || lower === 'cli help')) {
-    outputBackup = cliOutput ? cliOutput.textContent : '';
-    try{ localStorage.setItem('cliOutputHistoryBackup', outputBackup); }catch(_){}
-    inHelp = true; try{ localStorage.setItem('cliInHelp', 'true'); }catch(_){}
-  } else if (inHelp && (lower === 'exit' || lower === 'back' || lower === 'q' || lower === 'quit')) {
-    exitingHelp = true;
-  }
+  var responseGeneration=++cliResponseGeneration;
+  ++cliLogRequestGeneration; // invalidate bootstrap/poll replies already in flight
+  cliCommandPending=true;
+  var outputBeforeCommand = cliOutput ? cliOutput.textContent : '';
   if (commandHistory[commandHistory.length - 1] !== command) {
     commandHistory.push(command); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
     try{ localStorage.setItem('cliHistory', JSON.stringify(commandHistory)); }catch(_){}
@@ -219,9 +249,33 @@ function executeCommand(){
   try { console.debug('[CLI] fetch start: ' + command); } catch(_){}
   // This is the human terminal. Other /api/cli users default to machine mode
   // so their polls/buttons cannot answer a pending confirmation.
-  hw.postFormText('/api/cli', { cmd: command, capture: '1', interactive: '1' })
-  .then(function(result){ try { console.debug('[CLI] fetch ok, len=' + (result ? result.length : 0)); } catch(_){} var ESC=String.fromCharCode(27); var clearSeq = ESC+'[2J'+ESC+'[H'; if (result && result.indexOf(clearSeq) !== -1) { var cleanResult = result.split(clearSeq).join(''); if (exitingHelp && inHelp) { hw.setText(cliOutput, outputBackup || ''); inHelp = false; try{ localStorage.setItem('cliInHelp','false'); localStorage.removeItem('cliOutputHistoryBackup'); }catch(_){} if (cleanResult && cliOutput) { cliOutput.textContent += cleanResult; } try{ localStorage.setItem('cliOutputHistory', cliOutput ? cliOutput.textContent : ''); }catch(_){} } else { if (cliOutput) { cliOutput.textContent = cleanResult; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } } else { if (cliOutput) { cliOutput.textContent += result + '\n'; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } if (cliInput) { cliInput.value=''; cliInput.focus(); } })
-  .catch(function(e){ try { console.debug('[CLI] fetch error: ' + e.message); } catch(_){} var errorMsg='Error: ' + e.message + '\n'; if (cliOutput) { cliOutput.textContent += errorMsg; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } if (cliInput) { cliInput.value=''; cliInput.focus(); } });
+  hw.postForm('/api/cli', { cmd: command, capture: '1', interactive: '1' })
+  .then(function(r){ var helpState=__helpStateFromResponse(r); return r.text().then(function(text){ return {result:text,helpState:helpState,status:r.status,ok:r.ok}; }); })
+  .then(function(reply){
+    if(responseGeneration!==cliResponseGeneration){ return; }
+    cliCommandPending=false;
+    var result=reply.result||'';
+    try { console.debug('[CLI] fetch ok, len=' + result.length); } catch(_){}
+    var wasInHelp=inHelp;
+    if(reply.helpState===true && !wasInHelp){
+      outputBackup=outputBeforeCommand;
+      try{ localStorage.setItem('cliOutputHistoryBackup',outputBackup); }catch(_){}
+    }
+    if(reply.helpState!==null){ __storeHelpState(reply.helpState); }
+    var clearSeq=String.fromCharCode(27)+'[2J'+String.fromCharCode(27)+'[H';
+    var cleanResult=__stripAnsi(__applyClear(result));
+    if(wasInHelp && reply.helpState===false){
+      if(cliOutput){ cliOutput.textContent=outputBackup||''; if(cleanResult){ cliOutput.textContent+=cleanResult+(cleanResult.slice(-1)==='\n'?'':'\n'); } }
+      outputBackup='';
+    } else if(result.indexOf(clearSeq)!==-1){
+      if(cliOutput){ cliOutput.textContent=cleanResult; }
+    } else if(cliOutput){
+      cliOutput.textContent+=cleanResult+(cleanResult&&cleanResult.slice(-1)!=='\n'?'\n':'');
+    }
+    try{ localStorage.setItem('cliOutputHistory',cliOutput?cliOutput.textContent:''); }catch(_){}
+    if(cliInput){ cliInput.value=''; cliInput.focus(); }
+  })
+  .catch(function(e){ if(responseGeneration!==cliResponseGeneration){ return; } cliCommandPending=false; try { console.debug('[CLI] fetch error: ' + e.message); } catch(_){} var errorMsg='Error: ' + e.message + '\n'; if (cliOutput) { cliOutput.textContent += errorMsg; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } if (cliInput) { cliInput.value=''; cliInput.focus(); } });
 }
 try { console.debug('[CLI] EOF'); } catch(_){}
 function clearHistory() {
@@ -249,6 +303,7 @@ function cliInitBondToggle(){
 
 function cliSetTarget(bonded){
   cliBondMode = !!bonded;
+  if(cliBondMode){ ++cliLogRequestGeneration; }
   // Free up a socket for the bonded fetches; resume local log polling when back
   // on "This Device". See cliStartLogPoller() for why this matters.
   try { if (cliBondMode) { cliStopLogPoller(); } else { cliStartLogPoller(); } } catch(_){}

@@ -927,7 +927,13 @@ Available debug modules (type `help debug` on device for full list):
 > `python3 tools/command_registry.py reference`; the command and module counts
 > move with your flags, which is why they are not repeated here.
 
-Type `help` on the device to enter the interactive help system. Type a module name to see its commands. Type `help all` to include disconnected sensors.
+Type `help` on the device to enter the interactive help system. Type a module
+name to see its commands, or use `help <module>` directly. Longer module lists
+are paged before they enter any serial, web, or other display buffer:
+`help <module> p<N>` opens page *N* (`help espnow p2`, for example). While an
+interactive module page is open, type `next`, `prev`, or `p<N>` to move between
+its pages. `back` returns from a module page to the main help menu, and `exit`
+leaves help. Type `help all` to include disconnected sensors.
 
 Two things about lookup that explain most surprises:
 
@@ -1235,8 +1241,8 @@ httpAutoStart <0|1>             - Auto-start web server on boot
 httpsEnabled <0|1>              - Enable HTTPS (reboot required)
 webclihistorysize <1-100>       - Web CLI history buffer size
 oledclihistorysize <10-100>     - OLED CLI history buffer size
-beginwrite                      - Start a batch settings update (defers flash write)
-savesettings                    - Flush deferred settings to flash
+beginwrite                      - Coalesce this source's settings-file writes
+savesettings                    - Flush changed files and end write coalescing
 features                        - Show/toggle system features with heap estimates
 featuresetup                    - Run interactive feature configuration wizard
 ```

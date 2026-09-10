@@ -384,6 +384,7 @@ static bool webGuestApiAllowed(const char* path) {
     "/api/mqtt/status",
     "/api/automations",
     "/api/battery/status",
+    "/api/power/status",
     "/api/health/status",
     "/api/sensors",
     "/api/sensors/status",
@@ -532,6 +533,9 @@ String generateNavigation(const String& activePage, const String& username, cons
   link("/logging", "logging", "Logging");
 #if ENABLE_WEB_BATTERY
   link("/battery", "battery", "Battery");
+#endif
+#if ENABLE_WEB_POWER
+  link("/power", "power", "Power");
 #endif
 #if ENABLE_WEB_SPEECH
   link("/speech", "speech", "Speech");

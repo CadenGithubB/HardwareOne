@@ -4,12 +4,14 @@
 #if ENABLE_APDS_SENSOR
 
 #include <Arduino.h>
+#include <new>
 #include "Adafruit_APDS9960.h"
 
 #include "i2csensor_apds9960.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
@@ -178,7 +180,8 @@ const char* cmd_apdsstart(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  if (!i2cPingAddress(I2C_ADDR_APDS, 100000, 50)) {
+  if (!i2cPingAddress(I2C_ADDR_APDS, 100000, 50,
+                      (uint8_t)gSettings.apdsBus)) {
     return "Error: [APDS] Not detected on I2C bus";
   }
 
@@ -323,14 +326,21 @@ bool apdsInit() {
   if (gAPDS9960 != nullptr) {
     return true;
   }
+
+  const uint8_t apdsBus = (uint8_t)gSettings.apdsBus;
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  TwoWire* apdsWire = mgr ? mgr->getWire(apdsBus) : nullptr;
+  if (!apdsWire) return false;
   
   // Use i2cTransaction wrapper for safe mutex + clock management
-  return i2cDeviceTransaction(I2C_ADDR_APDS, 100000, 500, [&]() -> bool {
-    gAPDS9960 = new Adafruit_APDS9960();
-    if (!gAPDS9960) return false;
+  return i2cDeviceTransaction(apdsBus, I2C_ADDR_APDS, 100000, 500, [&]() -> bool {
+    // Only the task-context wrapper moves; the library owns its I2C transport.
+    void* apdsObjBuf = ps_alloc(sizeof(Adafruit_APDS9960), AllocPref::PreferPSRAM, "apds.obj");
+    if (!apdsObjBuf) return false;
+    gAPDS9960 = new (apdsObjBuf) Adafruit_APDS9960();
     
-    if (!gAPDS9960->begin()) {
-      delete gAPDS9960;
+    if (!gAPDS9960->begin(10, APDS9960_AGAIN_4X, APDS9960_ADDRESS, apdsWire)) {
+      ps_delete(gAPDS9960);
       gAPDS9960 = nullptr;
       return false;
     }
@@ -495,7 +505,7 @@ void apdsTask(void* parameter) {
     if (!anyEnabled) {
       gApdsConnected = false;
       if (gAPDS9960 != nullptr) {
-        delete gAPDS9960;
+        ps_delete(gAPDS9960);
         gAPDS9960 = nullptr;
       }
       gApdsCache.apdsDataValid = false;
@@ -523,7 +533,8 @@ void apdsTask(void* parameter) {
       }
     }
     
-    if (anyEnabled && gApdsConnected && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
+    const uint8_t apdsBus = (uint8_t)gSettings.apdsBus;
+    if (anyEnabled && gApdsConnected && !pollPaused(apdsBus)) {
       unsigned long apdsPollMs = (gSettings.apdsDevicePollMs > 0) ? (unsigned long)gSettings.apdsDevicePollMs : 200;
       
       if ((nowMs - lastApdsRead) >= apdsPollMs) {
@@ -532,7 +543,7 @@ void apdsTask(void* parameter) {
         uint8_t gesture = 0;
         
         // APDS reads ~5ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
-        bool result = i2cTaskWithTimeout(I2C_ADDR_APDS, 100000, 100, [&]() -> bool {
+        bool result = i2cTaskWithTimeout(apdsBus, I2C_ADDR_APDS, 100000, 100, [&]() -> bool {
           if (gApdsColorRunning && gAPDS9960->colorDataReady()) {
             gAPDS9960->getColorData(&red, &green, &blue, &clear);
           }
@@ -586,8 +597,9 @@ void apdsTask(void* parameter) {
         } else {
           // Note: I2CDevice::recordError() called automatically by transaction
           // Check centralized health tracking for auto-disable decision
-          if (i2cShouldAutoDisable(I2C_ADDR_APDS)) {
-            uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_APDS);
+          if (i2cShouldAutoDisable(I2C_ADDR_APDS, (uint8_t)gSettings.apdsBus)) {
+            uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_APDS,
+                                                     (uint8_t)gSettings.apdsBus);
             gApdsColorRunning = false;
             gApdsProximityRunning = false;
             gApdsGestureRunning = false;
@@ -601,7 +613,7 @@ void apdsTask(void* parameter) {
             // bailout above. `break` here left the while(true) loop and RETURNED
             // from the task entry point, which FreeRTOS turns into a jump to
             // address 0 (InstrFetchProhibited panic + reboot) rather than a task
-            // exit. It also skipped the `delete gAPDS9960` + cache-invalidate the
+            // exit. It also skipped the `ps_delete(gAPDS9960)` + cache-invalidate the
             // shutdown path performs. All three running flags are cleared above,
             // so the top-of-loop check now runs the clean SENSOR_TASK_EXIT.
             continue;

@@ -31,6 +31,28 @@ sizefiles.txt
 docs/HealthCapture/
 docs/NewCapture/
 
+# Serial-monitor captures. One of these was committed in the repo's first
+# commit and carried the operator's WiFi passphrase and admin password in
+# plaintext, because the [Tx] lines record every keystroke typed at the
+# first-time-setup prompts. Any file that looks like a console log stays out.
+*seriallog*
+*serial_log*
+*screenlog*
+*.hcidump
+*.btsnoop
+
+# Security audit and vulnerability-review documents. These carry working
+# exploit detail for a device with flash encryption disabled. The v0.99.92
+# tag shipped 177 internal docs including AUTH_SECURITY_REVIEW.md, whose own
+# header said not to publish it, because they were untracked rather than
+# ignored and a broad `git add` swept them in. Ignoring beats remembering.
+docs/*AUDIT*.md
+docs/*SECURITY*.md
+docs/*HARDENING*.md
+docs/*_REVIEW.md
+docs/UNAUTH_SURFACE_AUDIT_*.md
+docs/purge_plan.sh
+
 # Ad-hoc per-board firmware build outputs copied to the repo root for flashing
 # (e.g. hardwareone-idf-gamepad-step2.bin). Build products, not source.
 *.elf

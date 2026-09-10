@@ -490,7 +490,7 @@ void gpsTask(void* parameter) {
           return probeWire->endTransmission() == 0;
         });
         if (!probeResult) {
-          if (i2cShouldAutoDisable(I2C_ADDR_GPS)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_GPS, (uint8_t)gSettings.gpsBus)) {
             ERROR_GPSF("Too many consecutive GPS failures - auto-disabling");
             gGpsRunning = false;
             sensorStatusBumpWith("gps@auto_disabled");

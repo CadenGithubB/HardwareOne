@@ -1,8 +1,10 @@
 #include "System_Settings.h"        // Settings struct definition and function declarations
 #include "System_UserSettings.h"   // Per-user settings declarations + transaction contract
+#include "System_SettingsWriteBatchCore.h"
 #include <cerrno>            // errno/ENOENT — distinguish absence from stat failure
 #include <cmath>             // floorf — whole-number check in settingsTypeAccepted
 #include <climits>           // INT_MIN/INT_MAX — same
+#include <cstdint>
 #include <sys/stat.h>        // stat — fail-closed per-user settings existence probe
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"   // ENABLE_WIFI, ENABLE_ESPNOW flags
@@ -20,6 +22,8 @@
 #include "System_Clock.h"    // Clock::applyTimezone — push tz offset into libc TZ
 #include "BLE_Peers.h"       // bluetooth.peers JSON (de)serialization
 #include "System_Command.h"
+#include "System_CommandTypes.h"
+#include "System_AuthIdentity.h"
 #include "System_Notifications.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel() — derive legacy gSrDebugLevel from flags
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() — Stage 1 consolidation
@@ -35,6 +39,9 @@
 #include "mbedtls/platform_util.h"
 #include "mbedtls/sha256.h"
 #include "esp_flash.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #if ENABLE_WIFI
   #include <WiFi.h>
   #include <WiFiUdp.h>
@@ -111,8 +118,364 @@ extern volatile uint32_t gOutputFlags;
 // File paths - need to be non-static in .ino for access from .cpp files
 extern const char* SETTINGS_JSON_FILE;
 
-// Deferred write flag — when true, setSetting() updates RAM only; savesettings writes once
-volatile bool gDeferWrites = false;
+// Settings batching is owner-scoped. The core is a fixed-allocation state
+// machine; this adapter supplies the short critical section and all I/O.
+// Filesystem writes are deliberately performed only after releasing the mux.
+namespace {
+
+using SettingsBatchCore = hw1_settings_batch::Core<16>;
+using SettingsBatchOwner = hw1_settings_batch::Owner;
+using SettingsBatchFinish = hw1_settings_batch::FinishResult;
+
+static SettingsBatchCore sSettingsWriteBatches;
+static portMUX_TYPE sSettingsWriteBatchMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t sNextSettingsWriteBatchId = 1;
+static uint8_t sSettingsWritePendingRetryMask = 0;
+static uint32_t sSettingsWriteRetryNotBeforeMs = 0;
+static constexpr uint32_t kSettingsBatchMaxIdleMs = 120000;
+static constexpr uint32_t kSettingsBatchTickIntervalMs = 1000;
+static constexpr uint32_t kSettingsWriteRetryBackoffMs = 30000;
+
+// Full settings writers build from shared live RAM and use fixed temporary
+// paths. Serialize the complete operation, not just individual LittleFS calls,
+// so two tasks cannot race through the same merge/build/rename sequence.
+static StaticSemaphore_t sSettingsFileWriteMutexStorage;
+static SemaphoreHandle_t sSettingsFileWriteMutex = nullptr;
+static portMUX_TYPE sSettingsFileWriteMutexInitMux = portMUX_INITIALIZER_UNLOCKED;
+
+static SemaphoreHandle_t settingsFileWriteMutex() {
+  portENTER_CRITICAL(&sSettingsFileWriteMutexInitMux);
+  if (!sSettingsFileWriteMutex) {
+    sSettingsFileWriteMutex =
+        xSemaphoreCreateRecursiveMutexStatic(&sSettingsFileWriteMutexStorage);
+  }
+  SemaphoreHandle_t mutex = sSettingsFileWriteMutex;
+  portEXIT_CRITICAL(&sSettingsFileWriteMutexInitMux);
+  return mutex;
+}
+
+class SettingsFileWriteGuard {
+ public:
+  explicit SettingsFileWriteGuard(TickType_t wait = portMAX_DELAY) {
+    SemaphoreHandle_t mutex = settingsFileWriteMutex();
+    locked_ = mutex && xSemaphoreTakeRecursive(mutex, wait) == pdTRUE;
+  }
+  ~SettingsFileWriteGuard() {
+    if (locked_) xSemaphoreGiveRecursive(sSettingsFileWriteMutex);
+  }
+  explicit operator bool() const { return locked_; }
+
+ private:
+  bool locked_ = false;
+};
+
+static constexpr uint64_t kExplicitBatchDomain = UINT64_C(0x4857314241544348); // HW1BATCH
+static constexpr uint64_t kSessionBatchDomain  = UINT64_C(0x485731534553534e); // HW1SESSN
+static constexpr uint64_t kContextBatchDomain  = UINT64_C(0x485731434f4e5448); // HW1CONTH
+static constexpr uint64_t kFnvOffset = UINT64_C(1469598103934665603);
+static constexpr uint64_t kFnvPrime  = UINT64_C(1099511628211);
+
+static void settingsOwnerHashByte(uint64_t& hash, uint8_t value) {
+  hash ^= value;
+  hash *= kFnvPrime;
+}
+
+static void settingsOwnerHashU32(uint64_t& hash, uint32_t value) {
+  for (unsigned shift = 0; shift < 32; shift += 8) {
+    settingsOwnerHashByte(hash, static_cast<uint8_t>(value >> shift));
+  }
+}
+
+static void settingsOwnerHashString(uint64_t& hash, const String& value) {
+  for (size_t i = 0; i < value.length(); ++i) {
+    settingsOwnerHashByte(hash, static_cast<uint8_t>(value[i]));
+  }
+  // Preserve field boundaries so {"ab","c"} cannot alias {"a","bc"}.
+  settingsOwnerHashByte(hash, 0xffu);
+}
+
+static void settingsOwnerHashCString(uint64_t& hash, const char* value) {
+  if (value) {
+    while (*value) {
+      settingsOwnerHashByte(hash, static_cast<uint8_t>(*value++));
+    }
+  }
+  settingsOwnerHashByte(hash, 0xffu);
+}
+
+static SettingsBatchOwner explicitSettingsBatchOwner(uint32_t batchId) {
+  return {kExplicitBatchDomain, static_cast<uint64_t>(batchId)};
+}
+
+static bool currentSettingsBatchOwner(SettingsBatchOwner& ownerOut) {
+  CommandContext* command =
+      static_cast<CommandContext*>(currentCommandContext());
+  if (command) {
+    if (command->settingsBatchId != 0) {
+      ownerOut = explicitSettingsBatchOwner(command->settingsBatchId);
+      return true;
+    }
+
+    if (command->transportSessionEpoch != 0) {
+      const uint64_t domain =
+          kSessionBatchDomain ^
+          (static_cast<uint64_t>(command->auth.transport) << 8) ^
+          static_cast<uint64_t>(command->origin);
+      ownerOut = {
+          domain, static_cast<uint64_t>(command->transportSessionEpoch)};
+      return true;
+    }
+
+    // Stateless Basic Auth and bonded ESP-NOW commands have no transport
+    // epoch. Use a non-reversible value fingerprint of their stable source
+    // identity. Do not include path/command/id: those change for every member
+    // of the same beginwrite ... savesettings sequence.
+    uint64_t fingerprint = kFnvOffset;
+    settingsOwnerHashU32(fingerprint,
+                         static_cast<uint32_t>(command->auth.transport));
+    settingsOwnerHashU32(fingerprint,
+                         static_cast<uint32_t>(command->origin));
+    settingsOwnerHashString(fingerprint, command->auth.user);
+    settingsOwnerHashString(fingerprint, command->auth.sid);
+    settingsOwnerHashString(fingerprint, command->auth.ip);
+    settingsOwnerHashCString(fingerprint, command->automationName);
+    ownerOut = {kContextBatchDomain, fingerprint};
+    return true;
+  }
+
+  // A background caller has no command ownership boundary. It must write
+  // immediately; using task identity here would collapse every transport onto
+  // cmd_exec_task and recreate the old process-global suppression bug.
+  ownerOut = {};
+  return false;
+}
+
+static bool beginSettingsWriteBatch(SettingsBatchOwner owner) {
+  const uint32_t nowMs = static_cast<uint32_t>(millis());
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  const bool ok = sSettingsWriteBatches.begin(
+      owner, hw1_settings_batch::BeginMode::Idempotent,
+      nowMs);
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+  return ok;
+}
+
+static SettingsBatchFinish finishSettingsWriteBatch(SettingsBatchOwner owner) {
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  const SettingsBatchFinish result = sSettingsWriteBatches.finish(owner);
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+  return result;
+}
+
+static bool restoreSettingsWriteBatch(SettingsBatchOwner owner,
+                                      uint8_t dirtyMask) {
+  const uint32_t nowMs = static_cast<uint32_t>(millis());
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  const bool restored = sSettingsWriteBatches.restore(
+      owner, dirtyMask, nowMs);
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+  return restored;
+}
+
+static void retainSettingsWriteRetry(uint8_t dirtyMask) {
+  const uint8_t retainedMask = static_cast<uint8_t>(
+      dirtyMask & hw1_settings_batch::ALL);
+  if (retainedMask == 0) return;
+
+  const uint32_t nowMs = static_cast<uint32_t>(millis());
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  const bool wasEmpty = sSettingsWritePendingRetryMask == 0;
+  sSettingsWritePendingRetryMask = static_cast<uint8_t>(
+      sSettingsWritePendingRetryMask | retainedMask);
+  // Do not postpone an already scheduled retry when another writer fails.
+  // Once the pending mask is claimed by the tick it becomes empty, so a
+  // repeated failure naturally schedules one new bounded attempt.
+  if (wasEmpty) {
+    sSettingsWriteRetryNotBeforeMs = nowMs + kSettingsWriteRetryBackoffMs;
+  }
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+}
+
+static void clearSettingsWriteRetry(uint8_t persistedMask) {
+  persistedMask = static_cast<uint8_t>(
+      persistedMask & hw1_settings_batch::ALL);
+  if (persistedMask == 0) return;
+
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  sSettingsWritePendingRetryMask = static_cast<uint8_t>(
+      sSettingsWritePendingRetryMask & ~persistedMask);
+  if (sSettingsWritePendingRetryMask == 0) {
+    sSettingsWriteRetryNotBeforeMs = 0;
+  }
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+}
+
+static bool settingsWriteRetryDue(uint32_t nowMs) {
+  return static_cast<int32_t>(
+      nowMs - sSettingsWriteRetryNotBeforeMs) >= 0;
+}
+
+static bool flushSettingsDirtyMask(SettingsBatchOwner owner,
+                                   uint8_t dirtyMask) {
+  uint8_t failedMask = 0;
+  // Keep the recursive writer lock through failure bookkeeping. Otherwise a
+  // later full writer could succeed and clear an old retry just before this
+  // caller restores that now-obsolete failure bit.
+  SettingsFileWriteGuard flushGuard;
+  if (!flushGuard) {
+    failedMask = static_cast<uint8_t>(
+        dirtyMask & hw1_settings_batch::ALL);
+  } else {
+    if ((dirtyMask & hw1_settings_batch::MAIN) && !writeSettingsJson()) {
+      failedMask |= hw1_settings_batch::MAIN;
+    }
+    if ((dirtyMask & hw1_settings_batch::DEBUG) && !writeDebugJson()) {
+      failedMask |= hw1_settings_batch::DEBUG;
+    }
+  }
+
+  if (failedMask != 0 && !restoreSettingsWriteBatch(owner, failedMask)) {
+    // Slot pressure must not erase durability intent. The owner boundary no
+    // longer matters after a failed final flush, so a global retry mask is a
+    // safe fixed-allocation fallback.
+    retainSettingsWriteRetry(failedMask);
+    ERROR_STORAGEF("Settings batch slots exhausted; retained failed write in "
+                   "global retry mask (mask=0x%02x)", failedMask);
+  }
+  return failedMask == 0;
+}
+
+}  // namespace
+
+bool requestSettingsPersist() {
+  SettingsBatchOwner owner;
+  if (!currentSettingsBatchOwner(owner)) {
+    SettingsFileWriteGuard persistGuard;
+    if (!persistGuard) {
+      retainSettingsWriteRetry(hw1_settings_batch::MAIN);
+      return false;
+    }
+    const bool ok = writeSettingsJson();
+    if (!ok) retainSettingsWriteRetry(hw1_settings_batch::MAIN);
+    return ok;
+  }
+  const uint32_t nowMs = static_cast<uint32_t>(millis());
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  const hw1_settings_batch::NoteResult result =
+      sSettingsWriteBatches.note(owner, hw1_settings_batch::MAIN,
+                                 nowMs);
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+  if (result == hw1_settings_batch::NoteResult::Deferred) return true;
+  SettingsFileWriteGuard persistGuard;
+  if (!persistGuard) {
+    retainSettingsWriteRetry(hw1_settings_batch::MAIN);
+    return false;
+  }
+  const bool ok = writeSettingsJson();
+  if (!ok) retainSettingsWriteRetry(hw1_settings_batch::MAIN);
+  return ok;
+}
+
+bool requestDebugSettingsPersist() {
+  SettingsBatchOwner owner;
+  if (!currentSettingsBatchOwner(owner)) {
+    SettingsFileWriteGuard persistGuard;
+    if (!persistGuard) {
+      retainSettingsWriteRetry(hw1_settings_batch::DEBUG);
+      return false;
+    }
+    const bool ok = writeDebugJson();
+    if (!ok) retainSettingsWriteRetry(hw1_settings_batch::DEBUG);
+    return ok;
+  }
+  const uint32_t nowMs = static_cast<uint32_t>(millis());
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  const hw1_settings_batch::NoteResult result =
+      sSettingsWriteBatches.note(owner, hw1_settings_batch::DEBUG,
+                                 nowMs);
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+  if (result == hw1_settings_batch::NoteResult::Deferred) return true;
+  SettingsFileWriteGuard persistGuard;
+  if (!persistGuard) {
+    retainSettingsWriteRetry(hw1_settings_batch::DEBUG);
+    return false;
+  }
+  const bool ok = writeDebugJson();
+  if (!ok) retainSettingsWriteRetry(hw1_settings_batch::DEBUG);
+  return ok;
+}
+
+uint32_t allocateSettingsWriteBatchId() {
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  uint32_t batchId = sNextSettingsWriteBatchId++;
+  if (batchId == 0) {
+    batchId = sNextSettingsWriteBatchId++;
+  }
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+  return batchId;
+}
+
+void settingsWriteBatchTick() {
+  static uint32_t lastTickMs = 0;
+  const uint32_t tickStartMs = static_cast<uint32_t>(millis());
+  if (static_cast<uint32_t>(tickStartMs - lastTickMs) <
+      kSettingsBatchTickIntervalMs) {
+    return;
+  }
+  lastTickMs = tickStartMs;
+
+  // Do not destructively claim a retry until this task owns the full-writer
+  // lane. A concurrent successful snapshot must be able to clear the pending
+  // bit instead of racing a stale local copy into one more flash rewrite.
+  // Zero wait keeps the main loop non-blocking; a busy writer simply moves the
+  // housekeeping attempt to the next one-second tick.
+  SettingsFileWriteGuard tickWriteGuard(0);
+  if (!tickWriteGuard) return;
+
+  hw1_settings_batch::ExpiredResult expired;
+  uint8_t retryMask = 0;
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  // note() uses this same mux but intentionally does not take the file-writer
+  // lane. Sample while holding the mux so no owner can publish a later touch
+  // between this timestamp and takeExpired(); that unsigned age would
+  // otherwise underflow and appear ~49 days old.
+  const uint32_t nowMs = static_cast<uint32_t>(millis());
+  if (sSettingsWritePendingRetryMask != 0 && settingsWriteRetryDue(nowMs)) {
+    retryMask = sSettingsWritePendingRetryMask;
+    sSettingsWritePendingRetryMask = 0;
+    sSettingsWriteRetryNotBeforeMs = 0;
+  }
+  // Reap one owner even while a slot-pressure fallback is waiting for its
+  // retry deadline; otherwise a full table plus a persistent write failure
+  // could starve expiry forever.
+  expired = sSettingsWriteBatches.takeExpired(
+      nowMs, kSettingsBatchMaxIdleMs);
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+
+  if (expired.found && expired.dirtyMask == 0 && retryMask == 0) {
+    WARN_STORAGEF("Expired idle settings batch with no pending files");
+    return;
+  }
+
+  const uint8_t dirtyMask = static_cast<uint8_t>(
+      retryMask | (expired.found ? expired.dirtyMask : 0));
+  if (dirtyMask == 0) return;
+
+  if (expired.found) {
+    WARN_STORAGEF("Expiring idle settings batch after %lu ms (mask=0x%02x)",
+                  static_cast<unsigned long>(kSettingsBatchMaxIdleMs),
+                  expired.dirtyMask);
+  }
+
+  // Failed final writes no longer need their original ownership boundary. If
+  // an expired dirty owner is available, reuse it for restoration; otherwise
+  // use a reserved synthetic value (web IDs never allocate zero).
+  const SettingsBatchOwner retryOwner =
+      (expired.found && expired.dirtyMask != 0)
+          ? expired.owner
+          : SettingsBatchOwner{kExplicitBatchDomain, 0};
+  (void)flushSettingsDirtyMask(retryOwner, dirtyMask);
+}
 
 // Filesystem locking
 extern void fsLock(const char* owner);
@@ -261,8 +624,8 @@ const CommandEntry settingsCommands[] = {
 #endif
 
   // ---- Batch write ----
-  { "beginwrite",   "Start a batch settings update — defers flash write until savesettings.", true, cmd_beginwrite },
-  { "savesettings", "Flush deferred settings to flash (single write).",                       true, cmd_savesettings },
+  { "beginwrite",   "Start owner-scoped settings write coalescing until savesettings (not a RAM transaction).", true, cmd_beginwrite },
+  { "savesettings", "Flush this source's changed settings files and end its coalescing scope.",                true, cmd_savesettings },
 };
 
 const size_t settingsCommandsCount = sizeof(settingsCommands) / sizeof(settingsCommands[0]);
@@ -1044,6 +1407,12 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
 bool writeSettingsJson() {
   if (!filesystemReady) return false;
 
+  SettingsFileWriteGuard writeGuard;
+  if (!writeGuard) {
+    ERROR_STORAGEF("Could not acquire settings file writer lock");
+    return false;
+  }
+
   // Refuse to rebuild the file from RAM when this boot never successfully read
   // it. gSettingsLoadedOk means exactly "RAM is a trustworthy source for a full
   // rewrite": set at the end of a successful load, and set explicitly by the
@@ -1153,6 +1522,18 @@ bool writeSettingsJson() {
     return false;
   }
 
+  // Arduino FS does not expose a checked flush/fsync result. Verify both the
+  // serializer's accepted-byte count and the size observed after flush before
+  // allowing a temporary file to replace the live settings snapshot.
+  const size_t expectedBytes = measureJson(doc);
+  if (expectedBytes == 0) {
+    ERROR_STORAGEF("Failed to measure settings JSON");
+    logSystemEvent("SETTINGS", "save FAILED (measured 0 bytes) — settings NOT persisted");
+    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "serialize", "settings.json");
+    pollResume();
+    return false;
+  }
+
   // Atomic write: temp file then rename
   const char* tmp = "/settings.tmp";
   
@@ -1168,14 +1549,18 @@ bool writeSettingsJson() {
   }
 
   // Serialize JSON directly to file (no intermediate buffer)
-  size_t bytesWritten = serializeJson(doc, file);
+  const size_t bytesWritten = serializeJson(doc, file);
   file.flush();
+  const size_t observedBytes = file.size();
   file.close();
   fsUnlock();
 
-  if (bytesWritten == 0) {
-    ERROR_STORAGEF("Failed to serialize JSON");
-    logSystemEvent("SETTINGS", "save FAILED (serialize wrote 0 bytes) — settings NOT persisted");
+  if (bytesWritten != expectedBytes || observedBytes != expectedBytes) {
+    ERROR_STORAGEF("Incomplete settings temp write: serialized=%zu, size=%zu, expected=%zu",
+                   bytesWritten, observedBytes, expectedBytes);
+    logSystemEvent("SETTINGS",
+                   "save FAILED (temp wrote %zu bytes, size %zu, expected %zu) — settings NOT persisted",
+                   bytesWritten, observedBytes, expectedBytes);
     systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "serialize", "settings.json");
     VFS::removeGuarded(tmp, VFS::systemAuth("settings.write"));
     pollResume();
@@ -1202,10 +1587,23 @@ bool writeSettingsJson() {
       pollResume();
       return false;
     }
-    serializeJson(doc, directFile);
+    const size_t directBytesWritten = serializeJson(doc, directFile);
     directFile.flush();
+    const size_t directObservedBytes = directFile.size();
     directFile.close();
     fsUnlock();
+    if (directBytesWritten != expectedBytes ||
+        directObservedBytes != expectedBytes) {
+      ERROR_STORAGEF("Incomplete direct settings fallback: serialized=%zu, size=%zu, expected=%zu",
+                     directBytesWritten, directObservedBytes, expectedBytes);
+      logSystemEvent("SETTINGS",
+                     "save FAILED (direct fallback wrote %zu bytes, size %zu, expected %zu)",
+                     directBytesWritten, directObservedBytes, expectedBytes);
+      systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "direct_write",
+                      "settings.json");
+      pollResume();
+      return false;
+    }
   }
 
   DEBUG_STORAGEF("[Settings] Write complete");
@@ -1216,6 +1614,10 @@ bool writeSettingsJson() {
   { extern void computeBondLocalSettingsHash(); computeBondLocalSettingsHash(); }
 #endif
 
+  // A complete full-file snapshot supersedes any older failed immediate write
+  // for this file. Clear its retained retry bit while the shared writer guard
+  // still establishes ordering with every other full writer.
+  clearSettingsWriteRetry(hw1_settings_batch::MAIN);
   return true;
 }
 
@@ -1238,6 +1640,12 @@ static void buildDebugJsonDoc(JsonDocument& doc) {
 
 bool writeDebugJson() {
   if (!filesystemReady) return false;
+
+  SettingsFileWriteGuard writeGuard;
+  if (!writeGuard) {
+    ERROR_STORAGEF("Could not acquire settings file writer lock for debug.json");
+    return false;
+  }
   if (!gDebugLoadedOk) {
     ERROR_STORAGEF("debug save REFUSED: this boot never loaded %s; writing compiled "
                    "defaults would destroy the operator's flag set", DEBUG_JSON_FILE);
@@ -1257,6 +1665,16 @@ bool writeDebugJson() {
     return false;
   }
 
+  const size_t expectedBytes = measureJson(doc);
+  if (expectedBytes == 0) {
+    ERROR_STORAGEF("Failed to measure debug JSON");
+    logSystemEvent("SETTINGS", "debug save FAILED (measured 0 bytes)");
+    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "serialize",
+                    DEBUG_JSON_FILE);
+    pollResume();
+    return false;
+  }
+
   // Atomic write: temp at root (swept by the boot .tmp cleanup) then rename.
   const char* tmp = "/debug.tmp";
   fsLock("debug.write");
@@ -1267,13 +1685,20 @@ bool writeDebugJson() {
     pollResume();
     return false;
   }
-  size_t bytesWritten = serializeJson(doc, file);
+  const size_t bytesWritten = serializeJson(doc, file);
   file.flush();
+  const size_t observedBytes = file.size();
   file.close();
   fsUnlock();
 
-  if (bytesWritten == 0) {
-    ERROR_STORAGEF("Failed to serialize debug JSON");
+  if (bytesWritten != expectedBytes || observedBytes != expectedBytes) {
+    ERROR_STORAGEF("Incomplete debug temp write: serialized=%zu, size=%zu, expected=%zu",
+                   bytesWritten, observedBytes, expectedBytes);
+    logSystemEvent("SETTINGS",
+                   "debug save FAILED (temp wrote %zu bytes, size %zu, expected %zu)",
+                   bytesWritten, observedBytes, expectedBytes);
+    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "serialize",
+                    DEBUG_JSON_FILE);
     VFS::removeGuarded(tmp, VFS::systemAuth("settings.write"));
     pollResume();
     return false;
@@ -1293,10 +1718,23 @@ bool writeDebugJson() {
       pollResume();
       return false;
     }
-    serializeJson(doc, directFile);
+    const size_t directBytesWritten = serializeJson(doc, directFile);
     directFile.flush();
+    const size_t directObservedBytes = directFile.size();
     directFile.close();
     fsUnlock();
+    if (directBytesWritten != expectedBytes ||
+        directObservedBytes != expectedBytes) {
+      ERROR_STORAGEF("Incomplete direct debug fallback: serialized=%zu, size=%zu, expected=%zu",
+                     directBytesWritten, directObservedBytes, expectedBytes);
+      logSystemEvent("SETTINGS",
+                     "debug save FAILED (direct fallback wrote %zu bytes, size %zu, expected %zu)",
+                     directBytesWritten, directObservedBytes, expectedBytes);
+      systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "direct_write",
+                      DEBUG_JSON_FILE);
+      pollResume();
+      return false;
+    }
   }
 
   pollResume();
@@ -1307,6 +1745,7 @@ bool writeDebugJson() {
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
   { extern void computeBondLocalSettingsHash(); computeBondLocalSettingsHash(); }
 #endif
+  clearSettingsWriteRetry(hw1_settings_batch::DEBUG);
   return true;
 }
 
@@ -2375,6 +2814,10 @@ extern const SettingsModule rtcSettingsModule;
 extern const SettingsModule presenceSettingsModule;
 #endif
 
+#if ENABLE_LED_MATRIX
+extern const SettingsModule matrixSettingsModule;
+#endif
+
 #if ENABLE_CAMERA_SENSOR
 extern const SettingsModule cameraSettingsModule;
 #endif
@@ -2471,6 +2914,10 @@ void registerAllSettingsModules() {
 
 #if ENABLE_PRESENCE_SENSOR
   registerSettingsModule(&presenceSettingsModule);
+#endif
+
+#if ENABLE_LED_MATRIX
+  registerSettingsModule(&matrixSettingsModule);
 #endif
 
 #if ENABLE_CAMERA_SENSOR
@@ -2890,8 +3337,8 @@ size_t writeRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, b
 // only has a field reference, so reverse-look-up the registered SettingEntry by its
 // valuePtr to recover the setting's name + type, format the just-written value
 // (masking secrets), and post. A field with no registered entry (internal/runtime
-// state) posts nothing — and because setSetting() writes flash on every change, this
-// only ever fires on genuine, infrequent config changes. The handleSettingCommand
+// state) posts nothing — and because setSetting() requests persistence on every
+// change, this only ever fires on genuine config changes. The handleSettingCommand
 // path below posts its own SETTING_CHANGED (it writes valuePtr directly, not via
 // setSetting), so the two paths are disjoint and never double-fire.
 void notifySettingChanged(const void* fieldPtr) {
@@ -2926,7 +3373,7 @@ void notifySettingChanged(const void* fieldPtr) {
       // while the thermal page is up, a sensor toggle behind a sensor page, …)
       // instead of relying on every command to remember. It costs one extra
       // frame, and only on a real change: setSetting() already gates on
-      // field != value and writes flash, so this can't fire in a hot path.
+      // field != value, so this can't fire in a hot path.
       { extern void oledMarkDirty(); oledMarkDirty(); }
 #endif
       return;  // valuePtr is unique across the registry — first match is the only one
@@ -3039,7 +3486,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
         case SETTING_U32: *((uint32_t*)entry->valuePtr) = (uint32_t)v;                break;
         default: break;  // unreachable — outer switch already filtered
       }
-      if (!gDeferWrites) writeSettingsJson();
+      (void)requestSettingsPersist();
       BROADCAST_PRINTF("%s set to %d", entry->jsonKey, v);
       { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%d", v); systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, vBuf); }
       return "[Settings] Configuration updated";
@@ -3054,7 +3501,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
         }
       }
       *((float*)entry->valuePtr) = f;
-      if (!gDeferWrites) writeSettingsJson();
+      (void)requestSettingsPersist();
       BROADCAST_PRINTF("%s set to %.3f", entry->jsonKey, f);
       { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%.3f", f); systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, vBuf); }
       return "[Settings] Configuration updated";
@@ -3062,7 +3509,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
     case SETTING_BOOL: {
       bool v = (*p == '1' || strncasecmp(p, "true", 4) == 0);
       *((bool*)entry->valuePtr) = v;
-      if (!gDeferWrites) writeSettingsJson();
+      (void)requestSettingsPersist();
       // Master *enabled* off → stop the live subsystem now (not only next boot).
       if (!v) applyMasterEnableDisable(entry->cmdKey ? entry->cmdKey : entry->jsonKey);
       BROADCAST_PRINTF("%s set to %s", entry->jsonKey, v ? "true" : "false");
@@ -3071,7 +3518,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
     }
     case SETTING_STRING: {
       *((String*)entry->valuePtr) = p;
-      if (!gDeferWrites) writeSettingsJson();
+      (void)requestSettingsPersist();
       if (entry->isSecret) {
         BROADCAST_PRINTF("%s updated", entry->jsonKey);
         systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, "********");
@@ -3467,15 +3914,62 @@ void buildSettingsSchemaJson(JsonDocument& doc) {
 
 const char* cmd_beginwrite(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  gDeferWrites = true;
-  return "Write deferred — changes batched until savesettings";
+  String args = argsInput;
+  args.trim();
+  if (args.length() != 0) {
+    return "Error: invalid arguments — Usage: beginwrite";
+  }
+  SettingsBatchOwner owner;
+  if (!currentSettingsBatchOwner(owner)) {
+    return "Error: beginwrite requires a command source";
+  }
+  if (!beginSettingsWriteBatch(owner)) {
+    return "Error: too many active settings batches; save or retry later";
+  }
+  return "Settings writes coalesced for this command source until savesettings";
 }
 
 const char* cmd_savesettings(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  gDeferWrites = false;
-  writeSettingsJson();
-  writeDebugJson();  // a batch may include debug flags — flush their file too
+  String args = argsInput;
+  args.trim();
+  if (args.length() != 0) {
+    return "Error: invalid arguments — Usage: savesettings";
+  }
+
+  SettingsBatchOwner owner;
+  const bool hasOwner = currentSettingsBatchOwner(owner);
+  const SettingsBatchFinish finished =
+      hasOwner ? finishSettingsWriteBatch(owner) : SettingsBatchFinish{};
+
+  CommandContext* command =
+      static_cast<CommandContext*>(currentCommandContext());
+  const bool explicitRequestBatch = command && command->settingsBatchId != 0;
+
+  if (!finished.found && explicitRequestBatch) {
+    WARN_STORAGEF("Explicit settings batch %lu was no longer active; "
+                  "forcing a conservative full flush",
+                  static_cast<unsigned long>(command->settingsBatchId));
+  }
+
+  // Preserve standalone `savesettings` as an explicit compatibility flush.
+  // A missing explicit request slot also flushes ALL conservatively: expiry
+  // may have transferred that slot to the main-loop writer, and returning a
+  // no-op here would let HTTP claim durability while that write was still in
+  // flight (and could still fail). The shared writer guard serializes us with
+  // the expiry attempt. The normal web path disarms its RAII finalizer after a
+  // confirmed terminal save, so this conservative path is exceptional rather
+  // than an extra write on every request.
+  const uint8_t dirtyMask = finished.found
+      ? finished.dirtyMask
+      : hw1_settings_batch::ALL;
+  if (finished.found && !finished.final) {
+    return "Settings batch remains open";
+  }
+  if (dirtyMask == 0) return "Settings saved — no changed files";
+  if (!flushSettingsDirtyMask(owner, dirtyMask)) {
+    return "Error: settings save failed; savesettings will retry pending files";
+  }
   return "Settings saved";
 }
 

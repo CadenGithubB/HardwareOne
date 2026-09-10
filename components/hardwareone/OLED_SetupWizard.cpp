@@ -557,11 +557,11 @@ bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& re
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
     if (getSystemItemAt(getWizardCurrentSelection()) == SYS_ITEM_DEVICE_NAME) {
       bool cancelled = false;
-      String newName = getOLEDTextInput("Device Name:", false, getWizardDeviceName(), 20, &cancelled);
+      String newName = getOLEDTextInput("Device Name:", false, getWizardDeviceName(), 19, &cancelled);
       if (!cancelled && newName.length() > 0) {
         char* buf = getWizardDeviceNameBuf();
-        strncpy(buf, newName.c_str(), 20);
-        buf[20] = '\0';
+        strncpy(buf, newName.c_str(), 19);
+        buf[19] = '\0';
       }
     } else {
       // Cycle through options
@@ -707,7 +707,7 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
 
   // Device Name (used for Bluetooth + ESP-NOW identity)
   String currentName = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "HardwareOne";
-  String deviceName = getOLEDTextInput("Device Name:", false, currentName.c_str(), 20, &cancelled);
+  String deviceName = getOLEDTextInput("Device Name:", false, currentName.c_str(), 19, &cancelled);
   if (cancelled) { wizardPrevPage(); return; }
   if (deviceName.length() == 0) deviceName = currentName;
   result.espnowFriendlyName = deviceName;

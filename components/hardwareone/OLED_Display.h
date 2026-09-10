@@ -348,9 +348,10 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);
 // =============================================================================
 #include "HAL_Display.h"
 
-// OLED-specific configuration (I2C address defined in System_I2C.h as I2C_ADDR_OLED)
+// OLED-specific configuration. This is the address selected by display probing,
+// not a compile-time assumption about whether the panel uses 0x3C or 0x3D.
 #define OLED_RESET -1
-#define OLED_I2C_ADDRESS 0x3D
+#define OLED_I2C_ADDRESS gDisplayI2cAddress
 
 // Helper macro to wrap OLED operations in an I2C transaction.
 // Requires System_I2C.h (i2cDeviceTransactionVoid) and System_Settings.h

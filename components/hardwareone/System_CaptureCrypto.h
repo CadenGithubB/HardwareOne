@@ -35,8 +35,8 @@
 #define CAPCRYPT_MAGIC_PREFIX "#HW1ENC"
 #define CAPCRYPT_ROW_PREFIX   "ENC1:"
 // What a sealed row becomes when it cannot be opened (torn tail write, or a
-// file sealed by another device's key). Shorter than any sealed line, so
-// in-place reveal can always substitute it.
+// file sealed by another device's key). A malformed/truncated sealed line can
+// be SHORTER than this marker; whole-text reveal reserves that expansion.
 #define CAPCRYPT_UNDECRYPTABLE "[undecryptable row]"
 // Longest plaintext row we seal — matches the 1024-byte row builders in
 // System_SensorLogging (buf holds row + NUL).
@@ -79,8 +79,8 @@ bool captureCryptoIsSealedRow(const char* line);   // starts with ENC1:
 bool captureCryptoLooksSealed(File& f);
 
 // In-place reveal of one line (no trailing newline): a sealed row becomes its
-// plaintext, an unopenable sealed row becomes "[undecryptable row]" (both are
-// always shorter than the sealed form), anything else is untouched. Returns
+// plaintext, an unopenable sealed row becomes "[undecryptable row]",
+// anything else is untouched. Returns
 // true if the line was a sealed row.
 bool captureCryptoRevealLine(String& line);
 
@@ -90,5 +90,17 @@ bool captureCryptoRevealLine(String& line);
 // This is the hook for fileview / G2 / OLED viewers, applied AFTER their
 // existing auth gates: presentation surfaces reveal, byte surfaces never do.
 size_t captureCryptoRevealText(String& text);
+
+// Conservative capacity INCLUDING NUL needed by the bounded reveal overload.
+// Accounts for short damaged rows expanding into the failure marker. Returns
+// 0 for invalid input/size overflow; non-marked text needs only length + 1.
+size_t captureCryptoRevealCapacity(const char* text, size_t length);
+
+// Checked, caller-owned presentation buffer. On insufficient capacity returns
+// false without modifying bytes or length; on success updates length and NUL.
+// The caller may reserve captureCryptoRevealCapacity() before calling. Never
+// used by raw download/transfer paths. The optional row count is reset on entry.
+bool captureCryptoRevealText(char* text, size_t& length, size_t capacity,
+                             size_t* sealedRows = nullptr);
 
 #endif  // SYSTEM_CAPTURECRYPTO_H

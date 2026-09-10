@@ -34,6 +34,7 @@ enum class EspNowMeshRxKind : uint8_t {
 #include <ArduinoJson.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <type_traits>
 #include <vector>
 #include <WiFi.h>
 
@@ -107,16 +108,85 @@ enum BondSyncRequestType : uint8_t {
 };
 #endif // ENABLE_BONDED_MODE
 
-// ESP-NOW device name mapping
+// Small, allocation-free String-like field for records that live inside the
+// PSRAM-backed EspNowState. Capacity includes the trailing NUL. Keeping the
+// familiar c_str()/length()/assignment surface limits churn at call sites while
+// ensuring bounded registry metadata never falls back to the internal heap.
+template <size_t Capacity>
+class EspNowInlineText {
+  static_assert(Capacity > 0, "EspNowInlineText needs room for a NUL");
+
+ public:
+  EspNowInlineText() : value_{} {}
+  EspNowInlineText(const char* value) : value_{} { (void)assign(value); }
+  EspNowInlineText(const String& value) : value_{} { (void)assign(value); }
+
+  EspNowInlineText& operator=(const char* value) {
+    (void)assign(value);
+    return *this;
+  }
+  EspNowInlineText& operator=(const String& value) {
+    (void)assign(value);
+    return *this;
+  }
+
+  static constexpr size_t capacity() { return Capacity; }
+
+  // Returns false rather than retaining a misleading prefix when the source
+  // does not fit. Input boundaries that can receive persisted/user text should
+  // check this result and report or migrate the value explicitly.
+  bool assign(const char* value) {
+    if (!value) value = "";
+    size_t len = 0;
+    while (len < Capacity && value[len] != '\0') ++len;
+    if (len == Capacity) {
+      clear();
+      return false;
+    }
+    memcpy(value_, value, len + 1);
+    return true;
+  }
+  bool assign(const String& value) { return assign(value.c_str()); }
+
+  const char* c_str() const { return value_; }
+  operator const char*() const { return value_; }
+
+  size_t length() const {
+    size_t len = 0;
+    while (len < Capacity && value_[len] != '\0') ++len;
+    return len;
+  }
+  bool isEmpty() const { return value_[0] == '\0'; }
+  void clear() { value_[0] = '\0'; }
+
+  bool equalsIgnoreCase(const String& other) const {
+    return strcasecmp(value_, other.c_str()) == 0;
+  }
+  bool operator==(const char* other) const {
+    return strcmp(value_, other ? other : "") == 0;
+  }
+  bool operator!=(const char* other) const { return !(*this == other); }
+  bool operator==(const String& other) const {
+    return strcmp(value_, other.c_str()) == 0;
+  }
+  bool operator!=(const String& other) const { return !(*this == other); }
+
+ private:
+  char value_[Capacity];
+};
+
+// ESP-NOW device name mapping. These fields are embedded in EspNowState, whose
+// storage is allocated with PreferPSRAM, so none of this bounded metadata uses
+// Arduino String's internal-heap realloc path.
 struct EspNowDevice {
   uint8_t mac[6];
-  String name;
+  EspNowInlineText<32> name;
   bool encrypted;        // Whether this device uses encryption
   uint8_t key[16];       // Per-device encryption key
-  String friendlyName;   // Cached from mesh peer metadata
-  String room;           // Cached from mesh peer metadata
-  String zone;           // Cached from mesh peer metadata
-  String tags;           // Cached from mesh peer metadata (comma-separated)
+  EspNowInlineText<48> friendlyName;  // Cached from mesh peer metadata
+  EspNowInlineText<32> room;          // Cached from mesh peer metadata
+  EspNowInlineText<32> zone;          // Cached from mesh peer metadata
+  EspNowInlineText<64> tags;          // Cached metadata (comma-separated)
   bool stationary;       // Cached from mesh peer metadata
   // Phase 2 (multi-mesh): which of gSettings.meshes[] this peer belongs to.
   // Defaults to 0 (the primary/default mesh) for existing-style pairings.
@@ -129,19 +199,35 @@ struct EspNowDevice {
 // Mesh Topology Structures (from espnow_system.cpp)
 // ==========================
 
-// Topology streaming support (NEW - matches .cpp implementation)
-#define MAX_CONCURRENT_TOPO_STREAMS 4
+// Topology collection is a fixed PSRAM-backed matrix: at most every configured
+// mesh peer can respond, and every responder can report at most MESH_PEER_MAX
+// peers. No formatted String storage is retained while collecting.
+#define MAX_CONCURRENT_TOPO_STREAMS MESH_PEER_MAX
+struct TopologyPeerRecord {
+  uint8_t mac[6];
+  char name[32];
+  int8_t rssi;
+  bool present;
+};
+
 struct TopologyStream {
   uint32_t reqId;              // Request ID to match responses
   uint8_t senderMac[6];        // MAC of device sending topology
   char senderName[32];         // Name of sender device
   uint16_t totalPeers;         // Total number of peers to expect
   uint16_t receivedPeers;      // Peers received so far
+  uint16_t receivedPeerMask;   // One bit per validated peerIndex
   unsigned long startTime;     // Stream start time
+  bool occupied;               // Slot belongs to the current/completed request
   bool active;                 // Stream in progress
-  String accumulatedData;      // Accumulated peer info for display
-  String path;                 // Path from master to this device (comma-separated MACs)
+  bool started;                // A validated TOPO_START was received
+  bool complete;               // Finalized (complete or timed out)
+  TopologyPeerRecord peers[MESH_PEER_MAX];
 };
+static_assert(MESH_PEER_MAX <= 16, "Topology receivedPeerMask needs widening");
+static_assert(std::is_trivial<TopologyStream>::value &&
+                  std::is_standard_layout<TopologyStream>::value,
+              "TopologyStream must remain safe for bounded byte reset");
 
 // Topology device name cache
 #define MAX_TOPO_DEVICE_CACHE 16
@@ -327,7 +413,7 @@ struct BroadcastTracker {
 
 struct UnpairedDevice {
   uint8_t mac[6];
-  String name;
+  EspNowInlineText<32> name;
   int rssi;
   uint32_t lastSeenMs;
   uint32_t heartbeatCount;
@@ -677,7 +763,10 @@ struct EspNowState {
   int unpairedDeviceCount;
   
   // Streaming
-  uint8_t* streamTarget;  // MAC address (6 bytes, allocated)
+  // Kept inline with the PSRAM-resident state. This avoids a tiny standalone
+  // allocation for every stream session and gives teardown no pointer lifetime
+  // to leak or race.
+  uint8_t streamTarget[6];
   bool streamActive;
   bool streamingSuspended;
   uint32_t streamDroppedCount;
@@ -895,9 +984,11 @@ struct EspNowState {
     mode(ESPNOW_MODE_DIRECT),
     passphrase(""),
     encryptionEnabled(false),
+    devices{},
     deviceCount(0),
+    unpairedDevices{},
     unpairedDeviceCount(0),
-    streamTarget(nullptr),
+    streamTarget{},
     streamActive(false),
     streamingSuspended(false),
     streamDroppedCount(0),
@@ -1000,8 +1091,6 @@ struct EspNowState {
     memset(deferredCmdSrcMac, 0, 6);
     memset(deferredCmdDeviceName, 0, sizeof(deferredCmdDeviceName));
     memset(deferredCmdPayload, 0, sizeof(deferredCmdPayload));
-    memset(devices, 0, sizeof(devices));
-    memset(unpairedDevices, 0, sizeof(unpairedDevices));
     // listBuffer is a pointer — zeroed after ps_alloc in initEspNow
     memset(&lastRemoteCap, 0, sizeof(lastRemoteCap));
   }

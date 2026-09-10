@@ -1637,7 +1637,7 @@ static bool applyCameraSetting(const char* name, int value, int minVal, int maxV
   if (setter(s, value) == 0) {
     if (settingPtr) {
       *settingPtr = value;
-      writeSettingsJson();  // Persist
+      (void)requestSettingsPersist();
     }
     return true;
   }

@@ -26,6 +26,7 @@
 #include "System_Debug.h"
 #include "System_Command.h"
 #include "System_MemUtil.h"
+#include "System_MQTTLifecycleGate.h"
 #include "System_User.h"
 #include "System_Utils.h"
 #include <ArduinoJson.h>
@@ -77,10 +78,59 @@ extern const char* cmd_espnow_remote(const String& argsInput);
 
 // MQTT state
 static esp_mqtt_client_handle_t mqttClient = nullptr;
-static bool mqttTofConnected = false;
-static bool mqttClientRunning = false;
+static std::atomic<bool> mqttTofConnected{false};
+static std::atomic<bool> mqttClientRunning{false};
 static unsigned long lastPublishTime = 0;
 static String lastError = "";
+static MqttLifecycleGate sMqttLifecycle;
+// ESP-MQTT emits BEFORE_CONNECT only after its worker has completed the two
+// early setup steps that can make the task exit autonomously. This marker lets
+// stop cleanup distinguish that early self-exit from a live worker safely.
+static std::atomic<bool> sMqttBeforeConnectSeen{false};
+
+// Holds one admission while non-lifecycle code may use mqttClient. For command
+// callbacks this begins before cmd_exec submission and lasts until every
+// response path has returned from esp_mqtt_client_publish().
+class MqttClientUse final {
+ public:
+  MqttClientUse()
+      : admitted_(sMqttLifecycle.tryAdmitUse()) {}
+
+  ~MqttClientUse() {
+    if (admitted_) sMqttLifecycle.releaseUse();
+  }
+
+  MqttClientUse(const MqttClientUse&) = delete;
+  MqttClientUse& operator=(const MqttClientUse&) = delete;
+
+  bool admitted() const { return admitted_; }
+
+ private:
+  bool admitted_;
+};
+
+// Ensures every early start failure re-closes the lifecycle gate.  A stop
+// request racing startup is preserved by finishStart(true), which leaves the
+// new client closed and pending for main-loop teardown.
+class MqttStartAttempt final {
+ public:
+  MqttStartAttempt() = default;
+
+  ~MqttStartAttempt() {
+    if (!finished_) (void)sMqttLifecycle.finishStart(false);
+  }
+
+  MqttStartAttempt(const MqttStartAttempt&) = delete;
+  MqttStartAttempt& operator=(const MqttStartAttempt&) = delete;
+
+  bool finishStarted() {
+    finished_ = true;
+    return sMqttLifecycle.finishStart(true);
+  }
+
+ private:
+  bool finished_ = false;
+};
 
 static String redactMQTTCommandResult(const String& output) {
   String safe = redactOutputForLog(output);
@@ -227,12 +277,12 @@ static void subscribeToExternalTopics() {
 
 // Check if MQTT is connected
 bool isMqttConnected() {
-  return mqttTofConnected;
+  return mqttTofConnected.load(std::memory_order_acquire);
 }
 
 // Check if the MQTT client is started (not necessarily connected to the broker)
 bool isMqttStarted() {
-  return mqttClientRunning;
+  return mqttClientRunning.load(std::memory_order_acquire);
 }
 
 // Get external sensor count
@@ -359,7 +409,8 @@ static void publishDiscoveryConfig(const char* component, const char* objectId,
                                     const char* name, const char* valueTemplate,
                                     const char* unit, const char* deviceClass,
                                     const char* icon) {
-  if (!mqttClient || !mqttTofConnected) return;
+  if (!mqttClient ||
+      !mqttTofConnected.load(std::memory_order_acquire)) return;
   
   String deviceId = getDeviceId();
   String stateTopic = gSettings.mqttBaseTopic + "/state";
@@ -421,7 +472,8 @@ static void publishDiscoveryConfig(const char* component, const char* objectId,
 
 // Subscribe to command topic for receiving commands from HA
 static void subscribeToCommandTopic() {
-  if (!mqttClient || !mqttTofConnected) return;
+  if (!mqttClient ||
+      !mqttTofConnected.load(std::memory_order_acquire)) return;
   
   String commandTopic = gSettings.mqttBaseTopic + "/command";
   int msgId = esp_mqtt_client_subscribe(mqttClient, commandTopic.c_str(), 1);
@@ -442,6 +494,19 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   if (topicLen != (int)commandTopic.length() || 
       strncmp(topic, commandTopic.c_str(), topicLen) != 0) {
     return;  // Not our command topic
+  }
+
+  // Linearize command admission against shutdown before parsing, auth, or
+  // queue publication.  If shutdown won the race, answer directly from the
+  // MQTT callback without waiting on cmd_exec; the IDF client's recursive API
+  // lock keeps the handle alive until this callback returns.
+  MqttClientUse commandUse;
+  if (!commandUse.admitted()) {
+    esp_mqtt_client_publish(
+        mqttClient, responseTopic.c_str(),
+        "{\"ok\":false,\"error\":\"MQTT client is stopping\"}",
+        0, 0, false);
+    return;
   }
   
   // Extract payload string
@@ -610,7 +675,8 @@ static void publishMeshPeerDiscovery();
 
 // Publish all discovery configs for enabled sensors
 static void publishMQTTDiscovery() {
-  if (!mqttTofConnected || gSettings.mqttDiscoveryPrefix.length() == 0) return;
+  if (!mqttTofConnected.load(std::memory_order_acquire) ||
+      gSettings.mqttDiscoveryPrefix.length() == 0) return;
   
   INFO_MQTT_DISCOVERYF("Publishing Home Assistant discovery configs...");
   
@@ -721,7 +787,8 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
                                         const char* name, const char* valueTemplate,
                                         const char* unit, const char* deviceClass,
                                         const char* icon) {
-  if (!mqttClient || !mqttTofConnected) return;
+  if (!mqttClient ||
+      !mqttTofConnected.load(std::memory_order_acquire)) return;
 
   // Build peer device ID from MAC
   char macCompact[13];
@@ -784,7 +851,8 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
 
 // Publish HA discovery for all known mesh peers based on their sensor capabilities
 static void publishMeshPeerDiscovery() {
-  if (!mqttClient || !mqttTofConnected) return;
+  if (!mqttClient ||
+      !mqttTofConnected.load(std::memory_order_acquire)) return;
   if (gSettings.meshRole != MESH_ROLE_MASTER) return;  // Only master bridges
   if (!gMeshPeerMeta) return;  // Not yet allocated
 
@@ -843,7 +911,8 @@ static void publishMeshPeerDiscovery() {
 // Publish sensor data for all mesh peers from gRemoteSensorCache
 // Called periodically alongside local sensor publishing
 static void publishMeshPeerSensorData() {
-  if (!mqttClient || !mqttTofConnected) return;
+  if (!mqttClient ||
+      !mqttTofConnected.load(std::memory_order_acquire)) return;
   if (gSettings.meshRole != MESH_ROLE_MASTER) return;
   if (!gMeshPeerMeta) return;  // Not yet allocated
   if (!gRemoteSensorCache) return;  // ESP-NOW runtime has not initialized
@@ -928,18 +997,22 @@ static void publishMeshPeerSensorData() {
 // ~10s and fires DISCONNECTED per failed attempt, and MQTT_EVENT_ERROR clears
 // mqttTofConnected before DISCONNECTED on live-connection drops, so the flag alone
 // isn't a reliable was-connected signal at DISCONNECTED time.
-static uint32_t sMqttConnectedAtMs = 0;
+static std::atomic<uint32_t> sMqttConnectedAtMs{0};
 
 static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id, void* event_data) {
   esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
   
   switch ((esp_mqtt_event_id_t)event_id) {
+    case MQTT_EVENT_BEFORE_CONNECT:
+      sMqttBeforeConnectSeen.store(true, std::memory_order_release);
+      break;
+
     case MQTT_EVENT_CONNECTED:
-      mqttTofConnected = true;
+      mqttTofConnected.store(true, std::memory_order_release);
       lastError = "";
       broadcastOutput("[MQTT] Connected to broker");
       INFO_MQTT_CONNECTIONF("Connected to %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
-      sMqttConnectedAtMs = millis();
+      sMqttConnectedAtMs.store(millis(), std::memory_order_release);
       logSystemEvent("MQTT", "connected to broker %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
       {
         char broker[48];
@@ -964,22 +1037,26 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       break;
       
     case MQTT_EVENT_DISCONNECTED:
-      if (sMqttConnectedAtMs != 0) {
-        logSystemEvent("MQTT", "broker connection lost (was connected %lus)",
-                       (unsigned long)((millis() - sMqttConnectedAtMs) / 1000));
-        // Inside the once-per-transition gate — esp-mqtt fires DISCONNECTED
-        // on every ~10s retry, which would spam the ring outside this guard.
-        char secs[16];
-        snprintf(secs, sizeof(secs), "%lu", (unsigned long)((millis() - sMqttConnectedAtMs) / 1000));
-        systemEventPost(SYSEVT_MQTT_DISCONNECTED, secs);
-        sMqttConnectedAtMs = 0;
+      {
+        const uint32_t connectedAt =
+            sMqttConnectedAtMs.exchange(0, std::memory_order_acq_rel);
+        if (connectedAt != 0) {
+          logSystemEvent("MQTT", "broker connection lost (was connected %lus)",
+                         (unsigned long)((millis() - connectedAt) / 1000));
+          // Inside the once-per-transition gate — esp-mqtt fires DISCONNECTED
+          // on every ~10s retry, which would spam the ring outside this guard.
+          char secs[16];
+          snprintf(secs, sizeof(secs), "%lu",
+                   (unsigned long)((millis() - connectedAt) / 1000));
+          systemEventPost(SYSEVT_MQTT_DISCONNECTED, secs);
+        }
       }
-      mqttTofConnected = false;
+      mqttTofConnected.store(false, std::memory_order_release);
       WARN_MQTTF("Disconnected from broker");
       break;
       
     case MQTT_EVENT_ERROR:
-      mqttTofConnected = false;
+      mqttTofConnected.store(false, std::memory_order_release);
       lastError = "Connection error";
       ERROR_MQTTF("Error event");
       break;
@@ -1007,9 +1084,22 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
 // ============================================================================
 
 bool startMQTT() {
-  if (mqttClientRunning) {
+  if (sMqttLifecycle.stopPending()) {
+    lastError = "MQTT client is stopping";
+    return false;
+  }
+
+  if (mqttClientRunning.load(std::memory_order_acquire)) {
     return true;
   }
+
+  if (!sMqttLifecycle.beginStart()) {
+    lastError = sMqttLifecycle.starting()
+                    ? "MQTT client start already in progress"
+                    : "MQTT lifecycle is busy";
+    return false;
+  }
+  MqttStartAttempt startAttempt;
 
   if (!gSettings.mqttEnabled) {
     lastError = "MQTT disabled (mqttClientEnabled=false)";
@@ -1113,10 +1203,36 @@ bool startMQTT() {
     return false;
   }
   
-  esp_mqtt_client_register_event(mqttClient, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
-  esp_mqtt_client_start(mqttClient);
-  
-  mqttClientRunning = true;
+  const esp_err_t registerErr = esp_mqtt_client_register_event(
+      mqttClient, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
+  if (registerErr != ESP_OK) {
+    lastError = "Failed to register MQTT event handler";
+    ERROR_MQTTF("Event registration failed: %s", esp_err_to_name(registerErr));
+    systemEventPost(SYSEVT_MQTT_START_FAILED, "event registration failed");
+    esp_mqtt_client_destroy(mqttClient);
+    mqttClient = nullptr;
+    releaseExternalSensorStorage();
+    return false;
+  }
+
+  sMqttBeforeConnectSeen.store(false, std::memory_order_release);
+  const esp_err_t startErr = esp_mqtt_client_start(mqttClient);
+  if (startErr != ESP_OK) {
+    lastError = "Failed to start MQTT client";
+    ERROR_MQTTF("Client start failed: %s", esp_err_to_name(startErr));
+    systemEventPost(SYSEVT_MQTT_START_FAILED, "client task start failed");
+    esp_mqtt_client_destroy(mqttClient);
+    mqttClient = nullptr;
+    releaseExternalSensorStorage();
+    return false;
+  }
+
+  mqttClientRunning.store(true, std::memory_order_release);
+  if (!startAttempt.finishStarted()) {
+    lastError = "MQTT stop requested during startup";
+    WARN_MQTTF("Client started with shutdown already pending");
+    return false;
+  }
   lastError = "";
   broadcastOutput("[MQTT] Client started");
   INFO_MQTT_CONNECTIONF("Connecting to %s://%s:%d", (gSettings.mqttTLSMode > 0) ? "mqtts" : "mqtt", 
@@ -1125,31 +1241,79 @@ bool startMQTT() {
   return true;
 }
 
-void stopMQTT() {
-  if (!mqttClientRunning) {
+// Actual ESP-MQTT teardown is main-loop-affine.  Calling the blocking IDF stop
+// from cmd_exec can deadlock against an MQTT event callback that is itself
+// waiting for cmd_exec, even when the close command came from WEB or SERIAL.
+static bool stopMQTTNow() {
+  // Main-loop only. The first failed stop before BEFORE_CONNECT is retried to
+  // cover the small window after xTaskCreate but before the higher-priority
+  // MQTT worker first runs. A second such failure means the pinned IDF worker
+  // took one of its pre-event autonomous-exit paths and is safe to destroy.
+  static uint8_t failuresBeforeConnect = 0;
+
+  if (!mqttClientRunning.load(std::memory_order_acquire)) {
+    failuresBeforeConnect = 0;
     releaseExternalSensorStorage();
-    return;
+    return true;
   }
   
   if (mqttClient) {
     // Publish offline before disconnecting
-    if (mqttTofConnected && gSettings.mqttBaseTopic.length() > 0) {
+    if (mqttTofConnected.load(std::memory_order_acquire) &&
+        gSettings.mqttBaseTopic.length() > 0) {
       String availTopic = gSettings.mqttBaseTopic + "/availability";
       esp_mqtt_client_publish(mqttClient, availTopic.c_str(), "offline", 0, 1, true);
     }
-    
-    esp_mqtt_client_stop(mqttClient);
-    // esp_mqtt_client_stop() does NOT deliver MQTT_EVENT_DISCONNECTED, so post
-    // here so mqtt_connected doesn't stay stale after a manual stop.
-    systemEventPost(SYSEVT_MQTT_DISCONNECTED, "stopped");
-    esp_mqtt_client_destroy(mqttClient);
+
+    const esp_err_t stopErr = esp_mqtt_client_stop(mqttClient);
+    if (stopErr != ESP_OK) {
+      const bool workerPassedEarlyExit =
+          sMqttBeforeConnectSeen.load(std::memory_order_acquire);
+      if (!workerPassedEarlyExit && failuresBeforeConnect > 0) {
+        // Local ESP-IDF has only two autonomous run=false paths and both occur
+        // before BEFORE_CONNECT. The mandatory first retry rules out a newly
+        // created worker that simply had not run yet.
+        WARN_MQTTF("Driver task exited before connect; cleaning up client");
+      } else {
+        if (!workerPassedEarlyExit) ++failuresBeforeConnect;
+        // Never destroy a client whose task may still be live. Ask it to
+        // disconnect, then let mqttTick retry outside the event callback.
+        ERROR_MQTTF("Client stop failed; will retry: %s",
+                    esp_err_to_name(stopErr));
+        (void)esp_mqtt_client_disconnect(mqttClient);
+        return false;
+      }
+    } else {
+      // esp_mqtt_client_stop() does NOT deliver MQTT_EVENT_DISCONNECTED, so
+      // post here so mqtt_connected doesn't stay stale after a manual stop.
+      systemEventPost(SYSEVT_MQTT_DISCONNECTED, "stopped");
+    }
+    const esp_err_t destroyErr = esp_mqtt_client_destroy(mqttClient);
+    if (destroyErr != ESP_OK) {
+      ERROR_MQTTF("Stopped client destroy failed: %s",
+                  esp_err_to_name(destroyErr));
+    }
     mqttClient = nullptr;
   }
   
-  mqttClientRunning = false;
-  mqttTofConnected = false;
+  mqttClientRunning.store(false, std::memory_order_release);
+  mqttTofConnected.store(false, std::memory_order_release);
+  sMqttConnectedAtMs.store(0, std::memory_order_release);
+  sMqttBeforeConnectSeen.store(false, std::memory_order_release);
+  failuresBeforeConnect = 0;
   releaseExternalSensorStorage();
   broadcastOutput("[MQTT] Client stopped");
+  return true;
+}
+
+bool stopMQTT() {
+  const bool requested = sMqttLifecycle.requestStop();
+  if (requested) {
+    DEBUG_MQTT_CONNECTIONF(
+        "Client stop scheduled (client_uses_in_flight=%lu)",
+        (unsigned long)sMqttLifecycle.usesInFlight());
+  }
+  return requested;
 }
 
 // ============================================================================
@@ -1157,7 +1321,10 @@ void stopMQTT() {
 // ============================================================================
 
 void publishMQTTSensorData() {
-  if (!mqttTofConnected || !mqttClient) {
+  MqttClientUse publishUse;
+  if (!publishUse.admitted()) return;
+
+  if (!mqttTofConnected.load(std::memory_order_acquire) || !mqttClient) {
     return;
   }
   
@@ -1296,13 +1463,38 @@ void publishMQTTSensorData() {
 }
 
 void mqttTick() {
-  if (!mqttClientRunning || !mqttClient) {
+  const unsigned long now = millis();
+  static unsigned long stopRetryAfterMs = 0;
+  static bool stopRetryScheduled = false;
+
+  // Drain lifecycle work before touching the handle for normal publication.
+  // The packed gate prevents this claim until every admitted MQTT callback has
+  // returned from its response publish.  No other task performs stop/destroy.
+  if (sMqttLifecycle.stopPending()) {
+    if (stopRetryScheduled &&
+        (int32_t)(now - stopRetryAfterMs) < 0) return;
+    if (sMqttLifecycle.tryBeginStop()) {
+      if (stopMQTTNow()) {
+        sMqttLifecycle.finishStop();
+        stopRetryAfterMs = 0;
+        stopRetryScheduled = false;
+      } else {
+        sMqttLifecycle.retryStop();
+        stopRetryAfterMs = now + 250;
+        stopRetryScheduled = true;
+      }
+    }
+    return;
+  }
+
+  if (!sMqttLifecycle.isOpen() ||
+      !mqttClientRunning.load(std::memory_order_acquire) || !mqttClient) {
     return;
   }
   
   // Periodic publishing
-  unsigned long now = millis();
-  if (mqttTofConnected && (now - lastPublishTime >= gSettings.mqttPublishIntervalMs)) {
+  if (mqttTofConnected.load(std::memory_order_acquire) &&
+      (now - lastPublishTime >= gSettings.mqttPublishIntervalMs)) {
     publishMQTTSensorData();
     lastPublishTime = now;
   }
@@ -1314,8 +1506,12 @@ void mqttTick() {
 
 const char* cmd_openmqtt(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (sMqttLifecycle.stopPending()) {
+    return "Error: [MQTT] Client is stopping; retry when mqttstatus reports stopped";
+  }
   
-  if (mqttClientRunning) {
+  if (mqttClientRunning.load(std::memory_order_acquire)) {
     return "[MQTT] Already running";
   }
   
@@ -1334,13 +1530,11 @@ const char* cmd_openmqtt(const String& argsInput) {
 
 const char* cmd_closemqtt(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!mqttClientRunning) {
+
+  if (!stopMQTT()) {
     return "[MQTT] Not running";
   }
-  
-  stopMQTT();
-  return "[MQTT] Client stopped";
+  return "[MQTT] Client stop scheduled";
 }
 
 const char* cmd_mqttstatus(const String& argsInput) {
@@ -1348,10 +1542,13 @@ const char* cmd_mqttstatus(const String& argsInput) {
 
   // JSON: returned to the caller only (no broadcastOutput); text path unchanged.
   if (argWantsJson(argsInput)) {
+    const bool running = mqttClientRunning.load(std::memory_order_acquire);
+    const bool connected = mqttTofConnected.load(std::memory_order_acquire);
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
-    doc["enabled"] = mqttClientRunning;
-    doc["connected"] = mqttTofConnected;
+    doc["enabled"] = running;
+    doc["connected"] = connected;
+    doc["stopping"] = sMqttLifecycle.stopPending();
     doc["host"] = gSettings.mqttHost;
     doc["port"] = gSettings.mqttPort;
     doc["user"] = gSettings.mqttUser;
@@ -1363,9 +1560,12 @@ const char* cmd_mqttstatus(const String& argsInput) {
   }
 
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
+  const bool running = mqttClientRunning.load(std::memory_order_acquire);
+  const bool connected = mqttTofConnected.load(std::memory_order_acquire);
   broadcastOutput("=== MQTT STATUS ===");
-  BROADCAST_PRINTF("Enabled: %s", mqttClientRunning ? "Yes" : "No");
-  BROADCAST_PRINTF("Connected: %s", mqttTofConnected ? "Yes" : "No");
+  BROADCAST_PRINTF("Enabled: %s", running ? "Yes" : "No");
+  BROADCAST_PRINTF("Connected: %s", connected ? "Yes" : "No");
+  BROADCAST_PRINTF("Stopping: %s", sMqttLifecycle.stopPending() ? "Yes" : "No");
   BROADCAST_PRINTF("Broker: %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
   BROADCAST_PRINTF("User: %s", gSettings.mqttUser.length() > 0 ? gSettings.mqttUser.c_str() : "(none)");
   BROADCAST_PRINTF("Base Topic: %s", gSettings.mqttBaseTopic.c_str());
@@ -1375,7 +1575,7 @@ const char* cmd_mqttstatus(const String& argsInput) {
     BROADCAST_PRINTF("Last Error: %s", lastError.c_str());
   }
   
-  if (mqttTofConnected) {
+  if (connected) {
     unsigned long nextPublish = (lastPublishTime + gSettings.mqttPublishIntervalMs) - millis();
     BROADCAST_PRINTF("Next Publish: %lu ms", nextPublish);
   }
@@ -1398,8 +1598,9 @@ const char* cmd_mqttclientenabled(const String& argsInput) {
   bool enable = (arg == "1" || arg.equalsIgnoreCase("on") || arg.equalsIgnoreCase("true") || arg.equalsIgnoreCase("enable"));
   setSetting(gSettings.mqttEnabled, enable);
   if (!enable) {
-    stopMQTT();
-    return "MQTT client disabled";
+    return stopMQTT()
+               ? "MQTT client disabled; client stop scheduled"
+               : "MQTT client disabled";
   }
   return "MQTT client enabled";
 }

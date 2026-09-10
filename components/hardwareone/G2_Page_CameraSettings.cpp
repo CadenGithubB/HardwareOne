@@ -3,10 +3,9 @@
 // =============================================================================
 // Tap-to-cycle settings list. Each setting in `kSettings[]` defines its
 // value range and an apply hook that calls the existing cmd_camera*
-// handler — that handler does the persist (setSetting → JSON write)
-// and the live sensor update. We just snprintf the new int into a
-// String and pass it through. Result strings from the cmd_* handlers
-// are ignored; their broadcast/log side effects are enough.
+// handler — that handler owns the RAM mutation, persistence, and live sensor
+// update. The tap worker never pre-writes gSettings: doing so made the async
+// handler see an equal value and skip setSetting's persistence path.
 //
 // The settings table also drives row rendering, so adding a new
 // setting is a one-row table append.
@@ -23,6 +22,7 @@
 #include "System_Debug.h"
 #include "G2_HijackCmd.h"             // g2SubmitHijackCommand — Group A migration
 #include <Arduino.h>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -179,44 +179,72 @@ struct CamSetting {
   void*        valuePtr;        // typed by `type`
   int          (*cycle)(int curr);                 // returns next
   void         (*format)(char* out, size_t cap, int v); // render value
-  void         (*apply)(int v); // call cmd_camera* with stringified value
+  bool         (*apply)(int v); // queue cmd_camera* with stringified value
   CamCategory  category;        // which sub-list this setting belongs to
 };
 
-// Typed read/write — bool storage stays bool in gSettings; we expose
-// it as int (0/1) at the table layer so cycle/format/apply can be a
-// single int-based shape.
+// Typed read — bool storage stays bool in gSettings; we expose it as int
+// (0/1) at the table layer so cycle/format/apply can be a single int shape.
 static int readSetting(const CamSetting& s) {
   if (!s.valuePtr) return 0;
   if (s.type == CV_BOOL) return (*(bool*)s.valuePtr) ? 1 : 0;
   return *(int*)s.valuePtr;
 }
-static void writeSetting(const CamSetting& s, int v) {
-  if (!s.valuePtr) return;
-  if (s.type == CV_BOOL) *(bool*)s.valuePtr = (v != 0);
-  else                   *(int*)s.valuePtr  = v;
-}
+
+static void redrawCurrentCameraSettings();
 
 // Helpers ---------------------------------------------------------------------
 
 // Group A: each camera-setting tap used to call cmd_camera*(arg) inline on
 // tap_disp, which in turn does setSetting + writeSettingsJson + camera
-// restart — the deepest stack chain in the hijack tap path. Now we submit
-// the command line ("camera<thing> N") through cmd_exec_task, which has its
-// own 24 KB stack and handles the persist + apply off the tap dispatcher.
-// No callback: writeSetting() above already updated RAM and the inline
-// g2ShowListPage re-render reads the new value, so the lens shows the new
-// setting immediately. The persist/apply happens shortly after on cmd_exec.
-static void applyByCmd(const char* cmdName, int v) {
-  if (!cmdName || !*cmdName) return;
+// restart — the deepest stack chain in the hijack tap path. Submit through
+// cmd_exec_task instead, then redraw from the committed gSettings value. This
+// keeps flash I/O and mutation on the executor and makes queue failure a true
+// no-op rather than leaving an unpersisted optimistic value in RAM.
+static void onCameraSettingDone(bool ok, const char* result,
+                                const G2CmdCookie& cookie, void* /*userData*/) {
+  if (!ok || (result && strncmp(result, "Error", 5) == 0)) {
+    DEBUG_G2F("[G2] Camera settings: command failed: %.80s",
+              (result && result[0]) ? result : "no result");
+  }
+
+  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
+  if (!spec) {
+    DEBUG_G2F("[G2] Camera settings: redraw allocation failed");
+    return;
+  }
+  spec->render = redrawCurrentCameraSettings;
+  LensUiJob* job = new (std::nothrow) LensUiJob{};
+  if (!job) {
+    delete spec;
+    DEBUG_G2F("[G2] Camera settings: redraw job allocation failed");
+    return;
+  }
+  job->kind           = LensJobKind::Redraw;
+  job->submitMenuGen  = cookie.menuGen;
+  job->cmdSeq         = cookie.seq;
+  job->targetPage     = cookie.targetPage;
+  job->targetNetSub   = cookie.targetNetSub;
+  job->payload.redraw = spec;
+  if (!g2EnqueueLensJob(job)) {
+    delete spec;
+    delete job;
+    DEBUG_G2F("[G2] Camera settings: redraw queue full");
+  }
+}
+
+static bool applyByCmd(const char* cmdName, int v) {
+  if (!cmdName || !*cmdName) return false;
   char line[40];
   snprintf(line, sizeof(line), "%s %d", cmdName, v);
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = 0;
-  if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
-    DEBUG_G2F("[G2] Camera settings: %s submit FAILED — feature won't apply", cmdName);
+  cookie.targetNetSub = (uint8_t)gLevel;
+  if (!g2SubmitHijackCommand(line, cookie, onCameraSettingDone, nullptr)) {
+    DEBUG_G2F("[G2] Camera settings: %s submit FAILED — no change made", cmdName);
+    return false;
   }
+  return true;
 }
 
 // Cycle helpers — each clamps an out-of-range incoming value into a
@@ -312,17 +340,17 @@ static void fmtFramesize(char* out, size_t cap, int v) {
 // thin per-setting wrapper avoids leaking function pointers with
 // String-arg signatures into the table.
 
-static void applyFramesize(int v)  { applyByCmd("cameraframesize",  v); }
-static void applyBrightness(int v) { applyByCmd("camerabrightness", v); }
-static void applyContrast(int v)   { applyByCmd("cameracontrast",   v); }
-static void applyExposure(int v)   { applyByCmd("cameraexposure",   v); }
-static void applySharpness(int v)  { applyByCmd("camerasharpness",  v); }
-static void applyDenoise(int v)    { applyByCmd("cameradenoise",    v); }
-static void applyHMirror(int v)    { applyByCmd("camerahmirror",    v); }
-static void applyVFlip(int v)      { applyByCmd("cameravflip",      v); }
-static void applyQuality(int v)    { applyByCmd("cameraquality",    v); }
-static void applyToneMap(int v)    { applyByCmd("g2streamtonemap",  v); }
-static void applyFps(int v)        { applyByCmd("camerafps",        v); }
+static bool applyFramesize(int v)  { return applyByCmd("cameraframesize",  v); }
+static bool applyBrightness(int v) { return applyByCmd("camerabrightness", v); }
+static bool applyContrast(int v)   { return applyByCmd("cameracontrast",   v); }
+static bool applyExposure(int v)   { return applyByCmd("cameraexposure",   v); }
+static bool applySharpness(int v)  { return applyByCmd("camerasharpness",  v); }
+static bool applyDenoise(int v)    { return applyByCmd("cameradenoise",    v); }
+static bool applyHMirror(int v)    { return applyByCmd("camerahmirror",    v); }
+static bool applyVFlip(int v)      { return applyByCmd("cameravflip",      v); }
+static bool applyQuality(int v)    { return applyByCmd("cameraquality",    v); }
+static bool applyToneMap(int v)    { return applyByCmd("g2streamtonemap",  v); }
+static bool applyFps(int v)        { return applyByCmd("camerafps",        v); }
 
 // Table -----------------------------------------------------------------------
 // Order within each category = display order in that category's sub-list.
@@ -559,6 +587,22 @@ static void showTopMenu() {
   g2ShowListPage(gRowPtrs, n);
 }
 
+// Runs only on the lens-applier worker. If the user moved within Camera
+// Settings while cmd_exec was working, refresh the level they are on now;
+// if they left the page, do nothing. A full page transition also bumps the
+// shared menu generation, so the Redraw job is normally dropped even earlier.
+static void redrawCurrentCameraSettings() {
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_CAMERA_SETTINGS) return;
+  switch (gLevel) {
+    case CAM_LEVEL_TOP:               showTopMenu();                         return;
+    case CAM_LEVEL_SUB_CAMERA:        showSubMenu(CAM_CAT_CAMERA);           return;
+    case CAM_LEVEL_SUB_TRANSFORM:     showSubMenu(CAM_CAT_TRANSFORM);        return;
+    case CAM_LEVEL_SUB_POSTPROC:      showSubMenu(CAM_CAT_POSTPROC);         return;
+    case CAM_LEVEL_RESOLUTION_PICKER: showResolutionPicker();                return;
+    case CAM_LEVEL_STREAM_PICKER:     showStreamPicker();                    return;
+  }
+}
+
 // -----------------------------------------------------------------------------
 // CLI text — flat dump of every setting plus Stream
 // -----------------------------------------------------------------------------
@@ -658,11 +702,9 @@ static void handleTopTap(uint32_t idx) {
     case 2: {
       const int prev = gSettings.cameraStreamFps;
       const int next = cycleFps(prev);
-      // Optimistic RAM write so the re-render shows the new value
-      // immediately; camerafps persists via cmd_exec.
-      gSettings.cameraStreamFps = next;
-      applyFps(next);
-      DEBUG_G2F("[G2] Camera settings: FPS %d → %d", prev, next);
+      if (applyFps(next)) {
+        DEBUG_G2F("[G2] Camera settings: FPS %d → %d queued", prev, next);
+      }
       showTopMenu();
       return;
     }
@@ -700,13 +742,14 @@ static void handleSubTap(CamCategory cat, uint32_t idx) {
 
   const int prev = readSetting(s);
   const int next = s.cycle(prev);
-  writeSetting(s, next);   // RAM first so re-render shows the new value
-  s.apply(next);           // persist + live-apply via cmd_camera*
+  const bool queued = s.apply(next);  // executor owns mutate + persist + live apply
 
   char dispBuf[16] = {0};
   if (s.format) s.format(dispBuf, sizeof(dispBuf), next);
-  BROADCAST_PRINTF("[G2] Camera settings: %s %d -> %s",
-                   s.label ? s.label : "?", prev, dispBuf);
+  if (queued) {
+    BROADCAST_PRINTF("[G2] Camera settings: %s %d -> %s queued",
+                     s.label ? s.label : "?", prev, dispBuf);
+  }
 
   // Re-render the same sub-list so the row reflects the new value.
   size_t n = buildSubRows(cat);
@@ -732,10 +775,11 @@ static void handleResolutionPickerTap(uint32_t idx) {
     BROADCAST_PRINTF("[G2] Camera settings: resolution unchanged (%s)",
                      framesizeFullName(newSetting));
   } else {
-    BROADCAST_PRINTF("[G2] Camera settings: resolution %s -> %s",
-                     framesizeFullName(prevSetting),
-                     framesizeFullName(newSetting));
-    applyFramesize(newSetting);
+    if (applyFramesize(newSetting)) {
+      BROADCAST_PRINTF("[G2] Camera settings: resolution %s -> %s queued",
+                       framesizeFullName(prevSetting),
+                       framesizeFullName(newSetting));
+    }
   }
   // Return to the Camera sub-list with the new value reflected.
   showSubMenu(CAM_CAT_CAMERA);
@@ -768,19 +812,14 @@ static void handleStreamPickerTap(uint32_t idx) {
     BROADCAST_PRINTF("[G2] Camera settings: stream size unchanged (%dx%d)",
                      prevW, prevH);
   } else {
-    // RAM update first so the re-render below sees the new value;
-    // cmd_g2streamres persists asynchronously via setSetting.
-    gSettings.g2StreamWidth  = p.w;
-    gSettings.g2StreamHeight = p.h;
-
     char line[40];
     snprintf(line, sizeof(line), "g2streamres %dx%d", (int)p.w, (int)p.h);
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
-    cookie.targetNetSub = 0;
-    if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
+    cookie.targetNetSub = (uint8_t)gLevel;
+    if (!g2SubmitHijackCommand(line, cookie, onCameraSettingDone, nullptr)) {
       DEBUG_G2F("[G2] Camera settings: g2streamres submit FAILED — "
-                "RAM updated but persist won't happen");
+                "no change made");
     } else {
       BROADCAST_PRINTF("[G2] Camera settings: stream size %dx%d -> %dx%d",
                        prevW, prevH, (int)p.w, (int)p.h);

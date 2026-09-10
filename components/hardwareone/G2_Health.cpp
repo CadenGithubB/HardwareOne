@@ -1,4 +1,5 @@
 #include "G2_Health.h"
+#include "G2_HealthGraphCore.h"
 
 #if ENABLE_R1_HEALTH
 
@@ -31,29 +32,8 @@ extern uint32_t gBootCounter;  // session id — bumps each boot (HardwareOne.cp
 
 static constexpr size_t kThinHistory = 8;   // below this → request daily backfill
 
-struct HealthSample {
-  uint32_t ms;       // millis() at capture (or synthesised for backfill)
-  int16_t  value;
-  uint32_t ringTs;   // ring epoch ts when known; 0 if unknown
-};
-
-struct HealthSeries {
-  HealthSample buf[HEALTH_HIST_CAP];
-  size_t       head;   // next write index
-  size_t       count;
-  uint32_t     lastRingTs;
-  int16_t      lastValue;
-  uint32_t     lastMs;
-  // Daily-backfill taint for the X axis. Backfill .ms is a fetch-anchored
-  // synthetic (newest record pinned at the fetch instant), not a receive
-  // stamp, so wall-clock labels derived from it would print the FETCH time —
-  // hours wrong when the payload was stale. While the time-oldest sample does
-  // not post-date backfillAnchorMs the axis stays on elapsed labels; once
-  // every pre-backfill slot has evicted the flag is moot and wall labels
-  // return on their own.
-  bool         hasBackfill;
-  uint32_t     backfillAnchorMs;
-};
+using HealthSample = hw1_g2_health::Sample;
+using HealthSeries = hw1_g2_health::Series<HEALTH_HIST_CAP>;
 
 struct TrendMeta {
   uint32_t startTs;
@@ -349,44 +329,21 @@ static TrendMeta* trendMetaFor(G2HealthMetric m) {
 }
 
 static void seriesClear(HealthSeries* s) {
-  if (!s) return;
-  s->head = 0;
-  s->count = 0;
-  s->lastRingTs = 0;
-  s->lastValue = 0;
-  s->lastMs = 0;
-  s->hasBackfill = false;
-  s->backfillAnchorMs = 0;
+  hw1_g2_health::clearSeries(s);
 }
 
 static void seriesPush(HealthSeries* s, int16_t value, uint32_t ringTs, uint32_t ms) {
-  if (!s) return;
-  // Dedupe: same ring timestamp, or same value within 5 s when ts unknown.
-  if (ringTs != 0 && s->lastRingTs == ringTs) return;
-  if (ringTs == 0 && s->count > 0 && s->lastValue == value &&
-      (long)(ms - s->lastMs) < 5000) return;
-
-  s->buf[s->head].ms = ms;
-  s->buf[s->head].value = value;
-  s->buf[s->head].ringTs = ringTs;
-  s->head = (s->head + 1) % HEALTH_HIST_CAP;
-  if (s->count < HEALTH_HIST_CAP) s->count++;
-  s->lastRingTs = ringTs;
-  s->lastValue = value;
-  s->lastMs = ms;
+  // Dedupe the same ring timestamp anywhere in the live series. In
+  // particular, a DAILY response inserts its instantaneous latest value
+  // before its older averages; the final synthetic backfill stamp can match
+  // that earlier live point even though the immediately previous insertion
+  // does not.
+  (void)hw1_g2_health::pushSeries(s, value, ringTs, ms);
 }
 
 static void seriesPushRaw(HealthSeries* s, int16_t value, uint32_t ringTs, uint32_t ms) {
   // No dedupe — used when replacing a Trends day series from a full payload.
-  if (!s) return;
-  s->buf[s->head].ms = ms;
-  s->buf[s->head].value = value;
-  s->buf[s->head].ringTs = ringTs;
-  s->head = (s->head + 1) % HEALTH_HIST_CAP;
-  if (s->count < HEALTH_HIST_CAP) s->count++;
-  s->lastRingTs = ringTs;
-  s->lastValue = value;
-  s->lastMs = ms;
+  (void)hw1_g2_health::pushSeriesRaw(s, value, ringTs, ms);
 }
 
 static void bumpMenuGen(void) { sMenuGen++; }
@@ -1766,11 +1723,9 @@ static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
   if (usedMax) *usedMax = yMax;
   if (yMax <= yMin) yMax = (int16_t)(yMin + 1);
 
-  // Frame
-  drawHLine(x, x + w - 1, y, 3);
-  drawHLine(x, x + w - 1, y + h - 1, 3);
-  drawVLine(x, y, y + h - 1, 3);
-  drawVLine(x + w - 1, y, y + h - 1, 3);
+  // The endpoint dot reaches x+w-1. Keep that side open so it cannot merge
+  // into a full-height rail and read as a vertical continuation of the trace.
+  hw1_g2_health::drawOpenRightFrame(x, y, w, h, 3, drawHLine, drawVLine);
 
   const uint32_t nowMs = millis();
 

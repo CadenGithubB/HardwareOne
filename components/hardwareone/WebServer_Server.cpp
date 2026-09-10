@@ -28,6 +28,7 @@
 #include "System_Icons.h"
 #include "System_Logging.h"
 #include "System_MemUtil.h"
+#include "System_PsramBuffer.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_SelfDevice.h"
@@ -55,6 +56,7 @@
 #include "WebPage_LoginRequired.h"
 #include "WebPage_Logging.h"
 #include "WebPage_Battery.h"
+#include "WebPage_Power.h"
 #include "WebPage_R1_Health.h"
 #include "WebPage_Settings.h"
 #include "System_EdgeImpulse.h"
@@ -131,8 +133,8 @@ bool gServerIsHttps = false;
 // submitAndExecuteSync's 60 s timeout fires, freezing every command source.
 // Stop inline only when no handler is waiting; otherwise let the main loop do
 // it once the waiter drains.
-volatile int gWebCmdWaiters = 0;
-static volatile bool sHttpStopPending = false;
+std::atomic<int> gWebCmdWaiters{0};
+static std::atomic<bool> sHttpStopPending{false};
 static void webInvalidateAllSessionEpochs();
 static void webRepublishLiveSessionEpochs();
 
@@ -149,11 +151,12 @@ static void httpServerStopFinish() {
 bool httpServerStopSafe() {
   if (server == nullptr) { sHttpStopPending = false; return true; }
 
-  if (gWebCmdWaiters > 0) {
+  const int webWaiters = gWebCmdWaiters.load(std::memory_order_acquire);
+  if (webWaiters > 0) {
     // A web handler is blocked on cmd_exec_task right now. Stopping here would
     // wait on the task that is waiting on us. Hand it to the main loop.
     sHttpStopPending = true;
-    DEBUG_CMD_FLOWF("[http] stop deferred — %d web waiter(s) in flight", gWebCmdWaiters);
+    DEBUG_CMD_FLOWF("[http] stop deferred — %d web waiter(s) in flight", webWaiters);
     return false;
   }
 
@@ -166,7 +169,7 @@ bool httpServerStopSafe() {
 void httpServerStopPendingTick() {
   if (!sHttpStopPending) return;
   if (server == nullptr) { sHttpStopPending = false; return; }
-  if (gWebCmdWaiters > 0) return;   // still draining — try again next pass
+  if (gWebCmdWaiters.load(std::memory_order_acquire) > 0) return;
 
   sHttpStopPending = false;
   httpd_stop(server);
@@ -1505,6 +1508,8 @@ extern void appendCommandToFeed(const char* origin, const String& cmd, const Str
 // Command types from shared header
 #include "System_CommandTypes.h"
 extern bool submitAndExecuteSync(const Command& uc, String& out);
+extern bool submitAndExecuteSync(const Command& uc, String& out,
+                                 bool* completedOut);
 extern bool gMeshActivitySuspended;
 // gBroadcastSkipSessionIdx declared in web_server.h
 
@@ -1983,8 +1988,33 @@ void streamPasswordChangeContent(httpd_req_t* req, const String& username) {
   streamPasswordChangeInner(req, username, String());
 }
 
+// User-controlled files must never become trusted same-origin documents (SVG
+// can contain scripts and HTML). Enforce this on the response, including direct
+// navigation and mode=raw, rather than relying on how the UI embeds the file.
+// SVG gets an opaque origin as well as disabled scripts/forms. Escaped text and
+// inert media retain their origin so viewer links with SameSite=Strict cookies
+// and the browser's native audio player remain usable. Never grant allow-scripts
+// or apply these headers to firmware UI pages.
+static esp_err_t setFileResponsePolicy(httpd_req_t* req, bool isolateOrigin) {
+  const char* policy = isolateOrigin
+      ? "sandbox allow-downloads; default-src 'none'; script-src 'none'; "
+        "style-src 'unsafe-inline'; img-src data:; media-src 'self'; "
+        "base-uri 'none'; form-action 'none'"
+      : "sandbox allow-downloads allow-same-origin; default-src 'none'; script-src 'none'; "
+        "style-src 'unsafe-inline'; img-src data:; media-src 'self'; "
+        "base-uri 'none'; form-action 'none'";
+  esp_err_t err = httpd_resp_set_hdr(req, "Content-Security-Policy", policy);
+  if (err != ESP_OK) return err;
+  err = httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+  if (err != ESP_OK) return err;
+  return httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+}
+
 // Read raw file contents as text/plain
 esp_err_t handleFileRead(httpd_req_t* req) {
+  // Fail closed before polling is paused or any response/file bytes are sent.
+  const esp_err_t policyErr = setFileResponsePolicy(req, false);
+  if (policyErr != ESP_OK) return policyErr;
   DEBUG_STORAGEF("[handleFileRead] START");
   
   // Pause sensor polling during file streaming to prevent I2C contention
@@ -2882,13 +2912,22 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   // Add user info
   JsonObject user = response["user"].to<JsonObject>();
   user["username"] = ctx.user;
-  user["isAdmin"] = isAdminUser(ctx.user);
-  user["isGuest"] = isGuestUser(ctx.user);
-  user["roleRank"] = userAccountRank(ctx.user);
+  // Resolved once: this handler asked isAdminUser(ctx.user) twice, four lines
+  // apart, for the same answer — two full roster reads. The web request path
+  // does not install a TLS identity, so currentExecIsAdmin()'s memo does not
+  // apply here; hoisting is the equivalent fix.
+  const bool ctxIsAdmin = isAdminUser(ctx.user);
+  user["isAdmin"] = ctxIsAdmin;
+  // isGuestUser(who) IS `who.length() > 0 && userAccountRank(who) == kRoleRankGuest`
+  // (System_User.cpp), so these two lines called the same function twice for the
+  // same user — a second full roster read for an integer already in hand.
+  const int ctxRank = userAccountRank(ctx.user);
+  user["isGuest"] = (ctx.user.length() > 0 && ctxRank == kRoleRankGuest);
+  user["roleRank"] = ctxRank;
   
   // Add features
   JsonObject features = response["features"].to<JsonObject>();
-  features["adminSessions"] = isAdminUser(ctx.user);
+  features["adminSessions"] = ctxIsAdmin;
   features["userApprovals"] = true;
   features["adminControls"] = true;
   features["sensorConfig"] = true;
@@ -3250,6 +3289,13 @@ esp_err_t handleLogs(httpd_req_t* req) {
   }
   if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
   DEBUG_HTTPF("[LOGS_DEBUG] Auth OK for user '%s'", ctx.user.c_str());
+  const TransportSessionEpoch logsSessionEpoch =
+      captureTransportSessionEpoch(ctx);
+  httpd_resp_set_hdr(
+      req, "X-HW1-CLI-Help",
+      cliHelpModeOwnedBySession(ctx.transport, logsSessionEpoch)
+          ? "active"
+          : "inactive");
   httpd_resp_set_type(req, "text/plain");
   if (!gWebMirror.buf) {
     DEBUG_HTTPF("gWebMirror.buf is NULL, initializing...");
@@ -3711,6 +3757,12 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
 
   // Set HTTP status based on command result so API consumers can distinguish
   // success from permission/input errors without parsing the body.
+  httpd_resp_set_hdr(
+      req, "X-HW1-CLI-Help",
+      cliHelpModeOwnedBySession(ctx.transport,
+                                uc.ctx.transportSessionEpoch)
+          ? "active"
+          : "inactive");
   httpd_resp_set_type(req, "text/plain");
   if (!webSessionStillLive) {
     httpd_resp_set_status(req, "401 Unauthorized");
@@ -4347,9 +4399,14 @@ esp_err_t handleFilesList(httpd_req_t* req) {
   // {success,dirPerms,files[]} envelope so web and app never drift. dirPerms
   // reflects what THIS user can do in the directory (admin gets more, etc.).
   bool userIsAdmin = isAdminUser(ctx.user);
-  String json;
+  PsramBuffer json(SIZE_MAX, "files.http");
   buildFilesListJson(dirPath, ctx, /*hideAdminPaths=*/!userIsAdmin, json);
-  sendJsonResponse(req, json.c_str());
+  if (!json.ok()) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    sendJsonResponse(req, "{\"success\":false,\"error\":\"Out of memory building file listing\"}");
+  } else {
+    sendJsonResponse(req, json.c_str());
+  }
   return ESP_OK;
 }
 
@@ -4578,6 +4635,14 @@ esp_err_t handleFileView(httpd_req_t* req) {
     }
   }
   path = decoded;
+
+  // Use the same decoded extension as the image MIME branch below. Install the
+  // policy before opening a file or choosing any raw/pretty streaming branch.
+  const esp_err_t policyErr = setFileResponsePolicy(req, path.endsWith(".svg"));
+  if (policyErr != ESP_OK) {
+    pollResume();
+    return policyErr;
+  }
 
   if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
     pollResume();
@@ -4855,7 +4920,6 @@ esp_err_t handleFileView(httpd_req_t* req) {
     httpd_resp_set_type(req, mime);
     String disposition = "inline; filename=\"" + dispFilename + "\"";
     httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
     const size_t kSinglePassMax = 5u * 1024u * 1024u;  // 5 MB
     if (fileSize == 0) {
@@ -5498,6 +5562,75 @@ static esp_err_t handleBrowserIcon(httpd_req_t* req) {
   return ESP_OK;
 }
 
+static bool cliBatchCommandEquals(JsonVariantConst value,
+                                  const char* expected) {
+  String command = value.as<String>();
+  command.trim();
+  return command.equalsIgnoreCase(expected);
+}
+
+static bool settingsSaveOutputConfirmed(const String& output) {
+  // executeCommand() status-stamps successful human-facing results after the
+  // handler returns. Keep the raw forms for the early/direct and test paths,
+  // but match exact complete messages so an unrelated success cannot disarm
+  // request cleanup.
+  return output == "Settings saved" ||
+         output == "Settings saved — no changed files" ||
+         output == "OK: Settings saved" ||
+         output == "OK: Settings saved — no changed files";
+}
+
+// A local settings batch must be finalized even if the cookie generation is
+// revoked, one command stops the server, or the handler returns early. Submit
+// that finalizer through cmd_exec_task: submitAndExecuteSync may time out while
+// its command remains queued/running, and only the shared FIFO can guarantee
+// cleanup runs after every command already published by this request.
+class SettingsBatchRequestCleanup {
+ public:
+  explicit SettingsBatchRequestCleanup(uint32_t batchId) : batchId_(batchId) {}
+  ~SettingsBatchRequestCleanup() { (void)finish(); }
+
+  void disarmAfterConfirmedTerminalSave() {
+    finished_ = true;
+    succeeded_ = true;
+  }
+
+  bool finish() {
+    if (finished_ || batchId_ == 0) return succeeded_;
+    finished_ = true;
+
+    Command finalizer;
+    finalizer.line = "savesettings";
+    finalizer.ctx.origin = ORIGIN_SYSTEM;
+    finalizer.ctx.auth = systemIdentity("settings.batch.finalizer");
+    finalizer.ctx.id = static_cast<uint32_t>(millis());
+    finalizer.ctx.timestampMs = static_cast<uint32_t>(millis());
+    finalizer.ctx.outputMask = MSG_ROUTE_FILE;
+    finalizer.ctx.settingsBatchId = batchId_;
+    finalizer.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
+
+    String output;
+    bool completed = false;
+    const bool commandSucceeded =
+        submitAndExecuteSync(finalizer, output, &completed);
+    succeeded_ = completed && commandSucceeded &&
+                 !output.startsWith("Error:") &&
+                 !output.startsWith("[ERROR]");
+    if (!succeeded_) {
+      // A submitted command may still complete after a synchronous timeout;
+      // otherwise the settings-batch expiry tick is the bounded fallback.
+      ERROR_WEBF("Settings batch %lu executor finalizer pending after failure",
+                 static_cast<unsigned long>(batchId_));
+    }
+    return succeeded_;
+  }
+
+ private:
+  uint32_t batchId_ = 0;
+  bool finished_ = false;
+  bool succeeded_ = true;
+};
+
 esp_err_t handleCliBatch(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) {
@@ -5534,12 +5667,47 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     return ESP_OK;
   }
 
+  JsonArray commands = doc["commands"].as<JsonArray>();
+  bool containsBeginWrite = false;
+  for (JsonVariantConst value : commands) {
+    containsBeginWrite =
+        containsBeginWrite || cliBatchCommandEquals(value, "beginwrite");
+  }
+  const bool wrappedSettingsBatch =
+      commands.size() >= 2 &&
+      cliBatchCommandEquals(commands[0], "beginwrite") &&
+      cliBatchCommandEquals(commands[commands.size() - 1], "savesettings");
+
+  // An unbounded begin marker can escape the request lifetime, so require its
+  // exact begin...save wrapper. A standalone/mid-array savesettings remains a
+  // compatible explicit flush and does not create state that needs cleanup.
+  if (containsBeginWrite && !wrappedSettingsBatch) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(
+        req,
+        "{\"error\":\"settings batch must start with beginwrite and end with savesettings\"}");
+    return ESP_OK;
+  }
+
+  if (wrappedSettingsBatch) {
+    for (size_t i = 1; i + 1 < commands.size(); ++i) {
+      if (cliBatchCommandEquals(commands[i], "beginwrite") ||
+          cliBatchCommandEquals(commands[i], "savesettings")) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+                           "{\"error\":\"nested settings batch marker\"}");
+        return ESP_OK;
+      }
+    }
+  }
+
   String sidForCmd = getCookieSID(req);
   const TransportSessionEpoch batchSessionEpoch =
       captureTransportSessionEpoch(ctx);
   const bool interactiveBatch = doc["interactive"] | false;
   if (interactiveBatch) {
-    JsonArray commands = doc["commands"].as<JsonArray>();
     String answer = commands.size() == 2 ? commands[1].as<String>() : String();
     answer.trim();
     answer.toLowerCase();
@@ -5565,13 +5733,27 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
       return ESP_OK;
     }
   }
+
+  // Install cleanup only after every pre-execution validation return. From
+  // here onward the guard precedes the first queue publication.
+  const uint32_t settingsBatchId =
+      wrappedSettingsBatch ? allocateSettingsWriteBatchId() : 0;
+  SettingsBatchRequestCleanup settingsBatchCleanup(settingsBatchId);
+
   int originIdx = findSessionIndexBySID(sidForCmd);
   int prevSkip = gBroadcastSkipSessionIdx;
   gBroadcastSkipSessionIdx = originIdx;
   gMeshActivitySuspended = true;
 
-  // Collect per-command outputs for the results array
-  std::vector<String> results;
+  // Retain replies directly in the PSRAM-backed response, not a second list
+  // of ordinary-heap Strings. ArduinoJson owns each appended String's text.
+  PSRAM_JSON_DOC(respDoc);
+  respDoc["ok"] = false;
+  respDoc["count"] = 0;
+  JsonArray results = respDoc["results"].to<JsonArray>();
+  bool resultsBuffered = !results.isNull() && !respDoc.overflowed();
+  bool batchCommandsCompleted = true;
+  bool terminalSettingsSaveConfirmed = false;
   bool batchSessionStillLive =
       !ctx.sid.length() ||
       transportSessionEpochIsLive(SOURCE_WEB, batchSessionEpoch);
@@ -5582,7 +5764,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     String cmd = v.as<String>();
     cmd.trim();
     if (cmd.length() == 0) {
-      results.push_back("");
+      if (resultsBuffered && !results.add("")) resultsBuffered = false;
       continue;
     }
 
@@ -5595,6 +5777,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     uc.ctx.id = (uint32_t)millis();
     uc.ctx.timestampMs = (uint32_t)millis();
     uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
+    uc.ctx.settingsBatchId = settingsBatchId;
     uc.ctx.transportSessionEpoch = batchSessionEpoch;
     if (ctx.sid.length()) {
       uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
@@ -5607,7 +5790,21 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     uc.ctx.httpReq = req;
 
     String out;
-    submitAndExecuteSync(uc, out);
+    bool commandCompleted = false;
+    const bool commandSucceeded =
+        submitAndExecuteSync(uc, out, &commandCompleted);
+    if (!commandCompleted) {
+      batchCommandsCompleted = false;
+      if (out.length() == 0) {
+        out = "Error: command was not accepted by the executor";
+      }
+    }
+    if (wrappedSettingsBatch &&
+        cliBatchCommandEquals(v, "savesettings") && commandCompleted &&
+        commandSucceeded &&
+        settingsSaveOutputConfirmed(out)) {
+      terminalSettingsSaveConfirmed = true;
+    }
     batchSessionStillLive =
         !ctx.sid.length() ||
         transportSessionEpochIsLive(SOURCE_WEB, batchSessionEpoch);
@@ -5615,8 +5812,10 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
       // Do not retain earlier results after this cookie generation loses
       // authority; a later command in the batch may have revoked it.
       results.clear();
-      results.push_back(
-          "Error: web session changed before command result delivery.");
+      if (resultsBuffered &&
+          !results.add("Error: web session changed before command result delivery.")) {
+        resultsBuffered = false;
+      }
       break;
     }
     String redacted = redactWebCommandResult(out);
@@ -5625,7 +5824,8 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     }
     // Batch results cross the same HTTP boundary as the single-command path;
     // never return an unredacted handler response to the browser.
-    results.push_back(redacted);
+    // Buffering failure must not skip later commands or the common cleanup.
+    if (resultsBuffered && !results.add(redacted)) resultsBuffered = false;
 
     count++;
 
@@ -5637,6 +5837,13 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
 
   gMeshActivitySuspended = false;
   gBroadcastSkipSessionIdx = prevSkip;
+  if (terminalSettingsSaveConfirmed) {
+    // The user's last command already closed and durably flushed this exact
+    // request token. Avoid turning the safety finalizer into a second ALL-file
+    // write; abnormal/timeout paths remain armed and executor-ordered.
+    settingsBatchCleanup.disarmAfterConfirmedTerminalSave();
+  }
+  const bool settingsBatchFinalized = settingsBatchCleanup.finish();
 
   // If server was destroyed by a command, req is dangling — skip response
   if (server == NULL) return ESP_OK;
@@ -5659,14 +5866,27 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
 
   // Build response: {"ok":true,"count":N,"results":["out0","out1",...]}
   // Use ArduinoJson to safely serialize the output strings (handles escaping)
-  PSRAM_JSON_DOC(respDoc);
-  respDoc["ok"] = true;
-  respDoc["count"] = count;
-  JsonArray arr = respDoc["results"].to<JsonArray>();
-  for (const String& r : results) {
-    arr.add(r);
+  respDoc["ok"] = settingsBatchFinalized && batchCommandsCompleted;
+  if (!settingsBatchFinalized) {
+    // Be conservative at the HTTP boundary. The executor command or expiry
+    // fallback may still complete, but the client must not be told durability
+    // is confirmed while finalization is pending.
+    respDoc["error"] = "settings_batch_finalize_pending";
+  } else if (!batchCommandsCompleted) {
+    // Preserve the established endpoint contract: an executor-completed
+    // command-level error stays in its result slot while top-level `ok`
+    // remains true. Only admission failure/timeout is batch-level uncertainty.
+    respDoc["error"] = "batch_executor_unconfirmed";
   }
+  respDoc["count"] = count;
   httpd_resp_set_type(req, "application/json");
+  if (!resultsBuffered || respDoc.overflowed()) {
+    // Commands may already have run. Report response failure only after the
+    // existing cleanup and session checks; never send partial results as OK.
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"batch_response_oom\"}");
+    return ESP_OK;
+  }
   String respStr;
   serializeJson(respDoc, respStr);
   if (ctx.sid.length() &&
@@ -6008,6 +6228,9 @@ register_handlers:
  #endif
  #if ENABLE_WEB_BATTERY
   registerBatteryHandlers(server);
+ #endif
+ #if ENABLE_WEB_POWER
+  registerPowerHandlers(server);
  #endif
  #if ENABLE_WEB_R1_HEALTH
   registerR1HealthHandlers(server);

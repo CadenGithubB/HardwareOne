@@ -37,11 +37,11 @@
 // ============================================================================
 // Two flavors of every transaction helper exist:
 //
-//   * Legacy 4-arg: `i2cDeviceTransactionVoid(addr, clk, timeout, lambda)`
+//   * Legacy 4-arg: `i2cDeviceTransactionVoid(addr, clk, lockWait, lambda)`
 //     The lambda takes no arguments and references Wire1 directly. Defaults
 //     to bus 0 (Wire1). Existing sensor drivers compile unchanged.
 //
-//   * Dual-bus 5-arg: `i2cDeviceTransactionVoid(bus, addr, clk, timeout, lambda)`
+//   * Dual-bus 5-arg: `i2cDeviceTransactionVoid(bus, addr, clk, lockWait, lambda)`
 //     The lambda CAN take a `TwoWire&` argument and use that for the
 //     transmission, letting one driver work on either bus. The lambda can
 //     also still be nullary — `executeTransaction` detects the arity at
@@ -54,7 +54,7 @@
 
 // Legacy single-bus helper — implicit bus 0 (Wire1). Lambda gets no args.
 template<typename Func>
-auto i2cDeviceTransaction(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation)
+auto i2cDeviceTransaction(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, Func&& operation)
     -> decltype(operation()) {
   extern bool gI2CBusRunning;
   if (!gI2CBusRunning) return decltype(operation())();
@@ -65,14 +65,15 @@ auto i2cDeviceTransaction(uint8_t address, uint32_t clockHz, uint32_t timeoutMs,
   // getDevice / registerDevice default busIdx=0 — legacy lookups still hit
   // the primary bus's device table slot, unchanged from before.
   I2CDevice* dev = mgr->getDevice(address);
-  if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs);
+  if (!dev) dev = mgr->registerDevice(address, "Auto");
   if (!dev) return decltype(operation())();
 
-  return dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::STANDARD);
+  const I2CTransactionOptions options{clockHz, lockWaitMs};
+  return dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::STANDARD);
 }
 
 template<typename Func>
-void i2cDeviceTransactionVoid(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
+void i2cDeviceTransactionVoid(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, Func&& operation) {
   extern bool gI2CBusRunning;
   if (!gI2CBusRunning) return;
 
@@ -80,10 +81,11 @@ void i2cDeviceTransactionVoid(uint8_t address, uint32_t clockHz, uint32_t timeou
   if (!mgr) return;
 
   I2CDevice* dev = mgr->getDevice(address);
-  if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs);
+  if (!dev) dev = mgr->registerDevice(address, "Auto");
   if (!dev) return;
 
-  dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::STANDARD);
+  const I2CTransactionOptions options{clockHz, lockWaitMs};
+  dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::STANDARD);
 }
 
 // New dual-bus helpers — explicit `bus` (0 or 1). Lambda is nullary, exactly
@@ -94,7 +96,7 @@ void i2cDeviceTransactionVoid(uint8_t address, uint32_t clockHz, uint32_t timeou
 // device's bus internally so the rest of the transaction shape is unchanged.
 template<typename Func>
 auto i2cDeviceTransaction(uint8_t bus, uint8_t address, uint32_t clockHz,
-                          uint32_t timeoutMs, Func&& operation)
+                          uint32_t lockWaitMs, Func&& operation)
     -> decltype(operation()) {
   extern bool gI2CBusRunning;
   if (!gI2CBusRunning) return decltype(operation())();
@@ -103,15 +105,16 @@ auto i2cDeviceTransaction(uint8_t bus, uint8_t address, uint32_t clockHz,
   if (!mgr) return decltype(operation())();
 
   I2CDevice* dev = mgr->getDevice(address, bus);
-  if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs, bus);
+  if (!dev) dev = mgr->registerDevice(address, "Auto", bus);
   if (!dev) return decltype(operation())();
 
-  return dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::STANDARD);
+  const I2CTransactionOptions options{clockHz, lockWaitMs};
+  return dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::STANDARD);
 }
 
 template<typename Func>
 void i2cDeviceTransactionVoid(uint8_t bus, uint8_t address, uint32_t clockHz,
-                              uint32_t timeoutMs, Func&& operation) {
+                              uint32_t lockWaitMs, Func&& operation) {
   extern bool gI2CBusRunning;
   if (!gI2CBusRunning) return;
 
@@ -119,22 +122,24 @@ void i2cDeviceTransactionVoid(uint8_t bus, uint8_t address, uint32_t clockHz,
   if (!mgr) return;
 
   I2CDevice* dev = mgr->getDevice(address, bus);
-  if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs, bus);
+  if (!dev) dev = mgr->registerDevice(address, "Auto", bus);
   if (!dev) return;
 
-  dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::STANDARD);
+  const I2CTransactionOptions options{clockHz, lockWaitMs};
+  dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::STANDARD);
 }
 
 template<typename Func>
 auto i2cTaskWithStandardTimeout(uint8_t address, uint32_t clockHz, Func&& operation)
     -> decltype(operation()) {
+  // Legacy function name: 1000ms is the bus-mutex acquisition budget only.
   return i2cDeviceTransaction(address, clockHz, 1000, std::forward<Func>(operation));
 }
 
 template<typename Func>
-auto i2cTaskWithTimeout(uint8_t address, uint32_t clockHz, uint32_t maxMs, Func&& operation)
+auto i2cTaskWithTimeout(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, Func&& operation)
     -> decltype(operation()) {
-  return i2cDeviceTransaction(address, clockHz, maxMs, std::forward<Func>(operation));
+  return i2cDeviceTransaction(address, clockHz, lockWaitMs, std::forward<Func>(operation));
 }
 
 // Bus-aware overloads — same semantics, leading `bus` arg routes the
@@ -143,32 +148,23 @@ auto i2cTaskWithTimeout(uint8_t address, uint32_t clockHz, uint32_t maxMs, Func&
 template<typename Func>
 auto i2cTaskWithStandardTimeout(uint8_t bus, uint8_t address, uint32_t clockHz, Func&& operation)
     -> decltype(operation()) {
+  // Legacy function name: 1000ms is the bus-mutex acquisition budget only.
   return i2cDeviceTransaction(bus, address, clockHz, 1000, std::forward<Func>(operation));
 }
 
 template<typename Func>
-auto i2cTaskWithTimeout(uint8_t bus, uint8_t address, uint32_t clockHz, uint32_t maxMs, Func&& operation)
+auto i2cTaskWithTimeout(uint8_t bus, uint8_t address, uint32_t clockHz,
+                        uint32_t lockWaitMs, Func&& operation)
     -> decltype(operation()) {
-  return i2cDeviceTransaction(bus, address, clockHz, maxMs, std::forward<Func>(operation));
+  return i2cDeviceTransaction(bus, address, clockHz, lockWaitMs, std::forward<Func>(operation));
 }
 
-// Defined here (before the template helpers that need it) rather than in the
-// address table below.  All other I2C_ADDR_* macros live in the address table.
+// Primary discovery address; SSD1306 panels may instead answer at 0x3C.
+// Live display transactions use gDisplayI2cAddress after probing.
 #define I2C_ADDR_OLED 0x3D
 
 template<typename Func>
-void i2cOledTransactionVoid(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
-  i2cDeviceTransactionVoid(I2C_ADDR_OLED, clockHz, timeoutMs, std::forward<Func>(operation));
-}
-
-template<typename Func>
-auto i2cOledTransaction(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) 
-    -> decltype(operation()) {
-  return i2cDeviceTransaction(I2C_ADDR_OLED, clockHz, timeoutMs, std::forward<Func>(operation));
-}
-
-template<typename Func>
-void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
+void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, Func&& operation) {
   extern bool gI2CBusRunning;
   if (!gI2CBusRunning) return;
 
@@ -176,17 +172,18 @@ void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t time
   if (!mgr) return;
 
   I2CDevice* dev = mgr->getDevice(address);
-  if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs);
+  if (!dev) dev = mgr->registerDevice(address, "Auto");
   if (!dev) return;
 
-  dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::NACK_TOLERANT);
+  const I2CTransactionOptions options{clockHz, lockWaitMs};
+  dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::NACK_TOLERANT);
 }
 
 // Dual-bus NACK-tolerant variant (FM radio path uses NACK-tolerant for
 // register polling; same shape extended with a bus selector).
 template<typename Func>
 void i2cTransactionNACKTolerant(uint8_t bus, uint8_t address, uint32_t clockHz,
-                                uint32_t timeoutMs, Func&& operation) {
+                                uint32_t lockWaitMs, Func&& operation) {
   extern bool gI2CBusRunning;
   if (!gI2CBusRunning) return;
 
@@ -194,10 +191,11 @@ void i2cTransactionNACKTolerant(uint8_t bus, uint8_t address, uint32_t clockHz,
   if (!mgr) return;
 
   I2CDevice* dev = mgr->getDevice(address, bus);
-  if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs, bus);
+  if (!dev) dev = mgr->registerDevice(address, "Auto", bus);
   if (!dev) return;
 
-  dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::NACK_TOLERANT);
+  const I2CTransactionOptions options{clockHz, lockWaitMs};
+  dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::NACK_TOLERANT);
 }
 
 // ============================================================================
@@ -233,31 +231,18 @@ inline bool checkTaskStackSafety(const char* sensorName, uint32_t totalStackWord
 // Probe a single address on a specific bus. Does NOT auto-register the device
 // (probes are used by the scanner / wizards to check existence, not to set
 // devices up for ongoing use). `bus` defaults to 0 so legacy callers work.
-inline uint8_t i2cProbeAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
+inline uint8_t i2cProbeAddress(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, uint8_t bus = 0) {
   extern bool gI2CBusRunning;
   if (!gI2CBusRunning) return 4;
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return 4;
-  if (!mgr->isBusInitialized(bus)) return 4;
-
-  SemaphoreHandle_t mutex = mgr->getBusMutex(bus);
-  TwoWire*          wire  = mgr->getWire(bus);
-  if (!mutex || !wire) return 4;
-
-  uint8_t err = 4;
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
-    wire->setClock(clockHz);
-    wire->beginTransmission(address);
-    err = wire->endTransmission();
-    wire->setClock(100000);
-    xSemaphoreGive(mutex);
-  }
-  return err;
+  return mgr->probeAddress(bus, address,
+                           I2CTransactionOptions{clockHz, lockWaitMs});
 }
 
-inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
-  return (i2cProbeAddress(address, clockHz, timeoutMs, bus) == 0);
+inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, uint8_t bus = 0) {
+  return (i2cProbeAddress(address, clockHz, lockWaitMs, bus) == 0);
 }
 
 // Confirm a device is really present by reading >=1 byte after its address ACKs.
@@ -266,39 +251,23 @@ inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs
 // nearby address). A real device returns data; a phantom NAKs the read. Returns
 // true only if a byte actually came back. NOTE: write-only devices (the SSD1306
 // OLED) NAK reads — use i2cConfirmPresent(), which exempts them, not this raw call.
-inline bool i2cConfirmRead(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
+inline bool i2cConfirmRead(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, uint8_t bus = 0) {
   extern bool gI2CBusRunning;
   if (!gI2CBusRunning) return false;
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return false;
-  if (!mgr->isBusInitialized(bus)) return false;
-
-  SemaphoreHandle_t mutex = mgr->getBusMutex(bus);
-  TwoWire*          wire  = mgr->getWire(bus);
-  if (!mutex || !wire) return false;
-
-  bool ok = false;
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
-    wire->setClock(clockHz);
-    size_t got = wire->requestFrom((uint16_t)address, (size_t)1);
-    if (got >= 1) {
-      while (wire->available()) (void)wire->read();
-      ok = true;
-    }
-    wire->setClock(100000);
-    xSemaphoreGive(mutex);
-  }
-  return ok;
+  return mgr->confirmRead(bus, address,
+                          I2CTransactionOptions{clockHz, lockWaitMs});
 }
 
 // True when a device that ACKed `address` is *confirmed* present. Normal devices
 // must return a read byte (filters phantom address-ACKs); the write-only SSD1306
 // OLED (0x3D primary, 0x3C alt) NAKs reads, so for it the ACK is the confirmation.
 // Scans should gate "present" on this, not on a bare ACK.
-inline bool i2cConfirmPresent(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
+inline bool i2cConfirmPresent(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, uint8_t bus = 0) {
   if (address == I2C_ADDR_OLED || address == 0x3C) return true;  // OLED: write-only
-  return i2cConfirmRead(address, clockHz, timeoutMs, bus);
+  return i2cConfirmRead(address, clockHz, lockWaitMs, bus);
 }
 
 // Centralized device stop handler: ESP-NOW broadcast + notification
@@ -333,50 +302,46 @@ inline int getQueueDepth() {
   return mgr ? mgr->getQueueDepth() : 0;
 }
 
-// Health functions
-//
-// These are keyed on address alone — every call site passes a compile-time
-// I2C_ADDR_* constant and has no notion of which bus its sensor landed on. So
-// they resolve through getDeviceAnyBus() rather than getDevice(), whose bus
-// parameter defaults to 0: with the default, a sensor registered on bus 1
-// returned nullptr here and every health check silently degraded to a no-op
-// (i2cShouldAutoDisable in particular could never fire on the secondary bus).
-inline bool i2cDeviceIsDegraded(uint8_t address) {
+// Health functions are explicitly keyed by (bus, address), just like the
+// registry. Address-only lookup is ambiguous when identical devices exist on
+// both buses and used to let a boot-created bus-0 ghost mask the real device.
+inline bool i2cDeviceIsDegraded(uint8_t address, uint8_t bus) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return false;
-  I2CDevice* dev = mgr->getDeviceAnyBus(address);
+  I2CDevice* dev = mgr->getDevice(address, bus);
   return dev ? dev->isDegraded() : false;
 }
 
-inline void i2cDeviceSuccess(uint8_t address) {
+inline void i2cDeviceSuccess(uint8_t address, uint8_t bus) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
-  I2CDevice* dev = mgr->getDeviceAnyBus(address);
+  I2CDevice* dev = mgr->getDevice(address, bus);
   if (dev) dev->recordSuccess();
 }
 
-inline void i2cDeviceError(uint8_t address) {
+inline void i2cDeviceError(uint8_t address, uint8_t bus) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
-  I2CDevice* dev = mgr->getDeviceAnyBus(address);
+  I2CDevice* dev = mgr->getDevice(address, bus);
   if (dev) dev->recordError(I2CErrorType::NACK, 0x02);
 }
 
 // Check if sensor should auto-disable based on consecutive I2C failures
 // Uses existing I2CDevice health tracking - no local counters needed in sensor tasks
-inline bool i2cShouldAutoDisable(uint8_t address, uint8_t maxConsecutiveErrors = 5) {
+inline bool i2cShouldAutoDisable(uint8_t address, uint8_t bus,
+                                 uint8_t maxConsecutiveErrors = 5) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return false;
-  I2CDevice* dev = mgr->getDeviceAnyBus(address);
+  I2CDevice* dev = mgr->getDevice(address, bus);
   if (!dev) return false;
   return dev->getHealth().consecutiveErrors >= maxConsecutiveErrors;
 }
 
 // Get current consecutive error count for a device (for logging)
-inline uint8_t i2cGetConsecutiveErrors(uint8_t address) {
+inline uint8_t i2cGetConsecutiveErrors(uint8_t address, uint8_t bus) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return 0;
-  I2CDevice* dev = mgr->getDeviceAnyBus(address);
+  I2CDevice* dev = mgr->getDevice(address, bus);
   return dev ? dev->getHealth().consecutiveErrors : 0;
 }
 
@@ -677,6 +642,6 @@ extern volatile bool thermalPendingFirstFrame;
 #define I2C_WIRE1_DEFAULT_FREQ 100000
 
 // Grace period reset (used during sensor re-init to clear stale error state)
-void i2cResetGracePeriod(uint8_t address);
+void i2cResetGracePeriod(uint8_t address, uint8_t bus);
 
 #endif // I2C_SYSTEM_H

@@ -55,6 +55,7 @@
 #include "System_AuthIdentity.h"      // currentAuthContext() — gate blesecret to trusted transports
 #include <atomic>
 #include <cctype>                     // passphrase complexity policy
+#include <new>                        // placement-new for PSRAM-resident BLESystemState
 #include <freertos/semphr.h>
 
 #include <esp_gatts_api.h>
@@ -1152,11 +1153,81 @@ struct BleScDeferred {
   uint8_t buf[517];
 };
 
+/*
+ * Fixed slot pool for inbound secure-channel frames.
+ *
+ * The copy itself is irreducible -- the GATT callback's buffer is only valid
+ * for the duration of the callback, so deferring the work requires copying the
+ * frame. sizeof(BleScDeferred) is 528 B, which is already the floor: 8 B of
+ * header plus a 517-byte frame (the max at MTU 517).
+ *
+ * What was NOT irreducible was doing that as a ps_alloc/free pair per frame,
+ * ~8,700 times per 4 MB OTA image. A pool claimed by index costs one allocation
+ * for the whole session, removes the allocator from the per-frame hot path
+ * entirely, and cannot fragment the heap -- which is what makes this viable on
+ * a board with no PSRAM, where ps_alloc falls back to internal DRAM.
+ *
+ * 24 slots = 12,672 B, sized to hold one full Android OTA burst
+ * (OTA_BLE_BATCH_CHUNKS = 16) plus headroom, matching gCmdExecQ's depth. For
+ * comparison the old scheme could have 8 frames in flight at 6,912 B each
+ * (ExecReq + BleScDeferred) = 55,296 B, i.e. this is ~4.4x LESS memory at 3x
+ * the depth.
+ *
+ * Allocated lazily on the first secure frame, so a device that never takes an
+ * encrypted BLE connection pays nothing -- and Bluetooth is off by default on
+ * this build. Never freed: the pool is bounded and reused, and freeing it would
+ * need a proof that no slot is still queued on cmd_exec_task.
+ */
+// 26, deliberately NOT 24. A pool slot is held from the claim on BTC_TASK until
+// the deferred job finishes on cmd_exec_task, but the QUEUE slot is released at
+// dequeue -- so peak pool usage is (frames queued) + (1 being processed), i.e.
+// gCmdExecQ's depth of 24 plus one, plus a slot of margin. At 24 the pool, not
+// the queue, would have been the binding constraint, and frames would have been
+// dropped while the queue still had room. Keep this > gCmdExecQ's depth.
+static constexpr size_t kBleScPoolSlots = 26;
+static BleScDeferred* gBleScPool = nullptr;
+static uint32_t gBleScPoolInUse = 0;  // bit i => slot i claimed (24 <= 32 bits)
+static portMUX_TYPE gBleScPoolMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Claim a slot. Called only from BTC_TASK (the sole inbound producer), so the
+// lazy allocation below needs no lock; only the in-use mask is shared, and it
+// is released from cmd_exec_task.
+static BleScDeferred* bleScPoolClaim() {
+  if (!gBleScPool) {
+    gBleScPool = (BleScDeferred*)ps_alloc(sizeof(BleScDeferred) * kBleScPoolSlots,
+                                          AllocPref::PreferPSRAM, "ble.sc.pool");
+    if (!gBleScPool) return nullptr;
+    gBleScPoolInUse = 0;
+  }
+  int slot = -1;
+  portENTER_CRITICAL(&gBleScPoolMux);
+  for (size_t i = 0; i < kBleScPoolSlots; ++i) {
+    if ((gBleScPoolInUse & (1u << i)) == 0) {
+      gBleScPoolInUse |= (1u << i);
+      slot = (int)i;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&gBleScPoolMux);
+  return (slot < 0) ? nullptr : &gBleScPool[slot];
+}
+
+// Return a slot. Must be called exactly once for every successful claim, on
+// whichever task finished with it.
+static void bleScPoolRelease(BleScDeferred* d) {
+  if (!gBleScPool || !d) return;
+  const size_t slot = (size_t)(d - gBleScPool);
+  if (slot >= kBleScPoolSlots) return;  // not ours; never free() a pool slot
+  portENTER_CRITICAL(&gBleScPoolMux);
+  gBleScPoolInUse &= ~(1u << slot);
+  portEXIT_CRITICAL(&gBleScPoolMux);
+}
+
 // Runs on cmd_exec_task. Frees its own arg (per submitDeferredToCmdExec contract).
 static void bleScDeferredInbound(void* arg) {
   BleScDeferred* d = (BleScDeferred*)arg;
   if (!bleSessionEpochMatches(d->connId, d->sessionEpoch)) {
-    free(d);
+    bleScPoolRelease(d);
     return;
   }
   char   plain[512];
@@ -1168,14 +1239,14 @@ static void bleScDeferredInbound(void* arg) {
     // The secure-channel decoder recognized an opaque application envelope.
     // OTA performs its own live-session/superadmin check for every frame.
     if (!bleSessionEpochMatches(d->connId, d->sessionEpoch)) {
-      free(d);
+      bleScPoolRelease(d);
       return;
     }
     bleMarkActivity(d->connId);
     (void)otaBleHandleEncryptedFrame(d->connId,
                                      reinterpret_cast<const uint8_t*>(plain), pl);
   }
-  free(d);
+  bleScPoolRelease(d);
 }
 
 // Entry from the GATT write callback — runs on BTC_TASK (8 KB, time-critical). Keep it
@@ -1194,17 +1265,23 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
       sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
       return;
     }
-    BleScDeferred* d = (BleScDeferred*)ps_alloc(sizeof(BleScDeferred), AllocPref::PreferPSRAM, "ble.sc.rx");
+    BleScDeferred* d = bleScPoolClaim();
     if (d) {
       d->connId = connId;
       d->len = (uint16_t)len;
       d->sessionEpoch = bleSessionEpochForConnection(connId);
       memcpy(d->buf, data, len);
       if (d->sessionEpoch == 0) {
-        free(d);
+        bleScPoolRelease(d);
         return;
       }
-      if (!submitDeferredToCmdExec(bleScDeferredInbound, d)) free(d);
+      if (!submitDeferredToCmdExec(bleScDeferredInbound, d)) bleScPoolRelease(d);
+    } else {
+      // Pool exhausted: the peer is bursting faster than cmd_exec_task drains.
+      // Same visible outcome as a full queue (the frame is dropped and the
+      // sender's next checkpoint re-sends from the accepted offset), so it is
+      // counted in the same place rather than failing silently.
+      cmdExecDropCountIncrement();
     }
     return;
   }
@@ -1287,13 +1364,15 @@ bool initBluetooth() {
   // Track DRAM before init to measure leak on deinit
   sBLEHeapBeforeInit = ESP.getFreeHeap();
   
-  // Allocate state structure
-  gBLEState = (BLESystemState*)ps_alloc(sizeof(BLESystemState), AllocPref::PreferPSRAM, "ble.state");
-  if (!gBLEState) {
+  // BLESystemState owns Arduino String members. ps_alloc() supplies raw storage,
+  // so start their lifetimes explicitly; byte-zeroing the aggregate would leave
+  // invalid String representations and free() would skip their destructors.
+  void* stateStorage = ps_alloc(sizeof(BLESystemState), AllocPref::PreferPSRAM, "ble.state");
+  if (!stateStorage) {
     broadcastOutput("[BLE] Failed to allocate state");
     return false;
   }
-  memset(gBLEState, 0, sizeof(BLESystemState));
+  gBLEState = new (stateStorage) BLESystemState{};
   
   // Initialize connection slots
   for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
@@ -1319,7 +1398,7 @@ bool initBluetooth() {
     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
     if (!rollback.success) bleStackSetLifecycleFault(true);
     if (gBLEState) {
-      free(gBLEState);
+      ps_delete(gBLEState);
       gBLEState = nullptr;
     }
     return false;
@@ -1551,7 +1630,7 @@ void deinitBluetooth() {
   {
     BleLifecycleGuard lifecycle;
     if (lifecycle && gBLEState) {
-      free(gBLEState);
+      ps_delete(gBLEState);
       gBLEState = nullptr;
     }
   }
@@ -1884,6 +1963,16 @@ void bleSessionTick() {
           !sessionIdleExpired(SOURCE_BLUETOOTH, conn.lastActivityMs, now)) {
         continue;
       }
+      // A bulk OTA upload in flight IS liveness, so it outranks the idle
+      // heuristic rather than depending on it. Observed 2026-08-30: a staging
+      // transfer was logged out mid-flight while its checkpoints were still
+      // completing every 1.4 s, which should be impossible given that both the
+      // command path and the binary frame path call bleMarkActivity(). The
+      // reason activity was not landing is still open; this makes the outcome
+      // impossible either way, because a multi-minute authenticated transfer
+      // must not race a logout clock. Bounded: housekeepBleUpload() drops the
+      // upload after 60 s without frames, so this cannot pin a dead session.
+      if (otaBleUploadActiveOnConnection(conn.connId)) continue;
       connId = conn.connId;
       idleMs = now - conn.lastActivityMs;
       expiredUser = conn.user;

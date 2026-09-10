@@ -13,10 +13,6 @@
 #include "System_MemUtil.h"
 #include <ArduinoJson.h>
 
-// External declarations
-extern MeshPeerMeta* gMeshPeerMeta;
-extern int gMeshPeerSlots;
-
 /**
  * @brief Get device metadata (friendly name, room, zone, tags) for a specific MAC address
  * @param req HTTP request with ?mac=XX:XX:XX:XX:XX:XX query parameter
@@ -68,31 +64,15 @@ esp_err_t handleEspNowMetadata(httpd_req_t* req) {
   }
   
   // Try to find metadata in gMeshPeerMeta (mesh/pairing mode)
-  MeshPeerMeta* meta = nullptr;
   DEBUG_ESPNOW_METADATAF("[METADATA] API: query for %02X:%02X:%02X:%02X:%02X:%02X gMeshPeerMeta=%p slots=%d",
     targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5],
     gMeshPeerMeta, gMeshPeerSlots);
-  if (gMeshPeerMeta) {
-    for (int i = 0; i < gMeshPeerSlots; i++) {
-      if (!gMeshPeerMeta[i].isActive) continue;
-      DEBUG_ESPNOW_METADATAF("[METADATA] API: slot[%d] active mac=%02X:%02X:%02X:%02X:%02X:%02X name='%s'",
-        i,
-        gMeshPeerMeta[i].mac[0], gMeshPeerMeta[i].mac[1], gMeshPeerMeta[i].mac[2],
-        gMeshPeerMeta[i].mac[3], gMeshPeerMeta[i].mac[4], gMeshPeerMeta[i].mac[5],
-        gMeshPeerMeta[i].name);
-      if (memcmp(gMeshPeerMeta[i].mac, targetMac, 6) == 0) {
-        meta = &gMeshPeerMeta[i];
-        DEBUG_ESPNOW_METADATAF("[METADATA] API: HIT slot=%d name='%s' room='%s'",
-          i, meta->name, meta->room);
-        break;
-      }
-    }
-    if (!meta) {
-      DEBUG_ESPNOW_METADATAF("[METADATA] API: miss — no active slot matches %02X:%02X:%02X:%02X:%02X:%02X",
-        targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
-    }
+  MeshPeerMeta* meta = getMeshPeerMeta(targetMac, false);
+  if (meta) {
+    DEBUG_ESPNOW_METADATAF("[METADATA] API: HIT name='%s' room='%s'", meta->name, meta->room);
   } else {
-    DEBUG_ESPNOW_METADATAF("[METADATA] API: gMeshPeerMeta is null");
+    DEBUG_ESPNOW_METADATAF("[METADATA] API: miss — no active slot matches %02X:%02X:%02X:%02X:%02X:%02X",
+      targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
   }
   
   // If found in mesh metadata, return it. Built via the shared core serializer

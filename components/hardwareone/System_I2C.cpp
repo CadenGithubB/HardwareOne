@@ -34,6 +34,7 @@
 #include "System_ESPNow_Sensors.h"
 #endif
 #include "System_Settings.h"
+#include "i2csensor_ht16k33.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
 
@@ -76,6 +77,7 @@
 // Helper function to check if a sensor is compiled in
 // Uses module name matching against compile-time flags
 static bool isSensorCompiled(const I2CSensorEntry& sensor) {
+  if (sensor.moduleName && strcmp(sensor.moduleName, "matrix") == 0) return ENABLE_LED_MATRIX;
   if (sensor.moduleName == nullptr) {
     // Infrastructure devices (SSD1306, PCA9685) - check by address
     if (sensor.address == 0x3C || sensor.address == 0x3D) {
@@ -134,6 +136,53 @@ static bool isSensorCompiled(const I2CSensorEntry& sensor) {
   return true;
 }
 
+// The registry is keyed by (bus, address), so boot-time identity records must
+// follow the same per-device routing settings used by the drivers.  Registering
+// every compiled device on bus 0 creates a "ghost" primary-bus record whenever
+// the real device is routed to I2C2; address-only health lookups can then report
+// and recover the wrong record.
+static uint8_t configuredBusForSensor(const I2CSensorEntry& sensor) {
+  int configuredBus = 0;
+
+  if (sensor.moduleName) {
+#if ENABLE_LED_MATRIX
+    if (strcmp(sensor.moduleName, "matrix") == 0) return matrixDeviceBus();
+#endif
+    if      (strcmp(sensor.moduleName, "thermal")  == 0) configuredBus = gSettings.thermalBus;
+    else if (strcmp(sensor.moduleName, "tof")      == 0) configuredBus = gSettings.tofBus;
+    else if (strcmp(sensor.moduleName, "imu")      == 0) configuredBus = gSettings.imuBus;
+    else if (strcmp(sensor.moduleName, "input")    == 0) configuredBus = gSettings.inputBus;
+    else if (strcmp(sensor.moduleName, "apds")     == 0) configuredBus = gSettings.apdsBus;
+    else if (strcmp(sensor.moduleName, "gps")      == 0) configuredBus = gSettings.gpsBus;
+    else if (strcmp(sensor.moduleName, "fmradio")  == 0) configuredBus = gSettings.fmRadioBus;
+    else if (strcmp(sensor.moduleName, "rtc")      == 0) configuredBus = gSettings.rtcBus;
+    else if (strcmp(sensor.moduleName, "presence") == 0) configuredBus = gSettings.presenceBus;
+    else if (strcmp(sensor.moduleName, "servo")    == 0) configuredBus = gSettings.servoBus;
+  } else {
+    // Infrastructure rows do not have module names.
+    if (sensor.address == 0x3C || sensor.address == 0x3D) configuredBus = gSettings.oledBus;
+    else if (sensor.address == 0x36)                     configuredBus = gSettings.fuelGaugeBus;
+    else if (sensor.address == 0x40)                     configuredBus = gSettings.servoBus;
+  }
+
+  if (configuredBus < 0 || configuredBus >= I2CDeviceManager::NUM_BUSES) {
+    WARN_I2CF("Invalid configured bus %d for 0x%02X (%s); using bus 0",
+              configuredBus, sensor.address, sensor.name ? sensor.name : "?");
+    return 0;
+  }
+  return (uint8_t)configuredBus;
+}
+
+// Resolve configurable identity consistently for scans and health registration.
+static I2CSensorEntry configuredSensor(const I2CSensorEntry& source) {
+  I2CSensorEntry sensor = source;
+#if ENABLE_LED_MATRIX
+  if (sensor.moduleName && strcmp(sensor.moduleName, "matrix") == 0)
+    sensor.address = matrixDeviceAddress();
+#endif
+  return sensor;
+}
+
 // Initialize the unified I2C manager singleton
 void initI2CManager() {
   I2CDeviceManager::initialize();
@@ -143,19 +192,24 @@ void initI2CManager() {
   INFO_I2C_DISCOVERYF("[I2C_REGISTRY] Device manager initialized with capacity for %d devices", I2CDeviceManager::MAX_DEVICES);
   
   
-  // Pre-register only compiled-in devices from database with their timing parameters
+  // Pre-register only compiled-in device identities on their configured buses.
+  // Clock and lock-wait policy belongs to each transaction, not this registry.
   int compiledCount = 0;
   for (size_t i = 0; i < i2cSensorsCount; i++) {
-    const I2CSensorEntry& sensor = i2cSensors[i];
+    const I2CSensorEntry sensor = configuredSensor(i2cSensors[i]);
     if (isSensorCompiled(sensor)) {
-      uint32_t clock = sensor.i2cClockHz > 0 ? sensor.i2cClockHz : 100000;
-      uint32_t timeout = sensor.i2cTimeoutMs > 0 ? sensor.i2cTimeoutMs : 200;
-      I2CDevice* dev = mgr->registerDevice(sensor.address, sensor.name, clock, timeout);
+      // The SSD1306 may live at 0x3D or 0x3C. Register it only after probing,
+      // otherwise a permanent 0x3D ghost pollutes health when the panel is 0x3C.
+      if (sensor.address == 0x3D && sensor.altAddress == 0x3C) continue;
+      const uint8_t bus = configuredBusForSensor(sensor);
+      I2CDevice* dev = mgr->registerDevice(sensor.address, sensor.name, bus);
       if (dev) {
         compiledCount++;
-        INFO_I2C_DISCOVERYF("Pre-registered compiled device: 0x%02X (%s)", sensor.address, sensor.name);
+        INFO_I2C_DISCOVERYF("Pre-registered compiled device: 0x%02X (%s) on bus %u",
+                            sensor.address, sensor.name, bus);
       } else {
-        ERROR_I2CF("Failed to pre-register compiled device: 0x%02X (%s)", sensor.address, sensor.name);
+        ERROR_I2CF("Failed to pre-register compiled device: 0x%02X (%s) on bus %u",
+                   sensor.address, sensor.name, bus);
       }
     }
   }
@@ -244,7 +298,9 @@ const I2CSensorEntry i2cSensors[] = {
   // so the I2C discovery scan probes 0x36 and names it instead of "Unknown".
   { 0x36, "MAX17048", "LiPo Fuel Gauge", "Maxim", false, 0x00, 0, NULL, NULL, NULL, 400000, 100 },
 #endif
-  { 0x40, "PCA9685", "16-Channel 12-bit PWM/Servo Driver", "Adafruit", true, 0x70, 0, "Adafruit_PWMServoDriver", "_ADAFRUIT_PWMSERVODRIVER_H_", NULL, 100000, 200 },
+  // 0x70 is PCA9685's broadcast all-call address, not a second device identity.
+  { 0x40, "PCA9685", "16-Channel 12-bit PWM/Servo Driver", "Adafruit", false, 0x00, 0, "Adafruit_PWMServoDriver", "_ADAFRUIT_PWMSERVODRIVER_H_", NULL, 100000, 200 },
+  { 0x70, "HT16K33", "Monochrome 16x8 LED Matrix", "Adafruit", false, 0x00, 0, "Adafruit_LEDBackpack", "Adafruit_LEDBackpack_h", "matrix", 100000, 200 },
 };
 
 // Export array size for use in .ino file
@@ -312,6 +368,25 @@ static uint8_t i2cAddressForDeviceType(I2CDeviceType sensor) {
   }
 }
 
+// Keep queue/autostart probes on the same physical bus as the corresponding
+// driver.  The old default-argument calls always probed bus 0, so a correctly
+// configured bus-1 sensor was rejected before its start request reached the
+// driver.
+static uint8_t i2cBusForDeviceType(I2CDeviceType sensor) {
+  switch (sensor) {
+    case I2C_DEVICE_THERMAL:  return (uint8_t)gSettings.thermalBus;
+    case I2C_DEVICE_TOF:      return (uint8_t)gSettings.tofBus;
+    case I2C_DEVICE_IMU:      return (uint8_t)gSettings.imuBus;
+    case I2C_DEVICE_INPUT:    return (uint8_t)gSettings.inputBus;
+    case I2C_DEVICE_GPS:      return (uint8_t)gSettings.gpsBus;
+    case I2C_DEVICE_FMRADIO:  return (uint8_t)gSettings.fmRadioBus;
+    case I2C_DEVICE_APDS:     return (uint8_t)gSettings.apdsBus;
+    case I2C_DEVICE_RTC:      return (uint8_t)gSettings.rtcBus;
+    case I2C_DEVICE_PRESENCE: return (uint8_t)gSettings.presenceBus;
+    default:                  return 0;
+  }
+}
+
 // Externally linkable so HAL_Input.cpp's unified cmd_openinput can dispatch
 // through the same queue as the other sensor start commands.
 const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const bool& enabledFlag, const char* eventTag) {
@@ -335,7 +410,8 @@ const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName
 
   // Verify hardware is physically present before attempting start
   uint8_t addr = i2cAddressForDeviceType(sensor);
-  if (addr != 0 && !i2cPingAddress(addr, 100000, 50)) {
+  const uint8_t bus = i2cBusForDeviceType(sensor);
+  if (addr != 0 && !i2cPingAddress(addr, 100000, 50, bus)) {
     snprintf(getDebugBuffer(), 1024, "[%s] Not detected on I2C bus", displayName);
     return getDebugBuffer();
   }
@@ -434,12 +510,10 @@ void initI2CBuses() {
 
 // ========== End I2C Bus Initialization ==========
 
-void i2cResetGracePeriod(uint8_t address) {
+void i2cResetGracePeriod(uint8_t address, uint8_t bus) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
-  // Address-only, like the health helpers in System_I2C.h — resolve across
-  // buses so a bus 1 sensor's grace period actually gets reset.
-  I2CDevice* dev = mgr->getDeviceAnyBus(address);
+  I2CDevice* dev = mgr->getDevice(address, bus);
   if (dev) dev->resetGracePeriod();
 }
 
@@ -451,7 +525,7 @@ const char* cmd_i2chealth(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
-    doc["schema"] = 2;   // 2: added per-device "bus" (registry is keyed on address+bus)
+    doc["schema"] = 3;   // 3: transaction timing moved out of the health registry
     doc["deviceCount"] = mgr->getDeviceCount();
     JsonArray arr = doc["devices"].to<JsonArray>();
     for (int i = 0; i < mgr->getDeviceCount(); i++) {
@@ -468,7 +542,6 @@ const char* cmd_i2chealth(const String& argsInput) {
       o["nack"]               = h.nackCount;
       o["timeout"]            = h.timeoutCount;
       o["busError"]           = h.busErrorCount;
-      o["adaptiveTimeoutMs"]  = (unsigned long)dev->getAdaptiveTimeout();
     }
     // Size against the real buffer (4096), not the stale 1024 literal — 16
     // devices x ~150 B of JSON overruns 1 KB and serializeJson would emit a
@@ -512,9 +585,8 @@ const char* cmd_i2chealth(const String& argsInput) {
     // Error classification breakdown
     if (h.totalErrors > 0 && remaining > 100) {
       n = snprintf(p, remaining,
-        "            NACK=%d TIMEOUT=%d BUS_ERR=%d | timeout=%lums\n",
-        h.nackCount, h.timeoutCount, h.busErrorCount,
-        (unsigned long)dev->getAdaptiveTimeout());
+        "            NACK=%d TIMEOUT=%d BUS_ERR=%d\n",
+        h.nackCount, h.timeoutCount, h.busErrorCount);
       p += n; remaining -= n;
     }
   }
@@ -664,9 +736,8 @@ const char* cmd_i2cmetrics(const String& argsInput) {
 
 // Helper function to identify sensor by I2C address
 String identifySensor(uint8_t address) {
-  for (size_t i = 0; i < 64; i++) {  // Reasonable max for sensor database
-    const I2CSensorEntry& sensor = i2cSensors[i];
-    if (sensor.name == nullptr) break;  // End of array
+  for (size_t i = 0; i < i2cSensorsCount; i++) {
+    const I2CSensorEntry sensor = configuredSensor(i2cSensors[i]);
     if (sensor.address == address || (sensor.multiAddress && sensor.altAddress == address)) {
       String result = sensor.name;
       result += " (";
@@ -938,7 +1009,7 @@ const char* cmd_i2cstats(const String& originalCmd) {
 // gTofRunning / gTofConnected / gTofTaskHandle / gVL53L4CX provided by i2csensor_vl53l4cx.h
 extern bool tofPoll();
 #endif
-// i2cOledTransactionVoid/i2cOledTransaction and i2cDeviceTransaction are template functions in System_I2C.h
+// i2cDeviceTransaction helpers are template functions in System_I2C.h
 // gThermalRunning provided by i2csensor_mlx90640.h
 
 // SensorCache struct is now defined in i2c_system.h
@@ -996,7 +1067,7 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
 static int findSensorIndexByAddress(uint8_t address) {
   // Pass 1: prefer exact primary address matches
   for (size_t i = 0; i < i2cSensorsCount; i++) {
-    if (i2cSensors[i].address == address) {
+    if (configuredSensor(i2cSensors[i]).address == address) {
       return i;
     }
   }
@@ -1076,7 +1147,7 @@ void detectHardware(DetectionResult& out) {
     PollPauseGuard guard(bus);
     for (size_t i = 0; i < n && i < MAXSENS; i++) {
       if (found[i]) continue;                   // already located on the other bus
-      const I2CSensorEntry& s = i2cSensors[i];
+      const I2CSensorEntry s = configuredSensor(i2cSensors[i]);
       // Probe for an ACK, then confirm by read-back to reject phantom ACKs
       // (see i2cConfirmPresent — write-only OLED is exempt). Prevents a ghost
       // address (e.g. 0x68) from being reported as a real device.
@@ -1116,7 +1187,7 @@ void detectHardware(DetectionResult& out) {
   };
 
   for (size_t i = 0; i < n && i < MAXSENS; i++) {
-    const I2CSensorEntry& s = i2cSensors[i];
+    const I2CSensorEntry s = configuredSensor(i2cSensors[i]);
     if (!s.moduleName) continue;                 // infrastructure handled below
     if (alreadyEmitted(s.moduleName)) continue;
 
@@ -1169,7 +1240,7 @@ ApplyResult applyDetectedHardware(const DetectionResult& r) {
     out.enabled++;
     if (f->flags & FEATURE_FLAG_REQUIRES_REBOOT) out.rebootNeeded = true;
   }
-  if (out.enabled) writeSettingsJson();
+  if (out.enabled) (void)requestSettingsPersist();
   return out;
 }
 
@@ -1374,46 +1445,15 @@ void discoverI2CDevices() {
   int scanCount = 0;
   
   for (size_t i = 0; i < i2cSensorsCount && scanCount < 32; i++) {
-    // Check if sensor is compiled in (via header guard)
-    bool compiled = true;
-    if (i2cSensors[i].headerGuard != nullptr) {
-      // Sensor has a header guard - check if it's defined
-      // For now, assume all sensors with guards are compiled (compile-time check)
-      // Runtime check would require preprocessor macros passed as runtime flags
-      #if !ENABLE_THERMAL_SENSOR
-        if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_MLX90640_H_") == 0) compiled = false;
-      #endif
-      #if !ENABLE_TOF_SENSOR
-        if (strcmp(i2cSensors[i].headerGuard, "_VL53L4CX_CLASS_H_") == 0) compiled = false;
-      #endif
-      #if !ENABLE_IMU_SENSOR
-        if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_BNO055_H_") == 0) compiled = false;
-      #endif
-      #if !ENABLE_GAMEPAD_SENSOR
-        if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_SEESAW_H_") == 0) compiled = false;
-      #endif
-      #if !ENABLE_APDS_SENSOR
-        if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_APDS9960_H_") == 0) compiled = false;
-      #endif
-      #if !ENABLE_GPS_SENSOR
-        if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_GPS_H") == 0) compiled = false;
-      #endif
-      #if !ENABLE_RTC_SENSOR
-        if (i2cSensors[i].moduleName && strcmp(i2cSensors[i].moduleName, "rtc") == 0) compiled = false;
-      #endif
-      #if !ENABLE_FM_RADIO
-        if (i2cSensors[i].moduleName && strcmp(i2cSensors[i].moduleName, "fmradio") == 0) compiled = false;
-      #endif
-      #if !ENABLE_PRESENCE_SENSOR
-        if (i2cSensors[i].moduleName && strcmp(i2cSensors[i].moduleName, "presence") == 0) compiled = false;
-      #endif
-    }
-    
-    if (compiled) {
-      scanAddresses[scanCount++] = i2cSensors[i].address;
-      if (i2cSensors[i].multiAddress && scanCount < 32) {
-        scanAddresses[scanCount++] = i2cSensors[i].altAddress;
-      }
+    // Use the same feature predicate as manager pre-registration and hardware
+    // detection. The old duplicate header-guard filter accidentally admitted
+    // disabled headerless entries (RTC, FM, presence, OLED, and PCA9685), so a
+    // gauge-only build still probed unrelated addresses at every boot.
+    if (!isSensorCompiled(i2cSensors[i])) continue;
+
+    scanAddresses[scanCount++] = configuredSensor(i2cSensors[i]).address;
+    if (i2cSensors[i].multiAddress && scanCount < 32) {
+      scanAddresses[scanCount++] = i2cSensors[i].altAddress;
     }
   }
   
@@ -1845,7 +1885,7 @@ const char* cmd_sensors(const String& argsInput) {
 
   int count = 0;
   for (size_t i = 0; i < i2cSensorsCount; i++) {
-    const I2CSensorEntry& sensor = i2cSensors[i];
+    const I2CSensorEntry sensor = configuredSensor(i2cSensors[i]);
 
     // Apply filter if specified
     if (filter.length() > 0) {
@@ -1908,6 +1948,7 @@ const char* cmd_sensorinfo(const String& argsInput) {
 
   // Find sensor by name (case insensitive)
   const I2CSensorEntry* foundSensor = nullptr;
+  I2CSensorEntry configuredInfo{};
   String searchName = args;
   searchName.toLowerCase();
 
@@ -1915,7 +1956,8 @@ const char* cmd_sensorinfo(const String& argsInput) {
     String sensorName = String(i2cSensors[i].name);
     sensorName.toLowerCase();
     if (sensorName == searchName) {
-      foundSensor = &i2cSensors[i];
+      configuredInfo = configuredSensor(i2cSensors[i]);
+      foundSensor = &configuredInfo;
       break;
     }
   }
@@ -1953,31 +1995,37 @@ const char* cmd_sensorinfo(const String& argsInput) {
     BROADCAST_PRINTF("Alternative Address: 0x%s (%d)", altHex, foundSensor->altAddress);
   }
 
-  // Check if this sensor is currently connected
-  bool connectedWire0 = false, connectedWire1 = false;
-
-  Wire.beginTransmission(foundSensor->address);
-  if (Wire.endTransmission() == 0) connectedWire0 = true;
-
-  if (i2cPingAddress(foundSensor->address, 100000, 50)) connectedWire1 = true;
-
-  if (foundSensor->multiAddress) {
-    Wire.beginTransmission(foundSensor->altAddress);
-    if (Wire.endTransmission() == 0) connectedWire0 = true;
-
-    if (i2cPingAddress(foundSensor->altAddress, 100000, 50)) connectedWire1 = true;
+  // Check both initialized manager buses.  The old code mixed a raw `Wire`
+  // transfer with a default-bus helper, skipped the bus mutex for one probe,
+  // and never printed the secondary-bus hit.
+  bool connectedBus[I2CDeviceManager::NUM_BUSES] = {};
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  for (uint8_t bus = 0; bus < I2CDeviceManager::NUM_BUSES; ++bus) {
+    if (!mgr || !mgr->isBusInitialized(bus)) continue;
+    connectedBus[bus] = i2cPingAddress(foundSensor->address, 100000, 50, bus);
+    if (!connectedBus[bus] && foundSensor->multiAddress) {
+      connectedBus[bus] = i2cPingAddress(foundSensor->altAddress, 100000, 50, bus);
+    }
   }
 
   broadcastOutput("");
   broadcastOutput("Connection Status:");
 
-  if (connectedWire1) {
+  if (connectedBus[0]) {
     char buf[64];
-    snprintf(buf, sizeof(buf), "  ✓ Connected on Wire1 (SDA=%d, SCL=%d)", gSettings.i2cSdaPin, gSettings.i2cSclPin);
+    snprintf(buf, sizeof(buf), "  ✓ Connected on I2C1/Wire1 (SDA=%d, SCL=%d)",
+             gSettings.i2cSdaPin, gSettings.i2cSclPin);
     broadcastOutput(buf);
   }
 
-  if (!connectedWire0 && !connectedWire1) {
+  if (connectedBus[1]) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "  ✓ Connected on I2C2/Wire (SDA=%d, SCL=%d)",
+             gSettings.i2c2SdaPin, gSettings.i2c2SclPin);
+    broadcastOutput(buf);
+  }
+
+  if (!connectedBus[0] && !connectedBus[1]) {
     broadcastOutput("  ✗ Not currently connected");
   }
 
@@ -2097,7 +2145,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
       *sensorHeapCosts[i].autoStartFlag = enable;
       if (enable) totalCost += sensorHeapCosts[i].heapCostKB;
     }
-    writeSettingsJson();
+    (void)requestSettingsPersist();
     
     EXT_RAM_BSS_ATTR static char result[128];
     uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
@@ -2117,7 +2165,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   
   bool wasEnabled = *found->autoStartFlag;
   *found->autoStartFlag = enable;
-  writeSettingsJson();
+  (void)requestSettingsPersist();
   
   EXT_RAM_BSS_ATTR static char result[128];
   uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
@@ -2540,6 +2588,7 @@ const char* buildSensorStatusJson() {
 #else
   doc["servoCompiled"] = false;
 #endif
+  doc["matrixCompiled"] = static_cast<bool>(ENABLE_LED_MATRIX);
 
 #if ENABLE_CAMERA_SENSOR
   extern bool gCameraRunning;
@@ -2830,7 +2879,7 @@ void sensorQueueProcessorTask(void* param) {
       {
         uint8_t devAddr = i2cAddressForDeviceType(req.device);
         if (devAddr != 0) {
-          i2cResetGracePeriod(devAddr);
+          i2cResetGracePeriod(devAddr, i2cBusForDeviceType(req.device));
         }
       }
 
@@ -3055,7 +3104,8 @@ static bool isSensorAvailableForAutoStart(const char* moduleName, I2CDeviceType 
   if (isSensorConnected(moduleName)) return true;
   // Registry miss — try a direct I2C ping as fallback
   uint8_t addr = i2cAddressForDeviceType(deviceType);
-  if (addr != 0 && i2cPingAddress(addr, 100000, 50)) {
+  const uint8_t bus = i2cBusForDeviceType(deviceType);
+  if (addr != 0 && i2cPingAddress(addr, 100000, 50, bus)) {
     INFO_I2C_AUTOSTARTF("[AutoStart] %s not in registry but responds to I2C ping", moduleName);
     return true;
   }
@@ -3083,7 +3133,7 @@ void processAutoStartSensors() {
     return;
   }
 
- #if ENABLE_I2C_SYSTEM
+ #if ENABLE_I2C_SENSOR_QUEUE
   if (!queueProcessorTask) {
     const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;
     // Pin to Core 1 (I2C_SENSOR_CORE) — same rationale as the primary create site

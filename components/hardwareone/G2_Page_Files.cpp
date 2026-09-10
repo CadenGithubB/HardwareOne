@@ -41,6 +41,9 @@
 #include "System_VFS.h"          // internal / SD capacity + mount state
 #include "System_CaptureCrypto.h"  // reveal sealed captures on the lens viewer
 #include "System_MemUtil.h"   // ps_alloc — gFilesFm lives in PSRAM (placement-new)
+#include "System_PsramBuffer.h"
+#include "System_TextWrapStream.h"
+#include "System_Mutex.h"
 #include <new>                // placement-new
 #include "System_Debug.h"
 #include "System_AuthIdentity.h"
@@ -166,27 +169,23 @@ static bool gFilesConfirmActive = false;   // delete-confirm list is up
 static char gFilesConfirmRow[FILE_MANAGER_MAX_NAME + 12];
 EXT_RAM_BSS_ATTR static char gFilesMutateMsg[112];          // result banner text
 
-// Capacity calls are intentionally snapshot-based. LittleFS.usedBytes() walks
-// the filesystem, so doing it on every quick folder / chooser redraw makes the
-// explorer sluggish. More importantly, Files shares the physical G2 widget
-// with Rename's keyboard: there must be no background timer that can repaint
-// this page while TextEntry owns it. Re-entry and SD mount transitions force a
-// sample; browsing reuses one for at most 10 seconds, and successful mutations
-// invalidate it immediately.
+// Capacity calls use VFS's shared, opt-in presentation snapshots.
+// LittleFS.usedBytes() walks the filesystem, so doing it on every quick folder
+// / chooser redraw makes the explorer sluggish. More importantly, Files shares
+// the physical G2 widget with Rename's keyboard: there must be no background
+// timer that can repaint this page while TextEntry owns it. Re-entry forces a
+// fresh sample; browsing reuses one for at most 10 seconds, SD lifecycle changes
+// are invalidated centrally by VFS, and successful mutations invalidate both
+// displayed tiers immediately.
 struct FilesStorageSnapshot {
-  bool     valid;
   bool     sdMounted;
   bool     internalOk;
   bool     sdOk;
-  uint32_t sampledAtMs;
   uint64_t internalTotal;
   uint64_t internalFree;
   uint64_t sdTotal;
   uint64_t sdFree;
 };
-static FilesStorageSnapshot gFilesStorage = {};
-static portMUX_TYPE gFilesStorageMux = portMUX_INITIALIZER_UNLOCKED;
-static uint32_t gFilesStorageInvalidateGen = 0;
 static constexpr uint32_t kFilesStorageTtlMs = 10000;
 
 // Paged text viewer (JSON pretty/raw, .txt, .csv). Shares the TextPager
@@ -329,77 +328,34 @@ static void formatStorageUsageBar(uint64_t total, uint64_t freeBytes,
 }
 
 static void invalidateFilesStorageSnapshot() {
-  portENTER_CRITICAL(&gFilesStorageMux);
-  gFilesStorageInvalidateGen++;
-  gFilesStorage.valid = false;
-  portEXIT_CRITICAL(&gFilesStorageMux);
+  // The old G2-local cache stored one composite sample, so a mutation always
+  // invalidated both rows. Preserve that exact redraw behavior while moving the
+  // storage and generation fencing into VFS's shared per-tier cache.
+  VFS::invalidateStatsSnapshot(VFS::INTERNAL);
+  VFS::invalidateStatsSnapshot(VFS::SDCARD);
 }
 
 static FilesStorageSnapshot getFilesStorageSnapshot(bool force) {
-  FilesStorageSnapshot lastSample = {};
+  FilesStorageSnapshot next = {};
+  const uint32_t maxAgeMs = force ? 0 : kFilesStorageTtlMs;
 
-  // A mutation can invalidate the cache while LittleFS.usedBytes() is walking
-  // the volume. Retry once with the new generation; if it races twice, render
-  // the latest local sample but leave the global cache invalid for next draw.
-  for (uint8_t attempt = 0; attempt < 2; attempt++) {
-    FilesStorageSnapshot current = {};
-    uint32_t invalidateGen = 0;
-    portENTER_CRITICAL(&gFilesStorageMux);
-    current = gFilesStorage;
-    invalidateGen = gFilesStorageInvalidateGen;
-    portEXIT_CRITICAL(&gFilesStorageMux);
+  VFS::CapacitySnapshot internal = {};
+  next.internalOk = VFS::getStatsSnapshot(
+      VFS::INTERNAL, internal, maxAgeMs) && internal.totalBytes > 0;
+  next.internalTotal = internal.totalBytes;
+  next.internalFree = internal.freeBytes;
 
-    const uint32_t now = millis();
-    bool refresh = force || !current.valid ||
-        (uint32_t)(now - current.sampledAtMs) >= kFilesStorageTtlMs;
-
-    // Only the fresh-cache path needs a separate cheap mount query. Recheck
-    // time after it because the accessor may wait behind an active FS user.
-    if (!refresh) {
-      const bool sdMountedNow = VFS::isSDAvailable();
-      const uint32_t checkedAt = millis();
-      refresh = current.sdMounted != sdMountedNow ||
-          (uint32_t)(checkedAt - current.sampledAtMs) >=
-              kFilesStorageTtlMs;
-    }
-    if (!refresh) return current;
-
-    FilesStorageSnapshot next = {};
-    uint64_t ignoredUsed = 0;
-    next.internalOk = VFS::getStats(
-        VFS::INTERNAL, next.internalTotal, ignoredUsed, next.internalFree) &&
-        next.internalTotal > 0;
-
-    // Query SD unconditionally on a refresh. getStats owns the FS lock and
-    // therefore gives an authoritative mount result at query time. A mounted
-    // but unreadable FAT volume can surface as 0/0; omit that optional row.
-    const bool sdStatsOk = VFS::getStats(
-        VFS::SDCARD, next.sdTotal, ignoredUsed, next.sdFree);
-    next.sdMounted = sdStatsOk;
-    next.sdOk = sdStatsOk && next.sdTotal > 0;
-    next.sampledAtMs = millis();
-    next.valid = true;
-    lastSample = next;
-
-    // g2ShowFilesMenu has legacy call sites on more than one task. Publish the
-    // complete uint64_t snapshot under a spinlock so readers never observe a
-    // torn or half-updated capacity sample. Filesystem I/O stays outside it.
-    bool published = false;
-    portENTER_CRITICAL(&gFilesStorageMux);
-    // An invalidation that landed during the filesystem scan wins; publishing
-    // the earlier sample would otherwise silently lose a completed mutation.
-    if (gFilesStorageInvalidateGen == invalidateGen) {
-      gFilesStorage = next;
-      published = true;
-    }
-    current = gFilesStorage;
-    portEXIT_CRITICAL(&gFilesStorageMux);
-
-    if (published) return next;
-    if (current.valid) return current;  // another task already refreshed it
-  }
-
-  return lastSample;
+  // Query SD even when unmounted. A fresh/cache miss returns false without
+  // modifying the local zero snapshot; a mounted but unreadable FAT volume can
+  // still surface as 0/0 and is omitted just as it was before this migration.
+  VFS::CapacitySnapshot sd = {};
+  const bool sdStatsOk =
+      VFS::getStatsSnapshot(VFS::SDCARD, sd, maxAgeMs);
+  next.sdMounted = sdStatsOk;
+  next.sdOk = sdStatsOk && sd.totalBytes > 0;
+  next.sdTotal = sd.totalBytes;
+  next.sdFree = sd.freeBytes;
+  return next;
 }
 
 // Build the complete non-interactive right pane in one TextObject. Keeping
@@ -419,8 +375,8 @@ static void buildFilesSidebar(const char* path, bool forceStorageRefresh) {
 
   const FilesStorageSnapshot storage =
       getFilesStorageSnapshot(forceStorageRefresh);
-  const bool intOk = storage.valid && storage.internalOk;
-  const bool sdOk = storage.valid && storage.sdOk;
+  const bool intOk = storage.internalOk;
+  const bool sdOk = storage.sdOk;
 
   char intAmount[16] = {};
   char intBar[9] = {};
@@ -832,6 +788,33 @@ static void exitTextViewBackToFiles() {
   g2ShowFilesMenu();
 }
 
+// G2-only checked reader. The shared String reader remains unchanged for CLI
+// fileview and the tiny Info sniff. The caller has installed the paired user's
+// identity and checked canRead; like readTextLimited this helper is policy-free
+// and serializes its whole VFS read with the filesystem lock.
+static bool filesReadTextBuffer(const char* path, PsramBuffer& out,
+                                 size_t maxBytes) {
+  out.clear();
+  FsLockGuard guard("g2.files.text");
+  File f = VFS::open(String(path), "r");
+  if (!f) return false;
+  // Avoid reserving a full 12 KiB for a tiny file. File writes using the same
+  // FS lock cannot grow it during this read; retain the caller's hard cap.
+  size_t toRead = f.size();
+  if (toRead > maxBytes) toRead = maxBytes;
+  if (toRead == SIZE_MAX || !out.reserve(toRead + 1)) return false;
+  size_t total = 0;
+  while (total < toRead) {
+    size_t chunk = toRead - total;
+    if (chunk > 512) chunk = 512;
+    const size_t n = f.readBytes(out.data() + total, chunk);
+    if (!n) break;
+    total += n;
+  }
+  f.close();
+  return out.setSize(total);
+}
+
 // Read the chooser entry, optionally JSON-pretty-print it, wrap it, and page it
 // onto the lens via the shared TextPager. `pretty` only applies to JSON;
 // .txt/.csv always call with pretty=false. Returns false if the swap couldn't
@@ -855,8 +838,8 @@ static bool showTextFileViaWidget(bool pretty) {
                           exitTextViewBackToFiles, nullptr);
   }
 
-  String raw;
-  if (!readTextLimited(path, raw, kFilesTextReadCapBytes)) {
+  PsramBuffer raw(SIZE_MAX, "g2.files.input");
+  if (!filesReadTextBuffer(path, raw, kFilesTextReadCapBytes)) {
     DEBUG_G2F("[G2] Files text: read failed '%s'", path);
     return false;
   }
@@ -865,34 +848,44 @@ static bool showTextFileViaWidget(bool pretty) {
   // Sealed capture? Reveal for the lens — this runs under the G2-paired
   // user's identity (ctxGuard above) and behind the canRead gate; the
   // '#HW1ENC' first line stays visible as the mark.
-  captureCryptoRevealText(raw);
+  const size_t revealCapacity = captureCryptoRevealCapacity(raw.c_str(), raw.size());
+  size_t revealedLength = raw.size();
+  if (!revealCapacity || !raw.reserve(revealCapacity) ||
+      !captureCryptoRevealText(raw.data(), revealedLength, raw.capacity()) ||
+      !raw.setSize(revealedLength)) {
+    DEBUG_G2F("[G2] Files text: reveal buffer failed '%s'", path);
+    return false;
+  }
 
-  String display;
+  // Serialize directly into the existing PSRAM body. The stateful sink keeps
+  // wrap columns across JSON serializer writes; no display String is needed.
+  TextWrapStream display(gFilesTextBody, sizeof(gFilesTextBody),
+                         G2_TEXT_DEFAULT_COLS, /*contIndent=*/0,
+                         /*stripControl=*/true);
   if (pretty) {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, raw);
+    PSRAM_JSON_DOC(doc);
+    // Match ArduinoJson's String reader, which is length-bounded (including
+    // embedded NUL bytes); presentation wrapping still stops at the first NUL.
+    DeserializationError err = deserializeJson(doc, raw.c_str(), raw.size());
     if (err) {
-      display = "// Pretty parse failed: ";
-      display += err.c_str();
-      display += "\n// Falling back to raw JSON text\n\n";
-      display += raw;
+      display.write("// Pretty parse failed: ");
+      display.write(err.c_str());
+      display.write("\n// Falling back to raw JSON text\n\n");
+      display.write(raw.c_str());
       DEBUG_G2F("[G2] Files text: pretty parse failed '%s' (%s)",
                 path, err.c_str());
     } else {
       serializeJsonPretty(doc, display);
     }
   } else {
-    display = raw;
+    display.write(raw.c_str());
   }
 
   // Wrap into the shared body buffer: strips '\r' + control bytes, soft-wraps
   // long lines at the lens column width (so wide CSV rows stay legible), and
   // flags truncation when the source outgrows the displayable body.
-  bool wrapTrunc = false;
-  size_t bodyLen = textWrapInto(gFilesTextBody, sizeof(gFilesTextBody),
-                                  display.c_str(), G2_TEXT_DEFAULT_COLS,
-                                  /*contIndent=*/0, /*stripCtrl=*/true,
-                                  &wrapTrunc);
+  const bool wrapTrunc = display.truncated();
+  const size_t bodyLen = display.size();
   gFilesPager.curPage   = 0;
   gFilesPager.truncated = (hitReadCap || wrapTrunc);
   textSplitPages(gFilesPager, bodyLen);
@@ -909,7 +902,7 @@ static bool showTextFileViaWidget(bool pretty) {
            pretty ? "Pretty " : "", base);
 
   DEBUG_G2F("[G2] Files text: %s '%s' src=%uB body=%uB cap=%uB pages=%u trunc=%d",
-            pretty ? "pretty" : "raw", path, (unsigned)display.length(),
+            pretty ? "pretty" : "raw", path, (unsigned)display.sourceBytes(),
             (unsigned)bodyLen, (unsigned)kFilesTextReadCapBytes,
             (unsigned)gFilesPager.pageCount, gFilesPager.truncated ? 1 : 0);
   return filesRenderTextPage();

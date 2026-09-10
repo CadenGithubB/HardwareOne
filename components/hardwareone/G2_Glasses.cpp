@@ -12532,7 +12532,7 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
     disconnectTemple(*missing);
     return false;
   }
-  if (persistNeeded) (void)writeSettingsJson();
+  if (persistNeeded) (void)requestSettingsPersist();
   return true;
 }
 
@@ -14801,13 +14801,34 @@ static void __attribute__((unused)) g2AutoNotifPrimeIfReady(G2Temple& t) {
 // Per-temple lifecycle
 // =============================================================================
 
+static bool templeRuntimeQuiescedForInit(const G2Temple& t) {
+  return !t.connected &&
+         !t.client &&
+         !t.writeChar &&
+         !t.notifyChar &&
+         !t.audioNotifyChar &&
+         !t.advertisedDevice &&
+         !t.rxBuf &&
+         !t.writeMutex &&
+         !t.devCfgTxnArmed;
+}
+
 static void templeInit(G2Temple& t, char side) {
-  memset(&t, 0, sizeof(t));
+  // gL/gR are real C++ objects whose String members were constructed during
+  // static initialization. Reconstruct the complete object so a prior scan's
+  // heap-backed name/address buffers are released before re-init; byte-zeroing
+  // them loses those allocations and leaves invalid String representations.
+  // Every runtime owner must already have been fenced and released by
+  // deinitG2Client()/templeReset() before this point.
+  configASSERT(templeRuntimeQuiescedForInit(t));
+  t.~G2Temple();
+  new (&t) G2Temple{};
   t.side = side;
   t.rxCap = RX_ASSEMBLY_CAP;
   t.mtu = 23;  // default until negotiated
   t.sessionPhase = G2SessionPhase::Down;
   t.devCfgAckSem = xSemaphoreCreateBinaryStatic(&t.devCfgAckSemStorage);
+  configASSERT(t.devCfgAckSem != nullptr);
 }
 
 static bool ensureTempleRuntime(G2Temple& t) {
@@ -15331,6 +15352,20 @@ bool initG2Client() {
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 
+  // Reconstructing a temple destroys its String members, so refuse to do it
+  // unless the preceding lifecycle has released every object/pointer that the
+  // old temple owns. Check both before modifying either to avoid a half-reset
+  // pair if an earlier teardown ever violates this contract.
+  const bool leftTempleQuiesced = templeRuntimeQuiescedForInit(gL);
+  const bool rightTempleQuiesced = templeRuntimeQuiescedForInit(gR);
+  if (!leftTempleQuiesced || !rightTempleQuiesced) {
+    DEBUG_G2F("[G2] Client init refused: temple runtime not quiesced (L=%d R=%d)",
+              (int)leftTempleQuiesced, (int)rightTempleQuiesced);
+    broadcastOutput("[G2] Client start blocked: prior temple teardown is incomplete");
+    configASSERT(leftTempleQuiesced && rightTempleQuiesced);
+    return false;
+  }
+
   // gG2State lives for the program's life and is touched only by regular
   // task contexts (BLE notify, command dispatch, etc.) — safe in PSRAM.
   // Note: the embedded `String deviceName/deviceAddress` members hold
@@ -15348,6 +15383,9 @@ bool initG2Client() {
   // read before assignment. Placement-new runs the constructors (same fix as
   // gEspNow / gSessions / gWifiNetworks).
   new (gG2State) G2ClientState();
+
+  templeInit(gL, 'L');
+  templeInit(gR, 'R');
 
   BLEDevice::init("HardwareOne");
   if (!BLEDevice::getInitialized() || !isBluedroidHostEnabled() ||
@@ -15392,9 +15430,6 @@ bool initG2Client() {
   gScan->setActiveScan(true);
   gScan->setInterval(100);
   gScan->setWindow(99);
-
-  templeInit(gL, 'L');
-  templeInit(gR, 'R');
 
   if (!gCreateAckSem) {
     gCreateAckSem = xSemaphoreCreateBinary();
@@ -16043,7 +16078,7 @@ static bool g2ConnectSync(G2Eye eye,
     DEBUG_G2F("[G2] Saved reconnect completion superseded — success discarded");
     return false;
   }
-  if (persistNeeded) (void)writeSettingsJson();
+  if (persistNeeded) (void)requestSettingsPersist();
   return true;
 }
 

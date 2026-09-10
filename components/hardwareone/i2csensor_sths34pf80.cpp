@@ -106,10 +106,7 @@ extern const SettingsModule presenceSettingsModule = {
 // Low-level I2C Helper Functions
 // ============================================================================
 // Resolves the STHS34PF80's bus + TwoWire* from settings (gSettings.presenceBus).
-// Returns false (outputs unchanged) when the bus isn't initialized — every
-// register helper below fails closed in that case rather than silently
-// targeting Wire1 with the wrong bus mutex. Same pattern as the OLED + RTC
-// migrations.
+// Returns false (outputs unchanged) when the bus isn't initialized.
 static bool presenceResolveBus(uint8_t* outBus, TwoWire** outWire) {
   const uint8_t bus = (uint8_t)gSettings.presenceBus;
   TwoWire* w = i2c() ? i2c()->getWire(bus) : nullptr;
@@ -119,51 +116,42 @@ static bool presenceResolveBus(uint8_t* outBus, TwoWire** outWire) {
   return true;
 }
 
-static bool writeRegister(uint8_t reg, uint8_t value) {
-  uint8_t bus; TwoWire* w;
-  if (!presenceResolveBus(&bus, &w)) return false;
-  return i2cDeviceTransaction(bus, I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
-    w->beginTransmission(I2C_ADDR_PRESENCE);
-    w->write(reg);
-    w->write(value);
-    return (w->endTransmission() == 0);
-  });
+// Raw register helpers. The caller must already own the configured bus through
+// one manager transaction; these helpers deliberately do not acquire it again.
+static bool writeRegister(TwoWire& wire, uint8_t reg, uint8_t value) {
+  wire.beginTransmission(I2C_ADDR_PRESENCE);
+  wire.write(reg);
+  wire.write(value);
+  return (wire.endTransmission() == 0);
 }
 
-static bool readRegister(uint8_t reg, uint8_t* value) {
-  uint8_t bus; TwoWire* w;
-  if (!presenceResolveBus(&bus, &w)) return false;
-  return i2cDeviceTransaction(bus, I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
-    w->beginTransmission(I2C_ADDR_PRESENCE);
-    w->write(reg);
-    if (w->endTransmission(false) != 0) return false;
+static bool readRegister(TwoWire& wire, uint8_t reg, uint8_t* value) {
+  wire.beginTransmission(I2C_ADDR_PRESENCE);
+  wire.write(reg);
+  if (wire.endTransmission(false) != 0) return false;
 
-    if (w->requestFrom(I2C_ADDR_PRESENCE, (uint8_t)1) != 1) return false;
-    *value = w->read();
-    return true;
-  });
+  if (wire.requestFrom(I2C_ADDR_PRESENCE, (uint8_t)1) != 1) return false;
+  *value = wire.read();
+  return true;
 }
 
-static bool readRegisters(uint8_t reg, uint8_t* buffer, uint8_t len) {
-  uint8_t bus; TwoWire* w;
-  if (!presenceResolveBus(&bus, &w)) return false;
-  return i2cDeviceTransaction(bus, I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
-    w->beginTransmission(I2C_ADDR_PRESENCE);
-    w->write(reg);
-    if (w->endTransmission(false) != 0) return false;
+static bool readRegisters(TwoWire& wire, uint8_t reg, uint8_t* buffer, uint8_t len) {
+  wire.beginTransmission(I2C_ADDR_PRESENCE);
+  wire.write(reg);
+  if (wire.endTransmission(false) != 0) return false;
 
-    if (w->requestFrom(I2C_ADDR_PRESENCE, len) != len) return false;
-    for (uint8_t i = 0; i < len; i++) {
-      buffer[i] = w->read();
-    }
-    return true;
-  });
+  if (wire.requestFrom(I2C_ADDR_PRESENCE, len) != len) return false;
+  for (uint8_t i = 0; i < len; i++) {
+    buffer[i] = wire.read();
+  }
+  return true;
 }
 
-static int16_t readInt16(uint8_t regL) {
+static bool readInt16(TwoWire& wire, uint8_t regL, int16_t* value) {
   uint8_t buf[2];
-  if (!readRegisters(regL, buf, 2)) return 0;
-  return (int16_t)(buf[0] | (buf[1] << 8));
+  if (!readRegisters(wire, regL, buf, 2)) return false;
+  *value = (int16_t)(buf[0] | (buf[1] << 8));
+  return true;
 }
 
 // ============================================================================
@@ -172,7 +160,7 @@ static int16_t readInt16(uint8_t regL) {
 
 const char* cmd_presencestart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   if (gPresenceRunning) {
     return "Error: [PRESENCE] Already running";
   }
@@ -330,11 +318,17 @@ bool presenceInit() {
   if (gPresenceConnected) {
     return true;
   }
-  
-  return i2cTaskWithTimeout(I2C_ADDR_PRESENCE, 100000, 500, [&]() -> bool {
+
+  uint8_t bus; TwoWire* wire;
+  if (!presenceResolveBus(&bus, &wire)) {
+    ERROR_PRESENCEF("Presence bus %d is not initialized", gSettings.presenceBus);
+    return false;
+  }
+
+  bool initialized = i2cTaskWithTimeout(bus, I2C_ADDR_PRESENCE, 100000, 500, [&]() -> bool {
     // Check WHO_AM_I
     uint8_t whoami;
-    if (!readRegister(STHS34PF80_WHO_AM_I, &whoami)) {
+    if (!readRegister(*wire, STHS34PF80_WHO_AM_I, &whoami)) {
       ERROR_PRESENCEF("Failed to read WHO_AM_I");
       return false;
     }
@@ -349,25 +343,29 @@ bool presenceInit() {
     // Configure CTRL1: Set ODR to 8Hz, BDU enabled
     // Bits [6:4] = ODR, Bit 3 = BDU
     uint8_t ctrl1 = (STHS34PF80_ODR_8HZ << 4) | 0x08;
-    if (!writeRegister(STHS34PF80_CTRL1, ctrl1)) {
+    if (!writeRegister(*wire, STHS34PF80_CTRL1, ctrl1)) {
       ERROR_PRESENCEF("Failed to configure CTRL1");
       return false;
     }
     
     // Configure CTRL2: Enable presence, motion, and ambient shock detection
     // Defaults are usually fine, but ensure FUNC_CFG_ACCESS is 0
-    if (!writeRegister(STHS34PF80_CTRL2, 0x00)) {
+    if (!writeRegister(*wire, STHS34PF80_CTRL2, 0x00)) {
       ERROR_PRESENCEF("Failed to configure CTRL2");
       return false;
     }
     
     gPresenceConnected = true;
-    
-    // Register for I2C health tracking (use manager directly with correct clock/timeout)
-    I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-    if (mgr) mgr->registerDevice(I2C_ADDR_PRESENCE, "STHS34PF80", 100000, 200);
     return true;
   });
+
+  // Promote the lazily-created health record to the sensor's real name on the
+  // same configured bus. Timing policy belongs to each transaction, not here.
+  if (initialized) {
+    I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+    if (mgr) mgr->registerDevice(I2C_ADDR_PRESENCE, "STHS34PF80", bus);
+  }
+  return initialized;
 }
 
 // Event-latch state for presence/motion detected/cleared. File-scope so a
@@ -379,51 +377,61 @@ static bool gMotionActive = false;
 
 bool presencePoll() {
   if (!gPresenceConnected) return false;
-  
-  // Read status first
-  uint8_t status;
-  if (!readRegister(STHS34PF80_STATUS, &status)) {
-    return false;
-  }
-  
-  // Check if data is ready (bit 2 = DRDY)
-  if (!(status & 0x04)) {
-    return true;  // No new data, but I2C transaction succeeded
-  }
-  
-  // Read function status for detection flags
-  uint8_t funcStatus;
-  if (!readRegister(STHS34PF80_FUNC_STATUS, &funcStatus)) {
-    return false;
-  }
-  
-  // Read ambient temperature (LSB = 0.0625°C)
-  int16_t ambientRaw = readInt16(STHS34PF80_TAMBIENT_L);
+
+  uint8_t bus; TwoWire* wire;
+  if (!presenceResolveBus(&bus, &wire)) return false;
+
+  bool dataReady = false;
+  uint8_t funcStatus = 0;
+  int16_t ambientRaw = 0;
+  int16_t objectRaw = 0;
+  int16_t compObjRaw = 0;
+  int16_t presenceVal = 0;
+  int16_t motionVal = 0;
+  int16_t tempShockVal = 0;
+
+  bool transactionOk = i2cTaskWithTimeout(bus, I2C_ADDR_PRESENCE, 100000, 100, [&]() -> bool {
+    // Read status first
+    uint8_t status;
+    if (!readRegister(*wire, STHS34PF80_STATUS, &status)) {
+      return false;
+    }
+
+    // Check if data is ready (bit 2 = DRDY)
+    if (!(status & 0x04)) {
+      return true;  // No new data, but I2C transaction succeeded
+    }
+
+    // Read function status for detection flags
+    if (!readRegister(*wire, STHS34PF80_FUNC_STATUS, &funcStatus)) {
+      return false;
+    }
+
+    if (!readInt16(*wire, STHS34PF80_TAMBIENT_L, &ambientRaw) ||
+        !readInt16(*wire, STHS34PF80_TOBJECT_L, &objectRaw) ||
+        !readInt16(*wire, STHS34PF80_TOBJ_COMP_L, &compObjRaw) ||
+        !readInt16(*wire, STHS34PF80_TPRESENCE_L, &presenceVal) ||
+        !readInt16(*wire, STHS34PF80_TMOTION_L, &motionVal) ||
+        !readInt16(*wire, STHS34PF80_TAMB_SHOCK_L, &tempShockVal)) {
+      return false;
+    }
+    dataReady = true;
+    return true;
+  });
+
+  if (!transactionOk || !dataReady) return transactionOk;
+
   float ambient = ambientRaw / 100.0f;
-  
-  // Read object temperature (raw)
-  int16_t objectRaw = readInt16(STHS34PF80_TOBJECT_L);
-  
-  // Read compensated object temperature
-  int16_t compObjRaw = readInt16(STHS34PF80_TOBJ_COMP_L);
   float compObj = compObjRaw / 100.0f;
-  
-  // Read presence value
-  int16_t presenceVal = readInt16(STHS34PF80_TPRESENCE_L);
-  
-  // Read motion value
-  int16_t motionVal = readInt16(STHS34PF80_TMOTION_L);
-  
-  // Read temperature shock value
-  int16_t tempShockVal = readInt16(STHS34PF80_TAMB_SHOCK_L);
-  
+
   // Extract detection flags from FUNC_STATUS
   // Bit 0 = PRES_FLAG, Bit 1 = MOT_FLAG, Bit 2 = TAMB_SHOCK_FLAG
   bool presence = (funcStatus & 0x04) != 0;
   bool motion = (funcStatus & 0x02) != 0;
   bool tempShock = (funcStatus & 0x01) != 0;
-  
-  // Update cache
+
+  // Update cache after releasing the I2C bus, so cache contention cannot hold
+  // up unrelated devices sharing that bus.
   {
     SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(50), "presence.pollWrite");
     if (g.held) {
@@ -591,24 +599,21 @@ void presenceTask(void* parameter) {
       }
     }
     
-    // NOTE: hybrid driver — init() is bus-aware (5-arg), but this poll uses the
-    // legacy 4-arg i2cTaskWithTimeout(I2C_ADDR_PRESENCE, ...) which routes to
-    // bus 0 (Wire1). Gate on the bus the poll ACTUALLY uses (0), not the
-    // presenceBus setting it doesn't honor here. Revisit if the poll is migrated
-    // to the 5-arg bus-aware form.
-    if (gPresenceRunning && gPresenceConnected && !pollPaused(0 /* poll uses legacy bus 0 */)) {
+    // presencePoll() owns one bus-aware transaction for all register reads.
+    if (gPresenceRunning && gPresenceConnected &&
+        !pollPaused((uint8_t)gSettings.presenceBus)) {
       unsigned long presencePollMs = (gSettings.presenceDevicePollMs > 0) ? (unsigned long)gSettings.presenceDevicePollMs : 200;
       
       if ((nowMs - lastPresenceRead) >= presencePollMs) {
-        bool ok = i2cTaskWithTimeout(I2C_ADDR_PRESENCE, 100000, 100, [&]() -> bool {
-          return presencePoll();
-        });
+        bool ok = presencePoll();
         
         if (ok) {
           // ESP-NOW broadcaster reads presenceBuildDataJSON() on demand from gPresenceCache.
         } else {
-          if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE)) {
-            uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_PRESENCE);
+          if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE,
+                                   (uint8_t)gSettings.presenceBus)) {
+            uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_PRESENCE,
+                                                     (uint8_t)gSettings.presenceBus);
             gPresenceRunning = false;
             gPresenceConnected = false;
             sensorStatusBumpWith("presence@auto_disabled");

@@ -8,7 +8,9 @@
 #include "System_ESPNow_Sessions.h"  // pendingFrameCount()
 #include "System_Debug.h"
 #include <Arduino.h>
+#include <freertos/semphr.h>
 #include <string.h>
+#include <type_traits>
 
 namespace {
 
@@ -27,6 +29,8 @@ struct Sample {
   uint16_t ackRttCount;         // count of ACK RTTs in this bucket
   uint16_t ackRttMaxMs;         // max ACK RTT in this bucket
 };
+static_assert(std::is_trivially_copyable<Sample>::value,
+              "saturation samples must remain safe for byte reset/copy");
 
 // PSRAM .bss: pure-POD diagnostics ring, written once per second from the
 // saturation tick and read by `espnowsaturation` (espnowSaturationReport) — no
@@ -42,6 +46,31 @@ uint32_t    gAckRttSumMs           = 0;
 uint16_t    gAckRttCount           = 0;
 uint16_t    gAckRttMaxMs           = 0;
 
+// The sampler/ACK accumulator runs on espnow_task, while the report/reset
+// commands run on cmd_exec_task. Keep this control block in internal RAM and
+// serialize every access to the PSRAM ring and its indexes/accumulators. Report
+// formatting snapshots under this mutex, then releases it before emitting any
+// output so the heartbeat task is never held behind console I/O.
+StaticSemaphore_t gStateMutexStorage;
+SemaphoreHandle_t gStateMutex = xSemaphoreCreateMutexStatic(&gStateMutexStorage);
+
+class StateGuard {
+ public:
+  StateGuard()
+      : held_(gStateMutex &&
+              xSemaphoreTake(gStateMutex, portMAX_DELAY) == pdTRUE) {}
+  ~StateGuard() {
+    if (held_) xSemaphoreGive(gStateMutex);
+  }
+  bool held() const { return held_; }
+
+  StateGuard(const StateGuard&) = delete;
+  StateGuard& operator=(const StateGuard&) = delete;
+
+ private:
+  bool held_;
+};
+
 inline uint16_t computeStreamQDepth() {
   if (!gEspNow || !gEspNow->streamQueue || gEspNow->streamQueueCap == 0) return 0;
   int head = gEspNow->streamQueueHead;
@@ -53,14 +82,16 @@ inline uint16_t computeStreamQDepth() {
 }  // namespace
 
 void espnowSaturationNoteAckRtt(uint32_t rttMs) {
-  // Single-task accumulators — only touched from contexts where the broadcast
-  // tracker sweeps (periodic tick). No mutex needed.
+  StateGuard guard;
+  if (!guard.held()) return;
   gAckRttSumMs += rttMs;
   if (gAckRttCount < UINT16_MAX) gAckRttCount++;
   if (rttMs > gAckRttMaxMs && rttMs <= UINT16_MAX) gAckRttMaxMs = (uint16_t)rttMs;
 }
 
 void espnowSaturationTick() {
+  StateGuard guard;
+  if (!guard.held()) return;
   uint32_t now = (uint32_t)millis();
   if (gLastTickMs != 0 && (now - gLastTickMs) < 1000) return;
   gLastTickMs = now;
@@ -88,6 +119,8 @@ void espnowSaturationTick() {
 }
 
 void espnowSaturationReset() {
+  StateGuard guard;
+  if (!guard.held()) return;
   memset(gRing, 0, sizeof(gRing));
   gRingHead = gRingFill = 0;
   gLastTickMs = 0;
@@ -101,19 +134,34 @@ void espnowSaturationReport() {
     BROADCAST_PRINTF("ESP-NOW not initialized");
     return;
   }
-  if (gRingFill < 2) {
-    BROADCAST_PRINTF("ESP-NOW Saturation: not enough samples yet (need ≥2s; have %us)", gRingFill);
+
+  Sample ringSnapshot[kWindowSamples];
+  uint8_t ringHead = 0;
+  uint8_t ringFill = 0;
+  {
+    StateGuard guard;
+    if (!guard.held()) {
+      BROADCAST_PRINTF("ESP-NOW Saturation: state unavailable");
+      return;
+    }
+    memcpy(ringSnapshot, gRing, sizeof(ringSnapshot));
+    ringHead = gRingHead;
+    ringFill = gRingFill;
+  }
+
+  if (ringFill < 2) {
+    BROADCAST_PRINTF("ESP-NOW Saturation: not enough samples yet (need ≥2s; have %us)", ringFill);
     return;
   }
 
   // Oldest sample in window = the slot just past head when full, or slot 0 when
   // not yet full.
-  uint8_t oldestIdx = (gRingFill == kWindowSamples)
-                        ? gRingHead
+  uint8_t oldestIdx = (ringFill == kWindowSamples)
+                        ? ringHead
                         : 0;
-  uint8_t newestIdx = (gRingHead == 0) ? (kWindowSamples - 1) : (gRingHead - 1);
-  const Sample& oldest = gRing[oldestIdx];
-  const Sample& newest = gRing[newestIdx];
+  uint8_t newestIdx = (ringHead == 0) ? (kWindowSamples - 1) : (ringHead - 1);
+  const Sample& oldest = ringSnapshot[oldestIdx];
+  const Sample& newest = ringSnapshot[newestIdx];
 
   uint32_t windowMs = newest.ts - oldest.ts;
   if (windowMs == 0) windowMs = 1;  // avoid div0 on rapid back-to-back calls
@@ -136,9 +184,9 @@ void espnowSaturationReport() {
   uint32_t ackSum = 0;
   uint32_t ackCnt = 0;
   uint16_t ackMax = 0;
-  for (uint8_t i = 0; i < gRingFill; i++) {
+  for (uint8_t i = 0; i < ringFill; i++) {
     uint8_t idx = (oldestIdx + i) % kWindowSamples;
-    const Sample& s = gRing[idx];
+    const Sample& s = ringSnapshot[idx];
     if (s.streamQDepth > qPeak)    qPeak    = s.streamQDepth;
     if (s.pendingFrames > pendPeak) pendPeak = s.pendingFrames;
     ackSum += s.ackRttSumMs;
@@ -147,7 +195,7 @@ void espnowSaturationReport() {
     // Per-second deltas (compare to previous slot)
     if (i > 0) {
       uint8_t prevIdx = (oldestIdx + i - 1) % kWindowSamples;
-      const Sample& p = gRing[prevIdx];
+      const Sample& p = ringSnapshot[prevIdx];
       uint32_t dSec_tx = s.messagesSent     - p.messagesSent;
       uint32_t dSec_rx = s.messagesReceived - p.messagesReceived;
       if (dSec_tx > fpsTxPeakWindow) fpsTxPeakWindow = dSec_tx;
@@ -162,7 +210,7 @@ void espnowSaturationReport() {
   float    qPeakPct = 100.0f * qPeak / qCap;
   float    ackAvg   = ackCnt ? (float)ackSum / ackCnt : 0.0f;
 
-  BROADCAST_PRINTF("ESP-NOW Saturation (window=%us, %u samples):", (unsigned)(windowMs/1000), gRingFill);
+  BROADCAST_PRINTF("ESP-NOW Saturation (window=%us, %u samples):", (unsigned)(windowMs/1000), ringFill);
   BROADCAST_PRINTF("  Frames TX: %.1f fps avg, peak %lu fps (%lu in window)",
                    fpsSent, (unsigned long)fpsTxPeakWindow, (unsigned long)dSent);
   BROADCAST_PRINTF("  Frames RX: %.1f fps avg, peak %lu fps (%lu in window)",

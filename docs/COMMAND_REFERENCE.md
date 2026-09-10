@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-946 commands across 49 modules (958 registry entries).
+947 commands across 49 modules (959 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -15,7 +15,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`cli`](#cli) — 4 commands
 - [`system`](#system) — 26 commands
 - [`wifi`](#wifi) — 20 commands
-- [`espnow`](#espnow) — 120 commands
+- [`espnow`](#espnow) — 119 commands
 - [`mqtt`](#mqtt) — 27 commands
 - [`bluetooth`](#bluetooth) — 19 commands
 - [`filesystem`](#filesystem) — 10 commands
@@ -23,24 +23,24 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`oled`](#oled) — 20 commands
 - [`neopixel`](#neopixel) — 3 commands
 - [`led`](#led) — 6 commands
-- [`servo`](#servo) — 5 commands
-- [`thermal`](#thermal) — 22 commands
-- [`tof`](#tof) — 9 commands
-- [`imu`](#imu) — 15 commands
+- [`matrix`](#matrix) — 3 commands
+- [`servo`](#servo) — 6 commands
+- [`thermal`](#thermal) — 23 commands
+- [`tof`](#tof) — 10 commands
+- [`imu`](#imu) — 16 commands
 - [`input`](#input) — 4 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 5 commands
-- [`apds`](#apds) — 8 commands
-- [`gps`](#gps) — 5 commands
-- [`fmradio`](#fmradio) — 9 commands
-- [`rtc`](#rtc) — 6 commands
-- [`presence`](#presence) — 5 commands
+- [`apds`](#apds) — 9 commands
+- [`gps`](#gps) — 6 commands
+- [`fmradio`](#fmradio) — 10 commands
+- [`rtc`](#rtc) — 7 commands
+- [`presence`](#presence) — 6 commands
 - [`camera`](#camera) — 49 commands
 - [`microphone`](#microphone) — 15 commands
-- [`dictation`](#dictation) — 1 commands
 - [`edgeimpulse`](#edgeimpulse) — 16 commands
 - [`espsr`](#espsr) — 45 commands
-- [`i2c`](#i2c) — 33 commands
+- [`i2c`](#i2c) — 24 commands
 - [`automation`](#automation) — 8 commands
 - [`battery`](#battery) — 3 commands
 - [`debug`](#debug) — 182 commands
@@ -54,10 +54,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`mapsettings`](#mapsettings) — 3 commands
 - [`power`](#power) — 3 commands
 - [`liveaudio`](#liveaudio) — 1 commands
-- [`cm5`](#cm5) — 14 commands
+- [`cm5`](#cm5) — 15 commands
 - [`ota`](#ota) — 18 commands
 - [`setpattern`](#setpattern) — 1 commands
-- [`even_g2`](#even-g2) — 56 commands
+- [`even_g2`](#even-g2) — 55 commands
 - [`even_r1`](#even-r1) — 5 commands
 - [`llm`](#llm) — 30 commands
 - [`settingsedit`](#settingsedit) — 57 commands
@@ -66,14 +66,14 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## cli
 
-> The cli module is the on-device help and CLI navigation layer, not a feature subsystem. help opens a paged help browser: bare help shows the main menu listing every registered module, help <module> drills into one module command page (and prints that module subsystem overview at the top), and the special topics help sensors (aggregate view across all sensor modules), help all (show every command including hidden ones), and help tail (dump suppressed output) cover the rest. While the browser is open the CLI is in a help state, so back steps from a module page up to the main menu, exit leaves help mode entirely and returns to the normal prompt, and clear wipes the CLI scrollback/history.
+> The cli module is the on-device help and CLI navigation layer, not a feature subsystem. help opens a paged help browser: bare help shows the main menu listing every registered module, help <module> drills into page 1 of that module (and prints its subsystem overview at the top), and help <module> p<N> opens an explicit later page. The special topics help sensors (aggregate view across all sensor modules), help all (show every command including hidden ones), and help tail (dump suppressed output) cover the rest. While the browser is open the CLI is in a help state, so p<N>, next and prev move within a module, back steps from a module page up to the main menu, and exit leaves help mode entirely and returns to the normal prompt, and clear wipes the CLI scrollback/history.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `back` |  | Return to main help menu |
 | `clear` |  | Clear CLI history |
 | `exit` |  | Exit help mode |
-| `help` |  | Display help menu (help [topic])<br/>`Usage: help [<module>\|sensors\|all\|tail]` |
+| `help` |  | Display help menu (module results use p<N> pages)<br/>`Usage: help [<module> [p<N>]\|sensors\|all\|tail] Example: help espnow p2 In help mode: p<N>, next, prev, back, exit` |
 
 ## system
 
@@ -110,7 +110,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## wifi
 
-> The WiFi subsystem manages station-mode network connections plus the network services that ride on top of them: NTP time sync and the on-device HTTP/HTTPS server. Saved networks are stored as a prioritized list (wifilist, wifiadd, wifirm, wifipromote) and persist to flash; openwifi connects by best-priority (default) or by --index <N>, and a failed indexed attempt auto-rolls back to the previously connected network. Note two distinct disconnects: closewifi tears down the link AND stops the HTTP server and web output to free heap, while wifidisconnect (drop) leaves the radio and web server up so you can move to another network. wifiscan lists nearby APs, ntpsync/ntpstatus handle clock sync, and openhttp/closehttp/httpstatus run the web server (compiled in only when the HTTP server is enabled). certinfo and certgen (admin-only) manage the self-signed HTTPS certificate.
+> The WiFi subsystem manages station-mode network connections plus the network services that ride on top of them: NTP time sync and the on-device HTTP/HTTPS server. Saved networks are stored as a prioritized list (wifilist, wifiadd, wifirm, wifipromote) and persist to flash; openwifi connects by best-priority (default) or by --index <N>, and a failed indexed attempt auto-rolls back to the previously connected network. Note two distinct disconnects: closewifi tears down the link AND stops the HTTP server and web output to free heap, while wifidisconnect (drop) leaves the radio and web server up so you can move to another network. closewifi powers the radio down only when ESP-NOW is not using it; 'radiopower off' is the unconditional airplane switch. wifiscan lists nearby APs, ntpsync/ntpstatus handle clock sync, and openhttp/closehttp/httpstatus run the web server (compiled in only when the HTTP server is enabled). certinfo and certgen (admin-only) manage the self-signed HTTPS certificate.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -201,7 +201,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowmeshrelay` | A | Carry other nodes' mesh traffic: <0\|1><br/>`Usage: espnowmeshrelay <0\|1> 1 (default) = act as a relay so out-of-range peers can reach each other through this node. 0 = stop forwarding for others. This node still uses multi-hop for its OWN traffic (set espnowmeshttl 1 for that), and stops advertising routes so nobody sends via it.` |
 | `espnowmeshrole` | A | Get/set mesh role: 'espnowmeshrole [worker\|master\|backup]'.<br/>`Usage: espnowmeshrole [worker\|master\|backup]` |
 | `espnowmeshroutes` |  | Show the mesh route table: who this node can reach and via which neighbour.<br/>`Usage: espnowmeshroutes [clear] 'via (direct)' = in radio range. Anything else is reached over one or more relay hops. Multi-hop routes are learned from neighbours every 30s — allow a minute after boot.` |
-| `espnowmeshsave` |  | Manually save mesh peer topology to filesystem. |
 | `espnowmeshstatus` |  | Show mesh peer health (heartbeats & ACKs). |
 | `espnowmeshtopo` |  | Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults) |
 | `espnowmeshttl` |  | Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.<br/>`Usage: espnowmeshttl [<1..10>] How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop). Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop.` |
@@ -237,7 +236,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowsessionopen` | A | Initiate SESSION handshake (requires prior espnowkeyex). (async - session goes ACTIVE later; check espnowsessions)<br/>`Usage: espnowsessionopen <name_or_mac> [<mesh>] Returns OK when SESSION_OPEN is sent; the session becomes ACTIVE when CONFIRM arrives - run 'espnowsessions'.` |
 | `espnowsessions` |  | Show in-RAM session state (peer, sessionId, dir, age, counters). |
 | `espnowsessionsend` | A | DIAGNOSTIC: send an AEAD-encrypted CHAT message over an active session (exercises the session-crypto path). NOT executed on the peer and returns no reply - to RUN a command use 'espnowremote'.<br/>`Usage: espnowsessionsend <name_or_mac> <message> Delivers an encrypted CHAT message (lands in the peer's espnowmessages). It is NOT command execution and no reply comes back. To run a command on the peer: espnowremote <target> <target-user> <target-pass> <command>.` |
-| `espnowsetname` | A | Get/set device name: 'espnowsetname [name]'.<br/>`Usage: espnowsetname [<name>] (<=20 chars; letters, numbers, - and _ only)` |
+| `espnowsetname` | A | Get/set device name: 'espnowsetname [name]'.<br/>`Usage: espnowsetname [<name>] (<=19 bytes; letters, numbers, - and _ only)` |
 | `espnowsetpassphrase` | S | Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.<br/>`Usage: espnowsetpassphrase <mesh> <passphrase> espnowsetpassphrase <mesh> clear` |
 | `espnowstationary` |  | Get/set stationary flag: 'espnowstationary [0\|1]'.<br/>`Usage: espnowstationary [on\|off\|0\|1]` |
 | `espnowstats` |  | Show ESP-NOW statistics (messages, errors, etc.). |
@@ -249,7 +248,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowtimesync` |  | Broadcast NTP time to mesh (intended for the master; role not enforced). (async broadcast; delivery only, no reply) |
 | `espnowtopoautorefresh` | A | Set auto refresh topology: <0\|1><br/>`Usage: espnowtopoautorefresh <0\|1>` |
 | `espnowtopodiscoveryinterval` | A | Set topology discovery interval: <0-300000 ms><br/>`Usage: espnowtopodiscoveryinterval <0..300000>` |
-| `espnowtoporesults` |  | Get topology discovery results. |
+| `espnowtoporesults` |  | Get topology results: 'espnowtoporesults [page] [request-id]'. |
 | `espnowunpair` | A | Unpair ESP-NOW device (also clears its crypto identity): 'espnowunpair <name_or_mac>'.<br/>`Usage: espnowunpair <name_or_mac>` |
 | `espnowusersync` | S | Enable/disable user credential sync: 'espnowusersync [on\|off]'.<br/>`Usage: espnowusersync [on\|off]` |
 | `espnowworker` |  | Configure worker status reporting: 'espnowworker [show\|on\|off\|interval <ms>\|fields <list>]'.<br/>`Usage: espnowworker [show\|on\|off\|interval <ms>\|fields <heap,rssi,thermal,imu>]` |
@@ -401,6 +400,16 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `ledstartupeffect` |  | Set LED startup effect [none\|rainbow\|pulse\|fade\|blink\|strobe].<br/>`Usage: ledstartupeffect <none\|rainbow\|pulse\|fade\|blink\|strobe>` |
 | `ledstartupenabled` |  | Enable/disable LED startup effect [0\|1].<br/>`Usage: ledstartupenabled <0\|1>` |
 
+## matrix
+
+> matrix test draws an orientation pattern. matrix text HI, matrix pixel 3 2 on, matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `matrix` |  | HT16K33 LED matrix: status, clear, fill, on/off, pixel, text, brightness, rotation, blink, test |
+| `matrixaddress` | A | Select matrix address (reboot required)<br/>`Usage: matrixaddress <0x70..0x77>` |
+| `matrixbus` | A | Select matrix I2C bus (reboot required)<br/>`Usage: matrixbus <0\|1>` |
+
 ## servo
 
 > The PCA9685 is a 16-channel I2C PWM driver used to control hobby servos (and generic PWM outputs) without tying up the ESP32 own timers. servo <channel> <angle> moves the servo on a channel to an angle, while pwm <channel> <value> [freq] writes a raw PWM duty (and optional frequency) for non-servo loads like LEDs or motor drivers. Because different servos expect different pulse ranges, servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name> stores a per-channel calibration that maps angles to the correct pulse widths (servolist shows the saved profiles), and servocalibrate <channel> opens an interactive mode to find those pulse limits by hand.
@@ -409,6 +418,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | ------- | :-: | ----------- |
 | `pwm` |  | Set PWM output: pwm <channel> <value> [freq].<br/>`Usage: pwm <channel> <value> [freq]` |
 | `servo` |  | Control servo motor: servo <channel> <angle>.<br/>`Usage: servo <channel> <angle>` |
+| `servobus` | A | Route PCA9685 servo to bus: <0\|1> (reboot required)<br/>`Usage: servoBus <0\|1>` |
 | `servocalibrate` |  | Enter calibration mode: servocalibrate <channel>.<br/>`Usage: servocalibrate <channel>` |
 | `servolist` |  | List configured servo profiles. (add 'json' for JSON output) |
 | `servoprofile` |  | Configure servo profile: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>.<br/>`Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>` |
@@ -422,6 +432,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `closethermal` |  | Stop MLX90640 thermal sensor. |
 | `openthermal` |  | Start MLX90640 thermal sensor. |
 | `thermalautostart` |  | Enable/disable thermal auto-start after boot [on\|off]<br/>`Usage: thermalautostart [on\|off]` |
+| `thermalbus` | A | Route MLX90640 thermal to bus: <0\|1> (reboot required)<br/>`Usage: thermalBus <0\|1>` |
 | `thermaldevicepollms` | A | Thermal device poll: <100..2000><br/>`Usage: thermalDevicePollMs <100..2000>` |
 | `thermaldiag` |  | Run thermal sensor diagnostics. |
 | `thermalewmafactor` | A | Thermal EWMA factor: <0.0..1.0><br/>`Usage: thermalewmafactor <0.0..1.0>` |
@@ -451,6 +462,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `closetof` |  | Stop VL53L4CX ToF sensor. |
 | `opentof` |  | Start VL53L4CX ToF sensor. |
 | `tofautostart` |  | Enable/disable ToF auto-start after boot [on\|off]<br/>`Usage: tofautostart [on\|off]` |
+| `tofbus` | A | Route VL53L4CX ToF to bus: <0\|1> (reboot required)<br/>`Usage: tofBus <0\|1>` |
 | `tofdevicepollms` | A | ToF device poll: <100..2000><br/>`Usage: tofDevicePollMs <100..2000>` |
 | `tofmaxdistancemm` | A | ToF max distance: <100..10000><br/>`Usage: tofmaxdistancemm <100..10000>` |
 | `tofpollingms` | A | ToF UI polling: <50..5000><br/>`Usage: tofpollingms <50..5000>` |
@@ -467,6 +479,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `closeimu` |  | Stop BNO055 IMU sensor. |
 | `imuactions` |  | Show IMU action detection state. |
 | `imuautostart` |  | Enable/disable IMU auto-start after boot [on\|off]<br/>`Usage: imuautostart [on\|off]` |
+| `imubus` | A | Route BNO055 IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
 | `imudevicepollms` | A | IMU device poll interval: <50..1000><br/>`Usage: imuDevicePollMs <50..1000>` |
 | `imuewmafactor` | A | IMU EWMA smoothing: <0.0..1.0><br/>`Usage: imuewmafactor <0.0..1.0>` |
 | `imuorientationcorrection` | A | IMU orientation correction: <0\|1><br/>`Usage: imuorientationcorrection <0\|1>` |
@@ -518,6 +531,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `apdsautostart` |  | Enable/disable APDS auto-start after boot [on\|off]<br/>`Usage: apdsautostart [on\|off]` |
+| `apdsbus` | A | Route APDS9960 gesture to bus: <0\|1> (reboot required)<br/>`Usage: apdsBus <0\|1>` |
 | `apdscolor` |  | Read APDS9960 color values. |
 | `apdsgesture` |  | Read APDS9960 gesture. |
 | `apdsmode` |  | Control APDS modes: apdsmode <color\|proximity\|gesture> [on\|off].<br/>`Usage: apdsmode <color\|proximity\|gesture> [<on\|off>]` |
@@ -534,6 +548,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | ------- | :-: | ----------- |
 | `closegps` |  | Stop PA1010D GPS module. |
 | `gpsautostart` |  | Enable/disable GPS auto-start after boot [on\|off]<br/>`Usage: gpsautostart [on\|off]` |
+| `gpsbus` | A | Route PA1010D GPS to bus: <0\|1> (reboot required)<br/>`Usage: gpsBus <0\|1>` |
 | `gpslog` |  | Set up and start GPS track logging now (persists across boots). Usage: gpslog [interval_ms]<br/>`Usage: gpslog [interval_ms] Sets gpsAutoStart, sensorlog format=track, sensors=gps, and autostart, then starts both the GPS sensor and sensor logging immediately. interval_ms: log interval in ms (default 1000, min 100) Example: gpslog (1-second logging) gpslog 500 (500ms logging)` |
 | `gpsread` |  | Read GPS location and time data. (add 'json' for JSON output) |
 | `opengps` |  | Start PA1010D GPS module. |
@@ -546,6 +561,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | ------- | :-: | ----------- |
 | `closefmradio` |  | Stop FM Radio sensor. |
 | `fmradioautostart` |  | Enable/disable FM Radio auto-start after boot [on\|off]<br/>`Usage: fmradioautostart [on\|off]` |
+| `fmradiobus` | A | Route RDA5807 FM radio to bus: <0\|1> (reboot required)<br/>`Usage: fmRadioBus <0\|1>` |
 | `fmradiomute` |  | Mute audio |
 | `fmradioread` |  | Read FM Radio status. (add 'json' for JSON output) |
 | `fmradioseek` |  | Start seeking the next station [up\|down] (async; 'fmradioread' shows the result)<br/>`Usage: fmradioseek [up\|down]` |
@@ -563,6 +579,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `closertc` |  | Stop DS3231 RTC sensor. |
 | `openrtc` |  | Start DS3231 RTC sensor. |
 | `rtcautostart` |  | Enable/disable RTC auto-start after boot [on\|off]<br/>`Usage: rtcautostart [on\|off]` |
+| `rtcbus` | A | Route DS3231 RTC to bus: <0\|1> (reboot required)<br/>`Usage: rtcBus <0\|1>` |
 | `rtcread` |  | Read RTC status [status\|temp]<br/>`Usage: rtcread [status\|temp] [json]` |
 | `rtcset` | A | Set RTC time: <datetime\|timestamp><br/>`Usage: rtcset YYYY-MM-DD HH:MM:SS or rtcset <unix_timestamp>` |
 | `rtcsync` | A | Sync time: [to\|from]<br/>`Usage: rtcsync [to\|from] (to=RTC->system, from=system->RTC)` |
@@ -576,6 +593,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `closepresence` |  | Stop STHS34PF80 sensor. |
 | `openpresence` |  | Start STHS34PF80 IR presence/motion sensor. |
 | `presenceautostart` |  | Enable/disable presence auto-start after boot [on\|off]<br/>`Usage: presenceautostart [on\|off]` |
+| `presencebus` | A | Route STHS34PF80 presence to bus: <0\|1> (reboot required)<br/>`Usage: presenceBus <0\|1>` |
 | `presenceread` |  | Read STHS34PF80 presence/motion/temperature data. (add 'json' for JSON output) |
 | `presencestatus` |  | Show STHS34PF80 sensor status. (add 'json' for JSON output) |
 
@@ -586,7 +604,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `cameraaec` | A | Auto exposure: <on\|off><br/>`Usage: cameraaec <on\|off\|1\|0\|true\|auto>` |
-| `cameraaec2` | A | Alt AEC algorithm: <on\|off><br/>`Usage: cameraaec2 <on\|off>` |
+| `cameraaec2` | A | Night mode (slower fps, brighter in low light): <on\|off><br/>`Usage: cameraaec2 <on\|off>` |
 | `cameraaecvalue` | A | Exposure value: <0-1200><br/>`Usage: cameraaecvalue <0..1200>` |
 | `cameraagc` | A | Auto gain: <on\|off><br/>`Usage: cameraagc <on\|off\|1\|0\|true\|auto>` |
 | `cameraagcgain` | A | Gain value: <0-30><br/>`Usage: cameraagcgain <0..30>` |
@@ -656,14 +674,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `micviz` |  | Real-time audio level visualizer.<br/>`Usage: micviz (press any key to stop)` |
 | `openmic` |  | Start microphone sensor. |
 | `voicefetch` |  | Stream a recording to the UART host as binary frames (CM5 bulk pull).<br/>`Usage: voicefetch "<path>" - path must be under /recordings or /sd/recordings. Sends META+AUDIO frames on the UART link, then replies with byte/frame totals and crc16.` |
-
-## dictation
-
-> Host half of the OLED keyboard's mic page. The wearer arms a capture from the keyboard (whichever mic the source layer has resolved — on-board PDM or the G2 glasses), the firmware records it with VAD auto-stop and pushes a dictate_request <id> <path> event on the authenticated UART link, and the CM5 host voicefetches the WAV, transcribes it, and returns the words with dictate result <id> <text> — the text runs to end of line, so it needs no quoting or escaping. dictate fail <id> [reason] reports a transcription that could not be produced, and dictate status reports the current state, active mic source and elapsed time. The id is single-use and bound to the display session that armed it, so a transcript can never land in a field belonging to a different user; the recording is deleted once its words are delivered. This device cannot transcribe speech on its own, so the whole command family is UART-only and inert without a logged-in host.
-
-| Command | | Description |
-| ------- | :-: | ----------- |
-| `dictate` |  | Deliver a host transcript into the on-device text field.<br/>`Usage: dictate status dictate result <16hex> <text> - text runs to end of line dictate fail <16hex> [reason]` |
 
 ## edgeimpulse
 
@@ -742,18 +752,15 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## i2c
 
-> The i2c module configures and diagnoses up to two I2C buses and the sensor device registry. There are two buses with a deliberate naming convention: bus 0 is I2C1 (Arduino Wire1, the primary STEMMA QT / sensor bus) and bus 1 is I2C2 (Wire, the optional secondary bus); each has its own enable flag and SDA/SCL pin settings, and bus/pin changes require a reboot. Each sensor can be routed to either bus with a per-device command (oledBus, gpsBus, rtcBus, imuBus, thermalBus, tofBus, etc.), all taking 0 or 1 and needing a reboot. Discovery and diagnostics: i2cscan dumps raw addresses found on each active bus; detect reports configured-vs-present hardware and detect apply (admin) auto-enables newly detected cheap devices; i2cmetrics/i2cstats/i2chealth show bus performance, error counters, and per-device health. Bus recovery: i2cpause/i2cresume stop and restart sensor polling, i2creset does a pause-recover-resume cycle, and i2crecover <address> clears a single device degraded state. The device registry is exposed via sensors [filter|json], sensorinfo <name>, devices, discover, and devicefile; sensorautostart [sensor] [on|off] controls which sensors start polling automatically at boot.
+> The i2c module configures and diagnoses up to two I2C buses and the sensor device registry. There are two buses with a deliberate naming convention: bus 0 is I2C1 (Arduino Wire1, the primary STEMMA QT / sensor bus) and bus 1 is I2C2 (Wire, the optional secondary bus); each has its own enable flag and SDA/SCL pin settings, and bus/pin changes require a reboot. Each sensor can be routed to either bus with a per-device command. Each sensor's routing verb now lives in that sensor's own module (run 'help gps' for gpsBus, 'help rtc' for rtcBus, and so on); oledBus, inputBus and fuelGaugeBus stay here. The persisted setting names are unchanged. all taking 0 or 1 and needing a reboot. Discovery and diagnostics: i2cscan dumps raw addresses found on each active bus; detect reports configured-vs-present hardware and detect apply (admin) auto-enables newly detected cheap devices; i2cmetrics/i2cstats/i2chealth show bus performance, error counters, and per-device health. Bus recovery: i2cpause/i2cresume stop and restart sensor polling, i2creset does a pause-recover-resume cycle, and i2crecover <address> clears a single device degraded state. The device registry is exposed via sensors [filter|json], sensorinfo <name>, devices, discover, and devicefile; sensorautostart [sensor] [on|off] controls which sensors start polling automatically at boot.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `apdsbus` | A | Route APDS9960 gesture to bus: <0\|1> (reboot required)<br/>`Usage: apdsBus <0\|1>` |
 | `detect` |  | Detect hardware: scan I2C buses, diff vs. configured features.<br/>`Usage: detect [apply] detect - read-only report (present/enabled/missing) detect apply - auto-enable cheap detected devices (admin; reboot for some)` |
 | `devicefile` |  | Show device registry JSON file. |
 | `devices` |  | Show discovered I2C device registry. (add 'json' for JSON output) |
 | `discover` |  | Re-scan and register I2C devices. |
-| `fmradiobus` | A | Route RDA5807 FM radio to bus: <0\|1> (reboot required)<br/>`Usage: fmRadioBus <0\|1>` |
 | `fuelgaugebus` | A | Route MAX17048 fuel gauge to bus: <0\|1> (reboot required)<br/>`Usage: fuelGaugeBus <0\|1>` |
-| `gpsbus` | A | Route PA1010D GPS to bus: <0\|1> (reboot required)<br/>`Usage: gpsBus <0\|1>` |
 | `i2c2busenabled` | A | Enable/disable I2C2 bus: <0\|1> (reboot required)<br/>`Usage: i2c2BusEnabled <0\|1>` |
 | `i2c2sclpin` | A | Set I2C2 SCL pin: <-1..> (-1=unavailable)<br/>`Usage: i2c2SclPin <-1..> (-1=unavailable)` |
 | `i2c2sdapin` | A | Set I2C2 SDA pin: <-1..> (-1=unavailable)<br/>`Usage: i2c2SdaPin <-1..> (-1=unavailable)` |
@@ -768,17 +775,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `i2csclpin` | A | Set I2C1 SCL pin: <0..> (max GPIO for this board)<br/>`Usage: i2cSclPin <0..> (max GPIO for this board)` |
 | `i2csdapin` | A | Set I2C1 SDA pin: <0..> (max GPIO for this board)<br/>`Usage: i2cSdaPin <0..> (max GPIO for this board)` |
 | `i2cstats` |  | I2C bus statistics and errors. |
-| `imubus` | A | Route BNO055 IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
 | `inputbus` | A | Route input device to bus: <0\|1> (reboot required)<br/>`Usage: inputBus <0\|1>` |
 | `oledbus` | A | Route OLED to bus: <0\|1> (reboot required)<br/>`Usage: oledBus <0\|1>` |
-| `presencebus` | A | Route STHS34PF80 presence to bus: <0\|1> (reboot required)<br/>`Usage: presenceBus <0\|1>` |
-| `rtcbus` | A | Route DS3231 RTC to bus: <0\|1> (reboot required)<br/>`Usage: rtcBus <0\|1>` |
 | `sensorautostart` | A | Sensor auto-start: [sensor] [on\|off]<br/>`Usage: sensorautostart [sensor] [on\|off] sensorautostart all [on\|off] Sensors: thermal, tof, imu, gps, fmradio, apds, input` |
 | `sensorinfo` |  | Sensor details: <name><br/>`Usage: sensorinfo <sensor_name> Example: sensorinfo BNO055` |
 | `sensors` |  | List I2C sensors [filter]<br/>`Usage: sensors [filter] - filter by name, description, or manufacturer sensors json [brief] - live state (+readings; 'brief' = state only, no data) Example: sensors temperature, sensors json brief` |
-| `servobus` | A | Route PCA9685 servo to bus: <0\|1> (reboot required)<br/>`Usage: servoBus <0\|1>` |
-| `thermalbus` | A | Route MLX90640 thermal to bus: <0\|1> (reboot required)<br/>`Usage: thermalBus <0\|1>` |
-| `tofbus` | A | Route VL53L4CX ToF to bus: <0\|1> (reboot required)<br/>`Usage: tofBus <0\|1>` |
 
 ## automation
 
@@ -996,11 +997,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## settings
 
-> The settings subsystem holds the device persisted configuration and the commands that change it. Each setting command (for example outserial, serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, webclihistorysize) sets one value; writes normally go to RAM and are flushed to the settings JSON on flash. Because flash writes are costly, you can batch them: beginwrite defers all subsequent writes, then savesettings flushes everything in a single write and ends the batch (savesettings is also the explicit flush-now command after individual changes). Most commands here are admin-gated. Some changes only take effect after a reboot (for example espnowenabled and httpsEnabled are marked reboot required). The controls command emits a machine-readable JSON descriptor of a module settable controls for UI use. Note that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) are owned and registered by their own modules; this module hosts the cross-cutting CLI/output/auth/time settings plus the batch-write machinery.
+> The settings subsystem holds the device persisted configuration and the commands that change it. Each setting command (for example outserial, serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, webclihistorysize) sets one value and normally requests an immediate settings-file write. Because flash writes are costly, beginwrite and savesettings can coalesce changes made by the same request or transport session: the final save writes each changed settings file at most once. This is write coalescing, not a RAM transaction; unrelated sources continue to persist immediately, and their full snapshot can include live values changed while a batch is open. Idle batches expire after two minutes. savesettings remains an explicit flush-now command when no batch is open. Most commands here are admin-gated. Some changes only take effect after a reboot (for example espnowenabled and httpsEnabled are marked reboot required). The controls command emits a machine-readable JSON descriptor of a module's settable controls for UI use. Note that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) are owned and registered by their own modules; this module hosts the cross-cutting CLI/output/auth/time settings plus the batch-write machinery.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `beginwrite` | A | Start a batch settings update — defers flash write until savesettings. |
+| `beginwrite` | A | Start owner-scoped settings write coalescing until savesettings (not a RAM transaction). |
 | `controls` |  | Per-module control descriptor (JSON): controls json [module]<br/>`Usage: controls json <module> (e.g. 'controls json imu'); 'controls json' lists modules` |
 | `displayrequireauth` | S | Require auth for display: <0\|1><br/>`Usage: displayrequireauth <0\|1>` |
 | `espnowenabled` | A | Enable/disable ESP-NOW: <0\|1> (reboot required)<br/>`Usage: espnowenabled <0\|1>` |
@@ -1009,7 +1010,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `ntpserver` | A | Set NTP server: <hostname><br/>`Usage: ntpserver <host>` |
 | `oledclihistorysize` | A | Set OLED CLI history size: <10..100><br/>`Usage: oledclihistorysize <10..100>` |
 | `outserial` | A | Set serial output: <0\|1> [persist\|temp]<br/>`Usage: outserial <0\|1> [persist\|temp]` |
-| `savesettings` | A | Flush deferred settings to flash (single write). |
+| `savesettings` | A | Flush this source's changed settings files and end its coalescing scope. |
 | `serialrequireauth` | S | Require auth for serial: <0\|1><br/>`Usage: serialrequireauth <0\|1>` |
 | `tzoffsetminutes` | A | Set timezone offset: <-720..840><br/>`Usage: tzoffsetminutes <-720..840>` |
 | `uartlink` | A | UART host link: status \| on \| off<br/>`Usage: uartlink [status\|on\|off]` |
@@ -1034,9 +1035,9 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `healthlogging` |  | Start/stop local R1 health logging (independent of ring collection)<br/>`Usage: healthlogging <on\|off\|toggle\|status\|interval [sec]> on: enable LOG_R1, force format=CSV, start under /logging_captures/sensors/, persist for boot (one dated per-day file when the clock is set, boot-<N>/ until sync then roll) off: remove LOG_R1; stop logging if no other sensors remain interval <sec>: how often local logging polls/mines the ring (default 900 = 15 min) R1-only sessions write ONLY on that mine (and Poll Now) — no 5s empty heartbeats This does not change the ring's health-collection privacy setting.` |
+| `healthlogging` |  | Start/stop local R1 health logging (independent of ring collection)<br/>`Usage: healthlogging <on\|off\|toggle\|status\|interval [sec]> on: enable LOG_R1, force format=CSV, start under /logging_captures/sensors/, persist for boot (one dated per-day file when the clock is set, boot-<N>/ until sync then roll) off: remove LOG_R1; stop logging if no other sensors remain interval <sec>: legacy POINT mining interval (default 900 = 15 min) On 2.2.9, logging is passive/on-demand and records Poll Now refreshes; it sends no timed POINT query R1-only sessions write only on an admitted mine/refresh — no 5s empty heartbeats This does not change the ring's health-collection privacy setting.` |
 | `healthlogmerge` | A | Byte-concatenate sensor logs in the given order: "<out>" "<in1>" "<in2>" ...<br/>`Usage: healthlogmerge "<output>" "<in1>" "<in2>" [...] OUTPUT FIRST — arg 0 is TRUNCATED. Inputs follow, in the order you want them. Bare output name → /logging_captures/sensors/; INPUTS need a full path. Extensionless output gets .csv appended even for TEXT inputs. Concatenation is byte-exact: CSV inputs keep their header lines mid-file, rows are NOT time-ordered, and mixing formats/sensor masks yields an unparseable result. Max 8 inputs (arg limit).` |
-| `healthstatus` |  | R1 live vitals, ring controls, local logging, and typed history status<br/>`Usage: healthstatus [json\|poll\|history\|force-history\|refresh-controls] bare/json: live values, desired/observed controls, local logging, history/store poll: kick HR→HRV→SpO2→battery point queries (replies via notify) history: normal typed history refresh; force-history: admin freshness bypass refresh-controls: read low-power state; health collection has no proven GET and stays Unknown BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page` |
+| `healthstatus` |  | R1 live vitals, ring controls, local logging, and typed history status<br/>`Usage: healthstatus [json\|poll\|history\|force-history\|refresh-controls] bare/json: live values, desired/observed controls, local logging, history/store poll: exact-2.2.9 DAILY HR/HRV/SpO2/sleep/activity + deviceStatus refresh history: normal typed history refresh; force-history: admin freshness bypass refresh-controls: read low-power state; health collection has no proven GET and stays Unknown BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page` |
 
 ## users
 
@@ -1123,7 +1124,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `power` | A | Power management [mode] [auto] [threshold]<br/>`Usage: power - show current power status power mode <perf\|balanced\|saver\|ultra\|locked\|0-4> power auto <on\|off> power threshold <0-100>` |
+| `power` | A | Power management [mode] [auto] [threshold]<br/>`Usage: power - show current power status power json - status as one JSON blob (same schema as /api/power/status) power mode <perf\|balanced\|saver\|ultra\|locked\|0-4> power auto <on\|off> power threshold <0-100>` |
 | `powercooldown` | A | Sleep transition cooldown (ms; 0 disables)<br/>`Usage: powercooldown <0..60000>` |
 | `powersave` | A | Idle power-save: OLED off + optional downclock (0 disables)<br/>`Usage: powersave <0..1440>` |
 
@@ -1141,11 +1142,12 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `cm5` |  | Inspect CM5 service presence, and host power/fan control.<br/>`Usage: cm5 <status\|capabilities> (heartbeat is UART control-plane only)` |
+| `cm5` |  | Inspect CM5 service presence, link health, and host power/fan control.<br/>`Usage: cm5 <status\|capabilities\|linkhealth> (heartbeat is UART control-plane only)` |
 | `cm5 capabilities` |  | Show the CM5 presence protocol capabilities.<br/>`Usage: cm5 capabilities` |
 | `cm5 fan` | A | Inspect or request CM5 fan mode/readback.<br/>`Usage: cm5 fan [show\|status\|quiet\|auto\|max]` |
 | `cm5 fan ack` |  | Accept a CM5 fan ACK (authenticated UART session only).<br/>`Usage: cm5 fan ack 1 <16-hex-id> <accepted\|applied\|failed>` |
 | `cm5 fan report` |  | Accept bounded CM5 fan readback (authenticated UART session only).<br/>`Usage: cm5 fan report 1 <id> <requested-mode> <effective-mode> <temp-mc\|-1> <target-pwm> <pwm> <rpm\|-1> <health>` |
+| `cm5 linkhealth` |  | Show the CM5 host's UART link fault tally.<br/>`Usage: cm5 linkhealth [json]` |
 | `cm5 power` | A | Inspect or request CM5 host power/profile state.<br/>`Usage: cm5 power [show\|status\|profile <eco\|balanced\|performance\|auto>]` |
 | `cm5 power ack` |  | Accept a CM5 delivery/application ACK (UART session only).<br/>`Usage: cm5 power ack 1 <16-hex-id> <accepted\|committed\|applied\|failed>` |
 | `cm5 power halt` | S | Request a confirmed CM5 halt.<br/>`Usage: cm5 power halt confirm` |
@@ -1236,7 +1238,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `g2notifenable` | A | Prime native notifications on sid 0x04 (enable + whitelist-disable) before g2nativenotify<br/>`Usage: g2notifenable (sends NOTIF_CTRL enable + WHITELIST_CTRL disable to the right arm)` |
 | `g2notify` |  | Transient text (placeholder): g2notify [secs] <text><br/>`Usage: g2notify [<seconds>] <text> (seconds 1..599, default 5)` |
 | `g2packrate` |  | SD-pack animation cadence: g2packrate [<ms>] (range 20..2000, default 80)<br/>`Usage: g2packrate [<ms>] (20..2000; bare = report)` |
-| `g2pet` |  | Open the Pet (virtual creature) app on the G2 lens<br/>`Usage: g2pet (Feed/Play/Clean/Sleep on the lens; Back to exit)` |
 | `g2probe` |  | Fire arbitrary pb cmd on non-mutation sids: g2probe <sid_hex> <cmd_dec> [body_hex]<br/>`Usage: g2probe <sid_hex> <cmd_dec> [body_hex] (sids 01/03/04/09/80 blocked)` |
 | `g2protostats` |  | Show G2 protocol stats per sid: g2protostats [verbose]<br/>`Usage: g2protostats [verbose]` |
 | `g2recover` |  | Try to reconnect a missing G2 temple without tearing down the connected one |
@@ -1338,8 +1339,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `notifydevicequeue` | A | Enable/disable the notification-center queue<br/>`Usage: notifydevicequeue <0\|1>` |
 | `notifydevicetoasts` | A | Enable/disable web notification toasts<br/>`Usage: notifydevicetoasts <0\|1>` |
 | `notifylevel` |  | Set YOUR notification importance floor<br/>`Usage: notifylevel [verbose\|standard\|alert] Bare: show your current floor (default: standard) verbose: everything; standard: skip routine chatter; alert: security/safety only Nothing is lost - filtered kinds still reach the notification center and automations` |
-| `notifyusermute` |  | Mute event kinds from notifications for YOUR user<br/>`Usage: notifyusermute [<kind,kind,...>\|none] Bare: show your muted kinds; none: clear Applies only to the logged-in user (stored with your dashboard preferences) List valid kinds with 'events kinds'` |
-| `notifyusershow` |  | Force event kinds through YOUR importance floor<br/>`Usage: notifyusershow [<kind,kind,...>\|none] Bare: show your forced kinds; none: clear Opposite of notifyusermute: these interrupt even below your notifylevel List valid kinds with 'events kinds'` |
+| `notifyusermute` |  | Mute event kinds from notifications for YOUR user<br/>`Usage: notifyusermute [<kind,kind,...>\|set <kind> <on\|off>\|patch <+kind,-kind>\|all\|none] Bare: show; legacy list: replace; set: change one; patch: change several all/none: mute every current kind/clear; applies only to your logged-in user List valid kinds with 'events kinds'` |
+| `notifyusershow` |  | Force event kinds through YOUR importance floor<br/>`Usage: notifyusershow [<kind,kind,...>\|set <kind> <on\|off>\|patch <+kind,-kind>\|all\|none] Bare: show; legacy list: replace; set: change one; patch: change several all/none: force every current kind/clear; overrides your notifylevel List valid kinds with 'events kinds'` |
 | `oledautostart` | A | Start the OLED display at boot<br/>`Usage: oledautostart <0\|1>` |
 | `powerdim` | A | Set display dim level (%)<br/>`Usage: powerdim <0-100>` |
 | `presencedevicepollms` | A | Set presence sensor poll interval (ms)<br/>`Usage: presencedevicepollms <50-5000>` |

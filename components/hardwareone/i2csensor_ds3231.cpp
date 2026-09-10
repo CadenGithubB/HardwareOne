@@ -545,8 +545,12 @@ void rtcStop() {
   }
   
   if (gRtcTaskHandle != nullptr) {
-    vTaskDelete(gRtcTaskHandle);
-    gRtcTaskHandle = nullptr;
+    // rtcTask can be inside setSetting()/writeSettingsJson(). Force-deleting a
+    // C++ task skips stack destructors and could permanently strand the shared
+    // settings-writer mutex (or leave polling paused). Keep the stop bounded,
+    // but let the task acknowledge exit and clear its own handle naturally.
+    DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RTC,
+                 "[WARN][RTC] Task exit still pending; refusing unsafe force-delete");
   }
   
   gRtcConnected = false;
@@ -564,6 +568,22 @@ bool rtcStartInternal() {
   if (gRtcRunning && gRtcConnected) {
     DEBUG_RTC_LIFECYCLEF("[RTC] Already running");
     return true;
+  }
+
+  // A prior stop may have returned while rtcTask was completing a settings
+  // write. Do not flip gRtcRunning back to true underneath that old task or
+  // create a second poller; retry is safe once its exit tail clears the handle.
+  if (gRtcTaskHandle != nullptr) {
+    const eTaskState state = eTaskGetState(gRtcTaskHandle);
+    if (state == eDeleted || state == eInvalid) {
+      // Preserve createRTCTask()'s stale-handle recovery even though a live
+      // exiting task must now be rejected before initialization changes state.
+      gRtcTaskHandle = nullptr;
+    } else {
+      DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RTC,
+                   "[WARN][RTC] Previous task is still exiting; retry start shortly");
+      return false;
+    }
   }
 
   // Check memory before creating RTC task

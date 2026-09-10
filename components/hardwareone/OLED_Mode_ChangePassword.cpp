@@ -432,7 +432,7 @@ static const OLEDModeEntry changePasswordModeEntries[] = {
   {
     OLED_CHANGE_PASSWORD,
     "Change Password",
-    "password",
+    "lock",
     displayChangePasswordMode,
     isChangePasswordModeAvailable,
     handleChangePasswordModeInput,

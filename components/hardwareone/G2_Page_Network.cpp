@@ -1639,12 +1639,12 @@ static void espnowNameCancel() {
 }
 
 // Shared keyboard launch for the Name row and the unnamed OFF→ON tap.
-// maxLen 20 matches cmd_espnow_setname (letters, numbers, - and _ only).
+  // maxLen 19 matches the V4 wire field (20 bytes including NUL).
 static bool beginEspNowNameEntry(TextEntryCommitFn onCommit) {
   TextEntryConfig cfg = {};
   cfg.prompt   = "ESPNow Name";
   cfg.initial  = gSettings.espnowDeviceName.c_str();
-  cfg.maxLen   = 20;
+  cfg.maxLen   = 19;
   cfg.onCommit = onCommit;
   cfg.onCancel = espnowNameCancel;
   if (!g2BeginTextEntry(cfg)) {

@@ -32,6 +32,19 @@ enum class I2CErrorType : uint8_t {
 
 I2CErrorType classifyI2CError(uint8_t espError);
 
+// Execution policy belongs to an individual transaction, not to the device
+// registry.  A single device can legitimately use a conservative clock during
+// initialization and a different clock / bus-lock budget while polling.
+//
+// lockWaitMs is only the maximum wait to acquire the per-bus mutex.  It is not
+// a Wire I/O deadline; TwoWire's hardware timeout is configured separately by
+// initBus().  Keeping those two concepts separate prevents an I/O timeout from
+// silently changing how long unrelated tasks queue for a busy bus.
+struct I2CTransactionOptions {
+  uint32_t clockHz;
+  uint32_t lockWaitMs;
+};
+
 // ============================================================================
 // I2CDevice Class (merged from System_I2C_Device.h)
 // ============================================================================
@@ -46,9 +59,6 @@ public:
   uint8_t bus;            // 0 = primary (Wire1, I2C1), 1 = secondary (Wire, I2C2)
                           // Defaults to 0 so legacy single-bus callers work unchanged.
   const char* name;
-  uint32_t clockHz;
-  uint32_t baseTimeoutMs;
-  uint32_t adaptiveTimeoutMs;
   
   // Health tracking
   struct Health {
@@ -75,15 +85,14 @@ public:
   
   // Constructor
   I2CDevice();
-  // Initialize a device. The `busIdx` parameter is optional with default 0
-  // so legacy registration sites (which don't know about multi-bus) keep
-  // compiling — they get the primary bus (Wire1 / I2C1), matching the
-  // single-bus behavior that existed before the dual-bus refactor.
-  void init(uint8_t addr, const char* deviceName, uint32_t clock, uint32_t timeout, uint8_t busIdx = 0);
+  // Initialize registry identity. Timing is deliberately absent: it is
+  // supplied through I2CTransactionOptions for every operation.
+  void init(uint8_t addr, const char* deviceName, uint8_t busIdx = 0);
   
   // Transaction interface - unified entry point
   template<typename Func>
-  auto transaction(Func&& operation, Mode mode = Mode::STANDARD) -> decltype(operation());
+  auto transaction(Func&& operation, const I2CTransactionOptions& options,
+                   Mode mode = Mode::STANDARD) -> decltype(operation());
   
   // Health management
   void recordSuccess();
@@ -93,7 +102,6 @@ public:
   void resetGracePeriod();
   
   // Getters
-  uint32_t getAdaptiveTimeout() const { return adaptiveTimeoutMs; }
   const Health& getHealth() const { return health; }
   bool isInitialized() const { return address != 0; }
 };
@@ -174,8 +182,10 @@ private:
   I2CBusMetrics     busMetrics[NUM_BUSES];
   uint32_t          lastRecoveryMs[NUM_BUSES];  // throttles error-driven recovery
 
-  // Clock stack for nested transactions — also per-bus, since two tasks on
-  // different buses can be mid-transaction simultaneously.
+  // Per-bus clock restoration bookkeeping. Bus mutexes are intentionally
+  // non-recursive: a transaction lambda must not enter another manager
+  // transaction on the same bus. Separate state still lets the two physical
+  // buses operate simultaneously.
   static const int CLOCK_STACK_MAX = 8;
   uint32_t clockStacks[NUM_BUSES][CLOCK_STACK_MAX];
   int      clockStackDepths[NUM_BUSES];
@@ -212,21 +222,18 @@ public:
   static I2CDeviceManager* getInstance();
   static void initialize();
 
-  // Device registration.
-  // The `busIdx` parameter defaults to 0 so callers from the legacy single-bus
-  // codepath (no bus knowledge) implicitly register on the primary bus.
-  I2CDevice* registerDevice(uint8_t addr, const char* name, uint32_t clockHz = 100000, uint32_t timeoutMs = 200, uint8_t busIdx = 0);
+  // Device registration records identity and health only. Clock rate and
+  // mutex-wait policy are per-transaction options and never live here.
+  // `busIdx` defaults to bus 0 for legacy callers.
+  I2CDevice* registerDevice(uint8_t addr, const char* name, uint8_t busIdx = 0);
   // Lookup by (address, bus). Same address on different buses → two distinct
   // devices (e.g., two DS3231s, one per bus). Default bus=0 preserves legacy
   // single-bus lookup semantics.
   I2CDevice* getDevice(uint8_t addr, uint8_t busIdx = 0);
-  // Address-only lookup across every bus, lowest bus first. For callers that
-  // genuinely don't know their bus — the address-keyed health helpers in
-  // System_I2C.h, whose call sites pass a compile-time I2C_ADDR_* constant.
-  // getDevice(addr) would silently resolve those to bus 0 and return nullptr
-  // for a device living on bus 1, turning every health check into a no-op.
-  // If the same address is registered on both buses this returns the bus 0
-  // entry; use getDevice(addr, bus) when the distinction matters.
+  // Address-only lookup across every bus, lowest bus first. Retained for CLI
+  // commands whose syntax genuinely supplies only an address (i2crecover).
+  // Runtime health and driver paths must use getDevice(addr, bus). If the same
+  // address exists on both buses this returns bus 0 deterministically.
   I2CDevice* getDeviceAnyBus(uint8_t addr);
   I2CDevice* getDeviceByName(const char* name);
   int getDeviceCount() const { return deviceCount; }
@@ -256,6 +263,14 @@ public:
   bool busRecoveryThrottled(uint8_t busIdx) const;
   void discoverDevices();
 
+  // Unregistered discovery operations. These share the manager's mutex and
+  // clock cache but deliberately do not create device-health records or alter
+  // the normal device-transaction metrics.
+  uint8_t probeAddress(uint8_t busIdx, uint8_t address,
+                       const I2CTransactionOptions& options);
+  bool confirmRead(uint8_t busIdx, uint8_t address,
+                   const I2CTransactionOptions& options);
+
   // I2C device lifecycle
   bool enqueueDeviceStart(I2CDeviceType sensor);
   bool dequeueDeviceStart(I2CDeviceStartRequest* req);
@@ -272,14 +287,15 @@ public:
 
   // Transaction execution (called by I2CDevice). Picks the right mutex /
   // wire / clock stack from `device->bus`, runs the operation under the
-  // bus's mutex with the device's clock applied, and tracks per-bus
-  // metrics + health. The lambda is nullary; sensors that need to talk
+  // bus's mutex with this call's clock and lock-wait policy, and tracks
+  // per-bus metrics + health. The lambda is nullary; sensors that need to talk
   // to a specific Wire instance capture the TwoWire* externally (use
   // getWire(busIdx) at init time). This keeps the API shape identical to
   // the pre-dual-bus version — no migration cost for lambdas that stay
   // on bus 0 (their `Wire1` references already match bus 0's wire).
   template<typename Func>
   auto executeTransaction(I2CDevice* device, Func&& operation,
+                         const I2CTransactionOptions& options,
                          I2CDevice::Mode mode) -> decltype(operation());
 
   // Mutex access for external use (legacy compatibility during migration).
@@ -309,6 +325,7 @@ inline I2CDeviceManager* i2c() {
 
 template<typename Func>
 auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
+                                          const I2CTransactionOptions& options,
                                           I2CDevice::Mode mode)
     -> decltype(operation()) {
   using ReturnType = decltype(operation());
@@ -321,6 +338,7 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
   // Resolve the bus this device lives on. Bounds-clamp for safety so an
   // uninitialized device with bus==255 doesn't index out of bounds.
   uint8_t bus = (device->bus < NUM_BUSES) ? device->bus : 0;
+  const uint32_t transactionClockHz = options.clockHz > 0 ? options.clockHz : 100000;
   SemaphoreHandle_t mutex = busMutexes[bus];
   if (!mutex || !busInitialized[bus] || !wires[bus]) {
     DEBUG_I2CF("[TX] ABORT: bus %u not initialized (device 0x%02X %s)",
@@ -339,22 +357,22 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
   uint32_t startUs = micros();
   busMetrics[bus].totalTransactions++;
 
-  // Acquire this bus's mutex with the device's adaptive timeout. Other tasks
-  // talking to devices on the OTHER bus are not blocked — that's the whole
-  // point of per-bus mutexes.
-  BaseType_t acquired = xSemaphoreTake(mutex, pdMS_TO_TICKS(device->adaptiveTimeoutMs));
+  // Acquire this bus's mutex using this call's explicit queueing budget.
+  // Other tasks talking to devices on the OTHER bus are not blocked.
+  BaseType_t acquired = xSemaphoreTake(mutex, pdMS_TO_TICKS(options.lockWaitMs));
   uint32_t waitUs = micros() - startUs;
 
   if (acquired != pdTRUE) {
     busMetrics[bus].mutexTimeouts++;
-    DEBUG_I2CF("[TX] MUTEX_TIMEOUT 0x%02X (%s) bus=%u waited=%luus",
-               device->address, device->name, bus, (unsigned long)waitUs);
+    DEBUG_I2CF("[TX] MUTEX_TIMEOUT 0x%02X (%s) bus=%u budget=%lums waited=%luus",
+               device->address, device->name, bus,
+               (unsigned long)options.lockWaitMs, (unsigned long)waitUs);
     return ReturnType();
   }
   (void)waitUs;  // referenced again below via updateMetrics
 
   // Push clock to this bus's stack
-  if (!clockStackPush(bus, device->clockHz)) {
+  if (!clockStackPush(bus, transactionClockHz)) {
     DEBUG_I2CF("[TX] CLOCK_STACK_OVERFLOW 0x%02X (%s) bus=%u",
                device->address, device->name, bus);
     xSemaphoreGive(mutex);
@@ -362,7 +380,7 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
   }
 
   // Set the bus's clock to this device's rate
-  setBusClock(bus, device->clockHz);
+  setBusClock(bus, transactionClockHz);
 
   // Execute operation and track duration. The lambda is nullary; if it needs
   // to operate on a specific TwoWire instance other than Wire1, the lambda
@@ -374,12 +392,12 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     operation();
     uint32_t txDurationUs = micros() - txStartUs;
 
-    // Restore clock from the stack (nested-transaction safe)
+    // Restore the bus default before releasing its non-recursive mutex.
     clockStackPop(bus);
     setBusClock(bus, clockStackTopOrDefault(bus));
     xSemaphoreGive(mutex);
 
-    updateMetrics(bus, waitUs, txDurationUs, device->clockHz);
+    updateMetrics(bus, waitUs, txDurationUs, transactionClockHz);
 
     if (mode != I2CDevice::Mode::NACK_TOLERANT) {
       device->recordSuccess();
@@ -426,7 +444,7 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     setBusClock(bus, clockStackTopOrDefault(bus));
     xSemaphoreGive(mutex);
 
-    updateMetrics(bus, waitUs, txDurationUs, device->clockHz);
+    updateMetrics(bus, waitUs, txDurationUs, transactionClockHz);
 
     if (mode != I2CDevice::Mode::NACK_TOLERANT) {
       if constexpr (std::is_same<ReturnType, bool>::value) {
@@ -455,10 +473,11 @@ inline I2CDeviceManager* I2CDeviceManager_getInstance() {
 }
 
 template<typename Func>
-auto I2CDevice::transaction(Func&& operation, Mode mode) -> decltype(operation()) {
+auto I2CDevice::transaction(Func&& operation, const I2CTransactionOptions& options,
+                            Mode mode) -> decltype(operation()) {
   I2CDeviceManager* mgr = I2CDeviceManager_getInstance();
   if (!mgr) return decltype(operation())();
-  return mgr->executeTransaction(this, std::forward<Func>(operation), mode);
+  return mgr->executeTransaction(this, std::forward<Func>(operation), options, mode);
 }
 
 #endif // SYSTEM_I2C_MANAGER_H

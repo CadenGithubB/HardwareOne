@@ -203,7 +203,7 @@ bool fmRadioInit() {
     }
     INFO_FMRADIO_LIFECYCLEF("FM Radio initWire() success - RDA5807M chip detected on bus %u", fmBus);
     radio.debugEnable(false);
-    
+
     // Set band and initial frequency
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Setting band to FM and frequency to %.1f MHz", gFmRadioCache.frequency / 10.0);
     radio.setBandFrequency(RADIO_BAND_FM, gFmRadioCache.frequency);
@@ -460,63 +460,60 @@ void updateFMRadio() {
     return;  // Don't log this - too frequent
   }
   
-  // Use task timeout wrapper to catch FM radio performance issues
-  // Note: Still NACK-tolerant since RDA5807M legitimately NACKs when no RDS data available
-  auto result = i2cTaskWithTimeout((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 1000, [&]() -> bool {
-    // Wrap the NACK-tolerant transaction within timeout monitoring
-    i2cTransactionNACKTolerant((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 100, [&]() {
-      // Check for RDS data (this triggers callbacks)
-      radio.checkRDS();
-      
-      // Update signal quality and stereo status
-      RADIO_INFO ri;
-      radio.getRadioInfo(&ri);
-      gFmRadioCache.rssi = ri.rssi;
-      gFmRadioCache.stereo = ri.stereo;
-      gFmRadioCache.snr = ri.snr;
+  // One NACK-tolerant transaction owns the bus for the complete poll. Wrapping
+  // this in a standard transaction would try to take the same non-recursive
+  // mutex twice, so the actual radio reads would never run.
+  i2cTransactionNACKTolerant((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO,
+                             FM_RADIO_I2C_CLOCK, 100, [&]() {
+    // Check for RDS data (this triggers callbacks)
+    radio.checkRDS();
 
-      // Finalize a pending async seek (started by cmd_fmradio_seek). The
-      // 300 ms arm delay keeps the first poll from trusting a stale
-      // ri.tuned=true before the chip has actually dropped it; 6 s is the
-      // failsafe for a band edge with no station (seekUp(false) = no wrap).
-      if (gFmRadioCache.seekInProgress) {
-        unsigned long sinceStart = millis() - gFmRadioCache.seekStartMs;
-        bool armed    = sinceStart >= 300;
-        bool timedOut = sinceStart > 6000;
-        if ((armed && ri.tuned) || timedOut) {
-          gFmRadioCache.frequency = radio.getFrequency();
-          // RDS was cleared at seek start; clear again in case a late
-          // callback for the old station landed mid-seek.
-          memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
-          memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
-          gFmRadioCache.seekInProgress = false;
-          char mhz[12];
-          snprintf(mhz, sizeof(mhz), "%.1f", gFmRadioCache.frequency / 100.0);
-          systemEventPost(SYSEVT_FM_TUNED, mhz, timedOut ? "seek timeout" : "seek");
-          DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Seek finalized at %s MHz%s",
-                                   mhz, timedOut ? " (timeout)" : "");
-        }
+    // Update signal quality and stereo status
+    RADIO_INFO ri;
+    radio.getRadioInfo(&ri);
+    gFmRadioCache.rssi = ri.rssi;
+    gFmRadioCache.stereo = ri.stereo;
+    gFmRadioCache.snr = ri.snr;
+
+    // Finalize a pending async seek (started by cmd_fmradio_seek). The
+    // 300 ms arm delay keeps the first poll from trusting a stale
+    // ri.tuned=true before the chip has actually dropped it; 6 s is the
+    // failsafe for a band edge with no station (seekUp(false) = no wrap).
+    if (gFmRadioCache.seekInProgress) {
+      unsigned long sinceStart = millis() - gFmRadioCache.seekStartMs;
+      bool armed    = sinceStart >= 300;
+      bool timedOut = sinceStart > 6000;
+      if ((armed && ri.tuned) || timedOut) {
+        gFmRadioCache.frequency = radio.getFrequency();
+        // RDS was cleared at seek start; clear again in case a late
+        // callback for the old station landed mid-seek.
+        memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
+        memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
+        gFmRadioCache.seekInProgress = false;
+        char mhz[12];
+        snprintf(mhz, sizeof(mhz), "%.1f", gFmRadioCache.frequency / 100.0);
+        systemEventPost(SYSEVT_FM_TUNED, mhz, timedOut ? "seek timeout" : "seek");
+        DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Seek finalized at %s MHz%s",
+                                 mhz, timedOut ? " (timeout)" : "");
       }
+    }
 
+    // Only log when signal changes significantly (reduces flood)
+    unsigned long now = millis();
+    if (abs(gFmRadioCache.rssi - lastRSSI) >= 2 || gFmRadioCache.stereo != lastStereo || (now - lastUpdateLog > 30000)) {
+      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Signal: RSSI=%d, SNR=%d, Stereo=%s",
+                     gFmRadioCache.rssi, gFmRadioCache.snr, gFmRadioCache.stereo ? "true" : "false");
+      lastRSSI = gFmRadioCache.rssi;
+      lastStereo = gFmRadioCache.stereo;
+      lastUpdateLog = now;
+    }
 
-      // Only log when signal changes significantly (reduces flood)
-      unsigned long now = millis();
-      if (abs(gFmRadioCache.rssi - lastRSSI) >= 2 || gFmRadioCache.stereo != lastStereo || (now - lastUpdateLog > 30000)) {
-        DEBUG_FMRADIO_VALUESF("[FM_RADIO] Signal: RSSI=%d, SNR=%d, Stereo=%s",
-                       gFmRadioCache.rssi, gFmRadioCache.snr, gFmRadioCache.stereo ? "true" : "false");
-        lastRSSI = gFmRadioCache.rssi;
-        lastStereo = gFmRadioCache.stereo;
-        lastUpdateLog = now;
-      }
-      
-      // Update headphone detection based on RSSI
-      gFmRadioCache.headphonesConnected = (gFmRadioCache.rssi >= 15);
+    // Update headphone detection based on RSSI
+    gFmRadioCache.headphonesConnected = (gFmRadioCache.rssi >= 15);
 
-      // Freshness stamp for the shared sensor envelope (ts + valid).
-      gFmRadioCache.lastUpdate = now;
-      gFmRadioCache.dataValid = true;
-    });
-    return true;  // Assume success for void operation
+    // Freshness stamp for the shared sensor envelope (ts + valid).
+    gFmRadioCache.lastUpdate = now;
+    gFmRadioCache.dataValid = true;
   });
 }
 

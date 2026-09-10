@@ -11,6 +11,7 @@
 #include <sodium.h>
 #include <mbedtls/base64.h>
 #include <nvs.h>
+#include <limits.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -263,26 +264,55 @@ bool captureCryptoRevealLine(String& line) {
   return true;
 }
 
-size_t captureCryptoRevealText(String& text) {
-  // Only interpret blobs that carry the mark — stray "ENC1:" text inside an
-  // ordinary file must never be treated as ciphertext.
-  if (strncmp(text.c_str(), CAPCRYPT_MAGIC_PREFIX, kMagicPfxLen) != 0) return 0;
+size_t captureCryptoRevealCapacity(const char* text, size_t length) {
+  if (!text || length == SIZE_MAX) return 0;
+  size_t capacity = length + 1;
+  if (length < kMagicPfxLen ||
+      memcmp(text, CAPCRYPT_MAGIC_PREFIX, kMagicPfxLen) != 0) return capacity;
+  size_t r = 0;
+  while (r < length) {
+    const size_t start = r;
+    while (r < length && text[r] != '\n') ++r;
+    const size_t lineLen = r - start;
+    if (r < length) ++r;
+    if (lineLen > kPrefixLen && lineLen < sizeof(kUndecryptable) - 1 &&
+        memcmp(text + start, CAPCRYPT_ROW_PREFIX, kPrefixLen) == 0) {
+      const size_t growth = sizeof(kUndecryptable) - 1 - lineLen;
+      if (growth > SIZE_MAX - capacity) return 0;
+      capacity += growth;
+    }
+  }
+  return capacity;
+}
+
+bool captureCryptoRevealText(char* buf, size_t& length, size_t capacity,
+                             size_t* outSealedRows) {
+  if (outSealedRows) *outSealedRows = 0;
+  if (!buf || !capacity || length >= capacity) return false;
+  const size_t needed = captureCryptoRevealCapacity(buf, length);
+  if (!needed || needed > capacity) return false;
+  // Only marked presentation text is interpreted. Keep ordinary bytes intact.
+  if (length < kMagicPfxLen ||
+      memcmp(buf, CAPCRYPT_MAGIC_PREFIX, kMagicPfxLen) != 0) {
+    buf[length] = '\0';
+    return true;
+  }
   const bool haveKey = captureCryptoEnsureKey();
   ScratchGuard lock;
 
-  // In-place walk: plaintext (and the failure marker) is always shorter than
-  // its sealed line, so the write cursor never overtakes the read cursor.
-  // Arduino String exposes no mutable accessor; its buffer is contiguous and
-  // NUL-terminated, so writing through c_str() and truncating with remove()
-  // is safe here.
-  char* buf = const_cast<char*>(text.c_str());
-  const size_t len = text.length();
-  size_t r = 0, w = 0, sealedRows = 0;
-  while (r < len) {
+  // A torn row such as ENC1:x is shorter than the failure marker. Reserve all
+  // possible expansion BEFORE mutating, and move unread input out of its way.
+  // Every output row is <= its input row plus the growth budget for that row,
+  // so the write cursor cannot overtake the unread tail (even with no key).
+  const size_t growth = needed - length - 1;
+  if (growth) memmove(buf + growth, buf, length);
+  const size_t end = length + growth;
+  size_t r = growth, w = 0, sealedRows = 0;
+  while (r < end) {
     size_t lineStart = r;
-    while (r < len && buf[r] != '\n') r++;
+    while (r < end && buf[r] != '\n') r++;
     size_t lineLen = r - lineStart;
-    const bool hasNl = (r < len);
+    const bool hasNl = (r < end);
     if (hasNl) r++;
 
     if (lineLen > kPrefixLen &&
@@ -302,6 +332,40 @@ size_t captureCryptoRevealText(String& text) {
     }
     if (hasNl) buf[w++] = '\n';
   }
-  text.remove(w);
+  buf[w] = '\0';
+  length = w;
+  if (outSealedRows) *outSealedRows = sealedRows;
+  return true;
+}
+
+size_t captureCryptoRevealText(String& text) {
+  const size_t originalLength = text.length();
+  if (originalLength < kMagicPfxLen ||
+      memcmp(text.c_str(), CAPCRYPT_MAGIC_PREFIX, kMagicPfxLen) != 0) return 0;
+  const size_t needed = captureCryptoRevealCapacity(text.c_str(), originalLength);
+  if (!needed || needed - 1 > UINT_MAX || !text.reserve(needed - 1)) {
+    WARN_SYSTEMF("[CapCrypt] reveal buffer allocation failed; text left sealed");
+    return 0;
+  }
+  // String::remove() can shrink, but cannot extend its recorded length. Grow
+  // the bookkeeping first, after the checked reserve. Padding is overwritten
+  // by the bounded helper; this path only runs for malformed short rows.
+  static const char padding[] = "                                ";
+  while (text.length() < needed - 1) {
+    size_t n = needed - 1 - text.length();
+    if (n > sizeof(padding) - 1) n = sizeof(padding) - 1;
+    if (!text.concat(padding, static_cast<unsigned int>(n))) {
+      text.remove(originalLength);
+      WARN_SYSTEMF("[CapCrypt] reveal padding failed; text left sealed");
+      return 0;
+    }
+  }
+  size_t length = originalLength, sealedRows = 0;
+  if (!captureCryptoRevealText(const_cast<char*>(text.c_str()), length,
+                               needed, &sealedRows)) {
+    text.remove(originalLength);
+    return 0;
+  }
+  text.remove(length);
   return sealedRows;
 }
