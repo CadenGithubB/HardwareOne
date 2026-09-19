@@ -107,6 +107,15 @@ python3 tools/ota/hardware_qualification.py preflight \
   --json
 ```
 
+For a checked-in deployment, add both axes so same-board legacy artifacts
+cannot be mistaken for the deployment layout:
+
+```sh
+--board feather_esp32_v2 --deployment headless/feather_esp32_v2
+
+--board feathers3 --deployment headless/feathers3
+```
+
 The command is read-only. Omitting the paired build directories, serial port,
 or ADB serial records that check as `SKIP`. A skipped paired audit means
 `readyForDestructiveRun` remains false even if the manifest/image pair verifies.
@@ -182,6 +191,9 @@ python3 tools/ota/make_test_fixtures.py \
   --output /path/outside-the-repository/hw1-ota-fixtures \
   --acknowledge-lab-key
 ```
+
+Fixture generation accepts the same optional `--deployment` selector and binds
+the control/negative manifests to that deployment's layout and version suffix.
 
 The generated index includes 16 fixture pairings covering missing parts,
 truncation, same-size digest mismatch, detached-signature failure, a detached

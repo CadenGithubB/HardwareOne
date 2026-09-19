@@ -15,14 +15,9 @@
 #
 # The chip target comes from the board file's `# HW_TARGET:` marker, and
 # HW_BOARD is always passed — which closes the known footgun where a bare
-# `idf.py build` reconfigure defaults an S3 tree to flash=16mb and regenerates
-# partitions.csv with a layout the sdkconfig can't fit.
-#
-# ONE SHARED FILE REMAINS: the root partitions.csv is (re)generated at CMake
-# configure time from partitions_<sr>_<flash>.csv and is READ during the build.
-# Do NOT run two different boards' builds concurrently — serialize them. The
-# last configure wins; the file is gitignored/generated, so the next configure
-# of any board simply rewrites it.
+# `idf.py build` could combine one board's sdkconfig with another board's
+# partition selection. Each build now depends directly on its authoritative
+# checked-in partition table, so different boards may build concurrently.
 
 set -euo pipefail
 

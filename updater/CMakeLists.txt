@@ -1,12 +1,26 @@
 cmake_minimum_required(VERSION 3.16)
 
 # Standalone, pure ESP-IDF factory recovery application. It intentionally does
-# not link Arduino or the HardwareOne application component.
+# not link Arduino or the HardwareOne application component. The updater's
+# managed dependencies are declared by main/idf_component.yml; borrowing the
+# root project's managed_components directory makes a clean updater-first build
+# fail because that directory has not been populated yet.
 set(EXTRA_COMPONENT_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}/../components/hw1_ota_protocol"
-    "${CMAKE_CURRENT_LIST_DIR}/../managed_components/joltwallet__littlefs")
+    "${CMAKE_CURRENT_LIST_DIR}/../components/hw1_ota_protocol")
+
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/HW1Deployment.cmake")
+set(_hw_deployment "$ENV{HW_DEPLOYMENT}")
+hw1_load_deployment("${CMAKE_CURRENT_LIST_DIR}/.." "${_hw_deployment}")
 
 set(_hw_board "$ENV{HW_BOARD}")
+if(HW1_DEPLOYMENT_ACTIVE)
+    if(_hw_board AND NOT _hw_board STREQUAL HW1_DEPLOYMENT_BOARD)
+        message(FATAL_ERROR
+            "HW_DEPLOYMENT=${_hw_deployment} is for board "
+            "${HW1_DEPLOYMENT_BOARD}, but HW_BOARD=${_hw_board}")
+    endif()
+    set(_hw_board "${HW1_DEPLOYMENT_BOARD}")
+endif()
 if(NOT _hw_board)
     set(_hw_board "feathers3")
 endif()
@@ -51,6 +65,27 @@ elseif(_hw_board STREQUAL "feather_esp32_v2")
 elseif(_hw_board STREQUAL "qtpy_esp32")
     set(_layout_id "hw1-qtpy-ota-v1")
     set(_version_suffix "qtpyo1")
+elseif(_hw_board STREQUAL "xiao_s3")
+    # Deployment-only board. Unlike every row above it, the XIAO has NO
+    # board-only recovery layout: its identity and its partition geometry come
+    # from a deployment contract, and HW1_DEPLOYMENT_ACTIVE overwrites both
+    # values below.
+    #
+    # Refuse the bare build rather than assigning defaults. Without this the
+    # partition selection further down would fall through to the shared
+    # partitions_ota_no_sr_8mb.csv, whose ota_0 and littlefs sit at different
+    # offsets from any XIAO deployment table -- producing an updater that
+    # builds green, claims a layout id it does not implement, and writes
+    # firmware to the wrong address on a provisioned device.
+    if(NOT HW1_DEPLOYMENT_ACTIVE)
+        message(FATAL_ERROR
+            "HW_BOARD=xiao_s3 has no board-only recovery layout. Build its "
+            "updater through a deployment, e.g. "
+            "HW_DEPLOYMENT=pocket_assistant/xiao_s3, or use "
+            "tools/build_deployment.sh pocket_assistant xiao_s3.")
+    endif()
+    set(_layout_id "${HW1_DEPLOYMENT_LAYOUT_ID}")
+    set(_version_suffix "${HW1_DEPLOYMENT_VERSION_SUFFIX}")
 else()
     message(FATAL_ERROR
         "updater/boards/${_hw_board}.defaults exists but the board has no "
@@ -58,7 +93,42 @@ else()
         "recovery-OTA registry in ../CMakeLists.txt; the two are compared by "
         "tools/ota/check_ota_builds.py.")
 endif()
+if(HW1_DEPLOYMENT_ACTIVE)
+    if(NOT _updater_target STREQUAL HW1_DEPLOYMENT_TARGET)
+        message(FATAL_ERROR
+            "Deployment ${_hw_deployment} target ${HW1_DEPLOYMENT_TARGET} "
+            "does not match updater board target ${_updater_target}")
+    endif()
+    set(_layout_id "${HW1_DEPLOYMENT_LAYOUT_ID}")
+    set(_version_suffix "${HW1_DEPLOYMENT_VERSION_SUFFIX}")
+endif()
 set(_project_version "1.0.0+${_version_suffix}")
+
+# Never let a configured updater build directory change recovery identity.
+# Board-only and deployment layouts can target the same physical board while
+# assigning incompatible partition geometry and signed layout ids.
+if(HW1_DEPLOYMENT_ACTIVE)
+    set(_updater_layout_mode
+        "deployment:${_hw_deployment}:${_layout_id}")
+else()
+    set(_updater_layout_mode "legacy:${_hw_board}:${_layout_id}")
+endif()
+set(_updater_layout_mode_file "${CMAKE_BINARY_DIR}/hw1-layout-mode.txt")
+if(EXISTS "${_updater_layout_mode_file}")
+    file(READ "${_updater_layout_mode_file}" _updater_cached_layout_mode)
+    string(STRIP "${_updater_cached_layout_mode}"
+        _updater_cached_layout_mode)
+    if(NOT _updater_cached_layout_mode STREQUAL _updater_layout_mode)
+        message(FATAL_ERROR
+            "This updater build directory was configured for "
+            "'${_updater_cached_layout_mode}' and cannot be reused for "
+            "'${_updater_layout_mode}'. Use a fresh -B directory; recovery "
+            "identities and partition layouts are intentionally isolated.")
+    endif()
+else()
+    file(WRITE "${_updater_layout_mode_file}"
+        "${_updater_layout_mode}\n")
+endif()
 
 # --- Partition table: shared with the main application, never copied ---
 #
@@ -96,9 +166,22 @@ if(NOT _updater_fs_line)
 endif()
 string(REGEX MATCH "FLASHSIZE_([0-9]+MB)" _ "${_updater_fs_line}")
 string(TOLOWER "${CMAKE_MATCH_1}" _updater_flash_size)
-set(_updater_partitions
-    "../partitions_ota_${_updater_sr_flag}_${_updater_flash_size}.csv")
-if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/${_updater_partitions}")
+if(HW1_DEPLOYMENT_ACTIVE)
+    if(NOT _updater_flash_size STREQUAL HW1_DEPLOYMENT_FLASH_SIZE)
+        message(FATAL_ERROR
+            "Deployment ${_hw_deployment} flash ${HW1_DEPLOYMENT_FLASH_SIZE} "
+            "does not match updater board flash ${_updater_flash_size}")
+    endif()
+    set(_updater_partitions "${HW1_DEPLOYMENT_PARTITION_FILE}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${HW1_DEPLOYMENT_CONTRACT_FILE}"
+        "${HW1_DEPLOYMENT_PARTITION_FILE}")
+else()
+    set(_updater_partitions
+        "${CMAKE_CURRENT_LIST_DIR}/../partitions/partitions_ota_${_updater_sr_flag}_${_updater_flash_size}.csv")
+endif()
+get_filename_component(_updater_partitions "${_updater_partitions}" ABSOLUTE)
+if(NOT EXISTS "${_updater_partitions}")
     message(FATAL_ERROR
         "Expected shared partition file ${_updater_partitions} does not exist "
         "(resolved from board ${_hw_board}: ${_updater_flash_size}, "
@@ -156,13 +239,42 @@ if(NOT _ota_public_key_result EQUAL 0)
         "Could not derive the OTA public key: ${_ota_public_key_error}")
 endif()
 
-set(SDKCONFIG "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.${_hw_board}")
+# Updater settings are build products, not source policy.  A build-local
+# sdkconfig avoids legacy/deployment collisions, stale partition paths, and
+# rewriting tracked files with workstation-specific signing-key paths.
+set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig" CACHE FILEPATH
+    "HardwareOne updater saved sdkconfig" FORCE)
 # Kconfig defaults never override an existing sdkconfig value. Remove only the
-# workstation-specific key path so this invocation's HW1_OTA_SIGNING_KEY is
-# authoritative for both app signing and the embedded manifest public key.
+# stale partition/key values so this invocation's selected contract and
+# HW1_OTA_SIGNING_KEY are authoritative.
 if(EXISTS "${SDKCONFIG}")
     file(READ "${SDKCONFIG}" _updater_sdkconfig_contents)
     set(_updater_sdkconfig_original "${_updater_sdkconfig_contents}")
+    file(STRINGS "${SDKCONFIG}" _updater_partition_configured_lines
+        REGEX "^CONFIG_PARTITION_TABLE_(CUSTOM_FILENAME|FILENAME)=")
+    set(_updater_partition_expected_custom
+        "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"${_updater_partitions}\"")
+    set(_updater_partition_expected_filename
+        "CONFIG_PARTITION_TABLE_FILENAME=\"${_updater_partitions}\"")
+    list(FIND _updater_partition_configured_lines
+        "${_updater_partition_expected_custom}" _updater_partition_custom_index)
+    list(FIND _updater_partition_configured_lines
+        "${_updater_partition_expected_filename}" _updater_partition_filename_index)
+    if(_updater_partition_custom_index EQUAL -1 OR
+       _updater_partition_filename_index EQUAL -1)
+        foreach(_updater_partition_key IN ITEMS
+                CONFIG_PARTITION_TABLE_CUSTOM_FILENAME
+                CONFIG_PARTITION_TABLE_FILENAME)
+            string(REGEX REPLACE
+                "(^|\n)${_updater_partition_key}=[^\n]*"
+                "\\1" _updater_sdkconfig_contents
+                "${_updater_sdkconfig_contents}")
+            string(REGEX REPLACE
+                "(^|\n)# ${_updater_partition_key} is not set"
+                "\\1" _updater_sdkconfig_contents
+                "${_updater_sdkconfig_contents}")
+        endforeach()
+    endif()
     string(REGEX REPLACE
         "(^|\n)CONFIG_SECURE_BOOT_SIGNING_KEY=[^\n]*"
         "\\1" _updater_sdkconfig_contents "${_updater_sdkconfig_contents}")
@@ -172,7 +284,7 @@ if(EXISTS "${SDKCONFIG}")
     if(NOT _updater_sdkconfig_contents STREQUAL _updater_sdkconfig_original)
         file(WRITE "${SDKCONFIG}" "${_updater_sdkconfig_contents}")
         message(STATUS
-            "Cleared stale updater signing-key path; current HW1_OTA_SIGNING_KEY will apply")
+            "Cleared stale updater partition/key settings; current contract and key will apply")
     endif()
 endif()
 set(_ota_key_defaults "${CMAKE_BINARY_DIR}/hw1_ota_signing_key.defaults")
@@ -180,7 +292,7 @@ file(WRITE "${_ota_key_defaults}"
     "CONFIG_SECURE_BOOT_SIGNING_KEY=\"${_ota_signing_key}\"\n")
 set(SDKCONFIG_DEFAULTS
     "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults"
-    "${CMAKE_CURRENT_LIST_DIR}/../sdkconfig.ota.defaults"
+    "${CMAKE_CURRENT_LIST_DIR}/../config/sdkconfig.ota.defaults"
     "${_board_defaults}"
     "${_updater_partition_defaults}"
     "${_ota_key_defaults}")
@@ -203,7 +315,7 @@ set(SDKCONFIG_DEFAULTS
 # Deriving them from the csv this firmware is built against keeps the check
 # meaningful -- it still validates real flash against a declared layout -- while
 # making it impossible for the declaration and the layout to drift apart.
-file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/${_updater_partitions}"
+file(STRINGS "${_updater_partitions}"
      _hw1_csv_rows REGEX "^[A-Za-z_][A-Za-z0-9_]*[ \t]*,")
 macro(hw1_partition_geometry _pname _off_var _size_var)
     set(${_off_var} "")

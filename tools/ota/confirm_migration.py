@@ -10,18 +10,48 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import deployment_contract  # noqa: E402  (path set above)
 import make_manifest  # noqa: E402  (path set above)
+
+
+def expected_confirmation(board: str, deployment: str | None = None) -> str:
+    """Return the exact consent phrase for one migration identity.
+
+    Legacy layouts remain board-scoped for compatibility.  A deployment may
+    define a different partition map for the same physical board, so its phrase
+    also binds the checked-in deployment selector and OTA layout identifier.
+    """
+    if deployment is None:
+        return f"MIGRATE {board}"
+    selected = deployment_contract.load(deployment)
+    if selected.board_id != board:
+        raise ValueError(
+            f"deployment {deployment!r} is for {selected.board_id}, not {board}"
+        )
+    return f"MIGRATE {selected.selector} {selected.layout_id}"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--board", choices=sorted(make_manifest.BOARD_LAYOUTS), required=True
+        "--board", choices=make_manifest.selectable_boards(), required=True
+    )
+    parser.add_argument(
+        "--deployment",
+        choices=deployment_contract.available(),
+        help="checked-in deployment selector whose partition layout will be installed",
     )
     args = parser.parse_args()
-    expected = f"MIGRATE {args.board}"
+    try:
+        expected = expected_confirmation(args.board, args.deployment)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     print("\nONE-TIME OTA LAYOUT MIGRATION")
+    if args.deployment:
+        selected = deployment_contract.load(args.deployment)
+        print(f"  - Deployment: {selected.selector}")
+        print(f"  - OTA layout identity: {selected.layout_id}")
     print("  - LittleFS is REPLACED with an empty filesystem. Its contents are destroyed.")
     print("  - Back up and verify device files before continuing.")
     print("  - To update only the recovery updater instead, use 'factory-flash'.")

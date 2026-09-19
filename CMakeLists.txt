@@ -24,11 +24,16 @@ cmake_minimum_required(VERSION 3.16)
 # aborts the switch (the reconfigure deletes/replaces sdkconfig, so reading it
 # yields the old chip or the S3 fallback). Env var and sdkconfig remain fallbacks.
 set(_inferred_target "")
+set(_inferred_target_explicit FALSE)
 if(DEFINED IDF_TARGET AND NOT "${IDF_TARGET}" STREQUAL "")
     set(_inferred_target "${IDF_TARGET}")
+    set(_inferred_target_explicit TRUE)
 endif()
 if(NOT _inferred_target)
     set(_inferred_target "$ENV{IDF_TARGET}")
+    if(_inferred_target)
+        set(_inferred_target_explicit TRUE)
+    endif()
 endif()
 # The saved config lives in config/, not at the project root. IDF would otherwise
 # default SDKCONFIG to ${project_dir}/sdkconfig, so claim it here BEFORE
@@ -54,6 +59,36 @@ if(NOT _inferred_target)
                    _inferred_target "${_target_line}")
         endif()
     endif()
+endif()
+
+# --- Optional deployment profile selection ---
+#
+# Boards describe hardware. Deployments describe a reproducible feature/layout
+# policy for that hardware. Keep those axes separate: the Headless Node remains
+# a feather_esp32_v2 on the wire and in board tooling, while gaining its own
+# feature header, OTA identity, and partition table.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1Deployment.cmake")
+set(_hw_deployment "$ENV{HW_DEPLOYMENT}")
+hw1_load_deployment("${CMAKE_CURRENT_SOURCE_DIR}" "${_hw_deployment}")
+if(HW1_DEPLOYMENT_ACTIVE)
+    if(_inferred_target_explicit AND
+       NOT _inferred_target STREQUAL HW1_DEPLOYMENT_TARGET)
+        message(FATAL_ERROR
+            "HW_DEPLOYMENT=${_hw_deployment} requires target "
+            "${HW1_DEPLOYMENT_TARGET}, but IDF_TARGET=${_inferred_target}")
+    endif()
+    set(_inferred_target "${HW1_DEPLOYMENT_TARGET}")
+    set(IDF_TARGET "${HW1_DEPLOYMENT_TARGET}" CACHE STRING
+        "ESP-IDF target selected by HardwareOne deployment" FORCE)
+    set(HW1_DEPLOYMENT_FEATURE_FILE "${HW1_DEPLOYMENT_FEATURE_FILE}"
+        CACHE INTERNAL "HardwareOne deployment feature header" FORCE)
+    set(HW1_DEPLOYMENT_SDKCONFIG_FILE "${HW1_DEPLOYMENT_SDKCONFIG_FILE}"
+        CACHE INTERNAL "HardwareOne deployment sdkconfig overlay" FORCE)
+else()
+    set(HW1_DEPLOYMENT_FEATURE_FILE "" CACHE INTERNAL
+        "HardwareOne deployment feature header" FORCE)
+    set(HW1_DEPLOYMENT_SDKCONFIG_FILE "" CACHE INTERNAL
+        "HardwareOne deployment sdkconfig overlay" FORCE)
 endif()
 if(NOT _inferred_target)
     set(_inferred_target "esp32s3")
@@ -84,6 +119,14 @@ endif()
 set(_hw_board "$ENV{HW_BOARD}")
 set(_board_file "")
 set(_flash_size "8mb")   # used by the partition picker; overridden from the board file below
+if(HW1_DEPLOYMENT_ACTIVE)
+    if(_hw_board AND NOT _hw_board STREQUAL HW1_DEPLOYMENT_BOARD)
+        message(FATAL_ERROR
+            "HW_DEPLOYMENT=${_hw_deployment} is for board "
+            "${HW1_DEPLOYMENT_BOARD}, but HW_BOARD=${_hw_board}")
+    endif()
+    set(_hw_board "${HW1_DEPLOYMENT_BOARD}")
+endif()
 if(NOT _hw_board)
     if(_inferred_target STREQUAL "esp32s3")
         set(_hw_board "feathers3")
@@ -132,6 +175,13 @@ if(_hw_board)
         string(REGEX MATCH "FLASHSIZE_([0-9]+MB)" _ "${_fs_line}")
         string(TOLOWER "${CMAKE_MATCH_1}" _flash_size)
     endif()
+    if(HW1_DEPLOYMENT_ACTIVE AND
+       NOT _flash_size STREQUAL HW1_DEPLOYMENT_FLASH_SIZE)
+        message(FATAL_ERROR
+            "Deployment ${_hw_deployment} declares flash "
+            "${HW1_DEPLOYMENT_FLASH_SIZE}, but boards/${_hw_board}.defaults "
+            "declares ${_flash_size}")
+    endif()
     message(STATUS "HW_BOARD=${_hw_board} (target=${_inferred_target}, flash=${_flash_size}) → layering ${_board_file}")
 else()
     message(STATUS "Target=${_inferred_target}: no boards/ mapping → layering skipped; "
@@ -143,7 +193,7 @@ endif()
 # Two axes: SR vs no_sr (from #define ENABLE_ESP_SR in System_BuildConfig.h)
 # and flash size (from the active board file, defaulted to 8mb for ESP32
 # boards and as a fallback). The four combinations are:
-#   partitions/ holds the source tables (the root partitions.csv is generated):
+#   partitions/ holds the authoritative source tables selected per build:
 #   partitions_no_sr_8mb.csv    factory 4948K + littlefs 3180K
 #   partitions_no_sr_16mb.csv   factory 4948K + littlefs 11628K  (FeatherS3[D])
 #   partitions_sr_8mb.csv       factory 4992K + model 3008K + littlefs 128K
@@ -152,7 +202,9 @@ endif()
 # When ENABLE_ESP_SR is enabled, we need a "model" SPIFFS partition for
 # WakeNet/MultiNet; when disabled, that space is reclaimed for LittleFS.
 set(_ota_layout FALSE)
-if(DEFINED ENV{HW_OTA_LAYOUT})
+if(HW1_DEPLOYMENT_ACTIVE)
+    set(_ota_layout TRUE)
+elseif(DEFINED ENV{HW_OTA_LAYOUT})
     string(TOLOWER "$ENV{HW_OTA_LAYOUT}" _ota_layout_env)
     if(_ota_layout_env STREQUAL "1" OR
        _ota_layout_env STREQUAL "on" OR
@@ -178,6 +230,14 @@ endif()
 #                                         none; feather_esp32_v2 needs one.
 # A partial addition produces artifacts that build and then fail the paired
 # audit, or worse, pass it while disagreeing about where partitions live.
+#
+# A board does NOT have to appear here to be OTA-capable. A deployment contract
+# supplies the layout id, version suffix, partition table and release limits on
+# its own and overrides this registry (see below), so a board that only ever
+# ships as a deployment -- xiao_s3, which ships as pocket_assistant/xiao_s3 --
+# needs only the updater board file, the updater registry row and the protocol
+# constants. Adding a row here would assert a board-only layout that does not
+# exist.
 #
 # _ota_updater_max_bytes is a release gate, not a physical limit: it is the
 # point past which the updater is too close to filling its factory slot to be
@@ -221,12 +281,31 @@ elseif(_hw_board STREQUAL "qtpy_esp32")
     set(_ota_updater_max_bytes 1171456)
 endif()
 
+# A deployment contract is more specific than the physical-board OTA registry.
+# It deliberately overrides the board's legacy layout without changing the
+# boardId used by the manifest protocol.
+if(HW1_DEPLOYMENT_ACTIVE)
+    set(_ota_expected_target "${HW1_DEPLOYMENT_TARGET}")
+    set(_ota_expected_flash "${HW1_DEPLOYMENT_FLASH_SIZE}")
+    set(_ota_layout_id "${HW1_DEPLOYMENT_LAYOUT_ID}")
+    set(_ota_version_suffix "${HW1_DEPLOYMENT_VERSION_SUFFIX}")
+    set(_ota_updater_max_bytes "${HW1_DEPLOYMENT_UPDATER_RELEASE_MAX}")
+    if(HW1_DEPLOYMENT_FLASH_ENCRYPTION STREQUAL "1")
+        set(_ota_expect_flash_encryption TRUE)
+    else()
+        set(_ota_expect_flash_encryption FALSE)
+    endif()
+endif()
+
 if(_ota_layout)
     if(_ota_layout_id STREQUAL "")
         message(FATAL_ERROR
             "HW_OTA_LAYOUT=1 does not support HW_BOARD=${_hw_board}. Supported "
             "recovery-OTA boards: feathers3, feathers3_fe (16 MB, esp32s3), "
-            "feather_esp32_v2, qtpy_esp32 (8 MB, esp32).")
+            "feather_esp32_v2, qtpy_esp32 (8 MB, esp32). A board with no "
+            "board-only layout can still be built through a deployment "
+            "contract, which supplies the layout id and partition table "
+            "itself: xiao_s3 ships as HW_DEPLOYMENT=pocket_assistant/xiao_s3.")
     endif()
     if(NOT _inferred_target STREQUAL _ota_expected_target OR
        NOT _flash_size STREQUAL _ota_expected_flash)
@@ -245,6 +324,9 @@ endif()
 set(_hw1_layout_mode "ordinary")
 if(_ota_layout)
     set(_hw1_layout_mode "recovery-ota")
+endif()
+if(HW1_DEPLOYMENT_ACTIVE)
+    set(_hw1_layout_mode "deployment:${_hw_deployment}:${_ota_layout_id}")
 endif()
 set(_hw1_layout_mode_file "${CMAKE_BINARY_DIR}/hw1-layout-mode.txt")
 if(EXISTS "${_hw1_layout_mode_file}")
@@ -280,6 +362,14 @@ endif()
 set(_buildconfig "${CMAKE_CURRENT_SOURCE_DIR}/components/hardwareone/System_BuildConfig.h")
 if(EXISTS "${_buildconfig}")
     file(READ "${_buildconfig}" _bc_contents)
+    if(HW1_DEPLOYMENT_ACTIVE)
+        file(READ "${HW1_DEPLOYMENT_FEATURE_FILE}" _deployment_bc_contents)
+        set(_bc_contents "${_deployment_bc_contents}\n${_bc_contents}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${HW1_DEPLOYMENT_FEATURE_FILE}"
+            "${HW1_DEPLOYMENT_CONTRACT_FILE}"
+            "${HW1_DEPLOYMENT_PARTITION_FILE}")
+    endif()
     string(REGEX MATCH "#define ENABLE_ESP_SR[ \t]+([0-9]+)" _match "${_bc_contents}")
     set(_espsr_val "${CMAKE_MATCH_1}")
     if(_espsr_val STREQUAL "1")
@@ -287,7 +377,9 @@ if(EXISTS "${_buildconfig}")
     else()
         set(_sr_flag "no_sr")
     endif()
-    if(_ota_layout)
+    if(HW1_DEPLOYMENT_ACTIVE)
+        set(_partitions_src "${HW1_DEPLOYMENT_PARTITION_FILE}")
+    elseif(_ota_layout)
         set(_partitions_src
             "${CMAKE_CURRENT_SOURCE_DIR}/partitions/partitions_ota_${_sr_flag}_${_flash_size}.csv")
     else()
@@ -300,19 +392,23 @@ if(EXISTS "${_buildconfig}")
             "Add it (and any sibling _8mb / _16mb file you may have missed).")
     endif()
     message(STATUS "ENABLE_ESP_SR=${_espsr_val}, flash=${_flash_size} → ${_partitions_src}")
-    # Source tables live in partitions/; the GENERATED table stays at the project
-    # root because CONFIG_PARTITION_TABLE_CUSTOM_FILENAME (sdkconfig.defaults:22)
-    # resolves "partitions.csv" relative to the project dir.
-    set(_partitions_dst "${CMAKE_CURRENT_SOURCE_DIR}/partitions.csv")
-    file(READ "${_partitions_src}" _src_content)
-    set(_dst_content "")
-    if(EXISTS "${_partitions_dst}")
-        file(READ "${_partitions_dst}" _dst_content)
-    endif()
-    if(NOT "${_src_content}" STREQUAL "${_dst_content}")
-        file(WRITE "${_partitions_dst}" "${_src_content}")
-        message(STATUS "Updated partitions.csv from ${_partitions_src}")
-    endif()
+
+    # Point IDF directly at this build's authoritative checked-in table.  The
+    # old design copied every selected layout into one source-root
+    # `partitions.csv`; configuring another board could then change the inputs
+    # of an already-configured build, and parallel builds raced each other.
+    # Keep the saved value relative to the project so sdkconfig remains
+    # portable, while IDF resolves it to an absolute dependency internally.
+    file(RELATIVE_PATH _partitions_config_value
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${_partitions_src}")
+    string(REPLACE "\\" "/" _partitions_config_value
+        "${_partitions_config_value}")
+    set(_partition_defaults
+        "${CMAKE_BINARY_DIR}/hw1_partitions.defaults")
+    file(WRITE "${_partition_defaults}"
+        "CONFIG_PARTITION_TABLE_CUSTOM=y\n"
+        "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"${_partitions_config_value}\"\n"
+        "CONFIG_PARTITION_TABLE_FILENAME=\"${_partitions_config_value}\"\n")
 endif()
 
 # --- 4. SDKCONFIG_DEFAULTS layering + sdkconfig auto-recovery ---
@@ -325,6 +421,41 @@ if(_board_file)
     set(SDKCONFIG_DEFAULTS
         "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig.defaults"
         "${_board_file}")
+    list(APPEND SDKCONFIG_DEFAULTS "${_partition_defaults}")
+
+    # Defaults do not override a value already saved in sdkconfig.  Clear only
+    # stale partition paths so the build-local selection above is authoritative
+    # after switching a board/profile or upgrading an older build directory.
+    # Matching values are left untouched, avoiding needless reconfiguration.
+    if(EXISTS "${_sdkconfig}")
+        file(STRINGS "${_sdkconfig}" _partition_configured_lines
+            REGEX "^CONFIG_PARTITION_TABLE_(CUSTOM_FILENAME|FILENAME)=")
+        set(_partition_expected_custom
+            "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"${_partitions_config_value}\"")
+        set(_partition_expected_filename
+            "CONFIG_PARTITION_TABLE_FILENAME=\"${_partitions_config_value}\"")
+        list(FIND _partition_configured_lines
+            "${_partition_expected_custom}" _partition_custom_index)
+        list(FIND _partition_configured_lines
+            "${_partition_expected_filename}" _partition_filename_index)
+        if(_partition_custom_index EQUAL -1 OR
+           _partition_filename_index EQUAL -1)
+            file(READ "${_sdkconfig}" _partition_sdk_contents)
+            foreach(_partition_key IN ITEMS
+                    CONFIG_PARTITION_TABLE_CUSTOM_FILENAME
+                    CONFIG_PARTITION_TABLE_FILENAME)
+                string(REGEX REPLACE
+                    "(^|\n)${_partition_key}=[^\n]*"
+                    "\\1" _partition_sdk_contents "${_partition_sdk_contents}")
+                string(REGEX REPLACE
+                    "(^|\n)# ${_partition_key} is not set"
+                    "\\1" _partition_sdk_contents "${_partition_sdk_contents}")
+            endforeach()
+            file(WRITE "${_sdkconfig}" "${_partition_sdk_contents}")
+            message(STATUS
+                "Cleared stale partition-table path; selected ${_partitions_config_value}")
+        endif()
+    endif()
     if(_ota_layout)
         list(APPEND SDKCONFIG_DEFAULTS
             "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig.ota.defaults")
@@ -341,6 +472,29 @@ if(_board_file)
             set_property(DIRECTORY APPEND PROPERTY
                 CMAKE_CONFIGURE_DEPENDS "${_board_ota_file}")
         endif()
+    endif()
+
+    # A deployment's optional sdkconfig overlay, layered LAST so it outranks
+    # every board and layout default above it. This is the only place a
+    # deployment can state policy that CONTRADICTS boards/<board>.defaults --
+    # pocket_assistant/xiao_s3 needs it because that board file turns the
+    # Bluedroid stack off, which would silently force ENABLE_BLUETOOTH,
+    # ENABLE_G2_GLASSES and ENABLE_R1_HEALTH to 0 in the derived rules and
+    # produce a green build with the entire product missing.
+    #
+    # Deliberately NOT applied to the recovery updater: it is a separate
+    # project whose configuration is updater/boards/<board>.defaults, and it
+    # has no use for the application's radios.
+    if(HW1_DEPLOYMENT_ACTIVE AND
+       NOT "${HW1_DEPLOYMENT_SDKCONFIG_FILE}" STREQUAL "")
+        list(APPEND SDKCONFIG_DEFAULTS "${HW1_DEPLOYMENT_SDKCONFIG_FILE}")
+        set_property(DIRECTORY APPEND PROPERTY
+            CMAKE_CONFIGURE_DEPENDS "${HW1_DEPLOYMENT_SDKCONFIG_FILE}")
+        message(STATUS
+            "HardwareOne deployment sdkconfig overlay: ${HW1_DEPLOYMENT_SDKCONFIG_FILE}")
+    endif()
+
+    if(_ota_layout)
 
         # Keep workstation-specific key paths out of tracked configuration.
         # A conventional ignored local filename is supported for convenience;
@@ -511,12 +665,35 @@ if(_board_file)
     endif()
 endif()
 
+if(HW1_DEPLOYMENT_ACTIVE)
+    # Set this directory property before project(): ESP-IDF creates component
+    # targets during project discovery, so a later add_compile_definitions()
+    # would miss them. The hardwareone target receives the same definitions
+    # explicitly below as a checked, load-bearing contract.
+    add_compile_definitions(
+        HW1_DEPLOYMENT_CONFIG_HEADER="${HW1_DEPLOYMENT_FEATURE_FILE}"
+        HW1_DEPLOYMENT_ID="${HW1_DEPLOYMENT_ID}"
+    )
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-if(_ota_layout)
-    set(PROJECT_VER "0.99.94+${_ota_version_suffix}")
+# The component-manager lock embeds its target.  Keep classic ESP32 resolution
+# out of the tracked ESP32-S3 lock so switching between Headless Feather and
+# the ordinary S3 boards neither dirties the tree nor re-solves dependencies.
+if(IDF_TARGET STREQUAL "esp32s3")
+    set(_hw1_dependencies_lock
+        "${CMAKE_CURRENT_SOURCE_DIR}/dependencies.lock")
 else()
-    set(PROJECT_VER "0.99.94")
+    set(_hw1_dependencies_lock
+        "${CMAKE_CURRENT_SOURCE_DIR}/dependencies.lock.${IDF_TARGET}")
+endif()
+idf_build_set_property(DEPENDENCIES_LOCK "${_hw1_dependencies_lock}")
+
+if(_ota_layout)
+    set(PROJECT_VER "0.99.94.1+${_ota_version_suffix}")
+else()
+    set(PROJECT_VER "0.99.94.1")
 endif()
 project(hardwareone-idf)
 
@@ -529,6 +706,23 @@ idf_component_get_property(_hw1_app_component hardwareone COMPONENT_LIB)
 if(NOT TARGET ${_hw1_app_component})
     message(FATAL_ERROR
         "Could not resolve the hardwareone component target for OTA definitions")
+endif()
+if(HW1_DEPLOYMENT_ACTIVE)
+    target_compile_definitions(${_hw1_app_component} PRIVATE
+        HW1_DEPLOYMENT_CONFIG_HEADER="${HW1_DEPLOYMENT_FEATURE_FILE}"
+        HW1_DEPLOYMENT_ID="${HW1_DEPLOYMENT_ID}"
+    )
+    get_target_property(_hw1_deployment_definitions
+        ${_hw1_app_component} COMPILE_DEFINITIONS)
+    list(FIND _hw1_deployment_definitions
+        "HW1_DEPLOYMENT_CONFIG_HEADER=\"${HW1_DEPLOYMENT_FEATURE_FILE}\""
+        _hw1_deployment_header_index)
+    if(_hw1_deployment_header_index EQUAL -1)
+        message(FATAL_ERROR
+            "Deployment feature header definition did not reach hardwareone target")
+    endif()
+    message(STATUS
+        "HW_DEPLOYMENT=${_hw_deployment} feature=${HW1_DEPLOYMENT_FEATURE_FILE}")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -763,10 +957,16 @@ if(_ota_layout)
         get_filename_component(_ota_updater_build
             "${_ota_updater_bin}" DIRECTORY)
         idf_build_get_property(_ota_python PYTHON)
+        set(_ota_pair_deployment_args "")
+        if(HW1_DEPLOYMENT_ACTIVE)
+            list(APPEND _ota_pair_deployment_args
+                --deployment "${_hw_deployment}")
+        endif()
         add_custom_target(hw1-ota-pair-audit
             COMMAND "${_ota_python}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/ota/check_ota_builds.py"
                 --board "${_hw_board}"
+                ${_ota_pair_deployment_args}
                 --main-build "${_ota_build_dir}"
                 --updater-build "${_ota_updater_build}"
             DEPENDS gen_project_binary "${_ota_updater_bin}"
@@ -829,10 +1029,16 @@ if(_ota_layout)
     # preserves NVS. To replace only the recovery updater on a provisioned
     # device, use `factory-flash`, which touches nothing else.
     if(NOT "${_ota_updater_bin}" STREQUAL "")
+        set(_ota_migration_deployment_args "")
+        if(HW1_DEPLOYMENT_ACTIVE)
+            list(APPEND _ota_migration_deployment_args
+                --deployment "${_hw_deployment}")
+        endif()
         add_custom_target(hw1-ota-migration-preflight
             COMMAND "${_ota_python}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/ota/confirm_migration.py"
                 --board "${_hw_board}"
+                ${_ota_migration_deployment_args}
             DEPENDS
                 hw1-ota-pair-audit
                 bootloader
@@ -920,8 +1126,8 @@ if(_ota_layout)
         message(WARNING
             "One-time migration target enabled. It now writes a BLANK "
             "littlefs and destroys filesystem contents; back up first. Use "
-            "'idf.py migration-flash' (feathers3) or "
-            "'idf.py encrypted-migration-flash' (feathers3_fe). To replace "
+            "'idf.py migration-flash' (unencrypted layouts) or "
+            "'idf.py encrypted-migration-flash' (encrypted layouts). To replace "
             "only the recovery updater on a provisioned device use "
             "'idf.py factory-flash'.")
     endif()

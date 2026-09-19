@@ -8,6 +8,49 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.94.1] - 2026-09-19
+
+Checked-in deployment profiles: build a reproducible Headless Node or Pocket
+Assistant image for a board, with its own features, partition table and OTA
+identity. Versions may now carry a fourth point-release number.
+
+### Added
+- Deployment profiles under `deployments/`: Headless Node for Feather ESP32 V2
+  and FeatherS3, and Pocket Assistant for the Seeed XIAO ESP32-S3 (G2 glasses,
+  R1 ring, CM5 UART link). Each has a contract, feature header, partition table
+  and migration guide.
+- `tools/build_deployment.sh` builds a deployment as a paired recovery-updater
+  and main release. The OTA tools (manifest, bundle, build audit, migration
+  confirmation, fixtures, qualification) take `--deployment`.
+- OTA identities for the three deployment layouts, and XIAO ESP32-S3 support in
+  the recovery updater.
+- Point-release versions: the OTA protocol, recovery updater and host tools
+  accept an optional fourth number, ordered `0.99.94 < 0.99.94.1 < 0.99.95`.
+- Host OTA tools validate versions with the same rule as the device.
+
+### Changed
+- Each build points at its own checked-in partition table instead of a shared
+  generated `partitions.csv`, so different boards can build at the same time.
+  Stale partition paths in saved configs are cleared automatically.
+- Component-manager lock files are per target, and the updater declares its own
+  managed dependencies.
+- XIAO ESP32-S3 builds keep Bluetooth on and leave out MQTT, I2C, OLED and local
+  input to fit the G2 stack.
+- Build info reports the deployment feature header and reads the app partition
+  size from the build's own partition table.
+- README, Quick Start, Board Switching, OTA setup, OTA tools and release docs
+  cover deployments, concurrent builds and point-release versions.
+
+### Removed
+- The saved updater configs `updater/sdkconfig.feather_esp32_v2` and
+  `updater/sdkconfig.qtpy_esp32`; the updater builds from
+  `updater/boards/<board>.defaults`.
+- The shared `partitions.csv` filename from `config/sdkconfig.defaults`.
+
+### Fixed
+- `.gitignore` hid every `partitions.csv`, including the deployment tables; it
+  now ignores only the generated root file.
+
 ## [0.99.94] - 2026-09-10
 
 This release hardens the boundaries where long-lived firmware services meet:

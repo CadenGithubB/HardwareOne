@@ -19,8 +19,8 @@
 # If you switch chip families (for example ESP32 <-> ESP32-S3), run
 # `idf.py fullclean` first. See docs/BOARD_SWITCHING.md for full instructions.
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+# CMake appends the exact board/deployment partition path as a generated
+# defaults fragment. Do not put a shared generated filename here.
 
 # Flash size
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y

@@ -19,6 +19,11 @@ import subprocess
 import sys
 import tempfile
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
+from tools.ota import deployment_contract, semver
+
 
 APP_DESC_OFFSET = 24 + 8
 APP_DESC_MAGIC = 0xABCD5432
@@ -67,6 +72,27 @@ BOARD_CONTRACT = {
         "partition_csv": "partitions_ota_no_sr_8mb.csv",
     },
 }
+
+
+def resolve_contract(board: str, deployment: str | None) -> dict[str, object]:
+    if not deployment:
+        return dict(BOARD_CONTRACT[board])
+    selected = deployment_contract.load(deployment)
+    if selected.board_id != board:
+        raise ValueError(
+            f"deployment {deployment!r} is for {selected.board_id}, not {board}"
+        )
+    return {
+        "layout": selected.layout_id,
+        "main_suffix": selected.version_suffix,
+        "updater_suffix": selected.version_suffix,
+        "flash_encryption": selected.flash_encryption,
+        "target": selected.target,
+        "flash_size": selected.flash_size.upper(),
+        "partition_csv": selected.partition_csv,
+        "main_release_max": selected.main_release_max,
+        "updater_release_max": selected.updater_release_max,
+    }
 
 
 def slot_sizes(csv_path: pathlib.Path) -> dict[str, int]:
@@ -242,6 +268,20 @@ def check_value(
     audit.require(actual == expected, f"{owner}: {key}={actual!r}, expected {expected!r}")
 
 
+def check_version_contract(
+    audit: Audit, version: str, required_suffix: object, owner: str
+) -> None:
+    suffix = str(required_suffix)
+    audit.require(
+        semver.is_valid(version),
+        f"{owner} version {version!r} is not valid SemVer",
+    )
+    audit.require(
+        version.endswith(suffix),
+        f"{owner} version {version!r} lacks {suffix!r}",
+    )
+
+
 def check_common_config(
     audit: Audit, config: dict[str, str], owner: str, contract: dict[str, object]
 ) -> None:
@@ -293,14 +333,29 @@ def check_fe_contract(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--board", choices=sorted(BOARD_CONTRACT), required=True)
+    parser.add_argument(
+        "--board",
+        # Union with the deployment board ids: a board can be reachable only
+        # through a deployment contract (xiao_s3) and has no BOARD_CONTRACT row.
+        choices=sorted(set(BOARD_CONTRACT) | set(deployment_contract.board_ids())),
+        required=True,
+    )
+    parser.add_argument(
+        "--deployment",
+        choices=deployment_contract.available(),
+        help="checked-in deployment contract layered onto --board",
+    )
     parser.add_argument("--main-build", type=pathlib.Path, required=True)
     parser.add_argument("--updater-build", type=pathlib.Path, required=True)
     args = parser.parse_args()
 
     main_build = args.main_build.resolve()
     updater_build = args.updater_build.resolve()
-    contract = BOARD_CONTRACT[args.board]
+    try:
+        contract = resolve_contract(args.board, args.deployment)
+    except ValueError as exc:
+        print(f"OTA build audit failed: {exc}", file=sys.stderr)
+        return 2
     audit = Audit()
 
     try:
@@ -323,8 +378,14 @@ def main() -> int:
             updater_build / "partition_table/partition-table.bin"
         ).read_bytes()
         repository = pathlib.Path(__file__).resolve().parents[2]
-        # Source tables live in partitions/ (root partitions.csv is generated).
-        partition_csv = repository / "partitions" / str(contract["partition_csv"])
+        # Legacy board contracts name a file under partitions/. Deployment
+        # contracts resolve their own checked-in per-board table directly.
+        configured_partition = pathlib.Path(str(contract["partition_csv"]))
+        partition_csv = (
+            configured_partition
+            if configured_partition.is_absolute()
+            else repository / "partitions" / configured_partition
+        )
         slots = slot_sizes(partition_csv)
         expected_partition_table = expected_partition_binary(
             main_description, partition_csv, str(contract["flash_size"])
@@ -389,19 +450,24 @@ def main() -> int:
     )
     audit.require(main_project == "hardwareone-idf", f"main project is {main_project!r}")
     audit.require(updater_project == "hw1-updater", f"updater project is {updater_project!r}")
-    audit.require(
-        main_version.endswith(str(contract["main_suffix"])),
-        f"main version {main_version!r} lacks {contract['main_suffix']!r}",
+    check_version_contract(audit, main_version, contract["main_suffix"], "main")
+    check_version_contract(
+        audit, updater_version, contract["updater_suffix"], "updater"
     )
-    audit.require(
-        updater_version.endswith(str(contract["updater_suffix"])),
-        f"updater version {updater_version!r} lacks {contract['updater_suffix']!r}",
+    main_release_gate = int(contract.get("main_release_max") or slots["ota_0"])
+    configured_updater_gate = int(
+        contract.get("updater_release_max") or UPDATER_RELEASE_GATE
     )
-    updater_gate = min(UPDATER_RELEASE_GATE, slots["factory"])
+    updater_gate = min(configured_updater_gate, slots["factory"])
     audit.require(
         main_bin.stat().st_size <= slots["ota_0"],
         f"main image {main_bin.stat().st_size} B exceeds the "
         f"{slots['ota_0']} B ota_0 slot",
+    )
+    audit.require(
+        main_bin.stat().st_size <= main_release_gate,
+        f"main image {main_bin.stat().st_size} B exceeds the "
+        f"{main_release_gate} B release gate",
     )
     audit.require(
         updater_bin.stat().st_size <= slots["factory"],
@@ -421,7 +487,7 @@ def main() -> int:
         return 1
 
     print(
-        f"OK: {args.board} / {contract['layout']} — "
+        f"OK: {args.deployment or args.board} / {contract['layout']} — "
         f"main {main_version} ({main_bin.stat().st_size} B), "
         f"updater {updater_version} ({updater_bin.stat().st_size} B), "
         f"key sha256:{main_key_fingerprint[:16]}"

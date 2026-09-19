@@ -10,9 +10,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from tools.ota import make_manifest, make_test_fixtures
-from tools.ota.qualification.artifacts import load_verified_artifacts
+from tools.ota.qualification.artifacts import load_verified_artifacts, run_pair_audit
 from tools.ota.qualification.evidence import EvidenceRecorder, Redactor
 from tools.ota.qualification.model import Checkpoint
 from tools.ota.qualification.recovery_http import (
@@ -69,6 +70,30 @@ class ModelAndScenarioTests(unittest.TestCase):
         bad["journalSequence"] = -1
         with self.assertRaisesRegex(ValueError, "sequence"):
             Checkpoint.from_dict(bad)
+
+
+class ArtifactAuditTests(unittest.TestCase):
+    def test_pair_audit_passes_deployment_selector_to_build_audit(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="OTA build audit passed", stderr=""
+        )
+        with mock.patch(
+            "tools.ota.qualification.artifacts.subprocess.run",
+            return_value=completed,
+        ) as run:
+            result = run_pair_audit(
+                "feather_esp32_v2",
+                pathlib.Path("main-build"),
+                pathlib.Path("updater-build"),
+                "headless/feather_esp32_v2",
+            )
+
+        self.assertTrue(result.passed)
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--deployment") + 1],
+            "headless/feather_esp32_v2",
+        )
 
 
 class EvidenceTests(unittest.TestCase):
@@ -257,6 +282,30 @@ class FixtureAndCliTests(unittest.TestCase):
                 acknowledge_lab_key=True,
             )
         )
+        cls.headless_image = cls.root / "fake-headless-main.bin"
+        headless_image = bytearray(cls.image.read_bytes())
+        version_start = descriptor + 16
+        headless_image[version_start : version_start + 32] = bytes(32)
+        headless_version = b"9.9.9+fv2ho1"
+        headless_image[version_start : version_start + len(headless_version)] = (
+            headless_version
+        )
+        cls.headless_image.write_bytes(headless_image)
+        cls.headless_manifest = cls.root / "headless-manifest.json"
+        make_manifest.write_envelope(
+            {
+                "boardId": "feather_esp32_v2",
+                "dataSchema": 1,
+                "imageSha256": make_manifest.sha256_file(cls.headless_image),
+                "imageSize": cls.headless_image.stat().st_size,
+                "layoutId": "hw1-hl-fv2-ota-v1",
+                "minUpdaterVersion": "1.0.0",
+                "projectName": "hardwareone-idf",
+                "version": headless_version.decode("ascii"),
+            },
+            cls.key,
+            cls.headless_manifest,
+        )
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -312,6 +361,62 @@ class FixtureAndCliTests(unittest.TestCase):
             expected_board="feathers3",
         )
         self.assertEqual(identity.version, "9.9.9+f3o1")
+
+    def test_headless_manifest_requires_and_accepts_its_deployment_contract(self) -> None:
+        public_key = self.output / "lab-public-key.pem"
+        fields = make_test_fixtures.canonical_fields(
+            self.headless_image,
+            "feather_esp32_v2",
+            "headless/feather_esp32_v2",
+        )
+        self.assertEqual(fields["layoutId"], "hw1-hl-fv2-ota-v1")
+        identity = load_verified_artifacts(
+            self.headless_image,
+            self.headless_manifest,
+            public_key,
+            expected_board="feather_esp32_v2",
+            expected_deployment="headless/feather_esp32_v2",
+        )
+        self.assertEqual(identity.layout, "hw1-hl-fv2-ota-v1")
+
+        with self.assertRaisesRegex(ValueError, "layoutId"):
+            load_verified_artifacts(
+                self.headless_image,
+                self.headless_manifest,
+                public_key,
+                expected_board="feather_esp32_v2",
+            )
+
+    def test_cli_preflight_reports_headless_deployment_layout(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "tools/ota/hardware_qualification.py",
+                "preflight",
+                "--board",
+                "feather_esp32_v2",
+                "--deployment",
+                "headless/feather_esp32_v2",
+                "--image",
+                str(self.headless_image),
+                "--manifest",
+                str(self.headless_manifest),
+                "--public-key",
+                str(self.output / "lab-public-key.pem"),
+                "--json",
+            ],
+            cwd=REPOSITORY,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["deployment"], "headless/feather_esp32_v2")
+        self.assertEqual(report["layout"], "hw1-hl-fv2-ota-v1")
+        self.assertEqual(
+            report["checks"]["artifacts"]["layout"], "hw1-hl-fv2-ota-v1"
+        )
 
     def test_cli_preflight_init_and_resume_are_clean_json_and_non_destructive(self) -> None:
         common = [

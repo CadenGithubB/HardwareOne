@@ -26,7 +26,7 @@ What it costs, measured rather than estimated:
 | OTA code in the app | ~800 B flash, 0 B RAM | ~64 KiB flash, ~3.9 KiB RAM |
 
 The flash layout cost is the part that matters, and it comes out of the
-filesystem:
+filesystem. The original 16 MB FeatherS3 layout is:
 
 | Partition | Non-OTA 16 MB | OTA 16 MB |
 | --- | ---: | ---: |
@@ -38,13 +38,20 @@ filesystem:
 LittleFS gives up 1,388 KiB. In exchange the app slot gains 44 KiB and you get
 a recovery updater that cannot be bricked. The arithmetic balances exactly.
 
-Enable OTA when the device will be updated in the field, is a 16 MB FeatherS3,
-and you control a signing key you can keep for the life of the deployment.
+The checked-in Headless Node deployment also supports the 8 MB Feather ESP32
+V2. It uses a 1,144 KiB golden updater, a 4.5 MiB main slot, and 2,368 KiB of
+LittleFS, with a 4 MiB release gate. Its exact feature and migration contract
+is in [`deployments/headless/README.md`](../deployments/headless/README.md).
+
+Enable OTA when the device will be updated in the field, has a checked-in OTA
+contract, and you control a signing key you can keep for the life of the
+deployment.
 
 Do NOT enable it when:
 
-- The board is not a 16 MB FeatherS3. The build refuses anything else today,
-  and the recovery updater has the partition geometry compiled in as constants.
+- The board/deployment combination has no checked-in OTA contract. The recovery
+  updater has the partition geometry compiled in as constants; a similarly
+  sized flash chip is not interchangeable.
 - The build uses ESP-SR. The speech model partition is ~3,008 KiB and there is
   no arrangement that fits a model, two app slots and a filesystem in 8 MB.
 - The device is a fixed sensor appliance that is reflashed by cable anyway. It
@@ -57,7 +64,9 @@ Do NOT enable it when:
 - An RSA-3072 signing key on durable, backed-up storage. NOT `/tmp` - macOS
   purges it, and losing the key ends OTA for every device that shipped with the
   matching public key baked in.
-- A 16 MB FeatherS3 on USB, with the port known.
+- A supported board on USB, with the port known. The end-to-end commands below
+  document the original FeatherS3 flow; use the deployment wrapper shown below
+  for the Headless Feather ESP32 V2.
 - ESP-IDF 5.5.x exported in the shell.
 
 Set these once per shell:
@@ -72,6 +81,23 @@ export HW1_MAIN_BUILD=build-ota
 export HW1_UPDATER_BUILD=/private/tmp/hw1-updater-migration
 ```
 
+For the paired Headless Node images, the deployment wrapper replaces the two
+manual build steps and runs the pair audit, manifest signing, and bundle
+creation as one operation:
+
+```sh
+HW1_OTA_SIGNING_KEY="$HW1_KEY" \
+  tools/build_deployment.sh headless feather_esp32_v2
+
+# Or Unexpected Maker FeatherS3 / FeatherS3[D]:
+HW1_OTA_SIGNING_KEY="$HW1_KEY" \
+  tools/build_deployment.sh headless feathers3
+```
+
+Its outputs are isolated under `build/deployments/headless/<board>/`.
+Installing either deployment partition layout over a cable is still a
+destructive, one-time migration; back up LittleFS first as described next.
+
 ## Migration is destructive and one-time
 
 Moving a board onto the OTA layout relocates LittleFS. Everything on the
@@ -82,6 +108,12 @@ Starting from a blank chip is also fine and is what the steps below assume:
 
 ```sh
 esptool.py --chip esp32s3 -p "$HW1_PORT" erase_flash
+```
+
+For the Headless Feather ESP32 V2, select its classic ESP32 target instead:
+
+```sh
+esptool.py --chip esp32 -p "$HW1_PORT" erase_flash
 ```
 
 ## 1. Build the recovery updater
@@ -127,6 +159,23 @@ HW_BOARD="$HW1_BOARD" HW_OTA_LAYOUT=1 HW1_OTA_SIGNING_KEY="$HW1_KEY" \
   ESPPORT="$HW1_PORT" idf.py -B "$HW1_MAIN_BUILD" migration-flash
 ```
 
+For the checked-in Headless Feather deployment, use its isolated paired build
+directories and preserve the deployment selector when invoking the target:
+
+```sh
+HW_DEPLOYMENT=headless/feather_esp32_v2 \
+  HW_BOARD=feather_esp32_v2 HW_OTA_LAYOUT=1 \
+  HW1_OTA_SIGNING_KEY="$HW1_KEY" \
+  HW1_UPDATER_BIN="$PWD/build/deployments/headless/feather_esp32_v2/updater/hw1-updater.bin" \
+  ESPPORT="$HW1_PORT" \
+  idf.py -B build/deployments/headless/feather_esp32_v2/main migration-flash
+```
+
+For FeatherS3[D], substitute `headless/feathers3`, `HW_BOARD=feathers3`, and
+`build/deployments/headless/feathers3/...`. Its exact non-interactive phrase is
+`MIGRATE headless/feathers3 hw1-hl-f3-ota-v1`; the release directory's
+`MIGRATION.md` also records every raw flash offset.
+
 `idf.py -p` is deliberately not used here, and passing it would be a trap.
 `-p` is a global option that the BUILT-IN flash actions forward to esptool;
 every HardwareOne cable target is a plain CMake custom target, which idf.py
@@ -136,8 +185,13 @@ is harmless; with two it silently flashes the wrong one. Every guarded target
 now prints the port it is about to write and refuses outright when more than
 one USB serial device is attached and `ESPPORT` is unset.
 
-It prompts for the exact text `MIGRATE feathers3`; the sanctioned scripted
-escape is `HW1_OTA_MIGRATION_CONFIRM="MIGRATE $HW1_BOARD"`.
+The legacy flow prompts for the exact text `MIGRATE feathers3`; its sanctioned
+scripted escape remains
+`HW1_OTA_MIGRATION_CONFIRM="MIGRATE $HW1_BOARD"`. The Headless Feather flow
+instead requires the deployment- and layout-bound phrase
+`MIGRATE headless/feather_esp32_v2 hw1-hl-fv2-ota-v1`. If scripting that
+destructive migration, set the complete phrase explicitly; do not derive it
+from the physical board name alone.
 
 On `feathers3_fe` use `encrypted-migration-flash`. The plain target fails on
 that board on purpose.
@@ -156,6 +210,17 @@ app it does not hold USB CDC, so reopening the port resets the chip:
 ```sh
 HW_BOARD="$HW1_BOARD" HW1_OTA_SIGNING_KEY="$HW1_KEY" \
   idf.py -C updater -B "$HW1_UPDATER_BUILD" -p "$HW1_PORT" monitor
+```
+
+For the Headless Feather deployment, keep the deployment identity and use its
+isolated updater build:
+
+```sh
+HW_DEPLOYMENT=headless/feather_esp32_v2 \
+  HW_BOARD=feather_esp32_v2 HW1_OTA_SIGNING_KEY="$HW1_KEY" \
+  idf.py -C updater \
+    -B build/deployments/headless/feather_esp32_v2/updater \
+    -p "$HW1_PORT" monitor
 ```
 
 At the `hw1up>` prompt:

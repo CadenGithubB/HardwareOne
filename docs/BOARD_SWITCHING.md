@@ -22,12 +22,11 @@ defaults + `boards/<board>.defaults`. Consequences:
   driver board's state) are never touched by another board's build.
 - The wrapper derives the chip target from the board file's `# HW_TARGET:`
   marker and always sets `HW_BOARD` — closing the footgun where a bare
-  `idf.py build` reconfigure on esp32s3 defaults to `flash=16mb` and
-  regenerates `partitions.csv` with a layout an 8 MB sdkconfig can't fit.
-- **Caveat — do not run two different boards' builds concurrently.** The root
-  `partitions.csv` is generated at configure time and read during the build;
-  it is the one file the per-board dirs still share. Serialize builds; the
-  file is gitignored/generated, so the next configure simply rewrites it.
+  `idf.py build` reconfigure on esp32s3 could combine `flash=16mb` with an
+  8 MB board's saved configuration.
+- Different board builds may run concurrently. Each build depends directly on
+  its selected checked-in partition table; there is no shared generated
+  partition input between build directories.
 - Local sdkconfig experiments (`menuconfig`) apply per board dir, since each
   dir owns its sdkconfig.
 - Each successful build writes **`build-<board>/BUILD_INFO.md`** — a manifest
@@ -36,12 +35,12 @@ defaults + `boards/<board>.defaults`. Consequences:
   the git commit it came from). Ship or archive an image with that file and it
   explains itself.
 
-### Known gap — feature flags are still one shared file
+### Board and deployment are independent axes
 
-Per-board dirs isolate **sdkconfig** (chip, PSRAM mode, flash size, BT stack),
-but **`components/hardwareone/System_BuildConfig.h` is global**: one set of
-feature flags for every board. Boards genuinely disagree about them, so
-switching boards can still require editing the header:
+Per-board dirs isolate **sdkconfig** (chip, PSRAM mode, flash size, BT stack).
+Ordinary builds still take their feature choices from the shared
+`components/hardwareone/System_BuildConfig.h`, so switching ordinary board
+builds can require editing that header:
 
 | Board | Requires | Why |
 |---|---|---|
@@ -49,12 +48,28 @@ switching boards can still require editing the header:
 | FeatherS3[D] | `I2C_FEATURE_LEVEL > 0` | MAX17048 fuel gauge is on I2C — a `#error` fires otherwise |
 | QT Py ESP32 | `ENABLE_BLUETOOTH 0` | `boards/qtpy_esp32.defaults` sets `CONFIG_BT_ENABLED=n`, so the Bluedroid headers do not exist |
 
-Building a board with the wrong header state fails loudly (a `#error`, or a
-missing `esp_gap_ble_api.h`-style include) rather than producing a bad image —
-but it is still a manual step the build dirs do not solve. A future
-`boards/<board>.features.h` overlay layered by `System_BuildConfig.h` would
-close this; until then, treat the header's user-config block as part of the
-board profile and expect to set it before switching.
+Building an ordinary board with the wrong header state fails loudly (a
+`#error`, or a missing `esp_gap_ble_api.h`-style include) rather than producing
+a bad image.
+
+Checked-in deployment profiles solve that problem for reproducible release
+images. A deployment selects a feature overlay and an exact OTA/partition
+contract while continuing to use `boards/<board>.defaults` for the physical
+hardware. Build them with both names:
+
+```bash
+HW1_OTA_SIGNING_KEY=/absolute/path/to/key.pem \
+  tools/build_deployment.sh headless feather_esp32_v2
+
+# Unexpected Maker FeatherS3 / FeatherS3[D]
+HW1_OTA_SIGNING_KEY=/absolute/path/to/key.pem \
+  tools/build_deployment.sh headless feathers3
+```
+
+This writes the updater, main image, and release artifacts below
+`build/deployments/headless/<board>/`; it does not change the shared header or
+reuse an ordinary board build directory. The canonical Headless Node contracts
+are documented in [`deployments/headless/README.md`](../deployments/headless/README.md).
 
 The classic single-`build/` flow below still works and remains what
 `./build/` + bare `idf.py` uses; the sections are kept for reference and for
@@ -323,10 +338,19 @@ When `XIAO_ESP32S3_SENSE_ENABLED` is defined:
 
 ### Unexpected Maker FeatherS3[D]
 - **STEMMA QT I2C (primary)**: SDA=GPIO8, SCL=GPIO9 (I2C1, always-on LDO; shared with MAX17048G fuel gauge @ 0x36)
-- **STEMMA QT I2C (secondary)**: SDA=GPIO15, SCL=GPIO16 (I2C2, LDO2 — powers off in deep sleep). Not currently used by the codebase; would require a second `Wire1` bus instance.
+- **STEMMA QT I2C (secondary)**: SDA=GPIO16, SCL=GPIO15 (I2C2, LDO2 - powers off in deep sleep)
 - **Built-in RGB LED**: data on GPIO40, powered via LDO2 (enable on GPIO39)
-- **Battery monitoring**: MAX17048G fuel gauge on I2C1 @ 0x36 — *no ADC fallback on the [D]*. Currently disabled in the codebase (ADC-based `battery_monitor` can't talk to the fuel gauge). Adding a small `i2csensor_max17048` driver would re-enable it with better accuracy than the old ADC method.
+- **Battery monitoring**: the existing `i2csensor_max17048` driver reads the MAX17048G on I2C1 @ 0x36; there is no ADC fallback on the [D]
 - **No on-board camera, microphone, or display** — pair with an OLED via STEMMA QT if a display is needed.
+
+The `headless/feathers3` deployment is intentionally gauge-only: it enables
+the core primary I2C path and MAX17048 battery surfaces, while every optional
+sensor, display, and input is compiled out. I2C2 remains disabled by default,
+so the secondary connector does not silently add another active bus. This is a
+deployment policy, not a limitation of the board or I2C implementation.
+
+The `headless/feather_esp32_v2` deployment is unchanged: it uses the GPIO35
+ADC battery divider and keeps I2C entirely disabled.
 
 ---
 

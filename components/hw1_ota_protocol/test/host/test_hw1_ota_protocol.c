@@ -156,6 +156,23 @@ static void test_semver(void)
     CHECK(hw1_ota_semver_compare("1.2.3", "1.2.3-rc.1", &valid) > 0 && valid);
     (void)hw1_ota_semver_compare("1.02.3", "1.2.3", &valid);
     CHECK(!valid);
+
+    /* Optional fourth core number: point releases order after their base. */
+    CHECK(hw1_ota_semver_compare("0.99.94.1", "0.99.94", &valid) > 0 && valid);
+    CHECK(hw1_ota_semver_compare("0.99.94", "0.99.94.0", &valid) == 0 && valid);
+    CHECK(hw1_ota_semver_compare("0.99.94.1+f3ho1", "0.99.95", &valid) < 0 && valid);
+    CHECK(hw1_ota_semver_compare("0.99.94.2", "0.99.94.10", &valid) < 0 && valid);
+    CHECK(hw1_ota_semver_compare("1.2.3.4-rc.1", "1.2.3.4", &valid) < 0 && valid);
+    CHECK(hw1_ota_semver_compare("4294967295.4294967295.4294967295.4294967295",
+                                 "4294967295.4294967295.4294967295", &valid) > 0 && valid);
+    (void)hw1_ota_semver_compare("1.2.3.4.5", "1.2.3", &valid);
+    CHECK(!valid);
+    (void)hw1_ota_semver_compare("1.2.3.04", "1.2.3", &valid);
+    CHECK(!valid);
+    (void)hw1_ota_semver_compare("1.2.3.", "1.2.3", &valid);
+    CHECK(!valid);
+    (void)hw1_ota_semver_compare("1.2.3.4294967296", "1.2.3", &valid);
+    CHECK(!valid);
 }
 
 static void test_record_round_trip_and_transitions(void)

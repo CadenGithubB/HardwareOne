@@ -438,6 +438,24 @@
 #include HW1_DEPLOYMENT_CONFIG_HEADER
 #endif
 
+// The XIAO ESP32-S3/Sense has its camera, PDM microphone, microSD and BLE/G2
+// hardware on the carrier, but no built-in I2C display or input controller.
+// Keep its board image focused on those actual peripherals: this also recovers
+// the flash needed for the Bluedroid/G2 stack. These are board policy overrides
+// rather than changes to the shared editable defaults above, so Feather and
+// classic-ESP32 builds retain their selected MQTT/I2C/OLED/input features.
+#if defined(ARDUINO_XIAO_ESP32S3_DEV) || defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV)
+  #undef ENABLE_MQTT
+  #define ENABLE_MQTT 0
+  #undef I2C_FEATURE_LEVEL
+  #define I2C_FEATURE_LEVEL 0
+  #undef DISPLAY_TYPE
+  #define DISPLAY_TYPE 0
+  #undef INPUT_DEVICE_TYPE
+  #define INPUT_DEVICE_TYPE 0
+#endif
+
+
 // ╔═══════════════════════════════════════════════════════════════════════════╗
 // ║                    END OF USER CONFIGURATION                              ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝

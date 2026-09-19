@@ -17,7 +17,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from tools.ota import make_manifest
+from tools.ota import deployment_contract, make_manifest
 from tools.ota.qualification.artifacts import (
     ArtifactIdentity,
     load_verified_artifacts,
@@ -64,7 +64,12 @@ def command_plan(args: argparse.Namespace) -> int:
 
 def artifact_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--board", choices=sorted(make_manifest.BOARD_LAYOUTS), required=True
+        "--board", choices=make_manifest.selectable_boards(), required=True
+    )
+    parser.add_argument(
+        "--deployment",
+        choices=deployment_contract.available(),
+        help="checked-in deployment contract layered onto --board",
     )
     parser.add_argument("--image", type=pathlib.Path, required=True)
     parser.add_argument("--manifest", type=pathlib.Path, required=True)
@@ -74,11 +79,13 @@ def artifact_args(parser: argparse.ArgumentParser) -> None:
 
 
 def preflight(args: argparse.Namespace) -> tuple[dict[str, object], ArtifactIdentity]:
+    deployment = getattr(args, "deployment", None)
     identity = load_verified_artifacts(
         args.image,
         args.manifest,
         args.public_key,
         expected_board=args.board,
+        expected_deployment=deployment,
     )
     checks: dict[str, object] = {
         "artifacts": {"status": "PASS", **identity.as_dict()},
@@ -89,7 +96,12 @@ def preflight(args: argparse.Namespace) -> tuple[dict[str, object], ArtifactIden
         raise ValueError("--main-build and --updater-build must be supplied together")
     pair_passed = False
     if pair_requested:
-        audit = run_pair_audit(args.board, args.main_build, args.updater_build)
+        audit = run_pair_audit(
+            args.board,
+            args.main_build,
+            args.updater_build,
+            deployment,
+        )
         checks["pairAudit"] = {"status": "PASS" if audit.passed else "FAIL", **audit.as_dict()}
         pair_passed = audit.passed
     else:
@@ -125,12 +137,14 @@ def preflight(args: argparse.Namespace) -> tuple[dict[str, object], ArtifactIden
 
     report = {
         "board": args.board,
-        "layout": make_manifest.BOARD_LAYOUTS[args.board],
+        "layout": identity.layout,
         "checks": checks,
         "artifactReady": True,
         "readyForDestructiveRun": pair_passed and serial_passed and adb_passed,
         "note": "This command performs no device mutation.",
     }
+    if deployment:
+        report["deployment"] = deployment
     return report, identity
 
 

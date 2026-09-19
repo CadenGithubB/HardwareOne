@@ -43,18 +43,12 @@ CONFIG_NVS_ENCRYPTION=n
 # CSVs start nvs at 0xA000 so both offsets work).
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 
-# CARRIER BUILD (2026-08-07): Bluetooth ENABLED so the G2 glasses mic can
-# reach the CM5 over the UART link. Flash for the Bluedroid stack + controller
-# + LC3 audio codec is recovered by dropping maps + the I2C/OLED layer
-# (I2C_FEATURE_LEVEL=0, ENABLE_MAPS=0 in System_BuildConfig.h); camera kept.
-# Was CONFIG_BT_ENABLED=n (binary overflowed the 5332K factory with BT + the
-# fuller feature set). Revert this + the two BuildConfig flags to rebuild the
-# camera+PDM-only variant.
-#
-# 2026-08-24: back to n — ENABLE_LLM_SOURCE_ONBOARD=1 (SD-card models on the
-# standalone XIAO) overflowed the factory partition by 0x3ff0 with BT in.
-# G2/ring/BLE are dropped from THIS image; flip back to y for the carrier use.
-CONFIG_BT_ENABLED=n
+# Bluetooth is a board capability, not an opt-in carrier-only feature. Keep
+# Bluedroid available for the Bluetooth web page and the G2 glasses; the shared
+# ESP32-S3 defaults provide the matching controller, Bluedroid and BLE 4.2
+# settings. Feature profiles may still compile application Bluetooth out, but
+# the ordinary XIAO firmware must not silently remove it at the SDK layer.
+CONFIG_BT_ENABLED=y
 
 # Camera sensor policy — the XIAO Sense fleet uses the OV family. Keep all
 # three OV variants supported by HardwareOne and compile out unrelated sensor
