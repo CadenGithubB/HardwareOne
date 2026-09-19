@@ -39,6 +39,7 @@ def load_verified_artifacts(
     public_key: pathlib.Path,
     *,
     expected_board: str,
+    expected_deployment: str | None = None,
 ) -> ArtifactIdentity:
     image = image.resolve()
     manifest_path = manifest_path.resolve()
@@ -89,10 +90,11 @@ def load_verified_artifacts(
     fields = make_manifest.decode_payload(payload)
     make_manifest.verify_payload(payload, signature, public_key)
 
+    contract = make_manifest.resolve_contract(expected_board, expected_deployment)
     project, version = make_manifest.read_app_descriptor(image)
     comparisons = {
         "boardId": expected_board,
-        "layoutId": make_manifest.BOARD_LAYOUTS[expected_board],
+        "layoutId": contract["layout"],
         "projectName": project,
         "version": version,
         "imageSize": image.stat().st_size,
@@ -138,23 +140,32 @@ def run_pair_audit(
     board: str,
     main_build: pathlib.Path,
     updater_build: pathlib.Path,
+    deployment: str | None = None,
 ) -> PairAuditResult:
     script = pathlib.Path(__file__).resolve().parents[1] / "check_ota_builds.py"
-    command = (
+    command = [
         sys.executable,
         str(script),
         "--board",
         board,
-        "--main-build",
-        str(main_build.resolve()),
-        "--updater-build",
-        str(updater_build.resolve()),
+    ]
+    if deployment:
+        command.extend(("--deployment", deployment))
+    command.extend(
+        (
+            "--main-build",
+            str(main_build.resolve()),
+            "--updater-build",
+            str(updater_build.resolve()),
+        )
     )
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     output = "\n".join(
         part.strip() for part in (result.stdout, result.stderr) if part.strip()
     )
-    return PairAuditResult(result.returncode == 0, command, output, result.returncode)
+    return PairAuditResult(
+        result.returncode == 0, tuple(command), output, result.returncode
+    )
 
 
 def file_metadata(path: pathlib.Path) -> dict[str, object]:

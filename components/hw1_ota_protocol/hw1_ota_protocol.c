@@ -259,10 +259,14 @@ static bool parse_core_number(const char **cursor, uint32_t *value, char delimit
     return true;
 }
 
+/* SemVer, extended with an optional fourth core number for point releases:
+ * major.minor.patch[.revision][-prerelease][+build]. A missing revision is 0,
+ * so 0.99.94 < 0.99.94.1 < 0.99.95. tools/ota/semver.py mirrors this grammar. */
 typedef struct {
     uint32_t major;
     uint32_t minor;
     uint32_t patch;
+    uint32_t revision;
     const char *prerelease;
     size_t prerelease_length;
 } semver_t;
@@ -315,6 +319,12 @@ static bool parse_semver(const char *text, semver_t *parsed)
         !parse_core_number(&cursor, &parsed->minor, '.') ||
         !parse_core_number(&cursor, &parsed->patch, '\0')) {
         return false;
+    }
+    if (*cursor == '.') {
+        ++cursor;
+        if (!parse_core_number(&cursor, &parsed->revision, '\0')) {
+            return false;
+        }
     }
     suffix = cursor;
     if (*suffix == '-') {
@@ -425,6 +435,9 @@ int hw1_ota_semver_compare(const char *left, const char *right, bool *valid)
     }
     if (left_version.patch != right_version.patch) {
         return left_version.patch < right_version.patch ? -1 : 1;
+    }
+    if (left_version.revision != right_version.revision) {
+        return left_version.revision < right_version.revision ? -1 : 1;
     }
     return compare_prerelease(&left_version, &right_version);
 }

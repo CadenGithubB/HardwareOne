@@ -16,8 +16,14 @@ import json
 import pathlib
 import struct
 import subprocess
+import sys
 import tempfile
 import zlib
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
+from tools.ota import deployment_contract, semver
 
 
 FORMAT = "hardwareone-ota-envelope"
@@ -59,11 +65,68 @@ BOARD_SUFFIXES = {
 }
 
 
-def board_slot_size(board: str) -> int:
-    """ota_0 capacity for a board, read from its partition CSV."""
+def selectable_boards() -> tuple[str, ...]:
+    """Board ids a --board argument may name.
+
+    The legacy registries above cover boards with a board-only recovery layout.
+    A board can also arrive purely through a deployment contract (xiao_s3 has
+    no board-only layout and is reachable only as pocket_assistant/xiao_s3), so
+    those are unioned in rather than requiring a fictitious legacy row.
+    """
+    return tuple(sorted(set(BOARD_LAYOUTS) | set(deployment_contract.board_ids())))
+
+
+def resolve_contract(board: str, deployment: str | None = None) -> dict[str, object]:
+    """Resolve legacy board-only or deployment-specific OTA identity."""
+    if deployment:
+        selected = deployment_contract.load(deployment)
+        if selected.board_id != board:
+            raise ValueError(
+                f"deployment {deployment!r} is for {selected.board_id}, not {board}"
+            )
+        return {
+            "board": selected.board_id,
+            "layout": selected.layout_id,
+            "suffix": selected.version_suffix,
+            "partition_csv": selected.partition_csv,
+            "slot_size": selected.ota_slot_size,
+            "main_release_max": selected.main_release_max,
+        }
+    if board not in BOARD_LAYOUTS:
+        raise ValueError(
+            f"board {board!r} has no board-only recovery layout; name the "
+            f"deployment it ships as (one of: "
+            f"{', '.join(s for s in deployment_contract.available() if s.endswith('/' + board)) or 'none'})"
+        )
     repository = pathlib.Path(__file__).resolve().parents[2]
-    # Source tables live in partitions/ (the root partitions.csv is the generated one).
-    csv_path = repository / "partitions" / BOARD_PARTITION_CSV[board]
+    return {
+        "board": board,
+        "layout": BOARD_LAYOUTS[board],
+        "suffix": BOARD_SUFFIXES[board],
+        "partition_csv": repository / "partitions" / BOARD_PARTITION_CSV[board],
+        "slot_size": None,
+        "main_release_max": None,
+    }
+
+
+def contract_for_identity(board: str, layout: str) -> dict[str, object]:
+    """Find the unique checked-in contract named by a signed manifest."""
+    if board in BOARD_LAYOUTS and BOARD_LAYOUTS[board] == layout:
+        return resolve_contract(board)
+    for selector in deployment_contract.available():
+        selected = deployment_contract.load(selector)
+        if selected.board_id == board and selected.layout_id == layout:
+            return resolve_contract(board, selector)
+    raise ValueError(f"unknown OTA board/layout identity: {board!r} / {layout!r}")
+
+
+def board_slot_size(board: str, deployment: str | None = None) -> int:
+    """ota_0 capacity for a board, read from its partition CSV."""
+    contract = resolve_contract(board, deployment)
+    explicit = contract.get("slot_size")
+    if isinstance(explicit, int):
+        return explicit
+    csv_path = pathlib.Path(contract["partition_csv"])
     for raw in csv_path.read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
         fields = [field.strip() for field in line.split(",")]
@@ -115,12 +178,16 @@ def _fixed_ascii(value: str, capacity: int, field: str) -> bytes:
 
 
 def encode_payload(fields: dict[str, object]) -> bytes:
+    version = semver.require(fields["version"], "version")
+    minimum_updater = semver.require(
+        fields["minUpdaterVersion"], "minUpdaterVersion"
+    )
     payload = bytearray(PAYLOAD_SIZE)
     struct.pack_into("<IHH", payload, 0, PAYLOAD_MAGIC, FORMAT_VERSION, PAYLOAD_SIZE)
     payload[8:32] = _fixed_ascii(str(fields["boardId"]), 24, "boardId")
     payload[32:56] = _fixed_ascii(str(fields["layoutId"]), 24, "layoutId")
     payload[56:88] = _fixed_ascii(str(fields["projectName"]), 32, "projectName")
-    payload[88:136] = _fixed_ascii(str(fields["version"]), 48, "version")
+    payload[88:136] = _fixed_ascii(version, 48, "version")
     image_size = int(fields["imageSize"])
     data_schema = int(fields["dataSchema"])
     digest = bytes.fromhex(str(fields["imageSha256"]))
@@ -133,7 +200,7 @@ def encode_payload(fields: dict[str, object]) -> bytes:
     struct.pack_into("<I", payload, 136, image_size)
     payload[140:172] = digest
     payload[172:204] = _fixed_ascii(
-        str(fields["minUpdaterVersion"]), 32, "minUpdaterVersion"
+        minimum_updater, 32, "minUpdaterVersion"
     )
     struct.pack_into("<I", payload, 204, data_schema)
     struct.pack_into("<I", payload, 220, zlib.crc32(payload[:220]) & 0xFFFFFFFF)
@@ -162,7 +229,7 @@ def decode_payload(payload: bytes) -> dict[str, object]:
     expected_crc = zlib.crc32(payload[:220]) & 0xFFFFFFFF
     if struct.unpack_from("<I", payload, 220)[0] != expected_crc:
         raise ValueError("signed payload CRC32 is invalid")
-    return {
+    fields: dict[str, object] = {
         "boardId": _read_fixed(payload, 8, 24),
         "layoutId": _read_fixed(payload, 32, 24),
         "projectName": _read_fixed(payload, 56, 32),
@@ -172,6 +239,9 @@ def decode_payload(payload: bytes) -> dict[str, object]:
         "minUpdaterVersion": _read_fixed(payload, 172, 32),
         "dataSchema": struct.unpack_from("<I", payload, 204)[0],
     }
+    semver.require(fields["version"], "version")
+    semver.require(fields["minUpdaterVersion"], "minUpdaterVersion")
+    return fields
 
 
 def run_openssl(args: list[str]) -> None:
@@ -284,7 +354,11 @@ def create(args: argparse.Namespace) -> None:
         raise SystemExit(
             f"unexpected ESP project name {project_name!r}; expected 'hardwareone-idf'"
         )
-    expected_suffix = BOARD_SUFFIXES[args.board]
+    try:
+        contract = resolve_contract(args.board, getattr(args, "deployment", None))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    expected_suffix = str(contract["suffix"])
     if not version.endswith(expected_suffix):
         raise SystemExit(
             f"image version {version!r} lacks required layout suffix {expected_suffix!r}"
@@ -293,13 +367,19 @@ def create(args: argparse.Namespace) -> None:
     image_size = image.stat().st_size
     slot_size = args.slot_size
     if slot_size is None:
-        slot_size = board_slot_size(args.board)
+        slot_size = board_slot_size(args.board, getattr(args, "deployment", None))
     if image_size <= 0 or image_size > slot_size:
         raise SystemExit(
             f"image size {image_size} does not fit OTA slot ({slot_size} bytes)"
         )
+    release_limit = contract.get("main_release_max")
+    if isinstance(release_limit, int) and image_size > release_limit:
+        raise SystemExit(
+            f"image size {image_size} exceeds deployment release gate "
+            f"({release_limit} bytes)"
+        )
 
-    expected_layout = BOARD_LAYOUTS[args.board]
+    expected_layout = str(contract["layout"])
     if args.layout and args.layout != expected_layout:
         raise SystemExit(
             f"layout {args.layout!r} does not belong to {args.board}; "
@@ -381,7 +461,12 @@ def parser() -> argparse.ArgumentParser:
     make.add_argument("--output", type=pathlib.Path, required=True)
     make.add_argument("--public-key-out", type=pathlib.Path)
     make.add_argument(
-        "--board", choices=sorted(BOARD_LAYOUTS), required=True
+        "--board", choices=selectable_boards(), required=True
+    )
+    make.add_argument(
+        "--deployment",
+        choices=deployment_contract.available(),
+        help="checked-in deployment contract layered onto --board",
     )
     make.add_argument(
         "--layout",

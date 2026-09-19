@@ -17,7 +17,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from tools.ota import make_manifest
+from tools.ota import deployment_contract, make_manifest
 from tools.ota.qualification.artifacts import public_key_fingerprint, sha256
 
 
@@ -25,21 +25,27 @@ INDEX_FORMAT = "hardwareone-ota-negative-fixtures"
 INDEX_VERSION = 1
 
 
-def canonical_fields(image: pathlib.Path, board: str) -> dict[str, object]:
+def canonical_fields(
+    image: pathlib.Path,
+    board: str,
+    deployment: str | None = None,
+) -> dict[str, object]:
     project, version = make_manifest.read_app_descriptor(image)
     if project != "hardwareone-idf":
         raise ValueError(f"unexpected app project {project!r}")
-    suffix = make_manifest.BOARD_SUFFIXES[board]
+    contract = make_manifest.resolve_contract(board, deployment)
+    suffix = str(contract["suffix"])
     if not version.endswith(suffix):
         raise ValueError(
-            f"image version {version!r} does not belong to board {board!r}"
+            f"image version {version!r} does not belong to selected "
+            f"board/deployment identity"
         )
     return {
         "boardId": board,
         "dataSchema": 1,
         "imageSha256": sha256(image),
         "imageSize": image.stat().st_size,
-        "layoutId": make_manifest.BOARD_LAYOUTS[board],
+        "layoutId": contract["layout"],
         "minUpdaterVersion": "1.0.0",
         "projectName": project,
         "version": version,
@@ -104,7 +110,8 @@ def generate(args: argparse.Namespace) -> pathlib.Path:
         raise ValueError(f"lab key not found: {key}")
     if output.exists():
         raise ValueError(f"fixture output already exists: {output}")
-    fields = canonical_fields(source, args.board)
+    deployment = getattr(args, "deployment", None)
+    fields = canonical_fields(source, args.board, deployment)
 
     images = output / "images"
     manifests = output / "manifests"
@@ -205,11 +212,13 @@ def generate(args: argparse.Namespace) -> pathlib.Path:
         "format": INDEX_FORMAT,
         "formatVersion": INDEX_VERSION,
         "board": args.board,
-        "layout": make_manifest.BOARD_LAYOUTS[args.board],
+        "layout": fields["layoutId"],
         "sourceImageSha256": sha256(source),
         "labPublicKeyFingerprint": public_key_fingerprint(public_key),
         "fixtures": fixtures,
     }
+    if deployment:
+        index["deployment"] = deployment
     (output / "fixture-index.json").write_text(
         json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -222,7 +231,12 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--lab-key", type=pathlib.Path, required=True)
     root.add_argument("--output", type=pathlib.Path, required=True)
     root.add_argument(
-        "--board", choices=sorted(make_manifest.BOARD_LAYOUTS), required=True
+        "--board", choices=make_manifest.selectable_boards(), required=True
+    )
+    root.add_argument(
+        "--deployment",
+        choices=deployment_contract.available(),
+        help="checked-in deployment contract layered onto --board",
     )
     root.add_argument(
         "--acknowledge-lab-key",

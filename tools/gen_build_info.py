@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate BUILD_INFO.md for a build directory.
 
-    tools/gen_build_info.py build-feathers3 [board-name]
+    tools/gen_build_info.py build-feathers3 [board-name] [deployment-selector]
 
 Documents what a given firmware image actually contains: which feature flags
 were on, which board/chip it targets, how big it is, and what tree it came
@@ -93,6 +93,19 @@ def compiler_cmd_for_buildconfig(build_dir):
     return out, entry.get("directory", build_dir)
 
 
+def deployment_header_from_argv(argv):
+    """Return the deployment feature overlay named by the compile command."""
+    prefix = "-DHW1_DEPLOYMENT_CONFIG_HEADER="
+    for token in argv:
+        if token.startswith(prefix):
+            value = token[len(prefix):].strip()
+            # CMake emits a C string literal. shlex removes shell quoting but
+            # deliberately leaves the quotes that form part of the macro.
+            value = value.strip('"')
+            return os.path.abspath(value) if value else None
+    return None
+
+
 def resolve_macros(build_dir, artifact_path=None):
     """Ask the real compiler for the resolved value of every interesting macro.
 
@@ -101,17 +114,25 @@ def resolve_macros(build_dir, artifact_path=None):
     a later run would confidently print values this image was never built with.
     Wrong values are worse than absent ones.
     """
-    hdr = os.path.join(REPO, "components", "hardwareone", "System_BuildConfig.h")
-    if artifact_path and os.path.exists(artifact_path) and os.path.exists(hdr):
-        if os.path.getmtime(hdr) > os.path.getmtime(artifact_path):
-            return None, ("STALE — System_BuildConfig.h was modified after this image "
-                          "was linked, so the flags it was built with can no longer be "
-                          "recovered (they are resolved from the header's current text). "
-                          "Rebuild this board to regenerate an accurate manifest.")
-
     argv, cwd = compiler_cmd_for_buildconfig(build_dir)
     if not argv:
         return None, "compile_commands.json unavailable (build not configured?)"
+    hdr = os.path.join(REPO, "components", "hardwareone", "System_BuildConfig.h")
+    deployment_hdr = deployment_header_from_argv(argv)
+    source_headers = [hdr]
+    if deployment_hdr:
+        if not os.path.isfile(deployment_hdr):
+            return None, ("deployment feature overlay recorded by this build is missing: "
+                          "%s" % deployment_hdr)
+        source_headers.append(deployment_hdr)
+    if artifact_path and os.path.exists(artifact_path):
+        changed = [path for path in source_headers
+                   if os.path.getmtime(path) > os.path.getmtime(artifact_path)]
+        if changed:
+            names = ", ".join(os.path.relpath(path, REPO) for path in changed)
+            return None, ("STALE — %s changed after this image was linked, so its "
+                          "feature flags can no longer be recovered from current source. "
+                          "Rebuild this board to regenerate an accurate manifest." % names)
 
     with tempfile.TemporaryDirectory() as td:
         # Pass 1: what is defined at all?
@@ -124,9 +145,8 @@ def resolve_macros(build_dir, artifact_path=None):
         except Exception as e:
             return None, "preprocessor invocation failed: %s" % e
         if p1.returncode != 0:
-            # Most likely cause: System_BuildConfig.h has been edited since this
-            # build (feature flags live in ONE shared file — the per-board build
-            # dirs isolate sdkconfig only). Surface the compiler's own words.
+            # Most likely cause: a build-configuration header has been edited
+            # since this image was linked. Surface the compiler's own words.
             err = ""
             for line in p1.stderr.splitlines():
                 clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]|\[\d+m\[K|\[K", "", line)
@@ -180,7 +200,12 @@ def resolve_macros(build_dir, artifact_path=None):
             mv = re.match(r'HW1VAL\s+"(\w+)"\s+(.*)$', line)
             if mv:
                 value[mv.group(1)] = mv.group(2).strip()
-        return {"bool": boolean, "value": value, "names": ordered}, None
+        return {
+            "bool": boolean,
+            "value": value,
+            "names": ordered,
+            "deployment_header": deployment_hdr,
+        }, None
 
 
 def read_sdkconfig(build_dir):
@@ -230,13 +255,12 @@ def artifact_info(build_dir):
     if os.path.exists(binp):
         out["bin_path"] = os.path.relpath(binp, REPO)
         out["bin_bytes"] = os.path.getsize(binp)
-    # App partition size — read THIS build's own partition table image, not the
-    # repo-root partitions.csv (that file is regenerated at configure time and
-    # may belong to whichever board configured last).
+    # App partition size — read THIS build's own partition table image.
     ptbin = os.path.join(build_dir, "partition_table", "partition-table.bin")
     csv_text = None
     if os.path.exists(ptbin):
-        gen = os.path.join(os.environ.get("IDF_PATH", ""), "components",
+        idf_path = (proj or {}).get("idf_path") or os.environ.get("IDF_PATH", "")
+        gen = os.path.join(idf_path, "components",
                            "partition_table", "gen_esp32part.py")
         if os.path.exists(gen):
             try:
@@ -248,22 +272,55 @@ def artifact_info(build_dir):
             except Exception:
                 pass
     if csv_text is None:
-        root_csv = os.path.join(REPO, "partitions.csv")
-        if os.path.exists(root_csv):
-            csv_text = open(root_csv, errors="replace").read()
-            out["part_source"] = ("repo-root partitions.csv — shared/generated, "
-                                  "may reflect another board")
+        # The selected path is also recorded in this build's sdkconfig. This
+        # remains authoritative when the IDF partition decoder is unavailable.
+        sdkconfig = os.path.join(build_dir, "sdkconfig")
+        if os.path.isfile(sdkconfig):
+            for line in open(sdkconfig, errors="replace"):
+                match = re.match(
+                    r'^CONFIG_PARTITION_TABLE_FILENAME="([^"]+)"$',
+                    line.strip(),
+                )
+                if not match:
+                    continue
+                configured = match.group(1)
+                partition_path = (
+                    configured
+                    if os.path.isabs(configured)
+                    else os.path.join(REPO, configured)
+                )
+                if os.path.isfile(partition_path):
+                    csv_text = open(partition_path, errors="replace").read()
+                    out["part_source"] = os.path.relpath(partition_path, REPO)
+                break
+    app_partitions = []
     for line in (csv_text or "").splitlines():
         if line.strip().startswith("#") or "," not in line:
             continue
         parts = [p.strip() for p in line.split(",")]
         if len(parts) >= 5 and parts[1] == "app":
             try:
-                out["app_part_bytes"] = int(parts[4], 0)
-                out["app_part_name"] = parts[0]
+                raw_size = parts[4]
+                multiplier = 1
+                if raw_size.upper().endswith("K"):
+                    multiplier = 1024
+                    raw_size = raw_size[:-1]
+                elif raw_size.upper().endswith("M"):
+                    multiplier = 1024 * 1024
+                    raw_size = raw_size[:-1]
+                app_partitions.append(
+                    (parts[0], int(raw_size, 0) * multiplier)
+                )
             except Exception:
                 pass
-            break
+    if app_partitions:
+        # HardwareOne recovery layouts boot the golden updater from factory and
+        # place the main firmware in ota_0. Ordinary layouts have only factory.
+        selected = next(
+            (part for part in app_partitions if part[0] == "ota_0"),
+            app_partitions[0],
+        )
+        out["app_part_name"], out["app_part_bytes"] = selected
     return out
 
 
@@ -273,12 +330,13 @@ def fmt_kb(n):
 
 def main():
     if len(sys.argv) < 2:
-        die("usage: gen_build_info.py <build-dir> [board]")
+        die("usage: gen_build_info.py <build-dir> [board] [deployment-selector]")
     build_dir = os.path.abspath(sys.argv[1])
     if not os.path.isdir(build_dir):
         die("no such build dir: %s" % build_dir)
     board = sys.argv[2] if len(sys.argv) > 2 else (
         os.path.basename(build_dir).replace("build-", "") or "(default)")
+    deployment = sys.argv[3] if len(sys.argv) > 3 else ""
 
     art = artifact_info(build_dir)
     art_abs = os.path.join(REPO, art["bin_path"]) if art.get("bin_path") else None
@@ -289,7 +347,8 @@ def main():
 
     L = []
     A = L.append
-    A("# Build manifest — `%s`" % board)
+    identity = deployment or board
+    A("# Build manifest — `%s`" % identity)
     A("")
     A("_Generated by `tools/gen_build_info.py` at build time. Regenerated on every")
     A("build; do not hand-edit._")
@@ -299,6 +358,8 @@ def main():
         A("**Board:** %s (`HW_BOARD=%s`)  " % (board_name, board))
     else:
         A("**Board:** `HW_BOARD=%s`  " % board)
+    if deployment:
+        A("**Deployment:** `%s`  " % deployment)
     A("**Chip:** %s  " % cfg.get("CONFIG_IDF_TARGET", "?"))
     A("**Built:** %s  " % now.strftime("%Y-%m-%d %H:%M:%S %Z"))
     if commit:
@@ -377,11 +438,22 @@ def main():
     A("## Reproduce this build")
     A("")
     A("```bash")
-    A("tools/build_board.sh %s" % board)
+    if deployment:
+        family, deployment_board = deployment.split("/", 1)
+        A("HW1_OTA_SIGNING_KEY=/absolute/path/to/key.pem \\")
+        A("  tools/build_deployment.sh %s %s" % (family, deployment_board))
+    else:
+        A("tools/build_board.sh %s" % board)
     A("```")
     A("")
-    A("Feature flags come from `components/hardwareone/System_BuildConfig.h`")
-    A("(edit the user-config section at the top); board/chip settings come from")
+    if deployment and macros and macros.get("deployment_header"):
+        overlay = os.path.relpath(macros["deployment_header"], REPO)
+        A("Feature defaults come from `components/hardwareone/System_BuildConfig.h` and")
+        A("are overridden by the checked-in deployment policy `%s`;" % overlay)
+    else:
+        A("Feature flags come from `components/hardwareone/System_BuildConfig.h`")
+        A("(edit the user-config section at the top);")
+    A("board/chip settings come from")
     A("`boards/%s.defaults`. Values above were resolved by the compiler for this" % board)
     A("exact build, so they include derived flags, not just the literals in the header.")
     A("")

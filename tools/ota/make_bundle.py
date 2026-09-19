@@ -37,7 +37,12 @@ BUNDLE_MEMBERS = (
     BUNDLE_IMAGE,
 )
 MAX_MANIFEST_SIZE = 2048
-MAX_IMAGE_SIZE = 0x5A0000
+# Absolute parser guard. The board/layout-specific limit is resolved from the
+# signed manifest below; this ceiling only prevents unreasonable ZIP members
+# before identity has been decoded.
+MAX_IMAGE_SIZE = max(
+    make_manifest.board_slot_size(board) for board in make_manifest.BOARD_LAYOUTS
+)
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -87,8 +92,22 @@ def verify_pair(
             raise ValueError(f"{label} not found: {path}")
     size = image.stat().st_size
     if size <= 0 or size > MAX_IMAGE_SIZE:
-        raise ValueError(f"image size {size} does not fit ota_0 ({MAX_IMAGE_SIZE} bytes)")
+        raise ValueError(f"image size {size} exceeds the OTA bundle parser limit")
     payload, signature, fields = _manifest_parts(manifest)
+    contract = make_manifest.contract_for_identity(
+        str(fields["boardId"]), str(fields["layoutId"])
+    )
+    slot_size = int(
+        contract.get("slot_size")
+        or make_manifest.board_slot_size(str(fields["boardId"]))
+    )
+    release_limit = int(contract.get("main_release_max") or slot_size)
+    if size > slot_size:
+        raise ValueError(f"image size {size} does not fit ota_0 ({slot_size} bytes)")
+    if size > release_limit:
+        raise ValueError(
+            f"image size {size} exceeds the {release_limit}-byte release gate"
+        )
     make_manifest.verify_payload(payload, signature, public_key)
     project, version = make_manifest.read_app_descriptor(image)
     actual = {
@@ -176,10 +195,19 @@ def inspect_bundle(path: pathlib.Path) -> dict[str, object]:
         if bundle.getinfo(BUNDLE_MANIFEST).file_size > MAX_MANIFEST_SIZE:
             raise ValueError("manifest exceeds the recovery limit")
         if not 0 < bundle.getinfo(BUNDLE_IMAGE).file_size <= MAX_IMAGE_SIZE:
-            raise ValueError("firmware image exceeds ota_0")
+            raise ValueError("firmware image exceeds the OTA bundle parser limit")
         payload, _signature, fields = _manifest_parts_from_bytes(
             bundle.read(BUNDLE_MANIFEST)
         )
+        contract = make_manifest.contract_for_identity(
+            str(fields["boardId"]), str(fields["layoutId"])
+        )
+        slot_size = int(contract.get("slot_size") or make_manifest.board_slot_size(
+            str(fields["boardId"])
+        ))
+        release_limit = int(contract.get("main_release_max") or slot_size)
+        if bundle.getinfo(BUNDLE_IMAGE).file_size > min(slot_size, release_limit):
+            raise ValueError("firmware image exceeds its board/layout release limit")
         if len(payload) != make_manifest.PAYLOAD_SIZE:
             raise ValueError("manifest payload has the wrong size")
         image_digest = hashlib.sha256(bundle.read(BUNDLE_IMAGE)).hexdigest()

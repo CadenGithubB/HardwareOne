@@ -22,6 +22,8 @@ mechanism; do NOT use Conventional Commit type()/scope prefixes.
 
 ## SemVer (pre-1.0)
 PATCH = fixes/docs. MINOR = backward-compatible features. Breaking changes bump MINOR (pre-1.0).
+An optional fourth number marks a point release on top of X.Y.Z (e.g. `0.99.94.1`); the OTA
+protocol, recovery updater and `tools/ota/semver.py` accept it and order it between X.Y.Z and the next patch.
 
 ## Cut a release
 1. Draft notes from `git log <last-tag>..HEAD --oneline`, grouped into Added / Changed / Fixed / Security / Docs.

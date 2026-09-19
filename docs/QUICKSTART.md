@@ -1,4 +1,4 @@
-# HardwareOne v0.99.94 - Quick Start Guide
+# HardwareOne v0.99.94.1 - Quick Start Guide
 
 This guide will help you get up and running with Hardware One.
 
@@ -6,7 +6,7 @@ This guide will help you get up and running with Hardware One.
 
 Choose the setup that matches your deployment type. All types use the same Software Setup steps that follow.
 
-### Barebones / Headless Node
+### Headless Node
 1. Just your board and a USB-C cable.
 2. Connect it to your computer and continue to Software Setup.
 
@@ -116,7 +116,8 @@ The wrapper reads the chip target from the board file's `# HW_TARGET:` marker an
 > pass one as a board name - the selectable boards are the files with no `.ota`
 > in the middle.
 
-> **Do not run two boards' builds at the same time.** The root `partitions.csv` is generated at configure time and read during the build - it is the one file the per-board directories still share. Serialize them.
+Different board builds may run at the same time. Each build directory points
+directly at its selected checked-in partition table.
 
 Each successful build also writes `build-<board>/BUILD_INFO.md`: a manifest of what that image actually contains - every feature flag as the compiler resolved it, chip / PSRAM / flash settings, image size and partition headroom, and the git commit it came from.
 
@@ -217,7 +218,7 @@ Basic mode's question is *"What will you use this device for?"*. Pick one of fou
 | Archetype | Needs compiled in | Pre-enables |
 | --------- | ----------------- | ----------- |
 | **Standard Handheld** | OLED + an input device | WiFi, web, I2C, OLED, input, automations |
-| **Headless / relay** | - | WiFi, web, I2C, ESP-NOW, automations |
+| **Headless Node** | - | WiFi, web, ESP-NOW, Bluetooth |
 | **G2 Companion** | Bluetooth | WiFi, web, I2C, Bluetooth, automations |
 | **Meshed Node** | ESP-NOW | WiFi, I2C, ESP-NOW, automations |
 

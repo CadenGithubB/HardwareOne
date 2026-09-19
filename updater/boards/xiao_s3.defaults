@@ -1,0 +1,37 @@
+# HW_TARGET: esp32s3
+#
+# Recovery updater board file — Seeed XIAO ESP32-S3 (Pocket Assistant).
+#
+# Flash size is load-bearing twice: it configures esptool AND, for a legacy
+# board-only layout, it selects the shared partition CSV in
+# updater/CMakeLists.txt. It must agree with boards/xiao_s3.defaults. The
+# Pocket Assistant deployment supplies its own table instead, but the value is
+# still validated against the contract's FLASH_SIZE.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_OFFSET=0x9000
+
+# This board must never build with flash encryption; only feathers3_fe does.
+# The explicit =n is the same two-part guard as boards/xiao_s3.defaults: the
+# S3 has an HMAC peripheral, so CONFIG_NVS_ENCRYPTION does NOT fall away on its
+# own when flash encryption is turned off, and a stale =y would burn an eFuse
+# key block on the first nvs_flash_init().
+CONFIG_SECURE_FLASH_ENC_ENABLED=n
+CONFIG_NVS_ENCRYPTION=n
+
+# Console: the S3 exposes a native USB-Serial/JTAG peripheral, and the updater
+# installs its interrupt-driven driver so a blocking stdio read waits for a
+# whole line. This is also the only console the XIAO can use here — the
+# application owns UART0 (GPIO43/44) for the CM5 host link.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Power interlock: the XIAO has no battery hardware — no gauge and no VBAT
+# divider (BATTERY_MONITOR_AVAILABLE is 0 in System_BuildConfig.h). There is
+# nothing to sample, so the interlock reports external power, as on qtpy_esp32.
+CONFIG_HW1_UPDATER_POWER_NONE=y
+
+# No PSRAM in the recovery image; it verifies and writes one partition. This
+# also keeps the updater independent of the board's octal-PSRAM mode, which the
+# application needs and a recovery image has no reason to configure.
+CONFIG_SPIRAM=n

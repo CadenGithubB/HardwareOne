@@ -1,0 +1,30 @@
+# Pocket Assistant sdkconfig overlay — Seeed XIAO ESP32-S3.
+#
+# Layered LAST, after config/sdkconfig.defaults, boards/xiao_s3.defaults,
+# config/sdkconfig.ota.defaults and boards/<board>.ota.defaults, so the values
+# here win.  It applies to the main application only; the recovery updater is a
+# separate project and takes its configuration from updater/boards/xiao_s3.defaults.
+#
+# Deployments describe policy, boards describe hardware.  This file exists
+# because ONE piece of this deployment's policy has to be expressed in
+# sdkconfig rather than in features.h.
+#
+# boards/xiao_s3.defaults sets CONFIG_BT_ENABLED=n, which was correct for the
+# standalone XIAO image it was written for (an on-device-LLM build that
+# overflowed its factory partition by 0x3ff0 with Bluedroid linked in).  That
+# is a per-image trade, not a property of the silicon — the S3 has a BLE radio.
+#
+# This is load-bearing, and it fails SILENTLY if removed.  The derived rules in
+# System_BuildConfig.h and the mirrored downgrade in
+# components/hardwareone/CMakeLists.txt both force ENABLE_BLUETOOTH to 0 when
+# the active sdkconfig has no Bluedroid, and ENABLE_G2_GLASSES / ENABLE_R1_HEALTH
+# follow it down.  The result would be a green build of a "Pocket Assistant"
+# with no glasses, no ring and no BLE — which is the entire product.
+#
+# The other three keys are already y in config/sdkconfig.defaults.esp32s3;
+# they are restated so this overlay is a complete, readable statement of the
+# BT contract instead of a single line that only makes sense next to another file.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y

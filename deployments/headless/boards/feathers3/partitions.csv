@@ -1,0 +1,16 @@
+# Headless Node — Unexpected Maker FeatherS3 / FeatherS3[D] — 16 MB flash.
+#
+# Golden factory recovery + one 4.5 MiB main slot. Direct recovery HTTP writes
+# ota_0; it never needs enough LittleFS space to stage the firmware image.
+# The signed release gate is 4 MiB, preserving 512 KiB of app-slot headroom.
+#
+# This deployment has its own identity and layout. Installing it replaces the
+# generic FeatherS3 LittleFS geometry and therefore requires a cable migration.
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0xA000,    0x4000,
+nvs_key,    data, nvs_keys, 0xE000,    0x1000,    encrypted
+phy_init,   data, phy,      0xF000,    0x1000,
+factory,    app,  factory,  0x10000,   0x14E000,
+otadata,    data, ota,      0x15E000,  0x2000,    encrypted
+ota_0,      app,  ota_0,    0x160000,  0x480000,
+littlefs,   data, littlefs, 0x5E0000,  0xA20000,  encrypted

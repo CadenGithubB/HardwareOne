@@ -33,6 +33,24 @@ set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_FAN 0)
 if(EXISTS "${hw_cfg_file}")
     file(READ "${hw_cfg_file}" HW_CFG_CONTENT)
 
+    # A checked-in deployment profile overrides the editable defaults in
+    # System_BuildConfig.h. Put its text first so the existing first-match regex
+    # parser sees the deployment values, exactly as the C preprocessor will after
+    # System_BuildConfig.h includes the file before its derived rules.
+    if(DEFINED HW1_DEPLOYMENT_FEATURE_FILE AND
+       NOT "${HW1_DEPLOYMENT_FEATURE_FILE}" STREQUAL "")
+        if(NOT EXISTS "${HW1_DEPLOYMENT_FEATURE_FILE}")
+            message(FATAL_ERROR
+                "HW1 deployment feature header is missing: ${HW1_DEPLOYMENT_FEATURE_FILE}")
+        endif()
+        file(READ "${HW1_DEPLOYMENT_FEATURE_FILE}" _hw_deployment_features)
+        set(HW_CFG_CONTENT "${_hw_deployment_features}\n${HW_CFG_CONTENT}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${HW1_DEPLOYMENT_FEATURE_FILE}")
+        message(STATUS
+            "HardwareOne feature profile: ${HW1_DEPLOYMENT_FEATURE_FILE}")
+    endif()
+
     # Helper-equivalent: extract `#define NAME <integer>` from the header
     # and bind it to the matching HW_CFG_* variable. Inline-repeated
     # because CMake macros over file scope add more rope than this is
@@ -150,6 +168,18 @@ if(EXISTS "${hw_cfg_file}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_FAN "${CMAKE_MATCH_1}")
     endif()
+endif()
+
+# XIAO carrier policy: it has no built-in I2C display/input hardware, and its
+# Bluetooth/G2 image needs the space otherwise consumed by MQTT and that stack.
+# Mirror the board-only System_BuildConfig.h override above so the source list
+# excludes the same implementations rather than compiling guarded-empty TUs.
+if(DEFINED ENV{HW_BOARD} AND "$ENV{HW_BOARD}" STREQUAL "xiao_s3")
+    set(HW_CFG_ENABLE_MQTT 0)
+    set(HW_CFG_I2C_FEATURE_LEVEL 0)
+    set(HW_CFG_DISPLAY_TYPE 0)
+    set(HW_CFG_INPUT_DEVICE_TYPE 0)
+    message(STATUS "XIAO board profile: MQTT/I2C/OLED/input EXCLUDED for Bluetooth/G2 headroom")
 endif()
 
 # The active board's sdkconfig is ground truth for whether the Bluedroid stack

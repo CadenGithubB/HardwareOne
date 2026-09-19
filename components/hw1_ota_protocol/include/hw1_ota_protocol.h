@@ -51,10 +51,22 @@ extern "C" {
 #define HW1_OTA_VERSION_SUFFIX_FEATHERS3_PLAIN "+f3o1"
 #define HW1_OTA_VERSION_SUFFIX_FEATHERS3_FLASH_ENCRYPTED "+f3feo1"
 
+// Headless Node deployment for the same plain FeatherS3 physical board.  Its
+// lean application/LittleFS split is intentionally incompatible with the
+// generic FeatherS3 recovery layout.
+#define HW1_OTA_LAYOUT_ID_HEADLESS_FEATHERS3_V1 "hw1-hl-f3-ota-v1"
+#define HW1_OTA_VERSION_SUFFIX_HEADLESS_FEATHERS3_V1 "+f3ho1"
+
 /* Adafruit Feather ESP32 V2 -- classic ESP32, 8 MB flash, no flash encryption. */
 #define HW1_OTA_BOARD_ID_FEATHER_ESP32_V2 "feather_esp32_v2"
 #define HW1_OTA_LAYOUT_ID_FEATHER_ESP32_V2_OTA_V1 "hw1-fv2-ota-v1"
 #define HW1_OTA_VERSION_SUFFIX_FEATHER_ESP32_V2 "+fv2o1"
+
+// Headless Node is a deployment identity layered onto the same physical board.
+// It has different partition geometry and must never accept the legacy Feather
+// V2 layout's artifacts (or vice versa).
+#define HW1_OTA_LAYOUT_ID_HEADLESS_FEATHER_ESP32_V2_V1 "hw1-hl-fv2-ota-v1"
+#define HW1_OTA_VERSION_SUFFIX_HEADLESS_FEATHER_ESP32_V2_V1 "+fv2ho1"
 
 /* Adafruit QT Py ESP32 -- same die and flash size as the Feather V2, but no
  * Bluetooth and no battery hardware. Distinct ids all the same: the layout is
@@ -63,6 +75,14 @@ extern "C" {
 #define HW1_OTA_BOARD_ID_QTPY_ESP32 "qtpy_esp32"
 #define HW1_OTA_LAYOUT_ID_QTPY_ESP32_OTA_V1 "hw1-qtpy-ota-v1"
 #define HW1_OTA_VERSION_SUFFIX_QTPY_ESP32 "+qtpyo1"
+
+/* Seeed XIAO ESP32-S3 -- ESP32-S3, 8 MB flash, octal PSRAM, no flash
+ * encryption. Unlike every board above, this one has NO board-only recovery
+ * layout: it reaches the OTA system solely as the Pocket Assistant deployment,
+ * whose 8 MB split gives the application 5,760 KiB and LittleFS 1,216 KiB. */
+#define HW1_OTA_BOARD_ID_XIAO_S3 "xiao_s3"
+#define HW1_OTA_LAYOUT_ID_POCKET_ASSISTANT_XIAO_S3_V1 "hw1-pa-xiao-ota-v1"
+#define HW1_OTA_VERSION_SUFFIX_POCKET_ASSISTANT_XIAO_S3_V1 "+xiaopa1"
 
 /* Pass this expected sequence only when optimistic conflict checking is unwanted. */
 #define HW1_OTA_SEQUENCE_ANY UINT32_MAX
@@ -347,6 +367,7 @@ hw1_ota_status_t hw1_ota_manifest_validate(
     uint32_t observed_image_size,
     const uint8_t observed_image_sha256[HW1_OTA_SHA256_SIZE],
     uint32_t *mismatches);
+/* major.minor.patch[.revision][-prerelease][+build]; a missing revision is 0. */
 int hw1_ota_semver_compare(const char *left, const char *right, bool *valid);
 
 void hw1_ota_record_init(hw1_ota_record_t *record);

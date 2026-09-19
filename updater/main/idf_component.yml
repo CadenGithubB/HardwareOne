@@ -1,0 +1,4 @@
+dependencies:
+  joltwallet/littlefs:
+    # Match the version already qualified and locked by the main firmware.
+    version: "==1.20.4"

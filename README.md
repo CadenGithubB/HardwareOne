@@ -6,7 +6,7 @@
   <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
 </picture>
 
-# Hardware One v0.99.94
+# Hardware One v0.99.94.1
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
 
@@ -24,15 +24,16 @@ On any single device, control works the same way no matter how you reach it: one
 
 Hardware One can be used in several different ways depending on the hardware you attach and the role you want the device to play:
 
-### 1) Barebones / Headless Node
+### 1) Headless Node
 - Just the microcontroller board - no display, no sensors, no gamepad.
-- Full web UI, ESP-NOW, WiFi, CLI, MQTT, automation, and remote management features still available.
+- WiFi, web, ESP-NOW, Bluetooth, Automations, CLI, signed recovery OTA, and remote management remain available in the checked-in lean deployment.
 - Good for relay nodes and remote endpoints.
+- Reproducible per-board profiles live under [`deployments/headless/`](deployments/headless/README.md); this is a deployment family, not a new hardware board.
 
 ### 2) Sensor Appliance
 - Build a dedicated single-purpose device around one or more sensors, such as IMU, gamepad, thermal sensor, GPS, RTC, ToF, or presence.
 - Useful for fixed installs where you want one job done well without having all features compiled in.
-- Can still expose data over web, CLI, automations, MQTT, and ESP-NOW like the barebones / headless node.
+- Can still expose data over web, CLI, automations, MQTT, and ESP-NOW like a Headless Node when those optional modules are included.
 
 ### 3) Hardware One (Standard Handheld)
 - The intended full build: board + SSD1306 OLED + Seesaw gamepad (or ANO rotary encoder) + a selection of I2C sensors.
@@ -68,7 +69,7 @@ Hardware One can be used in several different ways depending on the hardware you
 
 > The **Wearable Companion** configuration is not a column here - the G2 glasses and R1 ring are interfaces that compose with any of the four builds below.
 
-| Feature | Barebones | Sensor Appliance | Standard Handheld | Bonded |
+| Feature | Headless Node | Sensor Appliance | Standard Handheld | Bonded |
 | ------- | :-------: | :--------------: | :---------------: | :----: |
 | Serial CLI with full command system | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | LittleFS file system | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
@@ -76,13 +77,13 @@ Hardware One can be used in several different ways depending on the hardware you
 | WiFi (connect, auto-reconnect, AP scan) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
 | Web UI (browser-based control & monitoring) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
 | Authentication (4 role tiers: guest / user / admin / super admin) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
-| HTTPS (TLS web server, self-signed or uploaded certs) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| HTTPS (TLS web server, self-signed or uploaded certs) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Notifications (OLED banners, web toasts, G2 cards, notification center) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | Backup & restore (`.hwbackup` migration between devices) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| Signed OTA firmware updates - opt-in `HW_OTA_LAYOUT=1` build-time layout, not a `System_BuildConfig.h` flag (staged to the filesystem, over Bluetooth on builds that include it, or uploaded to the recovery SoftAP; applied by a factory recovery image) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Signed OTA firmware updates - opt-in `HW_OTA_LAYOUT=1` build-time layout, not a `System_BuildConfig.h` flag (staged to the filesystem, over Bluetooth on builds that include it, or uploaded to the recovery SoftAP; applied by a factory recovery image) | ✅ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | ESP-NOW V3 (peer discovery, pairing, bonding) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | ESP-NOW metadata sync & file transfer | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
-| MQTT (Home Assistant integration) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
+| MQTT (Home Assistant integration) | ❌ | ✅ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
 | Automations (scheduled & conditional commands) | ✅ | ✅ | ✅ | ⚙️&nbsp;+&nbsp;✅ |
 | Seesaw gamepad input | ❌ | ❌ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
 | ANO rotary encoder input (alternative to the gamepad) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
@@ -98,14 +99,14 @@ Hardware One can be used in several different ways depending on the hardware you
 | PDM microphone (I2S audio capture) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;✅ |
 | TEA5767 FM Radio receiver | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | ESP-SR voice commands (wake word + command recognition) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;✅ |
-| BLE server + Even Realities G2 glasses client | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| BLE server + Even Realities G2 glasses client | ✅ server / ❌ G2 | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | R1 smart ring - health vitals, graphs, health logging | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| Offline maps + waypoints | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| Browser games (Tilt Maze or A Dark Room - one per build) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| LLM assistant (tiny on-device model on ESP32-S3 + PSRAM, and/or answered by the Pi co-processor) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| Raspberry Pi co-processor over UART (LLM, speech-to-text, dictation, power/fan control, clock) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Offline maps + waypoints | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Browser games (Tilt Maze or A Dark Room - one per build) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| LLM assistant (tiny on-device model on ESP32-S3 + PSRAM, and/or answered by the Pi co-processor) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Raspberry Pi co-processor over UART (LLM, speech-to-text, dictation, power/fan control, clock) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| Battery monitoring (LiPo voltage via ADC) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Battery monitoring (LiPo voltage via ADC) | ✅ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | PCA9685 servo controller | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 
 > If a module is enabled in the build config but not physically connected, its commands will gracefully fail - nothing breaks.
@@ -189,7 +190,21 @@ tools/build_board.sh xiao_s3 -p PORT flash monitor
 
 `tools/build_board.sh <board> [idf.py args...]` gives each board its own `build-<board>/` directory and its own sdkconfig, so switching boards never needs an `idf.py fullclean`.
 
-The feature flags (which sensors, which web modules, which network features) live in one file: `components/hardwareone/System_BuildConfig.h`. Set the flags for the device you are building, rebuild, done - the values already in that file are one example configuration, not a contract. The recovery OTA layout is the exception: it is selected at build time with `HW_OTA_LAYOUT=1`, not by a flag in that file.
+Checked-in deployment profiles add a second, independent axis on top of the
+physical board. For example, paired Headless Node updater/main releases are:
+
+```bash
+HW1_OTA_SIGNING_KEY=/absolute/path/to/key.pem \
+  tools/build_deployment.sh headless feather_esp32_v2
+
+HW1_OTA_SIGNING_KEY=/absolute/path/to/key.pem \
+  tools/build_deployment.sh headless feathers3
+```
+
+Ordinary builds take their feature flags (sensors, web modules, and network
+features) from `components/hardwareone/System_BuildConfig.h`. Checked-in
+deployment builds apply their own feature overlay and OTA/partition contract,
+so the same release can be reproduced without editing that shared header.
 
 If your build enables the G2 glasses / R1 ring Bluetooth support, first apply the small local patches to the managed Arduino BLE component: see [docs/arduino-local-patches/](docs/arduino-local-patches/) (patch file, verify script, and instructions). Building those features against a stock copy of the library fails to link.
 
