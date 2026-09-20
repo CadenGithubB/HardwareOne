@@ -5,6 +5,171 @@
 #include <Arduino.h>     // millis()
 #include <string.h>
 
+// ── Native Conversate (capture-backed lifecycle) ─────────────────────────────
+static bool g2ConversateLanguages(uint8_t* pb, size_t cap, size_t* pos,
+                                   uint32_t field) {
+  static const char* const labels[][2] = {{"OFF", "Off"}};
+  for (const auto& label : labels) {
+    size_t nested = 0;
+    if (!g2PbBeginNested(pb, cap, pos, field, &nested) ||
+        !g2PbWriteString(pb, cap, pos, 1, label[0]) ||
+        !g2PbWriteString(pb, cap, pos, 2, label[1]) ||
+        !g2PbEndNested(pb, cap, pos, nested)) return false;
+  }
+  return true;
+}
+
+size_t g2BuildConversateHeartbeat(uint8_t seq, uint32_t magic,
+                                  uint8_t* out, size_t cap) {
+  uint8_t pb[16]; size_t n = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &n, 1, 255) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) ||
+      !g2PbWriteBytes(pb, sizeof(pb), &n, 11, nullptr, 0)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_CONVERSATE, G2_FLAG_REQUEST, pb, n, out, cap);
+}
+
+size_t g2BuildConversatePrep(uint8_t seq, uint32_t magic,
+                            uint8_t* out, size_t cap) {
+  uint8_t pb[240]; size_t n = 0, list = 0, config = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &n, 1, 3) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) ||
+      !g2PbBeginNested(pb, sizeof(pb), &n, 5, &list) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, 0) ||
+      !g2PbBeginNested(pb, sizeof(pb), &n, 3, &config) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 1, 1) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, 1) ||
+      !g2ConversateLanguages(pb, sizeof(pb), &n, 3) ||
+      !g2PbWriteString(pb, sizeof(pb), &n, 4, "OFF") ||
+      !g2PbEndNested(pb, sizeof(pb), &n, config) ||
+      !g2PbEndNested(pb, sizeof(pb), &n, list)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_CONVERSATE, G2_FLAG_REQUEST, pb, n, out, cap);
+}
+
+size_t g2BuildConversateControl(uint8_t seq, uint32_t magic, bool start,
+                               uint8_t* out, size_t cap, bool transcribe, bool aiCue) {
+  uint8_t pb[240]; size_t n = 0, ctrl = 0, settings = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &n, 1, 1) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) ||
+      !g2PbBeginNested(pb, sizeof(pb), &n, 3, &ctrl) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 1, start ? 1 : 2)) return 0;
+  if (start &&
+      (!g2PbBeginNested(pb, sizeof(pb), &n, 2, &settings) ||
+       !g2PbWriteUint32(pb, sizeof(pb), &n, 1, aiCue) ||
+       !g2PbWriteUint32(pb, sizeof(pb), &n, 2, transcribe) ||
+       !g2PbWriteUint32(pb, sizeof(pb), &n, 3, 0) ||
+       !g2PbWriteUint32(pb, sizeof(pb), &n, 4, 1) ||
+       !g2PbWriteUint32(pb, sizeof(pb), &n, 5, 0) ||
+       !g2PbEndNested(pb, sizeof(pb), &n, settings))) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &n, 4, 0)) return 0;
+  if (start &&
+      (!g2ConversateLanguages(pb, sizeof(pb), &n, 5) ||
+       !g2PbWriteString(pb, sizeof(pb), &n, 6, "OFF"))) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &n, ctrl)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_CONVERSATE, G2_FLAG_REQUEST, pb, n, out, cap);
+}
+
+size_t g2BuildConversatePauseResume(uint8_t seq, uint32_t magic, bool resume,
+                                   uint8_t* out, size_t cap) {
+  uint8_t pb[32]; size_t n = 0, ctrl = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &n, 1, 1) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) ||
+      !g2PbBeginNested(pb, sizeof(pb), &n, 3, &ctrl) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 1, resume ? 4 : 3) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 4, 0) ||
+      !g2PbEndNested(pb, sizeof(pb), &n, ctrl)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_CONVERSATE, G2_FLAG_REQUEST, pb, n, out, cap);
+}
+
+size_t g2BuildConversateInterfaceReply(uint8_t seq, uint32_t magic,
+                                      uint32_t error, bool transcribe, bool aiCue,
+                                      uint8_t* out, size_t cap) {
+  uint8_t pb[40]; size_t n = 0, body = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &n, 1, 165) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) ||
+      !g2PbBeginNested(pb, sizeof(pb), &n, 15, &body) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 1, error) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, transcribe) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 3, aiCue) ||
+      !g2PbEndNested(pb, sizeof(pb), &n, body)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_CONVERSATE, G2_FLAG_REQUEST, pb, n, out, cap);
+}
+
+size_t g2BuildConversateLanguageReply(uint8_t seq, uint32_t magic, uint32_t error,
+                                     uint8_t* out, size_t cap) {
+  uint8_t pb[32]; size_t n = 0, body = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &n, 1, 167) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) ||
+      !g2PbBeginNested(pb, sizeof(pb), &n, 17, &body) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 1, error) ||
+      !g2PbEndNested(pb, sizeof(pb), &n, body)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_CONVERSATE, G2_FLAG_REQUEST, pb, n, out, cap);
+}
+
+bool g2ParseConversateEvent(const uint8_t* pb, size_t len,
+                            G2ConversateEvent* out) {
+  if (!out) return false;
+  *out = {};
+  if (!pb || !len) return false;
+  G2ConversateEvent event{};
+  bool commandSeen = false, magicSeen = false;
+  const uint8_t* body = nullptr; size_t bodyLen = 0;
+  uint32_t bodyField = 0;
+  size_t pos = 0;
+  while (pos < len) {
+    uint32_t field; uint8_t wire; uint64_t value;
+    if (!g2PbReadTag(pb, len, &pos, &field, &wire) || !field) return false;
+    if (field == 1 || field == 2) {
+      if (wire != G2_PB_WIRE_VARINT ||
+          !g2PbReadVarint(pb, len, &pos, &value) || value > UINT32_MAX) return false;
+      bool& seen = field == 1 ? commandSeen : magicSeen;
+      if (seen) return false;
+      seen = true;
+      (field == 1 ? event.command : event.magic) = uint32_t(value);
+    } else if (field >= 3 && field <= 18) {
+      if (body || wire != G2_PB_WIRE_LEN_DELIM ||
+          !g2PbReadVarint(pb, len, &pos, &value) || value > len - pos) return false;
+      body = pb + pos; bodyLen = size_t(value); bodyField = field;
+      pos += bodyLen;
+    } else if (!g2PbSkipField(pb, len, &pos, wire)) return false;
+  }
+  const uint32_t expected = event.command == 2 ? 4 : event.command == 4 ? 6 :
+                            event.command == 161 ? 9 : event.command == 162 ? 10 :
+                            event.command == 164 ? 14 : event.command == 166 ? 16 :
+                            event.command == 168 ? 18 : 0;
+  if (!commandSeen || !magicSeen || !expected || bodyField != expected) return false;
+  pos = 0;
+  bool secondSeen = false, languageSeen = false;
+  while (pos < bodyLen) {
+    uint32_t field; uint8_t wire; uint64_t value;
+    if (!g2PbReadTag(body, bodyLen, &pos, &field, &wire) || !field) return false;
+    if (event.command == 166 && field == 1) {
+      if (languageSeen || wire != G2_PB_WIRE_LEN_DELIM ||
+          !g2PbReadVarint(body, bodyLen, &pos, &value) ||
+          !value || value >= sizeof(event.language) || value > bodyLen - pos) return false;
+      languageSeen = true;
+      for (size_t i = 0; i < value; ++i) {
+        const uint8_t c = body[pos++];
+        if (c < 0x21 || c > 0x7e) return false;
+        event.language[i] = char(c);
+      }
+    } else if (event.command == 164 && field == 2) {
+      if (secondSeen || wire != G2_PB_WIRE_VARINT ||
+          !g2PbReadVarint(body, bodyLen, &pos, &value) || value > UINT32_MAX) return false;
+      secondSeen = true;
+      event.aiCue = uint32_t(value);
+    } else if (field == 1 && event.command != 168) {
+      if (event.hasValue || wire != G2_PB_WIRE_VARINT ||
+          !g2PbReadVarint(body, bodyLen, &pos, &value) || value > UINT32_MAX) return false;
+      event.hasValue = true; event.value = uint32_t(value);
+      if (event.command == 164) event.transcribe = uint32_t(value);
+    } else if (!g2PbSkipField(body, bodyLen, &pos, wire)) return false;
+  }
+  if ((event.command == 4 || event.command == 161) && !event.hasValue) return false;
+  if (event.command == 166 && !languageSeen) return false;
+  *out = event;
+  return true;
+}
+
 // ── CRC-16/CCITT-FALSE ───────────────────────────────────────────────────────
 
 uint16_t g2CrcCcittFalse(const uint8_t* data, size_t len) {

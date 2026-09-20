@@ -73,6 +73,13 @@ bool        audioSetSource(AudioSource src);
 // none is available. `sampleRate` applies to the PDM source (pass 0 for the
 // 16 kHz default); the G2 source is always 16 kHz.
 bool        audioCaptureStart(const char* owner, uint32_t sampleRate = 0);
+// Native Conversate already controls the physical microphone through 0x0B.
+// Claim only its LEFT decoder/ring, never E0 AudioCtrl or a fallback PDM mic.
+// The owner must keep the native session alive and stop this claim afterwards.
+bool        audioCaptureStartG2Native(const char* owner, uint32_t leftGeneration);
+// Freeze input while preserving the buffered tail for the single PCM drainer.
+// Exact native owner only; also used for native PAUSE/RESUME.
+void        audioCapturePauseG2Native(const char* owner, bool paused);
 void        audioCaptureStop(const char* owner);
 bool        audioCaptureActive();   // STARTING or ACTIVE (false once stop wins)
 bool        audioCaptureBusy();     // STARTING, ACTIVE, or STOPPING

@@ -309,6 +309,35 @@ bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire);
 bool g2ParseCommandMagic(const uint8_t* payload, size_t payloadLen,
                          uint32_t* outCommand, uint32_t* outMagic);
 
+// Native Conversate, stock Pixel/G2 capture 2026-09-20. Heartbeat is cmd=255,
+// EMPTY f11 (no EvenAI counter). Only translation OFF is advertised until a
+// translation backend exists. These builders do not send transcript/cue content.
+size_t g2BuildConversateHeartbeat(uint8_t seq, uint32_t magic,
+                                  uint8_t* out, size_t cap);
+size_t g2BuildConversatePrep(uint8_t seq, uint32_t magic,
+                            uint8_t* out, size_t cap);
+size_t g2BuildConversateControl(uint8_t seq, uint32_t magic, bool start,
+                               uint8_t* out, size_t cap,
+                               bool transcribe = true, bool aiCue = true);
+size_t g2BuildConversatePauseResume(uint8_t seq, uint32_t magic, bool resume,
+                                   uint8_t* out, size_t cap);
+size_t g2BuildConversateInterfaceReply(uint8_t seq, uint32_t magic,
+                                      uint32_t error, bool transcribe, bool aiCue,
+                                      uint8_t* out, size_t cap);
+size_t g2BuildConversateLanguageReply(uint8_t seq, uint32_t magic, uint32_t error,
+                                     uint8_t* out, size_t cap);
+struct G2ConversateEvent {
+  uint32_t command = 0, magic = 0, value = 0;
+  bool hasValue = false;
+  uint32_t transcribe = 0, aiCue = 0; // absent proto3 flags mean zero, not unchanged
+  char language[16] = {};
+};
+// Strict RX shapes: PREP, SELECT, STATUS, ACK, interface/language switch, END.
+// value is SELECT.isSkip, STATUS.control or ACK.errorCode. Language is bounded
+// printable ASCII, never a pointer into the notify buffer. Failure zeros out.
+bool g2ParseConversateEvent(const uint8_t* pb, size_t len,
+                            G2ConversateEvent* out);
+
 // Presence-aware decoder for SERVICE_SYNC_INFO_APP_ID (sid=0x0D).
 // `data` is an optional nested message, so hasData distinguishes an absent
 // body from a present-but-empty body. App IDs are protobuf int32 values and

@@ -848,7 +848,9 @@ void g2StopLiveTextPage();
 // and pushes here. Caller must arrange a StartUpPage container is
 // active and `g2micon` has been issued before turning this on, or the
 // firmware won't send audio.
-bool g2MicSetAfeFeedActive(bool on);
+bool g2MicSetAfeFeedActive(bool on, uint32_t nativeLeftGeneration = 0);
+void g2MicPauseAfeFeed(bool paused);
+uint32_t g2MicAfeIntegrityErrors();
 bool g2MicAfeFeedIsActive();
 // Turn the glasses' LC3 audio stream on/off (AudioCtrCmd{AudoFuncEn}) on the
 // LEFT temple only. Idempotent; returns false if the LEFT arm is down or the
@@ -1491,7 +1493,9 @@ inline void g2KickLivePageRefresh() {}
 inline bool g2StartLiveTextPage(G2LivePageBuildFn, uint32_t,
                                 bool (*)() = nullptr) { return false; }
 inline void g2StopLiveTextPage() {}
-inline bool g2MicSetAfeFeedActive(bool) { return false; }
+inline bool g2MicSetAfeFeedActive(bool, uint32_t = 0) { return false; }
+inline void g2MicPauseAfeFeed(bool) {}
+inline uint32_t g2MicAfeIntegrityErrors() { return 0; }
 inline bool g2MicAfeFeedIsActive() { return false; }
 inline bool g2MicStreamEnable(bool) { return false; }
 inline void g2MicLinkFastAcquire() {}

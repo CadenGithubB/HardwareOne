@@ -8,10 +8,12 @@
 #include <esp_attr.h>
 #include <esp_crc.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include "G2_Glasses.h"
+#include "HAL_Audio.h"
 #include "System_AuthIdentity.h"
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -24,6 +26,8 @@ namespace {
 
 constexpr uint8_t kProtocolVersion = 1;
 constexpr uint8_t kSyntheticFlag = 0x01;
+constexpr uint8_t kConversateFlag = 0x02;
+constexpr const char* kConversateOwner = "g2-conversate";
 constexpr uint8_t kSourceSynthetic = 0;
 constexpr uint8_t kFormatS16LeMono = 1;
 constexpr uint32_t kSampleRate = 16000;
@@ -55,12 +59,15 @@ enum AbortReason : uint8_t {
   ABORT_HOST_REQUEST = 5,
   ABORT_TX_BACKPRESSURE = 6,
   ABORT_INTERNAL = 7,
+  ABORT_SOURCE_LOST = 8,
+  ABORT_SAMPLE_LIMIT = 9,
 };
 
 enum StreamMode : uint8_t {
   STREAM_NONE = 0,
   STREAM_SYNTHETIC = 1,
   STREAM_RECORDER = 2,
+  STREAM_CONVERSATE = 3,
 };
 
 enum TerminalDecision : uint8_t {
@@ -73,6 +80,7 @@ struct LeaseState {
   bool valid = false;
   bool shadowEnabled = false;
   bool shadowNative = false;
+  bool conversateEnabled = false;
   uint64_t controller = 0;
   uint64_t shadowExchange = 0;
   uint32_t sessionEpoch = 0;
@@ -90,6 +98,8 @@ struct CaptureArm {
 
 struct StreamState {
   bool active = false;
+  bool starting = false;
+  bool paused = false;
   bool abortRequested = false;
   bool endRequested = false;
   uint8_t abortReason = ABORT_NONE;
@@ -295,6 +305,8 @@ const char* abortReasonName(uint8_t reason) {
     case ABORT_HOST_REQUEST: return "host_abort";
     case ABORT_TX_BACKPRESSURE: return "tx_backpressure";
     case ABORT_INTERNAL: return "internal";
+    case ABORT_SOURCE_LOST: return "source_lost";
+    case ABORT_SAMPLE_LIMIT: return "sample_limit";
     default: return "none";
   }
 }
@@ -303,6 +315,7 @@ const char* streamModeName(uint8_t mode) {
   switch (mode) {
     case STREAM_SYNTHETIC: return "synthetic";
     case STREAM_RECORDER: return "recorder";
+    case STREAM_CONVERSATE: return "conversate";
     default: return "none";
   }
 }
@@ -536,7 +549,7 @@ bool sendPcmFrame(const StreamState& job, uint16_t& seq, uint8_t* pcm,
   putLe32(pcm + 18, sentSamples);
   putLe16(pcm + 22, frameSamples);
   const size_t pcmBytes = static_cast<size_t>(frameSamples) * sizeof(int16_t);
-  memcpy(pcm + 24, bytes, pcmBytes);
+  if (pcm + 24 != bytes) memcpy(pcm + 24, bytes, pcmBytes);
   if (!writeStreamFrame(UARTLINK_FRAME_LIVE_PCM, seq, pcm, 24 + pcmBytes,
                         job.controller, job.exchange, job.sessionEpoch)) {
     return false;
@@ -623,6 +636,60 @@ void runRecorder(const StreamState& job, uint16_t& seq,
   }
 }
 
+// The existing TX worker is the sole native PCM consumer. The BLE decoder's
+// bounded 2-second PSRAM ring absorbs scheduling jitter; no second recorder,
+// shadow queue, task, or filesystem operation is introduced for Conversate.
+void runConversate(const StreamState& job, uint16_t& seq,
+                    uint32_t& sentSamples, uint32_t& crc32,
+                    uint32_t& pcmFrames, uint8_t& reason) {
+#if ENABLE_MICROPHONE
+  // Decode reads straight into the aligned frame payload. Keep this at the
+  // recorder TX path's 1-KiB stack footprint (task stack is only 4 KiB).
+  int16_t storage[UARTLINK_FRAME_MAX_PAYLOAD / sizeof(int16_t)];
+  auto* frame = reinterpret_cast<uint8_t*>(storage);
+  int16_t* samples = storage + 12;
+  while (reason == ABORT_NONE) {
+    reason = streamAbortReason(job.controller, job.exchange, job.sessionEpoch);
+    if (reason != ABORT_NONE) break;
+    if (!audioCaptureOwnedBy(kConversateOwner) || !audioCaptureActive() ||
+        g2MicAfeIntegrityErrors()) {
+      reason = ABORT_SOURCE_LOST;
+      break;
+    }
+    // Snapshot END before reading: seeing it after an empty read could omit
+    // the final packet that raced that read but preceded the input freeze.
+    const bool ending = recorderEndRequested(job);
+    const size_t count = audioReadPcm(samples, kPhysicalFrameSamples, kRecorderPollMs);
+    if (!count) {
+      if (ending) break;
+      continue;
+    }
+    if (count > UINT32_MAX - sentSamples) {
+      reason = ABORT_SAMPLE_LIMIT; // v1 sample offsets must never wrap
+      break;
+    }
+    portENTER_CRITICAL(&sStateMux);
+    sStream.totalSamples = sentSamples + static_cast<uint32_t>(count);
+    portEXIT_CRITICAL(&sStateMux);
+    if (g2MicAfeIntegrityErrors()) {
+      reason = ABORT_SOURCE_LOST;
+      break;
+    }
+    if (!sendPcmFrame(job, seq, frame, reinterpret_cast<uint8_t*>(samples),
+                      static_cast<uint16_t>(count), sentSamples, crc32, pcmFrames)) {
+      reason = currentRequestedAbort(job.controller, job.exchange, job.sessionEpoch);
+      if (reason == ABORT_NONE) reason = ABORT_INTERNAL;
+      break;
+    }
+    sentSamples += static_cast<uint32_t>(count);
+    publishProgress(job, sentSamples, crc32, pcmFrames);
+  }
+#else
+  (void)job; (void)seq; (void)sentSamples; (void)crc32; (void)pcmFrames;
+  reason = ABORT_SOURCE_LOST;
+#endif
+}
+
 void liveAudioTxTask(void*) {
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -630,7 +697,7 @@ void liveAudioTxTask(void*) {
     portENTER_CRITICAL(&sStateMux);
     job = sStream;
     portEXIT_CRITICAL(&sStateMux);
-    if (!job.active) continue;
+    if (!job.active || job.starting) continue;
 
     uint16_t seq = 0;
     uint32_t sentSamples = 0;
@@ -655,6 +722,8 @@ void liveAudioTxTask(void*) {
         runSynthetic(job, seq, sentSamples, crc32, pcmFrames, reason);
       else if (job.mode == STREAM_RECORDER)
         runRecorder(job, seq, sentSamples, crc32, pcmFrames, reason);
+      else if (job.mode == STREAM_CONVERSATE)
+        runConversate(job, seq, sentSamples, crc32, pcmFrames, reason);
       else
         reason = ABORT_INTERNAL;
     }
@@ -679,7 +748,17 @@ void liveAudioTxTask(void*) {
           expected, static_cast<uint8_t>(TERMINAL_ABORT),
           std::memory_order_acq_rel, std::memory_order_acquire);
     }
-    const uint32_t totalSamples = currentTotalSamples(job);
+    uint32_t totalSamples = currentTotalSamples(job);
+#if ENABLE_MICROPHONE
+    if (job.mode == STREAM_CONVERSATE) {
+      audioCapturePauseG2Native(kConversateOwner, true);
+      const size_t buffered = g2MicAfeRingDepth();
+      if (buffered <= UINT32_MAX - totalSamples) totalSamples += buffered;
+      // Native control owner handles CLOSE/FAST. HAL releases only the local
+      // decoder, never sends E0 mic-off or redraws a page.
+      audioCaptureStop(kConversateOwner);
+    }
+#endif
     const uint32_t droppedSamples = totalSamples > sentSamples
                                         ? totalSamples - sentSamples : 0;
     uint8_t terminal[30];
@@ -838,6 +917,105 @@ void liveAudioEndBulkTransfer() {
   portENTER_CRITICAL(&sStateMux);
   sBulkTransferActive = false;
   portEXIT_CRITICAL(&sStateMux);
+}
+
+LiveAudioConversateAdmission liveAudioConversateBegin(uint32_t leftGeneration,
+                                                     uint64_t* exchangeOut) {
+  if (exchangeOut) *exchangeOut = 0;
+#if ENABLE_MICROPHONE
+  if (!exchangeOut || !leftGeneration) return LiveAudioConversateAdmission::Failed;
+  // Only the serialized G2 control owner mints native exchanges. A boot nonce
+  // and monotonic counter prevent old host results/cancellation targeting a
+  // later wearer launch. No reuse at counter exhaustion.
+  static uint32_t nonce = 0, counter = 0;
+  if (!nonce) { do { nonce = esp_random(); } while (!nonce); }
+  const uint32_t now = millis(), epoch = uartLinkSessionEpoch();
+  bool enabled = false, admitted = false;
+  uint64_t exchange = 0;
+  portENTER_CRITICAL(&sStateMux);
+  enabled = sLease.conversateEnabled;
+  if (enabled && !sBulkTransferActive && !sStream.active && sTxTask &&
+      counter != UINT32_MAX && leaseMatchesLocked(sLease.controller, epoch, now)) {
+    exchange = (static_cast<uint64_t>(nonce) << 32) | ++counter;
+    sTerminalDecision.store(TERMINAL_OPEN, std::memory_order_release);
+    sStream = StreamState{};
+    sStream.active = sStream.starting = true;
+    sStream.mode = STREAM_CONVERSATE;
+    sStream.flags = kConversateFlag;
+    sStream.source = static_cast<uint8_t>(LiveAudioRecorderSource::G2);
+    sStream.controller = sLease.controller;
+    sStream.exchange = exchange;
+    sStream.sessionEpoch = epoch;
+    sStream.startedMs = now;
+    admitted = true;
+  }
+  portEXIT_CRITICAL(&sStateMux);
+  if (!enabled) return LiveAudioConversateAdmission::Disabled;
+  if (!admitted) return LiveAudioConversateAdmission::Failed;
+  *exchangeOut = exchange;
+  const bool captured = audioCaptureStartG2Native(kConversateOwner, leftGeneration);
+  portENTER_CRITICAL(&sStateMux);
+  if (!captured) requestAbortLocked(ABORT_SOURCE_LOST);
+  else if (uartLinkSessionEpoch() != epoch) requestAbortLocked(ABORT_AUTH_LOST);
+  else if (!leaseMatchesLocked(sStream.controller, epoch, millis()))
+    requestAbortLocked(ABORT_LEASE_EXPIRED);
+  const bool ready = captured && !sStream.abortRequested;
+  sStream.starting = false;
+  portEXIT_CRITICAL(&sStateMux);
+  xTaskNotifyGive(sTxTask);
+  return ready ? LiveAudioConversateAdmission::Started : LiveAudioConversateAdmission::Failed;
+#else
+  (void)leftGeneration;
+  return LiveAudioConversateAdmission::Disabled;
+#endif
+}
+
+bool liveAudioConversatePending(uint64_t exchange) {
+  portENTER_CRITICAL(&sStateMux);
+  const bool pending = exchange && sStream.active && sStream.mode == STREAM_CONVERSATE &&
+      sStream.exchange == exchange;
+  portEXIT_CRITICAL(&sStateMux);
+  return pending;
+}
+
+bool liveAudioConversateRunning(uint64_t exchange) {
+  portENTER_CRITICAL(&sStateMux);
+  const bool running = exchange && sStream.active && sStream.mode == STREAM_CONVERSATE &&
+      sStream.exchange == exchange && !sStream.abortRequested && !sStream.endRequested;
+  portEXIT_CRITICAL(&sStateMux);
+  return running;
+}
+
+void liveAudioConversatePause(uint64_t exchange, bool paused) {
+#if ENABLE_MICROPHONE
+  // G2 owner serializes pause/finish/begin. A successor native capture cannot
+  // be admitted until this call returns; HAL also checks the exact owner.
+  if (liveAudioConversateRunning(exchange)) {
+    audioCapturePauseG2Native(kConversateOwner, paused);
+    portENTER_CRITICAL(&sStateMux);
+    if (sStream.active && sStream.mode == STREAM_CONVERSATE && sStream.exchange == exchange)
+      sStream.paused = paused;
+    portEXIT_CRITICAL(&sStateMux);
+  }
+#else
+  (void)exchange; (void)paused;
+#endif
+}
+
+void liveAudioConversateFinish(uint64_t exchange, bool clean) {
+  if (!exchange) return;
+  if (liveAudioConversateRunning(exchange)) {
+#if ENABLE_MICROPHONE
+    audioCapturePauseG2Native(kConversateOwner, true);
+#endif
+  }
+  portENTER_CRITICAL(&sStateMux);
+  if (sStream.active && sStream.mode == STREAM_CONVERSATE && sStream.exchange == exchange) {
+    if (clean) sStream.endRequested = true;
+    else requestAbortLocked(ABORT_SOURCE_LOST);
+  }
+  portEXIT_CRITICAL(&sStateMux);
+  if (sTxTask) xTaskNotifyGive(sTxTask);
 }
 
 bool liveAudioRecorderArmNative(uint64_t exchangeId, uint32_t sessionEpoch) {
@@ -1073,7 +1251,8 @@ const char* cmd_liveaudio(const String& argsInput) {
   CommandArgs args(argsInput);
   if (args.count() == 1 && args.arg(0) == "capabilities") {
     snprintf(sReply, sizeof(sReply),
-             "OK: live-pcm-v1 synthetic=1 recorder_shadow=1 "
+             "OK: live-pcm-v1 synthetic=1 recorder_shadow=1 conversate=1 "
+             "conversate_default=off conversate_flag=2 native_duration=user "
              "shadow_default=off protocol=1 frames=0x10/0x11/0x12/0x13 "
              "source=0 recorder_source=1/2 format=1 rate=16000 "
              "renew_direct=1 lease_ttl_ms=%lu lease_renew_ms=%lu "
@@ -1127,11 +1306,11 @@ const char* cmd_liveaudio(const String& argsInput) {
     if (last.valid) formatId(last.exchange, lastExchange);
     snprintf(sReply, sizeof(sReply),
              "OK: liveaudio task=%s baud=%d session_epoch=%lu lease=%s "
-             "lease_epoch=%lu remaining_ms=%lu shadow=%s shadow_mode=%s "
+             "lease_epoch=%lu remaining_ms=%lu conversate=%s shadow=%s shadow_mode=%s "
              "shadow_target=%s shadow_arm=%s shadow_psram=%s q_depth=%lu "
              "q_hwm=%lu shadow_starts=%lu shadow_skips=%lu "
              "shadow_overflows=%lu shadow_alloc_failures=%lu bulk=%d "
-             "active=%d mode=%s source=%u controller=%s exchange=%s "
+             "active=%d mode=%s source=%u controller=%s exchange=%s paused=%d "
              "sent=%lu total=%lu pcm_frames=%lu crc32=%08lx abort=%s "
              "last=%s last_mode=%s last_exchange=%s last_sent=%lu "
              "last_dropped=%lu last_crc32=%08lx last_terminal=%d degraded=%d",
@@ -1139,6 +1318,7 @@ const char* cmd_liveaudio(const String& argsInput) {
              static_cast<unsigned long>(currentSessionEpoch), leaseId,
              static_cast<unsigned long>(lease.sessionEpoch),
              static_cast<unsigned long>(leaseRemaining),
+             lease.conversateEnabled ? "on" : "off",
              lease.shadowEnabled ? "on" : "off",
              lease.shadowNative ? "native" : "exact", shadowTarget,
              armExchange, sShadowStorage ? "ready" : "unavailable",
@@ -1149,7 +1329,7 @@ const char* cmd_liveaudio(const String& argsInput) {
              static_cast<unsigned long>(stats.overflows),
              static_cast<unsigned long>(stats.allocFailures), bulk ? 1 : 0,
              stream.active ? 1 : 0, streamModeName(stream.mode), stream.source,
-             streamController, exchangeId,
+             streamController, exchangeId, stream.paused ? 1 : 0,
              static_cast<unsigned long>(stream.sentSamples),
              static_cast<unsigned long>(stream.totalSamples),
              static_cast<unsigned long>(stream.pcmFrames),
@@ -1217,6 +1397,36 @@ const char* cmd_liveaudio(const String& argsInput) {
              static_cast<unsigned long>(kLeaseRenewMs),
              uartLinkEffectiveBaud());
     return sReply;
+  }
+
+  if (args.count() >= 1 && args.arg(0) == "conversate") {
+    if (args.count() != 4 || args.arg(1) != "1" ||
+        (args.arg(3) != "on" && args.arg(3) != "off"))
+      return "Error: usage: liveaudio conversate 1 <controller_hex16> on|off";
+    uint64_t controller = 0;
+    if (!parseStrictId(args.arg(2), controller))
+      return "Error: invalid controller ID";
+    if (const char* error = requireMutableTransport()) return error;
+#if !ENABLE_MICROPHONE || !ENABLE_G2_GLASSES
+    return "Error: native G2 audio unavailable in this build";
+#else
+    const bool on = args.arg(3) == "on";
+    const uint32_t epoch = uartLinkSessionEpoch(), now = millis();
+    bool matched = false;
+    portENTER_CRITICAL(&sStateMux);
+    if (leaseMatchesLocked(controller, epoch, now)) {
+      matched = true;
+      sLease.conversateEnabled = on;
+      if (!on && sStream.active && sStream.mode == STREAM_CONVERSATE &&
+          sStream.controller == controller && sStream.sessionEpoch == epoch)
+        requestAbortLocked(ABORT_RELEASED);
+    }
+    portEXIT_CRITICAL(&sStateMux);
+    if (!matched) return "Error: liveaudio lease does not match controller";
+    if (sTxTask) xTaskNotifyGive(sTxTask);
+    return on ? "OK: Conversate PCM armed for next wearer launch; renew ready every 1000 ms"
+              : "OK: Conversate PCM disarmed; active native stream cancelled";
+#endif
   }
 
   if (args.count() >= 1 && args.arg(0) == "shadow") {
@@ -1399,13 +1609,13 @@ const char* cmd_liveaudio(const String& argsInput) {
     return sReply;
   }
 
-  return "Error: usage: liveaudio <capabilities|status|ready 1 <controller_hex16>|shadow 1 <controller_hex16> on <exchange_hex16|native>|shadow 1 <controller_hex16> off|release 1 <controller_hex16>|synth 1 <controller_hex16> <exchange_hex16> <duration_ms>|abort 1 <controller_hex16> <exchange_hex16>>";
+  return "Error: usage: liveaudio <capabilities|status|ready 1 <controller_hex16>|conversate 1 <controller_hex16> on|off|shadow 1 <controller_hex16> on <exchange_hex16|native>|shadow 1 <controller_hex16> off|release 1 <controller_hex16>|synth 1 <controller_hex16> <exchange_hex16> <duration_ms>|abort 1 <controller_hex16> <exchange_hex16>>";
 }
 
 const CommandEntry liveAudioCommands[] = {
     {"liveaudio", "Opt-in live PCM transport, lease, and shadow diagnostics",
      false, cmd_liveaudio,
-     "Usage: liveaudio <capabilities|status|ready 1 <controller_hex16>|shadow 1 <controller_hex16> on <exchange_hex16|native>|shadow 1 <controller_hex16> off|release 1 <controller_hex16>|synth 1 <controller_hex16> <exchange_hex16> <duration_ms>|abort 1 <controller_hex16> <exchange_hex16>>"},
+     "Usage: liveaudio <capabilities|status|ready 1 <controller_hex16>|conversate 1 <controller_hex16> on|off|shadow 1 <controller_hex16> on <exchange_hex16|native>|shadow 1 <controller_hex16> off|release 1 <controller_hex16>|synth 1 <controller_hex16> <exchange_hex16> <duration_ms>|abort 1 <controller_hex16> <exchange_hex16>>"},
 };
 
 const size_t liveAudioCommandsCount =

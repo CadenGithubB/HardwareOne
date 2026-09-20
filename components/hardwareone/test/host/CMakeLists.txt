@@ -282,6 +282,13 @@ if(HW1_SANITIZE)
 endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(G2_CONVERSATE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_CONVERSATE_TEST_ARGS --sanitize)
+endif()
+add_test(NAME g2_conversate
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_g2_conversate.py
+          ${G2_CONVERSATE_TEST_ARGS})
 
 enable_testing()
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
@@ -411,6 +418,11 @@ set(OTA_PSRAM_REPLIES_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND OTA_PSRAM_REPLIES_TEST_ARGS --sanitize)
 endif()
+add_test(
+  NAME live_audio
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_live_audio.py
+          ${OTA_PSRAM_REPLIES_TEST_ARGS})
 add_test(
   NAME ota_psram_replies
   COMMAND ${Python3_EXECUTABLE}

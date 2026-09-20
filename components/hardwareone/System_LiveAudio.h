@@ -62,12 +62,24 @@ struct LiveAudioRecorderAuthorization {
   uint32_t sessionEpoch = 0;
 };
 
+// Same framed transport, but native Conversate owns capture rather than a WAV
+// recorder. Only the G2 control owner calls these lifecycle hooks. Admission
+// requires a current UART lease explicitly opted in with `conversate ... on`.
+enum class LiveAudioConversateAdmission : uint8_t { Disabled, Started, Failed };
+
 // ---------------------------------------------------------------------------
 // Everything below needs the module itself. The TYPES above stay unconditional:
 // System_Microphone.cpp holds LiveAudioRecorderAuthorization BY VALUE and takes
 // the enums by reference in eight places, so they must exist on every build.
 // ---------------------------------------------------------------------------
 #if ENABLE_UART_HOST_LINK
+
+LiveAudioConversateAdmission liveAudioConversateBegin(uint32_t leftGeneration,
+                                                     uint64_t* exchangeOut);
+bool liveAudioConversateRunning(uint64_t exchange);
+bool liveAudioConversatePending(uint64_t exchange); // includes terminal cleanup
+void liveAudioConversatePause(uint64_t exchange, bool paused);
+void liveAudioConversateFinish(uint64_t exchange, bool clean);
 
 bool liveAudioRecorderBegin(uint64_t exchangeId,
                             LiveAudioRecorderSource source,
@@ -90,6 +102,14 @@ bool liveAudioRecorderCaptureEligible(
 // Registry command and module table. The command remains registered on boards
 // without a UART host link and fails cleanly there.
 #else  // UART host link compiled out — inert stubs
+inline LiveAudioConversateAdmission liveAudioConversateBegin(uint32_t, uint64_t* id) {
+  if (id) *id = 0;
+  return LiveAudioConversateAdmission::Disabled;
+}
+inline bool liveAudioConversateRunning(uint64_t) { return false; }
+inline bool liveAudioConversatePending(uint64_t) { return false; }
+inline void liveAudioConversatePause(uint64_t, bool) {}
+inline void liveAudioConversateFinish(uint64_t, bool) {}
 //
 // Every return value is behaviourally exact, not merely safe: with the module
 // gone the `liveaudio` command is unregistered, so NotHandled / false are what
