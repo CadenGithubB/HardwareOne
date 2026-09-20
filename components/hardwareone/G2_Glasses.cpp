@@ -31,6 +31,7 @@
 #include <esp_timer.h>        // esp_timer_create/start_once — replaces notifyClearTaskBody
 
 #include "System_G2_Protocol.h"
+#include "G2_ConversateSession.h"
 #include "System_Lz4.h"     // lz4Compress* — CompressMode=2 image push (Q32/Q32f)
 #include "Bluetooth.h"
 #include "System_Debug.h"
@@ -281,6 +282,7 @@ struct G2Temple {
   // while the prefix accumulates the complete protobuf body.
   size_t                       rxFrameHave;
   size_t                       rxFrameExpected;
+  uint32_t                     rxFrameConversateEpoch;
   G2RxReassembly               rxReassembly;
   // Kept only until the former inline parser below is retired after the
   // owner-path hardware soak; it is no longer called by the notify thunks.
@@ -296,6 +298,7 @@ struct G2Temple {
   uint32_t                     rxReassemblyGeneration;
   uint32_t                     rxReassemblyLifecycleEpoch;
   uint32_t                     rxReassemblyPresentationEpoch;
+  uint32_t                     rxReassemblyConversateEpoch;
   // Incremented before every subscribe attempt and on disconnect. Queued
   // notifications stamped by an older link are discarded by the owner.
   uint32_t                     connectionGeneration;
@@ -2970,6 +2973,38 @@ uint16_t bleNegotiateConnMtu(BLEClient* client, uint16_t preferred,
 static bool connectTemple(G2Temple& t);
 static void disconnectTemple(G2Temple& t);
 static bool sendEnvelope(G2Temple& t, const uint8_t* data, size_t len);
+// Native Conversate is explicitly enabled by CLI, never started at boot. Only
+// the control owner mutates lifecycle / sends BLE; the audio callback updates
+// bounded telemetry under this lock. Command producers use a one-slot mailbox.
+static G2ConversateSession gConversate;
+static portMUX_TYPE gConversateMux = portMUX_INITIALIZER_UNLOCKED;
+static int32_t gConversateRequest = 0; // >0 test seconds; -1 stop; -2 off; -3 user-ended on
+static bool gConversateFastHeld = false; // control-owner only
+static uint32_t gConversateMagic = 0;    // byte-bounded rotation, control-owner only
+static uint32_t gConversatePrepMagic = 0, gConversateStartMagic = 0;
+// Only the control owner reads/writes this deferred fresh launch. It cannot
+// start until the previous CLOSE ACK/deadline, and never survives disable.
+static bool gConversateDeferredPrep = false;
+static uint32_t gConversateDeferredMagic = 0;
+static uint32_t gConversateRxEpoch = 1; // atomic callback-to-owner cancellation fence
+static G2ConversateSession g2ConversateSnapshot() {
+  portENTER_CRITICAL(&gConversateMux);
+  const auto snapshot = gConversate;
+  portEXIT_CRITICAL(&gConversateMux);
+  return snapshot;
+}
+static bool g2ConversateActive() {
+  portENTER_CRITICAL(&gConversateMux);
+  const bool active = gConversate.active();
+  portEXIT_CRITICAL(&gConversateMux);
+  return active;
+}
+static void g2ConversateStop(G2ConversateSession::Stop reason,
+                             uint32_t replyMagic = 0);
+static void g2ConversateTick(bool requestsOnly = false);
+static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
+                            const uint8_t* pb, size_t len);
+static bool g2ConversateDeclineEvenAi(G2Temple& temple, uint32_t generation);
 // EvenAI ("Hey Even") session. Native CTRL transitions are decoded by the
 // control owner; disconnect can terminate from the BLE host callback.
 static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration);
@@ -2983,7 +3018,7 @@ static bool sendToBoth(const uint8_t* data, size_t len);
 static void handleNotify(G2Temple& t, const uint8_t* data, size_t len);
 static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
                           uint32_t generation, uint32_t lifecycleEpoch,
-                          uint32_t presentationEpoch);
+                          uint32_t presentationEpoch, uint32_t conversateEpoch);
 static void g2ControlWake();
 static bool g2ControlWorkerEnsure();
 static bool g2ControlWorkerShutdown();
@@ -3989,6 +4024,8 @@ static size_t             gMicAfeRingCount  = 0;
 static lc3_decoder_t      gMicAfeDecoder    = nullptr;
 static void*              gMicAfeDecMem     = nullptr;
 static volatile bool      gMicAfeFeedActive = false;
+static std::atomic<bool> gMicAfePaused{false}; // written under gMicAfeMutex
+static uint32_t          gMicAfeNativeGeneration = 0;
 static uint32_t           gMicAfeOverruns   = 0;
 static std::atomic<uint32_t> gMicAfeMutexDrops{0};
 static std::atomic<uint32_t> gMicAfeDecodeFails{0};
@@ -4023,12 +4060,17 @@ static void micAfeRingPushLocked(const int16_t* src, size_t n) {
   gMicAfeRingCount += n;
 }
 
-bool g2MicSetAfeFeedActive(bool on) {
+bool g2MicSetAfeFeedActive(bool on, uint32_t nativeLeftGeneration) {
   if (!gMicAfeMutex)    gMicAfeMutex    = xSemaphoreCreateMutex();
   if (!gMicAfeReadySem) gMicAfeReadySem = xSemaphoreCreateBinary();
   if (!gMicAfeMutex || !gMicAfeReadySem) return false;
 
   xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
+  if (on && nativeLeftGeneration &&
+      !g2TempleReadyAtGeneration(gL, nativeLeftGeneration)) {
+    xSemaphoreGive(gMicAfeMutex);
+    return false;
+  }
   if (on && !gMicAfeFeedActive) {
     if (!gMicAfeRing) {
       gMicAfeRing = (int16_t*)ps_alloc(
@@ -4060,9 +4102,18 @@ bool g2MicSetAfeFeedActive(bool on) {
     }
     gMicAfeRingHead = 0;
     gMicAfeRingCount = 0;
+    if (nativeLeftGeneration) {
+      // A new conversation must not inherit codec history from the previous
+      // capture (the allocated workspace is retained, its state is not).
+      gMicAfeDecoder = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
+                                         0, gMicAfeDecMem);
+    }
     gMicAfeOverruns = 0;
     gMicAfeMutexDrops.store(0, std::memory_order_relaxed);
     gMicAfeDecodeFails.store(0, std::memory_order_relaxed);
+    gMicAfePlcFrames.store(0, std::memory_order_relaxed);
+    gMicAfeNativeGeneration = nativeLeftGeneration;
+    gMicAfePaused = false;
     gMicRecArm = 'L';
     gMicAfeFeedActive = true;
     DEBUG_G2F("[G2-MIC-AFE] feed ON (ring %u samples / %u B)",
@@ -4085,6 +4136,22 @@ bool g2MicSetAfeFeedActive(bool on) {
 }
 
 bool g2MicAfeFeedIsActive() { return gMicAfeFeedActive; }
+
+void g2MicPauseAfeFeed(bool paused) {
+  if (!gMicAfeMutex) return;
+  xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
+  if (gMicAfeFeedActive && gMicAfeNativeGeneration) gMicAfePaused = paused;
+  xSemaphoreGive(gMicAfeMutex);
+}
+
+uint32_t g2MicAfeIntegrityErrors() {
+  if (!gMicAfeMutex) return 0;
+  xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
+  const uint32_t errors = gMicAfeOverruns + gMicAfeMutexDrops.load() +
+      gMicAfeDecodeFails.load() + gMicAfePlcFrames.load();
+  xSemaphoreGive(gMicAfeMutex);
+  return errors;
+}
 
 size_t g2MicReadPcmSamples(int16_t* out, size_t capSamples, uint32_t timeoutMs) {
   if (!out || capSamples == 0) return 0;
@@ -4162,6 +4229,7 @@ static bool g2EvenAiSessionIsActive();   // defined with the EvenAI worker below
 static bool gMicAutoContainer = false;
 
 bool g2MicStreamEnable(bool on) {
+  if (g2ConversateActive()) return false; // native 0x0B owns audio, not E0
   if (!g2TempleReadyAtGeneration(gL)) return false;
   if (on == gMicStreamOn) return true;   // already in the requested state
   // NOTE deliberately NO container auto-create here: this function also runs
@@ -4224,6 +4292,7 @@ void g2MicLinkFastRelease() {
 // on CREATE failure the delivered-rate watchdog reports the resulting
 // silence rather than this path guessing.
 void g2MicEnsureCaptureContainer() {
+  if (g2ConversateActive()) return;
   if (!g2TempleReadyAtGeneration(gL)) return;
   if (g2LensGetState().containerReady || g2EvenAiSessionIsActive() ||
       g2LensGetState().hijackActive) {
@@ -4256,6 +4325,7 @@ void g2MicReleaseCaptureContainer() {
 // while G2 recording is active, replicating that keepalive so the mic stays live
 // regardless of the display state. One BLE write; idempotent on the glasses.
 static bool g2MicStreamReassert() {
+  if (g2ConversateActive()) return false;
   if (!g2TempleReadyAtGeneration(gL)) return false;
 #if ENABLE_MICROPHONE
   // Self-guard: only re-arm for a real G2 recording. `openmic` intentionally
@@ -4412,6 +4482,11 @@ static void g2MicSeqBaselineReset() {
 static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   G2MicProbe& m = (t.side == 'L') ? gMicL : gMicR;
   uint32_t now = millis();
+  if (t.side == 'L' && len == 205) {
+    portENTER_CRITICAL(&gConversateMux);
+    gConversate.audio(now, t.connectionGeneration, data[204]);
+    portEXIT_CRITICAL(&gConversateMux);
+  }
   const uint32_t prevArrivalMs = m.lastFrameMs;
   const bool hadFrames = m.frameCount > 0;
   m.frameCount++;
@@ -4504,10 +4579,13 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   // 800 int16 samples to the ring buffer that ESP-SR's loop drains.
   // Independent of the WAV writer above — both can run together
   // (e.g. record-while-listening for ground-truth comparisons).
-  if (gMicAfeFeedActive && t.side == gMicRecArm && gMicAfeMutex &&
+  if (gMicAfeFeedActive && !gMicAfePaused.load(std::memory_order_acquire) &&
+      t.side == gMicRecArm && gMicAfeMutex &&
       len == 205 && gMicAfeDecoder) {
     if (xSemaphoreTake(gMicAfeMutex, 0) == pdTRUE) {
-      if (gMicAfeFeedActive && gMicAfeDecoder && gMicAfeRing) {
+      if (gMicAfeFeedActive && !gMicAfePaused && gMicAfeDecoder && gMicAfeRing &&
+          (!gMicAfeNativeGeneration ||
+           t.connectionGeneration == gMicAfeNativeGeneration)) {
         int16_t pcm[kMicLc3FramesPerPkt * kMicLc3SamplesPerFrame];
         bool decOk = true;
         for (int i = 0; i < kMicLc3FramesPerPkt; i++) {
@@ -4534,7 +4612,9 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
       // mutex so the reader can immediately retake it.
       if (gMicAfeReadySem) xSemaphoreGive(gMicAfeReadySem);
     } else {
-      gMicAfeMutexDrops.fetch_add(1, std::memory_order_relaxed);
+      // Input after a native freeze is deliberately excluded, not lost PCM.
+      if (!gMicAfePaused.load(std::memory_order_acquire))
+        gMicAfeMutexDrops.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
@@ -4567,12 +4647,14 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   }
 }
 
-static void audioNotifyThunkL(BLERemoteCharacteristic* /*c*/, uint8_t* data,
+static void audioNotifyThunkL(BLERemoteCharacteristic* c, uint8_t* data,
                               size_t len, bool /*isNotify*/) {
+  if (c != gL.audioNotifyChar || !g2TempleReadyAtGeneration(gL)) return;
   handleAudioNotify(gL, data, len);
 }
-static void audioNotifyThunkR(BLERemoteCharacteristic* /*c*/, uint8_t* data,
+static void audioNotifyThunkR(BLERemoteCharacteristic* c, uint8_t* data,
                               size_t len, bool /*isNotify*/) {
+  if (c != gR.audioNotifyChar || !g2TempleReadyAtGeneration(gR)) return;
   handleAudioNotify(gR, data, len);
 }
 
@@ -4755,6 +4837,8 @@ struct G2RxPacket {
   uint32_t generation;
   uint32_t lifecycleEpoch;
   uint32_t presentationEpoch;
+  uint32_t conversateEpoch;
+  bool conversateClose;
   uint16_t len;
   char side;
   uint8_t data[G2_BLE_LOCAL_MTU_PREF];
@@ -4799,6 +4883,18 @@ static bool g2RxEvenAiCtrlStatus(const uint8_t* data, size_t len,
   }
   *outStatus = status;
   return true;
+}
+
+static uint8_t g2RxConversateTerminal(const uint8_t* data, size_t len) {
+  if (!data || len < G2_ENVELOPE_HDR_LEN + G2_ENVELOPE_CRC_LEN ||
+      data[6] != G2_SID_CONVERSATE) return false;
+  G2EnvelopeView env{};
+  G2ConversateEvent event{};
+  if (!g2ParseEnvelope(data, len, &env) || env.isTx ||
+      !g2ParseConversateEvent(env.payload, env.payloadLen, &event)) return 0;
+  if (event.command == 168) return 2;
+  return event.command == 161 && (event.value == 2 || event.value == 3)
+      ? uint8_t(event.value) : 0;
 }
 
 static void g2DevCfgTxnCancel(G2Temple& t) {
@@ -4976,6 +5072,7 @@ bool g2ControlStatusSnapshot(G2ControlStatus* out) {
 }
 
 static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len) {
+  const uint32_t conversateEpoch = __atomic_load_n(&gConversateRxEpoch, __ATOMIC_ACQUIRE);
   if (!gRxPackets || !data || len == 0 || len > G2_BLE_LOCAL_MTU_PREF) {
     portENTER_CRITICAL(&gRxPacketMux);
     gRxPacketDrops++;
@@ -4985,8 +5082,22 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
   uint32_t evenAiCtrlStatus = 0;
   const bool priority = gRxEvenAiCtrlPackets &&
       g2RxEvenAiCtrlStatus(data, len, &evenAiCtrlStatus);
+  const uint8_t conversateTerminal = t.side == 'R' ? g2RxConversateTerminal(data, len) : 0;
   bool queued = false;
   portENTER_CRITICAL(&gRxPacketMux);
+  // Retain an explicit Conversate CLOSE/PAUSE despite an ordinary RX burst.
+  // Keep FIFO ordering (no jump ahead of PREP/SELECT); regular arrivals never
+  // evict this terminal control. All work and BLE TX stay on the owner.
+  bool retainClose = false;
+  if (conversateTerminal == 3 && gRxPacketCount == G2_RX_PACKET_DEPTH) {
+    for (uint8_t i = 0; i < gRxPacketCount; ++i)
+      retainClose |= gRxPackets[(gRxPacketHead + i) % G2_RX_PACKET_DEPTH].conversateClose;
+  }
+  if (conversateTerminal && !retainClose && gRxPacketCount == G2_RX_PACKET_DEPTH) {
+    gRxPacketHead = (uint8_t)((gRxPacketHead + 1) % G2_RX_PACKET_DEPTH);
+    --gRxPacketCount;
+    ++gRxPacketDrops;
+  }
   if (priority) {
     // EXIT is fail-closed: if four unconsumed native transitions somehow fill
     // this tiny queue, retain the newest dismissal by evicting the oldest
@@ -5005,6 +5116,8 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
       p.lifecycleEpoch = __atomic_load_n(&gWidgetLifecycleEpoch,
                                          __ATOMIC_ACQUIRE);
       p.presentationEpoch = g2PresentationEpochCurrent();
+      p.conversateEpoch = conversateEpoch;
+      p.conversateClose = false;
       p.len = (uint16_t)len;
       p.side = t.side;
       memcpy(p.data, data, len);
@@ -5021,6 +5134,8 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
     p.lifecycleEpoch = __atomic_load_n(&gWidgetLifecycleEpoch,
                                        __ATOMIC_ACQUIRE);
     p.presentationEpoch = g2PresentationEpochCurrent();
+    p.conversateEpoch = conversateEpoch;
+    p.conversateClose = conversateTerminal == 2;
     p.len = (uint16_t)len;
     p.side = t.side;
     memcpy(p.data, data, len);
@@ -5067,10 +5182,12 @@ static bool g2RxPacketDequeue(G2RxPacket* out) {
 static void g2RxReset(G2Temple& t) {
   t.rxFrameHave = 0;
   t.rxFrameExpected = 0;
+  t.rxFrameConversateEpoch = 0;
   g2RxReassemblyReset(&t.rxReassembly);
   t.rxStartedMs = 0;
   t.rxReassemblyLifecycleEpoch = 0;
   t.rxReassemblyPresentationEpoch = 0;
+  t.rxReassemblyConversateEpoch = 0;
 }
 
 static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
@@ -5087,7 +5204,7 @@ static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
 // Runs on the reused heartbeat/control owner, never on Bluedroid's callback.
 static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
                           uint32_t generation, uint32_t lifecycleEpoch,
-                          uint32_t presentationEpoch) {
+                          uint32_t presentationEpoch, uint32_t conversateEpoch) {
   if (!t.rxBuf || !data || len == 0 || generation != t.connectionGeneration) return;
   if (t.rxReassemblyGeneration != generation) {
     g2RxReset(t);
@@ -5109,6 +5226,7 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
       return;
     }
     t.rxFrameExpected = expected;
+    t.rxFrameConversateEpoch = conversateEpoch;
   } else if (t.rxFrameHave == 0) {
     return;
   }
@@ -5124,6 +5242,7 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
   g2RingRecord(t.side, 'R', frame, t.rxFrameExpected);
   const uint8_t fragIdx = frame[5];
   const uint8_t totalFrags = frame[4];
+  const uint32_t frameConversateEpoch = t.rxFrameConversateEpoch;
   t.rxFrameHave = t.rxFrameExpected = 0;
   const uint32_t now = millis();
   if (t.rxReassembly.active && (uint32_t)(now - t.rxStartedMs) > 2000) {
@@ -5137,6 +5256,7 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
     // local presentation transition.
     t.rxReassemblyLifecycleEpoch = lifecycleEpoch;
     t.rxReassemblyPresentationEpoch = presentationEpoch;
+    t.rxReassemblyConversateEpoch = frameConversateEpoch;
   }
   G2EnvelopeView env{};
   const G2RxReassemblyStatus result =
@@ -5148,13 +5268,17 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
     t.rxStartedMs = 0;
     t.rxReassemblyLifecycleEpoch = 0;
     t.rxReassemblyPresentationEpoch = 0;
+    t.rxReassemblyConversateEpoch = 0;
   } else if (result == G2_RX_REASSEMBLY_COMPLETE) {
-    g2DispatchCompleteEnvelope(t, env, generation,
-                               t.rxReassemblyLifecycleEpoch,
-                               t.rxReassemblyPresentationEpoch);
+    if (env.sid != G2_SID_CONVERSATE ||
+        t.rxReassemblyConversateEpoch == __atomic_load_n(&gConversateRxEpoch, __ATOMIC_ACQUIRE))
+      g2DispatchCompleteEnvelope(t, env, generation,
+                                 t.rxReassemblyLifecycleEpoch,
+                                 t.rxReassemblyPresentationEpoch);
     t.rxStartedMs = 0;
     t.rxReassemblyLifecycleEpoch = 0;
     t.rxReassemblyPresentationEpoch = 0;
+    t.rxReassemblyConversateEpoch = 0;
   }
 }
 
@@ -10932,6 +11056,7 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
       break;
     case G2_SID_CONVERSATE:
       voiceLangLog(t.side, "Conversate", conversateCmdName, env.payload, env.payloadLen);
+      g2ConversateOnRx(t, rxGeneration, env.payload, env.payloadLen);
       break;
 
     case G2_SID_EVEN_AI: {
@@ -13583,6 +13708,11 @@ static bool g2EvenAiSendReply(uint64_t exchangeId,
 // hard boundary: supersede any old exchange first, then bind this one to the
 // exact temple connection epoch that delivered it.
 static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration) {
+  // An active, explicitly enabled Conversate session owns the mic. Decline the
+  // competing popup before creating an exchange or starting CM5 capture.
+  if (g2ConversateDeclineEvenAi(temple, rxGeneration)) return;
+  // Idle availability does not suppress an ordinary EvenAI invocation.
+  g2ConversateStop(G2ConversateSession::Stop::Busy);
   gEvenAiLastWakeMs = millis();   // timing anchor for evenai_timing
   const uint64_t priorId = g2EvenAiCurrentExchangeId();
   if (priorId) g2EvenAiTerminate(priorId, "superseded");
@@ -14048,6 +14178,379 @@ static void g2EvenAiSessionTick() {
   }
 }
 
+// ── Native Conversate microphone qualification ───────────────────────────────
+static uint32_t g2ConversateNextMagic() {
+  // Match the byte-sized native token convention used by the EvenAI driver.
+  // Reserve this session's PREP/START tokens, even after wrap, so their delayed
+  // control ACKs can never be mistaken for heartbeat liveness. ACKs themselves
+  // never advance the allocator. A byte protocol cannot disambiguate an ACK
+  // delayed through an entire (~20 minute) heartbeat-token rotation.
+  const auto s = g2ConversateSnapshot();
+  do {
+    if (gConversateMagic >= 250) {
+      gConversateMagic = 1;
+      portENTER_CRITICAL(&gConversateMux);
+      if (gConversate.active()) ++gConversate.magicWraps;
+      portEXIT_CRITICAL(&gConversateMux);
+    } else ++gConversateMagic;
+  } while (gConversateMagic == gConversatePrepMagic ||
+           gConversateMagic == gConversateStartMagic ||
+           gConversateMagic == s.pendingMagic || s.reserved(gConversateMagic));
+  return gConversateMagic;
+}
+
+static bool g2ConversateBusy() {
+  // Only our current native lease may share its own HAL claim. A prior
+  // stream still draining after CLOSE prevents a replacement PREP until done.
+  const bool ownCapture = g2ConversateSnapshot().active() &&
+      audioCaptureOwnedBy("g2-conversate");
+  return (audioCaptureBusy() && !ownCapture) || gMicStreamOn || gMicProbeActive ||
+      gMicRecFile || gMicWavFile || g2EvenAiSessionIsActive() ||
+      g2LensGetState().containerReady || g2FsmHijackActive();
+}
+
+static bool g2ConversateConnections(const G2ConversateSession& s) {
+  return g2TempleReadyAtGeneration(gL, s.leftGeneration) &&
+         g2TempleReadyAtGeneration(gR, s.rightGeneration) && gL.audioNotifyChar;
+}
+
+static void g2ConversateStop(G2ConversateSession::Stop reason, uint32_t replyMagic) {
+  const auto s = g2ConversateSnapshot();
+  if (reason != G2ConversateSession::Stop::NativeExit) {
+    __atomic_add_fetch(&gConversateRxEpoch, 1u, __ATOMIC_ACQ_REL);
+    gConversateDeferredPrep = false;
+  }
+  if (reason == G2ConversateSession::Stop::Shutdown) {
+    portENTER_CRITICAL(&gConversateMux);
+    gConversate.enabled = false;
+    portEXIT_CRITICAL(&gConversateMux);
+    gConversateDeferredPrep = false;
+  }
+  if (!s.active()) return;
+  if (s.phase == G2ConversateSession::Phase::Closing) {
+    if (reason == G2ConversateSession::Stop::Shutdown) {
+      portENTER_CRITICAL(&gConversateMux);
+      gConversate.stop(reason);
+      portEXIT_CRITICAL(&gConversateMux);
+    }
+    return;
+  }
+  // Fence audio first. Native CLOSE is best effort and cannot be sent to a
+  // reconnected replacement temple. No E0 shutdown / mic-off / page redraw.
+  const uint32_t magic = replyMagic ? replyMagic : g2ConversateNextMagic();
+  const bool ackSafe = magic != s.pendingMagic && magic != gConversatePrepMagic &&
+                       magic != gConversateStartMagic && !s.reserved(magic);
+  portENTER_CRITICAL(&gConversateMux);
+  gConversate.beginClose(millis(), reason, magic, ackSafe);
+  const bool pcmClean = gConversate.lostPackets == 0 && gConversate.duplicates == 0;
+  portEXIT_CRITICAL(&gConversateMux);
+  liveAudioConversateFinish(s.audioExchange, pcmClean && (
+      reason == G2ConversateSession::Stop::NativeExit ||
+      reason == G2ConversateSession::Stop::User ||
+      reason == G2ConversateSession::Stop::Deadline));
+  bool closed = false;
+  if (s.prepared && g2TempleReadyAtGeneration(gR, s.rightGeneration)) {
+    uint8_t frame[40];
+    const size_t n = g2BuildConversateControl(allocSeq(),
+        magic, false, frame, sizeof(frame));
+    closed = n && sendEnvelopeAtGeneration(gR, frame, n, s.rightGeneration);
+  }
+  if (gConversateFastHeld) {
+    gConversateFastHeld = false;
+    g2ConnPriReleaseFast("g2-conversate");
+  }
+  portENTER_CRITICAL(&gConversateMux);
+  if (!closed || reason == G2ConversateSession::Stop::Shutdown ||
+      reason == G2ConversateSession::Stop::Disconnected) gConversate.stop(reason);
+  portEXIT_CRITICAL(&gConversateMux);
+  DEBUG_G2F("[G2-CONVERSATE] closing reason=%s packets=%lu hb=%lu ack=%lu "
+            "max_gap_ms=%lu magic_wraps=%lu evenai_declines=%lu close_sent=%u",
+            G2ConversateSession::stopName(reason),
+            (unsigned long)s.packets, (unsigned long)s.heartbeats,
+            (unsigned long)s.acknowledgements, (unsigned long)s.maxGapMs,
+            (unsigned long)s.magicWraps, (unsigned long)s.evenAiDeclines, closed);
+}
+
+static bool g2ConversateDeclineEvenAi(G2Temple& temple, uint32_t generation) {
+  const auto s = g2ConversateSnapshot();
+  if (!s.active()) return false;
+  const uint32_t expected = temple.side == 'L' ? s.leftGeneration :
+                             temple.side == 'R' ? s.rightGeneration : 0;
+  // Stale or unrelated WAKE must neither target a replacement connection nor
+  // tear down the active session. Its normal connection watchdog still runs.
+  if (!generation || generation != expected) return true;
+  if (!g2ConversateConnections(s)) {
+    g2ConversateStop(G2ConversateSession::Stop::Disconnected);
+    return true;
+  }
+  uint8_t frame[64];
+  const size_t n = g2BuildEvenAICtrl(allocSeq(), g2EvenAiNextMagic(),
+                                    G2_AI_STATUS_EXIT, frame, sizeof(frame));
+  if (!n || !sendEnvelopeAtGeneration(temple, frame, n, generation)) {
+    g2ConversateStop(G2ConversateSession::Stop::TxFailed);
+    return true;
+  }
+  portENTER_CRITICAL(&gConversateMux);
+  ++gConversate.evenAiDeclines;
+  portEXIT_CRITICAL(&gConversateMux);
+  DEBUG_G2F("[G2-CONVERSATE] declined EvenAI wake arm=%c gen=%lu; "
+            "native mic lease retained", temple.side, (unsigned long)generation);
+  // No START/re-arm: the glasses must keep delivering audio, otherwise the
+  // existing audio watchdog closes this test. Native CLOSE remains terminal.
+  return true;
+}
+
+static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
+                            const uint8_t* pb, size_t len) {
+  auto s = g2ConversateSnapshot();
+  if (temple.side != 'R' || !generation ||
+      !g2TempleReadyAtGeneration(temple, generation)) return;
+  G2ConversateEvent event;
+  if (!g2ParseConversateEvent(pb, len, &event)) return;
+  if (generation == s.rightGeneration &&
+      (event.command == 168 || (event.command == 161 && event.value == 2)))
+    gConversateDeferredPrep = false;
+  if (s.phase == G2ConversateSession::Phase::Closing) {
+    if (generation != s.rightGeneration) return;
+    if (event.command == 2 && s.enabled) {
+      gConversateDeferredPrep = true;
+      gConversateDeferredMagic = event.magic;
+    } else if (event.command == 162) {
+      portENTER_CRITICAL(&gConversateMux);
+      gConversate.acknowledgeClose(event.magic, event.value);
+      portEXIT_CRITICAL(&gConversateMux);
+    } else if (event.command == 168 || (event.command == 161 && event.value == 2)) {
+      gConversateDeferredPrep = false; // a newer dismissal cancels queued re-entry
+    }
+    return;
+  }
+  if (!s.active()) {
+    // Session completion must not disable future native launches. Never re-arm
+    // on a timer, reconnect, SELECT, audio, or a delayed ACK/CLOSE: require the
+    // wearer's native PREP handshake again, with current connections/ownership.
+    if (!s.enabled || event.command != 2) return;
+    if (s.audioExchange && generation == s.rightGeneration &&
+        g2ConversateConnections(s) && liveAudioConversatePending(s.audioExchange)) {
+      // CLOSE may be acknowledged before the frozen PCM tail has drained.
+      // Keep a rapid wearer re-entry rather than silently dropping PREP as
+      // "busy" and leaving the glasses stuck on their starting screen.
+      gConversateDeferredPrep = true;
+      gConversateDeferredMagic = event.magic;
+      return;
+    }
+    const bool ready = g2TempleReadyAtGeneration(gL) && gL.audioNotifyChar;
+    const bool busy = g2ConversateBusy();
+    portENTER_CRITICAL(&gConversateMux);
+    if (!ready || busy) {
+      gConversate.stop(ready ? G2ConversateSession::Stop::Busy
+                            : G2ConversateSession::Stop::Disconnected);
+    } else {
+      gConversateDeferredPrep = false;
+      gConversatePrepMagic = gConversateStartMagic = 0;
+      gConversate.arm(millis(), s.limitSeconds, gL.connectionGeneration, generation);
+    }
+    s = gConversate;
+    portEXIT_CRITICAL(&gConversateMux);
+  }
+  if (!s.active() || generation != s.rightGeneration) return;
+  if (event.command == 168 || (event.command == 161 && event.value == 2)) {
+    g2ConversateStop(G2ConversateSession::Stop::NativeExit, event.magic);
+    return;
+  }
+  if (event.command == 162) {
+    portENTER_CRITICAL(&gConversateMux);
+    const bool matched = gConversate.acknowledge(event.magic, event.value);
+    const uint32_t failures = gConversate.consecutiveFailures;
+    portEXIT_CRITICAL(&gConversateMux);
+    if (matched && event.value)
+      DEBUG_G2F("[G2-CONVERSATE] heartbeat rejected error=%lu consecutive=%lu/12",
+                (unsigned long)event.value, (unsigned long)failures);
+    return;
+  }
+  if (event.command == 161 || event.command == 164 || event.command == 166) {
+    if (!s.prepared || !g2ConversateConnections(s)) return;
+    uint8_t frame[64]; size_t n = 0;
+    if (event.command == 161) {
+      // Only explicit native PAUSE/RESUME changes audio expectation. In
+      // particular SyncInfo overlays / display-off are not microphone stops.
+      if (event.value != 3 && event.value != 4) return;
+      portENTER_CRITICAL(&gConversateMux);
+      const bool changed = event.value == 3 ? gConversate.pause() : gConversate.resume(millis());
+      portEXIT_CRITICAL(&gConversateMux);
+      const bool duplicate = (event.value == 3 && s.phase == G2ConversateSession::Phase::Paused) ||
+                             (event.value == 4 && s.phase == G2ConversateSession::Phase::Running);
+      if (!changed && !duplicate) return;
+      liveAudioConversatePause(s.audioExchange, event.value == 3);
+      n = g2BuildConversatePauseResume(allocSeq(), event.magic, event.value == 4, frame, sizeof(frame));
+    } else if (event.command == 164) {
+      const bool valid = event.transcribe <= 1 && event.aiCue <= 1;
+      // Visibility preferences only: this does not claim a working STT/AI
+      // backend or change mic ownership. Invalid flags preserve prior state.
+      n = g2BuildConversateInterfaceReply(allocSeq(), event.magic, valid ? 0 : 1,
+          valid ? event.transcribe != 0 : s.transcribeVisible,
+          valid ? event.aiCue != 0 : s.aiCueVisible, frame, sizeof(frame));
+      portENTER_CRITICAL(&gConversateMux);
+      if (valid) {
+        gConversate.transcribeVisible = event.transcribe != 0;
+        gConversate.aiCueVisible = event.aiCue != 0;
+        ++gConversate.interfaceChanges;
+      }
+      portEXIT_CRITICAL(&gConversateMux);
+    } else {
+      // No translator is attached. Explicitly reject non-OFF selections; do
+      // not tell the native UI translation succeeded while producing nothing.
+      n = g2BuildConversateLanguageReply(allocSeq(), event.magic,
+          strcmp(event.language, "OFF") == 0 ? 0 : 1, frame, sizeof(frame));
+      portENTER_CRITICAL(&gConversateMux);
+      ++gConversate.languageRequests;
+      portEXIT_CRITICAL(&gConversateMux);
+    }
+    portENTER_CRITICAL(&gConversateMux);
+    gConversate.reserveReply(event.magic);
+    portEXIT_CRITICAL(&gConversateMux);
+    if (event.magic <= 250 && event.magic > gConversateMagic) gConversateMagic = event.magic;
+    if (!n || !sendEnvelopeAtGeneration(gR, frame, n, s.rightGeneration))
+      g2ConversateStop(G2ConversateSession::Stop::TxFailed);
+    return;
+  }
+  if (s.phase != G2ConversateSession::Phase::Armed) return;
+  if (!g2ConversateConnections(s) || g2ConversateBusy()) {
+    g2ConversateStop(G2ConversateSession::Stop::Busy);
+    return;
+  }
+  uint8_t frame[256]; size_t n = 0;
+  if (event.command == 2) {
+    if (s.prepared) return; // duplicate PREP must not mint unreserved ACK tokens
+    if (event.magic <= 250 && event.magic > gConversateMagic)
+      gConversateMagic = event.magic;
+    gConversatePrepMagic = g2ConversateNextMagic();
+    n = g2BuildConversatePrep(allocSeq(), gConversatePrepMagic, frame, sizeof(frame));
+    // Mark before TX so a partially delivered prep can still be closed.
+    portENTER_CRITICAL(&gConversateMux);
+    gConversate.prepared = true;
+    portEXIT_CRITICAL(&gConversateMux);
+  } else if (event.command == 4 && s.prepared && event.value == 1) {
+    // Captured SELECT.isSkip=1 -> START echoes the SELECT magic. Do not
+    // auto-start on a note selection, a repeated SELECT or an unsolicited RX.
+    gConversateStartMagic = event.magic;
+    if (event.magic <= 250 && event.magic > gConversateMagic)
+      gConversateMagic = event.magic;
+    g2ConnPriRequestFast("g2-conversate");
+    gConversateFastHeld = true;
+    portENTER_CRITICAL(&gConversateMux);
+    gConversate.reserveReply(event.magic); // fence any preparing-heartbeat token collision
+    gConversate.start(millis());
+    portEXIT_CRITICAL(&gConversateMux);
+    uint64_t exchange = 0;
+    const auto admission = liveAudioConversateBegin(s.leftGeneration, &exchange);
+    portENTER_CRITICAL(&gConversateMux);
+    gConversate.audioExchange = exchange;
+    portEXIT_CRITICAL(&gConversateMux);
+    if (admission == LiveAudioConversateAdmission::Failed) {
+      g2ConversateStop(G2ConversateSession::Stop::HostAudio);
+      return;
+    }
+    n = g2BuildConversateControl(allocSeq(), event.magic, true, frame, sizeof(frame),
+                                 s.transcribeVisible, s.aiCueVisible);
+  } else {
+    g2ConversateStop(G2ConversateSession::Stop::Unsupported);
+    return;
+  }
+  if (!n || !sendEnvelopeAtGeneration(gR, frame, n, s.rightGeneration))
+    g2ConversateStop(G2ConversateSession::Stop::TxFailed);
+}
+
+static void g2ConversateTick(bool requestsOnly) {
+  int32_t request;
+  portENTER_CRITICAL(&gConversateMux);
+  request = gConversateRequest;
+  gConversateRequest = 0;
+  portEXIT_CRITICAL(&gConversateMux);
+  if (request == -1 || request == -2) {
+    gConversateDeferredPrep = false;
+    if (request == -2) {
+      portENTER_CRITICAL(&gConversateMux);
+      gConversate.enabled = false;
+      portEXIT_CRITICAL(&gConversateMux);
+    }
+    g2ConversateStop(G2ConversateSession::Stop::User);
+  }
+  if (request > 0 || request == -3) {
+    const bool ready = g2TempleReadyAtGeneration(gL) && g2TempleReadyAtGeneration(gR);
+    const bool busy = g2ConversateBusy();
+    portENTER_CRITICAL(&gConversateMux);
+    if (!gConversate.active()) {
+      if (!ready || busy) gConversate.stop(ready ? G2ConversateSession::Stop::Busy
+                                                : G2ConversateSession::Stop::Disconnected);
+      else {
+        gConversate.enabled = true;
+        gConversate.limitSeconds = request == -3 ? 0 : uint32_t(request);
+      }
+    }
+    portEXIT_CRITICAL(&gConversateMux);
+  }
+  if (requestsOnly) return;
+  auto s = g2ConversateSnapshot();
+  const uint32_t now = millis();
+  if (s.phase == G2ConversateSession::Phase::Closing) {
+    const bool same = g2ConversateConnections(s);
+    const bool expired = now - s.closeMs >= G2ConversateSession::CloseTimeoutMs;
+    if (!same || expired) {
+      portENTER_CRITICAL(&gConversateMux);
+      gConversate.closeTimedOut = expired;
+      gConversate.stop(s.reason);
+      portEXIT_CRITICAL(&gConversateMux);
+      if (!same) gConversateDeferredPrep = false;
+      DEBUG_G2F("[G2-CONVERSATE] close finished timeout=%u connected=%u", expired, same);
+      s = g2ConversateSnapshot();
+    } else return;
+  }
+  if (!s.active()) {
+    if (gConversateDeferredPrep) {
+      if (s.enabled && g2ConversateConnections(s) &&
+          liveAudioConversatePending(s.audioExchange)) return;
+      const uint32_t magic = gConversateDeferredMagic;
+      gConversateDeferredPrep = false;
+      // Reconstruct only the already validated empty PREP shape. Recheck the
+      // original generations; never transfer this request across reconnects.
+      if (s.enabled && g2ConversateConnections(s)) {
+        uint8_t pb[24]; size_t n = 0;
+        if (g2PbWriteUint32(pb, sizeof(pb), &n, 1, 2) &&
+            g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) &&
+            g2PbWriteBytes(pb, sizeof(pb), &n, 4, nullptr, 0))
+          g2ConversateOnRx(gR, s.rightGeneration, pb, n);
+      }
+    }
+    return;
+  }
+  const bool same = g2ConversateConnections(s), busy = g2ConversateBusy();
+  if (s.audioExchange && (!liveAudioConversateRunning(s.audioExchange) ||
+      s.lostPackets || s.duplicates)) {
+    g2ConversateStop(G2ConversateSession::Stop::HostAudio);
+    return;
+  }
+  portENTER_CRITICAL(&gConversateMux);
+  const auto stop = gConversate.check(now, same, busy);
+  s = gConversate;
+  portEXIT_CRITICAL(&gConversateMux);
+  if (stop != G2ConversateSession::Stop::None) {
+    g2ConversateStop(stop);
+    return;
+  }
+  if (gConversateFastHeld && g2LinkIsSlow(&gL)) g2ConnPriReapply();
+  if (!s.heartbeatDue(now)) return;
+  const uint32_t magic = g2ConversateNextMagic();
+  uint8_t frame[32];
+  const size_t n = g2BuildConversateHeartbeat(allocSeq(), magic, frame, sizeof(frame));
+  if (!n || !sendEnvelopeAtGeneration(gR, frame, n, s.rightGeneration)) {
+    g2ConversateStop(G2ConversateSession::Stop::TxFailed);
+    return;
+  }
+  portENTER_CRITICAL(&gConversateMux);
+  gConversate.heartbeatSent(now, magic);
+  portEXIT_CRITICAL(&gConversateMux);
+}
+
 static void heartbeatWorkerTask(void* /*arg*/) {
   while (!gBeatTaskStop) {
     // This is now the G2 control owner as well as the heartbeat worker.
@@ -14075,9 +14578,14 @@ static void heartbeatWorkerTask(void* /*arg*/) {
         (gMicRecFile != nullptr) || gMicRecPendingClose;
     uint32_t ownerWaitMs = cancelRetryPending ? G2_EVENAI_CANCEL_RETRY_MS
                             : policyTxnActive ? 250u
-                            : (g2MicCaptureActive || g2EvenAiSessionIsActive()
+                            : (g2MicCaptureActive || g2EvenAiSessionIsActive() || g2ConversateActive()
                                || micRecDrainPending)
                                 ? 1000u : 6000u;
+    // Deadline-aware rather than five nominal 1-second laps: RX wakes and
+    // unrelated owner work must not add an extra second to every heartbeat.
+    const uint32_t conversateWaitMs = gConversateDeferredPrep ? 100 :
+        g2ConversateSnapshot().waitMs(millis());
+    if (conversateWaitMs < ownerWaitMs) ownerWaitMs = conversateWaitMs;
     // A SyncInfo departure is deliberately debounced for only 400 ms. Its RX
     // wake is consumed by the lap that arms the timer, so cap the *next* wait
     // to the remaining deadline instead of waiting for the 5/6 s heartbeat.
@@ -14086,6 +14594,9 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     const bool signalled =
         xSemaphoreTake(gBeatSem, pdMS_TO_TICKS(ownerWaitMs)) == pdTRUE;
     if (gBeatTaskStop) break;
+
+    // Apply CLI arm/stop before consuming native requests from this wake.
+    g2ConversateTick(true);
 
 #if ENABLE_MICROPHONE
     // Recompute AFTER the (up to 6 s) sleep: a capture stop during the wait
@@ -14171,7 +14682,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     while (g2RxEvenAiCtrlDequeue(&p)) {
       G2Temple& temple = (p.side == 'L') ? gL : gR;
       processNotify(temple, p.data, p.len, p.generation, p.lifecycleEpoch,
-                    p.presentationEpoch);
+                    p.presentationEpoch, p.conversateEpoch);
       if (gBeatTaskStop) break;
     }
     if (gBeatTaskStop) break;
@@ -14187,7 +14698,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     while (g2RxPacketDequeue(&p)) {
       G2Temple& temple = (p.side == 'L') ? gL : gR;
       processNotify(temple, p.data, p.len, p.generation, p.lifecycleEpoch,
-                    p.presentationEpoch);
+                    p.presentationEpoch, p.conversateEpoch);
       if (gBeatTaskStop) break;
     }
     if (gBeatTaskStop) break;
@@ -14195,6 +14706,9 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     // Run after the complete ordinary RX drain so a return-to-224 or 4094
     // cancellation queued in the same burst wins over timer expiry.
     g2SyncLifecycleTick();
+
+    // Process native EXIT/ACK first, then renew only a still-live lease.
+    g2ConversateTick();
 
     if (g2ControlTakeDirty()) g2ControlReconcileTick();
 
@@ -14254,6 +14768,10 @@ static void heartbeatWorkerTask(void* /*arg*/) {
       }
     }
   }
+  g2ConversateStop(G2ConversateSession::Stop::Shutdown);
+  portENTER_CRITICAL(&gConversateMux);
+  gConversateRequest = 0;
+  portEXIT_CRITICAL(&gConversateMux);
   portENTER_CRITICAL(&gControlLifecycleMux);
   gBeatTaskHandle = nullptr;
   portEXIT_CRITICAL(&gControlLifecycleMux);
@@ -25286,8 +25804,78 @@ static G2Temple* pickMicArm(const char* tag, bool preferLeft) {
   return nullptr;
 }
 
+static const char* cmd_g2conversate(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  EXT_RAM_BSS_ATTR static char ret[640];
+  CommandArgs ca(argsInput);
+  const String op = ca.count() ? ca.arg(0) : String("status");
+  if (op == "status" && ca.count() <= 1) {
+    const auto s = g2ConversateSnapshot();
+    const uint32_t now = millis();
+    const char* phase = G2ConversateSession::phaseName(s.phase);
+    snprintf(ret, sizeof(ret),
+        "G2 Conversate: enabled=%s %s reason=%s packets=%lu audio_span_ms=%lu silent_ms=%lu "
+        "max_gap_ms=%lu lost=%lu duplicates=%lu hb=%lu ack=%lu limit_s=%lu "
+        "hb_failures=%lu consecutive=%lu ack_timeouts=%lu close_ack=%u close_timeout=%u "
+        "transcribe_visible=%u ai_cue_visible=%u interface_changes=%lu language_requests=%lu "
+        "magic_wraps=%lu evenai_declines=%lu. limit_s=0 means user-ended. "
+        "PCM transport: liveaudio status. No local STT or audio file.", s.enabled ? "on" : "off", phase,
+        G2ConversateSession::stopName(s.reason), (unsigned long)s.packets,
+        (unsigned long)(s.packets ? s.lastAudioMs - s.firstAudioMs : 0),
+        (unsigned long)(s.packets ? now - s.lastAudioMs : 0),
+        (unsigned long)s.maxGapMs, (unsigned long)s.lostPackets,
+        (unsigned long)s.duplicates, (unsigned long)s.heartbeats,
+        (unsigned long)s.acknowledgements, (unsigned long)s.limitSeconds,
+        (unsigned long)s.heartbeatFailures, (unsigned long)s.consecutiveFailures,
+        (unsigned long)s.ackTimeouts, s.closeAcknowledged, s.closeTimedOut,
+        s.transcribeVisible, s.aiCueVisible,
+        (unsigned long)s.interfaceChanges, (unsigned long)s.languageRequests,
+        (unsigned long)s.magicWraps, (unsigned long)s.evenAiDeclines);
+    return ret;
+  }
+  if ((op == "stop" || op == "off") && ca.count() == 1) {
+    portENTER_CRITICAL(&gConversateMux);
+    // A later stop must not weaken an already queued explicit disable.
+    if (op == "off" || gConversateRequest != -2)
+      gConversateRequest = op == "off" ? -2 : -1;
+    portEXIT_CRITICAL(&gConversateMux);
+    g2ControlWake();
+    return op == "off" ? "G2 Conversate: disable and stop queued; use status to confirm"
+                       : "G2 Conversate: session stop queued; stays available if enabled. Use status to confirm";
+  }
+  if ((op != "on" && op != "test") || ca.count() > 2 || (op == "on" && ca.count() != 1))
+    return "Usage: g2conversate on | test [seconds 10..3600, default 300] | status | stop | off";
+  uint32_t seconds = op == "on" ? 0 : 300;
+  if (ca.count() == 2) {
+    const String arg = ca.arg(1);
+    if (!arg.length() || arg.length() > 4) return "Error: duration must be 10..3600 seconds";
+    seconds = 0;
+    for (size_t i = 0; i < arg.length(); ++i) {
+      if (arg[i] < '0' || arg[i] > '9') return "Error: duration must be 10..3600 seconds";
+      seconds = seconds * 10 + uint32_t(arg[i] - '0');
+    }
+    if (seconds < 10 || seconds > 3600) return "Error: duration must be 10..3600 seconds";
+  }
+  if (!g2TempleReadyAtGeneration(gL) || !g2TempleReadyAtGeneration(gR))
+    return "Error: connect both G2 temples first; disconnect the phone";
+  if (!gL.audioNotifyChar) return "Error: left-temple audio subscription unavailable; reconnect glasses";
+  if (g2ConversateBusy())
+    return "Error: close mic/recorders and Hardware One lens pages; native audio needs exclusive ownership";
+  if (!g2ControlWorkerEnsure()) return "Error: G2 control worker unavailable";
+  portENTER_CRITICAL(&gConversateMux);
+  const bool busy = gConversate.active() || gConversateRequest != 0;
+  if (!busy) gConversateRequest = seconds ? int32_t(seconds) : -3;
+  portEXIT_CRITICAL(&gConversateMux);
+  if (busy) return "Error: Conversate session/close/request active; use stop and wait for idle";
+  g2ControlWake();
+  return seconds
+      ? "G2 Conversate: timed test queued. Open Conversate; Skip & Start if offered. Reopen for another timed run. Use status to confirm."
+      : "G2 Conversate: user-ended mode queued (no duration cutoff). Open Conversate; Skip & Start if offered. Exit ends one session; off disables. No STT/file yet.";
+}
+
 static const char* cmd_g2micon(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (g2ConversateActive()) return "Error: native mic owned by Conversate; use g2conversate stop";
   EXT_RAM_BSS_ATTR static char ret[200];
   CommandArgs ca(argsInput);
   String armArg = ca.count() > 0 ? ca.arg(0) : String("");
@@ -25312,6 +25900,7 @@ static const char* cmd_g2micon(const String& argsInput) {
 
 static const char* cmd_g2micoff(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (g2ConversateActive()) return "Error: native mic owned by Conversate; use g2conversate stop";
   EXT_RAM_BSS_ATTR static char ret[160];
   G2Temple* arm = pickMicArm("g2micoff", true);
   if (!arm) return "Error: G2 mic: no reachable temple";
@@ -25356,7 +25945,8 @@ static const char* cmd_g2micstats(const String& /*argsInput*/) {
   snprintf(ret, sizeof(ret),
            "G2 mic: %s | %s%s | afe mutex_drop=%u decode_fail=%u plc=%u "
            "overrun=%u depth=%u degraded=%u",
-           l, r, gMicProbeActive ? " (stream ON)" : " (stream OFF)",
+           l, r, g2ConversateSnapshot().phase == G2ConversateSession::Phase::Running
+                     ? " (native Conversate)" : gMicProbeActive ? " (stream ON)" : " (stream OFF)",
            (unsigned)gMicAfeMutexDrops.load(std::memory_order_relaxed),
            (unsigned)gMicAfeDecodeFails.load(std::memory_order_relaxed),
            (unsigned)gMicAfePlcFrames.load(std::memory_order_relaxed),
@@ -26258,6 +26848,7 @@ extern const CommandEntry g2Commands[] = {
   { "g2micon",      "G2 mic probe: AudioCtrCmd{en=1} on LEFT (or 'r' for RIGHT)",                           false, cmd_g2micon, "Usage: g2micon [r]  (default LEFT; arg starting r = RIGHT)" },
   { "g2micoff",     "G2 mic probe: AudioCtrCmd{en=0} (stop stream)",                                        false, cmd_g2micoff },
   { "g2micstats",   "G2 mic probe: dump per-arm frame counters",                                            false, cmd_g2micstats },
+  { "g2conversate", "Native Conversate mic keepalive (no STT or file)", false, cmd_g2conversate, "Usage: g2conversate on | test [seconds 10..3600, default 300] | status | stop | off" },
   { "g2micreset",   "G2 mic probe: zero per-arm counters",                                                  false, cmd_g2micreset },
   { "g2micverbose", "G2 mic probe: per-frame log [on|off]",                                                 false, cmd_g2micverbose, "Usage: g2micverbose [<on|off>]  (bare = toggle)" },
   { "g2micrec",     "G2 mic dump: g2micrec start [\"path\"] | stop | status — writes raw 205B LC3 packets to SD", false, cmd_g2micrec, "Usage: g2micrec start [\"path\"] | stop | status  (bare = status)" },

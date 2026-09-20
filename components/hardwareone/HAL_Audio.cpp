@@ -45,6 +45,8 @@ static volatile AudioSource       gAudioSource  = AUDIO_SRC_NONE; // no compile-
 static volatile AudioCapturePhase gCapturePhase = AudioCapturePhase::IDLE;
 static const char*                gCaptureOwner = nullptr;        // null only in IDLE
 static uint32_t                   gCaptureRate  = AUDIO_HAL_SAMPLE_RATE;
+static uint32_t                   gNativeG2Generation = 0;
+static AudioSource                gNativePreviousSource = AUDIO_SRC_NONE;
 static StaticSemaphore_t          gAudioStateMutexStorage;
 static SemaphoreHandle_t          gAudioStateMutex = nullptr;
 static portMUX_TYPE               gAudioStateInitMux = portMUX_INITIALIZER_UNLOCKED;
@@ -208,7 +210,8 @@ bool audioCaptureOwnedBy(const char* owner) {
 }
 const char* audioCaptureOwner(){ return gCaptureOwner ? gCaptureOwner : ""; }
 
-bool audioCaptureStart(const char* owner, uint32_t sampleRate) {
+static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
+                                  uint32_t nativeGeneration) {
   if (!ensureAudioStateMutex()) return false;
   const char* requestedOwner = owner ? owner : "audio";
 
@@ -218,7 +221,7 @@ bool audioCaptureStart(const char* owner, uint32_t sampleRate) {
     // Only an already ACTIVE same-owner call is idempotent. Returning success
     // for STARTING would expose a backend that has not actually armed yet.
     const bool sameOwner = strcmp(requestedOwner, gCaptureOwner) == 0;
-    const bool alreadyActive = sameOwner &&
+    const bool alreadyActive = sameOwner && gNativeG2Generation == nativeGeneration &&
                                gCapturePhase == AudioCapturePhase::ACTIVE;
     if (!alreadyActive) {
       WARN_SYSTEMF("[HAL_AUDIO] capture busy (held by '%s'), '%s' denied",
@@ -230,8 +233,12 @@ bool audioCaptureStart(const char* owner, uint32_t sampleRate) {
 
   // Resolve: honor the selected source if still available, else fall back to any
   // available source (PDM-first). No implicit assumption that a source exists.
-  AudioSource src = gAudioSource;
-  if (src == AUDIO_SRC_NONE || !audioSourceAvailable(src)) {
+  AudioSource src = nativeGeneration ? AUDIO_SRC_G2_LEFT : gAudioSource;
+  if (nativeGeneration && !audioSourceAvailable(src)) {
+    xSemaphoreGive(gAudioStateMutex);
+    return false;
+  }
+  if (!nativeGeneration && (src == AUDIO_SRC_NONE || !audioSourceAvailable(src))) {
     if      (audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) src = AUDIO_SRC_LOCAL_PDM;
     else if (audioSourceAvailable(AUDIO_SRC_G2_LEFT))   src = AUDIO_SRC_G2_LEFT;
     else {
@@ -242,8 +249,10 @@ bool audioCaptureStart(const char* owner, uint32_t sampleRate) {
     }
   }
   if (sampleRate == 0) sampleRate = AUDIO_HAL_SAMPLE_RATE;
+  if (nativeGeneration) gNativePreviousSource = gAudioSource;
   gAudioSource  = src;               // latch resolved source for audioReadPcm dispatch
   gCaptureRate  = sampleRate;
+  gNativeG2Generation = nativeGeneration;
   gCaptureOwner = requestedOwner;            // provisional claim; rolled back on failure
   gCapturePhase = AudioCapturePhase::STARTING;
   xSemaphoreGive(gAudioStateMutex);
@@ -256,10 +265,14 @@ bool audioCaptureStart(const char* owner, uint32_t sampleRate) {
     ok = pdmStartLocked(sampleRate);
 #endif
   } else if (src == AUDIO_SRC_G2_LEFT) {
-    // Arm the local ring/decoder AND tell the glasses to actually stream (the
-    // AFE feed alone never sends AudioCtrCmd → zero frames → silent dead mic).
-    ok = g2MicStreamEnable(true) && g2MicSetAfeFeedActive(true);
-    if (!ok) g2MicStreamEnable(false);   // undo a half-armed stream
+    // Native control owns mic start/stop. Legacy capture needs both a decoder
+    // and AudioCtrCmd; never send the latter into native Conversate.
+    if (nativeGeneration) {
+      ok = g2MicSetAfeFeedActive(true, nativeGeneration);
+    } else {
+      ok = g2MicStreamEnable(true) && g2MicSetAfeFeedActive(true);
+      if (!ok) g2MicStreamEnable(false);   // undo a half-armed stream
+    }
   }
 
   // Revalidate the provisional claim. A source-loss callback may have moved it
@@ -291,7 +304,7 @@ bool audioCaptureStart(const char* owner, uint32_t sampleRate) {
       pdmStopLocked();
 #endif
     } else if (src == AUDIO_SRC_G2_LEFT) {
-      g2MicStreamEnable(false);
+      if (!nativeGeneration) g2MicStreamEnable(false);
       g2MicSetAfeFeedActive(false);
     }
   }
@@ -299,11 +312,34 @@ bool audioCaptureStart(const char* owner, uint32_t sampleRate) {
   xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
   // STOPPING excludes replacement claims until cleanup above is complete.
   if (gCapturePhase == AudioCapturePhase::STOPPING) {
+    if (nativeGeneration) gAudioSource = gNativePreviousSource;
     gCaptureOwner = nullptr;
     gCapturePhase = AudioCapturePhase::IDLE;
   }
   xSemaphoreGive(gAudioStateMutex);
   return false;
+}
+
+bool audioCaptureStart(const char* owner, uint32_t sampleRate) {
+  return audioCaptureStartImpl(owner, sampleRate, 0);
+}
+
+bool audioCaptureStartG2Native(const char* owner, uint32_t leftGeneration) {
+  return owner && owner[0] && leftGeneration &&
+      audioCaptureStartImpl(owner, AUDIO_HAL_SAMPLE_RATE, leftGeneration);
+}
+
+void audioCapturePauseG2Native(const char* owner, bool paused) {
+  if (!owner || !ensureAudioStateMutex()) return;
+  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
+  if (gCapturePhase == AudioCapturePhase::ACTIVE && gNativeG2Generation &&
+      gCaptureOwner && strcmp(owner, gCaptureOwner) == 0) {
+    // This backend operation only takes the short PCM mutex and never calls
+    // HAL/BLE. Holding the ownership lock prevents delayed cleanup from
+    // freezing a successor capture after this one has been released.
+    g2MicPauseAfeFeed(paused);
+  }
+  xSemaphoreGive(gAudioStateMutex);
 }
 
 void audioCaptureStop(const char* owner) {
@@ -333,6 +369,7 @@ void audioCaptureStop(const char* owner) {
     return;
   }
   const AudioSource src = gAudioSource;
+  const bool nativeG2 = gNativeG2Generation != 0;
   gCapturePhase = AudioCapturePhase::STOPPING;
   xSemaphoreGive(gAudioStateMutex);
 
@@ -343,13 +380,16 @@ void audioCaptureStop(const char* owner) {
     pdmStopLocked();
 #endif
   } else if (src == AUDIO_SRC_G2_LEFT) {
-    g2MicLinkFastRelease();              // safety net (latched no-op if the
+    if (!nativeG2) {
+      g2MicLinkFastRelease();              // safety net (latched no-op if the
                                          // recorder already released)
-    g2MicStreamEnable(false);            // AudioCtrCmd{en=0} — stop the glasses stream
+      g2MicStreamEnable(false);            // AudioCtrCmd{en=0} — stop the glasses stream
+    }
     g2MicSetAfeFeedActive(false);        // disarm the ring/decoder
   }
 
   xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
+  if (nativeG2) gAudioSource = gNativePreviousSource;
   gCaptureOwner = nullptr;
   gCapturePhase = AudioCapturePhase::IDLE;
   xSemaphoreGive(gAudioStateMutex);
