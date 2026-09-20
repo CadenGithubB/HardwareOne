@@ -1,0 +1,215 @@
+
+<div class='games-wrap'>
+  <h2>Games</h2>
+  <p class='text-sm'>Client-side prototype for Tilt Maze. IMU polling starts when you click Start.</p>
+  <div class='row'>
+    <div class='col'>
+      <div class='card-light'>
+        <h3 style='margin-bottom:8px'>Tilt Maze</h3>
+        <div class='btn-row'>
+          <button class='btn' id='btnStart'>Start</button>
+          <button class='btn' id='btnStop'>Stop</button>
+          <select id='terrainSelect' class='input-tall' style='width:auto'>
+            <option value='ground'>Ground</option>
+            <option value='ice'>Icy</option>
+            <option value='cave'>Cave</option>
+            <option value='plains'>Plains</option>
+            <option value='expanse'>Expanse</option>
+            <option value='cavetest'>Cave Test</option>
+          </select>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-left:12px' title='Use Seesaw gamepad to control the maze'>
+            <input type='checkbox' id='chkGamepad'/> Gamepad
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-left:12px' title='Use WASD/arrows + mouse look to control the maze'>
+            <input type='checkbox' id='chkKeyboard'/> Keyboard + Mouse
+          </label>
+        </div>
+        <div id='caveTestOptions' class='space-top-sm text-sm' style='display:none;padding:4px 8px;background:#1a2a1a;border:1px solid #335533;border-radius:4px'>
+          <span style='color:#88cc88;font-weight:bold;margin-right:8px'>Cave Test:</span>
+          <label>Entrance
+            <select id='ctEntranceKind' class='input-tall' style='width:auto'>
+              <option value='descending'>Descending</option>
+              <option value='hillside'>Hillside</option>
+            </select>
+          </label>
+          <button class='btn btn-small' id='ctViewApproach'>Approach</button>
+          <button class='btn btn-small' id='ctViewMouth'>Mouth</button>
+          <button class='btn btn-small' id='ctViewInside'>Inside</button>
+          <button class='btn btn-small' id='ctViewBack'>Look out</button>
+          <button class='btn btn-small' id='ctViewChamber'>Chamber</button>
+          <button class='btn btn-small' id='ctViewAbove'>Above cave</button>
+          <button class='btn btn-small' id='ctViewSideLeft'>Side left</button>
+          <button class='btn btn-small' id='ctViewSideRight'>Side right</button>
+          <button class='btn btn-small' id='ctViewOblique'>Oblique</button>
+          <button class='btn btn-small' id='ctViewRoofEdge'>Roof edge</button>
+          <label style='display:inline-flex;align-items:center;gap:4px;margin-left:6px'>
+            <input type='checkbox' id='ctFixedNoon' checked/> Fixed noon
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:4px;margin-left:6px' title='Pause and render a skeleton, chest, and fire orb just inside the entrance; turn off to restart normal Cave Test'>
+            <input type='checkbox' id='ctVisibilityFixtures'/> Visibility fixtures
+          </label>
+          <output id='ctPreviewStatus' style='display:block;margin:4px 0;color:#b9d8b9'></output>
+          <div style='margin:6px 0'>
+            <button class='btn btn-small' id='ctProfilePreview'>Profile preview</button>
+            <button class='btn btn-small' id='ctProfileFullscreen'>Profile fullscreen</button>
+            <button class='btn btn-small' id='ctProfileViewport'>Profile viewport-size fallback</button>
+            <button class='btn btn-small' id='ctProfileCancel' disabled>Cancel profile</button>
+            <label style='display:inline-flex;align-items:center;gap:4px;margin-left:6px'>
+              <input type='checkbox' id='ctProfileVerifyPixels'/> Verify pixels after profiling
+            </label>
+            <div style='font-size:11px;margin-top:4px'>Pauses the three visibility fixtures; 12 warmups + 60 animation frames. Fullscreen exits automatically. No quality settings change.</div>
+            <pre id='ctProfileResult' role='log' aria-label='Browser profile result' aria-live='polite' style='white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;margin:4px 0;font-size:11px'>Choose a viewpoint, then profile it.</pre>
+          </div>
+          <label style='display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:8px'>
+            <input type='checkbox' id='ctSurfaceEnemies'/> <span style='font-size:11px'>Surface Enemies</span>
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:8px'>
+            <input type='checkbox' id='ctStructures'/> <span style='font-size:11px'>Structures</span>
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:8px'>
+            <input type='checkbox' id='ctMarkets'/> <span style='font-size:11px'>Markets</span>
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:8px'>
+            <input type='checkbox' id='ctShrines'/> <span style='font-size:11px'>Shrines</span>
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:8px'>
+            <input type='checkbox' id='ctSpawners'/> <span style='font-size:11px'>Spawners</span>
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:8px'>
+            <input type='checkbox' id='ctSurfaceChests'/> <span style='font-size:11px'>Surface Chests</span>
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:8px'>
+            <input type='checkbox' id='ctCaveEnemies'/> <span style='font-size:11px'>Cave Enemies</span>
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:8px'>
+            <input type='checkbox' id='ctCaveChests' checked/> <span style='font-size:11px'>Cave Chests</span>
+          </label>
+        </div>
+        <div class='space-top-sm text-sm'>
+          <button class='btn btn-small' id='btnView2D'>2D View</button>
+          <button class='btn btn-small' id='btnView3D'>3D View (beta)</button>
+          <button class='btn btn-small' id='btnToggleTex'>Toggle Textures</button>
+          <button class='btn btn-small' id='btnOverview' style='background:#2a3a2a;border-color:#446644'>🗺 Overview</button>
+          <button class='btn btn-small' id='btnEndless' style='background:#3a2a2a;border-color:#664444'>Endless Mode</button>
+        </div>
+        <div class='space-top-sm text-sm'>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer'>
+            <input type='checkbox' id='chkImuDebug'/> IMU debug to console
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Automatically show map overview when a level loads'>
+            <input type='checkbox' id='chkAutoOverview' checked/> Auto overview on load
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer'>
+            <input type='checkbox' id='chk3dDebug'/> 3D debug overlay
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer'>
+            <input type='checkbox' id='chkTexDebug'/> Texture debug
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer'>
+            <input type='checkbox' id='chkFloorDebug'/> Floor debug
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Red ground plane + green quad edges to find floor line artifact'>
+            <input type='checkbox' id='chkFloorLineDebug'/> Floor LINE debug
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer'>
+            <input type='checkbox' id='chkDecorDebug'/> Decoration debug
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Log combat/attack state each frame: mouseHeld, mana, cooldown, lastShotMs'>
+            <input type='checkbox' id='chkCombatDebug'/> Combat debug
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Show skeleton sprite sheet overlay with active frame highlighted'>
+            <input type='checkbox' id='chkSkelDebug'/> Skeleton debug
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='During 3D render, set camera position equal to player position'>
+            <input type='checkbox' id='chkCamFollow'/> Sync camera to player
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Disable collision with walls and enemies'>
+            <input type='checkbox' id='chkNoclip'/> Noclip
+          </label>
+          <span class='space-left-md'></span>
+          <button class='btn btn-small' id='btnFwDbgOn' title='Enable firmware sensor debug flags'>FW Debug ON</button>
+          <button class='btn btn-small' id='btnFwDbgOff' title='Disable firmware sensor debug flags'>FW Debug OFF</button>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Overlay real-time frame time breakdown and FPS on the canvas'>
+            <input type='checkbox' id='chkPerfHud'/> Perf HUD
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Overlay cave debug info: floor height, ceiling height, ambient light, underground state'>
+            <input type='checkbox' id='chkCaveDbg'/> Cave Debug
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Log archway piece visibility transitions to console (per-pillar, per-plank)'>
+            <input type='checkbox' id='chkArchVisDbg'/> Arch-Vis Log
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Color-code floor quad categories at cave entrance: cyan=gap, magenta=deferred, yellow=clamped, green=edge, blue=ceiling'>
+            <input type='checkbox' id='chkCaveColors'/> Cave Colors
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Color floor quads by layer type: green=cave floor(1), yellow=ledge(3), blue=surface cap(4)'>
+            <input type='checkbox' id='chkLayerTypes'/> Layer Types
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Color every polygon by what it is: red=cave wall, gray=surface wall, blue=cap, purple=ceiling, green=surface floor, yellow=tilted floor, orange=cave floor'>
+            <input type='checkbox' id='chkPolyTypes'/> Poly Types
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Draw ceiling quad outlines in magenta so you can see the mesh — reveals skewed/twisted quads near entrances'>
+            <input type='checkbox' id='chkCeilWire'/> Ceiling Wire
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Skip the cave ceiling render pass — if the view opens up when toggled on, the ceiling was blocking it'>
+            <input type='checkbox' id='chkHideCeil'/> Hide Ceiling
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Skip the walls render pass (also includes the floor) — shows what ceiling+platforms draw alone'>
+            <input type='checkbox' id='chkHideWalls'/> Hide Walls
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Skip platforms render pass'>
+            <input type='checkbox' id='chkHidePlats'/> Hide Platforms
+          </label>
+        </div>
+        <div class='hud'>
+          <div>Level: <span id='hudLevel'>1</span></div>
+          <div id='hudCal' class='text-muted'>Not calibrated</div>
+          <div>Collisions: <span id='hudCol'>0</span></div>
+          <div>Input: <span id='hudInput'>IMU</span></div>
+        </div>
+        <div class='space-top-md' style='display:flex; align-items:flex-start; gap:10px;'>
+          <canvas id='maze' width='360' height='240'></canvas>
+          <div id='caveColorLegend' style='display:none; background:#0a0a14; border:1px solid #3a6; padding:8px 12px; font:13px monospace; line-height:1.6; white-space:nowrap;'>
+            <div style='color:#00ffff;'>CYAN = Near entrance (at depth)</div>
+            <div style='color:#ffff00;'>YELLOW = Clamped to 0 (far)</div>
+            <div style='color:#4444ff;'>BLUE = Ceiling quad</div>
+            <div style='color:#ff00ff;'>MAGENTA = Deferred quad</div>
+          </div>
+        </div>
+        <div id='perfHudPanel' style='display:none; margin-top:8px;'>
+          <div style='display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap;'>
+            <canvas id='perfHudCanvas' width='560' height='680' style='border:1px solid #557; background:#0a0a14; flex-shrink:0;'></canvas>
+            <pre id='perfHudText' style='color:#dde; font:10px monospace; background:#0a0a14; border:1px solid #557; padding:6px; margin:0; white-space:pre; min-width:260px;'></pre>
+          </div>
+        </div>
+        <div id='caveDebugPanel' style='display:none; margin-top:8px;'>
+          <div style='display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap;'>
+            <canvas id='controlMapCanvas' width='300' height='300' style='border:1px solid #3a6; background:#0a0a14; flex-shrink:0;'></canvas>
+            <canvas id='caveProfileCanvas' width='400' height='220' style='border:1px solid #3a6; background:#0a0a14; flex-shrink:0;'></canvas>
+            <pre id='caveDebugText' style='color:#ccddee; font:10px monospace; background:#0a0a14; border:1px solid #3a6; padding:6px; margin:0; white-space:pre;'></pre>
+            <pre id='caveDebugStats' style='color:#ffee99; font:10px monospace; background:#0a0a14; border:1px solid #a63; padding:6px; margin:0; white-space:pre;'></pre>
+            <div style='display:flex; flex-direction:column; gap:6px; width:420px; max-width:420px;'>
+              <button id='caveTestRunBtn' style='background:#264; color:#cfe; border:1px solid #3a6; padding:6px 12px; font:11px monospace; cursor:pointer; align-self:flex-start;'>Capture state</button>
+              <pre id='caveTestResults' style='color:#ccddee; font:10px monospace; background:#0a0a14; border:1px solid #a63; padding:6px; margin:0; white-space:pre-wrap; word-break:break-all; width:420px; max-height:360px; overflow:auto;'>Walk to a spot, then click "Capture state" to snapshot the cave debug state. Paste the output back to share.</pre>
+            </div>
+          </div>
+        </div>
+        <p class='text-sm space-top-sm'>Hold the device flat. Roll controls X, Pitch controls Y. Keep movements gentle.</p>
+</div>

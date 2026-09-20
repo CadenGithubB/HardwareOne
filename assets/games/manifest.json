@@ -1,0 +1,42 @@
+{
+  "format": 1,
+  "template": "header.h.in",
+  "parts": {
+    "CSS": [
+      "page.css"
+    ],
+    "HTML": [
+      "page.html"
+    ],
+    "BOOTSTRAP": [
+      "src/00-errors.js"
+    ],
+    "MAIN": [
+      "src/01-config-state.js",
+      "src/02-utilities-terrain.js",
+      "src/03-level-generation.js",
+      "src/04-shop.js",
+      "src/05-endless-world.js",
+      "src/06-floor-queries.js",
+      "src/07-decorations-lighting.js",
+      "src/08-sensors-input-los.js",
+      "src/09-physics.js",
+      "src/10-combat.js",
+      "src/11-enemies.js",
+      "src/12-scene-depth.js",
+      "src/12-render-core-walls.js",
+      "src/13-render-floors-ceilings.js",
+      "src/14-render-entities.js",
+      "src/15-render-hud-menu.js",
+      "src/16-draw-overview.js",
+      "src/17-input-lighting-update.js",
+      "src/18-arena-fortress.js",
+      "src/19-companions-loot.js",
+      "src/20-diagnostics.js",
+      "src/20-browser-profile.js",
+      "src/21-frame-loop.js",
+      "src/22-lifecycle.js",
+      "src/23-events-init.js"
+    ]
+  }
+}

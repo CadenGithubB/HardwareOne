@@ -1,0 +1,45 @@
+#ifndef WEBPAGE_GAMES_H
+#define WEBPAGE_GAMES_H
+
+#include <Arduino.h>
+#include "System_BuildConfig.h"
+#if ENABLE_HTTP_SERVER
+#include <esp_http_server.h>
+#endif
+#include "WebServer_Utils.h"
+
+#if ENABLE_WEB_GAME_MAZE
+
+// Client-only Tilt Maze prototype
+// - Uses IMU endpoint: /api/sensors?sensor=imu
+// - Polling starts ONLY after pressing Start
+// - Uses shared page shell/navigation
+
+// Streamed inner content for games page
+inline void streamGamesInner(httpd_req_t* req) {
+  // CSS
+  httpd_resp_send_chunk(req, R"CSS(@@CSS@@)CSS", HTTPD_RESP_USE_STRLEN);
+
+  // HTML structure
+  httpd_resp_send_chunk(req, R"HTML(@@HTML@@)HTML", HTTPD_RESP_USE_STRLEN);
+
+  // JavaScript (complete game logic)
+  httpd_resp_send_chunk(req, R"JS(
+<script>@@BOOTSTRAP@@</script>
+<script>@@MAIN@@</script>
+)JS", HTTPD_RESP_USE_STRLEN);
+
+  // Close games-wrap
+  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+}
+
+void registerGamesHandlers(httpd_handle_t server);
+
+#else
+
+inline void streamGamesInner(httpd_req_t* req) { (void)req; }
+inline void registerGamesHandlers(httpd_handle_t server) { (void)server; }
+
+#endif
+
+#endif // WEBPAGE_GAMES_H

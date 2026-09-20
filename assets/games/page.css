@@ -1,0 +1,6 @@
+
+.games-wrap{max-width:1000px;margin:0 auto}
+.row{display:flex;gap:16px;flex-wrap:wrap}
+.col{flex:1 1 320px} .card-light{background:var(--panel-bg);color:var(--panel-fg);border-radius:12px;padding:16px;border:1px solid var(--border)}
+.hud{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-family:'Courier New',monospace;color:var(--panel-fg)}
+canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}

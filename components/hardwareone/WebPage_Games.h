@@ -55,6 +55,40 @@ canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
         </div>
         <div id='caveTestOptions' class='space-top-sm text-sm' style='display:none;padding:4px 8px;background:#1a2a1a;border:1px solid #335533;border-radius:4px'>
           <span style='color:#88cc88;font-weight:bold;margin-right:8px'>Cave Test:</span>
+          <label>Entrance
+            <select id='ctEntranceKind' class='input-tall' style='width:auto'>
+              <option value='descending'>Descending</option>
+              <option value='hillside'>Hillside</option>
+            </select>
+          </label>
+          <button class='btn btn-small' id='ctViewApproach'>Approach</button>
+          <button class='btn btn-small' id='ctViewMouth'>Mouth</button>
+          <button class='btn btn-small' id='ctViewInside'>Inside</button>
+          <button class='btn btn-small' id='ctViewBack'>Look out</button>
+          <button class='btn btn-small' id='ctViewChamber'>Chamber</button>
+          <button class='btn btn-small' id='ctViewAbove'>Above cave</button>
+          <button class='btn btn-small' id='ctViewSideLeft'>Side left</button>
+          <button class='btn btn-small' id='ctViewSideRight'>Side right</button>
+          <button class='btn btn-small' id='ctViewOblique'>Oblique</button>
+          <button class='btn btn-small' id='ctViewRoofEdge'>Roof edge</button>
+          <label style='display:inline-flex;align-items:center;gap:4px;margin-left:6px'>
+            <input type='checkbox' id='ctFixedNoon' checked/> Fixed noon
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:4px;margin-left:6px' title='Pause and render a skeleton, chest, and fire orb just inside the entrance; turn off to restart normal Cave Test'>
+            <input type='checkbox' id='ctVisibilityFixtures'/> Visibility fixtures
+          </label>
+          <output id='ctPreviewStatus' style='display:block;margin:4px 0;color:#b9d8b9'></output>
+          <div style='margin:6px 0'>
+            <button class='btn btn-small' id='ctProfilePreview'>Profile preview</button>
+            <button class='btn btn-small' id='ctProfileFullscreen'>Profile fullscreen</button>
+            <button class='btn btn-small' id='ctProfileViewport'>Profile viewport-size fallback</button>
+            <button class='btn btn-small' id='ctProfileCancel' disabled>Cancel profile</button>
+            <label style='display:inline-flex;align-items:center;gap:4px;margin-left:6px'>
+              <input type='checkbox' id='ctProfileVerifyPixels'/> Verify pixels after profiling
+            </label>
+            <div style='font-size:11px;margin-top:4px'>Pauses the three visibility fixtures; 12 warmups + 60 animation frames. Fullscreen exits automatically. No quality settings change.</div>
+            <pre id='ctProfileResult' role='log' aria-label='Browser profile result' aria-live='polite' style='white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;margin:4px 0;font-size:11px'>Choose a viewpoint, then profile it.</pre>
+          </div>
           <label style='display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:8px'>
             <input type='checkbox' id='ctSurfaceEnemies'/> <span style='font-size:11px'>Surface Enemies</span>
           </label>
@@ -451,7 +485,9 @@ function getCam3D() {
   var invTanHalf = 1 / Math.tan(halfFov);
   var pitchOff = Math.floor(-(cam.pitch || 0) * projScale);
   var horizonY = Math.floor(h * 0.5) + pitchOff;
-  var cameraZ = 60 + ((cam.z || 60) - 60) * (25 / 40);
+  // cam.z retains the legacy player-height encoding (60 + 40 * mesh H).
+  // Zero is a valid height; only a missing/nonfinite value uses the fallback.
+  var cameraZ = 60 + ((Number.isFinite(cam.z) ? cam.z : 60) - 60) * (25 / 40);
   return { w: w, h: h, cosAng: cosAng, sinAng: sinAng, invTanHalf: invTanHalf,
            horizonY: horizonY, cameraZ: cameraZ };
 }
@@ -475,6 +511,9 @@ function projToScreen(wx, wy, wz, C) {
 // opts: { maxDist, depthOffset, checkMidpoint, fadeFraction, skipDepth, stats }
 //   stats: optional object — if provided, increments .tooFar / .behind / .depthOccl / .belowFloor / .midOccl
 function entityVisible3D(wx, wy, wz, C, opts) {
+  opts = opts || {};
+  var sceneDepth = !!(opts.sceneDepth || opts.bounds);
+  if (!Number.isFinite(wx) || !Number.isFinite(wy)) return null;
   var dx = wx - cam.x, dy = wy - cam.y;
   var dist = Math.hypot(dx, dy);
   if (dist < 1) dist = 1;
@@ -489,7 +528,7 @@ function entityVisible3D(wx, wy, wz, C, opts) {
 
   // Depth buffer check — use min depth across a small column range to avoid
   // 1-pixel edge artifacts where a face boundary causes single-column occlusion flicker.
-  if (!opts.skipDepth) {
+  if (!sceneDepth && !opts.skipDepth) {
     var depthOff = opts.depthOffset || 2;
     if (depthBuffer && sx >= 0 && sx < depthBuffer.length) {
       // Single-column read + larger tolerance (+4) replaces the 5-column scan
@@ -505,15 +544,15 @@ function entityVisible3D(wx, wy, wz, C, opts) {
   // Floor height at entity
   var fh = floorMesh ? getFloorHeightAt(wx, wy) : 0;
   var floorZ = fh * 25;
-  if ((wz || 0) < floorZ - 40) { if (opts.stats) opts.stats.belowFloor++; return null; }
+  if (!sceneDepth && (wz || 0) < floorZ - 40) { if (opts.stats) opts.stats.belowFloor++; return null; }
 
   // Surface→underground entity culling: skip underground entities from surface
-  if (floorMesh && !playerUnderground && fh < -0.1) return null;
+  if (!sceneDepth && floorMesh && !playerUnderground && fh < -0.1) return null;
 
   // Midpoint occlusion — hill between camera and entity.
   // Skip when underground (surface terrain would falsely occlude) or when the
   // entity is within ~80u (no hill physically fits between).
-  if (opts.checkMidpoint && !playerUnderground && dist > 80) {
+  if (!sceneDepth && opts.checkMidpoint && !playerUnderground && dist > 80) {
     var fhMid = floorMesh ? getFloorHeightAt((cam.x + wx) * 0.5, (cam.y + wy) * 0.5) : 0;
     if (fhMid * 25 > (C.cameraZ + floorZ) * 0.5 + 8) {
       if (opts.stats) opts.stats.midOccl++;
@@ -528,8 +567,11 @@ function entityVisible3D(wx, wy, wz, C, opts) {
     fade = Math.max(0, 1.0 - (dist - maxDist * fadeFrac) / (maxDist * (1 - fadeFrac)));
   }
 
-  var sy = Math.floor(C.horizonY + (C.cameraZ - (wz || floorZ)) / fwd * projScale);
-  return { sx: sx, sy: sy, fwd: fwd, dist: dist, floorZ: floorZ, fade: fade };
+  // Migrated callers supply an absolute render height. Zero is valid; bounce
+  // offsets belong in their animation, not in this world-height slot.
+  var renderZ = sceneDepth ? (Number.isFinite(wz) ? wz : floorZ) : (wz || floorZ);
+  var sy = Math.floor(C.horizonY + (C.cameraZ - renderZ) / fwd * projScale);
+  return { sx: sx, sy: sy, fwd: fwd, dist: dist, floorZ: floorZ, renderZ:renderZ, fade: fade };
 }
 
 // =============================================
@@ -573,9 +615,13 @@ function renderEntities3D(arr, visOpts, drawFn) {
   var count = 0;
   for (var i = 0; i < arr.length; i++) {
     var e = arr[i];
-    var wx = e.x, wy = e.y, wz = e.wz || e.z || 0;
+    var wx = e.x, wy = e.y;
+    var wz = visOpts.groundAnchor ? getEntityRenderFloorZ(e) :
+      (visOpts.sceneDepth || visOpts.bounds) ? (Number.isFinite(e.wz) ? e.wz : Number.isFinite(e.z) ? e.z : getEntityRenderFloorZ(e)) : (e.wz || e.z || 0);
+    if ((visOpts.sceneDepth || visOpts.bounds) && !Number.isFinite(wz)) continue;
     var vis = entityVisible3D(wx, wy, wz, C, visOpts);
     if (!vis) continue;
+    if (visOpts.groundAnchor) vis.floorZ = wz;
     if (vis.dist < minDist) continue;
     if (count >= 512) break; // safety cap
     _reIdxBuf[count] = i;
@@ -605,7 +651,15 @@ function renderEntities3D(arr, visOpts, drawFn) {
 
   // Draw pass
   for (var di = 0; di < count; di++) {
-    drawFn(arr[_reIdxBuf[di]], _reVisBuf[di], C, ctx, now);
+    var entity = arr[_reIdxBuf[di]], visible = _reVisBuf[di];
+    if (typeof visOpts.bounds === 'function') {
+      var bounds = visOpts.bounds(entity, visible, C, now);
+      withSceneDepthBillboard(bounds, visible.fwd, function() {
+        drawFn(entity, visible, C, ctx, now);
+      });
+    } else {
+      drawFn(entity, visible, C, ctx, now);
+    }
   }
 }
 
@@ -2010,8 +2064,6 @@ var levels = [
     walls:[]
   }
 ];
-
-
 // =============================================
 // SECTION 1: UTILITIES
 // =============================================
@@ -3521,6 +3573,8 @@ function generateFloorScatter() {
       x: c2s.wx + (rng() - 0.5) * cell * 0.6,
       y: c2s.wy + (rng() - 0.5) * cell * 0.6,
       type: itemType,
+      // Preserve the stratum that selected this clutter, independent of camera.
+      underground: !!inCave,
       variant: Math.floor(rng() * 3),
       seed: rng()
     });
@@ -3546,6 +3600,7 @@ function generateFloorScatter() {
         x: gc.wx + Math.cos(gAng) * gRad + (rng() - 0.5) * cell * 0.25,
         y: gc.wy + Math.sin(gAng) * gRad + (rng() - 0.5) * cell * 0.25,
         type: groupType,
+        underground: !!inCaveG,
         variant: Math.floor(rng() * 3),
         seed: rng(),
         grouped: true   // cosmetic flag — renderers treat these identically to singles
@@ -3600,6 +3655,7 @@ function generateFloorScatter() {
       x: ec.wx + (rng() - 0.5) * cell * 0.4,
       y: ec.wy + (rng() - 0.5) * cell * 0.4,
       type: eType2,
+      underground: !!inCaveE,
       variant: Math.floor(rng() * 3),
       seed: rng(),
       edge: true
@@ -4125,7 +4181,6 @@ function applyIrregularBorder(poly) {
   }
   console.log('[BORDER] Irregular border applied: ' + marked + ' cells marked outside polygon');
 }
-
 // =============================================
 // SHOP SYSTEM
 // =============================================
@@ -4436,6 +4491,41 @@ function getDifficultyAt(wx, wy) {
 // ── Endless-Mode Underground Cave Network Generator ──
 // ══════════════════════════════════════════════════════════════
 
+// Heights in this section are mesh-height units. XY is always world-space;
+// only the copies in deepCaveEntrances are rebased into window coordinates.
+function getEndlessNaturalSurfaceH(wx, wy) {
+  var geoOffset = (geographyNoise(wx, wy) - 0.5) * 8.0;
+  var spawnDist = Math.hypot(wx, wy);
+  if (spawnDist < 800) geoOffset *= Math.max(0, (spawnDist - 200) / 600);
+  return terrainNoise(wx, wy) + geoOffset;
+}
+
+function caveSmooth01(t) {
+  t = Math.max(0, Math.min(1, t));
+  return t * t * (3 - 2 * t);
+}
+
+// This footprint is shared with render/diagnostic consumers. along is
+// positive OUTSIDE the mouth, matching the original entrance-zone convention.
+function sampleCavePortal(e, x, y) {
+  var dx = x - e.x, dy = y - e.y;
+  var co = Math.cos(e.angle), si = Math.sin(e.angle);
+  var along = -(dx * co + dy * si);
+  var cross = -dx * si + dy * co;
+  var perp = Math.abs(cross);
+  var outer = e.approachLength || 480, inner = e.innerLength || 240;
+  if (along > outer || along < -inner) return null;
+  var halfW = e.halfWidth || 54;
+  var coreW = halfW + (along > 0 ? 42 * along / outer : 0);
+  var feather = 48;
+  if (perp >= coreW + feather) return null;
+  var lat = 1 - caveSmooth01((perp - coreW) / feather);
+  var axial = along > 0 ? 1 - caveSmooth01(along / outer) : 1;
+  return {along: along, cross: cross, perp: perp, coreW: coreW, lat: lat,
+    tAxial: axial, t: axial * lat, inCore: perp <= coreW,
+    isInside: along >= -inner && along <= 0, covered: along <= 0, entrance: e};
+}
+
 function generateCaveNetwork(regionX, regionY) {
   var netKey = regionX + ',' + regionY;
   if (netKey in endlessCaveNetworks) return endlessCaveNetworks[netKey];
@@ -4470,100 +4560,115 @@ function generateCaveNetwork(regionX, regionY) {
   }
 
   var rng = chunkRng(regionX, regionY, 100);
-  var corridors = [];
-  var chambers = [];
-  var entrances = [];
-
-  // 1-2 entrances
-  var numEntrances = rng() < 0.4 ? 2 : 1;
-  for (var ei = 0; ei < numEntrances; ei++) {
-    var eAng = rng() * Math.PI * 2;
-    var eDist = CHUNK_SIZE * (0.5 + rng() * 0.5);
-    var ex = centerWX + Math.cos(eAng) * eDist;
-    var ey = centerWY + Math.sin(eAng) * eDist;
-    // Face inward toward center
-    var inwardAng = Math.atan2(centerWY - ey, centerWX - ex);
-    entrances.push({x: ex, y: ey, angle: inwardAng});
+  var entryAngle = rng() * Math.PI * 2;
+  var entryDist = CHUNK_SIZE * (0.5 + rng() * 0.4);
+  var mouthX = centerWX + Math.cos(entryAngle) * entryDist;
+  var mouthY = centerWY + Math.sin(entryAngle) * entryDist;
+  var inward = entryAngle + Math.PI;
+  var headroom = 3.8 + rng() * 0.4, minCover = 1.0;
+  var style = rng(), width = 104 + rng() * 16;
+  var turns = [], lengths = [], widths = [];
+  var count = 5 + Math.floor(rng() * 3);
+  for (var s = 0; s < count; s++) {
+    turns.push(s === 0 ? 0 : (rng() - 0.5) * 0.65);
+    lengths.push(s === 0 ? 180 : 55 + rng() * 25);
+    widths.push(s === 0 ? width : width * (0.86 + rng() * 0.2));
   }
+  var chamberRadius = 82 + rng() * 24;
 
-  // Corridor generation: iterative work-stack random walk from each entrance
-  var stack = [];
-  for (var si = 0; si < entrances.length; si++) {
-    var ent = entrances[si];
-    stack.push({
-      x: ent.x, y: ent.y, angle: ent.angle,
-      width: 90 + rng() * 50,     // 90-140 world units — wider so the rim lip doesn't feel cramped
-      depth: 6.0 + rng() * 2.5,   // 6.0-8.5 height units deep — deeper caves read as substantial underground spaces
-      ceilH: 5.0 + rng() * 1.5,   // 5.0-6.5 headroom above floor (was 3.5-4.5)
-      stepsLeft: 8 + Math.floor(rng() * 8), // 8-15 steps
-      branchDepth: 0
-    });
+  // A modest first recipe: one connected winding route into a chamber. The
+  // old independently grown entrance networks could advertise disconnected
+  // exits. Larger/dual-entrance recipes can use this same portal contract later.
+  function makeLayout(ex, ey, ang, hillside) {
+    var corridors = [], px = ex, py = ey, a = ang;
+    var steps = hillside ? 4 : count;
+    for (var i = 0; i < steps; i++) {
+      a = ang + Math.max(-0.65, Math.min(0.65, a - ang + turns[i]));
+      var segLen = hillside && i === 0 ? 120 : lengths[i];
+      var nx = px + Math.cos(a) * segLen, ny = py + Math.sin(a) * segLen;
+      corridors.push({x1: px, y1: py, x2: nx, y2: ny, width: widths[i], ceilH: headroom});
+      px = nx; py = ny;
+    }
+    return {corridors: corridors, chambers: [{cx: px, cy: py,
+      radius: chamberRadius, ceilH: headroom + 0.6, terminal: true}]};
   }
-
-  var maxSegments = 120;
-  while (stack.length > 0 && corridors.length < maxSegments) {
-    var cur = stack.pop();
-    for (var step = 0; step < cur.stepsLeft && corridors.length < maxSegments; step++) {
-      var stepLen = 45 + rng() * 30; // 45-75 world units per step
-      // Direction jitter: ±0.4 rad, 70/30 blend back
-      var jitter = (rng() - 0.5) * 0.8;
-      cur.angle = cur.angle * 0.3 + (cur.angle + jitter) * 0.7;
-
-      var nx = cur.x + Math.cos(cur.angle) * stepLen;
-      var ny = cur.y + Math.sin(cur.angle) * stepLen;
-
-      // Per-segment taper
-      var segW = cur.width * (0.8 + rng() * 0.4); // 80-120% of base width
-      // Cave floor swing: segment depth stays locked to the entrance depth so
-      // the floor inside the cave stays flat. Previously (rng()-0.5)*0.3 added
-      // ±0.15u per segment — and chain of 8-15 segments could drift ±1.2u.
-      // Combined with chambers going deeper, total floor swing was ~2u, which
-      // created large gaps at wall-cell boundaries. Keeping this at 0 makes
-      // within-cave floor uniform without affecting overall cave depth.
-      var segDepth = cur.depth;
-      var segCeil = cur.ceilH;
-
-      corridors.push({
-        x1: cur.x, y1: cur.y, x2: nx, y2: ny,
-        width: segW, depth: segDepth, ceilH: segCeil
-      });
-
-      cur.x = nx;
-      cur.y = ny;
-
-      // Chamber at step 3+ (20% chance) or at terminal
-      var isTerminal = (step === cur.stepsLeft - 1);
-      if (isTerminal || (step >= 3 && rng() < 0.20)) {
-        var chR = 70 + rng() * 50; // 70-120 radius (wider chambers)
-        var chDepth = segDepth; // same depth as corridor — keeps cave floor flat, no dip into chambers
-        var chCeil = segCeil + 0.5 + rng() * 1.0;   // higher ceiling
-        chambers.push({
-          cx: cur.x, cy: cur.y, radius: chR,
-          depth: chDepth, ceilH: chCeil, terminal: isTerminal
-        });
-      }
-
-      // Branching (30% depth 0-1, 15% depth 2, 0% depth 3+)
-      if (cur.branchDepth < 3 && step >= 2) {
-        var branchChance = cur.branchDepth <= 1 ? 0.30 : 0.15;
-        if (rng() < branchChance) {
-          var branchDir = (rng() < 0.5 ? 1 : -1);
-          var branchAng = cur.angle + branchDir * (1.0 + rng() * 1.1); // 60-120° off
-          stack.push({
-            x: cur.x, y: cur.y, angle: branchAng,
-            width: segW * (0.7 + rng() * 0.2), // 70-90% of parent width
-            depth: segDepth,
-            ceilH: segCeil * 0.9,
-            stepsLeft: 4 + Math.floor(rng() * 5), // 4-8 steps
-            branchDepth: cur.branchDepth + 1
-          });
+  // Check the full width, not merely its centerline. Sampling extends beyond
+  // the footprint; the extra cover margin absorbs sub-cell terrain variation.
+  function floorLimit(layout, ex, ey, ang, skipPortal) {
+    var limit = Infinity, co = Math.cos(ang), si = Math.sin(ang);
+    function take(x, y, roof) {
+      var axial = (x - ex) * co + (y - ey) * si;
+      if (skipPortal && axial < 240) return;
+      limit = Math.min(limit, getEndlessNaturalSurfaceH(x, y) - roof - minCover - 0.35);
+    }
+    for (var j = 0; j < layout.corridors.length; j++) {
+      var c = layout.corridors[j], dx = c.x2 - c.x1, dy = c.y2 - c.y1;
+      var len = Math.hypot(dx, dy), n = Math.ceil(len / 24);
+      for (var k = 0; k <= n; k++) {
+        var x = c.x1 + dx * k / n, y = c.y1 + dy * k / n;
+        for (var side = -1; side <= 1; side++) {
+          take(x - dy / len * (c.width / 2 + 24) * side,
+               y + dx / len * (c.width / 2 + 24) * side, c.ceilH);
         }
       }
     }
+    var ch = layout.chambers[0];
+    take(ch.cx, ch.cy, ch.ceilH);
+    for (var r = 1; r <= 2; r++) {
+      for (var a = 0; a < 16; a++) {
+        var theta = a * Math.PI / 8;
+        take(ch.cx + Math.cos(theta) * (ch.radius + 24) * r / 2,
+             ch.cy + Math.sin(theta) * (ch.radius + 24) * r / 2, ch.ceilH);
+      }
+    }
+    return limit;
   }
 
-  var net = {corridors: corridors, chambers: chambers, entrances: entrances,
-             regionX: regionX, regionY: regionY};
+  var layout = makeLayout(mouthX, mouthY, inward);
+  var floorH = Math.min(getEndlessNaturalSurfaceH(mouthX, mouthY) - headroom - minCover,
+    floorLimit(layout, mouthX, mouthY, inward, false));
+  var kind = 'descending';
+  var hillsideBestMargin = -Infinity;
+  // Hillside mouths require a real uphill landform. Search is deterministic,
+  // bounded, and done once per cached network; a failed fit becomes a descent.
+  // No synthetic test-only hillside or globally raised terrain is involved.
+  var forcedKind = CAVE_TEST_MODE && typeof window !== 'undefined' ? window._caveTestKindOverride : null;
+  for (var attempt = 0; attempt < 32 && forcedKind !== 'descending'; attempt++) {
+    var ca = entryAngle + attempt * Math.PI * 2 / 32;
+    var tx = centerWX + Math.cos(ca) * entryDist;
+    var ty = centerWY + Math.sin(ca) * entryDist;
+    var ta = ca + Math.PI;
+    // A hillside mouth is cut into the hillside at its OUTSIDE approach
+    // elevation, not at the uncut rock's height directly over the opening.
+    var th = getEndlessNaturalSurfaceH(tx - Math.cos(ta) * 240, ty - Math.sin(ta) * 240) - 0.4;
+    var uphill = getEndlessNaturalSurfaceH(tx + Math.cos(ta) * 300, ty + Math.sin(ta) * 300);
+    if (uphill < th + headroom + minCover) continue;
+    var trial = makeLayout(tx, ty, ta, true);
+    var fitMargin = floorLimit(trial, tx, ty, ta, true) - th;
+    hillsideBestMargin = Math.max(hillsideBestMargin, fitMargin);
+    if (fitMargin < 0) continue;
+    mouthX = tx; mouthY = ty; inward = ta; floorH = th;
+    layout = trial; kind = 'hillside'; break;
+  }
+  for (var ci = 0; ci < layout.corridors.length; ci++) {
+    layout.corridors[ci].floorH = floorH;
+    layout.corridors[ci].depth = -floorH;
+  }
+  for (var chi = 0; chi < layout.chambers.length; chi++) {
+    layout.chambers[chi].floorH = floorH;
+    layout.chambers[chi].depth = -floorH;
+  }
+  var entrance = {id: netKey + ':0', x: mouthX, y: mouthY, angle: inward,
+    kind: kind, floorH: floorH, depth: -floorH, ceilH: headroom,
+    ceilingH: floorH + headroom, halfWidth: width / 2,
+    approachLength: kind === 'hillside' ? 240 : 480, innerLength: 240,
+    minCover: minCover, style: style};
+  var net = {corridors: layout.corridors, chambers: layout.chambers, entrances: [entrance],
+    regionX: regionX, regionY: regionY, recipe: 'winding-chamber-v1', hillsideFitMargin: hillsideBestMargin};
+  net.route = [{x: mouthX, y: mouthY}];
+  for (var ri = 0; ri < layout.corridors.length; ri++) {
+    net.route.push({x: layout.corridors[ri].x2, y: layout.corridors[ri].y2});
+  }
   endlessCaveNetworks[netKey] = net;
   return net;
 }
@@ -4637,17 +4742,21 @@ function queryEndlessCave(wx, wy, networks) {
 // Returned record:
 //   {
 //     fade: 0..1,         blend factor. 1 = pure cave, 0 = pure surface.
-//     caveFloorZ,         target floor height in mesh units (negative for depth).
+//     caveFloorZ,         connected passage floor in mesh-height units.
+//     floorH,             actual floor after approach/edge shaping.
+//     surfaceH,           ordinary surface, or the local hillside cover bank.
 //     ceilZ,              cave ceiling Z, or null if no ceiling (approach ramp).
-//     isEntrance,         true if cell is at the mouth (skip cap, open sky).
+//     covered,            true only on the covered side of the portal plane.
+//     portal,             complete authoritative entrance record.
+//     isEntrance,         near the mouth; diagnostic, not another cap rule.
 //     wallCarve,          true if grid[] should be carved open here.
 //     source,             'corridor' | 'chamber' | 'approach' — diagnostic only.
 //   }
 //
 // Per-chunk stamping becomes:
 //   var c = queryCaveGeometry(wx, wy, nets, smoothSurf);
-//   if (c) { cHeights[i] = lerp(surfaceH, c.caveFloorZ, c.fade);
-//            if (c.ceilZ) cCaveCeilH[i] = c.ceilZ; }
+//   if (c) { cHeights[i] = c.floorH; cSurfaceH[i] = c.surfaceH;
+//            if (c.ceilZ !== null) cCaveCeilH[i] = c.ceilZ; }
 //
 // Per-grid carving becomes:
 //   var c = queryCaveGeometry(cwx, cwy, nets, smoothSurf);
@@ -4656,137 +4765,93 @@ function queryEndlessCave(wx, wy, networks) {
 // All depth clamping, boundary smoothing, and entrance-mouth logic lives
 // here. No other system touches cave geometry.
 function queryCaveGeometry(wx, wy, networks, smoothedSurface) {
-  var MIN_COVER = 1.0;       // minimum rock units between ceiling and surface
-  var MOUTH_RADIUS = 60;     // within this of an entrance, isEntrance=true
-  var APPROACH_LEN = 480;    // approach-cone length outward from entrance
-  var APPROACH_W = 150;      // approach cone half-width at the FAR end (outward)
-  var APPROACH_MOUTH_W = 48; // half-width AT the mouth — matches archway pillar
-                             // outer edges (arch opening ~31u + pillar 7u + margin)
-                             // so the ramp's side walls meet the pillar bases flush.
-  var APPROACH_FEATHER = 0.8; // feather band as fraction of core width
-
-  var bestFade = 0, bestDepth = 0, bestCeilH = 0, bestSource = null;
-  var mouthFlag = false;
-  var approachFade = 0, approachDepth = 0;
-
+  var surface = smoothedSurface;
+  if (typeof surface !== 'number' || !isFinite(surface)) surface = getEndlessNaturalSurfaceH(wx, wy);
+  var best = null, bestFade = 0, approach = null;
+  var bankSurface = surface, bankPortal = null;
   for (var ni = 0; ni < networks.length; ni++) {
     var net = networks[ni];
-    // Corridors (capsule distance)
+    // A generated cave lives on the inward side of its portal plane. The
+    // rounded end of a capsule must never stamp a roof into the open approach.
+    var entry = net.entrances[0], portal = null, inward = true;
+    if (entry) {
+      portal = sampleCavePortal(entry, wx, wy);
+      var along = -((wx - entry.x) * Math.cos(entry.angle) + (wy - entry.y) * Math.sin(entry.angle));
+      inward = along <= 0;
+      if (portal && !inward && (!approach || portal.t > approach.t)) approach = portal;
+    }
+    if (!inward) continue;
+    // A narrow, explicit rock bevel closes headroom at the boundary. We do
+    // not blend the cave floor toward a distant terrain maximum: that used
+    // to raise the floor through its own ceiling and create invisible steps.
     for (var ci = 0; ci < net.corridors.length; ci++) {
       var c = net.corridors[ci];
       var cdx = c.x2 - c.x1, cdy = c.y2 - c.y1;
       var lenSq = cdx * cdx + cdy * cdy;
       if (lenSq < 1) continue;
       var tC = Math.max(0, Math.min(1, ((wx - c.x1) * cdx + (wy - c.y1) * cdy) / lenSq));
-      var px = c.x1 + tC * cdx, py = c.y1 + tC * cdy;
-      var perpDist = Math.hypot(wx - px, wy - py);
+      var perpDist = Math.hypot(wx - c.x1 - tC * cdx, wy - c.y1 - tC * cdy);
       var hw = c.width * 0.5;
-      var outerHW = hw + 108;  // 9-cell feather band (was 20u) — wider gradient
-      if (perpDist < outerHW) {
-        var fadeStart = hw * 0.7;
-        var fade;
-        if (perpDist <= fadeStart) fade = 1.0;
-        else {
-          var ft = (perpDist - fadeStart) / (outerHW - fadeStart);
-          fade = 1.0 - ft * ft * (3 - 2 * ft);
-        }
+      if (entry && entry.kind === 'hillside' && along >= -entry.innerLength && perpDist < hw + 96) {
+        var bankFade = 1 - caveSmooth01((perpDist - hw - 36) / 60);
+        var bankTarget = c.floorH + c.ceilH + entry.minCover;
+        var bankH = surface + Math.max(0, bankTarget - surface) * bankFade;
+        if (bankH > bankSurface) { bankSurface = bankH; bankPortal = entry; }
+      }
+      if (perpDist < hw + 36) {
+        var fade = 1 - caveSmooth01((perpDist - hw) / 36);
         if (fade > bestFade) {
-          bestFade = fade; bestDepth = c.depth; bestCeilH = c.ceilH; bestSource = 'corridor';
+          bestFade = fade;
+          best = {floor: typeof c.floorH === 'number' ? c.floorH : -c.depth,
+            headroom: c.ceilH, source: 'corridor', entry: entry, portal: portal};
         }
       }
     }
-    // Chambers (circle distance)
     for (var chi = 0; chi < net.chambers.length; chi++) {
       var ch = net.chambers[chi];
       var chDist = Math.hypot(wx - ch.cx, wy - ch.cy);
-      var outerR = ch.radius + 108;  // 9-cell feather (match corridor)
-      if (chDist < outerR) {
-        var fadeStartCh = ch.radius * 0.7;
-        var fadeCh;
-        if (chDist <= fadeStartCh) fadeCh = 1.0;
-        else {
-          var ftCh = (chDist - fadeStartCh) / (outerR - fadeStartCh);
-          fadeCh = 1.0 - ftCh * ftCh * (3 - 2 * ftCh);
-        }
+      if (entry && entry.kind === 'hillside' && along >= -entry.innerLength && chDist < ch.radius + 96) {
+        var chBankFade = 1 - caveSmooth01((chDist - ch.radius - 36) / 60);
+        var chBankH = surface + Math.max(0, ch.floorH + ch.ceilH + entry.minCover - surface) * chBankFade;
+        if (chBankH > bankSurface) { bankSurface = chBankH; bankPortal = entry; }
+      }
+      if (chDist < ch.radius + 36) {
+        var fadeCh = 1 - caveSmooth01((chDist - ch.radius) / 36);
         if (fadeCh > bestFade) {
-          bestFade = fadeCh; bestDepth = ch.depth; bestCeilH = ch.ceilH; bestSource = 'chamber';
-        }
-      }
-    }
-    // Entrances: mouth flag + approach ramp outside cave
-    for (var ei = 0; ei < net.entrances.length; ei++) {
-      var e = net.entrances[ei];
-      var edx = wx - e.x, edy = wy - e.y;
-      var edSq = edx * edx + edy * edy;
-      if (edSq < MOUTH_RADIUS * MOUTH_RADIUS) mouthFlag = true;
-      // Approach ramp (outside the cave, in a cone pointing away from angle)
-      var outDX = -Math.cos(e.angle), outDY = -Math.sin(e.angle);
-      var along = edx * outDX + edy * outDY;
-      if (along >= 0 && along <= APPROACH_LEN) {
-        var perp = Math.abs(edx * (-outDY) + edy * outDX);
-        // Funnel: narrow at the mouth (matches archway pillar outer edges),
-        // widening outward for a natural terrain blend. The ramp's side walls
-        // thus rise at the pillar bases instead of leaving a wide pit around
-        // the archway.
-        var _coreT = along / APPROACH_LEN;
-        var coreW = APPROACH_MOUTH_W + (APPROACH_W - APPROACH_MOUTH_W) * _coreT;
-        var featherW = coreW * APPROACH_FEATHER;
-        if (perp <= coreW + featherW) {
-          var lat = perp <= coreW ? 1.0 : 1.0 - (perp - coreW) / featherW;
-          var latSmooth = lat * lat * (3 - 2 * lat);
-          var axialT = 1.0 - along / APPROACH_LEN;
-          var aFade = axialT * latSmooth;
-          if (aFade > approachFade) {
-            approachFade = aFade;
-            approachDepth = e.depth || 5;
-          }
+          bestFade = fadeCh;
+          best = {floor: typeof ch.floorH === 'number' ? ch.floorH : -ch.depth,
+            headroom: ch.ceilH, source: 'chamber', entry: entry, portal: portal};
         }
       }
     }
   }
-
-  if (bestFade === 0 && approachFade === 0) return null;
-
-  // Inside an actual cave feature
-  if (bestFade > 0) {
-    var floorZ = -bestDepth;
-    // Depth gate: keep ceiling below smoothed surface with MIN_COVER.
-    var maxFloor = smoothedSurface - MIN_COVER - bestCeilH;
-    if (floorZ > maxFloor) floorZ = maxFloor;
-    var ceilZ = floorZ + bestCeilH;
-    var ceilCap = smoothedSurface - 0.5;
-    var ceilMin = floorZ + 2.0;
-    if (ceilZ > ceilCap) ceilZ = ceilCap;
-    if (ceilZ < ceilMin) ceilZ = ceilMin;
-    // Combine with approach ramp so the surface→cave blend factor is
-    // monotonic through the mouth. Without this, cells just inside the
-    // cave feature can have a smaller total fade than cells just outside
-    // (approach was contributing there but dropped out here), creating a
-    // bump/cliff at the entrance. Taking max keeps the descent smooth.
-    var combinedFade = bestFade;
-    if (approachFade > bestFade) combinedFade = approachFade;
-    return {
-      fade: combinedFade,
-      caveFloorZ: floorZ,
-      ceilZ: ceilZ,
-      isEntrance: mouthFlag,
-      wallCarve: combinedFade > 0.3,
-      source: bestSource
-    };
+  surface = bankSurface;
+  if (best) {
+    var cover = best.entry && best.entry.minCover || 1;
+    var ceiling = best.floor + best.headroom;
+    var localPortal = best.portal;
+    // Only a hillside's entrance bank may add cover. Everywhere else the
+    // generation-time terrain fit chooses the common network floor first.
+    ceiling = Math.min(ceiling, surface - cover);
+    var floor = best.floor + Math.max(0, ceiling - best.floor) * (1 - bestFade);
+    return {fade: bestFade, caveFloorZ: best.floor, floorH: floor, ceilZ: ceiling,
+      surfaceH: surface, covered: true, portal: best.entry,
+      isEntrance: !!localPortal && localPortal.along >= -24,
+      wallCarve: ceiling - floor >= 3.0 && floor - best.floor <= 0.75, source: best.source};
   }
-
-  // Approach ramp only — outside any cave feature, open sky, carve floor down
-  var aFloor = -approachDepth;
-  var aMax = smoothedSurface - 0.5;
-  if (aFloor > aMax) aFloor = aMax;
-  return {
-    fade: approachFade,
-    caveFloorZ: aFloor,
-    ceilZ: null,
-    isEntrance: mouthFlag,
-    wallCarve: approachFade > 0.3,
-    source: 'approach'
-  };
+  if (!approach || approach.t <= 0) {
+    if (!bankPortal) return null;
+    return {fade: 0, caveFloorZ: surface, floorH: surface, surfaceH: surface,
+      ceilZ: null, covered: false, portal: bankPortal, isEntrance: false,
+      wallCarve: false, source: 'bank'};
+  }
+  var e = approach.entrance;
+  var target = typeof e.floorH === 'number' ? e.floorH : -e.depth;
+  return {fade: approach.t, caveFloorZ: target,
+    floorH: surface * (1 - approach.t) + target * approach.t,
+    surfaceH: surface, ceilZ: null, covered: false, portal: e,
+    isEntrance: approach.along < 24, wallCarve: approach.inCore,
+    source: 'approach'};
 }
 
 // Debug helper: call `debugCaveAt(wx, wy)` from the console to inspect
@@ -4797,9 +4862,7 @@ if (typeof window !== 'undefined') {
     var nets = (typeof endlessCaveNetworks !== 'undefined')
       ? Object.values(endlessCaveNetworks).filter(function(v){return v;}) : [];
     if (!nets.length) { console.log('[CAVE-DBG] no cave networks'); return null; }
-    // Approximate smoothed surface = 0 for the probe (depth gate uses it but
-    // debug doesn't need the exact value).
-    var r = queryCaveGeometry(wx, wy, nets, 2.0);
+    var r = queryCaveGeometry(wx, wy, nets, getEndlessNaturalSurfaceH(wx, wy));
     console.log('[CAVE-DBG] at (' + wx.toFixed(0) + ',' + wy.toFixed(0) + '):', r);
     return r;
   };
@@ -4848,62 +4911,18 @@ var ENTRANCE_ZONE_REACH = 520;
 // Axis convention: entrance.angle faces INWARD toward cave center, so outward
 // direction is -angle. Along > 0 means OUTSIDE the cave; along < 0 is inside.
 function queryEntranceZone(wx, wy, networks) {
-  var OUTER_LEN = 480;  // approach extends outward this far
-  var INNER_LEN = 220;  // inner stub extends inward this far (overlaps cave start)
-  var MOUTH_W = 150;    // half-width at the mouth (along=0)
-  var OUTER_W = 120;    // half-width at the outer end (along=OUTER_LEN)
-  var INNER_W = 110;    // half-width at the inner end (along=-INNER_LEN)
-  var FEATHER = 0.8;    // feather band as fraction of core width
   var best = null;
   var bestT = -1;
   for (var ni = 0; ni < networks.length; ni++) {
     var net = networks[ni];
     for (var ei = 0; ei < net.entrances.length; ei++) {
       var e = net.entrances[ei];
-      var outDX = -Math.cos(e.angle);
-      var outDY = -Math.sin(e.angle);
-      var toX = wx - e.x, toY = wy - e.y;
-      var along = toX * outDX + toY * outDY;
-      if (along > OUTER_LEN || along < -INNER_LEN) continue;
-      var perp = Math.abs(toX * (-outDY) + toY * outDX);
-      // Core width tapers linearly along the axis. At the mouth it's widest;
-      // it narrows in both directions (outer end and inner end).
-      var coreW, tAxial;
-      if (along >= 0) {
-        // Outside (approach): wide at mouth → narrower at outer edge
-        var u = along / OUTER_LEN;
-        coreW = MOUTH_W * (1 - u) + OUTER_W * u;
-        tAxial = 1.0 - u; // 1 at mouth, 0 at outer
-      } else {
-        // Inside (stub): wide at mouth → corridor-width at inner end
-        var u2 = -along / INNER_LEN;
-        coreW = MOUTH_W * (1 - u2) + INNER_W * u2;
-        // Already inside: stay at full depth; t is saturated.
-        tAxial = 1.0;
-      }
-      var featherW = coreW * FEATHER;
-      if (perp > coreW + featherW) continue;
-      // Lateral smoothstep
-      var lat;
-      if (perp <= coreW) lat = 1.0;
-      else {
-        var latT = 1.0 - (perp - coreW) / featherW;
-        lat = latT * latT * (3 - 2 * latT);
-      }
-      var t = tAxial * lat;
-      if (t <= bestT) continue;
-      bestT = t;
-      // Query cave parameters at entrance position (cached per entrance)
-      var caveQ = queryEndlessCave(e.x, e.y, [net]);
-      best = {
-        t: t, tAxial: tAxial, lat: lat,
-        along: along, perp: perp,
-        inCore: perp <= coreW,
-        isInside: along < 0,
-        depth: caveQ ? caveQ.depth : 3.0,
-        ceilH: caveQ ? caveQ.ceilH : 5.5,
-        entrance: e
-      };
+      var p = sampleCavePortal(e, wx, wy);
+      if (!p || p.t <= bestT) continue;
+      bestT = p.t;
+      p.depth = e.depth;
+      p.ceilH = e.ceilH;
+      best = p;
     }
   }
   return best;
@@ -4915,6 +4934,17 @@ function queryEntranceApproach(wx, wy, networks) {
   var z = queryEntranceZone(wx, wy, networks);
   if (!z || z.isInside) return null; // old function was outside-only
   return {t: z.t, depth: z.depth, ceilH: z.ceilH};
+}
+
+// The chamber center owns its content even when it lands on a chunk edge.
+// Insets keep initial actors in loaded owner geometry; unlike rejecting edge
+// rows, this cannot silently remove a small cave's only reward/encounter.
+function caveChamberContentPoint(chamber, offsetX, offsetY) {
+  var cx = Math.floor(chamber.cx / CHUNK_SIZE), cy = Math.floor(chamber.cy / CHUNK_SIZE);
+  var inset = 18;
+  return {ownerCX: cx, ownerCY: cy,
+    x: Math.max(cx * CHUNK_SIZE + inset, Math.min((cx + 1) * CHUNK_SIZE - inset, chamber.cx + offsetX)),
+    y: Math.max(cy * CHUNK_SIZE + inset, Math.min((cy + 1) * CHUNK_SIZE - inset, chamber.cy + offsetY))};
 }
 
 function generateChunk(cx, cy) {
@@ -5387,9 +5417,7 @@ function generateChunk(cx, cy) {
             var _e = net.entrances[_ei2];
             if (_e.x + entReach > chunkWX0 && _e.x - entReach < chunkWX1 &&
                 _e.y + entReach > chunkWY0 && _e.y - entReach < chunkWY1) {
-              var _eq = queryEndlessCave(_e.x, _e.y, [net]);
-              cCaveEntrances.push({x: _e.x, y: _e.y, angle: _e.angle,
-                depth: _eq ? _eq.depth : 3.0, ceilH: _eq ? _eq.ceilH : 3.5});
+              cCaveEntrances.push(Object.assign({}, _e));
             }
           }
         }
@@ -5405,9 +5433,36 @@ function generateChunk(cx, cy) {
           var cwx = cx * CHUNK_SIZE + cgx * cell + cell * 0.5;
           var cwy = cy * CHUNK_SIZE + cgy * cell + cell * 0.5;
           var cidx = cgy * CHUNK_CELLS + cgx;
-          // Use a coarse smoothed-surface estimate for the depth gate —
-          // carving only needs the fade value, so the exact Z doesn't matter.
-          var _cgCarve = queryCaveGeometry(cwx, cwy, cCaveNets, 2.0);
+          var _cgCarve = queryCaveGeometry(cwx, cwy, cCaveNets, getEndlessNaturalSurfaceH(cwx, cwy));
+          // A rock bevel is solid even where the original surface maze was
+          // already open. Validate the cell's corner samples too: the floor
+          // mesh is vertex-aligned, not sampled at this grid cell's center.
+          var _cellCovered = !!(_cgCarve && _cgCarve.covered);
+          var _cellWalkable = !_cellCovered || _cgCarve.wallCarve;
+          var _cellFloorMin = _cgCarve ? _cgCarve.floorH : getEndlessNaturalSurfaceH(cwx, cwy);
+          var _cellFloorMax = _cellFloorMin;
+          // Check all corners even when the center is outside the cavity;
+          // otherwise a thin roof/rock edge can live in an open grid cell.
+          if (_cgCarve || cCaveNets.length) {
+            for (var _vcy = -1; _vcy <= 1; _vcy += 2) {
+              for (var _vcx = -1; _vcx <= 1; _vcx += 2) {
+                var _vx = cwx + _vcx * cell * 0.5, _vy = cwy + _vcy * cell * 0.5;
+                var _vs = getEndlessNaturalSurfaceH(_vx, _vy);
+                var _vg = queryCaveGeometry(_vx, _vy, cCaveNets, _vs);
+                var _vh = _vg ? _vg.floorH : _vs;
+                _cellFloorMin = Math.min(_cellFloorMin, _vh);
+                _cellFloorMax = Math.max(_cellFloorMax, _vh);
+                if (_vg && _vg.covered) _cellCovered = true;
+                if (_vg && _vg.covered && !_vg.wallCarve) _cellWalkable = false;
+              }
+            }
+          }
+          if (_cellCovered) {
+            if (_cellFloorMax - _cellFloorMin > 0.75) _cellWalkable = false;
+            cGrid[cidx] = _cellWalkable ? 0 : 1;
+            cCaveInterior[cidx] = 1;
+            continue;
+          }
           if (_cgCarve && _cgCarve.wallCarve) {
             cGrid[cidx] = 0;
             cCaveInterior[cidx] = 1;
@@ -5445,14 +5500,7 @@ function generateChunk(cx, cy) {
     for (var mx = 0; mx < meshW; mx++) {
       var fwx = cx * CHUNK_SIZE + mx * meshGridSize;
       var fwy = cy * CHUNK_SIZE + my * meshGridSize;
-      var h = terrainNoise(fwx, fwy);
-      // Geography: large-scale elevation (mountains/valleys)
-      var geo = geographyNoise(fwx, fwy);
-      var geoOffset = (geo - 0.5) * 8.0;
-      // Fade out near spawn so player starts on flat ground
-      var spawnDist = Math.hypot(fwx, fwy);
-      if (spawnDist < 800) geoOffset *= Math.max(0, (spawnDist - 200) / 600);
-      h += geoOffset;
+      var h = getEndlessNaturalSurfaceH(fwx, fwy);
       cHeights[my * meshW + mx] = h;
       cColors[my * meshW + mx] = getFloorColorBlended(fwx, fwy, h);
     }
@@ -5515,51 +5563,8 @@ function generateChunk(cx, cy) {
     }
   }
 
-  // Smooth the natural surface height around cave entrances so the terrain
-  // around the mouth is less jagged. Cave entrances expose whatever natural
-  // noise variance exists locally — a valley cell next to a hill cell
-  // produces a tilted floor quad spanning 4+ units, which reads as a spike
-  // when the cave is visible. Averaging heights in a radius around each
-  // entrance gives a gently rolling, less-jagged approach area.
-  if (cCaveEntrances.length > 0) {
-    var _smrRadius = 10;         // mesh cells of smoothing influence
-    // 3 iterations of 3×3 box blur, weighted by distance to entrance.
-    for (var _smrIt = 0; _smrIt < 3; _smrIt++) {
-      var _smrCopy = new Float32Array(cHeights);
-      for (var _smry = 0; _smry < meshH; _smry++) {
-        for (var _smrx = 0; _smrx < meshW; _smrx++) {
-          var _smri = _smry * meshW + _smrx;
-          var _smrwx = cx * CHUNK_SIZE + _smrx * meshGridSize;
-          var _smrwy = cy * CHUNK_SIZE + _smry * meshGridSize;
-          var _smrMinDSq = 1e9;
-          for (var _smrei = 0; _smrei < cCaveEntrances.length; _smrei++) {
-            var _smre = cCaveEntrances[_smrei];
-            var _smrdx = _smrwx - _smre.x, _smrdy = _smrwy - _smre.y;
-            var _smrDSq = _smrdx * _smrdx + _smrdy * _smrdy;
-            if (_smrDSq < _smrMinDSq) _smrMinDSq = _smrDSq;
-          }
-          var _smrMaxR = _smrRadius * meshGridSize * 2.5;
-          if (_smrMinDSq > _smrMaxR * _smrMaxR) continue;
-          var _smrW = 1.0 - Math.min(1.0, Math.sqrt(_smrMinDSq) / _smrMaxR);
-          _smrW = _smrW * _smrW * (3 - 2 * _smrW);
-          if (_smrW < 0.01) continue;
-          var _smrSum = 0, _smrN = 0;
-          for (var _smrDy = -1; _smrDy <= 1; _smrDy++) {
-            for (var _smrDx = -1; _smrDx <= 1; _smrDx++) {
-              var _smrNx = _smrx + _smrDx, _smrNy = _smry + _smrDy;
-              if (_smrNx < 0 || _smrNx >= meshW || _smrNy < 0 || _smrNy >= meshH) continue;
-              _smrSum += _smrCopy[_smrNy * meshW + _smrNx];
-              _smrN++;
-            }
-          }
-          if (_smrN > 0) {
-            var _smrAvg = _smrSum / _smrN;
-            cHeights[_smri] = cHeights[_smri] * (1 - _smrW) + _smrAvg * _smrW;
-          }
-        }
-      }
-    }
-  }
+  // Entrance shaping is sampled in world space below. Do not blur chunks
+  // independently: truncated kernels at chunk edges created floor seams.
 
   // Snapshot the pristine per-cell surface color AND (smoothed-near-entrance)
   // height BEFORE cave stamping — used by the cap layer during window assembly.
@@ -5590,20 +5595,7 @@ function generateChunk(cx, cy) {
         var cmwy = cy * CHUNK_SIZE + cmy * meshGridSize;
         var cmIdx = cmy * meshW + cmx;
 
-        // Smoothed surface (21×21 max) — stable reference for depth gate.
-        var _smoothSurf = -Infinity;
-        for (var _ssdy = -10; _ssdy <= 10; _ssdy++) {
-          for (var _ssdx = -10; _ssdx <= 10; _ssdx++) {
-            var _ssnx = cmx + _ssdx, _ssny = cmy + _ssdy;
-            if (_ssnx < 0 || _ssnx >= meshW || _ssny < 0 || _ssny >= meshH) continue;
-            var _ssv = cSurfaceH[_ssny * meshW + _ssnx];
-            if (_ssv > _smoothSurf) _smoothSurf = _ssv;
-          }
-        }
-        if (_smoothSurf === -Infinity) _smoothSurf = cHeights[cmIdx];
-        if (_smoothSurf < 1.0) _smoothSurf = 1.0;
-
-        var cg = queryCaveGeometry(cmwx, cmwy, cCaveNets, _smoothSurf);
+        var cg = queryCaveGeometry(cmwx, cmwy, cCaveNets, cSurfaceH[cmIdx]);
         if (!cg) continue;
 
         _cgDbg.total++;
@@ -5613,24 +5605,15 @@ function generateChunk(cx, cy) {
         if (cg.isEntrance) _cgDbg.mouth++;
         if (cg.wallCarve) _cgDbg.carved++;
 
-        // Floor: smooth blend from surface to cave floor by fade.
-        var _surfH = cHeights[cmIdx];
-        cHeights[cmIdx] = _surfH * (1 - cg.fade) + cg.caveFloorZ * cg.fade;
+        // Geometry owns the final floor, roof, and (entrance-only) cover bank.
+        cHeights[cmIdx] = cg.floorH;
+        cSurfaceH[cmIdx] = cg.surfaceH;
 
         // Ceiling (only when the geometry record has one — approach has no ceiling).
         if (cg.ceilZ !== null) { cCaveCeilH[cmIdx] = cg.ceilZ; cCaveHasCeil[cmIdx] = 1; }
 
-        // Cave-floor color tint — only for cells DEEP inside a cave feature.
-        // Boundary cells (fade < 0.7) keep the natural surface color so the
-        // tilted floor quads at the rim don't read as dark stripes showing
-        // "through" the grass when viewed at shallow angles.
-        if (cg.fade > 0.7 && cg.source !== 'approach') {
-          var _cb = Math.sqrt(cg.fade);
-          var _cr2 = Math.floor(85 * _cb + 25 * (1 - _cb));
-          var _cg2 = Math.floor(60 * _cb + 18 * (1 - _cb));
-          var _cb2 = Math.floor(40 * _cb + 10 * (1 - _cb));
-          cColors[cmIdx] = '#' + ((1<<24)|(_cr2<<16)|(_cg2<<8)|_cb2).toString(16).slice(1);
-        }
+        // Material is authored once with the finished layers below. A separate
+        // hard threshold here used to recolor the mouth floor abruptly.
       }
     }
     if (DEBUG_CAVE) {
@@ -5919,21 +5902,21 @@ function generateChunk(cx, cy) {
       var _cn = cCaveNets[_cni];
       for (var _cci = 0; _cci < _cn.chambers.length; _cci++) {
         var _cch = _cn.chambers[_cci];
-        // Only spawn in chambers that overlap this chunk
-        var _ccx = Math.floor((_cch.cx - cx * CHUNK_SIZE) / cell);
-        var _ccy = Math.floor((_cch.cy - cy * CHUNK_SIZE) / cell);
-        if (_ccx < 2 || _ccx >= CHUNK_CELLS - 2 || _ccy < 2 || _ccy >= CHUNK_CELLS - 2) continue;
+        var _chOwner = caveChamberContentPoint(_cch, 0, 0);
+        if (_chOwner.ownerCX !== cx || _chOwner.ownerCY !== cy) continue;
         var numCaveEn = 2 + Math.floor(caveEnemyRng() * 2); // 2-3 per chamber
         for (var _cei = 0; _cei < numCaveEn; _cei++) {
           var ceOff = _cch.radius * 0.5;
-          var ceX = _cch.cx + (caveEnemyRng() - 0.5) * ceOff;
-          var ceY = _cch.cy + (caveEnemyRng() - 0.5) * ceOff;
+          var cePoint = caveChamberContentPoint(_cch, (caveEnemyRng() - 0.5) * ceOff,
+            (caveEnemyRng() - 0.5) * ceOff);
+          var ceX = cePoint.x, ceY = cePoint.y;
           var ceTypeKey = caveTypeKeys[Math.floor(caveEnemyRng() * caveTypeKeys.length)];
           var ceType = enemyTypes[ceTypeKey];
           // Spawn at correct cave floor Z immediately (not z:0 which is surface level)
           var ceFloorZ = -_cch.depth * 25;
           cEnemies.push({
             x: ceX, y: ceY, z: ceFloorZ, underground: true,
+            caveSpawnId: _cn.regionX + ',' + _cn.regionY + ':chamber:' + _cci + ':enemy:' + _cei,
             enemyType: ceType,
             health: Math.floor(ceType.health * difficulty * 1.2),
             maxHealth: Math.floor(ceType.health * difficulty * 1.2),
@@ -5961,13 +5944,13 @@ function generateChunk(cx, cy) {
       for (var _cci2 = 0; _cci2 < _cn2.chambers.length; _cci2++) {
         var _cch2 = _cn2.chambers[_cci2];
         if (!_cch2.terminal) continue; // only terminal chambers get chests
-        var _tcx2 = Math.floor((_cch2.cx - cx * CHUNK_SIZE) / cell);
-        var _tcy2 = Math.floor((_cch2.cy - cy * CHUNK_SIZE) / cell);
-        if (_tcx2 < 1 || _tcx2 >= CHUNK_CELLS - 1 || _tcy2 < 1 || _tcy2 >= CHUNK_CELLS - 1) continue;
+        var _tcPoint = caveChamberContentPoint(_cch2, 0, 0);
+        if (_tcPoint.ownerCX !== cx || _tcPoint.ownerCY !== cy) continue;
         var tierRoll = caveChestRng() + 0.15; // shift toward higher tiers
         var cTier = tierRoll < 0.3 ? 'common' : tierRoll < 0.65 ? 'uncommon' : tierRoll < 0.85 ? 'rare' : 'epic';
         cChests.push({
-          x: _cch2.cx, y: _cch2.cy,
+          x: _tcPoint.x, y: _tcPoint.y,
+          caveSpawnId: _cn2.regionX + ',' + _cn2.regionY + ':chamber:' + _cci2 + ':chest',
           gold: Math.floor(10 + caveChestRng() * 30 * difficulty),
           collected: false, opened: false, lidAngle: 0,
           facing: Math.floor(caveChestRng() * 4) * Math.PI / 2,
@@ -6239,39 +6222,22 @@ function generateChunk(cx, cy) {
   var cL2TopZ = new Float32Array(_chN), cL2Type = new Uint8Array(_chN), cL2Color = new Array(_chN);
   var cL3TopZ = new Float32Array(_chN), cL3Type = new Uint8Array(_chN), cL3Color = new Array(_chN);
   var cL4TopZ = new Float32Array(_chN), cL4Type = new Uint8Array(_chN), cL4Color = new Array(_chN);
-  // Per-layer color palettes — each role has a base tone + per-cell variation
-  // so stacked terrain reads as distinct strata rather than a single tint.
-  var _cavFloorRng = chunkRng(cx, cy, 170);
-  var _cavCeilRng  = chunkRng(cx, cy, 171);
-  function _rgbStr(r, g, b) {
-    return '#' + ('000000' + (((r << 16) | (g << 8) | b) >>> 0).toString(16)).slice(-6);
-  }
-  function _ceilingColor(rng) {
-    var r = 25 + ((rng() * 20) | 0);
-    var g = 18 + ((rng() * 14) | 0);
-    var b = 12 + ((rng() * 12) | 0);
-    return _rgbStr(r, g, b);
-  }
-  function _caveFloorColor(baseHex, rng) {
-    var bp = parseInt(baseHex.slice(1), 16);
-    var br = (bp >> 16) & 0xff, bg = (bp >> 8) & 0xff, bb = bp & 0xff;
-    var tR = 95 + ((rng() * 30) | 0);
-    var tG = 65 + ((rng() * 22) | 0);
-    var tB = 42 + ((rng() * 18) | 0);
-    var k = 0.85;
-    var r = (br * (1 - k) + tR * k) | 0;
-    var g = (bg * (1 - k) + tG * k) | 0;
-    var b = (bb * (1 - k) + tB * k) | 0;
-    return _rgbStr(r, g, b);
-  }
+  // One shared rock material for every cavity-facing surface. Author against
+  // world-space portals here; rendering only reads the cached packed color.
+  // The field includes neighboring solid cells so the wall/portal cut faces
+  // sample the same palette even when their midpoint sits outside the cavity.
+  var cCaveStone = new Uint32Array(_chN);
   for (var _chI = 0; _chI < _chN; _chI++) {
     var _chFh = cHeights[_chI];
     var _chCh = cCaveCeilH[_chI];
+    var _matWX = cx * CHUNK_SIZE + (_chI % meshW) * meshGridSize;
+    var _matWY = cy * CHUNK_SIZE + Math.floor(_chI / meshW) * meshGridSize;
+    cCaveStone[_chI] = sampleCaveMaterialColor(cSurfaceBiome[_chI], _matWX, _matWY, cCaveEntrances);
     cL0TopZ[_chI] = _chFh; cL0Type[_chI] = 1;
     if (cCaveHasCeil[_chI]) {
-      cL0Color[_chI] = _caveFloorColor(cSurfaceBiome[_chI], _cavFloorRng);
+      cL0Color[_chI] = caveMaterialColorHex(cCaveStone[_chI]);
       cL1TopZ[_chI] = _chCh; cL1Type[_chI] = 2;
-      cL1Color[_chI] = _ceilingColor(_cavCeilRng);
+      cL1Color[_chI] = cL0Color[_chI];
       cLayerCount[_chI] = 2;
     } else {
       cL0Color[_chI] = cColors[_chI];
@@ -6283,7 +6249,7 @@ function generateChunk(cx, cy) {
     cx: cx, cy: cy, biome: biome, difficulty: difficulty,
     grid: cGrid, wallHeights: cWallH, wallColorR: cWallCR, wallColorG: cWallCG, wallColorB: cWallCB, walls: cWalls,
     floorMesh: {w: meshW, h: meshH, gridSize: meshGridSize, water: cWater,
-                surfaceBiome: cSurfaceBiome, surfaceH: cSurfaceH,
+                surfaceBiome: cSurfaceBiome, surfaceH: cSurfaceH, caveStone: cCaveStone,
                 layerCount: cLayerCount,
                 l0TopZ: cL0TopZ, l0Type: cL0Type, l0Color: cL0Color,
                 l1TopZ: cL1TopZ, l1Type: cL1Type, l1Color: cL1Color,
@@ -6319,6 +6285,13 @@ function generateChunk(cx, cy) {
 
   chunks[key] = chunk;
   return chunk;
+}
+
+function chunkWallDecorationInWindow(d, chunkWindowX, chunkWindowY) {
+  return {worldX: d.worldX - windowOriginX, worldY: d.worldY - windowOriginY,
+    side: d.side, type: d.type,
+    gridX: d.gridX + chunkWindowX * CHUNK_CELLS,
+    gridY: d.gridY + chunkWindowY * CHUNK_CELLS};
 }
 
 function assembleWindow(centerCX, centerCY) {
@@ -6553,6 +6526,7 @@ function assembleWindow(centerCX, centerCY) {
     colors: new Array(totalMeshSize),
     surfaceBiome: new Array(totalMeshSize),
     surfaceH: new Float32Array(totalMeshSize),
+    caveStone: new Uint32Array(totalMeshSize),
     water: new Uint8Array(totalMeshSize),
     waterDirX: new Float32Array(totalMeshSize),
     waterDirY: new Float32Array(totalMeshSize),
@@ -6581,6 +6555,7 @@ function assembleWindow(centerCX, centerCY) {
           var si = my * cmesh.w + mx;
           floorMesh.surfaceBiome[ti] = cmesh.surfaceBiome[si];
           floorMesh.surfaceH[ti] = cmesh.surfaceH ? cmesh.surfaceH[si] : cmesh.l0TopZ[si];
+          floorMesh.caveStone[ti] = cmesh.caveStone[si];
           if (cmesh.water) floorMesh.water[ti] = cmesh.water[si];
           // Copy per-chunk layer data (heights, types, colors) into window mesh
           floorMesh.layerCount[ti] = cmesh.layerCount[si];
@@ -6614,21 +6589,6 @@ function assembleWindow(centerCX, centerCY) {
     else if (lcMC >= 3 && floorMesh.l2Type[iMC] === 2) meshCave[iMC] = 1;
   }
 
-  // Cave entrance positions (window-local) — pulled from chunks because
-  // deepCaveEntrances isn't built yet at this point in assembly.
-  var capEntrances = [];
-  for (var dye = 0; dye < WINDOW_CHUNKS; dye++) {
-    for (var dxe = 0; dxe < WINDOW_CHUNKS; dxe++) {
-      var che = chunks[(windowCX + dxe) + ',' + (windowCY + dye)];
-      if (che && che.caveEntrances) {
-        for (var cei = 0; cei < che.caveEntrances.length; cei++) {
-          var cee = che.caveEntrances[cei];
-          capEntrances.push({ x: cee.x - windowOriginX, y: cee.y - windowOriginY });
-        }
-      }
-    }
-  }
-
   // Helper: read floor Z (l0) and ceiling Z (first type=2 layer, or 0).
   // Per-chunk gen guarantees l0 = floor (type=1). Ceiling follows if present.
   function _getFloorZ(i) { return floorMesh.l0TopZ[i]; }
@@ -6640,16 +6600,9 @@ function assembleWindow(centerCX, centerCY) {
     return 0;
   }
 
-  // needsCap: cells that get a synthesized hill cap (not near entrances).
-  // Radius keeps the mouth itself open but must stay small enough to cap the
-  // rest of the chamber. Chambers are commonly ~100-200 units wide; a 140u
-  // exclusion used to swallow entire caves and leave them uncapped.
-  var CAP_EXCL_SQ = 30 * 30;
-  // Approach depression exclusion: the entrance ramp dips the floor well
-  // below natural surface, and any cell where that depression is visible
-  // from above must stay uncapped — otherwise the cap paints as ground over
-  // the hole. Threshold in mesh Z units (×25 = world Z).
-  var APPROACH_DEPTH_THRESH = 1.0;
+  // A ceiling is the authoritative roof footprint, including its mouth edge.
+  // The approach has no ceiling and therefore no cap. No second circular
+  // entrance exclusion can disagree with the portal plane.
   var needsCap = new Uint8Array(N);
   var capH = new Float32Array(N);
   // Flat-surface cap model: cap sits at the NATURAL surface height for
@@ -6661,14 +6614,6 @@ function assembleWindow(centerCX, centerCY) {
   for (var iN = 0; iN < N; iN++) {
     var fhN = _getFloorZ(iN);
     if (meshCave[iN]) {
-      var gyN = (iN / totalMeshW) | 0;
-      var gxN = iN - gyN * totalMeshW;
-      var wxN = (gxN + 0.5) * 12, wyN = (gyN + 0.5) * 12;
-      var nearEntr = false;
-      for (var k = 0; k < capEntrances.length; k++) {
-        var dX = wxN - capEntrances[k].x, dY = wyN - capEntrances[k].y;
-        if (dX * dX + dY * dY < CAP_EXCL_SQ) { nearEntr = true; break; }
-      }
       // Cap cells with a ceiling overhead (actual cave interior). Skip cells
       // without a ceiling — the approach ramp / open mouth should read as a
       // hole in the ground, not a capped tunnel.
@@ -6677,7 +6622,7 @@ function assembleWindow(centerCX, centerCY) {
                           (_lc >= 3 && floorMesh.l2Type[iN] === 2) ||
                           (_lc >= 4 && floorMesh.l3Type[iN] === 2) ||
                           (_lc >= 5 && floorMesh.l4Type[iN] === 2);
-      if (!nearEntr && _hasCeilAbove) needsCap[iN] = 1;
+      if (_hasCeilAbove) needsCap[iN] = 1;
     }
     capH[iN] = needsCap[iN] ? floorMesh.surfaceH[iN] : fhN;
   }
@@ -7029,12 +6974,12 @@ function assembleWindow(centerCX, centerCY) {
       }
       for (var di3 = 0; di3 < ch5.wallDecorations.length; di3++) {
         var d = ch5.wallDecorations[di3];
-        wallDecorations.push({worldX: d.worldX - windowOriginX, worldY: d.worldY - windowOriginY,
-          side: d.side, type: d.type, gridX: d.gridX, gridY: d.gridY});
+        wallDecorations.push(chunkWallDecorationInWindow(d, dx5, dy5));
       }
       for (var ti2 = 0; ti2 < ch5.treasureChests.length; ti2++) {
         var tc = ch5.treasureChests[ti2];
         treasureChests.push({x: tc.x - windowOriginX, y: tc.y - windowOriginY,
+          caveSpawnId: tc.caveSpawnId || null,
           gold: tc.gold, collected: tc.collected, opened: tc.opened, lidAngle: tc.lidAngle,
           facing: tc.facing, equipId: tc.equipId, seed: tc.seed,
           tier: tc.tier || 'common', quality: tc.quality || 1.0, relicId: tc.relicId || null,
@@ -7050,6 +6995,7 @@ function assembleWindow(centerCX, centerCY) {
       for (var ei2 = 0; ei2 < ch5.enemies.length; ei2++) {
         var en = ch5.enemies[ei2];
         enemies.push({x: en.x - windowOriginX, y: en.y - windowOriginY, z: en.z,
+          caveSpawnId: en.caveSpawnId || null,
           enemyType: en.enemyType, health: en.health, maxHealth: en.maxHealth, speed: en.speed,
           chaseRange: en.chaseRange, lastUpdate: en.lastUpdate,
           damageFlash: en.damageFlash, damageFlashColor: en.damageFlashColor,
@@ -7157,9 +7103,9 @@ function assembleWindow(centerCX, centerCY) {
           }
           if (!_ceDup) {
             var _ceAng = _ce.angle || 0;
-            deepCaveEntrances.push({x: _ce.x - windowOriginX, y: _ce.y - windowOriginY,
-              angle: _ce.angle, depth: _ce.depth, ceilH: _ce.ceilH,
-              cosA: Math.cos(_ceAng), sinA: Math.sin(_ceAng)});
+            deepCaveEntrances.push(Object.assign({}, _ce, {
+              x: _ce.x - windowOriginX, y: _ce.y - windowOriginY,
+              cosA: Math.cos(_ceAng), sinA: Math.sin(_ceAng)}));
           }
         }
       }
@@ -7368,6 +7314,7 @@ function saveEnemyStateToChunks() {
     if (!ch2) { discarded++; continue; } // safety guard — shouldn't fire after clamp
     ch2.enemies.push({
       x: worldX, y: worldY, z: e.z || 0,
+      caveSpawnId: e.caveSpawnId || null, underground: e.underground || false,
       enemyType: e.enemyType, health: e.health, maxHealth: e.maxHealth,
       speed: e.speed, chaseRange: e.chaseRange, lastUpdate: e.lastUpdate,
       damageFlash: e.damageFlash, damageFlashColor: e.damageFlashColor,
@@ -7508,6 +7455,19 @@ function updateChunks() {
   }
 }
 
+function settlePlayerAtSpawn(preferSurface) {
+  var h = getFloorHeightAt(pos.x, pos.y);
+  if (preferSurface && floorMesh && floorMesh.layerCount) {
+    var gx = Math.floor(pos.x / floorMesh.gridSize), gy = Math.floor(pos.y / floorMesh.gridSize);
+    var li = getTopWalkableLayerIdx(gx, gy);
+    if (li >= 0) h = meshLayerHeight(floorMesh, gy * floorMesh.w + gx, li);
+  }
+  jumpVelZ = 0;
+  jumpAirborne = false;
+  pos.floorZ = 60 + h * 40;
+  cam.x = pos.x; cam.y = pos.y; cam.z = pos.floorZ;
+}
+
 function resetEndlessMode() {
   ENDLESS_MODE = true;
   level = 1;
@@ -7619,6 +7579,11 @@ function resetEndlessMode() {
     }
   }
 
+  // Spawn at the selected support immediately, not at the legacy zero-height
+  // default followed by a fall. Reset vertical state left over from the last
+  // world as well; opening Cave Test during a jump must not launch the player.
+  settlePlayerAtSpawn(!CAVE_TEST_MODE);
+
   // Activate settings
   CAM_FOLLOW = true;
   initAmbientParticles();
@@ -7645,7 +7610,10 @@ function resetEndlessMode() {
   console.log('[ENDLESS] ═══════════════════════════════════════════');
 
   // Auto-show overview so the player can see the world layout
-  setTimeout(function() { if (!overviewActive) toggleOverview(); }, 100);
+  var _autoOverview = document.getElementById('chkAutoOverview');
+  if (!CAVE_TEST_MODE && (!_autoOverview || _autoOverview.checked)) {
+    setTimeout(function() { if (!overviewActive) toggleOverview(); }, 100);
+  }
 }
 
 function resetLevel(lv) {
@@ -7737,7 +7705,8 @@ function resetLevel(lv) {
     pos.x = safe.x; pos.y = safe.y;
     console.log('[MAP] Safe spawn: (' + pos.x.toFixed(1) + ',' + pos.y.toFixed(1) + ')  grid=(' + Math.floor(pos.x/cell) + ',' + Math.floor(pos.y/cell) + ')  wall=' + (isInGridWall(pos.x,pos.y,6) ? 'YES ⚠' : 'no'));
   }
-  cam.x = pos.x; cam.y = pos.y; cam.ang = 0; cam.z = 60; cam.pitch = 0; pos.floorZ = 60;
+  cam.ang = 0; cam.pitch = 0;
+  settlePlayerAtSpawn(true);
   CAM_FOLLOW = true;
   oreVeins = [];
   floorScatter = [];
@@ -7787,23 +7756,28 @@ function resetLevel(lv) {
     setTimeout(function() { if (!overviewActive) toggleOverview(); }, 80);
   }
 }
-
-
 // =============================================
 // SECTION 4: FLOOR HELPERS
 // =============================================
 
-// 32-slot cache of recent (gridX, gridY) → l0TopZ lookups. Knuth multiplicative
+// 1024-slot cache of recent (gridX, gridY) → lowest walkable floor lookups. Knuth multiplicative
 // hash mixes both coords so row/column sweeps don't degenerate to a single slot.
 // Bumped each frame via _floorCacheTick so stale entries miss on a new frame.
 var _floorCacheKey = new Int32Array(1024);
 var _floorCacheVal = new Float32Array(1024);
 var _floorCacheTickArr = new Int32Array(1024);
 var _floorCacheTick = 0;
+var _floorCacheMesh = null;
 var _lightGridFrameCount = 0;
 function getFloorHeightAt(x, y) {
   if (!floorMesh) return 0;
   var mesh = floorMesh;
+  // A window rebuild can query floors before the next draw tick. Coordinates
+  // now refer to a different mesh, so the previous window's cache is invalid.
+  if (_floorCacheMesh !== mesh) {
+    _floorCacheMesh = mesh;
+    _floorCacheTick = (_floorCacheTick + 1) | 0;
+  }
   var gridX = Math.floor(x / mesh.gridSize);
   var gridY = Math.floor(y / mesh.gridSize);
   if (gridX < 0 || gridX >= mesh.w || gridY < 0 || gridY >= mesh.h) return 0;
@@ -7814,6 +7788,14 @@ function getFloorHeightAt(x, y) {
     return _floorCacheVal[slot];
   }
   var v = mesh.l0TopZ[gridY * mesh.w + gridX];
+  if (mesh.layerCount) {
+    var cellIndex = gridY * mesh.w + gridX, lowest = Infinity;
+    for (var li = 0; li < mesh.layerCount[cellIndex]; li++) {
+      var type = meshLayerType(mesh, cellIndex, li);
+      if (type === 1 || type === 3 || type === 4) lowest = Math.min(lowest, meshLayerHeight(mesh, cellIndex, li));
+    }
+    v = lowest < Infinity ? lowest : 0;
+  }
   _floorCacheKey[slot] = key;
   _floorCacheVal[slot] = v;
   _floorCacheTickArr[slot] = _floorCacheTick;
@@ -7822,83 +7804,73 @@ function getFloorHeightAt(x, y) {
   return v;
 }
 
-// Layer-aware floor query. Returns the walkable layer the player should snap
-// to given their current height, with small step-up grace so you can walk
-// onto a hill cap from normal surface without a discontinuity. topH is in
-// world height units (same units as floorMesh.heights). idx is the layer
-// index, or -1 if the cell has no walkable layer.
-// Types: 1 = floor/cap/ledge (walkable), 2 = ceiling (skip), 3 = ledge (walkable)
-function getWalkableLayerTopAt(x, y, playerH) {
-  if (!floorMesh || !floorMesh.layerCount) return {topH: 0, idx: -1, type: 0};
-  var mesh = floorMesh;
-  var gx = Math.floor(x / mesh.gridSize), gy = Math.floor(y / mesh.gridSize);
-  if (gx < 0 || gx >= mesh.w || gy < 0 || gy >= mesh.h) return {topH: 0, idx: -1, type: 0};
-  var i = gy * mesh.w + gx;
-  var lc = mesh.layerCount[i];
-  if (lc === 0) return {topH: 0, idx: -1, type: 0};
-  // Step thresholds: tuned so the entrance ramp (~0.7u/cell gradient) walks
-  // smoothly but the ~4u cap-to-cave-floor gap still triggers a fall.
-  // STEP_UP: max height you can step onto like a curb.
-  // STEP_DOWN: max drop you can walk off without starting to fall.
-  // Beyond these the player goes airborne.
-  var STEP_UP = 1.0;
-  var STEP_DOWN = 1.0;
-  // Cave-entrance ramps are steep by design — the approach can drop several
-  // mesh units per cell near the archway. Broadly relax STEP_DOWN within a
-  // generous radius so the player can actually walk down into the cave.
-  if (typeof deepCaveEntrances !== 'undefined' && deepCaveEntrances && deepCaveEntrances.length) {
-    for (var _wsli = 0; _wsli < deepCaveEntrances.length; _wsli++) {
-      var _wsle = deepCaveEntrances[_wsli];
-      var _wsldx = x - _wsle.x, _wsldy = y - _wsle.y;
-      if (_wsldx * _wsldx + _wsldy * _wsldy < 260 * 260) { STEP_DOWN = 10.0; break; }
+// Mesh heights are the spatial contract. Player physics retains its legacy
+// offset/scale; rendering converts feet H separately and adds its eye height.
+var PLAYER_BODY_H = 2.8;
+function meshHeightToPlayerZ(h) { return h * 40 + 60; }
+function getPlayerFloorH() {
+  return ((typeof pos.floorZ === 'number' && isFinite(pos.floorZ) ? pos.floorZ : 60) - 60) / 40;
+}
+function meshLayerType(mesh, i, li) { return mesh['l' + li + 'Type'][i]; }
+function meshLayerHeight(mesh, i, li) { return mesh['l' + li + 'TopZ'][i]; }
+function meshCellAt(x, y) {
+  if (!floorMesh || !floorMesh.layerCount) return -1;
+  var gx = Math.floor(x / floorMesh.gridSize), gy = Math.floor(y / floorMesh.gridSize);
+  return gx < 0 || gy < 0 || gx >= floorMesh.w || gy >= floorMesh.h ? -1 : gy * floorMesh.w + gx;
+}
+
+// Actual overhead geometry, independent of time of day, nearest entrance,
+// or whether the player is grounded. A roof below the feet is not overhead.
+function getCaveSpaceAt(x, y, feetH) {
+  var i = meshCellAt(x, y), ceilingH = Infinity;
+  if (i >= 0) {
+    for (var li = 0; li < floorMesh.layerCount[i]; li++) {
+      var type = meshLayerType(floorMesh, i, li), h = meshLayerHeight(floorMesh, i, li);
+      // A cap within step height is our surface support while the grounded
+      // camera eases upward, not a second roof above our head.
+      if ((type === 2 || (type === 4 && h > feetH + 1.0)) && h > feetH + 0.001 && h < ceilingH) ceilingH = h;
     }
   }
-  // Layers are sorted ascending; walk from top down looking for the highest
-  // walkable layer whose topH is at or below playerH+grace.
-  // Gradient-based walkable picker.
-  //  - Walkables within [playerH - STEP_DOWN, playerH + STEP_UP] = walkable now.
-  //  - Anything outside that window is either too high (unreachable step up)
-  //    or too low (player is about to fall). The caller reads idx === -1 as
-  //    "not supported, start falling."
-  //  - Ceiling-blocked layers (rock between here and the camera) are rejected
-  //    if the player is clearly above them — a player on the cap can't be
-  //    teleported to the cave floor just because it's within vertical range.
-  //  - Uses the precomputed lXMeta (role + hasCeilAbove) for that rejection.
-  var best_topH = 0, best_idx = -1, best_type = 0, best_diff = 1e9;
-  var fallCandidate_z = -Infinity, fallCandidate_idx = -1, fallCandidate_type = 0;
-  for (var li = 0; li < lc; li++) {
-    var t, z;
-    if (li === 0) { t = mesh.l0Type[i]; z = mesh.l0TopZ[i]; }
-    else if (li === 1) { t = mesh.l1Type[i]; z = mesh.l1TopZ[i]; }
-    else if (li === 2) { t = mesh.l2Type[i]; z = mesh.l2TopZ[i]; }
-    else if (li === 3) { t = mesh.l3Type[i]; z = mesh.l3TopZ[i]; }
-    else { t = mesh.l4Type[i]; z = mesh.l4TopZ[i]; }
+  return {ceilingH: ceilingH, underground: ceilingH < Infinity,
+    clearanceH: ceilingH - feetH, cellIdx: i};
+}
+
+// Pick support only within the same open vertical interval. A ceiling between
+// the actor and a lower floor prevents falling through the roof, even when
+// there is no cap in the cell. Low headroom is a blocked passage, not a floor.
+// topH is null when no reachable support exists; callers must read action.
+function getWalkableLayerTopAt(x, y, playerH, options) {
+  var mesh = floorMesh, i = meshCellAt(x, y);
+  if (i < 0 || !mesh.layerCount[i]) return {topH: null, idx: -1, type: 0, action: 'missing', ceilingH: Infinity};
+  var stepUp = options && options.stepUp !== undefined ? options.stepUp : 1.0;
+  var bodyH = options && options.bodyH !== undefined ? options.bodyH : PLAYER_BODY_H;
+  var best = null, bestDiff = Infinity, fall = null, blocked = null;
+  for (var li = 0; li < mesh.layerCount[i]; li++) {
+    var t = meshLayerType(mesh, i, li), z = meshLayerHeight(mesh, i, li);
     if (t !== 1 && t !== 3 && t !== 4) continue;
-    // No ceiling-reachability check: the cap layer (type=4) is the real roof
-    // — it always sits at surface Z and, when present, wins the picker at
-    // playerH≈0 via STEP_UP/DOWN priority, keeping the surface player from
-    // falling through to the cave floor. Cells without a cap (cave mouths,
-    // open pits) are supposed to be descendable — a ceiling overhead is not
-    // solid from the player's POV; the ramp slopes under it.
-    var dz = z - playerH; // positive = layer is above player
-    // Track the highest drop-to candidate for the fall case.
-    if (z < playerH && z > fallCandidate_z) {
-      fallCandidate_z = z; fallCandidate_idx = li; fallCandidate_type = t;
+    var ceilingH = Infinity, separated = false;
+    for (var ci = 0; ci < mesh.layerCount[i]; ci++) {
+      var ct = meshLayerType(mesh, i, ci), cz = meshLayerHeight(mesh, i, ci);
+      if (ct !== 2 && ct !== 4) continue;
+      if (cz > z + 0.001 && cz < ceilingH) ceilingH = cz;
+      if (ct === 2 && cz > Math.min(z, playerH) + 0.001 && cz <= Math.max(z, playerH) + 0.001) separated = true;
     }
-    // Accept if within valid step window (asymmetric if you want; symmetric 0.5u is fine).
-    if (dz > STEP_UP) continue;            // too high to step up
-    if (dz < -STEP_DOWN) continue;         // drop too far — don't walk, fall
-    var absDiff = dz < 0 ? -dz : dz;
-    if (absDiff < best_diff) {
-      best_diff = absDiff; best_topH = z; best_idx = li; best_type = t;
+    var candidate = {topH: z, idx: li, type: t, action: 'walk', ceilingH: ceilingH};
+    if (separated || ceilingH - Math.max(z, playerH) < bodyH - 0.001 || z - playerH > stepUp) {
+      if (!blocked || Math.abs(z - playerH) < Math.abs(blocked.topH - playerH)) blocked = candidate;
+      continue;
+    }
+    var dz = z - playerH;
+    if (dz < -1.0) {
+      if (!fall || z > fall.topH) fall = candidate;
+    } else if (Math.abs(dz) < bestDiff) {
+      bestDiff = Math.abs(dz); best = candidate;
     }
   }
-  if (best_idx >= 0) return {topH: best_topH, idx: best_idx, type: best_type, action: 'walk'};
-  // No walkable within step range. If there's something below, signal fall
-  // by returning the target. idx === -1 tells callers "not supported."
-  if (fallCandidate_idx >= 0) return {topH: fallCandidate_z, idx: -1, type: fallCandidate_type, action: 'fall'};
-  // No walkables at all (shouldn't happen in a populated mesh).
-  return {topH: 0, idx: -1, type: 0, action: 'fall'};
+  if (best) return best;
+  if (fall) { fall.supportIdx = fall.idx; fall.idx = -1; fall.action = 'fall'; return fall; }
+  if (blocked) { blocked.supportIdx = blocked.idx; blocked.idx = -1; blocked.action = 'blocked'; return blocked; }
+  return {topH: null, idx: -1, type: 0, action: 'missing', ceilingH: Infinity};
 }
 
 // Index of the topmost walkable layer in this cell (or -1 if none).
@@ -7947,8 +7919,6 @@ function avgColor(c1, c2, c3, c4) {
   var b = Math.floor((b1 + b2 + b3 + b4) / 4);
   return '#' + ('0' + r.toString(16)).slice(-2) + ('0' + g.toString(16)).slice(-2) + ('0' + b.toString(16)).slice(-2);
 }
-
-
 // =============================================
 // SECTION 5: WALL DECORATIONS
 // =============================================
@@ -8022,18 +7992,54 @@ function createWallDecorations() {
   console.log('[DECOR] Created ' + wallDecorations.length + ' seeded decorations on actual walls');
 }
 
+// The decoration owns an actual wall face, not merely a ground coordinate.
+// Match drawWalls3D's center-based top and its per-face base, then fit the
+// sprite inside the exposed span. A collapsed/missing wall cannot hold a torch.
+function getWallDecorationAttachment(dec) {
+  if (dec.gridX < 0 || dec.gridY < 0 || dec.gridX >= gridW || dec.gridY >= gridH) return null;
+  var ci = dec.gridY * gridW + dec.gridX;
+  if (!grid || !grid[ci]) return null;
+  var nx = dec.side === 'west' ? -1 : dec.side === 'east' ? 1 : 0;
+  var ny = dec.side === 'north' ? -1 : dec.side === 'south' ? 1 : 0;
+  if (!nx && !ny) return null;
+  var centerX = (dec.gridX + 0.5) * cell, centerY = (dec.gridY + 0.5) * cell;
+  var centerH = floorMesh ? getFloorHeightAt(centerX, centerY) : 0;
+  var topH = centerH + (CANVAS_BASE_H / 25) * (wallHeights ? wallHeights[ci] : 1);
+  if (wallMaxTopZ && isFinite(wallMaxTopZ[ci])) topH = Math.min(topH, wallMaxTopZ[ci]);
+  var face = dec.side === 'west' ? 0 : dec.side === 'east' ? 1 : dec.side === 'north' ? 2 : 3;
+  var baseH = wallFaceBase ? wallFaceBase[ci * 4 + face] : centerH;
+  var x = dec.worldX + nx * 0.5, y = dec.worldY + ny * 0.5;
+  var openH = floorMesh ? getFloorHeightAt(x, y) : 0;
+  baseH = Math.max(baseH, openH);
+  if (floorMesh && typeof getCaveSpaceAt === 'function') {
+    topH = Math.min(topH, getCaveSpaceAt(x, y, openH).ceilingH);
+  }
+  var span = (topH - baseH) * 25;
+  if (!isFinite(span) || span < 4) return null;
+  var tier = WALL_DECOR_TIER[dec.type] || 'smWall';
+  var size = Math.min(32 * getScale3D(tier), span * 0.3);
+  var z = baseH * 25 + span * 0.55;
+  return {x:x, y:y, z:z, size:size, nx:nx, ny:ny,
+    baseZ:baseH*25, topZ:topH*25,
+    flameZ:z + size * (dec.type === 'sconce' ? 1/6 : 1/4)};
+}
+
+function getWallDecorationRenderZ(dec) {
+  var attachment = getWallDecorationAttachment(dec);
+  return attachment ? attachment.z : NaN;
+}
+
 function buildPointLights() {
   pointLights = [];
   for (var i = 0; i < wallDecorations.length; i++) {
     var d = wallDecorations[i];
     if (d.type !== 'torch' && d.type !== 'sconce') continue;
-    // Offset light half a cell away from the wall into open space
-    var lx = d.worldX, ly = d.worldY;
-    if (d.side === 'north') ly += cell * 0.5;
-    else if (d.side === 'south') ly -= cell * 0.5;
-    else if (d.side === 'west') lx += cell * 0.5;
-    else if (d.side === 'east') lx -= cell * 0.5;
-    pointLights.push({x: lx, y: ly, radius: 90, intensity: 0.55, r: 255, g: 180, b: 80});
+    var attachment = getWallDecorationAttachment(d);
+    if (!attachment) continue;
+    // Glow and illumination originate at the visible flame, just OUTSIDE its
+    // supporting face. The former half-cell offset pointed into solid rock.
+    pointLights.push({x: attachment.x, y: attachment.y, z: attachment.flameZ,
+      radius: 90, intensity: 0.55, r: 255, g: 180, b: 80});
   }
   // Warm amber glow at cave entrances — subtle light spilling from the archway
   // onto the approach. Offset slightly into the cave mouth so the opening reads
@@ -8043,7 +8049,7 @@ function buildPointLights() {
     var _ea = e.angle || 0;
     var _elx = e.x + Math.cos(_ea) * 10;
     var _ely = e.y + Math.sin(_ea) * 10;
-    pointLights.push({x: _elx, y: _ely, radius: 80, intensity: 0.45, r: 255, g: 200, b: 140});
+    pointLights.push({x: _elx, y: _ely, z: (e.floorH || 0) * 25 + 35, radius: 80, intensity: 0.45, r: 255, g: 200, b: 140});
   }
   // Allocate light grid if needed
   var gw = Math.ceil(worldW / _lightCellSize);
@@ -8177,8 +8183,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
   var heightScale = 1.0;
   var distanceFactor = Math.max(0.0, Math.min(1.0, (120 - dist) / 80));
   var angleEffect = distanceFactor * (1.0 - viewAngle);
-  if (side === 'north' || side === 'south') { widthScale = 1.0 - angleEffect * 0.6; }
-  else { heightScale = 1.0 - angleEffect * 0.5; }
+  widthScale = 1.0 - angleEffect * 0.6;
   var w = Math.floor(size * widthScale);
   var h = Math.floor(size * heightScale);
   if (type === 'torch') {
@@ -9096,26 +9101,14 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 // Perspective-projects all floorScatter items and draws them with drawFloorItem().
 function drawFloorScatter3D() {
   var _fsMaxDist = viewDist * 0.75;
-  // Cave-aware culling: underground, hide surface-placed items (their floor
-  // is at/above surface — they'd otherwise render through the cave ceiling).
-  // On the surface, hide items whose floor is below surface (cave items
-  // showing through the ground). Skip items whose floor height isn't
-  // resolvable to avoid culling legitimate items.
-  var _fsScatter = floorScatter;
-  if (floorMesh && floorScatter && floorScatter.length) {
-    _fsScatter = [];
-    for (var _fsi = 0; _fsi < floorScatter.length; _fsi++) {
-      var _fsIt = floorScatter[_fsi];
-      var _fsFh = getFloorHeightAt(_fsIt.x, _fsIt.y);
-      if (playerUnderground) {
-        if (_fsFh >= -0.1) continue; // surface item, hide when underground
-      } else {
-        if (_fsFh < -0.1) continue;  // cave item, hide from surface
-      }
-      _fsScatter.push(_fsIt);
-    }
-  }
-  renderEntities3D(_fsScatter, {maxDist: _fsMaxDist, depthOffset: 2, checkMidpoint: true, fadeFraction: 0.3, sort: true, minDist: 3, mode3dOnly: true},
+  // A doorway can reveal either stratum from either camera position. The
+  // actual terrain/ceiling depth clips scatter; camera state never hides it.
+  renderEntities3D(floorScatter, {maxDist: _fsMaxDist, groundAnchor: true,
+    bounds: function(item, vis) {
+      var size = Math.max(6, Math.min(70, Math.floor(1500 * getScale3D(FLOOR_ITEM_TIER[item.type] || 'medium') / vis.fwd)));
+      // Covers the widest sticks, vertical plants, and stroked edges.
+      return {x:vis.sx-size*2-2,y:vis.sy-size*2-2,width:size*4+4,height:size*4+4};
+    }, fadeFraction: 0.3, sort: true, minDist: 3, mode3dOnly: true},
     function(item, vis, C, ctx, now) {
       var fwd = vis.fwd;
       var tier = FLOOR_ITEM_TIER[item.type] || 'medium';
@@ -9141,15 +9134,22 @@ function drawTreasureChests3D() {
   var invTanHalf = C.invTanHalf, horizonY = C.horizonY, cameraZ = C.cameraZ;
   var now = Date.now();
 
-  function proj(wx, wy, wz) { return projToScreen(wx, wy, wz, C); }
+  function proj(wx, wy, wz) {
+    var p = projToScreen(wx, wy, wz, C) || {sx:0,sy:0,fwd:0};
+    // Retain world vertices for near-plane clipping of complete box faces.
+    p.x = wx; p.y = wy; p.z = wz;
+    return p;
+  }
+
+  function chestFace(p0, p1, p2, p3) {
+    return projectSceneWorldPolygon([p0,p1,p2,p3], C);
+  }
 
   // Draw a quad from 4 projected points
   function fillQuad(p0, p1, p2, p3, color) {
     ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.moveTo(p0.sx, p0.sy); ctx.lineTo(p1.sx, p1.sy);
-    ctx.lineTo(p2.sx, p2.sy); ctx.lineTo(p3.sx, p3.sy);
-    ctx.closePath(); ctx.fill();
+    var face = chestFace(p0,p1,p2,p3);
+    withSceneDepthClip(face, function () { traceSceneDepthPolygon(face); ctx.fill(); });
   }
 
   // Chest world dimensions — sized relative to wall cells (cell=12) so they
@@ -9160,10 +9160,8 @@ function drawTreasureChests3D() {
   // Stroke helper for edge outlines
   function strokeQuad(p0, p1, p2, p3, color, lw) {
     ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(p0.sx, p0.sy); ctx.lineTo(p1.sx, p1.sy);
-    ctx.lineTo(p2.sx, p2.sy); ctx.lineTo(p3.sx, p3.sy);
-    ctx.closePath(); ctx.stroke();
+    var face = chestFace(p0,p1,p2,p3);
+    withSceneDepthClip(face, function () { traceSceneDepthPolygon(face); ctx.stroke(); });
   }
 
   // Collect visible chests and sort far-to-near for correct painter's algorithm
@@ -9171,15 +9169,15 @@ function drawTreasureChests3D() {
   for (var i = 0; i < treasureChests.length; i++) {
     var ch = treasureChests[i];
     if (ch.collected) continue;
-    var vis = entityVisible3D(ch.x, ch.y, 0, C,
-      { maxDist: viewDist * 0.7, depthOffset: 2, checkMidpoint: true, fadeFraction: 0.8 });
+    var vis = entityVisible3D(ch.x, ch.y, getEntityRenderFloorZ(ch), C,
+      { maxDist: viewDist * 0.7, skipDepth: true, sceneDepth: true, fadeFraction: 0.8 });
     if (!vis || vis.dist < 3) continue;
     visibleChests.push({ch: ch, vis: vis});
   }
   visibleChests.sort(function(a, b) { return b.vis.dist - a.vis.dist; });
   for (var ci = 0; ci < visibleChests.length; ci++) {
     var ch = visibleChests[ci].ch, vis = visibleChests[ci].vis;
-    var centerSX = vis.sx, fwd = vis.fwd, floorZ = vis.floorZ;
+    var centerSX = vis.sx, fwd = vis.fwd, floorZ = getEntityRenderFloorZ(ch);
     var dx = ch.x - cam.x, dy = ch.y - cam.y;
     var lid = ch.lidAngle || 0;
 
@@ -9192,7 +9190,9 @@ function drawTreasureChests3D() {
     var glowR = Math.max(14, Math.min(70, 20 * getScale3D('lgGlow') * projScale / fwd));
     ctx.globalAlpha = fogAlpha * _ctd.glowA;
     ctx.fillStyle = _ctd.glow;
-    ctx.beginPath(); ctx.arc(centerSX, glowSY, glowR, 0, Math.PI * 2); ctx.fill();
+    withSceneDepthBillboard({x:centerSX-glowR,y:glowSY-glowR,width:glowR*2,height:glowR*2}, fwd, function () {
+      ctx.beginPath(); ctx.arc(centerSX, glowSY, glowR, 0, Math.PI * 2); ctx.fill();
+    });
     ctx.globalAlpha = fogAlpha;
 
     // ── 3D box corners — fixed world-space orientation ──
@@ -9280,8 +9280,10 @@ function drawTreasureChests3D() {
     var trimTopR = proj(c1x, c1y, floorZ + bodyH * 0.55);
     if (camDotFw > 0 && trimBot && trimTop && trimBotR && trimTopR) {
       fillQuad(trimBot, trimBotR, trimTopR, trimTop, _ctd.trim);
-      ctx.strokeStyle = _ctd.lock; ctx.lineWidth = Math.max(1, edgeLW * 0.6);
-      ctx.beginPath(); ctx.moveTo(trimTop.sx, trimTop.sy); ctx.lineTo(trimTopR.sx, trimTopR.sy); ctx.stroke();
+      withSceneDepthClip(chestFace(trimBot,trimBotR,trimTopR,trimTop), function () {
+        ctx.strokeStyle = _ctd.lock; ctx.lineWidth = Math.max(1, edgeLW * 0.6);
+        ctx.beginPath(); ctx.moveTo(trimTop.sx, trimTop.sy); ctx.lineTo(trimTopR.sx, trimTopR.sy); ctx.stroke();
+      });
     }
 
     // Vertical center strap on front
@@ -9297,12 +9299,14 @@ function drawTreasureChests3D() {
     // Lock circle on front
     if (camDotFw > 0) {
       var lockP = proj(bandMidX, bandMidY, floorZ + bodyH * 0.47);
-      if (lockP) {
+      if (lockP.fwd >= 1) {
         var lockR = Math.max(2, Math.min(5, 3 * projScale / lockP.fwd));
-        ctx.fillStyle = _ctd.lock;
-        ctx.beginPath(); ctx.arc(lockP.sx, lockP.sy, lockR, 0, Math.PI * 2); ctx.fill();
-        ctx.strokeStyle = _ctd.lockStr; ctx.lineWidth = Math.max(1, lockR * 0.4);
-        ctx.stroke();
+        withSceneDepthBillboard({x:lockP.sx-lockR-2,y:lockP.sy-lockR-2,width:lockR*2+4,height:lockR*2+4}, lockP.fwd, function () {
+          ctx.fillStyle = _ctd.lock;
+          ctx.beginPath(); ctx.arc(lockP.sx, lockP.sy, lockR, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = _ctd.lockStr; ctx.lineWidth = Math.max(1, lockR * 0.4);
+          ctx.stroke();
+        });
       }
     }
 
@@ -9333,8 +9337,12 @@ function drawTreasureChests3D() {
       fillQuad(pLidC0, pLidC1, pLidC2, pLidC3, _ctd.lidTop);
       strokeQuad(pLidC0, pLidC1, pLidC2, pLidC3, edgeCol, edgeLW);
       // Trim on front edge of lid (the opening edge)
-      ctx.strokeStyle = _ctd.trim; ctx.lineWidth = Math.max(1, edgeLW * 1.2);
-      ctx.beginPath(); ctx.moveTo(pLidC0.sx, pLidC0.sy); ctx.lineTo(pLidC1.sx, pLidC1.sy); ctx.stroke();
+      withSceneDepthClip(chestFace(pLidC0,pLidC1,pLidC2,pLidC3), function () {
+        ctx.strokeStyle = _ctd.trim; ctx.lineWidth = Math.max(1, edgeLW * 1.2);
+        if (pLidC0.fwd >= 1 && pLidC1.fwd >= 1) {
+          ctx.beginPath(); ctx.moveTo(pLidC0.sx, pLidC0.sy); ctx.lineTo(pLidC1.sx, pLidC1.sy); ctx.stroke();
+        }
+      });
     }
 
     // Small sparkle
@@ -9342,9 +9350,11 @@ function drawTreasureChests3D() {
     ctx.globalAlpha = fogAlpha * shimmer * 0.5;
     ctx.fillStyle = _ctd.spark;
     var sparkP = proj(ch.x, ch.y, bodyTopZ + lidH + 3);
-    if (sparkP) {
+    if (sparkP.fwd >= 1) {
       var sparkR = Math.max(1, Math.min(3, 2 * projScale / sparkP.fwd));
-      ctx.beginPath(); ctx.arc(sparkP.sx, sparkP.sy, sparkR, 0, Math.PI * 2); ctx.fill();
+      withSceneDepthBillboard({x:sparkP.sx-sparkR,y:sparkP.sy-sparkR,width:sparkR*2,height:sparkR*2}, sparkP.fwd, function () {
+        ctx.beginPath(); ctx.arc(sparkP.sx, sparkP.sy, sparkR, 0, Math.PI * 2); ctx.fill();
+      });
     }
 
     // ── Epic chest orbiting particles ──
@@ -9357,11 +9367,13 @@ function drawTreasureChests3D() {
         var epY = ch.y + Math.sin(epAng) * epR;
         var epZ = floorZ + bodyH * 0.5 + Math.sin(now * 0.005 + epi) * 4;
         var epP = proj(epX, epY, epZ);
-        if (epP) {
+        if (epP.fwd >= 1) {
           var epSz = Math.max(1.5, Math.min(4, 2.5 * projScale / epP.fwd));
-          ctx.fillStyle = _ctd.glow;
-          ctx.shadowBlur = 6; ctx.shadowColor = _ctd.glow;
-          ctx.beginPath(); ctx.arc(epP.sx, epP.sy, epSz, 0, Math.PI * 2); ctx.fill();
+          withSceneDepthBillboard({x:epP.sx-epSz-12,y:epP.sy-epSz-12,width:epSz*2+24,height:epSz*2+24}, epP.fwd, function () {
+            ctx.fillStyle = _ctd.glow;
+            ctx.shadowBlur = 6; ctx.shadowColor = _ctd.glow;
+            ctx.beginPath(); ctx.arc(epP.sx, epP.sy, epSz, 0, Math.PI * 2); ctx.fill();
+          });
         }
       }
       ctx.shadowBlur = 0;
@@ -9430,8 +9442,9 @@ function drawTreasureChests3D() {
           if (tw > maxTxtW) maxTxtW = tw;
         }
         var bgW = maxTxtW + 12, bgH = textLines.length * lineH + 6;
-        ctx.fillStyle = 'rgba(0,0,0,0.65)';
-        ctx.fillRect(textP.sx - bgW / 2, textP.sy - bgH + 2, bgW, bgH);
+        withSceneDepthBillboard({x:textP.sx-bgW/2,y:textP.sy-bgH+2,width:bgW,height:bgH+2}, textP.fwd, function () {
+          ctx.fillStyle = 'rgba(0,0,0,0.65)';
+          ctx.fillRect(textP.sx - bgW / 2, textP.sy - bgH + 2, bgW, bgH);
 
         // Draw text lines
         ctx.textAlign = 'center';
@@ -9443,6 +9456,7 @@ function drawTreasureChests3D() {
           ctx.font = (tl === 0 ? 'bold ' : '') + fontSize + 'px Arial';
           ctx.fillText(textLines[tl], textP.sx, textP.sy - bgH + 2 + (tl + 1) * lineH);
         }
+        });
       }
     }
 
@@ -9480,7 +9494,11 @@ function drawEnemySpawners3D() {
       if (enemySpawners[i].active) activeSpawners.push(enemySpawners[i]);
     }
   }
-  renderEntities3D(activeSpawners, {maxDist: viewDist * 0.5, depthOffset: 2, checkMidpoint: true, fadeFraction: 0.8, sort: true, minDist: 3, mode3dOnly: true},
+  renderEntities3D(activeSpawners, {maxDist: viewDist * 0.5, groundAnchor: true,
+    bounds: function(sp, vis) {
+      var size = Math.max(12, Math.min(120, Math.floor(40 * getScale3D('lgStructure') * projScale / vis.fwd)));
+      return {x:vis.sx-size*2-2,y:vis.sy-size*2.5-4,width:size*4+4,height:size*4+8};
+    }, fadeFraction: 0.8, sort: true, minDist: 3, mode3dOnly: true},
     function(sp, vis, C, ctx, now) {
       var screenX = vis.sx, screenY = vis.sy, fwd = vis.fwd;
       var size = Math.max(12, Math.min(120, Math.floor(40 * getScale3D('lgStructure') * projScale / fwd)));
@@ -9528,8 +9546,8 @@ function drawEnemySpawners3D() {
 }
 
 // Renders breakable ore vein overlays on cave walls.
-// Same perspective pipeline as drawWallDecorations; depth-buffer occlusion prevents
-// drawing through walls. hp-based opacity shows cracking as the vein is damaged.
+// Attach to the same real exposed face as wall decorations; read opaque scene
+// depth so neither mineral nor glow can shine through the cave roof.
 function drawOreVeins() {
   if (!oreVeins || !oreVeins.length || !MODE3D) return;
   var C = getCam3D();
@@ -9541,27 +9559,34 @@ function drawOreVeins() {
   var visibleOres = [];
   for (var i = 0; i < oreVeins.length; i++) {
     var ore = oreVeins[i];
-    var vis = entityVisible3D(ore.worldX, ore.worldY, 0, C,
-      { maxDist: 280, depthOffset: 2, checkMidpoint: false, fadeFraction: 0.8 });
+    var faceX = (ore.gx + (ore.side === 'west' ? 0 : ore.side === 'east' ? 1 : 0.5)) * cell;
+    var faceY = (ore.gy + (ore.side === 'north' ? 0 : ore.side === 'south' ? 1 : 0.5)) * cell;
+    var attachment = getWallDecorationAttachment({gridX:ore.gx,gridY:ore.gy,
+      worldX:faceX,worldY:faceY,side:ore.side,type:'ore'});
+    if (!attachment || (cam.x-attachment.x)*attachment.nx+(cam.y-attachment.y)*attachment.ny <= 0) continue;
+    var vis = entityVisible3D(attachment.x, attachment.y, attachment.z, C,
+      { maxDist: 280, sceneDepth: true, fadeFraction: 0.8 });
     if (!vis) continue;
-    visibleOres.push({ore: ore, vis: vis});
+    visibleOres.push({ore: ore, vis: vis, attachment:attachment});
   }
   visibleOres.sort(function(a, b) { return b.vis.dist - a.vis.dist; });
   for (var oi = 0; oi < visibleOres.length; oi++) {
     var ore = visibleOres[oi].ore, vis = visibleOres[oi].vis;
     var screenX = vis.sx, screenY = vis.sy, fwd = vis.fwd, dist = vis.dist;
     var _oFade = vis.fade;
-    // Place vein at mid-wall height
-    var wallMidY = screenY - Math.floor(h / fwd * 180 * 0.55);
+    var wallMidY = screenY;
 
     // Perspective-scaled size
-    var size = Math.max(6, Math.min(48, Math.floor(160 * getScale3D('smWall') / dist)));
+    var size = Math.min(visibleOres[oi].attachment.size,cell*0.45) / fwd * projScale;
+    if (size < 0.5) continue;
 
     // hp fade: full at 3, 65% at 2, 35% at 1 (cracked look)
     var hpAlpha = ore.hp >= 3 ? 1.0 : ore.hp === 2 ? 0.65 : 0.35;
     // Shimmer flicker
     var flicker = 0.82 + 0.18 * Math.sin(now * 0.007 + ore.gx * 5.3 + ore.gy * 3.7);
 
+    withSceneDepthBillboard({x:screenX-size*1.6-2,y:wallMidY-size*1.6-2,
+      width:size*3.2+4,height:size*3.2+4}, fwd, function () {
     ctx.save();
     ctx.globalAlpha = hpAlpha * flicker * _oFade;
 
@@ -9618,6 +9643,7 @@ function drawOreVeins() {
     }
 
     ctx.restore();
+    }, {depthBias:1.5});
   }
 }
 
@@ -9634,8 +9660,10 @@ function drawWallDecorations() {
   var visibleDecors = [];
   for (var i = 0; i < wallDecorations.length; i++) {
     var dec = wallDecorations[i];
-    var dx = dec.worldX - cam.x;
-    var dy = dec.worldY - cam.y;
+    var attachment = getWallDecorationAttachment(dec);
+    if (!attachment) continue;
+    var dx = attachment.x - cam.x;
+    var dy = attachment.y - cam.y;
     var dist = Math.hypot(dx, dy);
     if (dist < 1 || dist > viewDist * 0.7) continue;
     var _dFade = dist > viewDist * 0.56 ? Math.max(0, 1.0 - (dist - viewDist * 0.56) / (viewDist * 0.14)) : 1.0;
@@ -9646,23 +9674,7 @@ function drawWallDecorations() {
     var screenX = Math.floor((rgt / fwd * invTanHalf * 0.5 + 0.5) * w);
     if (screenX < -40 || screenX > w + 40) { culledCount++; continue; }
 
-    // Cave-aware decoration culling: hide decorations on the wrong side of
-    // the surface/cave boundary so they don't render through cave ceiling
-    // (from below) or through the ground (from above).
-    if (floorMesh) {
-      var _dFh = getFloorHeightAt(dec.worldX, dec.worldY);
-      if (playerUnderground) {
-        if (_dFh >= -0.1) { culledCount++; continue; }
-      } else {
-        if (_dFh < -0.1) { culledCount++; continue; }
-      }
-    }
-    var isOccluded = isDecorationOccluded(dec.worldX, dec.worldY, cam.x, cam.y);
-    if (isOccluded) {
-      occludedCount++;
-    } else {
-      visibleDecors.push({dec: dec, dx: dx, dy: dy, dist: dist, fwd: fwd, screenX: screenX, _dFade: _dFade});
-    }
+    visibleDecors.push({dec: dec, attachment:attachment, dx: dx, dy: dy, dist: dist, fwd: fwd, screenX: screenX, _dFade: _dFade});
   }
   visibleDecors.sort(function(a, b) { return b.dist - a.dist; });
   for (var di = 0; di < visibleDecors.length; di++) {
@@ -9680,27 +9692,30 @@ function drawWallDecorations() {
     var toCamY = cam.y - dec.worldY;
     var toCamLen = Math.hypot(toCamX, toCamY);
     if (toCamLen > 0) { toCamX /= toCamLen; toCamY /= toCamLen; }
-    var viewAngle = Math.abs(toCamX * wallNormalX + toCamY * wallNormalY);
-
-    var wTier = WALL_DECOR_TIER[dec.type] || 'medium';
-    var s3w = getScale3D(wTier);
-    var scale = Math.min(4.0, 200 * s3w / fwd);
-    var size = Math.max(8, Math.min(80, Math.floor(32 * scale)));
-
-    var wallFloorZ = floorMesh ? getFloorHeightAt(dec.worldX, dec.worldY) * 25 : 0;
-    var wallBaseY  = horizonYd + Math.floor(((cameraZd - wallFloorZ) / fwd) * projScale);
-    var wallLineH  = Math.max(1, Math.floor(h / fwd * 180));
-    var decorY = wallBaseY - Math.floor(wallLineH * 0.38);
-
-    drawWallAlignedDecoration(dec.type, renderX, decorY, size, dist, dec.side, viewAngle, _dFade);
+    var viewAngle = toCamX * wallNormalX + toCamY * wallNormalY;
+    if (viewAngle <= 0) continue;
+    var attachment = visibleDecors[di].attachment;
+    // Perspective scaling has no minimum pixel size: a far torch must not
+    // grow beyond the wall carrying it. Z and size are shared with its glow.
+    var size = attachment.size / fwd * projScale;
+    if (size < 0.5) continue;
+    var decorZ = attachment.z;
+    var decorY = horizonYd + (cameraZd - decorZ) / fwd * projScale;
+    var depthPoly = [
+      {x:renderX-size*2,y:decorY-size*3,depth:fwd},
+      {x:renderX+size*2,y:decorY-size*3,depth:fwd},
+      {x:renderX+size*2,y:decorY+size*3,depth:fwd},
+      {x:renderX-size*2,y:decorY+size*3,depth:fwd}
+    ];
+    withSceneDepthClip(depthPoly, function() {
+      drawWallAlignedDecoration(dec.type, renderX, decorY, size, dist, dec.side, viewAngle, _dFade);
+    }, {depthBias:1.5});
   }
   if (shouldLog) {
     //console.log('[DECOR] Summary: ' + visibleCount + ' visible, ' + occludedCount + ' occluded, ' + culledCount + ' culled'); // TEMP DISABLED
     __decorDebugLast = now;
   }
 }
-
-
 // =============================================
 // SECTION 6: SENSOR & HARDWARE
 // =============================================
@@ -10047,7 +10062,8 @@ function repelFromEnemies(dt) {
       // Use the same full-radius wall check as player movement so enemies
       // can never pin the player into wall geometry or out-of-bounds
       var blocked = (newX < 6 || newX > worldW - 6 || newY < 6 || newY > worldH - 6)
-                    || isInGridWall(newX, newY, 6, pos.floorZ || 60);
+                    || isInGridWall(newX, newY, 6, meshHeightToPlayerZ(getPlayerFloorH()))
+                    || isTerrainBlockedAt(newX, newY, getPlayerFloorH(), jumpAirborne);
       if (!blocked) { pos.x = newX; pos.y = newY; vel.x += (dx * inv) * k * overlap * dt; vel.y += (dy * inv) * k * overlap * dt; }
       else { vel.x *= 0.5; vel.y *= 0.5; }
     }
@@ -10075,14 +10091,41 @@ function repelFromStalls() {
         ly += (ly > 0 ? oy : -oy);
       }
       // Transform back to world space
-      pos.x = st.x + lx * cf - ly * sf;
-      pos.y = st.y + lx * sf + ly * cf;
+      var stallPushX = st.x + lx * cf - ly * sf;
+      var stallPushY = st.y + lx * sf + ly * cf;
+      if (!isTerrainBlockedAt(stallPushX, stallPushY, getPlayerFloorH(), jumpAirborne)) {
+        pos.x = stallPushX;
+        pos.y = stallPushY;
+      }
       vel.x *= 0.3; vel.y *= 0.3;
     }
   }
 }
 
+function tracksMeshFloor() {
+  return !!floorMesh && (ENDLESS_MODE || terrain === 'plains' || terrain === 'cave' || terrain === 'expanse');
+}
+
+// Terrain is collision geometry too: a tall rise or low ceiling cannot be
+// entered merely because the coarse wall grid happens to be empty. Sample
+// the actor footprint, so the body cannot clip through the side of a passage.
+function isTerrainBlockedAt(x, y, feetH, airborne) {
+  if (!tracksMeshFloor()) return false;
+  var offsets = [0, 0, -6, 0, 6, 0, 0, -6, 0, 6];
+  for (var ti = 0; ti < offsets.length; ti += 2) {
+    var support = getWalkableLayerTopAt(x + offsets[ti], y + offsets[ti + 1], feetH,
+      airborne ? {stepUp: 0} : null);
+    if (support.action === 'blocked' || support.action === 'missing') return true;
+  }
+  return false;
+}
+
+function updatePlayerCaveSpace() {
+  playerUnderground = getCaveSpaceAt(pos.x, pos.y, getPlayerFloorH()).underground;
+}
+
 function step(dt) {
+  updatePlayerCaveSpace();
   // Mana and health regen (with hat bonuses)
   var manaRegenBonus = (equipment.hat && equipment.hat.manaRegen) ? equipment.hat.manaRegen : 0;
   var hpRegenBonus = (equipment.hat && equipment.hat.hpRegen) ? equipment.hat.hpRegen : 0;
@@ -10135,17 +10178,20 @@ function step(dt) {
     }
   }
   if (jumpAirborne) {
+    var previousH = getPlayerFloorH();
     jumpVelZ -= GAME_CONFIG.player.gravity * dt;
-    pos.floorZ = (pos.floorZ || 60) + jumpVelZ * dt;
-    var groundZ = 60;
-    if ((ENDLESS_MODE || terrain === 'plains' || terrain === 'cave' || terrain === 'expanse') && floorMesh) {
-      // Layer-aware landing: pick the walkable layer the player is descending
-      // onto. Uses player's current Z so if you jump up to the cap from below
-      // but overshoot, gravity still lands you on the cap (the highest layer
-      // at/below your Z).
-      var playerH_j = ((pos.floorZ || 60) - 60) / 40;
-      var walk_j = getWalkableLayerTopAt(pos.x, pos.y, playerH_j);
-      groundZ = walk_j.topH * 40 + 60;
+    pos.floorZ = meshHeightToPlayerZ(previousH) + jumpVelZ * dt;
+    var groundZ = tracksMeshFloor() ? -Infinity : 60;
+    if (tracksMeshFloor()) {
+      // Sweep from the previous feet height so a fast fall cannot skip a
+      // floor. Only floors reachable without crossing rock may catch us.
+      var walk_j = getWalkableLayerTopAt(pos.x, pos.y, previousH, {stepUp: 0});
+      if (walk_j.action === 'walk' || walk_j.action === 'fall') groundZ = meshHeightToPlayerZ(walk_j.topH);
+      var ceiling_j = getCaveSpaceAt(pos.x, pos.y, previousH).ceilingH;
+      if (jumpVelZ > 0 && getPlayerFloorH() + PLAYER_BODY_H > ceiling_j) {
+        pos.floorZ = meshHeightToPlayerZ(Math.max(previousH, ceiling_j - PLAYER_BODY_H));
+        jumpVelZ = 0;
+      }
     }
     // Can land on wall top if falling down onto it
     if (wallTopZ > 0 && jumpVelZ <= 0 && pos.floorZ <= wallTopZ) {
@@ -10153,7 +10199,7 @@ function step(dt) {
       jumpVelZ = 0;
       jumpAirborne = false;
       onWallTop = true;
-    } else if (pos.floorZ <= groundZ) {
+    } else if (jumpVelZ <= 0 && pos.floorZ <= groundZ) {
       pos.floorZ = groundZ;
       jumpVelZ = 0;
       jumpAirborne = false;
@@ -10170,13 +10216,12 @@ function step(dt) {
   }
   // Walking off a wall edge — start falling
   if (!jumpAirborne && !onWallTop && wallTopZ === 0) {
-    var groundZ2 = 60;
-    if ((ENDLESS_MODE || terrain === 'plains' || terrain === 'cave' || terrain === 'expanse') && floorMesh) {
-      var playerH_e = ((pos.floorZ || 60) - 60) / 40;
-      var walk_e = getWalkableLayerTopAt(pos.x, pos.y, playerH_e);
-      groundZ2 = walk_e.topH * 40 + 60;
+    var fallingOffEdge = pos.floorZ > 63;
+    if (tracksMeshFloor()) {
+      var walk_e = getWalkableLayerTopAt(pos.x, pos.y, getPlayerFloorH());
+      fallingOffEdge = walk_e.action === 'fall';
     }
-    if (pos.floorZ > groundZ2 + 3) {
+    if (fallingOffEdge) {
       // Walked off edge — start falling
       jumpAirborne = true;
       jumpVelZ = 0;
@@ -10203,14 +10248,20 @@ function step(dt) {
   var oldX = pos.x;
   pos.x += vel.x * dt;
   // Skip wall collision when: airborne above walls, or standing on a wall top
-  var aboveWalls = (pos.floorZ || 0) > 80 || onWallTop;
-  var _collideZ = pos.floorZ || 60; // pass player Z for height-aware collision
+  var aboveWalls = onWallTop;
+  var _collideZ = meshHeightToPlayerZ(getPlayerFloorH()); // legitimate zero is not the default floor
   var _hitWallX = false, _hitWallY = false;
-  if (!NOCLIP && !aboveWalls && isInGridWall(pos.x, pos.y, 6, _collideZ)) { pos.x = oldX; vel.x *= -bounce; _hitWallX = true; }
+  if (!NOCLIP && ((!aboveWalls && isInGridWall(pos.x, pos.y, 6, _collideZ)) ||
+      isTerrainBlockedAt(pos.x, pos.y, getPlayerFloorH(), jumpAirborne))) {
+    pos.x = oldX; vel.x *= -bounce; _hitWallX = true;
+  }
 
   var oldY = pos.y;
   pos.y += vel.y * dt;
-  if (!NOCLIP && !aboveWalls && isInGridWall(pos.x, pos.y, 6, _collideZ)) { pos.y = oldY; vel.y *= -bounce; _hitWallY = true; }
+  if (!NOCLIP && ((!aboveWalls && isInGridWall(pos.x, pos.y, 6, _collideZ)) ||
+      isTerrainBlockedAt(pos.x, pos.y, getPlayerFloorH(), jumpAirborne))) {
+    pos.y = oldY; vel.y *= -bounce; _hitWallY = true;
+  }
 
   // Active unstuck: if player is still inside a wall after axis collision
   // (common when cave gen leaves them stranded, or when they overlap a wall
@@ -10227,6 +10278,7 @@ function step(dt) {
           if (_usNx < 0 || _usNx >= gridW || _usNy < 0 || _usNy >= gridH) continue;
           var _usCx = (_usNx + 0.5) * cell, _usCy = (_usNy + 0.5) * cell;
           if (isInGridWall(_usCx, _usCy, 6, _collideZ)) continue;
+          if (isTerrainBlockedAt(_usCx, _usCy, getPlayerFloorH(), jumpAirborne)) continue;
           var _usDistSq = _usDx * _usDx + _usDy * _usDy;
           if (_usDistSq < _usBestDistSq) { _usBestDistSq = _usDistSq; _usBestDX = _usDx; _usBestDY = _usDy; }
         }
@@ -10263,18 +10315,22 @@ function step(dt) {
 
   // Floor height tracking for procedural-floor terrains (always active in endless mode)
   // Skip floor lerp when airborne — jump physics handles Z directly
-  if (!jumpAirborne && (ENDLESS_MODE || terrain === 'plains' || terrain === 'cave' || terrain === 'expanse') && floorMesh) {
+  if (!jumpAirborne && !onWallTop && tracksMeshFloor()) {
     // Layer-aware floor pick: given the player's current Z (converted to
     // height-units), find the walkable layer they should snap to. Auto step-up
     // handles walking onto a hill cap from normal surface without falling
     // through. Replaces the old clamp+surfaceH logic.
-    var playerH_t = ((pos.floorZ || 60) - 60) / 40;
+    var playerH_t = getPlayerFloorH();
     var walk_t = getWalkableLayerTopAt(pos.x, pos.y, playerH_t);
-    var floorHeight = walk_t.topH;
-    if (!pos.floorZ) pos.floorZ = 0;
-    var targetZ = floorHeight * 40 + 60;
-    var zDiff = targetZ - pos.floorZ;
-    pos.floorZ += zDiff * 0.3;
+    var zDiff = 0;
+    if (walk_t.action === 'walk') {
+      var targetZ = meshHeightToPlayerZ(walk_t.topH);
+      zDiff = targetZ - meshHeightToPlayerZ(playerH_t);
+      pos.floorZ = meshHeightToPlayerZ(playerH_t) + zDiff * (1 - Math.pow(0.7, dt * 60));
+    } else if (walk_t.action === 'fall') {
+      jumpAirborne = true;
+      jumpVelZ = 0;
+    }
 
     // Auto-pitch: transient horizon nudge when traversing slopes.
     // Uses a SEPARATE offset that decays on its own — never touches pitchTarget
@@ -10329,6 +10385,7 @@ function step(dt) {
     repelFromEnemies(dt);
     repelFromStalls();
   }
+  updatePlayerCaveSpace();
 
   // Death check
   if (health <= 0 && running) {
@@ -10375,8 +10432,6 @@ function step(dt) {
   else if (timeSec <= medalBronze) timeColor = '#cd7f32';
   else timeColor = '#ffffff';
 }
-
-
 // =============================================
 // SECTION 9: COMBAT SYSTEM
 // =============================================
@@ -10480,6 +10535,11 @@ function getAimAngle() {
   return ang;
 }
 
+// Stored player height is 60+40H; effects/projectiles use render-world 25H.
+function getPlayerRenderFloorZ() {
+  return Number.isFinite(pos.floorZ) ? (pos.floorZ - 60) * 0.625 : 0;
+}
+
 function spawnProjectile(speedOverride, radiusOverride, spellOverride, angOffset) {
   var spell = spellOverride || getCurrentSpell();
   var ang = getAimAngle() + (angOffset || 0);
@@ -10495,12 +10555,13 @@ function spawnProjectile(speedOverride, radiusOverride, spellOverride, angOffset
   var rr = (radiusOverride || PROJ_RADIUS);
   var hz = sp * Math.cos(usePitch);
   var vz = sp * Math.sin(usePitch);
-  var spawnZ = MODE3D ? (pos.floorZ || 60) - 5 : 0;  // spawn at hand height (slightly below eye level, works at any floor Z)
+  var spawnZ = MODE3D ? getPlayerRenderFloorZ() + 55 : 0;
   console.log('[PROJ] pitch=' + (cam.pitch||0).toFixed(3) + ' usePitch=' + usePitch.toFixed(3) + ' hz=' + hz.toFixed(1) + ' vz=' + vz.toFixed(1) + ' spawnZ=' + spawnZ);
   var _pLife = PROJ_LIFE_MS;
   if (equipment.relic && equipment.relic.effect === 'spellRange') _pLife = Math.round(_pLife * (1 + equipment.relic.value));
   projectiles.push({x:sx, y:sy, z:spawnZ, ang:ang, speed:sp, hz:hz, vz:vz,
-                    spawnMs:Date.now(), lifeMs:_pLife, r:rr, spell:spell});
+                    spawnMs:Date.now(), lifeMs:_pLife, r:rr, spell:spell,
+                    renderFloorZ:getPlayerRenderFloorZ(), underground:!!playerUnderground});
 }
 
 // Lob projectile — arcing trajectory for Poison Cloud
@@ -10513,7 +10574,7 @@ function spawnLobProjectile(spell, angOffset) {
   var sx = pos.x + Math.cos(ang) * handFwd + Math.cos(rightAng) * handRight;
   var sy = pos.y + Math.sin(ang) * handFwd + Math.sin(rightAng) * handRight;
   var sp = spell.speed || 200;
-  var spawnZ = MODE3D ? (pos.floorZ || 60) - 5 : 0;
+  var spawnZ = MODE3D ? getPlayerRenderFloorZ() + 55 : 0;
   var gravZ = -200;
 
   // Landing Z = floor height at target position (works at any elevation including caves)
@@ -10528,7 +10589,8 @@ function spawnLobProjectile(spell, angOffset) {
   var tYpre = sy + Math.sin(ang) * targetDist;
   var landingZ = 0;
   if (MODE3D && floorMesh) {
-    landingZ = getFloorHeightAt(tXpre, tYpre) * 25;
+    landingZ = sampleEntitySupportRenderZ(tXpre, tYpre, getPlayerRenderFloorZ(), playerUnderground);
+    if (!Number.isFinite(landingZ)) landingZ = getPlayerRenderFloorZ();
   }
 
   var lobTime = targetDist / sp;
@@ -10543,7 +10605,8 @@ function spawnLobProjectile(spell, angOffset) {
   projectiles.push({x:sx, y:sy, z:spawnZ, ang:ang, speed:sp, hz:sp, vz:initVZ,
                     spawnMs:Date.now(), lifeMs:3000, r:PROJ_RADIUS, spell:spell,
                     isLob:true, gravZ:gravZ, lobStartZ:spawnZ,
-                    targetX:tX, targetY:tY});
+                    targetX:tX, targetY:tY, targetZ:landingZ,
+                    renderFloorZ:getPlayerRenderFloorZ(), underground:!!playerUnderground});
 }
 
 // Nova attack — instant AoE damage around the player
@@ -10551,7 +10614,8 @@ function castNovaAttack(spell) {
   var now = Date.now();
   var radius = spell.novaRadius || 100;
   var hitCount = 0;
-  novaEffects.push({x:pos.x, y:pos.y, radius:radius, color:spell.color, spawnMs:now, lifeMs:400});
+  novaEffects.push({x:pos.x, y:pos.y, renderFloorZ:getPlayerRenderFloorZ(), underground:!!playerUnderground,
+    radius:radius, color:spell.color, spawnMs:now, lifeMs:400});
   if (enemies && enemies.length) {
     for (var ei = 0; ei < enemies.length; ei++) {
       var e = enemies[ei];
@@ -10585,7 +10649,9 @@ function castConeAttack(spell) {
   var halfAngle = coneAngle / 2;
   var range = spell.coneRange || 100;
   var hitCount = 0;
-  coneEffects.push({x:pos.x, y:pos.y, z:MODE3D ? 35 : 0, ang:ang, halfAngle:halfAngle, range:range, color:spell.color, spellId:spell.id, spawnMs:now, lifeMs:200});
+  coneEffects.push({x:pos.x, y:pos.y, z:MODE3D ? getPlayerRenderFloorZ() + 35 : 0,
+    renderFloorZ:getPlayerRenderFloorZ(), underground:!!playerUnderground,
+    ang:ang, halfAngle:halfAngle, range:range, color:spell.color, spellId:spell.id, spawnMs:now, lifeMs:200});
   if (enemies && enemies.length) {
     for (var ei = 0; ei < enemies.length; ei++) {
       var e = enemies[ei];
@@ -10625,6 +10691,7 @@ function castConeAttack(spell) {
       var fgx = Math.floor(fx / cell), fgy = Math.floor(fy / cell);
       if (fgx >= 0 && fgy >= 0 && fgx < gridW && fgy < gridH && !grid[fgy * gridW + fgx]) {
         groundEffects.push({x:fx, y:fy, radius:20, duration:fireDur,
+                            renderFloorZ:sampleEntitySupportRenderZ(fx, fy, getPlayerRenderFloorZ(), playerUnderground), underground:!!playerUnderground,
                             damage:0.5, color:'#ff4400', spellId:'fire', spawnMs:now, tickMs:now});
       }
     }
@@ -10692,6 +10759,7 @@ function castStreamAttack(spell) {
     var fgx = Math.floor(fx / cell), fgy = Math.floor(fy / cell);
     if (fgx >= 0 && fgy >= 0 && fgx < gridW && fgy < gridH && !grid[fgy * gridW + fgx]) {
       groundEffects.push({x:fx, y:fy, radius:18, duration:fireDur,
+                          renderFloorZ:sampleEntitySupportRenderZ(fx, fy, getPlayerRenderFloorZ(), playerUnderground), underground:!!playerUnderground,
                           damage:0.4, color:'#ff4400', spellId:'fire', spawnMs:now, tickMs:now});
     }
   }
@@ -10711,7 +10779,7 @@ function applySteamBurst(target, now) {
     }
   }
   target.slowUntil = 0; target.burnUntil = 0; // clear both statuses
-  impacts.push({x:target.x, y:target.y, z:0, spawnMs:now, lifeMs:500, type:'steam'});
+  impacts.push({x:target.x, y:target.y, z:getEntityRenderFloorZ(target) + 10, spawnMs:now, lifeMs:500, type:'steam'});
   console.log('[SYNERGY] Steam Burst!');
 }
 
@@ -10743,7 +10811,7 @@ function _applyProjectileHit(spell, e, ei, nx, ny, nz, dx, dy, now) {
   } else if (spell.id === 'ice') {
     e.slowUntil = now + 2500;
     if (spell.groundPatch) {
-      groundEffects.push({x:e.x, y:e.y, radius:35, duration:3000,
+      groundEffects.push({x:e.x, y:e.y, renderFloorZ:getEntityRenderFloorZ(e), underground:!!e.underground, radius:35, duration:3000,
         damage:0, color:'#00ffff', spellId:'ice', spawnMs:now, tickMs:now,
         slowFactor:0.4});
     }
@@ -10755,7 +10823,7 @@ function _applyProjectileHit(spell, e, ei, nx, ny, nz, dx, dy, now) {
         fne.slowUntil = now + 2000;
         fne.damageFlash = now + 100; fne.damageFlashColor = '#00ffff';
       }
-      impacts.push({x:e.x, y:e.y, z:0, spawnMs:now, lifeMs:350, type:'frostnova'});
+      impacts.push({x:e.x, y:e.y, z:getEntityRenderFloorZ(e) + 10, spawnMs:now, lifeMs:350, type:'frostnova'});
     }
   } else if (spell.id === 'fire') {
     e.fireHits = (e.fireHits || 0) + 1;
@@ -10813,8 +10881,8 @@ function _applyProjectileHit(spell, e, ei, nx, ny, nz, dx, dy, now) {
     ce2.vx = (ce2.x - e.x) * 0.5; ce2.vy = (ce2.y - e.y) * 0.5;
   }
   if (chainTargets.length > 0) {
-    chainEffects.push({fromX:e.x, fromY:e.y, targets:chainTargets.map(function(ci2) {
-      return {x:enemies[ci2].x, y:enemies[ci2].y};
+    chainEffects.push({fromX:e.x, fromY:e.y, fromZ:getEntityRenderFloorZ(e) + 30, targets:chainTargets.map(function(ci2) {
+      return {x:enemies[ci2].x, y:enemies[ci2].y, z:getEntityRenderFloorZ(enemies[ci2]) + 30};
     }), spawnMs:now, lifeMs:300});
   }
 }
@@ -10868,9 +10936,9 @@ function updateProjectiles(dt) {
     var nz = (p.z || 0) + (p.vz || 0) * dt;
 
     // ── Lob landing — use floor height at current position (works underground) ──
-    var lobFloorZ = floorMesh ? getFloorHeightAt(nx, ny) * 25 : 0;
+    var lobFloorZ = p.isLob && floorMesh ? sampleEntitySupportRenderZ(nx, ny, p.renderFloorZ, p.underground) : 0;
     if (p.isLob && nz <= lobFloorZ && (now - p.spawnMs) > 100) {
-      groundEffects.push({x:nx, y:ny, radius:spell.cloudRadius || 50,
+      groundEffects.push({x:nx, y:ny, renderFloorZ:lobFloorZ, underground:!!p.underground, radius:spell.cloudRadius || 50,
         duration:spell.cloudDuration || 4000, damage:spell.damage || 0.4,
         color:spell.color, spellId:spell.id, spawnMs:now, tickMs:now});
       impacts.push({x:nx, y:ny, z:lobFloorZ, spawnMs:now, lifeMs:400});
@@ -10895,7 +10963,7 @@ function updateProjectiles(dt) {
         if (MODE3D) {
           // Use actual terrain height at enemy position as Z base — e.z is always 0
           // but terrain can be elevated (spawnZ seen as high as 110+ in logs).
-          var eFloorH = (floorMesh ? getFloorHeightAt(e.x, e.y) : 0) * 25;
+          var eFloorH = getEntityRenderFloorZ(e);
           // Enemy body spans floor level to ~70 units above (head height)
           if (nz < eFloorH - 12 || nz > eFloorH + 72) continue;
         }
@@ -10929,7 +10997,8 @@ function updateProjectiles(dt) {
             // Drop gold
             for (var sd = 0; sd < 5; sd++) {
               var sda = Math.random() * Math.PI * 2;
-              coinDrops.push({x:sp2.x + Math.cos(sda)*6, y:sp2.y + Math.sin(sda)*6, spawnMs:now, lifeMs:25000});
+              coinDrops.push({x:sp2.x + Math.cos(sda)*6, y:sp2.y + Math.sin(sda)*6,
+                underground:!!(sp2.underground || sp2.caveSpawnId), spawnMs:now, lifeMs:25000});
             }
             console.log('[SPAWNER] Destroyed at (' + Math.round(sp2.x) + ',' + Math.round(sp2.y) + ')');
           }
@@ -10958,6 +11027,7 @@ function updateProjectiles(dt) {
             for (var di = 0; di < dropN; di++) {
               var da = Math.random() * Math.PI * 2, ds = 15 + Math.random() * 30;
               coinDrops.push({x:nx + Math.cos(da)*6, y:ny + Math.sin(da)*6,
+                              underground:!!p.underground,
                               vx:Math.cos(da)*ds, vy:Math.sin(da)*ds,
                               spawnMs:now, lifeMs:25000});
             }
@@ -11033,6 +11103,7 @@ function updateGroundEffects(dt) {
             for (var pi = 0; pi < pn; pi++) {
               var pa = Math.random() * Math.PI * 2, ps = 10 + Math.random() * 20;
               coinDrops.push({x:e.x + Math.cos(pa)*4, y:e.y + Math.sin(pa)*4,
+                underground:!!(e.underground || e.caveSpawnId),
                 vx:Math.cos(pa)*ps, vy:Math.sin(pa)*ps, spawnMs:now, lifeMs:25000});
             }
           }
@@ -11194,8 +11265,6 @@ function tickEffects(dt) {
     lastRegenTick = now;
   }
 }
-
-
 // =============================================
 // SECTION 10: ENEMY SYSTEM
 // =============================================
@@ -11325,7 +11394,8 @@ function updateEnemies(dt) {
           len:7+Math.random()*13, spawnMs:now, lifeMs:800, color:'#cfc8b8'});
       }
       // Soul orb — glowing mana pickup
-      soulOrbs.push({x:e.x, y:e.y, spawnMs:now, bob:Math.random()*Math.PI*2});
+      soulOrbs.push({x:e.x, y:e.y, renderFloorZ:getEntityRenderFloorZ(e), underground:!!e.underground,
+        spawnMs:now, bob:Math.random()*Math.PI*2});
       // Coin drop — 3-5 scout, 4-6 wolf, 5-8 soldier, 8-12 brute
       var _eid = e.enemyType.id;
       var dropBase  = _eid === 'fast' ? 3 : _eid === 'wolf' ? 4 : _eid === 'normal' ? 5 : 8;
@@ -11334,6 +11404,7 @@ function updateEnemies(dt) {
       for (var ci = 0; ci < dropCount; ci++) {
         var cang = Math.random() * Math.PI * 2, cspd = 15 + Math.random() * 25;
         coinDrops.push({x:e.x + Math.cos(cang)*8, y:e.y + Math.sin(cang)*8,
+          underground:!!(e.underground || e.caveSpawnId),
           bob:Math.random()*Math.PI*2, spawnMs:now});
       }
       continue;
@@ -11497,7 +11568,373 @@ function updateEnemies(dt) {
   }
 }
 
+// Shared opaque-scene visibility for the Canvas renderer. Unlike the legacy
+// wall-only column buffer, this records floors, ceilings and walls at each
+// screen pixel. Store reciprocal forward depth: it interpolates linearly in
+// screen space even when a floor recedes steeply into the distance.
+var _sceneDepthW = 0, _sceneDepthH = 0;
+var _sceneDepthInv = new Float32Array(0);
+var _sceneDepthClipMarks = new Uint32Array(0);
+var _sceneDepthClipInv = new Float32Array(0);
+var _sceneDepthClipRowMarks = new Uint32Array(0);
+var _sceneDepthClipRowMin = new Int32Array(0), _sceneDepthClipRowMax = new Int32Array(0);
+var _sceneDepthClipGeneration = 0;
+var _sceneDepthClipCount = 0, _sceneDepthClipHidden = 0;
+var _sceneDepthClipMinX = 0, _sceneDepthClipMaxX = -1;
+var _sceneDepthClipMinY = 0, _sceneDepthClipMaxY = -1;
 
+function beginSceneDepthFrame(w, h) {
+  w = Math.floor(w); h = Math.floor(h);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+    _sceneDepthW = _sceneDepthH = 0;
+    return false;
+  }
+  var size = w * h;
+  // Allocation depends only on canvas size, never on scene complexity. Reuse
+  // the storage on every subsequent frame and when shrinking the canvas.
+  if (_sceneDepthInv.length < size) {
+    _sceneDepthInv = new Float32Array(size);
+    _sceneDepthClipMarks = new Uint32Array(size);
+    _sceneDepthClipInv = new Float32Array(size);
+  } else {
+    _sceneDepthInv.fill(0, 0, size);
+  }
+  if (_sceneDepthClipRowMarks.length < h) {
+    _sceneDepthClipRowMarks = new Uint32Array(h);
+    _sceneDepthClipRowMin = new Int32Array(h);
+    _sceneDepthClipRowMax = new Int32Array(h);
+  }
+  _sceneDepthW = w; _sceneDepthH = h;
+  return true;
+}
+
+function sceneDepthAt(x, y) {
+  x = Math.floor(x); y = Math.floor(y);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 ||
+      x >= _sceneDepthW || y >= _sceneDepthH) return Infinity;
+  var inverse = _sceneDepthInv[y * _sceneDepthW + x];
+  return inverse > 0 ? 1 / inverse : Infinity;
+}
+
+// Sprites and their glow/labels occupy a screen rectangle at one camera-forward
+// depth. They read opaque world depth but never write their transparent bounds.
+function withSceneDepthBillboard(bounds, depth, drawCallback, options) {
+  if (!bounds || !Number.isFinite(depth) || depth < 1 ||
+      !Number.isFinite(bounds.x) || !Number.isFinite(bounds.y) ||
+      !Number.isFinite(bounds.width) || !Number.isFinite(bounds.height) ||
+      bounds.width <= 0 || bounds.height <= 0) return 0;
+  var x = bounds.x, y = bounds.y, right = x + bounds.width, bottom = y + bounds.height;
+  if (right <= 0 || bottom <= 0 || x >= _sceneDepthW || y >= _sceneDepthH) return 0;
+  return withSceneDepthClip([
+    {x:x,y:y,depth:depth}, {x:right,y:y,depth:depth},
+    {x:right,y:bottom,depth:depth}, {x:x,y:bottom,depth:depth}
+  ], drawCallback, {depthBias: options && Number.isFinite(options.depthBias) ? options.depthBias : 0.15});
+}
+
+// Sample the same semantic stratum and diagonal used by the terrain renderer.
+// referenceZ, when supplied, is render-world height; otherwise underground
+// selects the lowest support and surface selects the highest support. Neither
+// choice depends on the camera or player. Missing support remains NaN.
+function sampleEntitySupportRenderZ(wx, wy, referenceZ, underground, requireTriangle) {
+  var mesh = floorMesh;
+  if (!mesh || !mesh.layerCount) return 0;
+  var gs = mesh.gridSize, gx = Math.floor(wx / gs), gy = Math.floor(wy / gs);
+  if (gx < 0 || gy < 0 || gx >= mesh.w || gy >= mesh.h) return NaN;
+  var ci = gy * mesh.w + gx, li = -1, z = 0, score = Infinity;
+  for (var k = 0; k < mesh.layerCount[ci]; k++) {
+    var type = mesh['l' + k + 'Type'][ci], h = mesh['l' + k + 'TopZ'][ci];
+    if ((type !== 1 && type !== 3 && type !== 4) || !Number.isFinite(h)) continue;
+    var next = Number.isFinite(referenceZ) ? Math.abs(h * 25 - referenceZ) : underground ? h : -h;
+    if (next < score) { score = next; li = k; z = h; }
+  }
+  if (li < 0) return NaN;
+  if (gx >= mesh.w - 1 || gy >= mesh.h - 1) return requireTriangle ? NaN : z * 25;
+  var role = getFloorRenderLayerRole(mesh, ci, li, mesh['l' + li + 'Type'][ci]);
+  var z1 = findFloorRenderRoleZ(mesh, ci + 1, role, z, ci);
+  var z2 = findFloorRenderRoleZ(mesh, ci + mesh.w, role, z, ci);
+  var z3 = findFloorRenderRoleZ(mesh, ci + mesh.w + 1, role, z, ci);
+  // Keep a real cell's support at a stratum edge; do not bridge a missing roof
+  // or manufacture zero height. Decal callers can reject missing triangles.
+  if (!Number.isFinite(z1) || !Number.isFinite(z2) || !Number.isFinite(z3)) return requireTriangle ? NaN : z * 25;
+  z1 = Math.max(z - 4.5, Math.min(z + 4.5, z1));
+  z2 = Math.max(z - 4.5, Math.min(z + 4.5, z2));
+  z3 = Math.max(z - 4.5, Math.min(z + 4.5, z3));
+  var tx = wx / gs - gx, ty = wy / gs - gy;
+  return 25 * (tx >= ty ? z + tx * (z1 - z) + ty * (z3 - z1) :
+    z + ty * (z2 - z) + tx * (z3 - z2));
+}
+
+function getEntityGroundRenderZ(wx, wy, underground) {
+  return sampleEntitySupportRenderZ(wx, wy, NaN, !!underground);
+}
+
+function getEntityRenderFloorZ(entity) {
+  if (Number.isFinite(entity.renderFloorZ)) return entity.renderFloorZ;
+  return getEntityGroundRenderZ(entity.x, entity.y, !!(entity.underground || entity.caveSpawnId));
+}
+
+// Input is a convex polygon already projected/clipped at the near plane.
+function _sceneDepthValidPolygon(points) {
+  if (!_sceneDepthW || !_sceneDepthH || !points || points.length < 3) return false;
+  for (var i = 0; i < points.length; i++) {
+    var p = points[i];
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) ||
+        !Number.isFinite(p.depth) || p.depth <= 0) return false;
+  }
+  return true;
+}
+
+// mode 0 writes opaque depth; mode 1 builds the visible pixel mask. Fan
+// triangles share their edge pixels safely: depth uses max, masks use stamps.
+function _sceneDepthTriangle(a, b, c, mode, bias) {
+  var area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  if (Math.abs(area) < 1e-9) return;
+  if (area < 0) { var swap = b; b = c; c = swap; area = -area; }
+  var x0 = Math.max(0, Math.ceil(Math.min(a.x, b.x, c.x) - 0.5));
+  var x1 = Math.min(_sceneDepthW - 1, Math.floor(Math.max(a.x, b.x, c.x) - 0.5));
+  var y0 = Math.max(0, Math.ceil(Math.min(a.y, b.y, c.y) - 0.5));
+  var y1 = Math.min(_sceneDepthH - 1, Math.floor(Math.max(a.y, b.y, c.y) - 0.5));
+  if (x0 > x1 || y0 > y1) return;
+  var ax = b.y - c.y, ay = c.x - b.x;
+  var bx = c.y - a.y, by = a.x - c.x;
+  var cx = a.y - b.y, cy = b.x - a.x;
+  var px = x0 + 0.5, py = y0 + 0.5;
+  var rowA = ax * (px - b.x) + ay * (py - b.y);
+  var rowB = bx * (px - c.x) + by * (py - c.y);
+  var rowC = cx * (px - a.x) + cy * (py - a.y);
+  var za = 1 / (a.depth * area), zb = 1 / (b.depth * area), zc = 1 / (c.depth * area);
+  var dzx = ax * za + bx * zb + cx * zc;
+  var dzy = ay * za + by * zb + cy * zc;
+  var rowZ = rowA * za + rowB * zb + rowC * zc;
+  var edgeTolerance = -area * 1e-10;
+  for (var y = y0; y <= y1; y++) {
+    // Intersect the three edge half-planes once per scanline. The inner
+    // pixel loop visits only the triangle's covered span, not its bounding
+    // rectangle, and needs no repeated edge/barycentric tests.
+    var lo = 0, hi = x1 - x0;
+    if (ax > 0) lo = Math.max(lo, Math.ceil((edgeTolerance - rowA) / ax));
+    else if (ax < 0) hi = Math.min(hi, Math.floor((edgeTolerance - rowA) / ax));
+    else if (rowA < edgeTolerance) hi = -1;
+    if (bx > 0) lo = Math.max(lo, Math.ceil((edgeTolerance - rowB) / bx));
+    else if (bx < 0) hi = Math.min(hi, Math.floor((edgeTolerance - rowB) / bx));
+    else if (rowB < edgeTolerance) hi = -1;
+    if (cx > 0) lo = Math.max(lo, Math.ceil((edgeTolerance - rowC) / cx));
+    else if (cx < 0) hi = Math.min(hi, Math.floor((edgeTolerance - rowC) / cx));
+    else if (rowC < edgeTolerance) hi = -1;
+    var rowVisibleMin = x1 + 1, rowVisibleMax = -1;
+    var startX = x0 + lo, endX = x0 + hi, iz = rowZ + lo * dzx;
+    var index = y * _sceneDepthW + startX;
+    for (var x = startX; x <= endX; x++, index++, iz += dzx) {
+      if (iz <= 0) continue;
+      var existing = _sceneDepthInv[index];
+      if (!mode) {
+        if (iz > existing) _sceneDepthInv[index] = iz;
+      } else if (iz * (1 + existing * bias) + 1e-9 >= existing) {
+        if (_sceneDepthClipMarks[index] !== _sceneDepthClipGeneration) {
+          _sceneDepthClipMarks[index] = _sceneDepthClipGeneration;
+          _sceneDepthClipInv[index] = iz;
+          _sceneDepthClipCount++;
+        } else if (iz > _sceneDepthClipInv[index]) {
+          _sceneDepthClipInv[index] = iz;
+        }
+        if (x < rowVisibleMin) rowVisibleMin = x;
+        rowVisibleMax = x;
+      } else {
+        _sceneDepthClipHidden++;
+      }
+    }
+    if (rowVisibleMax >= rowVisibleMin) {
+      if (_sceneDepthClipRowMarks[y] !== _sceneDepthClipGeneration) {
+        _sceneDepthClipRowMarks[y] = _sceneDepthClipGeneration;
+        _sceneDepthClipRowMin[y] = rowVisibleMin;
+        _sceneDepthClipRowMax[y] = rowVisibleMax;
+      } else {
+        if (rowVisibleMin < _sceneDepthClipRowMin[y]) _sceneDepthClipRowMin[y] = rowVisibleMin;
+        if (rowVisibleMax > _sceneDepthClipRowMax[y]) _sceneDepthClipRowMax[y] = rowVisibleMax;
+      }
+      if (rowVisibleMin < _sceneDepthClipMinX) _sceneDepthClipMinX = rowVisibleMin;
+      if (rowVisibleMax > _sceneDepthClipMaxX) _sceneDepthClipMaxX = rowVisibleMax;
+      if (y < _sceneDepthClipMinY) _sceneDepthClipMinY = y;
+      if (y > _sceneDepthClipMaxY) _sceneDepthClipMaxY = y;
+    }
+    rowA += ay; rowB += by; rowC += cy; rowZ += dzy;
+  }
+}
+
+function writeSceneDepthPolygon(points) {
+  if (!_sceneDepthValidPolygon(points)) return false;
+  for (var i = 1; i + 1 < points.length; i++) {
+    _sceneDepthTriangle(points[0], points[i], points[i + 1], 0, 0);
+  }
+  return true;
+}
+
+// Trace an opaque fill's exact integer pixel mask, coalescing identical spans
+// on adjacent rows. A tall wall needs one rectangle instead of one per scanline;
+// holes and changing edges retain their original coverage. Five scalar pending
+// span fields avoid per-row allocations or another canvas-sized scratch buffer.
+function _traceSceneDepthPixelMask(generation, minY, maxY) {
+  var marks = _sceneDepthClipMarks, rowMarks = _sceneDepthClipRowMarks;
+  var rowMin = _sceneDepthClipRowMin, rowMax = _sceneDepthClipRowMax;
+  var pendingX = 0, pendingY = 0, pendingW = 0, pendingH = 0;
+  ctx.beginPath();
+  for (var y = minY; y <= maxY; y++) {
+    if (rowMarks[y] !== generation) continue;
+    var row = y * _sceneDepthW, x = rowMin[y], end = rowMax[y];
+    while (x <= end) {
+      while (x <= end && marks[row + x] !== generation) x++;
+      var start = x;
+      while (x <= end && marks[row + x] === generation) x++;
+      if (x > start) {
+        var width = x - start;
+        if (pendingH && pendingX === start && pendingW === width && pendingY + pendingH === y) {
+          pendingH++;
+        } else {
+          if (pendingH) ctx.rect(pendingX, pendingY, pendingW, pendingH);
+          pendingX = start; pendingY = y; pendingW = width; pendingH = 1;
+        }
+      }
+    }
+  }
+  if (pendingH) ctx.rect(pendingX, pendingY, pendingW, pendingH);
+}
+
+// Draw once through a pixel-run clip only when partially obscured. Fully
+// visible faces keep the cheap ordinary Canvas path; fully hidden ones do
+// not invoke the callback. Opaque callers opt into writing their visible
+// depth. Transparent effects should leave writeDepth false.
+function withSceneDepthClip(points, drawCallback, options) {
+  if (!_sceneDepthValidPolygon(points) || typeof drawCallback !== 'function') return 0;
+  options = options || {};
+  var bias = Number.isFinite(options.depthBias) ? Math.max(0, options.depthBias) : 0.15;
+  _sceneDepthClipGeneration = (_sceneDepthClipGeneration + 1) >>> 0;
+  if (!_sceneDepthClipGeneration) {
+    _sceneDepthClipMarks.fill(0);
+    _sceneDepthClipRowMarks.fill(0);
+    _sceneDepthClipGeneration = 1;
+  }
+  _sceneDepthClipCount = _sceneDepthClipHidden = 0;
+  _sceneDepthClipMinX = _sceneDepthW; _sceneDepthClipMaxX = -1;
+  _sceneDepthClipMinY = _sceneDepthH; _sceneDepthClipMaxY = -1;
+  for (var i = 1; i + 1 < points.length; i++) {
+    _sceneDepthTriangle(points[0], points[i], points[i + 1], 1, bias);
+  }
+  // Extended effects can union endpoint glow caps with a depth-varying core
+  // in one mask/callback, without stretching its depth or nesting clip calls.
+  if (options.extraPolygons) {
+    for (var pi = 0; pi < options.extraPolygons.length; pi++) {
+      var extra = options.extraPolygons[pi];
+      if (!_sceneDepthValidPolygon(extra)) continue;
+      for (var ti = 1; ti + 1 < extra.length; ti++) {
+        _sceneDepthTriangle(extra[0], extra[ti], extra[ti + 1], 1, bias);
+      }
+    }
+  }
+  var visibleCount = _sceneDepthClipCount;
+  if (!visibleCount) return 0;
+  // Capture mask metadata before calling drawing code. The callback should
+  // only draw this face; nested withSceneDepthClip calls are not supported.
+  var generation = _sceneDepthClipGeneration;
+  var minY = _sceneDepthClipMinY, maxY = _sceneDepthClipMaxY;
+  // The opaque helper already paints the exact visible-pixel mask. A second
+  // Canvas clip would add work without changing its coverage. Ordinary
+  // callbacks retain the partial-visibility clip below.
+  if (!_sceneDepthClipHidden || options._paintsDepthPixels) {
+    drawCallback();
+  } else {
+    ctx.save();
+    try {
+      // Preserve the original clipping path, including its one-pixel rows.
+      // Native Canvas can round antialiased sprite/glow edges differently when
+      // an equivalent clip path is coalesced, even under an identity transform.
+      // Opaque mask fills above are bit-identical with coalescing; clips are not.
+      ctx.beginPath();
+      for (var y = minY; y <= maxY; y++) {
+        if (_sceneDepthClipRowMarks[y] !== generation) continue;
+        var row = y * _sceneDepthW, x = _sceneDepthClipRowMin[y], rowEnd = _sceneDepthClipRowMax[y];
+        while (x <= rowEnd) {
+          while (x <= rowEnd && _sceneDepthClipMarks[row + x] !== generation) x++;
+          var start = x;
+          while (x <= rowEnd && _sceneDepthClipMarks[row + x] === generation) x++;
+          if (x > start) ctx.rect(start, y, x - start, 1);
+        }
+      }
+      ctx.clip();
+      drawCallback();
+    } finally {
+      ctx.restore();
+    }
+  }
+  if (options.writeDepth) {
+    for (var wy = minY; wy <= maxY; wy++) {
+      if (_sceneDepthClipRowMarks[wy] !== generation) continue;
+      var rowMin = _sceneDepthClipRowMin[wy], rowMax = _sceneDepthClipRowMax[wy];
+      var index = wy * _sceneDepthW + rowMin;
+      for (var wx = rowMin; wx <= rowMax; wx++, index++) {
+        if (_sceneDepthClipMarks[index] === generation && _sceneDepthClipInv[index] > _sceneDepthInv[index]) {
+          _sceneDepthInv[index] = _sceneDepthClipInv[index];
+        }
+      }
+    }
+  }
+  return visibleCount;
+}
+
+function traceSceneDepthPolygon(points) {
+  if (!points || points.length < 3) return false;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (var i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.closePath();
+  return true;
+}
+
+// Keep the caller's material/alpha; this helper only supplies shared opaque
+// visibility. Transparent geometry must use withSceneDepthClip directly.
+function fillSceneDepthPolygon(points) {
+  return withSceneDepthClip(points, function () {
+    // Canvas antialiases separate triangle edges, but depth is pixel-center
+    // sampled. Filling the original path could leave half-painted cracks
+    // whose depth was already opaque. Paint precisely the rasterized mask
+    // with integer-aligned spans, using the caller's unchanged material.
+    // Adjacent terrain triangles now agree on both color and depth coverage.
+    _traceSceneDepthPixelMask(_sceneDepthClipGeneration, _sceneDepthClipMinY, _sceneDepthClipMaxY);
+    ctx.fill();
+  }, {writeDepth: true, _paintsDepthPixels: true});
+}
+
+// Clip in camera space before projection, so a face crossing the near plane
+// stays a visible polygon instead of disappearing because one corner is
+// behind the camera. z is the renderer's world height, not player floorZ.
+function projectSceneWorldPolygon(vertices, C) {
+  if (!vertices || vertices.length < 3 || !C) return [];
+  var cameraPoints = [];
+  for (var i = 0; i < vertices.length; i++) {
+    var p = vertices[i];
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return [];
+    var dx = p.x - cam.x, dy = p.y - cam.y;
+    cameraPoints.push({depth: dx * C.cosAng + dy * C.sinAng,
+      right: -dx * C.sinAng + dy * C.cosAng, z: p.z});
+  }
+  var clipped = [], previous = cameraPoints[cameraPoints.length - 1];
+  for (var j = 0; j < cameraPoints.length; j++) {
+    var current = cameraPoints[j];
+    if ((previous.depth >= 1) !== (current.depth >= 1)) {
+      var t = (1 - previous.depth) / (current.depth - previous.depth);
+      clipped.push({depth: 1, right: previous.right + t * (current.right - previous.right),
+        z: previous.z + t * (current.z - previous.z)});
+    }
+    if (current.depth >= 1) clipped.push(current);
+    previous = current;
+  }
+  var projected = [];
+  for (var k = 0; k < clipped.length; k++) {
+    var v = clipped[k];
+    projected.push({x: (v.right / v.depth * C.invTanHalf * 0.5 + 0.5) * C.w,
+      y: C.horizonY + (C.cameraZ - v.z) / v.depth * projScale, depth: v.depth});
+  }
+  return projected;
+}
 // =============================================
 // SECTION 11: RENDERING - CORE
 // =============================================
@@ -11810,87 +12247,22 @@ function drawWalls3D() {
   var viewDistSq = viewDist * viewDist;
   var fadeStart = viewDist * 0.82, fadeRange = viewDist - fadeStart;
 
-  // Project a world point to screen. Returns false if behind camera.
-  // Stores results in module-scope _wsx[idx], _wsy[idx], _wfwd[idx].
-  function projWall(wx, wy, wz, idx) {
-    var dx = wx - cam.x, dy = wy - cam.y;
-    var fwd = dx * cosAng + dy * sinAng;
-    if (fwd < 0.1) return false;
-    var rgt = dx * (-sinAng) + dy * cosAng;
-    var sx = Math.floor((rgt / fwd * invTanHalf * 0.5 + 0.5) * w);
-    if (sx < -1.5 * w || sx > 2.5 * w) return false;
-    _wsx[idx] = sx;
-    _wsy[idx] = Math.floor(horizonY + (cameraZ - wz * 25) / fwd * projScale);
-    _wfwd[idx] = fwd;
-    return true;
-  }
-
   // Render a single wall face quad
-  // Deep cave wall colors: dark cool stone, distinct from warm terrain walls
-  var caveWR = 65, caveWG = 60, caveWB = 75;
+  // Cave albedo is authored with the terrain, independent of camera state.
 
   function renderFace(wx1, wy1, wx2, wy2, floorZ, topZ, shade, perpDist, caveTopZ1, caveTopZ2, inCave, isEntrWall) {
     // Extend wall base slightly below floor to prevent gaps on slopes
     var extFloorZ = floorZ - 0.15;
-    // Project 4 corners: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
-    if (!projWall(wx1, wy1, extFloorZ, 0)) return;
-    if (!projWall(wx2, wy2, extFloorZ, 1)) return;
-    if (!projWall(wx2, wy2, topZ, 2)) return;
-    if (!projWall(wx1, wy1, topZ, 3)) return;
-
-    // Clamp wall base so it can't paint below the floor surface between
-    // camera and wall. Skip when underground — intermediate surface-level terrain
-    // would project above the horizon and incorrectly clip cave wall bases.
-    // Also skip for entrance walls — entrance floor quads render at cave depth,
-    // not at surface level. Base clamping samples surface terrain between camera
-    // and wall, which would collapse the wall to zero height (topH=0 matches
-    // surface floor → invisible). These walls must render at full depth.
-    var fwd0 = _wfwd[0], fwd1 = _wfwd[1];
-    if (floorMesh && !playerUnderground && !isEntrWall && fwd0 > 1) {
-      // Start with wall's own floor as baseline clamp
-      var bestClampY0 = horizonY + ((cameraZ - getFloorHeightAt(wx1, wy1) * 25) / fwd0) * projScale;
-      // Sample floor at 20%, 40%, 60%, 80% between camera and wall endpoint
-      for (var _t = 0.2; _t <= 0.8; _t += 0.2) {
-        var _sx = cam.x + (wx1 - cam.x) * _t, _sy2 = cam.y + (wy1 - cam.y) * _t;
-        var _sfh = getFloorHeightAt(_sx, _sy2) * 25;
-        var _sfwd = fwd0 * _t;
-        if (_sfwd > 1) {
-          var _ssy = horizonY + ((cameraZ - _sfh) / _sfwd) * projScale;
-          if (_ssy < bestClampY0) bestClampY0 = _ssy;
-        }
-      }
-      if (_wsy[0] > bestClampY0) _wsy[0] = bestClampY0;
-    }
-    if (floorMesh && !playerUnderground && !isEntrWall && fwd1 > 1) {
-      var bestClampY1 = horizonY + ((cameraZ - getFloorHeightAt(wx2, wy2) * 25) / fwd1) * projScale;
-      for (var _t = 0.2; _t <= 0.8; _t += 0.2) {
-        var _sx = cam.x + (wx2 - cam.x) * _t, _sy2 = cam.y + (wy2 - cam.y) * _t;
-        var _sfh = getFloorHeightAt(_sx, _sy2) * 25;
-        var _sfwd = fwd1 * _t;
-        if (_sfwd > 1) {
-          var _ssy = horizonY + ((cameraZ - _sfh) / _sfwd) * projScale;
-          if (_ssy < bestClampY1) bestClampY1 = _ssy;
-        }
-      }
-      if (_wsy[1] > bestClampY1) _wsy[1] = bestClampY1;
-    }
-    // If after clamping the bottom is at or above the top, skip this face
-    if (_wsy[0] <= _wsy[3] && _wsy[1] <= _wsy[2]) return;
-
-    // Expand quad slightly outward from center to eliminate seams at corners
-    var cxAvg = (_wsx[0] + _wsx[1] + _wsx[2] + _wsx[3]) * 0.25;
-    var cyAvg = (_wsy[0] + _wsy[1] + _wsy[2] + _wsy[3]) * 0.25;
-    for (var ei = 0; ei < 4; ei++) {
-      var edx = _wsx[ei] - cxAvg, edy = _wsy[ei] - cyAvg;
-      var elen = Math.sqrt(edx * edx + edy * edy);
-      if (elen > 0) {
-        _wsx[ei] += edx / elen * 1.5;
-        _wsy[ei] += edy / elen * 1.5;
-      }
-    }
+    var wallPoly = projectSceneWorldPolygon([
+      {x:wx1,y:wy1,z:extFloorZ*25}, {x:wx2,y:wy2,z:extFloorZ*25},
+      {x:wx2,y:wy2,z:topZ*25}, {x:wx1,y:wy1,z:topZ*25}
+    ], C);
+    if (wallPoly.length < 3) return;
 
     // Distance fog + alpha fade (must match floor fade so walls don't bleed through)
-    var fog = Math.max(fogFloor, 1.0 - perpDist * 0.0008);
+    var _faceFogFloor = inCave && typeof renderCaveFogFloor !== 'undefined' ?
+      renderCaveFogFloor : (typeof renderSurfaceFogFloor !== 'undefined' ? renderSurfaceFogFloor : fogFloor);
+    var fog = Math.max(_faceFogFloor, 1.0 - perpDist * 0.0008);
     if (perpDist > fadeStart) {
       var wallAlpha = Math.max(0, 1.0 - (perpDist - fadeStart) / fadeRange);
       ctx.globalAlpha = wallAlpha * wallAlpha; // ease-out, same as floor
@@ -11899,6 +12271,8 @@ function drawWalls3D() {
     // Pick base color: cave walls use dark stone, others use terrain color
     // DEBUG_CAVE_COLORS: bright green for cave walls
     // DEBUG_POLY_TYPES: RED for cave wall, GRAY for surface wall
+    var material = getCaveMaterialColorAt((wx1 + wx2) * 0.5, (wy1 + wy2) * 0.5);
+    var caveWR = (material >> 16) & 255, caveWG = (material >> 8) & 255, caveWB = material & 255;
     var faceR, faceG, faceB;
     if (DEBUG_POLY_TYPES) {
       if (inCave) { faceR = 255; faceG = 30;  faceB = 30; }   // RED cave wall
@@ -11913,7 +12287,10 @@ function drawWalls3D() {
     var faceMidX = (wx1 + wx2) * 0.5, faceMidY = (wy1 + wy2) * 0.5;
     var posHash = ((Math.floor(faceMidX * 0.3) * 7919 + Math.floor(faceMidY * 0.3) * 104729) >>> 0) % 16;
     var colorMod = 1.0;
-    if (inCave || (baseR < 110 && baseG < 110 && baseB > baseR)) {
+    if (inCave) {
+      // Authored cave stone already contains world-stable grain.
+      colorMod = 1.0;
+    } else if (baseR < 110 && baseG < 110 && baseB > baseR) {
       if (posHash < 2) colorMod = 0.75;
       else if (posHash < 4) colorMod = 0.85;
       else if (posHash > 13) colorMod = 1.15;
@@ -11932,7 +12309,9 @@ function drawWalls3D() {
       if (lgx >= 0 && lgx < _lightGridW && lgy >= 0 && lgy < _lightGridH)
         lightContrib = _lightGrid[lgy * _lightGridW + lgx];
     }
-    var totalShade = shade + lightContrib;
+    var baseShade = inCave && typeof getCaveRenderLightAt === 'function' ?
+      getCaveRenderLightAt(faceMidX, faceMidY, true) : shade;
+    var totalShade = Math.min(1.0, baseShade + lightContrib);
     // Warm tint near torches
     var warmR = lightContrib > 0.05 ? 1.0 + lightContrib * 0.3 : 1.0;
     var warmB = lightContrib > 0.05 ? 1.0 - lightContrib * 0.2 : 1.0;
@@ -11951,8 +12330,11 @@ function drawWalls3D() {
 
     // Use gradient for the wall face. Canvas gradients bake absolute coords,
     // so the per-frame cache key includes a y-range bucket (A1-3).
-    var minSY = Math.min(_wsy[2], _wsy[3]);
-    var maxSY = Math.max(_wsy[0], _wsy[1]);
+    var minSY = Infinity, maxSY = -Infinity;
+    for (var wi = 0; wi < wallPoly.length; wi++) {
+      minSY = Math.min(minSY, wallPoly[wi].y);
+      maxSY = Math.max(maxSY, wallPoly[wi].y);
+    }
     if (maxSY > minSY + 1) {
       // Bucket color to 8-step and y to 8px. Key fits in 32 bits.
       var _cb = ((r >> 3) << 12) | ((g >> 3) << 6) | (b >> 3);
@@ -11975,44 +12357,36 @@ function drawWalls3D() {
       ctx.fillStyle = rgbQ(r, g, b);
     }
 
-    ctx.beginPath();
-    ctx.moveTo(_wsx[0], _wsy[0]);
-    ctx.lineTo(_wsx[1], _wsy[1]);
-    ctx.lineTo(_wsx[2], _wsy[2]);
-    ctx.lineTo(_wsx[3], _wsy[3]);
-    ctx.closePath();
-    ctx.fill();
+    fillSceneDepthPolygon(wallPoly);
     ctx.globalAlpha = 1.0;
 
-    // Cave ceiling extension: draw dark rock from wall top up to cave ceiling
-    // Per-endpoint heights allow smooth transitions across adjacent faces
-    // Skip when on surface — cave ceiling heights are enormous (100+ world Z)
-    // and would draw as tall dark columns reaching to the sky.
-    if (playerUnderground && (caveTopZ1 > topZ || caveTopZ2 > topZ)) {
-      var ctZ1 = Math.max(caveTopZ1, topZ);  // clamp: at minimum, starts at wall top
-      var ctZ2 = Math.max(caveTopZ2, topZ);
-      // 0=bottom-left (wall top at endpoint1), 1=bottom-right (wall top at endpoint2)
-      // 2=top-right (cave ceiling at endpoint2), 3=top-left (cave ceiling at endpoint1)
-      if (!projWall(wx1, wy1, topZ, 0)) return;
-      if (!projWall(wx2, wy2, topZ, 1)) return;
-      if (!projWall(wx2, wy2, ctZ2, 2)) return;
-      if (!projWall(wx1, wy1, ctZ1, 3)) return;
-      var rockFog = Math.max(0.3, 1.0 - perpDist / viewDist * 0.8);
+    // Close the boundary wall up to the real ceiling. Terrain and roof depth
+    // decide which pixels remain visible, including views through the mouth.
+    var _ct1Valid = typeof caveTopZ1 === 'number' && isFinite(caveTopZ1);
+    var _ct2Valid = typeof caveTopZ2 === 'number' && isFinite(caveTopZ2);
+    var _hasCaveTop = (_ct1Valid && caveTopZ1 > topZ) || (_ct2Valid && caveTopZ2 > topZ);
+    if (inCave && _hasCaveTop) {
+      var ctZ1 = _ct1Valid ? Math.max(caveTopZ1, topZ) : topZ;
+      var ctZ2 = _ct2Valid ? Math.max(caveTopZ2, topZ) : topZ;
+      var extensionPoly = projectSceneWorldPolygon([
+        {x:wx1,y:wy1,z:topZ*25}, {x:wx2,y:wy2,z:topZ*25},
+        {x:wx2,y:wy2,z:ctZ2*25}, {x:wx1,y:wy1,z:ctZ1*25}
+      ], C);
+      var rockFog = Math.max(renderCaveFogFloor, 1.0 - perpDist / viewDist * 0.8);
+      var rockLight = typeof getCaveRenderLightAt === 'function' ?
+        getCaveRenderLightAt(faceMidX, faceMidY, true) : ambientLight;
       ctx.globalAlpha = rockFog;
-      ctx.fillStyle = shade < 1.0 ? '#150c05' : '#1a0f06';
-      ctx.beginPath();
-      ctx.moveTo(_wsx[0], _wsy[0]);
-      ctx.lineTo(_wsx[1], _wsy[1]);
-      ctx.lineTo(_wsx[2], _wsy[2]);
-      ctx.lineTo(_wsx[3], _wsy[3]);
-      ctx.closePath();
-      ctx.fill();
+      ctx.fillStyle = rgbQ(Math.floor(caveWR * rockLight), Math.floor(caveWG * rockLight), Math.floor(caveWB * rockLight));
+      fillSceneDepthPolygon(extensionPoly);
       ctx.globalAlpha = 1.0;
     }
 
     // Populate depth buffer for the screen columns this face covers
-    var minSX = Math.max(0, Math.floor(Math.min(_wsx[0], _wsx[1], _wsx[2], _wsx[3])));
-    var maxSX = Math.min(w - 1, Math.ceil(Math.max(_wsx[0], _wsx[1], _wsx[2], _wsx[3])));
+    var minSX = w - 1, maxSX = 0;
+    for (var wi = 0; wi < wallPoly.length; wi++) {
+      minSX = Math.min(minSX, Math.max(0, Math.floor(wallPoly[wi].x)));
+      maxSX = Math.max(maxSX, Math.min(w - 1, Math.ceil(wallPoly[wi].x)));
+    }
     for (var sx = minSX; sx <= maxSX; sx++) {
       if (perpDist < depthBuffer[sx]) depthBuffer[sx] = perpDist;
     }
@@ -12041,25 +12415,9 @@ function drawWalls3D() {
       var fh = floorMesh ? getFloorHeightAt(centerX, centerY) : 0;
       var topH = fh + wallBaseH * wh;
 
-      // Layer-tag cull: if a walkable layer sits above this wall's top (a
-      // "dirt ceiling"), the wall is in a lower layer than the camera when
-      // cam.z is above that cap Z. Skip it. Naturally handles descent: as
-      // the camera drops past each cell's cap Z, cave walls come into view
-      // cell-by-cell. wallCapZ was precomputed at window assembly.
-      // Entrance-mouth cells have no cap (wallCapZ = -Infinity) and render
-      // in all cases; surface walls have no cap above their own top.
+      // The roof/cap itself occludes this wall in the shared depth field.
+      // Camera height alone cannot decide visibility through a mouth.
       var _wcap = wallCapZ ? wallCapZ[gy * gridW + gx] : -Infinity;
-      if (_wcap > -Infinity && cam.z > _wcap * 25 - 2) continue;
-      // Symmetric cull: when player is underground, surface walls (non-cave
-      // cells, no cap above) are above the cave ceiling but get painted
-      // after it in the render order — they bleed through as visible towers
-      // and grass. Skip them. Cave walls and entrance-mouth walls still
-      // render (they have .cave flag OR no cap, but ARE cave-cells).
-      if (playerUnderground && _wcap <= -Infinity) {
-        if (!gridCave || !gridCave[gy * gridW + gx]) continue;
-      }
-      // Walls under a cap render at full cave depth — skip surface-floor
-      // base clamping in renderFace (which would collapse them to 0).
       var _isEntrWall = _wcap > -Infinity;
 
       // Top-Z clamp: precomputed per cell. Capped cells clamp to their cap;
@@ -12088,14 +12446,12 @@ function drawWalls3D() {
       }
 
       // Check if this wall cell is inside a deep cave region (standard mode or endless mode)
-      // Only apply cave styling when the player is underground — prevents cave walls
-      // from looking clipped/odd when viewed from the surface above
+      // Material belongs to this cell, never to the player's underground flag.
       var cellCave = false;
       if (deepCaveRegions.length > 0) cellCave = !!isInDeepCave(centerX, centerY);
       if (!cellCave && gridCave) {
         cellCave = !!gridCave[gy * gridW + gx];
       }
-
       // Biome at this cell (for forest canopy rendering etc.)
       var cellBiome = ENDLESS_MODE ? getBiomeAt(centerX + windowOriginX, centerY + windowOriginY) : (GAME_CONFIG.terrain || 'ground');
 
@@ -12103,8 +12459,10 @@ function drawWalls3D() {
       var x1 = gx * cell, y1 = gy * cell;
       var x2 = (gx + 1) * cell, y2 = (gy + 1) * cell;
 
-      // Helper: compute cave ceiling Z at a single world point.
-      // Samples the point + an offset toward neighbor to get best depth.
+      // Helper: compute cave ceiling H at a single world point. Return values
+      // stay in mesh-height units; projection performs the one H→render-Z
+      // conversion. The old endless branch multiplied here as well, creating
+      // giant columns instead of a wall-to-ceiling closure.
       function caveCeilAt(wx, wy, wallTopH) {
         // Standard mode deep caves
         if (deepCaveRegions.length > 0) {
@@ -12123,13 +12481,16 @@ function drawWalls3D() {
           if (_mcx >= 0 && _mcx < floorMesh.w && _mcy >= 0 && _mcy < floorMesh.h) {
             var _mcidx = _mcy * floorMesh.w + _mcx;
             var _mclc = floorMesh.layerCount[_mcidx];
-            var _ch = 0;
-            if (_mclc >= 2 && floorMesh.l1Type[_mcidx] === 2) _ch = floorMesh.l1TopZ[_mcidx];
-            else if (_mclc >= 3 && floorMesh.l2Type[_mcidx] === 2) _ch = floorMesh.l2TopZ[_mcidx];
-            if (_ch > 0.1) return _ch * 25;
+            var _ch = Infinity;
+            for (var _mcli = 0; _mcli < _mclc; _mcli++) {
+              var _mct = floorMesh['l' + _mcli + 'Type'][_mcidx];
+              var _mcz = floorMesh['l' + _mcli + 'TopZ'][_mcidx];
+              if (_mct === 2 && _mcz < _ch) _ch = _mcz;
+            }
+            if (_ch < Infinity) return _ch;
           }
         }
-        return 0;
+        return null;
       }
 
       // Check each face — collect if neighbor is empty
@@ -12144,9 +12505,9 @@ function drawWalls3D() {
         if (perpDist < 1) perpDist = 1;
         var ct1 = caveCeilAt(x1, y2, topH);
         var ct2 = caveCeilAt(x1, y1, topH);
-        var faceInCave = cellCave || ct1 > 0 || ct2 > 0;
+        var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx] : fh;
-        wallFaces.push({wx1:x1, wy1:y2, wx2:x1, wy2:y1, fh:baseFh, topH:topH, shade:_wallShadeW, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x1, wy1:y2, wx2:x1, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeW, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
       }
       // East face (gx+1): endpoints are (x2,y1) and (x2,y2)
       if (gx === gridW - 1 || !grid[gy * gridW + (gx + 1)]) {
@@ -12154,9 +12515,9 @@ function drawWalls3D() {
         if (perpDist < 1) perpDist = 1;
         var ct1 = caveCeilAt(x2, y1, topH);
         var ct2 = caveCeilAt(x2, y2, topH);
-        var faceInCave = cellCave || ct1 > 0 || ct2 > 0;
+        var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx + 1] : fh;
-        wallFaces.push({wx1:x2, wy1:y1, wx2:x2, wy2:y2, fh:baseFh, topH:topH, shade:_wallShadeE, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x2, wy1:y1, wx2:x2, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeE, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
       }
       // North face (gy-1): endpoints are (x1,y1) and (x2,y1)
       if (gy === 0 || !grid[(gy - 1) * gridW + gx]) {
@@ -12164,9 +12525,9 @@ function drawWalls3D() {
         if (perpDist < 1) perpDist = 1;
         var ct1 = caveCeilAt(x1, y1, topH);
         var ct2 = caveCeilAt(x2, y1, topH);
-        var faceInCave = cellCave || ct1 > 0 || ct2 > 0;
+        var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx + 2] : fh;
-        wallFaces.push({wx1:x1, wy1:y1, wx2:x2, wy2:y1, fh:baseFh, topH:topH, shade:_wallShadeN, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x1, wy1:y1, wx2:x2, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeN, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
       }
       // South face (gy+1): endpoints are (x2,y2) and (x1,y2)
       if (gy === gridH - 1 || !grid[(gy + 1) * gridW + gx]) {
@@ -12174,9 +12535,9 @@ function drawWalls3D() {
         if (perpDist < 1) perpDist = 1;
         var ct1 = caveCeilAt(x2, y2, topH);
         var ct2 = caveCeilAt(x1, y2, topH);
-        var faceInCave = cellCave || ct1 > 0 || ct2 > 0;
+        var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx + 3] : fh;
-        wallFaces.push({wx1:x2, wy1:y2, wx2:x1, wy2:y2, fh:baseFh, topH:topH, shade:_wallShadeS, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x2, wy1:y2, wx2:x1, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeS, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
       }
 
       // Top face — only if camera is above wall top and not fully surrounded
@@ -12207,7 +12568,7 @@ function drawWalls3D() {
     var bTopH = bfh + wallBaseH * boundaryWh;
     var bPerp = Math.abs((bx1 - cam.x) * cosAng + ((by1 + by2) * 0.5 - cam.y) * sinAng);
     if (bPerp < 1) bPerp = 1;
-    wallFaces.push({wx1:bx1, wy1:by2, wx2:bx1, wy2:by1, fh:bfh, topH:bTopH, shade:_wallShadeW, dist:bPerp, ct1:0, ct2:0, br:defaultBaseR, bg:defaultBaseG, bb:defaultBaseB});
+    wallFaces.push({wx1:bx1, wy1:by2, wx2:bx1, wy2:by1, fh:bfh, topH:bTopH, shade:renderSurfaceWallShadeW, dist:bPerp, ct1:0, ct2:0, br:defaultBaseR, bg:defaultBaseG, bb:defaultBaseB});
   }
   // East boundary (gx=gridW-1)
   for (var gy = gyMin; gy <= gyMax; gy++) {
@@ -12218,7 +12579,7 @@ function drawWalls3D() {
     var bTopH = bfh + wallBaseH * boundaryWh;
     var bPerp = Math.abs((bx2 - cam.x) * cosAng + ((by1 + by2) * 0.5 - cam.y) * sinAng);
     if (bPerp < 1) bPerp = 1;
-    wallFaces.push({wx1:bx2, wy1:by1, wx2:bx2, wy2:by2, fh:bfh, topH:bTopH, shade:_wallShadeE, dist:bPerp, ct1:0, ct2:0, br:defaultBaseR, bg:defaultBaseG, bb:defaultBaseB});
+    wallFaces.push({wx1:bx2, wy1:by1, wx2:bx2, wy2:by2, fh:bfh, topH:bTopH, shade:renderSurfaceWallShadeE, dist:bPerp, ct1:0, ct2:0, br:defaultBaseR, bg:defaultBaseG, bb:defaultBaseB});
   }
   // North boundary (gy=0)
   for (var gx = gxMin; gx <= gxMax; gx++) {
@@ -12229,7 +12590,7 @@ function drawWalls3D() {
     var bTopH = bfh + wallBaseH * boundaryWh;
     var bPerp = Math.abs(((bx1 + bx2) * 0.5 - cam.x) * cosAng + (by1 - cam.y) * sinAng);
     if (bPerp < 1) bPerp = 1;
-    wallFaces.push({wx1:bx1, wy1:by1, wx2:bx2, wy2:by1, fh:bfh, topH:bTopH, shade:_wallShadeN, dist:bPerp, ct1:0, ct2:0, br:defaultBaseR, bg:defaultBaseG, bb:defaultBaseB});
+    wallFaces.push({wx1:bx1, wy1:by1, wx2:bx2, wy2:by1, fh:bfh, topH:bTopH, shade:renderSurfaceWallShadeN, dist:bPerp, ct1:0, ct2:0, br:defaultBaseR, bg:defaultBaseG, bb:defaultBaseB});
   }
   // South boundary (gy=gridH-1)
   for (var gx = gxMin; gx <= gxMax; gx++) {
@@ -12240,7 +12601,7 @@ function drawWalls3D() {
     var bTopH = bfh + wallBaseH * boundaryWh;
     var bPerp = Math.abs(((bx1 + bx2) * 0.5 - cam.x) * cosAng + (by2 - cam.y) * sinAng);
     if (bPerp < 1) bPerp = 1;
-    wallFaces.push({wx1:bx2, wy1:by2, wx2:bx1, wy2:by2, fh:bfh, topH:bTopH, shade:_wallShadeS, dist:bPerp, ct1:0, ct2:0, br:defaultBaseR, bg:defaultBaseG, bb:defaultBaseB});
+    wallFaces.push({wx1:bx2, wy1:by2, wx2:bx1, wy2:by2, fh:bfh, topH:bTopH, shade:renderSurfaceWallShadeS, dist:bPerp, ct1:0, ct2:0, br:defaultBaseR, bg:defaultBaseG, bb:defaultBaseB});
   }
   } // end !ENDLESS_MODE boundary walls
 
@@ -12256,10 +12617,11 @@ function drawWalls3D() {
     var f = wallFaces[fi];
     if (f.top) {
       // Top face — horizontal quad at wall top height
-      if (!projWall(f.x1, f.y1, f.z, 0)) continue;
-      if (!projWall(f.x2, f.y1, f.z, 1)) continue;
-      if (!projWall(f.x2, f.y2, f.z, 2)) continue;
-      if (!projWall(f.x1, f.y2, f.z, 3)) continue;
+      var topPoly = projectSceneWorldPolygon([
+        {x:f.x1,y:f.y1,z:f.z*25}, {x:f.x2,y:f.y1,z:f.z*25},
+        {x:f.x2,y:f.y2,z:f.z*25}, {x:f.x1,y:f.y2,z:f.z*25}
+      ], C);
+      if (topPoly.length < 3) continue;
 
       var fog = Math.max(fogFloor, 1.0 - f.dist * 0.0008);
       if (f.dist > fadeStart) {
@@ -12268,7 +12630,7 @@ function drawWalls3D() {
       } else {
         ctx.globalAlpha = 1.0;
       }
-      var shade = _topShade;
+      var shade = renderSurfaceTopShade;
       // Point light on top face
       var topMidX = (f.x1 + f.x2) * 0.5, topMidY = (f.y1 + f.y2) * 0.5;
       var topLC = 0;
@@ -12289,13 +12651,7 @@ function drawWalls3D() {
       if (tHash < 2) { r = Math.floor(r * 0.92); g = Math.floor(g * 0.92); b = Math.floor(b * 0.92); }
 
       ctx.fillStyle = rgbQ(r, g, b);
-      ctx.beginPath();
-      ctx.moveTo(_wsx[0], _wsy[0]);
-      ctx.lineTo(_wsx[1], _wsy[1]);
-      ctx.lineTo(_wsx[2], _wsy[2]);
-      ctx.lineTo(_wsx[3], _wsy[3]);
-      ctx.closePath();
-      ctx.fill();
+      fillSceneDepthPolygon(topPoly);
 
       // ── Forest: draw canopy inline (once per cell, respects painter's order) ──
       if (f.biome === 'forest') {
@@ -12346,7 +12702,8 @@ function drawWalls3D() {
       } else {
         baseR = f.br; baseG = f.bg; baseB = f.bb;
       }
-      renderFace(f.wx1, f.wy1, f.wx2, f.wy2, f.fh, f.topH, f.shade, f.dist, f.ct1 || 0, f.ct2 || 0, f.cave || false, f.entrWall || false);
+      renderFace(f.wx1, f.wy1, f.wx2, f.wy2, f.fh, f.topH, f.shade, f.dist,
+        f.ct1, f.ct2, f.cave || false, f.entrWall || false);
 
       // ── Forest: draw canopy inline from side view ──
       if (f.biome === 'forest' && f.dist < viewDist * 0.5) {
@@ -12401,7 +12758,6 @@ function drawWalls3D() {
 
   ctx.restore();
 }
-
 // =============================================
 // SECTION 13: RENDERING - FLOOR
 // =============================================
@@ -12439,21 +12795,152 @@ function drawPlatforms2D() {
 }
 
 // =============================================
-// SECTION 13c: RENDERING - LAYERED FLOOR (WIP)
+// SECTION 13c: RENDERING - LAYERED FLOOR
 // =============================================
-// New layer-aware floor renderer (refactor step 3, sub-step A: skeleton).
-// Reads directly from the layered height field instead of heights[]/surfaceH[].
-// Each walkable layer in a cell renders as a floor quad iff all 4 corner cells
-// have a matching-index walkable layer (index-matching stitch rule). Where
-// layers don't stitch, the quad is skipped — subsequent passes will fill those
-// edges with wall/side faces.
-//
-// Currently a minimal stub:
-//   - Ground plane fill
-//   - Per-layer flat color (green shades) — biome colors come later
-//   - Painter's order + FOV + distance culling (matches old renderer)
-//   - No water, no textures, no fog, no entrance-specific logic
-// Enable via the "Layer Render" checkbox in debug panel.
+// Reads the layered height field directly. Floor quads stitch by semantic
+// stratum rather than layer index or nearest arbitrary walkable height, which
+// keeps surface, cave floor, cap and ledge geometry distinct at cave mouths.
+// The pass includes painter ordering, spatial/FOV culling, authored layer
+// colors, local lighting/AO, cave fog, and steep-ground skirts.
+
+// Renderer-facing semantic helpers are deliberately top-level so focused
+// fixtures can exercise the exact stitch contract without running Canvas.
+function getFloorRenderLayerRole(mesh, ci, li, type) {
+  var meta = 0;
+  if (li === 0) meta = mesh.l0Meta ? mesh.l0Meta[ci] : 0;
+  else if (li === 1) meta = mesh.l1Meta ? mesh.l1Meta[ci] : 0;
+  else if (li === 2) meta = mesh.l2Meta ? mesh.l2Meta[ci] : 0;
+  else if (li === 3) meta = mesh.l3Meta ? mesh.l3Meta[ci] : 0;
+  else meta = mesh.l4Meta ? mesh.l4Meta[ci] : 0;
+  var role = meta & 0x7f;
+  if (role) return role;
+  // Fixed/legacy meshes may not carry metadata. Keep a conservative fallback
+  // that still separates caps and ledges from ordinary ground.
+  if (type === 4) return 3;
+  if (type === 3) return 4;
+  if (type === 1) {
+    return mesh.ceilAboveMask && ((mesh.ceilAboveMask[ci] >> li) & 1) ? 2 : 1;
+  }
+  return 0;
+}
+
+function findFloorRenderRoleZ(mesh, ci, targetRole, targetZ, sourceCi) {
+  var lc = mesh.layerCount[ci];
+  if (!lc) return NaN;
+  var bestZ = 0, bestDiff = 1e9, exteriorZ = 0, exteriorDiff = 1e9;
+  var mouthZ = 0, mouthDiff = 1e9;
+  var sourceSurface = mesh.surfaceH && sourceCi >= 0 ? mesh.surfaceH[sourceCi] : NaN;
+  for (var li = 0; li < lc; li++) {
+    var type, z;
+    if (li === 0) { type = mesh.l0Type[ci]; z = mesh.l0TopZ[ci]; }
+    else if (li === 1) { type = mesh.l1Type[ci]; z = mesh.l1TopZ[ci]; }
+    else if (li === 2) { type = mesh.l2Type[ci]; z = mesh.l2TopZ[ci]; }
+    else if (li === 3) { type = mesh.l3Type[ci]; z = mesh.l3TopZ[ci]; }
+    else { type = mesh.l4Type[ci]; z = mesh.l4TopZ[ci]; }
+    if (type !== 1 && type !== 3 && type !== 4) continue;
+    var role = getFloorRenderLayerRole(mesh, ci, li, type);
+    var diff = z > targetZ ? z - targetZ : targetZ - z;
+    if (role === targetRole) {
+      if (diff < bestDiff) { bestDiff = diff; bestZ = z; }
+      continue;
+    }
+    // Surface and cap are two storage roles for one exterior terrain skin.
+    // Join them only when both samples still sit on their natural surface.
+    // The depressed approach fails this test, so it cannot pull the cap down
+    // into a green spike at the mouth.
+    if ((targetRole === 1 && role === 3) || (targetRole === 3 && role === 1)) {
+      var neighborSurface = mesh.surfaceH ? mesh.surfaceH[ci] : NaN;
+      if (sourceSurface === sourceSurface && neighborSurface === neighborSurface &&
+          Math.abs(targetZ - sourceSurface) <= 0.6 &&
+          Math.abs(z - neighborSurface) <= 0.6 && diff <= 1.5 &&
+          diff < exteriorDiff) {
+        exteriorDiff = diff;
+        exteriorZ = z;
+      }
+    }
+    // Open approach (surface role) and covered tunnel floor (cave-floor role)
+    // are physically one support at the portal plane. Preserve that seam only
+    // while it is within the movement step contract; deeper/lateral strata
+    // remain separate instead of being stretched into a sloped quad.
+    if (((targetRole === 1 && role === 2) || (targetRole === 2 && role === 1)) &&
+        diff <= 1.0 && diff < mouthDiff) {
+      mouthDiff = diff;
+      mouthZ = z;
+    }
+  }
+  return bestDiff < 1e9 ? bestZ :
+    exteriorDiff < 1e9 ? exteriorZ : mouthDiff < 1e9 ? mouthZ : NaN;
+}
+
+// Static corner results, not camera transforms/materials/lighting. Tiles make
+// first use incremental; a fixed byte cap bounds memory even on huge meshes.
+var FLOOR_STITCH_TILE_CELLS = 256;
+var FLOOR_STITCH_CACHE_BYTES = 4 * 1024 * 1024;
+
+function getFloorStitchCache(mesh) {
+  var cache = mesh._floorRenderStitches;
+  // buildWalkCandZ is the existing geometry-finalization boundary. It replaces
+  // walkCandZ on every rebuild, including rebuilding a reused mesh object.
+  // Future in-place height/type/meta changes must rebuild that derived data
+  // or delete _floorRenderStitches before another render.
+  if (!cache || cache.stamp !== mesh.walkCandZ || cache.w !== mesh.w || cache.h !== mesh.h) {
+    cache = mesh._floorRenderStitches = {stamp:mesh.walkCandZ,w:mesh.w,h:mesh.h,
+      floors:[],ceilings:[],bytes:0,hits:0,misses:0,fallbacks:0,
+      scratch:{values:new Float64Array(FLOOR_STITCH_TILE_CELLS*3)}};
+  }
+  return cache;
+}
+
+function findCeilingRenderMatchZ(mesh, ci, targetZ) {
+  var lc = mesh.layerCount[ci], bestZ = 0, bestDiff = 1e9;
+  for (var li = 0; li < lc; li++) {
+    var type, z;
+    if (li === 0) { type=mesh.l0Type[ci]; z=mesh.l0TopZ[ci]; }
+    else if (li === 1) { type=mesh.l1Type[ci]; z=mesh.l1TopZ[ci]; }
+    else if (li === 2) { type=mesh.l2Type[ci]; z=mesh.l2TopZ[ci]; }
+    else if (li === 3) { type=mesh.l3Type[ci]; z=mesh.l3TopZ[ci]; }
+    else { type=mesh.l4Type[ci]; z=mesh.l4TopZ[ci]; }
+    if (type !== 2) continue;
+    var diff = z > targetZ ? z-targetZ : targetZ-z;
+    if (diff < bestDiff) {bestDiff=diff;bestZ=z;}
+  }
+  return bestDiff <= 0.8 ? bestZ : NaN;
+}
+
+function getFloorStitchTile(mesh, cache, ci, li, role, z, ceiling) {
+  var layers = ceiling ? cache.ceilings : cache.floors;
+  var tiles = layers[li] || (layers[li]=[]), tileIndex=ci>>>8;
+  var tile = tiles[tileIndex], slot=ci&255, offset=slot*3;
+  if (tile && tile.ready[slot]) {
+    cache.hits++;
+    if (!ceiling) _cacheStats.matchZ.hits+=3;
+    return tile;
+  }
+  if (!tile) {
+    var tileBytes=FLOOR_STITCH_TILE_CELLS*(3*8+1);
+    if (cache.bytes+tileBytes <= FLOOR_STITCH_CACHE_BYTES) {
+      tile=tiles[tileIndex]={values:new Float64Array(FLOOR_STITCH_TILE_CELLS*3),ready:new Uint8Array(FLOOR_STITCH_TILE_CELLS)};
+      cache.bytes+=tileBytes;
+    } else {
+      tile=cache.scratch;cache.fallbacks++;
+    }
+  }
+  var values=tile.values,mw=mesh.w;
+  if (ceiling) {
+    values[offset]=findCeilingRenderMatchZ(mesh,ci+1,z);
+    values[offset+1]=findCeilingRenderMatchZ(mesh,ci+mw,z);
+    values[offset+2]=findCeilingRenderMatchZ(mesh,ci+mw+1,z);
+  } else {
+    values[offset]=findFloorRenderRoleZ(mesh,ci+1,role,z,ci);
+    values[offset+1]=findFloorRenderRoleZ(mesh,ci+mw,role,z,ci);
+    values[offset+2]=findFloorRenderRoleZ(mesh,ci+mw+1,role,z,ci);
+    _cacheStats.matchZ.misses+=3;
+  }
+  if(tile.ready)tile.ready[slot]=1;
+  cache.misses++;
+  return tile;
+}
+
 function drawLayersFloor3D() {
   if (!floorMesh || !floorMesh.layerCount) return;
   var C = getCam3D();
@@ -12462,6 +12949,7 @@ function drawLayersFloor3D() {
   var mesh = floorMesh;
   var gs = mesh.gridSize;
   var tanHalf = 1 / invTanHalf;
+  var stitchCache = getFloorStitchCache(mesh);
   // Reset debug stats for this frame
   __caveStats.floorTotal = 0;
   __caveStats.floorDistCull = 0;
@@ -12503,113 +12991,16 @@ function drawLayersFloor3D() {
     else { t = mesh.l4Type[ci]; z = mesh.l4TopZ[ci]; }
     return [z, t];
   }
-  // Role-aware stitch: find the layer in cell `ci` that best matches
-  // `targetZ` among layers compatible with `targetType`. Walkable (1) and
-  // ledge (3) are treated as the same role; ceiling (2) is separate.
-  // Returns matched topZ, or NaN if no layer is within `tol`.
-  // This replaces the old index-matching stitch that could pair a cave
-  // floor at -4 with a surface floor at +2 just because both were layer 0.
-  function findMatchZ(ci, targetType, targetZ, tol) {
-    // A2-1 (precomputed): walkable-role queries (targetType=1) read from
-    // mesh.walkCandZ[ci], built once at map-assembly time. No per-frame work.
-    if (targetType === 1) {
-      var cands = mesh.walkCandZ ? mesh.walkCandZ[ci] : null;
-      _cacheStats.matchZ.hits++;
-      if (!cands) return NaN;
-      var bestZ = 0, bestDiff = 1e9;
-      for (var k = 0; k < cands.length; k++) {
-        var zk = cands[k];
-        var dk = zk > targetZ ? zk - targetZ : targetZ - zk;
-        if (dk < bestDiff) { bestDiff = dk; bestZ = zk; }
-      }
-      return bestDiff <= tol ? bestZ : NaN;
-    }
-    // Other targetType (e.g. ceiling queries) — direct scan, not cached.
-    var lc = mesh.layerCount[ci];
-    if (!lc) return NaN;
-    var bestZ2 = 0, bestDiff2 = 1e9;
-    for (var li2 = 0; li2 < lc; li2++) {
-      var t2, z2;
-      if (li2 === 0) { t2 = mesh.l0Type[ci]; z2 = mesh.l0TopZ[ci]; }
-      else if (li2 === 1) { t2 = mesh.l1Type[ci]; z2 = mesh.l1TopZ[ci]; }
-      else if (li2 === 2) { t2 = mesh.l2Type[ci]; z2 = mesh.l2TopZ[ci]; }
-      else if (li2 === 3) { t2 = mesh.l3Type[ci]; z2 = mesh.l3TopZ[ci]; }
-      else { t2 = mesh.l4Type[ci]; z2 = mesh.l4TopZ[ci]; }
-      var roleMatch = (targetType === 2) ? (t2 === 2) : (t2 === 1 || t2 === 3 || t2 === 4);
-      if (!roleMatch) continue;
-      var diff = z2 > targetZ ? z2 - targetZ : targetZ - z2;
-      if (diff < bestDiff2) { bestDiff2 = diff; bestZ2 = z2; }
-    }
-    return bestDiff2 <= tol ? bestZ2 : NaN;
-  }
+  // Layer identity is semantic, not just "some walkable height nearby".
+  // The mouth can have cave floor, open surface and roof cap in adjacent
+  // cells. Pairing those roles by nearest Z makes the cap dive toward the
+  // tunnel floor and produces the large terrain triangles seen through the
+  // opening. lXMeta is authored after the final layer sort and therefore is
+  // the authoritative role for stitching.
+  // Return the closest height for the SAME semantic role. A role may move to
+  // another layer index after height sorting, so matching the index is also
+  // incorrect. Height clamping happens only after this identity check.
 
-  // Precompute entrance world positions for surface-view cave visibility.
-  // Tighter radius (was 1500): cave interior cells only render when the
-  // player is very close to an entrance, so distant caves don't bleed
-  // through hills between player and mouth.
-  var _entCount = (deepCaveEntrances && !playerUnderground) ? deepCaveEntrances.length : 0;
-  var _entRadSq = 100 * 100;
-  // Compute once per frame: is the CAMERA close to any entrance? Cave
-  // interior cells only render when the camera is near the mouth — no
-  // matter how close a cell is to the entrance, if the player is far away
-  // the cell stays hidden. Prevents cave geometry bleeding through ground
-  // from a distance.
-  var _camNearAnyEnt = false;
-  var _camNearEntDist = 1e9;
-  for (var _caei = 0; _caei < _entCount; _caei++) {
-    var _cae = deepCaveEntrances[_caei];
-    var _caedx = cam.x - _cae.x, _caedy = cam.y - _cae.y;
-    var _caeDSq = _caedx * _caedx + _caedy * _caedy;
-    if (_caeDSq < _camNearEntDist) _camNearEntDist = _caeDSq;
-    if (_caeDSq < _entRadSq) { _camNearAnyEnt = true; break; }
-  }
-
-  // Rasterize entrance cull mask once per frame. Each entrance covers a
-  // small oriented rectangle (~22u half-extent along + cross); at cell size
-  // 12u that's ~4x4 cells per entrance. Quads whose cell is flagged here
-  // skip the per-quad transform + rectangle check in the inner loop.
-  var _meshN = mesh.w * mesh.h;
-  if (_entCount > 0 && !playerUnderground) {
-    if (!_entCullMask || _entCullMaskN !== _meshN) {
-      _entCullMask = new Uint8Array(_meshN);
-      _entCullMaskN = _meshN;
-    } else {
-      _entCullMask.fill(0);
-    }
-    var _entHalf = 22; // along/cross half-extent (mirrors inner-loop check)
-    var _entCellRange = Math.ceil((_entHalf * 1.5) / gs); // ~3 cells
-    for (var _ecei = 0; _ecei < _entCount; _ecei++) {
-      var _ece = deepCaveEntrances[_ecei];
-      var _eceCx = Math.floor(_ece.x / gs);
-      var _eceCy = Math.floor(_ece.y / gs);
-      var _eceC = _ece.cosA, _eceS = _ece.sinA;
-      if (_eceC === undefined) {
-        var _eceA = _ece.angle || 0;
-        _eceC = Math.cos(_eceA); _eceS = Math.sin(_eceA);
-        _ece.cosA = _eceC; _ece.sinA = _eceS;
-      }
-      var _eceX = _ece.x, _eceY = _ece.y;
-      var _eceX0 = _eceCx - _entCellRange, _eceX1 = _eceCx + _entCellRange;
-      var _eceY0 = _eceCy - _entCellRange, _eceY1 = _eceCy + _entCellRange;
-      if (_eceX0 < 0) _eceX0 = 0;
-      if (_eceY0 < 0) _eceY0 = 0;
-      if (_eceX1 >= mesh.w) _eceX1 = mesh.w - 1;
-      if (_eceY1 >= mesh.h) _eceY1 = mesh.h - 1;
-      for (var _ecy = _eceY0; _ecy <= _eceY1; _ecy++) {
-        for (var _ecx = _eceX0; _ecx <= _eceX1; _ecx++) {
-          var _ecWx = (_ecx + 0.5) * gs, _ecWy = (_ecy + 0.5) * gs;
-          var _ecDx = _ecWx - _eceX, _ecDy = _ecWy - _eceY;
-          var _ecAlong = _ecDx * _eceC + _ecDy * _eceS;
-          var _ecCross = -_ecDx * _eceS + _ecDy * _eceC;
-          if (_ecAlong < 0) _ecAlong = -_ecAlong;
-          if (_ecCross < 0) _ecCross = -_ecCross;
-          if (_ecAlong < _entHalf && _ecCross < _entHalf) {
-            _entCullMask[_ecy * mesh.w + _ecx] = 1;
-          }
-        }
-      }
-    }
-  }
   // Diagnostic: how many cave-underground quads passed the cull this frame?
   window.__caveFloorRendered = 0;
 
@@ -12684,99 +13075,53 @@ function drawLayersFloor3D() {
         // map load by buildWalkCandZ). Bit li set = ceiling/cap layer exists
         // above layer li in this cell.
         var _cellUnderground = (mesh.ceilAboveMask[idx0] >> li) & 1;
-        // Visibility: if a cap layer (type=4) sits above this floor, painter
-        // order will overwrite whatever we draw here — skip the work. If
-        // there's no cap (cave mouth, uncapped pit), the cave floor is what
-        // the player is meant to see looking in.
-        if (_cellUnderground && !playerUnderground) {
-          if ((mesh.capAboveMask[idx0] >> li) & 1) continue;
-          window.__caveFloorRendered++;
-        }
+        // Visibility is resolved against the actual projected terrain and roof,
+        // not a camera/portal mode switch.
+        if (_cellUnderground) window.__caveFloorRendered++;
 
-        // Solid-ground rendering: every floor quad paints, even across steep
-        // transitions. findMatchZ returns the best walkable neighbor Z if
-        // within tol; otherwise findMatchZClampedInline clamps the neighbor
-        // Z into tol range so the quad still renders as a steep dirt face.
-        // No more rejected-quad voids through which the cave shows.
+        // A quad may only join four samples of the same semantic stratum.
+        // Surface, cave floor, cap and ledge can coexist at the mouth, but a
+        // cap must end at the roof edge instead of sloping down to whichever
+        // other walkable layer happens to be nearest in the next cell.
         var _tol = 4.5;
         var _z0 = L0[0];
-        function _clampNeighborZ(i, tz) {
-          var lcN = mesh.layerCount[i];
-          if (!lcN) return tz;
-          var bestZ = tz, bestDiff = 1e9;
-          for (var lj = 0; lj < lcN; lj++) {
-            var tj, zj;
-            if (lj === 0) { tj = mesh.l0Type[i]; zj = mesh.l0TopZ[i]; }
-            else if (lj === 1) { tj = mesh.l1Type[i]; zj = mesh.l1TopZ[i]; }
-            else if (lj === 2) { tj = mesh.l2Type[i]; zj = mesh.l2TopZ[i]; }
-            else if (lj === 3) { tj = mesh.l3Type[i]; zj = mesh.l3TopZ[i]; }
-            else { tj = mesh.l4Type[i]; zj = mesh.l4TopZ[i]; }
-            if (tj !== 1 && tj !== 3 && tj !== 4) continue;
-            var dj = zj > tz ? zj - tz : tz - zj;
-            if (dj < bestDiff) { bestDiff = dj; bestZ = zj; }
-          }
-          if (bestZ > tz + _tol) bestZ = tz + _tol;
-          else if (bestZ < tz - _tol) bestZ = tz - _tol;
-          return bestZ;
-        }
-        var _z1 = findMatchZ(idx1, 1, _z0, _tol);
-        if (_z1 !== _z1) _z1 = _clampNeighborZ(idx1, _z0);
-        var _z2 = findMatchZ(idx2, 1, _z0, _tol);
-        if (_z2 !== _z2) _z2 = _clampNeighborZ(idx2, _z0);
-        var _z3 = findMatchZ(idx3, 1, _z0, _tol);
-        if (_z3 !== _z3) _z3 = _clampNeighborZ(idx3, _z0);
-        __caveStats.floorBlendRange++;
-
-        // Cave-mouth hole: at a deep entrance, steeply tilted floor quads are
-        // what used to project as a "wall" covering the opening. Skip them
-        // entirely when near an entrance so cave walls / floor / ceiling behind
-        // show through — the mouth reads as an actual hole instead of a slope.
-        // Farther quads keep their tilt + dirt skirt so distant cliffs stay
-        // solid. Only skip for the ground-level floor layer (li===0) on the
-        // surface — never underground, never for caps/ledges.
-        // Cave-mouth hole: skip floor quads that sit fully below surface Z
-        // near a deep entrance — those are the cells inside the mouth that
-        // would otherwise paint as a green floor draped across the opening.
-        // Ramp quads (at least one corner still at/above surface) keep
-        // rendering so the descent remains visible and walkable.
-        // Skip only the tight opening footprint beneath the stone archway so
-        // distant/elevated views don't see the cave through unrelated ground.
-        // Oriented rectangle aligned to entrance.angle matches the archway opening.
-        // Cave-mouth cull: O(1) bitmask read (_entCullMask rasterized at frame start).
-        var _entryMaxZ = Math.max(_z0, _z1, _z2, _z3);
-        if (li === 0 && !playerUnderground && _entCount > 0 && _entryMaxZ < -0.5 &&
-            _entCullMask && _entCullMask[idx0]) {
+        var _role0 = getFloorRenderLayerRole(mesh, idx0, li, L0[1]);
+        var _stitch = getFloorStitchTile(mesh, stitchCache, idx0, li, _role0, _z0, false);
+        var _stitchOffset = (idx0 & 255) * 3;
+        var _z1 = _stitch.values[_stitchOffset];
+        var _z2 = _stitch.values[_stitchOffset+1];
+        var _z3 = _stitch.values[_stitchOffset+2];
+        if (_z1 !== _z1 || _z2 !== _z2 || _z3 !== _z3) {
+          __caveStats.floorOutsideBlend++;
           continue;
         }
+        // Preserve solid steep terrain, but only within the already matched
+        // role. This can no longer pull a cap toward a cave floor or surface.
+        if (_z1 > _z0 + _tol) _z1 = _z0 + _tol;
+        else if (_z1 < _z0 - _tol) _z1 = _z0 - _tol;
+        if (_z2 > _z0 + _tol) _z2 = _z0 + _tol;
+        else if (_z2 < _z0 - _tol) _z2 = _z0 - _tol;
+        if (_z3 > _z0 + _tol) _z3 = _z0 + _tol;
+        else if (_z3 < _z0 - _tol) _z3 = _z0 - _tol;
+        __caveStats.floorBlendRange++;
+
+        // Top faces are visible only from above their plane. This one spatial
+        // rule hides the grass/cap above an interior camera while preserving
+        // the cave floor and the real approach outside; no fixed mouth-sized
+        // rectangle or playerUnderground switch is needed.
+        var _quadMinZ = Math.min(_z0, _z1, _z2, _z3);
+        if (cameraZ < _quadMinZ * 25 - 1) continue;
 
         var wx1 = x * gs, wy1 = y * gs, wx2 = wx1 + gs, wy2 = wy1 + gs;
-        // Project 4 corners in quad order: (wx1,wy1), (wx2,wy1), (wx2,wy2), (wx1,wy2)
-        var sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3;
-        var cfwd, crgt, screenFrac, projDx, projDy;
-        projDx = wx1 - cam.x; projDy = wy1 - cam.y;
-        cfwd = projDx * cosAng + projDy * sinAng; if (cfwd < 1) continue;
-        crgt = projDx * (-sinAng) + projDy * cosAng;
-        screenFrac = (crgt / cfwd) * invTanHalf * 0.5 + 0.5;
-        if (screenFrac < -0.3 || screenFrac > 1.3) continue;
-        sx0 = screenFrac * w; sy0 = horizonY + ((cameraZ - _z0 * 25) / cfwd) * projScale;
-        projDx = wx2 - cam.x; projDy = wy1 - cam.y;
-        cfwd = projDx * cosAng + projDy * sinAng; if (cfwd < 1) continue;
-        crgt = projDx * (-sinAng) + projDy * cosAng;
-        screenFrac = (crgt / cfwd) * invTanHalf * 0.5 + 0.5;
-        if (screenFrac < -0.3 || screenFrac > 1.3) continue;
-        sx1 = screenFrac * w; sy1 = horizonY + ((cameraZ - _z1 * 25) / cfwd) * projScale;
-        projDx = wx2 - cam.x; projDy = wy2 - cam.y;
-        cfwd = projDx * cosAng + projDy * sinAng; if (cfwd < 1) continue;
-        crgt = projDx * (-sinAng) + projDy * cosAng;
-        screenFrac = (crgt / cfwd) * invTanHalf * 0.5 + 0.5;
-        if (screenFrac < -0.3 || screenFrac > 1.3) continue;
-        sx2 = screenFrac * w; sy2 = horizonY + ((cameraZ - _z3 * 25) / cfwd) * projScale;
-        projDx = wx1 - cam.x; projDy = wy2 - cam.y;
-        cfwd = projDx * cosAng + projDy * sinAng; if (cfwd < 1) continue;
-        crgt = projDx * (-sinAng) + projDy * cosAng;
-        screenFrac = (crgt / cfwd) * invTanHalf * 0.5 + 0.5;
-        if (screenFrac < -0.3 || screenFrac > 1.3) continue;
-        sx3 = screenFrac * w; sy3 = horizonY + ((cameraZ - _z2 * 25) / cfwd) * projScale;
+        var floorVertices = [
+          {x:wx1,y:wy1,z:_z0*25}, {x:wx2,y:wy1,z:_z1*25},
+          {x:wx2,y:wy2,z:_z3*25}, {x:wx1,y:wy2,z:_z2*25}
+        ];
+        // A sloped four-corner cell is not necessarily planar. Triangulate
+        // before projection so Canvas coverage and interpolated depth agree.
+        var floorPoly = projectSceneWorldPolygon([floorVertices[0], floorVertices[1], floorVertices[2]], C);
+        var floorPolyB = projectSceneWorldPolygon([floorVertices[0], floorVertices[2], floorVertices[3]], C);
+        if (floorPoly.length < 3 && floorPolyB.length < 3) continue;
 
         // Biome color from mesh.colors[], dimmed by ambient + light grid + AO.
         // Bottom layer uses stored color directly (surface or cave). Higher
@@ -12823,18 +13168,12 @@ function drawLayersFloor3D() {
           else if (_ptMaxDz >= 2.0) baseCol = '#ffdc00'; // YELLOW tilted floor
           else baseCol = '#2ecc40';                     // GREEN flat surface
         }
-        // Cells under a ceiling get cave ambient when the player is also
-        // underground — they're exploring in the dark and need torches. But
-        // when the player is on the surface, cave-interior cells visible
-        // through the entrance would be pitch black at 0.08; use a dim
-        // "indirect light through the mouth" value (0.35) so the player
-        // can actually see into the cave from outside.
-        var floorLight;
-        if (_cellUnderground) {
-          floorLight = playerUnderground ? 0.3 : 0.65;
-        } else {
-          floorLight = ambientLight;
-        }
+        // Light belongs to the rendered cell, not to the player's global
+        // state. Covered floors fade smoothly from exterior daylight at the
+        // shared portal plane to the readable cave ambient deeper inside.
+        var floorLight = _cellUnderground && typeof getCaveRenderLightAt === 'function' ?
+          getCaveRenderLightAt(centerX, centerY, true) :
+          (typeof renderSurfaceAmbient !== 'undefined' ? renderSurfaceAmbient : ambientLight);
         if (_lightGrid) {
           var flgx = Math.floor(centerX / _lightCellSize);
           var flgy = Math.floor(centerY / _lightCellSize);
@@ -12870,54 +13209,8 @@ function drawLayersFloor3D() {
           ctx.globalAlpha = fadeF;
         }
         ctx.fillStyle = 'rgb(' + (_fr | 0) + ',' + (_fg | 0) + ',' + (_fb | 0) + ')';
-        ctx.beginPath();
-        ctx.moveTo(sx0, sy0); ctx.lineTo(sx1, sy1);
-        ctx.lineTo(sx2, sy2); ctx.lineTo(sx3, sy3);
-        ctx.closePath(); ctx.fill();
-
-        // ── Dirt-face cliff fill ──
-        // Only draws a skirt under quads with steep corner deltas (>2u).
-        // Keeps the performance cost bounded while still covering the most
-        // visible tilted quads at cave rims.
-        var _cfMaxDz = Math.max(Math.abs(_z1 - _z0), Math.abs(_z2 - _z0), Math.abs(_z3 - _z0));
-        if (_cfMaxDz > 2.0 && !DEBUG_POLY_TYPES && !DEBUG_LAYER_TYPES) {
-          var _cfMinZ = Math.min(_z0, _z1, _z2, _z3) - 1.5;
-          // Project the skirt at _cfMinZ (all 4 corners same low Z)
-          var _cfpDx, _cfpDy, _cffwd, _cfrgt, _cfsf;
-          var _cfsx0, _cfsy0, _cfsx1, _cfsy1, _cfsx2, _cfsy2, _cfsx3, _cfsy3;
-          _cfpDx = wx1 - cam.x; _cfpDy = wy1 - cam.y;
-          _cffwd = _cfpDx * cosAng + _cfpDy * sinAng;
-          _cfrgt = _cfpDx * (-sinAng) + _cfpDy * cosAng;
-          _cfsf = (_cfrgt / _cffwd) * invTanHalf * 0.5 + 0.5;
-          _cfsx0 = _cfsf * w; _cfsy0 = horizonY + ((cameraZ - _cfMinZ * 25) / _cffwd) * projScale;
-          _cfpDx = wx2 - cam.x; _cfpDy = wy1 - cam.y;
-          _cffwd = _cfpDx * cosAng + _cfpDy * sinAng;
-          _cfrgt = _cfpDx * (-sinAng) + _cfpDy * cosAng;
-          _cfsf = (_cfrgt / _cffwd) * invTanHalf * 0.5 + 0.5;
-          _cfsx1 = _cfsf * w; _cfsy1 = horizonY + ((cameraZ - _cfMinZ * 25) / _cffwd) * projScale;
-          _cfpDx = wx2 - cam.x; _cfpDy = wy2 - cam.y;
-          _cffwd = _cfpDx * cosAng + _cfpDy * sinAng;
-          _cfrgt = _cfpDx * (-sinAng) + _cfpDy * cosAng;
-          _cfsf = (_cfrgt / _cffwd) * invTanHalf * 0.5 + 0.5;
-          _cfsx2 = _cfsf * w; _cfsy2 = horizonY + ((cameraZ - _cfMinZ * 25) / _cffwd) * projScale;
-          _cfpDx = wx1 - cam.x; _cfpDy = wy2 - cam.y;
-          _cffwd = _cfpDx * cosAng + _cfpDy * sinAng;
-          _cfrgt = _cfpDx * (-sinAng) + _cfpDy * cosAng;
-          _cfsf = (_cfrgt / _cffwd) * invTanHalf * 0.5 + 0.5;
-          _cfsx3 = _cfsf * w; _cfsy3 = horizonY + ((cameraZ - _cfMinZ * 25) / _cffwd) * projScale;
-          // Dirt color — darker than regular surface, reads as a rock/dirt face.
-          ctx.fillStyle = 'rgb(60, 42, 28)';
-          ctx.beginPath();
-          ctx.moveTo(_cfsx0, _cfsy0); ctx.lineTo(_cfsx1, _cfsy1);
-          ctx.lineTo(_cfsx2, _cfsy2); ctx.lineTo(_cfsx3, _cfsy3);
-          ctx.closePath(); ctx.fill();
-          // Redraw the tilted quad on top so it stays visible
-          ctx.fillStyle = 'rgb(' + (_fr | 0) + ',' + (_fg | 0) + ',' + (_fb | 0) + ')';
-          ctx.beginPath();
-          ctx.moveTo(sx0, sy0); ctx.lineTo(sx1, sy1);
-          ctx.lineTo(sx2, sy2); ctx.lineTo(sx3, sy3);
-          ctx.closePath(); ctx.fill();
-        }
+        fillSceneDepthPolygon(floorPoly);
+        fillSceneDepthPolygon(floorPolyB);
 
         ctx.globalAlpha = 1.0;
       }
@@ -12928,14 +13221,12 @@ function drawLayersFloor3D() {
 
 
 // Layer-aware ceiling renderer. Iterates ceiling-type layers (type=2) from
-// the layered field. Uses the same index-matching stitch rule as the floor:
-// a ceiling quad renders only when all 4 corner cells have a matching-index
-// ceiling layer. Where ceilings don't stitch, the edge naturally opens to
-// show the opening (e.g. at an entrance mouth).
+// the layered field and stitches neighboring ceiling samples by height. Where
+// ceilings do not match, the edge naturally opens at the entrance mouth.
 //
-// Current behavior mirrors legacy drawCeiling3D: full opacity when underground,
-// fades to 35% on surface. Skip cells whose top walkable layer (cap) sits
-// above the ceiling — those are buried in the hill from the player's view.
+// A roof cap and its underside are two faces of the same rock. The ceiling is
+// rendered when the camera is below it; an exterior camera above it sees the
+// cap instead. This remains correct while looking back out through the mouth.
 function drawLayersCeiling3D() {
   if (!floorMesh || !floorMesh.layerCount) return;
   var C = getCam3D();
@@ -12944,6 +13235,7 @@ function drawLayersCeiling3D() {
   var mesh = floorMesh;
   var gs = mesh.gridSize;
   var tanHalf = 1 / invTanHalf;
+  var stitchCache = getFloorStitchCache(mesh);
   // Reset ceiling pipeline stats
   __caveStats.ceilCollected = 0;
   __caveStats.ceilSkipLowCeil = 0;
@@ -12980,28 +13272,6 @@ function drawLayersCeiling3D() {
     else { t = mesh.l4Type[ci]; z = mesh.l4TopZ[ci]; }
     return [z, t];
   }
-  // Role-aware stitch: match by height proximity among ceiling-type layers.
-  function findCeilMatchZ(ci, targetZ, tol) {
-    var lc = mesh.layerCount[ci];
-    if (!lc) return NaN;
-    var bestZ = 0, bestDiff = 1e9;
-    for (var li = 0; li < lc; li++) {
-      var t, z;
-      if (li === 0) { t = mesh.l0Type[ci]; z = mesh.l0TopZ[ci]; }
-      else if (li === 1) { t = mesh.l1Type[ci]; z = mesh.l1TopZ[ci]; }
-      else if (li === 2) { t = mesh.l2Type[ci]; z = mesh.l2TopZ[ci]; }
-      else if (li === 3) { t = mesh.l3Type[ci]; z = mesh.l3TopZ[ci]; }
-      else { t = mesh.l4Type[ci]; z = mesh.l4TopZ[ci]; }
-      if (t !== 2) continue;
-      var diff = z > targetZ ? z - targetZ : targetZ - z;
-      if (diff < bestDiff) { bestDiff = diff; bestZ = z; }
-    }
-    return bestDiff <= tol ? bestZ : NaN;
-  }
-
-  // Rocky ceiling palette
-  var ceilColors = ['#1e130a', '#261a0e', '#2e2014', '#361f0f', '#2a1a08',
-                    '#1a0f06', '#332818', '#201008'];
 
   for (var y = iterYStart; y !== iterYEnd; y += iterYStep) {
     for (var x = iterXStart; x !== iterXEnd; x += iterXStep) {
@@ -13024,69 +13294,43 @@ function drawLayersCeiling3D() {
         // with smoothed-surface ceiling clamping, valid ceilings vary by
         // <=1u/cell; a 2u tol was accepting outlier corners that produced
         // steep tilted quads ("fangs") hanging into the cave.
-        var _ctol = 0.8;
         var _cz0 = L0[0];
-        var _cz1 = findCeilMatchZ(idx1, _cz0, _ctol);
+        var _ceilStitch = getFloorStitchTile(mesh, stitchCache, idx0, li, 0, _cz0, true);
+        var _ceilStitchOffset = (idx0 & 255) * 3;
+        var _cz1 = _ceilStitch.values[_ceilStitchOffset];
         if (_cz1 !== _cz1) { __caveStats.ceilSkipEntrRange++; continue; }
-        var _cz2 = findCeilMatchZ(idx2, _cz0, _ctol);
+        var _cz2 = _ceilStitch.values[_ceilStitchOffset+1];
         if (_cz2 !== _cz2) { __caveStats.ceilSkipEntrRange++; continue; }
-        var _cz3 = findCeilMatchZ(idx3, _cz0, _ctol);
+        var _cz3 = _ceilStitch.values[_ceilStitchOffset+2];
         if (_cz3 !== _cz3) { __caveStats.ceilSkipEntrRange++; continue; }
         __caveStats.ceilCollected++;
 
-        // Layer cull: a ceiling is only visible when the camera is UNDER it.
-        // With cam.z > ceilingZ*25 the ceiling projects below the horizon and
-        // paints over the ground as false terrain — the classic "cave rock
-        // showing through the hillside" bug.
-        if (cam.z > _cz0 * 25) continue;
-        // If there's a walkable cap layer ABOVE this ceiling the ceiling is
-        // buried in the hill — skip. (Redundant with the layer cull for
-        // surface cameras but still needed for underground cases.)
-        var hasCapAbove = false;
-        for (var li2 = li + 1; li2 < lc0; li2++) {
-          var LA = layerAtC(idx0, li2);
-          if (LA && (LA[1] === 1 || LA[1] === 3 || LA[1] === 4)) { hasCapAbove = true; break; }
-        }
-        if (hasCapAbove) continue;
+        // The underside is visible only when the converted render eye is below
+        // it. Do not suppress it merely because a cap exists above: that cap
+        // is precisely the roof whose underside the interior needs to show.
+        var _ceilMaxZ = Math.max(_cz0, _cz1, _cz2, _cz3);
+        if (cameraZ > _ceilMaxZ * 25 + 1) continue;
 
         var wx1 = x * gs, wy1 = y * gs, wx2 = wx1 + gs, wy2 = wy1 + gs;
-        var sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3;
-        var cfwd, crgt, screenFrac, projDx, projDy;
-        projDx = wx1 - cam.x; projDy = wy1 - cam.y;
-        cfwd = projDx * cosAng + projDy * sinAng; if (cfwd < 1) continue;
-        crgt = projDx * (-sinAng) + projDy * cosAng;
-        screenFrac = (crgt / cfwd) * invTanHalf * 0.5 + 0.5;
-        if (screenFrac < -0.3 || screenFrac > 1.3) continue;
-        sx0 = screenFrac * w; sy0 = horizonY + ((cameraZ - _cz0 * 25) / cfwd) * projScale;
-        projDx = wx2 - cam.x; projDy = wy1 - cam.y;
-        cfwd = projDx * cosAng + projDy * sinAng; if (cfwd < 1) continue;
-        crgt = projDx * (-sinAng) + projDy * cosAng;
-        screenFrac = (crgt / cfwd) * invTanHalf * 0.5 + 0.5;
-        if (screenFrac < -0.3 || screenFrac > 1.3) continue;
-        sx1 = screenFrac * w; sy1 = horizonY + ((cameraZ - _cz1 * 25) / cfwd) * projScale;
-        projDx = wx2 - cam.x; projDy = wy2 - cam.y;
-        cfwd = projDx * cosAng + projDy * sinAng; if (cfwd < 1) continue;
-        crgt = projDx * (-sinAng) + projDy * cosAng;
-        screenFrac = (crgt / cfwd) * invTanHalf * 0.5 + 0.5;
-        if (screenFrac < -0.3 || screenFrac > 1.3) continue;
-        sx2 = screenFrac * w; sy2 = horizonY + ((cameraZ - _cz3 * 25) / cfwd) * projScale;
-        projDx = wx1 - cam.x; projDy = wy2 - cam.y;
-        cfwd = projDx * cosAng + projDy * sinAng; if (cfwd < 1) continue;
-        crgt = projDx * (-sinAng) + projDy * cosAng;
-        screenFrac = (crgt / cfwd) * invTanHalf * 0.5 + 0.5;
-        if (screenFrac < -0.3 || screenFrac > 1.3) continue;
-        sx3 = screenFrac * w; sy3 = horizonY + ((cameraZ - _cz2 * 25) / cfwd) * projScale;
+        var ceilingVertices = [
+          {x:wx1,y:wy1,z:_cz0*25}, {x:wx2,y:wy1,z:_cz1*25},
+          {x:wx2,y:wy2,z:_cz3*25}, {x:wx1,y:wy2,z:_cz2*25}
+        ];
+        var ceilingPoly = projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[1], ceilingVertices[2]], C);
+        var ceilingPolyB = projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[2], ceilingVertices[3]], C);
+        if (ceilingPoly.length < 3 && ceilingPolyB.length < 3) continue;
 
-        // Color: deterministic per-cell hash from the rocky palette
-        var cHash = ((x * 48271 + y * 16807) >>> 0) % ceilColors.length;
-        var baseCol = ceilColors[cHash];
+        // Same world-authored stone as walls and cave floors.
+        var material = getCaveMaterialColorAt(centerX, centerY);
+        var baseCol = '#' + ('000000' + material.toString(16)).slice(-6);
         // DEBUG_POLY_TYPES: ceilings = PURPLE. Plus YELLOW tint if the
         // ceiling quad is visibly tilted (corner Z delta >= 1u).
         if (DEBUG_POLY_TYPES) {
           var _cDz = Math.max(Math.abs(_cz1 - _cz0), Math.abs(_cz2 - _cz0), Math.abs(_cz3 - _cz0));
           baseCol = _cDz >= 1.0 ? '#ffdc00' : '#b10dc9';
         }
-        var ceilLight = ambientLight;
+        var ceilLight = typeof getCaveRenderLightAt === 'function' ?
+          getCaveRenderLightAt(centerX, centerY, true) : ambientLight;
         if (_lightGrid) {
           var clgx = Math.floor(centerX / _lightCellSize);
           var clgy = Math.floor(centerY / _lightCellSize);
@@ -13099,20 +13343,18 @@ function drawLayersCeiling3D() {
         var _cb = Math.min(255, Math.floor((_cp & 0xff) * ceilLight));
         ctx.fillStyle = 'rgb(' + _cr + ',' + _cg + ',' + _cb + ')';
 
-        // Ceiling is solid rock — full opacity always. The cap-above skip
-        // hides buried ceilings; what remains is real overhang geometry.
+        // Ceiling is solid rock — full opacity. Exterior occlusion comes from
+        // the eye-plane test and cap top face, not a global mode flag.
         ctx.globalAlpha = 1.0;
-        ctx.beginPath();
-        ctx.moveTo(sx0, sy0); ctx.lineTo(sx1, sy1);
-        ctx.lineTo(sx2, sy2); ctx.lineTo(sx3, sy3);
-        ctx.closePath(); ctx.fill();
+        fillSceneDepthPolygon(ceilingPoly);
+        fillSceneDepthPolygon(ceilingPolyB);
         if (DEBUG_CEIL_WIRE) {
-          ctx.strokeStyle = '#ff00ff';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(sx0, sy0); ctx.lineTo(sx1, sy1);
-          ctx.lineTo(sx2, sy2); ctx.lineTo(sx3, sy3);
-          ctx.closePath(); ctx.stroke();
+          withSceneDepthClip(ceilingPoly, function() {
+            ctx.strokeStyle = '#ff00ff';
+            ctx.lineWidth = 1;
+            traceSceneDepthPolygon(ceilingPoly);
+            ctx.stroke();
+          });
         }
         __caveStats.ceilRendered++;
       }
@@ -13121,8 +13363,6 @@ function drawLayersCeiling3D() {
   ctx.globalAlpha = 1.0;
   ctx.restore();
 }
-
-
 // =============================================
 // SECTION 14: RENDERING - ENTITIES
 // =============================================
@@ -13132,18 +13372,23 @@ function drawGoalMarker3D() {
   var C = getCam3D();
   var w = C.w, h = C.h;
   var gx = goal.x + goal.w / 2, gy = goal.y + goal.h / 2;
-  var vis = entityVisible3D(gx, gy, 0, C,
-    { maxDist: viewDist, depthOffset: 3, checkMidpoint: false, fadeFraction: 1 });
+  var vis = entityVisible3D(gx, gy, getEntityGroundRenderZ(gx, gy, false), C,
+    { maxDist: viewDist, sceneDepth: true, fadeFraction: 1 });
   if (!vis) return;
   var screenX = vis.sx, fwd = vis.fwd, floorY = vis.sy;
   var s3g = getScale3D('smStructure');
   var size = Math.max(6, Math.min(28, Math.floor(240 * s3g / fwd)));
+  var flagTop = floorY - Math.floor(size / 4);
+  var flagHeight = Math.max(0, Math.min(40, Math.floor(280 * s3g / fwd)));
+  withSceneDepthBillboard({x: screenX - size / 2 - 1, y: flagTop - flagHeight - 1,
+    width: size + 2, height: flagHeight + Math.floor(size / 3) + 2}, fwd, function () {
   ctx.save(); ctx.globalAlpha = 0.95; ctx.fillStyle = '#00ff00';
   ctx.strokeStyle = 'rgba(0,255,0,0.7)'; ctx.lineWidth = 2;
   ctx.fillRect(screenX - size / 2, floorY - Math.floor(size / 4), size, Math.floor(size / 3));
   ctx.beginPath(); ctx.moveTo(screenX, floorY - Math.floor(size / 4));
-  ctx.lineTo(screenX, floorY - Math.floor(size / 4) - Math.max(0, Math.min(40, Math.floor(280 * s3g / fwd))));
+  ctx.lineTo(screenX, flagTop - flagHeight);
   ctx.stroke(); ctx.restore();
+  });
 }
 
 function drawSkeletonFrame(oc, typeId, frame, crumble, dir) {
@@ -13982,6 +14227,54 @@ function drawSkeletonDebug() {
   ctx.restore();
 }
 
+// Bounds include every actual draw component, not only a point at the feet.
+// The scene-depth mask can therefore keep a visible head/health bar while a
+// foreground bank covers the lower body, without letting status effects leak.
+function getEnemyBillboardBounds(e, screenX, floorY, spriteW, spriteH, hasSprite, now) {
+  var size = spriteH * 0.43, top = floorY - spriteH;
+  var x0 = screenX - spriteW / 2, x1 = screenX + spriteW / 2;
+  var y0 = top, y1 = floorY;
+  function include(cx, cy, rx, ry) {
+    x0 = Math.min(x0, cx - rx); x1 = Math.max(x1, cx + rx);
+    y0 = Math.min(y0, cy - ry); y1 = Math.max(y1, cy + ry);
+  }
+  if (!hasSprite) {
+    var fallbackStroke = Math.max(1, Math.min(3, Math.floor(size / 15))) / 2;
+    include(screenX, floorY - size / 2, size / 2 + fallbackStroke, size / 2 + fallbackStroke);
+  }
+  include(screenX, floorY, size * 0.45, size * 0.2); // Shadow.
+  if (e.slowUntil && now < e.slowUntil) {
+    var slowRadius = size * 0.65 + Math.max(2, Math.min(4, Math.floor(size / 12))) / 2;
+    include(screenX, top + spriteH * 0.45, slowRadius, slowRadius);
+  }
+  if (e.burnUntil && now < e.burnUntil) {
+    include(screenX, top + spriteH * 0.08, size * 0.3, size * 0.3);
+    include(screenX, top - size * 0.1, size * 0.18, size * 0.18);
+  }
+  if (e.attackState === 'windup' && e.attackStateUntil) {
+    var windupDur = e.enemyType.attackWindup || 500;
+    var windupT = Math.max(0, Math.min(1, 1 - (e.attackStateUntil - now) / windupDur));
+    var ringR = size * (0.45 + windupT * 0.45);
+    var ringStroke = Math.max(2, Math.floor(size / 6)) / 2;
+    include(screenX, floorY, ringR + ringStroke, ringR * 0.28 + ringStroke);
+  }
+  var hpPct = e.health / e.maxHealth;
+  if (hpPct < 1) {
+    var barW = Math.max(20, size * 1.2), barH = Math.max(2, Math.floor(size / 10));
+    include(screenX, top - barH / 2 - 2, barW / 2, barH / 2);
+  }
+  if (e.aggroAt && now - e.aggroAt < 600) {
+    var fontSize = Math.max(10, Math.floor(size * 0.5));
+    var baseline = top - (hpPct < 1 ? 10 : 4);
+    // Monospace glyph bounds include the full em and possible descent. This
+    // avoids a second text-metrics pass for every aggro animation frame.
+    include(screenX, baseline - fontSize * 0.4, fontSize * 0.65, fontSize * 0.65);
+  }
+  // One pixel also includes Canvas stroke antialiasing at the footprint edge.
+  return {x: Math.floor(x0) - 1, y: Math.floor(y0) - 1,
+    width: Math.ceil(x1) - Math.floor(x0) + 2, height: Math.ceil(y1) - Math.floor(y0) + 2};
+}
+
 function drawEnemies3D() {
   if (!enemies || !enemies.length) return;
   var C = getCam3D();
@@ -13996,6 +14289,7 @@ function drawEnemies3D() {
     drawEnemies3D._sortDist = new Float32Array(512);
     drawEnemies3D._visCache = new Array(512); // reusable vis result slots
     for (var _vi = 0; _vi < 512; _vi++) drawEnemies3D._visCache[_vi] = {sx:0,sy:0,fwd:0,dist:0,floorZ:0,fade:0};
+    drawEnemies3D._sortTemp = {sx:0,sy:0,fwd:0,dist:0,floorZ:0,fade:0};
   }
   var _eSortIdx = drawEnemies3D._sortIdx;
   var _eSortDist = drawEnemies3D._sortDist;
@@ -14003,20 +14297,24 @@ function drawEnemies3D() {
   var _eVisCount = 0;
   for (var i = 0; i < enemies.length; i++) {
     var e = enemies[i];
-    var vis = entityVisible3D(e.x, e.y, e.z || 0, C,
-      { maxDist: viewDist, depthOffset: 16, checkMidpoint: false, fadeFraction: 0.8, stats: _eRenderStats });
+    // Surface enemies historically store a placeholder z:0; cave enemies
+    // store absolute render-world Z. Neither depends on the camera's stratum.
+    var enemyZ = e.underground && Number.isFinite(e.z) ? e.z : getEntityRenderFloorZ(e);
+    var vis = entityVisible3D(e.x, e.y, enemyZ, C,
+      { maxDist: viewDist, sceneDepth: true, fadeFraction: 0.8, stats: _eRenderStats });
     if (!vis) continue;
+    if (_eVisCount >= _eSortIdx.length) break;
     // Copy vis data into reusable cache slot (no object allocation)
     var vc = _eVisCache[_eVisCount];
     vc.sx = vis.sx; vc.sy = vis.sy; vc.fwd = vis.fwd;
-    vc.dist = vis.dist; vc.floorZ = vis.floorZ; vc.fade = vis.fade;
+    vc.dist = vis.dist; vc.floorZ = enemyZ; vc.fade = vis.fade;
     _eSortIdx[_eVisCount] = i;
     _eSortDist[_eVisCount] = vis.dist;
     _eVisCount++;
   }
   // Simple insertion sort (faster than Array.sort for small N, zero allocation).
-  // Uses slot 511 as temp storage to avoid object creation during swaps.
-  var _eTmp = _eVisCache[511];
+  // The scratch slot must not alias the final visible enemy's own data.
+  var _eTmp = drawEnemies3D._sortTemp;
   for (var si = 1; si < _eVisCount; si++) {
     var sd = _eSortDist[si], sIdx = _eSortIdx[si];
     _eTmp.sx = _eVisCache[si].sx; _eTmp.sy = _eVisCache[si].sy;
@@ -14038,7 +14336,7 @@ function drawEnemies3D() {
   for (var vi = 0; vi < _eVisCount; vi++) {
     var e = enemies[_eSortIdx[vi]], eType = e.enemyType, vis = _eVisCache[vi];
     var _eFade = vis.fade;
-    var screenX = vis.sx, fwd = vis.fwd, dist = vis.dist, floorWorldZ = vis.floorZ;
+    var screenX = vis.sx, fwd = vis.fwd, dist = vis.dist;
     var floorY = vis.sy;
     var isWolf = eType.id === 'wolf';
     // Wolves are lower to the ground than upright skeletons
@@ -14046,23 +14344,9 @@ function drawEnemies3D() {
     var spriteH = Math.max(6, Math.min(h * 2, Math.floor(worldEnemyH * projScale / fwd)));
     var spriteW = isWolf ? Math.floor(spriteH * WOLF_W / WOLF_H) : Math.floor(spriteH * SKEL_W / SKEL_H);
     var size = spriteH * 0.43;
-    // Clamp floorY so the enemy's feet are at most 50% below the canvas bottom.
-    // Old clamp was h+spriteH which — with spriteH up to h*2 — let floorY reach 1350
-    // at close range, making spriteTop=450 and the enemy 0px visible (the "sudden shrink").
-    // h*1.5 guarantees the top of the sprite stays on screen at any distance.
-    floorY = Math.min(floorY, h * 1.5);
-    // Lift uses height ABOVE the local floor (not absolute Z) — works at any elevation
-    var zAboveFloor = (e.z || 0) - floorWorldZ;
-    var zVal = zAboveFloor + 12;  // +12 = feet offset so sprite stands ON the floor
-    var liftRaw = (zVal * 1.0) / (1 + dist * 0.01);
-    var liftPx = Math.max(-80, Math.min(80, Math.floor(liftRaw)));
-    var centerY = floorY - liftPx;
-
-    ctx.save();
-    var shadowAlpha = Math.max(0.15, Math.min(0.5, 0.6 - dist / 1000)) * _eFade;
-    ctx.globalAlpha = shadowAlpha; ctx.fillStyle = '#000000';
-    ctx.beginPath(); ctx.ellipse(screenX, floorY, size * 0.45, size * 0.2, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = 0.95 * _eFade;
+    // Project the actual feet once. Screen-space clamps/lift invented another
+    // base when standing on hills and when the camera crossed a cave portal.
+    var centerY = floorY - size / 2;
     var isFlashing = (e.damageFlash && now < e.damageFlash);
     var hpPct = e.health / e.maxHealth;
 
@@ -14094,7 +14378,6 @@ function drawEnemies3D() {
           ' spriteW=' + spriteW +
           ' floorY=' + floorY.toFixed(1) +
           ' z=' + (e.z || 0).toFixed(1) +
-          ' liftPx=' + liftPx +
           ' frame=' + skelFrameIdx + '/' + SKEL_FRAMES +
           ' key=' + skelKey +
           (!skelCanvas ? ' NO_CANVAS' : '') +
@@ -14108,7 +14391,13 @@ function drawEnemies3D() {
     // Sprite screen rect — spriteH and spriteW computed from perspective above
     var spriteX = screenX - spriteW / 2;
     var spriteTop = floorY - spriteH;
-
+    var enemyBounds = getEnemyBillboardBounds(e, screenX, floorY, spriteW, spriteH, !!skelCanvas, now);
+    var visiblePixels = withSceneDepthBillboard(enemyBounds, fwd, function () {
+    ctx.save();
+    var shadowAlpha = Math.max(0.15, Math.min(0.5, 0.6 - dist / 1000)) * _eFade;
+    ctx.globalAlpha = shadowAlpha; ctx.fillStyle = '#000000';
+    ctx.beginPath(); ctx.ellipse(screenX, floorY, size * 0.45, size * 0.2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 0.95 * _eFade;
     if (skelCanvas) {
       var drawSrc = skelCanvas;
       if (ambientLight < 0.85) {
@@ -14196,7 +14485,9 @@ function drawEnemies3D() {
       ctx.globalAlpha = 0.95 * _eFade;
     }
     ctx.restore();
-    _eRenderStats.rendered++;
+    });
+    if (visiblePixels) _eRenderStats.rendered++;
+    else _eRenderStats.depthOccl++;
   }
   // Periodic enemy render debug (every 10s)
   if (false && (!window._eRenderLogLast || now - window._eRenderLogLast > 10000)) { // TEMP DISABLED
@@ -14337,26 +14628,197 @@ function drawProjectiles2D() {
   ctx.restore(); ctx.globalAlpha = 1.0;
 }
 
+// Transparent spells share the opaque scene's visibility, but never contribute
+// opaque depth themselves. Sprites use padded billboard bounds; extended spells
+// use actual per-segment/per-surface depth rather than one center-depth box.
+function spellFloorRenderZ(effect, x, y) {
+  var referenceZ = Number.isFinite(effect.renderFloorZ) ? effect.renderFloorZ :
+    getEntityRenderFloorZ(effect);
+  return sampleEntitySupportRenderZ(x, y, referenceZ, effect.underground, true);
+}
+
+function drawSpellBillboard(point, radius, glow, draw) {
+  if (!point || !Number.isFinite(point.fwd) || point.fwd < 1) return 0;
+  var pad = Math.max(0, radius) + Math.max(0, glow) * 2.5 + 2;
+  return withSceneDepthBillboard({x:point.sx-pad,y:point.sy-pad,width:pad*2,height:pad*2},
+    point.fwd, draw);
+}
+
+// Clip a world segment at the near plane before building its screen ribbon.
+// The two ribbon ends retain their different forward depths, including glow.
+function drawSpellWorldSegment(a, b, C, width, glow, draw) {
+  if (!a || !b || !Number.isFinite(a.z) || !Number.isFinite(b.z)) return 0;
+  var da = (a.x-cam.x)*C.cosAng+(a.y-cam.y)*C.sinAng;
+  var db = (b.x-cam.x)*C.cosAng+(b.y-cam.y)*C.sinAng;
+  if (da < 1 && db < 1) return 0;
+  if ((da < 1) !== (db < 1)) {
+    var t = (1-Math.min(da,db))/Math.abs(db-da);
+    var behind = da < 1 ? a : b, front = da < 1 ? b : a;
+    var clipped = {x:behind.x+(front.x-behind.x)*t,
+      y:behind.y+(front.y-behind.y)*t,z:behind.z+(front.z-behind.z)*t};
+    if (da < 1) { a=clipped; da=1; } else { b=clipped; db=1; }
+  }
+  function project(v, depth) {
+    var dx=v.x-cam.x, dy=v.y-cam.y;
+    return {x:(0.5+(-dx*C.sinAng+dy*C.cosAng)/depth*C.invTanHalf*0.5)*C.w,
+      y:C.horizonY+(C.cameraZ-v.z)/depth*projScale,depth:depth};
+  }
+  var pa=project(a,da), pb=project(b,db), dx=pb.x-pa.x, dy=pb.y-pa.y;
+  var length=Math.hypot(dx,dy), pad=Math.max(1,width*0.5+glow*2.5+2);
+  if (length < 0.01) {
+    return drawSpellBillboard({sx:pa.x,sy:pa.y,fwd:Math.min(da,db)},width,glow,
+      function(){draw(pa,pb);});
+  }
+  var ux=dx/length, uy=dy/length, nx=-uy*pad, ny=ux*pad;
+  var ribbon=[{x:pa.x+nx,y:pa.y+ny,depth:da},{x:pb.x+nx,y:pb.y+ny,depth:db},
+    {x:pb.x-nx,y:pb.y-ny,depth:db},{x:pa.x-nx,y:pa.y-ny,depth:da}];
+  // Keep glow caps at their endpoint's depth without stretching the main
+  // ribbon's reciprocal-depth gradient. One union mask paints the stroke once.
+  var startCap=[ribbon[0],ribbon[3],
+    {x:pa.x-ux*pad-nx,y:pa.y-uy*pad-ny,depth:da},
+    {x:pa.x-ux*pad+nx,y:pa.y-uy*pad+ny,depth:da}];
+  var endCap=[ribbon[1],{x:pb.x+ux*pad+nx,y:pb.y+uy*pad+ny,depth:db},
+    {x:pb.x+ux*pad-nx,y:pb.y+uy*pad-ny,depth:db},ribbon[2]];
+  return withSceneDepthClip(ribbon,function(){draw(pa,pb);},{extraPolygons:[startCap,endCap]});
+}
+
+function strokeSpellWorldSegment(a,b,C,width,glow) {
+  return drawSpellWorldSegment(a,b,C,width,glow,function(pa,pb){
+    ctx.lineWidth=width; ctx.beginPath(); ctx.moveTo(pa.x,pa.y); ctx.lineTo(pb.x,pb.y); ctx.stroke();
+  });
+}
+
+function spellDiscPoints(x,y,radius,segments,start,end) {
+  var points=[], from=Number.isFinite(start)?start:0, to=Number.isFinite(end)?end:Math.PI*2;
+  for(var i=0;i<segments;i++) {
+    var angle=from+(to-from)*i/segments;
+    points.push({x:x+Math.cos(angle)*radius,y:y+Math.sin(angle)*radius});
+  }
+  return points;
+}
+
+// Cache only terrain geometry, not visibility or camera projections. Each
+// footprint is clipped to the very same TL–BR terrain triangles as the floor
+// pass, avoiding flat decals cutting into banks or jumping to a cave below.
+function spellGroundTriangles(effect, minX,minY,maxX,maxY) {
+  var gs=floorMesh ? floorMesh.gridSize : 12;
+  var x0=Math.floor(minX/gs), y0=Math.floor(minY/gs), x1=Math.floor(maxX/gs), y1=Math.floor(maxY/gs);
+  var reference=Number.isFinite(effect.renderFloorZ)?effect.renderFloorZ:getEntityRenderFloorZ(effect);
+  var cache=effect._spellGroundCache;
+  if(cache && cache.mesh===floorMesh && cache.x0<=x0 && cache.y0<=y0 && cache.x1>=x1 && cache.y1>=y1 && cache.reference===reference)
+    return cache.triangles;
+  var triangles=[], epsilon=gs*1e-6;
+  if(floorMesh) { x0=Math.max(0,x0);y0=Math.max(0,y0);x1=Math.min(floorMesh.w-2,x1);y1=Math.min(floorMesh.h-2,y1); }
+  for(var gy=y0;gy<=y1;gy++)for(var gx=x0;gx<=x1;gx++) {
+    var wx=gx*gs, wy=gy*gs;
+    var vertices=[{x:wx,y:wy},{x:wx+gs,y:wy},{x:wx+gs,y:wy+gs},{x:wx,y:wy+gs}];
+    var okay=true;
+    for(var vi=0;vi<4;vi++) {
+      var vx=vertices[vi].x, vy=vertices[vi].y;
+      var z=sampleEntitySupportRenderZ(vx+(vx===wx?epsilon:-epsilon),
+        vy+(vy===wy?epsilon:-epsilon),reference,effect.underground,true);
+      if(!Number.isFinite(z)) {okay=false;break;}
+      vertices[vi].z=z+0.8;
+    }
+    if(okay) {triangles.push([vertices[0],vertices[1],vertices[2]]);triangles.push([vertices[0],vertices[2],vertices[3]]);}
+  }
+  effect._spellGroundCache={mesh:floorMesh,x0:x0,y0:y0,x1:x1,y1:y1,reference:reference,triangles:triangles};
+  return triangles;
+}
+
+function drawSpellGroundPolygon(effect, footprint, C) {
+  if(!footprint || footprint.length<3) return;
+  var minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for(var pi=0;pi<footprint.length;pi++) {
+    minX=Math.min(minX,footprint[pi].x);maxX=Math.max(maxX,footprint[pi].x);
+    minY=Math.min(minY,footprint[pi].y);maxY=Math.max(maxY,footprint[pi].y);
+  }
+  var triangles=spellGroundTriangles(effect,minX,minY,maxX,maxY);
+  for(var ti=0;ti<triangles.length;ti++) {
+    var triangle=triangles[ti], polygon=footprint;
+    var tx0=Math.min(triangle[0].x,triangle[1].x,triangle[2].x),tx1=Math.max(triangle[0].x,triangle[1].x,triangle[2].x);
+    var ty0=Math.min(triangle[0].y,triangle[1].y,triangle[2].y),ty1=Math.max(triangle[0].y,triangle[1].y,triangle[2].y);
+    if(tx1<minX || tx0>maxX || ty1<minY || ty0>maxY)continue;
+    for(var edge=0;edge<3 && polygon.length;edge++) {
+      var a=triangle[edge],b=triangle[(edge+1)%3], output=[];
+      var prev=polygon[polygon.length-1],pd=(b.x-a.x)*(prev.y-a.y)-(b.y-a.y)*(prev.x-a.x);
+      for(var k=0;k<polygon.length;k++) {
+        var current=polygon[k],cd=(b.x-a.x)*(current.y-a.y)-(b.y-a.y)*(current.x-a.x);
+        if((pd>=0)!==(cd>=0)) {
+          var ratio=pd/(pd-cd);output.push({x:prev.x+(current.x-prev.x)*ratio,y:prev.y+(current.y-prev.y)*ratio});
+        }
+        if(cd>=0)output.push(current);
+        prev=current;pd=cd;
+      }
+      polygon=output;
+    }
+    if(polygon.length<3)continue;
+    var a0=triangle[0],a1=triangle[1],a2=triangle[2];
+    var determinant=(a1.x-a0.x)*(a2.y-a0.y)-(a1.y-a0.y)*(a2.x-a0.x);
+    var world=[];
+    for(var v=0;v<polygon.length;v++) {
+      var q=polygon[v],u=((q.x-a0.x)*(a2.y-a0.y)-(q.y-a0.y)*(a2.x-a0.x))/determinant;
+      var vv=((a1.x-a0.x)*(q.y-a0.y)-(a1.y-a0.y)*(q.x-a0.x))/determinant;
+      world.push({x:q.x,y:q.y,z:a0.z+u*(a1.z-a0.z)+vv*(a2.z-a0.z)});
+    }
+    var projected=projectSceneWorldPolygon(world,C);
+    withSceneDepthClip(projected,function(){traceSceneDepthPolygon(projected);ctx.fill();});
+  }
+}
+
+function drawSpellGroundRing(effect,x,y,radius,C,width,glow) {
+  if(radius<=0)return;
+  var count=Math.max(16,Math.min(96,Math.ceil(radius*Math.PI*2/10)));
+  var pts=spellDiscPoints(x,y,radius,count),previous=null;
+  for(var i=0;i<=count;i++) {
+    var point=pts[i%count],z=spellFloorRenderZ(effect,point.x,point.y);
+    var vertex=Number.isFinite(z)?{x:point.x,y:point.y,z:z+1.0}:null;
+    if(previous && vertex)strokeSpellWorldSegment(previous,vertex,C,width,glow);
+    previous=vertex;
+  }
+}
+
+function drawSpellLandingReticle(p,C) {
+  if(!p.spell || p.spell.id!=='poison' || !Number.isFinite(p.targetX) || !Number.isFinite(p.targetY))return;
+  if(Math.hypot(p.targetX-cam.x,p.targetY-cam.y)>700)return;
+  var cloudR=p.spell.cloudRadius||50,pulse=0.55+0.45*Math.sin((Date.now()-p.spawnMs)*0.014);
+  var targetEffect=p._targetGroundEffect;
+  if(!targetEffect || targetEffect.x!==p.targetX || targetEffect.y!==p.targetY)
+    targetEffect=p._targetGroundEffect={x:p.targetX,y:p.targetY,renderFloorZ:p.targetZ,underground:p.underground};
+  ctx.save();ctx.shadowBlur=0;ctx.globalAlpha=0.95;
+  ctx.fillStyle='rgba(80,220,30,'+(0.13*pulse)+')';
+  drawSpellGroundPolygon(targetEffect,spellDiscPoints(p.targetX,p.targetY,cloudR,32),C);
+  ctx.strokeStyle='rgba(120,255,60,'+(0.65*pulse)+')';
+  drawSpellGroundRing(targetEffect,p.targetX,p.targetY,cloudR,C,Math.max(1,1.5*resScale),0);
+  ctx.fillStyle='rgba(180,255,80,'+(0.55*pulse)+')';
+  drawSpellGroundPolygon(targetEffect,spellDiscPoints(p.targetX,p.targetY,cloudR*0.14,12),C);
+  ctx.restore();
+}
+
 function drawProjectiles3D() {
   if (!projectiles || !projectiles.length) return;
   var C = getCam3D();
-  var w = C.w, h = C.h, cosAng = C.cosAng, sinAng = C.sinAng;
-  var invTanHalf = C.invTanHalf, horizonY = C.horizonY, cameraZ = C.cameraZ;
+  var horizonY = C.horizonY, cameraZ = C.cameraZ;
   for (var i = 0; i < projectiles.length; i++) {
     var p = projectiles[i];
-    var vis = entityVisible3D(p.x, p.y, p.z || 0, C,
-      { maxDist: 600, depthOffset: 2, checkMidpoint: false, fadeFraction: 1 });
+    // The ground indicator remains independently visible when its airborne
+    // projectile is behind the camera or hidden by terrain.
+    drawSpellLandingReticle(p,C);
+    var vis = entityVisible3D(p.x, p.y, Number.isFinite(p.z) ? p.z : 0, C,
+      { maxDist: 600, sceneDepth:true, checkMidpoint: false, fadeFraction: 1 });
     if (!vis) continue;
-    var screenX = vis.sx, fwd = vis.fwd, floorWorldZ = vis.floorZ;
-    var floorY = vis.sy;
+    var screenX = vis.sx, fwd = vis.fwd;
     var size = Math.max(10 * resScale, Math.min(40 * resScale, Math.floor(560 * resScale * getScale3D('projectile') / fwd)));
-    var zVal = (p.z || 0);
+    var zVal = Number.isFinite(p.z) ? p.z : 0;
     // Proper perspective: project projectile Z the same way floor/camera Z is projected
     var projWorldZ = zVal;
     var centerY = horizonY + Math.floor(((cameraZ - projWorldZ) / fwd) * projScale);
     ctx.save(); ctx.globalAlpha = 0.95;
     var spellId = (p.spell && p.spell.id) || 'missile';
     var RS = resScale;
+    // Lightning branches and comet tails extend well beyond the orb center.
+    var extent = spellId==='lightning'?size*4.5:spellId==='missile'?size*3.2:size;
+    drawSpellBillboard({sx:screenX,sy:centerY,fwd:fwd},extent,12*RS,function(){
     if (spellId === 'lightning') {
       ctx.strokeStyle = p.spell.color;
       ctx.lineWidth = Math.max(2 * RS, Math.min(4 * RS, size / 5));
@@ -14380,8 +14842,6 @@ function drawProjectiles3D() {
       }
       ctx.shadowBlur = 0;
     } else if (spellId === 'poison') {
-      var now3d = Date.now();
-      var lobAge = now3d - p.spawnMs;
       // The ball
       ctx.shadowBlur = 8 * RS; ctx.shadowColor = '#88ff44';
       ctx.fillStyle = 'rgba(136,255,68,0.75)';
@@ -14389,27 +14849,6 @@ function drawProjectiles3D() {
       ctx.fillStyle = 'rgba(200,255,140,0.55)';
       ctx.beginPath(); ctx.arc(screenX, centerY, size * 0.38, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
-      // Landing reticle at target position on the floor
-      if (p.targetX !== undefined) {
-        var tv = entityVisible3D(p.targetX, p.targetY, 0, C,
-          {maxDist:700, depthOffset:2, checkMidpoint:false, fadeFraction:1});
-        if (tv) {
-          var cloudR = p.spell.cloudRadius || 50;
-          var tRx = Math.max(8, Math.floor(cloudR * 2.2 / (tv.fwd * 0.018 + 1)));
-          var tRy = Math.max(3, Math.floor(tRx * 0.32));
-          var pulse = 0.55 + 0.45 * Math.sin(lobAge * 0.014);
-          // Filled dim zone
-          ctx.fillStyle = 'rgba(80,220,30,' + (0.13 * pulse) + ')';
-          ctx.beginPath(); ctx.ellipse(tv.sx, tv.sy, tRx, tRy, 0, 0, Math.PI * 2); ctx.fill();
-          // Bright ring edge
-          ctx.strokeStyle = 'rgba(120,255,60,' + (0.65 * pulse) + ')';
-          ctx.lineWidth = Math.max(1, 1.5 * RS);
-          ctx.beginPath(); ctx.ellipse(tv.sx, tv.sy, tRx, tRy, 0, 0, Math.PI * 2); ctx.stroke();
-          // Center crosshair dot
-          ctx.fillStyle = 'rgba(180,255,80,' + (0.55 * pulse) + ')';
-          ctx.beginPath(); ctx.ellipse(tv.sx, tv.sy, tRx * 0.18, tRy * 0.55, 0, 0, Math.PI * 2); ctx.fill();
-        }
-      }
     } else if (spellId === 'arcane') {
       ctx.shadowBlur = 10 * RS; ctx.shadowColor = '#cc66ff'; ctx.fillStyle = 'rgba(204,102,255,0.8)';
       ctx.beginPath(); ctx.arc(screenX, centerY, size * 0.6, 0, Math.PI * 2); ctx.fill();
@@ -14445,6 +14884,7 @@ function drawProjectiles3D() {
       ctx.beginPath(); ctx.arc(screenX, centerY, size / 2, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
     }
+    });
     ctx.restore();
   }
 }
@@ -14463,18 +14903,21 @@ function drawImpacts2D() {
 }
 
 function drawImpacts3D() {
-  renderEntities3D(impacts, {maxDist: viewDist, depthOffset: 2, checkMidpoint: false, fadeFraction: 1},
-    function(im, vis, C, ctx, now) {
-      var fwd = vis.fwd;
-      // Use height above local floor for lift (works underground where z is negative)
-      var zAboveFloor = (im.z || 0) - vis.floorZ;
-      var liftPx = Math.max(-60, Math.min(60, Math.floor((zAboveFloor * 1.0) / (1 + fwd * 0.01))));
-      var centerY = vis.sy - liftPx;
+  if(!impacts || !impacts.length)return;
+  var C=getCam3D(),now=Date.now();
+  for(var i=0;i<impacts.length;i++) {
+      var im=impacts[i],z=Number.isFinite(im.z)?im.z:getEntityRenderFloorZ(im);
+      // Every producer stores absolute render-world Z, including companions
+      // and synergy bursts. Do not re-add their support or apply a second lift.
+      var vis=entityVisible3D(im.x,im.y,z,C,{maxDist:viewDist,sceneDepth:true,fadeFraction:1});
+      if(!vis)continue;
+      var fwd = vis.fwd, centerY=vis.sy;
       var t = Math.max(0, Math.min(1, (now - im.spawnMs) / im.lifeMs));
 
       if (im.isCompanionProj) {
         // Companion projectile — glowing orb with trail
         var sz = Math.max(5, Math.min(22, Math.floor(320 * getScale3D('smProjectile') / fwd)));
+        drawSpellBillboard(vis,sz,10,function(){
         ctx.save();
         ctx.globalAlpha = 0.9;
         ctx.shadowBlur = 10; ctx.shadowColor = im.color || '#44dd55';
@@ -14484,14 +14927,17 @@ function drawImpacts3D() {
         ctx.beginPath(); ctx.arc(vis.sx, centerY, sz * 0.5, 0, Math.PI * 2); ctx.fill();
         ctx.shadowBlur = 0;
         ctx.restore();
+        });
       } else {
         // Normal impact — expanding ring
         var size = Math.max(10, Math.min(50, Math.floor(510 * getScale3D('projectile') / fwd)));
         var r = (size * 0.5) + 10 * t;
+        drawSpellBillboard(vis,r+2,0,function(){
         ctx.save(); ctx.globalAlpha = 1.0 - t; ctx.strokeStyle = 'rgba(255,212,79,0.95)'; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.arc(vis.sx, centerY, r, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+        });
       }
-    });
+  }
 }
 
 // ── Ground Effects Rendering ──────────────────────────────────────────
@@ -14541,46 +14987,41 @@ function drawGroundEffects3D() {
   if (!groundEffects || !groundEffects.length) return;
   var now = Date.now();
   var C = getCam3D();
-  var w = C.w, h = C.h, cosAng = C.cosAng, sinAng = C.sinAng;
-  var invTanHalf = C.invTanHalf, horizonY = C.horizonY, cameraZ = C.cameraZ;
   for (var i = 0; i < groundEffects.length; i++) {
     var ge = groundEffects[i];
     var dx = ge.x - cam.x, dy = ge.y - cam.y;
     var dist = Math.hypot(dx, dy);
-    if (dist > 500 || dist < 1) continue;
-    var fh = floorMesh ? getFloorHeightAt(ge.x, ge.y) : 0;
-    var p = projToScreen(ge.x, ge.y, fh * 25, C);
-    if (!p) continue;
-    var screenX = p.sx, fwd = p.fwd, floorY = p.sy;
-    var sizeW = Math.max(8, Math.floor(ge.radius * 2.5 / (dist * 0.02 + 1)));
-    var sizeH = Math.max(3, Math.floor(sizeW * 0.35)); // perspective flattening
+    if (dist-ge.radius > 500) continue;
     var age = now - ge.spawnMs;
     var t = Math.min(1, age / ge.duration);
     var fadeOut = t > 0.7 ? 1.0 - (t - 0.7) / 0.3 : 1.0;
-    ctx.save(); ctx.globalAlpha = 0.5 * fadeOut;
+    var fadeIn=Math.min(1,age/200);
+    ctx.save(); ctx.globalAlpha = 0.5 * fadeOut*fadeIn;
     if (ge.spellId === 'fire') {
       var flicker = 0.8 + 0.2 * Math.sin(now * 0.01 + i * 3);
       ctx.fillStyle = 'rgba(255,' + Math.floor(80 * flicker) + ',0,0.6)';
-      ctx.beginPath(); ctx.ellipse(screenX, floorY, sizeW * 0.5 * flicker, sizeH * 0.5 * flicker, 0, 0, Math.PI * 2); ctx.fill();
+      drawSpellGroundPolygon(ge,spellDiscPoints(ge.x,ge.y,ge.radius*flicker,32),C);
+      ctx.fillStyle='rgba(255,200,0,0.3)';
+      drawSpellGroundPolygon(ge,spellDiscPoints(ge.x,ge.y,ge.radius*0.6*flicker,24),C);
     } else if (ge.spellId === 'ice') {
       ctx.fillStyle = 'rgba(0,200,255,0.35)';
-      ctx.beginPath(); ctx.ellipse(screenX, floorY, sizeW * 0.5, sizeH * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+      drawSpellGroundPolygon(ge,spellDiscPoints(ge.x,ge.y,ge.radius,32),C);
       ctx.strokeStyle = 'rgba(150,240,255,0.4)'; ctx.lineWidth = 1;
-      ctx.stroke();
+      drawSpellGroundRing(ge,ge.x,ge.y,ge.radius,C,1,0);
     } else if (ge.spellId === 'poison') {
       var bubble = 0.9 + 0.1 * Math.sin(now * 0.008 + i * 5);
-      ctx.shadowBlur = 10; ctx.shadowColor = '#88ff44';
+      ctx.shadowColor = '#88ff44';
       // Main cloud body
       ctx.fillStyle = 'rgba(80,200,40,0.38)';
-      ctx.beginPath(); ctx.ellipse(screenX, floorY, sizeW * 0.5 * bubble, sizeH * 0.5 * bubble, 0, 0, Math.PI * 2); ctx.fill();
+      drawSpellGroundPolygon(ge,spellDiscPoints(ge.x,ge.y,ge.radius*bubble,32),C);
       // Side wisps for billow shape
       ctx.fillStyle = 'rgba(120,230,60,0.22)';
-      var wOff3d = sizeW * 0.28;
-      ctx.beginPath(); ctx.ellipse(screenX - wOff3d, floorY, sizeW * 0.38, sizeH * 0.38, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.ellipse(screenX + wOff3d, floorY, sizeW * 0.34, sizeH * 0.34, 0, 0, Math.PI * 2); ctx.fill();
+      drawSpellGroundPolygon(ge,spellDiscPoints(ge.x-ge.radius*0.28,ge.y,ge.radius*0.58,24),C);
+      drawSpellGroundPolygon(ge,spellDiscPoints(ge.x+ge.radius*0.28,ge.y,ge.radius*0.52,24),C);
       // Glow ring outline
       ctx.strokeStyle = 'rgba(100,255,60,0.22)'; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.ellipse(screenX, floorY, sizeW * 0.5, sizeH * 0.5, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.shadowBlur=10;
+      drawSpellGroundRing(ge,ge.x,ge.y,ge.radius,C,1,10);
       ctx.shadowBlur = 0;
     }
     ctx.restore();
@@ -14623,15 +15064,26 @@ function drawChainEffects3D() {
     var t = age / ce.lifeMs;
     ctx.save(); ctx.globalAlpha = 1.0 - t;
     ctx.strokeStyle = '#ffff00'; ctx.lineWidth = 2; ctx.lineCap = 'round';
-    // Project source at its actual floor height so the bolt hugs the ground
-    var fromFloorZ = (floorMesh ? getFloorHeightAt(ce.fromX, ce.fromY) : 0) * 25;
-    var fromScreen = projToScreen(ce.fromX, ce.fromY, fromFloorZ + 12, C);
-    if (!fromScreen) { ctx.restore(); continue; }
+    var fromZ=Number.isFinite(ce.fromZ)?ce.fromZ:spellFloorRenderZ(ce,ce.fromX,ce.fromY)+30;
+    var from={x:ce.fromX,y:ce.fromY,z:fromZ};
     for (var j = 0; j < ce.targets.length; j++) {
       var tgt = ce.targets[j];
-      var toFloorZ = (floorMesh ? getFloorHeightAt(tgt.x, tgt.y) : 0) * 25;
-      var toScreen = projToScreen(tgt.x, tgt.y, toFloorZ + 12, C);
-      if (toScreen) drawLightningBoltBetween(fromScreen.sx, fromScreen.sy, toScreen.sx, toScreen.sy);
+      var toZ=Number.isFinite(tgt.z)?tgt.z:spellFloorRenderZ(ce,tgt.x,tgt.y)+30;
+      var to={x:tgt.x,y:tgt.y,z:toZ},distance=Math.hypot(to.x-from.x,to.y-from.y);
+      var count=Math.max(3,Math.min(32,Math.ceil(distance/16))),previous=from;
+      for(var seg=1;seg<=count;seg++) {
+        var along=seg/count,jitter=seg===count?0:(Math.random()-0.5)*9;
+        var point={x:from.x+(to.x-from.x)*along-(to.y-from.y)/(distance||1)*jitter,
+          y:from.y+(to.y-from.y)*along+(to.x-from.x)/(distance||1)*jitter,
+          z:from.z+(to.z-from.z)*along+(seg===count?0:(Math.random()-0.5)*6)};
+        drawSpellWorldSegment(previous,point,C,8,14,function(pa,pb){
+          ctx.shadowBlur=14;ctx.shadowColor='#ffff00';ctx.strokeStyle='rgba(255,230,60,0.35)';ctx.lineWidth=8;
+          ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);ctx.stroke();
+          ctx.shadowBlur=6;ctx.shadowColor='#ffffa0';ctx.strokeStyle='#ffffff';ctx.lineWidth=1.4;
+          ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);ctx.stroke();
+        });
+        previous=point;
+      }
     }
     ctx.restore();
   }
@@ -14648,7 +15100,7 @@ function worldToScreen3D(wx, wy, wz, cam2, halfFov, w, h, horizon, pitchOff) {
   var rgt = dx * (-sinA) + dy * cosA;
   var invTanHalf = 1 / Math.tan(halfFov);
   var screenX = Math.floor((rgt / fwd * invTanHalf * 0.5 + 0.5) * w);
-  var cameraZ = 60 + ((cam2.z || 60) - 60) * (25 / 40);
+  var cameraZ = 60 + ((Number.isFinite(cam2.z) ? cam2.z : 60) - 60) * (25 / 40);
   var horizonY = Math.floor(h * 0.5) + pitchOff;
   var screenY = horizonY + Math.floor(((cameraZ - wz) / fwd) * projScale);
   return {x:screenX, y:screenY};
@@ -14741,8 +15193,6 @@ function drawNovaEffects3D() {
   if (!novaEffects || !novaEffects.length) return;
   var now = Date.now();
   var C = getCam3D();
-  var w = C.w, h = C.h, cosAng = C.cosAng, sinAng = C.sinAng;
-  var invTanHalf = C.invTanHalf, horizonY = C.horizonY, cameraZ = C.cameraZ;
   var alive = [];
   for (var i = 0; i < novaEffects.length; i++) {
     var ne = novaEffects[i];
@@ -14752,39 +15202,35 @@ function drawNovaEffects3D() {
     var t = age / ne.lifeMs;
     var dx = ne.x - cam.x, dy = ne.y - cam.y;
     var dist = Math.hypot(dx, dy);
-    if (dist > 500) continue;
-    var fwd = dx * cosAng + dy * sinAng;
-    if (fwd < 1) continue;
-    var rgt = dx * (-sinAng) + dy * cosAng;
-    var screenX = Math.floor((rgt / fwd * invTanHalf * 0.5 + 0.5) * w);
-    var fh = floorMesh ? getFloorHeightAt(ne.x, ne.y) : 0;
-    var floorY = horizonY + Math.floor(((cameraZ - fh * 25) / fwd) * projScale);
-    var screenR = Math.max(6, Math.floor(ne.radius * t * 2.0 / (fwd * 0.02 + 1)));
+    if (dist-ne.radius > 500) continue;
+    var radius=ne.radius*t;
     ctx.save();
     ctx.shadowBlur = 18; ctx.shadowColor = ne.color;
-    // Outer ellipse ring
+    // World-space rings cross the near plane and hills one segment at a time.
     ctx.globalAlpha = 0.75 * (1.0 - t);
     ctx.strokeStyle = ne.color; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.ellipse(screenX, floorY, screenR, screenR * 0.35, 0, 0, Math.PI * 2); ctx.stroke();
+    drawSpellGroundRing(ne,ne.x,ne.y,radius,C,3,18);
     // Mid ring
-    var screenR2 = Math.max(4, Math.floor(screenR * 0.68));
     var tMid3d = Math.min(1, t / 0.7);
     ctx.globalAlpha = 0.5 * (1.0 - t) * tMid3d;
     ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.ellipse(screenX, floorY, screenR2, screenR2 * 0.35, 0, 0, Math.PI * 2); ctx.stroke();
+    drawSpellGroundRing(ne,ne.x,ne.y,radius*0.68,C,2,18);
     // Filled interior glow
-    ctx.fillStyle = ne.color; ctx.globalAlpha = 0.10 * (1.0 - t);
-    ctx.beginPath(); ctx.ellipse(screenX, floorY, screenR, screenR * 0.35, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur=0;ctx.fillStyle = ne.color; ctx.globalAlpha = 0.10 * (1.0 - t);
+    drawSpellGroundPolygon(ne,spellDiscPoints(ne.x,ne.y,radius,40),C);
     // Central flash
     if (t < 0.35) {
       var ft3d = t / 0.35;
-      ctx.globalAlpha = 0.9 * (1.0 - ft3d);
-      ctx.fillStyle = '#ffffff';
-      var fR3d = Math.max(3, Math.floor(screenR * 0.22 * (1 - ft3d * 0.5)));
-      ctx.beginPath(); ctx.arc(screenX, floorY, fR3d, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = ne.color;
-      ctx.globalAlpha = 0.6 * (1.0 - ft3d);
-      ctx.beginPath(); ctx.arc(screenX, floorY, Math.max(2, fR3d * 1.9), 0, Math.PI * 2); ctx.fill();
+      var flash=projToScreen(ne.x,ne.y,spellFloorRenderZ(ne,ne.x,ne.y)+2,C);
+      if(flash) {
+        var fR3d=Math.max(3,ne.radius*0.20*projScale/flash.fwd*(1-ft3d*0.5));
+        drawSpellBillboard(flash,fR3d*1.9,18,function(){
+          ctx.shadowBlur=18;ctx.globalAlpha=0.9*(1-ft3d);ctx.fillStyle='#ffffff';
+          ctx.beginPath();ctx.arc(flash.sx,flash.sy,fR3d,0,Math.PI*2);ctx.fill();
+          ctx.globalAlpha=0.6*(1-ft3d);ctx.fillStyle=ne.color;
+          ctx.beginPath();ctx.arc(flash.sx,flash.sy,fR3d*1.9,0,Math.PI*2);ctx.fill();
+        });
+      }
     }
     ctx.shadowBlur = 0;
     ctx.restore();
@@ -14836,15 +15282,7 @@ function drawConeEffects2D() {
 function drawConeEffects3D() {
   if (!coneEffects || !coneEffects.length) return;
   var C = getCam3D();
-  var w = C.w, h = C.h, cosAng = C.cosAng, sinAng = C.sinAng;
-  var invTanHalf = C.invTanHalf, horizonY = C.horizonY, cameraZ = C.cameraZ;
   var now = Date.now();
-  // Local projection helper — looks up floor height, delegates to projToScreen
-  function projPt(px, py) {
-    var fhh = floorMesh ? getFloorHeightAt(px, py) : 0;
-    var p = projToScreen(px, py, fhh * 25, C);
-    return p ? {x: p.sx, y: p.sy, fwd: p.fwd} : null;
-  }
   for (var i = 0; i < coneEffects.length; i++) {
     var ce = coneEffects[i];
     var t = Math.max(0, Math.min(1, (now - ce.spawnMs) / ce.lifeMs));
@@ -14859,13 +15297,16 @@ function drawConeEffects3D() {
         var pAng = ce.ang + (Math.random() - 0.5) * spread;
         var px = ce.x + Math.cos(pAng) * dist;
         var py = ce.y + Math.sin(pAng) * dist;
-        var pt = projPt(px, py);
+        var floorZ=spellFloorRenderZ(ce,px,py);
+        var pt = Number.isFinite(floorZ)?projToScreen(px,py,floorZ+8,C):null;
         if (!pt || pt.fwd > 300) continue;
         var size = Math.max(6, Math.min(24, Math.floor(220 / pt.fwd))) * (1 - pct * 0.5);
         ctx.globalAlpha = (0.7 - 0.4 * pct) * (1.0 - t);
         var hue = p % 3;
         ctx.fillStyle = (hue === 0) ? '#ff6600' : (hue === 1 ? '#ffaa00' : '#ff8800');
-        ctx.beginPath(); ctx.arc(pt.x, pt.y, size, 0, Math.PI * 2); ctx.fill();
+        drawSpellBillboard(pt,size,15,function(){
+          ctx.beginPath(); ctx.arc(pt.sx, pt.sy, size, 0, Math.PI * 2); ctx.fill();
+        });
       }
       ctx.restore();
     } else {
@@ -14877,32 +15318,27 @@ function drawConeEffects3D() {
         var rayAng = leftAng + (rightAng - leftAng) * (r / (rays - 1));
         ctx.globalAlpha = 0.5 * (1.0 - t);
         ctx.strokeStyle = 'rgba(0,255,255,0.8)'; ctx.lineWidth = 3;
-        ctx.beginPath();
-        var steps = 6;
+        var steps = Math.max(6,Math.ceil(ce.range/10)),previous=null;
         for (var s = 0; s <= steps; s++) {
           var dist = ce.range * (s / steps);
           var rpx = ce.x + Math.cos(rayAng) * dist;
           var rpy = ce.y + Math.sin(rayAng) * dist;
-          var rpt = projPt(rpx, rpy);
-          if (!rpt) continue;
-          if (s === 0) ctx.moveTo(rpt.x, rpt.y); else ctx.lineTo(rpt.x, rpt.y);
+          var rz=spellFloorRenderZ(ce,rpx,rpy);
+          var rpt=Number.isFinite(rz)?{x:rpx,y:rpy,z:rz+1}:null;
+          if(previous && rpt)strokeSpellWorldSegment(previous,rpt,C,3,10);
+          previous=rpt;
         }
-        ctx.stroke();
       }
       ctx.globalAlpha = 0.2 * (1.0 - t); ctx.fillStyle = 'rgba(0,255,255,0.3)';
-      ctx.beginPath();
-      var arcSteps = 16;
+      ctx.shadowBlur=0;
+      var arcSteps = 16,footprint=[{x:ce.x,y:ce.y}];
       for (var s = 0; s <= arcSteps; s++) {
         var a = leftAng + (rightAng - leftAng) * (s / arcSteps);
         var apx = ce.x + Math.cos(a) * ce.range;
         var apy = ce.y + Math.sin(a) * ce.range;
-        var apt = projPt(apx, apy);
-        if (!apt) continue;
-        if (s === 0) ctx.moveTo(apt.x, apt.y); else ctx.lineTo(apt.x, apt.y);
+        footprint.push({x:apx,y:apy});
       }
-      var opt = projPt(ce.x, ce.y);
-      if (opt) ctx.lineTo(opt.x, opt.y);
-      ctx.closePath(); ctx.fill();
+      drawSpellGroundPolygon(ce,footprint,C);
       ctx.restore();
     }
   }
@@ -15003,16 +15439,16 @@ function drawFlameStream3D() {
   var originX = pos.x + cosA * handFwd + rightCos * handRight;
   var originY = pos.y + sinA * handFwd + rightSin * handRight;
   // Hand height in renderer Z: convert from game floorZ space to renderer space
-  var handZ = ((pos.floorZ || 60) - 5 - 60) * (25 / 40) + 60; // hand level (slightly below eye)
-  var floorAtOrigin = floorMesh ? getFloorHeightAt(originX, originY) * 25 : 0;
+  var handZ = ((Number.isFinite(pos.floorZ) ? pos.floorZ : 60) - 60) * (25 / 40) + 55;
+  var flameGround={x:pos.x,y:pos.y,renderFloorZ:getPlayerFloorH()*25,underground:playerUnderground};
 
-  function projPt(px, py, t) {
-    var floorZ = floorMesh ? getFloorHeightAt(px, py) * 25 : 0;
+  function worldPt(px, py, t) {
+    var floorZ = spellFloorRenderZ(flameGround,px,py);
+    if(!Number.isFinite(floorZ))return null;
     // Near origin: at hand height. At distance: descends to floor level.
     // Smooth lerp so the flame arcs down naturally
-    var zz = handZ * (1 - t * t) + floorZ * (t * t);
-    var p = projToScreen(px, py, zz, C);
-    return p ? {x: p.sx, y: p.sy, fwd: p.fwd} : null;
+    var zz = handZ * (1 - t * t) + (floorZ+1) * (t * t);
+    return {x:px,y:py,z:zz};
   }
 
   ctx.save();
@@ -15031,8 +15467,8 @@ function drawFlameStream3D() {
     var w = (1 + dist * Math.tan(coneSpread) * (0.3 + 0.7 * fanT)) * rampT;
     var perpX = -sinA * w, perpY = cosA * w;
 
-    var ptL = projPt(cx2 + perpX, cy2 + perpY, t);
-    var ptR = projPt(cx2 - perpX, cy2 - perpY, t);
+    var ptL = worldPt(cx2 + perpX, cy2 + perpY, t);
+    var ptR = worldPt(cx2 - perpX, cy2 - perpY, t);
 
     if (prevL && prevR && ptL && ptR) {
       // Alpha: bright at hand, fading to nearly transparent at tip
@@ -15053,13 +15489,12 @@ function drawFlameStream3D() {
       }
       ctx.fillStyle = rgbQ(Math.max(20, r), Math.max(0, g), Math.max(0, b));
 
-      ctx.beginPath();
-      ctx.moveTo(prevL.x, prevL.y);
-      ctx.lineTo(ptL.x, ptL.y);
-      ctx.lineTo(ptR.x, ptR.y);
-      ctx.lineTo(prevR.x, prevR.y);
-      ctx.closePath();
-      ctx.fill();
+      // A fanning quad may be nonplanar on terrain. Its two triangles retain
+      // forward depth at all vertices and clip independently across the mouth.
+      var flameA=projectSceneWorldPolygon([prevL,ptL,ptR],C);
+      var flameB=projectSceneWorldPolygon([prevL,ptR,prevR],C);
+      withSceneDepthClip(flameA,function(){traceSceneDepthPolygon(flameA);ctx.fill();});
+      withSceneDepthClip(flameB,function(){traceSceneDepthPolygon(flameB);ctx.fill();});
     }
     prevL = ptL; prevR = ptR;
   }
@@ -15076,7 +15511,8 @@ function drawFlameStream3D() {
     var pAng = ang + (((seed % 50) / 50) - 0.5) * spreadAtDist * 2;
     var px = originX + Math.cos(pAng) * dist2;
     var py = originY + Math.sin(pAng) * dist2;
-    var pt = projPt(px, py, pct);
+    var world=worldPt(px,py,pct);
+    var pt=world?projToScreen(world.x,world.y,world.z,C):null;
     if (!pt || pt.fwd > 400 || pt.fwd < 1) continue;
     // Particles shrink and fade with distance
     var size = Math.max(2, Math.min(16, Math.floor(160 / pt.fwd))) * (1.2 - pct * 0.8) * rampT;
@@ -15085,14 +15521,14 @@ function drawFlameStream3D() {
     ctx.globalAlpha = pAlpha;
     var hue = (seed + Math.floor(now * 0.012)) % 5;
     ctx.fillStyle = hue === 0 ? '#ffffcc' : hue === 1 ? '#ffdd44' : hue === 2 ? '#ffaa00' : hue === 3 ? '#ff6600' : '#ff3300';
-    ctx.beginPath(); ctx.arc(pt.x, pt.y, size, 0, Math.PI * 2); ctx.fill();
+    drawSpellBillboard(pt,size,10,function(){
+      ctx.beginPath(); ctx.arc(pt.sx, pt.sy, size, 0, Math.PI * 2); ctx.fill();
+    });
   }
 
   ctx.shadowBlur = 0;
   ctx.restore(); ctx.globalAlpha = 1.0;
 }
-
-
 // =============================================
 // SECTION 15: RENDERING - HUD & MENU
 // =============================================
@@ -15457,12 +15893,17 @@ function drawCoins2D() {
 }
 
 function drawCoins3D() {
-  renderEntities3D(coinDrops, {maxDist: viewDist * 0.5, depthOffset: 3, checkMidpoint: true, fadeFraction: 1},
+  renderEntities3D(coinDrops, {maxDist: viewDist * 0.5, groundAnchor: true, fadeFraction: 1,
+    bounds:function(coin,vis,C,now) {
+      var size = Math.max(4,Math.min(14,Math.floor(C.h*0.18/(vis.fwd*0.12+1))));
+      var cy = vis.sy-size*1.2+Math.sin(now*0.004+(Number.isFinite(coin.bob)?coin.bob:0))*3;
+      return {x:vis.sx-size-22,y:cy-size-22,width:size*2+44,height:size*2+44};
+    }},
     function(coin, vis, C, ctx, now) {
       var h = C.h, fwd = vis.fwd;
-      var floorY = Math.min(vis.sy, h + 10);
+      var floorY = vis.sy;
       var sz = Math.max(4, Math.min(14, Math.floor(h * 0.18 / (fwd * 0.12 + 1))));
-      var bob = Math.sin(now * 0.004 + coin.bob) * 3;
+      var bob = Math.sin(now * 0.004 + (Number.isFinite(coin.bob) ? coin.bob : 0)) * 3;
       var cy = floorY - sz * 1.2 + bob;
       ctx.save();
       ctx.shadowBlur = 10; ctx.shadowColor = '#ffd700';
@@ -15651,7 +16092,7 @@ function drawTorchGlow3D() {
     if (fwd < 5) continue;
     var rgt = dx * (-sinAng) + dy * cosAng;
     var screenX = Math.floor((rgt / fwd * invTanHalf * 0.5 + 0.5) * w);
-    var wz = 15; // torch height in world
+    var wz = Number.isFinite(light.z) ? light.z : (floorMesh ? getFloorHeightAt(light.x, light.y) * 25 : 0) + 15;
     var screenY = Math.floor(horizonY + ((cameraZ - wz) / fwd) * projScale);
     var glowRadius = Math.max(10, Math.floor(w * 0.12 * (120 * getScale3D('smGlow') / fwd)));
     var flicker = 0.95 + 0.03 * Math.sin(now * 0.007 + i * 2.3) + 0.02 * Math.sin(now * 0.013 + i * 5.7);
@@ -15661,7 +16102,14 @@ function drawTorchGlow3D() {
     grad.addColorStop(0.4, 'rgba(' + light.r + ',' + Math.floor(light.g * 0.7) + ',' + Math.floor(light.b * 0.3) + ',' + (alpha * 0.3).toFixed(3) + ')');
     grad.addColorStop(1, 'rgba(' + light.r + ',' + light.g + ',' + light.b + ',0)');
     ctx.fillStyle = grad;
-    ctx.fillRect(screenX - glowRadius, screenY - glowRadius, glowRadius * 2, glowRadius * 2);
+    withSceneDepthClip([
+      {x:screenX-glowRadius,y:screenY-glowRadius,depth:fwd},
+      {x:screenX+glowRadius,y:screenY-glowRadius,depth:fwd},
+      {x:screenX+glowRadius,y:screenY+glowRadius,depth:fwd},
+      {x:screenX-glowRadius,y:screenY+glowRadius,depth:fwd}
+    ], function() {
+      ctx.fillRect(screenX - glowRadius, screenY - glowRadius, glowRadius * 2, glowRadius * 2);
+    });
   }
   ctx.restore();
 }
@@ -15685,6 +16133,8 @@ function drawAmbientParticles3D() {
     if (screenY < -5 || screenY > h + 5) continue;
     var sz = Math.max(1, p.size * getScale3D('particle') * projScale / fwd * 0.15);
 
+    withSceneDepthBillboard({x:screenX-sz*4-1,y:screenY-sz*4-1,
+      width:sz*8+2,height:sz*8+2}, fwd, function() {
     ctx.globalAlpha = p.alpha;
     if (p.type === 'firefly' || p.type === 'ember') {
       // Glow halo
@@ -15697,6 +16147,7 @@ function drawAmbientParticles3D() {
     } else {
       ctx.beginPath(); ctx.arc(screenX, screenY, sz, 0, Math.PI * 2); ctx.fill();
     }
+    });
   }
   ctx.globalAlpha = 1.0;
 }
@@ -16411,121 +16862,25 @@ function drawGuardTower3D(C, proj, fillQuad, strokeQuad) {
 function drawCaveEntrance3D() {
   if (!deepCaveEntrances || !deepCaveEntrances.length || !MODE3D) return;
   var C = getCam3D();
-  var proj = function(wx, wy, wz) { return projToScreen(wx, wy, wz, C); };
-
+  // Clip complete world-space faces at the near plane before projection.
+  var proj = function(wx, wy, wz) { return {x:wx, y:wy, z:wz}; };
   var fillQuad = function(p0, p1, p2, p3, color) {
     if (!p0 || !p1 || !p2 || !p3) return;
     ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.moveTo(p0.sx, p0.sy); ctx.lineTo(p1.sx, p1.sy);
-    ctx.lineTo(p2.sx, p2.sy); ctx.lineTo(p3.sx, p3.sy);
-    ctx.closePath(); ctx.fill();
+    return fillSceneDepthPolygon(projectSceneWorldPolygon([p0,p1,p2,p3], C));
   };
 
-  // Arch dimensions (world units). Sized so the opening is visibly large
-  // enough for the player to walk through without guesswork.
-  var ARCH_W = 90;     // total outer width
-  var ARCH_H = 110;    // top of pillar / bottom of lintel (was 64 — too short)
-  var PILLAR_W = 14;   // pillar thickness along arch axis
-  var PILLAR_D = 14;   // pillar thickness through-arch
-  var LINTEL_H = 18;   // lintel vertical thickness
-  var LINTEL_OVERHANG = 8;  // lintel extends past pillars on each side
-  var OPENING_W = ARCH_W - 2 * PILLAR_W;  // inner opening width (~62)
+  // Dimensions are populated from each authoritative portal record. Every
+  // entrance gets physical rock jamb/lintel faces at the terrain cut;
+  // increasingly constructed styles add a decorative frame and, at the high
+  // end, short reinforcements.
+  var ARCH_W, ARCH_H, PILLAR_W, PILLAR_D, LINTEL_H, LINTEL_OVERHANG, OPENING_W;
 
   var STONE_LIT = '#a89787';
   var STONE_MID = '#776859';
   var STONE_DARK = '#473d32';
   var STONE_SHADOW = '#2a2320';
   var PORTAL_DARK = '#05040a';
-
-  // Per-piece occlusion check: ray-walks from camera to a world point, hidden
-  // if any hill or wall lies between. Lets each pillar / flank / lintel pop in
-  // independently as the camera clears the obstruction.
-  function canSeePoint(wx, wy, pieceTopZ) {
-    window.__lastSeeReason = null;
-    var dx = wx - cam.x, dy = wy - cam.y;
-    var rayLen = Math.hypot(dx, dy);
-    if (rayLen < 1) return true;
-    // Fast depth-buffer check — walls already wrote their depths per screen
-    // column. If the point sits behind the nearest wall at this column, cull
-    // immediately. Same pattern entityVisible3D uses for enemies/chests.
-    var fwd = dx * C.cosAng + dy * C.sinAng;
-    if (fwd > 1 && depthBuffer) {
-      var rgt = dx * (-C.sinAng) + dy * C.cosAng;
-      var sxx = Math.floor((rgt / fwd * C.invTanHalf * 0.5 + 0.5) * C.w);
-      if (sxx >= 0 && sxx < depthBuffer.length) {
-        // Single-column read + larger tolerance replaces 5-column scan.
-        var dmin = depthBuffer[sxx];
-        if (fwd > dmin + 6) {
-          window.__lastSeeReason = 'depthBuffer sx=' + sxx + ' fwd=' + fwd.toFixed(1) + ' dmin=' + dmin.toFixed(1);
-          return false;
-        }
-      }
-    }
-    var eyeZ = cam.z != null ? cam.z : 60;
-    var step = 8;  // stepping granularity — 8u catches typical hills, halves cost vs 4
-    var mesh = floorMesh;
-    var gs = mesh ? mesh.gridSize : 0;
-    // Skip terrain/layer occlusion when underground — inside the cave, mesh
-    // layers are above/below the camera, not between it and the arch, and
-    // the sampled layer Zs lead to false positives. Walls still occlude via
-    // the depthBuffer check above.
-    var skipLayerCheck = (typeof playerUnderground !== 'undefined' && playerUnderground);
-    for (var t = step; t < rayLen - 20; t += step) {
-      var fr = t / rayLen;
-      var sx = cam.x + dx * fr, sy = cam.y + dy * fr;
-      if (mesh && !skipLayerCheck) {
-        var mgx = Math.floor(sx / gs), mgy = Math.floor(sy / gs);
-        if (mgx >= 0 && mgy >= 0 && mgx < mesh.w && mgy < mesh.h) {
-          var mci = mgy * mesh.w + mgx;
-          var lc = mesh.layerCount[mci];
-          // Only walkable/solid layers occlude: 1=floor, 3=ledge, 4=cap.
-          // Skip type 2 (ceiling) — cave ceilings sit high above but don't
-          // visually block sight from outside the cave.
-          var maxZ = -Infinity;
-          if (lc > 0 && mesh.l0Type[mci] !== 2 && mesh.l0TopZ[mci] > maxZ) maxZ = mesh.l0TopZ[mci];
-          if (lc > 1 && mesh.l1Type[mci] !== 2 && mesh.l1TopZ[mci] > maxZ) maxZ = mesh.l1TopZ[mci];
-          if (lc > 2 && mesh.l2Type[mci] !== 2 && mesh.l2TopZ[mci] > maxZ) maxZ = mesh.l2TopZ[mci];
-          if (lc > 3 && mesh.l3Type[mci] !== 2 && mesh.l3TopZ[mci] > maxZ) maxZ = mesh.l3TopZ[mci];
-          if (lc > 4 && mesh.l4Type[mci] !== 2 && mesh.l4TopZ[mci] > maxZ) maxZ = mesh.l4TopZ[mci];
-          if (maxZ === -Infinity) continue;
-          // A layer is "a hill" only if it rises materially above surface
-          // AND above eye. This avoids counting the pit's own rim cells when
-          // the camera is down in the ramp.
-          var layerZ = maxZ * 25;
-          // Screen-space occlusion: if the terrain at this point is above the
-          // line of sight from camera eye → piece top, the terrain visually
-          // covers the piece in that column. Line of sight Z at distance t:
-          //   sightZ = eyeZ + (pieceTopZ - eyeZ) * (t / rayLen)
-          // Terrain occludes iff layerZ > sightZ.
-          if (pieceTopZ != null) {
-            // Only flag as hill-occluder if the layer is meaningfully above
-            // surface (Z > 30). Pit/ramp depression layers below surface are
-            // the archway's own domain — they shouldn't occlude it. Prevents
-            // false positives that hid all the flank planks.
-            if (layerZ > 30) {
-              var sightZ = eyeZ + (pieceTopZ - eyeZ) * (t / rayLen);
-              if (layerZ > sightZ + 2) {
-                window.__lastSeeReason = 'sightLine t=' + t.toFixed(0) + ' layerZ=' + layerZ.toFixed(1) + ' sightZ=' + sightZ.toFixed(1);
-                return false;
-              }
-            }
-          } else if (layerZ > 30 && layerZ > eyeZ + 10) {
-            window.__lastSeeReason = 'layerZ t=' + t.toFixed(0) + ' layerZ=' + layerZ.toFixed(1) + ' eyeZ=' + eyeZ.toFixed(1);
-            return false;
-          }
-        }
-      }
-      var gxx = Math.floor(sx / cell), gyy = Math.floor(sy / cell);
-      if (gxx >= 0 && gyy >= 0 && gxx < gridW && gyy < gridH) {
-        if (grid[gyy * gridW + gxx] && !inEntranceReserve(sx, sy)) {
-          window.__lastSeeReason = 'wallCell t=' + t.toFixed(0) + ' gx=' + gxx + ' gy=' + gyy;
-          return false;
-        }
-      }
-    }
-    return true;
-  }
 
   var visibleCaves = [];
   for (var ei = 0; ei < deepCaveEntrances.length; ei++) {
@@ -16543,9 +16898,21 @@ function drawCaveEntrance3D() {
     var ce = visibleCaves[ci].ce;
     var dist = visibleCaves[ci].dist;
 
-    // Ground at the entrance = bottom of the ramp (cave floor Z).
-    var fh = floorMesh ? getFloorHeightAt(ce.x, ce.y) : 0;
+    var portalStyle = typeof ce.style === 'number' ? Math.max(0, Math.min(1, ce.style)) : 0.8;
+    PILLAR_W = 8 + portalStyle * 6;
+    PILLAR_D = 8 + portalStyle * 6;
+    LINTEL_H = 9 + portalStyle * 9;
+    LINTEL_OVERHANG = 4 + portalStyle * 4;
+    OPENING_W = Math.max(60, (ce.halfWidth || 45) * 2);
+    ARCH_W = OPENING_W + PILLAR_W * 2;
+
+    // The frame shares the portal's floor and roof rather than resampling l0.
+    var fh = typeof ce.floorH === 'number' && isFinite(ce.floorH) ?
+      ce.floorH : (floorMesh ? getFloorHeightAt(ce.x, ce.y) : 0);
+    var portalCeilH = typeof ce.ceilingH === 'number' && isFinite(ce.ceilingH) ?
+      ce.ceilingH : fh + (ce.ceilH || 4.2);
     var gz = fh * 25;
+    ARCH_H = Math.max(78, Math.min(130, (portalCeilH - fh) * 25));
 
     // Through-direction (walk axis) and perpendicular (arch-width axis).
     // Uses baked cosA/sinA from entrance creation; falls back if missing.
@@ -16556,6 +16923,78 @@ function drawCaveEntrance3D() {
       ce.cosA = fx; ce.sinA = fy;
     }
     var px = -fy, py = fx;
+
+    // ── PORTAL ROCK CUT ────────────────────────────────────────────────
+    // Layer-role boundaries intentionally stop floor/cap quads at the mouth.
+    // Their missing vertical faces are real rock volume, not empty sky: draw
+    // two jamb solids and the roof lintel from the same portal contract. This
+    // is structural geometry and therefore exists even for a natural style;
+    // the constructed pillars below remain optional decoration.
+    function _portalSurfaceH(cross, along, fallbackH) {
+      if (!floorMesh || !floorMesh.surfaceH || !floorMesh.gridSize) return fallbackH;
+      var swx = ce.x + px * cross + fx * along;
+      var swy = ce.y + py * cross + fy * along;
+      var sgx = Math.round(swx / floorMesh.gridSize);
+      var sgy = Math.round(swy / floorMesh.gridSize);
+      if (sgx < 0 || sgy < 0 || sgx >= floorMesh.w || sgy >= floorMesh.h) return fallbackH;
+      var sh = floorMesh.surfaceH[sgy * floorMesh.w + sgx];
+      return typeof sh === 'number' && isFinite(sh) ? sh : fallbackH;
+    }
+    var _rockHalf = ce.halfWidth || 54;
+    var _rockOuter = _rockHalf + Math.min(48, Math.max(30, _rockHalf * 0.7));
+    var _rockMinTop = portalCeilH + Math.max(0.25, ce.minCover || 1);
+    function _rockTopAt(cross) {
+      return Math.max(_rockMinTop,
+        _portalSurfaceH(cross, 0, _rockMinTop),
+        _portalSurfaceH(cross, 14, _rockMinTop));
+    }
+    var _rockTopNegInner = _rockTopAt(-_rockHalf - 2);
+    var _rockTopNegOuter = _rockTopAt(-_rockOuter);
+    var _rockTopPosInner = _rockTopAt(_rockHalf + 2);
+    var _rockTopPosOuter = _rockTopAt(_rockOuter);
+    var _rockFrontAlong = -3;
+    var _rockBackAlong = 16;
+    var rockMaterial = getCaveMaterialColorAt(ce.x, ce.y);
+    var rockLight = getCaveRenderLightAt(ce.x, ce.y, true);
+    function rockShade(shade) {
+      return rgbQ(((rockMaterial >> 16) & 255) * rockLight * shade | 0,
+        ((rockMaterial >> 8) & 255) * rockLight * shade | 0,
+        (rockMaterial & 255) * rockLight * shade | 0);
+    }
+    var _rockFront = DEBUG_POLY_TYPES ? '#d91f1f' : rockShade(1);
+    var _rockSide = DEBUG_POLY_TYPES ? '#a51414' : rockShade(0.88);
+    var _rockBack = DEBUG_POLY_TYPES ? '#771010' : rockShade(0.8);
+    var _rockTop = DEBUG_POLY_TYPES ? '#ef3535' : rockShade(1);
+
+    function _rockPoint(cross, along, heightH) {
+      return proj(ce.x + px * cross + fx * along,
+                  ce.y + py * cross + fy * along, heightH * 25);
+    }
+    function _drawRockBand(c0, c1, bottomH, top0H, top1H) {
+      if (top0H <= bottomH || top1H <= bottomH) return;
+      var f0b = _rockPoint(c0, _rockFrontAlong, bottomH);
+      var f1b = _rockPoint(c1, _rockFrontAlong, bottomH);
+      var b0b = _rockPoint(c0, _rockBackAlong, bottomH);
+      var b1b = _rockPoint(c1, _rockBackAlong, bottomH);
+      var f0t = _rockPoint(c0, _rockFrontAlong, top0H);
+      var f1t = _rockPoint(c1, _rockFrontAlong, top1H);
+      var b0t = _rockPoint(c0, _rockBackAlong, top0H);
+      var b1t = _rockPoint(c1, _rockBackAlong, top1H);
+      // Far face, edge returns, mouth face, then top. The decorative frame is
+      // painted later and naturally sits in front of this rock cut.
+      fillQuad(b0t, b1t, b1b, b0b, _rockBack);
+      fillQuad(f0t, b0t, b0b, f0b, _rockSide);
+      fillQuad(f1t, b1t, b1b, f1b, _rockSide);
+      fillQuad(f0t, f1t, f1b, f0b, _rockFront);
+      fillQuad(f0t, f1t, b1t, b0t, _rockTop);
+    }
+    _drawRockBand(-_rockOuter, -_rockHalf, fh, _rockTopNegOuter, _rockTopNegInner);
+    _drawRockBand(_rockHalf, _rockOuter, fh, _rockTopPosInner, _rockTopPosOuter);
+    _drawRockBand(-_rockHalf, _rockHalf, portalCeilH, _rockTopNegInner, _rockTopPosInner);
+
+    // At the natural end, the rock cut is the entrance. Avoid placing a
+    // freestanding constructed monument in front of every cave.
+    if (portalStyle < 0.28) continue;
 
     // Pillar centers: flank the opening left/right
     var halfStride = (OPENING_W + PILLAR_W) * 0.5;
@@ -16588,32 +17027,13 @@ function drawCaveEntrance3D() {
       // Top cap
       fillQuad(flT, frT, brT, blT, STONE_LIT);
     }
-    window.__archwayVis = window.__archwayVis || {};
-    var _ak = 'ent' + ci;
-    var _prev = window.__archwayVis[_ak] || {};
-    function _logVis(part, nowVis) {
-      var was = _prev[part];
-      if (was === nowVis) return;
-      _prev[part] = nowVis;
-      if (!window.DEBUG_ARCH_VIS) return;
-      var reason = nowVis ? 'clear' : (window.__lastSeeReason || 'unknown');
-      console.log('[ARCH-VIS] ' + part + ' ' + (was===undefined?'init':was?'HIDE':'SHOW') +
-        ' → ' + (nowVis ? 'SHOW' : 'HIDE') +
-        ' | cam=(' + cam.x.toFixed(0) + ',' + cam.y.toFixed(0) + ',z=' + (cam.z||60).toFixed(0) + ')' +
-        ' ent=(' + ce.x.toFixed(0) + ',' + ce.y.toFixed(0) + ')' +
-        ' dist=' + dist.toFixed(0) +
-        ' reason=' + reason);
-    }
-    var _pillarTop = gz + ARCH_H;
-    var _seeL = canSeePoint(lcX, lcY, _pillarTop);  _logVis('pillarL', _seeL);
-    var _seeR = canSeePoint(rcX, rcY, _pillarTop);  _logVis('pillarR', _seeR);
-    if (_seeL) drawPillar(lcX, lcY);
-    if (_seeR) drawPillar(rcX, rcY);
+    drawPillar(lcX, lcY);
+    drawPillar(rcX, rcY);
 
     // ── FLANKING WALLS: stone segments extending sideways from each pillar ──
     // Match pillar Z range (gz to gz+ARCH_H) so they sit beside the pillars, not
     // above them. Extend outward along the cross axis to block side approach.
-    var FLANK_LEN = 140;          // sideways extent from pillar outer edge
+    var FLANK_LEN = Math.round((ce.halfWidth || 54) * (0.5 + portalStyle * 0.7));
     var FLANK_THK = PILLAR_D;
     // Reach to the bottom of the lintel — the visual "ceiling" of the archway.
     var FLANK_H = ARCH_H;
@@ -16628,14 +17048,6 @@ function drawCaveEntrance3D() {
     var PLANK_SHADES = [WOOD_MID, WOOD_LIT, WOOD_MID, WOOD_DARK, WOOD_MID, WOOD_LIT, WOOD_MID];
     var NUM_PLANKS = 7;
     function drawFlank(pillarCX, pillarCY, sideSign) {
-      var _sideName = sideSign === 1 ? 'L' : 'R';
-      // Fast path: test the flank's midpoint first. If fully clear, draw
-      // every plank without per-plank ray walks. If fully occluded, skip the
-      // whole flank. Only fall through to per-plank tests when the midpoint
-      // is ambiguous (handled by per-plank logic as before).
-      var _midCross = sideSign * (pHW + FLANK_LEN * 0.5);
-      var _midX = pillarCX + px * _midCross, _midY = pillarCY + py * _midCross;
-      var _midClear = canSeePoint(_midX, _midY, gz + FLANK_H);
       var hzD = FLANK_THK * 0.5;
       var plankLen = FLANK_LEN / NUM_PLANKS;
       // Camera-relative draw order: outer planks further → draw first
@@ -16650,21 +17062,6 @@ function drawCaveEntrance3D() {
         var c1 = sideSign * (pHW + (k + 1) * plankLen);
         var p0X = pillarCX + px * c0, p0Y = pillarCY + py * c0;
         var p1X = pillarCX + px * c1, p1Y = pillarCY + py * c1;
-        // Per-plank occlusion — skip the per-plank ray walk when the flank
-        // midpoint is clear; that's the common case and saves 6 rays/flank.
-        var plankMX = (p0X + p1X) * 0.5, plankMY = (p0Y + p1Y) * 0.5;
-        var _plankVis = _midClear || canSeePoint(plankMX, plankMY, gz + FLANK_H);
-        var _plankKey = 'plank' + _sideName + k;
-        if (_prev[_plankKey] !== _plankVis) {
-          var _prevPlank = _prev[_plankKey];
-          _prev[_plankKey] = _plankVis;
-          if (window.DEBUG_ARCH_VIS) console.log('[ARCH-VIS] ' + _plankKey + ' ' + (_prevPlank===undefined?'init':(_prevPlank?'HIDE':'SHOW')) +
-            ' → ' + (_plankVis ? 'SHOW' : 'HIDE') +
-            ' | cam=(' + cam.x.toFixed(0) + ',' + cam.y.toFixed(0) + ',z=' + (cam.z||60).toFixed(0) + ')' +
-            ' plank=(' + plankMX.toFixed(0) + ',' + plankMY.toFixed(0) + ')' +
-            ' reason=' + (_plankVis ? 'clear' : (window.__lastSeeReason || 'unknown')));
-        }
-        if (!_plankVis) continue;
         var f0X = p0X + fx * hzD, f0Y = p0Y + fy * hzD;
         var b0X = p0X - fx * hzD, b0Y = p0Y - fy * hzD;
         var f1X = p1X + fx * hzD, f1Y = p1Y + fy * hzD;
@@ -16686,30 +17083,12 @@ function drawCaveEntrance3D() {
         if (k === 0) fillQuad(f0T, b0T, b0B, f0B, WOOD_SIDE);
         // Top cap — use the plank shade (slightly lit)
         fillQuad(f0T, f1T, b1T, b0T, shade);
-        // Dark vertical seam at every plank junction on front AND back
-        if (k > 0 && ctx) {
-          ctx.strokeStyle = WOOD_DEEP;
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(f0T.sx, f0T.sy); ctx.lineTo(f0B.sx, f0B.sy);
-          ctx.moveTo(b0T.sx, b0T.sy); ctx.lineTo(b0B.sx, b0B.sy);
-          ctx.stroke();
-        }
       }
     }
-    // Test at the midpoint of each flank so it pops in when that specific
-    // section clears the obstruction, independent of the pillars.
-    var _lflkCX = lcX + px * (pHW + FLANK_LEN * 0.5);
-    var _lflkCY = lcY + py * (pHW + FLANK_LEN * 0.5);
-    var _rflkCX = rcX - px * (pHW + FLANK_LEN * 0.5);
-    var _rflkCY = rcY - py * (pHW + FLANK_LEN * 0.5);
-    var _flankTop = gz + FLANK_H;
-    // No outer gate — drawFlank does per-plank visibility itself. The flank
-    // midpoint test used to hide the whole wall in one shot when the midpoint
-    // happened to be occluded, defeating the per-plank reveal.
-    drawFlank(lcX, lcY, 1);
-    drawFlank(rcX, rcY, -1);
-    window.__archwayVis[_ak] = _prev;
+    if (portalStyle >= 0.72) {
+      drawFlank(lcX, lcY, 1);
+      drawFlank(rcX, rcY, -1);
+    }
 
     // ── LINTEL (horizontal stone beam across the top) ──
     var lntHW = ARCH_W * 0.5 + LINTEL_OVERHANG;
@@ -16723,8 +17102,8 @@ function drawCaveEntrance3D() {
     var lblB = proj(lblX, lblY, lz0), lbrB = proj(lbrX, lbrY, lz0);
     var lflT = proj(lflX, lflY, lz1), lfrT = proj(lfrX, lfrY, lz1);
     var lblT = proj(lblX, lblY, lz1), lbrT = proj(lbrX, lbrY, lz1);
-    // Lintel shows if either pillar is visible (it spans both)
-    if (_seeL || _seeR) {
+    // Every lintel face uses the same per-pixel depth as the ground.
+    {
       fillQuad(lblT, lbrT, lbrB, lblB, STONE_SHADOW);
       fillQuad(lflT, lblT, lblB, lflB, STONE_DARK);
       fillQuad(lfrT, lbrT, lbrB, lfrB, STONE_DARK);
@@ -16733,9 +17112,10 @@ function drawCaveEntrance3D() {
     }
 
     // "CAVE" label above the lintel when close
-    if (dist < 500) {
-      var labelP = proj(ce.x, ce.y, lz1 + 10);
-      if (labelP) {
+    if (portalStyle >= 0.82 && dist < 500) {
+      var labelP = projToScreen(ce.x, ce.y, lz1 + 10, C);
+      var labelDepth = (ce.x - cam.x) * C.cosAng + (ce.y - cam.y) * C.sinAng;
+      if (labelP && labelDepth <= sceneDepthAt(labelP.sx, labelP.sy) + 0.15) {
         var a = Math.min(1.0, (500 - dist) / 200);
         ctx.save();
         ctx.globalAlpha = a;
@@ -18119,7 +18499,6 @@ function drawGameOver() {
 
   ctx.restore();
 }
-
 // =============================================
 // SECTION 16: MAIN DRAW DISPATCH
 // =============================================
@@ -18950,7 +19329,7 @@ function draw() {
     // Camera follow
     if (CAM_FOLLOW) {
       cam.x = pos.x; cam.y = pos.y;
-      if (pos.floorZ) cam.z = pos.floorZ;
+      if (Number.isFinite(pos.floorZ)) cam.z = pos.floorZ;
     }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -18966,10 +19345,12 @@ function draw() {
     // the reduced rate (unnoticeable at walking speed over ~80ms).
     _floorCacheTick = (_floorCacheTick + 1) | 0;  // invalidate floor cache each frame
     _pt('lightGrid', function(){ if ((++_lightGridFrameCount) % 5 === 0) updateLightGrid(); });
+    beginSceneDepthFrame(canvas.width, canvas.height);
     _pt('skybox3D', function(){ drawSkybox3D(); });
     _pt('ceiling3D', function(){ if (!DEBUG_HIDE_CEIL) drawLayersCeiling3D(); });
     _pt('platforms3D', function(){ if (!DEBUG_HIDE_PLATS) drawLayersFloor3D(); });
     _pt('walls3D', function(){ if (!DEBUG_HIDE_WALLS) drawWalls3D(); });
+    _pt('caveEntrance3D', function(){ drawCaveEntrance3D(); });
     _pt('sceneEntities', function(){
       drawFloorScatter3D();
       drawTreasureChests3D();
@@ -18987,8 +19368,6 @@ function draw() {
     drawPlatforms2D();
   }
 }
-
-
 // =============================================
 // SECTION 17: GAME LOOP
 // =============================================
@@ -19290,99 +19669,211 @@ function _separatePair(a, b) {
   }
 }
 
+// Keep the daylight solution separate from the camera's cave exposure.  The
+// legacy renderer stored both in ambientLight, which meant that entering a
+// cave darkened sunlit terrain visible through the mouth.  Cave-aware passes
+// use getCaveRenderLightAt(); surface passes use renderSurfaceAmbient.
+var renderSurfaceAmbient = 0.9;
+var renderSurfaceSunIntensity = 0.6;
+var renderSurfaceFogFloor = 0.3;
+var renderSurfaceWallShadeN = 0.8;
+var renderSurfaceWallShadeS = 0.8;
+var renderSurfaceWallShadeE = 1.0;
+var renderSurfaceWallShadeW = 1.0;
+var renderSurfaceTopShade = 1.15;
+var renderCaveAmbient = 0.45;
+var renderCaveFogFloor = 0.15;
+var renderCameraCaveBlend = 0;
+
+function _renderSmooth01(t) {
+  t = Math.max(0, Math.min(1, t));
+  return t * t * (3 - 2 * t);
+}
+
+function getRenderCameraFeetH() {
+  var z = (typeof cam !== 'undefined' && typeof cam.z === 'number' && isFinite(cam.z)) ?
+    cam.z : ((typeof pos.floorZ === 'number' && isFinite(pos.floorZ)) ? pos.floorZ : 60);
+  return (z - 60) / 40;
+}
+
+function isRenderCameraUnderground() {
+  if (typeof getCaveSpaceAt !== 'function') return !!playerUnderground;
+  return !!getCaveSpaceAt(cam.x, cam.y, getRenderCameraFeetH()).underground;
+}
+
+// Daylight fades over the first part of the covered passage.  Portal geometry
+// owns the mouth frame and signed axial coordinate; lighting only consumes it.
+// A covered point outside every portal footprint is a deep-interior point.
+function getPortalRenderBlendAt(x, y, covered) {
+  if (!covered) return 0;
+  return getCavePortalDepthBlendAt(x, y,
+    typeof deepCaveEntrances !== 'undefined' ? deepCaveEntrances : []);
+}
+
+// Explicit-coordinate form shared by generation and rendering. Entrances and
+// XY must use the same frame: world-space while authoring a chunk, window-local
+// for lighting. No player/camera state participates in a surface's material.
+function getCavePortalDepthBlendAt(x, y, entrances) {
+  var best = 1;
+  var found = false;
+  if (typeof sampleCavePortal === 'function' && entrances) {
+    for (var i = 0; i < entrances.length; i++) {
+      var e = entrances[i];
+      var s = sampleCavePortal(e, x, y);
+      if (!s) continue;
+      var fadeLen = Math.max(60, Math.min(150, (e.innerLength || 240) * 0.6));
+      // A stamped roof can reach one mesh cell outward from the mathematical
+      // plane. Treat that fringe as the bright mouth (depth zero), not as a
+      // deep interior point; otherwise ambient flickers dark→bright→dark while
+      // crossing adjacent +along/-along cells.
+      var b = _renderSmooth01(Math.max(0, -s.along) / fadeLen);
+      if (b < best) best = b;
+      found = true;
+    }
+  }
+  return found ? best : 1;
+}
+
+// Author one stone albedo per mesh vertex. Mouth rock starts with the actual
+// neighboring terrain palette and becomes warm-neutral stone farther inward.
+// Floor, walls, ceiling and cut faces share this palette; orientation and
+// illumination are shading, not alternate material definitions. The subtle
+// mineral variation uses absolute world coordinates, never window indices or
+// chunk RNG consumption order, so rebuilding/rebasing cannot recolor a rock.
+function sampleCaveMaterialColor(surfaceHex, worldX, worldY, worldEntrances) {
+  var surface = typeof surfaceHex === 'number' ? surfaceHex :
+    parseInt(typeof surfaceHex === 'string' ? surfaceHex.slice(1) : '', 16);
+  if (!isFinite(surface)) surface = 0x6c6558;
+  var blend = getCavePortalDepthBlendAt(worldX, worldY, worldEntrances);
+  var hash = ((Math.floor(worldX / 12) * 7919 +
+    Math.floor(worldY / 12) * 104729) >>> 0) % 13;
+  var grain = hash - 6;
+  var r = Math.round(((surface >> 16) & 255) * (1 - blend) + (108 + grain) * blend);
+  var g = Math.round(((surface >> 8) & 255) * (1 - blend) + (101 + grain) * blend);
+  var b = Math.round((surface & 255) * (1 - blend) + (88 + grain) * blend);
+  return (r << 16) | (g << 8) | b;
+}
+
+function caveMaterialColorHex(color) {
+  return '#' + ('000000' + (color >>> 0).toString(16)).slice(-6);
+}
+
+// Constant-time material lookup for a window-local rendered face midpoint.
+// The bounded array belongs to the mesh and is replaced with it. In particular,
+// this must not query biome/noise, portals or camera state for every wall face.
+function getCaveMaterialColorAt(x, y) {
+  if (typeof floorMesh !== 'undefined' && floorMesh && floorMesh.caveStone &&
+      isFinite(x) && isFinite(y)) {
+    var gx = Math.floor(x / floorMesh.gridSize), gy = Math.floor(y / floorMesh.gridSize);
+    if (gx >= 0 && gy >= 0 && gx < floorMesh.w && gy < floorMesh.h) {
+      return floorMesh.caveStone[gy * floorMesh.w + gx];
+    }
+  }
+  // Legacy level meshes have no authored cave field. Keep a stable neutral
+  // fallback rather than silently reintroducing a view-dependent palette.
+  return 0x6c6558;
+}
+
+function getCaveRenderLightAt(x, y, covered) {
+  if (!covered) return renderSurfaceAmbient;
+  var blend = getPortalRenderBlendAt(x, y, true);
+  return renderSurfaceAmbient + (renderCaveAmbient - renderSurfaceAmbient) * blend;
+}
+
+// A point on the opposite side of the roof plane is visible only when its ray
+// crosses a real portal aperture. This works in both directions: looking in
+// from the approach and looking back out from the chamber.
+function isPointVisibleThroughCavePortal(wx, wy) {
+  if (!deepCaveEntrances || !deepCaveEntrances.length) return false;
+  for (var i = 0; i < deepCaveEntrances.length; i++) {
+    var e = deepCaveEntrances[i];
+    var co = e.cosA, si = e.sinA;
+    if (co === undefined || si === undefined) {
+      co = Math.cos(e.angle || 0); si = Math.sin(e.angle || 0);
+    }
+    // e.angle points inward; sampleCavePortal's public along axis points out.
+    var cdx = cam.x - e.x, cdy = cam.y - e.y;
+    var tdx = wx - e.x, tdy = wy - e.y;
+    var ca = -(cdx * co + cdy * si);
+    var ta = -(tdx * co + tdy * si);
+    if (!((ca <= 0 && ta >= 0) || (ca >= 0 && ta <= 0)) || ta === ca) continue;
+    var cc = -cdx * si + cdy * co;
+    var tc = -tdx * si + tdy * co;
+    var u = -ca / (ta - ca);
+    if (u < 0 || u > 1) continue;
+    var crossAtMouth = cc + (tc - cc) * u;
+    if (Math.abs(crossAtMouth) <= (e.halfWidth || 54) + 6) return true;
+  }
+  return false;
+}
+
+function isExteriorVisibleThroughCavePortal(wx, wy) {
+  return isPointVisibleThroughCavePortal(wx, wy);
+}
+
 function updateDayNight(dt) {
   if (!settings.dayNight) {
     // Cycle disabled — fixed noon
     ambientLight = 0.9; sunIntensity = 0.6; fogFloor = 0.3;
     sunDirX = 0; sunDirZ = 1;
-    _wallShadeN = 0.8; _wallShadeS = 0.8; _wallShadeE = 1.0; _wallShadeW = 1.0;
-    _topShade = 1.15;
-    return;
-  }
-  dayTime += dt * daySpeed;
-  if (dayTime >= 1) dayTime -= 1;
-
-  // Sun orbit — moves east-to-west, arc over south sky
-  var sunAngle = dayTime * Math.PI * 2;
-  sunDirX = Math.cos(sunAngle);
-  sunDirZ = Math.sin(sunAngle);  // positive = above horizon
-
-  // Ambient + sun intensity from time of day
-  // Night: 0.0-0.15 and 0.85-1.0, Dawn: 0.15-0.30, Day: 0.30-0.70, Dusk: 0.70-0.85
-  var t = dayTime;
-  if (t < 0.15 || t > 0.85) {
-    // Night
-    ambientLight = 0.32;
-    sunIntensity = 0.0;
-    fogFloor = 0.2;
-  } else if (t < 0.30) {
-    // Dawn — lerp from night to day
-    var p = (t - 0.15) / 0.15;
-    ambientLight = 0.32 + p * 0.58;
-    sunIntensity = p * 0.6;
-    fogFloor = 0.2 + p * 0.1;
-  } else if (t < 0.70) {
-    // Day
-    ambientLight = 0.9;
-    sunIntensity = 0.6;
-    fogFloor = 0.3;
   } else {
-    // Dusk — lerp from day to night
-    var p = (t - 0.70) / 0.15;
-    ambientLight = 0.9 - p * 0.58;
-    sunIntensity = 0.6 - p * 0.6;
-    fogFloor = 0.3 - p * 0.1;
+    dayTime += dt * daySpeed;
+    if (dayTime >= 1) dayTime -= 1;
+
+    // Sun orbit — moves east-to-west, arc over south sky
+    var sunAngle = dayTime * Math.PI * 2;
+    sunDirX = Math.cos(sunAngle);
+    sunDirZ = Math.sin(sunAngle);  // positive = above horizon
+
+    // Ambient + sun intensity from time of day
+    // Night: 0.0-0.15 and 0.85-1.0, Dawn: 0.15-0.30, Day: 0.30-0.70, Dusk: 0.70-0.85
+    var t = dayTime;
+    if (t < 0.15 || t > 0.85) {
+      // Night
+      ambientLight = 0.32;
+      sunIntensity = 0.0;
+      fogFloor = 0.2;
+    } else if (t < 0.30) {
+      // Dawn — lerp from night to day
+      var p = (t - 0.15) / 0.15;
+      ambientLight = 0.32 + p * 0.58;
+      sunIntensity = p * 0.6;
+      fogFloor = 0.2 + p * 0.1;
+    } else if (t < 0.70) {
+      // Day
+      ambientLight = 0.9;
+      sunIntensity = 0.6;
+      fogFloor = 0.3;
+    } else {
+      // Dusk — lerp from day to night
+      var p = (t - 0.70) / 0.15;
+      ambientLight = 0.9 - p * 0.58;
+      sunIntensity = 0.6 - p * 0.6;
+      fogFloor = 0.3 - p * 0.1;
+    }
   }
 
-  // Underground detection — cap ambient when player is under a cave ceiling.
-  // Near cave entrances, use a gradual transition instead of an abrupt flip:
-  // the entrance rendering system (deferred quads, gaps, ceiling) needs to keep
-  // working while the player walks into the cave, not shut off the instant
-  // they step onto a cell with ceilH > 0.1.
-  playerUnderground = false;
-  var _playerEntranceDist = 999; // still used for ambient blend fade below
-  if (floorMesh && floorMesh.layerCount) {
-    var _pgx = Math.floor(pos.x / 12);
-    var _pgy = Math.floor(pos.y / 12);
-    if (_pgx >= 0 && _pgx < floorMesh.w && _pgy >= 0 && _pgy < floorMesh.h) {
-      // Layer-aware underground detection:
-      //   - Find the walkable layer the player is currently on.
-      //   - Find the topmost walkable layer in this cell.
-      //   - If the player's layer is below the topmost, they're under
-      //     something — they're underground.
-      // This replaces the old heuristic (meshCave + height < -0.3 + entrDist)
-      // with pure topology. No thresholds, no fudge factors.
-      var _playerH_u = ((pos.floorZ || 60) - 60) / 40;
-      var _walk_u = getWalkableLayerTopAt(pos.x, pos.y, _playerH_u);
-      var _topWalk = getTopWalkableLayerIdx(_pgx, _pgy);
-      if (_walk_u.idx >= 0 && _topWalk >= 0 && _walk_u.idx < _topWalk) {
-        playerUnderground = true;
-      }
-    }
-    // Still compute entrance distance for ambient lighting blend below
-    if (deepCaveEntrances && deepCaveEntrances.length > 0) {
-      for (var _ei = 0; _ei < deepCaveEntrances.length; _ei++) {
-        var _edx = pos.x - deepCaveEntrances[_ei].x;
-        var _edy = pos.y - deepCaveEntrances[_ei].y;
-        var _ed = Math.sqrt(_edx * _edx + _edy * _edy);
-        if (_ed < _playerEntranceDist) _playerEntranceDist = _ed;
-      }
-    }
+  // Save the exterior solution before applying camera exposure.  Even with
+  // day/night disabled this section runs, so underground topology never goes
+  // stale.  The cave floor is a true readability floor, not merely an upper
+  // cap on an already-dark night value.
+  renderSurfaceAmbient = ambientLight;
+  renderSurfaceSunIntensity = sunIntensity;
+  renderSurfaceFogFloor = fogFloor;
+  renderCaveAmbient = Math.max(0.40, Math.min(0.45, renderSurfaceAmbient));
+  renderCaveFogFloor = 0.15;
+
+  if (typeof getCaveSpaceAt === 'function') {
+    playerUnderground = !!getCaveSpaceAt(pos.x, pos.y, getPlayerFloorH()).underground;
+  } else {
+    playerUnderground = false;
   }
-  if (playerUnderground) {
-    // Previously clamped to 0.08 which was nearly pitch-black and made the
-    // cave hard to read as you crossed the threshold. 0.45 reads as a dim
-    // cave — clearly darker than the surface but still legible — and the
-    // 0.9→0.45 step across the threshold is far less jarring than 0.9→0.08.
-    ambientLight = Math.min(ambientLight, 0.45);
-    sunIntensity = 0;
-    fogFloor = 0.15;
-  } else if (_playerEntranceDist < 120) {
-    // Gradual darkening near entrance — blend between surface and cave ambient
-    var _entrBlend = Math.max(0, 1.0 - _playerEntranceDist / 120);
-    var _caveAmbient = Math.min(ambientLight, 0.45);
-    ambientLight = ambientLight + ((_caveAmbient - ambientLight) * (1.0 - _entrBlend));
-  }
+  renderCameraCaveBlend = getPortalRenderBlendAt(pos.x, pos.y, playerUnderground);
+  ambientLight = renderSurfaceAmbient +
+    (renderCaveAmbient - renderSurfaceAmbient) * renderCameraCaveBlend;
+  sunIntensity = renderSurfaceSunIntensity * (1 - renderCameraCaveBlend);
+  fogFloor = renderSurfaceFogFloor +
+    (renderCaveFogFloor - renderSurfaceFogFloor) * renderCameraCaveBlend;
 
   // Pre-compute shade per wall normal direction (4 values, reused for all faces)
   // Normals: N=(0,-1), S=(0,1), E=(1,0), W=(-1,0)
@@ -19397,6 +19888,14 @@ function updateDayNight(dt) {
   _wallShadeW = ambientLight + sunIntensity * dotW;
   // Top faces — lit by sun elevation (sunDirZ = how high sun is)
   _topShade = ambientLight + sunIntensity * Math.max(0, sunDirZ) * 0.8;
+
+  // Exterior shade remains stable while the player looks out from a cave.
+  renderSurfaceWallShadeN = renderSurfaceAmbient + renderSurfaceSunIntensity * dotN;
+  renderSurfaceWallShadeS = renderSurfaceAmbient + renderSurfaceSunIntensity * dotS;
+  renderSurfaceWallShadeE = renderSurfaceAmbient + renderSurfaceSunIntensity * dotE;
+  renderSurfaceWallShadeW = renderSurfaceAmbient + renderSurfaceSunIntensity * dotW;
+  renderSurfaceTopShade = renderSurfaceAmbient +
+    renderSurfaceSunIntensity * Math.max(0, sunDirZ) * 0.8;
 }
 
 function gameUpdate(dt) {
@@ -19472,7 +19971,6 @@ function activateShrine(shr) {
   pushToast('Shrine of ' + buffName + ' — 2 min buff', '#ffcc66', 3000);
   console.log('[SHRINE] Activated ' + buffName + ' shrine for ' + (duration / 1000) + 's');
 }
-
 // =============================================
 // ARENA CHALLENGE SYSTEM
 // =============================================
@@ -19982,7 +20480,7 @@ function updateArcaneTomes() {
       applyArcaneTome();
       for (var pi = 0; pi < 15; pi++) {
         var ang = (pi / 15) * Math.PI * 2;
-        impacts.push({x: tome.x, y: tome.y, z: 10,
+        impacts.push({x: tome.x, y: tome.y, z: getEntityRenderFloorZ(tome) + 10,
           vx: Math.cos(ang) * 50, vy: Math.sin(ang) * 50, vz: 20 + Math.random() * 30,
           spawnMs: Date.now(), lifeMs: 1000, color: '#bb66ff', size: 5});
       }
@@ -20012,14 +20510,13 @@ function updateStatPickups() {
       goalMessageUntil = Date.now() + 4000;
       for (var pi = 0; pi < 12; pi++) {
         var ang = (pi / 12) * Math.PI * 2;
-        impacts.push({x: sp.x, y: sp.y, z: 8,
+        impacts.push({x: sp.x, y: sp.y, z: getEntityRenderFloorZ(sp) + 8,
           vx: Math.cos(ang) * 45, vy: Math.sin(ang) * 45, vz: 15 + Math.random() * 25,
           spawnMs: Date.now(), lifeMs: 800, color: pColor, size: 4});
       }
       console.log('[STAT] Collected ' + sp.type + ' at (' + sp.wx.toFixed(0) + ',' + sp.wy.toFixed(0) + ')');
     });
 }
-
 // =============================================
 // COMPANION SYSTEM
 // =============================================
@@ -20031,6 +20528,9 @@ function updateCompanions(dt) {
     var c = companions[i];
     var def = COMPANION_DEFS[c.type];
     if (!def) continue;
+    if (!Number.isFinite(c.renderFloorZ)) {
+      c.renderFloorZ = sampleEntitySupportRenderZ(c.x, c.y, getPlayerRenderFloorZ());
+    }
 
     // Initialize wander angle on first frame
     if (c.wanderAng === undefined) c.wanderAng = Math.random() * Math.PI * 2;
@@ -20044,6 +20544,7 @@ function updateCompanions(dt) {
       var tAng = cam.ang + (Math.random() - 0.5) * 1.2;
       c.x = pos.x + Math.cos(tAng) * def.followIdeal;
       c.y = pos.y + Math.sin(tAng) * def.followIdeal;
+      c.renderFloorZ = sampleEntitySupportRenderZ(c.x, c.y, getPlayerRenderFloorZ());
       cdx = pos.x - c.x; cdy = pos.y - c.y;
       cdist = Math.hypot(cdx, cdy);
     }
@@ -20090,6 +20591,9 @@ function updateCompanions(dt) {
       c.phase += dt * 2.5;
     }
 
+    // Carry support with this actor as it walks; bounce remains a local offset.
+    var nextSupportZ = sampleEntitySupportRenderZ(c.x, c.y, c.renderFloorZ);
+    if (Number.isFinite(nextSupportZ)) c.renderFloorZ = nextSupportZ;
     // Bounce height
     c.z = Math.abs(Math.sin(c.phase)) * def.bounceHeight;
 
@@ -20117,7 +20621,7 @@ function updateCompanions(dt) {
           var pvx = (pdx / pdist) * def.projSpeed;
           var pvy = (pdy / pdist) * def.projSpeed;
           impacts.push({
-            x: c.x, y: c.y, z: c.z * 25,
+            x: c.x, y: c.y, z: getEntityRenderFloorZ(c) + c.z * 25,
             vx: pvx, vy: pvy,
             spawnMs: now, lifeMs: def.projLifeMs,
             color: def.color, size: 4,
@@ -20283,15 +20787,47 @@ function updateEnemySpawners() {
 }
 
 
+// Shared layout keeps the scene-depth bounds identical to the animated sprite,
+// including its label and soft halo. Screen-edge clamping would detach loot
+// from its real support and can pull buried objects back into the viewport.
+function lootPickupRenderLayout(kind, item, vis, C, now) {
+  var phase = Number.isFinite(item.bob) ? item.bob : 0;
+  var size, centerY, label = '', blur;
+  if (kind === 'soul') {
+    size = Math.max(8, Math.min(32, Math.floor(C.h * 0.65 * getScale3D('smPickup') / (vis.fwd * 0.12 + 1))));
+    centerY = vis.sy-size*1.6+Math.sin(now*0.003+phase)*4;
+    blur = 28;
+  } else if (kind === 'tome') {
+    size = Math.max(12, Math.min(48, Math.floor(C.h * 0.80 * getScale3D('lgPickup') / (vis.fwd * 0.12 + 1))));
+    centerY = vis.sy-size*2.5+Math.sin(now*0.002+phase)*6;
+    label = 'Arcane Tome'; blur = 40;
+  } else {
+    size = Math.max(10, Math.min(36, Math.floor(C.h * 0.65 * getScale3D('smPickup') / (vis.fwd * 0.12 + 1))));
+    centerY = vis.sy-size*2+Math.sin(now*0.003+phase)*5;
+    label = item.type === 'heartCrystal' ? 'Heart Crystal' : item.type === 'manaStar' ? 'Mana Star' : 'Movement Tome';
+    blur = 28;
+  }
+  var labelSize = Math.max(10, Math.floor(20 * getScale3D('smText') * projScale / vis.fwd));
+  var halfW = size+blur, top = centerY-size-blur, bottom = centerY+size+blur;
+  if (label) {
+    ctx.save();
+    ctx.font = 'bold ' + labelSize + 'px monospace';
+    halfW = Math.max(halfW,ctx.measureText(label).width*0.5+2);
+    ctx.restore();
+    top = Math.min(top,centerY-size-8-labelSize-2);
+  }
+  return {size:size,centerY:centerY,label:label,labelSize:labelSize,phase:phase,
+    bounds:{x:vis.sx-halfW,y:top,width:halfW*2,height:bottom-top}};
+}
+
 function drawSoulOrbs3D() {
-  renderEntities3D(soulOrbs, {maxDist: 600, depthOffset: 5, checkMidpoint: true, fadeFraction: 1},
+  renderEntities3D(soulOrbs, {maxDist: 600, groundAnchor: true, fadeFraction: 1,
+    bounds:function(orb,vis,C,now){return lootPickupRenderLayout('soul',orb,vis,C,now).bounds;}},
     function(orb, vis, C, ctx, now) {
       var h = C.h, fwd = vis.fwd;
-      var orbSize = Math.max(8, Math.min(32, Math.floor(h * 0.65 * getScale3D('smPickup') / (fwd * 0.12 + 1))));
-      var floorY = Math.min(vis.sy, h + orbSize * 2);
-      var bob = Math.sin(now * 0.003 + orb.bob) * 4;
-      var orbY = floorY - orbSize * 1.6 + bob;
-      var pulse = 0.75 + 0.25 * Math.sin(now * 0.005 + orb.bob);
+      var layout = lootPickupRenderLayout('soul',orb,vis,C,now);
+      var orbSize = layout.size, orbY = layout.centerY;
+      var pulse = 0.75 + 0.25 * Math.sin(now * 0.005 + layout.phase);
       ctx.save();
       ctx.globalAlpha = 0.92;
       ctx.shadowBlur = 14 * pulse; ctx.shadowColor = '#9933ff';
@@ -20305,14 +20841,13 @@ function drawSoulOrbs3D() {
 }
 
 function drawArcaneTomes3D() {
-  renderEntities3D(arcaneTomes, {maxDist: 800, depthOffset: 5, checkMidpoint: true, fadeFraction: 1},
+  renderEntities3D(arcaneTomes, {maxDist: 800, groundAnchor: true, fadeFraction: 1,
+    bounds:function(tome,vis,C,now){return lootPickupRenderLayout('tome',tome,vis,C,now).bounds;}},
     function(tome, vis, C, ctx, now) {
       var h = C.h, sx = vis.sx, fwd = vis.fwd;
-      var sz = Math.max(12, Math.min(48, Math.floor(h * 0.80 * getScale3D('lgPickup') / (fwd * 0.12 + 1))));
-      var floorY = Math.min(vis.sy, h + sz * 2);
-      var bob = Math.sin(now * 0.002 + tome.bob) * 6;
-      var cy = floorY - sz * 2.5 + bob;
-      var spin = (now * 0.002 + tome.bob) % (Math.PI * 2);
+      var layout = lootPickupRenderLayout('tome',tome,vis,C,now);
+      var sz = layout.size, cy = layout.centerY;
+      var spin = (now * 0.002 + layout.phase) % (Math.PI * 2);
       var squish = Math.abs(Math.cos(spin));
       var pulse = 0.8 + 0.2 * Math.sin(now * 0.004);
       ctx.save();
@@ -20329,7 +20864,7 @@ function drawArcaneTomes3D() {
       ctx.lineTo(sx, cy + sz * 0.3); ctx.lineTo(sx - sz * 0.25 * squish, cy);
       ctx.closePath(); ctx.fill();
       ctx.shadowBlur = 0;
-      var labelSize = Math.max(10, Math.floor(20 * getScale3D('smText') * projScale / fwd));
+      var labelSize = layout.labelSize;
       ctx.fillStyle = '#eeccff';
       ctx.font = 'bold ' + labelSize + 'px monospace';
       ctx.textAlign = 'center';
@@ -20339,14 +20874,13 @@ function drawArcaneTomes3D() {
 }
 
 function drawStatPickups3D() {
-  renderEntities3D(statPickups, {maxDist: 600, depthOffset: 5, checkMidpoint: true, fadeFraction: 1},
+  renderEntities3D(statPickups, {maxDist: 600, groundAnchor: true, fadeFraction: 1,
+    bounds:function(sp,vis,C,now){return lootPickupRenderLayout('stat',sp,vis,C,now).bounds;}},
     function(sp, vis, C, ctx, now) {
       var h = C.h, sx = vis.sx, fwd = vis.fwd;
-      var sz = Math.max(10, Math.min(36, Math.floor(h * 0.65 * getScale3D('smPickup') / (fwd * 0.12 + 1))));
-      var floorY = Math.min(vis.sy, h + sz * 2);
-      var bob = Math.sin(now * 0.003 + sp.bob) * 5;
-      var cy = floorY - sz * 2 + bob;
-      var pulse = 0.75 + 0.25 * Math.sin(now * 0.005 + sp.bob);
+      var layout = lootPickupRenderLayout('stat',sp,vis,C,now);
+      var sz = layout.size, cy = layout.centerY;
+      var pulse = 0.75 + 0.25 * Math.sin(now * 0.005 + layout.phase);
       ctx.save();
       ctx.globalAlpha = 0.95 * vis.fade;
       if (sp.type === 'heartCrystal') {
@@ -20382,8 +20916,8 @@ function drawStatPickups3D() {
       ctx.fillStyle = 'rgba(255,255,255,0.4)';
       ctx.beginPath(); ctx.arc(sx - sz * 0.15, cy - sz * 0.15, sz * 0.25 * pulse, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
-      var labelSize = Math.max(10, Math.floor(20 * getScale3D('smText') * projScale / fwd));
-      var labelText = sp.type === 'heartCrystal' ? 'Heart Crystal' : sp.type === 'manaStar' ? 'Mana Star' : 'Movement Tome';
+      var labelSize = layout.labelSize;
+      var labelText = layout.label;
       ctx.fillStyle = sp.type === 'heartCrystal' ? '#ffaaaa' : sp.type === 'manaStar' ? '#aaccff' : '#aaffaa';
       ctx.font = 'bold ' + labelSize + 'px monospace';
       ctx.textAlign = 'center';
@@ -20393,14 +20927,23 @@ function drawStatPickups3D() {
 }
 
 function drawCompanions3D() {
-  renderEntities3D(companions, {maxDist: 600, depthOffset: 3, checkMidpoint: true, fadeFraction: 0.9},
+  renderEntities3D(companions, {maxDist: 600, groundAnchor: true, fadeFraction: 0.9,
+    bounds:function(c,vis,C) {
+      var def = COMPANION_DEFS[c.type];
+      if (!def) return null;
+      var size = Math.max(14,Math.min(65,Math.floor(C.h*0.72*getScale3D('creature')/(vis.fwd*0.10+1))))*def.size;
+      // Bounds include the maximum recoil/squash stretch and attack halo.
+      var jump = (Number.isFinite(c.z) ? c.z : 0)*size/8;
+      var halfW = size*2+36;
+      return {x:vis.sx-halfW,y:vis.sy-size*2.5-jump-36,width:halfW*2,height:size*3+jump+72};
+    }},
     function(c, vis, C, ctx, now) {
       var def = COMPANION_DEFS[c.type];
       if (!def) return;
       var h = C.h, sx = vis.sx, fwd = vis.fwd;
       var baseSz = Math.max(14, Math.min(65, Math.floor(h * 0.72 * getScale3D('creature') / (fwd * 0.10 + 1)))) * def.size;
-      var floorY = Math.min(vis.sy, h + baseSz * 3);
-      var zPx = c.z * (baseSz / 8);
+      var floorY = vis.sy;
+      var zPx = (Number.isFinite(c.z) ? c.z : 0) * (baseSz / 8);
       var squash = c.squash !== undefined ? c.squash : 1.0;
       var stretchY = c.z > def.bounceHeight * 0.7 ? 1.2 : 1.0;
 
@@ -20467,11 +21010,15 @@ function drawCompanions3D() {
 
 function drawFortressAllies3D() {
   if (!fortressAllies.length || !MODE3D) return;
-  renderEntities3D(fortressAllies, {maxDist: 600, depthOffset: 3, checkMidpoint: true, fadeFraction: 0.9},
+  renderEntities3D(fortressAllies, {maxDist: 600, groundAnchor: true, fadeFraction: 0.9,
+    bounds:function(ally,vis,C) {
+      var size = Math.max(16,Math.min(60,Math.floor(C.h*0.7*getScale3D('creature')/(vis.fwd*0.10+1))));
+      return {x:vis.sx-size,y:vis.sy-size*1.75-8,width:size*2,height:size*2+12};
+    }},
     function(ally, vis, C, ctx, now) {
       var h = C.h, sx = vis.sx, fwd = vis.fwd;
       var baseSz = Math.max(16, Math.min(60, Math.floor(h * 0.7 * getScale3D('creature') / (fwd * 0.10 + 1))));
-      var floorY = Math.min(vis.sy, h + baseSz * 3);
+      var floorY = vis.sy;
       // Walking bob
       var walkBob = Math.sin(ally.phase) * baseSz * 0.05;
       // Night darkness
@@ -20572,6 +21119,36 @@ var PERF_HISTORY_LEN = 120;
 var _perfRingIdx = 0;
 var _perfStageHistory = {};    // name → Float32Array(HISTORY_LEN)
 var _perfFrameTotals = new Float32Array(PERF_HISTORY_LEN);
+// Frame delivery and CPU work are different measurements. Record actual rAF
+// intervals; 2ms of JavaScript on a 60Hz display is not 500 displayed FPS.
+var _perfCadenceIntervals = new Float64Array(120);
+var _perfCadenceCount = 0, _perfCadenceIndex = 0;
+var _perfCadenceLast = null, _perfCadenceGeneration = null;
+function recordPerfFrameCadence(timestamp, generation) {
+  if (!Number.isFinite(timestamp)) return;
+  if (generation !== _perfCadenceGeneration) {
+    _perfCadenceGeneration = generation;
+    _perfCadenceLast = null; _perfCadenceCount = _perfCadenceIndex = 0;
+  }
+  if (_perfCadenceLast !== null && timestamp > _perfCadenceLast) {
+    _perfCadenceIntervals[_perfCadenceIndex] = timestamp - _perfCadenceLast;
+    _perfCadenceIndex = (_perfCadenceIndex + 1) % _perfCadenceIntervals.length;
+    _perfCadenceCount = Math.min(_perfCadenceCount + 1, _perfCadenceIntervals.length);
+  }
+  _perfCadenceLast = timestamp;
+}
+function getPerfFrameCadence() {
+  var total = 0;
+  for (var i = 0; i < _perfCadenceCount; i++) total += _perfCadenceIntervals[i];
+  return {samples:_perfCadenceCount, meanMs:_perfCadenceCount ? total / _perfCadenceCount : 0,
+    fps:total > 0 ? _perfCadenceCount * 1000 / total : 0};
+}
+
+function caveControlMapVisible() {
+  var fullscreen = document.fullscreenElement || document.webkitFullscreenElement ||
+    document.mozFullScreenElement || document.msFullscreenElement;
+  return !!(CAVE_TEST_MODE && DEBUG_CAVE && fullscreen !== canvas);
+}
 
 function _pt(name, fn) {
   var t0 = performance.now();
@@ -20622,7 +21199,7 @@ function drawPerfOverlay() {
     if (t > 0) { sumFrame += t; countFrame++; if (t > maxFrame) maxFrame = t; }
   }
   var avgFrame = countFrame ? sumFrame / countFrame : 0;
-  var fps = avgFrame > 0 ? (1000 / avgFrame) : 0;
+  var fps = getPerfFrameCadence().fps;
   // Scale: anchor at max of 33.3ms (30fps) or observed max+20%
   var scaleMax = Math.max(33.3, maxFrame * 1.2);
 
@@ -20661,8 +21238,8 @@ function drawPerfOverlay() {
   ctx.font = 'bold 11px monospace';
   ctx.textAlign = 'left';
   ctx.fillStyle = '#fff';
-  ctx.fillText('PERF  fps=' + fps.toFixed(0) +
-    '  avg=' + avgFrame.toFixed(1) + 'ms' +
+  ctx.fillText('PERF  rAF fps=' + fps.toFixed(0) +
+    '  CPU avg=' + avgFrame.toFixed(1) + 'ms' +
     '  max=' + maxFrame.toFixed(1) + 'ms',
     OX + 4, OY + 12);
 
@@ -20774,7 +21351,7 @@ function drawPerfHud() {
   var sumFt = 0, maxFt = 0, cnt = _hudFrameCount;
   for (var i = 0; i < cnt; i++) { sumFt += _hudFrameTimes[i]; if (_hudFrameTimes[i] > maxFt) maxFt = _hudFrameTimes[i]; }
   var avgFt = cnt > 0 ? sumFt / cnt : 0;
-  var fps = avgFt > 0 ? (1000 / avgFt) : 0;
+  var fps = getPerfFrameCadence().fps;
   var TARGET_MS = 16.67;
 
   hctx.clearRect(0, 0, W, H);
@@ -20791,7 +21368,7 @@ function drawPerfHud() {
   hctx.fillText(Math.round(fps) + ' fps', 8, 28);
   hctx.font = '10px monospace';
   hctx.fillStyle = '#99aacc';
-  hctx.fillText('avg ' + avgFt.toFixed(1) + 'ms   max ' + maxFt.toFixed(1) + 'ms   peak ' + _hudAllTimeMaxFt.toFixed(1) + 'ms',
+  hctx.fillText('CPU avg ' + avgFt.toFixed(1) + 'ms   max ' + maxFt.toFixed(1) + 'ms   peak ' + _hudAllTimeMaxFt.toFixed(1) + 'ms',
     110, 20);
   hctx.fillStyle = '#778';
   hctx.fillText('top: per-frame (last ' + PERF_HISTORY_LEN + ' frames)   bottom: per-second avg (last ' + PERF_SEC_LEN + 's)',
@@ -20968,7 +21545,9 @@ function drawPerfHud() {
   // Text side-panel with ranked stages + counts
   if (textEl) {
     var lines = [];
-    lines.push('─── TOP STAGES (avg ms, max ms) ───');
+    lines.push('rAF delivery: ' + fps.toFixed(1) + ' fps');
+    lines.push('CPU frame: ' + avgFt.toFixed(2) + ' ms average');
+    lines.push('─── TOP STAGES (inclusive avg ms, max ms) ───');
     for (var ti = 0; ti < _hudLastBreakdown.length; ti++) {
       var e = _hudLastBreakdown[ti];
       var nm2 = (e.name + '               ').slice(0, 18);
@@ -21025,7 +21604,7 @@ function _legacyDrawPerfHudOnCanvas_UNUSED() {
   var sumFt = 0, maxFt = 0, cnt = _hudFrameCount;
   for (var i = 0; i < cnt; i++) { sumFt += _hudFrameTimes[i]; if (_hudFrameTimes[i] > maxFt) maxFt = _hudFrameTimes[i]; }
   var avgFt = cnt > 0 ? sumFt / cnt : 0;
-  var fps = avgFt > 0 ? (1000 / avgFt) : 0;
+  var fps = getPerfFrameCadence().fps;
 
   // -- Panel size: sparkline + rows for each subsystem --
   var numRows = _hudLastBreakdown.length + 3; // fps + phys-steps + spacer + subsystems
@@ -21773,7 +22352,268 @@ function drawCaveControlMap() {
 
 // Global reference for deferred quad count in control map
 var _deferredCaveQuads = [];
+// Browser-only, user-triggered benchmark. Rendering stays unchanged: this owns
+// scheduling and diagnostics, never the simulation loop or quality settings.
+var _caveBrowserProfile = null;
 
+function caveProfileSummary(values) {
+  if (!values.length) return {samples:0,medianMs:null,p95Ms:null};
+  var sorted=values.slice().sort(function(a,b){return a-b;});
+  var middle=Math.floor(sorted.length/2);
+  return {samples:sorted.length,medianMs:sorted.length%2?sorted[middle]:(sorted[middle-1]+sorted[middle])/2,
+    p95Ms:sorted[Math.max(0,Math.ceil(sorted.length*0.95)-1)]};
+}
+
+function caveProfileFullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement ||
+    document.mozFullScreenElement || document.msFullscreenElement;
+}
+
+function caveProfileWrite(value) {
+  var output=document.getElementById('ctProfileResult');
+  if(output)output.textContent=typeof value==='string'?value:JSON.stringify(value,null,2);
+}
+
+function cancelCaveBrowserProfile(reason) {
+  var job=_caveBrowserProfile;
+  if(!job)return;
+  job.cancelReason=reason||'Cancelled by user';
+  if(job.raf){cancelAnimationFrame(job.raf);job.raf=0;}
+  if(job.resume){var resume=job.resume;job.resume=null;resume(null);}
+}
+
+function caveProfileNextFrame(job) {
+  return new Promise(function(resolve){
+    if(job.cancelReason){resolve(null);return;}
+    job.resume=resolve;
+    job.raf=requestAnimationFrame(function(ts){job.raf=0;job.resume=null;resolve(ts);});
+  });
+}
+
+// Globals are restored before returning to the browser, even if a draw throws.
+// The clock and random seed are the same in each synchronous render only.
+function caveProfileRender(job, collect) {
+  var oldDate=Date.now,oldRandom=Math.random,oldPt=_pt,state=job.randomSeed,stages={};
+  Date.now=function(){return job.frozenTime;};
+  Math.random=function(){state=(Math.imul(state,1664525)+1013904223)|0;return(state>>>0)/4294967296;};
+  _pt=function(name,fn){
+    var start=performance.now();
+    try{return oldPt(name,fn);}
+    finally{stages[name]=(stages[name]||0)+(performance.now()-start);}
+  };
+  var start=performance.now();
+  try{drawCaveVisibilityFixtures();}
+  finally{Date.now=oldDate;Math.random=oldRandom;_pt=oldPt;}
+  var elapsed=performance.now()-start;
+  if(collect){
+    job.renderMs.push(elapsed);
+    Object.keys(stages).forEach(function(name){
+      if(!job.stages[name])job.stages[name]=[];
+      job.stages[name].push(stages[name]);
+    });
+  }
+  return elapsed;
+}
+
+// A frozen draw clock alone cannot rewind random particles or exploration
+// accumulated before Pause. Use temporary render inputs, keeping the real
+// world's arrays and cached canvases untouched for restoration afterward.
+function caveProfilePrepareInputs(job) {
+  var saved=job.savedInputs={mesh:floorMesh,seed:WORLD_SEED,
+    ambient:ambientParticles,explored:exploredCells,minimap:minimapCanvas,dirty:minimapDirty,
+    fog:drawMinimap._fogCanvas,hadFog:Object.prototype.hasOwnProperty.call(drawMinimap,'_fogCanvas'),
+    exploredUpdate:_lastExploredUpdate,light:_lightGrid,lightScale:_lightGridLastScale,
+    lightX:_lightGridLastCamGX,lightY:_lightGridLastCamGY,lightFrame:_lightGridFrameCount,
+    showFPS:settings.showFPS,fpsSmooth:_fpsSmooth,lastFrameTime:_lastFrameTimeMs};
+  var oldDate=Date.now,oldRandom=Math.random,state=job.randomSeed;
+  Date.now=function(){return job.frozenTime;};
+  Math.random=function(){state=(Math.imul(state,1664525)+1013904223)|0;return(state>>>0)/4294967296;};
+  try{
+    initAmbientParticles();
+    updateAmbientParticles(0);
+    initMinimap();
+    var fog=document.createElement('canvas');fog.width=MINIMAP_W;fog.height=MINIMAP_H;
+    drawMinimap._fogCanvas=fog;minimapDirty=true;_lastExploredUpdate=job.frozenTime;
+    if(_lightGrid)_lightGrid=new Float32Array(_lightGrid.length);
+    _lightGridLastScale=-Infinity;_lightGridLastCamGX=-9999;_lightGridLastCamGY=-9999;
+    _lightGridFrameCount=4;
+    updateLightGrid();
+    // This is a profiling overlay, not a scene-quality feature. Its prior
+    // smoothed rate is unrelated to this frozen, manually paced fixture.
+    settings.showFPS=false;
+  }finally{
+    saved.ownedAmbient=ambientParticles;saved.ownedExplored=exploredCells;
+    saved.ownedMinimap=minimapCanvas;saved.ownedFog=drawMinimap._fogCanvas;saved.ownedLight=_lightGrid;
+    Date.now=oldDate;Math.random=oldRandom;
+  }
+}
+
+function caveProfileRestoreInputs(job) {
+  var saved=job.savedInputs;if(!saved)return;
+  // A cancelled run must not put old arrays back over a newly generated world.
+  if(floorMesh===saved.mesh && WORLD_SEED===saved.seed){
+    if(ambientParticles===saved.ownedAmbient)ambientParticles=saved.ambient;
+    if(exploredCells===saved.ownedExplored)exploredCells=saved.explored;
+    if(minimapCanvas===saved.ownedMinimap)minimapCanvas=saved.minimap;
+    if(drawMinimap._fogCanvas===saved.ownedFog){
+      if(saved.hadFog)drawMinimap._fogCanvas=saved.fog;else delete drawMinimap._fogCanvas;
+    }
+    minimapDirty=saved.dirty;_lastExploredUpdate=saved.exploredUpdate;
+    if(_lightGrid===saved.ownedLight)_lightGrid=saved.light;
+    _lightGridLastScale=saved.lightScale;_lightGridLastCamGX=saved.lightX;
+    _lightGridLastCamGY=saved.lightY;_lightGridFrameCount=saved.lightFrame;
+  }
+  settings.showFPS=saved.showFPS;_fpsSmooth=saved.fpsSmooth;_lastFrameTimeMs=saved.lastFrameTime;
+  job.savedInputs=null;
+}
+
+function caveProfileOptionalSignature(verifyPixels) {
+  if(!verifyPixels)return {skipped:true,
+    reason:'Pixel verification disabled; avoids readback changing later Canvas performance.'};
+  return caveProfileContentSignature();
+}
+
+function caveProfileContentSignature() {
+  // Explicitly outside timed samples: readback can synchronously flush GPU work.
+  var width=canvas.width,height=canvas.height;
+  var pixels=ctx.getImageData(0,0,width,height).data,hash=2166136261,tiles=[];
+  for(var row=0;row<3;row++)for(var col=0;col<4;col++)tiles.push({column:col,row:row,hash:2166136261,bytes:0});
+  for(var y=0;y<height;y++)for(var x=0;x<width;x++){
+    var tile=tiles[Math.min(2,Math.floor(y*3/height))*4+Math.min(3,Math.floor(x*4/width))];
+    var index=(y*width+x)*4;
+    for(var channel=0;channel<4;channel++){
+      var value=pixels[index+channel];hash=Math.imul(hash^value,16777619);
+      tile.hash=Math.imul(tile.hash^value,16777619);tile.bytes++;
+    }
+  }
+  function hex(value){return('00000000'+(value>>>0).toString(16)).slice(-8);}
+  tiles.forEach(function(tile){tile.hash=hex(tile.hash);});
+  return {algorithm:'fnv1a32-rgba',hash:hex(hash),bytes:pixels.length,tileColumns:4,tileRows:3,tiles:tiles};
+}
+
+async function startCaveBrowserProfile(mode) {
+  if(_caveBrowserProfile){caveProfileWrite('A profile is already running; cancel it before starting another.');return;}
+  if(!CAVE_TEST_MODE){caveProfileWrite({status:'unavailable',reason:'Select Cave Test first.'});return;}
+  if(caveProfileFullscreenElement()){caveProfileWrite({status:'unavailable',reason:'Exit fullscreen before starting a new profile.'});return;}
+  var fixtureCheckbox=document.getElementById('ctVisibilityFixtures');
+  if(!fixtureCheckbox){caveProfileWrite({status:'unavailable',reason:'Visibility fixtures are unavailable.'});return;}
+  var verifyCheckbox=document.getElementById('ctProfileVerifyPixels');
+  var job={mode:mode,verifyPixels:!!(verifyCheckbox && verifyCheckbox.checked),width:canvas.width,height:canvas.height,styleWidth:canvas.style.width,styleHeight:canvas.style.height,
+    seed:WORLD_SEED,view:cavePreviewLastView,mesh:null,raf:0,resume:null,cancelReason:null,
+    frozenTime:2000000000000,randomSeed:1234567,renderMs:[],intervals:[],stages:{},enteredFullscreen:false,
+    perfHud:DEBUG_PERF_HUD,caveDebug:DEBUG_CAVE};
+  _caveBrowserProfile=job;
+  var buttons=['ctProfilePreview','ctProfileFullscreen','ctProfileViewport'];
+  buttons.forEach(function(id){var b=document.getElementById(id);if(b)b.disabled=true;});
+  var cancel=document.getElementById('ctProfileCancel');if(cancel)cancel.disabled=false;
+  var result={status:'running',mode:mode,warmups:12,requestedSamples:60};
+  var baselineErrors={};
+  Object.keys(_ptErrors).forEach(function(key){baselineErrors[key]=_ptErrors[key];});
+  try{
+    // Request native fullscreen synchronously in the click's activation window.
+    var fullscreenPromise=null;
+    if(mode==='fullscreen'){
+      var request=canvas.requestFullscreen || canvas.webkitRequestFullscreen || canvas.mozRequestFullScreen || canvas.msRequestFullscreen;
+      if(typeof request!=='function')throw Error('Native fullscreen is unsupported. Use the explicitly labelled viewport-size fallback.');
+      fullscreenPromise=request.call(canvas);
+    }
+    fixtureCheckbox.checked=true;
+    DEBUG_PERF_HUD=false;DEBUG_CAVE=false;
+    previewCaveView(job.view);
+    job.mesh=floorMesh;
+    caveProfileWrite('Preparing '+mode+' profile; visibility fixtures are paused.');
+    if(fullscreenPromise && typeof fullscreenPromise.then==='function')await fullscreenPromise;
+    // Let fullscreenchange and its existing resize callback finish first.
+    await caveProfileNextFrame(job);await caveProfileNextFrame(job);
+    if(job.cancelReason)throw Error(job.cancelReason);
+    if(mode==='fullscreen'){
+      if(caveProfileFullscreenElement()!==canvas)throw Error('The browser did not enter native fullscreen. Use the labelled viewport-size fallback.');
+      job.enteredFullscreen=true;
+    } else if(mode==='viewport-size'){
+      canvas.width=Math.max(1,Math.floor(window.innerWidth));
+      canvas.height=Math.max(1,Math.floor(window.innerHeight));
+      canvas.style.width='100%';canvas.style.height='auto';
+    }
+    result.width=canvas.width;result.height=canvas.height;
+    result.nativeFullscreen=caveProfileFullscreenElement()===canvas;
+    result.devicePixelRatio=window.devicePixelRatio||1;
+    result.seed=job.seed;result.view=job.view;
+    result.fixtureObjects=['skeleton','chest','fire orb'];
+    result.frozenTime=job.frozenTime;result.randomSeed=job.randomSeed;
+    caveProfilePrepareInputs(job);
+    result.canonicalInputs={ambientParticles:ambientParticles.length,exploration:'radius 30 around fixture',
+      lighting:'forced frozen-time update',profilingOverlays:false};
+    var previous=null;
+    for(var frame=0;frame<72;frame++){
+      var ts=await caveProfileNextFrame(job);
+      if(job.cancelReason)throw Error(job.cancelReason);
+      if(!CAVE_TEST_MODE || WORLD_SEED!==job.seed || cavePreviewLastView!==job.view || floorMesh!==job.mesh || !caveVisibilityFixturesEnabled())
+        throw Error('Fixture or viewpoint changed during profile.');
+      if(canvas.width!==result.width || canvas.height!==result.height)throw Error('Canvas dimensions changed during profile.');
+      if(mode==='fullscreen' && caveProfileFullscreenElement()!==canvas)throw Error('Fullscreen ended before profiling completed.');
+      if(frame>=12 && previous!==null)job.intervals.push(ts-previous);
+      caveProfileRender(job,frame>=12);
+      previous=ts;
+      if(frame===11)caveProfileWrite('Warmups complete. Sampling 60 animation frames at '+canvas.width+' × '+canvas.height+'…');
+    }
+    result.status='complete';
+    result.renderCommands=caveProfileSummary(job.renderMs);
+    result.animationFrameIntervals=caveProfileSummary(job.intervals);
+    result.topInclusiveStages=Object.keys(job.stages).map(function(name){
+      var summary=caveProfileSummary(job.stages[name]);summary.name=name;return summary;
+    }).sort(function(a,b){return b.medianMs-a.medianMs;}).slice(0,14);
+    result.errors={};Object.keys(_ptErrors).forEach(function(key){
+      var count=_ptErrors[key]-(baselineErrors[key]||0);if(count)result.errors[key]=count;
+    });
+    result.contentSignature=caveProfileOptionalSignature(job.verifyPixels);
+    result.notes=['Render-command timing excludes final image readback and may exclude deferred GPU work.',
+      'Animation-frame intervals measure browser cadence, not 1000 / JavaScript time.',
+      'Stage times are inclusive; do not add parent draw() to its children.',
+      'Ambient particles, exploration and lighting are canonical temporary inputs; real-world references are restored afterward.',
+      job.verifyPixels?'Pixel verification can change the browser Canvas backend; reload before a fresh performance comparison.':'Pixel verification is disabled; no main-canvas readback is performed.',
+      mode==='viewport-size'?'Viewport-size fallback is not native fullscreen.':'No resolution or quality reduction was applied.'];
+  }catch(error){
+    result.status=job.cancelReason?'cancelled':'failed';result.reason=error.message||String(error);
+    result.completedSamples=job.renderMs.length;
+  }finally{
+    if(job.raf)cancelAnimationFrame(job.raf);
+    job.raf=0;job.resume=null;
+    if(mode==='fullscreen' && caveProfileFullscreenElement()===canvas){
+      var exit=document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+      try{if(exit)await exit.call(document);}catch(exitError){result.exitFullscreenError=exitError.message||String(exitError);}
+    }
+    canvas.width=job.width;canvas.height=job.height;
+    canvas.style.width=job.styleWidth;canvas.style.height=job.styleHeight;
+    DEBUG_PERF_HUD=job.perfHud;DEBUG_CAVE=job.caveDebug;
+    caveProfileRestoreInputs(job);
+    _caveBrowserProfile=null;
+    buttons.forEach(function(id){var b=document.getElementById(id);if(b)b.disabled=false;});
+    if(cancel)cancel.disabled=true;
+    if(CAVE_TEST_MODE && caveVisibilityFixturesEnabled()){
+      try{previewCaveView(cavePreviewLastView);}catch(redrawError){result.redrawError=redrawError.message||String(redrawError);}
+    }
+    caveProfileWrite(result);
+  }
+}
+
+(function(){
+  [['ctProfilePreview','preview'],['ctProfileFullscreen','fullscreen'],['ctProfileViewport','viewport-size']].forEach(function(pair){
+    var button=document.getElementById(pair[0]);if(button)button.addEventListener('click',function(){startCaveBrowserProfile(pair[1]);});
+  });
+  var cancel=document.getElementById('ctProfileCancel');if(cancel)cancel.addEventListener('click',function(){cancelCaveBrowserProfile();});
+  // Capture phase cancels before the existing controls mutate/reset the world.
+  document.addEventListener('change',function(event){
+    if(_caveBrowserProfile && event.target && event.target.id!=='ctProfileCancel')cancelCaveBrowserProfile('Control changed during profile.');
+  },true);
+  document.addEventListener('click',function(event){
+    if(!_caveBrowserProfile || !event.target)return;
+    var id=event.target.id||'';
+    if(id.indexOf('ctView')===0 || ['btnStart','btnStop','btnEndless','btnOverview','btnView2D','btnView3D','btnToggleTex'].indexOf(id)>=0)
+      cancelCaveBrowserProfile('View or game mode changed during profile.');
+  },true);
+  document.addEventListener('visibilitychange',function(){if(document.hidden)cancelCaveBrowserProfile('Page became hidden during profile.');});
+  window.addEventListener('pagehide',function(){cancelCaveBrowserProfile('Page navigation interrupted profile.');});
+}());
 function renderFrame() {
   if (overviewActive) { drawDebugOverview(); return; }
   _pt('draw()', function(){ draw(); });
@@ -21795,7 +22635,6 @@ function renderFrame() {
     _pt('shrines3D', function(){ drawShrines3D(); });
     _pt('ruins3D', function(){ drawRuins3D(); });
     _pt('structures3D', function(){ drawStructures3D(); });
-    _pt('caveEntrance3D', function(){ drawCaveEntrance3D(); });
     _pt('torchGlow3D', function(){ drawTorchGlow3D(); });
     _pt('ambientFX3D', function(){ drawAmbientParticles3D(); });
     _pt('fpsArms', function(){ drawFPSArms(); });
@@ -21867,7 +22706,7 @@ function renderFrame() {
   // Perf HUD overlay — drawn last so it sits on top of everything
   if (DEBUG_PERF_HUD) drawPerfHud();
   if (DEBUG_CAVE) drawCaveDebug();
-  if (CAVE_TEST_MODE) drawCaveControlMap();
+  if (caveControlMapVisible()) _pt('caveControlMap', function(){ drawCaveControlMap(); });
 
   // Auto-dump every 5s
   var now = Date.now();
@@ -21898,6 +22737,7 @@ function loop(ts, gen) {
   if (!running || gen !== _loopGen) return; // stale — a newer loop is in charge
   try {
   var loopStart = performance.now();
+  recordPerfFrameCadence(ts, gen);
   // Advance perf ring + zero this slot's stages before _pt writes this frame
   _perfRingIdx = (_perfRingIdx + 1) % PERF_HISTORY_LEN;
   _perfFrameTotals[_perfRingIdx] = 0;
@@ -21980,8 +22820,6 @@ function loop(ts, gen) {
   }
   _scheduleLoop();
 }
-
-
 // =============================================
 // SECTION 18: GAME LIFECYCLE
 // =============================================
@@ -22119,6 +22957,10 @@ document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
       if (this.value === 'cavetest') {
         // Show cave test options panel
         if (ctOpts) ctOpts.style.display = '';
+        var kindSelect = document.getElementById('ctEntranceKind');
+        window._caveTestKindOverride = kindSelect && kindSelect.value === 'hillside' ? 'hillside' : 'descending';
+        // Two reproducible natural sites, not fabricated test-only landforms.
+        window._caveTestSeedOverride = window._caveTestKindOverride === 'hillside' ? 5668 : 12345;
         // Read flags from checkboxes
         caveTestFlags.surfaceEnemies = document.getElementById('ctSurfaceEnemies').checked;
         caveTestFlags.structures = document.getElementById('ctStructures').checked;
@@ -22143,14 +22985,150 @@ document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
         calibrating = false;
         lastUpdate = 0;
         CONTROL_MODE = MODE_STICK_AIM;
+        USE_KEYBOARD = true; USE_MOUSE = true;
+        USE_GAMEPAD = false; stopGamepadPolling();
+        var gamepadInput = document.getElementById('chkGamepad');
+        if (gamepadInput) gamepadInput.checked = false;
+        var keyInput = document.getElementById('chkKeyboard');
+        if (keyInput) keyInput.checked = true;
+        previewCaveView('approach');
+        _loopGen++;
+        if (running) _scheduleLoop();
+        updateHudInput();
         return;
       }
       if (ctOpts) ctOpts.style.display = 'none';
+      var fixtures = document.getElementById('ctVisibilityFixtures');
+      if (fixtures) fixtures.checked = false;
+      setCavePreviewNoon(false);
       CAVE_TEST_MODE = false;
       terrain = this.value;
       applyPreset();
     });
   }
+})();
+
+// Explicit debug viewpoints make the two entrance profiles easy to compare.
+// They only reposition the Cave Test player; normal Endless play is untouched.
+var cavePreviewSavedDaySpeed = null;
+var cavePreviewLastView = 'approach';
+function caveVisibilityFixturesEnabled() {
+  var checkbox = document.getElementById('ctVisibilityFixtures');
+  return !!(CAVE_TEST_MODE && checkbox && checkbox.checked);
+}
+function drawCaveVisibilityFixtures() {
+  if (!caveVisibilityFixturesEnabled()) { draw(); return; }
+  // Freeze simulation and invalidate callbacks that were already queued.
+  // The fixture is only a draw-time substitution, never chunk/gameplay data.
+  running = false; _loopGen++;
+  stopGamepadPolling();
+  _mouseHeld = false; _attackHeld = false; flameStreamActive = false;
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+  var net = endlessCaveNetworks['0,0'];
+  if (!net || !net.entrances.length) { draw(); return; }
+  var entrance = net.entrances[0];
+  function point(inward, cross) {
+    var x = entrance.x + Math.cos(entrance.angle) * inward - Math.sin(entrance.angle) * cross - windowOriginX;
+    var y = entrance.y + Math.sin(entrance.angle) * inward + Math.cos(entrance.angle) * cross - windowOriginY;
+    return {x:x, y:y, z:getEntityGroundRenderZ(x,y,true)};
+  }
+  var ep = point(170,-18), cp = point(142,18), pp = point(150,0);
+  var frozenType = Object.assign({}, enemyTypes.normal, {speed:0,chaseRange:0});
+  var savedEnemies = enemies, savedChests = treasureChests, savedProjectiles = projectiles;
+  try {
+    enemies = [{x:ep.x,y:ep.y,z:ep.z,renderFloorZ:ep.z,underground:true,
+      enemyType:frozenType,health:2,maxHealth:4,speed:0,chaseRange:0,
+      facing:entrance.angle+Math.PI,patrolWaypoints:[],attackState:'idle'}];
+    treasureChests = [{x:cp.x,y:cp.y,renderFloorZ:cp.z,underground:true,
+      collected:false,opened:false,lidAngle:0,tier:'rare',gold:0,facing:entrance.angle+Math.PI,seed:1}];
+    projectiles = [{x:pp.x,y:pp.y,z:pp.z+30,renderFloorZ:pp.z,underground:true,
+      spell:spells.fire,ang:entrance.angle,vx:0,vy:0,vz:0}];
+    renderFrame();
+  } finally {
+    enemies = savedEnemies; treasureChests = savedChests; projectiles = savedProjectiles;
+  }
+}
+function setCavePreviewNoon(enabled) {
+  if (enabled) {
+    if (cavePreviewSavedDaySpeed === null) cavePreviewSavedDaySpeed = daySpeed;
+    daySpeed = 0;
+    dayTime = 0.5;
+  } else if (cavePreviewSavedDaySpeed !== null) {
+    daySpeed = cavePreviewSavedDaySpeed;
+    cavePreviewSavedDaySpeed = null;
+  }
+}
+function previewCaveView(view) {
+  if (!CAVE_TEST_MODE) return;
+  cavePreviewLastView = view;
+  var net = endlessCaveNetworks['0,0'];
+  if (!net || !net.entrances.length || !net.chambers.length) return;
+  var e = net.entrances[0], chamber = net.chambers[net.chambers.length - 1];
+  var along = view === 'approach' ? (e.approachLength || 480) * 0.8 : view === 'mouth' ? 24 : -90;
+  var cross = 0;
+  // These deliberately include terrain between the camera and lower jambs.
+  // The old top-point-only entrance visibility check missed those buried parts.
+  if (view === 'sideleft' || view === 'sideright') {
+    along = 300; cross = view === 'sideleft' ? 160 : -160;
+  } else if (view === 'oblique') {
+    along = 190; cross = 120;
+  } else if (view === 'roofedge') {
+    along = -72; cross = (e.halfWidth || 60) * 1.35;
+  }
+  var wx = e.x - Math.cos(e.angle) * along - Math.sin(e.angle) * cross;
+  var wy = e.y - Math.sin(e.angle) * along + Math.cos(e.angle) * cross;
+  if (view === 'chamber' || view === 'above') { wx = chamber.cx; wy = chamber.cy; }
+  pos.x = wx - windowOriginX; pos.y = wy - windowOriginY;
+  updateChunks();
+  var gx = Math.floor(pos.x / floorMesh.gridSize), gy = Math.floor(pos.y / floorMesh.gridSize);
+  var h = e.floorH;
+  if (view === 'approach' || view === 'above' || view === 'sideleft' || view === 'sideright' ||
+      view === 'oblique' || view === 'roofedge') {
+    var li = getTopWalkableLayerIdx(gx, gy);
+    if (li >= 0) h = floorMesh['l' + li + 'TopZ'][gy * floorMesh.w + gx];
+  } else {
+    var support = getWalkableLayerTopAt(pos.x, pos.y, Number.isFinite(h) ? h : -5);
+    if (Number.isFinite(support.topH)) h = support.topH;
+  }
+  if (!Number.isFinite(h)) h = getFloorHeightAt(pos.x, pos.y);
+  pos.floorZ = meshHeightToPlayerZ(h);
+  jumpAirborne = false; jumpVelZ = 0; onWallTop = false;
+  vel.x = 0; vel.y = 0;
+  kbState.up = kbState.down = kbState.left = kbState.right = false;
+  cam.x = pos.x; cam.y = pos.y; cam.z = pos.floorZ; cam.pitch = 0;
+  cam.ang = view === 'back' || view === 'chamber' || cross !== 0 ? Math.atan2(e.y - wy, e.x - wx) : e.angle;
+  if (view === 'sideleft' || view === 'sideright' || view === 'oblique') cam.pitch = 0.18;
+  if (view === 'roofedge') cam.pitch = 0.25;
+  overviewActive = false; MODE3D = true; CAM_FOLLOW = true;
+  var fixedNoon = document.getElementById('ctFixedNoon');
+  setCavePreviewNoon(!!(fixedNoon && fixedNoon.checked));
+  updateDayNight(0); updateLightGrid(); drawCaveVisibilityFixtures();
+  var status = document.getElementById('ctPreviewStatus');
+  if (status) status.textContent = (e.kind || 'cave') + ' · seed ' + WORLD_SEED + ' · ' + view +
+    ' · floor ' + h.toFixed(2) + ' · ' + (playerUnderground ? 'underground' : 'outdoors') +
+    (caveVisibilityFixturesEnabled() ? ' · PAUSED fixtures: skeleton, chest, fire orb' : '');
+}
+(function() {
+  var selector = document.getElementById('ctEntranceKind');
+  if (selector) selector.addEventListener('change', function() {
+    if (CAVE_TEST_MODE) document.getElementById('terrainSelect').dispatchEvent(new Event('change'));
+  });
+  ['Approach', 'Mouth', 'Inside', 'Back', 'Chamber', 'Above', 'SideLeft', 'SideRight', 'Oblique', 'RoofEdge'].forEach(function(name) {
+    var button = document.getElementById('ctView' + name);
+    if (button) button.addEventListener('click', function() { previewCaveView(name.toLowerCase()); });
+  });
+  var fixedNoon = document.getElementById('ctFixedNoon');
+  if (fixedNoon) fixedNoon.addEventListener('change', function() {
+    if (!CAVE_TEST_MODE) return;
+    setCavePreviewNoon(this.checked);
+    updateDayNight(0); updateLightGrid(); drawCaveVisibilityFixtures();
+  });
+  var fixtures = document.getElementById('ctVisibilityFixtures');
+  if (fixtures) fixtures.addEventListener('change', function() {
+    if (!CAVE_TEST_MODE) return;
+    if (this.checked) previewCaveView(cavePreviewLastView);
+    else document.getElementById('terrainSelect').dispatchEvent(new Event('change'));
+  });
 })();
 
 document.getElementById('btnView2D').addEventListener('click', function() { MODE3D = false; if (overviewActive) toggleOverview(); });
@@ -22162,6 +23140,9 @@ document.getElementById('btnToggleTex').addEventListener('click', function() {
 document.getElementById('btnOverview').addEventListener('click', function() { toggleOverview(); });
 document.getElementById('btnEndless').addEventListener('click', function() {
   ENDLESS_MODE = true;
+  var fixtures = document.getElementById('ctVisibilityFixtures');
+  if (fixtures) fixtures.checked = false;
+  setCavePreviewNoon(false);
   CAVE_TEST_MODE = false;  // Normal endless mode
   gameOverState = false;
   running = true;
@@ -22205,6 +23186,7 @@ document.getElementById('btnEndless').addEventListener('click', function() {
         // Auto-restart cave test if currently active
         if (CAVE_TEST_MODE) {
           resetEndlessMode();
+          if (caveVisibilityFixturesEnabled()) previewCaveView(cavePreviewLastView);
           console.log('[CAVE TEST] Restarted with flag ' + flagMap[chkId] + '=' + this.checked);
         }
       });
@@ -22250,7 +23232,12 @@ document.getElementById('chkPerfHud').addEventListener('change', function() {
   var p = document.getElementById('perfHudPanel');
   if (p) p.style.display = this.checked ? 'block' : 'none';
 });
-document.getElementById('chkCaveDbg').addEventListener('change', function() { DEBUG_CAVE = this.checked; });
+document.getElementById('chkCaveDbg').addEventListener('change', function() {
+  DEBUG_CAVE = this.checked;
+  var panel = document.getElementById('caveDebugPanel');
+  if (panel) panel.style.display = this.checked ? '' : 'none';
+  if (caveVisibilityFixturesEnabled()) drawCaveVisibilityFixtures();
+});
 var _archVisDbg = document.getElementById('chkArchVisDbg');
 if (_archVisDbg) _archVisDbg.addEventListener('change', function() { window.DEBUG_ARCH_VIS = this.checked; });
 document.getElementById('chkCaveColors').addEventListener('change', function() { DEBUG_CAVE_COLORS = this.checked; });
@@ -22308,6 +23295,7 @@ document.getElementById('chkPolyTypes').addEventListener('change', function() { 
 
   document.addEventListener('keydown', function(e) {
     if (!USE_KEYBOARD && !USE_MOUSE) return;
+    if (caveVisibilityFixturesEnabled()) return;
     var k = e.key;
     // Movement blocked while shop is open; also clear any held keys so the
     // player doesn't slide after closing.
@@ -22448,6 +23436,7 @@ document.getElementById('chkPolyTypes').addEventListener('change', function() { 
 
   // Mouse click — left button casts current spell while pointer is locked
   document.addEventListener('mousedown', function(e) {
+    if (caveVisibilityFixturesEnabled()) return;
     if (!USE_MOUSE || document.pointerLockElement !== canvas) return;
     if (settingsOpen) return;
     if (e.button === 0) { _mouseHeld = true; castCurrentSpell(); e.preventDefault(); }
@@ -22511,7 +23500,6 @@ buildSkeletonSprites();
 buildWolfSprites();
 buildPixelArmSprites();
 checkSensorAvailability();
-
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);
 
