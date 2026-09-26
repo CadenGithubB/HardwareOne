@@ -70,6 +70,8 @@ function caveProfilePrepareInputs(job) {
     fog:drawMinimap._fogCanvas,hadFog:Object.prototype.hasOwnProperty.call(drawMinimap,'_fogCanvas'),
     exploredUpdate:_lastExploredUpdate,light:_lightGrid,lightScale:_lightGridLastScale,
     lightX:_lightGridLastCamGX,lightY:_lightGridLastCamGY,lightFrame:_lightGridFrameCount,
+    surfaceBake:_surfaceFloorLightBake,surfaceMesh:_surfaceFloorLightMesh,
+    surfaceScale:_surfaceFloorLightScale,surfaceStats:_surfaceFloorLightStats,
     showFPS:settings.showFPS,fpsSmooth:_fpsSmooth,lastFrameTime:_lastFrameTimeMs};
   var oldDate=Date.now,oldRandom=Math.random,state=job.randomSeed;
   Date.now=function(){return job.frozenTime;};
@@ -108,6 +110,12 @@ function caveProfileRestoreInputs(job) {
     if(_lightGrid===saved.ownedLight)_lightGrid=saved.light;
     _lightGridLastScale=saved.lightScale;_lightGridLastCamGX=saved.lightX;
     _lightGridLastCamGY=saved.lightY;_lightGridFrameCount=saved.lightFrame;
+    // The upper-terrain bake is immutable and shared; only its animated scale
+    // changes during profiling. Never restore over a newly baked world.
+    if(_surfaceFloorLightBake===saved.surfaceBake && _surfaceFloorLightMesh===saved.surfaceMesh){
+      _surfaceFloorLightScale=saved.surfaceScale;
+      _surfaceFloorLightStats=saved.surfaceStats;
+    }
   }
   settings.showFPS=saved.showFPS;_fpsSmooth=saved.fpsSmooth;_lastFrameTimeMs=saved.lastFrameTime;
   job.savedInputs=null;
@@ -187,6 +195,7 @@ async function startCaveBrowserProfile(mode) {
     result.fixtureObjects=['skeleton','chest','fire orb'];
     result.frozenTime=job.frozenTime;result.randomSeed=job.randomSeed;
     caveProfilePrepareInputs(job);
+    result.surfaceLightingBake=typeof getSurfaceFloorLightStats==='function'?getSurfaceFloorLightStats():null;
     result.canonicalInputs={ambientParticles:ambientParticles.length,exploration:'radius 30 around fixture',
       lighting:'forced frozen-time update',profilingOverlays:false};
     var previous=null;

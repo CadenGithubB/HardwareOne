@@ -29,6 +29,23 @@
   check('fullscreen of another element does not assume game-only display', caveControlMapVisible());
   G.CAVE_TEST_MODE=false;
   check('normal gameplay does not run cave-only diagnostics', !caveControlMapVisible());
+
+  var configSource=slurp('assets/games/src/01-config-state.js');
+  var rgbStart=configSource.indexOf('// RGB string cache');
+  var rgbEnd=configSource.indexOf('// =============================================\n// LEVEL DATA',rgbStart);
+  if(rgbStart<0||rgbEnd<=rgbStart) throw Error('production RGB cache source not found');
+  G._cacheStats={rgbQ:{hits:0,misses:0,size:0,peakSize:0}};
+  (0,eval)(configSource.slice(rgbStart,rgbEnd));
+  var clamped=rgbQ(1.9,-4,999),clampedAgain=rgbQ(1,0,255);
+  check('RGB cache clamps channels and reuses the exact CSS string',clamped==='rgb(1,0,255)'&&clampedAgain===clamped&&_cacheStats.rgbQ.hits===1&&_cacheStats.rgbQ.misses===1&&_cacheStats.rgbQ.size===1);
+  G._rgbCache={};_cacheStats.rgbQ.hits=0;_cacheStats.rgbQ.misses=0;_cacheStats.rgbQ.size=0;_cacheStats.rgbQ.peakSize=0;
+  for(var color=0;color<RGB_CACHE_LIMIT;color++) rgbQ(color>>>16,(color>>>8)&255,color&255);
+  check('RGB cache fills its 4096-entry generation without an early reset',RGB_CACHE_LIMIT===4096&&Object.keys(_rgbCache).length===RGB_CACHE_LIMIT&&_cacheStats.rgbQ.size===RGB_CACHE_LIMIT);
+  var hitsAtLimit=_cacheStats.rgbQ.hits;
+  check('hot RGB lookup at the limit keeps the current generation',rgbQ(0,0,0)==='rgb(0,0,0)'&&_cacheStats.rgbQ.hits===hitsAtLimit+1&&Object.keys(_rgbCache).length===RGB_CACHE_LIMIT);
+  check('novel RGB at the limit starts one bounded fresh generation',rgbQ(0,16,0)==='rgb(0,16,0)'&&Object.keys(_rgbCache).length===1&&_rgbCache[0]===undefined&&_cacheStats.rgbQ.size===1&&_cacheStats.rgbQ.peakSize===RGB_CACHE_LIMIT);
+  for(color=4097;color<RGB_CACHE_LIMIT*4+19;color++) rgbQ(color>>>16,(color>>>8)&255,color&255);
+  check('repeated RGB generations stay bounded with accurate size telemetry',_cacheStats.rgbQ.size<=RGB_CACHE_LIMIT&&Object.keys(_rgbCache).length===_cacheStats.rgbQ.size&&_cacheStats.rgbQ.peakSize===RGB_CACHE_LIMIT);
   __out('PERF_CADENCE_RESULT PASS '+n);
 }());
 undefined;

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>HardwareOne artwork cache pilot</title>
+<style>
+body{font:15px system-ui;background:#14191d;color:#e4e8df;margin:24px;max-width:1340px}
+h1{font-size:24px}p{max-width:1000px;color:#bac7c7;line-height:1.5}
+button,select{font:inherit;padding:7px;background:#26333c;color:inherit;border:1px solid #61727a;border-radius:4px;margin:3px}
+.pair{display:flex;flex-wrap:wrap;gap:16px}figure{margin:12px 0}figcaption{margin:6px 0}canvas{border:1px solid #526066;max-width:100%;height:auto}
+pre{white-space:pre-wrap;padding:16px;background:#0c1115;max-height:480px;overflow:auto}
+</style>
+<h1>Artwork cache pilot</h1>
+<p>Production Canvas2D recipes, not replacement illustrations. Columns: fern, fallen log, skull, rubble.
+Rows: 12, 24, 48 and 70 pixels. The cache uses 2× backing resolution; small antialiasing differences are expected.
+Both panels preserve the recipes' existing intrinsic transparency (including their legacy disregard for parent fade).</p>
+<label>Backdrop <select id="backdrop"><option value="#68764b">Daylight ground</option><option value="#202638">Dusk stone</option></select></label>
+<button id="verify">Verify pixels and depth clipping</button>
+<button id="profile">Measure 120 mixed props</button>
+<button id="cancel" disabled>Cancel measurement</button>
+<p>Timing measures drawing commands only, not whole-game FPS or GPU completion. Reload before timing if you ran pixel verification.
+Motion includes changing projected sizes and fractional positions; first-frame and warm results are separate.</p>
+<div class="pair"><figure><figcaption>Original recipes</figcaption><canvas id="original" width="640" height="360"></canvas></figure>
+<figure><figcaption>Cached artwork</figcaption><canvas id="cached" width="640" height="360"></canvas></figure></div>
+<pre id="report">Ready. Use the controls above; nothing here changes game saves.</pre>
+<script>
+var ctx, terrain='ground';
+/* @PRODUCTION_ARTWORK@ */
+var artTypes=Object.keys(FLOOR_ARTWORK), stopped=false;
+function report(value){document.getElementById('report').textContent=JSON.stringify(value,null,2);}
+function preview(){
+  var bg=document.getElementById('backdrop').value;
+  ['original','cached'].forEach(function(id){
+    var c=document.getElementById(id).getContext('2d');
+    c.fillStyle=bg;c.fillRect(0,0,640,360);
+    setFloorArtworkCacheEnabled(id==='cached');
+    [12,24,48,70].forEach(function(size,row){
+      beginFloorArtworkFrame();
+      artTypes.forEach(function(type,col){
+        beginFloorArtworkFrame();
+        var x=80+col*160+0.25,y=55+row*82+0.75;
+        if(id==='cached') drawFloorArtwork(c,type,0,0.431,x,y,size);
+        else paintFloorItem(c,type,0,0.431,x,y,size);
+      });
+    });
+  });
+}
+document.getElementById('backdrop').addEventListener('change',preview);
+function freshCanvas(w,h){var c=document.createElement('canvas');c.width=w;c.height=h;return c;}
+function verify(){
+  var original=freshCanvas(192,192),cached=freshCanvas(192,192);
+  var a=original.getContext('2d'),b=cached.getContext('2d');
+  var results=[],passed=true;
+  clearFloorArtworkCache();setFloorArtworkCacheEnabled(true);
+  artTypes.forEach(function(type){
+    var error=0,channels=0,maxError=0,cases=0,clipped=0;
+    [0,0.125,0.431,0.731,0.999].forEach(function(seed){
+      [6,12,32,48,70].forEach(function(size){
+        [0,0.25,0.75].forEach(function(phase){
+          a.clearRect(0,0,192,192);b.clearRect(0,0,192,192);
+          var x=96+phase,y=96+phase;
+          a.globalAlpha=b.globalAlpha=0.2;
+          paintFloorItem(a,type,0,seed,x,y,size);
+          beginFloorArtworkFrame();drawFloorArtwork(b,type,0,seed,x,y,size);
+          var da=a.getImageData(0,0,192,192).data,db=b.getImageData(0,0,192,192).data;
+          var bounds=FLOOR_ARTWORK[type].bounds;
+          for(var i=0;i<da.length;i+=4){
+            var px=(i/4)%192,py=Math.floor(i/4/192);
+            if(da[i+3] && (px<x+bounds[0]*size-2 || px>x+bounds[2]*size+2 || py<y+bounds[1]*size-2 || py>y+bounds[3]*size+2)) clipped++;
+            if(!da[i+3]&&!db[i+3])continue;
+            // Premultiplied channels avoid meaningless RGB noise in nearly
+            // transparent pixels; average only the affected footprint.
+            for(var ch=0;ch<4;ch++){
+              var av=ch===3?da[i+3]:da[i+ch]*da[i+3]/255;
+              var bv=ch===3?db[i+3]:db[i+ch]*db[i+3]/255;
+              var d=Math.abs(av-bv);error+=d;channels++;maxError=Math.max(maxError,d);
+            }
+          }
+          cases++;
+        });
+      });
+    });
+    // Real production depth clip, with a foreground bank covering bottom half.
+    b.clearRect(0,0,192,192);ctx=b;beginSceneDepthFrame(192,192);
+    writeSceneDepthPolygon([{x:0,y:96,depth:10},{x:192,y:96,depth:10},{x:192,y:192,depth:10},{x:0,y:192,depth:10}]);
+    beginFloorArtworkFrame();
+    withSceneDepthBillboard({x:20,y:20,width:150,height:150},30,function(){drawFloorArtwork(b,type,0,0.431,96.25,96.75,70);});
+    var pixels=b.getImageData(0,0,192,192).data,leaks=0,visible=0;
+    for(var p=0;p<pixels.length;p+=4){if(pixels[p+3]){if(p/4>=96*192)leaks++;else visible++;}}
+    var mean=error/channels;
+    // A guard against gross shape/opacity changes, not pixel identity.
+    var okay=clipped===0 && leaks===0 && visible>0 && mean<10;
+    passed=passed&&okay;
+    results.push({type:type,cases:cases,meanPremultipliedChannelError:+mean.toFixed(3),maxChannelError:+maxError.toFixed(3),outOfBoundsPixels:clipped,depthLeaks:leaks,visiblePixels:visible,pass:okay});
+  });
+  report({check:'native Canvas2D appearance and actual scene-depth clip',pass:passed,results:results,cache:getFloorArtworkCacheStats()});
+}
+document.getElementById('verify').addEventListener('click',verify);
+function stats(values){var s=values.slice().sort(function(a,b){return a-b;});return {medianMs:+s[Math.floor(s.length/2)].toFixed(3),p95Ms:+s[Math.floor(s.length*.95)].toFixed(3)};}
+function frame(){return new Promise(function(resolve){requestAnimationFrame(resolve);});}
+async function profile(){
+  stopped=false;document.getElementById('profile').disabled=true;document.getElementById('verify').disabled=true;document.getElementById('cancel').disabled=false;
+  var results=[];
+  try{
+    for(var dimensions of [[360,240],[1280,720]]){
+      for(var moving of [false,true]){
+        var surface=freshCanvas(dimensions[0],dimensions[1]),c=surface.getContext('2d');
+        var cold=[],raw=[],cached=[],before;
+        clearFloorArtworkCache();setFloorArtworkCacheEnabled(true);
+        function draw(useCache,tick){
+          FLOOR_ARTWORK_CACHE_ENABLED=useCache;beginFloorArtworkFrame();
+          c.fillStyle='#68764b';c.fillRect(0,0,surface.width,surface.height);
+          for(var i=0;i<120;i++){
+            var type=artTypes[i%4],seed=(i*0.61803398875)%1;
+            var x=(i%12+0.5)*surface.width/12+Math.sin(tick*.04+i)*0.7;
+            var y=(Math.floor(i/12)+0.5)*surface.height/10+Math.cos(tick*.04+i)*0.7;
+            var size=12+(i%8)*7;
+            if(moving)size=Math.max(6,Math.min(70,Math.floor(size+8*Math.sin(tick*.055+i))));
+            if(useCache)drawFloorArtwork(c,type,0,seed,x,y,size);
+            else paintFloorItem(c,type,0,seed,x,y,size);
+          }
+        }
+        for(var warm=0;warm<80;warm++){
+          if(stopped)throw new Error('Cancelled');
+          await frame();var t=performance.now();draw(true,moving?warm:0);cold.push(performance.now()-t);
+        }
+        before=getFloorArtworkCacheStats();
+        for(var sample=0;sample<60;sample++){
+          if(stopped)throw new Error('Cancelled');
+          await frame();var tick=moving?80+sample:0;
+          // Alternate order to reduce systematic first/second-draw bias.
+          for(var order=0;order<2;order++){
+            var useCache=(sample+order)%2===0,t0=performance.now();draw(useCache,tick);
+            (useCache?cached:raw).push(performance.now()-t0);
+          }
+        }
+        var after=getFloorArtworkCacheStats();
+        results.push({canvas:dimensions.join('x'),mode:moving?'moving sizes + fractional positions':'fixed sizes + fractional positions',props:120,
+          firstCachedFrameMs:+cold[0].toFixed(3),warmup:stats(cold),original:stats(raw),cached:stats(cached),
+          measuredHits:after.hits-before.hits,measuredMisses:after.misses-before.misses,measuredBuilds:after.builds-before.builds,
+          pixelBytes:after.pixelBytes,entries:after.entries});
+        report({status:'Measuring',results:results});
+      }
+    }
+    report({status:'Complete',scope:'120 mixed props only; command time, no pixel readback, not whole-game FPS',results:results});
+  }catch(e){report({status:e.message,results:results});}
+  finally{document.getElementById('profile').disabled=false;document.getElementById('verify').disabled=false;document.getElementById('cancel').disabled=true;preview();}
+}
+document.getElementById('profile').addEventListener('click',profile);
+document.getElementById('cancel').addEventListener('click',function(){stopped=true;});
+preview();
+</script></html>

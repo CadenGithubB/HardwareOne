@@ -33,8 +33,11 @@ function makePattern(kind) {
   var oc = document.createElement('canvas');
   oc.width = 32; oc.height = 32;
   var c = oc.getContext('2d');
+  // Preserve the four existing pattern recipes, including legacy fallback.
+  var patternKind = (kind === 'ice' || kind === 'cave' || kind === 'expanse') ? kind : 'ground';
+  var patternBase = BIOME_PALETTE[patternKind].patternBase;
   if (kind === 'ice') {
-    c.fillStyle = '#0a1322'; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = patternBase; c.fillRect(0, 0, 32, 32);
     c.strokeStyle = 'rgba(170,210,255,0.35)'; c.lineWidth = 2;
     c.beginPath(); c.moveTo(0, 16); c.lineTo(32, 16); c.moveTo(16, 0); c.lineTo(16, 32); c.stroke();
     c.strokeStyle = 'rgba(120,190,255,0.18)';
@@ -48,7 +51,7 @@ function makePattern(kind) {
     g.addColorStop(0, 'rgba(255,255,255,0.02)'); g.addColorStop(1, 'rgba(255,255,255,0.00)');
     c.fillStyle = g; c.fillRect(0, 0, 32, 32);
   } else if (kind === 'cave') {
-    c.fillStyle = '#2a2a2e'; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = patternBase; c.fillRect(0, 0, 32, 32);
     for (var i = 0; i < 32; i++) {
       var x = Math.random() * 32, y = Math.random() * 32, r = Math.random() * 1.4 + 0.5;
       var a = 0.08 + Math.random() * 0.12; var pick = Math.random();
@@ -65,7 +68,7 @@ function makePattern(kind) {
     }
   } else if (kind === 'expanse') {
     // Cracked sandstone — warm ochre base with hairline fractures
-    c.fillStyle = '#7a4e22'; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = patternBase; c.fillRect(0, 0, 32, 32);
     // Crack lines
     c.strokeStyle = 'rgba(30,15,5,0.55)'; c.lineWidth = 0.8;
     for (var i = 0; i < 6; i++) {
@@ -83,7 +86,7 @@ function makePattern(kind) {
       c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
     }
   } else {
-    c.fillStyle = '#3b2a18'; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = patternBase; c.fillRect(0, 0, 32, 32);
     for (var i = 0; i < 28; i++) {
       var x = Math.random() * 32, y = Math.random() * 32, r = Math.random() * 1.6 + 0.6;
       var a = 0.10 + Math.random() * 0.10; var pick = Math.random();
@@ -124,5 +127,4 @@ function applyPreset() {
   ceilPattern = makeCeilPattern(k);
   wallColor = makeWallColor(k);
 }
-
 

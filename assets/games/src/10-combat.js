@@ -2,6 +2,67 @@
 // SECTION 9: COMBAT SYSTEM
 // =============================================
 
+// Magic Missile alone has an authored wind-up. Cost/cooldown are reserved on
+// accepted input; aim/position are sampled when its release is serviced. Other
+// attacks keep their existing immediate behavior and per-input equipment rules.
+var MISSILE_CAST_WINDUP_MS = 120;
+var pendingMissileCasts = [];
+var spellCastReservationSerial = 0;
+
+function missileCastingBlocked() {
+  return !running || gameOverState || menuOpen ||
+    (typeof shopOpen !== 'undefined' && shopOpen) ||
+    (typeof inventoryOpen !== 'undefined' && inventoryOpen) ||
+    (typeof forgeOpen !== 'undefined' && forgeOpen) ||
+    (typeof settingsOpen !== 'undefined' && settingsOpen) ||
+    (typeof document !== 'undefined' && document.hidden === true);
+}
+
+function reserveMissileCast(spell, now, count, cost, previousShotMs) {
+  var rangeMult = equipment.relic && equipment.relic.effect === 'spellRange' ? 1 + equipment.relic.value : 1;
+  pendingMissileCasts.push({releaseAt:now + MISSILE_CAST_WINDUP_MS, count:count,
+    spell:Object.assign({},spell), speed:spell.speed * rangeMult, radius:PROJ_RADIUS,
+    lifeMs:Math.round(PROJ_LIFE_MS * rangeMult), cost:cost,
+    previousShotMs:previousShotMs, reservedShotMs:lastShotMs, serial:spellCastReservationSerial,
+    stats:stats, grid:grid, floorMesh:floorMesh});
+}
+
+function cancelPendingMissileCasts(refund) {
+  var count = pendingMissileCasts.length;
+  for (var i = count - 1; i >= 0; i--) {
+    var pending = pendingMissileCasts[i];
+    // Never refund a discarded world's reservation into a new player's state.
+    if (refund && pending.stats === stats && pending.grid === grid && pending.floorMesh === floorMesh) {
+      mana = Math.min(typeof MANA_MAX === 'number' ? MANA_MAX : Infinity, mana + pending.cost);
+      stats.totalManaConsumed = Math.max(0, stats.totalManaConsumed - pending.cost);
+      if (spellCastReservationSerial === pending.serial && lastShotMs === pending.reservedShotMs) {
+        lastShotMs = pending.previousShotMs; spellCastReservationSerial--;
+      }
+    }
+  }
+  pendingMissileCasts = [];
+  if (count && typeof cancelFirstPersonCast === 'function') cancelFirstPersonCast();
+  return count;
+}
+
+function servicePendingMissileCasts(now) {
+  if (!pendingMissileCasts.length) return;
+  if (missileCastingBlocked()) { cancelPendingMissileCasts(true); return; }
+  var waiting = [], discarded = false;
+  for (var i = 0; i < pendingMissileCasts.length; i++) {
+    var pending = pendingMissileCasts[i];
+    if (pending.stats !== stats || pending.grid !== grid || pending.floorMesh !== floorMesh) { discarded = true; continue; }
+    if (now < pending.releaseAt) { waiting.push(pending); continue; }
+    for (var shot = 0; shot < pending.count; shot++) {
+      var offset = pending.count === 3 ? (shot - 1) * 0.2 : 0;
+      spawnProjectile(pending.speed, pending.radius, pending.spell, offset,
+        {speed:pending.speed, lifeMs:pending.lifeMs, releaseAt:pending.releaseAt});
+    }
+  }
+  pendingMissileCasts = waiting;
+  if (discarded && !waiting.length && typeof cancelFirstPersonCast === 'function') cancelFirstPersonCast();
+}
+
 function getUnlockedSpells() {
   var result = [];
   for (var i = 0; i < spellOrder.length; i++) {
@@ -28,6 +89,7 @@ function castCurrentSpell() {
   if (!running || gameOverState || menuOpen) return;
   var now = Date.now();
   var spell = getCurrentSpell();
+  if (spell.id === 'missile' && missileCastingBlocked()) return;
   if (DEBUG_COMBAT && now - __combatDbgLast > 200) {
     __combatDbgLast = now;
     var cd = now - lastShotMs;
@@ -41,6 +103,8 @@ function castCurrentSpell() {
   var effManaCost = spell.manaCost * ((equipment.robes && equipment.robes.manaCostReduction) ? (1 - equipment.robes.manaCostReduction) : 1);
   var _effCD = getEffectiveCooldown();
   if (mana >= effManaCost && (now - lastShotMs) >= _effCD) {
+    var previousShotMs = lastShotMs;
+    var windupMissile = spell.id === 'missile' && spell.attackType === 'projectile';
     if (spell.attackType === 'nova') castNovaAttack(spell);
     else if (spell.attackType === 'cone') castConeAttack(spell);
     else if (spell.attackType === 'lob') {
@@ -58,12 +122,7 @@ function castCurrentSpell() {
       }
     }
     else {
-      if (spell.tier >= 2 && spell.id === 'missile') {
-        // Split Shot: fire 3 missiles in a spread
-        for (var si = -1; si <= 1; si++) {
-          spawnProjectile(spell.speed, PROJ_RADIUS, spell, si * 0.2);
-        }
-      } else {
+      if (!windupMissile) {
         spawnProjectile(spell.speed, PROJ_RADIUS);
       }
     }
@@ -80,6 +139,9 @@ function castCurrentSpell() {
       lastShotMs = now;
     }
     castAnimUntil = now + 280;
+    spellCastReservationSerial++;
+    if (windupMissile) reserveMissileCast(spell, now, spell.tier >= 2 ? 3 : 1, finalManaCost, previousShotMs);
+    if (typeof noteFirstPersonCast === 'function') noteFirstPersonCast(spell, now);
   }
 }
 
@@ -106,7 +168,7 @@ function getPlayerRenderFloorZ() {
   return Number.isFinite(pos.floorZ) ? (pos.floorZ - 60) * 0.625 : 0;
 }
 
-function spawnProjectile(speedOverride, radiusOverride, spellOverride, angOffset) {
+function spawnProjectile(speedOverride, radiusOverride, spellOverride, angOffset, reserved) {
   var spell = spellOverride || getCurrentSpell();
   var ang = getAimAngle() + (angOffset || 0);
   var usePitch = -(cam.pitch || 0);
@@ -117,17 +179,21 @@ function spawnProjectile(speedOverride, radiusOverride, spellOverride, angOffset
   var sx = pos.x + Math.cos(ang) * handFwd + Math.cos(rightAng) * handRight;
   var sy = pos.y + Math.sin(ang) * handFwd + Math.sin(rightAng) * handRight;
   var sp = (speedOverride || spell.speed);
-  if (equipment.relic && equipment.relic.effect === 'spellRange') sp *= (1 + equipment.relic.value);
+  if (reserved) sp = reserved.speed;
+  else if (equipment.relic && equipment.relic.effect === 'spellRange') sp *= (1 + equipment.relic.value);
   var rr = (radiusOverride || PROJ_RADIUS);
   var hz = sp * Math.cos(usePitch);
   var vz = sp * Math.sin(usePitch);
   var spawnZ = MODE3D ? getPlayerRenderFloorZ() + 55 : 0;
   console.log('[PROJ] pitch=' + (cam.pitch||0).toFixed(3) + ' usePitch=' + usePitch.toFixed(3) + ' hz=' + hz.toFixed(1) + ' vz=' + vz.toFixed(1) + ' spawnZ=' + spawnZ);
   var _pLife = PROJ_LIFE_MS;
-  if (equipment.relic && equipment.relic.effect === 'spellRange') _pLife = Math.round(_pLife * (1 + equipment.relic.value));
-  projectiles.push({x:sx, y:sy, z:spawnZ, ang:ang, speed:sp, hz:hz, vz:vz,
-                    spawnMs:Date.now(), lifeMs:_pLife, r:rr, spell:spell,
-                    renderFloorZ:getPlayerRenderFloorZ(), underground:!!playerUnderground});
+  if (reserved) _pLife = reserved.lifeMs;
+  else if (equipment.relic && equipment.relic.effect === 'spellRange') _pLife = Math.round(_pLife * (1 + equipment.relic.value));
+  var projectile = {x:sx, y:sy, z:spawnZ, ang:ang, speed:sp, hz:hz, vz:vz,
+    spawnMs:reserved ? reserved.releaseAt : Date.now(), lifeMs:_pLife, r:rr, spell:spell,
+    renderFloorZ:getPlayerRenderFloorZ(), underground:!!playerUnderground};
+  if (reserved) projectile._castReleaseAt = reserved.releaseAt;
+  projectiles.push(projectile);
 }
 
 // Lob projectile — arcing trajectory for Poison Cloud
@@ -454,12 +520,18 @@ function _applyProjectileHit(spell, e, ei, nx, ny, nz, dx, dy, now) {
 }
 
 function updateProjectiles(dt) {
-  if (!projectiles || !projectiles.length) return;
   var now = Date.now();
+  servicePendingMissileCasts(now);
+  if (!projectiles || !projectiles.length) return;
   var alive = [], hitWalls = 0, hitEnemies = 0, expired = 0;
   for (var i = 0; i < projectiles.length; i++) {
     var p = projectiles[i];
     var spell = p.spell || spells.missile;
+    var stepDt = dt;
+    if (Number.isFinite(p._castReleaseAt)) {
+      stepDt = Math.min(dt, Math.max(0, (now - p._castReleaseAt) / 1000));
+      delete p._castReleaseAt;
+    }
 
     // ── Homing (Magic Missile) ──────────────────────────────────────
     if (spell.homing && !p.isLob) {
@@ -478,14 +550,14 @@ function updateProjectiles(dt) {
         var turnDa = bestAng - p.ang;
         while (turnDa > Math.PI) turnDa -= Math.PI * 2;
         while (turnDa < -Math.PI) turnDa += Math.PI * 2;
-        var maxTurn = spell.homing * dt;
+        var maxTurn = spell.homing * stepDt;
         if (turnDa > maxTurn) turnDa = maxTurn;
         else if (turnDa < -maxTurn) turnDa = -maxTurn;
         p.ang += turnDa;
         // Z-homing: steer vz toward target's Z
         if (bestEnemy) {
           var dz = (bestEnemy.z || 0) - (p.z || 0);
-          var zSteer = spell.homing * 200 * dt;
+          var zSteer = spell.homing * 200 * stepDt;
           if (dz > 0) p.vz = Math.min((p.vz || 0) + zSteer, p.speed * 0.5);
           else if (dz < 0) p.vz = Math.max((p.vz || 0) - zSteer, -p.speed * 0.5);
         }
@@ -494,12 +566,12 @@ function updateProjectiles(dt) {
 
     // ── Lob physics (Poison Cloud) ──────────────────────────────────
     if (p.isLob) {
-      p.vz = (p.vz || 0) + (p.gravZ || -200) * dt;
+      p.vz = (p.vz || 0) + (p.gravZ || -200) * stepDt;
     }
 
-    var nx = p.x + Math.cos(p.ang) * (p.hz || p.speed) * dt;
-    var ny = p.y + Math.sin(p.ang) * (p.hz || p.speed) * dt;
-    var nz = (p.z || 0) + (p.vz || 0) * dt;
+    var nx = p.x + Math.cos(p.ang) * (p.hz || p.speed) * stepDt;
+    var ny = p.y + Math.sin(p.ang) * (p.hz || p.speed) * stepDt;
+    var nz = (p.z || 0) + (p.vz || 0) * stepDt;
 
     // ── Lob landing — use floor height at current position (works underground) ──
     var lobFloorZ = p.isLob && floorMesh ? sampleEntitySupportRenderZ(nx, ny, p.renderFloorZ, p.underground) : 0;
@@ -536,7 +608,7 @@ function updateProjectiles(dt) {
 
         hitEnemy = true;
         _applyProjectileHit(spell, e, ei, nx, ny, nz, dx, dy, now);
-        impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220});
+        impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220, spellId:spell.id});
         hitEnemies++; break;
       }
     }
@@ -550,7 +622,7 @@ function updateProjectiles(dt) {
         if (!sp2.active || sp2.hp <= 0) continue;
         if (Math.hypot(nx - sp2.x, ny - sp2.y) < 25) {
           sp2.hp -= (spell.damage || 1);
-          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:300});
+          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:300, spellId:spell.id});
           if (sp2.hp <= 0) {
             sp2.active = false;
             // Death burst
@@ -586,7 +658,7 @@ function updateProjectiles(dt) {
         for (var oi = 0; oi < oreVeins.length; oi++) {
           if (oreVeins[oi].gx !== gx || oreVeins[oi].gy !== gy) continue;
           oreVeins[oi].hp--;
-          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:400});
+          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:400, spellId:spell.id});
           if (oreVeins[oi].hp <= 0) {
             oreVeins.splice(oi, 1);
             var dropN = 3 + Math.floor(Math.random() * 4);
@@ -601,7 +673,7 @@ function updateProjectiles(dt) {
           hitOre = true; hitWalls++; break;
         }
       }
-      if (!hitOre) { impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220}); hitWalls++; }
+      if (!hitOre) { impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220, spellId:spell.id}); hitWalls++; }
       continue;
     }
     p.x = nx; p.y = ny; p.z = nz;

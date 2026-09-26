@@ -232,16 +232,26 @@ def preview_html(assembly: Assembly) -> bytes:
     return (prefix + "\n" * padding + js.body + "</div></body></html>\n").encode("utf-8")
 
 
+def artwork_preview_html() -> bytes:
+    """Small production-recipe gallery; never starts the game or hardware APIs."""
+    page = (REPO_ROOT / "tools/game/artwork-preview.html").read_text(encoding="utf-8")
+    names = ("01-materials.js", "07-decorations-lighting.js", "07-artwork-cache.js", "12-scene-depth.js")
+    scripts = "\n".join(read_source(SOURCE_ROOT, "src/" + name) for name in names)
+    return page.replace("/* @PRODUCTION_ARTWORK@ */", scripts).encode("utf-8")
+
+
 def serve(port: int) -> None:
     check()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            if urlsplit(self.path).path not in ("/", "/game.html"):
+            route = urlsplit(self.path).path
+            if route not in ("/", "/game.html", "/artwork.html"):
                 self.send_error(404)
                 return
             try:
-                payload = preview_html(check())
+                assembly = check()
+                payload = artwork_preview_html() if route == "/artwork.html" else preview_html(assembly)
                 status = 200
                 content_type = "text/html; charset=utf-8"
             except (SourceError, OSError) as exc:
@@ -291,11 +301,21 @@ def main(argv: list[str] | None = None) -> int:
                            "tools.game.tests.test_cave_geometry", "tools.game.tests.test_cave_lighting",
                            "tools.game.tests.test_cave_render", "tools.game.tests.test_cave_material",
                            "tools.game.tests.test_scene_depth", "tools.game.tests.test_cave_occlusion_integration",
-                           "tools.game.tests.test_wall_decor", "tools.game.tests.test_entity_depth",
+                           "tools.game.tests.test_cave_wall_envelope", "tools.game.tests.test_cave_wall_cover",
+                           "tools.game.tests.test_cave_surface_shading",
+                           "tools.game.tests.test_cave_surface_material", "tools.game.tests.test_cave_surface_lighting",
+                           "tools.game.tests.test_ruin_generation", "tools.game.tests.test_ruin_decor",
+                           "tools.game.tests.test_wall_decor", "tools.game.tests.test_structure_floor_v1",
+                           "tools.game.tests.test_entity_depth",
                            "tools.game.tests.test_actor_visibility", "tools.game.tests.test_loot_visibility",
                            "tools.game.tests.test_spell_visibility", "tools.game.tests.test_perf_cadence",
                            "tools.game.tests.test_browser_profile", "tools.game.tests.test_scene_depth_coalescing",
-                           "tools.game.tests.test_floor_stitch_cache"]
+                           "tools.game.tests.test_floor_stitch_cache", "tools.game.tests.test_material_palette",
+                           "tools.game.tests.test_sky_render",
+                           "tools.game.tests.test_terrain_facing", "tools.game.tests.test_cave_exit_transition",
+                           "tools.game.tests.test_artwork_cache", "tools.game.tests.test_casting_presentation",
+                           "tools.game.tests.test_firstperson_art", "tools.game.tests.test_casting_studio",
+                           "tools.game.tests.test_hand_rig", "tools.game.tests.test_casting_styles"]
                 if args.suite:
                     module = f"tools/webui/tests/test_game_{args.suite}.py"
                     if not (REPO_ROOT / module).exists():

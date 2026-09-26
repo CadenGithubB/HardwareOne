@@ -24,6 +24,11 @@
             <input type='checkbox' id='chkKeyboard'/> Keyboard + Mouse
           </label>
         </div>
+        <div class='space-top-sm text-sm'>
+          <label for='playerCastingStyle'>Casting Style</label>
+          <select id='playerCastingStyle' aria-label='Player Casting Style' class='input-tall' style='width:auto' aria-describedby='castingStylePreferenceNote'></select>
+          <span id='castingStylePreferenceNote'>Browser-local preference. Animation study only for now; inspect in Casting studio.</span>
+        </div>
         <div id='caveTestOptions' class='space-top-sm text-sm' style='display:none;padding:4px 8px;background:#1a2a1a;border:1px solid #335533;border-radius:4px'>
           <span style='color:#88cc88;font-weight:bold;margin-right:8px'>Cave Test:</span>
           <label>Entrance
@@ -142,6 +147,9 @@
           <span class='space-left-md'></span>
           <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Overlay real-time frame time breakdown and FPS on the canvas'>
             <input type='checkbox' id='chkPerfHud'/> Perf HUD
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Experimental bounded artwork cache for ferns, logs, skulls and rubble; compare on/off'>
+            <input type='checkbox' id='chkArtworkCache'/> Prop cache (pilot)
           </label>
           <span class='space-left-md'></span>
           <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Overlay cave debug info: floor height, ceiling height, ambient light, underground state'>

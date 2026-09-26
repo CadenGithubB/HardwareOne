@@ -31,6 +31,53 @@ function chunkRng(cx, cy, component) {
   return next;
 }
 
+var FLOOR_SCATTER_POOLS = Object.freeze({
+  cave:Object.freeze(['crystal','stalagmite','rock_pile','puddle','boulder','cave_rubble_pile','rock_spire','bookshelf_debris','iron_chain','barrel']),
+  ice:Object.freeze(['ice_shard','frozen_pool','icicle_cluster','frost_patch','frozen_skull','cracked_stone']),
+  plains:Object.freeze(['tall_grass','wildflower','tall_grass','mesa_boulder','stone_marker','flat_rock','dead_shrub','wildflower','tree_stump']),
+  forest:Object.freeze(['tree_stump','fallen_log','tall_grass','wildflower','mushroom','moss_patch','fern','leaf_pile','tall_grass','fern']),
+  expanse:Object.freeze(['desert_rock','dead_shrub','dry_bones','stone_column','sand_pillar','cracked_stone','flat_rock']),
+  ground:Object.freeze(['bones','crate','skull','rubble','rib_cage','flat_rock','cracked_stone']),
+  fortress:Object.freeze(['crate','barrel','bookshelf_debris','iron_chain','rubble','cracked_stone','stick_bundle']),
+  arena:Object.freeze(['cracked_stone','rubble','bones','dry_bones','rib_cage','femur','flat_rock']),
+  watchtower:Object.freeze(['barrel','crate','stick_bundle','fallen_log','rubble','iron_chain','dead_shrub'])
+});
+var FLOOR_SCATTER_DENSITY = Object.freeze({
+  cave:0.025, forest:0.022, ground:0.020, expanse:0.018, plains:0.015, ice:0.015,
+  fortress:0.040, arena:0.038, watchtower:0.036
+});
+function getFloorScatterProfile(biome, structureType) {
+  var key = structureType && FLOOR_SCATTER_POOLS[structureType] ? structureType :
+    (FLOOR_SCATTER_POOLS[biome] ? biome : 'ground');
+  return {key:key, pool:FLOOR_SCATTER_POOLS[key], density:FLOOR_SCATTER_DENSITY[key]};
+}
+function floorScatterClusterWeight(worldGridX, worldGridY) {
+  var clusterX = Math.floor(worldGridX / 4), clusterY = Math.floor(worldGridY / 4);
+  var h = chunkSeedFor(clusterX, clusterY, 109) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 2246822519) >>> 0;
+  var n = ((h ^ (h >>> 13)) >>> 0) / 4294967296;
+  return n < 0.25 ? 2.5 : n < 0.60 ? 0.75 : 0.25;
+}
+// 0 = outside this structure, 1 = deliberately clear circulation zone,
+// 2 = themed clutter zone. This keeps courts/altars/tower cores readable.
+function getStructureFloorScatterZone(st, wx, wy) {
+  if (!st) return 0;
+  var scale = st.scale || 1, dx = wx - st.centerWX, dy = wy - st.centerWY;
+  if (st.type === 'fortress') {
+    var extent = CHUNK_SIZE * 1.7 * scale, cheb = Math.max(Math.abs(dx), Math.abs(dy));
+    if (cheb >= extent - cell * 2) return 0;
+    return cheb < cell * 10 * scale ? 1 : 2;
+  }
+  if (st.type === 'arena') {
+    var radius = Math.hypot(dx, dy), ring = CHUNK_SIZE * 1.1 * scale;
+    if (radius >= ring - cell * 3) return 0;
+    return radius < cell * 8 * scale ? 1 : 2;
+  }
+  var reach = cell * (17 * scale + 3), towerCheb = Math.max(Math.abs(dx), Math.abs(dy));
+  if (towerCheb >= reach) return 0;
+  return towerCheb < cell * 5 * scale ? 1 : 2;
+}
+
 function getBiomeAt(wx, wy) {
   if (CAVE_TEST_MODE) return 'plains';
   var n = biomeNoise(wx, wy, 3600);
@@ -200,6 +247,30 @@ function sampleCavePortal(e, x, y) {
   return {along: along, cross: cross, perp: perp, coreW: coreW, lat: lat,
     tAxial: axial, t: axial * lat, inCore: perp <= coreW,
     isInside: along >= -inner && along <= 0, covered: along <= 0, entrance: e};
+}
+
+// A cave boundary wall ends at the roof, inside the cover rock, not at the
+// highest nearby grass sample. Test the wall's own footprint: a surface tree
+// merely adjacent to a cave must retain its ordinary height. Mesh vertices
+// bound the piecewise-linear cover, including non-flat wall-cell corners.
+function getCaveWallRoofLimit(mesh, gx, gy, cellSize) {
+  if (!mesh || !mesh.layerCount || !mesh.surfaceH) return Infinity;
+  var x0=Math.max(0,Math.floor(gx*cellSize/mesh.gridSize));
+  var y0=Math.max(0,Math.floor(gy*cellSize/mesh.gridSize));
+  var x1=Math.min(mesh.w-1,Math.ceil((gx+1)*cellSize/mesh.gridSize));
+  var y1=Math.min(mesh.h-1,Math.ceil((gy+1)*cellSize/mesh.gridSize));
+  var roof=-Infinity,cover=Infinity;
+  for(var y=y0;y<=y1;y++)for(var x=x0;x<=x1;x++){
+    var i=y*mesh.w+x;
+    if(Number.isFinite(mesh.surfaceH[i]))cover=Math.min(cover,mesh.surfaceH[i]);
+    for(var li=0;li<mesh.layerCount[i];li++){
+      if(mesh['l'+li+'Type'][i]===2)roof=Math.max(roof,mesh['l'+li+'TopZ'][i]);
+    }
+  }
+  // Endpoint ceiling closure in the wall renderer remains authoritative when
+  // the roof slopes. This quarter-unit overlap is a geometric safety margin,
+  // never a camera-dependent visibility switch or a change to walk support.
+  return roof>-Infinity?Math.min(roof,cover-0.25):Infinity;
 }
 
 function generateCaveNetwork(regionX, regionY) {
@@ -621,6 +692,34 @@ function caveChamberContentPoint(chamber, offsetX, offsetY) {
   return {ownerCX: cx, ownerCY: cy,
     x: Math.max(cx * CHUNK_SIZE + inset, Math.min((cx + 1) * CHUNK_SIZE - inset, chamber.cx + offsetX)),
     y: Math.max(cy * CHUNK_SIZE + inset, Math.min((cy + 1) * CHUNK_SIZE - inset, chamber.cy + offsetY))};
+}
+
+// A hut is authored facing north, then quarter-turned to match its open side.
+// The wider broken footprint keeps the camera away from the near plane and
+// gives the radius-6 player real clearance through a three-cell doorway.
+function rotateRuinCellOffset(dx, dy, facing) {
+  facing = (facing | 0) & 3;
+  if (facing === 1) return {dx: -dy, dy: dx};
+  if (facing === 2) return {dx: -dx, dy: -dy};
+  if (facing === 3) return {dx: dy, dy: -dx};
+  return {dx: dx, dy: dy};
+}
+
+function buildHutRuinCells(facing) {
+  // Base orientation: open to the north (negative Y). The rear wall is the
+  // tallest surviving run; the side walls descend toward a three-cell entry.
+  // The missing front-right corner keeps the outline visibly ruined.
+  var authored = [
+    [-2, 2, 0.18], [-1, 2, 0.22], [0, 2, 0.24], [1, 2, 0.21], [2, 2, 0.17],
+    [-2,-1, 0.14], [-2, 0, 0.16], [-2, 1, 0.19],
+    [ 2, 0, 0.15], [ 2, 1, 0.18]
+  ];
+  var cells = [];
+  for (var i = 0; i < authored.length; i++) {
+    var turned = rotateRuinCellOffset(authored[i][0], authored[i][1], facing);
+    cells.push({dx: turned.dx, dy: turned.dy, wallH: authored[i][2]});
+  }
+  return cells;
 }
 
 function generateChunk(cx, cy) {
@@ -1232,6 +1331,22 @@ function generateChunk(cx, cy) {
             _fr = Math.floor(_fr * (1 - _ba) + _pf[0] * _ba);
             _fg = Math.floor(_fg * (1 - _ba) + _pf[1] * _ba);
             _fb = Math.floor(_fb * (1 - _ba) + _pf[2] * _ba);
+            // Structure-specific paving is baked into the chunk color mesh, so
+            // it adds visual scale and orientation without per-frame geometry.
+            var _pave = 0;
+            if (cStructure.type === 'fortress') {
+              var _paverX = Math.floor((ffwx - cStructure.centerWX) / (meshGridSize * 2));
+              var _paverY = Math.floor((ffwy - cStructure.centerWY) / meshGridSize);
+              _pave = ((_paverX + _paverY) & 1) ? 4 : -3;
+            } else if (cStructure.type === 'arena') {
+              _pave = (Math.floor(sDist / (meshGridSize * 2)) & 1) ? 4 : -2;
+            } else {
+              var _spokeA = Math.atan2(fdy2, fdx2) - (cStructure.rotation || 0);
+              _pave = (Math.floor(((_spokeA + Math.PI) / (Math.PI * 0.25))) & 1) ? 3 : -2;
+            }
+            _fr = Math.max(0, Math.min(255, _fr + _pave));
+            _fg = Math.max(0, Math.min(255, _fg + _pave));
+            _fb = Math.max(0, Math.min(255, _fb + _pave));
             cColors[fi2] = '#' + ((1<<24)|(_fr<<16)|(_fg<<8)|_fb).toString(16).slice(1);
           }
         }
@@ -1374,22 +1489,23 @@ function generateChunk(cx, cy) {
   // ── Floor scatter ──
   var cScatter = [];
   var scatterRng = chunkRng(cx, cy, 9);
-  var scatterPool;
-  if (biome === 'cave') scatterPool = ['crystal','stalagmite','rock_pile','puddle','boulder','cave_rubble_pile','rock_spire','bookshelf_debris','iron_chain','barrel'];
-  else if (biome === 'ice') scatterPool = ['ice_shard','frozen_pool','icicle_cluster','frost_patch','frozen_skull','cracked_stone'];
-  else if (biome === 'plains') scatterPool = ['tall_grass','wildflower','tall_grass','mesa_boulder','stone_marker','flat_rock','dead_shrub','wildflower','tree_stump'];
-  else if (biome === 'forest') scatterPool = ['tree_stump','fallen_log','tall_grass','wildflower','mushroom','moss_patch','fern','leaf_pile','tall_grass','fern'];
-  else if (biome === 'expanse') scatterPool = ['desert_rock','dead_shrub','dry_bones','stone_column','sand_pillar','cracked_stone','flat_rock'];
-  else scatterPool = ['bones','crate','skull','rubble','rib_cage','flat_rock','cracked_stone'];
-  var scatterDensity = biome === 'cave' ? 0.025 : biome === 'forest' ? 0.022 : biome === 'ground' ? 0.020 : biome === 'expanse' ? 0.018 : 0.015;
+  var baseScatterProfile = getFloorScatterProfile(biome, null);
+  var structureScatterProfile = cStructure ? getFloorScatterProfile(biome, cStructure.type) : null;
   for (var sy = 0; sy < CHUNK_CELLS; sy++) {
     for (var sx = 0; sx < CHUNK_CELLS; sx++) {
       if (cGrid[sy * CHUNK_CELLS + sx]) continue;
-      if (scatterRng() < scatterDensity) {
+      var scatterWX = cx * CHUNK_SIZE + sx * cell + cell * 0.5;
+      var scatterWY = cy * CHUNK_SIZE + sy * cell + cell * 0.5;
+      var structureScatterZone = getStructureFloorScatterZone(cStructure, scatterWX, scatterWY);
+      if (structureScatterZone === 1) continue;
+      var scatterProfile = structureScatterZone === 2 ? structureScatterProfile : baseScatterProfile;
+      var worldGridX = cx * CHUNK_CELLS + sx, worldGridY = cy * CHUNK_CELLS + sy;
+      var clusteredDensity = scatterProfile.density * floorScatterClusterWeight(worldGridX, worldGridY);
+      if (scatterRng() < clusteredDensity) {
         cScatter.push({
           x: cx * CHUNK_SIZE + sx * cell + scatterRng() * cell,
           y: cy * CHUNK_SIZE + sy * cell + scatterRng() * cell,
-          type: scatterPool[Math.floor(scatterRng() * scatterPool.length)],
+          type: scatterProfile.pool[Math.floor(scatterRng() * scatterProfile.pool.length)],
           variant: Math.floor(scatterRng() * 4),
           seed: Math.floor(scatterRng() * 10000)
         });
@@ -1431,11 +1547,11 @@ function generateChunk(cx, cy) {
       else if (side === 'west') dwx -= cell/2;
       else if (side === 'east') dwx += cell/2;
       // Cave-adjacent walls use cave decoration set with extra torches
-      var dTypes = (_adjCave) ? ['torch','torch','torch','stalactite','crack','fungi','moss'] :
-                   (biome === 'cave') ? ['fungi','stalactite','crack','moss','torch','torch'] :
-                   (biome === 'ice')  ? ['icicle','frost_crack','torch'] :
+      var dTypes = (_adjCave) ? ['torch','torch','torch','stalactite_tip','wall_crack','fungi','moss_drip'] :
+                   (biome === 'cave') ? ['fungi','stalactite_tip','wall_crack','moss_drip','torch','torch'] :
+                   (biome === 'ice')  ? ['icicle','frost_crystal','torch'] :
                    (biome === 'forest') ? ['vine_growth','moss_drip','vine_growth','carved_rune','moss_drip','torch'] :
-                   ['torch','shield','crack','vine','banner'];
+                   ['torch','shield','wall_crack','vine_growth','banner'];
       cDecors.push({
         worldX: dwx, worldY: dwy, side: side,
         type: dTypes[Math.floor(decorRng() * dTypes.length)],
@@ -1472,9 +1588,9 @@ function generateChunk(cx, cy) {
           if (Math.abs(cDecors[_di3].worldX - dwx3) < 2 && Math.abs(cDecors[_di3].worldY - dwy3) < 2) { _dup3 = true; break; }
         }
         if (_dup3) continue;
-        var sPool = (cStructure.type === 'fortress') ? ['torch','torch','torch','banner','shield','crack'] :
-                    (cStructure.type === 'arena') ? ['torch','torch','sconce','crack','banner'] :
-                    ['torch','torch','torch','sconce','crack'];
+        var sPool = (cStructure.type === 'fortress') ? ['torch','torch','torch','banner','shield','wall_crack'] :
+                    (cStructure.type === 'arena') ? ['torch','torch','sconce','wall_crack','banner'] :
+                    ['torch','torch','torch','sconce','wall_crack'];
         cDecors.push({
           worldX: dwx3, worldY: dwy3, side: side3,
           type: sPool[Math.floor(sDecorRng() * sPool.length)],
@@ -1784,20 +1900,36 @@ function generateChunk(cx, cy) {
       var ruY = Math.floor(CHUNK_CELLS / 2) + Math.floor(ruinRng() * 5) - 2;
       var ruinCells = [];
       var ruinWallH = 0.35 + ruinRng() * 0.15; // short ruined walls
+      var ruinSiteSpan = Infinity;
 
       if (ruinType === 'hut') {
-        // 3x3 with one open side
-        for (var rdy = -1; rdy <= 1; rdy++) {
-          for (var rdx = -1; rdx <= 1; rdx++) {
-            if (rdx === 0 && rdy === 0) continue; // hollow inside
-            // Open side based on facing
-            if (facing === 0 && rdy === -1 && rdx === 0) continue;
-            if (facing === 1 && rdx === 1 && rdy === 0) continue;
-            if (facing === 2 && rdy === 1 && rdx === 0) continue;
-            if (facing === 3 && rdx === -1 && rdy === 0) continue;
-            ruinCells.push({dx: rdx, dy: rdy});
+        // Search the nearby center cells for the flattest dry 7x7 pad. A hut
+        // embedded in a steep bank or pool turns its otherwise short remnants
+        // into tall exposed slabs and makes the doorway unreadable.
+        var ruinStartX = ruX, ruinStartY = ruY;
+        for (var rsoY = -3; rsoY <= 3; rsoY++) {
+          for (var rsoX = -3; rsoX <= 3; rsoX++) {
+            var rscX = ruinStartX + rsoX, rscY = ruinStartY + rsoY;
+            if (rscX < 4 || rscX >= CHUNK_CELLS - 4 || rscY < 4 || rscY >= CHUNK_CELLS - 4) continue;
+            var rsMin = Infinity, rsMax = -Infinity, rsDry = true;
+            for (var rspY = -3; rspY <= 3 && rsDry; rspY++) {
+              for (var rspX = -3; rspX <= 3; rspX++) {
+                var rsmx = Math.max(0, Math.min(meshW - 1,
+                  Math.floor(((rscX + rspX) * cell + cell * 0.5) / meshGridSize)));
+                var rsmy = Math.max(0, Math.min(meshH - 1,
+                  Math.floor(((rscY + rspY) * cell + cell * 0.5) / meshGridSize)));
+                var rsmi = rsmy * meshW + rsmx;
+                if (cWater[rsmi]) { rsDry = false; break; }
+                var rsh = cHeights[rsmi];
+                if (rsh < rsMin) rsMin = rsh;
+                if (rsh > rsMax) rsMax = rsh;
+              }
+            }
+            var rsSpan = rsDry ? rsMax - rsMin : Infinity;
+            if (rsSpan < ruinSiteSpan) { ruinSiteSpan = rsSpan; ruX = rscX; ruY = rscY; }
           }
         }
+        ruinCells = buildHutRuinCells(facing);
       } else if (ruinType === 'tower_base') {
         // 2x2 solid short walls
         for (var rdy2 = 0; rdy2 <= 1; rdy2++) {
@@ -1834,15 +1966,70 @@ function generateChunk(cx, cy) {
         var rgx = ruX + ruinCells[rci].dx, rgy = ruY + ruinCells[rci].dy;
         if (rgx < 1 || rgx >= CHUNK_CELLS - 1 || rgy < 1 || rgy >= CHUNK_CELLS - 1) { ruinValid = false; break; }
       }
+      // Hut pads need one clear cell outside their 5x4 footprint. Do not cut
+      // that pad through a layered cave/entrance if one shares this chunk.
+      var ruinPadRadius = ruinType === 'hut' ? 3 : 0;
+      if (ruinValid && ruinType === 'hut' && ruinSiteSpan > 1.4) ruinValid = false;
+      if (ruinValid && ruinPadRadius) {
+        for (var rpdy = -ruinPadRadius; rpdy <= ruinPadRadius && ruinValid; rpdy++) {
+          for (var rpdx = -ruinPadRadius; rpdx <= ruinPadRadius; rpdx++) {
+            var rpgx = ruX + rpdx, rpgy = ruY + rpdy;
+            if (rpgx < 1 || rpgx >= CHUNK_CELLS - 1 || rpgy < 1 || rpgy >= CHUNK_CELLS - 1) {
+              ruinValid = false; break;
+            }
+            if (cCaveNets.length) {
+              var rpwx = cx * CHUNK_SIZE + rpgx * cell + cell * 0.5;
+              var rpwy = cy * CHUNK_SIZE + rpgy * cell + cell * 0.5;
+              if (queryCaveGeometry(rpwx, rpwy, cCaveNets, getEndlessNaturalSurfaceH(rpwx, rpwy))) {
+                ruinValid = false; break;
+              }
+            }
+          }
+        }
+      }
       if (ruinValid) {
+        if (ruinPadRadius) {
+          // Reserve a clean 7x7 authored pad before placing the hut. Natural
+          // noise walls otherwise fuse to its silhouette or close the door.
+          for (var rpcy = -ruinPadRadius; rpcy <= ruinPadRadius; rpcy++) {
+            for (var rpcx = -ruinPadRadius; rpcx <= ruinPadRadius; rpcx++) {
+              var rpci = (ruY + rpcy) * CHUNK_CELLS + (ruX + rpcx);
+              cGrid[rpci] = 0; cWallH[rpci] = 0;
+              cWallCR[rpci] = 0; cWallCG[rpci] = 0; cWallCB[rpci] = 0;
+            }
+          }
+          function _outsideHutPadWorld(o) {
+            var ogx = Math.floor((o.x - cx * CHUNK_SIZE) / cell);
+            var ogy = Math.floor((o.y - cy * CHUNK_SIZE) / cell);
+            return Math.abs(ogx - ruX) > ruinPadRadius || Math.abs(ogy - ruY) > ruinPadRadius;
+          }
+          // These collections were authored earlier in the chunk pass. Prune
+          // stale occupants instead of leaving grass, torches or actors inside
+          // the newly reserved hut and its approach.
+          cScatter = cScatter.filter(_outsideHutPadWorld);
+          cChests = cChests.filter(_outsideHutPadWorld);
+          cEnemies = cEnemies.filter(_outsideHutPadWorld);
+          cSpawners = cSpawners.filter(_outsideHutPadWorld);
+          cDecors = cDecors.filter(function(d) {
+            return Math.abs(d.gridX - ruX) > ruinPadRadius || Math.abs(d.gridY - ruY) > ruinPadRadius;
+          });
+        }
+        var ruinStone = (typeof GAME_MATERIALS !== 'undefined' && GAME_MATERIALS.rubbleStone) ?
+          GAME_MATERIALS.rubbleStone.packed : {base:0x787060, shadow:0x686058, lit:0x888070};
         for (var rci2 = 0; rci2 < ruinCells.length; rci2++) {
           var rgx2 = ruX + ruinCells[rci2].dx, rgy2 = ruY + ruinCells[rci2].dy;
-          cGrid[rgy2 * CHUNK_CELLS + rgx2] = 1;
-          cWallH[rgy2 * CHUNK_CELLS + rgx2] = ruinWallH;
+          var ruinCellIdx = rgy2 * CHUNK_CELLS + rgx2;
+          cGrid[ruinCellIdx] = 1;
+          cWallH[ruinCellIdx] = Number.isFinite(ruinCells[rci2].wallH) ? ruinCells[rci2].wallH : ruinWallH;
+          if (ruinType === 'hut') {
+            var ruinPacked = rci2 % 5 === 1 ? ruinStone.lit : rci2 % 4 === 0 ? ruinStone.shadow : ruinStone.base;
+            cWallCR[ruinCellIdx] = (ruinPacked >>> 16) & 255;
+            cWallCG[ruinCellIdx] = (ruinPacked >>> 8) & 255;
+            cWallCB[ruinCellIdx] = ruinPacked & 255;
+          }
         }
-        // Clear floor inside for hut. Hall geometry already builds its
-        // open side into the perimeter-wall loop above (and doesn't mark
-        // interior cells as walls to begin with), so no post-stamp clearing.
+        // The authored hut footprint and hall loop both leave their interiors
+        // open; keep the center explicitly clear for older saved chunks.
         if (ruinType === 'hut') {
           cGrid[ruY * CHUNK_CELLS + ruX] = 0;
         }
@@ -1850,7 +2037,8 @@ function generateChunk(cx, cy) {
           x: cx * CHUNK_SIZE + ruX * cell + cell / 2,
           y: cy * CHUNK_SIZE + ruY * cell + cell / 2,
           ruinType: ruinType, facing: facing,
-          cells: ruinCells
+          cells: ruinCells, padRadius: ruinPadRadius,
+          siteSpan: Number.isFinite(ruinSiteSpan) ? ruinSiteSpan : null
         };
         // 15% chance of a stat pickup inside this ruin
         var spRng = chunkRng(cx, cy, 90);
@@ -1963,9 +2151,20 @@ function generateChunk(cx, cy) {
   return chunk;
 }
 
+// Old generated chunks can survive in memory across a source reload. Normalize
+// their former names at the window boundary so every stored wall item remains
+// visible after the art vocabulary changed.
+var WALL_DECOR_TYPE_ALIASES = Object.freeze({
+  stalactite:'stalactite_tip', crack:'wall_crack', moss:'moss_drip',
+  frost_crack:'frost_crystal', vine:'vine_growth'
+});
+function canonicalWallDecorationType(type) {
+  return WALL_DECOR_TYPE_ALIASES[type] || type;
+}
+
 function chunkWallDecorationInWindow(d, chunkWindowX, chunkWindowY) {
   return {worldX: d.worldX - windowOriginX, worldY: d.worldY - windowOriginY,
-    side: d.side, type: d.type,
+    side: d.side, type: canonicalWallDecorationType(d.type),
     gridX: d.gridX + chunkWindowX * CHUNK_CELLS,
     gridY: d.gridY + chunkWindowY * CHUNK_CELLS};
 }
@@ -2314,12 +2513,11 @@ function assembleWindow(centerCX, centerCY) {
     if (capH[iC] < cz + 0.25) capH[iC] = cz + 0.25;
   }
 
-  // Insert cap layer (type=4) into the existing layer stack for each cap
-  // cell, along with its color. Cap color varies per-cell around the local
-  // biome color so stacked terrain reads as distinct strata, not a flat
-  // surface. Colors ride the insertion sort alongside Z and type.
+  // Insert the cap as the same exterior terrain skin, not a new material.
+  // Its pristine world-authored color already includes biome blending and
+  // elevation tint. Cave-only variation would reveal the underground outline.
+  // Colors ride the insertion sort alongside Z and type.
   var layerTmpZ = new Float32Array(5), layerTmpT = new Uint8Array(5), layerTmpC = new Array(5);
-  var _capRng = (function(){ var s = 1664525; return function(){ s = (s * 1103515245 + 12345) | 0; return ((s >>> 0) % 10000) / 10000; }; })();
   for (var iL = 0; iL < N; iL++) {
     if (!needsCap[iL]) continue;
     var lc = floorMesh.layerCount[iL];
@@ -2328,18 +2526,7 @@ function assembleWindow(centerCX, centerCY) {
     if (lc >= 2) { layerTmpZ[n] = floorMesh.l1TopZ[iL]; layerTmpT[n] = floorMesh.l1Type[iL]; layerTmpC[n] = floorMesh.l1Color[iL]; n++; }
     if (lc >= 3) { layerTmpZ[n] = floorMesh.l2TopZ[iL]; layerTmpT[n] = floorMesh.l2Type[iL]; layerTmpC[n] = floorMesh.l2Color[iL]; n++; }
     if (lc >= 4) { layerTmpZ[n] = floorMesh.l3TopZ[iL]; layerTmpT[n] = floorMesh.l3Type[iL]; layerTmpC[n] = floorMesh.l3Color[iL]; n++; }
-    // Cap color: biome base + mild per-cell variation (±6%) so the surface
-    // over a cave reads as natural patches, not a uniform tint.
-    var _biomeStr = floorMesh.surfaceBiome[iL] || '#9bb06d';
-    var _bp = parseInt(_biomeStr.slice(1), 16);
-    var _br = (_bp >> 16) & 0xff, _bg = (_bp >> 8) & 0xff, _bb = _bp & 0xff;
-    var _jr = 0.94 + _capRng() * 0.12;
-    var _jg = 0.94 + _capRng() * 0.12;
-    var _jb = 0.94 + _capRng() * 0.12;
-    var _cr = Math.min(255, Math.max(0, (_br * _jr) | 0));
-    var _cg = Math.min(255, Math.max(0, (_bg * _jg) | 0));
-    var _cb = Math.min(255, Math.max(0, (_bb * _jb) | 0));
-    var capCol = '#' + ('000000' + (((_cr << 16) | (_cg << 8) | _cb) >>> 0).toString(16)).slice(-6);
+    var capCol = floorMesh.surfaceBiome[iL] || '#9bb06d';
     layerTmpZ[n] = capH[iL]; layerTmpT[n] = 4; layerTmpC[n] = capCol; n++;
     // Insertion sort by topZ — colors swap alongside Z/type
     for (var si = 1; si < n; si++) {
@@ -2516,15 +2703,12 @@ function assembleWindow(centerCX, centerCY) {
   console.log('[WALL-BASE] precomputed ' + _wfbCells + ' walls × 4 faces (' + _wfbSamples + ' samples) in ' + (Date.now() - _wfbT0) + 'ms  caveExtend=' + _cwExtended + ' @ Z=' + _cwDeepZ.toFixed(2));
 
   // ── Per-wall layer tag: wallCapZ ──
-  // For each wall cell, find the lowest walkable-layer Z that sits ABOVE the
-  // wall's top. That's the "ceiling of ground" directly over this wall.
-  // A cave wall (under dirt) has a finite wallCapZ and should be hidden from
-  // a camera above the cap. A surface wall or an entrance-mouth wall has no
-  // layer above it — stored as -Infinity — and renders in all cases.
-  // Compared to cam.z at draw time (both in world Z units = meshZ * 25).
+  // Nearby cover tag retained for render/decor consumers. It is not a wall
+  // height or a camera-height visibility test; the scene depth field resolves
+  // visibility against actual terrain and roof polygons.
   // Per-cell cap lookup: cap Z if the mesh cell has a walkable layer above
-  // any ceiling layer, else -Infinity. Used both for wallCapZ (skip test)
-  // and to compute topZ clamps from neighbors.
+  // any ceiling layer, else -Infinity. The separate roof limit below keeps
+  // wall geometry out of this exterior surface.
   function _mesh_cellCapZ(mi) {
     if (mi < 0 || mi >= floorMesh.layerCount.length) return -Infinity;
     var lc = floorMesh.layerCount[mi];
@@ -2543,11 +2727,9 @@ function assembleWindow(centerCX, centerCY) {
   }
 
   wallCapZ = new Float32Array(gridW * gridH);
-  // wallMaxTopZ: highest allowed wall top in world-mesh Z. Starts at the
-  // cell's own cap (if capped) or ceiling (if uncapped-with-ceiling), then
-  // relaxed to the lowest neighbor-cap Z among 3x3 neighbors so entrance-
-  // mouth walls are clamped to surrounding ground level instead of floating
-  // up to wherever the cave ceiling wanders.
+  // wallMaxTopZ: roof-bound wall height in mesh units. Taking the MAXIMUM
+  // neighboring cap raised cave walls through lower corners of sloping grass,
+  // exposing the cave's outline from above despite a correctly covered roof.
   wallMaxTopZ = new Float32Array(gridW * gridH);
   var _wclCapped = 0;
   for (var _wclGy = 0; _wclGy < gridH; _wclGy++) {
@@ -2577,35 +2759,7 @@ function assembleWindow(centerCX, centerCY) {
       }
       if (_wclOwnCap > -Infinity) { wallCapZ[_wclIdx] = _wclOwnCap; _wclCapped++; }
 
-      // Compute top-Z clamp. For uncapped-with-ceiling cells (mouth walls),
-      // clamp to the min of nearby caps — "the wall can't rise higher than
-      // the surrounding dirt." Fall back to own ceiling if no neighbor has
-      // a cap.
-      var _wclCeilZ = -Infinity;
-      var _wclLc2 = floorMesh.layerCount[_wclMi];
-      for (var _wclLi2 = 0; _wclLi2 < _wclLc2; _wclLi2++) {
-        var _wclT2, _wclZ2;
-        if (_wclLi2 === 0) { _wclT2 = floorMesh.l0Type[_wclMi]; _wclZ2 = floorMesh.l0TopZ[_wclMi]; }
-        else if (_wclLi2 === 1) { _wclT2 = floorMesh.l1Type[_wclMi]; _wclZ2 = floorMesh.l1TopZ[_wclMi]; }
-        else if (_wclLi2 === 2) { _wclT2 = floorMesh.l2Type[_wclMi]; _wclZ2 = floorMesh.l2TopZ[_wclMi]; }
-        else if (_wclLi2 === 3) { _wclT2 = floorMesh.l3Type[_wclMi]; _wclZ2 = floorMesh.l3TopZ[_wclMi]; }
-        else { _wclT2 = floorMesh.l4Type[_wclMi]; _wclZ2 = floorMesh.l4TopZ[_wclMi]; }
-        if (_wclT2 === 2 && _wclZ2 > _wclCeilZ) _wclCeilZ = _wclZ2;
-      }
-      var _wclTopLimit = Infinity;
-      if (_wclOwnCap > -Infinity) {
-        // Capped cell: wall top at cap (wall will be skipped from above
-        // anyway; this bound is for the descent transition).
-        _wclTopLimit = _wclOwnCap;
-      } else if (_wclCeilZ > -Infinity) {
-        // Uncapped cell with a ceiling — a "mouth" cell in a region where
-        // everything is cave interior. Clamp to min(ceiling, SEA_LEVEL_Z).
-        // SEA_LEVEL_Z is the world reference surface (mesh-Z ~ 0 → world 0);
-        // walls can't rise above it by construction of this terrain.
-        var _seaZ = 0.0;
-        _wclTopLimit = Math.min(_wclCeilZ, _seaZ);
-      }
-      wallMaxTopZ[_wclIdx] = _wclTopLimit;
+      wallMaxTopZ[_wclIdx] = getCaveWallRoofLimit(floorMesh,_wclGx,_wclGy,cell);
     }
   }
   console.log('[WALL-CAP] tagged ' + _wclCapped + ' capped walls; wallMaxTopZ computed for all');
@@ -2760,7 +2914,9 @@ function assembleWindow(centerCX, centerCY) {
             type: _st.type,
             centerWX: _st.centerWX, centerWY: _st.centerWY,
             regionX: _st.regionX, regionY: _st.regionY,
-            scale: _st.scale || 1.0
+            scale: _st.scale || 1.0, rotation:_st.rotation || 0,
+            palette:_st.palette, numBuildings:_st.numBuildings || 0,
+            numPillars:_st.numPillars || 8, armCount:_st.armCount || 2
           });
         }
       }
@@ -3145,6 +3301,7 @@ function settlePlayerAtSpawn(preferSurface) {
 }
 
 function resetEndlessMode() {
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(false);
   ENDLESS_MODE = true;
   level = 1;
   collisions = 0;
@@ -3293,6 +3450,7 @@ function resetEndlessMode() {
 }
 
 function resetLevel(lv) {
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(false);
   level = lv || 1;
   collisions = 0;
   startMs = Date.now();

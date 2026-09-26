@@ -11,8 +11,8 @@ class CaveMaterialTests(unittest.TestCase):
     def test_authored_material_and_rebased_lookup_contracts(self) -> None:
         result = run_js(Path(__file__).with_name("cave_material.js"), timeout=20)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertIn("CAVE_MATERIAL_RESULT PASS 24", result.stdout.splitlines())
-        self.assertEqual(24, sum(line.startswith("PASS ") for line in result.stdout.splitlines()))
+        self.assertIn("CAVE_MATERIAL_RESULT PASS 30", result.stdout.splitlines())
+        self.assertEqual(30, sum(line.startswith("PASS ") for line in result.stdout.splitlines()))
 
 
 if __name__ == "__main__":

@@ -249,6 +249,17 @@ function buildPixelArmSprites() {
 }
 
 function drawFPSArms() {
+  if (typeof HAND_RIG_PREVIEW !== 'undefined' && HAND_RIG_PREVIEW &&
+      typeof drawFirstPersonHandRig === 'function') {
+    drawFirstPersonHandRig(HAND_RIG_TIME_MS,HAND_RIG_VIEW_YAW);return;
+  }
+  if (typeof CASTING_ART_ENABLED !== 'undefined' && CASTING_ART_ENABLED &&
+      getCurrentSpell().id === 'missile' && typeof drawFirstPersonCastingArt === 'function') {
+    drawFirstPersonCastingArt(Date.now());
+  } else drawFPSArmsLegacy();
+}
+
+function drawFPSArmsLegacy() {
   if (!MODE3D || shopOpen) return;
   var w = canvas.width, h = canvas.height;
   var S = resScale;
@@ -731,71 +742,342 @@ function drawShrines3D() {
     });
 }
 
+// Ruin dressing is authored in structure-local world units. Local +Y points
+// out through the ruin's open face and local +X points to its right. Keeping
+// these positions independent of camera distance prevents the old rubble ring
+// from orbiting the ruin as the player approached it.
+var RUIN_DEBRIS_LAYOUTS = {
+  hut: [
+    [-15, 37, 5.0, 3.0, 0.20], [18, 35, 3.8, 2.5, 0.85],
+    [35, 16, 5.5, 3.4, 0.48], [-37, -24, 4.5, 2.8, 1.18]
+  ],
+  tower_base: [
+    [-31, 30, 4.6, 3.0, 0.30], [12, 38, 5.4, 3.6, 0.94],
+    [39, 8, 3.8, 2.5, 0.58], [25, -34, 5.0, 3.1, 1.30],
+    [-25, -30, 3.6, 2.4, 0.72]
+  ],
+  hall: [
+    [-34, 63, 5.4, 3.4, 0.20], [3, 66, 4.0, 2.7, 0.86],
+    [41, 58, 5.8, 3.8, 0.44], [64, 25, 4.5, 2.8, 1.24],
+    [-62, -43, 5.2, 3.3, 0.68], [-34, -63, 4.2, 2.6, 1.48]
+  ]
+};
+
+function ruinLocalToWorld(ru, localX, localY, out) {
+  out = out || {};
+  var facing = (ru.facing | 0) & 3;
+  if (facing === 0) { out.x = ru.x + localX; out.y = ru.y - localY; }
+  else if (facing === 1) { out.x = ru.x + localY; out.y = ru.y + localX; }
+  else if (facing === 2) { out.x = ru.x - localX; out.y = ru.y + localY; }
+  else { out.x = ru.x - localY; out.y = ru.y - localX; }
+  return out;
+}
+
+function getRuinDebrisWorld(ru, index, out) {
+  var layout = RUIN_DEBRIS_LAYOUTS[ru.ruinType] || RUIN_DEBRIS_LAYOUTS.hut;
+  if (index < 0 || index >= layout.length) return null;
+  var authored = layout[index];
+  out = ruinLocalToWorld(ru, authored[0], authored[1], out);
+  out.size = authored[2]; out.height = authored[3];
+  out.yaw = authored[4] + ((ru.facing | 0) & 3) * Math.PI * 0.5;
+  return out;
+}
+
+function getRuinPostWorld(ru, out) {
+  var forward = ru.ruinType === 'hall' ? 67 : ru.ruinType === 'tower_base' ? 42 : 39;
+  out = ruinLocalToWorld(ru, 18, forward, out);
+  var facing = (ru.facing | 0) & 3;
+  out.rightX = facing === 0 ? 1 : facing === 2 ? -1 : 0;
+  out.rightY = facing === 1 ? 1 : facing === 3 ? -1 : 0;
+  out.outX = facing === 1 ? 1 : facing === 3 ? -1 : 0;
+  out.outY = facing === 2 ? 1 : facing === 0 ? -1 : 0;
+  return out;
+}
+
+function ruinDecorSurfaceZ(wx, wy, fallbackZ) {
+  var z = typeof getEntityGroundRenderZ === 'function' ? getEntityGroundRenderZ(wx, wy, false) : NaN;
+  return Number.isFinite(z) ? z : (Number.isFinite(fallbackZ) ? fallbackZ : 0);
+}
+
+function drawRuinDecorFace(vertices, color, C) {
+  var projected = projectSceneWorldPolygon(vertices, C);
+  if (!projected || projected.length < 3) return 0;
+  ctx.fillStyle = color;
+  return fillSceneDepthPolygon(projected);
+}
+
+function drawRuinStone(point, baseZ, colors, C) {
+  var cs = Math.cos(point.yaw), sn = Math.sin(point.yaw);
+  var ux = cs * point.size, uy = sn * point.size;
+  var vx = -sn * point.size * 0.68, vy = cs * point.size * 0.68;
+  var z0 = baseZ + 0.25, z1 = z0 + point.height;
+  var topScale = 0.56, leanX = ux * 0.12, leanY = uy * 0.12;
+  var b0 = {x:point.x-ux-vx,y:point.y-uy-vy,z:z0};
+  var b1 = {x:point.x+ux-vx,y:point.y+uy-vy,z:z0};
+  var b2 = {x:point.x+ux+vx,y:point.y+uy+vy,z:z0};
+  var b3 = {x:point.x-ux+vx,y:point.y-uy+vy,z:z0};
+  var t0 = {x:point.x-ux*topScale-vx*topScale+leanX,y:point.y-uy*topScale-vy*topScale+leanY,z:z1};
+  var t1 = {x:point.x+ux*topScale-vx*topScale+leanX,y:point.y+uy*topScale-vy*topScale+leanY,z:z1};
+  var t2 = {x:point.x+ux*topScale+vx*topScale+leanX,y:point.y+uy*topScale+vy*topScale+leanY,z:z1};
+  var t3 = {x:point.x-ux*topScale+vx*topScale+leanX,y:point.y-uy*topScale+vy*topScale+leanY,z:z1};
+  drawRuinDecorFace([b0,b1,t1,t0], colors.shadow, C);
+  drawRuinDecorFace([b1,b2,t2,t1], colors.base, C);
+  drawRuinDecorFace([b2,b3,t3,t2], colors.dark, C);
+  drawRuinDecorFace([b3,b0,t0,t3], colors.shadow, C);
+  drawRuinDecorFace([t0,t1,t2,t3], colors.lit, C);
+}
+
+function drawRuinDecorBox(center, z0, z1, halfRight, halfOut, colors, C) {
+  var rx = center.rightX * halfRight, ry = center.rightY * halfRight;
+  var ox = center.outX * halfOut, oy = center.outY * halfOut;
+  var b0 = {x:center.x-rx-ox,y:center.y-ry-oy,z:z0};
+  var b1 = {x:center.x+rx-ox,y:center.y+ry-oy,z:z0};
+  var b2 = {x:center.x+rx+ox,y:center.y+ry+oy,z:z0};
+  var b3 = {x:center.x-rx+ox,y:center.y-ry+oy,z:z0};
+  var t0 = {x:b0.x,y:b0.y,z:z1}, t1 = {x:b1.x,y:b1.y,z:z1};
+  var t2 = {x:b2.x,y:b2.y,z:z1}, t3 = {x:b3.x,y:b3.y,z:z1};
+  drawRuinDecorFace([b0,b1,t1,t0], colors.dark, C);
+  drawRuinDecorFace([b1,b2,t2,t1], colors.mid, C);
+  drawRuinDecorFace([b2,b3,t3,t2], colors.deep, C);
+  drawRuinDecorFace([b3,b0,t0,t3], colors.dark, C);
+  drawRuinDecorFace([t0,t1,t2,t3], colors.lit, C);
+}
+
 function drawRuins3D() {
-  renderEntities3D(ruins, {maxDist: viewDist * 0.7, depthOffset: 2, checkMidpoint: true, fadeFraction: 0.8, sort: true, minDist: 3, mode3dOnly: true},
+  // Match the wall renderer's range: opaque dressing is too small to notice at
+  // the horizon, and no longer hard-culls while its wall remnants are visible.
+  renderEntities3D(ruins, {maxDist: viewDist, groundAnchor: true, sceneDepth: true,
+    fadeFraction: 0.8, sort: true, minDist: 3, mode3dOnly: true},
     function(ru, vis, C, ctx, now) {
       function proj(wx, wy, wz) { return projToScreen(wx, wy, wz, C); }
       var fwd = vis.fwd;
       ctx.save();
-      ctx.globalAlpha = Math.max(0.3, 1.0 - fwd / viewDist * 0.6) * vis.fade;
+      // These faces write opaque scene depth, so their paint must be opaque as
+      // well. Distance fading is reserved for the non-opaque location label.
+      var labelAlpha = Math.max(0.3, 1.0 - fwd / viewDist * 0.6) * vis.fade;
+      ctx.globalAlpha = 1;
 
-      var rubbleCount = ru.ruinType === 'hall' ? 6 : 4;
-      for (var rbi = 0; rbi < rubbleCount; rbi++) {
-        var rbAng = rbi * (Math.PI * 2 / rubbleCount) + vis.dist * 0.1;
-        var rbDist = 15 + (rbi % 3) * 8;
-        var rbx = ru.x + Math.cos(rbAng) * rbDist;
-        var rby = ru.y + Math.sin(rbAng) * rbDist;
-        var rbP = proj(rbx, rby, 0);
-        if (rbP && rbP.fwd > 1) {
-          var rbS = Math.max(2, Math.floor(4 * projScale / rbP.fwd));
-          ctx.fillStyle = (rbi % 2 === 0) ? '#8a7a68' : '#6a5a48';
-          ctx.fillRect(rbP.sx - rbS, rbP.sy - rbS * 0.5, rbS * 2, rbS);
-        }
+      var stoneColors = (typeof GAME_MATERIALS !== 'undefined' && GAME_MATERIALS.rubbleStone) ?
+        GAME_MATERIALS.rubbleStone.hex : {base:'#787060',shadow:'#686058',lit:'#888070',dark:'#504840'};
+      var debrisLayout = RUIN_DEBRIS_LAYOUTS[ru.ruinType] || RUIN_DEBRIS_LAYOUTS.hut;
+      var debrisPoint = {};
+      for (var rbi = 0; rbi < debrisLayout.length; rbi++) {
+        getRuinDebrisWorld(ru, rbi, debrisPoint);
+        var debrisZ = ruinDecorSurfaceZ(debrisPoint.x, debrisPoint.y, vis.floorZ);
+        drawRuinStone(debrisPoint, debrisZ, stoneColors, C);
       }
 
-      var postOffX = 0, postOffY = 0;
-      if (ru.facing === 0) postOffY = -25;
-      else if (ru.facing === 1) postOffX = 25;
-      else if (ru.facing === 2) postOffY = 25;
-      else postOffX = -25;
-      var postP0 = proj(ru.x + postOffX, ru.y + postOffY, 0);
-      var postP1 = proj(ru.x + postOffX, ru.y + postOffY, 20);
-      if (postP0 && postP1 && postP0.fwd > 1) {
-        ctx.strokeStyle = '#5a4030';
-        ctx.lineWidth = Math.max(2, Math.floor(3 * projScale / postP0.fwd));
-        ctx.beginPath(); ctx.moveTo(postP0.sx, postP0.sy); ctx.lineTo(postP1.sx, postP1.sy); ctx.stroke();
-        var crossP = proj(ru.x + postOffX, ru.y + postOffY, 16);
-        if (crossP) {
-          var crossW = Math.max(3, Math.floor(8 * projScale / crossP.fwd));
-          ctx.lineWidth = Math.max(1, Math.floor(2 * projScale / crossP.fwd));
-          ctx.beginPath(); ctx.moveTo(crossP.sx - crossW, crossP.sy); ctx.lineTo(crossP.sx + crossW, crossP.sy); ctx.stroke();
-        }
+      // A small solid waypost sits to the right of the open face. Both its
+      // stem and crosspiece are world boxes, so they retain their orientation
+      // instead of turning into screen-space lines as the camera moves.
+      var post = getRuinPostWorld(ru, {});
+      var postZ = ruinDecorSurfaceZ(post.x, post.y, vis.floorZ);
+      var woodColors = (typeof GAME_MATERIALS !== 'undefined' && GAME_MATERIALS.palisadeWood) ?
+        GAME_MATERIALS.palisadeWood.hex : {lit:'#7a4c2a',mid:'#6b4226',dark:'#5a3720',deep:'#3a2412'};
+      drawRuinDecorBox(post, postZ + 0.2, postZ + 21, 0.9, 0.9, woodColors, C);
+      drawRuinDecorBox(post, postZ + 14, postZ + 19, 8.5, 1.0, woodColors, C);
+
+      // Two fixed roof-frame remnants give the hut a readable shelter
+      // silhouette without closing it in. They use the same facing basis as
+      // the waypost and stay attached to the rear/left wall runs.
+      if (ru.ruinType === 'hut') {
+        var rearBeam = ruinLocalToWorld(ru, 0, -27, {});
+        rearBeam.rightX = post.rightX; rearBeam.rightY = post.rightY;
+        rearBeam.outX = post.outX; rearBeam.outY = post.outY;
+        var rearBeamZ = ruinDecorSurfaceZ(rearBeam.x, rearBeam.y, vis.floorZ);
+        drawRuinDecorBox(rearBeam, rearBeamZ + 52, rearBeamZ + 56, 28, 1.8, woodColors, C);
+        var sideBeam = ruinLocalToWorld(ru, -27, -5, {});
+        sideBeam.rightX = post.rightX; sideBeam.rightY = post.rightY;
+        sideBeam.outX = post.outX; sideBeam.outY = post.outY;
+        var sideBeamZ = ruinDecorSurfaceZ(sideBeam.x, sideBeam.y, vis.floorZ);
+        drawRuinDecorBox(sideBeam, sideBeamZ + 38, sideBeamZ + 42, 1.8, 18, woodColors, C);
       }
 
       if (fwd < viewDist * 0.3) {
-        var labelP = proj(ru.x, ru.y, 28);
-        if (labelP) {
+        var labelLift = ru.ruinType === 'hut' ? 68 : ru.ruinType === 'hall' ? 74 : 62;
+        var labelP = proj(ru.x, ru.y, vis.floorZ + labelLift);
+        if (labelP && labelP.fwd > 1) {
+          ctx.globalAlpha = labelAlpha;
           ctx.fillStyle = '#c8b898';
-          ctx.font = Math.max(9, Math.floor(12 * projScale / labelP.fwd)) + 'px monospace';
+          var labelSize = Math.max(9, Math.min(24, Math.floor(12 * projScale / labelP.fwd)));
+          ctx.font = labelSize + 'px monospace';
           ctx.textAlign = 'center';
           var ruinLabel = ru.ruinType === 'hut' ? 'Ruined Hut' : ru.ruinType === 'tower_base' ? 'Tower Ruins' : 'Ruined Hall';
-          ctx.fillText(ruinLabel, labelP.sx, labelP.sy);
+          var labelWidth = ctx.measureText(ruinLabel).width;
+          withSceneDepthBillboard({x:labelP.sx-labelWidth*0.5-1,y:labelP.sy-labelSize,
+            width:labelWidth+2,height:labelSize+3}, labelP.fwd, function() {
+            ctx.fillText(ruinLabel, labelP.sx, labelP.sy);
+          });
         }
       }
       ctx.restore();
     });
 }
 
+function getStructureShellMetrics(st) {
+  var scale = st.scale || 1;
+  var normalized = ((st.type === 'fortress') ? 0.9 : (st.type === 'watchtower') ? 1.0 : 0.7) *
+    (0.9 + scale * 0.1);
+  return {scale:scale, normalized:normalized, wallWorldH:CANVAS_BASE_H * normalized};
+}
+
+function structurePaletteRole(st, role) {
+  var palette = st.palette;
+  if (palette && palette[role]) return palette[role];
+  if (st.type === 'arena') return role === 'p' ? [100,60,45] : role === 's' ? [115,65,50] : [130,75,55];
+  if (st.type === 'watchtower') return role === 't' ? [120,130,155] : role === 'a' ? [110,120,140] : [110,120,140];
+  return role === 'c' ? [155,150,140] : role === 'k' ? [150,145,135] : [140,135,125];
+}
+
+function structureColorRamp(st, role) {
+  var rgb = structurePaletteRole(st, role);
+  function shade(delta) {
+    return rgbQ(Math.max(0, Math.min(255, rgb[0] + delta)),
+      Math.max(0, Math.min(255, rgb[1] + delta)),
+      Math.max(0, Math.min(255, rgb[2] + delta)));
+  }
+  return {lit:shade(18), mid:shade(4), dark:shade(-18), deep:shade(-34), shadow:shade(-25), base:shade(0)};
+}
+
+function drawStructureBoxWorld(x, y, z0, z1, halfRight, halfOut, yaw, colors, C) {
+  var cs = Math.cos(yaw), sn = Math.sin(yaw);
+  drawRuinDecorBox({x:x,y:y,rightX:cs,rightY:sn,outX:-sn,outY:cs},
+    z0,z1,halfRight,halfOut,colors,C);
+}
+
+function drawStructurePyramidWorld(x, y, zBase, zPeak, halfRight, halfOut, yaw, colors, C) {
+  var cs=Math.cos(yaw), sn=Math.sin(yaw), rx=cs*halfRight, ry=sn*halfRight;
+  var ox=-sn*halfOut, oy=cs*halfOut;
+  var b0={x:x-rx-ox,y:y-ry-oy,z:zBase}, b1={x:x+rx-ox,y:y+ry-oy,z:zBase};
+  var b2={x:x+rx+ox,y:y+ry+oy,z:zBase}, b3={x:x-rx+ox,y:y-ry+oy,z:zBase};
+  var apex={x:x,y:y,z:zPeak};
+  drawRuinDecorFace([b0,b1,apex],colors.dark,C);
+  drawRuinDecorFace([b1,b2,apex],colors.mid,C);
+  drawRuinDecorFace([b2,b3,apex],colors.base,C);
+  drawRuinDecorFace([b3,b0,apex],colors.shadow,C);
+}
+
+function drawStructureGableWorld(x, y, zEave, zPeak, halfRight, halfOut, yaw, colors, C) {
+  var cs=Math.cos(yaw), sn=Math.sin(yaw), rx=cs*halfRight, ry=sn*halfRight;
+  var ox=-sn*halfOut, oy=cs*halfOut;
+  var b0={x:x-rx-ox,y:y-ry-oy,z:zEave}, b1={x:x+rx-ox,y:y+ry-oy,z:zEave};
+  var b2={x:x+rx+ox,y:y+ry+oy,z:zEave}, b3={x:x-rx+ox,y:y-ry+oy,z:zEave};
+  var r0={x:x-rx,y:y-ry,z:zPeak}, r1={x:x+rx,y:y+ry,z:zPeak};
+  drawRuinDecorFace([b0,b1,r1,r0],colors.dark,C);
+  drawRuinDecorFace([b3,r0,r1,b2],colors.base,C);
+  drawRuinDecorFace([b0,r0,b3],colors.shadow,C);
+  drawRuinDecorFace([b1,b2,r1],colors.mid,C);
+}
+
+function drawStructureRadialRoof(st, radius, sides, rimZ, peakZ, colors, C) {
+  var rotation = (st.rotation || 0) + Math.PI / sides;
+  var apex={x:st.x,y:st.y,z:peakZ};
+  for (var face=0;face<sides;face++) {
+    var a0=rotation+face*Math.PI*2/sides, a1=rotation+(face+1)*Math.PI*2/sides;
+    var p0={x:st.x+Math.cos(a0)*radius,y:st.y+Math.sin(a0)*radius,z:rimZ};
+    var p1={x:st.x+Math.cos(a1)*radius,y:st.y+Math.sin(a1)*radius,z:rimZ};
+    drawRuinDecorFace([p0,p1,apex],
+      face%3===0?colors.lit:face%2===0?colors.mid:colors.dark,C);
+    var mid=(a0+a1)*0.5, chord=radius*Math.sin(Math.PI/sides);
+    drawStructureBoxWorld(st.x+Math.cos(mid)*radius*Math.cos(Math.PI/sides),
+      st.y+Math.sin(mid)*radius*Math.cos(Math.PI/sides),rimZ-3,rimZ+3,
+      chord,cell*0.12,mid+Math.PI*0.5,colors,C);
+  }
+}
+
+function drawStructureStandardWorld(x, y, baseZ, yaw, height, color, C) {
+  var wood = GAME_MATERIALS.floorPropWood.hex;
+  var woodRamp={lit:wood.lit,mid:wood.base,dark:wood.shadow,deep:wood.deep};
+  drawStructureBoxWorld(x,y,baseZ+0.2,baseZ+height,1.1,1.1,0,woodRamp,C);
+  var rx=Math.cos(yaw)*cell*0.48, ry=Math.sin(yaw)*cell*0.48;
+  var ox=-Math.sin(yaw)*1.2, oy=Math.cos(yaw)*1.2;
+  var clothTop=baseZ+height*0.88, clothBottom=baseZ+height*0.55;
+  drawRuinDecorFace([
+    {x:x-rx+ox,y:y-ry+oy,z:clothTop},{x:x+rx+ox,y:y+ry+oy,z:clothTop},
+    {x:x+rx+ox,y:y+ry+oy,z:clothBottom},{x:x-rx+ox,y:y-ry+oy,z:clothBottom}
+  ],color,C);
+}
+
+function drawStructureShellWorld(st, vis, C) {
+  if (!Number.isFinite(vis.floorZ)) return;
+  var metrics=getStructureShellMetrics(st), scale=metrics.scale, baseZ=vis.floorZ;
+  var mainRole=st.type==='fortress'?'w':st.type==='arena'?'w':'t';
+  var trimRole=st.type==='fortress'?'k':st.type==='arena'?'p':'a';
+  var main=structureColorRamp(st,mainRole), trim=structureColorRamp(st,trimRole);
+  var accent=st.type==='fortress'?'#b58a35':st.type==='arena'?'#9f3d2d':'#3f7597';
+  ctx.globalAlpha=1;
+  if (st.type==='fortress') {
+    var extent=CHUNK_SIZE*1.7*scale, gateInset=extent-cell*1.5;
+    var gateZ0=baseZ+metrics.wallWorldH*0.68, gateZ1=baseZ+metrics.wallWorldH*0.90;
+    drawStructureBoxWorld(st.x,st.y-gateInset,gateZ0,gateZ1,cell*2.9,cell*0.48,0,trim,C);
+    drawStructureBoxWorld(st.x,st.y+gateInset,gateZ0,gateZ1,cell*2.9,cell*0.48,0,trim,C);
+    drawStructureBoxWorld(st.x-gateInset,st.y,gateZ0,gateZ1,cell*2.9,cell*0.48,Math.PI*0.5,trim,C);
+    drawStructureBoxWorld(st.x+gateInset,st.y,gateZ0,gateZ1,cell*2.9,cell*0.48,Math.PI*0.5,trim,C);
+    var cornerOffset=extent-cell*2.5;
+    for(var fy=-1;fy<=1;fy+=2) for(var fx=-1;fx<=1;fx+=2) {
+      var towerX=st.x+fx*cornerOffset,towerY=st.y+fy*cornerOffset;
+      var towerTop=baseZ+CANVAS_BASE_H*(metrics.normalized+0.3);
+      drawStructureBoxWorld(towerX,towerY,towerTop,towerTop+8,cell*2.35,cell*2.35,0,trim,C);
+      drawStructurePyramidWorld(towerX,towerY,towerTop+8,towerTop+cell*1.45,
+        cell*1.25,cell*1.25,Math.PI*0.25,trim,C);
+    }
+    var pillarTop=baseZ+CANVAS_BASE_H*(metrics.normalized+0.6)+3;
+    drawStructureRadialRoof(st,cell*10*scale,6,pillarTop,pillarTop+cell*2.3,trim,C);
+    var buildingZ=baseZ+CANVAS_BASE_H*(metrics.normalized*0.7)+3;
+    if(st.numBuildings>=1) drawStructureGableWorld(st.x+extent*0.45,st.y-extent*0.4,
+      buildingZ,buildingZ+cell*1.8,cell*4.25,cell*3.25,0,main,C);
+    if(st.numBuildings>=2) drawStructureGableWorld(st.x-extent*0.45,st.y+extent*0.4,
+      buildingZ,buildingZ+cell*1.8,cell*4.25,cell*3.25,0,main,C);
+    drawStructureStandardWorld(st.x,st.y-gateInset,baseZ,0,metrics.wallWorldH*0.92,accent,C);
+    drawStructureStandardWorld(st.x,st.y+gateInset,baseZ,Math.PI,metrics.wallWorldH*0.92,accent,C);
+    drawStructureStandardWorld(st.x-gateInset,st.y,baseZ,-Math.PI*0.5,metrics.wallWorldH*0.92,accent,C);
+    drawStructureStandardWorld(st.x+gateInset,st.y,baseZ,Math.PI*0.5,metrics.wallWorldH*0.92,accent,C);
+  } else if(st.type==='arena') {
+    var ringR=CHUNK_SIZE*1.1*scale, rotation=st.rotation||0;
+    for(var gi=-1;gi<=1;gi+=2) {
+      var gateA=rotation+gi*Math.PI*0.5, gateX=st.x+Math.cos(gateA)*ringR, gateY=st.y+Math.sin(gateA)*ringR;
+      drawStructureBoxWorld(gateX,gateY,baseZ+metrics.wallWorldH*0.62,
+        baseZ+metrics.wallWorldH*0.88,cell*2.8,cell*0.5,gateA+Math.PI*0.5,main,C);
+      drawStructureStandardWorld(gateX,gateY,baseZ,gateA+Math.PI*0.5,metrics.wallWorldH*0.9,accent,C);
+    }
+    var pillars=Math.max(8,Math.min(15,st.numPillars||8)), pillarR=ringR*0.55;
+    var entZ=baseZ+CANVAS_BASE_H*(metrics.normalized+0.2);
+    for(var pi=0;pi<pillars;pi++) {
+      var midA=rotation+(pi+0.5)*Math.PI*2/pillars;
+      drawStructureBoxWorld(st.x+Math.cos(midA)*pillarR*Math.cos(Math.PI/pillars),
+        st.y+Math.sin(midA)*pillarR*Math.cos(Math.PI/pillars),entZ-3,entZ+4,
+        pillarR*Math.sin(Math.PI/pillars),cell*0.11,midA+Math.PI*0.5,trim,C);
+    }
+    var pedestalTop=baseZ+metrics.wallWorldH*0.18;
+    drawStructureBoxWorld(st.x,st.y,pedestalTop,pedestalTop+6,cell*0.78,cell*0.78,rotation,trim,C);
+  } else {
+    var towerR=cell*3*scale, towerRoof=baseZ+metrics.wallWorldH*1.4+3;
+    drawStructurePyramidWorld(st.x,st.y,towerRoof,towerRoof+cell*3.0,
+      towerR*1.08,towerR*1.08,(st.rotation||0)+Math.PI*0.25,trim,C);
+    var arms=Math.max(2,Math.min(4,st.armCount||2)), armLen=cell*14*scale;
+    for(var ai=0;ai<arms;ai++) {
+      var armA=(st.rotation||0)+ai*Math.PI*2/arms;
+      var roomDist=towerR+armLen, roomX=st.x+Math.cos(armA)*roomDist, roomY=st.y+Math.sin(armA)*roomDist;
+      var roomRoof=baseZ+metrics.wallWorldH*0.9+3, roomR=cell*2.5*scale;
+      drawStructurePyramidWorld(roomX,roomY,roomRoof,roomRoof+cell*1.65,
+        roomR*1.08,roomR*1.08,armA+Math.PI*0.25,main,C);
+      drawStructureStandardWorld(roomX,roomY,baseZ,armA+Math.PI*0.5,metrics.wallWorldH*0.82,accent,C);
+    }
+  }
+}
+
 function drawStructures3D() {
-  renderEntities3D(largeStructures, {maxDist: viewDist * 0.9, depthOffset: 2, checkMidpoint: true, fadeFraction: 0.8, sort: true, minDist: 3, mode3dOnly: true},
+  renderEntities3D(largeStructures, {maxDist: viewDist * 2.6, depthOffset: 2, checkMidpoint: true, fadeFraction: 0.92, sort: true, minDist: 3, mode3dOnly: true, groundAnchor:true},
     function(st, vis, C, ctx, now) {
       function proj(wx, wy, wz) { return projToScreen(wx, wy, wz, C); }
       var fwd = vis.fwd;
       ctx.save();
       ctx.globalAlpha = vis.fade;
+      drawStructureShellWorld(st,vis,C);
+      ctx.globalAlpha = vis.fade;
 
       if (fwd < viewDist * 0.6) {
-        var labelP = proj(st.x, st.y, 40);
+        var labelP = proj(st.x, st.y, vis.floorZ + 40);
         if (labelP) {
           var labelSize = Math.max(10, Math.floor(16 * projScale / labelP.fwd));
           ctx.fillStyle = (st.type === 'fortress') ? '#e8c868' : (st.type === 'arena') ? '#e87848' : '#88c8e8';
@@ -823,18 +1105,18 @@ function drawStructures3D() {
           if (_int3d.used) continue;
           var ix = st.x + _int3d.ox, iy = st.y + _int3d.oy;
           // Base platform
-          var ib0 = proj(ix - 4, iy - 4, 0);
-          var ib1 = proj(ix + 4, iy - 4, 0);
-          var ib2 = proj(ix + 4, iy + 4, 0);
-          var ib3 = proj(ix - 4, iy + 4, 0);
+          var ib0 = proj(ix - 4, iy - 4, vis.floorZ);
+          var ib1 = proj(ix + 4, iy - 4, vis.floorZ);
+          var ib2 = proj(ix + 4, iy + 4, vis.floorZ);
+          var ib3 = proj(ix - 4, iy + 4, vis.floorZ);
           if (ib0 && ib1 && ib2 && ib3) {
             ctx.fillStyle = '#333'; ctx.globalAlpha = 0.8;
             ctx.beginPath(); ctx.moveTo(ib0.sx, ib0.sy); ctx.lineTo(ib1.sx, ib1.sy);
             ctx.lineTo(ib2.sx, ib2.sy); ctx.lineTo(ib3.sx, ib3.sy); ctx.closePath(); ctx.fill();
           }
           // Object body
-          var ip0 = proj(ix, iy, 0);
-          var ip1 = proj(ix, iy, 18);
+          var ip0 = proj(ix, iy, vis.floorZ);
+          var ip1 = proj(ix, iy, vis.floorZ + 18);
           if (ip0 && ip1 && ip0.fwd > 1) {
             var ipw = Math.max(3, Math.floor(8 * projScale / ip0.fwd));
             if (_int3d.type === 'forge') {
@@ -873,7 +1155,7 @@ function drawStructures3D() {
           // Prompt text when player is near
           if (nearestFortressInteract && nearestFortressInteract.type === _int3d.type &&
               nearestFortressInteract.structure === st) {
-            var tp3 = proj(ix, iy, 28);
+            var tp3 = proj(ix, iy, vis.floorZ + 28);
             if (tp3) {
               var fs3 = Math.max(10, Math.floor(18 * getScale3D('lgText') * projScale / (tp3.fwd || 10)));
               ctx.globalAlpha = 1.0;
@@ -905,7 +1187,7 @@ function drawStructures3D() {
             var _sealPts = [];
             for (var _si2 = 0; _si2 < _sealN; _si2++) {
               var _sA = _si2 * Math.PI * 2 / _sealN;
-              _sealPts.push(proj(st.x + Math.cos(_sA) * _sealR, st.y + Math.sin(_sA) * _sealR, 4));
+              _sealPts.push(proj(st.x + Math.cos(_sA) * _sealR, st.y + Math.sin(_sA) * _sealR, vis.floorZ + 4));
             }
             var _sealVisible = true;
             for (var _sk = 0; _sk < _sealN; _sk++) if (!_sealPts[_sk]) { _sealVisible = false; break; }
@@ -921,7 +1203,7 @@ function drawStructures3D() {
               ctx.shadowBlur = 0;
               // "SEALED" label at top of ring
               if (fortressLockedNear && fortressLockedNear.structure === st) {
-                var _slP = proj(st.x, st.y, 20);
+                var _slP = proj(st.x, st.y, vis.floorZ + 20);
                 if (_slP && _slP.fwd > 1) {
                   var _slFs = Math.max(9, Math.floor(14 * projScale / _slP.fwd));
                   ctx.globalAlpha = vis.fade;
@@ -934,97 +1216,6 @@ function drawStructures3D() {
           }
         }
 
-        // ── Gazebo / greek temple roof — hexagonal canopy over the pillars ──
-        var _gzR = cell * 10 * (st.scale || 1);
-        var _gzN = 6;
-        var _gzRoofZ = 38; // world Z of pillar tops / roof ring
-        var _gzPeakZ = _gzRoofZ + 9; // pointed peak above center
-        var _gzPal = st.palette;
-        var _gzKr = _gzPal ? _gzPal.k[0] + 18 : 180;
-        var _gzKg = _gzPal ? _gzPal.k[1] + 14 : 165;
-        var _gzKb = _gzPal ? _gzPal.k[2] + 10 : 140;
-        var _gzPts = [];
-        for (var _gzI = 0; _gzI < _gzN; _gzI++) {
-          var _gzA = _gzI * Math.PI * 2 / _gzN + Math.PI / 6;
-          _gzPts.push(proj(st.x + Math.cos(_gzA) * _gzR, st.y + Math.sin(_gzA) * _gzR, _gzRoofZ));
-        }
-        var _gzApex = proj(st.x, st.y, _gzPeakZ);
-        // Filled hexagonal roof (visible overhead)
-        ctx.save();
-        ctx.globalAlpha = vis.fade * 0.82;
-        var _gzAllVis = true;
-        for (var _gzK = 0; _gzK < _gzN; _gzK++) if (!_gzPts[_gzK]) { _gzAllVis = false; break; }
-        if (_gzAllVis && _gzPts[0].fwd > 1) {
-          ctx.fillStyle = 'rgb(' + _gzKr + ',' + _gzKg + ',' + _gzKb + ')';
-          ctx.beginPath(); ctx.moveTo(_gzPts[0].sx, _gzPts[0].sy);
-          for (var _gzK2 = 1; _gzK2 < _gzN; _gzK2++) ctx.lineTo(_gzPts[_gzK2].sx, _gzPts[_gzK2].sy);
-          ctx.closePath(); ctx.fill();
-          // Highlight rim
-          ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5;
-          ctx.stroke();
-          // Pyramid rafters to peak
-          if (_gzApex) {
-            ctx.strokeStyle = 'rgb(' + (_gzKr + 12) + ',' + (_gzKg + 10) + ',' + (_gzKb + 8) + ')';
-            for (var _gzK3 = 0; _gzK3 < _gzN; _gzK3++) {
-              ctx.lineWidth = Math.max(1, Math.floor(2 * projScale / _gzApex.fwd));
-              ctx.beginPath(); ctx.moveTo(_gzPts[_gzK3].sx, _gzPts[_gzK3].sy); ctx.lineTo(_gzApex.sx, _gzApex.sy); ctx.stroke();
-            }
-            // Finial capstone ornament
-            var _gzFinR = Math.max(2, Math.floor(4 * projScale / _gzApex.fwd));
-            ctx.fillStyle = '#f0dfa0'; ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.arc(_gzApex.sx, _gzApex.sy, _gzFinR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-          }
-        }
-        // Entablature beams along the eaves
-        ctx.globalAlpha = vis.fade;
-        for (var _gzK4 = 0; _gzK4 < _gzN; _gzK4++) {
-          var _gz0 = _gzPts[_gzK4], _gz1 = _gzPts[(_gzK4 + 1) % _gzN];
-          if (_gz0 && _gz1 && _gz0.fwd > 1) {
-            var _gzLW = Math.max(2, Math.floor(3 * projScale / _gz0.fwd));
-            ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = _gzLW + 2;
-            ctx.beginPath(); ctx.moveTo(_gz0.sx, _gz0.sy); ctx.lineTo(_gz1.sx, _gz1.sy); ctx.stroke();
-            ctx.strokeStyle = 'rgb(' + (_gzKr - 10) + ',' + (_gzKg - 8) + ',' + (_gzKb - 6) + ')';
-            ctx.lineWidth = _gzLW;
-            ctx.beginPath(); ctx.moveTo(_gz0.sx, _gz0.sy); ctx.lineTo(_gz1.sx, _gz1.sy); ctx.stroke();
-          }
-        }
-        ctx.restore();
-      }
-
-      var bannerPositions = [];
-      if (st.type === 'fortress') {
-        bannerPositions.push({bx: st.x - 20, by: st.y - CHUNK_SIZE * 0.95});
-        bannerPositions.push({bx: st.x + 20, by: st.y - CHUNK_SIZE * 0.95});
-        bannerPositions.push({bx: st.x - 20, by: st.y + CHUNK_SIZE * 0.95});
-        bannerPositions.push({bx: st.x + 20, by: st.y + CHUNK_SIZE * 0.95});
-      } else if (st.type === 'arena') {
-        var gateR = CHUNK_SIZE * 0.6;
-        bannerPositions.push({bx: st.x, by: st.y - gateR});
-        bannerPositions.push({bx: st.x, by: st.y + gateR});
-      } else {
-        var armEnd = 15 * 1.5 + 15 * 8;
-        bannerPositions.push({bx: st.x, by: st.y - armEnd});
-        bannerPositions.push({bx: st.x, by: st.y + armEnd});
-        bannerPositions.push({bx: st.x - armEnd, by: st.y});
-        bannerPositions.push({bx: st.x + armEnd, by: st.y});
-      }
-      var bannerColor = (st.type === 'fortress') ? '#c8a028' : (st.type === 'arena') ? '#c84020' : '#2080c0';
-      for (var bi = 0; bi < bannerPositions.length; bi++) {
-        var bp = bannerPositions[bi];
-        var bp0 = proj(bp.bx, bp.by, 0);
-        var bp1 = proj(bp.bx, bp.by, 30);
-        if (bp0 && bp1 && bp0.fwd > 1) {
-          ctx.strokeStyle = '#5a4a3a';
-          ctx.lineWidth = Math.max(2, Math.floor(3 * projScale / bp0.fwd));
-          ctx.beginPath(); ctx.moveTo(bp0.sx, bp0.sy); ctx.lineTo(bp1.sx, bp1.sy); ctx.stroke();
-          var bpM = proj(bp.bx, bp.by, 22);
-          if (bpM) {
-            var bw = Math.max(4, Math.floor(10 * projScale / bpM.fwd));
-            var bh = Math.max(6, Math.floor(14 * projScale / bpM.fwd));
-            ctx.fillStyle = bannerColor;
-            ctx.fillRect(bpM.sx, bpM.sy, bw, bh);
-          }
-        }
       }
       ctx.restore();
     });
@@ -1345,11 +1536,11 @@ function drawCaveEntrance3D() {
   // end, short reinforcements.
   var ARCH_W, ARCH_H, PILLAR_W, PILLAR_D, LINTEL_H, LINTEL_OVERHANG, OPENING_W;
 
-  var STONE_LIT = '#a89787';
-  var STONE_MID = '#776859';
-  var STONE_DARK = '#473d32';
-  var STONE_SHADOW = '#2a2320';
-  var PORTAL_DARK = '#05040a';
+  var stoneColors = GAME_MATERIALS.entranceStone.hex;
+  var STONE_LIT = stoneColors.lit;
+  var STONE_MID = stoneColors.mid;
+  var STONE_DARK = stoneColors.dark;
+  var STONE_SHADOW = stoneColors.shadow;
 
   var visibleCaves = [];
   for (var ei = 0; ei < deepCaveEntrances.length; ei++) {
@@ -1509,11 +1700,12 @@ function drawCaveEntrance3D() {
     // Wooden palisade — vertical planks with per-plank shading. Both front &
     // back faces get the same per-plank shade so the variation reads from any
     // side. Shades are strongly contrasted so the planks are distinguishable.
-    var WOOD_LIT = '#7a4c2a';
-    var WOOD_MID = '#6b4226';
-    var WOOD_DARK = '#5a3720';
-    var WOOD_DEEP = '#3a2412';
-    var WOOD_SIDE = '#3a2412';
+    var woodColors = GAME_MATERIALS.palisadeWood.hex;
+    var WOOD_LIT = woodColors.lit;
+    var WOOD_MID = woodColors.mid;
+    var WOOD_DARK = woodColors.dark;
+    var WOOD_DEEP = woodColors.deep;
+    var WOOD_SIDE = woodColors.deep;
     var PLANK_SHADES = [WOOD_MID, WOOD_LIT, WOOD_MID, WOOD_DARK, WOOD_MID, WOOD_LIT, WOOD_MID];
     var NUM_PLANKS = 7;
     function drawFlank(pillarCX, pillarCY, sideSign) {

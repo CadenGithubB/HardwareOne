@@ -205,6 +205,7 @@ function _handleGamepad3D(dt) {
 // Shared spell casting logic — fires current spell if mana/cooldown allow
 function _tryCastSpell(now) {
   var spell = getCurrentSpell();
+  if (spell.id === 'missile' && missileCastingBlocked()) return;
   // Stream attacks (flamethrower) tick continuously while held
   if (spell.attackType === 'stream') {
     var tickInterval = spell.streamTickMs || 80;
@@ -225,11 +226,16 @@ function _tryCastSpell(now) {
   }
   var _effCD2 = getEffectiveCooldown();
   if (mana >= spell.manaCost && (now - lastShotMs) >= _effCD2) {
+    var previousShotMs = lastShotMs;
+    var windupMissile = spell.id === 'missile' && spell.attackType === 'projectile';
     if (spell.attackType === 'cone') castConeAttack(spell);
-    else spawnProjectile(spell.speed, PROJ_RADIUS);
+    else if (!windupMissile) spawnProjectile(spell.speed, PROJ_RADIUS);
     mana -= spell.manaCost; stats.totalManaConsumed += spell.manaCost;
     // Snap to ideal cooldown boundary to prevent held-fire drift
     lastShotMs = Math.max(lastShotMs + _effCD2, now - 16);
+    spellCastReservationSerial++;
+    if (windupMissile) reserveMissileCast(spell, now, 1, spell.manaCost, previousShotMs);
+    if (typeof noteFirstPersonCast === 'function') noteFirstPersonCast(spell, now);
   } else if (mana < spell.manaCost && !lastADown) {
     manaBlinkUntil = now + 1000;
   }
@@ -367,20 +373,19 @@ function getCavePortalDepthBlendAt(x, y, entrances) {
 // Author one stone albedo per mesh vertex. Mouth rock starts with the actual
 // neighboring terrain palette and becomes warm-neutral stone farther inward.
 // Floor, walls, ceiling and cut faces share this palette; orientation and
-// illumination are shading, not alternate material definitions. The subtle
-// mineral variation uses absolute world coordinates, never window indices or
-// chunk RNG consumption order, so rebuilding/rebasing cannot recolor a rock.
+// illumination are shading, not alternate material definitions. Fine grain and
+// broad damp/rust/worn fields use absolute world coordinates, never window
+// indices or chunk RNG consumption order, so rebuilding cannot recolor a rock.
 function sampleCaveMaterialColor(surfaceHex, worldX, worldY, worldEntrances) {
+  var stone = GAME_MATERIALS.caveStone;
   var surface = typeof surfaceHex === 'number' ? surfaceHex :
     parseInt(typeof surfaceHex === 'string' ? surfaceHex.slice(1) : '', 16);
-  if (!isFinite(surface)) surface = 0x6c6558;
+  if (!isFinite(surface)) surface = stone.packed.base;
   var blend = getCavePortalDepthBlendAt(worldX, worldY, worldEntrances);
-  var hash = ((Math.floor(worldX / 12) * 7919 +
-    Math.floor(worldY / 12) * 104729) >>> 0) % 13;
-  var grain = hash - 6;
-  var r = Math.round(((surface >> 16) & 255) * (1 - blend) + (108 + grain) * blend);
-  var g = Math.round(((surface >> 8) & 255) * (1 - blend) + (101 + grain) * blend);
-  var b = Math.round((surface & 255) * (1 - blend) + (88 + grain) * blend);
+  var authored = sampleInteriorStoneAlbedo(stone.packed.base, worldX, worldY);
+  var r = Math.max(0, Math.min(255, Math.round(((surface >> 16) & 255) * (1 - blend) + ((authored >> 16) & 255) * blend)));
+  var g = Math.max(0, Math.min(255, Math.round(((surface >> 8) & 255) * (1 - blend) + ((authored >> 8) & 255) * blend)));
+  var b = Math.max(0, Math.min(255, Math.round((surface & 255) * (1 - blend) + (authored & 255) * blend)));
   return (r << 16) | (g << 8) | b;
 }
 
@@ -401,7 +406,7 @@ function getCaveMaterialColorAt(x, y) {
   }
   // Legacy level meshes have no authored cave field. Keep a stable neutral
   // fallback rather than silently reintroducing a view-dependent palette.
-  return 0x6c6558;
+  return GAME_MATERIALS.caveStone.packed.base;
 }
 
 function getCaveRenderLightAt(x, y, covered) {
@@ -450,8 +455,10 @@ function updateDayNight(dt) {
     dayTime += dt * daySpeed;
     if (dayTime >= 1) dayTime -= 1;
 
-    // Sun orbit — moves east-to-west, arc over south sky
-    var sunAngle = dayTime * Math.PI * 2;
+    // Sun orbit — sunrise at 0.25, overhead at 0.5, sunset at 0.75.
+    // This phase is shared by the visible sky so the disk and world lighting
+    // no longer disagree about where noon is.
+    var sunAngle = (dayTime - 0.25) * Math.PI * 2;
     sunDirX = Math.cos(sunAngle);
     sunDirZ = Math.sin(sunAngle);  // positive = above horizon
 

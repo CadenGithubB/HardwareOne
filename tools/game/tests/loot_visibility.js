@@ -74,6 +74,38 @@
   check('explicit zero support is retained below a nonzero surface',G.getEntityRenderFloorZ({x:120,y:50,renderFloorZ:0})===0);
   G.floorMesh=mesh([0,2,1,3],false);
   check('loot follows the terrain triangle on sloped ground',Math.abs(G.getEntityRenderFloorZ({x:100,y:100})-37.5)<1e-8);
+  // Descending-cave exits can leave the eye below the surrounding surface.
+  // A real projected uphill bank, not the player's stratum, must hide props.
+  G.floorMesh=mesh([-2,-2,-2,-2],true);
+  G.cam.y=50;G.cam.z=60;
+  var surfaceScatter={x:120,y:50,type:'tall_grass',variant:0,seed:0.4};
+  G.floorScatter=[surfaceScatter];
+  function exitBank(topZ){
+    var C=G.getCam3D(), a={x:60,y:-100,z:0}, b={x:80,y:-100,z:topZ},
+      c={x:80,y:200,z:topZ}, d={x:60,y:200,z:0};
+    G.writeSceneDepthPolygon(G.projectSceneWorldPolygon([a,b,c],C));
+    G.writeSceneDepthPolygon(G.projectSceneWorldPolygon([a,c,d],C));
+  }
+  check('below-surface camera cannot move surface scatter onto cave support',
+    G.getCam3D().cameraZ<75&&G.getEntityRenderFloorZ(surfaceScatter)===75);
+  frame();exitBank(110);clips=[];G.drawFloorScatter3D();
+  check('uphill bank fully hides surface scatter from below ground level',
+    paints===0&&clips.length===1&&clips[0].hidden>0);
+  frame();exitBank(70);clips=[];G.drawFloorScatter3D();
+  check('bank clips lower scatter while keeping the exposed upper portion',
+    paints>0&&clips.length===1&&clips[0].hidden>0&&clips[0].result>0&&saves===0);
+  frame();clips=[];G.drawFloorScatter3D();
+  check('unobstructed surface scatter stays visible from a lower camera',
+    paints>0&&clips.length===1&&clips[0].result>0);
+  var belowProjection=clips[0].points[0].y;
+  G.playerUnderground=!G.playerUnderground;frame();clips=[];G.drawFloorScatter3D();
+  check('camera stratum changes do not pop scatter between floor heights',
+    paints>0&&clips[0].points[0].y===belowProjection&&G.getEntityRenderFloorZ(surfaceScatter)===75);
+  G.floorScatter=[{x:120,y:50,type:'rock_pile',variant:0,seed:0.4,underground:true}];
+  G.cam.z=-60;G.playerUnderground=false;frame();clips=[];G.drawFloorScatter3D();
+  check('exposed cave clutter remains visible without a player-underground gate',
+    paints>0&&clips.length===1&&G.getEntityRenderFloorZ(G.floorScatter[0])===-50);
+  G.cam.z=60;G.cam.y=0;
   G.floorMesh=null;G.playerUnderground=false;
   G.gridW=G.gridH=16;G.cell=12;G.grid=new Uint8Array(256);G.grid[4*16+10]=1;
   G.wallHeights=new Float32Array(256);G.wallHeights.fill(0.2);G.wallFaceBase=null;G.wallMaxTopZ=null;

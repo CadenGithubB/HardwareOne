@@ -125,93 +125,7 @@ var CANVAS_BASE_H = canvas.height;  // original authored resolution (240)
 var projScale = 180;                // projection scale factor — recomputed each frame for resolution independence
 var resScale = 1;                   // resolution scale (1.0 at base res) — recomputed each frame
 
-// =============================================
-// BIOME_PALETTE — Centralized per-biome color definitions
-// =============================================
-// All biome-specific colors (floor, wall, sky, mountain, ceiling, pattern)
-// live here. Consumed by: getFloorColor, makeWallColor, makeCeilPattern,
-// makePattern, drawSkybox3D, drawSimpleWallSlice, getFloorColorBlended.
-// Adding a new biome = add one entry here; all systems pick it up.
-var BIOME_PALETTE = {
-  cave: {
-    wallColor:  '#6a6a70',
-    ceilFill:   '#1a1a1e',
-    patternBase:'#2a2a2e',
-    wallBaseRGB: [95, 95, 105],
-    // Floor height bands: 8 entries from deepest (-0.9) to highest (>0.5)
-    floorBands: ['#18181c','#28282e','#3a3a42','#4e4e58','#7a7a80','#8a8a90','#9a9aa0','#aaaab0'],
-    // Sky: [top, bottom] RGB arrays
-    sky:     [[0x12,0x12,0x1a], [0x1a,0x1a,0x1e]],
-    // Mountain layers: [far, mid, near] RGB arrays (hidden for cave)
-    mountain:[[0x12,0x12,0x1a], [0x12,0x12,0x1a], [0x12,0x12,0x1a]],
-    foothills: [0x12,0x12,0x1a],
-    haze:      [15,15,25],
-    mountainVisible: 0
-  },
-  ground: {
-    wallColor:  '#a77a45',
-    ceilFill:   '#3f2f1c',
-    patternBase:'#3b2a18',
-    wallBaseRGB: [180, 140, 100],
-    floorBands: ['#0e1a12','#1e2e22','#2a4232','#3a5642','#5a8a69','#6a9a79','#7aaa89','#8aba99'],
-    sky:     [[0x06,0x06,0x08], [0x0e,0x0c,0x08]],
-    mountain:[[0x22,0x1a,0x0e], [0x1a,0x14,0x08], [0x12,0x0e,0x05]],
-    foothills: [0x0c,0x0a,0x04],
-    haze:      [30,22,12],
-    mountainVisible: 1
-  },
-  plains: {
-    wallColor:  '#a77a45',
-    ceilFill:   '#3f2f1c',
-    patternBase:'#3b2a18',
-    wallBaseRGB: [180, 140, 100],
-    floorBands: ['#12180a','#222e10','#344218','#4a5a28','#6a7a40','#808e50','#96a260','#a8b870'],
-    sky:     [[0x06,0x06,0x08], [0x0e,0x0c,0x08]],
-    mountain:[[0x22,0x1a,0x0e], [0x1a,0x14,0x08], [0x12,0x0e,0x05]],
-    foothills: [0x0c,0x0a,0x04],
-    haze:      [30,22,12],
-    mountainVisible: 1
-  },
-  forest: {
-    wallColor:  '#4b3723',
-    ceilFill:   '#1a2a10',
-    patternBase:'#2a3a18',
-    wallBaseRGB: [75, 55, 35],
-    floorBands: ['#0e1608','#1a2810','#283a18','#385020','#4a6830','#5a7a40','#6a8a50','#7a9a60'],
-    sky:     [[0x08,0x0a,0x06], [0x12,0x18,0x0c]],
-    mountain:[[0x1a,0x2a,0x12], [0x14,0x22,0x0c], [0x0e,0x1a,0x08]],
-    foothills: [0x0c,0x14,0x06],
-    haze:      [20,30,15],
-    mountainVisible: 1
-  },
-  expanse: {
-    wallColor:  '#c07838',
-    ceilFill:   '#5a3010',
-    patternBase:'#7a4e22',
-    wallBaseRGB: [180, 140, 100],
-    floorBands: ['#1a0e08','#2e1808','#4a2a10','#6b3e1a','#8b5a28','#a87040','#c48a52','#d8a86a'],
-    sky:     [[0x06,0x04,0x08], [0x0e,0x0a,0x06]],
-    mountain:[[0x2a,0x1c,0x10], [0x1e,0x14,0x08], [0x14,0x0e,0x05]],
-    foothills: [0x0e,0x0a,0x04],
-    haze:      [50,30,12],
-    mountainVisible: 1
-  },
-  ice: {
-    wallColor:  '#7aa7ff',
-    ceilFill:   '#0d1a2e',
-    patternBase:'#0a1322',
-    wallBaseRGB: [140, 170, 240],
-    floorBands: ['#0a0e1a','#141c30','#1e2c48','#2a3c5e','#4a6888','#6888a8','#88a8c8','#a0c0e0'],
-    sky:     [[0x05,0x07,0x0f], [0x0b,0x0d,0x12]],
-    mountain:[[0x1a,0x25,0x40], [0x14,0x1c,0x35], [0x0e,0x14,0x28]],
-    foothills: [0x0c,0x12,0x20],
-    haze:      [15,20,35],
-    mountainVisible: 1
-  }
-};
-
-// Floor height thresholds — shared by getFloorColor, maps heightPercent to band index
-var _floorBandThresholds = [-0.9, -0.6, -0.3, -0.1, 0.1, 0.3, 0.5];
+// Biome palettes and shared materials are initialized by 01-materials.js.
 
 // =============================================
 // SHARED 3D PROJECTION & OCCLUSION
@@ -707,14 +621,12 @@ var gridW = 0;
 var gridH = 0;
 var wallHeights = null;
 var wallColorR = null, wallColorG = null, wallColorB = null; // per-cell wall color overrides (structure walls)
-// wallCapZ[i]: world-Z of the walkable layer directly above this wall's top
-// (the "dirt ceiling" over a cave wall), or -Infinity if none. Hides cave
-// walls from a surface camera without distance gates. Filled at window
-// assembly; see [WALL-CAP] log.
+// wallCapZ[i]: nearby exterior cap tag in mesh-height units, or -Infinity.
+// Not a wall height or camera-height cull; shared scene depth hides buried
+// faces. Filled at window assembly; see [WALL-CAP] log.
 var wallCapZ = null;
-// wallMaxTopZ[i]: highest allowed wall top in mesh-Z. For entrance-mouth
-// cells (no cap, has ceiling), relaxed to the lowest neighbor cap so walls
-// don't rise above surrounding ground. Infinity = no clamp.
+// wallMaxTopZ[i]: roof-bound wall top in mesh-height units, kept inside the
+// cover over this wall's footprint. Infinity = an ordinary surface wall.
 var wallMaxTopZ = null;
 var wallDecorations = [];
 var oreVeins = [];        // breakable mineral deposits on cave walls; cleared each level
@@ -978,11 +890,13 @@ var QUALITY_PRESETS = {
   high:   {viewDist: 1300, chunkWindow: 7, particles: 40, resolution: 1.0},
   ultra:  {viewDist: 1800, chunkWindow: 9, particles: 60, resolution: 1.0}
 };
-var settings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true};
+var settings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true,
+  castingStyle: typeof getSelectedCastingStyle === 'function' ? getSelectedCastingStyle() : 'arcane'};
 // Staging copy — holds uncommitted edits while settings overlay is open.
 // Written to by all slider/toggle/preset interactions.
 // Flushed → settings on Apply; discarded on close without Apply.
-var pendingSettings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true};
+var pendingSettings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true,
+  castingStyle: settings.castingStyle};
 var _settingsDirty = false; // true when pendingSettings differs from settings
 var _fpsSmooth = 60;
 var _lastFrameTimeMs = 0;
@@ -1076,18 +990,25 @@ function getScale3D(tier) { return (SIZE_TIERS[tier] || 1.0) * SCALE_3D_GLOBAL; 
 
 // Maps floor scatter item types to size tiers
 var FLOOR_ITEM_TIER = {
-  tree_stump:'lgPlant', fallen_log:'lgPlant', rock_cluster:'lgPlant',
-  ancient_column:'lgPlant', stone_pillar:'lgPlant', ruined_wall:'lgPlant',
-  crystal_cluster:'mdPlant', crate:'mdPlant', barrel:'mdPlant', skull:'mdPlant',
+  boulder:'lgPlant', stone_column:'lgPlant', rock_arch:'lgPlant', rock_spire:'lgPlant',
+  cave_rubble_pile:'lgPlant', sand_pillar:'lgPlant', mesa_boulder:'lgPlant',
+  tree_stump:'lgPlant', fallen_log:'lgPlant',
+  crystal:'mdPlant', stalagmite:'mdPlant', rock_pile:'mdPlant', desert_rock:'mdPlant',
+  crate:'mdPlant', barrel:'mdPlant', skull:'mdPlant', frozen_skull:'mdPlant',
   mushroom:'mdPlant', fern:'mdPlant', leaf_pile:'mdPlant', ice_shard:'mdPlant',
-  bookshelf_debris:'mdPlant', iron_chain:'mdPlant',
+  icicle_cluster:'mdPlant', bookshelf_debris:'mdPlant', iron_chain:'mdPlant',
+  rib_cage:'mdPlant', stone_marker:'mdPlant', cracked_stone:'mdPlant',
+  bones:'smPlant', dry_bones:'smPlant', femur:'smPlant', stick_bundle:'smPlant',
+  dead_shrub:'smPlant', puddle:'smPlant', frozen_pool:'smPlant',
   moss_patch:'smPlant', frost_patch:'smPlant', wildflower:'smPlant', tall_grass:'smPlant',
   flat_rock:'smPlant', rubble:'smPlant',
 };
 // Maps wall decoration types to size tiers
 var WALL_DECOR_TIER = {
-  torch:'lgWall', icicle:'lgWall', vine_growth:'lgWall',
-  moss_drip:'smWall', carved_rune:'smWall', ore_vein:'smWall',
+  torch:'lgWall', sconce:'lgWall', shield:'lgWall', banner:'lgWall',
+  icicle:'lgWall', vine_growth:'lgWall',
+  fungi:'smWall', moss_drip:'smWall', carved_rune:'smWall',
+  frost_crystal:'smWall', stalactite_tip:'smWall', wall_crack:'smWall', ore_vein:'smWall',
 };
 
 // ── Chest Tier System ──
@@ -1719,7 +1640,10 @@ var __decorDebugLast = 0;
 
 // RGB string cache — caches exact 'rgb(r,g,b)' strings by packed integer key.
 // After warm-up, every call is a hash lookup with zero string allocation.
-// Typical cache size: ~1000-3000 entries (walls, decorations, effects).
+// Typical cache size: ~1000-3000 entries (walls, decorations, effects). A
+// novel color at the hard limit starts a fresh generation so long sessions
+// cannot retain every fog/light combination ever visited.
+var RGB_CACHE_LIMIT = 4096;
 var _rgbCache = {};
 function rgbQ(r, g, b) {
   r = Math.max(0, Math.min(255, r)) | 0;
@@ -1728,6 +1652,13 @@ function rgbQ(r, g, b) {
   var key = (r << 16) | (g << 8) | b;
   var s = _rgbCache[key];
   if (s) { _cacheStats.rgbQ.hits++; return s; }
+  if (_cacheStats.rgbQ.size >= RGB_CACHE_LIMIT) {
+    if (_cacheStats.rgbQ.size > _cacheStats.rgbQ.peakSize) {
+      _cacheStats.rgbQ.peakSize = _cacheStats.rgbQ.size;
+    }
+    _rgbCache = {};
+    _cacheStats.rgbQ.size = 0;
+  }
   s = 'rgb(' + r + ',' + g + ',' + b + ')';
   _rgbCache[key] = s;
   _cacheStats.rgbQ.misses++;

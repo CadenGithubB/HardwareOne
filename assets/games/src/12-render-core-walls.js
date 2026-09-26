@@ -55,200 +55,302 @@ function drawSimpleWallSlice(x, y, height, wallX, shade, dist, side) {
   ctx.fillRect(x, y, 1, height);
 }
 
+var SKY_BIOME_ANCHORS = [
+  {n:0.083,b:'cave'}, {n:0.250,b:'ground'}, {n:0.416,b:'plains'},
+  {n:0.583,b:'forest'}, {n:0.750,b:'expanse'}, {n:0.916,b:'ice'}
+];
+
+// Fixed catalogs keep the moving sky deterministic and bounded. Stars are
+// batched into two paths and clouds into two paths rather than many fills.
+var SKY_STAR_CATALOG = (function() {
+  var stars = [], state = 0x51f15e;
+  function next() {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  }
+  for (var i = 0; i < 48; i++) {
+    stars.push({angle:next() * Math.PI * 2, altitude:0.12 + next() * 0.78,
+      bright:next() > 0.78, phase:next()});
+  }
+  return stars;
+}());
+
+var SKY_CLOUD_CATALOG = [
+  {angle:0.20,height:0.56,scale:0.85,band:0}, {angle:0.95,height:0.70,scale:0.66,band:1},
+  {angle:1.62,height:0.46,scale:1.00,band:0}, {angle:2.25,height:0.64,scale:0.74,band:1},
+  {angle:2.92,height:0.53,scale:0.92,band:0}, {angle:3.54,height:0.72,scale:0.60,band:1},
+  {angle:4.18,height:0.43,scale:1.08,band:0}, {angle:4.86,height:0.61,scale:0.78,band:1},
+  {angle:5.46,height:0.50,scale:0.96,band:0}, {angle:6.02,height:0.68,scale:0.68,band:1}
+];
+var SKY_MOUNTAIN_HEIGHTS = [0.70,0.55,0.38];
+var SKY_MOUNTAIN_ATMOSPHERE = [0.42,0.27,0.12];
+var SKY_MOUNTAIN_FREQUENCIES = [[1.6,4.2,8.5],[2.1,5.2,10.5],[2.7,6.8,13.5]];
+
+var _skyPhaseScratch = {};
+
+function skySmooth(t) {
+  t = Math.max(0, Math.min(1, t));
+  return t * t * (3 - 2 * t);
+}
+function skyLerpRGB(a, b, t) {
+  return [Math.round(a[0] + (b[0] - a[0]) * t),
+          Math.round(a[1] + (b[1] - a[1]) * t),
+          Math.round(a[2] + (b[2] - a[2]) * t)];
+}
+function skyRGB(c) { return rgbQ(c[0], c[1], c[2]); }
+function skyRGBA(c, a) {
+  return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
+}
+function skyAngleDelta(a, b) {
+  var d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+function getSkyPhase(time, enabled, out) {
+  out = out || {};
+  var t = enabled ? ((time % 1) + 1) % 1 : 0.5;
+  var daylight = 0, warm = 0, stars = 1;
+  if (!enabled || (t >= 0.30 && t <= 0.70)) {
+    daylight = 1; stars = 0;
+  } else if (t >= 0.15 && t < 0.30) {
+    var dawnP = skySmooth((t - 0.15) / 0.15);
+    daylight = dawnP; stars = 1 - dawnP;
+    warm = Math.sin(dawnP * Math.PI);
+  } else if (t > 0.70 && t <= 0.85) {
+    var duskP = skySmooth((t - 0.70) / 0.15);
+    daylight = 1 - duskP; stars = duskP;
+    warm = Math.sin(duskP * Math.PI);
+  }
+  var solarAngle = (t - 0.25) * Math.PI * 2;
+  out.time = t; out.daylight = daylight; out.warm = warm; out.stars = stars;
+  out.warmColor = t < 0.5 ? SKY_TIME_COLORS.dawn : SKY_TIME_COLORS.dusk;
+  out.sunElevation = Math.sin(solarAngle); out.sunAzimuth = solarAngle;
+  out.moonElevation = -out.sunElevation; out.moonAzimuth = solarAngle + Math.PI;
+  return out;
+}
+
+function skyTimeColor(dayColor, nightColor, phase, warmAmount) {
+  var result = skyLerpRGB(nightColor, dayColor, phase.daylight);
+  if (phase.warm > 0.001 && warmAmount > 0) {
+    result = skyLerpRGB(result, phase.warmColor, phase.warm * warmAmount);
+  }
+  return result;
+}
+
+function drawSkyStars(w, horizonY, halfFov, phase, exposure) {
+  var alpha = phase.stars * exposure;
+  if (alpha <= 0.01 || horizonY <= 0) return;
+  var drift = phase.time * Math.PI * 2;
+  ctx.save();
+  for (var pass = 0; pass < 2; pass++) {
+    var count = 0;
+    ctx.beginPath();
+    for (var i = 0; i < SKY_STAR_CATALOG.length; i++) {
+      var star = SKY_STAR_CATALOG[i];
+      if ((star.bright ? 1 : 0) !== pass) continue;
+      var delta = skyAngleDelta(star.angle + drift, cam.ang);
+      if (Math.abs(delta) > halfFov * 1.08) continue;
+      var sx = w * 0.5 + delta / halfFov * w * 0.5;
+      var sy = horizonY * (1 - star.altitude);
+      var size = pass ? 1.5 : 1;
+      ctx.rect(Math.floor(sx), Math.floor(sy), size, size);
+      count++;
+    }
+    if (count) {
+      ctx.globalAlpha = alpha * (pass ? 0.95 : 0.55);
+      ctx.fillStyle = skyRGB(SKY_TIME_COLORS.star);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function drawSkyCelestial(w, h, horizonY, halfFov, phase, exposure, skyMid) {
+  if (exposure <= 0.01 || horizonY <= 0) return;
+  var sunDelta = skyAngleDelta(phase.sunAzimuth, cam.ang);
+  var sunX = w * 0.5 + sunDelta / halfFov * w * 0.5;
+  var sunY = horizonY - phase.sunElevation * horizonY * 0.72;
+  var radius = Math.max(3, h * 0.025);
+  if (Math.abs(sunDelta) < halfFov * 1.35 && phase.sunElevation > -0.10) {
+    if (Math.abs(phase.sunElevation) < 0.28) {
+      var glowRadius = Math.max(35, w * 0.28);
+      var glow = ctx.createRadialGradient(sunX, horizonY, 0, sunX, horizonY, glowRadius);
+      glow.addColorStop(0, skyRGBA(phase.warmColor, 0.52));
+      glow.addColorStop(1, skyRGBA(phase.warmColor, 0));
+      ctx.globalAlpha = exposure * (1 - Math.abs(phase.sunElevation) / 0.28);
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, w, Math.max(0, horizonY));
+    }
+    ctx.globalAlpha = exposure * 0.18;
+    ctx.fillStyle = skyRGB(SKY_TIME_COLORS.sunEdge);
+    ctx.beginPath(); ctx.arc(sunX, sunY, radius * 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = exposure * 0.96;
+    ctx.fillStyle = skyRGB(SKY_TIME_COLORS.sunCore);
+    ctx.beginPath(); ctx.arc(sunX, sunY, radius, 0, Math.PI * 2); ctx.fill();
+  }
+
+  var moonDelta = skyAngleDelta(phase.moonAzimuth, cam.ang);
+  if (phase.stars > 0.08 && Math.abs(moonDelta) < halfFov * 1.2 &&
+      phase.moonElevation > -0.08) {
+    var moonX = w * 0.5 + moonDelta / halfFov * w * 0.5;
+    var moonY = horizonY - phase.moonElevation * horizonY * 0.68;
+    ctx.globalAlpha = exposure * phase.stars * 0.92;
+    ctx.fillStyle = skyRGB(SKY_TIME_COLORS.moon);
+    ctx.beginPath(); ctx.arc(moonX, moonY, radius * 0.82, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = exposure * phase.stars * 0.20;
+    ctx.fillStyle = skyRGB(skyMid);
+    ctx.beginPath(); ctx.arc(moonX - radius * 0.18, moonY - radius * 0.12,
+      radius * 0.19, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(moonX + radius * 0.22, moonY + radius * 0.18,
+      radius * 0.12, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawSkyClouds(w, horizonY, halfFov, cloudColor, cloudiness, phase) {
+  if (cloudiness <= 0.01 || horizonY <= 0) return;
+  var drift = Date.now() * 0.0000022;
+  var scaleBase = w / 360;
+  for (var band = 0; band < 2; band++) {
+    var count = 0;
+    ctx.beginPath();
+    for (var i = 0; i < SKY_CLOUD_CATALOG.length; i++) {
+      var cloud = SKY_CLOUD_CATALOG[i];
+      if (cloud.band !== band) continue;
+      var delta = skyAngleDelta(cloud.angle + drift * (band ? 0.58 : 1), cam.ang);
+      if (Math.abs(delta) > halfFov * 1.35) continue;
+      var x = w * 0.5 + delta / halfFov * w * 0.5;
+      var y = horizonY * (1 - cloud.height);
+      var s = scaleBase * cloud.scale * (band ? 0.82 : 1.08);
+      ctx.ellipse(x, y, 17 * s, 4.6 * s, 0, 0, Math.PI * 2);
+      ctx.ellipse(x - 11 * s, y + 1.5 * s, 11 * s, 3.5 * s, 0, 0, Math.PI * 2);
+      ctx.ellipse(x + 12 * s, y + 1.2 * s, 12 * s, 3.7 * s, 0, 0, Math.PI * 2);
+      count++;
+    }
+    if (count) {
+      ctx.globalAlpha = cloudiness * (band ? 0.10 : 0.16) *
+        (0.72 + phase.daylight * 0.28);
+      ctx.fillStyle = skyRGB(cloudColor);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function skyMountainNoise(a, freq) {
+  var v = a * freq, i = Math.floor(v), f = v - i;
+  f = f * f * (3 - 2 * f);
+  var h1 = ((i * 127 + 311) * 7919 >>> 0) % 10000 / 10000;
+  var h2 = (((i + 1) * 127 + 311) * 7919 >>> 0) % 10000 / 10000;
+  return h1 + (h2 - h1) * f;
+}
+
 function drawSkybox3D() {
   var w = canvas.width, h = canvas.height;
   var pitchOff = Math.floor(-(cam.pitch || 0) * projScale);
   var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var halfFov = cam.fov / 2;
   ctx.save();
 
-  // ── Biome-blended sky colors (from BIOME_PALETTE) ──────────────────
-  // Build lookup tables from centralized palette — no per-biome data here
-  var _bp = BIOME_PALETTE;
-  var _skyPalettes = {}, _mtPalettes = {}, _footPalettes = {}, _hazePalettes = {}, _mtVisible = {};
-  for (var _bk in _bp) {
-    _skyPalettes[_bk]  = _bp[_bk].sky;
-    _mtPalettes[_bk]   = _bp[_bk].mountain;
-    _footPalettes[_bk] = _bp[_bk].foothills;
-    _hazePalettes[_bk] = _bp[_bk].haze;
-    _mtVisible[_bk]    = _bp[_bk].mountainVisible;
+  var wx = ENDLESS_MODE ? pos.x + (windowOriginX || 0) : pos.x;
+  var wy = ENDLESS_MODE ? pos.y + (windowOriginY || 0) : pos.y;
+  var noise = typeof biomeNoise === 'function' ? biomeNoise(wx, wy, 3600) : 0.3;
+  var lo = SKY_BIOME_ANCHORS[0];
+  var hi = SKY_BIOME_ANCHORS[SKY_BIOME_ANCHORS.length - 1];
+  for (var ai = 0; ai < SKY_BIOME_ANCHORS.length - 1; ai++) {
+    if (noise >= SKY_BIOME_ANCHORS[ai].n && noise <= SKY_BIOME_ANCHORS[ai + 1].n) {
+      lo = SKY_BIOME_ANCHORS[ai]; hi = SKY_BIOME_ANCHORS[ai + 1]; break;
+    }
   }
+  if (noise < lo.n) hi = lo;
+  if (noise > hi.n) lo = hi;
+  var biomeT = lo === hi ? 0 : skySmooth((noise - lo.n) / (hi.n - lo.n));
+  var loBiome = BIOME_PALETTE[lo.b], hiBiome = BIOME_PALETTE[hi.b];
+  var loSky = SKY_ATMOSPHERE[lo.b], hiSky = SKY_ATMOSPHERE[hi.b];
+  var phase = getSkyPhase(dayTime, settings.dayNight, _skyPhaseScratch);
+  var dayZenith = skyLerpRGB(loSky.zenith, hiSky.zenith, biomeT);
+  var dayMid = skyLerpRGB(loSky.mid, hiSky.mid, biomeT);
+  var dayHorizon = skyLerpRGB(loSky.horizon, hiSky.horizon, biomeT);
+  var skyTop = skyTimeColor(dayZenith, SKY_TIME_COLORS.nightZenith, phase, 0.10);
+  var skyMid = skyTimeColor(dayMid, SKY_TIME_COLORS.nightMid, phase, 0.30);
+  var skyHorizon = skyTimeColor(dayHorizon, SKY_TIME_COLORS.nightHorizon, phase, 0.62);
+  var cloudDay = skyLerpRGB(loSky.cloud, hiSky.cloud, biomeT);
+  var cloudColor = skyTimeColor(cloudDay, SKY_TIME_COLORS.nightMid, phase, 0.22);
+  var cloudiness = loSky.cloudiness + (hiSky.cloudiness - loSky.cloudiness) * biomeT;
+  var mountainAlpha = loBiome.mountainVisible +
+    (hiBiome.mountainVisible - loBiome.mountainVisible) * biomeT;
 
-  // Blend helper: interpolate two RGB arrays
-  function _lerpRGB(a, b, t) {
-    return [Math.round(a[0] + (b[0] - a[0]) * t),
-            Math.round(a[1] + (b[1] - a[1]) * t),
-            Math.round(a[2] + (b[2] - a[2]) * t)];
-  }
-  function _rgbStr(c) { return rgbQ(c[0], c[1], c[2]); }
-  function _rgbaStr(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
-
-  // Get blended sky parameters from biome noise at player world position
-  var _skyBlend = (function() {
-    var wx, wy;
-    if (ENDLESS_MODE) {
-      wx = pos.x + (windowOriginX || 0);
-      wy = pos.y + (windowOriginY || 0);
-    } else {
-      wx = pos.x; wy = pos.y;
-    }
-    var n = (typeof biomeNoise === 'function') ? biomeNoise(wx, wy, 3600) : 0.3;
-    // Biome anchors at midpoint of each noise band
-    var anchors = [
-      {n: 0.083, b: 'cave'}, {n: 0.250, b: 'ground'}, {n: 0.416, b: 'plains'},
-      {n: 0.583, b: 'forest'}, {n: 0.750, b: 'expanse'}, {n: 0.916, b: 'ice'}
-    ];
-    // Find surrounding anchors
-    var lo = anchors[0], hi = anchors[anchors.length - 1];
-    for (var ai = 0; ai < anchors.length - 1; ai++) {
-      if (n >= anchors[ai].n && n <= anchors[ai + 1].n) {
-        lo = anchors[ai]; hi = anchors[ai + 1]; break;
-      }
-    }
-    if (n < anchors[0].n) { lo = anchors[0]; hi = anchors[0]; }
-    if (n > anchors[anchors.length - 1].n) { lo = hi = anchors[anchors.length - 1]; }
-    var t = (lo === hi) ? 0 : (n - lo.n) / (hi.n - lo.n);
-    t = t * t * (3 - 2 * t); // smoothstep
-    return {
-      skyTop:  _lerpRGB(_skyPalettes[lo.b][0], _skyPalettes[hi.b][0], t),
-      skyBot:  _lerpRGB(_skyPalettes[lo.b][1], _skyPalettes[hi.b][1], t),
-      mt:      [_lerpRGB(_mtPalettes[lo.b][0], _mtPalettes[hi.b][0], t),
-                _lerpRGB(_mtPalettes[lo.b][1], _mtPalettes[hi.b][1], t),
-                _lerpRGB(_mtPalettes[lo.b][2], _mtPalettes[hi.b][2], t)],
-      foot:    _lerpRGB(_footPalettes[lo.b], _footPalettes[hi.b], t),
-      haze:    _lerpRGB(_hazePalettes[lo.b], _hazePalettes[hi.b], t),
-      mtAlpha: _mtVisible[lo.b] + (_mtVisible[hi.b] - _mtVisible[lo.b]) * t
-    };
-  })();
-
-  // Day/night sky tinting — blend biome sky colors with time-of-day keyframes
-  if (settings.dayNight) {
-    var t = dayTime;
-    var skyTint, skyBrightness;
-    if (t < 0.15 || t > 0.85) {
-      // Night — deep dark blue
-      skyTint = [0x02, 0x02, 0x0a];
-      skyBrightness = 0.3;
-    } else if (t < 0.25) {
-      // Dawn — warm orange/purple rising
-      var p = (t - 0.15) / 0.10;
-      skyTint = _lerpRGB([0x02,0x02,0x0a], [0x50,0x25,0x10], p);
-      skyBrightness = 0.3 + p * 1.2;
-    } else if (t < 0.35) {
-      // Dawn → Day transition
-      var p = (t - 0.25) / 0.10;
-      skyTint = _lerpRGB([0x50,0x25,0x10], [0x30,0x30,0x40], p);
-      skyBrightness = 1.5 + p * 0.5;
-    } else if (t < 0.65) {
-      // Day — use biome colors brightened
-      skyTint = [0x30, 0x30, 0x40];
-      skyBrightness = 2.0;
-    } else if (t < 0.75) {
-      // Day → Dusk transition
-      var p = (t - 0.65) / 0.10;
-      skyTint = _lerpRGB([0x30,0x30,0x40], [0x60,0x20,0x08], p);
-      skyBrightness = 2.0 - p * 0.5;
-    } else {
-      // Dusk — warm red/orange fading
-      var p = (t - 0.75) / 0.10;
-      skyTint = _lerpRGB([0x60,0x20,0x08], [0x02,0x02,0x0a], p);
-      skyBrightness = 1.5 - p * 1.2;
-    }
-    // Apply tint: blend biome color toward tint, then scale by brightness
-    function _tintRGB(base, tint, bright) {
-      return [Math.min(255, Math.floor((base[0] * 0.4 + tint[0] * 0.6) * bright)),
-              Math.min(255, Math.floor((base[1] * 0.4 + tint[1] * 0.6) * bright)),
-              Math.min(255, Math.floor((base[2] * 0.4 + tint[2] * 0.6) * bright))];
-    }
-    _skyBlend.skyTop = _tintRGB(_skyBlend.skyTop, skyTint, skyBrightness);
-    _skyBlend.skyBot = _tintRGB(_skyBlend.skyBot, skyTint, skyBrightness);
-    // Tint mountains/foothills/haze too
-    for (var mi = 0; mi < 3; mi++) _skyBlend.mt[mi] = _tintRGB(_skyBlend.mt[mi], skyTint, skyBrightness * 0.8);
-    _skyBlend.foot = _tintRGB(_skyBlend.foot, skyTint, skyBrightness * 0.7);
-    _skyBlend.haze = _tintRGB(_skyBlend.haze, skyTint, skyBrightness * 0.6);
-  }
-
-  // Sky gradient
-  var gradient = ctx.createLinearGradient(0, 0, 0, horizonY);
-  gradient.addColorStop(0, _rgbStr(_skyBlend.skyTop));
-  gradient.addColorStop(1, _rgbStr(_skyBlend.skyBot));
+  var gradient = ctx.createLinearGradient(0, 0, 0, Math.max(1, horizonY));
+  gradient.addColorStop(0, skyRGB(skyTop));
+  gradient.addColorStop(0.56, skyRGB(skyMid));
+  gradient.addColorStop(0.86, skyRGB(skyLerpRGB(skyMid, skyHorizon, 0.58)));
+  gradient.addColorStop(1, skyRGB(skyHorizon));
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, w, Math.max(0, horizonY));
 
-  // Mountain silhouettes — fade out for cave biome
-  if (_skyBlend.mtAlpha > 0.01 && horizonY > 0) {
-    var ang = cam.ang;
-    function mtNoise(a, freq) {
-      var v = a * freq;
-      var i = Math.floor(v);
-      var f = v - i;
-      f = f * f * (3 - 2 * f);
-      var h1 = ((i * 127 + 311) * 7919 >>> 0) % 10000 / 10000;
-      var h2 = (((i + 1) * 127 + 311) * 7919 >>> 0) % 10000 / 10000;
-      return h1 + (h2 - h1) * f;
+  drawSkyStars(w, horizonY, halfFov, phase, mountainAlpha);
+  drawSkyCelestial(w, h, horizonY, halfFov, phase, mountainAlpha, skyMid);
+  drawSkyClouds(w, horizonY, halfFov, cloudColor, cloudiness, phase);
+
+  // Farther mountain layers borrow progressively more horizon atmosphere.
+  if (mountainAlpha > 0.01 && horizonY > 0) {
+    var mountainColors = [];
+    for (var mi = 0; mi < 3; mi++) {
+      var rawMountain = skyLerpRGB(loBiome.mountain[mi], hiBiome.mountain[mi], biomeT);
+      var dayMountain = skyLerpRGB(rawMountain, dayHorizon, SKY_MOUNTAIN_ATMOSPHERE[mi]);
+      mountainColors.push(skyTimeColor(dayMountain,
+        SKY_TIME_COLORS.nightHorizon, phase, 0.16));
     }
-
-    var layerHeights = [0.70, 0.55, 0.38];
-    var layerFreqs = [
-      [1.6, 4.2, 8.5],
-      [2.1, 5.2, 10.5],
-      [2.7, 6.8, 13.5]
-    ];
-
-    var halfFov = cam.fov / 2;
+    var rawFoot = skyLerpRGB(loBiome.foothills, hiBiome.foothills, biomeT);
+    var footColor = skyTimeColor(skyLerpRGB(rawFoot, dayHorizon, 0.08),
+      SKY_TIME_COLORS.nightZenith, phase, 0.10);
+    var rawHaze = skyLerpRGB(loBiome.haze, hiBiome.haze, biomeT);
+    var hazeColor = skyTimeColor(skyLerpRGB(rawHaze, dayHorizon, 0.52),
+      SKY_TIME_COLORS.nightHorizon, phase, 0.28);
     var step = Math.max(2, Math.floor(w / 120));
     var belowExtend = Math.min(h * 0.25, 60);
-
-    ctx.globalAlpha = _skyBlend.mtAlpha;
+    ctx.globalAlpha = mountainAlpha;
     for (var li = 0; li < 3; li++) {
-      var maxH = horizonY * layerHeights[li];
-      ctx.fillStyle = _rgbStr(_skyBlend.mt[li]);
-      ctx.beginPath();
-      ctx.moveTo(0, horizonY + belowExtend);
-      for (var sx = 0; sx <= w; sx += step) {
-        var t = (sx / w - 0.5) * 2;
-        var worldAng = ang + t * halfFov;
-        var n = mtNoise(worldAng, layerFreqs[li][0]) * 0.55
-              + mtNoise(worldAng, layerFreqs[li][1]) * 0.3
-              + mtNoise(worldAng, layerFreqs[li][2]) * 0.15;
-        n = Math.pow(n, 0.7);
-        var peakY = horizonY - n * maxH;
-        ctx.lineTo(sx, peakY);
+      var maxH = horizonY * SKY_MOUNTAIN_HEIGHTS[li];
+      ctx.fillStyle = skyRGB(mountainColors[li]);
+      ctx.beginPath(); ctx.moveTo(0, horizonY + belowExtend);
+      for (var sx2 = 0; sx2 <= w; sx2 += step) {
+        var screenT = (sx2 / w - 0.5) * 2;
+        var worldAng = cam.ang + screenT * halfFov;
+        var n = skyMountainNoise(worldAng, SKY_MOUNTAIN_FREQUENCIES[li][0]) * 0.55
+          + skyMountainNoise(worldAng, SKY_MOUNTAIN_FREQUENCIES[li][1]) * 0.30
+          + skyMountainNoise(worldAng, SKY_MOUNTAIN_FREQUENCIES[li][2]) * 0.15;
+        ctx.lineTo(sx2, horizonY - Math.pow(n, 0.7) * maxH);
       }
-      ctx.lineTo(w, horizonY + belowExtend);
-      ctx.closePath();
-      ctx.fill();
+      ctx.lineTo(w, horizonY + belowExtend); ctx.closePath(); ctx.fill();
     }
 
-    // Foothills
-    ctx.fillStyle = _rgbStr(_skyBlend.foot);
-    ctx.beginPath();
-    ctx.moveTo(0, horizonY + belowExtend);
-    for (var sx2 = 0; sx2 <= w; sx2 += step) {
-      var t2 = (sx2 / w - 0.5) * 2;
-      var worldAng2 = ang + t2 * halfFov;
-      var nf = mtNoise(worldAng2, 3.5) * 0.5 + mtNoise(worldAng2, 8) * 0.3 + mtNoise(worldAng2, 15) * 0.2;
-      nf = Math.pow(nf, 0.6);
-      var footY = horizonY - nf * horizonY * 0.18;
-      ctx.lineTo(sx2, footY);
+    ctx.fillStyle = skyRGB(footColor);
+    ctx.beginPath(); ctx.moveTo(0, horizonY + belowExtend);
+    for (var sx3 = 0; sx3 <= w; sx3 += step) {
+      var screenT2 = (sx3 / w - 0.5) * 2;
+      var worldAng2 = cam.ang + screenT2 * halfFov;
+      var nf = skyMountainNoise(worldAng2, 3.5) * 0.5
+        + skyMountainNoise(worldAng2, 8) * 0.3
+        + skyMountainNoise(worldAng2, 15) * 0.2;
+      ctx.lineTo(sx3, horizonY - Math.pow(nf, 0.6) * horizonY * 0.18);
     }
-    ctx.lineTo(w, horizonY + belowExtend);
-    ctx.closePath();
-    ctx.fill();
+    ctx.lineTo(w, horizonY + belowExtend); ctx.closePath(); ctx.fill();
     ctx.globalAlpha = 1;
 
-    // Haze band
     var hazeH = Math.min(30, horizonY * 0.15);
     var hazeGrad = ctx.createLinearGradient(0, horizonY - hazeH, 0, horizonY + hazeH);
-    hazeGrad.addColorStop(0, _rgbaStr(_skyBlend.haze, 0));
-    hazeGrad.addColorStop(0.4, _rgbaStr(_skyBlend.haze, 0.45));
-    hazeGrad.addColorStop(1, _rgbaStr(_skyBlend.haze, 0));
+    hazeGrad.addColorStop(0, skyRGBA(hazeColor, 0));
+    hazeGrad.addColorStop(0.4, skyRGBA(hazeColor, 0.45));
+    hazeGrad.addColorStop(1, skyRGBA(hazeColor, 0));
     ctx.fillStyle = hazeGrad;
     ctx.fillRect(0, horizonY - hazeH, w, hazeH * 2);
   }
 
   ctx.restore();
 }
-
 function drawCalibration() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#333'; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -374,22 +476,43 @@ function drawWalls3D() {
     }
     var baseShade = inCave && typeof getCaveRenderLightAt === 'function' ?
       getCaveRenderLightAt(faceMidX, faceMidY, true) : shade;
-    var totalShade = Math.min(1.0, baseShade + lightContrib);
-    // Warm tint near torches
-    var warmR = lightContrib > 0.05 ? 1.0 + lightContrib * 0.3 : 1.0;
-    var warmB = lightContrib > 0.05 ? 1.0 - lightContrib * 0.2 : 1.0;
+    var caveStyled = inCave && !DEBUG_POLY_TYPES && !DEBUG_CAVE_COLORS;
+    var r, g, b;
+    if (caveStyled) {
+      // Stable underground side lighting separates corners without borrowing
+      // the exterior sun direction. Long east/west faces are slightly quieter.
+      var caveOrientation = Math.abs(wx2 - wx1) > Math.abs(wy2 - wy1) ? 0.94 : 1;
+      var caveLit = shadeCaveSurfaceColor(material, CAVE_SURFACE_WALL,
+        baseShade * caveOrientation, lightContrib, fog);
+      r = (caveLit >>> 16) & 255; g = (caveLit >>> 8) & 255; b = caveLit & 255;
+    } else {
+      var totalShade = Math.min(1.0, baseShade + lightContrib);
+      // Warm tint near torches
+      var warmR = lightContrib > 0.05 ? 1.0 + lightContrib * 0.3 : 1.0;
+      var warmB = lightContrib > 0.05 ? 1.0 - lightContrib * 0.2 : 1.0;
+      r = Math.max(0, Math.min(255, Math.floor(faceR * colorMod * totalShade * fog * warmR)));
+      g = Math.max(0, Math.min(255, Math.floor(faceG * colorMod * totalShade * fog)));
+      b = Math.max(0, Math.min(255, Math.floor(faceB * colorMod * totalShade * fog * warmB)));
+    }
 
-    var r = Math.max(0, Math.min(255, Math.floor(faceR * colorMod * totalShade * fog * warmR)));
-    var g = Math.max(0, Math.min(255, Math.floor(faceG * colorMod * totalShade * fog)));
-    var b = Math.max(0, Math.min(255, Math.floor(faceB * colorMod * totalShade * fog * warmB)));
-
-    // Draw wall quad with vertical gradient (lighter at top, darker at bottom)
-    var topR = Math.min(255, Math.floor(r * 1.12));
-    var topG = Math.min(255, Math.floor(g * 1.12));
-    var topB = Math.min(255, Math.floor(b * 1.12));
-    var botR = Math.floor(r * 0.88);
-    var botG = Math.floor(g * 0.88);
-    var botB = Math.floor(b * 0.88);
+    // Exterior walls keep the legacy sunlight ramp. Covered stone instead has
+    // a soot-dark roof join, readable middle and grounded floor contact.
+    var topFactor = caveStyled ? 0.76 : 1.12;
+    var upperFactor = caveStyled ? 0.94 : 1;
+    var middleFactor = caveStyled ? 1.03 : 1;
+    var bottomFactor = caveStyled ? 0.80 : 0.88;
+    var topR = Math.min(255, Math.floor(r * topFactor));
+    var topG = Math.min(255, Math.floor(g * topFactor));
+    var topB = Math.min(255, Math.floor(b * topFactor));
+    var upperR = Math.min(255, Math.floor(r * upperFactor));
+    var upperG = Math.min(255, Math.floor(g * upperFactor));
+    var upperB = Math.min(255, Math.floor(b * upperFactor));
+    var middleR = Math.min(255, Math.floor(r * middleFactor));
+    var middleG = Math.min(255, Math.floor(g * middleFactor));
+    var middleB = Math.min(255, Math.floor(b * middleFactor));
+    var botR = Math.floor(r * bottomFactor);
+    var botG = Math.floor(g * bottomFactor);
+    var botB = Math.floor(b * bottomFactor);
 
     // Use gradient for the wall face. Canvas gradients bake absolute coords,
     // so the per-frame cache key includes a y-range bucket (A1-3).
@@ -399,15 +522,17 @@ function drawWalls3D() {
       maxSY = Math.max(maxSY, wallPoly[wi].y);
     }
     if (maxSY > minSY + 1) {
-      // Bucket color to 8-step and y to 8px. Key fits in 32 bits.
+      // Bucket color to 8-step and y to 8px. The material-ramp bit keeps an
+      // interior four-stop gradient from reusing an exterior three-stop one.
       var _cb = ((r >> 3) << 12) | ((g >> 3) << 6) | (b >> 3);
       var _yb = ((minSY >> 3) & 0x3fff) | (((maxSY >> 3) & 0x3fff) << 14);
-      var _gkey = _cb * 268435456 + _yb; // 18-bit color * 2^28 + 28-bit y
+      var _gkey = _cb * 536870912 + (caveStyled ? 268435456 : 0) + _yb;
       var gradient = _wallGradCache.get(_gkey);
       if (!gradient) {
         gradient = ctx.createLinearGradient(0, minSY, 0, maxSY);
         gradient.addColorStop(0, rgbQ(topR, topG, topB));
-        gradient.addColorStop(0.5, rgbQ(r, g, b));
+        if (caveStyled) gradient.addColorStop(0.22, rgbQ(upperR, upperG, upperB));
+        gradient.addColorStop(caveStyled ? 0.62 : 0.5, rgbQ(middleR, middleG, middleB));
         gradient.addColorStop(1, rgbQ(botR, botG, botB));
         _wallGradCache.set(_gkey, gradient);
         _cacheStats.wallGrad.misses++;
@@ -438,8 +563,15 @@ function drawWalls3D() {
       var rockFog = Math.max(renderCaveFogFloor, 1.0 - perpDist / viewDist * 0.8);
       var rockLight = typeof getCaveRenderLightAt === 'function' ?
         getCaveRenderLightAt(faceMidX, faceMidY, true) : ambientLight;
-      ctx.globalAlpha = rockFog;
-      ctx.fillStyle = rgbQ(Math.floor(caveWR * rockLight), Math.floor(caveWG * rockLight), Math.floor(caveWB * rockLight));
+      if (caveStyled) {
+        var closureLit = shadeCaveSurfaceColor(material, CAVE_SURFACE_CEILING,
+          rockLight, lightContrib, rockFog);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = rgbQ((closureLit >>> 16) & 255, (closureLit >>> 8) & 255, closureLit & 255);
+      } else {
+        ctx.globalAlpha = rockFog;
+        ctx.fillStyle = rgbQ(Math.floor(caveWR * rockLight), Math.floor(caveWG * rockLight), Math.floor(caveWB * rockLight));
+      }
       fillSceneDepthPolygon(extensionPoly);
       ctx.globalAlpha = 1.0;
     }
@@ -483,9 +615,9 @@ function drawWalls3D() {
       var _wcap = wallCapZ ? wallCapZ[gy * gridW + gx] : -Infinity;
       var _isEntrWall = _wcap > -Infinity;
 
-      // Top-Z clamp: precomputed per cell. Capped cells clamp to their cap;
-      // mouth cells clamp to the lowest neighbor cap (surrounding ground);
-      // open-surface cells have Infinity (no clamp).
+      // Precomputed roof-bound clamp keeps cave walls inside their rock cover,
+      // below every exterior corner. A nearby cap is not a wall-height target;
+      // ordinary surface cells retain Infinity (no clamp).
       if (wallMaxTopZ) {
         var _wmax = wallMaxTopZ[gy * gridW + gx];
         if (_wmax < Infinity && topH > _wmax) topH = _wmax;
@@ -493,9 +625,11 @@ function drawWalls3D() {
 
       // Per-cell biome color for endless mode (smooth blending across biomes)
       var cellBR = defaultBaseR, cellBG = defaultBaseG, cellBB = defaultBaseB;
+      var cellAuthored = false;
       if (ENDLESS_MODE) {
         var _wcIdx = gy * gridW + gx;
         if (wallColorR && wallColorR[_wcIdx]) {
+          cellAuthored = true;
           cellBR = wallColorR[_wcIdx];
           cellBG = wallColorG[_wcIdx];
           cellBB = wallColorB[_wcIdx];
@@ -570,7 +704,7 @@ function drawWalls3D() {
         var ct2 = caveCeilAt(x1, y1, topH);
         var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx] : fh;
-        wallFaces.push({wx1:x1, wy1:y2, wx2:x1, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeW, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x1, wy1:y2, wx2:x1, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeW, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored, entrWall:_isEntrWall});
       }
       // East face (gx+1): endpoints are (x2,y1) and (x2,y2)
       if (gx === gridW - 1 || !grid[gy * gridW + (gx + 1)]) {
@@ -580,7 +714,7 @@ function drawWalls3D() {
         var ct2 = caveCeilAt(x2, y2, topH);
         var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx + 1] : fh;
-        wallFaces.push({wx1:x2, wy1:y1, wx2:x2, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeE, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x2, wy1:y1, wx2:x2, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeE, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored, entrWall:_isEntrWall});
       }
       // North face (gy-1): endpoints are (x1,y1) and (x2,y1)
       if (gy === 0 || !grid[(gy - 1) * gridW + gx]) {
@@ -590,7 +724,7 @@ function drawWalls3D() {
         var ct2 = caveCeilAt(x2, y1, topH);
         var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx + 2] : fh;
-        wallFaces.push({wx1:x1, wy1:y1, wx2:x2, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeN, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x1, wy1:y1, wx2:x2, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeN, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored, entrWall:_isEntrWall});
       }
       // South face (gy+1): endpoints are (x2,y2) and (x1,y2)
       if (gy === gridH - 1 || !grid[(gy + 1) * gridW + gx]) {
@@ -600,7 +734,7 @@ function drawWalls3D() {
         var ct2 = caveCeilAt(x1, y2, topH);
         var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx + 3] : fh;
-        wallFaces.push({wx1:x2, wy1:y2, wx2:x1, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeS, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x2, wy1:y2, wx2:x1, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeS, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored, entrWall:_isEntrWall});
       }
 
       // Top face — only if camera is above wall top and not fully surrounded
@@ -611,7 +745,7 @@ function drawWalls3D() {
       if (hasExposed && !cellCave && cameraZ > topH * 25) {
         var topDist = Math.sqrt(ddx * ddx + ddy * ddy);
         if (topDist > 1) {
-          wallFaces.push({top:true, x1:x1, y1:y1, x2:x2, y2:y2, z:topH, dist:topDist, wh:wh, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome});
+          wallFaces.push({top:true, x1:x1, y1:y1, x2:x2, y2:y2, z:topH, dist:topDist, wh:wh, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored});
         }
       }
     }
@@ -717,7 +851,7 @@ function drawWalls3D() {
       fillSceneDepthPolygon(topPoly);
 
       // ── Forest: draw canopy inline (once per cell, respects painter's order) ──
-      if (f.biome === 'forest') {
+      if (f.biome === 'forest' && !f.authored) {
         var tKey = Math.floor(f.x1) + ',' + Math.floor(f.y1);
         if (!_forestCanopyDrawn[tKey]) {
           _forestCanopyDrawn[tKey] = 1;
@@ -760,7 +894,7 @@ function drawWalls3D() {
       }
     } else {
       // Side face — forest walls render as brown bark trunks
-      if (f.biome === 'forest') {
+      if (f.biome === 'forest' && !f.authored) {
         baseR = 75; baseG = 55; baseB = 35;  // bark brown instead of green
       } else {
         baseR = f.br; baseG = f.bg; baseB = f.bb;
@@ -769,7 +903,7 @@ function drawWalls3D() {
         f.ct1, f.ct2, f.cave || false, f.entrWall || false);
 
       // ── Forest: draw canopy inline from side view ──
-      if (f.biome === 'forest' && f.dist < viewDist * 0.5) {
+      if (f.biome === 'forest' && !f.authored && f.dist < viewDist * 0.5) {
         // Dedup by grid cell — use wall midpoint to derive cell key
         var faceMX = (f.wx1 + f.wx2) * 0.5, faceMY = (f.wy1 + f.wy2) * 0.5;
         var tKey = Math.floor(faceMX / cell) + ',' + Math.floor(faceMY / cell);

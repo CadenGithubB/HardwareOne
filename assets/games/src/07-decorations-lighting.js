@@ -95,17 +95,171 @@ function getWallDecorationAttachment(dec) {
   }
   var span = (topH - baseH) * 25;
   if (!isFinite(span) || span < 4) return null;
-  var tier = WALL_DECOR_TIER[dec.type] || 'smWall';
+  var type = canonicalWallDecorationType(dec.type);
+  var tier = WALL_DECOR_TIER[type] || 'smWall';
   var size = Math.min(32 * getScale3D(tier), span * 0.3);
   var z = baseH * 25 + span * 0.55;
   return {x:x, y:y, z:z, size:size, nx:nx, ny:ny,
     baseZ:baseH*25, topZ:topH*25,
-    flameZ:z + size * (dec.type === 'sconce' ? 1/6 : 1/4)};
+    flameZ:z + size * (type === 'sconce' ? 1/6 : 1/4)};
 }
 
 function getWallDecorationRenderZ(dec) {
   var attachment = getWallDecorationAttachment(dec);
   return attachment ? attachment.z : NaN;
+}
+
+// Upper terrain owns a separate, static receiver bake. The legacy XY light
+// grid remains the interior/other-renderer path; it cannot distinguish a cave
+// floor from grass above the same cave. These heights are render-world Z.
+var _surfaceFloorLightBake = null, _surfaceFloorLightMesh = null;
+var _surfaceFloorLightScale = 0;
+var _surfaceFloorLightStats = {builds:0,elapsedMs:0,firstElapsedMs:null,bytes:0,receivers:0,rays:0,blocked:0};
+
+// Test the two actual stitched terrain triangles, not a bilinear heightfield
+// or a coarse light-grid tile. The segment is local to this mesh cell in XY.
+function _surfaceLightTriangleHit(u, v, du, dv, z, dz, a, sx, sy, first) {
+  var denominator = dz - du * sx - dv * sy;
+  if (Math.abs(denominator) < 1e-10) return false;
+  var t = (a + u * sx + v * sy - z) / denominator;
+  if (t <= 0.0000001 || t >= 0.9999999) return false;
+  var x = u + du * t, y = v + dv * t;
+  return x >= -1e-8 && y >= -1e-8 && x <= 1+1e-8 && y <= 1+1e-8 &&
+    (first ? x + 1e-8 >= y : y + 1e-8 >= x);
+}
+
+function _surfaceLightCellBlocks(mesh, cache, gx, gy, x0, y0, z0, dx, dy, dz) {
+  if (gx < 0 || gy < 0 || gx >= mesh.w-1 || gy >= mesh.h-1) return false;
+  var ci = gy * mesh.w + gx, gs = mesh.gridSize;
+  var u = x0 / gs - gx, v = y0 / gs - gy, du = dx / gs, dv = dy / gs;
+  for (var li = 0; li < mesh.layerCount[ci]; li++) {
+    var type = mesh['l'+li+'Type'][ci], h = mesh['l'+li+'TopZ'][ci];
+    if (type !== 1 && type !== 2 && type !== 3 && type !== 4) continue;
+    var ceiling = type === 2, role = ceiling ? 0 : getFloorRenderLayerRole(mesh,ci,li,type);
+    var tile = getFloorStitchTile(mesh,cache,ci,li,role,h,ceiling), offset = (ci & 255) * 3;
+    var h1=tile.values[offset], h2=tile.values[offset+1], h3=tile.values[offset+2];
+    if (!Number.isFinite(h1) || !Number.isFinite(h2) || !Number.isFinite(h3)) continue;
+    if (!ceiling) {
+      h1=Math.max(h-4.5,Math.min(h+4.5,h1));
+      h2=Math.max(h-4.5,Math.min(h+4.5,h2));
+      h3=Math.max(h-4.5,Math.min(h+4.5,h3));
+    }
+    if (_surfaceLightTriangleHit(u,v,du,dv,z0,dz,h*25,(h1-h)*25,(h3-h1)*25,true) ||
+        _surfaceLightTriangleHit(u,v,du,dv,z0,dz,h*25,(h3-h2)*25,(h2-h)*25,false)) return true;
+  }
+  return false;
+}
+
+// Short static light rays visit crossed mesh cells only. Both sides of floor,
+// cap and ceiling triangles block light, independent of camera facing. This
+// intentionally does not claim shadows from actors, props or every legacy
+// wall renderer; its scope is preventing illumination through solid terrain.
+function surfaceLightRayBlocked(x0,y0,z0,x1,y1,z1,mesh) {
+  if (!mesh || !mesh.layerCount || typeof getFloorStitchCache !== 'function') return false;
+  if (![x0,y0,z0,x1,y1,z1].every(Number.isFinite)) return true;
+  var gs=mesh.gridSize, dx=x1-x0, dy=y1-y0, dz=z1-z0;
+  var gx=Math.floor(x0/gs), gy=Math.floor(y0/gs), endX=Math.floor(x1/gs), endY=Math.floor(y1/gs);
+  var stepX=dx>0?1:dx<0?-1:0, stepY=dy>0?1:dy<0?-1:0;
+  var tx=stepX?((gx+(stepX>0?1:0))*gs-x0)/dx:Infinity;
+  var ty=stepY?((gy+(stepY>0?1:0))*gs-y0)/dy:Infinity;
+  var dtx=stepX?gs/Math.abs(dx):Infinity, dty=stepY?gs/Math.abs(dy):Infinity;
+  var cache=getFloorStitchCache(mesh), steps=Math.abs(endX-gx)+Math.abs(endY-gy)+3;
+  for(var i=0;i<steps;i++) {
+    if(_surfaceLightCellBlocks(mesh,cache,gx,gy,x0,y0,z0,dx,dy,dz)) return true;
+    if(gx===endX && gy===endY) break;
+    if(tx<ty) {gx+=stepX;tx+=dtx;}
+    else if(ty<tx) {gy+=stepY;ty+=dty;}
+    else {gx+=stepX;gy+=stepY;tx+=dtx;ty+=dty;}
+  }
+  return false;
+}
+
+function _surfaceLightReceiverZ(mesh,ci,cache) {
+  var selected=-1, highest=-Infinity;
+  for(var li=0;li<mesh.layerCount[ci];li++) {
+    var type=mesh['l'+li+'Type'][ci], h=mesh['l'+li+'TopZ'][ci];
+    if((type===1||type===3||type===4) && h>highest) {highest=h;selected=li;}
+  }
+  if(selected<0) return NaN;
+  // A floor with a ceiling but no complete cap is still an interior receiver.
+  for(var k=0;k<mesh.layerCount[ci];k++) {
+    if(mesh['l'+k+'Type'][ci]===2 && mesh['l'+k+'TopZ'][ci]>highest) return NaN;
+  }
+  var role=getFloorRenderLayerRole(mesh,ci,selected,mesh['l'+selected+'Type'][ci]);
+  var tile=getFloorStitchTile(mesh,cache,ci,selected,role,highest,false), offset=(ci&255)*3;
+  if(!Number.isFinite(tile.values[offset]) || !Number.isFinite(tile.values[offset+1]) ||
+     !Number.isFinite(tile.values[offset+2])) return NaN;
+  var opposite=Math.max(highest-4.5,Math.min(highest+4.5,tile.values[offset+2]));
+  // The exact center lies on the renderer's NW→SE diagonal. A 0.05 render-
+  // unit offset prevents receiver self-shadow without lifting it over a roof.
+  return (highest+opposite)*12.5+0.05;
+}
+
+function buildSurfaceFloorLighting() {
+  var began=typeof performance!=='undefined'&&performance.now?performance.now():Date.now();
+  var stats={builds:_surfaceFloorLightStats.builds+1,elapsedMs:0,
+    firstElapsedMs:_surfaceFloorLightStats.firstElapsedMs,bytes:0,receivers:0,rays:0,blocked:0};
+  _surfaceFloorLightBake=null; _surfaceFloorLightMesh=null;
+  var mesh=typeof floorMesh!=='undefined'?floorMesh:null;
+  if(mesh && mesh.layerCount && typeof getFloorStitchCache==='function') {
+    var bake=new Float32Array(mesh.w*mesh.h), receiverHeights=new Map(), cache=getFloorStitchCache(mesh);
+    for(var i=0;i<pointLights.length;i++) {
+      var light=pointLights[i];
+      if(!Number.isFinite(light.x)||!Number.isFinite(light.y)||!Number.isFinite(light.z)||
+         !Number.isFinite(light.radius)||light.radius<=0||!Number.isFinite(light.intensity)||light.intensity<=0) continue;
+      var gs=mesh.gridSize, radiusSq=light.radius*light.radius;
+      var x0=Math.max(0,Math.floor((light.x-light.radius)/gs));
+      var y0=Math.max(0,Math.floor((light.y-light.radius)/gs));
+      var x1=Math.min(mesh.w-2,Math.floor((light.x+light.radius)/gs));
+      var y1=Math.min(mesh.h-2,Math.floor((light.y+light.radius)/gs));
+      for(var y=y0;y<=y1;y++)for(var x=x0;x<=x1;x++) {
+        var wx=(x+.5)*gs, wy=(y+.5)*gs, dx=wx-light.x, dy=wy-light.y, distSq=dx*dx+dy*dy;
+        if(distSq>=radiusSq) continue;
+        var ci=y*mesh.w+x, z;
+        if(receiverHeights.has(ci)) z=receiverHeights.get(ci);
+        else {
+          z=_surfaceLightReceiverZ(mesh,ci,cache);receiverHeights.set(ci,z);
+          if(Number.isFinite(z)) stats.receivers++;
+        }
+        if(!Number.isFinite(z)) continue;
+        stats.rays++;
+        if(surfaceLightRayBlocked(light.x,light.y,light.z,wx,wy,z,mesh)) {stats.blocked++;continue;}
+        // Preserve the existing horizontal falloff; only the receiver and
+        // terrain visibility are new. No extra brightness or radius change.
+        bake[ci]+=light.intensity*(1-distSq/radiusSq);
+      }
+    }
+    bake.meshStamp=mesh.walkCandZ;
+    _surfaceFloorLightBake=bake;_surfaceFloorLightMesh=mesh;stats.bytes=bake.byteLength;
+  }
+  stats.elapsedMs=(typeof performance!=='undefined'&&performance.now?performance.now():Date.now())-began;
+  if(_surfaceFloorLightBake && stats.firstElapsedMs===null) stats.firstElapsedMs=stats.elapsedMs;
+  _surfaceFloorLightStats=stats;
+}
+
+function getSurfaceFloorLightAt(mesh,ci,li) {
+  if(!_surfaceFloorLightBake || mesh!==_surfaceFloorLightMesh ||
+     _surfaceFloorLightBake.meshStamp!==mesh.walkCandZ || ci<0 || ci>=_surfaceFloorLightBake.length) return 0;
+  // One receiver per XY, explicitly bound to the highest walkable layer.
+  // Lower uncovered ledges keep their legacy lighting path instead of
+  // borrowing a different height's bake. At most five layer reads, no rays.
+  if(li!==undefined) {
+    if(li<0 || li>=mesh.layerCount[ci]) return NaN;
+    var receiver=-1,highest=-Infinity;
+    for(var k=0;k<mesh.layerCount[ci];k++) {
+      var type=mesh['l'+k+'Type'][ci],h=mesh['l'+k+'TopZ'][ci];
+      if((type===1||type===3||type===4) && h>highest) {highest=h;receiver=k;}
+    }
+    if(li!==receiver) return NaN;
+  }
+  return _surfaceFloorLightBake[ci]*_surfaceFloorLightScale;
+}
+
+function getSurfaceFloorLightStats() {
+  return {builds:_surfaceFloorLightStats.builds,elapsedMs:_surfaceFloorLightStats.elapsedMs,
+    firstElapsedMs:_surfaceFloorLightStats.firstElapsedMs,
+    bytes:_surfaceFloorLightStats.bytes,receivers:_surfaceFloorLightStats.receivers,
+    rays:_surfaceFloorLightStats.rays,blocked:_surfaceFloorLightStats.blocked};
 }
 
 function buildPointLights() {
@@ -163,6 +317,7 @@ function buildPointLights() {
       }
     }
   }
+  buildSurfaceFloorLighting();
   console.log('[LIGHTS] Built ' + pointLights.length + ' point lights (' +
     wallDecorations.filter(function(d){ return d.type === 'torch' || d.type === 'sconce'; }).length + ' torches, ' +
     deepCaveEntrances.length + ' cave entrances) — baked to static grid');
@@ -170,13 +325,15 @@ function buildPointLights() {
 
 var _lightGridLastScale = -1, _lightGridLastCamGX = -9999, _lightGridLastCamGY = -9999;
 function updateLightGrid() {
-  if (!_lightGrid || (!pointLights.length && !playerUnderground)) return;
   var now = Date.now();
-  var darkFactor = Math.max(0, 1.0 - ambientLight);
   // Day/night multiplier: torches matter less during day (0.3× min, 1× at night).
   // Global gentle flicker — one sin wave shared across all lights (cheap).
-  var dayScale = 0.3 + 0.7 * darkFactor;
   var flicker = 0.95 + 0.04 * Math.sin(now * 0.007) + 0.02 * Math.sin(now * 0.013);
+  var surfaceAmbient=typeof renderSurfaceAmbient!=='undefined'?renderSurfaceAmbient:ambientLight;
+  _surfaceFloorLightScale=(0.3+0.7*Math.max(0,1-surfaceAmbient))*flicker;
+  if (!_lightGrid || (!pointLights.length && !playerUnderground)) return;
+  var darkFactor = Math.max(0, 1.0 - ambientLight);
+  var dayScale = 0.3 + 0.7 * darkFactor;
   var scale = dayScale * flicker;
   var camGX = Math.floor(cam.x / _lightCellSize);
   var camGY = Math.floor(cam.y / _lightCellSize);
@@ -254,48 +411,187 @@ function isDecorationOccluded(decorX, decorY, camX, camY) {
   return false;
 }
 
-function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade) {
+function getWallDecorationVariant(dec) {
+  if (!dec) return 0;
+  var sideCode = dec.side === 'north' ? 11 : dec.side === 'south' ? 23 : dec.side === 'west' ? 37 : 53;
+  var h = Math.imul((dec.gridX | 0) + 4099, 73856093) ^
+          Math.imul((dec.gridY | 0) + 8191, 19349663) ^ sideCode;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+function wallPropLitColor(material, role, brightness) {
+  var packed = GAME_MATERIALS[material].packed[role];
+  var light = Math.max(0.42, Math.min(1.08, 0.46 + brightness * 0.6));
+  return rgbQ(Math.min(255, Math.floor(((packed >>> 16) & 255) * light)),
+    Math.min(255, Math.floor(((packed >>> 8) & 255) * light)),
+    Math.min(255, Math.floor((packed & 255) * light)));
+}
+
+function traceWallShieldPath(x, y, w, h) {
+  ctx.beginPath();
+  ctx.moveTo(x - w * 0.44, y - h * 0.42);
+  ctx.quadraticCurveTo(x, y - h * 0.58, x + w * 0.44, y - h * 0.42);
+  ctx.lineTo(x + w * 0.36, y + h * 0.12);
+  ctx.quadraticCurveTo(x + w * 0.24, y + h * 0.42, x, y + h * 0.58);
+  ctx.quadraticCurveTo(x - w * 0.24, y + h * 0.42, x - w * 0.36, y + h * 0.12);
+  ctx.closePath();
+}
+
+function traceWallBannerCloth(x, y, w, h) {
+  ctx.beginPath();
+  ctx.moveTo(x - w * 0.39, y - h * 0.34);
+  ctx.lineTo(x + w * 0.39, y - h * 0.34);
+  ctx.lineTo(x + w * 0.36, y + h * 0.42);
+  ctx.lineTo(x, y + h * 0.28);
+  ctx.lineTo(x - w * 0.36, y + h * 0.42);
+  ctx.closePath();
+}
+
+function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade, dec, now) {
   ctx.save();
+  type = canonicalWallDecorationType(type);
   var brightness = Math.max(0.4, viewAngle);
-  ctx.globalAlpha = Math.max(0.6, brightness) * (fade !== undefined ? fade : 1);
+  var baseAlpha = Math.max(0.6, brightness) * (fade !== undefined ? fade : 1);
+  ctx.globalAlpha = baseAlpha;
   var widthScale = 1.0;
   var heightScale = 1.0;
   var distanceFactor = Math.max(0.0, Math.min(1.0, (120 - dist) / 80));
   var angleEffect = distanceFactor * (1.0 - viewAngle);
   widthScale = 1.0 - angleEffect * 0.6;
-  var w = Math.floor(size * widthScale);
-  var h = Math.floor(size * heightScale);
+  var w = Math.max(1, size * widthScale);
+  var h = Math.max(1, size * heightScale);
+  var variant = getWallDecorationVariant(dec);
+  if (!Number.isFinite(now)) now = Date.now();
   if (type === 'torch') {
-    var stickColor = rgbQ(Math.floor(139 * brightness), Math.floor(69 * brightness), Math.floor(19 * brightness));
-    ctx.fillStyle = stickColor;
-    ctx.fillRect(x - w / 6, y, w / 3, h);
-    ctx.fillStyle = '#FF4500'; ctx.globalAlpha *= 0.9;
-    ctx.beginPath(); ctx.ellipse(x, y - h / 4, w / 3, h / 2, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#FFD700';
-    ctx.beginPath(); ctx.ellipse(x, y - h / 3, w / 5, h / 4, 0, 0, Math.PI * 2); ctx.fill();
-  } else if (type === 'shield') {
-    var metalColor = rgbQ(Math.floor(192 * brightness), Math.floor(192 * brightness), Math.floor(192 * brightness));
-    ctx.fillStyle = metalColor;
-    ctx.beginPath(); ctx.ellipse(x, y, w / 2, h * 0.6, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#8B0000'; ctx.globalAlpha *= 0.8;
+    // Iron backplate and bracket make the torch visibly attached to the wall.
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'shadow', brightness);
+    ctx.beginPath(); ctx.ellipse(x, y + h * 0.10, w * 0.15, h * 0.23, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'base', brightness);
+    ctx.fillRect(x - w * 0.07, y + h * 0.04, w * 0.14, h * 0.34);
     ctx.beginPath();
-    ctx.moveTo(x, y - h / 3); ctx.lineTo(x - w / 4, y); ctx.lineTo(x, y + h / 3); ctx.lineTo(x + w / 4, y);
+    ctx.moveTo(x - w * 0.04, y + h * 0.14); ctx.lineTo(x + w * 0.18, y + h * 0.02);
+    ctx.lineTo(x + w * 0.22, y + h * 0.10); ctx.lineTo(x + w * 0.02, y + h * 0.24);
     ctx.closePath(); ctx.fill();
+    // Tapered resin-darkened wooden shaft and two retaining bands.
+    ctx.fillStyle = wallPropLitColor('wallPropWood', 'shadow', brightness);
+    ctx.beginPath(); ctx.moveTo(x - w * 0.11, y - h * 0.01); ctx.lineTo(x + w * 0.12, y - h * 0.01);
+    ctx.lineTo(x + w * 0.08, y + h * 0.82); ctx.lineTo(x - w * 0.07, y + h * 0.82); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropWood', 'lit', brightness);
+    ctx.fillRect(x - w * 0.06, y + h * 0.05, w * 0.05, h * 0.70);
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'deep', brightness);
+    ctx.fillRect(x - w * 0.14, y + h * 0.02, w * 0.28, Math.max(1, h * 0.07));
+    ctx.fillRect(x - w * 0.12, y + h * 0.17, w * 0.24, Math.max(1, h * 0.06));
+    // Three flat flame layers give a readable core with only bounded paths.
+    var torchWave = Math.sin(now * 0.009 + (variant & 255) * 0.17);
+    var torchX = x + torchWave * w * 0.035;
+    var torchTop = y - h * (0.65 + torchWave * 0.035);
+    ctx.globalAlpha = baseAlpha * 0.92;
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.outer;
+    ctx.beginPath(); ctx.moveTo(torchX - w * 0.24, y + h * 0.03);
+    ctx.quadraticCurveTo(torchX - w * 0.30, y - h * 0.28, torchX, torchTop);
+    ctx.quadraticCurveTo(torchX + w * 0.30, y - h * 0.25, torchX + w * 0.22, y + h * 0.03);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.inner;
+    ctx.beginPath(); ctx.ellipse(torchX, y - h * 0.19, w * 0.16, h * 0.29, torchWave * 0.08, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.core;
+    ctx.beginPath(); ctx.ellipse(torchX, y - h * 0.10, w * 0.07, h * 0.14, 0, 0, Math.PI * 2); ctx.fill();
+  } else if (type === 'shield') {
+    // Heater-shield silhouette, iron rim, heraldic field and raised boss.
+    ctx.globalAlpha = baseAlpha * 0.34;
+    ctx.fillStyle = GAME_MATERIALS.wallPropIron.hex.deep;
+    traceWallShieldPath(x + w * 0.07, y + h * 0.07, w, h); ctx.fill();
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'lit', brightness);
+    traceWallShieldPath(x, y, w, h); ctx.fill();
+    var shieldFamily = variant % 3;
+    var shieldRole = shieldFamily === 0 ? 'red' : shieldFamily === 1 ? 'blue' : 'purple';
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', shieldRole, brightness);
+    traceWallShieldPath(x, y + h * 0.01, w * 0.79, h * 0.79); ctx.fill();
+    ctx.strokeStyle = wallPropLitColor('wallPropIron', 'edge', brightness);
+    ctx.lineWidth = Math.max(1, w * 0.055);
+    traceWallShieldPath(x, y, w * 0.91, h * 0.91); ctx.stroke();
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', 'gold', brightness);
+    if (shieldFamily === 0) {
+      ctx.fillRect(x - w * 0.055, y - h * 0.35, w * 0.11, h * 0.68);
+      ctx.fillRect(x - w * 0.27, y - h * 0.07, w * 0.54, h * 0.11);
+    } else if (shieldFamily === 1) {
+      ctx.beginPath(); ctx.moveTo(x - w * 0.25, y - h * 0.16); ctx.lineTo(x, y + h * 0.12);
+      ctx.lineTo(x + w * 0.25, y - h * 0.16); ctx.lineTo(x + w * 0.25, y - h * 0.02);
+      ctx.lineTo(x, y + h * 0.27); ctx.lineTo(x - w * 0.25, y - h * 0.02); ctx.closePath(); ctx.fill();
+    } else {
+      ctx.beginPath(); ctx.arc(x, y - h * 0.03, w * 0.20, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'edge', brightness);
+    ctx.beginPath(); ctx.arc(x, y - h * 0.02, w * 0.09, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'shadow', brightness);
+    ctx.beginPath(); ctx.arc(x + w * 0.02, y, w * 0.045, 0, Math.PI * 2); ctx.fill();
   } else if (type === 'banner') {
-    var poleColor = rgbQ(Math.floor(139 * brightness), Math.floor(69 * brightness), Math.floor(19 * brightness));
-    ctx.fillStyle = poleColor;
-    ctx.fillRect(x - w / 8, y - h / 2, w / 4, h);
-    var fabricColor = rgbQ(Math.floor(128 * brightness), 0, Math.floor(128 * brightness));
-    ctx.fillStyle = fabricColor;
-    ctx.fillRect(x, y - h / 2, w / 2, h * 0.7);
-    ctx.fillStyle = '#FFD700'; ctx.globalAlpha *= 0.9;
-    ctx.fillRect(x + w / 8, y - h / 3, w / 4, h / 6);
+    var bannerFamily = variant % 3;
+    var bannerRole = bannerFamily === 0 ? 'red' : bannerFamily === 1 ? 'blue' : 'purple';
+    ctx.globalAlpha = baseAlpha * 0.3;
+    ctx.fillStyle = GAME_MATERIALS.wallPropIron.hex.deep;
+    traceWallBannerCloth(x + w * 0.06, y + h * 0.07, w, h); ctx.fill();
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = wallPropLitColor('wallPropWood', 'shadow', brightness);
+    ctx.fillRect(x - w * 0.49, y - h * 0.44, w * 0.98, Math.max(1, h * 0.08));
+    ctx.fillRect(x - w * 0.025, y - h * 0.47, w * 0.05, h * 0.14);
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'lit', brightness);
+    ctx.beginPath(); ctx.arc(x - w * 0.49, y - h * 0.40, w * 0.07, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + w * 0.49, y - h * 0.40, w * 0.07, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', bannerRole, brightness);
+    traceWallBannerCloth(x, y, w, h); ctx.fill();
+    ctx.globalAlpha = baseAlpha * 0.36;
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', bannerRole + 'Deep', brightness);
+    ctx.beginPath(); ctx.moveTo(x - w * 0.31, y - h * 0.33); ctx.lineTo(x - w * 0.13, y - h * 0.33);
+    ctx.lineTo(x - w * 0.08, y + h * 0.29); ctx.lineTo(x - w * 0.27, y + h * 0.36); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', 'goldLit', brightness);
+    if (bannerFamily === 0) {
+      ctx.fillRect(x - w * 0.06, y - h * 0.22, w * 0.12, h * 0.38);
+      ctx.fillRect(x - w * 0.22, y - h * 0.08, w * 0.44, h * 0.10);
+    } else if (bannerFamily === 1) {
+      ctx.beginPath(); ctx.moveTo(x - w * 0.22, y - h * 0.13); ctx.lineTo(x, y + h * 0.12);
+      ctx.lineTo(x + w * 0.22, y - h * 0.13); ctx.lineTo(x + w * 0.22, y + h * 0.01);
+      ctx.lineTo(x, y + h * 0.26); ctx.lineTo(x - w * 0.22, y + h * 0.01); ctx.closePath(); ctx.fill();
+    } else {
+      ctx.beginPath(); ctx.arc(x, y - h * 0.04, w * 0.17, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = wallPropLitColor('wallHeraldry', 'linen', brightness);
+      ctx.beginPath(); ctx.arc(x, y - h * 0.04, w * 0.07, 0, Math.PI * 2); ctx.fill();
+    }
   } else if (type === 'sconce') {
-    var baseColor = rgbQ(Math.floor(105 * brightness), Math.floor(105 * brightness), Math.floor(105 * brightness));
-    ctx.fillStyle = baseColor;
-    ctx.beginPath(); ctx.arc(x, y, w / 3, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#FF6347'; ctx.globalAlpha *= 0.8;
-    ctx.beginPath(); ctx.ellipse(x, y - h / 6, w / 4, h / 3, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'shadow', brightness);
+    ctx.beginPath(); ctx.ellipse(x, y + h * 0.10, w * 0.24, h * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'base', brightness);
+    ctx.beginPath(); ctx.arc(x, y + h * 0.07, w * 0.14, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x - w * 0.07, y + h * 0.04); ctx.lineTo(x + w * 0.26, y - h * 0.03);
+    ctx.lineTo(x + w * 0.30, y + h * 0.08); ctx.lineTo(x, y + h * 0.18); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'deep', brightness);
+    ctx.beginPath(); ctx.ellipse(x + w * 0.25, y - h * 0.02, w * 0.25, h * 0.10, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'lit', brightness);
+    ctx.beginPath(); ctx.ellipse(x + w * 0.25, y - h * 0.06, w * 0.19, h * 0.07, 0, 0, Math.PI * 2); ctx.fill();
+    var sconceWave = Math.sin(now * 0.010 + (variant & 255) * 0.13);
+    var sconceX = x + w * 0.25 + sconceWave * w * 0.025;
+    ctx.globalAlpha = baseAlpha * 0.9;
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.outer;
+    ctx.beginPath(); ctx.ellipse(sconceX, y - h * 0.25, w * 0.18, h * 0.29, sconceWave * 0.08, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.inner;
+    ctx.beginPath(); ctx.ellipse(sconceX, y - h * 0.19, w * 0.10, h * 0.18, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.core;
+    ctx.beginPath(); ctx.ellipse(sconceX, y - h * 0.13, w * 0.045, h * 0.09, 0, 0, Math.PI * 2); ctx.fill();
+
+  } else if (type === 'wall_crack') {
+    // A real renderer for the former invisible `crack` decoration.
+    ctx.globalAlpha = baseAlpha * 0.62;
+    ctx.strokeStyle = wallPropLitColor('wallPropIron', 'deep', brightness);
+    ctx.lineWidth = Math.max(1, w * 0.045); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x - w * 0.18, y - h * 0.40); ctx.lineTo(x + w * 0.02, y - h * 0.16);
+    ctx.lineTo(x - w * 0.05, y + h * 0.04); ctx.lineTo(x + w * 0.20, y + h * 0.37);
+    ctx.moveTo(x + w * 0.01, y - h * 0.16); ctx.lineTo(x + w * 0.27, y - h * 0.27);
+    ctx.moveTo(x - w * 0.04, y + h * 0.04); ctx.lineTo(x - w * 0.26, y + h * 0.19);
+    ctx.moveTo(x + w * 0.10, y + h * 0.23); ctx.lineTo(x + w * 0.30, y + h * 0.15);
+    ctx.stroke();
 
   // ── Cave ornament types ─────────────────────────────────────────────────────
 
@@ -307,15 +603,15 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
       var fo = offsets[fi];
       var fr = fo[2] * h;
       // Glow halo
-      ctx.globalAlpha = 0.18 * brightness;
+      ctx.globalAlpha = 0.18 * baseAlpha;
       ctx.fillStyle = fungCols[fi % fungCols.length];
       ctx.beginPath(); ctx.arc(x + fo[0], y + fo[1], fr * 2.2, 0, Math.PI * 2); ctx.fill();
       // Cap
-      ctx.globalAlpha = 0.75 * brightness;
+      ctx.globalAlpha = 0.75 * baseAlpha;
       ctx.fillStyle = fungCols[fi % fungCols.length];
       ctx.beginPath(); ctx.arc(x + fo[0], y + fo[1], fr, 0, Math.PI * 2); ctx.fill();
       // Stem
-      ctx.globalAlpha = 0.5 * brightness;
+      ctx.globalAlpha = 0.5 * baseAlpha;
       ctx.fillStyle = '#c8c0a8';
       ctx.fillRect(x + fo[0] - fr * 0.2, y + fo[1], fr * 0.4, fr * 1.3);
     }
@@ -328,13 +624,13 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
       var mx2 = x + drips[mi][0], my2 = y - h * 0.3 + drips[mi][1];
       var dripH = h * (0.3 + mi * 0.07);
       var dripW = Math.max(1, Math.floor(w * 0.04));
-      ctx.fillStyle = mossGreen; ctx.globalAlpha = 0.7 * brightness;
+      ctx.fillStyle = mossGreen; ctx.globalAlpha = 0.7 * baseAlpha;
       ctx.fillRect(mx2 - dripW * 0.5, my2, dripW, dripH);
       // Drip bulb at bottom
       ctx.beginPath(); ctx.arc(mx2, my2 + dripH, dripW * 0.8, 0, Math.PI * 2); ctx.fill();
     }
     // Moss patch — irregular cluster near base of drips
-    ctx.globalAlpha = 0.55 * brightness;
+    ctx.globalAlpha = 0.55 * baseAlpha;
     ctx.fillStyle = rgbQ(Math.floor(30 * brightness), Math.floor(70 * brightness), Math.floor(20 * brightness));
     ctx.beginPath(); ctx.ellipse(x, y + h * 0.1, w * 0.45, h * 0.18, 0, 0, Math.PI * 2); ctx.fill();
 
@@ -343,14 +639,14 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
     var stoneColor = rgbQ(Math.floor(70 * brightness), Math.floor(60 * brightness), Math.floor(50 * brightness));
     var tipY = y - h * 0.35;   // anchor near top of wall
     // Main spike
-    ctx.fillStyle = stoneColor; ctx.globalAlpha = 0.85 * brightness;
+    ctx.fillStyle = stoneColor; ctx.globalAlpha = 0.85 * baseAlpha;
     ctx.beginPath();
     ctx.moveTo(x - w * 0.18, tipY);
     ctx.lineTo(x + w * 0.18, tipY);
     ctx.lineTo(x, tipY + h * 0.45);
     ctx.closePath(); ctx.fill();
     // Secondary smaller spike offset
-    ctx.globalAlpha = 0.65 * brightness;
+    ctx.globalAlpha = 0.65 * baseAlpha;
     ctx.beginPath();
     ctx.moveTo(x + w * 0.22, tipY + h * 0.04);
     ctx.lineTo(x + w * 0.42, tipY + h * 0.04);
@@ -370,7 +666,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
     for (var ii2 = 0; ii2 < iceOff.length; ii2++) {
       var io = iceOff[ii2];
       var spikeH = h * (0.25 + ii2 * 0.08);
-      ctx.fillStyle = iceCols[ii2 % iceCols.length]; ctx.globalAlpha = 0.7 * brightness;
+      ctx.fillStyle = iceCols[ii2 % iceCols.length]; ctx.globalAlpha = 0.7 * baseAlpha;
       ctx.beginPath();
       ctx.moveTo(x + io[0] - w*0.04, y - h*0.3 + io[1]);
       ctx.lineTo(x + io[0] + w*0.04, y - h*0.3 + io[1]);
@@ -383,7 +679,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
 
   } else if (type === 'frost_crystal') {
     // Hexagonal frost crystal on wall surface
-    ctx.globalAlpha = 0.6 * brightness;
+    ctx.globalAlpha = 0.6 * baseAlpha;
     ctx.strokeStyle = 'rgba(180,225,255,' + (0.7*brightness) + ')'; ctx.lineWidth = Math.max(1, w*0.04);
     // Draw 6-pointed star pattern
     for (var fc = 0; fc < 6; fc++) {
@@ -406,7 +702,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
     // Creeping vines on natural border walls
     var vineGreen = rgbQ(Math.floor(50*brightness), Math.floor(100*brightness), Math.floor(40*brightness));
     ctx.strokeStyle = vineGreen; ctx.lineWidth = Math.max(1, w*0.05); ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.7 * brightness;
+    ctx.globalAlpha = 0.7 * baseAlpha;
     // Main vine
     ctx.beginPath(); ctx.moveTo(x - w*0.2, y - h*0.4);
     ctx.quadraticCurveTo(x + w*0.1, y - h*0.1, x - w*0.05, y + h*0.3); ctx.stroke();
@@ -415,7 +711,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
     ctx.beginPath(); ctx.moveTo(x, y - h*0.15);
     ctx.quadraticCurveTo(x + w*0.2, y - h*0.2, x + w*0.25, y - h*0.05); ctx.stroke();
     // Small leaves
-    ctx.fillStyle = vineGreen; ctx.globalAlpha = 0.55 * brightness;
+    ctx.fillStyle = vineGreen; ctx.globalAlpha = 0.55 * baseAlpha;
     var leafPos = [[w*0.25, -h*0.05], [-w*0.05, h*0.25], [w*0.08, -h*0.3]];
     for (var lf = 0; lf < leafPos.length; lf++) {
       ctx.beginPath(); ctx.ellipse(x + leafPos[lf][0], y + leafPos[lf][1], w*0.06, w*0.04, lf*0.8, 0, Math.PI*2); ctx.fill();
@@ -423,7 +719,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
 
   } else if (type === 'carved_rune') {
     // Ancient carved symbol on stone wall
-    ctx.globalAlpha = 0.5 * brightness;
+    ctx.globalAlpha = 0.5 * baseAlpha;
     ctx.strokeStyle = 'rgba(180,160,120,' + (0.6*brightness) + ')'; ctx.lineWidth = Math.max(1, w*0.05); ctx.lineCap = 'round';
     // Random rune pattern (circle + lines)
     ctx.beginPath(); ctx.arc(x, y, h*0.15, 0, Math.PI*2); ctx.stroke();
@@ -445,7 +741,37 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
 // Draw a single floor scatter item at screen position (x, y) with perspective size.
 // All shapes are anchored at their base (ground level) so they sit ON the floor.
 function drawFloorItem(type, variant, seed, x, y, size) {
+  paintFloorItem(ctx, type, variant, seed, x, y, size);
+}
+
+var FLOOR_ITEM_CONTACT_SHADOW = Object.freeze({
+  bones:0.40, dry_bones:0.40, crate:0.52, skull:0.40, rubble:0.46,
+  crystal:0.38, stalagmite:0.34, rock_pile:0.52, desert_rock:0.48,
+  dead_shrub:0.32, rib_cage:0.48, femur:0.40, stick_bundle:0.48,
+  cracked_stone:0.50, boulder:0.62, stone_column:0.38, rock_arch:0.65,
+  rock_spire:0.42, cave_rubble_pile:0.64, icicle_cluster:0.40,
+  frozen_skull:0.42, stone_marker:0.34, barrel:0.48,
+  bookshelf_debris:0.56, iron_chain:0.46, sand_pillar:0.40,
+  mesa_boulder:0.62, tree_stump:0.48, fallen_log:0.66, mushroom:0.28
+});
+function drawFloorItemContactShadow(ctx, type, x, y, size) {
+  var width = FLOOR_ITEM_CONTACT_SHADOW[type];
+  if (!width) return;
+  var parentAlpha = Number.isFinite(ctx.globalAlpha) ? ctx.globalAlpha : 1;
   ctx.save();
+  ctx.globalAlpha = parentAlpha * 0.18;
+  ctx.fillStyle = '#000000';
+  ctx.beginPath(); ctx.ellipse(x, y + size * 0.045, size * width, size * 0.12, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+// Explicit destination lets the artwork cache/gallery reuse the original recipe
+// without swapping the game's global context or duplicating drawing commands.
+function paintFloorItem(ctx, type, variant, seed, x, y, size) {
+  ctx.save();
+  // Preserve the caller's fog, spawn fade and lighting. The old recipes set
+  // absolute alpha values, making distant clutter pop back to near opacity.
+  var parentAlpha = Number.isFinite(ctx.globalAlpha) ? ctx.globalAlpha : 1;
   var s = size;
   var s2 = s * 0.5, s4 = s * 0.25, s8 = s * 0.125;
   // Use seed for per-item sub-randomness without calling Math.random()
@@ -454,72 +780,74 @@ function drawFloorItem(type, variant, seed, x, y, size) {
   var r2 = (seed * 19.1 + 0.6) % 1.0;
 
   if (type === 'bones' || type === 'dry_bones') {
-    var boneCol = (type === 'dry_bones') ? '#c8b870' : '#c8c8c8';
+    var boneCol = (type === 'dry_bones') ? GAME_MATERIALS.bone.hex.dry : GAME_MATERIALS.bone.hex.base;
     ctx.strokeStyle = boneCol; ctx.lineWidth = Math.max(1, s * 0.12); ctx.lineCap = 'round';
     var angles = [r0 * Math.PI, (r0 + 0.4) * Math.PI, (r1 + 0.7) * Math.PI];
     for (var bi = 0; bi < (variant === 0 ? 2 : 3); bi++) {
       var ba = angles[bi]; var bl = s * (0.5 + r1 * 0.3);
-      ctx.globalAlpha = 0.85;
+      ctx.globalAlpha = parentAlpha * 0.85;
       ctx.beginPath(); ctx.moveTo(x + Math.cos(ba)*bl, y + Math.sin(ba)*bl*0.45);
       ctx.lineTo(x - Math.cos(ba)*bl, y - Math.sin(ba)*bl*0.45); ctx.stroke();
       // endpoint knuckle dots
-      ctx.fillStyle = boneCol; ctx.globalAlpha = 0.9;
+      ctx.fillStyle = boneCol; ctx.globalAlpha = parentAlpha * 0.9;
       ctx.beginPath(); ctx.arc(x + Math.cos(ba)*bl, y + Math.sin(ba)*bl*0.45, s*0.10, 0, Math.PI*2); ctx.fill();
       ctx.beginPath(); ctx.arc(x - Math.cos(ba)*bl, y - Math.sin(ba)*bl*0.45, s*0.10, 0, Math.PI*2); ctx.fill();
     }
 
   } else if (type === 'crate') {
-    ctx.globalAlpha = 0.9;
-    ctx.fillStyle = '#8b5a2b'; ctx.fillRect(x - s2, y - s2, s, s);
-    ctx.fillStyle = '#6b3a1b'; ctx.fillRect(x - s2, y - s8, s, Math.max(1, s*0.15));
+    var woodColors = GAME_MATERIALS.crateWood.hex;
+    ctx.globalAlpha = parentAlpha * 0.9;
+    ctx.fillStyle = woodColors.base; ctx.fillRect(x - s2, y - s2, s, s);
+    ctx.fillStyle = woodColors.bracing; ctx.fillRect(x - s2, y - s8, s, Math.max(1, s*0.15));
     ctx.fillRect(x - s8, y - s2, Math.max(1, s*0.15), s);
     if (variant === 2) { // broken corner
       ctx.clearRect(x + s2 - s*0.3, y - s2, s*0.32, s*0.32);
-      ctx.fillStyle = '#3a1a08'; ctx.fillRect(x + s2 - s*0.3, y - s2, s*0.32, s*0.32);
+      ctx.fillStyle = woodColors.interior; ctx.fillRect(x + s2 - s*0.3, y - s2, s*0.32, s*0.32);
     }
-    ctx.strokeStyle = '#4a2808'; ctx.lineWidth = 1; ctx.globalAlpha = 0.7;
+    ctx.strokeStyle = woodColors.outline; ctx.lineWidth = 1; ctx.globalAlpha = parentAlpha * 0.7;
     ctx.strokeRect(x - s2, y - s2, s, s);
 
   } else if (type === 'skull') {
-    ctx.globalAlpha = 0.92;
+    var boneColors = GAME_MATERIALS.bone.hex;
+    ctx.globalAlpha = parentAlpha * 0.92;
     // Dark outline for contrast
-    ctx.fillStyle = '#2a2018';
+    ctx.fillStyle = boneColors.outline;
     ctx.beginPath(); ctx.ellipse(x, y - s*0.14, s*0.42, s*0.36, 0, 0, Math.PI*2); ctx.fill();
     // Cranium
-    ctx.fillStyle = '#e8e0c8';
+    ctx.fillStyle = boneColors.lit;
     ctx.beginPath(); ctx.ellipse(x, y - s*0.15, s*0.38, s*0.32, 0, 0, Math.PI*2); ctx.fill();
     // Jaw
-    ctx.fillStyle = '#d0c8b0';
+    ctx.fillStyle = boneColors.shadow;
     ctx.beginPath(); ctx.ellipse(x, y + s*0.12, s*0.28, s*0.18, 0, 0, Math.PI); ctx.fill();
     // Eye sockets — larger and darker
-    ctx.fillStyle = '#000000'; ctx.globalAlpha = 0.9;
+    ctx.fillStyle = boneColors.cavity; ctx.globalAlpha = parentAlpha * 0.9;
     ctx.beginPath(); ctx.ellipse(x - s*0.14, y - s*0.18, s*0.12, s*0.13, 0, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.ellipse(x + s*0.14, y - s*0.18, s*0.12, s*0.13, 0, 0, Math.PI*2); ctx.fill();
     // Nose hole
     ctx.beginPath(); ctx.ellipse(x, y - s*0.02, s*0.05, s*0.07, 0, 0, Math.PI*2); ctx.fill();
     // Teeth
-    ctx.fillStyle = '#e8e0c8'; ctx.globalAlpha = 0.9;
+    ctx.fillStyle = boneColors.lit; ctx.globalAlpha = parentAlpha * 0.9;
     for (var ti = 0; ti < 4; ti++) {
       ctx.fillRect(x - s*0.16 + ti*s*0.1, y + s*0.03, Math.max(1,s*0.07), Math.max(1,s*0.10));
     }
     // Tooth gaps
-    ctx.fillStyle = '#1a1008'; ctx.globalAlpha = 0.7;
+    ctx.fillStyle = boneColors.gap; ctx.globalAlpha = parentAlpha * 0.7;
     for (var tg = 0; tg < 3; tg++) {
       ctx.fillRect(x - s*0.06 + tg*s*0.1, y + s*0.03, Math.max(1,s*0.02), Math.max(1,s*0.10));
     }
 
   } else if (type === 'rubble') {
-    var rubCols = ['#787060','#686058','#888070','#504840'];
+    var rubCols = GAME_MATERIALS.rubbleStone.swatches;
     for (var ri = 0; ri < 5; ri++) {
       var rox = (((ri*7+3)*seed*11)%1.0 - 0.5) * s * 0.9;
       var roy = (((ri*5+1)*seed*17)%1.0 - 0.5) * s * 0.5;
       var rr = s * (0.12 + ((ri*3+seed*7)%1.0) * 0.15);
-      ctx.fillStyle = rubCols[ri % rubCols.length]; ctx.globalAlpha = 0.8;
+      ctx.fillStyle = rubCols[ri % rubCols.length]; ctx.globalAlpha = parentAlpha * 0.8;
       ctx.beginPath(); ctx.ellipse(x+rox, y+roy, rr*1.3, rr*0.7, r0*Math.PI, 0, Math.PI*2); ctx.fill();
     }
 
   } else if (type === 'ice_shard') {
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = parentAlpha * 0.75;
     var shardCols = ['rgba(140,200,255,0.7)','rgba(180,230,255,0.6)','rgba(100,170,240,0.65)'];
     for (var ii = 0; ii < (variant === 0 ? 2 : 3); ii++) {
       var iox = (ii - 1) * s * 0.35; var ih = s * (0.7 + ii * 0.2);
@@ -533,7 +861,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
     }
 
   } else if (type === 'frozen_pool') {
-    ctx.globalAlpha = 0.55;
+    ctx.globalAlpha = parentAlpha * 0.55;
     ctx.fillStyle = 'rgba(100,160,255,0.45)';
     ctx.beginPath(); ctx.ellipse(x, y, s*0.7, s*0.3, 0, 0, Math.PI*2); ctx.fill();
     ctx.strokeStyle = 'rgba(200,230,255,0.6)'; ctx.lineWidth = 1;
@@ -547,13 +875,13 @@ function drawFloorItem(type, variant, seed, x, y, size) {
       ? ['#c8a000','#ffe066','#e8b800'] : ['#00c8a8','#00eedd','#60d8c8'];
     for (var ki = 0; ki < (variant === 0 ? 2 : 3); ki++) {
       var kox = (ki - 1) * s * 0.3; var kh = s * (0.6 + ki * 0.25);
-      ctx.globalAlpha = 0.85; ctx.fillStyle = crystColors[ki % crystColors.length];
+      ctx.globalAlpha = parentAlpha * 0.85; ctx.fillStyle = crystColors[ki % crystColors.length];
       ctx.beginPath();
       ctx.moveTo(x+kox-s*0.09, y - s*0.05);
       ctx.lineTo(x+kox+s*0.09, y - s*0.05);
       ctx.lineTo(x+kox, y - kh); ctx.closePath(); ctx.fill();
       // bright inner core
-      ctx.globalAlpha = 0.55; ctx.fillStyle = '#ffffff';
+      ctx.globalAlpha = parentAlpha * 0.55; ctx.fillStyle = '#ffffff';
       ctx.beginPath();
       ctx.moveTo(x+kox-s*0.03, y - kh*0.4);
       ctx.lineTo(x+kox+s*0.03, y - kh*0.4);
@@ -561,7 +889,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
     }
 
   } else if (type === 'stalagmite') {
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var stCol = '#6a5848';
     ctx.fillStyle = stCol;
     var sw = s * (0.12 + r0 * 0.08); var sh = s * (0.9 + r1 * 0.5);
@@ -574,32 +902,32 @@ function drawFloorItem(type, variant, seed, x, y, size) {
     ctx.beginPath(); ctx.moveTo(x - sw*0.2, y); ctx.lineTo(x - sw*0.1, y - sh*0.8); ctx.stroke();
 
   } else if (type === 'rock_pile') {
-    var rpCols = ['#787060','#686058','#888070'];
+    var rpCols = GAME_MATERIALS.rubbleStone.swatches;
     for (var rpi = 0; rpi < 3; rpi++) {
       var rpox = (rpi-1) * s*0.3 + (r0-0.5)*s*0.15;
       var rpoy = (r1-0.5)*s*0.2;
       var rpr = s*(0.22 + rpi*0.04);
-      ctx.globalAlpha = 0.8; ctx.fillStyle = rpCols[rpi];
+      ctx.globalAlpha = parentAlpha * 0.8; ctx.fillStyle = rpCols[rpi];
       ctx.beginPath(); ctx.ellipse(x+rpox, y+rpoy, rpr*1.2, rpr*0.75, r2*Math.PI, 0, Math.PI*2); ctx.fill();
     }
 
   } else if (type === 'puddle') {
-    ctx.globalAlpha = 0.65;
+    ctx.globalAlpha = parentAlpha * 0.65;
     ctx.fillStyle = 'rgba(15,22,35,0.75)';
     ctx.beginPath(); ctx.ellipse(x, y, s*0.65, s*0.28, 0, 0, Math.PI*2); ctx.fill();
     ctx.strokeStyle = 'rgba(60,80,100,0.5)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.ellipse(x - s*0.1, y - s*0.06, s*0.2, s*0.07, -0.4, 0, Math.PI); ctx.stroke();
 
   } else if (type === 'desert_rock') {
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     ctx.fillStyle = '#b8905a';
     ctx.beginPath(); ctx.ellipse(x, y - s*0.15, s*(0.38+r0*0.15), s*(0.25+r1*0.1), r2*0.5, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = '#d0a870'; ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#d0a870'; ctx.globalAlpha = parentAlpha * 0.6;
     ctx.beginPath(); ctx.ellipse(x - s*0.08, y - s*0.22, s*0.15, s*0.08, -0.5, 0, Math.PI*2); ctx.fill();
 
   } else if (type === 'dead_shrub') {
-    ctx.strokeStyle = '#6a4820'; ctx.lineWidth = Math.max(1, s*0.09); ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.78;
+    ctx.strokeStyle = GAME_MATERIALS.floorFoliage.hex.dry; ctx.lineWidth = Math.max(1, s*0.09); ctx.lineCap = 'round';
+    ctx.globalAlpha = parentAlpha * 0.78;
     ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + (r0-0.5)*s*0.2, y - s*0.65); ctx.stroke();
     var branches = [[0.4, -0.4, 0.5, 0.3],[-0.35, -0.45, -0.55, 0.25],[0.15, -0.6, 0.45, 0.2]];
     for (var bri = 0; bri < 3; bri++) {
@@ -611,8 +939,8 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'rib_cage') {
     // Curved rib bones arching from a central spine
-    ctx.strokeStyle = '#c0b8a0'; ctx.lineWidth = Math.max(1, s*0.08); ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.82;
+    ctx.strokeStyle = GAME_MATERIALS.bone.hex.aged; ctx.lineWidth = Math.max(1, s*0.08); ctx.lineCap = 'round';
+    ctx.globalAlpha = parentAlpha * 0.82;
     // Spine
     ctx.beginPath(); ctx.moveTo(x - s*0.35, y); ctx.lineTo(x + s*0.35, y); ctx.stroke();
     // Ribs curving upward
@@ -632,9 +960,9 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'femur') {
     // Single large bone with bulbous ends
-    var boneCol2 = '#d0c8b0';
+    var boneCol2 = GAME_MATERIALS.bone.hex.shadow;
     ctx.strokeStyle = boneCol2; ctx.lineWidth = Math.max(2, s*0.14); ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     var fAng = r0 * Math.PI;
     var fLen = s * 0.6;
     var fx1 = x + Math.cos(fAng)*fLen, fy1 = y + Math.sin(fAng)*fLen*0.4;
@@ -645,15 +973,15 @@ function drawFloorItem(type, variant, seed, x, y, size) {
     ctx.beginPath(); ctx.arc(fx1, fy1, s*0.14, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.arc(fx2, fy2, s*0.14, 0, Math.PI*2); ctx.fill();
     // Smaller knob bumps
-    ctx.fillStyle = '#b8b098'; ctx.globalAlpha = 0.7;
+    ctx.fillStyle = GAME_MATERIALS.bone.hex.knuckle; ctx.globalAlpha = parentAlpha * 0.7;
     ctx.beginPath(); ctx.arc(fx1 + Math.cos(fAng+0.8)*s*0.08, fy1 + Math.sin(fAng+0.8)*s*0.05, s*0.07, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.arc(fx2 - Math.cos(fAng-0.8)*s*0.08, fy2 - Math.sin(fAng-0.8)*s*0.05, s*0.07, 0, Math.PI*2); ctx.fill();
 
   } else if (type === 'stick_bundle') {
     // 3-5 sticks scattered loosely (50% larger than base size)
     var ss = s * 1.5;
-    ctx.lineCap = 'round'; ctx.globalAlpha = 0.78;
-    var stickCols = ['#5a3e1e','#6b4a28','#4d3218','#7a5a38'];
+    ctx.lineCap = 'round'; ctx.globalAlpha = parentAlpha * 0.78;
+    var stickCols = GAME_MATERIALS.floorPropWood.swatches;
     var nSticks = 3 + Math.floor(r0 * 3);
     for (var sti = 0; sti < nSticks; sti++) {
       var stAng = (r0 + sti * 0.7 + r1 * 0.3) * Math.PI;
@@ -670,7 +998,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'flat_rock') {
     // Large flat rounded stone
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = parentAlpha * 0.8;
     var frCol = terrain === 'cave' ? '#58504a' : (terrain === 'ice' ? '#8a98a8' : '#9a8a6a');
     ctx.fillStyle = frCol;
     ctx.beginPath();
@@ -690,7 +1018,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'cracked_stone') {
     // Angular broken stone slab with crack lines
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var csCol = terrain === 'cave' ? '#504848' : '#8a7860';
     ctx.fillStyle = csCol;
     // Irregular angular shape
@@ -724,7 +1052,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'boulder') {
     // Large rounded boulder with highlight and shadow
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     var bldR = s * (0.4 + r0 * 0.15);
     ctx.fillStyle = '#5a5550';
     ctx.beginPath(); ctx.ellipse(x, y, bldR * 1.1, bldR * 0.7, r2 * 0.5, 0, Math.PI * 2); ctx.fill();
@@ -742,7 +1070,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'stone_column') {
     // Broken stone column / pillar remnant rising from cave floor
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var colW = s * (0.14 + r0 * 0.06);
     var colH = s * (0.8 + r1 * 0.6);
     ctx.fillStyle = '#605850';
@@ -774,7 +1102,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'rock_arch') {
     // Small natural rock arch / bridge formation
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = parentAlpha * 0.8;
     var archW = s * 0.55;
     var archH = s * (0.5 + r0 * 0.3);
     ctx.fillStyle = '#585048';
@@ -798,7 +1126,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'rock_spire') {
     // Tall thin rock spire / stalagmite cluster
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = parentAlpha * 0.8;
     var spireCount = 2 + Math.floor(r0 * 2);
     var spCols = ['#5a5248','#685e52','#4e4840'];
     for (var spi = 0; spi < spireCount; spi++) {
@@ -819,7 +1147,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'cave_rubble_pile') {
     // Large mound of cave debris — stacked irregular rocks
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var pCols = ['#504a44','#5e5650','#686058','#3e3a36'];
     // Base mound shape
     ctx.fillStyle = '#504a44';
@@ -842,7 +1170,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'icicle_cluster') {
     // Cluster of icicles hanging down (drawn pointing up from floor perspective)
-    ctx.globalAlpha = 0.7;
+    ctx.globalAlpha = parentAlpha * 0.7;
     var icCols = ['rgba(160,210,255,0.7)','rgba(130,190,240,0.65)','rgba(180,225,255,0.6)'];
     var nIc = 3 + Math.floor(r0 * 2);
     for (var ici = 0; ici < nIc; ici++) {
@@ -860,7 +1188,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'frost_patch') {
     // Frosted ground patch with crystal patterns
-    ctx.globalAlpha = 0.4;
+    ctx.globalAlpha = parentAlpha * 0.4;
     ctx.fillStyle = 'rgba(180,220,255,0.35)';
     ctx.beginPath(); ctx.ellipse(x, y, s*0.6, s*0.25, r0*0.5, 0, Math.PI*2); ctx.fill();
     // Frost crystal lines
@@ -874,21 +1202,21 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'frozen_skull') {
     // Skull encased in ice
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = parentAlpha * 0.75;
     // Ice casing
     ctx.fillStyle = 'rgba(140,200,255,0.3)';
     ctx.beginPath(); ctx.ellipse(x, y - s*0.1, s*0.45, s*0.38, 0, 0, Math.PI*2); ctx.fill();
     // Skull inside
     ctx.fillStyle = '#b8b0a0';
     ctx.beginPath(); ctx.ellipse(x, y - s*0.12, s*0.3, s*0.25, 0, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = '#1a1008'; ctx.globalAlpha = 0.7;
+    ctx.fillStyle = '#1a1008'; ctx.globalAlpha = parentAlpha * 0.7;
     ctx.beginPath(); ctx.arc(x - s*0.1, y - s*0.15, s*0.06, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.arc(x + s*0.1, y - s*0.15, s*0.06, 0, Math.PI*2); ctx.fill();
 
   } else if (type === 'tall_grass') {
     // Tuft of tall grass blades
-    ctx.globalAlpha = 0.7;
-    var grassCols = ['#5a7a3a','#4a6830','#6a8a48','#3e5828'];
+    ctx.globalAlpha = parentAlpha * 0.7;
+    var grassCols = GAME_MATERIALS.floorFoliage.swatches;
     var nBlades = 4 + Math.floor(r0 * 3);
     for (var tgi = 0; tgi < nBlades; tgi++) {
       var gAng = (tgi / nBlades - 0.5) * 1.2 + (r1 - 0.5) * 0.3;
@@ -902,7 +1230,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'wildflower') {
     // Small wildflower cluster
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = parentAlpha * 0.75;
     // Stems
     ctx.strokeStyle = '#4a6830'; ctx.lineWidth = Math.max(1, s*0.04);
     var flCols = ['#d84040','#d8a030','#c060c0','#4080d0'];
@@ -920,7 +1248,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'stone_marker') {
     // Standing stone / menhir
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var mkW = s * 0.12; var mkH = s * (0.6 + r0 * 0.4);
     ctx.fillStyle = '#707868';
     ctx.beginPath();
@@ -937,11 +1265,11 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'barrel') {
     // Wooden barrel
-    ctx.globalAlpha = 0.85;
-    ctx.fillStyle = '#7a5230';
+    ctx.globalAlpha = parentAlpha * 0.85;
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.base;
     ctx.beginPath(); ctx.ellipse(x, y - s*0.15, s*0.28, s*0.35, 0, 0, Math.PI*2); ctx.fill();
     // Metal bands
-    ctx.strokeStyle = '#555'; ctx.lineWidth = Math.max(1, s*0.06);
+    ctx.strokeStyle = GAME_MATERIALS.floorPropIron.hex.base; ctx.lineWidth = Math.max(1, s*0.06);
     ctx.beginPath(); ctx.ellipse(x, y - s*0.35, s*0.24, s*0.06, 0, 0, Math.PI*2); ctx.stroke();
     ctx.beginPath(); ctx.ellipse(x, y + s*0.05, s*0.24, s*0.06, 0, 0, Math.PI*2); ctx.stroke();
     // Wood grain
@@ -951,11 +1279,11 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'bookshelf_debris') {
     // Broken bookshelf / scattered books
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     // Broken shelf plank — thicker, with wood grain
-    ctx.fillStyle = '#5a3e20';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.shadow;
     ctx.fillRect(x - s*0.45, y + s*0.05, s*0.9, s*0.12);
-    ctx.fillStyle = '#4a3018';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.deep;
     ctx.fillRect(x - s*0.45, y + s*0.13, s*0.9, s*0.04);
     // Scattered books — thicker with visible page edges
     var bookCols = ['#8b2020','#1a4a6a','#2a5a2a','#6a4a20','#5a1a5a'];
@@ -979,8 +1307,8 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'iron_chain') {
     // Coiled chain on the ground
-    ctx.globalAlpha = 0.7;
-    ctx.strokeStyle = '#707878'; ctx.lineWidth = Math.max(2, s*0.08); ctx.lineCap = 'round';
+    ctx.globalAlpha = parentAlpha * 0.7;
+    ctx.strokeStyle = GAME_MATERIALS.floorPropIron.hex.base; ctx.lineWidth = Math.max(2, s*0.08); ctx.lineCap = 'round';
     // Loose coil
     ctx.beginPath();
     ctx.arc(x, y, s*0.25, 0, Math.PI*1.5); ctx.stroke();
@@ -995,7 +1323,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'sand_pillar') {
     // Weathered sandstone column — desert/expanse only
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var spW = s * (0.16 + r0 * 0.06);
     var spH = s * (0.75 + r1 * 0.5);
     // Main body — tapers upward, warm sandstone
@@ -1025,7 +1353,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'mesa_boulder') {
     // Wide flat-topped layered rock — plains biome
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     var mbW = s * (0.45 + r0 * 0.15);
     var mbH = s * (0.3 + r1 * 0.15);
     // Bottom layer — widest
@@ -1052,36 +1380,36 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'tree_stump') {
     // Dead tree stump — ground biome
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = parentAlpha * 0.8;
     var tsW = s * (0.2 + r0 * 0.08);
     var tsH = s * (0.2 + r1 * 0.1);
     // Trunk
-    ctx.fillStyle = '#5a4030';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.shadow;
     ctx.beginPath();
     ctx.moveTo(x - tsW, y); ctx.lineTo(x + tsW, y);
     ctx.lineTo(x + tsW * 0.85, y - tsH); ctx.lineTo(x - tsW * 0.85, y - tsH);
     ctx.closePath(); ctx.fill();
     // Top face (oval with rings)
-    ctx.fillStyle = '#7a6050';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.cut;
     ctx.beginPath(); ctx.ellipse(x, y - tsH, tsW * 0.85, tsW * 0.4, 0, 0, Math.PI * 2); ctx.fill();
     // Growth rings
     ctx.strokeStyle = 'rgba(40,25,15,0.4)'; ctx.lineWidth = Math.max(1, s * 0.02);
     ctx.beginPath(); ctx.ellipse(x, y - tsH, tsW * 0.5, tsW * 0.25, 0, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.ellipse(x, y - tsH, tsW * 0.25, tsW * 0.12, 0, 0, Math.PI * 2); ctx.stroke();
     // Root tendrils
-    ctx.strokeStyle = '#4a3020'; ctx.lineWidth = Math.max(1, s * 0.04); ctx.lineCap = 'round';
+    ctx.strokeStyle = GAME_MATERIALS.floorPropWood.hex.deep; ctx.lineWidth = Math.max(1, s * 0.04); ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(x - tsW, y); ctx.lineTo(x - tsW * 1.4, y + s * 0.05); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x + tsW, y); ctx.lineTo(x + tsW * 1.3, y + s * 0.07); ctx.stroke();
 
   } else if (type === 'fallen_log') {
     // Horizontal log on ground — ground biome
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = parentAlpha * 0.75;
     var flW = s * (0.5 + r0 * 0.2);
     var flH = s * (0.12 + r1 * 0.04);
     var flAng = (r0 - 0.5) * 0.6; // slight angle
     ctx.save(); ctx.translate(x, y); ctx.rotate(flAng);
     // Main trunk
-    ctx.fillStyle = '#5a4535';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.shadow;
     ctx.beginPath();
     ctx.ellipse(0, 0, flW, flH, 0, 0, Math.PI * 2); ctx.fill();
     // Bark texture lines
@@ -1091,7 +1419,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
       ctx.beginPath(); ctx.moveTo(bx, -flH * 0.8); ctx.lineTo(bx, flH * 0.8); ctx.stroke();
     }
     // End cross-section (circle)
-    ctx.fillStyle = '#7a6555';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.cut;
     ctx.beginPath(); ctx.ellipse(flW * 0.9, 0, flH * 1.1, flH * 1.1, 0, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = 'rgba(40,25,15,0.4)'; ctx.lineWidth = Math.max(1, s * 0.015);
     ctx.beginPath(); ctx.ellipse(flW * 0.9, 0, flH * 0.5, flH * 0.5, 0, 0, Math.PI * 2); ctx.stroke();
@@ -1099,7 +1427,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'mushroom') {
     // Cluster of small mushrooms
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     var mshCols = ['#8b3020','#a04030','#7a2818'];
     var nMsh = 2 + Math.floor(r0 * 2);
     for (var mi = 0; mi < nMsh; mi++) {
@@ -1120,8 +1448,8 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'fern') {
     // Green fronds radiating from center
-    ctx.globalAlpha = 0.7;
-    var fernCols = ['#3a6a28','#4a7a38','#2e5a20'];
+    ctx.globalAlpha = parentAlpha * 0.7;
+    var fernCols = GAME_MATERIALS.floorFoliage.swatches;
     var nFronds = 5 + Math.floor(r0 * 3);
     ctx.lineCap = 'round';
     for (var fi2 = 0; fi2 < nFronds; fi2++) {
@@ -1146,7 +1474,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'leaf_pile') {
     // Heap of autumn-colored leaves
-    ctx.globalAlpha = 0.7;
+    ctx.globalAlpha = parentAlpha * 0.7;
     var leafCols = ['#8a4a1a','#aa6a20','#6a3a10','#c88030','#9a5518','#7a4420'];
     var nLeaves = 7 + Math.floor(r0 * 4);
     for (var li = 0; li < nLeaves; li++) {
@@ -1160,7 +1488,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'moss_patch') {
     // Green ground covering
-    ctx.globalAlpha = 0.4;
+    ctx.globalAlpha = parentAlpha * 0.4;
     ctx.fillStyle = 'rgba(60,120,40,0.35)';
     ctx.beginPath(); ctx.ellipse(x, y, s*0.55, s*0.22, r0*0.5, 0, Math.PI*2); ctx.fill();
     // Dot texture
@@ -1179,6 +1507,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
 // Perspective-projects all floorScatter items and draws them with drawFloorItem().
 function drawFloorScatter3D() {
+  beginFloorArtworkFrame();
   var _fsMaxDist = viewDist * 0.75;
   // A doorway can reveal either stratum from either camera position. The
   // actual terrain/ceiling depth clips scatter; camera state never hides it.
@@ -1199,7 +1528,8 @@ function drawFloorScatter3D() {
       // Apply night darkness
       var _floorItemLight = (ambientLight < 0.85) ? (0.3 + ambientLight * 0.7) : 1.0;
       ctx.save(); ctx.globalAlpha = Math.max(0, fogAlpha) * _floorItemLight;
-      drawFloorItem(item.type, item.variant, item.seed, vis.sx, vis.sy, size);
+      drawFloorItemContactShadow(ctx, item.type, vis.sx, vis.sy, size);
+      drawFloorArtwork(ctx, item.type, item.variant, item.seed, vis.sx, vis.sy, size);
       ctx.restore();
     });
 }
@@ -1787,7 +2117,7 @@ function drawWallDecorations() {
       {x:renderX-size*2,y:decorY+size*3,depth:fwd}
     ];
     withSceneDepthClip(depthPoly, function() {
-      drawWallAlignedDecoration(dec.type, renderX, decorY, size, dist, dec.side, viewAngle, _dFade);
+      drawWallAlignedDecoration(dec.type, renderX, decorY, size, dist, dec.side, viewAngle, _dFade, dec, now);
     }, {depthBias:1.5});
   }
   if (shouldLog) {

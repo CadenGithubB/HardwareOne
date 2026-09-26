@@ -181,6 +181,76 @@ function getFloorStitchTile(mesh, cache, ci, li, role, z, ceiling) {
   return tile;
 }
 
+// Signed vertical distance from the eye to the triangle's actual plane.
+// Comparing only corner heights is not back-face culling: an uphill bank can
+// face an eye below every corner, while a downhill back face can face away
+// from an eye above them. Test each triangle because a cell need not be planar.
+// Heights here are already render-world units, matching cameraZ/projection.
+function getTerrainTriangleEyeSide(a, b, c, eyeX, eyeY, eyeZ) {
+  var ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+  var vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+  var nz = ux * vy - uy * vx;
+  if (!nz) return NaN;
+  return eyeZ - a.z + ((uy * vz - uz * vy) * (eyeX - a.x) +
+    (uz * vx - ux * vz) * (eyeY - a.y)) / nz;
+}
+
+// Same endpoint closure as the wall pass, in mesh-height units. This is a
+// static layer lookup, not a camera or player-stratum visibility decision.
+function floorWallAOCeilingAt(wx, wy, topH) {
+  if (deepCaveRegions.length > 0) {
+    var region = isInDeepCave(wx, wy);
+    if (region && region.ceilZ > 0) {
+      var depth = region.depth || 1.0;
+      return Math.max(topH, topH + (region.ceilZ / 25 - topH) * Math.min(1, depth * depth * 2.5));
+    }
+  }
+  var mesh = floorMesh;
+  if (!mesh || !mesh.layerCount) return topH;
+  var mx = Math.floor(wx / mesh.gridSize), my = Math.floor(wy / mesh.gridSize);
+  if (mx < 0 || my < 0 || mx >= mesh.w || my >= mesh.h) return topH;
+  var mi = my * mesh.w + mx, ceiling = Infinity;
+  for (var li = 0; li < mesh.layerCount[mi]; li++) {
+    if (meshLayerType(mesh, mi, li) === 2) ceiling = Math.min(ceiling, meshLayerHeight(mesh, mi, li));
+  }
+  return ceiling < Infinity ? Math.max(topH, ceiling) : topH;
+}
+
+// Contact AO belongs to the floor edge beside the actual wall span. A 2D
+// occupancy bit alone also describes buried cave walls, which must not draw
+// a dark map of the cave through the grass above. Face indices match the wall
+// renderer (W/E/N/S); edge heights run top-to-bottom or left-to-right.
+function floorWallOccludesAO(gx, gy, face, edgeZ1, edgeZ2) {
+  if (!grid || gx < 0 || gy < 0 || gx >= gridW || gy >= gridH) return false;
+  var wi = gy * gridW + gx;
+  if (!grid[wi]) return false;
+  var edgeMin = Math.min(edgeZ1, edgeZ2), edgeMax = Math.max(edgeZ1, edgeZ2);
+  var limit = wallMaxTopZ ? wallMaxTopZ[wi] : Infinity;
+  var x1 = (gx + (face === 1 ? 1 : 0)) * cell;
+  var y1 = (gy + (face === 3 ? 1 : 0)) * cell;
+  var x2 = x1 + (face >= 2 ? cell : 0), y2 = y1 + (face < 2 ? cell : 0);
+  // Buried walls usually reject using just the stored roof bound and its two
+  // ceiling endpoints, without a floor-height query. A sloped closure can
+  // still rise past that bound, so the bound alone is not an occluder test.
+  if (limit <= edgeMin + 0.001 &&
+      floorWallAOCeilingAt(x1, y1, limit) <= edgeZ1 + 0.001 &&
+      floorWallAOCeilingAt(x2, y2, limit) <= edgeZ2 + 0.001) return false;
+  var floorH = floorMesh ? getFloorHeightAt((gx + 0.5) * cell, (gy + 0.5) * cell) : 0;
+  var topH = Math.min(floorH + (CANVAS_BASE_H / 25) * (wallHeights ? wallHeights[wi] : 1), limit);
+  var baseH = (wallFaceBase ? wallFaceBase[wi * 4 + face] : floorH) - 0.15;
+  if (baseH > edgeMax + 0.001) return false;
+  if (topH > edgeMin + 0.001 && topH > baseH) return true;
+  var top1 = floorWallAOCeilingAt(x1, y1, topH);
+  var top2 = floorWallAOCeilingAt(x2, y2, topH);
+  // Clip the floor-edge interval to the wall base, then test the two ends of
+  // that interval. Linear roof/floor edges cannot cross elsewhere unnoticed.
+  var t1 = 0, t2 = 1, dz = edgeZ2 - edgeZ1;
+  if (edgeZ1 < baseH && dz > 0) t1 = (baseH - edgeZ1) / dz;
+  if (edgeZ2 < baseH && dz < 0) t2 = (baseH - edgeZ1) / dz;
+  var above1 = top1 - edgeZ1, aboveDelta = top2 - edgeZ2 - above1;
+  return above1 + aboveDelta * t1 > 0.001 || above1 + aboveDelta * t2 > 0.001;
+}
+
 function drawLayersFloor3D() {
   if (!floorMesh || !floorMesh.layerCount) return;
   var C = getCam3D();
@@ -345,22 +415,22 @@ function drawLayersFloor3D() {
         else if (_z3 < _z0 - _tol) _z3 = _z0 - _tol;
         __caveStats.floorBlendRange++;
 
-        // Top faces are visible only from above their plane. This one spatial
-        // rule hides the grass/cap above an interior camera while preserving
-        // the cave floor and the real approach outside; no fixed mouth-sized
-        // rectangle or playerUnderground switch is needed.
-        var _quadMinZ = Math.min(_z0, _z1, _z2, _z3);
-        if (cameraZ < _quadMinZ * 25 - 1) continue;
-
         var wx1 = x * gs, wy1 = y * gs, wx2 = wx1 + gs, wy2 = wy1 + gs;
         var floorVertices = [
           {x:wx1,y:wy1,z:_z0*25}, {x:wx2,y:wy1,z:_z1*25},
           {x:wx2,y:wy2,z:_z3*25}, {x:wx1,y:wy2,z:_z2*25}
         ];
         // A sloped four-corner cell is not necessarily planar. Triangulate
-        // before projection so Canvas coverage and interpolated depth agree.
-        var floorPoly = projectSceneWorldPolygon([floorVertices[0], floorVertices[1], floorVertices[2]], C);
-        var floorPolyB = projectSceneWorldPolygon([floorVertices[0], floorVertices[2], floorVertices[3]], C);
+        // before both facing and projection so visible uphill banks still
+        // supply opaque depth while the exiting camera is below the surface.
+        // Flat caps retain their actual top/underside distinction; this does
+        // not draw a grass lid over the interior or switch by player stratum.
+        var floorPoly = getTerrainTriangleEyeSide(floorVertices[0], floorVertices[1], floorVertices[2],
+          cam.x, cam.y, cameraZ) >= -0.000001 ?
+          projectSceneWorldPolygon([floorVertices[0], floorVertices[1], floorVertices[2]], C) : [];
+        var floorPolyB = getTerrainTriangleEyeSide(floorVertices[0], floorVertices[2], floorVertices[3],
+          cam.x, cam.y, cameraZ) >= -0.000001 ?
+          projectSceneWorldPolygon([floorVertices[0], floorVertices[2], floorVertices[3]], C) : [];
         if (floorPoly.length < 3 && floorPolyB.length < 3) continue;
 
         // Biome color from mesh.colors[], dimmed by ambient + light grid + AO.
@@ -411,44 +481,59 @@ function drawLayersFloor3D() {
         // Light belongs to the rendered cell, not to the player's global
         // state. Covered floors fade smoothly from exterior daylight at the
         // shared portal plane to the readable cave ambient deeper inside.
-        var floorLight = _cellUnderground && typeof getCaveRenderLightAt === 'function' ?
+        var floorAmbient = _cellUnderground && typeof getCaveRenderLightAt === 'function' ?
           getCaveRenderLightAt(centerX, centerY, true) :
           (typeof renderSurfaceAmbient !== 'undefined' ? renderSurfaceAmbient : ambientLight);
-        if (_lightGrid) {
+        var floorPointLight = 0;
+        var _surfacePointLight = !_cellUnderground && typeof getSurfaceFloorLightAt === 'function' ?
+          getSurfaceFloorLightAt(mesh, idx0, li) : NaN;
+        if (Number.isFinite(_surfacePointLight)) {
+          floorPointLight = _surfacePointLight;
+        } else if (_lightGrid) {
           var flgx = Math.floor(centerX / _lightCellSize);
           var flgy = Math.floor(centerY / _lightCellSize);
           if (flgx >= 0 && flgx < _lightGridW && flgy >= 0 && flgy < _lightGridH)
-            floorLight = Math.min(1.0, floorLight + _lightGrid[flgy * _lightGridW + flgx]);
+            floorPointLight = _lightGrid[flgy * _lightGridW + flgx];
         }
-        // AO: darken quads adjacent to walls
+        // AO: only walls reaching this physical floor edge can darken it.
+        var floorAO = 1;
         if (grid) {
           var _aoGx = Math.floor(centerX / cell), _aoGy = Math.floor(centerY / cell);
           if (_aoGx >= 0 && _aoGx < gridW && _aoGy >= 0 && _aoGy < gridH) {
             var _aoN = 0;
-            if (_aoGx > 0 && grid[_aoGy * gridW + _aoGx - 1]) _aoN++;
-            if (_aoGx < gridW - 1 && grid[_aoGy * gridW + _aoGx + 1]) _aoN++;
-            if (_aoGy > 0 && grid[(_aoGy - 1) * gridW + _aoGx]) _aoN++;
-            if (_aoGy < gridH - 1 && grid[(_aoGy + 1) * gridW + _aoGx]) _aoN++;
-            if (_aoN > 0) floorLight *= (1.0 - 0.08 * _aoN);
+            if (floorWallOccludesAO(_aoGx - 1, _aoGy, 1, _z0, _z2)) _aoN++;
+            if (floorWallOccludesAO(_aoGx + 1, _aoGy, 0, _z1, _z3)) _aoN++;
+            if (floorWallOccludesAO(_aoGx, _aoGy - 1, 3, _z0, _z1)) _aoN++;
+            if (floorWallOccludesAO(_aoGx, _aoGy + 1, 2, _z2, _z3)) _aoN++;
+            if (_aoN > 0) floorAO = 1.0 - 0.08 * _aoN;
           }
         }
         var _fc = parseInt(baseCol.slice(1), 16);
-        var _fr = ((_fc >> 16) & 0xff) * floorLight;
-        var _fg = ((_fc >> 8) & 0xff) * floorLight;
-        var _fb = (_fc & 0xff) * floorLight;
         // Distance fog: underground cells fade toward black (cave depth),
         // surface cells fade via alpha toward whatever is behind (sky/ground).
         var fadeStart = viewDist * 0.72, fadeRange = viewDist - fadeStart;
         var d = Math.sqrt(distSq);
         var fadeF = d > fadeStart ? Math.max(0, 1.0 - (d - fadeStart) / fadeRange) : 1.0;
         fadeF *= fadeF;
-        if (_cellUnderground) {
-          _fr *= fadeF; _fg *= fadeF; _fb *= fadeF;
+        var _fr, _fg, _fb;
+        if (_cellUnderground && !DEBUG_LAYER_TYPES && !DEBUG_POLY_TYPES) {
+          var floorLit = shadeCaveSurfaceColor(_fc, CAVE_SURFACE_FLOOR,
+            floorAmbient, floorPointLight, fadeF, floorAO);
+          _fr = (floorLit >>> 16) & 255; _fg = (floorLit >>> 8) & 255; _fb = floorLit & 255;
           ctx.globalAlpha = 1.0;
         } else {
-          ctx.globalAlpha = fadeF;
+          var floorLight = Math.min(1, floorAmbient + floorPointLight) * floorAO;
+          _fr = ((_fc >> 16) & 0xff) * floorLight;
+          _fg = ((_fc >> 8) & 0xff) * floorLight;
+          _fb = (_fc & 0xff) * floorLight;
+          if (_cellUnderground) {
+            _fr *= fadeF; _fg *= fadeF; _fb *= fadeF;
+            ctx.globalAlpha = 1;
+          } else {
+            ctx.globalAlpha = fadeF;
+          }
         }
-        ctx.fillStyle = 'rgb(' + (_fr | 0) + ',' + (_fg | 0) + ',' + (_fb | 0) + ')';
+        ctx.fillStyle = rgbQ(_fr, _fg, _fb);
         fillSceneDepthPolygon(floorPoly);
         fillSceneDepthPolygon(floorPolyB);
 
@@ -545,19 +630,19 @@ function drawLayersCeiling3D() {
         if (_cz3 !== _cz3) { __caveStats.ceilSkipEntrRange++; continue; }
         __caveStats.ceilCollected++;
 
-        // The underside is visible only when the converted render eye is below
-        // it. Do not suppress it merely because a cap exists above: that cap
-        // is precisely the roof whose underside the interior needs to show.
-        var _ceilMaxZ = Math.max(_cz0, _cz1, _cz2, _cz3);
-        if (cameraZ > _ceilMaxZ * 25 + 1) continue;
-
         var wx1 = x * gs, wy1 = y * gs, wx2 = wx1 + gs, wy2 = wy1 + gs;
         var ceilingVertices = [
           {x:wx1,y:wy1,z:_cz0*25}, {x:wx2,y:wy1,z:_cz1*25},
           {x:wx2,y:wy2,z:_cz3*25}, {x:wx1,y:wy2,z:_cz2*25}
         ];
-        var ceilingPoly = projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[1], ceilingVertices[2]], C);
-        var ceilingPolyB = projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[2], ceilingVertices[3]], C);
+        // The underside uses the opposite side of the same triangle-plane
+        // test, including sloped ceilings viewed obliquely through the mouth.
+        var ceilingPoly = getTerrainTriangleEyeSide(ceilingVertices[0], ceilingVertices[1], ceilingVertices[2],
+          cam.x, cam.y, cameraZ) <= 0.000001 ?
+          projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[1], ceilingVertices[2]], C) : [];
+        var ceilingPolyB = getTerrainTriangleEyeSide(ceilingVertices[0], ceilingVertices[2], ceilingVertices[3],
+          cam.x, cam.y, cameraZ) <= 0.000001 ?
+          projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[2], ceilingVertices[3]], C) : [];
         if (ceilingPoly.length < 3 && ceilingPolyB.length < 3) continue;
 
         // Same world-authored stone as walls and cave floors.
@@ -569,19 +654,31 @@ function drawLayersCeiling3D() {
           var _cDz = Math.max(Math.abs(_cz1 - _cz0), Math.abs(_cz2 - _cz0), Math.abs(_cz3 - _cz0));
           baseCol = _cDz >= 1.0 ? '#ffdc00' : '#b10dc9';
         }
-        var ceilLight = typeof getCaveRenderLightAt === 'function' ?
+        var ceilAmbient = typeof getCaveRenderLightAt === 'function' ?
           getCaveRenderLightAt(centerX, centerY, true) : ambientLight;
+        var ceilPointLight = 0;
         if (_lightGrid) {
           var clgx = Math.floor(centerX / _lightCellSize);
           var clgy = Math.floor(centerY / _lightCellSize);
           if (clgx >= 0 && clgx < _lightGridW && clgy >= 0 && clgy < _lightGridH)
-            ceilLight = Math.min(1.0, ceilLight + _lightGrid[clgy * _lightGridW + clgx]);
+            ceilPointLight = _lightGrid[clgy * _lightGridW + clgx];
         }
-        var _cp = parseInt(baseCol.slice(1), 16);
-        var _cr = Math.min(255, Math.floor(((_cp >> 16) & 0xff) * ceilLight));
-        var _cg = Math.min(255, Math.floor(((_cp >> 8) & 0xff) * ceilLight));
-        var _cb = Math.min(255, Math.floor((_cp & 0xff) * ceilLight));
-        ctx.fillStyle = 'rgb(' + _cr + ',' + _cg + ',' + _cb + ')';
+        var _cr, _cg, _cb;
+        if (DEBUG_POLY_TYPES) {
+          var _cp = parseInt(baseCol.slice(1), 16);
+          var ceilLight = Math.min(1, ceilAmbient + ceilPointLight);
+          _cr = Math.min(255, Math.floor(((_cp >> 16) & 0xff) * ceilLight));
+          _cg = Math.min(255, Math.floor(((_cp >> 8) & 0xff) * ceilLight));
+          _cb = Math.min(255, Math.floor((_cp & 0xff) * ceilLight));
+        } else {
+          var _ceilFogFloor = typeof renderCaveFogFloor !== 'undefined' ? renderCaveFogFloor :
+            (typeof fogFloor !== 'undefined' ? fogFloor : 0.15);
+          var ceilFog = Math.max(_ceilFogFloor, 1 - fwdDot * 0.0008);
+          var ceilingLit = shadeCaveSurfaceColor(material, CAVE_SURFACE_CEILING,
+            ceilAmbient, ceilPointLight, ceilFog);
+          _cr = (ceilingLit >>> 16) & 255; _cg = (ceilingLit >>> 8) & 255; _cb = ceilingLit & 255;
+        }
+        ctx.fillStyle = rgbQ(_cr, _cg, _cb);
 
         // Ceiling is solid rock — full opacity. Exterior occlusion comes from
         // the eye-plane test and cap top face, not a global mode flag.

@@ -3,6 +3,7 @@
 // =============================================
 
 function startGame() {
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(false);
   // If Cave Test is selected in the terrain dropdown, delegate to the cave test launcher
   var _tSel = document.getElementById('terrainSelect');
   if (_tSel && _tSel.value === 'cavetest') {
@@ -65,6 +66,7 @@ function startGame() {
 }
 
 function stopGame() {
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
   running = false;
   if (polling) { try { clearInterval(polling); } catch (_) {} polling = null; }
   stopGamepadPolling();
@@ -114,5 +116,4 @@ function startLogPoller() {
 function stopLogPoller() {
   if (__gamesLogPoll) { try { clearInterval(__gamesLogPoll); } catch (_) {} __gamesLogPoll = null; }
 }
-
 

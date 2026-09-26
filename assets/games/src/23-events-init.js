@@ -4,9 +4,26 @@
 
 document.getElementById('btnStart').addEventListener('click', startGame);
 document.getElementById('btnStop').addEventListener('click', stopGame);
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden && typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
+});
 document.getElementById('chkImuDebug').addEventListener('change', function() { DEBUG_IMU = this.checked; });
 document.getElementById('btnFwDbgOn').addEventListener('click', fwDebugOn);
 document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
+
+// Personal animation preference, available without a world, item or unlock.
+// The neutral rig remains a studio study until its appearance is approved.
+(function() {
+  var select=document.getElementById('playerCastingStyle');
+  if(!select||typeof getCastingStyleOptions!=='function')return;
+  getCastingStyleOptions().forEach(function(style){
+    var option=document.createElement('option');option.value=style.id;
+    option.textContent=style.label;select.appendChild(option);
+  });
+  select.value=getSelectedCastingStyle();
+  select.addEventListener('change',function(){setSelectedCastingStyle(select.value);});
+  onCastingStyleChange(function(id){select.value=id;});
+})();
 
 (function() {
   var sel = document.getElementById('terrainSelect');
@@ -78,6 +95,7 @@ function caveVisibilityFixturesEnabled() {
 }
 function drawCaveVisibilityFixtures() {
   if (!caveVisibilityFixturesEnabled()) { draw(); return; }
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
   // Freeze simulation and invalidate callbacks that were already queued.
   // The fixture is only a draw-time substitution, never chunk/gameplay data.
   running = false; _loopGen++;
@@ -120,6 +138,7 @@ function setCavePreviewNoon(enabled) {
 }
 function previewCaveView(view) {
   if (!CAVE_TEST_MODE) return;
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
   cavePreviewLastView = view;
   var net = endlessCaveNetworks['0,0'];
   if (!net || !net.entrances.length || !net.chambers.length) return;
@@ -292,6 +311,12 @@ document.getElementById('chkPerfHud').addEventListener('change', function() {
   var p = document.getElementById('perfHudPanel');
   if (p) p.style.display = this.checked ? 'block' : 'none';
 });
+var _artworkCacheCheckbox = document.getElementById('chkArtworkCache');
+if (_artworkCacheCheckbox) _artworkCacheCheckbox.addEventListener('change', function() {
+  setFloorArtworkCacheEnabled(this.checked);
+  if (typeof cancelCaveBrowserProfile === 'function') cancelCaveBrowserProfile();
+  if (caveVisibilityFixturesEnabled()) drawCaveVisibilityFixtures();
+});
 document.getElementById('chkCaveDbg').addEventListener('change', function() {
   DEBUG_CAVE = this.checked;
   var panel = document.getElementById('caveDebugPanel');
@@ -432,6 +457,7 @@ document.getElementById('chkPolyTypes').addEventListener('change', function() { 
           pendingSettings.resolution  = settings.resolution;
           pendingSettings.showFPS     = settings.showFPS;
           pendingSettings.dayNight    = settings.dayNight;
+          pendingSettings.castingStyle = getSelectedCastingStyle();
           _pendingQualityPreset       = qualityPreset;
           _settingsDirty = false;
           if (document.pointerLockElement === canvas) document.exitPointerLock();

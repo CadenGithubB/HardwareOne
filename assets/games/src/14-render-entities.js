@@ -1432,13 +1432,15 @@ function drawSpellLandingReticle(p,C) {
 
 function drawProjectiles3D() {
   if (!projectiles || !projectiles.length) return;
-  var C = getCam3D();
+  var C = getCam3D(), artNow = Date.now();
   var horizonY = C.horizonY, cameraZ = C.cameraZ;
   for (var i = 0; i < projectiles.length; i++) {
     var p = projectiles[i];
     // The ground indicator remains independently visible when its airborne
     // projectile is behind the camera or hidden by terrain.
     drawSpellLandingReticle(p,C);
+    if (typeof CASTING_ART_ENABLED !== 'undefined' && CASTING_ART_ENABLED &&
+        typeof renderMissileProjectileArt === 'function' && renderMissileProjectileArt(p,C,artNow)) continue;
     var vis = entityVisible3D(p.x, p.y, Number.isFinite(p.z) ? p.z : 0, C,
       { maxDist: 600, sceneDepth:true, checkMidpoint: false, fadeFraction: 1 });
     if (!vis) continue;
@@ -1542,6 +1544,8 @@ function drawImpacts3D() {
   var C=getCam3D(),now=Date.now();
   for(var i=0;i<impacts.length;i++) {
       var im=impacts[i],z=Number.isFinite(im.z)?im.z:getEntityRenderFloorZ(im);
+      if (typeof CASTING_ART_ENABLED !== 'undefined' && CASTING_ART_ENABLED &&
+          typeof renderMissileImpactArt === 'function' && renderMissileImpactArt(im,C,now)) continue;
       // Every producer stores absolute render-world Z, including companions
       // and synergy bursts. Do not re-add their support or apply a second lift.
       var vis=entityVisible3D(im.x,im.y,z,C,{maxDist:viewDist,sceneDepth:true,fadeFraction:1});

@@ -53,6 +53,11 @@ canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
             <input type='checkbox' id='chkKeyboard'/> Keyboard + Mouse
           </label>
         </div>
+        <div class='space-top-sm text-sm'>
+          <label for='playerCastingStyle'>Casting Style</label>
+          <select id='playerCastingStyle' aria-label='Player Casting Style' class='input-tall' style='width:auto' aria-describedby='castingStylePreferenceNote'></select>
+          <span id='castingStylePreferenceNote'>Browser-local preference. Animation study only for now; inspect in Casting studio.</span>
+        </div>
         <div id='caveTestOptions' class='space-top-sm text-sm' style='display:none;padding:4px 8px;background:#1a2a1a;border:1px solid #335533;border-radius:4px'>
           <span style='color:#88cc88;font-weight:bold;margin-right:8px'>Cave Test:</span>
           <label>Entrance
@@ -172,6 +177,9 @@ canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
           <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Overlay real-time frame time breakdown and FPS on the canvas'>
             <input type='checkbox' id='chkPerfHud'/> Perf HUD
           </label>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Experimental bounded artwork cache for ferns, logs, skulls and rubble; compare on/off'>
+            <input type='checkbox' id='chkArtworkCache'/> Prop cache (pilot)
+          </label>
           <span class='space-left-md'></span>
           <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Overlay cave debug info: floor height, ceiling height, ambient light, underground state'>
             <input type='checkbox' id='chkCaveDbg'/> Cave Debug
@@ -257,7 +265,340 @@ window.onerror = function(msg, url, line, col) {
   console.error('[FATAL]', msg, 'line', line, 'col', col);
 };
 </script>
-<script>
+<script>// Pure appearance data: loaded before DOM/game configuration.
+// Canvas2D rendering, world generation, and gameplay are not initialized here.
+
+// =============================================
+// BIOME_PALETTE — Centralized per-biome color definitions
+// =============================================
+// Existing biome API and values are preserved. Named object materials below
+// complement these environmental colors; lighting and geometry stay separate.
+// Consumers include floors, walls, patterns and the sky. This is not yet a
+// palette for every prop, structure, spell or HUD element in the game.
+var BIOME_PALETTE = {
+  cave: {
+    wallColor:  '#6a6a70',
+    ceilFill:   '#1a1a1e',
+    patternBase:'#2a2a2e',
+    wallBaseRGB: [95, 95, 105],
+    // Floor height bands: 8 entries from deepest (-0.9) to highest (>0.5)
+    floorBands: ['#18181c','#28282e','#3a3a42','#4e4e58','#7a7a80','#8a8a90','#9a9aa0','#aaaab0'],
+    // Sky: [top, bottom] RGB arrays
+    sky:     [[0x12,0x12,0x1a], [0x1a,0x1a,0x1e]],
+    // Mountain layers: [far, mid, near] RGB arrays (hidden for cave)
+    mountain:[[0x12,0x12,0x1a], [0x12,0x12,0x1a], [0x12,0x12,0x1a]],
+    foothills: [0x12,0x12,0x1a],
+    haze:      [15,15,25],
+    mountainVisible: 0
+  },
+  ground: {
+    wallColor:  '#a77a45',
+    ceilFill:   '#3f2f1c',
+    patternBase:'#3b2a18',
+    wallBaseRGB: [180, 140, 100],
+    floorBands: ['#0e1a12','#1e2e22','#2a4232','#3a5642','#5a8a69','#6a9a79','#7aaa89','#8aba99'],
+    sky:     [[0x06,0x06,0x08], [0x0e,0x0c,0x08]],
+    mountain:[[0x22,0x1a,0x0e], [0x1a,0x14,0x08], [0x12,0x0e,0x05]],
+    foothills: [0x0c,0x0a,0x04],
+    haze:      [30,22,12],
+    mountainVisible: 1
+  },
+  plains: {
+    wallColor:  '#a77a45',
+    ceilFill:   '#3f2f1c',
+    patternBase:'#3b2a18',
+    wallBaseRGB: [180, 140, 100],
+    floorBands: ['#12180a','#222e10','#344218','#4a5a28','#6a7a40','#808e50','#96a260','#a8b870'],
+    sky:     [[0x06,0x06,0x08], [0x0e,0x0c,0x08]],
+    mountain:[[0x22,0x1a,0x0e], [0x1a,0x14,0x08], [0x12,0x0e,0x05]],
+    foothills: [0x0c,0x0a,0x04],
+    haze:      [30,22,12],
+    mountainVisible: 1
+  },
+  forest: {
+    wallColor:  '#4b3723',
+    ceilFill:   '#1a2a10',
+    patternBase:'#2a3a18',
+    wallBaseRGB: [75, 55, 35],
+    floorBands: ['#0e1608','#1a2810','#283a18','#385020','#4a6830','#5a7a40','#6a8a50','#7a9a60'],
+    sky:     [[0x08,0x0a,0x06], [0x12,0x18,0x0c]],
+    mountain:[[0x1a,0x2a,0x12], [0x14,0x22,0x0c], [0x0e,0x1a,0x08]],
+    foothills: [0x0c,0x14,0x06],
+    haze:      [20,30,15],
+    mountainVisible: 1
+  },
+  expanse: {
+    wallColor:  '#c07838',
+    ceilFill:   '#5a3010',
+    patternBase:'#7a4e22',
+    wallBaseRGB: [180, 140, 100],
+    floorBands: ['#1a0e08','#2e1808','#4a2a10','#6b3e1a','#8b5a28','#a87040','#c48a52','#d8a86a'],
+    sky:     [[0x06,0x04,0x08], [0x0e,0x0a,0x06]],
+    mountain:[[0x2a,0x1c,0x10], [0x1e,0x14,0x08], [0x14,0x0e,0x05]],
+    foothills: [0x0e,0x0a,0x04],
+    haze:      [50,30,12],
+    mountainVisible: 1
+  },
+  ice: {
+    wallColor:  '#7aa7ff',
+    ceilFill:   '#0d1a2e',
+    patternBase:'#0a1322',
+    wallBaseRGB: [140, 170, 240],
+    floorBands: ['#0a0e1a','#141c30','#1e2c48','#2a3c5e','#4a6888','#6888a8','#88a8c8','#a0c0e0'],
+    sky:     [[0x05,0x07,0x0f], [0x0b,0x0d,0x12]],
+    mountain:[[0x1a,0x25,0x40], [0x14,0x1c,0x35], [0x0e,0x14,0x28]],
+    foothills: [0x0c,0x12,0x20],
+    haze:      [15,20,35],
+    mountainVisible: 1
+  }
+};
+
+// Low-cost sky appearance data. The renderer interpolates these daylight
+// anchors across biome borders, then applies one shared dawn/day/dusk/night
+// curve. Keeping the colors here avoids branching art direction into the
+// Canvas renderer and makes the sky independently tunable from terrain.
+var SKY_ATMOSPHERE = {
+  cave: {
+    zenith:[10,12,18], mid:[16,16,22], horizon:[23,22,24], cloud:[52,52,58], cloudiness:0
+  },
+  ground: {
+    zenith:[44,64,101], mid:[82,99,126], horizon:[154,129,103], cloud:[182,175,165], cloudiness:0.72
+  },
+  plains: {
+    zenith:[52,78,124], mid:[98,121,151], horizon:[178,158,121], cloud:[205,198,182], cloudiness:0.58
+  },
+  forest: {
+    zenith:[38,62,75], mid:[69,91,91], horizon:[126,126,96], cloud:[163,166,145], cloudiness:0.78
+  },
+  expanse: {
+    zenith:[63,66,102], mid:[127,99,98], horizon:[205,134,79], cloud:[210,171,130], cloudiness:0.34
+  },
+  ice: {
+    zenith:[42,73,126], mid:[91,128,166], horizon:[181,207,218], cloud:[218,230,235], cloudiness:0.66
+  }
+};
+
+var SKY_TIME_COLORS = {
+  nightZenith:[2,4,14], nightMid:[7,10,22], nightHorizon:[15,18,31],
+  dawn:[236,132,78], dusk:[226,91,56],
+  sunCore:[255,239,185], sunEdge:[255,177,83],
+  moon:[207,218,226], star:[218,229,242]
+};
+
+// Floor height thresholds — shared by getFloorColor, maps heightPercent to band index
+var _floorBandThresholds = [-0.9, -0.6, -0.3, -0.1, 0.1, 0.3, 0.5];
+
+// =============================================
+// SHARED OBJECT MATERIALS
+// =============================================
+// Author colors here as six-digit hex. The compiled read-only forms below are
+// derived once at startup, not parsed/allocated for each painted face. Keep
+// lighting, transparency and shape in the renderer, not in these base colors.
+// Edit these definitions and reload the page: live theme switching would also
+// have to rebuild authored chunk colors and cached artwork and is not provided.
+var GAME_MATERIAL_COLORS = {
+  missileMagic: {core:'#fff3d8', light:'#c4edf0', mid:'#79b9d0', deep:'#315677', rune:'#bfa16a'},
+  casterSkin: {shadow:'#714b40', base:'#b98265', light:'#e2bb94', crease:'#755047', nail:'#d9b59c'},
+  casterCloth: {deep:'#16242e', mid:'#344b58', lit:'#607a83', cuff:'#4c3c2c', linen:'#c4b493'},
+  casterMetal: {shadow:'#50422c', base:'#a78b54', light:'#dfc78d'},
+  // Ashen Reliquary interior stone. `base` remains the compatibility/fallback
+  // color; the secondary roles are blended softly into world-authored albedo.
+  caveStone: {
+    base:'#686156', damp:'#50595b', iron:'#73513d', worn:'#83755f'
+  },
+  entranceStone: {
+    lit: '#a89787', mid: '#776859', dark: '#473d32', shadow: '#2a2320'
+  },
+  // Order also defines the stable swatch cycle for rubble/rock-pile variants.
+  rubbleStone: {
+    base: '#787060', shadow: '#686058', lit: '#888070', dark: '#504840'
+  },
+  crateWood: {
+    base: '#8b5a2b', bracing: '#6b3a1b', interior: '#3a1a08', outline: '#4a2808'
+  },
+  palisadeWood: {lit: '#7a4c2a', mid: '#6b4226', dark: '#5a3720', deep: '#3a2412'},
+  // Constructed wall props share one compact material vocabulary. These are
+  // flat authored colors; the renderer applies its existing face brightness
+  // and distance fade without gradients, filters or per-pixel effects.
+  wallPropWood: {deep:'#2b1b12', shadow:'#4a2f1f', base:'#7c5030', lit:'#ad7a48'},
+  wallPropIron: {deep:'#22252a', shadow:'#3f444b', base:'#737b84', lit:'#b9c1c6', edge:'#e1d7bc'},
+  wallHeraldry: {
+    redDeep:'#47151a', red:'#8f2830', redLit:'#c34a48',
+    blueDeep:'#172a45', blue:'#315b83', blueLit:'#5d86a6',
+    purpleDeep:'#2f1c43', purple:'#684184', purpleLit:'#9870ad',
+    gold:'#b58a35', goldLit:'#e0bf69', linen:'#d8cfb2'
+  },
+  wallFlame: {ember:'#8f2416', outer:'#e55220', inner:'#f6a329', core:'#fff1a6'},
+  floorPropWood: {deep:'#2f2118', shadow:'#4c3424', base:'#765238', lit:'#a27950', cut:'#b99a72'},
+  floorPropIron: {deep:'#24272b', shadow:'#3d4247', base:'#656c72', lit:'#a2a9ac', rust:'#80513a'},
+  floorFoliage: {deep:'#243d20', shadow:'#35562b', base:'#52763d', lit:'#779657', dry:'#77613a'},
+  bone: {
+    base: '#c8c8c8', dry: '#c8b870', lit: '#e8e0c8', shadow: '#d0c8b0',
+    outline: '#2a2018', cavity: '#000000', gap: '#1a1008',
+    aged: '#c0b8a0', knuckle: '#b8b098'
+  }
+};
+
+// Pure compiler; safe to test without a DOM or Canvas. Invalid color values
+// fail at startup rather than silently inheriting a previous canvas color.
+function compileGameMaterials(definitions) {
+  if (!definitions || typeof definitions !== 'object' || Array.isArray(definitions))
+    throw new Error('Material definitions must be an object');
+  var materials = Object.create(null);
+  Object.keys(definitions).forEach(function(id) {
+    var colors = definitions[id];
+    if (!colors || typeof colors !== 'object' || Array.isArray(colors) || !Object.keys(colors).length)
+      throw new Error('Material ' + id + ' needs named colors');
+    var hex = Object.create(null), rgb = Object.create(null), packed = Object.create(null), swatches = [];
+    Object.keys(colors).forEach(function(role) {
+      var color = colors[role];
+      if (typeof color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(color))
+        throw new Error('Invalid material color: ' + id + '.' + role);
+      var value = parseInt(color.slice(1), 16);
+      hex[role] = color;
+      packed[role] = value;
+      rgb[role] = Object.freeze([(value >> 16) & 255, (value >> 8) & 255, value & 255]);
+      swatches.push(color);
+    });
+    materials[id] = Object.freeze({hex: Object.freeze(hex), rgb: Object.freeze(rgb),
+      packed: Object.freeze(packed), swatches: Object.freeze(swatches)});
+  });
+  return Object.freeze(materials);
+}
+var GAME_MATERIALS = compileGameMaterials(GAME_MATERIAL_COLORS);
+
+// Stable semantic roles shared by the cave floor, wall and ceiling renderers.
+// They alter only the lit presentation of one authored stone albedo; geometry,
+// depth, portals and the exterior cap material remain unchanged.
+var CAVE_SURFACE_FLOOR = 0, CAVE_SURFACE_WALL = 1, CAVE_SURFACE_CEILING = 2;
+
+function _caveStoneHash(worldX, worldY, scale, salt) {
+  var x = Math.floor(worldX / scale), y = Math.floor(worldY / scale);
+  var h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + salt) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+function _mixPackedMaterial(a, b, amount) {
+  var ar = (a >>> 16) & 255, ag = (a >>> 8) & 255, ab = a & 255;
+  var br = (b >>> 16) & 255, bg = (b >>> 8) & 255, bb = b & 255;
+  var r = Math.round(ar + (br - ar) * amount);
+  var g = Math.round(ag + (bg - ag) * amount);
+  var blue = Math.round(ab + (bb - ab) * amount);
+  return (r << 16) | (g << 8) | blue;
+}
+
+// Generation-time, allocation-free stone authoring. Fine grain is quiet at
+// the 12-unit mesh cadence while broader 48/96-unit fields form natural slabs
+// instead of a high-contrast checkerboard. No camera, seed or random state is
+// consulted, so streaming-window rebases cannot make the material crawl.
+function sampleInteriorStoneAlbedo(basePacked, worldX, worldY) {
+  var stone = GAME_MATERIALS.caveStone;
+  var base = Number.isFinite(basePacked) ? basePacked >>> 0 : stone.packed.base;
+  var variant = _caveStoneHash(worldX, worldY, 96, 0x51ed270b) % 100;
+  var target = base, mix = 0;
+  if (variant >= 96) { target = stone.packed.worn; mix = 0.22; }
+  else if (variant >= 90) { target = stone.packed.iron; mix = 0.18; }
+  else if (variant >= 72) { target = stone.packed.damp; mix = 0.20; }
+  var packed = mix ? _mixPackedMaterial(base, target, mix) : base;
+  var fine = (_caveStoneHash(worldX, worldY, 12, 0x1b873593) % 5) - 2;
+  var broad = (_caveStoneHash(worldX, worldY, 48, 0x7f4a7c15) % 7) - 3;
+  var r = Math.max(0, Math.min(255, ((packed >>> 16) & 255) + fine + broad));
+  var g = Math.max(0, Math.min(255, ((packed >>> 8) & 255) + fine + broad));
+  var b = Math.max(0, Math.min(255, (packed & 255) + fine + broad));
+  return (r << 16) | (g << 8) | b;
+}
+
+// Hot-path presentation shared by every interior plane. It returns packed RGB
+// so callers can use the existing rgbQ cache without allocating arrays or CSS
+// strings. The floor is the navigation plane, walls carry the mid values, and
+// the ceiling stays dark; local lights warm all three consistently.
+function shadeCaveSurfaceColor(material, role, ambient, pointLight, fog, occlusion) {
+  if (!Number.isFinite(material)) material = GAME_MATERIALS.caveStone.packed.base;
+  if (role !== CAVE_SURFACE_FLOOR && role !== CAVE_SURFACE_CEILING) role = CAVE_SURFACE_WALL;
+  ambient = Number.isFinite(ambient) ? Math.max(0, ambient) : 0;
+  pointLight = Number.isFinite(pointLight) ? Math.max(0, pointLight) : 0;
+  fog = Number.isFinite(fog) ? Math.max(0, Math.min(1, fog)) : 1;
+  occlusion = Number.isFinite(occlusion) ? Math.max(0, Math.min(1, occlusion)) : 1;
+  var pointScale = role === CAVE_SURFACE_CEILING ? 0.62 : 1;
+  var light = Math.min(1, ambient + pointLight * pointScale);
+  var value = role === CAVE_SURFACE_FLOOR ? 1.06 : role === CAVE_SURFACE_CEILING ? 0.74 : 1;
+  var redRole = role === CAVE_SURFACE_FLOOR ? 1.03 : role === CAVE_SURFACE_CEILING ? 0.94 : 1;
+  var greenRole = role === CAVE_SURFACE_FLOOR ? 1.01 : role === CAVE_SURFACE_CEILING ? 0.98 : 1;
+  var blueRole = role === CAVE_SURFACE_FLOOR ? 0.97 : role === CAVE_SURFACE_CEILING ? 1.03 : 1;
+  var warmR = 1 + pointLight * 0.28, warmG = 1 + pointLight * 0.06;
+  var warmB = Math.max(0.72, 1 - pointLight * 0.17);
+  var r = Math.max(0, Math.min(255, Math.floor(((material >>> 16) & 255) * light * value * fog * occlusion * redRole * warmR)));
+  var g = Math.max(0, Math.min(255, Math.floor(((material >>> 8) & 255) * light * value * fog * occlusion * greenRole * warmG)));
+  var b = Math.max(0, Math.min(255, Math.floor((material & 255) * light * value * fog * occlusion * blueRole * warmB)));
+  return (r << 16) | (g << 8) | b;
+}
+// Personal presentation preference, not equipment, progression or a quality
+// preset. Add descriptors here and their data-only animation recipes to the
+// hand renderer. A style never changes combat timing or projectile mechanics.
+var CASTING_STYLES = Object.freeze({
+  arcane:Object.freeze({id:'arcane',label:'Arcane (default)',handAnimation:'arcane'}),
+  finger_guns:Object.freeze({id:'finger_guns',label:'Finger Guns',handAnimation:'finger_guns'})
+});
+var CASTING_STYLE_STORAGE_KEY = 'hardwareone.casting-style.v1';
+
+function normalizeCastingStyle(id) {
+  return typeof id === 'string' && Object.prototype.hasOwnProperty.call(CASTING_STYLES,id) ? id : 'arcane';
+}
+function getCastingStyle(id) {
+  return CASTING_STYLES[normalizeCastingStyle(id)];
+}
+function getCastingStyleOptions() {
+  // Callers can sort/build controls without changing the shared registry.
+  return Object.keys(CASTING_STYLES).map(function(id) {
+    return {id:id,label:CASTING_STYLES[id].label};
+  });
+}
+function readCastingStylePreference() {
+  try {
+    if (typeof localStorage !== 'undefined') return normalizeCastingStyle(localStorage.getItem(CASTING_STYLE_STORAGE_KEY));
+  } catch (error) { /* Private/blocked storage leaves the session usable. */ }
+  return 'arcane';
+}
+var _selectedCastingStyle = readCastingStylePreference();
+var _castingStyleListeners = [];
+
+function onCastingStyleChange(listener) {
+  if (typeof listener !== 'function') throw TypeError('Casting style listener must be a function');
+  var subscription = {listener:listener,active:true};
+  _castingStyleListeners.push(subscription);
+  return function () {
+    subscription.active = false;
+    var index = _castingStyleListeners.indexOf(subscription);
+    if (index >= 0) _castingStyleListeners.splice(index,1);
+  };
+}
+
+function getSelectedCastingStyle() {
+  return normalizeCastingStyle(typeof settings !== 'undefined' && settings ? settings.castingStyle : _selectedCastingStyle);
+}
+function setSelectedCastingStyle(id) {
+  var selected = normalizeCastingStyle(id);
+  // Compare the committed preference, not a temporary renderer's settings copy.
+  var previous = _selectedCastingStyle;
+  _selectedCastingStyle = selected;
+  // Only this personal field is changed. In particular, do not apply a quality
+  // preset, rebuild the world, alter equipment, or gate it behind an unlock.
+  if (typeof settings !== 'undefined' && settings) settings.castingStyle = selected;
+  if (typeof pendingSettings !== 'undefined' && pendingSettings) pendingSettings.castingStyle = selected;
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(CASTING_STYLE_STORAGE_KEY,selected);
+  } catch (error) { /* The selection still works for this browser session. */ }
+  if (selected !== previous) {
+    _castingStyleListeners.slice().forEach(function (subscription) {
+      if (!subscription.active) return;
+      try { subscription.listener(selected,previous); }
+      catch (error) { /* A failed preview listener must not break other controls. */ }
+    });
+  }
+  return selected;
+}
+
 
 // =============================================
 // CANVAS & RENDERING
@@ -384,93 +725,7 @@ var CANVAS_BASE_H = canvas.height;  // original authored resolution (240)
 var projScale = 180;                // projection scale factor — recomputed each frame for resolution independence
 var resScale = 1;                   // resolution scale (1.0 at base res) — recomputed each frame
 
-// =============================================
-// BIOME_PALETTE — Centralized per-biome color definitions
-// =============================================
-// All biome-specific colors (floor, wall, sky, mountain, ceiling, pattern)
-// live here. Consumed by: getFloorColor, makeWallColor, makeCeilPattern,
-// makePattern, drawSkybox3D, drawSimpleWallSlice, getFloorColorBlended.
-// Adding a new biome = add one entry here; all systems pick it up.
-var BIOME_PALETTE = {
-  cave: {
-    wallColor:  '#6a6a70',
-    ceilFill:   '#1a1a1e',
-    patternBase:'#2a2a2e',
-    wallBaseRGB: [95, 95, 105],
-    // Floor height bands: 8 entries from deepest (-0.9) to highest (>0.5)
-    floorBands: ['#18181c','#28282e','#3a3a42','#4e4e58','#7a7a80','#8a8a90','#9a9aa0','#aaaab0'],
-    // Sky: [top, bottom] RGB arrays
-    sky:     [[0x12,0x12,0x1a], [0x1a,0x1a,0x1e]],
-    // Mountain layers: [far, mid, near] RGB arrays (hidden for cave)
-    mountain:[[0x12,0x12,0x1a], [0x12,0x12,0x1a], [0x12,0x12,0x1a]],
-    foothills: [0x12,0x12,0x1a],
-    haze:      [15,15,25],
-    mountainVisible: 0
-  },
-  ground: {
-    wallColor:  '#a77a45',
-    ceilFill:   '#3f2f1c',
-    patternBase:'#3b2a18',
-    wallBaseRGB: [180, 140, 100],
-    floorBands: ['#0e1a12','#1e2e22','#2a4232','#3a5642','#5a8a69','#6a9a79','#7aaa89','#8aba99'],
-    sky:     [[0x06,0x06,0x08], [0x0e,0x0c,0x08]],
-    mountain:[[0x22,0x1a,0x0e], [0x1a,0x14,0x08], [0x12,0x0e,0x05]],
-    foothills: [0x0c,0x0a,0x04],
-    haze:      [30,22,12],
-    mountainVisible: 1
-  },
-  plains: {
-    wallColor:  '#a77a45',
-    ceilFill:   '#3f2f1c',
-    patternBase:'#3b2a18',
-    wallBaseRGB: [180, 140, 100],
-    floorBands: ['#12180a','#222e10','#344218','#4a5a28','#6a7a40','#808e50','#96a260','#a8b870'],
-    sky:     [[0x06,0x06,0x08], [0x0e,0x0c,0x08]],
-    mountain:[[0x22,0x1a,0x0e], [0x1a,0x14,0x08], [0x12,0x0e,0x05]],
-    foothills: [0x0c,0x0a,0x04],
-    haze:      [30,22,12],
-    mountainVisible: 1
-  },
-  forest: {
-    wallColor:  '#4b3723',
-    ceilFill:   '#1a2a10',
-    patternBase:'#2a3a18',
-    wallBaseRGB: [75, 55, 35],
-    floorBands: ['#0e1608','#1a2810','#283a18','#385020','#4a6830','#5a7a40','#6a8a50','#7a9a60'],
-    sky:     [[0x08,0x0a,0x06], [0x12,0x18,0x0c]],
-    mountain:[[0x1a,0x2a,0x12], [0x14,0x22,0x0c], [0x0e,0x1a,0x08]],
-    foothills: [0x0c,0x14,0x06],
-    haze:      [20,30,15],
-    mountainVisible: 1
-  },
-  expanse: {
-    wallColor:  '#c07838',
-    ceilFill:   '#5a3010',
-    patternBase:'#7a4e22',
-    wallBaseRGB: [180, 140, 100],
-    floorBands: ['#1a0e08','#2e1808','#4a2a10','#6b3e1a','#8b5a28','#a87040','#c48a52','#d8a86a'],
-    sky:     [[0x06,0x04,0x08], [0x0e,0x0a,0x06]],
-    mountain:[[0x2a,0x1c,0x10], [0x1e,0x14,0x08], [0x14,0x0e,0x05]],
-    foothills: [0x0e,0x0a,0x04],
-    haze:      [50,30,12],
-    mountainVisible: 1
-  },
-  ice: {
-    wallColor:  '#7aa7ff',
-    ceilFill:   '#0d1a2e',
-    patternBase:'#0a1322',
-    wallBaseRGB: [140, 170, 240],
-    floorBands: ['#0a0e1a','#141c30','#1e2c48','#2a3c5e','#4a6888','#6888a8','#88a8c8','#a0c0e0'],
-    sky:     [[0x05,0x07,0x0f], [0x0b,0x0d,0x12]],
-    mountain:[[0x1a,0x25,0x40], [0x14,0x1c,0x35], [0x0e,0x14,0x28]],
-    foothills: [0x0c,0x12,0x20],
-    haze:      [15,20,35],
-    mountainVisible: 1
-  }
-};
-
-// Floor height thresholds — shared by getFloorColor, maps heightPercent to band index
-var _floorBandThresholds = [-0.9, -0.6, -0.3, -0.1, 0.1, 0.3, 0.5];
+// Biome palettes and shared materials are initialized by 01-materials.js.
 
 // =============================================
 // SHARED 3D PROJECTION & OCCLUSION
@@ -966,14 +1221,12 @@ var gridW = 0;
 var gridH = 0;
 var wallHeights = null;
 var wallColorR = null, wallColorG = null, wallColorB = null; // per-cell wall color overrides (structure walls)
-// wallCapZ[i]: world-Z of the walkable layer directly above this wall's top
-// (the "dirt ceiling" over a cave wall), or -Infinity if none. Hides cave
-// walls from a surface camera without distance gates. Filled at window
-// assembly; see [WALL-CAP] log.
+// wallCapZ[i]: nearby exterior cap tag in mesh-height units, or -Infinity.
+// Not a wall height or camera-height cull; shared scene depth hides buried
+// faces. Filled at window assembly; see [WALL-CAP] log.
 var wallCapZ = null;
-// wallMaxTopZ[i]: highest allowed wall top in mesh-Z. For entrance-mouth
-// cells (no cap, has ceiling), relaxed to the lowest neighbor cap so walls
-// don't rise above surrounding ground. Infinity = no clamp.
+// wallMaxTopZ[i]: roof-bound wall top in mesh-height units, kept inside the
+// cover over this wall's footprint. Infinity = an ordinary surface wall.
 var wallMaxTopZ = null;
 var wallDecorations = [];
 var oreVeins = [];        // breakable mineral deposits on cave walls; cleared each level
@@ -1237,11 +1490,13 @@ var QUALITY_PRESETS = {
   high:   {viewDist: 1300, chunkWindow: 7, particles: 40, resolution: 1.0},
   ultra:  {viewDist: 1800, chunkWindow: 9, particles: 60, resolution: 1.0}
 };
-var settings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true};
+var settings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true,
+  castingStyle: typeof getSelectedCastingStyle === 'function' ? getSelectedCastingStyle() : 'arcane'};
 // Staging copy — holds uncommitted edits while settings overlay is open.
 // Written to by all slider/toggle/preset interactions.
 // Flushed → settings on Apply; discarded on close without Apply.
-var pendingSettings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true};
+var pendingSettings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true,
+  castingStyle: settings.castingStyle};
 var _settingsDirty = false; // true when pendingSettings differs from settings
 var _fpsSmooth = 60;
 var _lastFrameTimeMs = 0;
@@ -1335,18 +1590,25 @@ function getScale3D(tier) { return (SIZE_TIERS[tier] || 1.0) * SCALE_3D_GLOBAL; 
 
 // Maps floor scatter item types to size tiers
 var FLOOR_ITEM_TIER = {
-  tree_stump:'lgPlant', fallen_log:'lgPlant', rock_cluster:'lgPlant',
-  ancient_column:'lgPlant', stone_pillar:'lgPlant', ruined_wall:'lgPlant',
-  crystal_cluster:'mdPlant', crate:'mdPlant', barrel:'mdPlant', skull:'mdPlant',
+  boulder:'lgPlant', stone_column:'lgPlant', rock_arch:'lgPlant', rock_spire:'lgPlant',
+  cave_rubble_pile:'lgPlant', sand_pillar:'lgPlant', mesa_boulder:'lgPlant',
+  tree_stump:'lgPlant', fallen_log:'lgPlant',
+  crystal:'mdPlant', stalagmite:'mdPlant', rock_pile:'mdPlant', desert_rock:'mdPlant',
+  crate:'mdPlant', barrel:'mdPlant', skull:'mdPlant', frozen_skull:'mdPlant',
   mushroom:'mdPlant', fern:'mdPlant', leaf_pile:'mdPlant', ice_shard:'mdPlant',
-  bookshelf_debris:'mdPlant', iron_chain:'mdPlant',
+  icicle_cluster:'mdPlant', bookshelf_debris:'mdPlant', iron_chain:'mdPlant',
+  rib_cage:'mdPlant', stone_marker:'mdPlant', cracked_stone:'mdPlant',
+  bones:'smPlant', dry_bones:'smPlant', femur:'smPlant', stick_bundle:'smPlant',
+  dead_shrub:'smPlant', puddle:'smPlant', frozen_pool:'smPlant',
   moss_patch:'smPlant', frost_patch:'smPlant', wildflower:'smPlant', tall_grass:'smPlant',
   flat_rock:'smPlant', rubble:'smPlant',
 };
 // Maps wall decoration types to size tiers
 var WALL_DECOR_TIER = {
-  torch:'lgWall', icicle:'lgWall', vine_growth:'lgWall',
-  moss_drip:'smWall', carved_rune:'smWall', ore_vein:'smWall',
+  torch:'lgWall', sconce:'lgWall', shield:'lgWall', banner:'lgWall',
+  icicle:'lgWall', vine_growth:'lgWall',
+  fungi:'smWall', moss_drip:'smWall', carved_rune:'smWall',
+  frost_crystal:'smWall', stalactite_tip:'smWall', wall_crack:'smWall', ore_vein:'smWall',
 };
 
 // ── Chest Tier System ──
@@ -1978,7 +2240,10 @@ var __decorDebugLast = 0;
 
 // RGB string cache — caches exact 'rgb(r,g,b)' strings by packed integer key.
 // After warm-up, every call is a hash lookup with zero string allocation.
-// Typical cache size: ~1000-3000 entries (walls, decorations, effects).
+// Typical cache size: ~1000-3000 entries (walls, decorations, effects). A
+// novel color at the hard limit starts a fresh generation so long sessions
+// cannot retain every fog/light combination ever visited.
+var RGB_CACHE_LIMIT = 4096;
 var _rgbCache = {};
 function rgbQ(r, g, b) {
   r = Math.max(0, Math.min(255, r)) | 0;
@@ -1987,6 +2252,13 @@ function rgbQ(r, g, b) {
   var key = (r << 16) | (g << 8) | b;
   var s = _rgbCache[key];
   if (s) { _cacheStats.rgbQ.hits++; return s; }
+  if (_cacheStats.rgbQ.size >= RGB_CACHE_LIMIT) {
+    if (_cacheStats.rgbQ.size > _cacheStats.rgbQ.peakSize) {
+      _cacheStats.rgbQ.peakSize = _cacheStats.rgbQ.size;
+    }
+    _rgbCache = {};
+    _cacheStats.rgbQ.size = 0;
+  }
   s = 'rgb(' + r + ',' + g + ',' + b + ')';
   _rgbCache[key] = s;
   _cacheStats.rgbQ.misses++;
@@ -2099,8 +2371,11 @@ function makePattern(kind) {
   var oc = document.createElement('canvas');
   oc.width = 32; oc.height = 32;
   var c = oc.getContext('2d');
+  // Preserve the four existing pattern recipes, including legacy fallback.
+  var patternKind = (kind === 'ice' || kind === 'cave' || kind === 'expanse') ? kind : 'ground';
+  var patternBase = BIOME_PALETTE[patternKind].patternBase;
   if (kind === 'ice') {
-    c.fillStyle = '#0a1322'; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = patternBase; c.fillRect(0, 0, 32, 32);
     c.strokeStyle = 'rgba(170,210,255,0.35)'; c.lineWidth = 2;
     c.beginPath(); c.moveTo(0, 16); c.lineTo(32, 16); c.moveTo(16, 0); c.lineTo(16, 32); c.stroke();
     c.strokeStyle = 'rgba(120,190,255,0.18)';
@@ -2114,7 +2389,7 @@ function makePattern(kind) {
     g.addColorStop(0, 'rgba(255,255,255,0.02)'); g.addColorStop(1, 'rgba(255,255,255,0.00)');
     c.fillStyle = g; c.fillRect(0, 0, 32, 32);
   } else if (kind === 'cave') {
-    c.fillStyle = '#2a2a2e'; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = patternBase; c.fillRect(0, 0, 32, 32);
     for (var i = 0; i < 32; i++) {
       var x = Math.random() * 32, y = Math.random() * 32, r = Math.random() * 1.4 + 0.5;
       var a = 0.08 + Math.random() * 0.12; var pick = Math.random();
@@ -2131,7 +2406,7 @@ function makePattern(kind) {
     }
   } else if (kind === 'expanse') {
     // Cracked sandstone — warm ochre base with hairline fractures
-    c.fillStyle = '#7a4e22'; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = patternBase; c.fillRect(0, 0, 32, 32);
     // Crack lines
     c.strokeStyle = 'rgba(30,15,5,0.55)'; c.lineWidth = 0.8;
     for (var i = 0; i < 6; i++) {
@@ -2149,7 +2424,7 @@ function makePattern(kind) {
       c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
     }
   } else {
-    c.fillStyle = '#3b2a18'; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = patternBase; c.fillRect(0, 0, 32, 32);
     for (var i = 0; i < 28; i++) {
       var x = Math.random() * 32, y = Math.random() * 32, r = Math.random() * 1.6 + 0.6;
       var a = 0.10 + Math.random() * 0.10; var pick = Math.random();
@@ -2190,7 +2465,6 @@ function applyPreset() {
   ceilPattern = makeCeilPattern(k);
   wallColor = makeWallColor(k);
 }
-
 
 // =============================================
 // SECTION 3: LEVEL GENERATION
@@ -4355,6 +4629,53 @@ function chunkRng(cx, cy, component) {
   return next;
 }
 
+var FLOOR_SCATTER_POOLS = Object.freeze({
+  cave:Object.freeze(['crystal','stalagmite','rock_pile','puddle','boulder','cave_rubble_pile','rock_spire','bookshelf_debris','iron_chain','barrel']),
+  ice:Object.freeze(['ice_shard','frozen_pool','icicle_cluster','frost_patch','frozen_skull','cracked_stone']),
+  plains:Object.freeze(['tall_grass','wildflower','tall_grass','mesa_boulder','stone_marker','flat_rock','dead_shrub','wildflower','tree_stump']),
+  forest:Object.freeze(['tree_stump','fallen_log','tall_grass','wildflower','mushroom','moss_patch','fern','leaf_pile','tall_grass','fern']),
+  expanse:Object.freeze(['desert_rock','dead_shrub','dry_bones','stone_column','sand_pillar','cracked_stone','flat_rock']),
+  ground:Object.freeze(['bones','crate','skull','rubble','rib_cage','flat_rock','cracked_stone']),
+  fortress:Object.freeze(['crate','barrel','bookshelf_debris','iron_chain','rubble','cracked_stone','stick_bundle']),
+  arena:Object.freeze(['cracked_stone','rubble','bones','dry_bones','rib_cage','femur','flat_rock']),
+  watchtower:Object.freeze(['barrel','crate','stick_bundle','fallen_log','rubble','iron_chain','dead_shrub'])
+});
+var FLOOR_SCATTER_DENSITY = Object.freeze({
+  cave:0.025, forest:0.022, ground:0.020, expanse:0.018, plains:0.015, ice:0.015,
+  fortress:0.040, arena:0.038, watchtower:0.036
+});
+function getFloorScatterProfile(biome, structureType) {
+  var key = structureType && FLOOR_SCATTER_POOLS[structureType] ? structureType :
+    (FLOOR_SCATTER_POOLS[biome] ? biome : 'ground');
+  return {key:key, pool:FLOOR_SCATTER_POOLS[key], density:FLOOR_SCATTER_DENSITY[key]};
+}
+function floorScatterClusterWeight(worldGridX, worldGridY) {
+  var clusterX = Math.floor(worldGridX / 4), clusterY = Math.floor(worldGridY / 4);
+  var h = chunkSeedFor(clusterX, clusterY, 109) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 2246822519) >>> 0;
+  var n = ((h ^ (h >>> 13)) >>> 0) / 4294967296;
+  return n < 0.25 ? 2.5 : n < 0.60 ? 0.75 : 0.25;
+}
+// 0 = outside this structure, 1 = deliberately clear circulation zone,
+// 2 = themed clutter zone. This keeps courts/altars/tower cores readable.
+function getStructureFloorScatterZone(st, wx, wy) {
+  if (!st) return 0;
+  var scale = st.scale || 1, dx = wx - st.centerWX, dy = wy - st.centerWY;
+  if (st.type === 'fortress') {
+    var extent = CHUNK_SIZE * 1.7 * scale, cheb = Math.max(Math.abs(dx), Math.abs(dy));
+    if (cheb >= extent - cell * 2) return 0;
+    return cheb < cell * 10 * scale ? 1 : 2;
+  }
+  if (st.type === 'arena') {
+    var radius = Math.hypot(dx, dy), ring = CHUNK_SIZE * 1.1 * scale;
+    if (radius >= ring - cell * 3) return 0;
+    return radius < cell * 8 * scale ? 1 : 2;
+  }
+  var reach = cell * (17 * scale + 3), towerCheb = Math.max(Math.abs(dx), Math.abs(dy));
+  if (towerCheb >= reach) return 0;
+  return towerCheb < cell * 5 * scale ? 1 : 2;
+}
+
 function getBiomeAt(wx, wy) {
   if (CAVE_TEST_MODE) return 'plains';
   var n = biomeNoise(wx, wy, 3600);
@@ -4524,6 +4845,30 @@ function sampleCavePortal(e, x, y) {
   return {along: along, cross: cross, perp: perp, coreW: coreW, lat: lat,
     tAxial: axial, t: axial * lat, inCore: perp <= coreW,
     isInside: along >= -inner && along <= 0, covered: along <= 0, entrance: e};
+}
+
+// A cave boundary wall ends at the roof, inside the cover rock, not at the
+// highest nearby grass sample. Test the wall's own footprint: a surface tree
+// merely adjacent to a cave must retain its ordinary height. Mesh vertices
+// bound the piecewise-linear cover, including non-flat wall-cell corners.
+function getCaveWallRoofLimit(mesh, gx, gy, cellSize) {
+  if (!mesh || !mesh.layerCount || !mesh.surfaceH) return Infinity;
+  var x0=Math.max(0,Math.floor(gx*cellSize/mesh.gridSize));
+  var y0=Math.max(0,Math.floor(gy*cellSize/mesh.gridSize));
+  var x1=Math.min(mesh.w-1,Math.ceil((gx+1)*cellSize/mesh.gridSize));
+  var y1=Math.min(mesh.h-1,Math.ceil((gy+1)*cellSize/mesh.gridSize));
+  var roof=-Infinity,cover=Infinity;
+  for(var y=y0;y<=y1;y++)for(var x=x0;x<=x1;x++){
+    var i=y*mesh.w+x;
+    if(Number.isFinite(mesh.surfaceH[i]))cover=Math.min(cover,mesh.surfaceH[i]);
+    for(var li=0;li<mesh.layerCount[i];li++){
+      if(mesh['l'+li+'Type'][i]===2)roof=Math.max(roof,mesh['l'+li+'TopZ'][i]);
+    }
+  }
+  // Endpoint ceiling closure in the wall renderer remains authoritative when
+  // the roof slopes. This quarter-unit overlap is a geometric safety margin,
+  // never a camera-dependent visibility switch or a change to walk support.
+  return roof>-Infinity?Math.min(roof,cover-0.25):Infinity;
 }
 
 function generateCaveNetwork(regionX, regionY) {
@@ -4945,6 +5290,34 @@ function caveChamberContentPoint(chamber, offsetX, offsetY) {
   return {ownerCX: cx, ownerCY: cy,
     x: Math.max(cx * CHUNK_SIZE + inset, Math.min((cx + 1) * CHUNK_SIZE - inset, chamber.cx + offsetX)),
     y: Math.max(cy * CHUNK_SIZE + inset, Math.min((cy + 1) * CHUNK_SIZE - inset, chamber.cy + offsetY))};
+}
+
+// A hut is authored facing north, then quarter-turned to match its open side.
+// The wider broken footprint keeps the camera away from the near plane and
+// gives the radius-6 player real clearance through a three-cell doorway.
+function rotateRuinCellOffset(dx, dy, facing) {
+  facing = (facing | 0) & 3;
+  if (facing === 1) return {dx: -dy, dy: dx};
+  if (facing === 2) return {dx: -dx, dy: -dy};
+  if (facing === 3) return {dx: dy, dy: -dx};
+  return {dx: dx, dy: dy};
+}
+
+function buildHutRuinCells(facing) {
+  // Base orientation: open to the north (negative Y). The rear wall is the
+  // tallest surviving run; the side walls descend toward a three-cell entry.
+  // The missing front-right corner keeps the outline visibly ruined.
+  var authored = [
+    [-2, 2, 0.18], [-1, 2, 0.22], [0, 2, 0.24], [1, 2, 0.21], [2, 2, 0.17],
+    [-2,-1, 0.14], [-2, 0, 0.16], [-2, 1, 0.19],
+    [ 2, 0, 0.15], [ 2, 1, 0.18]
+  ];
+  var cells = [];
+  for (var i = 0; i < authored.length; i++) {
+    var turned = rotateRuinCellOffset(authored[i][0], authored[i][1], facing);
+    cells.push({dx: turned.dx, dy: turned.dy, wallH: authored[i][2]});
+  }
+  return cells;
 }
 
 function generateChunk(cx, cy) {
@@ -5556,6 +5929,22 @@ function generateChunk(cx, cy) {
             _fr = Math.floor(_fr * (1 - _ba) + _pf[0] * _ba);
             _fg = Math.floor(_fg * (1 - _ba) + _pf[1] * _ba);
             _fb = Math.floor(_fb * (1 - _ba) + _pf[2] * _ba);
+            // Structure-specific paving is baked into the chunk color mesh, so
+            // it adds visual scale and orientation without per-frame geometry.
+            var _pave = 0;
+            if (cStructure.type === 'fortress') {
+              var _paverX = Math.floor((ffwx - cStructure.centerWX) / (meshGridSize * 2));
+              var _paverY = Math.floor((ffwy - cStructure.centerWY) / meshGridSize);
+              _pave = ((_paverX + _paverY) & 1) ? 4 : -3;
+            } else if (cStructure.type === 'arena') {
+              _pave = (Math.floor(sDist / (meshGridSize * 2)) & 1) ? 4 : -2;
+            } else {
+              var _spokeA = Math.atan2(fdy2, fdx2) - (cStructure.rotation || 0);
+              _pave = (Math.floor(((_spokeA + Math.PI) / (Math.PI * 0.25))) & 1) ? 3 : -2;
+            }
+            _fr = Math.max(0, Math.min(255, _fr + _pave));
+            _fg = Math.max(0, Math.min(255, _fg + _pave));
+            _fb = Math.max(0, Math.min(255, _fb + _pave));
             cColors[fi2] = '#' + ((1<<24)|(_fr<<16)|(_fg<<8)|_fb).toString(16).slice(1);
           }
         }
@@ -5698,22 +6087,23 @@ function generateChunk(cx, cy) {
   // ── Floor scatter ──
   var cScatter = [];
   var scatterRng = chunkRng(cx, cy, 9);
-  var scatterPool;
-  if (biome === 'cave') scatterPool = ['crystal','stalagmite','rock_pile','puddle','boulder','cave_rubble_pile','rock_spire','bookshelf_debris','iron_chain','barrel'];
-  else if (biome === 'ice') scatterPool = ['ice_shard','frozen_pool','icicle_cluster','frost_patch','frozen_skull','cracked_stone'];
-  else if (biome === 'plains') scatterPool = ['tall_grass','wildflower','tall_grass','mesa_boulder','stone_marker','flat_rock','dead_shrub','wildflower','tree_stump'];
-  else if (biome === 'forest') scatterPool = ['tree_stump','fallen_log','tall_grass','wildflower','mushroom','moss_patch','fern','leaf_pile','tall_grass','fern'];
-  else if (biome === 'expanse') scatterPool = ['desert_rock','dead_shrub','dry_bones','stone_column','sand_pillar','cracked_stone','flat_rock'];
-  else scatterPool = ['bones','crate','skull','rubble','rib_cage','flat_rock','cracked_stone'];
-  var scatterDensity = biome === 'cave' ? 0.025 : biome === 'forest' ? 0.022 : biome === 'ground' ? 0.020 : biome === 'expanse' ? 0.018 : 0.015;
+  var baseScatterProfile = getFloorScatterProfile(biome, null);
+  var structureScatterProfile = cStructure ? getFloorScatterProfile(biome, cStructure.type) : null;
   for (var sy = 0; sy < CHUNK_CELLS; sy++) {
     for (var sx = 0; sx < CHUNK_CELLS; sx++) {
       if (cGrid[sy * CHUNK_CELLS + sx]) continue;
-      if (scatterRng() < scatterDensity) {
+      var scatterWX = cx * CHUNK_SIZE + sx * cell + cell * 0.5;
+      var scatterWY = cy * CHUNK_SIZE + sy * cell + cell * 0.5;
+      var structureScatterZone = getStructureFloorScatterZone(cStructure, scatterWX, scatterWY);
+      if (structureScatterZone === 1) continue;
+      var scatterProfile = structureScatterZone === 2 ? structureScatterProfile : baseScatterProfile;
+      var worldGridX = cx * CHUNK_CELLS + sx, worldGridY = cy * CHUNK_CELLS + sy;
+      var clusteredDensity = scatterProfile.density * floorScatterClusterWeight(worldGridX, worldGridY);
+      if (scatterRng() < clusteredDensity) {
         cScatter.push({
           x: cx * CHUNK_SIZE + sx * cell + scatterRng() * cell,
           y: cy * CHUNK_SIZE + sy * cell + scatterRng() * cell,
-          type: scatterPool[Math.floor(scatterRng() * scatterPool.length)],
+          type: scatterProfile.pool[Math.floor(scatterRng() * scatterProfile.pool.length)],
           variant: Math.floor(scatterRng() * 4),
           seed: Math.floor(scatterRng() * 10000)
         });
@@ -5755,11 +6145,11 @@ function generateChunk(cx, cy) {
       else if (side === 'west') dwx -= cell/2;
       else if (side === 'east') dwx += cell/2;
       // Cave-adjacent walls use cave decoration set with extra torches
-      var dTypes = (_adjCave) ? ['torch','torch','torch','stalactite','crack','fungi','moss'] :
-                   (biome === 'cave') ? ['fungi','stalactite','crack','moss','torch','torch'] :
-                   (biome === 'ice')  ? ['icicle','frost_crack','torch'] :
+      var dTypes = (_adjCave) ? ['torch','torch','torch','stalactite_tip','wall_crack','fungi','moss_drip'] :
+                   (biome === 'cave') ? ['fungi','stalactite_tip','wall_crack','moss_drip','torch','torch'] :
+                   (biome === 'ice')  ? ['icicle','frost_crystal','torch'] :
                    (biome === 'forest') ? ['vine_growth','moss_drip','vine_growth','carved_rune','moss_drip','torch'] :
-                   ['torch','shield','crack','vine','banner'];
+                   ['torch','shield','wall_crack','vine_growth','banner'];
       cDecors.push({
         worldX: dwx, worldY: dwy, side: side,
         type: dTypes[Math.floor(decorRng() * dTypes.length)],
@@ -5796,9 +6186,9 @@ function generateChunk(cx, cy) {
           if (Math.abs(cDecors[_di3].worldX - dwx3) < 2 && Math.abs(cDecors[_di3].worldY - dwy3) < 2) { _dup3 = true; break; }
         }
         if (_dup3) continue;
-        var sPool = (cStructure.type === 'fortress') ? ['torch','torch','torch','banner','shield','crack'] :
-                    (cStructure.type === 'arena') ? ['torch','torch','sconce','crack','banner'] :
-                    ['torch','torch','torch','sconce','crack'];
+        var sPool = (cStructure.type === 'fortress') ? ['torch','torch','torch','banner','shield','wall_crack'] :
+                    (cStructure.type === 'arena') ? ['torch','torch','sconce','wall_crack','banner'] :
+                    ['torch','torch','torch','sconce','wall_crack'];
         cDecors.push({
           worldX: dwx3, worldY: dwy3, side: side3,
           type: sPool[Math.floor(sDecorRng() * sPool.length)],
@@ -6108,20 +6498,36 @@ function generateChunk(cx, cy) {
       var ruY = Math.floor(CHUNK_CELLS / 2) + Math.floor(ruinRng() * 5) - 2;
       var ruinCells = [];
       var ruinWallH = 0.35 + ruinRng() * 0.15; // short ruined walls
+      var ruinSiteSpan = Infinity;
 
       if (ruinType === 'hut') {
-        // 3x3 with one open side
-        for (var rdy = -1; rdy <= 1; rdy++) {
-          for (var rdx = -1; rdx <= 1; rdx++) {
-            if (rdx === 0 && rdy === 0) continue; // hollow inside
-            // Open side based on facing
-            if (facing === 0 && rdy === -1 && rdx === 0) continue;
-            if (facing === 1 && rdx === 1 && rdy === 0) continue;
-            if (facing === 2 && rdy === 1 && rdx === 0) continue;
-            if (facing === 3 && rdx === -1 && rdy === 0) continue;
-            ruinCells.push({dx: rdx, dy: rdy});
+        // Search the nearby center cells for the flattest dry 7x7 pad. A hut
+        // embedded in a steep bank or pool turns its otherwise short remnants
+        // into tall exposed slabs and makes the doorway unreadable.
+        var ruinStartX = ruX, ruinStartY = ruY;
+        for (var rsoY = -3; rsoY <= 3; rsoY++) {
+          for (var rsoX = -3; rsoX <= 3; rsoX++) {
+            var rscX = ruinStartX + rsoX, rscY = ruinStartY + rsoY;
+            if (rscX < 4 || rscX >= CHUNK_CELLS - 4 || rscY < 4 || rscY >= CHUNK_CELLS - 4) continue;
+            var rsMin = Infinity, rsMax = -Infinity, rsDry = true;
+            for (var rspY = -3; rspY <= 3 && rsDry; rspY++) {
+              for (var rspX = -3; rspX <= 3; rspX++) {
+                var rsmx = Math.max(0, Math.min(meshW - 1,
+                  Math.floor(((rscX + rspX) * cell + cell * 0.5) / meshGridSize)));
+                var rsmy = Math.max(0, Math.min(meshH - 1,
+                  Math.floor(((rscY + rspY) * cell + cell * 0.5) / meshGridSize)));
+                var rsmi = rsmy * meshW + rsmx;
+                if (cWater[rsmi]) { rsDry = false; break; }
+                var rsh = cHeights[rsmi];
+                if (rsh < rsMin) rsMin = rsh;
+                if (rsh > rsMax) rsMax = rsh;
+              }
+            }
+            var rsSpan = rsDry ? rsMax - rsMin : Infinity;
+            if (rsSpan < ruinSiteSpan) { ruinSiteSpan = rsSpan; ruX = rscX; ruY = rscY; }
           }
         }
+        ruinCells = buildHutRuinCells(facing);
       } else if (ruinType === 'tower_base') {
         // 2x2 solid short walls
         for (var rdy2 = 0; rdy2 <= 1; rdy2++) {
@@ -6158,15 +6564,70 @@ function generateChunk(cx, cy) {
         var rgx = ruX + ruinCells[rci].dx, rgy = ruY + ruinCells[rci].dy;
         if (rgx < 1 || rgx >= CHUNK_CELLS - 1 || rgy < 1 || rgy >= CHUNK_CELLS - 1) { ruinValid = false; break; }
       }
+      // Hut pads need one clear cell outside their 5x4 footprint. Do not cut
+      // that pad through a layered cave/entrance if one shares this chunk.
+      var ruinPadRadius = ruinType === 'hut' ? 3 : 0;
+      if (ruinValid && ruinType === 'hut' && ruinSiteSpan > 1.4) ruinValid = false;
+      if (ruinValid && ruinPadRadius) {
+        for (var rpdy = -ruinPadRadius; rpdy <= ruinPadRadius && ruinValid; rpdy++) {
+          for (var rpdx = -ruinPadRadius; rpdx <= ruinPadRadius; rpdx++) {
+            var rpgx = ruX + rpdx, rpgy = ruY + rpdy;
+            if (rpgx < 1 || rpgx >= CHUNK_CELLS - 1 || rpgy < 1 || rpgy >= CHUNK_CELLS - 1) {
+              ruinValid = false; break;
+            }
+            if (cCaveNets.length) {
+              var rpwx = cx * CHUNK_SIZE + rpgx * cell + cell * 0.5;
+              var rpwy = cy * CHUNK_SIZE + rpgy * cell + cell * 0.5;
+              if (queryCaveGeometry(rpwx, rpwy, cCaveNets, getEndlessNaturalSurfaceH(rpwx, rpwy))) {
+                ruinValid = false; break;
+              }
+            }
+          }
+        }
+      }
       if (ruinValid) {
+        if (ruinPadRadius) {
+          // Reserve a clean 7x7 authored pad before placing the hut. Natural
+          // noise walls otherwise fuse to its silhouette or close the door.
+          for (var rpcy = -ruinPadRadius; rpcy <= ruinPadRadius; rpcy++) {
+            for (var rpcx = -ruinPadRadius; rpcx <= ruinPadRadius; rpcx++) {
+              var rpci = (ruY + rpcy) * CHUNK_CELLS + (ruX + rpcx);
+              cGrid[rpci] = 0; cWallH[rpci] = 0;
+              cWallCR[rpci] = 0; cWallCG[rpci] = 0; cWallCB[rpci] = 0;
+            }
+          }
+          function _outsideHutPadWorld(o) {
+            var ogx = Math.floor((o.x - cx * CHUNK_SIZE) / cell);
+            var ogy = Math.floor((o.y - cy * CHUNK_SIZE) / cell);
+            return Math.abs(ogx - ruX) > ruinPadRadius || Math.abs(ogy - ruY) > ruinPadRadius;
+          }
+          // These collections were authored earlier in the chunk pass. Prune
+          // stale occupants instead of leaving grass, torches or actors inside
+          // the newly reserved hut and its approach.
+          cScatter = cScatter.filter(_outsideHutPadWorld);
+          cChests = cChests.filter(_outsideHutPadWorld);
+          cEnemies = cEnemies.filter(_outsideHutPadWorld);
+          cSpawners = cSpawners.filter(_outsideHutPadWorld);
+          cDecors = cDecors.filter(function(d) {
+            return Math.abs(d.gridX - ruX) > ruinPadRadius || Math.abs(d.gridY - ruY) > ruinPadRadius;
+          });
+        }
+        var ruinStone = (typeof GAME_MATERIALS !== 'undefined' && GAME_MATERIALS.rubbleStone) ?
+          GAME_MATERIALS.rubbleStone.packed : {base:0x787060, shadow:0x686058, lit:0x888070};
         for (var rci2 = 0; rci2 < ruinCells.length; rci2++) {
           var rgx2 = ruX + ruinCells[rci2].dx, rgy2 = ruY + ruinCells[rci2].dy;
-          cGrid[rgy2 * CHUNK_CELLS + rgx2] = 1;
-          cWallH[rgy2 * CHUNK_CELLS + rgx2] = ruinWallH;
+          var ruinCellIdx = rgy2 * CHUNK_CELLS + rgx2;
+          cGrid[ruinCellIdx] = 1;
+          cWallH[ruinCellIdx] = Number.isFinite(ruinCells[rci2].wallH) ? ruinCells[rci2].wallH : ruinWallH;
+          if (ruinType === 'hut') {
+            var ruinPacked = rci2 % 5 === 1 ? ruinStone.lit : rci2 % 4 === 0 ? ruinStone.shadow : ruinStone.base;
+            cWallCR[ruinCellIdx] = (ruinPacked >>> 16) & 255;
+            cWallCG[ruinCellIdx] = (ruinPacked >>> 8) & 255;
+            cWallCB[ruinCellIdx] = ruinPacked & 255;
+          }
         }
-        // Clear floor inside for hut. Hall geometry already builds its
-        // open side into the perimeter-wall loop above (and doesn't mark
-        // interior cells as walls to begin with), so no post-stamp clearing.
+        // The authored hut footprint and hall loop both leave their interiors
+        // open; keep the center explicitly clear for older saved chunks.
         if (ruinType === 'hut') {
           cGrid[ruY * CHUNK_CELLS + ruX] = 0;
         }
@@ -6174,7 +6635,8 @@ function generateChunk(cx, cy) {
           x: cx * CHUNK_SIZE + ruX * cell + cell / 2,
           y: cy * CHUNK_SIZE + ruY * cell + cell / 2,
           ruinType: ruinType, facing: facing,
-          cells: ruinCells
+          cells: ruinCells, padRadius: ruinPadRadius,
+          siteSpan: Number.isFinite(ruinSiteSpan) ? ruinSiteSpan : null
         };
         // 15% chance of a stat pickup inside this ruin
         var spRng = chunkRng(cx, cy, 90);
@@ -6287,9 +6749,20 @@ function generateChunk(cx, cy) {
   return chunk;
 }
 
+// Old generated chunks can survive in memory across a source reload. Normalize
+// their former names at the window boundary so every stored wall item remains
+// visible after the art vocabulary changed.
+var WALL_DECOR_TYPE_ALIASES = Object.freeze({
+  stalactite:'stalactite_tip', crack:'wall_crack', moss:'moss_drip',
+  frost_crack:'frost_crystal', vine:'vine_growth'
+});
+function canonicalWallDecorationType(type) {
+  return WALL_DECOR_TYPE_ALIASES[type] || type;
+}
+
 function chunkWallDecorationInWindow(d, chunkWindowX, chunkWindowY) {
   return {worldX: d.worldX - windowOriginX, worldY: d.worldY - windowOriginY,
-    side: d.side, type: d.type,
+    side: d.side, type: canonicalWallDecorationType(d.type),
     gridX: d.gridX + chunkWindowX * CHUNK_CELLS,
     gridY: d.gridY + chunkWindowY * CHUNK_CELLS};
 }
@@ -6638,12 +7111,11 @@ function assembleWindow(centerCX, centerCY) {
     if (capH[iC] < cz + 0.25) capH[iC] = cz + 0.25;
   }
 
-  // Insert cap layer (type=4) into the existing layer stack for each cap
-  // cell, along with its color. Cap color varies per-cell around the local
-  // biome color so stacked terrain reads as distinct strata, not a flat
-  // surface. Colors ride the insertion sort alongside Z and type.
+  // Insert the cap as the same exterior terrain skin, not a new material.
+  // Its pristine world-authored color already includes biome blending and
+  // elevation tint. Cave-only variation would reveal the underground outline.
+  // Colors ride the insertion sort alongside Z and type.
   var layerTmpZ = new Float32Array(5), layerTmpT = new Uint8Array(5), layerTmpC = new Array(5);
-  var _capRng = (function(){ var s = 1664525; return function(){ s = (s * 1103515245 + 12345) | 0; return ((s >>> 0) % 10000) / 10000; }; })();
   for (var iL = 0; iL < N; iL++) {
     if (!needsCap[iL]) continue;
     var lc = floorMesh.layerCount[iL];
@@ -6652,18 +7124,7 @@ function assembleWindow(centerCX, centerCY) {
     if (lc >= 2) { layerTmpZ[n] = floorMesh.l1TopZ[iL]; layerTmpT[n] = floorMesh.l1Type[iL]; layerTmpC[n] = floorMesh.l1Color[iL]; n++; }
     if (lc >= 3) { layerTmpZ[n] = floorMesh.l2TopZ[iL]; layerTmpT[n] = floorMesh.l2Type[iL]; layerTmpC[n] = floorMesh.l2Color[iL]; n++; }
     if (lc >= 4) { layerTmpZ[n] = floorMesh.l3TopZ[iL]; layerTmpT[n] = floorMesh.l3Type[iL]; layerTmpC[n] = floorMesh.l3Color[iL]; n++; }
-    // Cap color: biome base + mild per-cell variation (±6%) so the surface
-    // over a cave reads as natural patches, not a uniform tint.
-    var _biomeStr = floorMesh.surfaceBiome[iL] || '#9bb06d';
-    var _bp = parseInt(_biomeStr.slice(1), 16);
-    var _br = (_bp >> 16) & 0xff, _bg = (_bp >> 8) & 0xff, _bb = _bp & 0xff;
-    var _jr = 0.94 + _capRng() * 0.12;
-    var _jg = 0.94 + _capRng() * 0.12;
-    var _jb = 0.94 + _capRng() * 0.12;
-    var _cr = Math.min(255, Math.max(0, (_br * _jr) | 0));
-    var _cg = Math.min(255, Math.max(0, (_bg * _jg) | 0));
-    var _cb = Math.min(255, Math.max(0, (_bb * _jb) | 0));
-    var capCol = '#' + ('000000' + (((_cr << 16) | (_cg << 8) | _cb) >>> 0).toString(16)).slice(-6);
+    var capCol = floorMesh.surfaceBiome[iL] || '#9bb06d';
     layerTmpZ[n] = capH[iL]; layerTmpT[n] = 4; layerTmpC[n] = capCol; n++;
     // Insertion sort by topZ — colors swap alongside Z/type
     for (var si = 1; si < n; si++) {
@@ -6840,15 +7301,12 @@ function assembleWindow(centerCX, centerCY) {
   console.log('[WALL-BASE] precomputed ' + _wfbCells + ' walls × 4 faces (' + _wfbSamples + ' samples) in ' + (Date.now() - _wfbT0) + 'ms  caveExtend=' + _cwExtended + ' @ Z=' + _cwDeepZ.toFixed(2));
 
   // ── Per-wall layer tag: wallCapZ ──
-  // For each wall cell, find the lowest walkable-layer Z that sits ABOVE the
-  // wall's top. That's the "ceiling of ground" directly over this wall.
-  // A cave wall (under dirt) has a finite wallCapZ and should be hidden from
-  // a camera above the cap. A surface wall or an entrance-mouth wall has no
-  // layer above it — stored as -Infinity — and renders in all cases.
-  // Compared to cam.z at draw time (both in world Z units = meshZ * 25).
+  // Nearby cover tag retained for render/decor consumers. It is not a wall
+  // height or a camera-height visibility test; the scene depth field resolves
+  // visibility against actual terrain and roof polygons.
   // Per-cell cap lookup: cap Z if the mesh cell has a walkable layer above
-  // any ceiling layer, else -Infinity. Used both for wallCapZ (skip test)
-  // and to compute topZ clamps from neighbors.
+  // any ceiling layer, else -Infinity. The separate roof limit below keeps
+  // wall geometry out of this exterior surface.
   function _mesh_cellCapZ(mi) {
     if (mi < 0 || mi >= floorMesh.layerCount.length) return -Infinity;
     var lc = floorMesh.layerCount[mi];
@@ -6867,11 +7325,9 @@ function assembleWindow(centerCX, centerCY) {
   }
 
   wallCapZ = new Float32Array(gridW * gridH);
-  // wallMaxTopZ: highest allowed wall top in world-mesh Z. Starts at the
-  // cell's own cap (if capped) or ceiling (if uncapped-with-ceiling), then
-  // relaxed to the lowest neighbor-cap Z among 3x3 neighbors so entrance-
-  // mouth walls are clamped to surrounding ground level instead of floating
-  // up to wherever the cave ceiling wanders.
+  // wallMaxTopZ: roof-bound wall height in mesh units. Taking the MAXIMUM
+  // neighboring cap raised cave walls through lower corners of sloping grass,
+  // exposing the cave's outline from above despite a correctly covered roof.
   wallMaxTopZ = new Float32Array(gridW * gridH);
   var _wclCapped = 0;
   for (var _wclGy = 0; _wclGy < gridH; _wclGy++) {
@@ -6901,35 +7357,7 @@ function assembleWindow(centerCX, centerCY) {
       }
       if (_wclOwnCap > -Infinity) { wallCapZ[_wclIdx] = _wclOwnCap; _wclCapped++; }
 
-      // Compute top-Z clamp. For uncapped-with-ceiling cells (mouth walls),
-      // clamp to the min of nearby caps — "the wall can't rise higher than
-      // the surrounding dirt." Fall back to own ceiling if no neighbor has
-      // a cap.
-      var _wclCeilZ = -Infinity;
-      var _wclLc2 = floorMesh.layerCount[_wclMi];
-      for (var _wclLi2 = 0; _wclLi2 < _wclLc2; _wclLi2++) {
-        var _wclT2, _wclZ2;
-        if (_wclLi2 === 0) { _wclT2 = floorMesh.l0Type[_wclMi]; _wclZ2 = floorMesh.l0TopZ[_wclMi]; }
-        else if (_wclLi2 === 1) { _wclT2 = floorMesh.l1Type[_wclMi]; _wclZ2 = floorMesh.l1TopZ[_wclMi]; }
-        else if (_wclLi2 === 2) { _wclT2 = floorMesh.l2Type[_wclMi]; _wclZ2 = floorMesh.l2TopZ[_wclMi]; }
-        else if (_wclLi2 === 3) { _wclT2 = floorMesh.l3Type[_wclMi]; _wclZ2 = floorMesh.l3TopZ[_wclMi]; }
-        else { _wclT2 = floorMesh.l4Type[_wclMi]; _wclZ2 = floorMesh.l4TopZ[_wclMi]; }
-        if (_wclT2 === 2 && _wclZ2 > _wclCeilZ) _wclCeilZ = _wclZ2;
-      }
-      var _wclTopLimit = Infinity;
-      if (_wclOwnCap > -Infinity) {
-        // Capped cell: wall top at cap (wall will be skipped from above
-        // anyway; this bound is for the descent transition).
-        _wclTopLimit = _wclOwnCap;
-      } else if (_wclCeilZ > -Infinity) {
-        // Uncapped cell with a ceiling — a "mouth" cell in a region where
-        // everything is cave interior. Clamp to min(ceiling, SEA_LEVEL_Z).
-        // SEA_LEVEL_Z is the world reference surface (mesh-Z ~ 0 → world 0);
-        // walls can't rise above it by construction of this terrain.
-        var _seaZ = 0.0;
-        _wclTopLimit = Math.min(_wclCeilZ, _seaZ);
-      }
-      wallMaxTopZ[_wclIdx] = _wclTopLimit;
+      wallMaxTopZ[_wclIdx] = getCaveWallRoofLimit(floorMesh,_wclGx,_wclGy,cell);
     }
   }
   console.log('[WALL-CAP] tagged ' + _wclCapped + ' capped walls; wallMaxTopZ computed for all');
@@ -7084,7 +7512,9 @@ function assembleWindow(centerCX, centerCY) {
             type: _st.type,
             centerWX: _st.centerWX, centerWY: _st.centerWY,
             regionX: _st.regionX, regionY: _st.regionY,
-            scale: _st.scale || 1.0
+            scale: _st.scale || 1.0, rotation:_st.rotation || 0,
+            palette:_st.palette, numBuildings:_st.numBuildings || 0,
+            numPillars:_st.numPillars || 8, armCount:_st.armCount || 2
           });
         }
       }
@@ -7469,6 +7899,7 @@ function settlePlayerAtSpawn(preferSurface) {
 }
 
 function resetEndlessMode() {
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(false);
   ENDLESS_MODE = true;
   level = 1;
   collisions = 0;
@@ -7617,6 +8048,7 @@ function resetEndlessMode() {
 }
 
 function resetLevel(lv) {
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(false);
   level = lv || 1;
   collisions = 0;
   startMs = Date.now();
@@ -8016,17 +8448,171 @@ function getWallDecorationAttachment(dec) {
   }
   var span = (topH - baseH) * 25;
   if (!isFinite(span) || span < 4) return null;
-  var tier = WALL_DECOR_TIER[dec.type] || 'smWall';
+  var type = canonicalWallDecorationType(dec.type);
+  var tier = WALL_DECOR_TIER[type] || 'smWall';
   var size = Math.min(32 * getScale3D(tier), span * 0.3);
   var z = baseH * 25 + span * 0.55;
   return {x:x, y:y, z:z, size:size, nx:nx, ny:ny,
     baseZ:baseH*25, topZ:topH*25,
-    flameZ:z + size * (dec.type === 'sconce' ? 1/6 : 1/4)};
+    flameZ:z + size * (type === 'sconce' ? 1/6 : 1/4)};
 }
 
 function getWallDecorationRenderZ(dec) {
   var attachment = getWallDecorationAttachment(dec);
   return attachment ? attachment.z : NaN;
+}
+
+// Upper terrain owns a separate, static receiver bake. The legacy XY light
+// grid remains the interior/other-renderer path; it cannot distinguish a cave
+// floor from grass above the same cave. These heights are render-world Z.
+var _surfaceFloorLightBake = null, _surfaceFloorLightMesh = null;
+var _surfaceFloorLightScale = 0;
+var _surfaceFloorLightStats = {builds:0,elapsedMs:0,firstElapsedMs:null,bytes:0,receivers:0,rays:0,blocked:0};
+
+// Test the two actual stitched terrain triangles, not a bilinear heightfield
+// or a coarse light-grid tile. The segment is local to this mesh cell in XY.
+function _surfaceLightTriangleHit(u, v, du, dv, z, dz, a, sx, sy, first) {
+  var denominator = dz - du * sx - dv * sy;
+  if (Math.abs(denominator) < 1e-10) return false;
+  var t = (a + u * sx + v * sy - z) / denominator;
+  if (t <= 0.0000001 || t >= 0.9999999) return false;
+  var x = u + du * t, y = v + dv * t;
+  return x >= -1e-8 && y >= -1e-8 && x <= 1+1e-8 && y <= 1+1e-8 &&
+    (first ? x + 1e-8 >= y : y + 1e-8 >= x);
+}
+
+function _surfaceLightCellBlocks(mesh, cache, gx, gy, x0, y0, z0, dx, dy, dz) {
+  if (gx < 0 || gy < 0 || gx >= mesh.w-1 || gy >= mesh.h-1) return false;
+  var ci = gy * mesh.w + gx, gs = mesh.gridSize;
+  var u = x0 / gs - gx, v = y0 / gs - gy, du = dx / gs, dv = dy / gs;
+  for (var li = 0; li < mesh.layerCount[ci]; li++) {
+    var type = mesh['l'+li+'Type'][ci], h = mesh['l'+li+'TopZ'][ci];
+    if (type !== 1 && type !== 2 && type !== 3 && type !== 4) continue;
+    var ceiling = type === 2, role = ceiling ? 0 : getFloorRenderLayerRole(mesh,ci,li,type);
+    var tile = getFloorStitchTile(mesh,cache,ci,li,role,h,ceiling), offset = (ci & 255) * 3;
+    var h1=tile.values[offset], h2=tile.values[offset+1], h3=tile.values[offset+2];
+    if (!Number.isFinite(h1) || !Number.isFinite(h2) || !Number.isFinite(h3)) continue;
+    if (!ceiling) {
+      h1=Math.max(h-4.5,Math.min(h+4.5,h1));
+      h2=Math.max(h-4.5,Math.min(h+4.5,h2));
+      h3=Math.max(h-4.5,Math.min(h+4.5,h3));
+    }
+    if (_surfaceLightTriangleHit(u,v,du,dv,z0,dz,h*25,(h1-h)*25,(h3-h1)*25,true) ||
+        _surfaceLightTriangleHit(u,v,du,dv,z0,dz,h*25,(h3-h2)*25,(h2-h)*25,false)) return true;
+  }
+  return false;
+}
+
+// Short static light rays visit crossed mesh cells only. Both sides of floor,
+// cap and ceiling triangles block light, independent of camera facing. This
+// intentionally does not claim shadows from actors, props or every legacy
+// wall renderer; its scope is preventing illumination through solid terrain.
+function surfaceLightRayBlocked(x0,y0,z0,x1,y1,z1,mesh) {
+  if (!mesh || !mesh.layerCount || typeof getFloorStitchCache !== 'function') return false;
+  if (![x0,y0,z0,x1,y1,z1].every(Number.isFinite)) return true;
+  var gs=mesh.gridSize, dx=x1-x0, dy=y1-y0, dz=z1-z0;
+  var gx=Math.floor(x0/gs), gy=Math.floor(y0/gs), endX=Math.floor(x1/gs), endY=Math.floor(y1/gs);
+  var stepX=dx>0?1:dx<0?-1:0, stepY=dy>0?1:dy<0?-1:0;
+  var tx=stepX?((gx+(stepX>0?1:0))*gs-x0)/dx:Infinity;
+  var ty=stepY?((gy+(stepY>0?1:0))*gs-y0)/dy:Infinity;
+  var dtx=stepX?gs/Math.abs(dx):Infinity, dty=stepY?gs/Math.abs(dy):Infinity;
+  var cache=getFloorStitchCache(mesh), steps=Math.abs(endX-gx)+Math.abs(endY-gy)+3;
+  for(var i=0;i<steps;i++) {
+    if(_surfaceLightCellBlocks(mesh,cache,gx,gy,x0,y0,z0,dx,dy,dz)) return true;
+    if(gx===endX && gy===endY) break;
+    if(tx<ty) {gx+=stepX;tx+=dtx;}
+    else if(ty<tx) {gy+=stepY;ty+=dty;}
+    else {gx+=stepX;gy+=stepY;tx+=dtx;ty+=dty;}
+  }
+  return false;
+}
+
+function _surfaceLightReceiverZ(mesh,ci,cache) {
+  var selected=-1, highest=-Infinity;
+  for(var li=0;li<mesh.layerCount[ci];li++) {
+    var type=mesh['l'+li+'Type'][ci], h=mesh['l'+li+'TopZ'][ci];
+    if((type===1||type===3||type===4) && h>highest) {highest=h;selected=li;}
+  }
+  if(selected<0) return NaN;
+  // A floor with a ceiling but no complete cap is still an interior receiver.
+  for(var k=0;k<mesh.layerCount[ci];k++) {
+    if(mesh['l'+k+'Type'][ci]===2 && mesh['l'+k+'TopZ'][ci]>highest) return NaN;
+  }
+  var role=getFloorRenderLayerRole(mesh,ci,selected,mesh['l'+selected+'Type'][ci]);
+  var tile=getFloorStitchTile(mesh,cache,ci,selected,role,highest,false), offset=(ci&255)*3;
+  if(!Number.isFinite(tile.values[offset]) || !Number.isFinite(tile.values[offset+1]) ||
+     !Number.isFinite(tile.values[offset+2])) return NaN;
+  var opposite=Math.max(highest-4.5,Math.min(highest+4.5,tile.values[offset+2]));
+  // The exact center lies on the renderer's NW→SE diagonal. A 0.05 render-
+  // unit offset prevents receiver self-shadow without lifting it over a roof.
+  return (highest+opposite)*12.5+0.05;
+}
+
+function buildSurfaceFloorLighting() {
+  var began=typeof performance!=='undefined'&&performance.now?performance.now():Date.now();
+  var stats={builds:_surfaceFloorLightStats.builds+1,elapsedMs:0,
+    firstElapsedMs:_surfaceFloorLightStats.firstElapsedMs,bytes:0,receivers:0,rays:0,blocked:0};
+  _surfaceFloorLightBake=null; _surfaceFloorLightMesh=null;
+  var mesh=typeof floorMesh!=='undefined'?floorMesh:null;
+  if(mesh && mesh.layerCount && typeof getFloorStitchCache==='function') {
+    var bake=new Float32Array(mesh.w*mesh.h), receiverHeights=new Map(), cache=getFloorStitchCache(mesh);
+    for(var i=0;i<pointLights.length;i++) {
+      var light=pointLights[i];
+      if(!Number.isFinite(light.x)||!Number.isFinite(light.y)||!Number.isFinite(light.z)||
+         !Number.isFinite(light.radius)||light.radius<=0||!Number.isFinite(light.intensity)||light.intensity<=0) continue;
+      var gs=mesh.gridSize, radiusSq=light.radius*light.radius;
+      var x0=Math.max(0,Math.floor((light.x-light.radius)/gs));
+      var y0=Math.max(0,Math.floor((light.y-light.radius)/gs));
+      var x1=Math.min(mesh.w-2,Math.floor((light.x+light.radius)/gs));
+      var y1=Math.min(mesh.h-2,Math.floor((light.y+light.radius)/gs));
+      for(var y=y0;y<=y1;y++)for(var x=x0;x<=x1;x++) {
+        var wx=(x+.5)*gs, wy=(y+.5)*gs, dx=wx-light.x, dy=wy-light.y, distSq=dx*dx+dy*dy;
+        if(distSq>=radiusSq) continue;
+        var ci=y*mesh.w+x, z;
+        if(receiverHeights.has(ci)) z=receiverHeights.get(ci);
+        else {
+          z=_surfaceLightReceiverZ(mesh,ci,cache);receiverHeights.set(ci,z);
+          if(Number.isFinite(z)) stats.receivers++;
+        }
+        if(!Number.isFinite(z)) continue;
+        stats.rays++;
+        if(surfaceLightRayBlocked(light.x,light.y,light.z,wx,wy,z,mesh)) {stats.blocked++;continue;}
+        // Preserve the existing horizontal falloff; only the receiver and
+        // terrain visibility are new. No extra brightness or radius change.
+        bake[ci]+=light.intensity*(1-distSq/radiusSq);
+      }
+    }
+    bake.meshStamp=mesh.walkCandZ;
+    _surfaceFloorLightBake=bake;_surfaceFloorLightMesh=mesh;stats.bytes=bake.byteLength;
+  }
+  stats.elapsedMs=(typeof performance!=='undefined'&&performance.now?performance.now():Date.now())-began;
+  if(_surfaceFloorLightBake && stats.firstElapsedMs===null) stats.firstElapsedMs=stats.elapsedMs;
+  _surfaceFloorLightStats=stats;
+}
+
+function getSurfaceFloorLightAt(mesh,ci,li) {
+  if(!_surfaceFloorLightBake || mesh!==_surfaceFloorLightMesh ||
+     _surfaceFloorLightBake.meshStamp!==mesh.walkCandZ || ci<0 || ci>=_surfaceFloorLightBake.length) return 0;
+  // One receiver per XY, explicitly bound to the highest walkable layer.
+  // Lower uncovered ledges keep their legacy lighting path instead of
+  // borrowing a different height's bake. At most five layer reads, no rays.
+  if(li!==undefined) {
+    if(li<0 || li>=mesh.layerCount[ci]) return NaN;
+    var receiver=-1,highest=-Infinity;
+    for(var k=0;k<mesh.layerCount[ci];k++) {
+      var type=mesh['l'+k+'Type'][ci],h=mesh['l'+k+'TopZ'][ci];
+      if((type===1||type===3||type===4) && h>highest) {highest=h;receiver=k;}
+    }
+    if(li!==receiver) return NaN;
+  }
+  return _surfaceFloorLightBake[ci]*_surfaceFloorLightScale;
+}
+
+function getSurfaceFloorLightStats() {
+  return {builds:_surfaceFloorLightStats.builds,elapsedMs:_surfaceFloorLightStats.elapsedMs,
+    firstElapsedMs:_surfaceFloorLightStats.firstElapsedMs,
+    bytes:_surfaceFloorLightStats.bytes,receivers:_surfaceFloorLightStats.receivers,
+    rays:_surfaceFloorLightStats.rays,blocked:_surfaceFloorLightStats.blocked};
 }
 
 function buildPointLights() {
@@ -8084,6 +8670,7 @@ function buildPointLights() {
       }
     }
   }
+  buildSurfaceFloorLighting();
   console.log('[LIGHTS] Built ' + pointLights.length + ' point lights (' +
     wallDecorations.filter(function(d){ return d.type === 'torch' || d.type === 'sconce'; }).length + ' torches, ' +
     deepCaveEntrances.length + ' cave entrances) — baked to static grid');
@@ -8091,13 +8678,15 @@ function buildPointLights() {
 
 var _lightGridLastScale = -1, _lightGridLastCamGX = -9999, _lightGridLastCamGY = -9999;
 function updateLightGrid() {
-  if (!_lightGrid || (!pointLights.length && !playerUnderground)) return;
   var now = Date.now();
-  var darkFactor = Math.max(0, 1.0 - ambientLight);
   // Day/night multiplier: torches matter less during day (0.3× min, 1× at night).
   // Global gentle flicker — one sin wave shared across all lights (cheap).
-  var dayScale = 0.3 + 0.7 * darkFactor;
   var flicker = 0.95 + 0.04 * Math.sin(now * 0.007) + 0.02 * Math.sin(now * 0.013);
+  var surfaceAmbient=typeof renderSurfaceAmbient!=='undefined'?renderSurfaceAmbient:ambientLight;
+  _surfaceFloorLightScale=(0.3+0.7*Math.max(0,1-surfaceAmbient))*flicker;
+  if (!_lightGrid || (!pointLights.length && !playerUnderground)) return;
+  var darkFactor = Math.max(0, 1.0 - ambientLight);
+  var dayScale = 0.3 + 0.7 * darkFactor;
   var scale = dayScale * flicker;
   var camGX = Math.floor(cam.x / _lightCellSize);
   var camGY = Math.floor(cam.y / _lightCellSize);
@@ -8175,48 +8764,187 @@ function isDecorationOccluded(decorX, decorY, camX, camY) {
   return false;
 }
 
-function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade) {
+function getWallDecorationVariant(dec) {
+  if (!dec) return 0;
+  var sideCode = dec.side === 'north' ? 11 : dec.side === 'south' ? 23 : dec.side === 'west' ? 37 : 53;
+  var h = Math.imul((dec.gridX | 0) + 4099, 73856093) ^
+          Math.imul((dec.gridY | 0) + 8191, 19349663) ^ sideCode;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+function wallPropLitColor(material, role, brightness) {
+  var packed = GAME_MATERIALS[material].packed[role];
+  var light = Math.max(0.42, Math.min(1.08, 0.46 + brightness * 0.6));
+  return rgbQ(Math.min(255, Math.floor(((packed >>> 16) & 255) * light)),
+    Math.min(255, Math.floor(((packed >>> 8) & 255) * light)),
+    Math.min(255, Math.floor((packed & 255) * light)));
+}
+
+function traceWallShieldPath(x, y, w, h) {
+  ctx.beginPath();
+  ctx.moveTo(x - w * 0.44, y - h * 0.42);
+  ctx.quadraticCurveTo(x, y - h * 0.58, x + w * 0.44, y - h * 0.42);
+  ctx.lineTo(x + w * 0.36, y + h * 0.12);
+  ctx.quadraticCurveTo(x + w * 0.24, y + h * 0.42, x, y + h * 0.58);
+  ctx.quadraticCurveTo(x - w * 0.24, y + h * 0.42, x - w * 0.36, y + h * 0.12);
+  ctx.closePath();
+}
+
+function traceWallBannerCloth(x, y, w, h) {
+  ctx.beginPath();
+  ctx.moveTo(x - w * 0.39, y - h * 0.34);
+  ctx.lineTo(x + w * 0.39, y - h * 0.34);
+  ctx.lineTo(x + w * 0.36, y + h * 0.42);
+  ctx.lineTo(x, y + h * 0.28);
+  ctx.lineTo(x - w * 0.36, y + h * 0.42);
+  ctx.closePath();
+}
+
+function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade, dec, now) {
   ctx.save();
+  type = canonicalWallDecorationType(type);
   var brightness = Math.max(0.4, viewAngle);
-  ctx.globalAlpha = Math.max(0.6, brightness) * (fade !== undefined ? fade : 1);
+  var baseAlpha = Math.max(0.6, brightness) * (fade !== undefined ? fade : 1);
+  ctx.globalAlpha = baseAlpha;
   var widthScale = 1.0;
   var heightScale = 1.0;
   var distanceFactor = Math.max(0.0, Math.min(1.0, (120 - dist) / 80));
   var angleEffect = distanceFactor * (1.0 - viewAngle);
   widthScale = 1.0 - angleEffect * 0.6;
-  var w = Math.floor(size * widthScale);
-  var h = Math.floor(size * heightScale);
+  var w = Math.max(1, size * widthScale);
+  var h = Math.max(1, size * heightScale);
+  var variant = getWallDecorationVariant(dec);
+  if (!Number.isFinite(now)) now = Date.now();
   if (type === 'torch') {
-    var stickColor = rgbQ(Math.floor(139 * brightness), Math.floor(69 * brightness), Math.floor(19 * brightness));
-    ctx.fillStyle = stickColor;
-    ctx.fillRect(x - w / 6, y, w / 3, h);
-    ctx.fillStyle = '#FF4500'; ctx.globalAlpha *= 0.9;
-    ctx.beginPath(); ctx.ellipse(x, y - h / 4, w / 3, h / 2, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#FFD700';
-    ctx.beginPath(); ctx.ellipse(x, y - h / 3, w / 5, h / 4, 0, 0, Math.PI * 2); ctx.fill();
-  } else if (type === 'shield') {
-    var metalColor = rgbQ(Math.floor(192 * brightness), Math.floor(192 * brightness), Math.floor(192 * brightness));
-    ctx.fillStyle = metalColor;
-    ctx.beginPath(); ctx.ellipse(x, y, w / 2, h * 0.6, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#8B0000'; ctx.globalAlpha *= 0.8;
+    // Iron backplate and bracket make the torch visibly attached to the wall.
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'shadow', brightness);
+    ctx.beginPath(); ctx.ellipse(x, y + h * 0.10, w * 0.15, h * 0.23, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'base', brightness);
+    ctx.fillRect(x - w * 0.07, y + h * 0.04, w * 0.14, h * 0.34);
     ctx.beginPath();
-    ctx.moveTo(x, y - h / 3); ctx.lineTo(x - w / 4, y); ctx.lineTo(x, y + h / 3); ctx.lineTo(x + w / 4, y);
+    ctx.moveTo(x - w * 0.04, y + h * 0.14); ctx.lineTo(x + w * 0.18, y + h * 0.02);
+    ctx.lineTo(x + w * 0.22, y + h * 0.10); ctx.lineTo(x + w * 0.02, y + h * 0.24);
     ctx.closePath(); ctx.fill();
+    // Tapered resin-darkened wooden shaft and two retaining bands.
+    ctx.fillStyle = wallPropLitColor('wallPropWood', 'shadow', brightness);
+    ctx.beginPath(); ctx.moveTo(x - w * 0.11, y - h * 0.01); ctx.lineTo(x + w * 0.12, y - h * 0.01);
+    ctx.lineTo(x + w * 0.08, y + h * 0.82); ctx.lineTo(x - w * 0.07, y + h * 0.82); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropWood', 'lit', brightness);
+    ctx.fillRect(x - w * 0.06, y + h * 0.05, w * 0.05, h * 0.70);
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'deep', brightness);
+    ctx.fillRect(x - w * 0.14, y + h * 0.02, w * 0.28, Math.max(1, h * 0.07));
+    ctx.fillRect(x - w * 0.12, y + h * 0.17, w * 0.24, Math.max(1, h * 0.06));
+    // Three flat flame layers give a readable core with only bounded paths.
+    var torchWave = Math.sin(now * 0.009 + (variant & 255) * 0.17);
+    var torchX = x + torchWave * w * 0.035;
+    var torchTop = y - h * (0.65 + torchWave * 0.035);
+    ctx.globalAlpha = baseAlpha * 0.92;
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.outer;
+    ctx.beginPath(); ctx.moveTo(torchX - w * 0.24, y + h * 0.03);
+    ctx.quadraticCurveTo(torchX - w * 0.30, y - h * 0.28, torchX, torchTop);
+    ctx.quadraticCurveTo(torchX + w * 0.30, y - h * 0.25, torchX + w * 0.22, y + h * 0.03);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.inner;
+    ctx.beginPath(); ctx.ellipse(torchX, y - h * 0.19, w * 0.16, h * 0.29, torchWave * 0.08, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.core;
+    ctx.beginPath(); ctx.ellipse(torchX, y - h * 0.10, w * 0.07, h * 0.14, 0, 0, Math.PI * 2); ctx.fill();
+  } else if (type === 'shield') {
+    // Heater-shield silhouette, iron rim, heraldic field and raised boss.
+    ctx.globalAlpha = baseAlpha * 0.34;
+    ctx.fillStyle = GAME_MATERIALS.wallPropIron.hex.deep;
+    traceWallShieldPath(x + w * 0.07, y + h * 0.07, w, h); ctx.fill();
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'lit', brightness);
+    traceWallShieldPath(x, y, w, h); ctx.fill();
+    var shieldFamily = variant % 3;
+    var shieldRole = shieldFamily === 0 ? 'red' : shieldFamily === 1 ? 'blue' : 'purple';
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', shieldRole, brightness);
+    traceWallShieldPath(x, y + h * 0.01, w * 0.79, h * 0.79); ctx.fill();
+    ctx.strokeStyle = wallPropLitColor('wallPropIron', 'edge', brightness);
+    ctx.lineWidth = Math.max(1, w * 0.055);
+    traceWallShieldPath(x, y, w * 0.91, h * 0.91); ctx.stroke();
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', 'gold', brightness);
+    if (shieldFamily === 0) {
+      ctx.fillRect(x - w * 0.055, y - h * 0.35, w * 0.11, h * 0.68);
+      ctx.fillRect(x - w * 0.27, y - h * 0.07, w * 0.54, h * 0.11);
+    } else if (shieldFamily === 1) {
+      ctx.beginPath(); ctx.moveTo(x - w * 0.25, y - h * 0.16); ctx.lineTo(x, y + h * 0.12);
+      ctx.lineTo(x + w * 0.25, y - h * 0.16); ctx.lineTo(x + w * 0.25, y - h * 0.02);
+      ctx.lineTo(x, y + h * 0.27); ctx.lineTo(x - w * 0.25, y - h * 0.02); ctx.closePath(); ctx.fill();
+    } else {
+      ctx.beginPath(); ctx.arc(x, y - h * 0.03, w * 0.20, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'edge', brightness);
+    ctx.beginPath(); ctx.arc(x, y - h * 0.02, w * 0.09, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'shadow', brightness);
+    ctx.beginPath(); ctx.arc(x + w * 0.02, y, w * 0.045, 0, Math.PI * 2); ctx.fill();
   } else if (type === 'banner') {
-    var poleColor = rgbQ(Math.floor(139 * brightness), Math.floor(69 * brightness), Math.floor(19 * brightness));
-    ctx.fillStyle = poleColor;
-    ctx.fillRect(x - w / 8, y - h / 2, w / 4, h);
-    var fabricColor = rgbQ(Math.floor(128 * brightness), 0, Math.floor(128 * brightness));
-    ctx.fillStyle = fabricColor;
-    ctx.fillRect(x, y - h / 2, w / 2, h * 0.7);
-    ctx.fillStyle = '#FFD700'; ctx.globalAlpha *= 0.9;
-    ctx.fillRect(x + w / 8, y - h / 3, w / 4, h / 6);
+    var bannerFamily = variant % 3;
+    var bannerRole = bannerFamily === 0 ? 'red' : bannerFamily === 1 ? 'blue' : 'purple';
+    ctx.globalAlpha = baseAlpha * 0.3;
+    ctx.fillStyle = GAME_MATERIALS.wallPropIron.hex.deep;
+    traceWallBannerCloth(x + w * 0.06, y + h * 0.07, w, h); ctx.fill();
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = wallPropLitColor('wallPropWood', 'shadow', brightness);
+    ctx.fillRect(x - w * 0.49, y - h * 0.44, w * 0.98, Math.max(1, h * 0.08));
+    ctx.fillRect(x - w * 0.025, y - h * 0.47, w * 0.05, h * 0.14);
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'lit', brightness);
+    ctx.beginPath(); ctx.arc(x - w * 0.49, y - h * 0.40, w * 0.07, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + w * 0.49, y - h * 0.40, w * 0.07, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', bannerRole, brightness);
+    traceWallBannerCloth(x, y, w, h); ctx.fill();
+    ctx.globalAlpha = baseAlpha * 0.36;
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', bannerRole + 'Deep', brightness);
+    ctx.beginPath(); ctx.moveTo(x - w * 0.31, y - h * 0.33); ctx.lineTo(x - w * 0.13, y - h * 0.33);
+    ctx.lineTo(x - w * 0.08, y + h * 0.29); ctx.lineTo(x - w * 0.27, y + h * 0.36); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = wallPropLitColor('wallHeraldry', 'goldLit', brightness);
+    if (bannerFamily === 0) {
+      ctx.fillRect(x - w * 0.06, y - h * 0.22, w * 0.12, h * 0.38);
+      ctx.fillRect(x - w * 0.22, y - h * 0.08, w * 0.44, h * 0.10);
+    } else if (bannerFamily === 1) {
+      ctx.beginPath(); ctx.moveTo(x - w * 0.22, y - h * 0.13); ctx.lineTo(x, y + h * 0.12);
+      ctx.lineTo(x + w * 0.22, y - h * 0.13); ctx.lineTo(x + w * 0.22, y + h * 0.01);
+      ctx.lineTo(x, y + h * 0.26); ctx.lineTo(x - w * 0.22, y + h * 0.01); ctx.closePath(); ctx.fill();
+    } else {
+      ctx.beginPath(); ctx.arc(x, y - h * 0.04, w * 0.17, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = wallPropLitColor('wallHeraldry', 'linen', brightness);
+      ctx.beginPath(); ctx.arc(x, y - h * 0.04, w * 0.07, 0, Math.PI * 2); ctx.fill();
+    }
   } else if (type === 'sconce') {
-    var baseColor = rgbQ(Math.floor(105 * brightness), Math.floor(105 * brightness), Math.floor(105 * brightness));
-    ctx.fillStyle = baseColor;
-    ctx.beginPath(); ctx.arc(x, y, w / 3, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#FF6347'; ctx.globalAlpha *= 0.8;
-    ctx.beginPath(); ctx.ellipse(x, y - h / 6, w / 4, h / 3, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'shadow', brightness);
+    ctx.beginPath(); ctx.ellipse(x, y + h * 0.10, w * 0.24, h * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'base', brightness);
+    ctx.beginPath(); ctx.arc(x, y + h * 0.07, w * 0.14, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x - w * 0.07, y + h * 0.04); ctx.lineTo(x + w * 0.26, y - h * 0.03);
+    ctx.lineTo(x + w * 0.30, y + h * 0.08); ctx.lineTo(x, y + h * 0.18); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'deep', brightness);
+    ctx.beginPath(); ctx.ellipse(x + w * 0.25, y - h * 0.02, w * 0.25, h * 0.10, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = wallPropLitColor('wallPropIron', 'lit', brightness);
+    ctx.beginPath(); ctx.ellipse(x + w * 0.25, y - h * 0.06, w * 0.19, h * 0.07, 0, 0, Math.PI * 2); ctx.fill();
+    var sconceWave = Math.sin(now * 0.010 + (variant & 255) * 0.13);
+    var sconceX = x + w * 0.25 + sconceWave * w * 0.025;
+    ctx.globalAlpha = baseAlpha * 0.9;
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.outer;
+    ctx.beginPath(); ctx.ellipse(sconceX, y - h * 0.25, w * 0.18, h * 0.29, sconceWave * 0.08, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.inner;
+    ctx.beginPath(); ctx.ellipse(sconceX, y - h * 0.19, w * 0.10, h * 0.18, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = GAME_MATERIALS.wallFlame.hex.core;
+    ctx.beginPath(); ctx.ellipse(sconceX, y - h * 0.13, w * 0.045, h * 0.09, 0, 0, Math.PI * 2); ctx.fill();
+
+  } else if (type === 'wall_crack') {
+    // A real renderer for the former invisible `crack` decoration.
+    ctx.globalAlpha = baseAlpha * 0.62;
+    ctx.strokeStyle = wallPropLitColor('wallPropIron', 'deep', brightness);
+    ctx.lineWidth = Math.max(1, w * 0.045); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x - w * 0.18, y - h * 0.40); ctx.lineTo(x + w * 0.02, y - h * 0.16);
+    ctx.lineTo(x - w * 0.05, y + h * 0.04); ctx.lineTo(x + w * 0.20, y + h * 0.37);
+    ctx.moveTo(x + w * 0.01, y - h * 0.16); ctx.lineTo(x + w * 0.27, y - h * 0.27);
+    ctx.moveTo(x - w * 0.04, y + h * 0.04); ctx.lineTo(x - w * 0.26, y + h * 0.19);
+    ctx.moveTo(x + w * 0.10, y + h * 0.23); ctx.lineTo(x + w * 0.30, y + h * 0.15);
+    ctx.stroke();
 
   // ── Cave ornament types ─────────────────────────────────────────────────────
 
@@ -8228,15 +8956,15 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
       var fo = offsets[fi];
       var fr = fo[2] * h;
       // Glow halo
-      ctx.globalAlpha = 0.18 * brightness;
+      ctx.globalAlpha = 0.18 * baseAlpha;
       ctx.fillStyle = fungCols[fi % fungCols.length];
       ctx.beginPath(); ctx.arc(x + fo[0], y + fo[1], fr * 2.2, 0, Math.PI * 2); ctx.fill();
       // Cap
-      ctx.globalAlpha = 0.75 * brightness;
+      ctx.globalAlpha = 0.75 * baseAlpha;
       ctx.fillStyle = fungCols[fi % fungCols.length];
       ctx.beginPath(); ctx.arc(x + fo[0], y + fo[1], fr, 0, Math.PI * 2); ctx.fill();
       // Stem
-      ctx.globalAlpha = 0.5 * brightness;
+      ctx.globalAlpha = 0.5 * baseAlpha;
       ctx.fillStyle = '#c8c0a8';
       ctx.fillRect(x + fo[0] - fr * 0.2, y + fo[1], fr * 0.4, fr * 1.3);
     }
@@ -8249,13 +8977,13 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
       var mx2 = x + drips[mi][0], my2 = y - h * 0.3 + drips[mi][1];
       var dripH = h * (0.3 + mi * 0.07);
       var dripW = Math.max(1, Math.floor(w * 0.04));
-      ctx.fillStyle = mossGreen; ctx.globalAlpha = 0.7 * brightness;
+      ctx.fillStyle = mossGreen; ctx.globalAlpha = 0.7 * baseAlpha;
       ctx.fillRect(mx2 - dripW * 0.5, my2, dripW, dripH);
       // Drip bulb at bottom
       ctx.beginPath(); ctx.arc(mx2, my2 + dripH, dripW * 0.8, 0, Math.PI * 2); ctx.fill();
     }
     // Moss patch — irregular cluster near base of drips
-    ctx.globalAlpha = 0.55 * brightness;
+    ctx.globalAlpha = 0.55 * baseAlpha;
     ctx.fillStyle = rgbQ(Math.floor(30 * brightness), Math.floor(70 * brightness), Math.floor(20 * brightness));
     ctx.beginPath(); ctx.ellipse(x, y + h * 0.1, w * 0.45, h * 0.18, 0, 0, Math.PI * 2); ctx.fill();
 
@@ -8264,14 +8992,14 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
     var stoneColor = rgbQ(Math.floor(70 * brightness), Math.floor(60 * brightness), Math.floor(50 * brightness));
     var tipY = y - h * 0.35;   // anchor near top of wall
     // Main spike
-    ctx.fillStyle = stoneColor; ctx.globalAlpha = 0.85 * brightness;
+    ctx.fillStyle = stoneColor; ctx.globalAlpha = 0.85 * baseAlpha;
     ctx.beginPath();
     ctx.moveTo(x - w * 0.18, tipY);
     ctx.lineTo(x + w * 0.18, tipY);
     ctx.lineTo(x, tipY + h * 0.45);
     ctx.closePath(); ctx.fill();
     // Secondary smaller spike offset
-    ctx.globalAlpha = 0.65 * brightness;
+    ctx.globalAlpha = 0.65 * baseAlpha;
     ctx.beginPath();
     ctx.moveTo(x + w * 0.22, tipY + h * 0.04);
     ctx.lineTo(x + w * 0.42, tipY + h * 0.04);
@@ -8291,7 +9019,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
     for (var ii2 = 0; ii2 < iceOff.length; ii2++) {
       var io = iceOff[ii2];
       var spikeH = h * (0.25 + ii2 * 0.08);
-      ctx.fillStyle = iceCols[ii2 % iceCols.length]; ctx.globalAlpha = 0.7 * brightness;
+      ctx.fillStyle = iceCols[ii2 % iceCols.length]; ctx.globalAlpha = 0.7 * baseAlpha;
       ctx.beginPath();
       ctx.moveTo(x + io[0] - w*0.04, y - h*0.3 + io[1]);
       ctx.lineTo(x + io[0] + w*0.04, y - h*0.3 + io[1]);
@@ -8304,7 +9032,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
 
   } else if (type === 'frost_crystal') {
     // Hexagonal frost crystal on wall surface
-    ctx.globalAlpha = 0.6 * brightness;
+    ctx.globalAlpha = 0.6 * baseAlpha;
     ctx.strokeStyle = 'rgba(180,225,255,' + (0.7*brightness) + ')'; ctx.lineWidth = Math.max(1, w*0.04);
     // Draw 6-pointed star pattern
     for (var fc = 0; fc < 6; fc++) {
@@ -8327,7 +9055,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
     // Creeping vines on natural border walls
     var vineGreen = rgbQ(Math.floor(50*brightness), Math.floor(100*brightness), Math.floor(40*brightness));
     ctx.strokeStyle = vineGreen; ctx.lineWidth = Math.max(1, w*0.05); ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.7 * brightness;
+    ctx.globalAlpha = 0.7 * baseAlpha;
     // Main vine
     ctx.beginPath(); ctx.moveTo(x - w*0.2, y - h*0.4);
     ctx.quadraticCurveTo(x + w*0.1, y - h*0.1, x - w*0.05, y + h*0.3); ctx.stroke();
@@ -8336,7 +9064,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
     ctx.beginPath(); ctx.moveTo(x, y - h*0.15);
     ctx.quadraticCurveTo(x + w*0.2, y - h*0.2, x + w*0.25, y - h*0.05); ctx.stroke();
     // Small leaves
-    ctx.fillStyle = vineGreen; ctx.globalAlpha = 0.55 * brightness;
+    ctx.fillStyle = vineGreen; ctx.globalAlpha = 0.55 * baseAlpha;
     var leafPos = [[w*0.25, -h*0.05], [-w*0.05, h*0.25], [w*0.08, -h*0.3]];
     for (var lf = 0; lf < leafPos.length; lf++) {
       ctx.beginPath(); ctx.ellipse(x + leafPos[lf][0], y + leafPos[lf][1], w*0.06, w*0.04, lf*0.8, 0, Math.PI*2); ctx.fill();
@@ -8344,7 +9072,7 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
 
   } else if (type === 'carved_rune') {
     // Ancient carved symbol on stone wall
-    ctx.globalAlpha = 0.5 * brightness;
+    ctx.globalAlpha = 0.5 * baseAlpha;
     ctx.strokeStyle = 'rgba(180,160,120,' + (0.6*brightness) + ')'; ctx.lineWidth = Math.max(1, w*0.05); ctx.lineCap = 'round';
     // Random rune pattern (circle + lines)
     ctx.beginPath(); ctx.arc(x, y, h*0.15, 0, Math.PI*2); ctx.stroke();
@@ -8366,7 +9094,37 @@ function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle, fade
 // Draw a single floor scatter item at screen position (x, y) with perspective size.
 // All shapes are anchored at their base (ground level) so they sit ON the floor.
 function drawFloorItem(type, variant, seed, x, y, size) {
+  paintFloorItem(ctx, type, variant, seed, x, y, size);
+}
+
+var FLOOR_ITEM_CONTACT_SHADOW = Object.freeze({
+  bones:0.40, dry_bones:0.40, crate:0.52, skull:0.40, rubble:0.46,
+  crystal:0.38, stalagmite:0.34, rock_pile:0.52, desert_rock:0.48,
+  dead_shrub:0.32, rib_cage:0.48, femur:0.40, stick_bundle:0.48,
+  cracked_stone:0.50, boulder:0.62, stone_column:0.38, rock_arch:0.65,
+  rock_spire:0.42, cave_rubble_pile:0.64, icicle_cluster:0.40,
+  frozen_skull:0.42, stone_marker:0.34, barrel:0.48,
+  bookshelf_debris:0.56, iron_chain:0.46, sand_pillar:0.40,
+  mesa_boulder:0.62, tree_stump:0.48, fallen_log:0.66, mushroom:0.28
+});
+function drawFloorItemContactShadow(ctx, type, x, y, size) {
+  var width = FLOOR_ITEM_CONTACT_SHADOW[type];
+  if (!width) return;
+  var parentAlpha = Number.isFinite(ctx.globalAlpha) ? ctx.globalAlpha : 1;
   ctx.save();
+  ctx.globalAlpha = parentAlpha * 0.18;
+  ctx.fillStyle = '#000000';
+  ctx.beginPath(); ctx.ellipse(x, y + size * 0.045, size * width, size * 0.12, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+// Explicit destination lets the artwork cache/gallery reuse the original recipe
+// without swapping the game's global context or duplicating drawing commands.
+function paintFloorItem(ctx, type, variant, seed, x, y, size) {
+  ctx.save();
+  // Preserve the caller's fog, spawn fade and lighting. The old recipes set
+  // absolute alpha values, making distant clutter pop back to near opacity.
+  var parentAlpha = Number.isFinite(ctx.globalAlpha) ? ctx.globalAlpha : 1;
   var s = size;
   var s2 = s * 0.5, s4 = s * 0.25, s8 = s * 0.125;
   // Use seed for per-item sub-randomness without calling Math.random()
@@ -8375,72 +9133,74 @@ function drawFloorItem(type, variant, seed, x, y, size) {
   var r2 = (seed * 19.1 + 0.6) % 1.0;
 
   if (type === 'bones' || type === 'dry_bones') {
-    var boneCol = (type === 'dry_bones') ? '#c8b870' : '#c8c8c8';
+    var boneCol = (type === 'dry_bones') ? GAME_MATERIALS.bone.hex.dry : GAME_MATERIALS.bone.hex.base;
     ctx.strokeStyle = boneCol; ctx.lineWidth = Math.max(1, s * 0.12); ctx.lineCap = 'round';
     var angles = [r0 * Math.PI, (r0 + 0.4) * Math.PI, (r1 + 0.7) * Math.PI];
     for (var bi = 0; bi < (variant === 0 ? 2 : 3); bi++) {
       var ba = angles[bi]; var bl = s * (0.5 + r1 * 0.3);
-      ctx.globalAlpha = 0.85;
+      ctx.globalAlpha = parentAlpha * 0.85;
       ctx.beginPath(); ctx.moveTo(x + Math.cos(ba)*bl, y + Math.sin(ba)*bl*0.45);
       ctx.lineTo(x - Math.cos(ba)*bl, y - Math.sin(ba)*bl*0.45); ctx.stroke();
       // endpoint knuckle dots
-      ctx.fillStyle = boneCol; ctx.globalAlpha = 0.9;
+      ctx.fillStyle = boneCol; ctx.globalAlpha = parentAlpha * 0.9;
       ctx.beginPath(); ctx.arc(x + Math.cos(ba)*bl, y + Math.sin(ba)*bl*0.45, s*0.10, 0, Math.PI*2); ctx.fill();
       ctx.beginPath(); ctx.arc(x - Math.cos(ba)*bl, y - Math.sin(ba)*bl*0.45, s*0.10, 0, Math.PI*2); ctx.fill();
     }
 
   } else if (type === 'crate') {
-    ctx.globalAlpha = 0.9;
-    ctx.fillStyle = '#8b5a2b'; ctx.fillRect(x - s2, y - s2, s, s);
-    ctx.fillStyle = '#6b3a1b'; ctx.fillRect(x - s2, y - s8, s, Math.max(1, s*0.15));
+    var woodColors = GAME_MATERIALS.crateWood.hex;
+    ctx.globalAlpha = parentAlpha * 0.9;
+    ctx.fillStyle = woodColors.base; ctx.fillRect(x - s2, y - s2, s, s);
+    ctx.fillStyle = woodColors.bracing; ctx.fillRect(x - s2, y - s8, s, Math.max(1, s*0.15));
     ctx.fillRect(x - s8, y - s2, Math.max(1, s*0.15), s);
     if (variant === 2) { // broken corner
       ctx.clearRect(x + s2 - s*0.3, y - s2, s*0.32, s*0.32);
-      ctx.fillStyle = '#3a1a08'; ctx.fillRect(x + s2 - s*0.3, y - s2, s*0.32, s*0.32);
+      ctx.fillStyle = woodColors.interior; ctx.fillRect(x + s2 - s*0.3, y - s2, s*0.32, s*0.32);
     }
-    ctx.strokeStyle = '#4a2808'; ctx.lineWidth = 1; ctx.globalAlpha = 0.7;
+    ctx.strokeStyle = woodColors.outline; ctx.lineWidth = 1; ctx.globalAlpha = parentAlpha * 0.7;
     ctx.strokeRect(x - s2, y - s2, s, s);
 
   } else if (type === 'skull') {
-    ctx.globalAlpha = 0.92;
+    var boneColors = GAME_MATERIALS.bone.hex;
+    ctx.globalAlpha = parentAlpha * 0.92;
     // Dark outline for contrast
-    ctx.fillStyle = '#2a2018';
+    ctx.fillStyle = boneColors.outline;
     ctx.beginPath(); ctx.ellipse(x, y - s*0.14, s*0.42, s*0.36, 0, 0, Math.PI*2); ctx.fill();
     // Cranium
-    ctx.fillStyle = '#e8e0c8';
+    ctx.fillStyle = boneColors.lit;
     ctx.beginPath(); ctx.ellipse(x, y - s*0.15, s*0.38, s*0.32, 0, 0, Math.PI*2); ctx.fill();
     // Jaw
-    ctx.fillStyle = '#d0c8b0';
+    ctx.fillStyle = boneColors.shadow;
     ctx.beginPath(); ctx.ellipse(x, y + s*0.12, s*0.28, s*0.18, 0, 0, Math.PI); ctx.fill();
     // Eye sockets — larger and darker
-    ctx.fillStyle = '#000000'; ctx.globalAlpha = 0.9;
+    ctx.fillStyle = boneColors.cavity; ctx.globalAlpha = parentAlpha * 0.9;
     ctx.beginPath(); ctx.ellipse(x - s*0.14, y - s*0.18, s*0.12, s*0.13, 0, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.ellipse(x + s*0.14, y - s*0.18, s*0.12, s*0.13, 0, 0, Math.PI*2); ctx.fill();
     // Nose hole
     ctx.beginPath(); ctx.ellipse(x, y - s*0.02, s*0.05, s*0.07, 0, 0, Math.PI*2); ctx.fill();
     // Teeth
-    ctx.fillStyle = '#e8e0c8'; ctx.globalAlpha = 0.9;
+    ctx.fillStyle = boneColors.lit; ctx.globalAlpha = parentAlpha * 0.9;
     for (var ti = 0; ti < 4; ti++) {
       ctx.fillRect(x - s*0.16 + ti*s*0.1, y + s*0.03, Math.max(1,s*0.07), Math.max(1,s*0.10));
     }
     // Tooth gaps
-    ctx.fillStyle = '#1a1008'; ctx.globalAlpha = 0.7;
+    ctx.fillStyle = boneColors.gap; ctx.globalAlpha = parentAlpha * 0.7;
     for (var tg = 0; tg < 3; tg++) {
       ctx.fillRect(x - s*0.06 + tg*s*0.1, y + s*0.03, Math.max(1,s*0.02), Math.max(1,s*0.10));
     }
 
   } else if (type === 'rubble') {
-    var rubCols = ['#787060','#686058','#888070','#504840'];
+    var rubCols = GAME_MATERIALS.rubbleStone.swatches;
     for (var ri = 0; ri < 5; ri++) {
       var rox = (((ri*7+3)*seed*11)%1.0 - 0.5) * s * 0.9;
       var roy = (((ri*5+1)*seed*17)%1.0 - 0.5) * s * 0.5;
       var rr = s * (0.12 + ((ri*3+seed*7)%1.0) * 0.15);
-      ctx.fillStyle = rubCols[ri % rubCols.length]; ctx.globalAlpha = 0.8;
+      ctx.fillStyle = rubCols[ri % rubCols.length]; ctx.globalAlpha = parentAlpha * 0.8;
       ctx.beginPath(); ctx.ellipse(x+rox, y+roy, rr*1.3, rr*0.7, r0*Math.PI, 0, Math.PI*2); ctx.fill();
     }
 
   } else if (type === 'ice_shard') {
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = parentAlpha * 0.75;
     var shardCols = ['rgba(140,200,255,0.7)','rgba(180,230,255,0.6)','rgba(100,170,240,0.65)'];
     for (var ii = 0; ii < (variant === 0 ? 2 : 3); ii++) {
       var iox = (ii - 1) * s * 0.35; var ih = s * (0.7 + ii * 0.2);
@@ -8454,7 +9214,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
     }
 
   } else if (type === 'frozen_pool') {
-    ctx.globalAlpha = 0.55;
+    ctx.globalAlpha = parentAlpha * 0.55;
     ctx.fillStyle = 'rgba(100,160,255,0.45)';
     ctx.beginPath(); ctx.ellipse(x, y, s*0.7, s*0.3, 0, 0, Math.PI*2); ctx.fill();
     ctx.strokeStyle = 'rgba(200,230,255,0.6)'; ctx.lineWidth = 1;
@@ -8468,13 +9228,13 @@ function drawFloorItem(type, variant, seed, x, y, size) {
       ? ['#c8a000','#ffe066','#e8b800'] : ['#00c8a8','#00eedd','#60d8c8'];
     for (var ki = 0; ki < (variant === 0 ? 2 : 3); ki++) {
       var kox = (ki - 1) * s * 0.3; var kh = s * (0.6 + ki * 0.25);
-      ctx.globalAlpha = 0.85; ctx.fillStyle = crystColors[ki % crystColors.length];
+      ctx.globalAlpha = parentAlpha * 0.85; ctx.fillStyle = crystColors[ki % crystColors.length];
       ctx.beginPath();
       ctx.moveTo(x+kox-s*0.09, y - s*0.05);
       ctx.lineTo(x+kox+s*0.09, y - s*0.05);
       ctx.lineTo(x+kox, y - kh); ctx.closePath(); ctx.fill();
       // bright inner core
-      ctx.globalAlpha = 0.55; ctx.fillStyle = '#ffffff';
+      ctx.globalAlpha = parentAlpha * 0.55; ctx.fillStyle = '#ffffff';
       ctx.beginPath();
       ctx.moveTo(x+kox-s*0.03, y - kh*0.4);
       ctx.lineTo(x+kox+s*0.03, y - kh*0.4);
@@ -8482,7 +9242,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
     }
 
   } else if (type === 'stalagmite') {
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var stCol = '#6a5848';
     ctx.fillStyle = stCol;
     var sw = s * (0.12 + r0 * 0.08); var sh = s * (0.9 + r1 * 0.5);
@@ -8495,32 +9255,32 @@ function drawFloorItem(type, variant, seed, x, y, size) {
     ctx.beginPath(); ctx.moveTo(x - sw*0.2, y); ctx.lineTo(x - sw*0.1, y - sh*0.8); ctx.stroke();
 
   } else if (type === 'rock_pile') {
-    var rpCols = ['#787060','#686058','#888070'];
+    var rpCols = GAME_MATERIALS.rubbleStone.swatches;
     for (var rpi = 0; rpi < 3; rpi++) {
       var rpox = (rpi-1) * s*0.3 + (r0-0.5)*s*0.15;
       var rpoy = (r1-0.5)*s*0.2;
       var rpr = s*(0.22 + rpi*0.04);
-      ctx.globalAlpha = 0.8; ctx.fillStyle = rpCols[rpi];
+      ctx.globalAlpha = parentAlpha * 0.8; ctx.fillStyle = rpCols[rpi];
       ctx.beginPath(); ctx.ellipse(x+rpox, y+rpoy, rpr*1.2, rpr*0.75, r2*Math.PI, 0, Math.PI*2); ctx.fill();
     }
 
   } else if (type === 'puddle') {
-    ctx.globalAlpha = 0.65;
+    ctx.globalAlpha = parentAlpha * 0.65;
     ctx.fillStyle = 'rgba(15,22,35,0.75)';
     ctx.beginPath(); ctx.ellipse(x, y, s*0.65, s*0.28, 0, 0, Math.PI*2); ctx.fill();
     ctx.strokeStyle = 'rgba(60,80,100,0.5)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.ellipse(x - s*0.1, y - s*0.06, s*0.2, s*0.07, -0.4, 0, Math.PI); ctx.stroke();
 
   } else if (type === 'desert_rock') {
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     ctx.fillStyle = '#b8905a';
     ctx.beginPath(); ctx.ellipse(x, y - s*0.15, s*(0.38+r0*0.15), s*(0.25+r1*0.1), r2*0.5, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = '#d0a870'; ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#d0a870'; ctx.globalAlpha = parentAlpha * 0.6;
     ctx.beginPath(); ctx.ellipse(x - s*0.08, y - s*0.22, s*0.15, s*0.08, -0.5, 0, Math.PI*2); ctx.fill();
 
   } else if (type === 'dead_shrub') {
-    ctx.strokeStyle = '#6a4820'; ctx.lineWidth = Math.max(1, s*0.09); ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.78;
+    ctx.strokeStyle = GAME_MATERIALS.floorFoliage.hex.dry; ctx.lineWidth = Math.max(1, s*0.09); ctx.lineCap = 'round';
+    ctx.globalAlpha = parentAlpha * 0.78;
     ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + (r0-0.5)*s*0.2, y - s*0.65); ctx.stroke();
     var branches = [[0.4, -0.4, 0.5, 0.3],[-0.35, -0.45, -0.55, 0.25],[0.15, -0.6, 0.45, 0.2]];
     for (var bri = 0; bri < 3; bri++) {
@@ -8532,8 +9292,8 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'rib_cage') {
     // Curved rib bones arching from a central spine
-    ctx.strokeStyle = '#c0b8a0'; ctx.lineWidth = Math.max(1, s*0.08); ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.82;
+    ctx.strokeStyle = GAME_MATERIALS.bone.hex.aged; ctx.lineWidth = Math.max(1, s*0.08); ctx.lineCap = 'round';
+    ctx.globalAlpha = parentAlpha * 0.82;
     // Spine
     ctx.beginPath(); ctx.moveTo(x - s*0.35, y); ctx.lineTo(x + s*0.35, y); ctx.stroke();
     // Ribs curving upward
@@ -8553,9 +9313,9 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'femur') {
     // Single large bone with bulbous ends
-    var boneCol2 = '#d0c8b0';
+    var boneCol2 = GAME_MATERIALS.bone.hex.shadow;
     ctx.strokeStyle = boneCol2; ctx.lineWidth = Math.max(2, s*0.14); ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     var fAng = r0 * Math.PI;
     var fLen = s * 0.6;
     var fx1 = x + Math.cos(fAng)*fLen, fy1 = y + Math.sin(fAng)*fLen*0.4;
@@ -8566,15 +9326,15 @@ function drawFloorItem(type, variant, seed, x, y, size) {
     ctx.beginPath(); ctx.arc(fx1, fy1, s*0.14, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.arc(fx2, fy2, s*0.14, 0, Math.PI*2); ctx.fill();
     // Smaller knob bumps
-    ctx.fillStyle = '#b8b098'; ctx.globalAlpha = 0.7;
+    ctx.fillStyle = GAME_MATERIALS.bone.hex.knuckle; ctx.globalAlpha = parentAlpha * 0.7;
     ctx.beginPath(); ctx.arc(fx1 + Math.cos(fAng+0.8)*s*0.08, fy1 + Math.sin(fAng+0.8)*s*0.05, s*0.07, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.arc(fx2 - Math.cos(fAng-0.8)*s*0.08, fy2 - Math.sin(fAng-0.8)*s*0.05, s*0.07, 0, Math.PI*2); ctx.fill();
 
   } else if (type === 'stick_bundle') {
     // 3-5 sticks scattered loosely (50% larger than base size)
     var ss = s * 1.5;
-    ctx.lineCap = 'round'; ctx.globalAlpha = 0.78;
-    var stickCols = ['#5a3e1e','#6b4a28','#4d3218','#7a5a38'];
+    ctx.lineCap = 'round'; ctx.globalAlpha = parentAlpha * 0.78;
+    var stickCols = GAME_MATERIALS.floorPropWood.swatches;
     var nSticks = 3 + Math.floor(r0 * 3);
     for (var sti = 0; sti < nSticks; sti++) {
       var stAng = (r0 + sti * 0.7 + r1 * 0.3) * Math.PI;
@@ -8591,7 +9351,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'flat_rock') {
     // Large flat rounded stone
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = parentAlpha * 0.8;
     var frCol = terrain === 'cave' ? '#58504a' : (terrain === 'ice' ? '#8a98a8' : '#9a8a6a');
     ctx.fillStyle = frCol;
     ctx.beginPath();
@@ -8611,7 +9371,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'cracked_stone') {
     // Angular broken stone slab with crack lines
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var csCol = terrain === 'cave' ? '#504848' : '#8a7860';
     ctx.fillStyle = csCol;
     // Irregular angular shape
@@ -8645,7 +9405,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'boulder') {
     // Large rounded boulder with highlight and shadow
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     var bldR = s * (0.4 + r0 * 0.15);
     ctx.fillStyle = '#5a5550';
     ctx.beginPath(); ctx.ellipse(x, y, bldR * 1.1, bldR * 0.7, r2 * 0.5, 0, Math.PI * 2); ctx.fill();
@@ -8663,7 +9423,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'stone_column') {
     // Broken stone column / pillar remnant rising from cave floor
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var colW = s * (0.14 + r0 * 0.06);
     var colH = s * (0.8 + r1 * 0.6);
     ctx.fillStyle = '#605850';
@@ -8695,7 +9455,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'rock_arch') {
     // Small natural rock arch / bridge formation
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = parentAlpha * 0.8;
     var archW = s * 0.55;
     var archH = s * (0.5 + r0 * 0.3);
     ctx.fillStyle = '#585048';
@@ -8719,7 +9479,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'rock_spire') {
     // Tall thin rock spire / stalagmite cluster
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = parentAlpha * 0.8;
     var spireCount = 2 + Math.floor(r0 * 2);
     var spCols = ['#5a5248','#685e52','#4e4840'];
     for (var spi = 0; spi < spireCount; spi++) {
@@ -8740,7 +9500,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'cave_rubble_pile') {
     // Large mound of cave debris — stacked irregular rocks
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var pCols = ['#504a44','#5e5650','#686058','#3e3a36'];
     // Base mound shape
     ctx.fillStyle = '#504a44';
@@ -8763,7 +9523,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'icicle_cluster') {
     // Cluster of icicles hanging down (drawn pointing up from floor perspective)
-    ctx.globalAlpha = 0.7;
+    ctx.globalAlpha = parentAlpha * 0.7;
     var icCols = ['rgba(160,210,255,0.7)','rgba(130,190,240,0.65)','rgba(180,225,255,0.6)'];
     var nIc = 3 + Math.floor(r0 * 2);
     for (var ici = 0; ici < nIc; ici++) {
@@ -8781,7 +9541,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'frost_patch') {
     // Frosted ground patch with crystal patterns
-    ctx.globalAlpha = 0.4;
+    ctx.globalAlpha = parentAlpha * 0.4;
     ctx.fillStyle = 'rgba(180,220,255,0.35)';
     ctx.beginPath(); ctx.ellipse(x, y, s*0.6, s*0.25, r0*0.5, 0, Math.PI*2); ctx.fill();
     // Frost crystal lines
@@ -8795,21 +9555,21 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'frozen_skull') {
     // Skull encased in ice
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = parentAlpha * 0.75;
     // Ice casing
     ctx.fillStyle = 'rgba(140,200,255,0.3)';
     ctx.beginPath(); ctx.ellipse(x, y - s*0.1, s*0.45, s*0.38, 0, 0, Math.PI*2); ctx.fill();
     // Skull inside
     ctx.fillStyle = '#b8b0a0';
     ctx.beginPath(); ctx.ellipse(x, y - s*0.12, s*0.3, s*0.25, 0, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = '#1a1008'; ctx.globalAlpha = 0.7;
+    ctx.fillStyle = '#1a1008'; ctx.globalAlpha = parentAlpha * 0.7;
     ctx.beginPath(); ctx.arc(x - s*0.1, y - s*0.15, s*0.06, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.arc(x + s*0.1, y - s*0.15, s*0.06, 0, Math.PI*2); ctx.fill();
 
   } else if (type === 'tall_grass') {
     // Tuft of tall grass blades
-    ctx.globalAlpha = 0.7;
-    var grassCols = ['#5a7a3a','#4a6830','#6a8a48','#3e5828'];
+    ctx.globalAlpha = parentAlpha * 0.7;
+    var grassCols = GAME_MATERIALS.floorFoliage.swatches;
     var nBlades = 4 + Math.floor(r0 * 3);
     for (var tgi = 0; tgi < nBlades; tgi++) {
       var gAng = (tgi / nBlades - 0.5) * 1.2 + (r1 - 0.5) * 0.3;
@@ -8823,7 +9583,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'wildflower') {
     // Small wildflower cluster
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = parentAlpha * 0.75;
     // Stems
     ctx.strokeStyle = '#4a6830'; ctx.lineWidth = Math.max(1, s*0.04);
     var flCols = ['#d84040','#d8a030','#c060c0','#4080d0'];
@@ -8841,7 +9601,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'stone_marker') {
     // Standing stone / menhir
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var mkW = s * 0.12; var mkH = s * (0.6 + r0 * 0.4);
     ctx.fillStyle = '#707868';
     ctx.beginPath();
@@ -8858,11 +9618,11 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'barrel') {
     // Wooden barrel
-    ctx.globalAlpha = 0.85;
-    ctx.fillStyle = '#7a5230';
+    ctx.globalAlpha = parentAlpha * 0.85;
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.base;
     ctx.beginPath(); ctx.ellipse(x, y - s*0.15, s*0.28, s*0.35, 0, 0, Math.PI*2); ctx.fill();
     // Metal bands
-    ctx.strokeStyle = '#555'; ctx.lineWidth = Math.max(1, s*0.06);
+    ctx.strokeStyle = GAME_MATERIALS.floorPropIron.hex.base; ctx.lineWidth = Math.max(1, s*0.06);
     ctx.beginPath(); ctx.ellipse(x, y - s*0.35, s*0.24, s*0.06, 0, 0, Math.PI*2); ctx.stroke();
     ctx.beginPath(); ctx.ellipse(x, y + s*0.05, s*0.24, s*0.06, 0, 0, Math.PI*2); ctx.stroke();
     // Wood grain
@@ -8872,11 +9632,11 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'bookshelf_debris') {
     // Broken bookshelf / scattered books
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     // Broken shelf plank — thicker, with wood grain
-    ctx.fillStyle = '#5a3e20';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.shadow;
     ctx.fillRect(x - s*0.45, y + s*0.05, s*0.9, s*0.12);
-    ctx.fillStyle = '#4a3018';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.deep;
     ctx.fillRect(x - s*0.45, y + s*0.13, s*0.9, s*0.04);
     // Scattered books — thicker with visible page edges
     var bookCols = ['#8b2020','#1a4a6a','#2a5a2a','#6a4a20','#5a1a5a'];
@@ -8900,8 +9660,8 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'iron_chain') {
     // Coiled chain on the ground
-    ctx.globalAlpha = 0.7;
-    ctx.strokeStyle = '#707878'; ctx.lineWidth = Math.max(2, s*0.08); ctx.lineCap = 'round';
+    ctx.globalAlpha = parentAlpha * 0.7;
+    ctx.strokeStyle = GAME_MATERIALS.floorPropIron.hex.base; ctx.lineWidth = Math.max(2, s*0.08); ctx.lineCap = 'round';
     // Loose coil
     ctx.beginPath();
     ctx.arc(x, y, s*0.25, 0, Math.PI*1.5); ctx.stroke();
@@ -8916,7 +9676,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'sand_pillar') {
     // Weathered sandstone column — desert/expanse only
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = parentAlpha * 0.82;
     var spW = s * (0.16 + r0 * 0.06);
     var spH = s * (0.75 + r1 * 0.5);
     // Main body — tapers upward, warm sandstone
@@ -8946,7 +9706,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'mesa_boulder') {
     // Wide flat-topped layered rock — plains biome
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     var mbW = s * (0.45 + r0 * 0.15);
     var mbH = s * (0.3 + r1 * 0.15);
     // Bottom layer — widest
@@ -8973,36 +9733,36 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'tree_stump') {
     // Dead tree stump — ground biome
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = parentAlpha * 0.8;
     var tsW = s * (0.2 + r0 * 0.08);
     var tsH = s * (0.2 + r1 * 0.1);
     // Trunk
-    ctx.fillStyle = '#5a4030';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.shadow;
     ctx.beginPath();
     ctx.moveTo(x - tsW, y); ctx.lineTo(x + tsW, y);
     ctx.lineTo(x + tsW * 0.85, y - tsH); ctx.lineTo(x - tsW * 0.85, y - tsH);
     ctx.closePath(); ctx.fill();
     // Top face (oval with rings)
-    ctx.fillStyle = '#7a6050';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.cut;
     ctx.beginPath(); ctx.ellipse(x, y - tsH, tsW * 0.85, tsW * 0.4, 0, 0, Math.PI * 2); ctx.fill();
     // Growth rings
     ctx.strokeStyle = 'rgba(40,25,15,0.4)'; ctx.lineWidth = Math.max(1, s * 0.02);
     ctx.beginPath(); ctx.ellipse(x, y - tsH, tsW * 0.5, tsW * 0.25, 0, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.ellipse(x, y - tsH, tsW * 0.25, tsW * 0.12, 0, 0, Math.PI * 2); ctx.stroke();
     // Root tendrils
-    ctx.strokeStyle = '#4a3020'; ctx.lineWidth = Math.max(1, s * 0.04); ctx.lineCap = 'round';
+    ctx.strokeStyle = GAME_MATERIALS.floorPropWood.hex.deep; ctx.lineWidth = Math.max(1, s * 0.04); ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(x - tsW, y); ctx.lineTo(x - tsW * 1.4, y + s * 0.05); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x + tsW, y); ctx.lineTo(x + tsW * 1.3, y + s * 0.07); ctx.stroke();
 
   } else if (type === 'fallen_log') {
     // Horizontal log on ground — ground biome
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = parentAlpha * 0.75;
     var flW = s * (0.5 + r0 * 0.2);
     var flH = s * (0.12 + r1 * 0.04);
     var flAng = (r0 - 0.5) * 0.6; // slight angle
     ctx.save(); ctx.translate(x, y); ctx.rotate(flAng);
     // Main trunk
-    ctx.fillStyle = '#5a4535';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.shadow;
     ctx.beginPath();
     ctx.ellipse(0, 0, flW, flH, 0, 0, Math.PI * 2); ctx.fill();
     // Bark texture lines
@@ -9012,7 +9772,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
       ctx.beginPath(); ctx.moveTo(bx, -flH * 0.8); ctx.lineTo(bx, flH * 0.8); ctx.stroke();
     }
     // End cross-section (circle)
-    ctx.fillStyle = '#7a6555';
+    ctx.fillStyle = GAME_MATERIALS.floorPropWood.hex.cut;
     ctx.beginPath(); ctx.ellipse(flW * 0.9, 0, flH * 1.1, flH * 1.1, 0, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = 'rgba(40,25,15,0.4)'; ctx.lineWidth = Math.max(1, s * 0.015);
     ctx.beginPath(); ctx.ellipse(flW * 0.9, 0, flH * 0.5, flH * 0.5, 0, 0, Math.PI * 2); ctx.stroke();
@@ -9020,7 +9780,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'mushroom') {
     // Cluster of small mushrooms
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = parentAlpha * 0.85;
     var mshCols = ['#8b3020','#a04030','#7a2818'];
     var nMsh = 2 + Math.floor(r0 * 2);
     for (var mi = 0; mi < nMsh; mi++) {
@@ -9041,8 +9801,8 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'fern') {
     // Green fronds radiating from center
-    ctx.globalAlpha = 0.7;
-    var fernCols = ['#3a6a28','#4a7a38','#2e5a20'];
+    ctx.globalAlpha = parentAlpha * 0.7;
+    var fernCols = GAME_MATERIALS.floorFoliage.swatches;
     var nFronds = 5 + Math.floor(r0 * 3);
     ctx.lineCap = 'round';
     for (var fi2 = 0; fi2 < nFronds; fi2++) {
@@ -9067,7 +9827,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'leaf_pile') {
     // Heap of autumn-colored leaves
-    ctx.globalAlpha = 0.7;
+    ctx.globalAlpha = parentAlpha * 0.7;
     var leafCols = ['#8a4a1a','#aa6a20','#6a3a10','#c88030','#9a5518','#7a4420'];
     var nLeaves = 7 + Math.floor(r0 * 4);
     for (var li = 0; li < nLeaves; li++) {
@@ -9081,7 +9841,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
   } else if (type === 'moss_patch') {
     // Green ground covering
-    ctx.globalAlpha = 0.4;
+    ctx.globalAlpha = parentAlpha * 0.4;
     ctx.fillStyle = 'rgba(60,120,40,0.35)';
     ctx.beginPath(); ctx.ellipse(x, y, s*0.55, s*0.22, r0*0.5, 0, Math.PI*2); ctx.fill();
     // Dot texture
@@ -9100,6 +9860,7 @@ function drawFloorItem(type, variant, seed, x, y, size) {
 
 // Perspective-projects all floorScatter items and draws them with drawFloorItem().
 function drawFloorScatter3D() {
+  beginFloorArtworkFrame();
   var _fsMaxDist = viewDist * 0.75;
   // A doorway can reveal either stratum from either camera position. The
   // actual terrain/ceiling depth clips scatter; camera state never hides it.
@@ -9120,7 +9881,8 @@ function drawFloorScatter3D() {
       // Apply night darkness
       var _floorItemLight = (ambientLight < 0.85) ? (0.3 + ambientLight * 0.7) : 1.0;
       ctx.save(); ctx.globalAlpha = Math.max(0, fogAlpha) * _floorItemLight;
-      drawFloorItem(item.type, item.variant, item.seed, vis.sx, vis.sy, size);
+      drawFloorItemContactShadow(ctx, item.type, vis.sx, vis.sy, size);
+      drawFloorArtwork(ctx, item.type, item.variant, item.seed, vis.sx, vis.sy, size);
       ctx.restore();
     });
 }
@@ -9708,13 +10470,157 @@ function drawWallDecorations() {
       {x:renderX-size*2,y:decorY+size*3,depth:fwd}
     ];
     withSceneDepthClip(depthPoly, function() {
-      drawWallAlignedDecoration(dec.type, renderX, decorY, size, dist, dec.side, viewAngle, _dFade);
+      drawWallAlignedDecoration(dec.type, renderX, decorY, size, dist, dec.side, viewAngle, _dFade, dec, now);
     }, {depthBias:1.5});
   }
   if (shouldLog) {
     //console.log('[DECOR] Summary: ' + visibleCount + ' visible, ' + occludedCount + ' occluded, ' + culledCount + ' culled'); // TEMP DISABLED
     __decorDebugLast = now;
   }
+}
+// Canvas2D artwork pilot. Only appearance is cached: projection, support,
+// ordering and the caller's scene-depth clip still run for every visible prop.
+// Bounds are relative to the existing recipe's (x,y) anchor, in size units.
+var FLOOR_ARTWORK = Object.freeze({
+  fern: Object.freeze({label:'Fern', bounds:Object.freeze([-0.5,-0.3,0.5,0.3]), materials:Object.freeze([])}),
+  fallen_log: Object.freeze({label:'Fallen log', bounds:Object.freeze([-0.95,-0.45,0.95,0.45]), materials:Object.freeze([])}),
+  skull: Object.freeze({label:'Skull', bounds:Object.freeze([-0.45,-0.52,0.45,0.32]), materials:Object.freeze(['bone'])}),
+  rubble: Object.freeze({label:'Rubble', bounds:Object.freeze([-0.82,-0.62,0.82,0.62]), materials:Object.freeze(['rubbleStone'])})
+});
+
+// Opt-in until the moving-scene pilot is accepted. No localStorage or save data.
+var FLOOR_ARTWORK_CACHE_ENABLED = false;
+var FLOOR_ARTWORK_CACHE_BYTE_LIMIT = 4 * 1024 * 1024;
+var FLOOR_ARTWORK_CACHE_ENTRY_LIMIT = 384;
+var _floorArtworkCache = new Map();
+var _floorArtworkBytes = 0;
+var _floorArtworkMaterials = null, _floorArtworkPainter = null;
+var _floorArtworkBuilds = 0, _floorArtworkBuildMs = 0;
+var _floorArtworkFailed = false;
+var _floorArtworkStats = {hits:0, misses:0, builds:0, evictions:0, fallbacks:0, buildMs:0};
+
+function floorArtworkNow() {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+function clearFloorArtworkCache() {
+  _floorArtworkCache.forEach(function(entry) { entry.canvas.width = entry.canvas.height = 1; });
+  _floorArtworkCache.clear();
+  _floorArtworkBytes = 0;
+  _floorArtworkMaterials = GAME_MATERIALS;
+  _floorArtworkPainter = paintFloorItem;
+  _floorArtworkFailed = false;
+}
+
+function setFloorArtworkCacheEnabled(enabled) {
+  FLOOR_ARTWORK_CACHE_ENABLED = !!enabled;
+  if (!FLOOR_ARTWORK_CACHE_ENABLED) clearFloorArtworkCache();
+}
+
+function getFloorArtworkCacheStats() {
+  return {enabled:FLOOR_ARTWORK_CACHE_ENABLED, entries:_floorArtworkCache.size,
+    pixelBytes:_floorArtworkBytes, byteLimit:FLOOR_ARTWORK_CACHE_BYTE_LIMIT,
+    hits:_floorArtworkStats.hits, misses:_floorArtworkStats.misses,
+    builds:_floorArtworkStats.builds, evictions:_floorArtworkStats.evictions,
+    fallbacks:_floorArtworkStats.fallbacks, buildMs:_floorArtworkStats.buildMs};
+}
+
+function beginFloorArtworkFrame() {
+  _floorArtworkBuilds = 0; _floorArtworkBuildMs = 0;
+  // Compiled materials are immutable; identity detects a replacement catalog.
+  // Source edits use reload; hot-swapping the recipe also invalidates artwork.
+  if (_floorArtworkMaterials !== GAME_MATERIALS || _floorArtworkPainter !== paintFloorItem)
+    clearFloorArtworkCache();
+}
+
+function floorArtworkSurfaceSupported(ctx) {
+  // Compositing/shadows/filters applied to each primitive cannot in general be
+  // replaced by applying them once to the flattened image. Keep the old path.
+  if (ctx.globalCompositeOperation !== 'source-over' || ctx.shadowBlur !== 0 ||
+      ctx.shadowColor !== 'rgba(0, 0, 0, 0)' ||
+      ctx.shadowOffsetX !== 0 || ctx.shadowOffsetY !== 0 ||
+      (ctx.filter && ctx.filter !== 'none') || ctx.getLineDash().length) return false;
+  var t = ctx.getTransform();
+  return t.a === 1 && t.b === 0 && t.c === 0 && t.d === 1 && t.e === 0 && t.f === 0;
+}
+
+function drawFloorArtwork(ctx, type, variant, seed, x, y, size) {
+  var recipe = Object.prototype.hasOwnProperty.call(FLOOR_ARTWORK, type) ? FLOOR_ARTWORK[type] : null;
+  if (!FLOOR_ARTWORK_CACHE_ENABLED || !recipe || _floorArtworkFailed ||
+      !Number.isFinite(seed) || seed < 0 || seed >= 1 ||
+      !Number.isInteger(variant) || variant < 0 || variant > 2 ||
+      !Number.isInteger(size) || size < 6 || size > 70 ||
+      !Number.isFinite(x) || !Number.isFinite(y) || !floorArtworkSurfaceSupported(ctx)) {
+    _floorArtworkStats.fallbacks++;
+    paintFloorItem(ctx, type, variant, seed, x, y, size); return;
+  }
+  if (_floorArtworkMaterials !== GAME_MATERIALS || _floorArtworkPainter !== paintFloorItem)
+    clearFloorArtworkCache();
+  // Exact seeds and projected integer sizes: no seed bucketing or upscaled art.
+  // Position/fade are intentionally NOT cache keys, so moving props can reuse it.
+  var key = type + ':' + variant + ':' + seed + ':' + size + ':' + ctx.lineCap + ':' + ctx.lineJoin + ':' + ctx.miterLimit;
+  var entry = _floorArtworkCache.get(key);
+  if (entry) {
+    _floorArtworkStats.hits++;
+    _floorArtworkCache.delete(key); _floorArtworkCache.set(key, entry);
+  } else {
+    _floorArtworkStats.misses++;
+    // A cold view must not bake every visible prop in a single frame. This is
+    // a soft time limit: one build may exceed it. The original recipe is safe.
+    if (_floorArtworkBuilds >= 4 || _floorArtworkBuildMs >= 1) {
+      _floorArtworkStats.fallbacks++;
+      paintFloorItem(ctx, type, variant, seed, x, y, size); return;
+    }
+    var b = recipe.bounds, pad = 2;
+    var left = Math.floor(b[0]*size)-pad, top = Math.floor(b[1]*size)-pad;
+    var width = Math.ceil(b[2]*size)+pad-left, height = Math.ceil(b[3]*size)+pad-top;
+    // 2x backing resolution keeps fractional placement crisp. Native raster
+    // antialiasing can differ at edges; this is not a pixel-identical claim.
+    var bytes = width * height * 16;
+    if (bytes > FLOOR_ARTWORK_CACHE_BYTE_LIMIT || FLOOR_ARTWORK_CACHE_ENTRY_LIMIT < 1) {
+      _floorArtworkStats.fallbacks++;
+      paintFloorItem(ctx, type, variant, seed, x, y, size); return;
+    }
+    while (_floorArtworkCache.size && (_floorArtworkBytes + bytes > FLOOR_ARTWORK_CACHE_BYTE_LIMIT ||
+        _floorArtworkCache.size >= FLOOR_ARTWORK_CACHE_ENTRY_LIMIT)) {
+      var oldestKey = _floorArtworkCache.keys().next().value;
+      var oldest = _floorArtworkCache.get(oldestKey);
+      _floorArtworkBytes -= oldest.bytes;
+      oldest.canvas.width = oldest.canvas.height = 1;
+      _floorArtworkCache.delete(oldestKey); _floorArtworkStats.evictions++;
+    }
+    var started = floorArtworkNow(), canvas;
+    try {
+      canvas = document.createElement('canvas');
+      canvas.width = width*2; canvas.height = height*2;
+      var artCtx = canvas.getContext('2d');
+      if (!artCtx) throw new Error('Canvas2D unavailable');
+      // Preserve inherited stroke attributes not explicitly set by the recipe.
+      artCtx.lineCap = ctx.lineCap; artCtx.lineJoin = ctx.lineJoin; artCtx.miterLimit = ctx.miterLimit;
+      artCtx.scale(2,2);
+      paintFloorItem(artCtx, type, variant, seed, -left, -top, size);
+      entry = {canvas:canvas, left:left, top:top, width:width, height:height, bytes:bytes};
+      _floorArtworkCache.set(key, entry); _floorArtworkBytes += bytes;
+      _floorArtworkStats.builds++;
+    } catch (error) {
+      if (canvas) canvas.width = canvas.height = 1;
+      _floorArtworkFailed = true;
+    }
+    var elapsed = floorArtworkNow() - started;
+    _floorArtworkBuilds++; _floorArtworkBuildMs += elapsed; _floorArtworkStats.buildMs += elapsed;
+    if (!entry) {
+      _floorArtworkStats.fallbacks++;
+      paintFloorItem(ctx, type, variant, seed, x, y, size); return;
+    }
+  }
+  ctx.save();
+  // These four legacy recipes set their own alpha before every primitive and
+  // ignore the caller's alpha. Preserve that behavior, don't double-fade them.
+  ctx.globalAlpha = 1;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(entry.canvas, x+entry.left, y+entry.top, entry.width, entry.height);
+  ctx.restore();
 }
 // =============================================
 // SECTION 6: SENSOR & HARDWARE
@@ -10436,6 +11342,67 @@ function step(dt) {
 // SECTION 9: COMBAT SYSTEM
 // =============================================
 
+// Magic Missile alone has an authored wind-up. Cost/cooldown are reserved on
+// accepted input; aim/position are sampled when its release is serviced. Other
+// attacks keep their existing immediate behavior and per-input equipment rules.
+var MISSILE_CAST_WINDUP_MS = 120;
+var pendingMissileCasts = [];
+var spellCastReservationSerial = 0;
+
+function missileCastingBlocked() {
+  return !running || gameOverState || menuOpen ||
+    (typeof shopOpen !== 'undefined' && shopOpen) ||
+    (typeof inventoryOpen !== 'undefined' && inventoryOpen) ||
+    (typeof forgeOpen !== 'undefined' && forgeOpen) ||
+    (typeof settingsOpen !== 'undefined' && settingsOpen) ||
+    (typeof document !== 'undefined' && document.hidden === true);
+}
+
+function reserveMissileCast(spell, now, count, cost, previousShotMs) {
+  var rangeMult = equipment.relic && equipment.relic.effect === 'spellRange' ? 1 + equipment.relic.value : 1;
+  pendingMissileCasts.push({releaseAt:now + MISSILE_CAST_WINDUP_MS, count:count,
+    spell:Object.assign({},spell), speed:spell.speed * rangeMult, radius:PROJ_RADIUS,
+    lifeMs:Math.round(PROJ_LIFE_MS * rangeMult), cost:cost,
+    previousShotMs:previousShotMs, reservedShotMs:lastShotMs, serial:spellCastReservationSerial,
+    stats:stats, grid:grid, floorMesh:floorMesh});
+}
+
+function cancelPendingMissileCasts(refund) {
+  var count = pendingMissileCasts.length;
+  for (var i = count - 1; i >= 0; i--) {
+    var pending = pendingMissileCasts[i];
+    // Never refund a discarded world's reservation into a new player's state.
+    if (refund && pending.stats === stats && pending.grid === grid && pending.floorMesh === floorMesh) {
+      mana = Math.min(typeof MANA_MAX === 'number' ? MANA_MAX : Infinity, mana + pending.cost);
+      stats.totalManaConsumed = Math.max(0, stats.totalManaConsumed - pending.cost);
+      if (spellCastReservationSerial === pending.serial && lastShotMs === pending.reservedShotMs) {
+        lastShotMs = pending.previousShotMs; spellCastReservationSerial--;
+      }
+    }
+  }
+  pendingMissileCasts = [];
+  if (count && typeof cancelFirstPersonCast === 'function') cancelFirstPersonCast();
+  return count;
+}
+
+function servicePendingMissileCasts(now) {
+  if (!pendingMissileCasts.length) return;
+  if (missileCastingBlocked()) { cancelPendingMissileCasts(true); return; }
+  var waiting = [], discarded = false;
+  for (var i = 0; i < pendingMissileCasts.length; i++) {
+    var pending = pendingMissileCasts[i];
+    if (pending.stats !== stats || pending.grid !== grid || pending.floorMesh !== floorMesh) { discarded = true; continue; }
+    if (now < pending.releaseAt) { waiting.push(pending); continue; }
+    for (var shot = 0; shot < pending.count; shot++) {
+      var offset = pending.count === 3 ? (shot - 1) * 0.2 : 0;
+      spawnProjectile(pending.speed, pending.radius, pending.spell, offset,
+        {speed:pending.speed, lifeMs:pending.lifeMs, releaseAt:pending.releaseAt});
+    }
+  }
+  pendingMissileCasts = waiting;
+  if (discarded && !waiting.length && typeof cancelFirstPersonCast === 'function') cancelFirstPersonCast();
+}
+
 function getUnlockedSpells() {
   var result = [];
   for (var i = 0; i < spellOrder.length; i++) {
@@ -10462,6 +11429,7 @@ function castCurrentSpell() {
   if (!running || gameOverState || menuOpen) return;
   var now = Date.now();
   var spell = getCurrentSpell();
+  if (spell.id === 'missile' && missileCastingBlocked()) return;
   if (DEBUG_COMBAT && now - __combatDbgLast > 200) {
     __combatDbgLast = now;
     var cd = now - lastShotMs;
@@ -10475,6 +11443,8 @@ function castCurrentSpell() {
   var effManaCost = spell.manaCost * ((equipment.robes && equipment.robes.manaCostReduction) ? (1 - equipment.robes.manaCostReduction) : 1);
   var _effCD = getEffectiveCooldown();
   if (mana >= effManaCost && (now - lastShotMs) >= _effCD) {
+    var previousShotMs = lastShotMs;
+    var windupMissile = spell.id === 'missile' && spell.attackType === 'projectile';
     if (spell.attackType === 'nova') castNovaAttack(spell);
     else if (spell.attackType === 'cone') castConeAttack(spell);
     else if (spell.attackType === 'lob') {
@@ -10492,12 +11462,7 @@ function castCurrentSpell() {
       }
     }
     else {
-      if (spell.tier >= 2 && spell.id === 'missile') {
-        // Split Shot: fire 3 missiles in a spread
-        for (var si = -1; si <= 1; si++) {
-          spawnProjectile(spell.speed, PROJ_RADIUS, spell, si * 0.2);
-        }
-      } else {
+      if (!windupMissile) {
         spawnProjectile(spell.speed, PROJ_RADIUS);
       }
     }
@@ -10514,6 +11479,9 @@ function castCurrentSpell() {
       lastShotMs = now;
     }
     castAnimUntil = now + 280;
+    spellCastReservationSerial++;
+    if (windupMissile) reserveMissileCast(spell, now, spell.tier >= 2 ? 3 : 1, finalManaCost, previousShotMs);
+    if (typeof noteFirstPersonCast === 'function') noteFirstPersonCast(spell, now);
   }
 }
 
@@ -10540,7 +11508,7 @@ function getPlayerRenderFloorZ() {
   return Number.isFinite(pos.floorZ) ? (pos.floorZ - 60) * 0.625 : 0;
 }
 
-function spawnProjectile(speedOverride, radiusOverride, spellOverride, angOffset) {
+function spawnProjectile(speedOverride, radiusOverride, spellOverride, angOffset, reserved) {
   var spell = spellOverride || getCurrentSpell();
   var ang = getAimAngle() + (angOffset || 0);
   var usePitch = -(cam.pitch || 0);
@@ -10551,17 +11519,21 @@ function spawnProjectile(speedOverride, radiusOverride, spellOverride, angOffset
   var sx = pos.x + Math.cos(ang) * handFwd + Math.cos(rightAng) * handRight;
   var sy = pos.y + Math.sin(ang) * handFwd + Math.sin(rightAng) * handRight;
   var sp = (speedOverride || spell.speed);
-  if (equipment.relic && equipment.relic.effect === 'spellRange') sp *= (1 + equipment.relic.value);
+  if (reserved) sp = reserved.speed;
+  else if (equipment.relic && equipment.relic.effect === 'spellRange') sp *= (1 + equipment.relic.value);
   var rr = (radiusOverride || PROJ_RADIUS);
   var hz = sp * Math.cos(usePitch);
   var vz = sp * Math.sin(usePitch);
   var spawnZ = MODE3D ? getPlayerRenderFloorZ() + 55 : 0;
   console.log('[PROJ] pitch=' + (cam.pitch||0).toFixed(3) + ' usePitch=' + usePitch.toFixed(3) + ' hz=' + hz.toFixed(1) + ' vz=' + vz.toFixed(1) + ' spawnZ=' + spawnZ);
   var _pLife = PROJ_LIFE_MS;
-  if (equipment.relic && equipment.relic.effect === 'spellRange') _pLife = Math.round(_pLife * (1 + equipment.relic.value));
-  projectiles.push({x:sx, y:sy, z:spawnZ, ang:ang, speed:sp, hz:hz, vz:vz,
-                    spawnMs:Date.now(), lifeMs:_pLife, r:rr, spell:spell,
-                    renderFloorZ:getPlayerRenderFloorZ(), underground:!!playerUnderground});
+  if (reserved) _pLife = reserved.lifeMs;
+  else if (equipment.relic && equipment.relic.effect === 'spellRange') _pLife = Math.round(_pLife * (1 + equipment.relic.value));
+  var projectile = {x:sx, y:sy, z:spawnZ, ang:ang, speed:sp, hz:hz, vz:vz,
+    spawnMs:reserved ? reserved.releaseAt : Date.now(), lifeMs:_pLife, r:rr, spell:spell,
+    renderFloorZ:getPlayerRenderFloorZ(), underground:!!playerUnderground};
+  if (reserved) projectile._castReleaseAt = reserved.releaseAt;
+  projectiles.push(projectile);
 }
 
 // Lob projectile — arcing trajectory for Poison Cloud
@@ -10888,12 +11860,18 @@ function _applyProjectileHit(spell, e, ei, nx, ny, nz, dx, dy, now) {
 }
 
 function updateProjectiles(dt) {
-  if (!projectiles || !projectiles.length) return;
   var now = Date.now();
+  servicePendingMissileCasts(now);
+  if (!projectiles || !projectiles.length) return;
   var alive = [], hitWalls = 0, hitEnemies = 0, expired = 0;
   for (var i = 0; i < projectiles.length; i++) {
     var p = projectiles[i];
     var spell = p.spell || spells.missile;
+    var stepDt = dt;
+    if (Number.isFinite(p._castReleaseAt)) {
+      stepDt = Math.min(dt, Math.max(0, (now - p._castReleaseAt) / 1000));
+      delete p._castReleaseAt;
+    }
 
     // ── Homing (Magic Missile) ──────────────────────────────────────
     if (spell.homing && !p.isLob) {
@@ -10912,14 +11890,14 @@ function updateProjectiles(dt) {
         var turnDa = bestAng - p.ang;
         while (turnDa > Math.PI) turnDa -= Math.PI * 2;
         while (turnDa < -Math.PI) turnDa += Math.PI * 2;
-        var maxTurn = spell.homing * dt;
+        var maxTurn = spell.homing * stepDt;
         if (turnDa > maxTurn) turnDa = maxTurn;
         else if (turnDa < -maxTurn) turnDa = -maxTurn;
         p.ang += turnDa;
         // Z-homing: steer vz toward target's Z
         if (bestEnemy) {
           var dz = (bestEnemy.z || 0) - (p.z || 0);
-          var zSteer = spell.homing * 200 * dt;
+          var zSteer = spell.homing * 200 * stepDt;
           if (dz > 0) p.vz = Math.min((p.vz || 0) + zSteer, p.speed * 0.5);
           else if (dz < 0) p.vz = Math.max((p.vz || 0) - zSteer, -p.speed * 0.5);
         }
@@ -10928,12 +11906,12 @@ function updateProjectiles(dt) {
 
     // ── Lob physics (Poison Cloud) ──────────────────────────────────
     if (p.isLob) {
-      p.vz = (p.vz || 0) + (p.gravZ || -200) * dt;
+      p.vz = (p.vz || 0) + (p.gravZ || -200) * stepDt;
     }
 
-    var nx = p.x + Math.cos(p.ang) * (p.hz || p.speed) * dt;
-    var ny = p.y + Math.sin(p.ang) * (p.hz || p.speed) * dt;
-    var nz = (p.z || 0) + (p.vz || 0) * dt;
+    var nx = p.x + Math.cos(p.ang) * (p.hz || p.speed) * stepDt;
+    var ny = p.y + Math.sin(p.ang) * (p.hz || p.speed) * stepDt;
+    var nz = (p.z || 0) + (p.vz || 0) * stepDt;
 
     // ── Lob landing — use floor height at current position (works underground) ──
     var lobFloorZ = p.isLob && floorMesh ? sampleEntitySupportRenderZ(nx, ny, p.renderFloorZ, p.underground) : 0;
@@ -10970,7 +11948,7 @@ function updateProjectiles(dt) {
 
         hitEnemy = true;
         _applyProjectileHit(spell, e, ei, nx, ny, nz, dx, dy, now);
-        impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220});
+        impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220, spellId:spell.id});
         hitEnemies++; break;
       }
     }
@@ -10984,7 +11962,7 @@ function updateProjectiles(dt) {
         if (!sp2.active || sp2.hp <= 0) continue;
         if (Math.hypot(nx - sp2.x, ny - sp2.y) < 25) {
           sp2.hp -= (spell.damage || 1);
-          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:300});
+          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:300, spellId:spell.id});
           if (sp2.hp <= 0) {
             sp2.active = false;
             // Death burst
@@ -11020,7 +11998,7 @@ function updateProjectiles(dt) {
         for (var oi = 0; oi < oreVeins.length; oi++) {
           if (oreVeins[oi].gx !== gx || oreVeins[oi].gy !== gy) continue;
           oreVeins[oi].hp--;
-          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:400});
+          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:400, spellId:spell.id});
           if (oreVeins[oi].hp <= 0) {
             oreVeins.splice(oi, 1);
             var dropN = 3 + Math.floor(Math.random() * 4);
@@ -11035,7 +12013,7 @@ function updateProjectiles(dt) {
           hitOre = true; hitWalls++; break;
         }
       }
-      if (!hitOre) { impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220}); hitWalls++; }
+      if (!hitOre) { impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220, spellId:spell.id}); hitWalls++; }
       continue;
     }
     p.x = nx; p.y = ny; p.z = nz;
@@ -11992,200 +12970,302 @@ function drawSimpleWallSlice(x, y, height, wallX, shade, dist, side) {
   ctx.fillRect(x, y, 1, height);
 }
 
+var SKY_BIOME_ANCHORS = [
+  {n:0.083,b:'cave'}, {n:0.250,b:'ground'}, {n:0.416,b:'plains'},
+  {n:0.583,b:'forest'}, {n:0.750,b:'expanse'}, {n:0.916,b:'ice'}
+];
+
+// Fixed catalogs keep the moving sky deterministic and bounded. Stars are
+// batched into two paths and clouds into two paths rather than many fills.
+var SKY_STAR_CATALOG = (function() {
+  var stars = [], state = 0x51f15e;
+  function next() {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  }
+  for (var i = 0; i < 48; i++) {
+    stars.push({angle:next() * Math.PI * 2, altitude:0.12 + next() * 0.78,
+      bright:next() > 0.78, phase:next()});
+  }
+  return stars;
+}());
+
+var SKY_CLOUD_CATALOG = [
+  {angle:0.20,height:0.56,scale:0.85,band:0}, {angle:0.95,height:0.70,scale:0.66,band:1},
+  {angle:1.62,height:0.46,scale:1.00,band:0}, {angle:2.25,height:0.64,scale:0.74,band:1},
+  {angle:2.92,height:0.53,scale:0.92,band:0}, {angle:3.54,height:0.72,scale:0.60,band:1},
+  {angle:4.18,height:0.43,scale:1.08,band:0}, {angle:4.86,height:0.61,scale:0.78,band:1},
+  {angle:5.46,height:0.50,scale:0.96,band:0}, {angle:6.02,height:0.68,scale:0.68,band:1}
+];
+var SKY_MOUNTAIN_HEIGHTS = [0.70,0.55,0.38];
+var SKY_MOUNTAIN_ATMOSPHERE = [0.42,0.27,0.12];
+var SKY_MOUNTAIN_FREQUENCIES = [[1.6,4.2,8.5],[2.1,5.2,10.5],[2.7,6.8,13.5]];
+
+var _skyPhaseScratch = {};
+
+function skySmooth(t) {
+  t = Math.max(0, Math.min(1, t));
+  return t * t * (3 - 2 * t);
+}
+function skyLerpRGB(a, b, t) {
+  return [Math.round(a[0] + (b[0] - a[0]) * t),
+          Math.round(a[1] + (b[1] - a[1]) * t),
+          Math.round(a[2] + (b[2] - a[2]) * t)];
+}
+function skyRGB(c) { return rgbQ(c[0], c[1], c[2]); }
+function skyRGBA(c, a) {
+  return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
+}
+function skyAngleDelta(a, b) {
+  var d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+function getSkyPhase(time, enabled, out) {
+  out = out || {};
+  var t = enabled ? ((time % 1) + 1) % 1 : 0.5;
+  var daylight = 0, warm = 0, stars = 1;
+  if (!enabled || (t >= 0.30 && t <= 0.70)) {
+    daylight = 1; stars = 0;
+  } else if (t >= 0.15 && t < 0.30) {
+    var dawnP = skySmooth((t - 0.15) / 0.15);
+    daylight = dawnP; stars = 1 - dawnP;
+    warm = Math.sin(dawnP * Math.PI);
+  } else if (t > 0.70 && t <= 0.85) {
+    var duskP = skySmooth((t - 0.70) / 0.15);
+    daylight = 1 - duskP; stars = duskP;
+    warm = Math.sin(duskP * Math.PI);
+  }
+  var solarAngle = (t - 0.25) * Math.PI * 2;
+  out.time = t; out.daylight = daylight; out.warm = warm; out.stars = stars;
+  out.warmColor = t < 0.5 ? SKY_TIME_COLORS.dawn : SKY_TIME_COLORS.dusk;
+  out.sunElevation = Math.sin(solarAngle); out.sunAzimuth = solarAngle;
+  out.moonElevation = -out.sunElevation; out.moonAzimuth = solarAngle + Math.PI;
+  return out;
+}
+
+function skyTimeColor(dayColor, nightColor, phase, warmAmount) {
+  var result = skyLerpRGB(nightColor, dayColor, phase.daylight);
+  if (phase.warm > 0.001 && warmAmount > 0) {
+    result = skyLerpRGB(result, phase.warmColor, phase.warm * warmAmount);
+  }
+  return result;
+}
+
+function drawSkyStars(w, horizonY, halfFov, phase, exposure) {
+  var alpha = phase.stars * exposure;
+  if (alpha <= 0.01 || horizonY <= 0) return;
+  var drift = phase.time * Math.PI * 2;
+  ctx.save();
+  for (var pass = 0; pass < 2; pass++) {
+    var count = 0;
+    ctx.beginPath();
+    for (var i = 0; i < SKY_STAR_CATALOG.length; i++) {
+      var star = SKY_STAR_CATALOG[i];
+      if ((star.bright ? 1 : 0) !== pass) continue;
+      var delta = skyAngleDelta(star.angle + drift, cam.ang);
+      if (Math.abs(delta) > halfFov * 1.08) continue;
+      var sx = w * 0.5 + delta / halfFov * w * 0.5;
+      var sy = horizonY * (1 - star.altitude);
+      var size = pass ? 1.5 : 1;
+      ctx.rect(Math.floor(sx), Math.floor(sy), size, size);
+      count++;
+    }
+    if (count) {
+      ctx.globalAlpha = alpha * (pass ? 0.95 : 0.55);
+      ctx.fillStyle = skyRGB(SKY_TIME_COLORS.star);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function drawSkyCelestial(w, h, horizonY, halfFov, phase, exposure, skyMid) {
+  if (exposure <= 0.01 || horizonY <= 0) return;
+  var sunDelta = skyAngleDelta(phase.sunAzimuth, cam.ang);
+  var sunX = w * 0.5 + sunDelta / halfFov * w * 0.5;
+  var sunY = horizonY - phase.sunElevation * horizonY * 0.72;
+  var radius = Math.max(3, h * 0.025);
+  if (Math.abs(sunDelta) < halfFov * 1.35 && phase.sunElevation > -0.10) {
+    if (Math.abs(phase.sunElevation) < 0.28) {
+      var glowRadius = Math.max(35, w * 0.28);
+      var glow = ctx.createRadialGradient(sunX, horizonY, 0, sunX, horizonY, glowRadius);
+      glow.addColorStop(0, skyRGBA(phase.warmColor, 0.52));
+      glow.addColorStop(1, skyRGBA(phase.warmColor, 0));
+      ctx.globalAlpha = exposure * (1 - Math.abs(phase.sunElevation) / 0.28);
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, w, Math.max(0, horizonY));
+    }
+    ctx.globalAlpha = exposure * 0.18;
+    ctx.fillStyle = skyRGB(SKY_TIME_COLORS.sunEdge);
+    ctx.beginPath(); ctx.arc(sunX, sunY, radius * 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = exposure * 0.96;
+    ctx.fillStyle = skyRGB(SKY_TIME_COLORS.sunCore);
+    ctx.beginPath(); ctx.arc(sunX, sunY, radius, 0, Math.PI * 2); ctx.fill();
+  }
+
+  var moonDelta = skyAngleDelta(phase.moonAzimuth, cam.ang);
+  if (phase.stars > 0.08 && Math.abs(moonDelta) < halfFov * 1.2 &&
+      phase.moonElevation > -0.08) {
+    var moonX = w * 0.5 + moonDelta / halfFov * w * 0.5;
+    var moonY = horizonY - phase.moonElevation * horizonY * 0.68;
+    ctx.globalAlpha = exposure * phase.stars * 0.92;
+    ctx.fillStyle = skyRGB(SKY_TIME_COLORS.moon);
+    ctx.beginPath(); ctx.arc(moonX, moonY, radius * 0.82, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = exposure * phase.stars * 0.20;
+    ctx.fillStyle = skyRGB(skyMid);
+    ctx.beginPath(); ctx.arc(moonX - radius * 0.18, moonY - radius * 0.12,
+      radius * 0.19, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(moonX + radius * 0.22, moonY + radius * 0.18,
+      radius * 0.12, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawSkyClouds(w, horizonY, halfFov, cloudColor, cloudiness, phase) {
+  if (cloudiness <= 0.01 || horizonY <= 0) return;
+  var drift = Date.now() * 0.0000022;
+  var scaleBase = w / 360;
+  for (var band = 0; band < 2; band++) {
+    var count = 0;
+    ctx.beginPath();
+    for (var i = 0; i < SKY_CLOUD_CATALOG.length; i++) {
+      var cloud = SKY_CLOUD_CATALOG[i];
+      if (cloud.band !== band) continue;
+      var delta = skyAngleDelta(cloud.angle + drift * (band ? 0.58 : 1), cam.ang);
+      if (Math.abs(delta) > halfFov * 1.35) continue;
+      var x = w * 0.5 + delta / halfFov * w * 0.5;
+      var y = horizonY * (1 - cloud.height);
+      var s = scaleBase * cloud.scale * (band ? 0.82 : 1.08);
+      ctx.ellipse(x, y, 17 * s, 4.6 * s, 0, 0, Math.PI * 2);
+      ctx.ellipse(x - 11 * s, y + 1.5 * s, 11 * s, 3.5 * s, 0, 0, Math.PI * 2);
+      ctx.ellipse(x + 12 * s, y + 1.2 * s, 12 * s, 3.7 * s, 0, 0, Math.PI * 2);
+      count++;
+    }
+    if (count) {
+      ctx.globalAlpha = cloudiness * (band ? 0.10 : 0.16) *
+        (0.72 + phase.daylight * 0.28);
+      ctx.fillStyle = skyRGB(cloudColor);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function skyMountainNoise(a, freq) {
+  var v = a * freq, i = Math.floor(v), f = v - i;
+  f = f * f * (3 - 2 * f);
+  var h1 = ((i * 127 + 311) * 7919 >>> 0) % 10000 / 10000;
+  var h2 = (((i + 1) * 127 + 311) * 7919 >>> 0) % 10000 / 10000;
+  return h1 + (h2 - h1) * f;
+}
+
 function drawSkybox3D() {
   var w = canvas.width, h = canvas.height;
   var pitchOff = Math.floor(-(cam.pitch || 0) * projScale);
   var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var halfFov = cam.fov / 2;
   ctx.save();
 
-  // ── Biome-blended sky colors (from BIOME_PALETTE) ──────────────────
-  // Build lookup tables from centralized palette — no per-biome data here
-  var _bp = BIOME_PALETTE;
-  var _skyPalettes = {}, _mtPalettes = {}, _footPalettes = {}, _hazePalettes = {}, _mtVisible = {};
-  for (var _bk in _bp) {
-    _skyPalettes[_bk]  = _bp[_bk].sky;
-    _mtPalettes[_bk]   = _bp[_bk].mountain;
-    _footPalettes[_bk] = _bp[_bk].foothills;
-    _hazePalettes[_bk] = _bp[_bk].haze;
-    _mtVisible[_bk]    = _bp[_bk].mountainVisible;
+  var wx = ENDLESS_MODE ? pos.x + (windowOriginX || 0) : pos.x;
+  var wy = ENDLESS_MODE ? pos.y + (windowOriginY || 0) : pos.y;
+  var noise = typeof biomeNoise === 'function' ? biomeNoise(wx, wy, 3600) : 0.3;
+  var lo = SKY_BIOME_ANCHORS[0];
+  var hi = SKY_BIOME_ANCHORS[SKY_BIOME_ANCHORS.length - 1];
+  for (var ai = 0; ai < SKY_BIOME_ANCHORS.length - 1; ai++) {
+    if (noise >= SKY_BIOME_ANCHORS[ai].n && noise <= SKY_BIOME_ANCHORS[ai + 1].n) {
+      lo = SKY_BIOME_ANCHORS[ai]; hi = SKY_BIOME_ANCHORS[ai + 1]; break;
+    }
   }
+  if (noise < lo.n) hi = lo;
+  if (noise > hi.n) lo = hi;
+  var biomeT = lo === hi ? 0 : skySmooth((noise - lo.n) / (hi.n - lo.n));
+  var loBiome = BIOME_PALETTE[lo.b], hiBiome = BIOME_PALETTE[hi.b];
+  var loSky = SKY_ATMOSPHERE[lo.b], hiSky = SKY_ATMOSPHERE[hi.b];
+  var phase = getSkyPhase(dayTime, settings.dayNight, _skyPhaseScratch);
+  var dayZenith = skyLerpRGB(loSky.zenith, hiSky.zenith, biomeT);
+  var dayMid = skyLerpRGB(loSky.mid, hiSky.mid, biomeT);
+  var dayHorizon = skyLerpRGB(loSky.horizon, hiSky.horizon, biomeT);
+  var skyTop = skyTimeColor(dayZenith, SKY_TIME_COLORS.nightZenith, phase, 0.10);
+  var skyMid = skyTimeColor(dayMid, SKY_TIME_COLORS.nightMid, phase, 0.30);
+  var skyHorizon = skyTimeColor(dayHorizon, SKY_TIME_COLORS.nightHorizon, phase, 0.62);
+  var cloudDay = skyLerpRGB(loSky.cloud, hiSky.cloud, biomeT);
+  var cloudColor = skyTimeColor(cloudDay, SKY_TIME_COLORS.nightMid, phase, 0.22);
+  var cloudiness = loSky.cloudiness + (hiSky.cloudiness - loSky.cloudiness) * biomeT;
+  var mountainAlpha = loBiome.mountainVisible +
+    (hiBiome.mountainVisible - loBiome.mountainVisible) * biomeT;
 
-  // Blend helper: interpolate two RGB arrays
-  function _lerpRGB(a, b, t) {
-    return [Math.round(a[0] + (b[0] - a[0]) * t),
-            Math.round(a[1] + (b[1] - a[1]) * t),
-            Math.round(a[2] + (b[2] - a[2]) * t)];
-  }
-  function _rgbStr(c) { return rgbQ(c[0], c[1], c[2]); }
-  function _rgbaStr(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
-
-  // Get blended sky parameters from biome noise at player world position
-  var _skyBlend = (function() {
-    var wx, wy;
-    if (ENDLESS_MODE) {
-      wx = pos.x + (windowOriginX || 0);
-      wy = pos.y + (windowOriginY || 0);
-    } else {
-      wx = pos.x; wy = pos.y;
-    }
-    var n = (typeof biomeNoise === 'function') ? biomeNoise(wx, wy, 3600) : 0.3;
-    // Biome anchors at midpoint of each noise band
-    var anchors = [
-      {n: 0.083, b: 'cave'}, {n: 0.250, b: 'ground'}, {n: 0.416, b: 'plains'},
-      {n: 0.583, b: 'forest'}, {n: 0.750, b: 'expanse'}, {n: 0.916, b: 'ice'}
-    ];
-    // Find surrounding anchors
-    var lo = anchors[0], hi = anchors[anchors.length - 1];
-    for (var ai = 0; ai < anchors.length - 1; ai++) {
-      if (n >= anchors[ai].n && n <= anchors[ai + 1].n) {
-        lo = anchors[ai]; hi = anchors[ai + 1]; break;
-      }
-    }
-    if (n < anchors[0].n) { lo = anchors[0]; hi = anchors[0]; }
-    if (n > anchors[anchors.length - 1].n) { lo = hi = anchors[anchors.length - 1]; }
-    var t = (lo === hi) ? 0 : (n - lo.n) / (hi.n - lo.n);
-    t = t * t * (3 - 2 * t); // smoothstep
-    return {
-      skyTop:  _lerpRGB(_skyPalettes[lo.b][0], _skyPalettes[hi.b][0], t),
-      skyBot:  _lerpRGB(_skyPalettes[lo.b][1], _skyPalettes[hi.b][1], t),
-      mt:      [_lerpRGB(_mtPalettes[lo.b][0], _mtPalettes[hi.b][0], t),
-                _lerpRGB(_mtPalettes[lo.b][1], _mtPalettes[hi.b][1], t),
-                _lerpRGB(_mtPalettes[lo.b][2], _mtPalettes[hi.b][2], t)],
-      foot:    _lerpRGB(_footPalettes[lo.b], _footPalettes[hi.b], t),
-      haze:    _lerpRGB(_hazePalettes[lo.b], _hazePalettes[hi.b], t),
-      mtAlpha: _mtVisible[lo.b] + (_mtVisible[hi.b] - _mtVisible[lo.b]) * t
-    };
-  })();
-
-  // Day/night sky tinting — blend biome sky colors with time-of-day keyframes
-  if (settings.dayNight) {
-    var t = dayTime;
-    var skyTint, skyBrightness;
-    if (t < 0.15 || t > 0.85) {
-      // Night — deep dark blue
-      skyTint = [0x02, 0x02, 0x0a];
-      skyBrightness = 0.3;
-    } else if (t < 0.25) {
-      // Dawn — warm orange/purple rising
-      var p = (t - 0.15) / 0.10;
-      skyTint = _lerpRGB([0x02,0x02,0x0a], [0x50,0x25,0x10], p);
-      skyBrightness = 0.3 + p * 1.2;
-    } else if (t < 0.35) {
-      // Dawn → Day transition
-      var p = (t - 0.25) / 0.10;
-      skyTint = _lerpRGB([0x50,0x25,0x10], [0x30,0x30,0x40], p);
-      skyBrightness = 1.5 + p * 0.5;
-    } else if (t < 0.65) {
-      // Day — use biome colors brightened
-      skyTint = [0x30, 0x30, 0x40];
-      skyBrightness = 2.0;
-    } else if (t < 0.75) {
-      // Day → Dusk transition
-      var p = (t - 0.65) / 0.10;
-      skyTint = _lerpRGB([0x30,0x30,0x40], [0x60,0x20,0x08], p);
-      skyBrightness = 2.0 - p * 0.5;
-    } else {
-      // Dusk — warm red/orange fading
-      var p = (t - 0.75) / 0.10;
-      skyTint = _lerpRGB([0x60,0x20,0x08], [0x02,0x02,0x0a], p);
-      skyBrightness = 1.5 - p * 1.2;
-    }
-    // Apply tint: blend biome color toward tint, then scale by brightness
-    function _tintRGB(base, tint, bright) {
-      return [Math.min(255, Math.floor((base[0] * 0.4 + tint[0] * 0.6) * bright)),
-              Math.min(255, Math.floor((base[1] * 0.4 + tint[1] * 0.6) * bright)),
-              Math.min(255, Math.floor((base[2] * 0.4 + tint[2] * 0.6) * bright))];
-    }
-    _skyBlend.skyTop = _tintRGB(_skyBlend.skyTop, skyTint, skyBrightness);
-    _skyBlend.skyBot = _tintRGB(_skyBlend.skyBot, skyTint, skyBrightness);
-    // Tint mountains/foothills/haze too
-    for (var mi = 0; mi < 3; mi++) _skyBlend.mt[mi] = _tintRGB(_skyBlend.mt[mi], skyTint, skyBrightness * 0.8);
-    _skyBlend.foot = _tintRGB(_skyBlend.foot, skyTint, skyBrightness * 0.7);
-    _skyBlend.haze = _tintRGB(_skyBlend.haze, skyTint, skyBrightness * 0.6);
-  }
-
-  // Sky gradient
-  var gradient = ctx.createLinearGradient(0, 0, 0, horizonY);
-  gradient.addColorStop(0, _rgbStr(_skyBlend.skyTop));
-  gradient.addColorStop(1, _rgbStr(_skyBlend.skyBot));
+  var gradient = ctx.createLinearGradient(0, 0, 0, Math.max(1, horizonY));
+  gradient.addColorStop(0, skyRGB(skyTop));
+  gradient.addColorStop(0.56, skyRGB(skyMid));
+  gradient.addColorStop(0.86, skyRGB(skyLerpRGB(skyMid, skyHorizon, 0.58)));
+  gradient.addColorStop(1, skyRGB(skyHorizon));
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, w, Math.max(0, horizonY));
 
-  // Mountain silhouettes — fade out for cave biome
-  if (_skyBlend.mtAlpha > 0.01 && horizonY > 0) {
-    var ang = cam.ang;
-    function mtNoise(a, freq) {
-      var v = a * freq;
-      var i = Math.floor(v);
-      var f = v - i;
-      f = f * f * (3 - 2 * f);
-      var h1 = ((i * 127 + 311) * 7919 >>> 0) % 10000 / 10000;
-      var h2 = (((i + 1) * 127 + 311) * 7919 >>> 0) % 10000 / 10000;
-      return h1 + (h2 - h1) * f;
+  drawSkyStars(w, horizonY, halfFov, phase, mountainAlpha);
+  drawSkyCelestial(w, h, horizonY, halfFov, phase, mountainAlpha, skyMid);
+  drawSkyClouds(w, horizonY, halfFov, cloudColor, cloudiness, phase);
+
+  // Farther mountain layers borrow progressively more horizon atmosphere.
+  if (mountainAlpha > 0.01 && horizonY > 0) {
+    var mountainColors = [];
+    for (var mi = 0; mi < 3; mi++) {
+      var rawMountain = skyLerpRGB(loBiome.mountain[mi], hiBiome.mountain[mi], biomeT);
+      var dayMountain = skyLerpRGB(rawMountain, dayHorizon, SKY_MOUNTAIN_ATMOSPHERE[mi]);
+      mountainColors.push(skyTimeColor(dayMountain,
+        SKY_TIME_COLORS.nightHorizon, phase, 0.16));
     }
-
-    var layerHeights = [0.70, 0.55, 0.38];
-    var layerFreqs = [
-      [1.6, 4.2, 8.5],
-      [2.1, 5.2, 10.5],
-      [2.7, 6.8, 13.5]
-    ];
-
-    var halfFov = cam.fov / 2;
+    var rawFoot = skyLerpRGB(loBiome.foothills, hiBiome.foothills, biomeT);
+    var footColor = skyTimeColor(skyLerpRGB(rawFoot, dayHorizon, 0.08),
+      SKY_TIME_COLORS.nightZenith, phase, 0.10);
+    var rawHaze = skyLerpRGB(loBiome.haze, hiBiome.haze, biomeT);
+    var hazeColor = skyTimeColor(skyLerpRGB(rawHaze, dayHorizon, 0.52),
+      SKY_TIME_COLORS.nightHorizon, phase, 0.28);
     var step = Math.max(2, Math.floor(w / 120));
     var belowExtend = Math.min(h * 0.25, 60);
-
-    ctx.globalAlpha = _skyBlend.mtAlpha;
+    ctx.globalAlpha = mountainAlpha;
     for (var li = 0; li < 3; li++) {
-      var maxH = horizonY * layerHeights[li];
-      ctx.fillStyle = _rgbStr(_skyBlend.mt[li]);
-      ctx.beginPath();
-      ctx.moveTo(0, horizonY + belowExtend);
-      for (var sx = 0; sx <= w; sx += step) {
-        var t = (sx / w - 0.5) * 2;
-        var worldAng = ang + t * halfFov;
-        var n = mtNoise(worldAng, layerFreqs[li][0]) * 0.55
-              + mtNoise(worldAng, layerFreqs[li][1]) * 0.3
-              + mtNoise(worldAng, layerFreqs[li][2]) * 0.15;
-        n = Math.pow(n, 0.7);
-        var peakY = horizonY - n * maxH;
-        ctx.lineTo(sx, peakY);
+      var maxH = horizonY * SKY_MOUNTAIN_HEIGHTS[li];
+      ctx.fillStyle = skyRGB(mountainColors[li]);
+      ctx.beginPath(); ctx.moveTo(0, horizonY + belowExtend);
+      for (var sx2 = 0; sx2 <= w; sx2 += step) {
+        var screenT = (sx2 / w - 0.5) * 2;
+        var worldAng = cam.ang + screenT * halfFov;
+        var n = skyMountainNoise(worldAng, SKY_MOUNTAIN_FREQUENCIES[li][0]) * 0.55
+          + skyMountainNoise(worldAng, SKY_MOUNTAIN_FREQUENCIES[li][1]) * 0.30
+          + skyMountainNoise(worldAng, SKY_MOUNTAIN_FREQUENCIES[li][2]) * 0.15;
+        ctx.lineTo(sx2, horizonY - Math.pow(n, 0.7) * maxH);
       }
-      ctx.lineTo(w, horizonY + belowExtend);
-      ctx.closePath();
-      ctx.fill();
+      ctx.lineTo(w, horizonY + belowExtend); ctx.closePath(); ctx.fill();
     }
 
-    // Foothills
-    ctx.fillStyle = _rgbStr(_skyBlend.foot);
-    ctx.beginPath();
-    ctx.moveTo(0, horizonY + belowExtend);
-    for (var sx2 = 0; sx2 <= w; sx2 += step) {
-      var t2 = (sx2 / w - 0.5) * 2;
-      var worldAng2 = ang + t2 * halfFov;
-      var nf = mtNoise(worldAng2, 3.5) * 0.5 + mtNoise(worldAng2, 8) * 0.3 + mtNoise(worldAng2, 15) * 0.2;
-      nf = Math.pow(nf, 0.6);
-      var footY = horizonY - nf * horizonY * 0.18;
-      ctx.lineTo(sx2, footY);
+    ctx.fillStyle = skyRGB(footColor);
+    ctx.beginPath(); ctx.moveTo(0, horizonY + belowExtend);
+    for (var sx3 = 0; sx3 <= w; sx3 += step) {
+      var screenT2 = (sx3 / w - 0.5) * 2;
+      var worldAng2 = cam.ang + screenT2 * halfFov;
+      var nf = skyMountainNoise(worldAng2, 3.5) * 0.5
+        + skyMountainNoise(worldAng2, 8) * 0.3
+        + skyMountainNoise(worldAng2, 15) * 0.2;
+      ctx.lineTo(sx3, horizonY - Math.pow(nf, 0.6) * horizonY * 0.18);
     }
-    ctx.lineTo(w, horizonY + belowExtend);
-    ctx.closePath();
-    ctx.fill();
+    ctx.lineTo(w, horizonY + belowExtend); ctx.closePath(); ctx.fill();
     ctx.globalAlpha = 1;
 
-    // Haze band
     var hazeH = Math.min(30, horizonY * 0.15);
     var hazeGrad = ctx.createLinearGradient(0, horizonY - hazeH, 0, horizonY + hazeH);
-    hazeGrad.addColorStop(0, _rgbaStr(_skyBlend.haze, 0));
-    hazeGrad.addColorStop(0.4, _rgbaStr(_skyBlend.haze, 0.45));
-    hazeGrad.addColorStop(1, _rgbaStr(_skyBlend.haze, 0));
+    hazeGrad.addColorStop(0, skyRGBA(hazeColor, 0));
+    hazeGrad.addColorStop(0.4, skyRGBA(hazeColor, 0.45));
+    hazeGrad.addColorStop(1, skyRGBA(hazeColor, 0));
     ctx.fillStyle = hazeGrad;
     ctx.fillRect(0, horizonY - hazeH, w, hazeH * 2);
   }
 
   ctx.restore();
 }
-
 function drawCalibration() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#333'; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -12311,22 +13391,43 @@ function drawWalls3D() {
     }
     var baseShade = inCave && typeof getCaveRenderLightAt === 'function' ?
       getCaveRenderLightAt(faceMidX, faceMidY, true) : shade;
-    var totalShade = Math.min(1.0, baseShade + lightContrib);
-    // Warm tint near torches
-    var warmR = lightContrib > 0.05 ? 1.0 + lightContrib * 0.3 : 1.0;
-    var warmB = lightContrib > 0.05 ? 1.0 - lightContrib * 0.2 : 1.0;
+    var caveStyled = inCave && !DEBUG_POLY_TYPES && !DEBUG_CAVE_COLORS;
+    var r, g, b;
+    if (caveStyled) {
+      // Stable underground side lighting separates corners without borrowing
+      // the exterior sun direction. Long east/west faces are slightly quieter.
+      var caveOrientation = Math.abs(wx2 - wx1) > Math.abs(wy2 - wy1) ? 0.94 : 1;
+      var caveLit = shadeCaveSurfaceColor(material, CAVE_SURFACE_WALL,
+        baseShade * caveOrientation, lightContrib, fog);
+      r = (caveLit >>> 16) & 255; g = (caveLit >>> 8) & 255; b = caveLit & 255;
+    } else {
+      var totalShade = Math.min(1.0, baseShade + lightContrib);
+      // Warm tint near torches
+      var warmR = lightContrib > 0.05 ? 1.0 + lightContrib * 0.3 : 1.0;
+      var warmB = lightContrib > 0.05 ? 1.0 - lightContrib * 0.2 : 1.0;
+      r = Math.max(0, Math.min(255, Math.floor(faceR * colorMod * totalShade * fog * warmR)));
+      g = Math.max(0, Math.min(255, Math.floor(faceG * colorMod * totalShade * fog)));
+      b = Math.max(0, Math.min(255, Math.floor(faceB * colorMod * totalShade * fog * warmB)));
+    }
 
-    var r = Math.max(0, Math.min(255, Math.floor(faceR * colorMod * totalShade * fog * warmR)));
-    var g = Math.max(0, Math.min(255, Math.floor(faceG * colorMod * totalShade * fog)));
-    var b = Math.max(0, Math.min(255, Math.floor(faceB * colorMod * totalShade * fog * warmB)));
-
-    // Draw wall quad with vertical gradient (lighter at top, darker at bottom)
-    var topR = Math.min(255, Math.floor(r * 1.12));
-    var topG = Math.min(255, Math.floor(g * 1.12));
-    var topB = Math.min(255, Math.floor(b * 1.12));
-    var botR = Math.floor(r * 0.88);
-    var botG = Math.floor(g * 0.88);
-    var botB = Math.floor(b * 0.88);
+    // Exterior walls keep the legacy sunlight ramp. Covered stone instead has
+    // a soot-dark roof join, readable middle and grounded floor contact.
+    var topFactor = caveStyled ? 0.76 : 1.12;
+    var upperFactor = caveStyled ? 0.94 : 1;
+    var middleFactor = caveStyled ? 1.03 : 1;
+    var bottomFactor = caveStyled ? 0.80 : 0.88;
+    var topR = Math.min(255, Math.floor(r * topFactor));
+    var topG = Math.min(255, Math.floor(g * topFactor));
+    var topB = Math.min(255, Math.floor(b * topFactor));
+    var upperR = Math.min(255, Math.floor(r * upperFactor));
+    var upperG = Math.min(255, Math.floor(g * upperFactor));
+    var upperB = Math.min(255, Math.floor(b * upperFactor));
+    var middleR = Math.min(255, Math.floor(r * middleFactor));
+    var middleG = Math.min(255, Math.floor(g * middleFactor));
+    var middleB = Math.min(255, Math.floor(b * middleFactor));
+    var botR = Math.floor(r * bottomFactor);
+    var botG = Math.floor(g * bottomFactor);
+    var botB = Math.floor(b * bottomFactor);
 
     // Use gradient for the wall face. Canvas gradients bake absolute coords,
     // so the per-frame cache key includes a y-range bucket (A1-3).
@@ -12336,15 +13437,17 @@ function drawWalls3D() {
       maxSY = Math.max(maxSY, wallPoly[wi].y);
     }
     if (maxSY > minSY + 1) {
-      // Bucket color to 8-step and y to 8px. Key fits in 32 bits.
+      // Bucket color to 8-step and y to 8px. The material-ramp bit keeps an
+      // interior four-stop gradient from reusing an exterior three-stop one.
       var _cb = ((r >> 3) << 12) | ((g >> 3) << 6) | (b >> 3);
       var _yb = ((minSY >> 3) & 0x3fff) | (((maxSY >> 3) & 0x3fff) << 14);
-      var _gkey = _cb * 268435456 + _yb; // 18-bit color * 2^28 + 28-bit y
+      var _gkey = _cb * 536870912 + (caveStyled ? 268435456 : 0) + _yb;
       var gradient = _wallGradCache.get(_gkey);
       if (!gradient) {
         gradient = ctx.createLinearGradient(0, minSY, 0, maxSY);
         gradient.addColorStop(0, rgbQ(topR, topG, topB));
-        gradient.addColorStop(0.5, rgbQ(r, g, b));
+        if (caveStyled) gradient.addColorStop(0.22, rgbQ(upperR, upperG, upperB));
+        gradient.addColorStop(caveStyled ? 0.62 : 0.5, rgbQ(middleR, middleG, middleB));
         gradient.addColorStop(1, rgbQ(botR, botG, botB));
         _wallGradCache.set(_gkey, gradient);
         _cacheStats.wallGrad.misses++;
@@ -12375,8 +13478,15 @@ function drawWalls3D() {
       var rockFog = Math.max(renderCaveFogFloor, 1.0 - perpDist / viewDist * 0.8);
       var rockLight = typeof getCaveRenderLightAt === 'function' ?
         getCaveRenderLightAt(faceMidX, faceMidY, true) : ambientLight;
-      ctx.globalAlpha = rockFog;
-      ctx.fillStyle = rgbQ(Math.floor(caveWR * rockLight), Math.floor(caveWG * rockLight), Math.floor(caveWB * rockLight));
+      if (caveStyled) {
+        var closureLit = shadeCaveSurfaceColor(material, CAVE_SURFACE_CEILING,
+          rockLight, lightContrib, rockFog);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = rgbQ((closureLit >>> 16) & 255, (closureLit >>> 8) & 255, closureLit & 255);
+      } else {
+        ctx.globalAlpha = rockFog;
+        ctx.fillStyle = rgbQ(Math.floor(caveWR * rockLight), Math.floor(caveWG * rockLight), Math.floor(caveWB * rockLight));
+      }
       fillSceneDepthPolygon(extensionPoly);
       ctx.globalAlpha = 1.0;
     }
@@ -12420,9 +13530,9 @@ function drawWalls3D() {
       var _wcap = wallCapZ ? wallCapZ[gy * gridW + gx] : -Infinity;
       var _isEntrWall = _wcap > -Infinity;
 
-      // Top-Z clamp: precomputed per cell. Capped cells clamp to their cap;
-      // mouth cells clamp to the lowest neighbor cap (surrounding ground);
-      // open-surface cells have Infinity (no clamp).
+      // Precomputed roof-bound clamp keeps cave walls inside their rock cover,
+      // below every exterior corner. A nearby cap is not a wall-height target;
+      // ordinary surface cells retain Infinity (no clamp).
       if (wallMaxTopZ) {
         var _wmax = wallMaxTopZ[gy * gridW + gx];
         if (_wmax < Infinity && topH > _wmax) topH = _wmax;
@@ -12430,9 +13540,11 @@ function drawWalls3D() {
 
       // Per-cell biome color for endless mode (smooth blending across biomes)
       var cellBR = defaultBaseR, cellBG = defaultBaseG, cellBB = defaultBaseB;
+      var cellAuthored = false;
       if (ENDLESS_MODE) {
         var _wcIdx = gy * gridW + gx;
         if (wallColorR && wallColorR[_wcIdx]) {
+          cellAuthored = true;
           cellBR = wallColorR[_wcIdx];
           cellBG = wallColorG[_wcIdx];
           cellBB = wallColorB[_wcIdx];
@@ -12507,7 +13619,7 @@ function drawWalls3D() {
         var ct2 = caveCeilAt(x1, y1, topH);
         var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx] : fh;
-        wallFaces.push({wx1:x1, wy1:y2, wx2:x1, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeW, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x1, wy1:y2, wx2:x1, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeW, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored, entrWall:_isEntrWall});
       }
       // East face (gx+1): endpoints are (x2,y1) and (x2,y2)
       if (gx === gridW - 1 || !grid[gy * gridW + (gx + 1)]) {
@@ -12517,7 +13629,7 @@ function drawWalls3D() {
         var ct2 = caveCeilAt(x2, y2, topH);
         var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx + 1] : fh;
-        wallFaces.push({wx1:x2, wy1:y1, wx2:x2, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeE, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x2, wy1:y1, wx2:x2, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeE, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored, entrWall:_isEntrWall});
       }
       // North face (gy-1): endpoints are (x1,y1) and (x2,y1)
       if (gy === 0 || !grid[(gy - 1) * gridW + gx]) {
@@ -12527,7 +13639,7 @@ function drawWalls3D() {
         var ct2 = caveCeilAt(x2, y1, topH);
         var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx + 2] : fh;
-        wallFaces.push({wx1:x1, wy1:y1, wx2:x2, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeN, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x1, wy1:y1, wx2:x2, wy2:y1, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeN, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored, entrWall:_isEntrWall});
       }
       // South face (gy+1): endpoints are (x2,y2) and (x1,y2)
       if (gy === gridH - 1 || !grid[(gy + 1) * gridW + gx]) {
@@ -12537,7 +13649,7 @@ function drawWalls3D() {
         var ct2 = caveCeilAt(x1, y2, topH);
         var faceInCave = cellCave || ct1 !== null || ct2 !== null;
         var baseFh = wallFaceBase ? wallFaceBase[_wfbBaseIdx + 3] : fh;
-        wallFaces.push({wx1:x2, wy1:y2, wx2:x1, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeS, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, entrWall:_isEntrWall});
+        wallFaces.push({wx1:x2, wy1:y2, wx2:x1, wy2:y2, fh:baseFh, topH:topH, shade:renderSurfaceWallShadeS, dist:perpDist, ct1:ct1, ct2:ct2, cave:faceInCave, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored, entrWall:_isEntrWall});
       }
 
       // Top face — only if camera is above wall top and not fully surrounded
@@ -12548,7 +13660,7 @@ function drawWalls3D() {
       if (hasExposed && !cellCave && cameraZ > topH * 25) {
         var topDist = Math.sqrt(ddx * ddx + ddy * ddy);
         if (topDist > 1) {
-          wallFaces.push({top:true, x1:x1, y1:y1, x2:x2, y2:y2, z:topH, dist:topDist, wh:wh, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome});
+          wallFaces.push({top:true, x1:x1, y1:y1, x2:x2, y2:y2, z:topH, dist:topDist, wh:wh, br:cellBR, bg:cellBG, bb:cellBB, biome:cellBiome, authored:cellAuthored});
         }
       }
     }
@@ -12654,7 +13766,7 @@ function drawWalls3D() {
       fillSceneDepthPolygon(topPoly);
 
       // ── Forest: draw canopy inline (once per cell, respects painter's order) ──
-      if (f.biome === 'forest') {
+      if (f.biome === 'forest' && !f.authored) {
         var tKey = Math.floor(f.x1) + ',' + Math.floor(f.y1);
         if (!_forestCanopyDrawn[tKey]) {
           _forestCanopyDrawn[tKey] = 1;
@@ -12697,7 +13809,7 @@ function drawWalls3D() {
       }
     } else {
       // Side face — forest walls render as brown bark trunks
-      if (f.biome === 'forest') {
+      if (f.biome === 'forest' && !f.authored) {
         baseR = 75; baseG = 55; baseB = 35;  // bark brown instead of green
       } else {
         baseR = f.br; baseG = f.bg; baseB = f.bb;
@@ -12706,7 +13818,7 @@ function drawWalls3D() {
         f.ct1, f.ct2, f.cave || false, f.entrWall || false);
 
       // ── Forest: draw canopy inline from side view ──
-      if (f.biome === 'forest' && f.dist < viewDist * 0.5) {
+      if (f.biome === 'forest' && !f.authored && f.dist < viewDist * 0.5) {
         // Dedup by grid cell — use wall midpoint to derive cell key
         var faceMX = (f.wx1 + f.wx2) * 0.5, faceMY = (f.wy1 + f.wy2) * 0.5;
         var tKey = Math.floor(faceMX / cell) + ',' + Math.floor(faceMY / cell);
@@ -12941,6 +14053,76 @@ function getFloorStitchTile(mesh, cache, ci, li, role, z, ceiling) {
   return tile;
 }
 
+// Signed vertical distance from the eye to the triangle's actual plane.
+// Comparing only corner heights is not back-face culling: an uphill bank can
+// face an eye below every corner, while a downhill back face can face away
+// from an eye above them. Test each triangle because a cell need not be planar.
+// Heights here are already render-world units, matching cameraZ/projection.
+function getTerrainTriangleEyeSide(a, b, c, eyeX, eyeY, eyeZ) {
+  var ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+  var vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+  var nz = ux * vy - uy * vx;
+  if (!nz) return NaN;
+  return eyeZ - a.z + ((uy * vz - uz * vy) * (eyeX - a.x) +
+    (uz * vx - ux * vz) * (eyeY - a.y)) / nz;
+}
+
+// Same endpoint closure as the wall pass, in mesh-height units. This is a
+// static layer lookup, not a camera or player-stratum visibility decision.
+function floorWallAOCeilingAt(wx, wy, topH) {
+  if (deepCaveRegions.length > 0) {
+    var region = isInDeepCave(wx, wy);
+    if (region && region.ceilZ > 0) {
+      var depth = region.depth || 1.0;
+      return Math.max(topH, topH + (region.ceilZ / 25 - topH) * Math.min(1, depth * depth * 2.5));
+    }
+  }
+  var mesh = floorMesh;
+  if (!mesh || !mesh.layerCount) return topH;
+  var mx = Math.floor(wx / mesh.gridSize), my = Math.floor(wy / mesh.gridSize);
+  if (mx < 0 || my < 0 || mx >= mesh.w || my >= mesh.h) return topH;
+  var mi = my * mesh.w + mx, ceiling = Infinity;
+  for (var li = 0; li < mesh.layerCount[mi]; li++) {
+    if (meshLayerType(mesh, mi, li) === 2) ceiling = Math.min(ceiling, meshLayerHeight(mesh, mi, li));
+  }
+  return ceiling < Infinity ? Math.max(topH, ceiling) : topH;
+}
+
+// Contact AO belongs to the floor edge beside the actual wall span. A 2D
+// occupancy bit alone also describes buried cave walls, which must not draw
+// a dark map of the cave through the grass above. Face indices match the wall
+// renderer (W/E/N/S); edge heights run top-to-bottom or left-to-right.
+function floorWallOccludesAO(gx, gy, face, edgeZ1, edgeZ2) {
+  if (!grid || gx < 0 || gy < 0 || gx >= gridW || gy >= gridH) return false;
+  var wi = gy * gridW + gx;
+  if (!grid[wi]) return false;
+  var edgeMin = Math.min(edgeZ1, edgeZ2), edgeMax = Math.max(edgeZ1, edgeZ2);
+  var limit = wallMaxTopZ ? wallMaxTopZ[wi] : Infinity;
+  var x1 = (gx + (face === 1 ? 1 : 0)) * cell;
+  var y1 = (gy + (face === 3 ? 1 : 0)) * cell;
+  var x2 = x1 + (face >= 2 ? cell : 0), y2 = y1 + (face < 2 ? cell : 0);
+  // Buried walls usually reject using just the stored roof bound and its two
+  // ceiling endpoints, without a floor-height query. A sloped closure can
+  // still rise past that bound, so the bound alone is not an occluder test.
+  if (limit <= edgeMin + 0.001 &&
+      floorWallAOCeilingAt(x1, y1, limit) <= edgeZ1 + 0.001 &&
+      floorWallAOCeilingAt(x2, y2, limit) <= edgeZ2 + 0.001) return false;
+  var floorH = floorMesh ? getFloorHeightAt((gx + 0.5) * cell, (gy + 0.5) * cell) : 0;
+  var topH = Math.min(floorH + (CANVAS_BASE_H / 25) * (wallHeights ? wallHeights[wi] : 1), limit);
+  var baseH = (wallFaceBase ? wallFaceBase[wi * 4 + face] : floorH) - 0.15;
+  if (baseH > edgeMax + 0.001) return false;
+  if (topH > edgeMin + 0.001 && topH > baseH) return true;
+  var top1 = floorWallAOCeilingAt(x1, y1, topH);
+  var top2 = floorWallAOCeilingAt(x2, y2, topH);
+  // Clip the floor-edge interval to the wall base, then test the two ends of
+  // that interval. Linear roof/floor edges cannot cross elsewhere unnoticed.
+  var t1 = 0, t2 = 1, dz = edgeZ2 - edgeZ1;
+  if (edgeZ1 < baseH && dz > 0) t1 = (baseH - edgeZ1) / dz;
+  if (edgeZ2 < baseH && dz < 0) t2 = (baseH - edgeZ1) / dz;
+  var above1 = top1 - edgeZ1, aboveDelta = top2 - edgeZ2 - above1;
+  return above1 + aboveDelta * t1 > 0.001 || above1 + aboveDelta * t2 > 0.001;
+}
+
 function drawLayersFloor3D() {
   if (!floorMesh || !floorMesh.layerCount) return;
   var C = getCam3D();
@@ -13105,22 +14287,22 @@ function drawLayersFloor3D() {
         else if (_z3 < _z0 - _tol) _z3 = _z0 - _tol;
         __caveStats.floorBlendRange++;
 
-        // Top faces are visible only from above their plane. This one spatial
-        // rule hides the grass/cap above an interior camera while preserving
-        // the cave floor and the real approach outside; no fixed mouth-sized
-        // rectangle or playerUnderground switch is needed.
-        var _quadMinZ = Math.min(_z0, _z1, _z2, _z3);
-        if (cameraZ < _quadMinZ * 25 - 1) continue;
-
         var wx1 = x * gs, wy1 = y * gs, wx2 = wx1 + gs, wy2 = wy1 + gs;
         var floorVertices = [
           {x:wx1,y:wy1,z:_z0*25}, {x:wx2,y:wy1,z:_z1*25},
           {x:wx2,y:wy2,z:_z3*25}, {x:wx1,y:wy2,z:_z2*25}
         ];
         // A sloped four-corner cell is not necessarily planar. Triangulate
-        // before projection so Canvas coverage and interpolated depth agree.
-        var floorPoly = projectSceneWorldPolygon([floorVertices[0], floorVertices[1], floorVertices[2]], C);
-        var floorPolyB = projectSceneWorldPolygon([floorVertices[0], floorVertices[2], floorVertices[3]], C);
+        // before both facing and projection so visible uphill banks still
+        // supply opaque depth while the exiting camera is below the surface.
+        // Flat caps retain their actual top/underside distinction; this does
+        // not draw a grass lid over the interior or switch by player stratum.
+        var floorPoly = getTerrainTriangleEyeSide(floorVertices[0], floorVertices[1], floorVertices[2],
+          cam.x, cam.y, cameraZ) >= -0.000001 ?
+          projectSceneWorldPolygon([floorVertices[0], floorVertices[1], floorVertices[2]], C) : [];
+        var floorPolyB = getTerrainTriangleEyeSide(floorVertices[0], floorVertices[2], floorVertices[3],
+          cam.x, cam.y, cameraZ) >= -0.000001 ?
+          projectSceneWorldPolygon([floorVertices[0], floorVertices[2], floorVertices[3]], C) : [];
         if (floorPoly.length < 3 && floorPolyB.length < 3) continue;
 
         // Biome color from mesh.colors[], dimmed by ambient + light grid + AO.
@@ -13171,44 +14353,59 @@ function drawLayersFloor3D() {
         // Light belongs to the rendered cell, not to the player's global
         // state. Covered floors fade smoothly from exterior daylight at the
         // shared portal plane to the readable cave ambient deeper inside.
-        var floorLight = _cellUnderground && typeof getCaveRenderLightAt === 'function' ?
+        var floorAmbient = _cellUnderground && typeof getCaveRenderLightAt === 'function' ?
           getCaveRenderLightAt(centerX, centerY, true) :
           (typeof renderSurfaceAmbient !== 'undefined' ? renderSurfaceAmbient : ambientLight);
-        if (_lightGrid) {
+        var floorPointLight = 0;
+        var _surfacePointLight = !_cellUnderground && typeof getSurfaceFloorLightAt === 'function' ?
+          getSurfaceFloorLightAt(mesh, idx0, li) : NaN;
+        if (Number.isFinite(_surfacePointLight)) {
+          floorPointLight = _surfacePointLight;
+        } else if (_lightGrid) {
           var flgx = Math.floor(centerX / _lightCellSize);
           var flgy = Math.floor(centerY / _lightCellSize);
           if (flgx >= 0 && flgx < _lightGridW && flgy >= 0 && flgy < _lightGridH)
-            floorLight = Math.min(1.0, floorLight + _lightGrid[flgy * _lightGridW + flgx]);
+            floorPointLight = _lightGrid[flgy * _lightGridW + flgx];
         }
-        // AO: darken quads adjacent to walls
+        // AO: only walls reaching this physical floor edge can darken it.
+        var floorAO = 1;
         if (grid) {
           var _aoGx = Math.floor(centerX / cell), _aoGy = Math.floor(centerY / cell);
           if (_aoGx >= 0 && _aoGx < gridW && _aoGy >= 0 && _aoGy < gridH) {
             var _aoN = 0;
-            if (_aoGx > 0 && grid[_aoGy * gridW + _aoGx - 1]) _aoN++;
-            if (_aoGx < gridW - 1 && grid[_aoGy * gridW + _aoGx + 1]) _aoN++;
-            if (_aoGy > 0 && grid[(_aoGy - 1) * gridW + _aoGx]) _aoN++;
-            if (_aoGy < gridH - 1 && grid[(_aoGy + 1) * gridW + _aoGx]) _aoN++;
-            if (_aoN > 0) floorLight *= (1.0 - 0.08 * _aoN);
+            if (floorWallOccludesAO(_aoGx - 1, _aoGy, 1, _z0, _z2)) _aoN++;
+            if (floorWallOccludesAO(_aoGx + 1, _aoGy, 0, _z1, _z3)) _aoN++;
+            if (floorWallOccludesAO(_aoGx, _aoGy - 1, 3, _z0, _z1)) _aoN++;
+            if (floorWallOccludesAO(_aoGx, _aoGy + 1, 2, _z2, _z3)) _aoN++;
+            if (_aoN > 0) floorAO = 1.0 - 0.08 * _aoN;
           }
         }
         var _fc = parseInt(baseCol.slice(1), 16);
-        var _fr = ((_fc >> 16) & 0xff) * floorLight;
-        var _fg = ((_fc >> 8) & 0xff) * floorLight;
-        var _fb = (_fc & 0xff) * floorLight;
         // Distance fog: underground cells fade toward black (cave depth),
         // surface cells fade via alpha toward whatever is behind (sky/ground).
         var fadeStart = viewDist * 0.72, fadeRange = viewDist - fadeStart;
         var d = Math.sqrt(distSq);
         var fadeF = d > fadeStart ? Math.max(0, 1.0 - (d - fadeStart) / fadeRange) : 1.0;
         fadeF *= fadeF;
-        if (_cellUnderground) {
-          _fr *= fadeF; _fg *= fadeF; _fb *= fadeF;
+        var _fr, _fg, _fb;
+        if (_cellUnderground && !DEBUG_LAYER_TYPES && !DEBUG_POLY_TYPES) {
+          var floorLit = shadeCaveSurfaceColor(_fc, CAVE_SURFACE_FLOOR,
+            floorAmbient, floorPointLight, fadeF, floorAO);
+          _fr = (floorLit >>> 16) & 255; _fg = (floorLit >>> 8) & 255; _fb = floorLit & 255;
           ctx.globalAlpha = 1.0;
         } else {
-          ctx.globalAlpha = fadeF;
+          var floorLight = Math.min(1, floorAmbient + floorPointLight) * floorAO;
+          _fr = ((_fc >> 16) & 0xff) * floorLight;
+          _fg = ((_fc >> 8) & 0xff) * floorLight;
+          _fb = (_fc & 0xff) * floorLight;
+          if (_cellUnderground) {
+            _fr *= fadeF; _fg *= fadeF; _fb *= fadeF;
+            ctx.globalAlpha = 1;
+          } else {
+            ctx.globalAlpha = fadeF;
+          }
         }
-        ctx.fillStyle = 'rgb(' + (_fr | 0) + ',' + (_fg | 0) + ',' + (_fb | 0) + ')';
+        ctx.fillStyle = rgbQ(_fr, _fg, _fb);
         fillSceneDepthPolygon(floorPoly);
         fillSceneDepthPolygon(floorPolyB);
 
@@ -13305,19 +14502,19 @@ function drawLayersCeiling3D() {
         if (_cz3 !== _cz3) { __caveStats.ceilSkipEntrRange++; continue; }
         __caveStats.ceilCollected++;
 
-        // The underside is visible only when the converted render eye is below
-        // it. Do not suppress it merely because a cap exists above: that cap
-        // is precisely the roof whose underside the interior needs to show.
-        var _ceilMaxZ = Math.max(_cz0, _cz1, _cz2, _cz3);
-        if (cameraZ > _ceilMaxZ * 25 + 1) continue;
-
         var wx1 = x * gs, wy1 = y * gs, wx2 = wx1 + gs, wy2 = wy1 + gs;
         var ceilingVertices = [
           {x:wx1,y:wy1,z:_cz0*25}, {x:wx2,y:wy1,z:_cz1*25},
           {x:wx2,y:wy2,z:_cz3*25}, {x:wx1,y:wy2,z:_cz2*25}
         ];
-        var ceilingPoly = projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[1], ceilingVertices[2]], C);
-        var ceilingPolyB = projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[2], ceilingVertices[3]], C);
+        // The underside uses the opposite side of the same triangle-plane
+        // test, including sloped ceilings viewed obliquely through the mouth.
+        var ceilingPoly = getTerrainTriangleEyeSide(ceilingVertices[0], ceilingVertices[1], ceilingVertices[2],
+          cam.x, cam.y, cameraZ) <= 0.000001 ?
+          projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[1], ceilingVertices[2]], C) : [];
+        var ceilingPolyB = getTerrainTriangleEyeSide(ceilingVertices[0], ceilingVertices[2], ceilingVertices[3],
+          cam.x, cam.y, cameraZ) <= 0.000001 ?
+          projectSceneWorldPolygon([ceilingVertices[0], ceilingVertices[2], ceilingVertices[3]], C) : [];
         if (ceilingPoly.length < 3 && ceilingPolyB.length < 3) continue;
 
         // Same world-authored stone as walls and cave floors.
@@ -13329,19 +14526,31 @@ function drawLayersCeiling3D() {
           var _cDz = Math.max(Math.abs(_cz1 - _cz0), Math.abs(_cz2 - _cz0), Math.abs(_cz3 - _cz0));
           baseCol = _cDz >= 1.0 ? '#ffdc00' : '#b10dc9';
         }
-        var ceilLight = typeof getCaveRenderLightAt === 'function' ?
+        var ceilAmbient = typeof getCaveRenderLightAt === 'function' ?
           getCaveRenderLightAt(centerX, centerY, true) : ambientLight;
+        var ceilPointLight = 0;
         if (_lightGrid) {
           var clgx = Math.floor(centerX / _lightCellSize);
           var clgy = Math.floor(centerY / _lightCellSize);
           if (clgx >= 0 && clgx < _lightGridW && clgy >= 0 && clgy < _lightGridH)
-            ceilLight = Math.min(1.0, ceilLight + _lightGrid[clgy * _lightGridW + clgx]);
+            ceilPointLight = _lightGrid[clgy * _lightGridW + clgx];
         }
-        var _cp = parseInt(baseCol.slice(1), 16);
-        var _cr = Math.min(255, Math.floor(((_cp >> 16) & 0xff) * ceilLight));
-        var _cg = Math.min(255, Math.floor(((_cp >> 8) & 0xff) * ceilLight));
-        var _cb = Math.min(255, Math.floor((_cp & 0xff) * ceilLight));
-        ctx.fillStyle = 'rgb(' + _cr + ',' + _cg + ',' + _cb + ')';
+        var _cr, _cg, _cb;
+        if (DEBUG_POLY_TYPES) {
+          var _cp = parseInt(baseCol.slice(1), 16);
+          var ceilLight = Math.min(1, ceilAmbient + ceilPointLight);
+          _cr = Math.min(255, Math.floor(((_cp >> 16) & 0xff) * ceilLight));
+          _cg = Math.min(255, Math.floor(((_cp >> 8) & 0xff) * ceilLight));
+          _cb = Math.min(255, Math.floor((_cp & 0xff) * ceilLight));
+        } else {
+          var _ceilFogFloor = typeof renderCaveFogFloor !== 'undefined' ? renderCaveFogFloor :
+            (typeof fogFloor !== 'undefined' ? fogFloor : 0.15);
+          var ceilFog = Math.max(_ceilFogFloor, 1 - fwdDot * 0.0008);
+          var ceilingLit = shadeCaveSurfaceColor(material, CAVE_SURFACE_CEILING,
+            ceilAmbient, ceilPointLight, ceilFog);
+          _cr = (ceilingLit >>> 16) & 255; _cg = (ceilingLit >>> 8) & 255; _cb = ceilingLit & 255;
+        }
+        ctx.fillStyle = rgbQ(_cr, _cg, _cb);
 
         // Ceiling is solid rock — full opacity. Exterior occlusion comes from
         // the eye-plane test and cap top face, not a global mode flag.
@@ -13362,6 +14571,200 @@ function drawLayersCeiling3D() {
   }
   ctx.globalAlpha = 1.0;
   ctx.restore();
+}
+// Magic Missile presentation: silver-blue aether held in a fine ivory spine.
+// This is paint only. Projectile motion, homing, hit volumes and effect life
+// remain owned by combat. No random numbers, gameplay writes or image cache.
+// The short wake follows the current world velocity, not a screen-space angle
+// or a frame-rate-dependent position history. It is not a replay of homing.
+var MISSILE_ART_COLORS = typeof GAME_MATERIALS !== 'undefined' && GAME_MATERIALS.missileMagic ?
+  GAME_MATERIALS.missileMagic.hex : Object.freeze({
+    core:'#fff3d8', light:'#c4edf0', mid:'#79b9d0', deep:'#315677', rune:'#bfa16a'
+  });
+// RGB prefixes are prepared once, not reparsed for every moving wake segment.
+function missileArtRGBPrefix(hex) {
+  var rgb = parseInt(hex.slice(1),16);
+  return 'rgba('+((rgb>>16)&255)+','+((rgb>>8)&255)+','+(rgb&255)+',';
+}
+var _missileArtMidRGBA = missileArtRGBPrefix(MISSILE_ART_COLORS.mid);
+var _missileArtLightRGBA = missileArtRGBPrefix(MISSILE_ART_COLORS.light);
+
+function missileArtClamp(value, low, high) {
+  return Math.max(low, Math.min(high, value));
+}
+
+function missileArtProject(point, C) {
+  var dx = point.x - cam.x, dy = point.y - cam.y;
+  var fwd = dx * C.cosAng + dy * C.sinAng;
+  if (!Number.isFinite(fwd) || fwd < 1 || !Number.isFinite(point.z)) return null;
+  return {
+    sx: (0.5 + (-dx * C.sinAng + dy * C.cosAng) / fwd * C.invTanHalf * 0.5) * C.w,
+    sy: C.horizonY + (C.cameraZ - point.z) / fwd * projScale,
+    fwd: fwd
+  };
+}
+
+function missileArtDiamond(x, y, ux, uy, length, width) {
+  var nx = -uy * width, ny = ux * width;
+  ctx.beginPath();
+  ctx.moveTo(x + ux * length, y + uy * length);
+  ctx.lineTo(x + nx, y + ny);
+  ctx.lineTo(x - ux * length * 0.72, y - uy * length * 0.72);
+  ctx.lineTo(x - nx, y - ny);
+  ctx.closePath(); ctx.fill();
+}
+
+// Each ribbon has its own near/far depth, and its callback paints only that
+// ribbon. Never put this renderer inside another scene-depth clip.
+function missileArtWakeSegment(a, b, C, widthA, widthB, alphaA, alphaB) {
+  drawSpellWorldSegment(a, b, C, Math.max(widthA, widthB) * 2, 0, function(pa, pb) {
+    var dx = pb.x - pa.x, dy = pb.y - pa.y, length = Math.hypot(dx, dy);
+    if (length < 0.25) return;
+    var nx = -dy / length, ny = dx / length;
+    var grad = ctx.createLinearGradient(pa.x, pa.y, pb.x, pb.y);
+    grad.addColorStop(0, _missileArtLightRGBA + alphaA + ')');
+    grad.addColorStop(1, _missileArtLightRGBA + alphaB + ')');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(pa.x + nx * widthA, pa.y + ny * widthA);
+    ctx.lineTo(pb.x + nx * widthB, pb.y + ny * widthB);
+    ctx.lineTo(pb.x - nx * widthB, pb.y - ny * widthB);
+    ctx.lineTo(pa.x - nx * widthA, pa.y - ny * widthA);
+    ctx.closePath(); ctx.fill();
+    // A single hairline gives the wake a crafted, calligraphic edge. No blur
+    // extends beyond the depth mask and no opaque rectangle enters the buffer.
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = Math.max(0.5, resScale * 0.45);
+    ctx.beginPath();
+    ctx.moveTo(pa.x + nx * widthA * 0.35, pa.y + ny * widthA * 0.35);
+    ctx.lineTo(pb.x + nx * widthB * 0.35, pb.y + ny * widthB * 0.35);
+    ctx.stroke();
+  });
+}
+
+// true means this presentation handled the missile, even if scenery hides all
+// of it. false selects the unchanged legacy renderer for every other spell.
+function renderMissileProjectileArt(p, C, now) {
+  if (!p || !p.spell || p.spell.id !== 'missile') return false;
+  if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z) ||
+      !Number.isFinite(p.ang) || !C) return true;
+  if (Math.hypot(p.x - cam.x, p.y - cam.y) > 600) return true;
+  var time = Number.isFinite(now) ? now : Date.now();
+  var age = Number.isFinite(p.spawnMs) ? Math.max(0, time - p.spawnMs) : 0;
+  var hz = Number.isFinite(p.hz) ? p.hz : Number.isFinite(p.speed) ? p.speed : 0;
+  var vz = Number.isFinite(p.vz) ? p.vz : 0;
+  var vx = Math.cos(p.ang) * hz, vy = Math.sin(p.ang) * hz;
+  // The wake cannot reach behind the launch point during its first moments.
+  // Three depth-aware spans describe 115 ms of travel, capped at 42 world units.
+  var speed = Math.hypot(hz, vz), seconds = Math.min(0.115, age / 1000, 42 / Math.max(1, speed));
+  var head = {x:p.x, y:p.y, z:p.z}, headView = missileArtProject(head, C);
+  var RS = Math.max(0.1, Number.isFinite(resScale) ? resScale : 1);
+  ctx.save();
+  try {
+    ctx.shadowBlur = 0; ctx.globalAlpha *= 0.96;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (var i = 0; i < 3; i++) {
+      var from = (3 - i) / 3, to = (2 - i) / 3;
+      var a = {x:p.x-vx*seconds*from, y:p.y-vy*seconds*from, z:p.z-vz*seconds*from};
+      var b = {x:p.x-vx*seconds*to, y:p.y-vy*seconds*to, z:p.z-vz*seconds*to};
+      var da = (a.x-cam.x)*C.cosAng+(a.y-cam.y)*C.sinAng;
+      var db = (b.x-cam.x)*C.cosAng+(b.y-cam.y)*C.sinAng;
+      var wa = missileArtClamp(1.4 * projScale / Math.max(1, da), RS * 0.35, RS * 7) * (1-from*0.88);
+      var wb = missileArtClamp(1.4 * projScale / Math.max(1, db), RS * 0.35, RS * 7) * (1-to*0.88);
+      if (seconds > 0) missileArtWakeSegment(a, b, C, wa, wb,
+        Math.pow(1-from,1.3)*0.5, Math.pow(1-to,1.3)*0.5);
+    }
+    if (headView) {
+      // Project a world-velocity step to obtain screen orientation. p.ang is a
+      // world heading; using it as a Canvas angle breaks when the camera turns.
+      var ahead = missileArtProject({x:p.x+vx*0.025,y:p.y+vy*0.025,z:p.z+vz*0.025}, C);
+      var sx = ahead ? ahead.sx-headView.sx : 0, sy = ahead ? ahead.sy-headView.sy : 0;
+      var motionLength = Math.hypot(sx, sy), ux = motionLength > 0.04 ? sx/motionLength : 0;
+      var uy = motionLength > 0.04 ? sy/motionLength : -1;
+      var radius = missileArtClamp(3.1 * projScale / headView.fwd, 1.7 * RS, 13 * RS);
+      var elongation = 1.05 + Math.min(0.75, motionLength / Math.max(1, radius));
+      var length = radius * elongation, width = radius * 0.48;
+      drawSpellBillboard(headView, length + RS * 2, 0, function() {
+        var x = headView.sx, y = headView.sy;
+        // Facets, not a neon orb: a translucent outer blade, silver edge and
+        // warm ivory center remain readable against stone and a bright sky.
+        ctx.fillStyle = _missileArtMidRGBA + '0.18)';
+        missileArtDiamond(x,y,ux,uy,length*1.05,width*1.65);
+        ctx.fillStyle = MISSILE_ART_COLORS.deep;
+        missileArtDiamond(x,y,ux,uy,length,width);
+        ctx.fillStyle = MISSILE_ART_COLORS.light;
+        missileArtDiamond(x-uy*width*0.1,y+ux*width*0.1,ux,uy,length*0.86,width*0.68);
+        ctx.fillStyle = MISSILE_ART_COLORS.core;
+        missileArtDiamond(x,y,ux,uy,length*0.64,Math.max(RS*0.55,width*0.25));
+        // Two separated brackets repeat the casting-hand seal at a useful
+        // distance. Far-away missiles retain just the clean luminous spindle.
+        if (radius > RS * 3.2) {
+          ctx.strokeStyle = _missileArtLightRGBA + '0.64)'; ctx.lineWidth = RS * 0.65;
+          for (var side = -1; side <= 1; side += 2) {
+            var nx = -uy * side, ny = ux * side;
+            ctx.beginPath();
+            ctx.moveTo(x-ux*radius*0.35+nx*radius*0.64,y-uy*radius*0.35+ny*radius*0.64);
+            ctx.lineTo(x+nx*radius*0.82,y+ny*radius*0.82);
+            ctx.lineTo(x+ux*radius*0.3+nx*radius*0.64,y+uy*radius*0.3+ny*radius*0.64);
+            ctx.stroke();
+          }
+        }
+      });
+    }
+  } finally { ctx.restore(); }
+  return true;
+}
+
+function renderMissileImpactArt(im, C, now) {
+  if (!im || im.spellId !== 'missile' || im.isCompanionProj) return false;
+  if (!Number.isFinite(im.x) || !Number.isFinite(im.y) || !C) return true;
+  var z = Number.isFinite(im.z) ? im.z : getEntityRenderFloorZ(im);
+  var time = Number.isFinite(now) ? now : Date.now();
+  var age = Math.max(0, time - im.spawnMs), life = im.lifeMs;
+  if (!Number.isFinite(age) || !Number.isFinite(life) || life <= 0 || age >= life) return true;
+  if (Math.hypot(im.x-cam.x, im.y-cam.y) > viewDist) return true;
+  var point = missileArtProject({x:im.x,y:im.y,z:z}, C);
+  if (!point) return true;
+  var t = age / life, RS = Math.max(0.1, Number.isFinite(resScale) ? resScale : 1);
+  var size = missileArtClamp(6.2 * projScale / point.fwd, RS * 4, RS * 24);
+  var spread = 0.3 + 0.88 * (1-Math.pow(1-t,3)), radius = size * spread;
+  var alpha = Math.pow(1-t, 1.05), angle = (im.spawnMs % 997) * 0.0017;
+  drawSpellBillboard(point, size * 1.5 + RS * 2, 0, function() {
+    ctx.save();
+    try {
+      ctx.shadowBlur = 0; ctx.globalAlpha *= alpha;
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      // The compressed seal breaks into six angular strokes. Their staggered
+      // lengths form a star fracture, then open out and disappear within the
+      // existing impact lifetime. No rings expand through surrounding walls.
+      for (var i=0; i<6; i++) {
+        var a=angle+i*Math.PI/3, ux=Math.cos(a), uy=Math.sin(a);
+        var outer=radius*(i%2 ? 0.76 : 1.14), inner=radius*(0.12+0.55*t);
+        var bend=radius*0.12*(i%2 ? -1 : 1);
+        var bx=point.sx+ux*(inner+outer)*0.5-uy*bend;
+        var by=point.sy+uy*(inner+outer)*0.5+ux*bend;
+        ctx.strokeStyle = i%2 ? MISSILE_ART_COLORS.mid : MISSILE_ART_COLORS.light;
+        ctx.lineWidth = Math.max(RS*0.65,size*0.065*(1-t*0.45));
+        ctx.beginPath(); ctx.moveTo(point.sx+ux*inner,point.sy+uy*inner);
+        ctx.lineTo(bx,by); ctx.lineTo(point.sx+ux*outer,point.sy+uy*outer); ctx.stroke();
+        // The short cross-stroke gives each separated fragment its rune-like
+        // silhouette without filling the screen with independent particles.
+        if (i%2===0 && t<0.78) {
+          ctx.strokeStyle = MISSILE_ART_COLORS.core; ctx.lineWidth *= 0.7;
+          ctx.beginPath(); ctx.moveTo(bx-uy*radius*0.1,by+ux*radius*0.1);
+          ctx.lineTo(bx+uy*radius*0.09,by-ux*radius*0.09); ctx.stroke();
+        }
+      }
+      if (t<0.5) {
+        var flash=size*0.47*Math.pow(1-t*2,1.1);
+        ctx.fillStyle=MISSILE_ART_COLORS.core;
+        missileArtDiamond(point.sx,point.sy,Math.cos(angle),Math.sin(angle),flash,flash*0.32);
+        ctx.fillStyle=_missileArtLightRGBA+'0.76)';
+        missileArtDiamond(point.sx,point.sy,-Math.sin(angle),Math.cos(angle),flash*0.66,flash*0.17);
+      }
+    } finally { ctx.restore(); }
+  });
+  return true;
 }
 // =============================================
 // SECTION 14: RENDERING - ENTITIES
@@ -14797,13 +16200,15 @@ function drawSpellLandingReticle(p,C) {
 
 function drawProjectiles3D() {
   if (!projectiles || !projectiles.length) return;
-  var C = getCam3D();
+  var C = getCam3D(), artNow = Date.now();
   var horizonY = C.horizonY, cameraZ = C.cameraZ;
   for (var i = 0; i < projectiles.length; i++) {
     var p = projectiles[i];
     // The ground indicator remains independently visible when its airborne
     // projectile is behind the camera or hidden by terrain.
     drawSpellLandingReticle(p,C);
+    if (typeof CASTING_ART_ENABLED !== 'undefined' && CASTING_ART_ENABLED &&
+        typeof renderMissileProjectileArt === 'function' && renderMissileProjectileArt(p,C,artNow)) continue;
     var vis = entityVisible3D(p.x, p.y, Number.isFinite(p.z) ? p.z : 0, C,
       { maxDist: 600, sceneDepth:true, checkMidpoint: false, fadeFraction: 1 });
     if (!vis) continue;
@@ -14907,6 +16312,8 @@ function drawImpacts3D() {
   var C=getCam3D(),now=Date.now();
   for(var i=0;i<impacts.length;i++) {
       var im=impacts[i],z=Number.isFinite(im.z)?im.z:getEntityRenderFloorZ(im);
+      if (typeof CASTING_ART_ENABLED !== 'undefined' && CASTING_ART_ENABLED &&
+          typeof renderMissileImpactArt === 'function' && renderMissileImpactArt(im,C,now)) continue;
       // Every producer stores absolute render-world Z, including companions
       // and synergy bursts. Do not re-add their support or apply a second lift.
       var vis=entityVisible3D(im.x,im.y,z,C,{maxDist:viewDist,sceneDepth:true,fadeFraction:1});
@@ -15529,6 +16936,674 @@ function drawFlameStream3D() {
   ctx.shadowBlur = 0;
   ctx.restore(); ctx.globalAlpha = 1.0;
 }
+// First-person presentation only. Combat owns the explicitly approved 120 ms
+// gathering interval; this artwork follows its accepted cast/release timestamps.
+// Body artwork is cached; articulated fingers remain native-resolution paths.
+// Rejected flat study: retained for comparison, never the default artwork.
+var CASTING_ART_ENABLED = false;
+var _castingPoseState = {castAt:-1e12,spellId:'missile',cooldown:450,lastNow:0,walkPhase:0};
+var _castingArtwork = null;
+var _castingArtStats = {builds:0,buildMs:0,lastBuildMs:0,bytes:0,entries:0,maxBytes:8*1024*1024,fallbacks:0};
+
+function noteFirstPersonCast(spell, now) {
+  if (!spell || spell.id !== 'missile' || !Number.isFinite(now)) return;
+  _castingPoseState.castAt=now;
+  _castingPoseState.spellId=spell.id;
+  _castingPoseState.cooldown=typeof getEffectiveCooldown==='function'?getEffectiveCooldown():450;
+}
+function cancelFirstPersonCast() {_castingPoseState.castAt=-1e12;}
+function clearCastingArtworkCache() {
+  _castingArtwork=null;
+  _castingArtStats={builds:0,buildMs:0,lastBuildMs:0,bytes:0,entries:0,maxBytes:8*1024*1024,fallbacks:0};
+}
+function getCastingArtworkStats() { return Object.assign({},_castingArtStats); }
+function castingMix(a,b,t) {
+  var av=parseInt(a.slice(1),16),bv=parseInt(b.slice(1),16);
+  return 'rgb('+Math.round(((av>>16)&255)*(1-t)+((bv>>16)&255)*t)+','+
+    Math.round(((av>>8)&255)*(1-t)+((bv>>8)&255)*t)+','+
+    Math.round((av&255)*(1-t)+(bv&255)*t)+')';
+}
+function castingHexMix(a,b,t) {
+  var av=parseInt(a.slice(1),16),bv=parseInt(b.slice(1),16);
+  var r=Math.round(((av>>16)&255)*(1-t)+((bv>>16)&255)*t);
+  var g=Math.round(((av>>8)&255)*(1-t)+((bv>>8)&255)*t);
+  var bl=Math.round((av&255)*(1-t)+(bv&255)*t);
+  return '#'+('000000'+((r<<16)|(g<<8)|bl).toString(16)).slice(-6);
+}
+function castingPalette() {
+  var M=typeof GAME_MATERIALS!=='undefined'?GAME_MATERIALS:{};
+  var ac=equipment.robes&&equipment.robes.armColor;
+  var skin=M.casterSkin?M.casterSkin.hex:{shadow:'#714b40',base:'#b98265',light:'#e2bb94',crease:'#755047',nail:'#d9b59c'};
+  var cloth=M.casterCloth?M.casterCloth.hex:{deep:'#16242e',mid:'#344b58',lit:'#607a83',cuff:'#4c3c2c',linen:'#c4b493'};
+  var metal=M.casterMetal?M.casterMetal.hex:{shadow:'#50422c',base:'#a78b54',light:'#dfc78d'};
+  return {skin:skin,cloth:ac?{deep:ac.deep,mid:ac.mid,lit:ac.lit,cuff:ac.cuff,linen:cloth.linen}:cloth,metal:metal};
+}
+function castingLitPalette(p, exposure) {
+  var out={skin:{},cloth:{},metal:{}};
+  ['skin','cloth','metal'].forEach(function(group){
+    Object.keys(p[group]).forEach(function(key){
+      out[group][key]=castingHexMix('#1c273b',p[group][key],0.43+exposure*0.57);
+    });
+  });
+  return out;
+}
+function castingStroke(c,color,width,points) {
+  c.strokeStyle=color;c.lineWidth=width;c.beginPath();c.moveTo(points[0],points[1]);
+  if(points.length===8)c.bezierCurveTo.apply(c,points.slice(2));
+  else for(var i=2;i<points.length;i+=2)c.lineTo(points[i],points[i+1]);
+  c.stroke();
+}
+function paintCastingArmBody(c,p) {
+  var cloth=p.cloth,skin=p.skin,gold=p.metal;
+  c.save();c.lineJoin='round';c.lineCap='round';
+  // Swept forearm, generous wool folds and a separate turned linen lining.
+  c.beginPath();c.moveTo(54,118);c.bezierCurveTo(47,149,32,190,45,256);
+  c.lineTo(174,256);c.bezierCurveTo(164,213,131,157,111,117);c.closePath();
+  var sleeve=c.createLinearGradient(43,156,157,184);
+  sleeve.addColorStop(0,cloth.deep);sleeve.addColorStop(.34,cloth.mid);
+  sleeve.addColorStop(.57,cloth.lit);sleeve.addColorStop(.78,cloth.mid);sleeve.addColorStop(1,cloth.deep);
+  c.fillStyle=sleeve;c.fill();c.strokeStyle=cloth.deep;c.lineWidth=2;c.stroke();
+  c.save();c.clip();
+  c.fillStyle=cloth.deep;c.globalAlpha=.65;
+  c.beginPath();c.moveTo(59,141);c.bezierCurveTo(34,207,55,228,69,258);c.lineTo(81,256);c.bezierCurveTo(63,200,55,171,70,144);c.fill();
+  c.beginPath();c.moveTo(104,139);c.bezierCurveTo(94,185,124,222,134,261);c.lineTo(156,261);c.bezierCurveTo(122,198,109,170,116,146);c.fill();
+  c.globalAlpha=.48;
+  castingStroke(c,cloth.lit,2,[74,142,69,179,81,224,91,262]);
+  castingStroke(c,cloth.lit,1.4,[113,160,111,191,148,233,149,261]);
+  c.globalAlpha=.5;
+  castingStroke(c,cloth.deep,1.2,[44,201,62,186,87,197,109,212]);
+  castingStroke(c,cloth.lit,.8,[43,204,67,191,85,201,108,214]);
+  // Stitched border follows fabric rather than a screen-aligned texture grid.
+  c.globalAlpha=.72;
+  for(var st=0;st<15;st++) {
+    var yy=148+st*7,xx=109+(yy-148)*.44;
+    castingStroke(c,gold.base,.75,[xx,yy,xx+2.5,yy+3]);
+  }
+  c.restore();
+  // Turned lining; cuff is a fitted leather band with sewn brass filigree.
+  c.fillStyle=cloth.linen;c.beginPath();c.moveTo(54,116);c.quadraticCurveTo(82,124,112,115);
+  c.lineTo(116,128);c.quadraticCurveTo(84,140,50,130);c.closePath();c.fill();
+  c.beginPath();c.moveTo(51,126);c.quadraticCurveTo(83,135,114,125);c.lineTo(121,147);
+  c.quadraticCurveTo(83,158,48,145);c.closePath();
+  var cuff=c.createLinearGradient(50,133,118,141);cuff.addColorStop(0,cloth.deep);cuff.addColorStop(.5,cloth.cuff);cuff.addColorStop(1,cloth.deep);
+  c.fillStyle=cuff;c.fill();c.strokeStyle=gold.shadow;c.lineWidth=1.4;c.stroke();
+  castingStroke(c,gold.base,1.2,[52,130,74,138,100,137,115,129]);
+  castingStroke(c,gold.light,.8,[51,144,73,152,101,152,119,144]);
+  for(var e=0;e<5;e++) {
+    var ex=57+e*12,ey=139+Math.sin(e*.8)*3;
+    castingStroke(c,gold.base,.9,[ex-3,ey,ex,ey-4,ex+3,ey,ex,ey+4,ex-3,ey]);
+    c.fillStyle=gold.light;c.beginPath();c.arc(ex,ey,.7,0,Math.PI*2);c.fill();
+  }
+  // Palm, thenar volume and wrist: the fingers join behind the knuckles.
+  c.beginPath();c.moveTo(53,61);c.bezierCurveTo(63,47,82,44,101,60);
+  c.bezierCurveTo(115,71,109,86,103,104);c.bezierCurveTo(98,113,102,119,109,124);
+  c.quadraticCurveTo(81,135,56,124);c.bezierCurveTo(66,111,58,101,50,89);
+  c.bezierCurveTo(41,77,45,69,53,61);c.closePath();
+  var palm=c.createLinearGradient(44,94,104,64);palm.addColorStop(0,skin.shadow);palm.addColorStop(.42,skin.base);palm.addColorStop(.8,skin.light);palm.addColorStop(1,skin.base);
+  c.fillStyle=palm;c.fill();c.strokeStyle=skin.shadow;c.lineWidth=1.2;c.stroke();
+  c.save();c.clip();
+  c.globalAlpha=.37;c.fillStyle=skin.light;c.beginPath();c.ellipse(63,88,13,22,-.4,0,Math.PI*2);c.fill();
+  c.globalAlpha=.46;castingStroke(c,skin.crease,1,[57,75,71,81,76,94,69,103]);
+  c.globalAlpha=.40;castingStroke(c,skin.crease,.9,[65,78,83,69,94,77,101,78]);
+  castingStroke(c,skin.crease,.7,[75,94,84,91,93,95,96,99]);
+  c.globalAlpha=.33;castingStroke(c,skin.light,.8,[61,77,76,82,76,94,72,101]);
+  castingStroke(c,skin.crease,.9,[65,114,76,117,89,117,98,112]);
+  c.restore();
+  c.restore();
+}
+function getCastingArmArtwork(S) {
+  var p=castingPalette(),raster=Math.max(1,Math.ceil(.68*S));
+  var key=[raster,p.skin.shadow,p.skin.base,p.skin.light,p.skin.crease,p.skin.nail,
+    p.cloth.deep,p.cloth.mid,p.cloth.lit,p.cloth.cuff,p.cloth.linen,
+    p.metal.shadow,p.metal.base,p.metal.light].join('|');
+  if(_castingArtwork&&_castingArtwork.key===key)return _castingArtwork;
+  var art={key:key,palette:p,shadow:null,day:null,raster:raster};
+  var bytes=176*256*raster*raster*4*2;
+  _castingArtStats.bytes=0;_castingArtStats.entries=0;
+  if(bytes>_castingArtStats.maxBytes){_castingArtStats.fallbacks++;return _castingArtwork=art;}
+  var start=performance.now();
+  try {
+    [0,1].forEach(function(light){
+      var img=document.createElement('canvas');img.width=176*raster;img.height=256*raster;
+      var brush=img.getContext('2d');
+      if(!brush)throw Error('Arm artwork allocation unavailable');
+      brush.scale(raster,raster);
+      paintCastingArmBody(brush,castingLitPalette(p,light));
+      if(light)art.day=img;else art.shadow=img;
+    });
+  } catch(error) {
+    art.day=null;art.shadow=null;_castingArtStats.fallbacks++;
+    _castingArtStats.lastBuildMs=performance.now()-start;
+    _castingArtStats.buildMs+=_castingArtStats.lastBuildMs;
+    return _castingArtwork=art;
+  }
+  var cost=performance.now()-start;
+  _castingArtStats.builds+=2;_castingArtStats.buildMs+=cost;_castingArtStats.lastBuildMs=cost;
+  _castingArtStats.bytes=bytes;_castingArtStats.entries=2;
+  return _castingArtwork=art;
+}
+// Curved, tapered digits with independent joints. Open/closed interpolation is
+// anatomical geometry, not a crossfade between two sets of ghost fingers.
+function paintCastingDigit(c,base,knee,tip,width,skin,curl) {
+  var dx=tip.x-base.x,dy=tip.y-base.y,len=Math.hypot(dx,dy)||1;
+  var nx=-dy/len,ny=dx/len;
+  c.beginPath();c.moveTo(base.x+nx*width,base.y+ny*width);
+  c.bezierCurveTo(knee.x+nx*width,knee.y+ny*width,tip.x+nx*width*.6,tip.y+ny*width*.6,tip.x,tip.y);
+  c.bezierCurveTo(tip.x-nx*width*.8,tip.y-ny*width*.8,knee.x-nx*width,knee.y-ny*width,base.x-nx*width,base.y-ny*width);
+  c.closePath();
+  var grad=c.createLinearGradient(base.x-width,base.y,base.x+width,base.y-7);
+  grad.addColorStop(0,skin.shadow);grad.addColorStop(.42,skin.base);grad.addColorStop(.72,skin.light);grad.addColorStop(1,skin.base);
+  c.fillStyle=grad;c.fill();c.strokeStyle=skin.shadow;c.lineWidth=.8;c.stroke();
+  c.globalAlpha=.55;
+  castingStroke(c,skin.crease,.75,[knee.x-nx*width*.6,knee.y-ny*width*.6,knee.x+nx*width*.6,knee.y+ny*width*.6]);
+  c.globalAlpha=1;
+  if(curl>.4){
+    c.save();c.translate(tip.x+(base.x-tip.x)*.16,tip.y+(base.y-tip.y)*.16);c.rotate(Math.atan2(dy,dx)+Math.PI/2);
+    c.fillStyle=skin.nail;c.globalAlpha=.72;c.beginPath();c.ellipse(0,1,width*.40,width*.65,0,0,Math.PI*2);c.fill();c.restore();
+  }
+}
+function paintCastingFingers(c,skin,curl,thumb) {
+  if(thumb){
+    paintCastingDigit(c,{x:56,y:92},{x:37-curl*2,y:77-curl*5},
+      {x:32+curl*14,y:56+curl*6},7.5,skin,curl);return;
+  }
+  var digits=[
+    [59,63,54,35,46,10,54,36,58,43,5.9],
+    [73,55,73,25,74,0,75,17,80,31,6.5],
+    [87,59,93,32,101,14,95,28,98,39,6.0],
+    [100,69,112,49,123,34,113,47,109,59,4.8]
+  ];
+  for(var i=3;i>=0;i--){var d=digits[i];
+    paintCastingDigit(c,{x:d[0],y:d[1]},
+      {x:d[2]+(d[6]-d[2])*curl,y:d[3]+(d[7]-d[3])*curl},
+      {x:d[4]+(d[8]-d[4])*curl,y:d[5]+(d[9]-d[5])*curl},d[10],skin,curl);
+  }
+}
+function getCastingArtPose(now) {
+  var elapsed=Math.max(0,now-_castingPoseState.castAt);
+  var duration=Math.max(210,Math.min(420,_castingPoseState.cooldown*.9));
+  var windup=typeof MISSILE_CAST_WINDUP_MS==='number'?MISSILE_CAST_WINDUP_MS:120;
+  if(elapsed<windup){
+    var anticipation=elapsed/windup;
+    anticipation=anticipation*anticipation*(3-2*anticipation);
+    return {phase:'anticipation / gathering',thrust:-.25*anticipation,curl:.84+.14*anticipation,
+      energy:.55+.45*anticipation,elapsed:elapsed,duration:duration};
+  }
+  var t=(elapsed-windup)/duration,thrust=0,curl=.84,energy=.55,phase='ready / gathering';
+  if(t<1){
+    if(t<.18){var u=t/.18;var push=1-Math.pow(1-u,3);thrust=-.25+push*1.25;curl=.98*(1-push);energy=1-u;phase='release';}
+    else if(t<.43){thrust=1;curl=0;energy=0;phase='follow-through';}
+    else {var v=(t-.43)/.57;var ease=v*v*(3-2*v);thrust=1-ease;curl=.84*ease;energy=.55*Math.max(0,(v-.45)/.55);phase='recovery / gathering';}
+  }
+  return {phase:phase,thrust:thrust,curl:curl,energy:energy,elapsed:elapsed,duration:duration};
+}
+function drawCastingHandFocus(x,y,r,energy,now,side,S) {
+  if(energy<=.005)return;
+  var mp=typeof GAME_MATERIALS!=='undefined'&&GAME_MATERIALS.missileMagic?GAME_MATERIALS.missileMagic.hex:
+    {core:'#fff3d8',light:'#c4edf0',mid:'#79b9d0',deep:'#315677',rune:'#bfa16a'};
+  ctx.save();ctx.globalAlpha=energy;
+  var glow=ctx.createRadialGradient(x,y,0,x,y,r*2.6);
+  glow.addColorStop(0,'rgba(160,221,238,.28)');glow.addColorStop(.35,'rgba(96,174,205,.15)');glow.addColorStop(1,'rgba(64,111,153,0)');
+  ctx.fillStyle=glow;ctx.beginPath();ctx.arc(x,y,r*2.6,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle=mp.mid;ctx.lineWidth=.7*S;
+  var angle=now*.0011*side;
+  for(var i=0;i<3;i++){
+    var a=angle+i*Math.PI*2/3;
+    ctx.beginPath();ctx.ellipse(x,y,r*1.55,r*.7,a,a+.15,a+1.0);ctx.stroke();
+  }
+  ctx.fillStyle=mp.light;ctx.beginPath();ctx.moveTo(x,y-r);ctx.quadraticCurveTo(x+r*.45,y-r*.2,x+r*.5,y);
+  ctx.lineTo(x,y+r*.8);ctx.lineTo(x-r*.45,y);ctx.closePath();ctx.fill();
+  ctx.fillStyle=mp.core;ctx.beginPath();ctx.moveTo(x,y-r*.72);ctx.lineTo(x+r*.17,y);ctx.lineTo(x,y+r*.35);ctx.lineTo(x-r*.1,y);ctx.closePath();ctx.fill();
+  ctx.restore();
+}
+function drawFirstPersonCastingArt(now) {
+  if(!MODE3D||shopOpen)return;
+  now=Number.isFinite(now)?now:Date.now();
+  var S=resScale,w=canvas.width,h=canvas.height,pose=getCastingArtPose(now);
+  var dt=_castingPoseState.lastNow?Math.max(0,Math.min(.05,(now-_castingPoseState.lastNow)/1000)):0;
+  _castingPoseState.lastNow=now;
+  var spd=Math.hypot(vel.x,vel.y);_castingPoseState.walkPhase+=spd*dt*.048;
+  var stride=Math.min(1,spd/180),bob=Math.sin(_castingPoseState.walkPhase)*1.9*S*stride;
+  var breath=Math.sin(now*.0017)*.6*S;
+  var exposure=Math.max(0,Math.min(1,((typeof ambientLight==='number'?ambientLight:.9)-.28)/.62));
+  var art=getCastingArmArtwork(S),lit=castingLitPalette(art.palette,exposure);
+  var scale=.68*S;
+  // Both hands leave the aim line clear. The casting hand releases near the
+  // existing right-offset projectile lane; simulation origin is never moved.
+  var right={x:w*.72-pose.thrust*27*S,y:h*.70+pose.thrust*16*S+bob+breath,angle:-.25-pose.thrust*.10};
+  var left={x:w*.245+pose.thrust*9*S,y:h*.78+pose.thrust*5*S-bob*.7+breath,angle:.34+pose.thrust*.12};
+  ctx.save();ctx.globalCompositeOperation='source-over';ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.imageSmoothingEnabled=true;
+  function hand(anchor,flip,curl,focus) {
+    ctx.save();ctx.translate(anchor.x,anchor.y);ctx.rotate(anchor.angle);ctx.scale(flip*scale,scale);ctx.translate(-79,-83);
+    paintCastingFingers(ctx,lit.skin,curl,false);
+    if(art.shadow){
+      ctx.drawImage(art.shadow,0,0,176,256);
+      if(exposure>0){ctx.globalAlpha=exposure;ctx.drawImage(art.day,0,0,176,256);ctx.globalAlpha=1;}
+    } else paintCastingArmBody(ctx,lit);
+    paintCastingFingers(ctx,lit.skin,curl,true);
+    // Small local reflected light follows the palm contours, not a bloom wash.
+    ctx.globalAlpha=focus*.35;castingStroke(ctx,'#bde8e9',1,[61,74,69,81,74,87,71,95]);ctx.globalAlpha=1;
+    ctx.restore();
+  }
+  hand(left,-1,.46+pose.thrust*.25,pose.energy*.4);
+  // The focus is behind the leading fingers, so the hand appears to cup it.
+  var fx=right.x-11*S,fy=right.y-33*S;
+  drawCastingHandFocus(fx,fy,4.9*S,pose.energy,now,1,S);
+  hand(right,1,pose.curl,pose.energy);
+  // One fine strand visibly ties the gathered focus to the fingertip gesture.
+  if(pose.energy>.05){
+    ctx.globalAlpha=pose.energy*.55;ctx.strokeStyle='#c4edf0';ctx.lineWidth=.7*S;
+    ctx.beginPath();ctx.moveTo(fx-8*S,fy+7*S);ctx.bezierCurveTo(fx-11*S,fy-5*S,fx+8*S,fy-9*S,fx+8*S,fy);ctx.stroke();
+  }
+  ctx.restore();
+}
+// Articulated first-person visual study, deliberately separate from the shipping
+// hand artwork. A hand-local mesh and finished robe materials are projected and
+// shaded by Canvas2D. It never writes to world depth or gameplay state. No
+// raster pose sheets or WebGL.
+var HAND_RIG_PREVIEW = false;
+var HAND_RIG_TIME_MS = 0;
+var HAND_RIG_VIEW_YAW = 0;
+var HAND_RIG_DEFAULT_GRIP = 'handle';
+var HAND_RIG_GRIP = HAND_RIG_DEFAULT_GRIP;
+var HAND_RIG_STYLE = 'arcane';
+var HAND_RIG_MATERIAL = {skin:0,cloth:1,cuff:2,lining:3,trim:4};
+// Reusable hand shapes only; these do not equip or create an item.
+var HAND_RIG_REST_POSES = {
+  reach:{finger:[.25,.32,.15],thumb:[.14,.23,.16],axialRoll:0},
+  // A staff grip rolls around the forearm's own longitudinal axis, not around
+  // the camera. Rest is upright; full extension pitches the wrist forward by
+  // about 20 degrees, carrying a held shaft toward the cast before recovering.
+  handle:{finger:[.82,1.04,.64],thumb:[.35,.70,.54],axialRoll:Math.PI/2,
+    root:[[.80,3.02,-.07],[.70,3.01,-.04],[1.15,3.01,-.07]],
+    // A held handle thrusts away even when the free-hand style has recoil.
+    placement:{distance:[57,58,70],anchorX:[.735,.732,.680],anchorY:[.930,.928,.855]}},
+  cradle:{finger:[.48,.63,.32],thumb:[.22,.39,.28],axialRoll:0}
+};
+// Animation recipes share one skeleton and renderer. The preference catalog
+// maps a stable style ID to one of these recipes; spells never read this data.
+// Digit order: index, middle, ring, little, thumb. Angles are local radians.
+var HAND_RIG_ANIMATIONS = {
+  arcane:{
+    // Gathering flexes the wrist without turning the palm toward the player.
+    // Keep all phases near the outward rest; finger curl carries the flourish.
+    root:[[.72,3.45,-.07],[.56,3.34,.02],[.82,3.20,-.17]],
+    distance:[57,55,67],anchorX:[.735,.735,.640],anchorY:[.930,.955,.880],
+    fingers:[
+      [[.25,.32,.15],[.30,.37,.18],[.35,.42,.21],[.43,.50,.258],[.14,.23,.16]],
+      [[.92,1.23,.75],[.97,1.28,.78],[1.02,1.33,.81],[1.10,1.41,.858],[.32,.71,.60]],
+      [[.06,.08,.04],[.11,.13,.07],[.16,.18,.10],[.24,.26,.148],[.04,.12,.08]]
+    ],
+    thumbSplay:[.88,.48,.88],thumbOpposition:[.20,.88,.10],thumbTwist:[-.45,-1.10,-.45],
+    fingerSpread:[1,.3,2.5]
+  },
+  finger_guns:{
+    // Index and middle aim together. Ring/little first extend from the palm,
+    // like the aiming fingers, then fold back at PIP with a returning DIP.
+    // Photo-referenced thumb: a broad radial base opens an L-shaped gap above
+    // the index. Its tip folds forward in the palm silhouette, not out of the
+    // palm toward the viewer. The distal joint leads; the knuckle follows.
+    // Keep the radial/thumb side upright like a gun held level. Pitch/yaw aim
+    // the two extended fingers toward the reticle without canting the hand.
+    root:[[-1.39,-.29,Math.PI/2],[-1.40,-.29,Math.PI/2],[-1.38,-.28,Math.PI/2]],
+    distance:[57,58,53],anchorX:[.735,.739,.750],anchorY:[.930,.931,.905],
+    fingers:[
+      [[.035,.045,.025],[.035,.045,.025],[.04,2.18,.96],[.04,2.20,.96],[1.00,-.10,.55]],
+      [[.04,.05,.025],[.04,.05,.025],[.045,2.21,.94],[.045,2.23,.94],[1.00,-.08,.58]],
+      [[.035,.045,.025],[.035,.045,.025],[.04,2.20,.95],[.04,2.22,.95],[1.00,-.35,-.80]]
+    ],
+    // Right-hand opposition maps flexion into radial X/forward Y. A small
+    // depth cant keeps the thumb pad rounded; twist orients its pad palmward.
+    thumbSplay:[0,0,0],thumbOpposition:[-1.50,-1.50,-1.50],thumbTwist:[-Math.PI/2,-Math.PI/2,-Math.PI/2],
+    fingerSpread:[.35,.30,.35]
+  }
+};
+function handRigAnimationId(styleId) {
+  var id=typeof getCastingStyle==='function'?getCastingStyle(styleId).handAnimation:styleId;
+  return Object.prototype.hasOwnProperty.call(HAND_RIG_ANIMATIONS,id)?id:'arcane';
+}
+function handRigAnimation(pose) {return HAND_RIG_ANIMATIONS[handRigAnimationId(pose.style)];}
+function handRigBlend(values,pose) {
+  return values[0]+(values[1]-values[0])*pose.gather+(values[2]-values[0])*pose.release;
+}
+var _handRigMesh = null;
+var _handRigStats = {vertices:0,triangles:0,visibleFaces:0,buildMs:0,builds:0,lastRenderMs:0,topologyBytes:0};
+function clearHandRigCache() {
+  _handRigMesh=null;
+  _handRigStats={vertices:0,triangles:0,visibleFaces:0,buildMs:0,builds:0,lastRenderMs:0,topologyBytes:0};
+}
+function getHandRigStats() {return Object.assign({},_handRigStats);}
+function handRigEase(t) {t=Math.max(0,Math.min(1,t));return t*t*(3-2*t);}
+function sampleHandRigAction(action,elapsedMs,grip,styleId) {
+  // Gameplay adapters must call this non-looping sampler, never the studio
+  // loop below. An advancing idle clock cannot accidentally trigger a cast.
+  var t=action==='cast'?Math.max(0,Math.min(2800,Number.isFinite(elapsedMs)?elapsedMs:0)):0;
+  var gather=0,release=0,phase='ready';
+  if(t>=500&&t<1050){gather=handRigEase((t-500)/550);phase='gather';}
+  else if(t>=1050&&t<1420){gather=1-handRigEase((t-1050)/370);release=handRigEase((t-1050)/370);phase='release';}
+  else if(t>=1420&&t<1730){release=1;phase='follow-through';}
+  else if(t>=1730&&t<2450){release=1-handRigEase((t-1730)/720);phase='recovery';}
+  // Small delayed forearm response is authored, not a frame-rate spring.
+  var settle=t>=1420&&t<2450?Math.sin((t-1420)*.010)*Math.exp(-(t-1420)/290)*.055:0;
+  grip=Object.prototype.hasOwnProperty.call(HAND_RIG_REST_POSES,grip)?grip:HAND_RIG_DEFAULT_GRIP;
+  return {timeMs:t,phase:phase,gather:gather,release:release,settle:settle,grip:grip,style:handRigAnimationId(styleId)};
+}
+function sampleHandRigRestPose(grip,styleId) {return sampleHandRigAction('idle',0,grip,styleId);}
+function sampleHandRigPose(timeMs,grip,styleId) {
+  var t=((Number.isFinite(timeMs)?timeMs:0)%2800+2800)%2800;
+  return sampleHandRigAction('cast',t,grip,styleId);
+}
+function handRigRootAngles(pose,yaw) {
+  // Arcane rests palm-away; Finger Guns turns sideways with the thumb raised.
+  // Each recipe recovers to its own rest instead of sharing a palm-thrust pose.
+  var root=handRigRootFrames(pose);
+  return [0,1,2].map(function(i){return handRigBlend([root[0][i],root[1][i],root[2][i]],pose)+
+    (i===1&&Number.isFinite(yaw)?yaw:0);});
+}
+function handRigRootFrames(pose) {
+  return HAND_RIG_REST_POSES[pose.grip].root||handRigAnimation(pose).root;
+}
+function handRigPlacementFrames(pose) {
+  return HAND_RIG_REST_POSES[pose.grip].placement||handRigAnimation(pose);
+}
+function handRigRotate(x,y,z,rx,ry,rz) {
+  var a=y*Math.cos(rx)-z*Math.sin(rx),b=y*Math.sin(rx)+z*Math.cos(rx);
+  var c=x*Math.cos(ry)+b*Math.sin(ry),d=-x*Math.sin(ry)+b*Math.cos(ry);
+  return [c*Math.cos(rz)-a*Math.sin(rz),c*Math.sin(rz)+a*Math.cos(rz),d];
+}
+function buildHandRigMesh() {
+  if(_handRigMesh)return _handRigMesh;
+  var start=performance.now(),desc=[],faces=[],groups=[];
+  // Authored proportions in arbitrary model units, not a medical model.
+  var digits=[
+    {x:-2.65,y:8.10,z:.0,lengths:[3.4,2.3,1.5],radius:.82,splay:.070,curl:.00},
+    {x:-.77,y:8.75,z:0,lengths:[3.8,2.5,1.7],radius:.88,splay:.010,curl:.05},
+    {x:1.22,y:8.30,z:0,lengths:[3.6,2.3,1.6],radius:.81,splay:-.050,curl:.10},
+    {x:2.98,y:7.20,z:.05,lengths:[2.7,1.8,1.3],radius:.68,splay:-.115,curl:.18},
+    {x:-2.45,y:2.45,z:.20,lengths:[3.0,2.8,2.1],radius:1.0,splay:.88,curl:0,thumb:true}
+  ];
+  function surface(rings,sides,make,material,capEnd) {
+    var first=desc.length;
+    for(var r=0;r<rings;r++)for(var j=0;j<sides;j++)desc.push(make(r,j,sides));
+    for(var row=0;row<rings-1;row++)for(var col=0;col<sides;col++){
+      var a=first+row*sides+col,b=first+row*sides+(col+1)%sides,c=b+sides,d=a+sides;
+      var faceMaterial=typeof material==='function'?material(row,col,sides):material;
+      faces.push([a,c,b,faceMaterial],[a,d,c,faceMaterial]);
+    }
+    if(capEnd){
+      var end=first+(rings-1)*sides;
+      // Tiny rounded tip ring; fan closes the end without a blunt cylinder cap.
+      for(var k=1;k<sides-1;k++)faces.push([end,end+k+1,end+k,material]);
+    }
+    return first;
+  }
+  // A rounded palm volume, narrower at the wrist, with an unequal MCP line.
+  var palmWidths=[2.60,2.78,3.30,3.73,3.87,3.88,3.67];
+  var palmDepth=[.92,1.00,1.06,1.08,.96,.80,.65];
+  surface(7,24,function(r,j,sides){
+    var v=r/6,angle=j*Math.PI*2/sides,co=Math.cos(angle),si=Math.sin(angle);
+    var x=palmWidths[r]*Math.sign(co)*Math.pow(Math.abs(co),.83);
+    var top=8.78-.17*x-.060*x*x;
+    var y=v*top,z=palmDepth[r]*si;
+    // Thenar and hypothenar pads are part of the surface, not attached spheres.
+    if(si>0)z+=si*(.40*Math.exp(-((x+1.9)*(x+1.9)+(y-3.0)*(y-3.0))/5.5)+
+      .16*Math.exp(-((x-2.4)*(x-2.4)+(y-3.7)*(y-3.7))/6.0));
+    return {kind:0,x:x,y:y,z:z};
+  },HAND_RIG_MATERIAL.skin,true);
+  // Robe forearm. Ring deformation tapers wrist rotation toward the elbow;
+  // shared wrist dimensions keep the attachment closed while turning. Four
+  // proximal rings carry the sleeve beyond the player viewport. The original
+  // nine wrist/elbow stations stay exact; four extra rings shape a turned linen
+  // edge, fitted cuff and narrow trim without changing the hand seam.
+  var proximalRings=4;
+  var forearmY=[];
+  for(var proximal=0;proximal<proximalRings;proximal++)forearmY.push(-20-(proximalRings-proximal)*5);
+  forearmY=forearmY.concat([-20,-17.5,-15,-12.5,-10,-7.5,-5,-4.15,-3.45,-2.5,-1.55,-.75,0]);
+  var forearmFirst=surface(forearmY.length,24,function(r,j,sides){
+    var y=forearmY[r];
+    var u=Math.min(1,-y/20),extension=Math.max(0,-20-y),angle=j*Math.PI*2/sides;
+    var width=2.6+u*1.1+Math.max(0,u-.14)*.8+.55*(1-Math.exp(-extension*.095/.55));
+    var depth=.92+u*1.85+.55*(1-Math.exp(-extension*.0925/.55));
+    // Long, offset lobes read as gathered wool rather than a regular ribbed
+    // tube. The fitted cuff remains smooth and slightly flares at both trims.
+    var fold=y<=-5?1+(.035+.025*u)*Math.sin(angle*5+u*2.2)*Math.sin(Math.min(1,u)*Math.PI)+
+      .022*Math.sin(angle*3-u*1.7):1;
+    if(y>-5){
+      var cuff=Math.max(0,1-Math.abs(y+2.45)/2.75);
+      width+=cuff*.34;depth+=cuff*.18;
+    }
+    var axisX=u*u*3.5+extension*.35;
+    return {kind:1,x:Math.cos(angle)*width*fold+axisX,y:y,z:Math.sin(angle)*depth*fold,axisX:axisX};
+  },function(row){
+    var middle=(forearmY[row]+forearmY[row+1])*.5;
+    if(middle>-.75)return HAND_RIG_MATERIAL.lining; // turned linen at the hand opening
+    if(middle>-1.55)return HAND_RIG_MATERIAL.trim;  // upper brass trim
+    if(middle>-3.45)return HAND_RIG_MATERIAL.cuff;
+    if(middle>-4.15)return HAND_RIG_MATERIAL.trim; // lower brass trim
+    return HAND_RIG_MATERIAL.cloth;               // gathered robe cloth
+  },false);
+  for(var seam=0;seam<24;seam++){
+    var wrist=desc[seam];
+    desc[forearmFirst+(forearmY.length-1)*24+seam]={kind:1,x:wrist.x,y:wrist.y,z:wrist.z,axisX:0};
+  }
+  // Inspection views can turn the normally off-screen shoulder end toward the
+  // camera. Close it with one cloth center and a two-sided fan so no
+  // background-colored hole appears when reviewing the existing Back view.
+  var proximalAxis=desc[forearmFirst].axisX,proximalCenter=desc.length;
+  desc.push({kind:1,x:proximalAxis,y:forearmY[0],z:0,axisX:proximalAxis,sleeveCap:true});
+  for(var cap=0;cap<24;cap++){
+    var rim=forearmFirst+cap,nextRim=forearmFirst+(cap+1)%24;
+    // Both sides are intentional: Back inspection looks into the arm entry,
+    // while ordinary player views see (or crop) the exterior-facing side.
+    faces.push([proximalCenter,rim,nextRim,HAND_RIG_MATERIAL.cloth],
+      [proximalCenter,nextRim,rim,HAND_RIG_MATERIAL.cloth]);
+  }
+  digits.forEach(function(d,id){
+    d.slot=id;
+    var L=d.lengths,total=L[0]+L[1]+L[2];
+    // Each joint has neighboring rings: deformation changes direction around
+    // a hinge without scaling phalanges into rubber strips.
+    var distances=[0,L[0]*.42,L[0]-.20,L[0]+.20,L[0]+L[1]-.15,
+      L[0]+L[1]+.15,total-.48,total-.18,total+.06];
+    var first=surface(distances.length,12,function(r,j,sides){
+      var distance=distances[r],t=distance/total,angle=j*Math.PI*2/sides;
+      var radius=d.radius*(1-.27*t);
+      // The thumb's buried metacarpal broadens into the thenar mass. A uniform
+      // tube here reads as a fifth finger glued to the side of the palm.
+      if(d.thumb&&r<3)radius*=[1.72,1.48,1.12][r];
+      if(r===7)radius*=.68;if(r===8)radius*=.10;
+      if(r===0)radius*=1.04;
+      return {kind:2,digit:id,distance:distance,side:Math.cos(angle)*radius,
+        pad:Math.sin(angle)*radius*(Math.sin(angle)>0?.96:.79)};
+    },HAND_RIG_MATERIAL.skin,true);
+    groups.push({first:first,count:distances.length*12,digit:id});
+  });
+  // Construction above uses a radial-negative reference. Reflect the entire
+  // local mesh to make a RIGHT hand (+x thumb, +y fingers, +z palmar surface),
+  // including digit frames and triangle winding. A camera turn cannot correct
+  // chirality, and a screen-only mirror would leave lighting/winding wrong.
+  desc.forEach(function(d){if(d.kind===2)d.side=-d.side;else d.x=-d.x;if(d.kind===1)d.axisX=-d.axisX;});
+  digits.forEach(function(d){d.x=-d.x;d.splay=-d.splay;d.handedness=-1;});
+  faces.forEach(function(f){var b=f[1];f[1]=f[2];f[2]=b;});
+  var n=desc.length;
+  _handRigMesh={desc:desc,faces:faces,digits:digits,groups:groups,
+    positions:new Float64Array(n*3),normals:new Float64Array(n*3),screen:new Float64Array(n*3),
+    light:new Float64Array(n),order:[],faceDepth:new Float64Array(faces.length)};
+  _handRigStats.vertices=n;_handRigStats.triangles=faces.length;
+  _handRigStats.buildMs=performance.now()-start;_handRigStats.builds++;
+  // Numeric working storage; JS topology objects and Canvas internals are extra.
+  _handRigStats.topologyBytes=n*10*8+faces.length*8;
+  return _handRigMesh;
+}
+function handRigDigitFrame(d,pose) {
+  var rest=HAND_RIG_REST_POSES[pose.grip]||HAND_RIG_REST_POSES.reach;
+  var animation=handRigAnimation(pose),slot=d.slot;
+  var flex=[0,1,2].map(function(i){return handRigBlend(animation.fingers.map(function(frame){return frame[slot][i];}),pose);});
+  // Item grip is an independent constraint, not a style or unlock. Until an
+  // item author supplies contact targets, occupied hands retain their template.
+  if(pose.grip!=='reach')flex=(d.thumb?rest.thumb:rest.finger).map(function(value,i){return value+(d.thumb?0:d.curl*(i===2?.6:1));});
+  var handedness=d.handedness||1;
+  var occupied=pose.grip!=='reach';
+  var splay=d.thumb?(occupied?.88:handRigBlend(animation.thumbSplay,pose))*handedness:
+    d.splay*(occupied?1:handRigBlend(animation.fingerSpread,pose));
+  var opposition=d.thumb?(occupied?(pose.grip==='handle'?.55:.20):handRigBlend(animation.thumbOpposition,pose))*handedness:0;
+  var twist=d.thumb?(occupied?-.45:handRigBlend(animation.thumbTwist,pose))*handedness:0;
+  var angles=[flex[0],flex[0]+flex[1],flex[0]+flex[1]+flex[2]];
+  var centers=[[0,0,0]],cy=0,cz=0;
+  for(var i=0;i<3;i++){
+    cy+=Math.cos(angles[i])*d.lengths[i];cz+=Math.sin(angles[i])*d.lengths[i];
+    centers.push([0,cy,cz]);
+  }
+  return {angles:angles,centers:centers,splay:splay,opposition:opposition,twist:twist};
+}
+function poseHandRigMesh(mesh,pose,yaw) {
+  var P=mesh.positions,N=mesh.normals,F=mesh.faces;
+  N.fill(0);
+  var digitFrames=mesh.digits.map(function(d){return handRigDigitFrame(d,pose);});
+  // A face-on inspection isolates the silhouette from first-person wrist pose
+  // and foreshortening. The ordinary player/side views retain their full motion.
+  var palmStudy=yaw==='palm';
+  var angles=palmStudy?[0,0,Math.PI/2]:handRigRootAngles(pose,0);
+  var neutral=palmStudy?angles:handRigRootFrames(pose)[0],inspectionYaw=Number.isFinite(yaw)?yaw:0;
+  var axialRoll=HAND_RIG_REST_POSES[pose.grip].axialRoll;
+  var axialCos=Math.cos(axialRoll),axialSin=Math.sin(axialRoll);
+  for(var i=0;i<mesh.desc.length;i++){
+    var d=mesh.desc[i],x=d.x,y=d.y,z=d.z,weight=1,axisX=0,axisZ=0;
+    if(d.kind===2){
+      var finger=mesh.digits[d.digit],frame=digitFrames[d.digit],L=finger.lengths;
+      var seg=d.distance<L[0]?0:d.distance<L[0]+L[1]?1:2;
+      var start=seg===0?0:seg===1?L[0]:L[0]+L[1],along=d.distance-start;
+      var angle=frame.angles[seg],center=frame.centers[seg];
+      var ringAngle=angle;
+      if(seg>0&&along<.35)ringAngle=frame.angles[seg-1]+(angle-frame.angles[seg-1])*(.5+along/.7);
+      if(seg<2&&along>L[seg]-.35)ringAngle=angle+(frame.angles[seg+1]-angle)*(.5-(L[seg]-along)/.7);
+      var side=d.side*Math.cos(frame.twist)-d.pad*Math.sin(frame.twist);
+      var pad=d.side*Math.sin(frame.twist)+d.pad*Math.cos(frame.twist);
+      var local=handRigRotate(side,center[1]+Math.cos(angle)*along-Math.sin(ringAngle)*pad,
+        center[2]+Math.sin(angle)*along+Math.cos(ringAngle)*pad,0,frame.opposition,frame.splay);
+      x=finger.x+local[0];y=finger.y+local[1];z=finger.z+local[2];
+    } else if(d.kind===1){
+      weight=handRigEase((y+20)/20);
+      // A small delayed cuff bend visibly differs from rigid hand rotation.
+      axisX=d.axisX;axisZ=Math.sin((-y/20)*Math.PI)*pose.settle*5;z+=axisZ;
+    }
+    // Rotate each cross-section about the actual forearm centerline. Rotating
+    // its position around the wrist by a varying camera angle bends the whole
+    // arm into a hook; axial roll preserves its length and authored centerline.
+    if(axialRoll){
+      var crossX=x-axisX,crossZ=z-axisZ;
+      x=axisX+crossX*axialCos+crossZ*axialSin;
+      z=axisZ-crossX*axialSin+crossZ*axialCos;
+    }
+    // The entire forearm shares the outward rest orientation. Only additional
+    // casting twist fades toward the elbow, avoiding a permanently twisted arm.
+    var rotated=handRigRotate(x,y,z,neutral[0]+(angles[0]-neutral[0])*weight,
+      neutral[1]+(angles[1]-neutral[1])*weight+inspectionYaw,neutral[2]+(angles[2]-neutral[2])*weight);
+    P[i*3]=rotated[0];P[i*3+1]=rotated[1];P[i*3+2]=rotated[2];
+  }
+  // Area-weighted vertex normals follow the deformed surface, not a painted
+  // highlight that remains attached to the camera while the wrist turns.
+  for(var f=0;f<F.length;f++){
+    var face=F[f],a=face[0]*3,b=face[1]*3,c=face[2]*3;
+    var abx=P[b]-P[a],aby=P[b+1]-P[a+1],abz=P[b+2]-P[a+2];
+    var acx=P[c]-P[a],acy=P[c+1]-P[a+1],acz=P[c+2]-P[a+2];
+    var nx=aby*acz-abz*acy,ny=abz*acx-abx*acz,nz=abx*acy-aby*acx;
+    for(var k=0;k<3;k++){var index=face[k]*3;N[index]+=nx;N[index+1]+=ny;N[index+2]+=nz;}
+  }
+  return mesh;
+}
+function handRigHexRgb(value,fallback) {
+  value=typeof value==='string'&&/^#[0-9a-f]{6}$/i.test(value)?value:fallback;
+  var n=parseInt(value.slice(1),16);return [(n>>16)&255,(n>>8)&255,n&255];
+}
+function handRigRgbMix(a,b,t) {
+  return [Math.round(a[0]+(b[0]-a[0])*t),Math.round(a[1]+(b[1]-a[1])*t),Math.round(a[2]+(b[2]-a[2])*t)];
+}
+function handRigMaterialPalette() {
+  var M=typeof GAME_MATERIALS!=='undefined'?GAME_MATERIALS:{};
+  var skin=M.casterSkin&&M.casterSkin.hex?M.casterSkin.hex:
+    {shadow:'#714b40',base:'#b98265',light:'#e2bb94'};
+  var cloth=M.casterCloth&&M.casterCloth.hex?M.casterCloth.hex:
+    {deep:'#16242e',mid:'#344b58',lit:'#607a83',cuff:'#4c3c2c',linen:'#c4b493'};
+  var metal=M.casterMetal&&M.casterMetal.hex?M.casterMetal.hex:
+    {shadow:'#50422c',base:'#a78b54',light:'#dfc78d'};
+  var arm=typeof equipment!=='undefined'&&equipment.robes&&equipment.robes.armColor?equipment.robes.armColor:{};
+  var sharedClothDeep=handRigHexRgb(cloth.deep,'#16242e');
+  var clothDeep=handRigHexRgb(arm.deep,cloth.deep),clothMid=handRigHexRgb(arm.mid,cloth.mid);
+  var clothLit=handRigHexRgb(arm.lit,cloth.lit),cuff=handRigHexRgb(arm.cuff,cloth.cuff);
+  var linen=handRigHexRgb(cloth.linen,'#c4b493'),metalLight=handRigHexRgb(metal.light,'#dfc78d');
+  return [
+    [handRigHexRgb(skin.shadow,'#714b40'),handRigHexRgb(skin.base,'#b98265'),handRigHexRgb(skin.light,'#e2bb94')],
+    [clothDeep,clothMid,clothLit],
+    [handRigRgbMix(clothDeep,cuff,.38),cuff,handRigRgbMix(cuff,metalLight,.24)],
+    [handRigRgbMix(linen,sharedClothDeep,.34),linen,handRigRgbMix(linen,[255,246,222],.22)],
+    [handRigHexRgb(metal.shadow,'#50422c'),handRigHexRgb(metal.base,'#a78b54'),metalLight]
+  ];
+}
+function handRigColor(level,material,palette) {
+  var ramp=palette[material]||palette[0],t=Math.max(0,Math.min(1,(level-.25)/.78)),rgb;
+  if(t<.58)rgb=handRigRgbMix(ramp[0],ramp[1],t/.58);
+  else rgb=handRigRgbMix(ramp[1],ramp[2],(t-.58)/.42);
+  return 'rgb('+rgb[0]+','+rgb[1]+','+rgb[2]+')';
+}
+function drawFirstPersonHandRig(timeMs,yaw,grip,styleId) {
+  if(!MODE3D||shopOpen)return;
+  var begin=performance.now(),mesh=buildHandRigMesh(),pose=sampleHandRigPose(timeMs,grip||HAND_RIG_GRIP,styleId||HAND_RIG_STYLE);
+  var palmStudy=yaw==='palm';
+  yaw=palmStudy?'palm':Number.isFinite(yaw)?yaw:0;poseHandRigMesh(mesh,pose,yaw);
+  var P=mesh.positions,N=mesh.normals,S=mesh.screen,I=mesh.light,faces=mesh.faces;
+  var palette=handRigMaterialPalette();
+  var placement=handRigPlacementFrames(pose),distance=palmStudy?48:handRigBlend(placement.distance,pose);
+  var focal=canvas.height*1.28,anchorX=canvas.width*(palmStudy?.70:handRigBlend(placement.anchorX,pose));
+  var anchorY=canvas.height*(palmStudy?.78:handRigBlend(placement.anchorY,pose));
+  var ambient=typeof ambientLight==='number'?Math.max(.25,Math.min(1,ambientLight)):.8;
+  for(var v=0;v<mesh.desc.length;v++){
+    var p=v*3,depth=distance-P[p+2];
+    S[p]=anchorX+P[p]*focal/depth;S[p+1]=anchorY-P[p+1]*focal/depth;S[p+2]=depth;
+    var length=Math.hypot(N[p],N[p+1],N[p+2])||1;
+    var diffuse=Math.max(0,(-.40*N[p]+.62*N[p+1]+.67*N[p+2])/length);
+    var rim=Math.max(0,(.65*N[p]-.2*N[p+1]-.72*N[p+2])/length);
+    I[v]=.27+ambient*.16+diffuse*.55+rim*.13;
+  }
+  var order=mesh.order;order.length=0;
+  for(var f=0;f<faces.length;f++){
+    var F=faces[f],a=F[0]*3,b=F[1]*3,c=F[2]*3;
+    if(S[a+2]<3||S[b+2]<3||S[c+2]<3)continue;
+    var area=(S[b]-S[a])*(S[c+1]-S[a+1])-(S[b+1]-S[a+1])*(S[c]-S[a]);
+    if(area>=-.015)continue;
+    if(Math.max(S[a],S[b],S[c])<0||Math.min(S[a],S[b],S[c])>canvas.width||
+      Math.max(S[a+1],S[b+1],S[c+1])<0||Math.min(S[a+1],S[b+1],S[c+1])>canvas.height)continue;
+    mesh.faceDepth[f]=(S[a+2]+S[b+2]+S[c+2])/3;order.push(f);
+  }
+  order.sort(function(a,b){return mesh.faceDepth[b]-mesh.faceDepth[a]||a-b;});
+  ctx.save();
+  try {
+    ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';ctx.shadowBlur=0;
+    ctx.lineJoin='round';ctx.lineWidth=.55;
+    for(var fi=0;fi<order.length;fi++){
+      var face=faces[order[fi]],ia=face[0],ib=face[1],ic=face[2],aa=ia*3,bb=ib*3,cc=ic*3;
+      var x0=S[aa],y0=S[aa+1],x1=S[bb],y1=S[bb+1],x2=S[cc],y2=S[cc+1];
+      var den=(x1-x0)*(y2-y0)-(x2-x0)*(y1-y0);
+      var gx=((I[ib]-I[ia])*(y2-y0)-(I[ic]-I[ia])*(y1-y0))/den;
+      var gy=((x1-x0)*(I[ic]-I[ia])-(x2-x0)*(I[ib]-I[ia]))/den;
+      var mag=gx*gx+gy*gy,shade,material=face[3];
+      var materialLift=material===HAND_RIG_MATERIAL.trim ? .07 :
+        material===HAND_RIG_MATERIAL.lining ? .025 : 0;
+      var rawLo=Math.min(I[ia],I[ib],I[ic]),rawHi=Math.max(I[ia],I[ib],I[ic]);
+      var lo=rawLo+materialLift,hi=rawHi+materialLift;
+      if(mag>1e-9&&hi-lo>.006){
+        var start=(rawLo-I[ia])/mag,end=(rawHi-I[ia])/mag;
+        shade=ctx.createLinearGradient(x0+gx*start,y0+gy*start,x0+gx*end,y0+gy*end);
+        shade.addColorStop(0,handRigColor(lo,material,palette));shade.addColorStop(1,handRigColor(hi,material,palette));
+      } else shade=handRigColor((I[ia]+I[ib]+I[ic])/3+materialLift,material,palette);
+      ctx.fillStyle=shade;ctx.strokeStyle=shade;
+      ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x1,y1);ctx.lineTo(x2,y2);ctx.closePath();ctx.fill();
+      // Subpixel seam cover, not an outline or lower-resolution raster layer.
+      ctx.stroke();
+    }
+  } finally {ctx.restore();}
+  _handRigStats.visibleFaces=order.length;_handRigStats.lastRenderMs=performance.now()-begin;
+}
 // =============================================
 // SECTION 15: RENDERING - HUD & MENU
 // =============================================
@@ -15780,6 +17855,17 @@ function buildPixelArmSprites() {
 }
 
 function drawFPSArms() {
+  if (typeof HAND_RIG_PREVIEW !== 'undefined' && HAND_RIG_PREVIEW &&
+      typeof drawFirstPersonHandRig === 'function') {
+    drawFirstPersonHandRig(HAND_RIG_TIME_MS,HAND_RIG_VIEW_YAW);return;
+  }
+  if (typeof CASTING_ART_ENABLED !== 'undefined' && CASTING_ART_ENABLED &&
+      getCurrentSpell().id === 'missile' && typeof drawFirstPersonCastingArt === 'function') {
+    drawFirstPersonCastingArt(Date.now());
+  } else drawFPSArmsLegacy();
+}
+
+function drawFPSArmsLegacy() {
   if (!MODE3D || shopOpen) return;
   var w = canvas.width, h = canvas.height;
   var S = resScale;
@@ -16262,71 +18348,342 @@ function drawShrines3D() {
     });
 }
 
+// Ruin dressing is authored in structure-local world units. Local +Y points
+// out through the ruin's open face and local +X points to its right. Keeping
+// these positions independent of camera distance prevents the old rubble ring
+// from orbiting the ruin as the player approached it.
+var RUIN_DEBRIS_LAYOUTS = {
+  hut: [
+    [-15, 37, 5.0, 3.0, 0.20], [18, 35, 3.8, 2.5, 0.85],
+    [35, 16, 5.5, 3.4, 0.48], [-37, -24, 4.5, 2.8, 1.18]
+  ],
+  tower_base: [
+    [-31, 30, 4.6, 3.0, 0.30], [12, 38, 5.4, 3.6, 0.94],
+    [39, 8, 3.8, 2.5, 0.58], [25, -34, 5.0, 3.1, 1.30],
+    [-25, -30, 3.6, 2.4, 0.72]
+  ],
+  hall: [
+    [-34, 63, 5.4, 3.4, 0.20], [3, 66, 4.0, 2.7, 0.86],
+    [41, 58, 5.8, 3.8, 0.44], [64, 25, 4.5, 2.8, 1.24],
+    [-62, -43, 5.2, 3.3, 0.68], [-34, -63, 4.2, 2.6, 1.48]
+  ]
+};
+
+function ruinLocalToWorld(ru, localX, localY, out) {
+  out = out || {};
+  var facing = (ru.facing | 0) & 3;
+  if (facing === 0) { out.x = ru.x + localX; out.y = ru.y - localY; }
+  else if (facing === 1) { out.x = ru.x + localY; out.y = ru.y + localX; }
+  else if (facing === 2) { out.x = ru.x - localX; out.y = ru.y + localY; }
+  else { out.x = ru.x - localY; out.y = ru.y - localX; }
+  return out;
+}
+
+function getRuinDebrisWorld(ru, index, out) {
+  var layout = RUIN_DEBRIS_LAYOUTS[ru.ruinType] || RUIN_DEBRIS_LAYOUTS.hut;
+  if (index < 0 || index >= layout.length) return null;
+  var authored = layout[index];
+  out = ruinLocalToWorld(ru, authored[0], authored[1], out);
+  out.size = authored[2]; out.height = authored[3];
+  out.yaw = authored[4] + ((ru.facing | 0) & 3) * Math.PI * 0.5;
+  return out;
+}
+
+function getRuinPostWorld(ru, out) {
+  var forward = ru.ruinType === 'hall' ? 67 : ru.ruinType === 'tower_base' ? 42 : 39;
+  out = ruinLocalToWorld(ru, 18, forward, out);
+  var facing = (ru.facing | 0) & 3;
+  out.rightX = facing === 0 ? 1 : facing === 2 ? -1 : 0;
+  out.rightY = facing === 1 ? 1 : facing === 3 ? -1 : 0;
+  out.outX = facing === 1 ? 1 : facing === 3 ? -1 : 0;
+  out.outY = facing === 2 ? 1 : facing === 0 ? -1 : 0;
+  return out;
+}
+
+function ruinDecorSurfaceZ(wx, wy, fallbackZ) {
+  var z = typeof getEntityGroundRenderZ === 'function' ? getEntityGroundRenderZ(wx, wy, false) : NaN;
+  return Number.isFinite(z) ? z : (Number.isFinite(fallbackZ) ? fallbackZ : 0);
+}
+
+function drawRuinDecorFace(vertices, color, C) {
+  var projected = projectSceneWorldPolygon(vertices, C);
+  if (!projected || projected.length < 3) return 0;
+  ctx.fillStyle = color;
+  return fillSceneDepthPolygon(projected);
+}
+
+function drawRuinStone(point, baseZ, colors, C) {
+  var cs = Math.cos(point.yaw), sn = Math.sin(point.yaw);
+  var ux = cs * point.size, uy = sn * point.size;
+  var vx = -sn * point.size * 0.68, vy = cs * point.size * 0.68;
+  var z0 = baseZ + 0.25, z1 = z0 + point.height;
+  var topScale = 0.56, leanX = ux * 0.12, leanY = uy * 0.12;
+  var b0 = {x:point.x-ux-vx,y:point.y-uy-vy,z:z0};
+  var b1 = {x:point.x+ux-vx,y:point.y+uy-vy,z:z0};
+  var b2 = {x:point.x+ux+vx,y:point.y+uy+vy,z:z0};
+  var b3 = {x:point.x-ux+vx,y:point.y-uy+vy,z:z0};
+  var t0 = {x:point.x-ux*topScale-vx*topScale+leanX,y:point.y-uy*topScale-vy*topScale+leanY,z:z1};
+  var t1 = {x:point.x+ux*topScale-vx*topScale+leanX,y:point.y+uy*topScale-vy*topScale+leanY,z:z1};
+  var t2 = {x:point.x+ux*topScale+vx*topScale+leanX,y:point.y+uy*topScale+vy*topScale+leanY,z:z1};
+  var t3 = {x:point.x-ux*topScale+vx*topScale+leanX,y:point.y-uy*topScale+vy*topScale+leanY,z:z1};
+  drawRuinDecorFace([b0,b1,t1,t0], colors.shadow, C);
+  drawRuinDecorFace([b1,b2,t2,t1], colors.base, C);
+  drawRuinDecorFace([b2,b3,t3,t2], colors.dark, C);
+  drawRuinDecorFace([b3,b0,t0,t3], colors.shadow, C);
+  drawRuinDecorFace([t0,t1,t2,t3], colors.lit, C);
+}
+
+function drawRuinDecorBox(center, z0, z1, halfRight, halfOut, colors, C) {
+  var rx = center.rightX * halfRight, ry = center.rightY * halfRight;
+  var ox = center.outX * halfOut, oy = center.outY * halfOut;
+  var b0 = {x:center.x-rx-ox,y:center.y-ry-oy,z:z0};
+  var b1 = {x:center.x+rx-ox,y:center.y+ry-oy,z:z0};
+  var b2 = {x:center.x+rx+ox,y:center.y+ry+oy,z:z0};
+  var b3 = {x:center.x-rx+ox,y:center.y-ry+oy,z:z0};
+  var t0 = {x:b0.x,y:b0.y,z:z1}, t1 = {x:b1.x,y:b1.y,z:z1};
+  var t2 = {x:b2.x,y:b2.y,z:z1}, t3 = {x:b3.x,y:b3.y,z:z1};
+  drawRuinDecorFace([b0,b1,t1,t0], colors.dark, C);
+  drawRuinDecorFace([b1,b2,t2,t1], colors.mid, C);
+  drawRuinDecorFace([b2,b3,t3,t2], colors.deep, C);
+  drawRuinDecorFace([b3,b0,t0,t3], colors.dark, C);
+  drawRuinDecorFace([t0,t1,t2,t3], colors.lit, C);
+}
+
 function drawRuins3D() {
-  renderEntities3D(ruins, {maxDist: viewDist * 0.7, depthOffset: 2, checkMidpoint: true, fadeFraction: 0.8, sort: true, minDist: 3, mode3dOnly: true},
+  // Match the wall renderer's range: opaque dressing is too small to notice at
+  // the horizon, and no longer hard-culls while its wall remnants are visible.
+  renderEntities3D(ruins, {maxDist: viewDist, groundAnchor: true, sceneDepth: true,
+    fadeFraction: 0.8, sort: true, minDist: 3, mode3dOnly: true},
     function(ru, vis, C, ctx, now) {
       function proj(wx, wy, wz) { return projToScreen(wx, wy, wz, C); }
       var fwd = vis.fwd;
       ctx.save();
-      ctx.globalAlpha = Math.max(0.3, 1.0 - fwd / viewDist * 0.6) * vis.fade;
+      // These faces write opaque scene depth, so their paint must be opaque as
+      // well. Distance fading is reserved for the non-opaque location label.
+      var labelAlpha = Math.max(0.3, 1.0 - fwd / viewDist * 0.6) * vis.fade;
+      ctx.globalAlpha = 1;
 
-      var rubbleCount = ru.ruinType === 'hall' ? 6 : 4;
-      for (var rbi = 0; rbi < rubbleCount; rbi++) {
-        var rbAng = rbi * (Math.PI * 2 / rubbleCount) + vis.dist * 0.1;
-        var rbDist = 15 + (rbi % 3) * 8;
-        var rbx = ru.x + Math.cos(rbAng) * rbDist;
-        var rby = ru.y + Math.sin(rbAng) * rbDist;
-        var rbP = proj(rbx, rby, 0);
-        if (rbP && rbP.fwd > 1) {
-          var rbS = Math.max(2, Math.floor(4 * projScale / rbP.fwd));
-          ctx.fillStyle = (rbi % 2 === 0) ? '#8a7a68' : '#6a5a48';
-          ctx.fillRect(rbP.sx - rbS, rbP.sy - rbS * 0.5, rbS * 2, rbS);
-        }
+      var stoneColors = (typeof GAME_MATERIALS !== 'undefined' && GAME_MATERIALS.rubbleStone) ?
+        GAME_MATERIALS.rubbleStone.hex : {base:'#787060',shadow:'#686058',lit:'#888070',dark:'#504840'};
+      var debrisLayout = RUIN_DEBRIS_LAYOUTS[ru.ruinType] || RUIN_DEBRIS_LAYOUTS.hut;
+      var debrisPoint = {};
+      for (var rbi = 0; rbi < debrisLayout.length; rbi++) {
+        getRuinDebrisWorld(ru, rbi, debrisPoint);
+        var debrisZ = ruinDecorSurfaceZ(debrisPoint.x, debrisPoint.y, vis.floorZ);
+        drawRuinStone(debrisPoint, debrisZ, stoneColors, C);
       }
 
-      var postOffX = 0, postOffY = 0;
-      if (ru.facing === 0) postOffY = -25;
-      else if (ru.facing === 1) postOffX = 25;
-      else if (ru.facing === 2) postOffY = 25;
-      else postOffX = -25;
-      var postP0 = proj(ru.x + postOffX, ru.y + postOffY, 0);
-      var postP1 = proj(ru.x + postOffX, ru.y + postOffY, 20);
-      if (postP0 && postP1 && postP0.fwd > 1) {
-        ctx.strokeStyle = '#5a4030';
-        ctx.lineWidth = Math.max(2, Math.floor(3 * projScale / postP0.fwd));
-        ctx.beginPath(); ctx.moveTo(postP0.sx, postP0.sy); ctx.lineTo(postP1.sx, postP1.sy); ctx.stroke();
-        var crossP = proj(ru.x + postOffX, ru.y + postOffY, 16);
-        if (crossP) {
-          var crossW = Math.max(3, Math.floor(8 * projScale / crossP.fwd));
-          ctx.lineWidth = Math.max(1, Math.floor(2 * projScale / crossP.fwd));
-          ctx.beginPath(); ctx.moveTo(crossP.sx - crossW, crossP.sy); ctx.lineTo(crossP.sx + crossW, crossP.sy); ctx.stroke();
-        }
+      // A small solid waypost sits to the right of the open face. Both its
+      // stem and crosspiece are world boxes, so they retain their orientation
+      // instead of turning into screen-space lines as the camera moves.
+      var post = getRuinPostWorld(ru, {});
+      var postZ = ruinDecorSurfaceZ(post.x, post.y, vis.floorZ);
+      var woodColors = (typeof GAME_MATERIALS !== 'undefined' && GAME_MATERIALS.palisadeWood) ?
+        GAME_MATERIALS.palisadeWood.hex : {lit:'#7a4c2a',mid:'#6b4226',dark:'#5a3720',deep:'#3a2412'};
+      drawRuinDecorBox(post, postZ + 0.2, postZ + 21, 0.9, 0.9, woodColors, C);
+      drawRuinDecorBox(post, postZ + 14, postZ + 19, 8.5, 1.0, woodColors, C);
+
+      // Two fixed roof-frame remnants give the hut a readable shelter
+      // silhouette without closing it in. They use the same facing basis as
+      // the waypost and stay attached to the rear/left wall runs.
+      if (ru.ruinType === 'hut') {
+        var rearBeam = ruinLocalToWorld(ru, 0, -27, {});
+        rearBeam.rightX = post.rightX; rearBeam.rightY = post.rightY;
+        rearBeam.outX = post.outX; rearBeam.outY = post.outY;
+        var rearBeamZ = ruinDecorSurfaceZ(rearBeam.x, rearBeam.y, vis.floorZ);
+        drawRuinDecorBox(rearBeam, rearBeamZ + 52, rearBeamZ + 56, 28, 1.8, woodColors, C);
+        var sideBeam = ruinLocalToWorld(ru, -27, -5, {});
+        sideBeam.rightX = post.rightX; sideBeam.rightY = post.rightY;
+        sideBeam.outX = post.outX; sideBeam.outY = post.outY;
+        var sideBeamZ = ruinDecorSurfaceZ(sideBeam.x, sideBeam.y, vis.floorZ);
+        drawRuinDecorBox(sideBeam, sideBeamZ + 38, sideBeamZ + 42, 1.8, 18, woodColors, C);
       }
 
       if (fwd < viewDist * 0.3) {
-        var labelP = proj(ru.x, ru.y, 28);
-        if (labelP) {
+        var labelLift = ru.ruinType === 'hut' ? 68 : ru.ruinType === 'hall' ? 74 : 62;
+        var labelP = proj(ru.x, ru.y, vis.floorZ + labelLift);
+        if (labelP && labelP.fwd > 1) {
+          ctx.globalAlpha = labelAlpha;
           ctx.fillStyle = '#c8b898';
-          ctx.font = Math.max(9, Math.floor(12 * projScale / labelP.fwd)) + 'px monospace';
+          var labelSize = Math.max(9, Math.min(24, Math.floor(12 * projScale / labelP.fwd)));
+          ctx.font = labelSize + 'px monospace';
           ctx.textAlign = 'center';
           var ruinLabel = ru.ruinType === 'hut' ? 'Ruined Hut' : ru.ruinType === 'tower_base' ? 'Tower Ruins' : 'Ruined Hall';
-          ctx.fillText(ruinLabel, labelP.sx, labelP.sy);
+          var labelWidth = ctx.measureText(ruinLabel).width;
+          withSceneDepthBillboard({x:labelP.sx-labelWidth*0.5-1,y:labelP.sy-labelSize,
+            width:labelWidth+2,height:labelSize+3}, labelP.fwd, function() {
+            ctx.fillText(ruinLabel, labelP.sx, labelP.sy);
+          });
         }
       }
       ctx.restore();
     });
 }
 
+function getStructureShellMetrics(st) {
+  var scale = st.scale || 1;
+  var normalized = ((st.type === 'fortress') ? 0.9 : (st.type === 'watchtower') ? 1.0 : 0.7) *
+    (0.9 + scale * 0.1);
+  return {scale:scale, normalized:normalized, wallWorldH:CANVAS_BASE_H * normalized};
+}
+
+function structurePaletteRole(st, role) {
+  var palette = st.palette;
+  if (palette && palette[role]) return palette[role];
+  if (st.type === 'arena') return role === 'p' ? [100,60,45] : role === 's' ? [115,65,50] : [130,75,55];
+  if (st.type === 'watchtower') return role === 't' ? [120,130,155] : role === 'a' ? [110,120,140] : [110,120,140];
+  return role === 'c' ? [155,150,140] : role === 'k' ? [150,145,135] : [140,135,125];
+}
+
+function structureColorRamp(st, role) {
+  var rgb = structurePaletteRole(st, role);
+  function shade(delta) {
+    return rgbQ(Math.max(0, Math.min(255, rgb[0] + delta)),
+      Math.max(0, Math.min(255, rgb[1] + delta)),
+      Math.max(0, Math.min(255, rgb[2] + delta)));
+  }
+  return {lit:shade(18), mid:shade(4), dark:shade(-18), deep:shade(-34), shadow:shade(-25), base:shade(0)};
+}
+
+function drawStructureBoxWorld(x, y, z0, z1, halfRight, halfOut, yaw, colors, C) {
+  var cs = Math.cos(yaw), sn = Math.sin(yaw);
+  drawRuinDecorBox({x:x,y:y,rightX:cs,rightY:sn,outX:-sn,outY:cs},
+    z0,z1,halfRight,halfOut,colors,C);
+}
+
+function drawStructurePyramidWorld(x, y, zBase, zPeak, halfRight, halfOut, yaw, colors, C) {
+  var cs=Math.cos(yaw), sn=Math.sin(yaw), rx=cs*halfRight, ry=sn*halfRight;
+  var ox=-sn*halfOut, oy=cs*halfOut;
+  var b0={x:x-rx-ox,y:y-ry-oy,z:zBase}, b1={x:x+rx-ox,y:y+ry-oy,z:zBase};
+  var b2={x:x+rx+ox,y:y+ry+oy,z:zBase}, b3={x:x-rx+ox,y:y-ry+oy,z:zBase};
+  var apex={x:x,y:y,z:zPeak};
+  drawRuinDecorFace([b0,b1,apex],colors.dark,C);
+  drawRuinDecorFace([b1,b2,apex],colors.mid,C);
+  drawRuinDecorFace([b2,b3,apex],colors.base,C);
+  drawRuinDecorFace([b3,b0,apex],colors.shadow,C);
+}
+
+function drawStructureGableWorld(x, y, zEave, zPeak, halfRight, halfOut, yaw, colors, C) {
+  var cs=Math.cos(yaw), sn=Math.sin(yaw), rx=cs*halfRight, ry=sn*halfRight;
+  var ox=-sn*halfOut, oy=cs*halfOut;
+  var b0={x:x-rx-ox,y:y-ry-oy,z:zEave}, b1={x:x+rx-ox,y:y+ry-oy,z:zEave};
+  var b2={x:x+rx+ox,y:y+ry+oy,z:zEave}, b3={x:x-rx+ox,y:y-ry+oy,z:zEave};
+  var r0={x:x-rx,y:y-ry,z:zPeak}, r1={x:x+rx,y:y+ry,z:zPeak};
+  drawRuinDecorFace([b0,b1,r1,r0],colors.dark,C);
+  drawRuinDecorFace([b3,r0,r1,b2],colors.base,C);
+  drawRuinDecorFace([b0,r0,b3],colors.shadow,C);
+  drawRuinDecorFace([b1,b2,r1],colors.mid,C);
+}
+
+function drawStructureRadialRoof(st, radius, sides, rimZ, peakZ, colors, C) {
+  var rotation = (st.rotation || 0) + Math.PI / sides;
+  var apex={x:st.x,y:st.y,z:peakZ};
+  for (var face=0;face<sides;face++) {
+    var a0=rotation+face*Math.PI*2/sides, a1=rotation+(face+1)*Math.PI*2/sides;
+    var p0={x:st.x+Math.cos(a0)*radius,y:st.y+Math.sin(a0)*radius,z:rimZ};
+    var p1={x:st.x+Math.cos(a1)*radius,y:st.y+Math.sin(a1)*radius,z:rimZ};
+    drawRuinDecorFace([p0,p1,apex],
+      face%3===0?colors.lit:face%2===0?colors.mid:colors.dark,C);
+    var mid=(a0+a1)*0.5, chord=radius*Math.sin(Math.PI/sides);
+    drawStructureBoxWorld(st.x+Math.cos(mid)*radius*Math.cos(Math.PI/sides),
+      st.y+Math.sin(mid)*radius*Math.cos(Math.PI/sides),rimZ-3,rimZ+3,
+      chord,cell*0.12,mid+Math.PI*0.5,colors,C);
+  }
+}
+
+function drawStructureStandardWorld(x, y, baseZ, yaw, height, color, C) {
+  var wood = GAME_MATERIALS.floorPropWood.hex;
+  var woodRamp={lit:wood.lit,mid:wood.base,dark:wood.shadow,deep:wood.deep};
+  drawStructureBoxWorld(x,y,baseZ+0.2,baseZ+height,1.1,1.1,0,woodRamp,C);
+  var rx=Math.cos(yaw)*cell*0.48, ry=Math.sin(yaw)*cell*0.48;
+  var ox=-Math.sin(yaw)*1.2, oy=Math.cos(yaw)*1.2;
+  var clothTop=baseZ+height*0.88, clothBottom=baseZ+height*0.55;
+  drawRuinDecorFace([
+    {x:x-rx+ox,y:y-ry+oy,z:clothTop},{x:x+rx+ox,y:y+ry+oy,z:clothTop},
+    {x:x+rx+ox,y:y+ry+oy,z:clothBottom},{x:x-rx+ox,y:y-ry+oy,z:clothBottom}
+  ],color,C);
+}
+
+function drawStructureShellWorld(st, vis, C) {
+  if (!Number.isFinite(vis.floorZ)) return;
+  var metrics=getStructureShellMetrics(st), scale=metrics.scale, baseZ=vis.floorZ;
+  var mainRole=st.type==='fortress'?'w':st.type==='arena'?'w':'t';
+  var trimRole=st.type==='fortress'?'k':st.type==='arena'?'p':'a';
+  var main=structureColorRamp(st,mainRole), trim=structureColorRamp(st,trimRole);
+  var accent=st.type==='fortress'?'#b58a35':st.type==='arena'?'#9f3d2d':'#3f7597';
+  ctx.globalAlpha=1;
+  if (st.type==='fortress') {
+    var extent=CHUNK_SIZE*1.7*scale, gateInset=extent-cell*1.5;
+    var gateZ0=baseZ+metrics.wallWorldH*0.68, gateZ1=baseZ+metrics.wallWorldH*0.90;
+    drawStructureBoxWorld(st.x,st.y-gateInset,gateZ0,gateZ1,cell*2.9,cell*0.48,0,trim,C);
+    drawStructureBoxWorld(st.x,st.y+gateInset,gateZ0,gateZ1,cell*2.9,cell*0.48,0,trim,C);
+    drawStructureBoxWorld(st.x-gateInset,st.y,gateZ0,gateZ1,cell*2.9,cell*0.48,Math.PI*0.5,trim,C);
+    drawStructureBoxWorld(st.x+gateInset,st.y,gateZ0,gateZ1,cell*2.9,cell*0.48,Math.PI*0.5,trim,C);
+    var cornerOffset=extent-cell*2.5;
+    for(var fy=-1;fy<=1;fy+=2) for(var fx=-1;fx<=1;fx+=2) {
+      var towerX=st.x+fx*cornerOffset,towerY=st.y+fy*cornerOffset;
+      var towerTop=baseZ+CANVAS_BASE_H*(metrics.normalized+0.3);
+      drawStructureBoxWorld(towerX,towerY,towerTop,towerTop+8,cell*2.35,cell*2.35,0,trim,C);
+      drawStructurePyramidWorld(towerX,towerY,towerTop+8,towerTop+cell*1.45,
+        cell*1.25,cell*1.25,Math.PI*0.25,trim,C);
+    }
+    var pillarTop=baseZ+CANVAS_BASE_H*(metrics.normalized+0.6)+3;
+    drawStructureRadialRoof(st,cell*10*scale,6,pillarTop,pillarTop+cell*2.3,trim,C);
+    var buildingZ=baseZ+CANVAS_BASE_H*(metrics.normalized*0.7)+3;
+    if(st.numBuildings>=1) drawStructureGableWorld(st.x+extent*0.45,st.y-extent*0.4,
+      buildingZ,buildingZ+cell*1.8,cell*4.25,cell*3.25,0,main,C);
+    if(st.numBuildings>=2) drawStructureGableWorld(st.x-extent*0.45,st.y+extent*0.4,
+      buildingZ,buildingZ+cell*1.8,cell*4.25,cell*3.25,0,main,C);
+    drawStructureStandardWorld(st.x,st.y-gateInset,baseZ,0,metrics.wallWorldH*0.92,accent,C);
+    drawStructureStandardWorld(st.x,st.y+gateInset,baseZ,Math.PI,metrics.wallWorldH*0.92,accent,C);
+    drawStructureStandardWorld(st.x-gateInset,st.y,baseZ,-Math.PI*0.5,metrics.wallWorldH*0.92,accent,C);
+    drawStructureStandardWorld(st.x+gateInset,st.y,baseZ,Math.PI*0.5,metrics.wallWorldH*0.92,accent,C);
+  } else if(st.type==='arena') {
+    var ringR=CHUNK_SIZE*1.1*scale, rotation=st.rotation||0;
+    for(var gi=-1;gi<=1;gi+=2) {
+      var gateA=rotation+gi*Math.PI*0.5, gateX=st.x+Math.cos(gateA)*ringR, gateY=st.y+Math.sin(gateA)*ringR;
+      drawStructureBoxWorld(gateX,gateY,baseZ+metrics.wallWorldH*0.62,
+        baseZ+metrics.wallWorldH*0.88,cell*2.8,cell*0.5,gateA+Math.PI*0.5,main,C);
+      drawStructureStandardWorld(gateX,gateY,baseZ,gateA+Math.PI*0.5,metrics.wallWorldH*0.9,accent,C);
+    }
+    var pillars=Math.max(8,Math.min(15,st.numPillars||8)), pillarR=ringR*0.55;
+    var entZ=baseZ+CANVAS_BASE_H*(metrics.normalized+0.2);
+    for(var pi=0;pi<pillars;pi++) {
+      var midA=rotation+(pi+0.5)*Math.PI*2/pillars;
+      drawStructureBoxWorld(st.x+Math.cos(midA)*pillarR*Math.cos(Math.PI/pillars),
+        st.y+Math.sin(midA)*pillarR*Math.cos(Math.PI/pillars),entZ-3,entZ+4,
+        pillarR*Math.sin(Math.PI/pillars),cell*0.11,midA+Math.PI*0.5,trim,C);
+    }
+    var pedestalTop=baseZ+metrics.wallWorldH*0.18;
+    drawStructureBoxWorld(st.x,st.y,pedestalTop,pedestalTop+6,cell*0.78,cell*0.78,rotation,trim,C);
+  } else {
+    var towerR=cell*3*scale, towerRoof=baseZ+metrics.wallWorldH*1.4+3;
+    drawStructurePyramidWorld(st.x,st.y,towerRoof,towerRoof+cell*3.0,
+      towerR*1.08,towerR*1.08,(st.rotation||0)+Math.PI*0.25,trim,C);
+    var arms=Math.max(2,Math.min(4,st.armCount||2)), armLen=cell*14*scale;
+    for(var ai=0;ai<arms;ai++) {
+      var armA=(st.rotation||0)+ai*Math.PI*2/arms;
+      var roomDist=towerR+armLen, roomX=st.x+Math.cos(armA)*roomDist, roomY=st.y+Math.sin(armA)*roomDist;
+      var roomRoof=baseZ+metrics.wallWorldH*0.9+3, roomR=cell*2.5*scale;
+      drawStructurePyramidWorld(roomX,roomY,roomRoof,roomRoof+cell*1.65,
+        roomR*1.08,roomR*1.08,armA+Math.PI*0.25,main,C);
+      drawStructureStandardWorld(roomX,roomY,baseZ,armA+Math.PI*0.5,metrics.wallWorldH*0.82,accent,C);
+    }
+  }
+}
+
 function drawStructures3D() {
-  renderEntities3D(largeStructures, {maxDist: viewDist * 0.9, depthOffset: 2, checkMidpoint: true, fadeFraction: 0.8, sort: true, minDist: 3, mode3dOnly: true},
+  renderEntities3D(largeStructures, {maxDist: viewDist * 2.6, depthOffset: 2, checkMidpoint: true, fadeFraction: 0.92, sort: true, minDist: 3, mode3dOnly: true, groundAnchor:true},
     function(st, vis, C, ctx, now) {
       function proj(wx, wy, wz) { return projToScreen(wx, wy, wz, C); }
       var fwd = vis.fwd;
       ctx.save();
       ctx.globalAlpha = vis.fade;
+      drawStructureShellWorld(st,vis,C);
+      ctx.globalAlpha = vis.fade;
 
       if (fwd < viewDist * 0.6) {
-        var labelP = proj(st.x, st.y, 40);
+        var labelP = proj(st.x, st.y, vis.floorZ + 40);
         if (labelP) {
           var labelSize = Math.max(10, Math.floor(16 * projScale / labelP.fwd));
           ctx.fillStyle = (st.type === 'fortress') ? '#e8c868' : (st.type === 'arena') ? '#e87848' : '#88c8e8';
@@ -16354,18 +18711,18 @@ function drawStructures3D() {
           if (_int3d.used) continue;
           var ix = st.x + _int3d.ox, iy = st.y + _int3d.oy;
           // Base platform
-          var ib0 = proj(ix - 4, iy - 4, 0);
-          var ib1 = proj(ix + 4, iy - 4, 0);
-          var ib2 = proj(ix + 4, iy + 4, 0);
-          var ib3 = proj(ix - 4, iy + 4, 0);
+          var ib0 = proj(ix - 4, iy - 4, vis.floorZ);
+          var ib1 = proj(ix + 4, iy - 4, vis.floorZ);
+          var ib2 = proj(ix + 4, iy + 4, vis.floorZ);
+          var ib3 = proj(ix - 4, iy + 4, vis.floorZ);
           if (ib0 && ib1 && ib2 && ib3) {
             ctx.fillStyle = '#333'; ctx.globalAlpha = 0.8;
             ctx.beginPath(); ctx.moveTo(ib0.sx, ib0.sy); ctx.lineTo(ib1.sx, ib1.sy);
             ctx.lineTo(ib2.sx, ib2.sy); ctx.lineTo(ib3.sx, ib3.sy); ctx.closePath(); ctx.fill();
           }
           // Object body
-          var ip0 = proj(ix, iy, 0);
-          var ip1 = proj(ix, iy, 18);
+          var ip0 = proj(ix, iy, vis.floorZ);
+          var ip1 = proj(ix, iy, vis.floorZ + 18);
           if (ip0 && ip1 && ip0.fwd > 1) {
             var ipw = Math.max(3, Math.floor(8 * projScale / ip0.fwd));
             if (_int3d.type === 'forge') {
@@ -16404,7 +18761,7 @@ function drawStructures3D() {
           // Prompt text when player is near
           if (nearestFortressInteract && nearestFortressInteract.type === _int3d.type &&
               nearestFortressInteract.structure === st) {
-            var tp3 = proj(ix, iy, 28);
+            var tp3 = proj(ix, iy, vis.floorZ + 28);
             if (tp3) {
               var fs3 = Math.max(10, Math.floor(18 * getScale3D('lgText') * projScale / (tp3.fwd || 10)));
               ctx.globalAlpha = 1.0;
@@ -16436,7 +18793,7 @@ function drawStructures3D() {
             var _sealPts = [];
             for (var _si2 = 0; _si2 < _sealN; _si2++) {
               var _sA = _si2 * Math.PI * 2 / _sealN;
-              _sealPts.push(proj(st.x + Math.cos(_sA) * _sealR, st.y + Math.sin(_sA) * _sealR, 4));
+              _sealPts.push(proj(st.x + Math.cos(_sA) * _sealR, st.y + Math.sin(_sA) * _sealR, vis.floorZ + 4));
             }
             var _sealVisible = true;
             for (var _sk = 0; _sk < _sealN; _sk++) if (!_sealPts[_sk]) { _sealVisible = false; break; }
@@ -16452,7 +18809,7 @@ function drawStructures3D() {
               ctx.shadowBlur = 0;
               // "SEALED" label at top of ring
               if (fortressLockedNear && fortressLockedNear.structure === st) {
-                var _slP = proj(st.x, st.y, 20);
+                var _slP = proj(st.x, st.y, vis.floorZ + 20);
                 if (_slP && _slP.fwd > 1) {
                   var _slFs = Math.max(9, Math.floor(14 * projScale / _slP.fwd));
                   ctx.globalAlpha = vis.fade;
@@ -16465,97 +18822,6 @@ function drawStructures3D() {
           }
         }
 
-        // ── Gazebo / greek temple roof — hexagonal canopy over the pillars ──
-        var _gzR = cell * 10 * (st.scale || 1);
-        var _gzN = 6;
-        var _gzRoofZ = 38; // world Z of pillar tops / roof ring
-        var _gzPeakZ = _gzRoofZ + 9; // pointed peak above center
-        var _gzPal = st.palette;
-        var _gzKr = _gzPal ? _gzPal.k[0] + 18 : 180;
-        var _gzKg = _gzPal ? _gzPal.k[1] + 14 : 165;
-        var _gzKb = _gzPal ? _gzPal.k[2] + 10 : 140;
-        var _gzPts = [];
-        for (var _gzI = 0; _gzI < _gzN; _gzI++) {
-          var _gzA = _gzI * Math.PI * 2 / _gzN + Math.PI / 6;
-          _gzPts.push(proj(st.x + Math.cos(_gzA) * _gzR, st.y + Math.sin(_gzA) * _gzR, _gzRoofZ));
-        }
-        var _gzApex = proj(st.x, st.y, _gzPeakZ);
-        // Filled hexagonal roof (visible overhead)
-        ctx.save();
-        ctx.globalAlpha = vis.fade * 0.82;
-        var _gzAllVis = true;
-        for (var _gzK = 0; _gzK < _gzN; _gzK++) if (!_gzPts[_gzK]) { _gzAllVis = false; break; }
-        if (_gzAllVis && _gzPts[0].fwd > 1) {
-          ctx.fillStyle = 'rgb(' + _gzKr + ',' + _gzKg + ',' + _gzKb + ')';
-          ctx.beginPath(); ctx.moveTo(_gzPts[0].sx, _gzPts[0].sy);
-          for (var _gzK2 = 1; _gzK2 < _gzN; _gzK2++) ctx.lineTo(_gzPts[_gzK2].sx, _gzPts[_gzK2].sy);
-          ctx.closePath(); ctx.fill();
-          // Highlight rim
-          ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5;
-          ctx.stroke();
-          // Pyramid rafters to peak
-          if (_gzApex) {
-            ctx.strokeStyle = 'rgb(' + (_gzKr + 12) + ',' + (_gzKg + 10) + ',' + (_gzKb + 8) + ')';
-            for (var _gzK3 = 0; _gzK3 < _gzN; _gzK3++) {
-              ctx.lineWidth = Math.max(1, Math.floor(2 * projScale / _gzApex.fwd));
-              ctx.beginPath(); ctx.moveTo(_gzPts[_gzK3].sx, _gzPts[_gzK3].sy); ctx.lineTo(_gzApex.sx, _gzApex.sy); ctx.stroke();
-            }
-            // Finial capstone ornament
-            var _gzFinR = Math.max(2, Math.floor(4 * projScale / _gzApex.fwd));
-            ctx.fillStyle = '#f0dfa0'; ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.arc(_gzApex.sx, _gzApex.sy, _gzFinR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-          }
-        }
-        // Entablature beams along the eaves
-        ctx.globalAlpha = vis.fade;
-        for (var _gzK4 = 0; _gzK4 < _gzN; _gzK4++) {
-          var _gz0 = _gzPts[_gzK4], _gz1 = _gzPts[(_gzK4 + 1) % _gzN];
-          if (_gz0 && _gz1 && _gz0.fwd > 1) {
-            var _gzLW = Math.max(2, Math.floor(3 * projScale / _gz0.fwd));
-            ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = _gzLW + 2;
-            ctx.beginPath(); ctx.moveTo(_gz0.sx, _gz0.sy); ctx.lineTo(_gz1.sx, _gz1.sy); ctx.stroke();
-            ctx.strokeStyle = 'rgb(' + (_gzKr - 10) + ',' + (_gzKg - 8) + ',' + (_gzKb - 6) + ')';
-            ctx.lineWidth = _gzLW;
-            ctx.beginPath(); ctx.moveTo(_gz0.sx, _gz0.sy); ctx.lineTo(_gz1.sx, _gz1.sy); ctx.stroke();
-          }
-        }
-        ctx.restore();
-      }
-
-      var bannerPositions = [];
-      if (st.type === 'fortress') {
-        bannerPositions.push({bx: st.x - 20, by: st.y - CHUNK_SIZE * 0.95});
-        bannerPositions.push({bx: st.x + 20, by: st.y - CHUNK_SIZE * 0.95});
-        bannerPositions.push({bx: st.x - 20, by: st.y + CHUNK_SIZE * 0.95});
-        bannerPositions.push({bx: st.x + 20, by: st.y + CHUNK_SIZE * 0.95});
-      } else if (st.type === 'arena') {
-        var gateR = CHUNK_SIZE * 0.6;
-        bannerPositions.push({bx: st.x, by: st.y - gateR});
-        bannerPositions.push({bx: st.x, by: st.y + gateR});
-      } else {
-        var armEnd = 15 * 1.5 + 15 * 8;
-        bannerPositions.push({bx: st.x, by: st.y - armEnd});
-        bannerPositions.push({bx: st.x, by: st.y + armEnd});
-        bannerPositions.push({bx: st.x - armEnd, by: st.y});
-        bannerPositions.push({bx: st.x + armEnd, by: st.y});
-      }
-      var bannerColor = (st.type === 'fortress') ? '#c8a028' : (st.type === 'arena') ? '#c84020' : '#2080c0';
-      for (var bi = 0; bi < bannerPositions.length; bi++) {
-        var bp = bannerPositions[bi];
-        var bp0 = proj(bp.bx, bp.by, 0);
-        var bp1 = proj(bp.bx, bp.by, 30);
-        if (bp0 && bp1 && bp0.fwd > 1) {
-          ctx.strokeStyle = '#5a4a3a';
-          ctx.lineWidth = Math.max(2, Math.floor(3 * projScale / bp0.fwd));
-          ctx.beginPath(); ctx.moveTo(bp0.sx, bp0.sy); ctx.lineTo(bp1.sx, bp1.sy); ctx.stroke();
-          var bpM = proj(bp.bx, bp.by, 22);
-          if (bpM) {
-            var bw = Math.max(4, Math.floor(10 * projScale / bpM.fwd));
-            var bh = Math.max(6, Math.floor(14 * projScale / bpM.fwd));
-            ctx.fillStyle = bannerColor;
-            ctx.fillRect(bpM.sx, bpM.sy, bw, bh);
-          }
-        }
       }
       ctx.restore();
     });
@@ -16876,11 +19142,11 @@ function drawCaveEntrance3D() {
   // end, short reinforcements.
   var ARCH_W, ARCH_H, PILLAR_W, PILLAR_D, LINTEL_H, LINTEL_OVERHANG, OPENING_W;
 
-  var STONE_LIT = '#a89787';
-  var STONE_MID = '#776859';
-  var STONE_DARK = '#473d32';
-  var STONE_SHADOW = '#2a2320';
-  var PORTAL_DARK = '#05040a';
+  var stoneColors = GAME_MATERIALS.entranceStone.hex;
+  var STONE_LIT = stoneColors.lit;
+  var STONE_MID = stoneColors.mid;
+  var STONE_DARK = stoneColors.dark;
+  var STONE_SHADOW = stoneColors.shadow;
 
   var visibleCaves = [];
   for (var ei = 0; ei < deepCaveEntrances.length; ei++) {
@@ -17040,11 +19306,12 @@ function drawCaveEntrance3D() {
     // Wooden palisade — vertical planks with per-plank shading. Both front &
     // back faces get the same per-plank shade so the variation reads from any
     // side. Shades are strongly contrasted so the planks are distinguishable.
-    var WOOD_LIT = '#7a4c2a';
-    var WOOD_MID = '#6b4226';
-    var WOOD_DARK = '#5a3720';
-    var WOOD_DEEP = '#3a2412';
-    var WOOD_SIDE = '#3a2412';
+    var woodColors = GAME_MATERIALS.palisadeWood.hex;
+    var WOOD_LIT = woodColors.lit;
+    var WOOD_MID = woodColors.mid;
+    var WOOD_DARK = woodColors.dark;
+    var WOOD_DEEP = woodColors.deep;
+    var WOOD_SIDE = woodColors.deep;
     var PLANK_SHADES = [WOOD_MID, WOOD_LIT, WOOD_MID, WOOD_DARK, WOOD_MID, WOOD_LIT, WOOD_MID];
     var NUM_PLANKS = 7;
     function drawFlank(pillarCX, pillarCY, sideSign) {
@@ -18619,7 +20886,7 @@ function drawWallDecorations2D() {
   for (var i = 0; i < wallDecorations.length; i++) {
     var dec = wallDecorations[i];
     var x = dec.worldX, y = dec.worldY;
-    var t = dec.type;
+    var t = canonicalWallDecorationType(dec.type);
     if (t === 'torch' || t === 'sconce') {
       ctx.fillStyle = (t === 'torch') ? '#ff8020' : '#ff5030';
       ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2); ctx.fill();
@@ -18651,6 +20918,9 @@ function drawWallDecorations2D() {
     } else if (t === 'carved_rune') {
       ctx.strokeStyle = 'rgba(180,160,120,0.6)'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2); ctx.stroke();
+    } else if (t === 'wall_crack') {
+      ctx.strokeStyle = 'rgba(42,34,30,0.75)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x-2,y-3); ctx.lineTo(x,y-1); ctx.lineTo(x-1,y+1); ctx.lineTo(x+2,y+3); ctx.stroke();
     }
   }
   ctx.globalAlpha = 1.0; ctx.restore();
@@ -19575,6 +21845,7 @@ function _handleGamepad3D(dt) {
 // Shared spell casting logic — fires current spell if mana/cooldown allow
 function _tryCastSpell(now) {
   var spell = getCurrentSpell();
+  if (spell.id === 'missile' && missileCastingBlocked()) return;
   // Stream attacks (flamethrower) tick continuously while held
   if (spell.attackType === 'stream') {
     var tickInterval = spell.streamTickMs || 80;
@@ -19595,11 +21866,16 @@ function _tryCastSpell(now) {
   }
   var _effCD2 = getEffectiveCooldown();
   if (mana >= spell.manaCost && (now - lastShotMs) >= _effCD2) {
+    var previousShotMs = lastShotMs;
+    var windupMissile = spell.id === 'missile' && spell.attackType === 'projectile';
     if (spell.attackType === 'cone') castConeAttack(spell);
-    else spawnProjectile(spell.speed, PROJ_RADIUS);
+    else if (!windupMissile) spawnProjectile(spell.speed, PROJ_RADIUS);
     mana -= spell.manaCost; stats.totalManaConsumed += spell.manaCost;
     // Snap to ideal cooldown boundary to prevent held-fire drift
     lastShotMs = Math.max(lastShotMs + _effCD2, now - 16);
+    spellCastReservationSerial++;
+    if (windupMissile) reserveMissileCast(spell, now, 1, spell.manaCost, previousShotMs);
+    if (typeof noteFirstPersonCast === 'function') noteFirstPersonCast(spell, now);
   } else if (mana < spell.manaCost && !lastADown) {
     manaBlinkUntil = now + 1000;
   }
@@ -19737,20 +22013,19 @@ function getCavePortalDepthBlendAt(x, y, entrances) {
 // Author one stone albedo per mesh vertex. Mouth rock starts with the actual
 // neighboring terrain palette and becomes warm-neutral stone farther inward.
 // Floor, walls, ceiling and cut faces share this palette; orientation and
-// illumination are shading, not alternate material definitions. The subtle
-// mineral variation uses absolute world coordinates, never window indices or
-// chunk RNG consumption order, so rebuilding/rebasing cannot recolor a rock.
+// illumination are shading, not alternate material definitions. Fine grain and
+// broad damp/rust/worn fields use absolute world coordinates, never window
+// indices or chunk RNG consumption order, so rebuilding cannot recolor a rock.
 function sampleCaveMaterialColor(surfaceHex, worldX, worldY, worldEntrances) {
+  var stone = GAME_MATERIALS.caveStone;
   var surface = typeof surfaceHex === 'number' ? surfaceHex :
     parseInt(typeof surfaceHex === 'string' ? surfaceHex.slice(1) : '', 16);
-  if (!isFinite(surface)) surface = 0x6c6558;
+  if (!isFinite(surface)) surface = stone.packed.base;
   var blend = getCavePortalDepthBlendAt(worldX, worldY, worldEntrances);
-  var hash = ((Math.floor(worldX / 12) * 7919 +
-    Math.floor(worldY / 12) * 104729) >>> 0) % 13;
-  var grain = hash - 6;
-  var r = Math.round(((surface >> 16) & 255) * (1 - blend) + (108 + grain) * blend);
-  var g = Math.round(((surface >> 8) & 255) * (1 - blend) + (101 + grain) * blend);
-  var b = Math.round((surface & 255) * (1 - blend) + (88 + grain) * blend);
+  var authored = sampleInteriorStoneAlbedo(stone.packed.base, worldX, worldY);
+  var r = Math.max(0, Math.min(255, Math.round(((surface >> 16) & 255) * (1 - blend) + ((authored >> 16) & 255) * blend)));
+  var g = Math.max(0, Math.min(255, Math.round(((surface >> 8) & 255) * (1 - blend) + ((authored >> 8) & 255) * blend)));
+  var b = Math.max(0, Math.min(255, Math.round((surface & 255) * (1 - blend) + (authored & 255) * blend)));
   return (r << 16) | (g << 8) | b;
 }
 
@@ -19771,7 +22046,7 @@ function getCaveMaterialColorAt(x, y) {
   }
   // Legacy level meshes have no authored cave field. Keep a stable neutral
   // fallback rather than silently reintroducing a view-dependent palette.
-  return 0x6c6558;
+  return GAME_MATERIALS.caveStone.packed.base;
 }
 
 function getCaveRenderLightAt(x, y, covered) {
@@ -19820,8 +22095,10 @@ function updateDayNight(dt) {
     dayTime += dt * daySpeed;
     if (dayTime >= 1) dayTime -= 1;
 
-    // Sun orbit — moves east-to-west, arc over south sky
-    var sunAngle = dayTime * Math.PI * 2;
+    // Sun orbit — sunrise at 0.25, overhead at 0.5, sunset at 0.75.
+    // This phase is shared by the visible sky so the disk and world lighting
+    // no longer disagree about where noon is.
+    var sunAngle = (dayTime - 0.25) * Math.PI * 2;
     sunDirX = Math.cos(sunAngle);
     sunDirZ = Math.sin(sunAngle);  // positive = above horizon
 
@@ -22424,6 +24701,8 @@ function caveProfilePrepareInputs(job) {
     fog:drawMinimap._fogCanvas,hadFog:Object.prototype.hasOwnProperty.call(drawMinimap,'_fogCanvas'),
     exploredUpdate:_lastExploredUpdate,light:_lightGrid,lightScale:_lightGridLastScale,
     lightX:_lightGridLastCamGX,lightY:_lightGridLastCamGY,lightFrame:_lightGridFrameCount,
+    surfaceBake:_surfaceFloorLightBake,surfaceMesh:_surfaceFloorLightMesh,
+    surfaceScale:_surfaceFloorLightScale,surfaceStats:_surfaceFloorLightStats,
     showFPS:settings.showFPS,fpsSmooth:_fpsSmooth,lastFrameTime:_lastFrameTimeMs};
   var oldDate=Date.now,oldRandom=Math.random,state=job.randomSeed;
   Date.now=function(){return job.frozenTime;};
@@ -22462,6 +24741,12 @@ function caveProfileRestoreInputs(job) {
     if(_lightGrid===saved.ownedLight)_lightGrid=saved.light;
     _lightGridLastScale=saved.lightScale;_lightGridLastCamGX=saved.lightX;
     _lightGridLastCamGY=saved.lightY;_lightGridFrameCount=saved.lightFrame;
+    // The upper-terrain bake is immutable and shared; only its animated scale
+    // changes during profiling. Never restore over a newly baked world.
+    if(_surfaceFloorLightBake===saved.surfaceBake && _surfaceFloorLightMesh===saved.surfaceMesh){
+      _surfaceFloorLightScale=saved.surfaceScale;
+      _surfaceFloorLightStats=saved.surfaceStats;
+    }
   }
   settings.showFPS=saved.showFPS;_fpsSmooth=saved.fpsSmooth;_lastFrameTimeMs=saved.lastFrameTime;
   job.savedInputs=null;
@@ -22541,6 +24826,7 @@ async function startCaveBrowserProfile(mode) {
     result.fixtureObjects=['skeleton','chest','fire orb'];
     result.frozenTime=job.frozenTime;result.randomSeed=job.randomSeed;
     caveProfilePrepareInputs(job);
+    result.surfaceLightingBake=typeof getSurfaceFloorLightStats==='function'?getSurfaceFloorLightStats():null;
     result.canonicalInputs={ambientParticles:ambientParticles.length,exploration:'radius 30 around fixture',
       lighting:'forced frozen-time update',profilingOverlays:false};
     var previous=null;
@@ -22613,6 +24899,764 @@ async function startCaveBrowserProfile(mode) {
   },true);
   document.addEventListener('visibilitychange',function(){if(document.hidden)cancelCaveBrowserProfile('Page became hidden during profile.');});
   window.addEventListener('pagehide',function(){cancelCaveBrowserProfile('Page navigation interrupted profile.');});
+}());
+// Opt-in, actual-game casting comparison. It borrows the current Cave Test
+// scene, never rebuilds terrain, and installs temporary simulation state only
+// during synchronous ticks/draws. Closing the studio leaves gameplay untouched.
+var _castingStudio = null;
+var _castingStudioArt = true;
+var _castingStudioLight = 'daylight';
+var _castingStudioMode = 'hand';
+var _castingStudioYaw = 0;
+var _castingStudioGrip = typeof HAND_RIG_DEFAULT_GRIP==='string'?HAND_RIG_DEFAULT_GRIP:'handle';
+var _castingStudioVideoURL = null;
+var _castingStudioSettingStyle = false;
+var _castingStudioStyleUnsubscribe = null;
+var CASTING_STUDIO_CYCLE_MS = 2400;
+var HAND_STUDIO_CYCLE_MS = 2800;
+var CASTING_STUDIO_REQUEST_MS = 600;
+var CASTING_STUDIO_STEP_MS = 1000 / 120;
+var _castingStudioKeys = (
+  'pos cam vel settings equipment spells stats health mana currentSpellIdx lastShotMs castAnimUntil ' +
+  '_castingPoseState walkBobPhase running gameOverState menuOpen shopOpen settingsOpen inventoryOpen forgeOpen ' +
+  'overviewActive calibrating MODE3D CAM_FOLLOW CONTROL_MODE USE_MOUSE USE_GAMEPAD gpLast ' +
+  '_mouseHeld _attackHeld flameStreamActive dmgBoostUntil manaBlinkUntil ' +
+  'enemies projectiles pendingMissileCasts spellCastReservationSerial impacts coneEffects groundEffects chainEffects novaEffects deathEffects soulOrbs coinDrops ' +
+  'enemySpawners oreVeins companions fortressAllies arcaneTomes statPickups ambientParticles ' +
+  'dayTime daySpeed ambientLight sunIntensity sunDirX sunDirZ fogFloor playerUnderground ' +
+  '_wallShadeN _wallShadeS _wallShadeE _wallShadeW _topShade ' +
+  'renderSurfaceAmbient renderSurfaceSunIntensity renderSurfaceFogFloor renderSurfaceWallShadeN ' +
+  'renderSurfaceWallShadeS renderSurfaceWallShadeE renderSurfaceWallShadeW renderSurfaceTopShade ' +
+  'renderCaveAmbient renderCaveFogFloor renderCameraCaveBlend ' +
+  '_lightGrid _lightGridLastScale _lightGridLastCamGX _lightGridLastCamGY _lightGridFrameCount ' +
+  '_surfaceFloorLightBake _surfaceFloorLightMesh _surfaceFloorLightScale _surfaceFloorLightStats ' +
+  'exploredCells minimapCanvas minimapDirty _lastExploredUpdate ' +
+  'CASTING_ART_ENABLED HAND_RIG_PREVIEW HAND_RIG_TIME_MS HAND_RIG_VIEW_YAW HAND_RIG_GRIP HAND_RIG_STYLE DEBUG_PERF_HUD DEBUG_CAVE DEBUG_COMBAT DEBUG_EFFECTS ' +
+  '_armRightIdle _armRightCast _armLeftIdle _armLeftCast _armLastRobeId'
+).split(' ');
+
+function castingStudioWrite(value) {
+  var el = document.getElementById('castingStudioResult');
+  if (el) el.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+function castingStudioSelectedStyle() {
+  return typeof getSelectedCastingStyle==='function'?getSelectedCastingStyle():'arcane';
+}
+
+function castingStudioCopy(keys) {
+  var out = {};
+  keys.forEach(function (key) { out[key] = window[key]; });
+  return out;
+}
+
+function castingStudioInstall(values) {
+  Object.keys(values).forEach(function (key) { window[key] = values[key]; });
+}
+
+function castingStudioScoped(job, fn) {
+  var saved = castingStudioCopy(_castingStudioKeys), oldDate = Date.now, oldRandom = Math.random;
+  var oldFog = drawMinimap._fogCanvas, hadFog = Object.prototype.hasOwnProperty.call(drawMinimap, '_fogCanvas');
+  var random = (1234567 ^ Math.round(job.time * 120 / 1000)) | 0;
+  castingStudioInstall(job.live);
+  drawMinimap._fogCanvas = job.fog;
+  Date.now = function () { return job.clockBase + job.time; };
+  Math.random = function () { random = (Math.imul(random, 1664525) + 1013904223) | 0; return (random >>> 0) / 4294967296; };
+  try { return fn(); }
+  finally {
+    job.live = castingStudioCopy(_castingStudioKeys);
+    job.fog = drawMinimap._fogCanvas;
+    castingStudioInstall(saved);
+    if (hadFog) drawMinimap._fogCanvas = oldFog; else delete drawMinimap._fogCanvas;
+    Date.now = oldDate; Math.random = oldRandom;
+  }
+}
+
+// A stationary, labelled practice skeleton uses the real enemy hit cylinder.
+// Check the existing grid/support along the firing lane; do not remove walls
+// or manufacture an impact if the current viewpoint cannot supply a target.
+function castingStudioFindTarget(pose, camera) {
+  var angle = camera.ang, floorZ = (pose.floorZ - 60) * 0.625, selected = null;
+  for (var distance = 16; distance <= 220; distance += 8) {
+    var x = pose.x + Math.cos(angle) * distance, y = pose.y + Math.sin(angle) * distance;
+    var gx = Math.floor(x / cell), gy = Math.floor(y / cell);
+    if (gx < 0 || gy < 0 || gx >= gridW || gy >= gridH || grid[gy * gridW + gx]) break;
+    var support = sampleEntitySupportRenderZ(x, y, floorZ, playerUnderground, true);
+    if (!Number.isFinite(support) || Math.abs(support - floorZ) > 30) break;
+    if (distance >= 96) selected = {x:x, y:y, z:support, renderFloorZ:support, distance:distance};
+  }
+  if (!selected) throw Error('This viewpoint has no clear practice lane. Choose Mouth (or Inside), then reopen Casting studio.');
+  return selected;
+}
+
+function castingStudioResetCycle(job) {
+  job.time = 0; job.simTime = 0; job.requested = false; job.requestAt = null; job.released = false; job.hitAt = null; job.releaseAt = null;
+  job.live.projectiles = []; job.live.pendingMissileCasts = []; job.live.impacts = []; job.live.groundEffects = [];
+  job.live.spellCastReservationSerial = 0;
+  job.live.coneEffects = []; job.live.chainEffects = []; job.live.novaEffects = [];
+  job.live.deathEffects = []; job.live.soulOrbs = []; job.live.coinDrops = [];
+  job.live.stats = {totalDamageDone:0, totalDamageTaken:0, totalManaConsumed:0, totalEnemiesKilled:0};
+  job.live.mana = MANA_MAX; job.live.lastShotMs = -1e12; job.live.castAnimUntil = 0;
+  job.live._castingPoseState = {castAt:-1e12, spellId:'missile', cooldown:450, lastNow:0, walkPhase:0};
+  job.live.walkBobPhase = 0;
+  job.live.enemies = job.mode==='hand'?[]:[Object.assign({}, job.target, {health:1000, maxHealth:1000,
+    enemyType:Object.assign({}, enemyTypes.normal, {speed:0, chaseRange:0}),
+    underground:job.underground, speed:0, chaseRange:0, facing:job.live.cam.ang + Math.PI,
+    patrolWaypoints:[], attackState:'idle', vx:0, vy:0})];
+  job.live.CASTING_ART_ENABLED = job.mode==='casting'&&job.art;
+  job.live.HAND_RIG_PREVIEW = job.mode==='hand'&&job.art;
+  job.live.HAND_RIG_TIME_MS = 0; job.live.HAND_RIG_VIEW_YAW = job.yaw;
+  job.live.HAND_RIG_GRIP = job.grip;
+  job.live.HAND_RIG_STYLE = job.style;
+  job.live.dayTime = job.light === 'dusk' ? 0.78 : 0.5;
+  job.live._lightGridLastScale = -Infinity; job.live._lightGridFrameCount = 4;
+  castingStudioSyncTimeline(job);
+}
+
+function startCastingStudio() {
+  if (_castingStudio) {
+    if(_castingStudio.stopped)throw Error('Studio is closing; wait for fullscreen to finish.');
+    return _castingStudio;
+  }
+  if (!CAVE_TEST_MODE || !floorMesh || !grid) throw Error('Select Cave Test first.');
+  if (_caveBrowserProfile) throw Error('Finish or cancel the other browser profile first.');
+  if (caveProfileFullscreenElement()) throw Error('Exit fullscreen before opening Casting studio.');
+  var pose = Object.assign({}, pos), camera = Object.assign({}, cam);
+  // A level, stationary shot keeps the same actual launch height and speed.
+  camera.x = pose.x; camera.y = pose.y; camera.z = pose.floorZ; camera.pitch = 0;
+  var target = _castingStudioMode==='hand'?null:castingStudioFindTarget(pose, camera);
+  var live = castingStudioCopy(_castingStudioKeys);
+  live.pos = pose; live.cam = camera; live.vel = {x:0,y:0};
+  live.settings = Object.assign({}, settings, {dayNight:true,showFPS:false});
+  live.equipment = Object.assign({}, equipment, {relic:null});
+  live.spells = Object.assign({}, spells, {missile:Object.assign({}, spells.missile, {tier:1,unlocked:true})});
+  live.health = HEALTH_MAX; live.currentSpellIdx = 0; live.dmgBoostUntil = 0;
+  live.MODE3D = true; live.CAM_FOLLOW = true; live.CONTROL_MODE = MODE_STICK_AIM;
+  live.USE_MOUSE = true; live.USE_GAMEPAD = false; live.gpLast = null; live.running = true;
+  ['gameOverState','menuOpen','shopOpen','settingsOpen','inventoryOpen','forgeOpen','overviewActive','calibrating',
+    '_mouseHeld','_attackHeld','flameStreamActive','DEBUG_PERF_HUD','DEBUG_CAVE','DEBUG_COMBAT','DEBUG_EFFECTS'].forEach(function (key) { live[key] = false; });
+  ['enemySpawners','oreVeins','companions','fortressAllies','arcaneTomes','statPickups'].forEach(function (key) { live[key] = []; });
+  live.ambientParticles = ambientParticles.map(function (p) { return Object.assign({}, p); });
+  live._lightGrid = _lightGrid ? new Float32Array(_lightGrid) : null;
+  // Upper-terrain visibility is baked once and immutable. Share that buffer;
+  // its daylight/flicker scalar is isolated by castingStudioScoped above.
+  live.daySpeed = 0;
+  var job = {live:live, mesh:floorMesh, seed:WORLD_SEED, view:cavePreviewLastView,
+    target:target, underground:!!playerUnderground, art:_castingStudioArt, light:_castingStudioLight,
+    mode:_castingStudioMode,yaw:_castingStudioYaw,grip:_castingStudioGrip,style:castingStudioSelectedStyle(),inspectionFullscreen:false,fullscreenPending:false,
+    wasRunning:running, width:canvas.width, height:canvas.height,
+    styleWidth:canvas.style.width, styleHeight:canvas.style.height,
+    raf:0, playing:false, profile:false, stopped:false, resume:null, clockBase:2000000000000,
+    fog:document.createElement('canvas')};
+  job.fog.width = MINIMAP_W; job.fog.height = MINIMAP_H;
+  castingStudioResetCycle(job);
+  // Prepare independent minimap storage once, outside timing and the live map.
+  castingStudioScoped(job, function () { initMinimap(); updateDayNight(0); updateLightGrid(); });
+  _castingStudio = job;
+  running = false; _loopGen++;
+  if (document.pointerLockElement === canvas && document.exitPointerLock) document.exitPointerLock();
+  return job;
+}
+
+function castingStudioAdvance(job, toMs) {
+  if(job.mode==='hand'){
+    // Anatomy proof only: no input acceptance, mana, queued cast, projectile,
+    // effect lifetime or hit simulation runs along this separate timeline.
+    job.time=toMs;job.simTime=toMs;job.live.HAND_RIG_TIME_MS=toMs;
+    return;
+  }
+  while (job.simTime + CASTING_STUDIO_STEP_MS <= toMs + 0.00001) {
+    job.simTime += CASTING_STUDIO_STEP_MS; job.time = job.simTime;
+    castingStudioScoped(job, function () {
+      if (!job.requested && job.time >= CASTING_STUDIO_REQUEST_MS - 0.00001) {
+        castCurrentSpell(); job.requested = true; job.requestAt = job.time;
+        if (!pendingMissileCasts.length && !projectiles.length) throw Error('Practice cast was not accepted.');
+      }
+      updateProjectiles(CASTING_STUDIO_STEP_MS / 1000);
+      // The production queue, serviced by updateProjectiles, owns the real
+      // 120 ms wind-up. Observe its actual spawn, never create a demo missile.
+      if (!job.released && projectiles.length) { job.released=true;job.releaseAt=job.time; }
+      tickEffects(CASTING_STUDIO_STEP_MS / 1000);
+      if (job.hitAt === null && enemies[0].health < 1000) job.hitAt = job.time;
+    });
+  }
+  job.time = toMs;
+}
+
+function castingStudioDraw(job) {
+  var stages = {}, buildMs = 0, oldPt = _pt, oldBuilder = buildPixelArmSprites;
+  var errorsBefore=Object.assign({},_ptErrors);
+  _pt = function (name, fn) {
+    var start = performance.now();
+    try { return oldPt(name, fn); }
+    finally { stages[name] = (stages[name] || 0) + performance.now() - start; }
+  };
+  buildPixelArmSprites = function () {
+    var cold = !_armRightIdle || _armLastRobeId !== (equipment.robes ? equipment.robes.id : '_default');
+    var start = performance.now();
+    try { return oldBuilder(); } finally { if (cold) buildMs += performance.now() - start; }
+  };
+  var start = performance.now();
+  try {
+    castingStudioScoped(job, function () { updateDayNight(0); renderFrame(); });
+  } finally { _pt = oldPt; buildPixelArmSprites = oldBuilder; }
+  Object.keys(_ptErrors).forEach(function(name){
+    if(_ptErrors[name]>(errorsBefore[name]||0))throw Error('Rendering stage failed: '+name+'. Check the browser console.');
+  });
+  var elapsed=performance.now()-start;
+  castingStudioSyncTimeline(job);
+  return {renderMs:elapsed, stages:stages, legacyBuildMs:buildMs};
+}
+
+function castingStudioDescribe(job) {
+  if(job.mode==='hand')return castingStudioArtLabel(job)+' · neutral hand motion study · '+job.light+
+    ' · '+handStudioPhase(job.time)+' · '+Math.round(job.time)+' / '+HAND_STUDIO_CYCLE_MS+' ms'+
+    ' · '+job.style+' style · '+job.grip+' resting template · ¼-speed casting flourish · no equipped item, spell or damage';
+  var phase = !job.requested ? 'Ready' : !job.released ? 'Gather / wind-up' : job.hitAt !== null ?
+    (job.time-job.hitAt < 250 ? 'Actual target hit' : 'Follow-through / recovery') :
+    job.live.projectiles.length ? 'Missile in flight' : 'Missile stopped by existing geometry';
+  return castingStudioArtLabel(job)+' · '+job.light+' · '+phase+
+    ' · stationary practice skeleton '+Math.round(job.target.distance)+' units away'+
+    ' · real damage '+job.live.stats.totalDamageDone.toFixed(1);
+}
+
+function castingStudioArtLabel(job) {
+  return !job.art?'Original baseline':job.mode==='hand'?'Articulated hand':'Rejected flat study';
+}
+
+function castingStudioCycleMs(job) {return job.mode==='hand'?HAND_STUDIO_CYCLE_MS:CASTING_STUDIO_CYCLE_MS;}
+
+function handStudioPhase(time) {
+  return time<500?'Ready':time<1050?'Gather':time<1420?'Release':time<1730?'Follow-through':time<2450?'Recovery':'Ready';
+}
+
+function castingStudioSyncTimeline(job) {
+  var scrub=document.getElementById('castingStudioTime');
+  var value=String(Math.round(Math.max(0,Math.min(castingStudioCycleMs(job),job.time))));
+  if(scrub&&scrub.value!==value)scrub.value=value;
+  if(job.mode==='hand'){
+    var phase=document.getElementById('castingStudioPhase');
+    var phaseValue={Ready:'0',Gather:'780',Release:'1220','Follow-through':'1560',Recovery:'2110'}[handStudioPhase(job.time)];
+    if(phase&&phase.value!==phaseValue)phase.value=phaseValue;
+  }
+}
+
+function pauseCastingStudio() {
+  var job = _castingStudio; if (!job || job.profile) return;
+  if(job.recording)finishCastingStudioRecording(job,true);
+  job.playing = false; if (job.raf) cancelAnimationFrame(job.raf); job.raf = 0;
+  castingStudioWrite(castingStudioDescribe(job)+' · paused');
+}
+
+function playCastingStudio() {
+  var job;
+  try { job = startCastingStudio(); } catch (error) { castingStudioWrite(error.message); return; }
+  if (job.profile || job.playing) return;
+  job.playing = true; job.previousTs = null;
+  function frame(ts) {
+    if (job.stopped || !job.playing) return;
+    try {
+      if (!CAVE_TEST_MODE || floorMesh !== job.mesh || WORLD_SEED !== job.seed) throw Error('World changed.');
+      var dt = (job.previousTs === null ? 0 : Math.min(50, Math.max(0, ts-job.previousTs)))*(job.mode==='hand'?0.25:1);
+      job.previousTs = ts;
+      var cycleMs=castingStudioCycleMs(job);
+      if (job.time + dt >= cycleMs) {
+        if(job.recording){
+          castingStudioAdvance(job,cycleMs);castingStudioDraw(job);
+          if(job.mode!=='hand'&&job.hitAt===null)throw Error('Practice target was not hit; incomplete recording discarded.');
+          job.playing=false;job.raf=0;finishCastingStudioRecording(job,false);return;
+        }
+        castingStudioResetCycle(job);
+      }
+      castingStudioAdvance(job, job.time+dt); castingStudioDraw(job);
+      castingStudioWrite(castingStudioDescribe(job));
+      job.raf = requestAnimationFrame(frame);
+    } catch (error) { stopCastingStudio(error.message); }
+  }
+  job.raf = requestAnimationFrame(frame);
+}
+
+function setCastingStudioArt(enabled) {
+  if(_castingStudio && (_castingStudio.profile||_castingStudio.fullscreenPending))return;
+  if(_castingStudio && _castingStudio.recording)finishCastingStudioRecording(_castingStudio,true);
+  _castingStudioArt = !!enabled;
+  castingStudioUpdateChoices();
+  var job = _castingStudio;
+  if(!job&&_castingStudioMode==='hand'){
+    try{job=startCastingStudio();}catch(error){castingStudioWrite(error.message);return;}
+  }
+  if (!job) {castingStudioWrite(castingStudioArtLabel({art:_castingStudioArt,mode:_castingStudioMode})+' · '+_castingStudioLight+' selected. Press Play.');return;}
+  if(job.mode==='hand')pauseCastingStudio();
+  job.art = _castingStudioArt; castingStudioResetCycle(job); castingStudioDraw(job);
+  castingStudioWrite(castingStudioDescribe(job));
+}
+
+function setCastingStudioLight(light) {
+  if(_castingStudio && _castingStudio.profile)return;
+  if(_castingStudio && _castingStudio.recording)finishCastingStudioRecording(_castingStudio,true);
+  _castingStudioLight = light === 'dusk' ? 'dusk' : 'daylight';
+  castingStudioUpdateChoices();
+  var job = _castingStudio;
+  if (!job) {castingStudioWrite(castingStudioArtLabel({art:_castingStudioArt,mode:_castingStudioMode})+' · '+_castingStudioLight+' selected. Press Play.');return;}
+  job.light = _castingStudioLight; castingStudioResetCycle(job); castingStudioDraw(job);
+  castingStudioWrite(castingStudioDescribe(job));
+}
+
+function castingStudioUpdateChoices() {
+  [['castingStudioOriginal',!_castingStudioArt],['castingStudioRedesigned',_castingStudioArt],
+    ['castingStudioDaylight',_castingStudioLight==='daylight'],['castingStudioDusk',_castingStudioLight==='dusk']].forEach(function(pair){
+    var button=document.getElementById(pair[0]);if(button)button.setAttribute('aria-pressed',String(pair[1]));
+  });
+  var redesigned=document.getElementById('castingStudioRedesigned');
+  if(redesigned)redesigned.textContent=_castingStudioMode==='hand'?'Articulated hand':'Rejected flat study';
+  var play=document.getElementById('castingStudioPlay');if(play)play.textContent=_castingStudioMode==='hand'?'Play casting flourish (¼ speed)':'Play casting sequence';
+  var scrub=document.getElementById('castingStudioTime');if(scrub)scrub.max=String(_castingStudioMode==='hand'?HAND_STUDIO_CYCLE_MS:CASTING_STUDIO_CYCLE_MS);
+  var view=document.getElementById('castingStudioHandView');if(view)view.disabled=_castingStudioMode!=='hand';
+  var phase=document.getElementById('castingStudioPhase');if(phase)phase.disabled=_castingStudioMode!=='hand';
+  var grip=document.getElementById('castingStudioGrip');
+  if(grip){grip.disabled=_castingStudioMode!=='hand';grip.value=_castingStudioGrip;}
+  var style=document.getElementById('castingStudioStyle');
+  if(style){style.disabled=_castingStudioMode!=='hand';style.value=castingStudioSelectedStyle();}
+}
+
+function setCastingStudioMode(mode) {
+  if(_castingStudio&&(_castingStudio.profile||_castingStudio.fullscreenPending||_castingStudio.inspectionFullscreen))return;
+  if(_castingStudio)stopCastingStudio('Study mode changed; previous session restored.');
+  _castingStudioMode=mode==='casting'?'casting':'hand';
+  _castingStudioArt=true;castingStudioUpdateChoices();
+  castingStudioWrite(_castingStudioMode==='hand'?'Hand motion study: neutral articulated anatomy only; no actual casting.':'Rejected flat casting study (archived comparison), with real missile simulation.');
+}
+
+function scrubCastingStudio(timeMs) {
+  var job;
+  try{
+    job=startCastingStudio();if(job.profile||job.fullscreenPending)return;
+    pauseCastingStudio();castingStudioResetCycle(job);
+    castingStudioAdvance(job,Math.max(0,Math.min(castingStudioCycleMs(job),Number(timeMs)||0)));
+    castingStudioDraw(job);castingStudioWrite(castingStudioDescribe(job)+' · paused');
+  }catch(error){if(job)stopCastingStudio(error.message);else castingStudioWrite(error.message);}
+}
+
+function setCastingStudioHandView(yaw) {
+  if(_castingStudio&&(_castingStudio.profile||_castingStudio.fullscreenPending))return;
+  _castingStudioYaw=yaw==='palm'?'palm':Number(yaw)||0;
+  var job=_castingStudio;
+  if(job){
+    if(job.recording)finishCastingStudioRecording(job,true);
+    job.yaw=_castingStudioYaw;job.live.HAND_RIG_VIEW_YAW=job.yaw;castingStudioDraw(job);
+    castingStudioWrite(castingStudioDescribe(job));
+  }
+}
+
+function setCastingStudioHandGrip(grip) {
+  if(_castingStudio&&(_castingStudio.profile||_castingStudio.fullscreenPending))return;
+  _castingStudioGrip=grip==='reach'||grip==='handle'||grip==='cradle'?grip:
+    typeof HAND_RIG_DEFAULT_GRIP==='string'?HAND_RIG_DEFAULT_GRIP:'handle';
+  castingStudioUpdateChoices();
+  if(_castingStudioMode!=='hand')return;
+  var job;
+  try{
+    job=startCastingStudio();pauseCastingStudio();job.grip=_castingStudioGrip;
+    castingStudioResetCycle(job);castingStudioDraw(job);
+    castingStudioWrite(castingStudioDescribe(job)+' · paused at rest');
+  }catch(error){if(job)stopCastingStudio(error.message);else castingStudioWrite(error.message);}
+}
+
+function setCastingStudioStyle(styleId) {
+  if(_castingStudio&&(_castingStudio.profile||_castingStudio.fullscreenPending)){
+    castingStudioUpdateChoices();return;
+  }
+  if(typeof setSelectedCastingStyle!=='function'){
+    castingStudioWrite('Casting Style preferences are unavailable; rebuild and reload the preview.');return;
+  }
+  // This is the user's deliberate preference change, not temporary preview
+  // state: call the registry outside the sandbox, retaining its browser save.
+  var selected;
+  _castingStudioSettingStyle=true;
+  try{selected=setSelectedCastingStyle(styleId);}finally{_castingStudioSettingStyle=false;}
+  castingStudioApplyStyle(selected,true);
+}
+
+function castingStudioApplyStyle(selected,openPreview) {
+  castingStudioUpdateChoices();
+  if(_castingStudioMode!=='hand')return;
+  if(_castingStudio&&(_castingStudio.profile||_castingStudio.fullscreenPending)){
+    stopCastingStudio('Casting Style changed; studio stopped.');return;
+  }
+  if(!_castingStudio&&!openPreview)return;
+  var job;
+  try{
+    job=startCastingStudio();pauseCastingStudio();job.style=selected;
+    job.live.settings.castingStyle=selected;
+    castingStudioResetCycle(job);castingStudioDraw(job);
+    castingStudioWrite(castingStudioDescribe(job)+' · preference selected; paused at rest');
+  }catch(error){if(job)stopCastingStudio(error.message);else castingStudioWrite(error.message);}
+}
+
+function stopCastingStudio(reason) {
+  var job = _castingStudio; if (!job) return;
+  if(job.recording)finishCastingStudioRecording(job,true);
+  job.stopped = true; job.playing = false; job.cancelReason = reason || 'Studio closed; gameplay restored.';
+  if (job.raf) cancelAnimationFrame(job.raf); job.raf = 0;
+  if (job.resume) { var resume=job.resume; job.resume=null; resume(null); }
+  if (job.profile) return; // async profile finally owns fullscreen/restoration
+  if(job.fullscreenPending)return; // fullscreen request owns its final cleanup
+  if(job.inspectionFullscreen&&caveProfileFullscreenElement()===canvas){
+    closeCastingStudioFullscreen(job);return;
+  }
+  castingStudioRestore(job);
+  castingStudioWrite(job.cancelReason);
+}
+
+function castingStudioYieldToControls() {
+  var job=_castingStudio;if(!job)return;
+  if(job.profile||job.inspectionFullscreen||job.fullscreenPending){
+    // Give ordinary controls back their pre-studio simulation synchronously;
+    // their own handlers then remain authoritative (not a later async finally).
+    job.externalAction=true;running=job.wasRunning;lastUpdate=0;_loopGen++;
+    if(running)_scheduleLoop();
+  }
+  stopCastingStudio('Game control changed; studio stopped.');
+}
+
+// Only real form controls can hand ownership back to the game. A canvas focus
+// click, screenshot-tool focus, document background or label text is not a
+// request to end the study. Resolve labels to their associated actual control.
+function castingStudioControlTarget(target) {
+  var node=target,steps=0;
+  while(node&&steps++<32){
+    if(node===canvas)return null;
+    var tag=typeof node.tagName==='string'?node.tagName.toUpperCase():'';
+    if(tag==='BUTTON'||tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA')return node;
+    if(tag==='LABEL'){
+      if(node.control)return node.control;
+      if(node.htmlFor){var linked=document.getElementById(node.htmlFor);if(linked)return linked;}
+    }
+    node=node.parentElement||node.parentNode;
+  }
+  return null;
+}
+
+function castingStudioControlEvent(event) {
+  if(!_castingStudio||!event.target)return;
+  var panel=document.getElementById('castingStudioPanel');
+  if(panel&&panel.contains(event.target))return;
+  var control=castingStudioControlTarget(event.target);
+  if(!control||(panel&&panel.contains(control)))return;
+  if(_castingStudio.profile&&(control.id||'').indexOf('ctProfile')===0){
+    event.preventDefault();event.stopImmediatePropagation();
+    stopCastingStudio('Casting profile cancelled. Start the other profile after it closes.');return;
+  }
+  castingStudioYieldToControls();
+}
+
+function castingStudioCanvasInput(event) {
+  var job=_castingStudio;if(!job)return false;
+  var type=event.type||'',onCanvas=event.target===canvas;
+  var down=type==='pointerdown'||type==='mousedown'||type==='touchstart';
+  var up=type==='pointerup'||type==='pointercancel'||type==='mouseup'||type==='touchend'||type==='touchcancel';
+  var move=type==='pointermove'||type==='mousemove'||type==='touchmove';
+  if(!onCanvas&&!((up||move)&&job.canvasPointerActive))return false;
+  if(down)job.canvasPointerActive=true;
+  if(up)job.canvasPointerActive=false;
+  // Run in capture phase, before the game's pointer-lock, cast, wheel or
+  // fullscreen handlers. Pointer releases outside the canvas are consumed too.
+  if(event.cancelable!==false)event.preventDefault();
+  event.stopImmediatePropagation();
+  return true;
+}
+
+async function closeCastingStudioFullscreen(job) {
+  if(job.closingFullscreen)return;
+  job.closingFullscreen=true;
+  try{
+    if(caveProfileFullscreenElement()===canvas){
+      var exit=document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen||document.msExitFullscreen;
+      if(exit)await exit.call(document);
+    }
+  }catch(error){job.cancelReason+=' Fullscreen exit: '+(error.message||String(error));}
+  finally{castingStudioRestore(job);castingStudioWrite(job.cancelReason||'Fullscreen inspection ended.');}
+}
+
+async function inspectCastingStudioFullscreen() {
+  var job;
+  try{
+    job=startCastingStudio();if(job.profile||job.fullscreenPending)return;
+    if(caveProfileFullscreenElement()===canvas)return;
+    var resumePlaying=job.playing;
+    pauseCastingStudio();job.fullscreenPending=true;job.inspectionFullscreen=true;
+    var request=canvas.requestFullscreen||canvas.webkitRequestFullscreen||canvas.mozRequestFullScreen||canvas.msRequestFullscreen;
+    if(!request)throw Error('Native fullscreen is unavailable.');
+    await request.call(canvas);
+    await castingStudioNextFrame(job);await castingStudioNextFrame(job);
+    if(job.stopped)throw Error(job.cancelReason);
+    if(caveProfileFullscreenElement()!==canvas)throw Error('Native fullscreen was not entered.');
+    job.fullscreenPending=false;castingStudioDraw(job);if(resumePlaying)playCastingStudio();
+    castingStudioWrite('Fullscreen inspection · '+(job.mode==='hand'?'¼-speed anatomy study':'casting sequence')+' · Space play/pause; Escape restores the game.');
+  }catch(error){
+    if(job){job.fullscreenPending=false;job.stopped=true;job.cancelReason=error.message||String(error);await closeCastingStudioFullscreen(job);}
+    else castingStudioWrite(error.message||String(error));
+  }
+}
+
+function castingStudioFullscreenChanged() {
+  var job=_castingStudio;
+  if(job&&job.inspectionFullscreen&&!job.fullscreenPending&&!job.profile&&!job.closingFullscreen&&caveProfileFullscreenElement()!==canvas)
+    stopCastingStudio('Fullscreen inspection ended; gameplay restored.');
+}
+
+function castingStudioRestore(job) {
+  if (_castingStudio !== job) return;
+  _castingStudio = null;
+  canvas.width=job.width; canvas.height=job.height;
+  canvas.style.width=job.styleWidth; canvas.style.height=job.styleHeight;
+  if (!job.externalAction && floorMesh===job.mesh && WORLD_SEED===job.seed) {
+    running=job.wasRunning; lastUpdate=0; _loopGen++;
+    if (running) _scheduleLoop();
+    else if (CAVE_TEST_MODE && caveVisibilityFixturesEnabled()) drawCaveVisibilityFixtures();
+    else renderFrame();
+  }
+}
+
+function castingStudioNextFrame(job) {
+  return new Promise(function (resolve) {
+    if (job.stopped) { resolve(null); return; }
+    job.resume=resolve;
+    job.raf=requestAnimationFrame(function (ts) { job.raf=0; job.resume=null; resolve(ts); });
+  });
+}
+
+function castingStudioArtworkStats() {
+  return {
+    hands:typeof getCastingArtworkStats==='function'?getCastingArtworkStats():{builds:0,buildMs:0,bytes:0},
+    missile:typeof getMagicMissileArtworkStats==='function'?getMagicMissileArtworkStats():{builds:0,buildMs:0,bytes:0},
+    handRig:typeof getHandRigStats==='function'?getHandRigStats():{vertices:0,triangles:0,visibleFaces:0,buildMs:0,builds:0,lastRenderMs:0,topologyBytes:0}
+  };
+}
+
+function castingStudioRevokeVideo() {
+  if(_castingStudioVideoURL){URL.revokeObjectURL(_castingStudioVideoURL);_castingStudioVideoURL=null;}
+  var links=document.getElementById('castingStudioVideo');
+  if(links)while(links.firstChild)links.removeChild(links.firstChild);
+}
+
+function finishCastingStudioRecording(job,discard) {
+  var recording=job.recording;if(!recording)return;
+  job.recording=null;recording.discard=!!discard;
+  try{if(recording.recorder.state!=='inactive')recording.recorder.stop();}
+  catch(error){recording.discard=true;}
+  finally{recording.stream.getTracks().forEach(function(track){try{track.stop();}catch(error){}});}
+}
+
+function recordCastingStudioCycle() {
+  if(_castingStudio && (_castingStudio.profile||_castingStudio.recording))return;
+  if(typeof MediaRecorder==='undefined'||typeof MediaRecorder.isTypeSupported!=='function'||typeof canvas.captureStream!=='function'){
+    castingStudioWrite('This browser cannot record Canvas video. The live comparison still works.');return;
+  }
+  var types=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+  var mime=types.filter(function(type){return MediaRecorder.isTypeSupported(type);})[0];
+  if(!mime){castingStudioWrite('WebM recording is not supported here. Use the live comparison; no substitute recording was generated.');return;}
+  var job,stream;
+  try{
+    job=startCastingStudio();pauseCastingStudio();castingStudioResetCycle(job);castingStudioDraw(job);
+    stream=canvas.captureStream(30);
+    var recorder=new MediaRecorder(stream,{mimeType:mime});
+    var recording={recorder:recorder,stream:stream,chunks:[],discard:false,
+      filename:(job.mode==='hand'?'hand-motion-'+(job.art?'articulated':'original')+'-'+job.style+'-'+job.grip:'casting-'+(job.art?'rejected-flat':'original'))+
+        '-'+job.light+'-'+canvas.width+'x'+canvas.height+'.webm',visualStudy:job.mode==='hand'};
+    job.recording=recording;
+    recorder.ondataavailable=function(event){if(event.data&&event.data.size)recording.chunks.push(event.data);};
+    recorder.onerror=function(){
+      recording.discard=true;
+      if(job.recording===recording)finishCastingStudioRecording(job,true);
+      pauseCastingStudio();castingStudioWrite('Recording failed; stream stopped. Use the live comparison.');
+    };
+    recorder.onstop=function(){
+      if(recording.discard||!recording.chunks.length)return;
+      castingStudioRevokeVideo();
+      _castingStudioVideoURL=URL.createObjectURL(new Blob(recording.chunks,{type:mime}));
+      var links=document.getElementById('castingStudioVideo');
+      if(links){
+        var link=document.createElement('a');link.href=_castingStudioVideoURL;link.download=recording.filename;
+        link.textContent='Download '+recording.filename;links.appendChild(link);
+      }
+      castingStudioWrite('Recorded one '+(recording.visualStudy?'¼-speed anatomy study (no casting or hit)':'actual casting cycle')+': '+recording.filename+
+        '. Capture requests 30 fps at the current canvas resolution; no audio. This is not a benchmark FPS measurement.');
+    };
+    recorder.start();playCastingStudio();
+    castingStudioWrite('Recording one '+(job.mode==='hand'?'¼-speed anatomy study':'actual casting cycle')+' at requested 30 fps, native canvas resolution, no audio…');
+  }catch(error){
+    if(job&&job.recording)finishCastingStudioRecording(job,true);
+    else if(stream)stream.getTracks().forEach(function(track){track.stop();});
+    castingStudioWrite('Recording unavailable: '+(error.message||String(error)));
+  }
+}
+
+async function profileCastingStudio(mode) {
+  var job;
+  try { job=startCastingStudio(); } catch (error) { castingStudioWrite(error.message); return; }
+  if (job.profile||job.fullscreenPending) return;
+  if(job.inspectionFullscreen){castingStudioWrite('Exit fullscreen inspection before starting a profile.');return;}
+  pauseCastingStudio(); job.profile=true;
+  var result={status:'running',mode:mode,study:job.mode,castingStyle:job.mode==='hand'?job.style:null,restingGrip:job.mode==='hand'?job.grip:null,light:job.light,seed:job.seed,view:job.view,
+    target:job.mode==='hand'?'One neutral articulated right hand; anatomy proof only, no actual cast or projectile':'Stationary, temporary skeleton; actual cast, projectile, hit and effect logic',
+    targetDistance:job.target?job.target.distance:null,versions:[],propCachePilot:typeof getFloorArtworkCacheStats==='function'?
+      getFloorArtworkCacheStats().enabled:false};
+  try {
+    if (mode==='fullscreen') {
+      var request=canvas.requestFullscreen||canvas.webkitRequestFullscreen||canvas.mozRequestFullScreen||canvas.msRequestFullscreen;
+      if (!request) throw Error('Native fullscreen is unavailable.');
+      await request.call(canvas);
+      await castingStudioNextFrame(job); await castingStudioNextFrame(job);
+      if (caveProfileFullscreenElement()!==canvas) throw Error('Native fullscreen was not entered.');
+    }
+    result.width=canvas.width;result.height=canvas.height;result.nativeFullscreen=caveProfileFullscreenElement()===canvas;
+    result.devicePixelRatio=window.devicePixelRatio||1;
+    for (var version=0;version<2;version++) {
+      job.art=version===1; castingStudioResetCycle(job);
+      // Force a genuine first use; static generation is reported separately
+      // from the following steady, identical-time full-motion cycle.
+      job.live._armRightIdle=job.live._armRightCast=job.live._armLeftIdle=job.live._armLeftCast=null;
+      job.live._armLastRobeId=null;
+      if (typeof clearCastingArtworkCache==='function') clearCastingArtworkCache();
+      if (typeof clearMagicMissileArtworkCache==='function') clearMagicMissileArtworkCache();
+      if(job.mode==='hand'&&typeof clearHandRigCache==='function')clearHandRigCache();
+      var before=castingStudioArtworkStats(), coldLegacy=0, firstFrame=null, renders=[], intervals=[], stages={},rigTimes=[];
+      var coldBuildFrames=[], hits=[];
+      for (var cycle=0;cycle<2;cycle++) {
+        castingStudioResetCycle(job);
+        var previous=null;
+        for (var frame=0;frame<144;frame++) {
+          var ts=await castingStudioNextFrame(job);
+          if (job.stopped) throw Error(job.cancelReason);
+          if (!CAVE_TEST_MODE || floorMesh!==job.mesh || WORLD_SEED!==job.seed) throw Error('World changed during profile.');
+          if (canvas.width!==result.width || canvas.height!==result.height) throw Error('Canvas dimensions changed during profile.');
+          if (mode==='fullscreen' && caveProfileFullscreenElement()!==canvas) throw Error('Fullscreen ended during profile.');
+          castingStudioAdvance(job,frame*castingStudioCycleMs(job)/144);
+          var cacheBefore=castingStudioArtworkStats(), sample=castingStudioDraw(job), cacheAfter=castingStudioArtworkStats();
+          if (firstFrame===null) firstFrame=sample.renderMs;
+          coldLegacy+=sample.legacyBuildMs;
+          if (cycle===0 && (sample.legacyBuildMs>0 || cacheAfter.hands.builds>cacheBefore.hands.builds || cacheAfter.missile.builds>cacheBefore.missile.builds||cacheAfter.handRig.builds>cacheBefore.handRig.builds))
+            coldBuildFrames.push({timeMs:job.time,renderCommandsMs:sample.renderMs});
+          if (cycle===1) {
+            renders.push(sample.renderMs); if (previous!==null) intervals.push(ts-previous);
+            if(job.mode==='hand'&&job.art)rigTimes.push(cacheAfter.handRig.lastRenderMs);
+            Object.keys(sample.stages).forEach(function(name){(stages[name]||(stages[name]=[])).push(sample.stages[name]);});
+          }
+          previous=ts;
+          if (frame%48===0) castingStudioWrite(castingStudioArtLabel(job)+' · '+job.light+' · '+
+            (cycle===0?'cold use / warmup':'steady motion sampling')+' · '+frame+'/144 frames');
+        }
+        if(job.mode!=='hand'){
+          if (job.hitAt===null) throw Error('Practice missile did not hit the target in the actual simulation. Choose Mouth and retry.');
+          hits.push({requestMs:job.requestAt,releaseMs:job.releaseAt,hitMs:job.hitAt,damage:job.live.stats.totalDamageDone});
+        }
+      }
+      var after=castingStudioArtworkStats();
+      result.versions.push({art:castingStudioArtLabel(job),firstFrameRenderCommandsMs:firstFrame,
+        firstUseArtworkGenerationMs:{legacyHands:coldLegacy,hands:after.hands.buildMs-before.hands.buildMs,
+          missile:after.missile.buildMs-before.missile.buildMs,handRig:after.handRig.buildMs-before.handRig.buildMs},coldBuildFrames:coldBuildFrames,
+        handRigColdReset:job.mode==='hand'&&typeof clearHandRigCache==='function',handRig:after.handRig,handRigRenderCommands:caveProfileSummary(rigTimes),
+        retainedArtwork:after,steadyRenderCommands:caveProfileSummary(renders),animationFrameIntervals:caveProfileSummary(intervals),
+        inclusiveStages:Object.keys(stages).map(function(name){return Object.assign({name:name},caveProfileSummary(stages[name]));})
+          .sort(function(a,b){return b.medianMs-a.medianMs;}),actualHits:hits});
+    }
+    result.status='complete';
+    result.notes=[job.mode==='hand'?'Same game scene, pose and light: existing original hands baseline versus one articulated right-hand anatomy study. No combat is simulated.':'Both versions use the same current terrain, pose, lighting, tier-1 spell and scripted 120 Hz simulation steps.',
+      job.mode==='hand'?'Time zero is the outward-facing resting grip. Play previews the selected personal Casting Style at quarter speed; grip templates remain independent and equip no item.':'600 ms ready, accepted cast and production 120 ms wind-up, then real release/flight/hit/recovery; no impact is fabricated.',
+      'Each version uses one 144-frame cold/warmup cycle followed by one 144-frame steady cycle.',
+      'Artwork generation and the first full draw are separate from steady render-command timing.',
+      'Command timing may exclude deferred GPU work. Animation-frame intervals are real browser cadence.',
+      'No pixel readback or quality reduction; existing prop-cache choice is unchanged.',
+      'Fixture equipment keeps the current appearance but disables relic side effects; actual equipment, mana, stats and arrays are restored.'];
+  } catch (error) { result.status=job.stopped?'cancelled':'failed';result.reason=error.message||String(error); }
+  finally {
+    if (job.raf) cancelAnimationFrame(job.raf);job.raf=0;job.resume=null;
+    if (mode==='fullscreen' && caveProfileFullscreenElement()===canvas) {
+      var exit=document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen||document.msExitFullscreen;
+      try { if (exit) await exit.call(document); } catch(error) { result.fullscreenExitError=error.message||String(error); }
+    }
+    job.profile=false;castingStudioRestore(job);castingStudioWrite(result);
+  }
+}
+
+(function () {
+  var host=document.getElementById('caveTestOptions');
+  if (!host || !host.appendChild) return;
+  var panel=document.createElement('details');panel.id='castingStudioPanel';
+  panel.style.cssText='margin-top:8px;padding:6px;border:1px solid #536777;border-radius:4px;background:#17222b';
+  var summary=document.createElement('summary');summary.textContent='Casting studio';panel.appendChild(summary);
+  var note=document.createElement('p');note.textContent='Handle grip is the default upright resting pose; Play previews your personal Casting Style at ¼ speed. All styles are available; your selection is remembered in this browser when storage is available. Resting grip templates stay independent and show shape only: no item is equipped, no spell is cast. The rejected flat study is archived in the mode selector.';
+  note.style.cssText='margin:6px 0;max-width:720px';panel.appendChild(note);
+  function select(id,label,options,fn){
+    var wrap=document.createElement('label');wrap.style.margin='2px 8px 2px 0';wrap.textContent=label+' ';
+    var select=document.createElement('select');select.id=id;select.setAttribute('aria-label',label);
+    options.forEach(function(option){var node=document.createElement('option');node.value=option[0];node.textContent=option[1];select.appendChild(node);});
+    select.addEventListener('change',function(){fn(select.value);});wrap.appendChild(select);panel.appendChild(wrap);return select;
+  }
+  select('castingStudioMode','Study mode',[['hand','Hand motion study'],['casting','Rejected flat casting study']],setCastingStudioMode);
+  var styleOptions=typeof getCastingStyleOptions==='function'?getCastingStyleOptions():[{id:'arcane',label:'Arcane (default)'}];
+  select('castingStudioStyle','Casting Style',styleOptions.map(function(style){return[style.id,style.label];}),setCastingStudioStyle);
+  select('castingStudioGrip','Resting pose',[['reach','Reach'],['handle','Handle grip'],['cradle','Cradle']],setCastingStudioHandGrip);
+  select('castingStudioHandView','Hand inspection view',[['0','Player view'],['palm','Palm study'],['-0.8','Left side'],['0.8','Right side'],[String(Math.PI),'Back']],setCastingStudioHandView);
+  select('castingStudioPhase','Hand pose',[['0','Ready'],['780','Gather'],['1220','Release'],['1560','Follow-through'],['2110','Recovery']],scrubCastingStudio);
+  var scrubLabel=document.createElement('label');scrubLabel.textContent='Pose time ';scrubLabel.style.marginRight='8px';
+  var scrub=document.createElement('input');scrub.type='range';scrub.id='castingStudioTime';scrub.min='0';scrub.max=String(HAND_STUDIO_CYCLE_MS);scrub.step='10';scrub.value='0';
+  scrub.setAttribute('aria-label','Hand pose time');scrub.addEventListener('input',function(){scrubCastingStudio(scrub.value);});
+  scrubLabel.appendChild(scrub);panel.appendChild(scrubLabel);panel.appendChild(document.createElement('br'));
+  function button(id,label,fn) { var b=document.createElement('button');b.id=id;b.type='button';b.className='btn btn-small';b.textContent=label;
+    b.style.margin='2px';b.addEventListener('click',fn);panel.appendChild(b);return b; }
+  button('castingStudioOriginal','Original baseline',function(){setCastingStudioArt(false);});
+  button('castingStudioRedesigned','Articulated hand',function(){setCastingStudioArt(true);});
+  button('castingStudioDaylight','Daylight',function(){setCastingStudioLight('daylight');});
+  button('castingStudioDusk','Dusk',function(){setCastingStudioLight('dusk');});
+  button('castingStudioPlay','Play comparison sequence',playCastingStudio);
+  button('castingStudioPause','Pause',pauseCastingStudio);
+  button('castingStudioInspectFullscreen','Fullscreen inspection',inspectCastingStudioFullscreen);
+  button('castingStudioRecord','Record one cycle (30 fps capture)',recordCastingStudioCycle);
+  button('castingStudioProfilePreview','Profile studio preview',function(){profileCastingStudio('preview');});
+  button('castingStudioProfileFullscreen','Profile studio fullscreen',function(){profileCastingStudio('fullscreen');});
+  button('castingStudioCancel','Cancel / restore game',function(){stopCastingStudio();});
+  var output=document.createElement('pre');output.id='castingStudioResult';output.setAttribute('role','log');output.setAttribute('aria-label','Casting studio result');
+  output.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;max-height:300px;overflow:auto;font-size:11px;margin:6px 0';
+  output.textContent='Choose a look and light, then play or profile. Closed by default; no simulation changes until you start.';
+  panel.appendChild(output);host.appendChild(panel);
+  var video=document.createElement('div');video.id='castingStudioVideo';panel.appendChild(video);
+  castingStudioUpdateChoices();
+  if(typeof onCastingStyleChange==='function'){
+    _castingStudioStyleUnsubscribe=onCastingStyleChange(function(selected){
+      if(!_castingStudioSettingStyle)castingStudioApplyStyle(selected,false);
+    });
+  }
+  panel.addEventListener('toggle',function(){if(!panel.open)stopCastingStudio();});
+  ['pointerdown','pointerup','pointercancel','pointermove','mousedown','mouseup','mousemove',
+    'click','dblclick','contextmenu','wheel','touchstart','touchmove','touchend','touchcancel'].forEach(function(type){
+    document.addEventListener(type,castingStudioCanvasInput,{capture:true,passive:false});
+  });
+  // Cancel before an actual game control mutates/regenerates the world.
+  document.addEventListener('click',castingStudioControlEvent,true);
+  document.addEventListener('change',castingStudioControlEvent,true);
+  document.addEventListener('keydown',function(event){
+    if(!_castingStudio)return;
+    if(event.key==='Escape'){stopCastingStudio('Cancelled with Escape.');return;}
+    if(event.key==='f'||event.key==='F'){
+      event.preventDefault();event.stopImmediatePropagation();return;
+    }
+    if(_castingStudio.inspectionFullscreen&&(event.key===' '||event.code==='Space')){
+      event.preventDefault();event.stopImmediatePropagation();
+      if(_castingStudio.playing)pauseCastingStudio();else playCastingStudio();
+    }
+  },true);
+  ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange'].forEach(function(event){
+    document.addEventListener(event,castingStudioFullscreenChanged);
+  });
+  document.addEventListener('visibilitychange',function(){if(document.hidden)stopCastingStudio('Page hidden; studio stopped.');});
+  window.addEventListener('pagehide',function(event){
+    stopCastingStudio('Page closed; studio stopped.');castingStudioRevokeVideo();
+    // Back/forward cache restores this same UI without running setup again.
+    // Keep its one listener alive while still releasing preview/capture state.
+    if(!event.persisted&&_castingStudioStyleUnsubscribe){_castingStudioStyleUnsubscribe();_castingStudioStyleUnsubscribe=null;}
+  });
 }());
 function renderFrame() {
   if (overviewActive) { drawDebugOverview(); return; }
@@ -22748,6 +25792,10 @@ function loop(ts, gen) {
 
   // Input runs at render rate for responsiveness
   _pt('handleInput', function(){ handleInput(FIXED_DT); });
+  // A pending hand gesture must not fire a delayed shot after closing a menu.
+  if (menuOpen || shopOpen || inventoryOpen || forgeOpen || settingsOpen || gameOverState) {
+    if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
+  }
 
   // Physics runs at fixed timestep for determinism
   if (!menuOpen) {
@@ -22825,6 +25873,7 @@ function loop(ts, gen) {
 // =============================================
 
 function startGame() {
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(false);
   // If Cave Test is selected in the terrain dropdown, delegate to the cave test launcher
   var _tSel = document.getElementById('terrainSelect');
   if (_tSel && _tSel.value === 'cavetest') {
@@ -22887,6 +25936,7 @@ function startGame() {
 }
 
 function stopGame() {
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
   running = false;
   if (polling) { try { clearInterval(polling); } catch (_) {} polling = null; }
   stopGamepadPolling();
@@ -22937,16 +25987,32 @@ function stopLogPoller() {
   if (__gamesLogPoll) { try { clearInterval(__gamesLogPoll); } catch (_) {} __gamesLogPoll = null; }
 }
 
-
 // =============================================
 // SECTION 19: EVENT LISTENERS & INIT
 // =============================================
 
 document.getElementById('btnStart').addEventListener('click', startGame);
 document.getElementById('btnStop').addEventListener('click', stopGame);
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden && typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
+});
 document.getElementById('chkImuDebug').addEventListener('change', function() { DEBUG_IMU = this.checked; });
 document.getElementById('btnFwDbgOn').addEventListener('click', fwDebugOn);
 document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
+
+// Personal animation preference, available without a world, item or unlock.
+// The neutral rig remains a studio study until its appearance is approved.
+(function() {
+  var select=document.getElementById('playerCastingStyle');
+  if(!select||typeof getCastingStyleOptions!=='function')return;
+  getCastingStyleOptions().forEach(function(style){
+    var option=document.createElement('option');option.value=style.id;
+    option.textContent=style.label;select.appendChild(option);
+  });
+  select.value=getSelectedCastingStyle();
+  select.addEventListener('change',function(){setSelectedCastingStyle(select.value);});
+  onCastingStyleChange(function(id){select.value=id;});
+})();
 
 (function() {
   var sel = document.getElementById('terrainSelect');
@@ -23018,6 +26084,7 @@ function caveVisibilityFixturesEnabled() {
 }
 function drawCaveVisibilityFixtures() {
   if (!caveVisibilityFixturesEnabled()) { draw(); return; }
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
   // Freeze simulation and invalidate callbacks that were already queued.
   // The fixture is only a draw-time substitution, never chunk/gameplay data.
   running = false; _loopGen++;
@@ -23060,6 +26127,7 @@ function setCavePreviewNoon(enabled) {
 }
 function previewCaveView(view) {
   if (!CAVE_TEST_MODE) return;
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
   cavePreviewLastView = view;
   var net = endlessCaveNetworks['0,0'];
   if (!net || !net.entrances.length || !net.chambers.length) return;
@@ -23232,6 +26300,12 @@ document.getElementById('chkPerfHud').addEventListener('change', function() {
   var p = document.getElementById('perfHudPanel');
   if (p) p.style.display = this.checked ? 'block' : 'none';
 });
+var _artworkCacheCheckbox = document.getElementById('chkArtworkCache');
+if (_artworkCacheCheckbox) _artworkCacheCheckbox.addEventListener('change', function() {
+  setFloorArtworkCacheEnabled(this.checked);
+  if (typeof cancelCaveBrowserProfile === 'function') cancelCaveBrowserProfile();
+  if (caveVisibilityFixturesEnabled()) drawCaveVisibilityFixtures();
+});
 document.getElementById('chkCaveDbg').addEventListener('change', function() {
   DEBUG_CAVE = this.checked;
   var panel = document.getElementById('caveDebugPanel');
@@ -23372,6 +26446,7 @@ document.getElementById('chkPolyTypes').addEventListener('change', function() { 
           pendingSettings.resolution  = settings.resolution;
           pendingSettings.showFPS     = settings.showFPS;
           pendingSettings.dayNight    = settings.dayNight;
+          pendingSettings.castingStyle = getSelectedCastingStyle();
           _pendingQualityPreset       = qualityPreset;
           _settingsDirty = false;
           if (document.pointerLockElement === canvas) document.exitPointerLock();

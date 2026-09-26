@@ -2,6 +2,7 @@
 // carry their flame with them. These checks require no browser/audit lab.
 (function () {
   var G = (0, eval)('this');
+  (0, eval)(slurp('assets/games/src/01-materials.js'));
   (0, eval)(slurp('assets/games/src/05-endless-world.js'));
   (0, eval)(slurp('assets/games/src/07-decorations-lighting.js'));
   var n = 0;
@@ -56,6 +57,102 @@
     if (light.x !== 72 + outward[i][0] || light.y !== 108 + outward[i][1] || light.z !== at.flameZ) aligned = false;
   }
   check('every cardinal light sits outside wall at its actual flame', aligned);
+
+  check('legacy generated names normalize to visible canonical props',
+    G.canonicalWallDecorationType('stalactite') === 'stalactite_tip' &&
+    G.canonicalWallDecorationType('crack') === 'wall_crack' &&
+    G.canonicalWallDecorationType('moss') === 'moss_drip' &&
+    G.canonicalWallDecorationType('frost_crack') === 'frost_crystal' &&
+    G.canonicalWallDecorationType('vine') === 'vine_growth');
+  var endlessSource = slurp('assets/games/src/05-endless-world.js');
+  check('endless generation pools emit canonical wall prop names',
+    ["'stalactite'", "'crack'", "'moss'", "'frost_crack'", "'vine'"].every(function(name) {
+      return endlessSource.indexOf(name) < 0;
+    }) && endlessSource.indexOf("'wall_crack'") >= 0);
+  var legacyCopy = G.chunkWallDecorationInWindow(
+    {worldX:72,worldY:1080,side:'north',type:'crack',gridX:3,gridY:5}, 1, 2);
+  check('window assembly repairs cached legacy prop names', legacyCopy.type === 'wall_crack');
+
+  var calls = [];
+  function record(name, args) {
+    calls.push([name].concat(Array.prototype.slice.call(args).map(function(value) {
+      return typeof value === 'number' ? Math.round(value * 1000000) / 1000000 : value;
+    })));
+  }
+  G.ctx = new Proxy({globalAlpha:1}, {
+    set:function(target, key, value) { target[key] = value; calls.push(['set', key, value]); return true; },
+    get:function(target, key) {
+      if (key in target) return target[key];
+      return function() { record(key, arguments); };
+    }
+  });
+  G.rgbQ = function(r,g,b) { return 'rgb(' + r + ',' + g + ',' + b + ')'; };
+  function render(type, gridX, gridY) {
+    calls = [];
+    var sample = {type:type, side:'north', gridX:gridX || 3, gridY:gridY || 4};
+    G.drawWallAlignedDecoration(type, 120, 80, 32, 36, 'north', 0.9, 1, sample, 2000000000000);
+    return JSON.parse(JSON.stringify(calls));
+  }
+  function hash(value) {
+    var text = JSON.stringify(value), h = 2166136261;
+    for (var hi = 0; hi < text.length; hi++) h = Math.imul(h ^ text.charCodeAt(hi), 16777619);
+    return h >>> 0;
+  }
+  var allTypes = ['torch','sconce','shield','banner','wall_crack','fungi','moss_drip',
+    'stalactite_tip','icicle','frost_crystal','vine_growth','carved_rune'];
+  var rendered = {};
+  allTypes.forEach(function(type) { rendered[type] = render(type); });
+  check('every generated wall prop has visible drawing commands', allTypes.every(function(type) {
+    return rendered[type].some(function(call) { return call[0] === 'fill' || call[0] === 'stroke' || call[0] === 'fillRect'; });
+  }));
+  check('torch includes mount shaft bands and layered flame',
+    rendered.torch.filter(function(call){ return call[0] === 'fillRect'; }).length >= 4 &&
+    rendered.torch.filter(function(call){ return call[0] === 'ellipse'; }).length >= 3);
+  check('sconce includes backplate bracket bowl and layered flame',
+    rendered.sconce.filter(function(call){ return call[0] === 'ellipse'; }).length >= 5 &&
+    rendered.sconce.some(function(call){ return call[0] === 'lineTo'; }));
+  check('shield has a pointed silhouette rim emblem and boss',
+    rendered.shield.filter(function(call){ return call[0] === 'quadraticCurveTo'; }).length >= 6 &&
+    rendered.shield.some(function(call){ return call[0] === 'stroke'; }) &&
+    rendered.shield.some(function(call){ return call[0] === 'arc'; }));
+  check('banner has a crossbar swallowtail folds and heraldry',
+    rendered.banner.filter(function(call){ return call[0] === 'fillRect'; }).length >= 2 &&
+    rendered.banner.filter(function(call){ return call[0] === 'lineTo'; }).length >= 8);
+  check('wall crack is a branched non-glowing stroke',
+    rendered.wall_crack.filter(function(call){ return call[0] === 'moveTo'; }).length >= 4 &&
+    rendered.wall_crack.filter(function(call){ return call[0] === 'stroke'; }).length === 1 &&
+    rendered.wall_crack.every(function(call){ return call[0] !== 'ellipse' && call[0] !== 'arc'; }));
+  check('fixed prop inputs produce deterministic Canvas commands',
+    hash(render('torch', 3, 4)) === hash(render('torch', 3, 4)) &&
+    hash(render('banner', 3, 4)) === hash(render('banner', 3, 4)));
+  check('stable placement hash gives adjacent props visual variety',
+    G.getWallDecorationVariant({side:'north',gridX:3,gridY:4}) !==
+    G.getWallDecorationVariant({side:'north',gridX:4,gridY:4}));
+  check('wall prop draw recipes remain deliberately bounded', allTypes.every(function(type) {
+    return rendered[type].length < 180;
+  }));
+  check('constructed prop paths stay inside their local wall footprint',
+    ['torch','sconce','shield','banner','wall_crack'].every(function(type) {
+      return rendered[type].every(function(call) {
+        if (call[0] === 'moveTo' || call[0] === 'lineTo')
+          return Math.abs(call[1] - 120) <= 48 && Math.abs(call[2] - 80) <= 48;
+        if (call[0] === 'quadraticCurveTo')
+          return Math.abs(call[1] - 120) <= 48 && Math.abs(call[2] - 80) <= 48 &&
+                 Math.abs(call[3] - 120) <= 48 && Math.abs(call[4] - 80) <= 48;
+        return true;
+      });
+    }));
+  calls = [];
+  G.drawWallAlignedDecoration('fungi', 120, 80, 32, 110, 'north', 0.9, 0.2,
+    {type:'fungi',side:'north',gridX:3,gridY:4}, 2000000000000);
+  check('natural wall props honor the same distance fade', calls.filter(function(call) {
+    return call[0] === 'set' && call[1] === 'globalAlpha' && typeof call[2] === 'number';
+  }).every(function(call) { return call[2] <= 0.1800001; }));
+  var decorSource = slurp('assets/games/src/07-decorations-lighting.js');
+  check('wall props avoid filters readback gradients and per-pixel work',
+    !/shadowBlur|\.filter|getImageData|putImageData|createLinearGradient|createRadialGradient/.test(
+      decorSource.slice(decorSource.indexOf('function getWallDecorationVariant'),
+        decorSource.indexOf('// ── FLOOR SCATTER'))));
   __out('WALL_DECOR_RESULT PASS ' + n);
 }());
 undefined;

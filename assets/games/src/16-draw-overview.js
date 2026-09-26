@@ -118,7 +118,7 @@ function drawWallDecorations2D() {
   for (var i = 0; i < wallDecorations.length; i++) {
     var dec = wallDecorations[i];
     var x = dec.worldX, y = dec.worldY;
-    var t = dec.type;
+    var t = canonicalWallDecorationType(dec.type);
     if (t === 'torch' || t === 'sconce') {
       ctx.fillStyle = (t === 'torch') ? '#ff8020' : '#ff5030';
       ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2); ctx.fill();
@@ -150,6 +150,9 @@ function drawWallDecorations2D() {
     } else if (t === 'carved_rune') {
       ctx.strokeStyle = 'rgba(180,160,120,0.6)'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2); ctx.stroke();
+    } else if (t === 'wall_crack') {
+      ctx.strokeStyle = 'rgba(42,34,30,0.75)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x-2,y-3); ctx.lineTo(x,y-1); ctx.lineTo(x-1,y+1); ctx.lineTo(x+2,y+3); ctx.stroke();
     }
   }
   ctx.globalAlpha = 1.0; ctx.restore();

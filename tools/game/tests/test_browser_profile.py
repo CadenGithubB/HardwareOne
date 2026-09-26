@@ -12,8 +12,8 @@ class BrowserProfileTests(unittest.TestCase):
         result = run_js(Path(__file__).with_name("browser_profile.js"), timeout=20)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         lines = result.stdout.splitlines()
-        self.assertIn("BROWSER_PROFILE_RESULT PASS 29", lines, result.stdout + result.stderr)
-        self.assertEqual(29, sum(line.startswith("PASS ") for line in lines))
+        self.assertIn("BROWSER_PROFILE_RESULT PASS 32", lines, result.stdout + result.stderr)
+        self.assertEqual(32, sum(line.startswith("PASS ") for line in lines))
 
 
 if __name__ == "__main__":

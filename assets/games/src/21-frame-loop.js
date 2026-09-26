@@ -132,6 +132,10 @@ function loop(ts, gen) {
 
   // Input runs at render rate for responsiveness
   _pt('handleInput', function(){ handleInput(FIXED_DT); });
+  // A pending hand gesture must not fire a delayed shot after closing a menu.
+  if (menuOpen || shopOpen || inventoryOpen || forgeOpen || settingsOpen || gameOverState) {
+    if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
+  }
 
   // Physics runs at fixed timestep for determinism
   if (!menuOpen) {
