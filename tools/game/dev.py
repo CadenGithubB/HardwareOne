@@ -214,13 +214,13 @@ def preview_html(assembly: Assembly) -> bytes:
         blocks = {block.delim: block for block in extracted}
     if len(extracted) != 3 or set(blocks) != {"CSS", "HTML", "JS"}:
         raise SourceError("preview requires exactly the CSS, HTML, and JS raw-string blocks")
-    prefix = ("<!doctype html><html><head><meta charset='utf-8'><title>HardwareOne game preview</title>\n"
+    prefix = ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>HardwareOne game preview</title>\n"
               "<style>:root{--panel-bg:#15191e;--panel-fg:#d8dde3;--border:#3a4450}"
               "body{background:#0c0e11;color:#d8dde3;font:14px system-ui;margin:16px}"
               ".btn{background:#26303a;color:#d8dde3;border:1px solid #3a4450;padding:5px;cursor:pointer}"
               ".input-tall{padding:5px} .text-sm{font-size:12px}</style>\n"
               "<style>" + blocks["CSS"].body + "</style>\n"
-              "<script>window.hw=new Proxy({}, {get:function(t,k){"
+              "<script>window.HW1_LOCAL_PREVIEW=true;window.hw=new Proxy({}, {get:function(t,k){"
               "if(k==='then'||typeof k==='symbol')return undefined;"
               "return function(){return new Promise(function(){});};}});</script>\n"
               "</head><body><p>Local preview · Hardware APIs disabled · Use Keyboard + Mouse. "
@@ -315,7 +315,8 @@ def main(argv: list[str] | None = None) -> int:
                            "tools.game.tests.test_terrain_facing", "tools.game.tests.test_cave_exit_transition",
                            "tools.game.tests.test_artwork_cache", "tools.game.tests.test_casting_presentation",
                            "tools.game.tests.test_firstperson_art", "tools.game.tests.test_casting_studio",
-                           "tools.game.tests.test_hand_rig", "tools.game.tests.test_casting_styles"]
+                           "tools.game.tests.test_hand_rig", "tools.game.tests.test_casting_styles",
+                           "tools.game.tests.test_frame_pause"]
                 if args.suite:
                     module = f"tools/webui/tests/test_game_{args.suite}.py"
                     if not (REPO_ROOT / module).exists():

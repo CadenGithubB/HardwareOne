@@ -19874,50 +19874,57 @@ function drawMinimap() {
   ctx.restore();
 }
 
+// Screen-space UI uses opaque ink and warm edges to stay readable over both
+// sunlit terrain and dark interiors. No blur/gradient allocation in the HUD.
+var HUD_COLORS = {
+  panel: 'rgba(15,18,22,0.93)', edge: '#665c49', ink: '#eee6d5',
+  muted: '#b5ad9d', accent: '#c9aa71', track: '#292d32',
+  health: '#b84d51', mana: '#539ab6', warning: '#f2a193'
+};
+
+function drawHudPanel(x, y, w, h, S) {
+  ctx.fillStyle = HUD_COLORS.panel;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = HUD_COLORS.edge;
+  ctx.lineWidth = Math.max(1, S);
+  ctx.strokeRect(x + S * 0.5, y + S * 0.5, w - S, h - S);
+}
+
 function drawHudOverlay() {
   var w = canvas.width, h = canvas.height;
-  var S = resScale;
+  var S = resScale, now = Date.now();
   ctx.save();
   var pad = 10 * S;
-  var barW = Math.min(120 * S, Math.floor(w * 0.2)), barH = 8 * S;
+  var barW = Math.min(100 * S, Math.floor(w * 0.25)), barH = 6 * S;
 
-  // ── Unified HUD column anchor — shifts left when minimap is hidden or enlarged ──
+  // A labelled pair of resource bars stays beside the compact map. Values
+  // remain readable at empty mana/low health instead of relying on color alone.
   var hudX = (minimapMode === 0) ? (pad + MINIMAP_W * S + 8 * S) : pad;
-  var hy = pad + 4 * S;
-  ctx.globalAlpha = 0.9;
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fillRect(hudX - 2 * S, hy - 2 * S, barW + 4 * S, barH + 4 * S);
+  var hy = pad + 12 * S;
   var hpct = Math.max(0, Math.min(1, health / HEALTH_MAX));
-  ctx.fillStyle = '#ff6a6a';
-  ctx.fillRect(hudX, hy, Math.floor(barW * hpct), barH);
-  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-  ctx.lineWidth = 1 * S;
-  ctx.strokeRect(hudX, hy, barW, barH);
-
-  // ── Coin counter — right of health bar ──
-  if (coins > 0 || (shopMarker && shopNearby)) {
-    ctx.globalAlpha = 0.9;
-    ctx.fillStyle = '#ffd700'; ctx.font = 'bold ' + Math.floor(11 * S) + 'px Arial'; ctx.textAlign = 'left';
-    ctx.fillText('$ ' + coins, hudX + barW + 8 * S, hy + barH - 1 * S);
-  }
-
-  // ── Mana bar — below health ──
-  var my = hy + barH + 6 * S;
-  ctx.globalAlpha = 0.9;
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fillRect(hudX - 2 * S, my - 2 * S, barW + 4 * S, barH + 4 * S);
   var pct = Math.max(0, Math.min(1, mana / MANA_MAX));
-  var blink = (Date.now() < manaBlinkUntil);
-  if (blink) {
-    var a = 0.5 + 0.5 * Math.sin(Date.now() / 120);
-    ctx.fillStyle = 'rgba(255,64,64,' + a.toFixed(2) + ')';
-  } else {
-    ctx.fillStyle = '#4db6ff';
-  }
+  var blink = now < manaBlinkUntil;
+  var my = hy + 22 * S;
+  drawHudPanel(hudX - 4 * S, pad - 3 * S, barW + 8 * S, 48 * S, S);
+  ctx.font = 'bold ' + Math.max(8, Math.floor(8 * S)) + 'px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = hpct <= 0.25 ? HUD_COLORS.warning : HUD_COLORS.ink;
+  ctx.fillText('HEALTH', hudX, hy - 3 * S);
+  ctx.textAlign = 'right';
+  ctx.fillText(Math.ceil(Math.max(0, health)) + '/' + HEALTH_MAX, hudX + barW, hy - 3 * S);
+  ctx.fillStyle = HUD_COLORS.track;
+  ctx.fillRect(hudX, hy, barW, barH);
+  ctx.fillStyle = hpct <= 0.25 ? '#e47668' : HUD_COLORS.health;
+  ctx.fillRect(hudX, hy, Math.floor(barW * hpct), barH);
+  ctx.fillStyle = blink ? HUD_COLORS.warning : HUD_COLORS.ink;
+  ctx.textAlign = 'left';
+  ctx.fillText('MANA', hudX, my - 3 * S);
+  ctx.textAlign = 'right';
+  ctx.fillText(Math.floor(Math.max(0, mana)) + '/' + MANA_MAX, hudX + barW, my - 3 * S);
+  ctx.fillStyle = HUD_COLORS.track;
+  ctx.fillRect(hudX, my, barW, barH);
+  ctx.fillStyle = blink ? HUD_COLORS.warning : HUD_COLORS.mana;
   ctx.fillRect(hudX, my, Math.floor(barW * pct), barH);
-  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-  ctx.lineWidth = 1 * S;
-  ctx.strokeRect(hudX, my, barW, barH);
 
   // ── Active buff indicators ──
   var _buffNow = Date.now();
@@ -19949,39 +19956,43 @@ function drawHudOverlay() {
     ctx.fillText('[E]  Enter Shop', w / 2, h / 2 + 40 * S);
   }
 
-  // ── Spell indicator — bottom-right, fades after change ──
-  var spellAge = (Date.now() - lastSpellChangeMs) / 1000;
-  if (spellAge < 3) {
-    var spell = getCurrentSpell();
-    ctx.font = Math.floor(12 * S) + 'px Arial';
-    var spellTxtW = ctx.measureText(spell.name).width;
-    var dotR = 7 * S, dotGap = 6 * S, innerPad = 6 * S;
-    var boxW = innerPad + dotR * 2 + dotGap + spellTxtW + innerPad;
-    var boxH = 28 * S;
-    var sx = w - pad - boxW, sy = h - pad - boxH - 4 * S;
-    var spellAlpha = spellAge < 2 ? 0.88 : 0.88 * (1.0 - (spellAge - 2));
-    ctx.globalAlpha = spellAlpha;
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(sx, sy, boxW, boxH);
-    ctx.fillStyle = spell.color;
-    ctx.beginPath(); ctx.arc(sx + innerPad + dotR, sy + boxH / 2, dotR, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#ffffff'; ctx.textAlign = 'left';
-    ctx.fillText(spell.name, sx + innerPad + dotR * 2 + dotGap, sy + boxH / 2 + 4 * S);
-  }
+  // Keep the equipped spell visible. The thin readiness line communicates a
+  // cooldown, while a written warning remains useful when the mana bar is empty.
+  var spell = getCurrentSpell();
+  var spellCost = spell.manaCost * ((equipment.robes && equipment.robes.manaCostReduction) ?
+    (1 - equipment.robes.manaCostReduction) : 1);
+  var canAfford = mana >= spellCost;
+  var spellReady = spell.attackType === 'stream' ? 1 :
+    Math.max(0, Math.min(1, (now - lastShotMs) / getEffectiveCooldown()));
+  var spellDetail = !canAfford ? 'Low mana' :
+    (Math.round(spellCost * 10) / 10) + (spell.attackType === 'stream' ? ' mana / tick' : ' mana');
+  if (canAfford && spell.attackType !== 'stream') spellDetail += spellReady < 1 ? ' · Recharging' : ' · Ready';
+  ctx.font = Math.max(9, Math.floor(10 * S)) + 'px Arial';
+  var spellW = Math.min(164 * S, Math.max(112 * S, ctx.measureText(spellDetail).width + 18 * S,
+    ctx.measureText(spell.name).width + 28 * S));
+  var spellX = w - pad - spellW, spellY = h - pad - 38 * S;
+  ctx.globalAlpha = 1;
+  drawHudPanel(spellX, spellY, spellW, 30 * S, S);
+  ctx.fillStyle = spell.color;
+  ctx.fillRect(spellX + 7 * S, spellY + 7 * S, 4 * S, 4 * S);
+  ctx.fillStyle = HUD_COLORS.ink; ctx.textAlign = 'left';
+  ctx.fillText(spell.name, spellX + 16 * S, spellY + 12 * S, spellW - 22 * S);
+  ctx.font = Math.max(8, Math.floor(8 * S)) + 'px Arial';
+  ctx.fillStyle = canAfford ? HUD_COLORS.muted : HUD_COLORS.warning;
+  ctx.fillText(spellDetail, spellX + 7 * S, spellY + 23 * S, spellW - 14 * S);
+  ctx.fillStyle = canAfford ? spell.color : HUD_COLORS.warning;
+  ctx.fillRect(spellX + 1 * S, spellY + 28 * S, (spellW - 2 * S) * (canAfford ? spellReady : 1), S);
 
-  // ── Fullscreen hint — bottom-right, fades out after 8 s ──
-  var hintAge = (Date.now() - startMs) / 1000;
-  if (hintAge < 8) {
-    var hintAlpha = Math.max(0, 1.0 - (hintAge - 6) / 2);
-    ctx.globalAlpha = hintAlpha * 0.7;
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(w - 110 * S, h - 58 * S, 106 * S, 20 * S);
-    ctx.fillStyle = '#aaaaaa';
-    ctx.font = Math.floor(11 * S) + 'px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('[F] Fullscreen', w - 57 * S, h - 44 * S);
+  // Short onboarding hint uses the active control mode, then leaves the view.
+  var hintAge = (now - startMs) / 1000;
+  if (hintAge < 10 && USE_KEYBOARD && !menuOpen && !settingsOpen) {
+    ctx.globalAlpha = Math.min(1, Math.max(0, (10 - hintAge) / 2));
+    drawHudPanel(pad - 3 * S, h - pad - 24 * S, 146 * S, 27 * S, S);
+    ctx.fillStyle = HUD_COLORS.muted;
+    ctx.font = Math.max(8, Math.floor(8 * S)) + 'px Arial'; ctx.textAlign = 'left';
+    ctx.fillText('WASD move · Click cast · E interact', pad + 3 * S, h - pad - 13 * S);
+    ctx.fillText('Space jump · Shift dash · P pause', pad + 3 * S, h - pad - 3 * S);
   }
-
 
   // ── Toast notifications — small corner stack ──
   var _tNow = Date.now();
@@ -19991,13 +20002,13 @@ function drawHudOverlay() {
     var _tH = Math.floor(17 * S);
     var _tPad = Math.floor(7 * S);
     var _tGap = Math.floor(3 * S);
-    var _tBaseY = h - Math.floor(52 * S);
+    var _tBaseY = h - Math.floor(78 * S);
     for (var _ti = toasts.length - 1; _ti >= 0; _ti--) {
       var _t = toasts[_ti];
       var _tAge = _tNow - _t.spawnMs;
       var _tFade = _tAge < 150 ? _tAge / 150 : (_t.lifeMs - _tAge < 350 ? (_t.lifeMs - _tAge) / 350 : 1.0);
       _tFade = Math.max(0, Math.min(1, _tFade));
-      var _tW = Math.min(Math.ceil(ctx.measureText(_t.text).width) + _tPad * 2, Math.floor(260 * S));
+      var _tW = Math.min(Math.ceil(ctx.measureText(_t.text).width) + _tPad * 2, Math.floor(260 * S), w - 16 * S);
       var _tY = _tBaseY - (toasts.length - 1 - _ti) * (_tH + _tGap);
       ctx.globalAlpha = _tFade * 0.92;
       ctx.fillStyle = 'rgba(8,8,12,0.86)';
@@ -20006,7 +20017,7 @@ function drawHudOverlay() {
       ctx.strokeRect(Math.floor(8 * S) + 0.5, _tY + 0.5, _tW - 1, _tH - 1);
       ctx.fillStyle = _t.color;
       ctx.textAlign = 'left';
-      ctx.fillText(_t.text, Math.floor(8 * S) + _tPad, _tY + Math.floor(11.5 * S));
+      ctx.fillText(_t.text, Math.floor(8 * S) + _tPad, _tY + Math.floor(11.5 * S), _tW - _tPad * 2);
     }
     ctx.globalAlpha = 1.0;
   }
@@ -20036,7 +20047,7 @@ function drawHudOverlay() {
     ctx.fillStyle = 'rgba(80,80,100,0.8)';
     ctx.fillRect(_logX, _logY, _logW, Math.floor(15 * S));
     ctx.fillStyle = '#aaaacc'; ctx.font = 'bold ' + Math.floor(9 * S) + 'px monospace'; ctx.textAlign = 'left';
-    ctx.fillText('CHAT  [scroll \u2191\u2193]  [C] close', _logX + Math.floor(6 * S), _logY + Math.floor(10 * S));
+    ctx.fillText('JOURNAL  [scroll \u2191\u2193]  [C] close', _logX + Math.floor(6 * S), _logY + Math.floor(10 * S));
     // Scrollbar
     if (_logTotal > _logVisible) {
       var _sbH = Math.floor((_logH - 18 * S) * _logVisible / _logTotal);
@@ -20069,7 +20080,7 @@ function drawHudOverlay() {
     var eqItem = equipment[_esd.key];
     var isRelic = _esd.key === 'relic';
     ctx.globalAlpha = 0.8;
-    ctx.fillStyle = eqItem ? 'rgba(20,20,40,0.7)' : 'rgba(0,0,0,0.3)';
+    ctx.fillStyle = HUD_COLORS.panel;
     ctx.fillRect(slotX, eqY, eqSlotSize, eqSlotSize);
     if (eqItem) {
       ctx.strokeStyle = isRelic ? RARITY_COLORS.epic : (RARITY_COLORS[eqItem.rarity] || '#888');
@@ -20089,11 +20100,9 @@ function drawHudOverlay() {
     // Yellow glow outline on selected slot
     if (eqi === inventorySelIdx) {
       ctx.save();
-      ctx.globalAlpha = 0.55 + 0.3 * Math.sin(Date.now() / 200);
-      ctx.strokeStyle = '#ffdd40';
-      ctx.lineWidth = 2.5 * S;
-      ctx.shadowColor = '#ffdd40';
-      ctx.shadowBlur = 6 * S;
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = HUD_COLORS.accent;
+      ctx.lineWidth = 2 * S;
       ctx.strokeRect(slotX - 1 * S, eqY - 1 * S, eqSlotSize + 2 * S, eqSlotSize + 2 * S);
       ctx.restore();
     }
@@ -20123,9 +20132,9 @@ function drawHudOverlay() {
     for (var _tli = 0; _tli < _tipLines.length; _tli++) _tipH += _tipLines[_tli].size + 3 * S;
     // Draw tooltip background
     ctx.globalAlpha = 0.9;
-    ctx.fillStyle = 'rgba(10,10,25,0.92)';
+    ctx.fillStyle = HUD_COLORS.panel;
     ctx.fillRect(_tipX, _tipY, _tipW, _tipH);
-    ctx.strokeStyle = 'rgba(100,150,255,0.5)'; ctx.lineWidth = 1 * S;
+    ctx.strokeStyle = HUD_COLORS.edge; ctx.lineWidth = 1 * S;
     ctx.strokeRect(_tipX, _tipY, _tipW, _tipH);
     // Draw relic icon in tooltip
     if (_tipIsRelic && _tipItem && _tipItem.shape) {
@@ -20140,7 +20149,7 @@ function drawHudOverlay() {
       ctx.globalAlpha = 0.95;
       ctx.fillStyle = _tl.color;
       ctx.font = (_tl.bold ? 'bold ' : '') + _tl.size + 'px Arial';
-      ctx.fillText(_tl.text, _tipX + 6 * S, _tlY);
+      ctx.fillText(_tl.text, _tipX + 6 * S, _tlY, _tipW - (_tipIsRelic && _tipItem ? 38 : 12) * S);
     }
   }
 
@@ -20151,10 +20160,16 @@ function drawHudOverlay() {
     var distFromOrigin = Math.floor(Math.hypot(trueX, trueY));
     var biomeLabel = terrain.charAt(0).toUpperCase() + terrain.slice(1);
     var diff = getDifficultyAt(trueX, trueY);
-    ctx.globalAlpha = 0.7;
-    ctx.font = Math.floor(10 * S) + 'px monospace'; ctx.textAlign = 'right';
-    ctx.fillStyle = '#cccccc';
-    ctx.fillText(biomeLabel + '  ' + distFromOrigin + 'm  x' + diff.toFixed(1), w - pad, pad + 12 * S);
+    ctx.globalAlpha = 1;
+    var regionW = Math.max(60 * S, w - pad - hudX - barW - 16 * S);
+    regionW = Math.min(regionW, 128 * S);
+    drawHudPanel(w - pad - regionW, pad - 3 * S, regionW, 32 * S, S);
+    ctx.font = 'bold ' + Math.max(8, Math.floor(9 * S)) + 'px Arial'; ctx.textAlign = 'right';
+    ctx.fillStyle = HUD_COLORS.ink;
+    ctx.fillText(biomeLabel, w - pad - 5 * S, pad + 9 * S, regionW - 10 * S);
+    ctx.font = Math.max(8, Math.floor(8 * S)) + 'px Arial';
+    ctx.fillStyle = HUD_COLORS.muted;
+    ctx.fillText(distFromOrigin + 'm · Danger ' + diff.toFixed(1), w - pad - 5 * S, pad + 22 * S, regionW - 10 * S);
     // Chunk debug: show player chunk, window bounds, distance to edge (requires 3D debug overlay)
     if (DEBUG_3D) {
       var pcx = Math.floor(trueX / CHUNK_SIZE);
@@ -20167,10 +20182,16 @@ function drawHudOverlay() {
       );
       var _chkCol = (pcx !== wCenterCX || pcy !== wCenterCY) ? '#ff4444' : '#88ff88';
       ctx.fillStyle = _chkCol;
-      ctx.fillText('chunk(' + pcx + ',' + pcy + ')', w - pad, pad + 24 * S);
-      ctx.fillText('win(' + windowCX + ',' + windowCY + ')-(' + (windowCX+WINDOW_CHUNKS-1) + ',' + (windowCY+WINDOW_CHUNKS-1) + ')', w - pad, pad + 36 * S);
-      ctx.fillText('edge:' + Math.floor(edgeDist) + 'px', w - pad, pad + 48 * S);
+      ctx.fillText('chunk(' + pcx + ',' + pcy + ')', w - pad, pad + 49 * S);
+      ctx.fillText('win(' + windowCX + ',' + windowCY + ')-(' + (windowCX+WINDOW_CHUNKS-1) + ',' + (windowCY+WINDOW_CHUNKS-1) + ')', w - pad, pad + 61 * S);
+      ctx.fillText('edge:' + Math.floor(edgeDist) + 'px', w - pad, pad + 73 * S);
     }
+  }
+
+  if (coins > 0 || (shopMarker && shopNearby)) {
+    ctx.globalAlpha = 1; ctx.fillStyle = HUD_COLORS.accent;
+    ctx.font = 'bold ' + Math.max(8, Math.floor(9 * S)) + 'px Arial'; ctx.textAlign = 'right';
+    ctx.fillText(coins + ' gold', w - pad, pad + (ENDLESS_MODE ? 39 : 12) * S);
   }
 
   // Time-of-day indicator — bottom-right
@@ -20196,7 +20217,7 @@ function drawHudOverlay() {
     ctx.font = 'bold ' + Math.floor(12 * S) + 'px monospace';
     ctx.textAlign = 'right';
     ctx.fillStyle = _fpsSmooth > 45 ? '#44ff44' : _fpsSmooth > 25 ? '#ffcc00' : '#ff4444';
-    var _fpsY = pad + (ENDLESS_MODE ? (DEBUG_3D ? 60 : 24) : 12) * S;
+    var _fpsY = pad + (ENDLESS_MODE ? (DEBUG_3D ? 86 : 52) : 26) * S;
     ctx.fillText(Math.round(_fpsSmooth) + ' FPS', w - pad, _fpsY);
   }
 
@@ -20216,7 +20237,7 @@ function drawInventoryOverlay() {
   var px = Math.floor((w - panW) / 2), py = Math.floor((h - panH) / 2);
 
   ctx.globalAlpha = 0.92;
-  ctx.fillStyle = 'rgba(10,10,25,0.92)';
+  ctx.fillStyle = HUD_COLORS.panel;
   ctx.fillRect(px, py, panW, panH);
   ctx.strokeStyle = 'rgba(100,150,255,0.7)'; ctx.lineWidth = 2 * S;
   ctx.strokeRect(px, py, panW, panH);
@@ -25659,7 +25680,12 @@ async function profileCastingStudio(mode) {
   });
 }());
 function renderFrame() {
-  if (overviewActive) { drawDebugOverview(); return; }
+  if (overviewActive) {
+    drawDebugOverview();
+    drawMenuOverlay();
+    drawSettingsOverlay();
+    return;
+  }
   _pt('draw()', function(){ draw(); });
   if (MODE3D) {
     _pt('groundFX3D', function(){ drawGroundEffects3D(); });
@@ -25798,7 +25824,7 @@ function loop(ts, gen) {
   }
 
   // Physics runs at fixed timestep for determinism
-  if (!menuOpen) {
+  if (!menuOpen && !settingsOpen) {
     _physicsAccum += elapsed;
     var steps = 0;
     while (_physicsAccum >= FIXED_DT_MS && steps < MAX_PHYSICS_STEPS) {
@@ -25807,6 +25833,9 @@ function loop(ts, gen) {
       steps++;
     }
     if (_physicsAccum > FIXED_DT_MS * MAX_PHYSICS_STEPS) _physicsAccum = 0; // clamp after long pause
+  } else {
+    // Never carry a partial simulation step out of a pause or settings panel.
+    _physicsAccum = 0;
   }
   renderFrame();
 
@@ -25872,7 +25901,81 @@ function loop(ts, gen) {
 // SECTION 18: GAME LIFECYCLE
 // =============================================
 
+var gamePauseReason = '';
+var gameSessionStarted = false;
+
+function clearGameplayInput() {
+  kbState = {up:false, down:false, left:false, right:false};
+  _arrowCam = {up:false, down:false, left:false, right:false};
+  mouseAccum = {x:0, y:0}; mouseDelta = {x:0, y:0};
+  _mouseHeld = false; _attackHeld = false; flameStreamActive = false;
+  jumpPressed = false; dashPressed = false;
+  // A paused player must not accelerate from stale input when play resumes.
+  vel.x = 0; vel.y = 0;
+}
+
+function updateGameSessionUi() {
+  var paused = running && menuOpen;
+  var status = document.getElementById('gameSessionState');
+  var hint = document.getElementById('gameSessionHint');
+  var pauseButton = document.getElementById('btnStop');
+  var startButton = document.getElementById('btnStart');
+  if (pauseButton) {
+    pauseButton.textContent = paused ? 'Resume' : 'Pause';
+    pauseButton.disabled = !running || gameOverState;
+    pauseButton.setAttribute('aria-pressed', paused ? 'true' : 'false');
+  }
+  if (startButton) startButton.textContent = gameSessionStarted ? 'New maze run' : 'Play maze';
+  if (status) {
+    status.textContent = gameOverState ? 'Run complete' : paused ? 'Paused' : running ? 'Exploring' : 'Ready to explore';
+    status.setAttribute('data-state', paused ? 'paused' : running ? 'playing' : 'ready');
+  }
+  if (hint) {
+    if (gameOverState) hint.textContent = 'Choose a new maze run or explore endless to begin again.';
+    else if (paused) hint.textContent = 'Your run is paused. Click the view or press P to resume.';
+    else if (!running) hint.textContent = 'Choose Play maze or Explore endless, then click the view to take control.';
+    else if (USE_KEYBOARD || USE_MOUSE) hint.textContent = document.pointerLockElement === canvas ?
+      'WASD move · mouse look · click cast · E interact · P or Esc pause' :
+      'Click the view for mouse look · WASD move · arrows look · E interact · P pause';
+    else hint.textContent = 'Hardware controls active · click the view to use keyboard and mouse.';
+  }
+}
+
+function pauseGame(reason) {
+  clearGameplayInput();
+  if (!running || gameOverState) return;
+  if (!menuOpen) gamePauseReason = reason || 'manual';
+  menuOpen = true;
+  _physicsAccum = 0; lastUpdate = 0;
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+  updateGameSessionUi();
+}
+
+function resumeGame() {
+  if (!running || gameOverState) return;
+  clearGameplayInput();
+  menuOpen = false; gamePauseReason = '';
+  _physicsAccum = 0; lastUpdate = 0;
+  updateGameSessionUi();
+}
+
+function toggleGamePause() {
+  if (menuOpen) resumeGame();
+  else pauseGame('manual');
+}
+
+function prepareGameRun() {
+  clearGameplayInput();
+  gameSessionStarted = true;
+  menuOpen = false; gamePauseReason = '';
+  settingsOpen = false; shopOpen = false; forgeOpen = false;
+  toastLogOpen = false; overviewActive = false;
+  _physicsAccum = 0; lastUpdate = 0;
+}
+
 function startGame() {
+  prepareGameRun();
   if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(false);
   // If Cave Test is selected in the terrain dropdown, delegate to the cave test launcher
   var _tSel = document.getElementById('terrainSelect');
@@ -25901,6 +26004,7 @@ function startGame() {
     if (chk && chk.checked) CAM_FOLLOW = true;
     if (USE_GAMEPAD) startGamepadPolling();
     updateHudInput();
+    updateGameSessionUi();
     return;
   }
 
@@ -25933,14 +26037,20 @@ function startGame() {
   if (chk && chk.checked) CAM_FOLLOW = true;
   if (USE_GAMEPAD) startGamepadPolling();
   updateHudInput();
+  updateGameSessionUi();
 }
 
 function stopGame() {
   if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
   running = false;
+  clearGameplayInput();
+  menuOpen = false; gamePauseReason = '';
+  _loopGen++;
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
   if (polling) { try { clearInterval(polling); } catch (_) {} polling = null; }
   stopGamepadPolling();
   controlSensor('imu', 'stop');
+  updateGameSessionUi();
 }
 
 function fwDebugOn() {
@@ -25986,16 +26096,39 @@ function startLogPoller() {
 function stopLogPoller() {
   if (__gamesLogPoll) { try { clearInterval(__gamesLogPoll); } catch (_) {} __gamesLogPoll = null; }
 }
-
 // =============================================
 // SECTION 19: EVENT LISTENERS & INIT
 // =============================================
 
 document.getElementById('btnStart').addEventListener('click', startGame);
-document.getElementById('btnStop').addEventListener('click', stopGame);
+document.getElementById('btnStop').addEventListener('click', toggleGamePause);
+var fullscreenButton = document.getElementById('btnFullscreen');
+if (fullscreenButton) fullscreenButton.addEventListener('click', toggleFullscreen);
 document.addEventListener('visibilitychange', function() {
-  if (document.hidden && typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
+  if (document.hidden) pauseGame('focus');
 });
+window.addEventListener('blur', function() {
+  if (USE_KEYBOARD || USE_MOUSE) pauseGame('focus');
+  else clearGameplayInput();
+});
+
+// Native page controls keep their keyboard behavior while the game is embedded.
+function isGamePageControlTarget(target) {
+  if (!target || target === canvas) return false;
+  var tag = (target.tagName || '').toLowerCase();
+  return target.isContentEditable || /^(input|textarea|select|button|a)$/.test(tag) ||
+    !!(target.closest && target.closest('[contenteditable="true"],button,a'));
+}
+
+function requestGamePointerLock() {
+  if (!canvas.requestPointerLock) return;
+  try {
+    var request = canvas.requestPointerLock();
+    // Some browsers deny recapture immediately after Escape. Keyboard and
+    // arrow-key play remains available, and a later click can try again.
+    if (request && typeof request.catch === 'function') request.catch(function() { updateGameSessionUi(); });
+  } catch (_) { updateGameSessionUi(); }
+}
 document.getElementById('chkImuDebug').addEventListener('change', function() { DEBUG_IMU = this.checked; });
 document.getElementById('btnFwDbgOn').addEventListener('click', fwDebugOn);
 document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
@@ -26021,6 +26154,7 @@ document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
     sel.addEventListener('change', function() {
       var ctOpts = document.getElementById('caveTestOptions');
       if (this.value === 'cavetest') {
+        prepareGameRun();
         // Show cave test options panel
         if (ctOpts) ctOpts.style.display = '';
         var kindSelect = document.getElementById('ctEntranceKind');
@@ -26061,6 +26195,7 @@ document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
         _loopGen++;
         if (running) _scheduleLoop();
         updateHudInput();
+        updateGameSessionUi();
         return;
       }
       if (ctOpts) ctOpts.style.display = 'none';
@@ -26207,6 +26342,7 @@ document.getElementById('btnToggleTex').addEventListener('click', function() {
 });
 document.getElementById('btnOverview').addEventListener('click', function() { toggleOverview(); });
 document.getElementById('btnEndless').addEventListener('click', function() {
+  prepareGameRun();
   ENDLESS_MODE = true;
   var fixtures = document.getElementById('ctVisibilityFixtures');
   if (fixtures) fixtures.checked = false;
@@ -26224,6 +26360,9 @@ document.getElementById('btnEndless').addEventListener('click', function() {
   lastUpdate = 0;
   CONTROL_MODE = MODE_STICK_AIM;
   USE_KEYBOARD = true; USE_MOUSE = true;
+  USE_GAMEPAD = false; stopGamepadPolling();
+  var gamepadInput = document.getElementById('chkGamepad');
+  if (gamepadInput) gamepadInput.checked = false;
   var chk = document.getElementById('chkKeyboard');
   if (chk) chk.checked = true;
   draw();
@@ -26231,6 +26370,7 @@ document.getElementById('btnEndless').addEventListener('click', function() {
   var chk2 = document.getElementById('chkCamFollow');
   if (chk2 && chk2.checked) CAM_FOLLOW = true;
   updateHudInput();
+  updateGameSessionUi();
   console.log('[ENDLESS] Endless mode launched');
 });
 
@@ -26272,6 +26412,8 @@ canvas.addEventListener('click', function(e) {
     handleSettingsClick(mx, my);
     return;
   }
+  if (!running || gameOverState || caveVisibilityFixturesEnabled()) return;
+  if (menuOpen) resumeGame();
   // Pointer lock: clicking the canvas while the game is running requests lock
   // and auto-enables keyboard+mouse mode (browsers require a direct user gesture).
   if (running && document.pointerLockElement !== canvas) {
@@ -26280,10 +26422,10 @@ canvas.addEventListener('click', function(e) {
     var cg = document.getElementById('chkGamepad'); if (cg) cg.checked = false;
     var ck = document.getElementById('chkKeyboard'); if (ck) ck.checked = true;
     stopGamepadPolling();
-    kbState = {up:false, down:false, left:false, right:false};
-    mouseAccum = {x:0, y:0}; mouseDelta = {x:0, y:0};
+    clearGameplayInput();
+    canvas.focus({preventScroll:true});
     updateHudInput();
-    canvas.requestPointerLock();
+    requestGamePointerLock();
   }
 });
 document.getElementById('chk3dDebug').addEventListener('change', function() { DEBUG_3D = this.checked; });

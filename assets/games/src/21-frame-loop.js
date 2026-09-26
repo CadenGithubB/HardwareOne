@@ -1,5 +1,10 @@
 function renderFrame() {
-  if (overviewActive) { drawDebugOverview(); return; }
+  if (overviewActive) {
+    drawDebugOverview();
+    drawMenuOverlay();
+    drawSettingsOverlay();
+    return;
+  }
   _pt('draw()', function(){ draw(); });
   if (MODE3D) {
     _pt('groundFX3D', function(){ drawGroundEffects3D(); });
@@ -138,7 +143,7 @@ function loop(ts, gen) {
   }
 
   // Physics runs at fixed timestep for determinism
-  if (!menuOpen) {
+  if (!menuOpen && !settingsOpen) {
     _physicsAccum += elapsed;
     var steps = 0;
     while (_physicsAccum >= FIXED_DT_MS && steps < MAX_PHYSICS_STEPS) {
@@ -147,6 +152,9 @@ function loop(ts, gen) {
       steps++;
     }
     if (_physicsAccum > FIXED_DT_MS * MAX_PHYSICS_STEPS) _physicsAccum = 0; // clamp after long pause
+  } else {
+    // Never carry a partial simulation step out of a pause or settings panel.
+    _physicsAccum = 0;
   }
   renderFrame();
 

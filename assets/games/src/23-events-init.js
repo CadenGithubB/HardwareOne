@@ -3,10 +3,34 @@
 // =============================================
 
 document.getElementById('btnStart').addEventListener('click', startGame);
-document.getElementById('btnStop').addEventListener('click', stopGame);
+document.getElementById('btnStop').addEventListener('click', toggleGamePause);
+var fullscreenButton = document.getElementById('btnFullscreen');
+if (fullscreenButton) fullscreenButton.addEventListener('click', toggleFullscreen);
 document.addEventListener('visibilitychange', function() {
-  if (document.hidden && typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
+  if (document.hidden) pauseGame('focus');
 });
+window.addEventListener('blur', function() {
+  if (USE_KEYBOARD || USE_MOUSE) pauseGame('focus');
+  else clearGameplayInput();
+});
+
+// Native page controls keep their keyboard behavior while the game is embedded.
+function isGamePageControlTarget(target) {
+  if (!target || target === canvas) return false;
+  var tag = (target.tagName || '').toLowerCase();
+  return target.isContentEditable || /^(input|textarea|select|button|a)$/.test(tag) ||
+    !!(target.closest && target.closest('[contenteditable="true"],button,a'));
+}
+
+function requestGamePointerLock() {
+  if (!canvas.requestPointerLock) return;
+  try {
+    var request = canvas.requestPointerLock();
+    // Some browsers deny recapture immediately after Escape. Keyboard and
+    // arrow-key play remains available, and a later click can try again.
+    if (request && typeof request.catch === 'function') request.catch(function() { updateGameSessionUi(); });
+  } catch (_) { updateGameSessionUi(); }
+}
 document.getElementById('chkImuDebug').addEventListener('change', function() { DEBUG_IMU = this.checked; });
 document.getElementById('btnFwDbgOn').addEventListener('click', fwDebugOn);
 document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
@@ -32,6 +56,7 @@ document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
     sel.addEventListener('change', function() {
       var ctOpts = document.getElementById('caveTestOptions');
       if (this.value === 'cavetest') {
+        prepareGameRun();
         // Show cave test options panel
         if (ctOpts) ctOpts.style.display = '';
         var kindSelect = document.getElementById('ctEntranceKind');
@@ -72,6 +97,7 @@ document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
         _loopGen++;
         if (running) _scheduleLoop();
         updateHudInput();
+        updateGameSessionUi();
         return;
       }
       if (ctOpts) ctOpts.style.display = 'none';
@@ -218,6 +244,7 @@ document.getElementById('btnToggleTex').addEventListener('click', function() {
 });
 document.getElementById('btnOverview').addEventListener('click', function() { toggleOverview(); });
 document.getElementById('btnEndless').addEventListener('click', function() {
+  prepareGameRun();
   ENDLESS_MODE = true;
   var fixtures = document.getElementById('ctVisibilityFixtures');
   if (fixtures) fixtures.checked = false;
@@ -235,6 +262,9 @@ document.getElementById('btnEndless').addEventListener('click', function() {
   lastUpdate = 0;
   CONTROL_MODE = MODE_STICK_AIM;
   USE_KEYBOARD = true; USE_MOUSE = true;
+  USE_GAMEPAD = false; stopGamepadPolling();
+  var gamepadInput = document.getElementById('chkGamepad');
+  if (gamepadInput) gamepadInput.checked = false;
   var chk = document.getElementById('chkKeyboard');
   if (chk) chk.checked = true;
   draw();
@@ -242,6 +272,7 @@ document.getElementById('btnEndless').addEventListener('click', function() {
   var chk2 = document.getElementById('chkCamFollow');
   if (chk2 && chk2.checked) CAM_FOLLOW = true;
   updateHudInput();
+  updateGameSessionUi();
   console.log('[ENDLESS] Endless mode launched');
 });
 
@@ -283,6 +314,8 @@ canvas.addEventListener('click', function(e) {
     handleSettingsClick(mx, my);
     return;
   }
+  if (!running || gameOverState || caveVisibilityFixturesEnabled()) return;
+  if (menuOpen) resumeGame();
   // Pointer lock: clicking the canvas while the game is running requests lock
   // and auto-enables keyboard+mouse mode (browsers require a direct user gesture).
   if (running && document.pointerLockElement !== canvas) {
@@ -291,10 +324,10 @@ canvas.addEventListener('click', function(e) {
     var cg = document.getElementById('chkGamepad'); if (cg) cg.checked = false;
     var ck = document.getElementById('chkKeyboard'); if (ck) ck.checked = true;
     stopGamepadPolling();
-    kbState = {up:false, down:false, left:false, right:false};
-    mouseAccum = {x:0, y:0}; mouseDelta = {x:0, y:0};
+    clearGameplayInput();
+    canvas.focus({preventScroll:true});
     updateHudInput();
-    canvas.requestPointerLock();
+    requestGamePointerLock();
   }
 });
 document.getElementById('chk3dDebug').addEventListener('change', function() { DEBUG_3D = this.checked; });

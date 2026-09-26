@@ -2,7 +2,81 @@
 // SECTION 18: GAME LIFECYCLE
 // =============================================
 
+var gamePauseReason = '';
+var gameSessionStarted = false;
+
+function clearGameplayInput() {
+  kbState = {up:false, down:false, left:false, right:false};
+  _arrowCam = {up:false, down:false, left:false, right:false};
+  mouseAccum = {x:0, y:0}; mouseDelta = {x:0, y:0};
+  _mouseHeld = false; _attackHeld = false; flameStreamActive = false;
+  jumpPressed = false; dashPressed = false;
+  // A paused player must not accelerate from stale input when play resumes.
+  vel.x = 0; vel.y = 0;
+}
+
+function updateGameSessionUi() {
+  var paused = running && menuOpen;
+  var status = document.getElementById('gameSessionState');
+  var hint = document.getElementById('gameSessionHint');
+  var pauseButton = document.getElementById('btnStop');
+  var startButton = document.getElementById('btnStart');
+  if (pauseButton) {
+    pauseButton.textContent = paused ? 'Resume' : 'Pause';
+    pauseButton.disabled = !running || gameOverState;
+    pauseButton.setAttribute('aria-pressed', paused ? 'true' : 'false');
+  }
+  if (startButton) startButton.textContent = gameSessionStarted ? 'New maze run' : 'Play maze';
+  if (status) {
+    status.textContent = gameOverState ? 'Run complete' : paused ? 'Paused' : running ? 'Exploring' : 'Ready to explore';
+    status.setAttribute('data-state', paused ? 'paused' : running ? 'playing' : 'ready');
+  }
+  if (hint) {
+    if (gameOverState) hint.textContent = 'Choose a new maze run or explore endless to begin again.';
+    else if (paused) hint.textContent = 'Your run is paused. Click the view or press P to resume.';
+    else if (!running) hint.textContent = 'Choose Play maze or Explore endless, then click the view to take control.';
+    else if (USE_KEYBOARD || USE_MOUSE) hint.textContent = document.pointerLockElement === canvas ?
+      'WASD move · mouse look · click cast · E interact · P or Esc pause' :
+      'Click the view for mouse look · WASD move · arrows look · E interact · P pause';
+    else hint.textContent = 'Hardware controls active · click the view to use keyboard and mouse.';
+  }
+}
+
+function pauseGame(reason) {
+  clearGameplayInput();
+  if (!running || gameOverState) return;
+  if (!menuOpen) gamePauseReason = reason || 'manual';
+  menuOpen = true;
+  _physicsAccum = 0; lastUpdate = 0;
+  if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+  updateGameSessionUi();
+}
+
+function resumeGame() {
+  if (!running || gameOverState) return;
+  clearGameplayInput();
+  menuOpen = false; gamePauseReason = '';
+  _physicsAccum = 0; lastUpdate = 0;
+  updateGameSessionUi();
+}
+
+function toggleGamePause() {
+  if (menuOpen) resumeGame();
+  else pauseGame('manual');
+}
+
+function prepareGameRun() {
+  clearGameplayInput();
+  gameSessionStarted = true;
+  menuOpen = false; gamePauseReason = '';
+  settingsOpen = false; shopOpen = false; forgeOpen = false;
+  toastLogOpen = false; overviewActive = false;
+  _physicsAccum = 0; lastUpdate = 0;
+}
+
 function startGame() {
+  prepareGameRun();
   if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(false);
   // If Cave Test is selected in the terrain dropdown, delegate to the cave test launcher
   var _tSel = document.getElementById('terrainSelect');
@@ -31,6 +105,7 @@ function startGame() {
     if (chk && chk.checked) CAM_FOLLOW = true;
     if (USE_GAMEPAD) startGamepadPolling();
     updateHudInput();
+    updateGameSessionUi();
     return;
   }
 
@@ -63,14 +138,20 @@ function startGame() {
   if (chk && chk.checked) CAM_FOLLOW = true;
   if (USE_GAMEPAD) startGamepadPolling();
   updateHudInput();
+  updateGameSessionUi();
 }
 
 function stopGame() {
   if (typeof cancelPendingMissileCasts === 'function') cancelPendingMissileCasts(true);
   running = false;
+  clearGameplayInput();
+  menuOpen = false; gamePauseReason = '';
+  _loopGen++;
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
   if (polling) { try { clearInterval(polling); } catch (_) {} polling = null; }
   stopGamepadPolling();
   controlSensor('imu', 'stop');
+  updateGameSessionUi();
 }
 
 function fwDebugOn() {
@@ -116,4 +197,3 @@ function startLogPoller() {
 function stopLogPoller() {
   if (__gamesLogPoll) { try { clearInterval(__gamesLogPoll); } catch (_) {} __gamesLogPoll = null; }
 }
-
