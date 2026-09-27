@@ -1,0 +1,156 @@
+--- a/components/arduino/libraries/BLE/src/BLECharacteristic.cpp
++++ b/components/arduino/libraries/BLE/src/BLECharacteristic.cpp
+@@ -103,7 +103,8 @@
+  * @param [in] pDescriptor
+  * @return N/A.
+  */
+-void BLECharacteristic::addDescriptor(BLEDescriptor *pDescriptor) {
++void BLECharacteristic::addDescriptor(BLEDescriptor *pDescriptor, bool takeOwnership) {
++  if (takeOwnership) pDescriptor->m_ownedByCharacteristic = true;
+ #ifdef CONFIG_NIMBLE_ENABLED
+   if (pDescriptor->getUUID() == BLEUUID(uint16_t(0x2902))) {
+     log_i("NimBLE automatically creates the 0x2902 descriptor if a characteristic has a notification or indication property assigned to it.\n"
+@@ -117,6 +118,15 @@
+   m_descriptorMap.setByUUID(pDescriptor->getUUID(), pDescriptor);
+   log_v("<< addDescriptor()");
+ }  // addDescriptor
++
++#if defined(CONFIG_BLUEDROID_ENABLED)
++void BLECharacteristic::destroyOwnedDescriptorsAfterHostDeinit() {
++  while (BLEDescriptor *descriptor = m_descriptorMap.getFirst()) {
++    m_descriptorMap.removeDescriptor(descriptor);
++    if (descriptor->m_ownedByCharacteristic) delete descriptor;
++  }
++}
++#endif
+ 
+ /**
+  * @brief Return the BLE Descriptor for the given UUID if associated with this characteristic.
+--- a/components/arduino/libraries/BLE/src/BLECharacteristic.h
++++ b/components/arduino/libraries/BLE/src/BLECharacteristic.h
+@@ -182,7 +182,9 @@
+   BLECharacteristic(BLEUUID uuid, uint32_t properties = 0);
+   virtual ~BLECharacteristic();
+ 
+-  void addDescriptor(BLEDescriptor *pDescriptor);
++  // Existing callers retain ownership unless explicitly transferred. Owned
++  // descriptors are reclaimed only by checked terminal Bluedroid teardown.
++  void addDescriptor(BLEDescriptor *pDescriptor, bool takeOwnership = false);
+   BLEDescriptor *getDescriptorByUUID(const char *descriptorUUID) const;
+   BLEDescriptor *getDescriptorByUUID(BLEUUID descriptorUUID) const;
+   BLEUUID getUUID() const;
+@@ -233,6 +235,7 @@
+   esp_gatt_char_prop_t m_properties;
+   BLECharacteristicCallbacks *m_pCallbacks;
+   BLEService *m_pService;
++  bool m_ownedByService = false; // createCharacteristic owns; addCharacteristic borrows
+   BLEValue m_value;
+   bool m_writeEvt = false;
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+@@ -280,6 +283,7 @@
+    ***************************************************************************/
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
++  void destroyOwnedDescriptorsAfterHostDeinit();
+   void handleGATTServerEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
+ #endif
+ 
+--- a/components/arduino/libraries/BLE/src/BLEDescriptor.h
++++ b/components/arduino/libraries/BLE/src/BLEDescriptor.h
+@@ -135,6 +135,7 @@
+   esp_attr_value_t m_value;
+   BLEDescriptorCallbacks *m_pCallback;
+   BLECharacteristic *m_pCharacteristic;
++  bool m_ownedByCharacteristic = false; // opt-in via addDescriptor(..., true)
+   FreeRTOS::Semaphore m_semaphoreSetValue = FreeRTOS::Semaphore("SetValue");
+ 
+   /***************************************************************************
+--- a/components/arduino/libraries/BLE/src/BLEDevice.cpp
++++ b/components/arduino/libraries/BLE/src/BLEDevice.cpp
+@@ -1245,6 +1245,12 @@
+       result.scanDeleted = true;
+     }
+     if (m_pServer != nullptr) {
++#if defined(CONFIG_BLUEDROID_ENABLED)
++      // Raw service/characteristic maps do not own their pointed-to objects.
++      // Reclaim the explicitly owned tree only inside terminalState retirement;
++      // an incomplete host/controller stop must retain all callback targets.
++      m_pServer->destroyGattTreeAfterHostDeinit();
++#endif
+       delete m_pServer;
+       m_pServer = nullptr;
+       result.serverDeleted = true;
+--- a/components/arduino/libraries/BLE/src/BLEServer.cpp
++++ b/components/arduino/libraries/BLE/src/BLEServer.cpp
+@@ -229,6 +229,22 @@
+ void BLEServer::setCallbacks(BLEServerCallbacks *pCallbacks) {
+   m_pServerCallbacks = pCallbacks;
+ }  // setCallbacks
++
++#if defined(CONFIG_BLUEDROID_ENABLED)
++// Terminal-only ownership cleanup. Service constructors are private and the
++// server factory owns every service still registered in this map. Removed
++// services retain their existing lifetime contract. Callback pointers are
++// borrowed and must never be deleted here.
++void BLEServer::destroyGattTreeAfterHostDeinit() {
++  while (BLEService *service = m_serviceMap.getFirst()) {
++    // Remove both map aliases while the object/handle is still valid. Starting
++    // a fresh iteration avoids retaining an iterator invalidated by removal.
++    m_serviceMap.removeService(service);
++    service->destroyOwnedCharacteristicsAfterHostDeinit();
++    delete service;
++  }
++}
++#endif
+ 
+ /*
+  * Remove service
+--- a/components/arduino/libraries/BLE/src/BLEServer.h
++++ b/components/arduino/libraries/BLE/src/BLEServer.h
+@@ -220,6 +220,9 @@
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+   uint16_t getGattsIf();
+   void registerApp(uint16_t);
++  // BLEDevice calls this only after checked host/controller terminal teardown.
++  // No asynchronous service-delete API or user callback is invoked here.
++  void destroyGattTreeAfterHostDeinit();
+   void handleGATTServerEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
+ #endif
+ 
+--- a/components/arduino/libraries/BLE/src/BLEService.cpp
++++ b/components/arduino/libraries/BLE/src/BLEService.cpp
+@@ -279,9 +279,24 @@
+  */
+ BLECharacteristic *BLEService::createCharacteristic(BLEUUID uuid, uint32_t properties) {
+   BLECharacteristic *pCharacteristic = new BLECharacteristic(uuid, properties);
++  pCharacteristic->m_ownedByService = true;
+   addCharacteristic(pCharacteristic);
+   return pCharacteristic;
+ }  // createCharacteristic
++
++#if defined(CONFIG_BLUEDROID_ENABLED)
++void BLEService::destroyOwnedCharacteristicsAfterHostDeinit() {
++  while (BLECharacteristic *characteristic = m_characteristicMap.getFirst()) {
++    m_characteristicMap.removeCharacteristic(characteristic);
++    // addCharacteristic can attach application-owned objects. Only our factory
++    // allocations belong to the terminal server tree.
++    if (characteristic->m_ownedByService) {
++      characteristic->destroyOwnedDescriptorsAfterHostDeinit();
++      delete characteristic;
++    }
++  }
++}
++#endif
+ 
+ BLECharacteristic *BLEService::getCharacteristic(const char *uuid) {
+   return getCharacteristic(BLEUUID(uuid));
+--- a/components/arduino/libraries/BLE/src/BLEService.h
++++ b/components/arduino/libraries/BLE/src/BLEService.h
+@@ -191,6 +191,7 @@
+    ***************************************************************************/
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
++  void destroyOwnedCharacteristicsAfterHostDeinit();
+   BLECharacteristic *getLastCreatedCharacteristic();
+   void handleGATTServerEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
+ #endif

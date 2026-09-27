@@ -1,0 +1,311 @@
+{
+  "schema": 1,
+  "phase": "before GATT ownership fix",
+  "firmware": {
+    "p4": {
+      "bootloader/bootloader.bin": {
+        "bytes": 23824,
+        "sha256": "40a68d1ab729c8747d9838b1acd952b98b3c92366e9bf93a0ccc0df4b1c6ba3c"
+      },
+      "partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "d6e3ea6ea3e74e8baf99c8fd5b70b9c96adbdf248ffca778474e70e17b64d7df"
+      },
+      "hardwareone-idf.bin": {
+        "bytes": 4098656,
+        "sha256": "0c5ea5f8ab43e230a4709ca07ddf4bdbdc0f2efcb58a41744c676cf95983fcc5"
+      }
+    },
+    "s3": {
+      "bootloader/bootloader.bin": {
+        "bytes": 22288,
+        "sha256": "5ec4ccf857a5aee7e52ae4b1c0462ab035b2c8e340eef3ad489a65b055a81e24"
+      },
+      "partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "c6ed2513218eaa1d5b591914aea7ce95715500cb49068ed13b891ce5fa7efc71"
+      },
+      "hardwareone-idf.bin": {
+        "bytes": 4732464,
+        "sha256": "f5c02cb55f2109839916d5bd9fcadf362f0643a29536d8375f0f12af0fc493ac"
+      }
+    }
+  },
+  "ble_runs": [
+    {
+      "run": "20260927T175606.366645Z-742f4813",
+      "status": "failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: connect_failed",
+          "mtu": null,
+          "mesh_messages": 0
+        }
+      ]
+    },
+    {
+      "run": "20260927T175636.201327Z-2c755730",
+      "status": "passed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "passed",
+          "error": null,
+          "mtu": 517,
+          "mesh_messages": 2
+        },
+        {
+          "name": "reconnect",
+          "status": "passed",
+          "error": null,
+          "mtu": 517,
+          "mesh_messages": 2
+        }
+      ]
+    },
+    {
+      "run": "20260927T180001.936869Z-507fb503",
+      "status": "passed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "passed",
+          "error": null,
+          "mtu": 517,
+          "mesh_messages": 2
+        },
+        {
+          "name": "reconnect",
+          "status": "passed",
+          "error": null,
+          "mtu": 517,
+          "mesh_messages": 2
+        }
+      ]
+    },
+    {
+      "run": "20260927T180111.747113Z-7ce2f1f6",
+      "status": "passed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "passed",
+          "error": null,
+          "mtu": 517,
+          "mesh_messages": 2
+        },
+        {
+          "name": "reconnect",
+          "status": "passed",
+          "error": null,
+          "mtu": 517,
+          "mesh_messages": 2
+        }
+      ]
+    }
+  ],
+  "memory_samples": [
+    {
+      "board": "p4",
+      "dram_free": 219499,
+      "internal_largest": 180224,
+      "psram_free": 32903792
+    },
+    {
+      "board": "p4",
+      "dram_free": 216947,
+      "internal_largest": 172032,
+      "psram_free": 32901848
+    },
+    {
+      "board": "p4",
+      "dram_free": 207315,
+      "internal_largest": 167936,
+      "psram_free": 32852156
+    },
+    {
+      "board": "p4",
+      "dram_free": 204787,
+      "internal_largest": 167936,
+      "psram_free": 32850268
+    },
+    {
+      "board": "p4",
+      "dram_free": 196007,
+      "internal_largest": 155648,
+      "psram_free": 32852156
+    },
+    {
+      "board": "p4",
+      "dram_free": 194039,
+      "internal_largest": 155648,
+      "psram_free": 32850272
+    },
+    {
+      "board": "p4",
+      "dram_free": 184663,
+      "internal_largest": 147456,
+      "psram_free": 32852156
+    },
+    {
+      "board": "p4",
+      "dram_free": 182735,
+      "internal_largest": 143360,
+      "psram_free": 32850268
+    },
+    {
+      "board": "p4",
+      "dram_free": 181791,
+      "internal_largest": 143360,
+      "psram_free": 32849224
+    },
+    {
+      "board": "s3",
+      "dram_free": 57583,
+      "internal_largest": 31744,
+      "psram_free": 6971560
+    },
+    {
+      "board": "s3",
+      "dram_free": 54911,
+      "internal_largest": 31744,
+      "psram_free": 6969652
+    },
+    {
+      "board": "s3",
+      "dram_free": 46151,
+      "internal_largest": 31744,
+      "psram_free": 6971560
+    },
+    {
+      "board": "s3",
+      "dram_free": 43515,
+      "internal_largest": 31744,
+      "psram_free": 6969652
+    },
+    {
+      "board": "s3",
+      "dram_free": 34747,
+      "internal_largest": 21504,
+      "psram_free": 6971560
+    },
+    {
+      "board": "s3",
+      "dram_free": 32091,
+      "internal_largest": 23552,
+      "psram_free": 6969652
+    }
+  ],
+  "http_runs": [
+    {
+      "run": "20260927T175741.826445Z-8a4efd1a",
+      "status": "failed",
+      "error": "Timed-out serial command did not reach its completion barrier; close/reopen required",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/login",
+          "status": 200,
+          "bytes": 22525
+        },
+        {
+          "method": "GET",
+          "path": "/api/system",
+          "status": 401,
+          "bytes": 62
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "status": 303,
+          "bytes": 0
+        },
+        {
+          "method": "GET",
+          "path": "/dashboard",
+          "status": 200,
+          "bytes": 84931
+        },
+        {
+          "method": "GET",
+          "path": "/settings",
+          "status": 200,
+          "bytes": 216013
+        },
+        {
+          "method": "GET",
+          "path": "/bluetooth",
+          "status": 200,
+          "bytes": 84191
+        },
+        {
+          "method": "GET",
+          "path": "/espnow",
+          "status": 200,
+          "bytes": 258115
+        },
+        {
+          "method": "GET",
+          "path": "/cli",
+          "status": 200,
+          "bytes": 95688
+        },
+        {
+          "method": "GET",
+          "path": "/api/system",
+          "status": 200,
+          "bytes": 843
+        },
+        {
+          "method": "GET",
+          "path": "/api/buildconfig",
+          "status": 200,
+          "bytes": 274
+        },
+        {
+          "method": "POST",
+          "path": "/api/cli",
+          "status": 200,
+          "bytes": 70
+        },
+        {
+          "method": "POST",
+          "path": "/api/cli",
+          "status": 200,
+          "bytes": 883
+        },
+        {
+          "method": "POST",
+          "path": "/api/cli",
+          "status": 200,
+          "bytes": 32
+        },
+        {
+          "method": "POST",
+          "path": "/api/cli",
+          "status": 200,
+          "bytes": 148
+        },
+        {
+          "method": "GET",
+          "path": "/api/system",
+          "status": 200,
+          "bytes": 844
+        },
+        {
+          "method": "GET",
+          "path": "/bluetooth",
+          "status": 200,
+          "bytes": 84191
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "Memory order: P4 client/server warm-up plus three further client/server pairs, then settled server; S3 three client/server pairs.",
+    "First BLE run used S3 setting3 (-3dBm); following runs used7 (+9dBm), with Wi-Fi/mesh active.",
+    "HTTP16 response checks passed; run failed on interleaved P4 serial completion during mesh callback. See SERIAL-NOTE.md."
+  ]
+}

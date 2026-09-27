@@ -1,0 +1,1056 @@
+--- a/components/hardwareone/Bluetooth.cpp
++++ b/components/hardwareone/Bluetooth.cpp
+@@ -752,6 +752,13 @@
+     else                               gLastNotifyResult = BleNotifyResult::TERMINAL;   // no client / notify disabled → don't spin
+   }
+ };
++
++// Arduino borrows these callback pointers. Their stateless implementations
++// survive role changes; allocating them on every Server start leaks them.
++static ServerCallbacks sServerCallbacks;
++static CmdRequestCallbacks sCmdRequestCallbacks;
++static CmdResponseCallbacks sCmdResponseCallbacks;
++static CmdStatusCallbacks sCmdStatusCallbacks;
+ 
+ // =============================================================================
+ // COMMAND PROCESSING
+@@ -1353,14 +1360,14 @@
+   if (!checkMemoryAvailable("bluetooth", nullptr)) {
+     if (sBLEToggleCount > 0) {
+       broadcastOutput("[BLE] Insufficient memory for Bluetooth (need 52KB DRAM)");
+-      broadcastOutput("[BLE] ESP32 BLE leaks ~10KB DRAM per stop/start cycle. Reboot to recover.");
++      broadcastOutput("[BLE] Free internal DRAM before restarting Bluetooth.");
+     } else {
+       broadcastOutput("[BLE] Insufficient memory for Bluetooth (need 52KB DRAM)");
+     }
+     return false;
+   }
+   
+-  // Track DRAM before init to measure leak on deinit
++  // Track total free-heap change; other subsystems can allocate in this interval.
+   sBLEHeapBeforeInit = ESP.getFreeHeap();
+   
+   // BLESystemState owns Arduino String members. ps_alloc() supplies raw storage,
+@@ -1428,7 +1435,7 @@
+ 
+   // Create server
+   pServer = BLEDevice::createServer();
+-  pServer->setCallbacks(new ServerCallbacks());
++  pServer->setCallbacks(&sServerCallbacks);
+   
+   // --------------------------------------------
+   // Device Info Service (standard 0x180A)
+@@ -1471,22 +1478,22 @@
+   // Refuse ATT prepared writes: the generic Arduino accumulator is shared by
+   // connections and an allocation failure can otherwise commit a prefix.
+   pCmdRequestChar->setPreparedWriteEnabled(false);
+-  pCmdRequestChar->setCallbacks(new CmdRequestCallbacks());
++  pCmdRequestChar->setCallbacks(&sCmdRequestCallbacks);
+   
+   // Response characteristic (notify to client - command results)
+   pCmdResponseChar = pCommandService->createCharacteristic(
+     BLE_CMD_RESPONSE_CHAR_UUID,
+     BLECharacteristic::PROPERTY_NOTIFY
+   );
+-  pCmdResponseChar->addDescriptor(new BLE2902());  // Required for notifications
+-  pCmdResponseChar->setCallbacks(new CmdResponseCallbacks());  // onStatus → notify backpressure
++  pCmdResponseChar->addDescriptor(new BLE2902(), true);  // Owned CCCD for notifications
++  pCmdResponseChar->setCallbacks(&sCmdResponseCallbacks);  // onStatus → notify backpressure
+   
+   // Status characteristic (read - connection info)
+   pCmdStatusChar = pCommandService->createCharacteristic(
+     BLE_CMD_STATUS_CHAR_UUID,
+     BLECharacteristic::PROPERTY_READ
+   );
+-  pCmdStatusChar->setCallbacks(new CmdStatusCallbacks());
++  pCmdStatusChar->setCallbacks(&sCmdStatusCallbacks);
+   
+   pCommandService->start();
+   
+@@ -1500,21 +1507,21 @@
+     BLE_SENSOR_DATA_CHAR_UUID,
+     BLECharacteristic::PROPERTY_NOTIFY
+   );
+-  pSensorDataChar->addDescriptor(new BLE2902());
++  pSensorDataChar->addDescriptor(new BLE2902(), true);
+   
+   // System status characteristic (notify - system health updates)
+   pSystemStatusChar = pDataService->createCharacteristic(
+     BLE_SYSTEM_STATUS_CHAR_UUID,
+     BLECharacteristic::PROPERTY_NOTIFY
+   );
+-  pSystemStatusChar->addDescriptor(new BLE2902());
++  pSystemStatusChar->addDescriptor(new BLE2902(), true);
+   
+   // Event notification characteristic (notify - important events)
+   pEventNotifyChar = pDataService->createCharacteristic(
+     BLE_EVENT_NOTIFY_CHAR_UUID,
+     BLECharacteristic::PROPERTY_NOTIFY
+   );
+-  pEventNotifyChar->addDescriptor(new BLE2902());
++  pEventNotifyChar->addDescriptor(new BLE2902(), true);
+   
+   // Stream control characteristic (write - enable/disable streams)
+   pStreamControlChar = pDataService->createCharacteristic(
+@@ -1643,7 +1650,7 @@
+   int leaked = (int)sBLEHeapBeforeInit - (int)heapAfterDeinit;
+   if (leaked > 0) {
+     char buf[96];
+-    snprintf(buf, sizeof(buf), "[BLE] Deinitialized (DRAM leak: ~%dKB this cycle, %d toggle%s total)",
++    snprintf(buf, sizeof(buf), "[BLE] Deinitialized (heap change since start: -%dKB, %d toggle%s total)",
+              leaked / 1024, sBLEToggleCount, sBLEToggleCount == 1 ? "" : "s");
+     broadcastOutput(buf);
+   } else {
+@@ -2568,7 +2575,7 @@
+     
+     // Apply first: a failed controller operation must not be reported as saved
+     // and applied. With BLE off, preserve the setting for the next start.
+-    if (gBLEState && gBLEState->initialized) {
++    if (bluetoothHalStatus().ready()) {
+       const esp_err_t powerErr = bluetoothHalSetTxPower((uint8_t)level);
+       if (powerErr != ESP_OK) {
+         if (!ensureDebugBuffer()) return "Error: BLE TX power update failed";
+--- a/components/hardwareone/CMakeLists.txt
++++ b/components/hardwareone/CMakeLists.txt
+@@ -500,6 +500,7 @@
+         json
+         mbedtls
+         esp_wifi
++        esp32-camera
+         fatfs
+         sdmmc
+         esp_driver_sdspi
+--- a/components/hardwareone/G2_Glasses.cpp
++++ b/components/hardwareone/G2_Glasses.cpp
+@@ -21,8 +21,6 @@
+ #include <BLEScan.h>
+ #include <BLEAdvertisedDevice.h>
+ #include <esp_gap_ble_api.h>  // esp_ble_gap_update_conn_params (HIGH priority)
+-#include <esp_bt.h>
+-#include <esp_bt_main.h>
+ #include <esp_attr.h>         // EXT_RAM_BSS_ATTR
+ #include <esp_heap_caps.h>    // heap_caps_get_free_size — ESP.getFreeHeap() is
+                               // MALLOC_CAP_INTERNAL with no 8BIT, so it counts the
+@@ -34,6 +32,7 @@
+ #include "G2_ConversateSession.h"
+ #include "System_Lz4.h"     // lz4Compress* — CompressMode=2 image push (Q32/Q32f)
+ #include "Bluetooth.h"
++#include "HAL_Bluetooth.h"
+ #include "System_Debug.h"
+ #include "System_Filesystem.h"  // requireQuotedToken (uniform quoted-path rule)
+ #include "System_Command.h"
+@@ -2932,36 +2931,45 @@
+ // Forward decls
+ // =============================================================================
+ 
+-// Raise-only local preferred ATT MTU, request per-connection exchange, wait
+-// for CFG_MTU_EVT (Arduino BLEClient updates m_mtu there). See plan:
+-// per-link BLE MTU / stop global local-MTU pollution.
++// Raise-only local preferred ATT MTU; preserve a completed exchange. Otherwise
++// let initial service discovery settle before requesting a single exchange.
++// Discovery has its own library bound (30 seconds); timeoutMs bounds only the
++// subsequent wait for CFG_MTU_EVT, which owns the negotiated MTU value.
+ uint16_t bleNegotiateConnMtu(BLEClient* client, uint16_t preferred,
+                              uint32_t timeoutMs, const char* logTag) {
+-  if (!client) return 23;
++  if (!client || !client->isConnected()) return 23;
+   if (!logTag) logTag = "BLE";
+ 
+   if (BLEDevice::getMTU() < preferred) {
+     BLEDevice::setMTU(preferred);
+   }
+ 
+-  // An exchange may already have completed before we run (library-internal
+-  // auto-request). Capture that before we re-request; getMTU() is only ever
+-  // written from CFG_MTU_EVT (patched lib), so >23 means a real negotiation.
+-  const uint16_t before = client->getMTU();
+-  client->setMTU(preferred);
+-
+-  uint16_t neg = before;
+-  if (before <= 23) {
++  uint16_t neg = client->getMTU();
++  if (neg <= 23) {
++    // Bluedroid may report CONNECT before OPEN binds the Arduino connection
++    // ID, so its automatic exchange can be skipped. An immediate explicit
++    // request can instead collide with initial ATT discovery (GATT_BUSY).
++    // G2/R1 both require services; an empty/failed lookup cannot qualify them.
++    auto* services = client->getServices();
++    if (!client->isConnected() || !services || services->empty()) {
++      DEBUG_G2F("[%s] MTU: service discovery unavailable; no exchange requested", logTag);
++      return 23;
++    }
++    neg = client->getMTU();
++  }
++  if (neg <= 23 && client->setMTU(preferred)) {
+     // Elapsed-time compare, not deadline compare: millis()+timeoutMs overflows
+     // near the 32-bit wrap (~49.7 days) and a deadline compare exits instantly.
+     const uint32_t start = millis();
+-    while ((uint32_t)(millis() - start) < timeoutMs) {
++    while (client->isConnected() &&
++           (uint32_t)(millis() - start) < timeoutMs) {
+       neg = client->getMTU();
+       if (neg > 23) break;
+       vTaskDelay(pdMS_TO_TICKS(10));
+     }
+     neg = client->getMTU();
+   }
++  if (!client->isConnected()) return 23;
+ 
+   DEBUG_G2F("[%s] MTU: local_pref=%u negotiated=%u",
+             logTag,
+@@ -3300,7 +3308,7 @@
+                                const char* src) {
+   memset(dst, 0, sizeof(dst));
+   if (!src) return;
+-  strncpy(dst, src, sizeof(dst) - 1);
++  memcpy(dst, src, strnlen(src, sizeof(dst) - 1));
+ }
+ 
+ static void g2ScanSetMacContext(const char* filterL, const char* filterR,
+@@ -15784,12 +15792,11 @@
+     return false;
+   }
+   // A disable/role-change path may already have completed the terminal host
+-  // teardown requested by a quarantined client. The native terminal states
+-  // are the positive lifetime acknowledgement; do not carry a client-only
++  // teardown requested by a quarantined client. Terminal host state and a
++  // checked local/remote controller teardown acknowledge this lifetime; do not
++  // carry a client-only
+   // admission block into the next clean generation.
+-  if (gBleClientRetirementPeerMask != 0 &&
+-      esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED &&
+-      esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
++  if (gBleClientRetirementPeerMask != 0 && bluetoothHalStatus().stopped()) {
+     bleCentralClientsTerminalTeardownAcknowledged();
+   }
+   if (bleStackLifecycleFaulted() &&
+@@ -15845,8 +15852,7 @@
+       return false;
+     }
+   }
+-  if (BLEDevice::getInitialized() || isBluedroidHostEnabled() ||
+-      esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE) {
++  if (!bluetoothHalStatus().stopped()) {
+     // A runtime-only G2 deinit can leave the host/controller generation up.
+     // Normalize it with the checked host-first teardown; a controller-only
+     // btStop/btStart while Bluedroid is live preserves exactly the stale TCB /
+@@ -15860,7 +15866,7 @@
+       return false;
+     }
+     BLEDevice::setCustomGapHandler(nullptr);
+-    const BLEDeviceDeinitResult reset = BLEDevice::deinitChecked(false);
++    const BluetoothHalShutdownResult reset = bluetoothHalDeinit();
+     if (!reset.success) {
+       bleStackSetLifecycleFault(true);
+       broadcastOutput("[G2] Existing BLE host could not be normalized; reboot required");
+@@ -15905,14 +15911,12 @@
+   templeInit(gL, 'L');
+   templeInit(gR, 'R');
+ 
+-  BLEDevice::init("HardwareOne");
+-  if (!BLEDevice::getInitialized() || !isBluedroidHostEnabled() ||
+-      !isBleControllerEnabled()) {
+-    // BLEDevice::init can fail after enabling the native controller/host but
++  if (!bluetoothHalInit("HardwareOne")) {
++    // Initialization can fail after enabling the controller/host but
+     // before publishing its Arduino initialized flag. Never free app state
+     // while that partial host generation can still dispatch callbacks.
+     BLEDevice::setCustomGapHandler(nullptr);
+-    const BLEDeviceDeinitResult rollback = BLEDevice::deinitChecked(false);
++    const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
+     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
+     if (!rollback.success) bleStackSetLifecycleFault(true);
+     gG2State->~G2ClientState();
+@@ -15922,6 +15926,17 @@
+         ? "[G2] BLE host initialization failed (rolled back)"
+         : "[G2] BLE host initialization failed; teardown incomplete — reboot required");
+     return false;
++  }
++  // Respect the shared setting in either role when the backend can apply it.
++  // Hosted keeps its companion default and explicitly lacks this capability.
++  if (bluetoothHalSupportsTxPower()) {
++    const esp_err_t powerErr = bluetoothHalSetTxPower(
++        (uint8_t)constrain(gSettings.bleTxPower, 0, 7));
++    if (powerErr != ESP_OK) {
++      BROADCAST_PRINTF("[G2] TX power setting failed: %s", esp_err_to_name(powerErr));
++    }
++  } else {
++    broadcastOutput("[G2] Radio backend controls BLE TX power; using companion default");
+   }
+   BLEDevice::setMTU(MTU_TARGET);
+   // Make the APPLIED connection interval observable. Until now nothing in the
+@@ -15937,7 +15952,7 @@
+   gScan = BLEDevice::getScan();
+   if (!gScan || !g2ScanCallbackResetAfterHostInit()) {
+     BLEDevice::setCustomGapHandler(nullptr);
+-    const BLEDeviceDeinitResult rollback = BLEDevice::deinitChecked(false);
++    const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
+     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
+     if (!rollback.success) bleStackSetLifecycleFault(true);
+     gG2State->~G2ClientState();
+@@ -16107,12 +16122,12 @@
+ // detects. Retrying can never clear it, so something has to reset the stack;
+ // this is that, minus the reboot.
+ //
+-// BLEDevice::deinit(false) is the operative step: it runs
+-// esp_bluedroid_disable/deinit AND esp_bt_controller_disable/deinit, which is
++// bluetoothHalDeinit() is the operative step: it shuts down the local host AND
++// the local or Hosted controller, which is
+ // what drops the parked TCB and the controller's cancel state. A btStop /
+ // btStart controller cycle is NOT sufficient — the stuck TCB lives in the
+ // HOST, and a controller-only bounce leaves it exactly where it was. Memory is
+-// retained (release_memory=false) so initG2Client's BLEDevice::init brings the
++// retained (release_memory=false) so initG2Client's HAL initialization brings the
+ // stack straight back up.
+ //
+ // deinitBluetooth() is not the path here either: it early-returns unless the
+@@ -16198,7 +16213,7 @@
+   // suppress a later safe recovery for ten minutes.
+   sBleLastRecycleMs = now ? now : 1;   // 0 is the "never recycled" sentinel
+   BLEDevice::setCustomGapHandler(nullptr);
+-  const BLEDeviceDeinitResult deinitResult = BLEDevice::deinitChecked(false);
++  const BluetoothHalShutdownResult deinitResult = bluetoothHalDeinit();
+   vTaskDelay(pdMS_TO_TICKS(200));
+ 
+   if (!deinitResult.success) {
+@@ -16217,14 +16232,12 @@
+   }
+   bleCentralClientsTerminalTeardownAcknowledged();
+ 
+-  const esp_bluedroid_status_t host = esp_bluedroid_get_status();
+-  const esp_bt_controller_status_t controller = esp_bt_controller_get_status();
+-  if (host != ESP_BLUEDROID_STATUS_UNINITIALIZED ||
+-      controller != ESP_BT_CONTROLLER_STATUS_IDLE) {
++  const BluetoothHalStatus stack = bluetoothHalStatus();
++  if (!stack.stopped()) {
+     bleStackSetLifecycleFault(true);
+     BROADCAST_PRINTF("[BLE] Stack recycle FAILED to normalize host/controller "
+-                     "(host=%d controller=%d) — reboot required",
+-                     (int)host, (int)controller);
++                     "(hostUninitialized=%d controller=%d) — reboot required",
++                     (int)stack.hostUninitialized, (int)stack.controller);
+     systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "normalize-failed", nullptr);
+     return false;
+   }
+@@ -16257,8 +16270,7 @@
+   // explicit role transition remains serialized by the same transition token.
+   const bool ok = initG2Client();
+   if (ok) {
+-    if (!BLEDevice::getInitialized() || !isBluedroidHostEnabled() ||
+-        !isBleControllerEnabled() || !isG2ClientInitialized() ||
++    if (!bluetoothHalStatus().ready() || !isG2ClientInitialized() ||
+         isBleServerInitialized()) {
+       BROADCAST_PRINTF("[BLE] Stack recycle re-init reported success but "
+                        "host/controller state is incomplete — reboot required");
+@@ -20857,6 +20869,8 @@
+     DEBUG_G2F("[G2] page-swap enqueue: worker unavailable");
+     return false;
+   }
++  // The snapshot owns a submitter claim, including on lifecycle rejection.
++  G2UiSubmitClaim submitClaim;
+   uint32_t lifecycleEpoch = 0;
+   uint32_t sourcePresentationEpoch = 0;
+   uint32_t sourceTextSlotSerial = 0;
+@@ -20869,7 +20883,6 @@
+   args->lifecycleEpoch = lifecycleEpoch;
+   args->sourcePresentationEpoch = sourcePresentationEpoch;
+   args->sourceTextSlotSerial = sourceTextSlotSerial;
+-  G2UiSubmitClaim submitClaim;
+   LensUiJob* job = new (std::nothrow) LensUiJob{};
+   if (!job) {
+     DEBUG_G2F("[G2] page-swap enqueue: LensUiJob alloc failed");
+--- a/components/hardwareone/G2_Page_Power.cpp
++++ b/components/hardwareone/G2_Page_Power.cpp
+@@ -28,8 +28,8 @@
+ // calls setCpuFrequencyMhz raw, WITHOUT the I2C-drain guard that wraps the
+ // power-save downclock (setCpuFrequencyDrained, HardwareOne.cpp). The OLED and
+ // CLI already carry the same gap; hardening the command path is a separate
+-// firmware change. (Note: applyPowerMode now only ever sets >=80 MHz — the raw
+-// jump to UltraSaver's 40 MHz is gone; 40 is applied solely by the drain-guarded
++// firmware change. Active modes stay at the target PLL floor or above;
++// UltraSaver's lower idle clock is applied solely by the drain-guarded
+ // idle power-save path, so the riskiest transition is already covered.)
+ 
+ #include "G2_Page_Power.h"
+@@ -58,10 +58,8 @@
+ // The five presets, in gSettings.powerMode order, and the command each
+ // dispatches. `power mode X` (not raw `cpufreq N`) is the OLED-established
+ // path — it also sets display brightness and selects UltraSaver, whose
+-// idle-only 40 MHz floor `cpufreq` (80/160/240) cannot express. (UltraSaver's
+-// ACTIVE clock is 80 MHz; the 40 MHz kicks in only when idle power-save
+-// blanks the screen — see powerSaveTick in HardwareOne.cpp. Locked alone
+-// keeps 240 through that idle path; Performance is 240/80.)
++// idle-only XTAL clock the interactive `cpufreq` choices cannot express.
++// Active/idle values below come from the shared target power policy.
+ static const char* const kPowerModeCmds[POWER_MODE_COUNT] = {
+   "power mode perf",      // POWER_MODE_PERFORMANCE
+   "power mode balanced",  // POWER_MODE_BALANCED
+@@ -107,21 +105,22 @@
+ 
+ // CPU preset picker rows — an "[X] " marker on the row matching the current
+ // gSettings.powerMode (picker precedent from Camera Settings' resolution list).
+-// Modes show their interactive clock; UltraSaver shows "80/40" because it runs
+-// at the 80 MHz floor while used and only sinks to 40 MHz once idle/asleep.
+-// Performance/Balanced show "240/80" and "160/80". Locked shows a single 240.
++// Each mode displays the active and idle clocks from the shared target policy.
+ static size_t buildCpuRows() {
+   snprintf(gRows[0], POWER_ROW_LEN, "<- Back");
+   for (uint8_t m = 0; m < POWER_MODE_COUNT; m++) {
+     const char* mark = (m == gSettings.powerMode) ? "[X]" : "[ ]";
++    // Keep complete three-digit active/idle clocks inside the 23-char row.
++    const char* name = m == POWER_MODE_PERFORMANCE ? "Perf" :
++                       m == POWER_MODE_ULTRASAVER ? "Ultra" : getPowerModeName(m);
+     const unsigned act  = (unsigned)getPowerModeActiveCpuFreq(m);
+     const unsigned idle = (unsigned)getPowerModeIdleCpuFreq(m);
+     if (idle < act) {
+       snprintf(gRows[m + 1], POWER_ROW_LEN, "%s %s %u/%uMHz",
+-               mark, getPowerModeName(m), act, idle);
++               mark, name, act, idle);
+     } else {
+       snprintf(gRows[m + 1], POWER_ROW_LEN, "%s %s %uMHz",
+-               mark, getPowerModeName(m), act);
++               mark, name, act);
+     }
+   }
+   for (size_t i = 0; i < 1 + POWER_MODE_COUNT; i++) gRowPtrs[i] = gRows[i];
+--- a/components/hardwareone/G2_Ring.cpp
++++ b/components/hardwareone/G2_Ring.cpp
+@@ -2260,7 +2260,7 @@
+ static void ringCopyAddressText(
+     char (&dst)[BLE_PEER_ADDRESS_TEXT_CAPACITY], const char* src) {
+   memset(dst, 0, sizeof(dst));
+-  if (src) strncpy(dst, src, sizeof(dst) - 1);
++  if (src) memcpy(dst, src, strnlen(src, sizeof(dst) - 1));
+ }
+ 
+ static void ringRequestToJob(const BlePeerConnectRequest& request,
+@@ -5413,6 +5413,14 @@
+   }
+   DEBUG_RING_LIFECYCLEF("[RING] Subscribing to notifications on %s",
+             G2RING_CHAR_NOTIFY_UUID);
++  // R1 requires link encryption for its CCCD before application pairAuth.
++  // Request headless Just Works encryption; the checked subscription below
++  // still requires the peripheral to acknowledge the descriptor write.
++  // getDescriptor returns the characteristic-owned cached descriptor.
++  if (BLERemoteDescriptor* cccd =
++          gRing.notifyChar->getDescriptor(BLEUUID((uint16_t)0x2902))) {
++    cccd->setAuth(ESP_GATT_AUTH_REQ_NO_MITM);
++  }
+   const BLERemoteNotifyResult ringNotify =
+       gRing.notifyChar->registerForNotify(ringNotifyThunk);
+   if (!ringNotify.success) {
+--- a/components/hardwareone/HAL_Bluetooth.cpp
++++ b/components/hardwareone/HAL_Bluetooth.cpp
+@@ -13,7 +13,9 @@
+ 
+ BluetoothHalStatus bluetoothHalStatus() {
+   BluetoothHalStatus status{};
+-  status.hostEnabled = esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED;
++  const esp_bluedroid_status_t host = esp_bluedroid_get_status();
++  status.hostEnabled = host == ESP_BLUEDROID_STATUS_ENABLED;
++  status.hostUninitialized = host == ESP_BLUEDROID_STATUS_UNINITIALIZED;
+   status.stackInitialized = BLEDevice::getInitialized();
+ #if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
+   status.backend = BluetoothHalBackend::Hosted;
+@@ -49,8 +51,7 @@
+   const BLEDeviceDeinitResult native = BLEDevice::deinitChecked(false);
+   const BluetoothHalStatus status = bluetoothHalStatus();
+   return {
+-    native.success && !status.stackInitialized && !status.hostEnabled &&
+-        status.controller == BluetoothHalControllerState::Idle,
++    native.success && status.stopped(),
+     static_cast<uint8_t>(native.phase),
+     native.hostStatusBefore, native.hostStatusAfter,
+     native.controllerStatusBefore, native.controllerStatusAfter,
+@@ -71,7 +72,13 @@
+ esp_err_t bluetoothHalSetTxPower(uint8_t level) {
+   if (level > 7) return ESP_ERR_INVALID_ARG;
+ #if !CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID && CONFIG_BT_CONTROLLER_ENABLED
+-  const esp_power_level_t power = static_cast<esp_power_level_t>(level);
++  // Persisted setting 0..7 means -12..+9 dBm. Controller enums differ by SoC:
++  // ESP32 starts at -12 dBm, whereas S3's controller starts at -24 dBm.
++  static constexpr esp_power_level_t levels[] = {
++    ESP_PWR_LVL_N12, ESP_PWR_LVL_N9, ESP_PWR_LVL_N6, ESP_PWR_LVL_N3,
++    ESP_PWR_LVL_N0, ESP_PWR_LVL_P3, ESP_PWR_LVL_P6, ESP_PWR_LVL_P9
++  };
++  const esp_power_level_t power = levels[level];
+   esp_err_t result = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, power);
+   if (result != ESP_OK) return result;
+   result = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, power);
+--- a/components/hardwareone/HAL_Bluetooth.h
++++ b/components/hardwareone/HAL_Bluetooth.h
+@@ -23,11 +23,19 @@
+   BluetoothHalControllerState controller;
+   bool controllerStateIsLive;
+   bool hostEnabled;
++  bool hostUninitialized;
+   bool stackInitialized;
+ 
+   bool ready() const {
+     return stackInitialized && hostEnabled &&
+            controller == BluetoothHalControllerState::Enabled;
++  }
++
++  // A disabled but still initialized host can retain callback routes. Only a
++  // terminal host/controller generation may release quarantined app clients.
++  bool stopped() const {
++    return !stackInitialized && hostUninitialized &&
++           controller == BluetoothHalControllerState::Idle;
+   }
+ };
+ 
+--- a/components/hardwareone/OLED_Mode_Power.cpp
++++ b/components/hardwareone/OLED_Mode_Power.cpp
+@@ -47,13 +47,20 @@
+ static void populatePowerCpuMenu() {
+   initPowerScrollStates();
+   oledScrollClearKeepSelection(&sPowerCpuScroll);
+-  oledScrollAddItem(&sPowerCpuScroll, "Performance 240/80MHz");
+-  oledScrollAddItem(&sPowerCpuScroll, "Balanced 160/80MHz");
+-  oledScrollAddItem(&sPowerCpuScroll, "PowerSaver 80MHz");
+-  // 80 MHz interactive, 40 MHz only once idle power-save blanks the screen.
+-  oledScrollAddItem(&sPowerCpuScroll, "UltraSaver 80/40MHz");
+-  // Always-240 — idle power-save blanks OLED but does not downclock.
+-  oledScrollAddItem(&sPowerCpuScroll, "Locked 240MHz");
++  // Scroll items borrow these pointers; each row needs persistent storage.
++  static char modeLabels[POWER_MODE_COUNT][40];
++  for (uint8_t mode = 0; mode < POWER_MODE_COUNT; ++mode) {
++    const unsigned long active = getPowerModeActiveCpuFreq(mode);
++    const unsigned long idle = getPowerModeIdleCpuFreq(mode);
++    if (idle < active) {
++      snprintf(modeLabels[mode], sizeof(modeLabels[mode]), "%s %lu/%luMHz",
++               getPowerModeName(mode), active, idle);
++    } else {
++      snprintf(modeLabels[mode], sizeof(modeLabels[mode]), "%s %luMHz",
++               getPowerModeName(mode), active);
++    }
++    oledScrollAddItem(&sPowerCpuScroll, modeLabels[mode]);
++  }
+   oledScrollClampSelection(&sPowerCpuScroll);
+ }
+ 
+--- a/components/hardwareone/System_Power.cpp
++++ b/components/hardwareone/System_Power.cpp
+@@ -26,12 +26,31 @@
+ };
+ 
+ static const PowerModeConfig gPowerModes[] = {
+-  {"Performance", 240, 100},  // 0: Full speed (idle → 80)
+-  {"Balanced",    160, 80},   // 1: Good balance (idle → 80)
+-  {"PowerSaver",  80,  50},   // 2: Battery focused
+-  {"UltraSaver",  40,  30},   // 3: Maximum savings (idle → 40)
+-  {"Locked",      240, 100}   // 4: Always-240 (idle keeps 240 — no downclock)
++  {"Performance", POWER_CPU_PERFORMANCE_MHZ, 100},
++  {"Balanced",    POWER_CPU_BALANCED_MHZ,     80},
++  {"PowerSaver",  POWER_INTERACTIVE_FLOOR_MHZ, 50},
++  {"UltraSaver",  POWER_CPU_ULTRA_IDLE_MHZ,   30},
++  {"Locked",      POWER_CPU_PERFORMANCE_MHZ, 100}
+ };
++
++static const uint32_t gPowerCpuFrequencies[] = {
++  POWER_INTERACTIVE_FLOOR_MHZ, POWER_CPU_BALANCED_MHZ, POWER_CPU_PERFORMANCE_MHZ
++};
++
++size_t getPowerCpuFrequencyCount() {
++  return sizeof(gPowerCpuFrequencies) / sizeof(gPowerCpuFrequencies[0]);
++}
++
++uint32_t getPowerCpuFrequencyMhz(size_t index) {
++  return index < getPowerCpuFrequencyCount() ? gPowerCpuFrequencies[index] : 0;
++}
++
++bool isPowerCpuFrequencySupported(uint32_t mhz) {
++  for (size_t i = 0; i < getPowerCpuFrequencyCount(); ++i) {
++    if (gPowerCpuFrequencies[i] == mhz) return true;
++  }
++  return false;
++}
+ 
+ static_assert(sizeof(gPowerModes) / sizeof(gPowerModes[0]) == POWER_MODE_COUNT,
+               "gPowerModes must match POWER_MODE_COUNT");
+@@ -49,12 +68,12 @@
+ 
+ uint32_t getPowerModeCpuFreq(uint8_t mode) {
+   if (mode >= POWER_MODE_COUNT) {
+-    return 240;  // Default to performance
++    return POWER_CPU_PERFORMANCE_MHZ;  // Default to target performance
+   }
+   return gPowerModes[mode].cpuFreqMhz;
+ }
+ 
+-// Interactive clock = nominal clamped UP to the floor. UltraSaver (40) -> 80;
++// Interactive clock = nominal clamped UP to the target PLL floor;
+ // all faster modes are returned unchanged.
+ uint32_t getPowerModeActiveCpuFreq(uint8_t mode) {
+   uint32_t f = getPowerModeCpuFreq(mode);
+@@ -62,9 +81,8 @@
+ }
+ 
+ // Idle clock while OLED power-save has blanked the panel (radio stays up).
+-// Locked alone holds its interactive clock (240) — screen blanks but the core
+-// does not downclock. Balanced/Performance/PowerSaver floor to 80. UltraSaver
+-// sinks to its nominal 40.
++// Locked holds its interactive clock. Other modes use the target PLL floor,
++// except UltraSaver, which uses its nominal idle-only XTAL clock.
+ uint32_t getPowerModeIdleCpuFreq(uint8_t mode) {
+   if (mode == POWER_MODE_LOCKED) {
+     return getPowerModeActiveCpuFreq(mode);
+@@ -80,21 +98,17 @@
+   return gPowerModes[mode].displayBrightnessPercent;
+ }
+ 
+-void applyPowerMode(uint8_t mode) {
++bool applyPowerMode(uint8_t mode) {
+   DEBUG_SYSTEMF("[POWER] applyPowerMode called with mode=%d", mode);
+   
+   if (mode >= POWER_MODE_COUNT) {
+     ERROR_SYSTEMF("Invalid power mode: %d", mode);
+-    return;
++    return false;
+   }
+   
+   const PowerModeConfig& config = gPowerModes[mode];
+-  // Apply the INTERACTIVE clock, not the nominal table value. For UltraSaver
+-  // that means 80 MHz, never a raw jump to 40: 40 MHz makes the UI unusably
+-  // laggy, so it is reserved for the idle/asleep state and applied only by the
+-  // (drain-guarded) idle power-save path in powerSaveTick(). Consequence: this
+-  // function now never switches TO 40 MHz, so the old raw-setCpuFrequencyMhz
+-  // hazard here only ever targets >=80 MHz (same as PowerSaver always did).
++  // UltraSaver's lower XTAL clock is reserved for the drain-guarded idle path.
++  // Active mode changes always use the target's interactive PLL frequencies.
+   const uint32_t targetFreq = getPowerModeActiveCpuFreq(mode);
+   DEBUG_SYSTEMF("[POWER] Config: name=%s nominal=%lu active=%lu displayBright=%d",
+                 config.name, (unsigned long)config.cpuFreqMhz,
+@@ -107,7 +121,11 @@
+   if (currentFreq != targetFreq) {
+     INFO_SYSTEMF("Changing CPU frequency: %lu MHz -> %lu MHz",
+                  (unsigned long)currentFreq, (unsigned long)targetFreq);
+-    setCpuFrequencyMhz(targetFreq);
++    if (!setCpuFrequencyMhz(targetFreq) || getCpuFrequencyMhz() != targetFreq) {
++      ERROR_SYSTEMF("CPU frequency change failed: requested %lu MHz, actual %lu MHz",
++                    (unsigned long)targetFreq, (unsigned long)getCpuFrequencyMhz());
++      return false;
++    }
+     DEBUG_SYSTEMF("[POWER] After setCpuFrequencyMhz, actual freq: %lu MHz",
+                   (unsigned long)getCpuFrequencyMhz());
+   } else {
+@@ -142,6 +160,7 @@
+     snprintf(ev, sizeof(ev), "powermode:%s:%luMHz", config.name, (unsigned long)targetFreq);
+     batteryLogEvent(ev);
+   }
++  return true;
+ }
+ 
+ void checkAutoPowerMode() {
+@@ -176,7 +195,7 @@
+ // The `modes` array is what lets a UI render the preset picker without
+ // re-encoding the gPowerModes table: name, the clock actually applied while
+ // the device is in use, the clock idle power-save may sink to, and the mode's
+-// display brightness. Anything that hardcodes "Performance = 240 MHz" in
++// display brightness. Any duplicated target frequency table in
+ // JavaScript is a duplicate of this table waiting to drift.
+ //
+ // No secrets; safe on any transport.
+@@ -194,6 +213,10 @@
+   doc["activeMhz"]         = (unsigned long)getPowerModeActiveCpuFreq(mode);
+   doc["idleMhz"]           = (unsigned long)getPowerModeIdleCpuFreq(mode);
+   doc["interactiveFloorMhz"] = (unsigned long)POWER_INTERACTIVE_FLOOR_MHZ;
++  JsonArray frequencies = doc["supportedCpuMhz"].to<JsonArray>();
++  for (size_t i = 0; i < getPowerCpuFrequencyCount(); ++i) {
++    frequencies.add(getPowerCpuFrequencyMhz(i));
++  }
+ 
+   doc["autoMode"]          = (bool)gSettings.powerAutoMode;
+   doc["batteryThreshold"]  = gSettings.powerBatteryThreshold;
+@@ -292,7 +315,9 @@
+                          gPowerModes[i].displayBrightnessPercent);
+       }
+     }
+-    broadcastOutput("  (Locked holds 240 MHz through idle power-save; UltraSaver's 40 MHz applies only once idle power-save blanks the screen; see 'powersave')");
++    BROADCAST_PRINTF("  (Locked holds %lu MHz through idle power-save; UltraSaver uses %lu MHz only after the screen blanks; see 'powersave')",
++                     (unsigned long)getPowerModeActiveCpuFreq(POWER_MODE_LOCKED),
++                     (unsigned long)getPowerModeIdleCpuFreq(POWER_MODE_ULTRASAVER));
+     return "[Power] Status displayed";
+   }
+   
+@@ -331,10 +356,12 @@
+       return "Error: Invalid mode. Use: perf, balanced, saver, ultra, locked, or 0-4";
+     }
+     
+-    DEBUG_SYSTEMF("[POWER_CMD] Setting gSettings.powerMode to %d", newMode);
++    const uint8_t previousMode = gSettings.powerMode;
+     setSetting(gSettings.powerMode, (uint8_t)newMode);
+-    DEBUG_SYSTEMF("[POWER_CMD] Calling applyPowerMode...");
+-    applyPowerMode(newMode);
++    if (!applyPowerMode(newMode)) {
++      setSetting(gSettings.powerMode, previousMode);
++      return "Error: CPU frequency change failed; previous power mode restored";
++    }
+     
+     BROADCAST_PRINTF("Power mode set to: %s", getPowerModeName(newMode));
+     return "[Power] Mode updated";
+@@ -442,7 +469,7 @@
+ //   no arg  → print current value
+ //   minutes → idle timeout before the OLED blanks + the CPU downclocks
+ //             (0..1440); 0 disables. Persisted via setSetting. The radio stays
+-//             up (CPU only drops to the 80 MHz WiFi floor) so the device stays
++//             up (CPU drops to its mode-dependent idle floor) so the device stays
+ //             reachable while the screen is dark.
+ static const char* cmd_powersave(const String& argsInput) {
+   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+--- a/components/hardwareone/System_Power.h
++++ b/components/hardwareone/System_Power.h
+@@ -15,16 +15,31 @@
+ #define POWER_MODE_BALANCED     1
+ #define POWER_MODE_POWERSAVER   2
+ #define POWER_MODE_ULTRASAVER   3
+-#define POWER_MODE_LOCKED       4   // 240 MHz always (idle power-save does not downclock)
++#define POWER_MODE_LOCKED       4   // Maximum clock always (idle power-save does not downclock)
+ #define POWER_MODE_COUNT        5
+ 
+-// Never run the interactive UI below this clock. 40 MHz renders the OLED/nav
+-// loop ~6x slower (render + once-per-frame input consume balloon together),
+-// which reads as "very unresponsive" input. So UltraSaver's headline 40 MHz is
+-// reserved for the idle/asleep state (nobody's looking at the blanked panel);
+-// while actively used, every mode holds at least this floor. 80 MHz is also the
+-// established Wi-Fi/PSRAM-safe floor (see cmd_cpufreq, powerSaveTick).
+-#define POWER_INTERACTIVE_FLOOR_MHZ  80
++// PLL frequencies accepted by the selected IDF target/revision. P4 revisions
++// below 3.0 use the 360 MHz PLL; revision 3.x builds use the 400 MHz PLL.
++// Keep target details here so commands and every UI share the same policy.
++#if defined(CONFIG_IDF_TARGET_ESP32P4)
++  #if defined(CONFIG_ESP32P4_SELECTS_REV_LESS_V3) && CONFIG_ESP32P4_SELECTS_REV_LESS_V3
++    #define POWER_CPU_PERFORMANCE_MHZ 360
++    #define POWER_CPU_BALANCED_MHZ    180
++    #define POWER_INTERACTIVE_FLOOR_MHZ 90
++  #else
++    #define POWER_CPU_PERFORMANCE_MHZ 400
++    #define POWER_CPU_BALANCED_MHZ    200
++    #define POWER_INTERACTIVE_FLOOR_MHZ 100
++  #endif
++#else
++  // Existing ESP32 / ESP32-S3 policy.
++  #define POWER_CPU_PERFORMANCE_MHZ 240
++  #define POWER_CPU_BALANCED_MHZ    160
++  #define POWER_INTERACTIVE_FLOOR_MHZ 80
++#endif
++
++// UltraSaver's XTAL clock is idle-only; interactive modes use the PLL floor.
++#define POWER_CPU_ULTRA_IDLE_MHZ 40
+ 
+ // ============================================================================
+ // Power Mode Management Functions
+@@ -34,17 +49,22 @@
+ // Nominal (table) clock for the mode — UltraSaver's is 40. This is the DEEP
+ // value; use the active/idle accessors below for what actually gets applied.
+ uint32_t getPowerModeCpuFreq(uint8_t mode);
+-// Clock applied while the device is actively used: max(nominal, floor). For
+-// UltraSaver this is 80, not 40 (see POWER_INTERACTIVE_FLOOR_MHZ).
++// Clock applied while the device is actively used: max(nominal, target floor).
+ uint32_t getPowerModeActiveCpuFreq(uint8_t mode);
+ // Clock the idle power-save path may drop to (OLED blanked, radio still up):
+-//   Locked → keep active clock (240)
+-//   Performance / Balanced / PowerSaver → 80 (Wi-Fi floor)
+-//   UltraSaver → 40
++//   Locked → keep active clock
++//   Performance / Balanced / PowerSaver → target PLL floor
++//   UltraSaver → idle XTAL clock
+ uint32_t getPowerModeIdleCpuFreq(uint8_t mode);
+ uint8_t getPowerModeDisplayBrightness(uint8_t mode);
+ 
+-void applyPowerMode(uint8_t mode);
++// Direct interactive overrides, ascending. Index outside count returns zero.
++size_t getPowerCpuFrequencyCount();
++uint32_t getPowerCpuFrequencyMhz(size_t index);
++bool isPowerCpuFrequencySupported(uint32_t mhz);
++
++// False if the target clock cannot be applied; no success event is emitted.
++bool applyPowerMode(uint8_t mode);
+ void checkAutoPowerMode();
+ 
+ // ----------------------------------------------------------------------------
+--- a/components/hardwareone/System_Utils.cpp
++++ b/components/hardwareone/System_Utils.cpp
+@@ -1563,6 +1563,8 @@
+   return "[System] Voltage info displayed";
+ }
+ 
++#include "System_Power.h"  // shared target CPU clock choices
++
+ const char* cmd_cpufreq(const String& argsInput) {
+   RETURN_VALID_IF_VALIDATE_CSTR();
+ 
+@@ -1577,16 +1579,26 @@
+     BROADCAST_PRINTF("  Current: %lu MHz", (unsigned long)currentFreq);
+     BROADCAST_PRINTF("  XTAL: %lu MHz", (unsigned long)getXtalFrequencyMhz());
+     BROADCAST_PRINTF("  APB: %lu MHz", (unsigned long)(getApbFrequency() / 1000000UL));
++    broadcastOutput("  Supported interactive frequencies:");
++    for (size_t i = 0; i < getPowerCpuFrequencyCount(); ++i) {
++      BROADCAST_PRINTF("    %lu MHz", (unsigned long)getPowerCpuFrequencyMhz(i));
++    }
+     return "[System] CPU frequency displayed";
+   } else {
+     // Set frequency (admin only for safety)
+ 
++    for (size_t i = 0; i < args.length(); ++i) {
++      if (args[i] < '0' || args[i] > '9') {
++        return "Error: Enter one CPU frequency in MHz; run cpufreq for supported values";
++      }
++    }
+     uint32_t newFreq = args.toInt();
+-    if (newFreq != 80 && newFreq != 160 && newFreq != 240) {
+-      return "Error: Frequency must be 80, 160, or 240 MHz";
+-    }
+-
+-    setCpuFrequencyMhz(newFreq);
++    if (!isPowerCpuFrequencySupported(newFreq)) {
++      return "Error: Unsupported CPU frequency; run cpufreq for supported values";
++    }
++    if (!setCpuFrequencyMhz(newFreq) || getCpuFrequencyMhz() != newFreq) {
++      return "Error: CPU frequency change failed";
++    }
+     {
+       extern void batteryLogEvent(const char* event);
+       char ev[24];
+@@ -3013,7 +3025,7 @@
+   { "temperature", "Read ESP32 internal temperature. (add 'json' for JSON output)", false, cmd_temperature },
+   { "voltage", "Estimate power draw from active subsystems (not a real voltage measurement; use batterystatus for measured volts). (add 'json' for JSON output)", false, cmd_voltage },
+   { "cpufreq", "Get/set CPU frequency (admin).", true, cmd_cpufreq,
+-    "Usage: cpufreq [80|160|240]" },
++    "Usage: cpufreq [MHz] (run without arguments to list supported values)" },
+   { "taskstats", "Detailed task statistics (state/prio/stack min-free). (add 'json' for JSON output)", false, cmd_taskstats },
+   { "perftop", "Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%. (add 'json' for loop + per-task CPU% JSON)", false, cmd_perftop },
+   { "events", "Show recent system events (the in-memory register that drives automation event triggers).", false, cmd_events,
+@@ -3105,7 +3117,7 @@
+     "profiling), fsusage, events (recent system events from the in-memory register "
+     "that drives automation event triggers), and the memory tools memsample (snapshot, with memsample "
+     "track on|off|reset|status for allocation tracking) and memreport. Control and "
+-    "power: reboot, ramflush, cpufreq [80|160|240] to read or set CPU clock, lightsleep "
++    "power: reboot, ramflush, cpufreq [MHz] to read or set a supported CPU clock, lightsleep "
+     "[seconds] for ESP32 light sleep, deepsleep for power-off (reset to wake), and "
+     "wait <ms>/sleep <ms> to pause command-script execution. "
+     "timeset sets the clock manually. broadcast <message> pushes a line of text to all "
+@@ -3636,14 +3648,12 @@
+   { "power",      "Power management", "The power subsystem manages CPU frequency and battery-oriented power saving. The "
+     "main command is power: power alone prints the current mode, CPU clock, display "
+     "brightness, and auto-mode state; power mode <perf|balanced|saver|ultra|locked|0-4> "
+-    "selects one of five preset modes (Performance 240/80 MHz, Balanced 160/80 MHz, "
+-    "PowerSaver 80 MHz, UltraSaver 80 MHz interactive / 40 MHz idle, Locked 240 MHz always) "
+-    "which sets both the CPU frequency and the display brightness; the chosen mode is "
+-    "persisted. Locked alone holds 240 MHz through idle power-save (OLED blanks but the "
+-    "core does not downclock). UltraSaver's headline 40 MHz is idle-only — it is "
+-    "applied solely when idle power-save blanks the screen (40 MHz is too laggy for the "
+-    "live UI) and any input or command restores >=80 MHz; so UltraSaver only reaches "
+-    "40 MHz if powersave is enabled. power auto <on|off> enables an "
++    "selects one of five target-specific presets: Performance, Balanced, PowerSaver, "
++    "UltraSaver, or Locked. Run power or power json to see their active and idle MHz. "
++    "Modes set the CPU clock and display brightness; the chosen mode is persisted. "
++    "Locked keeps the maximum active clock when the OLED blanks. UltraSaver uses its "
++    "lower idle-only clock when powersave blanks the display; input or a command "
++    "restores the target's interactive floor. power auto <on|off> enables an "
+     "automatic low-battery downshift gated by power threshold <0-100>. Two related idle "
+     "controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; "
+     "0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) "
+--- a/components/hardwareone/WebPage_Power.cpp
++++ b/components/hardwareone/WebPage_Power.cpp
+@@ -93,12 +93,8 @@
+   <p class='text-muted text-sm'>Applies immediately and persists. The second figure is the clock idle power-save may sink to once the display blanks.</p>
+   <div class='btn-row' id='pw-modes'></div>
+   <h4 style='margin:1.25rem 0 .5rem'>Set the clock directly</h4>
+-  <p class='text-muted text-sm'>One-off override; the next power-mode change or wake replaces it. 80 MHz is the WiFi/PSRAM floor.</p>
+-  <div class='btn-row'>
+-    <button class='btn' data-freq='80'>80 MHz</button>
+-    <button class='btn' data-freq='160'>160 MHz</button>
+-    <button class='btn' data-freq='240'>240 MHz</button>
+-  </div>
++  <p class='text-muted text-sm'>One-off override; the next power-mode change or wake replaces it. Interactive floor: <span id='pw-cpu-floor'>--</span> MHz.</p>
++  <div class='btn-row' id='pw-frequencies'></div>
+ </div>
+ 
+ <div class='card' data-guest-hide id='pw-card-tuning'>
+@@ -220,6 +216,29 @@
+     }
+   }
+ 
++  var frequenciesSig = null;
++  function renderFrequencies(s){
++    var wrap = hw.$('pw-frequencies');
++    if (!wrap || !Array.isArray(s.supportedCpuMhz)) return;
++    var sig = JSON.stringify(s.supportedCpuMhz);
++    if (sig === frequenciesSig) return;
++    frequenciesSig = sig;
++    wrap.innerHTML = '';
++    for (var i = 0; i < s.supportedCpuMhz.length; i++){
++      var mhz = Number(s.supportedCpuMhz[i]);
++      if (!isFinite(mhz) || mhz <= 0 || Math.floor(mhz) !== mhz) continue;
++      var button = document.createElement('button');
++      button.className = 'btn';
++      button.setAttribute('data-freq', String(mhz));
++      button.textContent = mhz + ' MHz';
++      button.disabled = !admin;
++      if (admin) hw.on(button, 'click', function(){
++        apply('cpufreq ' + this.getAttribute('data-freq'));
++      });
++      wrap.appendChild(button);
++    }
++  }
++
+   // Only write a field the user isn't currently typing into — otherwise the
+   // 2 s poll would yank the caret out from under them mid-edit.
+   function setField(id, val){
+@@ -231,6 +250,8 @@
+   function applyStatus(s){
+     if (!s || s.schema == null) return;
+     last = s;
++    hw.setText('pw-cpu-floor', s.interactiveFloorMhz != null ? s.interactiveFloorMhz : '--');
++    renderFrequencies(s);
+     hw.setText('pw-mode', s.modeName || '--');
+     hw.setText('pw-cpu', s.cpuMhz != null ? s.cpuMhz : '--');
+     hw.toggle('pw-downclocked', s.cpuMhz != null && s.activeMhz != null && s.cpuMhz < s.activeMhz);
+@@ -298,12 +319,6 @@
+   stopPoll = hw.pollJSON('/api/power/status', 2000, applyStatus);
+ 
+   if (admin) {
+-    // --- direct clock override ---
+-    var freqBtns = document.querySelectorAll('button[data-freq]');
+-    for (var f = 0; f < freqBtns.length; f++){
+-      hw.on(freqBtns[f], 'click', function(){ apply('cpufreq ' + this.getAttribute('data-freq')); });
+-    }
+-
+     // --- tuning fields ---
+     function bindField(id){
+       var el = hw.$(id);
+--- a/components/hardwareone/idf_component.yml
++++ b/components/hardwareone/idf_component.yml
+@@ -2,3 +2,9 @@
+   idf: ">=5.5.5,<5.6"
+   espressif/libsodium:
+     version: "==1.0.20~4"
++  # G2 file-image rendering uses the portable conversion sources. This pinned
++  # component excludes its sensor drivers on P4; no onboard camera is enabled.
++  espressif/esp32-camera:
++    version: "==2.1.4"
++  espressif/esp_jpeg:
++    version: "==1.3.1"
+--- a/components/hardwareone_libs/CMakeLists.txt
++++ b/components/hardwareone_libs/CMakeLists.txt
+@@ -1,3 +1,13 @@
+-# Mesh-only experiment: peripheral libraries are deliberately not compiled.
+-# ArduinoJson is header-only and required by the real application and mesh.
+-idf_component_register(INCLUDE_DIRS ArduinoJson ArduinoJson/src REQUIRES arduino)
++# G2/R1 client mode needs the existing vendored LC3 decoder, including on boards
++# with no onboard microphone. Keep unrelated sensor/display libraries disabled.
++idf_component_register(
++    SRC_DIRS liblc3/src
++    INCLUDE_DIRS ArduinoJson ArduinoJson/src liblc3/include
++    REQUIRES arduino)
++
++# Same baseline LC3 configuration as the normal HardwareOne component.
++file(GLOB LIBLC3_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/liblc3/src/*.c")
++set_source_files_properties(${LIBLC3_SOURCES} PROPERTIES
++    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/liblc3/src;${CMAKE_CURRENT_SOURCE_DIR}/liblc3/include"
++    COMPILE_OPTIONS "-Wno-unused-parameter;-Wno-sign-compare;-Wno-unused-variable"
++    COMPILE_DEFINITIONS "LC3_PLUS=0;LC3_PLUS_HR=0")
+--- a/dependencies.lock
++++ b/dependencies.lock
+@@ -9,6 +9,30 @@
+       registry_url: https://components.espressif.com/
+       type: service
+     version: 1.0.3
++  espressif/esp32-camera:
++    component_hash: f0a608b109935a5389221eee5090ec61f51b0df1a0749531fe59d33aaf263233
++    dependencies:
++    - name: espressif/esp_jpeg
++      registry_url: https://components.espressif.com
++      require: public
++      version: ^1.3.1
++    - name: idf
++      require: private
++      version: '>=5.1'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 2.1.4
++  espressif/esp_jpeg:
++    component_hash: defb83669293cbf86d0fa86b475ba5517aceed04ed70db435388c151ab37b5d7
++    dependencies:
++    - name: idf
++      require: private
++      version: '>=5.0'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 1.3.1
+   espressif/libsodium:
+     component_hash: ec52dce5da4af52b1908a0e23e2cf8f492edea090450e51f0d1fbe1108b6d58e
+     dependencies:
+@@ -45,10 +69,12 @@
+     version: 1.20.4
+ direct_dependencies:
+ - chmorgan/esp-libhelix-mp3
++- espressif/esp32-camera
++- espressif/esp_jpeg
+ - espressif/libsodium
+ - espressif/mdns
+ - idf
+ - joltwallet/littlefs
+-manifest_hash: 82eafca2616304a64ebf8f4ebebfd93da9f5b3d71cde254d9e830764cad19e7f
++manifest_hash: 52c11ba7cda62ef0672867b8ffb2bf8933889ea689bd6962d7900c7a98d552b6
+ target: esp32s3
+ version: 2.0.0
+--- a/dependencies.lock.esp32p4
++++ b/dependencies.lock.esp32p4
+@@ -23,6 +23,20 @@
+       registry_url: https://components.espressif.com
+       type: service
+     version: 1.1.6
++  espressif/esp32-camera:
++    component_hash: f0a608b109935a5389221eee5090ec61f51b0df1a0749531fe59d33aaf263233
++    dependencies:
++    - name: espressif/esp_jpeg
++      registry_url: https://components.espressif.com
++      require: public
++      version: ^1.3.1
++    - name: idf
++      require: private
++      version: '>=5.1'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 2.1.4
+   espressif/esp_hosted:
+     component_hash: f1792f36ef9a637adf2faa2662f3c4500b07f3d2ba65c25f3ed4824490ba59f9
+     dependencies:
+@@ -33,6 +47,16 @@
+       registry_url: https://components.espressif.com/
+       type: service
+     version: 2.12.13
++  espressif/esp_jpeg:
++    component_hash: defb83669293cbf86d0fa86b475ba5517aceed04ed70db435388c151ab37b5d7
++    dependencies:
++    - name: idf
++      require: private
++      version: '>=5.0'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 1.3.1
+   espressif/esp_serial_slave_link:
+     component_hash: ac1776806de0a6e371c84e87898bb983e19ce62aa7f1e2e5c4a3b0234a575d2c
+     dependencies:
+@@ -113,12 +137,14 @@
+     version: 1.20.4
+ direct_dependencies:
+ - chmorgan/esp-libhelix-mp3
++- espressif/esp32-camera
+ - espressif/esp_hosted
++- espressif/esp_jpeg
+ - espressif/esp_wifi_remote
+ - espressif/libsodium
+ - espressif/mdns
+ - idf
+ - joltwallet/littlefs
+-manifest_hash: 82eafca2616304a64ebf8f4ebebfd93da9f5b3d71cde254d9e830764cad19e7f
++manifest_hash: 52c11ba7cda62ef0672867b8ffb2bf8933889ea689bd6962d7900c7a98d552b6
+ target: esp32p4
+ version: 2.0.0

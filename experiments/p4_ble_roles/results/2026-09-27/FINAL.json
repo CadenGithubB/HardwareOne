@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "status": "passed",
+  "smp_diagnostics_enabled": false,
+  "sdk": {
+    "idf_version": [
+      5,
+      5,
+      5
+    ],
+    "upstream_fix_commit": "9fd7cb7e606a06111e1b14be7f4e00d77d9cf3dd",
+    "patch_sha256": "e8185397ceb5e74653c08c7cb22666f54445b27b0a578488c5e35bbca7eac367"
+  },
+  "firmware": {
+    "p4": {
+      "bytes": 4106304,
+      "sha256": "ace7d278e1cc5c4f58150bf57f225baf97dd96f891298534f58232854bdc05c2"
+    },
+    "s3": {
+      "bytes": 4740544,
+      "sha256": "86ad27464d7ec918838ff60bf7814fd5a05e7b96f632566d694f064b42389332"
+    }
+  },
+  "accessories": {
+    "s3": {
+      "status": "passed",
+      "g2_links": 2,
+      "ring_links": 1,
+      "att_mtu": 244,
+      "ring_setup_verified": true
+    },
+    "p4": {
+      "status": "passed",
+      "g2_links": 2,
+      "ring_links": 1,
+      "att_mtu": 244,
+      "ring_setup_verified": true,
+      "menu_visibility": "user_confirmed",
+      "ring_swipe_selection": "user_confirmed"
+    }
+  },
+  "role_transitions": {
+    "s3_client_to_server": "passed",
+    "p4_client_to_server": "passed",
+    "p4_server_to_client_restore": "passed"
+  },
+  "ble_server_protocol": {
+    "status": "passed",
+    "boards_tested": 2,
+    "sessions": 4,
+    "att_mtu": 517,
+    "prelogin_denials_verified": 4,
+    "admin_logins_verified": 4,
+    "encrypted_replies": 32,
+    "coexistent_mesh_messages": 8
+  },
+  "http_with_p4_accessories": {
+    "status": "passed",
+    "complete_responses": 19,
+    "body_bytes": 849743,
+    "html_pages": 5,
+    "json_apis": 2,
+    "login_status": 303,
+    "logout_status": 302,
+    "prelogin_api_status": 401,
+    "postlogout_api_status": 401,
+    "coexistent_mesh_messages": 2
+  },
+  "encrypted_mesh": {
+    "status": "passed",
+    "messages": 12,
+    "payload_bytes_each": 401,
+    "fragments_each": 3,
+    "content_hash_verified": true,
+    "contexts": {
+      "s3_accessories": 2,
+      "s3_server": 4,
+      "p4_accessories_with_http": 2,
+      "p4_server": 4
+    }
+  },
+  "p4_cpu": {
+    "status": "passed",
+    "observed_mhz": [
+      100,
+      200,
+      400
+    ],
+    "rejected_mhz": [
+      240
+    ],
+    "restored_mhz": 400
+  },
+  "log_scan": {
+    "panic_assert_abort_or_heap_corruption_signatures": 0
+  },
+  "final_state": {
+    "p4": {
+      "role": "client",
+      "g2_links": 2,
+      "ring_links": 1,
+      "ring_connect_pending": false,
+      "server_initialized": false,
+      "cpu_mhz": 400
+    },
+    "s3": {
+      "role": "server",
+      "g2_links": 0,
+      "ring_links": 0,
+      "server_initialized": true,
+      "server_state": "advertising",
+      "active_connections": 0
+    }
+  },
+  "limits": {
+    "android_ui": "not_tested",
+    "accessory_boot_without_even_app": "not_qualified",
+    "physical_power_panel": "not_confirmed",
+    "oled": "disabled_in_profile",
+    "idle_40mhz_and_sleep": "not_qualified",
+    "long_duration_endurance": "not_qualified"
+  }
+}
