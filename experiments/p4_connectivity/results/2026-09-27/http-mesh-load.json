@@ -1,0 +1,635 @@
+{
+  "schema": 1,
+  "status": "passed",
+  "started": "20260927T164842.217972Z",
+  "finished": "2026-09-27T16:49:20.168378+00:00",
+  "durationSec": 20,
+  "verified": {
+    "cookieLogin": true,
+    "protectedApi": true,
+    "namedAdminCli": true,
+    "htmlPages": 5,
+    "jsonApis": 2,
+    "commandJson": {
+      "status json": {
+        "completeJson": true,
+        "schema": 1
+      },
+      "blestatus json": {
+        "completeJson": true,
+        "schema": 1
+      },
+      "espnowstatus json": {
+        "completeJson": true,
+        "schema": 1
+      }
+    },
+    "logout": true,
+    "loadCycles": 5,
+    "coexistenceCallbacks": [
+      {
+        "cycle": 0,
+        "completed": true
+      },
+      {
+        "cycle": 1,
+        "completed": true
+      },
+      {
+        "cycle": 2,
+        "completed": true
+      },
+      {
+        "cycle": 3,
+        "completed": true
+      },
+      {
+        "cycle": 4,
+        "completed": true
+      }
+    ]
+  },
+  "privateRunId": "20260927T164842.217972Z-a66357ca",
+  "requests": [
+    {
+      "path": "/login",
+      "method": "GET",
+      "status": 200,
+      "bytes": 22525,
+      "sha256": "6cb83d056ec67b2a703f2ed5ed50f1371cd0103be329baba1b224b53d3897986",
+      "complete": true,
+      "durationMs": 184,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": true,
+      "cookiePresent": false,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 401,
+      "bytes": 62,
+      "sha256": "674828da50275451c56c2d01c5031be21eb018b3c9aeae4812985da6b446b58b",
+      "complete": true,
+      "durationMs": 292,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": false,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/login",
+      "method": "POST",
+      "status": 303,
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "complete": true,
+      "durationMs": 1351,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/dashboard",
+      "method": "GET",
+      "status": 200,
+      "bytes": 84879,
+      "sha256": "d79a07ad32faa1f638adfb7640de07a181a5e62f06288537ed2f925479eb5221",
+      "complete": true,
+      "durationMs": 839,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/settings",
+      "method": "GET",
+      "status": 200,
+      "bytes": 215961,
+      "sha256": "6df3ff9d86593160c13627cb0b618c3183cd76498185c3c3d85597eeee2d7dc1",
+      "complete": true,
+      "durationMs": 1552,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": true,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/bluetooth",
+      "method": "GET",
+      "status": 200,
+      "bytes": 73709,
+      "sha256": "0a32b6b6e7901e193da51ae31193e55f8c23cc316cafba8cdae1c88ca896079c",
+      "complete": true,
+      "durationMs": 832,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/espnow",
+      "method": "GET",
+      "status": 200,
+      "bytes": 258063,
+      "sha256": "8dd7cc4d2c7fec5938f7787d62095545af17899e64bd5dd21903689d37fc43eb",
+      "complete": true,
+      "durationMs": 2052,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": true,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/cli",
+      "method": "GET",
+      "status": 200,
+      "bytes": 95636,
+      "sha256": "6958fefebb9e01cf22839b98a7936179a0092a6f04a6977497a7247439d9eb20",
+      "complete": true,
+      "durationMs": 879,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": true,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 832,
+      "sha256": "c0dcf511bcab402e0fba101d64ed5519df07d3fe8bd52e09fd90d5dca1a7cdc5",
+      "complete": true,
+      "durationMs": 190,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/buildconfig",
+      "method": "GET",
+      "status": 200,
+      "bytes": 276,
+      "sha256": "0f04f4b9b5fcf725ba4fa592eed6237e0a438b3ce5ee845ae0046948f7501ac3",
+      "complete": true,
+      "durationMs": 336,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/cli",
+      "method": "POST",
+      "status": 200,
+      "bytes": 70,
+      "sha256": "075b53f49af5d684f24234c0f1e4fb0600c8f076893844ab05d55f4a236374c1",
+      "complete": true,
+      "durationMs": 510,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/cli",
+      "method": "POST",
+      "status": 200,
+      "bytes": 871,
+      "sha256": "63614b0492df45f5fe29850b6f919a8e02e9ee0137297d8ed37b462e3c0fe31e",
+      "complete": true,
+      "durationMs": 342,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/cli",
+      "method": "POST",
+      "status": 200,
+      "bytes": 171,
+      "sha256": "4b9e7238882bd2cd22169d337b0c3200eb853bde7287f78bba39dd95733a9687",
+      "complete": true,
+      "durationMs": 488,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/cli",
+      "method": "POST",
+      "status": 200,
+      "bytes": 148,
+      "sha256": "372228122b830ee0aeb678165f786562b5d73d90da49261990c9742d402e034f",
+      "complete": true,
+      "durationMs": 310,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 832,
+      "sha256": "93fae4fb6fca51d9b3b93da0b7307621ed5aedb6330432bc0cdd09a4d794a289",
+      "complete": true,
+      "durationMs": 290,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/bluetooth",
+      "method": "GET",
+      "status": 200,
+      "bytes": 73709,
+      "sha256": "0a32b6b6e7901e193da51ae31193e55f8c23cc316cafba8cdae1c88ca896079c",
+      "complete": true,
+      "durationMs": 721,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 832,
+      "sha256": "bc163e15b05440fd1ca9bf749829dc11a521f312ab62a812e7d98d78a888dc3f",
+      "complete": true,
+      "durationMs": 493,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 832,
+      "sha256": "2718a4b898140f616c751c4f6eea757e4e0f1601023cb009d29ab60e9427014b",
+      "complete": true,
+      "durationMs": 143,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/bluetooth",
+      "method": "GET",
+      "status": 200,
+      "bytes": 73709,
+      "sha256": "0a32b6b6e7901e193da51ae31193e55f8c23cc316cafba8cdae1c88ca896079c",
+      "complete": true,
+      "durationMs": 652,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 832,
+      "sha256": "d07c4d989b8c11d08a4a5b8dfaeb4f38f1e39ea39ccd58c5c044d3786c6cd86b",
+      "complete": true,
+      "durationMs": 368,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 832,
+      "sha256": "611f4ee5ff8d9dcf5bac99fa0b26004d471d70c38abca3813c2232d4fafc0a3f",
+      "complete": true,
+      "durationMs": 345,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/bluetooth",
+      "method": "GET",
+      "status": 200,
+      "bytes": 73709,
+      "sha256": "0a32b6b6e7901e193da51ae31193e55f8c23cc316cafba8cdae1c88ca896079c",
+      "complete": true,
+      "durationMs": 759,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 831,
+      "sha256": "487e78720266ce2c335cf7471251c3d2e7c4e8d151fa63adb26ecae9c56ab6e2",
+      "complete": true,
+      "durationMs": 225,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 831,
+      "sha256": "6d6ea2887dfb8e0e3532657f43a993dbbd2a783a02ddbef2533b731010119ab2",
+      "complete": true,
+      "durationMs": 357,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/bluetooth",
+      "method": "GET",
+      "status": 200,
+      "bytes": 73709,
+      "sha256": "0a32b6b6e7901e193da51ae31193e55f8c23cc316cafba8cdae1c88ca896079c",
+      "complete": true,
+      "durationMs": 628,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 831,
+      "sha256": "d03af44a0b91a1d15f20dd2c57e518efce9286ef6eb443e30d12087607d423c1",
+      "complete": true,
+      "durationMs": 516,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 831,
+      "sha256": "4b021189d1d54b614603f9313ffac58779a1546f13cd95e1ca60b29ca2111cf3",
+      "complete": true,
+      "durationMs": 372,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/bluetooth",
+      "method": "GET",
+      "status": 200,
+      "bytes": 73709,
+      "sha256": "0a32b6b6e7901e193da51ae31193e55f8c23cc316cafba8cdae1c88ca896079c",
+      "complete": true,
+      "durationMs": 799,
+      "htmlOpen": true,
+      "htmlClose": true,
+      "hasUsername": true,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": false
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 200,
+      "bytes": 832,
+      "sha256": "82f569ea0d33516606fe6f7716f6de94ba332561201bdced42eca70082fa97bd",
+      "complete": true,
+      "durationMs": 250,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": true,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/logout",
+      "method": "GET",
+      "status": 302,
+      "bytes": 10,
+      "sha256": "7d29213db0b38174b537357fb8f44b9f1d293124c25fdfff35d1bf53821e8213",
+      "complete": true,
+      "durationMs": 91,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": false,
+      "bodyIncluded": true
+    },
+    {
+      "path": "/api/system",
+      "method": "GET",
+      "status": 401,
+      "bytes": 62,
+      "sha256": "674828da50275451c56c2d01c5031be21eb018b3c9aeae4812985da6b446b58b",
+      "complete": true,
+      "durationMs": 362,
+      "htmlOpen": false,
+      "htmlClose": false,
+      "hasUsername": false,
+      "hasPassword": false,
+      "cookiePresent": false,
+      "bodyIncluded": true
+    }
+  ],
+  "network": {
+    "ip": "192.168.4.2",
+    "apIp": "192.168.5.1",
+    "channel": 6,
+    "connected": true
+  },
+  "totalResponseBytes": 1130136,
+  "requestCount": 31,
+  "coexistenceMessages": [
+    {
+      "cycle": 0,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 30,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "9aeaf1a2fcb648a9c4a6bacbb774c099ea02a41b98eed4ffe5401f8cbab8db97"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 31,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "be418131691c3e912c7b4d927c13d23e2994069e0a1bc372c6ea81a446fd97ae"
+        }
+      ]
+    },
+    {
+      "cycle": 1,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 32,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "0eeb31bfe6bb2025773da04d54b523177afb4f57191bf1cf0fe02bfc9489e063"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 33,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "c45e662f4ce3e2677eed0693ef85d5c677ce972529fbf7a983b9bb65503e06ab"
+        }
+      ]
+    },
+    {
+      "cycle": 2,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 34,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "286f74ee53cf7eb071525efe518809ae07fce9e52c28cb2827b21402ae9b0ea8"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 36,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "9860275feb2547f4e4222e55b4a0d4f0fb19ee2d736c606a49da3837fe4e0eb0"
+        }
+      ]
+    },
+    {
+      "cycle": 3,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 37,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "24a61e15a6894ab0a512f303d3c7f0092f0f45ba270c20793266099d9c3ec77e"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 38,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "f4bdcce759033a922ba8b455ddc3ddd662f52f7fbc04dffc3a0d7efef3c7320e"
+        }
+      ]
+    },
+    {
+      "cycle": 4,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 39,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "43b285c4297e04c76b176236051801d7c2cd4bbf5fa57cb792bfa4a74cc9a87b"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 40,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "101e08f80011d86e134ef876c96d0a7334f044bc41321973c1fe6ccd964c8879"
+        }
+      ]
+    }
+  ]
+}

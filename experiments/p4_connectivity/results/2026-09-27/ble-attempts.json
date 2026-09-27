@@ -1,0 +1,229 @@
+{
+  "schema": 1,
+  "phase": "complete with documented radio limitations",
+  "attempts": [
+    {
+      "privateRunId": "20260927T163727.887571Z-6707b9eb",
+      "status": "failed",
+      "targetName": null,
+      "expectedMeshMac": null,
+      "error": "S3 bridge rejected operation: connect_failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: connect_failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T163808.392650Z-458546bf",
+      "status": "failed",
+      "targetName": null,
+      "expectedMeshMac": null,
+      "error": "S3 bridge rejected operation: connect_failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: connect_failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T163832.427477Z-0760f467",
+      "status": "failed",
+      "targetName": null,
+      "expectedMeshMac": null,
+      "error": "S3 bridge rejected operation: connect_failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: connect_failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T163912.648508Z-05240676",
+      "status": "failed",
+      "targetName": null,
+      "expectedMeshMac": null,
+      "error": "S3 bridge rejected operation: connect_failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: connect_failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T163953.790517Z-33b990e5",
+      "status": "failed",
+      "targetName": null,
+      "expectedMeshMac": null,
+      "error": "S3 bridge rejected operation: connect_failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: connect_failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T164756.109424Z-9bf01e51",
+      "status": "failed",
+      "targetName": "HW1_S3_BLE",
+      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "error": "S3 bridge rejected operation: mtu_below_secure_minimum",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: mtu_below_secure_minimum"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T165304.059960Z-035879b0",
+      "status": "failed",
+      "targetName": "HW1_S3_BLE",
+      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "error": "S3 bridge rejected operation: mtu_below_secure_minimum",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: mtu_below_secure_minimum"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T165315.616365Z-7084648d",
+      "status": "failed",
+      "targetName": "HW1_P4_BLE",
+      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "error": "S3 bridge rejected operation: connect_failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: connect_failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T170307.911947Z-2a44432c",
+      "status": "failed",
+      "targetName": "HW1_S3_BLE",
+      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "error": "Expected exactly one S3-discovered BLE peripheral matching the explicit BLE address",
+      "checks": []
+    },
+    {
+      "privateRunId": "20260927T170324.758703Z-f13708c8",
+      "status": "failed",
+      "targetName": "HW1_S3_BLE",
+      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "error": "Expected exactly one S3-discovered BLE peripheral matching the explicit BLE address",
+      "checks": []
+    },
+    {
+      "privateRunId": "20260927T170354.764936Z-5d5c0244",
+      "status": "failed",
+      "targetName": "HW1_S3_BLE",
+      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "error": "BLE Secure Channel authentication failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "BLE Secure Channel authentication failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T170501.716412Z-449bec34",
+      "status": "failed",
+      "targetName": "HW1_P4_BLE",
+      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "error": "BLE Secure Channel authentication failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "BLE Secure Channel authentication failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T170951.461743Z-172cb646",
+      "status": "failed",
+      "targetName": "HW1_P4_BLE",
+      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "error": "S3 bridge rejected operation: connect_failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: connect_failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T171013.592247Z-95f9f39a",
+      "status": "passed",
+      "targetName": "HW1_S3_BLE",
+      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "error": null,
+      "checks": [
+        {
+          "name": "initial",
+          "status": "passed",
+          "error": null
+        },
+        {
+          "name": "reconnect",
+          "status": "passed",
+          "error": null
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T171123.011287Z-c02aaee8",
+      "status": "failed",
+      "targetName": "HW1_P4_BLE",
+      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "error": "S3 bridge rejected operation: connect_failed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "failed",
+          "error": "S3 bridge rejected operation: connect_failed"
+        }
+      ]
+    },
+    {
+      "privateRunId": "20260927T171210.400317Z-f0f464f8",
+      "status": "passed",
+      "targetName": "HW1_P4_BLE",
+      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "error": null,
+      "checks": [
+        {
+          "name": "initial",
+          "status": "passed",
+          "error": null
+        },
+        {
+          "name": "reconnect",
+          "status": "passed",
+          "error": null
+        }
+      ]
+    }
+  ],
+  "finalEncryptedBlePhase": "passed initial and reconnect in both directions; see role-specific evidence and conditions"
+}

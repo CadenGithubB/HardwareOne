@@ -1,0 +1,151 @@
+{
+  "schema": 1,
+  "privateRunId": "20260927T163655Z-de71653f",
+  "messageCount": 14,
+  "batches": [
+    {
+      "recordIndex": 13,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 49,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "ca92fabfe63b268c9c9232fb28cd8c97b714b257204f19a493b80484c4a5e4c5"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 50,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "54c3cf88b258b093388c358b047b5e8faa6e47c3a6914d3affa1fd4fe724b388"
+        },
+        {
+          "direction": "p4->s3",
+          "msgId": 50,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "d8570fdd08ecade118064ec850d4adc8e87d84f6190fce4e26ac5c5d8e578b3a"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 51,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "d2663825065b866168bb3092777898b808e1670f9df75e912afb90d3b2c134da"
+        },
+        {
+          "direction": "p4->s3",
+          "msgId": 52,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "04c390a2e2945f2c78bd9d100d4262bdf4c7b78ee4f44e7fa024379beb624dc1"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 53,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "b11dd5960a06f3c263385aafddaae8734e54e4c64b93bcb306b0e578277363ec"
+        }
+      ]
+    },
+    {
+      "recordIndex": 15,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 70,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "ca92fabfe63b268c9c9232fb28cd8c97b714b257204f19a493b80484c4a5e4c5"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 71,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "54c3cf88b258b093388c358b047b5e8faa6e47c3a6914d3affa1fd4fe724b388"
+        }
+      ]
+    },
+    {
+      "recordIndex": 17,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 71,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "ca92fabfe63b268c9c9232fb28cd8c97b714b257204f19a493b80484c4a5e4c5"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 73,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "54c3cf88b258b093388c358b047b5e8faa6e47c3a6914d3affa1fd4fe724b388"
+        }
+      ]
+    },
+    {
+      "recordIndex": 19,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 73,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "ca92fabfe63b268c9c9232fb28cd8c97b714b257204f19a493b80484c4a5e4c5"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 74,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "54c3cf88b258b093388c358b047b5e8faa6e47c3a6914d3affa1fd4fe724b388"
+        }
+      ]
+    },
+    {
+      "recordIndex": 21,
+      "messages": [
+        {
+          "direction": "p4->s3",
+          "msgId": 76,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "ca92fabfe63b268c9c9232fb28cd8c97b714b257204f19a493b80484c4a5e4c5"
+        },
+        {
+          "direction": "s3->p4",
+          "msgId": 77,
+          "bytes": 401,
+          "pieces": 3,
+          "encrypted": true,
+          "sha256": "54c3cf88b258b093388c358b047b5e8faa6e47c3a6914d3affa1fd4fe724b388"
+        }
+      ]
+    }
+  ],
+  "observedLifecycle": {
+    "p4WifiFullyStoppedBleAdvertising": true,
+    "s3WifiFullyStoppedBleScanSawP4": true,
+    "p4BleCloseAndReopenMeshChecksPassed": true,
+    "s3BleCloseAndReopenMeshChecksPassed": true
+  },
+  "qualification": "Ordered lifecycle operations only; unexpected C6 reset, concurrent lifecycle calls, and long-run heap behavior were not qualified."
+}

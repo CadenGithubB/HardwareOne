@@ -1,0 +1,308 @@
+{
+  "schema": 1,
+  "status": "passed",
+  "privateRunId": "20260927T171013.592247Z-95f9f39a",
+  "started": "2026-09-27T17:10:13.593058+00:00",
+  "finished": "2026-09-27T17:10:56.434053+00:00",
+  "central": {
+    "applicationSoc": "ESP32-P4",
+    "radioSoc": "ESP32-C6",
+    "radioTransport": "ESP-Hosted SDIO"
+  },
+  "peripheral": {
+    "applicationSoc": "ESP32-S3",
+    "radio": "native"
+  },
+  "expectedPeerMeshMac": "68:ee:8f:50:e9:d0",
+  "checks": [
+    {
+      "name": "initial",
+      "status": "passed",
+      "durationSec": 17.136,
+      "evidence": {
+        "deviceInfo": {
+          "manufacturer": "HardwareOne",
+          "model": "Seeed XIAO ESP32S3",
+          "firmware": "0.99.94.1"
+        },
+        "mtu": 517,
+        "secureChannel": "v1",
+        "initiallyUnauthenticated": true,
+        "preLoginCommandDenied": true,
+        "namedAdminLogin": true,
+        "gattCounters": {
+          "state": "connected",
+          "uptime": 69,
+          "rx": 9,
+          "tx": 14
+        },
+        "authenticatedPeerMeshMacMatchesExpected": true,
+        "bleStatus": {
+          "schema": 1,
+          "initialized": true,
+          "state": "connected",
+          "activeConnections": 1,
+          "maxConnections": 4,
+          "totalConnections": 1,
+          "commandsReceived": 8,
+          "responsesSent": 11
+        },
+        "meshStatus": {
+          "schema": 1,
+          "initialized": true,
+          "channel": 6,
+          "channelPref": 6,
+          "mac": "68:EE:8F:50:E9:D0",
+          "pairedDevices": 1
+        },
+        "encryptedReplies": [
+          {
+            "operation": "whoami",
+            "encrypted": true,
+            "messageId": 0,
+            "fragments": 1,
+            "firstCounter": 1,
+            "lastCounter": 1,
+            "bytes": 17
+          },
+          {
+            "operation": "status json",
+            "encrypted": true,
+            "messageId": 1,
+            "fragments": 1,
+            "firstCounter": 2,
+            "lastCounter": 2,
+            "bytes": 57
+          },
+          {
+            "operation": "login",
+            "encrypted": true,
+            "messageId": 2,
+            "fragments": 1,
+            "firstCounter": 3,
+            "lastCounter": 3,
+            "bytes": 47
+          },
+          {
+            "operation": "whoami",
+            "encrypted": true,
+            "messageId": 3,
+            "fragments": 1,
+            "firstCounter": 4,
+            "lastCounter": 4,
+            "bytes": 25
+          },
+          {
+            "operation": "status json",
+            "encrypted": true,
+            "messageId": 4,
+            "fragments": 5,
+            "firstCounter": 5,
+            "lastCounter": 9,
+            "bytes": 820
+          },
+          {
+            "operation": "blestatus json",
+            "encrypted": true,
+            "messageId": 5,
+            "fragments": 2,
+            "firstCounter": 10,
+            "lastCounter": 11,
+            "bytes": 257
+          },
+          {
+            "operation": "espnowstatus json",
+            "encrypted": true,
+            "messageId": 6,
+            "fragments": 1,
+            "firstCounter": 12,
+            "lastCounter": 12,
+            "bytes": 103
+          },
+          {
+            "operation": "whoami",
+            "encrypted": true,
+            "messageId": 8,
+            "fragments": 1,
+            "firstCounter": 14,
+            "lastCounter": 14,
+            "bytes": 25
+          }
+        ],
+        "whileBleConnected": {
+          "meshMessages": [
+            {
+              "direction": "p4->s3",
+              "msgId": 21,
+              "bytes": 401,
+              "pieces": 3,
+              "encrypted": true,
+              "sha256": "be712cadafac4cbccea45fd802899a0999772de33d17600aa5481c1c791ddbfb"
+            },
+            {
+              "direction": "s3->p4",
+              "msgId": 22,
+              "bytes": 401,
+              "pieces": 3,
+              "encrypted": true,
+              "sha256": "19ccdfa73e774d81f574f778185ba89a528d30f1dd0fbbd30cfe93e414ff51be"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reconnect",
+      "status": "passed",
+      "durationSec": 16.148,
+      "evidence": {
+        "deviceInfo": {
+          "manufacturer": "HardwareOne",
+          "model": "Seeed XIAO ESP32S3",
+          "firmware": "0.99.94.1"
+        },
+        "mtu": 517,
+        "secureChannel": "v1",
+        "initiallyUnauthenticated": true,
+        "preLoginCommandDenied": true,
+        "namedAdminLogin": true,
+        "gattCounters": {
+          "state": "connected",
+          "uptime": 87,
+          "rx": 19,
+          "tx": 30
+        },
+        "authenticatedPeerMeshMacMatchesExpected": true,
+        "bleStatus": {
+          "schema": 1,
+          "initialized": true,
+          "state": "connected",
+          "activeConnections": 1,
+          "maxConnections": 4,
+          "totalConnections": 2,
+          "commandsReceived": 18,
+          "responsesSent": 27
+        },
+        "meshStatus": {
+          "schema": 1,
+          "initialized": true,
+          "channel": 6,
+          "channelPref": 6,
+          "mac": "68:EE:8F:50:E9:D0",
+          "pairedDevices": 1
+        },
+        "encryptedReplies": [
+          {
+            "operation": "whoami",
+            "encrypted": true,
+            "messageId": 0,
+            "fragments": 1,
+            "firstCounter": 1,
+            "lastCounter": 1,
+            "bytes": 17
+          },
+          {
+            "operation": "status json",
+            "encrypted": true,
+            "messageId": 1,
+            "fragments": 1,
+            "firstCounter": 2,
+            "lastCounter": 2,
+            "bytes": 57
+          },
+          {
+            "operation": "login",
+            "encrypted": true,
+            "messageId": 2,
+            "fragments": 1,
+            "firstCounter": 3,
+            "lastCounter": 3,
+            "bytes": 47
+          },
+          {
+            "operation": "whoami",
+            "encrypted": true,
+            "messageId": 3,
+            "fragments": 1,
+            "firstCounter": 4,
+            "lastCounter": 4,
+            "bytes": 25
+          },
+          {
+            "operation": "status json",
+            "encrypted": true,
+            "messageId": 4,
+            "fragments": 5,
+            "firstCounter": 5,
+            "lastCounter": 9,
+            "bytes": 821
+          },
+          {
+            "operation": "blestatus json",
+            "encrypted": true,
+            "messageId": 5,
+            "fragments": 2,
+            "firstCounter": 10,
+            "lastCounter": 11,
+            "bytes": 258
+          },
+          {
+            "operation": "espnowstatus json",
+            "encrypted": true,
+            "messageId": 6,
+            "fragments": 1,
+            "firstCounter": 12,
+            "lastCounter": 12,
+            "bytes": 103
+          },
+          {
+            "operation": "whoami",
+            "encrypted": true,
+            "messageId": 8,
+            "fragments": 1,
+            "firstCounter": 14,
+            "lastCounter": 14,
+            "bytes": 25
+          }
+        ],
+        "whileBleConnected": {
+          "meshMessages": [
+            {
+              "direction": "p4->s3",
+              "msgId": 26,
+              "bytes": 401,
+              "pieces": 3,
+              "encrypted": true,
+              "sha256": "1e7c2e53793a002354c1a9b6745a903c9dfaeb2a063d5e08cc6b97ec9153472f"
+            },
+            {
+              "direction": "s3->p4",
+              "msgId": 26,
+              "bytes": 401,
+              "pieces": 3,
+              "encrypted": true,
+              "sha256": "6d21c219ab0e321203e35696c8d51604f48802cf5cb5c651f8263bdc057adbff"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "summary": {
+    "passedConnectionCycles": 2,
+    "negotiatedMtu": 517,
+    "freshUnauthenticatedConnectionChecks": 2,
+    "preLoginCommandDenials": 2,
+    "namedAdminLogins": 2,
+    "encryptedReplyMessages": 16,
+    "meshMessagesWhileBleConnected": 4,
+    "meshMessagesPerDirection": {
+      "p4->s3": 2,
+      "s3->p4": 2
+    },
+    "meshMessageBytes": 401,
+    "meshMessagePieces": 3
+  },
+  "qualification": "P4/C6 central to native S3 peripheral only. Initial connection and reconnect both establish Secure Channel v1 and named admin command access. Mesh messages were verified while BLE remained connected. This run does not establish the opposite BLE role or simultaneous HTTP traffic.",
+  "counterSemantics": "GATT rx/tx and application command/response counters are cumulative snapshots, not per-cycle counts. Private account names, credentials, response bodies, session cookies and filesystem paths are excluded."
+}

@@ -1,0 +1,982 @@
+--- a/components/hardwareone/Bluetooth.cpp
++++ b/components/hardwareone/Bluetooth.cpp
+@@ -59,8 +59,7 @@
+ #include <freertos/semphr.h>
+ 
+ #include <esp_gatts_api.h>
+-#include <esp_bt.h>            // esp_bt_controller_get_status()
+-#include <esp_bt_main.h>       // esp_bluedroid_get_status()
++#include "HAL_Bluetooth.h"    // native or companion controller lifecycle
+ #include <stdlib.h>
+ #include <string.h>
+ #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
+@@ -495,12 +494,12 @@
+ // keeps an upper-cased fast-path copy for hot identification paths
+ // that don't want to allocate or call toUpperCase on every check.
+ static void copyMacUpper(char* dst, size_t dstCap, const char* src) {
+-  if (src && src[0]) {
+-    strncpy(dst, src, dstCap - 1);
+-    dst[dstCap - 1] = '\0';
+-    for (char* p = dst; *p; p++) *p = toupper(*p);
+-  } else {
+-    dst[0] = '\0';
++  if (!dst || dstCap == 0) return;
++  const size_t len = src ? strnlen(src, dstCap - 1) : 0;
++  if (len) memcpy(dst, src, len);
++  dst[len] = '\0';
++  for (size_t i = 0; i < len; i++) {
++    dst[i] = (char)toupper((unsigned char)dst[i]);
+   }
+ }
+ static void bleUpdateMACCache() {
+@@ -1339,7 +1338,7 @@
+       return false;
+     }
+     BLEDevice::setCustomGapHandler(nullptr);
+-    const BLEDeviceDeinitResult reset = BLEDevice::deinitChecked(false);
++    const BluetoothHalShutdownResult reset = bluetoothHalDeinit();
+     if (!reset.success) {
+       bleStackSetLifecycleFault(true);
+       broadcastOutput("[BLE] Existing client host could not be normalized; reboot required");
+@@ -1389,12 +1388,11 @@
+   
+   // Initialize ESP32 BLE with configured device name
+   const char* deviceName = gSettings.bleDeviceName.length() > 0 ? gSettings.bleDeviceName.c_str() : "HardwareOne";
+-  BLEDevice::init(deviceName);
+-
+-  if (!BLEDevice::getInitialized() || !isBluedroidHostEnabled() ||
+-      !isBleControllerEnabled()) {
++  const bool stackReady = bluetoothHalInit(deviceName);
++
++  if (!stackReady) {
+     broadcastOutput("[BLE] Init failed (host/controller incomplete)");
+-    const BLEDeviceDeinitResult rollback = BLEDevice::deinitChecked(false);
++    const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
+     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
+     if (!rollback.success) bleStackSetLifecycleFault(true);
+     if (gBLEState) {
+@@ -1413,12 +1411,15 @@
+   // is a global Bluedroid setting — the G2 client path sets its own (244).
+   BLEDevice::setMTU(517);
+ 
+-  // Set TX power level (ESP_PWR_LVL_N12 to ESP_PWR_LVL_P9)
+-  // Map 0-7 to actual power levels
+-  esp_power_level_t powerLevel = (esp_power_level_t)constrain(gSettings.bleTxPower, 0, 7);
+-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, powerLevel);
+-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, powerLevel);
+-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, powerLevel);
++  // Apply the existing setting only where the controller exposes power control.
++  if (bluetoothHalSupportsTxPower()) {
++    const esp_err_t powerErr = bluetoothHalSetTxPower((uint8_t)constrain(gSettings.bleTxPower, 0, 7));
++    if (powerErr != ESP_OK) {
++      BROADCAST_PRINTF("[BLE] TX power setting failed: %s", esp_err_to_name(powerErr));
++    }
++  } else {
++    BLE_DEBUGF(DEBUG_BLE_CORE, "Radio backend uses its default BLE TX power");
++  }
+   
+   // Capture this server app's GATT interface so plaintext command replies can
+   // use IDF's connection-directed notify instead of Arduino's peer broadcast.
+@@ -1444,7 +1445,9 @@
+     BLE_MODEL_CHAR_UUID,
+     BLECharacteristic::PROPERTY_READ
+   );
+-  pModelChar->setValue("ESP32-S3 Hub");
++  const char* boardModel = BOARD_NAME;
++  pModelChar->setValue(boardModel[0] && strcmp(boardModel, "Unknown/Unsupported") != 0
++                          ? boardModel : "HardwareOne");
+   
+   pFirmwareChar = pDeviceInfoService->createCharacteristic(
+     BLE_FIRMWARE_CHAR_UUID,
+@@ -1588,7 +1591,7 @@
+   // Just deinit the device
+   sBleGattsIf.store(ESP_GATT_IF_NONE, std::memory_order_release);
+   BLEDevice::setCustomGattsHandler(nullptr);
+-  const BLEDeviceDeinitResult deinitResult = BLEDevice::deinitChecked(false);
++  const BluetoothHalShutdownResult deinitResult = bluetoothHalDeinit();
+   if (!deinitResult.success) {
+     bleStackSetLifecycleFault(true);
+     char buf[196];
+@@ -2058,20 +2061,11 @@
+ }
+ 
+ bool isBleControllerEnabled() {
+-#if CONFIG_BT_CONTROLLER_ENABLED
+-  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+-    return true;
+-  }
+-#endif
+-  return false;
++  return bluetoothHalStatus().controller == BluetoothHalControllerState::Enabled;
+ }
+ 
+ bool isBluedroidHostEnabled() {
+-#if defined(CONFIG_BLUEDROID_ENABLED)
+-  return esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED;
+-#else
+-  return false;
+-#endif
++  return bluetoothHalStatus().hostEnabled;
+ }
+ 
+ bool isBleServerInitialized() {
+@@ -2526,10 +2520,9 @@
+ }
+ 
+ static const char* cmd_blename(const String& argsInput) {
+-  // Parse args - skip command name
++  // The command dispatcher supplies arguments without the command name.
+   const char* args = argsInput.c_str();
+-  while (*args && *args != ' ') args++;  // Skip command name
+-  while (*args == ' ') args++;  // Skip spaces
++  while (*args == ' ') args++;
+   
+   if (*args != '\0') {
+     // Extract new name
+@@ -2559,9 +2552,11 @@
+ }
+ 
+ static const char* cmd_bletxpower(const String& argsInput) {
+-  // Parse args - skip command name
++  if (!bluetoothHalSupportsTxPower()) {
++    return "Error: BLE TX power control is unavailable on this radio backend";
++  }
++  // The dispatcher supplies arguments without the command name.
+   const char* args = argsInput.c_str();
+-  while (*args && *args != ' ') args++;  // Skip command name
+   while (*args == ' ') args++;  // Skip spaces
+   
+   if (*args != '\0') {
+@@ -2571,15 +2566,17 @@
+       return "Error: TX power must be 0-7 (0=min/-12dBm, 7=max/+9dBm)";
+     }
+     
++    // Apply first: a failed controller operation must not be reported as saved
++    // and applied. With BLE off, preserve the setting for the next start.
++    if (gBLEState && gBLEState->initialized) {
++      const esp_err_t powerErr = bluetoothHalSetTxPower((uint8_t)level);
++      if (powerErr != ESP_OK) {
++        if (!ensureDebugBuffer()) return "Error: BLE TX power update failed";
++        snprintf(getDebugBuffer(), 1024, "Error: BLE TX power update failed: %s", esp_err_to_name(powerErr));
++        return getDebugBuffer();
++      }
++    }
+     setSetting(gSettings.bleTxPower, level);
+-    
+-    // Apply immediately if BLE is running
+-    if (gBLEState && gBLEState->initialized) {
+-      esp_power_level_t powerLevel = (esp_power_level_t)level;
+-      esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, powerLevel);
+-      esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, powerLevel);
+-      esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, powerLevel);
+-    }
+     
+     if (!ensureDebugBuffer()) return "TX power updated";
+     char* buf = getDebugBuffer();
+--- a/components/hardwareone/Bluetooth.h
++++ b/components/hardwareone/Bluetooth.h
+@@ -196,8 +196,10 @@
+ void bleUpdateStreams();
+ 
+ // Runtime status. These predicates deliberately answer different questions:
+-// controller/host report physical stack state, server reports ownership of the
+-// phone-facing GATT profile, and bleSubsystemActive() reports either logical
++// controller reports the local driver's state or the last acknowledged remote
++// lifecycle state (Hosted has no live status RPC); host reports the local BLE
++// host state, server reports ownership of the phone-facing GATT profile, and
++// bleSubsystemActive() reports either logical
+ // application role (server or G2 client) initialized.
+ bool isBleControllerEnabled();
+ bool isBluedroidHostEnabled();
+--- a/components/hardwareone/CMakeLists.txt
++++ b/components/hardwareone/CMakeLists.txt
+@@ -230,6 +230,9 @@
+ set(hardwareone_srcs
+         HardwareOne.cpp
+         Bluetooth.cpp
++        HAL_Bluetooth.cpp
++        Connectivity_BleProbe.cpp
++        Connectivity_HttpProbe.cpp
+         System_BleSecureChannel.cpp
+         BLE_IDF.cpp
+         G2_Glasses.cpp
+--- /dev/null
++++ b/components/hardwareone/Connectivity_BleProbe.cpp
+@@ -0,0 +1,247 @@
++// Isolated connectivity experiment: USB-admin GATT central on either board.
++// Never initializes/deinitializes the shared BLE core or changes its role.
++#include "Connectivity_BleProbe.h"
++#include "System_BuildConfig.h"
++#include "System_Utils.h"
++#include "System_Command.h"
++#include "System_AuthIdentity.h"
++#include "System_MemUtil.h"
++
++#if ENABLE_BLUETOOTH
++#include <BLEDevice.h>
++#include <BLEClient.h>
++#include <BLEScan.h>
++#include <BLERemoteCharacteristic.h>
++#include <atomic>
++#include <mbedtls/base64.h>
++#include <freertos/queue.h>
++
++namespace {
++constexpr char SERVICE[] = "12345678-1234-5678-1234-56789abcdef0";
++constexpr char REQUEST[] = "12345678-1234-5678-1234-56789abcde01";
++constexpr char RESPONSE[] = "12345678-1234-5678-1234-56789abcde02";
++constexpr char PROBE_STATUS_UUID[] = "12345678-1234-5678-1234-56789abcde03";
++constexpr size_t MAX_FRAME = 517, QUEUE_DEPTH = 40;
++struct Frame { uint32_t generation; uint16_t length; uint8_t bytes[MAX_FRAME]; };
++QueueHandle_t frames = nullptr;
++BLEClient* client = nullptr;
++BLERemoteCharacteristic* requestChar = nullptr;
++BLERemoteCharacteristic* responseChar = nullptr;
++BLERemoteCharacteristic* statusChar = nullptr;
++BLERemoteService* infoService = nullptr;
++std::atomic<uint32_t> generation{0}, drops{0}, received{0};
++std::atomic<bool> connected{false};
++bool subscribed = false;
++char output[6144]; // serialized command execution owns this buffer
++
++class Callbacks final : public BLEClientCallbacks {
++  void onConnect(BLEClient*) override { connected.store(true); }
++  void onDisconnect(BLEClient*) override { connected.store(false); }
++} callbacks;
++
++const char* serialize(JsonDocument& doc) {
++  doc["schema"] = 1;
++  doc["bridge"] = "board-gatt-v1";
++  doc["generation"] = generation.load();
++  doc["connected"] = connected.load();
++  doc["drops"] = drops.load();
++  doc["received"] = received.load();
++  doc["queued"] = frames ? uxQueueMessagesWaiting(frames) : 0;
++  if (measureJson(doc) >= sizeof(output)) return "{\"schema\":1,\"ok\":false,\"error\":\"output_overflow\"}";
++  serializeJson(doc, output, sizeof(output));
++  return output;
++}
++
++const char* fail(const char* reason) {
++  PSRAM_JSON_DOC(doc);
++  doc["ok"] = false;
++  doc["error"] = reason;
++  return serialize(doc);
++}
++
++bool cleanup() {
++  ++generation; // fence notifications from the old subscription before close
++  subscribed = false;
++  if (!client) { connected.store(false); return true; }
++  if (client->isConnected() && client->disconnect() != 0) return false;
++  const uint32_t deadline = millis() + 5000;
++  while (client->isConnected() && int32_t(deadline - millis()) > 0) delay(10);
++  if (client->isConnected()) return false;
++  connected.store(false);
++  // The repository's checked delete waits for unregister acknowledgement and
++  // callback retirement. Retain the object if it cannot yet be destroyed.
++  while (int32_t(deadline - millis()) > 0) {
++    if (BLEDevice::deleteClient(client)) {
++      client = nullptr;
++      requestChar = responseChar = statusChar = nullptr;
++      infoService = nullptr;
++      if (frames) xQueueReset(frames);
++      return true;
++    }
++    delay(10);
++  }
++  return false;
++}
++
++bool validMac(const String& value) {
++  if (value.length() != 17) return false;
++  for (size_t i = 0; i < 17; ++i) {
++    if (i % 3 == 2 ? value[i] != ':' : !isxdigit(static_cast<unsigned char>(value[i]))) return false;
++  }
++  return true;
++}
++
++String base64(const uint8_t* data, size_t length) {
++  char encoded[((MAX_FRAME + 2) / 3) * 4 + 1];
++  size_t written = 0;
++  if (length > MAX_FRAME || mbedtls_base64_encode(reinterpret_cast<unsigned char*>(encoded), sizeof(encoded), &written, data, length) != 0) return String();
++  encoded[written] = '\0';
++  return String(encoded);
++}
++} // namespace
++
++static const char* cmd_bleprobe(const String& input) {
++  RETURN_VALID_IF_VALIDATE_CSTR();
++  if (currentAuthContext().transport != SOURCE_SERIAL || !currentExecIsAdmin()) return fail("serial_admin_required");
++  CommandArgs args(input);
++  const String sub = args.count() ? args.arg(0) : "status";
++  PSRAM_JSON_DOC(doc);
++  doc["ok"] = true;
++  doc["op"] = sub;
++  if (sub == "status") {
++    doc["initialized"] = BLEDevice::getInitialized();
++    doc["subscribed"] = subscribed;
++    doc["mtu"] = client && connected.load() ? client->getMTU() : 0;
++    return serialize(doc);
++  }
++  if (sub == "disconnect") {
++    if (!cleanup()) return fail("client_retirement_pending");
++    return serialize(doc);
++  }
++  if (!BLEDevice::getInitialized()) return fail("openble_required");
++  if (!frames) frames = xQueueCreate(QUEUE_DEPTH, sizeof(Frame));
++  if (!frames) return fail("queue_allocation_failed");
++  if (sub == "scan") {
++    if (client || args.count() != 2) return fail("scan_requires_disconnected_and_seconds");
++    const int seconds = args.arg(1).toInt();
++    if (seconds < 1 || seconds > 10) return fail("scan_seconds_1_to_10");
++    BLEScan* scan = BLEDevice::getScan();
++    scan->setActiveScan(true);
++    BLEScanResults* results = scan->start(seconds, false);
++    if (!results) return fail("scan_failed");
++    JsonArray devices = doc["devices"].to<JsonArray>();
++    for (int i = 0; i < results->getCount() && devices.size() < 8; ++i) {
++      BLEAdvertisedDevice device = results->getDevice(i);
++      if (!device.isAdvertisingService(BLEUUID(SERVICE))) continue;
++      JsonObject row = devices.add<JsonObject>();
++      row["mac"] = device.getAddress().toString();
++      row["addressType"] = device.getAddressType();
++      row["name"] = device.getName();
++      row["rssi"] = device.getRSSI();
++    }
++    scan->clearResults();
++    return serialize(doc);
++  }
++  if (sub == "connect") {
++    if (args.count() < 2 || args.count() > 3 || !validMac(args.arg(1))) return fail("connect_requires_mac_and_optional_type");
++    const int type = args.count() == 3 ? args.arg(2).toInt() : 0;
++    if (type < 0 || type > 3) return fail("invalid_address_type");
++    if (client && !cleanup()) return fail("previous_client_retirement_pending");
++    xQueueReset(frames);
++    drops.store(0); received.store(0); ++generation;
++    client = BLEDevice::createClient();
++    if (!client) return fail("client_allocation_failed");
++    client->setClientCallbacks(&callbacks);
++    if (!client->connect(BLEAddress(args.arg(1)), type, 10000)) { cleanup(); return fail("connect_failed"); }
++    connected.store(true);
++    // This wrapper can miss CONNECT before OPEN binds the connection ID.
++    // Finish service discovery before explicitly requesting MTU, so another
++    // outstanding ATT operation cannot make that request return GATT_BUSY.
++    auto* services = client->getServices();
++    if (!client->isConnected() || !services || services->empty()) { cleanup(); return fail("service_discovery_failed"); }
++    if (client->getMTU() < 230 && !client->setMTU(517)) { cleanup(); return fail("mtu_request_failed"); }
++    // setMTU only queues the request; the CFG_MTU callback owns the result.
++    const uint32_t mtuDeadline = millis() + 5000;
++    while (client->isConnected() && client->getMTU() < 230 && int32_t(mtuDeadline - millis()) > 0) delay(10);
++    if (!client->isConnected() || client->getMTU() < 230) { cleanup(); return fail("mtu_below_secure_minimum"); }
++    BLERemoteService* service = client->getService(SERVICE);
++    infoService = client->getService(BLEUUID(uint16_t(0x180a)));
++    if (service) {
++      requestChar = service->getCharacteristic(REQUEST);
++      responseChar = service->getCharacteristic(RESPONSE);
++      statusChar = service->getCharacteristic(PROBE_STATUS_UUID);
++    }
++    if (!service || !infoService || !requestChar || !responseChar || !statusChar || !requestChar->canWrite() || !responseChar->canNotify()) {
++      cleanup(); return fail("hardwareone_service_missing");
++    }
++    doc["mtu"] = client->getMTU();
++    return serialize(doc);
++  }
++  if (!client || !connected.load()) return fail("not_connected");
++  if (sub == "subscribe") {
++    if (!subscribed) {
++      const uint32_t owner = generation.load();
++      auto result = responseChar->registerForNotify([owner](BLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
++        if (owner != generation.load()) return;
++        if (!data || length > MAX_FRAME || length == 0) { ++drops; return; }
++        Frame frame;
++        frame.generation = owner;
++        frame.length = length;
++        memcpy(frame.bytes, data, length);
++        ++received;
++        if (xQueueSend(frames, &frame, 0) != pdTRUE) ++drops;
++      }, true, true, 5000);
++      if (!result.success) return fail("subscribe_failed");
++      subscribed = true;
++    }
++    return serialize(doc);
++  }
++  if (sub == "read") {
++    if (args.count() != 2) return fail("read_requires_manufacturer_model_firmware_or_status");
++    BLERemoteCharacteristic* characteristic = nullptr;
++    const String which = args.arg(1);
++    if (which == "status") characteristic = statusChar;
++    if (which == "manufacturer") characteristic = infoService->getCharacteristic(BLEUUID(uint16_t(0x2a29)));
++    if (which == "model") characteristic = infoService->getCharacteristic(BLEUUID(uint16_t(0x2a24)));
++    if (which == "firmware") characteristic = infoService->getCharacteristic(BLEUUID(uint16_t(0x2a26)));
++    if (!characteristic || !characteristic->canRead()) return fail("read_characteristic_missing");
++    String value = characteristic->readValue();
++    if (value.length() == 0 || value.length() > MAX_FRAME) return fail("read_failed_or_oversized");
++    doc["data"] = base64(reinterpret_cast<const uint8_t*>(value.c_str()), value.length());
++    return serialize(doc);
++  }
++  if (sub == "write") {
++    if (args.count() != 2 || !subscribed) return fail("write_requires_subscription_and_base64");
++    uint8_t bytes[MAX_FRAME]; size_t length = 0;
++    String encoded = args.arg(1);
++    if (mbedtls_base64_decode(bytes, sizeof(bytes), &length, reinterpret_cast<const unsigned char*>(encoded.c_str()), encoded.length()) != 0 || length == 0 || length > client->getMTU() - 3) return fail("invalid_or_oversized_record");
++    // Accept only Secure Channel client records: never forward login plaintext.
++    if (!((bytes[0] == 0x01 && length == 49) || (bytes[0] == 0x03 && length == 19) || (bytes[0] == 0x10 && length >= 25))) return fail("secure_record_required");
++    if (!requestChar->writeValue(bytes, length, true, 5000)) return fail("gatt_write_failed");
++    doc["bytes"] = length;
++    return serialize(doc);
++  }
++  if (sub == "poll") {
++    const int limit = args.count() == 2 ? args.arg(1).toInt() : 4;
++    if (limit < 1 || limit > 4 || args.count() > 2) return fail("poll_limit_1_to_4");
++    JsonArray result = doc["frames"].to<JsonArray>();
++    Frame frame;
++    for (int i = 0; i < limit && xQueueReceive(frames, &frame, 0) == pdTRUE; ++i) {
++      JsonObject row = result.add<JsonObject>();
++      row["generation"] = frame.generation;
++      row["bytes"] = frame.length;
++      row["data"] = base64(frame.bytes, frame.length);
++    }
++    return serialize(doc);
++  }
++  return fail("unknown_operation");
++}
++#else
++static const char* cmd_bleprobe(const String&) { return "{\"schema\":1,\"ok\":false,\"error\":\"bluetooth_disabled\"}"; }
++#endif
++
++const CommandEntry connectivityBleProbeCommands[] = {
++  {"bleprobe", "Isolated USB-admin board GATT test bridge.", true, cmd_bleprobe,
++   "bleprobe status|scan <1-10>|connect <mac> [type]|subscribe|read <manufacturer|model|firmware|status>|write <base64>|poll [1-4]|disconnect"}
++};
++const size_t connectivityBleProbeCommandsCount = sizeof(connectivityBleProbeCommands) / sizeof(connectivityBleProbeCommands[0]);
+--- /dev/null
++++ b/components/hardwareone/Connectivity_BleProbe.h
+@@ -0,0 +1,6 @@
++#pragma once
++// Isolated USB-admin GATT bridge for native or Hosted Bluetooth boards.
++#include <stddef.h>
++struct CommandEntry;
++extern const CommandEntry connectivityBleProbeCommands[];
++extern const size_t connectivityBleProbeCommandsCount;
+--- /dev/null
++++ b/components/hardwareone/Connectivity_HttpProbe.cpp
+@@ -0,0 +1,273 @@
++// Isolated experiment: native S3 HTTP client, controlled by USB admin only.
++// No host-computer networking, Wi-Fi deinit, or shared BLE lifecycle changes.
++#include "Connectivity_HttpProbe.h"
++#include "System_BuildConfig.h"
++#include "System_Utils.h"
++#include "System_Command.h"
++#include "System_AuthIdentity.h"
++#include "System_MemUtil.h"
++
++#if ENABLE_HTTP_SERVER && defined(CONFIG_IDF_TARGET_ESP32S3)
++#include "System_WiFi.h"
++#include "System_ESPNow.h"
++#include <WiFi.h>
++#include <HTTPClient.h>
++#include <mbedtls/base64.h>
++#include <mbedtls/sha256.h>
++#include <ctype.h>
++
++namespace {
++constexpr size_t MAX_BODY = 2000000, SMALL_BODY = 8192, MAX_FORM = 1400;
++constexpr uint8_t TEST_CHANNEL = 6;
++constexpr char TARGET[] = "192.168.4.1";
++String sessionCookie; // Never returned or logged; command execution is serialized.
++
++const char* serialize(JsonDocument& doc) {
++  PSRAM_STATIC_BUF(output, 16384);
++  doc["schema"] = 1;
++  doc["bridge"] = "s3-http-v1";
++  doc["connected"] = WiFi.status() == WL_CONNECTED;
++  doc["cookiePresent"] = !sessionCookie.isEmpty();
++  if (measureJson(doc) >= output_SIZE) return "{\"schema\":1,\"ok\":false,\"error\":\"output_overflow\"}";
++  serializeJson(doc, output, output_SIZE);
++  return output;
++}
++
++const char* fail(const char* reason) {
++  PSRAM_JSON_DOC(doc);
++  doc["ok"] = false;
++  doc["error"] = reason;
++  return serialize(doc);
++}
++
++bool decode(const String& encoded, uint8_t* bytes, size_t capacity, size_t& length) {
++  length = 0;
++  return mbedtls_base64_decode(bytes, capacity, &length,
++      reinterpret_cast<const unsigned char*>(encoded.c_str()), encoded.length()) == 0;
++}
++
++bool hasNull(const uint8_t* bytes, size_t length) { return memchr(bytes, 0, length) != nullptr; }
++
++struct Matcher {
++  const char* pattern;
++  size_t cursor = 0;
++  bool found = false;
++  void add(uint8_t value) {
++    if (found) return;
++    const char c = (char)tolower(value);
++    if (c == pattern[cursor]) {
++      if (pattern[++cursor] == '\0') found = true;
++    } else {
++      cursor = c == pattern[0] ? 1 : 0;
++    }
++  }
++};
++
++class BodySummary final : public Stream {
++ public:
++  size_t count = 0;
++  bool failed = false;
++  Matcher htmlOpen{"<html"}, htmlClose{"</html>"}, username{"username"}, password{"password"};
++  uint8_t* small = nullptr;
++  const uint32_t deadline = millis() + 20000;
++  mbedtls_sha256_context hash;
++  BodySummary() {
++    small = static_cast<uint8_t*>(ps_alloc(SMALL_BODY, AllocPolicy::PreferPSRAM, "http.probe.body"));
++    mbedtls_sha256_init(&hash);
++    failed = !small || mbedtls_sha256_starts(&hash, 0) != 0;
++  }
++  ~BodySummary() { mbedtls_sha256_free(&hash); ps_free(small); }
++  int available() override { return 0; }
++  int read() override { return -1; }
++  int peek() override { return -1; }
++  void flush() override {}
++  size_t write(uint8_t byte) override { return write(&byte, 1); }
++  size_t write(const uint8_t* bytes, size_t length) override {
++    if (failed || int32_t(deadline - millis()) <= 0 || length > MAX_BODY - count ||
++        mbedtls_sha256_update(&hash, bytes, length) != 0) {
++      failed = true;
++      setWriteError();
++      return 0;
++    }
++    if (count + length <= SMALL_BODY && length) memcpy(small + count, bytes, length);
++    for (size_t i = 0; i < length; ++i) {
++      htmlOpen.add(bytes[i]); htmlClose.add(bytes[i]); username.add(bytes[i]); password.add(bytes[i]);
++    }
++    count += length;
++    return length;
++  }
++  bool finish(char hex[65]) {
++    uint8_t digest[32];
++    if (failed || mbedtls_sha256_finish(&hash, digest) != 0) return false;
++    static const char digits[] = "0123456789abcdef";
++    for (size_t i = 0; i < sizeof(digest); ++i) {
++      hex[2*i] = digits[digest[i] >> 4]; hex[2*i+1] = digits[digest[i] & 15];
++    }
++    hex[64] = '\0';
++    return true;
++  }
++};
++
++bool updateCookie(const String& header) {
++  if (header.isEmpty()) return true;
++  if (!header.startsWith("session=")) return false;
++  int end = header.indexOf(';');
++  String value = header.substring(8, end < 0 ? header.length() : end);
++  if (value.length() > 128) return false;
++  for (size_t i = 0; i < value.length(); ++i) {
++    const unsigned char c = value[i];
++    if (!isalnum(c) && c != '-' && c != '_') return false;
++  }
++  sessionCookie = value.isEmpty() ? String() : String("session=") + value;
++  return true;
++}
++
++const char* request(const CommandArgs& args) {
++  if (args.count() < 3 || args.count() > 4) return fail("request_requires_method_path_optional_form");
++  const String method = args.arg(1), path = args.arg(2);
++  if ((method != "GET" && method != "POST") || (method == "GET" && args.count() != 3) ||
++      (method == "POST" && args.count() != 4)) return fail("get_or_post_required");
++  if (path.isEmpty() || path.length() > 128 || path[0] != '/' || path.startsWith("//")) return fail("invalid_path");
++  for (size_t i = 0; i < path.length(); ++i) {
++    const unsigned char c = path[i];
++    if (c <= 32 || c >= 127 || c == '#') return fail("invalid_path");
++  }
++  const IPAddress local = WiFi.localIP();
++  if (WiFi.status() != WL_CONNECTED || local[0] != 192 || local[1] != 168 || local[2] != 4 || WiFi.channel() != TEST_CHANNEL)
++    return fail("join_test_ap_first");
++  uint8_t form[MAX_FORM]; size_t formLength = 0;
++  if (method == "POST" && (!decode(args.arg(3), form, sizeof(form), formLength) || formLength == 0 || hasNull(form, formLength)))
++    return fail("invalid_or_oversized_form");
++  NetworkClient client;
++  HTTPClient http;
++  http.setConnectTimeout(5000);
++  http.setTimeout(5000);
++  http.setReuse(false);
++  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
++  http.setAcceptEncoding("identity");
++  if (!http.begin(client, TARGET, 80, path, false)) return fail("http_begin_failed");
++  const char* headers[] = {"Set-Cookie", "Location", "Transfer-Encoding", "Content-Encoding"};
++  http.collectHeaders(headers, sizeof(headers) / sizeof(headers[0]));
++  if (!sessionCookie.isEmpty()) http.addHeader("Cookie", sessionCookie);
++  if (method == "POST") http.addHeader("Content-Type", "application/x-www-form-urlencoded");
++  const uint32_t started = millis();
++  const int status = method == "GET" ? http.GET() : http.POST(form, formLength);
++  memset(form, 0, sizeof(form));
++  PSRAM_JSON_DOC(doc);
++  doc["op"] = "request";
++  doc["status"] = status;
++  doc["ok"] = false;
++  doc["complete"] = false;
++  if (status <= 0) {
++    http.end(); doc["error"] = "http_transport_failed"; return serialize(doc);
++  }
++  const int expected = http.getSize();
++  const bool chunked = http.header("Transfer-Encoding").equalsIgnoreCase("chunked");
++  const String encoding = http.header("Content-Encoding");
++  if ((expected < 0 && !chunked) || expected > (int)MAX_BODY ||
++      (!encoding.isEmpty() && !encoding.equalsIgnoreCase("identity"))) {
++    http.end(); doc["error"] = "unsupported_or_oversized_body"; return serialize(doc);
++  }
++  const String location = http.header("Location");
++  if (location.length() > 256 || !updateCookie(http.header("Set-Cookie"))) {
++    http.end(); doc["error"] = "invalid_response_header"; return serialize(doc);
++  }
++  BodySummary body;
++  int received = -1;
++  if (!body.failed) received = expected == 0 && !chunked ? 0 : http.writeToStream(&body);
++  const int finalExpected = http.getSize();
++  http.end();
++  char hash[65];
++  if (received < 0 || (size_t)received != body.count || (expected >= 0 && (size_t)expected != body.count) ||
++      (finalExpected >= 0 && (size_t)finalExpected != body.count) || !body.finish(hash)) {
++    doc["error"] = "body_incomplete_or_limit";
++    doc["bytes"] = body.count;
++    return serialize(doc);
++  }
++  doc["ok"] = true;
++  doc["complete"] = true;
++  doc["bytes"] = body.count;
++  doc["sha256"] = hash;
++  doc["location"] = location;
++  doc["durationMs"] = millis() - started;
++  doc["htmlOpen"] = body.htmlOpen.found;
++  doc["htmlClose"] = body.htmlClose.found;
++  doc["hasUsername"] = body.username.found;
++  doc["hasPassword"] = body.password.found;
++  doc["bodyIncluded"] = body.count <= SMALL_BODY;
++  if (body.count <= SMALL_BODY) {
++    const size_t capacity = ((body.count + 2) / 3) * 4 + 1;
++    char* encoded = static_cast<char*>(ps_alloc(capacity, AllocPolicy::PreferPSRAM, "http.probe.base64"));
++    size_t written = 0;
++    if (!encoded || mbedtls_base64_encode(reinterpret_cast<unsigned char*>(encoded), capacity, &written, body.small, body.count) != 0) {
++      ps_free(encoded); return fail("body_encoding_failed");
++    }
++    encoded[written] = '\0';
++    doc["body"] = encoded;
++    const char* result = serialize(doc);
++    ps_free(encoded);
++    return result;
++  }
++  return serialize(doc);
++}
++} // namespace
++
++static const char* cmd_httpprobe(const String& input) {
++  RETURN_VALID_IF_VALIDATE_CSTR();
++  if (currentAuthContext().transport != SOURCE_SERIAL || !currentExecIsAdmin()) return fail("serial_admin_required");
++  CommandArgs args(input);
++  if (args.unterminatedQuote()) return fail("invalid_arguments");
++  const String sub = args.count() ? args.arg(0) : "status";
++  if (sub == "request") return request(args);
++  PSRAM_JSON_DOC(doc);
++  doc["ok"] = true;
++  doc["op"] = sub;
++  if (sub == "clear" && args.count() == 1) {
++    sessionCookie = "";
++    return serialize(doc);
++  }
++  if (sub == "status" && args.count() <= 1) {
++    doc["ip"] = WiFi.localIP().toString();
++    doc["apIp"] = WiFi.softAPIP().toString();
++    doc["channel"] = WiFi.channel();
++    return serialize(doc);
++  }
++  if (sub == "join" && args.count() == 3) {
++    uint8_t ssid[33] = {}, password[64] = {};
++    size_t ssidLength = 0, passwordLength = 0;
++    if (!decode(args.arg(1), ssid, 32, ssidLength) || !decode(args.arg(2), password, 63, passwordLength) ||
++        ssidLength == 0 || passwordLength < 8 || hasNull(ssid, ssidLength) || hasNull(password, passwordLength))
++      return fail("invalid_ap_credentials");
++    WifiRadioMutationGuard guard(5000);
++    if (!guard.acquired()) return fail("radio_busy");
++    sessionCookie = "";
++    WiFi.persistent(false);
++    if (!WiFi.mode(WIFI_AP_STA) ||
++        !WiFi.softAPConfig(IPAddress(192, 168, 5, 1), IPAddress(192, 168, 5, 1), IPAddress(255, 255, 255, 0))) {
++      memset(password, 0, sizeof(password));
++      return fail("s3_ap_route_setup_failed");
++    }
++    WiFi.begin(reinterpret_cast<const char*>(ssid), reinterpret_cast<const char*>(password), TEST_CHANNEL);
++    memset(password, 0, sizeof(password));
++    const uint32_t deadline = millis() + 20000;
++    while (WiFi.status() != WL_CONNECTED && int32_t(deadline - millis()) > 0) delay(20);
++    espnowNoteWifiChannelMayHaveChanged();
++    const IPAddress local = WiFi.localIP();
++    if (WiFi.status() != WL_CONNECTED || WiFi.channel() != TEST_CHANNEL ||
++        local[0] != 192 || local[1] != 168 || local[2] != 4) return fail("test_ap_join_failed");
++    doc["ip"] = local.toString();
++    doc["apIp"] = WiFi.softAPIP().toString();
++    doc["channel"] = WiFi.channel();
++    return serialize(doc);
++  }
++  return fail("unknown_operation");
++}
++#else
++static const char* cmd_httpprobe(const String&) { return "{\"schema\":1,\"ok\":false,\"error\":\"native_s3_only\"}"; }
++#endif
++
++const CommandEntry connectivityHttpProbeCommands[] = {
++  {"httpprobe", "Isolated USB-admin S3 HTTP test bridge.", true, cmd_httpprobe,
++   "httpprobe status|clear|join <ssid-base64> <password-base64>|request GET|POST /path [form-base64]"}
++};
++const size_t connectivityHttpProbeCommandsCount = sizeof(connectivityHttpProbeCommands) / sizeof(connectivityHttpProbeCommands[0]);
+--- /dev/null
++++ b/components/hardwareone/Connectivity_HttpProbe.h
+@@ -0,0 +1,5 @@
++#pragma once
++#include <stddef.h>
++struct CommandEntry;
++extern const CommandEntry connectivityHttpProbeCommands[];
++extern const size_t connectivityHttpProbeCommandsCount;
+--- /dev/null
++++ b/components/hardwareone/HAL_Bluetooth.cpp
+@@ -0,0 +1,85 @@
++#include "HAL_Bluetooth.h"
++
++#if ENABLE_BLUETOOTH
++
++#include <BLEDevice.h>
++#include <esp_bt_main.h>
++
++#if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++#include <esp32-hal-bt.h>
++#elif CONFIG_BT_CONTROLLER_ENABLED
++#include <esp_bt.h>
++#endif
++
++BluetoothHalStatus bluetoothHalStatus() {
++  BluetoothHalStatus status{};
++  status.hostEnabled = esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED;
++  status.stackInitialized = BLEDevice::getInitialized();
++#if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++  status.backend = BluetoothHalBackend::Hosted;
++  // Pinned Hosted has no remote controller-status RPC. The Arduino adapter
++  // records only successful lifecycle acknowledgements, and -1 on uncertainty.
++  const int32_t controller = btHostedControllerStatus();
++  status.controller = controller >= 0 && controller <= 2
++                          ? static_cast<BluetoothHalControllerState>(controller)
++                          : BluetoothHalControllerState::Unknown;
++  status.controllerStateIsLive = false;
++#else
++  status.backend = BluetoothHalBackend::Native;
++#if CONFIG_BT_CONTROLLER_ENABLED
++  status.controller = static_cast<BluetoothHalControllerState>(esp_bt_controller_get_status());
++  status.controllerStateIsLive = true;
++#else
++  status.controller = BluetoothHalControllerState::Unknown;
++  status.controllerStateIsLive = false;
++#endif
++#endif
++  return status;
++}
++
++bool bluetoothHalInit(const char* deviceName) {
++  if (!deviceName || !deviceName[0]) return false;
++  BLEDevice::init(deviceName);
++  return bluetoothHalStatus().ready();
++}
++
++BluetoothHalShutdownResult bluetoothHalDeinit() {
++  // Arduino owns host callback retirement and controller shutdown ordering.
++  // Never release controller memory: this application supports BLE off/on.
++  const BLEDeviceDeinitResult native = BLEDevice::deinitChecked(false);
++  const BluetoothHalStatus status = bluetoothHalStatus();
++  return {
++    native.success && !status.stackInitialized && !status.hostEnabled &&
++        status.controller == BluetoothHalControllerState::Idle,
++    static_cast<uint8_t>(native.phase),
++    native.hostStatusBefore, native.hostStatusAfter,
++    native.controllerStatusBefore, native.controllerStatusAfter,
++    native.clientQuarantined
++  };
++}
++
++bool bluetoothHalSupportsTxPower() {
++#if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++  return false; // No remote power setter in the pinned Hosted API.
++#elif CONFIG_BT_CONTROLLER_ENABLED
++  return true;
++#else
++  return false;
++#endif
++}
++
++esp_err_t bluetoothHalSetTxPower(uint8_t level) {
++  if (level > 7) return ESP_ERR_INVALID_ARG;
++#if !CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID && CONFIG_BT_CONTROLLER_ENABLED
++  const esp_power_level_t power = static_cast<esp_power_level_t>(level);
++  esp_err_t result = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, power);
++  if (result != ESP_OK) return result;
++  result = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, power);
++  if (result != ESP_OK) return result;
++  return esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, power);
++#else
++  return ESP_ERR_NOT_SUPPORTED;
++#endif
++}
++
++#endif // ENABLE_BLUETOOTH
+--- /dev/null
++++ b/components/hardwareone/HAL_Bluetooth.h
+@@ -0,0 +1,57 @@
++/**
++ * HAL_Bluetooth — controller and stack lifecycle for the shared BLE application.
++ * GATT services, application authentication and role ownership stay in Bluetooth.
++ * Native targets use the local controller; Hosted targets use its acknowledged
++ * remote lifecycle. A Hosted acknowledgement is not a live controller query.
++ */
++#ifndef HAL_BLUETOOTH_H
++#define HAL_BLUETOOTH_H
++
++#include "System_BuildConfig.h"
++#include <stdint.h>
++#include "esp_err.h"
++
++#if ENABLE_BLUETOOTH
++
++enum class BluetoothHalBackend : uint8_t { Native, Hosted };
++enum class BluetoothHalControllerState : int8_t {
++  Unknown = -1, Idle = 0, Initialized = 1, Enabled = 2
++};
++
++struct BluetoothHalStatus {
++  BluetoothHalBackend backend;
++  BluetoothHalControllerState controller;
++  bool controllerStateIsLive;
++  bool hostEnabled;
++  bool stackInitialized;
++
++  bool ready() const {
++    return stackInitialized && hostEnabled &&
++           controller == BluetoothHalControllerState::Enabled;
++  }
++};
++
++// Preserve useful teardown diagnostics without exposing a backend's C++ type.
++struct BluetoothHalShutdownResult {
++  bool success;
++  uint8_t phase;
++  int32_t hostStatusBefore;
++  int32_t hostStatusAfter;
++  int32_t controllerStatusBefore;
++  int32_t controllerStatusAfter;
++  bool clientQuarantined;
++};
++
++// Caller owns the existing BLE role-transition token. Neither operation may run
++// in a BLE callback. Stop retains controller memory for restart and, when hosted,
++// releases only the BLE use of the transport; Wi-Fi/ESP-NOW remain alive.
++bool bluetoothHalInit(const char* deviceName);
++BluetoothHalShutdownResult bluetoothHalDeinit();
++BluetoothHalStatus bluetoothHalStatus();
++
++// Existing setting scale: 0..7. Unsupported backends never claim to apply it.
++bool bluetoothHalSupportsTxPower();
++esp_err_t bluetoothHalSetTxPower(uint8_t level);
++
++#endif // ENABLE_BLUETOOTH
++#endif // HAL_BLUETOOTH_H
+--- a/components/hardwareone/System_Utils.cpp
++++ b/components/hardwareone/System_Utils.cpp
+@@ -62,6 +62,12 @@
+ #include <esp_sntp.h>            // sntp_set_time_sync_notification_cb — real-reply signal
+                                  // (never also include lwip/apps/sntp.h in this TU)
+ #include "System_Command.h"
++#if ENABLE_BLUETOOTH
++#include "Connectivity_BleProbe.h"
++#endif
++#if ENABLE_HTTP_SERVER && CONFIG_IDF_TARGET_ESP32S3
++#include "Connectivity_HttpProbe.h"
++#endif
+ #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
+ #include "System_MemoryMonitor.h"
+ #include "System_Notifications.h"
+@@ -1246,6 +1252,8 @@
+   // Columns: prefix (lowercase cmd prefix), type (MASK_TOKEN_AT_POS|MASK_AFTER_TOKEN_POS|CALL_HANDLER), param (1-based token index), handler (custom fn or nullptr)
+   static const RedactRule kRules[] = {
+     { "wifiadd ",          MASK_TOKEN_AT_POS,    3, nullptr },  // wifiadd <ssid> <password>
++    { "probeap ",          MASK_TOKEN_AT_POS,    3, nullptr },  // isolated connectivity experiment
++    { "httpprobe ",        MASK_AFTER_TOKEN_POS, 1, nullptr },  // encoded test credentials are still secret
+     { "mqttpassword ",     MASK_AFTER_TOKEN_POS, 1, nullptr },  // mqttpassword <password>
+     { "login ",            MASK_TOKEN_AT_POS,    3, nullptr },  // login <user> <password>
+     { "testencryption ",   MASK_AFTER_TOKEN_POS, 1, nullptr },  // testencryption <secret>
+@@ -3162,6 +3170,12 @@
+     "reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] "
+     "(see blepeers for names).", bluetoothCommands, &bluetoothCommandsCount, CMD_MODULE_NETWORK, nullptr },
+   #endif
++#if ENABLE_BLUETOOTH
++  { "bleprobe", "Serial-only BLE test client", "Isolated connectivity experiment central probe.", connectivityBleProbeCommands, &connectivityBleProbeCommandsCount, CMD_MODULE_NETWORK, nullptr },
++#endif
++#if ENABLE_HTTP_SERVER && CONFIG_IDF_TARGET_ESP32S3
++  { "httpprobe", "Serial-only HTTP test client", "Isolated connectivity experiment web probe.", connectivityHttpProbeCommands, &connectivityHttpProbeCommandsCount, CMD_MODULE_NETWORK, nullptr },
++#endif
+   { "filesystem", "File operations and storage management", "Manages files and directories on the device internal LittleFS flash. Browse with "
+     "files [\"/path\"] (add json for app/BLE, or files stats json for storage usage); "
+     "create and remove with mkdir, rmdir, filecreate, and filedelete; view and rename "
+--- a/components/hardwareone/System_WiFi.cpp
++++ b/components/hardwareone/System_WiFi.cpp
+@@ -2039,6 +2039,41 @@
+ }
+ 
+ #if ENABLE_HTTP_SERVER
++// Isolated experiment fixture: expose the real web server on a passworded
++// local AP without acquiring home-network credentials or pretending STA joined.
++// This command is intentionally absent from the original application checkout.
++static const char* cmd_probeap(const String& argsInput) {
++  RETURN_VALID_IF_VALIDATE_CSTR();
++  CommandArgs args(argsInput);
++  if (args.count() != 2 || args.unterminatedQuote() ||
++      args.arg(0).length() < 1 || args.arg(0).length() > 32 ||
++      args.arg(1).length() < 8 || args.arg(1).length() > 63) {
++    return "ERROR: Usage: probeap <ssid> <password(8..63)>";
++  }
++  WifiRadioMutationGuard guard(5000);
++  if (!guard.acquired()) return "ERROR: Radio is busy";
++  uint8_t channel = 0;
++  wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
++  if (esp_wifi_get_channel(&channel, &second) != ESP_OK || channel < 1 || channel > 14) {
++    return "ERROR: Start and configure ESP-NOW before the AP probe";
++  }
++  if (!WiFi.mode(WIFI_AP_STA) ||
++      !WiFi.softAP(args.arg(0).c_str(), args.arg(1).c_str(), channel, false, 2)) {
++    return "ERROR: Local test AP failed";
++  }
++  espnowNoteWifiChannelMayHaveChanged();
++  if (server == nullptr) {
++    extern void startHttpServer();
++    startHttpServer();
++  }
++  if (server == nullptr) return "ERROR: AP is up but HTTP failed";
++  static char response[160];
++  snprintf(response, sizeof(response),
++           "{\"schema\":1,\"ap\":true,\"http\":true,\"ip\":\"%s\",\"channel\":%u}",
++           WiFi.softAPIP().toString().c_str(), channel);
++  return response;
++}
++
+ const char* cmd_httpstart(const String& argsInput) {
+   RETURN_VALID_IF_VALIDATE_CSTR();
+ 
+@@ -2412,6 +2447,7 @@
+   { "ntpsync",   "Sync time with NTP server.",               false, cmd_ntpsync },
+   { "ntpstatus", "Show NTP configuration and sync state.",   false, cmd_ntpstatus },
+ #if ENABLE_HTTP_SERVER
++  { "probeap", "Experiment only: passworded local AP and real HTTP server on the current mesh channel.", true, cmd_probeap },
+   { "openhttp", "Start HTTP server.", true, cmd_httpstart },
+   { "closehttp", "Stop HTTP server.", true, cmd_httpstop },
+   { "httpread", "Read HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
