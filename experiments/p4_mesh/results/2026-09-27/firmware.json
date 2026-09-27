@@ -1,0 +1,43 @@
+{
+  "sdk": "ESP-IDF v5.5.5",
+  "idfCommit": "b774170ff46c393eeb5e495ea37936038d3f4f4f",
+  "arduino": "3.3.5 + repository patches + experiment UART compatibility patch",
+  "espHosted": "2.12.13",
+  "firmware": {
+    "p4": {
+      "path": "private/build-p4/hardwareone-idf.bin",
+      "bytes": 1865952,
+      "sha256": "8eece05480b510514d5675d51855a9ed26f6ac0b5fc773169b2319248df085b1"
+    },
+    "s3": {
+      "path": "private/build-s3/hardwareone-idf.bin",
+      "bytes": 2175392,
+      "sha256": "e91e099196599b46ae4ae6f3386fc2dfed93fe1c3db71498a5328ceb30675087"
+    },
+    "c6_radio": {
+      "bytes": 1243776,
+      "path": "../p4_espnow/private/build-c6/network_adapter.bin",
+      "sha256": "001a01d4a5ec1b11dacc82596173dfe9d7e85a36167683d306a7afd2bdde7f06",
+      "unchangedFromTransportMilestone": true
+    }
+  },
+  "source_sha256": {
+    "app-overlay.patch": "80a5a820aa142861ae0a23c10a8b78bd00c05c0561f218297c86954a9ca4dac4",
+    "arduino-overlay.patch": "5eabc67354b53395e207778232e9153f5e5237876459a89c5cd85b7da83834a3",
+    "build-p4.sh": "f74627f1fe6c059b0576a803efb919c71f639e578373f846df73143cc9ed75a5",
+    "build-s3.sh": "180dd33a5d2ee7302dfe39e7b06152392c4e537c0ebc7f492051d3981e5abfd4",
+    "dependencies.p4.lock": "9b9ffd440f5de516dc7a1cc39b1044cfcfe7f75e344b3f363d019f977c7fd855",
+    "dependencies.s3.lock": "35dff2d7729930e308831554e59633e376395acb698cac25d6b16724926de29e",
+    "features.h": "02aa2f4415b2170f471ed64b7a810c389a3efc8437d0e08b12ec8b85bc3ce38a",
+    "p4x_eye.defaults": "a2823ca48f2b6b46d80dc0c687f8872251aea60f7adf8d6dc5c120fa16bd30e3",
+    "radio_backend.cpp": "37af6c4c3e23803a21832ebf4f1d0c275549b382e485570f4b6580238951487f",
+    "radio_backend.h": "ca08bfc7f8fdc4185c64e59c53e77d170a966618174bb2d337980378728fea5e",
+    "sdkconfig.mesh.defaults": "8a50fda4a990e08c2562e0fc964df88d102c0bd0a4dd97ddf4d38f06c5a71e26"
+  },
+  "flashSecurity": {
+    "secureBoot": false,
+    "flashEncryption": false,
+    "nvsEncryption": false,
+    "efusesModified": false
+  }
+}

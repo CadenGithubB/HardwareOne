@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "started": "2026-09-27T15:45:50.833+00:00",
+  "runId": "994264ce",
+  "status": "failed",
+  "boards": {
+    "p4": {
+      "port": "/dev/cu.usbmodem2101",
+      "mac": "fc:01:2c:e0:b9:a8",
+      "name": "HW1_P4"
+    },
+    "s3": {
+      "port": "/dev/cu.usbmodem1101",
+      "mac": "68:ee:8f:50:e9:d0",
+      "name": "HW1_S3"
+    }
+  },
+  "options": {
+    "configure": false,
+    "pair": "discovery",
+    "initiator": "s3",
+    "rekey": true,
+    "reopen": true
+  },
+  "checks": [
+    {
+      "name": "login_p4",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 1.049
+    },
+    {
+      "name": "login_s3",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 1.319
+    },
+    {
+      "name": "inspect_p4",
+      "status": "passed",
+      "evidence": {
+        "mac": "FC:01:2C:E0:B9:A8",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 0
+      },
+      "durationSec": 0.495
+    },
+    {
+      "name": "inspect_s3",
+      "status": "passed",
+      "evidence": {
+        "mac": "68:EE:8F:50:E9:D0",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 0
+      },
+      "durationSec": 0.808
+    },
+    {
+      "name": "statistics_start",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "schema": 1,
+          "messagesSent": 0,
+          "messagesReceived": 0,
+          "messagesFailed": 0,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 0,
+          "heartbeatsReceived": 0,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 10
+        },
+        "s3": {
+          "schema": 1,
+          "messagesSent": 0,
+          "messagesReceived": 0,
+          "messagesFailed": 0,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 0,
+          "heartbeatsReceived": 0,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 11
+        }
+      },
+      "durationSec": 0.245
+    },
+    {
+      "name": "pairing",
+      "status": "failed",
+      "error": "Serial response timed out after 15s (marker 20008)",
+      "durationSec": 17.908
+    }
+  ],
+  "scope": "two-node production pairing/session/text/file transport",
+  "statistics": {
+    "start": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 0,
+        "messagesReceived": 0,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 0,
+        "heartbeatsReceived": 0,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 10
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 0,
+        "messagesReceived": 0,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 0,
+        "heartbeatsReceived": 0,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 11
+      }
+    },
+    "end": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 12,
+        "messagesReceived": 9,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 0,
+        "heartbeatsReceived": 0,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 28
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 13,
+        "messagesReceived": 12,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 0,
+        "heartbeatsReceived": 0,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 29
+      }
+    }
+  },
+  "endStatisticsCapture": {
+    "reason": "run_failure",
+    "timeoutPerBoardSec": 5.0,
+    "errors": {}
+  },
+  "finished": "2026-09-27T15:46:20.927+00:00",
+  "error": "Serial response timed out after 15s (marker 20008)",
+  "sourceRunDirectory": "20260927T154550.811225Z-994264ce"
+}

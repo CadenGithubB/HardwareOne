@@ -1,0 +1,825 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -92,6 +92,12 @@
+ endif()
+ if(NOT _inferred_target)
+     set(_inferred_target "esp32s3")
++endif()
++
++# Isolated experiment hook: reuse the existing feature-header contract without
++# selecting a production OTA deployment. These cache paths are passed explicitly.
++if(HW1_MESH_EXPERIMENT_FEATURE_FILE)
++    set(HW1_DEPLOYMENT_FEATURE_FILE "${HW1_MESH_EXPERIMENT_FEATURE_FILE}")
+ endif()
+ 
+ # --- 2. Board selection (HW_BOARD, all targets) ---
+@@ -665,7 +671,11 @@
+     endif()
+ endif()
+ 
+-if(HW1_DEPLOYMENT_ACTIVE)
++if(HW1_MESH_EXPERIMENT_SDKCONFIG_FILE)
++    list(APPEND SDKCONFIG_DEFAULTS "${HW1_MESH_EXPERIMENT_SDKCONFIG_FILE}")
++endif()
++
++if(HW1_DEPLOYMENT_ACTIVE OR HW1_MESH_EXPERIMENT_FEATURE_FILE)
+     # Set this directory property before project(): ESP-IDF creates component
+     # targets during project discovery, so a later add_compile_definitions()
+     # would miss them. The hardwareone target receives the same definitions
+@@ -677,6 +687,9 @@
+ endif()
+ 
+ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
++if(HW1_MESH_EXPERIMENT_FEATURE_FILE)
++    idf_build_set_property(HW1_MESH_EXPERIMENT_FEATURE_FILE "${HW1_MESH_EXPERIMENT_FEATURE_FILE}")
++endif()
+ 
+ # The component-manager lock embeds its target.  Keep classic ESP32 resolution
+ # out of the tracked ESP32-S3 lock so switching between Headless Feather and
+@@ -707,7 +720,7 @@
+     message(FATAL_ERROR
+         "Could not resolve the hardwareone component target for OTA definitions")
+ endif()
+-if(HW1_DEPLOYMENT_ACTIVE)
++if(HW1_DEPLOYMENT_ACTIVE OR HW1_MESH_EXPERIMENT_FEATURE_FILE)
+     target_compile_definitions(${_hw1_app_component} PRIVATE
+         HW1_DEPLOYMENT_CONFIG_HEADER="${HW1_DEPLOYMENT_FEATURE_FILE}"
+         HW1_DEPLOYMENT_ID="${HW1_DEPLOYMENT_ID}"
+--- /dev/null
++++ b/boards/p4x_eye.defaults
+@@ -0,0 +1,45 @@
++# ESP32-P4X-EYE mesh experiment; optional peripheral drivers remain disabled.
++# HW_TARGET: esp32p4
++CONFIG_ARDUINO_VARIANT="esp32p4"
++CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
++CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
++CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
++CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
++CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=400
++CONFIG_SPIRAM=y
++CONFIG_SPIRAM_MODE_HEX=y
++CONFIG_SPIRAM_SPEED_200M=y
++CONFIG_SPIRAM_USE_MALLOC=y
++CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
++CONFIG_SECURE_BOOT=n
++CONFIG_SECURE_FLASH_ENC_ENABLED=n
++CONFIG_NVS_ENCRYPTION=n
++CONFIG_PARTITION_TABLE_OFFSET=0x8000
++CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
++CONFIG_ESP32P4_SELECTS_REV_LESS_V3=n
++CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
++CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
++CONFIG_FREERTOS_HZ=1000
++CONFIG_LOG_DEFAULT_LEVEL_INFO=y
++CONFIG_ESP_WIFI_REMOTE_ENABLED=y
++CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
++CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
++CONFIG_ESP_HOSTED_ENABLED=y
++CONFIG_ESP32P4_EYE_C6_BOARD=y
++CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
++CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
++CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
++CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000
++CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CMD_SLOT_1=27
++CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CLK_SLOT_1=28
++CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D0_SLOT_1=29
++CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D1_4BIT_BUS_SLOT_1=30
++CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1=31
++CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1=32
++CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=9
++# Hosted's ACTIVE_HIGH means enabled-high, with a low reset pulse (see Kconfig).
++CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y
++CONFIG_ESP_HOSTED_SLAVE_RESET_ON_EVERY_HOST_BOOTUP=y
++CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
++CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER=y
++CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS=8
+--- a/components/hardwareone/CMakeLists.txt
++++ b/components/hardwareone/CMakeLists.txt
+@@ -1,3 +1,9 @@
++# IDF runs dependency expansion in a separate CMake script. Carry the same
++# profile through a build property so early requirements match compilation.
++if(NOT HW1_DEPLOYMENT_FEATURE_FILE)
++    idf_build_get_property(HW1_DEPLOYMENT_FEATURE_FILE HW1_MESH_EXPERIMENT_FEATURE_FILE)
++endif()
++
+ set(hw_cfg_file "${CMAKE_CURRENT_LIST_DIR}/System_BuildConfig.h")
+ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${hw_cfg_file}")
+ 
+@@ -491,7 +497,6 @@
+         json
+         mbedtls
+         esp_wifi
+-        esp32-camera
+         fatfs
+         sdmmc
+         esp_driver_sdspi
+@@ -597,8 +602,6 @@
+         .
+     REQUIRES
+         ${hardwareone_requires}
+-    LDFRAGMENTS
+-        esp32_camera_psram.lf
+ )
+ 
+ # Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)
+--- a/components/hardwareone/HardwareOne.cpp
++++ b/components/hardwareone/HardwareOne.cpp
+@@ -161,7 +161,9 @@
+ #include <Adafruit_BNO055.h>
+ #include <utility/imumaths.h>
+ #endif
++#if ENABLE_NEOPIXEL
+ #include <Adafruit_NeoPixel.h>
++#endif
+ #if ENABLE_APDS_SENSOR
+ #include "Adafruit_APDS9960.h"
+ #endif
+@@ -368,7 +370,9 @@
+ #endif
+ }
+ 
++#if ENABLE_NEOPIXEL
+ extern Adafruit_NeoPixel pixels;
++#endif
+ extern BatteryState gBatteryState;
+ 
+ // Globals
+--- a/components/hardwareone/System_BuildConfig.h
++++ b/components/hardwareone/System_BuildConfig.h
+@@ -1242,6 +1242,21 @@
+   #define UART_LINK_BAUD_DEFAULT 230400
+   #define UART_LINK_BAUD_MAX    230400
+ 
++// --- ESP32-P4X-EYE mesh experiment: only the companion radio is enabled. ---
++#elif defined(CONFIG_IDF_TARGET_ESP32P4)
++  #define BOARD_SUPPORTED       1
++  #define BOARD_NAME            "Espressif ESP32-P4X-EYE"
++  #define I2C_SDA_PIN_DEFAULT    -1
++  #define I2C_SCL_PIN_DEFAULT    -1
++  #define NEOPIXEL_PIN_DEFAULT  -1
++  #define NEOPIXEL_POWER_PIN    -1
++  #define NEOPIXEL_COUNT_DEFAULT 0
++  #define USER_LED_PIN          -1
++  #define BATTERY_ADC_PIN       -1
++  #define BATTERY_MONITOR_AVAILABLE 0
++  #define BATTERY_BACKEND_ADC        0
++  #define BATTERY_BACKEND_FUEL_GAUGE 0
++
+ // --- Unsupported Board ---
+ #else
+   #define BOARD_SUPPORTED       0
+--- a/components/hardwareone/System_Debug.cpp
++++ b/components/hardwareone/System_Debug.cpp
+@@ -168,8 +168,7 @@
+   if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
+   ++gHelpSuppressedCount;
+   size_t i = gHelpTailIndex % kHelpTailLines;
+-  strncpy(gHelpTail[i], t, kHelpTailCols - 1);
+-  gHelpTail[i][kHelpTailCols - 1] = '\0';
++  strlcpy(gHelpTail[i], t, sizeof(gHelpTail[i]));
+   gHelpTailIndex++;
+   if (gHelpTailCount < kHelpTailLines) gHelpTailCount++;
+   xSemaphoreGive(mutex);
+--- a/components/hardwareone/System_ESPNow.cpp
++++ b/components/hardwareone/System_ESPNow.cpp
+@@ -96,6 +96,40 @@
+ // ============================================================================
+ EspNowState* gEspNow = nullptr;  // Allocated on-demand when ESP-NOW is initialized
+ 
++// One shared STA identity for this radio instance. isSelfMac is used repeatedly
++// by RX and routing, so querying the driver there would turn every check into a
++// blocking RPC with a companion radio. Publish before callback admission and
++// retain through shutdown until every runtime user and RX callback has joined.
++static portMUX_TYPE gEspNowSelfMacLock = portMUX_INITIALIZER_UNLOCKED;
++static uint8_t gEspNowSelfMac[6] = {};
++static bool gEspNowSelfMacValid = false;
++
++// A null argument invalidates the cache. The mux keeps readers on other tasks
++// from observing a partially published address during startup or shutdown.
++static void setEspNowSelfMacCache(const uint8_t* mac) {
++  taskENTER_CRITICAL(&gEspNowSelfMacLock);
++  if (mac) memcpy(gEspNowSelfMac, mac, sizeof(gEspNowSelfMac));
++  else memset(gEspNowSelfMac, 0, sizeof(gEspNowSelfMac));
++  gEspNowSelfMacValid = mac != nullptr;
++  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
++}
++
++bool isSelfMac(const uint8_t* mac) {
++  if (!mac) return false;
++  taskENTER_CRITICAL(&gEspNowSelfMacLock);
++  const bool valid = gEspNowSelfMacValid;
++  const bool matches = valid && memcmp(mac, gEspNowSelfMac, sizeof(gEspNowSelfMac)) == 0;
++  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
++  if (valid) return matches;
++
++  // Non-runtime callers may run before ESP-NOW opens or after it closes. Query
++  // without the mux and never publish this result: a slow fallback must not
++  // overwrite the checked identity of a concurrently starting radio instance.
++  uint8_t currentMac[6] = {};
++  return esp_wifi_get_mac(WIFI_IF_STA, currentMac) == ESP_OK &&
++         memcmp(mac, currentMac, sizeof(currentMac)) == 0;
++}
++
+ // Runtime boundary shared by every first-party send path. Admission starts
+ // CLOSED and stays closed while ESP-NOW is stopped. Enabled/count live behind
+ // one mux so close cannot observe zero in-flight users while an entrant sees
+@@ -537,15 +571,11 @@
+ // Lightweight RX ring to defer heavy processing to espnowHeartbeatTask (no new task)
+ struct InboundRxItem {
+   uint8_t src[6];
++  // Retain the callback's destination by value: it may be our STA address,
++  // our AP address, or broadcast. Never query the radio while draining RX.
++  uint8_t dst[6];
+   int len;
+   int8_t rssi;
+-  // Phase 0 relay groundwork: was this frame radio-addressed to FF:FF:FF:FF:FF:FF?
+-  // The recv callback used to discard des_addr entirely, so the drain rebuilt
+-  // recv_info with an all-zeros destination and RX code could never distinguish
+-  // "unicast to me" from "broadcast". The ring can't carry the pointer target,
+-  // but this one bit is all that distinction needs (ESP-NOW only ever delivers
+-  // frames addressed to us or to broadcast).
+-  bool radioDstIsBcast;
+   uint8_t data[250];
+ };
+ // Slot count MUST come from this constant, never sizeof(ring)/sizeof(ring[0]):
+@@ -1199,17 +1229,19 @@
+   // not be able to reach us — drop rather than fault on the WiFi task. The bump
+   // is defence-in-depth; espnowstats surfaces the counter as "RX Ring Drops".
+   if (!gEspNowRxRing) { gEspNowRxDrops++; return; }
++  // Both native ESP-NOW and the Hosted bridge supply these callback pointers.
++  // Refuse incomplete metadata rather than inventing a destination address.
++  if (!recv_info->src_addr || !recv_info->des_addr) { gEspNowRxDrops++; return; }
+   uint8_t next = (uint8_t)((gEspNowRxHead + 1) % ESPNOW_RX_RING_SLOTS);
+   if (next == gEspNowRxTail) { gEspNowRxDrops++; return; }
+   InboundRxItem& it = gEspNowRxRing[gEspNowRxHead];
+   memcpy(it.src, recv_info->src_addr, 6);
++  memcpy(it.dst, recv_info->des_addr, 6);
+   it.len = len; if (it.len > 250) it.len = 250; if (it.len < 0) it.len = 0;
+   // -128 (not -127) on missing rx_ctrl: the drain always rebuilds a non-null
+   // rx_ctrl, so this value flows to noteMeshPeerRxActivity's linkRssi as-is —
+   // and -128 is its "no sample" sentinel, keeping an unknown out of the EWMA.
+   it.rssi = recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-128;
+-  static const uint8_t kBcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+-  it.radioDstIsBcast = recv_info->des_addr && memcmp(recv_info->des_addr, kBcastMac, 6) == 0;
+   if (it.len > 0) memcpy(it.data, incomingData, it.len);
+   gEspNowRxHead = next;
+ }
+@@ -9693,8 +9725,6 @@
+   // never allocated (ESP-NOW not started, or the init alloc failed) — head and
+   // tail can't diverge in that case, but the guard keeps the deref honest.
+   if (gEspNowRxRing) {
+-    uint8_t selfMac[6] = {};
+-    esp_wifi_get_mac(WIFI_IF_STA, selfMac);  // once per drain pass, for des_addr rebuild
+     while (gEspNowRxHead != gEspNowRxTail) {
+       uint8_t tail = gEspNowRxTail;
+       InboundRxItem& item = gEspNowRxRing[tail];
+@@ -9705,17 +9735,13 @@
+         gEspNowRxTail = (uint8_t)((tail + 1) % ESPNOW_RX_RING_SLOTS);
+         continue;
+       }
+-      // Rebuild recv_info truthfully: ESP-NOW only delivers frames addressed
+-      // to us or to broadcast, and the ring carries which one this was.
+-      // (Formerly all-zeros, which made the distinction unknowable in RX code.)
+-      uint8_t dstMac[6];
+-      if (item.radioDstIsBcast) memset(dstMac, 0xFF, 6);
+-      else                      memcpy(dstMac, selfMac, 6);
++      // The callback copied both MACs before returning; these ring-owned bytes
++      // stay valid until dispatch completes and this slot is released below.
+       wifi_pkt_rx_ctrl_t rxCtrl = {};
+       rxCtrl.rssi = item.rssi;
+       esp_now_recv_info_t ri = {};
+       ri.src_addr = item.src;
+-      ri.des_addr = dstMac;
++      ri.des_addr = item.dst;
+       ri.rx_ctrl = &rxCtrl;
+       onEspNowRawRecv(&ri, item.data, (int)item.len);
+       gEspNowRxTail = (uint8_t)((tail + 1) % ESPNOW_RX_RING_SLOTS);
+@@ -10855,6 +10881,9 @@
+     broadcastOutput("[ESP-NOW] Cannot start: previous shutdown is still in progress");
+     return false;
+   }
++  // Callers only enter for a stopped instance; each fresh start must read the
++  // actual radio identity again before admitting receive or transmit work.
++  setEspNowSelfMacCache(nullptr);
+   // Capture heap before initialization
+   size_t heapBefore = ESP.getFreeHeap();
+   
+@@ -10907,8 +10936,8 @@
+   recomputeAllMeshFingerprints();
+ 
+   if (!gEspNow) {
+-    gEspNow = (EspNowState*)ps_alloc(sizeof(EspNowState), AllocPref::PreferPSRAM, "espnow.state");
+-    if (!gEspNow) {
++    void* stateStorage = ps_alloc(sizeof(EspNowState), AllocPref::PreferPSRAM, "espnow.state");
++    if (!stateStorage) {
+       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+                "out of PSRAM (state structure)");
+       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate state structure");
+@@ -10918,8 +10947,8 @@
+     // deviceName, etc.), so ps_alloc's raw storage must be placement-constructed.
+     // Device registry metadata is allocation-free EspNowInlineText embedded in
+     // this PSRAM block; its constructors establish valid empty strings.
+-    memset(gEspNow, 0, sizeof(EspNowState));
+-    new (gEspNow) EspNowState();
++    memset(stateStorage, 0, sizeof(EspNowState));
++    gEspNow = new (stateStorage) EspNowState();
+ 
+     // Allocate small PSRAM buffers pulled out of the EspNowState struct
+     gEspNow->listBuffer = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "espnow.listBuf");
+@@ -11074,6 +11103,15 @@
+     snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+              "failed to place WiFi radio in AP+STA mode");
+     broadcastOutput("[ESP-NOW] Cannot start: WiFi AP+STA mode change failed");
++    return false;
++  }
++
++  uint8_t radioSelfMac[6] = {};
++  const esp_err_t selfMacErr = esp_wifi_get_mac(WIFI_IF_STA, radioSelfMac);
++  if (selfMacErr != ESP_OK) {
++    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
++             "failed to read WiFi STA identity (%s)", esp_err_to_name(selfMacErr));
++    BROADCAST_PRINTF("[ESP-NOW] Cannot start: %s", gLastInitErrorReason);
+     return false;
+   }
+ 
+@@ -11197,6 +11235,8 @@
+     gEspNowRxTail = 0;
+   }
+ 
++  // The checked identity and RX ring must both exist before admission.
++  setEspNowSelfMacCache(radioSelfMac);
+   // Enable callback admission only after the RX ring exists. Registration can
+   // deliver immediately on the WiFi task, so admission must precede the first
+   // register call; a partial failure disables admission before unwinding.
+@@ -11216,6 +11256,7 @@
+     // attempt rather than turning a registration error into a delayed UAF.
+     const bool callbacksClean = waitForEspNowCallbacks(1000);
+     if (callbacksClean) {
++      setEspNowSelfMacCache(nullptr);
+       heap_caps_free(gEspNowRxRing);
+       gEspNowRxRing = nullptr;
+       gEspNowRxHead = 0;
+@@ -11626,6 +11667,7 @@
+     broadcastOutput("[ESP-NOW] ERROR: ESP-NOW callbacks did not quiesce; resources retained");
+     return false;
+   }
++  setEspNowSelfMacCache(nullptr);
+ 
+   // The callback producer and RX consumer are both fenced. Broadcast writers
+   // were covered by the runtime-op wait, so both internal-DRAM tables can now
+--- a/components/hardwareone/System_ESPNow.h
++++ b/components/hardwareone/System_ESPNow.h
+@@ -1239,12 +1239,9 @@
+ bool isMeshPeerAlive(const MeshPeerHealth* peer);
+ bool isMeshPeerRecentlyActive(const MeshPeerHealth* peer);
+ MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing = false);
+-// Inline: check if MAC is this device
+-inline bool isSelfMac(const uint8_t* mac) {
+-  uint8_t myMac[6];
+-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+-  return memcmp(mac, myMac, 6) == 0;
+-}
++// Compare against the checked STA identity cached for this ESP-NOW instance.
++// While stopped, a checked driver query preserves the existing helper behavior.
++bool isSelfMac(const uint8_t* mac);
+ void macFromHexString(const String& s, uint8_t out[6]);
+ String macToHexString(const uint8_t mac[6]);
+ // Zero-allocation MAC formatter for debug log call sites.
+--- a/components/hardwareone/System_Events.cpp
++++ b/components/hardwareone/System_Events.cpp
+@@ -200,8 +200,7 @@
+     const NotifContext& nctx = *getSlotReadOnly();
+     ev.source = (nctx.source == NOTIF_SOURCE_UNKNOWN) ? NOTIF_SOURCE_SYSTEM : nctx.source;
+     if (!whoOverride && nctx.subsource[0]) {
+-      strncpy(ev.who, nctx.subsource, sizeof(ev.who) - 1);
+-      ev.who[sizeof(ev.who) - 1] = '\0';
++      strlcpy(ev.who, nctx.subsource, sizeof(ev.who));
+     }
+   }
+   if (whoOverride && whoOverride[0]) {
+--- a/components/hardwareone/System_Utils.cpp
++++ b/components/hardwareone/System_Utils.cpp
+@@ -5906,7 +5906,9 @@
+ // Icon System Implementation - Unified PNG-based icons for OLED/Web/TFT
+ // ============================================================================
+ 
++#if ENABLE_OLED_DISPLAY
+ #include <Adafruit_SSD1306.h>
++#endif
+ #include "System_Icons.h"
+ 
+ bool initIconSystem() {
+@@ -6012,6 +6014,7 @@
+   return false;
+ }
+ 
++#if ENABLE_OLED_DISPLAY
+ bool drawIcon(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color) {
+   if (!display) {
+     return false;
+@@ -6099,6 +6102,8 @@
+ 
+   return true;
+ }
++
++#endif  // ENABLE_OLED_DISPLAY
+ 
+ // ============================================================================
+ // Authentication Commands (critical system functions)
+--- a/components/hardwareone/idf_component.yml
++++ b/components/hardwareone/idf_component.yml
+@@ -1,27 +1,4 @@
+-## IDF Component Manager dependency file
+-## See: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/tools/idf-component-manager.html
+-
+ dependencies:
+-  # ESP32-Camera driver for XIAO ESP32S3 Sense camera support
+-  espressif/esp32-camera:
+-    version: "^2.0.0"
+-    rules:
+-      - if: "idf_version >=5.0"
+-  # libsodium — Ed25519/X25519/AEAD/PBKDF2 for ESP-NOW V4 Phase 3 crypto.
+-  # Espressif's port; provides full NaCl/libsodium API. Foundation for the
+-  # per-peer forward-secret session keys landed across Phase 3 sub-phases.
++  idf: ">=5.5.5,<5.6"
+   espressif/libsodium:
+-    version: "^1.0.20"
+-    rules:
+-      - if: "idf_version >=5.0"
+-  # TensorFlow Lite Micro for runtime ML model loading
+-  espressif/esp-tflite-micro:
+-    version: "^1.3.0"
+-    rules:
+-      - if: "idf_version >=5.0"
+-  # ESP-SR for speech recognition (wake word + commands)
+-  espressif/esp-sr:
+-    version: "^1.4.0"
+-    rules:
+-      - if: "idf_version >=5.0"
+-        optional: true
++    version: "==1.0.20~4"
+--- a/components/hardwareone_libs/CMakeLists.txt
++++ b/components/hardwareone_libs/CMakeLists.txt
+@@ -1,70 +1,3 @@
+-idf_component_register(
+-    SRC_DIRS
+-        Adafruit_BNO055
+-        Adafruit_Unified_Sensor
+-        Adafruit_BusIO
+-        Adafruit_GFX_Library
+-        Adafruit_LED_Backpack_Library
+-        Adafruit_SSD1306
+-        Adafruit_NeoPixel
+-        Adafruit_APDS9960_Library
+-        STM32duino_VL53L4CX/src
+-        Adafruit_MLX90640
+-        Adafruit_MLX90640/utility
+-        Adafruit_PWM_Servo_Driver_Library
+-        Adafruit_GPS_Library/src
+-        Adafruit_seesaw_Library
+-        Radio/src
+-        liblc3/src
+-
+-    INCLUDE_DIRS
+-        ArduinoJson
+-        ArduinoJson/src
+-        Adafruit_BNO055
+-        Adafruit_Unified_Sensor
+-        Adafruit_BusIO
+-        Adafruit_GFX_Library
+-        Adafruit_LED_Backpack_Library
+-        Adafruit_SSD1306
+-        Adafruit_NeoPixel
+-        Adafruit_APDS9960_Library
+-        STM32duino_VL53L4CX/src
+-        Adafruit_MLX90640
+-        Adafruit_PWM_Servo_Driver_Library
+-        Adafruit_GPS_Library/src
+-        Adafruit_seesaw_Library
+-        Radio/src
+-        liblc3/include
+-
+-    REQUIRES
+-        arduino
+-)
+-
+-# liblc3 vendored from https://github.com/google/liblc3 (Apache-2.0).
+-# Its .c files use both <lc3.h> (public) and "common.h" / "bits.h" /
+-# etc. (private, sibling files in src/). Add src/ to those translation
+-# units' include path so the private headers resolve. Public consumers
+-# only get liblc3/include via the INCLUDE_DIRS list above.
+-file(GLOB LIBLC3_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/liblc3/src/*.c")
+-set_source_files_properties(
+-    ${LIBLC3_SOURCES}
+-    PROPERTIES
+-    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/liblc3/src;${CMAKE_CURRENT_SOURCE_DIR}/liblc3/include"
+-    COMPILE_OPTIONS "-Wno-unused-parameter;-Wno-sign-compare;-Wno-unused-variable"
+-    # Baseline LC3 only. LC3plus (2.5 ms / 5 ms frames) and LC3plus HR
+-    # (48/96 kHz high-res) are upstream extensions that default ON in
+-    # liblc3/src/common.h; Bluetooth LE Audio's baseline LC3 is 7.5 ms and
+-    # 10 ms only, and the G2 mic is hardwired to 10 ms / 16 kHz mono
+-    # (kMicLc3FrameUs / kMicLc3SampleHz in G2_Glasses.cpp).
+-    #
+-    # This is not a trim of dead code the linker could have found: the MDCT
+-    # windows are reached through lc3_mdct_win[dt][sr] (tables.c), a runtime-
+-    # indexed pointer table, so --gc-sections has to keep every entry. The
+-    # flags make the compiler emit NULL for the unused (dt,sr) slots instead.
+-    #
+-    # Safe by construction: resolve_dt() / resolve_srate() (lc3.c) are guarded
+-    # by these same flags, so a 2.5 ms or HR request now resolves to
+-    # LC3_NUM_DT / LC3_NUM_SRATE and lc3_setup_decoder() returns NULL rather
+-    # than dereferencing a NULL window.
+-    COMPILE_DEFINITIONS "LC3_PLUS=0;LC3_PLUS_HR=0"
+-)
++# Mesh-only experiment: peripheral libraries are deliberately not compiled.
++# ArduinoJson is header-only and required by the real application and mesh.
++idf_component_register(INCLUDE_DIRS ArduinoJson ArduinoJson/src REQUIRES arduino)
+--- a/components/hw1_ota_protocol/include/hw1_ota_idf.h
++++ b/components/hw1_ota_protocol/include/hw1_ota_idf.h
+@@ -34,6 +34,10 @@
+ #if defined(CONFIG_IDF_TARGET_ESP32S3)
+ #define HW1_OTA_EXPECTED_CHIP_ID ESP_CHIP_ID_ESP32S3
+ #define HW1_OTA_EXPECTED_CHIP_NAME "ESP32-S3"
++#elif defined(CONFIG_IDF_TARGET_ESP32P4)
++/* Mesh-only experiment: identifies the chip; OTA deployment is not enabled. */
++#define HW1_OTA_EXPECTED_CHIP_ID ESP_CHIP_ID_ESP32P4
++#define HW1_OTA_EXPECTED_CHIP_NAME "ESP32-P4"
+ #elif defined(CONFIG_IDF_TARGET_ESP32)
+ #define HW1_OTA_EXPECTED_CHIP_ID ESP_CHIP_ID_ESP32
+ #define HW1_OTA_EXPECTED_CHIP_NAME "ESP32"
+--- a/dependencies.lock
++++ b/dependencies.lock
+@@ -9,78 +9,6 @@
+       registry_url: https://components.espressif.com/
+       type: service
+     version: 1.0.3
+-  espressif/esp-dsp:
+-    component_hash: 3e7bbd487f1357a1d4944d0c85966d049501ea281b8a4c7f93f7cfedd5b7f23d
+-    dependencies:
+-    - name: idf
+-      require: private
+-      version: '>=4.2'
+-    source:
+-      registry_url: https://components.espressif.com
+-      type: service
+-    version: 1.4.12
+-  espressif/esp-nn:
+-    component_hash: e98a7dd3dfde460b1b4ca982e2ebae0b4831719a8e4659d19c145943deaf682b
+-    dependencies:
+-    - name: idf
+-      require: private
+-      version: '>=4.2'
+-    source:
+-      registry_url: https://components.espressif.com
+-      type: service
+-    version: 1.2.3
+-  espressif/esp-sr:
+-    component_hash: 9b41fd5ae5960c393bfd3559cd6e5fa2a95c0bf833915cebafe57fb8c4e4c396
+-    dependencies:
+-    - name: espressif/esp-dsp
+-      registry_url: https://components.espressif.com
+-      require: private
+-      version: <=1.5.0
+-    - name: idf
+-      require: private
+-      version: '>=5.0'
+-    source:
+-      registry_url: https://components.espressif.com/
+-      type: service
+-    version: 1.9.5
+-  espressif/esp-tflite-micro:
+-    component_hash: 57aa3889d3c7b7a513f716c2cb8707476a5bf42971d63a6f6d38a5616d862e57
+-    dependencies:
+-    - name: espressif/esp-nn
+-      registry_url: https://components.espressif.com
+-      require: private
+-      version: '>=1.1.1'
+-    - name: idf
+-      require: private
+-      version: '>=5.0'
+-    source:
+-      registry_url: https://components.espressif.com/
+-      type: service
+-    version: 1.3.5
+-  espressif/esp32-camera:
+-    component_hash: f0a608b109935a5389221eee5090ec61f51b0df1a0749531fe59d33aaf263233
+-    dependencies:
+-    - name: espressif/esp_jpeg
+-      registry_url: https://components.espressif.com
+-      require: public
+-      version: ^1.3.1
+-    - name: idf
+-      require: private
+-      version: '>=5.1'
+-    source:
+-      registry_url: https://components.espressif.com/
+-      type: service
+-    version: 2.1.4
+-  espressif/esp_jpeg:
+-    component_hash: defb83669293cbf86d0fa86b475ba5517aceed04ed70db435388c151ab37b5d7
+-    dependencies:
+-    - name: idf
+-      require: private
+-      version: '>=5.0'
+-    source:
+-      registry_url: https://components.espressif.com
+-      type: service
+-    version: 1.3.1
+   espressif/libsodium:
+     component_hash: ec52dce5da4af52b1908a0e23e2cf8f492edea090450e51f0d1fbe1108b6d58e
+     dependencies:
+@@ -104,7 +32,7 @@
+   idf:
+     source:
+       type: idf
+-    version: 5.5.1
++    version: 5.5.5
+   joltwallet/littlefs:
+     component_hash: dcea25bcef2de023f089f5f01e8d8c46ad1b8ffef75861ad5ffb4098555839df
+     dependencies:
+@@ -117,13 +45,10 @@
+     version: 1.20.4
+ direct_dependencies:
+ - chmorgan/esp-libhelix-mp3
+-- espressif/esp-sr
+-- espressif/esp-tflite-micro
+-- espressif/esp32-camera
+ - espressif/libsodium
+ - espressif/mdns
+ - idf
+ - joltwallet/littlefs
+-manifest_hash: 216cf06f961aaf24681869b446e31d38cdbd311967452810f7fa8ea3b6828ee5
++manifest_hash: 82eafca2616304a64ebf8f4ebebfd93da9f5b3d71cde254d9e830764cad19e7f
+ target: esp32s3
+ version: 2.0.0
+--- /dev/null
++++ b/dependencies.lock.esp32p4
+@@ -0,0 +1,124 @@
++dependencies:
++  chmorgan/esp-libhelix-mp3:
++    component_hash: cbb76089dc2c5749f7b470e2e70aedc44c9da519e04eb9a67d4c7ec275229e53
++    dependencies:
++    - name: idf
++      require: private
++      version: '>=4.1.0'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 1.0.3
++  espressif/eppp_link:
++    component_hash: c1369b37f2b0b427b198ae14e07e7547d3da92b95fe4dc7f949e5de560b35f21
++    dependencies:
++    - name: espressif/esp_serial_slave_link
++      registry_url: https://components.espressif.com
++      require: private
++      version: ^1.1.0
++    - name: idf
++      require: private
++      version: '>=5.2'
++    source:
++      registry_url: https://components.espressif.com
++      type: service
++    version: 1.1.6
++  espressif/esp_hosted:
++    component_hash: f1792f36ef9a637adf2faa2662f3c4500b07f3d2ba65c25f3ed4824490ba59f9
++    dependencies:
++    - name: idf
++      require: private
++      version: '>=5.3'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 2.12.13
++  espressif/esp_serial_slave_link:
++    component_hash: ac1776806de0a6e371c84e87898bb983e19ce62aa7f1e2e5c4a3b0234a575d2c
++    dependencies:
++    - name: idf
++      require: private
++      version: '>=5.0'
++    source:
++      registry_url: https://components.espressif.com
++      type: service
++    version: 1.1.2
++  espressif/esp_wifi_remote:
++    component_hash: e5cb66acbf9b3e115dab6b8e1262a5473e7de6e4106d32a2a8ca7384bd21fc00
++    dependencies:
++    - name: espressif/esp_hosted
++      registry_url: https://components.espressif.com
++      require: private
++      rules:
++      - if: target in [esp32h2, esp32p4]
++      version: '>=2.11'
++    - name: espressif/wifi_remote_over_eppp
++      registry_url: https://components.espressif.com
++      require: private
++      version: '>=0.1'
++    - name: idf
++      require: private
++      version: '>=5.3'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 1.3.1
++  espressif/libsodium:
++    component_hash: ec52dce5da4af52b1908a0e23e2cf8f492edea090450e51f0d1fbe1108b6d58e
++    dependencies:
++    - name: idf
++      require: private
++      version: '>=4.2'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 1.0.20~4
++  espressif/mdns:
++    component_hash: 7c0fa01a1cd0e72a87ec1928c3b661c0a3a9034a6d3a69dcf4850db8c6f272db
++    dependencies:
++    - name: idf
++      require: private
++      version: '>=5.0'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 1.10.1
++  espressif/wifi_remote_over_eppp:
++    component_hash: 1fd6968af20f0b19e421f6b519b0a8caf81d689afc3783b564c28559e45f66ef
++    dependencies:
++    - name: espressif/eppp_link
++      registry_url: https://components.espressif.com
++      require: private
++      version: '>=0.1'
++    - name: idf
++      require: private
++      version: '>=5.3'
++    source:
++      registry_url: https://components.espressif.com
++      type: service
++    version: 0.3.3
++  idf:
++    source:
++      type: idf
++    version: 5.5.5
++  joltwallet/littlefs:
++    component_hash: dcea25bcef2de023f089f5f01e8d8c46ad1b8ffef75861ad5ffb4098555839df
++    dependencies:
++    - name: idf
++      require: private
++      version: '>=5.0'
++    source:
++      registry_url: https://components.espressif.com/
++      type: service
++    version: 1.20.4
++direct_dependencies:
++- chmorgan/esp-libhelix-mp3
++- espressif/esp_hosted
++- espressif/esp_wifi_remote
++- espressif/libsodium
++- espressif/mdns
++- idf
++- joltwallet/littlefs
++manifest_hash: 82eafca2616304a64ebf8f4ebebfd93da9f5b3d71cde254d9e830764cad19e7f
++target: esp32p4
++version: 2.0.0
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -1,4 +1,13 @@
++# Durable experiment sources sit three levels above this copied main directory.
++get_filename_component(mesh_experiment_dir "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
++get_filename_component(espnow_bridge_dir "${mesh_experiment_dir}/../p4_espnow/bridge" ABSOLUTE)
++set(mesh_main_sources "hardwareone-idf.cpp" "${mesh_experiment_dir}/radio_backend.cpp")
++set(mesh_main_requires arduino hardwareone esp_driver_gpio)
++if(CONFIG_ESP_WIFI_REMOTE_ENABLED OR IDF_TARGET STREQUAL "esp32p4")
++    list(APPEND mesh_main_sources "${espnow_bridge_dir}/esp_now_hosted_host.c")
++    list(APPEND mesh_main_requires esp_hosted esp_wifi_remote)
++endif()
+ idf_component_register(
+-    SRCS "hardwareone-idf.cpp"
+-    INCLUDE_DIRS "."
+-)
+\ No newline at end of file
++    SRCS ${mesh_main_sources}
++    INCLUDE_DIRS "." "${mesh_experiment_dir}" "${espnow_bridge_dir}"
++    REQUIRES ${mesh_main_requires})
+--- a/main/hardwareone-idf.cpp
++++ b/main/hardwareone-idf.cpp
+@@ -1,4 +1,5 @@
+ #include "Arduino.h"
++#include "radio_backend.h"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/task.h"
+ 
+@@ -92,6 +93,7 @@
+ 
+     // Initialize Arduino core (Serial, peripherals, etc.)
+     initArduino();
++    ESP_ERROR_CHECK(hw1MeshRadioPrepare());
+ 
+     // Allocate the TLS auth-identity slot for this (main) task. The
+     // ExecIdentityGuard ctor would lazy-init anyway, but doing it explicitly
+@@ -111,6 +113,7 @@
+ 
+     // Run user setup once
+     setup();
++    hw1MeshRadioPrintStats();
+ 
+     // Run user loop forever with a small delay
+     while (true) {

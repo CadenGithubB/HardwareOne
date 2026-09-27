@@ -1,0 +1,83 @@
+[
+  {
+    "source": "private/test-runs/20260927T154644.954509Z-f8d9f62b/p4.log",
+    "excerpts": [
+      {
+        "line": 836,
+        "text": "2026-09-27T15:47:55.111+00:00 RX $ [68815] [V4_FILE] REJECTED incomplete transfer 'mesh_f8d9f62b_s3.bin': 40/41 chunks, 7992/8192 bytes"
+      }
+    ]
+  },
+  {
+    "source": "private/test-runs/20260927T154644.954509Z-f8d9f62b/s3.log",
+    "excerpts": [
+      {
+        "line": 546,
+        "text": "2026-09-27T15:47:35.117+00:00 RX [49450] [V4_FILE] Complete: mesh_f8d9f62b_p4.bin (8192 bytes)"
+      },
+      {
+        "line": 847,
+        "text": "2026-09-27T15:47:55.102+00:00 RX OK: File sent successfully via v3: mesh_f8d9f62b_s3.bin (8192 bytes)"
+      }
+    ]
+  },
+  {
+    "source": "private/pair-reverse-20260927T113611/p4.log",
+    "excerpts": [
+      {
+        "line": 364,
+        "text": "2026-09-27T15:36:27.984+00:00 RX [14821] [PAIR] 'HW1_S3' (68:EE:8F:50:E9:D0) wants to pair \u2014 run 'espnowaccept' or 'espnowreject'."
+      },
+      {
+        "line": 566,
+        "text": "2026-09-27T15:36:38.722+00:00 RX {\"schema\":1,\"devices\":[{\"mac\":\"68:EE:8F:50:E9:D0\",\"name\":\"HW1_S3\",\"encrypted\":true,\"meshId\":0}],\"count\":1,\"hint\":\"a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'\"}"
+      },
+      {
+        "line": 570,
+        "text": "2026-09-27T15:36:38.830+00:00 RX {\"schema\":1,\"sessions\":[{\"slot\":0,\"mac\":\"68:EE:8F:50:E9:D0\",\"meshId\":0,\"sessionId\":29228,\"dir\":\"B\",\"state\":\"ACTIVE\",\"ageMs\":6711,\"txSeq\":1,\"rxHwm\":0}]}"
+      }
+    ]
+  },
+  {
+    "source": "private/pair-reverse-20260927T113611/s3.log",
+    "excerpts": [
+      {
+        "line": 348,
+        "text": "2026-09-27T15:36:29.427+00:00 RX [16793] [PAIR] paired with HW1_P4 (FC:01:2C:E0:B9:A8): Encrypted device paired successfully: HW1_P4 (FC:01:2C:E0:B9:A8)"
+      },
+      {
+        "line": 553,
+        "text": "2026-09-27T15:36:39.417+00:00 RX {\"schema\":1,\"devices\":[{\"mac\":\"FC:01:2C:E0:B9:A8\",\"name\":\"HW1_P4\",\"encrypted\":true,\"meshId\":0}],\"count\":1,\"hint\":\"a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'\"}"
+      },
+      {
+        "line": 556,
+        "text": "2026-09-27T15:36:39.535+00:00 RX {\"schema\":1,\"sessions\":[{\"slot\":0,\"mac\":\"FC:01:2C:E0:B9:A8\",\"meshId\":0,\"sessionId\":29228,\"dir\":\"A\",\"state\":\"ACTIVE\",\"ageMs\":7638,\"txSeq\":0,\"rxHwm\":1}]}"
+      }
+    ]
+  },
+  {
+    "source": "private/pair-trace-20260927T112731/s3.log",
+    "excerpts": [
+      {
+        "line": 357,
+        "text": "2026-09-27T15:27:49.675+00:00 RX [16389] [INFO][ESP-NOW] SESSION_OPEN sent to FC:01:2C:E0:B9:A8 sessionId=56916 dir=A (awaiting CONFIRM)"
+      },
+      {
+        "line": 372,
+        "text": "2026-09-27T15:27:49.677+00:00 RX [16797] [INFO][ESP-NOW] SESSION_OPEN sent to FC:01:2C:E0:B9:A8 sessionId=61967 dir=A (awaiting CONFIRM)"
+      },
+      {
+        "line": 390,
+        "text": "2026-09-27T15:27:49.681+00:00 RX [16933] [WARN][ESP-NOW] SESSION_CONFIRM: no in-flight session for sessionId=56916 peer=FC:01:2C:E0:B9:A8"
+      },
+      {
+        "line": 419,
+        "text": "2026-09-27T15:27:50.131+00:00 RX [17423] [INFO][ESP-NOW] SESSION established (initiator) with FC:01:2C:E0:B9:A8 sessionId=61967 dir=A"
+      },
+      {
+        "line": 471,
+        "text": "2026-09-27T15:27:57.571+00:00 RX {\"schema\":1,\"sessions\":[{\"slot\":0,\"mac\":\"FC:01:2C:E0:B9:A8\",\"meshId\":0,\"sessionId\":61967,\"dir\":\"A\",\"state\":\"ACTIVE\",\"ageMs\":7379,\"txSeq\":1,\"rxHwm\":0}]}"
+      }
+    ]
+  }
+]

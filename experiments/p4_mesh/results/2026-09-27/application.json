@@ -1,0 +1,526 @@
+{
+  "schema": 1,
+  "started": "2026-09-27T15:46:44.977+00:00",
+  "runId": "f8d9f62b",
+  "status": "failed",
+  "boards": {
+    "p4": {
+      "port": "/dev/cu.usbmodem2101",
+      "mac": "fc:01:2c:e0:b9:a8",
+      "name": "HW1_P4"
+    },
+    "s3": {
+      "port": "/dev/cu.usbmodem1101",
+      "mac": "68:ee:8f:50:e9:d0",
+      "name": "HW1_S3"
+    }
+  },
+  "options": {
+    "configure": false,
+    "pair": "secure",
+    "initiator": "p4",
+    "rekey": true,
+    "reopen": true
+  },
+  "checks": [
+    {
+      "name": "login_p4",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 1.067
+    },
+    {
+      "name": "login_s3",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 1.335
+    },
+    {
+      "name": "inspect_p4",
+      "status": "passed",
+      "evidence": {
+        "mac": "FC:01:2C:E0:B9:A8",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 0
+      },
+      "durationSec": 0.649
+    },
+    {
+      "name": "inspect_s3",
+      "status": "passed",
+      "evidence": {
+        "mac": "68:EE:8F:50:E9:D0",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 0
+      },
+      "durationSec": 0.692
+    },
+    {
+      "name": "statistics_start",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "schema": 1,
+          "messagesSent": 0,
+          "messagesReceived": 0,
+          "messagesFailed": 0,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 0,
+          "heartbeatsReceived": 0,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 10
+        },
+        "s3": {
+          "schema": 1,
+          "messagesSent": 0,
+          "messagesReceived": 0,
+          "messagesFailed": 0,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 0,
+          "heartbeatsReceived": 0,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 11
+        }
+      },
+      "durationSec": 0.273
+    },
+    {
+      "name": "pairing",
+      "status": "passed",
+      "evidence": {
+        "mode": "secure",
+        "discoveryTested": false,
+        "localRegistries": {
+          "p4": {
+            "mac": "68:EE:8F:50:E9:D0",
+            "name": "HW1_S3",
+            "encrypted": true,
+            "meshId": 0
+          },
+          "s3": {
+            "mac": "FC:01:2C:E0:B9:A8",
+            "name": "HW1_P4",
+            "encrypted": true,
+            "meshId": 0
+          }
+        },
+        "sessions": {
+          "p4": {
+            "slot": 0,
+            "mac": "68:EE:8F:50:E9:D0",
+            "meshId": 0,
+            "sessionId": 12812,
+            "dir": "B",
+            "state": "ACTIVE",
+            "ageMs": 292,
+            "txSeq": 1,
+            "rxHwm": 0
+          },
+          "s3": {
+            "slot": 0,
+            "mac": "FC:01:2C:E0:B9:A8",
+            "meshId": 0,
+            "sessionId": 12812,
+            "dir": "A",
+            "state": "ACTIVE",
+            "ageMs": 773,
+            "txSeq": 0,
+            "rxHwm": 1
+          }
+        },
+        "senderReadyProbes": [
+          {
+            "direction": "p4->s3",
+            "msgId": 11,
+            "bytes": 64,
+            "pieces": 1,
+            "encrypted": true,
+            "sha256": "9a245232a2ea0c727d6b205604eff0f20290dd5f371a7737d12f66191d0aa1bf"
+          },
+          {
+            "direction": "s3->p4",
+            "msgId": 11,
+            "bytes": 64,
+            "pieces": 1,
+            "encrypted": true,
+            "sha256": "5c6ab1ef75425938d1b6a87cf568ae6b5097ab181aeae0eea36585419612ad0d"
+          }
+        ]
+      },
+      "durationSec": 4.103
+    },
+    {
+      "name": "active_session",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "slot": 0,
+          "mac": "68:EE:8F:50:E9:D0",
+          "meshId": 0,
+          "sessionId": 12812,
+          "dir": "B",
+          "state": "ACTIVE",
+          "ageMs": 1853,
+          "txSeq": 2,
+          "rxHwm": 1
+        },
+        "s3": {
+          "slot": 0,
+          "mac": "FC:01:2C:E0:B9:A8",
+          "meshId": 0,
+          "sessionId": 12812,
+          "dir": "A",
+          "state": "ACTIVE",
+          "ageMs": 2288,
+          "txSeq": 1,
+          "rxHwm": 2
+        }
+      },
+      "durationSec": 0.267
+    },
+    {
+      "name": "text_p4_to_s3_1",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 12,
+        "bytes": 1,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "19581e27de7ced00ff1ce50b2047e7a567c76b1cbaebabe5ef03f7c3017bb5b7"
+      },
+      "durationSec": 0.813
+    },
+    {
+      "name": "text_p4_to_s3_201",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 14,
+        "bytes": 201,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "b6cb2d559823bf9af6ab1df7b3741c6704f5e7f9cd3eb389b3ecea1d1672b97c"
+      },
+      "durationSec": 0.767
+    },
+    {
+      "name": "text_p4_to_s3_202",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 15,
+        "bytes": 202,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "51a382ab8f14289a37f5aa39a93cbc87a1c11203d1aef4d2e445890e5e422e64"
+      },
+      "durationSec": 0.675
+    },
+    {
+      "name": "text_p4_to_s3_203",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 16,
+        "bytes": 203,
+        "pieces": 2,
+        "encrypted": true,
+        "sha256": "b7d8955c4158c5ae81c6060466d2bdf04364a1a8ca0990c4b9678743a9a26a67"
+      },
+      "durationSec": 1.036
+    },
+    {
+      "name": "text_p4_to_s3_400",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 17,
+        "bytes": 400,
+        "pieces": 2,
+        "encrypted": true,
+        "sha256": "c151c37b51a50250d2e3afdea02ff301f4330a7be48e23eed5e642dc9415b69b"
+      },
+      "durationSec": 0.876
+    },
+    {
+      "name": "text_p4_to_s3_401",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 18,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "9860ad754614d5db3d1dac0d9d5b398d770f945a597df29ec103fd123f759b64"
+      },
+      "durationSec": 1.006
+    },
+    {
+      "name": "text_p4_to_s3_1024",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 20,
+        "bytes": 1024,
+        "pieces": 6,
+        "encrypted": true,
+        "sha256": "a8883a451496dbb1711e770ded895c198d444788a5a558bc79cc193b14937ee5"
+      },
+      "durationSec": 1.657
+    },
+    {
+      "name": "text_p4_to_s3_1025",
+      "status": "passed",
+      "evidence": {
+        "bytes": 1025,
+        "rejected": true,
+        "error": "too long"
+      },
+      "durationSec": 1.917
+    },
+    {
+      "name": "text_s3_to_p4_1",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 13,
+        "bytes": 1,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "18ac3e7343f016890c510e93f935261169d9e3f565436429830faf0934f4f8e4"
+      },
+      "durationSec": 0.679
+    },
+    {
+      "name": "text_s3_to_p4_201",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 15,
+        "bytes": 201,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "9f68d08971a6916179004f5bf1199c6a364bbb08b87c3e7df9fdb39522230866"
+      },
+      "durationSec": 0.555
+    },
+    {
+      "name": "text_s3_to_p4_202",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 16,
+        "bytes": 202,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "ef70ccc725640a37381ab953ed608c45d8514f801f8e332a4e47cc990b3fd341"
+      },
+      "durationSec": 0.469
+    },
+    {
+      "name": "text_s3_to_p4_203",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 17,
+        "bytes": 203,
+        "pieces": 2,
+        "encrypted": true,
+        "sha256": "ea6f95d2cd8cae48c0f2b79dc9b694e565434c0806b170c7c88fb5f323238596"
+      },
+      "durationSec": 0.666
+    },
+    {
+      "name": "text_s3_to_p4_400",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 18,
+        "bytes": 400,
+        "pieces": 2,
+        "encrypted": true,
+        "sha256": "f08587135b8759db5ef3ab1041197965236ea44c776c4a9de9df36da2e31ac69"
+      },
+      "durationSec": 0.906
+    },
+    {
+      "name": "text_s3_to_p4_401",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 19,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "d1ac824b759d46250b786297fa2fde856cbdb5d8bbde6a32e61c4aba5d8871fb"
+      },
+      "durationSec": 0.859
+    },
+    {
+      "name": "text_s3_to_p4_1024",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 20,
+        "bytes": 1024,
+        "pieces": 6,
+        "encrypted": true,
+        "sha256": "5af1726dd77e4ad9c4f2bff2bd56594bef0bfbaf527fde38a4e44d017abb7736"
+      },
+      "durationSec": 1.397
+    },
+    {
+      "name": "text_s3_to_p4_1025",
+      "status": "passed",
+      "evidence": {
+        "bytes": 1025,
+        "rejected": true,
+        "error": "too long"
+      },
+      "durationSec": 2.109
+    },
+    {
+      "name": "session_after_text",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "slot": 0,
+          "mac": "68:EE:8F:50:E9:D0",
+          "meshId": 0,
+          "sessionId": 12812,
+          "dir": "B",
+          "state": "ACTIVE",
+          "ageMs": 18558,
+          "txSeq": 18,
+          "rxHwm": 17
+        },
+        "s3": {
+          "slot": 0,
+          "mac": "FC:01:2C:E0:B9:A8",
+          "meshId": 0,
+          "sessionId": 12812,
+          "dir": "A",
+          "state": "ACTIVE",
+          "ageMs": 18987,
+          "txSeq": 17,
+          "rxHwm": 18
+        }
+      },
+      "durationSec": 0.254
+    },
+    {
+      "name": "file_p4_to_s3_8192",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "path": "/espnow/received/FC012CE0B9A8/mesh_f8d9f62b_p4.bin",
+        "bytes": 8192,
+        "sha256": "6408eeda07e1533452a37738695886f186f62d529d5fca128ab3301ed7a5b988",
+        "receiverCompletion": true,
+        "sessionId": 12812,
+        "rxPathRequiresSessionEncryption": true
+      },
+      "durationSec": 21.588
+    },
+    {
+      "name": "file_s3_to_p4_8192",
+      "status": "failed",
+      "error": "Serial response timed out after 30s (marker 65617)",
+      "durationSec": 45.463
+    }
+  ],
+  "scope": "two-node production pairing/session/text/file transport",
+  "statistics": {
+    "start": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 0,
+        "messagesReceived": 0,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 0,
+        "heartbeatsReceived": 0,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 10
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 0,
+        "messagesReceived": 0,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 0,
+        "heartbeatsReceived": 0,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 11
+      }
+    },
+    "end": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 148,
+        "messagesReceived": 147,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 17,
+        "heartbeatsReceived": 17,
+        "filesSent": 1,
+        "filesReceived": 0,
+        "uptimeSec": 98
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 147,
+        "messagesReceived": 148,
+        "messagesFailed": 1,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 17,
+        "heartbeatsReceived": 18,
+        "filesSent": 1,
+        "filesReceived": 1,
+        "uptimeSec": 99
+      }
+    }
+  },
+  "endStatisticsCapture": {
+    "reason": "run_failure",
+    "timeoutPerBoardSec": 5.0,
+    "errors": {}
+  },
+  "finished": "2026-09-27T15:48:25.322+00:00",
+  "error": "Serial response timed out after 30s (marker 65617)",
+  "sourceRunDirectory": "20260927T154644.954509Z-f8d9f62b"
+}

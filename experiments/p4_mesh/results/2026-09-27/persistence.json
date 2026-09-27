@@ -1,0 +1,300 @@
+{
+  "schema": 1,
+  "status": "passed",
+  "started": "2026-09-27T15:53:55.970+00:00",
+  "runId": "7b7c43c3",
+  "boards": {
+    "p4": {
+      "port": "/dev/cu.usbmodem2101",
+      "mac": "fc:01:2c:e0:b9:a8",
+      "name": "HW1_P4"
+    },
+    "s3": {
+      "port": "/dev/cu.usbmodem1101",
+      "mac": "68:ee:8f:50:e9:d0",
+      "name": "HW1_S3"
+    }
+  },
+  "rebootMethod": "close and reopen USB serial; no reset command",
+  "startupWaitSec": 9,
+  "baseline": {
+    "identities": {
+      "p4": {
+        "mac": "fc:01:2c:e0:b9:a8",
+        "pub": "25ce7a9809917dc2df122899deeb2742bb07c883fc3d48ce3cc707c8e34a4b34",
+        "createdAtSec": 5660,
+        "regenCount": 0
+      },
+      "s3": {
+        "mac": "68:ee:8f:50:e9:d0",
+        "pub": "31783495c4a7879012945c1ee071296de153220747c1b05ce3bf72f26d8f4f3e",
+        "createdAtSec": 3776,
+        "regenCount": 0
+      }
+    },
+    "configuration": {
+      "p4": {
+        "name": "HW1_P4",
+        "channel": 6,
+        "wifiJoined": false,
+        "autoStart": true,
+        "mode": "mesh",
+        "mesh": {
+          "slot": 0,
+          "label": "primary",
+          "enabled": true,
+          "fingerprint": 18265,
+          "fingerprintHex": "0x4759",
+          "isDefault": true,
+          "hasPassphrase": true
+        }
+      },
+      "s3": {
+        "name": "HW1_S3",
+        "channel": 6,
+        "wifiJoined": false,
+        "autoStart": true,
+        "mode": "mesh",
+        "mesh": {
+          "slot": 0,
+          "label": "primary",
+          "enabled": true,
+          "fingerprint": 18265,
+          "fingerprintHex": "0x4759",
+          "isDefault": true,
+          "hasPassphrase": true
+        }
+      }
+    },
+    "registries": {
+      "p4": {
+        "mac": "68:EE:8F:50:E9:D0",
+        "name": "HW1_S3",
+        "encrypted": true,
+        "meshId": 0
+      },
+      "s3": {
+        "mac": "FC:01:2C:E0:B9:A8",
+        "name": "HW1_P4",
+        "encrypted": true,
+        "meshId": 0
+      }
+    },
+    "boots": {
+      "p4": {
+        "schema": 1,
+        "boot_count": 18,
+        "boot_count_store": "nvs",
+        "crash_count": 0,
+        "reset_reason": "USB",
+        "reset_reason_code": 11
+      },
+      "s3": {
+        "schema": 1,
+        "boot_count": 23,
+        "boot_count_store": "nvs",
+        "crash_count": 0,
+        "reset_reason": "USB",
+        "reset_reason_code": 11
+      }
+    }
+  },
+  "baselineDelivery": {
+    "sessions": {
+      "p4": {
+        "slot": 0,
+        "mac": "68:EE:8F:50:E9:D0",
+        "meshId": 0,
+        "sessionId": 23623,
+        "dir": "B",
+        "state": "ACTIVE",
+        "ageMs": 1951,
+        "txSeq": 0,
+        "rxHwm": 0
+      },
+      "s3": {
+        "slot": 0,
+        "mac": "FC:01:2C:E0:B9:A8",
+        "meshId": 0,
+        "sessionId": 23623,
+        "dir": "A",
+        "state": "ACTIVE",
+        "ageMs": 1875,
+        "txSeq": 0,
+        "rxHwm": 0
+      }
+    },
+    "messages": [
+      {
+        "direction": "p4->s3",
+        "msgId": 8,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "0c65db11d84b48a7590a65a897f59b9ddab28ee83bd38b46899794eb15a6d04d"
+      },
+      {
+        "direction": "s3->p4",
+        "msgId": 9,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "e3a5e7a9a9c23397910ee3bb330ab933024bba3345d1d43b59b2b461b14de8a8"
+      }
+    ]
+  },
+  "after": {
+    "identities": {
+      "p4": {
+        "mac": "fc:01:2c:e0:b9:a8",
+        "pub": "25ce7a9809917dc2df122899deeb2742bb07c883fc3d48ce3cc707c8e34a4b34",
+        "createdAtSec": 5660,
+        "regenCount": 0
+      },
+      "s3": {
+        "mac": "68:ee:8f:50:e9:d0",
+        "pub": "31783495c4a7879012945c1ee071296de153220747c1b05ce3bf72f26d8f4f3e",
+        "createdAtSec": 3776,
+        "regenCount": 0
+      }
+    },
+    "configuration": {
+      "p4": {
+        "name": "HW1_P4",
+        "channel": 6,
+        "wifiJoined": false,
+        "autoStart": true,
+        "mode": "mesh",
+        "mesh": {
+          "slot": 0,
+          "label": "primary",
+          "enabled": true,
+          "fingerprint": 18265,
+          "fingerprintHex": "0x4759",
+          "isDefault": true,
+          "hasPassphrase": true
+        }
+      },
+      "s3": {
+        "name": "HW1_S3",
+        "channel": 6,
+        "wifiJoined": false,
+        "autoStart": true,
+        "mode": "mesh",
+        "mesh": {
+          "slot": 0,
+          "label": "primary",
+          "enabled": true,
+          "fingerprint": 18265,
+          "fingerprintHex": "0x4759",
+          "isDefault": true,
+          "hasPassphrase": true
+        }
+      }
+    },
+    "registries": {
+      "p4": {
+        "mac": "68:EE:8F:50:E9:D0",
+        "name": "HW1_S3",
+        "encrypted": true,
+        "meshId": 0
+      },
+      "s3": {
+        "mac": "FC:01:2C:E0:B9:A8",
+        "name": "HW1_P4",
+        "encrypted": true,
+        "meshId": 0
+      }
+    },
+    "boots": {
+      "p4": {
+        "schema": 1,
+        "boot_count": 19,
+        "boot_count_store": "nvs",
+        "crash_count": 0,
+        "reset_reason": "USB",
+        "reset_reason_code": 11
+      },
+      "s3": {
+        "schema": 1,
+        "boot_count": 24,
+        "boot_count_store": "nvs",
+        "crash_count": 0,
+        "reset_reason": "USB",
+        "reset_reason_code": 11
+      }
+    }
+  },
+  "rebootProof": {
+    "p4": {
+      "rom": "esp32p4-eco7-20260109",
+      "reset": "CHIP_USB_UART_RESET",
+      "beforeBootCount": 18,
+      "afterBootCount": 19,
+      "bootCountDelta": 1,
+      "applicationStartupComplete": true,
+      "crashCount": 0
+    },
+    "s3": {
+      "rom": "esp32s3-20210327",
+      "reset": "USB_UART_CHIP_RESET",
+      "beforeBootCount": 23,
+      "afterBootCount": 24,
+      "bootCountDelta": 1,
+      "applicationStartupComplete": true,
+      "crashCount": 0
+    }
+  },
+  "persistenceProof": {
+    "publicIdentitiesUnchanged": true,
+    "configurationUnchanged": true,
+    "reciprocalRegistriesUnchangedBeforeManualSessionKick": true
+  },
+  "afterDelivery": {
+    "sessions": {
+      "p4": {
+        "slot": 0,
+        "mac": "68:EE:8F:50:E9:D0",
+        "meshId": 0,
+        "sessionId": 3298,
+        "dir": "B",
+        "state": "ACTIVE",
+        "ageMs": 1976,
+        "txSeq": 0,
+        "rxHwm": 0
+      },
+      "s3": {
+        "slot": 0,
+        "mac": "FC:01:2C:E0:B9:A8",
+        "meshId": 0,
+        "sessionId": 3298,
+        "dir": "A",
+        "state": "ACTIVE",
+        "ageMs": 1801,
+        "txSeq": 0,
+        "rxHwm": 0
+      }
+    },
+    "messages": [
+      {
+        "direction": "p4->s3",
+        "msgId": 8,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "7c9ae6ed13abd7937cbc80b22ca0b8bf58fb0013a698848bbbf2be168541d317"
+      },
+      {
+        "direction": "s3->p4",
+        "msgId": 9,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "527f4b85e6f707a69eb70845df9a5110fedc185485d80c0d4a5b10262126534e"
+      }
+    ]
+  },
+  "finished": "2026-09-27T15:54:30.937+00:00",
+  "freshSessionVerified": true,
+  "sourceRunDirectory": "20260927T155355.970288Z-7b7c43c3"
+}
