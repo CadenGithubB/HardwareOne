@@ -1,0 +1,413 @@
+{
+  "schema": 1,
+  "status": "passed",
+  "started": "2026-09-27T17:12:10.401256+00:00",
+  "checks": [
+    {
+      "name": "initial",
+      "status": "passed",
+      "durationSec": 15.257,
+      "evidence": {
+        "deviceInfo": {
+          "manufacturer": "HardwareOne",
+          "model": "Espressif ESP32-P4X-EYE",
+          "firmware": "0.99.94.1"
+        },
+        "mtu": 517,
+        "secureChannel": "v1",
+        "initiallyUnauthenticated": true,
+        "preLoginCommandDenied": true,
+        "namedAdminLogin": true,
+        "system": {
+          "schema": 1,
+          "fw": "0.99.94.1",
+          "board": "Espressif ESP32-P4X-EYE",
+          "reset_reason": "USB",
+          "reset_reason_code": 11,
+          "crash_count": 0,
+          "system_time": "",
+          "uptime_hms": "0h 3m 3s",
+          "net": {
+            "wifiConnected": false,
+            "radioOn": true,
+            "radioHeldForEspnow": true,
+            "ssid": "",
+            "ip": "",
+            "rssi": 0,
+            "channel": 0,
+            "mac": "FC:01:2C:E0:B9:A8"
+          },
+          "mem": {
+            "heap_free_kb": 242,
+            "heap_total_kb": 539,
+            "psram_total_kb": 32606,
+            "psram_free_kb": 32269
+          },
+          "storage": {
+            "total_kb": 10092,
+            "used_kb": 276,
+            "free_kb": 9816
+          },
+          "connectivity": {
+            "espnow": {
+              "enabled": true,
+              "running": true,
+              "mesh": true,
+              "deviceName": "HW1_P4",
+              "encrypted": true,
+              "passphraseSet": true
+            },
+            "bluetooth": {
+              "running": true,
+              "state": "connected",
+              "mode": "server",
+              "server": true,
+              "client": false,
+              "g2Connected": false
+            },
+            "webserver": {
+              "running": true,
+              "https": false,
+              "port": 80,
+              "sessions": 0,
+              "maxSessions": 2
+            },
+            "i2c": {
+              "compiled": false,
+              "enabled": false,
+              "devices": 0
+            }
+          }
+        },
+        "bleStatus": {
+          "schema": 1,
+          "initialized": true,
+          "state": "connected",
+          "activeConnections": 1,
+          "maxConnections": 4,
+          "totalConnections": 3,
+          "commandsReceived": 8,
+          "responsesSent": 11,
+          "connections": [
+            {
+              "index": 0,
+              "user": "[REDACTED]",
+              "mac": "68:EE:8F:50:E9:D2",
+              "connectedSec": 11,
+              "commands": 0
+            }
+          ]
+        },
+        "meshStatus": {
+          "schema": 1,
+          "initialized": true,
+          "channel": 6,
+          "channelPref": 6,
+          "mac": "FC:01:2C:E0:B9:A8",
+          "pairedDevices": 1
+        },
+        "gattCounters": {
+          "state": "connected",
+          "uptime": 185,
+          "rx": 9,
+          "tx": 14
+        },
+        "encryptedReplies": [
+          {
+            "command": "whoami",
+            "encrypted": true,
+            "messageId": 0,
+            "fragments": 1,
+            "firstCounter": 1,
+            "lastCounter": 1,
+            "bytes": 17
+          },
+          {
+            "command": "status json",
+            "encrypted": true,
+            "messageId": 1,
+            "fragments": 1,
+            "firstCounter": 2,
+            "lastCounter": 2,
+            "bytes": 57
+          },
+          {
+            "command": "login [REDACTED]",
+            "encrypted": true,
+            "messageId": 2,
+            "fragments": 1,
+            "firstCounter": 3,
+            "lastCounter": 3,
+            "bytes": 47
+          },
+          {
+            "command": "whoami",
+            "encrypted": true,
+            "messageId": 3,
+            "fragments": 1,
+            "firstCounter": 4,
+            "lastCounter": 4,
+            "bytes": 25
+          },
+          {
+            "command": "status json",
+            "encrypted": true,
+            "messageId": 4,
+            "fragments": 5,
+            "firstCounter": 5,
+            "lastCounter": 9,
+            "bytes": 829
+          },
+          {
+            "command": "blestatus json",
+            "encrypted": true,
+            "messageId": 5,
+            "fragments": 2,
+            "firstCounter": 10,
+            "lastCounter": 11,
+            "bytes": 257
+          },
+          {
+            "command": "espnowstatus json",
+            "encrypted": true,
+            "messageId": 6,
+            "fragments": 1,
+            "firstCounter": 12,
+            "lastCounter": 12,
+            "bytes": 103
+          },
+          {
+            "command": "whoami",
+            "encrypted": true,
+            "messageId": 7,
+            "fragments": 1,
+            "firstCounter": 13,
+            "lastCounter": 13,
+            "bytes": 25
+          }
+        ],
+        "whileConnected": {
+          "mesh": "not requested"
+        }
+      }
+    },
+    {
+      "name": "reconnect",
+      "status": "passed",
+      "durationSec": 16.403,
+      "evidence": {
+        "deviceInfo": {
+          "manufacturer": "HardwareOne",
+          "model": "Espressif ESP32-P4X-EYE",
+          "firmware": "0.99.94.1"
+        },
+        "mtu": 517,
+        "secureChannel": "v1",
+        "initiallyUnauthenticated": true,
+        "preLoginCommandDenied": true,
+        "namedAdminLogin": true,
+        "system": {
+          "schema": 1,
+          "fw": "0.99.94.1",
+          "board": "Espressif ESP32-P4X-EYE",
+          "reset_reason": "USB",
+          "reset_reason_code": 11,
+          "crash_count": 0,
+          "system_time": "",
+          "uptime_hms": "0h 3m 22s",
+          "net": {
+            "wifiConnected": false,
+            "radioOn": true,
+            "radioHeldForEspnow": true,
+            "ssid": "",
+            "ip": "",
+            "rssi": 0,
+            "channel": 0,
+            "mac": "FC:01:2C:E0:B9:A8"
+          },
+          "mem": {
+            "heap_free_kb": 242,
+            "heap_total_kb": 539,
+            "psram_total_kb": 32606,
+            "psram_free_kb": 32269
+          },
+          "storage": {
+            "total_kb": 10092,
+            "used_kb": 280,
+            "free_kb": 9812
+          },
+          "connectivity": {
+            "espnow": {
+              "enabled": true,
+              "running": true,
+              "mesh": true,
+              "deviceName": "HW1_P4",
+              "encrypted": true,
+              "passphraseSet": true
+            },
+            "bluetooth": {
+              "running": true,
+              "state": "connected",
+              "mode": "server",
+              "server": true,
+              "client": false,
+              "g2Connected": false
+            },
+            "webserver": {
+              "running": true,
+              "https": false,
+              "port": 80,
+              "sessions": 0,
+              "maxSessions": 2
+            },
+            "i2c": {
+              "compiled": false,
+              "enabled": false,
+              "devices": 0
+            }
+          }
+        },
+        "bleStatus": {
+          "schema": 1,
+          "initialized": true,
+          "state": "connected",
+          "activeConnections": 1,
+          "maxConnections": 4,
+          "totalConnections": 4,
+          "commandsReceived": 18,
+          "responsesSent": 26,
+          "connections": [
+            {
+              "index": 0,
+              "user": "[REDACTED]",
+              "mac": "68:EE:8F:50:E9:D2",
+              "connectedSec": 13,
+              "commands": 0
+            }
+          ]
+        },
+        "meshStatus": {
+          "schema": 1,
+          "initialized": true,
+          "channel": 6,
+          "channelPref": 6,
+          "mac": "FC:01:2C:E0:B9:A8",
+          "pairedDevices": 1
+        },
+        "gattCounters": {
+          "state": "connected",
+          "uptime": 204,
+          "rx": 19,
+          "tx": 29
+        },
+        "encryptedReplies": [
+          {
+            "command": "whoami",
+            "encrypted": true,
+            "messageId": 0,
+            "fragments": 1,
+            "firstCounter": 1,
+            "lastCounter": 1,
+            "bytes": 17
+          },
+          {
+            "command": "status json",
+            "encrypted": true,
+            "messageId": 1,
+            "fragments": 1,
+            "firstCounter": 2,
+            "lastCounter": 2,
+            "bytes": 57
+          },
+          {
+            "command": "login [REDACTED]",
+            "encrypted": true,
+            "messageId": 2,
+            "fragments": 1,
+            "firstCounter": 3,
+            "lastCounter": 3,
+            "bytes": 47
+          },
+          {
+            "command": "whoami",
+            "encrypted": true,
+            "messageId": 3,
+            "fragments": 1,
+            "firstCounter": 4,
+            "lastCounter": 4,
+            "bytes": 25
+          },
+          {
+            "command": "status json",
+            "encrypted": true,
+            "messageId": 4,
+            "fragments": 5,
+            "firstCounter": 5,
+            "lastCounter": 9,
+            "bytes": 830
+          },
+          {
+            "command": "blestatus json",
+            "encrypted": true,
+            "messageId": 5,
+            "fragments": 2,
+            "firstCounter": 10,
+            "lastCounter": 11,
+            "bytes": 258
+          },
+          {
+            "command": "espnowstatus json",
+            "encrypted": true,
+            "messageId": 6,
+            "fragments": 1,
+            "firstCounter": 12,
+            "lastCounter": 12,
+            "bytes": 103
+          },
+          {
+            "command": "whoami",
+            "encrypted": true,
+            "messageId": 7,
+            "fragments": 1,
+            "firstCounter": 13,
+            "lastCounter": 13,
+            "bytes": 25
+          }
+        ],
+        "whileConnected": {
+          "mesh": "not requested"
+        }
+      }
+    }
+  ],
+  "transport": "Board GATT central through caller-owned USB serial",
+  "targetName": "HW1_P4_BLE",
+  "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+  "preflight": {
+    "python": "3.12.14",
+    "transport": "s3-usb-gatt",
+    "radioAccessed": false,
+    "packages": {
+      "PyNaCl": "1.6.2",
+      "pyserial": "3.5"
+    }
+  },
+  "peripheral": {
+    "name": "",
+    "bleMac": "fc:01:2c:e0:b9:aa",
+    "addressType": 0,
+    "selector": "observedBleMac"
+  },
+  "finished": "2026-09-27T17:12:51.656604+00:00",
+  "privateRunId": "20260927T171210.400317Z-f0f464f8",
+  "conditions": {
+    "client": "S3 native central",
+    "server": "P4 with C6 controller",
+    "s3Wifi": "off",
+    "s3Espnow": "off",
+    "p4Wifi": "APSTA on channel 6",
+    "p4Http": "running without HTTP requests during the BLE run",
+    "p4Espnow": "initialized; peer off; no mesh messages during this run",
+    "s3TxPowerLevel": 7
+  }
+}

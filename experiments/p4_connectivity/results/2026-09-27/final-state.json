@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "privateRunId": "20260927T170922Z-c93dc9f8",
+  "status": "passed",
+  "meshAfterRestoration": {
+    "session": {
+      "p4": {
+        "slot": 0,
+        "mac": "68:EE:8F:50:E9:D0",
+        "meshId": 0,
+        "sessionId": 35961,
+        "dir": "B",
+        "state": "ACTIVE",
+        "ageMs": 224746,
+        "txSeq": 6,
+        "rxHwm": 7
+      },
+      "s3": {
+        "slot": 0,
+        "mac": "FC:01:2C:E0:B9:A8",
+        "meshId": 0,
+        "sessionId": 35961,
+        "dir": "A",
+        "state": "ACTIVE",
+        "ageMs": 224785,
+        "txSeq": 7,
+        "rxHwm": 6
+      }
+    },
+    "messages": [
+      {
+        "direction": "p4->s3",
+        "msgId": 61,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "9d98276f17fb13bbb4105e9fc35aed7fc61fd344d8c57adb1c0f370d1a0a9a26"
+      },
+      {
+        "direction": "s3->p4",
+        "msgId": 50,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "3f09d674931e601c807562fd59ce95ba80a14b5f4234a547dd3c0d8e0d20ae83"
+      }
+    ]
+  },
+  "s3BlePowerRestored": 3,
+  "probeClientsDisconnected": true,
+  "probeNotificationDrops": {
+    "p4": 0,
+    "s3": 0
+  },
+  "httpCookieCleared": true,
+  "macWifi": "off",
+  "usbCoordinatorClosed": true,
+  "firmwareLeftInstalled": true,
+  "originalUserPathsUnchanged": 16
+}

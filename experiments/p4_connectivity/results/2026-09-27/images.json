@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "recordedAtUtc": "2026-09-27T17:13:06.216000+00:00",
+  "versions": {
+    "espIdf": "5.5.5",
+    "arduinoEsp32": "3.3.5",
+    "espHosted": "2.12.13"
+  },
+  "applicationImages": [
+    {
+      "board": "p4",
+      "idfTarget": "esp32p4",
+      "artifact": "hardwareone-idf.bin",
+      "bytes": 3370976,
+      "sha256": "46a594e23bc24a53cd3d6c1134795a6410c0beea447cecf08e59442091a6ae05",
+      "verification": "SHA-256 computed directly from the current built application image"
+    },
+    {
+      "board": "s3",
+      "idfTarget": "esp32s3",
+      "artifact": "hardwareone-idf.bin",
+      "bytes": 3921424,
+      "sha256": "502f58d622f99b7cd58ff1e687fe66a766fb922188605953cabc18b87256a478",
+      "verification": "SHA-256 computed directly from the current built application image"
+    }
+  ],
+  "companionImage": {
+    "board": "esp32c6",
+    "role": "ESP-Hosted radio companion with ESP-NOW overlay and Bluetooth controller",
+    "sha256": "001a01d4a5ec1b11dacc82596173dfe9d7e85a36167683d306a7afd2bdde7f06",
+    "verification": "Hash and byte count verified against the earlier durable companion manifest; not recomputed from the companion image in this capture",
+    "artifact": "network_adapter.bin",
+    "bytes": 1243776,
+    "evidenceRecord": "p4_espnow/results/2026-09-27/firmware.json"
+  },
+  "scope": "Application image hashes only; this manifest is not a hash of whole-flash backups, bootloaders, partition tables or provisioned device data.",
+  "arduinoPatches": "Repository local patches plus the recorded connectivity experiment overlay"
+}

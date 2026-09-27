@@ -1,0 +1,1254 @@
+--- a/components/arduino/CMakeLists.txt
++++ b/components/arduino/CMakeLists.txt
+@@ -383,6 +383,9 @@
+ set(priv_includes cores/esp32/libb64)
+ set(requires spi_flash esp_partition mbedtls wpa_supplicant esp_adc esp_eth http_parser esp_ringbuf esp_driver_gptimer esp_driver_usb_serial_jtag driver esp_http_client esp_https_ota bt esp_wifi)
+ set(priv_requires fatfs nvs_flash app_update spiffs bootloader_support esp_hid usb esp_psram ${ARDUINO_LIBRARIES_REQUIRES})
++if(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
++  list(APPEND priv_requires esp_hosted)
++endif()
+ 
+ if(NOT CONFIG_ARDUINO_SELECTIVE_COMPILATION OR CONFIG_ARDUINO_SELECTIVE_OpenThread)
+   #if(CONFIG_SOC_IEEE802154_SUPPORTED) # Does not work!
+--- a/components/arduino/cores/esp32/esp32-hal-bt.c
++++ b/components/arduino/cores/esp32/esp32-hal-bt.c
+@@ -14,7 +14,125 @@
+ 
+ #include "esp32-hal-bt.h"
+ 
+-#if SOC_BT_SUPPORTED
++#if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++
++#include "esp_hosted.h"
++#include "esp_hosted_bluedroid.h"
++#include "esp_bt_main.h"
++#include "esp32-hal-hosted.h"
++
++// BLEDevice serializes lifecycle transitions. The atomic snapshot also permits
++// status readers on other tasks without claiming to query the remote hardware.
++static int32_t sHostedControllerState = BT_HOSTED_CONTROLLER_UNKNOWN;
++static bool sHostedHciAttached = false;
++
++int32_t btHostedControllerStatus(void) {
++  return __atomic_load_n(&sHostedControllerState, __ATOMIC_ACQUIRE);
++}
++
++static void hostedControllerAcknowledge(esp_err_t status, int32_t state) {
++  __atomic_store_n(&sHostedControllerState,
++                   status == ESP_OK ? state : BT_HOSTED_CONTROLLER_UNKNOWN,
++                   __ATOMIC_RELEASE);
++}
++
++bool btStarted(void) {
++  return btHostedControllerStatus() == BT_HOSTED_CONTROLLER_ENABLED;
++}
++
++bool btStart(void) {
++  return btStartMode(BT_MODE_BLE);
++}
++
++bool btStartMode(bt_mode mode) {
++  // This backend targets a BLE-only C6 controller. Shared Hosted transport and
++  // board pins must already be prepared by the application's radio backend.
++  if (mode != BT_MODE_DEFAULT && mode != BT_MODE_BLE) {
++    log_e("Hosted controller supports BLE mode only");
++    return false;
++  }
++  if (btStarted() && sHostedHciAttached) return true;
++  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED) {
++    log_e("Hosted HCI setup requires an uninitialized Bluedroid host");
++    return false;
++  }
++  // Wi-Fi may later switch off independently. Register BLE's transport
++  // ownership before controller work; a failed/ambiguous RPC must retain it
++  // until checked teardown confirms that the controller is idle.
++  if (!hostedClaimBLE()) return false;
++
++  // The pinned slave makes both calls idempotent. Repeat them after any
++  // ambiguous failure; never infer radio state from SDIO connectivity alone.
++  esp_err_t err = esp_hosted_bt_controller_init();
++  hostedControllerAcknowledge(err, BT_HOSTED_CONTROLLER_INITED);
++  if (err != ESP_OK) {
++    log_e("Hosted controller init failed: %s", esp_err_to_name(err));
++    return false;
++  }
++  err = esp_hosted_bt_controller_enable();
++  hostedControllerAcknowledge(err, BT_HOSTED_CONTROLLER_ENABLED);
++  if (err != ESP_OK) {
++    log_e("Hosted controller enable failed: %s", esp_err_to_name(err));
++    return false;
++  }
++
++  // Same HCI operations as the pinned Hosted Bluedroid host-only example.
++  // open() reuses the existing transport; it does not initialize Wi-Fi.
++  hosted_hci_bluedroid_open();
++  const esp_bluedroid_hci_driver_operations_t operations = {
++    .send = hosted_hci_bluedroid_send,
++    .check_send_available = hosted_hci_bluedroid_check_send_available,
++    .register_host_callback = hosted_hci_bluedroid_register_host_callback,
++  };
++  err = esp_bluedroid_attach_hci_driver(&operations);
++  if (err != ESP_OK) {
++    hosted_hci_bluedroid_close();
++    log_e("Hosted HCI attach failed: %s", esp_err_to_name(err));
++    return false;
++  }
++  sHostedHciAttached = true;
++  return true;
++}
++
++esp_err_t btHostedControllerDisable(void) {
++  // Host teardown must finish before detaching its HCI callbacks/controller.
++  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED) {
++    return ESP_ERR_INVALID_STATE;
++  }
++  hosted_hci_bluedroid_close();
++  esp_err_t err = esp_bluedroid_detach_hci_driver();
++  if (err != ESP_OK) return err;
++  sHostedHciAttached = false;
++  const int32_t before = btHostedControllerStatus();
++  err = esp_hosted_bt_controller_disable();
++  // With an unknown starting state, disable alone does not prove initialized.
++  // Deinit is idempotent and establishes the terminal state in the next phase.
++  const int32_t disabledState = before == BT_HOSTED_CONTROLLER_IDLE ? BT_HOSTED_CONTROLLER_IDLE
++                                : before == BT_HOSTED_CONTROLLER_UNKNOWN ? BT_HOSTED_CONTROLLER_UNKNOWN
++                                : BT_HOSTED_CONTROLLER_INITED;
++  hostedControllerAcknowledge(err, disabledState);
++  return err;
++}
++
++esp_err_t btHostedControllerDeinit(void) {
++  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED ||
++      sHostedHciAttached || btHostedControllerStatus() == BT_HOSTED_CONTROLLER_ENABLED) {
++    return ESP_ERR_INVALID_STATE;
++  }
++  // Never release C6 controller memory: BLE must be reopenable and Wi-Fi,
++  // ESP-NOW, and the shared Hosted/SDIO connection must remain operational.
++  esp_err_t err = esp_hosted_bt_controller_deinit(false);
++  hostedControllerAcknowledge(err, BT_HOSTED_CONTROLLER_IDLE);
++  if (err == ESP_OK) hostedReleaseBLE();
++  return err;
++}
++
++bool btStop(void) {
++  if (btHostedControllerDisable() != ESP_OK) return false;
++  return btHostedControllerDeinit() == ESP_OK;
++}
++
++#elif SOC_BT_SUPPORTED
+ #if (defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)) && __has_include("esp_bt.h")
+ 
+ #if CONFIG_IDF_TARGET_ESP32
+@@ -131,4 +249,4 @@
+ 
+ #endif /* !__has_include("esp_bt.h") || !(defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)) */
+ 
+-#endif /* SOC_BT_SUPPORTED */
++#endif /* SOC_BT_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID */
+--- a/components/arduino/cores/esp32/esp32-hal-bt.h
++++ b/components/arduino/cores/esp32/esp32-hal-bt.h
+@@ -16,7 +16,8 @@
+ #define _ESP32_ESP32_HAL_BT_H_
+ 
+ #include "soc/soc_caps.h"
+-#if SOC_BT_SUPPORTED
++#include "sdkconfig.h"
++#if SOC_BT_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
+ 
+ #include "esp32-hal.h"
+ 
+@@ -36,10 +37,25 @@
+ bool btStartMode(bt_mode mode);
+ bool btStop();
+ 
++#if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++// Last acknowledged Hosted lifecycle phase, not a live controller query.
++// A failed RPC leaves the remote outcome unknown. Native enum values 0..2
++// are retained so checked BLE teardown can report either backend uniformly.
++enum {
++  BT_HOSTED_CONTROLLER_UNKNOWN = -1,
++  BT_HOSTED_CONTROLLER_IDLE = 0,
++  BT_HOSTED_CONTROLLER_INITED = 1,
++  BT_HOSTED_CONTROLLER_ENABLED = 2
++};
++int32_t btHostedControllerStatus(void);
++esp_err_t btHostedControllerDisable(void);
++esp_err_t btHostedControllerDeinit(void);
++#endif
++
+ #ifdef __cplusplus
+ }
+ #endif
+ 
+-#endif /* SOC_BT_SUPPORTED */
++#endif /* SOC_BT_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID */
+ 
+ #endif /* _ESP32_ESP32_HAL_BT_H_ */
+--- a/components/arduino/cores/esp32/esp32-hal-hosted.c
++++ b/components/arduino/cores/esp32/esp32-hal-hosted.c
+@@ -13,7 +13,7 @@
+ // limitations under the License.
+ 
+ #include "sdkconfig.h"
+-#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED)
++#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED)
+ 
+ #include "esp32-hal-hosted.h"
+ #include "esp32-hal-log.h"
+@@ -247,6 +247,23 @@
+   return true;
+ }
+ 
++bool hostedClaimBLE() {
++  // The application prepares the board pins and transport before BLE startup.
++  // Do not silently start a transport here with generic variant pin defaults.
++  if (!hosted_initialized) {
++    log_e("Prepare ESP-Hosted before claiming it for BLE");
++    return false;
++  }
++  hosted_ble_active = true;
++  return true;
++}
++
++void hostedReleaseBLE() {
++  // Controller shutdown belongs to BLEDevice's checked lifecycle. Keep SDIO
++  // operational even when BLE happens to be its final current consumer.
++  hosted_ble_active = false;
++}
++
+ bool hostedInitBLE() {
+   log_i("Initializing ESP-Hosted for BLE");
+   if (!hostedInit()) {
+@@ -353,4 +370,4 @@
+   return hosted_initialized;
+ }
+ 
+-#endif /* defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED) */
++#endif /* Hosted BLE or remote Wi-Fi */
+--- a/components/arduino/cores/esp32/esp32-hal-hosted.h
++++ b/components/arduino/cores/esp32/esp32-hal-hosted.h
+@@ -16,7 +16,7 @@
+ #define MAIN_ESP32_HAL_HOSTED_H_
+ 
+ #include "sdkconfig.h"
+-#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED)
++#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED)
+ 
+ #include "stdint.h"
+ #include "stdbool.h"
+@@ -39,6 +39,11 @@
+ bool hostedInitWiFi();
+ bool hostedDeinitBLE();
+ bool hostedDeinitWiFi();
++// Claim the prepared shared transport before a separately managed BLE host
++// starts. Retain ownership across uncertain controller failures; release only
++// after checked teardown. Release does not shut down the shared transport.
++bool hostedClaimBLE();
++void hostedReleaseBLE();
+ bool hostedIsInitialized();
+ bool hostedIsBLEActive();
+ bool hostedIsWiFiActive();
+@@ -57,5 +62,5 @@
+ }
+ #endif
+ 
+-#endif /* defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED) */
++#endif /* Hosted BLE or remote Wi-Fi */
+ #endif /* MAIN_ESP32_HAL_HOSTED_H_ */
+--- a/components/arduino/libraries/BLE/src/BLE2901.cpp
++++ b/components/arduino/libraries/BLE/src/BLE2901.cpp
+@@ -17,7 +17,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -55,4 +55,4 @@
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLE2901.h
++++ b/components/arduino/libraries/BLE/src/BLE2901.h
+@@ -20,7 +20,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -43,6 +43,6 @@
+ };  // BLE2901
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLE2901_H_ */
+--- a/components/arduino/libraries/BLE/src/BLE2902.cpp
++++ b/components/arduino/libraries/BLE/src/BLE2902.cpp
+@@ -16,7 +16,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -125,4 +125,4 @@
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLE2902.h
++++ b/components/arduino/libraries/BLE/src/BLE2902.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -58,6 +58,6 @@
+   };  // BLE2902
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLE2902_H_ */
+--- a/components/arduino/libraries/BLE/src/BLE2904.cpp
++++ b/components/arduino/libraries/BLE/src/BLE2904.cpp
+@@ -16,7 +16,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -85,4 +85,4 @@
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLE2904.h
++++ b/components/arduino/libraries/BLE/src/BLE2904.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -102,6 +102,6 @@
+ };  // BLE2904
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLE2904_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEAddress.cpp
++++ b/components/arduino/libraries/BLE/src/BLEAddress.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -220,4 +220,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEAddress.h
++++ b/components/arduino/libraries/BLE/src/BLEAddress.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -111,6 +111,6 @@
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEADDRESS_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEAdvertisedDevice.cpp
++++ b/components/arduino/libraries/BLE/src/BLEAdvertisedDevice.cpp
+@@ -17,7 +17,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -804,4 +804,4 @@
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEAdvertisedDevice.h
++++ b/components/arduino/libraries/BLE/src/BLEAdvertisedDevice.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -233,6 +233,6 @@
+ #endif  // SOC_BLE_50_SUPPORTED && CONFIG_BLUEDROID_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEADVERTISEDDEVICE_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEAdvertising.cpp
++++ b/components/arduino/libraries/BLE/src/BLEAdvertising.cpp
+@@ -23,7 +23,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -1424,4 +1424,4 @@
+ #endif /* CONFIG_NIMBLE_ENABLED */
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEAdvertising.h
++++ b/components/arduino/libraries/BLE/src/BLEAdvertising.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -253,6 +253,6 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEADVERTISING_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEBeacon.cpp
++++ b/components/arduino/libraries/BLE/src/BLEBeacon.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -95,4 +95,4 @@
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEBeacon.h
++++ b/components/arduino/libraries/BLE/src/BLEBeacon.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -64,6 +64,6 @@
+ };  // BLEBeacon
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEBEACON_H_ */
+--- a/components/arduino/libraries/BLE/src/BLECharacteristic.cpp
++++ b/components/arduino/libraries/BLE/src/BLECharacteristic.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -1269,4 +1269,4 @@
+ #endif /* CONFIG_NIMBLE_ENABLED */
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLECharacteristic.h
++++ b/components/arduino/libraries/BLE/src/BLECharacteristic.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -350,6 +350,6 @@
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLECHARACTERISTIC_H_ */
+--- a/components/arduino/libraries/BLE/src/BLECharacteristicMap.cpp
++++ b/components/arduino/libraries/BLE/src/BLECharacteristicMap.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -182,4 +182,4 @@
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEClient.cpp
++++ b/components/arduino/libraries/BLE/src/BLEClient.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -1640,4 +1640,4 @@
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEClient.h
++++ b/components/arduino/libraries/BLE/src/BLEClient.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -299,6 +299,6 @@
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* MAIN_BLECLIENT_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEDescriptor.cpp
++++ b/components/arduino/libraries/BLE/src/BLEDescriptor.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -405,4 +405,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEDescriptor.h
++++ b/components/arduino/libraries/BLE/src/BLEDescriptor.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -182,6 +182,6 @@
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEDESCRIPTOR_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEDescriptorMap.cpp
++++ b/components/arduino/libraries/BLE/src/BLEDescriptorMap.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -212,4 +212,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEDevice.cpp
++++ b/components/arduino/libraries/BLE/src/BLEDevice.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -1139,7 +1139,27 @@
+   }
+ #endif
+ 
+-#if SOC_BLE_SUPPORTED && CONFIG_BT_CONTROLLER_ENABLED
++#if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++  // Hosted has lifecycle RPC acknowledgements, not a live controller query.
++  // Complete local host teardown first and preserve the shared Wi-Fi transport.
++  result.controllerStatusBefore = btHostedControllerStatus();
++  controllerTerminal = false;
++  if (hostTerminal) {
++    result.phase = BLEDeviceDeinitPhase::STOP_CONTROLLER;
++    result.controllerDisableAttempted = true;
++    result.controllerDisableStatus = btHostedControllerDisable();
++    transitionCallsSucceeded &= result.controllerDisableStatus == ESP_OK;
++    if (result.controllerDisableStatus == ESP_OK) {
++      result.phase = BLEDeviceDeinitPhase::DEINIT_CONTROLLER;
++      result.controllerDeinitAttempted = true;
++      result.controllerDeinitStatus = btHostedControllerDeinit();
++      transitionCallsSucceeded &= result.controllerDeinitStatus == ESP_OK;
++      controllerTerminal = result.controllerDeinitStatus == ESP_OK &&
++                           btHostedControllerStatus() == BT_HOSTED_CONTROLLER_IDLE;
++    }
++  }
++  result.controllerStatusAfter = btHostedControllerStatus();
++#elif SOC_BLE_SUPPORTED && CONFIG_BT_CONTROLLER_ENABLED
+   esp_bt_controller_status_t controllerState = esp_bt_controller_get_status();
+   result.controllerStatusBefore = static_cast<int32_t>(controllerState);
+   controllerTerminal = controllerState == ESP_BT_CONTROLLER_STATUS_IDLE;
+@@ -1243,6 +1263,12 @@
+       result.memoryReleaseAttempted = true;
+       result.memoryReleaseStatus = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+       transitionCallsSucceeded &= result.memoryReleaseStatus == ESP_OK;
++#elif CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++      // Releasing the C6 controller's memory is irreversible until reboot.
++      // This shared-radio backend deliberately supports restartable shutdown.
++      result.memoryReleaseAttempted = true;
++      result.memoryReleaseStatus = ESP_ERR_NOT_SUPPORTED;
++      transitionCallsSucceeded = false;
+ #endif
+     }
+   }
+@@ -1757,4 +1783,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEDevice.h
++++ b/components/arduino/libraries/BLE/src/BLEDevice.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -380,6 +380,6 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* MAIN_BLEDevice_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEEddystoneTLM.cpp
++++ b/components/arduino/libraries/BLE/src/BLEEddystoneTLM.cpp
+@@ -15,7 +15,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include <string.h>
+@@ -181,4 +181,4 @@
+ }  // setTime
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEEddystoneTLM.h
++++ b/components/arduino/libraries/BLE/src/BLEEddystoneTLM.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include "BLEUUID.h"
+@@ -65,6 +65,6 @@
+ };  // BLEEddystoneTLM
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* _BLEEddystoneTLM_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEEddystoneURL.cpp
++++ b/components/arduino/libraries/BLE/src/BLEEddystoneURL.cpp
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include <string.h>
+@@ -288,4 +288,4 @@
+ }
+ 
+ #endif
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEEddystoneURL.h
++++ b/components/arduino/libraries/BLE/src/BLEEddystoneURL.h
+@@ -17,7 +17,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include "BLEUUID.h"
+@@ -67,6 +67,6 @@
+ };  // BLEEddystoneURL
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* _BLEEddystoneURL_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEExceptions.cpp
++++ b/components/arduino/libraries/BLE/src/BLEExceptions.cpp
+@@ -7,8 +7,8 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ 
+ //#include "BLEExceptions.h"
+ 
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEExceptions.h
++++ b/components/arduino/libraries/BLE/src/BLEExceptions.h
+@@ -10,7 +10,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ 
+ #if CONFIG_CXX_EXCEPTIONS != 1
+ #error "C++ exception handling must be enabled within make menuconfig. See Compiler Options > Enable C++ Exceptions."
+@@ -30,6 +30,6 @@
+   }
+ };
+ 
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEEXCEPTIONS_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEHIDDevice.cpp
++++ b/components/arduino/libraries/BLE/src/BLEHIDDevice.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -281,4 +281,4 @@
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEHIDDevice.h
++++ b/components/arduino/libraries/BLE/src/BLEHIDDevice.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include "BLECharacteristic.h"
+@@ -79,6 +79,6 @@
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* _BLEHIDDEVICE_H_ */
+--- a/components/arduino/libraries/BLE/src/BLERemoteCharacteristic.cpp
++++ b/components/arduino/libraries/BLE/src/BLERemoteCharacteristic.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -1266,4 +1266,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLERemoteCharacteristic.h
++++ b/components/arduino/libraries/BLE/src/BLERemoteCharacteristic.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -240,6 +240,6 @@
+ };  // BLERemoteCharacteristic
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEREMOTECHARACTERISTIC_H_ */
+--- a/components/arduino/libraries/BLE/src/BLERemoteDescriptor.cpp
++++ b/components/arduino/libraries/BLE/src/BLERemoteDescriptor.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -610,4 +610,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLERemoteDescriptor.h
++++ b/components/arduino/libraries/BLE/src/BLERemoteDescriptor.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -132,6 +132,6 @@
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEREMOTEDESCRIPTOR_H_ */
+--- a/components/arduino/libraries/BLE/src/BLERemoteService.cpp
++++ b/components/arduino/libraries/BLE/src/BLERemoteService.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -423,4 +423,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLERemoteService.h
++++ b/components/arduino/libraries/BLE/src/BLERemoteService.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -128,6 +128,6 @@
+ };  // BLERemoteService
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEREMOTESERVICE_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEScan.cpp
++++ b/components/arduino/libraries/BLE/src/BLEScan.cpp
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -859,4 +859,4 @@
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEScan.h
++++ b/components/arduino/libraries/BLE/src/BLEScan.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -233,6 +233,6 @@
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLESCAN_H_ */
+--- a/components/arduino/libraries/BLE/src/BLESecurity.cpp
++++ b/components/arduino/libraries/BLE/src/BLESecurity.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -432,4 +432,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLESecurity.h
++++ b/components/arduino/libraries/BLE/src/BLESecurity.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -222,6 +222,6 @@
+ };  // BLESecurityCallbacks
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif  // COMPONENTS_CPP_UTILS_BLESECURITY_H_
+--- a/components/arduino/libraries/BLE/src/BLEServer.cpp
++++ b/components/arduino/libraries/BLE/src/BLEServer.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -1048,4 +1048,4 @@
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEServer.h
++++ b/components/arduino/libraries/BLE/src/BLEServer.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -271,6 +271,6 @@
+ };  // BLEServerCallbacks
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLESERVER_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEService.cpp
++++ b/components/arduino/libraries/BLE/src/BLEService.cpp
+@@ -13,7 +13,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -649,4 +649,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEService.h
++++ b/components/arduino/libraries/BLE/src/BLEService.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -197,6 +197,6 @@
+ };  // BLEService
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLESERVICE_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEServiceMap.cpp
++++ b/components/arduino/libraries/BLE/src/BLEServiceMap.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -153,4 +153,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEUUID.cpp
++++ b/components/arduino/libraries/BLE/src/BLEUUID.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -332,4 +332,4 @@
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEUUID.h
++++ b/components/arduino/libraries/BLE/src/BLEUUID.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -123,6 +123,6 @@
+ };  // BLEUUID
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEUUID_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEUtils.cpp
++++ b/components/arduino/libraries/BLE/src/BLEUtils.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -2257,4 +2257,4 @@
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEUtils.h
++++ b/components/arduino/libraries/BLE/src/BLEUtils.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -24,6 +24,7 @@
+ #include <string>
+ #include "BLEAddress.h"
+ #include "WString.h"
++#include <freertos/FreeRTOS.h>
+ #include <freertos/task.h>
+ 
+ /*****************************************************************************
+@@ -148,6 +149,6 @@
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEUTILS_H_ */
+--- a/components/arduino/libraries/BLE/src/BLEValue.cpp
++++ b/components/arduino/libraries/BLE/src/BLEValue.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -134,4 +134,4 @@
+ }  // setValue
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+--- a/components/arduino/libraries/BLE/src/BLEValue.h
++++ b/components/arduino/libraries/BLE/src/BLEValue.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -56,6 +56,6 @@
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEVALUE_H_ */
