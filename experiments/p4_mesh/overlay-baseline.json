@@ -1,0 +1,22 @@
+{
+  "head": "56f3a7e07e04e6e7d6349836c39b18dae2e45075",
+  "baseline_files_sha256": {
+    "CMakeLists.txt": "ac7b28f6da9500a32a78491764e3751e94e637f7024c105e6a074c07b7e3a2ca",
+    "boards/p4x_eye.defaults": null,
+    "components/hardwareone/CMakeLists.txt": "99fa835ef290766c962008d31099272431d206babdd0fcd795ae122a65adfdcf",
+    "components/hardwareone/HardwareOne.cpp": "ac003a39c71d4cb1fd95a51dd045af0726ce7cc0925c97be03a7a783aa3da75a",
+    "components/hardwareone/System_BuildConfig.h": "06c4c1d22adac09f2f8c93cbb679201ad12099359e85d37962b1d9b2dc1fc410",
+    "components/hardwareone/System_Debug.cpp": "295e0768a40ef8ed36932ec71a91c56aee3b224dd972ce1ee1c57e614392cb4a",
+    "components/hardwareone/System_ESPNow.cpp": "f11701c7711223c16f99e87948b9e6eae0c139ac03b2be820b950767f5de61bc",
+    "components/hardwareone/System_ESPNow.h": "3cdcd85819f4da01b967320cf69902c1ed0a0baaabb2f4cc9dfdefb0fade5f97",
+    "components/hardwareone/System_Events.cpp": "564eb56b32d2e4c070968b6d958d5f3282ef51e9c4da5dea88b3e4b55faa3781",
+    "components/hardwareone/System_Utils.cpp": "e778ac54c439d9b894667383dd4c652c99c5bcc0fe2c5733720f15e66e70167f",
+    "components/hardwareone/idf_component.yml": "e3f08a8959014a6d7eedb2ea1bd73e24609a698dd1a072e8863eb7aa71f98d51",
+    "components/hardwareone_libs/CMakeLists.txt": "2bb8091298065569250be407708bf785e95954005e656615a95aba35b7a6cd57",
+    "components/hw1_ota_protocol/include/hw1_ota_idf.h": "66466190a8f34c949fd91011629e84e215815c75c11b8a7ac5b4d03994b5799a",
+    "dependencies.lock": "df22a79eb825ad8edeebd1f1a3a4aa4b67f467a3947e8e2838f9e561f7d1785e",
+    "dependencies.lock.esp32p4": null,
+    "main/CMakeLists.txt": "f815f7af536892e0feac4cae9ee578c5e6d02c6fc893e126c8140db6dff7b26d",
+    "main/hardwareone-idf.cpp": "1e623b8ff9065d87c0b2dcd166aa3c785fdf8781a223b51a1c43df008d130217"
+  }
+}
