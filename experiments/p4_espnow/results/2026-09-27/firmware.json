@@ -1,0 +1,49 @@
+{
+  "esp_hosted": "2.12.13",
+  "firmware": {
+    "c6_radio": {
+      "bytes": 1243776,
+      "path": "private/build-c6/network_adapter.bin",
+      "sha256": "001a01d4a5ec1b11dacc82596173dfe9d7e85a36167683d306a7afd2bdde7f06"
+    },
+    "p4_host": {
+      "bytes": 657248,
+      "path": "private/build-p4/hw1_hosted_p4_probe.bin",
+      "sha256": "30e8cecb5f271f2fc9e52188600ad867c0fdd2b7829c39b423ae363004f7a1b1"
+    },
+    "p4_programmer": {
+      "bytes": 381664,
+      "path": "private/build-programmer/hw1_c6_programmer.bin",
+      "sha256": "878f7e09b1c673667037d35673d7a698a48d8dda8fd91efce71254047d1a1415"
+    },
+    "s3_control": {
+      "bytes": 744128,
+      "path": "private/build-s3/hw1_espnow_native_s3_probe.bin",
+      "sha256": "4e3b857dd7cbd1067a41f06863006c8ffe083e0b8bf917584af683fc51b0003f"
+    }
+  },
+  "sdk": "ESP-IDF v5.5.5",
+  "source_sha256": {
+    "bridge/esp_now_hosted_host.c": "02caa8438c9b1f4ac81e244bac2788bc054f67f976c38447d8322bcdc0795188",
+    "bridge/esp_now_hosted_host.h": "8bbb61598a0d0c8160ad98c8530e348073a3f2a273877a710389ddb3af68847f",
+    "bridge/esp_now_hosted_rpc.h": "77ffb933a7adbd2af08c0e774e02caf2c6f66107504a321616bba630b8f64f73",
+    "bridge/esp_now_hosted_slave.c": "6a71592dc06a84b25542ae49041f11e3c9c980a2897453a796b7a06c292a826d",
+    "bridge/esp_now_hosted_slave.h": "4f3deae5bc9750bc32ec10014c0e370e6beebbf4d32fb77e4283b06acf270289",
+    "bridge/test_protocol.c": "c82f6eefe8508b4a2488ba8a81f0fb17b59b24360d147cde49a1767aece2f646",
+    "c6_programmer/CMakeLists.txt": "51275a34e4149a558bc9b40edc2be8fa4a7d79b102afa2bc72b446e92c1882a7",
+    "c6_programmer/main/CMakeLists.txt": "570cf3bf007a3af02db4bc723716b860eb79a0b4fed79e15c5c360a5cfc8a01d",
+    "c6_programmer/main/main.c": "3b99ba4a72464109dda5c3451780dbce28d1a805518b16473fc237aac5eec952",
+    "c6_programmer/sdkconfig.defaults": "f1381be5e62e4a4d959bf24f9eecf312c85db80f8ed4ce3408e0fbbf5a770285",
+    "hosted_p4/CMakeLists.txt": "7278f2f052839be18780e599d5ffc2a2680d62b6cf38f8871d66d1e1a9d55386",
+    "hosted_p4/main/CMakeLists.txt": "bddaa417fe9fa625aca561af04f29e5a1cd5a58cca9f659a868b8f32e59914f3",
+    "hosted_p4/main/idf_component.yml": "360b9566e91a6f1a753bf2a39a7a3f3536cc08cf90b5e25e80e54f1900fa5490",
+    "hosted_p4/main/main.c": "db8e3c747a0766744d7ccd58be2cc2c9301033452a9eb4bafbdeb47fb7203d82",
+    "hosted_p4/sdkconfig.defaults": "e1e3e747833791cb86ec998eb45bdfd83aaa14f6f7930ec4cd8aba8bcfd50e72",
+    "native_s3/CMakeLists.txt": "90bc722478dea6db18ee99d4dddd8a5104d0132f2b0d3ce649df1763784e90bf",
+    "native_s3/main/CMakeLists.txt": "be8c5ffca34f0c6a726a04a4f9cd47a73e8d00d85eaa071a5a9d7099576cab5e",
+    "native_s3/main/main.c": "12017ae8aff30c04fe4bc14fbec1cf7e38471dddc7807664ddbcdfe0b0bdf8ed",
+    "native_s3/main/milestone_wire.h": "c516de0c575a880e701d9b3f4f45c56fa83d07ad28032fadbef6aac429a19c65",
+    "native_s3/sdkconfig.defaults": "c9382487440cde9dca2f40f2655c368d143c4e8df0a6ab0659ef5e680f8c52a9",
+    "tests/slip_read_regression.c": "7d491e58529ac3159d350620a5abc96ae9cf94abd99fad6f8b62827544f6dc61"
+  }
+}

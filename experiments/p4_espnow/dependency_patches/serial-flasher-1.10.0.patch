@@ -1,0 +1,31 @@
+diff --git a/src/esp_loader.c b/src/esp_loader.c
+index db23950..d16751e 100644
+--- a/src/esp_loader.c
++++ b/src/esp_loader.c
+@@ -609,7 +609,7 @@ static esp_loader_error_t flash_read_stub(uint8_t *dest, uint32_t address, uint3
+ esp_loader_error_t esp_loader_flash_read(uint8_t *dest, uint32_t address, uint32_t length)
+ {
+     RETURN_ON_ERROR(init_flash_params());
+-    if (address + length >= s_target_flash_size) {
++    if (address > s_target_flash_size || length > s_target_flash_size - address) {
+         return ESP_LOADER_ERROR_IMAGE_SIZE;
+     }
+ 
+diff --git a/src/slip.c b/src/slip.c
+index 8876e6d..f96bc9c 100644
+--- a/src/slip.c
++++ b/src/slip.c
+@@ -45,6 +45,13 @@ esp_loader_error_t SLIP_receive_packet(uint8_t *buff, const size_t max_size, siz
+         RETURN_ON_ERROR( peripheral_read(&ch, 1) );
+     } while (ch == DELIMITER);
+ 
++    // The first payload byte is escaped exactly like every subsequent byte.
++    if (ch == 0xDB) {
++        RETURN_ON_ERROR(peripheral_read(&ch, 1));
++        if (ch == 0xDC) ch = 0xC0;
++        else if (ch == 0xDD) ch = 0xDB;
++        else return ESP_LOADER_ERROR_INVALID_RESPONSE;
++    }
+     buff[0] = ch;
+ 
+     // Receive either until either delimiter or maximum receive size

@@ -1,0 +1,1565 @@
+{
+  "baud": 115200,
+  "directory": "../../private/test-runs/20260927T144613.777864Z",
+  "finished_at": "2026-09-27T14:47:31.435+00:00",
+  "passed_tests": 26,
+  "ports": {
+    "p4": "/dev/cu.usbmodem2101",
+    "s3": "/dev/cu.usbmodem1101"
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-27T14:46:13.778+00:00",
+  "startup_stats_attempts": {
+    "p4": 1,
+    "s3": 1
+  },
+  "status": "passed",
+  "test_scope": "Unencrypted standalone HardwareOne V4 packet transport probe; not full application pairing",
+  "tests": [
+    {
+      "duration_seconds": 5.191264792025322,
+      "finished_at": "2026-09-27T14:46:18.992+00:00",
+      "name": "initial_discovery_and_stats",
+      "result": {
+        "baseline": {
+          "p4": {
+            "accepted": 2,
+            "bridge": {
+              "event_drops": 0,
+              "log_tag": "HW1_HOST",
+              "malformed": 0,
+              "request_timeouts": 0,
+              "stale_responses": 0,
+              "transport_errors": 0
+            },
+            "callback_drops": 0,
+            "channel": 6,
+            "channel_status": "ESP_OK",
+            "discoveries": 1,
+            "echoes": 0,
+            "invalid": 0,
+            "late_echoes": 0,
+            "log_tag": "HW1_HOST",
+            "peer_errors": 0,
+            "peer_known": 1,
+            "peer_test_failures": 0,
+            "peers": 2,
+            "peers_status": "ESP_OK",
+            "ping_active": 0,
+            "rejected": 0,
+            "requests": 0,
+            "restarts": 0,
+            "rx": 1,
+            "timeouts": 0,
+            "tx_fail": 0,
+            "tx_ok": 2
+          },
+          "s3": {
+            "accepted": 3,
+            "callback_drops": 0,
+            "channel": 6,
+            "channel_status": "ESP_OK",
+            "discoveries": 2,
+            "echo_rx": 0,
+            "echo_sent": 0,
+            "invalid": 0,
+            "log_tag": "HW1_PROBE",
+            "peer_errors": 0,
+            "peers": 2,
+            "peers_status": "ESP_OK",
+            "rejected": 0,
+            "requests": 0,
+            "restarts": 0,
+            "rx": 2,
+            "silence": 0,
+            "tx_fail": 0,
+            "tx_ok": 3
+          }
+        },
+        "before": {
+          "p4": {
+            "accepted": 2,
+            "bridge": {
+              "event_drops": 0,
+              "log_tag": "HW1_HOST",
+              "malformed": 0,
+              "request_timeouts": 0,
+              "stale_responses": 0,
+              "transport_errors": 0
+            },
+            "callback_drops": 0,
+            "channel": 6,
+            "channel_status": "ESP_OK",
+            "discoveries": 1,
+            "echoes": 0,
+            "invalid": 0,
+            "late_echoes": 0,
+            "log_tag": "HW1_HOST",
+            "peer_errors": 0,
+            "peer_known": 1,
+            "peer_test_failures": 0,
+            "peers": 2,
+            "peers_status": "ESP_OK",
+            "ping_active": 0,
+            "rejected": 0,
+            "requests": 0,
+            "restarts": 0,
+            "rx": 1,
+            "timeouts": 0,
+            "tx_fail": 0,
+            "tx_ok": 2
+          },
+          "s3": {
+            "accepted": 3,
+            "callback_drops": 0,
+            "channel": 6,
+            "channel_status": "ESP_OK",
+            "discoveries": 2,
+            "echo_rx": 0,
+            "echo_sent": 0,
+            "invalid": 0,
+            "log_tag": "HW1_PROBE",
+            "peer_errors": 0,
+            "peers": 2,
+            "peers_status": "ESP_OK",
+            "rejected": 0,
+            "requests": 0,
+            "restarts": 0,
+            "rx": 2,
+            "silence": 0,
+            "tx_fail": 0,
+            "tx_ok": 3
+          }
+        }
+      },
+      "started_at": "2026-09-27T14:46:13.801+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 3.404253165994305,
+      "finished_at": "2026-09-27T14:46:22.398+00:00",
+      "name": "ping_100_size_32",
+      "observed_ping_done": {
+        "attempted": 100,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 100,
+        "requested": 100,
+        "rtt_avg_us": 10004,
+        "rtt_max_us": 18779,
+        "rtt_min_us": 9316,
+        "size": 32,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 100,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 100,
+          "requested": 100,
+          "rtt_avg_us": 10004,
+          "rtt_max_us": 18779,
+          "rtt_min_us": 9316,
+          "size": 32,
+          "timeouts": 0
+        },
+        "first_packet_id": 1,
+        "last_packet_id": 100,
+        "packet_events": 100,
+        "rtt_us": {
+          "max": 18779,
+          "mean": 10004.75,
+          "min": 9316,
+          "p50": 9469,
+          "p95": 12417,
+          "p99": 16923
+        }
+      },
+      "started_at": "2026-09-27T14:46:18.994+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 3.536313250020612,
+      "finished_at": "2026-09-27T14:46:25.936+00:00",
+      "name": "ping_100_size_64",
+      "observed_ping_done": {
+        "attempted": 100,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 100,
+        "requested": 100,
+        "rtt_avg_us": 11071,
+        "rtt_max_us": 19606,
+        "rtt_min_us": 9967,
+        "size": 64,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 100,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 100,
+          "requested": 100,
+          "rtt_avg_us": 11071,
+          "rtt_max_us": 19606,
+          "rtt_min_us": 9967,
+          "size": 64,
+          "timeouts": 0
+        },
+        "first_packet_id": 101,
+        "last_packet_id": 200,
+        "packet_events": 100,
+        "rtt_us": {
+          "max": 19606,
+          "mean": 11071.34,
+          "min": 9967,
+          "p50": 10265,
+          "p95": 14825,
+          "p99": 18814
+        }
+      },
+      "started_at": "2026-09-27T14:46:22.400+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 3.662196542019956,
+      "finished_at": "2026-09-27T14:46:29.599+00:00",
+      "name": "ping_100_size_128",
+      "observed_ping_done": {
+        "attempted": 100,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 100,
+        "requested": 100,
+        "rtt_avg_us": 12450,
+        "rtt_max_us": 22695,
+        "rtt_min_us": 11396,
+        "size": 128,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 100,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 100,
+          "requested": 100,
+          "rtt_avg_us": 12450,
+          "rtt_max_us": 22695,
+          "rtt_min_us": 11396,
+          "size": 128,
+          "timeouts": 0
+        },
+        "first_packet_id": 201,
+        "last_packet_id": 300,
+        "packet_events": 100,
+        "rtt_us": {
+          "max": 22695,
+          "mean": 12450.61,
+          "min": 11396,
+          "p50": 11517,
+          "p95": 15815,
+          "p99": 21422
+        }
+      },
+      "started_at": "2026-09-27T14:46:25.937+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 3.9402742919919547,
+      "finished_at": "2026-09-27T14:46:33.541+00:00",
+      "name": "ping_100_size_250",
+      "observed_ping_done": {
+        "attempted": 100,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 100,
+        "requested": 100,
+        "rtt_avg_us": 16287,
+        "rtt_max_us": 29725,
+        "rtt_min_us": 13587,
+        "size": 250,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 100,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 100,
+          "requested": 100,
+          "rtt_avg_us": 16287,
+          "rtt_max_us": 29725,
+          "rtt_min_us": 13587,
+          "size": 250,
+          "timeouts": 0
+        },
+        "first_packet_id": 301,
+        "last_packet_id": 400,
+        "packet_events": 100,
+        "rtt_us": {
+          "max": 29725,
+          "mean": 16287.94,
+          "min": 13587,
+          "p50": 13832,
+          "p95": 24397,
+          "p99": 27482
+        }
+      },
+      "started_at": "2026-09-27T14:46:29.601+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 39.039835708012106,
+      "finished_at": "2026-09-27T14:47:12.583+00:00",
+      "name": "ping_1000_size_250",
+      "observed_ping_done": {
+        "attempted": 1000,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 1000,
+        "requested": 1000,
+        "rtt_avg_us": 16185,
+        "rtt_max_us": 57418,
+        "rtt_min_us": 13529,
+        "size": 250,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 1000,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 1000,
+          "requested": 1000,
+          "rtt_avg_us": 16185,
+          "rtt_max_us": 57418,
+          "rtt_min_us": 13529,
+          "size": 250,
+          "timeouts": 0
+        },
+        "first_packet_id": 401,
+        "last_packet_id": 1400,
+        "packet_events": 1000,
+        "rtt_us": {
+          "max": 57418,
+          "mean": 16185.813,
+          "min": 13529,
+          "p50": 13869,
+          "p95": 24397,
+          "p99": 32469
+        }
+      },
+      "started_at": "2026-09-27T14:46:33.543+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 1.0540790419909172,
+      "finished_at": "2026-09-27T14:47:13.639+00:00",
+      "name": "peer_capacity_and_error_semantics",
+      "result": {
+        "checks": [
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "count_before"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "get_real"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "real_fields"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "exists_real"
+          },
+          {
+            "actual": "ESP_ERR_ESPNOW_EXIST",
+            "expected": "ESP_ERR_ESPNOW_EXIST",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "duplicate_real"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "modify_real"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "delete_real"
+          },
+          {
+            "actual": "ESP_ERR_ESPNOW_NOT_FOUND",
+            "expected": "ESP_ERR_ESPNOW_NOT_FOUND",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "get_missing"
+          },
+          {
+            "actual": "ESP_ERR_ESPNOW_NOT_FOUND",
+            "expected": "ESP_ERR_ESPNOW_NOT_FOUND",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "delete_missing"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "restore_real"
+          },
+          {
+            "actual": "ESP_ERR_ESPNOW_FULL",
+            "expected": "ESP_ERR_ESPNOW_FULL",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "capacity_error"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "capacity_query"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "capacity_count"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "cleanup"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "count_after"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "count_restored"
+          },
+          {
+            "actual": "ESP_OK",
+            "expected": "ESP_OK",
+            "log_tag": "HW1_HOST",
+            "pass": 1,
+            "step": "real_restored"
+          }
+        ],
+        "summary": {
+          "added": 18,
+          "capacity": 20,
+          "failures": 0,
+          "log_tag": "HW1_HOST",
+          "real": "68:ee:8f:50:e9:d0"
+        }
+      },
+      "started_at": "2026-09-27T14:47:12.584+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.7679144580033608,
+      "finished_at": "2026-09-27T14:47:14.409+00:00",
+      "name": "post_peer_test_ping",
+      "observed_ping_done": {
+        "attempted": 20,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 20,
+        "requested": 20,
+        "rtt_avg_us": 16431,
+        "rtt_max_us": 27502,
+        "rtt_min_us": 13701,
+        "size": 250,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 20,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 20,
+          "requested": 20,
+          "rtt_avg_us": 16431,
+          "rtt_max_us": 27502,
+          "rtt_min_us": 13701,
+          "size": 250,
+          "timeouts": 0
+        },
+        "first_packet_id": 1401,
+        "last_packet_id": 1420,
+        "packet_events": 20,
+        "rtt_us": {
+          "max": 27502,
+          "mean": 16431.45,
+          "min": 13701,
+          "p50": 13795,
+          "p95": 24538,
+          "p99": 27502
+        }
+      },
+      "started_at": "2026-09-27T14:47:13.641+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.018006083002546802,
+      "finished_at": "2026-09-27T14:47:14.431+00:00",
+      "name": "s3_silence_enabled",
+      "result": {
+        "enabled": 1,
+        "log_tag": "HW1_PROBE"
+      },
+      "started_at": "2026-09-27T14:47:14.413+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 2.2377754579938482,
+      "finished_at": "2026-09-27T14:47:16.670+00:00",
+      "name": "silent_peer_timeouts",
+      "observed_ping_done": {
+        "attempted": 10,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 0,
+        "requested": 10,
+        "rtt_avg_us": 0,
+        "rtt_max_us": 0,
+        "rtt_min_us": 0,
+        "size": 64,
+        "timeouts": 10
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": true,
+        "firmware": {
+          "attempted": 10,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 0,
+          "requested": 10,
+          "rtt_avg_us": 0,
+          "rtt_max_us": 0,
+          "rtt_min_us": 0,
+          "size": 64,
+          "timeouts": 10
+        },
+        "first_packet_id": 1421,
+        "last_packet_id": 1430,
+        "packet_events": 10
+      },
+      "started_at": "2026-09-27T14:47:14.432+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.018264457990881056,
+      "finished_at": "2026-09-27T14:47:16.692+00:00",
+      "name": "s3_silence_disabled",
+      "result": {
+        "enabled": 0,
+        "log_tag": "HW1_PROBE"
+      },
+      "started_at": "2026-09-27T14:47:16.673+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.7873467089957558,
+      "finished_at": "2026-09-27T14:47:17.481+00:00",
+      "name": "silence_recovery_ping",
+      "observed_ping_done": {
+        "attempted": 20,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 20,
+        "requested": 20,
+        "rtt_avg_us": 16828,
+        "rtt_max_us": 28101,
+        "rtt_min_us": 13683,
+        "size": 250,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 20,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 20,
+          "requested": 20,
+          "rtt_avg_us": 16828,
+          "rtt_max_us": 28101,
+          "rtt_min_us": 13683,
+          "size": 250,
+          "timeouts": 0
+        },
+        "first_packet_id": 1431,
+        "last_packet_id": 1450,
+        "packet_events": 20,
+        "rtt_us": {
+          "max": 28101,
+          "mean": 16828.6,
+          "min": 13683,
+          "p50": 13803,
+          "p95": 27232,
+          "p99": 28101
+        }
+      },
+      "started_at": "2026-09-27T14:47:16.694+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.009501583001110703,
+      "finished_at": "2026-09-27T14:47:17.494+00:00",
+      "name": "s3_channel_11",
+      "result": {
+        "accepted": 1471,
+        "callback_drops": 0,
+        "channel": 11,
+        "channel_status": "ESP_OK",
+        "discoveries": 8,
+        "echo_rx": 0,
+        "echo_sent": 1440,
+        "invalid": 0,
+        "log_tag": "HW1_PROBE",
+        "peer_errors": 0,
+        "peers": 2,
+        "peers_status": "ESP_OK",
+        "rejected": 0,
+        "requests": 1450,
+        "restarts": 0,
+        "rx": 1458,
+        "silence": 0,
+        "tx_fail": 0,
+        "tx_ok": 1471
+      },
+      "started_at": "2026-09-27T14:47:17.484+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 2.2332038340100553,
+      "finished_at": "2026-09-27T14:47:19.730+00:00",
+      "name": "channel_mismatch_timeouts",
+      "observed_ping_done": {
+        "attempted": 10,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 0,
+        "requested": 10,
+        "rtt_avg_us": 0,
+        "rtt_max_us": 0,
+        "rtt_min_us": 0,
+        "size": 64,
+        "timeouts": 10
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": true,
+        "firmware": {
+          "attempted": 10,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 0,
+          "requested": 10,
+          "rtt_avg_us": 0,
+          "rtt_max_us": 0,
+          "rtt_min_us": 0,
+          "size": 64,
+          "timeouts": 10
+        },
+        "first_packet_id": 1451,
+        "last_packet_id": 1460,
+        "packet_events": 10
+      },
+      "started_at": "2026-09-27T14:47:17.496+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.05930995900416747,
+      "finished_at": "2026-09-27T14:47:19.792+00:00",
+      "name": "p4_channel_11",
+      "result": {
+        "accepted": 1469,
+        "bridge": {
+          "event_drops": 0,
+          "log_tag": "HW1_HOST",
+          "malformed": 0,
+          "request_timeouts": 0,
+          "stale_responses": 0,
+          "transport_errors": 0
+        },
+        "callback_drops": 0,
+        "channel": 11,
+        "channel_status": "ESP_OK",
+        "discoveries": 25,
+        "echoes": 1440,
+        "invalid": 0,
+        "late_echoes": 0,
+        "log_tag": "HW1_HOST",
+        "peer_errors": 0,
+        "peer_known": 1,
+        "peer_test_failures": 0,
+        "peers": 2,
+        "peers_status": "ESP_OK",
+        "ping_active": 0,
+        "rejected": 0,
+        "requests": 0,
+        "restarts": 0,
+        "rx": 1465,
+        "timeouts": 20,
+        "tx_fail": 9,
+        "tx_ok": 1460
+      },
+      "started_at": "2026-09-27T14:47:19.733+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.9155276249803137,
+      "finished_at": "2026-09-27T14:47:20.709+00:00",
+      "name": "channel_11_ping",
+      "observed_ping_done": {
+        "attempted": 20,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 20,
+        "requested": 20,
+        "rtt_avg_us": 22247,
+        "rtt_max_us": 42005,
+        "rtt_min_us": 13716,
+        "size": 250,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 20,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 20,
+          "requested": 20,
+          "rtt_avg_us": 22247,
+          "rtt_max_us": 42005,
+          "rtt_min_us": 13716,
+          "size": 250,
+          "timeouts": 0
+        },
+        "first_packet_id": 1461,
+        "last_packet_id": 1480,
+        "packet_events": 20,
+        "rtt_us": {
+          "max": 42005,
+          "mean": 22247.6,
+          "min": 13716,
+          "p50": 16494,
+          "p95": 35984,
+          "p99": 42005
+        }
+      },
+      "started_at": "2026-09-27T14:47:19.793+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.02091591598582454,
+      "finished_at": "2026-09-27T14:47:20.733+00:00",
+      "name": "restore_s3_channel_6",
+      "result": {
+        "accepted": 1493,
+        "callback_drops": 0,
+        "channel": 6,
+        "channel_status": "ESP_OK",
+        "discoveries": 8,
+        "echo_rx": 0,
+        "echo_sent": 1460,
+        "invalid": 0,
+        "log_tag": "HW1_PROBE",
+        "peer_errors": 0,
+        "peers": 2,
+        "peers_status": "ESP_OK",
+        "rejected": 0,
+        "requests": 1470,
+        "restarts": 0,
+        "rx": 1478,
+        "silence": 0,
+        "tx_fail": 0,
+        "tx_ok": 1493
+      },
+      "started_at": "2026-09-27T14:47:20.712+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.05678099999204278,
+      "finished_at": "2026-09-27T14:47:20.793+00:00",
+      "name": "restore_p4_channel_6",
+      "result": {
+        "accepted": 1489,
+        "bridge": {
+          "event_drops": 0,
+          "log_tag": "HW1_HOST",
+          "malformed": 0,
+          "request_timeouts": 0,
+          "stale_responses": 0,
+          "transport_errors": 0
+        },
+        "callback_drops": 0,
+        "channel": 6,
+        "channel_status": "ESP_OK",
+        "discoveries": 26,
+        "echoes": 1460,
+        "invalid": 0,
+        "late_echoes": 0,
+        "log_tag": "HW1_HOST",
+        "peer_errors": 0,
+        "peer_known": 1,
+        "peer_test_failures": 0,
+        "peers": 2,
+        "peers_status": "ESP_OK",
+        "ping_active": 0,
+        "rejected": 0,
+        "requests": 0,
+        "restarts": 0,
+        "rx": 1486,
+        "timeouts": 20,
+        "tx_fail": 9,
+        "tx_ok": 1480
+      },
+      "started_at": "2026-09-27T14:47:20.736+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.8485322920023464,
+      "finished_at": "2026-09-27T14:47:21.645+00:00",
+      "name": "restored_channel_6_ping",
+      "observed_ping_done": {
+        "attempted": 20,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 20,
+        "requested": 20,
+        "rtt_avg_us": 19569,
+        "rtt_max_us": 45913,
+        "rtt_min_us": 13708,
+        "size": 250,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 20,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 20,
+          "requested": 20,
+          "rtt_avg_us": 19569,
+          "rtt_max_us": 45913,
+          "rtt_min_us": 13708,
+          "size": 250,
+          "timeouts": 0
+        },
+        "first_packet_id": 1481,
+        "last_packet_id": 1500,
+        "packet_events": 20,
+        "rtt_us": {
+          "max": 45913,
+          "mean": 19569.35,
+          "min": 13708,
+          "p50": 16543,
+          "p95": 30589,
+          "p99": 45913
+        }
+      },
+      "started_at": "2026-09-27T14:47:20.797+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.12432583401096053,
+      "finished_at": "2026-09-27T14:47:21.773+00:00",
+      "name": "restart_s3_radio",
+      "result": {
+        "after": {
+          "accepted": 1513,
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 8,
+          "echo_rx": 0,
+          "echo_sent": 1480,
+          "invalid": 0,
+          "log_tag": "HW1_PROBE",
+          "peer_errors": 0,
+          "peers": 1,
+          "peers_status": "ESP_OK",
+          "rejected": 0,
+          "requests": 1490,
+          "restarts": 1,
+          "rx": 1498,
+          "silence": 0,
+          "tx_fail": 0,
+          "tx_ok": 1513
+        },
+        "before": {
+          "accepted": 1513,
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 8,
+          "echo_rx": 0,
+          "echo_sent": 1480,
+          "invalid": 0,
+          "log_tag": "HW1_PROBE",
+          "peer_errors": 0,
+          "peers": 2,
+          "peers_status": "ESP_OK",
+          "rejected": 0,
+          "requests": 1490,
+          "restarts": 0,
+          "rx": 1498,
+          "silence": 0,
+          "tx_fail": 0,
+          "tx_ok": 1513
+        },
+        "discovery": {
+          "accepted": 1510,
+          "bridge": {
+            "event_drops": 0,
+            "log_tag": "HW1_HOST",
+            "malformed": 0,
+            "request_timeouts": 0,
+            "stale_responses": 0,
+            "transport_errors": 0
+          },
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 26,
+          "echoes": 1480,
+          "invalid": 0,
+          "late_echoes": 0,
+          "log_tag": "HW1_HOST",
+          "peer_errors": 0,
+          "peer_known": 1,
+          "peer_test_failures": 0,
+          "peers": 2,
+          "peers_status": "ESP_OK",
+          "ping_active": 0,
+          "rejected": 0,
+          "requests": 0,
+          "restarts": 0,
+          "rx": 1506,
+          "timeouts": 20,
+          "tx_fail": 9,
+          "tx_ok": 1501
+        },
+        "ready": {
+          "channel": 6,
+          "espnow_version": 2,
+          "log_tag": "HW1_PROBE",
+          "mac": "68:ee:8f:50:e9:d0",
+          "mesh_fingerprint": "481c",
+          "role": "native_s3",
+          "silence": 0,
+          "wire_version": 4
+        }
+      },
+      "started_at": "2026-09-27T14:47:21.649+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.7794392080104444,
+      "finished_at": "2026-09-27T14:47:22.556+00:00",
+      "name": "s3_restart_recovery_ping",
+      "observed_ping_done": {
+        "attempted": 20,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 20,
+        "requested": 20,
+        "rtt_avg_us": 17070,
+        "rtt_max_us": 24573,
+        "rtt_min_us": 13666,
+        "size": 250,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 20,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 20,
+          "requested": 20,
+          "rtt_avg_us": 17070,
+          "rtt_max_us": 24573,
+          "rtt_min_us": 13666,
+          "size": 250,
+          "timeouts": 0
+        },
+        "first_packet_id": 1501,
+        "last_packet_id": 1520,
+        "packet_events": 20,
+        "rtt_us": {
+          "max": 24573,
+          "mean": 17070.5,
+          "min": 13666,
+          "p50": 14989,
+          "p95": 23731,
+          "p99": 24573
+        }
+      },
+      "started_at": "2026-09-27T14:47:21.776+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 4.355197374999989,
+      "finished_at": "2026-09-27T14:47:26.912+00:00",
+      "name": "restart_p4_radio_1",
+      "result": {
+        "after": {
+          "accepted": 1531,
+          "bridge": {
+            "event_drops": 0,
+            "log_tag": "HW1_HOST",
+            "malformed": 0,
+            "request_timeouts": 0,
+            "stale_responses": 0,
+            "transport_errors": 0
+          },
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 26,
+          "echoes": 1500,
+          "invalid": 0,
+          "late_echoes": 0,
+          "log_tag": "HW1_HOST",
+          "peer_errors": 0,
+          "peer_known": 0,
+          "peer_test_failures": 0,
+          "peers": 1,
+          "peers_status": "ESP_OK",
+          "ping_active": 0,
+          "rejected": 0,
+          "requests": 0,
+          "restarts": 1,
+          "rx": 1526,
+          "timeouts": 20,
+          "tx_fail": 9,
+          "tx_ok": 1521
+        },
+        "before": {
+          "accepted": 1530,
+          "bridge": {
+            "event_drops": 0,
+            "log_tag": "HW1_HOST",
+            "malformed": 0,
+            "request_timeouts": 0,
+            "stale_responses": 0,
+            "transport_errors": 0
+          },
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 26,
+          "echoes": 1500,
+          "invalid": 0,
+          "late_echoes": 0,
+          "log_tag": "HW1_HOST",
+          "peer_errors": 0,
+          "peer_known": 1,
+          "peer_test_failures": 0,
+          "peers": 2,
+          "peers_status": "ESP_OK",
+          "ping_active": 0,
+          "rejected": 0,
+          "requests": 0,
+          "restarts": 0,
+          "rx": 1526,
+          "timeouts": 20,
+          "tx_fail": 9,
+          "tx_ok": 1521
+        },
+        "discovery": {
+          "accepted": 1531,
+          "bridge": {
+            "event_drops": 0,
+            "log_tag": "HW1_HOST",
+            "malformed": 0,
+            "request_timeouts": 0,
+            "stale_responses": 0,
+            "transport_errors": 0
+          },
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 27,
+          "echoes": 1500,
+          "invalid": 0,
+          "late_echoes": 0,
+          "log_tag": "HW1_HOST",
+          "peer_errors": 0,
+          "peer_known": 1,
+          "peer_test_failures": 0,
+          "peers": 2,
+          "peers_status": "ESP_OK",
+          "ping_active": 0,
+          "rejected": 0,
+          "requests": 0,
+          "restarts": 1,
+          "rx": 1527,
+          "timeouts": 20,
+          "tx_fail": 9,
+          "tx_ok": 1522
+        },
+        "ready": {
+          "channel": 6,
+          "espnow_version": 2,
+          "log_tag": "HW1_HOST",
+          "mac": "fc:01:2c:e0:b9:a8",
+          "mesh_fingerprint": "481c",
+          "peers": 1,
+          "role": "hosted_p4",
+          "wire_version": 4
+        }
+      },
+      "started_at": "2026-09-27T14:47:22.557+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.8433700829918962,
+      "finished_at": "2026-09-27T14:47:27.757+00:00",
+      "name": "p4_restart_1_recovery_ping",
+      "observed_ping_done": {
+        "attempted": 20,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 20,
+        "requested": 20,
+        "rtt_avg_us": 17890,
+        "rtt_max_us": 42128,
+        "rtt_min_us": 13502,
+        "size": 250,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 20,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 20,
+          "requested": 20,
+          "rtt_avg_us": 17890,
+          "rtt_max_us": 42128,
+          "rtt_min_us": 13502,
+          "size": 250,
+          "timeouts": 0
+        },
+        "first_packet_id": 1521,
+        "last_packet_id": 1540,
+        "packet_events": 20,
+        "rtt_us": {
+          "max": 42128,
+          "mean": 17890.05,
+          "min": 13502,
+          "p50": 13609,
+          "p95": 40394,
+          "p99": 42128
+        }
+      },
+      "started_at": "2026-09-27T14:47:26.913+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 2.7740706669865176,
+      "finished_at": "2026-09-27T14:47:30.536+00:00",
+      "name": "restart_p4_radio_2",
+      "result": {
+        "after": {
+          "accepted": 1553,
+          "bridge": {
+            "event_drops": 0,
+            "log_tag": "HW1_HOST",
+            "malformed": 0,
+            "request_timeouts": 0,
+            "stale_responses": 0,
+            "transport_errors": 0
+          },
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 28,
+          "echoes": 1520,
+          "invalid": 0,
+          "late_echoes": 0,
+          "log_tag": "HW1_HOST",
+          "peer_errors": 0,
+          "peer_known": 1,
+          "peer_test_failures": 0,
+          "peers": 2,
+          "peers_status": "ESP_OK",
+          "ping_active": 0,
+          "rejected": 0,
+          "requests": 0,
+          "restarts": 2,
+          "rx": 1548,
+          "timeouts": 20,
+          "tx_fail": 9,
+          "tx_ok": 1543
+        },
+        "before": {
+          "accepted": 1552,
+          "bridge": {
+            "event_drops": 0,
+            "log_tag": "HW1_HOST",
+            "malformed": 0,
+            "request_timeouts": 0,
+            "stale_responses": 0,
+            "transport_errors": 0
+          },
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 27,
+          "echoes": 1520,
+          "invalid": 0,
+          "late_echoes": 0,
+          "log_tag": "HW1_HOST",
+          "peer_errors": 0,
+          "peer_known": 1,
+          "peer_test_failures": 0,
+          "peers": 2,
+          "peers_status": "ESP_OK",
+          "ping_active": 0,
+          "rejected": 0,
+          "requests": 0,
+          "restarts": 1,
+          "rx": 1547,
+          "timeouts": 20,
+          "tx_fail": 9,
+          "tx_ok": 1543
+        },
+        "discovery": {
+          "accepted": 1553,
+          "bridge": {
+            "event_drops": 0,
+            "log_tag": "HW1_HOST",
+            "malformed": 0,
+            "request_timeouts": 0,
+            "stale_responses": 0,
+            "transport_errors": 0
+          },
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 28,
+          "echoes": 1520,
+          "invalid": 0,
+          "late_echoes": 0,
+          "log_tag": "HW1_HOST",
+          "peer_errors": 0,
+          "peer_known": 1,
+          "peer_test_failures": 0,
+          "peers": 2,
+          "peers_status": "ESP_OK",
+          "ping_active": 0,
+          "rejected": 0,
+          "requests": 0,
+          "restarts": 2,
+          "rx": 1548,
+          "timeouts": 20,
+          "tx_fail": 9,
+          "tx_ok": 1543
+        },
+        "ready": {
+          "channel": 6,
+          "espnow_version": 2,
+          "log_tag": "HW1_HOST",
+          "mac": "fc:01:2c:e0:b9:a8",
+          "mesh_fingerprint": "481c",
+          "peers": 1,
+          "role": "hosted_p4",
+          "wire_version": 4
+        }
+      },
+      "started_at": "2026-09-27T14:47:27.762+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.8324196670146193,
+      "finished_at": "2026-09-27T14:47:31.374+00:00",
+      "name": "p4_restart_2_recovery_ping",
+      "observed_ping_done": {
+        "attempted": 20,
+        "log_tag": "HW1_HOST",
+        "rejected": 0,
+        "replies": 20,
+        "requested": 20,
+        "rtt_avg_us": 16437,
+        "rtt_max_us": 33453,
+        "rtt_min_us": 13441,
+        "size": 250,
+        "timeouts": 0
+      },
+      "result": {
+        "destination": "68:ee:8f:50:e9:d0",
+        "expected_timeout": false,
+        "firmware": {
+          "attempted": 20,
+          "log_tag": "HW1_HOST",
+          "rejected": 0,
+          "replies": 20,
+          "requested": 20,
+          "rtt_avg_us": 16437,
+          "rtt_max_us": 33453,
+          "rtt_min_us": 13441,
+          "size": 250,
+          "timeouts": 0
+        },
+        "first_packet_id": 1541,
+        "last_packet_id": 1560,
+        "packet_events": 20,
+        "rtt_us": {
+          "max": 33453,
+          "mean": 16437.1,
+          "min": 13441,
+          "p50": 13570,
+          "p95": 22725,
+          "p99": 33453
+        }
+      },
+      "started_at": "2026-09-27T14:47:30.541+00:00",
+      "status": "passed"
+    },
+    {
+      "duration_seconds": 0.0528648330073338,
+      "finished_at": "2026-09-27T14:47:31.432+00:00",
+      "name": "final_stats",
+      "result": {
+        "p4": {
+          "accepted": 1573,
+          "bridge": {
+            "event_drops": 0,
+            "log_tag": "HW1_HOST",
+            "malformed": 0,
+            "request_timeouts": 0,
+            "stale_responses": 0,
+            "transport_errors": 0
+          },
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 28,
+          "echoes": 1540,
+          "invalid": 0,
+          "late_echoes": 0,
+          "log_tag": "HW1_HOST",
+          "peer_errors": 0,
+          "peer_known": 1,
+          "peer_test_failures": 0,
+          "peers": 2,
+          "peers_status": "ESP_OK",
+          "ping_active": 0,
+          "rejected": 0,
+          "requests": 0,
+          "restarts": 2,
+          "rx": 1568,
+          "timeouts": 20,
+          "tx_fail": 9,
+          "tx_ok": 1564
+        },
+        "s3": {
+          "accepted": 1578,
+          "callback_drops": 0,
+          "channel": 6,
+          "channel_status": "ESP_OK",
+          "discoveries": 12,
+          "echo_rx": 0,
+          "echo_sent": 1540,
+          "invalid": 0,
+          "log_tag": "HW1_PROBE",
+          "peer_errors": 0,
+          "peers": 2,
+          "peers_status": "ESP_OK",
+          "rejected": 0,
+          "requests": 1550,
+          "restarts": 1,
+          "rx": 1562,
+          "silence": 0,
+          "tx_fail": 0,
+          "tx_ok": 1578
+        }
+      },
+      "started_at": "2026-09-27T14:47:31.379+00:00",
+      "status": "passed"
+    }
+  ],
+  "usb_reset": false
+}
