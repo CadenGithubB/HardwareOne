@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "date": "2026-09-27",
+  "sdk": "ESP-IDF 5.5.5 with pinned official Bluetooth backport",
+  "firmware": {
+    "bytes": 4379504,
+    "sha256": "d51a00ee8395440bf9ecc0d203b8a99e896367fb041c4f6267961c41819bdc61",
+    "appOnlyFlashVerified": true
+  },
+  "serialRun": "20260927T195108Z-d422d5e4",
+  "sourceFilesVerified": 7929,
+  "display": {
+    "driver": "P4-EYE ST7789",
+    "interface": "spi",
+    "panel": [
+      240,
+      240
+    ],
+    "logicalCanvas": [
+      128,
+      64
+    ],
+    "scaledCanvas": [
+      192,
+      96
+    ],
+    "automaticStartupObserved": true,
+    "modeAfterAuthorizedLogin": "Menu"
+  },
+  "inputs": {
+    "automaticStartupObserved": true,
+    "sampleMs": 5,
+    "auxiliaryButtonsEnabled": true,
+    "wheelPhysicalConfirmation": "User confirmed scrolling both directions, tap/select and hold/back on corrected image",
+    "auxiliaryButtonPhysicalConfirmation": "Each X/Y/START bit observed independently during user presses; released state observed",
+    "observedButtonMasks": [
+      0,
+      4,
+      8,
+      16,
+      24
+    ]
+  },
+  "accessories": {
+    "g2LeftConnected": true,
+    "g2RightConnected": true,
+    "r1Connected": true,
+    "mtu": 244,
+    "r1SetupVerified": true
+  },
+  "power": {
+    "cpuMhz": 400,
+    "supportedCpuMhz": [
+      100,
+      200,
+      400
+    ],
+    "performanceIdleFloorMhz": 100
+  },
+  "mesh": {
+    "verifiedMessages": 2,
+    "bytesPerMessage": 401,
+    "fragmentsPerMessage": 3,
+    "allEncrypted": true
+  },
+  "hostChecks": {
+    "displayInputSanitizerSuites": 6,
+    "loginRegressionTests": 3,
+    "oldGuardNegativeControlFailsBothDirections": true
+  },
+  "fatalSignatureMatches": {
+    "p4": 0,
+    "s3": 0
+  },
+  "limits": [
+    "Existing Even-app bootstrap prerequisite remains",
+    "HTTP and BLE Server qualification belongs to the earlier BLE-role image; not repeated here",
+    "Idle 40 MHz, sleep, SD, camera and microphone not tested"
+  ]
+}
