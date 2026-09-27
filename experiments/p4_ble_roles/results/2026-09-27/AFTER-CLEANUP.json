@@ -1,0 +1,652 @@
+{
+  "schema": 1,
+  "phase": "after GATT ownership fix",
+  "serial_run": "20260927T181111Z-7c325f0e",
+  "firmware": {
+    "p4": {
+      "bootloader/bootloader.bin": {
+        "bytes": 23824,
+        "sha256": "40a68d1ab729c8747d9838b1acd952b98b3c92366e9bf93a0ccc0df4b1c6ba3c"
+      },
+      "partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "d6e3ea6ea3e74e8baf99c8fd5b70b9c96adbdf248ffca778474e70e17b64d7df"
+      },
+      "hardwareone-idf.bin": {
+        "bytes": 4100496,
+        "sha256": "12b95c9af746aaef25eed3b8ca957bb896df48afea5b5bd07537bcdc73767c7e"
+      }
+    },
+    "s3": {
+      "bootloader/bootloader.bin": {
+        "bytes": 22288,
+        "sha256": "5ec4ccf857a5aee7e52ae4b1c0462ab035b2c8e340eef3ad489a65b055a81e24"
+      },
+      "partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "c6ed2513218eaa1d5b591914aea7ce95715500cb49068ed13b891ce5fa7efc71"
+      },
+      "hardwareone-idf.bin": {
+        "bytes": 4736384,
+        "sha256": "0a0a31c4459b0877b8363c4f9b33f06f9acdfd99731f2e610f659fddd882305e"
+      }
+    }
+  },
+  "role_cycles": {
+    "p4": {
+      "measured_cycles": 4,
+      "samples_client_then_server": [
+        {
+          "dram": {
+            "total": 535915,
+            "used": 305112,
+            "free": 230803,
+            "minFree": 225052,
+            "peakUsed": 310863
+          },
+          "psram": {
+            "available": true,
+            "total": 33201152,
+            "used": 297344,
+            "free": 32903808
+          },
+          "heapCaps": {
+            "internalFree": 230803,
+            "internalLargest": 192512,
+            "dmaFree": 195331,
+            "dmaLargest": 192512
+          }
+        },
+        {
+          "dram": {
+            "total": 535915,
+            "used": 307580,
+            "free": 228335,
+            "minFree": 222560,
+            "peakUsed": 313355
+          },
+          "psram": {
+            "available": true,
+            "total": 33201152,
+            "used": 299276,
+            "free": 32901876
+          },
+          "heapCaps": {
+            "internalFree": 228335,
+            "internalLargest": 188416,
+            "dmaFree": 192863,
+            "dmaLargest": 188416
+          }
+        },
+        {
+          "dram": {
+            "total": 535915,
+            "used": 305104,
+            "free": 230811,
+            "minFree": 222232,
+            "peakUsed": 313683
+          },
+          "psram": {
+            "available": true,
+            "total": 33201152,
+            "used": 297344,
+            "free": 32903808
+          },
+          "heapCaps": {
+            "internalFree": 230811,
+            "internalLargest": 192512,
+            "dmaFree": 195339,
+            "dmaLargest": 192512
+          }
+        },
+        {
+          "dram": {
+            "total": 535915,
+            "used": 307560,
+            "free": 228355,
+            "minFree": 222232,
+            "peakUsed": 313683
+          },
+          "psram": {
+            "available": true,
+            "total": 33201152,
+            "used": 299276,
+            "free": 32901876
+          },
+          "heapCaps": {
+            "internalFree": 228355,
+            "internalLargest": 184320,
+            "dmaFree": 192883,
+            "dmaLargest": 184320
+          }
+        },
+        {
+          "dram": {
+            "total": 535915,
+            "used": 305096,
+            "free": 230819,
+            "minFree": 222028,
+            "peakUsed": 313887
+          },
+          "psram": {
+            "available": true,
+            "total": 33201152,
+            "used": 297344,
+            "free": 32903808
+          },
+          "heapCaps": {
+            "internalFree": 230819,
+            "internalLargest": 192512,
+            "dmaFree": 195347,
+            "dmaLargest": 192512
+          }
+        },
+        {
+          "dram": {
+            "total": 535915,
+            "used": 307608,
+            "free": 228307,
+            "minFree": 222028,
+            "peakUsed": 313887
+          },
+          "psram": {
+            "available": true,
+            "total": 33201152,
+            "used": 299276,
+            "free": 32901876
+          },
+          "heapCaps": {
+            "internalFree": 228307,
+            "internalLargest": 192512,
+            "dmaFree": 192835,
+            "dmaLargest": 192512
+          }
+        },
+        {
+          "dram": {
+            "total": 535915,
+            "used": 305568,
+            "free": 230347,
+            "minFree": 222028,
+            "peakUsed": 313887
+          },
+          "psram": {
+            "available": true,
+            "total": 33201152,
+            "used": 297344,
+            "free": 32903808
+          },
+          "heapCaps": {
+            "internalFree": 230759,
+            "internalLargest": 192512,
+            "dmaFree": 195347,
+            "dmaLargest": 192512
+          }
+        },
+        {
+          "dram": {
+            "total": 535915,
+            "used": 307528,
+            "free": 228387,
+            "minFree": 222028,
+            "peakUsed": 313887
+          },
+          "psram": {
+            "available": true,
+            "total": 33201152,
+            "used": 299276,
+            "free": 32901876
+          },
+          "heapCaps": {
+            "internalFree": 228387,
+            "internalLargest": 192512,
+            "dmaFree": 192915,
+            "dmaLargest": 192512
+          }
+        }
+      ],
+      "server_free_dram_bytes": [
+        228335,
+        228355,
+        228307,
+        228387
+      ]
+    },
+    "s3": {
+      "measured_cycles": 4,
+      "samples_client_then_server": [
+        {
+          "dram": {
+            "total": 304683,
+            "used": 213784,
+            "free": 90899,
+            "minFree": 53564,
+            "peakUsed": 251119
+          },
+          "psram": {
+            "available": true,
+            "total": 8014568,
+            "used": 1007288,
+            "free": 7007280
+          },
+          "heapCaps": {
+            "internalFree": 90899,
+            "internalLargest": 31744,
+            "dmaFree": 83167,
+            "dmaLargest": 31744
+          }
+        },
+        {
+          "dram": {
+            "total": 304683,
+            "used": 216424,
+            "free": 88259,
+            "minFree": 50924,
+            "peakUsed": 253759
+          },
+          "psram": {
+            "available": true,
+            "total": 8014568,
+            "used": 1009204,
+            "free": 7005364
+          },
+          "heapCaps": {
+            "internalFree": 88259,
+            "internalLargest": 31744,
+            "dmaFree": 80527,
+            "dmaLargest": 31744
+          }
+        },
+        {
+          "dram": {
+            "total": 304683,
+            "used": 213812,
+            "free": 90871,
+            "minFree": 50812,
+            "peakUsed": 253871
+          },
+          "psram": {
+            "available": true,
+            "total": 8014568,
+            "used": 1007288,
+            "free": 7007280
+          },
+          "heapCaps": {
+            "internalFree": 90871,
+            "internalLargest": 31744,
+            "dmaFree": 83139,
+            "dmaLargest": 31744
+          }
+        },
+        {
+          "dram": {
+            "total": 304683,
+            "used": 216424,
+            "free": 88259,
+            "minFree": 50812,
+            "peakUsed": 253871
+          },
+          "psram": {
+            "available": true,
+            "total": 8014568,
+            "used": 1009204,
+            "free": 7005364
+          },
+          "heapCaps": {
+            "internalFree": 88259,
+            "internalLargest": 31744,
+            "dmaFree": 80527,
+            "dmaLargest": 31744
+          }
+        },
+        {
+          "dram": {
+            "total": 304683,
+            "used": 213812,
+            "free": 90871,
+            "minFree": 50812,
+            "peakUsed": 253871
+          },
+          "psram": {
+            "available": true,
+            "total": 8014568,
+            "used": 1007288,
+            "free": 7007280
+          },
+          "heapCaps": {
+            "internalFree": 90871,
+            "internalLargest": 31744,
+            "dmaFree": 83139,
+            "dmaLargest": 31744
+          }
+        },
+        {
+          "dram": {
+            "total": 304683,
+            "used": 216424,
+            "free": 88259,
+            "minFree": 50812,
+            "peakUsed": 253871
+          },
+          "psram": {
+            "available": true,
+            "total": 8014568,
+            "used": 1009204,
+            "free": 7005364
+          },
+          "heapCaps": {
+            "internalFree": 88259,
+            "internalLargest": 31744,
+            "dmaFree": 80527,
+            "dmaLargest": 31744
+          }
+        },
+        {
+          "dram": {
+            "total": 304683,
+            "used": 213816,
+            "free": 90867,
+            "minFree": 50812,
+            "peakUsed": 253871
+          },
+          "psram": {
+            "available": true,
+            "total": 8014568,
+            "used": 1007288,
+            "free": 7007280
+          },
+          "heapCaps": {
+            "internalFree": 90867,
+            "internalLargest": 31744,
+            "dmaFree": 83135,
+            "dmaLargest": 31744
+          }
+        },
+        {
+          "dram": {
+            "total": 304683,
+            "used": 216440,
+            "free": 88243,
+            "minFree": 50812,
+            "peakUsed": 253871
+          },
+          "psram": {
+            "available": true,
+            "total": 8014568,
+            "used": 1009204,
+            "free": 7005364
+          },
+          "heapCaps": {
+            "internalFree": 88243,
+            "internalLargest": 31744,
+            "dmaFree": 80511,
+            "dmaLargest": 31744
+          }
+        }
+      ],
+      "server_free_dram_bytes": [
+        88259,
+        88259,
+        88259,
+        88243
+      ]
+    }
+  },
+  "ble_runs": [
+    {
+      "run": "20260927T181306.425805Z-18b12eb3",
+      "target": "HW1_P4_BLE",
+      "status": "passed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "passed",
+          "mtu": 517,
+          "secure_channel": "v1",
+          "pre_login_denied": true,
+          "named_admin_login": true,
+          "encrypted_replies": 8,
+          "mesh_messages": 2
+        },
+        {
+          "name": "reconnect",
+          "status": "passed",
+          "mtu": 517,
+          "secure_channel": "v1",
+          "pre_login_denied": true,
+          "named_admin_login": true,
+          "encrypted_replies": 8,
+          "mesh_messages": 2
+        }
+      ]
+    },
+    {
+      "run": "20260927T181353.942599Z-da603519",
+      "target": "HW1_S3_BLE",
+      "status": "passed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "passed",
+          "mtu": 517,
+          "secure_channel": "v1",
+          "pre_login_denied": true,
+          "named_admin_login": true,
+          "encrypted_replies": 8,
+          "mesh_messages": 2
+        },
+        {
+          "name": "reconnect",
+          "status": "passed",
+          "mtu": 517,
+          "secure_channel": "v1",
+          "pre_login_denied": true,
+          "named_admin_login": true,
+          "encrypted_replies": 8,
+          "mesh_messages": 2
+        }
+      ]
+    },
+    {
+      "run": "20260927T181504.973158Z-66b24088",
+      "target": "HW1_P4_BLE",
+      "status": "passed",
+      "checks": [
+        {
+          "name": "initial",
+          "status": "passed",
+          "mtu": 517,
+          "secure_channel": "v1",
+          "pre_login_denied": true,
+          "named_admin_login": true,
+          "encrypted_replies": 8,
+          "mesh_messages": 2
+        },
+        {
+          "name": "reconnect",
+          "status": "passed",
+          "mtu": 517,
+          "secure_channel": "v1",
+          "pre_login_denied": true,
+          "named_admin_login": true,
+          "encrypted_replies": 8,
+          "mesh_messages": 2
+        }
+      ]
+    }
+  ],
+  "http_runs": [
+    {
+      "run": "20260927T181438.768911Z-447dda83",
+      "status": "passed",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/login",
+          "status": 200,
+          "bytes": 22525
+        },
+        {
+          "method": "GET",
+          "path": "/api/system",
+          "status": 401,
+          "bytes": 62
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "status": 303,
+          "bytes": 0
+        },
+        {
+          "method": "GET",
+          "path": "/dashboard",
+          "status": 200,
+          "bytes": 84931
+        },
+        {
+          "method": "GET",
+          "path": "/settings",
+          "status": 200,
+          "bytes": 216013
+        },
+        {
+          "method": "GET",
+          "path": "/bluetooth",
+          "status": 200,
+          "bytes": 84191
+        },
+        {
+          "method": "GET",
+          "path": "/espnow",
+          "status": 200,
+          "bytes": 258115
+        },
+        {
+          "method": "GET",
+          "path": "/cli",
+          "status": 200,
+          "bytes": 95688
+        },
+        {
+          "method": "GET",
+          "path": "/api/system",
+          "status": 200,
+          "bytes": 844
+        },
+        {
+          "method": "GET",
+          "path": "/api/buildconfig",
+          "status": 200,
+          "bytes": 274
+        },
+        {
+          "method": "POST",
+          "path": "/api/cli",
+          "status": 200,
+          "bytes": 70
+        },
+        {
+          "method": "POST",
+          "path": "/api/cli",
+          "status": 200,
+          "bytes": 883
+        },
+        {
+          "method": "POST",
+          "path": "/api/cli",
+          "status": 200,
+          "bytes": 32
+        },
+        {
+          "method": "POST",
+          "path": "/api/cli",
+          "status": 200,
+          "bytes": 148
+        },
+        {
+          "method": "GET",
+          "path": "/api/system",
+          "status": 200,
+          "bytes": 844
+        },
+        {
+          "method": "GET",
+          "path": "/bluetooth",
+          "status": 200,
+          "bytes": 84191
+        },
+        {
+          "method": "GET",
+          "path": "/api/system",
+          "status": 200,
+          "bytes": 844
+        },
+        {
+          "method": "GET",
+          "path": "/logout",
+          "status": 302,
+          "bytes": 10
+        },
+        {
+          "method": "GET",
+          "path": "/api/system",
+          "status": 401,
+          "bytes": 62
+        }
+      ],
+      "total_bytes": 849727,
+      "verified": {
+        "cookieLogin": true,
+        "protectedApi": true,
+        "namedAdminCli": true,
+        "htmlPages": 5,
+        "jsonApis": 2,
+        "commandJson": {
+          "status json": {
+            "completeJson": true,
+            "schema": 1
+          },
+          "blestatus json": {
+            "completeJson": true,
+            "schema": 1
+          },
+          "espnowstatus json": {
+            "completeJson": true,
+            "schema": 1
+          }
+        },
+        "logout": true,
+        "loadCycles": 1,
+        "coexistenceCallbacks": [
+          {
+            "cycle": 0,
+            "completed": true
+          }
+        ]
+      },
+      "mesh_messages": 2
+    }
+  ],
+  "explicit_encrypted_mesh_messages": 16,
+  "accessory_links_tested": false,
+  "android_app_tested": false,
+  "final_state": {
+    "p4": {
+      "server": "advertising",
+      "server_connections": 0,
+      "g2": "off",
+      "ring_connected": false,
+      "ring_connect_pending": false,
+      "accessory_auto_reconnect": false
+    },
+    "s3": {
+      "server": "advertising",
+      "server_connections": 0,
+      "g2": "off",
+      "ring_connected": false,
+      "ring_connect_pending": false,
+      "accessory_auto_reconnect": false
+    }
+  }
+}
