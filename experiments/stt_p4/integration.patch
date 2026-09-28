@@ -1,0 +1,2241 @@
+diff --git a/components/hardwareone/Bluetooth.cpp b/components/hardwareone/Bluetooth.cpp
+index 06d7288..5ba41c6 100644
+--- a/components/hardwareone/Bluetooth.cpp
++++ b/components/hardwareone/Bluetooth.cpp
+@@ -793,6 +793,23 @@ extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t rou
+ bool bleDataDebugEnabled() { return isDebugFlagSet(DEBUG_BLE_DATA); }
+ 
++// Inspect the complete bounded payload before previews/trace fragmentation.
++// Raw notify also carries non-NUL-terminated encrypted frames, so never use
++// strstr/String construction here or read beyond the caller's byte count.
++static bool bleOutputHasPrivateSTT(const char* data, size_t len) {
++  static constexpr char marker[] = "\"sttText\"";
++  constexpr size_t markerLen = sizeof(marker) - 1;
++  if (!data || len < markerLen) return false;
++  for (size_t i = 0; i <= len - markerLen; ++i) {
++    if (memcmp(data + i, marker, markerLen) == 0) return true;
++  }
++  return false;
++}
++
+ static void bleTxTrace(const char* tag, uint16_t connId, const char* data, size_t len) {
+   if (!bleDataDebugEnabled()) return;
++  if (bleOutputHasPrivateSTT(data, len)) {
++    data = "[private STT result]";
++    len = strlen(data);
++  }
+   const uint8_t NOBLE = (uint8_t)(MSG_ROUTE_ALL & ~MSG_ROUTE_BLE);
+   size_t frags = (len + 194) / 195; if (frags == 0) frags = 1;   // 195 = SC_MAX_PAY_FRAME
+@@ -1740,4 +1757,18 @@ uint32_t getBLEConnectionDuration() {
+ // 6 x 15 ms of vTaskDelay per send. It gives up on the first CONGESTED instead,
+ // and its caller counts the drop. Reliable senders keep the default.
++#if ENABLE_OLED_DISPLAY
++static void bleRememberOutput(const char* data, size_t len) {
++  if (!data || !len) return;
++  if (bleOutputHasPrivateSTT(data, len)) {
++    data = "[private STT result]";
++    len = strlen(data);
++  }
++  char tagged[BLE_MSG_MAX_LEN];
++  const size_t previewLen = len < BLE_MSG_MAX_LEN - 4 ? len : BLE_MSG_MAX_LEN - 4;
++  snprintf(tagged, sizeof(tagged), "TX:%.*s", static_cast<int>(previewLen), data);
++  bleAddMessageToHistory(tagged);
++}
++#endif
++
+ static bool bleRawNotifyToSession(uint16_t connId,
+                                   TransportSessionEpoch expectedEpoch,
+@@ -1800,10 +1831,5 @@ static bool bleRawNotifyToSession(uint16_t connId,
+ 
+   #if ENABLE_OLED_DISPLAY
+-  if (sent) {
+-    char tagged[BLE_MSG_MAX_LEN];
+-    snprintf(tagged, sizeof(tagged), "TX:%.*s",
+-             (int)(BLE_MSG_MAX_LEN - 4), data);
+-    bleAddMessageToHistory(tagged);
+-  }
++  if (sent) bleRememberOutput(data, len);
+   #endif
+   return sent;
+@@ -1853,9 +1879,5 @@ bool bleRawNotify(const char* data, size_t len) {
+ 
+   #if ENABLE_OLED_DISPLAY
+-  {
+-    char tagged[BLE_MSG_MAX_LEN];
+-    snprintf(tagged, sizeof(tagged), "TX:%.*s", (int)(BLE_MSG_MAX_LEN - 4), data ? data : "");
+-    bleAddMessageToHistory(tagged);
+-  }
++  bleRememberOutput(data, len);
+   #endif
+   return sent;
+diff --git a/components/hardwareone/CMakeLists.txt b/components/hardwareone/CMakeLists.txt
+index ba5c29e..a20b475 100644
+--- a/components/hardwareone/CMakeLists.txt
++++ b/components/hardwareone/CMakeLists.txt
+@@ -22,4 +22,5 @@ set(HW_CFG_ENABLE_AUTOMATION 0)
+ set(HW_CFG_ENABLE_CAMERA_SENSOR 0)
+ set(HW_CFG_ENABLE_ESP_SR 0)
++set(HW_CFG_ENABLE_LOCAL_STT 0)
+ set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
+ set(HW_CFG_ENABLE_GAMES 0)
+@@ -127,4 +128,9 @@ if(EXISTS "${hw_cfg_file}")
+     endif()
+ 
++    string(REGEX MATCH "#define[ \t]+ENABLE_LOCAL_STT[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
++    if(CMAKE_MATCH_1)
++        set(HW_CFG_ENABLE_LOCAL_STT "${CMAKE_MATCH_1}")
++    endif()
++
+     string(REGEX MATCH "#define[ \t]+ENABLE_AUTOMATION[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+     if(CMAKE_MATCH_1)
+@@ -640,4 +646,14 @@ if(HW_CFG_ENABLE_ESP_SR GREATER 0)
+ endif()
+ 
++# The local backend has no display or UART dependency. Its model/runtime is
++# enabled explicitly by a deployment profile; all other builds keep Pi STT.
++if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
++    list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp)
++    if(IDF_TARGET STREQUAL "esp32p4")
++        list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp)
++        list(APPEND hardwareone_requires espressif__esp-dl esp_rom mbedtls)
++    endif()
++endif()
++
+ # CSI/ISP stays behind the shared camera API; native S3 uses esp32-camera.
+ if(IDF_TARGET STREQUAL "esp32p4" AND HW_CFG_ENABLE_CAMERA_SENSOR GREATER 0)
+@@ -656,4 +672,22 @@ idf_component_register(
+ )
+ 
++# IDF evaluates component requirements in script mode before registration.
++# Source properties are only legal after idf_component_register returns.
++if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
++    set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
++    # ESP-SR also registers a model whitelist. Union QuartzNet's exact ops and
++    # kernel variants into it; otherwise SR's WN10 list strips our Relu/int8 Conv.
++    idf_build_get_property(_stt_build_components BUILD_COMPONENTS)
++    if("espressif__esp-dl" IN_LIST _stt_build_components)
++        idf_component_get_property(_stt_dl_dir espressif__esp-dl COMPONENT_DIR)
++    elseif("esp-dl" IN_LIST _stt_build_components)
++        idf_component_get_property(_stt_dl_dir esp-dl COMPONENT_DIR)
++    else()
++        message(FATAL_ERROR "Local STT requires the pinned ESP-DL component")
++    endif()
++    include("${_stt_dl_dir}/cmake/compile_register.cmake")
++    esp_dl_compile_add_yml("${CMAKE_CURRENT_LIST_DIR}/stt/quartznet.compile_req.yml")
++endif()
++
+ # Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)
+ # This enables SD_CS_PIN and other Sense-specific defines in System_BuildConfig.h
+diff --git a/components/hardwareone/G2_Glasses.cpp b/components/hardwareone/G2_Glasses.cpp
+index ef0cd3e..fd0f947 100644
+--- a/components/hardwareone/G2_Glasses.cpp
++++ b/components/hardwareone/G2_Glasses.cpp
+@@ -30016,4 +30016,6 @@ struct KbdPadState {
+   bool     micRenderedAvailable;
+   bool     micRenderedEpochLive;
++  bool     micRenderedPreparing;
++  bool     micRenderedBufferedLocal;
+   DictationState micRenderedState;
+   CommandSource  micRenderedOwner;
+@@ -30158,10 +30160,13 @@ static void kbdRenderMicShades(uint8_t* shades) {
+     switch (snap.state) {
+       case DictationState::RECORDING:
+-        line1 = "SPEAK NOW";
+-        line2 = "STOP SPEAKING TO END TRANSMISSION";
+-        footer = "AUTO-STOPS AFTER SILENCE";
++        line1 = snap.preparing ? "GET READY" : "SPEAK NOW";
++        line2 = snap.preparing ? "STARTING MICROPHONE"
++                : snap.bufferedLocal ? "TAP MIC TO FINISH"
++                                     : "STOP SPEAKING TO END TRANSMISSION";
++        footer = snap.bufferedLocal ? "LOCAL RECORDING / 20 SEC MAX"
++                                   : "AUTO-STOPS AFTER SILENCE";
+         break;
+       case DictationState::WAITING:
+-        line1 = "TRANSCRIBING";
++        line1 = snap.bufferedLocal ? "LOCAL STT" : "TRANSCRIBING";
+         line2 = "TAP MIC TO CANCEL";
+         footer = "LIST ROW STAYS FOCUSED";
+@@ -30621,4 +30626,6 @@ static bool kbdPadMicStatusChanged(bool remember) {
+       gKbdPad.micRenderedAvailable != available ||
+       gKbdPad.micRenderedEpochLive != epochLive ||
++      gKbdPad.micRenderedPreparing != snap.preparing ||
++      gKbdPad.micRenderedBufferedLocal != snap.bufferedLocal ||
+       gKbdPad.micRenderedState != snap.state ||
+       gKbdPad.micRenderedOwner != snap.ownerSource ||
+@@ -30629,4 +30636,6 @@ static bool kbdPadMicStatusChanged(bool remember) {
+     gKbdPad.micRenderedAvailable = available;
+     gKbdPad.micRenderedEpochLive = epochLive;
++    gKbdPad.micRenderedPreparing = snap.preparing;
++    gKbdPad.micRenderedBufferedLocal = snap.bufferedLocal;
+     gKbdPad.micRenderedState = snap.state;
+     gKbdPad.micRenderedOwner = snap.ownerSource;
+diff --git a/components/hardwareone/HardwareOne.cpp b/components/hardwareone/HardwareOne.cpp
+index efaa1ad..ae033a6 100644
+--- a/components/hardwareone/HardwareOne.cpp
++++ b/components/hardwareone/HardwareOne.cpp
+@@ -842,5 +842,8 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
+   // command handlers can return up to CMD_RESULT_MAX while DebugMessage::text
+   // remains a deliberately small line-sized envelope.
+-  broadcastCommandResultQueued(prefix, s, route);
++  // STT transcripts belong only to their initiating session. Direct serial,
++  // HTTP and targeted BLE delivery retain the original; shared mirrors do not.
++  const bool privateSTT = s.indexOf("\"sttText\"") >= 0;
++  broadcastCommandResultQueued(prefix, privateSTT ? safeOutputForTrace : s, route);
+   // (No web-mirror backfill here: the drain appends WEB-routed messages to
+   // the mirror unconditionally, so a backfill would double-append.)
+diff --git a/components/hardwareone/OLED_Utils.cpp b/components/hardwareone/OLED_Utils.cpp
+index cedcf05..f00886f 100644
+--- a/components/hardwareone/OLED_Utils.cpp
++++ b/components/hardwareone/OLED_Utils.cpp
+@@ -1777,4 +1777,9 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
+     switch (snap.state) {
+       case DictationState::RECORDING: {
++        if (snap.preparing) {
++          display->setCursor(0, micY);
++          display->print("Starting mic...");
++          break;
++        }
+         // Filled dot + elapsed seconds reads as "live" at a glance.
+         display->fillCircle(5, micY + 3, 3, DISPLAY_COLOR_WHITE);
+@@ -1795,5 +1800,5 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
+       case DictationState::WAITING:
+         display->setCursor(0, micY);
+-        display->print("Transcribing");
++        display->print(snap.bufferedLocal ? "Local STT" : "Transcribing");
+         for (uint32_t i = 0; i < ((millis() / 400) % 4); ++i) display->print(".");
+         break;
+diff --git a/components/hardwareone/System_BuildConfig.h b/components/hardwareone/System_BuildConfig.h
+index 9bbd75a..67abb1a 100644
+--- a/components/hardwareone/System_BuildConfig.h
++++ b/components/hardwareone/System_BuildConfig.h
+@@ -333,4 +333,10 @@
+ #define ENABLE_ESP_SR           0
+ 
++// Fully local buffered dictation backend; independent of displays and UART.
++// The deployment profile must provide its model/runtime before enabling it.
++#ifndef ENABLE_LOCAL_STT
++#define ENABLE_LOCAL_STT        0
++#endif
++
+ // Edge Impulse: ML inference engine.
+ #define ENABLE_EDGE_IMPULSE     0
+@@ -1462,11 +1468,8 @@
+ // then.
+ //
+-// The CM5 host link that actually performs the transcription is deliberately a
+-// RUNTIME condition rather than a build one: nothing on this device turns
+-// speech into arbitrary text (ESP-SR is a fixed command grammar), so the mode
+-// is useless without an authenticated host — but that host comes and goes while
+-// the firmware runs. uartLinkIsRunning() stubs to false on boards with no
+-// UART_LINK_* pins, so dictationAvailable() refuses there too and the keyboard
+-// skips the mode. Source-agnostic: PDM or G2, whichever the mic layer resolves.
++// ENABLE_LOCAL_STT selects local buffered transcription without a UART host.
++// Otherwise the authenticated CM5 adapter remains the runtime requirement.
++// Provider choice is latched per exchange; local failures never silently send
++// audio to a remote host. The capture source stays shared (PDM or G2).
+ // Dictation needs a mic and a KEYBOARD to dictate into — not specifically a
+ // panel. The module is display-agnostic by design (4 of its 1221 lines mention
+diff --git a/components/hardwareone/System_Dictation.cpp b/components/hardwareone/System_Dictation.cpp
+index 44c3acc..cbda315 100644
+--- a/components/hardwareone/System_Dictation.cpp
++++ b/components/hardwareone/System_Dictation.cpp
+@@ -13,4 +13,6 @@
+ #include "System_DictationPolicy.h"
+ #include "System_Microphone.h"
++#include "System_ESPSR.h"
++#include "System_STT.h"
+ #include "System_TaskUtils.h"
+ #include "System_UartLink.h"
+@@ -27,5 +29,5 @@ static constexpr uint32_t kDictationVadSilenceMs = 1200;
+ // framing, filesystem deletion, and source shutdown. Display and recorder tasks
+ // only publish fixed-size work under gDictMux and notify it.
+-static constexpr uint32_t kDictationWorkerStackBytes = 3072;
++static constexpr uint32_t kDictationWorkerStackBytes = ENABLE_LOCAL_STT ? 4096 : 3072;
+ static constexpr uint32_t kDictationWorkerRetryMs = 50;
+ 
+@@ -530,8 +532,223 @@ static bool dictationProcessCleanup() {
+ }
+ 
++#if ENABLE_LOCAL_STT
++// A local exchange never enters the UART/WAV path. This slot survives UI
++// cancellation until a late begin/worker has acknowledged the exact token.
++struct LocalDictation {
++  uint64_t exchange = 0;
++  STTOwner actor;
++  STTToken token = 0;
++  bool beginPending = false;
++  bool beginInFlight = false;
++  bool stopRequested = false;
++  bool cancelled = false;
++};
++static LocalDictation gLocalDict;
++static bool gLocalReadyPending = false;
++static bool gLocalReadyKnown = false;
++static bool gLocalReady = false;
++static uint32_t gLocalReadyCheckedMs = 0;
++static bool dictationEnsureWorker();
++
++static void dictationRefreshLocalReady() {
++  bool due;
++  portENTER_CRITICAL(&gDictMux);
++  due = gLocalReadyPending;
++  gLocalReadyPending = false;
++  portEXIT_CRITICAL(&gDictMux);
++  if (!due) return;
++  char error[96] = {};
++  const bool ready = sttLocalAvailable(error, sizeof(error));
++  portENTER_CRITICAL(&gDictMux);
++  gLocalReady = ready;
++  gLocalReadyKnown = true;
++  gLocalReadyCheckedMs = millis();
++  portEXIT_CRITICAL(&gDictMux);
++}
++
++static bool dictationLocalAvailable(const char** whyNot) {
++  if (!dictationEnsureWorker()) {
++    if (whyNot) *whyNot = "local worker unavailable";
++    return false;
++  }
++  bool known, ready;
++  portENTER_CRITICAL(&gDictMux);
++  known = gLocalReadyKnown;
++  ready = gLocalReady;
++  if (!known || millis() - gLocalReadyCheckedMs >= 5000) gLocalReadyPending = true;
++  portEXIT_CRITICAL(&gDictMux);
++  dictationWakeWorker();
++  const char* why = nullptr;
++#if ENABLE_ESP_SR
++  if (isESPSRRunning() || audioCaptureOwnedBy("sr")) why = "run closesr first";
++#endif
++  if (!why && (gMicRunning || micRecordingBusy() || audioCaptureOwnedBy("mic")))
++    why = "run closemic first";
++  if (!why && audioCaptureBusy() && !audioCaptureOwnedBy("stt")) why = "microphone busy";
++  if (!why && !known) why = "checking local model";
++  if (!why && !ready) why = "local model unavailable";
++  if (whyNot) *whyNot = why;
++  return why == nullptr;
++}
++
++static bool dictationBeginLocal(CommandSource source, TransportSessionEpoch epoch) {
++  const char* why = nullptr;
++  if (!dictationAvailable(&why)) return false;
++  const uint32_t nonce = esp_random();
++  bool admitted = false;
++  portENTER_CRITICAL(&gDictMux);
++  if (!gLocalDict.exchange &&
++      (gDict.state == DictationState::IDLE || gDict.state == DictationState::FAILED) &&
++      !gDict.cleanupOwner && !gDict.micStopPending && !gDict.published.pending &&
++      !gDict.cancelEvent.pending) {
++    if (!gDictBootNonce) gDictBootNonce = nonce ? nonce : 1;
++    if (++gDictCounter == 0) ++gDictCounter;
++    const uint64_t id = (static_cast<uint64_t>(gDictBootNonce) << 32) | gDictCounter;
++    gLocalDict = LocalDictation{};
++    gLocalDict.exchange = id;
++    gLocalDict.actor = STTOwner{source, epoch};
++    gLocalDict.beginPending = true;
++    gDict.owner = id;
++    gDict.displaySource = source;
++    gDict.displayEpoch = epoch;
++    gDict.state = DictationState::RECORDING;
++    gDict.stateEnteredMs = millis();
++    gDict.textPending = false;
++    memset(gDict.text, 0, sizeof(gDict.text));
++    gDict.failure[0] = '\0';
++    gDict.weStartedMic = false;
++    gDict.requestHostEpoch = 0;
++    gDict.requestPushInFlight = gDict.requestWasPushed = false;
++    admitted = true;
++  }
++  portEXIT_CRITICAL(&gDictMux);
++  if (admitted) dictationWakeWorker();
++  return admitted;
++}
++
++static void dictationCancelLocal(CommandSource source, bool force) {
++  portENTER_CRITICAL(&gDictMux);
++  if (force || gDict.displaySource == source) {
++    if (gLocalDict.exchange) gLocalDict.cancelled = true;
++    gDict.owner = 0;
++    gDict.state = DictationState::IDLE;
++    gDict.stateEnteredMs = millis();
++    gDict.displaySource = SOURCE_INTERNAL;
++    gDict.displayEpoch = 0;
++    gDict.textPending = false;
++    memset(gDict.text, 0, sizeof(gDict.text));
++    gDict.failure[0] = '\0';
++  }
++  portEXIT_CRITICAL(&gDictMux);
++  dictationWakeWorker();
++}
++
++static void dictationProcessLocal() {
++  dictationRefreshLocalReady();
++  LocalDictation run;
++  portENTER_CRITICAL(&gDictMux);
++  run = gLocalDict;
++  if (run.beginPending) {
++    gLocalDict.beginPending = false;
++    gLocalDict.beginInFlight = true;
++  }
++  portEXIT_CRITICAL(&gDictMux);
++  if (!run.exchange) return;
++
++  if (run.beginPending) {
++    STTToken token = 0;
++    char error[96] = {};
++    const bool accepted = !run.cancelled &&
++        displaySessionStillLive(run.actor.source, run.actor.epoch) &&
++        sttBegin(run.actor, STT_MAX_CAPTURE_MS, &token, error, sizeof(error));
++    portENTER_CRITICAL(&gDictMux);
++    if (gLocalDict.exchange == run.exchange) {
++      gLocalDict.beginInFlight = false;
++      if (accepted) gLocalDict.token = token;
++      if (!accepted) {
++        if (gDict.owner == run.exchange) {
++          gDict.owner = 0;
++          gDict.state = DictationState::FAILED;
++          gDict.stateEnteredMs = millis();
++          snprintf(gDict.failure, sizeof(gDict.failure), "%s",
++                   error[0] ? error : "session changed");
++        }
++        gLocalDict = LocalDictation{};
++      }
++      run = gLocalDict;
++    }
++    portEXIT_CRITICAL(&gDictMux);
++    if (!accepted) return;
++  }
++  if (!run.token) return;
++
++  // This check uses the original actor even when cancellation has cleared the
++  // UI owner. An expired session self-cancels inside STT; metadata-only join
++  // checking below remains possible without resurrecting its authority.
++  const bool live = displaySessionStillLive(run.actor.source, run.actor.epoch);
++  if (run.cancelled || !live) (void)sttCancel(run.actor, run.token);
++  else if (run.stopRequested) (void)sttRequestFinish(run.actor, run.token);
++  const bool active = sttRunActive(run.token);
++  STTSnapshot snap;
++  const bool hasSnapshot = live && sttSnapshot(run.actor, run.token, &snap);
++  if (active) {
++    portENTER_CRITICAL(&gDictMux);
++    if (gDict.owner == run.exchange && !gLocalDict.cancelled && hasSnapshot) {
++      const DictationState state = (snap.state == STTState::Preparing ||
++                                   snap.state == STTState::Recording)
++                                      ? DictationState::RECORDING : DictationState::WAITING;
++      if (gDict.state != state) {
++        gDict.state = state;
++        gDict.stateEnteredMs = millis();
++      }
++    }
++    portEXIT_CRITICAL(&gDictMux);
++    return;
++  }
++
++  char text[STT_MAX_TEXT + 1] = {};
++  const bool ready = !run.cancelled && hasSnapshot && snap.state == STTState::Done &&
++      sttResult(run.actor, run.token, text, sizeof(text));
++  const size_t len = strlen(text);
++  const bool printable = ready && dictationPrintableAscii(text, len, false);
++  const bool stillLive = displaySessionStillLive(run.actor.source, run.actor.epoch);
++  portENTER_CRITICAL(&gDictMux);
++  if (gLocalDict.exchange == run.exchange && gDict.owner == run.exchange &&
++      !gLocalDict.cancelled && gDict.displaySource == run.actor.source &&
++      gDict.displayEpoch == run.actor.epoch) {
++    gDict.owner = 0;
++    gDict.stateEnteredMs = millis();
++    if (printable && stillLive) {
++      // Keep the keyboard's established 256-byte contract. The broker's CLI
++      // uses its separate 512-byte limit; field maxLength wins at append time.
++      snprintf(gDict.text, sizeof(gDict.text), "%.*s", DICTATION_MAX_TEXT, text);
++      gDict.textPending = true;
++      gDict.state = DictationState::WAITING;
++    } else {
++      gDict.state = DictationState::FAILED;
++      snprintf(gDict.failure, sizeof(gDict.failure), "%s",
++               !stillLive ? "session changed"
++               : (hasSnapshot && snap.error[0]) ? snap.error
++               : ready ? "no printable speech recognized" : "local transcription failed");
++    }
++  }
++  portEXIT_CRITICAL(&gDictMux);
++  // Drop the broker's retained copy only after the terminal join and copy.
++  (void)sttCancel(run.actor, run.token);
++  memset(text, 0, sizeof(text));
++  portENTER_CRITICAL(&gDictMux);
++  if (gLocalDict.exchange == run.exchange) gLocalDict = LocalDictation{};
++  portEXIT_CRITICAL(&gDictMux);
++}
++#endif // ENABLE_LOCAL_STT
++
+ static bool dictationWorkerHasWork() {
+   bool work = false;
+   portENTER_CRITICAL(&gDictMux);
+-  work = gDict.published.pending || gDict.cancelEvent.pending ||
++  work =
++#if ENABLE_LOCAL_STT
++         gLocalReadyPending || gLocalDict.exchange != 0 ||
++#endif
++         gDict.published.pending || gDict.cancelEvent.pending ||
+          gDict.cleanupOwner != 0 ||
+          (gDict.micStopPending && !gDict.owner);
+@@ -544,4 +761,7 @@ static void dictationWorkerBody(void*) {
+     (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+     while (dictationWorkerHasWork()) {
++#if ENABLE_LOCAL_STT
++      dictationProcessLocal();
++#endif
+       (void)dictationProcessPublished();
+       dictationProcessCancelEvent();
+@@ -593,4 +813,9 @@ bool dictationAvailable(const char** whyNot) {
+     return false;
+   }
++#if ENABLE_LOCAL_STT
++  // An enabled local provider never silently exports microphone audio to a
++  // host, even if its model is missing or its inference fails.
++  return dictationLocalAvailable(whyNot);
++#endif
+   if (!uartLinkIsRunning()) {
+     if (whyNot) *whyNot = "no host link";
+@@ -612,4 +837,8 @@ bool dictationBeginFor(CommandSource displaySource,
+   if (!displaySessionStillLive(displaySource, displayEpoch)) return false;
+ 
++#if ENABLE_LOCAL_STT
++  return dictationBeginLocal(displaySource, displayEpoch);
++#endif
++
+   if (!dictationEnsureWorker()) return false;
+ 
+@@ -770,4 +999,12 @@ bool dictationBegin(TransportSessionEpoch displayEpoch) {
+ 
+ void dictationRequestStopFor(CommandSource displaySource) {
++#if ENABLE_LOCAL_STT
++  portENTER_CRITICAL(&gDictMux);
++  if (gLocalDict.exchange && gLocalDict.actor.source == displaySource &&
++      gDict.owner == gLocalDict.exchange) gLocalDict.stopRequested = true;
++  portEXIT_CRITICAL(&gDictMux);
++  dictationWakeWorker();
++  return;
++#endif
+   uint64_t owner = 0;
+   portENTER_CRITICAL(&gDictMux);
+@@ -786,4 +1023,8 @@ void dictationRequestStop() {
+ 
+ static void dictationCancelImpl(CommandSource displaySource, bool force) {
++#if ENABLE_LOCAL_STT
++  dictationCancelLocal(displaySource, force);
++  return;
++#endif
+   uint64_t owner = 0;
+   bool mine = false;
+@@ -860,8 +1101,30 @@ DictationSnapshot dictationSnapshotNow() {
+   out.sourceName = sourceLabel(audioGetSource());
+   out.level = (out.state == DictationState::RECORDING) ? getAudioLevel() : 0;
++#if ENABLE_LOCAL_STT
++  out.bufferedLocal = true;
++  LocalDictation local;
++  portENTER_CRITICAL(&gDictMux);
++  local = gLocalDict;
++  portEXIT_CRITICAL(&gDictMux);
++  STTSnapshot snap;
++  if (local.token && sttSnapshot(local.actor, local.token, &snap)) {
++    out.sourceName = sourceLabel(static_cast<AudioSource>(snap.audioSource));
++    out.level = snap.level;
++    out.preparing = snap.state == STTState::Preparing;
++  } else {
++    out.level = 0;
++    out.preparing = local.beginPending || local.beginInFlight;
++  }
++#endif
+   return out;
+ }
+ 
+ void dictationTick() {
++#if ENABLE_LOCAL_STT
++  // The local worker and broker supervise the capture/engine. Host heartbeat,
++  // WAV publication and UART response deadlines do not apply to this provider.
++  if (dictationWorkerHasWork()) dictationWakeWorker();
++  return;
++#endif
+   DictationState state;
+   uint32_t elapsed;
+@@ -922,10 +1185,32 @@ bool dictationTakeTextFor(CommandSource displaySource,
+                           char* out, size_t outSize) {
+   if (!out || outSize == 0) return false;
++  out[0] = '\0';
++  TransportSessionEpoch epoch = 0;
++  portENTER_CRITICAL(&gDictMux);
++  if (gDict.displaySource == displaySource && gDict.textPending)
++    epoch = gDict.displayEpoch;
++  portEXIT_CRITICAL(&gDictMux);
++  if (!epoch) return false;
++  if (!displaySessionStillLive(displaySource, epoch)) {
++    // This fence applies to BOTH providers: a pending transcript cannot survive
++    // logout/re-pair and become the replacement user's next field input.
++    portENTER_CRITICAL(&gDictMux);
++    if (gDict.displaySource == displaySource && gDict.displayEpoch == epoch) {
++      memset(gDict.text, 0, sizeof(gDict.text));
++      gDict.textPending = false;
++      gDict.state = DictationState::IDLE;
++      gDict.micStopPending = gDict.weStartedMic;
++    }
++    portEXIT_CRITICAL(&gDictMux);
++    dictationWakeWorker();
++    return false;
++  }
+   bool took = false;
+   portENTER_CRITICAL(&gDictMux);
+-  if (gDict.displaySource == displaySource && gDict.textPending) {
++  if (gDict.displaySource == displaySource && gDict.displayEpoch == epoch &&
++      gDict.textPending) {
+     snprintf(out, outSize, "%s", gDict.text);
+     gDict.textPending = false;
+-    gDict.text[0] = '\0';
++    memset(gDict.text, 0, sizeof(gDict.text));
+     gDict.state = DictationState::IDLE;
+     gDict.stateEnteredMs = millis();
+@@ -940,4 +1225,8 @@ bool dictationTakeTextFor(CommandSource displaySource,
+   portEXIT_CRITICAL(&gDictMux);
+   if (took) dictationWakeWorker();
++  if (!displaySessionStillLive(displaySource, epoch)) {
++    memset(out, 0, outSize);
++    return false;
++  }
+   return took;
+ }
+@@ -1000,5 +1289,6 @@ static const char* dictDeliver(uint64_t id, const char* text, size_t textLen,
+   uint32_t requestHostEpoch = 0;
+   portENTER_CRITICAL(&gDictMux);
+-  if (gDict.state == DictationState::WAITING && gDict.owner == id) {
++  if (gDict.state == DictationState::WAITING && gDict.owner == id &&
++      gDict.requestHostEpoch != 0) {
+     matched = true;
+     displaySource = gDict.displaySource;
+@@ -1166,5 +1456,6 @@ static const char* dictationHandleArgs(const char* argsInput,
+     uint32_t requestHostEpoch = 0;
+     portENTER_CRITICAL(&gDictMux);
+-    matched = (gDict.state == DictationState::WAITING && gDict.owner == id);
++    matched = (gDict.state == DictationState::WAITING && gDict.owner == id &&
++               gDict.requestHostEpoch != 0);
+     if (matched) requestHostEpoch = gDict.requestHostEpoch;
+     portEXIT_CRITICAL(&gDictMux);
+diff --git a/components/hardwareone/System_Dictation.h b/components/hardwareone/System_Dictation.h
+index d67b8ad..856b22f 100644
+--- a/components/hardwareone/System_Dictation.h
++++ b/components/hardwareone/System_Dictation.h
+@@ -1,17 +1,12 @@
+ // System_Dictation.h — speech-to-text as a text INPUT METHOD.
+ //
+-// This is the firmware half of "dictate into a keyboard". It is
+-// deliberately source-agnostic: a dictation capture is an ordinary owned
+-// recording, so whichever source the mic layer has resolved — onboard PDM or
+-// the G2 glasses' LEFT-temple mic over BLE — feeds it with no branch here.
+-// startRecordingInternal() re-resolves the preference and owns every G2-only
+-// concern (capture container, FAST conn params, stream kick), so the only
+-// source-specific thing at this layer is the label shown to the user.
++// An OLED/G2 keyboard input method with one provider latched per exchange.
++// ENABLE_LOCAL_STT builds use the shared local broker with bounded raw-HAL
++// capture and final text. Other builds retain the CM5 adapter and owned VAD
++// WAV capture. Both accept PDM or G2 audio through the same HAL. Local failure
++// never falls back to exporting audio to a host.
+ //
+-// Why the CM5 is mandatory: nothing on this device turns speech into arbitrary
+-// text. ESP-SR is WakeNet + MultiNet — a fixed command grammar that recognizes
+-// phrases from a table and cannot emit an unseen word — and it is compiled out
+-// on this build anyway. Free-text transcription lives on the Linux
+-// co-processor, so a dictation is a round trip:
++// ESP-SR provides fixed commands, not arbitrary dictation. The legacy CM5
++// provider performs free-text transcription on Linux with this round trip:
+ //
+ //   1. wearer arms it on an OLED/G2 keyboard        dictationBegin*()
+@@ -53,5 +48,5 @@ enum class DictationState : uint8_t {
+   IDLE = 0,     // nothing in flight; the mode shows "ready"
+   RECORDING,    // capture running; VAD or the wearer will end it
+-  WAITING,      // WAV closed, request pushed, host is transcribing
++  WAITING,      // provider is transcribing; final text awaits a one-time drain
+   FAILED,       // terminal, with a reason; cleared by the next arm
+ };
+@@ -64,4 +59,6 @@ struct DictationSnapshot {
+   int level;                // 0..100 audio level while RECORDING, else 0
+   char failure[40];
++  bool bufferedLocal = false; // Local capture has a duration cap, not host VAD.
++  bool preparing = false;    // Do not prompt SPEAK NOW before HAL capture.
+ };
+ 
+diff --git a/components/hardwareone/System_STT.cpp b/components/hardwareone/System_STT.cpp
+new file mode 100644
+index 0000000..d339985
+--- /dev/null
++++ b/components/hardwareone/System_STT.cpp
+@@ -0,0 +1,549 @@
++#include "System_STT.h"
++
++#if ENABLE_LOCAL_STT
++#if !ENABLE_MICROPHONE
++#error "ENABLE_LOCAL_STT requires the shared microphone HAL"
++#endif
++
++#include "HAL_Audio.h"
++#include "System_AuthIdentity.h"
++#include "System_Command.h"
++#include "System_ESPSR.h"
++#include "System_MemUtil.h"
++#include "System_Microphone.h"
++#include "System_Settings.h"
++#include "System_TaskUtils.h"
++#include <ArduinoJson.h>
++#include <esp_random.h>
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++
++namespace {
++constexpr uint32_t kWorkerStackBytes = 12288; // IDF task stack sizes are bytes.
++constexpr uint32_t kResultRetentionMs = 300000;
++constexpr size_t kReadSamples = 640; // 40 ms at the model's fixed 16 kHz rate.
++constexpr uint32_t kSourceTimeoutMs = 2000;
++
++struct STTRun {
++  STTOwner owner;
++  STTSnapshot snapshot;
++  uint32_t startedMs = 0;
++  uint32_t completedMs = 0;
++  bool cancelRequested = false;
++  bool finishRequested = false;
++  AudioSource requestedSource = AUDIO_SRC_NONE;
++  char text[STT_MAX_TEXT + 1] = {};
++};
++static portMUX_TYPE gSTTMux = portMUX_INITIALIZER_UNLOCKED;
++static STTRun gSTT;
++static uint32_t gSTTNonce = 0;
++static uint32_t gSTTCounter = 0;
++
++static bool sttOwnerLive(STTOwner owner) {
++  switch (owner.source) {
++    case SOURCE_SERIAL: case SOURCE_WEB: case SOURCE_BLUETOOTH:
++    case SOURCE_LOCAL_DISPLAY: case SOURCE_G2_GLASSES:
++      return owner.epoch && transportSessionEpochIsLive(owner.source, owner.epoch);
++    default: return false;
++  }
++}
++
++static bool sttSameOwner(STTOwner a, STTOwner b) {
++  return a.epoch != 0 && a.source == b.source && a.epoch == b.epoch;
++}
++
++static bool sttMatchesLocked(STTOwner owner, STTToken token) {
++  return token && gSTT.snapshot.token == token && sttSameOwner(owner, gSTT.owner);
++}
++
++static bool sttError(char* error, size_t cap, const char* reason) {
++  if (error && cap) snprintf(error, cap, "%s", reason);
++  return false;
++}
++
++static void sttClearTextLocked() {
++  // Volatile clear keeps a discarded private transcript out of retained RAM.
++  volatile char* p = gSTT.text;
++  for (size_t i = 0; i < sizeof(gSTT.text); ++i) p[i] = 0;
++  gSTT.snapshot.textReady = false;
++}
++
++// Terminal results have bounded retention. Re-check the original session at
++// every broker access; revocation can never transfer a mailbox to a successor.
++static void sttReapTerminal() {
++  STTOwner owner;
++  STTToken token;
++  portENTER_CRITICAL(&gSTTMux);
++  owner = gSTT.owner;
++  token = gSTT.snapshot.token;
++  portEXIT_CRITICAL(&gSTTMux);
++  const bool live = sttOwnerLive(owner);
++  portENTER_CRITICAL(&gSTTMux);
++  if (gSTT.snapshot.token == token && !gSTT.snapshot.workerActive &&
++      (!live || millis() - gSTT.completedMs >= kResultRetentionMs)) {
++    sttClearTextLocked();
++  }
++  portEXIT_CRITICAL(&gSTTMux);
++}
++
++static bool sttCancelled(void* context) {
++  const STTToken token = *static_cast<const STTToken*>(context);
++  STTOwner owner;
++  bool cancelled;
++  portENTER_CRITICAL(&gSTTMux);
++  owner = gSTT.owner;
++  cancelled = token != gSTT.snapshot.token || gSTT.cancelRequested;
++  portEXIT_CRITICAL(&gSTTMux);
++  return cancelled || !sttOwnerLive(owner);
++}
++
++static void sttProgress(void* context, STTLocalPhase phase) {
++  const STTToken token = *static_cast<const STTToken*>(context);
++  portENTER_CRITICAL(&gSTTMux);
++  if (gSTT.snapshot.token == token && gSTT.snapshot.workerActive) {
++    gSTT.snapshot.phase = phase;
++    gSTT.snapshot.workerStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
++  }
++  portEXIT_CRITICAL(&gSTTMux);
++}
++
++static void sttWorker(void*) {
++  STTToken token;
++  uint32_t captureMs;
++  AudioSource requestedSource;
++  portENTER_CRITICAL(&gSTTMux);
++  token = gSTT.snapshot.token;
++  captureMs = gSTT.snapshot.captureLimitMs;
++  requestedSource = gSTT.requestedSource;
++  portEXIT_CRITICAL(&gSTTMux);
++
++  int16_t* pcm = nullptr;
++  size_t samples = 0;
++  const size_t capacity = static_cast<size_t>(captureMs) * STT_SAMPLE_RATE / 1000;
++  char text[STT_MAX_TEXT + 1] = {};
++  char error[96] = {};
++  STTLocalStats stats;
++  bool ok = false;
++  bool claimed = false;
++  bool selected = false;
++  const AudioSource previousSource = audioGetSource();
++  AudioSource source = AUDIO_SRC_NONE;
++
++  // The worker owns every blocking call. No UI/command task waits for a model
++  // or forcibly deletes this task on cancel, so engine pointers remain valid.
++  do {
++    if (sttCancelled(&token)) break;
++    if (audioCaptureBusy() || micRecordingBusy() || gMicRunning) {
++      sttError(error, sizeof(error), "Audio became busy; close SR/mic and retry");
++      break;
++    }
++    pcm = static_cast<int16_t*>(ps_alloc(capacity * sizeof(int16_t),
++                                        AllocPref::RequirePSRAM, "stt.pcm"));
++    if (!pcm) {
++      sttError(error, sizeof(error), "Insufficient PSRAM for bounded capture");
++      break;
++    }
++    // Resolve preference afresh without changing it. Unavailable explicit
++    // sources fail instead of silently recording a different microphone.
++    source = requestedSource;
++    if (source != AUDIO_SRC_NONE && !audioSourceAvailable(source)) {
++      sttError(error, sizeof(error), "Selected microphone is unavailable");
++      break;
++    }
++    if (sttCancelled(&token)) break;
++    selected = audioSetSource(source);
++    if (!selected || !audioCaptureStart("stt", STT_SAMPLE_RATE)) {
++      sttError(error, sizeof(error), "Could not claim microphone; close SR/mic first");
++      break;
++    }
++    claimed = true;
++    source = audioGetSource();
++    // A requested source can disappear between availability and HAL claim.
++    // The generic HAL may then fall back; an explicit STT preference must not
++    // silently record another microphone. Fail before draining any PCM.
++    if (requestedSource != AUDIO_SRC_NONE && source != requestedSource) {
++      sttError(error, sizeof(error), "Selected microphone changed during startup");
++      break;
++    }
++    // G2 discards the preceding owner's tail; PDM already flushes on start.
++    audioTrimBufferedPcm("stt", 0);
++    portENTER_CRITICAL(&gSTTMux);
++    gSTT.snapshot.state = STTState::Recording;
++    gSTT.snapshot.audioSource = static_cast<uint8_t>(source);
++    portEXIT_CRITICAL(&gSTTMux);
++
++    const uint32_t captureStartedMs = millis();
++    uint32_t lastAudioMs = captureStartedMs;
++    while (samples < capacity && !sttCancelled(&token)) {
++      bool finish;
++      portENTER_CRITICAL(&gSTTMux);
++      finish = gSTT.finishRequested;
++      portEXIT_CRITICAL(&gSTTMux);
++      if (finish) break;
++      if (!audioCaptureOwnedBy("stt") || !audioCaptureActive() ||
++          !audioSourceAvailable(source)) {
++        sttError(error, sizeof(error), "Microphone source lost");
++        break;
++      }
++      const size_t requested = std::min(kReadSamples, capacity - samples);
++      const size_t count = audioReadPcm(pcm + samples, requested, 50);
++      if (count > requested) {
++        sttError(error, sizeof(error), "Invalid microphone sample count");
++        break;
++      }
++      if (count) {
++        // Input contract is raw HAL PCM. No recorder pre-emphasis, software
++        // gain or DC state is applied here; the model frontend owns its DSP.
++        double sum = 0;
++        for (size_t i = 0; i < count; ++i) {
++          const double v = pcm[samples + i];
++          sum += v * v;
++        }
++        samples += count;
++        lastAudioMs = millis();
++        const int level = std::min(100, static_cast<int>(
++            std::sqrt(sum / count) * 100.0 / 32768.0));
++        portENTER_CRITICAL(&gSTTMux);
++        gSTT.snapshot.recordedSamples = samples;
++        gSTT.snapshot.level = level;
++        portEXIT_CRITICAL(&gSTTMux);
++      } else {
++        vTaskDelay(pdMS_TO_TICKS(1));
++      }
++      if (millis() - lastAudioMs >= kSourceTimeoutMs ||
++          millis() - captureStartedMs > captureMs + kSourceTimeoutMs) {
++        sttError(error, sizeof(error), "Microphone PCM delivery timed out");
++        break;
++      }
++    }
++    if (error[0] || sttCancelled(&token)) break;
++    if (samples < STT_SAMPLE_RATE / 10) {
++      sttError(error, sizeof(error), "Capture too short (minimum 100 ms)");
++      break;
++    }
++    portENTER_CRITICAL(&gSTTMux);
++    gSTT.snapshot.state = STTState::Transcribing;
++    gSTT.snapshot.level = 0;
++    portEXIT_CRITICAL(&gSTTMux);
++    STTLocalControl control{&token, sttCancelled, sttProgress};
++    ok = sttLocalTranscribe(pcm, samples, text, sizeof(text), control,
++                            stats, error, sizeof(error));
++    if (ok && !memchr(text, '\0', sizeof(text))) {
++      ok = false;
++      sttError(error, sizeof(error), "Backend transcript exceeds output limit");
++    }
++  } while (false);
++
++  portENTER_CRITICAL(&gSTTMux);
++  gSTT.snapshot.state = STTState::Stopping;
++  gSTT.snapshot.level = 0;
++  portEXIT_CRITICAL(&gSTTMux);
++  // Keep admission closed until our exact HAL lease is actually released.
++  // If a backend stop is still unwinding, stay Stopping rather than publishing
++  // a false terminal state or allowing a new run to reuse its owner tag.
++  if (claimed || audioCaptureOwnedBy("stt")) {
++    audioCaptureStop("stt");
++    while (audioCaptureOwnedBy("stt")) vTaskDelay(pdMS_TO_TICKS(10));
++  }
++  if (selected && !audioCaptureBusy()) {
++    audioSetSource(audioSourceAvailable(previousSource) ? previousSource
++                                                       : AUDIO_SRC_NONE);
++  }
++  if (pcm) {
++    // Raw audio is private and not persisted. The buffer is freed only after
++    // synchronous inference and HAL teardown have both finished.
++    volatile int16_t* privatePCM = pcm;
++    for (size_t i = 0; i < capacity; ++i) privatePCM[i] = 0;
++    free(pcm);
++  }
++  const bool cancelled = sttCancelled(&token);
++  const uint32_t stackFree = uxTaskGetStackHighWaterMark(nullptr);
++  portENTER_CRITICAL(&gSTTMux);
++  if (gSTT.snapshot.token == token) {
++    sttClearTextLocked();
++    gSTT.snapshot.stats = stats;
++    gSTT.snapshot.recordedSamples = samples;
++    gSTT.snapshot.workerStackFreeBytes = stackFree;
++    gSTT.snapshot.state = (cancelled || gSTT.cancelRequested) ? STTState::Cancelled
++                              : ok ? STTState::Done : STTState::Failed;
++    if (gSTT.snapshot.state == STTState::Done) {
++      memcpy(gSTT.text, text, sizeof(gSTT.text));
++      gSTT.snapshot.textReady = true;
++    } else if (gSTT.snapshot.state == STTState::Failed) {
++      snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s",
++               error[0] ? error : "Local transcription failed");
++    }
++    gSTT.completedMs = millis();
++    gSTT.snapshot.workerActive = false;
++  }
++  portEXIT_CRITICAL(&gSTTMux);
++  volatile char* privateText = text;
++  for (size_t i = 0; i < sizeof(text); ++i) privateText[i] = 0;
++  vTaskDelete(nullptr);
++}
++} // namespace
++
++bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
++              char* error, size_t errorCap) {
++  sttReapTerminal();
++  if (token) *token = 0;
++  if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
++  if (captureMs < 1000 || captureMs > STT_MAX_CAPTURE_MS)
++    return sttError(error, errorCap, "Capture duration must be 1 to 20 seconds");
++#if ENABLE_ESP_SR
++  if (isESPSRRunning() || audioCaptureOwnedBy("sr"))
++    return sttError(error, errorCap, "Stop command recognition with closesr first");
++#endif
++  if (gMicRunning || micRecordingBusy() || audioCaptureOwnedBy("mic"))
++    return sttError(error, errorCap, "Stop recording and closemic first");
++  if (audioCaptureBusy()) return sttError(error, errorCap, "Microphone is busy");
++  if (!audioAnySourceAvailable()) return sttError(error, errorCap, "No microphone is available");
++  if (!sttLocalAvailable(error, errorCap)) return false;
++
++  STTOwner previousOwner;
++  portENTER_CRITICAL(&gSTTMux);
++  previousOwner = gSTT.owner;
++  portEXIT_CRITICAL(&gSTTMux);
++  const bool previousLive = sttOwnerLive(previousOwner);
++  const uint32_t nonce = esp_random();
++  const AudioSource requestedSource = gSettings.micSource == "pdm" ? AUDIO_SRC_LOCAL_PDM
++      : gSettings.micSource == "g2" ? AUDIO_SRC_G2_LEFT : AUDIO_SRC_NONE;
++  bool admitted = false;
++  portENTER_CRITICAL(&gSTTMux);
++  if (!gSTT.snapshot.workerActive &&
++      (!gSTT.snapshot.textReady || sttSameOwner(owner, gSTT.owner) ||
++       (sttSameOwner(previousOwner, gSTT.owner) && !previousLive) ||
++       millis() - gSTT.completedMs >= kResultRetentionMs)) {
++    sttClearTextLocked();
++    gSTT = STTRun{};
++    if (!gSTTNonce) gSTTNonce = nonce ? nonce : 1;
++    if (++gSTTCounter == 0) ++gSTTCounter;
++    gSTT.owner = owner;
++    gSTT.requestedSource = requestedSource;
++    gSTT.snapshot.token = (static_cast<uint64_t>(gSTTNonce) << 32) | gSTTCounter;
++    gSTT.snapshot.state = STTState::Preparing;
++    gSTT.snapshot.captureLimitMs = captureMs;
++    gSTT.snapshot.workerActive = true;
++    gSTT.startedMs = millis();
++    *token = gSTT.snapshot.token;
++    admitted = true;
++  }
++  portEXIT_CRITICAL(&gSTTMux);
++  if (!admitted) return sttError(error, errorCap, "STT is busy or a result belongs to another session");
++  taskStackRecord("stt", kWorkerStackBytes);
++  // Core 1 avoids putting the frontend/capture worker on the radio/ISR core;
++  // the model backend may use its own qualified multicore operator workers.
++  if (xTaskCreatePinnedToCore(sttWorker, "stt", kWorkerStackBytes, nullptr,
++                              1, nullptr, 1) != pdPASS) {
++    portENTER_CRITICAL(&gSTTMux);
++    gSTT.snapshot.workerActive = false;
++    gSTT.snapshot.state = STTState::Failed;
++    gSTT.completedMs = millis();
++    snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", "Could not create STT worker");
++    portEXIT_CRITICAL(&gSTTMux);
++    return sttError(error, errorCap, "Could not create STT worker");
++  }
++  if (error && errorCap) error[0] = '\0';
++  return true;
++}
++
++bool sttRunActive(STTToken token) {
++  portENTER_CRITICAL(&gSTTMux);
++  const bool active = token && gSTT.snapshot.token == token && gSTT.snapshot.workerActive;
++  portEXIT_CRITICAL(&gSTTMux);
++  return active;
++}
++
++bool sttRequestFinish(STTOwner owner, STTToken token) {
++  if (!sttOwnerLive(owner)) return false;
++  portENTER_CRITICAL(&gSTTMux);
++  const bool accepted = sttMatchesLocked(owner, token) &&
++      (gSTT.snapshot.state == STTState::Preparing || gSTT.snapshot.state == STTState::Recording);
++  if (accepted) gSTT.finishRequested = true;
++  portEXIT_CRITICAL(&gSTTMux);
++  return accepted;
++}
++
++bool sttCancel(STTOwner owner, STTToken token) {
++  if (!sttOwnerLive(owner)) return false;
++  portENTER_CRITICAL(&gSTTMux);
++  const bool accepted = sttMatchesLocked(owner, token);
++  if (accepted) {
++    gSTT.cancelRequested = true;
++    sttClearTextLocked();
++    if (!gSTT.snapshot.workerActive) gSTT.snapshot.state = STTState::Cancelled;
++  }
++  portEXIT_CRITICAL(&gSTTMux);
++  return accepted;
++}
++
++bool sttSnapshot(STTOwner owner, STTToken token, STTSnapshot* out) {
++  sttReapTerminal();
++  if (!out || !sttOwnerLive(owner)) return false;
++  portENTER_CRITICAL(&gSTTMux);
++  const bool matched = sttSameOwner(owner, gSTT.owner) && gSTT.snapshot.token &&
++                       (!token || token == gSTT.snapshot.token);
++  if (matched) {
++    *out = gSTT.snapshot;
++    out->elapsedMs = (gSTT.snapshot.workerActive ? millis() : gSTT.completedMs) - gSTT.startedMs;
++  }
++  portEXIT_CRITICAL(&gSTTMux);
++  return matched && sttOwnerLive(owner);
++}
++
++bool sttResult(STTOwner owner, STTToken token, char* text, size_t textCap) {
++  sttReapTerminal();
++  if (text && textCap) text[0] = '\0';
++  if (!text || textCap == 0 || !sttOwnerLive(owner)) return false;
++  bool ready = false;
++  portENTER_CRITICAL(&gSTTMux);
++  if (sttMatchesLocked(owner, token) && !gSTT.snapshot.workerActive &&
++      millis() - gSTT.completedMs < kResultRetentionMs &&
++      gSTT.snapshot.state == STTState::Done && gSTT.snapshot.textReady &&
++      strlen(gSTT.text) < textCap) {
++    memcpy(text, gSTT.text, strlen(gSTT.text) + 1);
++    ready = true;
++  }
++  portEXIT_CRITICAL(&gSTTMux);
++  if (!sttOwnerLive(owner)) {
++    memset(text, 0, textCap);
++    return false;
++  }
++  return ready;
++}
++
++const char* sttStateName(STTState state) {
++  switch (state) {
++    case STTState::Idle: return "idle";
++    case STTState::Preparing: return "preparing";
++    case STTState::Recording: return "recording";
++    case STTState::Transcribing: return "transcribing";
++    case STTState::Stopping: return "stopping";
++    case STTState::Done: return "done";
++    case STTState::Cancelled: return "cancelled";
++    case STTState::Failed: return "failed";
++  }
++  return "unknown";
++}
++
++// CLI_ADAPTER_BEGIN — host tests compile the broker above with fake HAL/tasks.
++static bool sttParseToken(const String& value, STTToken& token) {
++  token = 0;
++  if (value.length() != 16) return false;
++  for (size_t i = 0; i < value.length(); ++i) {
++    const char c = value[i];
++    const int digit = c >= '0' && c <= '9' ? c - '0'
++                    : c >= 'a' && c <= 'f' ? c - 'a' + 10
++                    : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
++    if (digit < 0) return false;
++    token = (token << 4) | static_cast<unsigned>(digit);
++  }
++  return token != 0;
++}
++
++static const char* sttPhaseName(STTLocalPhase phase) {
++  switch (phase) {
++    case STTLocalPhase::Loading: return "loading";
++    case STTLocalPhase::Frontend: return "frontend";
++    case STTLocalPhase::Inference: return "inference";
++    case STTLocalPhase::Decoding: return "decoding";
++  }
++  return "unknown";
++}
++
++static const char* cmd_stt(const String& argsInput) {
++  RETURN_VALID_IF_VALIDATE_CSTR();
++  static String reply;
++  secureClearString(reply);
++  const AuthContext& ctx = currentAuthContext();
++  STTOwner owner{ctx.transport, captureTransportSessionEpoch(ctx)};
++  if (ctx.user.length() == 0 || ctx.user == "AuthBypass" || !sttOwnerLive(owner))
++    return "Error: STT requires a live authenticated serial, web, BLE, OLED or G2 session";
++  CommandArgs args(argsInput);
++  const String op = args.count() ? args.arg(0) : "status";
++  if (args.unterminatedQuote()) return "Error: malformed STT arguments";
++  if (op == "record") {
++    if (args.count() > 2) return "Error: Usage: stt record [1..20 seconds]";
++    uint32_t seconds = 10;
++    if (args.count() == 2) {
++      seconds = 0;
++      const String& value = args.arg(1);
++      if (!value.length() || value.length() > 2) return "Error: duration must be 1..20 seconds";
++      for (size_t i = 0; i < value.length(); ++i) {
++        if (value[i] < '0' || value[i] > '9') return "Error: duration must be 1..20 seconds";
++        seconds = seconds * 10 + value[i] - '0';
++      }
++    }
++    STTToken token = 0;
++    char error[96] = {};
++    if (!sttBegin(owner, seconds * 1000, &token, error, sizeof(error))) {
++      reply = String("Error: ") + error;
++      return reply.c_str();
++    }
++    char id[17];
++    snprintf(id, sizeof(id), "%08lx%08lx", static_cast<unsigned long>(token >> 32),
++             static_cast<unsigned long>(token & 0xffffffffu));
++    reply = String("{\"accepted\":true,\"id\":\"") + id + "\",\"state\":\"preparing\"}";
++    return reply.c_str();
++  }
++  STTToken token = 0;
++  if (args.count() > 2 || (args.count() == 2 && !sttParseToken(args.arg(1), token)))
++    return "Error: STT id must be exactly 16 hex digits";
++  if (op == "stop" || op == "cancel") {
++    if (!token) return "Error: Usage: stt stop|cancel <id>";
++    const bool accepted = op == "stop" ? sttRequestFinish(owner, token) : sttCancel(owner, token);
++    return accepted ? "OK: STT request accepted; poll status until terminal"
++                    : "Error: no matching STT run accepts that operation";
++  }
++  STTSnapshot snap;
++  if (op != "status" && op != "result")
++    return "Error: Usage: stt record [seconds] | status [id] | stop|cancel|result <id>";
++  if (op == "result" && !token) return "Error: Usage: stt result <id>";
++  if (!sttSnapshot(owner, token, &snap)) return "Error: no STT run belongs to this session";
++  JsonDocument doc;
++  char id[17];
++  snprintf(id, sizeof(id), "%08lx%08lx", static_cast<unsigned long>(snap.token >> 32),
++           static_cast<unsigned long>(snap.token & 0xffffffffu));
++  doc["id"] = id;
++  doc["state"] = sttStateName(snap.state);
++  if (op == "result") {
++    char text[STT_MAX_TEXT + 1] = {};
++    if (!sttResult(owner, token, text, sizeof(text))) return "Error: no completed STT result for this id";
++    // This explicit tag makes the shared command-output sinks redact the whole
++    // reply; only the originating transport receives the private transcript.
++    doc["sttText"] = text;
++  } else {
++    doc["backend"] = "local";
++    doc["phase"] = sttPhaseName(snap.phase);
++    doc["workerActive"] = snap.workerActive;
++    doc["textReady"] = snap.textReady;
++    doc["elapsedMs"] = snap.elapsedMs;
++    doc["captureLimitMs"] = snap.captureLimitMs;
++    doc["samples"] = snap.recordedSamples;
++    doc["sampleRate"] = STT_SAMPLE_RATE;
++    doc["source"] = snap.audioSource == AUDIO_SRC_LOCAL_PDM ? "pdm"
++                     : snap.audioSource == AUDIO_SRC_G2_LEFT ? "g2" : "none";
++    doc["processing"] = "raw-hal; model frontend only; saved micgain not applied";
++    doc["level"] = snap.level;
++    doc["workerStackFreeBytes"] = snap.workerStackFreeBytes;
++    doc["error"] = snap.error;
++    doc["modelBytes"] = snap.stats.modelBytes;
++    doc["featureFrames"] = snap.stats.featureFrames;
++    doc["outputFrames"] = snap.stats.outputFrames;
++    doc["loadMs"] = snap.stats.loadMs;
++    doc["frontendMs"] = snap.stats.frontendMs;
++    doc["inferenceMs"] = snap.stats.inferenceMs;
++    doc["decodeMs"] = snap.stats.decodeMs;
++  }
++  reply = "";
++  serializeJson(doc, reply);
++  return reply.c_str();
++}
++
++const CommandEntry sttCommands[] = {
++  {"stt", "Local buffered speech-to-text with private session-owned results.", false, cmd_stt,
++   "Usage: stt record [1..20 seconds] | status [id] | stop|cancel|result <id>"}
++};
++const size_t sttCommandsCount = sizeof(sttCommands) / sizeof(sttCommands[0]);
++#endif // ENABLE_LOCAL_STT
+diff --git a/components/hardwareone/System_STT.h b/components/hardwareone/System_STT.h
+new file mode 100644
+index 0000000..5cdb1e9
+--- /dev/null
++++ b/components/hardwareone/System_STT.h
+@@ -0,0 +1,62 @@
++#pragma once
++
++#include "System_BuildConfig.h"
++#include "System_User.h"
++#include "System_STTLocal.h"
++
++// Shared bounded dictation broker. These APIs supply text; they never execute
++// recognized words as commands. The first local backend is buffered, not live
++// captions. Existing Pi-backed System_Dictation is independent and unchanged.
++constexpr size_t STT_MAX_TEXT = 512;
++constexpr uint32_t STT_SAMPLE_RATE = 16000;
++constexpr uint32_t STT_MAX_CAPTURE_MS = 20000;
++using STTToken = uint64_t;
++
++struct STTOwner {
++  CommandSource source = SOURCE_INTERNAL;
++  TransportSessionEpoch epoch = 0;
++};
++
++enum class STTState : uint8_t {
++  Idle, Preparing, Recording, Transcribing, Stopping, Done, Cancelled, Failed
++};
++
++struct STTSnapshot {
++  STTToken token = 0;
++  STTState state = STTState::Idle;
++  STTLocalPhase phase = STTLocalPhase::Loading;
++  uint32_t elapsedMs = 0;
++  uint32_t recordedSamples = 0;
++  uint32_t captureLimitMs = 0;
++  uint32_t workerStackFreeBytes = 0;
++  uint8_t audioSource = 0;
++  int level = 0;
++  bool workerActive = false;
++  bool textReady = false;
++  STTLocalStats stats;
++  char error[96] = {};
++};
++
++#if ENABLE_LOCAL_STT
++// Owner must represent an authenticated, live session. Headless serial/web,
++// authenticated BLE and future OLED/G2 callers use the same session fence.
++// Start requires SR, microphone sensor and recorder already stopped. It never
++// changes saved audio settings, writes a WAV, or implicitly re-arms voice.
++bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
++              char* error, size_t errorCap);
++// Internal join predicate: contains no transcript/session data and remains
++// usable after revocation. Unknown or terminal tokens are inactive.
++bool sttRunActive(STTToken token);
++bool sttRequestFinish(STTOwner owner, STTToken token);
++bool sttCancel(STTOwner owner, STTToken token);
++// token=0 means this owner's current run. No other session's data is exposed.
++bool sttSnapshot(STTOwner owner, STTToken token, STTSnapshot* out);
++// Idempotent exact-owner result read; retained until next same-owner run,
++// logout/revocation or five-minute expiry. UI consumers append once per token.
++bool sttResult(STTOwner owner, STTToken token, char* text, size_t textCap);
++const char* sttStateName(STTState state);
++
++struct CommandEntry;
++extern const CommandEntry sttCommands[];
++extern const size_t sttCommandsCount;
++#endif
+diff --git a/components/hardwareone/System_STTLocal.cpp b/components/hardwareone/System_STTLocal.cpp
+new file mode 100644
+index 0000000..b298318
+--- /dev/null
++++ b/components/hardwareone/System_STTLocal.cpp
+@@ -0,0 +1,47 @@
++#include "System_BuildConfig.h"
++#include "System_STTLocal.h"
++#if ENABLE_LOCAL_STT
++#include <cstdio>
++#if defined(CONFIG_IDF_TARGET_ESP32P4)
++#include "System_VFS.h"
++#include "stt/quartznet_runtime.h"
++#include "stt/stt_model_identity.h"
++namespace {
++constexpr const char* kModelPath="/STT Models/quartznet5x5.p4.stt";
++File openModel() {
++    // trusted: fixed, pinned inference weights; no caller-selected file path.
++    return VFS::openGuarded(kModelPath,"r",VFS::systemAuth("stt.model_read"));
++}
++size_t readModel(void* context,void* dest,size_t bytes) {
++    return static_cast<File*>(context)->read(static_cast<uint8_t*>(dest),bytes);
++}
++}
++bool sttLocalAvailable(char* error,size_t cap) {
++    if(error&&cap)error[0]=0;
++    File file=openModel();
++    const bool ok=file&&!file.isDirectory()&&file.size()==96+hw1::stt::identity::kCompressedBytes;
++    if(!ok&&error&&cap)snprintf(error,cap,"Install the matching local STT model in /STT Models");
++    return ok;
++}
++bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t textCap,
++                       const STTLocalControl& control,STTLocalStats& stats,
++                       char* error,size_t errorCap) {
++    File file=openModel();
++    if(!file||file.isDirectory()) {
++        if(text&&textCap)text[0]=0;
++        if(error&&errorCap)snprintf(error,errorCap,"Cannot open local STT model");
++        return false;
++    }
++    return hw1::stt::transcribe({&file,file.size(),readModel},pcm,samples,text,textCap,control,stats,error,errorCap);
++}
++#else
++bool sttLocalAvailable(char* error,size_t cap) {
++    if(error&&cap)snprintf(error,cap,"No local STT backend is qualified for this target");
++    return false;
++}
++bool sttLocalTranscribe(const int16_t*,size_t,char* text,size_t cap,const STTLocalControl&,
++                       STTLocalStats& stats,char* error,size_t errorCap) {
++    if(text&&cap)text[0]=0;stats={};return sttLocalAvailable(error,errorCap);
++}
++#endif
++#endif
+diff --git a/components/hardwareone/System_STTLocal.h b/components/hardwareone/System_STTLocal.h
+new file mode 100644
+index 0000000..f305858
+--- /dev/null
++++ b/components/hardwareone/System_STTLocal.h
+@@ -0,0 +1,35 @@
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++
++// Synchronous model backend. The caller owns PCM and the output buffer for the
++// whole call; the engine owns/frees all temporary model/frontend allocations.
++// Input is 16 kHz mono signed int16 BEFORE recorder DSP (no pre-emphasis/gain).
++// Cancellation is cooperative: return only after all engine work has stopped.
++enum class STTLocalPhase : uint8_t { Loading, Frontend, Inference, Decoding };
++
++struct STTLocalControl {
++  void* context = nullptr;
++  bool (*cancelled)(void*) = nullptr;
++  void (*progress)(void*, STTLocalPhase) = nullptr;
++};
++
++struct STTLocalStats {
++  uint32_t samples = 0;
++  uint32_t featureFrames = 0;
++  uint32_t outputFrames = 0;
++  uint32_t modelBytes = 0;
++  uint32_t loadMs = 0;
++  uint32_t frontendMs = 0;
++  uint32_t inferenceMs = 0;
++  uint32_t decodeMs = 0;
++};
++
++// Cheap availability check for the configured, fixed model path; does not load
++// a model. A true result is readiness to attempt a run, not proof of its result.
++bool sttLocalAvailable(char* error, size_t cap);
++bool sttLocalTranscribe(const int16_t* pcm, size_t samples,
++                        char* text, size_t textCap,
++                        const STTLocalControl& control, STTLocalStats& stats,
++                        char* error, size_t errorCap);
+diff --git a/components/hardwareone/System_Utils.cpp b/components/hardwareone/System_Utils.cpp
+index a8c4dd3..9fbd39c 100644
+--- a/components/hardwareone/System_Utils.cpp
++++ b/components/hardwareone/System_Utils.cpp
+@@ -102,4 +102,5 @@ bool isEspNowInitialized() { return false; }
+ #endif
+ #include "System_ESPSR.h"
++#include "System_STT.h"
+ 
+ extern "C" {
+@@ -1413,4 +1414,7 @@ String redactCmdForAudit(const String& argsInput,
+ // Redact sensitive data from command outputs (JSON responses, etc.)
+ String redactOutputForLog(const String& output) {
++  // Private STT results are tagged by the producer. Replace the WHOLE reply
++  // rather than parsing quoted/escaped text or risking a partial redaction.
++  if (output.indexOf("\"sttText\"") >= 0) return "[private STT result]";
+   String result = output;
+   
+@@ -3422,4 +3426,13 @@ static constexpr CommandModule gCommandModules[] = {
+ #endif
+ 
++#if ENABLE_LOCAL_STT
++  { "stt", "Local speech-to-text", "Buffered local dictation through the shared audio HAL. "
++    "Stop SR and the microphone sensor first, then use stt record [seconds]. "
++    "Poll stt status [id], finish early with stt stop <id>, discard with stt cancel <id>, "
++    "and read stt result <id> from the same authenticated session. Audio and results "
++    "stay local; no host link is required. This backend produces text for review, "
++    "not voice command execution.", sttCommands, &sttCommandsCount, CMD_MODULE_SENSOR, nullptr },
++#endif
++
+  #if ENABLE_ESP_SR
+    { "espsr", "ESP-SR speech recognition", "Offline voice control built on Espressif ESP-SR: a WakeNet wake-word stage gates a "
+diff --git a/components/hardwareone/WebServer_Server.cpp b/components/hardwareone/WebServer_Server.cpp
+index a52de83..fdedd58 100644
+--- a/components/hardwareone/WebServer_Server.cpp
++++ b/components/hardwareone/WebServer_Server.cpp
+@@ -1517,5 +1517,12 @@ extern bool gMeshActivitySuspended;
+ // Preserve that useful diagnostic while applying the command redactor to the
+ // echoed portion (important for typo'd credential commands such as `logni`).
+-static String redactWebCommandResult(const String& output) {
++static String redactWebCommandResult(const String& output,
++                                      bool directLiveOwnerReply = false) {
++  // sttText is a reserved producer tag. The STT broker already fences it to
++  // its source/session/token; only the direct, live cookie-session response
++  // may retain it. Shared mirrors always use the default redacted form.
++  // An unknown-command echo containing this word is not a structured result.
++  if (directLiveOwnerReply && output.startsWith("{") &&
++      output.indexOf("\"sttText\"") >= 0) return output;
+   String safe = redactOutputForLog(output);
+   static const char kUnknownPrefix[] = "Unknown command: ";
+@@ -3745,4 +3752,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
+   }
+ 
++  const String directOut = redactWebCommandResult(
++      out, webSessionStillLive && ctx.sid.length() != 0);
++
+   // Response admission is a separate boundary from shared-mirror admission.
+   // If revocation won since the earlier check, return only a fixed error body.
+@@ -3772,5 +3782,5 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
+     httpd_resp_set_status(req, "400 Bad Request");
+   }
+-  httpd_resp_send(req, redactedOut.c_str(), HTTPD_RESP_USE_STRLEN);
++  httpd_resp_send(req, directOut.c_str(), HTTPD_RESP_USE_STRLEN);
+   DEBUG_CMD_FLOWF("[web.cli] exit");
+   return ESP_OK;
+@@ -5823,8 +5833,11 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
+       broadcastOutput(redacted, uc.ctx);
+     }
+-    // Batch results cross the same HTTP boundary as the single-command path;
+-    // never return an unredacted handler response to the browser.
+-    // Buffering failure must not skip later commands or the common cleanup.
+-    if (resultsBuffered && !results.add(redacted)) resultsBuffered = false;
++    // Preserve private STT only for this live cookie-session response; shared
++    // broadcasts above keep the constant redaction. Other output retains the
++    // existing credential/unknown-command redaction. Later revocation clears
++    // every accumulated response before the HTTP send.
++    const String directOut = redactWebCommandResult(
++        out, batchSessionStillLive && ctx.sid.length() != 0);
++    if (resultsBuffered && !results.add(directOut)) resultsBuffered = false;
+ 
+     count++;
+diff --git a/components/hardwareone/stt/quartznet.compile_req.yml b/components/hardwareone/stt/quartznet.compile_req.yml
+new file mode 100644
+index 0000000..c1b8b48
+--- /dev/null
++++ b/components/hardwareone/stt/quartznet.compile_req.yml
+@@ -0,0 +1,16 @@
++# Generated by experiments/stt_p4/generate_compile_requirements.py.
++# Frozen raw model SHA256: 8a6766f69597e319c585613e94faba97dd2054a8d527fd21b1aa7d408981b925
++# ESP-DL3.3.12; actual Conv2D attributes, PIEv2 int8 channel alignment.
++# Runtime T may vary; channels/filter shapes and selected kernels do not.
++# RequantizeLinear supports Model/TensorBase::assign; it is not a graph node.
++kernel_abi: 1
++ops:
++  - Add
++  - Conv
++  - Relu
++  - RequantizeLinear
++kernels:
++  - dl_esp32p4_s8_conv2d_per_channel_11cn_bias
++  - dl_esp32p4_s8_conv2d_per_channel_11cn_bias_relu
++  - dl_esp32p4_s8_depthwise_conv2d_per_channel_hwc1
++  - dl_esp32p4_s8_unaligned_conv2d_per_channel_11cn_bias
+diff --git a/components/hardwareone/stt/quartznet_constants.h b/components/hardwareone/stt/quartznet_constants.h
+new file mode 100644
+index 0000000..bfe8b71
+--- /dev/null
++++ b/components/hardwareone/stt/quartznet_constants.h
+@@ -0,0 +1,278 @@
++// Generated by export_constants.py from the pinned NVIDIA QuartzNet5x5LS-En checkpoint.
++// Checkpoint weights: 51a92f946c8cccacb723f4291be1f3285d589e5ac84fa0f6714221dbbbf333cb
++#pragma once
++#include <cstdint>
++namespace hw1::stt::constants {
++inline constexpr float window[320] = {
++    0x0.0p+0f, 0x1.96c0000000000p-14f, 0x1.96c0000000000p-12f, 0x1.c984000000000p-11f, 0x1.9696000000000p-10f, 0x1.3d8e000000000p-9f, 0x1.c91d000000000p-9f, 0x1.36f6000000000p-8f,
++    0x1.95f5000000000p-8f, 0x1.00c0c00000000p-7f, 0x1.3cc8c00000000p-7f, 0x1.7f0c800000000p-7f, 0x1.c785400000000p-7f, 0x1.0b16000000000p-6f, 0x1.357c600000000p-6f, 0x1.62f1a00000000p-6f,
++    0x1.9371200000000p-6f, 0x1.c6f6200000000p-6f, 0x1.fd7b800000000p-6f, 0x1.1b7e000000000p-5f, 0x1.39b8d00000000p-5f, 0x1.596b400000000p-5f, 0x1.7a92300000000p-5f, 0x1.9d2a500000000p-5f,
++    0x1.c130300000000p-5f, 0x1.e6a0400000000p-5f, 0x1.06bb600000000p-4f, 0x1.1ad7e80000000p-4f, 0x1.2fa3c80000000p-4f, 0x1.451ce00000000p-4f, 0x1.5b41100000000p-4f, 0x1.720e280000000p-4f,
++    0x1.8981e80000000p-4f, 0x1.a199f80000000p-4f, 0x1.ba53f00000000p-4f, 0x1.d3ad600000000p-4f, 0x1.eda3c00000000p-4f, 0x1.041a400000000p-3f, 0x1.11ae7c0000000p-3f, 0x1.1f8d400000000p-3f,
++    0x1.2db5240000000p-3f, 0x1.3c24c40000000p-3f, 0x1.4adab00000000p-3f, 0x1.59d5740000000p-3f, 0x1.6913900000000p-3f, 0x1.7893840000000p-3f, 0x1.8853c40000000p-3f, 0x1.9852c00000000p-3f,
++    0x1.a88ee40000000p-3f, 0x1.b906880000000p-3f, 0x1.c9b8180000000p-3f, 0x1.daa1e40000000p-3f, 0x1.ebc23c0000000p-3f, 0x1.fd17700000000p-3f, 0x1.074fe40000000p-2f, 0x1.102cc60000000p-2f,
++    0x1.1921760000000p-2f, 0x1.222d140000000p-2f, 0x1.2b4eb80000000p-2f, 0x1.3485800000000p-2f, 0x1.3dd0780000000p-2f, 0x1.472ebc0000000p-2f, 0x1.509f580000000p-2f, 0x1.5a21640000000p-2f,
++    0x1.63b3e60000000p-2f, 0x1.6d55ec0000000p-2f, 0x1.7706880000000p-2f, 0x1.80c4ba0000000p-2f, 0x1.8a8f900000000p-2f, 0x1.94660e0000000p-2f, 0x1.9e47400000000p-2f, 0x1.a832240000000p-2f,
++    0x1.b225be0000000p-2f, 0x1.bc21140000000p-2f, 0x1.c6232c0000000p-2f, 0x1.d02b000000000p-2f, 0x1.da37920000000p-2f, 0x1.e447e60000000p-2f, 0x1.ee5afe0000000p-2f, 0x1.f86fd40000000p-2f,
++    0x1.0142b40000000p-1f, 0x1.064d600000000p-1f, 0x1.0b576c0000000p-1f, 0x1.1060560000000p-1f, 0x1.1567a00000000p-1f, 0x1.1a6cca0000000p-1f, 0x1.1f6f540000000p-1f, 0x1.246ebe0000000p-1f,
++    0x1.296a8c0000000p-1f, 0x1.2e623c0000000p-1f, 0x1.3355500000000p-1f, 0x1.38434c0000000p-1f, 0x1.3d2bb00000000p-1f, 0x1.420e020000000p-1f, 0x1.46e9c40000000p-1f, 0x1.4bbe7c0000000p-1f,
++    0x1.508bae0000000p-1f, 0x1.5550e00000000p-1f, 0x1.5a0d980000000p-1f, 0x1.5ec1600000000p-1f, 0x1.636bc00000000p-1f, 0x1.680c3c0000000p-1f, 0x1.6ca2680000000p-1f, 0x1.712dc80000000p-1f,
++    0x1.75ade80000000p-1f, 0x1.7a225a0000000p-1f, 0x1.7e8aaa0000000p-1f, 0x1.82e66a0000000p-1f, 0x1.8735280000000p-1f, 0x1.8b767c0000000p-1f, 0x1.8fa9f60000000p-1f, 0x1.93cf2a0000000p-1f,
++    0x1.97e5b00000000p-1f, 0x1.9bed200000000p-1f, 0x1.9fe5140000000p-1f, 0x1.a3cd240000000p-1f, 0x1.a7a4f40000000p-1f, 0x1.ab6c1e0000000p-1f, 0x1.af22400000000p-1f, 0x1.b2c6fc0000000p-1f,
++    0x1.b659f80000000p-1f, 0x1.b9dad80000000p-1f, 0x1.bd49400000000p-1f, 0x1.c0a4e00000000p-1f, 0x1.c3ed5c0000000p-1f, 0x1.c722640000000p-1f, 0x1.ca43a40000000p-1f, 0x1.cd50d00000000p-1f,
++    0x1.d049940000000p-1f, 0x1.d32dac0000000p-1f, 0x1.d5fcc80000000p-1f, 0x1.d8b6a60000000p-1f, 0x1.db5b000000000p-1f, 0x1.dde98c0000000p-1f, 0x1.e062120000000p-1f, 0x1.e2c44c0000000p-1f,
++    0x1.e510040000000p-1f, 0x1.e744fc0000000p-1f, 0x1.e962fa0000000p-1f, 0x1.eb69cc0000000p-1f, 0x1.ed593c0000000p-1f, 0x1.ef311c0000000p-1f, 0x1.f0f1380000000p-1f, 0x1.f299660000000p-1f,
++    0x1.f4297c0000000p-1f, 0x1.f5a1540000000p-1f, 0x1.f700c80000000p-1f, 0x1.f847b40000000p-1f, 0x1.f975f60000000p-1f, 0x1.fa8b720000000p-1f, 0x1.fb880c0000000p-1f, 0x1.fc6bac0000000p-1f,
++    0x1.fd363a0000000p-1f, 0x1.fde7a20000000p-1f, 0x1.fe7fd40000000p-1f, 0x1.fefebe0000000p-1f, 0x1.ff64560000000p-1f, 0x1.ffb0900000000p-1f, 0x1.ffe3660000000p-1f, 0x1.fffcd20000000p-1f,
++    0x1.fffcd20000000p-1f, 0x1.ffe3660000000p-1f, 0x1.ffb0900000000p-1f, 0x1.ff64540000000p-1f, 0x1.fefebe0000000p-1f, 0x1.fe7fd40000000p-1f, 0x1.fde7a20000000p-1f, 0x1.fd363a0000000p-1f,
++    0x1.fc6bac0000000p-1f, 0x1.fb880c0000000p-1f, 0x1.fa8b700000000p-1f, 0x1.f975f40000000p-1f, 0x1.f847b20000000p-1f, 0x1.f700c80000000p-1f, 0x1.f5a1540000000p-1f, 0x1.f4297e0000000p-1f,
++    0x1.f299660000000p-1f, 0x1.f0f1360000000p-1f, 0x1.ef311a0000000p-1f, 0x1.ed593c0000000p-1f, 0x1.eb69cc0000000p-1f, 0x1.e962fa0000000p-1f, 0x1.e744fc0000000p-1f, 0x1.e510040000000p-1f,
++    0x1.e2c44e0000000p-1f, 0x1.e062100000000p-1f, 0x1.dde98c0000000p-1f, 0x1.db5afc0000000p-1f, 0x1.d8b6a60000000p-1f, 0x1.d5fcc80000000p-1f, 0x1.d32dac0000000p-1f, 0x1.d049940000000p-1f,
++    0x1.cd50cc0000000p-1f, 0x1.ca43a40000000p-1f, 0x1.c722640000000p-1f, 0x1.c3ed5c0000000p-1f, 0x1.c0a4e00000000p-1f, 0x1.bd49420000000p-1f, 0x1.b9dad80000000p-1f, 0x1.b659f80000000p-1f,
++    0x1.b2c6fa0000000p-1f, 0x1.af223c0000000p-1f, 0x1.ab6c1c0000000p-1f, 0x1.a7a4f40000000p-1f, 0x1.a3cd240000000p-1f, 0x1.9fe5140000000p-1f, 0x1.9bed1c0000000p-1f, 0x1.97e5b00000000p-1f,
++    0x1.93cf280000000p-1f, 0x1.8fa9f80000000p-1f, 0x1.8b767c0000000p-1f, 0x1.8735260000000p-1f, 0x1.82e66c0000000p-1f, 0x1.7e8aa80000000p-1f, 0x1.7a225c0000000p-1f, 0x1.75ade60000000p-1f,
++    0x1.712dc80000000p-1f, 0x1.6ca2640000000p-1f, 0x1.680c400000000p-1f, 0x1.636bbe0000000p-1f, 0x1.5ec15c0000000p-1f, 0x1.5a0d9a0000000p-1f, 0x1.5550de0000000p-1f, 0x1.508bb00000000p-1f,
++    0x1.4bbe7a0000000p-1f, 0x1.46e9c80000000p-1f, 0x1.420e020000000p-1f, 0x1.3d2bac0000000p-1f, 0x1.38434c0000000p-1f, 0x1.33554e0000000p-1f, 0x1.2e623e0000000p-1f, 0x1.296a8a0000000p-1f,
++    0x1.246ec20000000p-1f, 0x1.1f6f540000000p-1f, 0x1.1a6cc60000000p-1f, 0x1.1567a00000000p-1f, 0x1.1060520000000p-1f, 0x1.0b576c0000000p-1f, 0x1.064d5e0000000p-1f, 0x1.0142b80000000p-1f,
++    0x1.f86fd20000000p-2f, 0x1.ee5af40000000p-2f, 0x1.e447e80000000p-2f, 0x1.da378c0000000p-2f, 0x1.d02b020000000p-2f, 0x1.c623260000000p-2f, 0x1.bc211a0000000p-2f, 0x1.b225bc0000000p-2f,
++    0x1.a832280000000p-2f, 0x1.9e473e0000000p-2f, 0x1.9466080000000p-2f, 0x1.8a8f920000000p-2f, 0x1.80c4b40000000p-2f, 0x1.77068c0000000p-2f, 0x1.6d55ec0000000p-2f, 0x1.63b3ec0000000p-2f,
++    0x1.5a21640000000p-2f, 0x1.509f540000000p-2f, 0x1.472ebe0000000p-2f, 0x1.3dd0740000000p-2f, 0x1.3485820000000p-2f, 0x1.2b4eb60000000p-2f, 0x1.222d180000000p-2f, 0x1.1921740000000p-2f,
++    0x1.102cbe0000000p-2f, 0x1.074fe60000000p-2f, 0x1.fd17680000000p-3f, 0x1.ebc2400000000p-3f, 0x1.daa1dc0000000p-3f, 0x1.c9b8200000000p-3f, 0x1.b906840000000p-3f, 0x1.a88eec0000000p-3f,
++    0x1.9852c00000000p-3f, 0x1.8853bc0000000p-3f, 0x1.7893880000000p-3f, 0x1.69138c0000000p-3f, 0x1.59d57c0000000p-3f, 0x1.4adaac0000000p-3f, 0x1.3c24cc0000000p-3f, 0x1.2db5240000000p-3f,
++    0x1.1f8d340000000p-3f, 0x1.11ae800000000p-3f, 0x1.041a380000000p-3f, 0x1.eda3c80000000p-4f, 0x1.d3ad580000000p-4f, 0x1.ba54000000000p-4f, 0x1.a199f80000000p-4f, 0x1.8981d80000000p-4f,
++    0x1.720e300000000p-4f, 0x1.5b41080000000p-4f, 0x1.451ce80000000p-4f, 0x1.2fa3c00000000p-4f, 0x1.1ad7f80000000p-4f, 0x1.06bb600000000p-4f, 0x1.e6a0200000000p-5f, 0x1.c130300000000p-5f,
++    0x1.9d2a400000000p-5f, 0x1.7a92400000000p-5f, 0x1.596b300000000p-5f, 0x1.39b8e00000000p-5f, 0x1.1b7df00000000p-5f, 0x1.fd7bc00000000p-6f, 0x1.c6f6200000000p-6f, 0x1.9371000000000p-6f,
++    0x1.62f1a00000000p-6f, 0x1.357c400000000p-6f, 0x1.0b16000000000p-6f, 0x1.c785400000000p-7f, 0x1.7f0cc00000000p-7f, 0x1.3cc8c00000000p-7f, 0x1.00c0c00000000p-7f, 0x1.95f5000000000p-8f,
++    0x1.36f6000000000p-8f, 0x1.c91e000000000p-9f, 0x1.3d8e000000000p-9f, 0x1.9696000000000p-10f, 0x1.c984000000000p-11f, 0x1.96c0000000000p-12f, 0x1.96c0000000000p-14f, 0x0.0p+0f
++};
++inline constexpr uint16_t mel_start[64] = {
++    1, 2, 3, 5, 6, 8, 9, 11,
++    12, 14, 15, 17, 18, 20, 21, 23,
++    24, 26, 27, 29, 30, 32, 33, 35,
++    36, 38, 40, 42, 44, 46, 48, 51,
++    53, 56, 59, 61, 64, 68, 71, 74,
++    78, 82, 86, 90, 94, 99, 104, 109,
++    114, 120, 125, 131, 138, 145, 152, 159,
++    167, 175, 184, 193, 202, 212, 222, 233
++};
++inline constexpr uint16_t mel_count[64] = {
++    2, 3, 3, 3, 3, 3, 3, 3,
++    3, 3, 3, 3, 3, 3, 3, 3,
++    3, 3, 3, 3, 3, 3, 3, 3,
++    4, 4, 4, 4, 4, 5, 5, 5,
++    6, 5, 5, 7, 7, 6, 7, 8,
++    8, 8, 8, 9, 10, 10, 10, 11,
++    11, 11, 13, 14, 14, 14, 15, 16,
++    17, 18, 18, 19, 20, 21, 23, 23
++};
++inline constexpr uint16_t mel_offset[65] = {
++    0, 2, 5, 8, 11, 14, 17, 20,
++    23, 26, 29, 32, 35, 38, 41, 44,
++    47, 50, 53, 56, 59, 62, 65, 68,
++    71, 75, 79, 83, 87, 91, 96, 101,
++    106, 112, 117, 122, 129, 136, 142, 149,
++    157, 165, 173, 181, 190, 200, 210, 220,
++    231, 242, 253, 266, 280, 294, 308, 323,
++    339, 356, 374, 392, 411, 431, 452, 475,
++    498
++};
++inline constexpr float mel_weight[498] = {
++    0x1.db81740000000p-7f, 0x1.cd39f40000000p-7f, 0x1.e9c8f60000000p-8f, 0x1.59eb760000000p-6f, 0x1.b0aaf00000000p-8f, 0x1.c8f02e0000000p-12f, 0x1.e9c8f60000000p-7f, 0x1.bef2700000000p-7f,
++    0x1.032bfc0000000p-7f, 0x1.52c7b60000000p-6f, 0x1.941bee0000000p-8f, 0x1.c8f02e0000000p-11f, 0x1.f810760000000p-7f, 0x1.b0aaf00000000p-7f, 0x1.11737e0000000p-7f, 0x1.4ba3f40000000p-6f,
++    0x1.778cea0000000p-8f, 0x1.56b4220000000p-10f, 0x1.032bfc0000000p-6f, 0x1.a2636e0000000p-7f, 0x1.1fbafe0000000p-7f, 0x1.4480340000000p-6f, 0x1.5afde80000000p-8f, 0x1.c8f02e0000000p-10f,
++    0x1.0a4fbe0000000p-6f, 0x1.941bee0000000p-7f, 0x1.2e02800000000p-7f, 0x1.3d5c740000000p-6f, 0x1.3e6ee40000000p-8f, 0x1.1d961c0000000p-9f, 0x1.11737e0000000p-6f, 0x1.85d46e0000000p-7f,
++    0x1.3c4a020000000p-7f, 0x1.3638b20000000p-6f, 0x1.21dfe20000000p-8f, 0x1.56b4220000000p-9f, 0x1.18973e0000000p-6f, 0x1.778cea0000000p-7f, 0x1.4a91820000000p-7f, 0x1.2f14f20000000p-6f,
++    0x1.0550de0000000p-8f, 0x1.8fd2280000000p-9f, 0x1.1fbafe0000000p-6f, 0x1.6945680000000p-7f, 0x1.58d9040000000p-7f, 0x1.27f1300000000p-6f, 0x1.d183b80000000p-9f, 0x1.c8f02e0000000p-9f,
++    0x1.26dec00000000p-6f, 0x1.5afde80000000p-7f, 0x1.6720860000000p-7f, 0x1.20cd700000000p-6f, 0x1.9865b40000000p-9f, 0x1.0107180000000p-8f, 0x1.2e02800000000p-6f, 0x1.4cb6660000000p-7f,
++    0x1.7568060000000p-7f, 0x1.19a9b00000000p-6f, 0x1.5f47ae0000000p-9f, 0x1.1ae0620000000p-8f, 0x1.32374a0000000p-6f, 0x1.42a1720000000p-7f, 0x1.6a884c0000000p-7f, 0x1.111bc80000000p-6f,
++    0x1.f982980000000p-9f, 0x1.e1058a0000000p-9f, 0x1.034ed40000000p-6f, 0x1.7517640000000p-7f, 0x1.fa10b40000000p-8f, 0x1.2d52520000000p-6f, 0x1.018f540000000p-7f, 0x1.70e1a20000000p-13f,
++    0x1.4eb8a40000000p-7f, 0x1.f4b5f60000000p-7f, 0x1.7640460000000p-8f, 0x1.2f45820000000p-9f, 0x1.76bfd00000000p-7f, 0x1.b636a40000000p-7f, 0x1.32809a0000000p-8f, 0x1.b62ff80000000p-9f,
++    0x1.7d315c0000000p-7f, 0x1.9797f40000000p-7f, 0x1.2948840000000p-8f, 0x1.c862340000000p-9f, 0x1.68f26e0000000p-7f, 0x1.9266aa0000000p-7f, 0x1.4e2bb00000000p-8f, 0x1.7e3aa00000000p-9f,
++    0x1.3fe06c0000000p-7f, 0x1.a126ca0000000p-7f, 0x1.96a1120000000p-8f, 0x1.d8d75c0000000p-10f, 0x1.06f30e0000000p-7f, 0x1.bf33860000000p-7f, 0x1.f9c3ea0000000p-8f, 0x1.d483120000000p-10f,
++    0x1.23ae780000000p-12f, 0x1.84b4d00000000p-8f, 0x1.7b975c0000000p-7f, 0x1.380e1e0000000p-7f, 0x1.0ef24a0000000p-8f, 0x1.d665020000000p-9f, 0x1.1dedca0000000p-7f, 0x1.79b7080000000p-7f,
++    0x1.b2806e0000000p-8f, 0x1.c64b320000000p-10f, 0x1.1ce2d40000000p-10f, 0x1.79271a0000000p-8f, 0x1.558ac00000000p-7f, 0x1.2d76020000000p-7f, 0x1.3749720000000p-8f, 0x1.3a6df60000000p-12f,
++    0x1.673ef00000000p-9f, 0x1.c9a13e0000000p-8f, 0x1.6fd1800000000p-7f, 0x1.fb36780000000p-8f, 0x1.e464ec0000000p-9f, 0x1.d737360000000p-9f, 0x1.e83d3e0000000p-8f, 0x1.5d30fe0000000p-7f,
++    0x1.c98e8e0000000p-8f, 0x1.b1763a0000000p-9f, 0x1.3c44860000000p-12f, 0x1.f2ad7a0000000p-9f, 0x1.dee9340000000p-8f, 0x1.4bcf240000000p-7f, 0x1.bcc62c0000000p-8f, 0x1.c3dc200000000p-9f,
++    0x1.c57cde0000000p-14f, 0x1.4df5d80000000p-12f, 0x1.cafaee0000000p-9f, 0x1.b61b900000000p-8f, 0x1.435cd40000000p-7f, 0x1.cd0ccc0000000p-8f, 0x1.062e600000000p-8f, 0x1.fa7f920000000p-11f,
++    0x1.6ee00e0000000p-9f, 0x1.7503660000000p-8f, 0x1.194b640000000p-7f, 0x1.f3c25c0000000p-8f, 0x1.3f0ade0000000p-8f, 0x1.14a6bc0000000p-9f, 0x1.d5b54c0000000p-10f, 0x1.21b2ee0000000p-8f,
++    0x1.cdf8880000000p-8f, 0x1.15a7c40000000p-7f, 0x1.8716ce0000000p-8f, 0x1.c5bc240000000p-9f, 0x1.f52ac00000000p-11f, 0x1.25c60c0000000p-11f, 0x1.8289d40000000p-9f, 0x1.5dd1140000000p-8f,
++    0x1.fa5d3e0000000p-8f, 0x1.d9c7440000000p-8f, 0x1.448bde0000000p-8f, 0x1.5ea0f00000000p-9f, 0x1.a151240000000p-12f, 0x1.5ff6a60000000p-10f, 0x1.cc7fa00000000p-9f, 0x1.7481f60000000p-8f,
++    0x1.01620e0000000p-7f, 0x1.abb8720000000p-8f, 0x1.241c200000000p-8f, 0x1.38ff980000000p-9f, 0x1.4e37820000000p-12f, 0x1.aab7d40000000p-10f, 0x1.d7e7fa0000000p-9f, 0x1.6d3a040000000p-8f,
++    0x1.ee800c0000000p-8f, 0x1.9a29760000000p-8f, 0x1.1eedea0000000p-8f, 0x1.4764c00000000p-9f, 0x1.43b6a40000000p-11f, 0x1.8d841e0000000p-10f, 0x1.b1b4b40000000p-9f, 0x1.4e53ae0000000p-8f,
++    0x1.c3ccfe0000000p-8f, 0x1.9f29140000000p-8f, 0x1.2f2d160000000p-8f, 0x1.7e622e0000000p-9f, 0x1.3cd4660000000p-10f, 0x1.1ecba20000000p-10f, 0x1.64e67e0000000p-9f, 0x1.1d33940000000p-8f,
++    0x1.87f3ea0000000p-8f, 0x1.b5ac760000000p-8f, 0x1.4fe92e0000000p-8f, 0x1.d44bce0000000p-9f, 0x1.08c53c0000000p-9f, 0x1.e9f5700000000p-12f, 0x1.c64afa0000000p-12f, 0x1.f59a5a0000000p-10f,
++    0x1.bcd0fa0000000p-9f, 0x1.3f6a620000000p-8f, 0x1.a06c480000000p-8f, 0x1.7cf7ae0000000p-8f, 0x1.207e440000000p-8f, 0x1.8809b80000000p-9f, 0x1.9e2dca0000000p-10f, 0x1.62413c0000000p-13f,
++    0x1.ed02020000000p-11f, 0x1.2b8ecc0000000p-9f, 0x1.dbdd1a0000000p-9f, 0x1.4615b20000000p-8f, 0x1.9e3cd80000000p-8f, 0x1.5ed13a0000000p-8f, 0x1.0ac8a40000000p-8f, 0x1.6d801c0000000p-9f,
++    0x1.8adde40000000p-10f, 0x1.d5dc760000000p-13f, 0x1.1a11260000000p-10f, 0x1.2d3f2c0000000p-9f, 0x1.cd75c60000000p-9f, 0x1.36d62e0000000p-8f, 0x1.86f17c0000000p-8f, 0x1.55eb860000000p-8f,
++    0x1.098e880000000p-8f, 0x1.7a63140000000p-9f, 0x1.c352300000000p-10f, 0x1.23bc740000000p-11f, 0x1.e09a580000000p-11f, 0x1.09bd840000000p-9f, 0x1.9b54720000000p-9f, 0x1.1675b00000000p-8f,
++    0x1.5f41260000000p-8f, 0x1.5dc3460000000p-8f, 0x1.185ea40000000p-8f, 0x1.a5f4060000000p-9f, 0x1.1b2ac60000000p-9f, 0x1.20c30a0000000p-10f, 0x1.6611020000000p-15f, 0x1.147bd00000000p-11f,
++    0x1.92d7da0000000p-10f, 0x1.4db8e40000000p-9f, 0x1.d205dc0000000p-9f, 0x1.2b296a0000000p-8f, 0x1.6d4fe60000000p-8f, 0x1.3376320000000p-8f, 0x1.e8ce220000000p-9f, 0x1.6aafdc0000000p-9f,
++    0x1.d923300000000p-10f, 0x1.b9cd4a0000000p-11f, 0x1.cd83440000000p-11f, 0x1.d734ae0000000p-10f, 0x1.63d3e00000000p-9f, 0x1.dc0d660000000p-9f, 0x1.2a23780000000p-8f, 0x1.57aa0c0000000p-8f,
++    0x1.1e5c680000000p-8f, 0x1.ca1d860000000p-9f, 0x1.57823c0000000p-9f, 0x1.c9cde00000000p-10f, 0x1.c92e960000000p-11f, 0x1.b250860000000p-14f, 0x1.eb4b1e0000000p-11f, 0x1.d026160000000p-10f,
++    0x1.55534e0000000p-9f, 0x1.c293900000000p-9f, 0x1.17e9ec0000000p-8f, 0x1.4e3fe60000000p-8f, 0x1.1a2d400000000p-8f, 0x1.cc35300000000p-9f, 0x1.640fe40000000p-9f, 0x1.f7d52c0000000p-10f,
++    0x1.278a900000000p-10f, 0x1.5cffd00000000p-12f, 0x1.13f8d40000000p-19f, 0x1.8e31a60000000p-11f, 0x1.8da7a80000000p-10f, 0x1.2a1b400000000p-9f, 0x1.8d62aa0000000p-9f, 0x1.f0aa140000000p-9f,
++    0x1.29f8c00000000p-8f, 0x1.23443a0000000p-8f, 0x1.e7e4b40000000p-9f, 0x1.8940f00000000p-9f, 0x1.2a9d300000000p-9f, 0x1.97f2e00000000p-10f, 0x1.b556ba0000000p-11f, 0x1.d63db80000000p-14f,
++    0x1.a369d80000000p-12f, 0x1.1d49a40000000p-10f, 0x1.d1b8d00000000p-10f, 0x1.4314000000000p-9f, 0x1.9d4b960000000p-9f, 0x1.f7832c0000000p-9f, 0x1.28dd620000000p-8f, 0x1.0b8b8e0000000p-8f,
++    0x1.c116ca0000000p-9f, 0x1.6b16760000000p-9f, 0x1.1516220000000p-9f, 0x1.7e2b9a0000000p-10f, 0x1.a455e40000000p-11f, 0x1.3152480000000p-13f, 0x1.1502cc0000000p-11f, 0x1.2e786a0000000p-10f,
++    0x1.d26f6a0000000p-10f, 0x1.3b33380000000p-9f, 0x1.8d2eb80000000p-9f, 0x1.df2a380000000p-9f, 0x1.1892dc0000000p-8f, 0x1.0343880000000p-8f, 0x1.b860500000000p-9f, 0x1.6a39900000000p-9f,
++    0x1.1c12ce0000000p-9f, 0x1.9bd8180000000p-10f, 0x1.ff152a0000000p-11f, 0x1.8cf4480000000p-12f, 0x1.cfc0540000000p-12f, 0x1.08efc20000000p-10f, 0x1.9def700000000p-10f, 0x1.19778e0000000p-9f,
++    0x1.63f7640000000p-9f, 0x1.ae773c0000000p-9f, 0x1.f8f7100000000p-9f, 0x1.072b400000000p-8f, 0x1.c751e40000000p-9f, 0x1.804d480000000p-9f, 0x1.3948ac0000000p-9f, 0x1.e488200000000p-10f,
++    0x1.567ee60000000p-10f, 0x1.90eb5e0000000p-11f, 0x1.d363be0000000p-13f, 0x1.8b75820000000p-13f, 0x1.71a97e0000000p-11f, 0x1.403ace0000000p-10f, 0x1.c7a0da0000000p-10f, 0x1.2783740000000p-9f,
++    0x1.6b367c0000000p-9f, 0x1.aee9820000000p-9f, 0x1.f29c880000000p-9f, 0x1.e877d00000000p-9f, 0x1.a7eeaa0000000p-9f, 0x1.6765840000000p-9f, 0x1.26dc600000000p-9f, 0x1.cca6720000000p-10f,
++    0x1.4b94280000000p-10f, 0x1.9503ba0000000p-11f, 0x1.25be460000000p-12f, 0x1.21b8360000000p-12f, 0x1.86f08c0000000p-11f, 0x1.3e82800000000p-10f, 0x1.b98cba0000000p-10f, 0x1.1a4b780000000p-9f,
++    0x1.57d0960000000p-9f, 0x1.9555b40000000p-9f, 0x1.d2dad00000000p-9f, 0x1.dc93fe0000000p-9f, 0x1.a1eed60000000p-9f, 0x1.6749ae0000000p-9f, 0x1.2ca4880000000p-9f, 0x1.e3fec00000000p-10f,
++    0x1.6eb4700000000p-10f, 0x1.f2d4440000000p-11f, 0x1.083fa40000000p-11f, 0x1.dab0680000000p-15f, 0x1.818f140000000p-13f, 0x1.4002200000000p-11f, 0x1.0fd03c0000000p-10f, 0x1.7f9f6a0000000p-10f,
++    0x1.ef6e980000000p-10f, 0x1.2f9ee20000000p-9f, 0x1.67867a0000000p-9f, 0x1.9f6e0e0000000p-9f, 0x1.d755a60000000p-9f, 0x1.afda500000000p-9f, 0x1.7a8f820000000p-9f, 0x1.4544b40000000p-9f,
++    0x1.0ff9e60000000p-9f, 0x1.b55e2e0000000p-10f, 0x1.4ac8900000000p-10f, 0x1.c065e80000000p-11f, 0x1.d6755c0000000p-12f, 0x1.60f74a0000000p-15f, 0x1.6303b20000000p-12f, 0x1.7cb6f40000000p-11f,
++    0x1.23f6080000000p-10f, 0x1.8990960000000p-10f, 0x1.ef2b220000000p-10f, 0x1.2a62da0000000p-9f, 0x1.5d30200000000p-9f, 0x1.8ffd660000000p-9f, 0x1.c2caae0000000p-9f, 0x1.9ca2040000000p-9f,
++    0x1.6c347a0000000p-9f, 0x1.3bc6f20000000p-9f, 0x1.0b59680000000p-9f, 0x1.b5d7ba0000000p-10f, 0x1.54fca60000000p-10f, 0x1.e843220000000p-11f, 0x1.268cfc0000000p-11f, 0x1.935b520000000p-13f,
++    0x1.4b194a0000000p-12f, 0x1.5e35720000000p-11f, 0x1.0b6f200000000p-10f, 0x1.67c3860000000p-10f, 0x1.c417ec0000000p-10f, 0x1.10362a0000000p-9f, 0x1.3e605e0000000p-9f, 0x1.6c8a920000000p-9f,
++    0x1.9ab4c40000000p-9f, 0x1.9da3960000000p-9f, 0x1.71a1a80000000p-9f, 0x1.459fba0000000p-9f, 0x1.199dca0000000p-9f, 0x1.db37b20000000p-10f, 0x1.8333d60000000p-10f, 0x1.2b2ff80000000p-10f,
++    0x1.a658320000000p-11f, 0x1.eca0e80000000p-12f, 0x1.1922d80000000p-13f, 0x1.41ce560000000p-13f, 0x1.f082fc0000000p-12f, 0x1.a00f640000000p-11f, 0x1.23eea60000000p-10f, 0x1.77d59a0000000p-10f,
++    0x1.cbbc8e0000000p-10f, 0x1.0fd1c20000000p-9f, 0x1.39c53c0000000p-9f, 0x1.63b8b60000000p-9f, 0x1.8dac2e0000000p-9f, 0x1.8666240000000p-9f, 0x1.5e68860000000p-9f, 0x1.366ae60000000p-9f,
++    0x1.0e6d480000000p-9f, 0x1.ccdf520000000p-10f, 0x1.7ce4160000000p-10f, 0x1.2ce8d80000000p-10f, 0x1.b9db360000000p-11f, 0x1.19e4bc0000000p-11f, 0x1.e7b90a0000000p-13f, 0x1.6e6a100000000p-13f,
++    0x1.e82ec00000000p-12f, 0x1.8c943a0000000p-11f, 0x1.12888c0000000p-10f, 0x1.5ec6fa0000000p-10f, 0x1.ab05680000000p-10f, 0x1.f743d60000000p-10f, 0x1.21c1220000000p-9f, 0x1.47e05a0000000p-9f,
++    0x1.6dff900000000p-9f, 0x1.826a940000000p-9f, 0x1.5e136a0000000p-9f, 0x1.39bc400000000p-9f, 0x1.1565160000000p-9f, 0x1.e21bd60000000p-10f, 0x1.996d800000000p-10f, 0x1.50bf2c0000000p-10f,
++    0x1.0810d80000000p-10f, 0x1.7ec5060000000p-11f, 0x1.dad0b80000000p-12f, 0x1.702ecc0000000p-13f, 0x1.0790b20000000p-14f, 0x1.57079a0000000p-12f, 0x1.3615840000000p-11f, 0x1.c0a7380000000p-11f,
++    0x1.259c780000000p-10f, 0x1.6ae5520000000p-10f, 0x1.b02e300000000p-10f, 0x1.f577080000000p-10f, 0x1.1d5ff20000000p-9f, 0x1.40045e0000000p-9f, 0x1.62a8cc0000000p-9f, 0x1.6c7baa0000000p-9f,
++    0x1.4b75a60000000p-9f, 0x1.2a6fa60000000p-9f, 0x1.0969a40000000p-9f, 0x1.d0c7460000000p-10f, 0x1.8ebb440000000p-10f, 0x1.4caf420000000p-10f, 0x1.0aa33e0000000p-10f, 0x1.912e760000000p-11f,
++    0x1.0d16720000000p-11f, 0x1.11fcd60000000p-12f, 0x1.3999600000000p-17f, 0x1.717c460000000p-14f, 0x1.5836aa0000000p-12f, 0x1.2a07200000000p-11f, 0x1.a7f2ec0000000p-11f, 0x1.12ef5c0000000p-10f,
++    0x1.51e5420000000p-10f, 0x1.90db280000000p-10f, 0x1.cfd10e0000000p-10f, 0x1.07637a0000000p-9f, 0x1.26de6c0000000p-9f, 0x1.4659600000000p-9f, 0x1.65d4520000000p-9f, 0x1.4a19e20000000p-9f,
++    0x1.2c17880000000p-9f, 0x1.0e152e0000000p-9f, 0x1.e025a80000000p-10f, 0x1.a420f20000000p-10f, 0x1.681c3e0000000p-10f, 0x1.2c17880000000p-10f, 0x1.e025a80000000p-11f, 0x1.681c3e0000000p-11f,
++    0x1.e025a80000000p-12f, 0x1.e025a80000000p-13f
++};
++inline constexpr uint16_t bit_reverse[512] = {
++    0, 256, 128, 384, 64, 320, 192, 448,
++    32, 288, 160, 416, 96, 352, 224, 480,
++    16, 272, 144, 400, 80, 336, 208, 464,
++    48, 304, 176, 432, 112, 368, 240, 496,
++    8, 264, 136, 392, 72, 328, 200, 456,
++    40, 296, 168, 424, 104, 360, 232, 488,
++    24, 280, 152, 408, 88, 344, 216, 472,
++    56, 312, 184, 440, 120, 376, 248, 504,
++    4, 260, 132, 388, 68, 324, 196, 452,
++    36, 292, 164, 420, 100, 356, 228, 484,
++    20, 276, 148, 404, 84, 340, 212, 468,
++    52, 308, 180, 436, 116, 372, 244, 500,
++    12, 268, 140, 396, 76, 332, 204, 460,
++    44, 300, 172, 428, 108, 364, 236, 492,
++    28, 284, 156, 412, 92, 348, 220, 476,
++    60, 316, 188, 444, 124, 380, 252, 508,
++    2, 258, 130, 386, 66, 322, 194, 450,
++    34, 290, 162, 418, 98, 354, 226, 482,
++    18, 274, 146, 402, 82, 338, 210, 466,
++    50, 306, 178, 434, 114, 370, 242, 498,
++    10, 266, 138, 394, 74, 330, 202, 458,
++    42, 298, 170, 426, 106, 362, 234, 490,
++    26, 282, 154, 410, 90, 346, 218, 474,
++    58, 314, 186, 442, 122, 378, 250, 506,
++    6, 262, 134, 390, 70, 326, 198, 454,
++    38, 294, 166, 422, 102, 358, 230, 486,
++    22, 278, 150, 406, 86, 342, 214, 470,
++    54, 310, 182, 438, 118, 374, 246, 502,
++    14, 270, 142, 398, 78, 334, 206, 462,
++    46, 302, 174, 430, 110, 366, 238, 494,
++    30, 286, 158, 414, 94, 350, 222, 478,
++    62, 318, 190, 446, 126, 382, 254, 510,
++    1, 257, 129, 385, 65, 321, 193, 449,
++    33, 289, 161, 417, 97, 353, 225, 481,
++    17, 273, 145, 401, 81, 337, 209, 465,
++    49, 305, 177, 433, 113, 369, 241, 497,
++    9, 265, 137, 393, 73, 329, 201, 457,
++    41, 297, 169, 425, 105, 361, 233, 489,
++    25, 281, 153, 409, 89, 345, 217, 473,
++    57, 313, 185, 441, 121, 377, 249, 505,
++    5, 261, 133, 389, 69, 325, 197, 453,
++    37, 293, 165, 421, 101, 357, 229, 485,
++    21, 277, 149, 405, 85, 341, 213, 469,
++    53, 309, 181, 437, 117, 373, 245, 501,
++    13, 269, 141, 397, 77, 333, 205, 461,
++    45, 301, 173, 429, 109, 365, 237, 493,
++    29, 285, 157, 413, 93, 349, 221, 477,
++    61, 317, 189, 445, 125, 381, 253, 509,
++    3, 259, 131, 387, 67, 323, 195, 451,
++    35, 291, 163, 419, 99, 355, 227, 483,
++    19, 275, 147, 403, 83, 339, 211, 467,
++    51, 307, 179, 435, 115, 371, 243, 499,
++    11, 267, 139, 395, 75, 331, 203, 459,
++    43, 299, 171, 427, 107, 363, 235, 491,
++    27, 283, 155, 411, 91, 347, 219, 475,
++    59, 315, 187, 443, 123, 379, 251, 507,
++    7, 263, 135, 391, 71, 327, 199, 455,
++    39, 295, 167, 423, 103, 359, 231, 487,
++    23, 279, 151, 407, 87, 343, 215, 471,
++    55, 311, 183, 439, 119, 375, 247, 503,
++    15, 271, 143, 399, 79, 335, 207, 463,
++    47, 303, 175, 431, 111, 367, 239, 495,
++    31, 287, 159, 415, 95, 351, 223, 479,
++    63, 319, 191, 447, 127, 383, 255, 511
++};
++inline constexpr float twiddle_real[256] = {
++    0x1.0000000000000p+0f, 0x1.fff6220000000p-1f, 0x1.ffd8860000000p-1f, 0x1.ffa72e0000000p-1f, 0x1.ff621e0000000p-1f, 0x1.ff09560000000p-1f, 0x1.fe9cda0000000p-1f, 0x1.fe1cb00000000p-1f,
++    0x1.fd88da0000000p-1f, 0x1.fce1600000000p-1f, 0x1.fc26480000000p-1f, 0x1.fb57980000000p-1f, 0x1.fa75580000000p-1f, 0x1.f97f920000000p-1f, 0x1.f876500000000p-1f, 0x1.f7599a0000000p-1f,
++    0x1.f6297c0000000p-1f, 0x1.f4e6040000000p-1f, 0x1.f38f3a0000000p-1f, 0x1.f225300000000p-1f, 0x1.f0a7f00000000p-1f, 0x1.ef178a0000000p-1f, 0x1.ed740e0000000p-1f, 0x1.ebbd8c0000000p-1f,
++    0x1.e9f4160000000p-1f, 0x1.e817ba0000000p-1f, 0x1.e6288e0000000p-1f, 0x1.e426a40000000p-1f, 0x1.e212100000000p-1f, 0x1.dfeae60000000p-1f, 0x1.ddb13c0000000p-1f, 0x1.db65260000000p-1f,
++    0x1.d906bc0000000p-1f, 0x1.d696180000000p-1f, 0x1.d4134e0000000p-1f, 0x1.d17e780000000p-1f, 0x1.ced7b00000000p-1f, 0x1.cc1f100000000p-1f, 0x1.c954b20000000p-1f, 0x1.c678b40000000p-1f,
++    0x1.c38b300000000p-1f, 0x1.c08c420000000p-1f, 0x1.bd7c0a0000000p-1f, 0x1.ba5aa60000000p-1f, 0x1.b728340000000p-1f, 0x1.b3e4d40000000p-1f, 0x1.b090a60000000p-1f, 0x1.ad2bca0000000p-1f,
++    0x1.a9b6620000000p-1f, 0x1.a630920000000p-1f, 0x1.a29a7a0000000p-1f, 0x1.9ef43e0000000p-1f, 0x1.9b3e040000000p-1f, 0x1.9777f00000000p-1f, 0x1.93a2240000000p-1f, 0x1.8fbcca0000000p-1f,
++    0x1.8bc8060000000p-1f, 0x1.87c4000000000p-1f, 0x1.83b0e00000000p-1f, 0x1.7f8ece0000000p-1f, 0x1.7b5df20000000p-1f, 0x1.771e760000000p-1f, 0x1.72d0840000000p-1f, 0x1.6e74460000000p-1f,
++    0x1.6a09e60000000p-1f, 0x1.6591920000000p-1f, 0x1.610b760000000p-1f, 0x1.5c77bc0000000p-1f, 0x1.57d6940000000p-1f, 0x1.53282a0000000p-1f, 0x1.4e6cac0000000p-1f, 0x1.49a44a0000000p-1f,
++    0x1.44cf320000000p-1f, 0x1.3fed960000000p-1f, 0x1.3affa20000000p-1f, 0x1.36058c0000000p-1f, 0x1.30ff800000000p-1f, 0x1.2bedb20000000p-1f, 0x1.26d0540000000p-1f, 0x1.21a79a0000000p-1f,
++    0x1.1c73b40000000p-1f, 0x1.1734d60000000p-1f, 0x1.11eb360000000p-1f, 0x1.0c97040000000p-1f, 0x1.07387a0000000p-1f, 0x1.01cfc80000000p-1f, 0x1.f8ba4e0000000p-2f, 0x1.edc1960000000p-2f,
++    0x1.e2b5d40000000p-2f, 0x1.d797760000000p-2f, 0x1.cc66ea0000000p-2f, 0x1.c1249e0000000p-2f, 0x1.b5d1000000000p-2f, 0x1.aa6c820000000p-2f, 0x1.9ef7940000000p-2f, 0x1.9372a60000000p-2f,
++    0x1.87de2a0000000p-2f, 0x1.7c3a940000000p-2f, 0x1.7088540000000p-2f, 0x1.64c7de0000000p-2f, 0x1.58f9a80000000p-2f, 0x1.4d1e240000000p-2f, 0x1.4135ca0000000p-2f, 0x1.35410c0000000p-2f,
++    0x1.2940620000000p-2f, 0x1.1d34440000000p-2f, 0x1.111d260000000p-2f, 0x1.04fb800000000p-2f, 0x1.f19f980000000p-3f, 0x1.d934fe0000000p-3f, 0x1.c0b8260000000p-3f, 0x1.a82a020000000p-3f,
++    0x1.8f8b840000000p-3f, 0x1.76dd9e0000000p-3f, 0x1.5e21440000000p-3f, 0x1.45576c0000000p-3f, 0x1.2c81060000000p-3f, 0x1.139f0c0000000p-3f, 0x1.f564e60000000p-4f, 0x1.c3785c0000000p-4f,
++    0x1.917a6c0000000p-4f, 0x1.5f6d000000000p-4f, 0x1.2d520a0000000p-4f, 0x1.f656e80000000p-5f, 0x1.91f6600000000p-5f, 0x1.2d86580000000p-5f, 0x1.9215600000000p-6f, 0x1.921d200000000p-7f,
++    0x1.1a62640000000p-54f, -0x1.921d200000000p-7f, -0x1.9215600000000p-6f, -0x1.2d86580000000p-5f, -0x1.91f6600000000p-5f, -0x1.f656e80000000p-5f, -0x1.2d520a0000000p-4f, -0x1.5f6d000000000p-4f,
++    -0x1.917a6c0000000p-4f, -0x1.c3785c0000000p-4f, -0x1.f564e60000000p-4f, -0x1.139f0c0000000p-3f, -0x1.2c81060000000p-3f, -0x1.45576c0000000p-3f, -0x1.5e21440000000p-3f, -0x1.76dd9e0000000p-3f,
++    -0x1.8f8b840000000p-3f, -0x1.a82a020000000p-3f, -0x1.c0b8260000000p-3f, -0x1.d934fe0000000p-3f, -0x1.f19f980000000p-3f, -0x1.04fb800000000p-2f, -0x1.111d260000000p-2f, -0x1.1d34440000000p-2f,
++    -0x1.2940620000000p-2f, -0x1.35410c0000000p-2f, -0x1.4135ca0000000p-2f, -0x1.4d1e240000000p-2f, -0x1.58f9a80000000p-2f, -0x1.64c7de0000000p-2f, -0x1.7088540000000p-2f, -0x1.7c3a940000000p-2f,
++    -0x1.87de2a0000000p-2f, -0x1.9372a60000000p-2f, -0x1.9ef7940000000p-2f, -0x1.aa6c820000000p-2f, -0x1.b5d1000000000p-2f, -0x1.c1249e0000000p-2f, -0x1.cc66ea0000000p-2f, -0x1.d797760000000p-2f,
++    -0x1.e2b5d40000000p-2f, -0x1.edc1960000000p-2f, -0x1.f8ba4e0000000p-2f, -0x1.01cfc80000000p-1f, -0x1.07387a0000000p-1f, -0x1.0c97040000000p-1f, -0x1.11eb360000000p-1f, -0x1.1734d60000000p-1f,
++    -0x1.1c73b40000000p-1f, -0x1.21a79a0000000p-1f, -0x1.26d0540000000p-1f, -0x1.2bedb20000000p-1f, -0x1.30ff800000000p-1f, -0x1.36058c0000000p-1f, -0x1.3affa20000000p-1f, -0x1.3fed960000000p-1f,
++    -0x1.44cf320000000p-1f, -0x1.49a44a0000000p-1f, -0x1.4e6cac0000000p-1f, -0x1.53282a0000000p-1f, -0x1.57d6940000000p-1f, -0x1.5c77bc0000000p-1f, -0x1.610b760000000p-1f, -0x1.6591920000000p-1f,
++    -0x1.6a09e60000000p-1f, -0x1.6e74460000000p-1f, -0x1.72d0840000000p-1f, -0x1.771e760000000p-1f, -0x1.7b5df20000000p-1f, -0x1.7f8ece0000000p-1f, -0x1.83b0e00000000p-1f, -0x1.87c4000000000p-1f,
++    -0x1.8bc8060000000p-1f, -0x1.8fbcca0000000p-1f, -0x1.93a2240000000p-1f, -0x1.9777f00000000p-1f, -0x1.9b3e040000000p-1f, -0x1.9ef43e0000000p-1f, -0x1.a29a7a0000000p-1f, -0x1.a630920000000p-1f,
++    -0x1.a9b6620000000p-1f, -0x1.ad2bca0000000p-1f, -0x1.b090a60000000p-1f, -0x1.b3e4d40000000p-1f, -0x1.b728340000000p-1f, -0x1.ba5aa60000000p-1f, -0x1.bd7c0a0000000p-1f, -0x1.c08c420000000p-1f,
++    -0x1.c38b300000000p-1f, -0x1.c678b40000000p-1f, -0x1.c954b20000000p-1f, -0x1.cc1f100000000p-1f, -0x1.ced7b00000000p-1f, -0x1.d17e780000000p-1f, -0x1.d4134e0000000p-1f, -0x1.d696180000000p-1f,
++    -0x1.d906bc0000000p-1f, -0x1.db65260000000p-1f, -0x1.ddb13c0000000p-1f, -0x1.dfeae60000000p-1f, -0x1.e212100000000p-1f, -0x1.e426a40000000p-1f, -0x1.e6288e0000000p-1f, -0x1.e817ba0000000p-1f,
++    -0x1.e9f4160000000p-1f, -0x1.ebbd8c0000000p-1f, -0x1.ed740e0000000p-1f, -0x1.ef178a0000000p-1f, -0x1.f0a7f00000000p-1f, -0x1.f225300000000p-1f, -0x1.f38f3a0000000p-1f, -0x1.f4e6040000000p-1f,
++    -0x1.f6297c0000000p-1f, -0x1.f7599a0000000p-1f, -0x1.f876500000000p-1f, -0x1.f97f920000000p-1f, -0x1.fa75580000000p-1f, -0x1.fb57980000000p-1f, -0x1.fc26480000000p-1f, -0x1.fce1600000000p-1f,
++    -0x1.fd88da0000000p-1f, -0x1.fe1cb00000000p-1f, -0x1.fe9cda0000000p-1f, -0x1.ff09560000000p-1f, -0x1.ff621e0000000p-1f, -0x1.ffa72e0000000p-1f, -0x1.ffd8860000000p-1f, -0x1.fff6220000000p-1f
++};
++inline constexpr float twiddle_imag[256] = {
++    -0x0.0p+0f, -0x1.921d200000000p-7f, -0x1.9215600000000p-6f, -0x1.2d86580000000p-5f, -0x1.91f6600000000p-5f, -0x1.f656e80000000p-5f, -0x1.2d520a0000000p-4f, -0x1.5f6d000000000p-4f,
++    -0x1.917a6c0000000p-4f, -0x1.c3785c0000000p-4f, -0x1.f564e60000000p-4f, -0x1.139f0c0000000p-3f, -0x1.2c81060000000p-3f, -0x1.45576c0000000p-3f, -0x1.5e21440000000p-3f, -0x1.76dd9e0000000p-3f,
++    -0x1.8f8b840000000p-3f, -0x1.a82a020000000p-3f, -0x1.c0b8260000000p-3f, -0x1.d934fe0000000p-3f, -0x1.f19f980000000p-3f, -0x1.04fb800000000p-2f, -0x1.111d260000000p-2f, -0x1.1d34440000000p-2f,
++    -0x1.2940620000000p-2f, -0x1.35410c0000000p-2f, -0x1.4135ca0000000p-2f, -0x1.4d1e240000000p-2f, -0x1.58f9a80000000p-2f, -0x1.64c7de0000000p-2f, -0x1.7088540000000p-2f, -0x1.7c3a940000000p-2f,
++    -0x1.87de2a0000000p-2f, -0x1.9372a60000000p-2f, -0x1.9ef7940000000p-2f, -0x1.aa6c820000000p-2f, -0x1.b5d1000000000p-2f, -0x1.c1249e0000000p-2f, -0x1.cc66ea0000000p-2f, -0x1.d797760000000p-2f,
++    -0x1.e2b5d40000000p-2f, -0x1.edc1960000000p-2f, -0x1.f8ba4e0000000p-2f, -0x1.01cfc80000000p-1f, -0x1.07387a0000000p-1f, -0x1.0c97040000000p-1f, -0x1.11eb360000000p-1f, -0x1.1734d60000000p-1f,
++    -0x1.1c73b40000000p-1f, -0x1.21a79a0000000p-1f, -0x1.26d0540000000p-1f, -0x1.2bedb20000000p-1f, -0x1.30ff800000000p-1f, -0x1.36058c0000000p-1f, -0x1.3affa20000000p-1f, -0x1.3fed960000000p-1f,
++    -0x1.44cf320000000p-1f, -0x1.49a44a0000000p-1f, -0x1.4e6cac0000000p-1f, -0x1.53282a0000000p-1f, -0x1.57d6940000000p-1f, -0x1.5c77bc0000000p-1f, -0x1.610b760000000p-1f, -0x1.6591920000000p-1f,
++    -0x1.6a09e60000000p-1f, -0x1.6e74460000000p-1f, -0x1.72d0840000000p-1f, -0x1.771e760000000p-1f, -0x1.7b5df20000000p-1f, -0x1.7f8ece0000000p-1f, -0x1.83b0e00000000p-1f, -0x1.87c4000000000p-1f,
++    -0x1.8bc8060000000p-1f, -0x1.8fbcca0000000p-1f, -0x1.93a2240000000p-1f, -0x1.9777f00000000p-1f, -0x1.9b3e040000000p-1f, -0x1.9ef43e0000000p-1f, -0x1.a29a7a0000000p-1f, -0x1.a630920000000p-1f,
++    -0x1.a9b6620000000p-1f, -0x1.ad2bca0000000p-1f, -0x1.b090a60000000p-1f, -0x1.b3e4d40000000p-1f, -0x1.b728340000000p-1f, -0x1.ba5aa60000000p-1f, -0x1.bd7c0a0000000p-1f, -0x1.c08c420000000p-1f,
++    -0x1.c38b300000000p-1f, -0x1.c678b40000000p-1f, -0x1.c954b20000000p-1f, -0x1.cc1f100000000p-1f, -0x1.ced7b00000000p-1f, -0x1.d17e780000000p-1f, -0x1.d4134e0000000p-1f, -0x1.d696180000000p-1f,
++    -0x1.d906bc0000000p-1f, -0x1.db65260000000p-1f, -0x1.ddb13c0000000p-1f, -0x1.dfeae60000000p-1f, -0x1.e212100000000p-1f, -0x1.e426a40000000p-1f, -0x1.e6288e0000000p-1f, -0x1.e817ba0000000p-1f,
++    -0x1.e9f4160000000p-1f, -0x1.ebbd8c0000000p-1f, -0x1.ed740e0000000p-1f, -0x1.ef178a0000000p-1f, -0x1.f0a7f00000000p-1f, -0x1.f225300000000p-1f, -0x1.f38f3a0000000p-1f, -0x1.f4e6040000000p-1f,
++    -0x1.f6297c0000000p-1f, -0x1.f7599a0000000p-1f, -0x1.f876500000000p-1f, -0x1.f97f920000000p-1f, -0x1.fa75580000000p-1f, -0x1.fb57980000000p-1f, -0x1.fc26480000000p-1f, -0x1.fce1600000000p-1f,
++    -0x1.fd88da0000000p-1f, -0x1.fe1cb00000000p-1f, -0x1.fe9cda0000000p-1f, -0x1.ff09560000000p-1f, -0x1.ff621e0000000p-1f, -0x1.ffa72e0000000p-1f, -0x1.ffd8860000000p-1f, -0x1.fff6220000000p-1f,
++    -0x1.0000000000000p+0f, -0x1.fff6220000000p-1f, -0x1.ffd8860000000p-1f, -0x1.ffa72e0000000p-1f, -0x1.ff621e0000000p-1f, -0x1.ff09560000000p-1f, -0x1.fe9cda0000000p-1f, -0x1.fe1cb00000000p-1f,
++    -0x1.fd88da0000000p-1f, -0x1.fce1600000000p-1f, -0x1.fc26480000000p-1f, -0x1.fb57980000000p-1f, -0x1.fa75580000000p-1f, -0x1.f97f920000000p-1f, -0x1.f876500000000p-1f, -0x1.f7599a0000000p-1f,
++    -0x1.f6297c0000000p-1f, -0x1.f4e6040000000p-1f, -0x1.f38f3a0000000p-1f, -0x1.f225300000000p-1f, -0x1.f0a7f00000000p-1f, -0x1.ef178a0000000p-1f, -0x1.ed740e0000000p-1f, -0x1.ebbd8c0000000p-1f,
++    -0x1.e9f4160000000p-1f, -0x1.e817ba0000000p-1f, -0x1.e6288e0000000p-1f, -0x1.e426a40000000p-1f, -0x1.e212100000000p-1f, -0x1.dfeae60000000p-1f, -0x1.ddb13c0000000p-1f, -0x1.db65260000000p-1f,
++    -0x1.d906bc0000000p-1f, -0x1.d696180000000p-1f, -0x1.d4134e0000000p-1f, -0x1.d17e780000000p-1f, -0x1.ced7b00000000p-1f, -0x1.cc1f100000000p-1f, -0x1.c954b20000000p-1f, -0x1.c678b40000000p-1f,
++    -0x1.c38b300000000p-1f, -0x1.c08c420000000p-1f, -0x1.bd7c0a0000000p-1f, -0x1.ba5aa60000000p-1f, -0x1.b728340000000p-1f, -0x1.b3e4d40000000p-1f, -0x1.b090a60000000p-1f, -0x1.ad2bca0000000p-1f,
++    -0x1.a9b6620000000p-1f, -0x1.a630920000000p-1f, -0x1.a29a7a0000000p-1f, -0x1.9ef43e0000000p-1f, -0x1.9b3e040000000p-1f, -0x1.9777f00000000p-1f, -0x1.93a2240000000p-1f, -0x1.8fbcca0000000p-1f,
++    -0x1.8bc8060000000p-1f, -0x1.87c4000000000p-1f, -0x1.83b0e00000000p-1f, -0x1.7f8ece0000000p-1f, -0x1.7b5df20000000p-1f, -0x1.771e760000000p-1f, -0x1.72d0840000000p-1f, -0x1.6e74460000000p-1f,
++    -0x1.6a09e60000000p-1f, -0x1.6591920000000p-1f, -0x1.610b760000000p-1f, -0x1.5c77bc0000000p-1f, -0x1.57d6940000000p-1f, -0x1.53282a0000000p-1f, -0x1.4e6cac0000000p-1f, -0x1.49a44a0000000p-1f,
++    -0x1.44cf320000000p-1f, -0x1.3fed960000000p-1f, -0x1.3affa20000000p-1f, -0x1.36058c0000000p-1f, -0x1.30ff800000000p-1f, -0x1.2bedb20000000p-1f, -0x1.26d0540000000p-1f, -0x1.21a79a0000000p-1f,
++    -0x1.1c73b40000000p-1f, -0x1.1734d60000000p-1f, -0x1.11eb360000000p-1f, -0x1.0c97040000000p-1f, -0x1.07387a0000000p-1f, -0x1.01cfc80000000p-1f, -0x1.f8ba4e0000000p-2f, -0x1.edc1960000000p-2f,
++    -0x1.e2b5d40000000p-2f, -0x1.d797760000000p-2f, -0x1.cc66ea0000000p-2f, -0x1.c1249e0000000p-2f, -0x1.b5d1000000000p-2f, -0x1.aa6c820000000p-2f, -0x1.9ef7940000000p-2f, -0x1.9372a60000000p-2f,
++    -0x1.87de2a0000000p-2f, -0x1.7c3a940000000p-2f, -0x1.7088540000000p-2f, -0x1.64c7de0000000p-2f, -0x1.58f9a80000000p-2f, -0x1.4d1e240000000p-2f, -0x1.4135ca0000000p-2f, -0x1.35410c0000000p-2f,
++    -0x1.2940620000000p-2f, -0x1.1d34440000000p-2f, -0x1.111d260000000p-2f, -0x1.04fb800000000p-2f, -0x1.f19f980000000p-3f, -0x1.d934fe0000000p-3f, -0x1.c0b8260000000p-3f, -0x1.a82a020000000p-3f,
++    -0x1.8f8b840000000p-3f, -0x1.76dd9e0000000p-3f, -0x1.5e21440000000p-3f, -0x1.45576c0000000p-3f, -0x1.2c81060000000p-3f, -0x1.139f0c0000000p-3f, -0x1.f564e60000000p-4f, -0x1.c3785c0000000p-4f,
++    -0x1.917a6c0000000p-4f, -0x1.5f6d000000000p-4f, -0x1.2d520a0000000p-4f, -0x1.f656e80000000p-5f, -0x1.91f6600000000p-5f, -0x1.2d86580000000p-5f, -0x1.9215600000000p-6f, -0x1.921d200000000p-7f
++};
++} // namespace hw1::stt::constants
+diff --git a/components/hardwareone/stt/quartznet_frontend.cpp b/components/hardwareone/stt/quartznet_frontend.cpp
+new file mode 100644
+index 0000000..8745dd9
+--- /dev/null
++++ b/components/hardwareone/stt/quartznet_frontend.cpp
+@@ -0,0 +1,146 @@
++#include "quartznet_frontend.h"
++#include "quartznet_constants.h"
++#include <cmath>
++#include <cstring>
++namespace hw1::stt {
++namespace {
++constexpr float kPreemphasis=0.97f, kDither=1e-5f, kLogGuard=0x1p-24f;
++struct Gaussian {
++    uint32_t state;
++    float spare=0;
++    bool has_spare=false;
++    uint32_t next() { state^=state<<13; state^=state>>17; state^=state<<5; return state; }
++    float uniform() { return static_cast<float>((static_cast<double>((next()>>8)+1))/16777217.0); }
++    float sample() {
++        if (has_spare) { has_spare=false; return spare; }
++        const float u1=uniform(), u2=uniform();
++        const float radius=std::sqrt(-2.0f*std::log(u1));
++        const float angle=0x1.921fb6p+2f*u2;
++        spare=radius*std::sin(angle); has_spare=true;
++        return radius*std::cos(angle);
++    }
++};
++void fft(FrontendWorkspace& w) {
++    for (size_t i=0;i<512;++i) {
++        const size_t j=constants::bit_reverse[i];
++        if (j>i) { const float temp=w.real[i]; w.real[i]=w.real[j]; w.real[j]=temp; }
++    }
++    for (size_t width=2;width<=512;width*=2) {
++        const size_t half=width/2, step=512/width;
++        for (size_t base=0;base<512;base+=width) for (size_t j=0;j<half;++j) {
++            const size_t a=base+j,b=a+half,t=j*step;
++            const float tr=constants::twiddle_real[t]*w.real[b]-constants::twiddle_imag[t]*w.imag[b];
++            const float ti=constants::twiddle_real[t]*w.imag[b]+constants::twiddle_imag[t]*w.real[b];
++            const float ar=w.real[a],ai=w.imag[a];
++            w.real[a]=ar+tr; w.imag[a]=ai+ti;
++            w.real[b]=ar-tr; w.imag[b]=ai-ti;
++        }
++    }
++}
++size_t reflect(int index, size_t samples) {
++    if (index<0) return static_cast<size_t>(-index);
++    if (static_cast<size_t>(index)>=samples) return 2*samples-2-static_cast<size_t>(index);
++    return static_cast<size_t>(index);
++}
++bool valid_score_extent(size_t frames,size_t stride) {
++    // The caller still owns the score allocation; reject arithmetic overflow before reads.
++    return frames<=kMaxSamples/160 && stride>=kCtcClasses &&
++        (frames==0 || stride<=(SIZE_MAX-kCtcClasses)/(frames>1?frames-1:1));
++}
++constexpr char kVocabulary[]=" abcdefghijklmnopqrstuvwxyz'";
++template<typename Score>
++Status feed(CtcState* state,const Score* scores,size_t frames,size_t stride,char* text,size_t capacity) {
++    if (!state||!text||!capacity||(!scores&&frames)||!valid_score_extent(frames,stride)||
++        state->frames>kMaxSamples/160||frames>kMaxSamples/160-state->frames||
++        state->written>=capacity||text[state->written]!='\0') return Status::InvalidArgument;
++    if (state->finished) return Status::AlreadyFinished;
++    for (size_t frame=0;frame<frames;++frame) {
++        const Score* row=scores+frame*stride;
++        size_t best=0;
++        for (size_t i=1;i<kCtcClasses;++i) if (row[i]>row[best]) best=i;
++        if (best!=kCtcBlank&&static_cast<int>(best)!=state->previous) {
++            const char value=kVocabulary[best];
++            if (!(state->written==0&&value==' ')) {
++                if (state->written+1<capacity&&!state->truncated) {
++                    text[state->written++]=value; text[state->written]='\0';
++                } else state->truncated=true;
++            }
++        }
++        state->previous=static_cast<int>(best); ++state->frames;
++    }
++    return state->truncated?Status::OutputTooSmall:Status::Ok;
++}
++}
++size_t feature_frames(size_t samples) { return samples>=kMinSamples&&samples<=kMaxSamples?(samples+159)/160:0; }
++Status compute_features(const int16_t* pcm,size_t samples,float* output,size_t capacity,
++                        FrontendWorkspace* workspace,uint32_t seed,bool dither) {
++    const size_t frames=feature_frames(samples);
++    if (!pcm||!output||!workspace||!frames||(dither&&!seed)) return Status::InvalidArgument;
++    if (capacity<frames*kMelBins) return Status::OutputTooSmall;
++    auto& w=*workspace;
++    Gaussian rng{seed};
++    size_t generated=0;
++    float previous=0;
++    for (size_t frame=0;frame<frames;++frame) {
++        const size_t center=frame*160;
++        size_t required=center+159;
++        if (required<160) required=160;
++        if (required>=samples) required=samples-1;
++        while (generated<=required) {
++            float sample=static_cast<float>(pcm[generated])*(1.0f/32768.0f);
++            if (dither) sample+=kDither*rng.sample();
++            w.conditioned[generated%512]=generated?sample-kPreemphasis*previous:sample;
++            previous=sample; ++generated;
++        }
++        std::memset(w.real,0,sizeof(w.real)); std::memset(w.imag,0,sizeof(w.imag));
++        for (size_t k=0;k<320;++k) {
++            const size_t input=reflect(static_cast<int>(center+k)-160,samples);
++            w.real[96+k]=w.conditioned[input%512]*constants::window[k];
++        }
++        fft(w);
++        for (size_t k=0;k<257;++k) w.power[k]=w.real[k]*w.real[k]+w.imag[k]*w.imag[k];
++        for (size_t m=0;m<kMelBins;++m) {
++            float value=0;
++            for (size_t j=0;j<constants::mel_count[m];++j)
++                value+=constants::mel_weight[constants::mel_offset[m]+j]*w.power[constants::mel_start[m]+j];
++            output[frame*kMelBins+m]=std::log(value+kLogGuard);
++        }
++    }
++    for (size_t m=0;m<kMelBins;++m) {
++        double sum=0;
++        for (size_t t=0;t<frames;++t) sum+=output[t*kMelBins+m];
++        const double exact_mean=sum/frames;
++        const float mean=static_cast<float>(exact_mean);
++        double variance=0;
++        for (size_t t=0;t<frames;++t) {
++            const double d=static_cast<double>(output[t*kMelBins+m])-exact_mean;
++            variance+=d*d;
++        }
++        const float stddev=std::sqrt(static_cast<float>(variance/(frames-1)))+1e-5f;
++        w.means[m]=mean; w.variances[m]=stddev;
++        for (size_t t=0;t<frames;++t) output[t*kMelBins+m]=(output[t*kMelBins+m]-mean)/stddev;
++    }
++    return Status::Ok;
++}
++Status ctc_reset(CtcState* state,char* text,size_t capacity) {
++    if (!state||!text||!capacity) return Status::InvalidArgument;
++    *state=CtcState{}; text[0]='\0'; return Status::Ok;
++}
++Status ctc_feed(CtcState* state,const float* scores,size_t frames,size_t stride,char* text,size_t capacity) {
++    if (!state||!text||!capacity||(!scores&&frames)||!valid_score_extent(frames,stride)||
++        state->frames>kMaxSamples/160||frames>kMaxSamples/160-state->frames) return Status::InvalidArgument;
++    for (size_t t=0;t<frames;++t) for(size_t c=0;c<kCtcClasses;++c)
++        if (!std::isfinite(scores[t*stride+c])) return Status::NonFinite;
++    return feed(state,scores,frames,stride,text,capacity);
++}
++Status ctc_feed(CtcState* state,const int8_t* scores,size_t frames,size_t stride,char* text,size_t capacity) {
++    return feed(state,scores,frames,stride,text,capacity);
++}
++Status ctc_finish(CtcState* state,char* text,size_t capacity) {
++    if (!state||!text||!capacity||state->written>=capacity||text[state->written]!='\0') return Status::InvalidArgument;
++    if (state->finished) return Status::AlreadyFinished;
++    while(state->written&&text[state->written-1]==' ') --state->written;
++    text[state->written]='\0'; state->finished=true;
++    return state->truncated?Status::OutputTooSmall:Status::Ok;
++}
++}
+diff --git a/components/hardwareone/stt/quartznet_frontend.h b/components/hardwareone/stt/quartznet_frontend.h
+new file mode 100644
+index 0000000..440b04b
+--- /dev/null
++++ b/components/hardwareone/stt/quartznet_frontend.h
+@@ -0,0 +1,38 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++namespace hw1::stt {
++inline constexpr size_t kSampleRate=16000, kMelBins=64, kMinSamples=320, kMaxSamples=480000;
++inline constexpr uint32_t kDitherSeed=0x12345678;
++enum class Status : uint8_t { Ok, InvalidArgument, OutputTooSmall, NonFinite, AlreadyFinished };
++// All workspace is caller-owned. No heap allocation, microphone or filesystem calls.
++// One Workspace may be reused serially, never shared between simultaneous calls.
++struct FrontendWorkspace {
++    float conditioned[512], real[512], imag[512], power[257];
++    double means[kMelBins], variances[kMelBins];
++};
++size_t feature_frames(size_t samples);
++// int16 PCM -> row-major float32 [ceil(N/160),64], without padding.
++// Input, output and workspace allocations must not overlap.
++// Raw HAL input: no upstream pre-emphasis/CMVN. Samples must be mono16kHz.
++// Deterministic Gaussian dither is reset once per utterance, before pre-emphasis.
++Status compute_features(const int16_t* pcm, size_t samples, float* output,
++                        size_t output_floats, FrontendWorkspace* workspace,
++                        uint32_t seed=kDitherSeed, bool dither=true);
++inline constexpr size_t kCtcClasses=29, kCtcBlank=28;
++struct CtcState {
++    int previous=-1;
++    size_t written=0, frames=0;
++    bool truncated=false, finished=false;
++};
++Status ctc_reset(CtcState* state, char* text, size_t capacity);
++// Scores have one common scale per tensor; int8 argmax requires no dequantization.
++// Maximum cumulative score frames: 3000. Caller supplies frames*stride scores.
++// Feed only valid model frames. State carries repeat/blank collapse across chunks.
++Status ctc_feed(CtcState* state, const float* scores, size_t frames, size_t stride,
++                char* text, size_t capacity);
++Status ctc_feed(CtcState* state, const int8_t* scores, size_t frames, size_t stride,
++                char* text, size_t capacity);
++// Finalization trims only trailing spaces and seals the output against later feeds.
++Status ctc_finish(CtcState* state, char* text, size_t capacity);
++}
+diff --git a/components/hardwareone/stt/quartznet_runtime.cpp b/components/hardwareone/stt/quartznet_runtime.cpp
+new file mode 100644
+index 0000000..b02044a
+--- /dev/null
++++ b/components/hardwareone/stt/quartznet_runtime.cpp
+@@ -0,0 +1,178 @@
++#include "quartznet_runtime.h"
++#include "quartznet_frontend.h"
++#include "stt_model_identity.h"
++#include "stt_model_container.h"
++#include "dl_model_base.hpp"
++#include "esp_heap_caps.h"
++#include "esp_timer.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++#include "mbedtls/sha256.h"
++#include "miniz.h"
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstring>
++#include <map>
++#include <memory>
++#include <new>
++#include <string>
++#include <vector>
++namespace hw1::stt {
++namespace {
++static_assert(kSampleRate==identity::kSampleRate && kMaxSamples==identity::kMaxSamples);
++uint32_t millis() { return uint32_t(esp_timer_get_time()/1000); }
++bool cancelled(const STTLocalControl& c) { return c.cancelled && c.cancelled(c.context); }
++void progress(const STTLocalControl& c, STTLocalPhase phase) { if(c.progress)c.progress(c.context,phase); }
++struct Buffer {
++    void* p = nullptr;
++    size_t bytes = 0;
++    bool sensitive = false;
++    explicit Buffer(size_t n, bool secret=false):bytes(n),sensitive(secret) {
++        p=heap_caps_aligned_alloc(16,n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
++    }
++    ~Buffer() { if(sensitive && p) { volatile uint8_t* d=static_cast<volatile uint8_t*>(p); for(size_t i=0;i<bytes;++i)d[i]=0; } heap_caps_free(p); }
++    Buffer(const Buffer&)=delete;
++    Buffer& operator=(const Buffer&)=delete;
++};
++bool readExact(ModelReader& r, void* dest, size_t size) {
++    auto p=static_cast<uint8_t*>(dest);
++    while(size) { size_t n=r.read(r.context,p,size); if(!n || n>size)return false; p+=n;size-=n; }
++    return true;
++}
++bool digest(const void* data, size_t bytes, uint8_t* hash) {
++    return mbedtls_sha256(static_cast<const unsigned char*>(data),bytes,hash,0)==0;
++}
++// ROM streaming inflate uses a non-wrapping output buffer of exactly the pinned
++// size. No untrusted length reaches ESP-DL's unchecked flatbuffer parser.
++bool inflateModel(ModelReader& r, uint8_t* raw, const STTLocalControl& control) {
++    Buffer workspace(sizeof(tinfl_decompressor)+4096);
++    if(!workspace.p)return false;
++    auto dec=static_cast<tinfl_decompressor*>(workspace.p);
++    auto in=reinterpret_cast<uint8_t*>(dec+1);
++    tinfl_init(dec);
++    size_t left=identity::kCompressedBytes, available=0, offset=0, output=0, chunks=0;
++    for(;;) {
++        if(cancelled(control))return false;
++        if(available==offset && left) {
++            available=std::min(left,size_t(4096));offset=0;
++            if(!readExact(r,in,available))return false;
++            left-=available;
++        }
++        size_t n=available-offset, out=identity::kRawBytes-output;
++        uint32_t flags=TINFL_FLAG_PARSE_ZLIB_HEADER|TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
++        if(left)flags|=TINFL_FLAG_HAS_MORE_INPUT;
++        tinfl_status status=tinfl_decompress(dec,in+offset,&n,raw,raw+output,&out,flags);
++        offset+=n;output+=out;
++        if(status==TINFL_STATUS_DONE)return output==identity::kRawBytes && !left && offset==available;
++        if(status<0 || (n==0 && out==0) || output>=identity::kRawBytes)return false;
++        if(!left && offset==available && status==TINFL_STATUS_NEEDS_MORE_INPUT)return false;
++        if(++chunks%32==0)vTaskDelay(1);
++    }
++}
++bool tensor(dl::TensorBase* t, size_t frames, size_t channels, int exponent) {
++    return t && t->data && t->dtype==dl::DATA_TYPE_INT8 && t->exponent.is_valid()
++        && !t->exponent.is_per_channel() && int(t->exponent)==exponent
++        && t->shape==std::vector<int>({1,int(frames),1,int(channels)})
++        && t->get_bytes()==int(frames*channels);
++}
++}
++bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
++                char* text, size_t capacity, const STTLocalControl& control,
++                STTLocalStats& stats, char* error, size_t errorCapacity,
++                Diagnostics* diagnostics) {
++    stats={}; if(diagnostics)*diagnostics={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
++    auto fail=[&](const char* why) { if(text && capacity)text[0]=0; if(error && errorCapacity)snprintf(error,errorCapacity,"%s",why);return false; };
++    if(!pcm || !text || capacity<2 || !reader.read || samples<kMinSamples || samples>kMaxSamples)return fail("Invalid STT audio buffer");
++    if(cancelled(control))return fail("Cancelled");
++    const size_t frames=feature_frames(samples), outputs=(frames+1)/2;
++    stats.samples=samples;stats.featureFrames=frames;stats.outputFrames=outputs;
++    if(!container::valid_size(reader.bytes))return fail("STT model size does not match this firmware");
++    progress(control,STTLocalPhase::Loading);uint32_t start=millis();
++    if(!container::read_header(reader.context,reader.bytes,reader.read))return fail("STT model identity mismatch");
++    // This pinned graph's 16-byte greedy arena is 2048*ceil(T/2), including
++    // residual lifetimes/fragmentation. Keep extra alignment and metadata/
++    // kernel-scratch margins: vendor constructors do not report every OOM.
++    const size_t arenaBudget=2048*outputs+64*1024;
++    const size_t frontendBytes=frames*kMelBins*sizeof(float)+sizeof(FrontendWorkspace);
++    constexpr size_t metadataMargin=1024*1024, internalMinimum=150*1024;
++    const size_t remainingBudget=arenaBudget+frontendBytes+metadataMargin;
++    if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)<identity::kRawBytes+remainingBudget
++       || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<identity::kRawBytes
++       || heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<internalMinimum)
++        return fail("Not enough free memory; stop camera, speech and other large models");
++    Buffer raw(identity::kRawBytes);
++    if(!raw.p)return fail("Cannot allocate STT model");
++    if(!inflateModel(reader,static_cast<uint8_t*>(raw.p),control))return fail(cancelled(control)?"Cancelled":"STT model decompression failed");
++    uint8_t hash[32];
++    if(!digest(raw.p,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32))return fail("STT model checksum mismatch");
++    stats.modelBytes=identity::kRawBytes;
++    if(cancelled(control))return fail("Cancelled");
++    // Raw model allocation can split the largest block. Check again before
++    // the vendor constructor requests a contiguous arena and creates metadata.
++    if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)<remainingBudget
++       || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<arenaBudget+metadataMargin
++       || heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<internalMinimum)
++        return fail("Not enough contiguous memory for STT activations");
++    // A fresh model per utterance avoids Model::build's resize allocation leak.
++    // Aligned EDL2+ in PSRAM allows zero-copy parameters; raw outlives model.
++    std::map<std::string,std::vector<int>> shapes{{identity::kInputName,{1,int(frames),1,64}}};
++    std::unique_ptr<dl::Model> model(new(std::nothrow) dl::Model(
++        static_cast<const char*>(raw.p),fbs::MODEL_LOCATION_IN_FLASH_RODATA,0,
++        dl::MEMORY_MANAGER_GREEDY,nullptr,false,shapes));
++    if(!model)return fail("Cannot create STT model");
++    auto input=model->get_input(identity::kInputName);auto output=model->get_output(identity::kOutputName);
++    if(!tensor(input,frames,64,identity::kInputExponent) || !tensor(output,outputs,29,identity::kOutputExponent))return fail("STT runtime tensor mismatch");
++    if(diagnostics) {
++        const auto memory=model->get_memory_info();
++        const auto variable=memory.find("variable");
++        if(variable!=memory.end()) {
++            diagnostics->activationPsramBytes=variable->second.psram;
++            diagnostics->activationInternalBytes=variable->second.internal;
++        }
++    }
++    stats.loadMs=millis()-start;
++    if(cancelled(control))return fail("Cancelled");
++    progress(control,STTLocalPhase::Frontend);start=millis();
++    {
++        Buffer features(frames*64*sizeof(float),true), workspace(sizeof(FrontendWorkspace),true);
++        if(!features.p || !workspace.p)return fail("Cannot allocate STT frontend");
++        auto f=static_cast<float*>(features.p);
++        if(compute_features(pcm,samples,f,frames*64,static_cast<FrontendWorkspace*>(workspace.p))!=Status::Ok)return fail("STT frontend failed");
++        auto q=static_cast<int8_t*>(input->data);
++        const float scale=std::ldexp(1.0f,-identity::kInputExponent);
++        for(size_t i=0;i<frames*64;++i) {
++            // nearest-even, matching ESP-PPQ/P4 quantization, independent of
++            // ambient FPU rounding mode (roundf would round ties away).
++            float x=f[i]*scale, lo=std::floor(x), part=x-lo;
++            int value=part>0.5f?int(lo)+1:part<0.5f?int(lo):(int(lo)&1)?int(lo)+1:int(lo);
++            q[i]=static_cast<int8_t>(std::max(-128,std::min(127,value)));
++        }
++    }
++    stats.frontendMs=millis()-start;
++    if(diagnostics) {
++        digest(input->data,input->get_bytes(),diagnostics->inputSha);
++        diagnostics->freePsramAtInference=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
++        diagnostics->freeInternalAtInference=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
++    }
++    if(cancelled(control))return fail("Cancelled");
++    progress(control,STTLocalPhase::Inference);start=millis();
++    for(int stage=0;stage<identity::kNodeCount;++stage) {
++        if(cancelled(control))return fail("Cancelled");
++        model->run(identity::kNodeCount,stage,dl::RUNTIME_MODE_MULTI_CORE);
++        vTaskDelay(1);
++    }
++    stats.inferenceMs=millis()-start;
++    if(cancelled(control))return fail("Cancelled");
++    progress(control,STTLocalPhase::Decoding);start=millis();
++    if(diagnostics)digest(output->data,output->get_bytes(),diagnostics->outputSha);
++    CtcState ctc;
++    if(ctc_reset(&ctc,text,capacity)!=Status::Ok
++       || ctc_feed(&ctc,static_cast<const int8_t*>(output->data),outputs,29,text,capacity)!=Status::Ok
++       || ctc_finish(&ctc,text,capacity)!=Status::Ok || ctc.truncated)return fail("STT transcript exceeds result capacity");
++    stats.decodeMs=millis()-start;
++    if(cancelled(control))return fail("Cancelled");
++    // Model destructor releases its arena before the backing raw blob is freed.
++    return true;
++}
++}
+diff --git a/components/hardwareone/stt/quartznet_runtime.h b/components/hardwareone/stt/quartznet_runtime.h
+new file mode 100644
+index 0000000..b7cbeaf
+--- /dev/null
++++ b/components/hardwareone/stt/quartznet_runtime.h
+@@ -0,0 +1,23 @@
++#pragma once
++#include "System_STTLocal.h"
++#include <cstddef>
++#include <cstdint>
++namespace hw1::stt {
++// A read-only stream already opened by the caller's storage/auth boundary.
++struct ModelReader {
++    void* context;
++    size_t bytes;
++    size_t (*read)(void*, void*, size_t);
++};
++struct Diagnostics {
++    uint8_t inputSha[32]{}, outputSha[32]{};
++    size_t activationPsramBytes = 0;
++    size_t activationInternalBytes = 0;
++    size_t freePsramAtInference = 0;
++    size_t freeInternalAtInference = 0;
++};
++bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
++                char* text, size_t capacity, const STTLocalControl& control,
++                STTLocalStats& stats, char* error, size_t errorCapacity,
++                Diagnostics* diagnostics = nullptr);
++}
+diff --git a/components/hardwareone/stt/stt_model_container.h b/components/hardwareone/stt/stt_model_container.h
+new file mode 100644
+index 0000000..ce6abfc
+--- /dev/null
++++ b/components/hardwareone/stt/stt_model_container.h
+@@ -0,0 +1,35 @@
++#pragma once
++#include "stt_model_identity.h"
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++namespace hw1::stt::container {
++inline constexpr size_t kHeaderBytes=96;
++static_assert(identity::kCompressedBytes<=std::numeric_limits<size_t>::max()-kHeaderBytes);
++inline uint32_t word(const uint8_t* p) {
++    return uint32_t(p[0]) | uint32_t(p[1])<<8 | uint32_t(p[2])<<16 | uint32_t(p[3])<<24;
++}
++inline bool valid_size(size_t bytes) { return bytes==kHeaderBytes+identity::kCompressedBytes; }
++// Only a complete, exactly identified envelope may reach decompression. The
++// runtime separately verifies the decompressed SHA before invoking ESP-DL.
++inline bool valid_header(const uint8_t* header,size_t available,size_t bytes) {
++    return header && available==kHeaderBytes && valid_size(bytes)
++        && std::memcmp(header,"HW1STT1\0",8)==0
++        && word(header+8)==1 && word(header+12)==1
++        && word(header+16)==identity::kRawBytes && word(header+20)==identity::kCompressedBytes
++        && word(header+24)==identity::kSampleRate && word(header+28)==identity::kMaxSamples
++        && std::memcmp(header+32,identity::kRawSha,32)==0
++        && std::memcmp(header+64,identity::kFrontendSha,32)==0;
++}
++inline bool read_header(void* context,size_t bytes,size_t (*read)(void*,void*,size_t)) {
++    if(!read || !valid_size(bytes))return false;
++    uint8_t header[kHeaderBytes];size_t have=0;
++    while(have<sizeof(header)) {
++        const size_t amount=read(context,header+have,sizeof(header)-have);
++        if(!amount || amount>sizeof(header)-have)return false;
++        have+=amount;
++    }
++    return valid_header(header,have,bytes);
++}
++} // namespace hw1::stt::container
+diff --git a/components/hardwareone/stt/stt_model_identity.h b/components/hardwareone/stt/stt_model_identity.h
+new file mode 100644
+index 0000000..eba4c35
+--- /dev/null
++++ b/components/hardwareone/stt/stt_model_identity.h
+@@ -0,0 +1,18 @@
++// Generated by pack_model.py. Do not hand-edit model/frontend identities.
++#pragma once
++#include <cstddef>
++#include <cstdint>
++namespace hw1::stt::identity {
++inline constexpr std::size_t kRawBytes = 7172016;
++inline constexpr std::size_t kCompressedBytes = 5490600;
++inline constexpr std::uint8_t kRawSha[32] = {0x8a, 0x67, 0x66, 0xf6, 0x95, 0x97, 0xe3, 0x19, 0xc5, 0x85, 0x61, 0x3e, 0x94, 0xfa, 0xba, 0x97, 0xdd, 0x20, 0x54, 0xa8, 0xd5, 0x27, 0xfd, 0x21, 0xb1, 0xaa, 0x7d, 0x40, 0x89, 0x81, 0xb9, 0x25};
++inline constexpr std::uint8_t kFrontendSha[32] = {0xca, 0x91, 0xeb, 0x96, 0x83, 0xf7, 0x15, 0x1b, 0x8b, 0xe1, 0xa0, 0x15, 0x32, 0xa6, 0x79, 0x0c, 0x6e, 0xb7, 0xd5, 0x15, 0xf6, 0x71, 0x69, 0xa2, 0x07, 0x75, 0x1e, 0x3f, 0xc4, 0x8c, 0xc5, 0x8b};
++inline constexpr char kInputName[] = "input.1";
++inline constexpr char kOutputName[] = "189";
++inline constexpr int kInputExponent = -5;
++inline constexpr int kOutputExponent = -2;
++inline constexpr int kNodeCount = 71;
++inline constexpr int kSampleRate = 16000;
++inline constexpr int kMaxSamples = 480000;
++inline constexpr int kMaxFeatureFrames = 3000;
++} // namespace hw1::stt::identity

@@ -1,0 +1,219 @@
+{
+  "schema": 1,
+  "status": "Host sanity checked; hardware qualification is recorded separately by runtime owner",
+  "model": "NVIDIA QuartzNet5x5LS-En, NeMo1.0.0a5",
+  "checkpoint_url": "https://api.ngc.nvidia.com/v2/models/nvidia/nemospeechmodels/versions/1.0.0a5/files/QuartzNet5x5LS-En.nemo",
+  "checkpoint_archive_sha256": "d12bae27c1aa66cf69111ce3f8e56ac7aa25dac27734ea4c3315a259966a02f5",
+  "checkpoint": {
+    "weights_sha256": "51a92f946c8cccacb723f4291be1f3285d589e5ac84fa0f6714221dbbbf333cb",
+    "config_sha256": "1e829dd42c31d4c55d2bcf844c8abbf664ba6f1b767a9e6c8e8d26672ae5ab58"
+  },
+  "frontend_contract_sha256": "ca91eb9683f7151b8be1a01532a6790c6eb7d515f67169a207751e3fc48cc58b",
+  "export": {
+    "stage": "full",
+    "target": "esp32p4",
+    "quant_type": "w8a8",
+    "bn_epsilon": 0.001,
+    "exact_valid_feature_length": true,
+    "max_feature_frames": 3000,
+    "calibration_steps": 8,
+    "unique_calibration_clips": 2,
+    "model": {
+      "file": "quartznet.espdl",
+      "bytes": 7172016,
+      "sha256": "8a6766f69597e319c585613e94faba97dd2054a8d527fd21b1aa7d408981b925"
+    },
+    "runtime": {
+      "inputs": [
+        {
+          "name": "input.1",
+          "shape": [
+            1,
+            663,
+            1,
+            64
+          ],
+          "dtype": 3,
+          "exponents": [
+            -5
+          ],
+          "layout": "NHWC; validated against exported dimensions and fixed channel/width contract"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "189",
+          "shape": [
+            1,
+            332,
+            1,
+            29
+          ],
+          "dtype": 3,
+          "exponents": [
+            -2
+          ],
+          "layout": "NHWC; validated against exported dimensions and fixed channel/width contract"
+        }
+      ],
+      "operators": {
+        "Conv": 61,
+        "Add": 5,
+        "Relu": 5
+      },
+      "node_count": 71
+    },
+    "versions": {
+      "torch": "2.10.0",
+      "esp-ppq": "1.3.11",
+      "onnx": "1.17.0",
+      "onnxruntime": "1.30.0",
+      "numpy": "2.2.6"
+    },
+    "scripts": {
+      "quartznet_graph.py": "59db61746b11990ced21ddb0c6582026967427add75812dc4e8e5495e6a43521",
+      "export_quartznet.py": "e5a56489e915feb2f26c94be8035f4a2364e1ecdb5a7b10e96b77f306f74b15a",
+      "frontend/reference_frontend.py": "1858f72b50380e622d0956e5789ca648e02b4cdff5a89477cd4f81a1f4c1316d"
+    },
+    "embedded_fixture0": {
+      "input": {
+        "logical_bytes": 42432,
+        "aligned_bytes": 42432,
+        "byte_exact": true
+      },
+      "output": {
+        "logical_bytes": 9628,
+        "aligned_bytes": 9632,
+        "byte_exact": true
+      }
+    }
+  },
+  "package": {
+    "schema": "HW1STT1",
+    "version": 1,
+    "codec": "zlib",
+    "header_bytes": 96,
+    "raw_bytes": 7172016,
+    "compressed_bytes": 5490600,
+    "raw_sha256": "8a6766f69597e319c585613e94faba97dd2054a8d527fd21b1aa7d408981b925",
+    "compressed_sha256": "8bfc15ae4a3874b8028cbbf69173fff60674c46341d979a248d07dba6aac8aa0",
+    "frontend_sha256": "ca91eb9683f7151b8be1a01532a6790c6eb7d515f67169a207751e3fc48cc58b",
+    "artifact": {
+      "file": "quartznet5x5.p4.stt",
+      "bytes": 5490696,
+      "sha256": "2569087185d881ccd38918023a12042996a2a7972f83e6dac7cbe572f4cef029"
+    },
+    "identity_header": {
+      "file": "stt_model_identity.h",
+      "sha256": "e7168df42c562ebd287f41de1843898a2414241b30db71d359da4bcb851d7bf2"
+    },
+    "source_manifest_sha256": "f9be50fdf25702eb28e76ed824f60c153be2682c8ffd115def38233ae52f00db",
+    "packer_sha256": "9e5cd11bf638e72340922e5a5a17a0dec9901f7a4d9c2bf4db5f9da34766a9c5",
+    "zlib_version": "1.2.12"
+  },
+  "calibration_and_evaluation": {
+    "scope": "Two-clip calibration and evaluation sanity check; not held-out WER or device qualification",
+    "cases": [
+      {
+        "fixture": "0.wav",
+        "wav_sha256": "6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f",
+        "samples": 106000,
+        "feature_frames": 663,
+        "reference": "after early nightfall the yellow lamps would light up here and there the squalid quarter of the brothels",
+        "float_text": "after early nightfall the yellow lamps would light up here and there the squalid quarter of the brotels",
+        "torch_original_text": "after early nightfall the yellow lamps would light up here and there the squalid quarter of the brotels",
+        "float_word_errors": 1,
+        "quantized_max_abs_error": 16.80643081665039,
+        "quantized_text": "after early nightfall the yellow lamps would light up here and there the squalid quarter of the brofels",
+        "quantized_word_errors": 1,
+        "float_quantized_text_equal": false,
+        "runtime_input_shape": [
+          1,
+          663,
+          1,
+          64
+        ],
+        "runtime_output_shape": [
+          1,
+          332,
+          1,
+          29
+        ],
+        "files": {
+          "input": {
+            "file": "fixture-0-input.bin",
+            "bytes": 42432,
+            "sha256": "684e88c3004f1a3f3bfc8c569e8a59845116f9ce6c3dc85a6b74268de5b0bc23"
+          },
+          "output": {
+            "file": "fixture-0-output.bin",
+            "bytes": 9628,
+            "sha256": "b13d484dc5d7530e3b5221fe3c21f80cbd0506175d9842e566fad9ad69495d70"
+          },
+          "features": {
+            "file": "fixture-0-features.bin",
+            "bytes": 169728,
+            "sha256": "86bbd2d08a579467e73ed5c24a60fb932cf4c44c2ec8d5e308e2e1f1fa5e8d8c"
+          }
+        }
+      },
+      {
+        "fixture": "1.wav",
+        "wav_sha256": "5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a",
+        "samples": 267440,
+        "feature_frames": 1672,
+        "reference": "god as a direct consequence of the sin which man thus punished had given her a lovely child whose place was on that same dishonoured bosom to connect her parent for ever with the race and descent of mortals and to be finally a blessed soul in heaven",
+        "float_text": "god as a direct consequence of the sin which man thus punished had given her a lovely child whose place was on that same dishonoured bosom to connect her parent for ever with the race and descent of mortals and to be finally a blessed soul in heaven",
+        "torch_original_text": "god as a direct consequence of the sin which man thus punished had given her a lovely child whose place was on that same dishonoured bosom to connect her parent for ever with the race and descent of mortals and to be finally a blessed soul in heaven",
+        "float_word_errors": 0,
+        "quantized_max_abs_error": 15.808225631713867,
+        "quantized_text": "god as a direct consequence of the sin which man thus punished had given her a lovely child whose place was on that same dishonoured bosom to connect her parent for ever with the race and dessent of mortals and to be finally a blessed soul in heaven",
+        "quantized_word_errors": 1,
+        "float_quantized_text_equal": false,
+        "runtime_input_shape": [
+          1,
+          1672,
+          1,
+          64
+        ],
+        "runtime_output_shape": [
+          1,
+          836,
+          1,
+          29
+        ],
+        "files": {
+          "input": {
+            "file": "fixture-1-input.bin",
+            "bytes": 107008,
+            "sha256": "40af537d6e87e398a3ee8d60ab0fa805370e4d2f83348a3046d2f717f0a3e157"
+          },
+          "output": {
+            "file": "fixture-1-output.bin",
+            "bytes": 24244,
+            "sha256": "b7f709bf4eb1150ae185f4cc407f11aacf4ac49596b8cf893fc9d19d5b99bc6e"
+          },
+          "features": {
+            "file": "fixture-1-features.bin",
+            "bytes": 428032,
+            "sha256": "f377c654a7f69f1d21179c980503a3f097bd099b6307074b9ea2f8ba1d2e3222"
+          }
+        }
+      }
+    ]
+  },
+  "commands": [
+    "python3 experiments/stt_p4/frontend/contract.py --check",
+    "experiments/stt_p4/private/export-venv/bin/python experiments/stt_p4/test_graph.py",
+    "experiments/stt_p4/private/export-venv/bin/python experiments/stt_p4/export_quartznet.py --frontend portable --stage full --output experiments/stt_p4/private/full-portable-v2",
+    "python3 experiments/stt_p4/pack_model.py --manifest experiments/stt_p4/private/full-portable-v2/manifest.json --frontend-sha256 ca91eb9683f7151b8be1a01532a6790c6eb7d515f67169a207751e3fc48cc58b",
+    "python3 experiments/stt_p4/test_pack_model.py"
+  ],
+  "bounds_and_caveats": [
+    "Exact valid feature lengths; no static zero-padding suffix.",
+    "Host quantized results are PPQ CPU fake-quantization until compared with device outputs.",
+    "Two calibration clips are also evaluation clips; word errors here do not estimate general or held-out accuracy.",
+    "Generated weights, PCM and feature/output tensors remain ignored private artifacts.",
+    "A fresh output directory is required for reproducible re-export."
+  ]
+}

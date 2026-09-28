@@ -75,7 +75,11 @@ def main() -> None:
         raise SystemExit("a host C++17 compiler is required")
     local = (COMPONENT / "WebServer_Server.cpp").read_text()
     bond = (COMPONENT / "WebPage_Bond.cpp").read_text()
+    utils = (COMPONENT / "System_Utils.cpp").read_text()
     definitions = [
+        extract_block(utils, "String redactOutputForLog("),
+        extract_block(local, "static String redactWebCommandResult("),
+        extract_block(local, "esp_err_t handleCLICommand("),
         extract_block(local, "static bool cliBatchCommandEquals("),
         extract_block(local, "static bool settingsSaveOutputConfirmed("),
         extract_block(local, "class SettingsBatchRequestCleanup") + ";",
@@ -95,8 +99,8 @@ def main() -> None:
         require("batch_response_oom" in handler, "batch lost explicit response OOM error")
         require("String respStr;" in handler and "serializeJson(respDoc, respStr)" in handler,
                 "narrow batch refactor changed the final String serializer")
-    require("results.add(redacted)" in definitions[-2],
-            "local batch must append owning redacted String")
+    require("results.add(directOut)" in definitions[-2],
+            "local batch must append owning direct-response String")
     require("results.add(out)" in definitions[-1],
             "bond batch must append owning output String")
 
@@ -109,7 +113,7 @@ def main() -> None:
         executable = Path(temp) / "web_batch_handlers"
         generated.write_text(harness)
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                   "-pedantic", "-I", str(HERE / "web_batch_stubs"),
+                   "-pedantic", "-Wno-sign-compare", "-I", str(HERE / "web_batch_stubs"),
                    "-I", str(JSON_INCLUDE), str(generated), "-o", str(executable)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-g"]

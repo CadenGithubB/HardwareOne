@@ -26,6 +26,11 @@ dependencies:
   # it transitively on P4/S3. Keep the existing consumer dependency explicit.
   espressif/esp-dsp:
     version: "==1.8.0"
+  # Local P4 transcription has a direct, pinned ESP-DL runtime dependency.
+  espressif/esp-dl:
+    version: "==3.3.12"
+    rules:
+      - if: "target in [esp32p4]"
   # ESP-SR for speech recognition (wake word + commands)
   espressif/esp-sr:
     version: "==2.5.5"

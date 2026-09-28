@@ -792,8 +792,25 @@ extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t rou
 // to avoid feeding the very pipe they trace; this just makes them off by default.
 bool bleDataDebugEnabled() { return isDebugFlagSet(DEBUG_BLE_DATA); }
 
+// Inspect the complete bounded payload before previews/trace fragmentation.
+// Raw notify also carries non-NUL-terminated encrypted frames, so never use
+// strstr/String construction here or read beyond the caller's byte count.
+static bool bleOutputHasPrivateSTT(const char* data, size_t len) {
+  static constexpr char marker[] = "\"sttText\"";
+  constexpr size_t markerLen = sizeof(marker) - 1;
+  if (!data || len < markerLen) return false;
+  for (size_t i = 0; i <= len - markerLen; ++i) {
+    if (memcmp(data + i, marker, markerLen) == 0) return true;
+  }
+  return false;
+}
+
 static void bleTxTrace(const char* tag, uint16_t connId, const char* data, size_t len) {
   if (!bleDataDebugEnabled()) return;
+  if (bleOutputHasPrivateSTT(data, len)) {
+    data = "[private STT result]";
+    len = strlen(data);
+  }
   const uint8_t NOBLE = (uint8_t)(MSG_ROUTE_ALL & ~MSG_ROUTE_BLE);
   size_t frags = (len + 194) / 195; if (frags == 0) frags = 1;   // 195 = SC_MAX_PAY_FRAME
   char hdr[160];
@@ -1739,6 +1756,20 @@ uint32_t getBLEConnectionDuration() {
 // producer running on the main loop (the notification sink) must not pay up to
 // 6 x 15 ms of vTaskDelay per send. It gives up on the first CONGESTED instead,
 // and its caller counts the drop. Reliable senders keep the default.
+#if ENABLE_OLED_DISPLAY
+static void bleRememberOutput(const char* data, size_t len) {
+  if (!data || !len) return;
+  if (bleOutputHasPrivateSTT(data, len)) {
+    data = "[private STT result]";
+    len = strlen(data);
+  }
+  char tagged[BLE_MSG_MAX_LEN];
+  const size_t previewLen = len < BLE_MSG_MAX_LEN - 4 ? len : BLE_MSG_MAX_LEN - 4;
+  snprintf(tagged, sizeof(tagged), "TX:%.*s", static_cast<int>(previewLen), data);
+  bleAddMessageToHistory(tagged);
+}
+#endif
+
 static bool bleRawNotifyToSession(uint16_t connId,
                                   TransportSessionEpoch expectedEpoch,
                                   const char* data, size_t len,
@@ -1799,12 +1830,7 @@ static bool bleRawNotifyToSession(uint16_t connId,
   }
 
   #if ENABLE_OLED_DISPLAY
-  if (sent) {
-    char tagged[BLE_MSG_MAX_LEN];
-    snprintf(tagged, sizeof(tagged), "TX:%.*s",
-             (int)(BLE_MSG_MAX_LEN - 4), data);
-    bleAddMessageToHistory(tagged);
-  }
+  if (sent) bleRememberOutput(data, len);
   #endif
   return sent;
 }
@@ -1852,11 +1878,7 @@ bool bleRawNotify(const char* data, size_t len) {
   if (sent && gBLEState) gBLEState->responsesSent++;
 
   #if ENABLE_OLED_DISPLAY
-  {
-    char tagged[BLE_MSG_MAX_LEN];
-    snprintf(tagged, sizeof(tagged), "TX:%.*s", (int)(BLE_MSG_MAX_LEN - 4), data ? data : "");
-    bleAddMessageToHistory(tagged);
-  }
+  bleRememberOutput(data, len);
   #endif
   return sent;
 }

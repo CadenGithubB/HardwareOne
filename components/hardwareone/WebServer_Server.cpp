@@ -1516,7 +1516,14 @@ extern bool gMeshActivitySuspended;
 // Command dispatch historically echoed the full line for an unknown verb.
 // Preserve that useful diagnostic while applying the command redactor to the
 // echoed portion (important for typo'd credential commands such as `logni`).
-static String redactWebCommandResult(const String& output) {
+static String redactWebCommandResult(const String& output,
+                                      bool directLiveOwnerReply = false) {
+  // sttText is a reserved producer tag. The STT broker already fences it to
+  // its source/session/token; only the direct, live cookie-session response
+  // may retain it. Shared mirrors always use the default redacted form.
+  // An unknown-command echo containing this word is not a structured result.
+  if (directLiveOwnerReply && output.startsWith("{") &&
+      output.indexOf("\"sttText\"") >= 0) return output;
   String safe = redactOutputForLog(output);
   static const char kUnknownPrefix[] = "Unknown command: ";
   if (!safe.startsWith(kUnknownPrefix)) return safe;
@@ -3744,6 +3751,9 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
     return ESP_OK;
   }
 
+  const String directOut = redactWebCommandResult(
+      out, webSessionStillLive && ctx.sid.length() != 0);
+
   // Response admission is a separate boundary from shared-mirror admission.
   // If revocation won since the earlier check, return only a fixed error body.
   if (ctx.sid.length() &&
@@ -3771,7 +3781,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   } else if (!ok || redactedOut.startsWith("Empty command") || redactedOut.startsWith("Unknown command")) {
     httpd_resp_set_status(req, "400 Bad Request");
   }
-  httpd_resp_send(req, redactedOut.c_str(), HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send(req, directOut.c_str(), HTTPD_RESP_USE_STRLEN);
   DEBUG_CMD_FLOWF("[web.cli] exit");
   return ESP_OK;
 }
@@ -5822,10 +5832,13 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     if (!cliModeOwnedBySession(ctx.transport, batchSessionEpoch)) {
       broadcastOutput(redacted, uc.ctx);
     }
-    // Batch results cross the same HTTP boundary as the single-command path;
-    // never return an unredacted handler response to the browser.
-    // Buffering failure must not skip later commands or the common cleanup.
-    if (resultsBuffered && !results.add(redacted)) resultsBuffered = false;
+    // Preserve private STT only for this live cookie-session response; shared
+    // broadcasts above keep the constant redaction. Other output retains the
+    // existing credential/unknown-command redaction. Later revocation clears
+    // every accumulated response before the HTTP send.
+    const String directOut = redactWebCommandResult(
+        out, batchSessionStillLive && ctx.sid.length() != 0);
+    if (resultsBuffered && !results.add(directOut)) resultsBuffered = false;
 
     count++;
 

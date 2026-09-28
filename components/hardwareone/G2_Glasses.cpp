@@ -30015,6 +30015,8 @@ struct KbdPadState {
   bool     micSignatureValid;
   bool     micRenderedAvailable;
   bool     micRenderedEpochLive;
+  bool     micRenderedPreparing;
+  bool     micRenderedBufferedLocal;
   DictationState micRenderedState;
   CommandSource  micRenderedOwner;
   char     micRenderedSource[5];
@@ -30157,12 +30159,15 @@ static void kbdRenderMicShades(uint8_t* shades) {
   } else if (snap.ownerSource == SOURCE_G2_GLASSES) {
     switch (snap.state) {
       case DictationState::RECORDING:
-        line1 = "SPEAK NOW";
-        line2 = "STOP SPEAKING TO END TRANSMISSION";
-        footer = "AUTO-STOPS AFTER SILENCE";
+        line1 = snap.preparing ? "GET READY" : "SPEAK NOW";
+        line2 = snap.preparing ? "STARTING MICROPHONE"
+                : snap.bufferedLocal ? "TAP MIC TO FINISH"
+                                     : "STOP SPEAKING TO END TRANSMISSION";
+        footer = snap.bufferedLocal ? "LOCAL RECORDING / 20 SEC MAX"
+                                   : "AUTO-STOPS AFTER SILENCE";
         break;
       case DictationState::WAITING:
-        line1 = "TRANSCRIBING";
+        line1 = snap.bufferedLocal ? "LOCAL STT" : "TRANSCRIBING";
         line2 = "TAP MIC TO CANCEL";
         footer = "LIST ROW STAYS FOCUSED";
         break;
@@ -30620,6 +30625,8 @@ static bool kbdPadMicStatusChanged(bool remember) {
   const bool changed = !gKbdPad.micSignatureValid ||
       gKbdPad.micRenderedAvailable != available ||
       gKbdPad.micRenderedEpochLive != epochLive ||
+      gKbdPad.micRenderedPreparing != snap.preparing ||
+      gKbdPad.micRenderedBufferedLocal != snap.bufferedLocal ||
       gKbdPad.micRenderedState != snap.state ||
       gKbdPad.micRenderedOwner != snap.ownerSource ||
       strcmp(gKbdPad.micRenderedSource, source) != 0 ||
@@ -30628,6 +30635,8 @@ static bool kbdPadMicStatusChanged(bool remember) {
     gKbdPad.micSignatureValid = true;
     gKbdPad.micRenderedAvailable = available;
     gKbdPad.micRenderedEpochLive = epochLive;
+    gKbdPad.micRenderedPreparing = snap.preparing;
+    gKbdPad.micRenderedBufferedLocal = snap.bufferedLocal;
     gKbdPad.micRenderedState = snap.state;
     gKbdPad.micRenderedOwner = snap.ownerSource;
     snprintf(gKbdPad.micRenderedSource,
