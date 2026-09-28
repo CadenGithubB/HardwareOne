@@ -1,0 +1,214 @@
+{
+  "schema": 1,
+  "started": "2026-09-28T12:24:12.238+00:00",
+  "runId": "e5a9568d",
+  "status": "failed",
+  "boards": {
+    "p4": {
+      "port": "/dev/cu.usbmodem2201",
+      "mac": "fc:01:2c:e0:b9:a8",
+      "name": "HW1_P4"
+    },
+    "s3": {
+      "port": "/dev/cu.usbmodem1101",
+      "mac": "68:ee:8f:50:e9:d0",
+      "name": "HW1_S3"
+    }
+  },
+  "options": {
+    "configure": false,
+    "pair": "discovery",
+    "initiator": "p4",
+    "rekey": false,
+    "reopen": false
+  },
+  "checks": [
+    {
+      "name": "login_p4",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 13.714
+    },
+    {
+      "name": "inspect_p4",
+      "status": "passed",
+      "evidence": {
+        "mac": "FC:01:2C:E0:B9:A8",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 0
+      },
+      "durationSec": 0.834
+    },
+    {
+      "name": "login_s3",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 1.284
+    },
+    {
+      "name": "inspect_s3",
+      "status": "passed",
+      "evidence": {
+        "mac": "68:EE:8F:50:E9:D0",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 0
+      },
+      "durationSec": 0.811
+    },
+    {
+      "name": "statistics_start",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "schema": 1,
+          "messagesSent": 0,
+          "messagesReceived": 0,
+          "messagesFailed": 0,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 0,
+          "heartbeatsReceived": 0,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 16
+        },
+        "s3": {
+          "schema": 1,
+          "messagesSent": 0,
+          "messagesReceived": 0,
+          "messagesFailed": 0,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 0,
+          "heartbeatsReceived": 0,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 16
+        }
+      },
+      "durationSec": 0.318
+    },
+    {
+      "name": "remove_existing_pair_p4",
+      "status": "passed",
+      "evidence": {
+        "alreadyUnpaired": true,
+        "peer": "68:ee:8f:50:e9:d0"
+      },
+      "durationSec": 0.576
+    },
+    {
+      "name": "remove_existing_pair_s3",
+      "status": "passed",
+      "evidence": {
+        "alreadyUnpaired": true,
+        "peer": "fc:01:2c:e0:b9:a8"
+      },
+      "durationSec": 0.458
+    },
+    {
+      "name": "fresh_discovery_pair",
+      "status": "failed",
+      "error": "Pairing did not populate both local send registries; identities/sessions alone are insufficient",
+      "durationSec": 35.799
+    }
+  ],
+  "scope": "two-node production pairing/session/text/file transport",
+  "statistics": {
+    "start": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 0,
+        "messagesReceived": 0,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 0,
+        "heartbeatsReceived": 0,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 16
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 0,
+        "messagesReceived": 0,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 0,
+        "heartbeatsReceived": 0,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 16
+      }
+    },
+    "end": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 53,
+        "messagesReceived": 46,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 6,
+        "heartbeatsReceived": 7,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 53
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 55,
+        "messagesReceived": 47,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 6,
+        "heartbeatsReceived": 6,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 53
+      }
+    }
+  },
+  "error": "Pairing did not populate both local send registries; identities/sessions alone are insufficient",
+  "endStatisticsCapture": {
+    "reason": "run_failure",
+    "timeoutPerBoardSec": 5.0,
+    "errors": {}
+  },
+  "finished": "2026-09-28T12:25:07.564716+00:00",
+  "source_sha256": "53ac1753d7fcf4ed21e489b7ee3d30197eac22dba621dbb13c193fe1f7ba2a6e",
+  "receiver_notice_observed": true,
+  "explicit_accept_acknowledged": true,
+  "final_registry_observation": {
+    "p4_count": 0,
+    "s3_count": 1,
+    "s3_saved_p4_encrypted": true,
+    "both_read_repeatedly_for_seconds": 30
+  },
+  "interpretation": "Both discovered each other. S3 received and explicitly accepted P4 request, but only S3 saved the peer. P4 registry remained empty over the bounded readiness check. Root cause not isolated; source request/accept reliability gaps remain."
+}

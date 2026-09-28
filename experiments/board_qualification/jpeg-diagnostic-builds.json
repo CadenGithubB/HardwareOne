@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "date": "2026-09-28",
+  "scope": "Temporary full-app USB JPEG diagnostic; compilation qualified, physical results recorded separately",
+  "base_commit": "db97310",
+  "idf": "5.5.5",
+  "command": "jpegdiag \"/jpeg_qualification/<fixture>.jpg\"",
+  "authentication": "Live named Serial administrator session; AuthBypass and other transports rejected",
+  "source_sha256": {
+    "experiments/board_qualification/jpeg-diagnostic.patch": "9272456d7d823f9e01fb94454f06467b3c40601ef7ab4dbea25d78f46e4800f0",
+    "experiments/board_qualification/prepare_jpeg_diagnostic.py": "9d149488ac0b44420d1f6765c5514260183176c89e186a58d30be43ea9823f12",
+    "experiments/board_qualification/build-jpeg-diagnostic.sh": "698558ff7735c9e8b84f20f8c94f479f982f5ca72bddd1fca4d65bf636d96414",
+    "experiments/board_qualification/radio_backend.cpp": "26c732ba79476835f9693a4e663a0e236bb4dd4ca6b2838e2afb4be0f0ee2c3a",
+    "experiments/board_qualification/radio_backend.h": "d899b56959a1dd0ff72e8354fbf93e8338d3ea86b527c2e8435af591e2c37492",
+    "experiments/board_qualification/jpeg_expectations.py": "d70767fcf989a528243d77bc2a3055ab3984f92fc33ccb925cedd7912b8795ec",
+    "experiments/board_qualification/jpeg-expectations.json": "f53876d95bbccc8bbd46356293f0a0a072ab14bb9c1cfce0843bc2a10ca346c9"
+  },
+  "hal_sha256": {
+    "HAL_JPEG.h": "d0a596973ec5829bdff399313a9f106717c9ceb10715f9a995dbc2b3189c7af2",
+    "HAL_JPEG.cpp": "a8d3e939d92af3196e4b1be1ed6acdd108ae47b726c771c093184dc5a9b24099",
+    "HAL_JPEG_Backend.h": "5f7902074225f2974ef1927604b3592bc3122990bbd010463a03ca2e9990982a",
+    "HAL_JPEG_Software.cpp": "fa9372fe2df01b8146cae11eb64f61668223ba8e71e511451328b4615d9f4961",
+    "HAL_JPEG_P4.cpp": "b8d374da2d2f649ece369589e4383c44e855fe358d0c2efeea4451e37c36dab3"
+  },
+  "offline_bmp_reference": {
+    "actual_production_cpp_buffers_compared": 21,
+    "all_bytes_equal": true
+  },
+  "builds": {
+    "p4": {
+      "file": "private/build-jpeg-p4/hardwareone-idf.bin",
+      "bytes": 4417328,
+      "sha256": "d7f3d29d874b6a3f096040704565a0a4bfe26af4d95f2c05d337dd0a85c0bb69",
+      "command_exit_code": 0,
+      "app_offset": "0x10000",
+      "application_partition_bytes": 6377472,
+      "partition_sha256": "d6e3ea6ea3e74e8baf99c8fd5b70b9c96adbdf248ffca778474e70e17b64d7df",
+      "partition_matches_previous": true,
+      "sdkconfig_values_match_previous": true,
+      "verified_source_count": 7934,
+      "source_manifest_sha256": "cd7b78c8c78aacb799efd90ce7d4ebef44c667f93c21996c71f512e49b8992ce",
+      "log_sha256": "ed8a67b962988f3d61362d53d999821354ad131090b4d2e75e93d47793eb30fa",
+      "compiled_camera": false,
+      "compiled_sense": false,
+      "compiled_microphone": false,
+      "compiled_display": true,
+      "qualified_hardware_jpeg": true,
+      "physical_tested": false
+    },
+    "s3": {
+      "file": "private/build-jpeg-s3/hardwareone-idf.bin",
+      "bytes": 4747552,
+      "sha256": "e27058d91020eb75f8ef9f70109555a0b00e5b472463f0a1e132f02fbf1331bd",
+      "command_exit_code": 0,
+      "app_offset": "0x10000",
+      "application_partition_bytes": 5984256,
+      "partition_sha256": "c6ed2513218eaa1d5b591914aea7ce95715500cb49068ed13b891ce5fa7efc71",
+      "partition_matches_previous": true,
+      "sdkconfig_values_match_previous": true,
+      "verified_source_count": 7924,
+      "source_manifest_sha256": "c4d005bc62a935ba63930e2a3fa9ae1cf31fd4a92a1d22cdc62fe5e1e3e72317",
+      "log_sha256": "e1e361798bf9bf96a48074b8c29e2eaab09629ff5f91484975407e97933da44e",
+      "compiled_camera": false,
+      "compiled_sense": false,
+      "compiled_microphone": false,
+      "compiled_display": false,
+      "qualified_hardware_jpeg": false,
+      "physical_tested": false
+    }
+  }
+}

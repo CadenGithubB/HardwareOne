@@ -1,0 +1,544 @@
+{
+  "schema": 1,
+  "scope": "Attempted board-only BLE role qualification; no new role-cycle or encrypted-server pass obtained",
+  "runs": [
+    {
+      "run": "20260928T121254.474813Z-cf473182",
+      "source_sha256": "c1dad27e22b2638f13ef4ec05629b9d88e477e8291eb3bd948130ef25318867d",
+      "status": "failed",
+      "error": "p4: firmware rejected command g2deinit",
+      "checks": [
+        {
+          "name": "p4_login",
+          "status": "passed",
+          "evidence": {
+            "authenticatedAdmin": true
+          },
+          "durationSec": 14.819
+        },
+        {
+          "name": "s3_login",
+          "status": "passed",
+          "evidence": {
+            "authenticatedAdmin": true
+          },
+          "durationSec": 1.348
+        },
+        {
+          "name": "p4_snapshot",
+          "status": "passed",
+          "evidence": {
+            "mode": "client",
+            "ble": {
+              "schema": 1,
+              "deviceName": "HW1_P4_BLE",
+              "txPower": 3,
+              "autoStart": true,
+              "requireAuth": true,
+              "secureChannelRequired": true,
+              "initialized": false,
+              "state": "uninitialized",
+              "connections": 0,
+              "maxConnections": 4,
+              "totalConnections": 0,
+              "commandsReceived": 0,
+              "clients": []
+            },
+            "peers": [
+              {
+                "name": "g2-glasses",
+                "autoReconnect": true,
+                "mac1": "dc:d3:41:4f:5a:a0",
+                "mac2": "c8:8d:65:00:97:69",
+                "pairedBy": "[REDACTED]"
+              },
+              {
+                "name": "phone",
+                "autoReconnect": false,
+                "mac1": "",
+                "mac2": null,
+                "pairedBy": ""
+              },
+              {
+                "name": "r1-ring",
+                "autoReconnect": true,
+                "mac1": "f8:29:ca:ba:ac:1c",
+                "mac2": null,
+                "pairedBy": "[REDACTED]"
+              }
+            ],
+            "g2": [
+              "scanning",
+              "down",
+              "down"
+            ],
+            "ringConnectPending": true,
+            "power": {
+              "schema": 1,
+              "mode": 0,
+              "modeName": "Performance",
+              "cpuMhz": 400,
+              "xtalMhz": 40,
+              "apbMhz": 90,
+              "activeMhz": 400,
+              "idleMhz": 100,
+              "interactiveFloorMhz": 100,
+              "supportedCpuMhz": [
+                100,
+                200,
+                400
+              ],
+              "autoMode": false,
+              "batteryThreshold": 20,
+              "displayBrightness": 255,
+              "displayDimLevel": 30,
+              "powerSaveMinutes": 10,
+              "powerSaveSupported": true,
+              "idleMsAgo": 51,
+              "cooldownMs": 5000,
+              "cooldownRemainingMs": 0,
+              "otaProbation": false,
+              "sleepAllowed": true,
+              "modes": [
+                {
+                  "index": 0,
+                  "name": "Performance",
+                  "activeMhz": 400,
+                  "idleMhz": 100,
+                  "brightness": 100
+                },
+                {
+                  "index": 1,
+                  "name": "Balanced",
+                  "activeMhz": 200,
+                  "idleMhz": 100,
+                  "brightness": 80
+                },
+                {
+                  "index": 2,
+                  "name": "PowerSaver",
+                  "activeMhz": 100,
+                  "idleMhz": 100,
+                  "brightness": 50
+                },
+                {
+                  "index": 3,
+                  "name": "UltraSaver",
+                  "activeMhz": 100,
+                  "idleMhz": 40,
+                  "brightness": 30
+                },
+                {
+                  "index": 4,
+                  "name": "Locked",
+                  "activeMhz": 400,
+                  "idleMhz": 400,
+                  "brightness": 100
+                }
+              ]
+            },
+            "loglink": "off"
+          },
+          "durationSec": 1.905
+        },
+        {
+          "name": "s3_snapshot",
+          "status": "passed",
+          "evidence": {
+            "mode": "server",
+            "ble": {
+              "schema": 1,
+              "deviceName": "HW1_S3_BLE",
+              "txPower": 7,
+              "autoStart": false,
+              "requireAuth": true,
+              "secureChannelRequired": true,
+              "initialized": false,
+              "state": "uninitialized",
+              "connections": 0,
+              "maxConnections": 4,
+              "totalConnections": 0,
+              "commandsReceived": 0,
+              "clients": []
+            },
+            "peers": [
+              {
+                "name": "phone",
+                "autoReconnect": false,
+                "mac1": "",
+                "mac2": null,
+                "pairedBy": ""
+              }
+            ],
+            "g2": [
+              "off",
+              "down",
+              "down"
+            ],
+            "ringConnectPending": false,
+            "power": {
+              "schema": 1,
+              "mode": 0,
+              "modeName": "Performance",
+              "cpuMhz": 240,
+              "xtalMhz": 40,
+              "apbMhz": 80,
+              "activeMhz": 240,
+              "idleMhz": 80,
+              "interactiveFloorMhz": 80,
+              "supportedCpuMhz": [
+                80,
+                160,
+                240
+              ],
+              "autoMode": false,
+              "batteryThreshold": 20,
+              "displayBrightness": 255,
+              "displayDimLevel": 30,
+              "powerSaveMinutes": 10,
+              "powerSaveSupported": false,
+              "idleMsAgo": 47,
+              "cooldownMs": 5000,
+              "cooldownRemainingMs": 0,
+              "otaProbation": false,
+              "sleepAllowed": true,
+              "modes": [
+                {
+                  "index": 0,
+                  "name": "Performance",
+                  "activeMhz": 240,
+                  "idleMhz": 80,
+                  "brightness": 100
+                },
+                {
+                  "index": 1,
+                  "name": "Balanced",
+                  "activeMhz": 160,
+                  "idleMhz": 80,
+                  "brightness": 80
+                },
+                {
+                  "index": 2,
+                  "name": "PowerSaver",
+                  "activeMhz": 80,
+                  "idleMhz": 80,
+                  "brightness": 50
+                },
+                {
+                  "index": 3,
+                  "name": "UltraSaver",
+                  "activeMhz": 80,
+                  "idleMhz": 40,
+                  "brightness": 30
+                },
+                {
+                  "index": 4,
+                  "name": "Locked",
+                  "activeMhz": 240,
+                  "idleMhz": 240,
+                  "brightness": 100
+                }
+              ]
+            },
+            "loglink": "off"
+          },
+          "durationSec": 1.702
+        },
+        {
+          "name": "p4_quiesce",
+          "status": "failed",
+          "error": "p4: firmware rejected command g2deinit",
+          "durationSec": 2.822
+        },
+        {
+          "name": "s3_restore",
+          "status": "passed",
+          "evidence": {
+            "mutationsStarted": false
+          },
+          "durationSec": 0.0
+        },
+        {
+          "name": "p4_restore",
+          "status": "failed",
+          "error": "p4: restoration incomplete: g2deinit: CheckFailed",
+          "durationSec": 6.18
+        }
+      ],
+      "restoration_errors": [
+        "p4: p4: restoration incomplete: g2deinit: CheckFailed"
+      ]
+    },
+    {
+      "run": "20260928T121929.793682Z-b2c6d128",
+      "source_sha256": "0943183e2b19373e13feaa3f24dcd4903fec80b36d47206b5b73694b1f3f9099",
+      "status": "failed",
+      "error": "p4: G2/R1 cancellation did not become idle within the bounded wait",
+      "checks": [
+        {
+          "name": "p4_login",
+          "status": "passed",
+          "evidence": {
+            "authenticatedAdmin": true
+          },
+          "durationSec": 14.463
+        },
+        {
+          "name": "s3_login",
+          "status": "passed",
+          "evidence": {
+            "authenticatedAdmin": true
+          },
+          "durationSec": 1.46
+        },
+        {
+          "name": "p4_snapshot",
+          "status": "passed",
+          "evidence": {
+            "mode": "client",
+            "ble": {
+              "schema": 1,
+              "deviceName": "HW1_P4_BLE",
+              "txPower": 3,
+              "autoStart": true,
+              "requireAuth": true,
+              "secureChannelRequired": true,
+              "initialized": false,
+              "state": "uninitialized",
+              "connections": 0,
+              "maxConnections": 4,
+              "totalConnections": 0,
+              "commandsReceived": 0,
+              "clients": []
+            },
+            "peers": [
+              {
+                "name": "g2-glasses",
+                "autoReconnect": true,
+                "mac1": "dc:d3:41:4f:5a:a0",
+                "mac2": "c8:8d:65:00:97:69",
+                "pairedBy": "[REDACTED]"
+              },
+              {
+                "name": "phone",
+                "autoReconnect": false,
+                "mac1": "",
+                "mac2": null,
+                "pairedBy": ""
+              },
+              {
+                "name": "r1-ring",
+                "autoReconnect": true,
+                "mac1": "f8:29:ca:ba:ac:1c",
+                "mac2": null,
+                "pairedBy": "[REDACTED]"
+              }
+            ],
+            "g2": [
+              "scanning",
+              "down",
+              "down"
+            ],
+            "ringConnectPending": true,
+            "power": {
+              "schema": 1,
+              "mode": 0,
+              "modeName": "Performance",
+              "cpuMhz": 400,
+              "xtalMhz": 40,
+              "apbMhz": 90,
+              "activeMhz": 400,
+              "idleMhz": 100,
+              "interactiveFloorMhz": 100,
+              "supportedCpuMhz": [
+                100,
+                200,
+                400
+              ],
+              "autoMode": false,
+              "batteryThreshold": 20,
+              "displayBrightness": 255,
+              "displayDimLevel": 30,
+              "powerSaveMinutes": 10,
+              "powerSaveSupported": true,
+              "idleMsAgo": 55,
+              "cooldownMs": 5000,
+              "cooldownRemainingMs": 0,
+              "otaProbation": false,
+              "sleepAllowed": true,
+              "modes": [
+                {
+                  "index": 0,
+                  "name": "Performance",
+                  "activeMhz": 400,
+                  "idleMhz": 100,
+                  "brightness": 100
+                },
+                {
+                  "index": 1,
+                  "name": "Balanced",
+                  "activeMhz": 200,
+                  "idleMhz": 100,
+                  "brightness": 80
+                },
+                {
+                  "index": 2,
+                  "name": "PowerSaver",
+                  "activeMhz": 100,
+                  "idleMhz": 100,
+                  "brightness": 50
+                },
+                {
+                  "index": 3,
+                  "name": "UltraSaver",
+                  "activeMhz": 100,
+                  "idleMhz": 40,
+                  "brightness": 30
+                },
+                {
+                  "index": 4,
+                  "name": "Locked",
+                  "activeMhz": 400,
+                  "idleMhz": 400,
+                  "brightness": 100
+                }
+              ]
+            },
+            "loglink": "off"
+          },
+          "durationSec": 2.061
+        },
+        {
+          "name": "s3_snapshot",
+          "status": "passed",
+          "evidence": {
+            "mode": "server",
+            "ble": {
+              "schema": 1,
+              "deviceName": "HW1_S3_BLE",
+              "txPower": 7,
+              "autoStart": false,
+              "requireAuth": true,
+              "secureChannelRequired": true,
+              "initialized": false,
+              "state": "uninitialized",
+              "connections": 0,
+              "maxConnections": 4,
+              "totalConnections": 0,
+              "commandsReceived": 0,
+              "clients": []
+            },
+            "peers": [
+              {
+                "name": "phone",
+                "autoReconnect": false,
+                "mac1": "",
+                "mac2": null,
+                "pairedBy": ""
+              }
+            ],
+            "g2": [
+              "off",
+              "down",
+              "down"
+            ],
+            "ringConnectPending": false,
+            "power": {
+              "schema": 1,
+              "mode": 0,
+              "modeName": "Performance",
+              "cpuMhz": 240,
+              "xtalMhz": 40,
+              "apbMhz": 80,
+              "activeMhz": 240,
+              "idleMhz": 80,
+              "interactiveFloorMhz": 80,
+              "supportedCpuMhz": [
+                80,
+                160,
+                240
+              ],
+              "autoMode": false,
+              "batteryThreshold": 20,
+              "displayBrightness": 255,
+              "displayDimLevel": 30,
+              "powerSaveMinutes": 10,
+              "powerSaveSupported": false,
+              "idleMsAgo": 52,
+              "cooldownMs": 5000,
+              "cooldownRemainingMs": 0,
+              "otaProbation": false,
+              "sleepAllowed": true,
+              "modes": [
+                {
+                  "index": 0,
+                  "name": "Performance",
+                  "activeMhz": 240,
+                  "idleMhz": 80,
+                  "brightness": 100
+                },
+                {
+                  "index": 1,
+                  "name": "Balanced",
+                  "activeMhz": 160,
+                  "idleMhz": 80,
+                  "brightness": 80
+                },
+                {
+                  "index": 2,
+                  "name": "PowerSaver",
+                  "activeMhz": 80,
+                  "idleMhz": 80,
+                  "brightness": 50
+                },
+                {
+                  "index": 3,
+                  "name": "UltraSaver",
+                  "activeMhz": 80,
+                  "idleMhz": 40,
+                  "brightness": 30
+                },
+                {
+                  "index": 4,
+                  "name": "Locked",
+                  "activeMhz": 240,
+                  "idleMhz": 240,
+                  "brightness": 100
+                }
+              ]
+            },
+            "loglink": "off"
+          },
+          "durationSec": 1.932
+        },
+        {
+          "name": "p4_quiesce",
+          "status": "failed",
+          "error": "p4: G2/R1 cancellation did not become idle within the bounded wait",
+          "durationSec": 14.813
+        },
+        {
+          "name": "s3_restore",
+          "status": "passed",
+          "evidence": {
+            "mutationsStarted": false
+          },
+          "durationSec": 0.0
+        },
+        {
+          "name": "p4_restore",
+          "status": "failed",
+          "error": "p4: restoration incomplete: Client stop: p4: G2/R1 cancellation did not become idle within the bounded wait",
+          "durationSec": 18.367
+        }
+      ],
+      "restoration_errors": [
+        "p4: p4: restoration incomplete: Client stop: p4: G2/R1 cancellation did not become idle within the bounded wait"
+      ]
+    }
+  ],
+  "finding": "P4 G2 became idle after explicit close, but disconnected R1 retained connectPending=true for the bounded 12-second wait and again during cleanup. No safe role switch was attempted afterward.",
+  "guard_bypassed": false,
+  "previous_qualified_BLE_results_invalidated": false,
+  "full_flash_restore": "verified; see restoration.json"
+}

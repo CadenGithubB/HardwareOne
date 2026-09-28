@@ -1,0 +1,1498 @@
+{
+  "schema": 1,
+  "scope": "USB full-app JPEG conversion; no G2 delivery or camera integration",
+  "s3": {
+    "status": "passed",
+    "checks": 44,
+    "source_sha256": "cf10c22880a2523dac6946f9fb4c95b8ed73d81a80f15f8a2364272dfa46e8c6",
+    "firmware_sha256": "e27058d91020eb75f8ef9f70109555a0b00e5b472463f0a1e132f02fbf1331bd",
+    "fixture_count": 20,
+    "repeat": {
+      "fixture": "rgb420_320x240",
+      "warmup_excluded_from_timing": true,
+      "iterations": 10,
+      "median_decode_us": 150799.0,
+      "median_bmp_us": 8504.5,
+      "median_total_us": 245100.5,
+      "internal_start": 185135,
+      "internal_end": 185135,
+      "internal_after_min": 185135,
+      "internal_after_max": 185135,
+      "largest_after_min": 102400,
+      "largest_after_max": 102400,
+      "all_integrity_checks_passed": true,
+      "all_rgb_and_bmp_hashes_stable": true,
+      "interpretation": "short repeated workload; concurrent application activity affects heap snapshots; not a leak/endurance verdict"
+    },
+    "fixture_results": [
+      {
+        "name": "s3_decode_blue_48x48",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 48,
+            "height": 48,
+            "backend": "software",
+            "rgb_hash": "b11e1dc5",
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 2350,
+            "bmp_us": 6462,
+            "total_us": 65812,
+            "internal_before": 185607,
+            "internal_after": 185607,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_blue_8x8",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 8,
+            "height": 8,
+            "backend": "software",
+            "rgb_hash": "24c1fdc5",
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 366,
+            "bmp_us": 5572,
+            "total_us": 64902,
+            "internal_before": 185587,
+            "internal_after": 185587,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_gray_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "software JPEG decode failed",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 443,
+            "bmp_us": 0,
+            "total_us": 55882,
+            "internal_before": 185587,
+            "internal_after": 185587,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_progressive_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "software JPEG decode failed",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 470,
+            "bmp_us": 0,
+            "total_us": 59023,
+            "internal_before": 185539,
+            "internal_after": 185539,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_red_48x48",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 48,
+            "height": 48,
+            "backend": "software",
+            "rgb_hash": "30f891c5",
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 2343,
+            "bmp_us": 5861,
+            "total_us": 70410,
+            "internal_before": 185571,
+            "internal_after": 185571,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_red_8x8",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 8,
+            "height": 8,
+            "backend": "software",
+            "rgb_hash": "a5de72c5",
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 351,
+            "bmp_us": 5573,
+            "total_us": 62853,
+            "internal_before": 185571,
+            "internal_after": 185571,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb420_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 17,
+            "height": 19,
+            "backend": "software",
+            "rgb_hash": "013ff62e",
+            "bmp_hash": "189da316",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 1410,
+            "bmp_us": 5024,
+            "total_us": 67988,
+            "internal_before": 185571,
+            "internal_after": 185571,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb420_24x24",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 24,
+            "height": 24,
+            "backend": "software",
+            "rgb_hash": "2875b766",
+            "bmp_hash": "26103489",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 1664,
+            "bmp_us": 5844,
+            "total_us": 64887,
+            "internal_before": 185571,
+            "internal_after": 185571,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb420_320x240",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 320,
+            "height": 240,
+            "backend": "software",
+            "rgb_hash": "bb31a4a0",
+            "bmp_hash": "ce5e337d",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 150869,
+            "bmp_us": 8348,
+            "total_us": 237078,
+            "internal_before": 185571,
+            "internal_after": 185571,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb422_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 17,
+            "height": 19,
+            "backend": "software",
+            "rgb_hash": "56cdddaf",
+            "bmp_hash": "6d941b1c",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 1413,
+            "bmp_us": 5929,
+            "total_us": 71379,
+            "internal_before": 185203,
+            "internal_after": 185559,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb422_24x24",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 24,
+            "height": 24,
+            "backend": "software",
+            "rgb_hash": "083ea52e",
+            "bmp_hash": "b6cf74d5",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 2024,
+            "bmp_us": 5640,
+            "total_us": 65443,
+            "internal_before": 185571,
+            "internal_after": 185571,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb422_320x240",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 320,
+            "height": 240,
+            "backend": "software",
+            "rgb_hash": "86557161",
+            "bmp_hash": "9f7196a3",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 183613,
+            "bmp_us": 9120,
+            "total_us": 274914,
+            "internal_before": 185571,
+            "internal_after": 185571,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb444_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 17,
+            "height": 19,
+            "backend": "software",
+            "rgb_hash": "bb62a7c1",
+            "bmp_hash": "8ebc5e13",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 1621,
+            "bmp_us": 5127,
+            "total_us": 68812,
+            "internal_before": 185571,
+            "internal_after": 185571,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb444_24x24",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 24,
+            "height": 24,
+            "backend": "software",
+            "rgb_hash": "1f7290e4",
+            "bmp_hash": "d5dc6bf9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 1992,
+            "bmp_us": 5911,
+            "total_us": 67381,
+            "internal_before": 185571,
+            "internal_after": 185571,
+            "largest_before": 110592,
+            "largest_after": 110592,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb444_320x240",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 320,
+            "height": 240,
+            "backend": "software",
+            "rgb_hash": "7ab8bc77",
+            "bmp_hash": "79f60307",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 249723,
+            "bmp_us": 8481,
+            "total_us": 346991,
+            "internal_before": 185135,
+            "internal_after": 185135,
+            "largest_before": 102400,
+            "largest_after": 102400,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_rgb444_48x48",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 48,
+            "height": 48,
+            "backend": "software",
+            "rgb_hash": "ee3edf92",
+            "bmp_hash": "6c268d8e",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 7459,
+            "bmp_us": 5882,
+            "total_us": 71514,
+            "internal_before": 185135,
+            "internal_after": 185135,
+            "largest_before": 102400,
+            "largest_after": 102400,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_invalid_soi",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "not a JPEG (missing SOI marker)",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 0,
+            "bmp_us": 0,
+            "total_us": 57897,
+            "internal_before": 185135,
+            "internal_after": 185135,
+            "largest_before": 102400,
+            "largest_after": 102400,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_too_small",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "file too small for JPEG",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 0,
+            "bmp_us": 0,
+            "total_us": 54069,
+            "internal_before": 185135,
+            "internal_after": 185135,
+            "largest_before": 102400,
+            "largest_after": 102400,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_truncated_eoi",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "truncated JPEG (missing EOI)",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 156,
+            "bmp_us": 0,
+            "total_us": 62343,
+            "internal_before": 185135,
+            "internal_after": 185135,
+            "largest_before": 102400,
+            "largest_after": 102400,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_decode_dimensions_over_limit",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "JPEG dimensions exceed limit",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 71,
+            "bmp_us": 0,
+            "total_us": 59298,
+            "internal_before": 185055,
+            "internal_after": 185055,
+            "largest_before": 102400,
+            "largest_after": 102400,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "s3_missing_file",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "file not found",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 0,
+            "bmp_us": 0,
+            "total_us": 25585,
+            "internal_before": 184751,
+            "internal_after": 184751,
+            "largest_before": 102400,
+            "largest_after": 102400,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      }
+    ],
+    "cleanup": [
+      {
+        "board": "s3",
+        "loglink_restored": true,
+        "originally_on": false
+      }
+    ]
+  },
+  "p4": {
+    "status": "matrix_completed_across_restarted_runs_with_two_preserved_USB_failures",
+    "firmware_sha256": "d7f3d29d874b6a3f096040704565a0a4bfe26af4d95f2c05d337dd0a85c0bb69",
+    "fixture_count": 20,
+    "fixture_results": [
+      {
+        "name": "p4_decode_blue_48x48",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 48,
+            "height": 48,
+            "backend": "hardware",
+            "rgb_hash": "5cdcc1c5",
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 2308,
+            "bmp_us": 5803,
+            "total_us": 73717,
+            "internal_before": 210995,
+            "internal_after": 210259,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_blue_8x8",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 8,
+            "height": 8,
+            "backend": "software",
+            "rgb_hash": "24c1fdc5",
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 562,
+            "bmp_us": 3813,
+            "total_us": 69441,
+            "internal_before": 210763,
+            "internal_after": 210763,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_gray_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 17,
+            "height": 19,
+            "backend": "software",
+            "rgb_hash": "7f1d8ed9",
+            "bmp_hash": "7cc13cdb",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 846,
+            "bmp_us": 3531,
+            "total_us": 63481,
+            "internal_before": 210219,
+            "internal_after": 210211,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_progressive_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "software JPEG decode failed",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 690,
+            "bmp_us": 0,
+            "total_us": 62218,
+            "internal_before": 210163,
+            "internal_after": 210715,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_red_48x48",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 48,
+            "height": 48,
+            "backend": "hardware",
+            "rgb_hash": "705cc1c5",
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 2341,
+            "bmp_us": 3857,
+            "total_us": 70763,
+            "internal_before": 207959,
+            "internal_after": 208511,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_red_8x8",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 8,
+            "height": 8,
+            "backend": "software",
+            "rgb_hash": "a5de72c5",
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 572,
+            "bmp_us": 4266,
+            "total_us": 64904,
+            "internal_before": 208459,
+            "internal_after": 207911,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb420_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 17,
+            "height": 19,
+            "backend": "software",
+            "rgb_hash": "1b6cc945",
+            "bmp_hash": "189da316",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 1115,
+            "bmp_us": 3515,
+            "total_us": 69997,
+            "internal_before": 207891,
+            "internal_after": 207899,
+            "largest_before": 172032,
+            "largest_after": 167936,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb420_24x24",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 24,
+            "height": 24,
+            "backend": "hardware",
+            "rgb_hash": "d01b6fd8",
+            "bmp_hash": "fe5dce55",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 3165,
+            "bmp_us": 3961,
+            "total_us": 67193,
+            "internal_before": 208459,
+            "internal_after": 208459,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb420_320x240",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 320,
+            "height": 240,
+            "backend": "hardware",
+            "rgb_hash": "5eed36ed",
+            "bmp_hash": "62331a1a",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 20371,
+            "bmp_us": 9151,
+            "total_us": 113521,
+            "internal_before": 208475,
+            "internal_after": 207927,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb422_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 17,
+            "height": 19,
+            "backend": "software",
+            "rgb_hash": "c50a0e78",
+            "bmp_hash": "6d941b1c",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 1085,
+            "bmp_us": 4721,
+            "total_us": 69737,
+            "internal_before": 208483,
+            "internal_after": 207835,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb422_24x24",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 24,
+            "height": 24,
+            "backend": "hardware",
+            "rgb_hash": "be0ebfae",
+            "bmp_hash": "00d5687d",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 2060,
+            "bmp_us": 3958,
+            "total_us": 67783,
+            "internal_before": 208959,
+            "internal_after": 208951,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb422_320x240",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 320,
+            "height": 240,
+            "backend": "hardware",
+            "rgb_hash": "3faa8522",
+            "bmp_hash": "d2272e09",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 20061,
+            "bmp_us": 6798,
+            "total_us": 114261,
+            "internal_before": 211055,
+            "internal_after": 210843,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb444_17x19",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 17,
+            "height": 19,
+            "backend": "software",
+            "rgb_hash": "bb62a7c1",
+            "bmp_hash": "8ebc5e13",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 1174,
+            "bmp_us": 4186,
+            "total_us": 79306,
+            "internal_before": 209787,
+            "internal_after": 209779,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb444_24x24",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 24,
+            "height": 24,
+            "backend": "software",
+            "rgb_hash": "1f7290e4",
+            "bmp_hash": "d5dc6bf9",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 1373,
+            "bmp_us": 3975,
+            "total_us": 73923,
+            "internal_before": 209767,
+            "internal_after": 209767,
+            "largest_before": 172032,
+            "largest_after": 172032,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb444_320x240",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": false,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 320,
+            "height": 240,
+            "backend": "hardware",
+            "rgb_hash": "42a44304",
+            "bmp_hash": "8c3a132d",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 30395,
+            "bmp_us": 8957,
+            "total_us": 137079,
+            "internal_before": 209255,
+            "internal_after": 209595,
+            "largest_before": 163840,
+            "largest_after": 163840,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_rgb444_48x48",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": false,
+          "independent_bmp_reference": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": true,
+            "converted": true,
+            "error": "",
+            "width": 48,
+            "height": 48,
+            "backend": "hardware",
+            "rgb_hash": "03f6d8a3",
+            "bmp_hash": "cf8577e3",
+            "bmp_bytes": 20854,
+            "bmp_valid": true,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "decode_us": 2426,
+            "bmp_us": 4885,
+            "total_us": 70182,
+            "internal_before": 209099,
+            "internal_after": 208555,
+            "largest_before": 163840,
+            "largest_after": 163840,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_invalid_soi",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "not a JPEG (missing SOI marker)",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 0,
+            "bmp_us": 0,
+            "total_us": 62107,
+            "internal_before": 208551,
+            "internal_after": 208563,
+            "largest_before": 163840,
+            "largest_after": 163840,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_too_small",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "file too small for JPEG",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 0,
+            "bmp_us": 0,
+            "total_us": 59310,
+            "internal_before": 208563,
+            "internal_after": 208563,
+            "largest_before": 163840,
+            "largest_after": 163840,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_truncated_eoi",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "truncated JPEG (missing EOI)",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 481,
+            "bmp_us": 0,
+            "total_us": 67097,
+            "internal_before": 209099,
+            "internal_after": 208555,
+            "largest_before": 163840,
+            "largest_after": 163840,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_decode_dimensions_over_limit",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "JPEG dimensions exceed limit",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 108,
+            "bmp_us": 0,
+            "total_us": 63879,
+            "internal_before": 207439,
+            "internal_after": 207439,
+            "largest_before": 163840,
+            "largest_after": 163840,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      },
+      {
+        "name": "p4_missing_file",
+        "status": "passed",
+        "evidence": {
+          "expected_failure": true,
+          "diagnostic": {
+            "schema": 1,
+            "diagnostic": "full-app-jpeg",
+            "ok": false,
+            "converted": false,
+            "error": "file not found",
+            "width": 0,
+            "height": 0,
+            "backend": "none",
+            "rgb_hash": "00000000",
+            "bmp_hash": "00000000",
+            "bmp_bytes": 0,
+            "bmp_valid": false,
+            "bmp_width": 0,
+            "bmp_height": 0,
+            "decode_us": 0,
+            "bmp_us": 0,
+            "total_us": 28410,
+            "internal_before": 207123,
+            "internal_after": 207123,
+            "largest_before": 163840,
+            "largest_after": 163840,
+            "integrity_before": true,
+            "integrity_after": true
+          }
+        }
+      }
+    ],
+    "repeat": {
+      "fixture": "rgb420_320x240",
+      "warmup_excluded_from_timing": true,
+      "iterations": 10,
+      "median_decode_us": 21957.0,
+      "median_bmp_us": 8513.0,
+      "median_total_us": 123275.5,
+      "internal_start": 207519,
+      "internal_end": 206991,
+      "internal_after_min": 206991,
+      "internal_after_max": 208063,
+      "largest_after_min": 163840,
+      "largest_after_max": 163840,
+      "all_integrity_checks_passed": true,
+      "all_rgb_and_bmp_hashes_stable": true,
+      "interpretation": "short repeated workload; concurrent application activity affects heap snapshots; not a leak/endurance verdict"
+    },
+    "runs": [
+      {
+        "run": "20260928T115721Z-17738f8a81bbb28f",
+        "status": "failed",
+        "source_sha256": "72efeab3826c1aedf264029b45ede85a9dba720e69c323b99ea7c7ee555b0880",
+        "first_failure": {
+          "name": "p4_decode_rgb422_320x240",
+          "error": "Expected one JPEG diagnostic response",
+          "type": "CheckFailed"
+        },
+        "cleanup": [
+          {
+            "board": "p4",
+            "loglink_restored": true,
+            "originally_on": false
+          }
+        ]
+      },
+      {
+        "run": "20260928T120728Z-4ecdcfee7ab9fd1a",
+        "status": "failed",
+        "source_sha256": "5b83235a202347ff03fa5cf1d4eed9ec7755a0dd7b2b7b222bca76e52523108b",
+        "first_failure": {
+          "name": "p4_stage_rgb444_320x240",
+          "error": "Timed-out serial command did not reach its completion barrier; close/reopen required",
+          "type": "ConnectivityConsoleFatal"
+        },
+        "cleanup": [
+          {
+            "board": "p4",
+            "loglink_restored": false,
+            "error": "Console completion is unknown; close/reopen before further commands"
+          }
+        ]
+      },
+      {
+        "run": "20260928T121535Z-bf68ef04a24babdb",
+        "status": "passed",
+        "source_sha256": "c5b33ba96dc3fb1f003e2892313e4f776bf74e8fba1666dd513ef7fcd2ff805a",
+        "first_failure": null,
+        "cleanup": [
+          {
+            "board": "p4",
+            "loglink_restored": true,
+            "originally_on": false
+          }
+        ]
+      }
+    ],
+    "transport_workaround": {
+      "fileread_chunk_bytes": 256,
+      "readback_gap_seconds": 0.1,
+      "firmware_changed_by_this_runner": false,
+      "fresh_console_may_reset_board": true,
+      "continuous_recovery_claimed": false,
+      "automatic_failure_retries": 0
+    },
+    "qualification_limit": "Successful conversions do not erase failed continuous runs; exact USB-loss mechanism remains unproven."
+  },
+  "limits": [
+    "Small-image BMP references are independently calculated; QVGA BMP repetitions compare with warmup.",
+    "Reported total_us includes diagnostic hashing and excludes USB upload and G2 transport.",
+    "These platform timings do not isolate the hardware accelerator effect.",
+    "Negative authorization and PSRAM exhaustion/bypass not physically exercised."
+  ]
+}

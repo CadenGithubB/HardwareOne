@@ -1,0 +1,724 @@
+{
+  "schema": 1,
+  "started": "2026-09-28T11:48:13.075+00:00",
+  "runId": "63419af2",
+  "status": "passed",
+  "boards": {
+    "p4": {
+      "port": "/dev/cu.usbmodem2201",
+      "mac": "fc:01:2c:e0:b9:a8",
+      "name": "HW1_P4"
+    },
+    "s3": {
+      "port": "/dev/cu.usbmodem1101",
+      "mac": "68:ee:8f:50:e9:d0",
+      "name": "HW1_S3"
+    }
+  },
+  "options": {
+    "configure": false,
+    "pair": "preserve",
+    "initiator": "p4",
+    "rekey": true,
+    "reopen": true
+  },
+  "checks": [
+    {
+      "name": "login_p4",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 13.49
+    },
+    {
+      "name": "login_s3",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 1.419
+    },
+    {
+      "name": "inspect_p4",
+      "status": "passed",
+      "evidence": {
+        "mac": "FC:01:2C:E0:B9:A8",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 1
+      },
+      "durationSec": 1.017
+    },
+    {
+      "name": "inspect_s3",
+      "status": "passed",
+      "evidence": {
+        "mac": "68:EE:8F:50:E9:D0",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 1
+      },
+      "durationSec": 0.78
+    },
+    {
+      "name": "statistics_start",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "schema": 1,
+          "messagesSent": 7,
+          "messagesReceived": 5,
+          "messagesFailed": 0,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 1,
+          "heartbeatsReceived": 1,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 16
+        },
+        "s3": {
+          "schema": 1,
+          "messagesSent": 5,
+          "messagesReceived": 7,
+          "messagesFailed": 4,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 3,
+          "heartbeatsReceived": 1,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 16
+        }
+      },
+      "durationSec": 0.337
+    },
+    {
+      "name": "pairing",
+      "status": "passed",
+      "evidence": {
+        "mode": "preserve",
+        "existingIdentities": {
+          "p4": true,
+          "s3": true
+        },
+        "discoveryTested": false,
+        "localRegistries": {
+          "p4": {
+            "mac": "68:EE:8F:50:E9:D0",
+            "name": "HW1_S3",
+            "encrypted": true,
+            "meshId": 0
+          },
+          "s3": {
+            "mac": "FC:01:2C:E0:B9:A8",
+            "name": "HW1_P4",
+            "encrypted": true,
+            "meshId": 0
+          }
+        },
+        "sessions": {
+          "p4": {
+            "slot": 0,
+            "mac": "68:EE:8F:50:E9:D0",
+            "meshId": 0,
+            "sessionId": 40521,
+            "dir": "B",
+            "state": "ACTIVE",
+            "ageMs": 5353,
+            "txSeq": 1,
+            "rxHwm": 0
+          },
+          "s3": {
+            "slot": 0,
+            "mac": "FC:01:2C:E0:B9:A8",
+            "meshId": 0,
+            "sessionId": 40521,
+            "dir": "A",
+            "state": "ACTIVE",
+            "ageMs": 5701,
+            "txSeq": 0,
+            "rxHwm": 1
+          }
+        },
+        "senderReadyProbes": [
+          {
+            "direction": "p4->s3",
+            "msgId": 7,
+            "bytes": 64,
+            "pieces": 1,
+            "encrypted": true,
+            "sha256": "225d0386e85d1a9c73ecd41338a857cc44252d760cb2931a49a95ee6199bffc2"
+          },
+          {
+            "direction": "s3->p4",
+            "msgId": 9,
+            "bytes": 64,
+            "pieces": 1,
+            "encrypted": true,
+            "sha256": "724577930432ad428433ed1248bc0eb531c9f7544d168fd83268d49048a40b7d"
+          }
+        ]
+      },
+      "durationSec": 2.963
+    },
+    {
+      "name": "active_session",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "slot": 0,
+          "mac": "68:EE:8F:50:E9:D0",
+          "meshId": 0,
+          "sessionId": 40521,
+          "dir": "B",
+          "state": "ACTIVE",
+          "ageMs": 7329,
+          "txSeq": 2,
+          "rxHwm": 1
+        },
+        "s3": {
+          "slot": 0,
+          "mac": "FC:01:2C:E0:B9:A8",
+          "meshId": 0,
+          "sessionId": 40521,
+          "dir": "A",
+          "state": "ACTIVE",
+          "ageMs": 7706,
+          "txSeq": 1,
+          "rxHwm": 2
+        }
+      },
+      "durationSec": 0.352
+    },
+    {
+      "name": "text_p4_to_s3_1",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 8,
+        "bytes": 1,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "252f10c83610ebca1a059c0bae8255eba2f95be4d1d7bcfa89d7248a82d9f111"
+      },
+      "durationSec": 0.922
+    },
+    {
+      "name": "text_p4_to_s3_201",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 9,
+        "bytes": 201,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "f80bc4d89c0241a63b56c58cb715dee7ca388feb341eabb6c784c1fdbbf14333"
+      },
+      "durationSec": 0.735
+    },
+    {
+      "name": "text_p4_to_s3_202",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 10,
+        "bytes": 202,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "dd7ed298dbf2153614ed5697198f3dc6090ce2ea919aa81a671a254a4bd1e3b8"
+      },
+      "durationSec": 0.729
+    },
+    {
+      "name": "text_p4_to_s3_203",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 12,
+        "bytes": 203,
+        "pieces": 2,
+        "encrypted": true,
+        "sha256": "ec7bebb78d169a60a27e50c84de6ddcf66be23be2d6e02584a7cdc90b99b734b"
+      },
+      "durationSec": 0.894
+    },
+    {
+      "name": "text_p4_to_s3_400",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 13,
+        "bytes": 400,
+        "pieces": 2,
+        "encrypted": true,
+        "sha256": "69aa6f4438655941a5831e291afe85ecde11787f3d501ea7fde926d679db9e49"
+      },
+      "durationSec": 0.942
+    },
+    {
+      "name": "text_p4_to_s3_401",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 14,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "17137c64d8b17dd6c3dc196896167a56cba703c3bfcadfbc15e921543f5004ce"
+      },
+      "durationSec": 1.163
+    },
+    {
+      "name": "text_p4_to_s3_1024",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 15,
+        "bytes": 1024,
+        "pieces": 6,
+        "encrypted": true,
+        "sha256": "beecb9f17080c45e9f6fab25354b76bc274e137fba27934a4afc67731e246448"
+      },
+      "durationSec": 1.627
+    },
+    {
+      "name": "text_p4_to_s3_1025",
+      "status": "passed",
+      "evidence": {
+        "bytes": 1025,
+        "rejected": true,
+        "error": "too long"
+      },
+      "durationSec": 2.012
+    },
+    {
+      "name": "text_s3_to_p4_1",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 12,
+        "bytes": 1,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+      },
+      "durationSec": 0.8
+    },
+    {
+      "name": "text_s3_to_p4_201",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 14,
+        "bytes": 201,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "933cd1cfc0bd791694d83c9be5531d6333255ee2389d7ed65d92acbd2af24afa"
+      },
+      "durationSec": 0.6
+    },
+    {
+      "name": "text_s3_to_p4_202",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 15,
+        "bytes": 202,
+        "pieces": 1,
+        "encrypted": true,
+        "sha256": "f45e9714f9c3fdda0f2afe61a2429daaf71b2af3f31cb9da111d812ca5db0402"
+      },
+      "durationSec": 0.809
+    },
+    {
+      "name": "text_s3_to_p4_203",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 16,
+        "bytes": 203,
+        "pieces": 2,
+        "encrypted": true,
+        "sha256": "386ca87e619e0ba942bd2f1492d6ea8025249ae17579a9888db36241c672830b"
+      },
+      "durationSec": 0.769
+    },
+    {
+      "name": "text_s3_to_p4_400",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 17,
+        "bytes": 400,
+        "pieces": 2,
+        "encrypted": true,
+        "sha256": "67ea9e2acbba8401210128e9c751679642cf004ccb3583434d111ed43cb523f7"
+      },
+      "durationSec": 0.909
+    },
+    {
+      "name": "text_s3_to_p4_401",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 18,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "70cca782ec93d9f1f18522f6bdac29bb57cdb82271b7684bb135a69b94df4fca"
+      },
+      "durationSec": 1.157
+    },
+    {
+      "name": "text_s3_to_p4_1024",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 20,
+        "bytes": 1024,
+        "pieces": 6,
+        "encrypted": true,
+        "sha256": "c0b30b6d09a4e9b501d28716585d06b9455712e438ecba6a599acfa0089a4db6"
+      },
+      "durationSec": 1.669
+    },
+    {
+      "name": "text_s3_to_p4_1025",
+      "status": "passed",
+      "evidence": {
+        "bytes": 1025,
+        "rejected": true,
+        "error": "too long"
+      },
+      "durationSec": 1.912
+    },
+    {
+      "name": "session_after_text",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "slot": 0,
+          "mac": "68:EE:8F:50:E9:D0",
+          "meshId": 0,
+          "sessionId": 40521,
+          "dir": "B",
+          "state": "ACTIVE",
+          "ageMs": 25389,
+          "txSeq": 18,
+          "rxHwm": 17
+        },
+        "s3": {
+          "slot": 0,
+          "mac": "FC:01:2C:E0:B9:A8",
+          "meshId": 0,
+          "sessionId": 40521,
+          "dir": "A",
+          "state": "ACTIVE",
+          "ageMs": 25771,
+          "txSeq": 17,
+          "rxHwm": 18
+        }
+      },
+      "durationSec": 0.373
+    },
+    {
+      "name": "file_p4_to_s3_8192",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "path": "/espnow/received/FC012CE0B9A8/mesh_63419af2_p4.bin",
+        "bytes": 8192,
+        "sha256": "19d03df88266588981a179c63f2d2766b488a81e4f231459643aa7b622f6d569",
+        "receiverCompletion": true,
+        "sessionId": 40521,
+        "rxPathRequiresSessionEncryption": true
+      },
+      "durationSec": 23.505
+    },
+    {
+      "name": "file_s3_to_p4_8192",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "path": "/espnow/received/68EE8F50E9D0/mesh_63419af2_s3.bin",
+        "bytes": 8192,
+        "sha256": "36d25011e2c583b3f07ca14a8f2ef910884a0108b9f649e349de16e435070510",
+        "receiverCompletion": true,
+        "sessionId": 40521,
+        "rxPathRequiresSessionEncryption": true
+      },
+      "durationSec": 19.911
+    },
+    {
+      "name": "rekey",
+      "status": "passed",
+      "evidence": {
+        "before": {
+          "p4": {
+            "slot": 0,
+            "mac": "68:EE:8F:50:E9:D0",
+            "meshId": 0,
+            "sessionId": 40521,
+            "dir": "B",
+            "state": "ACTIVE",
+            "ageMs": 70291,
+            "txSeq": 61,
+            "rxHwm": 60
+          },
+          "s3": {
+            "slot": 0,
+            "mac": "FC:01:2C:E0:B9:A8",
+            "meshId": 0,
+            "sessionId": 40521,
+            "dir": "A",
+            "state": "ACTIVE",
+            "ageMs": 70627,
+            "txSeq": 60,
+            "rxHwm": 61
+          }
+        },
+        "after": {
+          "p4": {
+            "slot": 0,
+            "mac": "68:EE:8F:50:E9:D0",
+            "meshId": 0,
+            "sessionId": 40521,
+            "dir": "B",
+            "state": "ACTIVE",
+            "ageMs": 42,
+            "txSeq": 0,
+            "rxHwm": 0
+          },
+          "s3": {
+            "slot": 0,
+            "mac": "FC:01:2C:E0:B9:A8",
+            "meshId": 0,
+            "sessionId": 40521,
+            "dir": "A",
+            "state": "ACTIVE",
+            "ageMs": 376,
+            "txSeq": 0,
+            "rxHwm": 0
+          }
+        },
+        "bothReportedNewKeys": true,
+        "previousKeyGraceMs": 5000,
+        "waitedAfterBothConfirmationsMs": 5500,
+        "priorDebugSettings": {
+          "p4": {
+            "core": false,
+            "level": 2,
+            "levelName": "info"
+          },
+          "s3": {
+            "core": false,
+            "level": 2,
+            "levelName": "info"
+          }
+        },
+        "debugSettingsRestored": true
+      },
+      "durationSec": 8.07
+    },
+    {
+      "name": "after_rekey_p4",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 34,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "2582d2b43b1c9b59c1bed66627efda732045b97baafbba809f8b3b5582faa7e6"
+      },
+      "durationSec": 1.576
+    },
+    {
+      "name": "after_rekey_s3",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 37,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "a519479e083892bf39b2e85ce68a3eba87d6e6b936e671bc5c14fe862adccc1b"
+      },
+      "durationSec": 1.011
+    },
+    {
+      "name": "radio_reopen",
+      "status": "passed",
+      "evidence": {
+        "reopened": "p4",
+        "sessions": {
+          "p4": {
+            "slot": 0,
+            "mac": "68:EE:8F:50:E9:D0",
+            "meshId": 0,
+            "sessionId": 40521,
+            "dir": "B",
+            "state": "ACTIVE",
+            "ageMs": 11004,
+            "txSeq": 4,
+            "rxHwm": 3
+          },
+          "s3": {
+            "slot": 0,
+            "mac": "FC:01:2C:E0:B9:A8",
+            "meshId": 0,
+            "sessionId": 40521,
+            "dir": "A",
+            "state": "ACTIVE",
+            "ageMs": 11266,
+            "txSeq": 3,
+            "rxHwm": 4
+          }
+        }
+      },
+      "durationSec": 2.45
+    },
+    {
+      "name": "after_reopen_p4",
+      "status": "passed",
+      "evidence": {
+        "direction": "p4->s3",
+        "msgId": 38,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "45612556f1b1d0d3ba48ff4e53a44b40696d1375362c3317a1513ff11a36f12d"
+      },
+      "durationSec": 2.125
+    },
+    {
+      "name": "after_reopen_s3",
+      "status": "passed",
+      "evidence": {
+        "direction": "s3->p4",
+        "msgId": 40,
+        "bytes": 401,
+        "pieces": 3,
+        "encrypted": true,
+        "sha256": "1762374daaa901636e212ca16ed17e4a5605d2592dac371f12835cb55b462f98"
+      },
+      "durationSec": 1.581
+    },
+    {
+      "name": "statistics_end",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "schema": 1,
+          "messagesSent": 153,
+          "messagesReceived": 151,
+          "messagesFailed": 0,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 18,
+          "heartbeatsReceived": 17,
+          "filesSent": 1,
+          "filesReceived": 1,
+          "uptimeSec": 98
+        },
+        "s3": {
+          "schema": 1,
+          "messagesSent": 151,
+          "messagesReceived": 153,
+          "messagesFailed": 5,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 19,
+          "heartbeatsReceived": 18,
+          "filesSent": 1,
+          "filesReceived": 1,
+          "uptimeSec": 98
+        }
+      },
+      "durationSec": 0.32
+    }
+  ],
+  "scope": "preserved two-node session/text/file transport, rekey and ordered ESP-NOW reopen; no fresh pairing",
+  "statistics": {
+    "start": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 7,
+        "messagesReceived": 5,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 1,
+        "heartbeatsReceived": 1,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 16
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 5,
+        "messagesReceived": 7,
+        "messagesFailed": 4,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 3,
+        "heartbeatsReceived": 1,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 16
+      }
+    },
+    "end": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 153,
+        "messagesReceived": 151,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 18,
+        "heartbeatsReceived": 17,
+        "filesSent": 1,
+        "filesReceived": 1,
+        "uptimeSec": 98
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 151,
+        "messagesReceived": 153,
+        "messagesFailed": 5,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 19,
+        "heartbeatsReceived": 18,
+        "filesSent": 1,
+        "filesReceived": 1,
+        "uptimeSec": 98
+      }
+    }
+  },
+  "finished": "2026-09-28T11:49:53.074+00:00",
+  "evidence_source_sha256": "e695598aa8de2cc0a82ae31316052d78f785d956ee9d3ac5c574d57a7f7f220b"
+}

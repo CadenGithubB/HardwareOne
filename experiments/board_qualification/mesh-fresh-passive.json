@@ -1,0 +1,206 @@
+{
+  "schema": 1,
+  "started": "2026-09-28T12:22:04.122+00:00",
+  "runId": "cac52a12",
+  "status": "failed",
+  "boards": {
+    "p4": {
+      "port": "/dev/cu.usbmodem2201",
+      "mac": "fc:01:2c:e0:b9:a8",
+      "name": "HW1_P4"
+    },
+    "s3": {
+      "port": "/dev/cu.usbmodem1101",
+      "mac": "68:ee:8f:50:e9:d0",
+      "name": "HW1_S3"
+    }
+  },
+  "options": {
+    "configure": false,
+    "pair": "discovery",
+    "initiator": "p4",
+    "rekey": false,
+    "reopen": false
+  },
+  "checks": [
+    {
+      "name": "login_p4",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 13.73
+    },
+    {
+      "name": "inspect_p4",
+      "status": "passed",
+      "evidence": {
+        "mac": "FC:01:2C:E0:B9:A8",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 1
+      },
+      "durationSec": 0.942
+    },
+    {
+      "name": "login_s3",
+      "status": "passed",
+      "evidence": {
+        "authenticatedAdmin": true
+      },
+      "durationSec": 1.539
+    },
+    {
+      "name": "inspect_s3",
+      "status": "passed",
+      "evidence": {
+        "mac": "68:EE:8F:50:E9:D0",
+        "channel": 6,
+        "wifiJoined": false,
+        "meshSlot": 0,
+        "meshFingerprint": 18265,
+        "pairedDevices": 1
+      },
+      "durationSec": 0.845
+    },
+    {
+      "name": "statistics_start",
+      "status": "passed",
+      "evidence": {
+        "p4": {
+          "schema": 1,
+          "messagesSent": 7,
+          "messagesReceived": 5,
+          "messagesFailed": 0,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 1,
+          "heartbeatsReceived": 1,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 16
+        },
+        "s3": {
+          "schema": 1,
+          "messagesSent": 5,
+          "messagesReceived": 7,
+          "messagesFailed": 4,
+          "streamSent": 0,
+          "streamReceived": 0,
+          "streamDropped": 0,
+          "rxRingDrops": 0,
+          "heartbeatsSent": 3,
+          "heartbeatsReceived": 1,
+          "filesSent": 0,
+          "filesReceived": 0,
+          "uptimeSec": 17
+        }
+      },
+      "durationSec": 0.488
+    },
+    {
+      "name": "remove_existing_pair_p4",
+      "status": "passed",
+      "evidence": {
+        "explicit_test_unpair": true,
+        "peer": "68:ee:8f:50:e9:d0"
+      },
+      "durationSec": 0.661
+    },
+    {
+      "name": "remove_existing_pair_s3",
+      "status": "passed",
+      "evidence": {
+        "explicit_test_unpair": true,
+        "peer": "fc:01:2c:e0:b9:a8"
+      },
+      "durationSec": 0.648
+    },
+    {
+      "name": "fresh_discovery_pair",
+      "status": "failed",
+      "error": "Serial response timed out after 15s (marker 18938)",
+      "durationSec": 18.475
+    }
+  ],
+  "scope": "two-node production pairing/session/text/file transport",
+  "statistics": {
+    "start": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 7,
+        "messagesReceived": 5,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 1,
+        "heartbeatsReceived": 1,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 16
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 5,
+        "messagesReceived": 7,
+        "messagesFailed": 4,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 3,
+        "heartbeatsReceived": 1,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 17
+      }
+    },
+    "end": {
+      "p4": {
+        "schema": 1,
+        "messagesSent": 20,
+        "messagesReceived": 6,
+        "messagesFailed": 0,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 1,
+        "heartbeatsReceived": 1,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 36
+      },
+      "s3": {
+        "schema": 1,
+        "messagesSent": 17,
+        "messagesReceived": 20,
+        "messagesFailed": 4,
+        "streamSent": 0,
+        "streamReceived": 0,
+        "streamDropped": 0,
+        "rxRingDrops": 0,
+        "heartbeatsSent": 3,
+        "heartbeatsReceived": 1,
+        "filesSent": 0,
+        "filesReceived": 0,
+        "uptimeSec": 37
+      }
+    }
+  },
+  "error": "Serial response timed out after 15s (marker 18938)",
+  "endStatisticsCapture": {
+    "reason": "run_failure",
+    "timeoutPerBoardSec": 5.0,
+    "errors": {}
+  },
+  "finished": "2026-09-28T12:22:43.121574+00:00",
+  "source_sha256": "f7936ab37e0f5e410d94af201e67d7f50619d6b81fc1b5d3bbdb63f4c68851b1",
+  "interpretation": "Passive receiver-notice wait timed out, but the receiver notice appeared immediately when the later statistics query drained USB output. This does not prove radio request loss or a failed acceptance handshake; acceptance was not attempted."
+}
