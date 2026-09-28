@@ -332,6 +332,12 @@
 // Runtime: srstart / srstop. Web page: CUSTOM_ENABLE_WEB_SPEECH (Connectivity).
 #define ENABLE_ESP_SR           0
 
+// Fully local buffered dictation backend; independent of displays and UART.
+// The deployment profile must provide its model/runtime before enabling it.
+#ifndef ENABLE_LOCAL_STT
+#define ENABLE_LOCAL_STT        0
+#endif
+
 // Edge Impulse: ML inference engine.
 #define ENABLE_EDGE_IMPULSE     0
 
@@ -1461,13 +1467,10 @@
 // after the board blocks, because ENABLE_OLED_DISPLAY is not resolved until
 // then.
 //
-// The CM5 host link that actually performs the transcription is deliberately a
-// RUNTIME condition rather than a build one: nothing on this device turns
-// speech into arbitrary text (ESP-SR is a fixed command grammar), so the mode
-// is useless without an authenticated host — but that host comes and goes while
-// the firmware runs. uartLinkIsRunning() stubs to false on boards with no
-// UART_LINK_* pins, so dictationAvailable() refuses there too and the keyboard
-// skips the mode. Source-agnostic: PDM or G2, whichever the mic layer resolves.
+// ENABLE_LOCAL_STT selects local buffered transcription without a UART host.
+// Otherwise the authenticated CM5 adapter remains the runtime requirement.
+// Provider choice is latched per exchange; local failures never silently send
+// audio to a remote host. The capture source stays shared (PDM or G2).
 // Dictation needs a mic and a KEYBOARD to dictate into — not specifically a
 // panel. The module is display-agnostic by design (4 of its 1221 lines mention
 // the OLED at all) and G2_Glasses.cpp:30097 arms it with

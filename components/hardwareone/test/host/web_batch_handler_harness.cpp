@@ -82,7 +82,7 @@ struct CommandContext {
   uint32_t id = 0, timestampMs = 0, settingsBatchId = 0;
   int outputMask = 0, behaviorFlags = 0;
   TransportSessionEpoch transportSessionEpoch = 0;
-  bool validateOnly = false;
+  bool validateOnly = false, captureOutput = false;
   void* replyHandle = nullptr;
   void* httpReq = nullptr;
 };
@@ -155,19 +155,13 @@ static bool webNoteSessionInteraction(const String&, TransportSessionEpoch) {
 }
 static uint32_t allocateSettingsWriteBatchId() { return 73; }
 static int findSessionIndexBySID(const String&) { return 3; }
-static uint32_t millis() { return 123; }
+static uint32_t millis() { static uint32_t now = 100; now += 100; return now; }
 static int pdMS_TO_TICKS(int value) { return value; }
 static void vTaskDelay(int) { ++scenario.delays; }
 static AuthContext systemIdentity(const char*) { return {}; }
 #define ERROR_WEBF(...) ((void)0)
 static void appendCommandToFeed(const char*, const String&, const String&, const String&) {}
 static String redactCmdForAudit(const String& text) { return text; }
-static String redactWebCommandResult(const String& output) {
-  std::string text(output.c_str());
-  for (size_t at = text.find("SECRET"); at != std::string::npos; at = text.find("SECRET"))
-    text.replace(at, 6, "[redacted]");
-  return String(text);
-}
 static bool cliModeOwnedBySession(int, TransportSessionEpoch) { return false; }
 static void broadcastOutput(const String& output, const CommandContext&) {
   scenario.broadcasts.emplace_back(output.c_str());
@@ -200,6 +194,23 @@ static bool executeUnifiedWebCommand(httpd_req_t*, const AuthContext& ctx,
   Command cmd; cmd.line = text; cmd.ctx.auth = ctx; cmd.ctx.origin = ORIGIN_WEB;
   bool completed = false;
   return submitAndExecuteSync(cmd, output, &completed);
+}
+
+#define DEBUG_CMD_FLOWF(...) ((void)0)
+#define DEBUG_CLIF(...) ((void)0)
+#define DEBUG_SSEF(...) ((void)0)
+static void httpd_resp_set_hdr(httpd_req_t*, const char*, const char*) {}
+static bool cliHelpModeOwnedBySession(int, TransportSessionEpoch) { return false; }
+static String extractFormField(const String& body, const String& key) {
+  const std::string text(body.c_str()), prefix=std::string(key.c_str())+"=";
+  const size_t pos=text.find(prefix);
+  if(pos==std::string::npos) return "";
+  const size_t first=pos+prefix.size(), end=text.find('&',first);
+  return text.substr(first,end==std::string::npos ? end : end-first);
+}
+static String urlDecode(const String& value) { return value; }
+static bool submitAndExecuteSync(const Command& cmd, String& output) {
+  bool completed=false; return submitAndExecuteSync(cmd,output,&completed);
 }
 
 // INSERT_PRODUCTION_HANDLERS_HERE
@@ -260,10 +271,10 @@ static void testNormalAndOwnership() {
     check(scenario.executed[0].line == (bond ? "remote:first" : "first"), "routing stays unchanged");
     check(responseAllocator.calls > 0, "actual response uses supplied JSON allocator");
   }
-  resetScenario(); scenario.steps = {{"SECRET first"}, {"second unrelated response"}};
+  resetScenario(); scenario.steps = {{"{\"password\":\"HASH:SECRET\"}"}, {"second unrelated response"}};
   const auto redacted = decode(invoke(false, {"a", "b"}));
-  check(redacted["results"][0] == "[redacted] first", "redaction precedes response storage");
-  check(scenario.broadcasts[0] == "[redacted] first", "broadcast remains redacted");
+  check(redacted["results"][0] == "{\"password\":\"***\"}", "redaction precedes response storage");
+  check(scenario.broadcasts[0] == "{\"password\":\"***\"}", "broadcast remains redacted");
   for (const auto& cmd : scenario.executed)
     check((cmd.ctx.behaviorFlags & COMMAND_CONTEXT_MODE_INDEPENDENT) != 0,
           "ordinary batch remains independent of interactive modes");
@@ -408,8 +419,36 @@ static void testRepeatedRepliesAndSlotGrowth() {
     }
   }
 }
+static void testPrivateSTTDirectReplies() {
+  const std::string transcript=R"({"id":"abcdef0100000001","state":"done","sttText":"quoted \"word\" and \\ slash"})";
+  resetScenario(); scenario.steps={{transcript}};
+  httpd_req_t single; single.input="cmd=stt result abcdef0100000001";
+  single.content_len=single.input.size(); handleCLICommand(&single);
+  check(single.output==transcript,"single direct HTTP preserves owner transcript");
+  check(scenario.broadcasts.size()==1 && scenario.broadcasts[0]=="[private STT result]",
+        "single shared output hides transcript");
+  resetScenario(); scenario.steps={{transcript}};
+  const auto batch=decode(invoke(false,{"stt result abcdef0100000001"}));
+  check(batch["results"][0].as<std::string>()==transcript,"batch direct HTTP preserves owner transcript");
+  check(scenario.broadcasts.size()==1 && scenario.broadcasts[0]=="[private STT result]",
+        "batch shared output hides transcript");
+  resetScenario(); scenario.steps={{transcript,true,true,true}};
+  httpd_req_t revoked; revoked.input="cmd=stt result abcdef0100000001";
+  revoked.content_len=revoked.input.size(); handleCLICommand(&revoked);
+  check(revoked.status.rfind("401",0)==0 && revoked.output.find("sttText")==std::string::npos,
+        "single revoked session cannot receive transcript");
+  resetScenario(); scenario.steps={{transcript},{"session gone",true,true,true}};
+  expectError(invoke(false,{"stt result abcdef0100000001","logout"}),"401","web_session_changed");
+  resetScenario(); scenario.stateful=false; scenario.steps={{transcript}};
+  const auto stateless=decode(invoke(false,{"stt result abcdef0100000001"}));
+  check(stateless["results"][0]=="[private STT result]","stateless request cannot use private-reply exception");
+  check(redactWebCommandResult("Unknown command: sttText",true)=="Unknown command: sttText",
+        "ordinary unknown-command behavior remains intact");
+}
+
 int main() {
   try {
+    testPrivateSTTDirectReplies();
     testNormalAndOwnership(); testSettingsAndTimeouts(); testInteractive();
     testSessionAndShutdown(); testResponseAllocationFailures();
     testRepeatedRepliesAndSlotGrowth();

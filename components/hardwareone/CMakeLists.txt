@@ -21,6 +21,7 @@ set(HW_CFG_ENABLE_MAPS 0)
 set(HW_CFG_ENABLE_AUTOMATION 0)
 set(HW_CFG_ENABLE_CAMERA_SENSOR 0)
 set(HW_CFG_ENABLE_ESP_SR 0)
+set(HW_CFG_ENABLE_LOCAL_STT 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
 set(HW_CFG_ENABLE_GAMES 0)
 set(HW_CFG_ENABLE_WEB_GAME_MAZE 1)
@@ -124,6 +125,11 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+ENABLE_ESP_SR[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_ESP_SR "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_LOCAL_STT[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_LOCAL_STT "${CMAKE_MATCH_1}")
     endif()
 
     string(REGEX MATCH "#define[ \t]+ENABLE_AUTOMATION[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
@@ -639,6 +645,16 @@ if(HW_CFG_ENABLE_ESP_SR GREATER 0)
     list(APPEND hardwareone_requires espressif__esp-sr)
 endif()
 
+# The local backend has no display or UART dependency. Its model/runtime is
+# enabled explicitly by a deployment profile; all other builds keep Pi STT.
+if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
+    list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp)
+    if(IDF_TARGET STREQUAL "esp32p4")
+        list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp)
+        list(APPEND hardwareone_requires espressif__esp-dl esp_rom mbedtls)
+    endif()
+endif()
+
 # CSI/ISP stays behind the shared camera API; native S3 uses esp32-camera.
 if(IDF_TARGET STREQUAL "esp32p4" AND HW_CFG_ENABLE_CAMERA_SENSOR GREATER 0)
     list(APPEND hardwareone_requires esp_video esp_cam_sensor esp_driver_gpio)
@@ -654,6 +670,24 @@ idf_component_register(
     LDFRAGMENTS
         esp32_camera_psram.lf
 )
+
+# IDF evaluates component requirements in script mode before registration.
+# Source properties are only legal after idf_component_register returns.
+if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
+    set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    # ESP-SR also registers a model whitelist. Union QuartzNet's exact ops and
+    # kernel variants into it; otherwise SR's WN10 list strips our Relu/int8 Conv.
+    idf_build_get_property(_stt_build_components BUILD_COMPONENTS)
+    if("espressif__esp-dl" IN_LIST _stt_build_components)
+        idf_component_get_property(_stt_dl_dir espressif__esp-dl COMPONENT_DIR)
+    elseif("esp-dl" IN_LIST _stt_build_components)
+        idf_component_get_property(_stt_dl_dir esp-dl COMPONENT_DIR)
+    else()
+        message(FATAL_ERROR "Local STT requires the pinned ESP-DL component")
+    endif()
+    include("${_stt_dl_dir}/cmake/compile_register.cmake")
+    esp_dl_compile_add_yml("${CMAKE_CURRENT_LIST_DIR}/stt/quartznet.compile_req.yml")
+endif()
 
 # Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)
 # This enables SD_CS_PIN and other Sense-specific defines in System_BuildConfig.h

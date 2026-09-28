@@ -101,6 +101,7 @@ bool isEspNowInitialized() { return false; }
 #include "i2csensor_apds9960.h"
 #endif
 #include "System_ESPSR.h"
+#include "System_STT.h"
 
 extern "C" {
   extern uint8_t _bss_start;
@@ -1412,6 +1413,9 @@ String redactCmdForAudit(const String& argsInput,
 
 // Redact sensitive data from command outputs (JSON responses, etc.)
 String redactOutputForLog(const String& output) {
+  // Private STT results are tagged by the producer. Replace the WHOLE reply
+  // rather than parsing quoted/escaped text or risking a partial redaction.
+  if (output.indexOf("\"sttText\"") >= 0) return "[private STT result]";
   String result = output;
   
   // Redact password hashes: "password":"HASH:xxxxx" -> "password":"***"
@@ -3419,6 +3423,15 @@ static constexpr CommandModule gCommandModules[] = {
     "eistatus shows current state. The eitrack family (eitrackenable, eitrackstatus, "
     "eitrackclear) adds cross-frame state tracking of detected objects on top of raw "
     "detections.", edgeImpulseCommands,  &edgeImpulseCommandsCount, CMD_MODULE_SENSOR, nullptr },
+#endif
+
+#if ENABLE_LOCAL_STT
+  { "stt", "Local speech-to-text", "Buffered local dictation through the shared audio HAL. "
+    "Stop SR and the microphone sensor first, then use stt record [seconds]. "
+    "Poll stt status [id], finish early with stt stop <id>, discard with stt cancel <id>, "
+    "and read stt result <id> from the same authenticated session. Audio and results "
+    "stay local; no host link is required. This backend produces text for review, "
+    "not voice command execution.", sttCommands, &sttCommandsCount, CMD_MODULE_SENSOR, nullptr },
 #endif
 
  #if ENABLE_ESP_SR

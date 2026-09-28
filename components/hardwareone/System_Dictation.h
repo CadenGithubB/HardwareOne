@@ -1,18 +1,13 @@
 // System_Dictation.h — speech-to-text as a text INPUT METHOD.
 //
-// This is the firmware half of "dictate into a keyboard". It is
-// deliberately source-agnostic: a dictation capture is an ordinary owned
-// recording, so whichever source the mic layer has resolved — onboard PDM or
-// the G2 glasses' LEFT-temple mic over BLE — feeds it with no branch here.
-// startRecordingInternal() re-resolves the preference and owns every G2-only
-// concern (capture container, FAST conn params, stream kick), so the only
-// source-specific thing at this layer is the label shown to the user.
+// An OLED/G2 keyboard input method with one provider latched per exchange.
+// ENABLE_LOCAL_STT builds use the shared local broker with bounded raw-HAL
+// capture and final text. Other builds retain the CM5 adapter and owned VAD
+// WAV capture. Both accept PDM or G2 audio through the same HAL. Local failure
+// never falls back to exporting audio to a host.
 //
-// Why the CM5 is mandatory: nothing on this device turns speech into arbitrary
-// text. ESP-SR is WakeNet + MultiNet — a fixed command grammar that recognizes
-// phrases from a table and cannot emit an unseen word — and it is compiled out
-// on this build anyway. Free-text transcription lives on the Linux
-// co-processor, so a dictation is a round trip:
+// ESP-SR provides fixed commands, not arbitrary dictation. The legacy CM5
+// provider performs free-text transcription on Linux with this round trip:
 //
 //   1. wearer arms it on an OLED/G2 keyboard        dictationBegin*()
 //   2. owned VAD capture runs, WAV/result/IDLE publish (recorder task)
@@ -52,7 +47,7 @@
 enum class DictationState : uint8_t {
   IDLE = 0,     // nothing in flight; the mode shows "ready"
   RECORDING,    // capture running; VAD or the wearer will end it
-  WAITING,      // WAV closed, request pushed, host is transcribing
+  WAITING,      // provider is transcribing; final text awaits a one-time drain
   FAILED,       // terminal, with a reason; cleared by the next arm
 };
 
@@ -63,6 +58,8 @@ struct DictationSnapshot {
   uint32_t elapsedMs;       // time in the current non-idle state
   int level;                // 0..100 audio level while RECORDING, else 0
   char failure[40];
+  bool bufferedLocal = false; // Local capture has a duration cap, not host VAD.
+  bool preparing = false;    // Do not prompt SPEAK NOW before HAL capture.
 };
 
 enum class DictationUartIntrinsicResult : uint8_t {

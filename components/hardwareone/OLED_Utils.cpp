@@ -1776,6 +1776,11 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     }
     switch (snap.state) {
       case DictationState::RECORDING: {
+        if (snap.preparing) {
+          display->setCursor(0, micY);
+          display->print("Starting mic...");
+          break;
+        }
         // Filled dot + elapsed seconds reads as "live" at a glance.
         display->fillCircle(5, micY + 3, 3, DISPLAY_COLOR_WHITE);
         display->setCursor(14, micY);
@@ -1794,7 +1799,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
       }
       case DictationState::WAITING:
         display->setCursor(0, micY);
-        display->print("Transcribing");
+        display->print(snap.bufferedLocal ? "Local STT" : "Transcribing");
         for (uint32_t i = 0; i < ((millis() / 400) % 4); ++i) display->print(".");
         break;
       case DictationState::FAILED:

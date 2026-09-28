@@ -20,6 +20,18 @@ class String {
     text_ = text ? text : "";
     return *this;
   }
+  char operator[](size_t index) const { return text_[index]; }
+  int indexOf(const char* value, size_t from = 0) const {
+    const auto pos = text_.find(value, from);
+    return pos == std::string::npos ? -1 : static_cast<int>(pos);
+  }
+  int indexOf(char value, size_t from = 0) const {
+    const auto pos = text_.find(value, from);
+    return pos == std::string::npos ? -1 : static_cast<int>(pos);
+  }
+  String substring(size_t from) const { return text_.substr(from); }
+  String substring(size_t from, size_t to) const { return text_.substr(from, to - from); }
+  String operator+(const String& other) const { return text_ + other.text_; }
   const char* c_str() const { return text_.c_str(); }
   size_t length() const { return text_.length(); }
   bool concat(const char* text) {
