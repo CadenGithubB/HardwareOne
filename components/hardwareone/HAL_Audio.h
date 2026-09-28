@@ -89,6 +89,16 @@ bool        audioCaptureBusy();     // STARTING, ACTIVE, or STOPPING
 bool        audioCaptureOwnedBy(const char* owner); // owner holds any busy phase
 const char* audioCaptureOwner();   // "" when idle
 
+// Loss/integrity events since this exact owner successfully started capture.
+// PDM counts dropped DMA blocks; G2 counts ring/mutex drops, decode failures and
+// PLC frames. Counts are events, NOT dropped samples. Returns false (and leaves
+// *out unchanged) if unavailable, inactive, or stop/restart raced the snapshot.
+// Warm-up loss is excluded; subsequent idempotent starts do not reset the count.
+// A zero count is not proof of gap-free transport: the IDF driver may abandon a
+// partial DMA block before overflow. Continuous PDM drainers should request
+// whole 1024-sample blocks and retain segment-boundary remainders themselves.
+bool        audioCaptureOverruns(const char* owner, uint32_t* out);
+
 // Pull PCM from the active source into `out` (int16 mono). Returns the number
 // of samples read, including valid partial PCM before a timeout; 0 if no PCM
 // is delivered or capture is inactive. timeoutMs is the source wait timeout;

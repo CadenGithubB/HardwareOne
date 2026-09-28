@@ -38,10 +38,10 @@ def inputs():
  assert d['external']==external_inputs()
  assert d['patch_sha256']==sha(HERE/'integration.patch') and d['dependency_sha256']==sha(REPO/DEP)
  return d
-def check(current=True):
+def check(current=True,external=True):
  d=json.loads((DEST/'stt-build-manifest.json').read_text())
  if current:assert d['inputs']==inputs()
- if 'external' in d['inputs']:assert d['inputs']['external']==external_inputs()
+ if external and 'external' in d['inputs']:assert d['inputs']['external']==external_inputs()
  assert d['baseline_manifest_sha256']==sha(SPEECH/'private/app-p4/speech-build-manifest.json')
  for p,h in d['sources'].items():
   if p!=LOCK:assert sha(DEST/p)==h,p
@@ -57,7 +57,10 @@ def check(current=True):
  return len(d['sources'])
 def prepare(refresh=False):
  if DEST.exists():
-  assert refresh,'Existing build copy; use --check or --refresh';check(False)
+  assert refresh,'Existing build copy; use --check or --refresh'
+  # A refresh may deliberately change the sealed profile/build inputs. Verify
+  # the old source/dependency copy, then verify the new inputs before staging.
+  check(False,external=False)
  m=module();m.check('p4',SPEECH/'private/app-p4',current=False)
  source,expected,common=m.baseline('p4');expected=dict(expected)
  expected.update(json.loads((SPEECH/'private/app-p4/speech-build-manifest.json').read_text())['overlay'])

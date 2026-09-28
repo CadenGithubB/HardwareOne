@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <limits>
 #include <set>
 #include <string>
 #define ENABLE_LOCAL_STT 1
@@ -80,6 +81,10 @@ void audioCaptureStop(const char* owner) {
   if (halOwner == owner) { halOwner.clear(); active = false; ++stops; }
 }
 size_t audioTrimBufferedPcm(const char*, size_t) { return 0; }
+bool audioCaptureOverruns(const char* owner, uint32_t* out) {
+  if (!out || !audioCaptureOwnedBy(owner)) return false;
+  *out = 0; return true;
+}
 size_t audioReadPcm(int16_t* pcm, size_t requested, uint32_t timeout) {
   assert(halOwner == "stt" && timeout == 50);
   const size_t n = std::min(requested, readLimit);

@@ -2,7 +2,7 @@
 //
 // An OLED/G2 keyboard input method with one provider latched per exchange.
 // ENABLE_LOCAL_STT builds use the shared local broker with bounded raw-HAL
-// capture and final text. Other builds retain the CM5 adapter and owned VAD
+// continuous capture and ordered text chunks. Other builds retain CM5 and owned VAD
 // WAV capture. Both accept PDM or G2 audio through the same HAL. Local failure
 // never falls back to exporting audio to a host.
 //
@@ -58,8 +58,18 @@ struct DictationSnapshot {
   uint32_t elapsedMs;       // time in the current non-idle state
   int level;                // 0..100 audio level while RECORDING, else 0
   char failure[40];
-  bool bufferedLocal = false; // Local capture has a duration cap, not host VAD.
+  bool continuous = false; // Session keeps listening between completed phrases.
+  bool captureActive = false;
+  bool inferenceActive = false;
   bool preparing = false;    // Do not prompt SPEAK NOW before HAL capture.
+};
+
+// Exact delivery receipt: committing an old field, chunk or byte offset is a no-op.
+struct DictationTextReceipt {
+  uint64_t exchange = 0;
+  uint32_t sequence = 0;
+  uint16_t offset = 0;
+  uint16_t length = 0;
 };
 
 enum class DictationUartIntrinsicResult : uint8_t {
@@ -102,12 +112,24 @@ DictationSnapshot dictationSnapshotNow();
 // OLED tick; cheap and safe when idle.
 void dictationTick();
 
-// Drains a delivered transcript exactly once. Returns false when nothing is
-// waiting. The keyboard appends what it gets rather than replacing, so the
+// Compatibility drain of one bounded delivery piece. Returns false when nothing
+// is waiting; small buffers leave the remaining bytes for the next call. The keyboard appends what it gets rather than replacing, so the
 // wearer can dictate and then fix it with the character grid.
 bool dictationTakeText(char* out, size_t outSize);
 bool dictationTakeTextFor(CommandSource displaySource,
                           char* out, size_t outSize);
+
+// Shared provider-neutral delivery. Pi v1 publishes one final chunk; local STT
+// can publish several. Peek never consumes. Commit only input bytes the field
+// actually accepted (including bytes deliberately filtered by its input policy).
+// Inference/transport acknowledgment happens only after every piece is accepted.
+bool dictationPeekTextFor(CommandSource source, char* out, size_t outSize,
+                         DictationTextReceipt* receipt);
+bool dictationCommitTextFor(CommandSource source,
+                           const DictationTextReceipt& receipt, size_t accepted);
+// A finite field cannot consume an unlimited session. Stop/discard the remainder
+// with a visible reason instead of ACKing text which was never inserted.
+void dictationFieldFullFor(CommandSource source);
 
 // Post-publication hook. The mic layer invokes this only AFTER it has published
 // the owner-scoped completion result and IDLE. It copies the stable local result
@@ -152,6 +174,9 @@ inline bool dictationTakeText(char*, size_t) { return false; }
 inline bool dictationTakeTextFor(CommandSource, char*, size_t) {
   return false;
 }
+inline bool dictationPeekTextFor(CommandSource, char*, size_t, DictationTextReceipt*) { return false; }
+inline bool dictationCommitTextFor(CommandSource, const DictationTextReceipt&, size_t) { return false; }
+inline void dictationFieldFullFor(CommandSource) {}
 inline void dictationOnCapturePublished(uint64_t, const char*, bool,
                                         const char*) {}
 inline void dictationResetForSessionBoundary() {}

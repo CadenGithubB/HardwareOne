@@ -1,5 +1,29 @@
 # Status
 
+## 2026-09-28 — continuous P4 STT milestone complete
+
+- Installed continuous-v4 on the connected P4; app-only flash verified. App SHA
+  `08a961f324a7f54ce31f6d3b96e42d87fd670e8986d2ff5c501744befce637e7`,
+  6,367,280 bytes, 10,192 bytes of existing app-partition headroom.
+- Physical 600.9 s run delivered 48 acknowledged chunks with
+  concurrent capture/inference and 10 successful camera captures; stop drained
+  both queues. Zero reported HAL overruns; no claim of exhaustive loss detection.
+- Quiet, two-minute speech, retry/ACK, inference cancellation, logout revocation,
+  explicit receiver backpressure, bounded-mode and ESP-SR checks passed. Initial
+  serial-output corruption and the final polling mitigation are documented.
+- ASan/UBSan actual-source tests, concurrent ThreadSanitizer, full P4 build and
+  all 7,956 source checks passed. No compiler optimization changes retained.
+- Optional R1 health web page/APIs omitted only in this experiment profile;
+  ring, core health, Bluetooth and other health interfaces remain enabled.
+- Shared HAL, adaptive VAD decisions and Dictation UI/mailbox retained. Pi UART v1
+  unchanged; continuous Pi adapter and physical OLED/G2 tests remain future work.
+- All 20 saved-settings postchecks passed after final reboot. Mic, camera and SR
+  are stopped, voice commands disarmed. All serial coordinators are closed.
+- Primary checkout and S3/C6 firmware untouched; no model/partition changes.
+  Private logs/models/audio/credentials/backups remain ignored. No push or PR.
+- See CONTINUOUS_RESULTS.md and continuous-validation.json for final evidence,
+  README.md for use, and CONTINUOUS_PI.md for the Pi adaptation.
+
 ## 2026-09-28 — local P4 STT first milestone complete
 
 - Branch: `codex/jpeg-portable`; starting point: qualified ESP-SR `f9bfe98`.

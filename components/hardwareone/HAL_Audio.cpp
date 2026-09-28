@@ -22,6 +22,8 @@
 #if ENABLE_MICROPHONE_SENSOR
 #include <driver/i2s_pdm.h>
 #include <driver/gpio.h>
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "System_Mutex.h"     // I2sMicLockGuard — shared I2S-mic hardware lock (PDM only)
 // The board owns its wiring. Enabling a mic on an unconfigured board must not
 // silently drive the XIAO pins (which can have different roles on other chips).
@@ -46,6 +48,8 @@ static volatile AudioSource       gAudioSource  = AUDIO_SRC_NONE; // no compile-
 static volatile AudioCapturePhase gCapturePhase = AudioCapturePhase::IDLE;
 static const char*                gCaptureOwner = nullptr;        // null only in IDLE
 static uint32_t                   gCaptureRate  = AUDIO_HAL_SAMPLE_RATE;
+static uint32_t                   gCaptureGeneration = 0;
+static uint32_t                   gCaptureOverrunBaseline = 0;
 static uint32_t                   gNativeG2Generation = 0;
 static AudioSource                gNativePreviousSource = AUDIO_SRC_NONE;
 static StaticSemaphore_t          gAudioStateMutexStorage;
@@ -70,6 +74,13 @@ static bool ensureAudioStateMutex() {
 // ── PDM backend (onboard I2S mic — inner-gated on ENABLE_MICROPHONE_SENSOR) ────
 #if ENABLE_MICROPHONE_SENSOR
 static i2s_chan_handle_t gPdmRx = nullptr;
+// ISR context never takes a mutex or allocates. Teardown disables/deletes the
+// old channel before another owner can reset this internal-memory counter.
+static DRAM_ATTR uint32_t gPdmOverruns = 0;
+static bool IRAM_ATTR pdmOverrun(i2s_chan_handle_t, i2s_event_data_t*, void* context) {
+  __atomic_fetch_add(static_cast<uint32_t*>(context), 1u, __ATOMIC_RELAXED);
+  return false;
+}
 
 // Caller must hold I2sMicLockGuard.
 static bool pdmStartLocked(uint32_t rate) {
@@ -139,6 +150,17 @@ static bool pdmStartLocked(uint32_t rate) {
     return false;
   }
 
+  i2s_event_callbacks_t callbacks = {};
+  callbacks.on_recv_q_ovf = pdmOverrun;
+  __atomic_store_n(&gPdmOverruns, 0u, __ATOMIC_RELAXED);
+  err = i2s_channel_register_event_callback(gPdmRx, &callbacks, &gPdmOverruns);
+  if (err != ESP_OK) {
+    WARN_SYSTEMF("[HAL_AUDIO] PDM overrun monitor failed: 0x%x", err);
+    i2s_del_channel(gPdmRx);
+    gPdmRx = nullptr;
+    return false;
+  }
+
   err = i2s_channel_enable(gPdmRx);
   if (err != ESP_OK) {
     WARN_SYSTEMF("[HAL_AUDIO] i2s_channel_enable failed: 0x%x (%s)", err, esp_err_to_name(err));
@@ -147,12 +169,33 @@ static bool pdmStartLocked(uint32_t rate) {
     return false;
   }
 
-  // PDM warm-up flush (the sensor needs a few reads before stable samples).
-  int16_t flushBuf[256];
-  size_t  flushBytes = 0;
-  for (int i = 0; i < 10; i++) {
-    // The IDF channel API takes milliseconds, not FreeRTOS ticks.
-    i2s_channel_read(gPdmRx, flushBuf, sizeof(flushBuf), &flushBytes, 100);
+  // Whole-block reads leave no partial DMA tail for a continuous drainer.
+  // Use a bounded temporary buffer so HAL callers need no additional stack.
+  // Three blocks preserve the old warmup minimum (2560 samples). This does not
+  // make the driver's overflow counter a proof of gap-free transport.
+  constexpr size_t warmupBytes = 1024 * sizeof(int16_t);
+  auto* flushBuf = static_cast<int16_t*>(heap_caps_malloc(
+      warmupBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  unsigned blocks = 0;
+  if (flushBuf) {
+    for (int attempt = 0; attempt < 10 && blocks < 3; ++attempt) {
+      size_t bytes = 0;
+      // IDF channel API takes milliseconds; retry a zero-byte timeout only.
+      err = i2s_channel_read(gPdmRx, flushBuf, warmupBytes, &bytes, 100);
+      if (err != ESP_OK && err != ESP_ERR_TIMEOUT) break;
+      if (bytes == warmupBytes) ++blocks;
+      else if (bytes || err != ESP_ERR_TIMEOUT) break;
+    }
+    volatile int16_t* wipe = flushBuf;
+    for (size_t i = 0; i < 1024; ++i) wipe[i] = 0;
+    heap_caps_free(flushBuf);
+  }
+  if (blocks != 3) {
+    WARN_SYSTEMF("[HAL_AUDIO] PDM warmup incomplete");
+    i2s_channel_disable(gPdmRx);
+    i2s_del_channel(gPdmRx);
+    gPdmRx = nullptr;
+    return false;
   }
   INFO_SYSTEMF("[HAL_AUDIO] PDM mic started: %u Hz, CLK=%d DATA=%d", (unsigned)rate,
                (int)MIC_CLK_PIN, (int)MIC_DATA_PIN);
@@ -168,6 +211,33 @@ static void pdmStopLocked() {
   }
 }
 #endif // ENABLE_MICROPHONE_SENSOR
+
+// No HAL mutex is held while the G2 backend takes its PCM mutex.
+static uint32_t sourceOverruns(AudioSource source) {
+#if ENABLE_MICROPHONE_SENSOR
+  if (source == AUDIO_SRC_LOCAL_PDM)
+    return __atomic_load_n(&gPdmOverruns, __ATOMIC_RELAXED);
+#endif
+  return source == AUDIO_SRC_G2_LEFT ? g2MicAfeIntegrityErrors() : 0;
+}
+
+bool audioCaptureOverruns(const char* owner, uint32_t* out) {
+  if (!owner || !owner[0] || !out || !ensureAudioStateMutex()) return false;
+  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
+  const bool active = gCapturePhase == AudioCapturePhase::ACTIVE &&
+      gCaptureOwner && strcmp(owner, gCaptureOwner) == 0;
+  const AudioSource source = gAudioSource;
+  const uint32_t generation = gCaptureGeneration, baseline = gCaptureOverrunBaseline;
+  xSemaphoreGive(gAudioStateMutex);
+  if (!active || (source != AUDIO_SRC_LOCAL_PDM && source != AUDIO_SRC_G2_LEFT)) return false;
+  const uint32_t count = sourceOverruns(source);
+  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
+  const bool unchanged = gCapturePhase == AudioCapturePhase::ACTIVE &&
+      generation == gCaptureGeneration && gCaptureOwner && strcmp(owner, gCaptureOwner) == 0;
+  if (unchanged) *out = count - baseline;
+  xSemaphoreGive(gAudioStateMutex);
+  return unchanged;
+}
 
 // ── Availability (runtime; no compile-time default source) ────────────────────
 bool audioSourceAvailable(AudioSource src) {
@@ -283,6 +353,7 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
   gNativeG2Generation = nativeGeneration;
   gCaptureOwner = requestedOwner;            // provisional claim; rolled back on failure
   gCapturePhase = AudioCapturePhase::STARTING;
+  ++gCaptureGeneration;
   xSemaphoreGive(gAudioStateMutex);
 
   // ── Start the backend OUTSIDE the state lock (BLE send / PDM warm-up block) ──
@@ -303,6 +374,8 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
     }
   }
 
+  const uint32_t overrunBaseline = ok ? sourceOverruns(src) : 0;
+
   // Revalidate the provisional claim. A source-loss callback may have moved it
   // to STOPPING while BLE/PDM startup blocked. STARTING cannot be reused, so a
   // cancelled starter can safely tear down its own backend before publishing
@@ -311,6 +384,7 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
   const bool sameOwner = gCaptureOwner &&
                          strcmp(requestedOwner, gCaptureOwner) == 0;
   if (ok && sameOwner && gCapturePhase == AudioCapturePhase::STARTING) {
+    gCaptureOverrunBaseline = overrunBaseline;
     gCapturePhase = AudioCapturePhase::ACTIVE;
     xSemaphoreGive(gAudioStateMutex);
     // NOTE: no FAST-interval hold here. The HAL claim includes the idle-open
