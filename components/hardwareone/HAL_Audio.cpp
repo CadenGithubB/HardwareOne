@@ -21,14 +21,15 @@
 
 #if ENABLE_MICROPHONE_SENSOR
 #include <driver/i2s_pdm.h>
+#include <driver/gpio.h>
 #include "System_Mutex.h"     // I2sMicLockGuard — shared I2S-mic hardware lock (PDM only)
-// PDM mic pins. BuildConfig defines these for the XIAO ESP32S3 Sense; keep a
-// fallback so the file is self-contained.
-#ifndef MIC_CLK_PIN
-#define MIC_CLK_PIN   42   // GPIO42 (PDM clock)
+// The board owns its wiring. Enabling a mic on an unconfigured board must not
+// silently drive the XIAO pins (which can have different roles on other chips).
+#if !defined(MIC_CLK_PIN) || !defined(MIC_DATA_PIN)
+#error "ENABLE_MICROPHONE_SENSOR requires board MIC_CLK_PIN and MIC_DATA_PIN"
 #endif
-#ifndef MIC_DATA_PIN
-#define MIC_DATA_PIN  41   // GPIO41 (PDM data)
+#ifndef MIC_POWER_PIN
+#define MIC_POWER_PIN -1
 #endif
 #endif // ENABLE_MICROPHONE_SENSOR
 
@@ -72,6 +73,21 @@ static i2s_chan_handle_t gPdmRx = nullptr;
 
 // Caller must hold I2sMicLockGuard.
 static bool pdmStartLocked(uint32_t rate) {
+#if MIC_POWER_PIN >= 0
+  // Some boards put the mic on a shared peripheral rail (P4X-EYE: camera/LCD
+  // and microphone). Set its output latch first, then enable output, so opening
+  // the mic cannot briefly pull down a rail already used by another backend.
+  // Never deassert/reset this pin during stop or error cleanup.
+  esp_err_t powerErr = gpio_set_level((gpio_num_t)MIC_POWER_PIN, 1);
+  if (powerErr == ESP_OK) {
+    powerErr = gpio_set_direction((gpio_num_t)MIC_POWER_PIN, GPIO_MODE_OUTPUT);
+  }
+  if (powerErr != ESP_OK) {
+    WARN_SYSTEMF("[HAL_AUDIO] microphone power enable failed: 0x%x (%s)",
+                 powerErr, esp_err_to_name(powerErr));
+    return false;
+  }
+#endif
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   chan_cfg.dma_desc_num  = 4;
   chan_cfg.dma_frame_num = 1024;
@@ -103,6 +119,17 @@ static bool pdmStartLocked(uint32_t rate) {
     },
   };
 
+#if defined(MIC_PDM_LOW_POWER_MAX_HZ) && defined(MIC_PDM_STANDARD_MIN_HZ)
+  // DSR8 clocks the mic at 64x PCM rate. Some microphones have a forbidden
+  // clock gap between their low-power and standard modes (16 kHz gives
+  // 1.024 MHz there). DSR16 doubles the PDM clock while preserving the PCM
+  // sample rate; board limits keep this adjustment specific to its hardware.
+  const uint64_t pdmClock = (uint64_t)rate * 64u;
+  if (pdmClock > MIC_PDM_LOW_POWER_MAX_HZ && pdmClock < MIC_PDM_STANDARD_MIN_HZ) {
+    pdm_cfg.clk_cfg.dn_sample_mode = I2S_PDM_DSR_16S;
+  }
+#endif
+
   err = i2s_channel_init_pdm_rx_mode(gPdmRx, &pdm_cfg);
   if (err != ESP_OK) {
     WARN_SYSTEMF("[HAL_AUDIO] i2s_channel_init_pdm_rx_mode failed at %u Hz: 0x%x (%s)",
@@ -124,7 +151,8 @@ static bool pdmStartLocked(uint32_t rate) {
   int16_t flushBuf[256];
   size_t  flushBytes = 0;
   for (int i = 0; i < 10; i++) {
-    i2s_channel_read(gPdmRx, flushBuf, sizeof(flushBuf), &flushBytes, pdMS_TO_TICKS(100));
+    // The IDF channel API takes milliseconds, not FreeRTOS ticks.
+    i2s_channel_read(gPdmRx, flushBuf, sizeof(flushBuf), &flushBytes, 100);
   }
   INFO_SYSTEMF("[HAL_AUDIO] PDM mic started: %u Hz, CLK=%d DATA=%d", (unsigned)rate,
                (int)MIC_CLK_PIN, (int)MIC_DATA_PIN);
@@ -412,9 +440,12 @@ size_t audioReadPcm(int16_t* out, size_t maxSamples, uint32_t timeoutMs) {
     I2sMicLockGuard guard("audio.read");
     if (!gPdmRx) return 0;
     err = i2s_channel_read(gPdmRx, out, maxSamples * sizeof(int16_t),
-                           &bytesRead, pdMS_TO_TICKS(timeoutMs));
+                           &bytesRead, timeoutMs);
   }
-  if (err != ESP_OK) return 0;
+  // IDF preserves bytes already copied when a later DMA-buffer wait times out.
+  // In particular, low sample rates can return useful PCM before the caller's
+  // read is full. Discarding it would punch gaps in recordings and DSP input.
+  if (err != ESP_OK && err != ESP_ERR_TIMEOUT) return 0;
   return bytesRead / sizeof(int16_t);
 #else
   return 0;   // no PDM backend on this board; G2 handled above
