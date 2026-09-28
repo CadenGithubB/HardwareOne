@@ -32,6 +32,7 @@ struct Buffer {
         p=heap_caps_aligned_alloc(16,n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     }
     ~Buffer() { if(sensitive && p) { volatile uint8_t* d=static_cast<volatile uint8_t*>(p); for(size_t i=0;i<bytes;++i)d[i]=0; } heap_caps_free(p); }
+    void* release() { void* value=p; p=nullptr; return value; }
     Buffer(const Buffer&)=delete;
     Buffer& operator=(const Buffer&)=delete;
 };
@@ -77,10 +78,19 @@ bool tensor(dl::TensorBase* t, size_t frames, size_t channels, int exponent) {
         && t->get_bytes()==int(frames*channels);
 }
 }
+ModelCache::~ModelCache() { reset(); }
+void ModelCache::reset() { heap_caps_free(raw_); raw_=nullptr; }
+#if HW1_STT_RUNTIME_DIAGNOSTICS
+bool ModelCache::verify() const {
+    uint8_t hash[32];
+    return raw_ && digest(raw_,identity::kRawBytes,hash) && !memcmp(hash,identity::kRawSha,32);
+}
+#endif
+
 bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
                 char* text, size_t capacity, const STTLocalControl& control,
                 STTLocalStats& stats, char* error, size_t errorCapacity,
-                Diagnostics* diagnostics) {
+                Diagnostics* diagnostics, ModelCache* cache) {
     stats={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
 #if HW1_STT_RUNTIME_DIAGNOSTICS
     if(diagnostics)*diagnostics={};
@@ -102,16 +112,35 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     const size_t frontendBytes=frames*kMelBins*sizeof(float)+sizeof(FrontendWorkspace);
     constexpr size_t metadataMargin=1024*1024, internalMinimum=150*1024;
     const size_t remainingBudget=arenaBudget+frontendBytes+metadataMargin;
-    if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)<identity::kRawBytes+remainingBudget
-       || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<identity::kRawBytes
+    // A null cache keeps one-shot calls self-contained. Continuous sessions
+    // retain this allocation only until their worker has joined/closed.
+    ModelCache temporary;
+    ModelCache& weights=cache ? *cache : temporary;
+    const bool reused=weights.raw_!=nullptr;
+    const size_t newWeights=reused ? 0 : identity::kRawBytes;
+    if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)<newWeights+remainingBudget
+       || (!reused && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<identity::kRawBytes)
        || heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<internalMinimum)
         return fail("Not enough free memory; stop camera, speech and other large models");
-    Buffer raw(identity::kRawBytes);
-    if(!raw.p)return fail("Cannot allocate STT model");
-    if(!inflateModel(reader,static_cast<uint8_t*>(raw.p),control))return fail(cancelled(control)?"Cancelled":"STT model decompression failed");
-    uint8_t hash[32];
-    if(!digest(raw.p,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32))return fail("STT model checksum mismatch");
+    if(!reused) {
+        Buffer candidate(identity::kRawBytes);
+        if(!candidate.p)return fail("Cannot allocate STT model");
+        if(!inflateModel(reader,static_cast<uint8_t*>(candidate.p),control))return fail(cancelled(control)?"Cancelled":"STT model decompression failed");
+        uint8_t hash[32];
+        if(!digest(candidate.p,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32))return fail("STT model checksum mismatch");
+        if(cancelled(control))return fail("Cancelled");
+        weights.raw_=candidate.release(); // publish only fully verified weights
+    } else {
+        // Validate again before every vendor parse: caching must not weaken
+        // the identity boundary or assume a vendor never mutates its backing.
+        uint8_t hash[32];
+        if(!digest(weights.raw_,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32)) {
+            weights.reset();
+            return fail("Cached STT model checksum mismatch");
+        }
+    }
     stats.modelBytes=identity::kRawBytes;
+    stats.weightsReused=reused;
     if(cancelled(control))return fail("Cancelled");
     // Raw model allocation can split the largest block. Check again before
     // the vendor constructor requests a contiguous arena and creates metadata.
@@ -120,10 +149,10 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
        || heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<internalMinimum)
         return fail("Not enough contiguous memory for STT activations");
     // A fresh model per utterance avoids Model::build's resize allocation leak.
-    // Aligned EDL2+ in PSRAM allows zero-copy parameters; raw outlives model.
+    // Aligned EDL2+ in PSRAM allows zero-copy parameters; weights outlive model.
     std::map<std::string,std::vector<int>> shapes{{identity::kInputName,{1,int(frames),1,64}}};
     std::unique_ptr<dl::Model> model(new(std::nothrow) dl::Model(
-        static_cast<const char*>(raw.p),fbs::MODEL_LOCATION_IN_FLASH_RODATA,0,
+        static_cast<const char*>(weights.raw_),fbs::MODEL_LOCATION_IN_FLASH_RODATA,0,
         dl::MEMORY_MANAGER_GREEDY,nullptr,false,shapes));
     if(!model)return fail("Cannot create STT model");
     auto input=model->get_input(identity::kInputName);auto output=model->get_output(identity::kOutputName);
@@ -183,7 +212,8 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
        || ctc_finish(&ctc,text,capacity)!=Status::Ok || ctc.truncated)return fail("STT transcript exceeds result capacity");
     stats.decodeMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
-    // Model destructor releases its arena before the backing raw blob is freed.
+    // Model destructor releases its arena before temporary weights are freed.
+    // Session weights remain immutable and are rechecked on the next call.
     return true;
 }
 }

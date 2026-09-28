@@ -37,22 +37,22 @@
     "components/hardwareone/System_Dictation.cpp": "38b9e753ca07bceecf722d600c59c64efcdd0a9ef3ed538b25ba3595f9e24080",
     "components/hardwareone/System_Dictation.h": "32d0006bffbb3235d7240ced4f3161bc89b99f6082940294ae10445c19838ecd",
     "components/hardwareone/System_Microphone.cpp": "0a11d6149f9b3ad93abd7ef589e936d416d98d5d733dca71edbf077dde527173",
-    "components/hardwareone/System_STT.cpp": "2df8619855dac62757e43daa0e6bbea618d0f1ed201a4cf88b5e9960be89c3c7",
+    "components/hardwareone/System_STT.cpp": "2a0990c500f9536c6fbacd949eb9c9deba2cdda3677b375eaa61483efd6a8f27",
     "components/hardwareone/System_STT.h": "a4a27e7db59d273bb761c2af554cb1d88de38161285281d9ec8be07824258bb6",
-    "components/hardwareone/System_STTLocal.cpp": "e4032997694253c7b9267e5d6e516e63c98974fd9e04bab7679159d7e3b4541a",
-    "components/hardwareone/System_STTLocal.h": "006e2cdfd259e612dd076ee1c56d94f312e1d9e22d83d6d4e0ac3739fc406c90",
+    "components/hardwareone/System_STTLocal.cpp": "25c3955f46a07e807f16646b62f53628c51de885f90744cec6b962fdd38e3a85",
+    "components/hardwareone/System_STTLocal.h": "e00148c0b8a789fd2b250ff75234eb56b4cb55611c30a82a2bffa857492a0723",
     "components/hardwareone/System_Utils.cpp": "d431edf15fbd2d4e16430dc5b6c0c4b7dd6ce35f1c549fb5ff828565d0e06d8d",
     "components/hardwareone/WebServer_Server.cpp": "8c2cd891d2f8c34ad171b4f8ed3ec76337812efb9e233403923d504f0a7cef7c",
     "components/hardwareone/stt/quartznet.compile_req.yml": "e5a4dee9fe5377027ed49f901c0e9b82700570a2c8874bd8b75275fac19a07b0",
     "components/hardwareone/stt/quartznet_constants.h": "a77794cca23f329cccc5e8bc7176a20aed6e1412190586bf218f1ab46d602239",
     "components/hardwareone/stt/quartznet_frontend.cpp": "2fc57170be79a7ea0986df74469f73a226133bbcbcc5051243c9c2c7a9be4f84",
     "components/hardwareone/stt/quartznet_frontend.h": "262ab1adc28346294d77bfafa11c28ce2fcd78a45c240cbaebed21b072109acb",
-    "components/hardwareone/stt/quartznet_runtime.cpp": "cc2aa3d2b0b98011710465712f7b723543fe494664e34a97c3075d4e7b2f3f8b",
-    "components/hardwareone/stt/quartznet_runtime.h": "46b9a77c17bc21ba8004c6c4e58a6905f96be96a93e211434d8634120cb2ae49",
+    "components/hardwareone/stt/quartznet_runtime.cpp": "404a9a6433fc97befa7ec45698b53d373af3a993a7c991ae0368385b7527d609",
+    "components/hardwareone/stt/quartznet_runtime.h": "b254074d656c7a2f8f0f1a6fe6c0ceece5a0f82bd7bd58fc8bc0c56ff4e49123",
     "components/hardwareone/stt/stt_model_container.h": "2da1a4a5f372e411868118b0ed761c2fb88bb02c8eba5e794738eaaa2080ff53",
     "components/hardwareone/stt/stt_model_identity.h": "e7168df42c562ebd287f41de1843898a2414241b30db71d359da4bcb851d7bf2",
     "components/hardwareone/stt/stt_segmenter.h": "fd02a7fde36cd06f05d03a12b78cd8c940345f97199b97f36eee52c36b555654"
   },
   "dependency_sha256": "de23affb7b68751273cc1fa38873cae6b18b6d946d64452c0c885e74648fdbb4",
-  "patch_sha256": "c53a78ea42c093f8ff1586db232792330ef0a87e94f9538abb98111752184f1f"
+  "patch_sha256": "c718f88316d5abecdcd2f1f74cb1a94ff60ec98afc63fea2844b266b6ea4f60d"
 }

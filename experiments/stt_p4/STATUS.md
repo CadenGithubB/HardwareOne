@@ -1,5 +1,28 @@
 # Status
 
+## 2026-09-28 — session-cached P4 STT qualified
+
+- Installed and verified cache-app-v1 on the P4: SHA-256
+  `56c0dba75ed40c32959085f2134b4c5f8c3283c1660cc1e22f1cc325ed26d945`,
+  6,367,776 bytes; 9,696 bytes of unchanged app-partition headroom.
+- Verified weights retained only for one continuous session; per-segment hash
+  checks, fresh model/arena, explicit release before FreeRTOS task deletion.
+  One-shot, shared HAL/Dictation/Pi UART and recognition settings unchanged.
+- Full-app warm load median 173 ms versus 3,379 ms cold without camera.
+  Same-input hardware probe: 4.497 s cold to 2.003 s warm, byte-exact tensors;
+  exact PSRAM recovery after explicit reset and destructor.
+- Final 301.6 s run: 29 acknowledged chunks, five camera captures,
+  zero reported overruns; cancel/logout/queue-full/one-shot/SR checks passed.
+  Initial serial JSON interleaving and read-only retry mitigation documented.
+- Cache/broker host sanitizers, concurrent TSan, full P4 build and all 7,956
+  source checks passed. All 20 saved-settings checks passed after reboot.
+  Mic, camera and SR off; voice disarmed; serial coordinators closed.
+- Accuracy remains limited; beam/gain/padding diagnostics gave no consistent
+  improvement. Eight-second minimum segment span is unchanged.
+- No new exclusions, partitions, model installs, S3/C6 or primary-checkout edits.
+  Private evidence ignored; local branch only, no push or PR.
+- See CACHE_RESULTS.md, cache-validation.json and DECODER_LATENCY_NOTES.md.
+
 ## 2026-09-28 — continuous P4 STT milestone complete
 
 - Installed continuous-v4 on the connected P4; app-only flash verified. App SHA

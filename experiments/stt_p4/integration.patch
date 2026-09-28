@@ -1450,10 +1450,10 @@ index d9555ff..1ec9021 100644
                              scoredSilent ? "SIL" : "snd",
 diff --git a/components/hardwareone/System_STT.cpp b/components/hardwareone/System_STT.cpp
 new file mode 100644
-index 0000000..aabd9d1
+index 0000000..871a9af
 --- /dev/null
 +++ b/components/hardwareone/System_STT.cpp
-@@ -0,0 +1,997 @@
+@@ -0,0 +1,1002 @@
 +#include "System_STT.h"
 +
 +#if ENABLE_LOCAL_STT
@@ -1972,6 +1972,7 @@ index 0000000..aabd9d1
 +}
 +static void sttContinuousWorker(void*) {
 +  StreamRun run;
++  STTLocalSession backendSession;
 +  portENTER_CRITICAL(&gSTTMux);
 +  run.token = gSTT.snapshot.token;
 +  run.requested = gSTT.requestedSource;
@@ -2031,7 +2032,7 @@ index 0000000..aabd9d1
 +      if (inferenceSamples > slot->samples)
 +        memset(slot->pcm + slot->samples, 0, (inferenceSamples - slot->samples) * sizeof(int16_t));
 +      const bool ok = sttLocalTranscribe(slot->pcm, inferenceSamples, text, sizeof(text), control,
-+                                        stats, error, sizeof(error));
++                                        stats, error, sizeof(error), &backendSession);
 +      if (!sttStreamCancelled(&run)) {
 +        if (!ok || !memchr(text, '\0', sizeof(text))) {
 +          sttStreamFail(run, error[0] ? error : "Continuous transcription failed");
@@ -2075,6 +2076,9 @@ index 0000000..aabd9d1
 +      vTaskDelay(pdMS_TO_TICKS(10));
 +    }
 +  }
++  // FreeRTOS self-delete does not unwind C++ locals. Close the backend before
++  // publishing workerActive=false, after every inference/capture user joined.
++  backendSession.reset();
 +  if (run.working) { sttWipe(run.working, kStreamSamples * sizeof(int16_t)); free(run.working); }
 +  for (auto& slot : run.slots) {
 +    if (slot.pcm) { sttWipe(slot.pcm, kStreamSamples * sizeof(int16_t)); free(slot.pcm); }
@@ -2433,6 +2437,7 @@ index 0000000..aabd9d1
 +    doc["captureStackFreeBytes"] = snap.captureStackFreeBytes;
 +    doc["error"] = snap.error;
 +    doc["modelBytes"] = snap.stats.modelBytes;
++    doc["weightsReused"] = snap.stats.weightsReused;
 +    doc["featureFrames"] = snap.stats.featureFrames;
 +    doc["outputFrames"] = snap.stats.outputFrames;
 +    doc["loadMs"] = snap.stats.loadMs;
@@ -2556,14 +2561,15 @@ index 0000000..8001a9f
 +#endif
 diff --git a/components/hardwareone/System_STTLocal.cpp b/components/hardwareone/System_STTLocal.cpp
 new file mode 100644
-index 0000000..b298318
+index 0000000..6c25cc6
 --- /dev/null
 +++ b/components/hardwareone/System_STTLocal.cpp
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,65 @@
 +#include "System_BuildConfig.h"
 +#include "System_STTLocal.h"
 +#if ENABLE_LOCAL_STT
 +#include <cstdio>
++#include <new>
 +#if defined(CONFIG_IDF_TARGET_ESP32P4)
 +#include "System_VFS.h"
 +#include "stt/quartznet_runtime.h"
@@ -2587,14 +2593,24 @@ index 0000000..b298318
 +}
 +bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t textCap,
 +                       const STTLocalControl& control,STTLocalStats& stats,
-+                       char* error,size_t errorCap) {
++                       char* error,size_t errorCap,STTLocalSession* session) {
++    stats={};
 +    File file=openModel();
 +    if(!file||file.isDirectory()) {
 +        if(text&&textCap)text[0]=0;
 +        if(error&&errorCap)snprintf(error,errorCap,"Cannot open local STT model");
 +        return false;
 +    }
-+    return hw1::stt::transcribe({&file,file.size(),readModel},pcm,samples,text,textCap,control,stats,error,errorCap);
++    if(session && !session->backendState_) {
++        session->backendState_=new(std::nothrow) hw1::stt::ModelCache;
++        if(!session->backendState_) {
++            if(text&&textCap)text[0]=0;
++            if(error&&errorCap)snprintf(error,errorCap,"Cannot allocate STT session");
++            return false;
++        }
++    }
++    return hw1::stt::transcribe({&file,file.size(),readModel},pcm,samples,text,textCap,control,stats,error,errorCap,
++                              nullptr,session ? static_cast<hw1::stt::ModelCache*>(session->backendState_) : nullptr);
 +}
 +#else
 +bool sttLocalAvailable(char* error,size_t cap) {
@@ -2602,24 +2618,32 @@ index 0000000..b298318
 +    return false;
 +}
 +bool sttLocalTranscribe(const int16_t*,size_t,char* text,size_t cap,const STTLocalControl&,
-+                       STTLocalStats& stats,char* error,size_t errorCap) {
++                       STTLocalStats& stats,char* error,size_t errorCap,STTLocalSession*) {
 +    if(text&&cap)text[0]=0;stats={};return sttLocalAvailable(error,errorCap);
 +}
 +#endif
++STTLocalSession::~STTLocalSession() { reset(); }
++void STTLocalSession::reset() {
++#if defined(CONFIG_IDF_TARGET_ESP32P4)
++    delete static_cast<hw1::stt::ModelCache*>(backendState_);
++#endif
++    backendState_=nullptr;
++}
 +#endif
 diff --git a/components/hardwareone/System_STTLocal.h b/components/hardwareone/System_STTLocal.h
 new file mode 100644
-index 0000000..f305858
+index 0000000..6c6e119
 --- /dev/null
 +++ b/components/hardwareone/System_STTLocal.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,55 @@
 +#pragma once
 +
 +#include <stddef.h>
 +#include <stdint.h>
 +
 +// Synchronous model backend. The caller owns PCM and the output buffer for the
-+// whole call; the engine owns/frees all temporary model/frontend allocations.
++// whole call. An optional session retains verified weights between calls;
++// per-segment model/frontend allocations remain temporary.
 +// Input is 16 kHz mono signed int16 BEFORE recorder DSP (no pre-emphasis/gain).
 +// Cancellation is cooperative: return only after all engine work has stopped.
 +enum class STTLocalPhase : uint8_t { Loading, Frontend, Inference, Decoding };
@@ -2635,10 +2659,28 @@ index 0000000..f305858
 +  uint32_t featureFrames = 0;
 +  uint32_t outputFrames = 0;
 +  uint32_t modelBytes = 0;
++  bool weightsReused = false;
 +  uint32_t loadMs = 0;
 +  uint32_t frontendMs = 0;
 +  uint32_t inferenceMs = 0;
 +  uint32_t decodeMs = 0;
++};
++
++// Single-worker backend lifetime, never shared between authenticated runs.
++// Reset after the final call has returned, including failure/cancellation.
++// FreeRTOS self-deleting tasks must reset explicitly before vTaskDelete().
++class STTLocalSession {
++ public:
++  STTLocalSession() = default;
++  ~STTLocalSession();
++  void reset();
++  STTLocalSession(const STTLocalSession&) = delete;
++  STTLocalSession& operator=(const STTLocalSession&) = delete;
++ private:
++  void* backendState_ = nullptr;
++  friend bool sttLocalTranscribe(const int16_t*, size_t, char*, size_t,
++                                const STTLocalControl&, STTLocalStats&,
++                                char*, size_t, STTLocalSession*);
 +};
 +
 +// Cheap availability check for the configured, fixed model path; does not load
@@ -2647,7 +2689,8 @@ index 0000000..f305858
 +bool sttLocalTranscribe(const int16_t* pcm, size_t samples,
 +                        char* text, size_t textCap,
 +                        const STTLocalControl& control, STTLocalStats& stats,
-+                        char* error, size_t errorCap);
++                        char* error, size_t errorCap,
++                        STTLocalSession* session = nullptr);
 diff --git a/components/hardwareone/System_Utils.cpp b/components/hardwareone/System_Utils.cpp
 index a8c4dd3..9fbd39c 100644
 --- a/components/hardwareone/System_Utils.cpp
@@ -3233,10 +3276,10 @@ index 0000000..440b04b
 +}
 diff --git a/components/hardwareone/stt/quartznet_runtime.cpp b/components/hardwareone/stt/quartznet_runtime.cpp
 new file mode 100644
-index 0000000..39c29ac
+index 0000000..d08e866
 --- /dev/null
 +++ b/components/hardwareone/stt/quartznet_runtime.cpp
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,219 @@
 +#include "quartznet_runtime.h"
 +#include "quartznet_frontend.h"
 +#include "stt_model_identity.h"
@@ -3271,6 +3314,7 @@ index 0000000..39c29ac
 +        p=heap_caps_aligned_alloc(16,n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
 +    }
 +    ~Buffer() { if(sensitive && p) { volatile uint8_t* d=static_cast<volatile uint8_t*>(p); for(size_t i=0;i<bytes;++i)d[i]=0; } heap_caps_free(p); }
++    void* release() { void* value=p; p=nullptr; return value; }
 +    Buffer(const Buffer&)=delete;
 +    Buffer& operator=(const Buffer&)=delete;
 +};
@@ -3316,10 +3360,19 @@ index 0000000..39c29ac
 +        && t->get_bytes()==int(frames*channels);
 +}
 +}
++ModelCache::~ModelCache() { reset(); }
++void ModelCache::reset() { heap_caps_free(raw_); raw_=nullptr; }
++#if HW1_STT_RUNTIME_DIAGNOSTICS
++bool ModelCache::verify() const {
++    uint8_t hash[32];
++    return raw_ && digest(raw_,identity::kRawBytes,hash) && !memcmp(hash,identity::kRawSha,32);
++}
++#endif
++
 +bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
 +                char* text, size_t capacity, const STTLocalControl& control,
 +                STTLocalStats& stats, char* error, size_t errorCapacity,
-+                Diagnostics* diagnostics) {
++                Diagnostics* diagnostics, ModelCache* cache) {
 +    stats={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
 +#if HW1_STT_RUNTIME_DIAGNOSTICS
 +    if(diagnostics)*diagnostics={};
@@ -3341,16 +3394,35 @@ index 0000000..39c29ac
 +    const size_t frontendBytes=frames*kMelBins*sizeof(float)+sizeof(FrontendWorkspace);
 +    constexpr size_t metadataMargin=1024*1024, internalMinimum=150*1024;
 +    const size_t remainingBudget=arenaBudget+frontendBytes+metadataMargin;
-+    if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)<identity::kRawBytes+remainingBudget
-+       || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<identity::kRawBytes
++    // A null cache keeps one-shot calls self-contained. Continuous sessions
++    // retain this allocation only until their worker has joined/closed.
++    ModelCache temporary;
++    ModelCache& weights=cache ? *cache : temporary;
++    const bool reused=weights.raw_!=nullptr;
++    const size_t newWeights=reused ? 0 : identity::kRawBytes;
++    if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)<newWeights+remainingBudget
++       || (!reused && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<identity::kRawBytes)
 +       || heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<internalMinimum)
 +        return fail("Not enough free memory; stop camera, speech and other large models");
-+    Buffer raw(identity::kRawBytes);
-+    if(!raw.p)return fail("Cannot allocate STT model");
-+    if(!inflateModel(reader,static_cast<uint8_t*>(raw.p),control))return fail(cancelled(control)?"Cancelled":"STT model decompression failed");
-+    uint8_t hash[32];
-+    if(!digest(raw.p,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32))return fail("STT model checksum mismatch");
++    if(!reused) {
++        Buffer candidate(identity::kRawBytes);
++        if(!candidate.p)return fail("Cannot allocate STT model");
++        if(!inflateModel(reader,static_cast<uint8_t*>(candidate.p),control))return fail(cancelled(control)?"Cancelled":"STT model decompression failed");
++        uint8_t hash[32];
++        if(!digest(candidate.p,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32))return fail("STT model checksum mismatch");
++        if(cancelled(control))return fail("Cancelled");
++        weights.raw_=candidate.release(); // publish only fully verified weights
++    } else {
++        // Validate again before every vendor parse: caching must not weaken
++        // the identity boundary or assume a vendor never mutates its backing.
++        uint8_t hash[32];
++        if(!digest(weights.raw_,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32)) {
++            weights.reset();
++            return fail("Cached STT model checksum mismatch");
++        }
++    }
 +    stats.modelBytes=identity::kRawBytes;
++    stats.weightsReused=reused;
 +    if(cancelled(control))return fail("Cancelled");
 +    // Raw model allocation can split the largest block. Check again before
 +    // the vendor constructor requests a contiguous arena and creates metadata.
@@ -3359,10 +3431,10 @@ index 0000000..39c29ac
 +       || heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<internalMinimum)
 +        return fail("Not enough contiguous memory for STT activations");
 +    // A fresh model per utterance avoids Model::build's resize allocation leak.
-+    // Aligned EDL2+ in PSRAM allows zero-copy parameters; raw outlives model.
++    // Aligned EDL2+ in PSRAM allows zero-copy parameters; weights outlive model.
 +    std::map<std::string,std::vector<int>> shapes{{identity::kInputName,{1,int(frames),1,64}}};
 +    std::unique_ptr<dl::Model> model(new(std::nothrow) dl::Model(
-+        static_cast<const char*>(raw.p),fbs::MODEL_LOCATION_IN_FLASH_RODATA,0,
++        static_cast<const char*>(weights.raw_),fbs::MODEL_LOCATION_IN_FLASH_RODATA,0,
 +        dl::MEMORY_MANAGER_GREEDY,nullptr,false,shapes));
 +    if(!model)return fail("Cannot create STT model");
 +    auto input=model->get_input(identity::kInputName);auto output=model->get_output(identity::kOutputName);
@@ -3422,16 +3494,17 @@ index 0000000..39c29ac
 +       || ctc_finish(&ctc,text,capacity)!=Status::Ok || ctc.truncated)return fail("STT transcript exceeds result capacity");
 +    stats.decodeMs=millis()-start;
 +    if(cancelled(control))return fail("Cancelled");
-+    // Model destructor releases its arena before the backing raw blob is freed.
++    // Model destructor releases its arena before temporary weights are freed.
++    // Session weights remain immutable and are rechecked on the next call.
 +    return true;
 +}
 +}
 diff --git a/components/hardwareone/stt/quartznet_runtime.h b/components/hardwareone/stt/quartznet_runtime.h
 new file mode 100644
-index 0000000..af9c919
+index 0000000..a96185d
 --- /dev/null
 +++ b/components/hardwareone/stt/quartznet_runtime.h
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,49 @@
 +#pragma once
 +#include "System_STTLocal.h"
 +#include <cstddef>
@@ -3456,10 +3529,30 @@ index 0000000..af9c919
 +    size_t freePsramAtInference = 0;
 +    size_t freeInternalAtInference = 0;
 +};
++// Retains only the pinned, verified raw weights. Each call still constructs
++// a fresh shape-specific model/arena; vendor resize/rebuild is never reused.
++// One worker owns this object. Destroy/reset only after transcribe returns.
++class ModelCache {
++ public:
++    ModelCache() = default;
++    ~ModelCache();
++    void reset();
++#if HW1_STT_RUNTIME_DIAGNOSTICS
++    // Probe integrity after the vendor model and arena have been destroyed.
++    bool verify() const;
++#endif
++    ModelCache(const ModelCache&) = delete;
++    ModelCache& operator=(const ModelCache&) = delete;
++ private:
++    void* raw_ = nullptr;
++    friend bool transcribe(ModelReader, const int16_t*, size_t, char*, size_t,
++                           const STTLocalControl&, STTLocalStats&, char*, size_t,
++                           Diagnostics*, ModelCache*);
++};
 +bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
 +                char* text, size_t capacity, const STTLocalControl& control,
 +                STTLocalStats& stats, char* error, size_t errorCapacity,
-+                Diagnostics* diagnostics = nullptr);
++                Diagnostics* diagnostics = nullptr, ModelCache* cache = nullptr);
 +}
 diff --git a/components/hardwareone/stt/stt_model_container.h b/components/hardwareone/stt/stt_model_container.h
 new file mode 100644
