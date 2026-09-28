@@ -1375,6 +1375,20 @@
 // If the user force-enabled the monitor on a board with no backend hardware
 // claimed, runtime reports measurement unavailable — no compile error.
 
+// Reserve the actual camera SCCB controller across start/stop so general
+// sensor bus recovery cannot tear it down. P4 CSI owns I2C0. DVP follows the
+// esp32-camera SDK selection; board profiles should choose I2C0 to leave the
+// primary Wire1/I2C1 sensor bus available.
+#if !ENABLE_CAMERA_SENSOR
+  #define CAMERA_SCCB_I2C_PORT -1
+#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+  #define CAMERA_SCCB_I2C_PORT 0
+#elif defined(CONFIG_SCCB_HARDWARE_I2C_PORT1) && CONFIG_SCCB_HARDWARE_I2C_PORT1
+  #define CAMERA_SCCB_I2C_PORT 1
+#else
+  #define CAMERA_SCCB_I2C_PORT 0
+#endif
+
 // =============================================================================
 // I2C2 (second I2C bus) — board-agnostic fallback
 // =============================================================================

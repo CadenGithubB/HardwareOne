@@ -35,68 +35,26 @@
 // UX; if the user wants to step backward they tap (range-1) more
 // times. Ranges below are intentionally small.
 
-// Framesize is non-monotonic in the setting-index space (0..5 are
-// QVGA..UXGA; 6..10 are 96x96..240x240). For the cycle order we want
-// small→large visual ordering, so we map through this canonical list:
-//
-// Setting index 6 (96x96) is intentionally OMITTED from the picker.
-// Field testing 2026-05-01 confirmed it produces JPEG frames that
-// blow the OV3660's auto-sized frame buffer, locking the camera in
-// FB-OVF and bricking the device at next boot (boot guard reverts
-// it to QVGA — see initCamera()). Re-add only after the buffer-size
-// problem is solved upstream.
-static const int kFramesizeCycleOrder[] = {
-  // 6,  // 96x96 — disabled (FB-OVF on OV3660, see comment above)
-  7,  // 160x120 (QQVGA)
-  8,  // 176x144 (QCIF)
-  9,  // 240x176 (HQVGA)
-  10, // 240x240
-  0,  // 320x240 (QVGA)
-  1,  // 640x480 (VGA)
-  2,  // 800x600 (SVGA)
-  3,  // 1024x768 (XGA)
-  4,  // 1280x1024 (SXGA)
-  5,  // 1600x1200 (UXGA)
-};
+// Persistent setting IDs are stable; capabilities decide which rows exist.
+// Keep the visible list in increasing pixel area across DVP and CSI backends.
+static const int kFramesizeCycleOrder[] = {6, 7, 8, 9, 10, 0, 12, 1, 2, 3, 11, 4, 5};
 static const size_t kFramesizeCycleCount =
     sizeof(kFramesizeCycleOrder) / sizeof(kFramesizeCycleOrder[0]);
 
 static const char* framesizeLabel(int settingIdx) {
-  switch (settingIdx) {
-    case 0:  return "QVGA";
-    case 1:  return "VGA";
-    case 2:  return "SVGA";
-    case 3:  return "XGA";
-    case 4:  return "SXGA";
-    case 5:  return "UXGA";
-    case 6:  return "96x96";
-    case 7:  return "QQVGA";
-    case 8:  return "QCIF";
-    case 9:  return "HQVGA";
-    case 10: return "240x240";
-    default: return "?";
-  }
+  const auto* info = cameraFrameSizeInfo(static_cast<CameraFrameSize>(settingIdx));
+  return info ? info->name : "?";
 }
 
-// Picker rows show "<LABEL> <WxH>" so the user sees both the standard
-// name and the actual dimensions on one line. For sizes whose label is
-// already the dimensions (96x96, 240x240) the helper returns just the
-// label to avoid silly duplication ("96x96 96x96").
-static const char* framesizeFullName(int settingIdx) {
-  switch (settingIdx) {
-    case 0:  return "QVGA 320x240";
-    case 1:  return "VGA 640x480";
-    case 2:  return "SVGA 800x600";
-    case 3:  return "XGA 1024x768";
-    case 4:  return "SXGA 1280x1024";
-    case 5:  return "UXGA 1600x1200";
-    case 6:  return "96x96";
-    case 7:  return "QQVGA 160x120";
-    case 8:  return "QCIF 176x144";
-    case 9:  return "HQVGA 240x176";
-    case 10: return "240x240";
-    default: return "?";
+// Return the setting ID for a supported, one-based picker row. Rendering and
+// dispatch use the same mapping so a hidden resolution cannot shift a tap.
+static int framesizeForRow(size_t displayRow, uint32_t resolutions) {
+  if (!displayRow) return -1;
+  for (int id : kFramesizeCycleOrder) {
+    if (!(resolutions & cameraResolutionBit(static_cast<CameraFrameSize>(id)))) continue;
+    if (--displayRow == 0) return id;
   }
+  return -1;
 }
 
 // Page level — top-level category menu, one of three category sub-lists,
@@ -131,25 +89,18 @@ enum CamCategory : uint8_t {
   CAM_CAT_POSTPROC  = 2,
 };
 
-// Stream size presets — each is W,H plus a label. The list is split into
-// two visual sections by header rows (w/h = -1 sentinels): the camera is
-// 4:3 today, so 4:3-aspect dst sizes fill the panel slot with no black
-// bars (and with smaller wire payloads than 1:1 / 2:1 alternatives at
-// the same panel area). The "with bars" section keeps the historical
-// 1:1 and 2:1 sizes for users who want square/wide framing and accept
-// the bandwidth cost of the bars (~25% of payload at 1:1, ~33% at 2:1
-// against a 4:3 camera). Reference cadence comments are in
-// G2_Glasses.cpp's camera-stream worker.
+// Stream output sizes are independent of the camera's native aspect ratio.
+// The shared image converter fits the source and adds bars when needed.
 struct StreamSizePreset { int16_t w; int16_t h; const char* label; };
 static const StreamSizePreset kStreamPresets[] = {
-  // ── Fill (4:3, no bars with current camera) ──
-  {  -1,  -1, "-- Fill (no bars) --" },
+  // 4:3 output sizes
+  {  -1,  -1, "-- 4:3 output --" },
   {  96,  72, "96x72 (Small)"        },
   { 128,  96, "128x96"               },
   { 192, 144, "192x144 (Full panel)" },
 
-  // ── With bars/pillars (against 4:3 camera) ──
-  {  -1,  -1, "-- With bars/pillars --" },
+  // Square and wide output sizes
+  {  -1,  -1, "-- Square / wide --" },
   {  96,  96, "96x96 (1:1)"   },
   { 128, 128, "128x128 (1:1)" },
   { 144, 144, "144x144 (1:1)" },
@@ -181,6 +132,7 @@ struct CamSetting {
   void         (*format)(char* out, size_t cap, int v); // render value
   bool         (*apply)(int v); // queue cmd_camera* with stringified value
   CamCategory  category;        // which sub-list this setting belongs to
+  int          control = -1;    // CameraControl, or -1 for shared pipeline settings
 };
 
 // Typed read — bool storage stays bool in gSettings; we expose it as int
@@ -303,15 +255,16 @@ static int cycleQuality(int v) {
 }
 
 static int cycleFramesize(int v) {
-  // Find current value in the canonical small→large order, advance by
-  // one, wrap. If the stored value isn't in the table (defensive),
-  // start at the first entry.
-  int idx = 0;
-  for (size_t i = 0; i < kFramesizeCycleCount; i++) {
-    if (kFramesizeCycleOrder[i] == v) { idx = (int)i; break; }
+  const auto caps = getCameraCapabilities();
+  size_t start = kFramesizeCycleCount - 1;
+  for (size_t i = 0; i < kFramesizeCycleCount; ++i) {
+    if (kFramesizeCycleOrder[i] == v) { start = i; break; }
   }
-  idx = (idx + 1) % (int)kFramesizeCycleCount;
-  return kFramesizeCycleOrder[idx];
+  for (size_t offset = 1; offset <= kFramesizeCycleCount; ++offset) {
+    int id = kFramesizeCycleOrder[(start + offset) % kFramesizeCycleCount];
+    if (caps.resolutions & cameraResolutionBit(static_cast<CameraFrameSize>(id))) return id;
+  }
+  return v;
 }
 
 // Format helpers --------------------------------------------------------------
@@ -360,32 +313,44 @@ static bool applyFps(int v)        { return applyByCmd("camerafps",        v); }
 static const CamSetting kSettings[] = {
   // Camera sub-list — sensor exposure / shaping knobs
   { "Resolution", CV_INT,  &gSettings.cameraFramesize,  cycleFramesize,  fmtFramesize,   applyFramesize,  CAM_CAT_CAMERA    },
-  { "Brightness", CV_INT,  &gSettings.cameraBrightness, cycleRangeM2P2,  fmtSignedInt,   applyBrightness, CAM_CAT_CAMERA    },
-  { "Contrast",   CV_INT,  &gSettings.cameraContrast,   cycleRangeM2P2,  fmtSignedInt,   applyContrast,   CAM_CAT_CAMERA    },
-  { "Exposure",   CV_INT,  &gSettings.cameraAELevel,    cycleRangeM2P2,  fmtSignedInt,   applyExposure,   CAM_CAT_CAMERA    },
-  { "Sharpness",  CV_INT,  &gSettings.cameraSharpness,  cycleRangeM2P2,  fmtSignedInt,   applySharpness,  CAM_CAT_CAMERA    },
+  { "Brightness", CV_INT,  &gSettings.cameraBrightness, cycleRangeM2P2,  fmtSignedInt,   applyBrightness, CAM_CAT_CAMERA, static_cast<int>(CameraControl::Brightness) },
+  { "Contrast",   CV_INT,  &gSettings.cameraContrast,   cycleRangeM2P2,  fmtSignedInt,   applyContrast,   CAM_CAT_CAMERA, static_cast<int>(CameraControl::Contrast) },
+  { "Exposure",   CV_INT,  &gSettings.cameraAELevel,    cycleRangeM2P2,  fmtSignedInt,   applyExposure,   CAM_CAT_CAMERA, static_cast<int>(CameraControl::ExposureLevel) },
+  { "Sharpness",  CV_INT,  &gSettings.cameraSharpness,  cycleRangeM2P2,  fmtSignedInt,   applySharpness,  CAM_CAT_CAMERA, static_cast<int>(CameraControl::Sharpness) },
   // Transform sub-list — geometric flips
-  { "H Mirror",   CV_BOOL, &gSettings.cameraHMirror,    cycleBool,       fmtBool,        applyHMirror,    CAM_CAT_TRANSFORM },
-  { "V Flip",     CV_BOOL, &gSettings.cameraVFlip,      cycleBool,       fmtBool,        applyVFlip,      CAM_CAT_TRANSFORM },
+  { "H Mirror",   CV_BOOL, &gSettings.cameraHMirror,    cycleBool,       fmtBool,        applyHMirror,    CAM_CAT_TRANSFORM, static_cast<int>(CameraControl::HMirror) },
+  { "V Flip",     CV_BOOL, &gSettings.cameraVFlip,      cycleBool,       fmtBool,        applyVFlip,      CAM_CAT_TRANSFORM, static_cast<int>(CameraControl::VFlip) },
   // Post Processing sub-list — image-quality knobs (Denoise is sensor-side
   // technically, but UX-wise belongs with Quality not Brightness — see the
   // CamCategory enum doc above). Tone Map is the lens 4-bpp algorithm
   // (Linear / Balanced / Shadows / Legacy), not a sensor register.
   { "Quality",    CV_INT,  &gSettings.cameraQuality,    cycleQuality,    fmtUnsignedInt, applyQuality,    CAM_CAT_POSTPROC  },
-  { "Denoise",    CV_INT,  &gSettings.cameraDenoise,    cycleDenoise,    fmtUnsignedInt, applyDenoise,    CAM_CAT_POSTPROC  },
+  { "Denoise",    CV_INT,  &gSettings.cameraDenoise,    cycleDenoise,    fmtUnsignedInt, applyDenoise,    CAM_CAT_POSTPROC, static_cast<int>(CameraControl::Denoise) },
   { "Tone Map",   CV_INT,  &gSettings.g2StreamToneMap,  cycleToneMap,    fmtToneMap,     applyToneMap,    CAM_CAT_POSTPROC  },
 };
 static const size_t kSettingsCount = sizeof(kSettings) / sizeof(kSettings[0]);
+
+static bool settingSupported(const CamSetting& setting, const CameraCapabilities& caps) {
+  return setting.control < 0 ||
+         (caps.controls & cameraControlBit(static_cast<CameraControl>(setting.control)));
+}
 
 // -----------------------------------------------------------------------------
 // Row buffer
 // -----------------------------------------------------------------------------
 
 #define CAM_SETTINGS_ROW_LEN  32
-// 1 back row + N settings rows. The picker page needs 1 back row + 11
-// resolution rows = 12, so size the shared buffer for that.
+// 1 back row + N settings rows. Also covers all 13 resolution IDs and the
+// independent stream-size picker, with room for an unavailable-controls row.
 static EXT_RAM_BSS_ATTR char gRows[1 + 16][CAM_SETTINGS_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
 static const char* gRowPtrs[1 + 16];
+// Keep the rendered identity until the next redraw. Capabilities can change
+// when the camera opens; a stale tap must never select a different setting.
+static size_t gSettingRowMap[1 + 16];
+static int gResolutionRowMap[1 + 16];
+static size_t gSettingRowsCount = 0;
+static size_t gResolutionRowsCount = 0;
+static CamCategory gRenderedCategory = CAM_CAT_CAMERA;
 
 // -----------------------------------------------------------------------------
 // Forward decls — show/build helpers used across the level handlers
@@ -399,18 +364,11 @@ static void   showSubMenu(CamCategory cat);
 static void   showResolutionPicker();
 static void   showStreamPicker();
 
-// Map a sub-list display row (1-based, after the back row) to a kSettings
-// index. Walks kSettings filtering on category until the Nth match. Returns
-// SIZE_MAX if the row is out of range. Used by both buildSubRows (for
-// rendering) and handleSubTap (for dispatching).
+// Recover the setting that was rendered in a one-based sub-list row.
+// Current capabilities are checked again by the dispatcher before submission.
 static size_t kSettingsIndexForSubRow(CamCategory cat, size_t displayRow) {
-  size_t matched = 0;
-  for (size_t i = 0; i < kSettingsCount; i++) {
-    if (kSettings[i].category != cat) continue;
-    matched++;
-    if (matched == displayRow) return i;
-  }
-  return SIZE_MAX;
+  if (cat != gRenderedCategory || !displayRow || displayRow >= gSettingRowsCount) return SIZE_MAX;
+  return gSettingRowMap[displayRow];
 }
 
 // -----------------------------------------------------------------------------
@@ -460,6 +418,10 @@ static size_t buildTopRows() {
 // -----------------------------------------------------------------------------
 
 static size_t buildSubRows(CamCategory cat) {
+  const auto caps = getCameraCapabilities();
+  gSettingRowsCount = 0;
+  gRenderedCategory = cat;
+  for (auto& index : gSettingRowMap) index = SIZE_MAX;
   size_t row = 0;
   strncpy(gRows[row], "<- Settings", CAM_SETTINGS_ROW_LEN - 1);
   gRows[row][CAM_SETTINGS_ROW_LEN - 1] = '\0';
@@ -468,10 +430,15 @@ static size_t buildSubRows(CamCategory cat) {
 
   for (size_t i = 0; i < kSettingsCount && row < (sizeof(gRows) / sizeof(gRows[0])); i++) {
     const CamSetting& s = kSettings[i];
-    if (s.category != cat) continue;
+    if (s.category != cat || !settingSupported(s, caps)) continue;
     char valueBuf[16];
     valueBuf[0] = '\0';
     if (s.format) s.format(valueBuf, sizeof(valueBuf), readSetting(s));
+    if (strcmp(s.label, "Resolution") == 0 &&
+        (readSetting(s) < 0 || readSetting(s) >= int(CameraFrameSize::Count) ||
+         !(caps.resolutions & cameraResolutionBit(static_cast<CameraFrameSize>(readSetting(s)))))) {
+      snprintf(valueBuf, sizeof(valueBuf), "%s [N/A]", framesizeLabel(readSetting(s)));
+    }
     // Resolution is the one row that opens a picker instead of cycling —
     // keep the ">" affordance so the user knows tap behaviour differs.
     if (strcmp(s.label, "Resolution") == 0) {
@@ -480,8 +447,15 @@ static size_t buildSubRows(CamCategory cat) {
       snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "%s: %s", s.label, valueBuf);
     }
     gRowPtrs[row] = gRows[row];
+    gSettingRowMap[row] = i;
     row++;
   }
+  if (row == 1) {
+    snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "No supported controls");
+    gRowPtrs[row] = gRows[row];
+    row++;
+  }
+  gSettingRowsCount = row;
   return row;
 }
 
@@ -490,6 +464,9 @@ static size_t buildSubRows(CamCategory cat) {
 // -----------------------------------------------------------------------------
 
 static size_t buildResolutionPickerRows() {
+  const auto caps = getCameraCapabilities();
+  gResolutionRowsCount = 0;
+  for (auto& id : gResolutionRowMap) id = -1;
   const int current = (int)gSettings.cameraFramesize;
 
   size_t row = 0;
@@ -498,16 +475,19 @@ static size_t buildResolutionPickerRows() {
   gRowPtrs[row] = gRows[row];
   row++;
 
-  for (size_t i = 0; i < kFramesizeCycleCount && row < (sizeof(gRows) / sizeof(gRows[0])); i++) {
-    const int idx = kFramesizeCycleOrder[i];
-    const bool selected = (idx == current);
-    snprintf(gRows[row], CAM_SETTINGS_ROW_LEN,
-             "%s%s",
-             selected ? "[X] " : "    ",
-             framesizeFullName(idx));
+  for (size_t displayRow = 1; row < (sizeof(gRows) / sizeof(gRows[0])); ++displayRow) {
+    const int id = framesizeForRow(displayRow, caps.resolutions);
+    if (id < 0) break;
+    const auto* info = cameraFrameSizeInfo(static_cast<CameraFrameSize>(id));
+    if (!info) break;
+    snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "%s%s %ux%u",
+             id == current ? "[X] " : "    ", info->name,
+             (unsigned)info->width, (unsigned)info->height);
     gRowPtrs[row] = gRows[row];
+    gResolutionRowMap[row] = id;
     row++;
   }
+  gResolutionRowsCount = row;
   return row;
 }
 
@@ -609,11 +589,13 @@ static void redrawCurrentCameraSettings() {
 
 void g2BuildCameraSettingsInfo(char* out, size_t cap) {
   if (!out || cap == 0) return;
+  const auto caps = getCameraCapabilities();
   size_t pos = 0;
 
   auto append = [&](const char* line) {
+    if (pos >= cap - 1) return;
     int w = snprintf(out + pos, cap - pos, "%s\n", line);
-    if (w > 0) pos += (size_t)w;
+    if (w > 0) pos += ((size_t)w < cap - pos) ? (size_t)w : cap - pos - 1;
   };
 
   // Stream + FPS come first — both live at the top level on the lens.
@@ -641,10 +623,15 @@ void g2BuildCameraSettingsInfo(char* out, size_t cap) {
     append(kGroups[g].header);
     for (size_t i = 0; i < kSettingsCount; i++) {
       const CamSetting& s = kSettings[i];
-      if (s.category != kGroups[g].cat) continue;
+      if (s.category != kGroups[g].cat || !settingSupported(s, caps)) continue;
       char valueBuf[16];
       valueBuf[0] = '\0';
       if (s.format) s.format(valueBuf, sizeof(valueBuf), readSetting(s));
+      if (strcmp(s.label, "Resolution") == 0 &&
+          (readSetting(s) < 0 || readSetting(s) >= int(CameraFrameSize::Count) ||
+           !(caps.resolutions & cameraResolutionBit(static_cast<CameraFrameSize>(readSetting(s)))))) {
+        snprintf(valueBuf, sizeof(valueBuf), "%s [N/A]", framesizeLabel(readSetting(s)));
+      }
       snprintf(line, sizeof(line), "  %s: %s", s.label, valueBuf);
       append(line);
     }
@@ -731,7 +718,7 @@ static void handleSubTap(CamCategory cat, uint32_t idx) {
     return;
   }
   const CamSetting& s = kSettings[k];
-  if (!s.valuePtr || !s.cycle || !s.apply) return;
+  if (!settingSupported(s, getCameraCapabilities()) || !s.valuePtr || !s.cycle || !s.apply) return;
 
   // Resolution opens the framesize picker rather than cycling — same
   // affordance the row's ">" indicator hints at.
@@ -763,22 +750,20 @@ static void handleResolutionPickerTap(uint32_t idx) {
     showSubMenu(CAM_CAT_CAMERA);
     return;
   }
-  const size_t i = (size_t)idx - 1;
-  if (i >= kFramesizeCycleCount) {
-    DEBUG_G2F("[G2] Camera settings: resolution picker tap idx=%u out of range (count=%u)",
-              (unsigned)idx, (unsigned)kFramesizeCycleCount);
+  const int newSetting = idx < gResolutionRowsCount ? gResolutionRowMap[idx] : -1;
+  if (newSetting < 0 || !cameraSupportsResolution(static_cast<CameraFrameSize>(newSetting))) {
+    DEBUG_G2F("[G2] Camera settings: unsupported resolution picker row %u", (unsigned)idx);
     return;
   }
-  const int newSetting = kFramesizeCycleOrder[i];
   const int prevSetting = (int)gSettings.cameraFramesize;
   if (newSetting == prevSetting) {
     BROADCAST_PRINTF("[G2] Camera settings: resolution unchanged (%s)",
-                     framesizeFullName(newSetting));
+                     framesizeLabel(newSetting));
   } else {
     if (applyFramesize(newSetting)) {
       BROADCAST_PRINTF("[G2] Camera settings: resolution %s -> %s queued",
-                       framesizeFullName(prevSetting),
-                       framesizeFullName(newSetting));
+                       framesizeLabel(prevSetting),
+                       framesizeLabel(newSetting));
     }
   }
   // Return to the Camera sub-list with the new value reflected.

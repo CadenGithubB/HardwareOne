@@ -772,6 +772,8 @@ const char* cmd_i2cbusenabled(const String& argsInput) {
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cBusEnabled <0|1> (reboot required)";
   bool v = (valStr.toInt() != 0);
+  if (v && CAMERA_SCCB_I2C_PORT == 1)
+    return "Error: I2C1/Wire1 controller is reserved for the camera in this build; select camera SCCB I2C0 to use the primary sensor bus.";
   setSetting(gSettings.i2cEnabled, v);
   snprintf(getDebugBuffer(), 1024, "i2cBusEnabled set to %d (reboot required)", (int)v);
   return getDebugBuffer();
@@ -816,6 +818,8 @@ const char* cmd_i2c2busenabled(const String& argsInput) {
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2BusEnabled <0|1> (reboot required)";
   bool v = (valStr.toInt() != 0);
+  if (v && CAMERA_SCCB_I2C_PORT == 0)
+    return "Error: I2C2/Wire controller is reserved for the camera in this build; use I2C1/Wire1.";
   setSetting(gSettings.i2c2Enabled, v);
   snprintf(getDebugBuffer(), 1024, "i2c2BusEnabled set to %d (reboot required)", (int)v);
   return getDebugBuffer();

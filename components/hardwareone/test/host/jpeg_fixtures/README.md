@@ -12,3 +12,7 @@ software decoder supports progressive JPEG.
 
 The additional 48x48 4:4:4 pattern and solid red/blue fixtures exceed the P4
 driver's horizontal DMA block width, allowing physical accelerated RGB checks.
+
+The solid 640x480 and 1280x720 files exercise Edge Impulse's VGA RGB-buffer
+boundary and rejection of larger camera images. They contain generated color
+only, with no camera photographs.

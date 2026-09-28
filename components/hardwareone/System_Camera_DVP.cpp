@@ -1,981 +1,255 @@
-/**
- * Camera Sensor Module - ESP32-S3 DVP Camera Implementation
- * 
- * Supports OV2640, OV3660, and OV5640 cameras on XIAO ESP32S3 Sense
- */
-
+/** Shared camera lifecycle and features; hardware drivers live behind HAL_Camera. */
 #include "System_Camera_DVP.h"
-#include "System_TaskUtils.h"  // I2C_SENSOR_CORE (cam_pwr does a shared-Wire I2C scan in initCamera)
-#include "System_Events.h"  // sensor_started/stopped parity for the camera
-#include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
+#include "System_TaskUtils.h"
+#include "System_Events.h"
+#include "System_Filesystem.h"
 #include <esp_attr.h>
 #include "System_Camera_Video.h"
 #include "System_BuildConfig.h"
-
 #if ENABLE_CAMERA_SENSOR
-
 #include <Arduino.h>
-#include <Wire.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include <esp_heap_caps.h>
-#include "esp_camera.h"
-#include "sdkconfig.h"
 #include "System_Debug.h"
 #include "System_RamFlush.h"
 #include "System_MemUtil.h"
 #include "System_Command.h"
 #include "System_Settings.h"
 #include "System_I2C.h"
-#include "System_Utils.h"   // argWantsJson
+#include "System_Utils.h"
 #include <ArduinoJson.h>
 #include <atomic>
 
-static SemaphoreHandle_t gCameraMutex = nullptr;
-
-static SemaphoreHandle_t getCameraMutex() {
-  if (!gCameraMutex) {
-    gCameraMutex = xSemaphoreCreateRecursiveMutex();
-  }
-  return gCameraMutex;
-}
-
+// Static storage prevents first-call races and never treats allocation failure
+// as permission to access a driver without the lifecycle lock.
+static StaticSemaphore_t gCameraMutexStorage;
+static SemaphoreHandle_t gCameraMutex = xSemaphoreCreateRecursiveMutexStatic(&gCameraMutexStorage);
 static bool lockCameraMutex(uint32_t timeoutMs) {
-  SemaphoreHandle_t m = getCameraMutex();
-  if (!m) return true;
-  TickType_t to = (timeoutMs == 0) ? 0 : pdMS_TO_TICKS(timeoutMs);
-  return xSemaphoreTakeRecursive(m, to) == pdTRUE;
+  return gCameraMutex && xSemaphoreTakeRecursive(gCameraMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
 }
-
-static void unlockCameraMutex() {
-  SemaphoreHandle_t m = getCameraMutex();
-  if (!m) return;
-  xSemaphoreGiveRecursive(m);
-}
-
-// Helper to decode esp_camera_init error codes
-// Note: Camera-specific errors use ESP_ERR_CAMERA_BASE (0x20000) in esp32-camera
-static const char* cameraErrorToString(esp_err_t err) {
-  switch (err) {
-    case ESP_OK: return "OK";
-    case ESP_ERR_NO_MEM: return "NO_MEM - Out of memory";
-    case ESP_ERR_INVALID_ARG: return "INVALID_ARG - Invalid argument";
-    case ESP_ERR_INVALID_STATE: return "INVALID_STATE - Invalid state (or camera not detected)";
-    case ESP_ERR_NOT_FOUND: return "NOT_FOUND - Camera not detected on SCCB";
-    case ESP_ERR_NOT_SUPPORTED: return "NOT_SUPPORTED - Operation not supported";
-    case ESP_ERR_TIMEOUT: return "TIMEOUT - Operation timed out";
-    case ESP_FAIL: return "FAIL - General failure";
-    // Camera-specific errors (ESP_ERR_CAMERA_BASE = 0x20000)
-    case 0x20001: return "ESP_ERR_CAMERA_NOT_DETECTED - Camera not found on SCCB";
-    case 0x20002: return "ESP_ERR_CAMERA_FAILED_TO_SET_FRAME_SIZE - Frame size error";
-    case 0x20003: return "ESP_ERR_CAMERA_FAILED_TO_SET_OUT_FORMAT - Output format error";
-    default: return "Unknown error";
-  }
-}
-
-// Camera state
+static void unlockCameraMutex() { xSemaphoreGiveRecursive(gCameraMutex); }
 bool gCameraRunning = false;
 bool cameraConnected = false;
 bool cameraStreaming = false;
-// Sticky hardware-presence latch, distinct from cameraConnected (a runtime
-// init flag that goes false on every stopCamera). Set once the SCCB probe in
-// initCamera gets a sensor handle back, and never cleared — so a stopped
-// camera still reports "silicon is present here", which is what callers need
-// to tell "not started" apart from "no camera on this board".
 bool cameraDetected = false;
 const char* cameraModel = "Unknown";
 int cameraWidth = 0;
 int cameraHeight = 0;
-
-static framesize_t cameraFramesizeFromSetting(int v) {
-  // Indices 0..5 are the original "confirmed working" sizes — kept in
-  // their existing slots so saved settings don't shift. Indices 6..10
-  // append the sub-QVGA sizes added later (Apr 2026) for the lens
-  // viewer and ESP-NOW thumbnail use cases.
-  static const framesize_t kMap[] = {
-    FRAMESIZE_QVGA,     // 0 (320x240)
-    FRAMESIZE_VGA,      // 1 (640x480)
-    FRAMESIZE_SVGA,     // 2 (800x600)
-    FRAMESIZE_XGA,      // 3 (1024x768)
-    FRAMESIZE_SXGA,     // 4 (1280x1024)
-    FRAMESIZE_UXGA,     // 5 (1600x1200)
-    FRAMESIZE_96X96,    // 6  (96x96)
-    FRAMESIZE_QQVGA,    // 7  (160x120)
-    FRAMESIZE_QCIF,     // 8  (176x144)
-    FRAMESIZE_HQVGA,    // 9  (240x176)
-    FRAMESIZE_240X240,  // 10 (240x240)
-  };
-
-  if (v >= 0 && v < (int)(sizeof(kMap) / sizeof(kMap[0]))) {
-    return kMap[v];
-  }
-
-  // Default to VGA if invalid
-  return FRAMESIZE_VGA;
-}
-
-static int cameraFramesizeSettingFromEnum(framesize_t fs) {
-  // Match the order in cameraFramesizeFromSetting. New small sizes
-  // (6..10) are appended; existing 0..5 unchanged.
-  switch (fs) {
-    case FRAMESIZE_QVGA:    return 0;
-    case FRAMESIZE_VGA:     return 1;
-    case FRAMESIZE_SVGA:    return 2;
-    case FRAMESIZE_XGA:     return 3;
-    case FRAMESIZE_SXGA:    return 4;
-    case FRAMESIZE_UXGA:    return 5;
-    case FRAMESIZE_96X96:   return 6;
-    case FRAMESIZE_QQVGA:   return 7;
-    case FRAMESIZE_QCIF:    return 8;
-    case FRAMESIZE_HQVGA:   return 9;
-    case FRAMESIZE_240X240: return 10;
-    default: return 1;  // Default to VGA
-  }
-}
-
-static void cameraDimsForFramesize(framesize_t fs, int& w, int& h) {
-  switch (fs) {
-    case FRAMESIZE_QVGA:    w = 320;  h = 240; break;
-    case FRAMESIZE_VGA:     w = 640;  h = 480; break;
-    case FRAMESIZE_SVGA:    w = 800;  h = 600; break;
-    case FRAMESIZE_XGA:     w = 1024; h = 768; break;
-    case FRAMESIZE_SXGA:    w = 1280; h = 1024; break;
-    case FRAMESIZE_UXGA:    w = 1600; h = 1200; break;
-    case FRAMESIZE_96X96:   w = 96;   h = 96;  break;
-    case FRAMESIZE_QQVGA:   w = 160;  h = 120; break;
-    case FRAMESIZE_QCIF:    w = 176;  h = 144; break;
-    case FRAMESIZE_HQVGA:   w = 240;  h = 176; break;
-    case FRAMESIZE_240X240: w = 240;  h = 240; break;
-    default:                w = 640;  h = 480; break;
-  }
-}
-
-// XIAO ESP32S3 Sense camera pins (directly on expansion board)
-// These match the Seeed documentation for OV2640/OV3660/OV5640
-#define PWDN_GPIO_NUM     -1
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM     10
-#define SIOD_GPIO_NUM     40  // Camera I2C SDA
-#define SIOC_GPIO_NUM     39  // Camera I2C SCL
-
-#define Y9_GPIO_NUM       48
-#define Y8_GPIO_NUM       11
-#define Y7_GPIO_NUM       12
-#define Y6_GPIO_NUM       14
-#define Y5_GPIO_NUM       16
-#define Y4_GPIO_NUM       18
-#define Y3_GPIO_NUM       17
-#define Y2_GPIO_NUM       15
-#define VSYNC_GPIO_NUM    38
-#define HREF_GPIO_NUM     47
-#define PCLK_GPIO_NUM     13
-
-// Static buffer for status JSON
 static char* cameraStatusBuffer = nullptr;
-static const size_t kStatusBufSize = 512;
-// User-facing power requests own the desired state independently of the
-// driver's transient gCameraRunning flag. Inline frame recovery checks this
-// latch before and after re-init so a queued STOP cannot be undone even when
-// the worker's bounded camera-mutex take expires behind a stuck frame fetch.
+static const size_t kStatusBufSize = 4096;
 static std::atomic<bool> sCameraDesiredOn{false};
-
 static bool stopCameraInternal(bool isRecovery);
 
+// Capability snapshots are small, immutable-value copies. Rendering never
+// waits behind an in-flight capture or sensor initialization. The driver is
+// still inspected only under its lifecycle mutex; a critical section protects
+// the last complete snapshot while another task is using that driver.
+static portMUX_TYPE sCameraCapsMutex = portMUX_INITIALIZER_UNLOCKED;
+static CameraCapabilities sCameraCaps{"initializing", 0, 0, false, false, 0, 0};
+static void cacheCameraCapabilities(const CameraCapabilities& caps) {
+  portENTER_CRITICAL(&sCameraCapsMutex);
+  sCameraCaps = caps;
+  portEXIT_CRITICAL(&sCameraCapsMutex);
+}
+CameraCapabilities getCameraCapabilities() {
+  if (lockCameraMutex(0)) {
+    cacheCameraCapabilities(cameraBackend().capabilities());
+    unlockCameraMutex();
+  }
+  portENTER_CRITICAL(&sCameraCapsMutex);
+  const auto caps = sCameraCaps;
+  portEXIT_CRITICAL(&sCameraCapsMutex);
+  return caps;
+}
+bool cameraSupportsResolution(CameraFrameSize size) {
+  return cameraFrameSizeInfo(size) && (getCameraCapabilities().resolutions & cameraResolutionBit(size));
+}
+bool cameraSupportsControl(CameraControl control) {
+  return unsigned(control) < unsigned(CameraControl::Count) &&
+         (getCameraCapabilities().controls & cameraControlBit(control));
+}
+bool getCameraControl(CameraControl control, int& value) {
+  if (!lockCameraMutex(15000)) return false;
+  const bool ok = gCameraRunning && cameraBackend().getControl(control, value);
+  unlockCameraMutex();
+  return ok;
+}
+bool setCameraControl(CameraControl control, int value) {
+  if (!lockCameraMutex(15000)) return false;
+  const bool ok = gCameraRunning && cameraSupportsControl(control) && cameraBackend().setControl(control, value);
+  unlockCameraMutex();
+  return ok;
+}
+static void updateCameraInfo() {
+  cacheCameraCapabilities(cameraBackend().capabilities());
+  const auto state = cameraBackend().info();
+  cameraDetected = cameraDetected || state.detected;
+  cameraModel = state.model;
+  cameraWidth = state.width;
+  cameraHeight = state.height;
+}
+static CameraConfig cameraConfigFromSettings() {
+  CameraConfig config;
+  config.resolution = cameraFrameSizeFromSetting(gSettings.cameraFramesize);
+  config.quality = gSettings.cameraQuality;
+  auto put = [&](CameraControl c, int value) { config.controls[unsigned(c)] = value; };
+  put(CameraControl::Brightness, gSettings.cameraBrightness);
+  put(CameraControl::Contrast, gSettings.cameraContrast);
+  put(CameraControl::Saturation, gSettings.cameraSaturation);
+  put(CameraControl::Sharpness, gSettings.cameraSharpness);
+  put(CameraControl::Denoise, gSettings.cameraDenoise);
+  put(CameraControl::WhiteBalanceMode, gSettings.cameraWBMode);
+  put(CameraControl::Effect, gSettings.cameraSpecialEffect);
+  put(CameraControl::HMirror, gSettings.cameraHMirror);
+  put(CameraControl::VFlip, gSettings.cameraVFlip);
+  put(CameraControl::ExposureLevel, gSettings.cameraAELevel);
+  put(CameraControl::AutoExposure, 1);
+  put(CameraControl::AutoGain, 1);
+  put(CameraControl::GainCeiling, 6);
+  put(CameraControl::WhiteBalance, 1);
+  put(CameraControl::WhiteBalanceGain, 1);
+  put(CameraControl::WhitePixelCorrection, 1);
+  put(CameraControl::Gamma, 1);
+  put(CameraControl::LensCorrection, 1);
+  put(CameraControl::Downsize, 1);
+  return config;
+}
 bool initCamera(bool isRecovery) {
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ========== initCamera() ENTRY ==========");
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gCameraRunning=%d cameraConnected=%d", gCameraRunning, cameraConnected);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Heap free: %u, PSRAM free: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-
-  if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ERROR: camera mutex timeout (camera busy)");
+  if (!lockCameraMutex(15000)) return false;
+  if (gCameraRunning) { unlockCameraMutex(); return true; }
+  if (isRecovery && !sCameraDesiredOn) { unlockCameraMutex(); return false; }
+  auto config = cameraConfigFromSettings();
+  // Saved IDs remain portable. A legacy size outside this backend's safe
+  // envelope uses VGA/QVGA for this run and leaves the saved preference intact.
+  const auto caps = cameraBackend().capabilities();
+  cacheCameraCapabilities(caps);
+  if (!(caps.resolutions & cameraResolutionBit(config.resolution))) {
+    config.resolution = config.resolution != CameraFrameSize::Square96 &&
+      (caps.resolutions & cameraResolutionBit(CameraFrameSize::VGA))
+      ? CameraFrameSize::VGA : CameraFrameSize::QVGA;
+    INFO_CAMERAF("Saved resolution %d unsupported by %s; using %u this run", gSettings.cameraFramesize, caps.backend, unsigned(config.resolution));
+  }
+  const bool ok = cameraBackend().begin(config);
+  updateCameraInfo();
+  if (!ok) {
+    const auto state = cameraBackend().info();
+    cameraConnected = gCameraRunning = false;
+    const char* why = state.error ? state.error : "camera initialization failed";
+    logSystemEvent("CAM", "camera init FAILED: %s", why);
+    if (!isRecovery) systemEventPost(SYSEVT_SENSOR_START_FAILED, "Camera", why);
+    unlockCameraMutex();
     return false;
   }
-  
-  if (gCameraRunning) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Already initialized - returning true");
-    INFO_CAMERAF("Already initialized");
-    unlockCameraMutex();
-    return true;
-  }
-
+  cameraConnected = gCameraRunning = true;
   if (isRecovery && !sCameraDesiredOn) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Recovery cancelled by desired-off latch");
-    unlockCameraMutex();
-    return false;
-  }
-
-  // ---------------------------------------------------------------------
-  // Boot-safety guard for camera framesize.
-  // ---------------------------------------------------------------------
-  // Setting index 6 = FRAMESIZE_96X96. On the OV3660 (and likely other
-  // OV-family sensors) this produces JPEG output that consistently
-  // exceeds the auto-sized frame buffer (~1843 B per esp32-camera's
-  // internal estimate), causing a permanent FB-OVF storm. The flush
-  // loop further down calls esp_camera_fb_get() which blocks on an
-  // internal queue indefinitely when no complete frame ever arrives,
-  // so a device with this setting persisted bricks at boot.
-  //
-  // Detected and fixed 2026-05-01 after a user got stuck in the boot
-  // hang. Until we can size the frame buffer correctly for sub-QVGA
-  // JPEG (or move to a different pixel format for the lens viewer),
-  // revert this specific value to QVGA at boot and persist so the
-  // recovery is sticky across reboots.
-  //
-  // Other sub-QVGA sizes (QQVGA, QCIF, HQVGA, 240x240) haven't shown
-  // the same lockup in field testing — they may produce smaller JPEG
-  // bitstreams or bigger auto buffers. Leave them alone for now.
-  if (gSettings.cameraFramesize == 6) {
-    BROADCAST_PRINTF("[CAM_INIT] WARN: framesize=6 (96x96) is unsupported "
-                     "on this sensor (FB-OVF) — reverting to QVGA and persisting");
-    setSetting(gSettings.cameraFramesize, 0);
-  }
-
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Starting initialization...");
-  INFO_CAMERAF("Initializing camera...");
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gSettings: framesize=%d quality=%d brightness=%d contrast=%d saturation=%d",
-                gSettings.cameraFramesize, gSettings.cameraQuality,
-                gSettings.cameraBrightness, gSettings.cameraContrast, gSettings.cameraSaturation);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gSettings: hmirror=%d vflip=%d aeLevel=%d",
-                gSettings.cameraHMirror, gSettings.cameraVFlip, gSettings.cameraAELevel);
-  INFO_CAMERAF("Settings from gSettings: framesize=%d quality=%d brightness=%d contrast=%d",
-                gSettings.cameraFramesize, gSettings.cameraQuality,
-                gSettings.cameraBrightness, gSettings.cameraContrast);
-
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Creating camera_config_t struct...");
-  camera_config_t config;
-  memset(&config, 0, sizeof(config));  // Zero-initialize for safety
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] config struct zeroed, size=%u bytes", sizeof(config));
-  
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] LEDC: channel=%d timer=%d", config.ledc_channel, config.ledc_timer);
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO pins configured:");
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   D0-D7: %d %d %d %d %d %d %d %d", 
-                config.pin_d0, config.pin_d1, config.pin_d2, config.pin_d3,
-                config.pin_d4, config.pin_d5, config.pin_d6, config.pin_d7);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   XCLK=%d PCLK=%d VSYNC=%d HREF=%d",
-                config.pin_xclk, config.pin_pclk, config.pin_vsync, config.pin_href);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   SDA=%d SCL=%d PWDN=%d RESET=%d",
-                config.pin_sccb_sda, config.pin_sccb_scl, config.pin_pwdn, config.pin_reset);
-  
-  // === DEBUG: Log GPIO states before init ===
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] === GPIO STATE CHECK (before init) ===");
-  // Data pins
-  for (int i = 0; i < 8; i++) {
-    int pins[] = {config.pin_d0, config.pin_d1, config.pin_d2, config.pin_d3,
-                  config.pin_d4, config.pin_d5, config.pin_d6, config.pin_d7};
-    if (pins[i] >= 0) {
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO D%d (pin %d): level=%d", i, pins[i], gpio_get_level((gpio_num_t)pins[i]));
-    }
-  }
-  // Control pins
-  if (config.pin_xclk >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO XCLK (pin %d): configured for LEDC output", config.pin_xclk);
-  if (config.pin_pclk >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO PCLK (pin %d): level=%d", config.pin_pclk, gpio_get_level((gpio_num_t)config.pin_pclk));
-  if (config.pin_vsync >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO VSYNC (pin %d): level=%d", config.pin_vsync, gpio_get_level((gpio_num_t)config.pin_vsync));
-  if (config.pin_href >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO HREF (pin %d): level=%d", config.pin_href, gpio_get_level((gpio_num_t)config.pin_href));
-  if (config.pin_sccb_sda >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO SDA (pin %d): level=%d", config.pin_sccb_sda, gpio_get_level((gpio_num_t)config.pin_sccb_sda));
-  if (config.pin_sccb_scl >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO SCL (pin %d): level=%d", config.pin_sccb_scl, gpio_get_level((gpio_num_t)config.pin_sccb_scl));
-  if (config.pin_pwdn >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO PWDN (pin %d): level=%d", config.pin_pwdn, gpio_get_level((gpio_num_t)config.pin_pwdn));
-  if (config.pin_reset >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO RESET (pin %d): level=%d", config.pin_reset, gpio_get_level((gpio_num_t)config.pin_reset));
-
-  // === DEBUG: Manual power/reset sequence with timing ===
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] === POWER/RESET SEQUENCE ===");
-  if (config.pin_pwdn >= 0) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Toggling PWDN pin %d: HIGH (power down)...", config.pin_pwdn);
-    gpio_set_direction((gpio_num_t)config.pin_pwdn, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)config.pin_pwdn, 1);  // Power down
-    vTaskDelay(pdMS_TO_TICKS(10));
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PWDN pin %d: LOW (power up)...", config.pin_pwdn);
-    gpio_set_level((gpio_num_t)config.pin_pwdn, 0);  // Power up
-    vTaskDelay(pdMS_TO_TICKS(10));
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PWDN sequence complete, level now=%d", gpio_get_level((gpio_num_t)config.pin_pwdn));
-  }
-  if (config.pin_reset >= 0) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Toggling RESET pin %d: LOW (reset active)...", config.pin_reset);
-    gpio_set_direction((gpio_num_t)config.pin_reset, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)config.pin_reset, 0);  // Reset active
-    vTaskDelay(pdMS_TO_TICKS(10));
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] RESET pin %d: HIGH (reset released)...", config.pin_reset);
-    gpio_set_level((gpio_num_t)config.pin_reset, 1);  // Reset released
-    vTaskDelay(pdMS_TO_TICKS(10));
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] RESET sequence complete, level now=%d", gpio_get_level((gpio_num_t)config.pin_reset));
-  }
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Waiting 100ms for camera to stabilize after power/reset...");
-  vTaskDelay(pdMS_TO_TICKS(100));
-
-  // === DEBUG: SCCB/I2C Probe for camera ===
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] === SCCB/I2C PROBE ===");
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Probing for camera on SCCB bus (SDA=%d, SCL=%d)...", config.pin_sccb_sda, config.pin_sccb_scl);
-  // Common OV camera I2C addresses: 0x30 (OV2640 write), 0x3C (OV3660/OV5640 write)
-  // We'll try a simple I2C scan using Wire
-  Wire.begin(config.pin_sccb_sda, config.pin_sccb_scl, 100000);  // 100kHz for SCCB
-  uint8_t camAddrs[] = {0x30, 0x3C, 0x21, 0x1E};  // Common camera addresses
-  bool foundCam = false;
-  for (int i = 0; i < sizeof(camAddrs); i++) {
-    Wire.beginTransmission(camAddrs[i]);
-    uint8_t err = Wire.endTransmission();
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] SCCB probe 0x%02X: %s", camAddrs[i], err == 0 ? "FOUND!" : (err == 2 ? "NACK" : "Error"));
-    if (err == 0) foundCam = true;
-  }
-  Wire.end();  // Release I2C for camera driver
-  if (!foundCam) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] *** WARNING: No camera found on SCCB bus! Check connections! ***");
-    INFO_CAMERAF("WARNING: No camera detected on I2C bus!");
-  }
-
-  // Start with conservative defaults - OV3660 is sensitive
-  framesize_t fs = cameraFramesizeFromSetting(gSettings.cameraFramesize);
-  // Hard cap at VGA (640×480) regardless of user setting. Larger frame
-  // sizes (SVGA/XGA/UXGA) require ~60 KB+ contiguous DMA + frame buffers,
-  // which is fragile under our load (BLE central + WiFi + HTTP all
-  // contending for memory). VGA's JPEG output is ~25–40 KB, fits comfortably
-  // in PSRAM, and reduces camera DMA bandwidth ~40% vs SVGA. If a user
-  // really needs higher resolution, raise this manually after measuring
-  // peak heap under the actual load they care about.
-  if (fs > FRAMESIZE_VGA) {
-    INFO_CAMERAF("Requested framesize=%d capped to VGA (memory-pressure guard)", (int)fs);
-    fs = FRAMESIZE_VGA;
-  }
-  int jpegQ = gSettings.cameraQuality;
-  // Clamp quality: 0 means "unset", use 10 as minimum for stability
-  if (jpegQ < 10) jpegQ = 10;
-  if (jpegQ > 63) jpegQ = 63;
-
-  config.xclk_freq_hz = 20000000;  // 20MHz - standard for ESP32-CAM
-  config.frame_size = fs;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = jpegQ;
-  config.fb_count = 1;  // Start with 1, increase if PSRAM available
-  // CAMERA_GRAB_LATEST: fb_get() returns the most recently captured frame;
-  // older unread frames are silently overwritten by the sensor task.
-  //
-  // Was CAMERA_GRAB_WHEN_EMPTY until 2026-05-10. WHEN_EMPTY treats the fb
-  // ring as a FIFO — the sensor stalls when full (cam_hal: FB-OVF) and
-  // fb_get() returns the OLDEST queued frame. With fb_count=2 and a slow
-  // consumer (e.g. G2 BLE stream draining one frame every ~1.5 s at
-  // 288×144), every captured frame was already ~1.5 s old before we
-  // started the BLE push, giving a ~3 s end-to-end preview latency.
-  //
-  // LATEST means streaming consumers (G2 lens, web MJPEG, snapshots) get
-  // current frames at the cost of dropping old unread ones — the right
-  // trade for live preview. Recording (System_Camera_Video.cpp recordingTask)
-  // also benefits: when disk I/O hiccups, LATEST drops stale frames cleanly
-  // instead of stalling the sensor and producing chunked playback. The
-  // "frame-perfect contiguous capture" semantics of WHEN_EMPTY only matter
-  // for use cases this firmware doesn't have (high-fps motion analysis).
-  config.grab_mode = CAMERA_GRAB_LATEST;
-  
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Initial config: xclk=%dHz fs=%d pix=%d fb_loc=%d qual=%d fb_cnt=%d grab=%d",
-                config.xclk_freq_hz, config.frame_size, config.pixel_format,
-                config.fb_location, config.jpeg_quality, config.fb_count, config.grab_mode);
-  
-  // menuconfig: Component config → Camera → "Enable PSRAM DMA mode by default".
-  // When disabled, CAM DMA does not target PSRAM; framebuffers must live in DRAM.
-#if CONFIG_CAMERA_PSRAM_DMA
-  const bool camPsramDma = true;
-#else
-  const bool camPsramDma = false;
-#endif
-
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Checking PSRAM...");
-  bool hasPsram = psramFound();
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] psramFound()=%d CONFIG_CAMERA_PSRAM_DMA=%d",
-                hasPsram ? 1 : 0, camPsramDma ? 1 : 0);
-
-  if (hasPsram && camPsramDma) {
-    config.jpeg_quality = 10;  // Higher quality when PSRAM DMA available
-    config.fb_count = 2;
-    config.grab_mode = CAMERA_GRAB_LATEST;
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PSRAM + PSRAM-DMA — quality=10, fb_count=2, FB in PSRAM");
-  } else if (hasPsram && !camPsramDma) {
-    // PSRAM_DMA disabled in menuconfig: the camera DMA peripheral writes
-    // to internal DRAM line buffers (avoids PSRAM-bus contention during
-    // DMA), and the driver memcpy's each completed frame into the FB.
-    //
-    // We KEEP the FB in PSRAM (don't force DRAM) for two reasons:
-    //   1) Internal DRAM is fragmented under our load (BLE + WiFi + HTTP
-    //      coexist). A 60 KB contiguous alloc routinely fails even when
-    //      total free DRAM is 140+ KB. Forcing FB to DRAM caused
-    //      `cam_dma_config: frame buffer malloc failed` on init.
-    //   2) PSRAM has 8 MB free — trivially fits the FB.
-    //
-    // Net trade vs PSRAM_DMA=on:
-    //   - Less peak PSRAM bandwidth during DMA → fewer NO-SOI/NO-EOI
-    //     truncation errors when WiFi/BT are also touching PSRAM.
-    //   - Slightly more CPU (one memcpy per frame, ~60 KB at PSRAM speed).
-    config.fb_location = CAMERA_FB_IN_PSRAM;
-    config.jpeg_quality = jpegQ;
-    // Two buffers even with PSRAM_DMA off. cam_hal allocates frames[] over
-    // frame_cnt regardless of psram_mode — only the per-frame DMA descriptor
-    // chain is gated on it — so this costs one extra FB in PSRAM (~60 KB at
-    // VGA) and nothing else. It is not optional for frame rate: on completion
-    // cam_hal clears frames[pos].en and only then looks for a free buffer, so
-    // with one buffer it always goes IDLE and skips a whole sensor frame.
-    // Measured 216.29 ms deltas were exactly 2x the 108.19 ms sensor period.
-    config.fb_count = 2;
-    config.grab_mode = CAMERA_GRAB_LATEST;
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PSRAM_DMA disabled — DMA→DRAM line buf, FB in PSRAM, fb_count=2, jpeg_quality=%d", jpegQ);
-  } else {
-    // No PSRAM chip — use internal DRAM. Resolution is already capped
-    // at VGA above, but if a future change raises that cap and PSRAM
-    // is absent, drop to QVGA so the FB fits in DRAM.
-    if (config.frame_size > FRAMESIZE_QVGA) {
-      config.frame_size = FRAMESIZE_QVGA;
-      INFO_CAMERAF("No PSRAM detected, limiting to QVGA resolution");
-    }
-    config.fb_location = CAMERA_FB_IN_DRAM;
-    config.fb_count = 1;
-    config.grab_mode = CAMERA_GRAB_LATEST;
-  }
-
-  INFO_CAMERAF("Config: xclk=%dMHz framesize=%d quality=%d fb_count=%d",
-                config.xclk_freq_hz / 1000000, config.frame_size, 
-                config.jpeg_quality, config.fb_count);
-
-  // Initialize the camera
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Final config before esp_camera_init():");
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   xclk_freq_hz=%d", config.xclk_freq_hz);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   frame_size=%d pixel_format=%d", config.frame_size, config.pixel_format);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   fb_location=%d jpeg_quality=%d", config.fb_location, config.jpeg_quality);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   fb_count=%d grab_mode=%d", config.fb_count, config.grab_mode);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Heap before esp_camera_init: %u", esp_get_free_heap_size());
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Calling esp_camera_init()...");
-  
-  unsigned long initStart = millis();
-  esp_err_t err = esp_camera_init(&config);
-  unsigned long initTime = millis() - initStart;
-  
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] esp_camera_init() returned 0x%x after %lu ms", err, initTime);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Error decode: %s", cameraErrorToString(err));
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Heap after esp_camera_init: %u", esp_get_free_heap_size());
-  
-  if (err != ESP_OK) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] *** INIT FAILED! ***");
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Error code: 0x%x", err);
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Error meaning: %s", cameraErrorToString(err));
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Possible causes:");
-    if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_INVALID_STATE || err == 0x20001) {
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Camera not connected or bad ribbon cable");
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - SCCB/I2C communication failed");
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Wrong I2C address for camera model");
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - PWDN/RESET pins not configured correctly");
-    } else if (err == ESP_ERR_NO_MEM) {
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Not enough memory for frame buffers");
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Try reducing resolution or fb_count");
-    } else if (err == ESP_ERR_TIMEOUT) {
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Camera not responding (check XCLK)");
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - DVP timing issue");
-    }
-    INFO_CAMERAF("Init failed: 0x%x (%s)", err, cameraErrorToString(err));
-    cameraConnected = false;
-    gCameraRunning = false;
-    unlockCameraMutex();
-    logSystemEvent("CAM", "camera init FAILED: 0x%x (%s)", err, cameraErrorToString(err));
-    systemEventPost(SYSEVT_SENSOR_START_FAILED, "Camera", cameraErrorToString(err));
-    return false;
-  }
-  
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] esp_camera_init() SUCCESS");
-  INFO_CAMERAF("esp_camera_init() succeeded");
-
-  // Get camera sensor info
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Getting camera sensor handle...");
-  sensor_t* s = esp_camera_sensor_get();
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] esp_camera_sensor_get() returned %p", s);
-  
-  if (s) {
-    // A sensor handle means the SCCB probe got an answer — real evidence of
-    // silicon, independent of whether the model is one we recognize below.
-    cameraDetected = true;
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Sensor info: PID=0x%x VER=0x%x MIDL=0x%x MIDH=0x%x",
-                  s->id.PID, s->id.VER, s->id.MIDL, s->id.MIDH);
-    INFO_CAMERAF("Sensor PID=0x%x", s->id.PID);
-    switch (s->id.PID) {
-      case OV2640_PID:
-        cameraModel = "OV2640";
-        break;
-      case OV3660_PID:
-        cameraModel = "OV3660";
-        break;
-      case OV5640_PID:
-        cameraModel = "OV5640";
-        break;
-      default:
-        cameraModel = "Unknown";
-        break;
-    }
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Detected camera model: %s", cameraModel);
-    INFO_CAMERAF("Detected: %s", cameraModel);
-    
-    // OV3660 specific: needs time to stabilize before changing settings
-    if (s->id.PID == OV3660_PID) {
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] OV3660 detected - waiting 500ms for stabilization");
-      INFO_CAMERAF("OV3660 detected - waiting 500ms for sensor stabilization...");
-      vTaskDelay(pdMS_TO_TICKS(500));
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] OV3660 stabilization wait complete");
-    }
-    
-    // Flush any garbage frames BEFORE applying settings
-    // OV3660 needs more flushes to clear overflow state
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Starting frame flush phase...");
-    INFO_CAMERAF("Flushing initial frames...");
-    int flushCount = (s->id.PID == OV3660_PID) ? 5 : 3;
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Will flush %d frames", flushCount);
-    
-    for (int i = 0; i < flushCount; i++) {
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: calling esp_camera_fb_get()...", i);
-      unsigned long flushStart = millis();
-      camera_fb_t* fb = esp_camera_fb_get();
-      unsigned long flushTime = millis() - flushStart;
-      
-      if (fb) {
-        DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: got frame in %lu ms - len=%u format=%d w=%u h=%u",
-                      i, flushTime, fb->len, fb->format, fb->width, fb->height);
-        if (fb->format == PIXFORMAT_JPEG && fb->len >= 2) {
-          DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: JPEG header bytes: 0x%02X 0x%02X",
-                        i, fb->buf[0], fb->buf[1]);
-        }
-        INFO_CAMERAF("Flush frame %d: %u bytes, format=%d", i, fb->len, fb->format);
-        esp_camera_fb_return(fb);
-        DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: frame returned to camera", i);
-      } else {
-        DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: TIMEOUT after %lu ms - fb is NULL!", i, flushTime);
-        INFO_CAMERAF("Flush frame %d: NULL (timeout)", i);
-        // Don't break - keep trying to clear overflow
-      }
-      vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Frame flush phase complete");
-    
-    // NOW apply user settings (after camera has stabilized)
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Applying user settings phase...");
-    INFO_CAMERAF("Applying user settings...");
-    
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_framesize(%d)...", fs);
-    int r1 = s->set_framesize(s, fs);
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_framesize returned %d", r1);
-    
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_quality(%d)...", jpegQ);
-    int r2 = s->set_quality(s, jpegQ);
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_quality returned %d", r2);
-    
-    // Order: contrast → brightness → saturation. Mirrors the camerafx
-    // command's order, which the user validated empirically as the
-    // best-looking combination on OV3660. ESPHome bug #5499 reports each
-    // call clears the others' enable bits on this sensor block; calling
-    // them back-to-back here in this order matches what the user found
-    // produces the "juiced" look they want as the default.
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_contrast(%d)...", gSettings.cameraContrast);
-    s->set_contrast(s, gSettings.cameraContrast);
-
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_brightness(%d)...", gSettings.cameraBrightness);
-    s->set_brightness(s, gSettings.cameraBrightness);
-
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_saturation(%d)...", gSettings.cameraSaturation);
-    s->set_saturation(s, gSettings.cameraSaturation);
-    
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_hmirror(%d)...", gSettings.cameraHMirror ? 1 : 0);
-    s->set_hmirror(s, gSettings.cameraHMirror ? 1 : 0);
-    
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_vflip(%d)...", gSettings.cameraVFlip ? 1 : 0);
-    s->set_vflip(s, gSettings.cameraVFlip ? 1 : 0);
-    
-    // Standard settings
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Applying standard settings (AWB, AE, gain, etc.)...");
-    s->set_special_effect(s, gSettings.cameraSpecialEffect);
-    s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);
-    s->set_wb_mode(s, gSettings.cameraWBMode);
-    if (s->set_sharpness) s->set_sharpness(s, gSettings.cameraSharpness);
-    if (s->set_denoise) s->set_denoise(s, gSettings.cameraDenoise);
-    s->set_exposure_ctrl(s, 1);
-    // set_aec2 is NIGHT MODE on the OV3660 (ov3660.c writes bit 0x04 of 0x3A00),
-    // not an alternate AEC algorithm. With it on, AEC extends VTS with dummy
-    // lines up to the ceiling in 0x3A02/0x3A03 (0x0930 = 2352 lines). Against
-    // the binned VTS of 783 that is a 3.0x frame-rate cut, and it measured as
-    // pinned at the ceiling in every bench run. The sensor's own reset default
-    // is off. Runtime opt-in for dim scenes is still `cameraaec2 on`.
-    s->set_aec2(s, 0);
-    s->set_ae_level(s, gSettings.cameraAELevel);  // Apply saved exposure compensation
-    s->set_gain_ctrl(s, 1);
-    s->set_agc_gain(s, 0);
-    // GAINCEILING_128X (=6). The previous default of 2X starved AGC under
-    // typical indoor light → image stayed dim → colors looked washed out
-    // because chroma channels quantized to small numbers near the noise
-    // floor. Higher ceiling lets AEC actually expose the scene, which is
-    // a prerequisite for any of the saturation/contrast knobs to register.
-    s->set_gainceiling(s, (gainceiling_t)6);
-    s->set_bpc(s, 0);
-    s->set_wpc(s, 1);
-    s->set_raw_gma(s, 1);
-    s->set_lenc(s, 1);
-    s->set_dcw(s, 1);
-    s->set_colorbar(s, 0);
-    
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] All sensor settings applied");
-    INFO_CAMERAF("Settings applied: brightness=%d contrast=%d saturation=%d hmirror=%d vflip=%d",
-                  gSettings.cameraBrightness, gSettings.cameraContrast, 
-                  gSettings.cameraSaturation, gSettings.cameraHMirror, gSettings.cameraVFlip);
-    
-    // OV3660: Flush frames AFTER changing settings to clear stale buffers
-    // This prevents FB-OVF when resolution was changed
-    if (s->id.PID == OV3660_PID) {
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] OV3660 post-settings flush starting...");
-      vTaskDelay(pdMS_TO_TICKS(100));  // Let new settings take effect
-      for (int i = 0; i < 3; i++) {
-        camera_fb_t* fb = esp_camera_fb_get();
-        if (fb) {
-          DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Post-flush %d: %u bytes %ux%u", i, fb->len, fb->width, fb->height);
-          esp_camera_fb_return(fb);
-        } else {
-          DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Post-flush %d: NULL", i);
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));
-      }
-      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] OV3660 post-settings flush complete");
-    }
-  } else {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] WARNING: sensor handle is NULL!");
-    INFO_CAMERAF("WARNING: esp_camera_sensor_get() returned NULL!");
-  }
-
-  // Set dimensions from the canonical helper so new sizes added to
-  // the kMap (cameraFramesizeFromSetting) and dim table flow here
-  // automatically.
-  cameraDimsForFramesize(fs, cameraWidth, cameraHeight);
-
-  cameraConnected = true;
-  gCameraRunning = true;
-  // A STOP may have timed out waiting for this recovery-held recursive mutex.
-  // Do not publish a resurrected camera; tear it down while we still own the
-  // lock. stopCameraInternal(true) is recursive and suppresses user events.
-  if (isRecovery && !sCameraDesiredOn) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Recovery completed after desired-off; deinitializing");
-    (void)stopCameraInternal(/*isRecovery=*/true);
+    (void)stopCameraInternal(true);
     unlockCameraMutex();
     return false;
   }
   sensorStatusBumpWith("opencamera");
-
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ========== initCamera() COMPLETE ==========");
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gCameraRunning=%d cameraConnected=%d", gCameraRunning, cameraConnected);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Model=%s Resolution=%dx%d", cameraModel, cameraWidth, cameraHeight);
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Final heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  INFO_CAMERAF("Initialized: %s (%dx%d)", cameraModel, cameraWidth, cameraHeight);
-  unlockCameraMutex();
-  // Durable lifecycle event — skipped for per-frame recovery re-inits (isRecovery)
-  // so a glitchy camera doesn't log "online" every few seconds during a stream.
-  // A NULL sensor handle means esp_camera_init() succeeded but sensor config was
-  // skipped (framesize/quality/format not applied) — report that honestly rather
-  // than claiming a clean start.
   if (!isRecovery) {
-    if (s) {
-      logSystemEvent("CAM", "camera online: %s (%dx%d)", cameraModel, cameraWidth, cameraHeight);
-    } else {
-      logSystemEvent("CAM", "camera online but DEGRADED — sensor handle NULL, config not applied (%dx%d)",
-                     cameraWidth, cameraHeight);
-    }
-    // Camera never routes through the I2C sensor queue, so the existing
-    // sensor_started/stopped kinds miss it — post directly for parity.
+    logSystemEvent("CAM", "camera online: %s (%dx%d), backend=%s", cameraModel, cameraWidth, cameraHeight, caps.backend);
     systemEventPost(SYSEVT_SENSOR_STARTED, "Camera", cameraModel);
   }
+  unlockCameraMutex();
   return true;
 }
-
 static bool stopCameraInternal(bool isRecovery) {
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] stopCamera() called, gCameraRunning=%d", gCameraRunning);
-
-  // Finalize AVI before taking the camera mutex. stopVideoRecording waits
-  // for cam_record, which may itself be inside captureFrame (holding that
-  // mutex) — calling it under the camera lock would deadlock. Skip on
-  // recovery re-inits so a glitch mid-stream doesn't abort a recording.
-  if (!isRecovery && videoRecording) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Stopping active recording before deinit");
-    stopVideoRecording();
-  }
-
-  if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] ERROR: camera mutex timeout (camera busy)");
-    return false;
-  }
-
-  // Check only after acquiring the camera mutex. In particular, inline frame
-  // recovery temporarily sets gCameraRunning=false before re-initialising while
-  // holding this recursive mutex. A concurrent worker STOP must wait for that
-  // recovery to finish and then turn the camera back off, not mistake the
-  // transient false value for an already-completed stop.
-  if (!gCameraRunning) {
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Already stopped, returning");
-    unlockCameraMutex();
-    return true;
-  }
-
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Heap before deinit: %u", esp_get_free_heap_size());
-  INFO_CAMERAF("Stopping camera...");
-  
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Calling esp_camera_deinit()...");
-  esp_camera_deinit();
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] esp_camera_deinit() complete");
-  
-  gCameraRunning = false;
-  cameraStreaming = false;
-  sensorStatusBumpWith("closecamera");
-  if (!isRecovery) systemEventPost(SYSEVT_SENSOR_STOPPED, "Camera");
-  
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Heap after deinit: %u", esp_get_free_heap_size());
-  INFO_CAMERAF("Stopped");
-
+  // The recorder can own the camera lock: join it before taking that lock.
+  if (!isRecovery && videoRecording) stopVideoRecording();
+  if (!lockCameraMutex(15000)) return false;
+  const bool wasRunning = gCameraRunning;
+  // A failed begin may retain resources when safe teardown itself failed.
+  // Idempotent end must still be retried by an explicit stop in that state.
+  if (!cameraBackend().end()) { unlockCameraMutex(); return false; }
+  gCameraRunning = cameraConnected = cameraStreaming = false;
+  cacheCameraCapabilities(cameraBackend().capabilities());
+  if (wasRunning) sensorStatusBumpWith("closecamera");
+  if (wasRunning && !isRecovery) systemEventPost(SYSEVT_SENSOR_STOPPED, "Camera");
   unlockCameraMutex();
   return true;
 }
+void stopCamera(bool isRecovery) { (void)stopCameraInternal(isRecovery); }
 
-void stopCamera(bool isRecovery) {
-  (void)stopCameraInternal(isRecovery);
-}
-
-uint8_t* captureFrame(size_t* outLen) {
-  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] ========== captureFrame() ENTRY ==========");
-  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] gCameraRunning=%d cameraConnected=%d cameraStreaming=%d",
-                gCameraRunning, cameraConnected, cameraStreaming);
-  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Heap: %u, PSRAM: %u",
-                esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-
-  if (!gCameraRunning) {
-    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Camera not enabled - returning NULL");
-    if (outLen) *outLen = 0;
-    return nullptr;
-  }
-
-  // Fast-fail: don't queue behind other captures, return busy immediately
-  if (!lockCameraMutex(0)) {
-    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Camera busy (another capture in progress)");
-    if (outLen) *outLen = 0;
-    return nullptr;
-  }
-
-  // Single attempt - fail fast, recover immediately if needed
-  camera_fb_t* fb = nullptr;
-  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Calling esp_camera_fb_get()...");
-
-  unsigned long startMs = millis();
-  fb = esp_camera_fb_get();
-  unsigned long elapsed = millis() - startMs;
-
-  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] esp_camera_fb_get() returned in %lu ms, fb=%p", elapsed, fb);
-  
-  if (!fb) {
-    // Recovery logging - keep these for diagnosing camera issues
-    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Capture failed - attempting recovery...");
-
-    (void)stopCameraInternal(/*isRecovery=*/true);
+bool captureCameraFrame(CameraFrame& out, size_t maxBytes) {
+  cameraFrameRelease(out);
+  if (maxBytes < 4 || !lockCameraMutex(0)) return false;
+  if (!gCameraRunning) { unlockCameraMutex(); return false; }
+  bool ok = cameraBackend().capture(out, maxBytes);
+  if (!ok) {
+    cameraFrameRelease(out);
+    const bool stopped = stopCameraInternal(true);
     vTaskDelay(pdMS_TO_TICKS(150));
-    bool ok = sCameraDesiredOn && initCamera(/*isRecovery=*/true);
-    if (ok) {
-      fb = esp_camera_fb_get();
-      // A STOP admitted while the second fetch was blocked owns the desired
-      // state even if the worker could not take the mutex. Discard the recovered
-      // frame; initCamera's post-init fence already prevents resurrection when
-      // STOP arrived earlier in recovery.
-      if (!sCameraDesiredOn && fb) {
-        esp_camera_fb_return(fb);
-        fb = nullptr;
-      }
-    }
-    if (!ok || !fb) {
-      DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Recovery failed");
-    }
-
-    if (!fb) {
-      unlockCameraMutex();
-      if (outLen) *outLen = 0;
-      return nullptr;
-    }
+    ok = stopped && sCameraDesiredOn && initCamera(true) && cameraBackend().capture(out, maxBytes);
+    if (!sCameraDesiredOn) ok = false;
   }
-  
-  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] fb buf=%p len=%u %ux%u fmt=%d ts=%ld.%06ld",
-                fb->buf, fb->len, fb->width, fb->height, fb->format,
-                (long)fb->timestamp.tv_sec, (long)fb->timestamp.tv_usec);
-
-  // Validate JPEG header (silent unless error)
-  if (fb->format == PIXFORMAT_JPEG && fb->len >= 2) {
-    if (fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) {
-      DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Invalid JPEG header: %02X %02X", fb->buf[0], fb->buf[1]);
-      esp_camera_fb_return(fb);
-      unlockCameraMutex();
-      if (outLen) *outLen = 0;
-      return nullptr;
-    }
+  if (!ok || !cameraFrameIsValid(out, maxBytes)) {
+    cameraFrameRelease(out);
+    unlockCameraMutex();
+    return false;
   }
-
-  // Copy frame buffer (caller must free)
-  uint8_t* buf = (uint8_t*)ps_alloc(fb->len, AllocPref::PreferPSRAM, "camera.frame");
-  
-  if (buf) {
-    memcpy(buf, fb->buf, fb->len);
-    if (outLen) *outLen = fb->len;
-  } else {
-    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] ALLOC FAILED: %u bytes, Heap: %u", 
-                  fb->len, esp_get_free_heap_size());
-    if (outLen) *outLen = 0;
-  }
-
-  esp_camera_fb_return(fb);
-  
-  // Note: With GRAB_LATEST mode, no flush needed - camera always gives latest frame
-  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] EXIT buf=%p, len=%u", buf, outLen ? *outLen : 0);
+  cameraWidth = out.width;
+  cameraHeight = out.height;
   unlockCameraMutex();
-  return buf;
+  return true;
 }
-
-// Set camera resolution - useful for ESP-NOW transmission (lower res = smaller files)
-bool setCameraResolution(framesize_t size) {
-  if (!gCameraRunning) {
-    return false;
-  }
-
-  if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERA_SETTINGSF("[CAM_SET] ERROR: camera mutex timeout (camera busy)");
-    return false;
-  }
-   
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) {
-    unlockCameraMutex();
-    return false;
-  }
-   
-  int result = s->set_framesize(s, size);
-  if (result == 0) {
-    // Update tracked dimensions via the canonical helper (single
-    // source of truth shared with the init path above).
-    cameraDimsForFramesize(size, cameraWidth, cameraHeight);
-    INFO_CAMERAF("Resolution set to %dx%d", cameraWidth, cameraHeight);
-    unlockCameraMutex();
-    return true;
-  }
-  unlockCameraMutex();
-  return false;
+uint8_t* captureFrame(size_t* outLen) {
+  if (outLen) *outLen = 0;
+  CameraFrame frame;
+  if (!captureCameraFrame(frame)) return nullptr;
+  if (outLen) *outLen = frame.length;
+  return frame.data;
 }
-
-// Set JPEG quality (0-63, lower = higher quality, larger file)
-bool setCameraQuality(int quality) {
-  if (!gCameraRunning) return false;
-
-  if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERA_SETTINGSF("[CAM_SET] ERROR: camera mutex timeout (camera busy)");
-    return false;
-  }
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) {
-    unlockCameraMutex();
-    return false;
-  }
-  bool ok = (s->set_quality(s, quality) == 0);
+bool setCameraResolution(CameraFrameSize size) {
+  if (!cameraFrameSizeInfo(size) || !lockCameraMutex(15000)) return false;
+  const bool ok = gCameraRunning && cameraBackend().setResolution(size);
+  if (ok) updateCameraInfo();
   unlockCameraMutex();
   return ok;
 }
-
-// Capture frame at specific resolution (for ESP-NOW: use QQVGA 160x120)
-uint8_t* captureFrameAtResolution(framesize_t size, int quality, size_t* outLen) {
-  if (!gCameraRunning) {
-    if (outLen) *outLen = 0;
-    return nullptr;
-  }
-
-  if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] ERROR: camera mutex timeout (camera busy)");
-    if (outLen) *outLen = 0;
-    return nullptr;
-  }
-   
-  // Save current settings
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) {
-    unlockCameraMutex();
-    if (outLen) *outLen = 0;
-    return nullptr;
-  }
-  
-  // Temporarily change resolution and quality
-  framesize_t oldSize = (framesize_t)s->status.framesize;
-  int oldQuality = s->status.quality;
-  
-  s->set_framesize(s, size);
-  s->set_quality(s, quality);
-  
-  // Capture frame
-  camera_fb_t* fb = esp_camera_fb_get();
-  uint8_t* result = nullptr;
-  
-  if (fb) {
-    result = (uint8_t*)ps_alloc(fb->len, AllocPref::PreferPSRAM, "camera.frame.resized");
-    if (result) {
-      memcpy(result, fb->buf, fb->len);
-      if (outLen) *outLen = fb->len;
-      DEBUG_CAMERA_CAPTUREF("Captured %dx%d frame: %u bytes (q=%d)",
-                     fb->width, fb->height, (unsigned)fb->len, quality);
-    } else {
-      if (outLen) *outLen = 0;
-    }
-    esp_camera_fb_return(fb);
-  } else {
-    if (outLen) *outLen = 0;
-  }
-  
-  // Restore original settings
-  s->set_framesize(s, oldSize);
-  s->set_quality(s, oldQuality);
-
+bool setCameraQuality(int quality) {
+  if (quality < 0 || quality > 63 || !lockCameraMutex(15000)) return false;
+  const bool ok = gCameraRunning && cameraBackend().setQuality(quality);
   unlockCameraMutex();
-   
-  return result;
+  return ok;
 }
-
-// Capture tiny frame suitable for ESP-NOW (160x120, high compression)
-// ESP-NOW limit is 250 bytes per packet, so this captures very small images
-// Returns grayscale thumbnail if JPEG is still too large
-uint8_t* captureTinyFrame(size_t* outLen) {
-  // Try QQVGA (160x120) with high compression (quality 40)
-  return captureFrameAtResolution(FRAMESIZE_QQVGA, 40, outLen);
+uint8_t* captureFrameAtResolution(CameraFrameSize size, int quality, size_t* outLen) {
+  if (outLen) *outLen = 0;
+  if (!cameraSupportsResolution(size) || quality < 0 || quality > 63 || !lockCameraMutex(15000)) return nullptr;
+  if (!gCameraRunning) { unlockCameraMutex(); return nullptr; }
+  const auto old = cameraBackend().info();
+  CameraFrame frame;
+  bool changedSize = cameraBackend().setResolution(size);
+  bool changedQuality = changedSize && cameraBackend().setQuality(quality);
+  bool ok = changedQuality && cameraBackend().capture(frame, kCameraMaxFrameBytes) && cameraFrameIsValid(frame, kCameraMaxFrameBytes);
+  bool restored = true;
+  if (changedQuality) restored = cameraBackend().setQuality(old.quality);
+  if (changedSize) restored = cameraBackend().setResolution(old.resolution) && restored;
+  updateCameraInfo();
+  if (!restored) {
+    // Continuing with temporary geometry would corrupt subsequent recording
+    // headers. Close the driver and require an explicit start to recover.
+    (void)stopCameraInternal(true);
+    ok = false;
+  }
+  if (!ok) cameraFrameRelease(frame);
+  unlockCameraMutex();
+  if (outLen) *outLen = frame.length;
+  return frame.data;
 }
+uint8_t* captureTinyFrame(size_t* outLen) { return captureFrameAtResolution(CameraFrameSize::QQVGA, 40, outLen); }
 
 const char* buildCameraStatusJson() {
-  if (!cameraStatusBuffer) {
-    cameraStatusBuffer = (char*)ps_alloc(kStatusBufSize, AllocPref::PreferPSRAM, "camera.status.json");
-    if (!cameraStatusBuffer) {
-      static const char* kEmptyJson = "{}";
-      return kEmptyJson;
-    }
-  }
-
+  if (!lockCameraMutex(15000)) return "{\"error\":\"Camera busy\"}";
+  if (!cameraStatusBuffer) cameraStatusBuffer = static_cast<char*>(ps_alloc(kStatusBufSize, AllocPref::PreferPSRAM, "camera.status.json"));
+  if (!cameraStatusBuffer) { unlockCameraMutex(); return "{}"; }
+  const auto caps = cameraBackend().capabilities();
+  const auto state = cameraBackend().info();
   PSRAM_JSON_DOC(doc);
-  // supported: camera silicon is wired on this board and compiled in. Always
-  // true here; the !ENABLE_CAMERA_SENSOR stub reports false. This is the
-  // camera's analog of the microphone's pdmAvailable — a build fact, not a probe.
   doc["supported"] = true;
-  // detected: the SCCB probe has seen a sensor at least once since boot.
-  // Sticky, so it stays true while the camera is stopped. Consumers wanting
-  // "is there a camera?" want this; "connected" only answers "is it running?".
   doc["detected"] = cameraDetected;
   doc["enabled"] = gCameraRunning;
   doc["connected"] = cameraConnected;
@@ -984,8 +258,39 @@ const char* buildCameraStatusJson() {
   doc["width"] = cameraWidth;
   doc["height"] = cameraHeight;
   doc["psram"] = psramFound();
-
+  doc["backend"] = caps.backend;
+  doc["hardwareJpeg"] = caps.hardwareJpeg;
+  doc["sourceWidth"] = caps.sourceWidth;
+  doc["sourceHeight"] = caps.sourceHeight;
+  doc["upscaled"] = caps.sourceWidth && (cameraWidth > caps.sourceWidth || cameraHeight > caps.sourceHeight);
+  doc["framing"] = caps.sourceWidth ? "center-crop" : "sensor";
+  doc["requestedFramesize"] = gSettings.cameraFramesize;
+  doc["framesize"] = unsigned(state.resolution);
+  doc["quality"] = state.quality;
+  doc["maxFrameBytes"] = kCameraMaxFrameBytes;
+  doc["error"] = state.error;
+  JsonArray sizes = doc["resolutions"].to<JsonArray>();
+  for (unsigned i = 0; i < unsigned(CameraFrameSize::Count); ++i) {
+    if (!(caps.resolutions & cameraResolutionBit(CameraFrameSize(i)))) continue;
+    const auto* size = cameraFrameSizeInfo(CameraFrameSize(i));
+    JsonObject entry = sizes.add<JsonObject>();
+    entry["id"] = i; entry["name"] = size->name;
+    entry["width"] = size->width; entry["height"] = size->height;
+  }
+  JsonArray controls = doc["controls"].to<JsonArray>();
+  JsonObject values = doc["controlValues"].to<JsonObject>();
+  for (unsigned i = 0; i < unsigned(CameraControl::Count); ++i) {
+    const auto c = CameraControl(i);
+    if (!(caps.controls & cameraControlBit(c))) continue;
+    controls.add(cameraControlName(c));
+    int value;
+    if (gCameraRunning && cameraBackend().getControl(c, value)) values[cameraControlName(c)] = value;
+  }
+  if (doc.overflowed() || measureJson(doc) >= kStatusBufSize) {
+    unlockCameraMutex(); return "{\"error\":\"Camera status overflow\"}";
+  }
   serializeJson(doc, cameraStatusBuffer, kStatusBufSize);
+  unlockCameraMutex();
   return cameraStatusBuffer;
 }
 
@@ -1249,9 +554,8 @@ static bool cameraPwrEnsureStartedLocked() {
   }
   taskStackRecord("cam_pwr", kStack);
   const BaseType_t ok =
-      // Pin to Core 1 (I2C_SENSOR_CORE): initCamera() does a shared-Wire I2C scan
-      // before handing the bus to the camera driver, so this worker carries the
-      // starve-mid-transaction → bus-storm → panic(4) hazard. Off the saturated Core 0.
+      // Keep camera SCCB initialization off the radio-heavy core. The backend
+      // owns its camera bus; no application Wire scan runs here.
       xTaskCreatePinnedToCore(cameraPwrWorker, "cam_pwr", kStack, sCamPwrQueue,
                   tskIDLE_PRIORITY + 2, &sCamPwrTask, I2C_SENSOR_CORE);
   if (ok != pdPASS) {
@@ -1432,6 +736,7 @@ bool cameraPowerRequestRestartSync(uint32_t waitMs) {
   return result;
 }
 
+
 // Command handlers
 const char* cmd_camera(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1476,101 +781,66 @@ const char* cmd_cameracapture(const String& argsInput) {
   return "Error: Frame capture failed";
 }
 
-const char* cmd_camerares(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  // Parse resolution argument
-  String sizeStr = argsInput;
-  sizeStr.trim();
-  sizeStr.toLowerCase();
-  
-  if (sizeStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char result[256];
-    snprintf(result, sizeof(result),
-      "Current: %dx%d\nUsage: camerares <size>\n"
-      "Sizes: 96x96 qqvga(160x120) qcif(176x144) hqvga(240x176) 240x240 "
-      "qvga(320x240) vga(640x480) svga(800x600) xga(1024x768) "
-      "sxga(1280x1024) uxga(1600x1200)\nNote: Requires camera restart",
-      cameraWidth, cameraHeight);
-    return result;
+static const char* applyCameraResolutionSetting(CameraFrameSize size) {
+  if (!cameraSupportsResolution(size)) return "Error: Resolution unsupported by this camera backend; see cameraread";
+  // A recording has one fixed geometry in its AVI header. Finish it before a
+  // live resolution change, without waiting for its task under the camera lock.
+  if (videoRecording) stopVideoRecording();
+  if (!lockCameraMutex(15000)) return "Error: Camera busy; resolution not saved";
+  const bool wasRunning = gCameraRunning;
+  if (wasRunning && !setCameraResolution(size)) {
+    unlockCameraMutex();
+    return "Error: Failed to apply resolution; setting not saved";
   }
-
-  framesize_t newSize = FRAMESIZE_VGA;
-  if      (sizeStr == "96x96")                          newSize = FRAMESIZE_96X96;
-  else if (sizeStr == "qqvga" || sizeStr == "160x120")  newSize = FRAMESIZE_QQVGA;
-  else if (sizeStr == "qcif"  || sizeStr == "176x144")  newSize = FRAMESIZE_QCIF;
-  else if (sizeStr == "hqvga" || sizeStr == "240x176")  newSize = FRAMESIZE_HQVGA;
-  else if (sizeStr == "240x240")                        newSize = FRAMESIZE_240X240;
-  else if (sizeStr == "qvga"  || sizeStr == "320x240")  newSize = FRAMESIZE_QVGA;
-  else if (sizeStr == "cif"   || sizeStr == "400x296")  newSize = FRAMESIZE_CIF;
-  else if (sizeStr == "vga"   || sizeStr == "640x480")  newSize = FRAMESIZE_VGA;
-  else if (sizeStr == "svga"  || sizeStr == "800x600")  newSize = FRAMESIZE_SVGA;
-  else if (sizeStr == "xga"   || sizeStr == "1024x768") newSize = FRAMESIZE_XGA;
-  else if (sizeStr == "sxga"  || sizeStr == "1280x1024") newSize = FRAMESIZE_SXGA;
-  else if (sizeStr == "uxga"  || sizeStr == "1600x1200") newSize = FRAMESIZE_UXGA;
-  else return "Error: Unknown resolution. Use: 96x96, qqvga, qcif, hqvga, 240x240, qvga, vga, svga, xga, sxga, uxga";
-  
-  // Save to settings for persistence
-  setSetting(gSettings.cameraFramesize, (int)cameraFramesizeSettingFromEnum(newSize));
-  
-  // If camera is running, do a full restart for reliable resolution change
-  bool wasEnabled = gCameraRunning;
-  bool wasStreaming = cameraStreaming;
-  
-  const bool restartOk = !wasEnabled || cameraPowerRequestRestartSync(60000);
-  
-  EXT_RAM_BSS_ATTR static char result[96];
-  if (!restartOk) {
-    snprintf(result, sizeof(result),
-             "Error: Resolution saved, but camera restart failed");
-  } else if (wasStreaming) {
-    snprintf(result, sizeof(result), "Resolution set to %dx%d (saved). Streaming stopped - please restart stream.", cameraWidth, cameraHeight);
-  } else if (wasEnabled) {
-    snprintf(result, sizeof(result), "Resolution set to %dx%d (saved). Camera restarted.", cameraWidth, cameraHeight);
-  } else {
-    snprintf(result, sizeof(result), "Resolution set to %dx%d (saved). Will apply on next camera start.", cameraWidth, cameraHeight);
-  }
+  setSetting(gSettings.cameraFramesize, int(size));
+  const bool wasStreaming = cameraStreaming;
+  if (wasRunning) cameraStreaming = false;
+  const auto* dims = cameraFrameSizeInfo(size);
+  EXT_RAM_BSS_ATTR static char result[160];
+  snprintf(result, sizeof(result), "Resolution set to %ux%u (saved). %s",
+           unsigned(wasRunning ? cameraWidth : dims->width),
+           unsigned(wasRunning ? cameraHeight : dims->height),
+           wasStreaming ? "Streaming stopped; restart the stream." :
+           wasRunning ? "Applied live." : "Will apply on next camera start.");
+  unlockCameraMutex();
   return result;
 }
+const char* cmd_camerares(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = argsInput; arg.trim(); arg.toLowerCase();
+  if (!arg.length()) {
+    EXT_RAM_BSS_ATTR static char result[192];
+    const auto* requested = cameraFrameSizeInfo(cameraFrameSizeFromSetting(gSettings.cameraFramesize));
+    snprintf(result, sizeof(result), "%s: %dx%d\nUsage: camerares <name|WIDTHxHEIGHT>\nUse cameraread for this backend's available resolutions.",
+             gCameraRunning ? "Current" : "Saved preference",
+             gCameraRunning ? cameraWidth : int(requested->width),
+             gCameraRunning ? cameraHeight : int(requested->height));
+    return result;
+  }
+  for (unsigned i = 0; i < unsigned(CameraFrameSize::Count); ++i) {
+    const auto* size = cameraFrameSizeInfo(CameraFrameSize(i));
+    char dimensions[24];
+    snprintf(dimensions, sizeof(dimensions), "%ux%u", unsigned(size->width), unsigned(size->height));
+    if (arg == size->name || arg == dimensions) return applyCameraResolutionSetting(size->id);
+  }
+  return "Error: Unknown resolution; see cameraread for available names and dimensions";
+}
 
-// Numeric framesize command for the settings UI. The value is the setting
-// INDEX (0-10) that maps to a framesize_t via cameraFramesizeFromSetting().
-// Dropdown options on the web Sensors page also use this index space, so the
-// query response (no args) must report the index — NOT the enum value, which
-// would collide (e.g. setting index 5 = UXGA, but enum FRAMESIZE_240X240 = 5).
+// Numeric values are the persistent IDs declared by CameraFrameSize, never a
+// vendor driver's frame-size enumeration. Existing IDs 0..10 stay unchanged.
 const char* cmd_cameraframesize(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-
-  String valStr = argsInput;
-  valStr.trim();
-
-  if (valStr.length() == 0) {
+  String arg = argsInput; arg.trim();
+  if (!arg.length()) {
     EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "cameraFramesize=%d", gSettings.cameraFramesize);
     return result;
   }
-  
-  int newSize = valStr.toInt();
-  if (newSize < 0 || newSize > 10) {
-    return "Error: Framesize must be 0-10 (0-5: QVGA..UXGA, 6-10: 96x96/QQVGA/QCIF/HQVGA/240x240)";
-  }
-  
-  setSetting(gSettings.cameraFramesize, newSize);
-  
-  // If camera is running, restart to apply
-  bool wasEnabled = gCameraRunning;
-  const bool restartOk = !wasEnabled || cameraPowerRequestRestartSync(60000);
-  
-  EXT_RAM_BSS_ATTR static char result[80];
-  if (!restartOk) {
-    snprintf(result, sizeof(result),
-             "Error: Resolution saved, but camera restart failed");
-  } else {
-    snprintf(result, sizeof(result), "Resolution set to %dx%d. %s",
-             cameraWidth, cameraHeight,
-             wasEnabled ? "Camera restarted." : "Will apply on next start.");
-  }
-  return result;
+  char* tail = nullptr;
+  const long size = strtol(arg.c_str(), &tail, 10);
+  if (!tail || *tail || size < 0 || size >= int(CameraFrameSize::Count))
+    return "Error: Framesize must be an integer 0-12; see cameraread for supported IDs";
+  return applyCameraResolutionSetting(CameraFrameSize(size));
 }
 
 const char* cmd_cameraquality(const String& argsInput) {
@@ -1586,17 +856,18 @@ const char* cmd_cameraquality(const String& argsInput) {
     return result;
   }
   
-  int quality = valStr.toInt();
-  if (quality < 0 || quality > 63) {
-    return "Error: Quality must be 0-63";
+  char* tail = nullptr;
+  const long parsed = strtol(valStr.c_str(), &tail, 10);
+  if (!tail || *tail || parsed < 0 || parsed > 63) {
+    return "Error: Quality must be an integer 0-63";
   }
+  const int quality = int(parsed);
   
-  // Save to settings for persistence
+  if (gCameraRunning && !setCameraQuality(quality)) return "Error: Failed to apply JPEG quality; setting not saved";
   setSetting(gSettings.cameraQuality, quality);
   
   // Apply live if camera is running (quality can be changed without restart)
   if (gCameraRunning) {
-    setCameraQuality(quality);
     EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "JPEG quality set to %d (saved, applied live)", quality);
     return result;
@@ -1625,249 +896,171 @@ const char* cmd_cameratiny(const String& argsInput) {
   return "Error: Tiny frame capture failed";
 }
 
-// Helper to apply a camera setting and optionally save
-static bool applyCameraSetting(const char* name, int value, int minVal, int maxVal, 
-                                int (*setter)(sensor_t*, int), int* settingPtr) {
-  if (!gCameraRunning) return false;
-  if (value < minVal || value > maxVal) return false;
-  
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) return false;
-  
-  if (setter(s, value) == 0) {
-    if (settingPtr) {
-      *settingPtr = value;
-      (void)requestSettingsPersist();
-    }
-    return true;
-  }
-  return false;
-}
 
-const char* cmd_camerabrightness(const String& argsInput) {
+// All control operations use the lifecycle mutex through the shared API.
+static const char* cameraIntegerCommand(const String& args, CameraControl control,
+                                       int minimum, int maximum, int* setting = nullptr) {
+  if (!gCameraRunning) return "Error: Camera not enabled";
+  if (!cameraSupportsControl(control)) return "Error: Control unsupported by this camera backend";
+  EXT_RAM_BSS_ATTR static char result[128];
+  String arg = args; arg.trim();
+  if (!arg.length()) {
+    int value;
+    if (!getCameraControl(control, value)) return "Error: Camera control unavailable";
+    snprintf(result, sizeof(result), "%s: %d (range %d to %d)", cameraControlName(control), value, minimum, maximum);
+    return result;
+  }
+  char* end = nullptr;
+  long value = strtol(arg.c_str(), &end, 10);
+  if (!end || *end || value < minimum || value > maximum) return "Error: Control value outside supported range";
+  if (!setCameraControl(control, int(value))) return "Error: Failed to apply camera control";
+  if (setting) setSetting(*setting, int(value));
+  snprintf(result, sizeof(result), "%s set to %ld%s", cameraControlName(control), value, setting ? " (saved)" : "");
+  return result;
+}
+static const char* cameraBoolToggle(const String& args, CameraControl control, bool* setting = nullptr) {
+  if (!gCameraRunning) return "Error: Camera not enabled";
+  if (!cameraSupportsControl(control)) return "Error: Control unsupported by this camera backend";
+  EXT_RAM_BSS_ATTR static char result[96];
+  String arg = args; arg.trim();
+  int value = 0;
+  if (!arg.length()) {
+    if (!getCameraControl(control, value)) return "Error: Camera control unavailable";
+  } else {
+    if (arg.equalsIgnoreCase("auto") && (control == CameraControl::AutoExposure || control == CameraControl::AutoGain)) value = 1;
+    else value = parseBoolArg(arg);
+    if (value < 0) return "Error: Use on or off";
+    if (!setCameraControl(control, value)) return "Error: Failed to apply camera control";
+    if (setting) setSetting(*setting, value != 0);
+  }
+  snprintf(result, sizeof(result), "%s: %s%s", cameraControlName(control), value ? "ON" : "OFF", arg.length() && setting ? " (saved)" : "");
+  return result;
+}
+#define CAMERA_INT_COMMAND(fn, control, low, high, field) \
+const char* fn(const String& argsInput) { \
+  RETURN_VALID_IF_VALIDATE_CSTR(); \
+  return cameraIntegerCommand(argsInput, CameraControl::control, low, high, &gSettings.field); \
+}
+CAMERA_INT_COMMAND(cmd_camerabrightness, Brightness, -2, 2, cameraBrightness)
+CAMERA_INT_COMMAND(cmd_cameracontrast, Contrast, -2, 2, cameraContrast)
+CAMERA_INT_COMMAND(cmd_camerasaturation, Saturation, -2, 2, cameraSaturation)
+CAMERA_INT_COMMAND(cmd_camerawb, WhiteBalanceMode, 0, 4, cameraWBMode)
+CAMERA_INT_COMMAND(cmd_camerasharpness, Sharpness, -2, 2, cameraSharpness)
+CAMERA_INT_COMMAND(cmd_cameradenoise, Denoise, 0, 8, cameraDenoise)
+CAMERA_INT_COMMAND(cmd_cameraeffect, Effect, 0, 6, cameraSpecialEffect)
+CAMERA_INT_COMMAND(cmd_cameraexposure, ExposureLevel, -2, 2, cameraAELevel)
+#undef CAMERA_INT_COMMAND
+#define CAMERA_BOOL_COMMAND(fn, control) \
+const char* fn(const String& argsInput) { \
+  RETURN_VALID_IF_VALIDATE_CSTR(); \
+  return cameraBoolToggle(argsInput, CameraControl::control); \
+}
+CAMERA_BOOL_COMMAND(cmd_cameraaec, AutoExposure)
+CAMERA_BOOL_COMMAND(cmd_cameraagc, AutoGain)
+CAMERA_BOOL_COMMAND(cmd_camerawhitebal, WhiteBalance)
+CAMERA_BOOL_COMMAND(cmd_cameraawbgain, WhiteBalanceGain)
+CAMERA_BOOL_COMMAND(cmd_cameraaec2, NightMode)
+CAMERA_BOOL_COMMAND(cmd_cameradcw, Downsize)
+CAMERA_BOOL_COMMAND(cmd_camerabpc, BlackPixelCorrection)
+CAMERA_BOOL_COMMAND(cmd_camerawpc, WhitePixelCorrection)
+CAMERA_BOOL_COMMAND(cmd_cameragamma, Gamma)
+CAMERA_BOOL_COMMAND(cmd_cameralenc, LensCorrection)
+CAMERA_BOOL_COMMAND(cmd_cameracolorbar, ColorBar)
+#undef CAMERA_BOOL_COMMAND
+const char* cmd_camerahmirror(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return cameraBoolToggle(argsInput, CameraControl::HMirror, &gSettings.cameraHMirror);
+}
+const char* cmd_cameravflip(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return cameraBoolToggle(argsInput, CameraControl::VFlip, &gSettings.cameraVFlip);
+}
+const char* cmd_cameragainceiling(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return cameraIntegerCommand(argsInput, CameraControl::GainCeiling, 0, 6);
+}
+static const char* cameraManualCommand(const String& args, CameraControl automatic,
+                                       CameraControl manual, int maximum) {
+  String arg = args; arg.trim();
+  if (!arg.length()) return "Error: Exposure/gain value required";
+  char* tail;
+  long value = strtol(arg.c_str(), &tail, 10);
+  if (*tail || value < 0 || value > maximum) return "Error: Value outside supported range";
+  if (!cameraSupportsControl(automatic) || !cameraSupportsControl(manual)) return "Error: Control unsupported by this camera backend";
+  if (!lockCameraMutex(15000)) return "Error: Camera busy";
+  int oldAuto = 0;
+  bool haveOld = getCameraControl(automatic, oldAuto);
+  bool ok = haveOld && setCameraControl(automatic, 0) && setCameraControl(manual, int(value));
+  if (!ok && haveOld) (void)setCameraControl(automatic, oldAuto);
+  unlockCameraMutex();
+  return ok ? "Manual camera control applied" : "Error: Failed to apply manual camera control";
+}
+const char* cmd_cameraaecvalue(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return cameraManualCommand(argsInput, CameraControl::AutoExposure, CameraControl::ExposureValue, 1200);
+}
+const char* cmd_cameraagcgain(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return cameraManualCommand(argsInput, CameraControl::AutoGain, CameraControl::Gain, 30);
+}
+const char* cmd_camerareg(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  unsigned address, mask, value;
+  if (sscanf(argsInput.c_str(), "%x %x %x", &address, &mask, &value) != 3) return "Error: Usage: camerareg <address> <mask> <value>";
+  if (!lockCameraMutex(15000)) return "Error: Camera busy";
+  bool ok = gCameraRunning && cameraBackend().capabilities().registerAccess && cameraBackend().writeRegister && cameraBackend().writeRegister(address, mask, value);
+  unlockCameraMutex();
+  return ok ? "Camera register written" : "Error: Register write unsupported or failed";
+}
+const char* cmd_cameradump(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!lockCameraMutex(15000)) return "Error: Camera busy";
+  bool ok = gCameraRunning && cameraBackend().dump && cameraBackend().dump();
+  unlockCameraMutex();
+  return ok ? "Sensor status dumped (see [CAM_DUMP] lines)" : "Error: Sensor dump unsupported or unavailable";
+}
+const char* cmd_camerafx(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char result[64];
-    snprintf(result, sizeof(result), "Brightness: %d (range -2 to 2)", gSettings.cameraBrightness);
+  if (!cameraSupportsControl(CameraControl::Brightness) || !cameraSupportsControl(CameraControl::Contrast) || !cameraSupportsControl(CameraControl::Saturation)) return "Error: Control unsupported by this camera backend";
+  String arg = argsInput; arg.trim();
+  if (!arg.length()) {
+    EXT_RAM_BSS_ATTR static char result[128];
+    int bri, con, sat;
+    if (!getCameraControl(CameraControl::Brightness, bri) || !getCameraControl(CameraControl::Contrast, con) || !getCameraControl(CameraControl::Saturation, sat)) return "Error: Camera control unavailable";
+    snprintf(result, sizeof(result), "camerafx: bri=%d con=%d sat=%d. Usage: camerafx <bri> <con> <sat>", bri, con, sat);
     return result;
   }
-  
-  int val = valStr.toInt();
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_brightness(s, val) == 0) {
-    setSetting(gSettings.cameraBrightness, val);
-    EXT_RAM_BSS_ATTR static char result[48];
-    snprintf(result, sizeof(result), "Brightness set to %d (saved)", val);
-    return result;
+  int bri, con, sat;
+  if (sscanf(arg.c_str(), "%d %d %d", &bri, &con, &sat) != 3 || bri < -2 || bri > 2 || con < -2 || con > 2 || sat < -2 || sat > 2) return "Error: Each value must be -2..2";
+  if (!lockCameraMutex(15000)) return "Error: Camera busy";
+  bool ok = setCameraControl(CameraControl::Contrast, con) && setCameraControl(CameraControl::Brightness, bri) && setCameraControl(CameraControl::Saturation, sat);
+  if (ok) {
+    setSetting(gSettings.cameraBrightness, bri);
+    setSetting(gSettings.cameraContrast, con);
+    setSetting(gSettings.cameraSaturation, sat);
   }
-  return "Error: Failed (use -2 to 2)";
+  unlockCameraMutex();
+  return ok ? "Camera brightness, contrast and saturation applied (saved)" : "Error: Camera effect sequence failed; settings not saved";
 }
-
-const char* cmd_cameracontrast(const String& argsInput) {
+const char* cmd_camerarotate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char result[64];
-    snprintf(result, sizeof(result), "Contrast: %d (range -2 to 2)", gSettings.cameraContrast);
-    return result;
-  }
-  
-  int val = valStr.toInt();
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_contrast(s, val) == 0) {
-    setSetting(gSettings.cameraContrast, val);
-    EXT_RAM_BSS_ATTR static char result[48];
-    snprintf(result, sizeof(result), "Contrast set to %d (saved)", val);
-    return result;
-  }
-  return "Error: Failed (use -2 to 2)";
-}
-
-const char* cmd_camerasaturation(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char result[64];
-    snprintf(result, sizeof(result), "Saturation: %d (range -2 to 2)", gSettings.cameraSaturation);
-    return result;
-  }
-  
-  int val = valStr.toInt();
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_saturation(s, val) == 0) {
-    setSetting(gSettings.cameraSaturation, val);
-    EXT_RAM_BSS_ATTR static char result[48];
-    snprintf(result, sizeof(result), "Saturation set to %d (saved)", val);
-    return result;
-  }
-  return "Error: Failed (use -2 to 2)";
-}
-
-const char* cmd_camerawb(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char result[96];
-    snprintf(result, sizeof(result), "WB mode: %d (0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home)", gSettings.cameraWBMode);
-    return result;
-  }
-  
-  int val = valStr.toInt();
-  if (val < 0 || val > 4) return "Error: WB mode must be 0-4";
-  
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_wb_mode(s, val) == 0) {
-    setSetting(gSettings.cameraWBMode, val);
-    EXT_RAM_BSS_ATTR static char result[48];
-    snprintf(result, sizeof(result), "WB mode set to %d (saved)", val);
-    return result;
-  }
-  return "Error: Failed to set WB mode";
-}
-
-const char* cmd_camerasharpness(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char result[64];
-    snprintf(result, sizeof(result), "Sharpness: %d (range -2 to 2, OV3660 only)", gSettings.cameraSharpness);
-    return result;
-  }
-  
-  int val = valStr.toInt();
-  if (val < -2 || val > 2) return "Error: Sharpness must be -2 to 2";
-  
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_sharpness && s->set_sharpness(s, val) == 0) {
-    setSetting(gSettings.cameraSharpness, val);
-    EXT_RAM_BSS_ATTR static char result[48];
-    snprintf(result, sizeof(result), "Sharpness set to %d (saved)", val);
-    return result;
-  }
-  return "Error: Failed (OV3660 only, use -2 to 2)";
-}
-
-const char* cmd_cameradenoise(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char result[64];
-    snprintf(result, sizeof(result), "Denoise: %d (range 0-8)", gSettings.cameraDenoise);
-    return result;
-  }
-  
-  int val = valStr.toInt();
-  if (val < 0 || val > 8) return "Error: Denoise must be 0-8";
-  
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_denoise && s->set_denoise(s, val) == 0) {
-    setSetting(gSettings.cameraDenoise, val);
-    EXT_RAM_BSS_ATTR static char result[48];
-    snprintf(result, sizeof(result), "Denoise set to %d (saved)", val);
-    return result;
-  }
-  return "Error: Failed to set denoise";
-}
-
-const char* cmd_cameraeffect(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char result[96];
-    snprintf(result, sizeof(result), "Effect: %d (0=None,1=Neg,2=Gray,3=Red,4=Green,5=Blue,6=Sepia)", gSettings.cameraSpecialEffect);
-    return result;
-  }
-  
-  int val = valStr.toInt();
-  if (val < 0 || val > 6) return "Error: Effect must be 0-6";
-  
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_special_effect(s, val) == 0) {
-    setSetting(gSettings.cameraSpecialEffect, val);
-    EXT_RAM_BSS_ATTR static char result[48];
-    snprintf(result, sizeof(result), "Effect set to %d (saved)", val);
-    return result;
-  }
-  return "Error: Failed to set effect";
-}
-
-const char* cmd_cameraexposure(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char result[80];
-    snprintf(result, sizeof(result), "AE Level: %d (range -2 to 2, negative=darker)", gSettings.cameraAELevel);
-    return result;
-  }
-  
-  int val = valStr.toInt();
-  if (val < -2 || val > 2) return "Error: AE Level must be -2 to 2";
-  
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_ae_level(s, val) == 0) {
-    setSetting(gSettings.cameraAELevel, val);
-    EXT_RAM_BSS_ATTR static char result[64];
-    snprintf(result, sizeof(result), "AE Level set to %d (saved)", val);
-    return result;
-  }
-  return "Error: Failed to set AE level";
-}
-
-const char* cmd_cameraaec(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Error: Camera sensor not available";
-
-  String arg = argsInput;
-  arg.trim();
-  
-  if (arg.length() == 0) {
-    bool enabled = (s->status.aec != 0);
-    return enabled ? "Auto exposure: ON" : "Auto exposure: OFF (manual)";
-  }
-
-  arg.toLowerCase();
-
-  bool enable = (arg == "on" || arg == "1" || arg == "true" || arg == "auto");
-  if (s->set_exposure_ctrl(s, enable ? 1 : 0) == 0) {
-    return enable ? "Auto exposure enabled" : "Auto exposure disabled (manual)";
-  }
-  return "Error: Failed";
+  if (!cameraSupportsControl(CameraControl::HMirror) || !cameraSupportsControl(CameraControl::VFlip)) return "Error: Control unsupported by this camera backend";
+  String arg = argsInput; arg.trim();
+  if (!arg.length()) return gSettings.cameraHMirror && gSettings.cameraVFlip ? "Rotate 180: ON" : "Rotate 180: OFF";
+  int value = arg == "180" ? 1 : parseBoolArg(arg);
+  if (value < 0) return "Error: Use on or off";
+  if (!lockCameraMutex(15000)) return "Error: Camera busy";
+  int oldMirror = 0;
+  bool haveOld = getCameraControl(CameraControl::HMirror, oldMirror);
+  bool ok = haveOld && setCameraControl(CameraControl::HMirror, value) && setCameraControl(CameraControl::VFlip, value);
+  if (ok) {
+    setSetting(gSettings.cameraHMirror, value != 0);
+    setSetting(gSettings.cameraVFlip, value != 0);
+  } else if (haveOld) (void)setCameraControl(CameraControl::HMirror, oldMirror);
+  unlockCameraMutex();
+  return ok ? "Camera rotation applied (saved)" : "Error: Failed to apply camera rotation";
 }
 
 const char* cmd_camerafps(const String& argsInput) {
@@ -1891,416 +1084,6 @@ const char* cmd_camerafps(const String& argsInput) {
   return buf;
 }
 
-const char* cmd_cameraaecvalue(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    return "Error: invalid arguments — Usage: cameraaecvalue <0-1200>";
-  }
-
-  int val = valStr.toInt();
-  if (val < 0 || val > 1200) return "Error: AEC value must be 0-1200";
-
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Error: Camera sensor not available";
-
-  (void)s->set_exposure_ctrl(s, 0);
-  if (s->set_aec_value(s, val) == 0) {
-    EXT_RAM_BSS_ATTR static char result[64];
-    snprintf(result, sizeof(result), "Manual exposure set to %d", val);
-    return result;
-  }
-  return "Error: Failed";
-}
-
-const char* cmd_cameraagc(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Error: Camera sensor not available";
-
-  String arg = argsInput;
-  arg.trim();
-  
-  if (arg.length() == 0) {
-    bool enabled = (s->status.agc != 0);
-    return enabled ? "Auto gain: ON" : "Auto gain: OFF (manual)";
-  }
-
-  arg.toLowerCase();
-
-  bool enable = (arg == "on" || arg == "1" || arg == "true" || arg == "auto");
-  if (s->set_gain_ctrl(s, enable ? 1 : 0) == 0) {
-    return enable ? "Auto gain enabled" : "Auto gain disabled (manual)";
-  }
-  return "Error: Failed";
-}
-
-const char* cmd_cameraagcgain(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    return "Error: invalid arguments — Usage: cameraagcgain <0-30>";
-  }
-
-  int val = valStr.toInt();
-  if (val < 0 || val > 30) return "Error: AGC gain must be 0-30";
-
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Error: Camera sensor not available";
-
-  (void)s->set_gain_ctrl(s, 0);
-  if (s->set_agc_gain(s, val) == 0) {
-    EXT_RAM_BSS_ATTR static char result[64];
-    snprintf(result, sizeof(result), "Manual gain set to %d", val);
-    return result;
-  }
-  return "Error: Failed";
-}
-
-// =============================================================================
-// Runtime-only sensor controls — no persistence, no UI integration.
-// Use these to test which OV3660 settings actually improve image quality
-// before promoting any of them to gSettings + persisted JSON.
-// =============================================================================
-
-// Gainceiling: 0..6 → 2X, 4X, 8X, 16X, 32X, 64X, 128X.
-// Most likely fix for "washed out" indoor symptom: default value 0 caps the
-// sensor at 2× analog gain so AGC can't expose dim scenes; raising to 6 (128X)
-// gives AEC headroom to actually brighten the image.
-const char* cmd_cameragainceiling(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-
-  String s = argsInput; s.trim();
-  sensor_t* sens = esp_camera_sensor_get();
-  if (!sens) return "Error: Camera sensor not available";
-
-  if (s.length() == 0) {
-    EXT_RAM_BSS_ATTR static char r[64];
-    static const char* kNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
-    int v = sens->status.gainceiling;
-    snprintf(r, sizeof(r), "Gainceiling: %d (%s). Set with: cameragainceiling <0-6>",
-             v, (v >= 0 && v <= 6) ? kNames[v] : "?");
-    return r;
-  }
-  int v = s.toInt();
-  if (v < 0 || v > 6) return "Error: gainceiling must be 0..6 (2X..128X)";
-  if (sens->set_gainceiling(sens, (gainceiling_t)v) == 0) {
-    EXT_RAM_BSS_ATTR static char r[64];
-    static const char* kNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
-    snprintf(r, sizeof(r), "Gainceiling set to %d (%s)", v, kNames[v]);
-    return r;
-  }
-  return "Error: Failed";
-}
-
-// parseBoolArg(const String&) is defined in System_Utils.h. It returns
-// -1 on empty, 0/1 on parsed values, -2 on unparseable input — same
-// semantics this file's command handlers use.
-
-// Shared shape for the simple on/off sensor toggles below. argsInput
-// empty → report current value; valid bool → call setter; bad input →
-// usage hint. `currentVal` is read from sensor_t::status; setter is the
-// sensor_t function pointer.
-static const char* cameraBoolToggle(const String& argsInput,
-                                    const char* tag,
-                                    uint8_t currentVal,
-                                    int (*setter)(sensor_t*, int)) {
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s || !setter) return "Error: Camera sensor not available";
-
-  EXT_RAM_BSS_ATTR static char r[80];
-  String a = argsInput; a.trim();
-  if (a.length() == 0) {
-    snprintf(r, sizeof(r), "%s: %s", tag, currentVal ? "ON" : "OFF");
-    return r;
-  }
-  int p = parseBoolArg(a);
-  if (p < 0) {
-    snprintf(r, sizeof(r), "Usage: <on|off>  (current %s: %s)",
-             tag, currentVal ? "ON" : "OFF");
-    return r;
-  }
-  if (setter(s, p) == 0) {
-    snprintf(r, sizeof(r), "%s: %s", tag, p ? "ON" : "OFF");
-    return r;
-  }
-  return "Error: Failed";
-}
-
-const char* cmd_camerawhitebal(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  sensor_t* s = esp_camera_sensor_get();
-  return cameraBoolToggle(argsInput, "whitebal", s ? s->status.awb : 0,
-                          s ? s->set_whitebal : nullptr);
-}
-
-const char* cmd_cameraawbgain(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  sensor_t* s = esp_camera_sensor_get();
-  return cameraBoolToggle(argsInput, "awb_gain", s ? s->status.awb_gain : 0,
-                          s ? s->set_awb_gain : nullptr);
-}
-
-const char* cmd_cameraaec2(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  sensor_t* s = esp_camera_sensor_get();
-  return cameraBoolToggle(argsInput, "aec2", s ? s->status.aec2 : 0,
-                          s ? s->set_aec2 : nullptr);
-}
-
-const char* cmd_cameradcw(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  sensor_t* s = esp_camera_sensor_get();
-  return cameraBoolToggle(argsInput, "dcw", s ? s->status.dcw : 0,
-                          s ? s->set_dcw : nullptr);
-}
-
-const char* cmd_camerabpc(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  sensor_t* s = esp_camera_sensor_get();
-  return cameraBoolToggle(argsInput, "bpc", s ? s->status.bpc : 0,
-                          s ? s->set_bpc : nullptr);
-}
-
-const char* cmd_camerawpc(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  sensor_t* s = esp_camera_sensor_get();
-  return cameraBoolToggle(argsInput, "wpc", s ? s->status.wpc : 0,
-                          s ? s->set_wpc : nullptr);
-}
-
-const char* cmd_cameragamma(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  sensor_t* s = esp_camera_sensor_get();
-  return cameraBoolToggle(argsInput, "raw_gma", s ? s->status.raw_gma : 0,
-                          s ? s->set_raw_gma : nullptr);
-}
-
-const char* cmd_cameralenc(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  sensor_t* s = esp_camera_sensor_get();
-  return cameraBoolToggle(argsInput, "lenc", s ? s->status.lenc : 0,
-                          s ? s->set_lenc : nullptr);
-}
-
-// Color bar test pattern. Use to confirm the decode + display pipeline is
-// honest before chasing tuning: if the colorbar renders vivid+saturated,
-// the issue is exposure/gain, not the BMP build / palette / lens.
-const char* cmd_cameracolorbar(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  sensor_t* s = esp_camera_sensor_get();
-  return cameraBoolToggle(argsInput, "colorbar", s ? s->status.colorbar : 0,
-                          s ? s->set_colorbar : nullptr);
-}
-
-// Direct sensor register poke. Escape hatch for OV3660 register tweaks
-// the high-level API doesn't cover (e.g. issue #220 register fix:
-// camerareg 0x3824 0x1f 0x04). Format: <addr_hex> <mask_hex> <value_hex>.
-const char* cmd_camerareg(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Error: Camera sensor not available";
-
-  String a = argsInput; a.trim();
-  if (a.length() == 0) {
-    return "Error: invalid arguments — Usage: camerareg <addr_hex> <mask_hex> <value_hex>  "
-           "(example: camerareg 0x3824 0x1f 0x04)";
-  }
-  unsigned addr = 0, mask = 0, val = 0;
-  // Accept "0x" prefix and bare hex. sscanf with %x handles both.
-  if (sscanf(a.c_str(), "%x %x %x", &addr, &mask, &val) != 3) {
-    return "Error: Bad format. Usage: camerareg <addr_hex> <mask_hex> <value_hex>";
-  }
-  if (s->set_reg(s, (int)addr, (int)mask, (int)val) == 0) {
-    EXT_RAM_BSS_ATTR static char r[80];
-    snprintf(r, sizeof(r), "set_reg(0x%04X, 0x%02X, 0x%02X) ok", addr, mask, val);
-    return r;
-  }
-  return "Error: set_reg failed";
-}
-
-// Print all current sensor status values. Emits each section as its own
-// broadcast line so the per-broadcast 256-byte cap in BROADCAST_PRINTF
-// doesn't truncate the dump. Returns a short summary so the cmd
-// dispatcher's response line shows something useful too.
-//
-// NOTE: these values come from sensor_t::status (software-side cache).
-// On OV3660, brightness/contrast/saturation share a DSP control block
-// where each setter clears the enable bits of the others — so
-// status.brightness=2 doesn't guarantee the brightness bit is enabled
-// in the hardware register. Use camerafx to set them together.
-const char* cmd_cameradump(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Error: Camera sensor not available";
-
-  static const char* kGCNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
-  const camera_status_t& st = s->status;
-  int gc = (st.gainceiling <= 6) ? st.gainceiling : 0;
-
-  BROADCAST_PRINTF("[CAM_DUMP] PID=0x%04X  framesize=%u  quality=%u  scale=%d",
-                   (unsigned)s->id.PID, (unsigned)st.framesize,
-                   (unsigned)st.quality, (int)st.scale);
-  BROADCAST_PRINTF("[CAM_DUMP] brightness=%d  contrast=%d  saturation=%d  "
-                   "sharpness=%d  denoise=%u  special_effect=%u",
-                   (int)st.brightness, (int)st.contrast, (int)st.saturation,
-                   (int)st.sharpness, (unsigned)st.denoise,
-                   (unsigned)st.special_effect);
-  BROADCAST_PRINTF("[CAM_DUMP] wb_mode=%u  awb=%u  awb_gain=%u",
-                   (unsigned)st.wb_mode, (unsigned)st.awb, (unsigned)st.awb_gain);
-  BROADCAST_PRINTF("[CAM_DUMP] aec=%u  aec2=%u  aec_value=%u  ae_level=%d",
-                   (unsigned)st.aec, (unsigned)st.aec2,
-                   (unsigned)st.aec_value, (int)st.ae_level);
-  BROADCAST_PRINTF("[CAM_DUMP] agc=%u  agc_gain=%u  gainceiling=%u (%s)",
-                   (unsigned)st.agc, (unsigned)st.agc_gain,
-                   (unsigned)st.gainceiling, kGCNames[gc]);
-  BROADCAST_PRINTF("[CAM_DUMP] bpc=%u  wpc=%u  raw_gma=%u  lenc=%u  dcw=%u",
-                   (unsigned)st.bpc, (unsigned)st.wpc,
-                   (unsigned)st.raw_gma, (unsigned)st.lenc, (unsigned)st.dcw);
-  BROADCAST_PRINTF("[CAM_DUMP] hmirror=%u  vflip=%u  colorbar=%u",
-                   (unsigned)st.hmirror, (unsigned)st.vflip,
-                   (unsigned)st.colorbar);
-  return "Sensor status dumped (see [CAM_DUMP] lines above)";
-}
-
-// Set brightness, contrast, and saturation together in one sequence.
-// Workaround for the OV3660 DSP-block chained-set behaviour: each of
-// set_brightness/contrast/saturation clears the other two's enable
-// bits, so cycling them individually leaves only the most-recent one
-// active. By calling all three back-to-back here, only the LAST call
-// clears the others — but since we set all three to known values, the
-// final state has all three set deterministically. (Documented in
-// esphome/issues#5499.)
-//
-// Usage: camerafx <bri> <con> <sat>   (each -2..+2)
-const char* cmd_camerafx(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Error: Camera sensor not available";
-
-  String a = argsInput; a.trim();
-  if (a.length() == 0) {
-    EXT_RAM_BSS_ATTR static char r[96];
-    snprintf(r, sizeof(r),
-             "camerafx: bri=%d con=%d sat=%d. Usage: camerafx <bri> <con> <sat>  (-2..+2 each)",
-             (int)s->status.brightness, (int)s->status.contrast,
-             (int)s->status.saturation);
-    return r;
-  }
-  int bri = -99, con = -99, sat = -99;
-  if (sscanf(a.c_str(), "%d %d %d", &bri, &con, &sat) != 3) {
-    return "Error: invalid arguments — Usage: camerafx <bri> <con> <sat>  (-2..+2 each)";
-  }
-  if (bri < -2 || bri > 2 || con < -2 || con > 2 || sat < -2 || sat > 2) {
-    return "Error: Each value must be -2..+2";
-  }
-
-  // Order matters: write contrast first, brightness second, saturation
-  // last. The last call's enable bit always wins for the *other* two,
-  // but we've explicitly set all three values just before — so the
-  // hardware register ends with the latest brightness/contrast values
-  // (preserved since they were written into the DSP block) and the
-  // saturation value (the last call).
-  int rc1 = s->set_contrast(s, con);
-  int rc2 = s->set_brightness(s, bri);
-  int rc3 = s->set_saturation(s, sat);
-
-  // Persist so reboot picks them up.
-  setSetting(gSettings.cameraBrightness, bri);
-  setSetting(gSettings.cameraContrast,   con);
-  setSetting(gSettings.cameraSaturation, sat);
-
-  EXT_RAM_BSS_ATTR static char r[120];
-  snprintf(r, sizeof(r),
-           "camerafx applied: bri=%d (rc=%d), con=%d (rc=%d), sat=%d (rc=%d) — saved",
-           bri, rc2, con, rc1, sat, rc3);
-  return r;
-}
-
-const char* cmd_camerahmirror(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String arg = argsInput;
-  arg.trim();
-  
-  if (arg.length() == 0) {
-    return gSettings.cameraHMirror ? "H-Mirror: ON" : "H-Mirror: OFF";
-  }
-  
-  arg.toLowerCase();
-  bool enable = (arg == "on" || arg == "1" || arg == "true");
-  
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_hmirror(s, enable ? 1 : 0) == 0) {
-    setSetting(gSettings.cameraHMirror, enable);
-    return enable ? "H-Mirror enabled (saved)" : "H-Mirror disabled (saved)";
-  }
-  return "Error: Failed";
-}
-
-const char* cmd_cameravflip(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not enabled";
-  
-  String arg = argsInput;
-  arg.trim();
-  
-  if (arg.length() == 0) {
-    return gSettings.cameraVFlip ? "V-Flip: ON" : "V-Flip: OFF";
-  }
-  
-  arg.toLowerCase();
-  bool enable = (arg == "on" || arg == "1" || arg == "true");
-  
-  sensor_t* s = esp_camera_sensor_get();
-  if (s && s->set_vflip(s, enable ? 1 : 0) == 0) {
-    setSetting(gSettings.cameraVFlip, enable);
-    return enable ? "V-Flip enabled (saved)" : "V-Flip disabled (saved)";
-  }
-  return "Error: Failed";
-}
-
-const char* cmd_camerarotate(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraRunning) return "Error: Camera not started";
-  
-  String arg = argsInput;
-  arg.trim();
-  
-  if (arg.length() == 0) {
-    bool rotated = gSettings.cameraHMirror && gSettings.cameraVFlip;
-    return rotated ? "Rotate 180: ON (hmirror+vflip)" : "Rotate 180: OFF";
-  }
-  
-  arg.toLowerCase();
-  bool enable = (arg == "on" || arg == "1" || arg == "true" || arg == "180");
-  
-  sensor_t* s = esp_camera_sensor_get();
-  if (s) {
-    s->set_hmirror(s, enable ? 1 : 0);
-    s->set_vflip(s, enable ? 1 : 0);
-    setSetting(gSettings.cameraHMirror, enable);
-    setSetting(gSettings.cameraVFlip, enable);
-    return enable ? "Rotated 180° (hmirror+vflip enabled, saved)" : "Rotation disabled (saved)";
-  }
-  return "Error: Failed";
-}
 
 // ============================================================================
 // Camera Settings Commands
@@ -2368,7 +1151,7 @@ const char* cmd_cameramaxstoredimages(const String& argsInput) {
     return buf;
   }
   int val = valStr.toInt();
-  if (val < 0 || val > 1000) return "Error: cameraMaxStoredImages must be 0-1000";
+  if (val < 0 || val > 1000) return "Error: cameraMaxStoredImages must be 0-1200";
   setSetting(gSettings.cameraMaxStoredImages, val);
   EXT_RAM_BSS_ATTR static char buf[48];
   snprintf(buf, sizeof(buf), "cameraMaxStoredImages set to %d", val);
@@ -2559,8 +1342,8 @@ const CommandEntry cameraCommands[] = {
   {"closecamera",      "Stop camera sensor.",             false, cmd_camerastop},
   {"cameracapture",    "Capture a single frame",          false, cmd_cameracapture},
   {"camerasave",       "Save current frame to storage",   false, cmd_camerasave},
-  {"camerares",        "Set camera resolution: <res>",    false, cmd_camerares, "Usage: camerares <96x96|qqvga|qcif|hqvga|240x240|qvga|cif|vga|svga|xga|sxga|uxga>"},
-  {"cameraframesize",  "Set resolution by index: <0-10>", true,  cmd_cameraframesize, "Usage: cameraframesize <0..10> (0-5: QVGA..UXGA, 6-10: 96x96/QQVGA/QCIF/HQVGA/240x240)"},
+  {"camerares",        "Set camera resolution: <res>",    false, cmd_camerares, "Usage: camerares <96x96|qqvga|qcif|hqvga|240x240|qvga|cif|vga|svga|xga|sxga|uxga|hd>"},
+  {"cameraframesize",  "Set resolution by index: <0-12>", true,  cmd_cameraframesize, "Usage: cameraframesize <0..12> (0-5: QVGA..UXGA, 6-10: small, 11: HD, 12: CIF; availability depends on backend)"},
   {"cameraquality",    "Set JPEG quality: <0-63>",        false, cmd_cameraquality, "Usage: cameraquality <0..63> (lower = better quality, larger file)"},
   {"camerafps",            "Camera FPS: <1-20>",          true, cmd_camerafps, "Usage: camerafps <1..20>"},
   {"cameratiny",       "Capture tiny frame for ESP-NOW",  false, cmd_cameratiny},
@@ -2596,7 +1379,7 @@ const CommandEntry cameraCommands[] = {
   {"cameraautostart",  "Auto-start: <on|off>",            true,  cmd_cameraautostart, "Usage: cameraautostart <on|off|1|0|true|false>"},
   {"camerastoragelocation", "Storage location: <0-2>",    true,  cmd_camerastoragelocation, "Usage: camerastoragelocation <0..2> (0=LittleFS,1=SD,2=Both)"},
   {"cameracapturefolder",   "Photo folder: <path>",       true,  cmd_cameracapturefolder, "Usage: cameracapturefolder <path>"},
-  {"cameramaxstoredimages", "Max stored: <0-1000>",       true,  cmd_cameramaxstoredimages, "Usage: cameramaxstoredimages <0..1000> (0=unlimited)"},
+  {"cameramaxstoredimages", "Max stored: <0-1200>",       true,  cmd_cameramaxstoredimages, "Usage: cameramaxstoredimages <0..1200> (0=unlimited)"},
   {"cameraautocapture",     "Auto-capture: <on|off>",     true,  cmd_cameraautocapture, "Usage: cameraautocapture <on|off|1|0|true>"},
   {"cameraautocaptureinterval", "Auto-capture: <sec>",    true, cmd_cameraautocaptureinterval, "Usage: cameraautocaptureinterval <10..3600>"},
   {"camerasendaftercapture", "Send after capture: <on|off>", true, cmd_camerasendaftercapture, "Usage: camerasendaftercapture <on|off|1|0|true>"},
@@ -2610,8 +1393,8 @@ const CommandEntry cameraCommands[] = {
 static const SettingEntry cameraSettingEntries[] = {
   { "cameraEnabled", SETTING_BOOL, &gSettings.cameraEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "cameraenabled" },
   { "cameraAutoStart", SETTING_BOOL, &gSettings.cameraAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "cameraautostart" },
-  { "cameraFramesize", SETTING_INT, &gSettings.cameraFramesize, 10, 0, nullptr, 0, 10, "Resolution", "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
-    "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240", false, "image", nullptr },
+  { "cameraFramesize", SETTING_INT, &gSettings.cameraFramesize, 10, 0, nullptr, 0, 12, "Resolution", "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
+    "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240,11:1280x720 (HD),12:400x296 (CIF)", false, "image", nullptr },
   { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 2, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", "camerabrightness" },
   { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 2, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", "cameracontrast" },
   { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 2, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", "camerasaturation" },
@@ -2648,7 +1431,7 @@ extern const SettingsModule cameraSettingsModule = {
   cameraSettingEntries,
   sizeof(cameraSettingEntries) / sizeof(cameraSettingEntries[0]),
   isCameraConnected,
-  "ESP32-S3 camera sensor"
+  "Camera capture and image settings"
 };
 const size_t cameraCommandsCount = sizeof(cameraCommands) / sizeof(cameraCommands[0]);
 

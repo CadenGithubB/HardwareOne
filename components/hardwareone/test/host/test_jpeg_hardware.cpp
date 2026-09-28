@@ -77,6 +77,7 @@ esp_err_t jpeg_decoder_process(jpeg_decoder_handle_t engine, const jpeg_decode_c
  return failure == Failure::Process ? ESP_FAIL : ESP_OK;
 }
 namespace hwjpeg { namespace detail {
+bool validateSoftwareEntropy(const uint8_t*, size_t, const Info&, const char**) { return true; }
 bool decodeSoftware(const uint8_t*, size_t, const Info& info, Image& image, const char**, OutputAllocator) {
  ++software; image.pixels = static_cast<uint8_t*>(std::malloc(info.bytes)); assert(image.pixels);
  std::memset(image.pixels, 0xee, info.bytes); image.width = info.width; image.height = info.height;

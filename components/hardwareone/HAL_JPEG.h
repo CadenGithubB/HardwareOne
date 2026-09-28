@@ -53,6 +53,15 @@ public:
 // Bounded header validation; success does not promise a supported entropy codec.
 bool inspect(const uint8_t* data, size_t length, Info& info,
              const DecodeOptions& options = {}, const char** error = nullptr);
+// Validate the complete entropy stream with the compiled software decoder.
+// Supports that decoder's baseline, single-scan formats; progressive/other
+// unsupported formats return false, even if structurally valid. Always uses
+// software (options.mode is ignored), bounded input/geometry checks and the
+// same marker normalization as decode(). No full-image RGB buffer is allocated.
+// info is populated by structural inspection; true additionally means all
+// entropy blocks were decoded. It is not a pixel-level reference comparison.
+bool validateSoftware(const uint8_t* data, size_t length, Info& info,
+                      const DecodeOptions& options = {}, const char** error = nullptr);
 // On failure image is empty. Auto tries eligible hardware then software.
 bool decode(const uint8_t* data, size_t length, Image& image,
             const DecodeOptions& options = {}, const char** error = nullptr);

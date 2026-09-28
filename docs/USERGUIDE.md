@@ -50,7 +50,7 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `ENABLE_R1_HEALTH` | Set to `1` to build the R1 Health vitals UI (G2 Apps->Health, OLED, Web `/r1-health`) + health logging. Requires Bluetooth + G2; forced off if either is off. Ring connect stays under `ENABLE_G2_GLASSES`. |
 | `ENABLE_MQTT` | Set to `1` to build the Home Assistant MQTT integration |
 | `ENABLE_AUTOMATION` | Set to `1` to build scheduled tasks and conditional commands |
-| `ENABLE_CAMERA_SENSOR` | Set to `1` to build the ESP32-S3 DVP camera driver (OV2640/OV5640) |
+| `ENABLE_CAMERA_SENSOR` | Set to `1` to build the shared camera system and the board's DVP or CSI backend |
 | `ENABLE_MICROPHONE_SENSOR` | Set to `1` to build the PDM microphone via I2S |
 | `ENABLE_BATTERY_MONITOR` | Enable the board's ADC or fuel-gauge battery backend |
 | `ENABLE_EDGE_IMPULSE` | Set to `1` to build Edge Impulse ML inference |
@@ -1448,7 +1448,7 @@ imagesend <device> "<path>"     - Send image to a peer via ESP-NOW (blocks; fail
 </details>
 
 <details>
-<summary><strong>camera - DVP camera (ESP32-S3 only, requires ENABLE_CAMERA_SENSOR)</strong></summary>
+<summary><strong>camera - shared DVP/CSI camera (requires ENABLE_CAMERA_SENSOR)</strong></summary>
 
 ```
 opencamera                      - Start camera sensor
@@ -1483,6 +1483,20 @@ cameracapturefolder <path>      - Folder for captured images
 cameramaxstoredimages <0-1000>  - Max images to keep
 cameratiny                      - Capture a small frame (for ESP-NOW transfer)
 ```
+
+The same photo, preview and stream commands are used on S3 and P4. Run
+`cameraread` to see this camera's supported resolutions and sensor controls.
+The web page disables unavailable controls; the G2 settings page omits them.
+A CLI request for an unsupported size or control returns an error. JPEG quality
+uses the existing 0..63 scale on both chips, with lower values giving better
+quality. Capture fails cleanly if its JPEG exceeds the shared output budget;
+reduce resolution or increase the quality number and retry.
+
+Saved resolution IDs 0..10 are unchanged; 11 is HD (1280x720), and 12 is CIF
+(400x296). Only sizes reported by the active backend can be selected. P4 CSI
+capture may scale a fixed sensor source to produce smaller JPEGs; the status
+reports source dimensions separately from output dimensions. SD recording
+still requires a card, and G2 viewing still requires connected glasses.
 </details>
 
 <details>

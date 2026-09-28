@@ -1,5 +1,6 @@
 #include "HAL_JPEG_Backend.h"
 #include "jpeg_decoder.h"
+#include "tjpgd.h"
 #include "esp_heap_caps.h"
 #include <cassert>
 #include <cstdio>
@@ -46,6 +47,8 @@ extern "C" esp_err_t esp_jpeg_decode(esp_jpeg_image_cfg_t* config, esp_jpeg_imag
  if (failure == Failure::OutputLength) --result->output_len;
  return failure == Failure::Decoder ? ESP_FAIL : ESP_OK;
 }
+extern "C" JRESULT jd_prepare(JDEC*, size_t (*)(JDEC*, uint8_t*, size_t), void*, size_t, void*) { return JDR_FMT1; }
+extern "C" JRESULT jd_decomp(JDEC*, int (*)(JDEC*, void*, JRECT*), uint8_t) { return JDR_FMT1; }
 namespace hwjpeg { namespace detail {
 bool decodeHardware(const uint8_t*, size_t, const Info&, Image&, const char**) { ++hardwareCalls; return false; }
 }}

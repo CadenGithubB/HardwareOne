@@ -3,6 +3,12 @@
 #include "esp_heap_caps.h"
 #include "sdkconfig.h"
 #include <stdlib.h>
+#include <string.h>
+#if defined(CONFIG_JD_USE_ROM) && CONFIG_JD_USE_ROM
+#include "rom/tjpgd.h"
+#else
+#include "tjpgd.h"
+#endif
 
 namespace hwjpeg { namespace detail {
 namespace {
@@ -25,6 +31,56 @@ constexpr size_t kWorkspaceBytes = kBaseWorkspace + 6u * 1024u > 65472u ?
 constexpr size_t kWorkspaceBytes = kBaseWorkspace;
 #endif
 #endif
+
+// Keep codec ABI differences inside this backend: IDF ROM uses the original
+// unsigned-int callbacks, while bundled TJpgDec uses size_t/int callbacks.
+#if defined(CONFIG_JD_USE_ROM) && CONFIG_JD_USE_ROM
+using ReadCount = unsigned int;
+using WriteResult = unsigned int;
+#else
+using ReadCount = size_t;
+using WriteResult = int;
+#endif
+struct ValidationInput {
+  const uint8_t* data;
+  size_t length;
+  size_t offset = 0;
+};
+ReadCount validationRead(JDEC* decoder, uint8_t* buffer, ReadCount requested) {
+  auto* input = static_cast<ValidationInput*>(decoder->device);
+  const size_t remaining = input->length - input->offset;
+  const size_t amount = size_t(requested) < remaining ? size_t(requested) : remaining;
+  if (buffer && amount) memcpy(buffer, input->data + input->offset, amount);
+  input->offset += amount;
+  return static_cast<ReadCount>(amount);
+}
+WriteResult validationDiscard(JDEC*, void*, JRECT*) { return 1; }
+}
+bool validateSoftwareEntropy(const uint8_t* data, size_t length, const Info& info,
+                             const char** error) {
+  void* workspace = heap_caps_malloc(kWorkspaceBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!workspace) {
+    if (error) *error = "out of memory for JPEG validation workspace";
+    return false;
+  }
+  ValidationInput input{data, length};
+  JDEC decoder = {};
+  const JRESULT prepared = jd_prepare(&decoder, validationRead, workspace, kWorkspaceBytes, &input);
+  const bool dimensionsMatch = prepared == JDR_OK && decoder.width == info.width && decoder.height == info.height;
+  // Every coefficient is still Huffman-decoded. At 1/8 scale TJpgDec skips
+  // the expensive IDCT and only produces disposable MCU-sized output.
+#if JD_USE_SCALE
+  constexpr uint8_t scale = 3;
+#else
+  constexpr uint8_t scale = 0;
+#endif
+  const JRESULT decoded = dimensionsMatch ? jd_decomp(&decoder, validationDiscard, scale) : JDR_FMT1;
+  free(workspace);
+  if (!dimensionsMatch || decoded != JDR_OK) {
+    if (error) *error = "software JPEG entropy validation failed";
+    return false;
+  }
+  return true;
 }
 bool decodeSoftware(const uint8_t* data, size_t length, const Info& info,
                     Image& image, const char** error, OutputAllocator allocator) {

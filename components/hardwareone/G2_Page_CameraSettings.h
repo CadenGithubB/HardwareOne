@@ -8,7 +8,9 @@
 // top-level hijack menu (registered with hijackLabel=nullptr) — it's
 // navigated to programmatically.
 //
-// Layout: one tappable row per exposed setting. Each tap cycles the
+// Layout: only controls and resolutions supported by the active camera backend
+// are listed. Shared stream size, cadence and tone mapping remain available.
+// Each tap cycles the
 // targeted value through its valid range (with wrap), persists via
 // setSetting()-equivalent path, and applies live to the camera sensor
 // where supported (most settings apply without a restart; framesize
