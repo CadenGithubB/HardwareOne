@@ -4,62 +4,99 @@
   "base_commit": "19a1da9451b4fe7c691bd0a4bd10b6feee20b2c4",
   "idf": "5.5.5",
   "software_decoder": "esp_jpeg 1.3.1",
-  "hardware_tested": false,
-  "board_flashed": false,
+  "hardware_tested": true,
+  "board_flashed": true,
   "builds": {
     "p4": {
       "file": "private/build-p4/hardwareone-idf.bin",
-      "bytes": 4412832,
-      "sha256": "9bd7f4446cee55e9a4236dbba24f4ef3e8645480503cb18a7f1d410a911995ce",
+      "bytes": 4413184,
+      "sha256": "d5c2b6c1305b318c2bb57a14e9a1d09c4e1cdf41180d2cf122010e89e17717c6",
       "command_exit_code": 0,
-      "hardware_driver_qualified": true
+      "hardware_driver_qualified": true,
+      "device_tested": false
     },
     "s3": {
       "file": "private/build-s3/hardwareone-idf.bin",
-      "bytes": 4986240,
-      "sha256": "b2d3c9e56bc188a074bfdca431aaedcc8c52e28e80a79a731799142c352ec7a2",
+      "bytes": 4986336,
+      "sha256": "37a31c376a95d4b890be25f609d5f22ecb91f1cec0af2f9e0e3c7bc58607e407",
       "command_exit_code": 0,
-      "hardware_driver_qualified": false
+      "hardware_driver_qualified": false,
+      "device_tested": false
     },
     "codec-p4": {
       "file": "private/build-codec-p4/hwjpeg_probe.bin",
-      "bytes": 518880,
-      "sha256": "629d2552dc4e23271aa5632e4c453a49bb55fc09c65c67719cffc3ca2c7d5227",
+      "bytes": 530704,
+      "sha256": "c128e3fdb33f29e676a8d4920814872e7cc67c4778014197dfa151596d0b4058",
       "command_exit_code": 0,
-      "hardware_driver_qualified": true
+      "hardware_driver_qualified": true,
+      "app_offset": "0x10000",
+      "erase_end_exclusive": "0x92000",
+      "device_tested": true
     },
     "codec-s3": {
       "file": "private/build-codec-s3/hwjpeg_probe.bin",
-      "bytes": 455584,
-      "sha256": "18e04f3f6c5a8090f39f3991164fb04eff7058e49739128dc684a452e9f1fe3e",
+      "bytes": 466800,
+      "sha256": "1cd0da2029fe50c28ece9bbaf2698ec492f624cfd5ebe741dc86e68e11d348cf",
       "command_exit_code": 0,
-      "hardware_driver_qualified": false
+      "hardware_driver_qualified": false,
+      "app_offset": "0x10000",
+      "erase_end_exclusive": "0x82000",
+      "device_tested": true
     }
   },
   "source_sha256": {
     "components/hardwareone/HAL_JPEG.cpp": "a8d3e939d92af3196e4b1be1ed6acdd108ae47b726c771c093184dc5a9b24099",
     "components/hardwareone/HAL_JPEG.h": "d0a596973ec5829bdff399313a9f106717c9ceb10715f9a995dbc2b3189c7af2",
     "components/hardwareone/HAL_JPEG_Backend.h": "5f7902074225f2974ef1927604b3592bc3122990bbd010463a03ca2e9990982a",
-    "components/hardwareone/HAL_JPEG_P4.cpp": "13349e537e3edbe6a0199314f67fd15acb39774530d68e33ef060085270b811c",
-    "components/hardwareone/HAL_JPEG_Software.cpp": "9cd059c0b90f825647218dd202c6af1eacc2caaa09982db323086fddbdb684cc",
+    "components/hardwareone/HAL_JPEG_P4.cpp": "b8d374da2d2f649ece369589e4383c44e855fe358d0c2efeea4451e37c36dab3",
+    "components/hardwareone/HAL_JPEG_Software.cpp": "fa9372fe2df01b8146cae11eb64f61668223ba8e71e511451328b4615d9f4961",
     "components/hardwareone/G2_Glasses.cpp": "e7d45fbf7644b86dd8ac78f5ff78ae5b08fffc22db3f7f258e2f4ff363df652a",
     "components/hardwareone/CMakeLists.txt": "2857955b9bde78cad904101eedb9b68d200690db91413c95d28581a98ebeb18d",
     "components/hardwareone/idf_component.yml": "e6537426ce22f57aa3ccaab8b9d2c3a26ac4ff52a0c1588b9dcf53e28e4cb8d4",
     "experiments/jpeg_portable/integration.patch": "72a8f9900c04da71aa0ac4b74e306ac69d15315e4f3309670647b7bd4bddd79b",
     "experiments/jpeg_portable/idf-jpeg.patch": "6c344428013de9f9b7f707d35c75ca9390fb3ecdf312fc99fce0174ed811f15f",
-    "experiments/jpeg_portable/codec/main/probe.cpp": "5e612e6af7eab15de0e87d704fcac59c329610a2e27503a5d5c3a15e72e0c40a"
+    "experiments/jpeg_portable/codec/main/probe.cpp": "9fa9c5b68e376d2759d71a2a65b8f9a45cbba08d6de9f9882f4edd54806ec5a2",
+    "experiments/jpeg_portable/build-codec.sh": "b0fa2e8f59a77ebbd03cc9744305cc1169fe13a0e66e196740edef53754ecbe4",
+    "experiments/jpeg_portable/codec/main/CMakeLists.txt": "8063d7760249cb4f03d9dfabb15328d6bc191715839b1c3d69708c24f7f919d9"
   },
   "host_validation": {
     "sanitizers": [
       "address",
       "undefined"
     ],
-    "decodable_legacy_parity_fixtures": 12,
-    "concurrent_decodes": 192,
-    "matching_source_hashes": 44,
-    "source_manifest_sha256": "a63f289b68976165be20be3bc0e57f1787eec6c21eac3c7a1bd1afd139c326e1",
-    "log_sha256": "a5abde4455dd79e11102160212efd6f7a9d6e3bf63b8cb95057e523b1cfd1554",
+    "matching_source_hashes": 47,
+    "source_manifest_sha256": "f5c84d5142d38a0fc482e986919eabf1cff9f1465c9c1684741698ae7623813d",
+    "log_sha256": "ca2d14295af87f912bfc47dd577aa245f36b13a40b939dbd320de4197aaea07f",
     "sdk_cleanup_test_methods": 10,
-    "sdk_negative_control_scenarios": 5
-  }
+    "sdk_negative_control_scenarios": 5,
+    "fastdecode_modes": {
+      "0": {
+        "legacy_parity_fixtures": 15,
+        "workspace_repaired_fixtures": 0,
+        "concurrent_decodes": 192
+      },
+      "1": {
+        "legacy_parity_fixtures": 12,
+        "workspace_repaired_fixtures": 3,
+        "concurrent_decodes": 192
+      },
+      "2": {
+        "legacy_parity_fixtures": 0,
+        "workspace_repaired_fixtures": 15,
+        "concurrent_decodes": 192
+      }
+    },
+    "log_file": "private/host-workspace-fix.log"
+  },
+  "probe_instrumentation": {
+    "warmup_decodes_per_mode": 1,
+    "measured_samples_per_mode": 11,
+    "concurrent_frame_shape_and_hash_checks": true,
+    "small_image_pixel_hex_dumps": true,
+    "actual_legacy_decoder_control": true,
+    "fixture_count": 16,
+    "tiny_image_software_fallback": true
+  },
+  "hardware_test_scope": "Standalone codec probes; full application images compiled only.",
+  "device_test_results": "device-results.json"
 }

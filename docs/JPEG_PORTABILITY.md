@@ -3,8 +3,8 @@
 HardwareOne's G2 JPEG file viewer, camera preview and camera stream share
 `HAL_JPEG`. They request an image without selecting a processor. ESP32 and
 ESP32-S3 use the existing Espressif TJpgDec software decoder. Targets exposing
-`SOC_JPEG_DECODE_SUPPORTED` and a qualified driver can use the optional hardware backend, with software
-fallback in the default `Auto` mode.
+`SOC_JPEG_DECODE_SUPPORTED` and a qualified driver can use the optional hardware
+backend, with software fallback in the default `Auto` mode.
 
 This change adds **decoding**. Camera-produced JPEGs still pass directly to
 storage and streaming; they are not decoded and re-encoded. The Edge Impulse
@@ -35,19 +35,30 @@ encoding can be added when there is a raw-frame consumer that needs it.
 ## Backends
 
 Software calls `esp_jpeg_decode` directly with the real destination capacity and
-its own scratch workspace. This retains the prior library/colour settings while
-avoiding `fmt2rgb888`'s shared static workspace and unbounded output-size promise.
+its own scratch workspace. Workspace sizing accounts for the configured TJpgDec
+variant: the pinned library's default 3,100 bytes is too small for ordinary
+4:2:0 images with `FASTDECODE=1`. This retains the prior library/colour settings
+while avoiding `fmt2rgb888`'s shared static workspace and unbounded output-size
+promise. The S3 ROM decoder retains its existing grayscale limitation;
+progressive JPEG is unsupported by both retained decoder variants.
 
 The P4 backend accepts a conservative baseline subset: 8-bit colour, one
 interleaved scan, standard component/table layouts and 4:4:4, 4:2:2 or 4:2:0
-sampling. Dimensions must be multiples of eight. Other otherwise-supported
-images, including grayscale and odd sizes, use software. `Auto` also falls back
-if the accelerator is busy, cannot allocate, or returns an error.
+sampling. Dimensions must be multiples of eight, with MCU-padded width at least
+40 pixels for 4:4:4 or 32 for 4:2:2/4:2:0. Narrower images can stall the pinned
+driver's fixed DMA blocks, so they go directly to software. Other
+otherwise-supported images, including grayscale and odd sizes, use software.
+`Auto` also falls back if the accelerator is busy, cannot allocate, or returns
+an error.
 
 Hardware DMA alignment and MCU padding are private to the backend. It owns a
-fresh engine per request, allocates compatible buffers, and compacts padded rows
-in place. A nonblocking admission guard prevents competing JPEG requests from
-waiting on the same accelerator. `SoftwareOnly` and `HardwareOnly` modes are
+fresh engine per request and allocates compatible buffers. Hardware produces
+YUV444; a final CPU pass converts it to full-range RGB and compacts padded rows
+in place, with no second image allocation. The SDK's direct RGB conversion uses
+limited-range video coefficients and clips ordinary JPEG shadows/highlights.
+Entropy decoding, inverse DCT and chroma expansion still run in hardware.
+A nonblocking admission guard prevents competing JPEG requests from waiting on
+the same accelerator. `SoftwareOnly` and `HardwareOnly` modes are
 available for qualification; application callers use `Auto`.
 
 The current application has no other 2D-DMA consumer. Before adding PPA or another
@@ -71,3 +82,9 @@ speed improvement. The standalone probe in `experiments/jpeg_portable/codec`
 compares both backends and reports timing, pixel differences and concurrent
 allocation behaviour on each physical board. See that experiment's results for
 the checks actually completed.
+
+Physical qualification passed on P4 revision 3.2 and XIAO S3; see
+[measured results](../experiments/jpeg_portable/RESULTS.md). The qualified
+external decoder uses RGB888 and disables default-Huffman injection. Full-app
+builds pass, while live-camera and G2 display checks remain separate integration
+work. The temporary probes were removed and both original applications restored.

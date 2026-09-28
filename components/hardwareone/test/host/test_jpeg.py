@@ -68,17 +68,18 @@ def main():
                                       'uint8_t *buff, size_t nbyte)')
             adapted = work / 'jpeg_decoder_host.c'
             adapted.write_text(wrapper)
-            objects = []
-            for index, source in enumerate((adapted, jpeg / 'tjpgd/tjpgd.c', jpeg / 'jpeg_default_huffman_table.c', camera / 'conversions/to_bmp.c')):
-                obj = work / f'decoder-{index}.o'
-                # Third-party C uses GNU/C extensions and unused legacy locals.
-                cflags = [flag for flag in flags if flag not in ('-pedantic', '-Werror')]
-                subprocess.run([cc, '-std=gnu11', *cflags, *includes,
-                                '-c', str(source), '-o', str(obj)], check=True)
-                objects.append(str(obj))
-            compile_run('parity', 'test_jpeg_parity.cpp',
-                        ['HAL_JPEG.cpp', 'HAL_JPEG_Software.cpp', 'HAL_JPEG_P4.cpp'],
-                        ['-DSOC_JPEG_DECODE_SUPPORTED=0', '-pthread', *includes, *objects])
+            for optimization in (0, 1, 2):
+                objects = []
+                for index, source in enumerate((adapted, jpeg / 'tjpgd/tjpgd.c', jpeg / 'jpeg_default_huffman_table.c', camera / 'conversions/to_bmp.c')):
+                    obj = work / f'decoder-{optimization}-{index}.o'
+                    # Third-party C uses GNU/C extensions and unused legacy locals.
+                    cflags = [flag for flag in flags if flag not in ('-pedantic', '-Werror')]
+                    subprocess.run([cc, '-std=gnu11', *cflags, f'-DCONFIG_JD_FASTDECODE={optimization}', *includes,
+                                    '-c', str(source), '-o', str(obj)], check=True)
+                    objects.append(str(obj))
+                compile_run(f'parity-{optimization}', 'test_jpeg_parity.cpp',
+                            ['HAL_JPEG.cpp', 'HAL_JPEG_Software.cpp', 'HAL_JPEG_P4.cpp'],
+                            ['-DSOC_JPEG_DECODE_SUPPORTED=0', f'-DCONFIG_JD_FASTDECODE={optimization}', '-pthread', *includes, *objects])
         else:
             print('Actual decoder corpus parity was not requested (supply both component paths).')
 

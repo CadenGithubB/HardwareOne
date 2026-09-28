@@ -1,9 +1,31 @@
 #include "HAL_JPEG_Backend.h"
 #include "jpeg_decoder.h"
 #include "esp_heap_caps.h"
+#include "sdkconfig.h"
 #include <stdlib.h>
 
 namespace hwjpeg { namespace detail {
+namespace {
+// esp_jpeg 1.3.1 defaults to 3100 bytes for both BASIC and 32BIT TJpgDec.
+// The latter stores MCU samples as int16_t, so ordinary 4:2:0 needs more than
+// that default. Size a private pool for its input buffer, four quantization
+// tables, both DC/AC Huffman tables (up to 256 symbols each), and largest MCU.
+#if defined(CONFIG_JD_USE_ROM) && CONFIG_JD_USE_ROM
+constexpr size_t kWorkspaceBytes = 3100; // Original ROM decoder contract.
+#else
+constexpr size_t kTableBytes = 4u * (16u + 256u * 3u) + 4u * 64u * 4u;
+constexpr size_t kMcuBytes = 4u * 64u * 2u + 64u + 6u * 64u *
+    (CONFIG_JD_FASTDECODE >= 1 ? 2u : 1u);
+constexpr size_t kBaseWorkspace = CONFIG_JD_SZBUF + kTableBytes + kMcuBytes + 64u;
+#if CONFIG_JD_FASTDECODE == 2
+// Retain the upstream recommendation for its Huffman lookup-table variant.
+constexpr size_t kWorkspaceBytes = kBaseWorkspace + 6u * 1024u > 65472u ?
+    kBaseWorkspace + 6u * 1024u : 65472u;
+#else
+constexpr size_t kWorkspaceBytes = kBaseWorkspace;
+#endif
+#endif
+}
 bool decodeSoftware(const uint8_t* data, size_t length, const Info& info,
                     Image& image, const char** error, OutputAllocator allocator) {
   image.reset();
@@ -18,6 +40,12 @@ bool decodeSoftware(const uint8_t* data, size_t length, const Info& info,
     if (error) *error = "out of memory decoding JPEG";
     return false;
   }
+  void* workspace = heap_caps_malloc(kWorkspaceBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!workspace) {
+    free(pixels);
+    if (error) *error = "out of memory for JPEG workspace";
+    return false;
+  }
   esp_jpeg_image_cfg_t config = {};
   config.indata = const_cast<uint8_t*>(data);
   config.indata_size = static_cast<uint32_t>(length);
@@ -26,11 +54,13 @@ bool decodeSoftware(const uint8_t* data, size_t length, const Info& info,
   config.out_format = JPEG_IMAGE_FORMAT_RGB888;
   config.out_scale = JPEG_IMAGE_SCALE_0;
   config.flags.swap_color_bytes = 0;
-  // Leave working_buffer null: esp_jpeg allocates a private workspace per call.
-  // The old fmt2rgb888 wrapper shares static scratch and promises UINT32_MAX
-  // output capacity. Neither contract is safe for concurrent image consumers.
+  config.advanced.working_buffer = workspace;
+  config.advanced.working_buffer_size = kWorkspaceBytes;
+  // Keep independent scratch per call and a checked output capacity. The old
+  // camera wrapper shares static scratch and advertises UINT32_MAX capacity.
   esp_jpeg_image_output_t result = {};
   const esp_err_t status = esp_jpeg_decode(&config, &result);
+  free(workspace);
   if (status != ESP_OK || result.width != info.width || result.height != info.height ||
       result.output_len != info.bytes) {
     free(pixels);

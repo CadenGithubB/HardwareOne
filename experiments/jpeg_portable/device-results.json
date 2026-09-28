@@ -1,0 +1,1548 @@
+{
+  "schema": 1,
+  "date": "2026-09-28",
+  "scope": "Standalone production-HAL probes on physical boards; original HardwareOne applications restored afterward",
+  "idf": "5.5.5",
+  "source_sha256": {
+    "components/hardwareone/HAL_JPEG_Software.cpp": "fa9372fe2df01b8146cae11eb64f61668223ba8e71e511451328b4615d9f4961",
+    "components/hardwareone/HAL_JPEG_P4.cpp": "b8d374da2d2f649ece369589e4383c44e855fe358d0c2efeea4451e37c36dab3",
+    "experiments/jpeg_portable/codec/main/probe.cpp": "9fa9c5b68e376d2759d71a2a65b8f9a45cbba08d6de9f9882f4edd54806ec5a2"
+  },
+  "boards": {
+    "p4": {
+      "chip": "ESP32-P4 revision 3.2",
+      "cpu_mhz": 400,
+      "probe": {
+        "path": "experiments/jpeg_portable/private/build-codec-p4/hwjpeg_probe.bin",
+        "bytes": 530704,
+        "sha256": "c128e3fdb33f29e676a8d4920814872e7cc67c4778014197dfa151596d0b4058",
+        "exit_code": 0,
+        "app_offset": "0x10000",
+        "erase_end_exclusive": "0x92000"
+      },
+      "log_sha256": "99aeb0203b91a9df3fc91f85433b9ed5b8a6f0a6eeb69dc3bee0809703d46123",
+      "fixture_count": 16,
+      "failures": 0,
+      "legacy": [
+        {
+          "name": "blue_48x48",
+          "ok": 1,
+          "hash": "b11e1dc5"
+        },
+        {
+          "name": "blue_8x8",
+          "ok": 1,
+          "hash": "24c1fdc5"
+        },
+        {
+          "name": "gray_17x19",
+          "ok": 1,
+          "hash": "7f1d8ed9"
+        },
+        {
+          "name": "progressive_17x19",
+          "ok": 0,
+          "hash": "00000000"
+        },
+        {
+          "name": "red_48x48",
+          "ok": 1,
+          "hash": "30f891c5"
+        },
+        {
+          "name": "red_8x8",
+          "ok": 1,
+          "hash": "a5de72c5"
+        },
+        {
+          "name": "rgb420_17x19",
+          "ok": 0,
+          "hash": "00000000"
+        },
+        {
+          "name": "rgb420_24x24",
+          "ok": 0,
+          "hash": "00000000"
+        },
+        {
+          "name": "rgb420_320x240",
+          "ok": 0,
+          "hash": "00000000"
+        },
+        {
+          "name": "rgb422_17x19",
+          "ok": 1,
+          "hash": "c50a0e78"
+        },
+        {
+          "name": "rgb422_24x24",
+          "ok": 1,
+          "hash": "6b204b3b"
+        },
+        {
+          "name": "rgb422_320x240",
+          "ok": 1,
+          "hash": "0fe76864"
+        },
+        {
+          "name": "rgb444_17x19",
+          "ok": 1,
+          "hash": "bb62a7c1"
+        },
+        {
+          "name": "rgb444_24x24",
+          "ok": 1,
+          "hash": "1f7290e4"
+        },
+        {
+          "name": "rgb444_320x240",
+          "ok": 1,
+          "hash": "ac8e3688"
+        },
+        {
+          "name": "rgb444_48x48",
+          "ok": 1,
+          "hash": "ee3edf92"
+        }
+      ],
+      "cases": [
+        {
+          "name": "blue_48x48",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 856,
+          "hash": "b11e1dc5",
+          "error": "none"
+        },
+        {
+          "name": "blue_48x48",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 1895,
+          "hash": "5cdcc1c5",
+          "max_delta": 1,
+          "mean_delta": 0.66667,
+          "error": "none"
+        },
+        {
+          "name": "blue_48x48",
+          "mode": "hardware",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 788,
+          "hash": "5cdcc1c5",
+          "max_delta": 1,
+          "mean_delta": 0.66667,
+          "error": "none"
+        },
+        {
+          "name": "blue_8x8",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 83,
+          "hash": "24c1fdc5",
+          "error": "none"
+        },
+        {
+          "name": "blue_8x8",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 76,
+          "hash": "24c1fdc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "blue_8x8",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 19,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG is narrower than the hardware DMA block"
+        },
+        {
+          "name": "gray_17x19",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 322,
+          "hash": "7f1d8ed9",
+          "error": "none"
+        },
+        {
+          "name": "gray_17x19",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 322,
+          "hash": "7f1d8ed9",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "gray_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 14,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG is outside the hardware decoder subset"
+        },
+        {
+          "name": "progressive_17x19",
+          "mode": "software",
+          "ok": 0,
+          "backend": "none",
+          "us": 185,
+          "hash": "811c9dc5",
+          "error": "software JPEG decode failed"
+        },
+        {
+          "name": "progressive_17x19",
+          "mode": "auto",
+          "ok": 0,
+          "backend": "none",
+          "us": 283,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "software JPEG decode failed"
+        },
+        {
+          "name": "progressive_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 25,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG is outside the hardware decoder subset"
+        },
+        {
+          "name": "red_48x48",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 773,
+          "hash": "30f891c5",
+          "error": "none"
+        },
+        {
+          "name": "red_48x48",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 779,
+          "hash": "705cc1c5",
+          "max_delta": 1,
+          "mean_delta": 0.66667,
+          "error": "none"
+        },
+        {
+          "name": "red_48x48",
+          "mode": "hardware",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 758,
+          "hash": "705cc1c5",
+          "max_delta": 1,
+          "mean_delta": 0.66667,
+          "error": "none"
+        },
+        {
+          "name": "red_8x8",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 75,
+          "hash": "a5de72c5",
+          "error": "none"
+        },
+        {
+          "name": "red_8x8",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 75,
+          "hash": "a5de72c5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "red_8x8",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 17,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG is narrower than the hardware DMA block"
+        },
+        {
+          "name": "rgb420_17x19",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 540,
+          "hash": "1b6cc945",
+          "error": "none"
+        },
+        {
+          "name": "rgb420_17x19",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 533,
+          "hash": "1b6cc945",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb420_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 22,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG is outside the hardware decoder subset"
+        },
+        {
+          "name": "rgb420_24x24",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 666,
+          "hash": "6a77e47b",
+          "error": "none"
+        },
+        {
+          "name": "rgb420_24x24",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 597,
+          "hash": "d01b6fd8",
+          "max_delta": 4,
+          "mean_delta": 1.12211,
+          "error": "none"
+        },
+        {
+          "name": "rgb420_24x24",
+          "mode": "hardware",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 550,
+          "hash": "d01b6fd8",
+          "max_delta": 4,
+          "mean_delta": 1.12211,
+          "error": "none"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 69609,
+          "hash": "a708d37d",
+          "error": "none"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 18731,
+          "hash": "5eed36ed",
+          "max_delta": 4,
+          "mean_delta": 1.1333,
+          "error": "none"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "hardware",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 18719,
+          "hash": "5eed36ed",
+          "max_delta": 4,
+          "mean_delta": 1.1333,
+          "error": "none"
+        },
+        {
+          "name": "rgb422_17x19",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 586,
+          "hash": "c50a0e78",
+          "error": "none"
+        },
+        {
+          "name": "rgb422_17x19",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 571,
+          "hash": "c50a0e78",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb422_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 23,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG is outside the hardware decoder subset"
+        },
+        {
+          "name": "rgb422_24x24",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 716,
+          "hash": "6b204b3b",
+          "error": "none"
+        },
+        {
+          "name": "rgb422_24x24",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 1761,
+          "hash": "be0ebfae",
+          "max_delta": 4,
+          "mean_delta": 1.15451,
+          "error": "none"
+        },
+        {
+          "name": "rgb422_24x24",
+          "mode": "hardware",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 577,
+          "hash": "be0ebfae",
+          "max_delta": 4,
+          "mean_delta": 1.15451,
+          "error": "none"
+        },
+        {
+          "name": "rgb422_320x240",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 85002,
+          "hash": "0fe76864",
+          "error": "none"
+        },
+        {
+          "name": "rgb422_320x240",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 24382,
+          "hash": "3faa8522",
+          "max_delta": 4,
+          "mean_delta": 1.1344,
+          "error": "none"
+        },
+        {
+          "name": "rgb422_320x240",
+          "mode": "hardware",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 24386,
+          "hash": "3faa8522",
+          "max_delta": 4,
+          "mean_delta": 1.1344,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_17x19",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 680,
+          "hash": "bb62a7c1",
+          "error": "none"
+        },
+        {
+          "name": "rgb444_17x19",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 659,
+          "hash": "bb62a7c1",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 25,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG is outside the hardware decoder subset"
+        },
+        {
+          "name": "rgb444_24x24",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 819,
+          "hash": "1f7290e4",
+          "error": "none"
+        },
+        {
+          "name": "rgb444_24x24",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 844,
+          "hash": "1f7290e4",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_24x24",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 27,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG is narrower than the hardware DMA block"
+        },
+        {
+          "name": "rgb444_320x240",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 117194,
+          "hash": "ac8e3688",
+          "error": "none"
+        },
+        {
+          "name": "rgb444_320x240",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 30565,
+          "hash": "42a44304",
+          "max_delta": 4,
+          "mean_delta": 1.12418,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_320x240",
+          "mode": "hardware",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 30579,
+          "hash": "42a44304",
+          "max_delta": 4,
+          "mean_delta": 1.12418,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_48x48",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 3343,
+          "hash": "ee3edf92",
+          "error": "none"
+        },
+        {
+          "name": "rgb444_48x48",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 2143,
+          "hash": "03f6d8a3",
+          "max_delta": 4,
+          "mean_delta": 1.13122,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_48x48",
+          "mode": "hardware",
+          "ok": 1,
+          "backend": "hardware",
+          "us": 876,
+          "hash": "03f6d8a3",
+          "max_delta": 4,
+          "mean_delta": 1.13122,
+          "error": "none"
+        }
+      ],
+      "benchmarks": [
+        {
+          "name": "rgb420_320x240",
+          "mode": "software",
+          "backend": "software",
+          "samples": 11,
+          "discarded_warmup": 1,
+          "min_us": 73052,
+          "median_us": 73083,
+          "max_us": 73198,
+          "hash": "a708d37d"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "auto",
+          "backend": "hardware",
+          "samples": 11,
+          "discarded_warmup": 1,
+          "min_us": 18622,
+          "median_us": 18639,
+          "max_us": 18657,
+          "hash": "5eed36ed"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "hardware",
+          "backend": "hardware",
+          "samples": 11,
+          "discarded_warmup": 1,
+          "min_us": 18650,
+          "median_us": 18653,
+          "max_us": 18676,
+          "hash": "5eed36ed"
+        }
+      ],
+      "concurrency": {
+        "loops": 60,
+        "us": 1349620,
+        "hardware": 50,
+        "software": 10,
+        "pixel_failures": 0,
+        "software_hash": "a708d37d",
+        "hardware_hash": "5eed36ed",
+        "heap_before": 34130123,
+        "heap_after": 34130103,
+        "internal_before": 578371,
+        "internal_after": 578351
+      },
+      "pixel_analysis": {
+        "log_sha256": "99aeb0203b91a9df3fc91f85433b9ed5b8a6f0a6eeb69dc3bee0809703d46123",
+        "dumps": [
+          {
+            "name": "blue_48x48",
+            "mode": "software",
+            "bytes": 6912,
+            "fnv1a": "b11e1dc5"
+          },
+          {
+            "name": "blue_48x48",
+            "mode": "hardware",
+            "bytes": 6912,
+            "fnv1a": "5cdcc1c5"
+          },
+          {
+            "name": "blue_8x8",
+            "mode": "software",
+            "bytes": 192,
+            "fnv1a": "24c1fdc5"
+          },
+          {
+            "name": "red_48x48",
+            "mode": "software",
+            "bytes": 6912,
+            "fnv1a": "30f891c5"
+          },
+          {
+            "name": "red_48x48",
+            "mode": "hardware",
+            "bytes": 6912,
+            "fnv1a": "705cc1c5"
+          },
+          {
+            "name": "red_8x8",
+            "mode": "software",
+            "bytes": 192,
+            "fnv1a": "a5de72c5"
+          },
+          {
+            "name": "rgb420_24x24",
+            "mode": "software",
+            "bytes": 1728,
+            "fnv1a": "6a77e47b"
+          },
+          {
+            "name": "rgb420_24x24",
+            "mode": "hardware",
+            "bytes": 1728,
+            "fnv1a": "d01b6fd8"
+          },
+          {
+            "name": "rgb422_24x24",
+            "mode": "software",
+            "bytes": 1728,
+            "fnv1a": "6b204b3b"
+          },
+          {
+            "name": "rgb422_24x24",
+            "mode": "hardware",
+            "bytes": 1728,
+            "fnv1a": "be0ebfae"
+          },
+          {
+            "name": "rgb444_24x24",
+            "mode": "software",
+            "bytes": 1728,
+            "fnv1a": "1f7290e4"
+          },
+          {
+            "name": "rgb444_48x48",
+            "mode": "software",
+            "bytes": 6912,
+            "fnv1a": "ee3edf92"
+          },
+          {
+            "name": "rgb444_48x48",
+            "mode": "hardware",
+            "bytes": 6912,
+            "fnv1a": "03f6d8a3"
+          }
+        ],
+        "hardware_vs_software": [
+          {
+            "name": "blue_48x48",
+            "channels": 6912,
+            "max_delta": 1,
+            "mean_delta": 0.6666666666666666,
+            "channels_above_8": 0
+          },
+          {
+            "name": "red_48x48",
+            "channels": 6912,
+            "max_delta": 1,
+            "mean_delta": 0.6666666666666666,
+            "channels_above_8": 0
+          },
+          {
+            "name": "rgb420_24x24",
+            "channels": 1728,
+            "max_delta": 4,
+            "mean_delta": 1.1221064814814814,
+            "channels_above_8": 0
+          },
+          {
+            "name": "rgb422_24x24",
+            "channels": 1728,
+            "max_delta": 4,
+            "mean_delta": 1.1545138888888888,
+            "channels_above_8": 0
+          },
+          {
+            "name": "rgb444_48x48",
+            "channels": 6912,
+            "max_delta": 4,
+            "mean_delta": 1.1312210648148149,
+            "channels_above_8": 0
+          }
+        ],
+        "reported_hardware_vs_software": [
+          {
+            "name": "blue_48x48",
+            "max_delta": 1,
+            "mean_delta": 0.66667
+          },
+          {
+            "name": "red_48x48",
+            "max_delta": 1,
+            "mean_delta": 0.66667
+          },
+          {
+            "name": "rgb420_24x24",
+            "max_delta": 4,
+            "mean_delta": 1.12211
+          },
+          {
+            "name": "rgb420_320x240",
+            "max_delta": 4,
+            "mean_delta": 1.1333
+          },
+          {
+            "name": "rgb422_24x24",
+            "max_delta": 4,
+            "mean_delta": 1.15451
+          },
+          {
+            "name": "rgb422_320x240",
+            "max_delta": 4,
+            "mean_delta": 1.1344
+          },
+          {
+            "name": "rgb444_320x240",
+            "max_delta": 4,
+            "mean_delta": 1.12418
+          },
+          {
+            "name": "rgb444_48x48",
+            "max_delta": 4,
+            "mean_delta": 1.13122
+          }
+        ],
+        "acceptance": {
+          "max_delta": 8,
+          "mean_delta": 2,
+          "hardware_required": true,
+          "passed": true
+        }
+      },
+      "unexpected_alerts": [],
+      "restoration": {
+        "application_restored_and_flash_digest_verified": true,
+        "prefix_64k_unchanged_after_probes": true,
+        "original_application_partition_sha256": "9adcf15f3b84f163c1d835d1752ccda999e735e660955ba735bdffbfd05babea",
+        "startup_completed": true,
+        "authenticated_login_retested": false,
+        "filesystem_written_by_probe": false
+      }
+    },
+    "s3": {
+      "chip": "ESP32-S3 revision 0.2",
+      "cpu_mhz": 240,
+      "probe": {
+        "path": "experiments/jpeg_portable/private/build-codec-s3/hwjpeg_probe.bin",
+        "bytes": 466800,
+        "sha256": "1cd0da2029fe50c28ece9bbaf2698ec492f624cfd5ebe741dc86e68e11d348cf",
+        "exit_code": 0,
+        "app_offset": "0x10000",
+        "erase_end_exclusive": "0x82000"
+      },
+      "log_sha256": "32cf7154ee9607764d52b73d76af3324a4426a8d0a524cb1aa1ff49a073cb56e",
+      "fixture_count": 16,
+      "failures": 0,
+      "legacy": [
+        {
+          "name": "blue_48x48",
+          "ok": 1,
+          "hash": "b11e1dc5"
+        },
+        {
+          "name": "blue_8x8",
+          "ok": 1,
+          "hash": "24c1fdc5"
+        },
+        {
+          "name": "gray_17x19",
+          "ok": 0,
+          "hash": "00000000"
+        },
+        {
+          "name": "progressive_17x19",
+          "ok": 0,
+          "hash": "00000000"
+        },
+        {
+          "name": "red_48x48",
+          "ok": 1,
+          "hash": "30f891c5"
+        },
+        {
+          "name": "red_8x8",
+          "ok": 1,
+          "hash": "a5de72c5"
+        },
+        {
+          "name": "rgb420_17x19",
+          "ok": 1,
+          "hash": "013ff62e"
+        },
+        {
+          "name": "rgb420_24x24",
+          "ok": 1,
+          "hash": "2875b766"
+        },
+        {
+          "name": "rgb420_320x240",
+          "ok": 1,
+          "hash": "bb31a4a0"
+        },
+        {
+          "name": "rgb422_17x19",
+          "ok": 1,
+          "hash": "56cdddaf"
+        },
+        {
+          "name": "rgb422_24x24",
+          "ok": 1,
+          "hash": "083ea52e"
+        },
+        {
+          "name": "rgb422_320x240",
+          "ok": 1,
+          "hash": "86557161"
+        },
+        {
+          "name": "rgb444_17x19",
+          "ok": 1,
+          "hash": "bb62a7c1"
+        },
+        {
+          "name": "rgb444_24x24",
+          "ok": 1,
+          "hash": "1f7290e4"
+        },
+        {
+          "name": "rgb444_320x240",
+          "ok": 1,
+          "hash": "7ab8bc77"
+        },
+        {
+          "name": "rgb444_48x48",
+          "ok": 1,
+          "hash": "ee3edf92"
+        }
+      ],
+      "cases": [
+        {
+          "name": "blue_48x48",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 2206,
+          "hash": "b11e1dc5",
+          "error": "none"
+        },
+        {
+          "name": "blue_48x48",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 2195,
+          "hash": "b11e1dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "blue_48x48",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 59,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "blue_8x8",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 180,
+          "hash": "24c1fdc5",
+          "error": "none"
+        },
+        {
+          "name": "blue_8x8",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 188,
+          "hash": "24c1fdc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "blue_8x8",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 56,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "gray_17x19",
+          "mode": "software",
+          "ok": 0,
+          "backend": "none",
+          "us": 240,
+          "hash": "811c9dc5",
+          "error": "software JPEG decode failed"
+        },
+        {
+          "name": "gray_17x19",
+          "mode": "auto",
+          "ok": 0,
+          "backend": "none",
+          "us": 244,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "software JPEG decode failed"
+        },
+        {
+          "name": "gray_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 46,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "progressive_17x19",
+          "mode": "software",
+          "ok": 0,
+          "backend": "none",
+          "us": 270,
+          "hash": "811c9dc5",
+          "error": "software JPEG decode failed"
+        },
+        {
+          "name": "progressive_17x19",
+          "mode": "auto",
+          "ok": 0,
+          "backend": "none",
+          "us": 273,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "software JPEG decode failed"
+        },
+        {
+          "name": "progressive_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 70,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "red_48x48",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 2141,
+          "hash": "30f891c5",
+          "error": "none"
+        },
+        {
+          "name": "red_48x48",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 2149,
+          "hash": "30f891c5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "red_48x48",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 57,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "red_8x8",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 179,
+          "hash": "a5de72c5",
+          "error": "none"
+        },
+        {
+          "name": "red_8x8",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 189,
+          "hash": "a5de72c5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "red_8x8",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 55,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb420_17x19",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 1226,
+          "hash": "013ff62e",
+          "error": "none"
+        },
+        {
+          "name": "rgb420_17x19",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 1236,
+          "hash": "013ff62e",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb420_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 81,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb420_24x24",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 1493,
+          "hash": "2875b766",
+          "error": "none"
+        },
+        {
+          "name": "rgb420_24x24",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 1497,
+          "hash": "2875b766",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb420_24x24",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 81,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 151057,
+          "hash": "bb31a4a0",
+          "error": "none"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 151029,
+          "hash": "bb31a4a0",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 3881,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb422_17x19",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 1253,
+          "hash": "56cdddaf",
+          "error": "none"
+        },
+        {
+          "name": "rgb422_17x19",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 1262,
+          "hash": "56cdddaf",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb422_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 80,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb422_24x24",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 1582,
+          "hash": "083ea52e",
+          "error": "none"
+        },
+        {
+          "name": "rgb422_24x24",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 1602,
+          "hash": "083ea52e",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb422_24x24",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 83,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb422_320x240",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 183726,
+          "hash": "86557161",
+          "error": "none"
+        },
+        {
+          "name": "rgb422_320x240",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 183672,
+          "hash": "86557161",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb422_320x240",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 4956,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb444_17x19",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 1440,
+          "hash": "bb62a7c1",
+          "error": "none"
+        },
+        {
+          "name": "rgb444_17x19",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 1441,
+          "hash": "bb62a7c1",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_17x19",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 82,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb444_24x24",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 1813,
+          "hash": "1f7290e4",
+          "error": "none"
+        },
+        {
+          "name": "rgb444_24x24",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 1833,
+          "hash": "1f7290e4",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_24x24",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 93,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb444_320x240",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 249666,
+          "hash": "7ab8bc77",
+          "error": "none"
+        },
+        {
+          "name": "rgb444_320x240",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 249685,
+          "hash": "7ab8bc77",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_320x240",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 7143,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        },
+        {
+          "name": "rgb444_48x48",
+          "mode": "software",
+          "ok": 1,
+          "backend": "software",
+          "us": 7293,
+          "hash": "ee3edf92",
+          "error": "none"
+        },
+        {
+          "name": "rgb444_48x48",
+          "mode": "auto",
+          "ok": 1,
+          "backend": "software",
+          "us": 7297,
+          "hash": "ee3edf92",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "none"
+        },
+        {
+          "name": "rgb444_48x48",
+          "mode": "hardware",
+          "ok": 0,
+          "backend": "none",
+          "us": 211,
+          "hash": "811c9dc5",
+          "max_delta": 0,
+          "mean_delta": 0.0,
+          "error": "JPEG hardware decoder is unavailable"
+        }
+      ],
+      "benchmarks": [
+        {
+          "name": "rgb420_320x240",
+          "mode": "software",
+          "backend": "software",
+          "samples": 11,
+          "discarded_warmup": 1,
+          "min_us": 151056,
+          "median_us": 151056,
+          "max_us": 151060,
+          "hash": "bb31a4a0"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "auto",
+          "backend": "software",
+          "samples": 11,
+          "discarded_warmup": 1,
+          "min_us": 151055,
+          "median_us": 151056,
+          "max_us": 151057,
+          "hash": "bb31a4a0"
+        },
+        {
+          "name": "rgb420_320x240",
+          "mode": "hardware",
+          "skipped": "hardware_unavailable"
+        }
+      ],
+      "concurrency": {
+        "loops": 60,
+        "us": 5305234,
+        "hardware": 0,
+        "software": 60,
+        "pixel_failures": 0,
+        "software_hash": "bb31a4a0",
+        "hardware_hash": "00000000",
+        "heap_before": 8762207,
+        "heap_after": 8762207,
+        "internal_before": 376015,
+        "internal_after": 376015
+      },
+      "pixel_analysis": {
+        "log_sha256": "32cf7154ee9607764d52b73d76af3324a4426a8d0a524cb1aa1ff49a073cb56e",
+        "dumps": [
+          {
+            "name": "blue_48x48",
+            "mode": "software",
+            "bytes": 6912,
+            "fnv1a": "b11e1dc5"
+          },
+          {
+            "name": "blue_8x8",
+            "mode": "software",
+            "bytes": 192,
+            "fnv1a": "24c1fdc5"
+          },
+          {
+            "name": "red_48x48",
+            "mode": "software",
+            "bytes": 6912,
+            "fnv1a": "30f891c5"
+          },
+          {
+            "name": "red_8x8",
+            "mode": "software",
+            "bytes": 192,
+            "fnv1a": "a5de72c5"
+          },
+          {
+            "name": "rgb420_24x24",
+            "mode": "software",
+            "bytes": 1728,
+            "fnv1a": "2875b766"
+          },
+          {
+            "name": "rgb422_24x24",
+            "mode": "software",
+            "bytes": 1728,
+            "fnv1a": "083ea52e"
+          },
+          {
+            "name": "rgb444_24x24",
+            "mode": "software",
+            "bytes": 1728,
+            "fnv1a": "1f7290e4"
+          },
+          {
+            "name": "rgb444_48x48",
+            "mode": "software",
+            "bytes": 6912,
+            "fnv1a": "ee3edf92"
+          }
+        ],
+        "hardware_vs_software": [],
+        "reported_hardware_vs_software": [],
+        "acceptance": {
+          "max_delta": 8,
+          "mean_delta": 2,
+          "hardware_required": false,
+          "passed": true
+        }
+      },
+      "unexpected_alerts": [],
+      "restoration": {
+        "application_restored_and_flash_digest_verified": true,
+        "prefix_64k_unchanged_after_probes": true,
+        "original_application_partition_sha256": "1352dc7884a6d2ffaadd46f018358ad7bcebc1a47a6c90aa5be7a74dd3914b2a",
+        "startup_completed": true,
+        "authenticated_login_retested": false,
+        "filesystem_written_by_probe": false
+      }
+    }
+  },
+  "limits": [
+    "Synthetic fixture corpus, not live camera capture or G2 image display.",
+    "P4 was headless; neither probe initializes a display, camera, radio or filesystem.",
+    "Timings measure whole decode-call wall time, not total application speed or CPU utilization.",
+    "One 60-frame concurrency batch per board does not establish long-term leak freedom.",
+    "New full HardwareOne images were rebuilt but not flashed; boards run their original applications."
+  ],
+  "p4_qvga_auto_speedup": 3.9209721551585384
+}

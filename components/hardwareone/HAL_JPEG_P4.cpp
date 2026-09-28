@@ -40,6 +40,25 @@ struct DecoderResources {
 // MCU-rounded dimensions as well as the visible image before allocation.
 constexpr uint32_t kDmaDimensionLimit = (1u << 14) - 1u;
 constexpr int kDecodeTimeoutMs = 1000;
+
+// JPEG YCbCr uses the full 0..255 range. IDF 5.5.5's RGB conversion uses
+// studio-range BT.601 (Y=16..235), clipping valid shadows/highlights. Request
+// the documented V,U,Y byte order instead and convert in place. Entropy/IDCT
+// and chroma upsampling remain in hardware; this final pass also crops padding.
+uint8_t fullRangeChannel(int32_t fixed) {
+  if (fixed <= 0) return 0;
+  if (fixed >= 255 * 65536) return 255;
+  return static_cast<uint8_t>((fixed + 32768) / 65536);
+}
+
+void convertFullRange(const uint8_t* yuv, uint8_t* rgb) {
+  const int32_t cr = int32_t(yuv[0]) - 128;
+  const int32_t cb = int32_t(yuv[1]) - 128;
+  const int32_t y = int32_t(yuv[2]) * 65536;
+  rgb[0] = fullRangeChannel(y + 91881 * cr);
+  rgb[1] = fullRangeChannel(y - 22554 * cb - 46802 * cr);
+  rgb[2] = fullRangeChannel(y + 116130 * cb);
+}
 #endif
 } // namespace
 
@@ -70,6 +89,14 @@ bool decodeHardware(const uint8_t* data, size_t length, const Info& info,
   const uint32_t paddedHeight = (info.height + mcuHeight - 1) / mcuHeight * mcuHeight;
   if (paddedWidth > kDmaDimensionLimit || paddedHeight > kDmaDimensionLimit) {
     return failed(error, "JPEG padded dimensions exceed the hardware limit");
+  }
+  // The pinned driver's RX descriptor uses fixed horizontal block widths:
+  // 40 pixels for direct 4:4:4, 32 for conversion from 4:2:2 or 4:2:0. A
+  // smaller image stalls until timeout on P4 rev3.2. Keep these valid JPEGs
+  // on software without allocating or starting the engine.
+  const uint32_t minimumDmaWidth = info.sampling[0] == 0x11 ? 40u : 32u;
+  if (paddedWidth < minimumDmaWidth) {
+    return failed(error, "JPEG is narrower than the hardware DMA block");
   }
   const uint64_t paddedBytes64 = uint64_t(paddedWidth) * paddedHeight * 3u;
   const uint64_t visibleBytes64 = uint64_t(info.width) * info.height * 3u;
@@ -111,10 +138,10 @@ bool decodeHardware(const uint8_t* data, size_t length, const Info& info,
     return failed(error, "JPEG hardware engine initialization failed");
   }
   // A fresh engine avoids IDF 5.5.5's retained no_color_conversion state
-  // between direct-format and converted operations. This backend uses RGB
-  // conversion exclusively; no raw driver handle escapes the codec boundary.
+  // between direct-format and converted operations. This backend uses YUV444
+  // output exclusively; no raw driver handle escapes the codec boundary.
   jpeg_decode_cfg_t decodeConfig = {};
-  decodeConfig.output_format = JPEG_DECODE_OUT_FORMAT_RGB888;
+  decodeConfig.output_format = JPEG_DECODE_OUT_FORMAT_YUV444;
   decodeConfig.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
   decodeConfig.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
   uint32_t decodedBytes = 0;
@@ -142,11 +169,13 @@ bool decodeHardware(const uint8_t* data, size_t length, const Info& info,
 
   const size_t tightStride = static_cast<size_t>(info.width) * 3u;
   const size_t paddedStride = static_cast<size_t>(paddedWidth) * 3u;
-  if (tightStride != paddedStride) {
-    for (uint32_t row = 1; row < info.height; ++row) {
-      std::memmove(resources.output + static_cast<size_t>(row) * tightStride,
-                   resources.output + static_cast<size_t>(row) * paddedStride,
-                   tightStride);
+  for (uint32_t row = 0; row < info.height; ++row) {
+    const uint8_t* source = resources.output + static_cast<size_t>(row) * paddedStride;
+    uint8_t* destination = resources.output + static_cast<size_t>(row) * tightStride;
+    // Destination never overtakes source, so conversion and compaction share
+    // the existing DMA buffer without another full-frame allocation.
+    for (uint32_t column = 0; column < info.width; ++column) {
+      convertFullRange(source + column * 3u, destination + column * 3u);
     }
   }
   image.pixels = resources.output;

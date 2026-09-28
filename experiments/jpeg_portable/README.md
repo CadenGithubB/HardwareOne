@@ -66,17 +66,19 @@ The probe uses the actual shared HAL and the committed original JPEG fixtures;
 it does not boot HardwareOne or use its settings, accounts, network or radios.
 It reports:
 
-- SoftwareOnly, Auto and HardwareOnly selection, decode times and output hashes.
+- SoftwareOnly, Auto and HardwareOnly selection, output hashes, and 11-sample warm decode timing medians for the 320×240 4:2:0 fixture.
 - 4:4:4 / 4:2:2 / 4:2:0, odd dimensions, MCU-padded dimensions, grayscale,
   progressive input and solid red/blue channel-order checks.
-- Tight visible dimensions/stride and exact pixels when Auto falls back to
-  software; hardware/software maximum and mean pixel differences are reported
-  because different IDCT/chroma rounding can produce different pixels.
+- Tight visible dimensions/stride, exact legacy-converter compatibility for
+  previously supported images, and exact pixels when Auto falls back to software.
+  Hardware/software maximum and mean differences allow for decoder rounding.
 - Malformed/truncated inputs, valid repeated-marker padding and output-budget rejection.
-- Sixty decodes from two concurrent workers, hardware/software call counts,
-  heap retention and allocator integrity.
+- Sixty decodes from two concurrent workers, per-frame shape and pixel hashes checked against each backend’s sequential reference, hardware/software call counts, heap retention and allocator integrity.
+- Bounded hexadecimal pixel dumps for small images, allowing independent comparison outside the board.
 
-Expected final output is `JPEG_RESULT failures=0`. Timings are probe measurements,
+The 16-fixture physical runs passed on both boards; see [RESULTS.md](RESULTS.md)
+and [device-results.json](device-results.json). Expected final output is
+`JPEG_RESULT failures=0`. Timings are probe measurements,
 not a benchmark of the whole HardwareOne application. Merely compiling this
 firmware does not qualify hardware behaviour or establish an acceleration gain.
 
@@ -87,3 +89,21 @@ preserve its bootloader, partition table, application and configuration. Flash
 only a reviewed layout-compatible image, capture the probe output, then restore
 the saved complete application/layout and verify its usual startup and login.
 Do not use a generic probe partition table to overwrite configured-device data.
+
+## Offline pixel validation
+
+The physical probe emits complete small RGB images as bounded hexadecimal
+chunks. With Pillow available, reconstruct them and check both complete dumps
+and device-reported large-image differences:
+
+```sh
+python3 experiments/jpeg_portable/analyze_pixels.py /path/to/p4-serial.log \
+    --require-hardware --json /path/to/pixels.json \
+    --contact-sheet /path/to/pixels.png
+```
+
+The defaults permit maximum channel difference 8 and mean difference 2 versus
+the same device's software decoder. This allows rounding while catching the
+limited-range colour error found in the first physical run. Omit
+`--require-hardware` for an S3 log. Pillow's displayed reference can use a
+different chroma upsampling filter and is not the bit-exact comparison oracle.

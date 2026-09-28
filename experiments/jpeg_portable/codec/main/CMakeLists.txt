@@ -13,7 +13,7 @@ execute_process(
 if(NOT fixture_result EQUAL 0)
     message(FATAL_ERROR "Could not embed the JPEG fixture corpus")
 endif()
-set(jpeg_requires espressif__esp_jpeg esp_timer)
+set(jpeg_requires espressif__esp_jpeg espressif__esp32-camera esp_timer)
 if(IDF_TARGET STREQUAL "esp32p4")
     list(APPEND jpeg_requires esp_driver_jpeg)
 endif()
@@ -22,3 +22,8 @@ idf_component_register(
         "${codec_dir}/HAL_JPEG_Software.cpp" "${codec_dir}/HAL_JPEG_P4.cpp"
     INCLUDE_DIRS "${codec_dir}" "${CMAKE_CURRENT_BINARY_DIR}"
     REQUIRES ${jpeg_requires})
+
+# Component Manager is disabled for this self-contained probe. Reproduce the
+# camera manifest's JPEG dependency without editing its verified source copy.
+idf_component_get_property(camera_library espressif__esp32-camera COMPONENT_LIB)
+target_link_libraries(${camera_library} PRIVATE idf::espressif__esp_jpeg)

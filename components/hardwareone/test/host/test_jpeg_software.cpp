@@ -11,9 +11,9 @@
 #include <vector>
 using namespace hwjpeg;
 namespace {
-enum class Failure { None, Psram, AllMemory, Decoder, Width, Height, OutputLength };
+enum class Failure { None, Psram, AllMemory, Workspace, Decoder, Width, Height, OutputLength };
 Failure failure = Failure::None;
-int calls = 0, allocations = 0, customCalls = 0, hardwareCalls = 0;
+int calls = 0, allocations = 0, customCalls = 0, hardwareCalls = 0, workspaceCalls = 0;
 bool bypassEnabled = false;
 bool customFails = false;
 uint8_t* customAllocate(size_t size) {
@@ -23,14 +23,20 @@ uint8_t* customAllocate(size_t size) {
 std::vector<uint32_t> requestedCaps;
 }
 extern "C" void* heap_caps_malloc(size_t size, uint32_t caps) {
- ++allocations; requestedCaps.push_back(caps);
- if (failure == Failure::AllMemory || (failure == Failure::Psram && (caps & MALLOC_CAP_SPIRAM))) return nullptr;
+ if (size == 969) {
+   ++allocations; requestedCaps.push_back(caps);
+   if (failure == Failure::AllMemory || (failure == Failure::Psram && (caps & MALLOC_CAP_SPIRAM))) return nullptr;
+ } else {
+   ++workspaceCalls;
+   assert(size >= 3100 && caps == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+   if (failure == Failure::Workspace) return nullptr;
+ }
  return std::malloc(size);
 }
 extern "C" esp_err_t esp_jpeg_decode(esp_jpeg_image_cfg_t* config, esp_jpeg_image_output_t* result) {
  ++calls; assert(config->out_format == JPEG_IMAGE_FORMAT_RGB888 && config->out_scale == JPEG_IMAGE_SCALE_0);
  assert(config->flags.swap_color_bytes == 0);
- assert(config->advanced.working_buffer == nullptr && config->advanced.working_buffer_size == 0);
+ assert(config->advanced.working_buffer != nullptr && config->advanced.working_buffer_size >= 3100);
  Info info; assert(inspect(config->indata, config->indata_size, info));
  assert(config->outbuf_size == info.bytes);
  result->width = info.width; result->height = info.height; result->output_len = info.bytes;
@@ -56,8 +62,8 @@ int main(int argc, char** argv) {
  std::vector<uint8_t> jpeg{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
  DecodeOptions options; options.mode = DecodeMode::SoftwareOnly;
  Image image;
- for (Failure f : {Failure::None, Failure::Psram, Failure::AllMemory, Failure::Decoder, Failure::Width, Failure::Height, Failure::OutputLength}) {
-   failure = f; calls = allocations = 0; requestedCaps.clear();
+ for (Failure f : {Failure::None, Failure::Psram, Failure::AllMemory, Failure::Workspace, Failure::Decoder, Failure::Width, Failure::Height, Failure::OutputLength}) {
+   failure = f; calls = allocations = workspaceCalls = 0; requestedCaps.clear();
    bool ok = decode(jpeg.data(), jpeg.size(), image, options);
    bool expected = f == Failure::None || f == Failure::Psram;
    assert(ok == expected);
@@ -65,7 +71,8 @@ int main(int argc, char** argv) {
    if (f == Failure::Psram || f == Failure::AllMemory) {
      assert(allocations == 2 && requestedCaps[1] == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
    } else assert(allocations == 1);
-   assert(calls == (f == Failure::AllMemory ? 0 : 1));
+   assert(calls == (f == Failure::AllMemory || f == Failure::Workspace ? 0 : 1));
+   assert(workspaceCalls == (f == Failure::AllMemory ? 0 : 1));
    if (ok) assert(image.backend == Backend::Software && image.size == 969 && image.stride == 51 && image.pixels[0] == 0x37);
    else assert(!image.pixels && image.size == 0 && image.backend == Backend::None);
  }
