@@ -1,53 +1,109 @@
-# JPEG build qualification — 2026-09-28
+# Portable JPEG results — 2026-09-28
 
-All four final build commands exited **0** after the final marker-padding,
-allocator and G2 cleanup changes. No serial port was opened and no firmware was
-flashed. Hardware timing, visual comparison and end-to-end G2 display checks
-remain pending.
+**Both physical probes passed (`JPEG_RESULT failures=0`).** The tested boards
+were ESP32-P4 revision 3.2 at 400 MHz and XIAO ESP32-S3 revision 0.2 at 240 MHz.
+Each ran the production HAL against 16 original synthetic JPEG fixtures. The
+P4 had no display attached; these tests require only USB.
 
-| Build | Application bytes | SHA-256 |
-|---|---:|---|
-| p4 | 4,412,832 | `9bd7f4446cee55e9a4236dbba24f4ef3e8645480503cb18a7f1d410a911995ce` |
-| s3 | 4,986,240 | `b2d3c9e56bc188a074bfdca431aaedcc8c52e28e80a79a731799142c352ec7a2` |
-| codec-p4 | 518,880 | `629d2552dc4e23271aa5632e4c453a49bb55fc09c65c67719cffc3ca2c7d5227` |
-| codec-s3 | 455,584 | `18e04f3f6c5a8090f39f3991164fb04eff7058e49739128dc684a452e9f1fe3e` |
+Both boards were restored to their **original HardwareOne applications** and
+completed normal startup. Application backups and restoration were verified
+against flash. The first 64 KiB, including bootloader, partition table and NVS,
+remained byte-identical throughout the probe tests. Only the application
+partition was flashed; the probe never initializes or writes the filesystem,
+settings, radio or camera. Authenticated login was not repeated.
 
-The full P4 application retains the qualified LCD/wheel/buttons profile and its
-G2/R1, web and mesh components. The S3 application enables the camera in addition
-to the BLE-role profile, exercising both live-camera decode call sites at compile
-and link time.
+## Measured decoding performance
 
-Post-build validation confirmed:
+For the committed 320×240 4:2:0 image, after one discarded warmup and 11 samples:
 
-- 7,934 P4 and 7,924 S3 source files still match their frozen baseline and final codec overlay.
-- The S3 ELF contains `g2CameraViewerWorker`, `g2CameraStreamWorker` and the shared `hwjpeg::decode`; it contains no `jpeg_decoder_process` symbol.
-- The P4 ELF contains `jpeg_decoder_process`. Both P4 builds use the verified private JPEG component and `HW1_JPEG_DRIVER_QUALIFIED=1`; neither S3 codec compilation has that define or hardware driver include path.
-- The isolated JPEG component preparation check passes. The installed ESP-IDF component is unchanged.
-- Both probes embed the original 13-image corpus plus runtime malformed, valid marker-padding, output-limit and concurrent-decode checks. Successful compilation is not a device test result.
+| Board / backend | Median | Minimum–maximum |
+|---|---:|---:|
+| P4 software | 73.083 ms | 73.052–73.198 ms |
+| P4 Auto, hardware selected | 18.639 ms | 18.622–18.657 ms |
+| S3 Auto, software selected | 151.056 ms | 151.055–151.057 ms |
 
-Host validation also passed under AddressSanitizer and UndefinedBehaviorSanitizer:
-metadata/resource limits, backend selection/fallback, marker normalization,
-custom allocator policy, G2 PSRAM bypass, failure cleanup, RGB ordering and padded
-output stride. Actual TJpgDec output matches the legacy converter byte-for-byte
-for all **12 decodable fixtures**, including **192 concurrent decodes**. The
-post-test manifest contains **44 matching source hashes**.
+P4 acceleration reduced this image's decode latency by **3.92×**, including
+header parsing, DMA buffer copies, engine setup/cleanup and the final full-range
+colour conversion. This measures the decode call, not total application speed
+or CPU utilization. Small/cold images do not uniformly benefit: engine startup
+can cost more than a tiny software decode.
 
-The actual SDK allocation/IRQ lifetime functions pass **10 host test methods**;
-the five original-SDK negative-control scenarios fail as intended, establishing
-that the checks exercise the repaired failure paths. Raw host logs and their
-source manifest remain private alongside the build logs.
+## Correctness and compatibility
 
-The SDK is ESP-IDF 5.5.5 with the experiment’s private Bluetooth and JPEG component
-overrides; the portable decoder is esp_jpeg 1.3.1. Full source and firmware
-fingerprints are recorded in `qualification.json`. The scripts in `README.md`
-reproduce the preparation and builds; build logs and images are in `private/`.
+- P4 decoded all 15 baseline fixtures; its 12 legacy-supported fixtures remained
+  byte-identical in software. The three 4:2:0 fixtures also work after fixing the
+  old undersized workspace. Progressive JPEG remains unsupported.
+- S3's 14 legacy-supported fixtures remained byte-identical. Both the actual
+  old converter and the new path reject grayscale and progressive input on this
+  ROM decoder, confirming an existing limitation rather than a regression.
+- P4 accelerated eight fixtures. Odd-sized, grayscale and too-narrow images
+  selected software immediately. S3 always selected software in Auto mode.
+- Hardware RGB output preserved channel order, orientation and cropped row
+  stride. Against P4 software, every accelerated fixture had maximum channel
+  error ≤4/255; patterned images had mean error approximately 1.13/255. Small
+  outputs were independently reconstructed from complete pixel dumps, with
+  hashes checked and a contact sheet inspected.
+- Pixel acceptance allows maximum error 8 and mean error 2 for this corpus, to
+  permit decoder rounding. The offline validator accepts the corrected results
+  and rejects the first run's colour-range bug. This is a corpus qualification,
+  not a guarantee for every possible JPEG.
+- Valid repeated-marker padding, malformed/truncated input and output limits
+  passed. Auto and HardwareOnly produced identical accelerated pixels.
+- Each board completed 60 concurrent decodes on two cores, all matching the
+  reference for the backend actually used. P4 selected hardware 50 times and
+  software 10 times, exercising busy fallback; S3 used software all 60 times.
+- Heap integrity passed. S3 retained no extra heap; P4 ended 20 bytes lower in
+  total/internal free heap. One batch does not establish long-term leak freedom.
+  Neither corrected run logged a watchdog, timeout, panic or assertion.
 
-The source change adds JPEG **decoding** acceleration. Existing JPEG encoding,
-camera passthrough and Edge Impulse conversion remain unchanged. The ordinary
-unqualified P4 SDK build retains software decoding.
+## Problems found and fixed by device testing
 
-Before enabling a broader release, run both probes on their corresponding boards,
-inspect the hardware/software pixel differences and timings, then restore the
-full application and test stored JPEG display and S3 live camera viewing. The
-probe output must end with `JPEG_RESULT failures=0`; any positive timing claim
-requires those measured device results.
+1. The P4's `FASTDECODE=1` software decoder needs more than esp_jpeg 1.3.1's
+   default 3,100-byte pool. A private 6,080-byte workspace fixes standard 4:2:0
+   input while preserving independent scratch for concurrent calls.
+2. IDF's direct RGB path applies limited-range video colour coefficients to
+   full-range JPEG data. The backend now requests YUV444 and converts it to
+   full-range RGB in place. Entropy decoding, inverse DCT and chroma expansion
+   remain accelerated, without allocating a second image buffer.
+3. The pinned driver's fixed horizontal DMA blocks stall on narrow images.
+   MCU-padded widths below 40 pixels for 4:4:4 or 32 for 4:2:2/4:2:0 now go
+   directly to software.
+
+The external decoder is qualified with RGB888 (`CONFIG_JD_FORMAT=0`) and default
+Huffman injection disabled. The S3 retains its ROM configuration. Other decoder
+configurations need their own qualification; no global SDK files were modified.
+
+## Final builds and host checks
+
+The corrected probes and both full HardwareOne applications built successfully.
+The full P4 app retains its LCD/wheel/buttons, G2/R1, web and mesh profile. The S3
+qualification build enables camera and Sense support so both live-camera decode
+call sites compile. **These new full-app images were not flashed.** The boards
+retain their previous firmware and feature profiles after the temporary probes.
+
+Post-build source checks passed for 7,934 P4 and 7,924 S3 files. The S3 ELF has
+both live-camera workers and shared decode, with no hardware JPEG symbol; P4 has
+the hardware decoder. The installed SDK and verified private JPEG override are
+unchanged. The override's 10 allocation/IRQ cleanup test methods and five
+original-SDK negative controls remain qualified.
+
+Host ASan/UBSan checks pass for dispatch, input bounds, normalization, allocator
+policy, full-range conversion, padded stride, cleanup and contention. Actual
+TJpgDec testing now covers **FASTDECODE 0, 1 and 2**, each with 15 baseline images
+and 192 concurrent decodes (576 total). Every image supported by the old
+converter remains byte-identical; larger private workspace repairs the fast
+modes' former allocation failures. The final host manifest has 47 source hashes.
+
+Firmware/source fingerprints are in `qualification.json`; measured cases,
+legacy outcomes, timings, pixel analysis and restoration evidence are summarized
+in `device-results.json`. Raw logs, pixel images and backups remain ignored in
+`private/device-20260928/`.
+
+## Remaining integration checks
+
+This milestone qualifies shared JPEG **decoding** on both processors. It does
+not test a live camera, G2 image delivery, a display, or JPEG encoding. P4 camera
+bring-up remains separate and is disabled in its current full-app profile.
+Before broader release, deploy the new full application and check stored-image
+viewing plus S3 live-camera viewing through G2. Long-running mixed workloads and
+any new independent 2D-DMA user (such as PPA) need additional qualification.

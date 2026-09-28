@@ -1,8 +1,14 @@
 #pragma once
+#ifndef CONFIG_JD_USE_ROM
 #define CONFIG_JD_USE_ROM 0
+#endif
+#ifndef CONFIG_JD_SZBUF
 #define CONFIG_JD_SZBUF 512
+#endif
 #define CONFIG_JD_FORMAT 0
 #define CONFIG_JD_USE_SCALE 1
 #define CONFIG_JD_TBLCLIP 1
+#ifndef CONFIG_JD_FASTDECODE
 #define CONFIG_JD_FASTDECODE 0
+#endif
 #define CONFIG_JD_DEFAULT_HUFFMAN 1

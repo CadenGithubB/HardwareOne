@@ -9,3 +9,6 @@ MCU-padded 24x24 geometry, 320x240 timing inputs, grayscale, progressive JPEG an
 solid red/blue images that detect accidental RGB/BGR reversal. A progressive
 fixture checks graceful unsupported behavior; it does not assert that the legacy
 software decoder supports progressive JPEG.
+
+The additional 48x48 4:4:4 pattern and solid red/blue fixtures exceed the P4
+driver's horizontal DMA block width, allowing physical accelerated RGB checks.

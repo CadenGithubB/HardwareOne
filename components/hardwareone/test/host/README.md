@@ -340,11 +340,15 @@ python3 -B components/hardwareone/test/host/test_jpeg.py --sanitize \
 ```
 
 Or configure CMake with `-DHW1_JPEG_COMPONENT=... -DHW1_CAMERA_COMPONENT=...`.
-This optional corpus suite checks exact software pixel parity for twelve original
-synthetic fixtures, including odd dimensions, grayscale and red/blue channel
-checks. Progressive JPEG fails cleanly in both the legacy and new software path;
-progressive support is not introduced. Another 192 concurrent decodes compare
-all pixels to the sequential legacy output, exercising the new per-call workspace.
+This optional corpus suite checks software decoding for fifteen original
+synthetic fixtures at all three external TJpgDec optimization levels, including odd dimensions, grayscale and red/blue channel
+checks. Whenever the legacy converter succeeds, output must match it byte-for-byte.
+The real FASTDECODE=1 regression reproduces three legacy 4:2:0 workspace failures;
+FASTDECODE=2 exhausts legacy scratch for all fifteen baseline fixtures. The new
+configuration-sized private workspace must decode all fifteen in every mode.
+Progressive JPEG fails cleanly in both the legacy and new software path;
+progressive support is not introduced. Another 192 concurrent decodes per optimization level compare
+all pixels to the sequential output, exercising the new per-call workspace.
 
 The third-party wrapper's input callback signature is adapted in a temporary file
 from 32-bit `unsigned int` to host `size_t` to match TJpgDec on 64-bit desktops.

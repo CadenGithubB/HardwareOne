@@ -23,3 +23,9 @@ pattern(17, 19).save(OUT / 'progressive_17x19.jpg', quality=91, progressive=True
 for name, color in (('red', (255, 0, 0)), ('blue', (0, 0, 255))):
     Image.new('RGB', (8, 8), color).save(OUT / f'{name}_8x8.jpg',
                                        quality=100, subsampling=0)
+
+# Wider-than-DMA-block fixtures exercise P4 4:4:4 hardware and channel order.
+pattern(48, 48).save(OUT / 'rgb444_48x48.jpg', quality=91, subsampling=0, optimize=False)
+for name, color in (('red', (255, 0, 0)), ('blue', (0, 0, 255))):
+    Image.new('RGB', (48, 48), color).save(OUT / f'{name}_48x48.jpg',
+                                         quality=100, subsampling=0)
