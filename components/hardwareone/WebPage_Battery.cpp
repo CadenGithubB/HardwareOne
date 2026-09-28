@@ -20,18 +20,23 @@
 // `battery json` CLI/BLE command return the IDENTICAL schema. Fields: present,
 // backend, voltage, percentage, status, charging, usbPresent, vbusSense,
 // lastReadMsAgo, ratePctPerHr/etaMinutes (fuelgauge only), rawADC (adc only).
+// Availability/validity flags distinguish unknown/null from a measured zero.
 esp_err_t handleBatteryStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   httpd_resp_set_type(req, "application/json");
   static char* buf = nullptr;
-  static const size_t kBufSize = 512;
+  static const size_t kBufSize = 1536;
   if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "battery.status.json");
   if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
   PSRAM_JSON_DOC(doc);
   extern void buildBatteryJson(JsonDocument& doc);  // core: System_Battery.cpp
   buildBatteryJson(doc);
-  serializeJson(doc, buf, kBufSize);
-  httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
+  if (measureJson(doc) >= kBufSize) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Battery status exceeds response buffer");
+    return ESP_FAIL;
+  }
+  const size_t written = serializeJson(doc, buf, kBufSize);
+  httpd_resp_send(req, buf, written);
   return ESP_OK;
 }
 
@@ -44,7 +49,7 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, R"HTML(
 <div class='card'>
   <h2 style='margin-top:0'>Battery</h2>
-  <div id='bat-absent' style='display:none;opacity:.8'>No battery detected &mdash; running on USB.</div>
+  <div id='bat-absent' style='display:none;opacity:.8'></div>
   <div id='bat-live' style='display:flex;flex-wrap:wrap;gap:1.5rem;align-items:baseline'>
     <div><span id='bat-pct' style='font-size:2.6rem;font-weight:bold'>--</span><span style='font-size:1.2rem'>%</span></div>
     <div>Voltage: <b id='bat-volt'>--</b> V</div>
@@ -52,7 +57,9 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
     <div id='bat-rate-wrap' style='display:none'>Rate: <b id='bat-rate'>--</b> %/hr</div>
     <div id='bat-eta-wrap' style='display:none'>Est. remaining: <b id='bat-eta'>--</b></div>
     <div>Source: <b id='bat-src'>--</b></div>
+    <div>Charging: <b id='bat-charging'>--</b></div>
   </div>
+  <div id='bat-estimate' style='display:none;margin-top:.7rem;opacity:.8'>Charge is estimated from voltage and may rise while plugged in, even without a cell. It does not confirm battery presence or charging.</div>
 </div>
 
 <div class='card'>
@@ -77,14 +84,20 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
   function applyStatus(s){
     if(!s){return;}
     var absent=hw.$('bat-absent'),live=hw.$('bat-live');
-    if(s.present===false){hw.show(absent);hw.hide(live);return;}
-    hw.hide(absent);if(live)live.style.display='flex';
-    hw.setText('bat-pct',fmt(s.percentage,1));
-    hw.setText('bat-volt',fmt(s.voltage,3));
-    hw.setText('bat-status',s.status||'--');
-    hw.setText('bat-src',s.charging?'Charging':(s.usbPresent?'USB (full)':'Battery'));
-    var hasRate=s.backend==='fuelgauge';
-    hw.toggle('bat-rate-wrap',!!hasRate);
+    var notice=s.voltageAvailable===false?'Battery monitoring is unavailable on this board.':
+      (s.present===false?'No battery detected.':
+      (s.voltageValid===false?'Battery voltage is unavailable.':''));
+    hw.setText(absent,notice);hw.toggle(absent,!!notice);
+    if(live)live.style.display='flex';
+    var hasPct=s.percentageValid===true&&s.percentage!=null;
+    hw.setText('bat-pct',hasPct?((s.percentageEstimated?'~':'')+fmt(s.percentage,1)):'--');
+    hw.setText('bat-volt',s.voltageValid?fmt(s.voltage,3):'--');
+    hw.setText('bat-status',s.status||'Unknown');
+    hw.setText('bat-src',s.usbKnown?(s.usbPresent?'USB connected':(s.present===true?'Battery':'USB absent')):'Unknown');
+    hw.setText('bat-charging',s.chargingKnown?((s.charging?'Yes':'No')+(s.chargingEstimated?' (estimated)':'')):'Unknown');
+    hw.toggle('bat-estimate',hasPct&&s.percentageSource==='voltage');
+    var hasRate=s.rateValid===true;
+    hw.toggle('bat-rate-wrap',hasRate);
     if(hasRate)hw.setText('bat-rate',fmt(s.ratePctPerHr,2));
     var showEta=hasRate&&(s.etaMinutes!=null&&s.etaMinutes!==undefined);
     hw.toggle('bat-eta-wrap',showEta);
@@ -128,7 +141,7 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
       for(var j=0;j<n;j++){if(!(d.rows[j][ei]||'').trim())continue;var x=X(j);ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,H-padB);ctx.stroke();}}
     // percent curve
     ctx.strokeStyle='#4caf50';ctx.lineWidth=2;ctx.beginPath();var started=false;
-    for(var i=0;i<n;i++){var p=parseFloat(d.rows[i][ci]);if(isNaN(p))continue;var x=X(i),y=Yp(p);started?ctx.lineTo(x,y):(ctx.moveTo(x,y),started=true);}
+    for(var i=0;i<n;i++){var p=parseFloat(d.rows[i][ci]);if(isNaN(p)){started=false;continue;}var x=X(i),y=Yp(p);started?ctx.lineTo(x,y):(ctx.moveTo(x,y),started=true);}
     ctx.stroke();
   }
   function loadLog(){

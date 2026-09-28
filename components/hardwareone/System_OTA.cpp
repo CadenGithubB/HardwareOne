@@ -738,87 +738,47 @@ bool clearCredential(char* reason = nullptr, size_t reasonSize = 0) {
   return err == ESP_OK;
 }
 
-/*
- * Is it safe to start an OTA write right now?
- *
- * Two board classes answer this very differently, and the percentage test
- * below is only meaningful for one of them.
- *
- * BATTERY_BACKEND_FUEL_GAUGE (FeatherS3): a MAX17048 reports true coulomb-
- * counted state-of-charge and a VBUS-sense GPIO reports USB presence
- * deterministically. Both terms of the original test are real. Unchanged.
- *
- * BATTERY_BACKEND_ADC (Feather ESP32 V2): the board has a VBAT divider and
- * nothing else. `percentage` is NEVER POPULATED on this path -- adcBackendSample()
- * fills voltage / isCharging / usbPresent and leaves percentage at its 0.0f
- * initialiser, because classifyAndNotify() works off a voltage ladder instead.
- * So `percentage >= 30` is `0 >= 30` on every single call, and the second test
- * can never pass.
- *
- * That leaves usbPresent, which on this board is itself inferred from voltage
- * (there is no VBUS pin). On a mains-powered unit with NO cell fitted the
- * divider reads ~0 V, so usbPresent is false, status is BATTERY_NOT_PRESENT,
- * percentage is 0 -- and every routine `otaupdate confirm` refuses for want of
- * power, on a permanently-powered device. The only way through would be
- * `force-power` on every update, which turns a deliberate override into
- * routine muscle memory and disarms the interlock it exists to enforce.
- *
- * So for the voltage-only class, decide from what the board can actually
- * measure: no cell wired means the power is external, and the device is
- * demonstrably running. Otherwise require the cell to be above the MEDIUM band
- * rather than a percentage that does not exist.
- */
+// Monitored boards require fresh telemetry. A divider measures the BAT node:
+// neither a high reading nor a disconnected cell proves that USB is present.
+// For ADC boards the existing voltage threshold remains the update criterion;
+// an approximate voltage-derived percentage is not a fuel-gauge measurement.
 bool powerIsSafe(bool force, char* reason, size_t reasonSize) {
 #if !ENABLE_BATTERY_MONITOR
-  /*
-   * The board has no battery subsystem at all (QT Py ESP32:
-   * BATTERY_MONITOR_AVAILABLE 0). It is running, so it is on external power --
-   * initBattery() says exactly that, seeding usbPresent=true.
-   *
-   * The freshness test below cannot be used here. updateBattery() returns
-   * immediately on this build, BEFORE `gBatteryState.lastReadMs = millis()`,
-   * so lastReadMs stays 0 for the life of the boot. Thirty seconds after
-   * startup `age` therefore exceeds kFreshPowerMs forever and EVERY branch
-   * fails -- otaupdate would refuse for want of fresh power telemetry that
-   * this board can never produce, permanently, with force-power the only way
-   * through. There is no reading to be stale about; say so and allow.
-   */
+  // Preserve the existing policy for builds without a power telemetry
+  // interlock. This is permission to update without monitoring, not a claim
+  // that USB is connected or that any battery is full.
   (void)force;
   (void)reason;
   (void)reasonSize;
   return true;
 #else
-  const uint32_t age = millis() - gBatteryState.lastReadMs;
-  if (age <= kFreshPowerMs && gBatteryState.usbPresent) return true;
+  const BatteryState battery = getBatterySnapshot();
+  const uint32_t age = millis() - battery.lastReadMs;
+  const bool fresh = age <= kFreshPowerMs;
+  // VBUS is independent of ADC/gauge success and has its own attempt timestamp.
+  const bool usbFresh = (millis() - battery.lastAttemptMs) <= kFreshPowerMs;
+  if (usbFresh && battery.usbKnown && battery.usbPresent) return true;
 
 #if BATTERY_BACKEND_ADC
-  if (age <= kFreshPowerMs) {
-    if (gBatteryState.status == BATTERY_NOT_PRESENT) {
-      // Executing this code proves the board is powered; a sub-2 V reading on
-      // VBAT proves it is not the cell doing it.
-      return true;
-    }
-    if (gBatteryState.status != BATTERY_UNKNOWN &&
-        gBatteryState.voltage >= VBAT_BAND_MEDIUM) {
-      return true;
-    }
-  }
-  if (force) return true;
-  snprintf(reason, reasonSize,
-           "Error: unsafe or stale power state; cell at %.2fV is below the %.2fV "
-           "minimum and this board cannot sense USB "
-           "(force-power is an explicit recorded override)",
-           (double)gBatteryState.voltage, (double)VBAT_BAND_MEDIUM);
-  return false;
-#else
-  if (age <= kFreshPowerMs && gBatteryState.status != BATTERY_NOT_PRESENT &&
-      gBatteryState.status != BATTERY_UNKNOWN &&
-      gBatteryState.percentage >= kMinimumBatteryPercent) {
+  if (fresh && battery.voltageValid && battery.voltage >= VBAT_BAND_MEDIUM) {
     return true;
   }
   if (force) return true;
   snprintf(reason, reasonSize,
-           "Error: unsafe or stale power state; connect USB or use a fresh battery >=30%% "
+           "Error: unsafe, unavailable or stale power state; require fresh measured "
+           "battery voltage >=%.2fV or confirmed USB "
+           "(force-power is an explicit recorded override)",
+           (double)VBAT_BAND_MEDIUM);
+  return false;
+#else
+  if (fresh && battery.percentageValid &&
+      battery.percentage >= kMinimumBatteryPercent) {
+    return true;
+  }
+  if (force) return true;
+  snprintf(reason, reasonSize,
+           "Error: unsafe, unavailable or stale power state; require confirmed USB "
+           "or a fresh battery reading >=30%% "
            "(force-power is an explicit recorded override)");
   return false;
 #endif  /* BATTERY_BACKEND_ADC */

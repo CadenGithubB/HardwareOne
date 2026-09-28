@@ -1,9 +1,16 @@
 # P4X-EYE battery investigation - 2026-09-28
 
-Read-only hardware/source investigation after board qualification. No battery
-probe was flashed, no live cell voltage was measured, and production sources
-remain unchanged. Whether a battery is attached to the Mac mini's EYE is not
-confirmed at the time of this note.
+This began as a read-only hardware/source investigation after board
+qualification. The shared backend has since been implemented in the isolated
+worktree; see [shared battery integration](../battery_portable/README.md) for
+code, commands, the build workflow and compatibility checks. Physical validation
+and deployment state are tracked separately in
+[RESULTS.md](../battery_portable/RESULTS.md); this investigation alone does not
+claim a live voltage measurement or confirm that a cell is attached.
+
+The baseline observations below describe the firmware/source before that
+integration. Divider accuracy, actual resistor population and behavior with a
+known attached cell remain physical qualification items.
 
 ## Hardware path
 
@@ -36,7 +43,7 @@ averaging/settling checks and a comparison with a multimeter on a known attached
 cell. C172 at the ADC input is marked not populated in the schematic. Do not
 turn calibration failure or an unloaded-charger voltage into a precise SOC.
 
-## Existing HardwareOne integration
+## Pre-integration HardwareOne baseline
 
 `System_Battery.cpp` already selects ADC, MAX17048 or disabled backends behind
 one `BatteryState` and common accessors. Consumers include `batterystatus json`,
@@ -63,7 +70,7 @@ Simply enabling the existing ADC backend is insufficient:
 - No-cell detection by voltage threshold alone is not valid on an active charger.
   OTA and power policy must not interpret guessed USB presence as authoritative.
 
-## Portable implementation direction
+## Implementation direction (now implemented)
 
 1. Modernize the existing ADC backend with IDF `adc_oneshot` and `adc_cali`.
    Derive ADC unit/channel from the configured GPIO. Select curve-fitting or
@@ -83,8 +90,9 @@ Simply enabling the existing ADC backend is insufficient:
 
 No IDF 6 upgrade is required: these APIs are present in the pinned IDF 5.5.5.
 
-## Qualification before enabling by default
+## Physical qualification and remaining checks
 
+Track results in [the integration results](../battery_portable/RESULTS.md).
 Compare measured voltage against a meter with a known battery, both under USB
 charging and on battery. Check averaging, stale/error handling, no-battery USB
 operation, low-voltage behavior and calibration failure. Build ESP32, S3 ADC,

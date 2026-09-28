@@ -1275,6 +1275,38 @@
 // =============================================================================
 // BATTERY MONITOR — derived enable + backend sanity
 // =============================================================================
+// EYE V2.4 BAT_ADC: GPIO49, R15=1M and R16=332k. This is board wiring,
+// not a generic ESP32-P4 capability; another P4 board must declare its own.
+#if defined(HW_BOARD_P4X_EYE) && HW_BOARD_P4X_EYE
+  #undef BATTERY_ADC_PIN
+  #undef BATTERY_MONITOR_AVAILABLE
+  #undef BATTERY_BACKEND_ADC
+  #undef BATTERY_BACKEND_FUEL_GAUGE
+  #define BATTERY_ADC_PIN 49
+  #define BATTERY_MONITOR_AVAILABLE 1
+  #define BATTERY_BACKEND_ADC 1
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
+  #ifndef BATTERY_ADC_DIVIDER
+    #define BATTERY_ADC_DIVIDER (1332.0f / 332.0f)
+  #endif
+  #ifndef BATTERY_ADC_ATTEN
+    #define BATTERY_ADC_ATTEN ADC_ATTEN_DB_6
+  #endif
+#endif
+// Existing Feather dividers retain their 2:1 wiring and attenuation. ADC
+// unit/channel are resolved by the IDF driver from the board's configured pin.
+#ifndef BATTERY_ADC_DIVIDER
+  #define BATTERY_ADC_DIVIDER 2.0f
+#endif
+#ifndef BATTERY_ADC_ATTEN
+  #define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
+#endif
+// Classic ESP32 without eFuse calibration may use the historical nominal
+// 1100mV reference. Set to 0 to require eFuse data; JSON identifies this fallback.
+#ifndef BATTERY_ADC_DEFAULT_VREF_MV
+  #define BATTERY_ADC_DEFAULT_VREF_MV 1100
+#endif
+
 // ENABLE_BATTERY_MONITOR defaults to the active board's BATTERY_MONITOR_AVAILABLE
 // flag so adding a new supported board "just works" without touching the user
 // config above. A user-set `#define ENABLE_BATTERY_MONITOR <0|1>` at the top of
@@ -1319,7 +1351,7 @@
 
 // Sanity: at most one backend selected. If the board didn't define either
 // flag (out-of-tree board file), fall back to 0/0 so System_Battery seeds the
-// USB-only stub instead of failing to compile.
+// unavailable backend instead of failing to compile.
 #ifndef BATTERY_BACKEND_ADC
   #define BATTERY_BACKEND_ADC 0
 #endif
@@ -1328,7 +1360,7 @@
 #endif
 
 // VBUS sense fallback. Boards without a routed VBUS divider leave this at -1
-// and System_Battery falls back to the CRATE/voltage heuristic. Boards with
+// and System_Battery reports external power as unknown. Boards with
 // the pin wired (FeatherS3[D] → GPIO 34) override above and get instant,
 // deterministic USB-present detection.
 #ifndef BATTERY_VBUS_SENSE_PIN
@@ -1341,7 +1373,7 @@
   #error "An enabled BATTERY_BACKEND_FUEL_GAUGE requires the I2C subsystem (I2C_FEATURE_LEVEL > 0). Raise the level, disable the battery monitor, or pick a different backend."
 #endif
 // If the user force-enabled the monitor on a board with no backend hardware
-// claimed, the runtime will seed USB-only and report it — no compile error.
+// claimed, runtime reports measurement unavailable — no compile error.
 
 // =============================================================================
 // I2C2 (second I2C bus) — board-agnostic fallback

@@ -3052,7 +3052,7 @@ extern const char* cmd_batterylog(const String& argsInput);
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry batteryCommands[] = {
   {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status},
-  {"batterycalibrate", "Recalibrate/re-probe the battery sensor (ADC characterize or fuel-gauge re-probe)", true, cmd_battery_calibrate},
+  {"batterycalibrate", "Reinitialize ADC calibration or re-probe the fuel gauge", true, cmd_battery_calibrate},
   {"batterylog", "Battery time-series CSV log (on/off/interval/tail/clear)", false, cmd_batterylog, "Usage: batterylog [on|off|interval <s>|tail|clear]"}
 };
 
@@ -3491,16 +3491,17 @@ static constexpr CommandModule gCommandModules[] = {
 #if ENABLE_BATTERY_MONITOR
   { "battery",    "Battery voltage and charge monitoring", "The battery module reports cell state and keeps a time-series log; it is only "
     "present when battery monitoring is compiled in. The backend is a MAX17048 fuel "
-    "gauge over I2C (with an ADC or USB-only fallback on other boards), and charging "
-    "detection cross-references the gauge CRATE register with a VBUS-present signal so "
-    "the reported state distinguishes truly charging from merely USB-powered. "
+    "gauge over I2C or a calibrated ADC voltage divider selected by the board. "
+    "ADC charge percentage is approximate; the charger can drive the measured BAT "
+    "node even without a cell. USB, charging and cell presence are reported only "
+    "when known. Missing readings are null in JSON, not zero/full estimates. "
     "batterystatus prints voltage, charge percentage, charging/USB state, and a coarse "
     "status label, or returns the same data as JSON. batterylog manages a CSV "
     "discharge/charge log written to the device for later graphing: with no args it "
     "shows status, and subcommands are on/off (enable/disable), interval <5..3600> "
     "seconds (sampling period), tail (show the most recent rows), and clear (erase the "
     "log); significant events such as sleep/wake are always recorded regardless of the "
-    "interval. batterycalibrate (admin) re-calibrates the ADC-based readings.", batteryCommands,      &batteryCommandsCount, 0, nullptr },
+    "interval. batterycalibrate (admin) reinitializes ADC calibration or re-probes the fuel gauge.", batteryCommands,      &batteryCommandsCount, 0, nullptr },
 #endif
   { "debug",      "System debugging and diagnostics", "The debug subsystem controls diagnostic logging verbosity across every part of the "
     "firmware. Its core is a large set of per-subsystem debug-flag toggles (for example "

@@ -407,38 +407,24 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
 
   // Battery / USB indicator
   if (headerInfo.showBattery || headerInfo.showUSB) {
-    extern BatteryState gBatteryState;
-    extern char getBatteryIcon();
-    extern bool isUsbPresent();
-
-    // USB presence (not just "actively charging") — covers the float-charge
-    // case where CRATE ≈ 0 but VBUS is still holding the cell topped off.
-    // Falling back to isBatteryCharging() here would silently drop the USB
-    // indicator the moment the cell hits 100%.
-    bool usbConnected = isUsbPresent();
-
-    if (usbConnected && headerInfo.showUSB) {
-      // "USB" is 3 chars × 6 px = 18 px. Anything less wraps "B" onto the
-      // next OLED row — see commit history for the original off-by-six bug.
-      iconX -= 18;
+    const BatteryState battery = getBatterySnapshot();
+    if (battery.usbKnown && battery.usbPresent && headerInfo.showUSB) {
+      iconX -= 18;  // "USB": three 6-pixel characters
       display->setCursor(iconX, 1);
       display->print("USB");
       drewRightSide = true;
-    } else if (headerInfo.showBattery && gBatteryState.status != BATTERY_NOT_PRESENT) {
-      // Show "NN%" — the tier-letter icon (F/H/M/L/E from getBatteryIcon)
-      // would be redundant with the number AND reads like a unit suffix
-      // ("87F" looked like 87° Fahrenheit). The richer state info (charging
-      // vs float vs discharging) is communicated by the parallel "USB" /
-      // "USB+" branch above and on the system status page.
-      int pct = (int)gBatteryState.percentage;
-
-      // Width: percentage digits (1-3 chars) + "%" (1 char). 6 px per char.
-      int pctWidth = (pct >= 100) ? 18 : (pct >= 10) ? 12 : 6;
-      iconX -= (pctWidth + 6);
-
+    } else if (headerInfo.showBattery) {
+      char label[8];
+      if (battery.percentageValid) {
+        snprintf(label, sizeof(label), "%s%d%%",
+                 battery.percentageEstimated ? "~" : "",
+                 (int)battery.percentage);
+      } else {
+        snprintf(label, sizeof(label), "--%%");
+      }
+      iconX -= strlen(label) * 6;
       display->setCursor(iconX, 1);
-      display->print(pct);
-      display->print('%');
+      display->print(label);
       drewRightSide = true;
     }
   }

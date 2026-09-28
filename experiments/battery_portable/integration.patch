@@ -1,0 +1,1946 @@
+diff --git a/components/hardwareone/BatteryPolicy.h b/components/hardwareone/BatteryPolicy.h
+new file mode 100644
+index 0000000..3c898d3
+--- /dev/null
++++ b/components/hardwareone/BatteryPolicy.h
+@@ -0,0 +1,133 @@
++#ifndef HARDWAREONE_BATTERY_POLICY_H
++#define HARDWAREONE_BATTERY_POLICY_H
++
++#include <cmath>
++#include <cstdint>
++
++// Shared single-cell LiPo reference and voltage-band thresholds.
++#define VBAT_FULL 4.2f
++#define VBAT_NOMINAL 3.7f
++#define VBAT_LOW 3.4f
++#define VBAT_CRITICAL 3.2f
++#define VBAT_BAND_FULL 4.15f
++#define VBAT_BAND_HIGH 4.00f
++#define VBAT_BAND_GOOD 3.80f
++#define VBAT_BAND_MEDIUM 3.65f
++#define VBAT_BAND_LOW 3.45f
++#define VBAT_BAND_CRITICAL 3.30f
++
++// Keep existing ordinals stable for event and display consumers.
++enum BatteryStatus {
++  BATTERY_UNKNOWN = 0, BATTERY_CHARGING, BATTERY_FULL, BATTERY_DISCHARGING,
++  BATTERY_LOW, BATTERY_CRITICAL, BATTERY_NOT_PRESENT, BATTERY_HIGH,
++  BATTERY_GOOD, BATTERY_MEDIUM, BATTERY_EMPTY
++};
++
++struct BatteryState {
++  float voltage = NAN;
++  float percentage = NAN;
++  BatteryStatus status = BATTERY_UNKNOWN;
++  bool isCharging = false;
++  bool usbPresent = false;
++  uint32_t lastReadMs = 0;       // Last successful voltage read, never an attempt.
++  uint16_t rawADC = 0;
++  float cratePctPerHr = NAN;
++  bool voltageAvailable = false; // Configured measurement hardware, not cell presence.
++  bool voltageValid = false;
++  bool voltageCalibrated = false;
++  bool percentageValid = false;
++  bool percentageEstimated = false;
++  bool statusEstimated = false;
++  bool presenceKnown = false;
++  bool present = false;
++  bool chargingKnown = false;
++  bool chargingEstimated = false;
++  bool usbKnown = false;
++  bool rateValid = false;
++  bool hasSample = false;
++  bool stale = false;
++  uint32_t lastAttemptMs = 0;
++  int32_t lastError = 0;
++};
++
++namespace BatteryPolicy {
++constexpr uint32_t kStaleAfterMs = 30000;
++
++// Indicative single-cell LiPo curve, not a capacity measurement. Load, cell
++// chemistry, temperature and charging all move the voltage/SOC relationship.
++// In particular a charger can drive this voltage with NO cell attached.
++inline float estimatePercentage(float volts) {
++  if (!std::isfinite(volts) || volts < 2.5f || volts > 4.5f) return NAN;
++  constexpr float v[] = {3.20f, 3.30f, 3.45f, 3.65f, 3.80f, 4.00f, 4.20f};
++  constexpr float p[] = {0.0f, 5.0f, 10.0f, 30.0f, 60.0f, 85.0f, 100.0f};
++  if (volts <= v[0]) return 0.0f;
++  for (unsigned i = 1; i < sizeof(v) / sizeof(v[0]); ++i) {
++    if (volts <= v[i]) return p[i - 1] + (volts - v[i - 1]) *
++      (p[i] - p[i - 1]) / (v[i] - v[i - 1]);
++  }
++  return 100.0f;
++}
++
++inline BatteryStatus classify(const BatteryState& s) {
++  if (s.presenceKnown && !s.present) return BATTERY_NOT_PRESENT;
++  if (!s.voltageValid || !s.percentageValid) return BATTERY_UNKNOWN;
++  if (s.chargingKnown && s.isCharging) return BATTERY_CHARGING;
++  if (s.voltage >= VBAT_BAND_FULL) return BATTERY_FULL;
++  if (s.voltage >= VBAT_BAND_HIGH) return BATTERY_HIGH;
++  if (s.voltage >= VBAT_BAND_GOOD) return BATTERY_GOOD;
++  if (s.voltage >= VBAT_BAND_MEDIUM) return BATTERY_MEDIUM;
++  if (s.voltage >= VBAT_BAND_LOW) return BATTERY_LOW;
++  if (s.voltage >= VBAT_BAND_CRITICAL) return BATTERY_CRITICAL;
++  return BATTERY_EMPTY;
++}
++
++inline void invalidateSample(BatteryState& s, int32_t error, uint32_t attemptMs) {
++  s.voltageValid = s.percentageValid = s.rateValid = false;
++  s.chargingKnown = false;
++  s.presenceKnown = false;
++  s.status = BATTERY_UNKNOWN;
++  s.statusEstimated = false;
++  s.lastAttemptMs = attemptMs;
++  s.lastError = error;
++  s.stale = false;
++  // Retain last values for diagnostics; readers MUST check validity.
++  // An independent VBUS GPIO remains meaningful after an ADC/I2C failure.
++}
++
++inline bool applyAdcVoltage(BatteryState& s, float volts, uint16_t raw, uint32_t now) {
++  if (!std::isfinite(volts) || volts < 0.0f || volts > 6.0f) {
++    invalidateSample(s, -1, now);
++    return false;
++  }
++  s.voltage = volts;
++  s.rawADC = raw;
++  s.voltageValid = s.hasSample = true;
++  s.percentage = estimatePercentage(volts);
++  s.percentageValid = std::isfinite(s.percentage);
++  s.percentageEstimated = true;
++  s.presenceKnown = false; // A BAT-node measurement is not a cell-presence test.
++  s.chargingKnown = s.chargingEstimated = s.rateValid = false;
++  s.isCharging = false;
++  s.lastReadMs = s.lastAttemptMs = now;
++  s.lastError = 0;
++  s.stale = false;
++  s.status = classify(s);
++  s.statusEstimated = s.status != BATTERY_UNKNOWN;
++  return true;
++}
++
++inline void expireSample(BatteryState& s, uint32_t now) {
++  if (s.hasSample && static_cast<uint32_t>(now - s.lastReadMs) > kStaleAfterMs) {
++    s.voltageValid = s.percentageValid = s.rateValid = s.chargingKnown = false;
++    s.presenceKnown = false;
++    s.status = BATTERY_UNKNOWN;
++    s.statusEstimated = false;
++    s.stale = true;
++  }
++  // VBUS itself is cached at the same cadence. It must not outlive a stalled
++  // monitor merely because the last ADC read succeeded or failed differently.
++  if (s.usbKnown && static_cast<uint32_t>(now - s.lastAttemptMs) > kStaleAfterMs)
++    s.usbKnown = false;
++}
++} // namespace BatteryPolicy
++#endif
+diff --git a/components/hardwareone/CMakeLists.txt b/components/hardwareone/CMakeLists.txt
+index aecbfab..d13b388 100644
+--- a/components/hardwareone/CMakeLists.txt
++++ b/components/hardwareone/CMakeLists.txt
+@@ -497,6 +497,7 @@ set(hardwareone_requires
+         app_update
+         bootloader_support
+         esp_app_format
++        esp_adc
+         json
+         mbedtls
+         esp_wifi
+diff --git a/components/hardwareone/G2_Glasses.cpp b/components/hardwareone/G2_Glasses.cpp
+index 8d958bb..1fb2b5e 100644
+--- a/components/hardwareone/G2_Glasses.cpp
++++ b/components/hardwareone/G2_Glasses.cpp
+@@ -43,7 +43,7 @@
+ #include "System_MemoryMonitor.h"   // checkMemoryAvailable() — g2client gate
+ #include "System_VFS.h"
+ #include "System_Mutex.h"       // FsLockGuard — serialize long-lived File handles
+-#include "System_Battery.h"   // BatteryState + getBatteryPercentage etc — for ESP corner widget
++#include "System_Battery.h"   // Valid battery snapshot for ESP corner widget
+ #include "System_Microphone.h"  // gMicRunning, micConnected, getAudioLevel, etc — for MIC detail page
+ #include "System_Dictation.h"  // G2 keyboard MIC page + source-bound transcript drain
+ #include "HAL_Audio.h"          // audioGetSource/audioCaptureActive/audioCaptureStop — G2 as a mic source
+@@ -6711,14 +6711,8 @@ buildG2StatusSnapshot(char* out, size_t cap) {
+   }
+ #endif
+ 
+-  // (Device battery line moved to the top-right corner widget — see
+-  //  buildEspStatusBattery + renderStatusCompound below. The corner
+-  //  shows ESP USB / ESP NN% / ESP --% via getBatteryPercentage() +
+-  //  isBatteryCharging(); body no longer carries it. If you need the
+-  //  raw voltage in the body, plumb it as a separate line — the
+-  //  legacy "Batt %.2fV %u%%" combined the two and folding USB
+-  //  reporting in cleanly required splitting the corner from the
+-  //  voltage display.)
++  // Device percentage lives in buildEspStatusBattery's corner widget.
++  // It uses the shared validity flags and marks estimated values with '~'.
+ 
+ #if ENABLE_G2_GLASSES
+   // (G2 battery line moved to the top-right corner widget — see
+@@ -6788,18 +6782,20 @@ static void buildR1StatusBattery(char* out, size_t cap) {
+ 
+ // Top-right corner ESP-battery widget. Same "NAME: value" shape as G2/R1
+ // and the same geom width (kStatusEspGeom matches kStatusBattGeom /
+-// kStatusR1Geom). Value is either "---" (no cell / bad read) or "NN%".
++// kStatusR1Geom). Unknown is "---"; approximate percentages carry '~'.
+ static void buildEspStatusBattery(char* out, size_t cap) {
+   if (!out || cap == 0) return;
+-  if (gBatteryState.status == BATTERY_NOT_PRESENT ||
+-      getBatteryVoltage() <= 0.0f) {
++  const BatteryState battery = getBatterySnapshot();
++  if (!battery.percentageValid) {
+     snprintf(out, cap, "ESP: ---");
+     return;
+   }
+-  int pct = (int)(getBatteryPercentage() + 0.5f);
++  int pct = (int)(battery.percentage + 0.5f);
+   if (pct < 0)   pct = 0;
+   if (pct > 100) pct = 100;
+-  snprintf(out, cap, "ESP: %d%%", pct);
++  // Replace the separator space with the estimate marker to retain the
++  // existing nine-character maximum within the 110-pixel corner widget.
++  snprintf(out, cap, "ESP:%s%d%%", battery.percentageEstimated ? "~" : " ", pct);
+ }
+ 
+ // 8-cell circle bar gauge using Unicode geometric/spinner glyphs that
+@@ -23303,10 +23299,8 @@ static void liveTextExitToHijackMenu() {
+ //   batt  — top-right corner row 1. Single-line G2% indicator.
+ //   r1    — top-right corner row 2. R1% indicator (placeholder until
+ //           ring telemetry is plumbed).
+-//   esp   — top-right corner row 3. ESP %/USB indicator. Reads
+-//           getBatteryPercentage()/isBatteryCharging() from
+-//           System_Battery.h. Replaces the legacy "Batt %.2fV %u%%"
+-//           line that used to live in the body block.
++//   esp   — top-right corner row 3. ESP percentage/unknown indicator from
++//           the shared battery snapshot; approximate percentages carry '~'.
+ //   meter — bottom-right corner, hugging the canvas edge. Two-line
+ //           ASCII bar gauge for heap + PSRAM.
+ //
+@@ -23342,7 +23336,7 @@ static constexpr G2ContainerGeom kStatusBattGeom  = { 458,   8, 110,  32 };
+ // G2-then-R1 top-down. Content from buildR1StatusBattery ("R1: NN%").
+ static constexpr G2ContainerGeom kStatusR1Geom    = { 458,  42, 110,  32 };
+ // ESP row directly below R1 — same x/w as G2/R1 so the three percentages
+-// line up. Content is "ESP: ---" or "ESP: NN%" (see buildEspStatusBattery).
++// line up. Unknown is "ESP: ---"; estimates use "ESP:~NN%".
+ static constexpr G2ContainerGeom kStatusEspGeom   = { 458,  76, 110,  32 };
+ static constexpr G2ContainerGeom kStatusMeterGeom = { 318, 224, 250,  56 };
+ 
+@@ -23375,10 +23369,8 @@ static char gStatusLastEspStr[32]    = {0};
+ // could only ever read a permanent "ESP: ---". That's noise, so the child is
+ // omitted at compile time and the lens gets the space back.
+ //
+-// NOTE: this is deliberately NOT keyed on the runtime value. On boards that CAN
+-// measure (FeatherS3 fuel gauge, Feather V2 ADC), "ESP: ---" is meaningful — it
+-// means "running on USB, no LiPo attached" — so buildEspStatusBattery keeps that
+-// behaviour untouched.
++// Keep the row when monitoring is compiled but a reading is unavailable.
++// "ESP: ---" means unknown charge, with no inference about USB or cell presence.
+ #if BATTERY_MONITOR_AVAILABLE
+ static constexpr size_t kStatusTextChildCount = 5;
+ #else
+@@ -23441,7 +23433,7 @@ static bool renderStatusCompound() {
+   char r1Str[32];
+   buildR1StatusBattery(r1Str, sizeof(r1Str));
+ 
+-  // ESP/USB indicator — see buildEspStatusBattery for the three-state
++  // ESP charge indicator — see buildEspStatusBattery for validity-aware
+   // logic. Same shape as battStr/r1Str so it threads through the
+   // multi-text CREATE/REBUILD path identically.
+   char espStr[32];
+diff --git a/components/hardwareone/OLED_Mode_System.cpp b/components/hardwareone/OLED_Mode_System.cpp
+index 731415f..219a4ea 100644
+--- a/components/hardwareone/OLED_Mode_System.cpp
++++ b/components/hardwareone/OLED_Mode_System.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include <Adafruit_SSD1306.h>
+ #include "System_Settings.h"
++#include "System_Battery.h"
+ #include "System_Utils.h"
+ #include <esp_heap_caps.h>
+ // Must come before the first hw1Internal*() use (this file also includes it
+@@ -650,13 +651,6 @@ static void perfOnEnter(bool isForward) {
+ // System Status Rendered (two-phase rendering)
+ // ============================================================================
+ 
+-// External battery functions
+-extern float getBatteryVoltage();
+-extern float getBatteryPercentage();
+-extern char getBatteryIcon();
+-extern bool isBatteryCharging();
+-extern bool isUsbPresent();
+-
+ // Pre-gathered system status data to avoid WiFi/heap operations inside I2C transaction
+ struct SystemStatusRenderData {
+   bool wifiConnected;  // CONNECTION axis: associated to an AP
+@@ -666,11 +660,7 @@ struct SystemStatusRenderData {
+   uint32_t freeHeap;
+   unsigned long uptimeHours;
+   unsigned long uptimeMinutes;
+-  float batteryVoltage;
+-  float batteryPercentage;
+-  char batteryIcon;
+-  bool batteryCharging;       // CRATE > +threshold (cell taking charge)
+-  bool batteryUsbPresent;     // USB connected (charging OR float-plateau)
++  BatteryState battery;
+   bool valid;
+ };
+ static SystemStatusRenderData systemStatusRenderData = {0};
+@@ -705,12 +695,8 @@ void prepareSystemStatusData() {
+   systemStatusRenderData.uptimeMinutes = (uptimeSec % 3600) / 60;
+   
+   // Get battery data OUTSIDE I2C transaction
+-  systemStatusRenderData.batteryVoltage = getBatteryVoltage();
+-  systemStatusRenderData.batteryPercentage = getBatteryPercentage();
+-  systemStatusRenderData.batteryIcon = getBatteryIcon();
+-  systemStatusRenderData.batteryCharging = isBatteryCharging();
+-  systemStatusRenderData.batteryUsbPresent = isUsbPresent();
+-  
++  systemStatusRenderData.battery = getBatterySnapshot();
++
+   systemStatusRenderData.valid = true;
+ }
+ 
+@@ -730,32 +716,26 @@ void displaySystemStatusRendered() {
+   // Header shows "System Status", no need for title here
+   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+ 
+-  // Battery Status (top priority). Four-state rendering — mirrors the G2
+-  // corner widget's logic so the OLED and lens columns stay consistent:
+-  //   icon=='?'              "Power: USB"           no cell installed
+-  //   isCharging             "Batt: V.VVV NN% USB+" USB in, taking charge
+-  //   usbPresent (no charge) "Batt: V.VVV NN% USB"  USB in, cell at float
+-  //   else                   "Batt: V.VVV NN% I"    on battery (I = M/H/F/L/E)
+-#if ENABLE_BATTERY_MONITOR
+-  if (systemStatusRenderData.batteryIcon == '?') {
+-    oledDisplay->print("Power: USB");
++  // Show measured voltage and mark ADC charge estimates. Missing telemetry
++  // must not become a fabricated USB indication or an empty/full battery.
++  const BatteryState& battery = systemStatusRenderData.battery;
++  if (!battery.voltageAvailable) {
++    oledDisplay->print("Batt: unavailable");
++  } else if (!battery.voltageValid) {
++    oledDisplay->print("Batt: unknown");
+   } else {
+     oledDisplay->print("Batt: ");
+-    oledDisplay->print(systemStatusRenderData.batteryVoltage, 2);
+-    oledDisplay->print("V ");
+-    oledDisplay->print((int)systemStatusRenderData.batteryPercentage);
+-    oledDisplay->print("% ");
+-    if (systemStatusRenderData.batteryCharging) {
+-      oledDisplay->print("USB+");
+-    } else if (systemStatusRenderData.batteryUsbPresent) {
+-      oledDisplay->print("USB");
+-    } else {
+-      oledDisplay->print(systemStatusRenderData.batteryIcon);
++    oledDisplay->print(battery.voltage, 2);
++    oledDisplay->print("V");
++    if (battery.percentageValid) {
++      oledDisplay->print(battery.percentageEstimated ? " ~" : " ");
++      oledDisplay->print((int)battery.percentage);
++      oledDisplay->print('%');
++    }
++    if (battery.usbKnown && battery.usbPresent) {
++      oledDisplay->print(" USB");
+     }
+   }
+-#else
+-  oledDisplay->print("Power: USB");
+-#endif
+   oledDisplay->println();
+ 
+   // Two separate axes: RADIO power, then WiFi CONNECTION.
+diff --git a/components/hardwareone/OLED_Utils.cpp b/components/hardwareone/OLED_Utils.cpp
+index 038e5e6..cedcf05 100644
+--- a/components/hardwareone/OLED_Utils.cpp
++++ b/components/hardwareone/OLED_Utils.cpp
+@@ -407,38 +407,24 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
+ 
+   // Battery / USB indicator
+   if (headerInfo.showBattery || headerInfo.showUSB) {
+-    extern BatteryState gBatteryState;
+-    extern char getBatteryIcon();
+-    extern bool isUsbPresent();
+-
+-    // USB presence (not just "actively charging") — covers the float-charge
+-    // case where CRATE ≈ 0 but VBUS is still holding the cell topped off.
+-    // Falling back to isBatteryCharging() here would silently drop the USB
+-    // indicator the moment the cell hits 100%.
+-    bool usbConnected = isUsbPresent();
+-
+-    if (usbConnected && headerInfo.showUSB) {
+-      // "USB" is 3 chars × 6 px = 18 px. Anything less wraps "B" onto the
+-      // next OLED row — see commit history for the original off-by-six bug.
+-      iconX -= 18;
++    const BatteryState battery = getBatterySnapshot();
++    if (battery.usbKnown && battery.usbPresent && headerInfo.showUSB) {
++      iconX -= 18;  // "USB": three 6-pixel characters
+       display->setCursor(iconX, 1);
+       display->print("USB");
+       drewRightSide = true;
+-    } else if (headerInfo.showBattery && gBatteryState.status != BATTERY_NOT_PRESENT) {
+-      // Show "NN%" — the tier-letter icon (F/H/M/L/E from getBatteryIcon)
+-      // would be redundant with the number AND reads like a unit suffix
+-      // ("87F" looked like 87° Fahrenheit). The richer state info (charging
+-      // vs float vs discharging) is communicated by the parallel "USB" /
+-      // "USB+" branch above and on the system status page.
+-      int pct = (int)gBatteryState.percentage;
+-
+-      // Width: percentage digits (1-3 chars) + "%" (1 char). 6 px per char.
+-      int pctWidth = (pct >= 100) ? 18 : (pct >= 10) ? 12 : 6;
+-      iconX -= (pctWidth + 6);
+-
++    } else if (headerInfo.showBattery) {
++      char label[8];
++      if (battery.percentageValid) {
++        snprintf(label, sizeof(label), "%s%d%%",
++                 battery.percentageEstimated ? "~" : "",
++                 (int)battery.percentage);
++      } else {
++        snprintf(label, sizeof(label), "--%%");
++      }
++      iconX -= strlen(label) * 6;
+       display->setCursor(iconX, 1);
+-      display->print(pct);
+-      display->print('%');
++      display->print(label);
+       drewRightSide = true;
+     }
+   }
+diff --git a/components/hardwareone/System_Automation.cpp b/components/hardwareone/System_Automation.cpp
+index 39c6d26..74c3bd2 100644
+--- a/components/hardwareone/System_Automation.cpp
++++ b/components/hardwareone/System_Automation.cpp
+@@ -59,7 +59,7 @@
+ #endif
+ 
+ // --- Additional condition-variable sources (see evaluateCondition) ---
+-#include "System_Battery.h"        // BATTERY: getBatteryPercentage()
++#include "System_Battery.h"        // BATTERY: valid battery snapshot
+ #include "System_Events.h"         // event triggers: ring drain + kind names
+ #include "System_Clock.h"          // NTP: Clock::isSynced()
+ #include "Bluetooth.h"             // BLE: isBLEConnected() (stub returns false when BT disabled)
+@@ -3120,8 +3120,11 @@ bool evaluateCondition(const char* condition) {
+            currentStringValue, gSettings.espnowTags.c_str());
+   // ---- System-state variables (numeric) ----
+   } else if (strcmp(sensor, "BATTERY") == 0) {
+-    // Fuel-gauge state of charge, 0-100% (reads 100 on boards with no battery hardware)
+-    currentValue = getBatteryPercentage();
++    // Gauge state of charge or approximate ADC voltage-derived percentage.
++    // Unavailable telemetry must not trigger a low/empty battery automation.
++    const BatteryState battery = getBatterySnapshot();
++    if (!battery.percentageValid) return false;
++    currentValue = battery.percentage;
+   } else if (strcmp(sensor, "HEAP") == 0) {
+     // Free INTERNAL DRAM in KB (the small, contested pool -- not the combined heap)
+     currentValue = (float)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024);
+diff --git a/components/hardwareone/System_Battery.cpp b/components/hardwareone/System_Battery.cpp
+index aaf9ea0..d5a9b38 100644
+--- a/components/hardwareone/System_Battery.cpp
++++ b/components/hardwareone/System_Battery.cpp
+@@ -1,627 +1,472 @@
+-// System_Battery.cpp — battery subsystem dispatcher
+-//
+-// One BatteryState (gBatteryState), three possible backends, picked at compile
+-// time by the board's BATTERY_BACKEND_* flag in System_BuildConfig.h:
+-//
+-//   BATTERY_BACKEND_ADC        → Adafruit Feather V1/V2, XIAO Plus, etc.
+-//                                Reads VBAT/2 via ADC1 + voltage divider.
+-//                                Charging is heuristic (voltage delta).
+-//   BATTERY_BACKEND_FUEL_GAUGE → Unexpected Maker FeatherS3[D].
+-//                                Reads MAX17048G over I2C. Charging is
+-//                                derived from the signed CRATE register.
+-//   neither                    → USB-only stub. gBatteryState seeded with
+-//                                status=NOT_PRESENT, percentage=100, voltage=5V
+-//                                so the OLED/G2 widgets render "USB" cleanly.
+-//
+-// updateBattery() is called every 10 seconds from HardwareOne.cpp's main
+-// loop. No dedicated task — see the rationale in i2csensor_max17048.h.
+-
++// Shared battery telemetry. Board wiring selects ADC or MAX17048; consumers
++// use one coherent, explicitly valid snapshot. A BAT node is not proof that a
++// cell is installed, and voltage never establishes USB or charging state.
+ #include "System_Battery.h"
+-#include "System_Events.h"  // systemEventPost — event register producer
+-#include "System_BuildConfig.h"
++#include "System_Events.h"
+ #include "System_Command.h"
+-#include "System_Utils.h"      // argWantsJson() — opt-in JSON output
+-#include "System_MemUtil.h"    // PSRAM_JSON_DOC / ps_alloc — battery json builder
++#include "System_Utils.h"
++#include "System_MemUtil.h"
+ #include "System_Debug.h"
+ #include "System_Notifications.h"
+-#include "System_Settings.h"   // gSettings (battery-log enable/interval) + setSetting
+-#include "System_VFS.h"        // guarded LittleFS access for the CSV log
+-#include "System_AuthIdentity.h" // currentAuthContext() — CLI handler file auth
+-#include "System_Mutex.h"      // fsLock/fsUnlock
+-#include <time.h>              // epoch timestamp column
+-
+-#if BATTERY_BACKEND_ADC
+-  #include <driver/adc.h>
+-  #include <esp_adc_cal.h>
++#include "System_Settings.h"
++#include "System_VFS.h"
++#include "System_AuthIdentity.h"
++#include "System_Mutex.h"
++#include <esp_err.h>
++#include <time.h>
++
++#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
++#include <esp_adc/adc_oneshot.h>
++#include <esp_adc/adc_cali.h>
++#include <esp_adc/adc_cali_scheme.h>
+ #endif
+-
+-#if BATTERY_BACKEND_FUEL_GAUGE
+-  #include "i2csensor_max17048.h"
++#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
++#include "i2csensor_max17048.h"
+ #endif
+ 
+-// Global battery state — public, shared by all consumers.
+-BatteryState gBatteryState = {
+-  .voltage = 0.0f,
+-  .percentage = 0.0f,
+-  .status = BATTERY_UNKNOWN,
+-  .isCharging = false,
+-  .usbPresent = false,
+-  .lastReadMs = 0,
+-  .rawADC = 0,
+-  .cratePctPerHr = 0.0f
++BatteryState gBatteryState;
++static portMUX_TYPE sStateMux = portMUX_INITIALIZER_UNLOCKED;
++// Created once by setup's initBattery(), before the first battery tick. All
++// hardware init/read/recalibration and transition detection share this mutex.
++static SemaphoreHandle_t sBackendMutex = nullptr;
++static bool sBackendInitialized = false;
++
++struct BatteryGuard {
++  bool held;
++  BatteryGuard() : held(sBackendMutex && xSemaphoreTake(sBackendMutex, portMAX_DELAY) == pdTRUE) {}
++  ~BatteryGuard() { if (held) xSemaphoreGive(sBackendMutex); }
+ };
+-
+-// USB-presence inference threshold (fallback heuristic only — used on boards
+-// without BATTERY_VBUS_SENSE_PIN wired). A LiPo cell can't physically hold
+-// above ~4.15V without an external charge source pushing current into it,
+-// so vBatt > this threshold infers USB presence at the float plateau when
+-// CRATE is too quiet to flag charging. Boards with a real VBUS GPIO ignore
+-// this and read the pin directly — see vbusSensePresent() below.
+-static constexpr float USB_PRESENT_VOLTAGE_THRESHOLD = 4.15f;
+-
+-// VBUS sense GPIO — authoritative USB-present signal when wired. The FeatherS3[D]
+-// routes USB VBUS to GPIO 34 through a divider. The MAX17048's CRATE register
+-// lags 30-60s on USB plug/unplug; this pin responds in microseconds. When
+-// BATTERY_VBUS_SENSE_PIN is -1 (board doesn't have it), the fuel-gauge backend
+-// falls back to the CRATE/voltage heuristic via vbusSensePresent() returning
+-// the OR of those signals.
+-#if BATTERY_VBUS_SENSE_PIN >= 0
+-static void vbusSenseInit() {
+-  pinMode(BATTERY_VBUS_SENSE_PIN, INPUT);
+-  // Log the initial pin state so a wrong pin assignment surfaces at boot
+-  // instead of being inferred from later misbehavior. On the FeatherS3[D]
+-  // this should read HIGH whenever USB is plugged in (whether or not a
+-  // host is enumerated) and LOW when only the cell is supplying power.
+-  const int level = digitalRead(BATTERY_VBUS_SENSE_PIN);
+-  INFO_SYSTEMF("Battery: VBUS sense GPIO %d initialized, reads %s",
+-               BATTERY_VBUS_SENSE_PIN, level == HIGH ? "HIGH (USB present)" : "LOW (no USB)");
++static BatteryState storedSnapshot() {
++  portENTER_CRITICAL(&sStateMux);
++  const BatteryState result = gBatteryState;
++  portEXIT_CRITICAL(&sStateMux);
++  return result;
++}
++static void publishSnapshot(const BatteryState& state) {
++  portENTER_CRITICAL(&sStateMux);
++  gBatteryState = state;
++  portEXIT_CRITICAL(&sStateMux);
+ }
+-static inline bool vbusSenseRead() {
+-  return digitalRead(BATTERY_VBUS_SENSE_PIN) == HIGH;
++BatteryState getBatterySnapshot() {
++  BatteryState state = storedSnapshot();
++  BatteryPolicy::expireSample(state, millis());
++  return state;
+ }
++
++#if ENABLE_BATTERY_MONITOR && BATTERY_VBUS_SENSE_PIN >= 0
+ static constexpr bool kHasVbusSense = true;
++static void vbusSenseInit() { pinMode(BATTERY_VBUS_SENSE_PIN, INPUT); }
++static void sampleVbus(BatteryState& state) {
++  state.usbPresent = digitalRead(BATTERY_VBUS_SENSE_PIN) == HIGH;
++  state.usbKnown = true;
++}
+ #else
+-static inline void vbusSenseInit() {}
+-static inline bool vbusSenseRead() { return false; }
+ static constexpr bool kHasVbusSense = false;
+-#endif
+-
+-// ============================================================================
+-// Backend: ADC (Feather V1/V2 voltage divider)
+-// ============================================================================
+-#if BATTERY_BACKEND_ADC
+-
+-static esp_adc_cal_characteristics_t* adc_chars = nullptr;
+-
+-#define BATTERY_SAMPLES 10
+-static float voltageHistory[BATTERY_SAMPLES] = {0};
+-static uint8_t voltageIndex = 0;
+-static bool historyFilled = false;
+-
+-static void adcBackendInit() {
+-  vbusSenseInit();
+-  adc1_config_width(ADC_WIDTH_BIT_12);
+-  adc1_config_channel_atten(BATTERY_ADC_CHANNEL, ADC_ATTEN_DB_11);
+-
+-  adc_chars = (esp_adc_cal_characteristics_t*)calloc(1, sizeof(esp_adc_cal_characteristics_t));
+-  esp_adc_cal_value_t val_type = esp_adc_cal_characterize(
+-    ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, adc_chars);
+-
+-  if (val_type == ESP_ADC_CAL_VAL_EFUSE_TP) {
+-    INFO_SYSTEMF("Battery ADC calibrated using Two Point Value");
+-  } else if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
+-    INFO_SYSTEMF("Battery ADC calibrated using eFuse Vref");
+-  } else {
+-    INFO_SYSTEMF("Battery ADC calibrated using Default Vref");
+-  }
+-  INFO_SYSTEMF("Battery monitor: ADC backend (pin=%d)", BATTERY_PIN);
++static void vbusSenseInit() {}
++static void sampleVbus(BatteryState& state) {
++  state.usbKnown = false;
++  state.usbPresent = false;
+ }
++#endif
+ 
+-// Returns voltage in volts. Sets `state.rawADC` for diagnostics. Charging
+-// flag is derived heuristically from voltage delta — the divider can't tell
+-// us whether VBUS is connected, only what the cell terminal sits at.
+-static void adcBackendSample(BatteryState& state) {
+-  uint32_t adcSum = 0;
+-  const int samples = 16;
+-  for (int i = 0; i < samples; i++) {
+-    adcSum += adc1_get_raw(BATTERY_ADC_CHANNEL);
+-    delayMicroseconds(100);
+-  }
+-  const uint16_t adcValue = adcSum / samples;
+-  state.rawADC = adcValue;
+-
+-  const uint32_t voltage_mv = esp_adc_cal_raw_to_voltage(adcValue, adc_chars);
+-  const float batteryVoltage = (voltage_mv / 1000.0f) * VBAT_DIVIDER;
+-
+-  voltageHistory[voltageIndex] = batteryVoltage;
+-  voltageIndex = (voltageIndex + 1) % BATTERY_SAMPLES;
+-  if (voltageIndex == 0) historyFilled = true;
+-
+-  float sum = 0;
+-  const int count = historyFilled ? BATTERY_SAMPLES : voltageIndex;
+-  for (int i = 0; i < count; i++) sum += voltageHistory[i];
+-  state.voltage = sum / count;
+-
+-  // Charging heuristic: cell voltage near top, or rising fast. Imperfect —
+-  // a board on USB at 4.05V looks the same as one off USB at 4.05V. The
+-  // fuel-gauge backend solves this via CRATE; for ADC we accept the noise.
+-  static float lastVoltage = 0;
+-  if (state.voltage > 4.1f) {
+-    state.isCharging = true;
+-  } else if (state.voltage > lastVoltage + 0.05f) {
+-    state.isCharging = true;
+-  } else {
+-    state.isCharging = false;
++#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
++static adc_oneshot_unit_handle_t sAdcUnit = nullptr;
++static adc_cali_handle_t sAdcCalibration = nullptr;
++static adc_unit_t sAdcUnitId;
++static adc_channel_t sAdcChannel;
++static esp_err_t sAdcInitError = ESP_ERR_INVALID_STATE;
++static bool sAdcEfuseCalibrated = false;
++
++static esp_err_t adcBackendDeinit() {
++  if (sAdcCalibration) {
++    esp_err_t err = ESP_ERR_NOT_SUPPORTED;
++#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
++    err = adc_cali_delete_scheme_curve_fitting(sAdcCalibration);
++#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
++    err = adc_cali_delete_scheme_line_fitting(sAdcCalibration);
++#endif
++    if (err != ESP_OK) return err;
++    sAdcCalibration = nullptr;
+   }
+-  lastVoltage = state.voltage;
+-
+-  // USB inference. When a hardware VBUS sense pin is wired, trust it
+-  // exclusively — it's deterministic and lag-free. Otherwise fall back to
+-  // the voltage/charging heuristic: active charging OR float-plateau (cell
+-  // can't sit above ~4.15V without USB).
+-  if (kHasVbusSense) {
+-    state.usbPresent = vbusSenseRead();
+-    // With a real VBUS signal, isCharging is "USB in AND CRATE going up".
+-    // The ADC has no CRATE, so approximate: USB in AND voltage below float.
+-    state.isCharging = state.usbPresent && (state.voltage < USB_PRESENT_VOLTAGE_THRESHOLD);
+-  } else {
+-    state.usbPresent = state.isCharging || (state.voltage > USB_PRESENT_VOLTAGE_THRESHOLD);
++  if (sAdcUnit) {
++    const esp_err_t err = adc_oneshot_del_unit(sAdcUnit);
++    if (err != ESP_OK) return err;
++    sAdcUnit = nullptr;
+   }
+-
+-  state.cratePctPerHr = 0.0f;  // not derived from ADC
++  sAdcEfuseCalibrated = false;
++  return ESP_OK;
+ }
+ 
+-#endif  // BATTERY_BACKEND_ADC
+-
+-// ============================================================================
+-// Backend: Fuel gauge (MAX17048G over I2C)
+-// ============================================================================
+-#if BATTERY_BACKEND_FUEL_GAUGE
+-
+-static bool fuelGaugePresent = false;
+-
+-static void fuelGaugeBackendInit() {
+-  // Don't probe here — initBattery() runs BEFORE initI2CBuses() in the boot
+-  // sequence, so I2C isn't ready yet. The first updateBattery() call from
+-  // the main loop (10s after boot) will lazy-probe via the sample path.
+-  fuelGaugePresent = false;
+-  vbusSenseInit();
+-  INFO_SYSTEMF("Battery monitor: MAX17048 fuel gauge backend (probe deferred to first tick)");
+-}
+-
+-// Charging detection threshold for CRATE (%/hr). The MAX17048's quiescent
+-// noise floor is around ±0.2 %/hr; anything beyond ±0.5 is real motion of
+-// charge. Picked conservatively so we don't flip BATTERY_CHARGING on/off
+-// every read when the cell is sitting at the float-charge plateau.
+-static constexpr float CHARGING_CRATE_THRESHOLD_PCT_HR = 0.5f;
+-
+-// Below this cell voltage, treat the gauge as "no cell installed" — the
+-// MAX17048 powers off VDD (the 3.3V rail) and will report a wandering low
+-// voltage with no actual battery wired to its B+ pin.
+-static constexpr float NO_CELL_VOLTAGE_THRESHOLD = 2.5f;
+-
+-static void fuelGaugeBackendSample(BatteryState& state) {
+-  state.rawADC = 0;
+-
+-  // If the chip wasn't detected at boot, re-probe once per call — handles
+-  // the case where I2C came up after initBattery() (rare but possible if
+-  // boot ordering changes).
+-  if (!fuelGaugePresent) {
+-    fuelGaugePresent = fuelGaugeProbe();
+-    if (!fuelGaugePresent) {
+-      // Stay in NOT_PRESENT — don't blast voltage/percentage to stale data.
+-      // No cell detected → the device must be running on USB to even be
+-      // executing this code, so usbPresent is unambiguously true (and the
+-      // VBUS GPIO will confirm it when wired).
+-      state.voltage = 0.0f;
+-      state.percentage = 0.0f;
+-      state.cratePctPerHr = 0.0f;
+-      state.isCharging = false;
+-      state.usbPresent = kHasVbusSense ? vbusSenseRead() : true;
+-      return;
++static esp_err_t adcBackendInit() {
++  esp_err_t err = adcBackendDeinit();
++  if (err != ESP_OK) return sAdcInitError = err;
++  err = adc_oneshot_io_to_channel(BATTERY_ADC_PIN, &sAdcUnitId, &sAdcChannel);
++  if (err != ESP_OK) return sAdcInitError = err;
++  adc_oneshot_unit_init_cfg_t unit = {};
++  unit.unit_id = sAdcUnitId;
++  unit.ulp_mode = ADC_ULP_MODE_DISABLE;
++  err = adc_oneshot_new_unit(&unit, &sAdcUnit);
++  if (err != ESP_OK) return sAdcInitError = err;
++  adc_oneshot_chan_cfg_t channel = {};
++  channel.atten = BATTERY_ADC_ATTEN;
++  channel.bitwidth = ADC_BITWIDTH_12;
++  err = adc_oneshot_config_channel(sAdcUnit, sAdcChannel, &channel);
++  if (err == ESP_OK) {
++#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
++    adc_cali_curve_fitting_config_t calibration = {};
++    calibration.unit_id = sAdcUnitId;
++    calibration.chan = sAdcChannel;
++    calibration.atten = BATTERY_ADC_ATTEN;
++    calibration.bitwidth = ADC_BITWIDTH_12;
++    err = adc_cali_create_scheme_curve_fitting(&calibration, &sAdcCalibration);
++    sAdcEfuseCalibrated = err == ESP_OK;
++#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
++    adc_cali_line_fitting_config_t calibration = {};
++    calibration.unit_id = sAdcUnitId;
++    calibration.atten = BATTERY_ADC_ATTEN;
++    calibration.bitwidth = ADC_BITWIDTH_12;
++#if CONFIG_IDF_TARGET_ESP32
++    adc_cali_line_fitting_efuse_val_t source;
++    err = adc_cali_scheme_line_fitting_check_efuse(&source);
++    if (err == ESP_OK) {
++      sAdcEfuseCalibrated = source != ADC_CALI_LINE_FITTING_EFUSE_VAL_DEFAULT_VREF;
++      calibration.default_vref = BATTERY_ADC_DEFAULT_VREF_MV;
++      if (!sAdcEfuseCalibrated && calibration.default_vref == 0) err = ESP_ERR_NOT_SUPPORTED;
+     }
++#else
++    sAdcEfuseCalibrated = true;
++#endif
++    if (err == ESP_OK) err = adc_cali_create_scheme_line_fitting(&calibration, &sAdcCalibration);
++#else
++    err = ESP_ERR_NOT_SUPPORTED;
++#endif
+   }
+-
+-  FuelGaugeReading r;
+-  if (!fuelGaugeRead(&r)) {
+-    DEBUG_SYSTEMF("[BATT] fuelGaugeRead failed; keeping previous state");
+-    return;
+-  }
+-
+-  state.voltage       = r.voltage;
+-  state.percentage    = r.socPct;
+-  state.cratePctPerHr = r.cratePctPerHr;
+-
+-  // Charging classification:
+-  //   CRATE > +threshold   → charging (cell taking on charge)
+-  //   CRATE < -threshold   → discharging
+-  //   |CRATE| ≤ threshold  → keep previous classification (avoids flapping
+-  //                          at the float-charge plateau where CRATE ≈ 0
+-  //                          but USB is still connected)
+-  // USB-present detection. With a hardware VBUS sense pin (FeatherS3[D] →
+-  // GPIO 34) the answer is deterministic and lag-free; without it we fall
+-  // back to the CRATE/voltage heuristic.
+-  //
+-  // Why VBUS-sense matters: the MAX17048's CRATE register is a heavily-
+-  // smoothed estimate of %/hr that lags 30-60s behind reality. When the
+-  // user unplugs USB, CRATE stays positive for almost a minute before
+-  // flipping sign, so the OLED would keep displaying "USB+ 82%" long
+-  // after the cable is gone. The GPIO responds in microseconds.
+-  if (kHasVbusSense) {
+-    state.usbPresent = vbusSenseRead();
+-    // isCharging is "USB is in AND cell is taking on charge". With VBUS as
+-    // an authoritative signal, isCharging only flips when BOTH are true:
+-    // USB connected, AND CRATE clearly positive. Float-plateau case
+-    // (USB in, CRATE ≈ 0) correctly reports isCharging=false → "USB" not "USB+".
+-    if (!state.usbPresent) {
+-      state.isCharging = false;  // USB unplugged → cannot be charging
+-    } else if (r.cratePctPerHr >  CHARGING_CRATE_THRESHOLD_PCT_HR) {
+-      state.isCharging = true;
+-    } else if (r.cratePctPerHr < -CHARGING_CRATE_THRESHOLD_PCT_HR) {
+-      state.isCharging = false;
+-    }
+-    // else (USB in, CRATE in deadband): leave isCharging unchanged.
++  if (err != ESP_OK) {
++    // Never substitute a raw-code/3.3V estimate when calibration fails.
++    adcBackendDeinit();
++    INFO_SYSTEMF("Battery ADC unavailable: %s", esp_err_to_name(err));
+   } else {
+-    if (r.cratePctPerHr >  CHARGING_CRATE_THRESHOLD_PCT_HR) {
+-      state.isCharging = true;
+-    } else if (r.cratePctPerHr < -CHARGING_CRATE_THRESHOLD_PCT_HR) {
+-      state.isCharging = false;
+-    }
+-    // Fallback heuristic: active charge OR float-plateau voltage.
+-    state.usbPresent = (r.cratePctPerHr > CHARGING_CRATE_THRESHOLD_PCT_HR)
+-                    || (r.voltage > USB_PRESENT_VOLTAGE_THRESHOLD);
++    INFO_SYSTEMF("Battery ADC: GPIO%d, unit%d channel%d, divider %.5f, %s calibration",
++      BATTERY_ADC_PIN, (int)sAdcUnitId + 1, (int)sAdcChannel,
++      (double)BATTERY_ADC_DIVIDER, sAdcEfuseCalibrated ? "eFuse" : "nominal Vref");
+   }
++  return sAdcInitError = err;
++}
+ 
+-  // "Topped off" clamp. The MAX17048's ModelGauge assumes a 4.20V full-charge
+-  // point, but this board's charge IC terminates / floats the cell around
+-  // ~4.17V — so the gauge's SOC plateaus a couple percent short and never
+-  // reads 100%. When USB is present AND charging has terminated (not actively
+-  // charging) AND the cell is sitting in the topped-off band, the pack is full
+-  // for all practical purposes — report 100% so the UI matches the existing
+-  // "USB (full)" state instead of sticking at 98%. Discharge and active-charge
+-  // readings still come straight from the gauge's coulomb-counted SOC.
+-  if (state.usbPresent && !state.isCharging && state.voltage >= VBAT_BAND_FULL) {
+-    state.percentage = 100.0f;
++static esp_err_t adcBackendSample(BatteryState& state) {
++  if (sAdcInitError != ESP_OK) return sAdcInitError;
++  if (!sAdcUnit || !sAdcCalibration) return ESP_ERR_INVALID_STATE;
++  int raw = 0;
++  // Discard the first conversion after idle, then average calibrated values.
++  // This reduces noise, but resistor/ADC accuracy still needs meter validation.
++  esp_err_t err = adc_oneshot_read(sAdcUnit, sAdcChannel, &raw);
++  if (err != ESP_OK) return err;
++  delayMicroseconds(200);
++  uint32_t rawSum = 0;
++  int32_t mvSum = 0;
++  constexpr unsigned count = 16;
++  for (unsigned i = 0; i < count; ++i) {
++    err = adc_oneshot_read(sAdcUnit, sAdcChannel, &raw);
++    if (err != ESP_OK) return err;
++    // A clipped upper rail cannot establish terminal voltage. Zero remains
++    // a meaningful BAT-node reading, but is not classified as an absent cell.
++    if (raw < 0 || raw >= 4095) return ESP_ERR_INVALID_RESPONSE;
++    int mv = 0;
++    err = adc_cali_raw_to_voltage(sAdcCalibration, raw, &mv);
++    if (err != ESP_OK) return err;
++    if (mv < 0) return ESP_ERR_INVALID_RESPONSE;
++    rawSum += raw;
++    mvSum += mv;
++    delayMicroseconds(100);
+   }
++  const float volts = (mvSum / (1000.0f * count)) * BATTERY_ADC_DIVIDER;
++  if (!BatteryPolicy::applyAdcVoltage(state, volts, rawSum / count, millis()))
++    return ESP_ERR_INVALID_RESPONSE;
++  state.voltageCalibrated = sAdcEfuseCalibrated;
++  return ESP_OK;
+ }
++#endif
+ 
+-#endif  // BATTERY_BACKEND_FUEL_GAUGE
+-
+-// ============================================================================
+-// Backend-agnostic status classification + notification
+-// ============================================================================
+-// Maps the populated BatteryState fields to a status enum and fires
+-// notifications on state transitions. Pure function of the inputs — no I/O.
+-//
+-// Classification (voltage-based, so it works with ANY LiPo regardless of
+-// capacity — no fuel-gauge SOC required):
+-//   1. voltage < 2V → NOT_PRESENT (no cell wired)
+-//   2. usbPresent   → CHARGING, ALWAYS. On the charger the cell sits near 4.2V
+-//                     even at low SOC (CV phase), so voltage can't tell "topped
+-//                     off" from "still filling" — so we just say "Charging"
+-//                     until it's unplugged.
+-//   3. off charger  → voltage ladder: FULL >= 4.15, then HIGH / GOOD / MEDIUM /
+-//                     LOW / CRITICAL / EMPTY (see VBAT_BAND_* in the header).
+-//
+-// usbPresent is the authoritative power gate (VBUS-sense GPIO, lag-free);
+-// isCharging stays a display sub-state ("USB+" vs "USB"), not a status driver.
+-static void classifyAndNotify(BatteryState& state) {
+-  const BatteryStatus prevStatus = state.status;
+-  // Under the rule below, "on charger" maps 1:1 to BATTERY_CHARGING.
+-  const bool wasOnCharger = (prevStatus == BATTERY_CHARGING);
+-
+-  if (state.voltage < 2.0f) {
+-    state.status = BATTERY_NOT_PRESENT;
+-  } else if (state.usbPresent) {
+-    state.status = BATTERY_CHARGING;                              // on charger → always Charging
+-  } else if (state.voltage >= VBAT_BAND_FULL) {
+-    state.status = BATTERY_FULL;                                  // off charger, topped off
+-  } else if (state.voltage >= VBAT_BAND_HIGH) {
+-    state.status = BATTERY_HIGH;
+-  } else if (state.voltage >= VBAT_BAND_GOOD) {
+-    state.status = BATTERY_GOOD;
+-  } else if (state.voltage >= VBAT_BAND_MEDIUM) {
+-    state.status = BATTERY_MEDIUM;
+-  } else if (state.voltage >= VBAT_BAND_LOW) {
+-    state.status = BATTERY_LOW;
+-  } else if (state.voltage >= VBAT_BAND_CRITICAL) {
+-    state.status = BATTERY_CRITICAL;
+-  } else {
+-    state.status = BATTERY_EMPTY;
++#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
++static bool sFuelGaugePresent = false;
++static esp_err_t fuelGaugeBackendSample(BatteryState& state) {
++  if (!sFuelGaugePresent) sFuelGaugePresent = fuelGaugeProbe();
++  if (!sFuelGaugePresent) return ESP_ERR_NOT_FOUND;
++  FuelGaugeReading reading;
++  if (!fuelGaugeRead(&reading)) {
++    sFuelGaugePresent = false;
++    return ESP_FAIL;
+   }
++  if (!std::isfinite(reading.voltage) || reading.voltage < 0 || reading.voltage > 6.0f ||
++      !std::isfinite(reading.socPct) || reading.socPct < 0 || reading.socPct > 100.0f ||
++      !std::isfinite(reading.cratePctPerHr)) return ESP_ERR_INVALID_RESPONSE;
++  state.voltage = reading.voltage;
++  state.percentage = reading.socPct;
++  state.cratePctPerHr = reading.cratePctPerHr;
++  state.rawADC = 0;
++  state.voltageValid = state.voltageCalibrated = state.hasSample = true;
++  state.percentageValid = std::isfinite(BatteryPolicy::estimatePercentage(reading.voltage));
++  state.percentageEstimated = true; // MAX17048 ModelGauge estimates SOC too.
++  state.rateValid = state.percentageValid;
++  state.presenceKnown = false; // Gauge communication is not a cell detector.
++  state.chargingKnown = false;
++  state.chargingEstimated = true;
++  if (state.usbKnown && !state.usbPresent) {
++    state.chargingKnown = true;
++    state.isCharging = false;
++    state.chargingEstimated = false;
++  } else if (state.rateValid && fabsf(reading.cratePctPerHr) > 0.5f) {
++    state.chargingKnown = true;
++    state.isCharging = reading.cratePctPerHr > 0.5f;
++  }
++  // CRATE's deadband means unknown, not indefinite retention of "charging".
++  // A high terminal voltage does not establish USB or force SOC to 100%.
++  state.lastReadMs = state.lastAttemptMs = millis();
++  state.lastError = ESP_OK;
++  state.stale = false;
++  state.status = BatteryPolicy::classify(state);
++  state.statusEstimated = state.status != BATTERY_UNKNOWN &&
++    (state.status != BATTERY_CHARGING || state.chargingEstimated);
++  return ESP_OK;
++}
++#endif
+ 
+-  // Notifications fire only on transitions, and never on the first read
+-  // (prevStatus == UNKNOWN) — avoids spamming "USB connected" at boot.
+-  if (prevStatus != BATTERY_UNKNOWN) {
+-    const bool nowOnCharger = (state.status == BATTERY_CHARGING);
+-    if (nowOnCharger && !wasOnCharger) {
+-      systemEventPost(SYSEVT_USB_ON);
+-    } else if (!nowOnCharger && wasOnCharger) {
+-      systemEventPost(SYSEVT_USB_OFF);
+-    }
+-    if (state.status == BATTERY_LOW && prevStatus != BATTERY_LOW) {
+-      { char pct[8]; snprintf(pct, sizeof(pct), "%d", (int)state.percentage);
+-        systemEventPost(SYSEVT_BATTERY_LOW, pct); }
+-    }
++static void notifyTransitions(const BatteryState& prev, const BatteryState& state) {
++  if (prev.usbKnown && state.usbKnown && prev.usbPresent != state.usbPresent)
++    systemEventPost(state.usbPresent ? SYSEVT_USB_ON : SYSEVT_USB_OFF);
++  char pct[12];
++  if (state.percentageValid)
++    snprintf(pct, sizeof(pct), "%s%d", state.percentageEstimated ? "~" : "", (int)state.percentage);
++  else snprintf(pct, sizeof(pct), "unknown");
++  if (prev.chargingKnown && state.chargingKnown && prev.isCharging != state.isCharging)
++    systemEventPost(state.isCharging ? SYSEVT_CHARGING_STARTED : SYSEVT_CHARGING_STOPPED, pct);
++  if (prev.status != BATTERY_UNKNOWN && state.percentageValid) {
++    if (state.status == BATTERY_LOW && prev.status != BATTERY_LOW)
++      systemEventPost(SYSEVT_BATTERY_LOW, pct);
+     if ((state.status == BATTERY_CRITICAL || state.status == BATTERY_EMPTY) &&
+-        prevStatus != BATTERY_CRITICAL && prevStatus != BATTERY_EMPTY) {
+-      { char pct[8]; snprintf(pct, sizeof(pct), "%d", (int)state.percentage);
+-        systemEventPost(SYSEVT_BATTERY_CRITICAL, pct); }
+-    }
++        prev.status != BATTERY_CRITICAL && prev.status != BATTERY_EMPTY)
++      systemEventPost(SYSEVT_BATTERY_CRITICAL, pct);
+   }
+-
+-  // charging_started/stopped bus events: keyed on the isCharging sub-state
+-  // (actually charging vs merely USB-powered — VBUS attach/detach already
+-  // posts usb_on/usb_off). First-read guarded like the notifies above; the
+-  // fuel gauge's CRATE hysteresis upstream damps flapping. Callable from
+-  // both loopTask (periodic) and cmd_exec (batterystatus) — the static
+-  // latch tolerates either caller seeing the edge first.
+-  {
+-    static int8_t sPrevCharging = -1;  // -1 = no reading yet
+-    const int8_t nowCharging = state.isCharging ? 1 : 0;
+-    if (sPrevCharging >= 0 && nowCharging != sPrevCharging) {
+-      char pct[8];
+-      snprintf(pct, sizeof(pct), "%d", (int)state.percentage);
+-      systemEventPost(nowCharging ? SYSEVT_CHARGING_STARTED : SYSEVT_CHARGING_STOPPED, pct);
+-    }
+-    sPrevCharging = nowCharging;
++  // Preserve the full-charge latch across short read errors and SOC jitter.
++  // Lifecycle mutex serializes this edge detector with recalibration too.
++  static bool wasFull = false;
++  if (state.usbKnown && !state.usbPresent) wasFull = false;
++  if (state.percentageValid && state.percentage < 95.0f) wasFull = false;
++  if (!wasFull && state.percentageValid && state.usbKnown && state.usbPresent &&
++      state.percentage >= 100.0f) {
++    if (prev.percentageValid) systemEventPost(SYSEVT_BATTERY_FULL, pct);
++    wasFull = true;
+   }
+ 
+-  // battery_full edge: post once when the cell tops off on the charger, never
+-  // every poll. Keyed on usbPresent (on charger) + percentage, NOT isCharging —
+-  // the charger drops isCharging to false the instant the cell reaches float, so
+-  // it's a poor "full" gate (see BatteryState::usbPresent). Hysteresis: latch at
+-  // >=100%, clear below 95% or once unplugged, so a cell hovering at the top
+-  // can't re-fire.
+-  {
+-    static bool gWasFull = false;
+-    if (!gWasFull && state.usbPresent && state.percentage >= 100.0f) {
+-      char pct[8];
+-      snprintf(pct, sizeof(pct), "%d", (int)state.percentage);
+-      systemEventPost(SYSEVT_BATTERY_FULL, pct);
+-      gWasFull = true;
+-    } else if (gWasFull && (!state.usbPresent || state.percentage < 95.0f)) {
+-      gWasFull = false;
+-    }
+-  }
+ }
+ 
+-// ============================================================================
+-// Public lifecycle — dispatch to selected backend
+-// ============================================================================
++// Caller holds sBackendMutex. Readers see the previous complete snapshot while
++// hardware I/O is in progress, then atomically see either success or failure.
++static void updateBatteryLocked() {
++  BatteryState state = storedSnapshot();
++  const BatteryState previous = getBatterySnapshot();
++  state.lastAttemptMs = millis();
++  sampleVbus(state);
++  esp_err_t err = ESP_ERR_NOT_SUPPORTED;
++#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
++  err = adcBackendSample(state);
++#elif ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
++  err = fuelGaugeBackendSample(state);
++#endif
++  if (err != ESP_OK) BatteryPolicy::invalidateSample(state, err, millis());
++  state.status = BatteryPolicy::classify(state);
++  publishSnapshot(state);
++  notifyTransitions(previous, state);
++}
+ 
+ void initBattery() {
+-#if !ENABLE_BATTERY_MONITOR
+-  // Subsystem disabled (USB-only build). Seed a stable "no cell" state.
+-  // usbPresent=true because the device is running, and the only way it can
+-  // be running in a USB-only build is from VBUS.
+-  gBatteryState.voltage = 5.0f;
+-  gBatteryState.percentage = 100.0f;
+-  gBatteryState.status = BATTERY_NOT_PRESENT;
+-  gBatteryState.isCharging = false;
+-  gBatteryState.usbPresent = true;
+-  INFO_SYSTEMF("Battery monitoring disabled (USB power assumed)");
+-  return;
++  // Setup calls once before periodic and command access. Subsequent calls use
++  // the same lifecycle lock and do not allocate another ADC unit.
++  if (!sBackendMutex) sBackendMutex = xSemaphoreCreateMutex();
++  BatteryGuard guard;
++  if (!guard.held || sBackendInitialized) return;
++  sBackendInitialized = true;
++  BatteryState state;
++  state.voltageAvailable = ENABLE_BATTERY_MONITOR && (BATTERY_BACKEND_ADC || BATTERY_BACKEND_FUEL_GAUGE);
++  publishSnapshot(state);
++  vbusSenseInit();
++#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
++  adcBackendInit();
++  updateBatteryLocked();
++#elif ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
++  // I2C initializes after initBattery(); first loop tick performs the probe.
++  INFO_SYSTEMF("Battery: MAX17048 probe deferred until first battery tick");
+ #else
+-  #if BATTERY_BACKEND_ADC
+-    adcBackendInit();
+-    updateBattery();
+-  #elif BATTERY_BACKEND_FUEL_GAUGE
+-    // Defer initial read — I2C bus may not be up yet at initBattery() time.
+-    // The probe inside updateBattery() handles this lazily on first tick.
+-    fuelGaugeBackendInit();
+-  #else
+-    // Subsystem enabled but board claims no backend. Treat as USB-only.
+-    gBatteryState.voltage = 5.0f;
+-    gBatteryState.percentage = 100.0f;
+-    gBatteryState.status = BATTERY_NOT_PRESENT;
+-    gBatteryState.isCharging = false;
+-    gBatteryState.usbPresent = true;
+-    INFO_SYSTEMF("Battery monitor enabled but no backend selected — USB assumed");
+-  #endif
++  INFO_SYSTEMF("Battery measurement unavailable for this build");
+ #endif
+ }
+ 
+ void updateBattery() {
+-#if !ENABLE_BATTERY_MONITOR
+-  return;
+-#else
+-  #if BATTERY_BACKEND_ADC
+-    adcBackendSample(gBatteryState);
+-    classifyAndNotify(gBatteryState);
+-  #elif BATTERY_BACKEND_FUEL_GAUGE
+-    fuelGaugeBackendSample(gBatteryState);
+-    if (gBatteryState.voltage >= NO_CELL_VOLTAGE_THRESHOLD ||
+-        gBatteryState.status == BATTERY_UNKNOWN) {
+-      classifyAndNotify(gBatteryState);
+-    } else {
+-      gBatteryState.status = BATTERY_NOT_PRESENT;
+-    }
+-  #endif
+-  gBatteryState.lastReadMs = millis();
++#if ENABLE_BATTERY_MONITOR && (BATTERY_BACKEND_ADC || BATTERY_BACKEND_FUEL_GAUGE)
++  BatteryGuard guard;
++  if (guard.held && sBackendInitialized) updateBatteryLocked();
+ #endif
+ }
+ 
+-// ============================================================================
+-// Accessors
+-// ============================================================================
+-
+-float getBatteryPercentage() { return gBatteryState.percentage; }
+-float getBatteryVoltage()    { return gBatteryState.voltage; }
+-bool  isBatteryCharging()    { return gBatteryState.isCharging; }
+-bool  isUsbPresent()         { return gBatteryState.usbPresent; }
+-
+-const char* getBatteryStatusString() {
+-#if !ENABLE_BATTERY_MONITOR
+-  return "USB Power";
+-#endif
+-  switch (gBatteryState.status) {
+-    case BATTERY_CHARGING:    return "Charging";
+-    case BATTERY_FULL:        return "Full";
+-    case BATTERY_HIGH:        return "High";
+-    case BATTERY_GOOD:        return "Good";
+-    case BATTERY_MEDIUM:      return "Medium";
++float getBatteryPercentage() {
++  const auto state = getBatterySnapshot();
++  return state.percentageValid ? state.percentage : NAN;
++}
++float getBatteryVoltage() {
++  const auto state = getBatterySnapshot();
++  return state.voltageValid ? state.voltage : NAN;
++}
++bool isBatteryCharging() {
++  const auto state = getBatterySnapshot();
++  return state.chargingKnown && state.isCharging;
++}
++bool isUsbPresent() {
++  const auto state = getBatterySnapshot();
++  return state.usbKnown && state.usbPresent;
++}
++const char* batteryStatusString(BatteryStatus status) {
++  switch (status) {
++    case BATTERY_CHARGING: return "Charging";
++    case BATTERY_FULL: return "Full";
++    case BATTERY_HIGH: return "High";
++    case BATTERY_GOOD: return "Good";
++    case BATTERY_MEDIUM: return "Medium";
+     case BATTERY_DISCHARGING: return "Discharging";
+-    case BATTERY_LOW:         return "Low";
+-    case BATTERY_CRITICAL:    return "Critical";
+-    case BATTERY_EMPTY:       return "Empty";
++    case BATTERY_LOW: return "Low";
++    case BATTERY_CRITICAL: return "Critical";
++    case BATTERY_EMPTY: return "Empty";
+     case BATTERY_NOT_PRESENT: return "Not Present";
+-    default:                  return "Unknown";
++    default: return "Unknown";
+   }
+ }
+-
++const char* batteryStatusString(const BatteryState& state) {
++  if (!state.statusEstimated) return batteryStatusString(state.status);
++  switch (state.status) {
++    case BATTERY_CHARGING: return "Charging (estimated)";
++    case BATTERY_FULL: return "Full (estimated)";
++    case BATTERY_HIGH: return "High (estimated)";
++    case BATTERY_GOOD: return "Good (estimated)";
++    case BATTERY_MEDIUM: return "Medium (estimated)";
++    case BATTERY_LOW: return "Low (estimated)";
++    case BATTERY_CRITICAL: return "Critical (estimated)";
++    case BATTERY_EMPTY: return "Empty (estimated)";
++    default: return batteryStatusString(state.status);
++  }
++}
++const char* getBatteryStatusString() { return batteryStatusString(getBatterySnapshot()); }
+ char getBatteryIcon() {
+-  if (gBatteryState.status == BATTERY_NOT_PRESENT) return '?';
+-  if (gBatteryState.isCharging) return '+';
+-  if (gBatteryState.percentage >= 75) return 'F';
+-  if (gBatteryState.percentage >= 50) return 'H';
+-  if (gBatteryState.percentage >= 25) return 'M';
+-  if (gBatteryState.percentage >= 10) return 'L';
++  const auto state = getBatterySnapshot();
++  if (!state.percentageValid) return '?';
++  if (state.chargingKnown && state.isCharging) return '+';
++  if (state.percentage >= 75) return 'F';
++  if (state.percentage >= 50) return 'H';
++  if (state.percentage >= 25) return 'M';
++  if (state.percentage >= 10) return 'L';
+   return 'E';
+ }
+ 
+-// ============================================================================
+-// CLI commands
+-// ============================================================================
+-
+-// Single source of truth for battery telemetry JSON — used by BOTH `battery json`
+-// (CLI/BLE, via cmd_battery_status) and the web /api/battery/status, so every
+-// interface returns the SAME schema. `present` is the availability gate: false
+-// (or backend "usb-only") means there's no battery hardware → the app/UI hides
+-// the battery card. No secrets; safe on any transport.
+ void buildBatteryJson(JsonDocument& doc) {
+-  doc["schema"]             = 1;
+-  doc["present"]       = (gBatteryState.status != BATTERY_NOT_PRESENT);
+-#if BATTERY_BACKEND_FUEL_GAUGE
+-  doc["backend"]       = "fuelgauge";
++  const auto state = getBatterySnapshot();
++  doc["schema"] = 1;
++#if !ENABLE_BATTERY_MONITOR
++  doc["backend"] = "disabled";
++#elif BATTERY_BACKEND_FUEL_GAUGE
++  doc["backend"] = "fuelgauge";
+ #elif BATTERY_BACKEND_ADC
+-  doc["backend"]       = "adc";
++  doc["backend"] = "adc";
+ #else
+-  doc["backend"]       = "usb-only";
++  doc["backend"] = "unavailable";
+ #endif
+-  doc["voltage"]       = gBatteryState.voltage;
+-  doc["percentage"]    = gBatteryState.percentage;
+-  doc["status"]        = getBatteryStatusString();
+-  doc["charging"]      = gBatteryState.isCharging;
+-  doc["usbPresent"]    = gBatteryState.usbPresent;
+-  doc["vbusSense"]     = kHasVbusSense;
+-  doc["lastReadMsAgo"] = (unsigned long)(millis() - gBatteryState.lastReadMs);
+-#if BATTERY_BACKEND_FUEL_GAUGE
+-  doc["ratePctPerHr"]  = gBatteryState.cratePctPerHr;
+-  if (gBatteryState.status != BATTERY_NOT_PRESENT && gBatteryState.cratePctPerHr < -0.01f) {
+-    doc["etaMinutes"]  = (long)((gBatteryState.percentage / -gBatteryState.cratePctPerHr) * 60.0f);
+-  }
+-#elif BATTERY_BACKEND_ADC
+-  doc["rawADC"]        = gBatteryState.rawADC;
++  if (state.presenceKnown) doc["present"] = state.present; else doc["present"] = nullptr;
++  if (state.voltageValid) doc["voltage"] = state.voltage; else doc["voltage"] = nullptr;
++  if (state.percentageValid) doc["percentage"] = state.percentage; else doc["percentage"] = nullptr;
++  if (state.chargingKnown) doc["charging"] = state.isCharging; else doc["charging"] = nullptr;
++  if (state.usbKnown) doc["usbPresent"] = state.usbPresent; else doc["usbPresent"] = nullptr;
++  doc["status"] = batteryStatusString(state);
++  doc["vbusSense"] = kHasVbusSense;
++  doc["voltageAvailable"] = state.voltageAvailable;
++  doc["voltageValid"] = state.voltageValid;
++  doc["voltageCalibrated"] = state.voltageCalibrated;
++  doc["percentageValid"] = state.percentageValid;
++  doc["percentageEstimated"] = state.percentageEstimated;
++  doc["statusEstimated"] = state.statusEstimated;
++#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
++  doc["percentageSource"] = "voltage";
++#elif ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
++  doc["percentageSource"] = "fuelgauge";
++#else
++  doc["percentageSource"] = nullptr;
++#endif
++  doc["presenceKnown"] = state.presenceKnown;
++  doc["chargingKnown"] = state.chargingKnown;
++  doc["chargingEstimated"] = state.chargingEstimated;
++  doc["usbKnown"] = state.usbKnown;
++  doc["rateValid"] = state.rateValid;
++  doc["stale"] = state.stale;
++  doc["hasSample"] = state.hasSample;
++  doc["lastError"] = state.lastError;
++  if (state.hasSample) doc["lastReadMsAgo"] = (uint32_t)(millis() - state.lastReadMs);
++  else doc["lastReadMsAgo"] = nullptr;
++#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
++  if (state.rateValid) doc["ratePctPerHr"] = state.cratePctPerHr;
++  else doc["ratePctPerHr"] = nullptr;
++  // CRATE is a delayed estimate. Do not provide a fabricated runtime when
++  // there is no valid negative rate; preserve the existing optional key.
++  if (state.percentageValid && state.rateValid && state.cratePctPerHr < -0.01f)
++    doc["etaMinutes"] = (long)((state.percentage / -state.cratePctPerHr) * 60.0f);
++#elif ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
++  if (state.voltageValid) doc["rawADC"] = state.rawADC; else doc["rawADC"] = nullptr;
++  doc["adcPin"] = BATTERY_ADC_PIN;
++  doc["divider"] = BATTERY_ADC_DIVIDER;
+ #endif
+ }
+ 
+ const char* cmd_battery_status(const String& argsInput) {
+-  // Deliberately does NOT call updateBattery(). gBatteryState is written by the
+-  // 10 s tick on the main loop (HardwareOne.cpp:2160) and has NO mutex, so a
+-  // forced update from the cmd_exec task raced that tick inside
+-  // classifyAndNotify() — which is a transition-edge detector (reads prevStatus,
+-  // writes status, fires only on a change). Concurrent runs could DOUBLE-FIRE a
+-  // "charger connected" notification, or SWALLOW the transition entirely when one
+-  // task overwrote status before the other sampled prevStatus. A polling client
+-  // hitting this command made that race easy to trigger.
+-  // Reading the cached snapshot leaves a single writer (the 10 s tick), matches
+-  // what /api/battery/status already does via buildBatteryJson(), and stays
+-  // self-describing: the JSON carries "lastReadMsAgo" so callers see the age.
+-
+-  // Structured path: bounded battery telemetry as one verbatim JSON blob via a
+-  // PSRAM buffer. No broadcastOutput. All values are numbers / fixed status
+-  // strings (no escaping needed). Schema: {"v":1,"voltage","percentage",
+-  // "status","charging","usbPresent","vbusSense","lastReadMsAgo","backend",...}
+   if (argWantsJson(argsInput)) {
+     PSRAM_JSON_DOC(doc);
+-    buildBatteryJson(doc);   // single source of truth (also feeds /api/battery/status)
++    buildBatteryJson(doc);
+     static char* jbuf = nullptr;
+-    if (!jbuf) jbuf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "battery.json");
++    constexpr size_t size = 1536;
++    if (!jbuf) jbuf = (char*)ps_alloc(size, AllocPref::PreferPSRAM, "battery.json");
+     if (!jbuf) return "{\"error\":\"oom\"}";
+-    serializeJson(doc, jbuf, 512);
++    if (measureJson(doc) >= size) return "{\"error\":\"battery_json_too_large\"}";
++    serializeJson(doc, jbuf, size);
+     return jbuf;
+   }
+-
+-  broadcastOutput("");
+-  broadcastOutput("╔════════════════════════════════════════╗");
+-  broadcastOutput("║         BATTERY STATUS                 ║");
+-  broadcastOutput("╠════════════════════════════════════════╣");
+-
+-  char line[80];  // still used by the Last-Read line and the USB-only backend below
+-  // Content rows grouped (was one broadcast each). %-20.20s caps the strings so
+-  // the envelope is bounded; the box borders stay single (each ~126 B in UTF-8).
+-  BROADCAST_PRINTF(
+-    "║ Voltage:     %.2fV                    ║\n"
+-    "║ Percentage:  %.0f%%                    ║\n"
+-    "║ Status:      %-20.20s ║",
+-    gBatteryState.voltage, gBatteryState.percentage, getBatteryStatusString());
+-  BROADCAST_PRINTF(
+-    "║ Charging:    %-20.20s ║\n"
+-    "║ USB Power:   %-20.20s ║",
+-    gBatteryState.isCharging ? "Yes" : "No",
+-    gBatteryState.usbPresent
+-      ? (kHasVbusSense ? "Yes (VBUS pin)" : "Yes (inferred)")
+-      : (kHasVbusSense ? "No  (VBUS pin)" : "No  (inferred)"));
+-
+-  broadcastOutput("║                                        ║");
+-
+-#if BATTERY_BACKEND_ADC
+-  BROADCAST_PRINTF(
+-    "║ Backend:     ADC                       ║\n"
+-    "║ Raw ADC:     %4d / 4095               ║",
+-    gBatteryState.rawADC);
+-#elif BATTERY_BACKEND_FUEL_GAUGE
+-  BROADCAST_PRINTF(
+-    "║ Backend:     MAX17048 fuel gauge       ║\n"
+-    "║ CRATE:       %+.2f %%/hr                ║",
+-    gBatteryState.cratePctPerHr);
+-#else
+-  snprintf(line, sizeof(line), "║ Backend:     USB-only (no battery HW)  ║");
+-  broadcastOutput(line);
+-#endif
+-
+-  snprintf(line, sizeof(line), "║ Last Read:   %lu ms ago               ║",
+-           (unsigned long)(millis() - gBatteryState.lastReadMs));
+-  broadcastOutput(line);
+-
+-  broadcastOutput("╠════════════════════════════════════════╣");
+-  BROADCAST_PRINTF(
+-    "║ LiPo Voltage Reference:                ║\n"
+-    "║   Full:      %.2fV                    ║\n"
+-    "║   Nominal:   %.2fV                    ║",
+-    VBAT_FULL, VBAT_NOMINAL);
+-  BROADCAST_PRINTF(
+-    "║   Low:       %.2fV                    ║\n"
+-    "║   Critical:  %.2fV                    ║",
+-    VBAT_LOW, VBAT_CRITICAL);
+-  broadcastOutput("╚════════════════════════════════════════╝");
+-
++  const auto state = getBatterySnapshot();
++  char voltage[24] = "Unavailable", percentage[24] = "Unavailable";
++  if (state.voltageValid) snprintf(voltage, sizeof(voltage), "%.3f V", state.voltage);
++  if (state.percentageValid) snprintf(percentage, sizeof(percentage), "%s%.0f%%", state.percentageEstimated ? "~" : "", state.percentage);
++  BROADCAST_PRINTF("Battery: %s\nVoltage: %s\nPercentage: %s\nCell present: %s\nCharging: %s\nUSB power: %s",
++    batteryStatusString(state), voltage, percentage,
++    state.presenceKnown ? (state.present ? "Yes" : "No") : "Unknown",
++    state.chargingKnown ? (state.isCharging ? "Yes" : "No") : "Unknown",
++    state.usbKnown ? (state.usbPresent ? "Yes" : "No") : "Unknown");
++  if (state.percentageEstimated)
++    broadcastOutput("SOC is an estimate; BAT voltage alone cannot confirm a connected cell.");
++  if (state.hasSample) BROADCAST_PRINTF("Last successful sample: %lu ms ago%s",
++    (unsigned long)(millis() - state.lastReadMs), state.stale ? " (stale)" : "");
++  if (state.lastError != ESP_OK) BROADCAST_PRINTF("Last read error: %s", esp_err_to_name(state.lastError));
+   return "Battery status displayed above";
+ }
+ 
+-const char* cmd_battery_calibrate(const String& /*argsInput*/) {
+-#if BATTERY_BACKEND_ADC
+-  if (adc_chars) free(adc_chars);
+-  adc_chars = (esp_adc_cal_characteristics_t*)calloc(1, sizeof(esp_adc_cal_characteristics_t));
+-  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, adc_chars);
+-
+-  for (int i = 0; i < BATTERY_SAMPLES; i++) voltageHistory[i] = 0;
+-  voltageIndex = 0;
+-  historyFilled = false;
+-  for (int i = 0; i < BATTERY_SAMPLES; i++) { updateBattery(); delay(100); }
+-  return "Battery calibration complete (ADC). Check 'batterystatus' for new readings.";
+-#elif BATTERY_BACKEND_FUEL_GAUGE
+-  // The MAX17048's ModelGauge self-calibrates continuously — there's no
+-  // ADC reference to recharacterize. Re-probe so a hot-plugged cell or
+-  // recently-powered chip shows up without a reboot.
+-  fuelGaugePresent = fuelGaugeProbe();
+-  updateBattery();
+-  return fuelGaugePresent
++const char* cmd_battery_calibrate(const String&) {
++  BatteryGuard guard;
++  if (!guard.held || !sBackendInitialized) return "Battery monitor is not initialized.";
++#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
++  const esp_err_t err = adcBackendInit();
++  updateBatteryLocked();
++  if (err != ESP_OK || !storedSnapshot().voltageValid)
++    return "Battery ADC calibration/read failed; telemetry is unavailable. See batterystatus json.";
++  return "Battery ADC calibration reloaded and reading refreshed. Divider accuracy still requires comparison with a meter.";
++#elif ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
++  sFuelGaugePresent = false;
++  updateBatteryLocked();
++  return storedSnapshot().voltageValid
+     ? "Battery: MAX17048 re-probed; readings refreshed."
+-    : "Battery: MAX17048 not detected on the configured bus.";
++    : "Battery: MAX17048 unavailable or read failed.";
+ #else
+-  return "Battery: no calibration applicable (USB-only build).";
++  return "Battery: no measurement hardware enabled; calibration unavailable.";
+ #endif
+ }
+ 
+@@ -654,18 +499,19 @@ static void batteryLogAppend(const char* event) {
+   //   boot,uptime_ms,epoch_s,datetime,pct[%],voltage[V],crate[%/hr],status,charging,usb,event
+   // Kept as clean comma-CSV for machine parsing / standard tools; visual
+   // formatting is the web UI's job, not the storage format's.
+-  char line[208];
+-  snprintf(line, sizeof(line), "%lu,%lu,%ld,%s,%.1f,%.3f,%.2f,%s,%d,%d,%s",
+-           (unsigned long)gBootCounter,
+-           (unsigned long)millis(),
+-           (long)epoch,
+-           dt,
+-           gBatteryState.percentage,
+-           gBatteryState.voltage,
+-           gBatteryState.cratePctPerHr,
+-           getBatteryStatusString(),
+-           gBatteryState.isCharging ? 1 : 0,
+-           gBatteryState.usbPresent ? 1 : 0,
++  const auto state = getBatterySnapshot();
++  // Preserve the existing 11-column CSV schema. Unknown values are empty,
++  // never fabricated zero/full/USB; the status names explicitly mark estimates.
++  char pct[24] = "", volts[24] = "", rate[24] = "";
++  if (state.percentageValid) snprintf(pct, sizeof(pct), "%.1f", state.percentage);
++  if (state.voltageValid) snprintf(volts, sizeof(volts), "%.3f", state.voltage);
++  if (state.rateValid) snprintf(rate, sizeof(rate), "%.2f", state.cratePctPerHr);
++  char line[256];
++  snprintf(line, sizeof(line), "%lu,%lu,%ld,%s,%s,%s,%s,%s,%s,%s,%s",
++           (unsigned long)gBootCounter, (unsigned long)millis(), (long)epoch, dt,
++           pct, volts, rate, batteryStatusString(state),
++           state.chargingKnown ? (state.isCharging ? "1" : "0") : "",
++           state.usbKnown ? (state.usbPresent ? "1" : "0") : "",
+            event ? event : "");
+ 
+   fsLock("batlog.append");
+@@ -782,15 +628,21 @@ const char* cmd_batterylog(const String& argsInput) {
+   File f = VFS::openGuarded(String(kBatteryLogPath), "r", ctx, false);
+   if (f) { sz = f.size(); f.close(); }
+   fsUnlock();
++  const auto state = getBatterySnapshot();
++  char reading[96];
++  if (state.voltageValid && state.percentageValid)
++    snprintf(reading, sizeof(reading), "%s%.1f%%  %.3fV (%s)",
++      state.percentageEstimated ? "~" : "", state.percentage, state.voltage, batteryStatusString(state));
++  else if (state.voltageValid)
++    snprintf(reading, sizeof(reading), "%.3fV, SOC unknown", state.voltage);
++  else snprintf(reading, sizeof(reading), "Measurement unavailable%s", state.stale ? " (stale)" : "");
+   snprintf(getDebugBuffer(), 1024,
+            "Battery log: %s | file %s (%u B) | interval %lu s\n"
+-           "  now: %.1f%%  %.3fV  %+.2f%%/hr  (%s)\n"
++           "  now: %s\n"
+            "  cmds: batterylog [on|off|interval <s>|tail|clear]",
+            gSettings.batteryLogEnabled ? "ON" : "OFF",
+            kBatteryLogPath, (unsigned)sz,
+-           (unsigned long)(gSettings.batteryLogIntervalMs / 1000),
+-           gBatteryState.percentage, gBatteryState.voltage,
+-           gBatteryState.cratePctPerHr, getBatteryStatusString());
++           (unsigned long)(gSettings.batteryLogIntervalMs / 1000), reading);
+   return getDebugBuffer();
+ }
+ 
+diff --git a/components/hardwareone/System_Battery.h b/components/hardwareone/System_Battery.h
+index b53fea6..798e847 100644
+--- a/components/hardwareone/System_Battery.h
++++ b/components/hardwareone/System_Battery.h
+@@ -4,81 +4,13 @@
+ #include <Arduino.h>
+ #include "System_BuildConfig.h"
+ 
+-// Adafruit Feather ESP32 battery monitoring (ADC backend default pin).
+-// Boards override via BATTERY_ADC_PIN; this fallback matches the original
+-// Feather ESP32 / Feather ESP32 V2 wiring (GPIO 35, ADC1 channel 7) for any
+-// board that didn't redefine BATTERY_ADC_PIN.
+-#define BATTERY_PIN 35
+-#define BATTERY_ADC_CHANNEL ADC1_CHANNEL_7
++#include "BatteryPolicy.h"
+ 
+-// Voltage divider: 2x (100K + 100K resistors) on Feather. ADC reads 0-3.3V,
+-// actual battery voltage is 0-4.2V (LiPo). Fuel-gauge backend ignores this
+-// — the MAX17048 reports cell voltage directly with no scaling.
+-#define VBAT_DIVIDER 2.0f
++// Reference constants, status enum and validity-bearing state live in the
++// platform-independent policy header. Voltage bands are estimates; charger
++// state and battery presence remain unknown without independent evidence.
+ 
+-// LiPo voltage levels (in volts) — used by both backends for status thresholds.
+-#define VBAT_FULL 4.2f
+-#define VBAT_NOMINAL 3.7f
+-#define VBAT_LOW 3.4f
+-#define VBAT_CRITICAL 3.2f
+-
+-// Off-charger status bands (LiPo discharge curve). These are capacity-
+-// independent voltage levels, so they work with ANY battery. classifyAndNotify
+-// walks them top-down once USB is absent. On the charger the status is always
+-// CHARGING — during the CV charge phase the cell sits near 4.2V regardless of
+-// true SOC, so voltage can't tell "topped off" from "still filling". Tune here:
+-// the OLED icon, G2 widget, web page, and notifications all read the status.
+-#define VBAT_BAND_FULL      4.15f   // off-charger, >= → Full
+-#define VBAT_BAND_HIGH      4.00f   // >= → High
+-#define VBAT_BAND_GOOD      3.80f   // >= → Good
+-#define VBAT_BAND_MEDIUM    3.65f   // >= → Medium
+-#define VBAT_BAND_LOW       3.45f   // >= → Low
+-#define VBAT_BAND_CRITICAL  3.30f   // >= → Critical, else → Empty
+-
+-// Status enum — public API surface, shared across all backends.
+-enum BatteryStatus {
+-  BATTERY_UNKNOWN = 0,
+-  BATTERY_CHARGING,
+-  BATTERY_FULL,
+-  BATTERY_DISCHARGING,   // legacy generic off-charger state; superseded by the finer bands below
+-  BATTERY_LOW,
+-  BATTERY_CRITICAL,
+-  BATTERY_NOT_PRESENT,
+-  // Finer off-charger voltage bands. Appended so the existing ordinals stay
+-  // stable. classifyAndNotify() now walks the full ladder when on battery.
+-  BATTERY_HIGH,
+-  BATTERY_GOOD,
+-  BATTERY_MEDIUM,
+-  BATTERY_EMPTY
+-};
+-
+-// Snapshot of current battery state. Updated by updateBattery() on the 10s
+-// main-loop tick; consumed by OLED widgets, G2 corner widget, notifications,
+-// and the `batterystatus` CLI command.
+-//
+-// Fields populated by ALL backends: voltage, percentage, status, isCharging,
+-//   lastReadMs.
+-// Backend-specific fields:
+-//   rawADC          — ADC backend only (0..4095). Always 0 for fuel-gauge.
+-//   cratePctPerHr   — Fuel-gauge backend only (signed %/hr). Always 0 for ADC.
+-struct BatteryState {
+-  float voltage;           // Current battery voltage
+-  float percentage;        // Estimated charge percentage (0-100)
+-  BatteryStatus status;    // Current status
+-  bool isCharging;         // True if cell is taking charge (not just "USB connected")
+-  bool usbPresent;         // True if a USB power source is supplying the device.
+-                           // Distinct from isCharging: the cell can be at float
+-                           // (100%, CRATE≈0) while USB is plugged in — isCharging
+-                           // is false but usbPresent is true. Inferred from
+-                           // isCharging OR voltage > 4.15V (LiPo can't hold that
+-                           // high without an external charge source). Always
+-                           // true in the USB-only stub build.
+-  uint32_t lastReadMs;     // Last reading timestamp
+-  uint16_t rawADC;         // [ADC backend] Raw ADC value, for diagnostics
+-  float cratePctPerHr;     // [Fuel-gauge backend] Signed rate of change (%/hr)
+-};
+-
+-// Global battery state — single source of truth across the codebase.
++// Compatibility symbol. Consumers should use the coherent snapshot accessor.
+ extern BatteryState gBatteryState;
+ 
+ // Lifecycle.
+@@ -86,10 +18,14 @@ void initBattery();
+ void updateBattery();
+ 
+ // Accessors used by OLED, G2, notifications, etc.
++BatteryState getBatterySnapshot();
++// Numeric accessors return NAN when unavailable; boolean accessors require known state.
+ float getBatteryPercentage();
+ float getBatteryVoltage();
+ bool isBatteryCharging();
+ bool isUsbPresent();
++const char* batteryStatusString(BatteryStatus status);
++const char* batteryStatusString(const BatteryState& state);
+ const char* getBatteryStatusString();
+ char getBatteryIcon();
+ 
+@@ -102,6 +38,7 @@ const char* cmd_batterylog(const String& args);
+ // sample so a discharge curve can be pulled off-device and graphed with
+ // standard tools. Columns:
+ //   boot,uptime_ms,epoch_s,datetime,pct,voltage,crate,status,charging,usb,event
++// Unknown samples/charging/USB fields are empty; status marks estimates.
+ // Visual/aligned presentation is the web UI's job, not this file's format.
+ // Called every main-loop battery tick; self-gates on gSettings.batteryLogEnabled
+ // + gSettings.batteryLogIntervalMs and rotates the file by size. Independent of
+diff --git a/components/hardwareone/System_BuildConfig.h b/components/hardwareone/System_BuildConfig.h
+index e54b69e..7decc46 100644
+--- a/components/hardwareone/System_BuildConfig.h
++++ b/components/hardwareone/System_BuildConfig.h
+@@ -1275,6 +1275,38 @@
+ // =============================================================================
+ // BATTERY MONITOR — derived enable + backend sanity
+ // =============================================================================
++// EYE V2.4 BAT_ADC: GPIO49, R15=1M and R16=332k. This is board wiring,
++// not a generic ESP32-P4 capability; another P4 board must declare its own.
++#if defined(HW_BOARD_P4X_EYE) && HW_BOARD_P4X_EYE
++  #undef BATTERY_ADC_PIN
++  #undef BATTERY_MONITOR_AVAILABLE
++  #undef BATTERY_BACKEND_ADC
++  #undef BATTERY_BACKEND_FUEL_GAUGE
++  #define BATTERY_ADC_PIN 49
++  #define BATTERY_MONITOR_AVAILABLE 1
++  #define BATTERY_BACKEND_ADC 1
++  #define BATTERY_BACKEND_FUEL_GAUGE 0
++  #ifndef BATTERY_ADC_DIVIDER
++    #define BATTERY_ADC_DIVIDER (1332.0f / 332.0f)
++  #endif
++  #ifndef BATTERY_ADC_ATTEN
++    #define BATTERY_ADC_ATTEN ADC_ATTEN_DB_6
++  #endif
++#endif
++// Existing Feather dividers retain their 2:1 wiring and attenuation. ADC
++// unit/channel are resolved by the IDF driver from the board's configured pin.
++#ifndef BATTERY_ADC_DIVIDER
++  #define BATTERY_ADC_DIVIDER 2.0f
++#endif
++#ifndef BATTERY_ADC_ATTEN
++  #define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
++#endif
++// Classic ESP32 without eFuse calibration may use the historical nominal
++// 1100mV reference. Set to 0 to require eFuse data; JSON identifies this fallback.
++#ifndef BATTERY_ADC_DEFAULT_VREF_MV
++  #define BATTERY_ADC_DEFAULT_VREF_MV 1100
++#endif
++
+ // ENABLE_BATTERY_MONITOR defaults to the active board's BATTERY_MONITOR_AVAILABLE
+ // flag so adding a new supported board "just works" without touching the user
+ // config above. A user-set `#define ENABLE_BATTERY_MONITOR <0|1>` at the top of
+@@ -1319,7 +1351,7 @@
+ 
+ // Sanity: at most one backend selected. If the board didn't define either
+ // flag (out-of-tree board file), fall back to 0/0 so System_Battery seeds the
+-// USB-only stub instead of failing to compile.
++// unavailable backend instead of failing to compile.
+ #ifndef BATTERY_BACKEND_ADC
+   #define BATTERY_BACKEND_ADC 0
+ #endif
+@@ -1328,7 +1360,7 @@
+ #endif
+ 
+ // VBUS sense fallback. Boards without a routed VBUS divider leave this at -1
+-// and System_Battery falls back to the CRATE/voltage heuristic. Boards with
++// and System_Battery reports external power as unknown. Boards with
+ // the pin wired (FeatherS3[D] → GPIO 34) override above and get instant,
+ // deterministic USB-present detection.
+ #ifndef BATTERY_VBUS_SENSE_PIN
+@@ -1341,7 +1373,7 @@
+   #error "An enabled BATTERY_BACKEND_FUEL_GAUGE requires the I2C subsystem (I2C_FEATURE_LEVEL > 0). Raise the level, disable the battery monitor, or pick a different backend."
+ #endif
+ // If the user force-enabled the monitor on a board with no backend hardware
+-// claimed, the runtime will seed USB-only and report it — no compile error.
++// claimed, runtime reports measurement unavailable — no compile error.
+ 
+ // =============================================================================
+ // I2C2 (second I2C bus) — board-agnostic fallback
+diff --git a/components/hardwareone/System_OTA.cpp b/components/hardwareone/System_OTA.cpp
+index 405ac8f..489fb19 100644
+--- a/components/hardwareone/System_OTA.cpp
++++ b/components/hardwareone/System_OTA.cpp
+@@ -738,87 +738,47 @@ bool clearCredential(char* reason = nullptr, size_t reasonSize = 0) {
+   return err == ESP_OK;
+ }
+ 
+-/*
+- * Is it safe to start an OTA write right now?
+- *
+- * Two board classes answer this very differently, and the percentage test
+- * below is only meaningful for one of them.
+- *
+- * BATTERY_BACKEND_FUEL_GAUGE (FeatherS3): a MAX17048 reports true coulomb-
+- * counted state-of-charge and a VBUS-sense GPIO reports USB presence
+- * deterministically. Both terms of the original test are real. Unchanged.
+- *
+- * BATTERY_BACKEND_ADC (Feather ESP32 V2): the board has a VBAT divider and
+- * nothing else. `percentage` is NEVER POPULATED on this path -- adcBackendSample()
+- * fills voltage / isCharging / usbPresent and leaves percentage at its 0.0f
+- * initialiser, because classifyAndNotify() works off a voltage ladder instead.
+- * So `percentage >= 30` is `0 >= 30` on every single call, and the second test
+- * can never pass.
+- *
+- * That leaves usbPresent, which on this board is itself inferred from voltage
+- * (there is no VBUS pin). On a mains-powered unit with NO cell fitted the
+- * divider reads ~0 V, so usbPresent is false, status is BATTERY_NOT_PRESENT,
+- * percentage is 0 -- and every routine `otaupdate confirm` refuses for want of
+- * power, on a permanently-powered device. The only way through would be
+- * `force-power` on every update, which turns a deliberate override into
+- * routine muscle memory and disarms the interlock it exists to enforce.
+- *
+- * So for the voltage-only class, decide from what the board can actually
+- * measure: no cell wired means the power is external, and the device is
+- * demonstrably running. Otherwise require the cell to be above the MEDIUM band
+- * rather than a percentage that does not exist.
+- */
++// Monitored boards require fresh telemetry. A divider measures the BAT node:
++// neither a high reading nor a disconnected cell proves that USB is present.
++// For ADC boards the existing voltage threshold remains the update criterion;
++// an approximate voltage-derived percentage is not a fuel-gauge measurement.
+ bool powerIsSafe(bool force, char* reason, size_t reasonSize) {
+ #if !ENABLE_BATTERY_MONITOR
+-  /*
+-   * The board has no battery subsystem at all (QT Py ESP32:
+-   * BATTERY_MONITOR_AVAILABLE 0). It is running, so it is on external power --
+-   * initBattery() says exactly that, seeding usbPresent=true.
+-   *
+-   * The freshness test below cannot be used here. updateBattery() returns
+-   * immediately on this build, BEFORE `gBatteryState.lastReadMs = millis()`,
+-   * so lastReadMs stays 0 for the life of the boot. Thirty seconds after
+-   * startup `age` therefore exceeds kFreshPowerMs forever and EVERY branch
+-   * fails -- otaupdate would refuse for want of fresh power telemetry that
+-   * this board can never produce, permanently, with force-power the only way
+-   * through. There is no reading to be stale about; say so and allow.
+-   */
++  // Preserve the existing policy for builds without a power telemetry
++  // interlock. This is permission to update without monitoring, not a claim
++  // that USB is connected or that any battery is full.
+   (void)force;
+   (void)reason;
+   (void)reasonSize;
+   return true;
+ #else
+-  const uint32_t age = millis() - gBatteryState.lastReadMs;
+-  if (age <= kFreshPowerMs && gBatteryState.usbPresent) return true;
++  const BatteryState battery = getBatterySnapshot();
++  const uint32_t age = millis() - battery.lastReadMs;
++  const bool fresh = age <= kFreshPowerMs;
++  // VBUS is independent of ADC/gauge success and has its own attempt timestamp.
++  const bool usbFresh = (millis() - battery.lastAttemptMs) <= kFreshPowerMs;
++  if (usbFresh && battery.usbKnown && battery.usbPresent) return true;
+ 
+ #if BATTERY_BACKEND_ADC
+-  if (age <= kFreshPowerMs) {
+-    if (gBatteryState.status == BATTERY_NOT_PRESENT) {
+-      // Executing this code proves the board is powered; a sub-2 V reading on
+-      // VBAT proves it is not the cell doing it.
+-      return true;
+-    }
+-    if (gBatteryState.status != BATTERY_UNKNOWN &&
+-        gBatteryState.voltage >= VBAT_BAND_MEDIUM) {
+-      return true;
+-    }
++  if (fresh && battery.voltageValid && battery.voltage >= VBAT_BAND_MEDIUM) {
++    return true;
+   }
+   if (force) return true;
+   snprintf(reason, reasonSize,
+-           "Error: unsafe or stale power state; cell at %.2fV is below the %.2fV "
+-           "minimum and this board cannot sense USB "
++           "Error: unsafe, unavailable or stale power state; require fresh measured "
++           "battery voltage >=%.2fV or confirmed USB "
+            "(force-power is an explicit recorded override)",
+-           (double)gBatteryState.voltage, (double)VBAT_BAND_MEDIUM);
++           (double)VBAT_BAND_MEDIUM);
+   return false;
+ #else
+-  if (age <= kFreshPowerMs && gBatteryState.status != BATTERY_NOT_PRESENT &&
+-      gBatteryState.status != BATTERY_UNKNOWN &&
+-      gBatteryState.percentage >= kMinimumBatteryPercent) {
++  if (fresh && battery.percentageValid &&
++      battery.percentage >= kMinimumBatteryPercent) {
+     return true;
+   }
+   if (force) return true;
+   snprintf(reason, reasonSize,
+-           "Error: unsafe or stale power state; connect USB or use a fresh battery >=30%% "
++           "Error: unsafe, unavailable or stale power state; require confirmed USB "
++           "or a fresh battery reading >=30%% "
+            "(force-power is an explicit recorded override)");
+   return false;
+ #endif  /* BATTERY_BACKEND_ADC */
+diff --git a/components/hardwareone/System_Utils.cpp b/components/hardwareone/System_Utils.cpp
+index 7d49eb7..a8c4dd3 100644
+--- a/components/hardwareone/System_Utils.cpp
++++ b/components/hardwareone/System_Utils.cpp
+@@ -3052,7 +3052,7 @@ extern const char* cmd_batterylog(const String& argsInput);
+ // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+ const CommandEntry batteryCommands[] = {
+   {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status},
+-  {"batterycalibrate", "Recalibrate/re-probe the battery sensor (ADC characterize or fuel-gauge re-probe)", true, cmd_battery_calibrate},
++  {"batterycalibrate", "Reinitialize ADC calibration or re-probe the fuel gauge", true, cmd_battery_calibrate},
+   {"batterylog", "Battery time-series CSV log (on/off/interval/tail/clear)", false, cmd_batterylog, "Usage: batterylog [on|off|interval <s>|tail|clear]"}
+ };
+ 
+@@ -3491,16 +3491,17 @@ static constexpr CommandModule gCommandModules[] = {
+ #if ENABLE_BATTERY_MONITOR
+   { "battery",    "Battery voltage and charge monitoring", "The battery module reports cell state and keeps a time-series log; it is only "
+     "present when battery monitoring is compiled in. The backend is a MAX17048 fuel "
+-    "gauge over I2C (with an ADC or USB-only fallback on other boards), and charging "
+-    "detection cross-references the gauge CRATE register with a VBUS-present signal so "
+-    "the reported state distinguishes truly charging from merely USB-powered. "
++    "gauge over I2C or a calibrated ADC voltage divider selected by the board. "
++    "ADC charge percentage is approximate; the charger can drive the measured BAT "
++    "node even without a cell. USB, charging and cell presence are reported only "
++    "when known. Missing readings are null in JSON, not zero/full estimates. "
+     "batterystatus prints voltage, charge percentage, charging/USB state, and a coarse "
+     "status label, or returns the same data as JSON. batterylog manages a CSV "
+     "discharge/charge log written to the device for later graphing: with no args it "
+     "shows status, and subcommands are on/off (enable/disable), interval <5..3600> "
+     "seconds (sampling period), tail (show the most recent rows), and clear (erase the "
+     "log); significant events such as sleep/wake are always recorded regardless of the "
+-    "interval. batterycalibrate (admin) re-calibrates the ADC-based readings.", batteryCommands,      &batteryCommandsCount, 0, nullptr },
++    "interval. batterycalibrate (admin) reinitializes ADC calibration or re-probes the fuel gauge.", batteryCommands,      &batteryCommandsCount, 0, nullptr },
+ #endif
+   { "debug",      "System debugging and diagnostics", "The debug subsystem controls diagnostic logging verbosity across every part of the "
+     "firmware. Its core is a large set of per-subsystem debug-flag toggles (for example "
+diff --git a/components/hardwareone/WebPage_Battery.cpp b/components/hardwareone/WebPage_Battery.cpp
+index c956fef..9067aa4 100644
+--- a/components/hardwareone/WebPage_Battery.cpp
++++ b/components/hardwareone/WebPage_Battery.cpp
+@@ -20,18 +20,23 @@
+ // `battery json` CLI/BLE command return the IDENTICAL schema. Fields: present,
+ // backend, voltage, percentage, status, charging, usbPresent, vbusSense,
+ // lastReadMsAgo, ratePctPerHr/etaMinutes (fuelgauge only), rawADC (adc only).
++// Availability/validity flags distinguish unknown/null from a measured zero.
+ esp_err_t handleBatteryStatus(httpd_req_t* req) {
+   WEB_AUTH_OR_RETURN(req, ctx);
+   httpd_resp_set_type(req, "application/json");
+   static char* buf = nullptr;
+-  static const size_t kBufSize = 512;
++  static const size_t kBufSize = 1536;
+   if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "battery.status.json");
+   if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
+   PSRAM_JSON_DOC(doc);
+   extern void buildBatteryJson(JsonDocument& doc);  // core: System_Battery.cpp
+   buildBatteryJson(doc);
+-  serializeJson(doc, buf, kBufSize);
+-  httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
++  if (measureJson(doc) >= kBufSize) {
++    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Battery status exceeds response buffer");
++    return ESP_FAIL;
++  }
++  const size_t written = serializeJson(doc, buf, kBufSize);
++  httpd_resp_send(req, buf, written);
+   return ESP_OK;
+ }
+ 
+@@ -44,7 +49,7 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
+   httpd_resp_send_chunk(req, R"HTML(
+ <div class='card'>
+   <h2 style='margin-top:0'>Battery</h2>
+-  <div id='bat-absent' style='display:none;opacity:.8'>No battery detected &mdash; running on USB.</div>
++  <div id='bat-absent' style='display:none;opacity:.8'></div>
+   <div id='bat-live' style='display:flex;flex-wrap:wrap;gap:1.5rem;align-items:baseline'>
+     <div><span id='bat-pct' style='font-size:2.6rem;font-weight:bold'>--</span><span style='font-size:1.2rem'>%</span></div>
+     <div>Voltage: <b id='bat-volt'>--</b> V</div>
+@@ -52,7 +57,9 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
+     <div id='bat-rate-wrap' style='display:none'>Rate: <b id='bat-rate'>--</b> %/hr</div>
+     <div id='bat-eta-wrap' style='display:none'>Est. remaining: <b id='bat-eta'>--</b></div>
+     <div>Source: <b id='bat-src'>--</b></div>
++    <div>Charging: <b id='bat-charging'>--</b></div>
+   </div>
++  <div id='bat-estimate' style='display:none;margin-top:.7rem;opacity:.8'>Charge is estimated from voltage and may rise while plugged in, even without a cell. It does not confirm battery presence or charging.</div>
+ </div>
+ 
+ <div class='card'>
+@@ -77,14 +84,20 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
+   function applyStatus(s){
+     if(!s){return;}
+     var absent=hw.$('bat-absent'),live=hw.$('bat-live');
+-    if(s.present===false){hw.show(absent);hw.hide(live);return;}
+-    hw.hide(absent);if(live)live.style.display='flex';
+-    hw.setText('bat-pct',fmt(s.percentage,1));
+-    hw.setText('bat-volt',fmt(s.voltage,3));
+-    hw.setText('bat-status',s.status||'--');
+-    hw.setText('bat-src',s.charging?'Charging':(s.usbPresent?'USB (full)':'Battery'));
+-    var hasRate=s.backend==='fuelgauge';
+-    hw.toggle('bat-rate-wrap',!!hasRate);
++    var notice=s.voltageAvailable===false?'Battery monitoring is unavailable on this board.':
++      (s.present===false?'No battery detected.':
++      (s.voltageValid===false?'Battery voltage is unavailable.':''));
++    hw.setText(absent,notice);hw.toggle(absent,!!notice);
++    if(live)live.style.display='flex';
++    var hasPct=s.percentageValid===true&&s.percentage!=null;
++    hw.setText('bat-pct',hasPct?((s.percentageEstimated?'~':'')+fmt(s.percentage,1)):'--');
++    hw.setText('bat-volt',s.voltageValid?fmt(s.voltage,3):'--');
++    hw.setText('bat-status',s.status||'Unknown');
++    hw.setText('bat-src',s.usbKnown?(s.usbPresent?'USB connected':(s.present===true?'Battery':'USB absent')):'Unknown');
++    hw.setText('bat-charging',s.chargingKnown?((s.charging?'Yes':'No')+(s.chargingEstimated?' (estimated)':'')):'Unknown');
++    hw.toggle('bat-estimate',hasPct&&s.percentageSource==='voltage');
++    var hasRate=s.rateValid===true;
++    hw.toggle('bat-rate-wrap',hasRate);
+     if(hasRate)hw.setText('bat-rate',fmt(s.ratePctPerHr,2));
+     var showEta=hasRate&&(s.etaMinutes!=null&&s.etaMinutes!==undefined);
+     hw.toggle('bat-eta-wrap',showEta);
+@@ -128,7 +141,7 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
+       for(var j=0;j<n;j++){if(!(d.rows[j][ei]||'').trim())continue;var x=X(j);ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,H-padB);ctx.stroke();}}
+     // percent curve
+     ctx.strokeStyle='#4caf50';ctx.lineWidth=2;ctx.beginPath();var started=false;
+-    for(var i=0;i<n;i++){var p=parseFloat(d.rows[i][ci]);if(isNaN(p))continue;var x=X(i),y=Yp(p);started?ctx.lineTo(x,y):(ctx.moveTo(x,y),started=true);}
++    for(var i=0;i<n;i++){var p=parseFloat(d.rows[i][ci]);if(isNaN(p)){started=false;continue;}var x=X(i),y=Yp(p);started?ctx.lineTo(x,y):(ctx.moveTo(x,y),started=true);}
+     ctx.stroke();
+   }
+   function loadLog(){
