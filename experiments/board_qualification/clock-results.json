@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "scope": "Active CPU frequency readback only; no load, idle or electrical measurement",
+  "boards": {
+    "p4": {
+      "status": "passed",
+      "checks": [
+        {
+          "requested": 100,
+          "actual": 100
+        },
+        {
+          "requested": 200,
+          "actual": 200
+        },
+        {
+          "requested": 400,
+          "actual": 400
+        }
+      ],
+      "restored": true,
+      "original_mhz": 400,
+      "source_sha256": "7984ad79d5a35835a1f9dc38e5573886ec28acccfb8126efc83b282c38f2fda8"
+    },
+    "s3": {
+      "status": "passed",
+      "checks": [
+        {
+          "requested": 80,
+          "actual": 80
+        },
+        {
+          "requested": 160,
+          "actual": 160
+        },
+        {
+          "requested": 240,
+          "actual": 240
+        }
+      ],
+      "restored": true,
+      "original_mhz": 240,
+      "source_sha256": "49053adf5fd82cc146ab20bb697abaadfa558fa703d9653018cee4a479c9649f"
+    }
+  }
+}

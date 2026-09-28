@@ -1,0 +1,108 @@
+{
+  "date": "2026-09-28",
+  "idf_version": "5.5.5",
+  "idf_commit": "b774170ff46c393eeb5e495ea37936038d3f4f4f",
+  "scope": "Standalone headless camera probes; not HardwareOne camera/web/G2/mesh/recording integration",
+  "p4_v1": {
+    "app_bytes": 543056,
+    "app_sha256": "157e2db60dc458cb3f0e2d02518baca30c5da24e37589a60f3cf175e46dc6587",
+    "result": "Test assumption rejected valid zero optional format fields before capture",
+    "evidence_preserved": true
+  },
+  "p4_v2": {
+    "app_bytes": 543168,
+    "app_sha256": "2e50e754994a58df866bb7a7596829f58de04305fd18b1b44925c62a0e587dc5",
+    "sensor": "OV2710",
+    "sensor_pid": "0x2710",
+    "width": 1280,
+    "height": 720,
+    "frames": 90,
+    "frame_errors": 0,
+    "elapsed_us": 3713145,
+    "observed_fps": 24.24,
+    "jpeg_encode_us": 10099,
+    "jpeg_quality_idf": 80,
+    "jpeg_subsampling": "4:2:0",
+    "jpeg_bytes": 86879,
+    "jpeg_crc32": "713e1dbb",
+    "jpeg_sha256": "0b374ffca9877e8fa3a40d679aa89c8d889af9f609b31f87fa8361251360bebf",
+    "usb_integrity_pass": true,
+    "independent_jpeg_decode_pass": true,
+    "heap_integrity_pass": true,
+    "visual_status": "Initial capture almost black and featureless; preserved as evidence. The same binary produced a coherent lit scene in p4_v2_lit_retest without software changes."
+  },
+  "p4_v2_lit_retest": {
+    "app_bytes": 543168,
+    "app_sha256": "2e50e754994a58df866bb7a7596829f58de04305fd18b1b44925c62a0e587dc5",
+    "sensor": "OV2710",
+    "sensor_pid": "0x2710",
+    "width": 1280,
+    "height": 720,
+    "frames": 90,
+    "frame_errors": 0,
+    "elapsed_us": 3713560,
+    "observed_fps": 24.24,
+    "jpeg_encode_us": 10177,
+    "jpeg_quality_idf": 80,
+    "jpeg_subsampling": "4:2:0",
+    "jpeg_bytes": 121716,
+    "jpeg_crc32": "de87ab4a",
+    "jpeg_sha256": "876d7bd3eda3c13643f3076134e822f337fa53f91b3596c24e6f1ef5a749351b",
+    "usb_integrity_pass": true,
+    "independent_jpeg_decode_pass": true,
+    "heap_integrity_pass": true,
+    "visual_status": "Coherent continuous lit scene with an object/fixture near the top; no gross tearing or mosaic artefacts. Soft/noisy image; no controlled focus, colour or exposure qualification.",
+    "usb_chunks": 951,
+    "software_changed_since_p4_v2": false,
+    "scene_change": "User confirmed lens uncovered and aimed camera at a lit area",
+    "g2_file_loader_limit_bytes": 131072,
+    "g2_file_loader_headroom_bytes": 9356
+  },
+  "s3": {
+    "app_bytes": 284672,
+    "app_sha256": "4a00f133931acc3de6e16018780c46e7182431761a1777ffe308f3163384bfa8",
+    "sensor": "OV3660",
+    "sensor_pid": "0x3660",
+    "captures": [
+      {
+        "width": 320,
+        "height": 240,
+        "frames": 35,
+        "frame_errors": 0,
+        "elapsed_us": 1379298,
+        "observed_fps": 25.38
+      },
+      {
+        "width": 640,
+        "height": 480,
+        "frames": 35,
+        "frame_errors": 0,
+        "elapsed_us": 1416382,
+        "observed_fps": 24.71
+      }
+    ],
+    "jpeg_quality_sensor": 12,
+    "jpeg_bytes": 16873,
+    "jpeg_crc32": "81899112",
+    "jpeg_sha256": "04c13091d2682cdeefea169b5f62bed74c8d9e6a9a63e997f84ae2bda008763a",
+    "usb_integrity_pass": true,
+    "independent_jpeg_decode_pass": true,
+    "heap_integrity_pass": true,
+    "visual_status": "Coherent room scene with partial foreground occlusion; no controlled colour/focus calibration"
+  },
+  "limitations": [
+    "Neither board has an SD card; storage tests not performed",
+    "Frame rates compare different sensors/resolutions/compression paths, not CPU speed",
+    "P4 lit image is coherent but soft/noisy; controlled focus, colour and exposure qualification remains outstanding",
+    "P4 lit JPEG leaves only 9356 bytes below the current 128 KiB G2 file loader cap; more detailed/noisy scenes may require resizing or bounded quality selection",
+    "No HardwareOne camera backend changes made",
+    "Primary checkout has a separate in-progress SD HAL candidate; it was reviewed read-only, not merged or physically qualified here"
+  ],
+  "reproduction": {
+    "p4_promoted_build_pass": true,
+    "s3_promoted_build_pass": true,
+    "dependency_locks_unchanged": true,
+    "host_capture_integrity_tests_passed": 7,
+    "original_frozen_images_unchanged": true
+  }
+}

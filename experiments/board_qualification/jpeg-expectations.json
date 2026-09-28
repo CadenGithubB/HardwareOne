@@ -1,0 +1,386 @@
+{
+  "schema": 1,
+  "scope": "Reference expectations, not full-app test results",
+  "bmp_reference": "G2 288x144 top-down 4bpp; aspect fit; Linear contrast 352/256; nearest sampling",
+  "boards": {
+    "p4": {
+      "log_sha256": "99aeb0203b91a9df3fc91f85433b9ed5b8a6f0a6eeb69dc3bee0809703d46123",
+      "fixtures": {
+        "blue_48x48": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "b11e1dc5",
+            "width": 48,
+            "height": 48,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "ee547f0fb2b75b4a56071889afe4f537d86afef3b7b7332c9b4e2e4e3e544421"
+          },
+          "hardware": {
+            "backend": "hardware",
+            "rgb_hash": "5cdcc1c5",
+            "width": 48,
+            "height": 48,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "ee547f0fb2b75b4a56071889afe4f537d86afef3b7b7332c9b4e2e4e3e544421"
+          }
+        },
+        "blue_8x8": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "24c1fdc5",
+            "width": 8,
+            "height": 8,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "b8f54bbfac880509b03e12541c411c528ead56a10781f4ea37d7d61ad46e9778"
+          }
+        },
+        "gray_17x19": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "7f1d8ed9",
+            "fixture_sha256": "9c2a321316a97fc026b9ddf7b36780b6a8284a2d467b19f58c9727aa9127bb8e"
+          }
+        },
+        "red_48x48": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "30f891c5",
+            "width": 48,
+            "height": 48,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "01a7ae8ef4b9311f7675490399e858502417efc2aebe9749ca91c421b7918072"
+          },
+          "hardware": {
+            "backend": "hardware",
+            "rgb_hash": "705cc1c5",
+            "width": 48,
+            "height": 48,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "01a7ae8ef4b9311f7675490399e858502417efc2aebe9749ca91c421b7918072"
+          }
+        },
+        "red_8x8": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "a5de72c5",
+            "width": 8,
+            "height": 8,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "1c886e18997f57230d91fe97a442ed135f36c3384ff06d36709d0ba2c2187d0b"
+          }
+        },
+        "rgb420_17x19": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "1b6cc945",
+            "fixture_sha256": "f0e6b636d6872dc2fec2627c499dc39fdfa42440a6b478c6ad7f8290be869792"
+          }
+        },
+        "rgb420_24x24": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "6a77e47b",
+            "width": 24,
+            "height": 24,
+            "bmp_hash": "26103489",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "9d3ccfd215b7bc2767e1a428207a61ad9d1ff4248a1e5a7a986e456c1d1876e7"
+          },
+          "hardware": {
+            "backend": "hardware",
+            "rgb_hash": "d01b6fd8",
+            "width": 24,
+            "height": 24,
+            "bmp_hash": "fe5dce55",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "9d3ccfd215b7bc2767e1a428207a61ad9d1ff4248a1e5a7a986e456c1d1876e7"
+          }
+        },
+        "rgb420_320x240": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "a708d37d",
+            "fixture_sha256": "cc3fd23d3feb793001fa248bc0ca1770ddea855d943d521b6c641f539751a440"
+          },
+          "hardware": {
+            "backend": "hardware",
+            "rgb_hash": "5eed36ed",
+            "fixture_sha256": "cc3fd23d3feb793001fa248bc0ca1770ddea855d943d521b6c641f539751a440"
+          }
+        },
+        "rgb422_17x19": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "c50a0e78",
+            "fixture_sha256": "8dfbd23dc37e4a37243b19a37f274ad3c7dcde542fd62f10ecb3e6085c88eb75"
+          }
+        },
+        "rgb422_24x24": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "6b204b3b",
+            "width": 24,
+            "height": 24,
+            "bmp_hash": "b6cf74d5",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "9049383b6d90d29fc6e96cb0ff8516cc3d3bfcf7355a560c574db8a77242f6ff"
+          },
+          "hardware": {
+            "backend": "hardware",
+            "rgb_hash": "be0ebfae",
+            "width": 24,
+            "height": 24,
+            "bmp_hash": "00d5687d",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "9049383b6d90d29fc6e96cb0ff8516cc3d3bfcf7355a560c574db8a77242f6ff"
+          }
+        },
+        "rgb422_320x240": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "0fe76864",
+            "fixture_sha256": "b637eed57a531223a2141280db4ee80c50a04c46d69c44793d729790f86af35c"
+          },
+          "hardware": {
+            "backend": "hardware",
+            "rgb_hash": "3faa8522",
+            "fixture_sha256": "b637eed57a531223a2141280db4ee80c50a04c46d69c44793d729790f86af35c"
+          }
+        },
+        "rgb444_17x19": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "bb62a7c1",
+            "fixture_sha256": "027988bef1e8e271865d512a2d1e749236055ca0ecb5a0aecf68115d9eb75fe6"
+          }
+        },
+        "rgb444_24x24": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "1f7290e4",
+            "width": 24,
+            "height": 24,
+            "bmp_hash": "d5dc6bf9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "8d8e2e6695e385e8ac1a998c8e4ad04d0a5a5efbc2b54454ce0d3bd9550ccda5"
+          }
+        },
+        "rgb444_320x240": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "ac8e3688",
+            "fixture_sha256": "63bbb4b7c333e5b590422e9b5981a16b1f93141ec41243975a29876a45bface1"
+          },
+          "hardware": {
+            "backend": "hardware",
+            "rgb_hash": "42a44304",
+            "fixture_sha256": "63bbb4b7c333e5b590422e9b5981a16b1f93141ec41243975a29876a45bface1"
+          }
+        },
+        "rgb444_48x48": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "ee3edf92",
+            "width": 48,
+            "height": 48,
+            "bmp_hash": "6c268d8e",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "ebfb14e37ce27b51a7d905f94f929ce2686b1c1e2d4b061dbf8a1ef1cda8c5fc"
+          },
+          "hardware": {
+            "backend": "hardware",
+            "rgb_hash": "03f6d8a3",
+            "width": 48,
+            "height": 48,
+            "bmp_hash": "cf8577e3",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "ebfb14e37ce27b51a7d905f94f929ce2686b1c1e2d4b061dbf8a1ef1cda8c5fc"
+          }
+        }
+      }
+    },
+    "s3": {
+      "log_sha256": "32cf7154ee9607764d52b73d76af3324a4426a8d0a524cb1aa1ff49a073cb56e",
+      "fixtures": {
+        "blue_48x48": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "b11e1dc5",
+            "width": 48,
+            "height": 48,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "ee547f0fb2b75b4a56071889afe4f537d86afef3b7b7332c9b4e2e4e3e544421"
+          }
+        },
+        "blue_8x8": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "24c1fdc5",
+            "width": 8,
+            "height": 8,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "b8f54bbfac880509b03e12541c411c528ead56a10781f4ea37d7d61ad46e9778"
+          }
+        },
+        "red_48x48": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "30f891c5",
+            "width": 48,
+            "height": 48,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "01a7ae8ef4b9311f7675490399e858502417efc2aebe9749ca91c421b7918072"
+          }
+        },
+        "red_8x8": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "a5de72c5",
+            "width": 8,
+            "height": 8,
+            "bmp_hash": "911beef9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "1c886e18997f57230d91fe97a442ed135f36c3384ff06d36709d0ba2c2187d0b"
+          }
+        },
+        "rgb420_17x19": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "013ff62e",
+            "fixture_sha256": "f0e6b636d6872dc2fec2627c499dc39fdfa42440a6b478c6ad7f8290be869792"
+          }
+        },
+        "rgb420_24x24": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "2875b766",
+            "width": 24,
+            "height": 24,
+            "bmp_hash": "26103489",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "9d3ccfd215b7bc2767e1a428207a61ad9d1ff4248a1e5a7a986e456c1d1876e7"
+          }
+        },
+        "rgb420_320x240": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "bb31a4a0",
+            "fixture_sha256": "cc3fd23d3feb793001fa248bc0ca1770ddea855d943d521b6c641f539751a440"
+          }
+        },
+        "rgb422_17x19": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "56cdddaf",
+            "fixture_sha256": "8dfbd23dc37e4a37243b19a37f274ad3c7dcde542fd62f10ecb3e6085c88eb75"
+          }
+        },
+        "rgb422_24x24": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "083ea52e",
+            "width": 24,
+            "height": 24,
+            "bmp_hash": "b6cf74d5",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "9049383b6d90d29fc6e96cb0ff8516cc3d3bfcf7355a560c574db8a77242f6ff"
+          }
+        },
+        "rgb422_320x240": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "86557161",
+            "fixture_sha256": "b637eed57a531223a2141280db4ee80c50a04c46d69c44793d729790f86af35c"
+          }
+        },
+        "rgb444_17x19": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "bb62a7c1",
+            "fixture_sha256": "027988bef1e8e271865d512a2d1e749236055ca0ecb5a0aecf68115d9eb75fe6"
+          }
+        },
+        "rgb444_24x24": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "1f7290e4",
+            "width": 24,
+            "height": 24,
+            "bmp_hash": "d5dc6bf9",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "8d8e2e6695e385e8ac1a998c8e4ad04d0a5a5efbc2b54454ce0d3bd9550ccda5"
+          }
+        },
+        "rgb444_320x240": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "7ab8bc77",
+            "fixture_sha256": "63bbb4b7c333e5b590422e9b5981a16b1f93141ec41243975a29876a45bface1"
+          }
+        },
+        "rgb444_48x48": {
+          "software": {
+            "backend": "software",
+            "rgb_hash": "ee3edf92",
+            "width": 48,
+            "height": 48,
+            "bmp_hash": "6c268d8e",
+            "bmp_bytes": 20854,
+            "bmp_width": 288,
+            "bmp_height": -144,
+            "fixture_sha256": "ebfb14e37ce27b51a7d905f94f929ce2686b1c1e2d4b061dbf8a1ef1cda8c5fc"
+          }
+        }
+      }
+    }
+  }
+}

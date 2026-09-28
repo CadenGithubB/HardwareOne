@@ -1,0 +1,182 @@
+--- a/components/hardwareone/G2_Glasses.cpp
++++ b/components/hardwareone/G2_Glasses.cpp
+@@ -26811,6 +26811,9 @@
+ }
+ 
+ static const char* cmd_g2bmp(const String& argsInput);
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++static const char* cmd_jpegdiag(const String& argsInput);
++#endif
+ #if ENABLE_R1_HEALTH
+ static const char* cmd_g2health(const String& argsInput);
+ #endif
+@@ -26840,6 +26843,10 @@
+ };
+ 
+ extern const CommandEntry g2Commands[] = {
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++  { "jpegdiag", "Qualification-only authenticated JPEG file conversion", true, cmd_jpegdiag,
++    "Usage: jpegdiag \"/jpeg_qualification/<fixture>.jpg\"" },
++#endif
+   { "openg2",       "Connect to G2 glasses: openg2 [left|right|auto|saved]", true, cmd_g2connect, "Usage: openg2 [left|right|auto|saved]  (default auto; saved = peer MACs)" },
+   { "closeg2",      "Disconnect G2 glasses [full=also free ~30KB GATT cache].", true, cmd_g2disconnect, "Usage: closeg2 [full]" },
+   { "g2status",     "Show G2 connection status",                       false, cmd_g2status },
+@@ -34685,9 +34692,26 @@
+ // quadrant 2× via buildTileBmpFromQuadrant). On success the caller
+ // owns *outBmp and must free() it. Errors are returned via outErr
+ // (static strings — caller doesn't free).
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++struct JpegIntegrationReport {
++  uint32_t width = 0, height = 0, rgbHash = 0;
++  const char* backend = "none";
++  int64_t decodeUs = 0, bmpUs = 0;
++};
++static uint32_t jpegIntegrationHash(const uint8_t* bytes, size_t length) {
++  uint32_t value = 2166136261u;
++  for (size_t i = 0; i < length; ++i) value = (value ^ bytes[i]) * 16777619u;
++  return value;
++}
++#endif
++
+ static bool loadJpgAsBmp288x144(const String& rawPath,
+                                 uint8_t** outBmp, size_t* outBmpLen,
+-                                const char** outErr) {
++                                const char** outErr
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++                                , JpegIntegrationReport* diagnostic = nullptr
++#endif
++                                ) {
+   if (outBmp) *outBmp = nullptr;
+   if (outBmpLen) *outBmpLen = 0;
+   if (outErr) *outErr = "unknown error";
+@@ -34745,11 +34769,26 @@
+ 
+   hwjpeg::Image decoded;
+   const char* decodeError = nullptr;
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++  const int64_t decodeStarted = esp_timer_get_time();
++#endif
+   if (!decodeJpegForG2(jpg, len, decoded, &decodeError)) {
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++    if (diagnostic) diagnostic->decodeUs = esp_timer_get_time() - decodeStarted;
++#endif
+     free(jpg);
+     if (outErr) *outErr = decodeError;
+     return false;
+   }
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++  if (diagnostic) {
++    diagnostic->decodeUs = esp_timer_get_time() - decodeStarted;
++    diagnostic->width = decoded.width;
++    diagnostic->height = decoded.height;
++    diagnostic->backend = decoded.backend == hwjpeg::Backend::Hardware ? "hardware" : "software";
++    diagnostic->rgbHash = jpegIntegrationHash(decoded.pixels, decoded.size);
++  }
++#endif
+   const int32_t srcW = decoded.width;
+   const int32_t srcH = decoded.height;
+   free(jpg);
+@@ -34764,7 +34803,13 @@
+     if (outErr) *outErr = "out of memory for BMP build";
+     return false;
+   }
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++  const int64_t bmpStarted = esp_timer_get_time();
++#endif
+   const size_t bmpLen = buildBmp4bppFromRgb888(bmp, kBmpCap, decoded.pixels, srcW, srcH);
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++  if (diagnostic) diagnostic->bmpUs = esp_timer_get_time() - bmpStarted;
++#endif
+   decoded.reset();
+   if (bmpLen == 0) {
+     free(bmp);
+@@ -34779,6 +34824,80 @@
+             path.c_str(), (int)srcW, (int)srcH, (unsigned)bmpLen);
+   return true;
+ }
++
++#if defined(HW1_JPEG_INTEGRATION_DIAGNOSTIC)
++// Temporary qualification entry point. Admin admission is enforced by the
++// command registry; the actual loader additionally checks the caller's VFS auth.
++// One conversion per command keeps load bounded and retains normal task yields.
++static const char* cmd_jpegdiag(const String& argsInput) {
++  RETURN_VALID_IF_VALIDATE_CSTR();
++  const AuthContext& auth = currentAuthContext();
++  String liveUser;
++  bool authenticated = false;
++  const TransportSessionEpoch epoch = serialTransportSessionSnapshot(liveUser, authenticated);
++  if (auth.transport != SOURCE_SERIAL || !authenticated || epoch == 0 ||
++      !auth.user.equalsIgnoreCase(liveUser) || !currentExecIsAdmin())
++    return "Error: jpegdiag requires a live named Serial administrator login";
++  CommandArgs args(argsInput);
++  if (args.count() != 1 || !args.argWasQuoted(0))
++    return "Error: jpegdiag requires one quoted fixture path";
++  const String path = args.arg(0);
++  if (path.length() > 191 || !path.startsWith("/jpeg_qualification/") ||
++      path.indexOf("/../") >= 0 || path.endsWith("/..") ||
++      path.indexOf("/./") >= 0 || path.indexOf('\\') >= 0)
++    return "Error: jpegdiag only accepts /jpeg_qualification/ fixture files";
++
++  constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
++  const size_t internalBefore = heap_caps_get_free_size(caps);
++  const size_t largestBefore = heap_caps_get_largest_free_block(caps);
++  const bool integrityBefore = heap_caps_check_integrity_all(false);
++  JpegIntegrationReport report;
++  uint8_t* bmp = nullptr;
++  size_t length = 0;
++  const char* error = nullptr;
++  const int64_t started = esp_timer_get_time();
++  const bool converted = loadJpgAsBmp288x144(path, &bmp, &length, &error, &report);
++  auto read32 = [](const uint8_t* p) -> uint32_t {
++    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
++  };
++  const int32_t bmpWidth = converted && length >= 118 ? int32_t(read32(bmp + 18)) : 0;
++  const int32_t bmpHeight = converted && length >= 118 ? int32_t(read32(bmp + 22)) : 0;
++  const bool bmpValid = converted && bmp && length == 118 + 144 * 144 &&
++                       bmp[0] == 'B' && bmp[1] == 'M' && bmp[28] == 4 && bmp[29] == 0 &&
++                       bmpWidth == 288 && bmpHeight == -144 && read32(bmp + 2) == length;
++  const uint32_t bmpHash = converted ? jpegIntegrationHash(bmp, length) : 0;
++  free(bmp);
++  const int64_t totalUs = esp_timer_get_time() - started;
++  const size_t internalAfter = heap_caps_get_free_size(caps);
++  const size_t largestAfter = heap_caps_get_largest_free_block(caps);
++  const bool integrityAfter = heap_caps_check_integrity_all(false);
++
++  JsonDocument doc;
++  doc["schema"] = 1;
++  doc["diagnostic"] = "full-app-jpeg";
++  doc["ok"] = converted && bmpValid && integrityBefore && integrityAfter;
++  doc["converted"] = converted;
++  doc["error"] = converted ? "" : (error ? error : "unknown");
++  doc["width"] = report.width; doc["height"] = report.height;
++  doc["backend"] = report.backend;
++  char rgbHash[9], bmpHashText[9];
++  snprintf(rgbHash, sizeof(rgbHash), "%08lx", (unsigned long)report.rgbHash);
++  snprintf(bmpHashText, sizeof(bmpHashText), "%08lx", (unsigned long)bmpHash);
++  doc["rgb_hash"] = rgbHash; doc["bmp_hash"] = bmpHashText;
++  doc["bmp_bytes"] = length; doc["bmp_valid"] = bmpValid;
++  doc["bmp_width"] = bmpWidth; doc["bmp_height"] = bmpHeight;
++  doc["decode_us"] = report.decodeUs; doc["bmp_us"] = report.bmpUs;
++  doc["total_us"] = totalUs;
++  doc["internal_before"] = internalBefore; doc["internal_after"] = internalAfter;
++  doc["largest_before"] = largestBefore; doc["largest_after"] = largestAfter;
++  doc["integrity_before"] = integrityBefore; doc["integrity_after"] = integrityAfter;
++  static char result[1024];
++  if (doc.overflowed() || measureJson(doc) >= sizeof(result))
++    return "Error: jpegdiag result allocation failed";
++  serializeJson(doc, result, sizeof(result));
++  return result;
++}
++#endif
+ 
+ // Single-tile JPG viewer — mirror of g2BmpViewerWorker. Decodes JPG
+ // into a 288×144 BMP (top-left of the lens canvas) and pushes via
+--- a/components/hardwareone/CMakeLists.txt
++++ b/components/hardwareone/CMakeLists.txt
+@@ -699,3 +699,6 @@
+     # FATAL_ERROR halts the build with a clear "configure failed" exit.
+     message(FATAL_ERROR "${_hw_littlefs_check_err}")
+ endif()
++
++# Temporary authenticated full-application JPEG qualification command.
++target_compile_definitions(${COMPONENT_LIB} PRIVATE HW1_JPEG_INTEGRATION_DIAGNOSTIC=1)
