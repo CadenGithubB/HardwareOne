@@ -291,6 +291,24 @@ add_test(NAME g2_conversate
           ${G2_CONVERSATE_TEST_ARGS})
 
 enable_testing()
+
+# Exercise real JPEG dispatch/software/P4 code against controlled SDK boundaries.
+# Supplying installed component paths additionally checks exact old/new software
+# pixels using the actual TJpgDec and esp32-camera converter sources.
+set(HW1_JPEG_COMPONENT "" CACHE PATH "Installed espressif__esp_jpeg component for codec parity")
+set(HW1_CAMERA_COMPONENT "" CACHE PATH "Installed espressif__esp32-camera component for codec parity")
+set(JPEG_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER} --cc ${CMAKE_C_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND JPEG_TEST_ARGS --sanitize)
+endif()
+if(HW1_JPEG_COMPONENT AND HW1_CAMERA_COMPONENT)
+  list(APPEND JPEG_TEST_ARGS --jpeg-component ${HW1_JPEG_COMPONENT}
+                            --camera-component ${HW1_CAMERA_COMPONENT})
+elseif(HW1_JPEG_COMPONENT OR HW1_CAMERA_COMPONENT)
+  message(FATAL_ERROR "JPEG corpus parity requires both HW1_JPEG_COMPONENT and HW1_CAMERA_COMPONENT")
+endif()
+add_test(NAME jpeg_portable
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_jpeg.py ${JPEG_TEST_ARGS})
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)

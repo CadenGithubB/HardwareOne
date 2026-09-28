@@ -282,6 +282,9 @@ set(hardwareone_srcs
         System_Icons.cpp
         HAL_Input.cpp
         HAL_Display.cpp
+        HAL_JPEG.cpp
+        HAL_JPEG_Software.cpp
+        HAL_JPEG_P4.cpp
         System_Mutex.cpp
         System_Power.cpp
         System_NeoPixel.cpp
@@ -498,6 +501,7 @@ set(hardwareone_requires
         mbedtls
         esp_wifi
         esp32-camera
+        espressif__esp_jpeg
         fatfs
         sdmmc
         esp_driver_sdspi
@@ -597,6 +601,13 @@ if(HW_CFG_ENABLE_LLM_BACKEND GREATER 0)
     message(STATUS "LLM feature ENABLED (sources: onboard=${HW_CFG_ENABLE_LLM_SOURCE_ONBOARD} cm5=${HW_CFG_ENABLE_LLM_SOURCE_CM5})")
 else()
     message(STATUS "LLM feature DISABLED")
+endif()
+
+# IDF expands component requirements before CONFIG_SOC_* is available. P4 is
+# the supported hardware target in the pinned SDK; the backend itself uses the
+# SOC capability plus the qualified-driver marker, never application chip checks.
+if(IDF_TARGET STREQUAL "esp32p4" OR CONFIG_SOC_JPEG_DECODE_SUPPORTED)
+    list(APPEND hardwareone_requires esp_driver_jpeg)
 endif()
 
 idf_component_register(
