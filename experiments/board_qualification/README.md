@@ -38,6 +38,12 @@ it stages synthetic files in a unique directory and invokes the guarded
 [diagnostic patch](jpeg-diagnostic.patch). The [camera probes](camera_probe/README.md)
 are separate applications, not a production camera backend.
 
+## Battery follow-up
+
+[BATTERY.md](BATTERY.md) records the EYE voltage-divider wiring, limitations of
+charging-state detection and a shared ADC-backend upgrade path. No live battery
+voltage has been measured or battery firmware flashed in that investigation.
+
 ## USB console tip
 
 HardwareOne's current serial input handler ignores carriage returns and submits
