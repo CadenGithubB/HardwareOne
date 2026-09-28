@@ -1113,7 +1113,7 @@ void g2FilesHandleTap(uint32_t idx) {
       case FACT_VIEW: {
         if (isImage) {
           // View -> push at native 288×144. BMP path uses the file bytes
-          // directly; JPG decodes via fmt2rgb888 then shares the transport.
+          // directly; JPG decodes via the shared JPEG HAL then shares the transport.
           char path[FILE_MANAGER_MAX_PATH + 32];
           buildChooserPath(path, sizeof(path));
           const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);

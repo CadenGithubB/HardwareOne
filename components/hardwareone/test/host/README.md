@@ -311,3 +311,46 @@ capacity, reset epochs, and counters beyond 4 GiB.
 tests, and third-party code are excluded deliberately; changing that boundary
 requires an explicit test update. The standalone recovery updater is outside
 this component and currently has six first-party `malloc` calls of its own.
+
+
+## Portable JPEG decoder
+
+`jpeg_portable` compiles the production `HAL_JPEG.cpp`, `HAL_JPEG_Software.cpp`
+and `HAL_JPEG_P4.cpp`. The default tests use controlled codec/SDK/heap boundaries
+and execute metadata validation, all header truncations, duplicate frames,
+segment/scan errors, capacity limits, explicit backend selection, software
+PSRAM-to-internal-memory fallback, partial-result cleanup, and automatic fallback.
+The software harness also extracts and executes the production G2 adapter,
+checking its shared allocator tag/policy and software-only selection when the
+runtime PSRAM bypass is enabled. Custom allocation failure must not escape that
+policy by silently using the raw SDK allocator.
+The P4 backend is compiled with no SoC capability, with an unqualified driver,
+and with both capability and driver qualification enabled. Its SDK mock
+covers RGB channel order, 4:4:4/4:2:2/4:2:0 padded-row compaction, input copying,
+allocation/engine/process/output-size/deletion failures, retry after failure,
+and nonblocking admission while another call owns the decoder. ASan/UBSan follow
+`HW1_SANITIZE`. These mocks cannot establish real DMA or timeout behavior.
+
+To also compile the installed real TJpgDec and the legacy `fmt2rgb888` converter:
+
+```sh
+python3 -B components/hardwareone/test/host/test_jpeg.py --sanitize \
+  --jpeg-component /path/to/managed_components/espressif__esp_jpeg \
+  --camera-component /path/to/managed_components/espressif__esp32-camera
+```
+
+Or configure CMake with `-DHW1_JPEG_COMPONENT=... -DHW1_CAMERA_COMPONENT=...`.
+This optional corpus suite checks exact software pixel parity for twelve original
+synthetic fixtures, including odd dimensions, grayscale and red/blue channel
+checks. Progressive JPEG fails cleanly in both the legacy and new software path;
+progressive support is not introduced. Another 192 concurrent decodes compare
+all pixels to the sequential legacy output, exercising the new per-call workspace.
+
+The third-party wrapper's input callback signature is adapted in a temporary file
+from 32-bit `unsigned int` to host `size_t` to match TJpgDec on 64-bit desktops.
+Its body, the decoder algorithm and the legacy conversion implementation are
+unchanged. ESP-IDF heap calls are mocked with the host allocator; this does not
+measure physical PSRAM placement, S3 ROM-decoder behavior or P4 JPEG hardware
+speed/quality. The normal test run explicitly reports when real corpus parity
+was not requested. Fixture regeneration needs Pillow; normal runs use committed
+JPEG files and need no image-generation dependency.

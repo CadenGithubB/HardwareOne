@@ -729,7 +729,7 @@ bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)() = nullptr);
 // Same shape as g2ShowBmpFile / g2ShowBmpFileFullScreen but the source
 // is a JPEG file (e.g. snapshots saved by the camera-stream page to
 // /sd/PICTURES/cam_<ms>.jpg). The worker reads the JPEG, decodes via
-// img_converters.h::fmt2rgb888 to RGB888, downsamples + quantizes to a
+// the shared JPEG HAL to RGB888, downsamples + quantizes to a
 // 288×144 4-bpp grayscale BMP (same buildBmp4bppFromRgb888 path the
 // camera viewer uses), then pushes through the same wire transport as
 // the BMP viewers. Returns true when the persistent session worker accepts

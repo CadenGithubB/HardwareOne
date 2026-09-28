@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "date": "2026-09-28",
+  "base_commit": "19a1da9451b4fe7c691bd0a4bd10b6feee20b2c4",
+  "idf": "5.5.5",
+  "software_decoder": "esp_jpeg 1.3.1",
+  "hardware_tested": false,
+  "board_flashed": false,
+  "builds": {
+    "p4": {
+      "file": "private/build-p4/hardwareone-idf.bin",
+      "bytes": 4412832,
+      "sha256": "9bd7f4446cee55e9a4236dbba24f4ef3e8645480503cb18a7f1d410a911995ce",
+      "command_exit_code": 0,
+      "hardware_driver_qualified": true
+    },
+    "s3": {
+      "file": "private/build-s3/hardwareone-idf.bin",
+      "bytes": 4986240,
+      "sha256": "b2d3c9e56bc188a074bfdca431aaedcc8c52e28e80a79a731799142c352ec7a2",
+      "command_exit_code": 0,
+      "hardware_driver_qualified": false
+    },
+    "codec-p4": {
+      "file": "private/build-codec-p4/hwjpeg_probe.bin",
+      "bytes": 518880,
+      "sha256": "629d2552dc4e23271aa5632e4c453a49bb55fc09c65c67719cffc3ca2c7d5227",
+      "command_exit_code": 0,
+      "hardware_driver_qualified": true
+    },
+    "codec-s3": {
+      "file": "private/build-codec-s3/hwjpeg_probe.bin",
+      "bytes": 455584,
+      "sha256": "18e04f3f6c5a8090f39f3991164fb04eff7058e49739128dc684a452e9f1fe3e",
+      "command_exit_code": 0,
+      "hardware_driver_qualified": false
+    }
+  },
+  "source_sha256": {
+    "components/hardwareone/HAL_JPEG.cpp": "a8d3e939d92af3196e4b1be1ed6acdd108ae47b726c771c093184dc5a9b24099",
+    "components/hardwareone/HAL_JPEG.h": "d0a596973ec5829bdff399313a9f106717c9ceb10715f9a995dbc2b3189c7af2",
+    "components/hardwareone/HAL_JPEG_Backend.h": "5f7902074225f2974ef1927604b3592bc3122990bbd010463a03ca2e9990982a",
+    "components/hardwareone/HAL_JPEG_P4.cpp": "13349e537e3edbe6a0199314f67fd15acb39774530d68e33ef060085270b811c",
+    "components/hardwareone/HAL_JPEG_Software.cpp": "9cd059c0b90f825647218dd202c6af1eacc2caaa09982db323086fddbdb684cc",
+    "components/hardwareone/G2_Glasses.cpp": "e7d45fbf7644b86dd8ac78f5ff78ae5b08fffc22db3f7f258e2f4ff363df652a",
+    "components/hardwareone/CMakeLists.txt": "2857955b9bde78cad904101eedb9b68d200690db91413c95d28581a98ebeb18d",
+    "components/hardwareone/idf_component.yml": "e6537426ce22f57aa3ccaab8b9d2c3a26ac4ff52a0c1588b9dcf53e28e4cb8d4",
+    "experiments/jpeg_portable/integration.patch": "72a8f9900c04da71aa0ac4b74e306ac69d15315e4f3309670647b7bd4bddd79b",
+    "experiments/jpeg_portable/idf-jpeg.patch": "6c344428013de9f9b7f707d35c75ca9390fb3ecdf312fc99fce0174ed811f15f",
+    "experiments/jpeg_portable/codec/main/probe.cpp": "5e612e6af7eab15de0e87d704fcac59c329610a2e27503a5d5c3a15e72e0c40a"
+  },
+  "host_validation": {
+    "sanitizers": [
+      "address",
+      "undefined"
+    ],
+    "decodable_legacy_parity_fixtures": 12,
+    "concurrent_decodes": 192,
+    "matching_source_hashes": 44,
+    "source_manifest_sha256": "a63f289b68976165be20be3bc0e57f1787eec6c21eac3c7a1bd1afd139c326e1",
+    "log_sha256": "a5abde4455dd79e11102160212efd6f7a9d6e3bf63b8cb95057e523b1cfd1554",
+    "sdk_cleanup_test_methods": 10,
+    "sdk_negative_control_scenarios": 5
+  }
+}
