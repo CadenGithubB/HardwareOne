@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "base_commit": "a95a9aa",
+  "production_sources": {
+    "components/hardwareone/BatteryPolicy.h": "0f4167bd3da97b74d57cea808bc59086e68834ce23c058a885b41b92a6b38c78",
+    "components/hardwareone/CMakeLists.txt": "3b212772356a538729905885dd0bcbcb967d339b165bffe5f2c1e7caa9c34c86",
+    "components/hardwareone/G2_Glasses.cpp": "982698234fbefa28b3e612322ff4dd98076b3008f0e2e50aff9a001e7b9e5a5e",
+    "components/hardwareone/OLED_Mode_System.cpp": "2930b8056b8b1fbf2e569aeb9abc83ef48015b842456d21c57318618d46eb089",
+    "components/hardwareone/OLED_Utils.cpp": "4bc9ccbff4746743622f6d3378a5f4d80ca4ecff2ae5a6c0a26801f5bd216007",
+    "components/hardwareone/System_Automation.cpp": "e5ebfc625d15535ab2e3a482904741290cb3964d002855eebd35c204c5de98ea",
+    "components/hardwareone/System_Battery.cpp": "e0406c1ba390c71b0ba2ea348757d3d53e33500de9d89d0dc5317923c5f5a0ca",
+    "components/hardwareone/System_Battery.h": "a8801ea459cfcde5a0fa3f0eea8a859ae32197c2944367e554db794ecff785c2",
+    "components/hardwareone/System_BuildConfig.h": "a3da3a6746d2b65fc8686d133403fb39ce7b973968735bf8dc5c67e3ccf5586a",
+    "components/hardwareone/System_OTA.cpp": "5906be48c889562adf1822d78cf3d3759300685caa5f1701481d4bf0784eaa67",
+    "components/hardwareone/System_Utils.cpp": "263bf773ae191811f41a32ab7db263c332f21e0a12323480896449d41be57be9",
+    "components/hardwareone/WebPage_Battery.cpp": "5467c62f8fdd89c4918da0853cfae7011f33652ca259d3e6b61b6342b8298825"
+  },
+  "patch_sha256": "94b776a6950552162a5161b34098486aa160608a4f792fb820dc8d8dcb7090fa"
+}

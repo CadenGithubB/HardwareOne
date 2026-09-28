@@ -497,6 +497,7 @@ set(hardwareone_requires
         app_update
         bootloader_support
         esp_app_format
+        esp_adc
         json
         mbedtls
         esp_wifi

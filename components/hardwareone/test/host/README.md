@@ -358,3 +358,39 @@ measure physical PSRAM placement, S3 ROM-decoder behavior or P4 JPEG hardware
 speed/quality. The normal test run explicitly reports when real corpus parity
 was not requested. Fixture regeneration needs Pillow; normal runs use committed
 JPEG files and need no image-generation dependency.
+
+
+## Shared battery backend and power admission
+
+Run the focused portable battery checks:
+
+```sh
+python3 components/hardwareone/test/host/test_battery.py --sanitize
+```
+
+The runner compiles the production `BatteryPolicy.h`, the unmodified backend,
+lifecycle, snapshot/accessor, calibration and JSON functions extracted from
+`System_Battery.cpp`, and the exact OTA `powerIsSafe()` function. SDK ADC,
+FreeRTOS synchronization, GPIO, clock, event delivery and MAX17048 transport are
+mock boundaries. The JSON checks use the repository's real ArduinoJson library.
+Tests cover:
+
+- Estimated SOC bounds/monotonicity; unknown presence, USB and charging;
+  stale/error handling, successful sample at boot millisecond zero, and wraparound.
+- Actual board selection for EYE, generic P4, classic Feather ESP32, XIAO Sense,
+  and FeatherS3 fuel gauge, including an explicitly false EYE board marker.
+- P4/S3 curve calibration and classic ESP32 line calibration (eFuse, nominal Vref,
+  and strict eFuse-only mode); GPIO-derived unit/channel use, partial reads,
+  saturation, conversion/configuration/calibration failures, and resource cleanup.
+- Concurrent recalibration blocked behind a paused hardware read, with readers
+  retaining the previous coherent snapshot until the operation completes.
+- Deferred fuel-gauge probe, retry after I2C failure, independent VBUS freshness,
+  CRATE deadband, disabled monitoring, and battery-full notification hysteresis.
+- Telemetry nulls for unknown/failed/stale readings and complete JSON serialization
+  within the CLI/web response buffer.
+- OTA admission under ADC, fuel-gauge and unmonitored build policies, including
+  invalid/stale values, independent fresh VBUS and the explicit force override.
+
+These checks do not validate resistor values, analog accuracy, actual SDK ADC
+routing, a connected cell, battery chemistry, or the charger circuit. Target
+builds and physical/meter comparison remain separate qualification steps.

@@ -798,11 +798,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## battery
 
-> The battery module reports cell state and keeps a time-series log; it is only present when battery monitoring is compiled in. The backend is a MAX17048 fuel gauge over I2C (with an ADC or USB-only fallback on other boards), and charging detection cross-references the gauge CRATE register with a VBUS-present signal so the reported state distinguishes truly charging from merely USB-powered. batterystatus prints voltage, charge percentage, charging/USB state, and a coarse status label, or returns the same data as JSON. batterylog manages a CSV discharge/charge log written to the device for later graphing: with no args it shows status, and subcommands are on/off (enable/disable), interval <5..3600> seconds (sampling period), tail (show the most recent rows), and clear (erase the log); significant events such as sleep/wake are always recorded regardless of the interval. batterycalibrate (admin) re-calibrates the ADC-based readings.
+> The battery module reports cell state and keeps a time-series log; it is only present when battery monitoring is compiled in. The backend is a MAX17048 fuel gauge over I2C or a calibrated ADC voltage divider selected by the board. ADC charge percentage is approximate; the charger can drive the measured BAT node even without a cell. USB, charging and cell presence are reported only when known. Missing readings are null in JSON, not zero/full estimates. batterystatus prints voltage, charge percentage, charging/USB state, and a coarse status label, or returns the same data as JSON. batterylog manages a CSV discharge/charge log written to the device for later graphing: with no args it shows status, and subcommands are on/off (enable/disable), interval <5..3600> seconds (sampling period), tail (show the most recent rows), and clear (erase the log); significant events such as sleep/wake are always recorded regardless of the interval. batterycalibrate (admin) reinitializes ADC calibration or re-probes the fuel gauge.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `batterycalibrate` | A | Recalibrate/re-probe the battery sensor (ADC characterize or fuel-gauge re-probe) |
+| `batterycalibrate` | A | Reinitialize ADC calibration or re-probe the fuel gauge |
 | `batterylog` |  | Battery time-series CSV log (on/off/interval/tail/clear)<br/>`Usage: batterylog [on\|off\|interval <s>\|tail\|clear]` |
 | `batterystatus` |  | Show battery voltage, charge level, and status |
 

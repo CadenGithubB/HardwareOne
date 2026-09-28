@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "idf_version": "5.5.5",
+  "idf_commit": "b774170ff46c393eeb5e495ea37936038d3f4f4f",
+  "scope": "The actual shared ADC function bodies compile and link against both supported calibration schemes. No probe flashed, no divider or cell physically qualified by these builds. Full HardwareOne P4/S3 builds are recorded separately.",
+  "results": [
+    {
+      "target": "esp32",
+      "source": "components/hardwareone/System_Battery.cpp",
+      "source_sha256": "e0406c1ba390c71b0ba2ea348757d3d53e33500de9d89d0dc5317923c5f5a0ca",
+      "extracted_backend_sha256": "e3d72fdfce74cb4124e5b2b90f1b9ee78b5391cd6370f975f4f7b626155b7753",
+      "policy_sha256": "0f4167bd3da97b74d57cea808bc59086e68834ce23c058a885b41b92a6b38c78",
+      "scope": "build only; no battery hardware qualification",
+      "status": "pass",
+      "binary_bytes": 174080,
+      "binary_sha256": "1eb47ddfa719460e69a805c173e13a03850abd79e83f1a07dd9a2a1c2efc746d",
+      "elf_sha256": "95b2c8208103ac04381c9e1fd48305b5684501bad6296000742422ea74d2e32a",
+      "log_sha256": "780fe640d9d9abddc91b12fc47592f75229798c0c9a6605b08b6df621a2abecd",
+      "command": "idf.py -D IDF_TARGET=esp32 build"
+    },
+    {
+      "target": "esp32s3",
+      "source": "components/hardwareone/System_Battery.cpp",
+      "source_sha256": "e0406c1ba390c71b0ba2ea348757d3d53e33500de9d89d0dc5317923c5f5a0ca",
+      "extracted_backend_sha256": "e3d72fdfce74cb4124e5b2b90f1b9ee78b5391cd6370f975f4f7b626155b7753",
+      "policy_sha256": "0f4167bd3da97b74d57cea808bc59086e68834ce23c058a885b41b92a6b38c78",
+      "scope": "build only; no battery hardware qualification",
+      "status": "pass",
+      "binary_bytes": 207024,
+      "binary_sha256": "3c1ee31253734dfc82442bb774d6da91984d9de061283b29feaafe96d2fef30c",
+      "elf_sha256": "5e435fa71bc6f382790bb693001398be8cf768a5b2f5e1023e1a1ef1f5b8e4bd",
+      "log_sha256": "3ac149ad8a952e311a86c14174c16f06ac53736ff305d1c4fd9ba7a556eaf2ed",
+      "command": "idf.py -D IDF_TARGET=esp32s3 build"
+    }
+  ]
+}

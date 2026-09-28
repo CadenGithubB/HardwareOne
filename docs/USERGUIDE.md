@@ -52,7 +52,7 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `ENABLE_AUTOMATION` | Set to `1` to build scheduled tasks and conditional commands |
 | `ENABLE_CAMERA_SENSOR` | Set to `1` to build the ESP32-S3 DVP camera driver (OV2640/OV5640) |
 | `ENABLE_MICROPHONE_SENSOR` | Set to `1` to build the PDM microphone via I2S |
-| `ENABLE_BATTERY_MONITOR` | Set to `1` to build LiPo voltage monitoring via ADC |
+| `ENABLE_BATTERY_MONITOR` | Enable the board's ADC or fuel-gauge battery backend |
 | `ENABLE_EDGE_IMPULSE` | Set to `1` to build Edge Impulse ML inference |
 | `ENABLE_BONDED_MODE` | Set to `1` to build Bonded Microcontrollers - two devices share command registries and the controller shows a Remote tab with the paired device's features |
 | `ENABLE_LLM_BACKEND` | Master switch for the LLM feature (web LLM page, OLED LLM mode, `llm*` commands, lens viewer). Set to `1` *and* turn on at least one source below; a build error tells you if you forget. |
@@ -667,7 +667,7 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | Time | `HOUR` | numeric | local hour, 0-23 |
 | Time | `DAY` | enum | `SUN` `MON` `TUE` `WED` `THU` `FRI` `SAT` |
 | Time | `NTP` | enum | `SYNCED` / `NONE` (clock holds a real date) |
-| System | `BATTERY` | numeric | charge percent (reads 100 on boards with no battery) |
+| System | `BATTERY` | numeric | charge estimate; ADC values are approximate, unavailable/stale readings do not satisfy the condition |
 | System | `HEAP` `PSRAM` `FSFREE` | numeric | free internal DRAM / PSRAM / storage, in KB |
 | System | `UPTIME` | numeric | minutes since boot |
 | System | `CHIPTEMP` | numeric | SoC temperature, C |
@@ -1416,9 +1416,24 @@ power threshold <value>         - Set power threshold
 
 ```
 batterystatus                   - Show voltage, charge level, and status
-batterycalibrate                - Recalibrate/re-probe the sensor (ADC characterize or fuel-gauge re-probe)
+batterycalibrate                - Reinitialize ADC calibration or re-probe the fuel gauge
 batterylog [on|off|interval <s>|tail|clear]  - Battery time-series CSV log
 ```
+
+Use `batterystatus json` for the measured voltage, validity flags and estimate
+source, or open `/battery` for the same readings and history. The P4X-EYE uses
+its calibrated GPIO49 divider through the shared ADC backend. A `~` marks an
+estimated percentage in the web page and display widgets. Its charger can
+raise the measured BAT-node voltage with no cell fitted, so voltage alone
+cannot establish cell presence, USB presence, or charging. Those facts remain
+unknown unless the board has the corresponding telemetry. Missing or stale
+numeric readings are `null` in JSON and `--` in the UI; they are not 0% or 100%.
+
+Monitored boards allow OTA with a fresh confirmed USB signal, a fresh ADC
+voltage of at least 3.65 V, or a fresh fuel-gauge reading of at least 30%, as
+appropriate for the backend. Low/unknown ADC voltage no longer proves external
+power. The existing explicit `force-power` override remains available. Builds
+without battery monitoring retain their existing unmonitored OTA policy.
 </details>
 
 <details>

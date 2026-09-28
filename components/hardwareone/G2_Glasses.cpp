@@ -43,7 +43,7 @@
 #include "System_MemoryMonitor.h"   // checkMemoryAvailable() — g2client gate
 #include "System_VFS.h"
 #include "System_Mutex.h"       // FsLockGuard — serialize long-lived File handles
-#include "System_Battery.h"   // BatteryState + getBatteryPercentage etc — for ESP corner widget
+#include "System_Battery.h"   // Valid battery snapshot for ESP corner widget
 #include "System_Microphone.h"  // gMicRunning, micConnected, getAudioLevel, etc — for MIC detail page
 #include "System_Dictation.h"  // G2 keyboard MIC page + source-bound transcript drain
 #include "HAL_Audio.h"          // audioGetSource/audioCaptureActive/audioCaptureStop — G2 as a mic source
@@ -6711,14 +6711,8 @@ buildG2StatusSnapshot(char* out, size_t cap) {
   }
 #endif
 
-  // (Device battery line moved to the top-right corner widget — see
-  //  buildEspStatusBattery + renderStatusCompound below. The corner
-  //  shows ESP USB / ESP NN% / ESP --% via getBatteryPercentage() +
-  //  isBatteryCharging(); body no longer carries it. If you need the
-  //  raw voltage in the body, plumb it as a separate line — the
-  //  legacy "Batt %.2fV %u%%" combined the two and folding USB
-  //  reporting in cleanly required splitting the corner from the
-  //  voltage display.)
+  // Device percentage lives in buildEspStatusBattery's corner widget.
+  // It uses the shared validity flags and marks estimated values with '~'.
 
 #if ENABLE_G2_GLASSES
   // (G2 battery line moved to the top-right corner widget — see
@@ -6788,18 +6782,20 @@ static void buildR1StatusBattery(char* out, size_t cap) {
 
 // Top-right corner ESP-battery widget. Same "NAME: value" shape as G2/R1
 // and the same geom width (kStatusEspGeom matches kStatusBattGeom /
-// kStatusR1Geom). Value is either "---" (no cell / bad read) or "NN%".
+// kStatusR1Geom). Unknown is "---"; approximate percentages carry '~'.
 static void buildEspStatusBattery(char* out, size_t cap) {
   if (!out || cap == 0) return;
-  if (gBatteryState.status == BATTERY_NOT_PRESENT ||
-      getBatteryVoltage() <= 0.0f) {
+  const BatteryState battery = getBatterySnapshot();
+  if (!battery.percentageValid) {
     snprintf(out, cap, "ESP: ---");
     return;
   }
-  int pct = (int)(getBatteryPercentage() + 0.5f);
+  int pct = (int)(battery.percentage + 0.5f);
   if (pct < 0)   pct = 0;
   if (pct > 100) pct = 100;
-  snprintf(out, cap, "ESP: %d%%", pct);
+  // Replace the separator space with the estimate marker to retain the
+  // existing nine-character maximum within the 110-pixel corner widget.
+  snprintf(out, cap, "ESP:%s%d%%", battery.percentageEstimated ? "~" : " ", pct);
 }
 
 // 8-cell circle bar gauge using Unicode geometric/spinner glyphs that
@@ -23303,10 +23299,8 @@ static void liveTextExitToHijackMenu() {
 //   batt  — top-right corner row 1. Single-line G2% indicator.
 //   r1    — top-right corner row 2. R1% indicator (placeholder until
 //           ring telemetry is plumbed).
-//   esp   — top-right corner row 3. ESP %/USB indicator. Reads
-//           getBatteryPercentage()/isBatteryCharging() from
-//           System_Battery.h. Replaces the legacy "Batt %.2fV %u%%"
-//           line that used to live in the body block.
+//   esp   — top-right corner row 3. ESP percentage/unknown indicator from
+//           the shared battery snapshot; approximate percentages carry '~'.
 //   meter — bottom-right corner, hugging the canvas edge. Two-line
 //           ASCII bar gauge for heap + PSRAM.
 //
@@ -23342,7 +23336,7 @@ static constexpr G2ContainerGeom kStatusBattGeom  = { 458,   8, 110,  32 };
 // G2-then-R1 top-down. Content from buildR1StatusBattery ("R1: NN%").
 static constexpr G2ContainerGeom kStatusR1Geom    = { 458,  42, 110,  32 };
 // ESP row directly below R1 — same x/w as G2/R1 so the three percentages
-// line up. Content is "ESP: ---" or "ESP: NN%" (see buildEspStatusBattery).
+// line up. Unknown is "ESP: ---"; estimates use "ESP:~NN%".
 static constexpr G2ContainerGeom kStatusEspGeom   = { 458,  76, 110,  32 };
 static constexpr G2ContainerGeom kStatusMeterGeom = { 318, 224, 250,  56 };
 
@@ -23375,10 +23369,8 @@ static char gStatusLastEspStr[32]    = {0};
 // could only ever read a permanent "ESP: ---". That's noise, so the child is
 // omitted at compile time and the lens gets the space back.
 //
-// NOTE: this is deliberately NOT keyed on the runtime value. On boards that CAN
-// measure (FeatherS3 fuel gauge, Feather V2 ADC), "ESP: ---" is meaningful — it
-// means "running on USB, no LiPo attached" — so buildEspStatusBattery keeps that
-// behaviour untouched.
+// Keep the row when monitoring is compiled but a reading is unavailable.
+// "ESP: ---" means unknown charge, with no inference about USB or cell presence.
 #if BATTERY_MONITOR_AVAILABLE
 static constexpr size_t kStatusTextChildCount = 5;
 #else
@@ -23441,7 +23433,7 @@ static bool renderStatusCompound() {
   char r1Str[32];
   buildR1StatusBattery(r1Str, sizeof(r1Str));
 
-  // ESP/USB indicator — see buildEspStatusBattery for the three-state
+  // ESP charge indicator — see buildEspStatusBattery for validity-aware
   // logic. Same shape as battStr/r1Str so it threads through the
   // multi-text CREATE/REBUILD path identically.
   char espStr[32];

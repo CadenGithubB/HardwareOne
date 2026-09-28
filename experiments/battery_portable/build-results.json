@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "integration_inputs_sha256": "5afb70de7b860470ce6a2c09a7c79ff0cdfa9c2f1d83d308ca603c91a4b8dfc5",
+  "builds": [
+    {
+      "target": "p4",
+      "status": "passed",
+      "idf_version": "5.5.5",
+      "app_bytes": 4446288,
+      "app_partition_bytes": 6377472,
+      "app_sha256": "b4fe60f62b7a1f86f8ad2ce4cadc4f17b635fc9d2b621a1843d0f6fcdf02db35",
+      "partition_table_sha256": "d6e3ea6ea3e74e8baf99c8fd5b70b9c96adbdf248ffca778474e70e17b64d7df",
+      "partition_table_matches_device_backup": true,
+      "build_log_sha256": "c2b9ba1f4703db9e254c80c5df7b05ec90cd5f954e35542694a21cefc89a9c90",
+      "app_manifest_sha256": "56872d96077d07e322e9673267c5c6bad3c99feca1b54122df55bdf841ceabb8",
+      "feature_profile_sha256": "e101329cbde26e88221cd142a91289c771eac0f14bce7bc4115b771e67631094"
+    },
+    {
+      "target": "s3",
+      "status": "passed",
+      "idf_version": "5.5.5",
+      "app_bytes": 4742592,
+      "app_partition_bytes": 5984256,
+      "app_sha256": "83feeea3080a79340d4537c2c09ab53c559695adea16fbf1d7d5a4ee8f956594",
+      "partition_table_sha256": "c6ed2513218eaa1d5b591914aea7ce95715500cb49068ed13b891ce5fa7efc71",
+      "partition_table_matches_device_backup": true,
+      "build_log_sha256": "acbd1fafc98d6b5424737fed0c9f5b4b48e5212ed2bc1313b3f012ee7b8a6115",
+      "app_manifest_sha256": "e6bf6c68b7c5240a809c3b22f42fde1aeacc1534cfabe84ee2f48b0a0bc60463",
+      "feature_profile_sha256": "519c9d8afe9b5541982e0e93b8c0516c4419c3a63b8db4560b54f62a80367b33"
+    }
+  ],
+  "earlier_attempts": [
+    {
+      "logs": [
+        "private/build-p4.log",
+        "private/build-s3.log"
+      ],
+      "outcome": "Input verifier stopped before compiling: source changed during capture; inputs recaptured."
+    },
+    {
+      "logs": [
+        "private/build-p4-v2.log",
+        "private/build-s3-v2.log"
+      ],
+      "outcome": "CMake stopped before compiling: missing radio wrapper; added forwarding wrappers."
+    }
+  ]
+}

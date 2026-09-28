@@ -59,7 +59,7 @@
 #endif
 
 // --- Additional condition-variable sources (see evaluateCondition) ---
-#include "System_Battery.h"        // BATTERY: getBatteryPercentage()
+#include "System_Battery.h"        // BATTERY: valid battery snapshot
 #include "System_Events.h"         // event triggers: ring drain + kind names
 #include "System_Clock.h"          // NTP: Clock::isSynced()
 #include "Bluetooth.h"             // BLE: isBLEConnected() (stub returns false when BT disabled)
@@ -3120,8 +3120,11 @@ bool evaluateCondition(const char* condition) {
            currentStringValue, gSettings.espnowTags.c_str());
   // ---- System-state variables (numeric) ----
   } else if (strcmp(sensor, "BATTERY") == 0) {
-    // Fuel-gauge state of charge, 0-100% (reads 100 on boards with no battery hardware)
-    currentValue = getBatteryPercentage();
+    // Gauge state of charge or approximate ADC voltage-derived percentage.
+    // Unavailable telemetry must not trigger a low/empty battery automation.
+    const BatteryState battery = getBatterySnapshot();
+    if (!battery.percentageValid) return false;
+    currentValue = battery.percentage;
   } else if (strcmp(sensor, "HEAP") == 0) {
     // Free INTERNAL DRAM in KB (the small, contested pool -- not the combined heap)
     currentValue = (float)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024);

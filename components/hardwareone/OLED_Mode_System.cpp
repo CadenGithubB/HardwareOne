@@ -9,6 +9,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "System_Settings.h"
+#include "System_Battery.h"
 #include "System_Utils.h"
 #include <esp_heap_caps.h>
 // Must come before the first hw1Internal*() use (this file also includes it
@@ -650,13 +651,6 @@ static void perfOnEnter(bool isForward) {
 // System Status Rendered (two-phase rendering)
 // ============================================================================
 
-// External battery functions
-extern float getBatteryVoltage();
-extern float getBatteryPercentage();
-extern char getBatteryIcon();
-extern bool isBatteryCharging();
-extern bool isUsbPresent();
-
 // Pre-gathered system status data to avoid WiFi/heap operations inside I2C transaction
 struct SystemStatusRenderData {
   bool wifiConnected;  // CONNECTION axis: associated to an AP
@@ -666,11 +660,7 @@ struct SystemStatusRenderData {
   uint32_t freeHeap;
   unsigned long uptimeHours;
   unsigned long uptimeMinutes;
-  float batteryVoltage;
-  float batteryPercentage;
-  char batteryIcon;
-  bool batteryCharging;       // CRATE > +threshold (cell taking charge)
-  bool batteryUsbPresent;     // USB connected (charging OR float-plateau)
+  BatteryState battery;
   bool valid;
 };
 static SystemStatusRenderData systemStatusRenderData = {0};
@@ -705,12 +695,8 @@ void prepareSystemStatusData() {
   systemStatusRenderData.uptimeMinutes = (uptimeSec % 3600) / 60;
   
   // Get battery data OUTSIDE I2C transaction
-  systemStatusRenderData.batteryVoltage = getBatteryVoltage();
-  systemStatusRenderData.batteryPercentage = getBatteryPercentage();
-  systemStatusRenderData.batteryIcon = getBatteryIcon();
-  systemStatusRenderData.batteryCharging = isBatteryCharging();
-  systemStatusRenderData.batteryUsbPresent = isUsbPresent();
-  
+  systemStatusRenderData.battery = getBatterySnapshot();
+
   systemStatusRenderData.valid = true;
 }
 
@@ -730,32 +716,26 @@ void displaySystemStatusRendered() {
   // Header shows "System Status", no need for title here
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
-  // Battery Status (top priority). Four-state rendering — mirrors the G2
-  // corner widget's logic so the OLED and lens columns stay consistent:
-  //   icon=='?'              "Power: USB"           no cell installed
-  //   isCharging             "Batt: V.VVV NN% USB+" USB in, taking charge
-  //   usbPresent (no charge) "Batt: V.VVV NN% USB"  USB in, cell at float
-  //   else                   "Batt: V.VVV NN% I"    on battery (I = M/H/F/L/E)
-#if ENABLE_BATTERY_MONITOR
-  if (systemStatusRenderData.batteryIcon == '?') {
-    oledDisplay->print("Power: USB");
+  // Show measured voltage and mark ADC charge estimates. Missing telemetry
+  // must not become a fabricated USB indication or an empty/full battery.
+  const BatteryState& battery = systemStatusRenderData.battery;
+  if (!battery.voltageAvailable) {
+    oledDisplay->print("Batt: unavailable");
+  } else if (!battery.voltageValid) {
+    oledDisplay->print("Batt: unknown");
   } else {
     oledDisplay->print("Batt: ");
-    oledDisplay->print(systemStatusRenderData.batteryVoltage, 2);
-    oledDisplay->print("V ");
-    oledDisplay->print((int)systemStatusRenderData.batteryPercentage);
-    oledDisplay->print("% ");
-    if (systemStatusRenderData.batteryCharging) {
-      oledDisplay->print("USB+");
-    } else if (systemStatusRenderData.batteryUsbPresent) {
-      oledDisplay->print("USB");
-    } else {
-      oledDisplay->print(systemStatusRenderData.batteryIcon);
+    oledDisplay->print(battery.voltage, 2);
+    oledDisplay->print("V");
+    if (battery.percentageValid) {
+      oledDisplay->print(battery.percentageEstimated ? " ~" : " ");
+      oledDisplay->print((int)battery.percentage);
+      oledDisplay->print('%');
+    }
+    if (battery.usbKnown && battery.usbPresent) {
+      oledDisplay->print(" USB");
     }
   }
-#else
-  oledDisplay->print("Power: USB");
-#endif
   oledDisplay->println();
 
   // Two separate axes: RADIO power, then WiFi CONNECTION.
