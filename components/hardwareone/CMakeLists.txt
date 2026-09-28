@@ -20,6 +20,7 @@ set(HW_CFG_ENABLE_LLM_SOURCE_CM5 0)      # CM5 co-processor as a source
 set(HW_CFG_ENABLE_MAPS 0)
 set(HW_CFG_ENABLE_AUTOMATION 0)
 set(HW_CFG_ENABLE_CAMERA_SENSOR 0)
+set(HW_CFG_ENABLE_ESP_SR 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
 set(HW_CFG_ENABLE_GAMES 0)
 set(HW_CFG_ENABLE_WEB_GAME_MAZE 1)
@@ -118,6 +119,11 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+ENABLE_CAMERA_SENSOR[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_CAMERA_SENSOR "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_ESP_SR[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_ESP_SR "${CMAKE_MATCH_1}")
     endif()
 
     string(REGEX MATCH "#define[ \t]+ENABLE_AUTOMATION[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
@@ -625,6 +631,12 @@ endif()
 # Both backends inspect SCCB controller ownership before driver initialization.
 if(HW_CFG_ENABLE_CAMERA_SENSOR GREATER 0)
     list(APPEND hardwareone_requires esp_driver_i2c)
+endif()
+
+# The shared speech consumer selects target-specific ESP-SR libraries through
+# the component; no chip-specific audio path is required here.
+if(HW_CFG_ENABLE_ESP_SR GREATER 0)
+    list(APPEND hardwareone_requires espressif__esp-sr)
 endif()
 
 # CSI/ISP stays behind the shared camera API; native S3 uses esp32-camera.

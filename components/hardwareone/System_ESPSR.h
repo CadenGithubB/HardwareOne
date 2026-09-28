@@ -15,7 +15,8 @@
 
 void initESPSR();
 bool startESPSR();
-void stopESPSR();
+// False means a worker is still stopping; its resources remain owned for retry.
+bool stopESPSR();
 bool isESPSRRunning();
 bool isESPSRWakeActive();
 void setESPSRWakeCallback(void (*callback)(const char* wakeWord));

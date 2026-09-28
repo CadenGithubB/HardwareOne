@@ -369,10 +369,21 @@ if(EXISTS "${_buildconfig}")
             "${HW1_DEPLOYMENT_FEATURE_FILE}"
             "${HW1_DEPLOYMENT_CONTRACT_FILE}"
             "${HW1_DEPLOYMENT_PARTITION_FILE}")
+    elseif(DEFINED HW1_DEPLOYMENT_FEATURE_FILE AND
+           NOT "${HW1_DEPLOYMENT_FEATURE_FILE}" STREQUAL "")
+        file(READ "${HW1_DEPLOYMENT_FEATURE_FILE}" _deployment_bc_contents)
+        set(_bc_contents "${_deployment_bc_contents}\n${_bc_contents}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${HW1_DEPLOYMENT_FEATURE_FILE}")
     endif()
+    string(REGEX MATCH "#define[ \t]+HW1_SR_MODELS_IN_FILESYSTEM[ \t]+([0-9]+)"
+           _model_location_match "${_bc_contents}")
+    set(_sr_models_in_filesystem "${CMAKE_MATCH_1}")
     string(REGEX MATCH "#define ENABLE_ESP_SR[ \t]+([0-9]+)" _match "${_bc_contents}")
     set(_espsr_val "${CMAKE_MATCH_1}")
-    if(_espsr_val STREQUAL "1")
+    # File-backed models share LittleFS/SD and need no dedicated model region.
+    # Keeping the no_sr layout preserves existing user data during SR upgrades.
+    if(_espsr_val STREQUAL "1" AND NOT _sr_models_in_filesystem STREQUAL "1")
         set(_sr_flag "sr")
     else()
         set(_sr_flag "no_sr")
