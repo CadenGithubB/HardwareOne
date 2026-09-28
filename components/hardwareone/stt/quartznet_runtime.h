@@ -22,8 +22,28 @@ struct Diagnostics {
     size_t freePsramAtInference = 0;
     size_t freeInternalAtInference = 0;
 };
+// Retains only the pinned, verified raw weights. Each call still constructs
+// a fresh shape-specific model/arena; vendor resize/rebuild is never reused.
+// One worker owns this object. Destroy/reset only after transcribe returns.
+class ModelCache {
+ public:
+    ModelCache() = default;
+    ~ModelCache();
+    void reset();
+#if HW1_STT_RUNTIME_DIAGNOSTICS
+    // Probe integrity after the vendor model and arena have been destroyed.
+    bool verify() const;
+#endif
+    ModelCache(const ModelCache&) = delete;
+    ModelCache& operator=(const ModelCache&) = delete;
+ private:
+    void* raw_ = nullptr;
+    friend bool transcribe(ModelReader, const int16_t*, size_t, char*, size_t,
+                           const STTLocalControl&, STTLocalStats&, char*, size_t,
+                           Diagnostics*, ModelCache*);
+};
 bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
                 char* text, size_t capacity, const STTLocalControl& control,
                 STTLocalStats& stats, char* error, size_t errorCapacity,
-                Diagnostics* diagnostics = nullptr);
+                Diagnostics* diagnostics = nullptr, ModelCache* cache = nullptr);
 }

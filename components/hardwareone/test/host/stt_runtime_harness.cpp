@@ -113,7 +113,8 @@ bool sttLocalAvailable(char* error, size_t cap) {
 }
 bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap,
                         const STTLocalControl& control, STTLocalStats& stats,
-                        char* error, size_t errorCap) {
+                        char* error, size_t errorCap, STTLocalSession* session) {
+  assert(!session); // One-shot callers must retain the self-contained backend path.
   assert(halOwner == "stt" && allocations.size() == 1);
   ++engineCalls; engineSamples = count;
   for (size_t i = 0; i < count; ++i) assert(pcm[i] == static_cast<int16_t>((i % 101) - 50));
@@ -125,6 +126,8 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
   else snprintf(text, cap, "quote \" secret \\ transcript");
   return engineOK;
 }
+STTLocalSession::~STTLocalSession() { reset(); }
+void STTLocalSession::reset() { assert(!backendState_); }
 #define free trackedFree
 // INSERT_BROKER
 #undef free

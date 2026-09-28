@@ -2,6 +2,7 @@
 #include "System_STTLocal.h"
 #if ENABLE_LOCAL_STT
 #include <cstdio>
+#include <new>
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 #include "System_VFS.h"
 #include "stt/quartznet_runtime.h"
@@ -25,14 +26,24 @@ bool sttLocalAvailable(char* error,size_t cap) {
 }
 bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t textCap,
                        const STTLocalControl& control,STTLocalStats& stats,
-                       char* error,size_t errorCap) {
+                       char* error,size_t errorCap,STTLocalSession* session) {
+    stats={};
     File file=openModel();
     if(!file||file.isDirectory()) {
         if(text&&textCap)text[0]=0;
         if(error&&errorCap)snprintf(error,errorCap,"Cannot open local STT model");
         return false;
     }
-    return hw1::stt::transcribe({&file,file.size(),readModel},pcm,samples,text,textCap,control,stats,error,errorCap);
+    if(session && !session->backendState_) {
+        session->backendState_=new(std::nothrow) hw1::stt::ModelCache;
+        if(!session->backendState_) {
+            if(text&&textCap)text[0]=0;
+            if(error&&errorCap)snprintf(error,errorCap,"Cannot allocate STT session");
+            return false;
+        }
+    }
+    return hw1::stt::transcribe({&file,file.size(),readModel},pcm,samples,text,textCap,control,stats,error,errorCap,
+                              nullptr,session ? static_cast<hw1::stt::ModelCache*>(session->backendState_) : nullptr);
 }
 #else
 bool sttLocalAvailable(char* error,size_t cap) {
@@ -40,8 +51,15 @@ bool sttLocalAvailable(char* error,size_t cap) {
     return false;
 }
 bool sttLocalTranscribe(const int16_t*,size_t,char* text,size_t cap,const STTLocalControl&,
-                       STTLocalStats& stats,char* error,size_t errorCap) {
+                       STTLocalStats& stats,char* error,size_t errorCap,STTLocalSession*) {
     if(text&&cap)text[0]=0;stats={};return sttLocalAvailable(error,errorCap);
 }
 #endif
+STTLocalSession::~STTLocalSession() { reset(); }
+void STTLocalSession::reset() {
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+    delete static_cast<hw1::stt::ModelCache*>(backendState_);
+#endif
+    backendState_=nullptr;
+}
 #endif

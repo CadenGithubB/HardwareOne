@@ -4,12 +4,15 @@ Experimental English dictation for HardwareOne, on `codex/jpeg-portable`, based
 on the qualified ESP-SR milestone `f9bfe98`. The P4 transcribes onboard microphone
 audio without a Pi, UART inference, Wi-Fi connection or cloud API.
 
-The new continuous implementation passed its full P4 build, host tests and a
-ten-minute physical run with camera captures. See
+The current `cache-app-v1` implementation retains verified model weights during
+a continuous session to reduce loading between segments. Its full-app physical
+qualification is complete; see [CACHE_RESULTS.md](CACHE_RESULTS.md) and
+[cache-validation.json](cache-validation.json) for current measurements, checks
+and limits. The earlier continuous implementation passed a ten-minute physical
+run with camera captures, documented in
 [CONTINUOUS_RESULTS.md](CONTINUOUS_RESULTS.md) and
-[continuous-validation.json](continuous-validation.json) for timings, memory,
-checks and limits. The earlier bounded-model results remain in
-[RESULTS.md](RESULTS.md) and [validation.json](validation.json).
+[continuous-validation.json](continuous-validation.json). Earlier bounded-model
+evidence remains in [RESULTS.md](RESULTS.md) and [validation.json](validation.json).
 
 ## Shared application path
 
@@ -18,8 +21,13 @@ the authenticated session, audio lease, bounded buffers and cancellation. PDM
 and G2 microphones use the same capture interface. A dedicated capture task
 continues draining PCM while a separate worker transcribes completed segments.
 The local engine loads pinned QuartzNet5x5 weights, computes log-mel features,
-runs P4 int8 ESP-DL kernels and greedily decodes CTC text. Model memory is
-released after each segment. No entire-session audio or transcript accumulates
+runs P4 int8 ESP-DL kernels and greedily decodes CTC text. A session-owned
+`ModelCache` retains 7,172,016 verified raw model bytes in PSRAM across segments.
+Every segment checks the pinned file header and hashes the resident bytes before
+vendor parsing. Each segment creates a fresh `dl::Model` and activation arena,
+then releases those per-segment allocations; session weights are released on
+stop, cancellation or error after inference returns and capture joins. One-shot inference remains
+self-contained and unchanged. No entire-session audio or transcript accumulates
 in RAM, and raw audio is not written to storage.
 
 Segmentation is a portable C++ energy detector, **not neural VAD**. It measures
@@ -35,8 +43,8 @@ those thresholds; they remain configurable for other microphones or rooms.
 The noise estimate cannot rise through an active utterance, and its peak resets
 after a natural pause. Current defaults retain 300 ms of pre-roll, require
 200 ms of voiced audio, and end on 600 ms of quiet once a segment spans at least
-eight seconds. That minimum span leaves
-room for model-loading overhead. Continuous speech is cut at twenty seconds;
+eight seconds. That minimum span is unchanged by weight caching; throughput and
+endpoint timing still need to be considered together. Continuous speech is cut at twenty seconds;
 normal stop also flushes a shorter voiced tail. Indefinite silence does not
 trigger periodic inference.
 
@@ -83,7 +91,10 @@ stt cancel <id>
 
 - `status` reports capture/inference activity, 64-bit session time and sample
   count, completed segments, pending audio/text, overruns, RMS/noise/threshold
-  readings, and errors. There is no total capture-duration limit. Individual segments and queues remain bounded;
+  readings, and errors. `weightsReused` describes the most recently processed
+  segment, not whether weights are currently allocated; it may remain true in
+  terminal status after the cache has been released. There is no total
+  capture-duration limit. Individual segments and queues remain bounded;
   sequence exhaustion is an explicit failure requiring a new session.
 - `next` peeks at the oldest result. When `available` is true, it returns
   `sequence`, `startSample`, `endSample`, `forcedBoundary` and `sttText`.
@@ -134,10 +145,13 @@ paths still require accessory qualification; the attached P4 has no display.
 - This produces **phrase-level results, not streaming tokens or word-by-word
   captions**. A natural endpoint normally waits for the eight-second minimum
   segment span, then model loading and inference add latency. Capture continues
-  during that processing. Earlier bounded full-app tests took about 6–8 seconds
-  to process short recordings and about thirteen seconds for twenty seconds of
-  audio; continuous throughput and contention are measured separately in
-  [the qualification report](CONTINUOUS_RESULTS.md).
+  during that processing. A same-input numeric probe measured 4.497 seconds
+  cold and 2.003 seconds with cached weights. Initial full-app model-loading
+  measurements were about 3.4 seconds cold and 0.17 seconds warm; these are
+  loading times, not end-to-end speech latency. See
+  [the current qualification report](CACHE_RESULTS.md) for continuous throughput
+  and camera contention. Earlier bounded full-app timings in
+  [RESULTS.md](RESULTS.md) predate the session cache.
 - Hard boundaries have **zero overlap**. Raw samples are not duplicated or
   silently skipped across a forced cut, but a word split at twenty seconds can
   be misrecognized because each segment has independent normalization, context
@@ -155,6 +169,10 @@ paths still require accessory qualification; the attached P4 has no display.
   errors in fifty reference words on float and int8 inference. Room speaker-to-
   microphone tests made additional errors. These small historical checks are
   not a representative WER benchmark or proof of human-speech accuracy.
+  Offline beam decoding, input-amplitude scaling and trailing-silence tests
+  found no consistent accuracy improvement; see
+  [DECODER_LATENCY_NOTES.md](DECODER_LATENCY_NOTES.md). The cache changes no
+  decoder, gain, frontend, model or segmentation behavior.
 - The 16 MB flash layout is unchanged. The model occupies 5,490,696 compressed
   bytes including its envelope, expands to 7,172,016 bytes in PSRAM, and shares
   LittleFS with the existing ESP-SR model.
@@ -164,10 +182,12 @@ paths still require accessory qualification; the attached P4 has no display.
   logging/history and the other health interfaces remain enabled. No compiler
   optimization settings were changed.
 
-The `continuous-v4` build is 6,367,280 bytes, leaving 10,192 bytes in the existing
-app partition. Its SHA-256 is
-`08a961f324a7f54ce31f6d3b96e42d87fd670e8986d2ff5c501744befce637e7`.
-Measured continuous throughput, camera coexistence and remaining limits are in
+The current `cache-app-v1` build is 6,367,776 bytes, leaving 9,696 bytes in the
+existing app partition. Its SHA-256 is
+`56c0dba75ed40c32959085f2134b4c5f8c3283c1660cc1e22f1cc325ed26d945`.
+Current qualification evidence belongs in [CACHE_RESULTS.md](CACHE_RESULTS.md)
+and [cache-validation.json](cache-validation.json); the earlier
+`continuous-v4` build identity and results remain in
 [CONTINUOUS_RESULTS.md](CONTINUOUS_RESULTS.md).
 
 ## Reproduce
@@ -185,6 +205,8 @@ The concurrent broker tests compile the actual production source with real host
 threads and controlled HAL/model fakes:
 
 ```sh
+python3 components/hardwareone/test/host/test_quartznet_cache.py --sanitize
+python3 components/hardwareone/test/host/test_stt_runtime.py --sanitize
 python3 components/hardwareone/test/host/test_stt_continuous.py --sanitize
 python3 components/hardwareone/test/host/test_stt_continuous.py --thread-sanitize
 python3 components/hardwareone/test/host/test_stt_segmenter.py --sanitize

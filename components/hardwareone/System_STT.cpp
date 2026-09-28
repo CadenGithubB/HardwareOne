@@ -516,6 +516,7 @@ static void sttCaptureWorker(void* context) {
 }
 static void sttContinuousWorker(void*) {
   StreamRun run;
+  STTLocalSession backendSession;
   portENTER_CRITICAL(&gSTTMux);
   run.token = gSTT.snapshot.token;
   run.requested = gSTT.requestedSource;
@@ -575,7 +576,7 @@ static void sttContinuousWorker(void*) {
       if (inferenceSamples > slot->samples)
         memset(slot->pcm + slot->samples, 0, (inferenceSamples - slot->samples) * sizeof(int16_t));
       const bool ok = sttLocalTranscribe(slot->pcm, inferenceSamples, text, sizeof(text), control,
-                                        stats, error, sizeof(error));
+                                        stats, error, sizeof(error), &backendSession);
       if (!sttStreamCancelled(&run)) {
         if (!ok || !memchr(text, '\0', sizeof(text))) {
           sttStreamFail(run, error[0] ? error : "Continuous transcription failed");
@@ -619,6 +620,9 @@ static void sttContinuousWorker(void*) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
   }
+  // FreeRTOS self-delete does not unwind C++ locals. Close the backend before
+  // publishing workerActive=false, after every inference/capture user joined.
+  backendSession.reset();
   if (run.working) { sttWipe(run.working, kStreamSamples * sizeof(int16_t)); free(run.working); }
   for (auto& slot : run.slots) {
     if (slot.pcm) { sttWipe(slot.pcm, kStreamSamples * sizeof(int16_t)); free(slot.pcm); }
@@ -977,6 +981,7 @@ static const char* cmd_stt(const String& argsInput) {
     doc["captureStackFreeBytes"] = snap.captureStackFreeBytes;
     doc["error"] = snap.error;
     doc["modelBytes"] = snap.stats.modelBytes;
+    doc["weightsReused"] = snap.stats.weightsReused;
     doc["featureFrames"] = snap.stats.featureFrames;
     doc["outputFrames"] = snap.stats.outputFrames;
     doc["loadMs"] = snap.stats.loadMs;

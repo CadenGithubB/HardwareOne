@@ -37,7 +37,8 @@ static std::atomic<uint64_t> clockMs{1};
 uint32_t millis() { return static_cast<uint32_t>(clockMs.load()); }
 void vTaskDelay(uint32_t) { std::this_thread::sleep_for(std::chrono::microseconds(100)); }
 static std::atomic<unsigned> deletedTasks{0}, activeTasks{0};
-void vTaskDelete(void*) { ++deletedTasks; }
+void vTaskDelete(void*);
+static thread_local bool mainWorker = false, taskSelfDeleted = false, backendResetBeforeDelete = false;
 uint32_t uxTaskGetStackHighWaterMark(void*) { return 2048; }
 void taskStackRecord(const char*, uint32_t) {}
 uint32_t esp_random() { return 0xabcdef01; }
@@ -52,7 +53,9 @@ int xTaskCreatePinnedToCore(void (*fn)(void*), const char* name, uint32_t bytes,
   if (failedTask == name) return 0;
   ++activeTasks;
   std::lock_guard<std::mutex> lock(tasksMutex);
-  tasks.emplace_back([=] { fn(context); --activeTasks; });
+  tasks.emplace_back([=, main = std::string(name) == "stt"] {
+    mainWorker = main; fn(context); --activeTasks;
+  });
   return pdPASS;
 }
 static std::atomic<bool> serialLive{true}, webLive{true}, successorLive{true};
@@ -182,8 +185,16 @@ void trackedFree(void* p) {
 }
 static std::atomic<unsigned> engineCalls{0}, enginePermits{UINT32_MAX};
 static std::atomic<bool> modelAvailable{true}, engineOK{true}, engineOverlong{false};
-static std::atomic<bool> ignoreEngineCancel{false}, engineActive{false};
-struct EngineCall { size_t rawSamples, inferenceSamples; uint64_t start, end; uint32_t sequence; };
+static std::atomic<bool> ignoreEngineCancel{false}, engineActive{false}, cacheStartFails{false};
+static std::atomic<unsigned> liveWeightCaches{0}, weightLoads{0}, weightReuses{0}, sessionCloses{0};
+struct FakeWeights { STTToken token; unsigned id; };
+struct EngineCall {
+  size_t rawSamples, inferenceSamples;
+  uint64_t start, end;
+  uint32_t sequence;
+  unsigned cacheId = 0;
+  bool weightsReused = false;
+};
 static std::mutex engineMutex;
 static std::vector<EngineCall> engineHistory;
 bool sttLocalAvailable(char* error, size_t cap) {
@@ -192,14 +203,45 @@ bool sttLocalAvailable(char* error, size_t cap) {
 }
 // Definition follows the injected broker so it can check real queue metadata.
 bool sttLocalTranscribe(const int16_t*, size_t, char*, size_t,
-                        const STTLocalControl&, STTLocalStats&, char*, size_t);
+                        const STTLocalControl&, STTLocalStats&, char*, size_t, STTLocalSession*);
 #define free trackedFree
 // INSERT_BROKER
 #undef free
 
+void STTLocalSession::reset() {
+  if (!taskSelfDeleted) {
+    assert(mainWorker && !backendResetBeforeDelete);
+    assert(!engineActive && !audioCaptureOwnedBy("stt"));
+    { std::lock_guard<std::mutex> lock(gSTTMux); assert(gSTT.snapshot.workerActive); }
+    backendResetBeforeDelete = true;
+    ++sessionCloses;
+  }
+  if (backendState_) {
+    delete static_cast<FakeWeights*>(backendState_);
+    backendState_ = nullptr;
+    assert(liveWeightCaches.fetch_sub(1) == 1);
+  }
+}
+STTLocalSession::~STTLocalSession() {
+  // Host threads return and unwind after our vTaskDelete fake. Real FreeRTOS
+  // does not: the deletion check below must already have seen explicit reset.
+  assert(!backendState_);
+  reset(); // Also verify that the reset after an explicit close is idempotent.
+}
+void vTaskDelete(void*) {
+  if (mainWorker) {
+    assert(backendResetBeforeDelete && liveWeightCaches == 0);
+    assert(!engineActive && !audioCaptureOwnedBy("stt"));
+    { std::lock_guard<std::mutex> lock(gSTTMux); assert(!gSTT.snapshot.workerActive); }
+  }
+  taskSelfDeleted = true;
+  ++deletedTasks;
+}
+
 bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap,
                         const STTLocalControl& control, STTLocalStats& stats,
-                        char* error, size_t errorCap) {
+                        char* error, size_t errorCap, STTLocalSession* session) {
+  assert(mainWorker && session && !backendResetBeforeDelete);
   auto& run = *static_cast<StreamRun*>(control.context);
   EngineCall call{};
   {
@@ -217,6 +259,19 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
     for (size_t i = call.rawSamples; i < count; ++i) assert(pcm[i] == 0);
   };
   assertPCM();
+  if (cacheStartFails) {
+    assert(!session->backendState_);
+    snprintf(error, errorCap, "Injected cache initialization failure");
+    return false;
+  }
+  call.weightsReused = session->backendState_ != nullptr;
+  if (!session->backendState_) {
+    assert(liveWeightCaches.fetch_add(1) == 0);
+    session->backendState_ = new FakeWeights{run.token, ++weightLoads};
+  } else ++weightReuses;
+  const auto& weights = *static_cast<FakeWeights*>(session->backendState_);
+  assert(weights.token == run.token); // A successor must receive fresh ownership.
+  call.cacheId = weights.id;
   {
     std::lock_guard<std::mutex> lock(engineMutex); engineHistory.push_back(call);
   }
@@ -226,7 +281,7 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
   while (enginePermits < number && (ignoreEngineCancel || !control.cancelled(control.context)))
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   assertPCM(); // The producer may have filled/reused other slots meanwhile.
-  stats.samples = count; stats.inferenceMs = 123;
+  stats.samples = count; stats.inferenceMs = 123; stats.weightsReused = call.weightsReused;
   if (!engineOK) snprintf(error, errorCap, "Injected inference failure");
   if (engineOverlong) memset(text, 'x', cap);
   else snprintf(text, cap, "segment %u", call.sequence);
@@ -249,7 +304,7 @@ static void joinTasks() {
   std::vector<std::thread> joined;
   { std::lock_guard<std::mutex> lock(tasksMutex); joined.swap(tasks); }
   for (auto& task : joined) task.join();
-  assert(allocationCount() == 0 && !audioCaptureBusy() && !engineActive);
+  assert(allocationCount() == 0 && !audioCaptureBusy() && !engineActive && liveWeightCaches == 0);
 }
 static STTSnapshot snapshot(STTToken token) {
   STTSnapshot out; assert(sttSnapshot(owner, token, &out)); return out;
@@ -271,6 +326,7 @@ static void reset() {
   allVoice = true; dc = 0; voiceIntervals.clear();
   modelAvailable = engineOK = true; engineOverlong = ignoreEngineCancel = engineActive = false;
   engineCalls = 0; enginePermits = UINT32_MAX; engineHistory.clear();
+  cacheStartFails = false; weightLoads = weightReuses = sessionCloses = 0;
 }
 static STTToken begin() {
   allowedSamples = deliveredSamples = 0; readCounter = 0;
@@ -296,7 +352,10 @@ static void feed(STTToken token, uint64_t totalSamples) {
   assert(snapshot(token).recordedSamples == totalSamples);
 }
 static void complete(STTToken token) {
-  await([&] { return !sttRunActive(token); }, "terminal session"); joinTasks();
+  await([&] { return !sttRunActive(token); }, "terminal session");
+  // Check before host stack unwinding could hide a missing FreeRTOS close.
+  assert(liveWeightCaches == 0);
+  joinTasks();
   assert(gSettings.micSource == "auto" && gSettings.microphoneGain == 70 && gSettings.microphoneSampleRate == 48000);
 }
 static STTTextChunk peek(STTToken token) {
@@ -355,6 +414,9 @@ static void testOverlapAndDrain() {
   enginePermits = UINT32_MAX; complete(token);
   auto s = snapshot(token); assert(s.state == STTState::Done && s.segmentsCompleted == 3 && s.recordedSamples == kCalibrationSamples + 720000);
   assert(starts == 1 && stops == 1 && deletedTasks == 2);
+  assert(weightLoads == 1 && weightReuses == 2 && sessionCloses == 1);
+  assert(!engineHistory[0].weightsReused && engineHistory[1].weightsReused && engineHistory[2].weightsReused);
+  for (const auto& call : engineHistory) assert(call.cacheId == engineHistory[0].cacheId);
   std::vector<STTTextChunk> result; acknowledgeAll(token, &result);
   assert(result.size() == 3);
   uint64_t end = kCalibrationSamples;
@@ -420,10 +482,12 @@ static void testCancelAndJoin() {
   assert(sttCancel(owner, token));
   await([] { return stopRequested.load(); }, "HAL asynchronous stop");
   assert(sttRunActive(token) && allocationCount() == 4 && engineActive);
+  assert(liveWeightCaches == 1 && sessionCloses == 0);
   rejectBegin();
   enginePermits = UINT32_MAX;
   await([] { return !engineActive.load(); }, "model cooperative join");
   assert(sttRunActive(token) && allocationCount() == 4); // HAL still owns caller memory/lifecycle.
+  assert(liveWeightCaches == 1 && sessionCloses == 0);
   releaseHALStop(); complete(token);
   assert(snapshot(token).state == STTState::Cancelled && engineCalls == 1 && !snapshot(token).pendingTexts);
   STTTextChunk out; assert(!sttReadChunk(owner, token, &out) && !out.text[0]);
@@ -473,13 +537,17 @@ static void testDeliveryAndRevocation() {
   serialLive = false; // Revocation cancels capture and wipes even already queued private text.
   await([&] { return !sttRunActive(token); }, "revocation shutdown"); joinTasks();
   assert(gSTT.snapshot.state == STTState::Cancelled && !gSTT.snapshot.pendingTexts);
+  assert(weightLoads == 1 && weightReuses == 2 && sessionCloses == 1 && liveWeightCaches == 0);
   memset(denied.text, 'x', sizeof(denied.text));
   assert(!sttReadChunk(owner, token, &denied) && !denied.text[0]);
   assert(!sttReadChunk(successor, token, &denied) && !sttAcknowledgeChunk(successor, token, 3));
   assert(!sttCancel(owner, token) && !sttRequestFinish(owner, token));
   serialLive = true;
   const auto next = begin(); assert(next != token && !sttCancel(owner, token)); started(next);
+  feed(next, 16000);
   assert(sttRequestFinish(owner, next)); complete(next);
+  assert(weightLoads == 2 && weightReuses == 2 && sessionCloses == 2);
+  assert(!engineHistory.back().weightsReused && engineHistory.back().cacheId != engineHistory.front().cacheId);
 }
 static void testStopIntegrityRace() {
   reset(); halOverruns = 4;
@@ -522,8 +590,12 @@ static void testFaults() {
   assert(snapshot(token).state == STTState::Failed && snapshot(token).audioOverruns == 7 && strstr(snapshot(token).error, "audio loss"));
   reset(); token = begin(); started(token); sourceAvailable = false; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "source lost"));
+  reset(); cacheStartFails = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + 320000; complete(token);
+  assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "initialization"));
+  assert(weightLoads == 0 && sessionCloses == 1 && liveWeightCaches == 0);
   reset(); engineOK = false; token = begin(); started(token); allowedSamples = kCalibrationSamples + 320000; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "Injected") && !snapshot(token).pendingTexts);
+  assert(weightLoads == 1 && weightReuses == 0 && sessionCloses == 1 && liveWeightCaches == 0);
   reset(); engineOverlong = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + 320000; complete(token);
   assert(snapshot(token).state == STTState::Failed && !snapshot(token).pendingTexts);
   reset(); token = begin(); started(token);
@@ -568,5 +640,5 @@ int main() {
   testStopIntegrityRace(); puts("PASS initial audio loss and simultaneous finish/overrun between reads");
   testFaults(); puts("PASS allocation/task/HAL/model faults and sequence exhaustion");
   testWideCountersAndRetention(); puts("PASS 64-bit time/positions and result expiry");
-  reset(); puts("Continuous production STT broker multithread tests passed");
+  reset(); puts("Continuous production STT broker multithread tests passed, including explicit backend-session cleanup");
 }
