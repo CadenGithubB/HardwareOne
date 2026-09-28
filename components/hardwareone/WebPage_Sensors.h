@@ -739,6 +739,9 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 #if ENABLE_EDGE_IMPULSE
   streamEdgeImpulseSensorJs(req);
 #endif
+  // Close the shell opened by streamBeginHtml after every sensor's script.
+  // streamPageWithContent owns the final empty HTTP chunk for this page.
+  httpd_resp_send_chunk(req, "</div></body></html>", HTTPD_RESP_USE_STRLEN);
 }
 
 #endif // WEB_SENSORS_H

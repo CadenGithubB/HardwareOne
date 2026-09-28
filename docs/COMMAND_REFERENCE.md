@@ -599,7 +599,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## camera
 
-> Driver and CLI for the attached DVP camera sensor (OV2640/OV3660 class). The sensor must be powered up first with opencamera before any capture or tuning command works (closecamera stops it); cameraread and cameradump report status and all current sensor register values. Three distinct capture paths exist: cameracapture grabs one JPEG frame into RAM and reports its size only, camerasave captures and writes a frame to storage (LittleFS, SD, or both, per camerastoragelocation, into cameracapturefolder), and cameratiny produces a 160x120 frame small enough for a single ESP-NOW packet; camerarecord start|stop records MJPEG-AVI video and requires an SD card. Resolution and image controls (camerares/cameraframesize, cameraquality, camerafps) and a large set of sensor-tuning commands (brightness/contrast/saturation, white balance, exposure/AEC, gain/AGC, special effects, mirror/flip/rotate, plus raw camerareg register writes) adjust the live image. Automation settings (cameraautostart, cameraautocapture/cameraautocaptureinterval, camerasendaftercapture/cameratargetdevice) drive timed capture and optional ESP-NOW delivery to a named peer.
+> Shared camera commands for DVP cameras on ESP32/S3 and CSI cameras on supported P4 boards. `opencamera` starts capture and `closecamera` releases the driver; `cameraread` reports the backend, actual and requested resolution, JPEG output limit, and supported resolutions/controls, including when stopped. The web page and G2 picker use those capabilities: unsupported sensor tuning is disabled or omitted and CLI writes fail without changing the setting. `cameracapture` captures a JPEG into RAM and reports its size; `camerasave` writes a photo using the shared storage settings. `cameratiny` requests a compressed 160x120 JPEG for the image-transfer path, without guaranteeing it fits a single radio packet. `camerarecord start|stop` records MJPEG-AVI and requires SD storage. Quality remains 0..63 (lower is better) on both backends. Resolution IDs 0..10 retain their meanings; HD is 11 and CIF is 12. Available sizes and low-level register access depend on the backend. Auto-capture, photo retention and optional ESP-NOW delivery continue through the shared image manager.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -624,7 +624,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `cameraeffect` | A | Special effect: <0-6><br/>`Usage: cameraeffect <0..6> (0=None,1=Negative,2=Grayscale,3=Red,4=Green,5=Blue,6=Sepia)` |
 | `cameraexposure` | A | Set AE level: <-2..2><br/>`Usage: cameraexposure <-2..2> (negative=darker)` |
 | `camerafps` | A | Camera FPS: <1-20><br/>`Usage: camerafps <1..20>` |
-| `cameraframesize` | A | Set resolution by index: <0-10><br/>`Usage: cameraframesize <0..10> (0-5: QVGA..UXGA, 6-10: 96x96/QQVGA/QCIF/HQVGA/240x240)` |
+| `cameraframesize` | A | Set resolution by index: <0-12><br/>`Usage: cameraframesize <0..12> (0-5: QVGA..UXGA, 6-10: 96x96/QQVGA/QCIF/HQVGA/240x240)` |
 | `camerafx` |  | Set bri/con/sat together: <bri> <con> <sat> (-2..+2 each)<br/>`Usage: camerafx <bri> <con> <sat> (-2..+2 each)` |
 | `cameragainceiling` | A | Gainceiling: <0-6> (2X..128X)<br/>`Usage: cameragainceiling <0..6> (2X..128X)` |
 | `cameragamma` | A | Raw gamma: <on\|off><br/>`Usage: cameragamma <on\|off>` |
@@ -635,7 +635,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `cameraread` |  | Read camera status |
 | `camerarecord` |  | Start/stop MJPEG-AVI recording (SD only): <start\|stop><br/>`Usage: camerarecord <start\|stop\|1\|0>` |
 | `camerareg` | A | Direct register write: <addr_hex> <mask_hex> <value_hex><br/>`Usage: camerareg <addr_hex> <mask_hex> <value_hex> (example: camerareg 0x3824 0x1f 0x04)` |
-| `camerares` |  | Set camera resolution: <res><br/>`Usage: camerares <96x96\|qqvga\|qcif\|hqvga\|240x240\|qvga\|cif\|vga\|svga\|xga\|sxga\|uxga>` |
+| `camerares` |  | Set camera resolution: <res><br/>`Usage: camerares <96x96\|qqvga\|qcif\|hqvga\|240x240\|qvga\|cif\|vga\|svga\|xga\|hd\|sxga\|uxga>` |
 | `camerarotate` |  | Rotate 180°: <on\|off><br/>`Usage: camerarotate <on\|off\|1\|0\|true\|180>` |
 | `camerasaturation` |  | Set saturation: <-2..2><br/>`Usage: camerasaturation <-2..2>` |
 | `camerasave` |  | Save current frame to storage |

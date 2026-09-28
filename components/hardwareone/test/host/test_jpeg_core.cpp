@@ -53,6 +53,7 @@ void rejected(const std::vector<uint8_t>& data, const DecodeOptions& opts = {}) 
 }
 }
 namespace hwjpeg { namespace detail {
+bool validateSoftwareEntropy(const uint8_t*, size_t, const Info&, const char**) { return true; }
 bool decodeHardware(const uint8_t* data, size_t length, const Info& info, Image& image, const char**) {
   checkCanonical(data, length);
   ++hardwareCalls; return fillImage(info, image, Backend::Hardware, hardwarePass);

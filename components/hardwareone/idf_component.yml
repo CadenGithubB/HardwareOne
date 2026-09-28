@@ -28,3 +28,9 @@ dependencies:
     rules:
       - if: "idf_version >=5.0"
         optional: true
+
+  # P4 CSI/ISP camera backend; no dependency added to native ESP32/S3 builds.
+  espressif/esp_video:
+    version: "==2.2.0"
+    rules:
+      - if: "target in [esp32p4]"

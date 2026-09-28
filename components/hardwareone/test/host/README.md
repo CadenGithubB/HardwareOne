@@ -394,3 +394,70 @@ Tests cover:
 These checks do not validate resistor values, analog accuracy, actual SDK ADC
 routing, a connected cell, battery chemistry, or the charger circuit. Target
 builds and physical/meter comparison remain separate qualification steps.
+
+
+## Shared camera controls and consumers
+
+```sh
+python3 components/hardwareone/test/host/test_camera_consumers.py --sanitize
+python3 -m unittest tools.webui.tests.test_camera_page tools.webui.tests.test_embedded_js_syntax
+```
+
+The C++ runner compiles the whole production G2 camera settings page with only
+runtime boundaries mocked, plus the real HAL descriptor and frame-validation
+implementation. It checks fixed resolution IDs/dimensions, invalid IDs, JPEG
+marker and byte-budget admission, release ownership, backend-specific settings
+and resolution rows, no command on an unsupported control, stale taps after a
+capability change, failed command submission, and text truncation at every
+capacity from 1 to 1023 bytes. The JavaScript test executes the actual served
+camera script against a small DOM adapter to verify supported options, disabled
+controls, capability changes, command gating and visible CLI errors. These are
+not sensor, browser layout, G2 transport, SD recording or physical camera tests.
+
+
+### Edge Impulse JPEG capacity
+
+```sh
+python3 components/hardwareone/test/host/test_edge_impulse_jpeg.py --sanitize
+```
+
+This compiles the actual Edge Impulse conversion guard and shared JPEG parser.
+Only the legacy converter is mocked, writing the complete inspected RGB size
+so a missed capacity check is observable under ASan. Real synthetic small/VGA
+JPEGs retain their actual geometry. HD input, undersized or null output,
+malformed headers, truncated input and a one-byte file cannot reach conversion;
+decoder failure cannot publish stale dimensions. Both camera and stored-file
+call sites are checked for use of this capacity-aware boundary. No additional
+full-image RGB allocation or inference/model behavior is introduced.
+
+### Camera / sensor I2C ownership
+
+```sh
+python3 components/hardwareone/test/host/test_camera_i2c_reservation.py --sanitize
+```
+
+This runs the actual `System_BuildConfig.h` reservation policy and unchanged
+manager constructor, `initBus`, `cmd_i2cbusenabled` and `cmd_i2c2busenabled`
+definitions in 18 host variants: P4, S3 and classic ESP32, camera enabled and
+disabled, with the DVP SDK I2C1 option undefined, explicitly false, and true.
+P4 always reserves hardware I2C0 when its camera is compiled. DVP follows the
+SDK-selected port, and camera-disabled builds reserve neither controller.
+
+The runtime checks verify logical bus 0 maps to Wire1 / hardware I2C1 and bus 1
+to Wire / hardware I2C0. The unreserved controller initializes normally while
+the reserved one performs no Wire begin, clock/timeout setup, power-pin writes,
+online event or bus-state update. Each CLI enable command rejects its reserved
+controller without persisting or changing either bus's existing configuration;
+the unreserved bus remains independently configurable. Disabling remains allowed,
+and empty and validation-only commands make no writes.
+
+Wire, GPIO, logging, core-affinity dispatch, Arduino String parsing and settings
+persistence are host adapters. These tests do not prove physical controller
+routing, ISR placement or camera/SCCB operation on a board.
+
+`test_jpeg_validation.py --jpeg-component /path/to/espressif__esp_jpeg --sanitize`
+compiles the shared entropy validator against the actual pinned TJpgDec codec.
+It exercises FASTDECODE 0/1/2 with scaling enabled and disabled, complete and
+truncated entropy, normalization, unsupported formats, and allocation failure.
+An optional `--private-bad /path/to/observed.jpg` checks a local failure artifact
+without adding private photographs to the repository.

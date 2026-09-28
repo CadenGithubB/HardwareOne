@@ -33717,7 +33717,6 @@ static size_t buildBmp4bppFromRgb888(uint8_t* out, size_t outCap,
 }
 
 #if ENABLE_CAMERA_SENSOR
-#include "esp_camera.h"
 #include "System_Camera_DVP.h"    // captureFrame, cameraWidth, cameraHeight, gCameraRunning
 #include "System_Camera_Video.h"  // videoRecording, start/stopVideoRecording — stream Rec row
 

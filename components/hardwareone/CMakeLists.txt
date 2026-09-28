@@ -19,6 +19,7 @@ set(HW_CFG_ENABLE_LLM_SOURCE_ONBOARD 0)  # on-device PSRAM engine as a source
 set(HW_CFG_ENABLE_LLM_SOURCE_CM5 0)      # CM5 co-processor as a source
 set(HW_CFG_ENABLE_MAPS 0)
 set(HW_CFG_ENABLE_AUTOMATION 0)
+set(HW_CFG_ENABLE_CAMERA_SENSOR 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
 set(HW_CFG_ENABLE_GAMES 0)
 set(HW_CFG_ENABLE_WEB_GAME_MAZE 1)
@@ -112,6 +113,11 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+ENABLE_MAPS[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_MAPS "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_CAMERA_SENSOR[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_CAMERA_SENSOR "${CMAKE_MATCH_1}")
     endif()
 
     string(REGEX MATCH "#define[ \t]+ENABLE_AUTOMATION[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
@@ -315,6 +321,9 @@ set(hardwareone_srcs
         System_Cm5Presence.cpp
         System_LiveAudio.cpp
         System_WiFi.cpp
+        HAL_Camera.cpp
+        HAL_Camera_DVP.cpp
+        HAL_Camera_P4.cpp
         System_Camera_DVP.cpp
         System_Camera_Video.cpp
         System_ImageManager.cpp
@@ -609,6 +618,16 @@ endif()
 # SOC capability plus the qualified-driver marker, never application chip checks.
 if(IDF_TARGET STREQUAL "esp32p4" OR CONFIG_SOC_JPEG_DECODE_SUPPORTED)
     list(APPEND hardwareone_requires esp_driver_jpeg)
+endif()
+
+# Both backends inspect SCCB controller ownership before driver initialization.
+if(HW_CFG_ENABLE_CAMERA_SENSOR GREATER 0)
+    list(APPEND hardwareone_requires esp_driver_i2c)
+endif()
+
+# CSI/ISP stays behind the shared camera API; native S3 uses esp32-camera.
+if(IDF_TARGET STREQUAL "esp32p4" AND HW_CFG_ENABLE_CAMERA_SENSOR GREATER 0)
+    list(APPEND hardwareone_requires esp_video esp_cam_sensor esp_driver_gpio)
 endif()
 
 idf_component_register(

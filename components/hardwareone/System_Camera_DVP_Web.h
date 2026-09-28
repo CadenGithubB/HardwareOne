@@ -1,8 +1,7 @@
 /**
  * Camera Sensor Web Module - Sensors page integration
  * 
- * ESP32-S3 DVP (Digital Video Port) Camera Support
- * Supports OV2640, OV3660, and OV5640 cameras
+ * Shared camera UI. Drivers report their supported resolutions and controls.
  */
 
 #ifndef SYSTEM_CAMERA_DVP_WEB_H
@@ -20,13 +19,13 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
 
     <div class='sensor-card' id='sensor-card-camera'>
-      <div class='sensor-title'><span>Camera (DVP)</span><span class='status-indicator status-disabled' id='camera-status-indicator' title='Camera Enabled'></span><span class='status-indicator status-disabled' id='camera-streaming-indicator' title='Streaming/Capturing' style='margin-left:4px'></span>)HTML", HTTPD_RESP_USE_STRLEN);
+      <div class='sensor-title'><span>Camera</span><span class='status-indicator status-disabled' id='camera-status-indicator' title='Camera Enabled'></span><span class='status-indicator status-disabled' id='camera-streaming-indicator' title='Streaming/Capturing' style='margin-left:4px'></span>)HTML", HTTPD_RESP_USE_STRLEN);
 #if ENABLE_EDGE_IMPULSE
   // ML inference dot only exists when the inference engine is compiled in.
   httpd_resp_send_chunk(req, R"HTML(<span class='status-indicator status-disabled' id='camera-ml-indicator' title='ML Inference' style='margin-left:4px'></span>)HTML", HTTPD_RESP_USE_STRLEN);
 #endif
   httpd_resp_send_chunk(req, R"HTML(</div>
-      <div class='sensor-description'>ESP32-S3 DVP camera sensor (OV2640/OV3660/OV5640).</div>
+      <div class='sensor-description' id='camera-description'>Attached camera. Available controls depend on the sensor.</div>
       <div id='camera-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
       <div class='sensor-controls'>
         <button class='btn' id='btn-camera-start'>Open Camera</button>
@@ -48,51 +47,42 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
       <div style='margin-top:10px'>
         <button class='btn' id='btn-camera-adjustments-toggle' style='width:100%;background:var(--panel-bg);border:1px solid #dee2e6' onclick='toggleCameraAdjustments()'>Image Adjustments</button>
       </div>
+      <div id='camera-adjustment-result' role='status' style='margin-top:6px;font-size:0.85em'></div>
       <div id='camera-adjustments' style='display:none;margin-top:10px;padding:10px;background:var(--panel-bg);border:1px solid #dee2e6;border-radius:4px'>
         <div style='margin-bottom:8px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Exposure (-2 to 2): <span id='exposure-val'>0</span></label>
-          <input type='range' id='camera-exposure' min='-2' max='2' value='0' step='1' style='width:100%'>
+          <input type='range' id='camera-exposure' disabled min='-2' max='2' value='0' step='1' style='width:100%'>
         </div>
         <div style='margin-bottom:8px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Resolution:</label>
-          <select id='camera-framesize' class='input-fit input-m'>
-            <option value='6'>96x96</option>
-            <option value='7'>160x120 (QQVGA)</option>
-            <option value='8'>176x144 (QCIF)</option>
-            <option value='9'>240x176 (HQVGA)</option>
-            <option value='10'>240x240</option>
-            <option value='0'>320x240 (QVGA)</option>
-            <option value='1'>640x480 (VGA)</option>
-            <option value='2'>800x600 (SVGA)</option>
-            <option value='3'>1024x768 (XGA)</option>
-            <option value='4'>1280x1024 (SXGA)</option>
-            <option value='5'>1600x1200 (UXGA)</option>
+          <select id='camera-framesize' class='input-fit input-m' disabled>
+            <option value=''>Reading supported resolutions...</option>
           </select>
         </div>
         <div style='margin-bottom:8px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Brightness (-2 to 2): <span id='brightness-val'>0</span></label>
-          <input type='range' id='camera-brightness' min='-2' max='2' value='0' step='1' style='width:100%'>
+          <input type='range' id='camera-brightness' disabled min='-2' max='2' value='0' step='1' style='width:100%'>
         </div>
         <div style='margin-bottom:8px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Contrast (-2 to 2): <span id='contrast-val'>0</span></label>
-          <input type='range' id='camera-contrast' min='-2' max='2' value='0' step='1' style='width:100%'>
+          <input type='range' id='camera-contrast' disabled min='-2' max='2' value='0' step='1' style='width:100%'>
         </div>
         <div style='margin-bottom:8px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Saturation (-2 to 2): <span id='saturation-val'>0</span></label>
-          <input type='range' id='camera-saturation' min='-2' max='2' value='0' step='1' style='width:100%'>
+          <input type='range' id='camera-saturation' disabled min='-2' max='2' value='0' step='1' style='width:100%'>
         </div>
         <div style='margin-bottom:8px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Quality (0-63, lower=better): <span id='quality-val'>12</span></label>
-          <input type='range' id='camera-quality' min='0' max='63' value='12' step='1' style='width:100%'>
+          <input type='range' id='camera-quality' disabled min='0' max='63' value='12' step='1' style='width:100%'>
         </div>
         <div style='margin-bottom:8px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Camera FPS: <span id='fps-val'>5</span> fps</label>
           <input type='range' id='camera-fps' min='1' max='20' value='5' step='1' style='width:100%'>
         </div>
         <div style='display:flex;gap:8px;margin-top:10px;flex-wrap:wrap'>
-          <button class='btn' id='btn-hmirror' onclick="applyCameraAdjustment('camerahmirror', 'toggle')" style='flex:1;min-width:100px'>H-Mirror</button>
-          <button class='btn' id='btn-vflip' onclick="applyCameraAdjustment('cameravflip', 'toggle')" style='flex:1;min-width:100px'>V-Flip</button>
-          <button class='btn' id='btn-rotate' onclick="applyCameraAdjustment('camerarotate', 'toggle')" style='flex:1;min-width:100px'>Rotate 180°</button>
+          <button class='btn' id='btn-hmirror' disabled onclick="applyCameraAdjustment('camerahmirror', 'toggle')" style='flex:1;min-width:100px'>H-Mirror</button>
+          <button class='btn' id='btn-vflip' disabled onclick="applyCameraAdjustment('cameravflip', 'toggle')" style='flex:1;min-width:100px'>V-Flip</button>
+          <button class='btn' id='btn-rotate' disabled onclick="applyCameraAdjustment('camerarotate', 'toggle')" style='flex:1;min-width:100px'>Rotate 180°</button>
         </div>
       </div>
 )HTML", HTTPD_RESP_USE_STRLEN);
@@ -211,6 +201,109 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
   // machine, and window.openAviPlayer entry point.
   streamAviPlayerJs(req);
 
+
+  // Executed by the status reader below, including while capture is stopped.
+  // Keep unknown capabilities disabled until the device has reported them.
+  httpd_resp_send_chunk(req, R"CAMERACAPJS(
+var __cameraCaps = null;
+var __cameraControlInputs = {
+  exposureLevel:'camera-exposure', brightness:'camera-brightness',
+  contrast:'camera-contrast', saturation:'camera-saturation',
+  hmirror:'btn-hmirror', vflip:'btn-vflip'
+};
+var __cameraControlLabels = {
+  exposureLevel:'exposure-val', brightness:'brightness-val',
+  contrast:'contrast-val', saturation:'saturation-val'
+};
+var __cameraCommandControls = {
+  cameraexposure:'exposureLevel', camerabrightness:'brightness',
+  cameracontrast:'contrast', camerasaturation:'saturation',
+  camerahmirror:'hmirror', cameravflip:'vflip'
+};
+function __cameraHasControl(name) {
+  return !!(__cameraCaps && __cameraCaps.controls.indexOf(name) !== -1);
+}
+function __cameraCommandSupported(cmd, value) {
+  if (cmd === 'camerafps') return true;
+  if (!__cameraCaps) return false;
+  if (cmd === 'cameraquality') return true;
+  if (cmd === 'camerarotate') return __cameraHasControl('hmirror') && __cameraHasControl('vflip');
+  if (cmd === 'cameraframesize') {
+    return __cameraCaps.resolutions.some(function(r) { return String(r.id) === String(value); });
+  }
+  return Object.prototype.hasOwnProperty.call(__cameraCommandControls, cmd) &&
+         __cameraHasControl(__cameraCommandControls[cmd]);
+}
+function __cameraAdjustmentMessage(message) {
+  hw.setText(hw.$('camera-adjustment-result'), message);
+}
+function __cameraApplyCapabilities(status) {
+  var valid = status && Array.isArray(status.controls) && Array.isArray(status.resolutions);
+  __cameraCaps = valid ? status : null;
+  Object.keys(__cameraControlInputs).forEach(function(control) {
+    var node = hw.$(__cameraControlInputs[control]);
+    if (!node) return;
+    node.disabled = !__cameraHasControl(control);
+    node.title = node.disabled ? 'Unavailable on this camera' : '';
+    if (node.parentElement && node.type === 'range') node.parentElement.style.opacity = node.disabled ? '.5' : '';
+    var current = valid && status.controlValues && status.controlValues[control];
+    if (!node.disabled && typeof current === 'number' && document.activeElement !== node && __cameraControlLabels[control]) {
+      node.value = current;
+      hw.setText(hw.$(__cameraControlLabels[control]), current);
+    }
+  });
+  var rotate = hw.$('btn-rotate');
+  if (rotate) {
+    rotate.disabled = !__cameraCommandSupported('camerarotate');
+    rotate.title = rotate.disabled ? 'Requires both mirror and flip controls' : '';
+  }
+  var quality = hw.$('camera-quality');
+  if (quality) {
+    quality.disabled = !valid;
+    if (valid && typeof status.quality === 'number' && document.activeElement !== quality) {
+      quality.value = status.quality;
+      hw.setText(hw.$('quality-val'), status.quality);
+    }
+  }
+  var resolution = hw.$('camera-framesize');
+  if (resolution) {
+    var signature = valid ? JSON.stringify(status.resolutions) : '';
+    if (resolution._cameraSignature !== signature) {
+      resolution.textContent = '';
+      (valid ? status.resolutions : []).forEach(function(info) {
+        var option = document.createElement('option');
+        option.value = String(info.id);
+        option.textContent = info.name + ' (' + info.width + 'x' + info.height + ')';
+        resolution.appendChild(option);
+      });
+      resolution._cameraSignature = signature;
+    }
+    resolution.disabled = !valid || !status.resolutions.length;
+    if (valid && document.activeElement !== resolution) {
+      var selected = status.enabled ? status.framesize : status.requestedFramesize;
+      var supported = status.resolutions.some(function(info) { return info.id === selected; });
+      resolution.value = supported ? String(selected) : '';
+      resolution.title = supported ? '' : 'Selected resolution unavailable on this camera';
+    }
+  }
+  if (valid) {
+    var source = (status.sourceWidth && status.sourceHeight) ?
+      ' Source ' + status.sourceWidth + 'x' + status.sourceHeight + '.' : '';
+    hw.setText(hw.$('camera-description'),
+      (status.model || 'Camera') + source + ' Unsupported controls are disabled.');
+  }
+}
+function __cameraLoadCapabilities() {
+  return hw.fetchJSON('/api/sensors?sensor=camera&ts=' + Date.now()).then(function(status) {
+    __cameraApplyCapabilities(status);
+    return status;
+  }).catch(function(error) {
+    __cameraApplyCapabilities(null);
+    __cameraAdjustmentMessage('Camera capabilities unavailable: ' + error);
+  });
+}
+)CAMERACAPJS", HTTPD_RESP_USE_STRLEN);
+
   // Camera sensor reader - register in window._sensorReaders
   httpd_resp_send_chunk(req,
     "window._sensorReaders = window._sensorReaders || {};\n"
@@ -218,18 +311,19 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "    var url = '/api/sensors?sensor=camera&ts=' + Date.now();\n"
     "    return hw.fetchJSON(url)\n"
     "      .then(function(j) {\n"
+    "        __cameraApplyCapabilities(j);\n"
     "        var el = hw.$('camera-data');\n"
     "        if (el) {\n"
     "          if (j && j.error) {\n"
-    "            el.textContent = 'Camera error: ' + j.error;\n"
+    "            __cameraAdjustmentMessage('Camera error: ' + j.error);\n"
     "          } else if (j && j.enabled) {\n"
     "            var s = function(id, v) { var e = hw.$(id); hw.setText(e, v); };\n"
     "            s('cameraModel', j.model || 'Unknown');\n"
     "            s('cameraRes', (j.width || 0) + 'x' + (j.height || 0));\n"
     "            s('cameraPsram', j.psram ? 'Yes' : 'No');\n"
     "          } else {\n"
-    "            var stats = hw.$('camera-stats');\n"
-    "            hw.setText(stats, 'Camera not enabled (use Open Camera button)');\n"
+    "            hw.setText(hw.$('cameraModel'), (j && j.model) || 'Camera stopped');\n"
+    "            hw.setText(hw.$('cameraRes'), '--');\n"
     "          }\n"
     "        }\n"
     "        return j;\n"
@@ -256,7 +350,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  try { return (/\\bon\\b/i).test(String(t || '')); } catch(_) { return false; }\n"
     "}\n"
     "function __cameraSyncFlipStates() {\n"
-    "  return Promise.all([__cameraCli('camerahmirror'), __cameraCli('cameravflip')])\n"
+    "  return Promise.all([__cameraHasControl('hmirror') ? __cameraCli('camerahmirror') : Promise.resolve(''), __cameraHasControl('vflip') ? __cameraCli('cameravflip') : Promise.resolve('')])\n"
     "    .then(function(res) {\n"
     "      cameraAdjustmentStates.hmirror = __cameraIsOnText(res[0]);\n"
     "      cameraAdjustmentStates.vflip = __cameraIsOnText(res[1]);\n"
@@ -364,6 +458,8 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  }\n"
     "}\n"
     "function applyCameraAdjustment(cmd, value) {\n"
+    "  if (!__cameraCommandSupported(cmd, value)) { __cameraAdjustmentMessage('This setting is unavailable on this camera.'); return; }\n"
+    "  __cameraAdjustmentMessage('');\n"
     "  var img = hw.$('camera-image');\n"
     "  var wasStreaming = (__cameraStreamRunning === true);\n"
     "  var needsStreamRestart = (cmd === 'camerahmirror' || cmd === 'cameravflip' || cmd === 'camerarotate' || cmd === 'cameraframesize');\n"
@@ -395,12 +491,14 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  hw.postFormText('/api/cli', {cmd:fullCmd})\n"
     "    .then(function(d) {\n"
     "      console.log('[Camera] Adjustment result:', d);\n"
+    "      if (/^Error\\b/i.test(String(d || '').trim())) { __cameraAdjustmentMessage(String(d)); }\n"
+    "      __cameraLoadCapabilities().then(__cameraSyncFlipStates);\n"
     "      if (wasStreaming) {\n"
     "        if (needsStreamRestart) { setTimeout(__cameraStartStreamUi, (cmd === 'cameraframesize' ? 800 : 350)); }\n"
     "        else { __cameraRestartStreamIfNeeded(); }\n"
     "      }\n"
     "    })\n"
-    "    .catch(function(e) { console.error('[Camera] Adjustment error:', e); });\n"
+    "    .catch(function(e) { __cameraAdjustmentMessage('Adjustment failed: ' + e); __cameraLoadCapabilities().then(__cameraSyncFlipStates); });\n"
     "}\n"
     "document.addEventListener('DOMContentLoaded', function() {\n"
     "  var captureBtn = hw.$('btn-camera-capture');\n"
@@ -440,12 +538,6 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  if (framesizeSel) {\n"
     "    framesizeSel.addEventListener('change', function() {\n"
     "      applyCameraAdjustment('cameraframesize', this.value);\n"
-    "    });\n"
-    "    __cameraCli('cameraframesize').then(function(t) {\n"
-    "      try {\n"
-    "        var m = /cameraFramesize\\s*=\\s*(\\d+)/i.exec(String(t || ''));\n"
-    "        if (m && m[1] !== undefined) { framesizeSel.value = String(m[1]); }\n"
-    "      } catch(e) { }\n"
     "    });\n"
     "  }\n"
     "  \n"
@@ -566,8 +658,8 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  });\n"
 
     "  // Sync button states against the device so on/off commands are correct.\n"
-    "  __cameraSyncFlipStates();\n"
-    "  hw.on(startBtn, 'click', function(){ setTimeout(__cameraSyncFlipStates, 750); });\n"
+    "  __cameraLoadCapabilities().then(__cameraSyncFlipStates);\n"
+    "  hw.on(startBtn, 'click', function(){ setTimeout(function(){ __cameraLoadCapabilities().then(__cameraSyncFlipStates); }, 750); });\n"
     "});\n", HTTPD_RESP_USE_STRLEN);
 
   httpd_resp_send_chunk(req, "window._sensorDataIds = window._sensorDataIds || {};\nwindow._sensorDataIds['camera'] = 'camera-data';\n", HTTPD_RESP_USE_STRLEN);
@@ -577,7 +669,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
 
 // Dashboard definition for camera sensor
 inline void streamCameraDashboardDef(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'OV2640',key:'camera',name:'Camera (DVP)',desc:'ESP32-S3 DVP Camera'});", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'camera',key:'camera',name:'Camera',desc:'Attached camera'});", HTTPD_RESP_USE_STRLEN);
 }
 
 #endif // ENABLE_CAMERA_SENSOR

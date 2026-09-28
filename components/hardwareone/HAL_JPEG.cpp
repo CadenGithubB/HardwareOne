@@ -243,6 +243,27 @@ struct InputCopy {
 };
 }
 
+bool validateSoftware(const uint8_t* data, size_t length, Info& info,
+                      const DecodeOptions& options, const char** error) {
+  if (!inspect(data, length, info, options, error)) return false;
+  if (info.sofMarker != 0xc0 || info.scanCount != 1)
+    return fail(error, "software entropy validation requires baseline single-scan JPEG");
+  InputCopy normalized;
+  if (info.needsMarkerNormalization) {
+    normalized.bytes = options.softwareAllocator ? options.softwareAllocator(length) :
+        static_cast<uint8_t*>(malloc(length));
+    if (!normalized.bytes) return fail(error, "out of memory normalizing JPEG");
+    size_t normalizedLength = 0;
+    if (!normalizeMarkers(data, length, normalized.bytes, normalizedLength))
+      return fail(error, "JPEG normalization failed");
+    data = normalized.bytes;
+    length = normalizedLength;
+  }
+  if (!detail::validateSoftwareEntropy(data, length, info, error)) return false;
+  if (error) *error = nullptr;
+  return true;
+}
+
 bool decode(const uint8_t* data, size_t length, Image& image,
             const DecodeOptions& options, const char** error) {
   image.reset();

@@ -68,7 +68,7 @@ const NonI2CSensorEntry nonI2CSensors[] = {
 #if ENABLE_CAMERA_SENSOR
   {
     "camera",
-    "Camera (OV2640/OV3660)",
+    "Camera",
     SENSOR_CATEGORY_CAMERA,
     cameraValidTasks,
     getCameraConnected,

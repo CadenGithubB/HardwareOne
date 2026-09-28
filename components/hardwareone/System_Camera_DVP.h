@@ -1,8 +1,8 @@
 /**
- * Camera Sensor Module - ESP32-S3 DVP Camera Support
+ * Shared Camera Module - DVP and CSI camera backends
  * 
- * Supports OV2640, OV3660, and OV5640 cameras on XIAO ESP32S3 Sense
- * Uses ESP32-S3 DVP (Digital Video Port) parallel interface, not I2C.
+ * Shared capture, lifecycle, settings and commands for the XIAO DVP camera
+ * and ESP32-P4X-EYE CSI camera. Vendor driver types stay behind HAL_Camera.
  */
 
 #ifndef SYSTEM_CAMERA_DVP_H
@@ -56,13 +56,24 @@ bool cameraPowerRequestRestartSync(uint32_t waitMs);
 // Caller must free the buffer with free() when done
 uint8_t* captureFrame(size_t* outLen);
 
+// Portable capabilities and actual owned-frame geometry.
+#include "HAL_Camera.h"
+// Nonblocking snapshot: while a driver operation is busy, returns its last
+// complete capabilities. A later control operation always rechecks support.
+CameraCapabilities getCameraCapabilities();
+bool cameraSupportsResolution(CameraFrameSize size);
+bool cameraSupportsControl(CameraControl control);
+bool getCameraControl(CameraControl control, int& value);
+bool setCameraControl(CameraControl control, int value);
+// Releases any prior owned frame in out before attempting a new capture.
+bool captureCameraFrame(CameraFrame& out, size_t maxBytes = kCameraMaxFrameBytes);
+
 // Resolution and quality control
-#include "esp_camera.h"
-bool setCameraResolution(framesize_t size);
+bool setCameraResolution(CameraFrameSize size);
 bool setCameraQuality(int quality);
 
-// Capture at specific resolution (for ESP-NOW: use FRAMESIZE_QQVGA)
-uint8_t* captureFrameAtResolution(framesize_t size, int quality, size_t* outLen);
+// Capture at specific resolution (for ESP-NOW: use CameraFrameSize::QQVGA)
+uint8_t* captureFrameAtResolution(CameraFrameSize size, int quality, size_t* outLen);
 
 // Capture tiny frame for ESP-NOW (160x120, high compression)
 uint8_t* captureTinyFrame(size_t* outLen);

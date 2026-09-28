@@ -249,6 +249,11 @@ static void beginBusOnCpu1(TwoWire* wire, int sda, int scl) {
 
 void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t hz) {
   if (busIdx >= NUM_BUSES) return;
+  const int hardwarePort = busIdx == 0 ? 1 : 0;
+  if (hardwarePort == CAMERA_SCCB_I2C_PORT) {
+    WARN_I2CF("Sensor bus %u unavailable: I2C%d is reserved for the camera", busIdx, hardwarePort);
+    return;
+  }
   if (sdaPin < 0 || sclPin < 0) {
     INFO_I2CF("initBus skipped: bus %u pins invalid (sda=%d scl=%d)", busIdx, sdaPin, sclPin);
     return;

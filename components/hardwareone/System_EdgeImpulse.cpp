@@ -11,8 +11,8 @@
 #include "System_Camera_DVP.h"
 #include "System_MemUtil.h"
 #include "System_TaskUtils.h"
-#include "esp_camera.h"
 #include "img_converters.h"
+#include "HAL_JPEG.h"
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include "System_VFS.h"
@@ -984,6 +984,33 @@ bool isEdgeImpulseModelLoaded() {
 // Inference Implementation
 // ============================================================================
 
+// fmt2rgb888 has no output-capacity argument. Inspect the same JPEG first so
+// neither a larger camera mode nor a stored file can overrun the existing VGA
+// buffer. Successful conversion publishes the JPEG's dimensions for resizing.
+static bool decodeEdgeImpulseJpeg(const uint8_t* jpeg, size_t length,
+                                 uint8_t* rgb, size_t capacity,
+                                 int& width, int& height, const char** error) {
+  width = height = 0;
+  if (error) *error = nullptr;
+  if (!rgb || !capacity) {
+    if (error) *error = "RGB output buffer unavailable";
+    return false;
+  }
+  hwjpeg::DecodeOptions options;
+  options.maxWidth = 640;
+  options.maxHeight = 480;
+  options.maxOutputBytes = capacity;
+  hwjpeg::Info info;
+  if (!hwjpeg::inspect(jpeg, length, info, options, error)) return false;
+  if (!fmt2rgb888(jpeg, length, PIXFORMAT_JPEG, rgb)) {
+    if (error) *error = "Failed to decode JPEG to RGB888";
+    return false;
+  }
+  width = static_cast<int>(info.width);
+  height = static_cast<int>(info.height);
+  return true;
+}
+
 EIResults runEdgeImpulseInference() {
   EIResults results = {false, 0, {}, 0, nullptr};
   
@@ -1049,6 +1076,7 @@ EIResults runEdgeImpulseInference() {
   const int maxRetries = 3;
   uint32_t captureTime = 0;
   uint32_t convertTime = 0;
+  const char* conversionError = nullptr;
   
   for (int attempt = 0; attempt < maxRetries && !converted; attempt++) {
     if (attempt > 0) {
@@ -1067,14 +1095,13 @@ EIResults runEdgeImpulseInference() {
       continue;
     }
 
-    frameWidth = cameraWidth;
-    frameHeight = cameraHeight;
-    DEBUG_SYSTEMF("[EI_DEBUG]   Captured in %lu ms: %dx%d, JPEG len=%zu",
-                  captureTime, frameWidth, frameHeight, jpegLen);
+    DEBUG_SYSTEMF("[EI_DEBUG]   Captured in %lu ms: JPEG len=%zu",
+                  captureTime, jpegLen);
 
-    // Step 2: Convert JPEG to RGB888
+    // Step 2: Bound JPEG geometry/output before the capacity-less converter.
     uint32_t convertStart = millis();
-    converted = fmt2rgb888(jpegBuf, jpegLen, PIXFORMAT_JPEG, gRgbBuffer);
+    converted = decodeEdgeImpulseJpeg(jpegBuf, jpegLen, gRgbBuffer, gRgbBufferSize,
+                                      frameWidth, frameHeight, &conversionError);
     convertTime = millis() - convertStart;
     free(jpegBuf);
 
@@ -1084,7 +1111,7 @@ EIResults runEdgeImpulseInference() {
   
   if (!converted) {
     DEBUG_SYSTEMF("[EI_DEBUG] FAIL: Format conversion failed after %d attempts", maxRetries);
-    results.errorMessage = "Failed to convert frame to RGB888";
+    results.errorMessage = conversionError ? conversionError : "Failed to convert frame to RGB888";
     return results;
   }
   
@@ -1546,23 +1573,9 @@ EIResults runInferenceFromFile(const char* imagePath) {
   bool decoded = false;
   int imgWidth = 0, imgHeight = 0;
   
-  // Check for JPEG signature (FFD8)
-  if (fileSize > 2 && imgBuffer[0] == 0xFF && imgBuffer[1] == 0xD8) {
-    DEBUG_SYSTEMF("[EI_DEBUG]   Detected JPEG format");
-    // Use ESP32 JPEG decoder - assume VGA max
-    decoded = fmt2rgb888(imgBuffer, fileSize, PIXFORMAT_JPEG, gRgbBuffer);
-    if (decoded) {
-      // JPEG decoder doesn't give us dimensions easily, assume common sizes
-      // For now, assume 640x480 or use model input size
-      imgWidth = 640;
-      imgHeight = 480;
-    }
-  } else {
-    DEBUG_SYSTEMF("[EI_DEBUG]   Unknown format (first bytes: %02X %02X)", imgBuffer[0], imgBuffer[1]);
-    free(imgBuffer);
-    results.errorMessage = "Unsupported image format (JPEG only)";
-    return results;
-  }
+  const char* decodeError = nullptr;
+  decoded = decodeEdgeImpulseJpeg(imgBuffer, fileSize, gRgbBuffer, gRgbBufferSize,
+                                  imgWidth, imgHeight, &decodeError);
   
   free(imgBuffer);
   imgBuffer = nullptr;
@@ -1572,7 +1585,7 @@ EIResults runInferenceFromFile(const char* imagePath) {
                 decoded ? "OK" : "FAILED", decodeTime, imgWidth, imgHeight);
   
   if (!decoded) {
-    results.errorMessage = "Failed to decode image";
+    results.errorMessage = decodeError ? decodeError : "Failed to decode image";
     return results;
   }
   

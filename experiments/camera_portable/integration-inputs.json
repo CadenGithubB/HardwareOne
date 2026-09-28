@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "base_commit": "8d9562e",
+  "production_sources": {
+    "components/hardwareone/CMakeLists.txt": "339dea2e0edd75aca133d278870069da211fb1362a0a437c4b58f1231c53fcc7",
+    "components/hardwareone/CameraRgb565.h": "b2cb02942076644e86314d62d2c58697b0880cfee2d27d86fa57d3a2bf1b7490",
+    "components/hardwareone/G2_Glasses.cpp": "56a9e567d2ee39605b661ff2c9b46b3fb8a13da9eb61b70d2145d91df6d1fd35",
+    "components/hardwareone/G2_Page_CameraSettings.cpp": "64438d6de9018739267135793b16d8d13545287a6a2e4b5cc83be171f563db54",
+    "components/hardwareone/G2_Page_CameraSettings.h": "50649674af7223fd4634dbc31fd3d357b5a8db33729abdfa7aa49782e5e9e5d9",
+    "components/hardwareone/HAL_Camera.cpp": "0c47acb2b8777a945a9a113e5842e755a909ca403cb73b7c99a5db4671b3aaae",
+    "components/hardwareone/HAL_Camera.h": "b4aa6106a3fffd04df23ce7b069a4ce8594f5b00563bfba09b19e160f19a83b8",
+    "components/hardwareone/HAL_Camera_DVP.cpp": "0ce3daee8f695814b5f95bb1d14fd867efcd33e3e92fa0c06a91695289c5c887",
+    "components/hardwareone/HAL_Camera_P4.cpp": "29daf0ca12d8d89578b727886d3ff6ce04cd3ab7d4444c2a470f5d7bdeb4acc9",
+    "components/hardwareone/HAL_JPEG.cpp": "e85f07dd9996595d76049e049373d073f73f9c521e44d843b27541148b4c54d3",
+    "components/hardwareone/HAL_JPEG.h": "711e8a8d9608fbdd18a6d2dd9c10eb0d489b193ef53484cb59b071cb936b9c2d",
+    "components/hardwareone/HAL_JPEG_Backend.h": "24adfbce889175f2dd97afa1688836241b2bcb7903204217e7ac81158eab7849",
+    "components/hardwareone/HAL_JPEG_Software.cpp": "7038c788e7413ec64878057e7aed8f82a3de8f81d5b701cd4932dc55451c0184",
+    "components/hardwareone/System_BuildConfig.h": "46e8cb22b256b6ae1b610a1443bcf74c30f7229157c70186ec05ba1ea4a6df4a",
+    "components/hardwareone/System_Camera_DVP.cpp": "76f578532339a78ec817ad60ee07ae2601e517038ca14dcab6ea20e99a067bcd",
+    "components/hardwareone/System_Camera_DVP.h": "86cd6999fa3cd6d414d40af77abf713c67178ab92248811f067046471146b2b8",
+    "components/hardwareone/System_Camera_DVP_Web.h": "facbbc5a8c149213b53956f3e470c71ddab3c5ebadb64e99f135841371525639",
+    "components/hardwareone/System_EdgeImpulse.cpp": "720ddfb922b4c1f005ce8ee018082f936f7ed2ca50423c4f43d89a9a5566f980",
+    "components/hardwareone/System_I2C.cpp": "4cba3c3f8575729a5c0da32828bf81ee1138d44141ef44347e196b5b630c1188",
+    "components/hardwareone/System_I2C_Manager.cpp": "da736675114403d9c6d89094744a3b1a767b749e5e80acd1b5632d229319cc3e",
+    "components/hardwareone/System_SensorRegistry.cpp": "67260e657905e03e3cad244b26ce8d8d8435b29f77557ab7a5701e50de5e362b",
+    "components/hardwareone/WebPage_Sensors.h": "d790ab3c6f751e7726b6c36e97d9a1fc217cd19e02f38a2f4381502f80bf9f89"
+  },
+  "dependency_source_sha256": "d2119971a71b8ff7abe7680cbf89a8a497603cd4b0313427cbfa2e70ab67f1b8",
+  "patch_sha256": "dd0463c571b53b6194e8fbe9880371eb05f4852b299c7dc9e4c806c1c6978163"
+}

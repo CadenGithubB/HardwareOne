@@ -29,3 +29,8 @@ pattern(48, 48).save(OUT / 'rgb444_48x48.jpg', quality=91, subsampling=0, optimi
 for name, color in (('red', (255, 0, 0)), ('blue', (0, 0, 255))):
     Image.new('RGB', (48, 48), color).save(OUT / f'{name}_48x48.jpg',
                                          quality=100, subsampling=0)
+
+# Small solid files exercise the Edge Impulse VGA capacity boundary and HD rejection.
+for width, height in ((640, 480), (1280, 720)):
+    Image.new('RGB', (width, height), (40, 100, 160)).save(
+        OUT / f'solid_{width}x{height}.jpg', quality=85, subsampling=2)

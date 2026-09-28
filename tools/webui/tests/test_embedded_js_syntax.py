@@ -409,8 +409,8 @@ CONCAT_MUTATIONS = [
         # compiler ever preprocesses this line on those boards.
         "broken JS in a per-board concat file",
         "System_Camera_DVP_Web.h",
-        "hw.setText(stats, 'Camera not enabled (use Open Camera button)')",
-        "hw.setText(stats,, 'Camera not enabled (use Open Camera button)')",
+        "hw.setText(hw.$('cameraRes'), '--')",
+        "hw.setText(hw.$('cameraRes'),, '--')",
     ),
     (
         "broken JS in a fragment file (stream-literal path)",
