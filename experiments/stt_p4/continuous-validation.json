@@ -1,0 +1,1430 @@
+{
+  "schema": 1,
+  "date": "2026-09-28",
+  "scope": "Continuous P4 onboard-PDM English dictation with bounded queues and no overall session timer. Ten-minute physical qualification; not infinite endurance or representative human-speech accuracy.",
+  "app": {
+    "app_sha256": "08a961f324a7f54ce31f6d3b96e42d87fd670e8986d2ff5c501744befce637e7",
+    "bytes": 6367280,
+    "partition_bytes": 6377472,
+    "headroom_bytes": 10192,
+    "artifact": "private/images/continuous-v4/hardwareone-idf.bin",
+    "installed_and_verified": true,
+    "source_manifest_sha256": "9d0f2c612fd594357170a4f771f4b05d2cd236173632d2f698bdee790c08a54a",
+    "integration_inputs_sha256": "5ca0726bb7c4e39984ac258b745a434d774fa3f6d061199cb760b4be39cb5dba",
+    "verified_build_sources": 7956
+  },
+  "board": {
+    "target": "esp32p4",
+    "silicon_revision": "3.2",
+    "cpu_mhz": 400,
+    "flash_bytes": 16777216,
+    "psram_bytes": 33554432,
+    "audio_source": "onboard PDM through HAL_Audio",
+    "display_attached": false
+  },
+  "toolchain": {
+    "esp_idf": "5.5.5",
+    "esp_dl": "3.3.12",
+    "esp_sr": "2.5.5"
+  },
+  "model": {
+    "name": "NVIDIA QuartzNet5x5LS-En, NeMo1.0.0a5",
+    "package": {
+      "file": "quartznet5x5.p4.stt",
+      "bytes": 5490696,
+      "sha256": "2569087185d881ccd38918023a12042996a2a7972f83e6dac7cbe572f4cef029"
+    },
+    "raw_bytes": 7172016,
+    "raw_sha256": "8a6766f69597e319c585613e94faba97dd2054a8d527fd21b1aa7d408981b925",
+    "frontend_sha256": "ca91eb9683f7151b8be1a01532a6790c6eb7d515f67169a207751e3fc48cc58b"
+  },
+  "storage": {
+    "partition_layout_changed": false,
+    "model_reinstalled": false,
+    "session_audio_written_to_flash": false
+  },
+  "profile_omission": [
+    "R1 health web page and navigation",
+    "GET /api/health/status",
+    "POST /api/health/action"
+  ],
+  "shared_path": [
+    "HAL_Audio",
+    "System_Dictation mailbox and UI delivery",
+    "Audio_VadPolicy decisions shared with existing Pi recorder"
+  ],
+  "physical": [
+    {
+      "test": "silence",
+      "memory_before": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 222468,
+          "free": 245543,
+          "minFree": 239416,
+          "peakUsed": 228595
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 307172,
+          "free": 32843288
+        },
+        "heapCaps": {
+          "internalFree": 245543,
+          "internalLargest": 208896,
+          "dmaFree": 210071,
+          "dmaLargest": 208896
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 36,
+          "capacity": 512,
+          "attempts": 975,
+          "successes": 975,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 263182,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "chunks": [],
+      "camera_captures": [],
+      "final": {
+        "state": "done",
+        "backend": "local",
+        "phase": "loading",
+        "workerActive": false,
+        "continuous": true,
+        "captureActive": false,
+        "inferenceActive": false,
+        "sessionMs": 61021,
+        "segmentsCaptured": 0,
+        "segmentsCompleted": 0,
+        "pendingAudio": 0,
+        "pendingTexts": 0,
+        "audioOverruns": 0,
+        "textReady": false,
+        "elapsedMs": 61021,
+        "captureLimitMs": 0,
+        "samples": 971776,
+        "sampleRate": 16000,
+        "source": "pdm",
+        "processing": "raw-hal; model frontend only; saved micgain not applied",
+        "level": 0,
+        "rms": 11,
+        "noiseRms": 3,
+        "thresholdRms": 45,
+        "peakRms": 11,
+        "workerStackFreeBytes": 9888,
+        "captureStackFreeBytes": 3008,
+        "error": "",
+        "modelBytes": 0,
+        "featureFrames": 0,
+        "outputFrames": 0,
+        "loadMs": 0,
+        "frontendMs": 0,
+        "inferenceMs": 0,
+        "decodeMs": 0
+      },
+      "acknowledged": 0,
+      "capture_and_inference_overlapped": false,
+      "elapsed_wall_seconds": 60.86238987505203,
+      "capture_wall_seconds": 60.51407916704193,
+      "memory_after": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 225528,
+          "free": 242483,
+          "minFree": 208028,
+          "peakUsed": 259983
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 308388,
+          "free": 32842072
+        },
+        "heapCaps": {
+          "internalFree": 242483,
+          "internalLargest": 176128,
+          "dmaFree": 207011,
+          "dmaLargest": 176128
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 38,
+          "capacity": 512,
+          "attempts": 5717,
+          "successes": 5717,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 3927950,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "status_samples": 6,
+      "minimum_observed_worker_stack_free": null,
+      "minimum_observed_capture_stack_free": 3008,
+      "maximum_observed_pending_audio": 0,
+      "maximum_observed_audio_overruns": 0,
+      "observed_segment_processing_ms_range": null
+    },
+    {
+      "test": "stream",
+      "memory_before": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 221912,
+          "free": 246099,
+          "minFree": 239260,
+          "peakUsed": 228751
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 307172,
+          "free": 32843288
+        },
+        "heapCaps": {
+          "internalFree": 246099,
+          "internalLargest": 208896,
+          "dmaFree": 210627,
+          "dmaLargest": 208896
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 36,
+          "capacity": 512,
+          "attempts": 975,
+          "successes": 975,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 263182,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "chunks": [
+        {
+          "sequence": 1,
+          "startSample": 25120,
+          "endSample": 176800,
+          "forcedBoundary": false,
+          "text_bytes": 74
+        },
+        {
+          "sequence": 2,
+          "startSample": 178720,
+          "endSample": 329120,
+          "forcedBoundary": false,
+          "text_bytes": 62
+        },
+        {
+          "sequence": 3,
+          "startSample": 335040,
+          "endSample": 463040,
+          "forcedBoundary": false,
+          "text_bytes": 68
+        },
+        {
+          "sequence": 4,
+          "startSample": 482560,
+          "endSample": 612160,
+          "forcedBoundary": false,
+          "text_bytes": 64
+        },
+        {
+          "sequence": 5,
+          "startSample": 643840,
+          "endSample": 900640,
+          "forcedBoundary": false,
+          "text_bytes": 134
+        },
+        {
+          "sequence": 6,
+          "startSample": 952000,
+          "endSample": 1080000,
+          "forcedBoundary": false,
+          "text_bytes": 70
+        },
+        {
+          "sequence": 7,
+          "startSample": 1103040,
+          "endSample": 1231040,
+          "forcedBoundary": false,
+          "text_bytes": 64
+        },
+        {
+          "sequence": 8,
+          "startSample": 1253600,
+          "endSample": 1510400,
+          "forcedBoundary": false,
+          "text_bytes": 132
+        },
+        {
+          "sequence": 9,
+          "startSample": 1548320,
+          "endSample": 1676320,
+          "forcedBoundary": false,
+          "text_bytes": 68
+        },
+        {
+          "sequence": 10,
+          "startSample": 1717120,
+          "endSample": 1845120,
+          "forcedBoundary": false,
+          "text_bytes": 63
+        },
+        {
+          "sequence": 11,
+          "startSample": 1865440,
+          "endSample": 1936384,
+          "forcedBoundary": false,
+          "text_bytes": 76
+        }
+      ],
+      "camera_captures": [],
+      "final": {
+        "state": "done",
+        "backend": "local",
+        "phase": "decoding",
+        "workerActive": false,
+        "continuous": true,
+        "captureActive": false,
+        "inferenceActive": false,
+        "sessionMs": 128443,
+        "segmentsCaptured": 11,
+        "segmentsCompleted": 11,
+        "pendingAudio": 0,
+        "pendingTexts": 0,
+        "audioOverruns": 0,
+        "textReady": false,
+        "elapsedMs": 128443,
+        "captureLimitMs": 0,
+        "samples": 1936384,
+        "sampleRate": 16000,
+        "source": "pdm",
+        "processing": "raw-hal; model frontend only; saved micgain not applied",
+        "level": 0,
+        "rms": 9,
+        "noiseRms": 4,
+        "thresholdRms": 16,
+        "peakRms": 122,
+        "workerStackFreeBytes": 7356,
+        "captureStackFreeBytes": 2828,
+        "error": "",
+        "modelBytes": 7172016,
+        "featureFrames": 444,
+        "outputFrames": 222,
+        "loadMs": 4135,
+        "frontendMs": 403,
+        "inferenceMs": 1423,
+        "decodeMs": 1
+      },
+      "acknowledged": 11,
+      "capture_and_inference_overlapped": true,
+      "elapsed_wall_seconds": 128.85653529199772,
+      "capture_wall_seconds": 120.89558016700903,
+      "memory_after": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 225644,
+          "free": 242367,
+          "minFree": 142428,
+          "peakUsed": 325583
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 307856,
+          "free": 32842604
+        },
+        "heapCaps": {
+          "internalFree": 242367,
+          "internalLargest": 172032,
+          "dmaFree": 206895,
+          "dmaLargest": 172032
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 38,
+          "capacity": 512,
+          "attempts": 6864,
+          "successes": 6864,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 4195015,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "status_samples": 12,
+      "minimum_observed_worker_stack_free": 7356,
+      "minimum_observed_capture_stack_free": 2828,
+      "maximum_observed_pending_audio": 0,
+      "maximum_observed_audio_overruns": 0,
+      "observed_segment_processing_ms_range": [
+        6556,
+        9999
+      ]
+    },
+    {
+      "test": "cancel_inference",
+      "memory_before": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 225092,
+          "free": 242919,
+          "minFree": 142428,
+          "peakUsed": 325583
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 307860,
+          "free": 32842600
+        },
+        "heapCaps": {
+          "internalFree": 242919,
+          "internalLargest": 172032,
+          "dmaFree": 207447,
+          "dmaLargest": 172032
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 38,
+          "capacity": 512,
+          "attempts": 6976,
+          "successes": 6976,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 4221884,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "chunks": [],
+      "camera_captures": [],
+      "final": {
+        "state": "cancelled",
+        "backend": "local",
+        "phase": "inference",
+        "workerActive": false,
+        "continuous": true,
+        "captureActive": false,
+        "inferenceActive": false,
+        "sessionMs": 16304,
+        "segmentsCaptured": 1,
+        "segmentsCompleted": 0,
+        "pendingAudio": 0,
+        "pendingTexts": 0,
+        "audioOverruns": 0,
+        "textReady": false,
+        "elapsedMs": 16304,
+        "captureLimitMs": 0,
+        "samples": 254976,
+        "sampleRate": 16000,
+        "source": "pdm",
+        "processing": "raw-hal; model frontend only; saved micgain not applied",
+        "level": 0,
+        "rms": 14,
+        "noiseRms": 3,
+        "thresholdRms": 16,
+        "peakRms": 92,
+        "workerStackFreeBytes": 7356,
+        "captureStackFreeBytes": 2840,
+        "error": "",
+        "modelBytes": 7172016,
+        "featureFrames": 956,
+        "outputFrames": 478,
+        "loadMs": 3295,
+        "frontendMs": 1045,
+        "inferenceMs": 0,
+        "decodeMs": 0
+      },
+      "acknowledged": 0,
+      "capture_and_inference_overlapped": true,
+      "elapsed_wall_seconds": 16.328130709007382,
+      "capture_wall_seconds": 16.174752042046748,
+      "memory_after": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 225156,
+          "free": 242855,
+          "minFree": 142428,
+          "peakUsed": 325583
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 307856,
+          "free": 32842604
+        },
+        "heapCaps": {
+          "internalFree": 242855,
+          "internalLargest": 147456,
+          "dmaFree": 207383,
+          "dmaLargest": 147456
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 38,
+          "capacity": 512,
+          "attempts": 7721,
+          "successes": 7721,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 6955208,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "status_samples": 2,
+      "minimum_observed_worker_stack_free": 8400,
+      "minimum_observed_capture_stack_free": 2840,
+      "maximum_observed_pending_audio": 0,
+      "maximum_observed_audio_overruns": 0,
+      "observed_segment_processing_ms_range": null
+    },
+    {
+      "test": "logout",
+      "memory_before": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 225708,
+          "free": 242303,
+          "minFree": 142428,
+          "peakUsed": 325583
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 307860,
+          "free": 32842600
+        },
+        "heapCaps": {
+          "internalFree": 242303,
+          "internalLargest": 147456,
+          "dmaFree": 206831,
+          "dmaLargest": 147456
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 38,
+          "capacity": 512,
+          "attempts": 7833,
+          "successes": 7833,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 6982077,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "chunks": [],
+      "camera_captures": [],
+      "logout_old_result_denied": true,
+      "memory_after": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 225216,
+          "free": 242795,
+          "minFree": 142428,
+          "peakUsed": 325583
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 307860,
+          "free": 32842600
+        },
+        "heapCaps": {
+          "internalFree": 242403,
+          "internalLargest": 172032,
+          "dmaFree": 206931,
+          "dmaLargest": 172032
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 38,
+          "capacity": 512,
+          "attempts": 8810,
+          "successes": 8810,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 9755878,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "status_samples": 2,
+      "minimum_observed_worker_stack_free": null,
+      "minimum_observed_capture_stack_free": 2988,
+      "maximum_observed_pending_audio": 0,
+      "maximum_observed_audio_overruns": 0,
+      "observed_segment_processing_ms_range": null
+    },
+    {
+      "test": "backpressure",
+      "memory_before": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 225608,
+          "free": 242403,
+          "minFree": 142428,
+          "peakUsed": 325583
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 307860,
+          "free": 32842600
+        },
+        "heapCaps": {
+          "internalFree": 242403,
+          "internalLargest": 172032,
+          "dmaFree": 206931,
+          "dmaLargest": 172032
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 38,
+          "capacity": 512,
+          "attempts": 8848,
+          "successes": 8848,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 9765517,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "chunks": [],
+      "camera_captures": [],
+      "final": {
+        "state": "failed",
+        "backend": "local",
+        "phase": "decoding",
+        "workerActive": false,
+        "continuous": true,
+        "captureActive": false,
+        "inferenceActive": false,
+        "sessionMs": 96162,
+        "segmentsCaptured": 9,
+        "segmentsCompleted": 8,
+        "pendingAudio": 0,
+        "pendingTexts": 8,
+        "audioOverruns": 0,
+        "textReady": true,
+        "elapsedMs": 96162,
+        "captureLimitMs": 0,
+        "samples": 1532928,
+        "sampleRate": 16000,
+        "source": "pdm",
+        "processing": "raw-hal; model frontend only; saved micgain not applied",
+        "level": 0,
+        "rms": 10,
+        "noiseRms": 3,
+        "thresholdRms": 16,
+        "peakRms": 94,
+        "workerStackFreeBytes": 7356,
+        "captureStackFreeBytes": 2840,
+        "error": "STT text queue full; receiver must acknowledge results",
+        "modelBytes": 7172016,
+        "featureFrames": 940,
+        "outputFrames": 470,
+        "loadMs": 3204,
+        "frontendMs": 1034,
+        "inferenceMs": 2833,
+        "decodeMs": 1
+      },
+      "acknowledged": 0,
+      "capture_and_inference_overlapped": true,
+      "elapsed_wall_seconds": 96.99156195798423,
+      "capture_wall_seconds": 96.83688204200007,
+      "memory_after": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 225692,
+          "free": 242319,
+          "minFree": 142428,
+          "peakUsed": 325583
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 307856,
+          "free": 32842604
+        },
+        "heapCaps": {
+          "internalFree": 242319,
+          "internalLargest": 172032,
+          "dmaFree": 206847,
+          "dmaLargest": 172032
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 38,
+          "capacity": 512,
+          "attempts": 12332,
+          "successes": 12332,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 13137375,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "status_samples": 9,
+      "minimum_observed_worker_stack_free": 7356,
+      "minimum_observed_capture_stack_free": 2840,
+      "maximum_observed_pending_audio": 0,
+      "maximum_observed_audio_overruns": 0,
+      "observed_segment_processing_ms_range": [
+        6448,
+        6689
+      ]
+    },
+    {
+      "test": "stream",
+      "memory_before": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 246996,
+          "free": 221015,
+          "minFree": 142428,
+          "peakUsed": 325583
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 5841260,
+          "free": 27309200
+        },
+        "heapCaps": {
+          "internalFree": 221015,
+          "internalLargest": 172032,
+          "dmaFree": 185543,
+          "dmaLargest": 172032
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 38,
+          "capacity": 512,
+          "attempts": 12481,
+          "successes": 12481,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 13172859,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "chunks": [
+        {
+          "sequence": 1,
+          "startSample": 19520,
+          "endSample": 166560,
+          "forcedBoundary": false,
+          "text_bytes": 74
+        },
+        {
+          "sequence": 2,
+          "startSample": 169280,
+          "endSample": 297280,
+          "forcedBoundary": false,
+          "text_bytes": 62
+        },
+        {
+          "sequence": 3,
+          "startSample": 330240,
+          "endSample": 458240,
+          "forcedBoundary": false,
+          "text_bytes": 69
+        },
+        {
+          "sequence": 4,
+          "startSample": 491680,
+          "endSample": 635680,
+          "forcedBoundary": false,
+          "text_bytes": 67
+        },
+        {
+          "sequence": 5,
+          "startSample": 645120,
+          "endSample": 965120,
+          "forcedBoundary": true,
+          "text_bytes": 141
+        },
+        {
+          "sequence": 6,
+          "startSample": 965120,
+          "endSample": 1093120,
+          "forcedBoundary": false,
+          "text_bytes": 55
+        },
+        {
+          "sequence": 7,
+          "startSample": 1104480,
+          "endSample": 1232480,
+          "forcedBoundary": false,
+          "text_bytes": 63
+        },
+        {
+          "sequence": 8,
+          "startSample": 1273920,
+          "endSample": 1491360,
+          "forcedBoundary": false,
+          "text_bytes": 135
+        },
+        {
+          "sequence": 9,
+          "startSample": 1558880,
+          "endSample": 1686880,
+          "forcedBoundary": false,
+          "text_bytes": 70
+        },
+        {
+          "sequence": 10,
+          "startSample": 1716480,
+          "endSample": 1858720,
+          "forcedBoundary": false,
+          "text_bytes": 62
+        },
+        {
+          "sequence": 11,
+          "startSample": 1868480,
+          "endSample": 2029120,
+          "forcedBoundary": false,
+          "text_bytes": 73
+        },
+        {
+          "sequence": 12,
+          "startSample": 2029120,
+          "endSample": 2188320,
+          "forcedBoundary": false,
+          "text_bytes": 60
+        },
+        {
+          "sequence": 13,
+          "startSample": 2194880,
+          "endSample": 2322880,
+          "forcedBoundary": false,
+          "text_bytes": 70
+        },
+        {
+          "sequence": 14,
+          "startSample": 2364160,
+          "endSample": 2492160,
+          "forcedBoundary": false,
+          "text_bytes": 62
+        },
+        {
+          "sequence": 15,
+          "startSample": 2518560,
+          "endSample": 2838560,
+          "forcedBoundary": true,
+          "text_bytes": 153
+        },
+        {
+          "sequence": 16,
+          "startSample": 2838560,
+          "endSample": 3034080,
+          "forcedBoundary": false,
+          "text_bytes": 111
+        },
+        {
+          "sequence": 17,
+          "startSample": 3106080,
+          "endSample": 3331040,
+          "forcedBoundary": false,
+          "text_bytes": 134
+        },
+        {
+          "sequence": 18,
+          "startSample": 3398560,
+          "endSample": 3526560,
+          "forcedBoundary": false,
+          "text_bytes": 70
+        },
+        {
+          "sequence": 19,
+          "startSample": 3554240,
+          "endSample": 3682240,
+          "forcedBoundary": false,
+          "text_bytes": 64
+        },
+        {
+          "sequence": 20,
+          "startSample": 3702560,
+          "endSample": 3830560,
+          "forcedBoundary": false,
+          "text_bytes": 74
+        },
+        {
+          "sequence": 21,
+          "startSample": 3862080,
+          "endSample": 3999840,
+          "forcedBoundary": false,
+          "text_bytes": 63
+        },
+        {
+          "sequence": 22,
+          "startSample": 4018240,
+          "endSample": 4146240,
+          "forcedBoundary": false,
+          "text_bytes": 70
+        },
+        {
+          "sequence": 23,
+          "startSample": 4183680,
+          "endSample": 4311680,
+          "forcedBoundary": false,
+          "text_bytes": 65
+        },
+        {
+          "sequence": 24,
+          "startSample": 4329280,
+          "endSample": 4490240,
+          "forcedBoundary": false,
+          "text_bytes": 74
+        },
+        {
+          "sequence": 25,
+          "startSample": 4494400,
+          "endSample": 4726080,
+          "forcedBoundary": false,
+          "text_bytes": 132
+        },
+        {
+          "sequence": 26,
+          "startSample": 4806080,
+          "endSample": 4934080,
+          "forcedBoundary": false,
+          "text_bytes": 64
+        },
+        {
+          "sequence": 27,
+          "startSample": 4953600,
+          "endSample": 5094080,
+          "forcedBoundary": false,
+          "text_bytes": 73
+        },
+        {
+          "sequence": 28,
+          "startSample": 5120000,
+          "endSample": 5328000,
+          "forcedBoundary": false,
+          "text_bytes": 123
+        },
+        {
+          "sequence": 29,
+          "startSample": 5328000,
+          "endSample": 5502080,
+          "forcedBoundary": false,
+          "text_bytes": 68
+        },
+        {
+          "sequence": 30,
+          "startSample": 5573280,
+          "endSample": 5807520,
+          "forcedBoundary": false,
+          "text_bytes": 138
+        },
+        {
+          "sequence": 31,
+          "startSample": 5885760,
+          "endSample": 6013760,
+          "forcedBoundary": false,
+          "text_bytes": 70
+        },
+        {
+          "sequence": 32,
+          "startSample": 6042720,
+          "endSample": 6170720,
+          "forcedBoundary": false,
+          "text_bytes": 65
+        },
+        {
+          "sequence": 33,
+          "startSample": 6198400,
+          "endSample": 6518400,
+          "forcedBoundary": true,
+          "text_bytes": 156
+        },
+        {
+          "sequence": 34,
+          "startSample": 6518400,
+          "endSample": 6646400,
+          "forcedBoundary": false,
+          "text_bytes": 47
+        },
+        {
+          "sequence": 35,
+          "startSample": 6647200,
+          "endSample": 6878240,
+          "forcedBoundary": false,
+          "text_bytes": 141
+        },
+        {
+          "sequence": 36,
+          "startSample": 6948640,
+          "endSample": 7178720,
+          "forcedBoundary": false,
+          "text_bytes": 135
+        },
+        {
+          "sequence": 37,
+          "startSample": 7261760,
+          "endSample": 7389760,
+          "forcedBoundary": false,
+          "text_bytes": 64
+        },
+        {
+          "sequence": 38,
+          "startSample": 7429440,
+          "endSample": 7557440,
+          "forcedBoundary": false,
+          "text_bytes": 71
+        },
+        {
+          "sequence": 39,
+          "startSample": 7586240,
+          "endSample": 7813440,
+          "forcedBoundary": false,
+          "text_bytes": 134
+        },
+        {
+          "sequence": 40,
+          "startSample": 7901760,
+          "endSample": 8029760,
+          "forcedBoundary": false,
+          "text_bytes": 64
+        },
+        {
+          "sequence": 41,
+          "startSample": 8055680,
+          "endSample": 8292800,
+          "forcedBoundary": false,
+          "text_bytes": 135
+        },
+        {
+          "sequence": 42,
+          "startSample": 8356640,
+          "endSample": 8484640,
+          "forcedBoundary": false,
+          "text_bytes": 68
+        },
+        {
+          "sequence": 43,
+          "startSample": 8519040,
+          "endSample": 8647040,
+          "forcedBoundary": false,
+          "text_bytes": 65
+        },
+        {
+          "sequence": 44,
+          "startSample": 8668320,
+          "endSample": 8804000,
+          "forcedBoundary": false,
+          "text_bytes": 73
+        },
+        {
+          "sequence": 45,
+          "startSample": 8820800,
+          "endSample": 9022400,
+          "forcedBoundary": false,
+          "text_bytes": 126
+        },
+        {
+          "sequence": 46,
+          "startSample": 9022400,
+          "endSample": 9191840,
+          "forcedBoundary": false,
+          "text_bytes": 66
+        },
+        {
+          "sequence": 47,
+          "startSample": 9288480,
+          "endSample": 9443520,
+          "forcedBoundary": false,
+          "text_bytes": 74
+        },
+        {
+          "sequence": 48,
+          "startSample": 9451680,
+          "endSample": 9610080,
+          "forcedBoundary": false,
+          "text_bytes": 64
+        }
+      ],
+      "camera_captures": [
+        {
+          "jpeg_bytes": 7419,
+          "at_seconds": 17.314630291017238,
+          "during_inference": true
+        },
+        {
+          "jpeg_bytes": 7789,
+          "at_seconds": 78.71830725000473,
+          "during_inference": true
+        },
+        {
+          "jpeg_bytes": 7348,
+          "at_seconds": 139.54860675003147,
+          "during_inference": true
+        },
+        {
+          "jpeg_bytes": 7444,
+          "at_seconds": 200.18760970799485,
+          "during_inference": false
+        },
+        {
+          "jpeg_bytes": 7495,
+          "at_seconds": 260.19369083299534,
+          "during_inference": true
+        },
+        {
+          "jpeg_bytes": 7672,
+          "at_seconds": 321.07009308302077,
+          "during_inference": true
+        },
+        {
+          "jpeg_bytes": 7048,
+          "at_seconds": 381.86639483302133,
+          "during_inference": true
+        },
+        {
+          "jpeg_bytes": 7182,
+          "at_seconds": 443.0826249999809,
+          "during_inference": false
+        },
+        {
+          "jpeg_bytes": 7560,
+          "at_seconds": 503.21138162503485,
+          "during_inference": true
+        },
+        {
+          "jpeg_bytes": 7714,
+          "at_seconds": 563.2680478750262,
+          "during_inference": false
+        }
+      ],
+      "final": {
+        "state": "done",
+        "backend": "local",
+        "phase": "decoding",
+        "workerActive": false,
+        "continuous": true,
+        "captureActive": false,
+        "inferenceActive": false,
+        "sessionMs": 610390,
+        "segmentsCaptured": 48,
+        "segmentsCompleted": 48,
+        "pendingAudio": 0,
+        "pendingTexts": 0,
+        "audioOverruns": 0,
+        "textReady": false,
+        "elapsedMs": 610390,
+        "captureLimitMs": 0,
+        "samples": 9615360,
+        "sampleRate": 16000,
+        "source": "pdm",
+        "processing": "raw-hal; model frontend only; saved micgain not applied",
+        "level": 0,
+        "rms": 6,
+        "noiseRms": 4,
+        "thresholdRms": 45,
+        "peakRms": 6,
+        "workerStackFreeBytes": 7352,
+        "captureStackFreeBytes": 2616,
+        "error": "",
+        "modelBytes": 7172016,
+        "featureFrames": 990,
+        "outputFrames": 495,
+        "loadMs": 4603,
+        "frontendMs": 1149,
+        "inferenceMs": 3705,
+        "decodeMs": 1
+      },
+      "acknowledged": 48,
+      "capture_and_inference_overlapped": true,
+      "elapsed_wall_seconds": 611.2730078329914,
+      "capture_wall_seconds": 600.8873064999934,
+      "memory_after": {
+        "schema": 1,
+        "dram": {
+          "total": 468011,
+          "used": 236748,
+          "free": 231263,
+          "minFree": 131676,
+          "peakUsed": 336335
+        },
+        "psram": {
+          "available": true,
+          "total": 33150460,
+          "used": 5959028,
+          "free": 27191432
+        },
+        "heapCaps": {
+          "internalFree": 231263,
+          "internalLargest": 172032,
+          "dmaFree": 195791,
+          "dmaLargest": 172032
+        },
+        "allocationTraffic": {
+          "semantics": "cumulative_requested_since_reset",
+          "enabled": true,
+          "generation": 1,
+          "tags": 39,
+          "capacity": 512,
+          "attempts": 38655,
+          "successes": 38655,
+          "failures": 0,
+          "fallbacks": 0,
+          "dramBytes": 9288,
+          "psramBytes": 21834928,
+          "contentionDrops": 0,
+          "invalidTagEvents": 0,
+          "overflowEvents": 0
+        }
+      },
+      "status_samples": 57,
+      "minimum_observed_worker_stack_free": 7352,
+      "minimum_observed_capture_stack_free": 2616,
+      "maximum_observed_pending_audio": 0,
+      "maximum_observed_audio_overruns": 0,
+      "observed_segment_processing_ms_range": [
+        6995,
+        13055
+      ]
+    }
+  ],
+  "bounded_regression": {
+    "acoustic_fixture": "heldout-0-samantha.wav",
+    "volume": 50,
+    "status": {
+      "state": "done",
+      "backend": "local",
+      "phase": "decoding",
+      "workerActive": false,
+      "continuous": false,
+      "captureActive": false,
+      "inferenceActive": false,
+      "sessionMs": 0,
+      "segmentsCaptured": 0,
+      "segmentsCompleted": 0,
+      "pendingAudio": 0,
+      "pendingTexts": 0,
+      "audioOverruns": 0,
+      "textReady": true,
+      "elapsedMs": 15945,
+      "captureLimitMs": 8000,
+      "samples": 128000,
+      "sampleRate": 16000,
+      "source": "pdm",
+      "processing": "raw-hal; model frontend only; saved micgain not applied",
+      "level": 0,
+      "rms": 0,
+      "noiseRms": 0,
+      "thresholdRms": 0,
+      "peakRms": 0,
+      "workerStackFreeBytes": 8648,
+      "captureStackFreeBytes": 0,
+      "error": "",
+      "modelBytes": 7172016,
+      "featureFrames": 800,
+      "outputFrames": 400,
+      "loadMs": 4173,
+      "frontendMs": 892,
+      "inferenceMs": 2656,
+      "decodeMs": 1
+    }
+  },
+  "esp_sr_regression": {
+    "started": true,
+    "voice_commands_disarmed_after_stop": true,
+    "opensr_auto_armed_briefly": true,
+    "wake_count": 0,
+    "command_count": 0,
+    "stt_rejected_while_sr_owned_mic": true,
+    "stopped_after_test": true
+  },
+  "saved_settings_postcheck": {
+    "passed": true,
+    "checks": {
+      "espnowlist": true,
+      "espnowmeshes listjson": true,
+      "httpstatus json": true,
+      "espnowstatus json": true,
+      "power json": true,
+      "ble_preferences": true,
+      "wifi_not_joined": true,
+      "camera_restored": true,
+      "cameraquality": true,
+      "cameracapturefolder": true,
+      "camerastoragelocation": true,
+      "cameraautocapture": true,
+      "speech_stopped_disarmed": true,
+      "speech_autostart_off": true,
+      "speech_model_source_littlefs": true,
+      "mic_available_stopped": true,
+      "mic_source_auto": true,
+      "mic_saved_rate": true,
+      "mic_saved_gain": true,
+      "battery_voltage": true
+    }
+  },
+  "host_tests": [
+    {
+      "command": "python3 components/hardwareone/test/host/test_stt_continuous.py --sanitize",
+      "result": "passed",
+      "scope": "Actual concurrent broker, segmenter and HAL/model fakes: readiness, immediate speech, long sessions, raw sample boundaries, queue pressure, faults, cancellation, revocation, expiry and64-bit counters."
+    },
+    {
+      "command": "python3 components/hardwareone/test/host/test_stt_continuous.py --thread-sanitize",
+      "result": "passed",
+      "scope": "Same real-thread broker suite; no reported data races."
+    },
+    {
+      "command": "python3 components/hardwareone/test/host/test_stt_runtime.py --sanitize",
+      "result": "passed",
+      "scope": "One-shot broker limits, ownership, faults, cancellation and cleanup."
+    },
+    {
+      "command": "python3 components/hardwareone/test/host/test_stt_segmenter.py --sanitize",
+      "result": "passed",
+      "scope": "DC invariance, calibration, pre-roll, pauses, hard cuts, short tails, changing noise, configurable thresholds;120s measured-range noise gives zero segments."
+    },
+    {
+      "command": "python3 components/hardwareone/test/host/test_audio_vad_policy.py --sanitize",
+      "result": "passed",
+      "scope": "Actual recorder block compared with frozen prior decisions across rates, window wrap, thresholds, trim, latch and deadlines."
+    },
+    {
+      "command": "python3 components/hardwareone/test/host/test_dictation_local.py --sanitize",
+      "result": "passed",
+      "scope": "Actual mailbox/Pi delivery with local feature both disabled and enabled, partial receipt, final-publication races, revocation and field-full cleanup."
+    },
+    {
+      "command": "python3 components/hardwareone/test/host/test_dictation_ui.py --sanitize",
+      "result": "passed",
+      "scope": "Actual OLED/G2 delivery, countdown, guarded append/capacity and filtering."
+    },
+    {
+      "command": "python3 components/hardwareone/test/host/test_stt_g2_status.py --sanitize",
+      "result": "passed",
+      "scope": "G2 STT readiness/state rendering and lifecycle regressions."
+    },
+    {
+      "command": "python3 components/hardwareone/test/host/test_audio_hal_pdm.py --sanitize",
+      "result": "passed",
+      "scope": "Actual P4/XIAO HAL variants,12 board profiles, whole-block warmup, OOM/error cleanup, overrun monitor and ownership fences."
+    },
+    {
+      "command": "python3 components/hardwareone/test/host/test_live_audio.py --sanitize",
+      "result": "passed",
+      "scope": "Actual G2 HAL/live-audio path and UART framing/admission/failure regressions."
+    }
+  ],
+  "additional_host_checks": [
+    "Shared transcript privacy and BLE redaction ASan/UBSan",
+    "Web batch1770 assertions",
+    "Container768 mutations and96 truncations ASan/UBSan",
+    "Quantizer124579 NumPy-exact checks; model/frontend identities unchanged"
+  ],
+  "records": [
+    {
+      "path": "experiments/stt_p4/private/continuous-20260928-222145.json",
+      "sha256": "c8a493b25c14f679a877e1293c4360e42407da2d4816bb40b5e7c94d7d715d2f"
+    },
+    {
+      "path": "experiments/stt_p4/private/continuous-20260928-222716.json",
+      "sha256": "c442a70faaed68462ab638c336901ce055078cf5cb733394cbc7b794e0977485"
+    },
+    {
+      "path": "experiments/stt_p4/private/acoustic-222615.json",
+      "sha256": "b8c5acc60669980d4b1b494acc7feccef100cf8e5078d871d5567446592783bd"
+    },
+    {
+      "path": "experiments/stt_p4/private/continuous-v4-flash.log",
+      "sha256": "3b507cd770459c95e0ae4cf347a4771b0d9e0d75ff874ed6c69696c2d4e9f12d"
+    },
+    {
+      "path": "experiments/stt_p4/private/continuous-v4-result.json",
+      "sha256": "6ff103c94a093405b1d253b479c4ba315defe6e980026ff4b38655f3cd073c9d"
+    },
+    {
+      "path": "experiments/speech_portable/private/run-20260928/postcheck-224247.json",
+      "sha256": "5fada1a884a486ca96ef1f8a84db8339f377c77eac5fe71163c25172b8a0d5cc"
+    }
+  ],
+  "limits": [
+    "Phrase-level results; no word-by-word partial hypotheses.",
+    "Finite audio/text queues; slow backend or receiver explicitly stops the session.",
+    "Finite OLED/G2 input fields still stop when full; no physical UI/accessory validation in this milestone.",
+    "Zero reported HAL integrity events do not establish absence of every possible driver-level sample loss. G2 packet-gap/stall diagnostics are not all included in this counter.",
+    "Energy gating and English QuartzNet accuracy remain imperfect; fixtures were room speaker playback, not a representative human-speech benchmark.",
+    "No overlap at forced20s cuts; split words may be misrecognized.",
+    "Pi UARTv1 preserved; continuous Pi adapter still future work. No S3 flash.",
+    "An earlier run lost part of a USB status reply and its completion marker during model loading. Final suite reduced log mirroring and polling; underlying serial robustness was not changed."
+  ]
+}

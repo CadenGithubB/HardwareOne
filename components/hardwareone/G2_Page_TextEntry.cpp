@@ -617,7 +617,17 @@ void g2TextEntryPadEvent(char code) {
   pushBuffer();   // text child only — grid image untouched; selection is fast
 }
 
-size_t g2TextEntryPadAppendText(const char* text) {
+size_t g2TextEntryPadRemaining(bool* needsSeparator) {
+  if (needsSeparator) *needsSeparator = false;
+  const uint32_t serial = __atomic_load_n(&gTE.serial, __ATOMIC_ACQUIRE);
+  TextEntryExecGuard execution(serial, /*cleanup*/ false);
+  if (!execution || !sessionCurrent() || !gTE.padMode || gTE.isSecret) return 0;
+  if (needsSeparator && gTE.len) *needsSeparator = gTE.buf[gTE.len - 1] != ' ';
+  return gTE.len < gTE.maxLen ? gTE.maxLen - gTE.len : 0;
+}
+
+size_t g2TextEntryPadAppendText(const char* text, size_t* consumed) {
+  if (consumed) *consumed = 0;
   if (!text || !text[0]) return 0;
   const uint32_t serial = __atomic_load_n(&gTE.serial, __ATOMIC_ACQUIRE);
   TextEntryExecGuard execution(serial, /*cleanup*/ false);
@@ -629,6 +639,7 @@ size_t g2TextEntryPadAppendText(const char* text) {
   size_t filtered = 0;
   for (const unsigned char* p = (const unsigned char*)text;
        *p && gTE.len < gTE.maxLen; ++p) {
+    if (consumed) ++*consumed;
     // Match the physical G2 grid's input contract. Control bytes, non-ASCII
     // UTF-8 fragments and double quotes cannot be entered manually either;
     // in particular, a quote would break callers that submit a quoted CLI

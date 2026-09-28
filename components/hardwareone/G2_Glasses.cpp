@@ -14,6 +14,7 @@
 
 #include <stdarg.h>
 #include <atomic>
+#include <algorithm>
 #include <new>          // std::nothrow — for LensUiJob allocation in pageSwapEnqueue
 
 #include <BLEDevice.h>
@@ -30013,10 +30014,11 @@ struct KbdPadState {
   uint8_t  micCountdown;        // 3..1 while priming, 0 otherwise
   uint32_t micCountdownNextMs;
   bool     micSignatureValid;
+  bool     micSessionStarted;
   bool     micRenderedAvailable;
   bool     micRenderedEpochLive;
   bool     micRenderedPreparing;
-  bool     micRenderedBufferedLocal;
+  bool     micRenderedContinuous;
   DictationState micRenderedState;
   CommandSource  micRenderedOwner;
   char     micRenderedSource[5];
@@ -30150,6 +30152,9 @@ static void kbdRenderMicShades(uint8_t* shades) {
   } else if (!epochLive) {
     line1 = "SESSION GONE";
     line2 = "EXIT KEYBOARD";
+  } else if (g2TextEntryPadRemaining() == 0) {
+    line1 = "TEXT FIELD FULL";
+    line2 = "TAP MIC TO RETURN";
   } else if (ownedElsewhere) {
     line1 = "MIC BUSY";
     line2 = "TAP MIC TO RETURN";
@@ -30161,13 +30166,13 @@ static void kbdRenderMicShades(uint8_t* shades) {
       case DictationState::RECORDING:
         line1 = snap.preparing ? "GET READY" : "SPEAK NOW";
         line2 = snap.preparing ? "STARTING MICROPHONE"
-                : snap.bufferedLocal ? "TAP MIC TO FINISH"
+                : snap.continuous ? "TAP MIC TO FINISH"
                                      : "STOP SPEAKING TO END TRANSMISSION";
-        footer = snap.bufferedLocal ? "LOCAL RECORDING / 20 SEC MAX"
+        footer = snap.continuous ? "LISTENS BETWEEN PHRASES"
                                    : "AUTO-STOPS AFTER SILENCE";
         break;
       case DictationState::WAITING:
-        line1 = snap.bufferedLocal ? "LOCAL STT" : "TRANSCRIBING";
+        line1 = snap.continuous ? "FINISHING" : "TRANSCRIBING";
         line2 = "TAP MIC TO CANCEL";
         footer = "LIST ROW STAYS FOCUSED";
         break;
@@ -30626,7 +30631,7 @@ static bool kbdPadMicStatusChanged(bool remember) {
       gKbdPad.micRenderedAvailable != available ||
       gKbdPad.micRenderedEpochLive != epochLive ||
       gKbdPad.micRenderedPreparing != snap.preparing ||
-      gKbdPad.micRenderedBufferedLocal != snap.bufferedLocal ||
+      gKbdPad.micRenderedContinuous != snap.continuous ||
       gKbdPad.micRenderedState != snap.state ||
       gKbdPad.micRenderedOwner != snap.ownerSource ||
       strcmp(gKbdPad.micRenderedSource, source) != 0 ||
@@ -30636,7 +30641,7 @@ static bool kbdPadMicStatusChanged(bool remember) {
     gKbdPad.micRenderedAvailable = available;
     gKbdPad.micRenderedEpochLive = epochLive;
     gKbdPad.micRenderedPreparing = snap.preparing;
-    gKbdPad.micRenderedBufferedLocal = snap.bufferedLocal;
+    gKbdPad.micRenderedContinuous = snap.continuous;
     gKbdPad.micRenderedState = snap.state;
     gKbdPad.micRenderedOwner = snap.ownerSource;
     snprintf(gKbdPad.micRenderedSource,
@@ -30664,6 +30669,7 @@ static bool kbdPadReturnToKeys(const char* why, bool cancelDictation) {
   kbdPadMicServiceSuspend();
   if (cancelDictation) dictationCancelFor(SOURCE_G2_GLASSES);
   gKbdPad.micCountdown = 0;
+  gKbdPad.micSessionStarted = false;
   gKbdPad.micCountdownNextMs = 0;
   gKbdPad.page = gKbdPad.pageBeforeMic <= 2 ? gKbdPad.pageBeforeMic : 0;
   gKbdPad.micSignatureValid = false;
@@ -30676,6 +30682,38 @@ static void kbdPadFreeBuffers() {
 }
 
 }  // namespace
+
+// Both providers use the same receipt path. The field owns capacity/filtering;
+// only source bytes actually consumed by that policy are committed.
+static bool kbdPadConsumeDictationText() {
+  char transcript[DICTATION_MAX_TEXT + 1] = {};
+  DictationTextReceipt receipt;
+  if (!dictationPeekTextFor(SOURCE_G2_GLASSES, transcript, sizeof(transcript), &receipt))
+    return false;
+  bool needsSpace = false;
+  const size_t remaining = g2TextEntryPadRemaining(&needsSpace);
+  const size_t prefix = receipt.offset == 0 && needsSpace ? 1 : 0;
+  if (remaining <= prefix) {
+    memset(transcript, 0, sizeof(transcript));
+    dictationFieldFullFor(SOURCE_G2_GLASSES);
+    return true;
+  }
+  const size_t amount = std::min(static_cast<size_t>(receipt.length), remaining - prefix);
+  char insertion[DICTATION_MAX_TEXT + 2] = {};
+  if (prefix) insertion[0] = ' ';
+  memcpy(insertion + prefix, transcript, amount);
+  size_t consumed = 0;
+  (void)g2TextEntryPadAppendText(insertion, &consumed);
+  memset(insertion, 0, sizeof(insertion));
+  memset(transcript, 0, sizeof(transcript));
+  const size_t accepted = consumed >= prefix ? consumed - prefix : 0;
+  if (accepted && !dictationCommitTextFor(SOURCE_G2_GLASSES, receipt, accepted)) {
+    dictationCancelFor(SOURCE_G2_GLASSES);
+    return true;
+  }
+  if (!g2TextEntryPadRemaining()) dictationFieldFullFor(SOURCE_G2_GLASSES);
+  return consumed != 0;
+}
 
 // Tap-worker side of the G2 dictation bridge. The main loop services recorder
 // timeouts, then queues this exact-presentation entry to drain a transcript and
@@ -30717,8 +30755,9 @@ static void kbdPadDictationServiceOnTap(uint32_t presentationEpoch) {
     // "1" has held for its full interval. Only now arm the mic, so the
     // wearer never loses the first word while the countdown is still painting.
     gKbdPad.micCountdown = 0;
-    const bool armed = dictationBeginFor(SOURCE_G2_GLASSES,
-                                         gKbdPad.dictationEpoch);
+    const bool armed = g2TextEntryPadRemaining() > 0 &&
+        dictationBeginFor(SOURCE_G2_GLASSES, gKbdPad.dictationEpoch);
+    gKbdPad.micSessionStarted = armed;
     DEBUG_G2F("[G2] kbd-pad: countdown complete, arm=%u", armed ? 1u : 0u);
     // Header is unchanged; recording/busy/failure state replaces the digit in
     // band 1, GET READY in band 2, and may change the footer in band 3.
@@ -30735,21 +30774,16 @@ static void kbdPadDictationServiceOnTap(uint32_t presentationEpoch) {
   }
 
   dictationTick();
-  char transcript[DICTATION_MAX_TEXT + 1] = {};
-  const bool took = dictationTakeTextFor(
-      SOURCE_G2_GLASSES, transcript, sizeof(transcript));
-  if (took) {
-    const size_t appended = g2TextEntryPadAppendText(transcript);
-    memset(transcript, 0, sizeof(transcript));
-    DEBUG_G2F("[G2] kbd-pad: dictation delivered, appended=%u",
-              (unsigned)appended);
-    // Successful speech input behaves like one keyboard action: return to the
-    // exact character page the wearer came from, with the list focus still on
-    // Mic / Keys. The IMAGE pane is never an interactive target.
+  const bool took = kbdPadConsumeDictationText();
+  const DictationSnapshot after = dictationSnapshotNow();
+  // Both providers finish only when their final result has been consumed.
+  // Continuous sessions stay on this page between text chunks.
+  if (gKbdPad.micSessionStarted && after.state == DictationState::IDLE) {
     if (!kbdPadReturnToKeys("mic-text-return", /*cancelDictation*/ false))
       g2TextEntryPadEvent('\x1b');
     return;
   }
+  if (took) gKbdPad.micSignatureValid = false;
 
   if (kbdPadMicStatusChanged(/*remember*/ false)) {
     kbdPadMicServiceSuspend();
@@ -31016,6 +31050,7 @@ void g2KbdPadHandleTap(uint32_t idx) {
     gKbdPad.pageBeforeMic = gKbdPad.page;
     gKbdPad.page = kKbdPageMic;
     gKbdPad.micCountdown = 3;
+    gKbdPad.micSessionStarted = false;
     gKbdPad.micSignatureValid = false;
     kbdPadMicServiceSuspend();
     // The same focused row starts an asynchronous 3→2→1 primer. Recording is

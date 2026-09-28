@@ -33,7 +33,7 @@
 #undef CUSTOM_ENABLE_WEB_BATTERY
 #define CUSTOM_ENABLE_WEB_BATTERY 1
 #undef CUSTOM_ENABLE_WEB_R1_HEALTH
-#define CUSTOM_ENABLE_WEB_R1_HEALTH 1
+#define CUSTOM_ENABLE_WEB_R1_HEALTH 0 // Omit optional web panel to fit continuous STT; ring support stays enabled.
 
 #undef ENABLE_HTTPS
 #define ENABLE_HTTPS 0

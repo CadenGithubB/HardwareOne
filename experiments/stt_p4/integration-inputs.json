@@ -1,7 +1,7 @@
 {
   "base": "f9bfe98",
   "external": {
-    "experiments/stt_p4/features-p4.h": "421702aeeb616849f4f2d1ba690e8ef32bb69c17069034377bab0145a8d9e886",
+    "experiments/stt_p4/features-p4.h": "88d63eeb952e6bec87a9dadc6e2091a2c42026cf01e075d27b2d0fda8ffc9d87",
     "experiments/stt_p4/sdkconfig.stt.defaults": "20110eb436f1c8d6c49c04e7a860b154fdcc716012e97d3505a51747d1ed313c",
     "experiments/stt_p4/radio_backend.cpp": "18bc3a75105e1a433a07fd18fd7dc294729b1663ac23a203e2eb5e070c4afb6f",
     "experiments/stt_p4/radio_backend.h": "9d6335a70931dc35f2fc88a51473212573aff870d0d8ea43be176c39a8cfccbe",
@@ -23,16 +23,22 @@
     "experiments/p4_ble_roles/radio_backend.h": "ca08bfc7f8fdc4185c64e59c53e77d170a966618174bb2d337980378728fea5e"
   },
   "sources": {
+    "components/hardwareone/Audio_VadPolicy.h": "5f2bc6a5e4211e04e9fdda8358fb20fa929a3bc439011f2ab00ca4f4a5b93f7b",
     "components/hardwareone/Bluetooth.cpp": "fc7a57032a0877d40b0086825eccda8db8ec58f24ba13423267137df489ad6d8",
     "components/hardwareone/CMakeLists.txt": "5b945a5ace59521d9e3b4f59c2ccfbf80af8f8e2b9612c35688bfe2e296f1583",
-    "components/hardwareone/G2_Glasses.cpp": "b2661430d082469571e40b697e21f233fd3ac7049e835d97e7746ce85677c82d",
+    "components/hardwareone/G2_Glasses.cpp": "cc1176a6e8506a3e6fe24a66a24c891babb9f22de742a122f49d9b8483877fa7",
+    "components/hardwareone/G2_Page_TextEntry.cpp": "6e820df8885694e9d68a2a356dee41c3677e87bcce843224009f2193dfd2f482",
+    "components/hardwareone/G2_Page_TextEntry.h": "4b2fe2c6580bb6015f4230321994ece6e3010064c761c28b6f12b110e4232770",
+    "components/hardwareone/HAL_Audio.cpp": "6668d5fec47a4ef4f694ceb59284f63cf47c1f129e85dae3a503bfcb92cf0a6a",
+    "components/hardwareone/HAL_Audio.h": "290a5fcbfff9f4fc6c954031b84d83f30d4096d7b8dc8d78548634bd4349ad0e",
     "components/hardwareone/HardwareOne.cpp": "948a31ab6006d90be1f56a8fcf70f095ebba36ba48946fbe7c0afce6063a14a8",
-    "components/hardwareone/OLED_Utils.cpp": "12352278a07dc0c6c8bdbae84ef85a1f083c84203221d4f8a570d0d39e20e711",
+    "components/hardwareone/OLED_Utils.cpp": "5aedc755a351994a2855cd64077417b30ecd5eababc1a71ccde0cf9971fca382",
     "components/hardwareone/System_BuildConfig.h": "6d0a5c1b76e13e60a433c885b2ff57940cc3181743f094b1c57b63abdf507045",
-    "components/hardwareone/System_Dictation.cpp": "e4f1cc056a3c07e106ce768deb78447128fd8ecf7f133c178295f0ca7a929334",
-    "components/hardwareone/System_Dictation.h": "23a333d731f9a055b08ad109387d5d618f1f53b0678bbdbbf62bf98f51c08d69",
-    "components/hardwareone/System_STT.cpp": "7995e1d436527a5d2e30698f2d7777cc3d255dcef0db4085a58254587b20242d",
-    "components/hardwareone/System_STT.h": "19849f29a2f3db93e596a461b25663dff96f02bd15de96f36cf03c4e9dc89ddc",
+    "components/hardwareone/System_Dictation.cpp": "38b9e753ca07bceecf722d600c59c64efcdd0a9ef3ed538b25ba3595f9e24080",
+    "components/hardwareone/System_Dictation.h": "32d0006bffbb3235d7240ced4f3161bc89b99f6082940294ae10445c19838ecd",
+    "components/hardwareone/System_Microphone.cpp": "0a11d6149f9b3ad93abd7ef589e936d416d98d5d733dca71edbf077dde527173",
+    "components/hardwareone/System_STT.cpp": "2df8619855dac62757e43daa0e6bbea618d0f1ed201a4cf88b5e9960be89c3c7",
+    "components/hardwareone/System_STT.h": "a4a27e7db59d273bb761c2af554cb1d88de38161285281d9ec8be07824258bb6",
     "components/hardwareone/System_STTLocal.cpp": "e4032997694253c7b9267e5d6e516e63c98974fd9e04bab7679159d7e3b4541a",
     "components/hardwareone/System_STTLocal.h": "006e2cdfd259e612dd076ee1c56d94f312e1d9e22d83d6d4e0ac3739fc406c90",
     "components/hardwareone/System_Utils.cpp": "d431edf15fbd2d4e16430dc5b6c0c4b7dd6ce35f1c549fb5ff828565d0e06d8d",
@@ -41,11 +47,12 @@
     "components/hardwareone/stt/quartznet_constants.h": "a77794cca23f329cccc5e8bc7176a20aed6e1412190586bf218f1ab46d602239",
     "components/hardwareone/stt/quartznet_frontend.cpp": "2fc57170be79a7ea0986df74469f73a226133bbcbcc5051243c9c2c7a9be4f84",
     "components/hardwareone/stt/quartznet_frontend.h": "262ab1adc28346294d77bfafa11c28ce2fcd78a45c240cbaebed21b072109acb",
-    "components/hardwareone/stt/quartznet_runtime.cpp": "e36cb8ba13aeb42f8200ddce8384bfb584a851306afa9ff9b5256ec55d04cb85",
-    "components/hardwareone/stt/quartznet_runtime.h": "8ec43b91828be50c5da7fa5bb1e63fcb99f2f46bd6d2127b031155c7e60bdafa",
+    "components/hardwareone/stt/quartznet_runtime.cpp": "cc2aa3d2b0b98011710465712f7b723543fe494664e34a97c3075d4e7b2f3f8b",
+    "components/hardwareone/stt/quartznet_runtime.h": "46b9a77c17bc21ba8004c6c4e58a6905f96be96a93e211434d8634120cb2ae49",
     "components/hardwareone/stt/stt_model_container.h": "2da1a4a5f372e411868118b0ed761c2fb88bb02c8eba5e794738eaaa2080ff53",
-    "components/hardwareone/stt/stt_model_identity.h": "e7168df42c562ebd287f41de1843898a2414241b30db71d359da4bcb851d7bf2"
+    "components/hardwareone/stt/stt_model_identity.h": "e7168df42c562ebd287f41de1843898a2414241b30db71d359da4bcb851d7bf2",
+    "components/hardwareone/stt/stt_segmenter.h": "fd02a7fde36cd06f05d03a12b78cd8c940345f97199b97f36eee52c36b555654"
   },
   "dependency_sha256": "de23affb7b68751273cc1fa38873cae6b18b6d946d64452c0c885e74648fdbb4",
-  "patch_sha256": "da93aae0ffecf99b183d611591bd97f4ec3c3228d9bc88cf556efb023c90f5da"
+  "patch_sha256": "c53a78ea42c093f8ff1586db232792330ef0a87e94f9538abb98111752184f1f"
 }

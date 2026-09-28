@@ -41,15 +41,15 @@ int main(){
   current.ownerSource=SOURCE_G2_GLASSES;
   current.sourceName="PDM";
   current.preparing=true;
-  current.bufferedLocal=true;
+  current.continuous=true;
   assert(kbdPadMicStatusChanged(true));
   assert(!kbdPadMicStatusChanged(false));
   current.preparing=false;
   assert(kbdPadMicStatusChanged(false)); // Same source/state; prompt must change.
   assert(kbdPadMicStatusChanged(true));
   assert(!kbdPadMicStatusChanged(false));
-  current.bufferedLocal=false;
-  assert(kbdPadMicStatusChanged(true)); // Silence-VAD versus bounded-capture label.
+  current.continuous=false;
+  assert(kbdPadMicStatusChanged(true)); // Silence-VAD versus continuous-session label.
   assert(!kbdPadMicStatusChanged(false));
   current.state=DictationState::WAITING;
   assert(kbdPadMicStatusChanged(true));

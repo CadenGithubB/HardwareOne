@@ -11,6 +11,7 @@ HERE=Path(__file__).resolve().parent
 SOURCE=HERE.parents[1]
 ROOT=SOURCE.parents[1]
 from test_espsr_runtime import function
+from test_web_batch_handlers import extract_block
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -25,10 +26,13 @@ def main():
     controls=source[source.index('struct DictationPublishedCapture'):source.index('// Capability is deliberately')]
     local=source[source.index('#if ENABLE_LOCAL_STT\n// A local exchange'):source.index('#endif // ENABLE_LOCAL_STT',source.index('// A local exchange'))]+'\n#endif\n'
     harness=(HERE/'dictation_local_harness.cpp').read_text()
+    dict_header=(base/'System_Dictation.h').read_text()
+    headers+='\n'+extract_block(dict_header,'enum class DictationState')+';\n'+extract_block(dict_header,'struct DictationTextReceipt')+';\n'
     harness=harness.replace('// INSERT_HEADERS',headers)
     harness=harness.replace('// INSERT_CONTROL',controls)
     harness=harness.replace('// INSERT_LOCAL',local)
-    harness=harness.replace('// INSERT_DRAIN',function(source,'bool dictationTakeTextFor('))
+    shared='\n'.join(function(source, sig) for sig in ['static bool dictFailOwned(', 'bool dictationPeekTextFor(', 'bool dictationCommitTextFor(', 'bool dictationTakeTextFor(', 'static void dictationCancelImpl(', 'void dictationFieldFullFor(', 'static const char* dictDeliver('])
+    harness=harness.replace('// INSERT_DRAIN',shared)
     harness=harness.replace('// INSERT_STOP',function(source,'void dictationRequestStopFor('))
     # Verify the old host body remains selected by the compile-time provider
     # branch, and local tokens cannot enter either UART completion operation.
@@ -39,6 +43,8 @@ def main():
         unit=Path(tmp)/'test.cpp';exe=Path(tmp)/'test';unit.write_text(harness)
         cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-missing-field-initializers',str(unit),'-o',str(exe),'-I',str(ROOT/'components/hardwareone')]
         if args.sanitize:cmd[1:1]=['-fsanitize=address,undefined','-fno-omit-frame-pointer']
-        subprocess.run(cmd,check=True);subprocess.run([str(exe)],check=True)
+        for provider in (0,1):
+            subprocess.run(cmd+['-DENABLE_LOCAL_STT='+str(provider)],check=True)
+            subprocess.run([str(exe)],check=True)
 
 if __name__=='__main__':main()

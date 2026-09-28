@@ -1,3 +1,50 @@
+diff --git a/components/hardwareone/Audio_VadPolicy.h b/components/hardwareone/Audio_VadPolicy.h
+new file mode 100644
+index 0000000..c8d45a7
+--- /dev/null
++++ b/components/hardwareone/Audio_VadPolicy.h
+@@ -0,0 +1,41 @@
++#pragma once
++#include <cstdint>
++
++namespace hw1::audio {
++// Amplitudes share the caller's units (for example mean absolute level or RMS).
++// The caller owns measurement, ambient-window/peak updates, latch lifetime and
++// timing. PCM is never changed here. Nonnegative int16 PCM amplitudes (0..32768)
++// keep the floor doubling below int32 limits; floorBefore=-1 means unseeded.
++struct AdaptiveVadConfig {
++  int32_t speechFloor = 120;
++  int32_t silenceFloor = 45;
++};
++struct AdaptiveVadDecision {
++  int32_t trimCut = 0;
++  int32_t stopCut = 0;
++  bool latch = false;
++  bool heardSpeech = false;
++  bool stopSilent = false;
++  bool trimSilent = false;
++};
++
++// Preserve the recorder's two distinct gates. The ambient-relative gate decides
++// whether quiet tails may be withheld; peak/8 only influences endpoint timing.
++// The current frame is already included in floorAfter and peak. Requiring a
++// previously seeded floor prevents the first ambient frame from latching speech.
++inline constexpr AdaptiveVadDecision adaptiveVadDecision(
++    int32_t level, int32_t floorBefore, int32_t floorAfter, int32_t peak,
++    bool heardSpeech, AdaptiveVadConfig config = {}) {
++  AdaptiveVadDecision result;
++  result.trimCut = config.silenceFloor;
++  if (2 * floorAfter > result.trimCut) result.trimCut = 2 * floorAfter;
++  result.stopCut = result.trimCut;
++  if (peak / 8 > result.stopCut) result.stopCut = peak / 8;
++  result.latch = !heardSpeech && floorBefore >= 0 &&
++                 level >= result.stopCut && level >= config.speechFloor;
++  result.heardSpeech = heardSpeech || result.latch;
++  result.stopSilent = result.heardSpeech && level < result.stopCut;
++  result.trimSilent = result.heardSpeech && level < result.trimCut;
++  return result;
++}
++} // namespace hw1::audio
 diff --git a/components/hardwareone/Bluetooth.cpp b/components/hardwareone/Bluetooth.cpp
 index 06d7288..5ba41c6 100644
 --- a/components/hardwareone/Bluetooth.cpp
@@ -127,17 +174,34 @@ index ba5c29e..a20b475 100644
  # Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)
  # This enables SD_CS_PIN and other Sense-specific defines in System_BuildConfig.h
 diff --git a/components/hardwareone/G2_Glasses.cpp b/components/hardwareone/G2_Glasses.cpp
-index ef0cd3e..fd0f947 100644
+index ef0cd3e..3484b5e 100644
 --- a/components/hardwareone/G2_Glasses.cpp
 +++ b/components/hardwareone/G2_Glasses.cpp
-@@ -30016,4 +30016,6 @@ struct KbdPadState {
+@@ -15,4 +15,5 @@
+ #include <stdarg.h>
+ #include <atomic>
++#include <algorithm>
+ #include <new>          // std::nothrow — for LensUiJob allocation in pageSwapEnqueue
+ 
+@@ -30014,6 +30015,9 @@ struct KbdPadState {
+   uint32_t micCountdownNextMs;
+   bool     micSignatureValid;
++  bool     micSessionStarted;
    bool     micRenderedAvailable;
    bool     micRenderedEpochLive;
 +  bool     micRenderedPreparing;
-+  bool     micRenderedBufferedLocal;
++  bool     micRenderedContinuous;
    DictationState micRenderedState;
    CommandSource  micRenderedOwner;
-@@ -30158,10 +30160,13 @@ static void kbdRenderMicShades(uint8_t* shades) {
+@@ -30149,4 +30153,7 @@ static void kbdRenderMicShades(uint8_t* shades) {
+     line1 = "SESSION GONE";
+     line2 = "EXIT KEYBOARD";
++  } else if (g2TextEntryPadRemaining() == 0) {
++    line1 = "TEXT FIELD FULL";
++    line2 = "TAP MIC TO RETURN";
+   } else if (ownedElsewhere) {
+     line1 = "MIC BUSY";
+@@ -30158,10 +30165,13 @@ static void kbdRenderMicShades(uint8_t* shades) {
      switch (snap.state) {
        case DictationState::RECORDING:
 -        line1 = "SPEAK NOW";
@@ -145,30 +209,326 @@ index ef0cd3e..fd0f947 100644
 -        footer = "AUTO-STOPS AFTER SILENCE";
 +        line1 = snap.preparing ? "GET READY" : "SPEAK NOW";
 +        line2 = snap.preparing ? "STARTING MICROPHONE"
-+                : snap.bufferedLocal ? "TAP MIC TO FINISH"
++                : snap.continuous ? "TAP MIC TO FINISH"
 +                                     : "STOP SPEAKING TO END TRANSMISSION";
-+        footer = snap.bufferedLocal ? "LOCAL RECORDING / 20 SEC MAX"
++        footer = snap.continuous ? "LISTENS BETWEEN PHRASES"
 +                                   : "AUTO-STOPS AFTER SILENCE";
          break;
        case DictationState::WAITING:
 -        line1 = "TRANSCRIBING";
-+        line1 = snap.bufferedLocal ? "LOCAL STT" : "TRANSCRIBING";
++        line1 = snap.continuous ? "FINISHING" : "TRANSCRIBING";
          line2 = "TAP MIC TO CANCEL";
          footer = "LIST ROW STAYS FOCUSED";
-@@ -30621,4 +30626,6 @@ static bool kbdPadMicStatusChanged(bool remember) {
+@@ -30621,4 +30631,6 @@ static bool kbdPadMicStatusChanged(bool remember) {
        gKbdPad.micRenderedAvailable != available ||
        gKbdPad.micRenderedEpochLive != epochLive ||
 +      gKbdPad.micRenderedPreparing != snap.preparing ||
-+      gKbdPad.micRenderedBufferedLocal != snap.bufferedLocal ||
++      gKbdPad.micRenderedContinuous != snap.continuous ||
        gKbdPad.micRenderedState != snap.state ||
        gKbdPad.micRenderedOwner != snap.ownerSource ||
-@@ -30629,4 +30636,6 @@ static bool kbdPadMicStatusChanged(bool remember) {
+@@ -30629,4 +30641,6 @@ static bool kbdPadMicStatusChanged(bool remember) {
      gKbdPad.micRenderedAvailable = available;
      gKbdPad.micRenderedEpochLive = epochLive;
 +    gKbdPad.micRenderedPreparing = snap.preparing;
-+    gKbdPad.micRenderedBufferedLocal = snap.bufferedLocal;
++    gKbdPad.micRenderedContinuous = snap.continuous;
      gKbdPad.micRenderedState = snap.state;
      gKbdPad.micRenderedOwner = snap.ownerSource;
+@@ -30656,4 +30670,5 @@ static bool kbdPadReturnToKeys(const char* why, bool cancelDictation) {
+   if (cancelDictation) dictationCancelFor(SOURCE_G2_GLASSES);
+   gKbdPad.micCountdown = 0;
++  gKbdPad.micSessionStarted = false;
+   gKbdPad.micCountdownNextMs = 0;
+   gKbdPad.page = gKbdPad.pageBeforeMic <= 2 ? gKbdPad.pageBeforeMic : 0;
+@@ -30669,4 +30684,36 @@ static void kbdPadFreeBuffers() {
+ }  // namespace
+ 
++// Both providers use the same receipt path. The field owns capacity/filtering;
++// only source bytes actually consumed by that policy are committed.
++static bool kbdPadConsumeDictationText() {
++  char transcript[DICTATION_MAX_TEXT + 1] = {};
++  DictationTextReceipt receipt;
++  if (!dictationPeekTextFor(SOURCE_G2_GLASSES, transcript, sizeof(transcript), &receipt))
++    return false;
++  bool needsSpace = false;
++  const size_t remaining = g2TextEntryPadRemaining(&needsSpace);
++  const size_t prefix = receipt.offset == 0 && needsSpace ? 1 : 0;
++  if (remaining <= prefix) {
++    memset(transcript, 0, sizeof(transcript));
++    dictationFieldFullFor(SOURCE_G2_GLASSES);
++    return true;
++  }
++  const size_t amount = std::min(static_cast<size_t>(receipt.length), remaining - prefix);
++  char insertion[DICTATION_MAX_TEXT + 2] = {};
++  if (prefix) insertion[0] = ' ';
++  memcpy(insertion + prefix, transcript, amount);
++  size_t consumed = 0;
++  (void)g2TextEntryPadAppendText(insertion, &consumed);
++  memset(insertion, 0, sizeof(insertion));
++  memset(transcript, 0, sizeof(transcript));
++  const size_t accepted = consumed >= prefix ? consumed - prefix : 0;
++  if (accepted && !dictationCommitTextFor(SOURCE_G2_GLASSES, receipt, accepted)) {
++    dictationCancelFor(SOURCE_G2_GLASSES);
++    return true;
++  }
++  if (!g2TextEntryPadRemaining()) dictationFieldFullFor(SOURCE_G2_GLASSES);
++  return consumed != 0;
++}
++
+ // Tap-worker side of the G2 dictation bridge. The main loop services recorder
+ // timeouts, then queues this exact-presentation entry to drain a transcript and
+@@ -30709,6 +30756,7 @@ static void kbdPadDictationServiceOnTap(uint32_t presentationEpoch) {
+     // wearer never loses the first word while the countdown is still painting.
+     gKbdPad.micCountdown = 0;
+-    const bool armed = dictationBeginFor(SOURCE_G2_GLASSES,
+-                                         gKbdPad.dictationEpoch);
++    const bool armed = g2TextEntryPadRemaining() > 0 &&
++        dictationBeginFor(SOURCE_G2_GLASSES, gKbdPad.dictationEpoch);
++    gKbdPad.micSessionStarted = armed;
+     DEBUG_G2F("[G2] kbd-pad: countdown complete, arm=%u", armed ? 1u : 0u);
+     // Header is unchanged; recording/busy/failure state replaces the digit in
+@@ -30727,19 +30775,14 @@ static void kbdPadDictationServiceOnTap(uint32_t presentationEpoch) {
+ 
+   dictationTick();
+-  char transcript[DICTATION_MAX_TEXT + 1] = {};
+-  const bool took = dictationTakeTextFor(
+-      SOURCE_G2_GLASSES, transcript, sizeof(transcript));
+-  if (took) {
+-    const size_t appended = g2TextEntryPadAppendText(transcript);
+-    memset(transcript, 0, sizeof(transcript));
+-    DEBUG_G2F("[G2] kbd-pad: dictation delivered, appended=%u",
+-              (unsigned)appended);
+-    // Successful speech input behaves like one keyboard action: return to the
+-    // exact character page the wearer came from, with the list focus still on
+-    // Mic / Keys. The IMAGE pane is never an interactive target.
++  const bool took = kbdPadConsumeDictationText();
++  const DictationSnapshot after = dictationSnapshotNow();
++  // Both providers finish only when their final result has been consumed.
++  // Continuous sessions stay on this page between text chunks.
++  if (gKbdPad.micSessionStarted && after.state == DictationState::IDLE) {
+     if (!kbdPadReturnToKeys("mic-text-return", /*cancelDictation*/ false))
+       g2TextEntryPadEvent('\x1b');
+     return;
+   }
++  if (took) gKbdPad.micSignatureValid = false;
+ 
+   if (kbdPadMicStatusChanged(/*remember*/ false)) {
+@@ -31008,4 +31051,5 @@ void g2KbdPadHandleTap(uint32_t idx) {
+     gKbdPad.page = kKbdPageMic;
+     gKbdPad.micCountdown = 3;
++    gKbdPad.micSessionStarted = false;
+     gKbdPad.micSignatureValid = false;
+     kbdPadMicServiceSuspend();
+diff --git a/components/hardwareone/G2_Page_TextEntry.cpp b/components/hardwareone/G2_Page_TextEntry.cpp
+index f0b2cea..96273ba 100644
+--- a/components/hardwareone/G2_Page_TextEntry.cpp
++++ b/components/hardwareone/G2_Page_TextEntry.cpp
+@@ -618,5 +618,15 @@ void g2TextEntryPadEvent(char code) {
+ }
+ 
+-size_t g2TextEntryPadAppendText(const char* text) {
++size_t g2TextEntryPadRemaining(bool* needsSeparator) {
++  if (needsSeparator) *needsSeparator = false;
++  const uint32_t serial = __atomic_load_n(&gTE.serial, __ATOMIC_ACQUIRE);
++  TextEntryExecGuard execution(serial, /*cleanup*/ false);
++  if (!execution || !sessionCurrent() || !gTE.padMode || gTE.isSecret) return 0;
++  if (needsSeparator && gTE.len) *needsSeparator = gTE.buf[gTE.len - 1] != ' ';
++  return gTE.len < gTE.maxLen ? gTE.maxLen - gTE.len : 0;
++}
++
++size_t g2TextEntryPadAppendText(const char* text, size_t* consumed) {
++  if (consumed) *consumed = 0;
+   if (!text || !text[0]) return 0;
+   const uint32_t serial = __atomic_load_n(&gTE.serial, __ATOMIC_ACQUIRE);
+@@ -630,4 +640,5 @@ size_t g2TextEntryPadAppendText(const char* text) {
+   for (const unsigned char* p = (const unsigned char*)text;
+        *p && gTE.len < gTE.maxLen; ++p) {
++    if (consumed) ++*consumed;
+     // Match the physical G2 grid's input contract. Control bytes, non-ASCII
+     // UTF-8 fragments and double quotes cannot be entered manually either;
+diff --git a/components/hardwareone/G2_Page_TextEntry.h b/components/hardwareone/G2_Page_TextEntry.h
+index 842e4b8..4142422 100644
+--- a/components/hardwareone/G2_Page_TextEntry.h
++++ b/components/hardwareone/G2_Page_TextEntry.h
+@@ -99,5 +99,10 @@ void g2TextEntryPadEvent(char code);
+ // its TEXT child. Runs on the tap-dispatch worker; returns the number of bytes
+ // accepted. Secret fields refuse dictation entirely.
+-size_t g2TextEntryPadAppendText(const char* text);
++// consumed also counts bytes deliberately rejected by the field's character
++// policy; unconsumed bytes at capacity remain owned by the dictation mailbox.
++size_t g2TextEntryPadAppendText(const char* text, size_t* consumed = nullptr);
++// Remaining capacity and whether a new phrase needs a separating space. Uses
++// the same live, non-secret field guard as append; zero when unavailable.
++size_t g2TextEntryPadRemaining(bool* needsSeparator = nullptr);
+ 
+ // True while a text-entry session is in progress.
+@@ -167,5 +172,12 @@ inline bool g2TextEntryIsSecret()                     { return false; }
+ inline void g2TextEntryHandleTap(uint32_t)            {}
+ inline void g2TextEntryPadEvent(char)                 {}
+-inline size_t g2TextEntryPadAppendText(const char*)   { return 0; }
++inline size_t g2TextEntryPadAppendText(const char*, size_t* consumed = nullptr) {
++  if (consumed) *consumed = 0;
++  return 0;
++}
++inline size_t g2TextEntryPadRemaining(bool* needsSeparator = nullptr) {
++  if (needsSeparator) *needsSeparator = false;
++  return 0;
++}
+ inline bool g2TextEntryOperationBegin(bool* = nullptr) { return false; }
+ inline void g2TextEntryOperationEnd()                 {}
+diff --git a/components/hardwareone/HAL_Audio.cpp b/components/hardwareone/HAL_Audio.cpp
+index 430ae0b..e83d321 100644
+--- a/components/hardwareone/HAL_Audio.cpp
++++ b/components/hardwareone/HAL_Audio.cpp
+@@ -23,4 +23,6 @@
+ #include <driver/i2s_pdm.h>
+ #include <driver/gpio.h>
++#include "esp_attr.h"
++#include "esp_heap_caps.h"
+ #include "System_Mutex.h"     // I2sMicLockGuard — shared I2S-mic hardware lock (PDM only)
+ // The board owns its wiring. Enabling a mic on an unconfigured board must not
+@@ -47,4 +49,6 @@ static volatile AudioCapturePhase gCapturePhase = AudioCapturePhase::IDLE;
+ static const char*                gCaptureOwner = nullptr;        // null only in IDLE
+ static uint32_t                   gCaptureRate  = AUDIO_HAL_SAMPLE_RATE;
++static uint32_t                   gCaptureGeneration = 0;
++static uint32_t                   gCaptureOverrunBaseline = 0;
+ static uint32_t                   gNativeG2Generation = 0;
+ static AudioSource                gNativePreviousSource = AUDIO_SRC_NONE;
+@@ -71,4 +75,11 @@ static bool ensureAudioStateMutex() {
+ #if ENABLE_MICROPHONE_SENSOR
+ static i2s_chan_handle_t gPdmRx = nullptr;
++// ISR context never takes a mutex or allocates. Teardown disables/deletes the
++// old channel before another owner can reset this internal-memory counter.
++static DRAM_ATTR uint32_t gPdmOverruns = 0;
++static bool IRAM_ATTR pdmOverrun(i2s_chan_handle_t, i2s_event_data_t*, void* context) {
++  __atomic_fetch_add(static_cast<uint32_t*>(context), 1u, __ATOMIC_RELAXED);
++  return false;
++}
+ 
+ // Caller must hold I2sMicLockGuard.
+@@ -140,4 +151,15 @@ static bool pdmStartLocked(uint32_t rate) {
+   }
+ 
++  i2s_event_callbacks_t callbacks = {};
++  callbacks.on_recv_q_ovf = pdmOverrun;
++  __atomic_store_n(&gPdmOverruns, 0u, __ATOMIC_RELAXED);
++  err = i2s_channel_register_event_callback(gPdmRx, &callbacks, &gPdmOverruns);
++  if (err != ESP_OK) {
++    WARN_SYSTEMF("[HAL_AUDIO] PDM overrun monitor failed: 0x%x", err);
++    i2s_del_channel(gPdmRx);
++    gPdmRx = nullptr;
++    return false;
++  }
++
+   err = i2s_channel_enable(gPdmRx);
+   if (err != ESP_OK) {
+@@ -148,10 +170,31 @@ static bool pdmStartLocked(uint32_t rate) {
+   }
+ 
+-  // PDM warm-up flush (the sensor needs a few reads before stable samples).
+-  int16_t flushBuf[256];
+-  size_t  flushBytes = 0;
+-  for (int i = 0; i < 10; i++) {
+-    // The IDF channel API takes milliseconds, not FreeRTOS ticks.
+-    i2s_channel_read(gPdmRx, flushBuf, sizeof(flushBuf), &flushBytes, 100);
++  // Whole-block reads leave no partial DMA tail for a continuous drainer.
++  // Use a bounded temporary buffer so HAL callers need no additional stack.
++  // Three blocks preserve the old warmup minimum (2560 samples). This does not
++  // make the driver's overflow counter a proof of gap-free transport.
++  constexpr size_t warmupBytes = 1024 * sizeof(int16_t);
++  auto* flushBuf = static_cast<int16_t*>(heap_caps_malloc(
++      warmupBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
++  unsigned blocks = 0;
++  if (flushBuf) {
++    for (int attempt = 0; attempt < 10 && blocks < 3; ++attempt) {
++      size_t bytes = 0;
++      // IDF channel API takes milliseconds; retry a zero-byte timeout only.
++      err = i2s_channel_read(gPdmRx, flushBuf, warmupBytes, &bytes, 100);
++      if (err != ESP_OK && err != ESP_ERR_TIMEOUT) break;
++      if (bytes == warmupBytes) ++blocks;
++      else if (bytes || err != ESP_ERR_TIMEOUT) break;
++    }
++    volatile int16_t* wipe = flushBuf;
++    for (size_t i = 0; i < 1024; ++i) wipe[i] = 0;
++    heap_caps_free(flushBuf);
++  }
++  if (blocks != 3) {
++    WARN_SYSTEMF("[HAL_AUDIO] PDM warmup incomplete");
++    i2s_channel_disable(gPdmRx);
++    i2s_del_channel(gPdmRx);
++    gPdmRx = nullptr;
++    return false;
+   }
+   INFO_SYSTEMF("[HAL_AUDIO] PDM mic started: %u Hz, CLK=%d DATA=%d", (unsigned)rate,
+@@ -170,4 +213,31 @@ static void pdmStopLocked() {
+ #endif // ENABLE_MICROPHONE_SENSOR
+ 
++// No HAL mutex is held while the G2 backend takes its PCM mutex.
++static uint32_t sourceOverruns(AudioSource source) {
++#if ENABLE_MICROPHONE_SENSOR
++  if (source == AUDIO_SRC_LOCAL_PDM)
++    return __atomic_load_n(&gPdmOverruns, __ATOMIC_RELAXED);
++#endif
++  return source == AUDIO_SRC_G2_LEFT ? g2MicAfeIntegrityErrors() : 0;
++}
++
++bool audioCaptureOverruns(const char* owner, uint32_t* out) {
++  if (!owner || !owner[0] || !out || !ensureAudioStateMutex()) return false;
++  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
++  const bool active = gCapturePhase == AudioCapturePhase::ACTIVE &&
++      gCaptureOwner && strcmp(owner, gCaptureOwner) == 0;
++  const AudioSource source = gAudioSource;
++  const uint32_t generation = gCaptureGeneration, baseline = gCaptureOverrunBaseline;
++  xSemaphoreGive(gAudioStateMutex);
++  if (!active || (source != AUDIO_SRC_LOCAL_PDM && source != AUDIO_SRC_G2_LEFT)) return false;
++  const uint32_t count = sourceOverruns(source);
++  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
++  const bool unchanged = gCapturePhase == AudioCapturePhase::ACTIVE &&
++      generation == gCaptureGeneration && gCaptureOwner && strcmp(owner, gCaptureOwner) == 0;
++  if (unchanged) *out = count - baseline;
++  xSemaphoreGive(gAudioStateMutex);
++  return unchanged;
++}
++
+ // ── Availability (runtime; no compile-time default source) ────────────────────
+ bool audioSourceAvailable(AudioSource src) {
+@@ -284,4 +354,5 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
+   gCaptureOwner = requestedOwner;            // provisional claim; rolled back on failure
+   gCapturePhase = AudioCapturePhase::STARTING;
++  ++gCaptureGeneration;
+   xSemaphoreGive(gAudioStateMutex);
+ 
+@@ -304,4 +375,6 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
+   }
+ 
++  const uint32_t overrunBaseline = ok ? sourceOverruns(src) : 0;
++
+   // Revalidate the provisional claim. A source-loss callback may have moved it
+   // to STOPPING while BLE/PDM startup blocked. STARTING cannot be reused, so a
+@@ -312,4 +385,5 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
+                          strcmp(requestedOwner, gCaptureOwner) == 0;
+   if (ok && sameOwner && gCapturePhase == AudioCapturePhase::STARTING) {
++    gCaptureOverrunBaseline = overrunBaseline;
+     gCapturePhase = AudioCapturePhase::ACTIVE;
+     xSemaphoreGive(gAudioStateMutex);
+diff --git a/components/hardwareone/HAL_Audio.h b/components/hardwareone/HAL_Audio.h
+index 1d437e5..5003287 100644
+--- a/components/hardwareone/HAL_Audio.h
++++ b/components/hardwareone/HAL_Audio.h
+@@ -90,4 +90,14 @@ bool        audioCaptureOwnedBy(const char* owner); // owner holds any busy phas
+ const char* audioCaptureOwner();   // "" when idle
+ 
++// Loss/integrity events since this exact owner successfully started capture.
++// PDM counts dropped DMA blocks; G2 counts ring/mutex drops, decode failures and
++// PLC frames. Counts are events, NOT dropped samples. Returns false (and leaves
++// *out unchanged) if unavailable, inactive, or stop/restart raced the snapshot.
++// Warm-up loss is excluded; subsequent idempotent starts do not reset the count.
++// A zero count is not proof of gap-free transport: the IDF driver may abandon a
++// partial DMA block before overflow. Continuous PDM drainers should request
++// whole 1024-sample blocks and retain segment-boundary remainders themselves.
++bool        audioCaptureOverruns(const char* owner, uint32_t* out);
++
+ // Pull PCM from the active source into `out` (int16 mono). Returns the number
+ // of samples read, including valid partial PCM before a timeout; 0 if no PCM
 diff --git a/components/hardwareone/HardwareOne.cpp b/components/hardwareone/HardwareOne.cpp
 index efaa1ad..ae033a6 100644
 --- a/components/hardwareone/HardwareOne.cpp
@@ -184,10 +544,16 @@ index efaa1ad..ae033a6 100644
    // (No web-mirror backfill here: the drain appends WEB-routed messages to
    // the mirror unconditionally, so a backfill would double-append.)
 diff --git a/components/hardwareone/OLED_Utils.cpp b/components/hardwareone/OLED_Utils.cpp
-index cedcf05..f00886f 100644
+index cedcf05..92d5cff 100644
 --- a/components/hardwareone/OLED_Utils.cpp
 +++ b/components/hardwareone/OLED_Utils.cpp
-@@ -1777,4 +1777,9 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
+@@ -17,4 +17,5 @@
+ #include "System_EventKindMask.h"
+ #include "System_FirstTimeSetup.h"
++#include <algorithm>
+ #include "System_Dictation.h"  // KEYBOARD_MODE_MIC: dictation state + control
+ #include "OLED_ConsoleBuffer.h"
+@@ -1777,4 +1778,9 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
      switch (snap.state) {
        case DictationState::RECORDING: {
 +        if (snap.preparing) {
@@ -197,13 +563,78 @@ index cedcf05..f00886f 100644
 +        }
          // Filled dot + elapsed seconds reads as "live" at a glance.
          display->fillCircle(5, micY + 3, 3, DISPLAY_COLOR_WHITE);
-@@ -1795,5 +1800,5 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
+@@ -1795,5 +1801,5 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
        case DictationState::WAITING:
          display->setCursor(0, micY);
 -        display->print("Transcribing");
-+        display->print(snap.bufferedLocal ? "Local STT" : "Transcribing");
++        display->print(snap.continuous ? "Finishing" : "Transcribing");
          for (uint32_t i = 0; i < ((millis() / 400) % 4); ++i) display->print(".");
          break;
+@@ -1807,5 +1813,6 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
+       default:
+         display->setCursor(0, micY);
+-        display->print("A: start speaking");
++        display->print(gOledKeyboardState.textLength >= gOledKeyboardState.maxLength
++                           ? "Text field full" : "A: start speaking");
+         break;
+     }
+@@ -1988,5 +1995,6 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+         secureClearString(sessionUser);
+         if (!sessionAuthed) epoch = kNoTransportSessionEpoch;
+-        dictationBegin(epoch);
++        if (gOledKeyboardState.textLength < gOledKeyboardState.maxLength)
++          dictationBegin(epoch);
+       }
+       inputHandled = true;
+@@ -2395,4 +2403,30 @@ void oledKeyboardToggleMode() {
+ }
+ 
++static bool oledKeyboardConsumeDictationText() {
++  char text[DICTATION_MAX_TEXT + 1] = {};
++  DictationTextReceipt receipt;
++  if (!dictationPeekTextFor(SOURCE_LOCAL_DISPLAY, text, sizeof(text), &receipt)) return false;
++  const int available = gOledKeyboardState.maxLength - gOledKeyboardState.textLength;
++  const size_t prefix = receipt.offset == 0 && gOledKeyboardState.textLength > 0 &&
++      gOledKeyboardState.text[gOledKeyboardState.textLength - 1] != ' ' ? 1 : 0;
++  if (available <= static_cast<int>(prefix)) {
++    memset(text, 0, sizeof(text));
++    dictationFieldFullFor(SOURCE_LOCAL_DISPLAY);
++    return true;
++  }
++  const size_t count = std::min(static_cast<size_t>(receipt.length),
++                                static_cast<size_t>(available) - prefix);
++  if (prefix) gOledKeyboardState.text[gOledKeyboardState.textLength++] = ' ';
++  memcpy(gOledKeyboardState.text + gOledKeyboardState.textLength, text, count);
++  gOledKeyboardState.textLength += count;
++  gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
++  memset(text, 0, sizeof(text));
++  if (!dictationCommitTextFor(SOURCE_LOCAL_DISPLAY, receipt, count))
++    dictationCancelFor(SOURCE_LOCAL_DISPLAY);
++  else if (gOledKeyboardState.textLength >= gOledKeyboardState.maxLength)
++    dictationFieldFullFor(SOURCE_LOCAL_DISPLAY);
++  return true;
++}
++
+ void oledKeyboardDictationTick() {
+   if (!gOledKeyboardState.active) return;
+@@ -2412,15 +2446,6 @@ void oledKeyboardDictationTick() {
+   dictationTick();
+ 
+-  // Append rather than replace, so a dictated phrase can be corrected with the
+-  // character grid afterwards. The field's own maxLength still wins.
+-  char text[DICTATION_MAX_TEXT + 1];
+-  if (dictationTakeText(text, sizeof(text))) {
+-    for (const char* p = text; *p; ++p) {
+-      if (gOledKeyboardState.textLength >= gOledKeyboardState.maxLength) break;
+-      gOledKeyboardState.text[gOledKeyboardState.textLength++] = *p;
+-    }
+-    gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
+-    DEBUG_DISPLAYF("[KEYBOARD] Dictation appended: textLength=%d\n",
+-                   gOledKeyboardState.textLength);
++  // Both providers use the same non-destructive peek and exact commit.
++  if (oledKeyboardConsumeDictationText()) {
+     oledMarkDirty();
+     return;
 diff --git a/components/hardwareone/System_BuildConfig.h b/components/hardwareone/System_BuildConfig.h
 index 9bbd75a..67abb1a 100644
 --- a/components/hardwareone/System_BuildConfig.h
@@ -236,24 +667,91 @@ index 9bbd75a..67abb1a 100644
  // Dictation needs a mic and a KEYBOARD to dictate into — not specifically a
  // panel. The module is display-agnostic by design (4 of its 1221 lines mention
 diff --git a/components/hardwareone/System_Dictation.cpp b/components/hardwareone/System_Dictation.cpp
-index 44c3acc..cbda315 100644
+index 44c3acc..4d1096c 100644
 --- a/components/hardwareone/System_Dictation.cpp
 +++ b/components/hardwareone/System_Dictation.cpp
-@@ -13,4 +13,6 @@
+@@ -7,4 +7,5 @@
+ 
+ #include <esp_random.h>
++#include <algorithm>
+ 
+ #include "HAL_Audio.h"
+@@ -13,4 +14,6 @@
  #include "System_DictationPolicy.h"
  #include "System_Microphone.h"
 +#include "System_ESPSR.h"
 +#include "System_STT.h"
  #include "System_TaskUtils.h"
  #include "System_UartLink.h"
-@@ -27,5 +29,5 @@ static constexpr uint32_t kDictationVadSilenceMs = 1200;
+@@ -27,5 +30,5 @@ static constexpr uint32_t kDictationVadSilenceMs = 1200;
  // framing, filesystem deletion, and source shutdown. Display and recorder tasks
  // only publish fixed-size work under gDictMux and notify it.
 -static constexpr uint32_t kDictationWorkerStackBytes = 3072;
 +static constexpr uint32_t kDictationWorkerStackBytes = ENABLE_LOCAL_STT ? 4096 : 3072;
  static constexpr uint32_t kDictationWorkerRetryMs = 50;
  
-@@ -530,8 +532,223 @@ static bool dictationProcessCleanup() {
+@@ -68,4 +71,14 @@ struct DictationControl {
+   DictationPublishedCapture published;
+   DictationCancelEvent cancelEvent;
++  // Common delivery mailbox. Pi v1 supplies one final chunk; local inference
++  // supplies successive chunks. UI consumers never select a provider.
++  uint64_t deliveryExchange = 0;
++  uint32_t deliverySequence = 0;
++  uint16_t deliveryOffset = 0;
++  uint16_t deliveryTotal = 0;
++  bool deliveryNeedsAck = false;
++  bool deliveryAckPending = false;
++  bool continuous = false; // Latched capture capability, independent of UI.
++  bool stopRequested = false;
+ };
+ 
+@@ -76,4 +89,45 @@ static DictationControl gDict = {
+     {}, {false, 0, false, {}, {}}, {false, 0, 0}};
+ 
++// All mailbox mutations run under gDictMux. Keep delivery identity independent
++// of recorder/host ownership: Pi accepts its result and clears owner before UI
++// delivery, and its exact WAV cleanup may finish before the field consumes text.
++static void dictationClearDeliveryLocked() {
++  memset(gDict.text, 0, sizeof(gDict.text));
++  gDict.textPending = false;
++  gDict.deliveryExchange = 0;
++  gDict.deliverySequence = 0;
++  gDict.deliveryOffset = gDict.deliveryTotal = 0;
++  gDict.deliveryNeedsAck = gDict.deliveryAckPending = false;
++}
++
++static void dictationFinishInputLocked() {
++  dictationClearDeliveryLocked();
++  gDict.owner = 0;
++  gDict.state = DictationState::IDLE;
++  gDict.stateEnteredMs = millis();
++  gDict.micStopPending = gDict.weStartedMic;
++  gDict.displaySource = SOURCE_INTERNAL;
++  gDict.displayEpoch = kNoTransportSessionEpoch;
++  gDict.requestHostEpoch = 0;
++  gDict.requestPushInFlight = gDict.requestWasPushed = false;
++}
++
++static void dictationStageTextLocked(uint64_t exchange, uint32_t sequence,
++                                    const char* text, size_t total, size_t offset,
++                                    bool needsAck) {
++  const size_t amount = std::min(total - offset, static_cast<size_t>(DICTATION_MAX_TEXT));
++  memcpy(gDict.text, text + offset, amount);
++  gDict.text[amount] = '\0';
++  gDict.textPending = amount != 0;
++  gDict.deliveryExchange = exchange;
++  gDict.deliverySequence = sequence;
++  gDict.deliveryOffset = static_cast<uint16_t>(offset);
++  gDict.deliveryTotal = static_cast<uint16_t>(total);
++  gDict.deliveryNeedsAck = needsAck;
++  // Silence-only backend segments may validly decode to empty text. They need
++  // acknowledgment but must not become a phantom UI action or a speech failure.
++  gDict.deliveryAckPending = needsAck && total == offset;
++}
++
+ // Capability is deliberately an epoch, not a sticky bool: UART logout/login
+ // revokes it without depending on a delayed session-change callback.
+@@ -530,8 +584,289 @@ static bool dictationProcessCleanup() {
  }
  
 +#if ENABLE_LOCAL_STT
@@ -265,8 +763,6 @@ index 44c3acc..cbda315 100644
 +  STTToken token = 0;
 +  bool beginPending = false;
 +  bool beginInFlight = false;
-+  bool stopRequested = false;
-+  bool cancelled = false;
 +};
 +static LocalDictation gLocalDict;
 +static bool gLocalReadyPending = false;
@@ -338,8 +834,9 @@ index 44c3acc..cbda315 100644
 +    gDict.displayEpoch = epoch;
 +    gDict.state = DictationState::RECORDING;
 +    gDict.stateEnteredMs = millis();
-+    gDict.textPending = false;
-+    memset(gDict.text, 0, sizeof(gDict.text));
++    dictationClearDeliveryLocked();
++    gDict.continuous = true;
++    gDict.stopRequested = false;
 +    gDict.failure[0] = '\0';
 +    gDict.weStartedMic = false;
 +    gDict.requestHostEpoch = 0;
@@ -351,18 +848,37 @@ index 44c3acc..cbda315 100644
 +  return admitted;
 +}
 +
-+static void dictationCancelLocal(CommandSource source, bool force) {
++static void dictationCancelLocal(CommandSource source, bool force,
++                                 const char* failure = nullptr) {
 +  portENTER_CRITICAL(&gDictMux);
 +  if (force || gDict.displaySource == source) {
-+    if (gLocalDict.exchange) gLocalDict.cancelled = true;
-+    gDict.owner = 0;
-+    gDict.state = DictationState::IDLE;
++    gDict.owner = 0; // Retained job identity below observes this and joins cancel.
++    gDict.state = failure ? DictationState::FAILED : DictationState::IDLE;
 +    gDict.stateEnteredMs = millis();
-+    gDict.displaySource = SOURCE_INTERNAL;
-+    gDict.displayEpoch = 0;
-+    gDict.textPending = false;
-+    memset(gDict.text, 0, sizeof(gDict.text));
-+    gDict.failure[0] = '\0';
++    if (!failure) {
++      gDict.displaySource = SOURCE_INTERNAL;
++      gDict.displayEpoch = 0;
++    }
++    dictationClearDeliveryLocked();
++    snprintf(gDict.failure, sizeof(gDict.failure), "%s", failure ? failure : "");
++  }
++  portEXIT_CRITICAL(&gDictMux);
++  dictationWakeWorker();
++}
++
++static bool dictationLocalCurrentLocked(const LocalDictation& run) {
++  return run.exchange && gDict.owner == run.exchange &&
++      gDict.displaySource == run.actor.source && gDict.displayEpoch == run.actor.epoch;
++}
++
++static void dictationFailLocal(const LocalDictation& run, const char* reason) {
++  portENTER_CRITICAL(&gDictMux);
++  if (dictationLocalCurrentLocked(run)) {
++    gDict.owner = 0;
++    dictationClearDeliveryLocked();
++    gDict.state = DictationState::FAILED;
++    gDict.stateEnteredMs = millis();
++    snprintf(gDict.failure, sizeof(gDict.failure), "%s", reason);
 +  }
 +  portEXIT_CRITICAL(&gDictMux);
 +  dictationWakeWorker();
@@ -371,8 +887,10 @@ index 44c3acc..cbda315 100644
 +static void dictationProcessLocal() {
 +  dictationRefreshLocalReady();
 +  LocalDictation run;
++  bool current = false, finish = false;
 +  portENTER_CRITICAL(&gDictMux);
 +  run = gLocalDict;
++  current = dictationLocalCurrentLocked(run);
 +  if (run.beginPending) {
 +    gLocalDict.beginPending = false;
 +    gLocalDict.beginInFlight = true;
@@ -383,15 +901,15 @@ index 44c3acc..cbda315 100644
 +  if (run.beginPending) {
 +    STTToken token = 0;
 +    char error[96] = {};
-+    const bool accepted = !run.cancelled &&
++    const bool accepted = current &&
 +        displaySessionStillLive(run.actor.source, run.actor.epoch) &&
-+        sttBegin(run.actor, STT_MAX_CAPTURE_MS, &token, error, sizeof(error));
++        sttBeginContinuous(run.actor, &token, error, sizeof(error));
 +    portENTER_CRITICAL(&gDictMux);
 +    if (gLocalDict.exchange == run.exchange) {
 +      gLocalDict.beginInFlight = false;
 +      if (accepted) gLocalDict.token = token;
 +      if (!accepted) {
-+        if (gDict.owner == run.exchange) {
++        if (dictationLocalCurrentLocked(run)) {
 +          gDict.owner = 0;
 +          gDict.state = DictationState::FAILED;
 +          gDict.stateEnteredMs = millis();
@@ -407,63 +925,109 @@ index 44c3acc..cbda315 100644
 +  }
 +  if (!run.token) return;
 +
-+  // This check uses the original actor even when cancellation has cleared the
-+  // UI owner. An expired session self-cancels inside STT; metadata-only join
-+  // checking below remains possible without resurrecting its authority.
++  portENTER_CRITICAL(&gDictMux);
++  current = dictationLocalCurrentLocked(run);
++  finish = gDict.stopRequested;
++  portEXIT_CRITICAL(&gDictMux);
 +  const bool live = displaySessionStillLive(run.actor.source, run.actor.epoch);
-+  if (run.cancelled || !live) (void)sttCancel(run.actor, run.token);
-+  else if (run.stopRequested) (void)sttRequestFinish(run.actor, run.token);
-+  const bool active = sttRunActive(run.token);
-+  STTSnapshot snap;
-+  const bool hasSnapshot = live && sttSnapshot(run.actor, run.token, &snap);
-+  if (active) {
-+    portENTER_CRITICAL(&gDictMux);
-+    if (gDict.owner == run.exchange && !gLocalDict.cancelled && hasSnapshot) {
-+      const DictationState state = (snap.state == STTState::Preparing ||
-+                                   snap.state == STTState::Recording)
-+                                      ? DictationState::RECORDING : DictationState::WAITING;
-+      if (gDict.state != state) {
-+        gDict.state = state;
-+        gDict.stateEnteredMs = millis();
-+      }
++  if (!current || !live) {
++    // The broker self-cancels on revocation. Metadata-only join still works
++    // after that identity can no longer read status or invoke cancellation.
++    (void)sttCancel(run.actor, run.token);
++    if (!live && current) dictationFailLocal(run, "session changed");
++    if (!sttRunActive(run.token)) {
++      portENTER_CRITICAL(&gDictMux);
++      if (gLocalDict.exchange == run.exchange) gLocalDict = LocalDictation{};
++      portEXIT_CRITICAL(&gDictMux);
 +    }
++    return;
++  }
++  if (finish) (void)sttRequestFinish(run.actor, run.token);
++
++  uint32_t ack = 0;
++  portENTER_CRITICAL(&gDictMux);
++  if (gDict.deliveryExchange == run.exchange && gDict.deliveryAckPending)
++    ack = gDict.deliverySequence;
++  portEXIT_CRITICAL(&gDictMux);
++  if (ack) {
++    if (!sttAcknowledgeChunk(run.actor, run.token, ack)) {
++      dictationFailLocal(run, "text acknowledgment failed");
++      return;
++    }
++    portENTER_CRITICAL(&gDictMux);
++    if (gDict.deliveryExchange == run.exchange && gDict.deliverySequence == ack &&
++        gDict.deliveryAckPending) dictationClearDeliveryLocked();
 +    portEXIT_CRITICAL(&gDictMux);
++  }
++
++  STTSnapshot snap;
++  if (!sttSnapshot(run.actor, run.token, &snap)) {
++    dictationFailLocal(run, "session changed");
++    return;
++  }
++  if (snap.state == STTState::Failed || snap.state == STTState::Cancelled) {
++    dictationFailLocal(run, snap.error[0] ? snap.error : "local transcription failed");
 +    return;
 +  }
 +
-+  char text[STT_MAX_TEXT + 1] = {};
-+  const bool ready = !run.cancelled && hasSnapshot && snap.state == STTState::Done &&
-+      sttResult(run.actor, run.token, text, sizeof(text));
-+  const size_t len = strlen(text);
-+  const bool printable = ready && dictationPrintableAscii(text, len, false);
-+  const bool stillLive = displaySessionStillLive(run.actor.source, run.actor.epoch);
++  uint16_t offset = 0;
++  uint32_t sequence = 0;
++  bool canStage = false;
 +  portENTER_CRITICAL(&gDictMux);
-+  if (gLocalDict.exchange == run.exchange && gDict.owner == run.exchange &&
-+      !gLocalDict.cancelled && gDict.displaySource == run.actor.source &&
-+      gDict.displayEpoch == run.actor.epoch) {
-+    gDict.owner = 0;
-+    gDict.stateEnteredMs = millis();
-+    if (printable && stillLive) {
-+      // Keep the keyboard's established 256-byte contract. The broker's CLI
-+      // uses its separate 512-byte limit; field maxLength wins at append time.
-+      snprintf(gDict.text, sizeof(gDict.text), "%.*s", DICTATION_MAX_TEXT, text);
-+      gDict.textPending = true;
-+      gDict.state = DictationState::WAITING;
-+    } else {
-+      gDict.state = DictationState::FAILED;
-+      snprintf(gDict.failure, sizeof(gDict.failure), "%s",
-+               !stillLive ? "session changed"
-+               : (hasSnapshot && snap.error[0]) ? snap.error
-+               : ready ? "no printable speech recognized" : "local transcription failed");
-+    }
++  if (dictationLocalCurrentLocked(run)) {
++    const DictationState state = !gDict.stopRequested &&
++        (snap.captureActive || snap.state == STTState::Preparing)
++            ? DictationState::RECORDING : DictationState::WAITING;
++    if (gDict.state != state) { gDict.state = state; gDict.stateEnteredMs = millis(); }
++    canStage = !gDict.textPending && !gDict.deliveryAckPending;
++    offset = gDict.deliveryOffset;
++    sequence = gDict.deliverySequence;
 +  }
 +  portEXIT_CRITICAL(&gDictMux);
-+  // Drop the broker's retained copy only after the terminal join and copy.
-+  (void)sttCancel(run.actor, run.token);
-+  memset(text, 0, sizeof(text));
++  if (canStage) {
++    STTTextChunk chunk;
++    if (sttReadChunk(run.actor, run.token, &chunk)) {
++      const size_t length = strnlen(chunk.text, sizeof(chunk.text));
++      const bool valid = length <= STT_MAX_TEXT &&
++          dictationPrintableAscii(chunk.text, length, /*allowEmpty=*/true) &&
++          chunk.sequence && (!sequence || sequence == chunk.sequence) && offset <= length;
++      const bool stillLive = displaySessionStillLive(run.actor.source, run.actor.epoch);
++      if (!valid) {
++        memset(chunk.text, 0, sizeof(chunk.text));
++        dictationFailLocal(run, "invalid local text chunk");
++        return;
++      }
++      portENTER_CRITICAL(&gDictMux);
++      if (dictationLocalCurrentLocked(run) && !gDict.textPending &&
++          !gDict.deliveryAckPending && gDict.deliveryOffset == offset && stillLive)
++        dictationStageTextLocked(run.exchange, chunk.sequence, chunk.text,
++                                 length, offset, /*needsAck=*/true);
++      portEXIT_CRITICAL(&gDictMux);
++      memset(chunk.text, 0, sizeof(chunk.text));
++    }
++  }
++
++  if (sttRunActive(run.token)) return;
++  // Completion may publish its final chunk after the earlier snapshot/read.
++  // Recheck the same authenticated job once inactive before discarding it.
++  if (!sttSnapshot(run.actor, run.token, &snap)) {
++    dictationFailLocal(run, "session changed");
++    return;
++  }
++  if (snap.state == STTState::Failed || snap.state == STTState::Cancelled) {
++    dictationFailLocal(run, snap.error[0] ? snap.error : "local transcription failed");
++    return;
++  }
++  bool terminal = false;
 +  portENTER_CRITICAL(&gDictMux);
-+  if (gLocalDict.exchange == run.exchange) gLocalDict = LocalDictation{};
++  if (dictationLocalCurrentLocked(run) && !snap.workerActive && snap.pendingTexts == 0 &&
++      !gDict.deliveryExchange && !gDict.textPending) {
++    dictationFinishInputLocked();
++    terminal = true;
++    if (gLocalDict.exchange == run.exchange) gLocalDict = LocalDictation{};
++  }
 +  portEXIT_CRITICAL(&gDictMux);
++  if (terminal) (void)sttCancel(run.actor, run.token);
 +}
 +#endif // ENABLE_LOCAL_STT
 +
@@ -478,7 +1042,7 @@ index 44c3acc..cbda315 100644
 +         gDict.published.pending || gDict.cancelEvent.pending ||
           gDict.cleanupOwner != 0 ||
           (gDict.micStopPending && !gDict.owner);
-@@ -544,4 +761,7 @@ static void dictationWorkerBody(void*) {
+@@ -544,4 +879,7 @@ static void dictationWorkerBody(void*) {
      (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
      while (dictationWorkerHasWork()) {
 +#if ENABLE_LOCAL_STT
@@ -486,7 +1050,7 @@ index 44c3acc..cbda315 100644
 +#endif
        (void)dictationProcessPublished();
        dictationProcessCancelEvent();
-@@ -593,4 +813,9 @@ bool dictationAvailable(const char** whyNot) {
+@@ -593,4 +931,9 @@ bool dictationAvailable(const char** whyNot) {
      return false;
    }
 +#if ENABLE_LOCAL_STT
@@ -496,7 +1060,7 @@ index 44c3acc..cbda315 100644
 +#endif
    if (!uartLinkIsRunning()) {
      if (whyNot) *whyNot = "no host link";
-@@ -612,4 +837,8 @@ bool dictationBeginFor(CommandSource displaySource,
+@@ -612,4 +955,8 @@ bool dictationBeginFor(CommandSource displaySource,
    if (!displaySessionStillLive(displaySource, displayEpoch)) return false;
  
 +#if ENABLE_LOCAL_STT
@@ -505,33 +1069,88 @@ index 44c3acc..cbda315 100644
 +
    if (!dictationEnsureWorker()) return false;
  
-@@ -770,4 +999,12 @@ bool dictationBegin(TransportSessionEpoch displayEpoch) {
+@@ -636,6 +983,7 @@ bool dictationBeginFor(CommandSource displaySource,
+     gDict.stateEnteredMs = millis();
+     gDict.failure[0] = '\0';
+-    gDict.textPending = false;
+-    gDict.text[0] = '\0';
++    dictationClearDeliveryLocked();
++    gDict.continuous = false;
++    gDict.stopRequested = false;
+     gDict.weStartedMic = false;
+     gDict.displaySource = displaySource;
+@@ -770,4 +1118,12 @@ bool dictationBegin(TransportSessionEpoch displayEpoch) {
  
  void dictationRequestStopFor(CommandSource displaySource) {
 +#if ENABLE_LOCAL_STT
 +  portENTER_CRITICAL(&gDictMux);
 +  if (gLocalDict.exchange && gLocalDict.actor.source == displaySource &&
-+      gDict.owner == gLocalDict.exchange) gLocalDict.stopRequested = true;
++      gDict.owner == gLocalDict.exchange) gDict.stopRequested = true;
 +  portEXIT_CRITICAL(&gDictMux);
 +  dictationWakeWorker();
 +  return;
 +#endif
    uint64_t owner = 0;
    portENTER_CRITICAL(&gDictMux);
-@@ -786,4 +1023,8 @@ void dictationRequestStop() {
+@@ -785,5 +1141,10 @@ void dictationRequestStop() {
+ }
  
- static void dictationCancelImpl(CommandSource displaySource, bool force) {
+-static void dictationCancelImpl(CommandSource displaySource, bool force) {
++static void dictationCancelImpl(CommandSource displaySource, bool force,
++                                const char* failure = nullptr) {
 +#if ENABLE_LOCAL_STT
-+  dictationCancelLocal(displaySource, force);
++  dictationCancelLocal(displaySource, force, failure);
 +  return;
 +#endif
    uint64_t owner = 0;
    bool mine = false;
-@@ -860,8 +1101,30 @@ DictationSnapshot dictationSnapshotNow() {
+@@ -799,16 +1160,17 @@ static void dictationCancelImpl(CommandSource displaySource, bool force) {
+         gDict.requestPushInFlight, gDict.requestWasPushed);
+     cancelHostEpoch = gDict.requestHostEpoch;
+-    gDict.state = DictationState::IDLE;
++    gDict.state = failure ? DictationState::FAILED : DictationState::IDLE;
+     gDict.stateEnteredMs = millis();
+     gDict.owner = 0;
+-    gDict.displaySource = SOURCE_INTERNAL;
+-    gDict.displayEpoch = kNoTransportSessionEpoch;
++    if (!failure) {
++      gDict.displaySource = SOURCE_INTERNAL;
++      gDict.displayEpoch = kNoTransportSessionEpoch;
++    }
+     gDict.requestHostEpoch = 0;
+     gDict.requestPushInFlight = false;
+     gDict.requestWasPushed = false;
+     gDict.micStopPending = gDict.weStartedMic;
+-    gDict.textPending = false;
+-    gDict.text[0] = '\0';
+-    gDict.failure[0] = '\0';
++    dictationClearDeliveryLocked();
++    snprintf(gDict.failure, sizeof(gDict.failure), "%s", failure ? failure : "");
+   }
+   portEXIT_CRITICAL(&gDictMux);
+@@ -849,4 +1211,10 @@ void dictationResetForSessionBoundary() {
+ }
+ 
++void dictationFieldFullFor(CommandSource source) {
++  // All providers stop through their existing cancellation/cleanup path. The
++  // visible failure explains why remaining speech/text was discarded.
++  dictationCancelImpl(source, /*force=*/false, "Text field full; stopped");
++}
++
+ DictationSnapshot dictationSnapshotNow() {
+   DictationSnapshot out{};
+@@ -855,13 +1223,40 @@ DictationSnapshot dictationSnapshotNow() {
+   out.state = gDict.state;
+   out.ownerSource = gDict.displaySource;
++  out.continuous = gDict.continuous;
+   out.elapsedMs = (uint32_t)(now - gDict.stateEnteredMs);
+   snprintf(out.failure, sizeof(out.failure), "%s", gDict.failure);
+   portEXIT_CRITICAL(&gDictMux);
++  out.captureActive = out.state == DictationState::RECORDING;
++  out.inferenceActive = out.state == DictationState::WAITING;
    out.sourceName = sourceLabel(audioGetSource());
    out.level = (out.state == DictationState::RECORDING) ? getAudioLevel() : 0;
 +#if ENABLE_LOCAL_STT
-+  out.bufferedLocal = true;
 +  LocalDictation local;
 +  portENTER_CRITICAL(&gDictMux);
 +  local = gLocalDict;
@@ -541,6 +1160,9 @@ index 44c3acc..cbda315 100644
 +    out.sourceName = sourceLabel(static_cast<AudioSource>(snap.audioSource));
 +    out.level = snap.level;
 +    out.preparing = snap.state == STTState::Preparing;
++    out.captureActive = snap.captureActive;
++    out.inferenceActive = snap.inferenceActive;
++    out.elapsedMs = static_cast<uint32_t>(std::min<uint64_t>(snap.sessionMs, UINT32_MAX));
 +  } else {
 +    out.level = 0;
 +    out.preparing = local.beginPending || local.beginInFlight;
@@ -558,51 +1180,112 @@ index 44c3acc..cbda315 100644
 +#endif
    DictationState state;
    uint32_t elapsed;
-@@ -922,10 +1185,32 @@ bool dictationTakeTextFor(CommandSource displaySource,
-                           char* out, size_t outSize) {
-   if (!out || outSize == 0) return false;
+@@ -919,26 +1314,85 @@ void dictationTick() {
+ }
+ 
+-bool dictationTakeTextFor(CommandSource displaySource,
+-                          char* out, size_t outSize) {
+-  if (!out || outSize == 0) return false;
+-  bool took = false;
++bool dictationPeekTextFor(CommandSource source, char* out, size_t outSize,
++                         DictationTextReceipt* receipt) {
++  if (!out || !outSize || !receipt) return false;
 +  out[0] = '\0';
++  *receipt = DictationTextReceipt{};
 +  TransportSessionEpoch epoch = 0;
-+  portENTER_CRITICAL(&gDictMux);
-+  if (gDict.displaySource == displaySource && gDict.textPending)
-+    epoch = gDict.displayEpoch;
+   portENTER_CRITICAL(&gDictMux);
+-  if (gDict.displaySource == displaySource && gDict.textPending) {
+-    snprintf(out, outSize, "%s", gDict.text);
+-    gDict.textPending = false;
+-    gDict.text[0] = '\0';
+-    gDict.state = DictationState::IDLE;
+-    gDict.stateEnteredMs = millis();
+-    gDict.micStopPending = gDict.weStartedMic;
+-    gDict.displaySource = SOURCE_INTERNAL;
+-    gDict.displayEpoch = kNoTransportSessionEpoch;
+-    gDict.requestHostEpoch = 0;
+-    gDict.requestPushInFlight = false;
+-    gDict.requestWasPushed = false;
+-    took = true;
++  if (gDict.displaySource == source && gDict.textPending) epoch = gDict.displayEpoch;
 +  portEXIT_CRITICAL(&gDictMux);
 +  if (!epoch) return false;
-+  if (!displaySessionStillLive(displaySource, epoch)) {
-+    // This fence applies to BOTH providers: a pending transcript cannot survive
-+    // logout/re-pair and become the replacement user's next field input.
++  if (!displaySessionStillLive(source, epoch)) {
 +    portENTER_CRITICAL(&gDictMux);
-+    if (gDict.displaySource == displaySource && gDict.displayEpoch == epoch) {
-+      memset(gDict.text, 0, sizeof(gDict.text));
-+      gDict.textPending = false;
-+      gDict.state = DictationState::IDLE;
-+      gDict.micStopPending = gDict.weStartedMic;
++    if (gDict.displaySource == source && gDict.displayEpoch == epoch) {
++      if (!gDict.owner) dictationFinishInputLocked();
++      else dictationClearDeliveryLocked();
 +    }
 +    portEXIT_CRITICAL(&gDictMux);
 +    dictationWakeWorker();
 +    return false;
 +  }
-   bool took = false;
-   portENTER_CRITICAL(&gDictMux);
--  if (gDict.displaySource == displaySource && gDict.textPending) {
-+  if (gDict.displaySource == displaySource && gDict.displayEpoch == epoch &&
-+      gDict.textPending) {
-     snprintf(out, outSize, "%s", gDict.text);
-     gDict.textPending = false;
--    gDict.text[0] = '\0';
-+    memset(gDict.text, 0, sizeof(gDict.text));
-     gDict.state = DictationState::IDLE;
-     gDict.stateEnteredMs = millis();
-@@ -940,4 +1225,8 @@ bool dictationTakeTextFor(CommandSource displaySource,
++  portENTER_CRITICAL(&gDictMux);
++  if (gDict.displaySource == source && gDict.displayEpoch == epoch &&
++      gDict.deliveryExchange && gDict.textPending && outSize > 1) {
++    const size_t count = std::min(strlen(gDict.text), outSize - 1);
++    memcpy(out, gDict.text, count); out[count] = '\0';
++    *receipt = {gDict.deliveryExchange, gDict.deliverySequence,
++                gDict.deliveryOffset, static_cast<uint16_t>(count)};
+   }
    portEXIT_CRITICAL(&gDictMux);
-   if (took) dictationWakeWorker();
-+  if (!displaySessionStillLive(displaySource, epoch)) {
+-  if (took) dictationWakeWorker();
+-  return took;
++  if (!displaySessionStillLive(source, epoch)) {
++    memset(out, 0, outSize); *receipt = DictationTextReceipt{}; return false;
++  }
++  return receipt->length != 0;
++}
++
++bool dictationCommitTextFor(CommandSource source,
++                           const DictationTextReceipt& receipt, size_t accepted) {
++  if (!accepted || accepted > receipt.length) return false;
++  TransportSessionEpoch epoch = 0;
++  portENTER_CRITICAL(&gDictMux);
++  if (gDict.displaySource == source) epoch = gDict.displayEpoch;
++  portEXIT_CRITICAL(&gDictMux);
++  if (!epoch || !displaySessionStillLive(source, epoch)) return false;
++  bool committed = false;
++  portENTER_CRITICAL(&gDictMux);
++  if (gDict.displaySource == source && gDict.displayEpoch == epoch &&
++      receipt.exchange && gDict.deliveryExchange == receipt.exchange &&
++      gDict.deliverySequence == receipt.sequence &&
++      gDict.deliveryOffset == receipt.offset && gDict.textPending &&
++      accepted <= strlen(gDict.text)) {
++    const size_t left = strlen(gDict.text) - accepted;
++    memmove(gDict.text, gDict.text + accepted, left + 1);
++    memset(gDict.text + left + 1, 0, sizeof(gDict.text) - left - 1);
++    gDict.textPending = left != 0;
++    gDict.deliveryOffset += accepted;
++    if (gDict.deliveryOffset == gDict.deliveryTotal) {
++      if (gDict.deliveryNeedsAck) gDict.deliveryAckPending = true;
++      else dictationFinishInputLocked(); // Pi v1's sole final segment.
++    }
++    committed = true;
++  }
++  portEXIT_CRITICAL(&gDictMux);
++  if (committed) dictationWakeWorker();
++  return committed;
++}
++
++bool dictationTakeTextFor(CommandSource source, char* out, size_t outSize) {
++  // Compatibility API: copying into the caller's buffer accepts that bounded
++  // piece. New field consumers use peek/commit after their actual insertion.
++  TransportSessionEpoch epoch = 0;
++  portENTER_CRITICAL(&gDictMux);
++  if (gDict.displaySource == source) epoch = gDict.displayEpoch;
++  portEXIT_CRITICAL(&gDictMux);
++  DictationTextReceipt receipt;
++  if (!dictationPeekTextFor(source, out, outSize, &receipt)) return false;
++  if (!dictationCommitTextFor(source, receipt, receipt.length) ||
++      !displaySessionStillLive(source, epoch)) {
 +    memset(out, 0, outSize);
 +    return false;
 +  }
-   return took;
++  return true;
  }
-@@ -1000,5 +1289,6 @@ static const char* dictDeliver(uint64_t id, const char* text, size_t textLen,
+ 
+@@ -1000,5 +1454,6 @@ static const char* dictDeliver(uint64_t id, const char* text, size_t textLen,
    uint32_t requestHostEpoch = 0;
    portENTER_CRITICAL(&gDictMux);
 -  if (gDict.state == DictationState::WAITING && gDict.owner == id) {
@@ -610,7 +1293,18 @@ index 44c3acc..cbda315 100644
 +      gDict.requestHostEpoch != 0) {
      matched = true;
      displaySource = gDict.displaySource;
-@@ -1166,5 +1456,6 @@ static const char* dictationHandleArgs(const char* argsInput,
+@@ -1031,7 +1486,7 @@ static const char* dictDeliver(uint64_t id, const char* text, size_t textLen,
+       gDict.displayEpoch == displayEpoch &&
+       gDict.requestHostEpoch == commandHostEpoch) {
+-    snprintf(gDict.text, sizeof(gDict.text), "%.*s",
+-             static_cast<int>(textLen), text ? text : "");
+-    gDict.textPending = true;
++    // One final chunk through the same UI mailbox as local inference. Keep its
++    // accepted ID after clearing host ownership so partial UI commits stay fenced.
++    dictationStageTextLocked(id, 1, text ? text : "", textLen, 0, /*needsAck=*/false);
+     gDict.owner = 0;
+     gDict.requestHostEpoch = 0;
+@@ -1166,5 +1621,6 @@ static const char* dictationHandleArgs(const char* argsInput,
      uint32_t requestHostEpoch = 0;
      portENTER_CRITICAL(&gDictMux);
 -    matched = (gDict.state == DictationState::WAITING && gDict.owner == id);
@@ -619,7 +1313,7 @@ index 44c3acc..cbda315 100644
      if (matched) requestHostEpoch = gDict.requestHostEpoch;
      portEXIT_CRITICAL(&gDictMux);
 diff --git a/components/hardwareone/System_Dictation.h b/components/hardwareone/System_Dictation.h
-index d67b8ad..856b22f 100644
+index d67b8ad..e8c8595 100644
 --- a/components/hardwareone/System_Dictation.h
 +++ b/components/hardwareone/System_Dictation.h
 @@ -1,17 +1,12 @@
@@ -634,7 +1328,7 @@ index d67b8ad..856b22f 100644
 -// source-specific thing at this layer is the label shown to the user.
 +// An OLED/G2 keyboard input method with one provider latched per exchange.
 +// ENABLE_LOCAL_STT builds use the shared local broker with bounded raw-HAL
-+// capture and final text. Other builds retain the CM5 adapter and owned VAD
++// continuous capture and ordered text chunks. Other builds retain CM5 and owned VAD
 +// WAV capture. Both accept PDM or G2 audio through the same HAL. Local failure
 +// never falls back to exporting audio to a host.
  //
@@ -654,19 +1348,112 @@ index d67b8ad..856b22f 100644
 +  WAITING,      // provider is transcribing; final text awaits a one-time drain
    FAILED,       // terminal, with a reason; cleared by the next arm
  };
-@@ -64,4 +59,6 @@ struct DictationSnapshot {
+@@ -64,4 +59,16 @@ struct DictationSnapshot {
    int level;                // 0..100 audio level while RECORDING, else 0
    char failure[40];
-+  bool bufferedLocal = false; // Local capture has a duration cap, not host VAD.
++  bool continuous = false; // Session keeps listening between completed phrases.
++  bool captureActive = false;
++  bool inferenceActive = false;
 +  bool preparing = false;    // Do not prompt SPEAK NOW before HAL capture.
++};
++
++// Exact delivery receipt: committing an old field, chunk or byte offset is a no-op.
++struct DictationTextReceipt {
++  uint64_t exchange = 0;
++  uint32_t sequence = 0;
++  uint16_t offset = 0;
++  uint16_t length = 0;
  };
  
+@@ -106,6 +113,6 @@ DictationSnapshot dictationSnapshotNow();
+ void dictationTick();
+ 
+-// Drains a delivered transcript exactly once. Returns false when nothing is
+-// waiting. The keyboard appends what it gets rather than replacing, so the
++// Compatibility drain of one bounded delivery piece. Returns false when nothing
++// is waiting; small buffers leave the remaining bytes for the next call. The keyboard appends what it gets rather than replacing, so the
+ // wearer can dictate and then fix it with the character grid.
+ bool dictationTakeText(char* out, size_t outSize);
+@@ -113,4 +120,16 @@ bool dictationTakeTextFor(CommandSource displaySource,
+                           char* out, size_t outSize);
+ 
++// Shared provider-neutral delivery. Pi v1 publishes one final chunk; local STT
++// can publish several. Peek never consumes. Commit only input bytes the field
++// actually accepted (including bytes deliberately filtered by its input policy).
++// Inference/transport acknowledgment happens only after every piece is accepted.
++bool dictationPeekTextFor(CommandSource source, char* out, size_t outSize,
++                         DictationTextReceipt* receipt);
++bool dictationCommitTextFor(CommandSource source,
++                           const DictationTextReceipt& receipt, size_t accepted);
++// A finite field cannot consume an unlimited session. Stop/discard the remainder
++// with a visible reason instead of ACKing text which was never inserted.
++void dictationFieldFullFor(CommandSource source);
++
+ // Post-publication hook. The mic layer invokes this only AFTER it has published
+ // the owner-scoped completion result and IDLE. It copies the stable local result
+@@ -156,4 +175,7 @@ inline bool dictationTakeTextFor(CommandSource, char*, size_t) {
+   return false;
+ }
++inline bool dictationPeekTextFor(CommandSource, char*, size_t, DictationTextReceipt*) { return false; }
++inline bool dictationCommitTextFor(CommandSource, const DictationTextReceipt&, size_t) { return false; }
++inline void dictationFieldFullFor(CommandSource) {}
+ inline void dictationOnCapturePublished(uint64_t, const char*, bool,
+                                         const char*) {}
+diff --git a/components/hardwareone/System_Microphone.cpp b/components/hardwareone/System_Microphone.cpp
+index d9555ff..1ec9021 100644
+--- a/components/hardwareone/System_Microphone.cpp
++++ b/components/hardwareone/System_Microphone.cpp
+@@ -35,4 +35,5 @@
+ #include "System_Dictation.h"     // keyboard voice input: terminal capture hook
+ #include "G2_Glasses.h"           // native EvenAI owner/login-epoch fence
++#include "Audio_VadPolicy.h"     // shared amplitude decisions; source DSP stays here
+ #include "HAL_Audio.h"            // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
+ 
+@@ -1099,8 +1100,7 @@ static void recordingTask(void* param) {
+           // before: auto-stop timing is unchanged, only less audio is thrown
+           // away.
+-          int32_t trimCut = kRecSilenceFloorAvg;
+-          if (2 * gRecFloorAvg > trimCut) trimCut = 2 * gRecFloorAvg;
+-          int32_t cut = trimCut;
+-          if (gRecPeakAvg / 8 > cut)  cut = gRecPeakAvg / 8;
++          const auto vad = hw1::audio::adaptiveVadDecision(
++              avg, floorBefore, gRecFloorAvg, gRecPeakAvg, gRecHeardSpeech,
++              {kRecSpeechFloorAvg, kRecSilenceFloorAvg});
+           // Speech has to stand above the MEASURED ambient floor, not merely
+           // above a fixed absolute level. Room tone on the G2 temple mic runs
+@@ -1117,6 +1117,5 @@ static void recordingTask(void* param) {
+           // auto-stop stays unreachable, and the capture rides the caller's
+           // max window instead of truncating. Pausing to think is then free.
+-          const bool latchedNow = (!gRecHeardSpeech && floorBefore >= 0
+-                                   && avg >= cut && avg >= kRecSpeechFloorAvg);
++          const bool latchedNow = vad.latch;
+           if (latchedNow) {
+             gRecHeardSpeech = true;
+@@ -1126,9 +1125,9 @@ static void recordingTask(void* param) {
+           const uint32_t chunkMs = (gRecSampleRate > 0)
+               ? (uint32_t)((uint64_t)sampleCount * 1000 / gRecSampleRate) : 128;
+-          const bool scoredSilent = (gRecHeardSpeech && avg < cut);
++          const bool scoredSilent = vad.stopSilent;
+           // Discard decision uses the floor-relative gate, so a quiet word tail
+           // is committed rather than held; the auto-stop clock below keeps the
+           // peak-relative gate so end-of-speech detection does not get slower.
+-          chunkScoredSilent = (gRecHeardSpeech && avg < trimCut);
++          chunkScoredSilent = vad.trimSilent;
+           if (scoredSilent) gRecSilenceMs += chunkMs;
+           else              gRecSilenceMs = 0;
+@@ -1154,5 +1153,5 @@ static void recordingTask(void* param) {
+                             "%s %s sil=%lums el=%lums",
+                             (unsigned long)gRecChunkIdx, (long)avg,
+-                            (long)floorBefore, (long)gRecFloorAvg, (long)cut, (long)gRecPeakAvg,
++                            (long)floorBefore, (long)gRecFloorAvg, (long)vad.stopCut, (long)gRecPeakAvg,
+                             gRecHeardSpeech ? (latchedNow ? "LATCH" : "spch ") : "----- ",
+                             scoredSilent ? "SIL" : "snd",
 diff --git a/components/hardwareone/System_STT.cpp b/components/hardwareone/System_STT.cpp
 new file mode 100644
-index 0000000..d339985
+index 0000000..aabd9d1
 --- /dev/null
 +++ b/components/hardwareone/System_STT.cpp
-@@ -0,0 +1,549 @@
+@@ -0,0 +1,997 @@
 +#include "System_STT.h"
 +
 +#if ENABLE_LOCAL_STT
@@ -682,6 +1469,7 @@ index 0000000..d339985
 +#include "System_Microphone.h"
 +#include "System_Settings.h"
 +#include "System_TaskUtils.h"
++#include "stt/stt_segmenter.h"
 +#include <ArduinoJson.h>
 +#include <esp_random.h>
 +#include <algorithm>
@@ -693,6 +1481,7 @@ index 0000000..d339985
 +constexpr uint32_t kResultRetentionMs = 300000;
 +constexpr size_t kReadSamples = 640; // 40 ms at the model's fixed 16 kHz rate.
 +constexpr uint32_t kSourceTimeoutMs = 2000;
++constexpr size_t kTextQueueDepth = 8;
 +
 +struct STTRun {
 +  STTOwner owner;
@@ -703,9 +1492,13 @@ index 0000000..d339985
 +  bool finishRequested = false;
 +  AudioSource requestedSource = AUDIO_SRC_NONE;
 +  char text[STT_MAX_TEXT + 1] = {};
++  uint8_t textHead = 0;
++  uint32_t acknowledgedSequence = 0;
 +};
 +static portMUX_TYPE gSTTMux = portMUX_INITIALIZER_UNLOCKED;
 +static STTRun gSTT;
++static STTTextChunk gSTTChunks[kTextQueueDepth];
++static void sttContinuousWorker(void*);
 +static uint32_t gSTTNonce = 0;
 +static uint32_t gSTTCounter = 0;
 +
@@ -735,6 +1528,10 @@ index 0000000..d339985
 +  // Volatile clear keeps a discarded private transcript out of retained RAM.
 +  volatile char* p = gSTT.text;
 +  for (size_t i = 0; i < sizeof(gSTT.text); ++i) p[i] = 0;
++  volatile uint8_t* q = reinterpret_cast<volatile uint8_t*>(gSTTChunks);
++  for (size_t i = 0; i < sizeof(gSTTChunks); ++i) q[i] = 0;
++  gSTT.textHead = 0;
++  gSTT.snapshot.pendingTexts = 0;
 +  gSTT.snapshot.textReady = false;
 +}
 +
@@ -951,14 +1748,361 @@ index 0000000..d339985
 +  for (size_t i = 0; i < sizeof(text); ++i) privateText[i] = 0;
 +  vTaskDelete(nullptr);
 +}
++// Independent producer/consumer tasks keep draining the microphone while a
++// synchronous backend works. This bounded pipeline has no total-duration cap.
++constexpr size_t kAudioQueueDepth = 3;
++constexpr size_t kStreamSamples = STT_SAMPLE_RATE * STT_MAX_CAPTURE_MS / 1000;
++constexpr size_t kStreamReadSamples = 1024; // Whole PDM DMA blocks; segmenting is downstream.
++constexpr uint32_t kCaptureStackBytes = 6144; // 2 KiB PCM block plus HAL/BLE startup depth.
++enum class StreamSlotState : uint8_t { Free, Ready, Processing };
++struct StreamSlot {
++  int16_t* pcm = nullptr;
++  size_t samples = 0;
++  uint64_t start = 0, end = 0;
++  uint32_t sequence = 0;
++  bool forced = false;
++  StreamSlotState state = StreamSlotState::Free;
++};
++struct StreamRun {
++  STTToken token = 0;
++  AudioSource requested = AUDIO_SRC_NONE;
++  int16_t* working = nullptr;
++  StreamSlot slots[kAudioQueueDepth];
++  hw1::stt::Segmenter segmenter;
++  bool captureDone = false;
++  bool failed = false;
++  uint32_t clockMs = 0;
++};
++static void sttStreamTick(StreamRun& run) {
++  portENTER_CRITICAL(&gSTTMux);
++  const uint32_t now = millis();
++  gSTT.snapshot.sessionMs += static_cast<uint32_t>(now - run.clockMs);
++  run.clockMs = now;
++  portEXIT_CRITICAL(&gSTTMux);
++}
++static void sttStreamFail(StreamRun& run, const char* message) {
++  portENTER_CRITICAL(&gSTTMux);
++  if (!run.failed) snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", message);
++  run.failed = true;
++  portEXIT_CRITICAL(&gSTTMux);
++}
++static bool sttStreamCancelled(void* context) {
++  auto& run = *static_cast<StreamRun*>(context);
++  portENTER_CRITICAL(&gSTTMux);
++  const bool failed = run.failed;
++  portEXIT_CRITICAL(&gSTTMux);
++  return failed || sttCancelled(&run.token);
++}
++static void sttStreamProgress(void* context, STTLocalPhase phase) {
++  auto& run = *static_cast<StreamRun*>(context);
++  sttProgress(&run.token, phase);
++  sttStreamTick(run);
++}
++static void sttWipe(void* memory, size_t bytes) {
++  if (!memory) return;
++  volatile uint8_t* p = static_cast<volatile uint8_t*>(memory);
++  while (bytes--) *p++ = 0;
++}
++static bool sttQueueSegment(StreamRun& run) {
++  const auto* segment = run.segmenter.segment();
++  if (!segment) return true;
++  StreamSlot* slot = nullptr;
++  portENTER_CRITICAL(&gSTTMux);
++  for (auto& candidate : run.slots) {
++    if (candidate.state == StreamSlotState::Free) { slot = &candidate; break; }
++  }
++  const bool exhausted = gSTT.snapshot.segmentsCaptured == UINT32_MAX;
++  portEXIT_CRITICAL(&gSTTMux);
++  if (!slot || exhausted) {
++    sttStreamFail(run, exhausted ? "STT sequence exhausted; start a new session"
++                                : "STT audio queue full; backend cannot keep up");
++    return false;
++  }
++  // Only the capture producer claims Free slots; the consumer sees Ready only
++  // after this copy and metadata publication complete under the same lock.
++  memcpy(slot->pcm, segment->pcm, segment->samples * sizeof(int16_t));
++  slot->samples = segment->samples;
++  slot->start = segment->start_sample;
++  slot->end = segment->end_sample;
++  slot->forced = segment->end == hw1::stt::SegmentEnd::HardLimit;
++  portENTER_CRITICAL(&gSTTMux);
++  slot->sequence = ++gSTT.snapshot.segmentsCaptured;
++  slot->state = StreamSlotState::Ready;
++  ++gSTT.snapshot.pendingAudio;
++  portEXIT_CRITICAL(&gSTTMux);
++  return run.segmenter.release();
++}
++static void sttCaptureWorker(void* context) {
++  auto& run = *static_cast<StreamRun*>(context);
++  const AudioSource previous = audioGetSource();
++  AudioSource source = AUDIO_SRC_NONE;
++  bool selected = false, claimed = false;
++  int16_t block[kStreamReadSamples];
++  do {
++    if (sttStreamCancelled(&run)) break;
++    if (audioCaptureBusy() || micRecordingBusy() || gMicRunning) {
++      sttStreamFail(run, "Audio became busy; close SR/mic and retry"); break;
++    }
++    if (run.requested != AUDIO_SRC_NONE && !audioSourceAvailable(run.requested)) {
++      sttStreamFail(run, "Selected microphone is unavailable"); break;
++    }
++    selected = audioSetSource(run.requested);
++    if (!selected || !audioCaptureStart("stt", STT_SAMPLE_RATE)) {
++      sttStreamFail(run, "Could not claim microphone; close SR/mic first"); break;
++    }
++    claimed = true;
++    source = audioGetSource();
++    if (run.requested != AUDIO_SRC_NONE && source != run.requested) {
++      sttStreamFail(run, "Selected microphone changed during startup"); break;
++    }
++    audioTrimBufferedPcm("stt", 0);
++    uint32_t initialOverruns = 0;
++    if (!audioCaptureOverruns("stt", &initialOverruns)) {
++      sttStreamFail(run, "Continuous capture integrity monitoring unavailable"); break;
++    }
++    if (initialOverruns) {
++      portENTER_CRITICAL(&gSTTMux);
++      gSTT.snapshot.audioOverruns = initialOverruns;
++      portEXIT_CRITICAL(&gSTTMux);
++      sttStreamFail(run, "Microphone audio loss during capture startup"); break;
++    }
++    portENTER_CRITICAL(&gSTTMux);
++    // Measure the ambient floor before prompting for speech. Capture remains
++    // owned during this short calibration; the UI still shows Preparing.
++    gSTT.snapshot.state = STTState::Preparing;
++    gSTT.snapshot.captureActive = true;
++    gSTT.snapshot.audioSource = static_cast<uint8_t>(source);
++    portEXIT_CRITICAL(&gSTTMux);
++    uint32_t lastAudioMs = millis();
++    while (!sttStreamCancelled(&run)) {
++      bool finish;
++      portENTER_CRITICAL(&gSTTMux);
++      finish = gSTT.finishRequested;
++      portEXIT_CRITICAL(&gSTTMux);
++      if (finish) break;
++      if (!audioCaptureOwnedBy("stt") || !audioCaptureActive() || !audioSourceAvailable(source)) {
++        sttStreamFail(run, "Microphone source lost"); break;
++      }
++      const size_t count = audioReadPcm(block, kStreamReadSamples, 80);
++      if (count > kStreamReadSamples) { sttStreamFail(run, "Invalid microphone sample count"); break; }
++      uint32_t overruns = 0;
++      if (!audioCaptureOverruns("stt", &overruns)) {
++        sttStreamFail(run, "Microphone integrity monitor lost"); break;
++      }
++      if (overruns != initialOverruns) {
++        portENTER_CRITICAL(&gSTTMux);
++        gSTT.snapshot.audioOverruns = overruns - initialOverruns;
++        portEXIT_CRITICAL(&gSTTMux);
++        sttStreamFail(run, "Microphone audio loss detected; session stopped"); break;
++      }
++      if (count) {
++        lastAudioMs = millis();
++        int64_t sum = 0;
++        uint64_t square = 0;
++        for (size_t i = 0; i < count; ++i) {
++          sum += block[i]; square += static_cast<int64_t>(block[i]) * block[i];
++        }
++        const double variance = static_cast<double>(square) / count -
++                                static_cast<double>(sum) * sum / count / count;
++        const int level = std::min(100, static_cast<int>(std::sqrt(std::max(0.0, variance)) * 100.0 / 32768));
++        size_t offset = 0;
++        while (offset < count && !sttStreamCancelled(&run)) {
++          const auto fed = run.segmenter.push(block + offset, count - offset);
++          offset += fed.consumed;
++          if (fed.status == hw1::stt::SegmentStatus::Ready) {
++            if (!sttQueueSegment(run)) break;
++          } else if (fed.status != hw1::stt::SegmentStatus::Ok || !fed.consumed) {
++            sttStreamFail(run, "Invalid continuous audio segment"); break;
++          }
++        }
++        portENTER_CRITICAL(&gSTTMux);
++        gSTT.snapshot.recordedSamples = run.segmenter.samples_seen();
++        if (run.segmenter.calibrated()) gSTT.snapshot.state = STTState::Recording;
++        gSTT.snapshot.rms = run.segmenter.current_rms();
++        gSTT.snapshot.noiseRms = run.segmenter.noise_rms();
++        gSTT.snapshot.thresholdRms = run.segmenter.threshold_rms();
++        gSTT.snapshot.peakRms = run.segmenter.peak_rms();
++        gSTT.snapshot.level = level;
++        gSTT.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
++        portEXIT_CRITICAL(&gSTTMux);
++      } else vTaskDelay(pdMS_TO_TICKS(1));
++      sttStreamTick(run);
++      if (millis() - lastAudioMs >= kSourceTimeoutMs) {
++        sttStreamFail(run, "Microphone PCM delivery timed out"); break;
++      }
++    }
++    // A normal stop seals and drains the final voiced tail. Cancel/error never
++    // turns abandoned partial audio into a new inference request.
++    if (!sttStreamCancelled(&run)) {
++      uint32_t finalOverruns = 0;
++      if (!audioCaptureOverruns("stt", &finalOverruns)) {
++        sttStreamFail(run, "Microphone integrity monitor lost at stop");
++      } else if (finalOverruns) {
++        portENTER_CRITICAL(&gSTTMux);
++        gSTT.snapshot.audioOverruns = finalOverruns;
++        portEXIT_CRITICAL(&gSTTMux);
++        sttStreamFail(run, "Microphone audio loss detected at stop");
++      }
++    }
++    if (!sttStreamCancelled(&run)) {
++      const auto status = run.segmenter.finish();
++      if (status == hw1::stt::SegmentStatus::Ready) (void)sttQueueSegment(run);
++      else if (status != hw1::stt::SegmentStatus::Finished)
++        sttStreamFail(run, "Could not finish continuous audio segment");
++    }
++  } while (false);
++  portENTER_CRITICAL(&gSTTMux);
++  gSTT.snapshot.captureActive = false;
++  gSTT.snapshot.state = STTState::Stopping;
++  gSTT.snapshot.level = 0;
++  portEXIT_CRITICAL(&gSTTMux);
++  if (claimed || audioCaptureOwnedBy("stt")) {
++    audioCaptureStop("stt");
++    while (audioCaptureOwnedBy("stt")) vTaskDelay(pdMS_TO_TICKS(10));
++  }
++  if (selected && !audioCaptureBusy())
++    audioSetSource(audioSourceAvailable(previous) ? previous : AUDIO_SRC_NONE);
++  sttWipe(block, sizeof(block));
++  // Publish join last: the parent may now free run.working and its own stack.
++  portENTER_CRITICAL(&gSTTMux);
++  gSTT.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
++  run.captureDone = true;
++  portEXIT_CRITICAL(&gSTTMux);
++  vTaskDelete(nullptr);
++}
++static void sttContinuousWorker(void*) {
++  StreamRun run;
++  portENTER_CRITICAL(&gSTTMux);
++  run.token = gSTT.snapshot.token;
++  run.requested = gSTT.requestedSource;
++  run.clockMs = millis();
++  portEXIT_CRITICAL(&gSTTMux);
++  bool captureStarted = false;
++  do {
++    if (sttCancelled(&run.token)) break;
++    run.working = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.segment"));
++    if (!run.working) { sttStreamFail(run, "Insufficient PSRAM for continuous audio"); break; }
++    for (auto& slot : run.slots) {
++      slot.pcm = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.queue"));
++      if (!slot.pcm) { sttStreamFail(run, "Insufficient PSRAM for continuous queue"); break; }
++    }
++    if (sttStreamCancelled(&run)) break;
++    hw1::stt::SegmenterConfig segmentConfig;
++    segmentConfig.adaptive = true;
++    if (!run.segmenter.reset(run.working, kStreamSamples, segmentConfig)) {
++      sttStreamFail(run, "Invalid continuous segmentation settings"); break;
++    }
++    taskStackRecord("stt_capture", kCaptureStackBytes);
++    if (xTaskCreatePinnedToCore(sttCaptureWorker, "stt_capture", kCaptureStackBytes,
++                                &run, 3, nullptr, 1) != pdPASS) {
++      sttStreamFail(run, "Could not create continuous capture worker"); break;
++    }
++    captureStarted = true;
++    for (;;) {
++      StreamSlot* slot = nullptr;
++      bool captureDone;
++      portENTER_CRITICAL(&gSTTMux);
++      captureDone = run.captureDone;
++      for (auto& candidate : run.slots) {
++        if (candidate.state == StreamSlotState::Ready &&
++            (!slot || candidate.sequence < slot->sequence)) slot = &candidate;
++      }
++      if (slot) {
++        slot->state = StreamSlotState::Processing;
++        --gSTT.snapshot.pendingAudio;
++        gSTT.snapshot.inferenceActive = true;
++      }
++      portEXIT_CRITICAL(&gSTTMux);
++      if (sttStreamCancelled(&run)) break;
++      if (!slot) {
++        if (captureDone) break;
++        vTaskDelay(pdMS_TO_TICKS(10));
++        sttStreamTick(run);
++        continue;
++      }
++      char text[STT_MAX_TEXT + 1] = {};
++      char error[96] = {};
++      STTLocalStats stats;
++      const STTLocalControl control{&run, sttStreamCancelled, sttStreamProgress};
++      // A stop immediately after a forced boundary can leave fewer than20 ms
++      // of real audio. Pad only the backend copy; published positions retain
++      // the exact captured extent, so no samples disappear or move in time.
++      const size_t inferenceSamples = std::max(slot->samples, size_t(320));
++      if (inferenceSamples > slot->samples)
++        memset(slot->pcm + slot->samples, 0, (inferenceSamples - slot->samples) * sizeof(int16_t));
++      const bool ok = sttLocalTranscribe(slot->pcm, inferenceSamples, text, sizeof(text), control,
++                                        stats, error, sizeof(error));
++      if (!sttStreamCancelled(&run)) {
++        if (!ok || !memchr(text, '\0', sizeof(text))) {
++          sttStreamFail(run, error[0] ? error : "Continuous transcription failed");
++        } else {
++          portENTER_CRITICAL(&gSTTMux);
++          if (!gSTT.cancelRequested && !run.failed && gSTT.snapshot.pendingTexts < kTextQueueDepth) {
++            auto& chunk = gSTTChunks[(gSTT.textHead + gSTT.snapshot.pendingTexts) % kTextQueueDepth];
++            chunk.sequence = slot->sequence;
++            chunk.startSample = slot->start;
++            chunk.endSample = slot->end;
++            chunk.forcedBoundary = slot->forced;
++            memcpy(chunk.text, text, sizeof(chunk.text));
++            ++gSTT.snapshot.pendingTexts;
++            ++gSTT.snapshot.segmentsCompleted;
++            gSTT.snapshot.textReady = true;
++          } else if (!gSTT.cancelRequested && !run.failed) {
++            run.failed = true;
++            snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", "STT text queue full; receiver must acknowledge results");
++          }
++          portEXIT_CRITICAL(&gSTTMux);
++        }
++      }
++      sttWipe(text, sizeof(text));
++      sttWipe(slot->pcm, inferenceSamples * sizeof(int16_t));
++      portENTER_CRITICAL(&gSTTMux);
++      gSTT.snapshot.stats = stats;
++      gSTT.snapshot.inferenceActive = false;
++      slot->state = StreamSlotState::Free;
++      portEXIT_CRITICAL(&gSTTMux);
++      sttStreamTick(run);
++    }
++  } while (false);
++  // On normal stop the producer has already joined; on failure/cancel its
++  // callback sees the same fence. Never free buffers while either task uses them.
++  if (captureStarted) {
++    for (;;) {
++      portENTER_CRITICAL(&gSTTMux);
++      const bool done = run.captureDone;
++      portEXIT_CRITICAL(&gSTTMux);
++      if (done) break;
++      vTaskDelay(pdMS_TO_TICKS(10));
++    }
++  }
++  if (run.working) { sttWipe(run.working, kStreamSamples * sizeof(int16_t)); free(run.working); }
++  for (auto& slot : run.slots) {
++    if (slot.pcm) { sttWipe(slot.pcm, kStreamSamples * sizeof(int16_t)); free(slot.pcm); }
++  }
++  sttStreamTick(run);
++  const bool cancelled = sttCancelled(&run.token);
++  portENTER_CRITICAL(&gSTTMux);
++  if (cancelled || gSTT.cancelRequested) sttClearTextLocked();
++  gSTT.snapshot.state = (cancelled || gSTT.cancelRequested) ? STTState::Cancelled
++                           : run.failed ? STTState::Failed : STTState::Done;
++  gSTT.snapshot.captureActive = false;
++  gSTT.snapshot.inferenceActive = false;
++  gSTT.snapshot.pendingAudio = 0;
++  gSTT.snapshot.workerStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
++  gSTT.completedMs = millis();
++  gSTT.snapshot.workerActive = false;
++  portEXIT_CRITICAL(&gSTTMux);
++  vTaskDelete(nullptr);
++}
++
 +} // namespace
 +
-+bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
-+              char* error, size_t errorCap) {
++static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
++                         STTToken* token, char* error, size_t errorCap) {
 +  sttReapTerminal();
 +  if (token) *token = 0;
 +  if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
-+  if (captureMs < 1000 || captureMs > STT_MAX_CAPTURE_MS)
++  if (!continuous && (captureMs < 1000 || captureMs > STT_MAX_CAPTURE_MS))
 +    return sttError(error, errorCap, "Capture duration must be 1 to 20 seconds");
 +#if ENABLE_ESP_SR
 +  if (isESPSRRunning() || audioCaptureOwnedBy("sr"))
@@ -992,7 +2136,8 @@ index 0000000..d339985
 +    gSTT.requestedSource = requestedSource;
 +    gSTT.snapshot.token = (static_cast<uint64_t>(gSTTNonce) << 32) | gSTTCounter;
 +    gSTT.snapshot.state = STTState::Preparing;
-+    gSTT.snapshot.captureLimitMs = captureMs;
++    gSTT.snapshot.captureLimitMs = continuous ? 0 : captureMs;
++    gSTT.snapshot.continuous = continuous;
 +    gSTT.snapshot.workerActive = true;
 +    gSTT.startedMs = millis();
 +    *token = gSTT.snapshot.token;
@@ -1003,7 +2148,7 @@ index 0000000..d339985
 +  taskStackRecord("stt", kWorkerStackBytes);
 +  // Core 1 avoids putting the frontend/capture worker on the radio/ISR core;
 +  // the model backend may use its own qualified multicore operator workers.
-+  if (xTaskCreatePinnedToCore(sttWorker, "stt", kWorkerStackBytes, nullptr,
++  if (xTaskCreatePinnedToCore(continuous ? sttContinuousWorker : sttWorker, "stt", kWorkerStackBytes, nullptr,
 +                              1, nullptr, 1) != pdPASS) {
 +    portENTER_CRITICAL(&gSTTMux);
 +    gSTT.snapshot.workerActive = false;
@@ -1017,6 +2162,48 @@ index 0000000..d339985
 +  return true;
 +}
 +
++bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
++              char* error, size_t errorCap) {
++  return sttBeginMode(owner, captureMs, false, token, error, errorCap);
++}
++bool sttBeginContinuous(STTOwner owner, STTToken* token,
++                        char* error, size_t errorCap) {
++  return sttBeginMode(owner, 0, true, token, error, errorCap);
++}
++
++bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {
++  if (out) *out = {};
++  sttReapTerminal();
++  if (!out || !sttOwnerLive(owner)) return false;
++  portENTER_CRITICAL(&gSTTMux);
++  const bool ready = sttMatchesLocked(owner, token) &&
++      gSTT.snapshot.continuous && !gSTT.cancelRequested && gSTT.snapshot.pendingTexts;
++  if (ready) *out = gSTTChunks[gSTT.textHead];
++  portEXIT_CRITICAL(&gSTTMux);
++  if (!sttOwnerLive(owner)) { sttWipe(out, sizeof(*out)); return false; }
++  return ready;
++}
++
++bool sttAcknowledgeChunk(STTOwner owner, STTToken token, uint32_t sequence) {
++  if (!sequence || !sttOwnerLive(owner)) return false;
++  bool accepted = false;
++  portENTER_CRITICAL(&gSTTMux);
++  if (sttMatchesLocked(owner, token) && gSTT.snapshot.continuous && !gSTT.cancelRequested) {
++    accepted = sequence <= gSTT.acknowledgedSequence;
++    if (gSTT.snapshot.pendingTexts && gSTTChunks[gSTT.textHead].sequence == sequence) {
++      volatile uint8_t* bytes = reinterpret_cast<volatile uint8_t*>(&gSTTChunks[gSTT.textHead]);
++      for (size_t i = 0; i < sizeof(STTTextChunk); ++i) bytes[i] = 0;
++      gSTT.textHead = (gSTT.textHead + 1) % kTextQueueDepth;
++      --gSTT.snapshot.pendingTexts;
++      gSTT.snapshot.textReady = gSTT.snapshot.pendingTexts != 0;
++      gSTT.acknowledgedSequence = sequence;
++      accepted = true;
++    }
++  }
++  portEXIT_CRITICAL(&gSTTMux);
++  return accepted && sttOwnerLive(owner);
++}
++
 +bool sttRunActive(STTToken token) {
 +  portENTER_CRITICAL(&gSTTMux);
 +  const bool active = token && gSTT.snapshot.token == token && gSTT.snapshot.workerActive;
@@ -1028,7 +2215,8 @@ index 0000000..d339985
 +  if (!sttOwnerLive(owner)) return false;
 +  portENTER_CRITICAL(&gSTTMux);
 +  const bool accepted = sttMatchesLocked(owner, token) &&
-+      (gSTT.snapshot.state == STTState::Preparing || gSTT.snapshot.state == STTState::Recording);
++      (gSTT.snapshot.state == STTState::Preparing || gSTT.snapshot.state == STTState::Recording ||
++       (gSTT.snapshot.continuous && gSTT.snapshot.workerActive));
 +  if (accepted) gSTT.finishRequested = true;
 +  portEXIT_CRITICAL(&gSTTMux);
 +  return accepted;
@@ -1069,7 +2257,7 @@ index 0000000..d339985
 +  portENTER_CRITICAL(&gSTTMux);
 +  if (sttMatchesLocked(owner, token) && !gSTT.snapshot.workerActive &&
 +      millis() - gSTT.completedMs < kResultRetentionMs &&
-+      gSTT.snapshot.state == STTState::Done && gSTT.snapshot.textReady &&
++      !gSTT.snapshot.continuous && gSTT.snapshot.state == STTState::Done && gSTT.snapshot.textReady &&
 +      strlen(gSTT.text) < textCap) {
 +    memcpy(text, gSTT.text, strlen(gSTT.text) + 1);
 +    ready = true;
@@ -1132,8 +2320,9 @@ index 0000000..d339985
 +  CommandArgs args(argsInput);
 +  const String op = args.count() ? args.arg(0) : "status";
 +  if (args.unterminatedQuote()) return "Error: malformed STT arguments";
-+  if (op == "record") {
-+    if (args.count() > 2) return "Error: Usage: stt record [1..20 seconds]";
++  if (op == "record" || op == "start") {
++    const bool continuous = op == "start";
++    if ((continuous && args.count() != 1) || args.count() > 2) return "Error: Usage: stt start | stt record [1..20 seconds]";
 +    uint32_t seconds = 10;
 +    if (args.count() == 2) {
 +      seconds = 0;
@@ -1146,7 +2335,8 @@ index 0000000..d339985
 +    }
 +    STTToken token = 0;
 +    char error[96] = {};
-+    if (!sttBegin(owner, seconds * 1000, &token, error, sizeof(error))) {
++    if (!(continuous ? sttBeginContinuous(owner, &token, error, sizeof(error))
++                     : sttBegin(owner, seconds * 1000, &token, error, sizeof(error)))) {
 +      reply = String("Error: ") + error;
 +      return reply.c_str();
 +    }
@@ -1157,6 +2347,21 @@ index 0000000..d339985
 +    return reply.c_str();
 +  }
 +  STTToken token = 0;
++  if (op == "ack") {
++    if (args.count() != 3 || !sttParseToken(args.arg(1), token))
++      return "Error: Usage: stt ack <id> <sequence>";
++    const String& value = args.arg(2);
++    uint32_t sequence = 0;
++    if (!value.length() || value.length() > 10) return "Error: invalid STT sequence";
++    for (size_t i = 0; i < value.length(); ++i) {
++      const char c = value[i];
++      if (c < '0' || c > '9' || sequence > (UINT32_MAX - (c - '0')) / 10)
++        return "Error: invalid STT sequence";
++      sequence = sequence * 10 + (c - '0');
++    }
++    return sttAcknowledgeChunk(owner, token, sequence) ? "OK: STT chunk acknowledged"
++        : "Error: sequence is not the oldest chunk for this session";
++  }
 +  if (args.count() > 2 || (args.count() == 2 && !sttParseToken(args.arg(1), token)))
 +    return "Error: STT id must be exactly 16 hex digits";
 +  if (op == "stop" || op == "cancel") {
@@ -1166,9 +2371,9 @@ index 0000000..d339985
 +                    : "Error: no matching STT run accepts that operation";
 +  }
 +  STTSnapshot snap;
-+  if (op != "status" && op != "result")
-+    return "Error: Usage: stt record [seconds] | status [id] | stop|cancel|result <id>";
-+  if (op == "result" && !token) return "Error: Usage: stt result <id>";
++  if (op != "status" && op != "result" && op != "next")
++    return "Error: Usage: stt start | record [seconds] | status [id] | stop|cancel|result|next <id> | ack <id> <sequence>";
++  if ((op == "result" || op == "next") && !token) return "Error: Usage: stt result <id>";
 +  if (!sttSnapshot(owner, token, &snap)) return "Error: no STT run belongs to this session";
 +  JsonDocument doc;
 +  char id[17];
@@ -1176,7 +2381,23 @@ index 0000000..d339985
 +           static_cast<unsigned long>(snap.token & 0xffffffffu));
 +  doc["id"] = id;
 +  doc["state"] = sttStateName(snap.state);
-+  if (op == "result") {
++  if (op == "next") {
++    if (!snap.continuous) return "Error: use stt result for a bounded recording";
++    STTTextChunk chunk;
++    const bool ready = sttReadChunk(owner, token, &chunk);
++    doc["available"] = ready;
++    if (ready) {
++      doc["sequence"] = chunk.sequence;
++      doc["startSample"] = chunk.startSample;
++      doc["endSample"] = chunk.endSample;
++      doc["forcedBoundary"] = chunk.forcedBoundary;
++    }
++    doc["sttText"] = chunk.text;
++    serializeJson(doc, reply);
++    sttWipe(&chunk, sizeof(chunk));
++    return reply.c_str();
++  } else if (op == "result") {
++    if (snap.continuous) return "Error: use stt next and stt ack for continuous results";
 +    char text[STT_MAX_TEXT + 1] = {};
 +    if (!sttResult(owner, token, text, sizeof(text))) return "Error: no completed STT result for this id";
 +    // This explicit tag makes the shared command-output sinks redact the whole
@@ -1186,6 +2407,15 @@ index 0000000..d339985
 +    doc["backend"] = "local";
 +    doc["phase"] = sttPhaseName(snap.phase);
 +    doc["workerActive"] = snap.workerActive;
++    doc["continuous"] = snap.continuous;
++    doc["captureActive"] = snap.captureActive;
++    doc["inferenceActive"] = snap.inferenceActive;
++    doc["sessionMs"] = snap.sessionMs;
++    doc["segmentsCaptured"] = snap.segmentsCaptured;
++    doc["segmentsCompleted"] = snap.segmentsCompleted;
++    doc["pendingAudio"] = snap.pendingAudio;
++    doc["pendingTexts"] = snap.pendingTexts;
++    doc["audioOverruns"] = snap.audioOverruns;
 +    doc["textReady"] = snap.textReady;
 +    doc["elapsedMs"] = snap.elapsedMs;
 +    doc["captureLimitMs"] = snap.captureLimitMs;
@@ -1195,7 +2425,12 @@ index 0000000..d339985
 +                     : snap.audioSource == AUDIO_SRC_G2_LEFT ? "g2" : "none";
 +    doc["processing"] = "raw-hal; model frontend only; saved micgain not applied";
 +    doc["level"] = snap.level;
++    doc["rms"] = snap.rms;
++    doc["noiseRms"] = snap.noiseRms;
++    doc["thresholdRms"] = snap.thresholdRms;
++    doc["peakRms"] = snap.peakRms;
 +    doc["workerStackFreeBytes"] = snap.workerStackFreeBytes;
++    doc["captureStackFreeBytes"] = snap.captureStackFreeBytes;
 +    doc["error"] = snap.error;
 +    doc["modelBytes"] = snap.stats.modelBytes;
 +    doc["featureFrames"] = snap.stats.featureFrames;
@@ -1211,26 +2446,26 @@ index 0000000..d339985
 +}
 +
 +const CommandEntry sttCommands[] = {
-+  {"stt", "Local buffered speech-to-text with private session-owned results.", false, cmd_stt,
-+   "Usage: stt record [1..20 seconds] | status [id] | stop|cancel|result <id>"}
++  {"stt", "Local continuous or bounded speech-to-text with private session-owned results.", false, cmd_stt,
++   "Usage: stt start | record [1..20 seconds] | status [id] | stop|cancel|result|next <id> | ack <id> <sequence>"}
 +};
 +const size_t sttCommandsCount = sizeof(sttCommands) / sizeof(sttCommands[0]);
 +#endif // ENABLE_LOCAL_STT
 diff --git a/components/hardwareone/System_STT.h b/components/hardwareone/System_STT.h
 new file mode 100644
-index 0000000..5cdb1e9
+index 0000000..8001a9f
 --- /dev/null
 +++ b/components/hardwareone/System_STT.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,97 @@
 +#pragma once
 +
 +#include "System_BuildConfig.h"
 +#include "System_User.h"
 +#include "System_STTLocal.h"
 +
-+// Shared bounded dictation broker. These APIs supply text; they never execute
-+// recognized words as commands. The first local backend is buffered, not live
-+// captions. Existing Pi-backed System_Dictation is independent and unchanged.
++// Shared dictation session broker. Audio remains bounded even for sessions
++// with no duration limit. Recognized words are text, never device commands.
++// A backend processes independent raw PCM segments; transport/UI own delivery.
 +constexpr size_t STT_MAX_TEXT = 512;
 +constexpr uint32_t STT_SAMPLE_RATE = 16000;
 +constexpr uint32_t STT_MAX_CAPTURE_MS = 20000;
@@ -1250,15 +2485,39 @@ index 0000000..5cdb1e9
 +  STTState state = STTState::Idle;
 +  STTLocalPhase phase = STTLocalPhase::Loading;
 +  uint32_t elapsedMs = 0;
-+  uint32_t recordedSamples = 0;
++  uint64_t recordedSamples = 0;
 +  uint32_t captureLimitMs = 0;
 +  uint32_t workerStackFreeBytes = 0;
++  uint32_t captureStackFreeBytes = 0;
 +  uint8_t audioSource = 0;
 +  int level = 0;
++  uint16_t rms = 0;
++  uint16_t noiseRms = 0;
++  uint16_t thresholdRms = 0;
++  uint16_t peakRms = 0;
 +  bool workerActive = false;
 +  bool textReady = false;
++  bool continuous = false;
++  bool captureActive = false;
++  bool inferenceActive = false;
++  uint32_t segmentsCaptured = 0;
++  uint32_t segmentsCompleted = 0;
++  uint32_t pendingAudio = 0;
++  uint32_t pendingTexts = 0;
++  uint32_t audioOverruns = 0;
++  uint64_t sessionMs = 0;
 +  STTLocalStats stats;
 +  char error[96] = {};
++};
++
++// Each result carries its place in the session, independent of its backend.
++// Offsets count raw 16 kHz samples since capture began, including idle gaps.
++struct STTTextChunk {
++  uint32_t sequence = 0;
++  uint64_t startSample = 0;
++  uint64_t endSample = 0;
++  bool forcedBoundary = false;
++  char text[STT_MAX_TEXT + 1] = {};
 +};
 +
 +#if ENABLE_LOCAL_STT
@@ -1268,6 +2527,17 @@ index 0000000..5cdb1e9
 +// changes saved audio settings, writes a WAV, or implicitly re-arms voice.
 +bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
 +              char* error, size_t errorCap);
++// Continuous sessions have no duration cap. Natural pauses produce bounded
++// segments; capture proceeds while the previous segment is transcribed. Stop
++// drains admitted audio. Cancel discards it. A slow backend/client causes an
++// explicit bounded-queue failure, never silent audio/text overwrite.
++bool sttBeginContinuous(STTOwner owner, STTToken* token,
++                        char* error, size_t errorCap);
++// Retry-safe oldest-result peek. Acknowledge only after a consumer accepts the
++// text; an ack can remove only the exact oldest chunk (or repeat an earlier ack).
++// Both APIs enforce the same live owner/epoch/token fence as one-shot results.
++bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out);
++bool sttAcknowledgeChunk(STTOwner owner, STTToken token, uint32_t sequence);
 +// Internal join predicate: contains no transcript/session data and remains
 +// usable after revocation. Unknown or terminal tokens are inactive.
 +bool sttRunActive(STTToken token);
@@ -1963,10 +3233,10 @@ index 0000000..440b04b
 +}
 diff --git a/components/hardwareone/stt/quartznet_runtime.cpp b/components/hardwareone/stt/quartznet_runtime.cpp
 new file mode 100644
-index 0000000..b02044a
+index 0000000..39c29ac
 --- /dev/null
 +++ b/components/hardwareone/stt/quartznet_runtime.cpp
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,189 @@
 +#include "quartznet_runtime.h"
 +#include "quartznet_frontend.h"
 +#include "stt_model_identity.h"
@@ -2050,7 +3320,12 @@ index 0000000..b02044a
 +                char* text, size_t capacity, const STTLocalControl& control,
 +                STTLocalStats& stats, char* error, size_t errorCapacity,
 +                Diagnostics* diagnostics) {
-+    stats={}; if(diagnostics)*diagnostics={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
++    stats={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
++#if HW1_STT_RUNTIME_DIAGNOSTICS
++    if(diagnostics)*diagnostics={};
++#else
++    (void)diagnostics;
++#endif
 +    auto fail=[&](const char* why) { if(text && capacity)text[0]=0; if(error && errorCapacity)snprintf(error,errorCapacity,"%s",why);return false; };
 +    if(!pcm || !text || capacity<2 || !reader.read || samples<kMinSamples || samples>kMaxSamples)return fail("Invalid STT audio buffer");
 +    if(cancelled(control))return fail("Cancelled");
@@ -2092,6 +3367,7 @@ index 0000000..b02044a
 +    if(!model)return fail("Cannot create STT model");
 +    auto input=model->get_input(identity::kInputName);auto output=model->get_output(identity::kOutputName);
 +    if(!tensor(input,frames,64,identity::kInputExponent) || !tensor(output,outputs,29,identity::kOutputExponent))return fail("STT runtime tensor mismatch");
++#if HW1_STT_RUNTIME_DIAGNOSTICS
 +    if(diagnostics) {
 +        const auto memory=model->get_memory_info();
 +        const auto variable=memory.find("variable");
@@ -2100,6 +3376,7 @@ index 0000000..b02044a
 +            diagnostics->activationInternalBytes=variable->second.internal;
 +        }
 +    }
++#endif
 +    stats.loadMs=millis()-start;
 +    if(cancelled(control))return fail("Cancelled");
 +    progress(control,STTLocalPhase::Frontend);start=millis();
@@ -2119,11 +3396,13 @@ index 0000000..b02044a
 +        }
 +    }
 +    stats.frontendMs=millis()-start;
++#if HW1_STT_RUNTIME_DIAGNOSTICS
 +    if(diagnostics) {
 +        digest(input->data,input->get_bytes(),diagnostics->inputSha);
 +        diagnostics->freePsramAtInference=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 +        diagnostics->freeInternalAtInference=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
 +    }
++#endif
 +    if(cancelled(control))return fail("Cancelled");
 +    progress(control,STTLocalPhase::Inference);start=millis();
 +    for(int stage=0;stage<identity::kNodeCount;++stage) {
@@ -2134,7 +3413,9 @@ index 0000000..b02044a
 +    stats.inferenceMs=millis()-start;
 +    if(cancelled(control))return fail("Cancelled");
 +    progress(control,STTLocalPhase::Decoding);start=millis();
++#if HW1_STT_RUNTIME_DIAGNOSTICS
 +    if(diagnostics)digest(output->data,output->get_bytes(),diagnostics->outputSha);
++#endif
 +    CtcState ctc;
 +    if(ctc_reset(&ctc,text,capacity)!=Status::Ok
 +       || ctc_feed(&ctc,static_cast<const int8_t*>(output->data),outputs,29,text,capacity)!=Status::Ok
@@ -2147,14 +3428,19 @@ index 0000000..b02044a
 +}
 diff --git a/components/hardwareone/stt/quartznet_runtime.h b/components/hardwareone/stt/quartznet_runtime.h
 new file mode 100644
-index 0000000..b7cbeaf
+index 0000000..af9c919
 --- /dev/null
 +++ b/components/hardwareone/stt/quartznet_runtime.h
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,29 @@
 +#pragma once
 +#include "System_STTLocal.h"
 +#include <cstddef>
 +#include <cstdint>
++// Tensor hashes and vendor memory profiling are probe-only; production keeps
++// its user-facing timings/status without retaining this optional code.
++#ifndef HW1_STT_RUNTIME_DIAGNOSTICS
++#define HW1_STT_RUNTIME_DIAGNOSTICS 0
++#endif
 +namespace hw1::stt {
 +// A read-only stream already opened by the caller's storage/auth boundary.
 +struct ModelReader {
@@ -2162,6 +3448,7 @@ index 0000000..b7cbeaf
 +    size_t bytes;
 +    size_t (*read)(void*, void*, size_t);
 +};
++// Ignored unless the runtime is compiled with HW1_STT_RUNTIME_DIAGNOSTICS=1.
 +struct Diagnostics {
 +    uint8_t inputSha[32]{}, outputSha[32]{};
 +    size_t activationPsramBytes = 0;
@@ -2239,3 +3526,284 @@ index 0000000..eba4c35
 +inline constexpr int kMaxSamples = 480000;
 +inline constexpr int kMaxFeatureFrames = 3000;
 +} // namespace hw1::stt::identity
+diff --git a/components/hardwareone/stt/stt_segmenter.h b/components/hardwareone/stt/stt_segmenter.h
+new file mode 100644
+index 0000000..a780f50
+--- /dev/null
++++ b/components/hardwareone/stt/stt_segmenter.h
+@@ -0,0 +1,275 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++#include "../Audio_VadPolicy.h"
++
++namespace hw1::stt {
++inline constexpr size_t kSegmentSampleRate=16000;
++inline constexpr size_t kSegmentAnalysisSamples=160; // 10 ms, independent of push chunk size.
++inline constexpr size_t kSegmentMaximumSamples=20*kSegmentSampleRate;
++inline constexpr size_t kSegmentNoiseWindowFrames=500; // At most five seconds of 10 ms levels.
++
++// Simple fixed/adaptive energy endpointing, not a neural voice-activity detector. All
++// durations are samples and must be multiples of the 10 ms analysis frame.
++struct SegmenterConfig {
++    size_t max_segment_samples=kSegmentMaximumSamples;
++    size_t min_segment_samples=8*kSegmentSampleRate;
++    size_t pre_roll_samples=4800;
++    size_t end_silence_samples=9600;
++    size_t min_voice_samples=3200;
++    size_t forced_overlap_samples=0;
++    uint16_t rms_threshold=400; // Fixed mode, DC-removed RMS in native int16 PCM units.
++    bool adaptive=false; // Opt in per consumer; existing fixed-mode behavior is unchanged.
++    size_t calibration_samples=8000; // Initial 500 ms is ambient only, never admitted as speech.
++    size_t noise_window_frames=kSegmentNoiseWindowFrames;
++    // Raw-RMS defaults separate measured P4 room noise (3..31) from speech.
++    // Callers may tune these for other microphones or acoustic conditions.
++    uint16_t adaptive_speech_floor=45;
++    uint16_t adaptive_silence_floor=16;
++};
++enum class SegmentEnd : uint8_t { Pause, HardLimit, SessionEnd };
++enum class SegmentStatus : uint8_t { Ok, Ready, Finished, InvalidArgument, NotInitialized, CounterOverflow };
++struct SegmentPushResult { size_t consumed; SegmentStatus status; };
++struct SpeechSegment {
++    const int16_t* pcm=nullptr;
++    size_t samples=0;
++    uint64_t start_sample=0, end_sample=0; // Absolute session offsets, end exclusive.
++    uint64_t fresh_start_sample=0; // Samples before this offset are explicit overlap.
++    size_t overlap_before_samples=0;
++    size_t next_overlap_samples=0; // Planned context if a hard-cut continuation is emitted.
++    size_t new_voiced_samples=0; // Classified voiced samples, excluding retained overlap.
++    SegmentEnd end=SegmentEnd::Pause;
++    bool continuation=false;
++};
++
++// Single-owner, no heap or platform dependencies. Buffer must remain valid and
++// have at least config.max_segment_samples elements. Input must not alias it.
++// push stops at one Ready result; only `consumed` samples belong to this call.
++// Copy/queue segment()->pcm before release(), then push the unconsumed suffix.
++// A ready segment is immutable until release/reset. Idle/noise gaps are skipped
++// deliberately; absolute offsets identify them. Raw PCM is never filtered.
++class Segmenter {
++public:
++    bool reset(int16_t* buffer,size_t capacity,const SegmenterConfig& config=SegmenterConfig{}) {
++        if(!buffer || !valid(config) || capacity<config.max_segment_samples)return false;
++        buffer_=buffer;config_=config;initialized_=true;reset_session();return true;
++    }
++    void reset_session() {
++        seen_=start_=fresh_start_=0;used_=head_=history_=voice_=silence_=0;
++        frame_count_=0;frame_sum_=0;frame_square_=0;
++        active_=continuation_=ready_=finishing_=finished_=false;segment_={};
++        calibrated_=!config_.adaptive;heard_speech_=false;calibration_seen_=0;
++        noise_head_=noise_count_=0;current_rms_=noise_rms_=peak_rms_=0;
++        threshold_rms_=config_.adaptive?config_.adaptive_speech_floor:config_.rms_threshold;
++        std::memset(noise_window_,0,sizeof(noise_window_));
++    }
++    uint64_t samples_seen() const { return seen_; }
++    bool calibrated() const { return initialized_ && calibrated_; }
++    uint16_t current_rms() const { return current_rms_; }
++    uint16_t noise_rms() const { return noise_rms_; }
++    uint16_t threshold_rms() const { return threshold_rms_; }
++    uint16_t peak_rms() const { return peak_rms_; }
++    const SpeechSegment* segment() const { return ready_?&segment_:nullptr; }
++    SegmentPushResult push(const int16_t* pcm,size_t count) {
++        if(!initialized_)return {0,SegmentStatus::NotInitialized};
++        if(ready_)return {0,SegmentStatus::Ready};
++        if(finished_ || finishing_)return {0,SegmentStatus::Finished};
++        if(!pcm && count)return {0,SegmentStatus::InvalidArgument};
++        if(count>std::numeric_limits<uint64_t>::max()-seen_)return {0,SegmentStatus::CounterOverflow};
++        size_t consumed=0;
++        while(consumed<count) {
++            const int16_t sample=pcm[consumed++];
++            // Calibration advances absolute positions but cannot become pre-roll
++            // or model input, even if it contains loud audio or ends mid-push.
++            if(calibrated_) {
++                if(active_)buffer_[used_++]=sample;
++                else append_history(sample);
++            }
++            ++seen_;++frame_count_;frame_sum_+=sample;
++            frame_square_+=static_cast<uint64_t>(static_cast<int64_t>(sample)*sample);
++            if(frame_count_==kSegmentAnalysisSamples) {
++                evaluate_frame(false);clear_frame();
++                if(ready_)return {consumed,SegmentStatus::Ready};
++            }
++        }
++        return {consumed,SegmentStatus::Ok};
++    }
++    // End the session. Flush qualified voiced tails even below the minimum
++    // wall span; no empty/silence-only continuation is emitted. Calling finish
++    // while a segment is ready keeps that view and seals the session on release.
++    SegmentStatus finish() {
++        if(!initialized_)return SegmentStatus::NotInitialized;
++        finishing_=true;
++        if(ready_)return SegmentStatus::Ready;
++        if(finished_)return SegmentStatus::Finished;
++        if(frame_count_) { evaluate_frame(true);clear_frame(); }
++        if(active_ && eligible()) { publish(SegmentEnd::SessionEnd);return SegmentStatus::Ready; }
++        finished_=true;active_=false;return SegmentStatus::Finished;
++    }
++    bool release() {
++        if(!ready_)return false;
++        ready_=false;
++        if(finishing_) { active_=false;finished_=true;return true; }
++        if(segment_.end==SegmentEnd::HardLimit) {
++            const size_t keep=config_.forced_overlap_samples;
++            if(keep)std::memmove(buffer_,buffer_+used_-keep,keep*sizeof(int16_t));
++            used_=keep;start_=seen_-keep;fresh_start_=seen_;
++            voice_=0;active_=true;continuation_=true;
++        } else {
++            // Already-delivered trailing silence must not become a new segment's
++            // pre-roll: the default zero-overlap mode is exactly nonoverlapping.
++            used_=head_=history_=voice_=silence_=0;active_=continuation_=false;
++            reset_utterance_levels();
++        }
++        segment_={};return true;
++    }
++private:
++    static bool aligned(size_t n) { return n%kSegmentAnalysisSamples==0; }
++    static bool valid(const SegmenterConfig& c) {
++        return c.max_segment_samples>=2*kSegmentAnalysisSamples && c.max_segment_samples<=kSegmentMaximumSamples
++            && c.min_segment_samples>0 && c.min_segment_samples<=c.max_segment_samples
++            && c.pre_roll_samples<=c.max_segment_samples-kSegmentAnalysisSamples
++            && c.end_silence_samples>0 && c.end_silence_samples<=c.max_segment_samples
++            && c.min_voice_samples>0 && c.min_voice_samples<=c.max_segment_samples-c.pre_roll_samples
++            && c.forced_overlap_samples<c.max_segment_samples && c.rms_threshold>0 && c.rms_threshold<=32767
++            && aligned(c.max_segment_samples) && aligned(c.min_segment_samples) && aligned(c.pre_roll_samples)
++            && aligned(c.end_silence_samples) && aligned(c.min_voice_samples) && aligned(c.forced_overlap_samples)
++            && (!c.adaptive || (c.noise_window_frames>0 && c.noise_window_frames<=kSegmentNoiseWindowFrames
++                && c.calibration_samples>=kSegmentAnalysisSamples
++                && c.calibration_samples<=kSegmentNoiseWindowFrames*kSegmentAnalysisSamples && aligned(c.calibration_samples)
++                && c.adaptive_speech_floor>0 && c.adaptive_speech_floor<=32767
++                && c.adaptive_silence_floor>0 && c.adaptive_silence_floor<=c.adaptive_speech_floor));
++    }
++    size_t history_capacity() const { return config_.pre_roll_samples+kSegmentAnalysisSamples; }
++    void append_history(int16_t sample) {
++        const size_t capacity=history_capacity();
++        if(history_==capacity) { buffer_[head_]=sample;head_=(head_+1)%capacity; }
++        else { buffer_[(head_+history_)%capacity]=sample;++history_; }
++    }
++    void reverse(size_t begin,size_t end) {
++        while(begin<end) { --end;if(begin>=end)break;int16_t v=buffer_[begin];buffer_[begin++]=buffer_[end];buffer_[end]=v; }
++    }
++    void begin_segment() {
++        // A full ring contains pre-roll plus the triggering analysis frame.
++        if(head_) { reverse(0,head_);reverse(head_,history_);reverse(0,history_); }
++        used_=history_;start_=seen_-used_;fresh_start_=start_;
++        head_=history_=voice_=silence_=0;active_=true;continuation_=false;
++    }
++    bool eligible() const { return voice_>0 && (continuation_ || voice_>=config_.min_voice_samples); }
++    void clear_frame() { frame_count_=0;frame_sum_=0;frame_square_=0; }
++    void evaluate_frame(bool finalizing) {
++        const uint64_t n=frame_count_;
++        const uint64_t centered=frame_square_*n-static_cast<uint64_t>(frame_sum_*frame_sum_);
++        // Integer floor(sqrt(variance)) is reproducible across hosts and chips;
++        // the fixed-mode comparison below retains its original exact arithmetic.
++        current_rms_=integer_sqrt(static_cast<uint32_t>(centered/(n*n)));
++        bool voiced=false, silent=false;
++        if(config_.adaptive) {
++            const int32_t floor_before=noise_count_?noise_rms_:-1;
++            const uint16_t window_min=track_noise(current_rms_);
++            if(!calibrated_) {
++                noise_rms_=window_min;calibration_seen_+=frame_count_;
++                if(calibration_seen_>=config_.calibration_samples)calibrated_=true;
++                threshold_rms_=onset_threshold();
++                return;
++            }
++            // A sustained voice can fill the entire window. Do not learn it as
++            // its own ambient floor after five seconds; retain the utterance's
++            // seed while permitting quieter evidence to lower it. Natural
++            // endpoints resume upward adaptation. A noise jump that resembles
++            // speech is inherently ambiguous to this energy-only detector.
++            if(!active_ || window_min<noise_rms_)noise_rms_=window_min;
++            // No utterance exists while idle: an old ambient peak must not
++            // prevent a quiet voice after the room/source becomes quieter.
++            if(!active_ || current_rms_>peak_rms_)peak_rms_=current_rms_;
++            const auto decision=hw1::audio::adaptiveVadDecision(current_rms_,floor_before,noise_rms_,peak_rms_,
++                heard_speech_,{config_.adaptive_speech_floor,config_.adaptive_silence_floor});
++            threshold_rms_=static_cast<uint16_t>(heard_speech_?decision.stopCut:
++                (decision.stopCut>config_.adaptive_speech_floor?decision.stopCut:config_.adaptive_speech_floor));
++            heard_speech_=decision.heardSpeech;
++            // Peak-relative stop timing must never remove quiet word tails.
++            // All admitted raw samples stay in the segment; floor-relative
++            // evidence counts toward minimum voice duration independently.
++            voiced=heard_speech_ && !decision.trimSilent;
++            silent=decision.stopSilent;
++        } else {
++            if(current_rms_>peak_rms_)peak_rms_=current_rms_;
++            const uint64_t threshold=uint64_t(config_.rms_threshold)*config_.rms_threshold*n*n;
++            voiced=centered>=threshold;silent=!voiced;
++        }
++        if(!active_ && voiced)begin_segment();
++        if(!active_)return;
++        if(voiced)voice_+=frame_count_;
++        if(silent)silence_+=frame_count_;else silence_=0;
++        if(finalizing)return;
++        const bool pause=used_>=config_.min_segment_samples && silence_>=config_.end_silence_samples;
++        if(pause || used_>=config_.max_segment_samples) {
++            if(eligible())publish(pause?SegmentEnd::Pause:SegmentEnd::HardLimit);
++            else discard_candidate();
++        }
++    }
++    static uint16_t integer_sqrt(uint32_t value) {
++        uint32_t result=0,bit=uint32_t(1)<<30;
++        while(bit>value)bit>>=2;
++        while(bit) {
++            if(value>=result+bit) { value-=result+bit;result=(result>>1)+bit; }
++            else result>>=1;
++            bit>>=2;
++        }
++        return static_cast<uint16_t>(result);
++    }
++    uint16_t track_noise(uint16_t level) {
++        noise_window_[noise_head_]=level;
++        noise_head_=(noise_head_+1)%config_.noise_window_frames;
++        if(noise_count_<config_.noise_window_frames)++noise_count_;
++        uint16_t minimum=noise_window_[0];
++        for(size_t i=1;i<noise_count_;++i)if(noise_window_[i]<minimum)minimum=noise_window_[i];
++        return minimum;
++    }
++    uint16_t onset_threshold() const {
++        uint16_t threshold=static_cast<uint16_t>(2*noise_rms_);
++        if(threshold<config_.adaptive_speech_floor)threshold=config_.adaptive_speech_floor;
++        return threshold;
++    }
++    void reset_utterance_levels() {
++        heard_speech_=false;peak_rms_=0;
++        if(config_.adaptive) {
++            if(noise_count_) {
++                noise_rms_=noise_window_[0];
++                for(size_t i=1;i<noise_count_;++i)if(noise_window_[i]<noise_rms_)noise_rms_=noise_window_[i];
++            }
++            threshold_rms_=onset_threshold();
++        }
++    }
++    void publish(SegmentEnd end) {
++        segment_={buffer_,used_,start_,seen_,fresh_start_,static_cast<size_t>(fresh_start_-start_),
++                  end==SegmentEnd::HardLimit?config_.forced_overlap_samples:0,voice_,end,continuation_};
++        ready_=true;
++    }
++    void discard_candidate() {
++        const size_t fresh=static_cast<size_t>(seen_-fresh_start_);
++        size_t keep=used_<history_capacity()?used_:history_capacity();
++        // A rejected forced continuation may contain retained, already-delivered
++        // context. Only fresh samples may seed a subsequent ordinary pre-roll.
++        if(keep>fresh)keep=fresh;
++        if(keep)std::memmove(buffer_,buffer_+used_-keep,keep*sizeof(int16_t));
++        history_=keep;head_=used_=voice_=silence_=0;active_=continuation_=false;
++        reset_utterance_levels();
++    }
++    int16_t* buffer_=nullptr;
++    SegmenterConfig config_{};
++    SpeechSegment segment_{};
++    uint64_t seen_=0,start_=0,fresh_start_=0;
++    size_t used_=0,head_=0,history_=0,voice_=0,silence_=0;
++    int64_t frame_sum_=0;
++    uint64_t frame_square_=0;
++    uint16_t frame_count_=0;
++    uint16_t noise_window_[kSegmentNoiseWindowFrames]{};
++    size_t noise_head_=0,noise_count_=0,calibration_seen_=0;
++    uint16_t current_rms_=0,noise_rms_=0,threshold_rms_=0,peak_rms_=0;
++    bool calibrated_=false,heard_speech_=false;
++    bool initialized_=false,active_=false,continuation_=false,ready_=false,finishing_=false,finished_=false;
++};
++} // namespace hw1::stt

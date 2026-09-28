@@ -98,7 +98,12 @@ void g2TextEntryPadEvent(char code);
 // Append a bounded transcript to the active arrow-pad field and refresh only
 // its TEXT child. Runs on the tap-dispatch worker; returns the number of bytes
 // accepted. Secret fields refuse dictation entirely.
-size_t g2TextEntryPadAppendText(const char* text);
+// consumed also counts bytes deliberately rejected by the field's character
+// policy; unconsumed bytes at capacity remain owned by the dictation mailbox.
+size_t g2TextEntryPadAppendText(const char* text, size_t* consumed = nullptr);
+// Remaining capacity and whether a new phrase needs a separating space. Uses
+// the same live, non-secret field guard as append; zero when unavailable.
+size_t g2TextEntryPadRemaining(bool* needsSeparator = nullptr);
 
 // True while a text-entry session is in progress.
 bool g2TextEntryIsActive();
@@ -166,7 +171,14 @@ inline bool g2TextEntryIsActive()                     { return false; }
 inline bool g2TextEntryIsSecret()                     { return false; }
 inline void g2TextEntryHandleTap(uint32_t)            {}
 inline void g2TextEntryPadEvent(char)                 {}
-inline size_t g2TextEntryPadAppendText(const char*)   { return 0; }
+inline size_t g2TextEntryPadAppendText(const char*, size_t* consumed = nullptr) {
+  if (consumed) *consumed = 0;
+  return 0;
+}
+inline size_t g2TextEntryPadRemaining(bool* needsSeparator = nullptr) {
+  if (needsSeparator) *needsSeparator = false;
+  return 0;
+}
 inline bool g2TextEntryOperationBegin(bool* = nullptr) { return false; }
 inline void g2TextEntryOperationEnd()                 {}
 inline bool g2TextEntryRouteBegin(bool* currentOut, bool* localOwnedOut,

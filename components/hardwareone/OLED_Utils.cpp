@@ -16,6 +16,7 @@
 #include "System_CommandTypes.h"  // For Command, CommandContext
 #include "System_EventKindMask.h"
 #include "System_FirstTimeSetup.h"
+#include <algorithm>
 #include "System_Dictation.h"  // KEYBOARD_MODE_MIC: dictation state + control
 #include "OLED_ConsoleBuffer.h"
 
@@ -1799,7 +1800,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
       }
       case DictationState::WAITING:
         display->setCursor(0, micY);
-        display->print(snap.bufferedLocal ? "Local STT" : "Transcribing");
+        display->print(snap.continuous ? "Finishing" : "Transcribing");
         for (uint32_t i = 0; i < ((millis() / 400) % 4); ++i) display->print(".");
         break;
       case DictationState::FAILED:
@@ -1811,7 +1812,8 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
       case DictationState::IDLE:
       default:
         display->setCursor(0, micY);
-        display->print("A: start speaking");
+        display->print(gOledKeyboardState.textLength >= gOledKeyboardState.maxLength
+                           ? "Text field full" : "A: start speaking");
         break;
     }
     return;
@@ -1992,7 +1994,8 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
             localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
         secureClearString(sessionUser);
         if (!sessionAuthed) epoch = kNoTransportSessionEpoch;
-        dictationBegin(epoch);
+        if (gOledKeyboardState.textLength < gOledKeyboardState.maxLength)
+          dictationBegin(epoch);
       }
       inputHandled = true;
     }
@@ -2399,6 +2402,32 @@ void oledKeyboardToggleMode() {
   DEBUG_DISPLAYF("[KEYBOARD] Mode changed to: %s\n", modeName);
 }
 
+static bool oledKeyboardConsumeDictationText() {
+  char text[DICTATION_MAX_TEXT + 1] = {};
+  DictationTextReceipt receipt;
+  if (!dictationPeekTextFor(SOURCE_LOCAL_DISPLAY, text, sizeof(text), &receipt)) return false;
+  const int available = gOledKeyboardState.maxLength - gOledKeyboardState.textLength;
+  const size_t prefix = receipt.offset == 0 && gOledKeyboardState.textLength > 0 &&
+      gOledKeyboardState.text[gOledKeyboardState.textLength - 1] != ' ' ? 1 : 0;
+  if (available <= static_cast<int>(prefix)) {
+    memset(text, 0, sizeof(text));
+    dictationFieldFullFor(SOURCE_LOCAL_DISPLAY);
+    return true;
+  }
+  const size_t count = std::min(static_cast<size_t>(receipt.length),
+                                static_cast<size_t>(available) - prefix);
+  if (prefix) gOledKeyboardState.text[gOledKeyboardState.textLength++] = ' ';
+  memcpy(gOledKeyboardState.text + gOledKeyboardState.textLength, text, count);
+  gOledKeyboardState.textLength += count;
+  gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
+  memset(text, 0, sizeof(text));
+  if (!dictationCommitTextFor(SOURCE_LOCAL_DISPLAY, receipt, count))
+    dictationCancelFor(SOURCE_LOCAL_DISPLAY);
+  else if (gOledKeyboardState.textLength >= gOledKeyboardState.maxLength)
+    dictationFieldFullFor(SOURCE_LOCAL_DISPLAY);
+  return true;
+}
+
 void oledKeyboardDictationTick() {
   if (!gOledKeyboardState.active) return;
   if (gOledKeyboardState.dictationPolicy !=
@@ -2416,17 +2445,8 @@ void oledKeyboardDictationTick() {
 
   dictationTick();
 
-  // Append rather than replace, so a dictated phrase can be corrected with the
-  // character grid afterwards. The field's own maxLength still wins.
-  char text[DICTATION_MAX_TEXT + 1];
-  if (dictationTakeText(text, sizeof(text))) {
-    for (const char* p = text; *p; ++p) {
-      if (gOledKeyboardState.textLength >= gOledKeyboardState.maxLength) break;
-      gOledKeyboardState.text[gOledKeyboardState.textLength++] = *p;
-    }
-    gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
-    DEBUG_DISPLAYF("[KEYBOARD] Dictation appended: textLength=%d\n",
-                   gOledKeyboardState.textLength);
+  // Both providers use the same non-destructive peek and exact commit.
+  if (oledKeyboardConsumeDictationText()) {
     oledMarkDirty();
     return;
   }

@@ -81,7 +81,12 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
                 char* text, size_t capacity, const STTLocalControl& control,
                 STTLocalStats& stats, char* error, size_t errorCapacity,
                 Diagnostics* diagnostics) {
-    stats={}; if(diagnostics)*diagnostics={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
+    stats={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
+#if HW1_STT_RUNTIME_DIAGNOSTICS
+    if(diagnostics)*diagnostics={};
+#else
+    (void)diagnostics;
+#endif
     auto fail=[&](const char* why) { if(text && capacity)text[0]=0; if(error && errorCapacity)snprintf(error,errorCapacity,"%s",why);return false; };
     if(!pcm || !text || capacity<2 || !reader.read || samples<kMinSamples || samples>kMaxSamples)return fail("Invalid STT audio buffer");
     if(cancelled(control))return fail("Cancelled");
@@ -123,6 +128,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     if(!model)return fail("Cannot create STT model");
     auto input=model->get_input(identity::kInputName);auto output=model->get_output(identity::kOutputName);
     if(!tensor(input,frames,64,identity::kInputExponent) || !tensor(output,outputs,29,identity::kOutputExponent))return fail("STT runtime tensor mismatch");
+#if HW1_STT_RUNTIME_DIAGNOSTICS
     if(diagnostics) {
         const auto memory=model->get_memory_info();
         const auto variable=memory.find("variable");
@@ -131,6 +137,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
             diagnostics->activationInternalBytes=variable->second.internal;
         }
     }
+#endif
     stats.loadMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
     progress(control,STTLocalPhase::Frontend);start=millis();
@@ -150,11 +157,13 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
         }
     }
     stats.frontendMs=millis()-start;
+#if HW1_STT_RUNTIME_DIAGNOSTICS
     if(diagnostics) {
         digest(input->data,input->get_bytes(),diagnostics->inputSha);
         diagnostics->freePsramAtInference=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         diagnostics->freeInternalAtInference=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
     }
+#endif
     if(cancelled(control))return fail("Cancelled");
     progress(control,STTLocalPhase::Inference);start=millis();
     for(int stage=0;stage<identity::kNodeCount;++stage) {
@@ -165,7 +174,9 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     stats.inferenceMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
     progress(control,STTLocalPhase::Decoding);start=millis();
+#if HW1_STT_RUNTIME_DIAGNOSTICS
     if(diagnostics)digest(output->data,output->get_bytes(),diagnostics->outputSha);
+#endif
     CtcState ctc;
     if(ctc_reset(&ctc,text,capacity)!=Status::Ok
        || ctc_feed(&ctc,static_cast<const int8_t*>(output->data),outputs,29,text,capacity)!=Status::Ok

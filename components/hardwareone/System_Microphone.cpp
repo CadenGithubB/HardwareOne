@@ -34,6 +34,7 @@
 #include "System_LiveAudio.h"     // best-effort owned-recorder PCM shadow
 #include "System_Dictation.h"     // keyboard voice input: terminal capture hook
 #include "G2_Glasses.h"           // native EvenAI owner/login-epoch fence
+#include "Audio_VadPolicy.h"     // shared amplitude decisions; source DSP stays here
 #include "HAL_Audio.h"            // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
 
 // PDM I2S capture is owned by HAL_Audio — no local channel handle here.
@@ -1098,10 +1099,9 @@ static void recordingTask(void* param) {
           // trimCut <= cut always, so strictly fewer chunks are held than
           // before: auto-stop timing is unchanged, only less audio is thrown
           // away.
-          int32_t trimCut = kRecSilenceFloorAvg;
-          if (2 * gRecFloorAvg > trimCut) trimCut = 2 * gRecFloorAvg;
-          int32_t cut = trimCut;
-          if (gRecPeakAvg / 8 > cut)  cut = gRecPeakAvg / 8;
+          const auto vad = hw1::audio::adaptiveVadDecision(
+              avg, floorBefore, gRecFloorAvg, gRecPeakAvg, gRecHeardSpeech,
+              {kRecSpeechFloorAvg, kRecSilenceFloorAvg});
           // Speech has to stand above the MEASURED ambient floor, not merely
           // above a fixed absolute level. Room tone on the G2 temple mic runs
           // ~150 mean-abs — comfortably over kRecSpeechFloorAvg — so the
@@ -1116,8 +1116,7 @@ static void recordingTask(void* param) {
           // clearly louder than ambient arrives, speech never latches, the
           // auto-stop stays unreachable, and the capture rides the caller's
           // max window instead of truncating. Pausing to think is then free.
-          const bool latchedNow = (!gRecHeardSpeech && floorBefore >= 0
-                                   && avg >= cut && avg >= kRecSpeechFloorAvg);
+          const bool latchedNow = vad.latch;
           if (latchedNow) {
             gRecHeardSpeech = true;
             gRecLatchChunk = (int32_t)gRecChunkIdx;
@@ -1125,11 +1124,11 @@ static void recordingTask(void* param) {
           }
           const uint32_t chunkMs = (gRecSampleRate > 0)
               ? (uint32_t)((uint64_t)sampleCount * 1000 / gRecSampleRate) : 128;
-          const bool scoredSilent = (gRecHeardSpeech && avg < cut);
+          const bool scoredSilent = vad.stopSilent;
           // Discard decision uses the floor-relative gate, so a quiet word tail
           // is committed rather than held; the auto-stop clock below keeps the
           // peak-relative gate so end-of-speech detection does not get slower.
-          chunkScoredSilent = (gRecHeardSpeech && avg < trimCut);
+          chunkScoredSilent = vad.trimSilent;
           if (scoredSilent) gRecSilenceMs += chunkMs;
           else              gRecSilenceMs = 0;
           const uint32_t elapsedMs = (gRecSampleRate > 0)
@@ -1153,7 +1152,7 @@ static void recordingTask(void* param) {
           DEBUG_MIC_VALUESF("[MIC_VAD] c%-3lu avg=%-5ld floor=%-5ld->%-5ld cut=%-5ld peak=%-5ld "
                             "%s %s sil=%lums el=%lums",
                             (unsigned long)gRecChunkIdx, (long)avg,
-                            (long)floorBefore, (long)gRecFloorAvg, (long)cut, (long)gRecPeakAvg,
+                            (long)floorBefore, (long)gRecFloorAvg, (long)vad.stopCut, (long)gRecPeakAvg,
                             gRecHeardSpeech ? (latchedNow ? "LATCH" : "spch ") : "----- ",
                             scoredSilent ? "SIL" : "snd",
                             (unsigned long)gRecSilenceMs, (unsigned long)elapsedMs);
