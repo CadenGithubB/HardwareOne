@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "base_commit": "05614eb5900e461633ad951f7358b522894e313b",
+  "production_sources": {
+    "components/hardwareone/CMakeLists.txt": "5fb0abbd5fd6e00333e437ef7463ab54bd5dfcf2da18ba3e6b44b008d16086cf",
+    "components/hardwareone/HAL_Audio.cpp": "7e317681cc56800173583f9980f8f2debecb2cbe2139c0794f892a6ceef07d35",
+    "components/hardwareone/HAL_Audio.h": "5bfc2c154d47044dfb7f9e0caf95e785511d8275f9ac67ef012fb3918d77ea39",
+    "components/hardwareone/System_BuildConfig.h": "e9f34aa3ea4f90ea0a6609adccb2f0287f6f614ddbafa1fbfa8b6498d811607d",
+    "components/hardwareone/System_ESPSR.cpp": "71cbe5c44a2d2f5ada3b73e37ddaa4cd32a1cb008ff01f15d94c393d48538fc0",
+    "components/hardwareone/System_Microphone.cpp": "3580e6bbbf00a29e51d70ad9c2be25d6e842cff697744e830c25d616b9807d28"
+  },
+  "dependency_source_sha256": "d2119971a71b8ff7abe7680cbf89a8a497603cd4b0313427cbfa2e70ab67f1b8",
+  "patch_sha256": "d64aad09a2861b3f79ba057e9cc751bfd174b6852ba7fb6ed06796d4ec2286c0"
+}

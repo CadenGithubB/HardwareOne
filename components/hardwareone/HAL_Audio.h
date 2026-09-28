@@ -10,9 +10,11 @@
  * that wants a live level while another consumer owns the stream must read the
  * owner's published derived scalar, NOT open a second capture.
  *
- * Every source delivers the same canonical format: 16 kHz / mono / int16 PCM,
- * so consumers (the WAV recorder, the ESP-SR AFE feed, VU metering) never
- * resample and never care which source is live.
+ * Every source delivers mono / int16 PCM. The default capture rate is 16 kHz;
+ * onboard PDM also accepts the requested sample rate, while G2 is fixed at
+ * 16 kHz. Consumers that require 16 kHz (such as ESP-SR) request that rate;
+ * recorders must use the effective source rate for WAV headers and duration.
+ * The HAL does not resample.
  *
  * Availability is RUNTIME, not a compile-time default: PDM is available iff the
  * board physically has it (ENABLE_MICROPHONE_SENSOR — I2S/PDM is unprobeable, so
@@ -37,7 +39,8 @@
 // ENABLE_MICROPHONE_SENSOR inside the .cpp.
 #if ENABLE_MICROPHONE
 
-// Canonical capture format — every source produces this.
+// Default capture rate and shared PCM format. G2 always uses this rate; PDM
+// can use the rate requested by audioCaptureStart().
 static const uint32_t AUDIO_HAL_SAMPLE_RATE = 16000;
 static const uint8_t  AUDIO_HAL_BITS        = 16;
 static const uint8_t  AUDIO_HAL_CHANNELS    = 1;
@@ -87,8 +90,10 @@ bool        audioCaptureOwnedBy(const char* owner); // owner holds any busy phas
 const char* audioCaptureOwner();   // "" when idle
 
 // Pull PCM from the active source into `out` (int16 mono). Returns the number
-// of samples read; 0 on timeout, stall, or when not capturing. Blocks up to
-// timeoutMs. Safe to call with a short read — consumers already tolerate it.
+// of samples read, including valid partial PCM before a timeout; 0 if no PCM
+// is delivered or capture is inactive. timeoutMs is the source wait timeout;
+// IDF PDM applies it to each DMA-buffer wait, so filling a multi-buffer request
+// can take longer in total. Consumers must tolerate short reads.
 size_t      audioReadPcm(int16_t* out, size_t maxSamples, uint32_t timeoutMs);
 
 // Establish a fresh consumer boundary without restarting the physical source.

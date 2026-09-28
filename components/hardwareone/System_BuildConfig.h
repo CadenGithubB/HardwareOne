@@ -210,11 +210,11 @@
   #endif
 #endif
 
-// Microphone: PDM microphone via I2S. PICO board has none. Auto-enabled on the
-// XIAO ESP32S3 Sense, which has an onboard PDM mic (CLK=GPIO42, DATA=GPIO41).
-// Overridable by a pre-define; all other boards default off.
+// Onboard PDM microphone via the shared audio HAL. Board wiring below selects
+// XIAO Sense GPIO42/41 or P4X-EYE GPIO22/21 and its peripheral power rail.
+// Overridable by a pre-define; other boards default off.
 #ifndef ENABLE_MICROPHONE_SENSOR
-  #if defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && XIAO_ESP32S3_SENSE_ENABLED)
+  #if (defined(HW_BOARD_P4X_EYE) && HW_BOARD_P4X_EYE) || defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && XIAO_ESP32S3_SENSE_ENABLED)
     #define ENABLE_MICROPHONE_SENSOR  1
   #else
     #define ENABLE_MICROPHONE_SENSOR  0
@@ -1071,6 +1071,9 @@
   // Sense-specific: Digital Microphone PDM
   #define MIC_CLK_PIN           42  // GPIO42 (PDM clock)
   #define MIC_DATA_PIN          41  // GPIO41 (PDM data)
+  // MSM261D3526H1CPM clock bands; the HAL avoids the mode-transition gap.
+  #define MIC_PDM_LOW_POWER_MAX_HZ 900000
+  #define MIC_PDM_STANDARD_MIN_HZ 1100000
 
   // UART host link — UART0 on D6/D7 (GPIO43/44, the XIAO's TX/RX pads; this
   // is what the CM5 carrier wires to the Pi's uart2). Requires the IDF
@@ -1270,6 +1273,18 @@
   #define BATTERY_BACKEND_ADC        0
   #define BATTERY_BACKEND_FUEL_GAUGE 0
 
+#endif
+
+// P4X-EYE V2.4 U9 (MSM261D): left-slot PDM microphone. These are board
+// connections, not generic P4 defaults. GPIO12 also powers camera/LCD/IMU;
+// the audio HAL asserts it on start and leaves it on during teardown.
+#if defined(HW_BOARD_P4X_EYE) && HW_BOARD_P4X_EYE
+  #define MIC_CLK_PIN 22
+  #define MIC_DATA_PIN 21
+  #define MIC_POWER_PIN 12
+  // MSM261DHP006 clock bands (same decimation policy as the XIAO mic).
+  #define MIC_PDM_LOW_POWER_MAX_HZ 900000
+  #define MIC_PDM_STANDARD_MIN_HZ 1100000
 #endif
 
 // =============================================================================

@@ -1,0 +1,226 @@
+diff --git a/components/hardwareone/CMakeLists.txt b/components/hardwareone/CMakeLists.txt
+index 240026f..1bc368a 100644
+--- a/components/hardwareone/CMakeLists.txt
++++ b/components/hardwareone/CMakeLists.txt
+@@ -508,4 +508,6 @@ set(hardwareone_requires
+         esp_app_format
+         esp_adc
++        esp_driver_gpio
++        esp_driver_i2s
+         json
+         mbedtls
+diff --git a/components/hardwareone/HAL_Audio.cpp b/components/hardwareone/HAL_Audio.cpp
+index 8e194cf..430ae0b 100644
+--- a/components/hardwareone/HAL_Audio.cpp
++++ b/components/hardwareone/HAL_Audio.cpp
+@@ -22,12 +22,13 @@
+ #if ENABLE_MICROPHONE_SENSOR
+ #include <driver/i2s_pdm.h>
++#include <driver/gpio.h>
+ #include "System_Mutex.h"     // I2sMicLockGuard — shared I2S-mic hardware lock (PDM only)
+-// PDM mic pins. BuildConfig defines these for the XIAO ESP32S3 Sense; keep a
+-// fallback so the file is self-contained.
+-#ifndef MIC_CLK_PIN
+-#define MIC_CLK_PIN   42   // GPIO42 (PDM clock)
++// The board owns its wiring. Enabling a mic on an unconfigured board must not
++// silently drive the XIAO pins (which can have different roles on other chips).
++#if !defined(MIC_CLK_PIN) || !defined(MIC_DATA_PIN)
++#error "ENABLE_MICROPHONE_SENSOR requires board MIC_CLK_PIN and MIC_DATA_PIN"
+ #endif
+-#ifndef MIC_DATA_PIN
+-#define MIC_DATA_PIN  41   // GPIO41 (PDM data)
++#ifndef MIC_POWER_PIN
++#define MIC_POWER_PIN -1
+ #endif
+ #endif // ENABLE_MICROPHONE_SENSOR
+@@ -73,4 +74,19 @@ static i2s_chan_handle_t gPdmRx = nullptr;
+ // Caller must hold I2sMicLockGuard.
+ static bool pdmStartLocked(uint32_t rate) {
++#if MIC_POWER_PIN >= 0
++  // Some boards put the mic on a shared peripheral rail (P4X-EYE: camera/LCD
++  // and microphone). Set its output latch first, then enable output, so opening
++  // the mic cannot briefly pull down a rail already used by another backend.
++  // Never deassert/reset this pin during stop or error cleanup.
++  esp_err_t powerErr = gpio_set_level((gpio_num_t)MIC_POWER_PIN, 1);
++  if (powerErr == ESP_OK) {
++    powerErr = gpio_set_direction((gpio_num_t)MIC_POWER_PIN, GPIO_MODE_OUTPUT);
++  }
++  if (powerErr != ESP_OK) {
++    WARN_SYSTEMF("[HAL_AUDIO] microphone power enable failed: 0x%x (%s)",
++                 powerErr, esp_err_to_name(powerErr));
++    return false;
++  }
++#endif
+   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+   chan_cfg.dma_desc_num  = 4;
+@@ -104,4 +120,15 @@ static bool pdmStartLocked(uint32_t rate) {
+   };
+ 
++#if defined(MIC_PDM_LOW_POWER_MAX_HZ) && defined(MIC_PDM_STANDARD_MIN_HZ)
++  // DSR8 clocks the mic at 64x PCM rate. Some microphones have a forbidden
++  // clock gap between their low-power and standard modes (16 kHz gives
++  // 1.024 MHz there). DSR16 doubles the PDM clock while preserving the PCM
++  // sample rate; board limits keep this adjustment specific to its hardware.
++  const uint64_t pdmClock = (uint64_t)rate * 64u;
++  if (pdmClock > MIC_PDM_LOW_POWER_MAX_HZ && pdmClock < MIC_PDM_STANDARD_MIN_HZ) {
++    pdm_cfg.clk_cfg.dn_sample_mode = I2S_PDM_DSR_16S;
++  }
++#endif
++
+   err = i2s_channel_init_pdm_rx_mode(gPdmRx, &pdm_cfg);
+   if (err != ESP_OK) {
+@@ -125,5 +152,6 @@ static bool pdmStartLocked(uint32_t rate) {
+   size_t  flushBytes = 0;
+   for (int i = 0; i < 10; i++) {
+-    i2s_channel_read(gPdmRx, flushBuf, sizeof(flushBuf), &flushBytes, pdMS_TO_TICKS(100));
++    // The IDF channel API takes milliseconds, not FreeRTOS ticks.
++    i2s_channel_read(gPdmRx, flushBuf, sizeof(flushBuf), &flushBytes, 100);
+   }
+   INFO_SYSTEMF("[HAL_AUDIO] PDM mic started: %u Hz, CLK=%d DATA=%d", (unsigned)rate,
+@@ -413,7 +441,10 @@ size_t audioReadPcm(int16_t* out, size_t maxSamples, uint32_t timeoutMs) {
+     if (!gPdmRx) return 0;
+     err = i2s_channel_read(gPdmRx, out, maxSamples * sizeof(int16_t),
+-                           &bytesRead, pdMS_TO_TICKS(timeoutMs));
++                           &bytesRead, timeoutMs);
+   }
+-  if (err != ESP_OK) return 0;
++  // IDF preserves bytes already copied when a later DMA-buffer wait times out.
++  // In particular, low sample rates can return useful PCM before the caller's
++  // read is full. Discarding it would punch gaps in recordings and DSP input.
++  if (err != ESP_OK && err != ESP_ERR_TIMEOUT) return 0;
+   return bytesRead / sizeof(int16_t);
+ #else
+diff --git a/components/hardwareone/HAL_Audio.h b/components/hardwareone/HAL_Audio.h
+index 6fa005f..1d437e5 100644
+--- a/components/hardwareone/HAL_Audio.h
++++ b/components/hardwareone/HAL_Audio.h
+@@ -11,7 +11,9 @@
+  * owner's published derived scalar, NOT open a second capture.
+  *
+- * Every source delivers the same canonical format: 16 kHz / mono / int16 PCM,
+- * so consumers (the WAV recorder, the ESP-SR AFE feed, VU metering) never
+- * resample and never care which source is live.
++ * Every source delivers mono / int16 PCM. The default capture rate is 16 kHz;
++ * onboard PDM also accepts the requested sample rate, while G2 is fixed at
++ * 16 kHz. Consumers that require 16 kHz (such as ESP-SR) request that rate;
++ * recorders must use the effective source rate for WAV headers and duration.
++ * The HAL does not resample.
+  *
+  * Availability is RUNTIME, not a compile-time default: PDM is available iff the
+@@ -38,5 +40,6 @@
+ #if ENABLE_MICROPHONE
+ 
+-// Canonical capture format — every source produces this.
++// Default capture rate and shared PCM format. G2 always uses this rate; PDM
++// can use the rate requested by audioCaptureStart().
+ static const uint32_t AUDIO_HAL_SAMPLE_RATE = 16000;
+ static const uint8_t  AUDIO_HAL_BITS        = 16;
+@@ -88,6 +91,8 @@ const char* audioCaptureOwner();   // "" when idle
+ 
+ // Pull PCM from the active source into `out` (int16 mono). Returns the number
+-// of samples read; 0 on timeout, stall, or when not capturing. Blocks up to
+-// timeoutMs. Safe to call with a short read — consumers already tolerate it.
++// of samples read, including valid partial PCM before a timeout; 0 if no PCM
++// is delivered or capture is inactive. timeoutMs is the source wait timeout;
++// IDF PDM applies it to each DMA-buffer wait, so filling a multi-buffer request
++// can take longer in total. Consumers must tolerate short reads.
+ size_t      audioReadPcm(int16_t* out, size_t maxSamples, uint32_t timeoutMs);
+ 
+diff --git a/components/hardwareone/System_BuildConfig.h b/components/hardwareone/System_BuildConfig.h
+index 270f9d3..9bbd75a 100644
+--- a/components/hardwareone/System_BuildConfig.h
++++ b/components/hardwareone/System_BuildConfig.h
+@@ -211,9 +211,9 @@
+ #endif
+ 
+-// Microphone: PDM microphone via I2S. PICO board has none. Auto-enabled on the
+-// XIAO ESP32S3 Sense, which has an onboard PDM mic (CLK=GPIO42, DATA=GPIO41).
+-// Overridable by a pre-define; all other boards default off.
++// Onboard PDM microphone via the shared audio HAL. Board wiring below selects
++// XIAO Sense GPIO42/41 or P4X-EYE GPIO22/21 and its peripheral power rail.
++// Overridable by a pre-define; other boards default off.
+ #ifndef ENABLE_MICROPHONE_SENSOR
+-  #if defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && XIAO_ESP32S3_SENSE_ENABLED)
++  #if (defined(HW_BOARD_P4X_EYE) && HW_BOARD_P4X_EYE) || defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && XIAO_ESP32S3_SENSE_ENABLED)
+     #define ENABLE_MICROPHONE_SENSOR  1
+   #else
+@@ -1072,4 +1072,7 @@
+   #define MIC_CLK_PIN           42  // GPIO42 (PDM clock)
+   #define MIC_DATA_PIN          41  // GPIO41 (PDM data)
++  // MSM261D3526H1CPM clock bands; the HAL avoids the mode-transition gap.
++  #define MIC_PDM_LOW_POWER_MAX_HZ 900000
++  #define MIC_PDM_STANDARD_MIN_HZ 1100000
+ 
+   // UART host link — UART0 on D6/D7 (GPIO43/44, the XIAO's TX/RX pads; this
+@@ -1273,4 +1276,16 @@
+ #endif
+ 
++// P4X-EYE V2.4 U9 (MSM261D): left-slot PDM microphone. These are board
++// connections, not generic P4 defaults. GPIO12 also powers camera/LCD/IMU;
++// the audio HAL asserts it on start and leaves it on during teardown.
++#if defined(HW_BOARD_P4X_EYE) && HW_BOARD_P4X_EYE
++  #define MIC_CLK_PIN 22
++  #define MIC_DATA_PIN 21
++  #define MIC_POWER_PIN 12
++  // MSM261DHP006 clock bands (same decimation policy as the XIAO mic).
++  #define MIC_PDM_LOW_POWER_MAX_HZ 900000
++  #define MIC_PDM_STANDARD_MIN_HZ 1100000
++#endif
++
+ // =============================================================================
+ // BATTERY MONITOR — derived enable + backend sanity
+diff --git a/components/hardwareone/System_ESPSR.cpp b/components/hardwareone/System_ESPSR.cpp
+index 0b6deea..f909703 100644
+--- a/components/hardwareone/System_ESPSR.cpp
++++ b/components/hardwareone/System_ESPSR.cpp
+@@ -1750,4 +1750,6 @@ static bool initI2SMicrophone() {
+   } else if (gSettings.micSource == "g2" && audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
+     audioSetSource(AUDIO_SRC_G2_LEFT);
++  } else {
++    audioSetSource(AUDIO_SRC_NONE);  // auto/unavailable preference: resolve afresh
+   }
+   return audioCaptureStart("sr", I2S_SR_SAMPLE_RATE);
+diff --git a/components/hardwareone/System_Microphone.cpp b/components/hardwareone/System_Microphone.cpp
+index b9bef3b..d9555ff 100644
+--- a/components/hardwareone/System_Microphone.cpp
++++ b/components/hardwareone/System_Microphone.cpp
+@@ -1,6 +1,6 @@
+ /**
+- * Microphone Sensor Module - ESP32-S3 PDM Microphone Implementation
++ * Microphone Sensor Module — shared onboard PDM and G2 recording
+  * 
+- * Uses I2S peripheral to interface with PDM microphone on XIAO ESP32S3 Sense.
++ * Capture hardware and BLE audio are owned by HAL_Audio on every board.
+  */
+ 
+@@ -37,8 +37,4 @@
+ #include "HAL_Audio.h"            // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
+ 
+-// XIAO ESP32S3 Sense PDM Microphone Pins
+-#define MIC_PDM_CLK_PIN     42        // PDM CLK (GPIO42 on XIAO Sense)
+-#define MIC_PDM_DATA_PIN    41        // PDM DATA (GPIO41 on XIAO Sense)
+-
+ // PDM I2S capture is owned by HAL_Audio — no local channel handle here.
+ 
+@@ -1984,6 +1980,5 @@ bool initMicrophone() {
+   WARN_SYSTEMF("[MIC_INIT] Audio settings: sampleRate=%d, bitDepth=%d, channels=%d, gain=%d%%",
+                micSampleRate, micBitDepth, micChannels, micGain);
+-  WARN_SYSTEMF("[MIC_INIT] Pin config: CLK=%d, DATA=%d", MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN);
+-  INFO_MIC_LIFECYCLEF("Initializing PDM microphone...");
++  INFO_MIC_LIFECYCLEF("Initializing microphone capture...");
+   STACK_TRACEF("initMicrophone.enter rate=%d bitDepth=%d channels=%d",
+                micSampleRate, micBitDepth, micChannels);
+@@ -2001,4 +1996,6 @@ bool initMicrophone() {
+   } else if (gSettings.micSource == "g2" && audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
+     audioSetSource(AUDIO_SRC_G2_LEFT);
++  } else {
++    audioSetSource(AUDIO_SRC_NONE);  // auto/unavailable preference: resolve afresh
+   }
+ 
+@@ -2008,5 +2005,5 @@ bool initMicrophone() {
+   if (!audioCaptureStart("mic", (uint32_t)micSampleRate)) {
+     WARN_SYSTEMF("[MIC_INIT] *** audioCaptureStart(\"mic\") FAILED at rate=%d Hz ***", micSampleRate);
+-    INFO_MIC_LIFECYCLEF("Failed to start PDM capture");
++    INFO_MIC_LIFECYCLEF("Failed to start microphone capture");
+     return false;
+   }

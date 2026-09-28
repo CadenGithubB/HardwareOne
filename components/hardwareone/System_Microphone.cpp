@@ -1,7 +1,7 @@
 /**
- * Microphone Sensor Module - ESP32-S3 PDM Microphone Implementation
+ * Microphone Sensor Module — shared onboard PDM and G2 recording
  * 
- * Uses I2S peripheral to interface with PDM microphone on XIAO ESP32S3 Sense.
+ * Capture hardware and BLE audio are owned by HAL_Audio on every board.
  */
 
 #include "System_Microphone.h"
@@ -35,10 +35,6 @@
 #include "System_Dictation.h"     // keyboard voice input: terminal capture hook
 #include "G2_Glasses.h"           // native EvenAI owner/login-epoch fence
 #include "HAL_Audio.h"            // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
-
-// XIAO ESP32S3 Sense PDM Microphone Pins
-#define MIC_PDM_CLK_PIN     42        // PDM CLK (GPIO42 on XIAO Sense)
-#define MIC_PDM_DATA_PIN    41        // PDM DATA (GPIO41 on XIAO Sense)
 
 // PDM I2S capture is owned by HAL_Audio — no local channel handle here.
 
@@ -1983,8 +1979,7 @@ bool initMicrophone() {
 
   WARN_SYSTEMF("[MIC_INIT] Audio settings: sampleRate=%d, bitDepth=%d, channels=%d, gain=%d%%",
                micSampleRate, micBitDepth, micChannels, micGain);
-  WARN_SYSTEMF("[MIC_INIT] Pin config: CLK=%d, DATA=%d", MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN);
-  INFO_MIC_LIFECYCLEF("Initializing PDM microphone...");
+  INFO_MIC_LIFECYCLEF("Initializing microphone capture...");
   STACK_TRACEF("initMicrophone.enter rate=%d bitDepth=%d channels=%d",
                micSampleRate, micBitDepth, micChannels);
 
@@ -2000,6 +1995,8 @@ bool initMicrophone() {
     audioSetSource(AUDIO_SRC_LOCAL_PDM);
   } else if (gSettings.micSource == "g2" && audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
     audioSetSource(AUDIO_SRC_G2_LEFT);
+  } else {
+    audioSetSource(AUDIO_SRC_NONE);  // auto/unavailable preference: resolve afresh
   }
 
   // Capture is owned by HAL_Audio (the single owner). audioCaptureStart resolves
@@ -2007,7 +2004,7 @@ bool initMicrophone() {
   // channel + warm-up flush OR arms the G2 ring and enables the glasses stream.
   if (!audioCaptureStart("mic", (uint32_t)micSampleRate)) {
     WARN_SYSTEMF("[MIC_INIT] *** audioCaptureStart(\"mic\") FAILED at rate=%d Hz ***", micSampleRate);
-    INFO_MIC_LIFECYCLEF("Failed to start PDM capture");
+    INFO_MIC_LIFECYCLEF("Failed to start microphone capture");
     return false;
   }
   gMicRunning = true;

@@ -507,6 +507,8 @@ set(hardwareone_requires
         bootloader_support
         esp_app_format
         esp_adc
+        esp_driver_gpio
+        esp_driver_i2s
         json
         mbedtls
         esp_wifi

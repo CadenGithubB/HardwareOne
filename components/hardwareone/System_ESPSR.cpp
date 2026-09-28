@@ -1749,6 +1749,8 @@ static bool initI2SMicrophone() {
     audioSetSource(AUDIO_SRC_LOCAL_PDM);
   } else if (gSettings.micSource == "g2" && audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
     audioSetSource(AUDIO_SRC_G2_LEFT);
+  } else {
+    audioSetSource(AUDIO_SRC_NONE);  // auto/unavailable preference: resolve afresh
   }
   return audioCaptureStart("sr", I2S_SR_SAMPLE_RATE);
 #else
