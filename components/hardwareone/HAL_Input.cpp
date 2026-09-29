@@ -13,7 +13,9 @@
 #if ENABLE_OLED_INPUT
 #include "System_Command.h"
 #include "System_Settings.h"
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
 #include "System_I2C.h"
+#endif
 #include "System_Utils.h"
 #endif
 
@@ -31,7 +33,9 @@
 // On a normal boot path that never fires, so IN/A/B/X/Y were dead from
 // boot through every menu mode until the user manually restarted the OLED.
 // Runtime inputSetControllerType() can still change this later.
-#if INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
+#if INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
+static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
+#elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
 static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_ANO_ENCODER;
 #elif INPUT_TYPE == INPUT_TYPE_CLICK_WHEEL
 static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_CLICK_WHEEL;
@@ -69,6 +73,12 @@ static const uint32_t gClickWheelMapping[] = {
   (1 << 3),   // INPUT_BUTTON_Y - Special button
   (1 << 4),   // INPUT_BUTTON_START - Start button
   (1 << 5)    // INPUT_BUTTON_SELECT - Select button
+};
+
+// Direct GPIO wheel gestures use HAL logical bit positions. Double-click is the
+// SELECT/function action; auxiliary board keys supply X, Y and START.
+static const uint32_t gGpioEncoderMapping[] = {
+  1u, 2u, 4u, 8u, ENABLE_GPIO_ENCODER_BUTTONS ? 16u : 0u, 32u
 };
 
 // ANO rotary encoder button mappings. The 4 directional buttons are PURE
@@ -117,6 +127,8 @@ void inputAbstractionInit() {
   gCurrentControllerType = INPUT_CONTROLLER_CLICK_WHEEL;
 #elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
   gCurrentControllerType = INPUT_CONTROLLER_ANO_ENCODER;
+#elif INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
+  gCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
 #elif INPUT_TYPE == INPUT_TYPE_CUSTOM
   gCurrentControllerType = INPUT_CONTROLLER_CUSTOM;
 #else
@@ -158,6 +170,9 @@ uint32_t inputGetButtonMask(InputButton button) {
 
     case INPUT_CONTROLLER_ANO_ENCODER:
       return gAnoEncoderMapping[button];
+
+    case INPUT_CONTROLLER_GPIO_ENCODER:
+      return gGpioEncoderMapping[button];
 
     case INPUT_CONTROLLER_CUSTOM:
       return gCustomMapping[button];
@@ -234,7 +249,46 @@ uint32_t inputButtonsToLogical(uint32_t deviceCacheButtonsActiveLow) {
 }
 
 uint32_t inputGetButtonsLogical() {
+  // A stopped/missing device has no pressed buttons. Its raw accessor's zero
+  // sentinel must not be inverted into every logical button being pressed.
+  if (!gInputConnected || !gInputCache.dataValid) return 0;
   return inputButtonsToLogical(inputGetButtonsRaw());
+}
+
+bool inputHasPendingDetents() {
+#if ENABLE_GPIO_ENCODER
+  return gpioEncoderHasPendingDetents();
+#elif ENABLE_ANO_ENCODER
+  return gAnoEncoderCache.encoderDelta != 0;
+#else
+  return false;
+#endif
+}
+
+int inputConsumeOneDetent() {
+#if ENABLE_GPIO_ENCODER
+  return gpioEncoderConsumeOneDetent();
+#elif ENABLE_ANO_ENCODER
+  return anoEncoderConsumeOneDetent();
+#else
+  return 0;
+#endif
+}
+
+uint32_t inputConsumeButtonPresses(uint32_t& previousActiveLow, bool& initialized) {
+  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(10)) != pdTRUE) return 0;
+  if (!gInputRunning || !gInputCache.dataValid) {
+    xSemaphoreGive(gInputCache.mutex);
+    return 0;
+  }
+  const uint32_t raw = gInputCache.buttons;
+  uint32_t pressed = gInputCache.buttonPressedAccum;
+  gInputCache.buttonPressedAccum = 0;
+  if (initialized) pressed |= ~raw & previousActiveLow;
+  previousActiveLow = raw;
+  initialized = true;
+  xSemaphoreGive(gInputCache.mutex);
+  return pressed;
 }
 
 #if ENABLE_OLED_INPUT
@@ -245,6 +299,7 @@ uint32_t inputGetButtonsLogical() {
 // Driver-internal CLIs that dump raw device state stay in their own driver
 // files (gamepadread, anoencoderread).
 
+#if !ENABLE_GPIO_ENCODER
 static const char* inputDeviceLabel() {
 #if ENABLE_ANO_ENCODER
   return "ANO Encoder";
@@ -256,9 +311,13 @@ static const char* inputDeviceLabel() {
 // Defined in System_I2C.cpp — generic queued-start dispatcher.
 extern const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName,
                                           const bool& enabledFlag, const char* eventTag);
+#endif
 
 static const char* cmd_openinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+#if ENABLE_GPIO_ENCODER
+  return inputStartInternal() ? "[Input] GPIO encoder started" : "Error: GPIO encoder start failed";
+#else
   const char* result = cmd_sensorstart_queued(I2C_DEVICE_INPUT, inputDeviceLabel(),
                                               gInputRunning, "openinput@enqueue");
   // The device starts asynchronously and this command returns no button state —
@@ -269,13 +328,19 @@ static const char* cmd_openinput(const String& argsInput) {
   cliHint("to read live input, run 'gamepadread' once the device is up");
 #endif
   return result;
+#endif
 }
 
 static const char* cmd_closeinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   INFO_INPUT_LIFECYCLEF("cmd_closeinput: Stop requested");
+#if ENABLE_GPIO_ENCODER
+  gpioEncoderStop();
+  return gInputRunning ? "Error: GPIO encoder is busy; retry closeinput" : "[Input] GPIO encoder stopped";
+#else
   handleDeviceStopped(I2C_DEVICE_INPUT);
   return "[Input] Stop requested; cleanup will complete asynchronously";
+#endif
 }
 
 static const char* cmd_inputautostart(const String& argsInput) {
@@ -298,6 +363,9 @@ static const char* cmd_inputautostart(const String& argsInput) {
 
 static const char* cmd_inputdevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+#if ENABLE_GPIO_ENCODER
+  return "[Input] GPIO encoder uses interrupts and a fixed 5 ms switch sample; poll interval applies to I2C input only";
+#else
   CommandArgs a(argsInput);
   if (a.count() == 0) {
     static char buf[48];
@@ -308,15 +376,27 @@ static const char* cmd_inputdevicepollms(const String& argsInput) {
   if (ms < 10 || ms > 1000) return "Error: invalid arguments — Usage: inputdevicepollms <10-1000>";
   setSetting(gSettings.inputDevicePollMs, ms);
   return "[Input] Poll interval updated";
+#endif
 }
+
+#if ENABLE_GPIO_ENCODER
+static const char* cmd_gpioencoderread(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char buf[256];
+  return gpioEncoderBuildDataJSON(buf, sizeof(buf)) > 0 ? buf : "Error: GPIO encoder snapshot unavailable";
+}
+#endif
 
 // Command registry — registered unconditionally as the "input" module since
 // it works under either driver.
 const CommandEntry inputCommands[] = {
-  { "openinput",         "Start the input device (gamepad or ANO encoder).", false, cmd_openinput },
+  { "openinput",         "Start the configured input device.",              false, cmd_openinput },
   { "closeinput",        "Stop the input device.",                            false, cmd_closeinput },
   { "inputautostart",    "Enable/disable input device auto-start [on|off]",   false, cmd_inputautostart,    "Usage: inputautostart [on|off]" },
   { "inputdevicepollms", "Set input device poll interval ms [10-1000]",       true,  cmd_inputdevicepollms, "Usage: inputdevicepollms <10-1000>" },
+#if ENABLE_GPIO_ENCODER
+  { "gpioencoderread",   "Read GPIO wheel position, switch and pending input as JSON.", false, cmd_gpioencoderread },
+#endif
 };
 const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0]);
 
@@ -326,7 +406,9 @@ const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0
 static const SettingEntry inputSettingEntries[] = {
   { "inputEnabled", SETTING_BOOL, &gSettings.inputEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "inputenabled" },
   { "inputAutoStart",    SETTING_BOOL, &gSettings.inputAutoStart,     0, 0, nullptr, 0,  1,    "Auto-start after boot", nullptr, false, nullptr, "inputautostart" },
+#if !ENABLE_GPIO_ENCODER
   { "inputDevicePollMs", SETTING_INT,  &gSettings.inputDevicePollMs, 90, 0, nullptr, 10, 1000, "Poll Interval (ms)",   nullptr, false, nullptr, "inputdevicepollms" },
+#endif
 };
 
 static bool isInputConnected() { return gInputConnected; }
@@ -339,7 +421,7 @@ extern const SettingsModule inputSettingsModule = {
   inputSettingEntries,
   sizeof(inputSettingEntries) / sizeof(inputSettingEntries[0]),
   isInputConnected,
-  "OLED input device (Seesaw gamepad or ANO encoder)"
+  "Local display input device (Seesaw, ANO or GPIO encoder)"
 };
 
 #endif // ENABLE_OLED_INPUT

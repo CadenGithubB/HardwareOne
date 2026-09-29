@@ -58,11 +58,12 @@ bool init();
 bool isLittleFSReady();
 
 /**
- * "Driver-level" SD availability: true iff SD.begin() has succeeded and the
+ * SD availability: true iff the selected SD transport mount has succeeded and the
  * mount hasn't been torn down. This does NOT prove files can actually be
  * written — a card can mount but fail writes (bad sector where the next
  * file happens to land, card yanked since, write-protect tab, filesystem
- * errors). For gating UI around "can we record to SD" use isSDWritable().
+ * errors). SDMMC also checks the card-detect switch and latches observed
+ * removal until remount. For "can we record to SD" use isSDWritable().
  */
 bool isSDAvailable();
 
@@ -83,7 +84,8 @@ bool isSDWritable();
  */
 void noteSDWriteFailure(const char* hint);
 
-// SD card management
+// SD card management. Stop active writers and close their files before
+// unmount/format; card insertion is mounted explicitly with remountSD().
 bool remountSD();
 bool unmountSD();
 bool formatSD();

@@ -21,6 +21,8 @@
 #include "i2csensor_seesaw.h"
 #elif ENABLE_ANO_ENCODER
 #include "i2csensor_ano_encoder.h"   // anoEncoderBuildDataJSON — the ANO input builder
+#elif ENABLE_GPIO_ENCODER
+#include "Input_GPIOEncoder.h"
 #endif
 #if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"
@@ -165,6 +167,8 @@ static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
   // `if (!spec.builder) continue;` silently dropped every input frame —
   // streaming "turned on" but nothing reached the peer.
   [REMOTE_SENSOR_INPUT]    = { anoEncoderBuildDataJSON,     100,  128  },
+#elif ENABLE_GPIO_ENCODER
+  [REMOTE_SENSOR_INPUT]    = { gpioEncoderBuildDataJSON,    100,  256  },
 #else
   [REMOTE_SENSOR_INPUT]    = { nullptr, 0, 0 },
 #endif

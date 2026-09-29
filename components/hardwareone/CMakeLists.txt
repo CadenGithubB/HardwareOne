@@ -21,7 +21,6 @@ set(HW_CFG_ENABLE_MAPS 0)
 set(HW_CFG_ENABLE_AUTOMATION 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
 set(HW_CFG_ENABLE_GAMES 0)
-set(HW_CFG_ENABLE_WEB_GAME_MAZE 1)
 set(HW_CFG_ENABLE_WEB_GAME_DARKROOM 0)
 set(HW_CFG_ENABLE_BLUETOOTH 0)
 set(HW_CFG_ENABLE_G2_GLASSES 0)
@@ -129,11 +128,6 @@ if(EXISTS "${hw_cfg_file}")
         set(HW_CFG_ENABLE_GAMES "${CMAKE_MATCH_1}")
     endif()
 
-    string(REGEX MATCH "#define[ \t]+ENABLE_WEB_GAME_MAZE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_WEB_GAME_MAZE "${CMAKE_MATCH_1}")
-    endif()
-
     string(REGEX MATCH "#define[ \t]+ENABLE_WEB_GAME_DARKROOM[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_WEB_GAME_DARKROOM "${CMAKE_MATCH_1}")
@@ -205,12 +199,14 @@ endif()
 
 # Coarse OLED gate: skip every OLED_*.cpp (except OLED_Utils.cpp, which
 # carries the !ENABLE_OLED_DISPLAY stub implementations) when the user
-# has no display hardware OR has disabled the I2C bus entirely. The
+# has no display hardware, or selects an I2C display with I2C disabled.
+# The P4X-EYE SPI backend remains available without an I2C bus. The
 # per-feature .cpp guards (`#if ENABLE_OLED_DISPLAY && ...`) still apply
 # inside each file when the bus + display are present but a sub-feature
 # (ESPNOW, ESP_SR, BONDED_MODE) is off.
 set(HW_CFG_BUILD_OLED_MODES 0)
-if(HW_CFG_DISPLAY_TYPE GREATER 0 AND HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
+if(HW_CFG_DISPLAY_TYPE EQUAL 4 OR
+   (HW_CFG_DISPLAY_TYPE GREATER 0 AND HW_CFG_I2C_FEATURE_LEVEL GREATER 0))
     set(HW_CFG_BUILD_OLED_MODES 1)
 endif()
 
@@ -282,6 +278,7 @@ set(hardwareone_srcs
         System_Icons.cpp
         HAL_Input.cpp
         HAL_Display.cpp
+        HAL_SDCard.cpp
         System_Mutex.cpp
         System_Power.cpp
         System_NeoPixel.cpp
@@ -437,6 +434,14 @@ else()
     message(STATUS "I2C sensors EXCLUDED (I2C_FEATURE_LEVEL=0)")
 endif()
 
+# GPIO input and SPI display are independent of the optional I2C bus.
+if(HW_CFG_INPUT_DEVICE_TYPE EQUAL 3)
+    list(APPEND hardwareone_srcs Input_GPIOEncoder.cpp)
+endif()
+if(HW_CFG_DISPLAY_TYPE EQUAL 4)
+    list(APPEND hardwareone_srcs HAL_Display_P4Eye.cpp)
+endif()
+
 if(HW_CFG_BUILD_OLED_MODES GREATER 0)
     list(APPEND hardwareone_srcs
         OLED_Settings.cpp
@@ -482,7 +487,7 @@ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
     endif()
     message(STATUS "OLED display modes INCLUDED (DISPLAY_TYPE=${HW_CFG_DISPLAY_TYPE})")
 else()
-    message(STATUS "OLED display modes EXCLUDED (DISPLAY_TYPE=0 or I2C_FEATURE_LEVEL=0)")
+    message(STATUS "Local display modes EXCLUDED by display/bus selection")
 endif()
 
 set(hardwareone_requires
@@ -500,9 +505,14 @@ set(hardwareone_requires
         esp32-camera
         fatfs
         sdmmc
+        esp_driver_sdmmc
         esp_driver_sdspi
         espressif__libsodium
 )
+
+if(HW_CFG_DISPLAY_TYPE EQUAL 4)
+    list(APPEND hardwareone_requires esp_lcd esp_driver_spi esp_driver_ledc)
+endif()
 
 if(HW_CFG_ENABLE_MQTT GREATER 0)
     list(APPEND hardwareone_srcs
@@ -539,9 +549,6 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
     endif()
     if(HW_CFG_ENABLE_R1_HEALTH GREATER 0)
         list(APPEND hardwareone_srcs WebPage_R1_Health.cpp)
-    endif()
-    if(HW_CFG_ENABLE_GAMES GREATER 0 AND HW_CFG_ENABLE_WEB_GAME_MAZE GREATER 0)
-        list(APPEND hardwareone_srcs WebPage_Games.cpp)
     endif()
     if(HW_CFG_ENABLE_GAMES GREATER 0 AND HW_CFG_ENABLE_WEB_GAME_DARKROOM GREATER 0)
         list(APPEND hardwareone_srcs WebPage_DarkRoom.cpp)

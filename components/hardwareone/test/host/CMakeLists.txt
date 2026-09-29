@@ -290,7 +290,47 @@ add_test(NAME g2_conversate
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_g2_conversate.py
           ${G2_CONVERSATE_TEST_ARGS})
 
+add_executable(p4eye_display_pixels_tests test_p4eye_display_pixels.cpp)
+add_executable(p4eye_display_lifecycle_tests
+  test_p4eye_display_lifecycle.cpp ../../HAL_Display_P4Eye.cpp)
+set_target_properties(p4eye_display_lifecycle_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(p4eye_display_lifecycle_tests PRIVATE p4eye_display_stubs)
+target_compile_definitions(p4eye_display_lifecycle_tests PRIVATE
+  SYSTEM_BUILDCONFIG_H DISPLAY_TYPE=4 DISPLAY_TYPE_ST7789_P4_EYE=4
+  CONFIG_IDF_TARGET_ESP32P4=1)
+target_compile_options(p4eye_display_lifecycle_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+set_target_properties(p4eye_display_pixels_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(p4eye_display_pixels_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+if(HW1_SANITIZE)
+  target_compile_options(p4eye_display_pixels_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(p4eye_display_pixels_tests PRIVATE -fsanitize=address,undefined)
+  target_compile_options(p4eye_display_lifecycle_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(p4eye_display_lifecycle_tests PRIVATE -fsanitize=address,undefined)
+endif()
+
 enable_testing()
+add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
+add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
+add_test(NAME rotary_core
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_rotary_core.py)
+add_test(NAME gpio_buttons
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_gpio_buttons.py)
+add_test(NAME gpio_encoder_integration
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_gpio_encoder_integration.py)
+add_test(NAME input_button_snapshot
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_input_button_snapshot.py)
+add_test(NAME optional_peripheral_config
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_optional_peripheral_config.py)
+set(SDMMC_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND SDMMC_TEST_ARGS --sanitize)
+endif()
+add_test(NAME sdmmc_lifecycle
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdmmc.py ${SDMMC_TEST_ARGS})
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)

@@ -13,7 +13,14 @@
 #include "System_Notifications.h"
 
 #include <LittleFS.h>
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
+#include "HAL_SDCard.h"
+// Preserve one filesystem access path; permissions and /sd routing below are
+// independent of the physical transport.
+static SdMmcCardFS& SD = gSdMmcCard;
+#else
 #include <SD.h>
+#endif
 #include "esp_littlefs.h"  // esp_littlefs_info — total+used in one traverse
 #include <SPI.h>
 
@@ -88,7 +95,7 @@ static void broadcastMultilineReport(const char* text) {
 
 namespace VFS {
 
-static bool gSdMounted  = false;  // driver-level: SD.begin() succeeded
+static bool gSdMounted  = false;  // driver-level: selected SD transport mounted
 static bool gSdWritable = false;  // probe-verified: a write round-trip worked
 
 // Presentation-only capacity snapshots. The cache core is dependency-free and
@@ -154,7 +161,7 @@ static bool probeSDWriteInternal();  // fwd decl
 
 // Fully tear down SPI + SD so tryMountSD() can start from a clean slate.
 static void spiTeardown() {
-#if defined(SD_CS_PIN)
+#if ENABLE_SD_CARD && !ENABLE_SDMMC_CARD && defined(SD_CS_PIN)
   SD.end();
   SPI.end();
   // Drive CS high so the card doesn't interpret noise as a command while the
@@ -169,7 +176,7 @@ static void spiTeardown() {
 // this, but doing it explicitly first helps with cards that just came out of
 // a format / reset.
 static void sdPowerUpClocks() {
-#if defined(SD_CS_PIN)
+#if ENABLE_SD_CARD && !ENABLE_SDMMC_CARD && defined(SD_CS_PIN)
   digitalWrite(SD_CS_PIN, HIGH);
   SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
   for (int i = 0; i < 10; i++) SPI.transfer(0xFF);  // 80 clocks
@@ -184,7 +191,19 @@ static bool tryMountSD() {
   // VFS::open/read/write while SPI and the FAT volume are being rebuilt.
   FsLockGuard guard("VFS.sdMount");
   invalidateStatsSnapshot(SDCARD);
-#if defined(SD_CS_PIN)
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
+  if (SD.begin()) {
+    gSdMounted = true;
+    gSdWritable = probeSDWriteInternal();
+    char freeMb[16];
+    const uint64_t total = SD.totalBytes(), used = SD.usedBytes();
+    snprintf(freeMb, sizeof(freeMb), "%llu",
+             (unsigned long long)((total > used ? total - used : 0) / (1024ULL * 1024ULL)));
+    systemEventPost(SYSEVT_SD_MOUNTED, freeMb, gSdWritable ? "writable" : "read-only");
+    return true;
+  }
+  WARN_STORAGEF("[SD] SDMMC mount failed: %s", SD.lastError());
+#elif ENABLE_SD_CARD && defined(SD_CS_PIN)
   // Three full attempts, each with a complete SPI bus reset, walking a
   // fastest-first frequency ladder.
   //
@@ -291,12 +310,20 @@ bool isLittleFSReady() {
 // ("readback mismatch") apart from path quirks.
 //
 // Filename choice matters: some FAT drivers handle leading-dot filenames
-// oddly (no 8.3 basename). HWPROBE.TMP is 8.3-safe and all-caps so it round-
-// trips cleanly on any FAT implementation.
+// oddly (no 8.3 basename). The temporary names are 8.3-safe and all-caps so
+// they round-trip cleanly on any FAT implementation.
 static bool probeSDWriteInternal() {
-#if defined(SD_CS_PIN)
-  if (!gSdMounted) return false;
-  const char* kProbePath = "/HWPROBE.TMP";
+#if ENABLE_SD_CARD
+  if (!isSDAvailable()) return false;
+  // A user may already have a similarly named file on a removable card.
+  // Pick a vacant 8.3 name; never truncate or delete existing card contents.
+  char kProbePath[16];
+  bool found = false;
+  for (unsigned i = 0; i < 16; ++i) {
+    snprintf(kProbePath, sizeof(kProbePath), "/HWPR%04u.TMP", i);
+    if (!SD.exists(kProbePath)) { found = true; break; }
+  }
+  if (!found) return false;
   const char* kProbeData = "hwone-sdtest\n";  // 13 bytes
   const size_t kProbeLen = 13;
 
@@ -352,6 +379,13 @@ static bool probeSDWriteInternal() {
 
 bool isSDAvailable() {
   FsLockGuard guard("VFS.sdAvailable");
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
+  if (gSdMounted && !SD.available()) {
+    gSdWritable = false;
+    invalidateStatsSnapshot(SDCARD);
+    return false;
+  }
+#endif
   return gSdMounted;
 }
 
@@ -361,7 +395,7 @@ bool isSDAvailable() {
 // writable without needing an explicit remount.
 bool isSDWritable() {
   FsLockGuard guard("VFS.sdWritable");
-  if (!gSdMounted) return false;
+  if (!isSDAvailable()) return false;
   if (gSdWritable) return true;
   // Not currently writable — maybe it was, maybe it is again. Try once.
   if (probeSDWriteInternal()) {
@@ -464,7 +498,7 @@ bool exists(const String& path) {
   FsLockGuard guard("VFS.exists");
 
   if (getStorageType(p) == SDCARD) {
-    if (!gSdMounted) return false;
+    if (!isSDAvailable()) return false;
     if (p == "/sd") return true;
     return SD.exists(p.c_str() + 3);
   }
@@ -479,7 +513,7 @@ File open(const String& path, const char* mode, bool create) {
   FsLockGuard guard("VFS.open");
 
   if (getStorageType(p) == SDCARD) {
-    if (!gSdMounted) return File();
+    if (!isSDAvailable()) return File();
     const char* sdPath = (p == "/sd") ? "/" : p.c_str() + 3;
     return SD.open(sdPath, mode, create);
   }
@@ -494,7 +528,7 @@ bool mkdir(const String& path) {
   FsLockGuard guard("VFS.mkdir");
 
   if (getStorageType(p) == SDCARD) {
-    if (!gSdMounted) return false;
+    if (!isSDAvailable()) return false;
     if (p == "/sd") return false;
     return SD.mkdir(p.c_str() + 3);
   }
@@ -518,7 +552,7 @@ bool remove(const String& path) {
   FsLockGuard guard("VFS.remove");
 
   if (getStorageType(p) == SDCARD) {
-    if (!gSdMounted) return false;
+    if (!isSDAvailable()) return false;
     if (p == "/sd") return false;
     bool ok = SD.remove(p.c_str() + 3);
     if (ok) postFileDeleted(p.c_str());
@@ -548,7 +582,7 @@ bool rename(const String& pathFrom, const String& pathTo) {
   FsLockGuard guard("VFS.rename");
 
   if (tf == SDCARD) {
-    if (!gSdMounted) return false;
+    if (!isSDAvailable()) return false;
     if (from == "/sd" || to == "/sd") return false;
     return SD.rename(from.c_str() + 3, to.c_str() + 3);
   }
@@ -565,7 +599,7 @@ bool rmdir(const String& path) {
   FsLockGuard guard("VFS.rmdir");
 
   if (getStorageType(p) == SDCARD) {
-    if (!gSdMounted) return false;
+    if (!isSDAvailable()) return false;
     if (p == "/sd") return false;
     bool ok = SD.rmdir(p.c_str() + 3);
     if (ok) postFileDeleted(p.c_str());
@@ -593,7 +627,7 @@ static FreshCapacitySample sampleCapacityFreshLocked(StorageType type) {
   FreshCapacitySample result;
 
   if (type == SDCARD) {
-    if (!gSdMounted) return result;
+    if (!isSDAvailable()) return result;
     result.snapshot.totalBytes = SD.totalBytes();
     result.snapshot.usedBytes = SD.usedBytes();
     result.snapshot.freeBytes =
@@ -838,9 +872,16 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
 bool unmountSD() {
   FsLockGuard guard("VFS.sdUnmount");
   invalidateStatsSnapshot(SDCARD);
-#if defined(SD_CS_PIN)
+#if ENABLE_SD_CARD
   if (gSdMounted) {
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
+    const bool ended = SD.end();
+    gSdMounted = false;
+    gSdWritable = false;
+    if (!ended) return false;
+#else
     SD.end();
+#endif
     gSdMounted = false;
     gSdWritable = false;
     systemEventPost(SYSEVT_SD_UNMOUNTED);
@@ -853,7 +894,13 @@ bool unmountSD() {
 bool remountSD() {
   FsLockGuard guard("VFS.sdRemount");
   invalidateStatsSnapshot(SDCARD);
-#if defined(SD_CS_PIN)
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
+  const bool ended = SD.end();
+  gSdMounted = false;
+  gSdWritable = false;
+  if (!ended) return false;
+  return tryMountSD();
+#elif ENABLE_SD_CARD && defined(SD_CS_PIN)
   // Full teardown regardless of current mount state — guarantees a clean bus.
   spiTeardown();
   gSdMounted = false;
@@ -869,7 +916,15 @@ bool remountSD() {
 bool formatSD() {
   FsLockGuard guard("VFS.sdFormat");
   invalidateStatsSnapshot(SDCARD);
-#if defined(SD_CS_PIN)
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
+  // Authorization and exact confirmation are enforced by cmd_sdformat.
+  gSdMounted = false;
+  gSdWritable = false;
+  if (!SD.format()) return false;
+  gSdMounted = true;
+  gSdWritable = probeSDWriteInternal();
+  return true;
+#elif ENABLE_SD_CARD && defined(SD_CS_PIN)
   INFO_STORAGEF("[SD FORMAT] Starting format process...");
   
   // Must unmount Arduino SD first and end SPI
@@ -1125,8 +1180,8 @@ AuthContext systemAuth(const char* scope, const char* reason) {
 static const char* cmd_sdmount(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char buf[128];
   
-#if !defined(SD_CS_PIN)
-  snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board (no SD_CS_PIN defined)");
+#if !ENABLE_SD_CARD
+  snprintf(buf, sizeof(buf), "ERROR: SD card support is disabled or unavailable on this board");
   return buf;
 #else
   if (VFS::isSDAvailable()) {
@@ -1152,15 +1207,11 @@ static const char* cmd_sdmount(const String& argsInput) {
 static const char* cmd_sdunmount(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char buf[128];
   
-#if !defined(SD_CS_PIN)
+#if !ENABLE_SD_CARD
   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
   return buf;
 #else
-  if (!VFS::isSDAvailable()) {
-    snprintf(buf, sizeof(buf), "Error: SD card is not mounted");
-    return buf;
-  }
-  
+  // Release a stale mount too (e.g. an accidentally removed SDMMC card).
   if (VFS::unmountSD()) {
     snprintf(buf, sizeof(buf), "SD card unmounted successfully");
   } else {
@@ -1173,12 +1224,14 @@ static const char* cmd_sdunmount(const String& argsInput) {
 static const char* cmd_sdformat(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char buf[256];
   
-#if !defined(SD_CS_PIN)
+#if !ENABLE_SD_CARD
   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
   return buf;
 #else
   // Check for confirmation flag
-  if (argsInput.indexOf("confirm") < 0) {
+  String confirmation = argsInput;
+  confirmation.trim();
+  if (confirmation != "confirm") {
     snprintf(buf, sizeof(buf), 
       "WARNING: This will ERASE ALL DATA on the SD card!\n"
       "Run 'sdformat confirm' to proceed.");
@@ -1203,7 +1256,7 @@ static const char* cmd_sdinfo(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char buf[512];
   const bool wantJson = argWantsJson(argsInput);
 
-#if !defined(SD_CS_PIN)
+#if !ENABLE_SD_CARD
   if (wantJson) return "{\"schema\":1,\"supported\":false}";
   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
   return buf;
@@ -1256,6 +1309,7 @@ static const char* cmd_sdinfo(const String& argsInput) {
 #endif
 }
 
+#if ENABLE_SD_CARD && !ENABLE_SDMMC_CARD && defined(SD_CS_PIN)
 // Helper to test SD card with specific pins
 static uint8_t testSDPins(int cs, int sck, int miso, int mosi, char* buf, int* pos, int maxLen) {
   *pos = appendf(buf, maxLen, *pos, "\n--- Testing CS=%d, SCK=%d, MISO=%d, MOSI=%d ---\n", cs, sck, miso, mosi);
@@ -1316,12 +1370,29 @@ static uint8_t testSDPins(int cs, int sck, int miso, int mosi, char* buf, int* p
   return response;
 }
 
-// Raw SPI diagnostic for SD card
+#endif
+
+// Transport-aware diagnostics; SDMMC mode never resets the C6 or LCD bus.
 static const char* cmd_sddiag(const String& argsInput) {
   PSRAM_STATIC_BUF(buf, 4096);
   int pos = 0;
   
-#if !defined(SD_CS_PIN)
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
+  FsLockGuard guard("VFS.sdDiag");
+  snprintf(buf, buf_SIZE,
+      "SDMMC slot %d, 4-bit, max %d kHz\n"
+      "CLK=%d CMD=%d D0=%d D1=%d D2=%d D3=%d\n"
+      "Power GPIO%d (active %d), LDO%d, detect GPIO%d\n"
+      "Card: %s; mount: %s; last error: %s\n"
+      "Use sdunmount before removal and sdmount after insertion.",
+      SD_MMC_SLOT, SD_MMC_MAX_FREQ_KHZ,
+      SD_MMC_CLK_PIN, SD_MMC_CMD_PIN, SD_MMC_D0_PIN, SD_MMC_D1_PIN,
+      SD_MMC_D2_PIN, SD_MMC_D3_PIN, SD_MMC_POWER_PIN,
+      SD_MMC_POWER_ACTIVE_LEVEL, SD_MMC_LDO_CHANNEL, SD_MMC_DETECT_PIN,
+      SD.cardPresent() ? "inserted" : "absent",
+      VFS::isSDAvailable() ? "mounted" : "not mounted", SD.lastError());
+  return buf;
+#elif !ENABLE_SD_CARD
   snprintf(buf, buf_SIZE, "ERROR: SD card not supported on this board");
   return buf;
 #else
@@ -1404,9 +1475,9 @@ const CommandEntry sdCommands[] = {
   { "sdinfo", "Show SD card information", false, cmd_sdinfo,
     "sdinfo - Display SD card type, size, and usage [json]" },
   { "sddiag", "SD card hardware diagnostics", false, cmd_sddiag,
-    "sddiag - Test raw SPI communication with SD card" },
+    "sddiag - Show SD transport diagnostics (SPI boards also run a bus test)" },
 };
 
 const size_t sdCommandsCount = sizeof(sdCommands) / sizeof(sdCommands[0]);
 // Note: SD commands registered via gCommandModules in System_Utils.cpp (not via static registrar)
-// This allows conditional compilation based on SD_CS_PIN for board compatibility
+// This allows conditional compilation based on ENABLE_SD_CARD for board compatibility

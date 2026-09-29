@@ -3176,17 +3176,17 @@ static constexpr CommandModule gCommandModules[] = {
     "are read-only (or browse-only) for admins, while user data is fully writable; "
     "logtier reports whether logs are writing to LittleFS or have spilled into SD "
     "overflow.", filesystemCommands,   &filesystemCommandsCount, 0, nullptr },
-#if defined(SD_CS_PIN)
+#if ENABLE_SD_CARD
   { "sd",         "SD card mount, format, and info", "Controls the optional microSD card, which mounts at /sd and serves as "
     "overflow/bulk storage (and is only compiled in on boards that wire a "
-    "card-detect/CS pin). sdmount attempts to mount the card and sdunmount safely "
+    "supported SPI or SDMMC slot). sdmount attempts to mount the card and sdunmount safely "
     "unmounts it; sdinfo shows the card type, size, and used/free space, and sddiag "
-    "runs a raw-SPI hardware diagnostic to troubleshoot a card that will not mount. "
+    "reports backend-specific diagnostics to troubleshoot a card that will not mount. "
     "sdformat erases the entire card and reformats it as FAT32 and therefore requires "
     "sdformat confirm to proceed. Once mounted, file commands address the card through "
     "its /sd/... path prefix.", sdCommands,           &sdCommandsCount, 0, []() { return VFS::isSDAvailable(); } },
 #endif
-  { "oled",       "OLED display control and graphics", "Drives the small SSD1306 OLED display: its lifecycle, the live screen contents, "
+  { "oled",       "Local display control and graphics", "Drives the selected local display backend: its lifecycle, the live screen contents, "
     "and persistent appearance settings. oledstart/oledstop (aliases "
     "openoled/closeoled) power the display task on and off, and oledstatus (alias "
     "oledread) reports its state. oledmode <mode> switches the live screen among the "
@@ -3280,13 +3280,13 @@ static constexpr CommandModule gCommandModules[] = {
     "degrees.", imuCommands,          &imuCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("imu"); } },
 #endif
 #if ENABLE_OLED_INPUT
-  { "input",      "Input device (gamepad or ANO encoder)", "Device-agnostic abstraction for the OLED input controller, which is either the "
-    "Seesaw gamepad or the ANO rotary encoder -- chosen at compile time via "
+  { "input",      "Input device (gamepad or rotary encoder)", "Device-agnostic abstraction for the OLED input controller, which is either the "
+    "Seesaw gamepad, ANO encoder or GPIO rotary encoder -- chosen at compile time via "
     "INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per "
     "firmware. These commands operate on whichever driver was built in: openinput "
     "starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, "
     "and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default "
-    "90). Driver-specific debugging and tuning live in the gamepad and anoencoder "
+    "90 for I2C devices; GPIO input uses a fixed 5 ms button sample). Driver-specific debugging and tuning live in the gamepad and anoencoder "
     "modules; this module holds only the shared settings (poll interval and "
     "auto-start).", inputCommands,       &inputCommandsCount,       CMD_MODULE_SENSOR, []() { return gInputConnected; } },
 #endif
@@ -4428,6 +4428,9 @@ void printMemoryReport() {
 
 #if ENABLE_GAMEPAD_SENSOR
   broadcastOutput("  [Y] GAMEPAD  | inputTask() in i2csensor_seesaw.cpp");
+  enabled_count++;
+#elif ENABLE_GPIO_ENCODER
+  broadcastOutput("  [Y] GPIO_ENC | Input_GPIOEncoder task");
   enabled_count++;
 #elif ENABLE_ANO_ENCODER
   broadcastOutput("  [Y] ANO_ENC  | inputTask() in i2csensor_ano_encoder.cpp");

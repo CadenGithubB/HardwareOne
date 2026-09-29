@@ -141,9 +141,6 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "OLED_Display.h"  // Always include - wrapper functions are safe to call when disabled
 #include "System_NeoPixel.h"
 #include "System_MemoryMonitor.h"
-#if ENABLE_WEB_GAMES
-  #include "WebPage_Games.h"
-#endif
 #if ENABLE_WIFI
   #include <lwip/netdb.h>
   #include <arpa/inet.h>
@@ -1753,7 +1750,7 @@ void hardwareone_setup() {
     broadcastOutput("  [N] PRESENCE | Disabled (~4-6KB flash, ~2KB RAM saved)");
 #endif
 #if ENABLE_OLED_DISPLAY
-    broadcastOutput("  [Y] OLED     | SSD1306 128x64 display enabled");
+    broadcastOutput("  [Y] DISPLAY  | " DISPLAY_NAME " enabled");
 #else
     broadcastOutput("  [N] OLED     | Disabled (~8-12KB flash, ~5KB RAM saved)");
 #endif
@@ -2079,6 +2076,13 @@ void hardwareone_setup() {
   oledSetBootProgress(87, "Starting sensors");
 #if ENABLE_I2C_SYSTEM
   processAutoStartSensors();
+#endif
+#if ENABLE_GPIO_ENCODER
+  // GPIO input has no I2C start queue. Preserve the shared enable/autostart
+  // policy and RAM-flush resume decision used by the other input backends.
+  if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
+    inputStartInternal();
+  }
 #endif
 
 #if ENABLE_CAMERA_SENSOR

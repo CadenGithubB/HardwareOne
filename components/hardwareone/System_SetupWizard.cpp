@@ -1744,26 +1744,7 @@ SetupWizardResult runSetupWizard() {
     // ------------------------------------------------------------------
 #if ENABLE_OLED_DISPLAY
     if (oledDisplay && oledConnected) {
-      uint32_t buttons = lastButtons;
-      bool haveButtons = false;
-      {
-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-        if (g.held && gInputCache.dataValid) {
-          buttons = gInputCache.buttons;
-          haveButtons = true;
-        }
-      }
-
-      if (haveButtons && !lastButtonsInitialized) {
-        lastButtons = buttons;
-        lastButtonsInitialized = true;
-        continue;
-      }
-
-      uint32_t pressedNow  = ~buttons;
-      uint32_t pressedLast = ~lastButtons;
-      uint32_t newButtons  = pressedNow & ~pressedLast;
-      lastButtons = buttons;
+      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
 
       JoystickNav nav = readWizardJoystickNav();
       bool hasInput = (newButtons != 0) || nav.up || nav.down || nav.left || nav.right;

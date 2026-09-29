@@ -65,7 +65,7 @@ void imuUpdateActions() {
 // driver get stubbed here — gInputRunning/gInputConnected/gInputCache
 // are populated live by the ANO task when ENABLE_ANO_ENCODER is on, so the
 // OLED input pipeline sees real state instead of zeros.
-#if !ENABLE_ANO_ENCODER
+#if !ENABLE_ANO_ENCODER && !ENABLE_GPIO_ENCODER
 InputCache gInputCache;
 bool gInputRunning = false;
 bool gInputConnected = false;
