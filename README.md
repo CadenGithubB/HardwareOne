@@ -6,7 +6,7 @@
   <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
 </picture>
 
-# Hardware One v0.99.94.1
+# Hardware One v0.99.95
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
 
@@ -17,6 +17,8 @@ You compile and flash each ESP32 chip to fit a specific job: a smart-home sensor
 On any single device, control works the same way no matter how you reach it: one command system - the CLI - issued over USB serial, a browser, the on-device screen + gamepad, Bluetooth, voice, or another node on the mesh. Same commands, same permission checks, every way in.
 
 > Built on **ESP-IDF** (not Arduino IDE). Runs on the **Seeed XIAO ESP32-S3**, **Unexpected Maker FeatherS3**, **Adafruit Feather ESP32**, and several other ESP32 / ESP32-S3 boards.
+
+> **ESP32-P4X-EYE is experimental.** Shared peripheral and transcription services are included, while board/radio integration uses pinned ESP-IDF 5.5.5 investigation profiles. See the [P4 build and STT notes](experiments/stt_p4/README.md) and [0.99.95 qualification limits](CHANGELOG.md#09995---2026-09-28).
 
 ---
 
