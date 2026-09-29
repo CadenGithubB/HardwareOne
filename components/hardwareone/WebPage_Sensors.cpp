@@ -49,6 +49,11 @@
 #if ENABLE_ESPNOW
   #include "System_ESPNow_Sensors.h"            // Remote sensor functions
 #endif
+#if ENABLE_MICROPHONE && ENABLE_DICTATION
+#include "System_Dictation.h"
+#include "Transcription_UI_Policy.h"
+#include "System_Utils.h"
+#endif
 #include "System_SensorStubs.h" // Stubs for disabled sensors
 #include "i2csensor_rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
 #include "System_MemUtil.h"             // ps_alloc, AllocPref
@@ -1067,6 +1072,200 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
   return ESP_OK;
 }
 
+#if ENABLE_MICROPHONE && ENABLE_DICTATION
+// TRANSCRIPTION_HTTP_BEGIN — host tests compile these shipping handlers.
+// This is a transport adapter for Dictation's exact App lease, not a provider.
+static esp_err_t transcriptionWebError(httpd_req_t* req, const char* status,
+                                      const char* error) {
+  httpd_resp_set_status(req, status);
+  PSRAM_JSON_DOC(doc);
+  doc["success"] = false;
+  doc["error"] = error;
+  String body;
+  serializeJson(doc, body);
+  return sendJsonResponse(req, body.c_str(), body.length());
+}
+
+static bool transcriptionWebNumber(const char* input, uint32_t maximum, uint32_t& out) {
+  return TranscriptionUI::parseUnsigned(input, out) && out <= maximum;
+}
+
+static esp_err_t transcriptionWebReply(httpd_req_t* req, TransportSessionEpoch epoch,
+                                      JsonDocument& doc) {
+  if (!transportSessionEpochIsLive(SOURCE_WEB, epoch))
+    return transcriptionWebError(req, "401 Unauthorized", "Web session changed");
+  if (doc.overflowed())
+    return transcriptionWebError(req, "500 Internal Server Error", "Response unavailable");
+  String body;
+  const size_t size = serializeJson(doc, body);
+  if (!size || size != measureJson(doc))
+    return transcriptionWebError(req, "500 Internal Server Error", "Response unavailable");
+  // Recheck after allocation/serialization; an old cookie never receives a
+  // previous owner's text after logout/revocation. No shared-output broadcast.
+  esp_err_t result;
+  if (!transportSessionEpochIsLive(SOURCE_WEB, epoch))
+    result = transcriptionWebError(req, "401 Unauthorized", "Web session changed");
+  else result = sendJsonResponse(req, body.c_str(), body.length());
+  secureClearString(body);
+  return result;
+}
+
+static esp_err_t handleTranscriptionGet(httpd_req_t* req) {
+  if (httpd_resp_set_hdr(req, "Cache-Control", "no-store") != ESP_OK) return ESP_FAIL;
+  WEB_AUTH_OR_RETURN(req, ctx);
+  const TransportSessionEpoch epoch = captureTransportSessionEpoch(ctx);
+  if (!ctx.sid.length() || !ctx.user.length() || ctx.user == "AuthBypass" || !epoch ||
+      !transportSessionEpochIsLive(SOURCE_WEB, epoch))
+    return transcriptionWebError(req, "401 Unauthorized", "A live named web session is required");
+  ExecIdentityGuard identity(ctx);
+  DictationAppLease lease{SOURCE_WEB, epoch, 0};
+  char query[64] = {}, id[17] = {};
+  const size_t queryLength = httpd_req_get_url_query_len(req);
+  if (queryLength >= sizeof(query))
+    return transcriptionWebError(req, "400 Bad Request", "Invalid session id");
+  const bool requested = queryLength != 0;
+  if (requested && httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+      !strcmp(query, "identity=1")) {
+    PSRAM_JSON_DOC(doc);
+    doc["success"] = true;
+    doc["session"] = epoch;
+    return transcriptionWebReply(req, epoch, doc);
+  }
+  if (requested) {
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "id", id, sizeof(id)) != ESP_OK ||
+        !TranscriptionUI::parseId(id, lease.exchange))
+      return transcriptionWebError(req, "400 Bad Request", "Invalid session id");
+  } else {
+    // Current clears its output when another consumer owns Dictation. Preserve
+    // this authenticated owner for Snapshot's non-private busy indication.
+    DictationAppLease current{};
+    if (dictationAppCurrent(SOURCE_WEB, epoch, &current)) lease = current;
+  }
+
+  DictationAppSnapshot snap{};
+  const bool valid = dictationAppSnapshot(lease, &snap);
+  if (requested && !valid)
+    return transcriptionWebError(req, "410 Gone", "Transcription session is no longer available");
+  PSRAM_JSON_DOC(doc);
+  doc["success"] = true;
+  doc["session"] = epoch;
+  doc["busy"] = snap.busy;
+  doc["valid"] = valid;
+  doc["active"] = valid && snap.active;
+  doc["done"] = valid && snap.done;
+  if (!requested) {
+    const char* reason = nullptr;
+    doc["available"] = dictationAvailable(&reason);
+    doc["unavailable"] = reason ? reason : "";
+    doc["continuous"] = static_cast<bool>(ENABLE_LOCAL_STT);
+    doc["savePreference"] = gSettings.sttSaveTranscripts;
+    doc["canSave"] = isAdminUser(ctx.user);
+    uint32_t userId = 0;
+    JsonArray roots = doc["roots"].to<JsonArray>();
+    if (getUserIdByUsername(ctx.user, userId) && userId) {
+      char path[32];
+      snprintf(path, sizeof(path), "/stt/u%lu", static_cast<unsigned long>(userId));
+      roots.add(String(path));
+      snprintf(path, sizeof(path), "/sd/stt/u%lu", static_cast<unsigned long>(userId));
+      roots.add(String(path));
+    }
+  }
+  struct PrivateText {
+    char value[DICTATION_MAX_TEXT + 1]{};
+    ~PrivateText() { TranscriptionUI::clear(value, sizeof(value)); }
+  } text;
+  if (valid) {
+    snprintf(id, sizeof(id), "%08lx%08lx", static_cast<unsigned long>(lease.exchange >> 32),
+             static_cast<unsigned long>(lease.exchange & 0xffffffffu));
+    doc["id"] = id;
+    doc["preparing"] = snap.status.preparing;
+    doc["captureActive"] = snap.status.captureActive;
+    doc["inferenceActive"] = snap.status.inferenceActive;
+    doc["error"] = snap.status.failure;
+    const auto& saved = snap.status.transcript;
+    doc["transcriptEnabled"] = saved.enabled;
+    doc["transcriptSaved"] = saved.saved;
+    doc["transcriptComplete"] = saved.complete;
+    doc["transcriptPath"] = saved.path;
+    doc["transcriptError"] = saved.error;
+    DictationTextReceipt receipt{};
+    const bool hasText = dictationAppPeekText(lease, text.value, sizeof(text.value), &receipt);
+    doc["textPending"] = hasText;
+    doc["sttText"] = text.value;
+    if (hasText) {
+      JsonObject r = doc["receipt"].to<JsonObject>();
+      r["sequence"] = receipt.sequence;
+      r["offset"] = receipt.offset;
+      r["length"] = receipt.length;
+    }
+  }
+  return transcriptionWebReply(req, epoch, doc);
+}
+
+static esp_err_t handleTranscriptionPost(httpd_req_t* req) {
+  if (httpd_resp_set_hdr(req, "Cache-Control", "no-store") != ESP_OK) return ESP_FAIL;
+  WEB_AUTH_OR_RETURN(req, ctx);
+  const TransportSessionEpoch epoch = captureTransportSessionEpoch(ctx);
+  if (!ctx.sid.length() || !ctx.user.length() || ctx.user == "AuthBypass" || !epoch ||
+      !transportSessionEpochIsLive(SOURCE_WEB, epoch))
+    return transcriptionWebError(req, "401 Unauthorized", "A live named web session is required");
+  // Small fixed forms only; do not allocate based on an untrusted body length.
+  char body[256] = {}, action[12] = {}, id[17] = {};
+  if (req->content_len <= 0 || req->content_len >= sizeof(body))
+    return transcriptionWebError(req, "400 Bad Request", "Invalid request body");
+  size_t used = 0;
+  while (used < req->content_len) {
+    const int n = httpd_req_recv(req, body + used, req->content_len - used);
+    if (n <= 0) return transcriptionWebError(req, "400 Bad Request", "Incomplete request body");
+    used += static_cast<size_t>(n);
+  }
+  if (memchr(body, '\0', used))
+    return transcriptionWebError(req, "400 Bad Request", "Invalid request body");
+  const bool ack = strcmp(req->uri, "/api/transcription/ack") == 0;
+  if (!ack && httpd_query_key_value(body, "action", action, sizeof(action)) != ESP_OK)
+    return transcriptionWebError(req, "400 Bad Request", "Missing action");
+  ExecIdentityGuard identity(ctx);
+  DictationAppLease lease{SOURCE_WEB, epoch, 0};
+  bool accepted = false;
+  if (!ack && !strcmp(action, "start")) {
+    // Lost replies are recovered by GET/current; never transparently restart.
+    accepted = dictationAppBegin(SOURCE_WEB, epoch, &lease);
+  } else {
+    if (httpd_query_key_value(body, "id", id, sizeof(id)) != ESP_OK ||
+        !TranscriptionUI::parseId(id, lease.exchange))
+      return transcriptionWebError(req, "400 Bad Request", "Invalid session id");
+    if (ack) {
+      char number[12];
+      uint32_t sequence = 0, offset = 0, length = 0;
+      if (httpd_query_key_value(body, "sequence", number, sizeof(number)) != ESP_OK ||
+          !transcriptionWebNumber(number, UINT32_MAX, sequence) || !sequence ||
+          httpd_query_key_value(body, "offset", number, sizeof(number)) != ESP_OK ||
+          !transcriptionWebNumber(number, UINT16_MAX, offset) ||
+          httpd_query_key_value(body, "length", number, sizeof(number)) != ESP_OK ||
+          !transcriptionWebNumber(number, DICTATION_MAX_TEXT, length) || !length)
+        return transcriptionWebError(req, "400 Bad Request", "Invalid text receipt");
+      const DictationTextReceipt receipt{lease.exchange, sequence,
+          static_cast<uint16_t>(offset), static_cast<uint16_t>(length)};
+      accepted = dictationAppCommitText(lease, receipt, length);
+    } else if (!strcmp(action, "stop")) accepted = dictationAppRequestStop(lease);
+    else if (!strcmp(action, "cancel")) accepted = dictationAppCancel(lease);
+    else return transcriptionWebError(req, "400 Bad Request", "Unknown action");
+  }
+  if (!transportSessionEpochIsLive(SOURCE_WEB, epoch))
+    return transcriptionWebError(req, "401 Unauthorized", "Web session changed");
+  if (!accepted)
+    return transcriptionWebError(req, "409 Conflict", "Request not accepted; refresh session status");
+  PSRAM_JSON_DOC(doc);
+  doc["success"] = true;
+  snprintf(id, sizeof(id), "%08lx%08lx", static_cast<unsigned long>(lease.exchange >> 32),
+           static_cast<unsigned long>(lease.exchange & 0xffffffffu));
+  doc["id"] = id;
+  return transcriptionWebReply(req, epoch, doc);
+}
+// TRANSCRIPTION_HTTP_END
+#endif
+
 // Register all sensor-related URI handlers
 void registerSensorHandlers(httpd_handle_t server) {
   // Sensors page
@@ -1098,6 +1297,15 @@ void registerSensorHandlers(httpd_handle_t server) {
   static const httpd_uri_t micRecordingFile = { .uri = "/api/recordings/file", .method = HTTP_GET, .handler = handleMicRecordingFile, .user_ctx = NULL };
   httpd_register_uri_handler(server, &micRecordings);
   httpd_register_uri_handler(server, &micRecordingFile);
+
+#if ENABLE_MICROPHONE && ENABLE_DICTATION
+  static const httpd_uri_t transcriptionGet = { .uri = "/api/transcription", .method = HTTP_GET, .handler = handleTranscriptionGet, .user_ctx = NULL };
+  static const httpd_uri_t transcriptionPost = { .uri = "/api/transcription", .method = HTTP_POST, .handler = handleTranscriptionPost, .user_ctx = NULL };
+  static const httpd_uri_t transcriptionAck = { .uri = "/api/transcription/ack", .method = HTTP_POST, .handler = handleTranscriptionPost, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &transcriptionGet);
+  httpd_register_uri_handler(server, &transcriptionPost);
+  httpd_register_uri_handler(server, &transcriptionAck);
+#endif
 
   // Video viewer endpoints (list + download AVI recordings from SD). Part of
   // the base experience: viewing/downloading existing videos works on any

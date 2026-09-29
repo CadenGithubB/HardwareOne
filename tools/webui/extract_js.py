@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Extract the shipping web UI's JavaScript out of the C++ that serves it.
 
-The device has no bundler and no .js files. Every byte of browser JavaScript
-lives inside a C++ raw string literal that gets handed to httpd_resp_send_chunk
-at request time. That means the only way to test the web UI honestly is to read
-the JS back out of the REAL source, the same rule updater/test/host/CMakeLists.txt:9-10
+The device has no bundler. Most JavaScript lives in C++ raw literals; the largest
+ESP-NOW script is an allowlisted local .js asset embedded as exact gzip bytes.
+This extractor resolves that source at its synchronous script position and never
+fetches remote code. Tests read the REAL source, following the same rule as
+updater/test/host/CMakeLists.txt:9-10
 states for the C code: compile "the REAL source, not a host reimplementation of it".
 A hand-copied .js fixture would drift the moment someone edits the header, and
 would then pass forever while shipping broken JS.
@@ -270,6 +271,28 @@ def _script_spans(text: str) -> list[tuple[int, int]]:
         pos = close.end() if close else len(text)
 
 
+def _external_script(path: Path, text: str, start: int) -> tuple[str, str] | None:
+    """Resolve only explicit local firmware assets; never fetch code from a URL.
+
+    The C++ page preserves synchronous script order. Tests read the editable
+    source which the build separately verifies against its exact gzip payload.
+    Unknown references fail loudly instead of silently removing test coverage.
+    """
+    opening = text[text.rfind("<", 0, start):start]
+    src = re.search(r"\bsrc\s*=\s*([\"'])(.*?)\1", opening, re.I)
+    if src is None:
+        return None
+    assets = {"/assets/espnow-core.js": "web_assets/espnow-core.js"}
+    relative = assets.get(src.group(2))
+    if relative is None:
+        raise ExtractionError(f"{_relative(path)}: unknown external script {src.group(2)!r}")
+    asset = path.parent / relative
+    try:
+        return asset.read_text(encoding="utf-8"), relative
+    except OSError as exc:
+        raise ExtractionError(f"{_relative(path)}: cannot read script {relative}: {exc}") from exc
+
+
 def _tagless_runs(joined: _Joined) -> list[tuple[int, int]]:
     """Step 4: maximal runs of adjacent JS-looking blocks, as joined offsets."""
     runs: list[tuple[int, int]] = []
@@ -302,15 +325,17 @@ def joined_regions(path: str | Path) -> list[Region]:
         spans = _tagless_runs(joined)
         kind = "run"
     name = Path(path).name
-    return [
-        Region(
-            name=f"{name}#{kind}{number}",
-            text=joined.text[start:end],
-            first_line=joined.source_line(start),
-        )
-        for number, (start, end) in enumerate(spans, start=1)
-        if joined.text[start:end].strip()
-    ]
+    result: list[Region] = []
+    for number, (start, end) in enumerate(spans, start=1):
+        external = _external_script(path, joined.text, start) if kind == "script" else None
+        body = external[0] if external else joined.text[start:end]
+        if body.strip():
+            result.append(Region(
+                name=f"{name}#{kind}{number}" + (f":{external[1]}" if external else ""),
+                text=body,
+                first_line=1 if external else joined.source_line(start),
+            ))
+    return result
 
 
 def page_js(
@@ -364,12 +389,16 @@ def page_js(
         if chunks:
             chunks.append("\n")
             out_line += 1
-        line_map.append((out_line, joined.source_line(start)))
-        for index, block_start in enumerate(joined.starts):
-            if start < block_start < end:
-                crossed = out_line + joined.text.count("\n", start, block_start)
-                line_map.append((crossed, joined.blocks[index].start_line))
-        body = joined.text[start:end]
+        external = _external_script(path, joined.text, start)
+        # External script regions use line numbers in their canonical .js file;
+        # joined_regions names that file explicitly in diagnostics.
+        line_map.append((out_line, 1 if external else joined.source_line(start)))
+        if not external:
+            for index, block_start in enumerate(joined.starts):
+                if start < block_start < end:
+                    crossed = out_line + joined.text.count("\n", start, block_start)
+                    line_map.append((crossed, joined.blocks[index].start_line))
+        body = external[0] if external else joined.text[start:end]
         chunks.append(body)
         out_line += body.count("\n")
 

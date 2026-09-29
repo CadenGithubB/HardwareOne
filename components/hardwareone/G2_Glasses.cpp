@@ -67,6 +67,7 @@ extern "C" {
 #include "G2_Page_Sensors.h"   // g2ShowSensorList() (per-page module)
 #include "G2_Page_Network.h"   // g2ShowNetworkMenu / g2NetworkHandleTap
 #include "G2_Page_Settings.h"  // g2ShowSettingsMenu / g2SettingsHandleTap
+#include "G2_Page_Transcription.h"
 #include "G2_Page_Files.h"     // g2ShowFilesMenu / g2FilesHandleTap / g2FilesTick
 #include "G2_Page_Power.h"     // g2ShowPowerMenu / g2PowerHandleTap
 #include "G2_Page_CameraSettings.h"  // g2ShowCameraSettingsMenu / g2CameraSettingsHandleTap
@@ -6906,11 +6907,11 @@ static void buildG2StatusMeter(char* out, size_t cap) {
 // the table.
 
 // A full board (LLM + camera + FM) registers 19 pages today; the two menu-
-// reorg launchers (System, Config) make 21. Headroom to 22 so a future page
+// reorg launchers (System, Config) make 21. Transcription adds one; headroom to 23 so a future page
 // doesn't silently drop at the register cap. NOTE: verify on an all-features
 // build, not just feathers3 — a green feathers3 build hides the overflow
 // (FM/camera pages are compiled out there).
-#define G2_PAGE_REGISTRY_MAX 22
+#define G2_PAGE_REGISTRY_MAX 23
 static const G2PageModule* gPageRegistry[G2_PAGE_REGISTRY_MAX] = { nullptr };
 static size_t              gPageRegistryCount = 0;
 
@@ -7212,12 +7213,13 @@ enum G2AppRow : uint8_t {
   APP_ROW_LLM,
   APP_ROW_AUTOMATIONS,
   APP_ROW_HEALTH,
+  APP_ROW_TRANSCRIPTION,
   // System Events + Logging moved to the System launcher; Users moved to the
   // Config launcher (menu reorg — mirrors the OLED categories).
 };
 
-// Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Health.
-#define G2_APPS_MAX_ROWS 7
+// Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Health + Transcription.
+#define G2_APPS_MAX_ROWS 8
 
 static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
   size_t n = 0;
@@ -7231,6 +7233,9 @@ static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
   // name="espnowapp"), distinct from Network -> ESP-NOW, which owns settings.
   add("ESP-NOW",      APP_ROW_ESPNOW);
   add("Files",        APP_ROW_FILES);
+#if ENABLE_DICTATION
+  add("Transcription", APP_ROW_TRANSCRIPTION);
+#endif
 #if ENABLE_MAPS
   // Reflect map availability in the label so tapping "Maps" with no tiles
   // on the device isn't a silent no-op (getAvailableMaps scans /maps for
@@ -7295,6 +7300,9 @@ static void g2AppsHandleTap(uint32_t idx) {
     }
     case APP_ROW_ESPNOW: g2ShowESPNowAppMenu(); return;  // callee sets gHijackPage
     case APP_ROW_FILES:  g2ShowFilesMenu();     return;  // callee sets gHijackPage
+#if ENABLE_DICTATION
+    case APP_ROW_TRANSCRIPTION: g2ShowTranscriptionMenu(); return;
+#endif
 #if ENABLE_MAPS
     case APP_ROW_MAPS:   g2ShowMapPage(&g2ShowAppsMenu); return;   // Back → Apps
 #endif
@@ -9462,6 +9470,14 @@ static const G2PageModule kTestSuitePage = {
 };
 #endif  // ENABLE_G2_TESTSUITE
 
+#if ENABLE_DICTATION
+static const G2PageModule kTranscriptionPage = {
+  "transcription", nullptr, "Open the private Transcription app on the lens",
+  g2BuildTranscriptionInfo, g2ShowTranscriptionMenu, g2TranscriptionHandleTap,
+  G2_HIJACK_PAGE_TRANSCRIPTION, 0, "<- Apps", false, nullptr,
+};
+#endif
+
 static void registerG2Pages(void) {
   // Order = menu order in the hijack list. Menu reorg (mirrors the OLED's 6
   // categories): the six visible rows are System, Config, Connect (Network),
@@ -9482,6 +9498,9 @@ static void registerG2Pages(void) {
   g2RegisterPage(kTestSuitePage);        // hidden — reached via System
 #endif
   g2RegisterPage(kFilesPage);            // hidden — reached via Apps
+#if ENABLE_DICTATION
+  g2RegisterPage(kTranscriptionPage);    // hidden — reached via Apps
+#endif
   g2RegisterPage(kEspNowAppPage);        // hidden — reached via Apps
 #if ENABLE_AUTOMATION
   g2RegisterPage(kAutomationsPage);      // hidden — reached via Apps
@@ -24219,6 +24238,7 @@ void g2Tick() {
   // the same input method, but queues all buffer/image work onto g2_tap_disp so
   // this main-loop tick never mutates the text-entry session cross-task.
   kbdPadDictationTickMain();
+  g2TranscriptionTick(); // async command scheduling only; no filesystem work here
   // Lifecycle reset tombstones routing synchronously; this bounded retry only
   // wakes the FIFO cleanup that owns callback-free pad/buffer teardown.
   (void)g2TextEntryCleanupKick();

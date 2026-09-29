@@ -19,6 +19,7 @@
 #include <algorithm>
 #include "System_Dictation.h"  // KEYBOARD_MODE_MIC: dictation state + control
 #include "OLED_ConsoleBuffer.h"
+#include "OLED_Mode_Transcription.h"
 
 #include <atomic>
 
@@ -3327,6 +3328,15 @@ static Command buildOLEDCommand(const String& cmdLine) {
   return uc;
 }
 
+bool submitOLEDCommandForSession(const String& line, TransportSessionEpoch epoch,
+                                 ExecAsyncCallback callback, void* context) {
+  extern bool submitCommandAsync(const Command&, ExecAsyncCallback, void*);
+  Command command = buildOLEDCommand(line);
+  command.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
+  if (!epoch || command.ctx.transportSessionEpoch != epoch) return false;
+  return submitCommandAsync(command, callback, context);
+}
+
 void executeOLEDCommand(const String& argsInput) {
   extern bool submitAndExecuteSync(const Command& cmd, String& out);
 
@@ -4042,6 +4052,7 @@ void updateOLEDDisplay() {
   // only bump an atomic generation; the main loop performs every teardown and
   // navigation mutation here, before input or rendering can touch old state.
   oledApplyPendingSessionBoundary();
+  prepareTranscriptionData();
   
   if (!gOledRunning || !oledConnected || oledDisplay == nullptr) {
     return;
@@ -4072,6 +4083,7 @@ void updateOLEDDisplay() {
   // erased out from under an active stack frame, and before any content from
   // the old UI incarnation is rendered.
   oledApplyPendingSessionBoundary();
+  prepareTranscriptionData();
 
   unsigned long now = millis();
   
@@ -4863,6 +4875,10 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_BLUETOOTH_R1: return "R1 Ring";
     case OLED_R1_HEALTH: return "R1 Health";
     case OLED_USER_MANAGER: return "Users";
+    case OLED_TRANSCRIPTION: return "Transcription";
+    case OLED_TRANSCRIPTION_LIVE: return "Recent text";
+    case OLED_TRANSCRIPTS: return "Transcripts";
+    case OLED_TRANSCRIPT_VIEW: return "Transcript";
     case OLED_REMOTE_SENSORS: return "Remote";
     case OLED_MEMORY_STATS: return "Memory";
     case OLED_WEB_STATS: return "Web Stats";
@@ -4923,6 +4939,7 @@ OLEDMode modeFromSlug(const String& slug) {
   if (slug == "perf") return OLED_PERF_STATS;
   if (slug == "i2cdiag") return OLED_I2C_DIAG;
   if (slug == "users") return OLED_USER_MANAGER;
+  if (slug == "transcription") return OLED_TRANSCRIPTION;
   if (slug == "web") return OLED_WEB_STATS;
   if (slug == "rtc") return OLED_RTC_DATA;
   if (slug == "presence") return OLED_PRESENCE_DATA;
@@ -4974,6 +4991,10 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_BLUETOOTH_R1:     return "r1ring";
     case OLED_R1_HEALTH:        return "r1health";
     case OLED_USER_MANAGER:     return "users";
+    case OLED_TRANSCRIPTION: return "transcription";
+    case OLED_TRANSCRIPTION_LIVE: return "transcriptionlive";
+    case OLED_TRANSCRIPTS: return "transcripts";
+    case OLED_TRANSCRIPT_VIEW: return "transcript";
     case OLED_REMOTE_SENSORS:  return "remote";
     case OLED_MEMORY_STATS:    return "memory";
     case OLED_PERF_STATS:      return "perf";
@@ -5368,6 +5389,9 @@ const int oledMenuCategory3Count = sizeof(oledMenuCategory3) / sizeof(oledMenuCa
 // so every program lives in one place, matching the glasses. Pet is G2-only —
 // it has no OLED mode, so the lens launcher has one row this menu does not.
 const OLEDMenuItem oledMenuCategory4[] = {
+#if ENABLE_DICTATION
+  { "Transcription", "mic", OLED_TRANSCRIPTION },
+#endif
 #if ENABLE_ESPNOW
   { "ESP-NOW",    "notify_espnow",     OLED_ESPNOW },
 #endif
@@ -7262,6 +7286,7 @@ static void oledApplyPendingSessionBoundary() {
     // replacement. Every later notification (including auth-policy rotation)
     // is a hard identity boundary and discards all prior-session UI state.
     if (hadUiIdentity || requested != 0) {
+      resetOLEDTranscription();
       oledResetLocalDisplaySessionTransients();
 
       if (shouldBlockForDisplayAuth()) {

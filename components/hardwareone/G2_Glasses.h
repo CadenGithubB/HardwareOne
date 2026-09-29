@@ -1022,6 +1022,7 @@ enum G2HijackPage : uint8_t {
   // pages by id (first match wins), so the collision hands this page's taps
   // to the other module.
   G2_HIJACK_PAGE_LLM_MENU        = 22,
+  G2_HIJACK_PAGE_TRANSCRIPTION   = 23, // Apps: private live text and saved sessions
 };
 G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);

@@ -344,6 +344,9 @@ set(hardwareone_srcs
         System_Microphone.cpp
         System_Dictation.cpp
         System_Transcript.cpp
+        System_TranscriptionUI.cpp
+        OLED_Mode_Transcription.cpp
+        G2_Page_Transcription.cpp
         HAL_Audio.cpp
         System_SensorRegistry.cpp
         System_Notifications.cpp
@@ -548,6 +551,7 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
             WebServer_Events.cpp
             WebServer_Server.cpp
             WebServer_Utils.cpp
+            WebAssets.cpp
             WebPage_Sensors.cpp
             WebPage_ESPNow.cpp
             WebPage_ESPNow_Metadata.cpp
@@ -755,4 +759,22 @@ if(NOT _hw_littlefs_check_rc EQUAL 0)
     # offenders, the suggested fix, and the AuthContext picker. Wrapping in
     # FATAL_ERROR halts the build with a clear "configure failed" exit.
     message(FATAL_ERROR "${_hw_littlefs_check_err}")
+endif()
+
+# Exact, generated gzip assets are committed for Arduino and other build systems.
+# Always check source/header consistency, including incremental builds; never
+# modify the checkout while CMake/Ninja are running.
+if(HW_CFG_ENABLE_HTTP_SERVER)
+    if(PYTHON)
+        set(_hw_web_python "${PYTHON}")
+    else()
+        set(_hw_web_python "${Python3_EXECUTABLE}")
+    endif()
+    add_custom_target(hardwareone_check_web_assets
+        COMMAND "${_hw_web_python}"
+            "${CMAKE_CURRENT_LIST_DIR}/web_assets/generate.py" --check
+        COMMENT "Checking embedded web assets"
+        VERBATIM
+    )
+    add_dependencies(${COMPONENT_LIB} hardwareone_check_web_assets)
 endif()

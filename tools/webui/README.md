@@ -1,16 +1,21 @@
 # tools/webui — host tests for the device's web-UI JavaScript
 
-The device serves its web interface from C++ raw string literals compiled into
-the firmware. That has one consequence worth stating plainly: **the firmware
-build never parses any of it.** To the compiler, `R"JS( … )JS"` is an opaque
-array of bytes. A missing brace, a typo'd identifier, a control-flow mistake —
-all of it compiles clean, links clean, flashes clean, and then fails on the
-board in front of whoever is holding it.
+The device serves most of its web interface from C++ raw string literals compiled
+into the firmware. The largest ESP-NOW script now lives in the readable
+`components/hardwareone/web_assets/espnow-core.js` and is embedded as exact gzip
+bytes. **The firmware compiler does not parse JavaScript in either form.** A
+missing brace or typo can compile and link successfully, then fail in the browser.
+
+The extractor resolves that allowlisted local script at its original synchronous
+script position. It never fetches remote code, and fails loudly for missing or
+unknown assets. The asset generator and CMake build check independently verify
+that the compressed firmware bytes decompress to the exact editable source.
+See [the asset workflow](../../components/hardwareone/web_assets/README.md).
 
 About 1.7 MiB of first-party JavaScript ships that way. This package is what
 checks it before the board does.
 
-What is here, in four parts:
+What is here:
 
 | file | what it does |
 |---|---|
@@ -18,6 +23,7 @@ What is here, in four parts:
 | `tests/test_llm_page.py` | runs the `/llm` chat page's real JS against a stub DOM and a fake device, 32 behavioral checks |
 | `tests/test_harness_detects_regressions.py` | breaks the page eight ways on purpose and asserts the harness notices each |
 | `tests/test_js_engine.py` | asserts the engine-portability layer gives byte-identical output on every engine present |
+| `tests/test_web_assets.py` | verifies exact gzip/source identity, extraction order, drift detection and the shipping static HTTP handler under ASan/UBSan |
 
 ### The syntax gate
 
@@ -64,8 +70,7 @@ From the repository root:
 python3 -m unittest discover -s tools/webui/tests -t .
 ```
 
-Fifteen tests, about 1.2 s. They are also picked up by the repo-wide sweep
-alongside the OTA suite, which goes from 29 tests to 44:
+The suite is also picked up by the repo-wide sweep alongside the OTA tests:
 
 ```sh
 python3 -m unittest discover -s . -t .

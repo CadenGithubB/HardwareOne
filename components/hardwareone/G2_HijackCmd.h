@@ -86,6 +86,10 @@ typedef void (*G2HijackCmdCallback)(bool ok,
 // `userData` : opaque pointer forwarded to the callback. Lifetime is the
 //              caller's responsibility.
 //
+// `expectedEpoch`: optional exact owner incarnation for delayed UI actions.
+// Nonzero rejects an owner replacement before command admission; zero preserves
+// immediate callers that intentionally capture the current owner.
+//
 // Returns true if the request was queued. False means blank pairedByUser,
 // cmd_exec queue full, or allocation failed. Callers must treat false as a
 // hard no-op — never run the mutation inline on the tap dispatcher (mixes
@@ -94,7 +98,8 @@ typedef void (*G2HijackCmdCallback)(bool ok,
 bool g2SubmitHijackCommand(const char* line,
                            const G2CmdCookie& cookie,
                            G2HijackCmdCallback callback,
-                           void* userData);
+                           void* userData,
+                           TransportSessionEpoch expectedEpoch = kNoTransportSessionEpoch);
 
 // =============================================================================
 // AuthContext for in-callback hijack work (no cmd_exec dispatch).

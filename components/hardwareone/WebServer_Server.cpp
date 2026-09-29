@@ -47,6 +47,7 @@
 #include "System_EventCatalogJson.h"  // shared event-kind JSON output adapter
 #include "System_UartLink.h"       // exact UART login-generation publication
 #include "WebServer_Utils.h"
+#include "WebAssets.h"
 #include "WebServer_Server.h"
 #include "WebPage_Automations.h"
 #include "WebPage_CLI.h"
@@ -774,6 +775,10 @@ class ScopedBufferZeroize {
 static bool requestIsInteraction(httpd_req_t* req, const char* uri) {
   if (!req || !uri) return false;
   if (req->method == HTTP_POST) {
+    // Automatic transcript receipts are passive polling, not human activity.
+    const size_t pathLength = strcspn(uri, "?");
+    if (pathLength == sizeof("/api/transcription/ack") - 1 &&
+        strncmp(uri, "/api/transcription/ack", pathLength) == 0) return false;
     return strncmp(uri, "/api/cli/batch", 14) != 0;
   }
   if (req->method == HTTP_GET) {
@@ -6206,6 +6211,7 @@ register_handlers:
   httpd_register_uri_handler(server, &filesWrite);
   httpd_register_uri_handler(server, &filesUpload);
   httpd_register_uri_handler(server, &iconGet);
+  registerWebAssetHandlers(server);
   httpd_register_uri_handler(server, &iconTestPage);
   httpd_register_uri_handler(server, &loggingPage);
  #if ENABLE_WEB_MAPS

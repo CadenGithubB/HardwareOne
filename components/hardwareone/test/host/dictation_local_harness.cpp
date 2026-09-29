@@ -37,10 +37,17 @@ static bool dictationEnsureWorker(){return workerOK;}
 static void dictationWakeWorker(){++wakeCount;}
 static std::set<std::pair<CommandSource,uint32_t>> sessions;
 static std::function<void()> sessionHook;
-static bool displaySessionStillLive(CommandSource s,uint32_t epoch){
+static bool transportSessionEpochIsLive(CommandSource s,uint32_t epoch){
  if(sessionHook){auto hook=sessionHook;sessionHook=nullptr;hook();}
  return sessions.count({s,epoch});
 }
+static TransportSessionEpoch localDisplayTransportSessionSnapshot(String& user,bool& authed){
+ if(sessionHook){auto hook=sessionHook;sessionHook=nullptr;hook();}
+ for(auto session:sessions) if(session.first==SOURCE_LOCAL_DISPLAY){user="wearer";authed=true;return session.second;}
+ user.clear();authed=false;return 0;
+}
+static void secureClearString(String& s){s.clear();}
+// INSERT_LIVE
 // The real sink has its own filesystem tests. This spy enforces the Dictation
 // seam: capture only snapshots admission metadata; writes run on its worker and
 // still belong to that original live identity at the first-write boundary.
@@ -155,6 +162,12 @@ bool dictationAvailable(const char** why){
 // INSERT_DRAIN
 // INSERT_STOP
 // INSERT_BEGIN
+static constexpr uint32_t MIC_STT_MAX_CAPTURE_MS=30000;
+static uint32_t hostEpoch=9;
+static bool hostRunning=true,hostReady=true;
+static uint32_t uartLinkSessionEpoch(){return hostEpoch;}
+static bool uartLinkIsRunning(){return hostRunning;}
+static bool dictationHostReadyForEpoch(uint32_t epoch,const char**){return hostReady&&epoch==hostEpoch;}
 // INSERT_SAVE
 static void runSaveWorker(){assert(!inTranscriptWorker);inTranscriptWorker=true;dictationProcessSave();inTranscriptWorker=false;}
 static STTOwner glasses{SOURCE_G2_GLASSES,3};
@@ -350,7 +363,181 @@ static void testLocal(){
  reset();modelReady=false;assert(!dictationAvailable(&why));dictationProcessLocal();assert(!dictationAvailable(&why)&&!dictationBeginLocal(glasses.source,glasses.epoch));
 }
 #endif
-int main(){testPiMailbox();
+static void testAppAdmission() {
+ reset();
+ assert(displaySessionStillLive(SOURCE_LOCAL_DISPLAY,4));
+ assert(!displaySessionStillLive(SOURCE_LOCAL_DISPLAY,3));
+ assert(displaySessionStillLive(SOURCE_G2_GLASSES,3));
+ sessions.insert({SOURCE_SERIAL,7});
+ assert(!displaySessionStillLive(SOURCE_SERIAL,7));
+ assert(!displaySessionStillLive(SOURCE_WEB,0)); sessions.insert({SOURCE_WEB,7});
+#if ENABLE_LOCAL_STT
+ ready();
+#endif
+ DictationAppLease app;
+ assert(!dictationBeginFor(SOURCE_WEB,7));
+ assert(!dictationAppBegin(SOURCE_SERIAL,7,&app));
+ assert(!dictationAppBegin(SOURCE_WEB,8,&app));
+ assert(!dictationAppBegin(SOURCE_WEB,7,nullptr));
+ assert(dictationAppBegin(SOURCE_WEB,7,&app));
+ assert(app.source==SOURCE_WEB&&app.epoch==7&&app.exchange==gDict.owner);
+ assert(gDict.appConsumer&&gDict.appLease.exchange==app.exchange);
+ DictationAppLease second;
+ assert(!dictationAppBegin(SOURCE_WEB,7,&second)&&second.exchange==0);
+ assert(!dictationBeginFor(SOURCE_LOCAL_DISPLAY,4));
+}
+static void testAppControls() {
+ reset(); sessions.insert({SOURCE_WEB,7});
+#if ENABLE_LOCAL_STT
+ ready();
+#endif
+ DictationAppLease app;assert(dictationAppBegin(SOURCE_WEB,7,&app));
+ // Same transport or even same session cannot use keyboard control wrappers.
+ dictationRequestStopFor(SOURCE_WEB);dictationCancelImpl(SOURCE_WEB,false);
+ dictationFieldFullFor(SOURCE_WEB);
+ assert(gDict.owner==app.exchange&&!gDict.stopRequested&&stops.empty());
+ auto other=app;other.epoch=8;sessions.insert({SOURCE_WEB,8});
+ assert(!dictationAppRequestStop(other)&&!dictationAppCancel(other));
+ other=app;other.exchange++;assert(!dictationAppCancel(other));
+ assert(dictationAppRequestStop(app));
+#if ENABLE_LOCAL_STT
+ assert(gDict.stopRequested);dictationProcessLocal();
+#else
+ assert(stops==std::vector<uint64_t>{app.exchange});
+#endif
+ sessions.erase({SOURCE_WEB,7});assert(!dictationAppCancel(app));
+ sessions.insert({SOURCE_WEB,7});assert(dictationAppCancel(app));
+ assert(!gDict.owner&&gDict.state==DictationState::IDLE);
+ // A retained terminal lease is not a keyboard handle.
+ assert(!dictationCancelImpl(SOURCE_WEB,false));
+}
+static void testAppDelivery() {
+ reset();sessions.insert({SOURCE_WEB,7});sessions.insert({SOURCE_WEB,8});
+ DictationAppLease app;dictationAdmitConsumerLocked(SOURCE_WEB,7,123,&app);
+ gDict.displaySource=SOURCE_WEB;gDict.displayEpoch=7;gDict.state=DictationState::WAITING;
+ dictationStageTextLocked(123,1,"abcdef",6,0,false);
+ char text[257];DictationTextReceipt a,b;
+ assert(!dictationPeekTextFor(SOURCE_WEB,text,sizeof(text),&a));
+ auto other=app;other.epoch=8;assert(!dictationAppPeekText(other,text,sizeof(text),&a));
+ assert(dictationAppPeekText(app,text,4,&a)&&std::string(text)=="abc");
+ assert(dictationAppPeekText(app,text,4,&b)&&a.offset==b.offset);
+ assert(!dictationCommitTextFor(SOURCE_WEB,a,3));
+ assert(!dictationAppCommitText(other,a,3));
+ assert(dictationAppCommitText(app,a,2));
+ assert(dictationAppCommitText(app,a,2)); // HTTP ACK reply lost: no second consume.
+ assert(!dictationAppCommitText(app,a,3));
+ assert(dictationAppPeekText(app,text,sizeof(text),&b)&&std::string(text)=="cdef");
+ assert(dictationAppCommitText(app,b,4));
+ assert(!dictationAppCommitText(app,a,2)); // Superseded receipt is stale.
+ assert(dictationAppCommitText(app,b,4)); // Exact retry survives terminal drain.
+ assert(gDict.state==DictationState::IDLE&&!gDict.textPending);
+ sessions.erase({SOURCE_WEB,7});assert(!dictationAppCommitText(app,b,4));
+ sessions.insert({SOURCE_WEB,7});
+ dictationAdmitConsumerLocked(SOURCE_WEB,7,124,&other);
+ assert(!dictationAppCommitText(app,b,4));
+}
+static void testAppSnapshotAndRecovery() {
+ reset();sessions.insert({SOURCE_WEB,7});sessions.insert({SOURCE_WEB,8});
+ DictationAppLease app;dictationAdmitConsumerLocked(SOURCE_WEB,7,123,&app);
+ gDict.displaySource=SOURCE_WEB;gDict.displayEpoch=7;gDict.owner=123;
+ gDict.transcriptExchange=123;gDict.transcriptStatus.enabled=true;
+ snprintf(gDict.transcriptStatus.path,sizeof(gDict.transcriptStatus.path),"/stt/u1/private.txt");
+ DictationAppLease recovered;assert(dictationAppCurrent(SOURCE_WEB,7,&recovered));
+ assert(recovered.exchange==123);
+ assert(!dictationAppCurrent(SOURCE_WEB,8,&recovered)&&recovered.exchange==0);
+ DictationAppSnapshot snap;
+ assert(!dictationAppSnapshot({SOURCE_WEB,8,0},&snap)&&snap.busy&&!snap.valid);
+ assert(!snap.status.transcript.path[0]&&!snap.status.transcript.enabled);
+ assert(dictationAppSnapshot(app,&snap)&&snap.active&&!snap.done&&snap.valid);
+ assert(std::string(snap.status.transcript.path)=="/stt/u1/private.txt");
+ gDict.owner=0;gDict.displaySource=SOURCE_INTERNAL;gDict.displayEpoch=0;
+ gDictSave.pending=true;gDictSave.exchange=123;
+ assert(dictationAppSnapshot(app,&snap)&&snap.active); // Saving survives delivery drain.
+ gDictSave.pending=false;gDictSave.inFlight=true;
+ assert(dictationAppSnapshot(app,&snap)&&snap.active);
+ gDictSave={};assert(dictationAppSnapshot(app,&snap)&&snap.done&&!snap.active);
+ assert(dictationAppCurrent(SOURCE_WEB,7,&recovered)&&recovered.exchange==123);
+ sessionHook=[] {sessions.erase({SOURCE_WEB,7});};
+ assert(!dictationAppSnapshot(app,&snap)&&!snap.status.transcript.path[0]);
+ sessions.insert({SOURCE_WEB,7});
+ dictationAdmitConsumerLocked(SOURCE_LOCAL_DISPLAY,4,124,nullptr);
+ assert(!dictationAppCurrent(SOURCE_WEB,7,&recovered)&&!recovered.exchange);
+ assert(!dictationAppSnapshot(app,&snap)&&!snap.status.transcript.path[0]);
+}
+static void testWorkerSupervision() {
+#if !ENABLE_LOCAL_STT
+ reset();sessions.insert({SOURCE_WEB,7});hostEpoch=9;hostRunning=hostReady=true;
+ DictationAppLease app;assert(dictationAppBegin(SOURCE_WEB,7,&app));
+ assert(dictationWorkerHasWork());nowMs+=MIC_STT_MAX_CAPTURE_MS;
+ const auto wakes=wakeCount;dictationSupervise();assert(wakeCount==wakes);
+ assert(stops==std::vector<uint64_t>{app.exchange});
+ sessions.erase({SOURCE_WEB,7});dictationSupervise();
+ assert(!gDict.owner&&gDict.state==DictationState::FAILED&&cleanup.back()==app.exchange);
+ reset();sessions.insert({SOURCE_WEB,7});assert(dictationAppBegin(SOURCE_WEB,7,&app));
+ gDict.state=DictationState::WAITING;gDict.requestHostEpoch=9;gDict.requestWasPushed=true;
+ nowMs+=90000;dictationSupervise();
+ assert(!gDict.owner&&gDict.state==DictationState::FAILED&&cancelEvents.back()==app.exchange);
+ reset();sessions.insert({SOURCE_WEB,7});assert(dictationAppBegin(SOURCE_WEB,7,&app));
+ gDict.state=DictationState::WAITING;gDict.requestHostEpoch=9;gDict.requestWasPushed=true;
+ hostEpoch=10;dictationSupervise();
+ assert(!gDict.owner&&std::string(gDict.failure)=="host session lost");hostEpoch=9;
+ reset();sessions.insert({SOURCE_WEB,7});assert(dictationAppBegin(SOURCE_WEB,7,&app));
+ gDict.owner=0;gDict.state=DictationState::WAITING;
+ dictationStageTextLocked(app.exchange,1,"private",7,0,false);
+ assert(dictationWorkerHasWork());sessions.erase({SOURCE_WEB,7});dictationSupervise();
+ assert(!gDict.textPending&&!gDict.deliveryExchange&&gDict.state==DictationState::IDLE);
+#endif
+}
+static void testAppLocalLifecycle() {
+#if ENABLE_LOCAL_STT
+ for(auto source:{SOURCE_LOCAL_DISPLAY,SOURCE_G2_GLASSES,SOURCE_WEB}) {
+  reset();sessions.insert({SOURCE_WEB,7});ready();
+  const uint32_t epoch=source==SOURCE_LOCAL_DISPLAY?4:source==SOURCE_G2_GLASSES?3:7;
+  DictationAppLease app;assert(dictationAppBegin(source,epoch,&app));
+  dictationProcessLocal();broker.state=STTState::Recording;broker.captureActive=true;
+  dictationCancelImpl(source,false);dictationFieldFullFor(source);dictationRequestStopFor(source);
+  assert(gDict.owner==app.exchange&&!gDict.stopRequested);
+  produce(1,std::string(512,'a'));dictationProcessLocal();
+  char text[257];DictationTextReceipt receipt;
+  assert(!dictationPeekTextFor(source,text,sizeof(text),&receipt));
+  assert(dictationAppPeekText(app,text,sizeof(text),&receipt)&&receipt.length==256);
+  assert(dictationAppCommitText(app,receipt,256));assert(dictationAppCommitText(app,receipt,256));
+  dictationProcessLocal();assert(ackCalls==0);
+  assert(dictationAppPeekText(app,text,sizeof(text),&receipt)&&receipt.offset==256);
+  assert(dictationAppCommitText(app,receipt,256));dictationProcessLocal();assert(ackCalls==1);
+  produce(2,"");dictationProcessLocal();dictationProcessLocal();assert(ackCalls==2);
+  assert(dictationAppRequestStop(app));produce(3,"last");terminal();dictationProcessLocal();
+  DictationAppSnapshot snap;assert(dictationAppSnapshot(app,&snap)&&snap.active&&snap.textPending);
+  assert(dictationAppPeekText(app,text,sizeof(text),&receipt)&&std::string(text)=="last");
+  assert(dictationAppCommitText(app,receipt,receipt.length));dictationProcessLocal();
+  assert(ackCalls==3&&dictationAppSnapshot(app,&snap)&&snap.done&&!snap.active);
+  assert(dictationAppCommitText(app,receipt,receipt.length)); // Last ACK response lost after worker retirement.
+  auto old=app;assert(dictationAppBegin(source,epoch,&app));
+  assert(app.exchange!=old.exchange&&!dictationAppCancel(old));
+  assert(!dictationAppCommitText(old,receipt,receipt.length));
+  sessions.erase({source,epoch});dictationProcessLocal();
+  assert(!dictationAppSnapshot(app,&snap)&&!snap.status.transcript.path[0]);
+ }
+#endif
+}
+static void testConsumerIdentity() {
+ reset(); gDict.displaySource=SOURCE_LOCAL_DISPLAY;
+ assert(dictationConsumerMatchesLocked(SOURCE_LOCAL_DISPLAY));
+ DictationAppLease app;
+ dictationAdmitConsumerLocked(SOURCE_WEB,7,100,&app);
+ assert(app.source==SOURCE_WEB && app.epoch==7 && app.exchange==100);
+ assert(dictationConsumerMatchesLocked(SOURCE_WEB,&app));
+ assert(!dictationConsumerMatchesLocked(SOURCE_WEB));
+ auto other=app; other.epoch=8; assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&other));
+ other=app;other.exchange=99;assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&other));
+ other=app;other.source=SOURCE_LOCAL_DISPLAY;assert(!dictationConsumerMatchesLocked(SOURCE_LOCAL_DISPLAY,&other));
+ dictationAdmitConsumerLocked(SOURCE_WEB,7,101,&other);
+ assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&app));
+ dictationAdmitConsumerLocked(SOURCE_LOCAL_DISPLAY,4,102,nullptr);
+ assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&other));
+ assert(dictationConsumerMatchesLocked(SOURCE_LOCAL_DISPLAY));
+}
+int main(){testAppLocalLifecycle();testWorkerSupervision();testAppSnapshotAndRecovery();testAppDelivery();testAppControls();testAppAdmission();testConsumerIdentity();testPiMailbox();
 #if ENABLE_LOCAL_STT
  testLocalSaving();testLocal();
 #else
