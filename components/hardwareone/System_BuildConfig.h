@@ -1471,15 +1471,10 @@
 // Otherwise the authenticated CM5 adapter remains the runtime requirement.
 // Provider choice is latched per exchange; local failures never silently send
 // audio to a remote host. The capture source stays shared (PDM or G2).
-// Dictation needs a mic and a KEYBOARD to dictate into — not specifically a
-// panel. The module is display-agnostic by design (4 of its 1221 lines mention
-// the OLED at all) and G2_Glasses.cpp:30097 arms it with
-// dictationBeginFor(SOURCE_G2_GLASSES, ...), with full filtering/append and
-// secret-field refusal in G2_Page_TextEntry. Gating on the OLED alone compiled
-// the whole feature out of the XIAO carrier build — glasses present, no panel —
-// which is the one configuration it was written for.
+// Dictation supplies keyboards and the standalone display/web transcription
+// interfaces. The existing provider boundary is independent of those surfaces.
 #define ENABLE_DICTATION        (ENABLE_MICROPHONE && \
-                                 (ENABLE_OLED_DISPLAY || ENABLE_G2_GLASSES))
+                                 (ENABLE_OLED_DISPLAY || ENABLE_G2_GLASSES || ENABLE_WEB_SENSORS))
 
 // =============================================================================
 // LLM FEATURE / SOURCE CONSISTENCY  (see §5 ENABLE_LLM_BACKEND)

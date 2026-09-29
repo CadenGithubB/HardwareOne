@@ -12,6 +12,9 @@
 #if ENABLE_WEB_SENSORS && ENABLE_MICROPHONE
 
 #include <esp_http_server.h>
+#if ENABLE_DICTATION
+#include "System_Transcription_Web.h"
+#endif
 
 // Stream microphone sensor card HTML
 inline void streamMicrophoneSensorCard(httpd_req_t* req) {
@@ -74,9 +77,11 @@ inline void streamMicrophoneSensorCard(httpd_req_t* req) {
     <div class="recordings-section" id="mic-recordings" style='display:none;margin-top:10px;padding:10px;background:var(--panel-bg);border:1px solid #dee2e6;border-radius:4px'>
       <div class="recordings-list" id="mic-recordings-list"></div>
     </div>
-  </div>
-</div>
 )rawliteral", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_DICTATION
+  streamTranscriptionPanel(req);
+#endif
+  httpd_resp_send_chunk(req, "</div></div>", HTTPD_RESP_USE_STRLEN);
 }
 
 // Stream button bindings for microphone
@@ -255,6 +260,9 @@ inline void streamMicrophoneSensorJS(httpd_req_t* req) {
   
   httpd_resp_send_chunk(req, "try{console.log('[SENSORS] Microphone sensor module ready');}catch(_){ }", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_DICTATION
+  streamTranscriptionJS(req);
+#endif
 }
 
 // Dashboard definition for microphone sensor

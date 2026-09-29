@@ -1,6 +1,7 @@
-// System_Dictation.h — speech-to-text as a text INPUT METHOD.
+// System_Dictation.h — provider-neutral keyboard and application speech-to-text.
 //
-// An OLED/G2 keyboard input method with one provider latched per exchange.
+// A shared OLED/G2 keyboard and OLED/G2/web App service with one provider
+// latched per exchange. The two consumers have separate authority handles.
 // ENABLE_LOCAL_STT builds use the shared local broker with bounded raw-HAL
 // continuous capture and ordered text chunks. Other builds retain CM5 and owned VAD
 // WAV capture. Both accept PDM or G2 audio through the same HAL. Local failure
@@ -24,12 +25,13 @@
 // event is fenced to the epoch latched at ADMISSION, because the admitting
 // session is the only party entitled to learn the recording's path (see the
 // comment at the mic_autostop push in System_Microphone.cpp). A dictation is
-// started by the person physically at the device, so it has no admitting UART
+// started by an authenticated keyboard/App owner, so it has no admitting UART
 // session and that fence would drop it. The push below therefore targets the
 // CURRENTLY authenticated UART session instead. That widening is scoped as
 // tightly as it can be: it fires only for an owner this module minted, only
 // while that exact dictation is still pending, and only when the input-surface
-// session that armed it is still live. Do not generalize it to other owners.
+// session that armed it is still live. Web Apps must use a named cookie epoch;
+// Basic Auth and other stateless callers cannot arm it.
 #ifndef SYSTEM_DICTATION_H
 #define SYSTEM_DICTATION_H
 
@@ -74,6 +76,24 @@ struct DictationTextReceipt {
   uint16_t length = 0;
 };
 
+// An application lease is distinct from the keyboard consumer, even on the
+// same display/session. Treat exchange as an opaque exact-run token. Possessing
+// it never replaces the live source+epoch authority checked by every operation.
+struct DictationAppLease {
+  CommandSource source = SOURCE_INTERNAL;
+  TransportSessionEpoch epoch = kNoTransportSessionEpoch;
+  uint64_t exchange = 0;
+};
+
+struct DictationAppSnapshot {
+  bool valid = false;
+  bool busy = false;       // Shared service is occupied, including cleanup.
+  bool active = false;     // This lease still owns work, delivery or saving.
+  bool done = false;       // Terminal and drained; inspect status.state/failure.
+  bool textPending = false;
+  DictationSnapshot status{}; // Owner-scoped: includes this lease's saved path.
+};
+
 enum class DictationUartIntrinsicResult : uint8_t {
   NotHandled = 0,
   Handled,
@@ -110,8 +130,8 @@ void dictationCancelFor(CommandSource displaySource);
 
 DictationSnapshot dictationSnapshotNow();
 
-// Supervises the recording cap and the host-reply timeout. Called once per
-// OLED tick; cheap and safe when idle.
+// Optional frontend nudge. The existing service worker independently enforces
+// capture/host timeouts and session revocation even when no UI is polling.
 void dictationTick();
 
 // Compatibility drain of one bounded delivery piece. Returns false when nothing
@@ -132,6 +152,34 @@ bool dictationCommitTextFor(CommandSource source,
 // A finite field cannot consume an unlimited session. Stop/discard the remainder
 // with a visible reason instead of ACKing text which was never inserted.
 void dictationFieldFullFor(CommandSource source);
+
+// Standalone Apps and the web microphone panel use these exact-lease APIs.
+// SOURCE_WEB requires a live cookie epoch; OLED/G2 use their named UI epoch.
+// The most recently accepted exact App receipt/count can be ACKed again after
+// a lost response; a later commit/admission invalidates that retry cache.
+// Begin can initialize the Pi microphone: invoke outside display/I2C rendering.
+// Peek/commit have the same retry-safe semantics as the keyboard mailbox. The
+// caller keeps a bounded text tail and commits only after accepting that piece.
+// Terminal leases remain queryable until the next admitted exchange. A revoked
+// epoch or stale lease can never read, stop, cancel or acknowledge a successor.
+// The Pi provider returns one final segment; continuous=true identifies local
+// repeated-segment capture. Neither provider promises partial-word streaming.
+bool dictationAppBegin(CommandSource source, TransportSessionEpoch epoch,
+                       DictationAppLease* lease);
+// Recover an active or terminal lease only for this live exact owner. Use a
+// separate output object: every failure clears it.
+bool dictationAppCurrent(CommandSource source, TransportSessionEpoch epoch,
+                         DictationAppLease* lease);
+// A live caller with an invalid/zero exchange receives only generic busy and
+// false; all private fields stay empty. This supports an idle app's Start gate.
+bool dictationAppSnapshot(const DictationAppLease& lease,
+                          DictationAppSnapshot* out);
+bool dictationAppRequestStop(const DictationAppLease& lease);
+bool dictationAppCancel(const DictationAppLease& lease);
+bool dictationAppPeekText(const DictationAppLease& lease, char* out, size_t outSize,
+                          DictationTextReceipt* receipt);
+bool dictationAppCommitText(const DictationAppLease& lease,
+                            const DictationTextReceipt& receipt, size_t accepted);
 
 // Post-publication hook. The mic layer invokes this only AFTER it has published
 // the owner-scoped completion result and IDLE. It copies the stable local result
@@ -179,6 +227,27 @@ inline bool dictationTakeTextFor(CommandSource, char*, size_t) {
 inline bool dictationPeekTextFor(CommandSource, char*, size_t, DictationTextReceipt*) { return false; }
 inline bool dictationCommitTextFor(CommandSource, const DictationTextReceipt&, size_t) { return false; }
 inline void dictationFieldFullFor(CommandSource) {}
+inline bool dictationAppBegin(CommandSource, TransportSessionEpoch, DictationAppLease* lease) {
+  if (lease) *lease = DictationAppLease{};
+  return false;
+}
+inline bool dictationAppCurrent(CommandSource, TransportSessionEpoch, DictationAppLease* lease) {
+  if (lease) *lease = DictationAppLease{};
+  return false;
+}
+inline bool dictationAppSnapshot(const DictationAppLease&, DictationAppSnapshot* out) {
+  if (out) *out = DictationAppSnapshot{};
+  return false;
+}
+inline bool dictationAppRequestStop(const DictationAppLease&) { return false; }
+inline bool dictationAppCancel(const DictationAppLease&) { return false; }
+inline bool dictationAppPeekText(const DictationAppLease&, char* out, size_t size,
+                                 DictationTextReceipt* receipt) {
+  if (out && size) out[0] = '\0';
+  if (receipt) *receipt = DictationTextReceipt{};
+  return false;
+}
+inline bool dictationAppCommitText(const DictationAppLease&, const DictationTextReceipt&, size_t) { return false; }
 inline void dictationOnCapturePublished(uint64_t, const char*, bool,
                                         const char*) {}
 inline void dictationResetForSessionBoundary() {}

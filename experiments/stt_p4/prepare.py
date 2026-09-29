@@ -16,7 +16,7 @@ def changes():
  scope=['components/hardwareone','CMakeLists.txt','config/sdkconfig.defaults']
  names=subprocess.check_output(['git','diff','--name-only',BASE,'--',*scope],cwd=REPO).decode().splitlines()
  names+=subprocess.check_output(['git','ls-files','--others','--exclude-standard','--','components/hardwareone'],cwd=REPO).decode().splitlines()
- return sorted(set(p for p in names if '/test/' not in p and (Path(p).suffix in ('.h','.cpp','.txt','.yml') and p!=DEP or p=='config/sdkconfig.defaults')))
+ return sorted(set(p for p in names if '/test/' not in p and (Path(p).suffix in ('.h','.cpp','.txt','.yml') and p!=DEP or p=='config/sdkconfig.defaults' or p.startswith('components/hardwareone/web_assets/') and Path(p).suffix in ('.js','.py'))))
 def external_inputs():
  paths=[HERE/'prepare.py',HERE/'features-p4.h',HERE/'sdkconfig.stt.defaults',HERE/'radio_backend.cpp',HERE/'radio_backend.h',HERE/'build.sh',SPEECH/'sdkconfig.speech.defaults',SPEECH/'sdkconfig.p4.speech.defaults',HERE.parent/'p4_ble_roles/sdkconfig.connectivity.defaults',HERE.parent/'p4_ble_roles/sdkconfig.p4.bluetooth.defaults',HERE.parent/'camera_portable/sdkconfig.p4.camera.defaults']
  for parent in ('speech_portable','audio_portable','camera_portable','jpeg_portable','p4_ble_roles'):

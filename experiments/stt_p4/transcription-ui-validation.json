@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "date": "2026-09-28",
+  "scope": [
+    "G2 Apps Transcription",
+    "OLED Apps Transcription",
+    "Web Sensors Microphone Transcription"
+  ],
+  "firmware": {
+    "profile": "transcription-ui-v1",
+    "sha256": "20a22d79b0ed9656aefa13ca6ff9108739a2db7e3ab2053adc38108910090f4d",
+    "app_bytes": 6362416,
+    "partition_bytes": 6377472,
+    "free_bytes": 15056,
+    "sealed_sources": 7972,
+    "app_only_verified": true,
+    "boot_panic": false,
+    "models_and_partitions_unchanged": true
+  },
+  "host": {
+    "asan_ubsan": true,
+    "local_and_pi_dictation": true,
+    "disabled_feature_stubs": true,
+    "existing_keyboard_regressions": true,
+    "g2_page_and_bridge": true,
+    "oled_mode_and_bridge": true,
+    "web_handlers_and_javascript": true,
+    "private_file_adapter": true,
+    "passive_activity": true,
+    "web_suite_tests_passed": 45
+  },
+  "physical_p4": {
+    "configuration_postchecks_passed": 20,
+    "app_capability_available": true,
+    "existing_transcripts_listed": 2,
+    "saved_file_bytes": 183,
+    "saved_file_windows": 1,
+    "saved_file_sha256": "a89ad4f29635ae4eef6b6e772aa518ea92de77334a67723b272295fba80bacc5",
+    "prior_hash_matches": true,
+    "other_account_path_denied": true,
+    "missing_sd_reported": true,
+    "fatal_log": false,
+    "transcript_saving_enabled": true,
+    "mic_camera_sr_stopped": true
+  },
+  "web_asset": {
+    "source_bytes": 82734,
+    "gzip_bytes": 17787,
+    "source_sha256": "57957e3c9f4bbb34e44c58d2b3da13fa5b956d4faa990880ef6d0ad9c5fbbe64",
+    "gzip_sha256": "7f3805dfe1469f7cf1be79219f737e723c6d0b7a906e85ca6bdcc9150ab6c587",
+    "javascript_byte_exact": true,
+    "browser_decompression": true,
+    "additional_feature_exclusions": []
+  },
+  "s3": {
+    "firmware_unchanged": true,
+    "user_requested_existing_openclaw_connection_preserved": true,
+    "wifi_connected_final": true,
+    "http_running_final": true,
+    "http_port": 80,
+    "subsequent_usb_resets": false,
+    "direct_mac_http_probe": "timed out",
+    "fixture_http_probe": "requires isolated AP; not used on user network"
+  },
+  "limits": [
+    "Physical OLED/G2/SD/Pi tests pending",
+    "P4 network UI test via S3 deferred to preserve OpenClaw network",
+    "Recognition model and Pi continuous transport unchanged"
+  ]
+}

@@ -1,5 +1,41 @@
 # Status
 
+## 2026-09-28 — shared Transcription interfaces installed on P4
+
+- Added **Apps → Transcription** for G2 and OLED, plus collapsible
+  **Sensors → Microphone → Transcription** on the web. Each controls the existing
+  STT service, displays bounded recent text, browses saved transcripts and uses
+  the saved next-session policy. Exact App leases keep keyboards and other
+  authenticated sessions isolated; no recognition engine/provider fork.
+- P4 app-only image `transcription-ui-v1` verified and booted, SHA-256
+  `20a22d79b0ed9656aefa13ca6ff9108739a2db7e3ab2053adc38108910090f4d`.
+  6,362,416 bytes, **15,056 bytes free**; 7,972 source checks passed.
+  Models, partition layout, C6 and S3 firmware and primary checkout unchanged.
+- P4 USB capability and private saved-file commands passed; the existing
+  183-byte transcript matches its prior hash. Other-account reads are denied;
+  missing SD is explicit. All 20 existing P4 settings/peripheral postchecks
+  passed. Saving remains on; mic/camera/SR stopped, voice disarmed.
+- Actual-source host sanitizers passed for both providers, keyboard regressions,
+  App leases, private file windows, all three interfaces and passive polling.
+  All 45 web tests passed. Physical OLED/G2/SD/Pi tests remain unqualified.
+- One existing ESP-NOW JavaScript block is now a byte-exact gzip asset, saving
+  64,947 asset bytes. Deterministic source consistency check runs on builds.
+  No additional standard feature or test-diagnostic removal was needed.
+- **Preserve the S3 for the user's concurrent OpenClaw tests.** Its saved Wi-Fi
+  connection is active and HTTP reports running on port 80 at 192.168.21.24.
+  This Mac's direct HTTP request timed out; the special S3 HTTP fixture insists
+  on its isolated test AP, so the P4 network test was deferred rather than
+  moving S3 off the user's network. Do not apply the old S3 Wi-Fi-off/channel-6
+  cleanup sequence or reboot it for this task.
+- Initial standard serial opening caused an S3 `USB_UART_CHIP_RESET`. Its saved
+  Wi-Fi/web service was restored with `openwifi` then `openhttp`; no credentials
+  or firmware were changed. Later USB access used a Serial subclass that does
+  not toggle DTR/RTS and clears HUPCL; no further reset was observed. During
+  `openwifi`, wait for its command result before sending anything else: the
+  console helper's automatic `whoami` barrier otherwise cancels connection.
+- No serial coordinators remain open. Work stays local; no push/PR. Details:
+  TRANSCRIPTION_UI.md, TRANSCRIPTION_UI_RESULTS.md, transcription-ui-validation.json.
+
 ## 2026-09-28 — shared transcript saving qualified on P4
 
 - Persistent `sttsavetranscripts` option, off by default and latched at admission.

@@ -5,6 +5,7 @@
 
 #include "System_BuildConfig.h"
 #include "System_Notifications.h"  // NotificationSource enum (defined there, not here)
+#include "System_CommandTypes.h"
 #include "System_User.h"           // AuthContext (returned by oledAuthContext)
 
 #if ENABLE_OLED_DISPLAY
@@ -15,6 +16,9 @@
 // =============================================================================
 // OLED Utilities - Scrolling Lists & Virtual Keyboard
 // =============================================================================
+
+bool submitOLEDCommandForSession(const String& command, TransportSessionEpoch epoch,
+                                 ExecAsyncCallback callback, void* context);
 
 // ============= Standardized Header System =============
 

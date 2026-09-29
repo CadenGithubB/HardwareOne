@@ -102,6 +102,7 @@ bool isEspNowInitialized() { return false; }
 #endif
 #include "System_ESPSR.h"
 #include "System_STT.h"
+#include "System_TranscriptionUI.h"
 
 extern "C" {
   extern uint8_t _bss_start;
@@ -902,7 +903,23 @@ extern bool gCLIValidateOnly;
 // belong here. User-typed `g2status` from a CLI prompt also passes
 // through this path and gets suppressed too — that's fine; it's
 // visible in the prompt response anyway.
+// Display clients poll and acknowledge accepted text automatically. These
+// passive exchanges must neither wake the device nor fill the audit log.
+static bool isPassiveTranscriptionCommand(const char* cmd) {
+  if (!cmd) return false;
+  static const char* const verbs[] = {
+    "transcription status", "transcription next", "transcription ack"
+  };
+  for (const char* verb : verbs) {
+    const size_t n = strlen(verb);
+    if (!strncmp(cmd, verb, n) &&
+        (!cmd[n] || cmd[n] == ' ' || cmd[n] == '\t')) return true;
+  }
+  return false;
+}
+
 static bool isQuietPollCommand(const char* cmd) {
+  if (isPassiveTranscriptionCommand(cmd)) return true;
   if (!cmd || !cmd[0]) return false;
   // Match the leading verb; ignore any trailing args (json modifiers, etc.)
   static const char* const kQuiet[] = {
@@ -3426,6 +3443,10 @@ static constexpr CommandModule gCommandModules[] = {
     "detections.", edgeImpulseCommands,  &edgeImpulseCommandsCount, CMD_MODULE_SENSOR, nullptr },
 #endif
 
+#if ENABLE_DICTATION
+  { "transcription", "Transcription interfaces", "Session controls and private transcript pages shared by display and web interfaces.", transcriptionUICommands, &transcriptionUICommandsCount, CMD_MODULE_SENSOR, nullptr },
+#endif
+
 #if ENABLE_LOCAL_STT
   { "stt", "Local speech-to-text", "Buffered local dictation through the shared audio HAL. "
     "Stop SR and the microphone sensor first, then use stt record [seconds]. "
@@ -5223,7 +5244,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // SOURCE_UART is excluded for the same reason: the UART host link is a
   // machine daemon that may poll sensors continuously — a human isn't there,
   // and its traffic must not hold the device out of power-save forever.
-  if (ctx.transport != SOURCE_INTERNAL && ctx.transport != SOURCE_UART) {
+  if (ctx.transport != SOURCE_INTERNAL && ctx.transport != SOURCE_UART &&
+      !isPassiveTranscriptionCommand(cmd)) {
     powerSaveNoteActivity();
   }
 

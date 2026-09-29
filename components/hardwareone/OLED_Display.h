@@ -155,7 +155,8 @@ enum OLEDMode {
   OLED_I2C_DIAG,           // I2C bus scan — hardware diagnostics (Hardware menu)
   OLED_BLUETOOTH_R1,       // R1 ring submenu — connect only (pushed from OLED_BLUETOOTH)
   OLED_R1_HEALTH,          // R1 Health — vitals / Poll / Track (ENABLE_R1_HEALTH)
-  OLED_USER_MANAGER        // Admin user manager — list / add / delete / role (Config menu)
+  OLED_USER_MANAGER,       // Admin user manager — list / add / delete / role (Config menu)
+  OLED_TRANSCRIPTION, OLED_TRANSCRIPTION_LIVE, OLED_TRANSCRIPTS, OLED_TRANSCRIPT_VIEW
 };
 
 // Guest OLED session helpers (view-only UX). Allowlist drives menu filter +

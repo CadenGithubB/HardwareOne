@@ -128,7 +128,8 @@ AuthContext g2HijackAuthContextForOwner(BlePeerOwnerSession* ownerOut) {
 bool g2SubmitHijackCommand(const char* line,
                            const G2CmdCookie& cookie,
                            G2HijackCmdCallback callback,
-                           void* userData) {
+                           void* userData,
+                           TransportSessionEpoch expectedEpoch) {
   if (!line || !*line) {
     WARN_COMMANDF("g2.hijack.cmd: reject empty line");
     return false;
@@ -145,6 +146,9 @@ bool g2SubmitHijackCommand(const char* line,
     WARN_COMMANDF("g2.hijack.cmd: reject blank pairedByUser line='%s'", safeLineForTrace.c_str());
     return false;
   }
+
+  if (expectedEpoch != kNoTransportSessionEpoch && owner.transportEpoch != expectedEpoch)
+    return false;
 
   HijackCallContext* ctx = new (std::nothrow) HijackCallContext{};
   if (!ctx) {

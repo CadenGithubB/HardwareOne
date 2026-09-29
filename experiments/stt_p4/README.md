@@ -4,7 +4,12 @@ Experimental English dictation for HardwareOne, on `codex/jpeg-portable`, based
 on the qualified ESP-SR milestone `f9bfe98`. The P4 transcribes onboard microphone
 audio without a Pi, UART inference, Wi-Fi connection or cloud API.
 
-The current `transcripts-app-v1` adds optional saved transcripts through the
+The Transcription interfaces add app controls and saved-file browsing on G2,
+OLED and Web Sensors → Microphone. See [TRANSCRIPTION_UI.md](TRANSCRIPTION_UI.md)
+for use and [TRANSCRIPTION_UI_RESULTS.md](TRANSCRIPTION_UI_RESULTS.md) for
+qualification and hardware limits.
+
+The previous `transcripts-app-v1` added optional saved transcripts through the
 shared local/Pi result path. See [TRANSCRIPTS.md](TRANSCRIPTS.md) for the persistent
 setting and downloads, and [TRANSCRIPT_RESULTS.md](TRANSCRIPT_RESULTS.md) for
 qualification. It retains the session weight cache measured in
