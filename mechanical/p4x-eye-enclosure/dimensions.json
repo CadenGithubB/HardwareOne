@@ -1,0 +1,3799 @@
+{
+  "units": "mm",
+  "status": "Revision 20 adds a lid-owned PCB anti-lift stop with 0.2 mm nominal gap and relocates the lower USB-side support away from RESET. All five final STL meshes passed watertightness, winding, positive-volume and single-component topology checks; four-page drawing dimensions/hashes and rendered pages passed inspection. Numerical viewer checks and PCB travel stop browser cutaway inspection passed with no reported console errors or warnings. Only lid/midframe changed; physical fit, contact pressure and supplier acceptance unverified.",
+  "source_board_revision": "PCB MB V2.3 2025-04-11 bundled in official P4X archive",
+  "source_electrical_revision": "P4X MB V2.4 February 2026",
+  "coordinate_system": "Gerber TOP view, X right, Y up, origin lower-left; SCAD mirrors X for display-facing concept",
+  "pcb_envelope_verified": [
+    69,
+    43
+  ],
+  "main_body_height_verified": 37,
+  "placement_reference_positions": [
+    {
+      "ref": "J23",
+      "feature": "USB Debug",
+      "x": 2.175,
+      "y": 11,
+      "side": "bottom"
+    },
+    {
+      "ref": "J6",
+      "feature": "USB High Speed",
+      "x": 2.175,
+      "y": 26,
+      "side": "bottom"
+    },
+    {
+      "ref": "J21",
+      "feature": "microSD",
+      "x": 45.45,
+      "y": 34.88,
+      "side": "bottom"
+    },
+    {
+      "ref": "SW7",
+      "feature": "power switch",
+      "x": 11.4268,
+      "y": 4.7,
+      "side": "bottom"
+    },
+    {
+      "ref": "SW1",
+      "feature": "BOOT",
+      "x": 2.125,
+      "y": 26.9,
+      "side": "top"
+    },
+    {
+      "ref": "SW2",
+      "feature": "RESET",
+      "x": 2.125,
+      "y": 33.9,
+      "side": "top"
+    },
+    {
+      "ref": "SW3",
+      "feature": "user button 1",
+      "x": 23,
+      "y": 24.5,
+      "side": "bottom"
+    },
+    {
+      "ref": "SW4",
+      "feature": "user button 2",
+      "x": 23,
+      "y": 18.5,
+      "side": "bottom"
+    },
+    {
+      "ref": "SW5",
+      "feature": "user button 3",
+      "x": 23,
+      "y": 12.5,
+      "side": "bottom"
+    },
+    {
+      "ref": "SW6",
+      "feature": "wheel encoder",
+      "x": 11.6,
+      "y": 32.85,
+      "side": "top"
+    },
+    {
+      "ref": "U9",
+      "feature": "microphone",
+      "x": 48.28,
+      "y": 40.8,
+      "side": "top"
+    },
+    {
+      "ref": "J25",
+      "feature": "battery connector",
+      "x": 3.125,
+      "y": 18.15,
+      "side": "top"
+    },
+    {
+      "ref": "J22",
+      "feature": "expansion header",
+      "x": 62.15,
+      "y": 18.5,
+      "side": "top"
+    },
+    {
+      "ref": "J24",
+      "feature": "camera FPC omitted module",
+      "x": 44.5,
+      "y": 30.4635,
+      "side": "top"
+    },
+    {
+      "ref": "J5",
+      "feature": "LCD FPC",
+      "x": 44.5,
+      "y": 20.36,
+      "side": "bottom"
+    }
+  ],
+  "lcd_module_datasheet": [
+    31.52,
+    33.72,
+    1.9
+  ],
+  "lcd_active_area_datasheet": [
+    27.72,
+    27.72
+  ],
+  "stock_case_battery_max_documented": [
+    45,
+    25,
+    4
+  ],
+  "proposed_case_unverified": [
+    80,
+    56,
+    29
+  ],
+  "proposed_envelope_including_raised_keys_unverified": [
+    80,
+    56,
+    30
+  ],
+  "battery_user_dimensions_original": [
+    36,
+    65,
+    10
+  ],
+  "battery_user_dimensions_oriented": [
+    65,
+    36,
+    10
+  ],
+  "battery_pocket_internal": [
+    67,
+    38
+  ],
+  "battery_model_and_electrical_ratings": "not yet supplied",
+  "pcb_thickness_assumption": 1.6,
+  "rear_component_space_assumption": 7.2,
+  "front_component_space_assumption": 5.7,
+  "charger": {
+    "part": "AP5056",
+    "voltage_V": 4.2,
+    "current_mA": 500
+  },
+  "battery_connector": {
+    "part": "HCTL HC-1.25-2AW",
+    "pitch": 1.25,
+    "positive_pin": 2,
+    "ground_pin": 1
+  },
+  "revision": 20,
+  "physical_board_revision_photo": "MB_V2.3 visible in user-supplied board photo",
+  "layout_mounting_circles": [
+    {
+      "x": 2,
+      "y": 2,
+      "diameter": 1.5
+    },
+    {
+      "x": 53.4,
+      "y": 2.2,
+      "diameter": 2
+    },
+    {
+      "x": 66.2,
+      "y": 35,
+      "diameter": 1.5
+    }
+  ],
+  "selected_board_mount": {
+    "hole_identification": "User photo confirms lower projecting-tab hole; layout provides center and apparent diameter. Physical diameter and screw fit require measurement.",
+    "gerber_top_xy": [
+      53.4,
+      2.2
+    ],
+    "display_case_xy": [
+      21.1,
+      8.7
+    ],
+    "pcb_hole_diameter_layout": 2,
+    "blind_pilot_diameter_provisional": 1.2,
+    "blind_pilot_depth": 5,
+    "fastener_provisional": "M1.6 screw; head clearance, thread engagement and printed pilot fit unverified",
+    "additional_board_retention": "Three provisional edge seats and filled rectangular locator in the lower-left PCB notch; upper-right outside guide omitted because case wall provides stop. Contact areas and stiffness require physical checks.",
+    "construction": "Selected PCB screw engages a blind pilot in a solid mount printed as part of the midframe. No base post or through-hole exists beneath this PCB fixing.",
+    "owner": "midframe",
+    "post_outer_diameter_provisional": 6,
+    "post_z_span": [
+      14.5,
+      19.7
+    ],
+    "blind_pilot_z_span": [
+      14.7,
+      19.7
+    ],
+    "remaining_solid_to_flat_midframe_underside": 1.7,
+    "base_post_present": false,
+    "midframe_through_hole_present": false
+  },
+  "previous_case_concept": [
+    80,
+    56,
+    28
+  ],
+  "battery_case_xy": [
+    8.5,
+    6
+  ],
+  "battery_shift_y_from_centered": -4,
+  "battery_z_span": [
+    2.5,
+    12.5
+  ],
+  "battery_pocket_case_xy": [
+    7.5,
+    5
+  ],
+  "separator": "Removable 1.5 mm midframe plate at Z13-14.5, with open front-right battery cable bay, integral blind PCB mount, two independent case fixings, three lid-locating keys, sparse board seats and solid notch locator. USB saddle belongs to base.",
+  "rear_component_space_note": "Battery top to PCB underside is 7.2 mm. Midframe plate occupies Z13-14.5, leaving 5.2 mm for underside component heights and clearance. Physical stack measurements are critical; J22 installed height remains unverified.",
+  "stack_z_spans": {
+    "floor": [
+      0,
+      2
+    ],
+    "battery_bottom_clearance": [
+      2,
+      2.5
+    ],
+    "battery": [
+      2.5,
+      12.5
+    ],
+    "battery_to_midframe_clearance": [
+      12.5,
+      13
+    ],
+    "midframe_plate": [
+      13,
+      14.5
+    ],
+    "underside_component_allowance": [
+      14.5,
+      19.7
+    ],
+    "pcb": [
+      19.7,
+      21.3
+    ],
+    "front_component_allowance": [
+      21.3,
+      27
+    ],
+    "upper_cover_walls_and_pillars": [
+      14.5,
+      27
+    ],
+    "upper_cover_faceplate": [
+      27,
+      29
+    ],
+    "lcd_reference_provisional": [
+      27.1,
+      29
+    ],
+    "lcd_support_ledge": [
+      25.9,
+      27.1
+    ],
+    "base_usb_saddle": [
+      14.5,
+      22.83
+    ],
+    "usb_saddle_cover_seam": [
+      22.83,
+      23.03
+    ],
+    "upper_cover_above_usb_saddle": [
+      23.03,
+      27
+    ],
+    "lid_alignment_keys": [
+      14.5,
+      17
+    ],
+    "lid_alignment_receivers": [
+      14.5,
+      17.8
+    ],
+    "power_slider_flange": [
+      26.8,
+      27.6
+    ],
+    "power_slider_retainer": [
+      25.4,
+      26.6
+    ],
+    "power_slider_socket": [
+      25.4,
+      27.9
+    ],
+    "power_slider_nub": [
+      27.6,
+      30
+    ],
+    "pcb_anti_lift_foot": [
+      21.5,
+      21.9
+    ],
+    "pcb_anti_lift_root": [
+      23.5,
+      27.1
+    ]
+  },
+  "rear_components_reference": [
+    {
+      "ref": "J22",
+      "feature": "2x10 right-angle SMT female expansion header, 2.54 mm pitch",
+      "gerber_top_xy": [
+        62.15,
+        18.5
+      ],
+      "manufacturer_model": "not specified by official BOM",
+      "height": "unverified"
+    },
+    {
+      "ref": "U11",
+      "feature": "ESP32-C6-MINI-1U-N4 radio module",
+      "gerber_top_xy": [
+        28.4,
+        30.75
+      ],
+      "datasheet_size": [
+        13.2,
+        12.5,
+        2.4
+      ]
+    },
+    {
+      "ref": "SW6",
+      "feature": "Mitsumi SIQ-02FVS3 encoder",
+      "gerber_top_xy": [
+        11.6,
+        32.85
+      ],
+      "installed_height": "Nominal 4 mm below PCB underside at Z=19.7; mounting and solder offsets unverified",
+      "datasheet_url": "https://nmbtc.com/wp-content/uploads/2019/04/switch_siq_02fvs_e.pdf",
+      "datasheet_page": 3,
+      "wheel_diameter_datasheet": 14.5,
+      "dial_thickness_datasheet": 2,
+      "overall_projection_datasheet": 4,
+      "display_case_xy": [
+        62.9,
+        39.35
+      ],
+      "wheel_outer_rim_case_y": 46.6,
+      "dial_z_span_provisional": [
+        15.7,
+        17.7
+      ],
+      "reference_body": "simplified visual envelope"
+    }
+  ],
+  "inline_viewer_path": "/Users/cadbecaimacmini/.codex/visualizations/2026/09/27/01a0e470-16f8-7de2-afc9-6933b2a473e2/p4x-enclosure-unified-body.html",
+  "wheel_access_guard": {
+    "profile": "Removable full-perimeter midframe floor on continuous support ledge and boss shoulders; former fixed far case lip and capture tabs removed.",
+    "z_span": [
+      13,
+      14.5
+    ],
+    "thickness": 1.5,
+    "battery_top_clearance": 0.5,
+    "nominal_dial_bottom_clearance": 1.2,
+    "role": "Midframe separates battery and board and forms floor below exposed wheel; closer perimeter seam is not a water seal.",
+    "verification_needed": [
+      "finger fit",
+      "wheel travel",
+      "installed mounting and solder offsets",
+      "guard stiffness",
+      "edge roundover",
+      "physical clearances"
+    ],
+    "perimeter_fit_clearance": 0.3
+  },
+  "lid_and_other_access": "Both halves follow the same wheel/USB outer contour, with 1 mm total wheel relief, a uniform right rear profile and inward reinforcement; actual lower cavity drives the revised midframe. USB apertures split across the base-owned lower saddle and upper cover for vertical assembly. Full LCD module remains flush with the outer face on a rear support ledge, with 0.2 mm side clearance and optional rear frame-to-seat silicone fillets. Three keys remain 1 mm raised, and outer top/bottom face edges use R2 rounding. Four M2 x 8 mm screws enter closed underside wells and engage blind upper-cover inserts. PCB attaches only to midframe; two independent M2 x 8 mm nylon screws attach that frame to inserts in the base posts. Installed component fit and physical assembly remain unverified. Revision 15 adds a local rounded rear USB cable scallop while preserving the full 4.4 mm case post at (77,41) and all rotary, battery and frame positions. Revision 16 adds the connected battery-lead passage within the midframe and shifts its front PCB seat/stop 4 mm left; the shell floor stays closed. Revision 17 enlarges the LCD flex relief and adds three midframe-owned lid locating keys, with downward-open blind pockets in added lid receiver ribs. Reprint the lid and midframe as a pair; the base and button strip retain revision 16 geometry. Revision 18 opens the battery cable bay through the front/right frame edges, moves its front PCB support left by 5 mm, adds a beveled SW7 opening and moves the front strip fixing to (63,19). New lid, frame and strip are a matched set; base unchanged. Revision 19 replaces the exposed SW7 opening with a separate captive slider, smaller lid slot, underside flange guide and integral retaining shelf on the button strip. Base and midframe retain revision 18 geometry. Revision 20 adds an independent upper PCB travel stop and relocates the lower USB-side seat away from RESET/pads. No preload or clamping force intended; lid must close freely before tightening screws. Base, button strip and power slider retain revision 19 geometry.",
+  "underside_component_clearance_above_midframe_assumption": 5.2,
+  "midframe": {
+    "status": "Revision 20 lower USB-side support relocated to clear RESET; final mesh checks passed. Numerical/browser checks passed; physical fit, contact pressure and load support unverified.",
+    "plate_z_span": [
+      13,
+      14.5
+    ],
+    "plate_thickness": 1.5,
+    "plate_underside": "Flat at Z=13 around through-cuts; 0.5 mm above battery envelope. This gap is not the battery-wire route.",
+    "board_edge_seats": {
+      "display_case_xy": [
+        [
+          10,
+          43.1
+        ],
+        [
+          61.5,
+          7.0
+        ],
+        [
+          69.9,
+          33.75
+        ]
+      ],
+      "z_span": [
+        14.5,
+        19.7
+      ],
+      "contact_status": "Sparse support candidates; relocated USB-side solder-mask bearing region reviewed against placements, Gerbers, mask openings and drills. Actual component/solder envelopes, contact and printed fit unverified.",
+      "left_outside_guide": "unchanged",
+      "front_seat_xy_bounds": {
+        "x": [
+          60,
+          63
+        ],
+        "y": [
+          6.1,
+          7.5
+        ]
+      },
+      "front_stop_xy_bounds": {
+        "x": [
+          60,
+          63
+        ],
+        "y": [
+          5.0,
+          6.1
+        ]
+      },
+      "front_support_move_x_from_revision_15": -4,
+      "front_support_move_reason": "Clear the larger revision 18 cable bay while preserving seat and stop Y/Z bounds",
+      "front_support_move_x_from_revision_17": -5,
+      "usb_side_seat": {
+        "introduced_revision": 20,
+        "xy_bounds": {
+          "x": [
+            69.3,
+            70.5
+          ],
+          "y": [
+            32.75,
+            34.75
+          ]
+        },
+        "size_xy": [
+          1.2,
+          2
+        ],
+        "z_span_with_union_overlap": [
+          14.49,
+          19.7
+        ],
+        "nominal_bearing_z": 19.7,
+        "nominal_contact_area": 2.4,
+        "replaces_xy_bounds": {
+          "x": [
+            71,
+            74
+          ],
+          "y": [
+            42.1,
+            42.9
+          ]
+        },
+        "reason": "Old support collided with SW2 RESET and terminal pads",
+        "source_basis": "MB V2.3 placement, Gerber copper, solder-mask and drill review",
+        "nominal_clearances": {
+          "boot_body": 0.275,
+          "boot_mask_pad": 0.425,
+          "encoder_pad": 0.35,
+          "usb_locating_hole_mask": 0.29,
+          "wheel_radial": 0.63,
+          "boot_mask_pad_horizontal_conservative": 0.425,
+          "boot_mask_pad_euclidean": 0.451
+        },
+        "usb_locating_hole": {
+          "center_case_xy": [
+            69.72,
+            35.39
+          ],
+          "nonplated_drill_diameter": 0.6,
+          "mask_opening_diameter": 0.7
+        },
+        "validation": "Source plan clearances, final mesh and PDF checks, numerical viewer and browser travel-stop inspection passed. Real component/solder envelopes, printed fit and contact loads remain unverified.",
+        "bearing_surface": "Solder-mask bearing land containing tented vias; not unperforated bare FR4"
+      }
+    },
+    "outline_jig": {
+      "pcb_step_case_xy": [
+        16.9,
+        12.1
+      ],
+      "construction": "Filled rectangular locator replaces the two arms of the former L-shaped jig",
+      "filled_block_xy_bounds": {
+        "x": [
+          8,
+          16.5
+        ],
+        "y": [
+          8,
+          11.7
+        ]
+      },
+      "guide_z_span": [
+        14.5,
+        21.1
+      ],
+      "size": [
+        8.5,
+        3.7,
+        6.6
+      ],
+      "nominal_clearance_to_pcb_notch_faces": 0.4,
+      "cad_union_overlap_below_nominal_z": 0.01,
+      "status": "Filled block stays within the PCB outline notch; physical insertion, contact areas and populated component clearances not verified",
+      "nominal_clearance_to_midframe_board_standoff": 1.6
+    },
+    "verification_needed": [
+      "full populated underside height within 5.2 mm plate-to-PCB gap",
+      "0.5 mm vertical battery clearance and new plan clearances with tolerances",
+      "integral PCB blind mount strength, screw engagement and 1.7 mm floor thickness",
+      "plate stiffness, two independent case fixings and perimeter ledge fit",
+      "vertical insertion/removal of PCB already attached to midframe, through base-owned USB saddle notches",
+      "front-left and rear frame screw driver access with PCB installed",
+      "button and wheel load support",
+      "upper-cover removal, wheel clearance and M2 case screw head fit",
+      "base USB saddle stiffness and inward brace/component clearance",
+      "LCD seat, flex routing, retention and cover removal",
+      "blind insert fit, deep-well head bearing and driver access",
+      "M2 frame insert fit, blind tip clearance, screw-head fit, post wall strength and usable thread engagement",
+      "Battery cable routing through open bay, bend radius, edge clearance and retention without pinching beneath the remaining plate",
+      "Three 0.2 mm-clearance lid locating pockets, chamfered key entry, vertical assembly and no binding before case screws are tightened",
+      "SW7 direct access, actual installed handle height and full 2 mm slider travel",
+      "Lid anti-lift stop must leave clearance without PCB preload; check real board thickness, print dimensions and revised seat component/solder clearance"
+    ],
+    "assembly_sequence": "With electronics removed, install four cover inserts and two base-post inserts, then fit actuator strip and LCD in the separate upper cover as appropriate. Attach PCB to midframe using its independent blind mount. Place battery with its lead corner toward (73.5,6). Before seating the frame, route the lead through the open front-right cable bay toward J25; connect while raised and accessible. Keep slack clear of screws/supports and out of the 0.5 mm under-plate gap. Lower the PCB/midframe onto the ledge with USB bodies entering the base saddle open notches. Fasten the front-left and rear M2 x 8 mm frame screws. Connect and route LCD flex, lower cover vertically over its three frame keys and past wheel to close USB notches; confirm free key entry and a closed seam without the anti-lift stop preloading the PCB; do not pull a binding lid down with screws. Insert four M2 x 8 mm nylon case screws from underside wells. Verify screw engagement, no bottoming, button rest gaps, free movement and full SW7 power-slider travel. Physical insertion, lead routing and fit require checking.",
+    "outer_perimeter": {
+      "construction": "Actual lower-interior outline offset inward by 0.3 mm, with reliefs around four upper insert pads; revision 18 cable bay opens through front and right edges and removes narrow cable-route strips.",
+      "nominal_clearance_to_case_inner_wall": 0.3,
+      "lid_boss_relief_radial_clearance": 0.3,
+      "standard_lid_boss_relief_radius": 2.9,
+      "moved_right_lid_boss_relief_radius": 2.9,
+      "moved_right_lid_boss_relief_center": [
+        77,
+        41
+      ],
+      "lid_boss_relief_basis": "All four frame notches clear the 5.2 mm upper insert pads by 0.3 mm radially; moved right base post remains 4.4 mm diameter.",
+      "offset_from_actual_lower_interior": 0.3
+    },
+    "continuous_case_ledge": {
+      "z_span": [
+        11.5,
+        13
+      ],
+      "width_inward_from_inner_wall": 1.4,
+      "construction": "Ring follows actual lower interior, extending 1.4 mm inward. Battery footprint expanded by 0.2 mm is subtracted so the ledge does not intersect the shifted pack.",
+      "battery_footprint_relief_per_side": 0.2,
+      "minimum_nominal_plate_overlap_at_usb_side": 0.2,
+      "minimum_nominal_shelf_width_at_usb_side": 0.5,
+      "nominal_rear_shelf_width": 0.8,
+      "nominal_plate_overlap_at_rear": 0.5
+    },
+    "lid_boss_support_shoulders": {
+      "z_span": [
+        11.5,
+        13
+      ],
+      "radius_addition_to_boss": 0.7,
+      "standard_shoulder_radius": 3.3,
+      "moved_right_shoulder_radius": 2.9,
+      "clip": "case outline",
+      "clearance_to_pack": 0.7,
+      "note": "Support shoulders are relieved around the shifted battery; right case-fastener center is (77,41), with matching frame relief and guide cuts."
+    },
+    "former_capture_tabs": "Earlier capture tabs remain removed. Revision 17 adds upward locating keys that permit straight vertical cover removal.",
+    "seam_status": "0.3 mm fit clearance around inner case wall closes large perimeter gaps; no water seal claimed",
+    "case_fixing_count": 2,
+    "pcb_fixing": "Independent blind mount at (21.1,8.7), belonging entirely to midframe; see selected_board_mount",
+    "front_left_fixing": {
+      "display_case_xy": [
+        5,
+        8.7
+      ],
+      "case_boss_outer_diameter_provisional": 5.5,
+      "case_boss_z_span": [
+        2,
+        13
+      ],
+      "case_pilot_diameter_provisional": 2.7,
+      "case_pilot_depth": 3.4,
+      "case_pilot_z_span": [
+        9.6,
+        13
+      ],
+      "plate_hole_diameter_provisional": 2.3,
+      "nominal_pack_clearance": 0.75,
+      "purpose": "Independent M2 x 8 mm nylon screw clamps midframe to heat-set insert in base post; accessible after PCB is attached to frame",
+      "heat_set_insert": {
+        "thread": "M2",
+        "outer_diameter_user": 3,
+        "length_user": 3.2,
+        "installed_z_span": [
+          9.8,
+          13
+        ],
+        "installation_direction": "Downward into open top of base post, before battery and electronics are fitted",
+        "entry_leadin_diameter_provisional": 3.1,
+        "entry_leadin_depth": 0.25,
+        "nominal_post_wall_around_insert": 1.25,
+        "pilot_status": "2.7 mm bore is an initial printed trial dimension; actual insert knurl profile and printed material must determine final pilot",
+        "entry_leadin_z_span": [
+          12.75,
+          13
+        ]
+      },
+      "screw": {
+        "thread": "M2",
+        "material": "nylon",
+        "under_head_length_user": 8,
+        "head_seat_z": 14.5,
+        "reference_head_diameter_provisional": 4,
+        "reference_head_height_provisional": 1.3,
+        "reference_head_z_span": [
+          14.5,
+          15.8
+        ],
+        "shaft_z_span": [
+          6.5,
+          14.5
+        ],
+        "nominal_tip_z": 6.5,
+        "nominal_tip_past_insert_lower_end": 3.3,
+        "status": "8 mm interpreted below head; actual head shape, usable thread length and driver access remain unverified"
+      },
+      "screw_tip_relief": {
+        "diameter_provisional": 2.4,
+        "z_span": [
+          6,
+          9.6
+        ],
+        "blind_end_z": 6,
+        "nominal_tip_clearance": 0.5,
+        "solid_thickness_above_floor": 4,
+        "solid_thickness_to_exterior_underside": 6
+      }
+    },
+    "rear_fixing": {
+      "display_case_xy": [
+        44,
+        48.5
+      ],
+      "case_boss_outer_diameter_provisional": 6,
+      "case_boss_z_span": [
+        2,
+        13
+      ],
+      "case_pilot_diameter_provisional": 2.7,
+      "case_pilot_depth": 3.4,
+      "case_pilot_z_span": [
+        9.6,
+        13
+      ],
+      "plate_hole_diameter_provisional": 2.3,
+      "nominal_pack_clearance": 3.5,
+      "purpose": "Independent M2 x 8 mm nylon screw clamps midframe to heat-set insert in base post; accessible after PCB is attached to frame",
+      "support_rib": {
+        "owner": "base",
+        "width_x": 1.6,
+        "x_span": [
+          43.2,
+          44.8
+        ],
+        "z_span": [
+          2,
+          6
+        ],
+        "direction": "Rearward from Y48.5 toward case wall",
+        "clip": "Lower interior expanded outward by 0.2 mm",
+        "nominal_overlap_into_inner_wall": 0.2,
+        "nominal_remaining_wall_to_exterior_shoulder": 1.8,
+        "construction": "Rib joins the base inner wall without ending on the exterior surface"
+      },
+      "heat_set_insert": {
+        "thread": "M2",
+        "outer_diameter_user": 3,
+        "length_user": 3.2,
+        "installed_z_span": [
+          9.8,
+          13
+        ],
+        "installation_direction": "Downward into open top of base post, before battery and electronics are fitted",
+        "entry_leadin_diameter_provisional": 3.1,
+        "entry_leadin_depth": 0.25,
+        "nominal_post_wall_around_insert": 1.5,
+        "pilot_status": "2.7 mm bore is an initial printed trial dimension; actual insert knurl profile and printed material must determine final pilot",
+        "entry_leadin_z_span": [
+          12.75,
+          13
+        ]
+      },
+      "screw": {
+        "thread": "M2",
+        "material": "nylon",
+        "under_head_length_user": 8,
+        "head_seat_z": 14.5,
+        "reference_head_diameter_provisional": 4,
+        "reference_head_height_provisional": 1.3,
+        "reference_head_z_span": [
+          14.5,
+          15.8
+        ],
+        "shaft_z_span": [
+          6.5,
+          14.5
+        ],
+        "nominal_tip_z": 6.5,
+        "nominal_tip_past_insert_lower_end": 3.3,
+        "status": "8 mm interpreted below head; actual head shape, usable thread length and driver access remain unverified"
+      },
+      "screw_tip_relief": {
+        "diameter_provisional": 2.4,
+        "z_span": [
+          6,
+          9.6
+        ],
+        "blind_end_z": 6,
+        "nominal_tip_clearance": 0.5,
+        "solid_thickness_above_floor": 4,
+        "solid_thickness_to_exterior_underside": 6
+      }
+    },
+    "battery_cable_passage": {
+      "introduced_revision": 18,
+      "construction": "One rounded rectangular through-cut opens midframe to front and right; former three joined cuts and intervening narrow strips removed. Base floor, outer shell and screw wells remain closed.",
+      "plate_z_span": [
+        13,
+        14.5
+      ],
+      "user_plug_reported_width": 5,
+      "cutter_xy": [
+        64.5,
+        -1
+      ],
+      "cutter_size_xy": [
+        16.5,
+        29.65
+      ],
+      "corner_radius": 1,
+      "cutter_xy_bounds": {
+        "x": [
+          64.5,
+          81
+        ],
+        "y": [
+          -1,
+          28.65
+        ]
+      },
+      "actual_opening": "Cutter intersected with actual plate perimeter; opens front/right edges",
+      "battery_lead_corner_case_xy": [
+        73.5,
+        6
+      ],
+      "battery_footprint_covered_percent_approximate": 91.3,
+      "coverage_note": "Plan area only, not verified retention load or stiffness",
+      "route": "Bring lead from battery corner into open bay to J25; keep slack inside case, clear of screws/supports and out of the 0.5 mm gap beneath remaining plate.",
+      "fit_status": "Final revision 18 STL mesh checks, numerical geometry checks and Midframe detail browser inspection passed. Physical wire route, bend radius and retention require validation."
+    },
+    "lid_alignment_keys": {
+      "introduced_revision": 17,
+      "owner": "midframe",
+      "receiver_owner": "lid",
+      "function": "Locate cover laterally and resist twisting; four case screws retain cover axially",
+      "key_rects_xywh": [
+        [
+          2.3,
+          20,
+          1.5,
+          8
+        ],
+        [
+          40,
+          2.3,
+          8,
+          1.5
+        ],
+        [
+          24,
+          52.2,
+          8,
+          1.5
+        ]
+      ],
+      "key_nominal_z_span": [
+        14.5,
+        17
+      ],
+      "key_height": 2.5,
+      "union_overlap_into_plate": 0.01,
+      "tip_chamfer_xy_per_side": 0.3,
+      "tip_chamfer_height": 0.4,
+      "receiver_rects_xywh": [
+        [
+          1.5,
+          18.8,
+          3.5,
+          10.4
+        ],
+        [
+          38.8,
+          1.5,
+          10.4,
+          3.5
+        ],
+        [
+          22.8,
+          51,
+          10.4,
+          3.5
+        ]
+      ],
+      "receiver_z_span": [
+        14.5,
+        17.8
+      ],
+      "pocket_clearance_per_side": 0.2,
+      "pocket_top_clearance": 0.3,
+      "pocket_top_case_z": 17.3,
+      "mouth_flare_additional_clearance_per_side": 0.2,
+      "mouth_flare_height": 0.4,
+      "receiver_inboard_wall_at_flared_entry_minimum_nominal": 0.8,
+      "receiver_xy_clearance_to_pcb_outline": {
+        "left": 0.5,
+        "front": 1.5,
+        "rear": 1.5
+      },
+      "receiver_top_to_pcb_underside": 1.9,
+      "assembly": "Lower cover straight down; chamfered keys enter downward-open blind pockets. Verify free fit before tightening case screws.",
+      "geometry_scope": "Exterior profile, outer wall thicknesses, base, battery/cable positions, USB saddle, wheel and button strip unchanged.",
+      "print_update": "Replace lid and midframe as a pair; retain revision 16 base and button strip if already printed.",
+      "validation": "Geometry retained from revision 17. All four final revision 18 STL mesh checks and numerical/viewer checks passed; physical fit unverified."
+    },
+    "previous_battery_cable_passage_revision_17": {
+      "construction": "Union of three rounded rectangular through-cuts in the midframe, with entry relief opening to plate edge; shell floor, outer shell and screw wells remain closed",
+      "plate_z_span": [
+        13,
+        14.5
+      ],
+      "user_plug_reported_width": 5,
+      "user_requested_passage_width": 7,
+      "plug_opening": {
+        "xy": [
+          65.5,
+          20.65
+        ],
+        "size_xy": [
+          7,
+          8
+        ],
+        "corner_radius": 1,
+        "xy_bounds": {
+          "x": [
+            65.5,
+            72.5
+          ],
+          "y": [
+            20.65,
+            28.65
+          ]
+        },
+        "location": "Near J25"
+      },
+      "wire_channel": {
+        "xy": [
+          69.5,
+          4
+        ],
+        "size_xy": [
+          3,
+          18
+        ],
+        "corner_radius": 0.75,
+        "xy_bounds": {
+          "x": [
+            69.5,
+            72.5
+          ],
+          "y": [
+            4,
+            22
+          ]
+        }
+      },
+      "lead_entry_relief": {
+        "xy": [
+          69,
+          4
+        ],
+        "corner_radius": 1,
+        "purpose": "Let the lead rise immediately above the front-right battery corner without using the tight lower screw-well gap",
+        "cutter_size_xy": [
+          9,
+          7
+        ],
+        "cutter_xy_bounds": {
+          "x": [
+            69,
+            78
+          ],
+          "y": [
+            4,
+            11
+          ]
+        },
+        "actual_opening": "Cutter clipped to actual plate perimeter; extends past edge to remove isolated sliver beside case post"
+      },
+      "battery_lead_corner_case_xy": [
+        73.5,
+        6
+      ],
+      "route": "Orient lead corner toward (73.5,6), rise through entry relief, follow connected channel toward plug passage. Any frontward turn uses the open bay at Y<6. Do not route in the 0.5 mm under-plate gap or narrow screw-well clearance.",
+      "fit_status": "Source dimensions, viewer numerical checks and final closed STL mesh checks passed; plug insertion, other plug dimensions, lead bend radius and physical fit remain unverified"
+    },
+    "previous_board_edge_seats_revision_19": {
+      "display_case_xy": [
+        [
+          10,
+          43.1
+        ],
+        [
+          61.5,
+          7.0
+        ],
+        [
+          72.5,
+          42.5
+        ]
+      ],
+      "z_span": [
+        14.5,
+        19.7
+      ],
+      "upper_right_width": 3,
+      "contact_status": "Candidate bare-edge contacts only; wheel/RESET proximity and component/solder clearances must be checked physically.",
+      "upper_right_xy_bounds": {
+        "x": [
+          71,
+          74
+        ],
+        "y": [
+          42.1,
+          42.9
+        ]
+      },
+      "upper_right_outside_guide": "omitted; contoured case wall provides XY stop",
+      "left_outside_guide": "unchanged",
+      "upper_right_depth_y": 0.8,
+      "right_seam_correction": "Rear-right seat moved to Y42.1-42.9 to follow the revised lower cavity and frame perimeter. Left seat and nominal Z span remain unchanged.",
+      "upper_right_base_wall_clearance": 0.1,
+      "upper_right_reinforced_upper_wall_clearance": 0.5,
+      "front_seat_xy_bounds": {
+        "x": [
+          60,
+          63
+        ],
+        "y": [
+          6.1,
+          7.5
+        ]
+      },
+      "front_stop_xy_bounds": {
+        "x": [
+          60,
+          63
+        ],
+        "y": [
+          5.0,
+          6.1
+        ]
+      },
+      "front_support_move_x_from_revision_15": -4,
+      "front_support_move_reason": "Clear the larger revision 18 cable bay while preserving seat and stop Y/Z bounds",
+      "front_support_move_x_from_revision_17": -5
+    }
+  },
+  "battery_move_y_from_revision_3": -8,
+  "battery_guide": {
+    "nominal_outer_case_xy": [
+      6.5,
+      4
+    ],
+    "lead_exit": "Orient actual pack lead corner toward case (73.5,6) and route up through the new midframe entry relief. The existing low-guide left-side notch remains but is not the revision 16 lead route; actual pack lead geometry and fit unverified.",
+    "case_lid_boss_radial_clearance": 0.4,
+    "case_screw_well_relief_radii": [
+      3.65,
+      3.65,
+      3.65,
+      3.4
+    ],
+    "case_screw_well_relief_basis": "Enlarged lower screw-well outside radius plus 0.4 mm; guide reliefs follow the support geometry",
+    "nominal_pack_to_moved_right_lid_boss_clearance_above_lower_well": 1.3,
+    "nominal_pack_to_closed_right_lower_screw_well_clearance": 0.5,
+    "front_frame_post_relief_radius": 3.15,
+    "rear_frame_post_relief_radius": 3.4,
+    "nominal_pack_to_front_frame_post_clearance": 0.75,
+    "nominal_pack_to_rear_frame_post_clearance": 3.5,
+    "nominal_pack_to_lower_usb_wall_clearance": 0.7,
+    "nominal_pack_to_lower_rear_wall_clearance": 1,
+    "perimeter_construction": "Guide envelope stays within common exterior and merges into the case wall where envelopes overlap; no separate interior clip. Reliefs trim the two frame posts and enlarged case-screw wells.",
+    "nominal_pack_to_front_right_case_well_corner_clearance": 0.514306,
+    "nominal_pack_to_case_well_clearances_in_order": [
+      2.2062,
+      0.514306,
+      8.2465,
+      0.5
+    ]
+  },
+  "wheel_access_slot": {
+    "status": "provisional bottom-open wheel notch in removable contoured upper cover",
+    "x_span": [
+      56.4,
+      69.4
+    ],
+    "z_span": [
+      14.5,
+      18.1
+    ],
+    "upper_outer_wall_case_y": 44.5,
+    "local_wall_thickness": 0.6,
+    "local_inner_wall_case_y": 43.9,
+    "local_pcb_edge_case_y": 43.5,
+    "nominal_wall_to_pcb_gap": 0.4,
+    "wheel_outer_rim_case_y": 46.6,
+    "wheel_rim_projection_past_upper_wall": 2.1,
+    "width": 13,
+    "approximate_nominal_side_clearance_at_inner_wall": 0.4866814486508346,
+    "side_clearance_note": "Upper rounded corners slightly reduce nominal clearance; physical fit not verified.",
+    "nominal_dial_to_notch_top_clearance": 0.4,
+    "bottom_open": true,
+    "assembly_note": "No closed lower bar: notch opens to upper-cover bottom at case Z14.5 so cover can lower past protruding wheel.",
+    "lower_local_wall_thickness": 1.5,
+    "local_wall_thickness_basis": "Encoder/PCB clearance band only; upper wall elsewhere around wheel is reinforced to 1.1 mm",
+    "reinforced_upper_wall_thickness": 1.1,
+    "reinforced_inner_wall_case_y": 43.4,
+    "thin_clearance_band_z_span": [
+      17.7,
+      21.6
+    ],
+    "nominal_encoder_hub_clearance_in_hardware_band": 0.35
+  },
+  "case_contour": {
+    "lower_body": "Uniform outer contour matches upper cover, including wheel edge Y44.5 and revised right corner enclosing the shifted closed well. Lower rear wall is reinforced inward to 1.5 mm; actual cavity drives the midframe outline.",
+    "lower_body_z_span": [
+      0,
+      14.5
+    ],
+    "outer_face_edge_rounding": {
+      "nominal_radius": 2,
+      "bottom_z_span": [
+        0,
+        2
+      ],
+      "top_z_span": [
+        27,
+        29
+      ],
+      "profile": "Quarter circle approximated by 64 native 2D-offset angular slices; not an analytic fillet",
+      "cad_angular_slices": 64,
+      "maximum_nominal_slice_step_approximate": 0.04908,
+      "assembly_seam": "Unchanged straight seam",
+      "bottom_well_rim_protection": {
+        "z_span": [
+          0,
+          2
+        ],
+        "first_three_footprint_radii": 3.25,
+        "right_footprint_radius": 3.0,
+        "clip": "Outer rounded case outline",
+        "minimum_first_three_mouth_wall_nominal": 0.77,
+        "right_mouth_wall_nominal": 0.75,
+        "construction": "Local full-depth material leaves short unrounded perimeter stretches around the screw-access wells so the head bores remain closed to the battery bay"
+      },
+      "body_envelope_change": "None; body remains 80 x 56 x 29 mm",
+      "fit_status": "Included in revision 16 compiled exports; final oriented meshes passed one-closed-component, watertightness, consistent-winding and topology checks. Physical print fit unverified."
+    },
+    "upper_edge_near_wheel_case_y": 44.5,
+    "center_sd_region_max_case_y": 56,
+    "other_outline_corner_radius": 5,
+    "battery_end_case_y": 42,
+    "lower_ledge_note": "Both case halves follow uniform exterior at Y44.5 around the wheel. Battery moves to Y6.0-42.0 and lower wall is reinforced inward; frame and ledge follow the revised actual cavity.",
+    "fit_status": "Initial contour; physical fit, finger access and assembly checks required.",
+    "upper_cover_wall_z_span": [
+      14.5,
+      27
+    ],
+    "upper_cover_faceplate_z_span": [
+      27,
+      29
+    ],
+    "upper_cover_local_zero_case_z": 14.5,
+    "upper_cover_construction": "Contoured walls and faceplate lift off together; base-owned lower USB saddle has open notches and a 0.2 mm seam to matching upper-cover notches.",
+    "usb_side_inset": {
+      "outer_x": 75.8,
+      "inner_x": 74.8,
+      "constant_x_y_span": [
+        11,
+        37.82509842672249
+      ],
+      "local_wall_thickness": 1.0,
+      "nominal_pcb_edge_x": 74.5,
+      "nominal_pcb_clearance": 0.3,
+      "construction": "Common outer USB contour on both halves; lower wall is 1.6 mm at flat USB side, upper raised saddle remains 1 mm around connector bodies.",
+      "curves": {
+        "outer_entry": [
+          [
+            80,
+            5
+          ],
+          [
+            80,
+            7.5
+          ],
+          [
+            75.8,
+            8.5
+          ],
+          [
+            75.8,
+            11
+          ]
+        ],
+        "format": "Outer entry cubic lists start, control 1, control 2 and end in case XY. Inner contours use native offsets and the local USB override."
+      },
+      "curve_sampling_segments": 24,
+      "lower_inner_x": 74.2,
+      "lower_local_wall_thickness": 1.6,
+      "right_return": {
+        "concave_arc_center": [
+          76.1,
+          37.82509842672249
+        ],
+        "concave_arc_radius": 0.3,
+        "concave_arc_start": [
+          75.8,
+          37.82509842672249
+        ],
+        "concave_arc_end": [
+          76.18181818181817,
+          38.11372584247499
+        ],
+        "well_arc_center": [
+          77,
+          41
+        ],
+        "well_arc_radius": 3,
+        "well_arc_end": [
+          80,
+          41
+        ],
+        "rear_arc_center": [
+          76.5,
+          41
+        ],
+        "rear_arc_radius": 3.5,
+        "rear_arc_end": [
+          76.5,
+          44.5
+        ],
+        "rear_straight_end": [
+          59,
+          44.5
+        ],
+        "geometry_basis": "Actual revised tangent return, followed by uniformly relieved rear edge"
+      },
+      "flat_end_to_high_speed_opening_clearance": 0.425098
+    },
+    "common_outer_contour_both_halves": true,
+    "wheel_rim_beyond_battery_end": 4.6,
+    "lower_interior_construction": {
+      "usb_override_rectangle_xy_bounds": {
+        "x": [
+          70,
+          80
+        ],
+        "y": [
+          7,
+          40.8
+        ]
+      },
+      "operation": "Intersect the nominal union of 2 mm general and 1.6 mm USB-region insets with a 1.5 mm inset of the revised exterior",
+      "default_inward_offset_from_nominal_unshaved_outline": 2,
+      "usb_local_inward_offset_from_nominal_unshaved_outline": 1.6,
+      "reinforced_actual_exterior_inset": 1.5,
+      "rear_inner_y": 43
+    },
+    "upper_interior_construction": {
+      "usb_override_rectangle_xy_bounds": {
+        "x": [
+          70,
+          80
+        ],
+        "y": [
+          7,
+          40.8
+        ]
+      },
+      "operation": "Intersect nominal upper interior with a 0.6 mm inset of actual exterior. Outside hardware band Z17.7-21.6, also intersect with union of a 1.1 mm inset and the region Y<=41.5 to preserve the USB side.",
+      "default_inward_offset_from_nominal_unshaved_outline": 1.6,
+      "usb_local_inward_offset_from_nominal_unshaved_outline": 1.0,
+      "hardware_band_actual_exterior_inset": 0.6,
+      "hardware_band_z_span": [
+        17.7,
+        21.6
+      ],
+      "reinforced_actual_exterior_inset": 1.1,
+      "rear_reinforcement_starts_y": 41.5,
+      "rear_inner_y_reinforced": 43.4,
+      "rear_inner_y_hardware_band": 43.9
+    },
+    "nominal_unshaved_rear_cubic": {
+      "start": [
+        59,
+        45.5
+      ],
+      "control_1": [
+        50,
+        45.5
+      ],
+      "control_2": [
+        48,
+        56
+      ],
+      "end": [
+        38,
+        56
+      ]
+    },
+    "exterior_wheel_relief": {
+      "inward_y_reduction": 1,
+      "full_relief_x_span": [
+        55.65,
+        76.5
+      ],
+      "left_blend_x_span": [
+        53.65,
+        55.65
+      ],
+      "blend_width": 2,
+      "blend_type": "Cubic smoothstep over left 2 mm transition only; full 1 mm relief continues rightward to revised corner without returning to old edge",
+      "applies_to": "Exterior rear perimeter of both case halves",
+      "nominal_unshaved_straight_y": 45.5,
+      "relieved_straight_y": 44.5,
+      "wheel_rim_projection": 2.1,
+      "upper_wall_nominal": 1.1,
+      "lower_wall_nominal": 1.5,
+      "interior_basis": "Original nominal interior is clipped by reinforced offsets of the revised exterior; lower actual cavity drives frame and ledge",
+      "fit_status": "Wall strength, finger access and physical fit remain unverified",
+      "cad_depth_parameter": "wheel_grip_depth",
+      "cad_blend_parameter": "wheel_grip_blend",
+      "nominal_interior_bezier_samples": 24,
+      "wheel_chord_at_inner_wall_nominal": 12.02663710269833,
+      "wheel_chord_at_relieved_outer_wall_nominal": 10.205880657738462,
+      "exterior_sampling_basis": "Linear subdivisions of the original 24-segment nominal curve/polyline before applying the exterior relief; no re-evaluation of the Bezier curve at new parameters",
+      "maximum_linear_subdivision_length": 0.25,
+      "upper_wall_in_hardware_band": 0.6,
+      "upper_hardware_band_z_span": [
+        17.7,
+        21.6
+      ],
+      "wheel_opening_width": 13
+    }
+  },
+  "case_lid_bosses": {
+    "moved_upper_right": {
+      "display_case_xy": [
+        77,
+        41
+      ],
+      "previous_revision_7_xy": [
+        77.2,
+        41.8
+      ],
+      "base_outer_diameter": 4.4,
+      "upper_neck_outer_diameter": 4.4,
+      "upper_insert_pad_outer_diameter": 5.2,
+      "upper_insert_pad_z_span": [
+        14.5,
+        18.2
+      ],
+      "upper_taper_z_span": [
+        18.2,
+        19.2
+      ],
+      "upper_neck_z_span": [
+        19.2,
+        27
+      ],
+      "nominal_pcb_xy_clearance_at_pcb_height": 0.3,
+      "nominal_battery_xy_clearance_above_lower_well": 1.3,
+      "closed_lower_well_nominal_battery_xy_clearance": 0.5,
+      "nominal_separation_from_high_speed_usb_opening_at_port_height": 1.4,
+      "minimum_case_y_at_port_height": 38.8,
+      "minimum_case_y_at_insert_pad": 38.4,
+      "reason_for_move": "Moves 0.5 mm forward from revision 13 to join the closed screw well to a uniform wheel-side exterior at Y44.5",
+      "nominal_insert_pad_to_curved_outer_outline_margin": 0.4,
+      "previous_revision_10_xy": [
+        77,
+        41.6
+      ],
+      "previous_revision_13_xy": [
+        77,
+        41.5
+      ]
+    },
+    "other_three": {
+      "display_case_xy": [
+        [
+          3.6,
+          3.6
+        ],
+        [
+          76.4,
+          3.6
+        ],
+        [
+          3.6,
+          52.4
+        ]
+      ],
+      "base_outer_diameter": 5.2,
+      "upper_pillar_outer_diameter": 5.2
+    },
+    "base_boss_z_span": [
+      2,
+      14.5
+    ],
+    "upper_cover_pillar_z_span": [
+      14.5,
+      27
+    ],
+    "bottom_entry_shaft_diameter_provisional": 2.3,
+    "bottom_entry_shaft_z_span": [
+      10.2,
+      14.5
+    ],
+    "shaft_only_column_z_span": [
+      10.2,
+      14.5
+    ],
+    "shaft_only_column_height": 4.3,
+    "head_counterbore": {
+      "diameter_provisional": 4.5,
+      "z_span": [
+        0,
+        10.2
+      ],
+      "head_seat_case_z": 10.2,
+      "head_seat_inward_move_from_revision_8": 8.4,
+      "shape": "Deep flat-bottom well opening only on exterior underside; all four wells are fully closed to the battery bay",
+      "reference_head_diameter": 4.0,
+      "reference_head_height": 1.3,
+      "reference_head_z_span": [
+        8.9,
+        10.2
+      ],
+      "reference_head_recess_below_outside_face": 8.9,
+      "hardware_status": "User supplied M2 x 8 mm nylon screw length, interpreted as length below the head. Head shape, diameter, height and driver access remain provisional."
+    },
+    "lower_head_well_reinforcement": {
+      "z_span": [
+        2,
+        11.5
+      ],
+      "other_three_outer_diameter": 6.5,
+      "other_three_clip": "Rounded outer case outline",
+      "other_three_minimum_external_wall_nominal": 0.77,
+      "right_outer_diameter": 6.0,
+      "right_center_xy": [
+        77,
+        41
+      ],
+      "right_well_construction": "Fully closed circular well joined to the existing post and case wall, with no side opening into the battery bay",
+      "right_well_nominal_battery_clearance": 0.5,
+      "right_radial_wall_around_bore": 0.75,
+      "side_openings_to_battery_bay": false,
+      "reinforced_roof_height_above_head_seat": 1.3,
+      "physical_validation": "Deep-well print quality, head bearing, driver access and strength not verified",
+      "sampled_right_rim_approximate": 0.7493,
+      "sampled_other_three_minimum_rim": 0.76484
+    },
+    "heat_set_insert": {
+      "thread": "M2",
+      "outer_diameter_user": 3.0,
+      "length_user": 3.2,
+      "reference_z_span": [
+        14.5,
+        17.7
+      ],
+      "installation_direction": "From open underside of separate upper cover, before electronics are fitted",
+      "pilot_diameter_provisional": 2.7,
+      "pilot_depth_provisional": 3.4,
+      "pilot_z_span": [
+        14.5,
+        17.9
+      ],
+      "entry_chamfer_diameter_provisional": 3.1,
+      "entry_chamfer_depth_provisional": 0.25,
+      "pilot_status": "Initial printable trial dimension, not a manufacturer-specified hole. Actual insert model, knurl profile and resin/print fit must determine the final pilot.",
+      "nominal_radial_pad_wall_around_insert": 1.1
+    },
+    "screw_tip_relief": {
+      "diameter_provisional": 2.4,
+      "z_span": [
+        17.9,
+        22.5
+      ],
+      "blind_end_case_z": 22.5,
+      "remaining_solid_to_exterior_top": 6.5,
+      "note": "Relief continues above insert pocket and remains blind; screw must not bottom in this cavity.",
+      "user_m2x8_tip_clearance_to_blind_end": 4.3
+    },
+    "hole_continues_through_faceplate": false,
+    "top_case_fastener_holes": false,
+    "case_screw_user": {
+      "thread": "M2",
+      "material": "nylon",
+      "under_head_length_user": 8,
+      "length_convention_assumption": "The supplied 8 mm is measured below the head; head shape and dimensions have not been supplied",
+      "under_head_seat_z": 10.2,
+      "nominal_tip_z": 18.2,
+      "nominal_overlap_with_insert_length": 3.2,
+      "nominal_tip_beyond_insert": 0.5,
+      "status": "User screw length incorporated. Check actual head, usable thread length, tip chamfer, insert seating and tightening; nominal geometric overlap does not establish full usable thread engagement."
+    },
+    "fastener_status": "Four M2 x 8 mm nylon screws enter closed deep underside wells and engage blind upper-cover inserts. Head seats remain Z10.2. Right case axis moves to (77,41) within the common contour; battery is 6.5 mm forward from revision 10. PCB and frame use a new independent mounting arrangement. Insert fit, actual screw heads, driver access and strength remain unverified. The two independent midframe fixings also use M2 x 8 mm nylon screws and matching 3 x 3.2 mm inserts; PCB mount pilot remains unchanged."
+  },
+  "viewer_validation": "Revision 20 geometry checker passed with 73,814 finite faces and exact SW1/SW2/encoder pad envelopes. Browser PCB travel stop cutaway rendered cleanly with nominal gap visible and zero reported console errors/warnings. Mesh and PDF checks recorded separately. Physical PCB/print gap, contact pressure, operating forces and supplier acceptance remain unverified.",
+  "previous_viewer_validation_revision_8": "Revision 8 JavaScript syntax and browser runtime checks passed with no reported errors. Clean assembled top, underside counterbores with and without screws, blind-insert cutaway and retained button mechanism visually checked. At a 360 px viewport, the 328 px-wide viewer had no horizontal overflow. Viewer showed installed 3 mm insert envelope; CAD printed pilot remains provisional 2.7 mm. These historical checks do not validate the current deep wells, raised keys or edge rounding.",
+  "battery_shift_x_from_centered": 1.0,
+  "battery_move_x_from_revision_4": 1.0,
+  "battery_move_x_from_revision_8": -0.75,
+  "battery_move_y_from_revision_4": -6.5,
+  "usb_c_access": {
+    "status": "Both split connector openings retain their dimensions and nominal 0.2 mm face projection. Local rear cable scallop adds clearance for measured plug plastic; actual plug depth, taper, inserted position and printed fit unverified.",
+    "enabled_by_default": true,
+    "part": "HRO TYPE-C-31-M-12",
+    "mounting": "right-angle surface mount on display-facing PCB side; not midmount",
+    "part_identification_source": "Official BOM row 23 specifies J6 and J23 together",
+    "manufacturer_page": "https://en.krhro.com/Product-Details/726.html",
+    "manufacturer_drawing_url": "https://datasheet.lcsc.com/datasheet/pdf/9e56b777c022540fcce7c7f67825f55e.pdf?productCode=C165948",
+    "drawing_body_width_y": 8.94,
+    "drawing_body_depth_x": 7.35,
+    "drawing_mounted_height": 3.26,
+    "manufacturer_webpage_height": 3.16,
+    "height_discrepancy_note": "Manufacturer drawing and webpage disagree; use drawing provisionally and measure installed connector.",
+    "mounting_plane_case_z": 21.3,
+    "opening_center_height_above_mounting_plane_assumption": 1.63,
+    "aperture_center_case_z_provisional": 22.93,
+    "socket_front_case_x": 76,
+    "socket_body_rear_case_x": 68.65,
+    "case_outer_wall_x": 75.8,
+    "lower_body_inner_wall_x": 74.2,
+    "upper_cover_inner_wall_x": 74.8,
+    "socket_front_recess_from_outer_wall": -0.2,
+    "socket_front_to_upper_cover_inner_wall_clearance": -1.2,
+    "aperture_width_y_provisional": 9.8,
+    "aperture_height_z_provisional": 4.2,
+    "aperture_corner_radius_provisional": 0.5,
+    "aperture_z_span_provisional": [
+      20.83,
+      25.03
+    ],
+    "cut_direction": "Along X through USB wall, split between base-owned saddle and removable upper cover",
+    "ports": [
+      {
+        "ref": "J23",
+        "feature": "USB Debug",
+        "case_center_y": 17.5,
+        "aperture_y_span_provisional": [
+          12.6,
+          22.4
+        ]
+      },
+      {
+        "ref": "J6",
+        "feature": "USB High Speed",
+        "case_center_y": 32.5,
+        "aperture_y_span_provisional": [
+          27.6,
+          37.4
+        ]
+      }
+    ],
+    "nominal_high_speed_opening_to_moved_lid_boss_separation": 1.4,
+    "assembly_note": "PCB is attached to midframe first, then both lower into base-owned open USB notches. Upper cover closes matching upper notches; two exposed frame screws secure frame to base.",
+    "fit_note": "Connector aperture remains a provisional receptacle-body clearance. Cable relief uses the measured 10.25 x 6 mm plastic envelope and an assumed nose plane at X>=76; check actual plug depth, taper, installed position, print fit, remaining wall strength and insertion.",
+    "socket_front_projection_past_outer_wall": 0.2,
+    "clearance_sign_note": "Negative recess means connector projects outside; negative inner-wall clearance means connector crosses the wall and requires split assembly notches.",
+    "nominal_connector_side_clearance": 0.43,
+    "nominal_connector_vertical_clearance": 0.47,
+    "local_wall_thickness": 1.0,
+    "nominal_pcb_edge_x": 74.5,
+    "nominal_inner_wall_to_pcb_clearance": 0.3,
+    "wall_split_z_spans": {
+      "seam": [
+        22.83,
+        23.03
+      ],
+      "cover": [
+        23.03,
+        27
+      ],
+      "base": [
+        14.5,
+        22.83
+      ]
+    },
+    "lower_body_wall_thickness": 1.6,
+    "user_rear_plug_plastic": {
+      "width_y_user": 10.25,
+      "height_z_user": 6,
+      "reference_center_yz": [
+        32.5,
+        22.93
+      ],
+      "reference_y_span": [
+        27.375,
+        37.625
+      ],
+      "reference_z_span": [
+        19.93,
+        25.93
+      ],
+      "nose_x_assumption_minimum": 76,
+      "unmeasured": [
+        "plastic body depth along X",
+        "nose and shoulder taper",
+        "actual inserted plastic position"
+      ],
+      "fit_basis": "Plastic nose assumed at X>=76; measured width and height alone do not establish complete cable fit"
+    },
+    "rear_cable_scallop": {
+      "purpose": "Increase plastic cable clearance beside rear USB port without moving case post or wheel",
+      "xy_bounds": {
+        "x": [
+          75.8,
+          81
+        ],
+        "y": [
+          36.8,
+          38.6
+        ]
+      },
+      "z_span": [
+        19.2,
+        26.8
+      ],
+      "internal_xy_corner_radius": 0.2,
+      "top_bottom_yz_round_radius": 0.5,
+      "full_depth_z_span": [
+        19.7,
+        26.3
+      ],
+      "nominal_obstacle_y_before": 38.0001,
+      "nominal_obstacle_y_after": 38.6,
+      "nominal_plug_side_gap_before": 0.3751,
+      "nominal_plug_side_gap_after": 0.975,
+      "nominal_clearance_gain_approximate": 0.6,
+      "unchanged_case_post_axis": [
+        77,
+        41
+      ],
+      "preserved_upper_case_post_diameter": 4.4,
+      "preserved_features": [
+        "upper insert and blind screw-tip cavity",
+        "closed lower screw well",
+        "cover roof",
+        "rotary wheel geometry",
+        "battery and midframe positions"
+      ],
+      "fit_status": "Source, numerical and viewer geometry checks passed; physical cable fit and printed strength remain unverified",
+      "minimum_sampled_local_cavity_web": 0.83901009,
+      "validation": {
+        "reference_plug_extra_clearance_per_side_yz": 0.2,
+        "sampled_z_span": [
+          19.73,
+          26.13
+        ],
+        "z_sample_step": 0.025,
+        "assumed_minimum_nose_x": 76,
+        "post_area_removed": 0,
+        "interior_channel_area_removed": 0,
+        "active_z_span_confirmed": [
+          19.2,
+          26.8
+        ],
+        "case_post_axis_confirmed": [
+          77,
+          41
+        ]
+      }
+    },
+    "print_setting_user_reported": {
+      "value": 0.15,
+      "qualification": "Reported print setting is not used as evidence of material strength or finished cable fit"
+    }
+  },
+  "lcd_access": {
+    "enabled_by_default": true,
+    "source_url": "https://dl.espressif.com/AE/esp-dev-kits/%E8%83%B6%E9%93%81%E4%B8%80%E4%BD%93ZJY154KC-IF17.pdf",
+    "source_pages": [
+      4,
+      5
+    ],
+    "part": "ZJY154KC-IF17",
+    "active_center_case_xy_provisional": [
+      30,
+      26.86
+    ],
+    "active_area_borders_datasheet": {
+      "left": 1.9,
+      "right": 1.9,
+      "non_flex_edge": 1.45,
+      "flex_edge": 4.55
+    },
+    "active_center_offset_from_module_center_toward_non_flex_edge": 1.55,
+    "flex_direction_assumption": "negative case Y",
+    "module_center_case_xy_provisional": [
+      30,
+      25.31
+    ],
+    "module_xy_bounds_provisional": {
+      "x": [
+        14.24,
+        45.76
+      ],
+      "y": [
+        8.45,
+        42.17
+      ]
+    },
+    "module_z_span_provisional": [
+      27.1,
+      29
+    ],
+    "active_surface_case_z_provisional": 29,
+    "placement_status": "Module, glass, polarizer and active-area dimensions are sourced. Pocket fits the overall module outline, not the glass. Installed XY, flex orientation and reach are assumptions; J5 connector placement does not locate the LCD module. Nominal module front is aligned to cover Z29, but measured thickness and printer fit must set final seat depth. No original enclosure CAD or LCD assembly dimensions found in reference archive.",
+    "retention_status": "Close locating fit with 0.2 mm nominal clearance per side; no guaranteed friction fit. Rear ledge carries the module frame. If required, add small accessible rear frame-to-seat fillets of electronics-grade noncorrosive neutral-cure silicone; keep adhesive off the glass, polarizer and flex. No bond wells, glass clamping or interference fit are designed.",
+    "button_apertures_enabled": true,
+    "design": "Full-module front pocket with rear perimeter support ledge; replaces the active-area-only viewing window.",
+    "previous_active_area_window_size": [
+      28.32,
+      28.32
+    ],
+    "previous_window_basis": "Datasheet mechanical drawing note 9 recommends 0.3 mm per side beyond the active area for a bezel viewing window; superseded by the full-module seat.",
+    "pocket_size": [
+      31.92,
+      34.12
+    ],
+    "pocket_corner_radius": 0.3,
+    "pocket_xy_bounds": {
+      "x": [
+        14.04,
+        45.96
+      ],
+      "y": [
+        8.25,
+        42.37
+      ]
+    },
+    "nominal_side_clearance": 0.2,
+    "seat_depth_parameter_default": 1.9,
+    "outer_cover_surface_case_z": 29,
+    "nominal_front_step": 0,
+    "support_ledge": {
+      "z_span": [
+        25.9,
+        27.1
+      ],
+      "thickness": 1.2,
+      "outer_xy_bounds": {
+        "x": [
+          12.54,
+          47.46
+        ],
+        "y": [
+          6.75,
+          43.87
+        ]
+      },
+      "outer_size": [
+        34.92,
+        37.12
+      ],
+      "central_opening_xy_bounds": {
+        "x": [
+          15.24,
+          44.76
+        ],
+        "y": [
+          9.45,
+          41.17
+        ]
+      },
+      "central_opening_size": [
+        29.52,
+        31.72
+      ],
+      "nominal_overlap_under_module_rear_edges": 1,
+      "support_contact": "Module rear frame perimeter, interrupted for the flex; actual free bearing area requires confirmation.",
+      "nominal_clearance_above_display_facing_pcb": 4.6,
+      "clearance_note": "The collar bottom at Z25.9 locally reduces the original 5.7 mm front allowance to 4.6 mm above PCB Z21.3; component clearance requires checking.",
+      "outer_corner_radius": 1,
+      "central_opening_corner_radius": 0.3
+    },
+    "flex_relief": {
+      "x_span": [
+        18,
+        42
+      ],
+      "y_span": [
+        5.9,
+        12.25
+      ],
+      "z_span": [
+        25.8,
+        28
+      ],
+      "width": 24,
+      "depth": 6.35,
+      "corner_radius_xy": 0.6,
+      "remaining_top_skin_outside_lcd_pocket": 1,
+      "change_from_revision_16": {
+        "width_addition_each_side": 1,
+        "depth_addition_each_end": 0.75,
+        "upward_clearance_addition": 0.5
+      },
+      "scope": "LCD module pocket, flush seat height and remaining support ledge unchanged; physical cable bend clearance requires checking."
+    },
+    "retention_source_url": "https://www.dow.com/documents/11/11-3921-01-advanced-silicone-adhesives-and-sealants.pdf?iframe=true",
+    "retention_product_example_url": "https://www.dow.com/en-us/pdp.dowsil-3145-rtv-mil-a-46146-adhesive-sealant.01059548z.html",
+    "assembly_note": "LCD is attached to the upper cover and moves with it. Lid screws secure the cover, not the display glass. Verify flex reach in the raised position and disconnect the flex before removing the cover; do not lift it by the cable.",
+    "flush_fit_status": "Nominal only: datasheet module thickness is 1.9 +/- 0.1 mm; seat depth and side clearance are adjustable and require a printed fit check.",
+    "previous_flex_relief_revision_16": {
+      "x_span": [
+        19,
+        41
+      ],
+      "y_span": [
+        6.65,
+        11.5
+      ],
+      "z_span": [
+        25.8,
+        27.5
+      ],
+      "width": 22
+    }
+  },
+  "lcd_glass_datasheet": [
+    30.12,
+    33.12
+  ],
+  "lcd_polarizer_datasheet": [
+    29.72,
+    30.12
+  ],
+  "lcd_module_thickness_tolerance_datasheet": 0.1,
+  "button_actuators": {
+    "enabled_by_default": true,
+    "enable_independent_of_lcd_and_usb": true,
+    "construction": "One removable strip under upper cover with three independent raised keys and a rigid power-slider retaining shelf joined to the anchor bar. Same two strip screws capture the shelf and power cap.",
+    "switch_part": "NH Technology NTC013-AA1J-A160T",
+    "source_url": "https://www.nh-technology.de/T-Mec/PDF/Series_TC/NTC013.pdf",
+    "switch_source_basis": "Official board BOM identifies the part; source placement centers transformed into display-facing case coordinates.",
+    "switch_height_nominal": 2.5,
+    "switch_height_tolerance": 0.2,
+    "switch_travel_nominal": 0.2,
+    "switch_travel_tolerance": 0.1,
+    "switch_operating_force_gf_nominal": 160,
+    "switch_operating_force_gf_tolerance": 50,
+    "switches": [
+      {
+        "ref": "SW5",
+        "board_label": "user button 3",
+        "case_xy": [
+          51.5,
+          19
+        ]
+      },
+      {
+        "ref": "SW4",
+        "board_label": "user button 2",
+        "case_xy": [
+          51.5,
+          25
+        ]
+      },
+      {
+        "ref": "SW3",
+        "board_label": "user button 1",
+        "case_xy": [
+          51.5,
+          31
+        ]
+      }
+    ],
+    "display_facing_pcb_z": 21.3,
+    "switch_top_z_nominal": 23.8,
+    "cover_inner_face_z": 27,
+    "switch_top_to_cover_inner_face_gap_nominal": 3.2,
+    "mounting_bar": {
+      "x_span": [
+        60.5,
+        65.5
+      ],
+      "y_span": [
+        16.5,
+        38
+      ],
+      "z_span": [
+        25.8,
+        26.6
+      ],
+      "thickness": 0.8,
+      "length_y": 21.5
+    },
+    "flexible_tongues": {
+      "width": 2,
+      "root_x": 60.5,
+      "tip_center_x": 51.5,
+      "nominal_root_to_tip_span": 9,
+      "z_span": [
+        25.8,
+        26.6
+      ],
+      "thickness": 0.8,
+      "root_fillet_radius": 0.3,
+      "solid_x_span_including_bar_overlap": [
+        51.5,
+        61
+      ],
+      "union_overlap_into_bar": 0.5,
+      "root_fillet_x_span": [
+        60.2,
+        60.5
+      ]
+    },
+    "key_diameter": 4.4,
+    "cover_hole_diameter": 5.2,
+    "nominal_radial_clearance": 0.4,
+    "hole_clearance_purpose": "Allow printing variation and the small tilt of the flexible tongue.",
+    "key_top_z": 30,
+    "nominal_key_projection_above_case": 1,
+    "cad_protrusion_parameter": "button_protrusion",
+    "maximum_envelope_height_including_keys": 30,
+    "raised_key_effect_on_switch_geometry": "Stems, tongue height and resting 0.3 mm switch gap unchanged; only key tops lengthened",
+    "screen_protection_status": "Raised keys provide nominal face-down spacing but flex under load; no verified screen impact or surface protection is claimed",
+    "tip_stem_diameter": 1.8,
+    "tip_stem_z_span": [
+      24.1,
+      25.8
+    ],
+    "tip_stem_length": 1.7,
+    "nominal_switch_to_stem_gap": 0.3,
+    "nominal_press_to_actuate": 0.5,
+    "nominal_press_basis": "0.3 mm initial gap plus 0.2 mm switch travel; tolerances, spring compliance and printed fit remain unverified.",
+    "strip_fixings": {
+      "case_xy": [
+        [
+          63,
+          19
+        ],
+        [
+          63,
+          36
+        ]
+      ],
+      "cover_boss_diameter": 5,
+      "cover_boss_z_span": [
+        26.6,
+        28.99
+      ],
+      "blind_pilot_diameter": 1.2,
+      "blind_pilot_top_z": 28.5,
+      "strip_hole_diameter": 1.8,
+      "fastener": "Two provisional M1.6 screws; length, pilot fit and thread engagement require selection and checking.",
+      "blind_pilot_opening_z": 26.6,
+      "nominal_blind_pilot_depth": 1.9,
+      "remaining_top_skin": 0.5
+    },
+    "retention": "Screwed bar holds the actuator strip to the cover; tongues independently flex inward to press each board switch.",
+    "travel_limit_status": "No hard stop is claimed. The switch datasheet does not provide maximum safe overtravel for this design; avoid sizing a stop from the actuation stroke alone.",
+    "verification_needed": [
+      "no switch preload at rest",
+      "independent key travel and feel",
+      "printed tongue strength and root flexibility",
+      "material fatigue and creep",
+      "stem alignment and hole clearance through travel",
+      "case and strip screw fit"
+    ],
+    "assembly": "Insert separate power slider through lid from inside first, then fasten retainer-equipped button strip with existing two screws. Check free cap travel before fitting lid over SW7 and verify no button preload.",
+    "cad_enable_parameter": "button_keys",
+    "cad_individual_part": "button_strip",
+    "key_z_span": [
+      26.6,
+      30
+    ],
+    "material_status": "Printed material and orientation are unqualified; PETG is a candidate only. Return force, repeated presses, creep and durability need testing.",
+    "nominal_cover_web_between_key_holes": 0.8,
+    "lcd_collar_to_key_xy_gap": 1.84,
+    "anchor_bar_to_usb_connector_body_xy_gap": 3.15,
+    "actuation_travel_range_from_switch_tolerances_only": [
+      0.2,
+      0.8
+    ],
+    "actuation_travel_range_note": "Includes the quoted switch height and travel tolerances only, not printer, PCB, solder, assembly or bending effects.",
+    "printing_note": "The isolated button_strip part shifts its lowest stem to Z0. Stems and keys project on opposite sides of the strip; print orientation and supports require testing, and a support-free flat print is not claimed.",
+    "previous_mounting_bar_revision_17": {
+      "x_span": [
+        60.5,
+        65.5
+      ],
+      "y_span": [
+        12,
+        38
+      ],
+      "z_span": [
+        25.8,
+        26.6
+      ],
+      "thickness": 0.8
+    },
+    "previous_strip_fixings_revision_17": {
+      "case_xy": [
+        [
+          63,
+          14
+        ],
+        [
+          63,
+          36
+        ]
+      ],
+      "cover_boss_diameter": 5,
+      "cover_boss_z_span": [
+        26.6,
+        28.99
+      ],
+      "blind_pilot_diameter": 1.2,
+      "blind_pilot_top_z": 28.5,
+      "strip_hole_diameter": 1.8,
+      "fastener": "Two provisional M1.6 screws; length, pilot fit and thread engagement require selection and checking.",
+      "blind_pilot_opening_z": 26.6,
+      "nominal_blind_pilot_depth": 1.9,
+      "remaining_top_skin": 0.5
+    },
+    "revision_18_change": "Front fixing moves from (63,14) to (63,19), bar shortened from Y12-38 to Y16.5-38 to clear power-switch opening. Keys, stems, return arms and switch gaps unchanged.",
+    "previous_construction_revision_18": "One removable strip under the upper cover, with three independent flexible tongues and round keys raised 1 mm; case body remains 29 mm high, total height with keys is 30 mm.",
+    "power_slider_retainer": {
+      "introduced_revision": 19,
+      "center_case_xy": [
+        63.0732,
+        11.2
+      ],
+      "size_xy": [
+        18,
+        9
+      ],
+      "corner_radius": 1,
+      "z_span": [
+        25.4,
+        26.6
+      ],
+      "thickness": 1.2,
+      "guide_slot_size_xy": [
+        7,
+        4.6
+      ],
+      "guide_slot_corner_radius": 0.3,
+      "bridge_width": 5,
+      "bridge_root_radius": 0.6,
+      "mounting": "Integral to button-strip anchor bar, same two screws at (63,19) and (63,36)",
+      "nominal_switch_body_clearance": 0.6,
+      "nominal_usb_shell_clearance": 0.84,
+      "load_path": "Slider flange bears on shelf under downward load; does not isolate all lateral loads because socket-to-handle Y clearance is 0.25 mm per side versus guide 0.3 mm. Shelf/bridge/anchors, actual switch engagement and resin fit require physical validation.",
+      "validation": "Final retainer-equipped strip mesh, numerical geometry, browser and PDF inspections passed. Physical strength, operating forces and fit remain unverified."
+    }
+  },
+  "previous_revision_10_backup": "work/p4x-enclosure/revision-10/",
+  "previous_viewer_validation_revision_10": "Revision 10 JavaScript syntax and browser checks passed without reported warnings or errors. Visual checks covered 1 mm raised keys, softened outer edges, filled rectangular midframe locator, shifted battery, closed right screw well, four intact underside recesses and the M2 x 8 mm insert cutaway. At a 360 px viewport, the 328 px-wide viewer rendered without horizontal overflow. All geometry vertices and normals were finite, and all 64 sampled top inset rings were free of self-intersections. Resolved sampled viewer perimeter rings visually approximate the native CAD offset slices; this is not a compiled SCAD mesh. No OpenSCAD compilation or physical fit verification has been performed.",
+  "battery_move_y_from_revision_10": -6.5,
+  "base_usb_saddle": {
+    "x_span": [
+      74.8,
+      75.8
+    ],
+    "y_span": [
+      11.2,
+      37.8
+    ],
+    "z_span": [
+      14.5,
+      22.83
+    ],
+    "vertical_seam_to_cover": 0.2,
+    "end_seams_to_cover": 0.2,
+    "construction": "Base-owned raised saddle supplies open lower halves of USB apertures; upper cover supplies upper halves. Midframe has no raised USB rail.",
+    "fit_status": "Provisional; printed rail stiffness, fit and connector insertion require checking.",
+    "union_overlap": 0.01,
+    "end_web_past_high_speed_opening_y": 0.4,
+    "owner": "base",
+    "inward_triangular_brace": {
+      "x_span": [
+        74.2,
+        74.8
+      ],
+      "z_span": [
+        14.5,
+        17.5
+      ],
+      "actual_cad_x_span_including_union_overlap": [
+        74.2,
+        74.81
+      ]
+    }
+  },
+  "previous_viewer_validation_revision_11_before_seam_correction": "Revision 11 JavaScript syntax and browser checks passed without reported warnings or errors. All 35,080 generated faces had finite geometry and all 64 sampled R2 inset rings were simple. Polygon checks placed the battery within the actual cavity with no overlap against the ledge or base posts, retained four closed screw wells and confirmed the flat frame underside. Browser inspection covered common wheel-side body, R2 edges, raised keys, exploded frame with blind PCB mount and two case fixings, USB faces and four underside recesses. At a 360 px viewport the 328 px-wide viewer rendered without horizontal overflow. These are source, numerical and viewer checks of sampled geometry, not a compiled SCAD mesh. No OpenSCAD compilation or physical fit verification has been performed.",
+  "case_and_midframe_m2_hardware": {
+    "screws": 6,
+    "screw_thread": "M2",
+    "screw_under_head_length_user": 8,
+    "screw_material": "nylon",
+    "inserts": 6,
+    "insert_outer_diameter_user": 3,
+    "insert_length_user": 3.2,
+    "allocation": "Four case fasteners plus two independent midframe fasteners; PCB and button-strip fixings remain separate"
+  },
+  "previous_viewer_validation_revision_12": "Revision 12 combined rib, seat and M2 frame-fastener changes passed JavaScript syntax and browser checks with no reported warnings or errors. All 35,346 generated faces were finite and all 64 sampled R2 inset rings were simple. Battery/cavity, ledge/post overlap, closed-well and flat-frame checks passed. Rear rib stayed at least 1.79 mm inside exterior. Both reference M2 heads bore fully on frame and cleared case-post reliefs; screw span Z6.5-15.8 and insert span Z9.8-13 matched geometry. The prior green patch was reproduced at the reported underside angle and confirmed absent after correction; frame view showed two M2 heads and base inserts. Revision 12 responsive check also passed: at a 360 px viewport the 328 px-wide viewer rendered without horizontal overflow and no browser warnings or errors. These are source, numerical and sampled-viewer checks; no OpenSCAD compilation or physical fit verification has been performed.",
+  "wheel_before_after_picture": {
+    "path": "mechanical/p4x-eye-enclosure/wheel-before-after.png",
+    "construction": "Geometry-based comparison of revision 13 and revision 14 with identical camera and scale",
+    "validation": "Revision 13-to-14 geometry comparison rendered with identical camera and scale; labels and geometry visually inspected",
+    "fit_status": "Illustrates nominal geometry only; not evidence of physical fit"
+  },
+  "previous_viewer_validation_revision_13": "Revision 13 JavaScript syntax and browser checks passed without reported warnings or errors. All 47,655 generated faces were finite and all 64 sampled R2 inset rings were simple. Battery, ledge, post, closed-well, M2-head and pocket-bound checks passed. At wheel center the exterior is Y=45.0 mm and unchanged inner walls are Y=43.5/43.9 mm, confirming nominal projection of 1.6 mm and lower/upper wall thicknesses of 1.5/1.1 mm. Relieved exterior was contained within nominal outline to a 0.00002 mm quantization tolerance; cavity unchanged. Assembled wheel view inspected. At a 360 px viewport the 328 px-wide viewer rendered without horizontal overflow. Geometry-based before/after PNG used identical camera and scale and was visually inspected. These are source, numerical and sampled-viewer checks; no OpenSCAD compilation or physical fit verification has been performed.",
+  "battery_move_y_from_revision_13": -0.5,
+  "previous_viewer_validation_revision_14": "Revision 14 JavaScript syntax and browser checks passed without reported errors. All 58,480 generated faces were finite and all 64 sampled R2 inset rings were simple. Battery containment, ledge/post clearance, four closed bores, M2 head bearing, frame/screw bounds and rear-rib checks passed. Wheel center outer Y44.5, lower inner Y43.0, reinforced upper inner Y43.4 and hardware channel Y43.9 gave nominal projection of 2.1 mm and walls of 1.5/1.1/0.6 mm. Complete PCB and encoder hub fit the clearance channel; full wheel sweep cleared at Z16.7; relocated right seat cleared reinforced wall. Nearest front-well gap was 0.514306 mm. Assembled wheel/USB views and the identical-camera revision 13-to-14 PNG were inspected. Prior responsive check passed at 360 px with a 328 px viewer; not repeated for revision 14. These are source, numerical and sampled-viewer checks; no OpenSCAD compilation or physical fit verification has been performed.",
+  "usb_before_after_picture": {
+    "path": "mechanical/p4x-eye-enclosure/usb-before-after.png",
+    "construction": "Revision 14 snapshot compared with revision 15 geometry using identical camera and scale; dashed 10.25 x 6 mm plastic plug envelope placed at assumed nose plane X76",
+    "validation": "Rendered and visually inspected; revision 14 snapshot versus revision 15 at identical camera and scale, with dashed measured plug nose and approximately 0.38-to-0.98 mm side gaps",
+    "fit_status": "Measured width/height reference with assumed nose position; not evidence of full physical cable fit"
+  },
+  "previous_viewer_validation_revision_15_before_stl_export": "Revision 15 JavaScript syntax and browser checks passed with no reported warnings or errors. All 67,859 generated faces were finite and all 64 sampled R2 inset rings were simple; prior pack, frame and closed-well checks passed. Measured 10.25 x 6 mm plug envelope plus 0.2 mm per side in Y/Z cleared at assumed X>=76, sampled every 0.025 mm over Z19.73-26.13. Scallop removed zero area from full 4.4 mm post and interior clearance channel; minimum sampled local cavity web was 0.83901009 mm in both upper bands. Relief inactive outside Z19.2-26.8; case axis retained at (77,41). Browser USB view and same-camera revision 14-to-15 comparison PNG inspected, including dashed plug nose and approximately 0.38-to-0.98 mm gaps. No OpenSCAD compilation or physical fit verification has been performed.",
+  "stl_export": {
+    "revision": 20,
+    "units": "mm",
+    "status": "All five final oriented revision 20 STL parts passed mesh checks",
+    "package_path": "mechanical/p4x-eye-enclosure/p4x-eye-stl-r20.zip",
+    "directory": "mechanical/p4x-eye-enclosure/stl/",
+    "printing_notes": "mechanical/p4x-eye-enclosure/stl/PRINTING.md",
+    "minimum_xyz_for_delivery": [
+      0,
+      0,
+      0
+    ],
+    "physical_fit_verified": false,
+    "slicer_support_setup_validated": false,
+    "gcode_provided": false,
+    "parts": [
+      {
+        "part": "base",
+        "orientation": "Floor down",
+        "triangles": 30586,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            80.0,
+            56.0,
+            22.829999923706055
+          ]
+        ],
+        "volume_mm3": 15150.671773867938,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            -0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "f19430f9aaa5f246a8e07a59c4b8288e024deea481c8ded9723ba4e58b0bcf14",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-base-r20.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          22.829999923706055
+        ],
+        "geometry_changed_from_revision_19": false
+      },
+      {
+        "part": "lid",
+        "orientation": "Exterior face down; insert openings up",
+        "triangles": 60324,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            80.0,
+            56.0,
+            14.5
+          ]
+        ],
+        "volume_mm3": 10732.137447029316,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            -1.0,
+            0.0,
+            56.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            14.5
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "846ab144b1b13100e8ce60ebd87edeb23aabaddeb01e90ef484e944c0dee1d72",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-lid-r20.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          14.5
+        ],
+        "geometry_changed_from_revision_19": true
+      },
+      {
+        "part": "midframe",
+        "orientation": "Flat battery-facing underside down",
+        "triangles": 1668,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            72.35462951660156,
+            51.400001525878906,
+            8.099998474121094
+          ]
+        ],
+        "volume_mm3": 5205.173601792282,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -2.299999237060547
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -2.299999237060547
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            -13.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "6b338fd72d0b2ed8b6307e19eb09d51732449536974a28148f4b0e8553093e8f",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-midframe-r20.stl",
+        "dimensions_xyz": [
+          72.35462951660156,
+          51.400001525878906,
+          8.099998474121094
+        ],
+        "geometry_changed_from_revision_19": true
+      },
+      {
+        "part": "button-strip",
+        "orientation": "Actuator stems down; support required below arms, bar and slider retainer",
+        "triangles": 3256,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            22.773197174072266,
+            31.299999237060547,
+            5.90000057220459
+          ]
+        ],
+        "volume_mm3": 480.29309089390887,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -49.29999923706055
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -6.699999809265137
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            5.722046125811175e-07
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "c1ea0724901f3ee0f7fab17daf32c69dd4d0b2f0e8960c6fcb732b4b7f5f1403",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-button-strip-r20.stl",
+        "dimensions_xyz": [
+          22.773197174072266,
+          31.299999237060547,
+          5.90000057220459
+        ],
+        "geometry_changed_from_revision_19": false
+      },
+      {
+        "part": "power-slider",
+        "orientation": "Nub face down; switch socket upward; supplier may reorient for resin supports",
+        "triangles": 972,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            13.999996185302734,
+            7.599998474121094,
+            4.600000381469727
+          ]
+        ],
+        "volume_mm3": 148.42137717241323,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -56.07320022583008
+          ],
+          [
+            0.0,
+            -1.0,
+            0.0,
+            14.999999046325684
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            4.599999904632568
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "0a015315a63f24862cbb357049290e7ec1ccfd520d325194817ae892d1d21d72",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-power-slider-r20.stl",
+        "dimensions_xyz": [
+          13.999996185302734,
+          7.599998474121094,
+          4.600000381469727
+        ],
+        "geometry_changed_from_revision_19": false
+      }
+    ],
+    "watertight_validation": "All five parts watertight with consistent winding, positive volume and one closed component each; no degenerate or duplicate triangles, boundary edges or nonmanifold edges",
+    "reprint_required": [
+      "lid",
+      "midframe"
+    ],
+    "reusable_revision_19_parts": [
+      "base",
+      "button-strip",
+      "power-slider"
+    ],
+    "historical_export": "previous_stl_export_revision_19",
+    "compiler": "OpenSCAD 2026.09.23; CGAL all five parts; --hardwarnings",
+    "source_sha256": "3d58d1e6bcea8972a5c1a09050d3e6496a81502448c8e866f1fbed27ae61ff8b",
+    "mesh_cleanup": "Unchanged base: conform_collinear_stl.py previously retriangulated five zero-area faces using existing vertices, without moving coordinates. Button strip and slider retain their clean revision 19 exports; lid and midframe use clean revision 20 CGAL exports.",
+    "hardwarnings": true,
+    "backend_by_part": {
+      "base": "CGAL",
+      "lid": "CGAL",
+      "midframe": "CGAL",
+      "button-strip": "CGAL",
+      "power-slider": "CGAL"
+    },
+    "manifest_path": "mechanical/p4x-eye-enclosure/stl/export-manifest.json",
+    "dimensions_status": "Measured from final oriented revision 20 STL files; detailed bounds and transforms recorded in manifest",
+    "reused_part_verification": "Base, button strip and power slider hashes match revision 19 exactly"
+  },
+  "previous_stl_export_revision_15": {
+    "revision": 15,
+    "units": "mm",
+    "status": "Historical preliminary revision 15 compilation: all four parts compiled; superseded by revision 16 before final delivery mesh checks",
+    "compiler": "OpenSCAD 2026.09.23",
+    "distribution": "Official Mac snapshot, SHA verified before execution",
+    "backend": "Manifold",
+    "hardwarnings": true,
+    "compiler_runs_succeeded": 4,
+    "compiler_simple_true_for_all_parts": true,
+    "package_path": "mechanical/p4x-eye-enclosure/p4x-eye-stl-r15.zip",
+    "directory": "mechanical/p4x-eye-enclosure/stl/",
+    "printing_notes": "mechanical/p4x-eye-enclosure/stl/PRINTING.md",
+    "minimum_z_for_delivery": 0,
+    "watertight_validation": "Not asserted for these historical preliminary exports; use validated revision 16 files",
+    "physical_fit_verified": false,
+    "slicer_support_setup_validated": false,
+    "gcode_provided": false,
+    "parts": [
+      {
+        "part": "base",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-base-r15.stl",
+        "dimensions_xyz": [
+          80,
+          56,
+          22.83
+        ],
+        "orientation": "floor down"
+      },
+      {
+        "part": "lid",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-lid-r15.stl",
+        "dimensions_xyz": [
+          80,
+          56,
+          14.5
+        ],
+        "orientation": "exterior face down"
+      },
+      {
+        "part": "midframe",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-midframe-r15.stl",
+        "dimensions_xyz": [
+          73.82508,
+          51.4,
+          8.1
+        ],
+        "orientation": "flat underside down"
+      },
+      {
+        "part": "button-strip",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-button-strip-r15.stl",
+        "dimensions_xyz": [
+          16.2,
+          26,
+          5.9
+        ],
+        "orientation": "stems down",
+        "supports": "Slicer supports needed; setup not validated"
+      }
+    ]
+  },
+  "previous_stl_export_revision_16": {
+    "revision": 16,
+    "units": "mm",
+    "status": "All four final oriented revision 16 STL parts passed mesh checks",
+    "compiler": "OpenSCAD 2026.09.23",
+    "distribution": "Official Mac snapshot, SHA verified before execution",
+    "package_path": "mechanical/p4x-eye-enclosure/p4x-eye-stl-r16.zip",
+    "directory": "mechanical/p4x-eye-enclosure/stl/",
+    "printing_notes": "mechanical/p4x-eye-enclosure/stl/PRINTING.md",
+    "minimum_z_for_delivery": 0,
+    "watertight_validation": "All four parts watertight with consistent winding and one closed component each; no degenerate or duplicate triangles, boundary edges or nonmanifold edges",
+    "physical_fit_verified": false,
+    "slicer_support_setup_validated": false,
+    "gcode_provided": false,
+    "parts": [
+      {
+        "part": "base",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-base-r16.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          22.829999923706055
+        ],
+        "orientation": "Floor down",
+        "triangles": 30586,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "sha256": "f19430f9aaa5f246a8e07a59c4b8288e024deea481c8ded9723ba4e58b0bcf14"
+      },
+      {
+        "part": "lid",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-lid-r16.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          14.5
+        ],
+        "orientation": "Exterior face down; insert openings up",
+        "triangles": 58984,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "sha256": "e4cde778da0e24a7aa52a4e444babb4fe9f12e471ff85a7d305026e3a90f813e"
+      },
+      {
+        "part": "midframe",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-midframe-r16.stl",
+        "dimensions_xyz": [
+          72.35462951660156,
+          51.400001525878906,
+          8.100000381469727
+        ],
+        "orientation": "Flat battery-facing underside down",
+        "triangles": 1928,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "sha256": "dee0139a3327e6ed4f9da6bc3f11592dd79cd6603da7a53d5b8ffdfb774c411b"
+      },
+      {
+        "part": "button-strip",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-button-strip-r16.stl",
+        "dimensions_xyz": [
+          16.200000762939453,
+          26.0,
+          5.900000095367432
+        ],
+        "orientation": "Actuator stems down; support required below arms and anchor bar",
+        "supports": "Slicer supports needed; setup not validated",
+        "triangles": 3250,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "sha256": "1e8cdc7aaafc9bf07f8f8e93cc98db1855ffd28236179f0880a29e09507c1769"
+      }
+    ],
+    "backend_by_part": {
+      "base": "CGAL",
+      "lid": "CGAL",
+      "midframe": "Manifold",
+      "button-strip": "Manifold"
+    },
+    "dimensions_status": "Measured from final oriented revision 16 STL files; detailed values and bounds in export manifest",
+    "hardwarnings": true,
+    "minimum_xyz_for_delivery": [
+      0,
+      0,
+      0
+    ],
+    "manifest_path": "mechanical/p4x-eye-enclosure/stl/export-manifest.json",
+    "source_sha256": "2a00cf490114265286913708ffcaabaabd62cf98626e4eb732b0819cfdc26ab1",
+    "mesh_cleanup": "Base: conform_collinear_stl.py retriangulates five zero-area faces using existing vertices, without moving coordinates. Button strip: removes 342 zero-area faces. No dimensions changed.",
+    "package_validation": "ZIP CRC and packaged file hashes verified; contains four STL files, PRINTING.md and export manifest",
+    "package_size_bytes": 995909
+  },
+  "previous_viewer_validation_revision_16": "Revision 16 generated 67,911 finite viewer faces. Checks confirmed a connected cable cut, one connected frame polygon, front seat clearance and an uncovered battery lead corner; all prior numerical geometry checks passed. The browser midframe detail was visually inspected without reported warnings or errors. This is a dimension-matched viewer, not the compiled STL mesh. Revision 16 export validation is recorded separately in stl_export; physical fit unverified.",
+  "manufacturing_review": {
+    "status": "Not JLC3DP production-ready",
+    "review_path": "mechanical/p4x-eye-enclosure/JLC3DP_REVIEW.md",
+    "requested_finish": "Clear resin case, exterior clear gloss; moving guides and handle socket kept finish-free",
+    "requested_insert_installation": "Supplier-installed inserts",
+    "current_hardware": "User-specified M2 inserts, OD3 x length3.2",
+    "decision_pending": "Select an acceptable supplier, then confirm insert dimensions, finish and thin-feature acceptance before any manufacturing adaptation.",
+    "geometry_concerns_for_review": [
+      "0.6 mm wheel clearance-band wall",
+      "0.75 mm closed screw-well rim",
+      "0.8 mm button flexure",
+      "1.5 mm alignment keys and 0.8 mm receiver entrance web",
+      "0.4 mm nominal radial button movement gap",
+      "Open cable bay frame stiffness and battery retention, with approximately 91.3% plan coverage",
+      "SW7 height discrepancy, socket engagement and cap travel after finish",
+      "Power-slider retainer shelf/bridge/anchor strength",
+      "0.3 mm Y guide and 0.2 mm above/below flange clearances; finish-free guide/socket surfaces",
+      "0.2 mm nominal upper PCB stop gap versus print/PCB thickness tolerances; no preload intended",
+      "Relocated lower seat has 0.275 mm BOOT-body and 0.29 mm USB-hole-mask clearances; inspect actual components/solder"
+    ],
+    "physical_fit_verified": false,
+    "candidate_service": "Protolabs had a potential SLA epoxy-installed M2 insert and custom clear WaterShed route, but the user rejected this supplier on price.",
+    "geometry_action": "Independent lid anti-lift stop and relocated lower PCB support added. Only lid/midframe changed; six M2 insert positions/pilots unchanged and supplier insert geometry remains unknown.",
+    "manufacturer_selection": "Undecided; Protolabs excluded by user due price.",
+    "current_revision": 20
+  },
+  "previous_stl_export_revision_17": {
+    "revision": 17,
+    "units": "mm",
+    "status": "All four final oriented revision 17 STL parts passed mesh checks",
+    "package_path": "mechanical/p4x-eye-enclosure/p4x-eye-stl-r17.zip",
+    "directory": "mechanical/p4x-eye-enclosure/stl/",
+    "printing_notes": "mechanical/p4x-eye-enclosure/stl/PRINTING.md",
+    "minimum_xyz_for_delivery": [
+      0,
+      0,
+      0
+    ],
+    "physical_fit_verified": false,
+    "slicer_support_setup_validated": false,
+    "gcode_provided": false,
+    "parts": [
+      {
+        "part": "base",
+        "orientation": "Floor down",
+        "triangles": 30586,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            80.0,
+            56.0,
+            22.829999923706055
+          ]
+        ],
+        "volume_mm3": 15150.671773867938,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            -0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "f19430f9aaa5f246a8e07a59c4b8288e024deea481c8ded9723ba4e58b0bcf14",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-base-r17.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          22.829999923706055
+        ],
+        "geometry_changed_from_revision_16": false
+      },
+      {
+        "part": "lid",
+        "orientation": "Exterior face down; insert openings up",
+        "triangles": 59232,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            80.0,
+            56.0,
+            14.5
+          ]
+        ],
+        "volume_mm3": 10846.033635412217,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            -1.0,
+            0.0,
+            56.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            14.5
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "0806975ce311323940042949a5debed494ac95fd14c07ee2fbe832247bb23305",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-lid-r17.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          14.5
+        ],
+        "geometry_changed_from_revision_16": true
+      },
+      {
+        "part": "midframe",
+        "orientation": "Flat battery-facing underside down",
+        "triangles": 1992,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            72.35462951660156,
+            51.400001525878906,
+            8.099998474121094
+          ]
+        ],
+        "volume_mm3": 5398.294090485854,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -2.299999237060547
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -2.299999237060547
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            -13.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "897106fece66305dd513236b4e3ead1d1853a8633e2bfc5b7c94d03607800c50",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-midframe-r17.stl",
+        "dimensions_xyz": [
+          72.35462951660156,
+          51.400001525878906,
+          8.099998474121094
+        ],
+        "geometry_changed_from_revision_16": true
+      },
+      {
+        "part": "button-strip",
+        "orientation": "Actuator stems down; support required below arms and anchor bar",
+        "triangles": 3250,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            16.200000762939453,
+            26.0,
+            5.900000095367432
+          ]
+        ],
+        "volume_mm3": 337.28947084786586,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -49.29999923706055
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -12.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            -0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "1e8cdc7aaafc9bf07f8f8e93cc98db1855ffd28236179f0880a29e09507c1769",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-button-strip-r17.stl",
+        "dimensions_xyz": [
+          16.200000762939453,
+          26.0,
+          5.900000095367432
+        ],
+        "geometry_changed_from_revision_16": false
+      }
+    ],
+    "watertight_validation": "All four parts watertight with consistent winding, positive volume and one closed component each; no degenerate or duplicate triangles, boundary edges or nonmanifold edges",
+    "reprint_required": [
+      "lid",
+      "midframe"
+    ],
+    "reusable_revision_16_parts": [
+      "base",
+      "button-strip"
+    ],
+    "historical_export": "previous_stl_export_revision_16",
+    "compiler": "OpenSCAD 2026.09.23; CGAL base/lid/midframe, Manifold button strip; --hardwarnings",
+    "source_sha256": "95ba8d6c7dc7c88914fd894ecfc4a5cf0b006c4d8361e545096b433cd978d869",
+    "mesh_cleanup": "Base: conform_collinear_stl.py retriangulates five zero-area faces using existing vertices, without moving coordinates. Button strip: removes 342 zero-area faces. No dimensions changed.",
+    "hardwarnings": true,
+    "backend_by_part": {
+      "base": "CGAL",
+      "lid": "CGAL",
+      "midframe": "CGAL",
+      "button-strip": "Manifold"
+    },
+    "manifest_path": "mechanical/p4x-eye-enclosure/stl/export-manifest.json",
+    "dimensions_status": "Measured from final oriented revision 17 STL files; detailed bounds and transforms recorded in manifest",
+    "base_and_button_strip_reuse": "Exported hashes match revision 16 exactly; no geometry changes",
+    "package_validation": "Revision 17 ZIP contains four STLs, PRINTING.md, export-manifest.json and JLC3DP_REVIEW.md. CRC check passed, archive contents match final files, and all STL hashes match the export manifest."
+  },
+  "previous_viewer_validation_revision_17": "Revision 17 numerical geometry checks passed with 69,204 finite faces. Browser inspection passed: Lid alignment keys view selected correctly at 12% explode, showing upper cover, midframe, keys and receivers while PCB/display/buttons/hardware were hidden; Display seat view visibly rendered the enlarged LCD flex relief with 24 x 6.35 mm metadata. No console warnings or errors reported. Browser left on alignment-key view. This dimension-matched viewer does not validate manufacturing acceptance or physical fit.",
+  "power_switch_access": {
+    "ref": "SW7",
+    "part": "HRO K3-1235S-F1",
+    "manufacturer_drawing_url": "https://static.chipdip.ru/lib/844/DOC012844376.pdf",
+    "local_reference": "work/p4x-enclosure/reference/sw7-K3-1235S-F1.pdf",
+    "gerber_top_xy": [
+      11.4268,
+      4.7
+    ],
+    "case_xy": [
+      63.0732,
+      11.2
+    ],
+    "pcb_side": "Display-facing",
+    "body_size_xyz": [
+      9,
+      3.5,
+      3.5
+    ],
+    "body_base_case_z": 21.3,
+    "body_top_case_z": 24.8,
+    "handle_size_xy": [
+      1.5,
+      1.5
+    ],
+    "slider_travel_x": 2,
+    "handle_height_drawing": 2,
+    "handle_height_bom": 2.5,
+    "installed_handle_top_case_z_provisional": [
+      26.8,
+      27.3
+    ],
+    "height_status": "Manufacturer F1 drawing and board BOM disagree; solder/installed height and reach unverified",
+    "revised_revision": 19,
+    "construction": "Separate socketed captive cap coupled to original SW7; lid slot covered by flange, retained from beneath by button-strip shelf",
+    "running_slot_size_xy": [
+      9,
+      4.4
+    ],
+    "running_slot_corner_radius": 1,
+    "running_slot_xy_bounds": {
+      "x": [
+        58.5732,
+        67.5732
+      ],
+      "y": [
+        9,
+        13.4
+      ]
+    },
+    "running_slot_cutter_z_span": [
+      26.9,
+      29.1
+    ],
+    "underside_guide_size_xy": [
+      17,
+      8.2
+    ],
+    "underside_guide_corner_radius": 1,
+    "underside_guide_ceiling_z": 27.8,
+    "remaining_lid_roof": 1.2,
+    "actuation": "Slide raised printed nub along X; no glue on moving cap",
+    "validation": "Final lid mesh checks, PDF text/dimension/rendered inspection and browser Power switch/Button mechanism inspection passed. Actual engagement, operating forces, resin fit and load path remain physically unverified."
+  },
+  "technical_drawing": {
+    "revision": 20,
+    "path": "mechanical/p4x-eye-enclosure/p4x-eye-pcbway-technical-drawing-r20.pdf",
+    "status": "All four PDF pages rendered and visually inspected; independent text/dimension/coordinate/hash audit passed against CAD and final manifest. S1 anti-lift callout and new lower-seat note visible.",
+    "purpose": "Quotation/supplier review; existing insert pilots not approved supplier installation dimensions",
+    "previous_revision_path": "mechanical/p4x-eye-enclosure/p4x-eye-pcbway-technical-drawing-r19.pdf",
+    "physical_fit_verified": false,
+    "pages": 4,
+    "text_dimension_check": "S1 exported72.50/13.70/Z7.50 maps assembly72.5/42.3/Z21.5;3x1.2foot and0.20gap match. Lower-seat assembly X69.30-70.50,Y32.75-34.75,topZ19.70 matches source. Five filenames/hash identities, part envelopes and six unchanged insert positions/directions/depths checked."
+  },
+  "previous_stl_export_revision_18": {
+    "revision": 18,
+    "units": "mm",
+    "status": "All four final oriented revision 18 STL parts passed mesh checks",
+    "package_path": "mechanical/p4x-eye-enclosure/p4x-eye-stl-r18.zip",
+    "directory": "mechanical/p4x-eye-enclosure/stl/",
+    "printing_notes": "mechanical/p4x-eye-enclosure/stl/PRINTING.md",
+    "minimum_xyz_for_delivery": [
+      0,
+      0,
+      0
+    ],
+    "physical_fit_verified": false,
+    "slicer_support_setup_validated": false,
+    "gcode_provided": false,
+    "parts": [
+      {
+        "part": "base",
+        "orientation": "Floor down",
+        "triangles": 30586,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            80.0,
+            56.0,
+            22.829999923706055
+          ]
+        ],
+        "volume_mm3": 15150.671773867938,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            -0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "f19430f9aaa5f246a8e07a59c4b8288e024deea481c8ded9723ba4e58b0bcf14",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-base-r18.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          22.829999923706055
+        ],
+        "geometry_changed_from_revision_17": false
+      },
+      {
+        "part": "lid",
+        "orientation": "Exterior face down; insert openings up",
+        "triangles": 59644,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            80.0,
+            56.0,
+            14.5
+          ]
+        ],
+        "volume_mm3": 10713.843080498897,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            -1.0,
+            0.0,
+            56.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            14.5
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "bf5ef76a0e684607c7b1c8fb566f1640dad721d1b857c229cdadcf54b0baeb7d",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-lid-r18.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          14.5
+        ],
+        "geometry_changed_from_revision_17": true
+      },
+      {
+        "part": "midframe",
+        "orientation": "Flat battery-facing underside down",
+        "triangles": 1676,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            72.35462951660156,
+            51.400001525878906,
+            8.099998474121094
+          ]
+        ],
+        "volume_mm3": 5205.179681298215,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -2.299999237060547
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -2.299999237060547
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            -13.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "81f19dcfb55d093c5c249db16cbbcb8f615e2be869ba521366ed4754c1ea8d4b",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-midframe-r18.stl",
+        "dimensions_xyz": [
+          72.35462951660156,
+          51.400001525878906,
+          8.099998474121094
+        ],
+        "geometry_changed_from_revision_17": true
+      },
+      {
+        "part": "button-strip",
+        "orientation": "Actuator stems down; support required below arms and anchor bar",
+        "triangles": 2572,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            16.200000762939453,
+            21.5,
+            5.90000057220459
+          ]
+        ],
+        "volume_mm3": 319.2895380911154,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -49.29999923706055
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -16.5
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            5.722046125811175e-07
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "c87bf5a5c26f58c35d1a47779f57f49967efd5236c288edb8898e752172a07ef",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-button-strip-r18.stl",
+        "dimensions_xyz": [
+          16.200000762939453,
+          21.5,
+          5.90000057220459
+        ],
+        "geometry_changed_from_revision_17": true
+      }
+    ],
+    "watertight_validation": "All four parts watertight with consistent winding, positive volume and one closed component each; no degenerate or duplicate triangles, boundary edges or nonmanifold edges",
+    "reprint_required": [
+      "lid",
+      "midframe",
+      "button-strip"
+    ],
+    "reusable_revision_17_parts": [
+      "base"
+    ],
+    "historical_export": "previous_stl_export_revision_17",
+    "compiler": "OpenSCAD 2026.09.23; CGAL all four parts; --hardwarnings",
+    "source_sha256": "9d11cf7a3c1acee0258fd27293496c4cf8a81c49352742a4e7cb091fe96388ae",
+    "mesh_cleanup": "Unchanged base: conform_collinear_stl.py previously retriangulated five zero-area faces using existing vertices, without moving coordinates. Other parts use clean revision 18 CGAL exports.",
+    "hardwarnings": true,
+    "backend_by_part": {
+      "base": "CGAL",
+      "lid": "CGAL",
+      "midframe": "CGAL",
+      "button-strip": "CGAL"
+    },
+    "manifest_path": "mechanical/p4x-eye-enclosure/stl/export-manifest.json",
+    "dimensions_status": "Measured from final oriented revision 18 STL files; detailed bounds and transforms recorded in manifest",
+    "base_reuse": "Final mesh hash matches revision 17 exactly"
+  },
+  "previous_viewer_validation_revision_18": "Revision 18 geometry checks passed with 73,125 finite faces and 64 simple R2 rings. Browser Power switch and Midframe detail presets displayed the new switch opening and open cable bay correctly without reported console warnings or errors. These numerical and visual checks do not establish physical fit or supplier acceptance.",
+  "previous_technical_drawing_revision_18": {
+    "revision": 18,
+    "path": "mechanical/p4x-eye-enclosure/p4x-eye-pcbway-technical-drawing-r18.pdf",
+    "status": "All three PDF pages rendered and visually inspected with no overlaps. Independent text, dimensions, coordinates and hash-prefix checks passed against current CAD and final r18 manifest.",
+    "purpose": "Quotation and supplier review; current insert pilots not approved supplier-installation dimensions",
+    "previous_revision_path": "mechanical/p4x-eye-enclosure/p4x-eye-pcbway-technical-drawing-r17.pdf",
+    "text_dimension_check": "All four filenames/hash prefixes and part bounds match final r18 manifest. Lid SW7 coordinate applies exported Y=56-caseY. Insert XY/entry directions, pilot3.4 and total blind8.0/7.0 depths match CAD; six M2 inserts and supplier-review caveats retained.",
+    "physical_fit_verified": false
+  },
+  "previous_power_switch_access_revision_18": {
+    "introduced_revision": 18,
+    "ref": "SW7",
+    "part": "HRO K3-1235S-F1",
+    "manufacturer_drawing_url": "https://static.chipdip.ru/lib/844/DOC012844376.pdf",
+    "local_reference": "work/p4x-enclosure/reference/sw7-K3-1235S-F1.pdf",
+    "gerber_top_xy": [
+      11.4268,
+      4.7
+    ],
+    "case_xy": [
+      63.0732,
+      11.2
+    ],
+    "pcb_side": "Display-facing",
+    "body_size_xyz": [
+      9,
+      3.5,
+      3.5
+    ],
+    "body_base_case_z": 21.3,
+    "body_top_case_z": 24.8,
+    "handle_size_xy": [
+      1.5,
+      1.5
+    ],
+    "slider_travel_x": 2,
+    "handle_height_drawing": 2,
+    "handle_height_bom": 2.5,
+    "installed_handle_top_case_z_provisional": [
+      26.8,
+      27.3
+    ],
+    "height_status": "Manufacturer F1 drawing and board BOM disagree; solder/installed height and reach unverified",
+    "opening_size_xy": [
+      12,
+      5
+    ],
+    "opening_corner_radius": 1,
+    "opening_xy_bounds": {
+      "x": [
+        57.0732,
+        69.0732
+      ],
+      "y": [
+        8.7,
+        13.7
+      ]
+    },
+    "opening_cutter_z_span": [
+      26.8,
+      29.1
+    ],
+    "bevel_z_span_nominal": [
+      28.2,
+      29
+    ],
+    "mouth_size_xy": [
+      14,
+      7
+    ],
+    "mouth_corner_radius": 2,
+    "mouth_xy_bounds": {
+      "x": [
+        56.0732,
+        70.0732
+      ],
+      "y": [
+        7.7,
+        14.7
+      ]
+    },
+    "actuation": "Direct fingernail access to original slider; no additional printed actuator",
+    "button_bar_and_anchor_clearance_to_mouth_y": 1.8,
+    "validation": "Final revision 18 lid mesh checks passed. PDF text/dimension cross-check agrees with CAD and exported coordinates, rendered drawing inspection passed, and browser Power switch preset shows the opening without reported errors. Actual handle height, fingernail reach and slider travel remain physically unverified."
+  },
+  "power_slider": {
+    "introduced_revision": 19,
+    "cad_part": "power_slider",
+    "quantity": 1,
+    "center_case_xy_nominal": [
+      63.0732,
+      11.2
+    ],
+    "assembly_reference_x_offset": 1,
+    "nub_size_xy": [
+      6,
+      3.8
+    ],
+    "nub_corner_radius": 1,
+    "nub_top_case_z": 30,
+    "nub_projection_above_lid": 1,
+    "nub_upper_edge_chamfer_xy": 0.3,
+    "nub_upper_edge_chamfer_height": 0.3,
+    "flange_size_xy": [
+      14,
+      7.6
+    ],
+    "flange_corner_radius": 1,
+    "flange_z_span_nominal": [
+      26.8,
+      27.6
+    ],
+    "lower_boss_size_xy": [
+      4,
+      4
+    ],
+    "lower_boss_corner_radius": 0.3,
+    "lower_boss_bottom_case_z": 25.4,
+    "socket_size_xy": [
+      2,
+      2
+    ],
+    "socket_top_case_z": 27.9,
+    "socket_entry_size_xy": [
+      2.4,
+      2.4
+    ],
+    "socket_entry_height": 0.2,
+    "socket_clearance_per_side_to_nominal_handle": 0.25,
+    "nominal_cap_travel_x": 3,
+    "switch_travel_x": 2,
+    "socket_play_x_total": 0.5,
+    "remaining_travel_reserve_total": 0.5,
+    "y_guide_clearance_per_side": 0.3,
+    "nominal_vertical_clearance_above_flange": 0.2,
+    "nominal_vertical_clearance_below_flange": 0.2,
+    "total_vertical_float": 0.4,
+    "minimum_nominal_slot_end_overlap": 1,
+    "nominal_slot_side_overlap": 1.6,
+    "minimum_boss_to_switch_body_clearance_at_lowest_cap": 0.4,
+    "minimum_socket_ceiling_to_taller_bom_handle_at_lowest_cap": 0.4,
+    "retained_by": "Lid roof and integral button-strip shelf; no extra fastener or adhesive",
+    "assembly": "Insert cap from lid interior; fasten button strip to capture flange; check free motion, then align socket over SW7 when lowering cover. Do not glue moving part.",
+    "finish": "Exterior clear gloss allowed. Mask running guides, retainer slot and handle socket against coating buildup and adhesive.",
+    "seal_status": "Overlapping cover only; no gasket, water resistance or IP rating claimed",
+    "physical_fit_verified": false,
+    "validation": "Final slider mesh topology and hash checks passed. Geometry checker passed cap travel, overlap and retainer checks; browser power/button-mechanism views and four-page drawing text/dimension/visual reviews passed. Actual switch engagement, resin fit, retainer strength and operating forces remain unverified.",
+    "lateral_contact_note": "Guide allows \u00b10.3 mm Y, but 2 mm socket around nominal 1.5 mm handle allows only \u00b10.25 mm before contact. Handle may receive sideways contact before guide limits motion; retainer is intended to carry downward loads, not isolate all lateral loads."
+  },
+  "previous_stl_export_revision_19": {
+    "revision": 19,
+    "units": "mm",
+    "status": "All five final oriented revision 19 STL parts passed mesh checks",
+    "package_path": "mechanical/p4x-eye-enclosure/p4x-eye-stl-r19.zip",
+    "directory": "mechanical/p4x-eye-enclosure/stl/",
+    "printing_notes": "mechanical/p4x-eye-enclosure/stl/PRINTING.md",
+    "minimum_xyz_for_delivery": [
+      0,
+      0,
+      0
+    ],
+    "physical_fit_verified": false,
+    "slicer_support_setup_validated": false,
+    "gcode_provided": false,
+    "parts": [
+      {
+        "part": "base",
+        "orientation": "Floor down",
+        "triangles": 30586,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            80.0,
+            56.0,
+            22.829999923706055
+          ]
+        ],
+        "volume_mm3": 15150.671773867938,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            -0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "f19430f9aaa5f246a8e07a59c4b8288e024deea481c8ded9723ba4e58b0bcf14",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-base-r19.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          22.829999923706055
+        ],
+        "geometry_changed_from_revision_18": false
+      },
+      {
+        "part": "lid",
+        "orientation": "Exterior face down; insert openings up",
+        "triangles": 59780,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            80.0,
+            56.0,
+            14.5
+          ]
+        ],
+        "volume_mm3": 10688.7206239351,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -0.0
+          ],
+          [
+            0.0,
+            -1.0,
+            0.0,
+            56.0
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            14.5
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "a008e282bf45ab73da0f6e2a3161a30a48c64b62779cc617ad8564bf4045d33f",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-lid-r19.stl",
+        "dimensions_xyz": [
+          80.0,
+          56.0,
+          14.5
+        ],
+        "geometry_changed_from_revision_18": true
+      },
+      {
+        "part": "midframe",
+        "orientation": "Flat battery-facing underside down",
+        "triangles": 1676,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            72.35462951660156,
+            51.400001525878906,
+            8.099998474121094
+          ]
+        ],
+        "volume_mm3": 5205.179681298215,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -2.299999237060547
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -2.299999237060547
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            -13.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "81f19dcfb55d093c5c249db16cbbcb8f615e2be869ba521366ed4754c1ea8d4b",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-midframe-r19.stl",
+        "dimensions_xyz": [
+          72.35462951660156,
+          51.400001525878906,
+          8.099998474121094
+        ],
+        "geometry_changed_from_revision_18": false
+      },
+      {
+        "part": "button-strip",
+        "orientation": "Actuator stems down; support required below arms, bar and slider retainer",
+        "triangles": 3256,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            22.773197174072266,
+            31.299999237060547,
+            5.90000057220459
+          ]
+        ],
+        "volume_mm3": 480.29309089390887,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -49.29999923706055
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            -6.699999809265137
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            5.722046125811175e-07
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "c1ea0724901f3ee0f7fab17daf32c69dd4d0b2f0e8960c6fcb732b4b7f5f1403",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-button-strip-r19.stl",
+        "dimensions_xyz": [
+          22.773197174072266,
+          31.299999237060547,
+          5.90000057220459
+        ],
+        "geometry_changed_from_revision_18": true
+      },
+      {
+        "part": "power-slider",
+        "orientation": "Nub face down; switch socket upward; supplier may reorient for resin supports",
+        "triangles": 972,
+        "bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            13.999996185302734,
+            7.599998474121094,
+            4.600000381469727
+          ]
+        ],
+        "volume_mm3": 148.42137717241323,
+        "watertight": true,
+        "consistent_winding": true,
+        "closed_components": 1,
+        "degenerate_triangles": 0,
+        "duplicate_triangles": 0,
+        "boundary_edges": 0,
+        "nonmanifold_edges": 0,
+        "raw_to_export_transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            -56.07320022583008
+          ],
+          [
+            0.0,
+            -1.0,
+            0.0,
+            14.999999046325684
+          ],
+          [
+            0.0,
+            0.0,
+            -1.0,
+            4.599999904632568
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "sha256": "0a015315a63f24862cbb357049290e7ec1ccfd520d325194817ae892d1d21d72",
+        "path": "mechanical/p4x-eye-enclosure/stl/p4x-eye-power-slider-r19.stl",
+        "dimensions_xyz": [
+          13.999996185302734,
+          7.599998474121094,
+          4.600000381469727
+        ],
+        "geometry_changed_from_revision_18": true
+      }
+    ],
+    "watertight_validation": "All five parts watertight with consistent winding, positive volume and one closed component each; no degenerate or duplicate triangles, boundary edges or nonmanifold edges",
+    "reprint_required": [
+      "lid",
+      "button-strip",
+      "power-slider"
+    ],
+    "reusable_revision_18_parts": [
+      "base",
+      "midframe"
+    ],
+    "historical_export": "previous_stl_export_revision_18",
+    "compiler": "OpenSCAD 2026.09.23; CGAL all five parts; --hardwarnings",
+    "source_sha256": "933512e8dee378c447d04b299e74a80bd7097c0140ef1afceeb9fa7f991116a8",
+    "mesh_cleanup": "Unchanged base: conform_collinear_stl.py previously retriangulated five zero-area faces using existing vertices, without moving coordinates. Midframe retains its clean revision 18 export; lid, button strip and slider use clean revision 19 CGAL exports.",
+    "hardwarnings": true,
+    "backend_by_part": {
+      "base": "CGAL",
+      "lid": "CGAL",
+      "midframe": "CGAL",
+      "button-strip": "CGAL",
+      "power-slider": "CGAL"
+    },
+    "manifest_path": "mechanical/p4x-eye-enclosure/stl/export-manifest.json",
+    "dimensions_status": "Measured from final oriented revision 19 STL files; detailed bounds and transforms recorded in manifest",
+    "reused_part_verification": "Base and midframe hashes match revision 18 exactly"
+  },
+  "previous_viewer_validation_revision_19": "Revision 19 geometry checker passed with 73,560 finite faces, all 64 simple R2 rings, and cap travel/overlap and retainer checks. Browser Power switch and Button mechanism views visibly showed the closed cap and retained flange/shelf without reported console warnings or errors. Physical fit, operating forces and supplier acceptance remain unverified.",
+  "previous_technical_drawing_revision_19": {
+    "revision": 19,
+    "path": "mechanical/p4x-eye-enclosure/p4x-eye-pcbway-technical-drawing-r19.pdf",
+    "status": "All four final rendered pages visually inspected; independent text/dimension/coordinate/hash checks passed against CAD and manifest. Sheet 3 strip view reduced to 1.85:1 for spacing and regenerated/reinspected; dimensions and content unchanged.",
+    "purpose": "Quotation and supplier review; existing insert pilots not approved supplier-installation dimensions",
+    "previous_revision_path": "mechanical/p4x-eye-enclosure/p4x-eye-pcbway-technical-drawing-r18.pdf",
+    "physical_fit_verified": false,
+    "pages": 4,
+    "text_dimension_check": "All five filenames/hash prefixes and envelope dimensions match r19 manifest. Exported lid switch center63.073/44.800, running slot9x4.4 and underside guide17x8.2 match CAD. Six insert coordinates, directions and depths retained. Slider page dimensions,3mm travel,.3side gaps,.4total float,2mm socket/1.5mm lever,1.2roof and1/1.6overlaps checked.",
+    "sheet_3_strip_view_scale": "1.85:1"
+  },
+  "pcb_anti_lift_stop": {
+    "introduced_revision": 20,
+    "owner": "lid",
+    "center_case_xy": [
+      72.5,
+      42.3
+    ],
+    "foot_size_xy": [
+      3,
+      1.2
+    ],
+    "foot_corner_radius": 0.2,
+    "foot_xy_bounds": {
+      "x": [
+        71,
+        74
+      ],
+      "y": [
+        41.7,
+        42.9
+      ]
+    },
+    "foot_z_span": [
+      21.5,
+      21.9
+    ],
+    "root_size_xy": [
+      4,
+      2.4
+    ],
+    "root_corner_radius": 0.4,
+    "root_z_span_nominal": [
+      23.5,
+      27.1
+    ],
+    "loft_z_span_nominal": [
+      21.9,
+      23.5
+    ],
+    "nominal_pcb_top_z": 21.3,
+    "nominal_pcb_gap": 0.2,
+    "source_basis": "Display-face patch reviewed against MB V2.3 placement, Gerber, mask and drill sources",
+    "bearing_surface": "Component-free display-face solder-mask patch; no drill centers, component bodies, mask openings or paste openings found within the reviewed upper footprint",
+    "function": "Limit upward PCB travel; separate from relocated lower support, no intended preload or clamp force",
+    "assembly_note": "PCB thickness and printing tolerances may consume 0.2 mm nominal gap. Confirm lid closes freely before tightening screws; never use screws to force cover onto PCB.",
+    "physical_fit_verified": false,
+    "validation": "Final lid mesh, four-page PDF dimensions/hash/rendered checks and numerical viewer/browser travel-stop inspection passed. Cutaway shows nominal gap; physical tolerance gap, contact pressure and support loads remain unverified."
+  }
+}

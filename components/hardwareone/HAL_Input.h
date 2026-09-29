@@ -26,12 +26,15 @@
 #define INPUT_TYPE_CLICK_WHEEL     2
 #define INPUT_TYPE_CUSTOM          3
 #define INPUT_TYPE_ANO_ENCODER     4
+#define INPUT_TYPE_GPIO_ENCODER    5
 
 // Default input type. BuildConfig owns the user-visible INPUT_DEVICE_TYPE
 // flag; this internal INPUT_TYPE is derived from it so HAL code has a single
 // constant to switch on regardless of which input device is built.
 #ifndef INPUT_TYPE
-  #if defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 2  /* INPUT_DEVICE_TYPE_ANO_ENCODER */
+  #if defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 3  /* INPUT_DEVICE_TYPE_GPIO_ENCODER */
+    #define INPUT_TYPE  INPUT_TYPE_GPIO_ENCODER
+  #elif defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 2  /* INPUT_DEVICE_TYPE_ANO_ENCODER */
     #define INPUT_TYPE  INPUT_TYPE_ANO_ENCODER
   #else
     #define INPUT_TYPE  INPUT_TYPE_SEESAW_GAMEPAD
@@ -45,7 +48,10 @@
 // stack/HWM reports showing the actual driver in use instead of a misleading
 // "gamepad_task" on ANO builds. FreeRTOS task name cap is
 // CONFIG_FREERTOS_MAX_TASK_NAME_LEN (16) — both names fit.
-#if INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
+#if INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
+  #define INPUT_TASK_NAME "encoder_task"
+  #define INPUT_TASK_TAG  "encoder"
+#elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
   #define INPUT_TASK_NAME "ano_task"
   #define INPUT_TASK_TAG  "ano"
 #else
@@ -62,6 +68,7 @@
 
 #include "i2csensor_seesaw.h"
 #include "i2csensor_ano_encoder.h"
+#include "Input_GPIOEncoder.h"
 
 // =============================================================================
 // Logical Button Identifiers (hardware-agnostic)
@@ -85,7 +92,8 @@ enum InputControllerType {
   INPUT_CONTROLLER_GAMEPAD_SEESAW,  // Adafruit Seesaw gamepad
   INPUT_CONTROLLER_CLICK_WHEEL,     // Generic click wheel / rotary encoder
   INPUT_CONTROLLER_CUSTOM,          // Custom controller mapping
-  INPUT_CONTROLLER_ANO_ENCODER      // Adafruit ANO rotary encoder breakout
+  INPUT_CONTROLLER_ANO_ENCODER,     // Adafruit ANO rotary encoder breakout
+  INPUT_CONTROLLER_GPIO_ENCODER     // Direct GPIO quadrature + push switch
 };
 
 // =============================================================================
@@ -118,6 +126,15 @@ uint32_t inputGetCustomButtonMapping(InputButton button);
 // rotary state.
 int       inputGetX();
 int       inputGetY();
+
+// Shared rotary channel for any wheel backend. Joysticks return false/zero.
+bool      inputHasPendingDetents();
+int       inputConsumeOneDetent();
+
+// Blocking wizard readers use the same latched press edges as the main UI.
+// Caller owns its previous raw state. First read ignores a held raw switch but
+// preserves a completed click that arrived before the first wizard frame.
+uint32_t inputConsumeButtonPresses(uint32_t& previousActiveLow, bool& initialized);
 
 // Raw cache buttons (active-LOW at the underlying device's native bit
 // positions — gamepad chip bits or ANO_BTN_* bits depending on build).

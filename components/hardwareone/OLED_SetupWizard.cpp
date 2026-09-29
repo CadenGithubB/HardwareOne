@@ -75,7 +75,11 @@ void drawWizardFooter(const char* leftAction, const char* rightAction, const cha
     oledDisplay->print(leftAction);
   }
   if (rightAction && rightAction[0]) {
+#if ENABLE_GPIO_ENCODER
+    oledDisplay->print(" X:");
+#else
     oledDisplay->print(" >:");
+#endif
     oledDisplay->print(rightAction);
   }
   if (backAction && backAction[0]) {
@@ -467,6 +471,10 @@ void resetWizardJoystickState() {
 
 JoystickNav readWizardJoystickNav() {
   JoystickNav nav = {false, false, false, false};
+  // Consume outside the cache lock: GPIO wheels share that mutex with buttons.
+  const int detent = inputConsumeOneDetent();
+  nav.up = detent < 0;
+  nav.down = detent > 0;
 
   SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.joystickNav");
   if (g.held) {
@@ -504,6 +512,16 @@ JoystickNav readWizardJoystickNav() {
 // ============================================================================
 
 // Shared toggle-page input handler: A=toggle, up/down=move, right=next, left/B=back
+static bool wizardNextRequested(uint32_t buttons, const JoystickNav& nav) {
+  if (nav.right || (buttons & INPUT_MASK(INPUT_BUTTON_START))) return true;
+#if ENABLE_GPIO_ENCODER
+  // The one-switch wheel exposes X via press-and-turn; use it for Next while
+  // double-click remains the keyboard mode/function key.
+  if (buttons & INPUT_MASK(INPUT_BUTTON_X)) return true;
+#endif
+  return false;
+}
+
 static bool handleTogglePageInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result) {
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
     wizardToggleCurrentItem();
@@ -513,7 +531,7 @@ static bool handleTogglePageInput(uint32_t buttons, JoystickNav& nav, SetupWizar
   if (nav.up) { wizardMoveUp(); return true; }
   if (nav.down) { wizardMoveDown(); return true; }
 
-  if (nav.right || (buttons & INPUT_MASK(INPUT_BUTTON_START))) {
+  if (wizardNextRequested(buttons, nav)) {
     wizardNextPage(result);
     return true;
   }
@@ -537,7 +555,7 @@ bool handleFeaturesInput(uint32_t buttons, JoystickNav& nav) {
   if (nav.up) { wizardMoveUp(); return true; }
   if (nav.down) { wizardMoveDown(); return true; }
 
-  if (nav.right || (buttons & INPUT_MASK(INPUT_BUTTON_START))) {
+  if (wizardNextRequested(buttons, nav)) {
     wizardNextPage(sDummyResult);
     return true;
   }
@@ -580,7 +598,7 @@ bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& re
     return true;
   }
 
-  if (nav.right || (buttons & INPUT_MASK(INPUT_BUTTON_START))) {
+  if (wizardNextRequested(buttons, nav)) {
     if (!wizardNextPage(result)) {
       return false;  // Signal completion
     }
@@ -662,20 +680,7 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
       continue;
     }
 
-    uint32_t buttons = lastButtons;
-    bool haveButtons = false;
-    {
-      SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-      if (g.held && gInputCache.dataValid) {
-        buttons = gInputCache.buttons;
-        haveButtons = true;
-      }
-    }
-    if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
-    uint32_t pressedNow = ~buttons;
-    uint32_t pressedLast = ~lastButtons;
-    uint32_t newButtons = pressedNow & ~pressedLast;
-    lastButtons = buttons;
+    const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
 
     if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
       return (selection == 0) ? 1 : 0; // 1=configure, 0=skip
@@ -766,20 +771,7 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
       JoystickNav nav = readWizardJoystickNav();
       if (nav.up || nav.down) { selection = selection == 0 ? 1 : 0; delay(150); continue; }
 
-      uint32_t buttons = lastButtons;
-      bool haveButtons = false;
-      {
-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-        if (g.held && gInputCache.dataValid) {
-          buttons = gInputCache.buttons;
-          haveButtons = true;
-        }
-      }
-      if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
-      uint32_t pressedNow = ~buttons;
-      uint32_t pressedLast = ~lastButtons;
-      uint32_t newButtons = pressedNow & ~pressedLast;
-      lastButtons = buttons;
+      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
 
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
         result.espnowStationary = (selection == 1);
@@ -923,17 +915,7 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
       // other wizard pages — without this, right did nothing on the mode pages.
       if (nav.right) { wizardModeApply(sub, sel); if (!wizardNextPage(result)) running = false; return; }
 
-      uint32_t buttons = lastButtons;
-      bool haveButtons = false;
-      {
-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.modeBtn");
-        if (g.held && gInputCache.dataValid) { buttons = gInputCache.buttons; haveButtons = true; }
-      }
-      if (haveButtons && !lastButtonsInitialized) {
-        lastButtons = buttons; lastButtonsInitialized = true; continue;
-      }
-      uint32_t newButtons = (~buttons) & ~(~lastButtons);
-      lastButtons = buttons;
+      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
       if (newButtons & (INPUT_MASK(INPUT_BUTTON_A) | INPUT_MASK(INPUT_BUTTON_START))) {
         wizardModeApply(sub, sel);
         if (!wizardNextPage(result)) running = false;
@@ -1065,26 +1047,7 @@ bool getOLEDSetupModeSelection(int& setupMode) {
       }
 
       // Read buttons
-      uint32_t buttons = lastButtons;
-      bool haveButtons = false;
-      {
-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-        if (g.held && gInputCache.dataValid) {
-          buttons = gInputCache.buttons;
-          haveButtons = true;
-        }
-      }
-
-      if (haveButtons && !lastButtonsInitialized) {
-        lastButtons = buttons;
-        lastButtonsInitialized = true;
-        continue;
-      }
-
-      uint32_t pressedNow = ~buttons;
-      uint32_t pressedLast = ~lastButtons;
-      uint32_t newButtons = pressedNow & ~pressedLast;
-      lastButtons = buttons;
+      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
 
       // A button = select
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
@@ -1167,17 +1130,7 @@ int getOLEDArchetypeSelection() {
       if (nav.up)   { selection = (selection > 0) ? selection - 1 : NUM - 1; delay(150); continue; }
       if (nav.down) { selection = (selection < NUM - 1) ? selection + 1 : 0; delay(150); continue; }
 
-      uint32_t buttons = lastButtons;
-      bool haveButtons = false;
-      {
-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.archetypeRead");
-        if (g.held && gInputCache.dataValid) { buttons = gInputCache.buttons; haveButtons = true; }
-      }
-      if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
-      uint32_t pressedNow = ~buttons;
-      uint32_t pressedLast = ~lastButtons;
-      uint32_t newButtons = pressedNow & ~pressedLast;
-      lastButtons = buttons;
+      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) return avail[selection];
       if (newButtons & INPUT_MASK(INPUT_BUTTON_B)) return -1;
     }
@@ -1262,26 +1215,7 @@ bool getOLEDThemeSelection(bool& darkMode) {
       }
       
       // Read buttons
-      uint32_t buttons = lastButtons;
-      bool haveButtons = false;
-      {
-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-        if (g.held && gInputCache.dataValid) {
-          buttons = gInputCache.buttons;
-          haveButtons = true;
-        }
-      }
-      
-      if (haveButtons && !lastButtonsInitialized) {
-        lastButtons = buttons;
-        lastButtonsInitialized = true;
-        continue;
-      }
-      
-      uint32_t pressedNow = ~buttons;
-      uint32_t pressedLast = ~lastButtons;
-      uint32_t newButtons = pressedNow & ~pressedLast;
-      lastButtons = buttons;
+      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
       
       // A button = select
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {

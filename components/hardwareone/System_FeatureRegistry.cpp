@@ -224,7 +224,7 @@ static bool isMapsCompiled() {
 }
 
 static bool isGamesCompiled() {
-#if ENABLE_GAMES
+#if ENABLE_WEB_GAME_DARKROOM
   return true;
 #else
   return false;
@@ -340,10 +340,10 @@ static constexpr FeatureEntry featureRegistry[] = {
     "Home Assistant integration via MQTT broker" },
 
   // === DISPLAY FEATURES ===
-  { "oled", "OLED Display", FEATURE_CAT_DISPLAY, 4,
+  { "oled", "Local Display", FEATURE_CAT_DISPLAY, 4,
     FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
     &gSettings.oledEnabled, isOledCompiled,
-    "128x64 OLED display interface" },
+    "Local display interface (selected display backend)" },
     
   { "led", "NeoPixel LED", FEATURE_CAT_DISPLAY, 2,
     FEATURE_FLAG_RUNTIME_TOGGLE,
@@ -368,7 +368,9 @@ static constexpr FeatureEntry featureRegistry[] = {
   // exposes itself here. Wizard / settings UI / feature list all use this one
   // entry; the active driver disambiguates at runtime.
   { "input",
-#if ENABLE_ANO_ENCODER
+#if ENABLE_GPIO_ENCODER
+    "GPIO Rotary Encoder",
+#elif ENABLE_ANO_ENCODER
     "ANO Encoder",
 #else
     "Gamepad",
@@ -376,7 +378,9 @@ static constexpr FeatureEntry featureRegistry[] = {
     FEATURE_CAT_SENSOR, 2,
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.inputAutoStart, isInputCompiled,
-#if ENABLE_ANO_ENCODER
+#if ENABLE_GPIO_ENCODER
+    "GPIO quadrature wheel and click gestures for navigation"
+#elif ENABLE_ANO_ENCODER
     "ANO rotary encoder + 5-button D-pad for navigation"
 #else
     "Seesaw gamepad for navigation"
@@ -565,15 +569,13 @@ static constexpr FeatureEntry featureRegistry[] = {
     nullptr, isMapsCompiled,
     "Offline map tiles, waypoints, and the OLED Maps mode" },
 
-  // Games cost ~0 internal heap: both games are raw string literals streamed
+  // A Dark Room costs ~0 internal heap: its raw string literals are streamed
   // straight out of .rodata by static httpd handlers, with no task, timer or
-  // device-side state (the maze polls /api/sensors from browser JS; A Dark
-  // Room saves to browser localStorage). The real cost is flash — ~0.7-1 MB,
-  // which is why BuildConfig #errors if both games are enabled at once.
+  // device-side state. Saves live in browser localStorage; the cost is flash.
   { "games", "Games", FEATURE_CAT_SYSTEM, 0,
     FEATURE_FLAG_COMPILE_TIME,
     nullptr, isGamesCompiled,
-    "Browser games at /games (tilt maze or A Dark Room)" },
+    "A Dark Room browser game at /games" },
 };
 
 static const size_t featureRegistryCount = sizeof(featureRegistry) / sizeof(featureRegistry[0]);

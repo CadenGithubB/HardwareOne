@@ -1,0 +1,3251 @@
+--- a/components/hardwareone/CMakeLists.txt
++++ b/components/hardwareone/CMakeLists.txt
+@@ -205,12 +205,14 @@
+ 
+ # Coarse OLED gate: skip every OLED_*.cpp (except OLED_Utils.cpp, which
+ # carries the !ENABLE_OLED_DISPLAY stub implementations) when the user
+-# has no display hardware OR has disabled the I2C bus entirely. The
++# has no display hardware, or selects an I2C display with I2C disabled.
++# The P4X-EYE SPI backend remains available without an I2C bus. The
+ # per-feature .cpp guards (`#if ENABLE_OLED_DISPLAY && ...`) still apply
+ # inside each file when the bus + display are present but a sub-feature
+ # (ESPNOW, ESP_SR, BONDED_MODE) is off.
+ set(HW_CFG_BUILD_OLED_MODES 0)
+-if(HW_CFG_DISPLAY_TYPE GREATER 0 AND HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
++if(HW_CFG_DISPLAY_TYPE EQUAL 4 OR
++   (HW_CFG_DISPLAY_TYPE GREATER 0 AND HW_CFG_I2C_FEATURE_LEVEL GREATER 0))
+     set(HW_CFG_BUILD_OLED_MODES 1)
+ endif()
+ 
+@@ -285,6 +287,7 @@
+         System_Icons.cpp
+         HAL_Input.cpp
+         HAL_Display.cpp
++        HAL_SDCard.cpp
+         System_Mutex.cpp
+         System_Power.cpp
+         System_NeoPixel.cpp
+@@ -440,6 +443,14 @@
+     message(STATUS "I2C sensors EXCLUDED (I2C_FEATURE_LEVEL=0)")
+ endif()
+ 
++# GPIO input and SPI display are independent of the optional I2C bus.
++if(HW_CFG_INPUT_DEVICE_TYPE EQUAL 3)
++    list(APPEND hardwareone_srcs Input_GPIOEncoder.cpp)
++endif()
++if(HW_CFG_DISPLAY_TYPE EQUAL 4)
++    list(APPEND hardwareone_srcs HAL_Display_P4Eye.cpp)
++endif()
++
+ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
+     list(APPEND hardwareone_srcs
+         OLED_Settings.cpp
+@@ -485,7 +496,7 @@
+     endif()
+     message(STATUS "OLED display modes INCLUDED (DISPLAY_TYPE=${HW_CFG_DISPLAY_TYPE})")
+ else()
+-    message(STATUS "OLED display modes EXCLUDED (DISPLAY_TYPE=0 or I2C_FEATURE_LEVEL=0)")
++    message(STATUS "Local display modes EXCLUDED by display/bus selection")
+ endif()
+ 
+ set(hardwareone_requires
+@@ -502,9 +513,14 @@
+         esp_wifi
+         fatfs
+         sdmmc
++        esp_driver_sdmmc
+         esp_driver_sdspi
+         espressif__libsodium
+ )
++
++if(HW_CFG_DISPLAY_TYPE EQUAL 4)
++    list(APPEND hardwareone_requires esp_lcd esp_driver_spi esp_driver_ledc)
++endif()
+ 
+ if(HW_CFG_ENABLE_MQTT GREATER 0)
+     list(APPEND hardwareone_srcs
+--- a/components/hardwareone/HAL_Display.cpp
++++ b/components/hardwareone/HAL_Display.cpp
+@@ -29,7 +29,11 @@
+  */
+ bool displayInit() {
+   if (gDisplay) {
++#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++    return gDisplay->begin(); // Reopen hardware on the retained software canvas.
++#else
+     return true;  // Already initialized
++#endif
+   }
+   
+ #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+@@ -92,6 +96,16 @@
+   displayUpdate();
+   return true;
+   
++#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++  gDisplay = new P4EyeDisplay();
++  if (!gDisplay) return false;
++  if (!gDisplay->begin()) {
++    // Keep the canvas stable for legacy UI pointers. A retry calls begin()
++    // again; the driver releases failed hardware allocations itself.
++    return false;
++  }
++  return true;
++
+ #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789
+   // ============================================================================
+   // SPI TFT (ST7789) Initialization
+@@ -151,7 +165,7 @@
+ void displayClear() {
+   if (!gDisplay) return;
+   
+-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 || DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+   gDisplay->clearDisplay();
+ #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
+   gDisplay->fillScreen(DISPLAY_COLOR_BLACK);
+@@ -181,6 +195,8 @@
+   i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, gDisplayI2cAddress, 400000, 15, [&]() {
+     gDisplay->display();  // Push framebuffer to OLED (~20ms at 400kHz)
+   });
++#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++  gDisplay->display();
+ #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
+   // No-op for TFT (direct rendering)
+ #endif
+@@ -194,7 +210,7 @@
+ void displayDim(bool dim) {
+   if (!gDisplay) return;
+   
+-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 || DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+   gDisplay->dim(dim);
+   
+ #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
+@@ -219,6 +235,8 @@
+   gDisplay->ssd1306_command(0x81);  // Set Contrast Control
+   gDisplay->ssd1306_command(level);
+   
++#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++  gDisplay->setBrightness(level);
+ #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
+   // TFT brightness via backlight PWM
+   #if DISPLAY_BL_PIN >= 0
+--- a/components/hardwareone/HAL_Display.h
++++ b/components/hardwareone/HAL_Display.h
+@@ -8,6 +8,7 @@
+  * Currently supported:
+  *   - DISPLAY_TYPE_SSD1306: 128x64 monochrome OLED (I2C)
+  *   - DISPLAY_TYPE_ST7789: 240x320 color IPS TFT (SPI) - Adafruit 2.0" EYESPI
++ *   - DISPLAY_TYPE_ST7789_P4_EYE: onboard 240x240 ST7789, existing 128x64 UI
+  * 
+  * Future support planned:
+  *   - DISPLAY_TYPE_ILI9341: 320x240 color TFT (SPI)
+@@ -58,6 +59,26 @@
+   #define DISPLAY_COLOR_INVERSE SSD1306_INVERSE
+   
+   // Default foreground/background for themes
++  #define DISPLAY_FG            SSD1306_WHITE
++  #define DISPLAY_BG            SSD1306_BLACK
++
++#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++  #include "HAL_Display_P4Eye.h"
++  #define DISPLAY_ENABLED       1
++  // Logical canvas matches every existing OLED mode and raw-buffer consumer.
++  // The driver scales this 128x64 surface to 240x120, centered on the panel.
++  #define DISPLAY_WIDTH         128
++  #define DISPLAY_HEIGHT        64
++  #define DISPLAY_PANEL_WIDTH   240
++  #define DISPLAY_PANEL_HEIGHT  240
++  #define DISPLAY_COLOR_DEPTH   1
++  #define DISPLAY_IS_COLOR      0
++  #define DISPLAY_INTERFACE     "spi"
++  #define DISPLAY_NAME          "P4-EYE ST7789"
++  typedef P4EyeDisplay DisplayDriver;
++  #define DISPLAY_COLOR_BLACK   SSD1306_BLACK
++  #define DISPLAY_COLOR_WHITE   SSD1306_WHITE
++  #define DISPLAY_COLOR_INVERSE SSD1306_INVERSE
+   #define DISPLAY_FG            SSD1306_WHITE
+   #define DISPLAY_BG            SSD1306_BLACK
+ 
+--- /dev/null
++++ b/components/hardwareone/HAL_Display_P4Eye.cpp
+@@ -0,0 +1,265 @@
++#include "HAL_Display_P4Eye.h"
++
++#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++#include "System_Board_P4X_EYE.h"
++#include "HAL_Display_P4EyePixels.h"
++#include "driver/spi_master.h"
++#include "driver/rtc_io.h"
++#include "esp_heap_caps.h"
++#include "esp_lcd_panel_vendor.h"
++#include "esp_log.h"
++#include <System_MemUtil.h>
++
++namespace {
++constexpr char kTag[] = "P4EyeDisplay";
++constexpr spi_host_device_t kHost = SPI2_HOST;
++// Conservative clock also works with early P4 silicon/IDF clock-source errata.
++constexpr int kClockHz = 20 * 1000 * 1000;
++constexpr size_t kStripBytes = p4eye_display::kWidth *
++                               p4eye_display::kStripRows * sizeof(uint16_t);
++}
++
++P4EyeDisplay::P4EyeDisplay()
++    : Adafruit_SSD1306(128, 64, static_cast<TwoWire*>(nullptr), -1) {
++  lock_ = xSemaphoreCreateMutex();
++}
++
++P4EyeDisplay::~P4EyeDisplay() {
++  // This private destructor is never used by runtime stop/restart. If lifetime
++  // management is changed later, freeing the callback's context before an
++  // outstanding DMA finishes would be unsafe, even after a transfer timeout.
++  if (transferPending_) {
++    xSemaphoreTake(transferred_, portMAX_DELAY);
++    transferPending_ = false;
++  }
++  release();
++  if (lock_) vSemaphoreDelete(lock_);
++}
++
++bool P4EyeDisplay::transferDone(esp_lcd_panel_io_handle_t,
++                               esp_lcd_panel_io_event_data_t*, void* context) {
++  auto* self = static_cast<P4EyeDisplay*>(context);
++  BaseType_t woke = pdFALSE;
++  xSemaphoreGiveFromISR(self->transferred_, &woke);
++  return woke == pdTRUE;
++}
++
++bool P4EyeDisplay::begin() {
++  // An initial low-memory failure is retryable without replacing the object.
++  if (!lock_) lock_ = xSemaphoreCreateMutex();
++  if (!lock_) return false;
++  xSemaphoreTake(lock_, portMAX_DELAY);
++  struct Unlock {
++    SemaphoreHandle_t lock;
++    ~Unlock() { xSemaphoreGive(lock); }
++  } unlock{lock_};
++  if (panel_ && ready_) {
++    if (!waitTransfer()) return false;
++    if (esp_lcd_panel_disp_on_off(panel_, true) != ESP_OK) return false;
++    powered_ = true;
++    applyBacklight();
++    return true;
++  }
++  // A failed init may retain a DMA buffer until completion is observed.
++  if (panel_) {
++    if (!waitTransfer()) return false;
++    release();
++  }
++  // buffer is owned/freed by the SSD1306 base. Do not call its begin(), which
++  // would issue real SSD1306 commands to a nonexistent OLED bus.
++  if (!buffer) buffer = static_cast<uint8_t*>(ps_calloc(
++      128 * 64 / 8, 1, AllocPolicy::PreferInternal, "display.p4eye.canvas"));
++  // The transfer stripe must be DMA-capable; the generic project allocator
++  // has no DMA policy. Keep this explicitly constrained allocation internal.
++  strip_ = static_cast<uint16_t*>(heap_caps_malloc(
++      kStripBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
++  transferred_ = xSemaphoreCreateBinary();
++  if (!buffer || !strip_ || !transferred_) {
++    ESP_LOGE(kTag, "Display buffers/semaphores unavailable");
++    release();
++    return false;
++  }
++
++  // GPIO12 powers both LCD and camera. Release any retained RTC hold from a
++  // previous sleep, assert the rail, and leave it asserted during panel stop.
++  rtc_gpio_hold_dis(static_cast<gpio_num_t>(EYE_LCD_EN));
++  rtc_gpio_deinit(static_cast<gpio_num_t>(EYE_LCD_EN));
++  pinMode(EYE_LCD_EN, OUTPUT);
++  digitalWrite(EYE_LCD_EN, HIGH);
++  pinMode(EYE_LCD_BL, OUTPUT);
++  digitalWrite(EYE_LCD_BL, EYE_LCD_BL_ACTIVE_LOW ? HIGH : LOW);
++  delay(20);
++
++  if (!ledcAttach(EYE_LCD_BL, 5000, 8)) {
++    ESP_LOGE(kTag, "Backlight PWM allocation failed");
++    release();
++    return false;
++  }
++  pwmAttached_ = true;
++  applyBacklight();
++
++  spi_bus_config_t bus = {};
++  bus.sclk_io_num = EYE_LCD_SCLK;
++  bus.mosi_io_num = EYE_LCD_MOSI;
++  bus.miso_io_num = -1;
++  bus.quadwp_io_num = -1;
++  bus.quadhd_io_num = -1;
++  bus.max_transfer_sz = kStripBytes;
++  esp_err_t err = spi_bus_initialize(kHost, &bus, SPI_DMA_CH_AUTO);
++  if (err == ESP_OK) ownsBus_ = true;
++
++  esp_lcd_panel_io_spi_config_t ioConfig = {};
++  ioConfig.cs_gpio_num = EYE_LCD_CS;
++  ioConfig.dc_gpio_num = EYE_LCD_DC;
++  ioConfig.spi_mode = 0;
++  ioConfig.pclk_hz = kClockHz;
++  ioConfig.trans_queue_depth = 1;
++  ioConfig.on_color_trans_done = transferDone;
++  ioConfig.user_ctx = this;
++  ioConfig.lcd_cmd_bits = 8;
++  ioConfig.lcd_param_bits = 8;
++  if (err == ESP_OK) {
++    err = esp_lcd_new_panel_io_spi(static_cast<esp_lcd_spi_bus_handle_t>(kHost),
++                                   &ioConfig, &io_);
++  }
++  esp_lcd_panel_dev_config_t panelConfig = {};
++  panelConfig.reset_gpio_num = EYE_LCD_RST;
++  panelConfig.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
++  panelConfig.bits_per_pixel = 16;
++  if (err == ESP_OK) err = esp_lcd_new_panel_st7789(io_, &panelConfig, &panel_);
++  if (err == ESP_OK) err = esp_lcd_panel_reset(panel_);
++  if (err == ESP_OK) err = esp_lcd_panel_init(panel_);
++  if (err == ESP_OK) err = esp_lcd_panel_invert_color(panel_, true);
++  if (err == ESP_OK) err = esp_lcd_panel_swap_xy(panel_, false);
++  if (err == ESP_OK) err = esp_lcd_panel_mirror(panel_, false, false);
++  if (err == ESP_OK) {
++    clearDisplay();
++    // Initialize the entire controller RAM including the black letterbox.
++    for (int y = 0; y < p4eye_display::kHeight; y += p4eye_display::kStripRows) {
++      p4eye_display::rasterize(buffer, strip_, y, p4eye_display::kStripRows, false);
++      if (!sendStrip(y, p4eye_display::kStripRows)) { err = ESP_FAIL; break; }
++    }
++  }
++  if (err == ESP_OK) err = esp_lcd_panel_disp_on_off(panel_, true);
++  if (err != ESP_OK) {
++    ESP_LOGE(kTag, "ST7789 initialization failed: %s", esp_err_to_name(err));
++    release();
++    return false;
++  }
++  powered_ = true;
++  ready_ = true;
++  applyBacklight();
++  return true;
++}
++
++bool P4EyeDisplay::sendStrip(int y, int rows) {
++  transferPending_ = true;
++  const esp_err_t err = esp_lcd_panel_draw_bitmap(panel_, 0, y,
++      p4eye_display::kWidth, y + rows, strip_);
++  if (err != ESP_OK) {
++    transferPending_ = false;
++    ESP_LOGE(kTag, "LCD transfer failed: %s", esp_err_to_name(err));
++    return false;
++  }
++  // esp_lcd submits DMA asynchronously. Do not change or free strip_ until the
++  // color completion callback fires, including on the final strip of a frame.
++  return waitTransfer();
++}
++
++bool P4EyeDisplay::waitTransfer() {
++  if (!transferPending_) return true;
++  if (xSemaphoreTake(transferred_, pdMS_TO_TICKS(1000)) != pdTRUE) {
++    // Keep the DMA allocation and transport alive after timeout. A later
++    // frame/restart/stop retries completion before reusing or freeing them.
++    ESP_LOGE(kTag, "LCD DMA completion timed out");
++    return false;
++  }
++  transferPending_ = false;
++  return true;
++}
++
++void P4EyeDisplay::display() {
++  if (!lock_) return;
++  xSemaphoreTake(lock_, portMAX_DELAY);
++  if (!panel_ || !powered_ || !waitTransfer()) {
++    xSemaphoreGive(lock_);
++    return;
++  }
++  for (int y = p4eye_display::kImageTop;
++       y < p4eye_display::kImageTop + p4eye_display::kImageHeight;
++       y += p4eye_display::kStripRows) {
++    p4eye_display::rasterize(buffer, strip_, y, p4eye_display::kStripRows, inverted_);
++    if (!sendStrip(y, p4eye_display::kStripRows)) break;
++  }
++  xSemaphoreGive(lock_);
++}
++
++void P4EyeDisplay::applyBacklight() {
++  if (!pwmAttached_) return;
++  const uint8_t level = powered_ ? brightness_ : 0;
++  ledcWrite(EYE_LCD_BL, EYE_LCD_BL_ACTIVE_LOW ? 255 - level : level);
++}
++
++void P4EyeDisplay::setBrightness(uint8_t level) {
++  if (!lock_) return;
++  xSemaphoreTake(lock_, portMAX_DELAY);
++  brightness_ = level;
++  applyBacklight();
++  xSemaphoreGive(lock_);
++}
++
++void P4EyeDisplay::dim(bool dimmed) { setBrightness(dimmed ? 64 : 255); }
++
++void P4EyeDisplay::setPower(bool on) {
++  if (!lock_) return;
++  xSemaphoreTake(lock_, portMAX_DELAY);
++  if (!panel_) { xSemaphoreGive(lock_); return; }
++  if (!on) { powered_ = false; applyBacklight(); }
++  if (waitTransfer() && esp_lcd_panel_disp_on_off(panel_, on) == ESP_OK) powered_ = on;
++  applyBacklight();
++  xSemaphoreGive(lock_);
++}
++
++void P4EyeDisplay::invertDisplay(bool inverted) {
++  if (!lock_) return;
++  xSemaphoreTake(lock_, portMAX_DELAY);
++  inverted_ = inverted;
++  xSemaphoreGive(lock_);
++}
++
++void P4EyeDisplay::ssd1306_command(uint8_t command) {
++  // Compatibility for legacy local-display callers. These commands are
++  // interpreted locally and never sent to either an I2C bus or the ST7789.
++  if (contrastPending_) { contrastPending_ = false; setBrightness(command); }
++  else if (command == SSD1306_SETCONTRAST) contrastPending_ = true;
++  else if (command == SSD1306_DISPLAYOFF) setPower(false);
++  else if (command == SSD1306_DISPLAYON) setPower(true);
++  else if (command == SSD1306_INVERTDISPLAY) invertDisplay(true);
++  else if (command == SSD1306_NORMALDISPLAY) invertDisplay(false);
++}
++
++void P4EyeDisplay::release() {
++  ready_ = false;
++  powered_ = false;
++  applyBacklight();
++  if (!waitTransfer()) return;
++  if (panel_) { esp_lcd_panel_del(panel_); panel_ = nullptr; }
++  if (io_) { esp_lcd_panel_io_del(io_); io_ = nullptr; }
++  if (ownsBus_) { spi_bus_free(kHost); ownsBus_ = false; }
++  if (pwmAttached_) {
++    ledcDetach(EYE_LCD_BL);
++    pinMode(EYE_LCD_BL, OUTPUT);
++    digitalWrite(EYE_LCD_BL, EYE_LCD_BL_ACTIVE_LOW ? HIGH : LOW);
++    pwmAttached_ = false;
++  }
++  if (transferred_) { vSemaphoreDelete(transferred_); transferred_ = nullptr; }
++  if (strip_) { heap_caps_free(strip_); strip_ = nullptr; }
++}
++
++void P4EyeDisplay::end() {
++  if (!lock_) return;
++  xSemaphoreTake(lock_, portMAX_DELAY);
++  release();
++  xSemaphoreGive(lock_);
++}
++#endif
+--- /dev/null
++++ b/components/hardwareone/HAL_Display_P4Eye.h
+@@ -0,0 +1,52 @@
++#pragma once
++
++#include "System_BuildConfig.h"
++
++#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++#include <Adafruit_SSD1306.h>
++#include "esp_lcd_panel_io.h"
++#include "esp_lcd_panel_ops.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/semphr.h"
++
++// Keep the established 128x64, page-packed UI surface, including getBuffer()
++// consumers and Adafruit_SSD1306* drawing helpers. The base is used ONLY as a
++// software canvas: its begin/display/command methods must never reach I2C.
++// Panel transport and all resources belong to this concrete driver.
++class P4EyeDisplay : public Adafruit_SSD1306 {
++ public:
++  P4EyeDisplay();
++  bool begin();
++  void end();
++  void display();
++  void dim(bool dimmed);
++  void setBrightness(uint8_t level);
++  void setPower(bool on);
++  void invertDisplay(bool inverted);
++  void ssd1306_command(uint8_t command);
++
++ private:
++  // The UI exposes the canvas to legacy drawing helpers on several tasks.
++  // Keep its lifetime stable; end() releases hardware but never the canvas.
++  ~P4EyeDisplay();
++  static bool transferDone(esp_lcd_panel_io_handle_t,
++                           esp_lcd_panel_io_event_data_t*, void* context);
++  bool sendStrip(int y, int rows);
++  bool waitTransfer();
++  void applyBacklight();
++  void release();
++  esp_lcd_panel_io_handle_t io_ = nullptr;
++  esp_lcd_panel_handle_t panel_ = nullptr;
++  SemaphoreHandle_t transferred_ = nullptr;
++  SemaphoreHandle_t lock_ = nullptr;
++  uint16_t* strip_ = nullptr;
++  bool ownsBus_ = false;
++  bool pwmAttached_ = false;
++  bool powered_ = false;
++  bool inverted_ = false;
++  bool contrastPending_ = false;
++  bool transferPending_ = false;
++  bool ready_ = false;
++  uint8_t brightness_ = 255;
++};
++#endif
+--- /dev/null
++++ b/components/hardwareone/HAL_Display_P4EyePixels.h
+@@ -0,0 +1,36 @@
++#pragma once
++#include <stdint.h>
++
++namespace p4eye_display {
++constexpr int kWidth = 240;
++constexpr int kHeight = 240;
++constexpr int kCanvasWidth = 128;
++constexpr int kCanvasHeight = 64;
++constexpr int kImageWidth = 192;   // 1.5x, retaining the monochrome OLED layout.
++constexpr int kImageHeight = 96;
++constexpr int kImageLeft = (kWidth - kImageWidth) / 2;
++constexpr int kImageTop = (kHeight - kImageHeight) / 2;
++constexpr int kStripRows = 8;
++
++// Nearest-neighbor scaling preserves aspect ratio without introducing gray.
++// The centered 1.5x image leaves black borders on all four sides. White and
++// black RGB565 are byte-order invariant; no SPI endian conversion is needed.
++inline void rasterize(const uint8_t* canvas, uint16_t* output,
++                      int startY, int rows, bool inverted) {
++  for (int row = 0; row < rows; ++row) {
++    const int y = startY + row - kImageTop;
++    for (int x = 0; x < kWidth; ++x) {
++      bool lit = false;
++      const int imageX = x - kImageLeft;
++      if (canvas && imageX >= 0 && imageX < kImageWidth && y >= 0 && y < kImageHeight) {
++        const int sourceY = y * kCanvasHeight / kImageHeight;
++        const int sourceX = imageX * kCanvasWidth / kImageWidth;
++        lit = ((canvas[(sourceY / 8) * kCanvasWidth + sourceX] >>
++                (sourceY & 7)) & 1) != 0;
++        lit = lit != inverted;
++      }
++      output[row * kWidth + x] = lit ? 0xffff : 0;
++    }
++  }
++}
++}
+--- a/components/hardwareone/HAL_Input.cpp
++++ b/components/hardwareone/HAL_Input.cpp
+@@ -13,7 +13,9 @@
+ #if ENABLE_OLED_INPUT
+ #include "System_Command.h"
+ #include "System_Settings.h"
++#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
+ #include "System_I2C.h"
++#endif
+ #include "System_Utils.h"
+ #endif
+ 
+@@ -31,7 +33,9 @@
+ // On a normal boot path that never fires, so IN/A/B/X/Y were dead from
+ // boot through every menu mode until the user manually restarted the OLED.
+ // Runtime inputSetControllerType() can still change this later.
+-#if INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
++#if INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
++static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
++#elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
+ static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_ANO_ENCODER;
+ #elif INPUT_TYPE == INPUT_TYPE_CLICK_WHEEL
+ static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_CLICK_WHEEL;
+@@ -69,6 +73,12 @@
+   (1 << 3),   // INPUT_BUTTON_Y - Special button
+   (1 << 4),   // INPUT_BUTTON_START - Start button
+   (1 << 5)    // INPUT_BUTTON_SELECT - Select button
++};
++
++// Direct GPIO wheel gestures use HAL logical bit positions. Double-click is the
++// SELECT/function action; auxiliary board keys supply X, Y and START.
++static const uint32_t gGpioEncoderMapping[] = {
++  1u, 2u, 4u, 8u, ENABLE_GPIO_ENCODER_BUTTONS ? 16u : 0u, 32u
+ };
+ 
+ // ANO rotary encoder button mappings. The 4 directional buttons are PURE
+@@ -117,6 +127,8 @@
+   gCurrentControllerType = INPUT_CONTROLLER_CLICK_WHEEL;
+ #elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
+   gCurrentControllerType = INPUT_CONTROLLER_ANO_ENCODER;
++#elif INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
++  gCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
+ #elif INPUT_TYPE == INPUT_TYPE_CUSTOM
+   gCurrentControllerType = INPUT_CONTROLLER_CUSTOM;
+ #else
+@@ -158,6 +170,9 @@
+ 
+     case INPUT_CONTROLLER_ANO_ENCODER:
+       return gAnoEncoderMapping[button];
++
++    case INPUT_CONTROLLER_GPIO_ENCODER:
++      return gGpioEncoderMapping[button];
+ 
+     case INPUT_CONTROLLER_CUSTOM:
+       return gCustomMapping[button];
+@@ -234,7 +249,46 @@
+ }
+ 
+ uint32_t inputGetButtonsLogical() {
++  // A stopped/missing device has no pressed buttons. Its raw accessor's zero
++  // sentinel must not be inverted into every logical button being pressed.
++  if (!gInputConnected || !gInputCache.dataValid) return 0;
+   return inputButtonsToLogical(inputGetButtonsRaw());
++}
++
++bool inputHasPendingDetents() {
++#if ENABLE_GPIO_ENCODER
++  return gpioEncoderHasPendingDetents();
++#elif ENABLE_ANO_ENCODER
++  return gAnoEncoderCache.encoderDelta != 0;
++#else
++  return false;
++#endif
++}
++
++int inputConsumeOneDetent() {
++#if ENABLE_GPIO_ENCODER
++  return gpioEncoderConsumeOneDetent();
++#elif ENABLE_ANO_ENCODER
++  return anoEncoderConsumeOneDetent();
++#else
++  return 0;
++#endif
++}
++
++uint32_t inputConsumeButtonPresses(uint32_t& previousActiveLow, bool& initialized) {
++  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(10)) != pdTRUE) return 0;
++  if (!gInputRunning || !gInputCache.dataValid) {
++    xSemaphoreGive(gInputCache.mutex);
++    return 0;
++  }
++  const uint32_t raw = gInputCache.buttons;
++  uint32_t pressed = gInputCache.buttonPressedAccum;
++  gInputCache.buttonPressedAccum = 0;
++  if (initialized) pressed |= ~raw & previousActiveLow;
++  previousActiveLow = raw;
++  initialized = true;
++  xSemaphoreGive(gInputCache.mutex);
++  return pressed;
+ }
+ 
+ #if ENABLE_OLED_INPUT
+@@ -245,6 +299,7 @@
+ // Driver-internal CLIs that dump raw device state stay in their own driver
+ // files (gamepadread, anoencoderread).
+ 
++#if !ENABLE_GPIO_ENCODER
+ static const char* inputDeviceLabel() {
+ #if ENABLE_ANO_ENCODER
+   return "ANO Encoder";
+@@ -256,9 +311,13 @@
+ // Defined in System_I2C.cpp — generic queued-start dispatcher.
+ extern const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName,
+                                           const bool& enabledFlag, const char* eventTag);
++#endif
+ 
+ static const char* cmd_openinput(const String& argsInput) {
+   RETURN_VALID_IF_VALIDATE_CSTR();
++#if ENABLE_GPIO_ENCODER
++  return inputStartInternal() ? "[Input] GPIO encoder started" : "Error: GPIO encoder start failed";
++#else
+   const char* result = cmd_sensorstart_queued(I2C_DEVICE_INPUT, inputDeviceLabel(),
+                                               gInputRunning, "openinput@enqueue");
+   // The device starts asynchronously and this command returns no button state —
+@@ -269,13 +328,19 @@
+   cliHint("to read live input, run 'gamepadread' once the device is up");
+ #endif
+   return result;
++#endif
+ }
+ 
+ static const char* cmd_closeinput(const String& argsInput) {
+   RETURN_VALID_IF_VALIDATE_CSTR();
+   INFO_INPUT_LIFECYCLEF("cmd_closeinput: Stop requested");
++#if ENABLE_GPIO_ENCODER
++  gpioEncoderStop();
++  return gInputRunning ? "Error: GPIO encoder is busy; retry closeinput" : "[Input] GPIO encoder stopped";
++#else
+   handleDeviceStopped(I2C_DEVICE_INPUT);
+   return "[Input] Stop requested; cleanup will complete asynchronously";
++#endif
+ }
+ 
+ static const char* cmd_inputautostart(const String& argsInput) {
+@@ -298,6 +363,9 @@
+ 
+ static const char* cmd_inputdevicepollms(const String& argsInput) {
+   RETURN_VALID_IF_VALIDATE_CSTR();
++#if ENABLE_GPIO_ENCODER
++  return "[Input] GPIO encoder uses interrupts and a fixed 5 ms switch sample; poll interval applies to I2C input only";
++#else
+   CommandArgs a(argsInput);
+   if (a.count() == 0) {
+     static char buf[48];
+@@ -308,15 +376,27 @@
+   if (ms < 10 || ms > 1000) return "Error: invalid arguments — Usage: inputdevicepollms <10-1000>";
+   setSetting(gSettings.inputDevicePollMs, ms);
+   return "[Input] Poll interval updated";
+-}
++#endif
++}
++
++#if ENABLE_GPIO_ENCODER
++static const char* cmd_gpioencoderread(const String& argsInput) {
++  RETURN_VALID_IF_VALIDATE_CSTR();
++  static char buf[256];
++  return gpioEncoderBuildDataJSON(buf, sizeof(buf)) > 0 ? buf : "Error: GPIO encoder snapshot unavailable";
++}
++#endif
+ 
+ // Command registry — registered unconditionally as the "input" module since
+ // it works under either driver.
+ const CommandEntry inputCommands[] = {
+-  { "openinput",         "Start the input device (gamepad or ANO encoder).", false, cmd_openinput },
++  { "openinput",         "Start the configured input device.",              false, cmd_openinput },
+   { "closeinput",        "Stop the input device.",                            false, cmd_closeinput },
+   { "inputautostart",    "Enable/disable input device auto-start [on|off]",   false, cmd_inputautostart,    "Usage: inputautostart [on|off]" },
+   { "inputdevicepollms", "Set input device poll interval ms [10-1000]",       true,  cmd_inputdevicepollms, "Usage: inputdevicepollms <10-1000>" },
++#if ENABLE_GPIO_ENCODER
++  { "gpioencoderread",   "Read GPIO wheel position, switch and pending input as JSON.", false, cmd_gpioencoderread },
++#endif
+ };
+ const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0]);
+ 
+@@ -326,7 +406,9 @@
+ static const SettingEntry inputSettingEntries[] = {
+   { "inputEnabled", SETTING_BOOL, &gSettings.inputEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "inputenabled" },
+   { "inputAutoStart",    SETTING_BOOL, &gSettings.inputAutoStart,     0, 0, nullptr, 0,  1,    "Auto-start after boot", nullptr, false, nullptr, "inputautostart" },
++#if !ENABLE_GPIO_ENCODER
+   { "inputDevicePollMs", SETTING_INT,  &gSettings.inputDevicePollMs, 90, 0, nullptr, 10, 1000, "Poll Interval (ms)",   nullptr, false, nullptr, "inputdevicepollms" },
++#endif
+ };
+ 
+ static bool isInputConnected() { return gInputConnected; }
+@@ -339,7 +421,7 @@
+   inputSettingEntries,
+   sizeof(inputSettingEntries) / sizeof(inputSettingEntries[0]),
+   isInputConnected,
+-  "OLED input device (Seesaw gamepad or ANO encoder)"
++  "Local display input device (Seesaw, ANO or GPIO encoder)"
+ };
+ 
+ #endif // ENABLE_OLED_INPUT
+--- a/components/hardwareone/HAL_Input.h
++++ b/components/hardwareone/HAL_Input.h
+@@ -26,12 +26,15 @@
+ #define INPUT_TYPE_CLICK_WHEEL     2
+ #define INPUT_TYPE_CUSTOM          3
+ #define INPUT_TYPE_ANO_ENCODER     4
++#define INPUT_TYPE_GPIO_ENCODER    5
+ 
+ // Default input type. BuildConfig owns the user-visible INPUT_DEVICE_TYPE
+ // flag; this internal INPUT_TYPE is derived from it so HAL code has a single
+ // constant to switch on regardless of which input device is built.
+ #ifndef INPUT_TYPE
+-  #if defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 2  /* INPUT_DEVICE_TYPE_ANO_ENCODER */
++  #if defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 3  /* INPUT_DEVICE_TYPE_GPIO_ENCODER */
++    #define INPUT_TYPE  INPUT_TYPE_GPIO_ENCODER
++  #elif defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 2  /* INPUT_DEVICE_TYPE_ANO_ENCODER */
+     #define INPUT_TYPE  INPUT_TYPE_ANO_ENCODER
+   #else
+     #define INPUT_TYPE  INPUT_TYPE_SEESAW_GAMEPAD
+@@ -45,7 +48,10 @@
+ // stack/HWM reports showing the actual driver in use instead of a misleading
+ // "gamepad_task" on ANO builds. FreeRTOS task name cap is
+ // CONFIG_FREERTOS_MAX_TASK_NAME_LEN (16) — both names fit.
+-#if INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
++#if INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
++  #define INPUT_TASK_NAME "encoder_task"
++  #define INPUT_TASK_TAG  "encoder"
++#elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
+   #define INPUT_TASK_NAME "ano_task"
+   #define INPUT_TASK_TAG  "ano"
+ #else
+@@ -62,6 +68,7 @@
+ 
+ #include "i2csensor_seesaw.h"
+ #include "i2csensor_ano_encoder.h"
++#include "Input_GPIOEncoder.h"
+ 
+ // =============================================================================
+ // Logical Button Identifiers (hardware-agnostic)
+@@ -85,7 +92,8 @@
+   INPUT_CONTROLLER_GAMEPAD_SEESAW,  // Adafruit Seesaw gamepad
+   INPUT_CONTROLLER_CLICK_WHEEL,     // Generic click wheel / rotary encoder
+   INPUT_CONTROLLER_CUSTOM,          // Custom controller mapping
+-  INPUT_CONTROLLER_ANO_ENCODER      // Adafruit ANO rotary encoder breakout
++  INPUT_CONTROLLER_ANO_ENCODER,     // Adafruit ANO rotary encoder breakout
++  INPUT_CONTROLLER_GPIO_ENCODER     // Direct GPIO quadrature + push switch
+ };
+ 
+ // =============================================================================
+@@ -118,6 +126,15 @@
+ // rotary state.
+ int       inputGetX();
+ int       inputGetY();
++
++// Shared rotary channel for any wheel backend. Joysticks return false/zero.
++bool      inputHasPendingDetents();
++int       inputConsumeOneDetent();
++
++// Blocking wizard readers use the same latched press edges as the main UI.
++// Caller owns its previous raw state. First read ignores a held raw switch but
++// preserves a completed click that arrived before the first wizard frame.
++uint32_t inputConsumeButtonPresses(uint32_t& previousActiveLow, bool& initialized);
+ 
+ // Raw cache buttons (active-LOW at the underlying device's native bit
+ // positions — gamepad chip bits or ANO_BTN_* bits depending on build).
+--- /dev/null
++++ b/components/hardwareone/HAL_SDCard.cpp
+@@ -0,0 +1,210 @@
++#include "HAL_SDCard.h"
++
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
++#if !HW_BOARD_P4X_EYE || !CONFIG_IDF_TARGET_ESP32P4
++#error "The SDMMC backend requires the ESP32-P4X-EYE board profile"
++#endif
++
++#include <Arduino.h>
++#include "vfs_api.h"
++#include "driver/gpio.h"
++#include "driver/sdmmc_defs.h"
++#include "driver/sdmmc_host.h"
++#include "esp_log.h"
++#include "esp_vfs_fat.h"
++#include "sd_pwr_ctrl_by_on_chip_ldo.h"
++#include "ff.h"
++#include "diskio_sdmmc.h"
++
++namespace {
++constexpr char kMountPoint[] = "/sd";
++constexpr char kTag[] = "SDMMC";
++static_assert(SD_MMC_SLOT == 0, "Slot 1 is reserved for ESP-Hosted on P4X-EYE");
++}
++
++SdMmcCardFS gSdMmcCard;
++
++SdMmcCardFS::SdMmcCardFS() : FS(fs::FSImplPtr(new VFSImpl())) {}
++
++bool SdMmcCardFS::configurePower() {
++  gpio_config_t pins = {};
++  pins.pin_bit_mask = 1ULL << SD_MMC_POWER_PIN;
++  pins.mode = GPIO_MODE_OUTPUT;
++  // Preload the off level before enabling the output to avoid a power glitch.
++  error_ = gpio_set_level(static_cast<gpio_num_t>(SD_MMC_POWER_PIN),
++                         !SD_MMC_POWER_ACTIVE_LEVEL);
++  if (error_ != ESP_OK) return false;
++  error_ = gpio_config(&pins);
++  if (error_ != ESP_OK) return false;
++  pinsConfigured_ = true;
++
++  pins = {};
++  pins.pin_bit_mask = 1ULL << SD_MMC_DETECT_PIN;
++  pins.mode = GPIO_MODE_INPUT;
++  pins.pull_up_en = GPIO_PULLUP_ENABLE;
++  error_ = gpio_config(&pins);
++  if (error_ != ESP_OK) return false;
++
++  sd_pwr_ctrl_ldo_config_t ldo = {};
++  ldo.ldo_chan_id = SD_MMC_LDO_CHANNEL;
++  error_ = sd_pwr_ctrl_new_on_chip_ldo(&ldo, &power_);
++  if (error_ != ESP_OK) return false;
++  delay(20);
++  error_ = gpio_set_level(static_cast<gpio_num_t>(SD_MMC_POWER_PIN),
++                         SD_MMC_POWER_ACTIVE_LEVEL);
++  if (error_ != ESP_OK) return false;
++  delay(20);
++  return true;
++}
++
++void SdMmcCardFS::releasePower() {
++  if (pinsConfigured_) {
++    gpio_set_level(static_cast<gpio_num_t>(SD_MMC_POWER_PIN),
++                   !SD_MMC_POWER_ACTIVE_LEVEL);
++  }
++  if (power_) {
++    sd_pwr_ctrl_del_on_chip_ldo(power_);
++    power_ = nullptr;
++  }
++}
++
++bool SdMmcCardFS::cardPresent() const {
++  return pinsConfigured_ &&
++      gpio_get_level(static_cast<gpio_num_t>(SD_MMC_DETECT_PIN)) == 0;
++}
++
++bool SdMmcCardFS::available() {
++  if (card_ && !cardPresent()) removed_ = true;
++  return card_ && !removed_;
++}
++
++bool SdMmcCardFS::begin() {
++  return mount(false);
++}
++
++bool SdMmcCardFS::mount(bool allowFormat) {
++  if (card_) return available();
++  error_ = ESP_OK;
++  removed_ = false;
++  if (!configurePower()) {
++    ESP_LOGW(kTag, "Card power setup failed: %s", lastError());
++    releasePower();
++    return false;
++  }
++  if (!cardPresent()) {
++    error_ = ESP_ERR_NOT_FOUND;
++    ESP_LOGI(kTag, "No card inserted");
++    releasePower();
++    return false;
++  }
++
++  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
++  host.slot = SD_MMC_SLOT;
++  host.max_freq_khz = SD_MMC_MAX_FREQ_KHZ;
++  host.flags = SDMMC_HOST_FLAG_4BIT | SDMMC_HOST_FLAG_1BIT |
++               SDMMC_HOST_FLAG_DEINIT_ARG;
++  // Never call sdmmc_host_deinit(): that would tear down the C6's slot too.
++  // FatFs also invokes this callback on a failed card/FAT mount.
++  host.deinit_p = sdmmc_host_deinit_slot;
++  host.pwr_ctrl_handle = power_;
++
++  sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
++  slot.clk = static_cast<gpio_num_t>(SD_MMC_CLK_PIN);
++  slot.cmd = static_cast<gpio_num_t>(SD_MMC_CMD_PIN);
++  slot.d0 = static_cast<gpio_num_t>(SD_MMC_D0_PIN);
++  slot.d1 = static_cast<gpio_num_t>(SD_MMC_D1_PIN);
++  slot.d2 = static_cast<gpio_num_t>(SD_MMC_D2_PIN);
++  slot.d3 = static_cast<gpio_num_t>(SD_MMC_D3_PIN);
++  slot.d4 = slot.d5 = slot.d6 = slot.d7 = GPIO_NUM_NC;
++  slot.cd = static_cast<gpio_num_t>(SD_MMC_DETECT_PIN);
++  slot.wp = SDMMC_SLOT_NO_WP;
++  slot.width = 4;
++  slot.flags = 0;  // board has external bus pull-ups; stay at 3.3 V SDR
++
++  esp_vfs_fat_sdmmc_mount_config_t config = {};
++  config.format_if_mount_failed = allowFormat;
++  config.max_files = 10;
++  config.allocation_unit_size = 16 * 1024;
++  config.disk_status_check_enable = true;
++  error_ = esp_vfs_fat_sdmmc_mount(kMountPoint, &host, &slot, &config, &card_);
++  if (error_ != ESP_OK) {
++    card_ = nullptr;
++    ESP_LOGW(kTag, "Mount failed: %s (automatic format %s)",
++             lastError(), allowFormat ? "explicitly requested" : "disabled");
++    releasePower();
++    return false;
++  }
++  _impl->mountpoint(kMountPoint);
++  ESP_LOGI(kTag, "Mounted SDMMC slot %d, 4-bit, max %d kHz",
++           SD_MMC_SLOT, SD_MMC_MAX_FREQ_KHZ);
++  return true;
++}
++
++bool SdMmcCardFS::end() {
++  bool ok = true;
++  if (card_) {
++    error_ = esp_vfs_fat_sdcard_unmount(kMountPoint, card_);
++    ok = error_ == ESP_OK;
++    // IDF consumes the card before unregistering the VFS path. Even if that
++    // final unregister reports an error, this pointer must never be reused.
++    card_ = nullptr;
++    _impl->mountpoint(nullptr);
++  }
++  removed_ = false;
++  releasePower();
++  return ok;
++}
++
++bool SdMmcCardFS::format() {
++  if (!end() || !mount(true)) return false;
++  // mount(true) repairs an unformatted card; this explicit operation must
++  // also erase an already valid volume. Normal begin() never reaches here.
++  // Own the FatFs transition ourselves: IDF 5.5's sdcard_format helper can
++  // free its card on remount failure without clearing its saved VFS context.
++  // It also chooses FM_ANY, whereas this command promises FAT32.
++  const BYTE drive = ff_diskio_get_pdrv_card(card_);
++  char driveName[] = {static_cast<char>('0' + drive), ':', '\0'};
++  FATFS* volume = nullptr;
++  DWORD freeClusters = 0;
++  if (drive == 0xff || f_getfree(driveName, &freeClusters, &volume) != FR_OK ||
++      f_mount(nullptr, driveName, 0) != FR_OK) {
++    end();
++    error_ = ESP_FAIL;
++    return false;
++  }
++  // SD cards expose 512-byte logical sectors. One sector is the documented
++  // minimum f_mkfs workspace; keep the command-task stack bounded.
++  BYTE work[512];
++  const MKFS_PARM options = {FM_FAT32, 2, 0, 0, 16 * 1024};
++  const FRESULT formatted = f_mkfs(driveName, &options, work, sizeof(work));
++  const FRESULT remounted = f_mount(volume, driveName, 1);
++  if (formatted != FR_OK || remounted != FR_OK) {
++    end();
++    error_ = ESP_FAIL;
++    return false;
++  }
++  error_ = ESP_OK;
++  return true;
++}
++
++uint8_t SdMmcCardFS::cardType() const {
++  if (!card_) return CARD_NONE;
++  return (card_->ocr & SD_OCR_SDHC_CAP) ? CARD_SDHC : CARD_SD;
++}
++
++uint64_t SdMmcCardFS::totalBytes() const {
++  uint64_t total = 0, free = 0;
++  if (!card_ || esp_vfs_fat_info(kMountPoint, &total, &free) != ESP_OK) return 0;
++  return total;
++}
++
++uint64_t SdMmcCardFS::usedBytes() const {
++  uint64_t total = 0, free = 0;
++  if (!card_ || esp_vfs_fat_info(kMountPoint, &total, &free) != ESP_OK) return 0;
++  return total >= free ? total - free : 0;
++}
++
++const char* SdMmcCardFS::lastError() const {
++  return esp_err_to_name(error_);
++}
++#endif
+--- /dev/null
++++ b/components/hardwareone/HAL_SDCard.h
+@@ -0,0 +1,40 @@
++#pragma once
++
++#include "System_BuildConfig.h"
++
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
++#include <FS.h>
++#include <sd_defines.h>
++#include "sdmmc_cmd.h"
++#include "sd_pwr_ctrl.h"
++
++// The SDMMC transport belongs to VFS. Callers use VFS::*Guarded, just as they
++// do for the SPI card. All methods below require the VFS filesystem lock.
++// Keeping this separate from Arduino SD_MMC lets slot 0 coexist with the
++// ESP-Hosted C6 on slot 1 without relying on Arduino variant-global settings.
++class SdMmcCardFS final : public fs::FS {
++ public:
++  SdMmcCardFS();
++  bool begin();                     // mount existing FAT; never auto-format
++  bool end();                       // release slot, then card power / LDO
++  bool format();                    // destructive, explicit VFS command only
++  bool available();                // latches removal until an explicit remount
++  bool cardPresent() const;
++  uint8_t cardType() const;
++  uint64_t totalBytes() const;
++  uint64_t usedBytes() const;
++  const char* lastError() const;
++
++ private:
++  bool mount(bool allowFormat);
++  bool configurePower();
++  void releasePower();
++  sdmmc_card_t* card_ = nullptr;
++  sd_pwr_ctrl_handle_t power_ = nullptr;
++  esp_err_t error_ = ESP_OK;
++  bool pinsConfigured_ = false;
++  bool removed_ = false;
++};
++
++extern SdMmcCardFS gSdMmcCard;
++#endif
+--- a/components/hardwareone/HardwareOne.cpp
++++ b/components/hardwareone/HardwareOne.cpp
+@@ -1754,7 +1754,7 @@
+     broadcastOutput("  [N] PRESENCE | Disabled (~4-6KB flash, ~2KB RAM saved)");
+ #endif
+ #if ENABLE_OLED_DISPLAY
+-    broadcastOutput("  [Y] OLED     | SSD1306 128x64 display enabled");
++    broadcastOutput("  [Y] DISPLAY  | " DISPLAY_NAME " enabled");
+ #else
+     broadcastOutput("  [N] OLED     | Disabled (~8-12KB flash, ~5KB RAM saved)");
+ #endif
+@@ -2080,6 +2080,13 @@
+   oledSetBootProgress(87, "Starting sensors");
+ #if ENABLE_I2C_SYSTEM
+   processAutoStartSensors();
++#endif
++#if ENABLE_GPIO_ENCODER
++  // GPIO input has no I2C start queue. Preserve the shared enable/autostart
++  // policy and RAM-flush resume decision used by the other input backends.
++  if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
++    inputStartInternal();
++  }
+ #endif
+ 
+ #if ENABLE_CAMERA_SENSOR
+--- /dev/null
++++ b/components/hardwareone/Input_ButtonCore.h
+@@ -0,0 +1,33 @@
++#pragma once
++
++#include <stdint.h>
++
++// A momentary GPIO button with independent debounce state. The input task uses
++// the held level for the shared cache and latches only new press edges for UI
++// consumers, so a short press survives a slower display update.
++namespace gpioinput {
++class Button {
++ public:
++  static constexpr uint32_t DebounceMs = 20;
++
++  void reset(bool pressed, uint32_t now) {
++    raw_ = stable_ = pressed;
++    rawSince_ = now;
++    suppress_ = pressed;  // Opening input while held must not trigger an action.
++  }
++
++  bool update(bool pressed, uint32_t now) {
++    if (pressed != raw_) { raw_ = pressed; rawSince_ = now; }
++    if (stable_ == raw_ || uint32_t(now - rawSince_) < DebounceMs) return false;
++    stable_ = raw_;
++    if (!stable_) suppress_ = false;
++    return stable_ && !suppress_;
++  }
++
++  bool pressed() const { return stable_ && !suppress_; }
++
++ private:
++  bool raw_ = false, stable_ = false, suppress_ = false;
++  uint32_t rawSince_ = 0;
++};
++}  // namespace gpioinput
+--- /dev/null
++++ b/components/hardwareone/Input_GPIOEncoder.cpp
+@@ -0,0 +1,241 @@
++#include "Input_GPIOEncoder.h"
++
++#if ENABLE_GPIO_ENCODER
++#include "HAL_Input.h"
++#include "Input_RotaryCore.h"
++#if ENABLE_GPIO_ENCODER_BUTTONS
++#include "Input_ButtonCore.h"
++#endif
++#include "System_Debug.h"
++#include "System_TaskUtils.h"
++#include <driver/gpio.h>
++#include <limits.h>
++
++#ifndef GPIO_ENCODER_STEPS_PER_DETENT
++#define GPIO_ENCODER_STEPS_PER_DETENT 4
++#endif
++#ifndef GPIO_ENCODER_INVERT
++#define GPIO_ENCODER_INVERT 0
++#endif
++#ifndef GPIO_ENCODER_BUTTON_ACTIVE_LOW
++#define GPIO_ENCODER_BUTTON_ACTIVE_LOW 1
++#endif
++static_assert(GPIO_ENCODER_STEPS_PER_DETENT >= 1 && GPIO_ENCODER_STEPS_PER_DETENT <= 4,
++              "GPIO encoder requires 1..4 phase edges per detent");
++static_assert(GPIO_ENCODER_PIN_A != GPIO_ENCODER_PIN_B &&
++              GPIO_ENCODER_PIN_A != GPIO_ENCODER_PIN_BUTTON &&
++              GPIO_ENCODER_PIN_B != GPIO_ENCODER_PIN_BUTTON, "GPIO encoder pins must be distinct");
++
++bool gInputRunning = false;
++bool gInputConnected = false;
++InputCache gInputCache;
++
++static portMUX_TYPE sEncoderMux = portMUX_INITIALIZER_UNLOCKED;
++static rotary::Quadrature sDecoder;
++static rotary::Gestures sGestures;
++static int sCapturedDetents = 0;  // ISR writes, task drains under sEncoderMux.
++static int sPendingDetents = 0;   // UI consumes under cache mutex.
++static int32_t sPosition = 0;
++extern TaskHandle_t gInputTaskHandle;  // Shared slot used by task/memory monitors.
++static constexpr int kPendingLimit = 1024;
++static constexpr uint32_t kSampleMs = 5;
++
++#if ENABLE_GPIO_ENCODER_BUTTONS
++struct AuxiliaryButtonConfig {
++  int pin;
++  bool activeLow;
++  uint32_t action;
++};
++static constexpr AuxiliaryButtonConfig kAuxButtons[] = GPIO_ENCODER_AUX_BUTTONS;
++static constexpr size_t kAuxButtonCount = sizeof(kAuxButtons) / sizeof(kAuxButtons[0]);
++static gpioinput::Button sAuxButtons[kAuxButtonCount];
++static uint32_t sAuxPressedActions = 0;
++
++static bool auxiliaryPressed(size_t index) {
++  return digitalRead(kAuxButtons[index].pin) == (kAuxButtons[index].activeLow ? LOW : HIGH);
++}
++
++static bool auxiliaryPinsValid() {
++  for (size_t i = 0; i < kAuxButtonCount; ++i) {
++    const int pin = kAuxButtons[i].pin;
++    if (!GPIO_IS_VALID_GPIO(pin) || pin == GPIO_ENCODER_PIN_A ||
++        pin == GPIO_ENCODER_PIN_B || pin == GPIO_ENCODER_PIN_BUTTON) return false;
++    for (size_t j = 0; j < i; ++j) if (pin == kAuxButtons[j].pin) return false;
++  }
++  return true;
++}
++#endif
++
++static void ARDUINO_ISR_ATTR encoderEdge() {
++  const uint8_t ab = (digitalRead(GPIO_ENCODER_PIN_A) << 1) | digitalRead(GPIO_ENCODER_PIN_B);
++  portENTER_CRITICAL_ISR(&sEncoderMux);
++  int detent = sDecoder.update(ab, GPIO_ENCODER_STEPS_PER_DETENT);
++  if (GPIO_ENCODER_INVERT) detent = -detent;
++  if ((detent > 0 && sCapturedDetents < kPendingLimit) ||
++      (detent < 0 && sCapturedDetents > -kPendingLimit)) sCapturedDetents += detent;
++  portEXIT_CRITICAL_ISR(&sEncoderMux);
++}
++
++static bool buttonPressed() {
++  return digitalRead(GPIO_ENCODER_PIN_BUTTON) == (GPIO_ENCODER_BUTTON_ACTIVE_LOW ? LOW : HIGH);
++}
++
++static void clearCacheLocked() {
++  gInputCache.buttons = UINT32_MAX;  // Active-low cache: all buttons released.
++  gInputCache.buttonPressedAccum = 0;
++  gInputCache.joyX = gInputCache.joyY = JOYSTICK_CENTER;
++  gInputCache.dataValid = false;
++  sPendingDetents = 0;
++#if ENABLE_GPIO_ENCODER_BUTTONS
++  sAuxPressedActions = 0;
++#endif
++}
++
++static void stopLocked() {
++  gInputRunning = gInputConnected = false;
++  detachInterrupt(GPIO_ENCODER_PIN_A);
++  detachInterrupt(GPIO_ENCODER_PIN_B);
++  gpio_reset_pin(static_cast<gpio_num_t>(GPIO_ENCODER_PIN_A));
++  gpio_reset_pin(static_cast<gpio_num_t>(GPIO_ENCODER_PIN_B));
++  gpio_reset_pin(static_cast<gpio_num_t>(GPIO_ENCODER_PIN_BUTTON));
++#if ENABLE_GPIO_ENCODER_BUTTONS
++  for (const auto& button : kAuxButtons) gpio_reset_pin(static_cast<gpio_num_t>(button.pin));
++#endif
++  portENTER_CRITICAL(&sEncoderMux);
++  sCapturedDetents = 0;
++  portEXIT_CRITICAL(&sEncoderMux);
++  clearCacheLocked();
++}
++
++void inputTask(void*) {
++  for (;;) {
++    if (xSemaphoreTake(gInputCache.mutex, portMAX_DELAY) == pdTRUE) {
++      if (gInputRunning) {
++        portENTER_CRITICAL(&sEncoderMux);
++        const int detents = sCapturedDetents;
++        sCapturedDetents = 0;
++        portEXIT_CRITICAL(&sEncoderMux);
++        const uint32_t now = millis();
++        const bool previousPress = sGestures.pressed();
++        const rotary::Events events = sGestures.update(buttonPressed(), now, detents);
++        uint32_t heldActions = 0;
++        uint32_t pressedActions = events.actions;
++        bool auxiliaryChanged = false;
++#if ENABLE_GPIO_ENCODER_BUTTONS
++        for (size_t i = 0; i < kAuxButtonCount; ++i) {
++          if (sAuxButtons[i].update(auxiliaryPressed(i), now)) pressedActions |= kAuxButtons[i].action;
++          if (sAuxButtons[i].pressed()) heldActions |= kAuxButtons[i].action;
++        }
++        auxiliaryChanged = heldActions != sAuxPressedActions;
++        sAuxPressedActions = heldActions;
++#endif
++        const int64_t position = int64_t(sPosition) + detents;
++        sPosition = static_cast<int32_t>(position > INT32_MAX ? INT32_MAX :
++                                       position < INT32_MIN ? INT32_MIN : position);
++        sPendingDetents += events.detents;
++        if (sPendingDetents > kPendingLimit) sPendingDetents = kPendingLimit;
++        if (sPendingDetents < -kPendingLimit) sPendingDetents = -kPendingLimit;
++        gInputCache.buttons = ~(heldActions | events.actions);
++        gInputCache.buttonPressedAccum |= pressedActions;
++        gInputCache.lastUpdate = now;
++        gInputCache.dataValid = true;
++        if (detents || events.actions || auxiliaryChanged || previousPress != sGestures.pressed()) ++gInputCache.seq;
++      }
++      xSemaphoreGive(gInputCache.mutex);
++    }
++    // Phase transitions use interrupts. Switches and gesture timers are sampled
++    // here; slow I2C polling settings cannot lose turns or delay button sampling.
++    const TickType_t interval = pdMS_TO_TICKS(gInputRunning ? kSampleMs : 100);
++    vTaskDelay(interval ? interval : 1);
++  }
++}
++
++bool inputStartInternal() {
++  if (!GPIO_IS_VALID_GPIO(GPIO_ENCODER_PIN_A) || !GPIO_IS_VALID_GPIO(GPIO_ENCODER_PIN_B) ||
++      !GPIO_IS_VALID_GPIO(GPIO_ENCODER_PIN_BUTTON)) return false;
++#if ENABLE_GPIO_ENCODER_BUTTONS
++  if (!auxiliaryPinsValid()) return false;
++#endif
++  if (!gInputCache.mutex) gInputCache.mutex = xSemaphoreCreateMutex();
++  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
++  if (gInputRunning) { xSemaphoreGive(gInputCache.mutex); return true; }
++  pinMode(GPIO_ENCODER_PIN_A, INPUT_PULLUP);
++  pinMode(GPIO_ENCODER_PIN_B, INPUT_PULLUP);
++  pinMode(GPIO_ENCODER_PIN_BUTTON, GPIO_ENCODER_BUTTON_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
++#if ENABLE_GPIO_ENCODER_BUTTONS
++  for (size_t i = 0; i < kAuxButtonCount; ++i) {
++    pinMode(kAuxButtons[i].pin, kAuxButtons[i].activeLow ? INPUT_PULLUP : INPUT_PULLDOWN);
++    sAuxButtons[i].reset(auxiliaryPressed(i), millis());
++  }
++#endif
++  portENTER_CRITICAL(&sEncoderMux);
++  sCapturedDetents = 0;
++  sDecoder.reset((digitalRead(GPIO_ENCODER_PIN_A) << 1) | digitalRead(GPIO_ENCODER_PIN_B));
++  portEXIT_CRITICAL(&sEncoderMux);
++  sGestures.reset(buttonPressed(), millis());
++  clearCacheLocked();
++  sPosition = 0;
++  inputAbstractionInit();
++  attachInterrupt(GPIO_ENCODER_PIN_A, encoderEdge, CHANGE);
++  attachInterrupt(GPIO_ENCODER_PIN_B, encoderEdge, CHANGE);
++  // Retain the task across close/open, like the other optional input drivers.
++  // Stopping detaches interrupts, releases pins and invalidates all cached input.
++  if (!gInputTaskHandle && xTaskCreateLogged(inputTask, INPUT_TASK_NAME, INPUT_STACK_WORDS, nullptr,
++                                       TASK_PRIORITY_LOW, &gInputTaskHandle, INPUT_TASK_TAG,
++                                       tskNO_AFFINITY) != pdPASS) {
++    stopLocked();
++    xSemaphoreGive(gInputCache.mutex);
++    return false;
++  }
++  gInputCache.dataValid = true;
++  gInputCache.lastUpdate = millis();
++  gInputRunning = gInputConnected = true;
++  xSemaphoreGive(gInputCache.mutex);
++  INFO_INPUT_LIFECYCLEF("GPIO encoder started (A=%d B=%d click=%d)",
++                        GPIO_ENCODER_PIN_A, GPIO_ENCODER_PIN_B, GPIO_ENCODER_PIN_BUTTON);
++#if ENABLE_GPIO_ENCODER_BUTTONS
++  INFO_INPUT_LIFECYCLEF("GPIO encoder auxiliary buttons enabled (%u keys)", static_cast<unsigned>(kAuxButtonCount));
++#endif
++  return true;
++}
++
++void gpioEncoderStop() {
++  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
++  if (gInputRunning) stopLocked();
++  xSemaphoreGive(gInputCache.mutex);
++}
++
++bool gpioEncoderHasPendingDetents() {
++  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, 0) != pdTRUE) return false;
++  const bool pending = gInputRunning && sPendingDetents != 0;
++  xSemaphoreGive(gInputCache.mutex);
++  return pending;
++}
++
++int gpioEncoderConsumeOneDetent() {
++  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(5)) != pdTRUE) return 0;
++  const int step = (sPendingDetents > 0) - (sPendingDetents < 0);
++  sPendingDetents -= step;
++  xSemaphoreGive(gInputCache.mutex);
++  return step;
++}
++
++int gpioEncoderBuildDataJSON(char* buf, size_t size) {
++  if (!buf || !size) return 0;
++  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
++    const int n = snprintf(buf, size, "{\"connected\":false,\"valid\":false}");
++    return n > 0 && static_cast<size_t>(n) < size ? n : 0;
++  }
++  const int n = snprintf(buf, size,
++      "{\"connected\":%s,\"running\":%s,\"valid\":%s,\"ts\":%lu,\"pos\":%ld,\"axis\":0,"
++      "\"pendingDetents\":%d,\"buttons\":%lu,\"pressed\":%s,\"sampleMs\":%lu,\"auxButtonsEnabled\":%s}",
++      gInputConnected ? "true" : "false", gInputRunning ? "true" : "false",
++      gInputCache.dataValid ? "true" : "false", static_cast<unsigned long>(gInputCache.lastUpdate),
++      static_cast<long>(sPosition), sPendingDetents,
++      static_cast<unsigned long>(gInputCache.dataValid ? ~gInputCache.buttons : 0),
++      gInputRunning && sGestures.pressed() ? "true" : "false", static_cast<unsigned long>(kSampleMs),
++      ENABLE_GPIO_ENCODER_BUTTONS ? "true" : "false");
++  xSemaphoreGive(gInputCache.mutex);
++  return n > 0 && static_cast<size_t>(n) < size ? n : 0;
++}
++#endif  // ENABLE_GPIO_ENCODER
+--- /dev/null
++++ b/components/hardwareone/Input_GPIOEncoder.h
+@@ -0,0 +1,14 @@
++#pragma once
++
++#include "System_BuildConfig.h"
++#include <stddef.h>
++
++#if ENABLE_GPIO_ENCODER
++// Native quadrature encoder with a push switch and optional auxiliary buttons.
++// Pins, button actions and phase direction belong to the board profile.
++bool inputStartInternal();
++void gpioEncoderStop();
++bool gpioEncoderHasPendingDetents();
++int gpioEncoderConsumeOneDetent();
++int gpioEncoderBuildDataJSON(char* buf, size_t size);
++#endif
+--- /dev/null
++++ b/components/hardwareone/Input_RotaryCore.h
+@@ -0,0 +1,113 @@
++#pragma once
++
++#include <stdint.h>
++
++// Hardware-independent rotary decoding and button gestures. Kept separate from
++// GPIO/FreeRTOS so bounce, missed edges and time rollover can be exercised on a
++// host. Native action bits deliberately follow HAL_Input's logical button order.
++namespace rotary {
++enum Action : uint32_t {
++  Select = 1u << 0,
++  Back = 1u << 1,
++  Extra = 1u << 2,
++  Delete = 1u << 3,
++  Function = 1u << 5,
++};
++
++class Quadrature {
++ public:
++  void reset(uint8_t ab) { previous_ = ab & 3u; partial_ = 0; }
++
++  // Both phases changing together is a missed/invalid transition; discard the
++  // partial detent rather than invent a direction. Ordinary contact bounce
++  // traverses the same edge backwards and cancels itself.
++  __attribute__((always_inline)) inline int update(uint8_t ab, uint8_t steps = 4) {
++    ab &= 3u;
++    const uint8_t changed = previous_ ^ ab;
++    if (!changed) return 0;
++    if (changed == 3u) {
++      previous_ = ab;
++      partial_ = 0;
++      return 0;
++    }
++    partial_ += ((previous_ >> 1) ^ (ab & 1u)) ? 1 : -1;
++    previous_ = ab;
++    if (partial_ >= steps) { partial_ = 0; return 1; }
++    if (partial_ <= -static_cast<int>(steps)) { partial_ = 0; return -1; }
++    return 0;
++  }
++
++ private:
++  uint8_t previous_ = 0;
++  int8_t partial_ = 0;
++};
++
++struct Events {
++  int detents = 0;
++  uint32_t actions = 0;
++};
++
++class Gestures {
++ public:
++  static constexpr uint32_t DebounceMs = 20;
++  static constexpr uint32_t HoldMs = 700;
++  static constexpr uint32_t DoubleClickMs = 250;
++
++  void reset(bool pressed, uint32_t now) {
++    raw_ = stable_ = pressed;
++    rawSince_ = pressedAt_ = now;
++    held_ = turned_ = clickPending_ = secondClick_ = false;
++    suppress_ = pressed;  // A switch held during startup must first be released.
++  }
++
++  Events update(bool pressed, uint32_t now, int detents) {
++    Events out;
++    if (pressed != raw_) { raw_ = pressed; rawSince_ = now; }
++    if (stable_ != raw_ && uint32_t(now - rawSince_) >= DebounceMs) {
++      stable_ = raw_;
++      if (stable_) {
++        pressedAt_ = now;
++        held_ = turned_ = false;
++        secondClick_ = clickPending_ && uint32_t(rawSince_ - releasedAt_) <= DoubleClickMs;
++        if (secondClick_) clickPending_ = false;
++      } else if (suppress_) {
++        suppress_ = false;
++      } else if (!held_ && !turned_) {
++        if (secondClick_) out.actions |= Function;
++        else { clickPending_ = true; releasedAt_ = now; }
++        secondClick_ = false;
++      }
++    }
++
++    if (detents) {
++      if (stable_ && !suppress_) {
++        // Holding the wheel while turning provides the secondary UI actions
++        // needed by text entry (X=submit, Y=delete), without selecting on release.
++        turned_ = true;
++        clickPending_ = secondClick_ = false;
++        if (!held_) out.actions |= detents > 0 ? Extra : Delete;
++      } else if (!suppress_) {
++        out.detents = detents;
++      }
++    }
++    if (stable_ && !suppress_ && !held_ && !turned_ && uint32_t(now - pressedAt_) >= HoldMs) {
++      held_ = true;
++      clickPending_ = secondClick_ = false;
++      out.actions |= Back;
++    }
++    const bool secondPressDebouncing = raw_ && uint32_t(rawSince_ - releasedAt_) <= DoubleClickMs;
++    if (clickPending_ && !secondPressDebouncing && uint32_t(now - releasedAt_) > DoubleClickMs) {
++      clickPending_ = false;
++      out.actions |= Select;
++    }
++    return out;
++  }
++
++  bool pressed() const { return stable_; }
++
++ private:
++  bool raw_ = false, stable_ = false, suppress_ = false;
++  bool held_ = false, turned_ = false, clickPending_ = false, secondClick_ = false;
++  uint32_t rawSince_ = 0, pressedAt_ = 0, releasedAt_ = 0;
++};
++}  // namespace rotary
+--- a/components/hardwareone/OLED_Display.h
++++ b/components/hardwareone/OLED_Display.h
+@@ -351,7 +351,9 @@
+ // OLED-specific configuration. This is the address selected by display probing,
+ // not a compile-time assumption about whether the panel uses 0x3C or 0x3D.
+ #define OLED_RESET -1
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+ #define OLED_I2C_ADDRESS gDisplayI2cAddress
++#endif
+ 
+ // Helper macro to wrap OLED operations in an I2C transaction.
+ // Requires System_I2C.h (i2cDeviceTransactionVoid) and System_Settings.h
+@@ -363,8 +365,14 @@
+ // the previous 4-arg legacy form (implicit bus 0) took the WRONG bus's mutex
+ // when the OLED is on bus 1 (e.g. FeatherS3[D], I2C2) — fixed here.
+ #ifndef OLED_TRANSACTION
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+ #define OLED_TRANSACTION(code) \
+   i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() { code; })
++#else
++// SPI panels have their own transport lock. Never route them through an I2C
++// device manager, particularly in builds with I2C_FEATURE_LEVEL=0.
++#define OLED_TRANSACTION(code) do { code; } while (0)
++#endif
+ #endif
+ 
+ // OLED display object (now provided by Display_HAL.h as gDisplay)
+--- a/components/hardwareone/OLED_FirstTimeSetup.cpp
++++ b/components/hardwareone/OLED_FirstTimeSetup.cpp
+@@ -166,7 +166,11 @@
+         oledDisplay->setCursor(0, ftrY + 2);
+         oledDisplay->print("A:Sel Y:Del B:");
+         oledDrawBackArrowIcon(oledDisplay, ftrY + 2);
++#if ENABLE_GPIO_ENCODER
++        oledDisplay->print(" X:OK");
++#else
+         oledDisplay->print(" S:OK");
++#endif
+       }
+       
+       oledDisplay->display();
+@@ -295,7 +299,11 @@
+       
+       // Footer at standard position
+       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
++#if ENABLE_GPIO_ENCODER
++      drawFTSFooter("Wheel:Move A:OK");
++#else
+       drawFTSFooter("L/R:Move A:OK");
++#endif
+       
+       oledDisplay->display();
+     );
+@@ -321,10 +329,10 @@
+     uint32_t newlyPressed = getNewlyPressedButtons();
+     
+     // Left/Right to change selection
+-    if (deltaX < -JOYSTICK_DEADZONE) {
++    if (deltaX < -JOYSTICK_DEADZONE || gNavEvents.wheelDelta < 0) {
+       selection = 0;  // Yes
+       delay(200);
+-    } else if (deltaX > JOYSTICK_DEADZONE) {
++    } else if (deltaX > JOYSTICK_DEADZONE || gNavEvents.wheelDelta > 0) {
+       selection = 1;  // No
+       delay(200);
+     }
+@@ -621,10 +629,10 @@
+       getJoystickDelta(deltaX, deltaY);
+       const uint32_t newlyPressed = getNewlyPressedButtons();
+ 
+-      if (deltaY < -JOYSTICK_DEADZONE) {
++      if (deltaY < -JOYSTICK_DEADZONE || gNavEvents.wheelDelta < 0) {
+         if (selection > 0) --selection;
+         delay(150);
+-      } else if (deltaY > JOYSTICK_DEADZONE) {
++      } else if (deltaY > JOYSTICK_DEADZONE || gNavEvents.wheelDelta > 0) {
+         if (selection < displayCount - 1) ++selection;
+         delay(150);
+       }
+--- a/components/hardwareone/OLED_SetupWizard.cpp
++++ b/components/hardwareone/OLED_SetupWizard.cpp
+@@ -75,7 +75,11 @@
+     oledDisplay->print(leftAction);
+   }
+   if (rightAction && rightAction[0]) {
++#if ENABLE_GPIO_ENCODER
++    oledDisplay->print(" X:");
++#else
+     oledDisplay->print(" >:");
++#endif
+     oledDisplay->print(rightAction);
+   }
+   if (backAction && backAction[0]) {
+@@ -467,6 +471,10 @@
+ 
+ JoystickNav readWizardJoystickNav() {
+   JoystickNav nav = {false, false, false, false};
++  // Consume outside the cache lock: GPIO wheels share that mutex with buttons.
++  const int detent = inputConsumeOneDetent();
++  nav.up = detent < 0;
++  nav.down = detent > 0;
+ 
+   SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.joystickNav");
+   if (g.held) {
+@@ -504,6 +512,16 @@
+ // ============================================================================
+ 
+ // Shared toggle-page input handler: A=toggle, up/down=move, right=next, left/B=back
++static bool wizardNextRequested(uint32_t buttons, const JoystickNav& nav) {
++  if (nav.right || (buttons & INPUT_MASK(INPUT_BUTTON_START))) return true;
++#if ENABLE_GPIO_ENCODER
++  // The one-switch wheel exposes X via press-and-turn; use it for Next while
++  // double-click remains the keyboard mode/function key.
++  if (buttons & INPUT_MASK(INPUT_BUTTON_X)) return true;
++#endif
++  return false;
++}
++
+ static bool handleTogglePageInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result) {
+   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
+     wizardToggleCurrentItem();
+@@ -513,7 +531,7 @@
+   if (nav.up) { wizardMoveUp(); return true; }
+   if (nav.down) { wizardMoveDown(); return true; }
+ 
+-  if (nav.right || (buttons & INPUT_MASK(INPUT_BUTTON_START))) {
++  if (wizardNextRequested(buttons, nav)) {
+     wizardNextPage(result);
+     return true;
+   }
+@@ -537,7 +555,7 @@
+   if (nav.up) { wizardMoveUp(); return true; }
+   if (nav.down) { wizardMoveDown(); return true; }
+ 
+-  if (nav.right || (buttons & INPUT_MASK(INPUT_BUTTON_START))) {
++  if (wizardNextRequested(buttons, nav)) {
+     wizardNextPage(sDummyResult);
+     return true;
+   }
+@@ -580,7 +598,7 @@
+     return true;
+   }
+ 
+-  if (nav.right || (buttons & INPUT_MASK(INPUT_BUTTON_START))) {
++  if (wizardNextRequested(buttons, nav)) {
+     if (!wizardNextPage(result)) {
+       return false;  // Signal completion
+     }
+@@ -662,20 +680,7 @@
+       continue;
+     }
+ 
+-    uint32_t buttons = lastButtons;
+-    bool haveButtons = false;
+-    {
+-      SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+-      if (g.held && gInputCache.dataValid) {
+-        buttons = gInputCache.buttons;
+-        haveButtons = true;
+-      }
+-    }
+-    if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
+-    uint32_t pressedNow = ~buttons;
+-    uint32_t pressedLast = ~lastButtons;
+-    uint32_t newButtons = pressedNow & ~pressedLast;
+-    lastButtons = buttons;
++    const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+ 
+     if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
+       return (selection == 0) ? 1 : 0; // 1=configure, 0=skip
+@@ -766,20 +771,7 @@
+       JoystickNav nav = readWizardJoystickNav();
+       if (nav.up || nav.down) { selection = selection == 0 ? 1 : 0; delay(150); continue; }
+ 
+-      uint32_t buttons = lastButtons;
+-      bool haveButtons = false;
+-      {
+-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+-        if (g.held && gInputCache.dataValid) {
+-          buttons = gInputCache.buttons;
+-          haveButtons = true;
+-        }
+-      }
+-      if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
+-      uint32_t pressedNow = ~buttons;
+-      uint32_t pressedLast = ~lastButtons;
+-      uint32_t newButtons = pressedNow & ~pressedLast;
+-      lastButtons = buttons;
++      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+ 
+       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
+         result.espnowStationary = (selection == 1);
+@@ -923,17 +915,7 @@
+       // other wizard pages — without this, right did nothing on the mode pages.
+       if (nav.right) { wizardModeApply(sub, sel); if (!wizardNextPage(result)) running = false; return; }
+ 
+-      uint32_t buttons = lastButtons;
+-      bool haveButtons = false;
+-      {
+-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.modeBtn");
+-        if (g.held && gInputCache.dataValid) { buttons = gInputCache.buttons; haveButtons = true; }
+-      }
+-      if (haveButtons && !lastButtonsInitialized) {
+-        lastButtons = buttons; lastButtonsInitialized = true; continue;
+-      }
+-      uint32_t newButtons = (~buttons) & ~(~lastButtons);
+-      lastButtons = buttons;
++      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+       if (newButtons & (INPUT_MASK(INPUT_BUTTON_A) | INPUT_MASK(INPUT_BUTTON_START))) {
+         wizardModeApply(sub, sel);
+         if (!wizardNextPage(result)) running = false;
+@@ -1065,26 +1047,7 @@
+       }
+ 
+       // Read buttons
+-      uint32_t buttons = lastButtons;
+-      bool haveButtons = false;
+-      {
+-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+-        if (g.held && gInputCache.dataValid) {
+-          buttons = gInputCache.buttons;
+-          haveButtons = true;
+-        }
+-      }
+-
+-      if (haveButtons && !lastButtonsInitialized) {
+-        lastButtons = buttons;
+-        lastButtonsInitialized = true;
+-        continue;
+-      }
+-
+-      uint32_t pressedNow = ~buttons;
+-      uint32_t pressedLast = ~lastButtons;
+-      uint32_t newButtons = pressedNow & ~pressedLast;
+-      lastButtons = buttons;
++      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+ 
+       // A button = select
+       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
+@@ -1167,17 +1130,7 @@
+       if (nav.up)   { selection = (selection > 0) ? selection - 1 : NUM - 1; delay(150); continue; }
+       if (nav.down) { selection = (selection < NUM - 1) ? selection + 1 : 0; delay(150); continue; }
+ 
+-      uint32_t buttons = lastButtons;
+-      bool haveButtons = false;
+-      {
+-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.archetypeRead");
+-        if (g.held && gInputCache.dataValid) { buttons = gInputCache.buttons; haveButtons = true; }
+-      }
+-      if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
+-      uint32_t pressedNow = ~buttons;
+-      uint32_t pressedLast = ~lastButtons;
+-      uint32_t newButtons = pressedNow & ~pressedLast;
+-      lastButtons = buttons;
++      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) return avail[selection];
+       if (newButtons & INPUT_MASK(INPUT_BUTTON_B)) return -1;
+     }
+@@ -1262,26 +1215,7 @@
+       }
+       
+       // Read buttons
+-      uint32_t buttons = lastButtons;
+-      bool haveButtons = false;
+-      {
+-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+-        if (g.held && gInputCache.dataValid) {
+-          buttons = gInputCache.buttons;
+-          haveButtons = true;
+-        }
+-      }
+-      
+-      if (haveButtons && !lastButtonsInitialized) {
+-        lastButtons = buttons;
+-        lastButtonsInitialized = true;
+-        continue;
+-      }
+-      
+-      uint32_t pressedNow = ~buttons;
+-      uint32_t pressedLast = ~lastButtons;
+-      uint32_t newButtons = pressedNow & ~pressedLast;
+-      lastButtons = buttons;
++      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+       
+       // A button = select
+       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
+--- a/components/hardwareone/OLED_Utils.cpp
++++ b/components/hardwareone/OLED_Utils.cpp
+@@ -2363,6 +2363,10 @@
+ // Can this mode be entered right now? Every mode is unconditional except MIC,
+ // which needs field permission, a mic source, and an authenticated host link.
+ static bool oledKeyboardModeUsable(OLEDKeyboardMode mode) {
++#if ENABLE_GPIO_ENCODER
++  // The onboard wheel has no analog directions for gamepad-pattern input.
++  if (mode == KEYBOARD_MODE_PATTERN) return false;
++#endif
+   if (mode == KEYBOARD_MODE_MIC) {
+     return gOledKeyboardState.dictationPolicy ==
+                OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT &&
+@@ -3023,7 +3027,7 @@
+       }
+       #else
+       hints = "B:Back";
+-      #endif
++     #endif
+       break;
+       
+     // OLED_NETWORK_INFO / OLED_NETWORK_STATUS / OLED_NETWORK_WIFI_MENU hints
+@@ -3865,11 +3869,13 @@
+ // ============================================================================
+ 
+ bool initOLEDDisplay() {
++#if DISPLAY_TYPE != DISPLAY_TYPE_ST7789_P4_EYE
+   if (gDisplay != nullptr) {
+     gOledConsole.init();
+     broadcastOutput("OLED display already initialized");
+     return true;
+   }
++#endif
+ 
+   DEBUG_DISPLAYF("Starting display initialization (%s)...", DISPLAY_NAME);
+ 
+@@ -3929,12 +3935,17 @@
+   // transaction. Calling displayUpdate() here would try to acquire this same
+   // non-recursive bus mutex a second time and silently skip the final frame.
+   // delete/null must happen after the transaction completes, not inside it.
+-  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
++  OLED_TRANSACTION(
+     gDisplay->clearDisplay();
+     gDisplay->display();
+-  });
++  );
+   delete gDisplay;
+   gDisplay = nullptr;
++#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++  // Commands can stop the display while the render owner still holds a canvas
++  // pointer. Retain that small software canvas and its lock for the firmware
++  // lifetime; end() drains DMA and releases only the hardware resources.
++  gDisplay->end();
+ #else
+   // For SPI displays, no transaction needed
+   displayClear();
+@@ -4105,6 +4116,7 @@
+   oledSnapshotFrameSeqs();
+ 
+   // Skip if OLED is degraded (will auto-retry after recovery timeout)
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+   if (i2cDeviceIsDegraded(OLED_I2C_ADDRESS, (uint8_t)gSettings.oledBus)) {
+     static unsigned long lastDegradedLog = 0;
+     unsigned long nowLog = millis();
+@@ -4114,6 +4126,8 @@
+     }
+     return;
+   }
++
++#endif
+ 
+   // Apply a pending rotation (oledflip) here, at a frame boundary, rather than
+   // in the task that asked for it — swapping the GFX coordinate transform out
+@@ -4142,7 +4156,9 @@
+       preparePerfData();  // 1 Hz uxTaskGetSystemState sample behind everyMs gate
+       break;
+     case OLED_I2C_DIAG:
++#if ENABLE_I2C_SYSTEM
+       prepareI2cDiagData();  // advances the scan phase; runs the bus sweep here
++#endif
+       break;
+     case OLED_WEB_STATS:
+       prepareWebStatsData();
+@@ -4588,10 +4604,10 @@
+       tryAutoStartInputForMenu();
+       break;
+     case OLED_OFF:
+-      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
++      OLED_TRANSACTION(
+         oledDisplay->clearDisplay();
+         oledDisplay->display();
+-      });
++      );
+       break;
+     default:
+       // OLED_ANIMATION / OLED_FILE_BROWSER / OLED_ESPNOW entry resets now run via
+@@ -4652,10 +4668,10 @@
+     return "ERROR";
+   }
+ 
+-  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
++  OLED_TRANSACTION(
+     oledDisplay->clearDisplay();
+     oledDisplay->display();
+-  });
++  );
+ 
+   broadcastOutput("OLED display cleared");
+   return "OK";
+@@ -4669,7 +4685,15 @@
+     doc["schema"] = 1;
+     doc["connected"] = oledConnected;
+     if (oledConnected) {
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+       doc["address"] = OLED_I2C_ADDRESS;
++#endif
++      doc["interface"] = DISPLAY_INTERFACE;
++      doc["driver"] = DISPLAY_NAME;
++#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++      doc["panelWidth"] = DISPLAY_PANEL_WIDTH;
++      doc["panelHeight"] = DISPLAY_PANEL_HEIGHT;
++#endif
+       doc["width"]   = SCREEN_WIDTH;
+       doc["height"]  = SCREEN_HEIGHT;
+       doc["enabled"] = gOledRunning;
+@@ -4703,7 +4727,11 @@
+ 
+   broadcastOutput("OLED display: Connected");
+   if (ensureDebugBuffer()) {
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+     snprintf(getDebugBuffer(), 1024, "Address: 0x%02X", OLED_I2C_ADDRESS);
++#else
++    snprintf(getDebugBuffer(), 1024, "Display: %s (%s)", DISPLAY_NAME, DISPLAY_INTERFACE);
++#endif
+     broadcastOutput(getDebugBuffer());
+     snprintf(getDebugBuffer(), 1024, "Resolution: %dx%d", SCREEN_WIDTH, SCREEN_HEIGHT);
+     broadcastOutput(getDebugBuffer());
+@@ -5037,6 +5065,7 @@
+ // Early OLED initialization during setup() - probes and initializes for boot animation
+ // Returns true if OLED was detected and initialized
+ bool earlyOLEDInit() {
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+   // Early exit if I2C bus is disabled
+   if (!gI2CBusRunning) {
+     DEBUG_DISPLAYF("OLED init skipped - I2C bus disabled");
+@@ -5044,6 +5073,8 @@
+     gOledRunning = false;
+     return false;
+   }
++
++#endif
+ 
+   bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
+   DEBUG_DISPLAYF("[OLED_INIT] fts=%d settings.oledEnabled=%d\n", inFirstTimeSetup ? 1 : 0,
+@@ -5070,6 +5101,34 @@
+     }
+   }
+   
++#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++  if (!displayInit()) {
++    oledConnected = false;
++    gOledRunning = false;
++    if (gSettings.oledEnabled) systemEventPost(SYSEVT_DISPLAY_INIT_FAILED, DISPLAY_NAME);
++    return false;
++  }
++  oledConnected = true;
++  gOledRunning = true;
++  gOledConsole.init();
++  gDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
++  displaySetBrightness(gSettings.oledBrightness);
++  inputAbstractionInit();
++  currentBootPhase = BOOT_PHASE_ANIMATION;
++  bootPhaseStartTime = millis();
++  oledBootModeActive = true;
++  requestOLEDMode(OLED_ANIMATION, "boot.init", false);
++  currentAnimation = ANIM_BOOT_PROGRESS;
++  animationFrame = 0;
++  animationLastUpdate = millis();
++  bootProgressPercent = 0;
++  bootProgressLabel = "Initializing...";
++  displayClear();
++  displayAnimation();
++  displayUpdate();
++  logSystemEvent("DISPLAY", "%s online (SPI)", DISPLAY_NAME);
++  return true;
++#else
+   // Resolve OLED's bus from settings (default 0 = I2C1 = Wire1). Same
+   // hard-fail-on-unavailable contract as HAL_Display.cpp's displayInit.
+   const uint8_t oledBus = (uint8_t)gSettings.oledBus;
+@@ -5152,11 +5211,11 @@
+       bootProgressLabel = "Initializing...";
+ 
+       // Clear display and render first animation frame (I2C-safe)
+-      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
++      OLED_TRANSACTION(
+         oledDisplay->clearDisplay();
+         displayAnimation();
+         oledDisplay->display();
+-      });
++      );
+ 
+       DEBUG_DISPLAYF("OLED boot animation started at 0x%02X", detectedAddr);
+       logSystemEvent("DISPLAY", "OLED online at 0x%02X (bus %u)", detectedAddr, oledBus);
+@@ -5175,6 +5234,7 @@
+     systemEventPost(SYSEVT_DISPLAY_INIT_FAILED, dispDet);
+   }
+   return false;
++#endif
+ }
+ 
+ // Process boot sequence phase transitions in loop()
+@@ -6182,6 +6242,7 @@
+ static int gCurrentJoyX = 0;
+ static int gCurrentJoyY = 0;
+ static uint32_t gCurrentButtons = 0xFFFFFFFF;
++static uint32_t gHelperPressedAccum = 0;
+ static bool gInputStateValid = false;
+ 
+ /**
+@@ -6189,24 +6250,31 @@
+  * Call this at the start of each input polling cycle
+  */
+ void updateInputState() {
+-#if ENABLE_GAMEPAD_SENSOR
+-  if (!gInputCache.mutex) {
+-    gInputStateValid = false;
+-    return;
+-  }
+-  
+-  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.inputStateRead");
+-  if (g.held) {
+-    if (gInputCache.dataValid) {
++#if ENABLE_OLED_INPUT
++  gNavEvents = {false, false, false, false, 0, 0, 0};
++  gInputStateValid = false;
++  if (!gInputCache.mutex) return;
++  {
++    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.inputStateRead");
++    if (g.held && gInputCache.dataValid) {
+       gCurrentJoyX = gInputCache.joyX;
+       gCurrentJoyY = gInputCache.joyY;
+       gCurrentButtons = gInputCache.buttons;
++      gHelperPressedAccum |= gInputCache.buttonPressedAccum;
++      gInputCache.buttonPressedAccum = 0;
+       gInputStateValid = true;
+-    } else {
+-      gInputStateValid = false;
+-    }
+-  } else {
+-    gInputStateValid = false;
++    }
++  }
++  // Setup prompts use this helper outside the normal processOLEDInput pump.
++  // Release the shared input mutex before asking the driver for detents.
++  if (gInputStateValid) {
++    int step;
++    while ((step = inputConsumeOneDetent()) != 0) {
++      gNavEvents.wheelDelta += step;
++      if (gNavEvents.wheelDelta >= 64 || gNavEvents.wheelDelta <= -64) break;
++    }
++    gNavEvents.up = gNavEvents.wheelDelta < 0;
++    gNavEvents.down = gNavEvents.wheelDelta > 0;
+   }
+ #else
+   gInputStateValid = false;
+@@ -6226,13 +6294,16 @@
+   if (!lastButtonStateInitialized) {
+     lastButtonState = gCurrentButtons;
+     lastButtonStateInitialized = true;
+-    return 0;
++    const uint32_t pressed = gHelperPressedAccum;
++    gHelperPressedAccum = 0;
++    return pressed;
+   }
+   
+   // Buttons are active-low, so invert for edge detection
+   uint32_t currentPressed = ~gCurrentButtons;
+   uint32_t lastPressed = ~lastButtonState;
+-  uint32_t newlyPressed = currentPressed & ~lastPressed;
++  uint32_t newlyPressed = (currentPressed & ~lastPressed) | gHelperPressedAccum;
++  gHelperPressedAccum = 0;
+   
+   lastButtonState = gCurrentButtons;
+   return newlyPressed;
+@@ -6448,7 +6519,6 @@
+         joyY = gInputCache.joyY;
+         buttons = gInputCache.buttons;
+         latchedPresses = gInputCache.buttonPressedAccum;
+-        gInputCache.buttonPressedAccum = 0;  // Consume accumulated presses
+         dataValid = true;
+       }
+     }
+@@ -6482,7 +6552,7 @@
+   bool deflectedX = abs(deltaX) > JOYSTICK_DEADZONE;
+   bool deflectedY = abs(deltaY) > JOYSTICK_DEADZONE;
+   bool hasJoystickInput = deflectedX || deflectedY;
+-  bool hasButtonChange = (buttons != lastButtonState);
++  bool hasButtonChange = (buttons != lastButtonState) || latchedPresses != 0;
+   
+   // Reset latch when joystick returns to center
+   if (!deflectedX && wasDeflectedX) {
+@@ -6502,13 +6572,7 @@
+   // the encoder's pending-detents cache here, a wheel-only spin would early-
+   // exit and never reach the consumer below — detents would pile up forever
+   // and only get drained the next time the user pressed a button.
+-  bool hasEncoderInput = false;
+-#if ENABLE_ANO_ENCODER
+-  // No mutex: encoderDelta is a single int32_t, racing with the driver's
+-  // accumulate is benign — we read a slightly stale value, the next frame
+-  // catches up. Cheaper than a 5ms guard on the hot path.
+-  hasEncoderInput = (gAnoEncoderCache.encoderDelta != 0);
+-#endif
++  bool hasEncoderInput = inputHasPendingDetents();
+   if (!hasJoystickInput && !hasButtonChange && !wasDeflectedX && !wasDeflectedY && !hasEncoderInput) {
+     if (!oledKeyboardIsActive()) return false;
+   }
+@@ -6527,6 +6591,20 @@
+     return false;  // Skip this frame to allow button state to change
+   }
+   
++  // Consume only after all early exits. Short click pulses must remain latched
++  // across navigation debounce and the first-read initialization frame.
++  {
++    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.consumePresses");
++    if (!g.held) return false;
++    if (!gInputRunning || !gInputCache.dataValid) return false;
++    // Pair the latch with the same raw sample. A press arriving after the
++    // earlier peek must not be delivered from the latch now and as a fresh
++    // raw edge on the next frame.
++    buttons = gInputCache.buttons;
++    latchedPresses = gInputCache.buttonPressedAccum;
++    gInputCache.buttonPressedAccum = 0;
++  }
++
+   // Reset auto-repeat state when mode changes to prevent stuck joystick
+   static OLEDMode lastProcessedMode = OLED_OFF;
+   if (currentOLEDMode != lastProcessedMode) {
+@@ -6549,7 +6627,7 @@
+   // Reset navigation events
+   gNavEvents = {false, false, false, false, deltaX, deltaY, 0};
+ 
+-#if ENABLE_ANO_ENCODER
++#if ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER
+   // Canonical-signal model: every input device emits ONLY the signals that
+   // describe what it physically is. The ANO encoder has two physical input
+   // primitives — a quadrature wheel and 5 discrete buttons — and nothing
+@@ -6589,7 +6667,7 @@
+   {
+     int totalDetents = 0;
+     int d;
+-    while ((d = anoEncoderConsumeOneDetent()) != 0) {
++    while ((d = inputConsumeOneDetent()) != 0) {
+       totalDetents += d;
+       if (totalDetents > 64 || totalDetents < -64) break;  // safety clamp
+     }
+@@ -6600,23 +6678,26 @@
+     // per frame regardless of detent count; modes that want proportional
+     // response read wheelDelta.
+     if (totalDetents != 0) {
+-      uint8_t axis = ANO_AXIS_VERTICAL;
++      bool vertical = true;
++#if ENABLE_ANO_ENCODER
+       if (gAnoEncoderCache.mutex) {
+         SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(5), "ano.readAxis");
+-        if (g.held) axis = gAnoEncoderCache.currentAxis;
+-      }
++        if (g.held) vertical = (gAnoEncoderCache.currentAxis == ANO_AXIS_VERTICAL);
++      }
++#endif
+       if (totalDetents > 0) {
+-        if (axis == ANO_AXIS_VERTICAL) gNavEvents.down  = true;
++        if (vertical) gNavEvents.down  = true;
+         else                            gNavEvents.right = true;
+       } else {
+-        if (axis == ANO_AXIS_VERTICAL) gNavEvents.up   = true;
++        if (vertical) gNavEvents.up   = true;
+         else                            gNavEvents.left = true;
+       }
+       DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] wheel    delta=%+d axis=%s",
+-                                totalDetents, axis == ANO_AXIS_VERTICAL ? "V" : "H");
+-    }
+-  }
+-
++                                totalDetents, vertical ? "V" : "H");
++    }
++  }
++
++#if ENABLE_ANO_ENCODER
+   // ---- Dpad ----
+   // Edge-detected → boolean nav events. NO deltaX/Y emission: the dpad is a
+   // digital input device with no analog magnitude. Modes that want sustained
+@@ -6634,6 +6715,7 @@
+       DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] dpad     edge=0x%02lX", (unsigned long)dpadEdge);
+     }
+   }
++#endif // ENABLE_ANO_ENCODER
+ #else
+   // Compute X-axis navigation with auto-repeat
+   if (deflectedX) {
+@@ -6908,11 +6990,19 @@
+     // RAM-flush resume deliberately left off.
+     bool autoStart = gSettings.inputEnabled &&
+                      ramFlushResolve(RF_INPUT, gSettings.inputAutoStart);
+-    if (!autoStart || !gSettings.i2cEnabled) {
++    if (!autoStart) {
+       return;
+     }
+-  }
+-
++#if !ENABLE_GPIO_ENCODER
++    if (!gSettings.i2cEnabled) return;
++#endif
++  }
++
++#if ENABLE_GPIO_ENCODER
++  // The onboard wheel owns GPIOs and a polling task, with no I2C address or
++  // queued I2C device. Reuse the same driver start and saved autostart policy.
++  inputStartInternal();
++#else
+   // Resolve the active input device's I2C address — gamepad at 0x50, or
+   // the ANO encoder at whatever the user configured (default 0x49).
+ #if ENABLE_ANO_ENCODER
+@@ -6936,6 +7026,7 @@
+       DEBUG_DISPLAYF("[OLED] Auto-starting input device for menu navigation");
+     }
+   }
++#endif
+ }
+ 
+ #else // !ENABLE_OLED_INPUT
+@@ -7063,10 +7154,14 @@
+ #if ENABLE_OLED_DISPLAY
+   if (oledConnected && gOledRunning) {
+     if (gSettings.oledBrightness >= 0 && gSettings.oledBrightness <= 255) {
+-      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 200, [&]() {
++#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++      displaySetBrightness(gSettings.oledBrightness);
++#else
++      OLED_TRANSACTION(
+         oledDisplay->ssd1306_command(SSD1306_SETCONTRAST);
+         oledDisplay->ssd1306_command(gSettings.oledBrightness);
+-      });
++      );
++#endif
+     }
+   }
+ #endif
+@@ -7268,6 +7363,7 @@
+       // Prevent the login-confirm A press from being interpreted as a
+       // menu-select on the replacement identity's first frame.
+       lastButtonStateInitialized = false;
++      gHelperPressedAccum = 0;
+       lastButtonState = 0xFFFFFFFF;
+ #endif
+       oledMarkDirty();
+@@ -7299,9 +7395,13 @@
+ void oledDisplayOff() {
+ #if ENABLE_OLED_DISPLAY
+   if (oledDisplay && oledConnected) {
+-    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
++#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++    oledDisplay->setPower(false);
++#else
++    OLED_TRANSACTION(
+       oledDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
+-    });
++    );
++#endif
+   }
+ #endif
+ }
+@@ -7325,7 +7425,7 @@
+   // ESP32-S3 so it gets reset on wake — but that's a fresh boot path anyway,
+   // and the LDO defaults disabled when its enable line floats, so this is
+   // also the desired sleep state.
+-#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+   if (gSettings.oledBus == 1) {
+     digitalWrite(I2C2_POWER_PIN, LOW);
+     // Hold LDO low long enough for SSD1306 Vcc to fully decay past its
+@@ -7348,7 +7448,7 @@
+ 
+ void oledResumeFromSleep() {
+ #if ENABLE_OLED_DISPLAY
+-#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
++#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+   if (gSettings.oledBus == 1) {
+     // Step 1: raise the LDO enable and wait for the rail + chip to come up.
+     // The AP2127 LDO itself stabilises in ~5ms, BUT the SSD1306's internal
+@@ -7453,9 +7553,13 @@
+ void oledDisplayOn() {
+ #if ENABLE_OLED_DISPLAY
+   if (oledDisplay && oledConnected) {
+-    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
++#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++    oledDisplay->setPower(true);
++#else
++    OLED_TRANSACTION(
+       oledDisplay->ssd1306_command(SSD1306_DISPLAYON);
+-    });
++    );
++#endif
+   }
+ #endif
+ }
+@@ -7463,7 +7567,7 @@
+ void oledShowSleepScreen(int seconds) {
+ #if ENABLE_OLED_DISPLAY
+   if (oledDisplay && oledConnected) {
+-    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
++    OLED_TRANSACTION(
+       oledDisplay->clearDisplay();
+       oledDisplay->setTextSize(1);
+       oledDisplay->setCursor(0, 16);
+@@ -7471,7 +7575,7 @@
+       oledDisplay->println();
+       oledDisplay->printf("  Waking in %ds", seconds);
+       oledDisplay->display();
+-    });
+-  }
+-#endif
+-}
++    );
++  }
++#endif
++}
+--- /dev/null
++++ b/components/hardwareone/System_Board_P4X_EYE.h
+@@ -0,0 +1,60 @@
++#pragma once
++
++// ESP32-P4X-EYE / P4-EYE MB v2.3 wiring, verified against Espressif's BSP:
++// https://github.com/espressif/esp-bsp/blob/master/bsp/esp32_p4_eye/include/bsp/esp32_p4_eye.h
++// A P4 CPU alone does not identify this board. Select HW_BOARD_P4X_EYE=1 in
++// the board/deployment profile; optional device choices remain independent.
++#if !defined(CONFIG_IDF_TARGET_ESP32P4)
++#error "HW_BOARD_P4X_EYE requires the ESP32-P4 target"
++#endif
++
++#define EYE_LCD_SCLK 17
++#define EYE_LCD_MOSI 16
++#define EYE_LCD_DC 19
++#define EYE_LCD_CS 18
++#define EYE_LCD_RST 15
++#define EYE_LCD_BL 20
++#define EYE_LCD_EN 12
++#define EYE_LCD_BL_ACTIVE_LOW 1
++
++#define GPIO_ENCODER_PIN_A 48
++#define GPIO_ENCODER_PIN_B 47
++#define GPIO_ENCODER_PIN_BUTTON 2
++#ifndef GPIO_ENCODER_STEPS_PER_DETENT
++#define GPIO_ENCODER_STEPS_PER_DETENT 4
++#endif
++#ifndef GPIO_ENCODER_INVERT
++#define GPIO_ENCODER_INVERT 0
++#endif
++#define GPIO_ENCODER_BUTTON_ACTIVE_LOW 1
++
++// The three user keys (not BOOT/RESET), verified against Espressif's factory
++// demo BSP and MB v2.3 / P4X MB v2.4 schematics. All are pulled low when pressed.
++// https://github.com/espressif/esp-dev-kits/blob/master/examples/esp32-p4-eye/examples/common_components/esp32_p4_eye/include/bsp/esp32_p4_eye.h
++#define EYE_BUTTON_1_PIN 3
++#define EYE_BUTTON_2_PIN 4
++#define EYE_BUTTON_3_PIN 5
++// {pin, activeLow, HAL logical action bit}: X, Y, START complement the wheel's
++// A (tap), B (hold) and SELECT (double tap). These are independent momentary keys.
++#define GPIO_ENCODER_AUX_BUTTONS { \
++  {EYE_BUTTON_1_PIN, true, 1u << 2}, \
++  {EYE_BUTTON_2_PIN, true, 1u << 3}, \
++  {EYE_BUTTON_3_PIN, true, 1u << 4} \
++}
++
++// The radio companion owns slot 1 (GPIO27..32). The card must use slot 0,
++// with per-slot teardown; deinitializing the whole host would stop networking.
++#define SD_MMC_SLOT 0
++#define SD_MMC_CLK_PIN 43
++#define SD_MMC_CMD_PIN 44
++#define SD_MMC_D0_PIN 39
++#define SD_MMC_D1_PIN 40
++#define SD_MMC_D2_PIN 41
++#define SD_MMC_D3_PIN 42
++#define SD_MMC_DETECT_PIN 45
++#define SD_MMC_POWER_PIN 46
++#define SD_MMC_POWER_ACTIVE_LEVEL 0
++#define SD_MMC_LDO_CHANNEL 4
++#ifndef SD_MMC_MAX_FREQ_KHZ
++#define SD_MMC_MAX_FREQ_KHZ 20000
++#endif
+--- a/components/hardwareone/System_BuildConfig.h
++++ b/components/hardwareone/System_BuildConfig.h
+@@ -159,6 +159,7 @@
+ // Display: hardware display selection. 0 forces all OLED_*.cpp out of the
+ // build via the CMakeLists DISPLAY_TYPE gate.
+ //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
++//   4 = P4X-EYE ST7789 (SPI panel, compatible monochrome UI framebuffer)
+ //
+ // CURRENT: SSD1306 (OLED) for the FeatherS3. Set to 0 (NONE) for the XIAO — no
+ // on-board display. HAL_Display.cpp compiles unconditionally and switches on
+@@ -166,17 +167,23 @@
+ // I2C_FEATURE_LEVEL 0 already zeroes ENABLE_OLED_DISPLAY.
+ #define DISPLAY_TYPE            1
+ 
+-// Input device: which physical input controller is wired to the I2C bus.
+-// Exactly one driver compiles in (mutually exclusive — both share STEMMA QT
+-// and would collide if both ran). CMakeLists gates the .cpp file just like
++// Input device: which optional physical input controller is fitted.
++// Exactly one driver compiles in. CMakeLists gates the .cpp file just like
+ // DISPLAY_TYPE does.
+ //   0 = NONE             (no input device)
+ //   1 = SEESAW_GAMEPAD   (Adafruit Mini I2C Gamepad, 0x50)
+ //   2 = ANO_ENCODER      (Adafruit ANO Rotary Encoder breakout, 0x49)
++//   3 = GPIO_ENCODER     (quadrature wheel + click and optional board buttons)
+ //
+ // CURRENT: SEESAW_GAMEPAD for the FeatherS3. Set to 0 (NONE) for the XIAO —
+-// both options hang off the I2C bus a level-0 build doesn't have.
++// the two Seesaw options require I2C; GPIO input is independent.
+ #define INPUT_DEVICE_TYPE       1
++
++// Optional native SDMMC card backend; an explicit board profile supplies pins.
++// Existing SD_CS_PIN boards continue to use their SPI card backend.
++#ifndef ENABLE_SDMMC_CARD
++#define ENABLE_SDMMC_CARD 0
++#endif
+ 
+ // XIAO ESP32S3 Sense expansion: camera + PDM mic + microSD. The base XIAO and the
+ // Sense share one Arduino variant (CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"), so this
+@@ -482,10 +489,12 @@
+ #define DISPLAY_TYPE_SSD1306   1
+ #define DISPLAY_TYPE_ST7789    2
+ #define DISPLAY_TYPE_ILI9341   3
++#define DISPLAY_TYPE_ST7789_P4_EYE 4
+ 
+ #define INPUT_DEVICE_TYPE_NONE           0
+ #define INPUT_DEVICE_TYPE_SEESAW_GAMEPAD 1
+ #define INPUT_DEVICE_TYPE_ANO_ENCODER    2
++#define INPUT_DEVICE_TYPE_GPIO_ENCODER   3
+ 
+ // =============================================================================
+ // DERIVED FLAGS (automatically set based on I2C_FEATURE_LEVEL)
+@@ -580,6 +589,15 @@
+   #define ENABLE_LED_MATRIX 0
+ #endif
+ 
++// The legacy OLED UI can also render to the SPI EYE backend without I2C.
++#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
++  #undef ENABLE_OLED_DISPLAY
++  #define ENABLE_OLED_DISPLAY 1
++  #if !HW_BOARD_P4X_EYE
++    #error "P4X-EYE display requires its explicit board profile"
++  #endif
++#endif
++
+ // Override ENABLE_OLED_DISPLAY if DISPLAY_TYPE is NONE
+ #if DISPLAY_TYPE == DISPLAY_TYPE_NONE
+   #undef ENABLE_OLED_DISPLAY
+@@ -593,7 +611,21 @@
+ // because both occupy the same role (the OLED input source) and the seesaw
+ // driver would race the ANO driver for the STEMMA QT bus if both compiled in.
+ // The CMakeLists gate also skips the disabled driver's .cpp.
+-#if INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_ANO_ENCODER
++#define ENABLE_GPIO_ENCODER (INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_GPIO_ENCODER)
++// The EYE's three user keys belong to the same optional input controller.
++// Profiles can disable them while retaining wheel gestures. Other boards do
++// not acquire these GPIOs merely by selecting a native encoder.
++#ifndef ENABLE_GPIO_ENCODER_BUTTONS
++  #if HW_BOARD_P4X_EYE && ENABLE_GPIO_ENCODER
++    #define ENABLE_GPIO_ENCODER_BUTTONS 1
++  #else
++    #define ENABLE_GPIO_ENCODER_BUTTONS 0
++  #endif
++#endif
++#if ENABLE_GPIO_ENCODER_BUTTONS && (!HW_BOARD_P4X_EYE || !ENABLE_GPIO_ENCODER)
++  #error "GPIO encoder auxiliary buttons require the P4X-EYE encoder profile"
++#endif
++#if INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_ANO_ENCODER && ENABLE_I2C_SYSTEM
+   #undef  ENABLE_GAMEPAD_SENSOR
+   #define ENABLE_GAMEPAD_SENSOR 0
+   #define ENABLE_ANO_ENCODER    1
+@@ -609,7 +641,7 @@
+ // gate the OLED's input-handling code so it compiles for either driver.
+ // The two source-specific paths inside each block stay gated on their own
+ // ENABLE_* flag.
+-#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER)
++#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER)
+ 
+ // The device-start queue is only used by optional sensors that initialize in
+ // their own tasks. Infrastructure-only I2C builds (for example FeatherS3[D]'s
+@@ -617,7 +649,7 @@
+ // not pay for an idle 4 KB task that wakes every 100 ms.
+ #define ENABLE_I2C_SENSOR_QUEUE \
+   (ENABLE_THERMAL_SENSOR || ENABLE_TOF_SENSOR || ENABLE_IMU_SENSOR || \
+-   ENABLE_OLED_INPUT || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
++   ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
+    ENABLE_FM_RADIO || ENABLE_RTC_SENSOR || ENABLE_PRESENCE_SENSOR)
+ 
+ // =============================================================================
+@@ -938,8 +970,24 @@
+ //   4. Update the BOARD_NAME string for identification
+ // =============================================================================
+ 
++// --- Espressif ESP32-P4X-EYE: explicit board identity, not every P4 chip. ---
++#if HW_BOARD_P4X_EYE
++  #include "System_Board_P4X_EYE.h"
++  #define BOARD_SUPPORTED 1
++  #define BOARD_NAME "Espressif ESP32-P4X-EYE"
++  #define I2C_SDA_PIN_DEFAULT -1
++  #define I2C_SCL_PIN_DEFAULT -1
++  #define NEOPIXEL_PIN_DEFAULT -1
++  #define NEOPIXEL_POWER_PIN -1
++  #define NEOPIXEL_COUNT_DEFAULT 0
++  #define USER_LED_PIN -1
++  #define BATTERY_ADC_PIN -1
++  #define BATTERY_MONITOR_AVAILABLE 0
++  #define BATTERY_BACKEND_ADC 0
++  #define BATTERY_BACKEND_FUEL_GAUGE 0
++
+ // --- Adafruit QT Py ESP32 (ESP32-PICO) ---
+-#if defined(ARDUINO_ADAFRUIT_QTPY_ESP32_DEV)
++#elif defined(ARDUINO_ADAFRUIT_QTPY_ESP32_DEV)
+   #define BOARD_SUPPORTED       1
+   #define BOARD_NAME            "Adafruit QT Py ESP32"
+   
+@@ -1242,21 +1290,6 @@
+   #define UART_LINK_BAUD_DEFAULT 230400
+   #define UART_LINK_BAUD_MAX    230400
+ 
+-// --- ESP32-P4X-EYE mesh experiment: only the companion radio is enabled. ---
+-#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+-  #define BOARD_SUPPORTED       1
+-  #define BOARD_NAME            "Espressif ESP32-P4X-EYE"
+-  #define I2C_SDA_PIN_DEFAULT    -1
+-  #define I2C_SCL_PIN_DEFAULT    -1
+-  #define NEOPIXEL_PIN_DEFAULT  -1
+-  #define NEOPIXEL_POWER_PIN    -1
+-  #define NEOPIXEL_COUNT_DEFAULT 0
+-  #define USER_LED_PIN          -1
+-  #define BATTERY_ADC_PIN       -1
+-  #define BATTERY_MONITOR_AVAILABLE 0
+-  #define BATTERY_BACKEND_ADC        0
+-  #define BATTERY_BACKEND_FUEL_GAUGE 0
+-
+ // --- Unsupported Board ---
+ #else
+   #define BOARD_SUPPORTED       0
+@@ -1274,6 +1307,18 @@
+   #define BATTERY_BACKEND_ADC        0
+   #define BATTERY_BACKEND_FUEL_GAUGE 0
+ 
++#endif
++
++// Optional storage capability: the card never gates the internal filesystem.
++#ifndef ENABLE_SD_CARD
++  #if ENABLE_SDMMC_CARD || defined(SD_CS_PIN)
++    #define ENABLE_SD_CARD 1
++  #else
++    #define ENABLE_SD_CARD 0
++  #endif
++#endif
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!HW_BOARD_P4X_EYE || !defined(CONFIG_IDF_TARGET_ESP32P4))
++  #error "SDMMC card requires a supported board profile (currently P4X-EYE)"
+ #endif
+ 
+ // =============================================================================
+--- a/components/hardwareone/System_ESPNow_Sensors.cpp
++++ b/components/hardwareone/System_ESPNow_Sensors.cpp
+@@ -21,6 +21,8 @@
+ #include "i2csensor_seesaw.h"
+ #elif ENABLE_ANO_ENCODER
+ #include "i2csensor_ano_encoder.h"   // anoEncoderBuildDataJSON — the ANO input builder
++#elif ENABLE_GPIO_ENCODER
++#include "Input_GPIOEncoder.h"
+ #endif
+ #if ENABLE_GPS_SENSOR
+ #include "i2csensor_pa1010d.h"
+@@ -165,6 +167,8 @@
+   // `if (!spec.builder) continue;` silently dropped every input frame —
+   // streaming "turned on" but nothing reached the peer.
+   [REMOTE_SENSOR_INPUT]    = { anoEncoderBuildDataJSON,     100,  128  },
++#elif ENABLE_GPIO_ENCODER
++  [REMOTE_SENSOR_INPUT]    = { gpioEncoderBuildDataJSON,    100,  256  },
+ #else
+   [REMOTE_SENSOR_INPUT]    = { nullptr, 0, 0 },
+ #endif
+--- a/components/hardwareone/System_FeatureRegistry.cpp
++++ b/components/hardwareone/System_FeatureRegistry.cpp
+@@ -340,10 +340,10 @@
+     "Home Assistant integration via MQTT broker" },
+ 
+   // === DISPLAY FEATURES ===
+-  { "oled", "OLED Display", FEATURE_CAT_DISPLAY, 4,
++  { "oled", "Local Display", FEATURE_CAT_DISPLAY, 4,
+     FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
+     &gSettings.oledEnabled, isOledCompiled,
+-    "128x64 OLED display interface" },
++    "Local display interface (selected display backend)" },
+     
+   { "led", "NeoPixel LED", FEATURE_CAT_DISPLAY, 2,
+     FEATURE_FLAG_RUNTIME_TOGGLE,
+@@ -368,7 +368,9 @@
+   // exposes itself here. Wizard / settings UI / feature list all use this one
+   // entry; the active driver disambiguates at runtime.
+   { "input",
+-#if ENABLE_ANO_ENCODER
++#if ENABLE_GPIO_ENCODER
++    "GPIO Rotary Encoder",
++#elif ENABLE_ANO_ENCODER
+     "ANO Encoder",
+ #else
+     "Gamepad",
+@@ -376,7 +378,9 @@
+     FEATURE_CAT_SENSOR, 2,
+     FEATURE_FLAG_RUNTIME_TOGGLE,
+     &gSettings.inputAutoStart, isInputCompiled,
+-#if ENABLE_ANO_ENCODER
++#if ENABLE_GPIO_ENCODER
++    "GPIO quadrature wheel and click gestures for navigation"
++#elif ENABLE_ANO_ENCODER
+     "ANO rotary encoder + 5-button D-pad for navigation"
+ #else
+     "Seesaw gamepad for navigation"
+--- a/components/hardwareone/System_FirstTimeSetup.cpp
++++ b/components/hardwareone/System_FirstTimeSetup.cpp
+@@ -22,7 +22,7 @@
+ #include "System_MemUtil.h"
+ #include "System_I2C.h"
+ #include "System_SensorStubs.h"
+-#if ENABLE_GAMEPAD_SENSOR
++#if ENABLE_OLED_INPUT
+ #include "HAL_Input.h"
+ #endif
+ #include "System_Settings.h"
+@@ -585,7 +585,7 @@
+ 
+       // Step 5: Poll until restore completes or user presses B / types 'back'.
+       // Upload only stages the backup; OLED/serial confirm applies it.
+-#if ENABLE_GAMEPAD_SENSOR
++#if ENABLE_OLED_INPUT
+       uint32_t lastBtnState = 0xFFFFFFFF;
+       bool btnStateInit = false;
+ #endif
+@@ -645,7 +645,7 @@
+           }
+         }
+ 
+-#if ENABLE_GAMEPAD_SENSOR
++#if ENABLE_OLED_INPUT
+ #if ENABLE_OLED_DISPLAY
+         // Joystick up/down flips the help pages — same control as the archetype cards.
+         {
+@@ -654,27 +654,10 @@
+           else if (nav.up) { rpage = (rpage + RPAGES - 1) % RPAGES; }
+         }
+ #endif
+-        // Gamepad B button = back (active-low, detect new press)
+-        uint32_t btns = 0;
+-        bool valid = false;
++        // Back actions can be short wheel gestures; consume the shared latch.
+         if (!goBack) {
+-          SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "fts.gamepadEscape");
+-          if (g.held) {
+-            btns = gInputCache.buttons;
+-            valid = gInputCache.dataValid;
+-          }
+-        }
+-        if (!goBack && valid) {
+-          if (!btnStateInit) {
+-            lastBtnState = btns;
+-            btnStateInit = true;
+-          } else {
+-            uint32_t newPressed = ~btns & lastBtnState;  // active-low: was 1 (up), now 0 (down)
+-            if (newPressed & INPUT_MASK(INPUT_BUTTON_B)) {
+-              goBack = true;
+-            }
+-            lastBtnState = btns;
+-          }
++          const uint32_t newPressed = inputConsumeButtonPresses(lastBtnState, btnStateInit);
++          if (INPUT_CHECK(newPressed, INPUT_BUTTON_B)) goBack = true;
+         }
+ #endif
+       }
+@@ -1028,7 +1011,7 @@
+     needsRebootForHardware = true;
+   }
+ #endif
+-#if ENABLE_GAMEPAD_SENSOR
++#if ENABLE_OLED_INPUT
+   if (gInputRunning && !gSettings.inputAutoStart) {
+     needsRebootForHardware = true;
+   }
+--- a/components/hardwareone/System_I2C.cpp
++++ b/components/hardwareone/System_I2C.cpp
+@@ -13,6 +13,7 @@
+ 
+ #include "i2csensor_rda5807.h"
+ #include "System_BuildConfig.h"
++#include "Input_GPIOEncoder.h"
+ #include "System_Command.h"
+ #include "System_Debug.h"
+ #include "System_FirstTimeSetup.h"
+@@ -104,7 +105,7 @@
+   #if !ENABLE_IMU_SENSOR
+     if (strcmp(sensor.moduleName, "imu") == 0) return false;
+   #endif
+-  #if !ENABLE_OLED_INPUT
++  #if !ENABLE_GAMEPAD_SENSOR && !ENABLE_ANO_ENCODER
+     if (strcmp(sensor.moduleName, "input") == 0) return false;
+   #endif
+   // (Removed: two branches matching sensor.moduleName against the pre-unification
+@@ -390,6 +391,9 @@
+ // Externally linkable so HAL_Input.cpp's unified cmd_openinput can dispatch
+ // through the same queue as the other sensor start commands.
+ const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const bool& enabledFlag, const char* eventTag) {
++#if ENABLE_GPIO_ENCODER
++  if (sensor == I2C_DEVICE_INPUT) return "Error: GPIO input is not an I2C device; use openinput";
++#endif
+   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+ 
+   // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
+@@ -1835,6 +1839,8 @@
+   // encoder). Matches controls json / open<id>/close<id> / sensorautostart /
+   // the I2C DB moduleName, so the app correlates on one name with no overrides.
+   addSensorEntry(arr, "input",    "Seesaw gamepad",         SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
++#elif ENABLE_GPIO_ENCODER
++  addSensorEntry(arr, "input",    "GPIO rotary encoder",    SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gpioEncoderBuildDataJSON : nullptr);
+ #endif
+ #if ENABLE_THERMAL_SENSOR
+   addSensorEntry(arr, "thermal",  "MLX90640 thermal",       SENSOR_KIND_STREAM, gThermalRunning, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJSON : nullptr);
+@@ -2056,7 +2062,9 @@
+   { "GPS",            "gps",     &gSettings.gpsAutoStart,      4 },  // PA1010D: NMEA parsing
+   { "FM Radio",       "fmradio", &gSettings.fmRadioAutoStart,  2 },  // RDA5807: minimal
+   { "APDS Gesture",   "apds",    &gSettings.apdsAutoStart,     4 },  // APDS9960: gesture buffers
+-#if ENABLE_ANO_ENCODER
++#if ENABLE_GPIO_ENCODER
++  { "GPIO Encoder",   "input",   &gSettings.inputAutoStart,    4 },
++#elif ENABLE_ANO_ENCODER
+   { "ANO Encoder",    "input",   &gSettings.inputAutoStart,    2 },  // Adafruit ANO seesaw: minimal
+ #else
+   { "Gamepad",        "input",   &gSettings.inputAutoStart,    2 },  // Seesaw mini gamepad: minimal
+@@ -2901,6 +2909,7 @@
+           announceSensorStart("IMU", gImuRunning);
+           break;
+         case I2C_DEVICE_INPUT:
++#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
+           // I2C_DEVICE_INPUT is the shared input-device slot — under ANO
+           // build, inputStartInternal() comes from the ANO driver. The label
+           // reflects whichever input device is compiled in.
+@@ -2911,6 +2920,7 @@
+ #else
+           INFO_I2C_AUTOSTARTF("Gamepad: %s", gInputRunning ? "SUCCESS" : "FAILED");
+           announceSensorStart("Gamepad", gInputRunning);
++#endif
+ #endif
+           break;
+         case I2C_DEVICE_APDS:
+--- a/components/hardwareone/System_SensorStubs.cpp
++++ b/components/hardwareone/System_SensorStubs.cpp
+@@ -65,7 +65,7 @@
+ // driver get stubbed here — gInputRunning/gInputConnected/gInputCache
+ // are populated live by the ANO task when ENABLE_ANO_ENCODER is on, so the
+ // OLED input pipeline sees real state instead of zeros.
+-#if !ENABLE_ANO_ENCODER
++#if !ENABLE_ANO_ENCODER && !ENABLE_GPIO_ENCODER
+ InputCache gInputCache;
+ bool gInputRunning = false;
+ bool gInputConnected = false;
+--- a/components/hardwareone/System_SensorStubs.h
++++ b/components/hardwareone/System_SensorStubs.h
+@@ -79,7 +79,7 @@
+   extern const size_t gamepadCommandsCount;
+   // inputStartInternal() is provided by the ANO encoder driver when that is
+   // the active input device; only stub it when NO input driver is compiled in.
+-#if !ENABLE_ANO_ENCODER
++#if !ENABLE_ANO_ENCODER && !ENABLE_GPIO_ENCODER
+   inline bool inputStartInternal() { return false; }
+ #endif
+ #endif
+--- a/components/hardwareone/System_SetupWizard.cpp
++++ b/components/hardwareone/System_SetupWizard.cpp
+@@ -1744,26 +1744,7 @@
+     // ------------------------------------------------------------------
+ #if ENABLE_OLED_DISPLAY
+     if (oledDisplay && oledConnected) {
+-      uint32_t buttons = lastButtons;
+-      bool haveButtons = false;
+-      {
+-        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+-        if (g.held && gInputCache.dataValid) {
+-          buttons = gInputCache.buttons;
+-          haveButtons = true;
+-        }
+-      }
+-
+-      if (haveButtons && !lastButtonsInitialized) {
+-        lastButtons = buttons;
+-        lastButtonsInitialized = true;
+-        continue;
+-      }
+-
+-      uint32_t pressedNow  = ~buttons;
+-      uint32_t pressedLast = ~lastButtons;
+-      uint32_t newButtons  = pressedNow & ~pressedLast;
+-      lastButtons = buttons;
++      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+ 
+       JoystickNav nav = readWizardJoystickNav();
+       bool hasInput = (newButtons != 0) || nav.up || nav.down || nav.left || nav.right;
+--- a/components/hardwareone/System_SetupWizardMode.cpp
++++ b/components/hardwareone/System_SetupWizardMode.cpp
+@@ -27,6 +27,7 @@
+ // CLI_MODE_HANDLED_AND_EXIT on the final transition (or on cancel).
+ 
+ #include "System_SetupWizardMode.h"
++#include "HAL_Input.h"
+ #include "System_SetupWizard.h"   // existing state mutators + renderers
+ #include "System_CLIMode.h"
+ #include "System_Settings.h"      // gSettings, setSetting (applied at finalize)
+@@ -874,25 +875,8 @@
+   if (!oledDisplay || !oledConnected) return;
+ 
+   // ---- 1. Joystick poll ----
+-  uint32_t buttons = sLastButtons;
+-  bool haveButtons = false;
+-  {
+-    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "wizardMode.buttonRead");
+-    if (g.held && gInputCache.dataValid) {
+-      buttons = gInputCache.buttons;
+-      haveButtons = true;
+-    }
+-  }
+-  // First read just establishes the baseline; the first edge will be
+-  // detected next tick.
+-  if (haveButtons && !sLastButtonsValid) {
+-    sLastButtons = buttons;
+-    sLastButtonsValid = true;
+-  } else if (haveButtons) {
+-    uint32_t pressedNow  = ~buttons;
+-    uint32_t pressedLast = ~sLastButtons;
+-    uint32_t newButtons  = pressedNow & ~pressedLast;
+-    sLastButtons = buttons;
++  const uint32_t newButtons = inputConsumeButtonPresses(sLastButtons, sLastButtonsValid);
++  if (sLastButtonsValid) {
+ 
+     JoystickNav nav = readWizardJoystickNav();
+     bool hasInput = (newButtons != 0) || nav.up || nav.down || nav.left || nav.right;
+--- a/components/hardwareone/System_Utils.cpp
++++ b/components/hardwareone/System_Utils.cpp
+@@ -3190,17 +3190,17 @@
+     "are read-only (or browse-only) for admins, while user data is fully writable; "
+     "logtier reports whether logs are writing to LittleFS or have spilled into SD "
+     "overflow.", filesystemCommands,   &filesystemCommandsCount, 0, nullptr },
+-#if defined(SD_CS_PIN)
++#if ENABLE_SD_CARD
+   { "sd",         "SD card mount, format, and info", "Controls the optional microSD card, which mounts at /sd and serves as "
+     "overflow/bulk storage (and is only compiled in on boards that wire a "
+-    "card-detect/CS pin). sdmount attempts to mount the card and sdunmount safely "
++    "supported SPI or SDMMC slot). sdmount attempts to mount the card and sdunmount safely "
+     "unmounts it; sdinfo shows the card type, size, and used/free space, and sddiag "
+-    "runs a raw-SPI hardware diagnostic to troubleshoot a card that will not mount. "
++    "reports backend-specific diagnostics to troubleshoot a card that will not mount. "
+     "sdformat erases the entire card and reformats it as FAT32 and therefore requires "
+     "sdformat confirm to proceed. Once mounted, file commands address the card through "
+     "its /sd/... path prefix.", sdCommands,           &sdCommandsCount, 0, []() { return VFS::isSDAvailable(); } },
+ #endif
+-  { "oled",       "OLED display control and graphics", "Drives the small SSD1306 OLED display: its lifecycle, the live screen contents, "
++  { "oled",       "Local display control and graphics", "Drives the selected local display backend: its lifecycle, the live screen contents, "
+     "and persistent appearance settings. oledstart/oledstop (aliases "
+     "openoled/closeoled) power the display task on and off, and oledstatus (alias "
+     "oledread) reports its state. oledmode <mode> switches the live screen among the "
+@@ -3294,13 +3294,13 @@
+     "degrees.", imuCommands,          &imuCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("imu"); } },
+ #endif
+ #if ENABLE_OLED_INPUT
+-  { "input",      "Input device (gamepad or ANO encoder)", "Device-agnostic abstraction for the OLED input controller, which is either the "
+-    "Seesaw gamepad or the ANO rotary encoder -- chosen at compile time via "
++  { "input",      "Input device (gamepad or rotary encoder)", "Device-agnostic abstraction for the OLED input controller, which is either the "
++    "Seesaw gamepad, ANO encoder or GPIO rotary encoder -- chosen at compile time via "
+     "INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per "
+     "firmware. These commands operate on whichever driver was built in: openinput "
+     "starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, "
+     "and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default "
+-    "90). Driver-specific debugging and tuning live in the gamepad and anoencoder "
++    "90 for I2C devices; GPIO input uses a fixed 5 ms button sample). Driver-specific debugging and tuning live in the gamepad and anoencoder "
+     "modules; this module holds only the shared settings (poll interval and "
+     "auto-start).", inputCommands,       &inputCommandsCount,       CMD_MODULE_SENSOR, []() { return gInputConnected; } },
+ #endif
+@@ -4443,6 +4443,9 @@
+ #if ENABLE_GAMEPAD_SENSOR
+   broadcastOutput("  [Y] GAMEPAD  | inputTask() in i2csensor_seesaw.cpp");
+   enabled_count++;
++#elif ENABLE_GPIO_ENCODER
++  broadcastOutput("  [Y] GPIO_ENC | Input_GPIOEncoder task");
++  enabled_count++;
+ #elif ENABLE_ANO_ENCODER
+   broadcastOutput("  [Y] ANO_ENC  | inputTask() in i2csensor_ano_encoder.cpp");
+   enabled_count++;
+--- a/components/hardwareone/System_VFS.cpp
++++ b/components/hardwareone/System_VFS.cpp
+@@ -13,7 +13,14 @@
+ #include "System_Notifications.h"
+ 
+ #include <LittleFS.h>
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
++#include "HAL_SDCard.h"
++// Preserve one filesystem access path; permissions and /sd routing below are
++// independent of the physical transport.
++static SdMmcCardFS& SD = gSdMmcCard;
++#else
+ #include <SD.h>
++#endif
+ #include "esp_littlefs.h"  // esp_littlefs_info — total+used in one traverse
+ #include <SPI.h>
+ 
+@@ -88,7 +95,7 @@
+ 
+ namespace VFS {
+ 
+-static bool gSdMounted  = false;  // driver-level: SD.begin() succeeded
++static bool gSdMounted  = false;  // driver-level: selected SD transport mounted
+ static bool gSdWritable = false;  // probe-verified: a write round-trip worked
+ 
+ // Presentation-only capacity snapshots. The cache core is dependency-free and
+@@ -154,7 +161,7 @@
+ 
+ // Fully tear down SPI + SD so tryMountSD() can start from a clean slate.
+ static void spiTeardown() {
+-#if defined(SD_CS_PIN)
++#if ENABLE_SD_CARD && !ENABLE_SDMMC_CARD && defined(SD_CS_PIN)
+   SD.end();
+   SPI.end();
+   // Drive CS high so the card doesn't interpret noise as a command while the
+@@ -169,7 +176,7 @@
+ // this, but doing it explicitly first helps with cards that just came out of
+ // a format / reset.
+ static void sdPowerUpClocks() {
+-#if defined(SD_CS_PIN)
++#if ENABLE_SD_CARD && !ENABLE_SDMMC_CARD && defined(SD_CS_PIN)
+   digitalWrite(SD_CS_PIN, HIGH);
+   SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+   for (int i = 0; i < 10; i++) SPI.transfer(0xFF);  // 80 clocks
+@@ -184,7 +191,19 @@
+   // VFS::open/read/write while SPI and the FAT volume are being rebuilt.
+   FsLockGuard guard("VFS.sdMount");
+   invalidateStatsSnapshot(SDCARD);
+-#if defined(SD_CS_PIN)
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
++  if (SD.begin()) {
++    gSdMounted = true;
++    gSdWritable = probeSDWriteInternal();
++    char freeMb[16];
++    const uint64_t total = SD.totalBytes(), used = SD.usedBytes();
++    snprintf(freeMb, sizeof(freeMb), "%llu",
++             (unsigned long long)((total > used ? total - used : 0) / (1024ULL * 1024ULL)));
++    systemEventPost(SYSEVT_SD_MOUNTED, freeMb, gSdWritable ? "writable" : "read-only");
++    return true;
++  }
++  WARN_STORAGEF("[SD] SDMMC mount failed: %s", SD.lastError());
++#elif ENABLE_SD_CARD && defined(SD_CS_PIN)
+   // Three full attempts, each with a complete SPI bus reset, walking a
+   // fastest-first frequency ladder.
+   //
+@@ -291,12 +310,20 @@
+ // ("readback mismatch") apart from path quirks.
+ //
+ // Filename choice matters: some FAT drivers handle leading-dot filenames
+-// oddly (no 8.3 basename). HWPROBE.TMP is 8.3-safe and all-caps so it round-
+-// trips cleanly on any FAT implementation.
++// oddly (no 8.3 basename). The temporary names are 8.3-safe and all-caps so
++// they round-trip cleanly on any FAT implementation.
+ static bool probeSDWriteInternal() {
+-#if defined(SD_CS_PIN)
+-  if (!gSdMounted) return false;
+-  const char* kProbePath = "/HWPROBE.TMP";
++#if ENABLE_SD_CARD
++  if (!isSDAvailable()) return false;
++  // A user may already have a similarly named file on a removable card.
++  // Pick a vacant 8.3 name; never truncate or delete existing card contents.
++  char kProbePath[16];
++  bool found = false;
++  for (unsigned i = 0; i < 16; ++i) {
++    snprintf(kProbePath, sizeof(kProbePath), "/HWPR%04u.TMP", i);
++    if (!SD.exists(kProbePath)) { found = true; break; }
++  }
++  if (!found) return false;
+   const char* kProbeData = "hwone-sdtest\n";  // 13 bytes
+   const size_t kProbeLen = 13;
+ 
+@@ -352,6 +379,13 @@
+ 
+ bool isSDAvailable() {
+   FsLockGuard guard("VFS.sdAvailable");
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
++  if (gSdMounted && !SD.available()) {
++    gSdWritable = false;
++    invalidateStatsSnapshot(SDCARD);
++    return false;
++  }
++#endif
+   return gSdMounted;
+ }
+ 
+@@ -361,7 +395,7 @@
+ // writable without needing an explicit remount.
+ bool isSDWritable() {
+   FsLockGuard guard("VFS.sdWritable");
+-  if (!gSdMounted) return false;
++  if (!isSDAvailable()) return false;
+   if (gSdWritable) return true;
+   // Not currently writable — maybe it was, maybe it is again. Try once.
+   if (probeSDWriteInternal()) {
+@@ -464,7 +498,7 @@
+   FsLockGuard guard("VFS.exists");
+ 
+   if (getStorageType(p) == SDCARD) {
+-    if (!gSdMounted) return false;
++    if (!isSDAvailable()) return false;
+     if (p == "/sd") return true;
+     return SD.exists(p.c_str() + 3);
+   }
+@@ -479,7 +513,7 @@
+   FsLockGuard guard("VFS.open");
+ 
+   if (getStorageType(p) == SDCARD) {
+-    if (!gSdMounted) return File();
++    if (!isSDAvailable()) return File();
+     const char* sdPath = (p == "/sd") ? "/" : p.c_str() + 3;
+     return SD.open(sdPath, mode, create);
+   }
+@@ -494,7 +528,7 @@
+   FsLockGuard guard("VFS.mkdir");
+ 
+   if (getStorageType(p) == SDCARD) {
+-    if (!gSdMounted) return false;
++    if (!isSDAvailable()) return false;
+     if (p == "/sd") return false;
+     return SD.mkdir(p.c_str() + 3);
+   }
+@@ -518,7 +552,7 @@
+   FsLockGuard guard("VFS.remove");
+ 
+   if (getStorageType(p) == SDCARD) {
+-    if (!gSdMounted) return false;
++    if (!isSDAvailable()) return false;
+     if (p == "/sd") return false;
+     bool ok = SD.remove(p.c_str() + 3);
+     if (ok) postFileDeleted(p.c_str());
+@@ -548,7 +582,7 @@
+   FsLockGuard guard("VFS.rename");
+ 
+   if (tf == SDCARD) {
+-    if (!gSdMounted) return false;
++    if (!isSDAvailable()) return false;
+     if (from == "/sd" || to == "/sd") return false;
+     return SD.rename(from.c_str() + 3, to.c_str() + 3);
+   }
+@@ -565,7 +599,7 @@
+   FsLockGuard guard("VFS.rmdir");
+ 
+   if (getStorageType(p) == SDCARD) {
+-    if (!gSdMounted) return false;
++    if (!isSDAvailable()) return false;
+     if (p == "/sd") return false;
+     bool ok = SD.rmdir(p.c_str() + 3);
+     if (ok) postFileDeleted(p.c_str());
+@@ -593,7 +627,7 @@
+   FreshCapacitySample result;
+ 
+   if (type == SDCARD) {
+-    if (!gSdMounted) return result;
++    if (!isSDAvailable()) return result;
+     result.snapshot.totalBytes = SD.totalBytes();
+     result.snapshot.usedBytes = SD.usedBytes();
+     result.snapshot.freeBytes =
+@@ -838,9 +872,16 @@
+ bool unmountSD() {
+   FsLockGuard guard("VFS.sdUnmount");
+   invalidateStatsSnapshot(SDCARD);
+-#if defined(SD_CS_PIN)
++#if ENABLE_SD_CARD
+   if (gSdMounted) {
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
++    const bool ended = SD.end();
++    gSdMounted = false;
++    gSdWritable = false;
++    if (!ended) return false;
++#else
+     SD.end();
++#endif
+     gSdMounted = false;
+     gSdWritable = false;
+     systemEventPost(SYSEVT_SD_UNMOUNTED);
+@@ -853,7 +894,13 @@
+ bool remountSD() {
+   FsLockGuard guard("VFS.sdRemount");
+   invalidateStatsSnapshot(SDCARD);
+-#if defined(SD_CS_PIN)
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
++  const bool ended = SD.end();
++  gSdMounted = false;
++  gSdWritable = false;
++  if (!ended) return false;
++  return tryMountSD();
++#elif ENABLE_SD_CARD && defined(SD_CS_PIN)
+   // Full teardown regardless of current mount state — guarantees a clean bus.
+   spiTeardown();
+   gSdMounted = false;
+@@ -869,7 +916,15 @@
+ bool formatSD() {
+   FsLockGuard guard("VFS.sdFormat");
+   invalidateStatsSnapshot(SDCARD);
+-#if defined(SD_CS_PIN)
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
++  // Authorization and exact confirmation are enforced by cmd_sdformat.
++  gSdMounted = false;
++  gSdWritable = false;
++  if (!SD.format()) return false;
++  gSdMounted = true;
++  gSdWritable = probeSDWriteInternal();
++  return true;
++#elif ENABLE_SD_CARD && defined(SD_CS_PIN)
+   INFO_STORAGEF("[SD FORMAT] Starting format process...");
+   
+   // Must unmount Arduino SD first and end SPI
+@@ -1125,8 +1180,8 @@
+ static const char* cmd_sdmount(const String& argsInput) {
+   EXT_RAM_BSS_ATTR static char buf[128];
+   
+-#if !defined(SD_CS_PIN)
+-  snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board (no SD_CS_PIN defined)");
++#if !ENABLE_SD_CARD
++  snprintf(buf, sizeof(buf), "ERROR: SD card support is disabled or unavailable on this board");
+   return buf;
+ #else
+   if (VFS::isSDAvailable()) {
+@@ -1152,15 +1207,11 @@
+ static const char* cmd_sdunmount(const String& argsInput) {
+   EXT_RAM_BSS_ATTR static char buf[128];
+   
+-#if !defined(SD_CS_PIN)
++#if !ENABLE_SD_CARD
+   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
+   return buf;
+ #else
+-  if (!VFS::isSDAvailable()) {
+-    snprintf(buf, sizeof(buf), "Error: SD card is not mounted");
+-    return buf;
+-  }
+-  
++  // Release a stale mount too (e.g. an accidentally removed SDMMC card).
+   if (VFS::unmountSD()) {
+     snprintf(buf, sizeof(buf), "SD card unmounted successfully");
+   } else {
+@@ -1173,12 +1224,14 @@
+ static const char* cmd_sdformat(const String& argsInput) {
+   EXT_RAM_BSS_ATTR static char buf[256];
+   
+-#if !defined(SD_CS_PIN)
++#if !ENABLE_SD_CARD
+   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
+   return buf;
+ #else
+   // Check for confirmation flag
+-  if (argsInput.indexOf("confirm") < 0) {
++  String confirmation = argsInput;
++  confirmation.trim();
++  if (confirmation != "confirm") {
+     snprintf(buf, sizeof(buf), 
+       "WARNING: This will ERASE ALL DATA on the SD card!\n"
+       "Run 'sdformat confirm' to proceed.");
+@@ -1203,7 +1256,7 @@
+   EXT_RAM_BSS_ATTR static char buf[512];
+   const bool wantJson = argWantsJson(argsInput);
+ 
+-#if !defined(SD_CS_PIN)
++#if !ENABLE_SD_CARD
+   if (wantJson) return "{\"schema\":1,\"supported\":false}";
+   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
+   return buf;
+@@ -1256,6 +1309,7 @@
+ #endif
+ }
+ 
++#if ENABLE_SD_CARD && !ENABLE_SDMMC_CARD && defined(SD_CS_PIN)
+ // Helper to test SD card with specific pins
+ static uint8_t testSDPins(int cs, int sck, int miso, int mosi, char* buf, int* pos, int maxLen) {
+   *pos = appendf(buf, maxLen, *pos, "\n--- Testing CS=%d, SCK=%d, MISO=%d, MOSI=%d ---\n", cs, sck, miso, mosi);
+@@ -1316,12 +1370,29 @@
+   return response;
+ }
+ 
+-// Raw SPI diagnostic for SD card
++#endif
++
++// Transport-aware diagnostics; SDMMC mode never resets the C6 or LCD bus.
+ static const char* cmd_sddiag(const String& argsInput) {
+   PSRAM_STATIC_BUF(buf, 4096);
+   int pos = 0;
+   
+-#if !defined(SD_CS_PIN)
++#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
++  FsLockGuard guard("VFS.sdDiag");
++  snprintf(buf, buf_SIZE,
++      "SDMMC slot %d, 4-bit, max %d kHz\n"
++      "CLK=%d CMD=%d D0=%d D1=%d D2=%d D3=%d\n"
++      "Power GPIO%d (active %d), LDO%d, detect GPIO%d\n"
++      "Card: %s; mount: %s; last error: %s\n"
++      "Use sdunmount before removal and sdmount after insertion.",
++      SD_MMC_SLOT, SD_MMC_MAX_FREQ_KHZ,
++      SD_MMC_CLK_PIN, SD_MMC_CMD_PIN, SD_MMC_D0_PIN, SD_MMC_D1_PIN,
++      SD_MMC_D2_PIN, SD_MMC_D3_PIN, SD_MMC_POWER_PIN,
++      SD_MMC_POWER_ACTIVE_LEVEL, SD_MMC_LDO_CHANNEL, SD_MMC_DETECT_PIN,
++      SD.cardPresent() ? "inserted" : "absent",
++      VFS::isSDAvailable() ? "mounted" : "not mounted", SD.lastError());
++  return buf;
++#elif !ENABLE_SD_CARD
+   snprintf(buf, buf_SIZE, "ERROR: SD card not supported on this board");
+   return buf;
+ #else
+@@ -1404,9 +1475,9 @@
+   { "sdinfo", "Show SD card information", false, cmd_sdinfo,
+     "sdinfo - Display SD card type, size, and usage [json]" },
+   { "sddiag", "SD card hardware diagnostics", false, cmd_sddiag,
+-    "sddiag - Test raw SPI communication with SD card" },
++    "sddiag - Show SD transport diagnostics (SPI boards also run a bus test)" },
+ };
+ 
+ const size_t sdCommandsCount = sizeof(sdCommands) / sizeof(sdCommands[0]);
+ // Note: SD commands registered via gCommandModules in System_Utils.cpp (not via static registrar)
+-// This allows conditional compilation based on SD_CS_PIN for board compatibility
++// This allows conditional compilation based on ENABLE_SD_CARD for board compatibility
+--- a/components/hardwareone/System_VFS.h
++++ b/components/hardwareone/System_VFS.h
+@@ -58,11 +58,12 @@
+ bool isLittleFSReady();
+ 
+ /**
+- * "Driver-level" SD availability: true iff SD.begin() has succeeded and the
++ * SD availability: true iff the selected SD transport mount has succeeded and the
+  * mount hasn't been torn down. This does NOT prove files can actually be
+  * written — a card can mount but fail writes (bad sector where the next
+  * file happens to land, card yanked since, write-protect tab, filesystem
+- * errors). For gating UI around "can we record to SD" use isSDWritable().
++ * errors). SDMMC also checks the card-detect switch and latches observed
++ * removal until remount. For "can we record to SD" use isSDWritable().
+  */
+ bool isSDAvailable();
+ 
+@@ -83,7 +84,8 @@
+  */
+ void noteSDWriteFailure(const char* hint);
+ 
+-// SD card management
++// SD card management. Stop active writers and close their files before
++// unmount/format; card insertion is mounted explicitly with remountSD().
+ bool remountSD();
+ bool unmountSD();
+ bool formatSD();
+--- a/components/hardwareone_libs/CMakeLists.txt
++++ b/components/hardwareone_libs/CMakeLists.txt
+@@ -1,3 +1,8 @@
+-# Mesh-only experiment: peripheral libraries are deliberately not compiled.
+-# ArduinoJson is header-only and required by the real application and mesh.
+-idf_component_register(INCLUDE_DIRS ArduinoJson ArduinoJson/src REQUIRES arduino)
++idf_component_register(
++ SRC_DIRS Adafruit_BusIO Adafruit_GFX_Library Adafruit_SSD1306
++ INCLUDE_DIRS ArduinoJson ArduinoJson/src Adafruit_BusIO Adafruit_GFX_Library
++ Adafruit_SSD1306 Adafruit_Unified_Sensor Adafruit_NeoPixel Adafruit_GPS_Library/src
++ Adafruit_seesaw_Library Adafruit_BNO055 Adafruit_APDS9960_Library
++ Adafruit_MLX90640 Adafruit_PWM_Servo_Driver_Library STM32duino_VL53L4CX/src
++ Radio/src Adafruit_LED_Backpack_Library liblc3/include
++ REQUIRES arduino)

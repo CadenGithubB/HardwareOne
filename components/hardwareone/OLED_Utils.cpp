@@ -2363,6 +2363,10 @@ void oledKeyboardCancel() {
 // Can this mode be entered right now? Every mode is unconditional except MIC,
 // which needs field permission, a mic source, and an authenticated host link.
 static bool oledKeyboardModeUsable(OLEDKeyboardMode mode) {
+#if ENABLE_GPIO_ENCODER
+  // The onboard wheel has no analog directions for gamepad-pattern input.
+  if (mode == KEYBOARD_MODE_PATTERN) return false;
+#endif
   if (mode == KEYBOARD_MODE_MIC) {
     return gOledKeyboardState.dictationPolicy ==
                OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT &&
@@ -3023,7 +3027,7 @@ void drawOLEDFooter() {
       }
       #else
       hints = "B:Back";
-      #endif
+     #endif
       break;
       
     // OLED_NETWORK_INFO / OLED_NETWORK_STATUS / OLED_NETWORK_WIFI_MENU hints
@@ -3865,11 +3869,13 @@ extern void imuUpdateActions();
 // ============================================================================
 
 bool initOLEDDisplay() {
+#if DISPLAY_TYPE != DISPLAY_TYPE_ST7789_P4_EYE
   if (gDisplay != nullptr) {
     gOledConsole.init();
     broadcastOutput("OLED display already initialized");
     return true;
   }
+#endif
 
   DEBUG_DISPLAYF("Starting display initialization (%s)...", DISPLAY_NAME);
 
@@ -3929,12 +3935,17 @@ void stopOLEDDisplay() {
   // transaction. Calling displayUpdate() here would try to acquire this same
   // non-recursive bus mutex a second time and silently skip the final frame.
   // delete/null must happen after the transaction completes, not inside it.
-  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
+  OLED_TRANSACTION(
     gDisplay->clearDisplay();
     gDisplay->display();
-  });
+  );
   delete gDisplay;
   gDisplay = nullptr;
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+  // Commands can stop the display while the render owner still holds a canvas
+  // pointer. Retain that small software canvas and its lock for the firmware
+  // lifetime; end() drains DMA and releases only the hardware resources.
+  gDisplay->end();
 #else
   // For SPI displays, no transaction needed
   displayClear();
@@ -4105,6 +4116,7 @@ void updateOLEDDisplay() {
   oledSnapshotFrameSeqs();
 
   // Skip if OLED is degraded (will auto-retry after recovery timeout)
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   if (i2cDeviceIsDegraded(OLED_I2C_ADDRESS, (uint8_t)gSettings.oledBus)) {
     static unsigned long lastDegradedLog = 0;
     unsigned long nowLog = millis();
@@ -4114,6 +4126,8 @@ void updateOLEDDisplay() {
     }
     return;
   }
+
+#endif
 
   // Apply a pending rotation (oledflip) here, at a frame boundary, rather than
   // in the task that asked for it — swapping the GFX coordinate transform out
@@ -4142,7 +4156,9 @@ void updateOLEDDisplay() {
       preparePerfData();  // 1 Hz uxTaskGetSystemState sample behind everyMs gate
       break;
     case OLED_I2C_DIAG:
+#if ENABLE_I2C_SYSTEM
       prepareI2cDiagData();  // advances the scan phase; runs the bus sweep here
+#endif
       break;
     case OLED_WEB_STATS:
       prepareWebStatsData();
@@ -4588,10 +4604,10 @@ const char* cmd_oledmode(const String& argsInput) {
       tryAutoStartInputForMenu();
       break;
     case OLED_OFF:
-      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
+      OLED_TRANSACTION(
         oledDisplay->clearDisplay();
         oledDisplay->display();
-      });
+      );
       break;
     default:
       // OLED_ANIMATION / OLED_FILE_BROWSER / OLED_ESPNOW entry resets now run via
@@ -4652,10 +4668,10 @@ const char* cmd_oledclear(const String& argsInput) {
     return "ERROR";
   }
 
-  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
+  OLED_TRANSACTION(
     oledDisplay->clearDisplay();
     oledDisplay->display();
-  });
+  );
 
   broadcastOutput("OLED display cleared");
   return "OK";
@@ -4669,7 +4685,15 @@ const char* cmd_oledstatus(const String& argsInput) {
     doc["schema"] = 1;
     doc["connected"] = oledConnected;
     if (oledConnected) {
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
       doc["address"] = OLED_I2C_ADDRESS;
+#endif
+      doc["interface"] = DISPLAY_INTERFACE;
+      doc["driver"] = DISPLAY_NAME;
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+      doc["panelWidth"] = DISPLAY_PANEL_WIDTH;
+      doc["panelHeight"] = DISPLAY_PANEL_HEIGHT;
+#endif
       doc["width"]   = SCREEN_WIDTH;
       doc["height"]  = SCREEN_HEIGHT;
       doc["enabled"] = gOledRunning;
@@ -4703,7 +4727,11 @@ const char* cmd_oledstatus(const String& argsInput) {
 
   broadcastOutput("OLED display: Connected");
   if (ensureDebugBuffer()) {
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
     snprintf(getDebugBuffer(), 1024, "Address: 0x%02X", OLED_I2C_ADDRESS);
+#else
+    snprintf(getDebugBuffer(), 1024, "Display: %s (%s)", DISPLAY_NAME, DISPLAY_INTERFACE);
+#endif
     broadcastOutput(getDebugBuffer());
     snprintf(getDebugBuffer(), 1024, "Resolution: %dx%d", SCREEN_WIDTH, SCREEN_HEIGHT);
     broadcastOutput(getDebugBuffer());
@@ -5037,6 +5065,7 @@ extern ConnectedDevice connectedDevices[];
 // Early OLED initialization during setup() - probes and initializes for boot animation
 // Returns true if OLED was detected and initialized
 bool earlyOLEDInit() {
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   // Early exit if I2C bus is disabled
   if (!gI2CBusRunning) {
     DEBUG_DISPLAYF("OLED init skipped - I2C bus disabled");
@@ -5044,6 +5073,8 @@ bool earlyOLEDInit() {
     gOledRunning = false;
     return false;
   }
+
+#endif
 
   bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
   DEBUG_DISPLAYF("[OLED_INIT] fts=%d settings.oledEnabled=%d\n", inFirstTimeSetup ? 1 : 0,
@@ -5070,6 +5101,34 @@ bool earlyOLEDInit() {
     }
   }
   
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+  if (!displayInit()) {
+    oledConnected = false;
+    gOledRunning = false;
+    if (gSettings.oledEnabled) systemEventPost(SYSEVT_DISPLAY_INIT_FAILED, DISPLAY_NAME);
+    return false;
+  }
+  oledConnected = true;
+  gOledRunning = true;
+  gOledConsole.init();
+  gDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
+  displaySetBrightness(gSettings.oledBrightness);
+  inputAbstractionInit();
+  currentBootPhase = BOOT_PHASE_ANIMATION;
+  bootPhaseStartTime = millis();
+  oledBootModeActive = true;
+  requestOLEDMode(OLED_ANIMATION, "boot.init", false);
+  currentAnimation = ANIM_BOOT_PROGRESS;
+  animationFrame = 0;
+  animationLastUpdate = millis();
+  bootProgressPercent = 0;
+  bootProgressLabel = "Initializing...";
+  displayClear();
+  displayAnimation();
+  displayUpdate();
+  logSystemEvent("DISPLAY", "%s online (SPI)", DISPLAY_NAME);
+  return true;
+#else
   // Resolve OLED's bus from settings (default 0 = I2C1 = Wire1). Same
   // hard-fail-on-unavailable contract as HAL_Display.cpp's displayInit.
   const uint8_t oledBus = (uint8_t)gSettings.oledBus;
@@ -5152,11 +5211,11 @@ bool earlyOLEDInit() {
       bootProgressLabel = "Initializing...";
 
       // Clear display and render first animation frame (I2C-safe)
-      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
+      OLED_TRANSACTION(
         oledDisplay->clearDisplay();
         displayAnimation();
         oledDisplay->display();
-      });
+      );
 
       DEBUG_DISPLAYF("OLED boot animation started at 0x%02X", detectedAddr);
       logSystemEvent("DISPLAY", "OLED online at 0x%02X (bus %u)", detectedAddr, oledBus);
@@ -5175,6 +5234,7 @@ bool earlyOLEDInit() {
     systemEventPost(SYSEVT_DISPLAY_INIT_FAILED, dispDet);
   }
   return false;
+#endif
 }
 
 // Process boot sequence phase transitions in loop()
@@ -6182,6 +6242,7 @@ static const unsigned long GAMEPAD_DEBUG_INTERVAL = 30000; // Log every 30 secon
 static int gCurrentJoyX = 0;
 static int gCurrentJoyY = 0;
 static uint32_t gCurrentButtons = 0xFFFFFFFF;
+static uint32_t gHelperPressedAccum = 0;
 static bool gInputStateValid = false;
 
 /**
@@ -6189,24 +6250,31 @@ static bool gInputStateValid = false;
  * Call this at the start of each input polling cycle
  */
 void updateInputState() {
-#if ENABLE_GAMEPAD_SENSOR
-  if (!gInputCache.mutex) {
-    gInputStateValid = false;
-    return;
-  }
-  
-  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.inputStateRead");
-  if (g.held) {
-    if (gInputCache.dataValid) {
+#if ENABLE_OLED_INPUT
+  gNavEvents = {false, false, false, false, 0, 0, 0};
+  gInputStateValid = false;
+  if (!gInputCache.mutex) return;
+  {
+    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.inputStateRead");
+    if (g.held && gInputCache.dataValid) {
       gCurrentJoyX = gInputCache.joyX;
       gCurrentJoyY = gInputCache.joyY;
       gCurrentButtons = gInputCache.buttons;
+      gHelperPressedAccum |= gInputCache.buttonPressedAccum;
+      gInputCache.buttonPressedAccum = 0;
       gInputStateValid = true;
-    } else {
-      gInputStateValid = false;
     }
-  } else {
-    gInputStateValid = false;
+  }
+  // Setup prompts use this helper outside the normal processOLEDInput pump.
+  // Release the shared input mutex before asking the driver for detents.
+  if (gInputStateValid) {
+    int step;
+    while ((step = inputConsumeOneDetent()) != 0) {
+      gNavEvents.wheelDelta += step;
+      if (gNavEvents.wheelDelta >= 64 || gNavEvents.wheelDelta <= -64) break;
+    }
+    gNavEvents.up = gNavEvents.wheelDelta < 0;
+    gNavEvents.down = gNavEvents.wheelDelta > 0;
   }
 #else
   gInputStateValid = false;
@@ -6226,13 +6294,16 @@ uint32_t getNewlyPressedButtons() {
   if (!lastButtonStateInitialized) {
     lastButtonState = gCurrentButtons;
     lastButtonStateInitialized = true;
-    return 0;
+    const uint32_t pressed = gHelperPressedAccum;
+    gHelperPressedAccum = 0;
+    return pressed;
   }
   
   // Buttons are active-low, so invert for edge detection
   uint32_t currentPressed = ~gCurrentButtons;
   uint32_t lastPressed = ~lastButtonState;
-  uint32_t newlyPressed = currentPressed & ~lastPressed;
+  uint32_t newlyPressed = (currentPressed & ~lastPressed) | gHelperPressedAccum;
+  gHelperPressedAccum = 0;
   
   lastButtonState = gCurrentButtons;
   return newlyPressed;
@@ -6448,7 +6519,6 @@ bool processOLEDInput() {
         joyY = gInputCache.joyY;
         buttons = gInputCache.buttons;
         latchedPresses = gInputCache.buttonPressedAccum;
-        gInputCache.buttonPressedAccum = 0;  // Consume accumulated presses
         dataValid = true;
       }
     }
@@ -6482,7 +6552,7 @@ bool processOLEDInput() {
   bool deflectedX = abs(deltaX) > JOYSTICK_DEADZONE;
   bool deflectedY = abs(deltaY) > JOYSTICK_DEADZONE;
   bool hasJoystickInput = deflectedX || deflectedY;
-  bool hasButtonChange = (buttons != lastButtonState);
+  bool hasButtonChange = (buttons != lastButtonState) || latchedPresses != 0;
   
   // Reset latch when joystick returns to center
   if (!deflectedX && wasDeflectedX) {
@@ -6502,13 +6572,7 @@ bool processOLEDInput() {
   // the encoder's pending-detents cache here, a wheel-only spin would early-
   // exit and never reach the consumer below — detents would pile up forever
   // and only get drained the next time the user pressed a button.
-  bool hasEncoderInput = false;
-#if ENABLE_ANO_ENCODER
-  // No mutex: encoderDelta is a single int32_t, racing with the driver's
-  // accumulate is benign — we read a slightly stale value, the next frame
-  // catches up. Cheaper than a 5ms guard on the hot path.
-  hasEncoderInput = (gAnoEncoderCache.encoderDelta != 0);
-#endif
+  bool hasEncoderInput = inputHasPendingDetents();
   if (!hasJoystickInput && !hasButtonChange && !wasDeflectedX && !wasDeflectedY && !hasEncoderInput) {
     if (!oledKeyboardIsActive()) return false;
   }
@@ -6527,6 +6591,20 @@ bool processOLEDInput() {
     return false;  // Skip this frame to allow button state to change
   }
   
+  // Consume only after all early exits. Short click pulses must remain latched
+  // across navigation debounce and the first-read initialization frame.
+  {
+    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.consumePresses");
+    if (!g.held) return false;
+    if (!gInputRunning || !gInputCache.dataValid) return false;
+    // Pair the latch with the same raw sample. A press arriving after the
+    // earlier peek must not be delivered from the latch now and as a fresh
+    // raw edge on the next frame.
+    buttons = gInputCache.buttons;
+    latchedPresses = gInputCache.buttonPressedAccum;
+    gInputCache.buttonPressedAccum = 0;
+  }
+
   // Reset auto-repeat state when mode changes to prevent stuck joystick
   static OLEDMode lastProcessedMode = OLED_OFF;
   if (currentOLEDMode != lastProcessedMode) {
@@ -6549,7 +6627,7 @@ bool processOLEDInput() {
   // Reset navigation events
   gNavEvents = {false, false, false, false, deltaX, deltaY, 0};
 
-#if ENABLE_ANO_ENCODER
+#if ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER
   // Canonical-signal model: every input device emits ONLY the signals that
   // describe what it physically is. The ANO encoder has two physical input
   // primitives — a quadrature wheel and 5 discrete buttons — and nothing
@@ -6589,7 +6667,7 @@ bool processOLEDInput() {
   {
     int totalDetents = 0;
     int d;
-    while ((d = anoEncoderConsumeOneDetent()) != 0) {
+    while ((d = inputConsumeOneDetent()) != 0) {
       totalDetents += d;
       if (totalDetents > 64 || totalDetents < -64) break;  // safety clamp
     }
@@ -6600,23 +6678,26 @@ bool processOLEDInput() {
     // per frame regardless of detent count; modes that want proportional
     // response read wheelDelta.
     if (totalDetents != 0) {
-      uint8_t axis = ANO_AXIS_VERTICAL;
+      bool vertical = true;
+#if ENABLE_ANO_ENCODER
       if (gAnoEncoderCache.mutex) {
         SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(5), "ano.readAxis");
-        if (g.held) axis = gAnoEncoderCache.currentAxis;
+        if (g.held) vertical = (gAnoEncoderCache.currentAxis == ANO_AXIS_VERTICAL);
       }
+#endif
       if (totalDetents > 0) {
-        if (axis == ANO_AXIS_VERTICAL) gNavEvents.down  = true;
+        if (vertical) gNavEvents.down  = true;
         else                            gNavEvents.right = true;
       } else {
-        if (axis == ANO_AXIS_VERTICAL) gNavEvents.up   = true;
+        if (vertical) gNavEvents.up   = true;
         else                            gNavEvents.left = true;
       }
       DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] wheel    delta=%+d axis=%s",
-                                totalDetents, axis == ANO_AXIS_VERTICAL ? "V" : "H");
+                                totalDetents, vertical ? "V" : "H");
     }
   }
 
+#if ENABLE_ANO_ENCODER
   // ---- Dpad ----
   // Edge-detected → boolean nav events. NO deltaX/Y emission: the dpad is a
   // digital input device with no analog magnitude. Modes that want sustained
@@ -6634,6 +6715,7 @@ bool processOLEDInput() {
       DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] dpad     edge=0x%02lX", (unsigned long)dpadEdge);
     }
   }
+#endif // ENABLE_ANO_ENCODER
 #else
   // Compute X-axis navigation with auto-repeat
   if (deflectedX) {
@@ -6908,11 +6990,19 @@ void tryAutoStartInputForMenu() {
     // RAM-flush resume deliberately left off.
     bool autoStart = gSettings.inputEnabled &&
                      ramFlushResolve(RF_INPUT, gSettings.inputAutoStart);
-    if (!autoStart || !gSettings.i2cEnabled) {
+    if (!autoStart) {
       return;
     }
+#if !ENABLE_GPIO_ENCODER
+    if (!gSettings.i2cEnabled) return;
+#endif
   }
 
+#if ENABLE_GPIO_ENCODER
+  // The onboard wheel owns GPIOs and a polling task, with no I2C address or
+  // queued I2C device. Reuse the same driver start and saved autostart policy.
+  inputStartInternal();
+#else
   // Resolve the active input device's I2C address — gamepad at 0x50, or
   // the ANO encoder at whatever the user configured (default 0x49).
 #if ENABLE_ANO_ENCODER
@@ -6936,6 +7026,7 @@ void tryAutoStartInputForMenu() {
       DEBUG_DISPLAYF("[OLED] Auto-starting input device for menu navigation");
     }
   }
+#endif
 }
 
 #else // !ENABLE_OLED_INPUT
@@ -7063,10 +7154,14 @@ void applyOLEDBrightness() {
 #if ENABLE_OLED_DISPLAY
   if (oledConnected && gOledRunning) {
     if (gSettings.oledBrightness >= 0 && gSettings.oledBrightness <= 255) {
-      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 200, [&]() {
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+      displaySetBrightness(gSettings.oledBrightness);
+#else
+      OLED_TRANSACTION(
         oledDisplay->ssd1306_command(SSD1306_SETCONTRAST);
         oledDisplay->ssd1306_command(gSettings.oledBrightness);
-      });
+      );
+#endif
     }
   }
 #endif
@@ -7268,6 +7363,7 @@ static void oledApplyPendingSessionBoundary() {
       // Prevent the login-confirm A press from being interpreted as a
       // menu-select on the replacement identity's first frame.
       lastButtonStateInitialized = false;
+      gHelperPressedAccum = 0;
       lastButtonState = 0xFFFFFFFF;
 #endif
       oledMarkDirty();
@@ -7299,9 +7395,13 @@ void oledNotifyLocalDisplayAuthChanged() {
 void oledDisplayOff() {
 #if ENABLE_OLED_DISPLAY
   if (oledDisplay && oledConnected) {
-    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+    oledDisplay->setPower(false);
+#else
+    OLED_TRANSACTION(
       oledDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
-    });
+    );
+#endif
   }
 #endif
 }
@@ -7325,7 +7425,7 @@ void oledPrepareForSleep() {
   // ESP32-S3 so it gets reset on wake — but that's a fresh boot path anyway,
   // and the LDO defaults disabled when its enable line floats, so this is
   // also the desired sleep state.
-#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
   if (gSettings.oledBus == 1) {
     digitalWrite(I2C2_POWER_PIN, LOW);
     // Hold LDO low long enough for SSD1306 Vcc to fully decay past its
@@ -7348,7 +7448,7 @@ void oledPrepareForSleep() {
 
 void oledResumeFromSleep() {
 #if ENABLE_OLED_DISPLAY
-#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
   if (gSettings.oledBus == 1) {
     // Step 1: raise the LDO enable and wait for the rail + chip to come up.
     // The AP2127 LDO itself stabilises in ~5ms, BUT the SSD1306's internal
@@ -7453,9 +7553,13 @@ void oledResumeFromSleep() {
 void oledDisplayOn() {
 #if ENABLE_OLED_DISPLAY
   if (oledDisplay && oledConnected) {
-    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+    oledDisplay->setPower(true);
+#else
+    OLED_TRANSACTION(
       oledDisplay->ssd1306_command(SSD1306_DISPLAYON);
-    });
+    );
+#endif
   }
 #endif
 }
@@ -7463,7 +7567,7 @@ void oledDisplayOn() {
 void oledShowSleepScreen(int seconds) {
 #if ENABLE_OLED_DISPLAY
   if (oledDisplay && oledConnected) {
-    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() {
+    OLED_TRANSACTION(
       oledDisplay->clearDisplay();
       oledDisplay->setTextSize(1);
       oledDisplay->setCursor(0, 16);
@@ -7471,7 +7575,7 @@ void oledShowSleepScreen(int seconds) {
       oledDisplay->println();
       oledDisplay->printf("  Waking in %ds", seconds);
       oledDisplay->display();
-    });
+    );
   }
 #endif
 }

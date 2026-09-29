@@ -7,14 +7,14 @@ array of bytes. A missing brace, a typo'd identifier, a control-flow mistake —
 all of it compiles clean, links clean, flashes clean, and then fails on the
 board in front of whoever is holding it.
 
-About 1.7 MiB of first-party JavaScript ships that way. This package is what
+About 0.8 MiB of first-party JavaScript ships that way. This package is what
 checks it before the board does.
 
 What is here, in four parts:
 
 | file | what it does |
 |---|---|
-| `tests/test_embedded_js_syntax.py` | parses **every** raw-string JS region in `components/hardwareone/` (78 regions across 36 files, ~1.7 MiB) |
+| `tests/test_embedded_js_syntax.py` | parses **every** raw-string JS region in `components/hardwareone/` (75 regions across 38 files, ~0.8 MiB) |
 | `tests/test_llm_page.py` | runs the `/llm` chat page's real JS against a stub DOM and a fake device, 32 behavioral checks |
 | `tests/test_harness_detects_regressions.py` | breaks the page eight ways on purpose and asserts the harness notices each |
 | `tests/test_js_engine.py` | asserts the engine-portability layer gives byte-identical output on every engine present |

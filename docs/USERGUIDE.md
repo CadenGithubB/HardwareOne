@@ -43,7 +43,7 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder |
 | `ENABLE_HTTPS` | Set to `1` for TLS on the web server; certs in `/system/certs/`. Runtime toggle: `httpsEnabled` |
 | `ENABLE_MAPS` | Set to `1` to build offline maps and waypoints |
-| `ENABLE_GAMES` | Set to `1` to build the browser games page. Pick exactly one game: `ENABLE_WEB_GAME_MAZE` or `ENABLE_WEB_GAME_DARKROOM` - both at once overflows the app partition and is rejected at build time |
+| `ENABLE_GAMES` | Set to `1` with `ENABLE_WEB_GAME_DARKROOM=1` to build A Dark Room and its browser launcher |
 | `ENABLE_ESP_SR` | Set to `1` to build ESP-SR voice: WakeNet wake word + MultiNet command grammar |
 | `ENABLE_BLUETOOTH` | Set to `1` to build the BLE server with GATT services. It gates *our* code only - to actually reclaim the Bluedroid stack's flash/RAM you also need `CONFIG_BT_ENABLED=n` in sdkconfig, and on a board whose sdkconfig drops the stack the header's derived rules force this flag back to `0` |
 | `ENABLE_G2_GLASSES` | Set to `1` to build the Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) |
@@ -143,7 +143,7 @@ Which pages exist depends on the per-page compile gates (`CUSTOM_ENABLE_WEB_*` w
 | **MQTT** | `/mqtt` | `WEB_MQTT` | Broker config, topic preview, Home Assistant status (requires `ENABLE_MQTT`) |
 | **Speech** | `/speech` | `WEB_SPEECH` | ESP-SR status and tuning (requires `ENABLE_ESP_SR`) |
 | **LLM** | `/llm` | `ENABLE_LLM_BACKEND` | Model chat - load/unload, ask, temperature and sampling. Answers come from whichever source the build enables (on-chip model and/or the CM5 co-processor) |
-| **Games** | `/games` or `/darkroom` | `WEB_GAMES` | Browser game (requires `ENABLE_GAMES`; exactly one game per build) |
+| **Games** | `/games` or `/darkroom` | `WEB_GAMES` | A Dark Room (requires `ENABLE_GAMES` and `ENABLE_WEB_GAME_DARKROOM`) |
 | **Settings** | `/settings` | core | All device settings, debug flags, user management |
 | **CLI** | `/cli` | core | Full command interface in the browser, with history |
 
