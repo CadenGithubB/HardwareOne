@@ -159,6 +159,7 @@
 // Display: hardware display selection. 0 forces all OLED_*.cpp out of the
 // build via the CMakeLists DISPLAY_TYPE gate.
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
+//   4 = P4X-EYE ST7789 (SPI panel, compatible monochrome UI framebuffer)
 //
 // CURRENT: SSD1306 (OLED) for the FeatherS3. Set to 0 (NONE) for the XIAO — no
 // on-board display. HAL_Display.cpp compiles unconditionally and switches on
@@ -166,17 +167,23 @@
 // I2C_FEATURE_LEVEL 0 already zeroes ENABLE_OLED_DISPLAY.
 #define DISPLAY_TYPE            1
 
-// Input device: which physical input controller is wired to the I2C bus.
-// Exactly one driver compiles in (mutually exclusive — both share STEMMA QT
-// and would collide if both ran). CMakeLists gates the .cpp file just like
+// Input device: which optional physical input controller is fitted.
+// Exactly one driver compiles in. CMakeLists gates the .cpp file just like
 // DISPLAY_TYPE does.
 //   0 = NONE             (no input device)
 //   1 = SEESAW_GAMEPAD   (Adafruit Mini I2C Gamepad, 0x50)
 //   2 = ANO_ENCODER      (Adafruit ANO Rotary Encoder breakout, 0x49)
+//   3 = GPIO_ENCODER     (quadrature wheel + click and optional board buttons)
 //
 // CURRENT: SEESAW_GAMEPAD for the FeatherS3. Set to 0 (NONE) for the XIAO —
-// both options hang off the I2C bus a level-0 build doesn't have.
+// the two Seesaw options require I2C; GPIO input is independent.
 #define INPUT_DEVICE_TYPE       1
+
+// Optional native SDMMC card backend; an explicit board profile supplies pins.
+// Existing SD_CS_PIN boards continue to use their SPI card backend.
+#ifndef ENABLE_SDMMC_CARD
+#define ENABLE_SDMMC_CARD 0
+#endif
 
 // XIAO ESP32S3 Sense expansion: camera + PDM mic + microSD. The base XIAO and the
 // Sense share one Arduino variant (CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"), so this
@@ -382,15 +389,10 @@
 // Higher-level features built on top of the subsystems above. Each gates
 // its own web page and (where applicable) OLED mode.
 
-// Games: browser-based games web page (served at /games).
-//   ENABLE_GAMES is the master switch; then pick exactly ONE game below. Both
-//   games are raw-embedded in the firmware image, and shipping both at once
-//   exceeds the app partition, so a build-time guard rejects enabling both.
-//   Default game is the Tilt Maze (preserves prior behaviour).
-//   To ship A Dark Room instead: ENABLE_GAMES 1, ENABLE_WEB_GAME_MAZE 0,
-//   ENABLE_WEB_GAME_DARKROOM 1 (and CUSTOM_ENABLE_WEB_GAMES 1 at web level 4).
+// A Dark Room: browser game launcher at /games and game at /darkroom.
+//   Set ENABLE_GAMES and ENABLE_WEB_GAME_DARKROOM to 1. At web feature level 4,
+//   also set CUSTOM_ENABLE_WEB_GAMES to 1.
 #define ENABLE_GAMES            0
-#define ENABLE_WEB_GAME_MAZE        0   // Tilt Maze (IMU/gamepad prototype)
 #define ENABLE_WEB_GAME_DARKROOM    0   // A Dark Room (en/es/fr/zh_cn)
 
 // LLM assistant: model registry, conversation layer, CLI commands, web page
@@ -493,10 +495,12 @@
 #define DISPLAY_TYPE_SSD1306   1
 #define DISPLAY_TYPE_ST7789    2
 #define DISPLAY_TYPE_ILI9341   3
+#define DISPLAY_TYPE_ST7789_P4_EYE 4
 
 #define INPUT_DEVICE_TYPE_NONE           0
 #define INPUT_DEVICE_TYPE_SEESAW_GAMEPAD 1
 #define INPUT_DEVICE_TYPE_ANO_ENCODER    2
+#define INPUT_DEVICE_TYPE_GPIO_ENCODER   3
 
 // =============================================================================
 // DERIVED FLAGS (automatically set based on I2C_FEATURE_LEVEL)
@@ -591,6 +595,15 @@
   #define ENABLE_LED_MATRIX 0
 #endif
 
+// The legacy OLED UI can also render to the SPI EYE backend without I2C.
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+  #undef ENABLE_OLED_DISPLAY
+  #define ENABLE_OLED_DISPLAY 1
+  #if !HW_BOARD_P4X_EYE
+    #error "P4X-EYE display requires its explicit board profile"
+  #endif
+#endif
+
 // Override ENABLE_OLED_DISPLAY if DISPLAY_TYPE is NONE
 #if DISPLAY_TYPE == DISPLAY_TYPE_NONE
   #undef ENABLE_OLED_DISPLAY
@@ -604,7 +617,21 @@
 // because both occupy the same role (the OLED input source) and the seesaw
 // driver would race the ANO driver for the STEMMA QT bus if both compiled in.
 // The CMakeLists gate also skips the disabled driver's .cpp.
-#if INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_ANO_ENCODER
+#define ENABLE_GPIO_ENCODER (INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_GPIO_ENCODER)
+// The EYE's three user keys belong to the same optional input controller.
+// Profiles can disable them while retaining wheel gestures. Other boards do
+// not acquire these GPIOs merely by selecting a native encoder.
+#ifndef ENABLE_GPIO_ENCODER_BUTTONS
+  #if HW_BOARD_P4X_EYE && ENABLE_GPIO_ENCODER
+    #define ENABLE_GPIO_ENCODER_BUTTONS 1
+  #else
+    #define ENABLE_GPIO_ENCODER_BUTTONS 0
+  #endif
+#endif
+#if ENABLE_GPIO_ENCODER_BUTTONS && (!HW_BOARD_P4X_EYE || !ENABLE_GPIO_ENCODER)
+  #error "GPIO encoder auxiliary buttons require the P4X-EYE encoder profile"
+#endif
+#if INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_ANO_ENCODER && ENABLE_I2C_SYSTEM
   #undef  ENABLE_GAMEPAD_SENSOR
   #define ENABLE_GAMEPAD_SENSOR 0
   #define ENABLE_ANO_ENCODER    1
@@ -620,7 +647,7 @@
 // gate the OLED's input-handling code so it compiles for either driver.
 // The two source-specific paths inside each block stay gated on their own
 // ENABLE_* flag.
-#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER)
+#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER)
 
 // The device-start queue is only used by optional sensors that initialize in
 // their own tasks. Infrastructure-only I2C builds (for example FeatherS3[D]'s
@@ -628,7 +655,7 @@
 // not pay for an idle 4 KB task that wakes every 100 ms.
 #define ENABLE_I2C_SENSOR_QUEUE \
   (ENABLE_THERMAL_SENSOR || ENABLE_TOF_SENSOR || ENABLE_IMU_SENSOR || \
-   ENABLE_OLED_INPUT || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
+   ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
    ENABLE_FM_RADIO || ENABLE_RTC_SENSOR || ENABLE_PRESENCE_SENSOR)
 
 // =============================================================================
@@ -855,17 +882,11 @@
   #define ENABLE_WEB_GAMES 0
 #endif
 
-// Per-game selection sits beneath the games web subsystem. If web games are
-// off (master off, or the web feature level disables them), force both off.
+// A Dark Room sits beneath the games web subsystem. If web games are off
+// (master off, or the web feature level disables them), force it off.
 #if !ENABLE_WEB_GAMES
-  #undef ENABLE_WEB_GAME_MAZE
   #undef ENABLE_WEB_GAME_DARKROOM
-  #define ENABLE_WEB_GAME_MAZE     0
   #define ENABLE_WEB_GAME_DARKROOM 0
-#endif
-// Both games are raw-embedded; shipping both overflows the app partition.
-#if ENABLE_WEB_GAME_MAZE && ENABLE_WEB_GAME_DARKROOM
-  #error "Enable only ONE web game (ENABLE_WEB_GAME_MAZE or ENABLE_WEB_GAME_DARKROOM). Both are raw-embedded and exceed the app partition; gzip-embed if you need both."
 #endif
 #if !ENABLE_MAPS
   #undef ENABLE_WEB_MAPS
@@ -955,8 +976,24 @@
 //   4. Update the BOARD_NAME string for identification
 // =============================================================================
 
+// --- Espressif ESP32-P4X-EYE: explicit board identity, not every P4 chip. ---
+#if HW_BOARD_P4X_EYE
+  #include "System_Board_P4X_EYE.h"
+  #define BOARD_SUPPORTED 1
+  #define BOARD_NAME "Espressif ESP32-P4X-EYE"
+  #define I2C_SDA_PIN_DEFAULT -1
+  #define I2C_SCL_PIN_DEFAULT -1
+  #define NEOPIXEL_PIN_DEFAULT -1
+  #define NEOPIXEL_POWER_PIN -1
+  #define NEOPIXEL_COUNT_DEFAULT 0
+  #define USER_LED_PIN -1
+  #define BATTERY_ADC_PIN -1
+  #define BATTERY_MONITOR_AVAILABLE 0
+  #define BATTERY_BACKEND_ADC 0
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
+
 // --- Adafruit QT Py ESP32 (ESP32-PICO) ---
-#if defined(ARDUINO_ADAFRUIT_QTPY_ESP32_DEV)
+#elif defined(ARDUINO_ADAFRUIT_QTPY_ESP32_DEV)
   #define BOARD_SUPPORTED       1
   #define BOARD_NAME            "Adafruit QT Py ESP32"
   
@@ -1291,6 +1328,18 @@
   // MSM261DHP006 clock bands (same decimation policy as the XIAO mic).
   #define MIC_PDM_LOW_POWER_MAX_HZ 900000
   #define MIC_PDM_STANDARD_MIN_HZ 1100000
+#endif
+
+// Optional storage capability: the card never gates the internal filesystem.
+#ifndef ENABLE_SD_CARD
+  #if ENABLE_SDMMC_CARD || defined(SD_CS_PIN)
+    #define ENABLE_SD_CARD 1
+  #else
+    #define ENABLE_SD_CARD 0
+  #endif
+#endif
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!HW_BOARD_P4X_EYE || !defined(CONFIG_IDF_TARGET_ESP32P4))
+  #error "SDMMC card requires a supported board profile (currently P4X-EYE)"
 #endif
 
 // =============================================================================

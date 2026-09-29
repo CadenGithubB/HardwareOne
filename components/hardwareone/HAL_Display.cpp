@@ -29,7 +29,11 @@ uint8_t gDisplayI2cAddress = DISPLAY_I2C_ADDR_ALT;
  */
 bool displayInit() {
   if (gDisplay) {
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+    return gDisplay->begin(); // Reopen hardware on the retained software canvas.
+#else
     return true;  // Already initialized
+#endif
   }
   
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
@@ -92,6 +96,16 @@ bool displayInit() {
   displayUpdate();
   return true;
   
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+  gDisplay = new P4EyeDisplay();
+  if (!gDisplay) return false;
+  if (!gDisplay->begin()) {
+    // Keep the canvas stable for legacy UI pointers. A retry calls begin()
+    // again; the driver releases failed hardware allocations itself.
+    return false;
+  }
+  return true;
+
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789
   // ============================================================================
   // SPI TFT (ST7789) Initialization
@@ -151,7 +165,7 @@ bool displayInit() {
 void displayClear() {
   if (!gDisplay) return;
   
-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 || DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
   gDisplay->clearDisplay();
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
   gDisplay->fillScreen(DISPLAY_COLOR_BLACK);
@@ -181,6 +195,8 @@ void displayUpdate() {
   i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, gDisplayI2cAddress, 400000, 15, [&]() {
     gDisplay->display();  // Push framebuffer to OLED (~20ms at 400kHz)
   });
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+  gDisplay->display();
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
   // No-op for TFT (direct rendering)
 #endif
@@ -194,7 +210,7 @@ void displayUpdate() {
 void displayDim(bool dim) {
   if (!gDisplay) return;
   
-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 || DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
   gDisplay->dim(dim);
   
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
@@ -219,6 +235,8 @@ void displaySetBrightness(uint8_t level) {
   gDisplay->ssd1306_command(0x81);  // Set Contrast Control
   gDisplay->ssd1306_command(level);
   
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+  gDisplay->setBrightness(level);
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
   // TFT brightness via backlight PWM
   #if DISPLAY_BL_PIN >= 0

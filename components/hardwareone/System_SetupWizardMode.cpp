@@ -27,6 +27,7 @@
 // CLI_MODE_HANDLED_AND_EXIT on the final transition (or on cancel).
 
 #include "System_SetupWizardMode.h"
+#include "HAL_Input.h"
 #include "System_SetupWizard.h"   // existing state mutators + renderers
 #include "System_CLIMode.h"
 #include "System_Settings.h"      // gSettings, setSetting (applied at finalize)
@@ -874,25 +875,8 @@ static void wizardMode_onTick(void* /*ud*/) {
   if (!oledDisplay || !oledConnected) return;
 
   // ---- 1. Joystick poll ----
-  uint32_t buttons = sLastButtons;
-  bool haveButtons = false;
-  {
-    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "wizardMode.buttonRead");
-    if (g.held && gInputCache.dataValid) {
-      buttons = gInputCache.buttons;
-      haveButtons = true;
-    }
-  }
-  // First read just establishes the baseline; the first edge will be
-  // detected next tick.
-  if (haveButtons && !sLastButtonsValid) {
-    sLastButtons = buttons;
-    sLastButtonsValid = true;
-  } else if (haveButtons) {
-    uint32_t pressedNow  = ~buttons;
-    uint32_t pressedLast = ~sLastButtons;
-    uint32_t newButtons  = pressedNow & ~pressedLast;
-    sLastButtons = buttons;
+  const uint32_t newButtons = inputConsumeButtonPresses(sLastButtons, sLastButtonsValid);
+  if (sLastButtonsValid) {
 
     JoystickNav nav = readWizardJoystickNav();
     bool hasInput = (newButtons != 0) || nav.up || nav.down || nav.left || nav.right;

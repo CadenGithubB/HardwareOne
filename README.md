@@ -104,7 +104,7 @@ Hardware One can be used in several different ways depending on the hardware you
 | BLE server + Even Realities G2 glasses client | ✅ server / ❌ G2 | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | R1 smart ring - health vitals, graphs, health logging | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Offline maps + waypoints | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| Browser games (Tilt Maze or A Dark Room - one per build) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| A Dark Room browser game | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | LLM assistant (tiny on-device model on ESP32-S3 + PSRAM, and/or answered by the Pi co-processor) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Raspberry Pi co-processor over UART (LLM, speech-to-text, dictation, power/fan control, clock) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |

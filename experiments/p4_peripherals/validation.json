@@ -1,0 +1,44 @@
+{
+  "date": "2026-09-27",
+  "target": "esp32p4",
+  "board": "ESP32-P4X-EYE",
+  "idf": "5.5.5",
+  "arduino": "3.3.5",
+  "hosted": "2.12.13",
+  "hardware_tested": false,
+  "host_tests_passed": 13,
+  "source_files_verified": 7929,
+  "source_manifest_sha256": "aa420908c33c1b8b03e41be80650f6a8c76acf29743cb50e3d0e83c51374bd5e",
+  "images": {
+    "peripherals_enabled": {
+      "bytes": 3671472,
+      "sha256": "822f07efa02e2414620f17d4049a62289c7b612dc2f179264e0bf201ecb9b07b",
+      "image": "experiments/p4_peripherals/private/build-p4/hardwareone-idf.bin",
+      "log": "experiments/p4_peripherals/private/build-p4-scale15.log"
+    },
+    "peripherals_disabled": {
+      "bytes": 3371008,
+      "sha256": "7379798775192bb9133f26da03b332f54e417d0713ceb8a998e6aee5c1360a9e",
+      "image": "experiments/p4_peripherals/private/build-p4-disabled/hardwareone-idf.bin",
+      "log": "experiments/p4_peripherals/private/build-p4-disabled-buttons.log"
+    }
+  },
+  "display": {
+    "canvas": [
+      128,
+      64
+    ],
+    "image": [
+      192,
+      96
+    ],
+    "panel": [
+      240,
+      240
+    ],
+    "scale": 1.5,
+    "border_left_right": 24,
+    "border_top_bottom": 72,
+    "monochrome": true
+  }
+}

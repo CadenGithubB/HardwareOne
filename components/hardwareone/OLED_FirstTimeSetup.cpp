@@ -166,7 +166,11 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
         oledDisplay->setCursor(0, ftrY + 2);
         oledDisplay->print("A:Sel Y:Del B:");
         oledDrawBackArrowIcon(oledDisplay, ftrY + 2);
+#if ENABLE_GPIO_ENCODER
+        oledDisplay->print(" X:OK");
+#else
         oledDisplay->print(" S:OK");
+#endif
       }
       
       oledDisplay->display();
@@ -295,7 +299,11 @@ bool getOLEDYesNoPrompt(const char* prompt, bool defaultYes) {
       
       // Footer at standard position
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+#if ENABLE_GPIO_ENCODER
+      drawFTSFooter("Wheel:Move A:OK");
+#else
       drawFTSFooter("L/R:Move A:OK");
+#endif
       
       oledDisplay->display();
     );
@@ -321,10 +329,10 @@ bool getOLEDYesNoPrompt(const char* prompt, bool defaultYes) {
     uint32_t newlyPressed = getNewlyPressedButtons();
     
     // Left/Right to change selection
-    if (deltaX < -JOYSTICK_DEADZONE) {
+    if (deltaX < -JOYSTICK_DEADZONE || gNavEvents.wheelDelta < 0) {
       selection = 0;  // Yes
       delay(200);
-    } else if (deltaX > JOYSTICK_DEADZONE) {
+    } else if (deltaX > JOYSTICK_DEADZONE || gNavEvents.wheelDelta > 0) {
       selection = 1;  // No
       delay(200);
     }
@@ -621,10 +629,10 @@ bool getOLEDWiFiSelection(String& outSSID) {
       getJoystickDelta(deltaX, deltaY);
       const uint32_t newlyPressed = getNewlyPressedButtons();
 
-      if (deltaY < -JOYSTICK_DEADZONE) {
+      if (deltaY < -JOYSTICK_DEADZONE || gNavEvents.wheelDelta < 0) {
         if (selection > 0) --selection;
         delay(150);
-      } else if (deltaY > JOYSTICK_DEADZONE) {
+      } else if (deltaY > JOYSTICK_DEADZONE || gNavEvents.wheelDelta > 0) {
         if (selection < displayCount - 1) ++selection;
         delay(150);
       }

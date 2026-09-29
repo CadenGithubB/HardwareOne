@@ -5,8 +5,7 @@ build_darkroom_header.py — bundle "A Dark Room" into the HardwareOne firmware.
 A Dark Room (https://github.com/doublespeakgames/adarkroom) is a multi-file web
 game (MPL-2.0). This tool flattens it into a single self-contained HTML document
 and emits components/hardwareone/WebPage_DarkRoom.h, where the document is stored
-as C++ raw-string chunks and streamed at the /darkroom route (mirrors how the
-Tilt Maze game is embedded in WebPage_Games.h).
+as C++ raw-string chunks and streamed at the /darkroom route.
 
 What it does to make the game self-contained and offline-safe:
   - Inlines every local <script> and <link rel=stylesheet> in load order.

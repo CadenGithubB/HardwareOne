@@ -22,7 +22,7 @@
 #include "System_MemUtil.h"
 #include "System_I2C.h"
 #include "System_SensorStubs.h"
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT
 #include "HAL_Input.h"
 #endif
 #include "System_Settings.h"
@@ -585,7 +585,7 @@ void firstTimeSetupIfNeeded() {
 
       // Step 5: Poll until restore completes or user presses B / types 'back'.
       // Upload only stages the backup; OLED/serial confirm applies it.
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT
       uint32_t lastBtnState = 0xFFFFFFFF;
       bool btnStateInit = false;
 #endif
@@ -645,7 +645,7 @@ void firstTimeSetupIfNeeded() {
           }
         }
 
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT
 #if ENABLE_OLED_DISPLAY
         // Joystick up/down flips the help pages — same control as the archetype cards.
         {
@@ -654,27 +654,10 @@ void firstTimeSetupIfNeeded() {
           else if (nav.up) { rpage = (rpage + RPAGES - 1) % RPAGES; }
         }
 #endif
-        // Gamepad B button = back (active-low, detect new press)
-        uint32_t btns = 0;
-        bool valid = false;
+        // Back actions can be short wheel gestures; consume the shared latch.
         if (!goBack) {
-          SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "fts.gamepadEscape");
-          if (g.held) {
-            btns = gInputCache.buttons;
-            valid = gInputCache.dataValid;
-          }
-        }
-        if (!goBack && valid) {
-          if (!btnStateInit) {
-            lastBtnState = btns;
-            btnStateInit = true;
-          } else {
-            uint32_t newPressed = ~btns & lastBtnState;  // active-low: was 1 (up), now 0 (down)
-            if (newPressed & INPUT_MASK(INPUT_BUTTON_B)) {
-              goBack = true;
-            }
-            lastBtnState = btns;
-          }
+          const uint32_t newPressed = inputConsumeButtonPresses(lastBtnState, btnStateInit);
+          if (INPUT_CHECK(newPressed, INPUT_BUTTON_B)) goBack = true;
         }
 #endif
       }
@@ -1028,7 +1011,7 @@ void firstTimeSetupIfNeeded() {
     needsRebootForHardware = true;
   }
 #endif
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT
   if (gInputRunning && !gSettings.inputAutoStart) {
     needsRebootForHardware = true;
   }

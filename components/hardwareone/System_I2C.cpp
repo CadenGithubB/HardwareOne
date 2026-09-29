@@ -13,6 +13,7 @@
 
 #include "i2csensor_rda5807.h"
 #include "System_BuildConfig.h"
+#include "Input_GPIOEncoder.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_FirstTimeSetup.h"
@@ -104,7 +105,7 @@ static bool isSensorCompiled(const I2CSensorEntry& sensor) {
   #if !ENABLE_IMU_SENSOR
     if (strcmp(sensor.moduleName, "imu") == 0) return false;
   #endif
-  #if !ENABLE_OLED_INPUT
+  #if !ENABLE_GAMEPAD_SENSOR && !ENABLE_ANO_ENCODER
     if (strcmp(sensor.moduleName, "input") == 0) return false;
   #endif
   // (Removed: two branches matching sensor.moduleName against the pre-unification
@@ -390,6 +391,9 @@ static uint8_t i2cBusForDeviceType(I2CDeviceType sensor) {
 // Externally linkable so HAL_Input.cpp's unified cmd_openinput can dispatch
 // through the same queue as the other sensor start commands.
 const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const bool& enabledFlag, const char* eventTag) {
+#if ENABLE_GPIO_ENCODER
+  if (sensor == I2C_DEVICE_INPUT) return "Error: GPIO input is not an I2C device; use openinput";
+#endif
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
@@ -1839,6 +1843,8 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   // encoder). Matches controls json / open<id>/close<id> / sensorautostart /
   // the I2C DB moduleName, so the app correlates on one name with no overrides.
   addSensorEntry(arr, "input",    "Seesaw gamepad",         SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
+#elif ENABLE_GPIO_ENCODER
+  addSensorEntry(arr, "input",    "GPIO rotary encoder",    SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gpioEncoderBuildDataJSON : nullptr);
 #endif
 #if ENABLE_THERMAL_SENSOR
   addSensorEntry(arr, "thermal",  "MLX90640 thermal",       SENSOR_KIND_STREAM, gThermalRunning, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJSON : nullptr);
@@ -2060,7 +2066,9 @@ static const SensorHeapCost sensorHeapCosts[] = {
   { "GPS",            "gps",     &gSettings.gpsAutoStart,      4 },  // PA1010D: NMEA parsing
   { "FM Radio",       "fmradio", &gSettings.fmRadioAutoStart,  2 },  // RDA5807: minimal
   { "APDS Gesture",   "apds",    &gSettings.apdsAutoStart,     4 },  // APDS9960: gesture buffers
-#if ENABLE_ANO_ENCODER
+#if ENABLE_GPIO_ENCODER
+  { "GPIO Encoder",   "input",   &gSettings.inputAutoStart,    4 },
+#elif ENABLE_ANO_ENCODER
   { "ANO Encoder",    "input",   &gSettings.inputAutoStart,    2 },  // Adafruit ANO seesaw: minimal
 #else
   { "Gamepad",        "input",   &gSettings.inputAutoStart,    2 },  // Seesaw mini gamepad: minimal
@@ -2905,6 +2913,7 @@ void sensorQueueProcessorTask(void* param) {
           announceSensorStart("IMU", gImuRunning);
           break;
         case I2C_DEVICE_INPUT:
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
           // I2C_DEVICE_INPUT is the shared input-device slot — under ANO
           // build, inputStartInternal() comes from the ANO driver. The label
           // reflects whichever input device is compiled in.
@@ -2915,6 +2924,7 @@ void sensorQueueProcessorTask(void* param) {
 #else
           INFO_I2C_AUTOSTARTF("Gamepad: %s", gInputRunning ? "SUCCESS" : "FAILED");
           announceSensorStart("Gamepad", gInputRunning);
+#endif
 #endif
           break;
         case I2C_DEVICE_APDS:

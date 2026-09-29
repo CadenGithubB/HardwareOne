@@ -5,9 +5,8 @@
  *   The firmware build never parses the web UI's JavaScript. To the C++ compiler
  *   an R"JS( ... )JS" literal is an opaque array of bytes, so a missing brace
  *   compiles, links, flashes, and then fails in front of whoever is holding the
- *   board. WebPage_Games.h carries a hand-written window.onerror handler for
- *   exactly this reason -- its own comment says a syntax error otherwise shows
- *   up as a silent black screen.
+ *   board. Without an independent syntax gate, a malformed embedded script can
+ *   therefore reach a browser as a blank or partially rendered page.
  *
  *   Worse, some of that JavaScript sits behind #if ENABLE_HTTPS or
  *   #if ENABLE_NEOPIXEL. On a board with those off, the preprocessor discards
