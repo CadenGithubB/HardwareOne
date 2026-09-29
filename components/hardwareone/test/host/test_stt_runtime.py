@@ -18,7 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
-    backend = no_includes((SOURCE / 'System_STTLocal.h').read_text()).replace('#pragma once', '')
+    backend = no_includes((SOURCE / 'System_Transcript.h').read_text() + '\n' + (SOURCE / 'System_STTLocal.h').read_text()).replace('#pragma once', '')
     interface = no_includes((SOURCE / 'System_STT.h').read_text()).replace('#pragma once', '')
     broker = no_includes((SOURCE / 'System_STT.cpp').read_text().split('// CLI_ADAPTER_BEGIN')[0])
     broker += '\n#endif\n'

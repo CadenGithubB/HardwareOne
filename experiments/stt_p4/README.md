@@ -4,15 +4,15 @@ Experimental English dictation for HardwareOne, on `codex/jpeg-portable`, based
 on the qualified ESP-SR milestone `f9bfe98`. The P4 transcribes onboard microphone
 audio without a Pi, UART inference, Wi-Fi connection or cloud API.
 
-The current `cache-app-v1` implementation retains verified model weights during
-a continuous session to reduce loading between segments. Its full-app physical
-qualification is complete; see [CACHE_RESULTS.md](CACHE_RESULTS.md) and
-[cache-validation.json](cache-validation.json) for current measurements, checks
-and limits. The earlier continuous implementation passed a ten-minute physical
-run with camera captures, documented in
-[CONTINUOUS_RESULTS.md](CONTINUOUS_RESULTS.md) and
-[continuous-validation.json](continuous-validation.json). Earlier bounded-model
-evidence remains in [RESULTS.md](RESULTS.md) and [validation.json](validation.json).
+The current `transcripts-app-v1` adds optional saved transcripts through the
+shared local/Pi result path. See [TRANSCRIPTS.md](TRANSCRIPTS.md) for the persistent
+setting and downloads, and [TRANSCRIPT_RESULTS.md](TRANSCRIPT_RESULTS.md) for
+qualification. It retains the session weight cache measured in
+[CACHE_RESULTS.md](CACHE_RESULTS.md) and [cache-validation.json](cache-validation.json).
+Earlier continuous and bounded-model evidence remains in
+[CONTINUOUS_RESULTS.md](CONTINUOUS_RESULTS.md),
+[continuous-validation.json](continuous-validation.json), [RESULTS.md](RESULTS.md)
+and [validation.json](validation.json).
 
 ## Shared application path
 
@@ -110,6 +110,7 @@ stt cancel <id>
   end-of-session signal.
 - `cancel` discards queued audio and private text. Poll until the worker stops;
   cancellation never forcibly frees memory still used by capture or inference.
+  Accepted text already saved to a transcript is retained.
 
 Only the originating live transport session may retrieve or acknowledge text.
 Logout revokes the session; retained terminal results expire after five minutes.
@@ -182,13 +183,15 @@ paths still require accessory qualification; the attached P4 has no display.
   logging/history and the other health interfaces remain enabled. No compiler
   optimization settings were changed.
 
-The current `cache-app-v1` build is 6,367,776 bytes, leaving 9,696 bytes in the
-existing app partition. Its SHA-256 is
-`56c0dba75ed40c32959085f2134b4c5f8c3283c1660cc1e22f1cc325ed26d945`.
-Current qualification evidence belongs in [CACHE_RESULTS.md](CACHE_RESULTS.md)
-and [cache-validation.json](cache-validation.json); the earlier
-`continuous-v4` build identity and results remain in
-[CONTINUOUS_RESULTS.md](CONTINUOUS_RESULTS.md).
+The current `transcripts-app-v1` build is 6,375,872 bytes, leaving 1,600 bytes in
+the unchanged app partition. Its SHA-256 is
+`7c8e2a54a75ad0daf80d2169ad99c0a7a0d3c40e569040241b667acc48debc35`.
+The inherited experiment-only `camerajpegprobe` command is retired to fit this
+image; production camera/JPEG support remains enabled. No additional standard
+HardwareOne feature was excluded. Current evidence is in
+[TRANSCRIPT_RESULTS.md](TRANSCRIPT_RESULTS.md) and
+[transcript-validation.json](transcript-validation.json); previous image
+identities remain in their historical qualification reports.
 
 ## Reproduce
 

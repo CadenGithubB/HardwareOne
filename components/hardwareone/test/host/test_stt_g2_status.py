@@ -23,6 +23,7 @@ using TransportSessionEpoch=uint32_t;
 constexpr uint32_t kNoTransportSessionEpoch=0;
 enum CommandSource { SOURCE_INTERNAL, SOURCE_G2_GLASSES };
 '''
+    unit+=extract_block((SOURCE/'System_Transcript.h').read_text(),'struct TranscriptStatus')+';\n'
     unit+=extract_block(header,'enum class DictationState')+';\n'
     unit+=extract_block(header,'struct DictationSnapshot')+';\n'
     unit+=extract_block(source,'struct KbdPadState')+';\n'

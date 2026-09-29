@@ -18,7 +18,7 @@ def changes():
  names+=subprocess.check_output(['git','ls-files','--others','--exclude-standard','--','components/hardwareone'],cwd=REPO).decode().splitlines()
  return sorted(set(p for p in names if '/test/' not in p and (Path(p).suffix in ('.h','.cpp','.txt','.yml') and p!=DEP or p=='config/sdkconfig.defaults')))
 def external_inputs():
- paths=[HERE/'features-p4.h',HERE/'sdkconfig.stt.defaults',HERE/'radio_backend.cpp',HERE/'radio_backend.h',HERE/'build.sh',SPEECH/'sdkconfig.speech.defaults',SPEECH/'sdkconfig.p4.speech.defaults',HERE.parent/'p4_ble_roles/sdkconfig.connectivity.defaults',HERE.parent/'p4_ble_roles/sdkconfig.p4.bluetooth.defaults',HERE.parent/'camera_portable/sdkconfig.p4.camera.defaults']
+ paths=[HERE/'prepare.py',HERE/'features-p4.h',HERE/'sdkconfig.stt.defaults',HERE/'radio_backend.cpp',HERE/'radio_backend.h',HERE/'build.sh',SPEECH/'sdkconfig.speech.defaults',SPEECH/'sdkconfig.p4.speech.defaults',HERE.parent/'p4_ble_roles/sdkconfig.connectivity.defaults',HERE.parent/'p4_ble_roles/sdkconfig.p4.bluetooth.defaults',HERE.parent/'camera_portable/sdkconfig.p4.camera.defaults']
  for parent in ('speech_portable','audio_portable','camera_portable','jpeg_portable','p4_ble_roles'):
   paths.extend(HERE.parent/parent/name for name in ('radio_backend.cpp','radio_backend.h'))
  return {str(p.relative_to(REPO)):sha(p) for p in paths}
@@ -72,6 +72,20 @@ def prepare(refresh=False):
   result=subprocess.run(['patch','-f','-F','0','-p','1'],input=(HERE/'integration.patch').read_bytes(),cwd=stage,capture_output=True)
   report=(result.stdout+result.stderr).decode()
   if result.returncode or 'fuzz' in report:raise ValueError(report)
+  # Retire the earlier camera qualification command from this STT image.
+  # Its production JPEG backend stays enabled; only the injected test entry and
+  # include are removed. Exact anchors keep the inherited snapshot checkable.
+  filesystem=stage/'components/hardwareone/System_Filesystem.cpp'
+  body=filesystem.read_text()
+  retired_lines=[
+   '#include "Experiment_CameraJpegProbe.h"\n',
+   '  { "camerajpegprobe", "Experiment only: validate a stored JPEG using the software decoder.", true, cmd_camerajpegprobe },\n',
+  ]
+  for line in retired_lines:
+   assert body.count(line)==1,'Inherited JPEG probe changed'
+   body=body.replace(line,'',1)
+  assert 'cmd_camerajpegprobe' not in body
+  filesystem.write_text(body)
   dep=stage/DEP
   assert 'espressif/esp-dl:' not in dep.read_text()
   dep.write_text(dep.read_text()+'\n  espressif/esp-dl:\n    version: "==3.3.12"\n')
@@ -79,7 +93,7 @@ def prepare(refresh=False):
   lock=yaml.safe_load((stage/LOCK).read_text());lock['direct_dependencies'].append('espressif/esp-dl')
   (stage/LOCK).write_text(yaml.safe_dump(lock,sort_keys=False))
   names=set(expected)|set(data['sources'])|{DEP,LOCK}
-  record={'base':BASE,'inputs':data,'baseline_manifest_sha256':sha(source/'speech-build-manifest.json'),'sources':{p:sha(stage/p) for p in sorted(names)}}
+  record={'base':BASE,'retired_experiment_commands':['camerajpegprobe'],'inputs':data,'baseline_manifest_sha256':sha(source/'speech-build-manifest.json'),'sources':{p:sha(stage/p) for p in sorted(names)}}
   (stage/'stt-build-manifest.json').write_text(json.dumps(record,indent=2)+'\n')
   if not DEST.exists():
    shutil.copytree(stage,DEST)

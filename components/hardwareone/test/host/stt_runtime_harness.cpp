@@ -10,9 +10,11 @@
 #include <limits>
 #include <set>
 #include <string>
+#include <vector>
 #define ENABLE_LOCAL_STT 1
 #define ENABLE_MICROPHONE 1
 #define ENABLE_ESP_SR 1
+#define INFO_SYSTEMF(...) ((void)0)
 using String = std::string;
 using TransportSessionEpoch = uint32_t;
 enum CommandSource { SOURCE_WEB, SOURCE_SERIAL, SOURCE_INTERNAL, SOURCE_ESPNOW,
@@ -29,7 +31,8 @@ uint32_t millis() { return nowMs; }
 void vTaskDelay(uint32_t ms) { nowMs += ms; }
 static int taskDeleted = 0;
 void vTaskDelete(void*) { ++taskDeleted; }
-uint32_t uxTaskGetStackHighWaterMark(void*) { return 8192; }
+static bool transcriptFinished = false;
+uint32_t uxTaskGetStackHighWaterMark(void*) { return transcriptFinished ? 4096 : 8192; }
 void taskStackRecord(const char*, uint32_t) {}
 uint32_t esp_random() { return 0xabcdef01; }
 static bool taskFails = false;
@@ -132,6 +135,34 @@ void STTLocalSession::reset() { assert(!backendState_); }
 // INSERT_BROKER
 #undef free
 
+static bool savePreference = false, saveFailure = false;
+static std::vector<std::string> savedWords;
+static std::string savedOutcome;
+static TranscriptOptions capturedOptions;
+static std::function<void()> saveHook, finishHook;
+TranscriptOptions transcriptCaptureOptions(CommandSource source, TransportSessionEpoch epoch) {
+  TranscriptOptions o; o.enabled = savePreference; o.source = source; o.epoch = epoch;
+  strcpy(o.user, "alice"); return o;
+}
+void TranscriptSession::begin(const TranscriptOptions& options, const char*, uint64_t id) {
+  assert(gSTT.snapshot.workerActive); options_ = capturedOptions = options; id_ = id;
+  status_ = {}; status_.enabled = options.enabled; transcriptFinished = false;
+}
+bool TranscriptSession::append(uint32_t sequence, const char* text, size_t length) {
+  assert(gSTT.snapshot.workerActive && !audioCaptureOwnedBy("stt") && sequence == 1 && !sequence_);
+  sequence_ = sequence;
+  if (saveHook) saveHook();
+  if (!options_.enabled) return true;
+  if (saveFailure) { strcpy(status_.error, "Injected save failure"); return false; }
+  savedWords.emplace_back(text, length); status_.saved = length != 0; ++status_.chunks;
+  status_.bytes += length; return true;
+}
+void TranscriptSession::finish(const char* outcome) {
+  assert(gSTT.snapshot.workerActive && !audioCaptureOwnedBy("stt") && !finished_);
+  finished_ = true; transcriptFinished = true; savedOutcome = outcome; status_.complete = !status_.error[0];
+  if (finishHook) finishHook();
+}
+
 static STTOwner owner{SOURCE_SERIAL, 5};
 static STTOwner other{SOURCE_WEB, 5}; // Same number, different transport.
 static void reset() {
@@ -144,7 +175,8 @@ static void reset() {
   sourceAvailable = modelAvailable = engineOK = true;
   taskFails = allocationFails = startFails = engineOverlong = fallbackOnStart = false;
   starts = stops = engineCalls = taskDeleted = 0;
-  engineHook = nullptr; readHook = nullptr;
+  engineHook = nullptr; readHook = nullptr; saveHook = finishHook = nullptr;
+  savePreference = saveFailure = transcriptFinished = false; savedWords.clear(); savedOutcome.clear();
   gSettings.micSource = "auto";
 }
 static STTToken begin() {
@@ -156,7 +188,7 @@ static void run() {
   assert(pendingTask);
   auto fn = pendingTask; pendingTask = nullptr; fn(nullptr);
   assert(allocations.empty());
-  assert(!audioCaptureOwnedBy("stt"));
+  assert(!audioCaptureOwnedBy("stt") && transcriptFinished);
 }
 static STTSnapshot snapshot(STTToken token) {
   STTSnapshot out;
@@ -178,6 +210,7 @@ int main() {
   assert(!sttSnapshot({SOURCE_SERIAL, 6}, 0, &denied));
   run();
   assert(snapshot(token).state == STTState::Done);
+  assert(snapshot(token).workerStackFreeBytes == 4096); // Includes transcript finalization depth.
   assert(!sttRunActive(token));
   assert(engineSamples == 16000 && starts == 1 && stops == 1 && captureRate == 16000);
   assert(gSettings.microphoneSampleRate == 48000 && gSettings.microphoneGain == 70 && gSettings.micSource == "auto");
@@ -262,5 +295,21 @@ int main() {
   STTToken third; char error[96];
   assert(sttBegin(other, 1000, &third, error, sizeof(error)));
   assert(!sttResult(owner, token, text, sizeof(text))); run();
+  reset(); savePreference = true; token = begin(); savePreference = false;
+  saveHook = [&] { assert(sttRunActive(token)); rejectsBegin(); char pending[513]; assert(!sttResult(owner, token, pending, sizeof(pending))); };
+  run(); assert(capturedOptions.enabled && savedWords.size() == 1 && savedOutcome == "done");
+  assert(sttResult(owner, token, text, sizeof(text)) && sttResult(owner, token, text, sizeof(text)));
+  assert(savedWords.size() == 1 && snapshot(token).transcript.saved);
+  assert(sttCancel(owner, token) && savedOutcome == "done");
+  reset(); token = begin(); savePreference = true; run();
+  assert(!capturedOptions.enabled && savedWords.empty());
+  reset(); savePreference = saveFailure = true; token = begin(); run();
+  assert(snapshot(token).state == STTState::Done && snapshot(token).transcript.error[0]);
+  assert(sttResult(owner, token, text, sizeof(text)) && !snapshot(token).error[0]);
+  reset(); savePreference = true; token = begin(); assert(sttCancel(owner, token)); run();
+  assert(savedWords.empty() && savedOutcome == "cancelled");
+  reset(); savePreference = true; token = begin();
+  finishHook = [&] { assert(sttRunActive(token)); assert(sttCancel(owner, token)); };
+  run(); assert(snapshot(token).state == STTState::Cancelled && savedOutcome == "done" && savedWords.size() == 1);
   puts("STT production broker: ownership, cancellation, short reads, limits, failures and cleanup passed");
 }

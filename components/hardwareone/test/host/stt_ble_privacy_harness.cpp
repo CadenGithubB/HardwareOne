@@ -81,6 +81,18 @@ int main(){
  assert(traces[1].find("ordinary reply")!=std::string::npos);
  reset();bleRawNotify(secret.data(),secret.size());assert(delivered==secret);privateMirrors();
  assert(history[0]=="TX:[private STT result]");
+ const std::string privatePath="/stt/u123/PRIVATE_TRANSCRIPT.txt";
+ const std::string status="{\"transcriptPath\":\""+privatePath+"\"}";
+ for (bool encrypted : {false,true}) {
+  reset();secure=encrypted;callback(status);assert(delivered==status);
+  for(const auto& line:traces)assert(line.find(privatePath)==std::string::npos);
+  for(const auto& line:history)assert(line.find(privatePath)==std::string::npos);
+  if(!encrypted)assert(history.size()==1&&history[0]=="TX:[private STT result]");
+ }
+ const std::string latePath=std::string(195,'p')+status;
+ reset();callback(latePath);assert(delivered==latePath&&history[0]=="TX:[private STT result]");
+ const char shortPathMarker[]={'"','t','r','a','n','s','c','r','i','p','t','P','a','t','h'};
+ assert(!bleOutputHasPrivateSTT(shortPathMarker,sizeof(shortPathMarker)));
  // Encrypted binary buffers need not contain a NUL or even a full marker.
  const char shortBinary[2]={'x','y'};
  reset();bleRawNotify(shortBinary,sizeof(shortBinary));assert(delivered=="xy"&&history[0]=="TX:xy");

@@ -18,6 +18,7 @@
 #include "System_MemUtil.h"
 #include "System_PsramBuffer.h"
 #include "System_CommandLimits.h"
+#include "Transcript_PathPolicy.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
@@ -845,6 +846,14 @@ const char* cmd_filecreate(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// Shared output sinks must treat private file contents like live STT text.
+static bool filePathIsPrivateTranscript(const String& path) {
+  String normalized;
+  return normalizeFsPath(path, normalized)
+      && TranscriptPathPolicy::classify(normalized.c_str()).kind
+          != TranscriptPathPolicy::Kind::Outside;
+}
+
 const char* cmd_fileview(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
@@ -863,6 +872,10 @@ const char* cmd_fileview(const String& argsInput) {
     if (page < 1) return "Error: page must be >= 1 — usage: fileview \"<path>\" [page]";
   }
   if (a.has(2)) return "Error: unexpected argument — usage: fileview \"<path>\" [page]";
+
+  // This legacy viewer broadcasts untagged page chunks to shared sinks.
+  if (filePathIsPrivateTranscript(path))
+    return "Use fileread or the file browser to read private transcripts";
 
   const AuthContext& ctx = currentAuthContext();
   // existsGuarded gates by canRead — combines the previous canRead +
@@ -1086,8 +1099,10 @@ static bool fileReadAppendUnsigned(PsramBuffer& out, unsigned long value) {
 // path must consume the same budget here as they do in the actual serializer.
 static size_t fileReadEnvelopeLength(size_t escapedPathLength, size_t total,
                                      size_t offset, size_t len, bool eof,
-                                     const char* encoding, bool withData) {
-  return sizeof("{\"success\":true,\"path\":\"") - 1 + escapedPathLength +
+                                     const char* encoding, bool withData,
+                                     bool privateTranscript = false) {
+  return (privateTranscript ? sizeof(",\"transcriptPath\":true") - 1 : 0) +
+      sizeof("{\"success\":true,\"path\":\"") - 1 + escapedPathLength +
       sizeof("\",\"size\":") - 1 + fileReadUnsignedLength((unsigned long)total) +
       sizeof(",\"offset\":") - 1 + fileReadUnsignedLength((unsigned long)offset) +
       sizeof(",\"len\":") - 1 + fileReadUnsignedLength((unsigned long)len) +
@@ -1107,8 +1122,13 @@ static bool fileReadBuildReply(PsramBuffer& out, const String& path, size_t tota
         out.append(",\"len\":") && fileReadAppendUnsigned(out, (unsigned long)len) &&
         out.append(",\"eof\":") && out.append(eof ? "true" : "false") &&
         out.append(",\"enc\":\"") && out.append(encoding))) return false;
-  if (!withData) return out.append("\"}");
-  if (!out.append("\",\"data\":\"")) return false;
+  if (!out.append('"')) return false;
+  // Boolean presence tag: path remains in the existing path field. Shared
+  // sinks redact the whole reply; the authenticated owner retains its bytes.
+  if (filePathIsPrivateTranscript(path) && !out.append(",\"transcriptPath\":true"))
+    return false;
+  if (!withData) return out.append('}');
+  if (!out.append(",\"data\":\"")) return false;
   const bool encoded = strcmp(encoding, "b64") == 0
       ? fileReadAppendBase64(out, data, len)
       : fileReadAppendJsonString(out, data, len);
@@ -1130,6 +1150,7 @@ const char* cmd_fileread(const String& argsInput) {
   String path;
   if (requireQuotedPath(a, 0, path) != nullptr)
     return "{\"success\":false,\"error\":\"path must be a quoted token\"}";
+  const bool privateTranscript = filePathIsPrivateTranscript(path);
   long offset = a.has(1) ? a.argInt(1, 0) : 0;
   long reqLen = a.has(2) ? a.argInt(2, 0) : 0;
   bool forceB64 = false;
@@ -1178,11 +1199,11 @@ const char* cmd_fileread(const String& argsInput) {
     if (want > rawCap) want = rawCap;
     while (want > 0 &&
            fileReadEnvelopeLength(escapedPathLength, total, (size_t)offset, want,
-                                  (size_t)offset + want >= total, "b64", true) +
+                                  (size_t)offset + want >= total, "b64", true, privateTranscript) +
                ((want + 2) / 3) * 4 >= OUT_CAP) --want;
     if ((want == 0 && avail != 0) ||
         fileReadEnvelopeLength(escapedPathLength, total, (size_t)offset, want,
-                               (size_t)offset + want >= total, "b64", true) >= OUT_CAP) {
+                               (size_t)offset + want >= total, "b64", true, privateTranscript) >= OUT_CAP) {
       f.close();
       return "Error: File path too long for this transport";
     }
@@ -1243,7 +1264,7 @@ const char* cmd_fileread(const String& argsInput) {
   // an oversized first reply or keeps its high-water allocation alive.
   if (!useB64 &&
       fileReadEnvelopeLength(escapedPathLength, total, (size_t)offset, got, eof,
-                             "utf8", true) + fileReadJsonStringLength(buf, got) >= OUT_CAP - 1)
+                             "utf8", true, privateTranscript) + fileReadJsonStringLength(buf, got) >= OUT_CAP - 1)
     useB64 = true;
   const bool built = fileReadBuildReply(s_readJson, path, total, (size_t)offset,
                                         buf, got, eof, useB64 ? "b64" : "utf8", true);
@@ -1939,17 +1960,37 @@ static bool pathWithinScope(const String& path, const String& scope) {
   return path.startsWith(base + "/");
 }
 
+// Resolve a named account only for the private transcript tree. Ordinary file
+// operations keep their established role-only cost/behavior. The listing view
+// caches this ID under its already-held FS lock, so a roster change cannot
+// transfer a directory mid-listing.
+static uint32_t transcriptAccountId(const String& path, const String& user,
+                                     FsRole role) {
+  const auto kind = TranscriptPathPolicy::classify(path.c_str()).kind;
+  uint32_t id = 0;
+  if (role != FsRole::ANON && !isUnrestrictedRole(role) &&
+      (kind == TranscriptPathPolicy::Kind::Root || kind == TranscriptPathPolicy::Kind::Owner))
+    (void)getUserIdByUsername(user, id);
+  return id;
+}
+static uint8_t transcriptPermissionMask(const String& path, uint32_t accountId,
+                                        FsRole role) {
+  static_assert(PERM_READ == TranscriptPathPolicy::kRead && PERM_ALL == TranscriptPathPolicy::kAll);
+  return TranscriptPathPolicy::permissionMask(TranscriptPathPolicy::classify(path.c_str()),
+                                               accountId, isUnrestrictedRole(role));
+}
+
 // Aggregate the six public permission decisions from inputs that have already
 // been normalized/resolved. This is shared by the ordinary one-shot query and
 // the lock-bound listing view so scope, sensitive-extension, and image masks
 // cannot drift between the two paths. Pure and intentionally silent.
 static uint8_t permissionsForResolvedRole(const String& normalizedPath,
                                           const String& scope,
-                                          FsRole role) {
+                                          FsRole role, uint32_t accountId) {
   if (role == FsRole::ANON || !pathWithinScope(normalizedPath, scope)) return 0;
 
   const PathRule& rule = lookupRule(normalizedPath);
-  uint8_t granted = permsForRole(rule, role);
+  uint8_t granted = permsForRole(rule, role) & transcriptPermissionMask(normalizedPath, accountId, role);
   if (!isUnrestrictedRole(role)) {
     if (!rule.exemptSensitiveExt && hasSensitiveExtension(normalizedPath)) {
       granted &= ~(PERM_READ | PERM_WRITE);
@@ -1964,6 +2005,7 @@ namespace FsInternal {
 LockedListingPermissions::LockedListingPermissions(const AuthContext& ctx)
     : lock_("filesystem.listingPermissions"),
       scope_(ctx.scope),
+      user_(ctx.user),
       ownerTask_(xTaskGetCurrentTaskHandle()),
       role_(static_cast<uint8_t>(FsRole::ANON)),
       dynamicBond_(false),
@@ -2004,7 +2046,13 @@ uint8_t LockedListingPermissions::forPath(const String& path) const {
     role = isSuperAdminUser(kBondAdminUser) ? FsRole::SUPER : FsRole::ANON;
   }
 #endif
-  return permissionsForResolvedRole(normalizedPath, scope_, role);
+  const auto transcriptKind = TranscriptPathPolicy::classify(normalizedPath.c_str()).kind;
+  if (!transcriptAccountResolved_ &&
+      (transcriptKind == TranscriptPathPolicy::Kind::Root || transcriptKind == TranscriptPathPolicy::Kind::Owner)) {
+    transcriptAccountId_ = transcriptAccountId(normalizedPath, user_, role);
+    transcriptAccountResolved_ = true;
+  }
+  return permissionsForResolvedRole(normalizedPath, scope_, role, transcriptAccountId_);
 }
 
 uint8_t LockedListingPermissions::forChildOf(const String& dirPath) const {
@@ -2041,7 +2089,8 @@ static bool checkPerm(const String& path, const AuthContext& ctx,
                           && hasSensitiveExtension(path) && !isUnrestrictedRole(role);
   if (sensitiveBlocked) return false;
   if (imageEditApplies && isImageFile(path) && !isUnrestrictedRole(role)) return false;
-  uint8_t granted = permsForRole(lookupRule(path), role);
+  uint8_t granted = permsForRole(lookupRule(path), role) &
+                    transcriptPermissionMask(path, transcriptAccountId(path, ctx.user, role), role);
   return (granted & needed) == needed;
 }
 
@@ -2110,7 +2159,8 @@ void logFsAccessDeny(const String& path, const AuthContext& ctx,
                    op, path.c_str(), roleName(role));
     return;
   }
-  uint8_t granted = permsForRole(rule, role);
+  uint8_t granted = permsForRole(rule, role) &
+                    transcriptPermissionMask(path, transcriptAccountId(path, ctx.user, role), role);
   DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s granted=0x%02X needed=0x%02X",
                  op, path.c_str(), roleName(role), (unsigned)granted, (unsigned)needed);
 }
@@ -2126,8 +2176,9 @@ uint8_t getPermissions(const String& path, const AuthContext& ctx) {
   // though every real operation would be denied by checkPerm().
   String normalizedPath;
   if (!normalizeFsPath(path, normalizedPath)) return 0;
-  return permissionsForResolvedRole(normalizedPath, ctx.scope,
-                                    resolveRole(ctx));
+  const FsRole role = resolveRole(ctx);
+  return permissionsForResolvedRole(normalizedPath, ctx.scope, role,
+                                    transcriptAccountId(normalizedPath, ctx.user, role));
 }
 
 uint8_t getDirPerms(const String& dirPath, const AuthContext& ctx) {

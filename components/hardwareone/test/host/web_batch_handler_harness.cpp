@@ -420,6 +420,10 @@ static void testRepeatedRepliesAndSlotGrowth() {
   }
 }
 static void testPrivateSTTDirectReplies() {
+  check(redactWebCommandResult(R"({"transcriptPath":"/stt/u2/example.txt"})",true)==R"({"transcriptPath":"/stt/u2/example.txt"})",
+        "direct live owner retains transcript file path");
+  check(redactWebCommandResult(R"({"transcriptPath":"/stt/u2/example.txt"})",false)=="[private STT result]",
+        "shared command mirrors hide transcript file path");
   const std::string transcript=R"({"id":"abcdef0100000001","state":"done","sttText":"quoted \"word\" and \\ slash"})";
   resetScenario(); scenario.steps={{transcript}};
   httpd_req_t single; single.input="cmd=stt result abcdef0100000001";

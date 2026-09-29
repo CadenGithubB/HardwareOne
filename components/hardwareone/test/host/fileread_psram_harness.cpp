@@ -21,17 +21,33 @@ static void check(bool condition, const char* reason) {
 }
 
 class String {
+    std::string text_;
  public:
-  String() = default;
-  String(const char* text) : text_(text ? text : "") {}
-  String(const std::string& text) : text_(text) {}
-  const char* c_str() const { return text_.c_str(); }
-  size_t length() const { return text_.size(); }
-  long toInt() const { return std::strtol(text_.c_str(), nullptr, 10); }
-  bool operator==(const char* text) const { return text_ == text; }
- private:
-  std::string text_;
+    String()=default;
+    String(const char* s):text_(s?s:""){}
+    String(const std::string& s):text_(s){}
+    long toInt()const{return std::strtol(text_.c_str(),nullptr,10);}
+    size_t length()const{return text_.size();}
+    const char* c_str()const{return text_.c_str();}
+    char operator[](size_t i)const{return i<length()?text_[i]:0;}
+    bool startsWith(const String& s)const{return text_.rfind(s.text_,0)==0;}
+    bool endsWith(const String& s)const{return length()>=s.length() && text_.compare(length()-s.length(),s.length(),s.text_)==0;}
+    int indexOf(const char* s)const{auto n=text_.find(s);return n==std::string::npos?-1:int(n);}
+    int lastIndexOf(char c)const{auto n=text_.rfind(c);return n==std::string::npos?-1:int(n);}
+    String substring(size_t i)const{return text_.substr(std::min(i,length()));}
+    void reserve(size_t n){text_.reserve(n);}
+    void remove(size_t i){text_.erase(i);}
+    void toLowerCase(){for(char& c:text_)c=char(std::tolower(static_cast<unsigned char>(c)));}
+    void trim(){const auto a=text_.find_first_not_of(" \t\r\n"),b=text_.find_last_not_of(" \t\r\n");text_=a==std::string::npos?"":text_.substr(a,b-a+1);}
+    String& operator+=(char c){text_+=c;return *this;}
+    String& operator+=(const String& s){text_+=s.text_;return *this;}
+    friend String operator+(const String& a,const String& b){return a.text_+b.text_;}
+    friend bool operator==(const String& a,const String& b){return a.text_==b.text_;}
+    friend bool operator!=(const String& a,const String& b){return !(a==b);}
 };
+
+// INSERT_POLICY_HERE
+// INSERT_PAGER_HERE
 
 enum class AllocPref { PreferPSRAM };
 struct Allocation { size_t size; std::string tag; bool external; };
@@ -132,7 +148,17 @@ class File {
   bool valid_;
   size_t position_ = 0;
 };
+static unsigned existsCalls=0,viewReads=0;
+static std::vector<std::string> broadcasts;
+static char debugBuffer[1024];
+static bool ensureDebugBuffer(){return true;}
+static char* getDebugBuffer(){return debugBuffer;}
+static void broadcastOutput(const char* text){broadcasts.emplace_back(text);}
+template<class... Args>static void cliHintf(const char*,Args...){ }
+static bool readTextLimited(const char*,String& text,size_t cap){++viewReads;text=fileBytes.substr(0,cap);return true;}
+static void captureCryptoRevealText(String&){ }
 namespace VFS {
+static bool existsGuarded(const String&,const AuthContext& ctx){check(&ctx==&auth,"fileview preserves caller identity");++existsCalls;return fileExists;}
 static File openGuarded(const String& path, const char* mode, const AuthContext& ctx) {
   check(fsDepth == 1, "guarded VFS open remains under FS lock");
   check(&ctx == &auth, "installed caller identity is preserved");
@@ -244,7 +270,8 @@ static JsonDocument parseSuccess(const std::string& reply) {
   return document;
 }
 static void checkPayload(const std::string& reply, const std::string& expected,
-                          const std::string& path, size_t offset, bool eof) {
+                          const std::string& path, size_t offset, bool eof,
+                          bool privateTranscript = false) {
   auto document = parseSuccess(reply);
   check(document["path"].as<std::string>() == path, "path round-trips byte-for-byte");
   check(document["size"].as<size_t>() == reportedSize, "total file size is preserved");
@@ -256,14 +283,18 @@ static void checkPayload(const std::string& reply, const std::string& expected,
   check(encoding == "b64" || encoding == "utf8", "ordinary reply uses the established encoding names");
   check((encoding == "b64" ? decodeBase64(data) : data) == expected,
         "payload round-trips all source bytes");
+  check(document["transcriptPath"].isNull() == !privateTranscript,
+        "only private transcript replies carry the shared-sink privacy tag");
+  if(privateTranscript)check(document["transcriptPath"] == true,"privacy tag is boolean true");
   const std::string expectedWire = "{\"success\":true,\"path\":\"" + referenceEscape(path) +
       "\",\"size\":" + std::to_string(reportedSize) + ",\"offset\":" + std::to_string(offset) +
       ",\"len\":" + std::to_string(expected.size()) + ",\"eof\":" + (eof ? "true" : "false") +
-      ",\"enc\":\"" + encoding + "\",\"data\":\"" + referenceEscape(data) + "\"}";
+      ",\"enc\":\"" + encoding + "\"" + (privateTranscript ? ",\"transcriptPath\":true" : "") +
+      ",\"data\":\"" + referenceEscape(data) + "\"}";
   check(reply == expectedWire, "wire field order, types, escaping and formatting match the old contract");
   const size_t measured = fileReadEnvelopeLength(fileReadJsonStringLength(
       (const uint8_t*)path.data(), path.size()), reportedSize, offset, expected.size(), eof,
-      encoding.c_str(), true) + (encoding == "b64" ? ((expected.size() + 2) / 3) * 4 :
+      encoding.c_str(), true, privateTranscript) + (encoding == "b64" ? ((expected.size() + 2) / 3) * 4 :
                                   fileReadJsonStringLength((const uint8_t*)expected.data(), expected.size()));
   check(measured == reply.size(), "budget calculation exactly matches serialized output");
 }
@@ -405,6 +436,54 @@ int main(int argc, char** argv) {
     fixture(std::string("binary\0bytes", 12));
     auth.transport = SOURCE_HTTP; auth.sid = "7";
     checkPayload(invoke("/a", 0, 12, {"bin"}), fileBytes, "/a", 0, true);
+
+    // Exercise the actual legacy viewer: private aliases stop before any
+    // existence/read/broadcast path, while an ordinary page still renders.
+    for(const char* path:{"/stt/u2/session.txt","/sd/stt/u2/session.txt"," //./stt//u2/session.txt ",
+                         "/sd/STT/u2/a.txt","/sd/stt./u2/a.txt","/sd/\\stt/u2/a.txt",
+                         "/sd/.\\stt/u2/a.txt","/sd/stt/u2~1/a.txt"}) {
+      fixture("private spoken words");tokens={String(path)};broadcasts.clear();
+      const unsigned beforeExists=existsCalls,beforeRead=viewReads;
+      check(std::strcmp(cmd_fileview(""),"Use fileread or the file browser to read private transcripts")==0,
+            "private fileview redirects to owner-scoped readers");
+      check(existsCalls==beforeExists&&viewReads==beforeRead&&broadcasts.empty(),
+            "private fileview cannot read or broadcast content");
+    }
+    fixture("ordinary page");tokens={String("/ordinary.txt")};broadcasts.clear();
+    check(std::strcmp(cmd_fileview(""),"[FS] File displayed")==0,"ordinary fileview remains available");
+    check(std::find(broadcasts.begin(),broadcasts.end(),"ordinary page")!=broadcasts.end(),
+          "ordinary fileview still broadcasts its page");
+    for(const char* path:{"/stt/u2/session.txt","/sd/stt/u2/session.txt"," //./stt//u2/session.txt "}) {
+      fixture("words: \"quoted\"\n");
+      checkPayload(invoke(path),fileBytes,path,0,true,true);
+      checkPayload(invoke(path,0,0,{"b64"}),fileBytes,path,0,true,true);
+      checkPayload(invoke(path,5,4),fileBytes.substr(5,4),path,5,false,true);
+      checkPayload(invoke(path,999,4),"",path,fileBytes.size(),true,true);
+    }
+    // Include the tag in exact-capacity calculations, also on escape-heavy
+    // private names and both possible encodings.
+    bool privateBoundary=false;
+    for(size_t n=1;n<1900;n+=17){
+      const std::string path="/stt/u2/"+std::string(n,'\\');
+      fixture(std::string(6000,'\xff'),100000);
+      const auto reply=invoke(path,0,4096);const size_t count=parseSuccess(reply)["len"].as<size_t>();
+      checkPayload(reply,std::string(count,'\xff'),path,0,false,true);
+      privateBoundary|=reply.size()==CMD_RESULT_MAX-1;
+    }
+    check(privateBoundary,"private replies exercise exact capacity with the marker included");
+#if ENABLE_BLUETOOTH
+    fixture("private raw bytes");auth.transport=SOURCE_BLUETOOTH;
+    const std::string privatePath="/stt/u2/session.txt";
+    const auto privateRaw=invoke(privatePath,0,0,{"bin"});
+    auto privateMeta=parseSuccess(privateRaw);
+    check(privateMeta["enc"]=="raw"&&privateMeta["transcriptPath"]==true&&privateMeta["data"].isNull(),
+          "secure raw delivery returns tagged metadata without copying body into JSON");
+    check(binaryBody==fileBytes,"private secure raw body remains byte-identical");
+    check(privateRaw.size()==fileReadEnvelopeLength(privatePath.size(),fileBytes.size(),0,fileBytes.size(),true,"raw",false,true),
+          "private raw metadata budget is exact");
+    binarySendSucceeds=false;
+    checkPayload(invoke(privatePath,0,0,{"bin"}),fileBytes,privatePath,0,true,true);
+#endif
 
     fixture("secret");
     const unsigned opensBeforeEarly = openCalls;

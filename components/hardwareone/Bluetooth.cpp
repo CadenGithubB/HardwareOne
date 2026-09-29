@@ -796,11 +796,14 @@ bool bleDataDebugEnabled() { return isDebugFlagSet(DEBUG_BLE_DATA); }
 // Raw notify also carries non-NUL-terminated encrypted frames, so never use
 // strstr/String construction here or read beyond the caller's byte count.
 static bool bleOutputHasPrivateSTT(const char* data, size_t len) {
-  static constexpr char marker[] = "\"sttText\"";
-  constexpr size_t markerLen = sizeof(marker) - 1;
-  if (!data || len < markerLen) return false;
-  for (size_t i = 0; i <= len - markerLen; ++i) {
-    if (memcmp(data + i, marker, markerLen) == 0) return true;
+  static constexpr char textMarker[] = "\"sttText\"";
+  static constexpr char pathMarker[] = "\"transcriptPath\"";
+  constexpr size_t textLen = sizeof(textMarker) - 1;
+  constexpr size_t pathLen = sizeof(pathMarker) - 1;
+  if (!data || len < textLen) return false;
+  for (size_t i = 0; i <= len - textLen; ++i) {
+    if (memcmp(data + i, textMarker, textLen) == 0 ||
+        (len - i >= pathLen && memcmp(data + i, pathMarker, pathLen) == 0)) return true;
   }
   return false;
 }

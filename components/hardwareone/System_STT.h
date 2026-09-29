@@ -3,6 +3,7 @@
 #include "System_BuildConfig.h"
 #include "System_User.h"
 #include "System_STTLocal.h"
+#include "System_Transcript.h"
 
 // Shared dictation session broker. Audio remains bounded even for sessions
 // with no duration limit. Recognized words are text, never device commands.
@@ -48,6 +49,7 @@ struct STTSnapshot {
   uint32_t audioOverruns = 0;
   uint64_t sessionMs = 0;
   STTLocalStats stats;
+  TranscriptStatus transcript;
   char error[96] = {};
 };
 
@@ -73,7 +75,8 @@ bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
 // drains admitted audio. Cancel discards it. A slow backend/client causes an
 // explicit bounded-queue failure, never silent audio/text overwrite.
 bool sttBeginContinuous(STTOwner owner, STTToken* token,
-                        char* error, size_t errorCap);
+                        char* error, size_t errorCap,
+                        const TranscriptOptions* transcriptOptions = nullptr);
 // Retry-safe oldest-result peek. Acknowledge only after a consumer accepts the
 // text; an ack can remove only the exact oldest chunk (or repeat an earlier ack).
 // Both APIs enforce the same live owner/epoch/token fence as one-shot results.

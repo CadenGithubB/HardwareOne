@@ -37,6 +37,9 @@ class LockedListingPermissions final {
   // account, and release it only after every other captured field is dead.
   FsLockGuard lock_;
   String scope_;
+  String user_;
+  mutable uint32_t transcriptAccountId_ = 0;
+  mutable bool transcriptAccountResolved_ = false;
   TaskHandle_t ownerTask_ = nullptr;
   uint8_t role_ = 0;
   bool dynamicBond_ = false;
