@@ -188,19 +188,25 @@ paths still require accessory qualification; the attached P4 has no display.
   logging/history and the other health interfaces remain enabled. No compiler
   optimization settings were changed.
 
-The current `transcripts-app-v1` build is 6,375,872 bytes, leaving 1,600 bytes in
-the unchanged app partition. Its SHA-256 is
-`7c8e2a54a75ad0daf80d2169ad99c0a7a0d3c40e569040241b667acc48debc35`.
-The inherited experiment-only `camerajpegprobe` command is retired to fit this
-image; production camera/JPEG support remains enabled. No additional standard
-HardwareOne feature was excluded. Current evidence is in
-[TRANSCRIPT_RESULTS.md](TRANSCRIPT_RESULTS.md) and
-[transcript-validation.json](transcript-validation.json); previous image
-identities remain in their historical qualification reports.
+The installed `transcription-ui-v1` build is 6,362,416 bytes, leaving 15,056
+bytes in the unchanged app partition. Its SHA-256 is
+`20a22d79b0ed9656aefa13ca6ff9108739a2db7e3ab2053adc38108910090f4d`.
+The source release version 0.99.95 was separately rebuilt and checked without
+flashing; that image has the same size and SHA-256
+`1a9d5f690583e7db81315dffe6054449dc5046a2bc9f5ef7a690c7be128ecf4a`.
+The inherited experiment-only `camerajpegprobe` command remains retired;
+production camera/JPEG support remains enabled. The Transcription interfaces
+fit by storing one existing web script as a lossless gzip asset. Current
+interface evidence is in [TRANSCRIPTION_UI_RESULTS.md](TRANSCRIPTION_UI_RESULTS.md)
+and [transcription-ui-validation.json](transcription-ui-validation.json);
+previous image identities remain in their historical qualification reports.
 
 ## Reproduce
 
 Use the pinned IDF 5.5.5 environment and preserved qualification snapshots.
+These ignored application snapshots are required inputs: a fresh clone alone
+cannot recreate the full experimental P4 application yet. Models are generated
+separately using the provenance and export tooling below.
 `prepare.py --capture` records production changes against `f9bfe98`;
 `prepare.py` creates an isolated `private/app-p4`; `--refresh` refreshes only
 that checked copy. `build.sh` verifies sources, inherited radio/JPEG overlays,

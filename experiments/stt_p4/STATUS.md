@@ -1,5 +1,24 @@
 # Status
 
+## 2026-09-28 - source release 0.99.95
+
+- Version declarations and release notes now agree on 0.99.95. The completed
+  history on `codex/jpeg-portable` includes every committed change from
+  `codex/investigate-esp32-p4x-eye`; neither has divergent committed work.
+- Versioned P4 build passed all 7,972 source checks. The app descriptor is
+  `0.99.95`, size 6,362,416 bytes with 15,056 bytes free, SHA-256
+  `1a9d5f690583e7db81315dffe6054449dc5046a2bc9f5ef7a690c7be128ecf4a`.
+  No devices were accessed or flashed for the source release; installed P4
+  firmware and the S3 OpenClaw Wi-Fi/web service are unchanged.
+- The original investigation checkout still has separate uncommitted P4
+  display/input/SDMMC integration, Tilt Maze removal and enclosure work. It is
+  not duplicate residue and requires reconciliation before integration. Its
+  `work/` scratch/vendor directory must not be staged wholesale.
+- P4 integration still depends on preserved ignored source snapshots; standard
+  clean-clone P4 builds and refreshed native-target dependency locks/builds are
+  not qualified by this release. See the changelog for all qualification limits.
+
+
 ## 2026-09-28 — shared Transcription interfaces installed on P4
 
 - Added **Apps → Transcription** for G2 and OLED, plus collapsible

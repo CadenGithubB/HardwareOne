@@ -8,6 +8,59 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.95] - 2026-09-28
+
+Shared camera, audio, battery and transcription services now support the P4
+investigation alongside the existing ESP32/S3 paths. P4 hardware qualification
+uses pinned ESP-IDF 5.5.5 experiment builds; this is not an ESP-IDF 6 migration.
+
+### Added
+- Portable JPEG and camera backends: P4 hardware JPEG and CSI camera support,
+  with the existing S3 camera and software JPEG path retained.
+- Shared onboard PDM microphone support for P4X-EYE and XIAO ESP32-S3 Sense,
+  alongside the existing G2 microphone source.
+- P4X-EYE battery voltage telemetry through the shared battery backend, with
+  explicit capability reporting where charge or state-of-charge data is absent.
+- Experimental fully local English STT on P4, including continuous capture,
+  phrase-by-phrase results, bounded memory and session-cached model weights.
+- Optional per-account transcript saving through the shared local/Pi dictation
+  path. The persistent setting is captured when each session starts.
+- Apps -> Transcription on G2 and OLED, plus a collapsible Transcription panel
+  under Web Sensors -> Microphone: start/stop, recent text and saved-file browsing.
+- Native G2 Conversate lifecycle and shared PCM transport.
+- Pinned investigation profiles and hardware results for P4/C6 mesh,
+  Wi-Fi/web, BLE server and G2/R1 client modes, SPI display, wheel and buttons.
+
+### Changed
+- ESP-SR dependency is pinned to 2.5.5 with improved model admission, grammar
+  lifetime, microphone ownership and teardown. S3 speech qualification is
+  deferred until suitable model storage is available.
+- P4 investigation power controls expose its supported CPU clock choices.
+- One existing ESP-NOW web script is served as a checked, byte-exact gzip asset,
+  saving flash without removing its functionality.
+
+### Fixed
+- JPEG validation and fallback handling reject damaged S3 camera frames and
+  handle P4 DMA/cache and decoder compatibility requirements.
+- Transcription controls use authenticated session ownership, retry-safe result
+  delivery and private file access; background polling does not count as user
+  activity or fill command audit logs.
+
+### Qualification limits
+- P4 board/radio/display integration still uses the documented experiment
+  overlays and preserved local source snapshots, rather than a self-contained
+  clean-checkout board build. See `experiments/stt_p4/README.md` and the earlier
+  qualification profiles.
+- Local STT remains experimental in accuracy and latency. Continuous sessions
+  have no fixed total duration, but process bounded segments and stop visibly
+  if inference or a consumer cannot keep up. Pi UART v1 retains its existing
+  finite recording/result flow; continuous Pi transport is not implemented.
+- Native-target dependency locks predate the ESP-SR/DSP update and must be
+  resolved against the current manifest; a fresh native-target release build
+  has not been qualified.
+- The new transcription interfaces passed host tests and P4 USB checks.
+  Physical G2/OLED/SD/Pi and end-to-end web interface qualification remain open.
+
 ## [0.99.94.1] - 2026-09-19
 
 Checked-in deployment profiles: build a reproducible Headless Node or Pocket

@@ -24,6 +24,7 @@
     "experiments/p4_ble_roles/radio_backend.h": "ca08bfc7f8fdc4185c64e59c53e77d170a966618174bb2d337980378728fea5e"
   },
   "sources": {
+    "CMakeLists.txt": "fd8749bba888a85819e31876a62fe70bc897badea2c8ed5bf1b8c9beb9d2fd4a",
     "components/hardwareone/Audio_VadPolicy.h": "5f2bc6a5e4211e04e9fdda8358fb20fa929a3bc439011f2ab00ca4f4a5b93f7b",
     "components/hardwareone/Bluetooth.cpp": "8b904f5e2e8e372df9ef78e61ee94014534ddcd88b2640cef5c4c5ea3f3b6d52",
     "components/hardwareone/CMakeLists.txt": "58b8042c68459e53f9e549d1eb125e7bbde10611b76751ecce0cfec5111e1170",
@@ -84,5 +85,5 @@
     "components/hardwareone/web_assets/generate.py": "2f0054fc2b7ed0d93a46a4f686489c050d23be2d3bbe59feefde6de7a6c0b16d"
   },
   "dependency_sha256": "de23affb7b68751273cc1fa38873cae6b18b6d946d64452c0c885e74648fdbb4",
-  "patch_sha256": "a3e9c5d54ae3a357cdfa7a919f133547d10e61a66dcee974688ec437fc2ac0e4"
+  "patch_sha256": "c256a24f3694a6c380fb74150996009ce81465c7331889b667782177fd31ed95"
 }
