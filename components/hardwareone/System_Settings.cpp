@@ -2706,6 +2706,23 @@ static const SettingsModule outputSettingsModule = {
   "Output routing for serial, web, and display"
 };
 
+// Transcript-saving policy belongs to the shared settings registry, independent
+// of the selected dictation provider. A running session keeps its latched value.
+#if ENABLE_DICTATION || ENABLE_LOCAL_STT
+static const SettingEntry sttSettingEntries[] = {
+  { "sttsavetranscripts", SETTING_BOOL, &gSettings.sttSaveTranscripts, 0, 0, nullptr, 0, 1, "Save STT transcripts", nullptr, false, nullptr, "sttsavetranscripts" },
+};
+
+static const SettingsModule sttSettingsModule = {
+  "stt",
+  "stt",
+  sttSettingEntries,
+  sizeof(sttSettingEntries) / sizeof(sttSettingEntries[0]),
+  nullptr,
+  "Save recognized text; changes apply to the next STT session."
+};
+#endif
+
 // ============================================================================
 // Crash / Reset Tracking Settings Module
 // ============================================================================
@@ -2925,6 +2942,9 @@ void registerAllSettingsModules() {
 #endif
 #if ENABLE_MICROPHONE
   registerSettingsModule(&micSettingsModule);
+#endif
+#if ENABLE_DICTATION || ENABLE_LOCAL_STT
+  registerSettingsModule(&sttSettingsModule);
 #endif
 #if ENABLE_EDGE_IMPULSE
   registerSettingsModule(&edgeImpulseSettingsModule);
@@ -3586,6 +3606,9 @@ SETTING_EDITOR_CMD(cmd_set_eiinputsize,         "eiinputsize")
 SETTING_EDITOR_CMD(cmd_set_eiinterval,          "eiinterval")
 SETTING_EDITOR_CMD(cmd_set_srautostart,         "srautostart")
 SETTING_EDITOR_CMD(cmd_set_srmodelsource,       "srmodelsource")
+#if ENABLE_DICTATION || ENABLE_LOCAL_STT
+SETTING_EDITOR_CMD(cmd_set_sttsavetranscripts,   "sttsavetranscripts")
+#endif
 SETTING_EDITOR_CMD(cmd_set_eventlog,            "eventlog")
 SETTING_EDITOR_CMD(cmd_set_notifydevicebanners,        "notifydevicebanners")
 SETTING_EDITOR_CMD(cmd_set_notifydevicetoasts,         "notifydevicetoasts")
@@ -3676,6 +3699,9 @@ const CommandEntry settingEditorCommands[] = {
   { "eiinterval",          "Set Edge Impulse inference interval (ms)",   true, cmd_set_eiinterval,          "Usage: eiinterval <100-10000>" },
   { "srautostart",         "Set ESP-SR auto-start flag",                 true, cmd_set_srautostart,         "Usage: srautostart <0|1>" },
   { "srmodelsource",       "Set ESP-SR model source",                    true, cmd_set_srmodelsource,       "Usage: srmodelsource <value>" },
+#if ENABLE_DICTATION || ENABLE_LOCAL_STT
+  { "sttsavetranscripts", "Save recognized text; changes apply to the next STT session.", true, cmd_set_sttsavetranscripts, "Usage: sttsavetranscripts [0|1]" },
+#endif
   { "eventlog",            "Enable/disable the structured event-history log (events.log)", true, cmd_set_eventlog,
     "Usage: eventlog <0|1>\n  One line per system event, durable across reboots. Display/behavior unaffected." },
   { "notifydevicebanners",        "Enable/disable OLED notification banners",   true, cmd_set_notifydevicebanners,        "Usage: notifydevicebanners <0|1>" },

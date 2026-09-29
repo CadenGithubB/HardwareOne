@@ -343,6 +343,7 @@ set(hardwareone_srcs
         System_VFS.cpp
         System_Microphone.cpp
         System_Dictation.cpp
+        System_Transcript.cpp
         HAL_Audio.cpp
         System_SensorRegistry.cpp
         System_Notifications.cpp

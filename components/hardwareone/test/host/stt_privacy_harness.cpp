@@ -83,5 +83,11 @@ int main() {
   assert(shared.empty() && Serial.out.empty());
   reset(); deliverCommandResult("ordinary result",ctx);
   assert(Serial.out=="ordinary result\n" && shared.size()==1 && shared[0]=="ordinary result");
+  const String path=R"({"state":"done","transcriptPath":"/stt/u2/example.txt"})";
+  assert(redactOutputForLog(path).s=="[private STT result]");
+  assert(redactOutputForLog("{\"transcriptPath\":\"partial").s=="[private STT result]");
+  reset();ctx.origin=ORIGIN_SERIAL;ctx.outputMask=MSG_ROUTE_SERIAL|MSG_ROUTE_WEB|MSG_ROUTE_FILE;
+  deliverCommandResult(path,ctx);
+  assert(Serial.out==path.s+"\n"&&shared.size()==1&&shared[0]=="[private STT result]");
   puts("STT result privacy: escaped text, targeted serial/BLE, shared redaction and stale session suppression passed");
 }

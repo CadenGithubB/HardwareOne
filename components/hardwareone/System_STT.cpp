@@ -8,6 +8,7 @@
 #include "HAL_Audio.h"
 #include "System_AuthIdentity.h"
 #include "System_Command.h"
+#include "System_Debug.h"
 #include "System_ESPSR.h"
 #include "System_MemUtil.h"
 #include "System_Microphone.h"
@@ -29,6 +30,7 @@ constexpr size_t kTextQueueDepth = 8;
 
 struct STTRun {
   STTOwner owner;
+  TranscriptOptions transcriptOptions;
   STTSnapshot snapshot;
   uint32_t startedMs = 0;
   uint32_t completedMs = 0;
@@ -118,15 +120,31 @@ static void sttProgress(void* context, STTLocalPhase phase) {
   portEXIT_CRITICAL(&gSTTMux);
 }
 
+static void sttPublishTranscript(STTToken token, const TranscriptStatus& status) {
+  bool newError = false;
+  portENTER_CRITICAL(&gSTTMux);
+  if (gSTT.snapshot.token == token) {
+    newError = status.error[0] && !gSTT.snapshot.transcript.error[0];
+    gSTT.snapshot.transcript = status;
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  if (newError) INFO_SYSTEMF("[STT] Transcript saving failed: %s", status.error);
+}
+
 static void sttWorker(void*) {
   STTToken token;
   uint32_t captureMs;
   AudioSource requestedSource;
+  TranscriptOptions transcriptOptions;
   portENTER_CRITICAL(&gSTTMux);
   token = gSTT.snapshot.token;
   captureMs = gSTT.snapshot.captureLimitMs;
   requestedSource = gSTT.requestedSource;
+  transcriptOptions = gSTT.transcriptOptions;
   portEXIT_CRITICAL(&gSTTMux);
+  TranscriptSession transcript;
+  transcript.begin(transcriptOptions, "local", token);
+  sttPublishTranscript(token, transcript.snapshot());
 
   int16_t* pcm = nullptr;
   size_t samples = 0;
@@ -268,21 +286,40 @@ static void sttWorker(void*) {
     free(pcm);
   }
   const bool cancelled = sttCancelled(&token);
-  const uint32_t stackFree = uxTaskGetStackHighWaterMark(nullptr);
+  bool acceptedText = false;
   portENTER_CRITICAL(&gSTTMux);
   if (gSTT.snapshot.token == token) {
     sttClearTextLocked();
     gSTT.snapshot.stats = stats;
     gSTT.snapshot.recordedSamples = samples;
-    gSTT.snapshot.workerStackFreeBytes = stackFree;
     gSTT.snapshot.state = (cancelled || gSTT.cancelRequested) ? STTState::Cancelled
                               : ok ? STTState::Done : STTState::Failed;
     if (gSTT.snapshot.state == STTState::Done) {
       memcpy(gSTT.text, text, sizeof(gSTT.text));
       gSTT.snapshot.textReady = true;
+      acceptedText = true;
     } else if (gSTT.snapshot.state == STTState::Failed) {
       snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s",
                error[0] ? error : "Local transcription failed");
+    }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  // Recognition and saving have separate outcomes. Admission remains closed
+  // through filesystem work; a late mailbox retirement never reopens the file.
+  if (acceptedText) (void)transcript.append(1, text, strlen(text));
+  const bool finallyCancelled = sttCancelled(&token);
+  // This fixes the saved outcome before finalization I/O. A cancel arriving
+  // during finish only retires delivery; it cannot rewrite an accepted file.
+  transcript.finish(finallyCancelled ? "cancelled" : ok ? "done" : "failed");
+  sttPublishTranscript(token, transcript.snapshot());
+  // Include the optional writer/VFS call depth in this worker's final margin.
+  const uint32_t stackFree = uxTaskGetStackHighWaterMark(nullptr);
+  portENTER_CRITICAL(&gSTTMux);
+  if (gSTT.snapshot.token == token) {
+    gSTT.snapshot.workerStackFreeBytes = stackFree;
+    if (finallyCancelled || gSTT.cancelRequested) {
+      sttClearTextLocked();
+      gSTT.snapshot.state = STTState::Cancelled;
     }
     gSTT.completedMs = millis();
     gSTT.snapshot.workerActive = false;
@@ -517,11 +554,16 @@ static void sttCaptureWorker(void* context) {
 static void sttContinuousWorker(void*) {
   StreamRun run;
   STTLocalSession backendSession;
+  TranscriptOptions transcriptOptions;
   portENTER_CRITICAL(&gSTTMux);
   run.token = gSTT.snapshot.token;
   run.requested = gSTT.requestedSource;
   run.clockMs = millis();
+  transcriptOptions = gSTT.transcriptOptions;
   portEXIT_CRITICAL(&gSTTMux);
+  TranscriptSession transcript;
+  transcript.begin(transcriptOptions, "local", run.token);
+  sttPublishTranscript(run.token, transcript.snapshot());
   bool captureStarted = false;
   do {
     if (sttCancelled(&run.token)) break;
@@ -577,6 +619,7 @@ static void sttContinuousWorker(void*) {
         memset(slot->pcm + slot->samples, 0, (inferenceSamples - slot->samples) * sizeof(int16_t));
       const bool ok = sttLocalTranscribe(slot->pcm, inferenceSamples, text, sizeof(text), control,
                                         stats, error, sizeof(error), &backendSession);
+      bool acceptedText = false;
       if (!sttStreamCancelled(&run)) {
         if (!ok || !memchr(text, '\0', sizeof(text))) {
           sttStreamFail(run, error[0] ? error : "Continuous transcription failed");
@@ -592,12 +635,19 @@ static void sttContinuousWorker(void*) {
             ++gSTT.snapshot.pendingTexts;
             ++gSTT.snapshot.segmentsCompleted;
             gSTT.snapshot.textReady = true;
+            acceptedText = true;
           } else if (!gSTT.cancelRequested && !run.failed) {
             run.failed = true;
             snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", "STT text queue full; receiver must acknowledge results");
           }
           portEXIT_CRITICAL(&gSTTMux);
         }
+      }
+      // Save the whole accepted chunk once, before UI splitting/ACK can erase
+      // its mailbox copy. Only this inference worker performs transcript I/O.
+      if (acceptedText) {
+        (void)transcript.append(slot->sequence, text, strlen(text));
+        sttPublishTranscript(run.token, transcript.snapshot());
       }
       sttWipe(text, sizeof(text));
       sttWipe(slot->pcm, inferenceSamples * sizeof(int16_t));
@@ -629,6 +679,10 @@ static void sttContinuousWorker(void*) {
   }
   sttStreamTick(run);
   const bool cancelled = sttCancelled(&run.token);
+  // Saving has a completion boundary here. Later cancellation can retire the
+  // mailbox, but cannot rewrite this already-admitted final outcome.
+  transcript.finish(cancelled ? "cancelled" : run.failed ? "failed" : "done");
+  sttPublishTranscript(run.token, transcript.snapshot());
   portENTER_CRITICAL(&gSTTMux);
   if (cancelled || gSTT.cancelRequested) sttClearTextLocked();
   gSTT.snapshot.state = (cancelled || gSTT.cancelRequested) ? STTState::Cancelled
@@ -646,7 +700,8 @@ static void sttContinuousWorker(void*) {
 } // namespace
 
 static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
-                         STTToken* token, char* error, size_t errorCap) {
+                         STTToken* token, char* error, size_t errorCap,
+                         const TranscriptOptions* suppliedOptions = nullptr) {
   sttReapTerminal();
   if (token) *token = 0;
   if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
@@ -670,6 +725,16 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
   const uint32_t nonce = esp_random();
   const AudioSource requestedSource = gSettings.micSource == "pdm" ? AUDIO_SRC_LOCAL_PDM
       : gSettings.micSource == "g2" ? AUDIO_SRC_G2_LEFT : AUDIO_SRC_NONE;
+  TranscriptOptions transcriptOptions = suppliedOptions ? *suppliedOptions
+      : transcriptCaptureOptions(owner.source, owner.epoch);
+  if (transcriptOptions.enabled && (transcriptOptions.source != owner.source ||
+                                    transcriptOptions.epoch != owner.epoch)) {
+    // A deferred UI handoff can carry only this exact broker owner. Invalid
+    // saving identity fails the optional sink, never recognition itself.
+    memset(transcriptOptions.user, 0, sizeof(transcriptOptions.user));
+    transcriptOptions.source = owner.source;
+    transcriptOptions.epoch = owner.epoch;
+  }
   bool admitted = false;
   portENTER_CRITICAL(&gSTTMux);
   if (!gSTT.snapshot.workerActive &&
@@ -681,6 +746,8 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
     if (!gSTTNonce) gSTTNonce = nonce ? nonce : 1;
     if (++gSTTCounter == 0) ++gSTTCounter;
     gSTT.owner = owner;
+    gSTT.transcriptOptions = transcriptOptions;
+    gSTT.snapshot.transcript.enabled = transcriptOptions.enabled;
     gSTT.requestedSource = requestedSource;
     gSTT.snapshot.token = (static_cast<uint64_t>(gSTTNonce) << 32) | gSTTCounter;
     gSTT.snapshot.state = STTState::Preparing;
@@ -715,8 +782,9 @@ bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
   return sttBeginMode(owner, captureMs, false, token, error, errorCap);
 }
 bool sttBeginContinuous(STTOwner owner, STTToken* token,
-                        char* error, size_t errorCap) {
-  return sttBeginMode(owner, 0, true, token, error, errorCap);
+                        char* error, size_t errorCap,
+                        const TranscriptOptions* transcriptOptions) {
+  return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions);
 }
 
 bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {
@@ -980,6 +1048,13 @@ static const char* cmd_stt(const String& argsInput) {
     doc["workerStackFreeBytes"] = snap.workerStackFreeBytes;
     doc["captureStackFreeBytes"] = snap.captureStackFreeBytes;
     doc["error"] = snap.error;
+    doc["transcriptEnabled"] = snap.transcript.enabled;
+    doc["transcriptSaved"] = snap.transcript.saved;
+    doc["transcriptComplete"] = snap.transcript.complete;
+    doc["transcriptChunks"] = snap.transcript.chunks;
+    doc["transcriptBytes"] = snap.transcript.bytes;
+    doc["transcriptPath"] = snap.transcript.path;
+    doc["transcriptError"] = snap.transcript.error;
     doc["modelBytes"] = snap.stats.modelBytes;
     doc["weightsReused"] = snap.stats.weightsReused;
     doc["featureFrames"] = snap.stats.featureFrames;

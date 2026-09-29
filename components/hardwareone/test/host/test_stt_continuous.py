@@ -28,7 +28,7 @@ def main():
     if not 1 <= args.repeat <= 100:
         parser.error('--repeat must be 1..100')
     interface = '\n'.join(no_includes((SOURCE / name).read_text()) for name in
-                          ('System_STTLocal.h', 'System_STT.h', 'Audio_VadPolicy.h', 'stt/stt_segmenter.h'))
+                          ('System_Transcript.h', 'System_STTLocal.h', 'System_STT.h', 'Audio_VadPolicy.h', 'stt/stt_segmenter.h'))
     broker = no_includes((SOURCE / 'System_STT.cpp').read_text().split('// CLI_ADAPTER_BEGIN')[0]) + '\n#endif\n'
     harness = (HERE / 'stt_continuous_harness.cpp').read_text()
     harness = harness.replace('// INSERT_INTERFACE', interface).replace('// INSERT_BROKER', broker)

@@ -22,6 +22,7 @@
 #define ENABLE_LOCAL_STT 1
 #define ENABLE_MICROPHONE 1
 #define ENABLE_ESP_SR 1
+#define INFO_SYSTEMF(...) ((void)0)
 using String = std::string;
 using TransportSessionEpoch = uint32_t;
 enum CommandSource { SOURCE_WEB, SOURCE_SERIAL, SOURCE_INTERNAL, SOURCE_ESPNOW,
@@ -29,8 +30,9 @@ enum CommandSource { SOURCE_WEB, SOURCE_SERIAL, SOURCE_INTERNAL, SOURCE_ESPNOW,
 // INSERT_INTERFACE
 using portMUX_TYPE = std::mutex;
 #define portMUX_INITIALIZER_UNLOCKED {}
-#define portENTER_CRITICAL(x) (x)->lock()
-#define portEXIT_CRITICAL(x) (x)->unlock()
+static thread_local unsigned criticalDepth = 0;
+#define portENTER_CRITICAL(x) do { (x)->lock(); ++criticalDepth; } while (0)
+#define portEXIT_CRITICAL(x) do { assert(criticalDepth); --criticalDepth; (x)->unlock(); } while (0)
 #define pdMS_TO_TICKS(x) (x)
 constexpr int pdPASS = 1;
 static std::atomic<uint64_t> clockMs{1};
@@ -208,6 +210,59 @@ bool sttLocalTranscribe(const int16_t*, size_t, char*, size_t,
 // INSERT_BROKER
 #undef free
 
+static std::atomic<bool> savePreference{false}, saveFailure{false}, saveHeld{false}, saveEntered{false};
+static std::atomic<bool> finishHeld{false}, finishEntered{false};
+struct SavedTranscript {
+  TranscriptOptions options;
+  std::vector<std::pair<uint32_t, std::string>> chunks;
+  std::string outcome;
+};
+static std::mutex saveMutex;
+static std::map<STTToken, SavedTranscript> savedTranscripts;
+static thread_local bool transcriptFinished = false;
+TranscriptOptions transcriptCaptureOptions(CommandSource source, TransportSessionEpoch epoch) {
+  assert(!criticalDepth);
+  TranscriptOptions out; out.enabled = savePreference; out.source = source; out.epoch = epoch;
+  strcpy(out.user, "alice"); return out;
+}
+static void assertSaveWorker() {
+  assert(mainWorker && !criticalDepth && !taskSelfDeleted && !engineActive);
+  std::lock_guard<std::mutex> lock(gSTTMux); assert(gSTT.snapshot.workerActive);
+}
+void TranscriptSession::begin(const TranscriptOptions& options, const char* provider, uint64_t id) {
+  assertSaveWorker(); assert(std::string(provider) == "local");
+  options_ = options; id_ = id; status_ = {}; status_.enabled = options.enabled;
+  if (options.enabled && !options.user[0]) strcpy(status_.error, "Transcript owner unavailable");
+  std::lock_guard<std::mutex> lock(saveMutex);
+  assert(!savedTranscripts.count(id)); savedTranscripts[id].options = options;
+}
+bool TranscriptSession::append(uint32_t sequence, const char* text, size_t length) {
+  assertSaveWorker(); assert(!finished_ && sequence > sequence_); sequence_ = sequence;
+  if (!options_.enabled) return true;
+  if (status_.error[0]) return false;
+  saveEntered = true;
+  while (saveHeld) std::this_thread::sleep_for(std::chrono::microseconds(100));
+  if (saveFailure || (!status_.saved && !transportSessionEpochIsLive(options_.source, options_.epoch))) {
+    strcpy(status_.error, "Injected save failure"); return false;
+  }
+  { std::lock_guard<std::mutex> lock(saveMutex);
+    savedTranscripts[id_].chunks.emplace_back(sequence, std::string(text, length)); }
+  ++status_.chunks; status_.bytes += length;
+  if (length) { status_.saved = true; strcpy(status_.path, "/stt/u1/test.txt"); }
+  return true;
+}
+void TranscriptSession::finish(const char* outcome) {
+  assertSaveWorker(); assert(!audioCaptureOwnedBy("stt") && !finished_);
+  finishEntered = true;
+  while (finishHeld) std::this_thread::sleep_for(std::chrono::microseconds(100));
+  finished_ = true; transcriptFinished = true;
+  status_.complete = !status_.error[0];
+  std::lock_guard<std::mutex> lock(saveMutex); savedTranscripts[id_].outcome = outcome;
+}
+static SavedTranscript saved(STTToken token) {
+  std::lock_guard<std::mutex> lock(saveMutex); return savedTranscripts.at(token);
+}
+
 void STTLocalSession::reset() {
   if (!taskSelfDeleted) {
     assert(mainWorker && !backendResetBeforeDelete);
@@ -230,7 +285,7 @@ STTLocalSession::~STTLocalSession() {
 }
 void vTaskDelete(void*) {
   if (mainWorker) {
-    assert(backendResetBeforeDelete && liveWeightCaches == 0);
+    assert(backendResetBeforeDelete && liveWeightCaches == 0 && transcriptFinished);
     assert(!engineActive && !audioCaptureOwnedBy("stt"));
     { std::lock_guard<std::mutex> lock(gSTTMux); assert(!gSTT.snapshot.workerActive); }
   }
@@ -327,6 +382,8 @@ static void reset() {
   modelAvailable = engineOK = true; engineOverlong = ignoreEngineCancel = engineActive = false;
   engineCalls = 0; enginePermits = UINT32_MAX; engineHistory.clear();
   cacheStartFails = false; weightLoads = weightReuses = sessionCloses = 0;
+  savePreference = saveFailure = saveHeld = saveEntered = finishHeld = finishEntered = false;
+  savedTranscripts.clear();
 }
 static STTToken begin() {
   allowedSamples = deliveredSamples = 0; readCounter = 0;
@@ -603,6 +660,76 @@ static void testFaults() {
   allowedSamples = kCalibrationSamples + 320000; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "sequence exhausted"));
 }
+static void testTranscriptSaving() {
+  reset(); savePreference = true; saveHeld = true;
+  auto token = begin(); savePreference = false; started(token); feed(token, 320000);
+  await([] { return saveEntered.load(); }, "accepted chunk reaches saving worker");
+  // Publication/ACK can run while slow storage holds its own complete copy.
+  auto first = peek(token); assert(first.sequence == 1);
+  assert(sttReadChunk(owner, token, &first));
+  assert(sttAcknowledgeChunk(owner, token, 1) && sttAcknowledgeChunk(owner, token, 1));
+  assert(saved(token).chunks.empty() && snapshot(token).workerActive);
+  saveHeld = false;
+  await([&] { return saved(token).chunks.size() == 1; }, "first saved chunk");
+  feed(token, 640000);
+  await([&] { return saved(token).chunks.size() == 2; }, "second saved chunk despite setting off");
+  finishHeld = true; assert(sttRequestFinish(owner, token));
+  await([] { return finishEntered.load(); }, "saving finalization");
+  assert(sttRunActive(token) && saved(token).outcome.empty());
+  rejectBegin(); finishHeld = false; complete(token);
+  const auto accepted = saved(token);
+  assert(accepted.options.enabled && accepted.chunks.size() == 2 && accepted.outcome == "done");
+  assert(accepted.chunks[0].first == 1 && accepted.chunks[0].second == "segment 1");
+  assert(snapshot(token).transcript.saved && snapshot(token).transcript.complete && snapshot(token).transcript.chunks == 2);
+  assert(sttCancel(owner, token)); // Mailbox retirement must not rewrite finished files.
+  assert(saved(token).outcome == "done" && saved(token).chunks.size() == 2);
+
+  reset(); token = begin(); savePreference = true; started(token); feed(token, 16000);
+  assert(sttRequestFinish(owner, token)); complete(token);
+  assert(!saved(token).options.enabled && saved(token).chunks.empty());
+  assert(!snapshot(token).transcript.enabled && snapshot(token).state == STTState::Done);
+
+  reset(); savePreference = true; saveFailure = true; token = begin(); started(token); feed(token, 16000);
+  assert(sttRequestFinish(owner, token)); complete(token);
+  assert(snapshot(token).state == STTState::Done && !snapshot(token).error[0]);
+  assert(snapshot(token).transcript.error[0] && peek(token).text[0]);
+
+  reset(); savePreference = true; token = begin(); started(token); feed(token, 320000);
+  await([&] { return saved(token).chunks.size() == 1; }, "accepted words before cancel");
+  assert(sttCancel(owner, token)); complete(token);
+  assert(saved(token).chunks.size() == 1 && saved(token).outcome == "cancelled");
+  assert(snapshot(token).state == STTState::Cancelled && !snapshot(token).pendingTexts);
+
+  reset(); savePreference = true; enginePermits = 0; token = begin(); started(token); feed(token, 320000);
+  await([] { return engineCalls == 1; }, "inference before acceptance");
+  assert(sttCancel(owner, token)); complete(token);
+  assert(saved(token).chunks.empty() && saved(token).outcome == "cancelled");
+
+  reset(); savePreference = true; finishHeld = true; token = begin(); started(token);
+  feed(token, 16000); assert(sttRequestFinish(owner, token));
+  await([] { return finishEntered.load(); }, "final outcome fixed before finish I/O");
+  assert(sttCancel(owner, token)); finishHeld = false; complete(token);
+  assert(snapshot(token).state == STTState::Cancelled && !snapshot(token).pendingTexts);
+  assert(saved(token).outcome == "done" && saved(token).chunks.size() == 1);
+
+  reset(); savePreference = false;
+  const auto uiOptions = [] { TranscriptOptions o; o.enabled = true; o.source = owner.source;
+    o.epoch = owner.epoch; strcpy(o.user, "alice"); return o; }();
+  char error[96]; token = 0;
+  assert(sttBeginContinuous(owner, &token, error, sizeof(error), &uiOptions));
+  started(token); feed(token, 16000); assert(sttRequestFinish(owner, token)); complete(token);
+  assert(saved(token).options.enabled && saved(token).chunks.size() == 1);
+
+  for (bool wrongSource : {false, true}) {
+    reset(); auto mismatched = uiOptions;
+    if (wrongSource) mismatched.source = SOURCE_WEB; else ++mismatched.epoch;
+    token = 0;
+    assert(sttBeginContinuous(owner, &token, error, sizeof(error), &mismatched));
+    started(token); feed(token, 16000); assert(sttRequestFinish(owner, token)); complete(token);
+    assert(snapshot(token).state == STTState::Done && snapshot(token).transcript.error[0]);
+    assert(saved(token).chunks.empty() && saved(token).options.user[0] == 0);
+  }
+}
 static void testWideCountersAndRetention() {
   // White-box boundary injection avoids simulating days of microphone input.
   // Exercise actual accumulation through two uint32 millis wraps, and public
@@ -640,5 +767,6 @@ int main() {
   testStopIntegrityRace(); puts("PASS initial audio loss and simultaneous finish/overrun between reads");
   testFaults(); puts("PASS allocation/task/HAL/model faults and sequence exhaustion");
   testWideCountersAndRetention(); puts("PASS 64-bit time/positions and result expiry");
+  testTranscriptSaving(); puts("PASS transcript admission latch, ACK-independent saving, save failure, cancel and finalization");
   reset(); puts("Continuous production STT broker multithread tests passed, including explicit backend-session cleanup");
 }

@@ -38,6 +38,7 @@
 #include "System_BuildConfig.h"
 #include "System_DictationPolicy.h"  // exact direct-UART namespace predicate
 #include "System_User.h"   // TransportSessionEpoch
+#include "System_Transcript.h"
 
 // Longest transcript accepted from the host. Sized to the keyboard buffer —
 // anything past the field's own maxLength is truncated at append time anyway,
@@ -62,6 +63,7 @@ struct DictationSnapshot {
   bool captureActive = false;
   bool inferenceActive = false;
   bool preparing = false;    // Do not prompt SPEAK NOW before HAL capture.
+  TranscriptStatus transcript; // Generic status; this unscoped snapshot never exposes a path.
 };
 
 // Exact delivery receipt: committing an old field, chunk or byte offset is a no-op.

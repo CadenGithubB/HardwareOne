@@ -1518,12 +1518,13 @@ extern bool gMeshActivitySuspended;
 // echoed portion (important for typo'd credential commands such as `logni`).
 static String redactWebCommandResult(const String& output,
                                       bool directLiveOwnerReply = false) {
-  // sttText is a reserved producer tag. The STT broker already fences it to
+  // sttText/transcriptPath are reserved producer tags. The STT broker already fences it to
   // its source/session/token; only the direct, live cookie-session response
   // may retain it. Shared mirrors always use the default redacted form.
   // An unknown-command echo containing this word is not a structured result.
   if (directLiveOwnerReply && output.startsWith("{") &&
-      output.indexOf("\"sttText\"") >= 0) return output;
+      (output.indexOf("\"sttText\"") >= 0 ||
+       output.indexOf("\"transcriptPath\"") >= 0)) return output;
   String safe = redactOutputForLog(output);
   static const char kUnknownPrefix[] = "Unknown command: ";
   if (!safe.startsWith(kUnknownPrefix)) return safe;

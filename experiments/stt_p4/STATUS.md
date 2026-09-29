@@ -1,5 +1,26 @@
 # Status
 
+## 2026-09-28 — shared transcript saving qualified on P4
+
+- Persistent `sttsavetranscripts` option, off by default and latched at admission.
+  Shared account-bound writer serves local STT and Pi Dictation; saves accepted
+  chunks independently of UI reads/ACKs, with separate storage errors.
+- Installed app-only `transcripts-app-v1`: SHA-256
+  `7c8e2a54a75ad0daf80d2169ad99c0a7a0d3c40e569040241b667acc48debc35`,
+  6,375,872 bytes, 1,600 bytes free in the existing app partition.
+- Seven-chunk enabled and five-chunk disabled continuous runs verified both
+  mid-session toggle directions. Silence created no file; bounded mode saved
+  once. Three camera captures, zero reported overruns; file hashes and setting
+  survived reboot. All 20 existing configuration postchecks passed.
+- Per-account file guards, private retrieval and accountless mesh RPC rejection
+  tested with actual-source host sanitizers; local/Pi lifecycle and TSan passed.
+  Physical Pi/SD/OLED/G2 qualification remains outstanding.
+- Only inherited `camerajpegprobe` diagnostic removed to fit; no further standard
+  feature exclusions, model/partition changes, S3/C6 or primary-checkout edits.
+- P4 saving left enabled; mic/camera/SR off, voice disarmed, USB coordinators
+  closed. Private evidence ignored; local branch only, no push or PR.
+- See TRANSCRIPTS.md, TRANSCRIPT_RESULTS.md and transcript-validation.json.
+
 ## 2026-09-28 — session-cached P4 STT qualified
 
 - Installed and verified cache-app-v1 on the P4: SHA-256

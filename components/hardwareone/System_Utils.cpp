@@ -1415,7 +1415,8 @@ String redactCmdForAudit(const String& argsInput,
 String redactOutputForLog(const String& output) {
   // Private STT results are tagged by the producer. Replace the WHOLE reply
   // rather than parsing quoted/escaped text or risking a partial redaction.
-  if (output.indexOf("\"sttText\"") >= 0) return "[private STT result]";
+  if (output.indexOf("\"sttText\"") >= 0 ||
+      output.indexOf("\"transcriptPath\"") >= 0) return "[private STT result]";
   String result = output;
   
   // Redact password hashes: "password":"HASH:xxxxx" -> "password":"***"

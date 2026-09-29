@@ -136,7 +136,9 @@ query = function_body(
 assert "if (!ready()) return 0" in query
 assert "normalizeFsPath(path, normalizedPath)" in query
 assert "isSuperAdminUser(kBondAdminUser)" in query
-assert "permissionsForResolvedRole(normalizedPath, scope_, role)" in query
+assert "permissionsForResolvedRole(normalizedPath, scope_, role, transcriptAccountId_)" in query
+assert "transcriptAccountResolved_" in query
+assert "transcriptAccountId(normalizedPath, user_, role)" in query
 assert "logFsAccessDeny" not in query
 assert "DEBUG_" not in query
 
@@ -152,6 +154,7 @@ assert "return forPath(testPath)" in child_query
 resolved = function_body(FS_CPP, "static uint8_t permissionsForResolvedRole")
 assert "!pathWithinScope(normalizedPath, scope)" in resolved
 assert "hasSensitiveExtension(normalizedPath)" in resolved
+assert "transcriptPermissionMask(normalizedPath, accountId, role)" in resolved
 assert "isImageFile(normalizedPath)" in resolved
 assert "logFsAccessDeny" not in resolved
 assert "DEBUG_" not in resolved

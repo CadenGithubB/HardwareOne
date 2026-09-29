@@ -24,6 +24,7 @@
 #include "System_Filesystem.h"      // filesystemReady, getPermissions
 #include "System_MemUtil.h"         // ps_alloc — PSRAM-backed reply buffer (off espnow_task stack)
 #include "System_Mutex.h"           // FsLockGuard
+#include "Transcript_PathPolicy.h"
 #include "System_VFS.h"             // VFS::openGuarded, listVirtualEntries, etc.
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
@@ -593,6 +594,15 @@ static void processDeferredLocked() {
   xSemaphoreTake(sMutex, portMAX_DELAY);
 }
 
+// FS RPC authenticates a device peer, not an account. Its legacy SYSTEM scope
+// must not grant access to user-private transcripts (including FAT aliases).
+static bool fsRpcPathAllowed(const char* rawPath) {
+  String normalized;
+  return normalizeFsPath(String(rawPath), normalized)
+      && TranscriptPathPolicy::classify(normalized.c_str()).kind
+          == TranscriptPathPolicy::Kind::Outside;
+}
+
 static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListReq& req) {
   // Reply runs on cmd_exec_task (8 KB stack — see runDeferredFsOpOnCmdExec).
   // The reply buffer is 140 + 32*76 = 2572 B — nearly a third of that stack, so
@@ -642,6 +652,10 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
     // device level (FsList is base ESP-NOW, not bond-gated).
     // Per-user identity propagation can be layered on later via a token in
     // the request's reserved bytes.
+    if (!fsRpcPathAllowed(req.path)) {
+      hdr->status = FS_LIST_STATUS_PERM_DENIED;
+      goto send_reply;
+    }
     SYSTEM_IDENTITY_SCOPE("espnow.fs_list_reply");
     const AuthContext& ctx = currentAuthContext();
     String dirPath = VFS::normalize(req.path);
@@ -782,6 +796,10 @@ static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatRe
   }
 
   {
+    if (!fsRpcPathAllowed(req.path)) {
+      reply.status = FS_LIST_STATUS_PERM_DENIED;
+      goto send_stat;
+    }
     SYSTEM_IDENTITY_SCOPE("espnow.fs_stat_reply");
     String norm = VFS::normalize(req.path);
     VFS::StorageType tier = VFS::INTERNAL;
@@ -840,6 +858,10 @@ static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq&
   }
 
   {
+    if (!fsRpcPathAllowed(req.path)) {
+      ack.status = FS_LIST_STATUS_PERM_DENIED;
+      goto send_ack;
+    }
     SYSTEM_IDENTITY_SCOPE("espnow.fs_get_ack");
     const AuthContext& ctx = currentAuthContext();
     String filePath = VFS::normalize(req.path);

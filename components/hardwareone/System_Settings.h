@@ -345,6 +345,7 @@ struct Settings {
       microphoneGain(70),
       microphoneBitDepth(16),
       micSource("auto"),  // Mic source preference: "auto" | "pdm" | "g2" (resolved at capture time)
+      sttSaveTranscripts(false),
       cameraBrightness(2),
       cameraContrast(2),
       cameraSaturation(2),
@@ -1006,6 +1007,7 @@ struct Settings {
   int microphoneGain;           // Software gain 0-100% (default 90)
   int microphoneBitDepth;       // Bit depth (cosmetic; HAL/WAV are always 16-bit int)
   String micSource;             // Preferred mic source: "auto" | "pdm" | "g2" (resolved lazily against availability)
+  bool sttSaveTranscripts;      // Save recognized text; latched when a local or Pi dictation session starts
   // Camera image settings (persisted) - use int for settings system compatibility
   // OV3660 ships flat/washed-out, so we default brightness/contrast/saturation
   // to +2 (the API max). User-validated empirically — see camerafx command +
@@ -1431,7 +1433,7 @@ struct SettingsModule {
 // Maximum number of settings modules that can be registered.
 //
 // Must stay ahead of the registerSettingsModule() call count in
-// registerAllSettingsModules(), which is 36 - most behind #if guards, so no
+// registerAllSettingsModules(), which is 38 - most behind #if guards, so no
 // shipping board reaches the cap today. Overflow is not loud: the registration
 // simply logs and returns (System_Settings.cpp), and a dropped module then
 // neither loads nor persists ANY of its settings - it silently runs on

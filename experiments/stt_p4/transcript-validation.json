@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "profile": "transcripts-app-v1",
+  "image": {
+    "profile": "transcripts-app-v1",
+    "sha256": "7c8e2a54a75ad0daf80d2169ad99c0a7a0d3c40e569040241b667acc48debc35",
+    "bytes": 6375872,
+    "app_partition_bytes": 6377472,
+    "free_bytes": 1600
+  },
+  "checks": {
+    "both_toggle_directions_latched": true,
+    "continuous_file_matches_accepted_chunks": true,
+    "duplicate_reads_and_acks_no_duplicate_file": true,
+    "disabled_session_no_file": true,
+    "silence_no_empty_file": true,
+    "one_shot_saved_once": true,
+    "fileview_broadcast_refused": true,
+    "setting_survived_reconnect_reboot": true,
+    "both_file_hashes_survived_final_reboot": true,
+    "all_20_existing_configuration_checks": true,
+    "saved_setting_enabled_after_final_reboot": true
+  },
+  "continuous": [
+    {
+      "save_enabled": true,
+      "test": "stream",
+      "capture_seconds": 71.2193352500326,
+      "elapsed_seconds": 74.66651245800313,
+      "accepted_chunks": 7,
+      "saved_chunks": 7,
+      "saved_bytes": 595,
+      "audio_overruns": 0,
+      "worker_stack_free_bytes": 6312,
+      "capture_stack_free_bytes": 2924
+    },
+    {
+      "save_enabled": false,
+      "test": "stream",
+      "capture_seconds": 46.32280154101318,
+      "elapsed_seconds": 49.56271291599842,
+      "accepted_chunks": 5,
+      "saved_chunks": 0,
+      "saved_bytes": 0,
+      "audio_overruns": 0,
+      "worker_stack_free_bytes": 6876,
+      "capture_stack_free_bytes": 2944
+    },
+    {
+      "save_enabled": true,
+      "test": "silence",
+      "capture_seconds": 8.44282325002132,
+      "elapsed_seconds": 8.75919283402618,
+      "accepted_chunks": 0,
+      "saved_chunks": 0,
+      "saved_bytes": 0,
+      "audio_overruns": 0,
+      "worker_stack_free_bytes": 8196,
+      "capture_stack_free_bytes": 2964
+    }
+  ],
+  "camera_captures": 3,
+  "one_shot": {
+    "capture_seconds": 8,
+    "saved_chunks": 1,
+    "saved_bytes": 183,
+    "worker_stack_free_bytes": 7816
+  },
+  "source_files_verified": 7959,
+  "host_checks": [
+    "shared writer local/Pi/both ASan+UBSan",
+    "one-shot and concurrent continuous broker ASan+UBSan",
+    "continuous broker ThreadSanitizer",
+    "local/Pi Dictation admission/worker/UI tests",
+    "actual filesystem permission and listing policy ASan+UBSan",
+    "ESP-NOW LIST/STAT/GET privacy ASan+UBSan",
+    "fileread BLE/PSRAM matrix ASan+UBSan",
+    "shared-output/serial/BLE/web privacy tests",
+    "settings registry and persistence contracts"
+  ],
+  "limitations": [
+    "Pi hardware unavailable; Pi path host-tested only",
+    "SD, OLED and G2 physical qualification pending",
+    "Comparisons apply existing credential redaction to both text sources; raw file hashes checked separately across reboot",
+    "No power-cut durability claim; Arduino flush does not report every fsync failure",
+    "Unchanged recognition accuracy/segmentation and previous optional R1 health web exclusion"
+  ],
+  "private_evidence": [
+    "private/transcripts-20260928-235428.json",
+    "private/transcript-oneshot-235720.json",
+    "private/transcripts-app-v1-result.json",
+    "private/transcripts-20260928-235939.json",
+    "../speech_portable/private/run-20260928/postcheck-235814.json"
+  ],
+  "initial_test_setup_abort": "First optional-camera run requested capture before opening camera; session safely cancelled and rerun with camera initialized. No firmware change required.",
+  "passed": true,
+  "postcheck": {
+    "espnowlist": true,
+    "espnowmeshes listjson": true,
+    "httpstatus json": true,
+    "espnowstatus json": true,
+    "power json": true,
+    "ble_preferences": true,
+    "wifi_not_joined": true,
+    "camera_restored": true,
+    "cameraquality": true,
+    "cameracapturefolder": true,
+    "camerastoragelocation": true,
+    "cameraautocapture": true,
+    "speech_stopped_disarmed": true,
+    "speech_autostart_off": true,
+    "speech_model_source_littlefs": true,
+    "mic_available_stopped": true,
+    "mic_source_auto": true,
+    "mic_saved_rate": true,
+    "mic_saved_gain": true,
+    "battery_voltage": true
+  },
+  "settings_registry_note": "No new registry diagnostics; four pre-existing HT16K33 command-key diagnostics also occur at HEAD."
+}

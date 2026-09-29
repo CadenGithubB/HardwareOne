@@ -843,7 +843,8 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   // remains a deliberately small line-sized envelope.
   // STT transcripts belong only to their initiating session. Direct serial,
   // HTTP and targeted BLE delivery retain the original; shared mirrors do not.
-  const bool privateSTT = s.indexOf("\"sttText\"") >= 0;
+  const bool privateSTT = s.indexOf("\"sttText\"") >= 0 ||
+                          s.indexOf("\"transcriptPath\"") >= 0;
   broadcastCommandResultQueued(prefix, privateSTT ? safeOutputForTrace : s, route);
   // (No web-mirror backfill here: the drain appends WEB-routed messages to
   // the mirror unconditionally, so a backfill would double-append.)

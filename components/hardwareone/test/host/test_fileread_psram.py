@@ -14,20 +14,27 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+import sys
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
-JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--component", type=Path, default=COMPONENT)
+    parser.add_argument("--source-dir", type=Path)
     args = parser.parse_args()
+    sys.path.insert(0, str(args.component / "test/host"))
+    from test_web_batch_handlers import extract_block, require
     require(bool(args.cxx), "a host C++17 compiler is required")
-    source = (COMPONENT / "System_Filesystem.cpp").read_text()
+    component = args.component.resolve()
+    def read(name):
+        overlay = args.source_dir / name if args.source_dir else None
+        return (overlay if overlay and overlay.exists() else component / name).read_text()
+    source = read("System_Filesystem.cpp")
     handler = extract_block(source, "const char* cmd_fileread(")
     require("static PsramBuffer s_readJson(CMD_RESULT_MAX" in handler,
             "fileread must own a persistent response bounded by the command limit")
@@ -47,17 +54,22 @@ def main() -> None:
             "reply allocation must finish before raw body delivery")
     require(handler.index('buf, got, eof, "raw", false)') < handler.index("bleScSendEncrypted("),
             "complete checked raw metadata must precede binary body delivery")
-    definitions = [extract_block(source, f"static {signature}(") for signature in (
+    definitions = [extract_block(source, "bool normalizeFsPath("),
+                   extract_block(source, "static bool filePathIsPrivateTranscript("),
+                   extract_block(source, "const char* cmd_fileview(")]
+    definitions += [extract_block(source, f"static {signature}(") for signature in (
         "bool bytesNeedBase64", "size_t fileReadJsonStringLength",
         "bool fileReadAppendJsonString", "bool fileReadAppendBase64",
         "size_t fileReadUnsignedLength", "bool fileReadAppendUnsigned",
         "size_t fileReadEnvelopeLength", "bool fileReadBuildReply",
     )] + [handler]
-    buffer = (COMPONENT / "System_PsramBuffer.h").read_text()
+    buffer = read("System_PsramBuffer.h")
     buffer = buffer.replace('#include "System_MemUtil.h"', "").replace("#pragma once", "")
-    limits = (COMPONENT / "System_CommandLimits.h").read_text()
-    harness = (HERE / "fileread_psram_harness.cpp").read_text()
+    limits = read("System_CommandLimits.h")
+    harness = ((args.source_dir / "fileread_psram_harness.cpp") if args.source_dir else component / "test/host/fileread_psram_harness.cpp").read_text()
     for marker, production in {
+        "// INSERT_POLICY_HERE": read("Transcript_PathPolicy.h").replace("#pragma once", ""),
+        "// INSERT_PAGER_HERE": read("System_TextPager.h").replace("#pragma once", ""),
         "// INSERT_PRODUCTION_BUFFER_HERE": buffer,
         "// INSERT_PRODUCTION_LIMITS_HERE": limits,
         "// INSERT_PRODUCTION_FILEREAD_HERE": "\n\n".join(definitions),
@@ -70,7 +82,7 @@ def main() -> None:
         for bluetooth in (0, 1):
             executable = Path(temp) / f"fileread_ble{bluetooth}"
             command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-                       f"-DENABLE_BLUETOOTH={bluetooth}", "-I", str(JSON_INCLUDE),
+                       f"-DENABLE_BLUETOOTH={bluetooth}", "-I", str(component.parent / "hardwareone_libs/ArduinoJson/src"),
                        str(generated), "-o", str(executable)]
             if args.sanitize:
                 command[1:1] = ["-fsanitize=address,undefined", "-g"]
