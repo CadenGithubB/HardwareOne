@@ -102,9 +102,6 @@
 #include "WebPage_LLM.h"
 #include "System_LLM.h"
 #endif
-#if ENABLE_WEB_GAME_MAZE
-#include "WebPage_Games.h"
-#endif
 #if ENABLE_WEB_GAME_DARKROOM
 #include "WebPage_DarkRoom.h"
 #endif
@@ -6254,9 +6251,6 @@ register_handlers:
  #endif
  #if ENABLE_WEB_R1_HEALTH
   registerR1HealthHandlers(server);
- #endif
- #if ENABLE_WEB_GAME_MAZE
-  registerGamesHandlers(server);
  #endif
  #if ENABLE_WEB_GAME_DARKROOM
   registerDarkRoomHandlers(server);

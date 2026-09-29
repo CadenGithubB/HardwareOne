@@ -79,7 +79,7 @@
   extern const size_t gamepadCommandsCount;
   // inputStartInternal() is provided by the ANO encoder driver when that is
   // the active input device; only stub it when NO input driver is compiled in.
-#if !ENABLE_ANO_ENCODER
+#if !ENABLE_ANO_ENCODER && !ENABLE_GPIO_ENCODER
   inline bool inputStartInternal() { return false; }
 #endif
 #endif

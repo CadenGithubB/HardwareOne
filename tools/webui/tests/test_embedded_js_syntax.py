@@ -1,16 +1,10 @@
 """Syntax gate over every piece of JavaScript the firmware serves from a raw string.
 
 WHY THIS EXISTS
-    The C++ compiler never parses the contents of a raw string literal. Roughly
-    ~1.7 MiB of first-party JavaScript therefore reaches this gate with nothing
-    else having checked it is even syntactically valid. (Reaches the gate, not
-    "ships": about 1 MB of that is WebPage_Games.h, behind
-    ENABLE_WEB_GAME_MAZE=0 on this board -- which is the point, not a caveat.)
-    A missing brace
-    compiles, links, flashes, and fails on the board. components/hardwareone/
-    WebPage_Games.h carries a hand-written window.onerror handler for precisely
-    this reason -- its own comment says a JS syntax error otherwise shows up as
-    a silent black screen.
+    The C++ compiler never parses the contents of a raw string literal.
+    First-party JavaScript therefore reaches this gate with nothing else having
+    checked it is even syntactically valid. A missing brace compiles, links,
+    flashes, and fails on the board.
 
     It gets worse where the JS sits behind a build flag. WebPage_Settings.h
     holds script under `#if ENABLE_HTTPS` and under `#if ENABLE_NEOPIXEL`; on a
@@ -54,7 +48,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 CHECKER = REPO_ROOT / "tools" / "webui" / "harness" / "syntax_check.js"
 
 # A walk that silently matched nothing would pass vacuously, so the count has a
-# floor. Measured today: 36 files with raw-string blocks, 78 regions. The floor
+# floor. Measured today: 38 files with raw-string blocks, 75 regions. The floor
 # sits well below that so ordinary churn does not trip it, while a collapse to
 # near-zero -- a renamed directory, a broken glob, an over-eager exclusion --
 # fails loudly.
