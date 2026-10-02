@@ -355,6 +355,7 @@ extern const size_t g2RingCommandsCount;
 #if ENABLE_OLED_INPUT
   #include "HAL_Input.h"  // For inputCommands
 #endif
+#include "System_RadioCompanion.h"  // companionCommands, sleep hooks, status (P4X-EYE); no-ops elsewhere
 #if ENABLE_APDS_SENSOR
   #include "i2csensor_apds9960.h"     // For apdsCommands
 #endif
@@ -1689,8 +1690,12 @@ const char* cmd_lightsleep(const String& argsInput) {
   // Configure wake-up source: timer
   esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
 
+  // The radio companion follows the main processor: its heartbeat watchdog
+  // pauses so the silence of sleep is not mistaken for an outage.
+  radioCompanionBeforeLightSleep();
   // Enter light sleep (preserves RAM, resumes here when woken)
   esp_light_sleep_start();
+  radioCompanionAfterLightSleep();
 
   // Execution resumes here after wake-up
   DEBUG_SYSTEMF("Woke from light sleep!");
@@ -1732,6 +1737,9 @@ const char* cmd_deepsleep(const String& /*argsInput*/) {
     extern void batteryLogEvent(const char* event);
     batteryLogEvent("sleep:deep");
   }
+  // The radio companion follows: stop what uses it and hold the C6 in reset
+  // through deep sleep (no-op with an on-chip radio).
+  radioCompanionBeforeDeepSleep();
   // No wake source: ~10 µA until physical reset.
   esp_deep_sleep_start();
   return "Deep sleep";  // unreachable
@@ -1917,6 +1925,11 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
       sd["free_mb"] = (int)(stats.freeBytes / (1024 * 1024));
     }
   }
+
+#if HW1_RADIO_COMPANION
+  // ESP32-C6 radio companion (P4X-EYE): state, firmware, bridge, heartbeat.
+  radioCompanionJson(doc["companion"].to<JsonObject>());
+#endif
 
   // Connectivity status
   JsonObject conn = doc["connectivity"].to<JsonObject>();
@@ -3167,6 +3180,18 @@ static constexpr CommandModule gCommandModules[] = {
     "device carries identity metadata (name, friendly name, room, zone, tags) queried "
     "with espnowdeviceinfo locally or espnowrequestmeta for a peer.",
     espNowCommands,       &espNowCommandsCount, CMD_MODULE_NETWORK, nullptr },
+#endif
+#if HW1_RADIO_COMPANION
+  { "c6",         "ESP32-C6 radio companion (ESP-Hosted)",
+    "On the ESP32-P4X-EYE the Wi-Fi, Bluetooth and ESP-NOW radio is a separate ESP32-C6 "
+    "that the P4 drives over SDIO (ESP-Hosted). c6status reports its firmware, the ESP-NOW "
+    "bridge, heartbeat, memory and recovery counters; c6restart resets it in place; c6hold "
+    "turns the radio fully off by holding the C6 in reset and brings it back; c6update "
+    "flashes a new companion image over SDIO with rollback protection and c6confirm accepts "
+    "the running image; c6autorecover, c6autohold and c6heartbeat tune the background "
+    "monitor. Radio features never start while the companion is offline, and a companion "
+    "that stops answering is recovered without rebooting the P4.",
+    companionCommands,    &companionCommandsCount, CMD_MODULE_NETWORK, radioCompanionOnline },
 #endif
 #if ENABLE_MQTT
   { "mqtt",       "MQTT broker connection for Home Assistant", "The MQTT subsystem connects the device to a broker, primarily to publish its "

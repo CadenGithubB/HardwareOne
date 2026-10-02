@@ -59,6 +59,7 @@
 #include "System_TaskUtils.h"
 #include "System_UserSettings.h"
 #include "System_Utils.h"
+#include "System_RadioCompanion.h"  // radio companion gate + bridge presence (P4X-EYE)
 #include "System_WiFi.h"          // WifiRadioMutationGuard — serialize scan/mode/channel work
 #include "System_I2C.h"  // For ConnectedDevice struct
 #include "System_Filesystem.h"  // For canRead() security check
@@ -11534,6 +11535,20 @@ const char* cmd_espnow_init(const String& argsInput) {
   }
   if (gEspNow && gEspNow->initialized) {
     return "ESP-NOW already initialized";
+  }
+
+  // P4X-EYE: ESP-NOW runs on the C6 companion through the HardwareOne bridge.
+  {
+    const char* companionReason = nullptr;
+    if (radioCompanionBlocksRadio(&companionReason)) {
+      static char companionError[160];
+      snprintf(companionError, sizeof(companionError), "Error: %s", companionReason);
+      return companionError;
+    }
+    if (!radioHalEspNowAvailable()) {
+      return "Error: the C6 companion firmware has no ESP-NOW bridge; flash the firmware from "
+             "tools/p4/companion (c6update) - see c6status";
+    }
   }
 
   // Check memory before initializing ESP-NOW (task stack + state struct)

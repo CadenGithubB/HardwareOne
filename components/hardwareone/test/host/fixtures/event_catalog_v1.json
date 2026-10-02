@@ -211,6 +211,18 @@
         "secret_decrypt_failed",
         "display_init_failed"
       ]
+    },
+    {
+      "n": "Radio companion",
+      "k": [
+        "companion_online",
+        "companion_offline",
+        "companion_restarted",
+        "companion_mismatch",
+        "companion_low_memory",
+        "companion_updated",
+        "companion_reboot"
+      ]
     }
   ]
 }

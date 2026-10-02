@@ -57,6 +57,12 @@ check_symbol libraries/BLE/src/BLEDevice.h CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
 check_symbol libraries/BLE/src/BLECharacteristic.h takeOwnership
 check_symbol cores/esp32/esp32-hal-uart.c "CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32P4"
 
+# Companion "transport lost" teardown, 2026-10-02 (marked): Wi-Fi and BLE
+# deinit must complete on a dead or restarting C6 (System_RadioCompanion).
+check_symbol cores/esp32/esp32-hal-hosted.h hostedSetTransportLost
+check_symbol cores/esp32/esp32-hal-bt.c hostedTransportLost
+check_symbol libraries/WiFi/src/WiFiGeneric.cpp hostedTransportLost
+
 # NetworkEvents.cpp carries an UNMARKED local change — detectable only via git.
 # A clean diff here means it was either reverted or committed into the nested
 # repo; check `git -C components/arduino log` before assuming it is fine.

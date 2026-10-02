@@ -8,9 +8,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_app_desc.h"
 #include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_now.h" /* native C6 API; never link the host shim here */
+#include "esp_ota_ops.h"
+#include "esp_private/esp_clk.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_hosted_peer_data.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -24,6 +29,10 @@
 #endif
 
 static const char *TAG = "hw1_now_slave";
+
+/* Kept in the image's read-only data so a host can verify a firmware file
+ * carries this bridge before flashing it (see ESP_NOW_HOSTED_BRIDGE_MARKER). */
+__attribute__((used)) const char esp_now_hosted_bridge_marker[] = ESP_NOW_HOSTED_BRIDGE_MARKER;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t s_events;
 static QueueHandle_t s_requests;
@@ -324,6 +333,51 @@ static void process_request(const uint8_t *data, size_t len)
                                        payload + sizeof(send), send.data_len);
         break;
     }
+    case ESP_NOW_HOSTED_OP_GET_INFO: {
+        EXPECT_SIZE(0);
+        esp_now_hosted_info_t info;
+        memset(&info, 0, sizeof(info));
+        info.wire_version = ESP_NOW_HOSTED_WIRE_VERSION;
+        info.image_state = ESP_NOW_HOSTED_IMAGE_UNKNOWN;
+        info.running_slot = 0xff;
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        if (running) {
+            if (running->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MIN &&
+                running->subtype < ESP_PARTITION_SUBTYPE_APP_OTA_MAX) {
+                info.running_slot = (uint8_t)(running->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_MIN);
+            }
+            esp_ota_img_states_t state;
+            if (esp_ota_get_state_partition(running, &state) == ESP_OK) {
+                info.image_state = state == ESP_OTA_IMG_PENDING_VERIFY ? ESP_NOW_HOSTED_IMAGE_PENDING_VERIFY
+                                 : (state == ESP_OTA_IMG_INVALID || state == ESP_OTA_IMG_ABORTED)
+                                       ? ESP_NOW_HOSTED_IMAGE_INVALID
+                                       : ESP_NOW_HOSTED_IMAGE_VALID;
+            } else {
+                info.image_state = ESP_NOW_HOSTED_IMAGE_VALID; /* no OTA record: cable-flashed */
+            }
+        }
+        info.reset_reason = (uint8_t)esp_reset_reason();
+        info.uptime_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        info.free_heap = esp_get_free_heap_size();
+        info.min_free_heap = esp_get_minimum_free_heap_size();
+        info.cpu_mhz = (uint32_t)(esp_clk_cpu_freq() / 1000000);
+        uint32_t version = 0;
+        if (esp_now_get_version(&version) == ESP_OK) info.native_espnow_version = version;
+        const esp_app_desc_t *desc = esp_app_get_description();
+        if (desc) memcpy(info.build, desc->version, sizeof(info.build));
+        memcpy(result, &info, sizeof(info));
+        response.request.payload_len = sizeof(info);
+        response.status = ESP_OK;
+        break;
+    }
+    case ESP_NOW_HOSTED_OP_CONFIRM_IMAGE:
+        /* With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE the bootloader rolls a
+         * never-confirmed image back on the next reboot. Only the host confirms,
+         * and only after this bridge answered it; a stock or broken image is
+         * therefore undone by the next host reset. */
+        EXPECT_SIZE(0);
+        response.status = esp_ota_mark_app_valid_cancel_rollback();
+        break;
     default:
         response.status = ESP_ERR_NOT_SUPPORTED;
         break;
@@ -393,6 +447,11 @@ static void slave_req_cb(uint32_t msg_id, const uint8_t *data, size_t len, void 
 
 esp_err_t esp_now_hosted_slave_init(void)
 {
+    /* The host's c6update scans a candidate image for this marker before it
+     * sends anything. `used` keeps the compiler from dropping the array; this
+     * reference from a linker-rooted function keeps section garbage
+     * collection from dropping it too. */
+    __asm__ __volatile__("" : : "r"(esp_now_hosted_bridge_marker) : "memory");
     esp_err_t err = esp_hosted_register_custom_callback(ESP_NOW_HOSTED_MSG_REQ, slave_req_cb, NULL);
     if (err != ESP_OK) ESP_LOGE(TAG, "CustomRpc handler registration failed: %s", esp_err_to_name(err));
     else ESP_LOGI(TAG, "HardwareOne ESP-NOW bridge registered; awaiting host init");

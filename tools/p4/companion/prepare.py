@@ -182,7 +182,11 @@ def slave_sources(hosted: Path, dependency_lock: bytes) -> tuple[dict[str, bytes
     expected["main/CMakeLists.txt"] = cmake.encode()
     expected["sdkconfig.defaults"] += (
         b"\nCONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER=y\n"
-        b"CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS=8\n")
+        b"CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS=8\n"
+        # Rollback protection for c6update: the P4 confirms a freshly
+        # activated image through the bridge (CONFIRM_IMAGE) only after the
+        # bridge answers from it; until then the bootloader can revert it.
+        b"CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n")
     for name, source in BRIDGE_SOURCES.items():
         expected["main/" + name] = source.read_bytes()
     expected["dependencies.lock"] = dependency_lock

@@ -38,11 +38,11 @@ USB.
 
 ## Radio companion (ESP32-C6)
 
-`main/radio_backend.cpp` prepares the C6 at startup: C6 boot strap high on
-GPIO33, SDIO slot 1 on GPIO27-32, enable/reset on GPIO9. Arduino's Wi-Fi and
-BLE then run unchanged through `esp_wifi_remote` and Bluedroid over Hosted VHCI.
-The BLE TX-power setting is not applied on this board because Hosted has no
-remote power control; the C6 uses its default.
+`components/hardwareone/HAL_Radio.cpp` prepares the C6 at startup: C6 boot
+strap high on GPIO33, SDIO slot 1 on GPIO27-32, enable/reset on GPIO9.
+Arduino's Wi-Fi and BLE then run unchanged through `esp_wifi_remote` and
+Bluedroid over Hosted VHCI. The BLE TX-power setting is not applied on this
+board because Hosted has no remote power control; the C6 uses its default.
 
 ESP-NOW needs more than stock Hosted: `components/esp_now_hosted` forwards each
 `esp_now_*` call to the C6, which must run the companion firmware (the
@@ -51,14 +51,57 @@ ESP-Hosted slave pinned in
 HardwareOne bridge). Build, back up and flash it with
 [tools/p4/companion](../tools/p4/companion/README.md); both USB ports lead to
 the P4, so the C6 is programmed through a temporary P4 service image, and the
-procedure backs up the original C6 flash first.
+procedure backs up the original C6 flash first. Once a bridge-carrying image
+runs, later companion images can be sent over SDIO with `c6update`.
 
-At boot the P4 logs one line for the companion version (a mismatch with the
-pinned Hosted release is a warning) and one for the ESP-NOW bridge: present,
-absent (stock Hosted firmware: Wi-Fi and BLE work, ESP-NOW cannot start) or a
-transport error. If the C6 does not answer the transport at all the firmware
-aborts and restarts. Nothing yet detects or recovers from a C6 reset while
-running.
+The companion is a managed subsystem (`System_RadioCompanion`), present only
+in P4 images; every other board compiles it to nothing.
+
+- **Boot.** A C6 that does not answer is not fatal. The P4 boots without
+  Wi-Fi, BLE and ESP-NOW, says so, and keeps trying in the background with a
+  growing back-off (5 s, 15 s, 1 min, 5 min, 15 min). When the companion
+  answers, the features configured to auto-start are started then.
+- **Status.** `c6status [json]` reports the companion's ESP-Hosted version
+  against the qualified one, its image (project, version, build date, running
+  slot, confirmed or pending), the ESP-NOW bridge state, heartbeat, memory,
+  bridge counters and recovery counters. `/api/system` carries the same
+  summary under `companion`.
+- **Events.** The "Radio companion" family of System Events
+  (`companion_online`, `companion_offline`, `companion_restarted`,
+  `companion_mismatch`, `companion_low_memory`, `companion_updated`,
+  `companion_reboot`) goes through the notification system like every other
+  family, so each kind can be routed or muted per surface and used in
+  automations.
+- **Watchdog and recovery.** The companion sends a heartbeat (`c6heartbeat
+  <seconds>`, default 5, 0 disables). Three missed beats, an unexpected C6
+  reset or an SDIO transport failure start a soft recovery that never reboots
+  the P4: the radio users are stopped, the transport is rebuilt (which resets
+  the C6), and what was running is restored. Only when soft recovery fails
+  three times within ten minutes does the P4 reboot, after posting
+  `companion_reboot`. `c6autorecover off` leaves every outage to the user;
+  `c6restart` is the manual restart. P4 images set
+  `CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n` so ESP-Hosted itself
+  never reboots the P4 for a transport failure.
+- **Power.** The companion never acts on its own. `lightsleep` pauses the
+  heartbeat watchdog across the sleep; `deepsleep` stops the radio users and
+  holds the C6 in reset (GPIO9 low, held through sleep) because the next boot
+  resets it anyway. `c6hold on` turns the radio fully off the same way at any
+  time and `c6hold off` brings back what was running. With `c6autohold on`
+  the P4 does that by itself after the radio has been idle for 30 s, and
+  releases the companion when a feature asks for the radio.
+- **Firmware updates.** `c6update "<file>"` streams an image from the P4's
+  storage to the C6 over SDIO (ESP-Hosted OTA into the inactive ota slot).
+  The file is checked first: an ESP32-C6 application image of at most 1920 KB
+  that carries the bridge marker. ESP-NOW and BLE pause during the transfer.
+  The companion is built with bootloader rollback enabled, and the new image
+  is confirmed only after the bridge answers from it; otherwise the C6 returns
+  to the previous image on its next reset. `c6confirm` accepts a pending
+  image by hand.
+
+The recovery, hold and update paths were built against the ESP-Hosted
+2.12.13 host API with a host-tested policy core
+(`test_radio_companion_core.cpp`); their first hardware runs are still to be
+recorded.
 
 The shared mesh code never queries the radio per message on this board: the
 STA and AP identities are cached for the life of each ESP-NOW instance and

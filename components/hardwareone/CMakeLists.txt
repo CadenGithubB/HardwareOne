@@ -260,6 +260,8 @@ set(hardwareone_srcs
         HardwareOne.cpp
         Bluetooth.cpp
         HAL_Bluetooth.cpp
+        HAL_Radio.cpp
+        System_RadioCompanion.cpp
         System_BleSecureChannel.cpp
         BLE_IDF.cpp
         G2_Glasses.cpp
@@ -687,6 +689,12 @@ endif()
 # CSI/ISP stays behind the shared camera API; native S3 uses esp32-camera.
 if(IDF_TARGET STREQUAL "esp32p4" AND HW_CFG_ENABLE_CAMERA_SENSOR GREATER 0)
     list(APPEND hardwareone_requires esp_video esp_cam_sensor esp_driver_gpio)
+endif()
+
+# ESP32-C6 radio companion over ESP-Hosted. HAL_Radio.cpp and
+# System_RadioCompanion.cpp compile to nothing without CONFIG_ESP_WIFI_REMOTE_ENABLED.
+if(IDF_TARGET STREQUAL "esp32p4")
+    list(APPEND hardwareone_requires esp_hosted esp_now_hosted esp_event esp_timer)
 endif()
 
 idf_component_register(

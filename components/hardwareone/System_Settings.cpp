@@ -19,6 +19,7 @@
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC macro
 #include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"    // RETURN_VALID_IF_VALIDATE_CSTR macro
+#include "System_RadioCompanion.h"  // companionSettingsModule (P4X-EYE)
 #include "System_Clock.h"    // Clock::applyTimezone — push tz offset into libc TZ
 #include "BLE_Peers.h"       // bluetooth.peers JSON (de)serialization
 #include "System_Command.h"
@@ -2869,6 +2870,9 @@ void registerAllSettingsModules() {
   registerSettingsModule(&automationSettingsModule);
 #endif
   registerSettingsModule(&powerSettingsModule);
+#if HW1_RADIO_COMPANION
+  registerSettingsModule(&companionSettingsModule);  // ESP32-C6 radio companion (P4X-EYE)
+#endif
   // Timezone must persist on radioless builds, so this is never #if-gated.
   registerSettingsModule(&clockSettingsModule);
 #if ENABLE_NEOPIXEL

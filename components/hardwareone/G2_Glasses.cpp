@@ -34,6 +34,7 @@
 #include "System_Lz4.h"     // lz4Compress* — CompressMode=2 image push (Q32/Q32f)
 #include "Bluetooth.h"
 #include "HAL_Bluetooth.h"
+#include "System_RadioCompanion.h"  // radio companion gate (P4X-EYE); no-op with an on-chip radio
 #include "System_Debug.h"
 #include "System_Filesystem.h"  // requireQuotedToken (uniform quoted-path rule)
 #include "System_Command.h"
@@ -15830,6 +15831,13 @@ bool initG2Client() {
       bleRoleTransitionState() != BleRoleTransition::RECOVERING) {
     broadcastOutput("[G2] Client start blocked: prior BLE teardown was incomplete; reboot required");
     return false;
+  }
+  {
+    const char* companionReason = nullptr;
+    if (radioCompanionBlocksRadio(&companionReason)) {
+      BROADCAST_PRINTF("[G2] Client start blocked: %s", companionReason);
+      return false;
+    }
   }
   const bool initClaimed = g2ClientInitBegin();
   if (!initClaimed) {

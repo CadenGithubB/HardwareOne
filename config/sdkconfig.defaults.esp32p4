@@ -43,6 +43,9 @@ CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
 # host needs three custom handler slots.
 CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER=y
 CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS=8
+# A failed SDIO transport must not reboot the P4: the companion monitor
+# (System_RadioCompanion) recovers the C6 in place and escalates on its own.
+CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n
 
 # Bluedroid host on the P4, controller on the companion over Hosted VHCI.
 # Arduino BLE uses the legacy (4.2) scan/advertising APIs, which the C6 supports.

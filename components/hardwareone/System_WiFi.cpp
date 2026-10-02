@@ -15,6 +15,7 @@
 #include "System_Settings.h"      // Unified settings persistence
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson
+#include "System_RadioCompanion.h"  // radio companion gate (P4X-EYE); no-op with an on-chip radio
 #include "System_Clock.h"  // Clock::syncSource ledger for ntpstatus
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
@@ -977,6 +978,13 @@ static bool ensureStaRadioMode() {
     return false;
   }
   if (wifiRadioOn()) return true;
+  {
+    const char* companionReason = nullptr;
+    if (radioCompanionBlocksRadio(&companionReason)) {
+      WARN_WIFIF("[WiFi] radio enable refused: %s", companionReason);
+      return false;
+    }
+  }
 
   WifiRadioMutationGuard radioGuard;
   if (!radioGuard.acquired()) {
@@ -2520,6 +2528,15 @@ bool ensureWiFiInitialized() {
   if (wifiInitialized) {
     DEBUG_WIFIF("[WiFi] Already initialized");
     return true;
+  }
+  // P4X-EYE: the radio is the C6 companion; never ask Arduino to open a
+  // transport to a companion that is offline, restarting or being updated.
+  {
+    const char* companionReason = nullptr;
+    if (radioCompanionBlocksRadio(&companionReason)) {
+      WARN_SYSTEMF("[WiFi] refused: %s", companionReason);
+      return false;
+    }
   }
 
   WifiRadioMutationGuard radioGuard;

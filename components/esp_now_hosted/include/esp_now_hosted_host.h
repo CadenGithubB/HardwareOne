@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "esp_now.h"
+#include "esp_now_hosted_rpc.h"  /* esp_now_hosted_info_t, image states */
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,22 +34,43 @@ void esp_now_hosted_host_get_stats(esp_now_hosted_host_stats_t *out);
  */
 esp_err_t esp_now_hosted_is_peer_exist(const uint8_t *mac, bool *exists);
 
-/* Boot-time check that the C6 firmware carries the HardwareOne bridge. Sends
- * one GET_VERSION request and classifies the outcome. ESP-Hosted must already
- * be connected. A reply with ANY native status proves the bridge is present;
- * no reply within ESP_NOW_HOSTED_TIMEOUT_MS means stock Hosted firmware (or a
- * companion that is not answering). native_version/native_status are optional
- * and only meaningful when the bridge answered.
+/* Check that the C6 firmware carries the HardwareOne bridge. Sends one
+ * GET_INFO request and classifies the outcome. ESP-Hosted must already be
+ * connected. A reply with ANY status proves the bridge is present (a slave
+ * older than GET_INFO answers ESP_ERR_NOT_SUPPORTED: PRESENT_NO_INFO); no
+ * reply within ESP_NOW_HOSTED_TIMEOUT_MS means stock Hosted firmware or a
+ * companion that is not answering. `info` is optional and filled only when the
+ * slave answered GET_INFO with ESP_OK.
  */
 typedef enum {
-    ESP_NOW_HOSTED_BRIDGE_UNKNOWN = 0,   /* not probed yet */
-    ESP_NOW_HOSTED_BRIDGE_PRESENT = 1,   /* a bridge reply was received */
-    ESP_NOW_HOSTED_BRIDGE_ABSENT = 2,    /* probe timed out: no bridge in the C6 */
+    ESP_NOW_HOSTED_BRIDGE_UNKNOWN = 0,         /* not probed yet */
+    ESP_NOW_HOSTED_BRIDGE_PRESENT = 1,         /* bridge answered GET_INFO */
+    ESP_NOW_HOSTED_BRIDGE_ABSENT = 2,          /* probe timed out: no bridge in the C6 */
     ESP_NOW_HOSTED_BRIDGE_TRANSPORT_ERROR = 3, /* Hosted refused the request */
+    ESP_NOW_HOSTED_BRIDGE_PRESENT_NO_INFO = 4, /* bridge answered, but predates GET_INFO */
 } esp_now_hosted_bridge_state_t;
 
-esp_err_t esp_now_hosted_host_probe(uint32_t *native_version, int32_t *native_status);
+esp_err_t esp_now_hosted_host_probe(esp_now_hosted_info_t *info);
 esp_now_hosted_bridge_state_t esp_now_hosted_bridge_state(void);
+
+/* Live companion info (GET_INFO) and image confirmation (CONFIRM_IMAGE). Both
+ * return the slave's own status; ESP_ERR_NOT_SUPPORTED from an older bridge. */
+esp_err_t esp_now_hosted_bridge_info(esp_now_hosted_info_t *info);
+esp_err_t esp_now_hosted_confirm_image(void);
+
+/* Offline mode for a companion that stopped answering (transport failure,
+ * C6 reset or an update in progress). While offline every request fails
+ * immediately with ESP_ERR_INVALID_STATE instead of waiting out the bridge
+ * timeout, and esp_now_deinit() / callback unregistration only clear the
+ * host's local state and report ESP_OK, so the application's normal teardown
+ * completes in milliseconds. Clear it after the transport is back up.
+ */
+void esp_now_hosted_host_set_offline(bool offline);
+bool esp_now_hosted_host_is_offline(void);
+
+/* Forget the remote ESP-NOW instance without talking to the companion: after a
+ * C6 reset its table, callbacks and epoch are gone regardless. */
+void esp_now_hosted_host_reset_local(void);
 
 #ifdef __cplusplus
 }

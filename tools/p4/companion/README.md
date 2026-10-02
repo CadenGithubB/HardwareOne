@@ -21,21 +21,36 @@ The hardware-qualified results that produced this firmware are in
 [`experiments/p4_espnow`](../../../experiments/p4_espnow/README.md), which now
 builds its probes against this directory instead of carrying copies.
 
-## What the P4 does at boot
+## What the P4 does at boot, and after
 
-`main/radio_backend.cpp` brings the SDIO transport up and then classifies the
-companion in one line each:
+`components/hardwareone/HAL_Radio.cpp` brings the SDIO transport up (two
+attempts) and `System_RadioCompanion` classifies the companion in one line
+each:
 
 - the C6's reported ESP-Hosted version is compared with the header; a
-  mismatch is a warning (Hosted's own RPCs may still work) with a pointer here;
-- one ESP-NOW bridge request is sent. A reply means the bridge is present.
-  No reply within the bridge timeout means the C6 runs stock Hosted firmware:
+  mismatch is a warning (Hosted's own RPCs may still work) with a pointer
+  here and a `companion_mismatch` event;
+- one ESP-NOW bridge request (`GET_INFO`) is sent. A reply means the bridge
+  is present and also tells the P4 which ota slot runs, whether that image is
+  still pending confirmation, and the C6's uptime, heap and reset reason. No
+  reply within the bridge timeout means the C6 runs stock Hosted firmware:
   the log says so, Wi-Fi and BLE keep working through Hosted's own RPCs, and
-  ESP-NOW cannot start. `hw1RadioPrintStats()` repeats the verdict after setup.
+  ESP-NOW cannot start. `radioCompanionLogBootSummary()` repeats the verdict
+  after setup.
 
-Neither check is fatal. Nothing yet detects or recovers from a C6 reset while
-the P4 is running; a companion that stops answering mid-session surfaces as
-request timeouts in the bridge statistics.
+Neither check is fatal, and a C6 that does not answer at all is not fatal
+either: the P4 boots without its radio features and retries in the
+background. From then on the companion is monitored (heartbeat, Hosted
+transport events, C6 reset notifications) and recovered in place when it
+stops answering; `c6status` shows all of it. The P4 side is described in
+[docs/P4X_EYE_PERIPHERALS.md](../../../docs/P4X_EYE_PERIPHERALS.md#radio-companion-esp32-c6).
+
+The bridge answers two requests for this beyond ESP-NOW itself: `GET_INFO`
+(above) and `CONFIRM_IMAGE`, which marks the running image valid so the
+bootloader's rollback protection keeps it. `prepare.py` adds
+`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` to the slave build; the protection
+is active once a C6 carries that bootloader (a cable flash), while `c6update`
+itself also works with the older bootloader, just without the fallback.
 
 ## Build
 
@@ -130,6 +145,37 @@ credentials. Never commit or publish them.**
 
 To restore the original C6, repeat step 2, then
 `c6_tool.py write --offset 0 --file .../c6-original-4mb.bin` and `run`.
+
+## Updating the C6 from the P4 (`c6update`)
+
+Once a bridge-carrying image runs on the C6, later companion images need no
+cable. Copy `private/build-c6/network_adapter.bin` to the P4's storage (SD
+card or LittleFS, for example through the web file manager or
+`espnowsendfile`) and run, as an admin:
+
+```
+c6update "/sd/network_adapter.bin"
+```
+
+The P4 checks the file before sending anything (an ESP32-C6 application image
+of at most 1920 KB that contains the bridge marker `HW1-ESPNOW-BRIDGE/1`),
+pauses ESP-NOW and Bluetooth, streams the image into the inactive ota slot
+through ESP-Hosted's OTA requests, activates it, waits for the C6 to reboot,
+rebuilds the transport and asks the bridge again. Only when the bridge
+answers from the new image is it confirmed; if it does not, the C6 falls back
+to the previous image on its next reset (with the rollback-enabled
+bootloader) and `c6status` reports what happened. Wi-Fi stays up during the
+transfer when it was up; the paused features return afterwards. `c6confirm`
+accepts a pending image by hand and `c6restart` restarts the companion in
+place.
+
+The programmer service and `c6_tool.py` remain the way to flash a C6 that has
+no bridge yet, to replace the bootloader or partition table, and to take or
+restore full backups.
+
+The update, recovery and hold paths were written against the ESP-Hosted
+2.12.13 host API with a host-tested policy core; their hardware runs are not
+recorded yet.
 
 ## Changing the pin
 

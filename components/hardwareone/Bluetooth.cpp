@@ -60,6 +60,7 @@
 
 #include <esp_gatts_api.h>
 #include "HAL_Bluetooth.h"    // native or companion controller lifecycle
+#include "System_RadioCompanion.h"  // radio companion gate (P4X-EYE); no-op with an on-chip radio
 #include <stdlib.h>
 #include <string.h>
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
@@ -1334,6 +1335,13 @@ bool initBluetooth() {
       bleRoleTransitionState() != BleRoleTransition::RECOVERING) {
     broadcastOutput("[BLE] Server start blocked: prior host teardown was incomplete; reboot required");
     return false;
+  }
+  {
+    const char* companionReason = nullptr;
+    if (radioCompanionBlocksRadio(&companionReason)) {
+      BROADCAST_PRINTF("[BLE] Server start blocked: %s", companionReason);
+      return false;
+    }
   }
   if (!bleInitLifecycleMutex()) {
     broadcastOutput("[BLE] Failed to create lifecycle mutex");

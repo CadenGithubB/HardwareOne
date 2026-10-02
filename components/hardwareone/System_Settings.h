@@ -395,6 +395,9 @@ struct Settings {
       bleDeviceName("HardwareOne"),
       bleTxPower(3),
       bleMode(kBleModeDefaultForBuild),
+      c6AutoRecover(true),
+      c6AutoHold(false),
+      c6HeartbeatSec(5),
       bleRequireSecureChannel(true),
       bleSecureChannelSecret(""),
       // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
@@ -1091,6 +1094,11 @@ struct Settings {
   String bleDeviceName;         // BLE advertised device name (default: "HardwareOne")
   int bleTxPower;               // BLE TX power level 0-7 (0=min, 7=max, default: 3)
   int bleMode;                  // BLE role: 0=server (phone peripheral), 1=G2 client (central). Mutually exclusive at runtime.
+  // ESP32-C6 radio companion (P4X-EYE; the fields exist on every build so the
+  // settings layout is one). See System_RadioCompanion.
+  bool c6AutoRecover;           // Recover the companion on its own after an outage (default: true)
+  bool c6AutoHold;              // Hold the companion in reset while no radio feature runs (default: false)
+  int  c6HeartbeatSec;          // Companion heartbeat interval in seconds, 0 = watchdog off (default: 5)
   bool bleRequireSecureChannel; // Require the app-layer Secure Channel (server mode); refuse plaintext commands when set
   String bleSecureChannelSecret;// Pre-shared passphrase for the Secure Channel (PBKDF2 -> PSK). Secret.
   // BLE peer MACs and auto-reconnect flags now live in BLE_Peers.cpp's
@@ -1433,7 +1441,7 @@ struct SettingsModule {
 // Maximum number of settings modules that can be registered.
 //
 // Must stay ahead of the registerSettingsModule() call count in
-// registerAllSettingsModules(), which is 38 - most behind #if guards, so no
+// registerAllSettingsModules(), which is 39 - most behind #if guards, so no
 // shipping board reaches the cap today. Overflow is not loud: the registration
 // simply logs and returns (System_Settings.cpp), and a dropped module then
 // neither loads nor persists ANY of its settings - it silently runs on

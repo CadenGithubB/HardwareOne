@@ -366,9 +366,9 @@ has no numeric ids, aliases, flat duplicate array, `schema`, or revision field:
 {"families":[{"n":"Connectivity","k":["wifi_connected","wifi_disconnected"]}]}
 ```
 
-The complete current response is exactly **2,877 UTF-8 bytes** and contains
-**12 families / 152 unique canonical kinds**. The command buffer therefore
-needs 2,878 bytes including its trailing NUL and has 1,218 usable payload bytes
+The complete current response is exactly **3,051 UTF-8 bytes** and contains
+**13 families / 159 unique canonical kinds**. The command buffer therefore
+needs 3,052 bytes including its trailing NUL and has 1,044 usable payload bytes
 of headroom beneath the 4,095-byte command-result ceiling. Family order,
 within-family order, labels, and canonical snake_case names match the reviewed
 v1 fixture. The exact tokens `boot`, `none`, `set`, `patch`, `all`, and `list`
@@ -392,7 +392,7 @@ provider:
   application Secure Channel and must reassemble its paced reply fragments.
   The request is small; the multi-frame response is what needs reassembly.
 - **Do not request the full catalog over plaintext BLE.** That reply path sends
-  one unfragmented notification, whose ATT payload is far smaller than 2,877
+  one unfragmented notification, whose ATT payload is far smaller than 3,051
   bytes. Full-catalog plaintext delivery is unsupported; firmware may attempt
   the oversized notification without propagating its asynchronous send failure
   back into command success. A future plaintext client needs a separately
