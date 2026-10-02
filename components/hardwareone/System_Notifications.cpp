@@ -132,6 +132,17 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
     case SYSEVT_OTA_RESULT:           return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 0};
     case SYSEVT_SD_WRITE_RECOVERED:   return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 0};
     case SYSEVT_BATTERY_FULL:         return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 0};
+    // Radio companion (ESP32-C6, P4X-EYE). Losing the radio, a firmware
+    // mismatch and the P4 rebooting for the companion interrupt (banner); the
+    // rest are queue+toast. Offline/restarted carry cooldowns because a
+    // flapping companion repeats them on every recovery round.
+    case SYSEVT_COMPANION_OFFLINE:    return {ALL, 2, 3000, 10000};
+    case SYSEVT_COMPANION_REBOOT:     return {ALL, 3, 4000, 0};
+    case SYSEVT_COMPANION_MISMATCH:   return {ALL, 2, 4000, 0};
+    case SYSEVT_COMPANION_ONLINE:     return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 0};
+    case SYSEVT_COMPANION_RESTARTED:  return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 10000};
+    case SYSEVT_COMPANION_LOW_MEMORY: return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 60000};
+    case SYSEVT_COMPANION_UPDATED:    return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 3000, 0};
     // Everything else: event-only (automations/`events`/queue-off).
     default: return {NSINK_NONE, 0, 0, 0};
   }

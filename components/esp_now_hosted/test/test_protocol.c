@@ -42,6 +42,39 @@ static void request_tests(void)
     assert(!esp_now_hosted_decode_request(bytes, sizeof(bytes), &decoded));
 }
 
+static void info_tests(void)
+{
+    /* The info block is the largest return and must fit the response bound. */
+    assert(sizeof(esp_now_hosted_info_t) == 40);
+    assert(ESP_NOW_HOSTED_MAX_RETURN >= sizeof(esp_now_hosted_info_t));
+    assert(ESP_NOW_HOSTED_MAX_RETURN >= sizeof(esp_now_hosted_peer_t));
+    uint8_t bytes[sizeof(esp_now_hosted_resp_t) + sizeof(esp_now_hosted_info_t)] = {0};
+    esp_now_hosted_resp_t response = {
+        .request = {
+            .magic = ESP_NOW_HOSTED_MAGIC,
+            .version = ESP_NOW_HOSTED_WIRE_VERSION,
+            .opcode = ESP_NOW_HOSTED_OP_GET_INFO,
+            .payload_len = sizeof(esp_now_hosted_info_t),
+            .seq = 7,
+        },
+        .status = 0,
+    }, decoded;
+    esp_now_hosted_info_t info = {.wire_version = ESP_NOW_HOSTED_WIRE_VERSION,
+                                  .image_state = ESP_NOW_HOSTED_IMAGE_PENDING_VERIFY,
+                                  .running_slot = 1, .uptime_ms = 123456, .cpu_mhz = 160};
+    memcpy(bytes, &response, sizeof(response));
+    memcpy(bytes + sizeof(response), &info, sizeof(info));
+    assert(esp_now_hosted_decode_response(bytes, sizeof(bytes), &decoded));
+    assert(decoded.request.payload_len == sizeof(info));
+    esp_now_hosted_info_t back;
+    memcpy(&back, bytes + sizeof(response), sizeof(back));
+    assert(back.image_state == ESP_NOW_HOSTED_IMAGE_PENDING_VERIFY && back.running_slot == 1 &&
+           back.uptime_ms == 123456 && back.cpu_mhz == 160);
+    /* The marker a host searches a firmware file for ends in the wire version. */
+    const char *marker = ESP_NOW_HOSTED_BRIDGE_MARKER;
+    assert(marker[strlen(marker) - 1] == '0' + ESP_NOW_HOSTED_WIRE_VERSION);
+}
+
 static void response_tests(void)
 {
     uint8_t bytes[sizeof(esp_now_hosted_resp_t) + ESP_NOW_HOSTED_MAX_RETURN + 1] = {0};
@@ -97,6 +130,7 @@ int main(void)
 {
     request_tests();
     response_tests();
+    info_tests();
     event_tests();
     puts("ESP-NOW hosted protocol bounds/layout tests passed");
     return 0;

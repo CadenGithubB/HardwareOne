@@ -12,8 +12,8 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 FIXTURE_PATH = HERE / "fixtures" / "event_catalog_v1.json"
-EXPECTED_FAMILY_COUNT = 12
-EXPECTED_KIND_COUNT = 152
+EXPECTED_FAMILY_COUNT = 13
+EXPECTED_KIND_COUNT = 159
 RUN_TIMEOUT_SECONDS = 20
 
 if not __debug__:

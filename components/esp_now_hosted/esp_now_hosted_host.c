@@ -51,6 +51,7 @@ static bool s_initialized;
 static esp_now_hosted_host_stats_t s_stats;
 static esp_now_hosted_bridge_state_t s_bridge_state = ESP_NOW_HOSTED_BRIDGE_UNKNOWN;
 static bool s_last_exchange_answered; /* under s_state_lock; set by exchange_locked */
+static bool s_offline;                /* under s_state_lock; see esp_now_hosted_host_set_offline */
 /* Host mirror of the C6 peer table: an entry exists exactly when the last
  * successful add/mod/del left that MAC in the companion's table. Writers hold
  * s_request_lock; every access additionally runs under s_state_lock so the
@@ -257,8 +258,42 @@ esp_err_t esp_now_hosted_host_start(void)
     return err;
 }
 
+static void reset_local_state_locked(void)
+{
+    s_initialized = false;
+    s_epoch = 0;
+    s_recv_cb = NULL;
+    s_send_cb = NULL;
+    ++s_recv_generation;
+    ++s_send_generation;
+    memset(s_peer_private, 0, sizeof(s_peer_private));
+}
+
+void esp_now_hosted_host_reset_local(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    reset_local_state_locked();
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+void esp_now_hosted_host_set_offline(bool offline)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    s_offline = offline;
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+bool esp_now_hosted_host_is_offline(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    const bool offline = s_offline;
+    portEXIT_CRITICAL(&s_state_lock);
+    return offline;
+}
+
 static esp_err_t lock_bridge(void)
 {
+    if (esp_now_hosted_host_is_offline()) return ESP_ERR_INVALID_STATE;
     esp_err_t err = esp_now_hosted_host_start();
     if (err != ESP_OK) return err;
     return xSemaphoreTake(s_request_lock, pdMS_TO_TICKS(ESP_NOW_HOSTED_TIMEOUT_MS)) == pdTRUE
@@ -373,18 +408,18 @@ esp_err_t esp_now_init(void)
 
 esp_err_t esp_now_deinit(void)
 {
+    if (esp_now_hosted_host_is_offline()) {
+        /* Nothing to tell a companion that is not answering; its instance is
+         * gone with it. Release the host side so the application can close. */
+        esp_now_hosted_host_reset_local();
+        return ESP_OK;
+    }
     esp_err_t err = lock_bridge();
     if (err != ESP_OK) return err;
     err = exchange_locked(ESP_NOW_HOSTED_OP_DEINIT, NULL, 0, NULL, 0, NULL);
     if (err == ESP_OK) {
         portENTER_CRITICAL(&s_state_lock);
-        s_initialized = false;
-        s_epoch = 0;
-        s_recv_cb = NULL;
-        s_send_cb = NULL;
-        ++s_recv_generation;
-        ++s_send_generation;
-        memset(s_peer_private, 0, sizeof(s_peer_private));
+        reset_local_state_locked();
         portEXIT_CRITICAL(&s_state_lock);
     }
     xSemaphoreGive(s_request_lock);
@@ -393,6 +428,13 @@ esp_err_t esp_now_deinit(void)
 
 static esp_err_t set_recv_callback(esp_now_recv_cb_t cb, bool registering)
 {
+    if (!registering && esp_now_hosted_host_is_offline()) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_recv_cb = NULL;
+        ++s_recv_generation;
+        portEXIT_CRITICAL(&s_state_lock);
+        return ESP_OK;
+    }
     esp_err_t err = lock_bridge();
     if (err != ESP_OK) return err;
     uint8_t opcode = registering ? ESP_NOW_HOSTED_OP_REGISTER_RECV : ESP_NOW_HOSTED_OP_UNREGISTER_RECV;
@@ -409,6 +451,13 @@ static esp_err_t set_recv_callback(esp_now_recv_cb_t cb, bool registering)
 
 static esp_err_t set_send_callback(esp_now_send_cb_t cb, bool registering)
 {
+    if (!registering && esp_now_hosted_host_is_offline()) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_send_cb = NULL;
+        ++s_send_generation;
+        portEXIT_CRITICAL(&s_state_lock);
+        return ESP_OK;
+    }
     esp_err_t err = lock_bridge();
     if (err != ESP_OK) return err;
     uint8_t opcode = registering ? ESP_NOW_HOSTED_OP_REGISTER_SEND : ESP_NOW_HOSTED_OP_UNREGISTER_SEND;
@@ -501,6 +550,10 @@ esp_err_t esp_now_mod_peer(const esp_now_peer_info_t *peer)
 esp_err_t esp_now_del_peer(const uint8_t *mac)
 {
     if (!mac) return ESP_ERR_ESPNOW_ARG;
+    if (esp_now_hosted_host_is_offline()) {
+        private_clear(mac);
+        return ESP_OK;
+    }
     esp_err_t err = lock_bridge();
     if (err != ESP_OK) return err;
     err = exchange_locked(ESP_NOW_HOSTED_OP_DEL_PEER, mac, 6, NULL, 0, NULL);
@@ -580,32 +633,51 @@ bool esp_now_is_peer_exist(const uint8_t *mac)
     return private_lookup(mac, NULL);
 }
 
-esp_err_t esp_now_hosted_host_probe(uint32_t *native_version, int32_t *native_status)
+esp_err_t esp_now_hosted_host_probe(esp_now_hosted_info_t *info)
 {
-    uint32_t version = 0;
+    esp_now_hosted_info_t wire;
+    memset(&wire, 0, sizeof(wire));
     esp_err_t err = lock_bridge();
     if (err != ESP_OK) {
         portENTER_CRITICAL(&s_state_lock);
-        if (s_bridge_state != ESP_NOW_HOSTED_BRIDGE_PRESENT)
+        if (s_bridge_state != ESP_NOW_HOSTED_BRIDGE_PRESENT &&
+            s_bridge_state != ESP_NOW_HOSTED_BRIDGE_PRESENT_NO_INFO)
             s_bridge_state = ESP_NOW_HOSTED_BRIDGE_TRANSPORT_ERROR;
         portEXIT_CRITICAL(&s_state_lock);
         return err;
     }
-    err = exchange_locked(ESP_NOW_HOSTED_OP_GET_VERSION, NULL, 0, &version, sizeof(version), NULL);
+    err = exchange_locked(ESP_NOW_HOSTED_OP_GET_INFO, NULL, 0, &wire, sizeof(wire), NULL);
     portENTER_CRITICAL(&s_state_lock);
     const bool answered = s_last_exchange_answered;
-    if (!answered) {
+    if (answered) {
+        s_bridge_state = err == ESP_ERR_NOT_SUPPORTED ? ESP_NOW_HOSTED_BRIDGE_PRESENT_NO_INFO
+                                                       : ESP_NOW_HOSTED_BRIDGE_PRESENT;
+    } else {
         s_bridge_state = err == ESP_ERR_TIMEOUT ? ESP_NOW_HOSTED_BRIDGE_ABSENT
                                                 : ESP_NOW_HOSTED_BRIDGE_TRANSPORT_ERROR;
     }
     portEXIT_CRITICAL(&s_state_lock);
     xSemaphoreGive(s_request_lock);
     if (answered) {
-        if (native_status) *native_status = (int32_t)err;
-        if (native_version) *native_version = err == ESP_OK ? version : 0;
+        if (err == ESP_OK && info) *info = wire;
         return ESP_OK;
     }
     return err;
+}
+
+esp_err_t esp_now_hosted_bridge_info(esp_now_hosted_info_t *info)
+{
+    if (!info) return ESP_ERR_ESPNOW_ARG;
+    esp_now_hosted_info_t wire;
+    memset(&wire, 0, sizeof(wire));
+    esp_err_t err = request(ESP_NOW_HOSTED_OP_GET_INFO, NULL, 0, &wire, sizeof(wire));
+    if (err == ESP_OK) *info = wire;
+    return err;
+}
+
+esp_err_t esp_now_hosted_confirm_image(void)
+{
+    return request(ESP_NOW_HOSTED_OP_CONFIRM_IMAGE, NULL, 0, NULL, 0);
 }
 
 esp_now_hosted_bridge_state_t esp_now_hosted_bridge_state(void)

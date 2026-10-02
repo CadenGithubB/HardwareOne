@@ -1,0 +1,121 @@
+diff --git a/cores/esp32/esp32-hal-hosted.h b/cores/esp32/esp32-hal-hosted.h
+--- a/cores/esp32/esp32-hal-hosted.h
++++ b/cores/esp32/esp32-hal-hosted.h
+@@ -44,6 +44,13 @@
+ // after checked teardown. Release does not shut down the shared transport.
+ bool hostedClaimBLE();
+ void hostedReleaseBLE();
++// [hardwareone local patch 2026-10-02] A companion that stopped answering
++// (SDIO failure, C6 reset, update in progress) cannot acknowledge its own
++// shutdown. While "lost", the Wi-Fi and BLE teardown paths skip or forgive
++// the companion RPCs, so the host-side state is released and the transport
++// can be rebuilt without rebooting the host. Cleared by a successful init.
++void hostedSetTransportLost(bool lost);
++bool hostedTransportLost(void);
+ bool hostedIsInitialized();
+ bool hostedIsBLEActive();
+ bool hostedIsWiFiActive();
+diff --git a/cores/esp32/esp32-hal-hosted.c b/cores/esp32/esp32-hal-hosted.c
+--- a/cores/esp32/esp32-hal-hosted.c
++++ b/cores/esp32/esp32-hal-hosted.c
+@@ -28,7 +28,16 @@
+ static bool hosted_initialized = false;
+ static bool hosted_ble_active = false;
+ static bool hosted_wifi_active = false;
++static bool hosted_transport_lost = false;  // [hardwareone local patch 2026-10-02]
+ 
++void hostedSetTransportLost(bool lost) {
++  hosted_transport_lost = lost;
++}
++
++bool hostedTransportLost(void) {
++  return hosted_transport_lost;
++}
++
+ static sdio_pin_config_t sdio_pin_config = {
+ #ifdef BOARD_HAS_SDIO_ESP_HOSTED
+   .pin_clk = BOARD_SDIO_ESP_HOSTED_CLK,
+@@ -215,6 +224,7 @@
+       hosted_initialized = false;
+       return false;
+     }
++    hosted_transport_lost = false;  // [hardwareone local patch 2026-10-02] fresh link
+     hostedHasUpdate();
+     return true;
+   }
+@@ -291,6 +301,15 @@
+ 
+ bool hostedDeinitBLE() {
+   log_i("Deinitializing ESP-Hosted for BLE");
++  if (hosted_transport_lost) {
++    // [hardwareone local patch 2026-10-02] The controller went away with the
++    // companion; only the host-side bookkeeping remains to release.
++    hosted_ble_active = false;
++    if (!hosted_wifi_active) {
++      return hostedDeinit();
++    }
++    return true;
++  }
+   esp_err_t err = esp_hosted_bt_controller_disable();
+   if (err != ESP_OK) {
+     log_e("esp_hosted_bt_controller_disable failed: %s", esp_err_to_name(err));
+diff --git a/cores/esp32/esp32-hal-bt.c b/cores/esp32/esp32-hal-bt.c
+--- a/cores/esp32/esp32-hal-bt.c
++++ b/cores/esp32/esp32-hal-bt.c
+@@ -104,7 +104,9 @@
+   if (err != ESP_OK) return err;
+   sHostedHciAttached = false;
+   const int32_t before = btHostedControllerStatus();
+-  err = esp_hosted_bt_controller_disable();
++  // [hardwareone local patch 2026-10-02] A lost companion cannot acknowledge;
++  // its controller is gone with it, so the host records the terminal state.
++  err = hostedTransportLost() ? ESP_OK : esp_hosted_bt_controller_disable();
+   // With an unknown starting state, disable alone does not prove initialized.
+   // Deinit is idempotent and establishes the terminal state in the next phase.
+   const int32_t disabledState = before == BT_HOSTED_CONTROLLER_IDLE ? BT_HOSTED_CONTROLLER_IDLE
+@@ -121,7 +123,8 @@
+   }
+   // Never release C6 controller memory: BLE must be reopenable and Wi-Fi,
+   // ESP-NOW, and the shared Hosted/SDIO connection must remain operational.
+-  esp_err_t err = esp_hosted_bt_controller_deinit(false);
++  // [hardwareone local patch 2026-10-02] see btHostedControllerDisable().
++  esp_err_t err = hostedTransportLost() ? ESP_OK : esp_hosted_bt_controller_deinit(false);
+   hostedControllerAcknowledge(err, BT_HOSTED_CONTROLLER_IDLE);
+   if (err == ESP_OK) hostedReleaseBLE();
+   return err;
+diff --git a/libraries/WiFi/src/WiFiGeneric.cpp b/libraries/WiFi/src/WiFiGeneric.cpp
+--- a/libraries/WiFi/src/WiFiGeneric.cpp
++++ b/libraries/WiFi/src/WiFiGeneric.cpp
+@@ -321,7 +321,17 @@
+       esp_netif_destroy_default_wifi(esp_netifs[ESP_IF_WIFI_STA]);
+       esp_netifs[ESP_IF_WIFI_STA] = NULL;
+     }
+-    lowLevelInitDone = !(esp_wifi_deinit() == ESP_OK);
++    esp_err_t deinitErr = esp_wifi_deinit();
++#if CONFIG_ESP_WIFI_REMOTE_ENABLED
++    // [hardwareone local patch 2026-10-02] A companion that stopped answering
++    // cannot acknowledge the remote deinit; the host-side state is gone
++    // regardless, so finish the teardown and let Hosted rebuild the transport.
++    if (deinitErr != ESP_OK && hostedTransportLost()) {
++      log_w("Remote Wi-Fi deinit failed on a lost companion; treating as done");
++      deinitErr = ESP_OK;
++    }
++#endif
++    lowLevelInitDone = !(deinitErr == ESP_OK);
+     if (!lowLevelInitDone) {
+       arduino_event_t arduino_event;
+       arduino_event.event_id = ARDUINO_EVENT_WIFI_OFF;
+@@ -361,6 +371,13 @@
+   }
+   _esp_wifi_started = false;
+   err = esp_wifi_stop();
++#if CONFIG_ESP_WIFI_REMOTE_ENABLED
++  // [hardwareone local patch 2026-10-02] see wifiLowLevelDeinit().
++  if (err && hostedTransportLost()) {
++    log_w("Remote Wi-Fi stop failed on a lost companion; treating as stopped");
++    err = ESP_OK;
++  }
++#endif
+   if (err) {
+     log_e("Could not stop WiFi! 0x%x: %s", err, esp_err_to_name(err));
+     _esp_wifi_started = true;

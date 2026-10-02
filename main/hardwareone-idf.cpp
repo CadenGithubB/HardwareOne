@@ -1,5 +1,5 @@
 #include "Arduino.h"
-#include "radio_backend.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -9,8 +9,10 @@
 #include "esp_log.h"
 #endif
 
+#include "../components/hardwareone/HAL_Radio.h"
 #include "../components/hardwareone/System_AuthIdentity.h"
 #include "../components/hardwareone/System_OTASafety.h"
+#include "../components/hardwareone/System_RadioCompanion.h"
 
 // Real HardwareOne Arduino-style entry points are implemented in
 // components/hardwareone/HardwareOne.cpp
@@ -94,8 +96,17 @@ extern "C" void app_main(void)
     // Initialize Arduino core (Serial, peripherals, etc.)
     initArduino();
     // P4X-EYE: bring up the C6 radio companion before any Wi-Fi/BLE/ESP-NOW
-    // use. Native-radio targets return immediately.
-    ESP_ERROR_CHECK(hw1RadioPrepare());
+    // use. Native-radio targets return immediately. A companion that does not
+    // answer is not fatal: the firmware boots without its radio features and
+    // the companion monitor (System_RadioCompanion) keeps trying to bring it
+    // back.
+    {
+        const esp_err_t radioErr = radioHalPrepare();
+        if (radioErr != ESP_OK) {
+            ESP_LOGW("boot", "radio companion did not come up (%s); continuing without the radio",
+                     esp_err_to_name(radioErr));
+        }
+    }
 
     // Allocate the TLS auth-identity slot for this (main) task. The
     // ExecIdentityGuard ctor would lazy-init anyway, but doing it explicitly
@@ -115,7 +126,7 @@ extern "C" void app_main(void)
 
     // Run user setup once
     setup();
-    hw1RadioPrintStats();
+    radioCompanionLogBootSummary();
 
     // Run user loop forever with a small delay
     while (true) {

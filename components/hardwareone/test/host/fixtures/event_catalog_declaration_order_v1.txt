@@ -150,3 +150,10 @@ display_init_failed
 automation_added
 automation_deleted
 automation_action_dropped
+companion_online
+companion_offline
+companion_restarted
+companion_mismatch
+companion_low_memory
+companion_updated
+companion_reboot

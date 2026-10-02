@@ -63,9 +63,9 @@ static constexpr catalog_core::KindDescriptor kProductionKinds[] = {
 static constexpr auto kProductionFamilyIndex =
     catalog_core::buildFamilyIndex(kProductionFamilies, kProductionKinds);
 
-static_assert(arrayCount(kProductionFamilies) == 12,
+static_assert(arrayCount(kProductionFamilies) == 13,
               "reviewed fixture family count changed");
-static_assert(arrayCount(kProductionKinds) == 152,
+static_assert(arrayCount(kProductionKinds) == 159,
               "reviewed fixture kind count changed");
 static_assert(catalog_core::validate(kProductionFamilies, kProductionKinds)
                   .ok(),

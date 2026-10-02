@@ -354,9 +354,23 @@ if(HW1_SANITIZE)
   target_link_options(esp_now_hosted_protocol_tests PRIVATE -fsanitize=address,undefined)
 endif()
 
+# Health, retry and recovery policy for the P4X-EYE's C6 radio companion
+# (Radio_CompanionCore.h): boot retries with backoff, the heartbeat watchdog,
+# soft-recovery escalation to a reboot, idle hold and the sleep pause.
+add_executable(radio_companion_core_tests test_radio_companion_core.cpp)
+set_target_properties(radio_companion_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(radio_companion_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+if(HW1_SANITIZE)
+  target_compile_options(radio_companion_core_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(radio_companion_core_tests PRIVATE -fsanitize=address,undefined)
+endif()
+
 enable_testing()
 
 add_test(NAME esp_now_hosted_protocol COMMAND esp_now_hosted_protocol_tests)
+add_test(NAME radio_companion_core COMMAND radio_companion_core_tests)
 # The real HAL_Bluetooth.cpp under native and Hosted (P4 + C6) controller
 # substitutes; see test_hal_bluetooth.py for what it does and does not prove.
 set(HAL_BLUETOOTH_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})

@@ -8,6 +8,57 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [Unreleased]
+
+### Added
+- **The ESP32-C6 radio companion is a managed subsystem** on the P4X-EYE
+  (`components/hardwareone/HAL_Radio.cpp`, `System_RadioCompanion.cpp`,
+  `Radio_CompanionCore.h`; replaces `main/radio_backend.cpp`). Every part of
+  it compiles to nothing on boards with an on-chip radio.
+  - A companion that does not answer at boot no longer stops the P4: the
+    firmware boots without Wi-Fi, BLE and ESP-NOW, says why, retries with a
+    growing back-off and starts the configured features when the C6 answers.
+  - `c6status [json]`: ESP-Hosted version against the qualified one, image,
+    running slot and confirmation state, ESP-NOW bridge, heartbeat, memory,
+    bridge and recovery counters; also under `companion` in `/api/system`.
+  - A "Radio companion" family of System Events (`companion_online`,
+    `companion_offline`, `companion_restarted`, `companion_mismatch`,
+    `companion_low_memory`, `companion_updated`, `companion_reboot`) that the
+    notification system routes like every other family.
+  - A watchdog (ESP-Hosted heartbeat, `c6heartbeat`, default 5 s) and soft
+    recovery without a P4 reboot: the radio users stop, the transport is
+    rebuilt (which resets the C6) and what was running comes back. The P4
+    reboots only after three failed soft recoveries within ten minutes.
+    `c6restart` is the manual restart; `c6autorecover off` disables the
+    automatic one.
+  - `c6update "<file>"`: companion firmware update over SDIO (ESP-Hosted OTA)
+    from the P4's storage. The image is checked for the bridge marker before
+    anything is sent, the C6 build enables bootloader rollback, and the new
+    image is confirmed only once the bridge answers from it (`c6confirm` by
+    hand).
+  - Power follows the main processor: `lightsleep` pauses the watchdog,
+    `deepsleep` and `c6hold on` hold the C6 in reset (radio fully off),
+    `c6hold off` restores what ran, and `c6autohold on` does that by itself
+    after 30 s of radio idleness. The companion never changes power on its
+    own.
+  - Bridge protocol: `GET_INFO` (image state, slot, uptime, heap, reset
+    reason, build) and `CONFIRM_IMAGE`; the slave carries the marker string
+    `c6update` looks for.
+  - Arduino local patch (2026-10-02): a "transport lost" flag so Wi-Fi and
+    BLE teardown completes on a dead or restarting companion.
+
+### Changed
+- P4 images set `CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n`: an SDIO
+  failure is handled by the companion monitor instead of a P4 reboot.
+- Settings gain `c6AutoRecover`, `c6AutoHold` and `c6HeartbeatSec` (module
+  `companion`), present on every board so the settings layout stays one.
+
+### Not yet verified on hardware
+- The recovery, hold, deep-sleep hold and `c6update` paths were built against
+  the ESP-Hosted 2.12.13 host API and a host-tested policy core
+  (`test_radio_companion_core.cpp`); their first hardware runs are still to
+  be recorded.
+
 ## [0.99.96] - 2026-10-02
 
 The ESP32-P4X-EYE becomes a regular board that builds from a clean checkout,

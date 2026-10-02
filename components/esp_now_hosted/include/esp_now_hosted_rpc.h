@@ -38,7 +38,17 @@ enum {
     ESP_NOW_HOSTED_OP_UNREGISTER_RECV = 13,
     ESP_NOW_HOSTED_OP_REGISTER_SEND = 14,
     ESP_NOW_HOSTED_OP_UNREGISTER_SEND = 15,
+    /* Additive within wire version 1: a slave without them answers
+     * ESP_ERR_NOT_SUPPORTED, which the host reads as "bridge present, older". */
+    ESP_NOW_HOSTED_OP_GET_INFO = 16,      /* companion runtime + image state, no side effects */
+    ESP_NOW_HOSTED_OP_CONFIRM_IMAGE = 17, /* mark the running C6 image valid (cancel rollback) */
 };
+
+/* Embedded verbatim in the C6 image's read-only data by the slave, so a host
+ * can check that a candidate firmware FILE carries this bridge before sending
+ * a byte of it over OTA. The trailing number is the wire version; bump both
+ * together. */
+#define ESP_NOW_HOSTED_BRIDGE_MARKER "HW1-ESPNOW-BRIDGE/1"
 
 /* P4 and C6 are little-endian. Packed layout is verified below. Each sequence
  * is used once per host boot, including timed-out requests and reinitialization.
@@ -105,9 +115,34 @@ typedef struct __attribute__((packed)) {
     int32_t tx_status;
 } esp_now_hosted_send_evt_t;
 
+/* GET_INFO return payload. Every field is a plain value the host may display;
+ * none of it is authoritative for Hosted's own version check. */
+typedef struct __attribute__((packed)) {
+    uint8_t wire_version;          /* ESP_NOW_HOSTED_WIRE_VERSION compiled into the slave */
+    uint8_t image_state;           /* ESP_NOW_HOSTED_IMAGE_* below */
+    uint8_t running_slot;          /* OTA slot of the running app (0 = ota_0), 0xff unknown */
+    uint8_t reset_reason;          /* esp_reset_reason() of the companion */
+    uint32_t uptime_ms;            /* companion uptime, wraps after 49.7 days */
+    uint32_t free_heap;            /* esp_get_free_heap_size() */
+    uint32_t min_free_heap;        /* esp_get_minimum_free_heap_size() since boot */
+    uint32_t cpu_mhz;
+    uint32_t native_espnow_version;
+    char build[16];                /* slave app version string, truncated, not always NUL-terminated */
+} esp_now_hosted_info_t;
+
+enum {
+    ESP_NOW_HOSTED_IMAGE_UNKNOWN = 0,
+    ESP_NOW_HOSTED_IMAGE_VALID = 1,          /* valid, or no OTA record (cable-flashed) */
+    ESP_NOW_HOSTED_IMAGE_PENDING_VERIFY = 2, /* new image awaiting CONFIRM_IMAGE; rolls back on the next reboot otherwise */
+    ESP_NOW_HOSTED_IMAGE_INVALID = 3,
+};
+
 #define ESP_NOW_HOSTED_MAX_PAYLOAD \
     (sizeof(esp_now_hosted_send_req_t) + ESP_NOW_HOSTED_MAX_FRAME)
-#define ESP_NOW_HOSTED_MAX_RETURN sizeof(esp_now_hosted_peer_t)
+/* The largest value any request returns: the info block outgrew the peer record. */
+#define ESP_NOW_HOSTED_MAX_RETURN \
+    (sizeof(esp_now_hosted_info_t) > sizeof(esp_now_hosted_peer_t) \
+         ? sizeof(esp_now_hosted_info_t) : sizeof(esp_now_hosted_peer_t))
 #define ESP_NOW_HOSTED_MAX_EVENT \
     (sizeof(esp_now_hosted_recv_evt_t) + ESP_NOW_HOSTED_MAX_FRAME)
 
@@ -159,6 +194,8 @@ HW1_WIRE_ASSERT(sizeof(esp_now_hosted_peer_num_t) == 8, "peer count wire size");
 HW1_WIRE_ASSERT(sizeof(esp_now_hosted_send_req_t) == 9, "send wire size");
 HW1_WIRE_ASSERT(sizeof(esp_now_hosted_recv_evt_t) == 37, "recv wire size");
 HW1_WIRE_ASSERT(sizeof(esp_now_hosted_send_evt_t) == 45, "send event wire size");
+HW1_WIRE_ASSERT(sizeof(esp_now_hosted_info_t) == 40, "info wire size");
+HW1_WIRE_ASSERT(ESP_NOW_HOSTED_MAX_RETURN == 40, "max return size");
 HW1_WIRE_ASSERT(ESP_NOW_HOSTED_MAX_EVENT < 8166, "CustomRpc payload limit");
 #undef HW1_WIRE_ASSERT
 

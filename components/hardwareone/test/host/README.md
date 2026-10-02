@@ -173,8 +173,8 @@ sink-failure byte accounting; and the real `CMD_RESULT_MAX` budget. Its
 `--dump-typed` emits an independent ordinal/length/hex traversal protocol.
 `event_catalog_json_parse` invokes both modes, parses the JSON with Python's
 standard library, and compares every family and kind with typed traversal and
-the frozen fixture. The current established result is 12 families, 152 kinds,
-and exactly 2,877 payload bytes (2,878 including a command-buffer NUL).
+the frozen fixture. The current established result is 13 families, 159 kinds,
+and exactly 3,051 payload bytes (3,052 including a command-buffer NUL).
 
 `event_catalog_text_tests` exercises the real dependency-light human listing
 core used by `events kinds`. It covers basic and exact-fit packing, a canonical

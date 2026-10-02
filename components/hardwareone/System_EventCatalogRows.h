@@ -22,6 +22,7 @@ HW1_EVENT_CATALOG_FAMILY_ROW(SYSEVT_FAM_STORAGE,    "Storage")
 HW1_EVENT_CATALOG_FAMILY_ROW(SYSEVT_FAM_AUTOMATION, "Automation")
 HW1_EVENT_CATALOG_FAMILY_ROW(SYSEVT_FAM_OTA,        "Firmware & OTA")
 HW1_EVENT_CATALOG_FAMILY_ROW(SYSEVT_FAM_SYSTEM,     "System")
+HW1_EVENT_CATALOG_FAMILY_ROW(SYSEVT_FAM_COMPANION,  "Radio companion")
 #endif
 
 #ifdef HW1_EVENT_CATALOG_KIND_ROW
@@ -206,4 +207,12 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_DISPLAY_INIT_FAILED, "display_init_failed", SY
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_AUTOMATION_ADDED,    "automation_added", SYSEVT_FAM_AUTOMATION)     /* an automation was created  subject=name */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_AUTOMATION_DELETED,  "automation_deleted", SYSEVT_FAM_AUTOMATION)   /* an automation was deleted  subject=name */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_AUTOMATION_ACTION_DROPPED,"automation_action_dropped", SYSEVT_FAM_AUTOMATION) /* an automation action was skipped/failed mid-run  subject=name detail=reason */
+  /* --- Radio companion (ESP32-C6 over ESP-Hosted, P4X-EYE only) --- */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_ONLINE,     "companion_online", SYSEVT_FAM_COMPANION)     /* companion answered (boot, restart, recovery, release)  subject=hosted version detail=bridge state */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_OFFLINE,    "companion_offline", SYSEVT_FAM_COMPANION)    /* companion stopped answering or never came up  subject=cause detail=what happens next */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_RESTARTED,  "companion_restarted", SYSEVT_FAM_COMPANION)  /* companion (re)booted  subject=reset reason detail=expected|unexpected */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_MISMATCH,   "companion_mismatch", SYSEVT_FAM_COMPANION)   /* companion ESP-Hosted version differs from the qualified one  subject=running detail=expected */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_LOW_MEMORY, "companion_low_memory", SYSEVT_FAM_COMPANION) /* companion internal heap under the alarm line  subject=free detail=minimum */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_UPDATED,    "companion_updated", SYSEVT_FAM_COMPANION)    /* companion firmware updated or its image confirmed  subject=build detail=running|confirmed */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_REBOOT,     "companion_reboot", SYSEVT_FAM_COMPANION)     /* the P4 reboots because soft recovery kept failing  subject=outage detail=reason */
 #endif

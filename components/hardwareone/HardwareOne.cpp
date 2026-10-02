@@ -99,6 +99,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_CrashRecord.h"
 #include "System_OTASafety.h"
 #include "System_OTA.h"
+#include "System_RadioCompanion.h"  // ESP32-C6 companion: boot verdict, feature gating, loop tick
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Server.h"
 #endif
@@ -1886,12 +1887,18 @@ void hardwareone_setup() {
   // 7. NETWORK — WiFi + NTP
   // ========================================================================
   crashRecordSetPhase(CRASH_PHASE_NETWORK);
+  // Radio companion first (P4X-EYE): records how the C6 came up and arms its
+  // monitor, so the feature starts below can ask whether the radio exists.
+  radioCompanionBootInit();
 #if ENABLE_WIFI
   oledSetBootProgress(30, "Connecting WiFi");
 
   bool wifiConnected = false;
   // Always attempt WiFi connection if credentials exist (controlled by wifiAutoStart setting)
-  if (gSettings.wifiEnabled && ramFlushResolve(RF_WIFI, gSettings.wifiAutoStart)) {  // Controlled by first-time setup or settings
+  const char* wifiCompanionReason = nullptr;
+  if (gSettings.wifiEnabled && radioCompanionBlocksRadio(&wifiCompanionReason)) {
+    BROADCAST_PRINTF("[WiFi] Auto-start skipped: %s", wifiCompanionReason);
+  } else if (gSettings.wifiEnabled && ramFlushResolve(RF_WIFI, gSettings.wifiAutoStart)) {  // Controlled by first-time setup or settings
     // Skip NTP sync in wificonnect so we can show it separately in boot progress
     gSkipNTPInWifiConnect = true;
     setupWiFi();
@@ -2029,7 +2036,11 @@ void hardwareone_setup() {
   const bool wantBleServerAtBoot =
       ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart) || otaSystemResumeBleRequested();
 
-  if (gSettings.bleEnabled &&
+  const char* bleCompanionReason = nullptr;
+  if (gSettings.bleEnabled && (wantBleServerAtBoot || wantClientForAutoReconnect) &&
+      radioCompanionBlocksRadio(&bleCompanionReason)) {
+    BROADCAST_PRINTF("[BLE] Auto-start skipped: %s", bleCompanionReason);
+  } else if (gSettings.bleEnabled &&
       (wantBleServerAtBoot || wantClientForAutoReconnect)) {
     oledSetBootProgress(85, "Starting Bluetooth");
 
@@ -2287,7 +2298,10 @@ void hardwareone_setup() {
 
   // espnowEnabled used to serve as BOTH the master switch and the boot flag.
   // It is now the master switch only; espnowAutoStart is the boot flag.
-  if (gSettings.espnowEnabled &&
+  const char* espnowCompanionReason = nullptr;
+  if (gSettings.espnowEnabled && radioCompanionBlocksRadio(&espnowCompanionReason)) {
+    BROADCAST_PRINTF("[ESP-NOW] Auto-start skipped: %s", espnowCompanionReason);
+  } else if (gSettings.espnowEnabled &&
       ramFlushResolve(RF_ESPNOW, gSettings.espnowAutoStart) && identityOk) {
     broadcastOutput("[ESP-NOW] Auto-initialization enabled in settings");
     const char* setupError = checkEspNowFirstTimeSetup();
@@ -2722,6 +2736,10 @@ void hardwareone_loop() {
   // Advance a running (non-blocking) LED effect one frame. Cheap no-op while
   // idle; ~20 ms pacing while active. See ledEffectStart in System_NeoPixel.
   ledEffectTick();
+
+  // ESP32-C6 radio companion (P4X-EYE): drain transport events, run the
+  // heartbeat watchdog and the retry/recovery policy. No-op elsewhere.
+  radioCompanionTick();
 
 #if ENABLE_OLED_DISPLAY
   powerSaveTick();

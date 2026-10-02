@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-947 commands across 49 modules (959 registry entries).
+962 commands across 52 modules (974 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,6 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 26 commands
 - [`wifi`](#wifi) — 20 commands
 - [`espnow`](#espnow) — 119 commands
+- [`c6`](#c6) — 8 commands
 - [`mqtt`](#mqtt) — 27 commands
 - [`bluetooth`](#bluetooth) — 19 commands
 - [`filesystem`](#filesystem) — 10 commands
@@ -28,7 +29,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
 - [`imu`](#imu) — 16 commands
-- [`input`](#input) — 4 commands
+- [`input`](#input) — 5 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 5 commands
 - [`apds`](#apds) — 9 commands
@@ -39,6 +40,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`camera`](#camera) — 49 commands
 - [`microphone`](#microphone) — 15 commands
 - [`edgeimpulse`](#edgeimpulse) — 16 commands
+- [`transcription`](#transcription) — 2 commands
+- [`stt`](#stt) — 2 commands
 - [`espsr`](#espsr) — 45 commands
 - [`i2c`](#i2c) — 24 commands
 - [`automation`](#automation) — 8 commands
@@ -57,10 +60,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`cm5`](#cm5) — 15 commands
 - [`ota`](#ota) — 18 commands
 - [`setpattern`](#setpattern) — 1 commands
-- [`even_g2`](#even-g2) — 55 commands
+- [`even_g2`](#even-g2) — 56 commands
 - [`even_r1`](#even-r1) — 5 commands
 - [`llm`](#llm) — 30 commands
-- [`settingsedit`](#settingsedit) — 57 commands
+- [`settingsedit`](#settingsedit) — 58 commands
 
 ---
 
@@ -77,13 +80,13 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## system
 
-> The system module holds core device commands that do not belong to any peripheral. Status and inspection: status (WiFi, filesystem, memory summary), uptime, time (uptime plus NTP wall-clock if synced), temperature and voltage (ESP32 internal die temp and supply rail), taskstats/perftop (FreeRTOS task and live loop/CPU profiling), fsusage, events (recent system events from the in-memory register that drives automation event triggers), and the memory tools memsample (snapshot, with memsample track on|off|reset|status for allocation tracking) and memreport. Control and power: reboot, ramflush, cpufreq [80|160|240] to read or set CPU clock, lightsleep [seconds] for ESP32 light sleep, deepsleep for power-off (reset to wake), and wait <ms>/sleep <ms> to pause command-script execution. timeset sets the clock manually. broadcast <message> pushes a line of text to all connected output interfaces, and factoryreset deletes the user-accounts file so the first-boot setup wizard re-runs on next reboot while deliberately preserving WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.
+> The system module holds core device commands that do not belong to any peripheral. Status and inspection: status (WiFi, filesystem, memory summary), uptime, time (uptime plus NTP wall-clock if synced), temperature and voltage (ESP32 internal die temp and supply rail), taskstats/perftop (FreeRTOS task and live loop/CPU profiling), fsusage, events (recent system events from the in-memory register that drives automation event triggers), and the memory tools memsample (snapshot, with memsample track on|off|reset|status for allocation tracking) and memreport. Control and power: reboot, ramflush, cpufreq [MHz] to read or set a supported CPU clock, lightsleep [seconds] for ESP32 light sleep, deepsleep for power-off (reset to wake), and wait <ms>/sleep <ms> to pause command-script execution. timeset sets the clock manually. broadcast <message> pushes a line of text to all connected output interfaces, and factoryreset deletes the user-accounts file so the first-boot setup wizard re-runs on next reboot while deliberately preserving WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `bootcount` |  | Show boot count (NVS), crash count, last reset reason. 'bootcount reset' zeroes it (admin). (add 'json')<br/>`Usage: bootcount [reset\|json]` |
 | `broadcast` | A | Send a message to all connected output interfaces.<br/>`Usage: broadcast <message>` |
-| `cpufreq` | A | Get/set CPU frequency (admin).<br/>`Usage: cpufreq [80\|160\|240]` |
+| `cpufreq` | A | Get/set CPU frequency (admin).<br/>`Usage: cpufreq [MHz] (run without arguments to list supported values)` |
 | `crashlog` |  | Show the last recorded crash (panic text, core/PC, boot phase, repeat count). (add 'json')<br/>`Usage: crashlog [json]` |
 | `deepsleep` | A | Power off via deep sleep (no wake source — reset button to wake).<br/>`Usage: deepsleep (admin; wakes only via physical reset)` |
 | `events` |  | Show recent system events (the in-memory register that drives automation event triggers).<br/>`Usage: events [kinds [json]] (bare): show the recent-event ring kinds: list every valid event-kind name (json = machine form)` |
@@ -261,6 +264,21 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `testfilelock` |  | Test file transfer lock acquire/release. |
 | `teststreams` |  | Test topology stream management functions. |
 
+## c6
+
+> On the ESP32-P4X-EYE the Wi-Fi, Bluetooth and ESP-NOW radio is a separate ESP32-C6 that the P4 drives over SDIO (ESP-Hosted). c6status reports its firmware, the ESP-NOW bridge, heartbeat, memory and recovery counters; c6restart resets it in place; c6hold turns the radio fully off by holding the C6 in reset and brings it back; c6update flashes a new companion image over SDIO with rollback protection and c6confirm accepts the running image; c6autorecover, c6autohold and c6heartbeat tune the background monitor. Radio features never start while the companion is offline, and a companion that stops answering is recovered without rebooting the P4.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `c6autohold` | A | Hold the companion in reset while no radio feature runs: c6autohold [on\|off] (persists). |
+| `c6autorecover` | A | Auto-recover the companion after an outage: c6autorecover [on\|off] (persists). |
+| `c6confirm` | A | Confirm the companion's running image so it cannot roll back. |
+| `c6heartbeat` | A | Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists). |
+| `c6hold` | A | Hold the C6 in reset (radio fully off) or release it: c6hold [on\|off].<br/>`Usage: c6hold [on\|off] on - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset off - release it and restore what was running` |
+| `c6restart` | A | Restart the C6 companion in place (radio features stop and come back). |
+| `c6status` |  | ESP32-C6 companion status: firmware, bridge, heartbeat, memory, recovery (add 'json'). |
+| `c6update` | A | Flash companion firmware from a file over SDIO: c6update "<path>".<br/>`Usage: c6update "/sd/firmware/network_adapter.bin" The file must be an ESP32-C6 image built by tools/p4/companion (it is checked for the ESP-NOW bridge marker before anything is sent).` |
+
 ## mqtt
 
 > The MQTT subsystem connects the device to a broker, primarily to publish its sensor and system telemetry to Home Assistant via HA discovery. It is almost entirely configuration: broker host/port (mqttHost, mqttPort), credentials (mqttUser, mqttPassword), TLS mode and CA path, base/discovery topics, publish interval, and a long list of per-source publish toggles (mqttPublishThermal, mqttPublishIMU, and so on). These are persisted settings and most config commands are admin-only; after changing them, reconnect with closemqtt/openmqtt to apply to a live session. openmqtt and closemqtt start and stop the client, mqttstatus shows connection state, and mqttautostart controls whether it connects at boot. For inbound data, enable mqttSubscribeExternal with mqttSubscribeTopics; values received from those topics are cached and read back with mqttExternalSensors.
@@ -340,7 +358,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## sd
 
-> Controls the optional microSD card, which mounts at /sd and serves as overflow/bulk storage (and is only compiled in on boards that wire a card-detect/CS pin). sdmount attempts to mount the card and sdunmount safely unmounts it; sdinfo shows the card type, size, and used/free space, and sddiag runs a raw-SPI hardware diagnostic to troubleshoot a card that will not mount. sdformat erases the entire card and reformats it as FAT32 and therefore requires sdformat confirm to proceed. Once mounted, file commands address the card through its /sd/... path prefix.
+> Controls the optional microSD card, which mounts at /sd and serves as overflow/bulk storage (and is only compiled in on boards that wire a supported SPI or SDMMC slot). sdmount attempts to mount the card and sdunmount safely unmounts it; sdinfo shows the card type, size, and used/free space, and sddiag reports backend-specific diagnostics to troubleshoot a card that will not mount. sdformat erases the entire card and reformats it as FAT32 and therefore requires sdformat confirm to proceed. Once mounted, file commands address the card through its /sd/... path prefix.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -352,7 +370,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## oled
 
-> Drives the small SSD1306 OLED display: its lifecycle, the live screen contents, and persistent appearance settings. oledstart/oledstop (aliases openoled/closeoled) power the display task on and off, and oledstatus (alias oledread) reports its state. oledmode <mode> switches the live screen among the built-in views (menu, status, sensordata, thermal, network, mesh, gps, espnow, memory, off, and more); oledtext <message> shows custom text and oledanim <name>|fps <n> picks the animation -- both require the display to be running (run oledstart first) and neither persists across reboot. Separately, the oled* config commands write settings to flash immediately: oledbootmode and oleddefaultmode set the screen shown at boot and as the idle default, while oledbrightness <0-255>, oledflip, oledbootduration, oledupdateinterval, oledthermalscale, oledthermalcolormode, and oledenabled tune appearance and timing. oledrequireauth <0|1> (admin-only) controls whether a user must log in at the display before interacting with it.
+> Drives the selected local display backend: its lifecycle, the live screen contents, and persistent appearance settings. oledstart/oledstop (aliases openoled/closeoled) power the display task on and off, and oledstatus (alias oledread) reports its state. oledmode <mode> switches the live screen among the built-in views (menu, status, sensordata, thermal, network, mesh, gps, espnow, memory, off, and more); oledtext <message> shows custom text and oledanim <name>|fps <n> picks the animation -- both require the display to be running (run oledstart first) and neither persists across reboot. Separately, the oled* config commands write settings to flash immediately: oledbootmode and oleddefaultmode set the screen shown at boot and as the idle default, while oledbrightness <0-255>, oledflip, oledbootduration, oledupdateinterval, oledthermalscale, oledthermalcolormode, and oledenabled tune appearance and timing. oledrequireauth <0|1> (admin-only) controls whether a user must log in at the display before interacting with it.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -495,14 +513,15 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## input
 
-> Device-agnostic abstraction for the OLED input controller, which is either the Seesaw gamepad or the ANO rotary encoder -- chosen at compile time via INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per firmware. These commands operate on whichever driver was built in: openinput starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default 90). Driver-specific debugging and tuning live in the gamepad and anoencoder modules; this module holds only the shared settings (poll interval and auto-start).
+> Device-agnostic abstraction for the OLED input controller, which is either the Seesaw gamepad, ANO encoder or GPIO rotary encoder -- chosen at compile time via INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per firmware. These commands operate on whichever driver was built in: openinput starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default 90 for I2C devices; GPIO input uses a fixed 5 ms button sample). Driver-specific debugging and tuning live in the gamepad and anoencoder modules; this module holds only the shared settings (poll interval and auto-start).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closeinput` |  | Stop the input device. |
+| `gpioencoderread` |  | Read GPIO wheel position, switch and pending input as JSON. |
 | `inputautostart` |  | Enable/disable input device auto-start [on\|off]<br/>`Usage: inputautostart [on\|off]` |
 | `inputdevicepollms` | A | Set input device poll interval ms [10-1000]<br/>`Usage: inputdevicepollms <10-1000>` |
-| `openinput` |  | Start the input device (gamepad or ANO encoder). |
+| `openinput` |  | Start the configured input device. |
 
 ## gamepad
 
@@ -599,7 +618,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## camera
 
-> Shared camera commands for DVP cameras on ESP32/S3 and CSI cameras on supported P4 boards. `opencamera` starts capture and `closecamera` releases the driver; `cameraread` reports the backend, actual and requested resolution, JPEG output limit, and supported resolutions/controls, including when stopped. The web page and G2 picker use those capabilities: unsupported sensor tuning is disabled or omitted and CLI writes fail without changing the setting. `cameracapture` captures a JPEG into RAM and reports its size; `camerasave` writes a photo using the shared storage settings. `cameratiny` requests a compressed 160x120 JPEG for the image-transfer path, without guaranteeing it fits a single radio packet. `camerarecord start|stop` records MJPEG-AVI and requires SD storage. Quality remains 0..63 (lower is better) on both backends. Resolution IDs 0..10 retain their meanings; HD is 11 and CIF is 12. Available sizes and low-level register access depend on the backend. Auto-capture, photo retention and optional ESP-NOW delivery continue through the shared image manager.
+> Driver and CLI for the attached DVP camera sensor (OV2640/OV3660 class). The sensor must be powered up first with opencamera before any capture or tuning command works (closecamera stops it); cameraread and cameradump report status and all current sensor register values. Three distinct capture paths exist: cameracapture grabs one JPEG frame into RAM and reports its size only, camerasave captures and writes a frame to storage (LittleFS, SD, or both, per camerastoragelocation, into cameracapturefolder), and cameratiny produces a 160x120 frame small enough for a single ESP-NOW packet; camerarecord start|stop records MJPEG-AVI video and requires an SD card. Resolution and image controls (camerares/cameraframesize, cameraquality, camerafps) and a large set of sensor-tuning commands (brightness/contrast/saturation, white balance, exposure/AEC, gain/AGC, special effects, mirror/flip/rotate, plus raw camerareg register writes) adjust the live image. Automation settings (cameraautostart, cameraautocapture/cameraautocaptureinterval, camerasendaftercapture/cameratargetdevice) drive timed capture and optional ESP-NOW delivery to a named peer.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -624,18 +643,18 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `cameraeffect` | A | Special effect: <0-6><br/>`Usage: cameraeffect <0..6> (0=None,1=Negative,2=Grayscale,3=Red,4=Green,5=Blue,6=Sepia)` |
 | `cameraexposure` | A | Set AE level: <-2..2><br/>`Usage: cameraexposure <-2..2> (negative=darker)` |
 | `camerafps` | A | Camera FPS: <1-20><br/>`Usage: camerafps <1..20>` |
-| `cameraframesize` | A | Set resolution by index: <0-12><br/>`Usage: cameraframesize <0..12> (0-5: QVGA..UXGA, 6-10: 96x96/QQVGA/QCIF/HQVGA/240x240)` |
+| `cameraframesize` | A | Set resolution by index: <0-12><br/>`Usage: cameraframesize <0..12> (0-5: QVGA..UXGA, 6-10: small, 11: HD, 12: CIF; availability depends on backend)` |
 | `camerafx` |  | Set bri/con/sat together: <bri> <con> <sat> (-2..+2 each)<br/>`Usage: camerafx <bri> <con> <sat> (-2..+2 each)` |
 | `cameragainceiling` | A | Gainceiling: <0-6> (2X..128X)<br/>`Usage: cameragainceiling <0..6> (2X..128X)` |
 | `cameragamma` | A | Raw gamma: <on\|off><br/>`Usage: cameragamma <on\|off>` |
 | `camerahmirror` |  | Horizontal mirror: <on\|off><br/>`Usage: camerahmirror <on\|off\|1\|0\|true>` |
 | `cameralenc` | A | Lens shading correction: <on\|off><br/>`Usage: cameralenc <on\|off>` |
-| `cameramaxstoredimages` | A | Max stored: <0-1000><br/>`Usage: cameramaxstoredimages <0..1000> (0=unlimited)` |
+| `cameramaxstoredimages` | A | Max stored: <0-1200><br/>`Usage: cameramaxstoredimages <0..1200> (0=unlimited)` |
 | `cameraquality` |  | Set JPEG quality: <0-63><br/>`Usage: cameraquality <0..63> (lower = better quality, larger file)` |
 | `cameraread` |  | Read camera status |
 | `camerarecord` |  | Start/stop MJPEG-AVI recording (SD only): <start\|stop><br/>`Usage: camerarecord <start\|stop\|1\|0>` |
 | `camerareg` | A | Direct register write: <addr_hex> <mask_hex> <value_hex><br/>`Usage: camerareg <addr_hex> <mask_hex> <value_hex> (example: camerareg 0x3824 0x1f 0x04)` |
-| `camerares` |  | Set camera resolution: <res><br/>`Usage: camerares <96x96\|qqvga\|qcif\|hqvga\|240x240\|qvga\|cif\|vga\|svga\|xga\|hd\|sxga\|uxga>` |
+| `camerares` |  | Set camera resolution: <res><br/>`Usage: camerares <96x96\|qqvga\|qcif\|hqvga\|240x240\|qvga\|cif\|vga\|svga\|xga\|sxga\|uxga\|hd>` |
 | `camerarotate` |  | Rotate 180°: <on\|off><br/>`Usage: camerarotate <on\|off\|1\|0\|true\|180>` |
 | `camerasaturation` |  | Set saturation: <-2..2><br/>`Usage: camerasaturation <-2..2>` |
 | `camerasave` |  | Save current frame to storage |
@@ -697,6 +716,24 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `eitrackclear` |  | Clear all tracked objects.<br/>`Usage: eitrackclear` |
 | `eitrackenable` |  | Enable/disable state tracking.<br/>`Usage: eitrackenable <0\|1>` |
 | `eitrackstatus` |  | Show currently tracked objects.<br/>`Usage: eitrackstatus` |
+
+## transcription
+
+> Session controls and private transcript pages shared by display and web interfaces.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `transcription` |  | Transcription interface controls |
+| `transcripts` |  | Browse your saved transcripts |
+
+## stt
+
+> Buffered local dictation through the shared audio HAL. Stop SR and the microphone sensor first, then use stt record [seconds]. Poll stt status [id], finish early with stt stop <id>, discard with stt cancel <id>, and read stt result <id> from the same authenticated session. Audio and results stay local; no host link is required. This backend produces text for review, not voice command execution.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `stt` |  | Local continuous or bounded speech-to-text with private session-owned results.<br/>`Usage: stt start \| record [1..20 seconds] \| status [id] \| stop\|cancel\|result\|next\|draft <id> \| ack <id> <sequence>` |
+| `sttperf` |  | STT pacing/profiling per segment (timings and CPU only, never text).<br/>`Usage: sttperf [show\|clear\|log on\|off\|stages [all\|clear]]` |
 
 ## espsr
 
@@ -1120,7 +1157,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## power
 
-> The power subsystem manages CPU frequency and battery-oriented power saving. The main command is power: power alone prints the current mode, CPU clock, display brightness, and auto-mode state; power mode <perf|balanced|saver|ultra|locked|0-4> selects one of five preset modes (Performance 240/80 MHz, Balanced 160/80 MHz, PowerSaver 80 MHz, UltraSaver 80 MHz interactive / 40 MHz idle, Locked 240 MHz always) which sets both the CPU frequency and the display brightness; the chosen mode is persisted. Locked alone holds 240 MHz through idle power-save (OLED blanks but the core does not downclock). UltraSaver's headline 40 MHz is idle-only — it is applied solely when idle power-save blanks the screen (40 MHz is too laggy for the live UI) and any input or command restores >=80 MHz; so UltraSaver only reaches 40 MHz if powersave is enabled. power auto <on|off> enables an automatic low-battery downshift gated by power threshold <0-100>. Two related idle controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; 0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) while the radio stays up so the device remains reachable, and powercooldown <0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid back-to-back sleep transitions. All of these values persist.
+> The power subsystem manages CPU frequency and battery-oriented power saving. The main command is power: power alone prints the current mode, CPU clock, display brightness, and auto-mode state; power mode <perf|balanced|saver|ultra|locked|0-4> selects one of five target-specific presets: Performance, Balanced, PowerSaver, UltraSaver, or Locked. Run power or power json to see their active and idle MHz. Modes set the CPU clock and display brightness; the chosen mode is persisted. Locked keeps the maximum active clock when the OLED blanks. UltraSaver uses its lower idle-only clock when powersave blanks the display; input or a command restores the target's interactive floor. power auto <on|off> enables an automatic low-battery downshift gated by power threshold <0-100>. Two related idle controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; 0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) while the radio stays up so the device remains reachable, and powercooldown <0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid back-to-back sleep transitions. All of these values persist.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -1134,7 +1171,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `liveaudio` |  | Opt-in live PCM transport, lease, and shadow diagnostics<br/>`Usage: liveaudio <capabilities\|status\|ready 1 <controller_hex16>\|shadow 1 <controller_hex16> on <exchange_hex16\|native>\|shadow 1 <controller_hex16> off\|release 1 <controller_hex16>\|synth 1 <controller_hex16> <exchange_hex16> <duration_ms>\|abort 1 <controller_hex16> <exchange_hex16>>` |
+| `liveaudio` |  | Opt-in live PCM transport, lease, and shadow diagnostics<br/>`Usage: liveaudio <capabilities\|status\|ready 1 <controller_hex16>\|conversate 1 <controller_hex16> on\|off\|shadow 1 <controller_hex16> on <exchange_hex16\|native>\|shadow 1 <controller_hex16> off\|release 1 <controller_hex16>\|synth 1 <controller_hex16> <exchange_hex16> <duration_ms>\|abort 1 <controller_hex16> <exchange_hex16>>` |
 
 ## cm5
 
@@ -1208,6 +1245,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `g2clear` |  | Clear G2 display |
 | `g2connpri` | A | Probe the BLE conn-interval admission boundary: g2connpri [<min> <max>\|default] (bare = report)<br/>`Usage: g2connpri [<min> <max>\|default] (ticks of 1.25 ms; runtime only; bare = report)` |
 | `g2control` | A | Persist/reconcile G2 device policy without overwriting official-app state by default<br/>`Usage: g2control [<headup\|notifications> <preserve\|off\|on>] (bare = status; work is queued to g2 control owner)` |
+| `g2conversate` |  | Native Conversate mic keepalive (no STT or file)<br/>`Usage: g2conversate on \| test [seconds 10..3600, default 300] \| status \| stop \| off` |
 | `g2deinit` |  | Deinitialize G2 client mode |
 | `g2devcfg` |  | Typed sid=0x80 sender: g2devcfg <heartbeat\|auth\|role\|time\|ring> [args]<br/>`Usage: g2devcfg <heartbeat\|auth\|role <both\|right\|left>\|time [tzQuarterHours]\|ring <mac> <name>>` |
 | `g2dumpframes` |  | Print the recent G2 envelope ring buffer |
@@ -1358,6 +1396,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `srautostart` | A | Set ESP-SR auto-start flag<br/>`Usage: srautostart <0\|1>` |
 | `srenabled` | A | Enable/disable the speech-recognition subsystem<br/>`Usage: srenabled <0\|1>` |
 | `srmodelsource` | A | Set ESP-SR model source<br/>`Usage: srmodelsource <value>` |
+| `sttsavetranscripts` | A | Save recognized text; changes apply to the next STT session.<br/>`Usage: sttsavetranscripts [0\|1]` |
 | `systemlogenabled` | A | Enable/disable system logging entirely: <0\|1><br/>`Usage: systemlogenabled <0\|1>` |
 | `systemlogflags` | A | Set system-log debug category mask (hex)<br/>`Usage: systemlogflags <0x...>` |
 | `thermalenabled` | A | Enable/disable the thermal camera subsystem<br/>`Usage: thermalenabled <0\|1>` |
