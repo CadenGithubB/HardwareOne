@@ -117,7 +117,7 @@ verified USB port and logical radio MAC. Run one board at a time. For example:
 
 ```sh
 python3 experiments/audio_portable/test_hardware.py --board p4 \
-  --port /dev/cu.usbmodem2201 --mac FC:01:2C:E0:B9:A8 \
+  --port /dev/cu.usbmodem2201 --mac 02:48:57:31:01:A8 \
   --credentials /absolute/private/credentials.json --tone-player /usr/bin/afplay \
   --tone-volume 40
 ```

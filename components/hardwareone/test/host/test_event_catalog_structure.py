@@ -65,6 +65,9 @@ EXCLUDED_DIRECTORY_NAMES = {
     "managed_components",
     "node_modules",
     "output",
+    # Ignored per-experiment and companion workspaces hold whole copies of the
+    # application tree (experiments/*/private/app-*); they are not sources.
+    "private",
     "third_party",
     "tmp",
     "vendor",

@@ -13,10 +13,11 @@ class Element {
 }
 function fixture(options={}) {
   const elements={};
-  for(const name of ['panel','start','stop','cancel','status','provider','save','saving','live','files','refresh','file-status','file-list','prev','next','preview']) elements['transcription-'+name]=new Element();
+  for(const name of ['panel','start','stop','cancel','status','provider','save','saving','live','files','refresh','file-status','file-list','prev','next','preview','mic','mic-note']) elements['transcription-'+name]=new Element();
+  elements['transcription-mic'].options=['auto','pdm','g2'].map(value=>Object.assign(new Element('option'),{value}));
   const timers=new Map(), events={}; let serial=0;
-  const state={id:'',capture:false,pieces:[],lastAck:'',starts:0,acks:0,cancels:0,continuous:true,canSave:true,save:false,calls:[],list:[],fileText:'',fileCancels:0,epoch:42,...options};
-  const base=()=>({success:true,session:state.epoch,available:true,canSave:state.canSave,continuous:state.continuous,savePreference:state.save,roots:['/stt/u7','/sd/stt/u7'],id:state.id,busy:state.capture||state.pieces.length>0,active:state.capture||state.pieces.length>0,done:!!state.id&&!state.capture&&!state.pieces.length,captureActive:state.capture,transcriptEnabled:state.save,transcriptSaved:false});
+  const state={id:'',capture:false,pieces:[],lastAck:'',starts:0,acks:0,cancels:0,continuous:true,canSave:true,save:false,calls:[],list:[],fileText:'',fileCancels:0,epoch:42,micSource:'auto',micPdm:true,micG2:false,...options};
+  const base=()=>({success:true,session:state.epoch,available:true,canSave:state.canSave,continuous:state.continuous,savePreference:state.save,roots:['/stt/u7','/sd/stt/u7'],id:state.id,busy:state.capture||state.pieces.length>0,active:state.capture||state.pieces.length>0,done:!!state.id&&!state.capture&&!state.pieces.length,captureActive:state.capture,transcriptEnabled:state.save,transcriptSaved:false,micSource:state.micSource,micPdm:state.micPdm,micG2:state.micG2});
   const response=(data,status=200)=>({ok:status>=200&&status<300,status,json:async()=>data});
   const stream=(text,status=200)=>{
     let offset=0;const bytes=new TextEncoder().encode(text);
@@ -49,7 +50,7 @@ function fixture(options={}) {
     return response(data);
   }
   const context={document:{getElementById:id=>elements[id]||null,createElement:tag=>new Element(tag)},window:{addEventListener:(name,fn)=>events[name]=fn},fetch:fetcher,
-    hw:{postFormText:async(url,form)=>{state.calls.push({url,form});state.save=form.cmd.endsWith('1');return 'OK';}},
+    hw:{postFormText:async(url,form)=>{state.calls.push({url,form});if(form.cmd.startsWith('micsource '))state.micSource=form.cmd.slice(10);else state.save=form.cmd.endsWith('1');return 'OK';}},
     setTimeout:(fn,delay)=>{const id=++serial;timers.set(id,{fn,delay});return id;},clearTimeout:id=>timers.delete(id),
     AbortController,TextEncoder,TextDecoder,URLSearchParams,console};
   vm.runInNewContext(source,context);
@@ -86,6 +87,11 @@ function fixture(options={}) {
   f=fixture();await f.open();await f.start();f.el('live').value='private';f.el('preview').textContent='private file';f.state.fetchOverride=()=>({ok:false,status:401,json:async()=>{throw new Error('Not JSON');}});await f.tick();assert.equal(f.el('live').value,'');assert.equal(f.el('preview').textContent,'');assert.equal(f.el('start').disabled,true);
   // Provider label is truthful, and non-admins cannot mutate the preference.
   f=fixture({continuous:false,canSave:false});await f.open();assert.match(f.el('provider').textContent,/one recording/);assert.equal(f.el('save').disabled,true);f.el('save').checked=true;await f.el('save').onchange();assert.equal(f.state.calls.filter(c=>c.url==='/api/cli').length,0);
+  // Microphone choice: unreachable sources are disabled, a change goes through micsource, and it locks while a session runs.
+  f=fixture();await f.open();const mic=f.el('mic');assert.equal(mic.disabled,false);assert.equal(mic.value,'auto');
+  assert.deepEqual(mic.options.map(o=>o.disabled),[false,false,true]);
+  mic.value='pdm';await mic.onchange.call(mic);assert.equal(f.state.micSource,'pdm');assert.equal(f.state.calls.filter(c=>c.url==='/api/cli'&&c.form.cmd==='micsource pdm').length,1);
+  await f.start();await f.tick();assert.equal(mic.disabled,true);assert.match(f.el('mic-note').textContent,/Stop the session/);
   // Rendering uses DOM text only; entries and previews have explicit bounds.
   f=fixture();await f.open();f.state.list=[{name:'../escape.txt',type:'file',perms:1},{name:'<img onerror=boom>.txt',type:'file',perms:1},...Array.from({length:205},(_,i)=>({name:`2026-${String(i).padStart(3,'0')}.txt`,type:'file',perms:1}))];
   f.el('files').open=true;f.el('files').dispatch('toggle');await f.settle();assert.equal(f.el('file-list').children.length,10);assert.match(f.el('file-status').textContent,/200/);assert.equal(f.el('next').disabled,false);assert(!f.el('file-list').children.some(row=>row.children[0].textContent.includes('escape')));

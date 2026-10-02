@@ -48,8 +48,8 @@ from console import ANSI, ConsoleTimeout, MeshConsole, extract_json_objects
 HERE = Path(__file__).resolve().parent
 BOUNDARIES = (1, 201, 202, 203, 400, 401, 1024)
 DEFAULT_BOARDS = {
-    "p4": {"port": "/dev/cu.usbmodem2101", "mac": "fc:01:2c:e0:b9:a8", "name": "HW1_P4"},
-    "s3": {"port": "/dev/cu.usbmodem1101", "mac": "68:ee:8f:50:e9:d0", "name": "HW1_S3"},
+    "p4": {"port": "/dev/cu.usbmodem2101", "mac": os.environ.get("HW1_P4_MAC", "02:48:57:31:01:a8"), "name": "HW1_P4"},
+    "s3": {"port": "/dev/cu.usbmodem1101", "mac": os.environ.get("HW1_S3_MAC", "02:48:57:31:00:d0"), "name": "HW1_S3"},
 }
 FATAL = re.compile(r"Guru Meditation|panic'ed|assert failed|abort\(\) was called|"
                    r"ESP_ERROR_CHECK failed|Brownout detector|Task watchdog got triggered")

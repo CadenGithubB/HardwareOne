@@ -58,7 +58,7 @@ Bluetooth/JPEG component overlays. ESP-IDF 6 is not needed. P4 adds pinned
 **2.1.4**. P4 uses `dependencies.lock.esp32p4`; S3 uses `dependencies.lock`.
 
 ```sh
-source /private/tmp/hw1-p4-investigation-20260927/activate-idf.sh
+source "$HOME/esp/esp-idf/export.sh"   # ESP-IDF 5.5.5
 python3 -B experiments/camera_portable/prepare.py --capture
 python3 -B experiments/camera_portable/prepare.py --target p4
 python3 -B experiments/camera_portable/prepare.py --target s3

@@ -19,6 +19,20 @@
 #include <string>
 #include <vector>
 namespace hw1::stt {
+// Per-stage inference time accumulated across segments (sttperf stages).
+static constexpr int kStageProfileMax = 256;
+static uint32_t gStageTotalUs[kStageProfileMax];
+static uint32_t gStageSegments = 0;
+size_t stageProfile(uint32_t* totalUs, size_t cap, uint32_t* segments) {
+    const size_t n = std::min<size_t>(cap, std::min<int>(identity::kNodeCount, kStageProfileMax));
+    for (size_t i = 0; i < n; ++i) totalUs[i] = gStageTotalUs[i];
+    if (segments) *segments = gStageSegments;
+    return n;
+}
+void stageProfileReset() {
+    for (auto& v : gStageTotalUs) v = 0;
+    gStageSegments = 0;
+}
 namespace {
 static_assert(kSampleRate==identity::kSampleRate && kMaxSamples==identity::kMaxSamples);
 uint32_t millis() { return uint32_t(esp_timer_get_time()/1000); }
@@ -90,7 +104,7 @@ bool ModelCache::verify() const {
 bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
                 char* text, size_t capacity, const STTLocalControl& control,
                 STTLocalStats& stats, char* error, size_t errorCapacity,
-                Diagnostics* diagnostics, ModelCache* cache) {
+                Diagnostics* diagnostics, ModelCache* cache, const Decoder* decoder) {
     stats={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
 #if HW1_STT_RUNTIME_DIAGNOSTICS
     if(diagnostics)*diagnostics={};
@@ -118,9 +132,14 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     ModelCache& weights=cache ? *cache : temporary;
     const bool reused=weights.raw_!=nullptr;
     const size_t newWeights=reused ? 0 : identity::kRawBytes;
-    if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)<newWeights+remainingBudget
-       || (!reused && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<identity::kRawBytes)
-       || heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<internalMinimum)
+    // Optional decoder memory (a cached LM) yields before any refusal.
+    auto shed=[&] { return decoder && decoder->release && decoder->release(decoder->context); };
+    auto admitted=[&] {
+        return heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>=newWeights+remainingBudget
+            && (reused || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=identity::kRawBytes)
+            && heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)>=internalMinimum;
+    };
+    if(!admitted() && (!shed() || !admitted()))
         return fail("Not enough free memory; stop camera, speech and other large models");
     if(!reused) {
         Buffer candidate(identity::kRawBytes);
@@ -130,23 +149,31 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
         if(!digest(candidate.p,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32))return fail("STT model checksum mismatch");
         if(cancelled(control))return fail("Cancelled");
         weights.raw_=candidate.release(); // publish only fully verified weights
-    } else {
-        // Validate again before every vendor parse: caching must not weaken
-        // the identity boundary or assume a vendor never mutates its backing.
+    }
+    // Cached weights were fully verified (SHA-256) when this session loaded
+    // them. Re-hashing all 7.2 MB before every segment cost ~0.6 s per
+    // segment on the P4 (sttperf), so production reuse trusts that check;
+    // diagnostics probes keep the per-segment re-validation.
+#if HW1_STT_RUNTIME_DIAGNOSTICS
+    else {
         uint8_t hash[32];
         if(!digest(weights.raw_,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32)) {
             weights.reset();
             return fail("Cached STT model checksum mismatch");
         }
     }
+#endif
     stats.modelBytes=identity::kRawBytes;
     stats.weightsReused=reused;
     if(cancelled(control))return fail("Cancelled");
     // Raw model allocation can split the largest block. Check again before
     // the vendor constructor requests a contiguous arena and creates metadata.
-    if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)<remainingBudget
-       || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<arenaBudget+metadataMargin
-       || heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<internalMinimum)
+    auto contiguous=[&] {
+        return heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>=remainingBudget
+            && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=arenaBudget+metadataMargin
+            && heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)>=internalMinimum;
+    };
+    if(!contiguous() && (!shed() || !contiguous()))
         return fail("Not enough contiguous memory for STT activations");
     // A fresh model per utterance avoids Model::build's resize allocation leak.
     // Aligned EDL2+ in PSRAM allows zero-copy parameters; weights outlive model.
@@ -174,7 +201,15 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
         Buffer features(frames*64*sizeof(float),true), workspace(sizeof(FrontendWorkspace),true);
         if(!features.p || !workspace.p)return fail("Cannot allocate STT frontend");
         auto f=static_cast<float*>(features.p);
-        if(compute_features(pcm,samples,f,frames*64,static_cast<FrontendWorkspace*>(workspace.p))!=Status::Ok)return fail("STT frontend failed");
+        FrontendTiming timing;
+        timing.now_us=[]() -> uint64_t { return static_cast<uint64_t>(esp_timer_get_time()); };
+        // No dither on device: the microphone noise floor is ~10x its 1e-5
+        // amplitude, and the Gaussian generator cost ~1.2 s per 8 s segment.
+        if(compute_features(pcm,samples,f,frames*64,static_cast<FrontendWorkspace*>(workspace.p),
+                            kDitherSeed,false,&timing)!=Status::Ok)return fail("STT frontend failed");
+        stats.frontendConditionUs=timing.conditionUs; stats.frontendFftUs=timing.fftUs;
+        stats.frontendMelUs=timing.melUs; stats.frontendNormUs=timing.normUs;
+        const int64_t quantizeStart=esp_timer_get_time();
         auto q=static_cast<int8_t*>(input->data);
         const float scale=std::ldexp(1.0f,-identity::kInputExponent);
         for(size_t i=0;i<frames*64;++i) {
@@ -184,6 +219,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
             int value=part>0.5f?int(lo)+1:part<0.5f?int(lo):(int(lo)&1)?int(lo)+1:int(lo);
             q[i]=static_cast<int8_t>(std::max(-128,std::min(127,value)));
         }
+        stats.quantizeUs=static_cast<uint32_t>(esp_timer_get_time()-quantizeStart);
     }
     stats.frontendMs=millis()-start;
 #if HW1_STT_RUNTIME_DIAGNOSTICS
@@ -197,19 +233,43 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     progress(control,STTLocalPhase::Inference);start=millis();
     for(int stage=0;stage<identity::kNodeCount;++stage) {
         if(cancelled(control))return fail("Cancelled");
+        const int64_t stageStart=esp_timer_get_time();
         model->run(identity::kNodeCount,stage,dl::RUNTIME_MODE_MULTI_CORE);
-        vTaskDelay(1);
+        const int64_t stageEnd=esp_timer_get_time();
+        // Keep the three slowest stages (sorted, slowest first) for sttperf.
+        uint32_t us=static_cast<uint32_t>(stageEnd-stageStart);
+        uint16_t index=static_cast<uint16_t>(stage);
+        for(int k=0;k<3;++k) if(stats.slowStage[k]==0xffff || us>stats.slowStageUs[k]) {
+            std::swap(us,stats.slowStageUs[k]); std::swap(index,stats.slowStage[k]);
+        }
+        if(stage<kStageProfileMax){ gStageTotalUs[stage]+=static_cast<uint32_t>(stageEnd-stageStart); }
+        // Yield every 5 stages (was every stage: 201 x ~1 ms on the 15x5).
+        if((stage+1)%5==0 || stage+1==identity::kNodeCount) {
+            vTaskDelay(1);
+            stats.inferenceYieldUs+=static_cast<uint32_t>(esp_timer_get_time()-stageEnd);
+        }
     }
+    ++gStageSegments;
     stats.inferenceMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
     progress(control,STTLocalPhase::Decoding);start=millis();
 #if HW1_STT_RUNTIME_DIAGNOSTICS
     if(diagnostics)digest(output->data,output->get_bytes(),diagnostics->outputSha);
 #endif
-    CtcState ctc;
-    if(ctc_reset(&ctc,text,capacity)!=Status::Ok
-       || ctc_feed(&ctc,static_cast<const int8_t*>(output->data),outputs,29,text,capacity)!=Status::Ok
-       || ctc_finish(&ctc,text,capacity)!=Status::Ok || ctc.truncated)return fail("STT transcript exceeds result capacity");
+    // Any decoder failure other than cancellation decodes greedily instead.
+    const auto logits=static_cast<const int8_t*>(output->data);
+    DecodeResult decoded=decoder && decoder->decode
+        ? decoder->decode(decoder->context,logits,outputs,identity::kOutputExponent,text,capacity,control)
+        : DecodeResult::Fallback;
+    if(decoded==DecodeResult::Cancelled)return fail("Cancelled");
+    if(decoded==DecodeResult::Decoded && !memchr(text,0,capacity))decoded=DecodeResult::Fallback;
+    if(decoded!=DecodeResult::Decoded) {
+        CtcState ctc;
+        if(ctc_reset(&ctc,text,capacity)!=Status::Ok
+           || ctc_feed(&ctc,logits,outputs,29,text,capacity)!=Status::Ok
+           || ctc_finish(&ctc,text,capacity)!=Status::Ok || ctc.truncated)return fail("STT transcript exceeds result capacity");
+    }
+    stats.lmUsed=decoded==DecodeResult::Decoded;
     stats.decodeMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
     // Model destructor releases its arena before temporary weights are freed.

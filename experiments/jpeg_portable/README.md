@@ -14,11 +14,12 @@ experiment snapshots and installed SDK are never edited.
 ## Reproduce full application builds
 
 Activate ESP-IDF 5.5.5 and provide the root of the checkout containing the prior
-private snapshots. On the dedicated Mac mini the existing activation script is
-`/private/tmp/hw1-p4-investigation-20260927/activate-idf.sh`.
+private snapshots. On the dedicated Mac mini ESP-IDF 5.5.5 is installed at
+`~/esp/esp-idf` (the earlier `/private/tmp` install was removed by macOS's
+nightly `/tmp` cleanup on 2026-10-02).
 
 ```sh
-. /private/tmp/hw1-p4-investigation-20260927/activate-idf.sh
+. "$HOME/esp/esp-idf/export.sh"   # ESP-IDF 5.5.5
 python3 -B experiments/jpeg_portable/prepare.py --target p4 --baseline-root /path/to/baseline/checkout
 python3 -B experiments/jpeg_portable/prepare.py --target s3 --baseline-root /path/to/baseline/checkout
 bash experiments/jpeg_portable/build.sh p4

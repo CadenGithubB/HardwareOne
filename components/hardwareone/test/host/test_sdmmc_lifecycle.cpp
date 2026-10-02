@@ -56,7 +56,7 @@ esp_err_t esp_vfs_fat_sdmmc_mount(const char* path, const sdmmc_host_t* h,
     sdmmc_card_t** out) {
   ++mounts;
   assert(std::string(path) == "/sd" && powerLevel == 0 && ldoCount == 1);
-  assert(h->slot == 0 && h->max_freq_khz == 20000);
+  assert(h->slot == 0 && h->max_freq_khz == 40000);
   assert(h->flags & SDMMC_HOST_FLAG_DEINIT_ARG);
   assert(h->deinit_p == sdmmc_host_deinit_slot && h->pwr_ctrl_handle == &card);
   assert(s->width == 4 && s->clk == 43 && s->cmd == 44);

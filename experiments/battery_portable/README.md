@@ -109,7 +109,7 @@ missing. A source-only clone does not contain those local build artifacts.
 With the verified JPEG copies and pinned SDK components already prepared:
 
 ```sh
-. /private/tmp/hw1-p4-investigation-20260927/activate-idf.sh
+. "$HOME/esp/esp-idf/export.sh"   # ESP-IDF 5.5.5
 python3 -B experiments/battery_portable/prepare.py --target p4
 python3 -B experiments/battery_portable/prepare.py --target s3
 bash experiments/battery_portable/build.sh p4

@@ -408,7 +408,7 @@ void g2ConnPriReapply();
 
 // Fill `out` with the 6-byte BLE address of the right (or left) temple in
 // natural high-to-low order (matching the colon-separated string form, e.g.
-// "c8:8d:65:00:97:69" → {0xC8,0x8D,0x65,0x00,0x97,0x69}). Returns true if
+// "02:48:57:31:03:69" → {0xC8,0x8D,0x65,0x00,0x97,0x69}). Returns true if
 // the temple link is currently up; on false, `out` is zeroed. Used by the
 // R1 ring's advStart payload, which wants the right-temple MAC reversed
 // (LSB-first); reverse on the caller side.
@@ -604,6 +604,12 @@ bool g2ShowMultiTextPage(const G2TextChildSpec* children, size_t childCount,
 bool g2ShowMixedListText(const char* const* items, size_t itemCount,
                          const G2ContainerGeom& listGeom,
                          const G2TextChildSpec& title);
+
+// List + two independent text children (header + body). Update each later
+// with g2UpdateMixedTextChild; each stays within its own single-write budget.
+bool g2ShowMixedListText2(const char* const* items, size_t itemCount,
+                          const G2ContainerGeom& listGeom,
+                          const G2TextChildSpec& first, const G2TextChildSpec& second);
 
 // In-place refresh of the LIVE List+Text compound (no SHUTDOWN+CREATE).
 // Multi-child Cmd=7 REBUILD — re-sends the FULL child set (unmentioned
@@ -1537,6 +1543,8 @@ inline bool g2ShowMultiTextPage(const void*, size_t,
                                 void (*)() = nullptr,
                                 G2TapFn = nullptr) { return false; }
 inline bool g2ShowMixedListText(const char* const*, size_t) { return false; }
+inline bool g2ShowMixedListText2(const char* const*, size_t, const G2ContainerGeom&,
+                                 const G2TextChildSpec&, const G2TextChildSpec&) { return false; }
 inline bool g2KbdPadBegin(const char*) { return false; }
 inline void g2KbdPadNoteBufferText(const char*) {}
 inline void g2KbdPadHandleTap(uint32_t) {}

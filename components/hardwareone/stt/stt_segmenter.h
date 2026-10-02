@@ -72,6 +72,13 @@ public:
     uint16_t threshold_rms() const { return threshold_rms_; }
     uint16_t peak_rms() const { return peak_rms_; }
     const SpeechSegment* segment() const { return ready_?&segment_:nullptr; }
+    // Live view of the utterance still being captured (pre-roll included),
+    // for draft transcription. Valid only on the pushing thread, until the
+    // next push/release/reset. False while idle or before enough voice.
+    bool in_progress(const int16_t** pcm,size_t* samples) const {
+        if(!initialized_||!active_||ready_||!eligible()||!used_)return false;
+        *pcm=buffer_;*samples=used_;return true;
+    }
     SegmentPushResult push(const int16_t* pcm,size_t count) {
         if(!initialized_)return {0,SegmentStatus::NotInitialized};
         if(ready_)return {0,SegmentStatus::Ready};

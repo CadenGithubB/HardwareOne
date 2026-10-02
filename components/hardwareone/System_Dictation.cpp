@@ -29,8 +29,9 @@ static constexpr uint32_t kDictationVadSilenceMs = 1200;
 // This task owns every potentially blocking terminal operation: UART event
 // framing, filesystem deletion, and source shutdown. Display and recorder tasks
 // only publish fixed-size work under gDictMux and notify it.
-// Pi additionally owns a bounded transcript job and guarded filesystem writer.
-static constexpr uint32_t kDictationWorkerStackBytes = ENABLE_LOCAL_STT ? 4096 : 5120;
+// Both builds run the transcript filesystem writer here; local STT adds model
+// file probes and snapshot/chunk copies on top, so it needs the larger stack.
+static constexpr uint32_t kDictationWorkerStackBytes = ENABLE_LOCAL_STT ? 6144 : 5120;
 static constexpr uint32_t kDictationWorkerRetryMs = 50;
 
 struct DictationPublishedCapture {
@@ -1630,6 +1631,35 @@ bool dictationAppPeekText(const DictationAppLease& lease, char* out, size_t outS
 bool dictationAppCommitText(const DictationAppLease& lease,
                             const DictationTextReceipt& receipt, size_t accepted) {
   return dictationCommitTextImpl(lease.source, receipt, accepted, &lease);
+}
+
+// Live mode: the provisional text of the utterance still being spoken, for
+// the App that owns the local run. Never enters the committed text stream.
+bool dictationAppPeekDraft(const DictationAppLease& lease, char* out, size_t outSize, uint32_t* version) {
+  if (version) *version = 0;
+  if (!out || !outSize) return false;
+  out[0] = '\0';
+#if ENABLE_LOCAL_STT
+  STTOwner actor;
+  STTToken token = 0;
+  portENTER_CRITICAL(&gDictMux);
+  if (dictationConsumerMatchesLocked(lease.source, &lease) && gLocalDict.exchange == lease.exchange) {
+    actor = gLocalDict.actor;
+    token = gLocalDict.token;
+  }
+  portEXIT_CRITICAL(&gDictMux);
+  if (!token) return false;
+  STTDraft draft;
+  if (!sttReadDraft(actor, token, &draft)) return false;
+  snprintf(out, outSize, "%s", draft.text);
+  if (version) *version = draft.version;
+  volatile char* p = draft.text;
+  for (size_t i = 0; i < sizeof(draft.text); ++i) p[i] = 0;
+  return true;
+#else
+  (void)lease;
+  return false;
+#endif
 }
 
 bool dictationTakeTextFor(CommandSource source, char* out, size_t outSize) {

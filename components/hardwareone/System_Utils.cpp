@@ -1577,6 +1577,8 @@ const char* cmd_voltage(const String& originalCmd) {
   return "[System] Voltage info displayed";
 }
 
+#include "System_Power.h"  // shared target CPU clock choices
+
 const char* cmd_cpufreq(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -1591,16 +1593,26 @@ const char* cmd_cpufreq(const String& argsInput) {
     BROADCAST_PRINTF("  Current: %lu MHz", (unsigned long)currentFreq);
     BROADCAST_PRINTF("  XTAL: %lu MHz", (unsigned long)getXtalFrequencyMhz());
     BROADCAST_PRINTF("  APB: %lu MHz", (unsigned long)(getApbFrequency() / 1000000UL));
+    broadcastOutput("  Supported interactive frequencies:");
+    for (size_t i = 0; i < getPowerCpuFrequencyCount(); ++i) {
+      BROADCAST_PRINTF("    %lu MHz", (unsigned long)getPowerCpuFrequencyMhz(i));
+    }
     return "[System] CPU frequency displayed";
   } else {
     // Set frequency (admin only for safety)
 
-    uint32_t newFreq = args.toInt();
-    if (newFreq != 80 && newFreq != 160 && newFreq != 240) {
-      return "Error: Frequency must be 80, 160, or 240 MHz";
+    for (size_t i = 0; i < args.length(); ++i) {
+      if (args[i] < '0' || args[i] > '9') {
+        return "Error: Enter one CPU frequency in MHz; run cpufreq for supported values";
+      }
     }
-
-    setCpuFrequencyMhz(newFreq);
+    uint32_t newFreq = args.toInt();
+    if (!isPowerCpuFrequencySupported(newFreq)) {
+      return "Error: Unsupported CPU frequency; run cpufreq for supported values";
+    }
+    if (!setCpuFrequencyMhz(newFreq) || getCpuFrequencyMhz() != newFreq) {
+      return "Error: CPU frequency change failed";
+    }
     {
       extern void batteryLogEvent(const char* event);
       char ev[24];
@@ -3027,7 +3039,7 @@ const CommandEntry commands[] = {
   { "temperature", "Read ESP32 internal temperature. (add 'json' for JSON output)", false, cmd_temperature },
   { "voltage", "Estimate power draw from active subsystems (not a real voltage measurement; use batterystatus for measured volts). (add 'json' for JSON output)", false, cmd_voltage },
   { "cpufreq", "Get/set CPU frequency (admin).", true, cmd_cpufreq,
-    "Usage: cpufreq [80|160|240]" },
+    "Usage: cpufreq [MHz] (run without arguments to list supported values)" },
   { "taskstats", "Detailed task statistics (state/prio/stack min-free). (add 'json' for JSON output)", false, cmd_taskstats },
   { "perftop", "Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%. (add 'json' for loop + per-task CPU% JSON)", false, cmd_perftop },
   { "events", "Show recent system events (the in-memory register that drives automation event triggers).", false, cmd_events,
@@ -3119,7 +3131,7 @@ static constexpr CommandModule gCommandModules[] = {
     "profiling), fsusage, events (recent system events from the in-memory register "
     "that drives automation event triggers), and the memory tools memsample (snapshot, with memsample "
     "track on|off|reset|status for allocation tracking) and memreport. Control and "
-    "power: reboot, ramflush, cpufreq [80|160|240] to read or set CPU clock, lightsleep "
+    "power: reboot, ramflush, cpufreq [MHz] to read or set a supported CPU clock, lightsleep "
     "[seconds] for ESP32 light sleep, deepsleep for power-off (reset to wake), and "
     "wait <ms>/sleep <ms> to pause command-script execution. "
     "timeset sets the clock manually. broadcast <message> pushes a line of text to all "
@@ -3658,14 +3670,12 @@ static constexpr CommandModule gCommandModules[] = {
   { "power",      "Power management", "The power subsystem manages CPU frequency and battery-oriented power saving. The "
     "main command is power: power alone prints the current mode, CPU clock, display "
     "brightness, and auto-mode state; power mode <perf|balanced|saver|ultra|locked|0-4> "
-    "selects one of five preset modes (Performance 240/80 MHz, Balanced 160/80 MHz, "
-    "PowerSaver 80 MHz, UltraSaver 80 MHz interactive / 40 MHz idle, Locked 240 MHz always) "
-    "which sets both the CPU frequency and the display brightness; the chosen mode is "
-    "persisted. Locked alone holds 240 MHz through idle power-save (OLED blanks but the "
-    "core does not downclock). UltraSaver's headline 40 MHz is idle-only — it is "
-    "applied solely when idle power-save blanks the screen (40 MHz is too laggy for the "
-    "live UI) and any input or command restores >=80 MHz; so UltraSaver only reaches "
-    "40 MHz if powersave is enabled. power auto <on|off> enables an "
+    "selects one of five target-specific presets: Performance, Balanced, PowerSaver, "
+    "UltraSaver, or Locked. Run power or power json to see their active and idle MHz. "
+    "Modes set the CPU clock and display brightness; the chosen mode is persisted. "
+    "Locked keeps the maximum active clock when the OLED blanks. UltraSaver uses its "
+    "lower idle-only clock when powersave blanks the display; input or a command "
+    "restores the target's interactive floor. power auto <on|off> enables an "
     "automatic low-battery downshift gated by power threshold <0-100>. Two related idle "
     "controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; "
     "0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) "
@@ -5946,7 +5956,9 @@ bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& 
 // Icon System Implementation - Unified PNG-based icons for OLED/Web/TFT
 // ============================================================================
 
+#if ENABLE_OLED_DISPLAY
 #include <Adafruit_SSD1306.h>
+#endif
 #include "System_Icons.h"
 
 bool initIconSystem() {
@@ -6052,6 +6064,7 @@ bool loadIconData(const char* name, uint8_t* buffer, size_t bufferSize, uint8_t&
   return false;
 }
 
+#if ENABLE_OLED_DISPLAY
 bool drawIcon(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color) {
   if (!display) {
     return false;
@@ -6139,6 +6152,8 @@ bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, u
 
   return true;
 }
+
+#endif  // ENABLE_OLED_DISPLAY
 
 // ============================================================================
 // Authentication Commands (critical system functions)

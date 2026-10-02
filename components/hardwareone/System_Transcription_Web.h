@@ -14,6 +14,13 @@ inline void streamTranscriptionPanel(httpd_req_t* req) {
     <button class="btn" id="transcription-cancel" disabled data-guest-hide>Cancel</button>
   </div>
   <p id="transcription-status" role="status">Open this panel to begin.</p>
+  <label for="transcription-mic">Microphone</label>
+  <select id="transcription-mic" disabled data-guest-hide>
+    <option value="auto">Auto</option>
+    <option value="pdm">Onboard mic</option>
+    <option value="g2">G2 glasses</option>
+  </select>
+  <p id="transcription-mic-note" style="font-size:.85em"></p>
   <label><input type="checkbox" id="transcription-save" disabled> Save transcripts for new sessions</label>
   <p id="transcription-saving" style="font-size:.85em"></p>
   <label for="transcription-live">Recent text on this page</label>
@@ -48,12 +55,21 @@ let id = '', active = false, busy = false, ended = false, generation = 0, timer 
 let pendingAction = null, pendingAck = null, lastPiece = '', savedPreference = false;
 let roots = [], files = [], filePage = 0, fileGeneration = 0, fileBusy = false, sessionEpoch = 0;
 let capable = false, available = false, serviceBusy = false, canSave = false, saving = false;
-let previewAbort = null;
+let previewAbort = null, micSource = 'auto', micPdm = false, micG2 = false, micSaving = false;
 function controls() {
   el('start').disabled = !capable || !available || serviceBusy || active || !!pendingAction;
   el('stop').disabled = !active || !!pendingAction;
   el('cancel').disabled = !active || !!pendingAction;
   el('save').disabled = !canSave || saving;
+  // The source is claimed when a session starts, so only change it between sessions.
+  el('mic').disabled = !capable || active || !!pendingAction || micSaving;
+}
+function renderMic() {
+  const available = {auto:true, pdm:micPdm, g2:micG2};
+  for (const option of el('mic').options) option.disabled = !available[option.value] && option.value !== micSource;
+  if (!micSaving) el('mic').value = micSource;
+  el('mic-note').textContent = active ? 'Stop the session to change the microphone.'
+    : (!available[micSource] ? 'Selected microphone is not connected right now. ' : '') + 'Applies to the next session.';
 }
 function clearPrivate() {
   generation++; fileGeneration++;
@@ -106,6 +122,7 @@ function apply(data) {
     savedPreference = !!data.savePreference; roots = data.roots || [];
     if (firstRoots && roots.length && el('files').open) loadFiles();
     if (!saving) el('save').checked = savedPreference;
+    micSource = data.micSource || 'auto'; micPdm = !!data.micPdm; micG2 = !!data.micG2;
     el('provider').textContent = data.continuous
       ? 'On-device transcription: keeps listening between completed phrases.'
       : 'Pi transcription: one recording, followed by one final result.';
@@ -115,6 +132,7 @@ function apply(data) {
     id = data.id; lastPiece = ''; pendingAck = null; el('live').value = '';
   }
   active = !!data.active;
+  renderMic();
   const state = data.preparing ? 'Preparing microphone...'
     : data.captureActive ? 'Listening' : data.inferenceActive ? 'Transcribing...'
     : active ? 'Finishing...' : data.busy && !data.valid ? 'In use by another app or session.'
@@ -198,6 +216,18 @@ el('save').onchange = async function() {
     el('saving').textContent = 'Saved. This change applies to the next session.';
   } catch (error) { if (mine === generation && !ended) { this.checked = savedPreference; failure(error); } }
   finally { saving = false; controls(); }
+};
+el('mic').onchange = async function() {
+  if (micSaving || active) return;
+  micSaving = true; controls(); const mine = generation;
+  const value = this.value;
+  try {
+    const result = await hw.postFormText('/api/cli', {cmd:'micsource ' + value});
+    if (mine !== generation || ended) return;
+    if (/^(Error|Failed)/i.test(result)) throw new Error(result);
+    micSource = value;
+  } catch (error) { if (mine === generation && !ended) failure(error); }
+  finally { micSaving = false; renderMic(); controls(); }
 };
 async function limitedText(response, cap, signal) {
   if (!response.ok) { const error = new Error('File request failed (' + response.status + ')'); error.status = response.status; throw error; }

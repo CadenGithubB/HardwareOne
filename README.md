@@ -6,7 +6,7 @@
   <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
 </picture>
 
-# Hardware One v0.99.95
+# Hardware One v0.99.96
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
 
@@ -18,7 +18,7 @@ On any single device, control works the same way no matter how you reach it: one
 
 > Built on **ESP-IDF** (not Arduino IDE). Runs on the **Seeed XIAO ESP32-S3**, **Unexpected Maker FeatherS3**, **Adafruit Feather ESP32**, and several other ESP32 / ESP32-S3 boards.
 
-> **ESP32-P4X-EYE is experimental.** Shared peripheral and transcription services are included, while board/radio integration uses pinned ESP-IDF 5.5.5 investigation profiles. See the [P4 build and STT notes](experiments/stt_p4/README.md) and [0.99.95 qualification limits](CHANGELOG.md#09995---2026-09-28).
+> **ESP32-P4X-EYE is newly supported** (`tools/build_board.sh p4x_eye`). Its Wi-Fi, Bluetooth and ESP-NOW run on the onboard ESP32-C6, whose companion firmware is built and flashed from [`tools/p4/companion`](tools/p4/companion/README.md). See [P4X-EYE notes](docs/P4X_EYE_PERIPHERALS.md) for setup and what is not yet qualified. Every board builds on **ESP-IDF 5.5.5**.
 
 ---
 
@@ -41,6 +41,7 @@ Hardware One can be used in several different ways depending on the hardware you
 - The intended full build: board + SSD1306 OLED + Seesaw gamepad (or ANO rotary encoder) + a selection of I2C sensors.
 - Can be used from USB power or as a battery-powered handheld.
 - Best fit when you want both the local OLED/gamepad UI and the web UI.
+- The ESP32-P4X-EYE is this configuration with its own LCD, wheel, camera and microphone; its reproducible profile lives under [`deployments/handheld/`](deployments/handheld/README.md) as a factory-only (cable-flashed) deployment.
 
 ### 4) Bonded Microcontrollers
 - Control features unique to one device you flash while another device is flashed with other features - effectively removing the limit of software features that is faced due to iram constrictions on the ESP32.
@@ -127,6 +128,7 @@ Each device in your setup runs one board. Multiple boards can coexist on the sam
 | Unexpected Maker FeatherS3 | 16 / 8 MB | ❌ | ❌ | ✅ | Quad PSRAM; dual STEMMA QT (second I2C bus); onboard RGB LED; MAX17048 fuel gauge |
 | Adafruit Feather ESP32 V2 | 8 / 2 MB | ❌ | ❌ | ✅ (GPIO35) | Onboard NeoPixel + battery monitoring |
 | Adafruit QT Py ESP32 | 8 / 2 MB | ❌ | ❌ | ❌ | ESP32-PICO; STEMMA QT onboard; compact |
+| Espressif ESP32-P4X-EYE | 16 / 32 MB | ✅ (MIPI) | ✅ | ✅ (voltage) | 240×240 LCD, wheel + 3 buttons; radio via onboard ESP32-C6; local speech-to-text. [Notes](docs/P4X_EYE_PERIPHERALS.md), [enclosure](physical_enclosures/p4x_eye/README.md) |
 
 > A **generic ESP32** fallback build also exists for unlisted boards - it compiles, but verify the I2C pins match your hardware.
 

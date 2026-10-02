@@ -51,17 +51,18 @@ struct LensUiJob{LensJobKind kind;uint32_t submitMenuGen=0;G2HijackPage targetPa
 static std::vector<LensUiJob*> jobs;
 bool g2EnqueueLensJob(LensUiJob* job,G2LensEnqueueWait){if(!queueOkay)return false;jobs.push_back(job);return true;}
 static void drainUi(){while(!jobs.empty()){auto* job=jobs.front();jobs.erase(jobs.begin());if(job->submitMenuGen==menuGen&&job->targetPage==page)job->payload.redraw->render();delete job->payload.redraw;delete job;}}
-struct G2ContainerGeom{};
-static const G2ContainerGeom G2_GEOM_LARGE{},G2_GEOM_SPLIT_LIST{},G2_GEOM_SPLIT_RIGHT{};
+struct G2ContainerGeom{uint32_t x=0,y=0,w=0,h=0;};
+static const G2ContainerGeom G2_GEOM_LARGE{},G2_GEOM_SPLIT_LIST{};
 constexpr size_t G2_TEXT_DEFAULT_COLS=48;
 struct G2TextChildSpec{const char* containerName;const char* content;uint32_t containerId;G2ContainerGeom geom;bool eventCapture;};
 struct G2TextPageChrome{const char *title,*navHint,*singleHint,*separator,*emptyMsg;};
 enum G2TapKind{G2_TAP_PAGE_NEXT,G2_TAP_PAGE_PREV};using G2TapFn=void(*)(G2TapKind);
-static std::string displayed;static std::vector<std::string> menu;static unsigned renders=0;
+static std::string displayed,displayedHead;static std::vector<std::string> menu;static unsigned renders=0;
 static void(*exitCallback)()=nullptr;static G2TapFn navCallback=nullptr;
 bool g2ShowListPage(const char*const* rows,size_t count){if(!uiOkay)return false;menu.assign(rows,rows+count);displayed="";++renders;return true;}
 bool g2ShowMixedListText(const char*const* rows,size_t count,const G2ContainerGeom&,const G2TextChildSpec& side){if(!uiOkay)return false;menu.assign(rows,rows+count);displayed=side.content;++renders;return true;}
-bool g2UpdateMixedTextChild(const char*,uint32_t,const char* text){if(!uiOkay)return false;displayed=text;++renders;return true;}
+bool g2ShowMixedListText2(const char*const* rows,size_t count,const G2ContainerGeom&,const G2TextChildSpec& head,const G2TextChildSpec& body){if(!uiOkay)return false;menu.assign(rows,rows+count);displayedHead=head.content;displayed=body.content;++renders;return true;}
+bool g2UpdateMixedTextChild(const char* name,uint32_t,const char* text){if(!uiOkay)return false;(std::string(name)=="trhead"?displayedHead:displayed)=text;++renders;return true;}
 bool g2ShowTextPage(const char* text,const G2ContainerGeom&,void(*exit)(),G2TapFn nav){if(!uiOkay)return false;displayed=text;exitCallback=exit;navCallback=nav;++renders;return true;}
 // INSERT_PRODUCTION
 static void answer(const char* json,bool okay=true){assert(commands.size()==1);auto c=commands.front();commands.clear();if(c.epoch==liveEpoch&&ownerAuthed)c.callback(okay,json,c.cookie,c.opaque);}
@@ -72,7 +73,18 @@ static void home(){g2ShowTranscriptionMenu();drainUi();tick();assert(commands.fr
 static void start(){g2TranscriptionHandleTap(1);tick(1);assert(commands.front().line=="transcription start");answer(status(true).c_str());tick(1);}
 static void clear(){commands.clear();while(!jobs.empty()){auto*j=jobs.back();jobs.pop_back();delete j->payload.redraw;delete j;}state=State{};renderState=State{};renderedCount=0;renderedEpoch=0;ownerAuthed=true;liveEpoch=10;page=G2_HIJACK_PAGE_APPS;queueOkay=commandOkay=uiOkay=true;clockMs=1000;++menuGen;displayed.clear();}
 int main(){
-    home();assert(menu.size()==6&&menu[1]=="Start transcription");start();assert(menu[0]=="<- Apps (cancel session)");
+    // Lens idle timeout (DISPLAY_OFF) ends the hijack but must not cancel a
+    // running session: it keeps receiving text and is shown again on reopen.
+    {home();start();lens.hijackActive=false;tick();
+     assert(commands.front().line==std::string("transcription next ")+id&&!state.exiting);
+     answer("{\"success\":true,\"exchange\":\"0123456789abcdef\",\"available\":true,\"sequence\":1,\"offset\":0,\"length\":5,\"sttText\":\"while\"}");tick(1);
+     assert(commands.front().line==std::string("transcription ack ")+id+" 1 0 5");answer("{\"success\":true}");
+     lens.hijackActive=true;g2ShowTranscriptionMenu();drainUi();tick();
+     assert(state.active&&std::string(state.exchange)==id&&std::string(state.tail)=="while"&&menu[0]=="<- Apps (cancel session)");
+     assert(commands.front().line==std::string("transcription status ")+id);answer(status(true).c_str());tick(1);
+     g2TranscriptionHandleTap(0);tick(1);assert(commands.front().line==std::string("transcription cancel ")+id);answer("{\"success\":true}");tick(1);
+     clear();}
+    home();assert(menu.size()==7&&menu[1]=="Start transcription"&&menu[6]=="Mic: Auto");start();assert(menu[0]=="<- Apps (cancel session)");
     tick();assert(commands.front().line==std::string("transcription next ")+id);
     answer("{\"success\":true,\"exchange\":\"0123456789abcdef\",\"available\":true,\"sequence\":2,\"offset\":0,\"length\":12,\"sttText\":\"hello world!\"}");
     assert(std::string(state.tail)=="hello world!"&&state.ackPending);tick(1);
@@ -98,6 +110,26 @@ int main(){
     // A late saved response cannot replace another view after navigation.
     navCallback(G2_TAP_PAGE_NEXT);tick(1);exitCallback();answer("{\"success\":true,\"sttText\":\"late secret\",\"offset\":509,\"nextOffset\":600,\"eof\":true}");tick(1);assert(state.view==View::List&&std::string(state.fileText).find("late secret")==std::string::npos);
     clear();home();g2TranscriptionHandleTap(3);tick(1);assert(commands.front().line=="sttsavetranscripts 1");answer("Error: Admin required");tick(1);assert(commands.front().line=="transcription status");answer("{\"success\":true,\"available\":true,\"saveDefault\":false}");tick(1);assert(!state.saveDefault);
+    // A long recent tail keeps each right-column child inside one UPDATE_TEXT
+    // write (MTU 244): the body shows only the newest words, the header status.
+    clear();home();{std::string words;for(int i=1;i<=80;++i)words+=std::to_string(i)+" ";
+    std::strcpy(state.tail,words.c_str());state.dirty=true;tick(1);
+    assert(displayed.size()<=kBodyMax&&displayed.size()>120&&displayedHead.size()<=kSidebarUpdateMax);
+    assert(displayed.find("80 ")!=std::string::npos&&displayed.find(" 1 ")==std::string::npos);
+    // A live draft follows the confirmed words, and a header-only change
+    // patches just the header child without re-sending the body.
+    std::strcpy(state.draft,"still talking");state.dirty=true;tick(1);
+    assert(displayed.size()<=kBodyMax&&displayed.find("80 still talking")!=std::string::npos);
+    const std::string bodyBefore=displayed;const unsigned before=renders;
+    std::strcpy(state.message,"New status");state.dirty=true;tick(1);
+    assert(displayedHead.find("New status")!=std::string::npos&&displayed==bodyBefore&&renders==before+1);}
+    // Mic row cycles only reachable sources, refreshes status, and is refused mid-session.
+    clear();g2ShowTranscriptionMenu();drainUi();tick();answer("{\"success\":true,\"exchange\":\"\",\"available\":true,\"micSource\":\"auto\",\"micPdm\":true,\"micG2\":true}");tick(1);
+    assert(menu[6]=="Mic: Auto");g2TranscriptionHandleTap(6);tick(1);assert(commands.front().line=="micsource pdm");answer("Mic source preference set to 'pdm'");tick(1);
+    assert(commands.front().line=="transcription status");answer("{\"success\":true,\"available\":true,\"micSource\":\"g2\",\"micPdm\":false,\"micG2\":true}");tick(1);
+    assert(menu[6]=="Mic: Glasses");g2TranscriptionHandleTap(6);tick(1);assert(commands.front().line=="micsource auto");answer("ok");tick(1);answer(status(true).c_str());tick(1);
+    g2TranscriptionHandleTap(6);assert(state.queued==Op::None&&std::string(state.message)=="Stop transcription to change mic");
+    clear();home();
     // Queue admission failure retries submission, not an already-executed mutation.
     commandOkay=false;g2TranscriptionHandleTap(1);tick(1);assert(commands.empty()&&state.queued==Op::Start);commandOkay=true;tick(1);assert(commands.front().line=="transcription start");answer("not JSON");assert(!state.active&&state.recoveringStart);
     // A possibly admitted Start is never repeated. Failed read-only recovery

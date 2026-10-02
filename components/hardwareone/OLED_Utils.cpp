@@ -4640,7 +4640,7 @@ const char* cmd_oledmode(const String& argsInput) {
   }
 
   if (ensureDebugBuffer()) {
-    snprintf(getDebugBuffer(), 1024, "OLED mode: %s", getOLEDModeName(target));
+    snprintf(getDebugBuffer(), 1024, "OLED mode: %s", getOLEDModeName(currentOLEDMode));
     broadcastOutput(getDebugBuffer());
   }
   updateOLEDDisplay();
@@ -4735,7 +4735,7 @@ const char* cmd_oledstatus(const String& argsInput) {
         case OLED_FILE_BROWSER:   modeStr = "File Browser"; break;
         case OLED_LED:            modeStr = "LED"; break;
         case OLED_OFF:            modeStr = "Off"; break;
-        default:                  modeStr = "Unknown"; break;
+        default:                  modeStr = getOLEDModeName(currentOLEDMode); break;
       }
       doc["mode"] = modeStr;
     }
@@ -4776,7 +4776,7 @@ const char* cmd_oledstatus(const String& argsInput) {
       case OLED_FILE_BROWSER: modeStr = "File Browser"; break;
       case OLED_LED: modeStr = "LED"; break;
       case OLED_OFF: modeStr = "Off"; break;
-      default: modeStr = "Unknown"; break;
+      default: modeStr = getOLEDModeName(currentOLEDMode); break;
     }
     snprintf(getDebugBuffer(), 1024, "Mode: %s", modeStr.c_str());
     broadcastOutput(getDebugBuffer());

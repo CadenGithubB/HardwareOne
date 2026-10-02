@@ -442,6 +442,11 @@
 // below run. The root build, component source-list filter, and compiler all
 // resolve the same profile file, so a lean build never depends on temporarily
 // rewriting this shared header and restoring it afterward.
+// A board feature profile (boards/<board>.features.h, selected by HW_BOARD)
+// applies first; a deployment profile may then refine it further.
+#ifdef HW1_BOARD_CONFIG_HEADER
+#include HW1_BOARD_CONFIG_HEADER
+#endif
 #ifdef HW1_DEPLOYMENT_CONFIG_HEADER
 #include HW1_DEPLOYMENT_CONFIG_HEADER
 #endif
@@ -1524,6 +1529,19 @@
 // interfaces. The existing provider boundary is independent of those surfaces.
 #define ENABLE_DICTATION        (ENABLE_MICROPHONE && \
                                  (ENABLE_OLED_DISPLAY || ENABLE_G2_GLASSES || ENABLE_WEB_SENSORS))
+
+// Word n-gram language-model beam search for the local STT backend
+// (stt/stt_lm.h; format experiments/stt_train/lm/FORMAT.md). Defaults to the
+// backend's own switch, after the deployment profile has set it; a profile may
+// define 0 to keep greedy CTC only. At runtime /STT Models/meeting.lm (plus the
+// optional custom_words.txt) is read into PSRAM once per session; a missing or
+// invalid file or a memory shortfall logs once and decodes greedily.
+#ifndef ENABLE_STT_LM
+  #define ENABLE_STT_LM ENABLE_LOCAL_STT
+#endif
+#if ENABLE_STT_LM && !ENABLE_LOCAL_STT
+  #error "ENABLE_STT_LM decodes the local STT backend's output. Set ENABLE_LOCAL_STT 1 or ENABLE_STT_LM 0."
+#endif
 
 // =============================================================================
 // LLM FEATURE / SOURCE CONSISTENCY  (see §5 ENABLE_LLM_BACKEND)

@@ -1,0 +1,6 @@
+{
+  "target": "esp32p4",
+  "variant": "SMP metadata diagnostics plus official TinyCrypt fix plus ring encrypted CCCD request",
+  "bytes": 4107600,
+  "sha256": "ea930b70dcceada0daf744b7f0aeef420a9b3e6e7006cb8d0ba597cdb6684a4c"
+}

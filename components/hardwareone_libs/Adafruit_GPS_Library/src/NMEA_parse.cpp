@@ -699,7 +699,7 @@ bool Adafruit_GPS::parseCoord(char *pStart, nmea_float_t *angleDegrees,
     char *e = strchr(p, '.');
     if (e == NULL || e - p > 6)
       return false;                // no decimal point in range
-    strncpy(degreebuff, p, e - p); // get DDDMM
+    memcpy(degreebuff, p, e - p); // get DDDMM ([hardwareone local patch 2026-10-01] bounded above, buffer zeroed)
     long dddmm = atol(degreebuff);
     long degrees = (dddmm / 100);         // truncate the minutes
     long minutes = dddmm - degrees * 100; // remove the degrees
@@ -763,21 +763,24 @@ bool Adafruit_GPS::parseCoord(char *pStart, nmea_float_t *angleDegrees,
 char *Adafruit_GPS::parseStr(char *buff, char *p, int n) {
   char *e = strchr(p, ',');
   int len = 0;
+  // [hardwareone local patch 2026-10-01] Every branch copies exactly `len`
+  // bytes and terminates at buff[len]. Upstream terminated the '*' branch at
+  // buff[e - p], past the buffer when the field was longer than n - 1, and
+  // left the final branch unterminated when the field filled the buffer.
   if (e) {
     len = min(int(e - p), n - 1);
-    strncpy(buff, p, len); // copy up to the comma
-    buff[len] = 0;
+    memcpy(buff, p, len); // copy up to the comma
   } else {
     e = strchr(p, '*');
     if (e) {
       len = min(int(e - p), n - 1);
-      strncpy(buff, p, len); // or up to the *
-      buff[e - p] = 0;
+      memcpy(buff, p, len); // or up to the *
     } else {
       len = min((int)strlen(p), n - 1);
-      strncpy(buff, p, len); // or to the end or max capacity
+      memcpy(buff, p, len); // or to the end or max capacity
     }
   }
+  buff[len] = 0;
   return buff;
 }
 

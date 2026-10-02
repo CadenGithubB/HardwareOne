@@ -168,8 +168,7 @@ static void pushHelpSuppressed(const char* t) {
   if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
   ++gHelpSuppressedCount;
   size_t i = gHelpTailIndex % kHelpTailLines;
-  strncpy(gHelpTail[i], t, kHelpTailCols - 1);
-  gHelpTail[i][kHelpTailCols - 1] = '\0';
+  strlcpy(gHelpTail[i], t, sizeof(gHelpTail[i]));
   gHelpTailIndex++;
   if (gHelpTailCount < kHelpTailLines) gHelpTailCount++;
   xSemaphoreGive(mutex);

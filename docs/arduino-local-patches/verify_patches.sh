@@ -41,10 +41,28 @@ check_markers libraries/WiFi/src/STA.cpp 1
 check_markers cores/esp32/esp32-hal-i2c-ng.c 1
 check_markers cores/esp32/esp32-hal-periman.c 2
 
+# ESP32-P4 (ESP-Hosted companion radio) support, 2026-09-29. These hunks are
+# unmarked upstream-style changes; check a signature symbol from each instead.
+check_symbol() { # relative-file symbol
+  if grep -q "$2" "$ARD/$1" 2>/dev/null; then
+    echo "ok: components/arduino/$1 ($2)"
+  else
+    echo "PATCH MISSING: components/arduino/$1 lacks $2"
+    fail=1
+  fi
+}
+check_symbol cores/esp32/esp32-hal-hosted.h hostedSetPins
+check_symbol cores/esp32/esp32-hal-bt.h btHostedControllerStatus
+check_symbol libraries/BLE/src/BLEDevice.h CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
+check_symbol libraries/BLE/src/BLECharacteristic.h takeOwnership
+check_symbol cores/esp32/esp32-hal-uart.c "CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32P4"
+
 # NetworkEvents.cpp carries an UNMARKED local change — detectable only via git.
 # A clean diff here means it was either reverted or committed into the nested
 # repo; check `git -C components/arduino log` before assuming it is fine.
-if git -C "$ARD" diff --quiet -- libraries/Network/src/NetworkEvents.cpp 2>/dev/null; then
+# Only meaningful when components/arduino is its own nested checkout; a plain
+# directory copy resolves `git -C` to the enclosing repo, which ignores it.
+if [ -e "$ARD/.git" ] && git -C "$ARD" diff --quiet -- libraries/Network/src/NetworkEvents.cpp 2>/dev/null; then
   echo "WARNING: libraries/Network/src/NetworkEvents.cpp shows no local diff (reverted, or committed in the nested repo?)"
 fi
 

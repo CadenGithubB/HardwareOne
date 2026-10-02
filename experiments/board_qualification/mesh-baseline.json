@@ -6,12 +6,12 @@
   "boards": {
     "p4": {
       "port": "/dev/cu.usbmodem2201",
-      "mac": "fc:01:2c:e0:b9:a8",
+      "mac": "02:48:57:31:01:a8",
       "name": "HW1_P4"
     },
     "s3": {
       "port": "/dev/cu.usbmodem1101",
-      "mac": "68:ee:8f:50:e9:d0",
+      "mac": "02:48:57:31:00:d0",
       "name": "HW1_S3"
     }
   },
@@ -43,7 +43,7 @@
       "name": "inspect_p4",
       "status": "passed",
       "evidence": {
-        "mac": "FC:01:2C:E0:B9:A8",
+        "mac": "02:48:57:31:01:A8",
         "channel": 6,
         "wifiJoined": false,
         "meshSlot": 0,
@@ -56,7 +56,7 @@
       "name": "inspect_s3",
       "status": "passed",
       "evidence": {
-        "mac": "68:EE:8F:50:E9:D0",
+        "mac": "02:48:57:31:00:D0",
         "channel": 6,
         "wifiJoined": false,
         "meshSlot": 0,
@@ -114,13 +114,13 @@
         "discoveryTested": false,
         "localRegistries": {
           "p4": {
-            "mac": "68:EE:8F:50:E9:D0",
+            "mac": "02:48:57:31:00:D0",
             "name": "HW1_S3",
             "encrypted": true,
             "meshId": 0
           },
           "s3": {
-            "mac": "FC:01:2C:E0:B9:A8",
+            "mac": "02:48:57:31:01:A8",
             "name": "HW1_P4",
             "encrypted": true,
             "meshId": 0
@@ -129,7 +129,7 @@
         "sessions": {
           "p4": {
             "slot": 0,
-            "mac": "68:EE:8F:50:E9:D0",
+            "mac": "02:48:57:31:00:D0",
             "meshId": 0,
             "sessionId": 40521,
             "dir": "B",
@@ -140,7 +140,7 @@
           },
           "s3": {
             "slot": 0,
-            "mac": "FC:01:2C:E0:B9:A8",
+            "mac": "02:48:57:31:01:A8",
             "meshId": 0,
             "sessionId": 40521,
             "dir": "A",
@@ -177,7 +177,7 @@
       "evidence": {
         "p4": {
           "slot": 0,
-          "mac": "68:EE:8F:50:E9:D0",
+          "mac": "02:48:57:31:00:D0",
           "meshId": 0,
           "sessionId": 40521,
           "dir": "B",
@@ -188,7 +188,7 @@
         },
         "s3": {
           "slot": 0,
-          "mac": "FC:01:2C:E0:B9:A8",
+          "mac": "02:48:57:31:01:A8",
           "meshId": 0,
           "sessionId": 40521,
           "dir": "A",
@@ -408,7 +408,7 @@
       "evidence": {
         "p4": {
           "slot": 0,
-          "mac": "68:EE:8F:50:E9:D0",
+          "mac": "02:48:57:31:00:D0",
           "meshId": 0,
           "sessionId": 40521,
           "dir": "B",
@@ -419,7 +419,7 @@
         },
         "s3": {
           "slot": 0,
-          "mac": "FC:01:2C:E0:B9:A8",
+          "mac": "02:48:57:31:01:A8",
           "meshId": 0,
           "sessionId": 40521,
           "dir": "A",
@@ -436,7 +436,7 @@
       "status": "passed",
       "evidence": {
         "direction": "p4->s3",
-        "path": "/espnow/received/FC012CE0B9A8/mesh_63419af2_p4.bin",
+        "path": "/espnow/received/0248573101A8/mesh_63419af2_p4.bin",
         "bytes": 8192,
         "sha256": "19d03df88266588981a179c63f2d2766b488a81e4f231459643aa7b622f6d569",
         "receiverCompletion": true,
@@ -450,7 +450,7 @@
       "status": "passed",
       "evidence": {
         "direction": "s3->p4",
-        "path": "/espnow/received/68EE8F50E9D0/mesh_63419af2_s3.bin",
+        "path": "/espnow/received/0248573100D0/mesh_63419af2_s3.bin",
         "bytes": 8192,
         "sha256": "36d25011e2c583b3f07ca14a8f2ef910884a0108b9f649e349de16e435070510",
         "receiverCompletion": true,
@@ -466,7 +466,7 @@
         "before": {
           "p4": {
             "slot": 0,
-            "mac": "68:EE:8F:50:E9:D0",
+            "mac": "02:48:57:31:00:D0",
             "meshId": 0,
             "sessionId": 40521,
             "dir": "B",
@@ -477,7 +477,7 @@
           },
           "s3": {
             "slot": 0,
-            "mac": "FC:01:2C:E0:B9:A8",
+            "mac": "02:48:57:31:01:A8",
             "meshId": 0,
             "sessionId": 40521,
             "dir": "A",
@@ -490,7 +490,7 @@
         "after": {
           "p4": {
             "slot": 0,
-            "mac": "68:EE:8F:50:E9:D0",
+            "mac": "02:48:57:31:00:D0",
             "meshId": 0,
             "sessionId": 40521,
             "dir": "B",
@@ -501,7 +501,7 @@
           },
           "s3": {
             "slot": 0,
-            "mac": "FC:01:2C:E0:B9:A8",
+            "mac": "02:48:57:31:01:A8",
             "meshId": 0,
             "sessionId": 40521,
             "dir": "A",
@@ -564,7 +564,7 @@
         "sessions": {
           "p4": {
             "slot": 0,
-            "mac": "68:EE:8F:50:E9:D0",
+            "mac": "02:48:57:31:00:D0",
             "meshId": 0,
             "sessionId": 40521,
             "dir": "B",
@@ -575,7 +575,7 @@
           },
           "s3": {
             "slot": 0,
-            "mac": "FC:01:2C:E0:B9:A8",
+            "mac": "02:48:57:31:01:A8",
             "meshId": 0,
             "sessionId": 40521,
             "dir": "A",

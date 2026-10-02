@@ -28,8 +28,8 @@
 // calls setCpuFrequencyMhz raw, WITHOUT the I2C-drain guard that wraps the
 // power-save downclock (setCpuFrequencyDrained, HardwareOne.cpp). The OLED and
 // CLI already carry the same gap; hardening the command path is a separate
-// firmware change. (Note: applyPowerMode now only ever sets >=80 MHz — the raw
-// jump to UltraSaver's 40 MHz is gone; 40 is applied solely by the drain-guarded
+// firmware change. Active modes stay at the target PLL floor or above;
+// UltraSaver's lower idle clock is applied solely by the drain-guarded
 // idle power-save path, so the riskiest transition is already covered.)
 
 #include "G2_Page_Power.h"
@@ -58,10 +58,8 @@ enum PowerLevel : uint8_t {
 // The five presets, in gSettings.powerMode order, and the command each
 // dispatches. `power mode X` (not raw `cpufreq N`) is the OLED-established
 // path — it also sets display brightness and selects UltraSaver, whose
-// idle-only 40 MHz floor `cpufreq` (80/160/240) cannot express. (UltraSaver's
-// ACTIVE clock is 80 MHz; the 40 MHz kicks in only when idle power-save
-// blanks the screen — see powerSaveTick in HardwareOne.cpp. Locked alone
-// keeps 240 through that idle path; Performance is 240/80.)
+// idle-only XTAL clock the interactive `cpufreq` choices cannot express.
+// Active/idle values below come from the shared target power policy.
 static const char* const kPowerModeCmds[POWER_MODE_COUNT] = {
   "power mode perf",      // POWER_MODE_PERFORMANCE
   "power mode balanced",  // POWER_MODE_BALANCED
@@ -107,21 +105,22 @@ static size_t buildActionRows() {
 
 // CPU preset picker rows — an "[X] " marker on the row matching the current
 // gSettings.powerMode (picker precedent from Camera Settings' resolution list).
-// Modes show their interactive clock; UltraSaver shows "80/40" because it runs
-// at the 80 MHz floor while used and only sinks to 40 MHz once idle/asleep.
-// Performance/Balanced show "240/80" and "160/80". Locked shows a single 240.
+// Each mode displays the active and idle clocks from the shared target policy.
 static size_t buildCpuRows() {
   snprintf(gRows[0], POWER_ROW_LEN, "<- Back");
   for (uint8_t m = 0; m < POWER_MODE_COUNT; m++) {
     const char* mark = (m == gSettings.powerMode) ? "[X]" : "[ ]";
+    // Keep complete three-digit active/idle clocks inside the 23-char row.
+    const char* name = m == POWER_MODE_PERFORMANCE ? "Perf" :
+                       m == POWER_MODE_ULTRASAVER ? "Ultra" : getPowerModeName(m);
     const unsigned act  = (unsigned)getPowerModeActiveCpuFreq(m);
     const unsigned idle = (unsigned)getPowerModeIdleCpuFreq(m);
     if (idle < act) {
       snprintf(gRows[m + 1], POWER_ROW_LEN, "%s %s %u/%uMHz",
-               mark, getPowerModeName(m), act, idle);
+               mark, name, act, idle);
     } else {
       snprintf(gRows[m + 1], POWER_ROW_LEN, "%s %s %uMHz",
-               mark, getPowerModeName(m), act);
+               mark, name, act);
     }
   }
   for (size_t i = 0; i < 1 + POWER_MODE_COUNT; i++) gRowPtrs[i] = gRows[i];

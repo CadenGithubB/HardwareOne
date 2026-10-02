@@ -48,8 +48,8 @@
               {
                 "name": "g2-glasses",
                 "autoReconnect": true,
-                "mac1": "dc:d3:41:4f:5a:a0",
-                "mac2": "c8:8d:65:00:97:69",
+                "mac1": "02:48:57:31:05:a0",
+                "mac2": "02:48:57:31:03:69",
                 "pairedBy": "[REDACTED]"
               },
               {
@@ -62,7 +62,7 @@
               {
                 "name": "r1-ring",
                 "autoReconnect": true,
-                "mac1": "f8:29:ca:ba:ac:1c",
+                "mac1": "02:48:57:31:02:1c",
                 "mac2": null,
                 "pairedBy": "[REDACTED]"
               }
@@ -315,8 +315,8 @@
               {
                 "name": "g2-glasses",
                 "autoReconnect": true,
-                "mac1": "dc:d3:41:4f:5a:a0",
-                "mac2": "c8:8d:65:00:97:69",
+                "mac1": "02:48:57:31:05:a0",
+                "mac2": "02:48:57:31:03:69",
                 "pairedBy": "[REDACTED]"
               },
               {
@@ -329,7 +329,7 @@
               {
                 "name": "r1-ring",
                 "autoReconnect": true,
-                "mac1": "f8:29:ca:ba:ac:1c",
+                "mac1": "02:48:57:31:02:1c",
                 "mac2": null,
                 "pairedBy": "[REDACTED]"
               }

@@ -1,0 +1,52 @@
+{
+  "checked_at_utc": "2026-09-30T02:37:55.627458+00:00",
+  "package": "mechanical/p4x-eye-enclosure/p4x-eye-pcbway-review-r21.zip",
+  "bytes": 1128330,
+  "sha256": "58ef699f94c1257c95aa4c4c88cddd004692eef801e0c4d831b8cb3bbd670457",
+  "files": [
+    {
+      "name": "p4x-eye-base-r21.stl",
+      "sha256": "f19430f9aaa5f246a8e07a59c4b8288e024deea481c8ded9723ba4e58b0bcf14"
+    },
+    {
+      "name": "p4x-eye-lid-r21.stl",
+      "sha256": "ea9e1a288ad7b74090aa4ff754ea1ac7b172efebec5288be108846cd4cfdbb01"
+    },
+    {
+      "name": "p4x-eye-midframe-r21.stl",
+      "sha256": "6b338fd72d0b2ed8b6307e19eb09d51732449536974a28148f4b0e8553093e8f"
+    },
+    {
+      "name": "p4x-eye-button-strip-r21.stl",
+      "sha256": "51fe0f665844da4eeb8b0f335081a10ce126a13ba7906e967241c3d2daf68e24"
+    },
+    {
+      "name": "p4x-eye-button-keeper-r21.stl",
+      "sha256": "ae2e127c6d4dde1122d086e5a32bff3756e1fe360c5794f803d2111ae6f627eb"
+    },
+    {
+      "name": "p4x-eye-power-slider-r21.stl",
+      "sha256": "0a015315a63f24862cbb357049290e7ec1ccfd520d325194817ae892d1d21d72"
+    },
+    {
+      "name": "p4x-eye-pcbway-technical-drawing-r21.pdf",
+      "sha256": "9eb4a205556089d95f97369345ce40a560129fca8bf2c0a4cec8335edc015961"
+    },
+    {
+      "name": "export-manifest.json",
+      "sha256": "e7fc2fa88484b6f1a42dc55a0304262e9b462c94a63fee2b9cdd275fa6f36483"
+    },
+    {
+      "name": "PRINTING.md",
+      "sha256": "9ed6e544a607c460689a14317f5131ad10fce310f260f39b2e36b3ffaf55eb9f"
+    },
+    {
+      "name": "PCBWAY_REVIEW_REQUEST_R21.txt",
+      "sha256": "4c2b957e2fbcb0579a201d7f1e30e503dd35c9e375c5ffc018c61d5fa1c05c02"
+    }
+  ],
+  "CRC_and_member_bytes_verified": true,
+  "submission_status": "Prepared locally; not sent",
+  "supplier_approved": false,
+  "insert_fallback": "Customer adhesive installation; requires confirmed pocket/adhesive and CAD revision; no heat-setting in SLA resin"
+}

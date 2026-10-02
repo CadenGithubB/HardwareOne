@@ -188,6 +188,19 @@ else()
                    "using CONFIG_ARDUINO_VARIANT from sdkconfig.defaults.${_inferred_target}")
 endif()
 
+# Optional board feature profile: boards/<board>.features.h. A board whose
+# application features differ from the shared editable defaults (the P4X-EYE
+# has no I2C display, a different radio and its own peripherals) states them
+# here instead of in System_BuildConfig.h, because the CMake source gates below
+# read literal `#define NAME value` lines and cannot evaluate board #if blocks.
+# A deployment profile is more specific and is applied after (so it wins).
+set(HW1_BOARD_FEATURE_FILE "")
+if(_hw_board AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/boards/${_hw_board}.features.h")
+    set(HW1_BOARD_FEATURE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/boards/${_hw_board}.features.h")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${HW1_BOARD_FEATURE_FILE}")
+    message(STATUS "HW_BOARD=${_hw_board} feature profile: ${HW1_BOARD_FEATURE_FILE}")
+endif()
+
 # --- 3. Partition table selection ---
 #
 # Two axes: SR vs no_sr (from #define ENABLE_ESP_SR in System_BuildConfig.h)
@@ -202,8 +215,20 @@ endif()
 # When ENABLE_ESP_SR is enabled, we need a "model" SPIFFS partition for
 # WakeNet/MultiNet; when disabled, that space is reclaimed for LittleFS.
 set(_ota_layout FALSE)
-if(HW1_DEPLOYMENT_ACTIVE)
+if(HW1_DEPLOYMENT_ACTIVE AND HW1_DEPLOYMENT_OTA_LAYOUT)
     set(_ota_layout TRUE)
+elseif(HW1_DEPLOYMENT_ACTIVE)
+    # A factory-only deployment (OTA_LAYOUT=0) is still a deployment: its
+    # feature header, partition table and release limit apply, but there is no
+    # recovery updater, no signing and no layout id. Refuse HW_OTA_LAYOUT=1 on
+    # top of it rather than silently building something the contract does
+    # not describe.
+    if(DEFINED ENV{HW_OTA_LAYOUT} AND NOT "$ENV{HW_OTA_LAYOUT}" STREQUAL "" AND
+       NOT "$ENV{HW_OTA_LAYOUT}" STREQUAL "0")
+        message(FATAL_ERROR
+            "HW_DEPLOYMENT=${_hw_deployment} is a factory-only deployment "
+            "(OTA_LAYOUT=0); HW_OTA_LAYOUT=$ENV{HW_OTA_LAYOUT} does not apply")
+    endif()
 elseif(DEFINED ENV{HW_OTA_LAYOUT})
     string(TOLOWER "$ENV{HW_OTA_LAYOUT}" _ota_layout_env)
     if(_ota_layout_env STREQUAL "1" OR
@@ -284,7 +309,7 @@ endif()
 # A deployment contract is more specific than the physical-board OTA registry.
 # It deliberately overrides the board's legacy layout without changing the
 # boardId used by the manifest protocol.
-if(HW1_DEPLOYMENT_ACTIVE)
+if(HW1_DEPLOYMENT_ACTIVE AND HW1_DEPLOYMENT_OTA_LAYOUT)
     set(_ota_expected_target "${HW1_DEPLOYMENT_TARGET}")
     set(_ota_expected_flash "${HW1_DEPLOYMENT_FLASH_SIZE}")
     set(_ota_layout_id "${HW1_DEPLOYMENT_LAYOUT_ID}")
@@ -325,8 +350,10 @@ set(_hw1_layout_mode "ordinary")
 if(_ota_layout)
     set(_hw1_layout_mode "recovery-ota")
 endif()
-if(HW1_DEPLOYMENT_ACTIVE)
+if(HW1_DEPLOYMENT_ACTIVE AND HW1_DEPLOYMENT_OTA_LAYOUT)
     set(_hw1_layout_mode "deployment:${_hw_deployment}:${_ota_layout_id}")
+elseif(HW1_DEPLOYMENT_ACTIVE)
+    set(_hw1_layout_mode "deployment:${_hw_deployment}:factory")
 endif()
 set(_hw1_layout_mode_file "${CMAKE_BINARY_DIR}/hw1-layout-mode.txt")
 if(EXISTS "${_hw1_layout_mode_file}")
@@ -362,6 +389,10 @@ endif()
 set(_buildconfig "${CMAKE_CURRENT_SOURCE_DIR}/components/hardwareone/System_BuildConfig.h")
 if(EXISTS "${_buildconfig}")
     file(READ "${_buildconfig}" _bc_contents)
+    if(HW1_BOARD_FEATURE_FILE)
+        file(READ "${HW1_BOARD_FEATURE_FILE}" _board_bc_contents)
+        set(_bc_contents "${_board_bc_contents}\n${_bc_contents}")
+    endif()
     if(HW1_DEPLOYMENT_ACTIVE)
         file(READ "${HW1_DEPLOYMENT_FEATURE_FILE}" _deployment_bc_contents)
         set(_bc_contents "${_deployment_bc_contents}\n${_bc_contents}")
@@ -396,6 +427,15 @@ if(EXISTS "${_buildconfig}")
     else()
         set(_partitions_src
             "${CMAKE_CURRENT_SOURCE_DIR}/partitions/partitions_${_sr_flag}_${_flash_size}.csv")
+        # A board may carry its own ordinary layout when the shared one does
+        # not fit it: partitions_<sr>_<flash>_<board>.csv. The P4X-EYE image
+        # outgrew the shared 16 MB factory partition, and growing that table
+        # would reformat every FeatherS3 in the field.
+        set(_board_partitions_src
+            "${CMAKE_CURRENT_SOURCE_DIR}/partitions/partitions_${_sr_flag}_${_flash_size}_${_hw_board}.csv")
+        if(_hw_board AND EXISTS "${_board_partitions_src}")
+            set(_partitions_src "${_board_partitions_src}")
+        endif()
     endif()
     if(NOT EXISTS "${_partitions_src}")
         message(FATAL_ERROR
@@ -687,7 +727,33 @@ if(HW1_DEPLOYMENT_ACTIVE)
     )
 endif()
 
+if(HW1_BOARD_FEATURE_FILE)
+    add_compile_definitions(HW1_BOARD_CONFIG_HEADER="${HW1_BOARD_FEATURE_FILE}")
+endif()
+
+# ESP32-P4 builds replace two ESP-IDF 5.5.5 components with verified patched
+# copies (never edits to the shared SDK): `bt` carries the upstream TinyCrypt
+# ECC fix that BLE Secure Connections needs on P4 (esp-idf#19002), and
+# `esp_driver_jpeg` fixes allocation/interrupt unwind and marks the hardware
+# JPEG decoder as qualified. tools/p4/prepare_sdk.sh stages both, ignored by git.
+if(_inferred_target STREQUAL "esp32p4")
+    set(_hw1_p4_sdk_dir "${CMAKE_CURRENT_SOURCE_DIR}/.sdk-overrides/esp32p4")
+    foreach(_hw1_p4_component IN ITEMS bt esp_driver_jpeg)
+        if(NOT EXISTS "${_hw1_p4_sdk_dir}/${_hw1_p4_component}/CMakeLists.txt")
+            message(FATAL_ERROR
+                "ESP32-P4 builds need the patched ESP-IDF component "
+                "'${_hw1_p4_component}' in ${_hw1_p4_sdk_dir}. With ESP-IDF 5.5.5 "
+                "exported, run:\n    tools/p4/prepare_sdk.sh")
+        endif()
+        list(APPEND EXTRA_COMPONENT_DIRS "${_hw1_p4_sdk_dir}/${_hw1_p4_component}")
+    endforeach()
+    message(STATUS "ESP32-P4 SDK overrides: ${_hw1_p4_sdk_dir}/{bt,esp_driver_jpeg}")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Component CMake files (including IDF's script-mode requirement expansion,
+# which does not see these variables) read the profile from build properties.
+idf_build_set_property(HW1_BOARD_FEATURE_FILE "${HW1_BOARD_FEATURE_FILE}")
 
 # The component-manager lock embeds its target.  Keep classic ESP32 resolution
 # out of the tracked ESP32-S3 lock so switching between Headless Feather and
@@ -702,9 +768,9 @@ endif()
 idf_build_set_property(DEPENDENCIES_LOCK "${_hw1_dependencies_lock}")
 
 if(_ota_layout)
-    set(PROJECT_VER "0.99.95+${_ota_version_suffix}")
+    set(PROJECT_VER "0.99.96+${_ota_version_suffix}")
 else()
-    set(PROJECT_VER "0.99.95")
+    set(PROJECT_VER "0.99.96")
 endif()
 project(hardwareone-idf)
 
@@ -717,6 +783,10 @@ idf_component_get_property(_hw1_app_component hardwareone COMPONENT_LIB)
 if(NOT TARGET ${_hw1_app_component})
     message(FATAL_ERROR
         "Could not resolve the hardwareone component target for OTA definitions")
+endif()
+if(HW1_BOARD_FEATURE_FILE)
+    target_compile_definitions(${_hw1_app_component} PRIVATE
+        HW1_BOARD_CONFIG_HEADER="${HW1_BOARD_FEATURE_FILE}")
 endif()
 if(HW1_DEPLOYMENT_ACTIVE)
     target_compile_definitions(${_hw1_app_component} PRIVATE

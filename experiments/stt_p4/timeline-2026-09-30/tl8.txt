@@ -1,0 +1,103 @@
+[29904] [G2] Hijack tap: item 4 → Apps
+[29905] [G2] Hijack: Apps tapped — opened sub-page
+[33229] [G2] Hijack tap: item 3 (Transcription) → apps page
+[36756] [G2] Hijack tap: item 0 (<- Apps) → transcription page
+[39054] [G2] Hijack tap: item 3 (Transcription) → apps page
+[42906] [G2] Hijack tap: item 1 (Start transcription) → transcription page
+[43197] [CMD] a@g2: transcription start -> OK
+I (50407) STT: TL capture_start t=42987 source=2
+I (50407) STT: TL warm s=42981 e=48605 load=3993 ok=1 lm=1
+I (51196) STT: TL draft seq=1 audio_ms=1010 s=48605 e=49395 ok=1
+I (51197) STT: TL level t=43402 rms=30 noise=26 thr=52 open=0
+I (51197) STT: TL level t=44453 rms=30 noise=25 thr=50 open=0
+I (51197) STT: TL level t=45502 rms=568 noise=23 thr=123 open=1
+I (51197) STT: TL level t=46537 rms=46 noise=23 thr=123 open=1
+I (51198) STT: TL level t=47542 rms=794 noise=23 thr=123 open=1
+I (51198) STT: TL level t=48552 rms=379 noise=23 thr=123 open=1
+I (51375) STT: TL lens s=49568 e=49573 tail=0 draft=3 ok=1
+I (51697) STT: TL draft seq=1 audio_ms=4660 s=49407 e=49895 ok=0
+I (51699) STT: TL level t=49617 rms=27 noise=23 thr=123 open=1
+I (54730) STT: TL read seg=1 t=52928
+I (54821) STT: TL seg=1 a0=43527 a1=48637 q=49885 s=49897 m=210 f=137 n=2579 d=62 sv0=52898 sv1=53010 e=53019 ok=1
+I (54826) STT: TL level t=50662 rms=707 noise=21 thr=89 open=1
+I (54826) STT: TL level t=51667 rms=420 noise=21 thr=94 open=1
+I (54826) STT: TL level t=52672 rms=35 noise=21 thr=104 open=1
+I (55423) STT: TL lens s=53612 e=53622 tail=30 draft=0 ok=1
+I (55685) STT: TL draft seq=2 audio_ms=1000 s=53025 e=53883 ok=1
+I (55685) STT: TL level t=53676 rms=38 noise=21 thr=104 open=1
+I (55949) STT: TL lens s=54142 e=54147 tail=30 draft=8 ok=1
+I (58247) STT: TL draft seq=2 audio_ms=4050 s=53933 e=56445 ok=1
+I (58247) STT: TL level t=54697 rms=509 noise=21 thr=110 open=1
+I (58248) STT: TL level t=55704 rms=57 noise=21 thr=110 open=1
+I (61164) STT: TL lens s=59357 e=59362 tail=30 draft=24 ok=1
+I (62131) STT: TL draft seq=2 audio_ms=6600 s=56486 e=60330 ok=1
+I (62132) STT: TL level t=56736 rms=344 noise=21 thr=110 open=1
+I (62132) STT: TL level t=57742 rms=452 noise=21 thr=110 open=1
+I (62132) STT: TL level t=58747 rms=368 noise=21 thr=119 open=1
+I (62133) STT: TL level t=59752 rms=30 noise=21 thr=119 open=1
+I (63852) STT: TL draft seq=2 audio_ms=10450 s=60387 e=62050 ok=0
+I (63853) STT: TL level t=60754 rms=29 noise=21 thr=119 open=1
+I (63853) STT: TL level t=61764 rms=29 noise=21 thr=119 open=1
+I (63882) STT: TL lens s=62076 e=62080 tail=30 draft=52 ok=1
+I (70858) STT: TL read seg=2 t=69056
+I (70905) STT: TL seg=2 a0=48637 a1=60717 q=62025 s=62051 m=234 f=363 n=6159 d=183 sv0=69007 sv1=69094 e=69103 ok=1
+I (70907) STT: TL level t=62781 rms=33 noise=21 thr=42 open=0
+I (70907) STT: TL level t=63786 rms=29 noise=21 thr=42 open=0
+I (70907) STT: TL level t=64791 rms=44 noise=21 thr=42 open=1
+I (70908) STT: TL level t=65827 rms=32 noise=21 thr=42 open=1
+I (70908) STT: TL level t=66847 rms=40 noise=21 thr=42 open=1
+I (70908) STT: TL level t=67867 rms=41 noise=21 thr=42 open=1
+I (70908) STT: TL level t=68872 rms=38 noise=21 thr=42 open=1
+I (71921) STT: TL lens s=70112 e=70119 tail=132 draft=0 ok=1
+I (73411) STT: TL draft seq=3 audio_ms=3880 s=69107 e=71609 ok=1
+I (73412) STT: TL level t=69891 rms=37 noise=21 thr=42 open=1
+I (73413) STT: TL level t=70927 rms=40 noise=21 thr=42 open=1
+I (73477) STT: TL lens s=71669 e=71675 tail=132 draft=2 ok=1
+I (78984) STT: TL draft seq=3 audio_ms=9380 s=71645 e=77182 ok=1
+I (78984) STT: TL level t=71945 rms=30 noise=21 thr=42 open=1
+I (78984) STT: TL level t=72967 rms=199 noise=21 thr=43 open=1
+I (78984) STT: TL level t=73987 rms=45 noise=21 thr=43 open=1
+I (78984) STT: TL level t=74992 rms=33 noise=21 thr=43 open=1
+I (78985) STT: TL level t=75999 rms=40 noise=21 thr=43 open=1
+I (78985) STT: TL level t=77015 rms=37 noise=21 thr=43 open=1
+I (82183) STT: TL lens s=80379 e=80381 tail=132 draft=4 ok=1
+I (84194) STT: TL draft seq=3 audio_ms=14930 s=77220 e=82392 ok=0
+I (84194) STT: TL level t=78021 rms=34 noise=21 thr=43 open=1
+I (84194) STT: TL level t=79027 rms=61 noise=21 thr=43 open=1
+I (84194) STT: TL level t=80092 rms=42 noise=21 thr=49 open=1
+I (84194) STT: TL level t=81127 rms=130 noise=21 thr=53 open=1
+I (84195) STT: TL level t=82161 rms=40 noise=21 thr=53 open=1
+I (95588) STT: TL read seg=3 t=93786
+I (95660) STT: TL seg=3 a0=60907 a1=80907 q=82369 s=82393 m=232 f=571 n=10188 d=345 sv0=93743 sv1=93839 e=93858 ok=1
+I (95662) STT: TL level t=83197 rms=38 noise=21 thr=53 open=1
+I (95662) STT: TL level t=84202 rms=40 noise=21 thr=53 open=1
+I (95663) STT: TL level t=85206 rms=27 noise=21 thr=53 open=1
+I (95663) STT: TL level t=86227 rms=46 noise=21 thr=53 open=1
+I (95663) STT: TL level t=87262 rms=26 noise=21 thr=53 open=1
+I (95663) STT: TL level t=88297 rms=41 noise=21 thr=53 open=1
+I (95663) STT: TL level t=89332 rms=64 noise=21 thr=53 open=1
+I (95663) STT: TL level t=90352 rms=53 noise=21 thr=79 open=1
+I (95663) STT: TL level t=91390 rms=40 noise=21 thr=79 open=1
+I (95663) STT: TL level t=92392 rms=64 noise=21 thr=79 open=1
+I (95664) STT: TL level t=93413 rms=96 noise=21 thr=79 open=1
+I (95841) STT: TL lens s=94034 e=94039 tail=135 draft=0 ok=1
+I (99096) STT: TL draft seq=4 audio_ms=5580 s=93862 e=97294 ok=1
+I (99097) STT: TL level t=94432 rms=51 noise=21 thr=79 open=1
+I (99097) STT: TL level t=95472 rms=39 noise=21 thr=79 open=1
+I (99097) STT: TL level t=96472 rms=44 noise=21 thr=79 open=1
+I (99554) STT: TL lens s=97747 e=97752 tail=135 draft=1 ok=1
+I (101834) STT: TL draft seq=4 audio_ms=14930 s=97334 e=100032 ok=0
+I (101834) STT: TL level t=97476 rms=55 noise=21 thr=79 open=1
+I (101834) STT: TL level t=98544 rms=59 noise=21 thr=79 open=1
+I (101834) STT: TL level t=99592 rms=42 noise=21 thr=79 open=1
+[105756] [G2] Firmware ended widget (safety-timeout) after 61.915s; local container state cleared
+I (111157) STT: TL read seg=4 t=109355
+I (111217) STT: TL seg=4 a0=80907 a1=98427 q=99982 s=100033 m=234 f=507 n=8077 d=450 sv0=109316 sv1=109402 e=109415 ok=1
+I (111220) STT: TL level t=100596 rms=36 noise=27 thr=54 open=1
+I (111220) STT: TL level t=101602 rms=55 noise=27 thr=54 open=1
+I (111220) STT: TL level t=102622 rms=42 noise=27 thr=54 open=1
+I (111220) STT: TL level t=103661 rms=55 noise=27 thr=54 open=1
+I (111220) STT: TL level t=104692 rms=52 noise=27 thr=54 open=1
+I (111221) STT: TL level t=105727 rms=31 noise=27 thr=54 open=1
+I (111949) STT: TL draft seq=5 audio_ms=3460 s=109419 e=110147 ok=0
+[110843] [CMD] a@g2: transcription cancel 74f63e3400000001 -> OK

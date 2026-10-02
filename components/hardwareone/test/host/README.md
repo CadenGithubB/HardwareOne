@@ -461,3 +461,46 @@ It exercises FASTDECODE 0/1/2 with scaling enabled and disabled, complete and
 truncated entropy, normalization, unsupported formats, and allocation failure.
 An optional `--private-bad /path/to/observed.jpg` checks a local failure artifact
 without adding private photographs to the repository.
+
+## Local STT language-model decoder
+
+`stt_lm_tests` compiles the production `stt/stt_lm.cpp` (host SHA-256 and
+allocation path) against HW1LM1 files the test writes itself
+(`stt_lm_testlib.h`), per `experiments/stt_train/lm/FORMAT.md`. It covers SHA-256
+vectors; header/section/padding/digest/string-order/n-gram-order/word-id
+rejection behind a valid digest; ARPA backoff scoring; custom-word
+normalisation, limits and de-duplication; and the prefix beam search: blanks,
+repeats, leading/double/trailing spaces, capacity truncation, OOV scoring and
+`<unk>` context, hotword bonus, byte-order tie-breaks, >255-letter words,
+cancellation polling and argument limits. 3000 random small cases are compared
+with the independent map-based float64 reference decoder in `stt_lm_testlib.h`;
+a case is skipped only when some beam cut or final pick is within 1e-6 nats and
+is not a structural tie (equal LM parts): exact real-number coincidences reached
+through different arithmetic round differently in any two implementations. Both
+decoders follow the readings `experiments/stt_train/lm/hw1lm.py` documents:
+`char_prune` never prunes the repeat of a prefix's last symbol (space after space
+is blank-like), and custom-word lines split like Python `str.splitlines()`.
+
+`stt_lm_parity` runs `test_stt_lm_parity.py` over `fixtures/stt_lm/` (tiny.lm,
+caseN.i8, custom_words.txt and a JSON manifest written by the host builder's
+reference decoder). `stt_lm_tool` decodes each case with the same decoder and
+the production greedy CTC; both texts must match. With no manifest the test is
+reported as skipped (exit 77), not passed.
+
+`stt_local_lm` (`test_stt_local_lm.py`) compiles the actual
+`System_STTLocal.cpp` with `ENABLE_STT_LM` on and off against VFS/heap/log/
+runtime fakes and the real decoder: load once per session, one-shot lifetime,
+custom words, missing/invalid/truncated files, PSRAM refusal, release under
+memory pressure, cancellation mid-read and log-once behaviour. The runtime side
+of the hook (Decoded/Fallback/Cancelled, unterminated output, release before a
+memory refusal) is covered in `test_quartznet_cache.py`.
+
+Host benchmark (not a CTest; optimised, unsanitised build):
+
+```sh
+build/stt_lm_tool bench --frames 1000 --beams 16,32
+```
+
+It builds a synthetic 20k-word / 400k-bigram / 400k-trigram LM and 20 s of
+synthetic logits. Timings are host-only; the P4 has no double-precision FPU, so
+score arithmetic there is software double and must be measured on the device.

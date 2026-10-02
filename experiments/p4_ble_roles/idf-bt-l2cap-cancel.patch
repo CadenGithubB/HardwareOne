@@ -1,0 +1,55 @@
+diff -ru bt.orig/host/bluedroid/stack/btm/btm_ble.c bt/host/bluedroid/stack/btm/btm_ble.c
+--- bt.orig/host/bluedroid/stack/btm/btm_ble.c	2026-09-28 05:55:55
++++ bt/host/bluedroid/stack/btm/btm_ble.c	2026-09-28 23:11:06
+@@ -2198,7 +2198,8 @@
+             /* see L2CA_CancelBleConnectReq() */
+             tL2C_LCB *p_lcb = l2cu_find_lcb_by_bd_addr(l2cb.ble_connecting_bda, BT_TRANSPORT_LE);
+             /* Do not remove lcb if an LE link is already up as a peripheral */
+-            if (p_lcb != NULL &&
++            /* HW1: only discard an LCB that is still connecting; never a live link. */
++            if (p_lcb != NULL && p_lcb->link_state == LST_CONNECTING &&
+                     !(p_lcb->link_role == HCI_ROLE_SLAVE && BTM_LE_ACL_IS_CONNECTED(l2cb.ble_connecting_bda))) {
+                 p_lcb->disc_reason = L2CAP_CONN_CANCEL;
+                 l2cu_release_lcb (p_lcb);
+diff -ru bt.orig/host/bluedroid/stack/l2cap/l2c_ble.c bt/host/bluedroid/stack/l2cap/l2c_ble.c
+--- bt.orig/host/bluedroid/stack/l2cap/l2c_ble.c	2026-09-28 05:55:55
++++ bt/host/bluedroid/stack/l2cap/l2c_ble.c	2026-09-28 23:11:06
+@@ -110,8 +110,10 @@
+ 
+     if (btsnd_hcic_ble_create_conn_cancel()) {
+         p_lcb = l2cu_find_lcb_by_bd_addr(rem_bda, BT_TRANSPORT_LE);
+-        /* Do not remove lcb if an LE link is already up as a peripheral */
+-        if (p_lcb != NULL &&
++        /* Do not remove lcb if an LE link is already up as a peripheral.
++         * HW1: nor any LCB that is no longer connecting (e.g. a live central
++         * link) — a cancel may only discard the pending connection. */
++        if (p_lcb != NULL && p_lcb->link_state == LST_CONNECTING &&
+                 !(p_lcb->link_role == HCI_ROLE_SLAVE && BTM_LE_ACL_IS_CONNECTED(rem_bda))) {
+             p_lcb->disc_reason = L2CAP_CONN_CANCEL;
+             l2cu_release_lcb (p_lcb);
+@@ -333,6 +335,8 @@
+                        handle,  type, conn_interval, conn_latency, conn_timeout);
+ 
+     l2cb.is_ble_connecting = FALSE;
++    /* HW1: do not leave a completed peer's address behind for a later cancel. */
++    memset(l2cb.ble_connecting_bda, 0, BD_ADDR_LEN);
+ 
+     /* See if we have a link control block for the remote device */
+     p_lcb = l2cu_find_lcb_by_bd_addr (bda, BT_TRANSPORT_LE);
+diff -ru bt.orig/host/bluedroid/stack/l2cap/l2c_link.c bt/host/bluedroid/stack/l2cap/l2c_link.c
+--- bt.orig/host/bluedroid/stack/l2cap/l2c_link.c	2026-09-28 05:55:55
++++ bt/host/bluedroid/stack/l2cap/l2c_link.c	2026-09-28 23:11:06
+@@ -692,8 +692,12 @@
+         }
+ #endif  ///CLASSIC_BT_INCLUDED == TRUE
+ #if (BLE_INCLUDED == TRUE)
++        /* HW1: cancel only this LCB's own pending connect. The global
++         * ble_connecting_bda can be stale and name an already-connected
++         * peer, whose link the cancel path would then release. */
+         if (p_lcb->link_state == LST_CONNECTING &&
+-                l2cb.is_ble_connecting == TRUE) {
++                l2cb.is_ble_connecting == TRUE &&
++                !memcmp(p_lcb->remote_bd_addr, l2cb.ble_connecting_bda, BD_ADDR_LEN)) {
+             L2CA_CancelBleConnectReq(l2cb.ble_connecting_bda);
+         }
+ #endif

@@ -1,0 +1,26 @@
+# Partition table for the ESP32-P4X-EYE (16 MB flash, no ESP-SR model
+# partition: WakeNet/MultiNet and the STT models live in LittleFS).
+#
+# Selected automatically for HW_BOARD=p4x_eye in place of
+# partitions_no_sr_16mb.csv (see the partition picker in the root
+# CMakeLists.txt). Split out on 2026-10-01 because the P4 image, with local
+# speech-to-text, its language-model decoder and the Hosted radio stack, had
+# outgrown the shared 16 MB factory partition by a few KB after months of
+# running within 2-15 KB of it; the shared table could not grow without
+# reformatting every FeatherS3.
+#
+# Factory:  7252K (0x715000) -- +1 MB over the shared layout.
+# LittleFS: 9068K (0x8DB000) -- offset MOVES from 0x625000 to 0x725000, so the
+#           first full flash with this table REFORMATS the data partition:
+#           settings, accounts and uploaded model files must be re-provisioned.
+#           An app-only flash against a device still carrying the old table
+#           does not fit and must not be attempted; deploy tools compare the
+#           CSV before flashing.
+# nvs/nvs_key/phy_init: unchanged from the shared layout, so saved Wi-Fi
+#           credentials in NVS survive.
+# Name,   Type, SubType, Offset,   Size,    Flags
+nvs,      data, nvs,     0xA000,   0x4000,
+nvs_key,  data, nvs_keys, 0xE000,  0x1000,  encrypted
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x715000,
+littlefs, data, littlefs, 0x725000, 0x8DB000, encrypted

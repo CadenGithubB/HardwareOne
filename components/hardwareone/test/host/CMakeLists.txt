@@ -201,6 +201,27 @@ target_include_directories(event_catalog_text_tests PRIVATE ../..)
 target_compile_options(event_catalog_text_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# HW1LM1 word n-gram LM view, custom words and CTC prefix beam decoder
+# (stt/stt_lm.cpp, host SHA-256/allocation path) against test-written LMs, and
+# randomised cases against the independent map-based reference decoder in
+# stt_lm_testlib.h.
+add_executable(stt_lm_tests test_stt_lm.cpp ../../stt/stt_lm.cpp)
+set_target_properties(stt_lm_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(stt_lm_tests PRIVATE ../..)
+target_compile_options(stt_lm_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# CLI over the same decoder plus the production greedy CTC for fixture parity
+# (test_stt_lm_parity.py) and `stt_lm_tool bench`. Optimised and never
+# sanitised so its timings mean something.
+add_executable(stt_lm_tool stt_lm_tool.cpp ../../stt/stt_lm.cpp ../../stt/quartznet_frontend.cpp)
+set_target_properties(stt_lm_tool PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(stt_lm_tool PRIVATE ../..)
+target_compile_options(stt_lm_tool PRIVATE
+  -O2 -Wall -Wextra -Werror -pedantic)
+
 # Sanitizers are the point of test 1: the walk-back reads backwards through the
 # buffer, and an earlier draft ran off the front. Without ASan that is invisible.
 option(HW1_SANITIZE "Build the host tests with ASan/UBSan" ON)
@@ -279,6 +300,10 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(event_catalog_text_tests PRIVATE
     -fsanitize=address,undefined)
+  target_compile_options(stt_lm_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(stt_lm_tests PRIVATE
+    -fsanitize=address,undefined)
 endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -312,7 +337,35 @@ if(HW1_SANITIZE)
   target_link_options(p4eye_display_lifecycle_tests PRIVATE -fsanitize=address,undefined)
 endif()
 
+# Wire-protocol decoders shared by the P4 host and the C6 companion bridge
+# (components/esp_now_hosted/include/esp_now_hosted_rpc.h). Checks sizes,
+# exact bounds, truncation and trailing bytes, versions, magic and sequences.
+# Standalone C; no ESP-IDF.
+add_executable(esp_now_hosted_protocol_tests
+  ../../../esp_now_hosted/test/test_protocol.c)
+set_target_properties(esp_now_hosted_protocol_tests PROPERTIES
+  C_STANDARD 11 C_STANDARD_REQUIRED ON)
+target_include_directories(esp_now_hosted_protocol_tests PRIVATE
+  ../../../esp_now_hosted/include)
+target_compile_options(esp_now_hosted_protocol_tests PRIVATE
+  -Wall -Wextra -Werror)
+if(HW1_SANITIZE)
+  target_compile_options(esp_now_hosted_protocol_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(esp_now_hosted_protocol_tests PRIVATE -fsanitize=address,undefined)
+endif()
+
 enable_testing()
+
+add_test(NAME esp_now_hosted_protocol COMMAND esp_now_hosted_protocol_tests)
+# The real HAL_Bluetooth.cpp under native and Hosted (P4 + C6) controller
+# substitutes; see test_hal_bluetooth.py for what it does and does not prove.
+set(HAL_BLUETOOTH_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND HAL_BLUETOOTH_TEST_ARGS --sanitize)
+endif()
+add_test(NAME hal_bluetooth
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_hal_bluetooth.py
+          ${HAL_BLUETOOTH_TEST_ARGS})
 
 # Exercise real JPEG dispatch/software/P4 code against controlled SDK boundaries.
 # Supplying installed component paths additionally checks exact old/new software
@@ -370,6 +423,25 @@ add_test(NAME vfs_capacity_cache_tests COMMAND vfs_capacity_cache_tests)
 add_test(NAME event_catalog_tests COMMAND event_catalog_tests)
 add_test(NAME event_catalog_json_tests COMMAND event_catalog_json_tests)
 add_test(NAME event_catalog_text_tests COMMAND event_catalog_text_tests)
+add_test(NAME stt_lm_tests COMMAND stt_lm_tests)
+add_test(
+  NAME stt_lm_parity
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_lm_parity.py
+          --tool $<TARGET_FILE:stt_lm_tool>
+          --fixtures ${CMAKE_CURRENT_LIST_DIR}/fixtures/stt_lm)
+# No manifest yet (the host builder writes it): reported as skipped, not passed.
+set_tests_properties(stt_lm_parity PROPERTIES SKIP_RETURN_CODE 77)
+# The actual System_STTLocal.cpp LM load/cache/fallback policy, flag on and off.
+set(STT_LOCAL_LM_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND STT_LOCAL_LM_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME stt_local_lm
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_local_lm.py
+          ${STT_LOCAL_LM_TEST_ARGS})
 add_test(
   NAME event_catalog_json_parse
   COMMAND ${Python3_EXECUTABLE}
@@ -499,6 +571,8 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/check_raw_allocations.py
           # Ratchet, not a target: the ps_alloc/AllocPolicy unification retired six
-          # raw sites (17 -> 11, malloc 12 -> 6). Lower it when sites go away;
-          # a rise means someone reached past System_MemUtil again.
-          --expect 11 --expect-malloc 6)
+          # raw sites (17 -> 11). Lower it when sites go away; a rise means
+          # someone reached past System_MemUtil again. The malloc/calloc split
+          # (8/3) is what the tree has carried since 0.99.94; the earlier 6 was
+          # recorded before two calloc sites became malloc and never updated.
+          --expect 11 --expect-malloc 8)

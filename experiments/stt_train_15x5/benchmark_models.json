@@ -1,0 +1,12 @@
+[
+  {"name": "QuartzNet15x5 (NVIDIA)", "ckpt": "/Volumes/USB/stt/models/quartznet15x5",
+   "note": "NGC QuartzNet15x5Base-En, ~7,000 h incl. Fisher/Switchboard"},
+  {"name": "QuartzNet15x5 run15x5 step 8877", "ckpt": "/Volumes/USB2/stt/work/run15x5/best",
+   "note": "2026-09-30: AMI SDM/IHM + Libri-100, AdamW 2e-5, 175 h"},
+  {"name": "QuartzNet15x5 run15x5b step 8375", "ckpt": "/Volumes/USB2/stt/work/run15x5b/full/best",
+   "note": "2026-10-01: + VoxPopuli, G2 channel aug 0.3, G2 dev sets; on the P4 since 2026-10-01"},
+  {"name": "Citrinet-384 (NVIDIA, LibriSpeech)", "ckpt": "/Volumes/USB2/stt/models/citrinet384_ls",
+   "note": "HF nvidia/stt_en_citrinet_384_ls, 960 h audiobooks"},
+  {"name": "Citrinet-384 citrinet384 full", "ckpt": "/Volumes/USB2/stt/work/citrinet384/full/best",
+   "note": "2026-10-01: run15x5b recipe, AdamW 2e-5, 175 h"}
+]

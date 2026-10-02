@@ -124,7 +124,7 @@ Existing reusable coordinators:
 Conditional exact existing-runner command (only after same-login/shared mesh/current radio MAC prerequisites are verified):
 
 ```sh
-/private/tmp/hw1-p4-investigation-20260927/idf-tools/python_env/idf5.5_py3.12_env/bin/python \
+"$IDF_PYTHON_ENV_PATH/bin/python" \
   experiments/p4_mesh/test_mesh.py \
   --credentials experiments/board_qualification/private/mesh-credentials.json \
   --run-root experiments/board_qualification/private/mesh-runs \

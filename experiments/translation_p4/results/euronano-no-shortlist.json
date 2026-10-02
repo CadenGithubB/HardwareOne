@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-09-30T03:35:19.126Z",
+  "scope": "Mac host text-to-text reference inference; not a P4 capability or RAM-fit result",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v24.19.0",
+    "cpu": "Apple M1"
+  },
+  "runtime": {
+    "name": "@browsermt/bergamot-translator",
+    "version": "0.4.9",
+    "source_files_unmodified": true,
+    "engine": "Bergamot WASM with embedded intgemm fallback",
+    "configured_workspace_mib": 128,
+    "workspace_override_supported": false,
+    "beam_size": 1,
+    "cache_size": 0,
+    "workers": 1,
+    "use_shortlist": false,
+    "max_length_break": 128,
+    "max_length_factor": 2,
+    "mini_batch_words": 1024,
+    "note": "Stock worker forcibly sets workspace=128; this probe does not reduce that setting"
+  },
+  "direction": {
+    "from": "en",
+    "to": "es"
+  },
+  "candidate": {
+    "id": "euronano",
+    "name": "TranslatePsy-EuroNano Tiny en-xx",
+    "revision": "3a5e1e4e2f7001ff5cfd79785bef03cf19281b73",
+    "input_prefix": "##ES ",
+    "sentence_segmentation": "Intl.Segmenter en sentence; prefix each segment"
+  },
+  "offline": {
+    "local_assets_only": true,
+    "network_api_guards": [
+      "fetch",
+      "http",
+      "https",
+      "net"
+    ],
+    "blocked_network_attempts": 0,
+    "note": "No model registry or remote translation service is contacted; setup downloads are separate"
+  },
+  "model_assets": [
+    {
+      "part": "model",
+      "filename": "model.intgemm.alphas.bin",
+      "bytes": 17141227,
+      "sha256": "646c87844fd9917e929feed627ec7f21b245f7bfded5442b61dc8b4b1b1e68dd"
+    },
+    {
+      "part": "vocab",
+      "filename": "vocab.spm",
+      "bytes": 805231,
+      "sha256": "f76ce75a335872f27c812c7d122051f923565b5111adc36f207a15be4cbc9a51"
+    }
+  ],
+  "model_assets_total_bytes": 17946458,
+  "timing_ms": {
+    "setup": 163.50150000000002,
+    "runtime_initialize": 72.70337500000002,
+    "model_load": 66.95462500000002,
+    "first_decode": 179.12458300000003,
+    "cold_start_through_first_translation": 342.634625,
+    "warm_repeat_min": 16.575457999999912,
+    "warm_repeat_max": 16.575457999999912
+  },
+  "memory": {
+    "process_baseline_after_asset_read": {
+      "rss": 96862208,
+      "heapTotal": 11829248,
+      "heapUsed": 7962480,
+      "external": 39814378,
+      "arrayBuffers": 36039511
+    },
+    "process_sampled_peak_rss_bytes": 408961024,
+    "process_lifetime_max_rss_bytes": 409927680,
+    "after_runtime": {
+      "wasm_linear_memory_bytes": 16777216,
+      "worker_js_memory": {
+        "rss": 151502848,
+        "heapTotal": 19431424,
+        "heapUsed": 9838160,
+        "external": 32418209,
+        "arrayBuffers": 15604497
+      },
+      "blocked_network_attempts": 0
+    },
+    "after_model": {
+      "wasm_linear_memory_bytes": 34603008,
+      "worker_js_memory": {
+        "rss": 219906048,
+        "heapTotal": 19955712,
+        "heapUsed": 9734376,
+        "external": 68190499,
+        "arrayBuffers": 23201807
+      },
+      "blocked_network_attempts": 0
+    },
+    "after_inference": {
+      "wasm_linear_memory_bytes": 455344128,
+      "worker_js_memory": {
+        "rss": 408961024,
+        "heapTotal": 20217856,
+        "heapUsed": 10152728,
+        "external": 460636013,
+        "arrayBuffers": 5255349
+      },
+      "blocked_network_attempts": 0
+    },
+    "note": "RSS includes Node, JS buffers, worker and WASM. WASM linear memory is heap capacity, not live allocations. Neither predicts native P4 minimum RAM."
+  },
+  "results": [
+    {
+      "id": "cli",
+      "category": "manual",
+      "text": "I ordered tea, not coffee.",
+      "review_focus": "Manual review required",
+      "model_input_text": "##ES I ordered tea, not coffee.",
+      "model_input_segments": [
+        "##ES I ordered tea, not coffee."
+      ],
+      "translated_text": "Me ordenaba té, no café.",
+      "first_pass_ms": 179.12458300000003,
+      "first_pass_kind": "first_decode",
+      "warm_repeat_ms": 16.575457999999912,
+      "repeat_match": true
+    }
+  ]
+}

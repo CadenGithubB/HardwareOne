@@ -1,0 +1,55 @@
+# Board overrides — Espressif ESP32-P4X-EYE (P4-EYE MB v2.3 / P4X MB v2.4)
+#
+# Layered on top of sdkconfig.defaults + sdkconfig.defaults.esp32p4 by the
+# HW_BOARD selection logic in CMakeLists.txt. Contains ONLY the settings that
+# distinguish this board from other ESP32-P4 boards. The matching application
+# feature profile is boards/p4x_eye.features.h; pin wiring is in
+# components/hardwareone/System_Board_P4X_EYE.h. See docs/P4X_EYE_PERIPHERALS.md.
+#
+# Activated by: HW_BOARD=p4x_eye   (after `idf.py set-target esp32p4`)
+# Requires the patched SDK components: tools/p4/prepare_sdk.sh
+
+# HW_TARGET: esp32p4
+
+# Arduino's generic P4 variant; radio_backend.cpp overrides its Hosted pins.
+CONFIG_ARDUINO_VARIANT="esp32p4"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Same guards as the other non-FE boards: never inherit flash/NVS encryption or
+# secure boot from a stale sdkconfig (see boards/xiao_s3.defaults).
+CONFIG_SECURE_BOOT=n
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=n
+CONFIG_SECURE_FLASH_ENC_ENABLED=n
+CONFIG_NVS_ENCRYPTION=n
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# Onboard ESP32-C6 radio companion: 4-bit SDIO on host slot 1 (GPIO27..32),
+# enable/reset on GPIO9. The microSD card uses slot 0 (System_Board_P4X_EYE.h).
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+CONFIG_ESP32P4_EYE_C6_BOARD=y
+CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
+CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
+CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CMD_SLOT_1=27
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CLK_SLOT_1=28
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D0_SLOT_1=29
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D1_4BIT_BUS_SLOT_1=30
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1=31
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1=32
+CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=9
+# Hosted's ACTIVE_HIGH means enabled-high, with a low reset pulse (see Kconfig).
+CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y
+CONFIG_ESP_HOSTED_SLAVE_RESET_ON_EVERY_HOST_BOOTUP=y
+CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
+
+# Camera: OV2710 over MIPI-CSI (720p RAW10 25 fps, the only mode
+# HAL_Camera_P4.cpp accepts). SC2336 auto-detect covers later EYE revisions.
+CONFIG_CAMERA_OV2710=y
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1280X720_25FPS=y
+CONFIG_CAMERA_OV2710_MIPI_DEFAULT_FMT_RAW10_1280X720_25FPS=y
+CONFIG_CAMERA_SC2336=y
+CONFIG_CAMERA_SC2336_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_XCLK_USE_ESP_CLOCK_ROUTER=y

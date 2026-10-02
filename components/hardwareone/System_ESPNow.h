@@ -1239,12 +1239,15 @@ extern MeshPeerHealth* gMeshPeers;   // Dynamically allocated [gMeshPeerSlots] a
 bool isMeshPeerAlive(const MeshPeerHealth* peer);
 bool isMeshPeerRecentlyActive(const MeshPeerHealth* peer);
 MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing = false);
-// Inline: check if MAC is this device
-inline bool isSelfMac(const uint8_t* mac) {
-  uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
-  return memcmp(mac, myMac, 6) == 0;
-}
+// Compare against the checked STA identity cached for this ESP-NOW instance.
+// While stopped, a checked driver query preserves the existing helper behavior.
+bool isSelfMac(const uint8_t* mac);
+// This radio instance's own STA / AP address, from the same cache. A driver
+// query is a blocking RPC on a Hosted (P4 + C6) radio, so mesh code must not
+// call esp_wifi_get_mac() per message; these are a memcpy while running and
+// fall back to the checked driver read only before start or after stop.
+esp_err_t espnowSelfStaMac(uint8_t out[6]);
+esp_err_t espnowSelfApMac(uint8_t out[6]);
 void macFromHexString(const String& s, uint8_t out[6]);
 String macToHexString(const uint8_t mac[6]);
 // Zero-allocation MAC formatter for debug log call sites.
@@ -1528,6 +1531,8 @@ inline const char* checkEspNowFirstTimeSetup() { return "ESP-NOW disabled"; }
 inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }
 inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
 inline bool isSelfMac(const uint8_t* mac) { return false; }
+inline esp_err_t espnowSelfStaMac(uint8_t out[6]) { return esp_wifi_get_mac(WIFI_IF_STA, out); }
+inline esp_err_t espnowSelfApMac(uint8_t out[6]) { return esp_wifi_get_mac(WIFI_IF_AP, out); }
 inline bool isMeshPeerAlive(const MeshPeerHealth* peer) { return false; }
 inline bool isMeshPeerRecentlyActive(const MeshPeerHealth*) { return false; }
 inline void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t = -128, int8_t = -128) {}

@@ -1,0 +1,15 @@
+{
+  "target": "esp32s3",
+  "idf": "5.5.5",
+  "buildStatus": "passed",
+  "binary": "experiments/p4_ble_roles/private/build-s3-smpdiag/hardwareone-idf.bin",
+  "binarySize": 4741728,
+  "binarySha256": "efb25329ab963644d3df4d8d08c33c891fc4927d943c291afa536c08aa458e71",
+  "btComponent": "experiments/p4_ble_roles/private/diagnostic-components/bt",
+  "instrumentedSourcePaths": [
+    "experiments/p4_ble_roles/private/diagnostic-components/bt/host/bluedroid/stack/smp/smp_act.c",
+    "experiments/p4_ble_roles/private/diagnostic-components/bt/host/bluedroid/stack/smp/smp_keys.c"
+  ],
+  "log": "experiments/p4_ble_roles/private/build-s3-smpdiag.log",
+  "scope": "Build only. No device access. Metadata-only SMP diagnostics with corrected success/failure labels. Current frozen application includes R1 CCCD security request fix."
+}

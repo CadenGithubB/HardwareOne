@@ -50,7 +50,7 @@ static std::string failedTask;
 int xTaskCreatePinnedToCore(void (*fn)(void*), const char* name, uint32_t bytes,
                             void* context, int priority, void*, int core) {
   assert(core == 1);
-  assert((std::string(name) == "stt" && bytes == 12288 && priority == 1) ||
+  assert((std::string(name) == "stt" && bytes == 12288 && priority == 2) ||
          (std::string(name) == "stt_capture" && bytes >= 4096 && bytes <= 8192 && priority == 3));
   if (failedTask == name) return 0;
   ++activeTasks;
@@ -106,6 +106,13 @@ AudioSource audioGetSource() { std::lock_guard<std::mutex> lock(halMutex); retur
 bool audioCaptureBusy() { std::lock_guard<std::mutex> lock(halMutex); return !halOwner.empty(); }
 bool audioCaptureActive() { std::lock_guard<std::mutex> lock(halMutex); return halActive; }
 bool audioCaptureOwnedBy(const char* owner) { std::lock_guard<std::mutex> lock(halMutex); return halOwner == owner; }
+// G2 recording-scoped capture support: counted so tests can check balance.
+static int g2FastHolds = 0, g2Containers = 0, g2Kicks = 0;
+void g2MicLinkFastAcquire() { ++g2FastHolds; }
+void g2MicLinkFastRelease() { --g2FastHolds; }
+void g2MicEnsureCaptureContainer() { ++g2Containers; }
+void g2MicReleaseCaptureContainer() { --g2Containers; }
+bool g2MicKickStream() { ++g2Kicks; return true; }
 bool audioSourceAvailable(AudioSource s) { return s != AUDIO_SRC_NONE && sourceAvailable.load(); }
 bool audioAnySourceAvailable() { return sourceAvailable.load(); }
 bool audioSetSource(AudioSource s) {
@@ -293,11 +300,21 @@ void vTaskDelete(void*) {
   ++deletedTasks;
 }
 
+static std::atomic<int> draftCalls{0};
 bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap,
                         const STTLocalControl& control, STTLocalStats& stats,
                         char* error, size_t errorCap, STTLocalSession* session) {
   assert(mainWorker && session && !backendResetBeforeDelete);
   auto& run = *static_cast<StreamRun*>(control.context);
+  if (pcm == run.draftPcm) {
+    // Live-mode draft of the utterance in progress: never a queued segment.
+    // These tests pin final-segment behaviour, so drafts decline (production
+    // simply publishes no draft on failure) without touching the backend.
+    { std::lock_guard<std::mutex> lock(gSTTMux); assert(run.draftBusy && count <= 320000); }
+    ++draftCalls;
+    snprintf(error, errorCap, "draft declined by harness");
+    return false;
+  }
   EngineCall call{};
   {
     std::lock_guard<std::mutex> lock(gSTTMux);
@@ -308,7 +325,7 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
   }
   assert(call.sequence && call.end - call.start == call.rawSamples);
   assert(count == std::max(call.rawSamples, size_t(320)) && count <= 320000);
-  assert(allocationCount() == 4);
+  assert(allocationCount() == 5);
   auto assertPCM = [&] {
     for (size_t i = 0; i < call.rawSamples; ++i) assert(pcm[i] == rawSample(call.start + i));
     for (size_t i = call.rawSamples; i < count; ++i) assert(pcm[i] == 0);
@@ -466,7 +483,7 @@ static void testOverlapAndDrain() {
   assert(engineCalls == 1 && snapshot(token).segmentsCaptured == 2);
   assert(sttRequestFinish(owner, token));
   await([] { return stopRequested.load(); }, "normal capture stop");
-  assert(sttRunActive(token) && allocationCount() == 4);
+  assert(sttRunActive(token) && allocationCount() == 5);
   assert(snapshot(token).segmentsCaptured == 3);
   enginePermits = UINT32_MAX; complete(token);
   auto s = snapshot(token); assert(s.state == STTState::Done && s.segmentsCompleted == 3 && s.recordedSamples == kCalibrationSamples + 720000);
@@ -538,12 +555,12 @@ static void testCancelAndJoin() {
   feed(token, 700000);
   assert(sttCancel(owner, token));
   await([] { return stopRequested.load(); }, "HAL asynchronous stop");
-  assert(sttRunActive(token) && allocationCount() == 4 && engineActive);
+  assert(sttRunActive(token) && allocationCount() == 5 && engineActive);
   assert(liveWeightCaches == 1 && sessionCloses == 0);
   rejectBegin();
   enginePermits = UINT32_MAX;
   await([] { return !engineActive.load(); }, "model cooperative join");
-  assert(sttRunActive(token) && allocationCount() == 4); // HAL still owns caller memory/lifecycle.
+  assert(sttRunActive(token) && allocationCount() == 5); // HAL still owns caller memory/lifecycle.
   assert(liveWeightCaches == 1 && sessionCloses == 0);
   releaseHALStop(); complete(token);
   assert(snapshot(token).state == STTState::Cancelled && engineCalls == 1 && !snapshot(token).pendingTexts);

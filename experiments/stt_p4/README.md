@@ -251,3 +251,132 @@ Its partition CSV is supplied explicitly and compared before any app-only flash.
 `stage_model.py` stages an additive model install against a fresh filesystem
 image and verifies existing files are unchanged. USB coordination and full board
 backups are private artifacts, not automatic setup.
+
+## Fine-tuned model export (run2, 2026-09-29)
+
+`components/hardwareone/stt/stt_model_identity.h` now identifies a model
+exported from the AMI/LibriSpeech fine-tune `stt_train` run2 (best step 7484),
+not the NGC checkpoint in `model-provenance.json`. The byte counts quoted above
+(5,490,696 / 7,172,016) describe the previous model.
+
+| item | value |
+|---|---|
+| weights | `model_weights.ckpt` sha256 `d6e7f963195194345e313d0a4ec6182967313a71acfff49a4622a42c968d9900`; config unchanged (`1e829dd4...`) |
+| ESPDL | 7,171,984 bytes, sha256 `f6b81ad35e808db481b72bcf8ba7c197dfe81836e292926be79bda364fd80df0`; 71 nodes (61 Conv, 5 Add, 5 Relu) |
+| exponents | input **-4** (was -5), output -2 |
+| `.stt` | 5,487,504 bytes (compressed 5,487,408), sha256 `5848439b399c9197b71b9df1417c021c19cb29416897fe7f3ed61430a0243adb` |
+| frontend | unchanged, `ca91eb96...` |
+
+Tooling changes are all opt-in. A default-path re-export of the original
+checkpoint reproduced the deployed graph: the parsed initializers, nodes and
+exponents are identical, and the fixture I/O is byte-identical. The ESPDL file
+itself is 48 bytes shorter and its hash differs. The cause of that byte
+difference was not identified. `$P` below is `private/export-venv/bin/python`
+(see `setup_export_env.py`).
+
+* `quartznet_graph.load_checkpoint` accepts one extra weights hash from
+  `HW1_STT_ALLOW_WEIGHTS_SHA256`. The config hash is never overridable.
+* `export_quartznet.py --calib-stores STORE:COUNT ...` adds seeded clips from
+  the read-only `stt_train` dev stores to the calibration set (test stores are
+  refused). The fixture cases, graph input shape and embedded test values stay
+  those of fixture 0. With a non-pinned checkpoint, the pinned float
+  cross-check decoder is skipped (`torch_original_text` is null) and the manifest
+  records the actual hashes.
+* `evaluate_dev_int8.py` compares float and frozen-int8 greedy WER on
+  seeded dev-store subsets. It excludes calibration clips and first requires
+  byte-exact reproduction of each export's fixture outputs.
+
+```sh
+export HW1_STT_ALLOW_WEIGHTS_SHA256=d6e7f963195194345e313d0a4ec6182967313a71acfff49a4622a42c968d9900
+nice -n 10 $P export_quartznet.py --checkpoint /Volumes/USB2/stt/work/deploy/ckpt-run2 \
+    --output /Volumes/USB2/stt/work/deploy/export-run2 --threads 6 \
+    --calib-stores ami-sdm-validation:20 ami-ihm-validation:20 librispeech-dev-clean:20
+nice -n 10 $P pack_model.py --manifest /Volumes/USB2/stt/work/deploy/export-run2/manifest.json \
+    --frontend-sha256 ca91eb9683f7151b8be1a01532a6790c6eb7d515f67169a207751e3fc48cc58b
+```
+
+Greedy WER (%) on 150 seeded utterances per dev store, with the 60 calibration
+clips excluded. "orig" is the previously deployed `full-portable-v2` export.
+"2-clip" is the same run2 weights with the stock fixture-only calibration.
+
+| set (words) | orig float | orig int8 | run2 float | run2 int8 (62 clips, shipped) | run2 int8 (2 clips) |
+|---|---:|---:|---:|---:|---:|
+| ami-sdm-validation (1322) | 73.07 | 74.21 | 62.56 | 64.67 | 63.92 |
+| ami-ihm-validation (1294) | 55.02 | 56.57 | 42.04 | 42.04 | 42.89 |
+| librispeech-dev-clean (2954) | 5.28 | 6.36 | 6.80 | 7.48 | 8.43 |
+
+No int8 output reaches -128. One value in 1.48 M reaches +127 on LibriSpeech,
+and none on AMI. The largest float logit is 42.1, against an int8 limit of 31.75.
+The fine-tune costs about 1.1 points of int8 WER on LibriSpeech.
+
+## QuartzNet15x5 base export (separate artifact, 2026-09-29)
+
+An int8 export of the NGC `QuartzNet15x5Base-En` checkpoint (not fine-tuned) is
+kept under `/Volumes/USB2/stt/work/deploy15/`. It is **not** installed. The
+deployed 5x5 run2 model and `components/hardwareone/stt/stt_model_identity.h`
+are unchanged. The packed `quartznet15x5.p4.stt` is 15,315,794 bytes. It
+inflates to a 20,112,032-byte ESPDL with 201 nodes (171 Conv, 15 Add,
+15 Relu). The input exponent is -4 and the output exponent is **-1** (the 5x5
+uses -2). The generated header is `stt_model_identity_15x5.h`.
+
+The 15x5 preprocessor config is identical to the 5x5 one, and its `fb` tensor
+is bit-identical. Its stored Hann `window` differs from the 5x5 checkpoint's in
+6 of 320 values, each by at most 6e-8 (the 5x5 copy is 1 ULP off
+`torch.hann_window(320, periodic=False)`). Calibration and evaluation therefore
+use the deployed 5x5 window/fb, which is what the device frontend
+(`ca91eb96...`) computes.
+
+The tooling changes are opt-in, and the 5x5 default path behaves as before.
+`test_graph.py` and `test_pack_model.py` pass, and a default re-pack of run2
+is byte-identical to the installed header and artifact.
+
+* `quartznet_graph.CONFIG_15X5_SHA256` is a second pinned config (`023e8e2c...`).
+  It is accepted only with non-pinned weights, which requires
+  `HW1_STT_ALLOW_WEIGHTS_SHA256`, and only when the weights' encoder block
+  count equals the config's (18). The block structure is always derived from
+  the config.
+* `export_quartznet.py --frontend-checkpoint DIR` takes the window/fb tensors
+  from another pinned checkpoint. When used, the manifest records it under
+  `frontend_checkpoint`.
+* `pack_model.py --artifact-name/--identity-name` set the output file names.
+  The defaults are unchanged.
+* `evaluate_dev_int8.py --frontend-max-abs-diff X` accepts later models whose
+  window/fb differ from the first model's by at most X. The first model's
+  tensors are always used. The default is 0, meaning exact equality.
+
+```sh
+D=/Volumes/USB2/stt/work/deploy15   # ckpt-base15/ = symlinks to the NGC files + fixtures
+export HW1_STT_ALLOW_WEIGHTS_SHA256=b2eb3ebc66e9e82829818131c4da02cf9e1109003c3d445b824d9489869143f9
+nice -n 10 $P export_quartznet.py --checkpoint $D/ckpt-base15 --output $D/export-base15 --threads 4 \
+    --frontend-checkpoint ../speech_portable/private/stt-quartznet \
+    --calib-stores ami-sdm-validation:20 ami-ihm-validation:20 librispeech-dev-clean:20
+nice -n 10 $P pack_model.py --manifest $D/export-base15/manifest.json \
+    --frontend-sha256 ca91eb9683f7151b8be1a01532a6790c6eb7d515f67169a207751e3fc48cc58b \
+    --artifact-name quartznet15x5.p4.stt --identity-name stt_model_identity_15x5.h
+```
+
+The calibration clips are the same 60 as for run2. The table shows greedy WER
+(%) on the same 150 utterances per set as the run2 table; the run2 numbers
+reproduced exactly. The LM column uses the deployed `meeting.lm` unchanged,
+with the 29-class vocabulary, blank 28, and alpha/beta not retuned.
+
+| set | 15x5 float | 15x5 int8 | 15x5 int8 + LM | 5x5 run2 int8 | 5x5 run2 int8 + LM |
+|---|---:|---:|---:|---:|---:|
+| ami-sdm-validation | 53.63 | 56.13 | 52.34 | 64.67 | 58.40 |
+| ami-ihm-validation | 31.45 | 35.32 | 31.14 | 42.04 | 36.63 |
+| librispeech-dev-clean | 3.86 | 4.98 | 4.81 | 7.48 | 5.96 |
+
+No int8 output reaches +127 or -128, and no float logit exceeds the int8
+range of +/-63.5. The largest float logit is 50.4. Quantization costs more
+than on the 5x5: 2.5, 3.9 and 1.1 points.
+
+Costs:
+* MACs are 2.82x the 5x5.
+* Single-thread host CPU time on an 8 s clip is 2.98x (3.53 s vs 1.18 s).
+* Peak live activations are still 2048 B per output frame, taken from the
+  ONNX liveness at the final 1024->1024 layer, so the runtime's arena rule
+  carries over.
+* PSRAM needed for a 20 s segment is 20.11 MB of weights + 2.05 MB arena +
+  0.52 MB of features, about 22.7 MB. The runtime admission check wants
+  23.8 MB including its 1 MiB margin (5x5: 10.9 MB), plus one contiguous
+  20.1 MB block for the weights.

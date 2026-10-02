@@ -1,0 +1,338 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-09-30T03:30:36.852Z",
+  "scope": "Mac host text-to-text reference inference; not a P4 capability or RAM-fit result",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v24.19.0",
+    "cpu": "Apple M1"
+  },
+  "runtime": {
+    "name": "@browsermt/bergamot-translator",
+    "version": "0.4.9",
+    "source_files_unmodified": true,
+    "engine": "Bergamot WASM with embedded intgemm fallback",
+    "configured_workspace_mib": 128,
+    "workspace_override_supported": false,
+    "beam_size": 1,
+    "cache_size": 0,
+    "workers": 1,
+    "max_length_break": 128,
+    "max_length_factor": 2,
+    "mini_batch_words": 1024,
+    "note": "Stock worker forcibly sets workspace=128; this probe does not reduce that setting"
+  },
+  "direction": {
+    "from": "en",
+    "to": "es"
+  },
+  "offline": {
+    "local_assets_only": true,
+    "network_api_guards": [
+      "fetch",
+      "http",
+      "https",
+      "net"
+    ],
+    "blocked_network_attempts": 0,
+    "note": "No model registry or remote translation service is contacted; setup downloads are separate"
+  },
+  "model_assets": [
+    {
+      "part": "model",
+      "filename": "model.enes.intgemm.alphas.bin",
+      "bytes": 17140755,
+      "sha256": "fa7460037a3163e03fe1d23602f964bff2331da6ee813637e092ddf37156ef53"
+    },
+    {
+      "part": "shortlist",
+      "filename": "lex.50.50.enes.s2t.bin",
+      "bytes": 3347104,
+      "sha256": "3a113d713dec3cf1d12bba5b138ae616e28bba4bbc7fe7fd39ba145e26b86d7f"
+    },
+    {
+      "part": "vocab",
+      "filename": "vocab.esen.spm",
+      "bytes": 825463,
+      "sha256": "909b1eea1face0d7f90a474fe29a8c0fef8d104b6e41e65616f864c964ba8845"
+    }
+  ],
+  "model_assets_total_bytes": 21313322,
+  "timing_ms": {
+    "setup": 171.24441599999997,
+    "runtime_initialize": 71.130583,
+    "model_load": 75.32762499999998,
+    "first_decode": 160.67000000000002,
+    "cold_start_through_first_translation": 331.927958,
+    "warm_repeat_min": 8.063040999999998,
+    "warm_repeat_max": 30.649790999999937
+  },
+  "memory": {
+    "process_baseline_after_asset_read": {
+      "rss": 103235584,
+      "heapTotal": 11829248,
+      "heapUsed": 8639496,
+      "external": 46548106,
+      "arrayBuffers": 42773239
+    },
+    "process_sampled_peak_rss_bytes": 431865856,
+    "process_lifetime_max_rss_bytes": 432717824,
+    "after_runtime": {
+      "wasm_linear_memory_bytes": 16777216,
+      "worker_js_memory": {
+        "rss": 156958720,
+        "heapTotal": 19431424,
+        "heapUsed": 9831768,
+        "external": 32418209,
+        "arrayBuffers": 15604497
+      },
+      "blocked_network_attempts": 0
+    },
+    "after_model": {
+      "wasm_linear_memory_bytes": 34603008,
+      "worker_js_memory": {
+        "rss": 233127936,
+        "heapTotal": 19955712,
+        "heapUsed": 9732376,
+        "external": 71557363,
+        "arrayBuffers": 26568671
+      },
+      "blocked_network_attempts": 0
+    },
+    "after_inference": {
+      "wasm_linear_memory_bytes": 458817536,
+      "worker_js_memory": {
+        "rss": 431685632,
+        "heapTotal": 20480000,
+        "heapUsed": 12302624,
+        "external": 464109421,
+        "arrayBuffers": 5255349
+      },
+      "blocked_network_attempts": 0
+    },
+    "note": "RSS includes Node, JS buffers, worker and WASM. WASM linear memory is heap capacity, not live allocations. Neither predicts native P4 minimum RAM."
+  },
+  "results": [
+    {
+      "id": "greeting",
+      "category": "everyday",
+      "text": "Good morning. How are you today?",
+      "review_focus": "Natural greeting and question.",
+      "translated_text": "- Buenos días. Cómo estás hoy?",
+      "first_pass_ms": 160.67000000000002,
+      "first_pass_kind": "first_decode",
+      "warm_repeat_ms": 9.544833999999923,
+      "repeat_match": true
+    },
+    {
+      "id": "directions",
+      "category": "everyday",
+      "text": "Where is the nearest train station?",
+      "review_focus": "Preserve nearest and train station.",
+      "translated_text": "Dónde está la estación de tren más cercana?",
+      "first_pass_ms": 10.841459000000043,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 8.114334000000099,
+      "repeat_match": true
+    },
+    {
+      "id": "request",
+      "category": "everyday",
+      "text": "Could you speak more slowly, please?",
+      "review_focus": "Polite request for slower speech.",
+      "translated_text": "Podrías hablar más despacio, por favor?",
+      "first_pass_ms": 11.093332999999973,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 8.629291999999964,
+      "repeat_match": true
+    },
+    {
+      "id": "water",
+      "category": "everyday",
+      "text": "I would like a glass of water without ice.",
+      "review_focus": "Preserve without ice.",
+      "translated_text": "Me gustaría un vaso de agua sin hielo.",
+      "first_pass_ms": 11.596000000000004,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 10.640999999999963,
+      "repeat_match": true
+    },
+    {
+      "id": "negation",
+      "category": "meaning",
+      "text": "I do not want sugar in my coffee.",
+      "review_focus": "Do not reverse negation.",
+      "translated_text": "No quiero azúcar en mi café.",
+      "first_pass_ms": 9.212582999999995,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 8.184792000000016,
+      "repeat_match": true
+    },
+    {
+      "id": "contrast",
+      "category": "meaning",
+      "text": "I ordered tea, not coffee.",
+      "review_focus": "Tea ordered; coffee rejected.",
+      "translated_text": "Peré té, no café.",
+      "first_pass_ms": 8.656292000000008,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 8.063040999999998,
+      "repeat_match": true
+    },
+    {
+      "id": "numbers",
+      "category": "meaning",
+      "text": "The ticket costs twenty-five dollars and fifty cents.",
+      "review_focus": "Preserve 25 dollars and 50 cents.",
+      "translated_text": "El billete cuesta veinticinco dólares y cincuenta centés.",
+      "first_pass_ms": 15.223375000000033,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 11.625750000000039,
+      "repeat_match": true
+    },
+    {
+      "id": "time",
+      "category": "meaning",
+      "text": "Our train leaves at 6:45 tomorrow morning.",
+      "review_focus": "Preserve time and tomorrow morning.",
+      "translated_text": "Nuestro tren sale mañana a las 6:45.",
+      "first_pass_ms": 10.641083999999978,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 10.903124999999932,
+      "repeat_match": true
+    },
+    {
+      "id": "names",
+      "category": "meaning",
+      "text": "My name is Alex, and I am meeting Maria at the Central Hotel.",
+      "review_focus": "Preserve names and meeting location.",
+      "translated_text": "Me llamo Alex, y me reuniré con María en el Hotel Central.",
+      "first_pass_ms": 16.46129099999996,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 14.66270899999995,
+      "repeat_match": true
+    },
+    {
+      "id": "past",
+      "category": "grammar",
+      "text": "I lost my keys yesterday, but I found them this morning.",
+      "review_focus": "Preserve past events and their order.",
+      "translated_text": "Ayer perdí las llaves, pero las encontré esta mañana.",
+      "first_pass_ms": 15.526834000000008,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 13.556124999999952,
+      "repeat_match": true
+    },
+    {
+      "id": "conditional",
+      "category": "grammar",
+      "text": "If it rains tomorrow, we will stay inside.",
+      "review_focus": "Conditional cause and future action.",
+      "translated_text": "Si llueve mañana, nos quedaremos dentro.",
+      "first_pass_ms": 11.306332999999995,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 10.249207999999953,
+      "repeat_match": true
+    },
+    {
+      "id": "pronouns",
+      "category": "grammar",
+      "text": "She gave him the book because he had asked for it.",
+      "review_focus": "Preserve giver, recipient and causal relationship.",
+      "translated_text": "Ella le dio el libro porque él lo había pedido.",
+      "first_pass_ms": 11.531500000000051,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 10.77312500000005,
+      "repeat_match": true
+    },
+    {
+      "id": "colloquial",
+      "category": "robustness",
+      "text": "I'm running late. Can we meet in ten minutes?",
+      "review_focus": "Late rather than physically running; preserve ten minutes.",
+      "translated_text": "Estoy atrasado. Podemos vernos en diez minutos?",
+      "first_pass_ms": 12.665624999999977,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 12.14833299999998,
+      "repeat_match": true
+    },
+    {
+      "id": "idiom",
+      "category": "robustness",
+      "text": "That sounds good to me. Let's give it a try.",
+      "review_focus": "Natural idiomatic meaning.",
+      "translated_text": "Eso me suena bien. Vamos a intentarlo.",
+      "first_pass_ms": 12.835458000000017,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 12.204291000000012,
+      "repeat_match": true
+    },
+    {
+      "id": "punctuated",
+      "category": "asr_pair",
+      "text": "I need two tickets to Madrid. How much do they cost?",
+      "review_focus": "Reference with punctuation and casing.",
+      "translated_text": "Necesito dos entradas para Madrid. Cuánto cuestan?",
+      "first_pass_ms": 14.519791999999939,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 13.803332999999952,
+      "repeat_match": true
+    },
+    {
+      "id": "asr_lowercase",
+      "category": "asr_pair",
+      "text": "i need two tickets to madrid how much do they cost",
+      "review_focus": "Same meaning without ASR punctuation or casing.",
+      "translated_text": "Necesito dos entradas para madrid lo mucho que cuestan.",
+      "first_pass_ms": 13.415291000000025,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 12.652624999999944,
+      "repeat_match": true
+    },
+    {
+      "id": "asr_contraction",
+      "category": "asr_pair",
+      "text": "i don't understand can you say that again",
+      "review_focus": "Preserve negation and request despite missing punctuation.",
+      "translated_text": "No entiendo que puedas volver a decirlo.",
+      "first_pass_ms": 10.001750000000015,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 9.834958000000029,
+      "repeat_match": true
+    },
+    {
+      "id": "asr_error",
+      "category": "asr_error",
+      "text": "i need two tickets to mad red how much do they cost",
+      "review_focus": "Deliberate ASR corruption; translation cannot be assumed to repair it.",
+      "translated_text": "Necesito dos entradas para locurar cuánto cuestan.",
+      "first_pass_ms": 12.24737499999992,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 12.120041000000015,
+      "repeat_match": true
+    },
+    {
+      "id": "longer",
+      "category": "length",
+      "text": "We arrived this morning, and we would like to leave our bags here while we walk around the city. Is that possible?",
+      "review_focus": "Two related sentences, bags left while visiting the city.",
+      "translated_text": "Llegamos esta mañana, y nos gustaría dejar nuestras maletas aquí mientras caminamos por la ciudad. Es posible?",
+      "first_pass_ms": 30.070542000000046,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 30.649790999999937,
+      "repeat_match": true
+    },
+    {
+      "id": "hardware",
+      "category": "domain",
+      "text": "The microphone is working, but the battery is almost empty.",
+      "review_focus": "Preserve microphone success and low battery contrast.",
+      "translated_text": "El micrófono está funcionando, pero la batería está casi vacía.",
+      "first_pass_ms": 13.450041000000056,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 13.669541999999979,
+      "repeat_match": true
+    }
+  ]
+}

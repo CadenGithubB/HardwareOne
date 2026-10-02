@@ -6,7 +6,7 @@
     "session": {
       "p4": {
         "slot": 0,
-        "mac": "68:EE:8F:50:E9:D0",
+        "mac": "02:48:57:31:00:D0",
         "meshId": 0,
         "sessionId": 35961,
         "dir": "B",
@@ -17,7 +17,7 @@
       },
       "s3": {
         "slot": 0,
-        "mac": "FC:01:2C:E0:B9:A8",
+        "mac": "02:48:57:31:01:A8",
         "meshId": 0,
         "sessionId": 35961,
         "dir": "A",

@@ -35,6 +35,21 @@ set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_FAN 0)
 if(EXISTS "${hw_cfg_file}")
     file(READ "${hw_cfg_file}" HW_CFG_CONTENT)
 
+    # A board feature profile (boards/<board>.features.h) overrides the shared
+    # editable defaults; a deployment profile, prepended below, overrides both.
+    # Build property, not a variable: requirement expansion runs in script mode.
+    idf_build_get_property(_hw_board_feature_file HW1_BOARD_FEATURE_FILE)
+    if(_hw_board_feature_file)
+        if(NOT EXISTS "${_hw_board_feature_file}")
+            message(FATAL_ERROR
+                "HW1 board feature header is missing: ${_hw_board_feature_file}")
+        endif()
+        file(READ "${_hw_board_feature_file}" _hw_board_features)
+        set(HW_CFG_CONTENT "${_hw_board_features}\n${HW_CFG_CONTENT}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${_hw_board_feature_file}")
+    endif()
+
     # A checked-in deployment profile overrides the editable defaults in
     # System_BuildConfig.h. Put its text first so the existing first-match regex
     # parser sees the deployment values, exactly as the C preprocessor will after
@@ -244,6 +259,7 @@ endif()
 set(hardwareone_srcs
         HardwareOne.cpp
         Bluetooth.cpp
+        HAL_Bluetooth.cpp
         System_BleSecureChannel.cpp
         BLE_IDF.cpp
         G2_Glasses.cpp
@@ -662,7 +678,8 @@ endif()
 if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
     list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp)
     if(IDF_TARGET STREQUAL "esp32p4")
-        list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp)
+        # stt_lm.cpp is inert unless System_STTLocal.cpp uses it (ENABLE_STT_LM).
+        list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp stt/stt_lm.cpp)
         list(APPEND hardwareone_requires espressif__esp-dl esp_rom mbedtls)
     endif()
 endif()

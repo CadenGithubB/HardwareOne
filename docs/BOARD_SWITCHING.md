@@ -8,6 +8,7 @@ This document explains how to switch between different ESP32 board configuration
 tools/build_board.sh feathers3               # → build-feathers3/  (own sdkconfig)
 tools/build_board.sh qtpy_esp32              # → build-qtpy_esp32/ (own toolchain cache, classic ESP32)
 tools/build_board.sh xiao_s3 flash monitor   # actions pass through to idf.py
+tools/build_board.sh p4x_eye                 # ESP32-P4X-EYE (run tools/p4/prepare_sdk.sh once first)
 ```
 
 Every board builds in its own `build-<board>/` directory with its own
@@ -71,6 +72,21 @@ This writes the updater, main image, and release artifacts below
 reuse an ordinary board build directory. The canonical Headless Node contracts
 are documented in [`deployments/headless/README.md`](../deployments/headless/README.md).
 
+A contract may also declare `OTA_LAYOUT=0`: a **factory-only** deployment for a
+board without a recovery layout. It keeps the feature header, partition table
+and size gate, but builds no updater, needs no signing key, and produces an
+unsigned release directory for cable flashing. The ESP32-P4X-EYE ships this
+way as [`deployments/handheld/boards/p4x_eye`](../deployments/handheld/README.md):
+
+```bash
+tools/build_deployment.sh handheld p4x_eye
+```
+
+The coverage tools (`tools/build_coverage.sh`, `tools/build_memory_coverage.sh`,
+`tools/feature_size_sweep.sh`) take the board as their first argument and edit
+the board's `boards/<board>.features.h` for any flag it defines, since that
+profile outranks the shared header.
+
 The classic single-`build/` flow below still works and remains what
 `./build/` + bare `idf.py` uses; the sections are kept for reference and for
 one-off menuconfig work.
@@ -84,6 +100,7 @@ one-off menuconfig work.
 | Seeed XIAO ESP32S3 | ESP32-S3 | `XIAO_ESP32S3` | Base board |
 | Seeed XIAO ESP32S3 Sense | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED` | Camera, mic, SD slot |
 | Unexpected Maker FeatherS3[D] | ESP32-S3 | `um_feathers3` | 2× STEMMA QT, MAX17048G fuel gauge, **Quad** PSRAM |
+| Espressif ESP32-P4X-EYE | ESP32-P4 | `esp32p4` + `boards/p4x_eye.features.h` | LCD, wheel + 3 buttons, MIPI camera, PDM mic, battery; Wi-Fi/BLE via onboard C6 - see [P4X_EYE_PERIPHERALS.md](P4X_EYE_PERIPHERALS.md) |
 | Generic ESP32 | ESP32 | `esp32` | Fallback — verify pins manually |
 
 ---
@@ -129,6 +146,7 @@ boards/feathers3.defaults         # esp32s3  — um_feathers3       + Quad PSRAM
 boards/xiao_s3.defaults           # esp32s3  — XIAO_ESP32S3       + Octal PSRAM,  8 MB flash
 boards/qtpy_esp32.defaults        # esp32    — adafruit_qtpy_esp32      + Quad PSRAM, 8 MB flash
 boards/feather_esp32_v2.defaults  # esp32    — adafruit_feather_esp32_v2 + Quad PSRAM, 8 MB flash
+boards/p4x_eye.defaults           # esp32p4  - esp32p4 + C6 Hosted radio wiring + camera sensor, 16 MB flash
 ```
 
 The XIAO profile also pins the camera component to the three sensors this
@@ -178,6 +196,13 @@ reports 0 KB PSRAM.
    and (on ESP32 PICO parts) `CONFIG_PICO_PSRAM_CS_IO`. Start the file with a
    `# HW_TARGET: <chip>` marker so the build can validate it against the target.
 3. Build with `HW_BOARD=<short_name>` (after `idf.py set-target <chip>`).
+4. Optional: if the board's application features differ from the shared
+   editable defaults (a board with no I2C display, a different radio, ...), add
+   `boards/<short_name>.features.h` with `#undef`/`#define` pairs, one literal
+   `#define NAME value` per setting. `System_BuildConfig.h` includes it after its
+   defaults and the CMake source gates read it too, so it only applies when that
+   board is selected. A deployment profile, if also selected, is applied after
+   it. `boards/p4x_eye.features.h` is the example.
 
 > **Original Adafruit Feather ESP32 (HUZZAH32) is not supported.** It has 4 MB
 > flash and no PSRAM; this firmware's factory app partition alone is ~4.83 MB
@@ -362,6 +387,9 @@ sdkconfig.defaults.esp32        # ESP32-family (Quad PSRAM, DIO flash, Classic B
 sdkconfig.defaults.esp32s3      # ESP32-S3-family commons (PSRAM presence/speed, QIO flash, BLE only)
 boards/xiao_s3.defaults         # XIAO ESP32-S3: variant + Octal PSRAM mode  (default if HW_BOARD unset)
 boards/feathers3.defaults       # FeatherS3[D]: variant + Quad PSRAM mode    (activate with HW_BOARD=feathers3)
+sdkconfig.defaults.esp32p4      # ESP32-P4-family commons (400 MHz, hex PSRAM, Hosted Wi-Fi/BLE, camera pipeline)
+boards/p4x_eye.defaults         # P4X-EYE: C6 SDIO wiring, 16 MB flash, OV2710/SC2336 camera
+boards/p4x_eye.features.h       # P4X-EYE application feature profile (not an sdkconfig file)
 ```
 
 ESP-IDF loads them in order — later files override earlier. For S3 builds the

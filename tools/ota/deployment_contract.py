@@ -24,6 +24,7 @@ class DeploymentContract:
     board_id: str
     target: str
     flash_size: str
+    ota_layout: bool
     layout_id: str
     version_suffix: str
     partition_csv: pathlib.Path
@@ -35,8 +36,12 @@ class DeploymentContract:
     source: pathlib.Path
 
     @property
+    def app_partition_name(self) -> str:
+        return "ota_0" if self.ota_layout else "factory"
+
+    @property
     def ota_slot_size(self) -> int:
-        return partition_size(self.partition_csv, "ota_0")
+        return partition_size(self.partition_csv, self.app_partition_name)
 
 
 def contract_path(selector: str) -> pathlib.Path:
@@ -69,7 +74,14 @@ def _parse(path: pathlib.Path) -> dict[str, str]:
     return values
 
 
-def load(selector: str) -> DeploymentContract:
+def load(selector: str, require_ota: bool = True) -> DeploymentContract:
+    """Load one contract.
+
+    The OTA release tools call this with the default ``require_ota=True`` and
+    get a clear error for a factory-only deployment (OTA_LAYOUT=0), which has
+    no updater, manifest or bundle. Tooling that handles both kinds passes
+    ``require_ota=False`` and checks ``ota_layout`` itself.
+    """
     source = contract_path(selector)
     values = _parse(source)
     required = {
@@ -78,13 +90,17 @@ def load(selector: str) -> DeploymentContract:
         "TARGET",
         "FLASH_SIZE",
         "OTA_LAYOUT",
-        "OTA_LAYOUT_ID",
-        "OTA_VERSION_SUFFIX",
         "PARTITION_CSV",
         "FEATURE_HEADER",
         "MAIN_RELEASE_MAX",
-        "UPDATER_RELEASE_MAX",
         "FLASH_ENCRYPTION",
+    }
+    # Only a recovery-OTA contract carries a layout id, a version suffix and
+    # an updater size gate; a factory-only contract must not mention them.
+    ota_only = {
+        "OTA_LAYOUT_ID",
+        "OTA_VERSION_SUFFIX",
+        "UPDATER_RELEASE_MAX",
     }
     # Keys a contract MAY declare. An sdkconfig overlay is the only supported
     # way for a deployment to state policy that contradicts its board file --
@@ -93,6 +109,12 @@ def load(selector: str) -> DeploymentContract:
     optional = {
         "SDKCONFIG_DEFAULTS",
     }
+    ota_layout_value = values.get("OTA_LAYOUT")
+    if ota_layout_value not in {"0", "1"}:
+        raise ValueError(f"{source}: OTA_LAYOUT must be 0 (factory-only) or 1 (recovery OTA)")
+    ota_layout = ota_layout_value == "1"
+    if ota_layout:
+        required = required | ota_only
     missing = sorted(required - values.keys())
     unknown = sorted(values.keys() - required - optional)
     if missing or unknown:
@@ -106,11 +128,14 @@ def load(selector: str) -> DeploymentContract:
     family, board = selector.split("/", 1)
     if values["DEPLOYMENT_ID"] != family or values["BOARD_ID"] != board:
         raise ValueError(f"{source}: selector and deployment/board identity disagree")
-    if values["OTA_LAYOUT"] != "1":
-        raise ValueError(f"{source}: OTA_LAYOUT must be 1")
+    if require_ota and not ota_layout:
+        raise ValueError(
+            f"{source}: {selector} is a factory-only deployment (OTA_LAYOUT=0); "
+            "it has no recovery updater, manifest or bundle"
+        )
     if values["FLASH_ENCRYPTION"] not in {"0", "1"}:
         raise ValueError(f"{source}: FLASH_ENCRYPTION must be 0 or 1")
-    for key in ("MAIN_RELEASE_MAX", "UPDATER_RELEASE_MAX"):
+    for key in ("MAIN_RELEASE_MAX",) + (("UPDATER_RELEASE_MAX",) if ota_layout else ()):
         if not HEX_RE.fullmatch(values[key]):
             raise ValueError(f"{source}: {key} must be hexadecimal")
 
@@ -131,28 +156,46 @@ def load(selector: str) -> DeploymentContract:
         board_id=board,
         target=values["TARGET"],
         flash_size=values["FLASH_SIZE"],
-        layout_id=values["OTA_LAYOUT_ID"],
-        version_suffix="+" + values["OTA_VERSION_SUFFIX"].removeprefix("+"),
+        ota_layout=ota_layout,
+        layout_id=values["OTA_LAYOUT_ID"] if ota_layout else "",
+        version_suffix=("+" + values["OTA_VERSION_SUFFIX"].removeprefix("+")) if ota_layout else "",
         partition_csv=partition_csv,
         feature_header=feature_header,
         sdkconfig_defaults=sdkconfig_defaults,
         main_release_max=int(values["MAIN_RELEASE_MAX"], 0),
-        updater_release_max=int(values["UPDATER_RELEASE_MAX"], 0),
+        updater_release_max=int(values["UPDATER_RELEASE_MAX"], 0) if ota_layout else 0,
         flash_encryption=values["FLASH_ENCRYPTION"] == "1",
         source=source,
     )
     if contract.main_release_max > contract.ota_slot_size:
-        raise ValueError(f"{source}: MAIN_RELEASE_MAX exceeds ota_0")
+        raise ValueError(
+            f"{source}: MAIN_RELEASE_MAX exceeds {contract.app_partition_name}"
+        )
     return contract
 
 
-def available() -> tuple[str, ...]:
+def _is_ota(path: pathlib.Path) -> bool:
+    """Read OTA_LAYOUT as text; a malformed contract fails later in load()."""
+    try:
+        return _parse(path).get("OTA_LAYOUT") == "1"
+    except ValueError:
+        return True
+
+
+def available(include_factory_only: bool = False) -> tuple[str, ...]:
+    """Checked-in deployment selectors.
+
+    By default only recovery-OTA contracts (OTA_LAYOUT=1): every caller in
+    tools/ota builds or audits OTA artifacts, which a factory-only deployment
+    (OTA_LAYOUT=0) does not have.
+    """
     selectors: list[str] = []
     root = REPOSITORY / "deployments"
     if not root.is_dir():
         return ()
     for path in root.glob("*/boards/*/contract.conf"):
-        selectors.append(f"{path.parents[2].name}/{path.parent.name}")
+        if include_factory_only or _is_ota(path):
+            selectors.append(f"{path.parents[2].name}/{path.parent.name}")
     return tuple(sorted(selectors))
 
 

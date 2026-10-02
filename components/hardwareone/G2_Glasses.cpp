@@ -22,8 +22,6 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 #include <esp_gap_ble_api.h>  // esp_ble_gap_update_conn_params (HIGH priority)
-#include <esp_bt.h>
-#include <esp_bt_main.h>
 #include <esp_attr.h>         // EXT_RAM_BSS_ATTR
 #include <esp_heap_caps.h>    // heap_caps_get_free_size — ESP.getFreeHeap() is
                               // MALLOC_CAP_INTERNAL with no 8BIT, so it counts the
@@ -35,6 +33,7 @@
 #include "G2_ConversateSession.h"
 #include "System_Lz4.h"     // lz4Compress* — CompressMode=2 image push (Q32/Q32f)
 #include "Bluetooth.h"
+#include "HAL_Bluetooth.h"
 #include "System_Debug.h"
 #include "System_Filesystem.h"  // requireQuotedToken (uniform quoted-path rule)
 #include "System_Command.h"
@@ -2934,36 +2933,45 @@ bool bleConnectWatched(BLEClient* client, BLEAdvertisedDevice* dev,
 // Forward decls
 // =============================================================================
 
-// Raise-only local preferred ATT MTU, request per-connection exchange, wait
-// for CFG_MTU_EVT (Arduino BLEClient updates m_mtu there). See plan:
-// per-link BLE MTU / stop global local-MTU pollution.
+// Raise-only local preferred ATT MTU; preserve a completed exchange. Otherwise
+// let initial service discovery settle before requesting a single exchange.
+// Discovery has its own library bound (30 seconds); timeoutMs bounds only the
+// subsequent wait for CFG_MTU_EVT, which owns the negotiated MTU value.
 uint16_t bleNegotiateConnMtu(BLEClient* client, uint16_t preferred,
                              uint32_t timeoutMs, const char* logTag) {
-  if (!client) return 23;
+  if (!client || !client->isConnected()) return 23;
   if (!logTag) logTag = "BLE";
 
   if (BLEDevice::getMTU() < preferred) {
     BLEDevice::setMTU(preferred);
   }
 
-  // An exchange may already have completed before we run (library-internal
-  // auto-request). Capture that before we re-request; getMTU() is only ever
-  // written from CFG_MTU_EVT (patched lib), so >23 means a real negotiation.
-  const uint16_t before = client->getMTU();
-  client->setMTU(preferred);
-
-  uint16_t neg = before;
-  if (before <= 23) {
+  uint16_t neg = client->getMTU();
+  if (neg <= 23) {
+    // Bluedroid may report CONNECT before OPEN binds the Arduino connection
+    // ID, so its automatic exchange can be skipped. An immediate explicit
+    // request can instead collide with initial ATT discovery (GATT_BUSY).
+    // G2/R1 both require services; an empty/failed lookup cannot qualify them.
+    auto* services = client->getServices();
+    if (!client->isConnected() || !services || services->empty()) {
+      DEBUG_G2F("[%s] MTU: service discovery unavailable; no exchange requested", logTag);
+      return 23;
+    }
+    neg = client->getMTU();
+  }
+  if (neg <= 23 && client->setMTU(preferred)) {
     // Elapsed-time compare, not deadline compare: millis()+timeoutMs overflows
     // near the 32-bit wrap (~49.7 days) and a deadline compare exits instantly.
     const uint32_t start = millis();
-    while ((uint32_t)(millis() - start) < timeoutMs) {
+    while (client->isConnected() &&
+           (uint32_t)(millis() - start) < timeoutMs) {
       neg = client->getMTU();
       if (neg > 23) break;
       vTaskDelay(pdMS_TO_TICKS(10));
     }
     neg = client->getMTU();
   }
+  if (!client->isConnected()) return 23;
 
   DEBUG_G2F("[%s] MTU: local_pref=%u negotiated=%u",
             logTag,
@@ -3302,7 +3310,7 @@ static void copyBleAddressText(char (&dst)[BLE_PEER_ADDRESS_TEXT_CAPACITY],
                                const char* src) {
   memset(dst, 0, sizeof(dst));
   if (!src) return;
-  strncpy(dst, src, sizeof(dst) - 1);
+  memcpy(dst, src, strnlen(src, sizeof(dst) - 1));
 }
 
 static void g2ScanSetMacContext(const char* filterL, const char* filterR,
@@ -4273,6 +4281,10 @@ bool g2MicStreamEnable(bool on) {
 // BLE host context (disconnect) — release with the latch already clear is a
 // pure no-op, and a depth-0 release sends nothing on air by arbiter policy.
 static std::atomic<bool> gMicFastHeld{false};
+// Set when a lens container comes back up while a G2 capture has lost its
+// stream to the preceding teardown. The heartbeat worker re-arms at once
+// instead of on its next ~1 Hz lap; the capture only tolerates a short gap.
+static std::atomic<bool> gMicReassertNow{false};
 void g2MicLinkFastAcquire() {
   if (!gMicFastHeld.exchange(true)) g2ConnPriRequestFast("g2-mic");
 }
@@ -4326,6 +4338,16 @@ void g2MicReleaseCaptureContainer() {
 // (CM5/UART micrecord, no lens ticking) the heartbeat worker calls this ~1 Hz
 // while G2 recording is active, replicating that keepalive so the mic stays live
 // regardless of the display state. One BLE write; idempotent on the glasses.
+#if ENABLE_MICROPHONE
+// A real G2 capture that needs PCM delivered: the recorder (openmic keeps the
+// HAL lease active while idle, so the recorder FSM is the authority) or local
+// transcription, which owns the HAL directly without the recorder.
+static bool g2MicCaptureWanted() {
+  return audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT &&
+         (micRecordingBusy() || audioCaptureOwnedBy("stt"));
+}
+#endif
+
 static bool g2MicStreamReassert() {
   if (g2ConversateActive()) return false;
   if (!g2TempleReadyAtGeneration(gL)) return false;
@@ -4334,9 +4356,7 @@ static bool g2MicStreamReassert() {
   // keeps the HAL capture lease active while the recorder is idle; treating
   // that lease as a recording streams LC3 whenever an unrelated Lens page is
   // open and poisons the next recording's rising-edge reset.
-  if (!(audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT &&
-        micRecordingBusy()))
-    return false;
+  if (!g2MicCaptureWanted()) return false;
 #endif
   uint8_t buf[64];
   size_t n = g2BuildAudioCtrl(allocSeq(), G2_MAGIC_AUDIO_CTRL, /*on=*/true, buf, sizeof(buf));
@@ -14583,8 +14603,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     bool g2MicCaptureActive = false;
 #if ENABLE_MICROPHONE
     g2MicCaptureActive =
-        (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT &&
-         micRecordingBusy());
+        g2MicCaptureWanted();
 #endif
     const bool cancelRetryPending = g2EvenAiCancelRetryPending();
     // gMicRecFile/pending-close: a bench g2micrec dump has no HAL capture,
@@ -14622,8 +14641,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     // making a previous capture's `degraded` latch immortal. The pre-sleep
     // value above is only ever used for ownerWaitMs.
     g2MicCaptureActive =
-        (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT &&
-         micRecordingBusy());
+        g2MicCaptureWanted();
 #endif
 
 #if ENABLE_MICROPHONE
@@ -14637,7 +14655,8 @@ static void heartbeatWorkerTask(void* /*arg*/) {
         g2LensGetState().containerReady) {
       static uint32_t sLastMicReassertMs = 0;
       const uint32_t nowMs = millis();
-      if (nowMs - sLastMicReassertMs >= 1000u) {
+      if (gMicReassertNow.exchange(false) ||
+          nowMs - sLastMicReassertMs >= 1000u) {
         sLastMicReassertMs = nowMs;
         g2MicStreamReassert();
       }
@@ -15800,12 +15819,11 @@ bool initG2Client() {
     return false;
   }
   // A disable/role-change path may already have completed the terminal host
-  // teardown requested by a quarantined client. The native terminal states
-  // are the positive lifetime acknowledgement; do not carry a client-only
+  // teardown requested by a quarantined client. Terminal host state and a
+  // checked local/remote controller teardown acknowledge this lifetime; do not
+  // carry a client-only
   // admission block into the next clean generation.
-  if (gBleClientRetirementPeerMask != 0 &&
-      esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED &&
-      esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
+  if (gBleClientRetirementPeerMask != 0 && bluetoothHalStatus().stopped()) {
     bleCentralClientsTerminalTeardownAcknowledged();
   }
   if (bleStackLifecycleFaulted() &&
@@ -15861,8 +15879,7 @@ bool initG2Client() {
       return false;
     }
   }
-  if (BLEDevice::getInitialized() || isBluedroidHostEnabled() ||
-      esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE) {
+  if (!bluetoothHalStatus().stopped()) {
     // A runtime-only G2 deinit can leave the host/controller generation up.
     // Normalize it with the checked host-first teardown; a controller-only
     // btStop/btStart while Bluedroid is live preserves exactly the stale TCB /
@@ -15876,7 +15893,7 @@ bool initG2Client() {
       return false;
     }
     BLEDevice::setCustomGapHandler(nullptr);
-    const BLEDeviceDeinitResult reset = BLEDevice::deinitChecked(false);
+    const BluetoothHalShutdownResult reset = bluetoothHalDeinit();
     if (!reset.success) {
       bleStackSetLifecycleFault(true);
       broadcastOutput("[G2] Existing BLE host could not be normalized; reboot required");
@@ -15921,14 +15938,12 @@ bool initG2Client() {
   templeInit(gL, 'L');
   templeInit(gR, 'R');
 
-  BLEDevice::init("HardwareOne");
-  if (!BLEDevice::getInitialized() || !isBluedroidHostEnabled() ||
-      !isBleControllerEnabled()) {
-    // BLEDevice::init can fail after enabling the native controller/host but
+  if (!bluetoothHalInit("HardwareOne")) {
+    // Initialization can fail after enabling the controller/host but
     // before publishing its Arduino initialized flag. Never free app state
     // while that partial host generation can still dispatch callbacks.
     BLEDevice::setCustomGapHandler(nullptr);
-    const BLEDeviceDeinitResult rollback = BLEDevice::deinitChecked(false);
+    const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
     if (!rollback.success) bleStackSetLifecycleFault(true);
     gG2State->~G2ClientState();
@@ -15938,6 +15953,17 @@ bool initG2Client() {
         ? "[G2] BLE host initialization failed (rolled back)"
         : "[G2] BLE host initialization failed; teardown incomplete — reboot required");
     return false;
+  }
+  // Respect the shared setting in either role when the backend can apply it.
+  // Hosted keeps its companion default and explicitly lacks this capability.
+  if (bluetoothHalSupportsTxPower()) {
+    const esp_err_t powerErr = bluetoothHalSetTxPower(
+        (uint8_t)constrain(gSettings.bleTxPower, 0, 7));
+    if (powerErr != ESP_OK) {
+      BROADCAST_PRINTF("[G2] TX power setting failed: %s", esp_err_to_name(powerErr));
+    }
+  } else {
+    broadcastOutput("[G2] Radio backend controls BLE TX power; using companion default");
   }
   BLEDevice::setMTU(MTU_TARGET);
   // Make the APPLIED connection interval observable. Until now nothing in the
@@ -15953,7 +15979,7 @@ bool initG2Client() {
   gScan = BLEDevice::getScan();
   if (!gScan || !g2ScanCallbackResetAfterHostInit()) {
     BLEDevice::setCustomGapHandler(nullptr);
-    const BLEDeviceDeinitResult rollback = BLEDevice::deinitChecked(false);
+    const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
     if (!rollback.success) bleStackSetLifecycleFault(true);
     gG2State->~G2ClientState();
@@ -16123,12 +16149,12 @@ bool isG2ClientInitialized() {
 // detects. Retrying can never clear it, so something has to reset the stack;
 // this is that, minus the reboot.
 //
-// BLEDevice::deinit(false) is the operative step: it runs
-// esp_bluedroid_disable/deinit AND esp_bt_controller_disable/deinit, which is
+// bluetoothHalDeinit() is the operative step: it shuts down the local host AND
+// the local or Hosted controller, which is
 // what drops the parked TCB and the controller's cancel state. A btStop /
 // btStart controller cycle is NOT sufficient — the stuck TCB lives in the
 // HOST, and a controller-only bounce leaves it exactly where it was. Memory is
-// retained (release_memory=false) so initG2Client's BLEDevice::init brings the
+// retained (release_memory=false) so initG2Client's HAL initialization brings the
 // stack straight back up.
 //
 // deinitBluetooth() is not the path here either: it early-returns unless the
@@ -16214,7 +16240,7 @@ bool bleStackRecycleIfWedged(void) {
   // suppress a later safe recovery for ten minutes.
   sBleLastRecycleMs = now ? now : 1;   // 0 is the "never recycled" sentinel
   BLEDevice::setCustomGapHandler(nullptr);
-  const BLEDeviceDeinitResult deinitResult = BLEDevice::deinitChecked(false);
+  const BluetoothHalShutdownResult deinitResult = bluetoothHalDeinit();
   vTaskDelay(pdMS_TO_TICKS(200));
 
   if (!deinitResult.success) {
@@ -16233,14 +16259,12 @@ bool bleStackRecycleIfWedged(void) {
   }
   bleCentralClientsTerminalTeardownAcknowledged();
 
-  const esp_bluedroid_status_t host = esp_bluedroid_get_status();
-  const esp_bt_controller_status_t controller = esp_bt_controller_get_status();
-  if (host != ESP_BLUEDROID_STATUS_UNINITIALIZED ||
-      controller != ESP_BT_CONTROLLER_STATUS_IDLE) {
+  const BluetoothHalStatus stack = bluetoothHalStatus();
+  if (!stack.stopped()) {
     bleStackSetLifecycleFault(true);
     BROADCAST_PRINTF("[BLE] Stack recycle FAILED to normalize host/controller "
-                     "(host=%d controller=%d) — reboot required",
-                     (int)host, (int)controller);
+                     "(hostUninitialized=%d controller=%d) — reboot required",
+                     (int)stack.hostUninitialized, (int)stack.controller);
     systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "normalize-failed", nullptr);
     return false;
   }
@@ -16273,8 +16297,7 @@ bool bleStackRecycleIfWedged(void) {
   // explicit role transition remains serialized by the same transition token.
   const bool ok = initG2Client();
   if (ok) {
-    if (!BLEDevice::getInitialized() || !isBluedroidHostEnabled() ||
-        !isBleControllerEnabled() || !isG2ClientInitialized() ||
+    if (!bluetoothHalStatus().ready() || !isG2ClientInitialized() ||
         isBleServerInitialized()) {
       BROADCAST_PRINTF("[BLE] Stack recycle re-init reported success but "
                        "host/controller state is incomplete — reboot required");
@@ -19855,6 +19878,11 @@ struct PageSwapArgs {
                                  // memory the spec's pointers reference.
   char*            titleName;    // heap-owned strdup
   char*            titleContent; // heap-owned strdup
+  // Optional second text child (e.g. header + body panes beside the list).
+  bool             hasTitle2;
+  G2TextChildSpec  title2Spec;
+  char*            title2Name;   // heap-owned strdup
+  char*            title2Content;// heap-owned strdup
   G2ContainerGeom  listGeom;     // list geom (titleSpec carries its own)
   // Shared:
   G2ContainerGeom  geom;         // on-lens rectangle for the new container
@@ -19913,6 +19941,8 @@ static void freePageSwapArgs(PageSwapArgs* args) {
     freePageSwapItems(args->items, args->itemCount);
     free(args->titleName);
     free(args->titleContent);
+    free(args->title2Name);
+    free(args->title2Content);
   }
   delete args;
 }
@@ -20181,6 +20211,20 @@ static bool pageSwapJobBody(PageSwapArgs* args) {
                                                const G2ContainerGeom& listGeom,
                                                const G2TextChildSpec& title,
                                                uint32_t widgetId);
+    if (args->hasTitle2) {
+      extern bool sendCreateMixedListMultiTextAndWait(G2Temple& arm,
+                                                      const char* const* listItems,
+                                                      size_t listItemCount,
+                                                      const G2ContainerGeom& listGeom,
+                                                      const G2TextChildSpec* textChildren,
+                                                      size_t textChildCount,
+                                                      uint32_t widgetId);
+      const G2TextChildSpec children[2] = { args->titleSpec, args->title2Spec };
+      createOk = sendCreateMixedListMultiTextAndWait(*arm,
+                                                     (const char* const*)args->items,
+                                                     args->itemCount, args->listGeom,
+                                                     children, 2, BLOCKS_WIDGET_ID);
+    } else
     createOk = sendCreateMixedListTextAndWait(*arm,
                                               (const char* const*)args->items,
                                               args->itemCount,
@@ -20873,6 +20917,8 @@ static bool pageSwapEnqueue(PageSwapArgs* args) {
     DEBUG_G2F("[G2] page-swap enqueue: worker unavailable");
     return false;
   }
+  // The snapshot owns a submitter claim, including on lifecycle rejection.
+  G2UiSubmitClaim submitClaim;
   uint32_t lifecycleEpoch = 0;
   uint32_t sourcePresentationEpoch = 0;
   uint32_t sourceTextSlotSerial = 0;
@@ -20885,7 +20931,6 @@ static bool pageSwapEnqueue(PageSwapArgs* args) {
   args->lifecycleEpoch = lifecycleEpoch;
   args->sourcePresentationEpoch = sourcePresentationEpoch;
   args->sourceTextSlotSerial = sourceTextSlotSerial;
-  G2UiSubmitClaim submitClaim;
   LensUiJob* job = new (std::nothrow) LensUiJob{};
   if (!job) {
     DEBUG_G2F("[G2] page-swap enqueue: LensUiJob alloc failed");
@@ -22259,6 +22304,49 @@ bool g2ShowMixedListText(const char* const* items, size_t itemCount,
     pageSwapCancel();
     return false;
   }
+  return true;
+}
+
+// List + two text children (e.g. a status header over a scrolling body).
+// Each child is updated independently afterwards via g2UpdateMixedTextChild,
+// so a small header change and a long body never share one UPDATE budget.
+bool g2ShowMixedListText2(const char* const* items, size_t itemCount,
+                          const G2ContainerGeom& listGeom,
+                          const G2TextChildSpec& first, const G2TextChildSpec& second) {
+  if (!items || itemCount == 0 || pageSwapInFlight()) return false;
+  G2Temple* arm = nullptr;
+  if (gR.connected && !gR.pluginDead)      arm = &gR;
+  else if (gL.connected && !gL.pluginDead) arm = &gL;
+  if (!arm) return false;
+  char** itemsCopy = dupPageSwapItems(items, itemCount);
+  if (!itemsCopy) return false;
+  auto dup = [](const char* src, const char* tag) -> char* {
+    const char* s = src ? src : "";
+    const size_t n = strlen(s);
+    char* d = (char*)ps_alloc(n + 1, AllocPref::PreferPSRAM, tag);
+    if (d) memcpy(d, s, n + 1);
+    return d;
+  };
+  char* n1 = dup(first.containerName, "g2.listText2.name1");
+  char* c1 = dup(first.content, "g2.listText2.content1");
+  char* n2 = dup(second.containerName, "g2.listText2.name2");
+  char* c2 = dup(second.content, "g2.listText2.content2");
+  PageSwapArgs* args = (n1 && c1 && n2 && c2) ? new (std::nothrow) PageSwapArgs{} : nullptr;
+  if (!args) {
+    free(n1); free(c1); free(n2); free(c2);
+    freePageSwapItems(itemsCopy, itemCount);
+    return false;
+  }
+  args->kind = PSK_LIST_TEXT;
+  args->items = itemsCopy; args->itemCount = itemCount;
+  args->titleSpec = first; args->titleSpec.containerName = n1; args->titleSpec.content = c1;
+  args->titleName = n1; args->titleContent = c1;
+  args->hasTitle2 = true;
+  args->title2Spec = second; args->title2Spec.containerName = n2; args->title2Spec.content = c2;
+  args->title2Name = n2; args->title2Content = c2;
+  args->listGeom = listGeom; args->geom = listGeom;
+  if (!pageSwapBegin()) { freePageSwapArgs(args); return false; }
+  if (!pageSwapEnqueue(args)) { freePageSwapArgs(args); pageSwapCancel(); return false; }
   return true;
 }
 
@@ -24020,6 +24108,15 @@ void g2LensApplyContainer(bool ready, bool isList, uint32_t widgetId) {
   if (ready) {
     DEBUG_G2F("[G2] lens.container ready=1 isList=%d wid=%u",
               isList ? 1 : 0, (unsigned)widgetId);
+#if ENABLE_MICROPHONE
+    // A page swap mid-capture stopped the glasses' mic stream; wake the owner
+    // to re-arm now that a container exists again (no BLE TX from here).
+    if (!gMicStreamOn && g2MicCaptureWanted()) {
+      gMicReassertNow.store(true);
+      if (gBeatSem) xSemaphoreGive(gBeatSem);
+      DEBUG_G2F("[G2-MIC] container back mid-capture — re-arming stream now");
+    }
+#endif
   } else {
     DEBUG_G2F("[G2] lens.container cleared");
   }

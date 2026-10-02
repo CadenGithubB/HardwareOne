@@ -188,7 +188,7 @@ static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
                              uint8_t status) {
   V4PayloadKeyExConfirm conf = {};
   conf.meshFingerprint = meshFingerprint;
-  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   memcpy(conf.confirmerMac, selfMac, 6);
   conf.status = status;
   const auto& self = espnowIdentityGet();
@@ -327,7 +327,7 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   }
   V4PayloadKeyExReply reply = {};
   reply.meshFingerprint = msg->meshFingerprint;
-  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   memcpy(reply.responderMac, selfMac, 6);
   memcpy(reply.responderPubEd25519, self.pub, 32);
   if (!computeKeyExHmac(msg->meshFingerprint, selfMac, self.pub, bootKey, reply.hmac)) {
@@ -519,7 +519,7 @@ static bool keyExSendHello(const uint8_t peerMac[6], int slot) {
   if (!ensureUnencryptedPeer(peerMac)) return false;
 
   uint8_t selfMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  espnowSelfStaMac(selfMac);
 
   V4PayloadKeyExHello hello = {};
   hello.meshFingerprint = gSettings.meshes[slot].fingerprint;
@@ -753,7 +753,7 @@ void runDeferredSessionOpen(void* arg) {
     return;
   }
 
-  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   if (memcmp(msg->responderMac, selfMac, 6) != 0) {
     WARN_ESPNOWF("SESSION_OPEN: responderMac is not us — ignoring");
     free(w);
@@ -909,7 +909,7 @@ void runDeferredSessionConfirm(void* arg) {
     free(w);
     return;
   }
-  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   if (memcmp(msg->initiatorMac, selfMac, 6) != 0) {
     WARN_ESPNOWF("SESSION_CONFIRM: initiatorMac is not us");
     free(w);
@@ -1057,7 +1057,7 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel) 
   SessionState* s = sessionAllocate(peerMac, peer->meshId);
   if (!s) return false;
 
-  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   s->myDirection = sessionIsASide(selfMac, peerMac) ? 0 : 1;
 
   // Random sessionId in [1, 0xFFFE]. randombytes_uniform returns [0, n).
@@ -1162,7 +1162,7 @@ bool sendRekey(SessionState* s, const uint8_t peerMac[6]) {
   const auto& self = espnowIdentityGet();
   if (!self.valid) return false;
 
-  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
 
   // Fresh ephemeral keypair.
   uint8_t newEphPub[32], newEphSec[32];
@@ -1248,7 +1248,7 @@ void runDeferredRekey(void* arg) {
     free(w);
     return;
   }
-  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   uint8_t transcript[75];
   buildRekeyTranscript(transcript, msg->sessionId,
                        msg->senderMac, msg->receiverMac,

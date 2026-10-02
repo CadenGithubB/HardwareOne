@@ -73,9 +73,13 @@ char *Adafruit_GPS::build(char *nmea, const char *thisSource,
     return NULL;
   *nmea = '$';
   char *p = nmea + 1; // Pointer to move through the sentence
-  strncpy(p, thisSource, strlen(thisSource));
+  // [hardwareone local patch 2026-10-01] memcpy of the exact length: strncpy
+  // with the source length is a truncating copy by definition, which GCC 14
+  // (ESP-IDF 5.5.5) rejects under -Werror=stringop-truncation. No behaviour
+  // change; the sentence is terminated by the caller's final writes below.
+  memcpy(p, thisSource, strlen(thisSource));
   p += strlen(thisSource);
-  strncpy(p, thisSentence, strlen(thisSentence));
+  memcpy(p, thisSentence, strlen(thisSentence));
   p += strlen(thisSentence);
   *p = ',';
   p += 1; // Now $XXSSS, and need to add argument fields

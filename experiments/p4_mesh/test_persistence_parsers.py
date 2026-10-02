@@ -9,9 +9,9 @@ from test_persistence import autostart_value, compare_saved_state, prove_reboot,
 
 class PersistenceEvidenceTests(unittest.TestCase):
     def test_public_identity_excludes_private_material_and_requires_valid_key(self):
-        document = {"schema": 1, "valid": True, "mac": "FC:01:2C:E0:B9:A8", "pub": "AB" * 32,
+        document = {"schema": 1, "valid": True, "mac": "02:48:57:31:01:A8", "pub": "AB" * 32,
                     "createdAtSec": 0, "regenCount": 0}
-        actual = public_identity(document, "fc:01:2c:e0:b9:a8")
+        actual = public_identity(document, "02:48:57:31:01:a8")
         self.assertEqual(actual["pub"], "ab" * 32)
         self.assertEqual(set(actual), {"mac", "pub", "createdAtSec", "regenCount"})
         with self.assertRaises(CheckFailed):

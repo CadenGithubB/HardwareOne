@@ -1,0 +1,26 @@
+{
+  "repository": "qvac/TranslatePsy-EuroNano",
+  "revision": "3a5e1e4e2f7001ff5cfd79785bef03cf19281b73",
+  "architecture": "Tiny",
+  "pack": "en-xx/Tiny/intgemm",
+  "files": [
+    {
+      "path": "model.intgemm.alphas.bin",
+      "url": "https://huggingface.co/qvac/TranslatePsy-EuroNano/resolve/3a5e1e4e2f7001ff5cfd79785bef03cf19281b73/en-xx/Tiny/intgemm/model.intgemm.alphas.bin",
+      "bytes": 17141227,
+      "sha256": "646c87844fd9917e929feed627ec7f21b245f7bfded5442b61dc8b4b1b1e68dd"
+    },
+    {
+      "path": "lex.50.50.enxx.s2t.bin",
+      "url": "https://huggingface.co/qvac/TranslatePsy-EuroNano/resolve/3a5e1e4e2f7001ff5cfd79785bef03cf19281b73/en-xx/Tiny/intgemm/lex.50.50.enxx.s2t.bin",
+      "bytes": 614636,
+      "sha256": "9e0c8b830ef2ac6eecc56c54c974d81b7610aa1d5b32063a1c27e8d27b6c630c"
+    },
+    {
+      "path": "vocab.spm",
+      "url": "https://huggingface.co/qvac/TranslatePsy-EuroNano/resolve/3a5e1e4e2f7001ff5cfd79785bef03cf19281b73/en-xx/Tiny/intgemm/vocab.spm",
+      "bytes": 805231,
+      "sha256": "f76ce75a335872f27c812c7d122051f923565b5111adc36f207a15be4cbc9a51"
+    }
+  ]
+}

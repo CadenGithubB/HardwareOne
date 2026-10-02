@@ -1,0 +1,6 @@
+{
+  "target": "esp32p4",
+  "variant": "SMP metadata diagnostics plus ring encrypted CCCD request",
+  "bytes": 4105632,
+  "sha256": "55f2b2cb1553ce2eeafad4a66d6beb67efdf7b28df3efe85d2d2150dbe6bd718"
+}

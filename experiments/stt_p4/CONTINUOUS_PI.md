@@ -89,7 +89,7 @@ work.
 ## Source availability
 
 No Pi service checkout was found by a targeted filename search under
-`/Users/cadbecaimacmini/Documents/Codex/Projects`. The firmware README points to
+`~/Documents/Codex/Projects`. The firmware README points to
 [HardwareOne_RaspPi_CoProcessor](https://github.com/CadenGithubB/HardwareOne_RaspPi_CoProcessor).
 That repository is public. Its relevant source was inspected at immutable commit
 [`9b8aa2b585eee00e39990f7ac7745ad0e1fee0b9`](https://github.com/CadenGithubB/HardwareOne_RaspPi_CoProcessor/tree/9b8aa2b585eee00e39990f7ac7745ad0e1fee0b9),

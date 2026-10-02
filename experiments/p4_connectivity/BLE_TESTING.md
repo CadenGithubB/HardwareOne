@@ -77,8 +77,8 @@ result = await run_probe(
     existing_s3_console,
     private_credentials,
     expected_name="HW1_P4_BLE",
-    expected_ble_mac="fc:01:2c:e0:b9:aa",  # optional: observed by S3 scan
-    expected_mac="fc:01:2c:e0:b9:a8",  # authenticated ESP-NOW identity
+    expected_ble_mac="02:48:57:31:01:aa",  # optional: observed by S3 scan
+    expected_mac="02:48:57:31:01:a8",  # authenticated ESP-NOW identity
     timeout=65,
 )
 ```
@@ -104,7 +104,7 @@ fatal state and refuses further commands; the coordinator reports restartRequire
 and closes its ports. Asynchronous cancellation also joins the actual serial
 worker before cleanup, so no worker continues consuming responses after return.
 
-The live P4 advertisement was observed with BLE MAC `fc:01:2c:e0:b9:aa` and an
+The live P4 advertisement was observed with BLE MAC `02:48:57:31:01:aa` and an
 empty name: the two advertised 128-bit services exhausted the legacy advertising
 payload, and firmware logged a partial ADV write. The configured name getter
 alone therefore cannot select it. Use that observed address for this test setup;
@@ -132,7 +132,7 @@ hardware. Do not use it while another coordinator owns the port:
 ```sh
 experiments/p4_connectivity/private/ble-env/bin/python \
   experiments/p4_connectivity/test_ble.py --physical \
-  --s3-port /dev/cu.usbmodem1101 --ble-mac fc:01:2c:e0:b9:aa
+  --s3-port /dev/cu.usbmodem1101 --ble-mac 02:48:57:31:01:aa
 ```
 
 Read dependencies without opening a port or accessing any radio:
@@ -152,6 +152,6 @@ experiments/p4_connectivity/private/ble-env/bin/python tools/ble_secure/test_sec
 Actual results are recorded by the coordinator. Native S3 central against P4/C6
 exercises the hosted server path; reverse P4/C6 central against S3 exercises the
 hosted central path. For the reverse direction pass the existing P4 console,
-the observed S3 BLE address, and expected_mac="68:ee:8f:50:e9:d0" to run_probe.
+the observed S3 BLE address, and expected_mac="02:48:57:31:00:d0" to run_probe.
 The standalone CLI still names its port option --s3-port; use the caller-owned
 console API for the reverse test.

@@ -131,27 +131,27 @@ class BleAsyncTests(unittest.IsolatedAsyncioTestCase):
         class Console:
             def __init__(self):
                 self.calls = 0
-                self.rows = [{"mac": "fc:01:2c:e0:b9:aa", "name": "", "addressType": 0},
-                             {"mac": "fc:01:2c:e0:b9:ab", "name": "HW1_P4_BLE", "addressType": 1}]
+                self.rows = [{"mac": "02:48:57:31:01:aa", "name": "", "addressType": 0},
+                             {"mac": "02:48:57:31:01:ab", "name": "HW1_P4_BLE", "addressType": 1}]
             def command(self, command, timeout):
                 self.calls += 1
                 return json.dumps({"schema": 1, "bridge": "s3-gatt-v1", "ok": True, "drops": 0, "devices": self.rows})
         console = Console()
-        device = await scan(console, "HW1_P4_BLE", expected_ble_mac="FC:01:2C:E0:B9:AA")
-        self.assertEqual(device.address, "fc:01:2c:e0:b9:aa")
+        device = await scan(console, "HW1_P4_BLE", expected_ble_mac="02:48:57:31:01:AA")
+        self.assertEqual(device.address, "02:48:57:31:01:aa")
         self.assertEqual(device.name, "")
         self.assertEqual(device.address_type, 0)
         with self.assertRaises(BridgeError):
-            await scan(console, "HW1_P4_BLE", expected_ble_mac="fc:01:2c:e0:b9:a8")
+            await scan(console, "HW1_P4_BLE", expected_ble_mac="02:48:57:31:01:a8")
         # Explicit selection must not fall back to the named but wrong device,
         # and malformed addresses must fail before touching the console.
         calls = console.calls
         with self.assertRaises(BridgeError):
-            await scan(console, "HW1_P4_BLE", expected_ble_mac="fc012ce0b9aa")
+            await scan(console, "HW1_P4_BLE", expected_ble_mac="0248573101aa")
         self.assertEqual(console.calls, calls)
         console.rows.append(dict(console.rows[0]))
         with self.assertRaises(BridgeError):
-            await scan(console, "HW1_P4_BLE", expected_ble_mac="fc:01:2c:e0:b9:aa")
+            await scan(console, "HW1_P4_BLE", expected_ble_mac="02:48:57:31:01:aa")
 
     async def test_command_waits_for_completed_notification_and_correct_reply(self):
         report = SimpleNamespace(event=lambda *a, **k: None)

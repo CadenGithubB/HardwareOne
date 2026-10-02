@@ -39,6 +39,7 @@ function(hw1_load_deployment _repository_root _selector)
         set(HW1_DEPLOYMENT_FEATURE_FILE "" PARENT_SCOPE)
         set(HW1_DEPLOYMENT_SDKCONFIG_FILE "" PARENT_SCOPE)
         set(HW1_DEPLOYMENT_PARTITION_FILE "" PARENT_SCOPE)
+        set(HW1_DEPLOYMENT_OTA_LAYOUT FALSE PARENT_SCOPE)
         return()
     endif()
 
@@ -63,13 +64,31 @@ function(hw1_load_deployment _repository_root _selector)
     _hw1_contract_value("${_contract_contents}" "TARGET" _target)
     _hw1_contract_value("${_contract_contents}" "FLASH_SIZE" _flash_size)
     _hw1_contract_value("${_contract_contents}" "OTA_LAYOUT" _ota_layout)
-    _hw1_contract_value("${_contract_contents}" "OTA_LAYOUT_ID" _layout_id)
-    _hw1_contract_value("${_contract_contents}" "OTA_VERSION_SUFFIX" _version_suffix)
     _hw1_contract_value("${_contract_contents}" "PARTITION_CSV" _partition_csv)
     _hw1_contract_value("${_contract_contents}" "FEATURE_HEADER" _feature_header)
     _hw1_contract_value("${_contract_contents}" "MAIN_RELEASE_MAX" _main_release_max)
-    _hw1_contract_value("${_contract_contents}" "UPDATER_RELEASE_MAX" _updater_release_max)
     _hw1_contract_value("${_contract_contents}" "FLASH_ENCRYPTION" _flash_encryption)
+    # OTA_LAYOUT=1: a paired recovery-updater release with a signed layout id.
+    # OTA_LAYOUT=0: a factory-only release (one app partition, flashed over the
+    # cable), for boards that have no recovery layout yet. The OTA-only keys
+    # must then be absent, so a contract cannot half-describe a layout.
+    if(_ota_layout STREQUAL "1")
+        _hw1_contract_value("${_contract_contents}" "OTA_LAYOUT_ID" _layout_id)
+        _hw1_contract_value("${_contract_contents}" "OTA_VERSION_SUFFIX" _version_suffix)
+        _hw1_contract_value("${_contract_contents}" "UPDATER_RELEASE_MAX" _updater_release_max)
+    elseif(_ota_layout STREQUAL "0")
+        foreach(_ota_only_key IN ITEMS OTA_LAYOUT_ID OTA_VERSION_SUFFIX UPDATER_RELEASE_MAX)
+            _hw1_contract_optional("${_contract_contents}" "${_ota_only_key}" _ota_only_value)
+            if(NOT "${_ota_only_value}" STREQUAL "")
+                message(FATAL_ERROR
+                    "Deployment ${_selector} declares OTA_LAYOUT=0 but also "
+                    "${_ota_only_key}=...; remove it or declare OTA_LAYOUT=1")
+            endif()
+        endforeach()
+        set(_layout_id "")
+        set(_version_suffix "")
+        set(_updater_release_max "0")
+    endif()
     # OPTIONAL.  A deployment whose feature policy cannot be expressed in
     # features.h alone -- because it must contradict a value in
     # boards/<board>.defaults -- names an sdkconfig fragment here.  It is
@@ -82,17 +101,18 @@ function(hw1_load_deployment _repository_root _selector)
             "Deployment selector '${_selector}' disagrees with ${_contract}: "
             "DEPLOYMENT_ID=${_deployment_id}, BOARD_ID=${_board_id}")
     endif()
-    if(NOT _ota_layout STREQUAL "1")
+    if(NOT _ota_layout MATCHES "^[01]$")
         message(FATAL_ERROR
-            "Deployment ${_selector} must declare OTA_LAYOUT=1; non-OTA "
-            "deployment contracts are not implemented yet")
+            "Deployment ${_selector} OTA_LAYOUT must be 0 (factory-only) or 1 "
+            "(recovery OTA)")
     endif()
     if(NOT _flash_encryption MATCHES "^[01]$")
         message(FATAL_ERROR
             "Deployment ${_selector} FLASH_ENCRYPTION must be 0 or 1")
     endif()
     if(NOT _main_release_max MATCHES "^0[xX][0-9A-Fa-f]+$" OR
-       NOT _updater_release_max MATCHES "^0[xX][0-9A-Fa-f]+$")
+       (_ota_layout STREQUAL "1" AND
+        NOT _updater_release_max MATCHES "^0[xX][0-9A-Fa-f]+$"))
         message(FATAL_ERROR
             "Deployment ${_selector} release limits must be hexadecimal")
     endif()
@@ -125,7 +145,11 @@ function(hw1_load_deployment _repository_root _selector)
     set(HW1_DEPLOYMENT_BOARD "${_board_id}" PARENT_SCOPE)
     set(HW1_DEPLOYMENT_TARGET "${_target}" PARENT_SCOPE)
     set(HW1_DEPLOYMENT_FLASH_SIZE "${_flash_size_lower}" PARENT_SCOPE)
-    set(HW1_DEPLOYMENT_OTA_LAYOUT TRUE PARENT_SCOPE)
+    if(_ota_layout STREQUAL "1")
+        set(HW1_DEPLOYMENT_OTA_LAYOUT TRUE PARENT_SCOPE)
+    else()
+        set(HW1_DEPLOYMENT_OTA_LAYOUT FALSE PARENT_SCOPE)
+    endif()
     set(HW1_DEPLOYMENT_LAYOUT_ID "${_layout_id}" PARENT_SCOPE)
     set(HW1_DEPLOYMENT_VERSION_SUFFIX "${_version_suffix}" PARENT_SCOPE)
     set(HW1_DEPLOYMENT_FEATURE_FILE "${_feature_file}" PARENT_SCOPE)

@@ -19,6 +19,11 @@
 #
 #   usage: tools/build_coverage.sh [board] [1|2|both]     (default: xiao_s3 both)
 #
+# Any board under boards/ works. A board with boards/<board>.features.h gets
+# its coverage flags edited in that profile (it outranks the shared header).
+# Only xiao_s3 has been run end to end; other boards are supported by the
+# script but their coverage images have not been exercised.
+#
 # ---------------------------------------------------------------------------
 # THE ASSERT IS THE POINT — read its output, not just the exit code.
 #
@@ -42,34 +47,68 @@ BOARD="${1:-xiao_s3}"
 WHICH="${2:-both}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BC="$ROOT/components/hardwareone/System_BuildConfig.h"
+# A board with its own feature profile (boards/<board>.features.h, e.g. the
+# P4X-EYE) overrides the shared header for every flag it names, so a coverage
+# edit to the shared header alone would be silently ignored there. Flags are
+# therefore edited and asserted in whichever file actually decides them: the
+# board profile when it defines the flag, the shared header otherwise. Both
+# files are restored byte-identically from the EXIT trap.
+BF="$ROOT/boards/$BOARD.features.h"
+[ -f "$BF" ] || BF=""
 BAK="$(mktemp -t bccov)"
 SUM="$(mktemp -t bcsum)"
+BFBAK="$(mktemp -t bfcov)"
+BFSUM="$(mktemp -t bfsum)"
 
 cp "$BC" "$BAK"
 md5 -q "$BC" > "$SUM"
+if [ -n "$BF" ]; then cp "$BF" "$BFBAK"; md5 -q "$BF" > "$BFSUM"; fi
 
 restore() {
+  local rc=0
   cp "$BAK" "$BC"
   if [ "$(md5 -q "$BC")" = "$(cat "$SUM")" ]; then
     echo "-- System_BuildConfig.h restored byte-identical --"
   else
     echo "!! RESTORE MISMATCH — recover from $BAK !!" >&2
-    return 1
+    rc=1
   fi
-  rm -f "$BAK" "$SUM"
+  if [ -n "$BF" ]; then
+    cp "$BFBAK" "$BF"
+    if [ "$(md5 -q "$BF")" = "$(cat "$BFSUM")" ]; then
+      echo "-- $(basename "$BF") restored byte-identical --"
+    else
+      echo "!! RESTORE MISMATCH — recover from $BFBAK !!" >&2
+      rc=1
+    fi
+  fi
+  [ "$rc" -eq 0 ] && rm -f "$BAK" "$SUM" "$BFBAK" "$BFSUM"
+  return $rc
 }
 trap restore EXIT
 
+# flag_file NAME — the file whose literal decides NAME for this board.
+flag_file() {
+  local name="$1"
+  if [ -n "$BF" ] && grep -qE "^[[:space:]]*#define[[:space:]]+${name}[[:space:]]+[0-9]+" "$BF"; then
+    echo "$BF"
+  else
+    echo "$BC"
+  fi
+}
+
 # set_flag NAME VALUE — indentation-tolerant, value-anything.
 set_flag() {
-  local name="$1" val="$2"
-  sed -i '' -E "s/^([[:space:]]*)#define[[:space:]]+${name}[[:space:]]+[0-9]+/\\1#define ${name}       ${val}/" "$BC"
+  local name="$1" val="$2" f
+  f="$(flag_file "$name")"
+  sed -i '' -E "s/^([[:space:]]*)#define[[:space:]]+${name}[[:space:]]+[0-9]+/\\1#define ${name}       ${val}/" "$f"
 }
 
 # assert_flag NAME EXPECTED — hard-fail on the EFFECTIVE value.
 assert_flag() {
-  local name="$1" want="$2" got
-  got=$(grep -E "^[[:space:]]*#define[[:space:]]+${name}[[:space:]]+[0-9]+" "$BC" \
+  local name="$1" want="$2" got f
+  f="$(flag_file "$name")"
+  got=$(grep -E "^[[:space:]]*#define[[:space:]]+${name}[[:space:]]+[0-9]+" "$f" \
         | head -1 | sed -E "s/.*#define[[:space:]]+${name}[[:space:]]+([0-9]+).*/\1/")
   if [ -z "$got" ]; then
     echo "  ASSERT FAIL: ${name} not found — the anchor is stale, coverage is FAKE" >&2

@@ -2260,7 +2260,7 @@ static void ringConnectCancelAdvanceLocked() {
 static void ringCopyAddressText(
     char (&dst)[BLE_PEER_ADDRESS_TEXT_CAPACITY], const char* src) {
   memset(dst, 0, sizeof(dst));
-  if (src) strncpy(dst, src, sizeof(dst) - 1);
+  if (src) memcpy(dst, src, strnlen(src, sizeof(dst) - 1));
 }
 
 static void ringRequestToJob(const BlePeerConnectRequest& request,
@@ -5176,11 +5176,12 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
   // versus the 20/s required by a live recorder, so an actual G2 recording
   // gets priority. `audioCaptureActive()` is deliberately NOT the authority:
   // mic autostart/openmic holds that HAL lease indefinitely even while the
-  // recorder is IDLE. ESP-SR is a separate continuous consumer and remains a
-  // throughput-critical reason to wait.
+  // recorder is IDLE. ESP-SR and local transcription are separate continuous
+  // consumers and remain throughput-critical reasons to wait.
   auto g2AudioThroughputCritical = []() {
     return audioGetSource() == AUDIO_SRC_G2_LEFT &&
-           (micRecordingBusy() || audioCaptureOwnedBy("sr"));
+           (micRecordingBusy() || audioCaptureOwnedBy("sr") ||
+            audioCaptureOwnedBy("stt"));
   };
 
   if (g2AudioThroughputCritical()) {
@@ -5413,6 +5414,14 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
   }
   DEBUG_RING_LIFECYCLEF("[RING] Subscribing to notifications on %s",
             G2RING_CHAR_NOTIFY_UUID);
+  // R1 requires link encryption for its CCCD before application pairAuth.
+  // Request headless Just Works encryption; the checked subscription below
+  // still requires the peripheral to acknowledge the descriptor write.
+  // getDescriptor returns the characteristic-owned cached descriptor.
+  if (BLERemoteDescriptor* cccd =
+          gRing.notifyChar->getDescriptor(BLEUUID((uint16_t)0x2902))) {
+    cccd->setAuth(ESP_GATT_AUTH_REQ_NO_MITM);
+  }
   const BLERemoteNotifyResult ringNotify =
       gRing.notifyChar->registerForNotify(ringNotifyThunk);
   if (!ringNotify.success) {
@@ -6799,7 +6808,7 @@ static const char* cmd_ringbridge(const String& args) {
       name = "EVEN R1";
     }
 
-    // Parse "f8:29:ca:ba:ac:1c" → byte array (BLE address order = high byte
+    // Parse "02:48:57:31:02:1c" → byte array (BLE address order = high byte
     // first). g2BuildDevCfgRingConnect reverses internally to wire order.
     uint8_t macBle[6] = {0};
     {

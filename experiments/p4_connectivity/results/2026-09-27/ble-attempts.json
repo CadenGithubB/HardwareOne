@@ -76,7 +76,7 @@
       "privateRunId": "20260927T164756.109424Z-9bf01e51",
       "status": "failed",
       "targetName": "HW1_S3_BLE",
-      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "expectedMeshMac": "02:48:57:31:00:d0",
       "error": "S3 bridge rejected operation: mtu_below_secure_minimum",
       "checks": [
         {
@@ -90,7 +90,7 @@
       "privateRunId": "20260927T165304.059960Z-035879b0",
       "status": "failed",
       "targetName": "HW1_S3_BLE",
-      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "expectedMeshMac": "02:48:57:31:00:d0",
       "error": "S3 bridge rejected operation: mtu_below_secure_minimum",
       "checks": [
         {
@@ -104,7 +104,7 @@
       "privateRunId": "20260927T165315.616365Z-7084648d",
       "status": "failed",
       "targetName": "HW1_P4_BLE",
-      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "expectedMeshMac": "02:48:57:31:01:a8",
       "error": "S3 bridge rejected operation: connect_failed",
       "checks": [
         {
@@ -118,7 +118,7 @@
       "privateRunId": "20260927T170307.911947Z-2a44432c",
       "status": "failed",
       "targetName": "HW1_S3_BLE",
-      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "expectedMeshMac": "02:48:57:31:00:d0",
       "error": "Expected exactly one S3-discovered BLE peripheral matching the explicit BLE address",
       "checks": []
     },
@@ -126,7 +126,7 @@
       "privateRunId": "20260927T170324.758703Z-f13708c8",
       "status": "failed",
       "targetName": "HW1_S3_BLE",
-      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "expectedMeshMac": "02:48:57:31:00:d0",
       "error": "Expected exactly one S3-discovered BLE peripheral matching the explicit BLE address",
       "checks": []
     },
@@ -134,7 +134,7 @@
       "privateRunId": "20260927T170354.764936Z-5d5c0244",
       "status": "failed",
       "targetName": "HW1_S3_BLE",
-      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "expectedMeshMac": "02:48:57:31:00:d0",
       "error": "BLE Secure Channel authentication failed",
       "checks": [
         {
@@ -148,7 +148,7 @@
       "privateRunId": "20260927T170501.716412Z-449bec34",
       "status": "failed",
       "targetName": "HW1_P4_BLE",
-      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "expectedMeshMac": "02:48:57:31:01:a8",
       "error": "BLE Secure Channel authentication failed",
       "checks": [
         {
@@ -162,7 +162,7 @@
       "privateRunId": "20260927T170951.461743Z-172cb646",
       "status": "failed",
       "targetName": "HW1_P4_BLE",
-      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "expectedMeshMac": "02:48:57:31:01:a8",
       "error": "S3 bridge rejected operation: connect_failed",
       "checks": [
         {
@@ -176,7 +176,7 @@
       "privateRunId": "20260927T171013.592247Z-95f9f39a",
       "status": "passed",
       "targetName": "HW1_S3_BLE",
-      "expectedMeshMac": "68:ee:8f:50:e9:d0",
+      "expectedMeshMac": "02:48:57:31:00:d0",
       "error": null,
       "checks": [
         {
@@ -195,7 +195,7 @@
       "privateRunId": "20260927T171123.011287Z-c02aaee8",
       "status": "failed",
       "targetName": "HW1_P4_BLE",
-      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "expectedMeshMac": "02:48:57:31:01:a8",
       "error": "S3 bridge rejected operation: connect_failed",
       "checks": [
         {
@@ -209,7 +209,7 @@
       "privateRunId": "20260927T171210.400317Z-f0f464f8",
       "status": "passed",
       "targetName": "HW1_P4_BLE",
-      "expectedMeshMac": "fc:01:2c:e0:b9:a8",
+      "expectedMeshMac": "02:48:57:31:01:a8",
       "error": null,
       "checks": [
         {

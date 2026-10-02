@@ -1,0 +1,148 @@
+--- a/host/bluedroid/stack/smp/smp_act.c
++++ b/host/bluedroid/stack/smp/smp_act.c
+@@ -22,6 +22,7 @@
+ #include "btm_int.h"
+ #include "stack/l2c_api.h"
+ #include "smp_int.h"
++#include "smp_hw1_diag.h"
+ #if (SMP_CRYPTO_MBEDTLS == TRUE)
+ #include "mbedtls/ecp.h"
+ #elif (SMP_CRYPTO_TINYCRYPT == TRUE)
+@@ -240,10 +241,13 @@
+ {
+     p_cb->status = *(UINT8 *)p_data;
+     p_cb->failure = *(UINT8 *)p_data;
++    hw1_smp_diag(p_cb->status == SMP_SUCCESS ? "PAIR_COMPLETE" : "LOCAL_PAIR_RESULT",
++                 p_cb, p_cb->failure);
+ 
+     SMP_TRACE_DEBUG("%s status=%d failure=%d ", __func__, p_cb->status, p_cb->failure);
+ 
+     if (p_cb->status <= SMP_MAX_FAIL_RSN_PER_SPEC && p_cb->status != SMP_SUCCESS) {
++        hw1_smp_diag("TX_PAIR_FAILED", p_cb, p_cb->failure);
+         smp_send_cmd(SMP_OPCODE_PAIRING_FAILED, p_cb);
+         p_cb->wait_for_authorization_complete = TRUE;
+     }
+@@ -349,6 +353,7 @@
+ *******************************************************************************/
+ void smp_send_dhkey_check(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
+ {
++    hw1_smp_diag("TX_DHKEY_CHECK", p_cb, 0);
+     SMP_TRACE_DEBUG("%s", __func__);
+     smp_send_cmd(SMP_OPCODE_PAIR_DHKEY_CHECK, p_cb);
+ }
+@@ -522,6 +527,7 @@
+ *******************************************************************************/
+ void smp_proc_pair_fail(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
+ {
++    hw1_smp_diag("RX_PAIR_FAILED", p_cb, *(UINT8 *)p_data);
+     SMP_TRACE_DEBUG("%s", __func__);
+     p_cb->status = *(UINT8 *)p_data;
+ }
+@@ -905,6 +911,7 @@
+ *******************************************************************************/
+ void smp_process_dhkey_check(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
+ {
++    hw1_smp_diag("RX_DHKEY_CHECK", p_cb, 0);
+     UINT8 *p = (UINT8 *)p_data;
+     UINT8 reason = SMP_INVALID_PARAMETERS;
+ 
+@@ -1913,12 +1920,14 @@
+ 
+     if (memcmp(p_data->key.p_data, p_cb->remote_dhkey_check, BT_OCTET16_LEN)) {
+         SMP_TRACE_WARNING ("dhkey checks do no match\n");
++        hw1_smp_diag("LOCAL_DHKEY_MISMATCH", p_cb, reason);
+         p_cb->failure = reason;
+         smp_sm_event(p_cb, SMP_AUTH_CMPL_EVT, &reason);
+         return;
+     }
+ 
+     SMP_TRACE_EVENT ("dhkey checks match\n");
++    hw1_smp_diag("LOCAL_DHKEY_MATCH", p_cb, 0);
+ 
+     /* compare the max encryption key size, and save the smaller one for the link */
+     if (p_cb->peer_enc_size < p_cb->loc_enc_size) {
+--- /dev/null
++++ b/host/bluedroid/stack/smp/smp_hw1_diag.h
+@@ -0,0 +1,56 @@
++/* SPDX-License-Identifier: Apache-2.0
++ * Isolated HardwareOne diagnostic fixture. Never print key or nonce material.
++ * Only public addresses, negotiated policy and state-machine metadata are read.
++ */
++#ifndef HW1_SMP_DIAG_H
++#define HW1_SMP_DIAG_H
++#include "esp_log.h"
++#include "device/controller.h"
++#include "btm_int.h"
++
++#if SMP_INCLUDED == TRUE && BLE_INCLUDED == TRUE
++#define HW1_DIAG_MAC_FMT "%02x:%02x:%02x:%02x:%02x:%02x"
++#define HW1_DIAG_MAC(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
++static void hw1_smp_diag(const char *stage, tSMP_CB *p_cb, unsigned reason)
++{
++    BD_ADDR local = {0}, peer = {0}, public_addr = {0};
++    tBLE_ADDR_TYPE local_type = 0xff, peer_type = 0xff;
++    tACL_CONN *acl = btm_bda_to_acl(p_cb->pairing_bda, BT_TRANSPORT_LE);
++    bool peer_ok = false;
++    const controller_t *controller = controller_get_interface();
++    if (controller && controller->get_address) {
++        const bt_bdaddr_t *address = controller->get_address();
++        if (address) memcpy(public_addr, address->address, BD_ADDR_LEN);
++    }
++    if (acl) {
++        BTM_ReadConnectionAddr(p_cb->pairing_bda, local, &local_type);
++        peer_ok = BTM_ReadRemoteConnectionAddr(p_cb->pairing_bda, peer, &peer_type);
++    }
++    ESP_LOGW("HW1_SMP_DIAG", "stage=%s reason=0x%02x role=%u state=%u status=0x%02x failure=0x%02x flags=0x%04x assoc=%u sc=%u sc_only=%u round=%u rx_cmd=0x%02x tx_unacked=%u acl=%u handle=%u",
++             stage, reason, (unsigned)p_cb->role, (unsigned)p_cb->state,
++             (unsigned)p_cb->status, (unsigned)p_cb->failure, (unsigned)p_cb->flags,
++             (unsigned)p_cb->selected_association_model,
++             (unsigned)p_cb->le_secure_connections_mode_is_used,
++             (unsigned)p_cb->secure_connections_only_mode_required,
++             (unsigned)p_cb->round, (unsigned)p_cb->rcvd_cmd_code,
++             (unsigned)p_cb->total_tx_unacked, (unsigned)(acl != NULL),
++             acl ? (unsigned)acl->hci_handle : 0xffffU);
++    ESP_LOGW("HW1_SMP_DIAG", "stage=%s pairing=" HW1_DIAG_MAC_FMT " local=" HW1_DIAG_MAC_FMT " local_type=%u peer=" HW1_DIAG_MAC_FMT " peer_type=%u peer_ok=%u hci_public=" HW1_DIAG_MAC_FMT " own_policy=%u controller_rpa=%u",
++             stage, HW1_DIAG_MAC(p_cb->pairing_bda), HW1_DIAG_MAC(local),
++             (unsigned)local_type, HW1_DIAG_MAC(peer), (unsigned)peer_type,
++             (unsigned)peer_ok, HW1_DIAG_MAC(public_addr),
++             (unsigned)btm_cb.ble_ctr_cb.addr_mgnt_cb.own_addr_type,
++             (unsigned)CONTROLLER_RPA_LIST_ENABLE);
++    ESP_LOGW("HW1_SMP_DIAG", "stage=%s io_local=%u io_peer=%u auth_local=0x%02x auth_peer=0x%02x auth_origin=0x%02x auth_mode=0x%02x oob_local=%u oob_peer=%u enc_local=%u enc_peer=%u",
++             stage, (unsigned)p_cb->local_io_capability, (unsigned)p_cb->peer_io_caps,
++             (unsigned)p_cb->loc_auth_req, (unsigned)p_cb->peer_auth_req,
++             (unsigned)p_cb->origin_loc_auth_req, (unsigned)p_cb->auth_mode,
++             (unsigned)p_cb->loc_oob_flag, (unsigned)p_cb->peer_oob_flag,
++             (unsigned)p_cb->loc_enc_size, (unsigned)p_cb->peer_enc_size);
++}
++#undef HW1_DIAG_MAC
++#undef HW1_DIAG_MAC_FMT
++#else
++#define hw1_smp_diag(stage, cb, reason) ((void)0)
++#endif
++#endif
+--- a/host/bluedroid/stack/smp/smp_keys.c
++++ b/host/bluedroid/stack/smp/smp_keys.c
+@@ -31,6 +31,7 @@
+ //#include "bt_utils.h"
+ #include "stack/btm_ble_api.h"
+ #include "smp_int.h"
++#include "smp_hw1_diag.h"
+ #include "btm_int.h"
+ #include "btm_ble_int.h"
+ #include "stack/hcimsgs.h"
+@@ -2113,6 +2114,7 @@
+ *******************************************************************************/
+ void smp_calculate_local_dhkey_check(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
+ {
++    hw1_smp_diag("CALC_LOCAL_DHKEY_CHECK", p_cb, 0);
+     UINT8   iocap[3], a[7] = {0}, b[7] = {0};
+ 
+     SMP_TRACE_DEBUG ("%s", __FUNCTION__);
+@@ -2145,6 +2147,7 @@
+ *******************************************************************************/
+ void smp_calculate_peer_dhkey_check(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
+ {
++    hw1_smp_diag("CALC_PEER_DHKEY_CHECK", p_cb, 0);
+     UINT8       iocap[3], a[7] = {0}, b[7] = {0};
+     BT_OCTET16  param_buf;
+     BOOLEAN     ret;

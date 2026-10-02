@@ -6,11 +6,14 @@ start on channel 6 as unassociated stations. No access point, SSID, Wi-Fi
 password, or Internet connection is needed for the radio test; fetching build
 dependencies initially requires Internet access.
 
-All implementation is under `experiments/p4_espnow/`. The existing HardwareOne
-application source and the user's pre-existing working-tree edits remain
-untouched. These are separate firmware applications, so flashing them replaces
-the firmware currently running on the selected chip. Full flash backups make
-that replacement reversible.
+The probes live under `experiments/p4_espnow/`. The bridge they exercise is
+production code now: the host side is `components/esp_now_hosted`, and the C6
+side, the companion firmware build, the P4 programmer service and the backup
+tooling moved to [`tools/p4/companion`](../../tools/p4/companion/README.md).
+This directory keeps the native S3 and Hosted P4 probes, the hardware runner
+and the recorded results. These are separate firmware applications, so
+flashing them replaces the firmware currently running on the selected chip.
+Full flash backups make that replacement reversible.
 
 This milestone is a transport/backend probe. It does **not** establish a working
 HardwareOne P4 application, application pairing, mesh-passphrase authentication,
@@ -30,7 +33,8 @@ executes the native API and returns its actual result; asynchronous receive and
 send events travel back separately. Peer queries read the C6's real peer table.
 Radio callbacks and transport callbacks enqueue bounded events instead of doing
 blocking RPC work. Source/destination MAC, RSSI, channel, and payload are carried
-through the bridge. See [bridge/README.md](bridge/README.md) for lifetime,
+through the bridge. See the
+[bridge README](../../tools/p4/companion/bridge/README.md) for lifetime,
 timeout, supported-API and metadata details.
 
 The probe uses HardwareOne's packed 32-byte V4 header and the reserved experiment
@@ -54,56 +58,31 @@ support path. IDF 6 is not needed for this milestone.
 | Dependency | Pin |
 | --- | --- |
 | ESP-IDF | 5.5.5 |
-| ESP-Hosted MCU | v2.12.13, `dd0176e5fc959d79b306f6677a2f878123c58e9a` |
+| ESP-Hosted MCU, `esp-serial-flasher` | the tags and SHAs in `components/esp_now_hosted/include/esp_now_hosted_companion.h` (v2.12.13 and v1.10.0 when this was run) |
 | P4 `esp_wifi_remote` component | 1.3.1 |
-| `esp-serial-flasher` | v1.10.0, `77a994b91f2b7466b97c2fba8ed2d8538330b2bc` |
-| Bridge derivation | ESPHome overlay `14ee146ec71923aa250a7f743e5cff266a5ffb1a`, with the local changes and license documented in `bridge/` |
+| Bridge derivation | ESPHome overlay `14ee146ec71923aa250a7f743e5cff266a5ffb1a`, with the local changes and license documented in `tools/p4/companion/bridge/` |
 
-From the repository root:
+From the repository root, with the ESP-IDF 5.5.5 environment exported:
 
 ```sh
-cd experiments/p4_espnow
-# First source the export.sh belonging to your ESP-IDF 5.5.5 installation.
-python3 prepare.py
-./build.sh all
+experiments/p4_espnow/build.sh all
 ```
 
-`prepare.py` fetches pinned dependencies into ignored `private/` directories,
-verifies existing cache HEADs and edits, and applies the serial-flasher patch
-idempotently. That patch fixes flash reads ending exactly at the flash boundary
-and decoding an escaped first SLIP payload byte; both matter for faithful full
-backups. It then prepares `private/c6-slave/` from the pinned Hosted slave plus
-`common/`, adds the bridge source and force-link symbol, and enables custom RPC
-handling. No serial port is opened by preparation or building.
-
-Generated C6 files have a content manifest. Refreshing the checked-in bridge
-updates recognized generated files; unrelated private edits cause a refusal
-instead of being overwritten. Existing `sdkconfig`, build directories and
-managed components are preserved. `python3 prepare.py --check` performs offline
-verification without changing dependency/source caches.
-
-The durable [C6 component lock](dependency_locks/c6.lock) preserves the exact
-registry component versions and hashes resolved for IDF 5.5.5. Preparation
-expands its one `${IDF_PATH}` placeholder for the SDK's local `cmd_system`
-component, then installs it as `private/c6-slave/dependencies.lock` when absent.
-An existing generated lock must match exactly; changed resolutions are reported
-and preserved for inspection. Export the SDK before using either preparation
-mode. This lock is also tracked by the generated-source manifest.
-
-Individual builds are `./build.sh programmer`, `./build.sh s3`,
-`./build.sh p4`, and `./build.sh c6`. The script requires IDF 5.5.5 and uses
-absolute project/build/configuration paths. It refuses a build cache or
-configuration for the wrong target instead of deleting it.
+`all` builds the two probes here and delegates `programmer` and `c6` to
+`tools/p4/companion/build.sh`, whose `prepare.py` fetches the pinned
+dependencies into `tools/p4/companion/private/`, applies the serial-flasher
+patch and generates the C6 slave project. Individual builds are
+`./build.sh s3`, `./build.sh p4`, `./build.sh programmer` and `./build.sh c6`.
+The script requires IDF 5.5.5, refuses a build cache or configuration for the
+wrong target instead of deleting it, and opens no serial port.
 
 | Source | Target | Build directory | Purpose |
 | --- | --- | --- | --- |
-| `c6_programmer/` | ESP32-P4 | `private/build-programmer/` | Temporary P4 service for backing up and programming the onboard C6. |
 | `native_s3/` | ESP32-S3 | `private/build-s3/` | Native-radio discovery and echo control. |
-| `hosted_p4/` | ESP32-P4 | `private/build-p4/` | Hosted-radio initiator, peer lifecycle and delivery tests. |
-| Generated `private/c6-slave/` | ESP32-C6 | `private/build-c6/` | Hosted radio firmware plus the experimental ESP-NOW RPC bridge. |
-| `bridge/` | Host and companion | Included by the corresponding build | Adapter implementation, protocol, provenance and host protocol test. |
-| `tests/slip_read_regression.c` | Desktop | Coordinator-selected output | Regression test for the programmer's first-byte SLIP decoding fix. |
-| `c6_tool.py` | Desktop Python | None | Explicit C6 info/read/hash/write/run/monitor operations via the P4 service. |
+| `hosted_p4/` | ESP32-P4 | `private/build-p4/` | Hosted-radio initiator, peer lifecycle and delivery tests; links `components/esp_now_hosted`. |
+| `tools/p4/companion/c6_programmer/` | ESP32-P4 | `tools/p4/companion/private/build-programmer/` | Temporary P4 service for backing up and programming the onboard C6. |
+| Generated `tools/p4/companion/private/c6-slave/` | ESP32-C6 | `tools/p4/companion/private/build-c6/` | Hosted radio firmware plus the ESP-NOW RPC bridge. |
+| `tools/p4/companion/c6_tool.py` | Desktop Python | None | Explicit C6 info/read/hash/write/run/monitor operations via the P4 service. |
 
 ## Board wiring and access
 
@@ -143,6 +122,13 @@ response are distinct from the S3/P4 probe `READY` banners. Close other serial
 monitors before using a port.
 
 ## Backup, install and restore workflow
+
+The C6 part of this workflow (programmer service, C6 backup, companion
+install, C6 restore) is documented once, in
+[`tools/p4/companion/README.md`](../../tools/p4/companion/README.md); the
+commands below are the probe-specific remainder and still work as written
+when `c6_tool.py` and the `private/` paths are read as
+`tools/p4/companion/c6_tool.py` and `tools/p4/companion/private/`.
 
 The commands below assume the current directory is `experiments/p4_espnow/`,
 the IDF environment is exported, and `P4_PORT`/`S3_PORT` name the independently

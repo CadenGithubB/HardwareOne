@@ -15,7 +15,7 @@ from test_mesh import (CheckFailed, MeshRunner, check_session_pair, command_toke
 from test_mesh import parse_debug_state, select_registered_peer
 
 
-MAC = "fc:01:2c:e0:b9:a8"
+MAC = "02:48:57:31:01:a8"
 
 
 def text_rows(payload, msg_id=71):
@@ -159,7 +159,7 @@ class MeshParserTests(unittest.TestCase):
                 calls, waits = [], []
                 runner = object.__new__(MeshRunner)
                 runner.args = SimpleNamespace(pair="discovery", initiator=initiator)
-                runner.config = {"p4": {"mac": MAC}, "s3": {"mac": "68:ee:8f:50:e9:d0"}}
+                runner.config = {"p4": {"mac": MAC}, "s3": {"mac": "02:48:57:31:00:d0"}}
                 runner.boards = {
                     key: SimpleNamespace(marker=lambda key=key: 14 if key == "p4" else 33,
                                          read_until=lambda pattern, key=key, **kwargs: waits.append((key, kwargs)))
