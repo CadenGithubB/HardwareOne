@@ -2038,7 +2038,7 @@
         "purpose": "Rigid shelf registration limits strip XY motion and yaw; no snap feature"
       },
       "sampled_strip_pose_clearance": {
-        "check_script": "work/p4x-enclosure/check_keeper_slot_poses.py",
+        "check_script": "tools/check_keeper_slot_poses.py",
         "valid_poses_approximate": 1230000,
         "max_sampled_absolute_yaw_degrees_approximate": 1.19748,
         "conservative_cap_boss_required_half_extents_xy": [
