@@ -93,12 +93,8 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
   <p class='text-muted text-sm'>Applies immediately and persists. The second figure is the clock idle power-save may sink to once the display blanks.</p>
   <div class='btn-row' id='pw-modes'></div>
   <h4 style='margin:1.25rem 0 .5rem'>Set the clock directly</h4>
-  <p class='text-muted text-sm'>One-off override; the next power-mode change or wake replaces it. 80 MHz is the WiFi/PSRAM floor.</p>
-  <div class='btn-row'>
-    <button class='btn' data-freq='80'>80 MHz</button>
-    <button class='btn' data-freq='160'>160 MHz</button>
-    <button class='btn' data-freq='240'>240 MHz</button>
-  </div>
+  <p class='text-muted text-sm'>One-off override; the next power-mode change or wake replaces it. Interactive floor: <span id='pw-cpu-floor'>--</span> MHz.</p>
+  <div class='btn-row' id='pw-frequencies'></div>
 </div>
 
 <div class='card' data-guest-hide id='pw-card-tuning'>
@@ -220,6 +216,29 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     }
   }
 
+  var frequenciesSig = null;
+  function renderFrequencies(s){
+    var wrap = hw.$('pw-frequencies');
+    if (!wrap || !Array.isArray(s.supportedCpuMhz)) return;
+    var sig = JSON.stringify(s.supportedCpuMhz);
+    if (sig === frequenciesSig) return;
+    frequenciesSig = sig;
+    wrap.innerHTML = '';
+    for (var i = 0; i < s.supportedCpuMhz.length; i++){
+      var mhz = Number(s.supportedCpuMhz[i]);
+      if (!isFinite(mhz) || mhz <= 0 || Math.floor(mhz) !== mhz) continue;
+      var button = document.createElement('button');
+      button.className = 'btn';
+      button.setAttribute('data-freq', String(mhz));
+      button.textContent = mhz + ' MHz';
+      button.disabled = !admin;
+      if (admin) hw.on(button, 'click', function(){
+        apply('cpufreq ' + this.getAttribute('data-freq'));
+      });
+      wrap.appendChild(button);
+    }
+  }
+
   // Only write a field the user isn't currently typing into — otherwise the
   // 2 s poll would yank the caret out from under them mid-edit.
   function setField(id, val){
@@ -231,6 +250,8 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
   function applyStatus(s){
     if (!s || s.schema == null) return;
     last = s;
+    hw.setText('pw-cpu-floor', s.interactiveFloorMhz != null ? s.interactiveFloorMhz : '--');
+    renderFrequencies(s);
     hw.setText('pw-mode', s.modeName || '--');
     hw.setText('pw-cpu', s.cpuMhz != null ? s.cpuMhz : '--');
     hw.toggle('pw-downclocked', s.cpuMhz != null && s.activeMhz != null && s.cpuMhz < s.activeMhz);
@@ -298,12 +319,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
   stopPoll = hw.pollJSON('/api/power/status', 2000, applyStatus);
 
   if (admin) {
-    // --- direct clock override ---
-    var freqBtns = document.querySelectorAll('button[data-freq]');
-    for (var f = 0; f < freqBtns.length; f++){
-      hw.on(freqBtns[f], 'click', function(){ apply('cpufreq ' + this.getAttribute('data-freq')); });
-    }
-
     // --- tuning fields ---
     function bindField(id){
       var el = hw.$(id);

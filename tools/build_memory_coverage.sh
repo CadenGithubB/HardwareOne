@@ -24,8 +24,15 @@ if [[ -z "$MEMCOV_TARGET" ]]; then
   exit 2
 fi
 
+# boards/<board>.features.h, when present, decides every flag it names; see
+# tools/build_coverage.sh for the same rule. Both files are restored on exit.
+MEMCOV_BOARD_FEATURES="$MEMCOV_ROOT/boards/$MEMCOV_BOARD.features.h"
+[[ -f "$MEMCOV_BOARD_FEATURES" ]] || MEMCOV_BOARD_FEATURES=""
+
 MEMCOV_BACKUP="$(mktemp -t hw1-memcfg)"
 cp "$MEMCOV_CONFIG" "$MEMCOV_BACKUP"
+MEMCOV_FEATURES_BACKUP="$(mktemp -t hw1-memboard)"
+[[ -z "$MEMCOV_BOARD_FEATURES" ]] || cp "$MEMCOV_BOARD_FEATURES" "$MEMCOV_FEATURES_BACKUP"
 
 restore_config() {
   local status="$1"
@@ -36,7 +43,14 @@ restore_config() {
     echo "memory coverage: failed to restore System_BuildConfig.h byte-for-byte" >&2
     status=93
   fi
-  rm -f "$MEMCOV_BACKUP"
+  if [[ -n "$MEMCOV_BOARD_FEATURES" ]]; then
+    if ! cp "$MEMCOV_FEATURES_BACKUP" "$MEMCOV_BOARD_FEATURES" || \
+        ! cmp -s "$MEMCOV_FEATURES_BACKUP" "$MEMCOV_BOARD_FEATURES"; then
+      echo "memory coverage: failed to restore $(basename "$MEMCOV_BOARD_FEATURES") byte-for-byte" >&2
+      status=93
+    fi
+  fi
+  rm -f "$MEMCOV_BACKUP" "$MEMCOV_FEATURES_BACKUP"
 
   # CMake caches the temporary definitions in build-<board>. Restore that
   # directory too, so a later ordinary build cannot accidentally inherit the
@@ -55,12 +69,22 @@ restore_config() {
 }
 trap 'restore_config $?' EXIT
 
+flag_file() {
+  local name="$1"
+  if [[ -n "$MEMCOV_BOARD_FEATURES" ]] && \
+      grep -qE "^[[:space:]]*#define[[:space:]]+${name}[[:space:]]+[0-9]+" "$MEMCOV_BOARD_FEATURES"; then
+    echo "$MEMCOV_BOARD_FEATURES"
+  else
+    echo "$MEMCOV_CONFIG"
+  fi
+}
+
 set_flag() {
   local name="$1"
   local value="$2"
   sed -i '' -E \
     "s/^([[:space:]]*)#define[[:space:]]+${name}[[:space:]]+[0-9]+/\\1#define ${name}       ${value}/" \
-    "$MEMCOV_CONFIG"
+    "$(flag_file "$name")"
 }
 
 assert_flag() {
@@ -69,7 +93,7 @@ assert_flag() {
   local actual
   actual="$(sed -n -E \
     "s/^[[:space:]]*#define[[:space:]]+${name}[[:space:]]+([0-9]+).*/\\1/p" \
-    "$MEMCOV_CONFIG" | head -1)"
+    "$(flag_file "$name")" | head -1)"
   if [[ "$actual" != "$expected" ]]; then
     echo "memory coverage: ${name}=${actual:-missing}, expected ${expected}" >&2
     exit 90
@@ -78,6 +102,7 @@ assert_flag() {
 
 prepare_coverage_profile() {
   cp "$MEMCOV_BACKUP" "$MEMCOV_CONFIG"
+  [[ -z "$MEMCOV_BOARD_FEATURES" ]] || cp "$MEMCOV_FEATURES_BACKUP" "$MEMCOV_BOARD_FEATURES"
   [[ "$MEMCOV_BOARD" == "xiao_s3" ]] || return 0
 
   # Temporary compile-coverage profile for the 8 MB XIAO. Keep WiFi/HTTP,

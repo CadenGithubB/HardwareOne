@@ -113,3 +113,12 @@ tmp/
 
 # screen(1) session log — captured locally, never part of the source
 screenlog.*
+
+# Patched ESP-IDF component copies staged by tools/p4/prepare_sdk.sh.
+/.sdk-overrides/
+
+# Pinned dependency clones, generated C6 slave source, build output and flash
+# backups of the P4 companion tooling and the P4 experiments. Backups can hold
+# credentials; never track them.
+/tools/p4/companion/private/
+/experiments/*/private/

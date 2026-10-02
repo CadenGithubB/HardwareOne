@@ -196,8 +196,10 @@ bool bleIsStreamEnabled(uint8_t streamFlag);
 void bleUpdateStreams();
 
 // Runtime status. These predicates deliberately answer different questions:
-// controller/host report physical stack state, server reports ownership of the
-// phone-facing GATT profile, and bleSubsystemActive() reports either logical
+// controller reports the local driver's state or the last acknowledged remote
+// lifecycle state (Hosted has no live status RPC); host reports the local BLE
+// host state, server reports ownership of the phone-facing GATT profile, and
+// bleSubsystemActive() reports either logical
 // application role (server or G2 client) initialized.
 bool isBleControllerEnabled();
 bool isBluedroidHostEnabled();

@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-09-30T03:30:12.512Z",
+  "scope": "Mac host text-to-text reference inference; not a P4 capability or RAM-fit result",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v24.19.0",
+    "cpu": "Apple M1"
+  },
+  "runtime": {
+    "name": "@browsermt/bergamot-translator",
+    "version": "0.4.9",
+    "source_files_unmodified": true,
+    "engine": "Bergamot WASM with embedded intgemm fallback",
+    "configured_workspace_mib": 128,
+    "workspace_override_supported": false,
+    "beam_size": 1,
+    "cache_size": 0,
+    "workers": 1,
+    "max_length_break": 128,
+    "max_length_factor": 2,
+    "mini_batch_words": 1024,
+    "note": "Stock worker forcibly sets workspace=128; this probe does not reduce that setting"
+  },
+  "direction": {
+    "from": "en",
+    "to": "es"
+  },
+  "offline": {
+    "local_assets_only": true,
+    "network_api_guards": [
+      "fetch",
+      "http",
+      "https",
+      "net"
+    ],
+    "blocked_network_attempts": 0,
+    "note": "No model registry or remote translation service is contacted; setup downloads are separate"
+  },
+  "model_assets": [
+    {
+      "part": "model",
+      "filename": "model.enes.intgemm.alphas.bin",
+      "bytes": 17140755,
+      "sha256": "fa7460037a3163e03fe1d23602f964bff2331da6ee813637e092ddf37156ef53"
+    },
+    {
+      "part": "shortlist",
+      "filename": "lex.50.50.enes.s2t.bin",
+      "bytes": 3347104,
+      "sha256": "3a113d713dec3cf1d12bba5b138ae616e28bba4bbc7fe7fd39ba145e26b86d7f"
+    },
+    {
+      "part": "vocab",
+      "filename": "vocab.esen.spm",
+      "bytes": 825463,
+      "sha256": "909b1eea1face0d7f90a474fe29a8c0fef8d104b6e41e65616f864c964ba8845"
+    }
+  ],
+  "model_assets_total_bytes": 21313322,
+  "timing_ms": {
+    "setup": 179.840584,
+    "runtime_initialize": 79.64937499999996,
+    "model_load": 68.87704200000002,
+    "first_decode": 142.041,
+    "cold_start_through_first_translation": 321.893917,
+    "warm_repeat_min": 11.965665999999999,
+    "warm_repeat_max": 11.965665999999999
+  },
+  "memory": {
+    "process_baseline_after_asset_read": {
+      "rss": 103694336,
+      "heapTotal": 11829248,
+      "heapUsed": 7947400,
+      "external": 46548106,
+      "arrayBuffers": 42773239
+    },
+    "process_sampled_peak_rss_bytes": 419512320,
+    "process_lifetime_max_rss_bytes": 419872768,
+    "after_runtime": {
+      "wasm_linear_memory_bytes": 16777216,
+      "worker_js_memory": {
+        "rss": 154419200,
+        "heapTotal": 19431424,
+        "heapUsed": 9834296,
+        "external": 32418209,
+        "arrayBuffers": 15604497
+      },
+      "blocked_network_attempts": 0
+    },
+    "after_model": {
+      "wasm_linear_memory_bytes": 34603008,
+      "worker_js_memory": {
+        "rss": 221970432,
+        "heapTotal": 19955712,
+        "heapUsed": 9734008,
+        "external": 71557363,
+        "arrayBuffers": 26568671
+      },
+      "blocked_network_attempts": 0
+    },
+    "after_inference": {
+      "wasm_linear_memory_bytes": 458817536,
+      "worker_js_memory": {
+        "rss": 419512320,
+        "heapTotal": 20217856,
+        "heapUsed": 10177168,
+        "external": 464109421,
+        "arrayBuffers": 5255349
+      },
+      "blocked_network_attempts": 0
+    },
+    "note": "RSS includes Node, JS buffers, worker and WASM. WASM linear memory is heap capacity, not live allocations. Neither predicts native P4 minimum RAM."
+  },
+  "results": [
+    {
+      "id": "cli",
+      "category": "manual",
+      "text": "I would like a glass of water, please.",
+      "review_focus": "Manual review required",
+      "translated_text": "Me gustaría un vaso de agua, por favor.",
+      "first_pass_ms": 142.041,
+      "first_pass_kind": "first_decode",
+      "warm_repeat_ms": 11.965665999999999,
+      "repeat_match": true
+    }
+  ]
+}

@@ -30,7 +30,9 @@ STATUS_CHAR = "12345678-1234-5678-1234-56789abcde03"
 INFO_CHARS = {"manufacturer": "00002a29-0000-1000-8000-00805f9b34fb",
               "model": "00002a24-0000-1000-8000-00805f9b34fb",
               "firmware": "00002a26-0000-1000-8000-00805f9b34fb"}
-DEFAULT_MACS = {"p4": "fc:01:2c:e0:b9:a8", "s3": "68:ee:8f:50:e9:d0"}
+# Real board MACs stay out of git: set HW1_P4_MAC / HW1_S3_MAC (the placeholders never match a board).
+DEFAULT_MACS = {"p4": os.environ.get("HW1_P4_MAC", "02:48:57:31:01:a8"),
+                "s3": os.environ.get("HW1_S3_MAC", "02:48:57:31:00:d0")}
 
 
 class BleCheckFailed(Exception):

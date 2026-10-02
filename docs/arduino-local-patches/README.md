@@ -24,6 +24,7 @@ All marked with `[hardwareone local patch YYYY-MM-DD]` comments:
 | `cores/esp32/esp32-hal-periman.c` | 2 | Peripheral-manager `pins[]` + `deinit_functions[]` (856 B) moved to PSRAM — task-context attach/detach only; this firmware registers no GPIO ISRs (latent caveat documented in the marker for any future ISR user) |
 | `libraries/Network/src/NetworkEvents.cpp` | 0 (unmarked) | arduino_events task stack fix (see wifirm/arduino_events memory) |
 | `CMakeLists.txt`, `Kconfig.projbuild`, `idf_component.yml` | — | Build-integration tweaks |
+| ESP32-P4 / ESP-Hosted (2026-09-29, unmarked) | - | Required by `HW_BOARD=p4x_eye`, harmless elsewhere. `esp32-hal-bt.c/.h`: Bluedroid over the Hosted C6 controller (VHCI), with acknowledged controller lifecycle state (`btHostedControllerStatus`). `esp32-hal-hosted.c/.h`: `hostedSetPins`, BLE claim/release. BLE library: every `SOC_BLE_SUPPORTED` gate also accepts Hosted Bluedroid/NimBLE; owned CCCD descriptors (`addDescriptor(d, true)`) and GATT server trees are reclaimed only after checked terminal host teardown. `esp32-hal-uart.c`: P4 LP-UART RC_FAST clock. `idf_component.yml`: pins `esp_hosted` 2.12.13, `esp_wifi_remote` 1.3.1, `mdns` 1.10.1, `littlefs` 1.20.4 and drops Arduino's own `esp-sr` rule (HardwareOne pins ESP-SR itself). Qualified on hardware in `experiments/p4_connectivity`, `p4_ble_roles` and `p4_mesh`. |
 
 `arduino-local-patches.patch` is the full `git -C components/arduino diff`
 snapshot of all of the above.
@@ -32,6 +33,10 @@ snapshot of all of the above.
 directory (board variant) — `git diff` cannot capture untracked files.
 
 ## Verify (run any time, especially after anything touched components/arduino)
+
+`tools/build_board.sh` runs this check before every build and refuses to build
+when a patch is missing, so a dropped patch fails at the build step instead of
+on hardware.
 
 ```bash
 bash docs/arduino-local-patches/verify_patches.sh

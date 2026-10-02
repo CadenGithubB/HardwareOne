@@ -41,7 +41,7 @@
   64,947 asset bytes. Deterministic source consistency check runs on builds.
   No additional standard feature or test-diagnostic removal was needed.
 - **Preserve the S3 for the user's concurrent OpenClaw tests.** Its saved Wi-Fi
-  connection is active and HTTP reports running on port 80 at 192.168.21.24.
+  connection is active and HTTP reports running on port 80 at 192.0.2.24.
   This Mac's direct HTTP request timed out; the special S3 HTTP fixture insists
   on its isolated test AP, so the P4 network test was deferred rather than
   moving S3 off the user's network. Do not apply the old S3 Wi-Fi-off/channel-6

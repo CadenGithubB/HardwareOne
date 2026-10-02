@@ -29,6 +29,22 @@ inline bool parseUnsigned(const char* text, uint32_t& out) {
   }
   return true;
 }
+// Mic preference shared by every Transcription UI. Cycles auto -> pdm -> g2,
+// skipping sources that are not reachable, exactly like `micsource` accepts.
+inline const char* nextMicSource(const char* current, bool pdm, bool g2) {
+  const char* options[3] = {"auto", nullptr, nullptr};
+  size_t count = 1, at = 0;
+  if (pdm) options[count++] = "pdm";
+  if (g2) options[count++] = "g2";
+  for (size_t i = 0; i < count; ++i)
+    if (current && std::strcmp(current, options[i]) == 0) at = i;
+  return options[(at + 1) % count];
+}
+inline const char* micLabel(const char* source) {
+  if (source && std::strcmp(source, "pdm") == 0) return "Onboard";
+  if (source && std::strcmp(source, "g2") == 0) return "Glasses";
+  return "Auto";
+}
 inline bool continuation(unsigned char c) { return (c & 0xc0) == 0x80; }
 // Number of complete UTF-8 bytes at the end of a bounded non-final window.
 // Malformed bytes remain visible to the presentation layer; this only avoids

@@ -95,9 +95,9 @@ in the earlier investigation still need resolution for the full application.
   the built probes.
 - Timestamped serial logs and individual packet events are retained locally in
   `../../private/test-runs/20260927T144613.777864Z/`.
-- P4: revision 3.2, 16 MiB flash; radio MAC on its C6: `fc:01:2c:e0:b9:a8`.
+- P4: revision 3.2, 16 MiB flash; radio MAC on its C6: `02:48:57:31:01:a8`.
   C6: revision 0.2, 4 MiB flash. S3: revision 0.2, 8 MiB flash,
-  MAC `68:ee:8f:50:e9:d0`.
+  MAC `02:48:57:31:00:d0`.
 - Both boards remain on the working probe firmware, channel 6, S3 silence
   disabled, and no measured ping active. The C6 runs the matching bridge image.
 - Verified complete original flash images for P4, C6 and S3 remain in ignored

@@ -13,7 +13,7 @@
     "applicationSoc": "ESP32-S3",
     "radio": "native"
   },
-  "expectedPeerMeshMac": "68:ee:8f:50:e9:d0",
+  "expectedPeerMeshMac": "02:48:57:31:00:d0",
   "checks": [
     {
       "name": "initial",
@@ -52,7 +52,7 @@
           "initialized": true,
           "channel": 6,
           "channelPref": 6,
-          "mac": "68:EE:8F:50:E9:D0",
+          "mac": "02:48:57:31:00:D0",
           "pairedDevices": 1
         },
         "encryptedReplies": [
@@ -188,7 +188,7 @@
           "initialized": true,
           "channel": 6,
           "channelPref": 6,
-          "mac": "68:EE:8F:50:E9:D0",
+          "mac": "02:48:57:31:00:D0",
           "pairedDevices": 1
         },
         "encryptedReplies": [

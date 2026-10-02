@@ -1,0 +1,430 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-09-30T03:34:00.086Z",
+  "scope": "Mac host text-to-text reference inference; not a P4 capability or RAM-fit result",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v24.19.0",
+    "cpu": "Apple M1"
+  },
+  "runtime": {
+    "name": "@browsermt/bergamot-translator",
+    "version": "0.4.9",
+    "source_files_unmodified": true,
+    "engine": "Bergamot WASM with embedded intgemm fallback",
+    "configured_workspace_mib": 128,
+    "workspace_override_supported": false,
+    "beam_size": 1,
+    "cache_size": 0,
+    "workers": 1,
+    "max_length_break": 128,
+    "max_length_factor": 2,
+    "mini_batch_words": 1024,
+    "note": "Stock worker forcibly sets workspace=128; this probe does not reduce that setting"
+  },
+  "direction": {
+    "from": "en",
+    "to": "es"
+  },
+  "candidate": {
+    "id": "euronano",
+    "name": "TranslatePsy-EuroNano Tiny en-xx",
+    "revision": "3a5e1e4e2f7001ff5cfd79785bef03cf19281b73",
+    "input_prefix": "##ES ",
+    "sentence_segmentation": "Intl.Segmenter en sentence; prefix each segment"
+  },
+  "offline": {
+    "local_assets_only": true,
+    "network_api_guards": [
+      "fetch",
+      "http",
+      "https",
+      "net"
+    ],
+    "blocked_network_attempts": 0,
+    "note": "No model registry or remote translation service is contacted; setup downloads are separate"
+  },
+  "model_assets": [
+    {
+      "part": "model",
+      "filename": "model.intgemm.alphas.bin",
+      "bytes": 17141227,
+      "sha256": "646c87844fd9917e929feed627ec7f21b245f7bfded5442b61dc8b4b1b1e68dd"
+    },
+    {
+      "part": "shortlist",
+      "filename": "lex.50.50.enxx.s2t.bin",
+      "bytes": 614636,
+      "sha256": "9e0c8b830ef2ac6eecc56c54c974d81b7610aa1d5b32063a1c27e8d27b6c630c"
+    },
+    {
+      "part": "vocab",
+      "filename": "vocab.spm",
+      "bytes": 805231,
+      "sha256": "f76ce75a335872f27c812c7d122051f923565b5111adc36f207a15be4cbc9a51"
+    }
+  ],
+  "model_assets_total_bytes": 18561094,
+  "timing_ms": {
+    "setup": 164.89837500000002,
+    "runtime_initialize": 75.081625,
+    "model_load": 64.83970900000003,
+    "first_decode": 147.898667,
+    "cold_start_through_first_translation": 312.808625,
+    "warm_repeat_min": 6.344249999999988,
+    "warm_repeat_max": 29.94162499999993
+  },
+  "memory": {
+    "process_baseline_after_asset_read": {
+      "rss": 96780288,
+      "heapTotal": 11829248,
+      "heapUsed": 7998048,
+      "external": 41043650,
+      "arrayBuffers": 37268783
+    },
+    "process_sampled_peak_rss_bytes": 426164224,
+    "process_lifetime_max_rss_bytes": 426213376,
+    "after_runtime": {
+      "wasm_linear_memory_bytes": 16777216,
+      "worker_js_memory": {
+        "rss": 151339008,
+        "heapTotal": 19431424,
+        "heapUsed": 9885584,
+        "external": 32420145,
+        "arrayBuffers": 15606433
+      },
+      "blocked_network_attempts": 0
+    },
+    "after_model": {
+      "wasm_linear_memory_bytes": 34603008,
+      "worker_js_memory": {
+        "rss": 222494720,
+        "heapTotal": 19955712,
+        "heapUsed": 9732016,
+        "external": 68807071,
+        "arrayBuffers": 23816443
+      },
+      "blocked_network_attempts": 0
+    },
+    "after_inference": {
+      "wasm_linear_memory_bytes": 455933952,
+      "worker_js_memory": {
+        "rss": 401489920,
+        "heapTotal": 20217856,
+        "heapUsed": 12336288,
+        "external": 461225837,
+        "arrayBuffers": 5255349
+      },
+      "blocked_network_attempts": 0
+    },
+    "note": "RSS includes Node, JS buffers, worker and WASM. WASM linear memory is heap capacity, not live allocations. Neither predicts native P4 minimum RAM."
+  },
+  "results": [
+    {
+      "id": "greeting",
+      "category": "everyday",
+      "text": "Good morning. How are you today?",
+      "review_focus": "Natural greeting and question.",
+      "model_input_text": "##ES Good morning.\n##ES How are you today?",
+      "model_input_segments": [
+        "##ES Good morning.",
+        "##ES How are you today?"
+      ],
+      "translated_text": "- . .",
+      "first_pass_ms": 147.898667,
+      "first_pass_kind": "first_decode",
+      "warm_repeat_ms": 9.769709000000034,
+      "repeat_match": true
+    },
+    {
+      "id": "directions",
+      "category": "everyday",
+      "text": "Where is the nearest train station?",
+      "review_focus": "Preserve nearest and train station.",
+      "model_input_text": "##ES Where is the nearest train station?",
+      "model_input_segments": [
+        "##ES Where is the nearest train station?"
+      ],
+      "translated_text": ".",
+      "first_pass_ms": 7.567792000000054,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 6.344249999999988,
+      "repeat_match": true
+    },
+    {
+      "id": "request",
+      "category": "everyday",
+      "text": "Could you speak more slowly, please?",
+      "review_focus": "Polite request for slower speech.",
+      "model_input_text": "##ES Could you speak more slowly, please?",
+      "model_input_segments": [
+        "##ES Could you speak more slowly, please?"
+      ],
+      "translated_text": "-¿Ay?",
+      "first_pass_ms": 9.289333000000056,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 8.44620800000007,
+      "repeat_match": true
+    },
+    {
+      "id": "water",
+      "category": "everyday",
+      "text": "I would like a glass of water without ice.",
+      "review_focus": "Preserve without ice.",
+      "model_input_text": "##ES I would like a glass of water without ice.",
+      "model_input_segments": [
+        "##ES I would like a glass of water without ice."
+      ],
+      "translated_text": "- ...",
+      "first_pass_ms": 9.616416999999956,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 8.50912500000004,
+      "repeat_match": true
+    },
+    {
+      "id": "negation",
+      "category": "meaning",
+      "text": "I do not want sugar in my coffee.",
+      "review_focus": "Do not reverse negation.",
+      "model_input_text": "##ES I do not want sugar in my coffee.",
+      "model_input_segments": [
+        "##ES I do not want sugar in my coffee."
+      ],
+      "translated_text": "-No quede a azu azule en la que en la que deseo.",
+      "first_pass_ms": 15.536541000000057,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 13.40320900000006,
+      "repeat_match": true
+    },
+    {
+      "id": "contrast",
+      "category": "meaning",
+      "text": "I ordered tea, not coffee.",
+      "review_focus": "Tea ordered; coffee rejected.",
+      "model_input_text": "##ES I ordered tea, not coffee.",
+      "model_input_segments": [
+        "##ES I ordered tea, not coffee."
+      ],
+      "translated_text": "DE DE DE DE DE DE DE DE DE DE",
+      "first_pass_ms": 16.392124999999965,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 12.33466599999997,
+      "repeat_match": true
+    },
+    {
+      "id": "numbers",
+      "category": "meaning",
+      "text": "The ticket costs twenty-five dollars and fifty cents.",
+      "review_focus": "Preserve 25 dollars and 50 cents.",
+      "model_input_text": "##ES The ticket costs twenty-five dollars and fifty cents.",
+      "model_input_segments": [
+        "##ES The ticket costs twenty-five dollars and fifty cents."
+      ],
+      "translated_text": "- . (m.)",
+      "first_pass_ms": 11.906542000000059,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 10.851374999999962,
+      "repeat_match": true
+    },
+    {
+      "id": "time",
+      "category": "meaning",
+      "text": "Our train leaves at 6:45 tomorrow morning.",
+      "review_focus": "Preserve time and tomorrow morning.",
+      "model_input_text": "##ES Our train leaves at 6:45 tomorrow morning.",
+      "model_input_segments": [
+        "##ES Our train leaves at 6:45 tomorrow morning."
+      ],
+      "translated_text": ". - .",
+      "first_pass_ms": 9.36033400000008,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 9.045749999999998,
+      "repeat_match": true
+    },
+    {
+      "id": "names",
+      "category": "meaning",
+      "text": "My name is Alex, and I am meeting Maria at the Central Hotel.",
+      "review_focus": "Preserve names and meeting location.",
+      "model_input_text": "##ES My name is Alex, and I am meeting Maria at the Central Hotel.",
+      "model_input_segments": [
+        "##ES My name is Alex, and I am meeting Maria at the Central Hotel."
+      ],
+      "translated_text": ".y, en que en ens ensilen a Maria en la Central Hotel.",
+      "first_pass_ms": 17.671541000000047,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 16.091042000000016,
+      "repeat_match": true
+    },
+    {
+      "id": "past",
+      "category": "grammar",
+      "text": "I lost my keys yesterday, but I found them this morning.",
+      "review_focus": "Preserve past events and their order.",
+      "model_input_text": "##ES I lost my keys yesterday, but I found them this morning.",
+      "model_input_segments": [
+        "##ES I lost my keys yesterday, but I found them this morning."
+      ],
+      "translated_text": "Io de la RU, ay que las ens ens ens de la que lasyy.",
+      "first_pass_ms": 19.519874999999956,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 18.69962499999997,
+      "repeat_match": true
+    },
+    {
+      "id": "conditional",
+      "category": "grammar",
+      "text": "If it rains tomorrow, we will stay inside.",
+      "review_focus": "Conditional cause and future action.",
+      "model_input_text": "##ES If it rains tomorrow, we will stay inside.",
+      "model_input_segments": [
+        "##ES If it rains tomorrow, we will stay inside."
+      ],
+      "translated_text": "- .",
+      "first_pass_ms": 9.27333299999998,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 8.499249999999961,
+      "repeat_match": true
+    },
+    {
+      "id": "pronouns",
+      "category": "grammar",
+      "text": "She gave him the book because he had asked for it.",
+      "review_focus": "Preserve giver, recipient and causal relationship.",
+      "model_input_text": "##ES She gave him the book because he had asked for it.",
+      "model_input_segments": [
+        "##ES She gave him the book because he had asked for it."
+      ],
+      "translated_text": "-Leen la lan la lan la que la .",
+      "first_pass_ms": 14.013374999999996,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 12.64183300000002,
+      "repeat_match": true
+    },
+    {
+      "id": "colloquial",
+      "category": "robustness",
+      "text": "I'm running late. Can we meet in ten minutes?",
+      "review_focus": "Late rather than physically running; preserve ten minutes.",
+      "model_input_text": "##ES I'm running late.\n##ES Can we meet in ten minutes?",
+      "model_input_segments": [
+        "##ES I'm running late.",
+        "##ES Can we meet in ten minutes?"
+      ],
+      "translated_text": "- .. -¿Pedeses?",
+      "first_pass_ms": 15.317708000000039,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 13.537707999999952,
+      "repeat_match": true
+    },
+    {
+      "id": "idiom",
+      "category": "robustness",
+      "text": "That sounds good to me. Let's give it a try.",
+      "review_focus": "Natural idiomatic meaning.",
+      "model_input_text": "##ES That sounds good to me.\n##ES Let's give it a try.",
+      "model_input_segments": [
+        "##ES That sounds good to me.",
+        "##ES Let's give it a try."
+      ],
+      "translated_text": "- .. - .",
+      "first_pass_ms": 13.997749999999996,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 12.947292000000061,
+      "repeat_match": true
+    },
+    {
+      "id": "punctuated",
+      "category": "asr_pair",
+      "text": "I need two tickets to Madrid. How much do they cost?",
+      "review_focus": "Reference with punctuation and casing.",
+      "model_input_text": "##ES I need two tickets to Madrid.\n##ES How much do they cost?",
+      "model_input_segments": [
+        "##ES I need two tickets to Madrid.",
+        "##ES How much do they cost?"
+      ],
+      "translated_text": "- . -¿A que costen?",
+      "first_pass_ms": 14.125625000000014,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 13.254957999999988,
+      "repeat_match": true
+    },
+    {
+      "id": "asr_lowercase",
+      "category": "asr_pair",
+      "text": "i need two tickets to madrid how much do they cost",
+      "review_focus": "Same meaning without ASR punctuation or casing.",
+      "model_input_text": "##ES i need two tickets to madrid how much do they cost",
+      "model_input_segments": [
+        "##ES i need two tickets to madrid how much do they cost"
+      ],
+      "translated_text": "I need a dot (ens) a madrid, a la que costen",
+      "first_pass_ms": 15.710249999999974,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 14.684332999999924,
+      "repeat_match": true
+    },
+    {
+      "id": "asr_contraction",
+      "category": "asr_pair",
+      "text": "i don't understand can you say that again",
+      "review_focus": "Preserve negation and request despite missing punctuation.",
+      "model_input_text": "##ES i don't understand can you say that again",
+      "model_input_segments": [
+        "##ES i don't understand can you say that again"
+      ],
+      "translated_text": "- ...",
+      "first_pass_ms": 8.677333999999973,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 9.181542000000036,
+      "repeat_match": true
+    },
+    {
+      "id": "asr_error",
+      "category": "asr_error",
+      "text": "i need two tickets to mad red how much do they cost",
+      "review_focus": "Deliberate ASR corruption; translation cannot be assumed to repair it.",
+      "model_input_text": "##ES i need two tickets to mad red how much do they cost",
+      "model_input_segments": [
+        "##ES i need two tickets to mad red how much do they cost"
+      ],
+      "translated_text": "Is de dor.",
+      "first_pass_ms": 9.988958000000025,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 10.660834000000023,
+      "repeat_match": true
+    },
+    {
+      "id": "longer",
+      "category": "length",
+      "text": "We arrived this morning, and we would like to leave our bags here while we walk around the city. Is that possible?",
+      "review_focus": "Two related sentences, bags left while visiting the city.",
+      "model_input_text": "##ES We arrived this morning, and we would like to leave our bags here while we walk around the city.\n##ES Is that possible?",
+      "model_input_segments": [
+        "##ES We arrived this morning, and we would like to leave our bags here while we walk around the city.",
+        "##ES Is that possible?"
+      ],
+      "translated_text": ".. . -¿Es que?",
+      "first_pass_ms": 26.454958000000033,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 29.94162499999993,
+      "repeat_match": true
+    },
+    {
+      "id": "hardware",
+      "category": "domain",
+      "text": "The microphone is working, but the battery is almost empty.",
+      "review_focus": "Preserve microphone success and low battery contrast.",
+      "model_input_text": "##ES The microphone is working, but the battery is almost empty.",
+      "model_input_segments": [
+        "##ES The microphone is working, but the battery is almost empty."
+      ],
+      "translated_text": "- . (s) .., la arquitunda de la .",
+      "first_pass_ms": 16.267832999999996,
+      "first_pass_kind": "warm_decode",
+      "warm_repeat_ms": 16.54970800000001,
+      "repeat_match": true
+    }
+  ]
+}

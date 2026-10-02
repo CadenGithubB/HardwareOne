@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Feature-only QuartzNet-5x5 graph, using the inspected tensor-only checkpoint.
+(The same builder also serves the opt-in NGC QuartzNet15x5Base-En config; the
+block structure is always derived from model_config.yaml.)
 
 Input [1,64,T,1], output [1,29,ceil(T/2),1]. T is the exact valid feature
 length: no padded suffix, graph masks, frontend, softmax, or CTC decoder.
 """
 from pathlib import Path
 import hashlib
+import os
+import re
 import torch
 from torch import nn
 import yaml
@@ -13,15 +17,42 @@ import yaml
 WEIGHTS_SHA256 = '51a92f946c8cccacb723f4291be1f3285d589e5ac84fa0f6714221dbbbf333cb'
 CONFIG_SHA256 = '1e829dd42c31d4c55d2bcf844c8abbf664ba6f1b767a9e6c8e8d26672ae5ab58'
 DEFAULT_CHECKPOINT = Path(__file__).resolve().parents[1] / 'speech_portable/private/stt-quartznet'
+# Explicit opt-in for one additional (for example fine-tuned) weights file with
+# the same topology. The config hash is never overridable.
+WEIGHTS_OVERRIDE_ENV = 'HW1_STT_ALLOW_WEIGHTS_SHA256'
+# Second pinned config: NGC QuartzNet15x5Base-En (18 blocks, same 64-mel
+# preprocessor and 29-class CTC head). Reachable only with non-pinned weights,
+# i.e. through WEIGHTS_OVERRIDE_ENV; its weights must match its block count.
+CONFIG_15X5_SHA256 = '023e8e2c8dc0a6274885c3066657e476d6f32c2cca6ffbac8f1beb58d024193b'
+
+
+def allowed_weights_sha256():
+    override = os.environ.get(WEIGHTS_OVERRIDE_ENV, '').strip().lower()
+    if override and not re.fullmatch('[0-9a-f]{64}', override):
+        raise ValueError(WEIGHTS_OVERRIDE_ENV + ' must be one 64-digit SHA-256')
+    return {WEIGHTS_SHA256} | ({override} if override else set())
+
+
+def checkpoint_hashes(directory=DEFAULT_CHECKPOINT):
+    directory = Path(directory)
+    return {'weights_sha256': hashlib.sha256((directory/'model_weights.ckpt').read_bytes()).hexdigest(),
+            'config_sha256': hashlib.sha256((directory/'model_config.yaml').read_bytes()).hexdigest()}
 
 
 def load_checkpoint(directory=DEFAULT_CHECKPOINT):
     directory = Path(directory)
-    for name, expected in [('model_weights.ckpt', WEIGHTS_SHA256), ('model_config.yaml', CONFIG_SHA256)]:
-        if hashlib.sha256((directory/name).read_bytes()).hexdigest() != expected:
-            raise ValueError('Checkpoint hash mismatch: ' + name)
+    hashes = checkpoint_hashes(directory)
+    if hashes['weights_sha256'] not in allowed_weights_sha256():
+        raise ValueError('Checkpoint hash mismatch: model_weights.ckpt')
+    alternate = hashes['config_sha256'] == CONFIG_15X5_SHA256 and hashes['weights_sha256'] != WEIGHTS_SHA256
+    if hashes['config_sha256'] != CONFIG_SHA256 and not alternate:
+        raise ValueError('Checkpoint hash mismatch: model_config.yaml')
     config = yaml.safe_load((directory/'model_config.yaml').read_text())
     state = torch.load(directory/'model_weights.ckpt', weights_only=True, map_location='cpu')
+    if alternate:
+        blocks = {int(k.split('.')[2]) for k in state if k.startswith('encoder.encoder.')}
+        if blocks != set(range(len(config['encoder']['params']['jasper']))):
+            raise ValueError('Weights block count differs from model_config.yaml')
     return config, state
 
 

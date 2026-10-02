@@ -19,6 +19,11 @@ if(HW1_DEPLOYMENT_ACTIVE)
             "HW_DEPLOYMENT=${_hw_deployment} is for board "
             "${HW1_DEPLOYMENT_BOARD}, but HW_BOARD=${_hw_board}")
     endif()
+    if(NOT HW1_DEPLOYMENT_OTA_LAYOUT)
+        message(FATAL_ERROR
+            "HW_DEPLOYMENT=${_hw_deployment} is a factory-only deployment "
+            "(OTA_LAYOUT=0): it has no recovery updater to build")
+    endif()
     set(_hw_board "${HW1_DEPLOYMENT_BOARD}")
 endif()
 if(NOT _hw_board)

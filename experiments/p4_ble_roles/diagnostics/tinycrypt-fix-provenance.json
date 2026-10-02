@@ -1,0 +1,43 @@
+{
+  "upstreamCommit": "9fd7cb7e606a06111e1b14be7f4e00d77d9cf3dd",
+  "upstreamUrl": "https://github.com/espressif/esp-idf/commit/9fd7cb7e606a06111e1b14be7f4e00d77d9cf3dd",
+  "upstreamPatchSha256": "ce554b9efd814c08fa5cc6b59de999b51bdd49b61dd5151643b3c3ee780da8ae",
+  "filteredPatch": "experiments/p4_ble_roles/idf-tinycrypt-9fd7cb7.patch",
+  "filteredPatchSha256": "e8185397ceb5e74653c08c7cb22666f54445b27b0a578488c5e35bbca7eac367",
+  "excluded": [
+    "components/bt/host/nimble/nimble"
+  ],
+  "files": [
+    {
+      "path": "common/tinycrypt/port/esp_tinycrypt_port.c",
+      "baseSha256": "eea4471e5d549ac187d2b2171d7dabf9079b5710569af1e3a75af095adb11c40",
+      "upstreamGitBlobSha1": "16bbfb822ce3fc565c04b51e4a2512ccc8543917",
+      "patchedSha256": "79af032845f54e9e61091f01c6ffbbcb3b31c12e6281b0d2c77885de65b929d3"
+    },
+    {
+      "path": "common/tinycrypt/port/esp_tinycrypt_port.h",
+      "baseSha256": "2357d7a612f903218b92bdb7f8f562980300eee5166a34d35e59f549bdb638aa",
+      "upstreamGitBlobSha1": "90e6ef0c2e9da09b253e6ded2e6f6576e07026cf",
+      "patchedSha256": "56ba7201fea3a1b8dfdea283f42787190f29e6c3a1ef76b4517cd9276b0184f0"
+    },
+    {
+      "path": "common/tinycrypt/src/ecc.c",
+      "baseSha256": "b604b889d36bd1c9b1a0e0020f928a6c5e137b5c229d8bac2932a422f07f63ff",
+      "upstreamGitBlobSha1": "72cc5f299ddfd87b22f27a02b3ef459df51266b8",
+      "patchedSha256": "025b237331acb4e800f4d6fdaee83ed263e41e4428e6233be9ad9f11dab5dc34"
+    },
+    {
+      "path": "common/tinycrypt/src/ecc_dh.c",
+      "baseSha256": "e183bdb0c77179adb9916de4db65a2cd16d0360137b610da15aa01aa825b326c",
+      "upstreamGitBlobSha1": "d740a429eb88616c6490804b2982850e9183a886",
+      "patchedSha256": "c0cb59554bb0a20f143b861441218d27a90289fc25dc3fe9c221819cd5d84a58"
+    },
+    {
+      "path": "common/tinycrypt/src/ecc_dsa.c",
+      "baseSha256": "e031b36423076f79106b79ac87153f97dbe1e3fd8461216cec29bea23e76f807",
+      "upstreamGitBlobSha1": "aef4bfe2fa933ecad164ef26c934ce2d23299fff",
+      "patchedSha256": "e6e876d13f1ebbafb439e4866cbc28a7c83b01dcdc32251745509717648748ed"
+    }
+  ],
+  "review": "Five upstream TinyCrypt changes only. ECDH and signing use the regularized software ladder; supported canonical public-key/point operations use explicitly converted hardware parameters/results. No SMP negotiation, authentication requirement, key size, validation bypass or app protocol changes. Every patched file matches the official commit Git blob exactly. NimBLE submodule update omitted as advised by Espressif."
+}

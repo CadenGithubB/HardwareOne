@@ -1,6 +1,7 @@
 #include "System_TranscriptionUI.h"
 #if ENABLE_DICTATION
 #include "System_Dictation.h"
+#include "HAL_Audio.h"
 #include "System_AuthIdentity.h"
 #include "System_Command.h"
 #include "System_Filesystem.h"
@@ -56,6 +57,9 @@ void putStatus(JsonDocument& doc, const DictationAppLease& lease) {
   doc["available"] = available;
   doc["reason"] = why ? why : "";
   doc["saveDefault"] = gSettings.sttSaveTranscripts;
+  doc["micSource"] = gSettings.micSource;
+  doc["micPdm"] = audioSourceAvailable(AUDIO_SRC_LOCAL_PDM);
+  doc["micG2"] = audioSourceAvailable(AUDIO_SRC_G2_LEFT);
   doc["continuous"] = valid ? app.status.continuous : bool(ENABLE_LOCAL_STT);
   doc["preparing"] = valid && app.status.preparing;
   doc["captureActive"] = valid && app.status.captureActive;
@@ -107,6 +111,12 @@ const char* commandSession(const String& input) {
       doc["available"] = available; doc["sttText"] = text;
       doc["sequence"] = receipt.sequence; doc["offset"] = receipt.offset;
       doc["length"] = receipt.length;
+      TranscriptionUI::clear(text, sizeof(text));
+      // Live mode: provisional words still being spoken (same private reply).
+      uint32_t draftVersion = 0;
+      if (dictationAppPeekDraft(lease, text, sizeof(text), &draftVersion)) {
+        doc["draft"] = text; doc["draftVersion"] = draftVersion;
+      }
       TranscriptionUI::clear(text, sizeof(text));
     } else if (op == "ack" && args.count() == 5) {
       uint32_t seq, offset, length;

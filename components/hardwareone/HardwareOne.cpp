@@ -161,7 +161,9 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
 #endif
+#if ENABLE_NEOPIXEL
 #include <Adafruit_NeoPixel.h>
+#endif
 #if ENABLE_APDS_SENSOR
 #include "Adafruit_APDS9960.h"
 #endif
@@ -368,7 +370,9 @@ void sensorStatusBump() {
 #endif
 }
 
+#if ENABLE_NEOPIXEL
 extern Adafruit_NeoPixel pixels;
+#endif
 extern BatteryState gBatteryState;
 
 // Globals

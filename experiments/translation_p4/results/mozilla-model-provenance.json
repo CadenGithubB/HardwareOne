@@ -1,0 +1,26 @@
+{
+  "revision": "e7957fc407441a5e3e35bbcbf9d60d9b35764618",
+  "architecture": "tiny",
+  "from": "en",
+  "to": "es",
+  "files": [
+    {
+      "path": "model.enes.intgemm.alphas.bin",
+      "url": "https://storage.googleapis.com/bergamot-models-sandbox/0.3.3/enes/model.enes.intgemm.alphas.bin",
+      "bytes": 17140755,
+      "sha256": "fa7460037a3163e03fe1d23602f964bff2331da6ee813637e092ddf37156ef53"
+    },
+    {
+      "path": "lex.50.50.enes.s2t.bin",
+      "url": "https://storage.googleapis.com/bergamot-models-sandbox/0.3.3/enes/lex.50.50.enes.s2t.bin",
+      "bytes": 3347104,
+      "sha256": "3a113d713dec3cf1d12bba5b138ae616e28bba4bbc7fe7fd39ba145e26b86d7f"
+    },
+    {
+      "path": "vocab.esen.spm",
+      "url": "https://storage.googleapis.com/bergamot-models-sandbox/0.3.3/enes/vocab.esen.spm",
+      "bytes": 825463,
+      "sha256": "909b1eea1face0d7f90a474fe29a8c0fef8d104b6e41e65616f864c964ba8845"
+    }
+  ]
+}

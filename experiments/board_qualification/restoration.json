@@ -25,12 +25,12 @@
           "initialized": true,
           "channel": 6,
           "channelPref": 6,
-          "mac": "FC:01:2C:E0:B9:A8",
+          "mac": "02:48:57:31:01:A8",
           "pairedDevices": 1
         },
         "peers": [
           {
-            "mac": "68:EE:8F:50:E9:D0",
+            "mac": "02:48:57:31:00:D0",
             "name": "HW1_S3",
             "encrypted": true,
             "meshId": 0
@@ -74,12 +74,12 @@
           "initialized": true,
           "channel": 6,
           "channelPref": 6,
-          "mac": "68:EE:8F:50:E9:D0",
+          "mac": "02:48:57:31:00:D0",
           "pairedDevices": 1
         },
         "peers": [
           {
-            "mac": "FC:01:2C:E0:B9:A8",
+            "mac": "02:48:57:31:01:A8",
             "name": "HW1_P4",
             "encrypted": true,
             "meshId": 0

@@ -55,6 +55,9 @@
 #define SD_MMC_POWER_PIN 46
 #define SD_MMC_POWER_ACTIVE_LEVEL 0
 #define SD_MMC_LDO_CHANNEL 4
+// 40 MHz SD High Speed, as Espressif's own P4-EYE BSP uses on this slot
+// (SDMMC_FREQ_HIGHSPEED, 4-bit, LDO channel 4). Cards that do not support High
+// Speed are negotiated down to 20 MHz by the driver at mount.
 #ifndef SD_MMC_MAX_FREQ_KHZ
-#define SD_MMC_MAX_FREQ_KHZ 20000
+#define SD_MMC_MAX_FREQ_KHZ 40000
 #endif

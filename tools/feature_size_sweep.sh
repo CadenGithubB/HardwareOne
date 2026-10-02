@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
 # Per-feature flash-cost sweep: flip one feature family off, rebuild, record .bin size, restore.
-# Run from an ISOLATED CLONE of the tree (it rewrites System_BuildConfig.h and the saved
-# sdkconfig in place, restoring after each variant). Results: sweep_results.tsv.
+# Run from an ISOLATED CLONE of the tree (it rewrites System_BuildConfig.h, the board
+# feature profile if any, and the saved sdkconfig in place, restoring after each
+# variant). Results: sweep_results_<board>.tsv.
 # Produced docs/FEATURE_COST_LEDGER_2026-08-23.md §3; baseline reproduced the live image byte-exact.
-cd "$(dirname "$0")"
-source $HOME/esp/esp-idf/export.sh >/dev/null 2>&1
+#
+#   usage: tools/feature_size_sweep.sh [board]        (default: xiao_s3)
+#
+# Export ESP-IDF first; $HOME/esp/esp-idf/export.sh is sourced only when
+# idf.py is not already on PATH. A board with boards/<board>.features.h has
+# its flags flipped in that profile, since it outranks the shared header.
+cd "$(dirname "$0")/.."
+BOARD="${1:-xiao_s3}"
+command -v idf.py >/dev/null 2>&1 || source "$HOME/esp/esp-idf/export.sh" >/dev/null 2>&1
 F=components/hardwareone/System_BuildConfig.h
-SDK=build-xiao_s3/sdkconfig
-OUT=sweep_results.tsv
-cp $F $F.base; cp $SDK $SDK.base
-set_flag(){ sed -i '' -E "s/^(#define $1[[:space:]]+)[0-9]+/\1$2/" $F; }
-size(){ stat -f %z build-xiao_s3/hardwareone-idf.bin 2>/dev/null || echo FAIL; }
-build(){ tools/build_board.sh xiao_s3 build > "sweep_$1.log" 2>&1 && size || echo FAIL; }
+BF="boards/$BOARD.features.h"; [ -f "$BF" ] || BF=""
+SDK="build-$BOARD/sdkconfig"
+OUT="sweep_results_$BOARD.tsv"
+cp $F $F.base; cp $SDK $SDK.base; [ -z "$BF" ] || cp "$BF" "$BF.base"
+flag_file(){ if [ -n "$BF" ] && grep -qE "^[[:space:]]*#define[[:space:]]+$1[[:space:]]+[0-9]+" "$BF"; then echo "$BF"; else echo "$F"; fi; }
+set_flag(){ sed -i '' -E "s/^([[:space:]]*#define[[:space:]]+$1[[:space:]]+)[0-9]+/\1$2/" "$(flag_file "$1")"; }
+size(){ stat -f %z "build-$BOARD/hardwareone-idf.bin" 2>/dev/null || echo FAIL; }
+build(){ tools/build_board.sh "$BOARD" build > "sweep_${BOARD}_$1.log" 2>&1 && size || echo FAIL; }
+restore_all(){ cp $F.base $F; cp $SDK.base $SDK; [ -z "$BF" ] || cp "$BF.base" "$BF"; }
+trap restore_all EXIT
 echo -e "variant\tbytes" > $OUT
 echo -e "BASELINE_full\t$(build baseline)" >> $OUT
-run(){ name=$1; shift; cp $F.base $F; cp $SDK.base $SDK; eval "$*"; echo -e "$name\t$(build $name)" >> $OUT; cp $F.base $F; cp $SDK.base $SDK; }
+run(){ name=$1; shift; restore_all; eval "$*"; echo -e "$name\t$(build $name)" >> $OUT; restore_all; }
 run BT_family_off       'set_flag ENABLE_BLUETOOTH 0; set_flag ENABLE_G2_GLASSES 0; set_flag ENABLE_R1_HEALTH 0; set_flag ENABLE_G2_TESTSUITE 0; sed -i "" "s/^CONFIG_BT_ENABLED=y/CONFIG_BT_ENABLED=n/" $SDK'
 run G2_glasses_off      'set_flag ENABLE_G2_GLASSES 0; set_flag ENABLE_G2_TESTSUITE 0'
 run G2_testsuite_off    'set_flag ENABLE_G2_TESTSUITE 0'

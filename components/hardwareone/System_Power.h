@@ -15,16 +15,31 @@
 #define POWER_MODE_BALANCED     1
 #define POWER_MODE_POWERSAVER   2
 #define POWER_MODE_ULTRASAVER   3
-#define POWER_MODE_LOCKED       4   // 240 MHz always (idle power-save does not downclock)
+#define POWER_MODE_LOCKED       4   // Maximum clock always (idle power-save does not downclock)
 #define POWER_MODE_COUNT        5
 
-// Never run the interactive UI below this clock. 40 MHz renders the OLED/nav
-// loop ~6x slower (render + once-per-frame input consume balloon together),
-// which reads as "very unresponsive" input. So UltraSaver's headline 40 MHz is
-// reserved for the idle/asleep state (nobody's looking at the blanked panel);
-// while actively used, every mode holds at least this floor. 80 MHz is also the
-// established Wi-Fi/PSRAM-safe floor (see cmd_cpufreq, powerSaveTick).
-#define POWER_INTERACTIVE_FLOOR_MHZ  80
+// PLL frequencies accepted by the selected IDF target/revision. P4 revisions
+// below 3.0 use the 360 MHz PLL; revision 3.x builds use the 400 MHz PLL.
+// Keep target details here so commands and every UI share the same policy.
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+  #if defined(CONFIG_ESP32P4_SELECTS_REV_LESS_V3) && CONFIG_ESP32P4_SELECTS_REV_LESS_V3
+    #define POWER_CPU_PERFORMANCE_MHZ 360
+    #define POWER_CPU_BALANCED_MHZ    180
+    #define POWER_INTERACTIVE_FLOOR_MHZ 90
+  #else
+    #define POWER_CPU_PERFORMANCE_MHZ 400
+    #define POWER_CPU_BALANCED_MHZ    200
+    #define POWER_INTERACTIVE_FLOOR_MHZ 100
+  #endif
+#else
+  // Existing ESP32 / ESP32-S3 policy.
+  #define POWER_CPU_PERFORMANCE_MHZ 240
+  #define POWER_CPU_BALANCED_MHZ    160
+  #define POWER_INTERACTIVE_FLOOR_MHZ 80
+#endif
+
+// UltraSaver's XTAL clock is idle-only; interactive modes use the PLL floor.
+#define POWER_CPU_ULTRA_IDLE_MHZ 40
 
 // ============================================================================
 // Power Mode Management Functions
@@ -34,17 +49,22 @@ const char* getPowerModeName(uint8_t mode);
 // Nominal (table) clock for the mode — UltraSaver's is 40. This is the DEEP
 // value; use the active/idle accessors below for what actually gets applied.
 uint32_t getPowerModeCpuFreq(uint8_t mode);
-// Clock applied while the device is actively used: max(nominal, floor). For
-// UltraSaver this is 80, not 40 (see POWER_INTERACTIVE_FLOOR_MHZ).
+// Clock applied while the device is actively used: max(nominal, target floor).
 uint32_t getPowerModeActiveCpuFreq(uint8_t mode);
 // Clock the idle power-save path may drop to (OLED blanked, radio still up):
-//   Locked → keep active clock (240)
-//   Performance / Balanced / PowerSaver → 80 (Wi-Fi floor)
-//   UltraSaver → 40
+//   Locked → keep active clock
+//   Performance / Balanced / PowerSaver → target PLL floor
+//   UltraSaver → idle XTAL clock
 uint32_t getPowerModeIdleCpuFreq(uint8_t mode);
 uint8_t getPowerModeDisplayBrightness(uint8_t mode);
 
-void applyPowerMode(uint8_t mode);
+// Direct interactive overrides, ascending. Index outside count returns zero.
+size_t getPowerCpuFrequencyCount();
+uint32_t getPowerCpuFrequencyMhz(size_t index);
+bool isPowerCpuFrequencySupported(uint32_t mhz);
+
+// False if the target clock cannot be applied; no success event is emitted.
+bool applyPowerMode(uint8_t mode);
 void checkAutoPowerMode();
 
 // ----------------------------------------------------------------------------

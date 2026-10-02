@@ -26,12 +26,31 @@ struct PowerModeConfig {
 };
 
 static const PowerModeConfig gPowerModes[] = {
-  {"Performance", 240, 100},  // 0: Full speed (idle → 80)
-  {"Balanced",    160, 80},   // 1: Good balance (idle → 80)
-  {"PowerSaver",  80,  50},   // 2: Battery focused
-  {"UltraSaver",  40,  30},   // 3: Maximum savings (idle → 40)
-  {"Locked",      240, 100}   // 4: Always-240 (idle keeps 240 — no downclock)
+  {"Performance", POWER_CPU_PERFORMANCE_MHZ, 100},
+  {"Balanced",    POWER_CPU_BALANCED_MHZ,     80},
+  {"PowerSaver",  POWER_INTERACTIVE_FLOOR_MHZ, 50},
+  {"UltraSaver",  POWER_CPU_ULTRA_IDLE_MHZ,   30},
+  {"Locked",      POWER_CPU_PERFORMANCE_MHZ, 100}
 };
+
+static const uint32_t gPowerCpuFrequencies[] = {
+  POWER_INTERACTIVE_FLOOR_MHZ, POWER_CPU_BALANCED_MHZ, POWER_CPU_PERFORMANCE_MHZ
+};
+
+size_t getPowerCpuFrequencyCount() {
+  return sizeof(gPowerCpuFrequencies) / sizeof(gPowerCpuFrequencies[0]);
+}
+
+uint32_t getPowerCpuFrequencyMhz(size_t index) {
+  return index < getPowerCpuFrequencyCount() ? gPowerCpuFrequencies[index] : 0;
+}
+
+bool isPowerCpuFrequencySupported(uint32_t mhz) {
+  for (size_t i = 0; i < getPowerCpuFrequencyCount(); ++i) {
+    if (gPowerCpuFrequencies[i] == mhz) return true;
+  }
+  return false;
+}
 
 static_assert(sizeof(gPowerModes) / sizeof(gPowerModes[0]) == POWER_MODE_COUNT,
               "gPowerModes must match POWER_MODE_COUNT");
@@ -49,12 +68,12 @@ const char* getPowerModeName(uint8_t mode) {
 
 uint32_t getPowerModeCpuFreq(uint8_t mode) {
   if (mode >= POWER_MODE_COUNT) {
-    return 240;  // Default to performance
+    return POWER_CPU_PERFORMANCE_MHZ;  // Default to target performance
   }
   return gPowerModes[mode].cpuFreqMhz;
 }
 
-// Interactive clock = nominal clamped UP to the floor. UltraSaver (40) -> 80;
+// Interactive clock = nominal clamped UP to the target PLL floor;
 // all faster modes are returned unchanged.
 uint32_t getPowerModeActiveCpuFreq(uint8_t mode) {
   uint32_t f = getPowerModeCpuFreq(mode);
@@ -62,9 +81,8 @@ uint32_t getPowerModeActiveCpuFreq(uint8_t mode) {
 }
 
 // Idle clock while OLED power-save has blanked the panel (radio stays up).
-// Locked alone holds its interactive clock (240) — screen blanks but the core
-// does not downclock. Balanced/Performance/PowerSaver floor to 80. UltraSaver
-// sinks to its nominal 40.
+// Locked holds its interactive clock. Other modes use the target PLL floor,
+// except UltraSaver, which uses its nominal idle-only XTAL clock.
 uint32_t getPowerModeIdleCpuFreq(uint8_t mode) {
   if (mode == POWER_MODE_LOCKED) {
     return getPowerModeActiveCpuFreq(mode);
@@ -80,21 +98,17 @@ uint8_t getPowerModeDisplayBrightness(uint8_t mode) {
   return gPowerModes[mode].displayBrightnessPercent;
 }
 
-void applyPowerMode(uint8_t mode) {
+bool applyPowerMode(uint8_t mode) {
   DEBUG_SYSTEMF("[POWER] applyPowerMode called with mode=%d", mode);
   
   if (mode >= POWER_MODE_COUNT) {
     ERROR_SYSTEMF("Invalid power mode: %d", mode);
-    return;
+    return false;
   }
   
   const PowerModeConfig& config = gPowerModes[mode];
-  // Apply the INTERACTIVE clock, not the nominal table value. For UltraSaver
-  // that means 80 MHz, never a raw jump to 40: 40 MHz makes the UI unusably
-  // laggy, so it is reserved for the idle/asleep state and applied only by the
-  // (drain-guarded) idle power-save path in powerSaveTick(). Consequence: this
-  // function now never switches TO 40 MHz, so the old raw-setCpuFrequencyMhz
-  // hazard here only ever targets >=80 MHz (same as PowerSaver always did).
+  // UltraSaver's lower XTAL clock is reserved for the drain-guarded idle path.
+  // Active mode changes always use the target's interactive PLL frequencies.
   const uint32_t targetFreq = getPowerModeActiveCpuFreq(mode);
   DEBUG_SYSTEMF("[POWER] Config: name=%s nominal=%lu active=%lu displayBright=%d",
                 config.name, (unsigned long)config.cpuFreqMhz,
@@ -107,7 +121,11 @@ void applyPowerMode(uint8_t mode) {
   if (currentFreq != targetFreq) {
     INFO_SYSTEMF("Changing CPU frequency: %lu MHz -> %lu MHz",
                  (unsigned long)currentFreq, (unsigned long)targetFreq);
-    setCpuFrequencyMhz(targetFreq);
+    if (!setCpuFrequencyMhz(targetFreq) || getCpuFrequencyMhz() != targetFreq) {
+      ERROR_SYSTEMF("CPU frequency change failed: requested %lu MHz, actual %lu MHz",
+                    (unsigned long)targetFreq, (unsigned long)getCpuFrequencyMhz());
+      return false;
+    }
     DEBUG_SYSTEMF("[POWER] After setCpuFrequencyMhz, actual freq: %lu MHz",
                   (unsigned long)getCpuFrequencyMhz());
   } else {
@@ -142,6 +160,7 @@ void applyPowerMode(uint8_t mode) {
     snprintf(ev, sizeof(ev), "powermode:%s:%luMHz", config.name, (unsigned long)targetFreq);
     batteryLogEvent(ev);
   }
+  return true;
 }
 
 void checkAutoPowerMode() {
@@ -176,7 +195,7 @@ void checkAutoPowerMode() {
 // The `modes` array is what lets a UI render the preset picker without
 // re-encoding the gPowerModes table: name, the clock actually applied while
 // the device is in use, the clock idle power-save may sink to, and the mode's
-// display brightness. Anything that hardcodes "Performance = 240 MHz" in
+// display brightness. Any duplicated target frequency table in
 // JavaScript is a duplicate of this table waiting to drift.
 //
 // No secrets; safe on any transport.
@@ -194,6 +213,10 @@ void buildPowerJson(JsonDocument& doc) {
   doc["activeMhz"]         = (unsigned long)getPowerModeActiveCpuFreq(mode);
   doc["idleMhz"]           = (unsigned long)getPowerModeIdleCpuFreq(mode);
   doc["interactiveFloorMhz"] = (unsigned long)POWER_INTERACTIVE_FLOOR_MHZ;
+  JsonArray frequencies = doc["supportedCpuMhz"].to<JsonArray>();
+  for (size_t i = 0; i < getPowerCpuFrequencyCount(); ++i) {
+    frequencies.add(getPowerCpuFrequencyMhz(i));
+  }
 
   doc["autoMode"]          = (bool)gSettings.powerAutoMode;
   doc["batteryThreshold"]  = gSettings.powerBatteryThreshold;
@@ -292,7 +315,9 @@ const char* cmd_power(const String& argsInput) {
                          gPowerModes[i].displayBrightnessPercent);
       }
     }
-    broadcastOutput("  (Locked holds 240 MHz through idle power-save; UltraSaver's 40 MHz applies only once idle power-save blanks the screen; see 'powersave')");
+    BROADCAST_PRINTF("  (Locked holds %lu MHz through idle power-save; UltraSaver uses %lu MHz only after the screen blanks; see 'powersave')",
+                     (unsigned long)getPowerModeActiveCpuFreq(POWER_MODE_LOCKED),
+                     (unsigned long)getPowerModeIdleCpuFreq(POWER_MODE_ULTRASAVER));
     return "[Power] Status displayed";
   }
   
@@ -331,10 +356,12 @@ const char* cmd_power(const String& argsInput) {
       return "Error: Invalid mode. Use: perf, balanced, saver, ultra, locked, or 0-4";
     }
     
-    DEBUG_SYSTEMF("[POWER_CMD] Setting gSettings.powerMode to %d", newMode);
+    const uint8_t previousMode = gSettings.powerMode;
     setSetting(gSettings.powerMode, (uint8_t)newMode);
-    DEBUG_SYSTEMF("[POWER_CMD] Calling applyPowerMode...");
-    applyPowerMode(newMode);
+    if (!applyPowerMode(newMode)) {
+      setSetting(gSettings.powerMode, previousMode);
+      return "Error: CPU frequency change failed; previous power mode restored";
+    }
     
     BROADCAST_PRINTF("Power mode set to: %s", getPowerModeName(newMode));
     return "[Power] Mode updated";
@@ -442,7 +469,7 @@ static const char* cmd_powercooldown(const String& argsInput) {
 //   no arg  → print current value
 //   minutes → idle timeout before the OLED blanks + the CPU downclocks
 //             (0..1440); 0 disables. Persisted via setSetting. The radio stays
-//             up (CPU only drops to the 80 MHz WiFi floor) so the device stays
+//             up (CPU drops to its mode-dependent idle floor) so the device stays
 //             reachable while the screen is dark.
 static const char* cmd_powersave(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";

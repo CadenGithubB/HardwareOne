@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ada008773..b1314b66d 100644
+index ada0087..1b70e69 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -89,7 +89,7 @@ set(ARDUINO_ALL_LIBRARIES
@@ -11,7 +11,7 @@ index ada008773..b1314b66d 100644
    ESP_HostedOTA
    ESPmDNS
    Ethernet
-@@ -381,8 +381,8 @@ endforeach()
+@@ -381,8 +381,11 @@ endforeach()
  set(includedirs variants/${CONFIG_ARDUINO_VARIANT}/ cores/esp32/ ${ARDUINO_LIBRARIES_INCLUDEDIRS})
  set(srcs ${CORE_SRCS} ${ARDUINO_LIBRARIES_SRCS})
  set(priv_includes cores/esp32/libb64)
@@ -19,10 +19,13 @@ index ada008773..b1314b66d 100644
 -set(priv_requires fatfs nvs_flash app_update spiffs bootloader_support bt esp_hid usb esp_psram ${ARDUINO_LIBRARIES_REQUIRES})
 +set(requires spi_flash esp_partition mbedtls wpa_supplicant esp_adc esp_eth http_parser esp_ringbuf esp_driver_gptimer esp_driver_usb_serial_jtag driver esp_http_client esp_https_ota bt esp_wifi)
 +set(priv_requires fatfs nvs_flash app_update spiffs bootloader_support esp_hid usb esp_psram ${ARDUINO_LIBRARIES_REQUIRES})
++if(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
++  list(APPEND priv_requires esp_hosted)
++endif()
  
  if(NOT CONFIG_ARDUINO_SELECTIVE_COMPILATION OR CONFIG_ARDUINO_SELECTIVE_OpenThread)
    #if(CONFIG_SOC_IEEE802154_SUPPORTED) # Does not work!
-@@ -406,12 +406,27 @@ endif()
+@@ -406,12 +409,27 @@ endif()
  
  string(TOUPPER ${CONFIG_ARDUINO_VARIANT} idf_target_caps)
  string(REPLACE "-" "_" idf_target_for_macro "${idf_target_caps}")
@@ -51,7 +54,7 @@ index ada008773..b1314b66d 100644
  
  if(CONFIG_AUTOSTART_ARDUINO)
 diff --git a/Kconfig.projbuild b/Kconfig.projbuild
-index a2761749e..5e9bdaafe 100644
+index a276174..5e9bdaa 100644
 --- a/Kconfig.projbuild
 +++ b/Kconfig.projbuild
 @@ -28,6 +28,16 @@ config AUTOSTART_ARDUINO
@@ -71,8 +74,261 @@ index a2761749e..5e9bdaafe 100644
  choice ARDUINO_RUNNING_CORE
      bool "Core on which Arduino's setup() and loop() are running"
      default ARDUINO_RUN_CORE0 if FREERTOS_UNICORE
+diff --git a/cores/esp32/esp32-hal-bt.c b/cores/esp32/esp32-hal-bt.c
+index a2a603b..97ef48c 100644
+--- a/cores/esp32/esp32-hal-bt.c
++++ b/cores/esp32/esp32-hal-bt.c
+@@ -14,7 +14,125 @@
+ 
+ #include "esp32-hal-bt.h"
+ 
+-#if SOC_BT_SUPPORTED
++#if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++
++#include "esp_hosted.h"
++#include "esp_hosted_bluedroid.h"
++#include "esp_bt_main.h"
++#include "esp32-hal-hosted.h"
++
++// BLEDevice serializes lifecycle transitions. The atomic snapshot also permits
++// status readers on other tasks without claiming to query the remote hardware.
++static int32_t sHostedControllerState = BT_HOSTED_CONTROLLER_UNKNOWN;
++static bool sHostedHciAttached = false;
++
++int32_t btHostedControllerStatus(void) {
++  return __atomic_load_n(&sHostedControllerState, __ATOMIC_ACQUIRE);
++}
++
++static void hostedControllerAcknowledge(esp_err_t status, int32_t state) {
++  __atomic_store_n(&sHostedControllerState,
++                   status == ESP_OK ? state : BT_HOSTED_CONTROLLER_UNKNOWN,
++                   __ATOMIC_RELEASE);
++}
++
++bool btStarted(void) {
++  return btHostedControllerStatus() == BT_HOSTED_CONTROLLER_ENABLED;
++}
++
++bool btStart(void) {
++  return btStartMode(BT_MODE_BLE);
++}
++
++bool btStartMode(bt_mode mode) {
++  // This backend targets a BLE-only C6 controller. Shared Hosted transport and
++  // board pins must already be prepared by the application's radio backend.
++  if (mode != BT_MODE_DEFAULT && mode != BT_MODE_BLE) {
++    log_e("Hosted controller supports BLE mode only");
++    return false;
++  }
++  if (btStarted() && sHostedHciAttached) return true;
++  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED) {
++    log_e("Hosted HCI setup requires an uninitialized Bluedroid host");
++    return false;
++  }
++  // Wi-Fi may later switch off independently. Register BLE's transport
++  // ownership before controller work; a failed/ambiguous RPC must retain it
++  // until checked teardown confirms that the controller is idle.
++  if (!hostedClaimBLE()) return false;
++
++  // The pinned slave makes both calls idempotent. Repeat them after any
++  // ambiguous failure; never infer radio state from SDIO connectivity alone.
++  esp_err_t err = esp_hosted_bt_controller_init();
++  hostedControllerAcknowledge(err, BT_HOSTED_CONTROLLER_INITED);
++  if (err != ESP_OK) {
++    log_e("Hosted controller init failed: %s", esp_err_to_name(err));
++    return false;
++  }
++  err = esp_hosted_bt_controller_enable();
++  hostedControllerAcknowledge(err, BT_HOSTED_CONTROLLER_ENABLED);
++  if (err != ESP_OK) {
++    log_e("Hosted controller enable failed: %s", esp_err_to_name(err));
++    return false;
++  }
++
++  // Same HCI operations as the pinned Hosted Bluedroid host-only example.
++  // open() reuses the existing transport; it does not initialize Wi-Fi.
++  hosted_hci_bluedroid_open();
++  const esp_bluedroid_hci_driver_operations_t operations = {
++    .send = hosted_hci_bluedroid_send,
++    .check_send_available = hosted_hci_bluedroid_check_send_available,
++    .register_host_callback = hosted_hci_bluedroid_register_host_callback,
++  };
++  err = esp_bluedroid_attach_hci_driver(&operations);
++  if (err != ESP_OK) {
++    hosted_hci_bluedroid_close();
++    log_e("Hosted HCI attach failed: %s", esp_err_to_name(err));
++    return false;
++  }
++  sHostedHciAttached = true;
++  return true;
++}
++
++esp_err_t btHostedControllerDisable(void) {
++  // Host teardown must finish before detaching its HCI callbacks/controller.
++  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED) {
++    return ESP_ERR_INVALID_STATE;
++  }
++  hosted_hci_bluedroid_close();
++  esp_err_t err = esp_bluedroid_detach_hci_driver();
++  if (err != ESP_OK) return err;
++  sHostedHciAttached = false;
++  const int32_t before = btHostedControllerStatus();
++  err = esp_hosted_bt_controller_disable();
++  // With an unknown starting state, disable alone does not prove initialized.
++  // Deinit is idempotent and establishes the terminal state in the next phase.
++  const int32_t disabledState = before == BT_HOSTED_CONTROLLER_IDLE ? BT_HOSTED_CONTROLLER_IDLE
++                                : before == BT_HOSTED_CONTROLLER_UNKNOWN ? BT_HOSTED_CONTROLLER_UNKNOWN
++                                : BT_HOSTED_CONTROLLER_INITED;
++  hostedControllerAcknowledge(err, disabledState);
++  return err;
++}
++
++esp_err_t btHostedControllerDeinit(void) {
++  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED ||
++      sHostedHciAttached || btHostedControllerStatus() == BT_HOSTED_CONTROLLER_ENABLED) {
++    return ESP_ERR_INVALID_STATE;
++  }
++  // Never release C6 controller memory: BLE must be reopenable and Wi-Fi,
++  // ESP-NOW, and the shared Hosted/SDIO connection must remain operational.
++  esp_err_t err = esp_hosted_bt_controller_deinit(false);
++  hostedControllerAcknowledge(err, BT_HOSTED_CONTROLLER_IDLE);
++  if (err == ESP_OK) hostedReleaseBLE();
++  return err;
++}
++
++bool btStop(void) {
++  if (btHostedControllerDisable() != ESP_OK) return false;
++  return btHostedControllerDeinit() == ESP_OK;
++}
++
++#elif SOC_BT_SUPPORTED
+ #if (defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)) && __has_include("esp_bt.h")
+ 
+ #if CONFIG_IDF_TARGET_ESP32
+@@ -131,4 +249,4 @@ bool btStop() {
+ 
+ #endif /* !__has_include("esp_bt.h") || !(defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)) */
+ 
+-#endif /* SOC_BT_SUPPORTED */
++#endif /* SOC_BT_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID */
+diff --git a/cores/esp32/esp32-hal-bt.h b/cores/esp32/esp32-hal-bt.h
+index 8ab03ee..dd5b0d0 100644
+--- a/cores/esp32/esp32-hal-bt.h
++++ b/cores/esp32/esp32-hal-bt.h
+@@ -16,7 +16,8 @@
+ #define _ESP32_ESP32_HAL_BT_H_
+ 
+ #include "soc/soc_caps.h"
+-#if SOC_BT_SUPPORTED
++#include "sdkconfig.h"
++#if SOC_BT_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
+ 
+ #include "esp32-hal.h"
+ 
+@@ -36,10 +37,25 @@ bool btStart();
+ bool btStartMode(bt_mode mode);
+ bool btStop();
+ 
++#if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++// Last acknowledged Hosted lifecycle phase, not a live controller query.
++// A failed RPC leaves the remote outcome unknown. Native enum values 0..2
++// are retained so checked BLE teardown can report either backend uniformly.
++enum {
++  BT_HOSTED_CONTROLLER_UNKNOWN = -1,
++  BT_HOSTED_CONTROLLER_IDLE = 0,
++  BT_HOSTED_CONTROLLER_INITED = 1,
++  BT_HOSTED_CONTROLLER_ENABLED = 2
++};
++int32_t btHostedControllerStatus(void);
++esp_err_t btHostedControllerDisable(void);
++esp_err_t btHostedControllerDeinit(void);
++#endif
++
+ #ifdef __cplusplus
+ }
+ #endif
+ 
+-#endif /* SOC_BT_SUPPORTED */
++#endif /* SOC_BT_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID */
+ 
+ #endif /* _ESP32_ESP32_HAL_BT_H_ */
+diff --git a/cores/esp32/esp32-hal-hosted.c b/cores/esp32/esp32-hal-hosted.c
+index b5ab854..ca3ca2f 100644
+--- a/cores/esp32/esp32-hal-hosted.c
++++ b/cores/esp32/esp32-hal-hosted.c
+@@ -13,7 +13,7 @@
+ // limitations under the License.
+ 
+ #include "sdkconfig.h"
+-#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED)
++#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED)
+ 
+ #include "esp32-hal-hosted.h"
+ #include "esp32-hal-log.h"
+@@ -247,6 +247,23 @@ static bool hostedDeinit() {
+   return true;
+ }
+ 
++bool hostedClaimBLE() {
++  // The application prepares the board pins and transport before BLE startup.
++  // Do not silently start a transport here with generic variant pin defaults.
++  if (!hosted_initialized) {
++    log_e("Prepare ESP-Hosted before claiming it for BLE");
++    return false;
++  }
++  hosted_ble_active = true;
++  return true;
++}
++
++void hostedReleaseBLE() {
++  // Controller shutdown belongs to BLEDevice's checked lifecycle. Keep SDIO
++  // operational even when BLE happens to be its final current consumer.
++  hosted_ble_active = false;
++}
++
+ bool hostedInitBLE() {
+   log_i("Initializing ESP-Hosted for BLE");
+   if (!hostedInit()) {
+@@ -353,4 +370,4 @@ bool hostedIsInitialized() {
+   return hosted_initialized;
+ }
+ 
+-#endif /* defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED) */
++#endif /* Hosted BLE or remote Wi-Fi */
+diff --git a/cores/esp32/esp32-hal-hosted.h b/cores/esp32/esp32-hal-hosted.h
+index 1b329fc..6dc0497 100644
+--- a/cores/esp32/esp32-hal-hosted.h
++++ b/cores/esp32/esp32-hal-hosted.h
+@@ -16,7 +16,7 @@
+ #define MAIN_ESP32_HAL_HOSTED_H_
+ 
+ #include "sdkconfig.h"
+-#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED)
++#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED)
+ 
+ #include "stdint.h"
+ #include "stdbool.h"
+@@ -39,6 +39,11 @@ bool hostedInitBLE();
+ bool hostedInitWiFi();
+ bool hostedDeinitBLE();
+ bool hostedDeinitWiFi();
++// Claim the prepared shared transport before a separately managed BLE host
++// starts. Retain ownership across uncertain controller failures; release only
++// after checked teardown. Release does not shut down the shared transport.
++bool hostedClaimBLE();
++void hostedReleaseBLE();
+ bool hostedIsInitialized();
+ bool hostedIsBLEActive();
+ bool hostedIsWiFiActive();
+@@ -57,5 +62,5 @@ bool hostedActivateUpdate();
+ }
+ #endif
+ 
+-#endif /* defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_WIFI_REMOTE_ENABLED) */
++#endif /* Hosted BLE or remote Wi-Fi */
+ #endif /* MAIN_ESP32_HAL_HOSTED_H_ */
 diff --git a/cores/esp32/esp32-hal-i2c-ng.c b/cores/esp32/esp32-hal-i2c-ng.c
-index 8a55b369d..d4e550994 100644
+index 8a55b36..d4e5509 100644
 --- a/cores/esp32/esp32-hal-i2c-ng.c
 +++ b/cores/esp32/esp32-hal-i2c-ng.c
 @@ -41,7 +41,13 @@ typedef volatile struct {
@@ -91,7 +347,7 @@ index 8a55b369d..d4e550994 100644
  static bool i2cDetachBus(void *bus_i2c_num) {
    uint8_t i2c_num = (int)bus_i2c_num - 1;
 diff --git a/cores/esp32/esp32-hal-periman.c b/cores/esp32/esp32-hal-periman.c
-index bec88b0fd..12027ebe7 100644
+index bec88b0..12027eb 100644
 --- a/cores/esp32/esp32-hal-periman.c
 +++ b/cores/esp32/esp32-hal-periman.c
 @@ -16,8 +16,17 @@ typedef struct ATTR_PACKED {
@@ -114,13 +370,29 @@ index bec88b0fd..12027ebe7 100644
  
  #define GPIO_NOT_VALID(p) ((p >= SOC_GPIO_PIN_COUNT) || ((SOC_GPIO_VALID_GPIO_MASK & (1ULL << p)) == 0))
  
+diff --git a/cores/esp32/esp32-hal-uart.c b/cores/esp32/esp32-hal-uart.c
+index 4b80108..c7b0a49 100644
+--- a/cores/esp32/esp32-hal-uart.c
++++ b/cores/esp32/esp32-hal-uart.c
+@@ -1406,7 +1406,7 @@ bool uartSetClockSource(uint8_t uartNum, uart_sclk_t clkSrc) {
+   if (uart->num >= SOC_UART_HP_NUM) {
+     switch (clkSrc) {
+       case UART_SCLK_XTAL: uart->_uart_clock_source = LP_UART_SCLK_XTAL_D2; break;
+-#if CONFIG_IDF_TARGET_ESP32C5
++#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32P4
+       case UART_SCLK_RTC: uart->_uart_clock_source = LP_UART_SCLK_RC_FAST; break;
+ #else
+       case UART_SCLK_RTC: uart->_uart_clock_source = LP_UART_SCLK_LP_FAST; break;
 diff --git a/idf_component.yml b/idf_component.yml
-index fc83e00af..20cbc19e4 100644
+index fc83e00..d528bb2 100644
 --- a/idf_component.yml
 +++ b/idf_component.yml
-@@ -53,56 +53,56 @@ dependencies:
+@@ -51,86 +51,82 @@ dependencies:
+   idf: ">=5.3,<5.6"
+   # mdns 1.2.1 is necessary to build H2 with no WiFi
    espressif/mdns:
-     version: "^1.2.3"
+-    version: "^1.2.3"
++    version: "==1.10.1"
      require: public
 -  espressif/esp_modem:
 -    version: "^2.0.0"
@@ -221,9 +493,20 @@ index fc83e00af..20cbc19e4 100644
 +  #   rules:
 +  #     - if: "target not in [esp32c2, esp32p4]"
    # RainMaker End
-   espressif/esp-sr:
-     version: "^2.1.5"
-@@ -119,18 +119,18 @@ dependencies:
+-  espressif/esp-sr:
+-    version: "^2.1.5"
+-    rules:
+-      - if: "target in [esp32s3, esp32p4]"
+   espressif/esp_hosted:
+-    version: "^2.8.0"
++    version: "==2.12.13"
+     rules:
+       - if: "target == esp32p4"
+   espressif/esp_wifi_remote:
+-    version: "^1.2.2"
++    version: "==1.3.1"
+     rules:
+       - if: "target == esp32p4"
    espressif/libsodium:
      version: "^1.0.20~1"
      require: public
@@ -234,7 +517,8 @@ index fc83e00af..20cbc19e4 100644
 +  #   version: "^1.0.15"
 +  #   require: public
    joltwallet/littlefs:
-     version: "^1.10.2"
+-    version: "^1.10.2"
++    version: "==1.20.4"
    chmorgan/esp-libhelix-mp3:
      version: "1.0.3"
      require: public
@@ -249,11 +533,326 @@ index fc83e00af..20cbc19e4 100644
  examples:
    - path: ./idf_component_examples/hello_world
    - path: ./idf_component_examples/hw_cdc_hello_world
+diff --git a/libraries/BLE/src/BLE2901.cpp b/libraries/BLE/src/BLE2901.cpp
+index 20535dd..9a3c6b6 100644
+--- a/libraries/BLE/src/BLE2901.cpp
++++ b/libraries/BLE/src/BLE2901.cpp
+@@ -17,7 +17,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -55,4 +55,4 @@ void BLE2901::setDescription(const String &userDesc) {
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLE2901.h b/libraries/BLE/src/BLE2901.h
+index 949cad0..1bc7a27 100644
+--- a/libraries/BLE/src/BLE2901.h
++++ b/libraries/BLE/src/BLE2901.h
+@@ -20,7 +20,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -43,6 +43,6 @@ public:
+ };  // BLE2901
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLE2901_H_ */
+diff --git a/libraries/BLE/src/BLE2902.cpp b/libraries/BLE/src/BLE2902.cpp
+index 4645244..65d77a2 100644
+--- a/libraries/BLE/src/BLE2902.cpp
++++ b/libraries/BLE/src/BLE2902.cpp
+@@ -16,7 +16,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -125,4 +125,4 @@ void BLE2902::setNotifications(bool flag) {
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLE2902.h b/libraries/BLE/src/BLE2902.h
+index 1dc685c..7f3c244 100644
+--- a/libraries/BLE/src/BLE2902.h
++++ b/libraries/BLE/src/BLE2902.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -58,6 +58,6 @@ This class will be removed in a future version.")]] BLE2902 : public BLEDescript
+   };  // BLE2902
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLE2902_H_ */
+diff --git a/libraries/BLE/src/BLE2904.cpp b/libraries/BLE/src/BLE2904.cpp
+index 2d3565a..8ef67a5 100644
+--- a/libraries/BLE/src/BLE2904.cpp
++++ b/libraries/BLE/src/BLE2904.cpp
+@@ -16,7 +16,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -85,4 +85,4 @@ void BLE2904::setUnit(uint16_t unit) {
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLE2904.h b/libraries/BLE/src/BLE2904.h
+index f0f2676..f04dd95 100644
+--- a/libraries/BLE/src/BLE2904.h
++++ b/libraries/BLE/src/BLE2904.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -102,6 +102,6 @@ private:
+ };  // BLE2904
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLE2904_H_ */
+diff --git a/libraries/BLE/src/BLEAddress.cpp b/libraries/BLE/src/BLEAddress.cpp
+index e345ac9..2fc787f 100644
+--- a/libraries/BLE/src/BLEAddress.cpp
++++ b/libraries/BLE/src/BLEAddress.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -220,4 +220,4 @@ BLEAddress::BLEAddress(const String &stringAddress, uint8_t type) {
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEAddress.h b/libraries/BLE/src/BLEAddress.h
+index 9b6bd42..fae304d 100644
+--- a/libraries/BLE/src/BLEAddress.h
++++ b/libraries/BLE/src/BLEAddress.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -111,6 +111,6 @@ private:
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEADDRESS_H_ */
+diff --git a/libraries/BLE/src/BLEAdvertisedDevice.cpp b/libraries/BLE/src/BLEAdvertisedDevice.cpp
+index 40ff78c..8350607 100644
+--- a/libraries/BLE/src/BLEAdvertisedDevice.cpp
++++ b/libraries/BLE/src/BLEAdvertisedDevice.cpp
+@@ -17,7 +17,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -804,4 +804,4 @@ uint8_t BLEAdvertisedDevice::getAdvType() {
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEAdvertisedDevice.h b/libraries/BLE/src/BLEAdvertisedDevice.h
+index 2a34e5a..0c9d260 100644
+--- a/libraries/BLE/src/BLEAdvertisedDevice.h
++++ b/libraries/BLE/src/BLEAdvertisedDevice.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -233,6 +233,6 @@ public:
+ #endif  // SOC_BLE_50_SUPPORTED && CONFIG_BLUEDROID_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEADVERTISEDDEVICE_H_ */
+diff --git a/libraries/BLE/src/BLEAdvertising.cpp b/libraries/BLE/src/BLEAdvertising.cpp
+index 41350c6..60b70f2 100644
+--- a/libraries/BLE/src/BLEAdvertising.cpp
++++ b/libraries/BLE/src/BLEAdvertising.cpp
+@@ -23,7 +23,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -1424,4 +1424,4 @@ bool BLEAdvertising::stop() {
+ #endif /* CONFIG_NIMBLE_ENABLED */
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEAdvertising.h b/libraries/BLE/src/BLEAdvertising.h
+index 2ea112b..67e631b 100644
+--- a/libraries/BLE/src/BLEAdvertising.h
++++ b/libraries/BLE/src/BLEAdvertising.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -253,6 +253,6 @@ private:
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEADVERTISING_H_ */
+diff --git a/libraries/BLE/src/BLEBeacon.cpp b/libraries/BLE/src/BLEBeacon.cpp
+index 0b10836..a4103eb 100644
+--- a/libraries/BLE/src/BLEBeacon.cpp
++++ b/libraries/BLE/src/BLEBeacon.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -95,4 +95,4 @@ void BLEBeacon::setProximityUUID(BLEUUID uuid) {
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEBeacon.h b/libraries/BLE/src/BLEBeacon.h
+index b3f3408..c980a76 100644
+--- a/libraries/BLE/src/BLEBeacon.h
++++ b/libraries/BLE/src/BLEBeacon.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -64,6 +64,6 @@ public:
+ };  // BLEBeacon
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEBEACON_H_ */
 diff --git a/libraries/BLE/src/BLECharacteristic.cpp b/libraries/BLE/src/BLECharacteristic.cpp
-index cb971796b..a95589c0a 100644
+index cb97179..5b37ea6 100644
 --- a/libraries/BLE/src/BLECharacteristic.cpp
 +++ b/libraries/BLE/src/BLECharacteristic.cpp
-@@ -150,6 +150,21 @@ void BLECharacteristic::setAccessPermissions(uint16_t perm) {
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -103,7 +103,8 @@ BLECharacteristic::~BLECharacteristic() {
+  * @param [in] pDescriptor
+  * @return N/A.
+  */
+-void BLECharacteristic::addDescriptor(BLEDescriptor *pDescriptor) {
++void BLECharacteristic::addDescriptor(BLEDescriptor *pDescriptor, bool takeOwnership) {
++  if (takeOwnership) pDescriptor->m_ownedByCharacteristic = true;
+ #ifdef CONFIG_NIMBLE_ENABLED
+   if (pDescriptor->getUUID() == BLEUUID(uint16_t(0x2902))) {
+     log_i("NimBLE automatically creates the 0x2902 descriptor if a characteristic has a notification or indication property assigned to it.\n"
+@@ -118,6 +119,15 @@ void BLECharacteristic::addDescriptor(BLEDescriptor *pDescriptor) {
+   log_v("<< addDescriptor()");
+ }  // addDescriptor
+ 
++#if defined(CONFIG_BLUEDROID_ENABLED)
++void BLECharacteristic::destroyOwnedDescriptorsAfterHostDeinit() {
++  while (BLEDescriptor *descriptor = m_descriptorMap.getFirst()) {
++    m_descriptorMap.removeDescriptor(descriptor);
++    if (descriptor->m_ownedByCharacteristic) delete descriptor;
++  }
++}
++#endif
++
+ /**
+  * @brief Return the BLE Descriptor for the given UUID if associated with this characteristic.
+  * @param [in] descriptorUUID The UUID of the descriptor that we wish to retrieve.
+@@ -150,6 +160,21 @@ void BLECharacteristic::setAccessPermissions(uint16_t perm) {
  #endif
  }
  
@@ -275,7 +874,7 @@ index cb971796b..a95589c0a 100644
  esp_gatt_char_prop_t BLECharacteristic::getProperties() const {
    return m_properties;
  }  // getProperties
-@@ -567,6 +582,24 @@ void BLECharacteristic::handleGATTServerEvent(esp_gatts_cb_event_t event, esp_ga
+@@ -567,6 +592,24 @@ void BLECharacteristic::handleGATTServerEvent(esp_gatts_cb_event_t event, esp_ga
        // to send a response.  If we do, then we formulate a response and send it.
        if (param->write.handle == m_handle) {
  
@@ -300,11 +899,37 @@ index cb971796b..a95589c0a 100644
          // Check for authorization requirement
          if (m_permissions & ESP_GATT_PERM_WRITE_AUTHORIZATION) {
            bool authorized = false;
+@@ -1236,4 +1279,4 @@ void BLECharacteristicCallbacks::onSubscribe(BLECharacteristic *pCharacteristic,
+ #endif /* CONFIG_NIMBLE_ENABLED */
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
 diff --git a/libraries/BLE/src/BLECharacteristic.h b/libraries/BLE/src/BLECharacteristic.h
-index f7f61cde3..1c9fee84c 100644
+index f7f61cd..7800694 100644
 --- a/libraries/BLE/src/BLECharacteristic.h
 +++ b/libraries/BLE/src/BLECharacteristic.h
-@@ -209,6 +209,13 @@ public:
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -182,7 +182,9 @@ public:
+   BLECharacteristic(BLEUUID uuid, uint32_t properties = 0);
+   virtual ~BLECharacteristic();
+ 
+-  void addDescriptor(BLEDescriptor *pDescriptor);
++  // Existing callers retain ownership unless explicitly transferred. Owned
++  // descriptors are reclaimed only by checked terminal Bluedroid teardown.
++  void addDescriptor(BLEDescriptor *pDescriptor, bool takeOwnership = false);
+   BLEDescriptor *getDescriptorByUUID(const char *descriptorUUID) const;
+   BLEDescriptor *getDescriptorByUUID(BLEUUID descriptorUUID) const;
+   BLEUUID getUUID() const;
+@@ -209,6 +211,13 @@ public:
    void setBroadcastProperty(bool value);
    void setIndicateProperty(bool value);
    void setWriteNoResponseProperty(bool value);
@@ -318,8 +943,11 @@ index f7f61cde3..1c9fee84c 100644
  
  private:
    friend class BLEServer;
-@@ -228,6 +235,9 @@ private:
+@@ -226,8 +235,12 @@ private:
+   esp_gatt_char_prop_t m_properties;
+   BLECharacteristicCallbacks *m_pCallbacks;
    BLEService *m_pService;
++  bool m_ownedByService = false; // createCharacteristic owns; addCharacteristic borrows
    BLEValue m_value;
    bool m_writeEvt = false;
 +#if defined(CONFIG_BLUEDROID_ENABLED)
@@ -328,10 +956,54 @@ index f7f61cde3..1c9fee84c 100644
    FreeRTOS::Semaphore m_semaphoreConfEvt = FreeRTOS::Semaphore("ConfEvt");
    FreeRTOS::Semaphore m_semaphoreSetValue = FreeRTOS::Semaphore("SetValue");
  
+@@ -270,6 +283,7 @@ private:
+    ***************************************************************************/
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
++  void destroyOwnedDescriptorsAfterHostDeinit();
+   void handleGATTServerEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
+ #endif
+ 
+@@ -340,6 +354,6 @@ public:
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLECHARACTERISTIC_H_ */
+diff --git a/libraries/BLE/src/BLECharacteristicMap.cpp b/libraries/BLE/src/BLECharacteristicMap.cpp
+index f82f5be..f16c16f 100644
+--- a/libraries/BLE/src/BLECharacteristicMap.cpp
++++ b/libraries/BLE/src/BLECharacteristicMap.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -182,4 +182,4 @@ void BLECharacteristicMap::handleGATTServerEvent(uint16_t conn_handle, uint16_t
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
 diff --git a/libraries/BLE/src/BLEClient.cpp b/libraries/BLE/src/BLEClient.cpp
-index 808614ba5..3f279ee7b 100644
+index 808614b..f77a379 100644
 --- a/libraries/BLE/src/BLEClient.cpp
 +++ b/libraries/BLE/src/BLEClient.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
 @@ -114,10 +114,88 @@ BLEClient::BLEClient() {
  #endif
  }  // BLEClient
@@ -955,10 +1627,25 @@ index 808614ba5..3f279ee7b 100644
        break;
      }  // BLE_GAP_EVENT_DISCONNECT
  
+@@ -1303,4 +1640,4 @@ bool BLEClientCallbacks::onConnParamsUpdateRequest(BLEClient *pClient, const ble
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
 diff --git a/libraries/BLE/src/BLEClient.h b/libraries/BLE/src/BLEClient.h
-index cbe0bde7e..886ce2902 100644
+index cbe0bde..1fe6fc5 100644
 --- a/libraries/BLE/src/BLEClient.h
 +++ b/libraries/BLE/src/BLEClient.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
 @@ -22,8 +22,10 @@
   ***************************************************************************/
  
@@ -1099,10 +1786,94 @@ index cbe0bde7e..886ce2902 100644
    void gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
  #endif
  
+@@ -212,6 +299,6 @@ public:
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* MAIN_BLECLIENT_H_ */
+diff --git a/libraries/BLE/src/BLEDescriptor.cpp b/libraries/BLE/src/BLEDescriptor.cpp
+index fe5212b..cf6aab0 100644
+--- a/libraries/BLE/src/BLEDescriptor.cpp
++++ b/libraries/BLE/src/BLEDescriptor.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -405,4 +405,4 @@ int BLEDescriptor::handleGATTServerEvent(uint16_t conn_handle, uint16_t attr_han
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEDescriptor.h b/libraries/BLE/src/BLEDescriptor.h
+index be10779..2c2346a 100644
+--- a/libraries/BLE/src/BLEDescriptor.h
++++ b/libraries/BLE/src/BLEDescriptor.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -135,6 +135,7 @@ private:
+   esp_attr_value_t m_value;
+   BLEDescriptorCallbacks *m_pCallback;
+   BLECharacteristic *m_pCharacteristic;
++  bool m_ownedByCharacteristic = false; // opt-in via addDescriptor(..., true)
+   FreeRTOS::Semaphore m_semaphoreSetValue = FreeRTOS::Semaphore("SetValue");
+ 
+   /***************************************************************************
+@@ -182,6 +183,6 @@ public:
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEDESCRIPTOR_H_ */
+diff --git a/libraries/BLE/src/BLEDescriptorMap.cpp b/libraries/BLE/src/BLEDescriptorMap.cpp
+index 39a54dc..b3da272 100644
+--- a/libraries/BLE/src/BLEDescriptorMap.cpp
++++ b/libraries/BLE/src/BLEDescriptorMap.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -212,4 +212,4 @@ void BLEDescriptorMap::handleGATTServerEvent(uint16_t conn_handle, uint16_t attr
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
 diff --git a/libraries/BLE/src/BLEDevice.cpp b/libraries/BLE/src/BLEDevice.cpp
-index c184fada2..53987f009 100644
+index c184fad..0ba10a3 100644
 --- a/libraries/BLE/src/BLEDevice.cpp
 +++ b/libraries/BLE/src/BLEDevice.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
 @@ -30,6 +30,8 @@
  
  #include <esp_err.h>
@@ -1320,7 +2091,7 @@ index c184fada2..53987f009 100644
    std::map<uint16_t, conn_status_t>::iterator it = m_connectedClientsMap.find(ESP_GATT_IF_NONE);
    if (it != m_connectedClientsMap.end()) {
      std::swap(m_connectedClientsMap[conn_id], it->second);
-@@ -847,100 +989,285 @@ void BLEDevice::updatePeerDevice(void *peer, bool _client, uint16_t conn_id) {
+@@ -847,100 +989,317 @@ void BLEDevice::updatePeerDevice(void *peer, bool _client, uint16_t conn_id) {
  void BLEDevice::addPeerDevice(void *peer, bool _client, uint16_t conn_id) {
    log_i("add conn_id: %d, GATT role: %s", conn_id, _client ? "client" : "server");
    conn_status_t status = {.peer_device = peer, .connected = true, .mtu = 23};
@@ -1462,11 +2233,6 @@ index c184fada2..53987f009 100644
 -#ifdef CONFIG_BLUEDROID_ENABLED
 -  esp_bluedroid_disable();
 -  esp_bluedroid_deinit();
--#endif
--
--#if defined(CONFIG_NIMBLE_ENABLED)
--  nimble_port_stop();
--  nimble_port_deinit();
 +#if defined(CONFIG_BLUEDROID_ENABLED)
 +  // Normalize from the actual host state. In particular, never deinitialize an
 +  // ENABLED host merely because a preceding disable call was attempted.
@@ -1509,8 +2275,10 @@ index c184fada2..53987f009 100644
 +  hostTerminal = true;
  #endif
  
- #if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
--  hostedDeinitBLE();
+-#if defined(CONFIG_NIMBLE_ENABLED)
+-  nimble_port_stop();
+-  nimble_port_deinit();
++#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
 +  if (hostTerminal && initialized) {
 +    result.hostedDeinitAttempted = true;
 +    result.hostedDeinitSucceeded = hostedDeinitBLE();
@@ -1519,10 +2287,29 @@ index c184fada2..53987f009 100644
 +  }
  #endif
  
--#if CONFIG_BT_CONTROLLER_ENABLED
--  esp_bt_controller_disable();
--  esp_bt_controller_deinit();
-+#if SOC_BLE_SUPPORTED && CONFIG_BT_CONTROLLER_ENABLED
+-#if defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
+-  hostedDeinitBLE();
++#if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++  // Hosted has lifecycle RPC acknowledgements, not a live controller query.
++  // Complete local host teardown first and preserve the shared Wi-Fi transport.
++  result.controllerStatusBefore = btHostedControllerStatus();
++  controllerTerminal = false;
++  if (hostTerminal) {
++    result.phase = BLEDeviceDeinitPhase::STOP_CONTROLLER;
++    result.controllerDisableAttempted = true;
++    result.controllerDisableStatus = btHostedControllerDisable();
++    transitionCallsSucceeded &= result.controllerDisableStatus == ESP_OK;
++    if (result.controllerDisableStatus == ESP_OK) {
++      result.phase = BLEDeviceDeinitPhase::DEINIT_CONTROLLER;
++      result.controllerDeinitAttempted = true;
++      result.controllerDeinitStatus = btHostedControllerDeinit();
++      transitionCallsSucceeded &= result.controllerDeinitStatus == ESP_OK;
++      controllerTerminal = result.controllerDeinitStatus == ESP_OK &&
++                           btHostedControllerStatus() == BT_HOSTED_CONTROLLER_IDLE;
++    }
++  }
++  result.controllerStatusAfter = btHostedControllerStatus();
++#elif SOC_BLE_SUPPORTED && CONFIG_BT_CONTROLLER_ENABLED
 +  esp_bt_controller_status_t controllerState = esp_bt_controller_get_status();
 +  result.controllerStatusBefore = static_cast<int32_t>(controllerState);
 +  controllerTerminal = controllerState == ESP_BT_CONTROLLER_STATUS_IDLE;
@@ -1548,12 +2335,9 @@ index c184fada2..53987f009 100644
 +  result.controllerStatusAfter = static_cast<int32_t>(controllerState);
  #endif
  
--  // Only release memory if requested (this prevents reinitialization)
--  if (release_memory) {
--#ifdef ARDUINO_ARCH_ESP32
--    // Require tests because we released classic BT memory and this can cause crash (most likely not, esp-idf takes care of it)
 -#if CONFIG_BT_CONTROLLER_ENABLED
--    esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+-  esp_bt_controller_disable();
+-  esp_bt_controller_deinit();
 +  result.terminalState = hostTerminal && hostedTerminal && controllerTerminal;
 +  if (result.terminalState) {
 +    result.phase = BLEDeviceDeinitPhase::RETIRE_OBJECTS;
@@ -1614,11 +2398,23 @@ index c184fada2..53987f009 100644
 +      result.scanDeleted = true;
 +    }
 +    if (m_pServer != nullptr) {
++#if defined(CONFIG_BLUEDROID_ENABLED)
++      // Raw service/characteristic maps do not own their pointed-to objects.
++      // Reclaim the explicitly owned tree only inside terminalState retirement;
++      // an incomplete host/controller stop must retain all callback targets.
++      m_pServer->destroyGattTreeAfterHostDeinit();
+ #endif
 +      delete m_pServer;
 +      m_pServer = nullptr;
 +      result.serverDeleted = true;
 +    }
-+
+ 
+-  // Only release memory if requested (this prevents reinitialization)
+-  if (release_memory) {
+-#ifdef ARDUINO_ARCH_ESP32
+-    // Require tests because we released classic BT memory and this can cause crash (most likely not, esp-idf takes care of it)
+-#if CONFIG_BT_CONTROLLER_ENABLED
+-    esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
 +#ifdef CONFIG_NIMBLE_ENABLED
 +    m_synced = false;
  #endif
@@ -1632,6 +2428,12 @@ index c184fada2..53987f009 100644
 +      result.memoryReleaseAttempted = true;
 +      result.memoryReleaseStatus = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
 +      transitionCallsSucceeded &= result.memoryReleaseStatus == ESP_OK;
++#elif CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
++      // Releasing the C6 controller's memory is irreversible until reboot.
++      // This shared-radio backend deliberately supports restartable shutdown.
++      result.memoryReleaseAttempted = true;
++      result.memoryReleaseStatus = ESP_ERR_NOT_SUPPORTED;
++      transitionCallsSucceeded = false;
  #endif
 +    }
    }
@@ -1664,7 +2466,7 @@ index c184fada2..53987f009 100644
  }
  
  void BLEDevice::setCustomGapHandler(gap_event_handler handler) {
-@@ -1052,14 +1379,40 @@ void BLEDevice::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+@@ -1052,14 +1411,40 @@ void BLEDevice::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
  
      default: break;
    }  // switch
@@ -1710,7 +2512,7 @@ index c184fada2..53987f009 100644
    if (m_customGattcHandler != nullptr) {
      m_customGattcHandler(event, gattc_if, param);
    }
-@@ -1186,8 +1539,26 @@ void BLEDevice::gapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_par
+@@ -1186,8 +1571,26 @@ void BLEDevice::gapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_par
      }
    }  // switch
  
@@ -1739,10 +2541,25 @@ index c184fada2..53987f009 100644
    }
  
    if (BLEDevice::m_pScan != nullptr) {
+@@ -1386,4 +1789,4 @@ int BLEDeviceCallbacks::onStoreStatus(struct ble_store_status_event *event, void
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
 diff --git a/libraries/BLE/src/BLEDevice.h b/libraries/BLE/src/BLEDevice.h
-index 5d4a16295..f3a4dde44 100644
+index 5d4a162..27698ed 100644
 --- a/libraries/BLE/src/BLEDevice.h
 +++ b/libraries/BLE/src/BLEDevice.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
 @@ -22,6 +22,7 @@
   ***************************************************************************/
  
@@ -1861,10 +2678,183 @@ index 5d4a16295..f3a4dde44 100644
    /***************************************************************************
     *                        NimBLE private properties                        *
     ***************************************************************************/
+@@ -297,6 +380,6 @@ public:
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* MAIN_BLEDevice_H_ */
+diff --git a/libraries/BLE/src/BLEEddystoneTLM.cpp b/libraries/BLE/src/BLEEddystoneTLM.cpp
+index 8b642c8..62499c8 100644
+--- a/libraries/BLE/src/BLEEddystoneTLM.cpp
++++ b/libraries/BLE/src/BLEEddystoneTLM.cpp
+@@ -15,7 +15,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include <string.h>
+@@ -181,4 +181,4 @@ void BLEEddystoneTLM::setTime(uint32_t tmil) {
+ }  // setTime
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEEddystoneTLM.h b/libraries/BLE/src/BLEEddystoneTLM.h
+index 2aa30c2..f48aea8 100644
+--- a/libraries/BLE/src/BLEEddystoneTLM.h
++++ b/libraries/BLE/src/BLEEddystoneTLM.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include "BLEUUID.h"
+@@ -65,6 +65,6 @@ private:
+ };  // BLEEddystoneTLM
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* _BLEEddystoneTLM_H_ */
+diff --git a/libraries/BLE/src/BLEEddystoneURL.cpp b/libraries/BLE/src/BLEEddystoneURL.cpp
+index 00ca18b..56b4673 100644
+--- a/libraries/BLE/src/BLEEddystoneURL.cpp
++++ b/libraries/BLE/src/BLEEddystoneURL.cpp
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include <string.h>
+@@ -288,4 +288,4 @@ void BLEEddystoneURL::_initHeadder() {
+ }
+ 
+ #endif
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEEddystoneURL.h b/libraries/BLE/src/BLEEddystoneURL.h
+index f220350..e5f5ad6 100644
+--- a/libraries/BLE/src/BLEEddystoneURL.h
++++ b/libraries/BLE/src/BLEEddystoneURL.h
+@@ -17,7 +17,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include "BLEUUID.h"
+@@ -67,6 +67,6 @@ private:
+ };  // BLEEddystoneURL
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* _BLEEddystoneURL_H_ */
+diff --git a/libraries/BLE/src/BLEExceptions.cpp b/libraries/BLE/src/BLEExceptions.cpp
+index f566f78..f7e1c39 100644
+--- a/libraries/BLE/src/BLEExceptions.cpp
++++ b/libraries/BLE/src/BLEExceptions.cpp
+@@ -7,8 +7,8 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ 
+ //#include "BLEExceptions.h"
+ 
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEExceptions.h b/libraries/BLE/src/BLEExceptions.h
+index 91cb184..d65a23a 100644
+--- a/libraries/BLE/src/BLEExceptions.h
++++ b/libraries/BLE/src/BLEExceptions.h
+@@ -10,7 +10,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ 
+ #if CONFIG_CXX_EXCEPTIONS != 1
+ #error "C++ exception handling must be enabled within make menuconfig. See Compiler Options > Enable C++ Exceptions."
+@@ -30,6 +30,6 @@ class BLEUuidNotFoundException : public std::exception {
+   }
+ };
+ 
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEEXCEPTIONS_H_ */
+diff --git a/libraries/BLE/src/BLEHIDDevice.cpp b/libraries/BLE/src/BLEHIDDevice.cpp
+index 20f9e80..18a65c8 100644
+--- a/libraries/BLE/src/BLEHIDDevice.cpp
++++ b/libraries/BLE/src/BLEHIDDevice.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -281,4 +281,4 @@ BLEService *BLEHIDDevice::batteryService() {
+ }
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEHIDDevice.h b/libraries/BLE/src/BLEHIDDevice.h
+index a348075..b05a157 100644
+--- a/libraries/BLE/src/BLEHIDDevice.h
++++ b/libraries/BLE/src/BLEHIDDevice.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ #include "BLECharacteristic.h"
+@@ -79,6 +79,6 @@ private:
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* _BLEHIDDEVICE_H_ */
 diff --git a/libraries/BLE/src/BLERemoteCharacteristic.cpp b/libraries/BLE/src/BLERemoteCharacteristic.cpp
-index 70a91288a..fd2b4e6ac 100644
+index 70a9128..fe7987a 100644
 --- a/libraries/BLE/src/BLERemoteCharacteristic.cpp
 +++ b/libraries/BLE/src/BLERemoteCharacteristic.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
 @@ -221,56 +221,21 @@ float BLERemoteCharacteristic::readFloat() {
   * @brief Register for notifications.
   * @param [in] notifyCallback A callback to be invoked for a notification.  If NULL is provided then we are
@@ -2292,10 +3282,25 @@ index 70a91288a..fd2b4e6ac 100644
  
    log_v("<< writeValue");
    return true;
+@@ -1033,4 +1266,4 @@ bool BLERemoteCharacteristic::unsubscribe(bool response) {
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
 diff --git a/libraries/BLE/src/BLERemoteCharacteristic.h b/libraries/BLE/src/BLERemoteCharacteristic.h
-index 7b04a15c7..c91718208 100644
+index 7b04a15..9703d49 100644
 --- a/libraries/BLE/src/BLERemoteCharacteristic.h
 +++ b/libraries/BLE/src/BLERemoteCharacteristic.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
 @@ -68,6 +68,30 @@
  
  typedef std::function<void(BLERemoteCharacteristic *pBLERemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify)> notify_callback;
@@ -2374,10 +3379,27 @@ index 7b04a15c7..c91718208 100644
    BLERemoteCharacteristic(uint16_t handle, BLEUUID uuid, uint8_t charProp, BLERemoteService *pRemoteService);
    void retrieveDescriptors();
    void gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *evtParam);
+@@ -193,6 +240,6 @@ private:
+ };  // BLERemoteCharacteristic
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEREMOTECHARACTERISTIC_H_ */
 diff --git a/libraries/BLE/src/BLERemoteDescriptor.cpp b/libraries/BLE/src/BLERemoteDescriptor.cpp
-index e7cd3af38..d5dff4f9e 100644
+index e7cd3af..c4f338d 100644
 --- a/libraries/BLE/src/BLERemoteDescriptor.cpp
 +++ b/libraries/BLE/src/BLERemoteDescriptor.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
 @@ -139,6 +139,13 @@ void BLERemoteDescriptor::setAuth(uint8_t auth) {
  
  #if defined(CONFIG_BLUEDROID_ENABLED)
@@ -2572,10 +3594,25 @@ index e7cd3af38..d5dff4f9e 100644
  }  // writeValue
  
  #endif
+@@ -479,4 +610,4 @@ exit:
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
 diff --git a/libraries/BLE/src/BLERemoteDescriptor.h b/libraries/BLE/src/BLERemoteDescriptor.h
-index ea55fb815..f03de011b 100644
+index ea55fb8..d290539 100644
 --- a/libraries/BLE/src/BLERemoteDescriptor.h
 +++ b/libraries/BLE/src/BLERemoteDescriptor.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
 @@ -41,6 +41,22 @@
  
  class BLERemoteCharacteristic;
@@ -2626,8 +3663,429 @@ index ea55fb815..f03de011b 100644
    /***************************************************************************
     *                       Common private declarations                       *
     ***************************************************************************/
+@@ -103,6 +132,6 @@ private:
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEREMOTEDESCRIPTOR_H_ */
+diff --git a/libraries/BLE/src/BLERemoteService.cpp b/libraries/BLE/src/BLERemoteService.cpp
+index 3cec816..8308666 100644
+--- a/libraries/BLE/src/BLERemoteService.cpp
++++ b/libraries/BLE/src/BLERemoteService.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -423,4 +423,4 @@ int BLERemoteService::characteristicDiscCB(uint16_t conn_handle, const struct bl
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLERemoteService.h b/libraries/BLE/src/BLERemoteService.h
+index 977ccc8..ada7408 100644
+--- a/libraries/BLE/src/BLERemoteService.h
++++ b/libraries/BLE/src/BLERemoteService.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -128,6 +128,6 @@ private:
+ };  // BLERemoteService
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEREMOTESERVICE_H_ */
+diff --git a/libraries/BLE/src/BLEScan.cpp b/libraries/BLE/src/BLEScan.cpp
+index 54e60a2..ec2853d 100644
+--- a/libraries/BLE/src/BLEScan.cpp
++++ b/libraries/BLE/src/BLEScan.cpp
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -859,4 +859,4 @@ void BLEScan::onHostSync() {
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEScan.h b/libraries/BLE/src/BLEScan.h
+index 327eb8c..3092c06 100644
+--- a/libraries/BLE/src/BLEScan.h
++++ b/libraries/BLE/src/BLEScan.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -233,6 +233,6 @@ public:
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLESCAN_H_ */
+diff --git a/libraries/BLE/src/BLESecurity.cpp b/libraries/BLE/src/BLESecurity.cpp
+index 76757f5..c34b312 100644
+--- a/libraries/BLE/src/BLESecurity.cpp
++++ b/libraries/BLE/src/BLESecurity.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -432,4 +432,4 @@ void BLESecurityCallbacks::onAuthenticationComplete(ble_gap_conn_desc *desc) {
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLESecurity.h b/libraries/BLE/src/BLESecurity.h
+index fc6ff38..1f3654a 100644
+--- a/libraries/BLE/src/BLESecurity.h
++++ b/libraries/BLE/src/BLESecurity.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -222,6 +222,6 @@ public:
+ };  // BLESecurityCallbacks
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif  // COMPONENTS_CPP_UTILS_BLESECURITY_H_
+diff --git a/libraries/BLE/src/BLEServer.cpp b/libraries/BLE/src/BLEServer.cpp
+index b25aed2..b5df2af 100644
+--- a/libraries/BLE/src/BLEServer.cpp
++++ b/libraries/BLE/src/BLEServer.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /***************************************************************************
+@@ -230,6 +230,22 @@ void BLEServer::setCallbacks(BLEServerCallbacks *pCallbacks) {
+   m_pServerCallbacks = pCallbacks;
+ }  // setCallbacks
+ 
++#if defined(CONFIG_BLUEDROID_ENABLED)
++// Terminal-only ownership cleanup. Service constructors are private and the
++// server factory owns every service still registered in this map. Removed
++// services retain their existing lifetime contract. Callback pointers are
++// borrowed and must never be deleted here.
++void BLEServer::destroyGattTreeAfterHostDeinit() {
++  while (BLEService *service = m_serviceMap.getFirst()) {
++    // Remove both map aliases while the object/handle is still valid. Starting
++    // a fresh iteration avoids retaining an iterator invalidated by removal.
++    m_serviceMap.removeService(service);
++    service->destroyOwnedCharacteristicsAfterHostDeinit();
++    delete service;
++  }
++}
++#endif
++
+ /*
+  * Remove service
+  */
+@@ -1048,4 +1064,4 @@ void BLEServerCallbacks::onMtuChanged(BLEServer *pServer, ble_gap_conn_desc *des
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEServer.h b/libraries/BLE/src/BLEServer.h
+index c385c22..9caf8e0 100644
+--- a/libraries/BLE/src/BLEServer.h
++++ b/libraries/BLE/src/BLEServer.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -220,6 +220,9 @@ private:
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+   uint16_t getGattsIf();
+   void registerApp(uint16_t);
++  // BLEDevice calls this only after checked host/controller terminal teardown.
++  // No asynchronous service-delete API or user callback is invoked here.
++  void destroyGattTreeAfterHostDeinit();
+   void handleGATTServerEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
+ #endif
+ 
+@@ -271,6 +274,6 @@ public:
+ };  // BLEServerCallbacks
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLESERVER_H_ */
+diff --git a/libraries/BLE/src/BLEService.cpp b/libraries/BLE/src/BLEService.cpp
+index 438c9aa..8c9e27b 100644
+--- a/libraries/BLE/src/BLEService.cpp
++++ b/libraries/BLE/src/BLEService.cpp
+@@ -13,7 +13,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -279,10 +279,25 @@ BLECharacteristic *BLEService::createCharacteristic(const char *uuid, uint32_t p
+  */
+ BLECharacteristic *BLEService::createCharacteristic(BLEUUID uuid, uint32_t properties) {
+   BLECharacteristic *pCharacteristic = new BLECharacteristic(uuid, properties);
++  pCharacteristic->m_ownedByService = true;
+   addCharacteristic(pCharacteristic);
+   return pCharacteristic;
+ }  // createCharacteristic
+ 
++#if defined(CONFIG_BLUEDROID_ENABLED)
++void BLEService::destroyOwnedCharacteristicsAfterHostDeinit() {
++  while (BLECharacteristic *characteristic = m_characteristicMap.getFirst()) {
++    m_characteristicMap.removeCharacteristic(characteristic);
++    // addCharacteristic can attach application-owned objects. Only our factory
++    // allocations belong to the terminal server tree.
++    if (characteristic->m_ownedByService) {
++      characteristic->destroyOwnedDescriptorsAfterHostDeinit();
++      delete characteristic;
++    }
++  }
++}
++#endif
++
+ BLECharacteristic *BLEService::getCharacteristic(const char *uuid) {
+   return getCharacteristic(BLEUUID(uuid));
+ }
+@@ -649,4 +664,4 @@ bool BLEService::start() {
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEService.h b/libraries/BLE/src/BLEService.h
+index a3d3f14..f880708 100644
+--- a/libraries/BLE/src/BLEService.h
++++ b/libraries/BLE/src/BLEService.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -191,12 +191,13 @@ private:
+    ***************************************************************************/
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
++  void destroyOwnedCharacteristicsAfterHostDeinit();
+   BLECharacteristic *getLastCreatedCharacteristic();
+   void handleGATTServerEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
+ #endif
+ };  // BLEService
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLESERVICE_H_ */
+diff --git a/libraries/BLE/src/BLEServiceMap.cpp b/libraries/BLE/src/BLEServiceMap.cpp
+index ee58aa2..a0f229c 100644
+--- a/libraries/BLE/src/BLEServiceMap.cpp
++++ b/libraries/BLE/src/BLEServiceMap.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -153,4 +153,4 @@ void BLEServiceMap::handleGATTServerEvent(esp_gatts_cb_event_t event, esp_gatt_i
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEUUID.cpp b/libraries/BLE/src/BLEUUID.cpp
+index 5dd3833..f0fcc84 100644
+--- a/libraries/BLE/src/BLEUUID.cpp
++++ b/libraries/BLE/src/BLEUUID.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -332,4 +332,4 @@ const ble_uuid_any_t *BLEUUID::getNative() const {
+ #endif
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEUUID.h b/libraries/BLE/src/BLEUUID.h
+index da7c389..e5eb747 100644
+--- a/libraries/BLE/src/BLEUUID.h
++++ b/libraries/BLE/src/BLEUUID.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -123,6 +123,6 @@ private:
+ };  // BLEUUID
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEUUID_H_ */
+diff --git a/libraries/BLE/src/BLEUtils.cpp b/libraries/BLE/src/BLEUtils.cpp
+index f4b3ac6..cde5917 100644
+--- a/libraries/BLE/src/BLEUtils.cpp
++++ b/libraries/BLE/src/BLEUtils.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -2257,4 +2257,4 @@ void BLEUtils::taskRelease(const BLETaskData &taskData, int flags) {
+ #endif  // CONFIG_NIMBLE_ENABLED
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEUtils.h b/libraries/BLE/src/BLEUtils.h
+index f66cdcf..0c0e15b 100644
+--- a/libraries/BLE/src/BLEUtils.h
++++ b/libraries/BLE/src/BLEUtils.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -24,6 +24,7 @@
+ #include <string>
+ #include "BLEAddress.h"
+ #include "WString.h"
++#include <freertos/FreeRTOS.h>
+ #include <freertos/task.h>
+ 
+ /*****************************************************************************
+@@ -148,6 +149,6 @@ public:
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEUTILS_H_ */
+diff --git a/libraries/BLE/src/BLEValue.cpp b/libraries/BLE/src/BLEValue.cpp
+index 47a7b3d..ed8abc3 100644
+--- a/libraries/BLE/src/BLEValue.cpp
++++ b/libraries/BLE/src/BLEValue.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -134,4 +134,4 @@ void BLEValue::setValue(const uint8_t *pData, size_t length) {
+ }  // setValue
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+diff --git a/libraries/BLE/src/BLEValue.h b/libraries/BLE/src/BLEValue.h
+index 99147db..803aec6 100644
+--- a/libraries/BLE/src/BLEValue.h
++++ b/libraries/BLE/src/BLEValue.h
+@@ -14,7 +14,7 @@
+ 
+ #include "soc/soc_caps.h"
+ #include "sdkconfig.h"
+-#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
++#if defined(SOC_BLE_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE) || defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+ #if defined(CONFIG_BLUEDROID_ENABLED) || defined(CONFIG_NIMBLE_ENABLED)
+ 
+ /*****************************************************************************
+@@ -56,6 +56,6 @@ private:
+ };
+ 
+ #endif /* CONFIG_BLUEDROID_ENABLED || CONFIG_NIMBLE_ENABLED */
+-#endif /* SOC_BLE_SUPPORTED || CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE */
++#endif /* Native BLE or Hosted NimBLE/Bluedroid */
+ 
+ #endif /* COMPONENTS_CPP_UTILS_BLEVALUE_H_ */
 diff --git a/libraries/Network/src/NetworkEvents.cpp b/libraries/Network/src/NetworkEvents.cpp
-index 195499c51..e302251f2 100644
+index 195499c..e302251 100644
 --- a/libraries/Network/src/NetworkEvents.cpp
 +++ b/libraries/Network/src/NetworkEvents.cpp
 @@ -11,6 +11,15 @@
@@ -2647,7 +4105,7 @@ index 195499c51..e302251f2 100644
  #define ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE 4096
  #endif
 diff --git a/libraries/WiFi/src/STA.cpp b/libraries/WiFi/src/STA.cpp
-index 36577a38b..223b29082 100644
+index 36577a3..223b290 100644
 --- a/libraries/WiFi/src/STA.cpp
 +++ b/libraries/WiFi/src/STA.cpp
 @@ -73,6 +73,11 @@ static bool _is_staReconnectableReason(uint8_t reason) {

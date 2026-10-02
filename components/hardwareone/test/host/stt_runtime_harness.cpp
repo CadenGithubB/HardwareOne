@@ -39,7 +39,7 @@ static bool taskFails = false;
 static void (*pendingTask)(void*) = nullptr;
 int xTaskCreatePinnedToCore(void (*fn)(void*), const char*, uint32_t bytes,
                             void*, int priority, void*, int core) {
-  assert(bytes == 12288 && priority == 1 && core == 1);
+  assert(bytes == 12288 && priority == 2 && core == 1);
   if (taskFails) return 0;
   assert(!pendingTask);
   pendingTask = fn;
@@ -68,6 +68,13 @@ AudioSource audioGetSource() { return audioSource; }
 bool audioCaptureBusy() { return !halOwner.empty(); }
 bool audioCaptureActive() { return active; }
 bool audioCaptureOwnedBy(const char* owner) { return halOwner == owner; }
+// G2 recording-scoped capture support: counted so tests can check balance.
+static int g2FastHolds = 0, g2Containers = 0, g2Kicks = 0;
+void g2MicLinkFastAcquire() { ++g2FastHolds; }
+void g2MicLinkFastRelease() { --g2FastHolds; }
+void g2MicEnsureCaptureContainer() { ++g2Containers; }
+void g2MicReleaseCaptureContainer() { --g2Containers; }
+bool g2MicKickStream() { ++g2Kicks; return true; }
 bool audioSourceAvailable(AudioSource s) { return s != AUDIO_SRC_NONE && sourceAvailable; }
 bool audioAnySourceAvailable() { return sourceAvailable; }
 bool audioSetSource(AudioSource s) {

@@ -81,6 +81,15 @@ bool sttBeginContinuous(STTOwner owner, STTToken* token,
 // text; an ack can remove only the exact oldest chunk (or repeat an earlier ack).
 // Both APIs enforce the same live owner/epoch/token fence as one-shot results.
 bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out);
+// Live mode: provisional text for the utterance still being spoken. `sequence`
+// is the chunk sequence it will become; `version` changes on every update and
+// when the draft is cleared (its final chunk was published or the run ended).
+struct STTDraft {
+  uint32_t sequence = 0;
+  uint32_t version = 0;
+  char text[STT_MAX_TEXT + 1] = {};
+};
+bool sttReadDraft(STTOwner owner, STTToken token, STTDraft* out);
 bool sttAcknowledgeChunk(STTOwner owner, STTToken token, uint32_t sequence);
 // Internal join predicate: contains no transcript/session data and remains
 // usable after revocation. Unknown or terminal tokens are inactive.

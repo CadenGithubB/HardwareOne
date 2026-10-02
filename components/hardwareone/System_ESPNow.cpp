@@ -96,6 +96,69 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
 // ============================================================================
 EspNowState* gEspNow = nullptr;  // Allocated on-demand when ESP-NOW is initialized
 
+// One shared STA identity for this radio instance. isSelfMac is used repeatedly
+// by RX and routing, so querying the driver there would turn every check into a
+// blocking RPC with a companion radio. Publish before callback admission and
+// retain through shutdown until every runtime user and RX callback has joined.
+static portMUX_TYPE gEspNowSelfMacLock = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t gEspNowSelfMac[6] = {};
+static bool gEspNowSelfMacValid = false;
+static uint8_t gEspNowSelfApMac[6] = {};
+static bool gEspNowSelfApMacValid = false;
+
+// A null argument invalidates that cache. The mux keeps readers on other tasks
+// from observing a partially published address during startup or shutdown.
+static void setEspNowSelfMacCache(const uint8_t* staMac, const uint8_t* apMac) {
+  taskENTER_CRITICAL(&gEspNowSelfMacLock);
+  if (staMac) memcpy(gEspNowSelfMac, staMac, sizeof(gEspNowSelfMac));
+  else memset(gEspNowSelfMac, 0, sizeof(gEspNowSelfMac));
+  gEspNowSelfMacValid = staMac != nullptr;
+  if (apMac) memcpy(gEspNowSelfApMac, apMac, sizeof(gEspNowSelfApMac));
+  else memset(gEspNowSelfApMac, 0, sizeof(gEspNowSelfApMac));
+  gEspNowSelfApMacValid = apMac != nullptr;
+  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+}
+
+// Every "who am I" read in the mesh code goes through these two. While the
+// instance is running they are a memcpy under a short mux; the driver query
+// (a blocking SDIO round trip on a Hosted radio) only remains for callers that
+// run before start or after stop, where the fallback keeps the old behavior.
+esp_err_t espnowSelfStaMac(uint8_t out[6]) {
+  if (!out) return ESP_ERR_INVALID_ARG;
+  taskENTER_CRITICAL(&gEspNowSelfMacLock);
+  const bool valid = gEspNowSelfMacValid;
+  if (valid) memcpy(out, gEspNowSelfMac, 6);
+  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+  if (valid) return ESP_OK;
+  return esp_wifi_get_mac(WIFI_IF_STA, out);
+}
+
+esp_err_t espnowSelfApMac(uint8_t out[6]) {
+  if (!out) return ESP_ERR_INVALID_ARG;
+  taskENTER_CRITICAL(&gEspNowSelfMacLock);
+  const bool valid = gEspNowSelfApMacValid;
+  if (valid) memcpy(out, gEspNowSelfApMac, 6);
+  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+  if (valid) return ESP_OK;
+  return esp_wifi_get_mac(WIFI_IF_AP, out);
+}
+
+bool isSelfMac(const uint8_t* mac) {
+  if (!mac) return false;
+  taskENTER_CRITICAL(&gEspNowSelfMacLock);
+  const bool valid = gEspNowSelfMacValid;
+  const bool matches = valid && memcmp(mac, gEspNowSelfMac, sizeof(gEspNowSelfMac)) == 0;
+  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+  if (valid) return matches;
+
+  // Non-runtime callers may run before ESP-NOW opens or after it closes. Query
+  // without the mux and never publish this result: a slow fallback must not
+  // overwrite the checked identity of a concurrently starting radio instance.
+  uint8_t currentMac[6] = {};
+  return esp_wifi_get_mac(WIFI_IF_STA, currentMac) == ESP_OK &&
+         memcmp(mac, currentMac, sizeof(currentMac)) == 0;
+}
+
 // Runtime boundary shared by every first-party send path. Admission starts
 // CLOSED and stays closed while ESP-NOW is stopped. Enabled/count live behind
 // one mux so close cannot observe zero in-flight users while an entrant sees
@@ -537,15 +600,11 @@ static bool gBackupPromoted = false;
 // Lightweight RX ring to defer heavy processing to espnowHeartbeatTask (no new task)
 struct InboundRxItem {
   uint8_t src[6];
+  // Retain the callback's destination by value: it may be our STA address,
+  // our AP address, or broadcast. Never query the radio while draining RX.
+  uint8_t dst[6];
   int len;
   int8_t rssi;
-  // Phase 0 relay groundwork: was this frame radio-addressed to FF:FF:FF:FF:FF:FF?
-  // The recv callback used to discard des_addr entirely, so the drain rebuilt
-  // recv_info with an all-zeros destination and RX code could never distinguish
-  // "unicast to me" from "broadcast". The ring can't carry the pointer target,
-  // but this one bit is all that distinction needs (ESP-NOW only ever delivers
-  // frames addressed to us or to broadcast).
-  bool radioDstIsBcast;
   uint8_t data[250];
 };
 // Slot count MUST come from this constant, never sizeof(ring)/sizeof(ring[0]):
@@ -794,7 +853,7 @@ void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key) {
 
   // DEBUG: Show detailed key derivation info
   uint8_t mac[6];
-  WiFi.macAddress(mac);
+  espnowSelfStaMac(mac);
   String macStr = formatMacAddress(mac);
 
   DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Encryption key derived successfully");
@@ -1104,7 +1163,7 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
 
   // Build v2 JSON RESPONSE message (use compact MAC format)
   uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  espnowSelfStaMac(myMac);
   String statusPrefix = success ? "[SUCCESS] " : "[FAILED] ";
   String fullResult = statusPrefix + result;
   BROADCAST_PRINTF("[ESP-NOW] Sending response to %s (%u bytes)", senderName.c_str(), (unsigned)result.length());
@@ -1199,17 +1258,19 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
   // not be able to reach us — drop rather than fault on the WiFi task. The bump
   // is defence-in-depth; espnowstats surfaces the counter as "RX Ring Drops".
   if (!gEspNowRxRing) { gEspNowRxDrops++; return; }
+  // Both native ESP-NOW and the Hosted bridge supply these callback pointers.
+  // Refuse incomplete metadata rather than inventing a destination address.
+  if (!recv_info->src_addr || !recv_info->des_addr) { gEspNowRxDrops++; return; }
   uint8_t next = (uint8_t)((gEspNowRxHead + 1) % ESPNOW_RX_RING_SLOTS);
   if (next == gEspNowRxTail) { gEspNowRxDrops++; return; }
   InboundRxItem& it = gEspNowRxRing[gEspNowRxHead];
   memcpy(it.src, recv_info->src_addr, 6);
+  memcpy(it.dst, recv_info->des_addr, 6);
   it.len = len; if (it.len > 250) it.len = 250; if (it.len < 0) it.len = 0;
   // -128 (not -127) on missing rx_ctrl: the drain always rebuilds a non-null
   // rx_ctrl, so this value flows to noteMeshPeerRxActivity's linkRssi as-is —
   // and -128 is its "no sample" sentinel, keeping an unknown out of the EWMA.
   it.rssi = recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-128;
-  static const uint8_t kBcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-  it.radioDstIsBcast = recv_info->des_addr && memcmp(recv_info->des_addr, kBcastMac, 6) == 0;
   if (it.len > 0) memcpy(it.data, incomingData, it.len);
   gEspNowRxHead = next;
 }
@@ -1759,7 +1820,7 @@ static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, u
   EspNowV4Header h = {};
   h.magic = (uint16_t)ESPNOW_V4_MAGIC; h.ver = ESPNOW_V4_VERSION; h.type = type; h.flags = flags;
   h.headerLen = (uint8_t)sizeof(EspNowV4Header); h.msgId = msgId;
-  uint8_t myMac[6]; esp_wifi_get_mac(WIFI_IF_STA, myMac); memcpy(h.origin, myMac, 6);
+  uint8_t myMac[6]; espnowSelfStaMac(myMac); memcpy(h.origin, myMac, 6);
   h.ttl = ttl; h.fragIndex = 0; h.fragCount = 1;
   h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: scope frame to dst's mesh
 
@@ -2017,7 +2078,7 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
   h->flags           = baseFlags;  // sessionWrapFrame ORs in ESPNOW_V4_FLAG_SESSION_FRAME
   h->headerLen       = (uint8_t)sizeof(EspNowV4Header);
   h->msgId           = msgId;
-  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   memcpy(h->origin, selfMac, 6);
   h->ttl             = ttl;
   h->fragIndex       = 0;
@@ -2443,7 +2504,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
          (unsigned long)msgId, type, payloadLen, fragCount);
 
   uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  espnowSelfStaMac(myMac);
 
   const uint8_t MAX_RETRIES = 3;
   const uint32_t ACK_TIMEOUT_MS = 200;
@@ -2666,7 +2727,7 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
   
   // Build ACK frame with fragment info in header
   uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  espnowSelfStaMac(myMac);
   
   EspNowV4Header h = {};
   h.magic = (uint16_t)ESPNOW_V4_MAGIC;
@@ -2781,7 +2842,7 @@ static bool bondSendEncryptedAsync(const uint8_t* mac, uint8_t type, uint16_t fl
                                    uint32_t msgId, const uint8_t* payload, uint16_t len) {
   if (!gEspNow || !mac) return false;
   uint8_t selfMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  espnowSelfStaMac(selfMac);
   const bool iAmInitiator = !sessionIsASide(selfMac, mac);
   const PeerIdentity* pid = peerIdentityFindByMac(mac);
   SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
@@ -5312,7 +5373,7 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
     uint8_t synthSrc[6];
     memcpy(synthSrc, ih->origin, 6);
     uint8_t selfMac[6];
-    esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+    espnowSelfStaMac(selfMac);
 
     // RSSI is deliberately the "no sample" sentinel, not the last hop's signal:
     // we have measured nothing about the originator's link, and reporting the
@@ -5694,7 +5755,7 @@ static bool pairCtrlForUs(const V4RxCtx& ctx, uint8_t senderMac[6], char* nameOu
   if (ctx.payloadLen < sizeof(V4PayloadPairCtrl)) return false;
   const V4PayloadPairCtrl* p = (const V4PayloadPairCtrl*)ctx.payload;
   uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  espnowSelfStaMac(myMac);
   if (memcmp(p->targetMac, myMac, 6) != 0) return false;   // addressed to someone else
   memcpy(senderMac, ctx.recv_info->src_addr, 6);
   if (isSelfMac(senderMac)) return false;
@@ -7337,7 +7398,7 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
 #endif
 
   // Hardware info
-  esp_wifi_get_mac(WIFI_IF_STA, cap.mac);
+  espnowSelfStaMac(cap.mac);
   
   esp_chip_info_t chip_info;
   esp_chip_info(&chip_info);
@@ -7373,7 +7434,7 @@ static String generateDeviceManifest() {
   device["name"] = gSettings.espnowDeviceName;
   
   uint8_t mac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, mac);
+  espnowSelfStaMac(mac);
   device["mac"] = formatMacAddress(mac);
   device["role"] = isBondMaster() ? "master" : "worker";
   device["uptime"] = millis() / 1000;
@@ -9693,8 +9754,6 @@ void processMeshHeartbeats() {
   // never allocated (ESP-NOW not started, or the init alloc failed) — head and
   // tail can't diverge in that case, but the guard keeps the deref honest.
   if (gEspNowRxRing) {
-    uint8_t selfMac[6] = {};
-    esp_wifi_get_mac(WIFI_IF_STA, selfMac);  // once per drain pass, for des_addr rebuild
     while (gEspNowRxHead != gEspNowRxTail) {
       uint8_t tail = gEspNowRxTail;
       InboundRxItem& item = gEspNowRxRing[tail];
@@ -9705,17 +9764,13 @@ void processMeshHeartbeats() {
         gEspNowRxTail = (uint8_t)((tail + 1) % ESPNOW_RX_RING_SLOTS);
         continue;
       }
-      // Rebuild recv_info truthfully: ESP-NOW only delivers frames addressed
-      // to us or to broadcast, and the ring carries which one this was.
-      // (Formerly all-zeros, which made the distinction unknowable in RX code.)
-      uint8_t dstMac[6];
-      if (item.radioDstIsBcast) memset(dstMac, 0xFF, 6);
-      else                      memcpy(dstMac, selfMac, 6);
+      // The callback copied both MACs before returning; these ring-owned bytes
+      // stay valid until dispatch completes and this slot is released below.
       wifi_pkt_rx_ctrl_t rxCtrl = {};
       rxCtrl.rssi = item.rssi;
       esp_now_recv_info_t ri = {};
       ri.src_addr = item.src;
-      ri.des_addr = dstMac;
+      ri.des_addr = item.dst;
       ri.rx_ctrl = &rxCtrl;
       onEspNowRawRecv(&ri, item.data, (int)item.len);
       gEspNowRxTail = (uint8_t)((tail + 1) % ESPNOW_RX_RING_SLOTS);
@@ -10855,6 +10910,9 @@ static bool initEspNow() {
     broadcastOutput("[ESP-NOW] Cannot start: previous shutdown is still in progress");
     return false;
   }
+  // Callers only enter for a stopped instance; each fresh start must read the
+  // actual radio identity again before admitting receive or transmit work.
+  setEspNowSelfMacCache(nullptr, nullptr);
   // Capture heap before initialization
   size_t heapBefore = ESP.getFreeHeap();
   
@@ -10907,8 +10965,8 @@ static bool initEspNow() {
   recomputeAllMeshFingerprints();
 
   if (!gEspNow) {
-    gEspNow = (EspNowState*)ps_alloc(sizeof(EspNowState), AllocPref::PreferPSRAM, "espnow.state");
-    if (!gEspNow) {
+    void* stateStorage = ps_alloc(sizeof(EspNowState), AllocPref::PreferPSRAM, "espnow.state");
+    if (!stateStorage) {
       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
                "out of PSRAM (state structure)");
       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate state structure");
@@ -10918,8 +10976,8 @@ static bool initEspNow() {
     // deviceName, etc.), so ps_alloc's raw storage must be placement-constructed.
     // Device registry metadata is allocation-free EspNowInlineText embedded in
     // this PSRAM block; its constructors establish valid empty strings.
-    memset(gEspNow, 0, sizeof(EspNowState));
-    new (gEspNow) EspNowState();
+    memset(stateStorage, 0, sizeof(EspNowState));
+    gEspNow = new (stateStorage) EspNowState();
 
     // Allocate small PSRAM buffers pulled out of the EspNowState struct
     gEspNow->listBuffer = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "espnow.listBuf");
@@ -11077,6 +11135,20 @@ static bool initEspNow() {
     return false;
   }
 
+  uint8_t radioSelfMac[6] = {};
+  const esp_err_t selfMacErr = esp_wifi_get_mac(WIFI_IF_STA, radioSelfMac);
+  if (selfMacErr != ESP_OK) {
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             "failed to read WiFi STA identity (%s)", esp_err_to_name(selfMacErr));
+    BROADCAST_PRINTF("[ESP-NOW] Cannot start: %s", gLastInitErrorReason);
+    return false;
+  }
+  // The AP identity only guards "is this MAC me" checks, so a failed read
+  // leaves that cache empty (callers fall back to a driver query) rather than
+  // refusing to start.
+  uint8_t radioSelfApMac[6] = {};
+  const bool radioSelfApMacOk = esp_wifi_get_mac(WIFI_IF_AP, radioSelfApMac) == ESP_OK;
+
   // Keep the radio awake whenever ESP-NOW is up. The default WIFI_PS_MIN_MODEM
   // sleeps the modem between beacons, which silently drops asynchronous ESP-NOW
   // RX — and it stays in effect on a device that never associates (out and
@@ -11197,6 +11269,8 @@ static bool initEspNow() {
     gEspNowRxTail = 0;
   }
 
+  // The checked identity and RX ring must both exist before admission.
+  setEspNowSelfMacCache(radioSelfMac, radioSelfApMacOk ? radioSelfApMac : nullptr);
   // Enable callback admission only after the RX ring exists. Registration can
   // deliver immediately on the WiFi task, so admission must precede the first
   // register call; a partial failure disables admission before unwinding.
@@ -11216,6 +11290,7 @@ static bool initEspNow() {
     // attempt rather than turning a registration error into a delayed UAF.
     const bool callbacksClean = waitForEspNowCallbacks(1000);
     if (callbacksClean) {
+      setEspNowSelfMacCache(nullptr, nullptr);
       heap_caps_free(gEspNowRxRing);
       gEspNowRxRing = nullptr;
       gEspNowRxHead = 0;
@@ -11361,7 +11436,7 @@ static bool initEspNow() {
   // Register own device name for topology display
   // Use the device name from settings (set via 'espnowsetname')
   uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  espnowSelfStaMac(myMac);
   String myName = gSettings.espnowDeviceName;
   
   if (myName.length() > 0) {
@@ -11626,6 +11701,7 @@ static bool deinitEspNow(bool publishOffEvent) {
     broadcastOutput("[ESP-NOW] ERROR: ESP-NOW callbacks did not quiesce; resources retained");
     return false;
   }
+  setEspNowSelfMacCache(nullptr, nullptr);
 
   // The callback producer and RX consumer are both fenced. Broadcast writers
   // were covered by the runtime-op wait, so both internal-DRAM tables can now
@@ -11700,7 +11776,7 @@ const char* cmd_espnow_status(const String& argsInput) {
       doc["channel"]     = gEspNow->channel;
       doc["channelPref"] = gSettings.espnowChannel;  // 0=auto, 1-13=pinned when offline
       if (gEspNow->initialized) {
-        uint8_t mac[6]; WiFi.macAddress(mac);
+        uint8_t mac[6]; espnowSelfStaMac(mac);
         char macStr[18];
         snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -11740,7 +11816,7 @@ const char* cmd_espnow_status(const String& argsInput) {
     remaining -= n;
 
     uint8_t mac[6];
-    WiFi.macAddress(mac);
+    espnowSelfStaMac(mac);
     for (int i = 0; i < 6; i++) {
       if (i > 0) {
         n = snprintf(p, remaining, ":");
@@ -12056,7 +12132,7 @@ const char* cmd_espnow_identity(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!id.valid) return "{\"schema\":1,\"valid\":false}";
-    uint8_t jm[6]; WiFi.macAddress(jm);
+    uint8_t jm[6]; espnowSelfStaMac(jm);
     char jpub[65]; espnowIdentityFormatPubHex(id.pub, jpub, sizeof(jpub));
     snprintf(getDebugBuffer(), 1024,
       "{\"schema\":1,\"valid\":true,\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
@@ -12071,7 +12147,7 @@ const char* cmd_espnow_identity(const String& argsInput) {
   }
 
   uint8_t mac[6];
-  WiFi.macAddress(mac);
+  espnowSelfStaMac(mac);
 
   char pubHex[65];
   espnowIdentityFormatPubHex(id.pub, pubHex, sizeof(pubHex));
@@ -12667,8 +12743,8 @@ const char* cmd_espnow_pair(const String& argsInput) {
   {
     uint8_t selfSta[6];
     uint8_t selfAp[6];
-    esp_wifi_get_mac(WIFI_IF_STA, selfSta);
-    esp_wifi_get_mac(WIFI_IF_AP, selfAp);
+    espnowSelfStaMac(selfSta);
+    espnowSelfApMac(selfAp);
     if (memcmp(mac, selfSta, 6) == 0 || memcmp(mac, selfAp, 6) == 0) {
       return "Error: Cannot pair with self MAC address.";
     }
@@ -13111,7 +13187,7 @@ const char* cmd_espnow_setname(const String& argsInput) {
   
   if (gEspNow && gEspNow->initialized) {
     uint8_t myMac[6];
-    esp_wifi_get_mac(WIFI_IF_STA, myMac);
+    espnowSelfStaMac(myMac);
     
     bool found = false;
     for (int i = 0; i < gEspNow->deviceCount; i++) {
@@ -13215,7 +13291,7 @@ const char* cmd_espnow_deviceinfo(const String& argsInput) {
     if (gSettings.meshRole == MESH_ROLE_MASTER) roleStr = "master";
     else if (gSettings.meshRole == MESH_ROLE_BACKUP_MASTER) roleStr = "backup";
     doc["meshRole"] = roleStr;
-    uint8_t myMac[6]; esp_wifi_get_mac(WIFI_IF_STA, myMac);
+    uint8_t myMac[6]; espnowSelfStaMac(myMac);
     doc["mac"] = String(MAC_STR(myMac));
     doc["hint"] = "this is THIS device's metadata - to list mesh peers use 'espnowdevices', or refresh one peer with 'espnowrequestmeta <peer>'";
     serializeJson(doc, getDebugBuffer(), 1024);
@@ -13245,7 +13321,7 @@ const char* cmd_espnow_deviceinfo(const String& argsInput) {
   pos += snprintf(buf + pos, 1024 - pos, "Mesh Role:     %s\n", roleStr);
 
   uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  espnowSelfStaMac(myMac);
   pos += snprintf(buf + pos, 1024 - pos, "MAC:           %s", MAC_STR(myMac));
 
   return buf;
@@ -13795,7 +13871,7 @@ const char* cmd_espnow_meshmaster(const String& argsInput) {
   }
 
   uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  espnowSelfStaMac(myMac);
   String myMacStr = macToHexString(myMac);
   if (mac.equalsIgnoreCase(myMacStr)) {
     return "Error: Cannot set your own MAC as master MAC";
@@ -13827,7 +13903,7 @@ const char* cmd_espnow_meshbackup(const String& argsInput) {
   }
 
   uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  espnowSelfStaMac(myMac);
   String myMacStr = macToHexString(myMac);
   if (mac.equalsIgnoreCase(myMacStr)) {
     return "Error: Cannot set your own MAC as backup MAC";
@@ -15766,8 +15842,8 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   {
     uint8_t selfSta[6];
     uint8_t selfAp[6];
-    esp_wifi_get_mac(WIFI_IF_STA, selfSta);
-    esp_wifi_get_mac(WIFI_IF_AP, selfAp);
+    espnowSelfStaMac(selfSta);
+    espnowSelfApMac(selfAp);
     if (memcmp(mac, selfSta, 6) == 0 || memcmp(mac, selfAp, 6) == 0) {
       return "Error: Cannot pair with self MAC address.";
     }
@@ -15908,8 +15984,8 @@ const char* cmd_espnow_requestmeta(const String& argsInput) {
   // Check for self-targeting (metadata request to own MAC won't work)
   {
     uint8_t selfSta[6], selfAp[6];
-    esp_wifi_get_mac(WIFI_IF_STA, selfSta);
-    esp_wifi_get_mac(WIFI_IF_AP, selfAp);
+    espnowSelfStaMac(selfSta);
+    espnowSelfApMac(selfAp);
     if (memcmp(targetMac, selfSta, 6) == 0 || memcmp(targetMac, selfAp, 6) == 0) {
       return "Error: Cannot request metadata from self. This device is paired with its own MAC address. Unpair and pair with the correct remote device.";
     }
@@ -16130,8 +16206,8 @@ const char* cmd_espnow_remote(const String& argsInput) {
   // Check for self-targeting
   {
     uint8_t selfSta[6], selfAp[6];
-    esp_wifi_get_mac(WIFI_IF_STA, selfSta);
-    esp_wifi_get_mac(WIFI_IF_AP, selfAp);
+    espnowSelfStaMac(selfSta);
+    espnowSelfApMac(selfAp);
     if (memcmp(targetMac, selfSta, 6) == 0 || memcmp(targetMac, selfAp, 6) == 0) {
       return espnowAckErr(wantJson, "Error: Cannot send remote command to self. This device is paired with its own MAC. Unpair and pair with the correct remote device.", "{\"schema\":1,\"ok\":false,\"error\":\"self target\"}");
     }
@@ -16335,8 +16411,8 @@ const char* cmd_espnow_send(const String& argsInput) {
   // Check if trying to send to self
   uint8_t selfSta[6];
   uint8_t selfAp[6];
-  esp_wifi_get_mac(WIFI_IF_STA, selfSta);
-  esp_wifi_get_mac(WIFI_IF_AP, selfAp);
+  espnowSelfStaMac(selfSta);
+  espnowSelfApMac(selfAp);
   if (memcmp(mac, selfSta, 6) == 0 || memcmp(mac, selfAp, 6) == 0) {
     return jsonMode ? "{\"schema\":1,\"ok\":false,\"error\":\"self target\"}"
                     : "Error: Cannot send message to self. Use a different device MAC address.";
@@ -16896,7 +16972,7 @@ const char* cmd_bond_connect(const String& argsInput) {
   
   // Determine role by comparing our MAC with peer MAC (higher MAC = master)
   uint8_t ourMac[6];
-  WiFi.macAddress(ourMac);
+  espnowSelfStaMac(ourMac);
   int cmp = memcmp(ourMac, peerMac, 6);
   setSetting(gSettings.bondRole, (uint8_t)((cmp > 0) ? 1 : 0));  // Higher MAC becomes MASTER
   

@@ -47,13 +47,20 @@ static void populatePowerMainMenu() {
 static void populatePowerCpuMenu() {
   initPowerScrollStates();
   oledScrollClearKeepSelection(&sPowerCpuScroll);
-  oledScrollAddItem(&sPowerCpuScroll, "Performance 240/80MHz");
-  oledScrollAddItem(&sPowerCpuScroll, "Balanced 160/80MHz");
-  oledScrollAddItem(&sPowerCpuScroll, "PowerSaver 80MHz");
-  // 80 MHz interactive, 40 MHz only once idle power-save blanks the screen.
-  oledScrollAddItem(&sPowerCpuScroll, "UltraSaver 80/40MHz");
-  // Always-240 — idle power-save blanks OLED but does not downclock.
-  oledScrollAddItem(&sPowerCpuScroll, "Locked 240MHz");
+  // Scroll items borrow these pointers; each row needs persistent storage.
+  static char modeLabels[POWER_MODE_COUNT][40];
+  for (uint8_t mode = 0; mode < POWER_MODE_COUNT; ++mode) {
+    const unsigned long active = getPowerModeActiveCpuFreq(mode);
+    const unsigned long idle = getPowerModeIdleCpuFreq(mode);
+    if (idle < active) {
+      snprintf(modeLabels[mode], sizeof(modeLabels[mode]), "%s %lu/%luMHz",
+               getPowerModeName(mode), active, idle);
+    } else {
+      snprintf(modeLabels[mode], sizeof(modeLabels[mode]), "%s %luMHz",
+               getPowerModeName(mode), active);
+    }
+    oledScrollAddItem(&sPowerCpuScroll, modeLabels[mode]);
+  }
   oledScrollClampSelection(&sPowerCpuScroll);
 }
 

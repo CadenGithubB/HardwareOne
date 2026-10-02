@@ -1,4 +1,5 @@
 #include "Arduino.h"
+#include "radio_backend.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -92,6 +93,9 @@ extern "C" void app_main(void)
 
     // Initialize Arduino core (Serial, peripherals, etc.)
     initArduino();
+    // P4X-EYE: bring up the C6 radio companion before any Wi-Fi/BLE/ESP-NOW
+    // use. Native-radio targets return immediately.
+    ESP_ERROR_CHECK(hw1RadioPrepare());
 
     // Allocate the TLS auth-identity slot for this (main) task. The
     // ExecIdentityGuard ctor would lazy-init anyway, but doing it explicitly
@@ -111,6 +115,7 @@ extern "C" void app_main(void)
 
     // Run user setup once
     setup();
+    hw1RadioPrintStats();
 
     // Run user loop forever with a small delay
     while (true) {

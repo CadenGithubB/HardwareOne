@@ -1,0 +1,70 @@
+{
+  "file": "physical_enclosures/p4x_eye/tools/stl-raw/base-cgal-conforming.stl",
+  "sha256": "f19430f9aaa5f246a8e07a59c4b8288e024deea481c8ded9723ba4e58b0bcf14",
+  "file_bytes": 1529384,
+  "faces": 30586,
+  "unique_vertices": 15287,
+  "checks": {
+    "watertight": true,
+    "consistent_winding": true,
+    "positive_volume": true,
+    "no_degenerate_triangles": true,
+    "no_duplicate_triangles": true,
+    "single_connected_component": true,
+    "file_unchanged": true
+  },
+  "signed_volume_mm3": 15150.671773867938,
+  "bounds_mm": [
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      80.0,
+      56.0,
+      22.829999923706055
+    ]
+  ],
+  "dimensions_mm": [
+    80.0,
+    56.0,
+    22.829999923706055
+  ],
+  "minimum_triangle_area_mm2": 6.693881005048752e-10,
+  "degenerate_triangles": 0,
+  "exact_zero_area_triangles": 0,
+  "repeated_vertex_triangles": 0,
+  "duplicate_triangles": 0,
+  "boundary_edges": 0,
+  "nonmanifold_edges": 0,
+  "edge_connected_components": 1,
+  "vertex_connected_components": 1,
+  "components": [
+    {
+      "faces": 30586,
+      "vertices": 15287,
+      "watertight": true,
+      "consistent_winding": true,
+      "signed_volume_mm3": 15150.671773867938,
+      "bounds_mm": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          80.0,
+          56.0,
+          22.829999923706055
+        ]
+      ],
+      "dimensions_mm": [
+        80.0,
+        56.0,
+        22.829999923706055
+      ]
+    }
+  ],
+  "failures": []
+}

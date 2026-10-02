@@ -8,7 +8,7 @@ not the workstation network. Reboot both boards afterwards to retire that AP.
 --board p4 or --board s3 opens only that USB console and skips interop checks.
 Pass --image-python with a Pillow-enabled interpreter when the USB/IDF Python
 has no Pillow (on this workstation, the bundled Codex dependency Python is
-/Users/cadbecaimacmini/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3).
+~/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3).
 """
 import argparse
 import base64

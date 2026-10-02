@@ -52,6 +52,8 @@ struct State {
     STTLocalPhase phase=STTLocalPhase::Loading;
     bool mutateInDestructor=false;
     uint8_t* lastRaw=nullptr;
+    int greedyFeeds=0;
+    const int8_t* lastOutput=nullptr;
 } state;
 void clean() { assert(state.allocations.empty()); assert(state.models==0); state=State{}; }
 bool hasRaw(const void* p) {
@@ -189,7 +191,7 @@ class Model {
         --fake::state.models;++fake::state.destroyed;fake::state.events.push_back("destroy model");
     }
     TensorBase* get_input(const char*) { if(fake::state.tensorError)input.exponent.value=99;return &input; }
-    TensorBase* get_output(const char*) {return &output;}
+    TensorBase* get_output(const char*) {fake::state.lastOutput=static_cast<const int8_t*>(output.data);return &output;}
     std::map<std::string,Memory> get_memory_info()const{return {{"variable",{4096,512}}};}
     void run(int count,int stage,int mode) {
         assert(fake::hasRaw(weights));assert(count==hw1::stt::identity::kNodeCount && mode==RUNTIME_MODE_MULTI_CORE);
@@ -200,7 +202,7 @@ class Model {
 }
 namespace hw1::stt {
 size_t feature_frames(size_t samples) {return (samples+159)/160;}
-Status compute_features(const int16_t*,size_t samples,float* output,size_t count,FrontendWorkspace*,uint32_t,bool) {
+Status compute_features(const int16_t*,size_t samples,float* output,size_t count,FrontendWorkspace*,uint32_t,bool,FrontendTiming*) {
     assert(count==feature_frames(samples)*kMelBins);
     if(fake::state.frontendError)return Status::NonFinite;
     for(size_t i=0;i<count;++i)output[i]=float(int(i%5)-2)*0.0625f;
@@ -209,6 +211,7 @@ Status compute_features(const int16_t*,size_t samples,float* output,size_t count
 Status ctc_reset(CtcState* state,char* text,size_t cap) {assert(cap>2);*state={};text[0]=0;return Status::Ok;}
 Status ctc_feed(CtcState* state,const int8_t*,size_t frames,size_t stride,char* text,size_t cap) {
     assert(stride==29 && cap>2 && frames>0);
+    ++fake::state.greedyFeeds;
     if(fake::state.decodeError)return Status::InvalidArgument;
     state->truncated=fake::state.truncate;std::strcpy(text,"ok");return Status::Ok;
 }
@@ -251,6 +254,7 @@ size_t remainingBudget(size_t samples) {
     const size_t frames=feature_frames(samples),outputs=(frames+1)/2;
     return 2048*outputs+64*1024+frames*kMelBins*sizeof(float)+sizeof(FrontendWorkspace)+1024*1024;
 }
+constexpr int kWarmHash = HW1_STT_RUNTIME_DIAGNOSTICS ? 1 : 0;
 void coldWarmShapes() {
     fake::clean();
     {
@@ -261,13 +265,13 @@ void coldWarmShapes() {
         assert(fake::state.inflates==2 && fake::state.rawHashes==1);fake::settled(1);
         Reader b;auto second=call(&cache,b,480);
         assert(second.ok && second.stats.weightsReused && second.stats.featureFrames==3 && second.stats.outputFrames==2);
-        assert(b.bytesRead==container::kHeaderBytes && fake::state.inflates==2 && fake::state.rawHashes==2);
+        assert(b.bytesRead==container::kHeaderBytes && fake::state.inflates==2 && fake::state.rawHashes==1+kWarmHash); // verified once per session load (+probe re-check)
         Reader c;auto third=call(&cache,c);
         assert(third.ok && third.stats.weightsReused && third.stats.featureFrames==2 && third.stats.outputFrames==1);
         assert(c.bytesRead==container::kHeaderBytes);
         assert(fake::state.modelFrames==std::vector<size_t>({2,3,2}));
         assert(fake::state.created==3 && fake::state.destroyed==3 && fake::state.rawAllocations==1);
-        assert(fake::state.rawHashes==3);fake::settled(1);
+        assert(fake::state.rawHashes==1+2*kWarmHash);fake::settled(1);
         cache.reset();fake::settled(0);assert(fake::state.rawFrees==1);
         cache.reset();assert(fake::state.rawFrees==1);
     }
@@ -328,13 +332,14 @@ void failuresAfterPublish() {
         fake::state.failAllocation=0;fake::state.frontendError=false;fake::state.decodeError=false;fake::state.truncate=false;
         fake::state.cancelAtPhase=-1;fake::state.cancelAfterStage=false;fake::state.cancel=false;
         Reader retry;auto recovered=call(&cache,retry);assert(recovered.ok && recovered.stats.weightsReused);
-        assert(retry.bytesRead==container::kHeaderBytes && fake::state.rawHashes==2);
+        assert(retry.bytesRead==container::kHeaderBytes && fake::state.rawHashes==1+kWarmHash);
         cache.reset();fake::settled(0);assert(fake::state.rawFrees==1);
     }
     // A one-shot post-publish failure must also release the retained temporary.
     fake::clean();fake::state.frontendError=true;Reader reader;assert(!call(nullptr,reader).ok);fake::settled(0);
     assert(fake::state.rawFrees==1 && fake::state.destroyed==1);
 }
+#if HW1_STT_RUNTIME_DIAGNOSTICS
 void corruptedAndFailedHash() {
     for(int scenario=0;scenario<3;++scenario) {
         fake::clean();ModelCache cache;Reader cold;assert(call(&cache,cold).ok);
@@ -351,6 +356,32 @@ void corruptedAndFailedHash() {
         assert(fake::state.rawAllocations==2);cache.reset();assert(fake::state.rawFrees==2);
     }
 }
+#else
+void corruptedAndFailedHash() {
+    // Weights are SHA-verified once when a session loads them; warm segments
+    // do not re-hash 7.2 MB (sttperf measured ~0.6 s per segment on the P4).
+    fake::clean();
+    {
+        ModelCache cache;Reader cold;assert(call(&cache,cold).ok && fake::state.rawHashes==1);
+        fake::state.failHash=2;fake::state.wrongHash=2;
+        Reader warm;auto result=call(&cache,warm);
+        assert(result.ok && result.stats.weightsReused && warm.bytesRead==container::kHeaderBytes);
+        assert(fake::state.rawHashes==1 && fake::state.inflates==2);
+        fake::state.failHash=0;fake::state.wrongHash=0;
+        cache.reset();fake::settled(0);assert(fake::state.rawFrees==1);
+    }
+    // A cold load still rejects weights whose hash does not match.
+    for(int scenario=0;scenario<2;++scenario) {
+        fake::clean();
+        if(scenario==0)fake::state.failHash=1; else fake::state.wrongHash=1;
+        ModelCache cache;Reader bad;auto result=call(&cache,bad);
+        assert(!result.ok && result.error=="STT model checksum mismatch");
+        fake::settled(0);
+        fake::state.failHash=0;fake::state.wrongHash=0;
+        Reader retry;assert(call(&cache,retry).ok);cache.reset();fake::settled(0);
+    }
+}
+#endif
 void warmBudgetAndEnvelope() {
     fake::clean();ModelCache cache;Reader cold;assert(call(&cache,cold).ok);
     // Free memory admits activations/frontend, but cannot fit a second weights
@@ -409,7 +440,92 @@ void guardLimitsAndDestruction() {
     fake::settled(0);assert(fake::state.rawFrees==1);
 }
 }
+namespace test {
+// Optional decoder hook: its result replaces greedy only when Decoded and
+// NUL-terminated; Fallback leaves the greedy path unchanged; Cancelled fails.
+struct FakeDecoder {
+    DecodeResult result=DecodeResult::Decoded;
+    bool unterminated=false;
+    int decodes=0, releases=0;
+    size_t frames=0, capacity=0; int exponent=0; const int8_t* logits=nullptr;
+    void* lm=nullptr; size_t lmBytes=0;   // PSRAM a real LM would keep resident
+    static DecodeResult decode(void* c,const int8_t* logits,size_t frames,int exponent,char* text,size_t cap,const STTLocalControl& control) {
+        auto& d=*static_cast<FakeDecoder*>(c);++d.decodes;
+        assert(fake::state.phase==STTLocalPhase::Decoding && !control.cancelled(control.context));
+        d.frames=frames;d.exponent=exponent;d.capacity=cap;d.logits=logits;
+        if(d.unterminated)std::memset(text,'x',cap); else std::snprintf(text,cap,"%s","language model");
+        return d.result;
+    }
+    static bool release(void* c) {
+        auto& d=*static_cast<FakeDecoder*>(c);++d.releases;
+        if(!d.lm)return false;
+        heap_caps_free(d.lm);d.lm=nullptr;return true;
+    }
+    Decoder hook() {return {this,decode,release};}
+};
+Result callWith(ModelCache* cache,const Decoder* decoder,size_t samples=320) {
+    Reader reader;std::vector<int16_t> pcm(samples,42);char text[64],error[128];STTLocalStats stats;
+    const bool ok=transcribe(reader.model(),pcm.data(),samples,text,sizeof(text),fake::control(),stats,error,sizeof(error),nullptr,cache,decoder);
+    if(!ok) {assert(!text[0]);assert(error[0]);}
+    return {ok,stats,text,error};
+}
+void decoderHook() {
+    for(int scenario=0;scenario<5;++scenario) {
+        fake::clean();ModelCache cache;FakeDecoder fd;Decoder hook=fd.hook();
+        if(scenario==1)fd.result=DecodeResult::Fallback;
+        if(scenario==2)fd.result=DecodeResult::Cancelled;
+        if(scenario==3)fd.unterminated=true;
+        if(scenario==4)hook.decode=nullptr;
+        auto r=callWith(&cache,&hook,480);
+        if(scenario==0) {
+            assert(r.ok && r.text=="language model" && fake::state.greedyFeeds==0);
+        } else if(scenario==2) {
+            assert(!r.ok && r.error=="Cancelled" && fake::state.greedyFeeds==0);
+        } else {
+            assert(r.ok && r.text=="ok" && fake::state.greedyFeeds==1); // byte-identical greedy result
+        }
+        if(scenario!=4) {
+            assert(fd.decodes==1 && fd.frames==2 && fd.exponent==identity::kOutputExponent && fd.capacity==64);
+            assert(fd.logits==fake::state.lastOutput);
+        }
+        assert(fd.releases==0 && r.stats.outputFrames==2);
+        fake::settled(1);cache.reset();fake::settled(0);
+    }
+    // Absent decoder: exactly the previous greedy path.
+    fake::clean();{ModelCache cache;auto r=callWith(&cache,nullptr);assert(r.ok && r.text=="ok" && fake::state.greedyFeeds==1);}
+    fake::settled(0);
+}
+void decoderReleasesMemory() {
+    // A resident LM that would refuse the call is released first, then the
+    // call proceeds (cold: raw weights + budget; warm: budget only).
+    for(int warm=0;warm<2;++warm) {
+        fake::clean();ModelCache cache;
+        if(warm) {Reader reader;assert(call(&cache,reader).ok);}
+        FakeDecoder fd;fd.lmBytes=3*1024*1024;fd.lm=heap_caps_aligned_alloc(16,fd.lmBytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+        fake::state.psramTotal=(warm?2:1)*identity::kRawBytes+remainingBudget(320)+1024;
+        const Decoder hook=fd.hook();
+        auto r=callWith(&cache,&hook);
+        assert(r.ok && r.text=="language model" && fd.releases==1 && !fd.lm && fd.decodes==1);
+        fake::settled(1);cache.reset();fake::settled(0);
+    }
+    // Nothing to release, or not enough even after release: refused as before.
+    for(int scenario=0;scenario<2;++scenario) {
+        fake::clean();ModelCache cache;FakeDecoder fd;
+        if(scenario) {fd.lmBytes=1024;fd.lm=heap_caps_aligned_alloc(16,fd.lmBytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);}
+        fake::state.psramTotal=identity::kRawBytes+remainingBudget(320)-1; // short even after release
+        const Decoder hook=fd.hook();
+        auto r=callWith(&cache,&hook);
+        assert(!r.ok && r.error=="Not enough free memory; stop camera, speech and other large models");
+        assert(fd.releases==1 && fd.decodes==0 && !fd.lm && fake::state.rawAllocations==0);
+        fake::settled(0);
+    }
+    // Enough memory: release is never consulted.
+    fake::clean();{ModelCache cache;FakeDecoder fd;const Decoder hook=fd.hook();assert(callWith(&cache,&hook).ok && fd.releases==0);}
+    fake::settled(0);
+}
+}
 int main() {
+    test::decoderHook();test::decoderReleasesMemory();
     test::coldWarmShapes();test::oneShotOrder();test::failuresBeforePublish();test::failuresAfterPublish();
     test::corruptedAndFailedHash();test::warmBudgetAndEnvelope();test::guardLimitsAndDestruction();
     test::diagnosticsAfterModelDestruction();

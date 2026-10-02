@@ -152,7 +152,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 100,
@@ -198,7 +198,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 100,
@@ -244,7 +244,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 100,
@@ -290,7 +290,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 100,
@@ -336,7 +336,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 1000,
@@ -615,7 +615,7 @@
           "capacity": 20,
           "failures": 0,
           "log_tag": "HW1_HOST",
-          "real": "68:ee:8f:50:e9:d0"
+          "real": "02:48:57:31:00:d0"
         }
       },
       "started_at": "2026-09-27T14:47:12.584+00:00",
@@ -638,7 +638,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 20,
@@ -695,7 +695,7 @@
         "timeouts": 10
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": true,
         "firmware": {
           "attempted": 10,
@@ -744,7 +744,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 20,
@@ -818,7 +818,7 @@
         "timeouts": 10
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": true,
         "firmware": {
           "attempted": 10,
@@ -895,7 +895,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 20,
@@ -1008,7 +1008,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 20,
@@ -1120,7 +1120,7 @@
           "channel": 6,
           "espnow_version": 2,
           "log_tag": "HW1_PROBE",
-          "mac": "68:ee:8f:50:e9:d0",
+          "mac": "02:48:57:31:00:d0",
           "mesh_fingerprint": "481c",
           "role": "native_s3",
           "silence": 0,
@@ -1147,7 +1147,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 20,
@@ -1281,7 +1281,7 @@
           "channel": 6,
           "espnow_version": 2,
           "log_tag": "HW1_HOST",
-          "mac": "fc:01:2c:e0:b9:a8",
+          "mac": "02:48:57:31:01:a8",
           "mesh_fingerprint": "481c",
           "peers": 1,
           "role": "hosted_p4",
@@ -1308,7 +1308,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 20,
@@ -1442,7 +1442,7 @@
           "channel": 6,
           "espnow_version": 2,
           "log_tag": "HW1_HOST",
-          "mac": "fc:01:2c:e0:b9:a8",
+          "mac": "02:48:57:31:01:a8",
           "mesh_fingerprint": "481c",
           "peers": 1,
           "role": "hosted_p4",
@@ -1469,7 +1469,7 @@
         "timeouts": 0
       },
       "result": {
-        "destination": "68:ee:8f:50:e9:d0",
+        "destination": "02:48:57:31:00:d0",
         "expected_timeout": false,
         "firmware": {
           "attempted": 20,

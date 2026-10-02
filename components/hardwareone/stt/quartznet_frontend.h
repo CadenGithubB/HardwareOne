@@ -16,9 +16,16 @@ size_t feature_frames(size_t samples);
 // Input, output and workspace allocations must not overlap.
 // Raw HAL input: no upstream pre-emphasis/CMVN. Samples must be mono16kHz.
 // Deterministic Gaussian dither is reset once per utterance, before pre-emphasis.
+// Optional profiling (sttperf): microseconds per phase, accumulated when
+// now_us is set. Never changes the features.
+struct FrontendTiming {
+    uint64_t (*now_us)()=nullptr;
+    uint32_t conditionUs=0, fftUs=0, melUs=0, normUs=0;
+};
 Status compute_features(const int16_t* pcm, size_t samples, float* output,
                         size_t output_floats, FrontendWorkspace* workspace,
-                        uint32_t seed=kDitherSeed, bool dither=true);
+                        uint32_t seed=kDitherSeed, bool dither=true,
+                        FrontendTiming* timing=nullptr);
 inline constexpr size_t kCtcClasses=29, kCtcBlank=28;
 struct CtcState {
     int previous=-1;

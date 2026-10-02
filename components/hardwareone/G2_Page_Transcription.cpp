@@ -19,8 +19,18 @@ extern void g2ShowAppsMenu();
 
 namespace {
 constexpr size_t kTailBytes = 1024, kEntries = 8, kWindowBytes = 512;
+// The right column is two text children, each refreshed by its own
+// single-write UPDATE_TEXT. The glasses negotiate MTU 244 (241-byte writes)
+// and UPDATE_TEXT framing adds ~43 B, so each child stays <=180 B (a 200-byte
+// sidebar produced 243-byte envelopes the lens rejected, freezing the panel).
+constexpr size_t kSidebarUpdateMax = 180;
+// Header (status) over body (newest text). Body sized to what fits on screen.
+constexpr size_t kBodyMax = 150;
+constexpr G2ContainerGeom kHeaderGeom = {280, 8, 288, 88};
+constexpr G2ContainerGeom kBodyGeom = {280, 100, 288, 180};
+constexpr uint32_t kHeaderId = 97, kBodyId = 98;
 enum class View : uint8_t { Home, Live, List, File };
-enum class Op : uint8_t { None, Start, Status, Next, Ack, Stop, Cancel, List, Read, Save };
+enum class Op : uint8_t { None, Start, Status, Next, Ack, Stop, Cancel, List, Read, Save, Mic };
 struct Entry { char name[64] = {}, path[128] = {}; uint32_t bytes = 0; };
 struct State {
   uint32_t epoch = 0, request = 0, requestView = 0, viewGeneration = 0;
@@ -34,10 +44,12 @@ struct State {
   bool captureActive = false, inferenceActive = false, saveDefault = false, saveEnabled = false;
   bool saveComplete = false, sd = false, more = false, eof = false;
   bool exiting = false, dirty = false, ackPending = false, nextPoll = false;
-  bool recoveringStart = false, exitReady = false;
+  bool recoveringStart = false, exitReady = false, micPdm = false, micG2 = false;
   uint8_t count = 0, page = 0, pages = 0;
-  char exchange[17] = {}, message[96] = {}, saveError[64] = {};
+  char exchange[17] = {}, message[96] = {}, saveError[64] = {}, micSource[8] = "auto";
   char tail[kTailBytes + 1] = {}, fileText[kWindowBytes + 1] = {}, path[128] = {};
+  char draft[kWindowBytes + 1] = {};  // live mode: words still being spoken
+  uint32_t draftVersion = 0;
   Entry entries[kEntries];
 };
 static portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
@@ -45,6 +57,10 @@ EXT_RAM_BSS_ATTR static State state;
 // Only the lens-applier renders. Its scratch stays off the 8 KiB worker stack.
 EXT_RAM_BSS_ATTR static State renderState;
 EXT_RAM_BSS_ATTR static char rows[12][72], sidebar[512], textBody[1200], textPage[304];
+// Confirmed tail plus the live draft, and the last sidebar actually sent (so
+// unchanged polls send nothing instead of an identical UPDATE_TEXT).
+EXT_RAM_BSS_ATTR static char liveText[kTailBytes + kWindowBytes + 2], renderedSidebar[512];
+EXT_RAM_BSS_ATTR static char body[kSidebarUpdateMax + 8], renderedBody[kSidebarUpdateMax + 8];
 static const char* rowPtrs[12];
 static uint16_t pageOffsets[9];
 static View renderedView = View::File;
@@ -138,8 +154,11 @@ static void render() {
   }
   const auto& s = renderState;
   bool shown = false;
+  const size_t tailLen = strlen(s.tail);
+  const bool needSpace = tailLen && s.draft[0] && s.tail[tailLen - 1] != ' ';
+  snprintf(liveText, sizeof(liveText), "%s%s%s", s.tail, needSpace ? " " : "", s.draft);
   if (s.view == View::Live || s.view == View::File) {
-    const char* text = s.view == View::Live ? s.tail :
+    const char* text = s.view == View::Live ? liveText :
         s.message[0] ? s.message : s.fileText;
     bool truncated = false;
     const size_t bytes = textWrapInto(textBody, sizeof(textBody), text, G2_TEXT_DEFAULT_COLS, 0, true, &truncated);
@@ -184,32 +203,52 @@ static void render() {
       add("Live text");
       add(s.saveDefault ? "Save next session: On" : "Save next session: Off");
       add("Saved: Internal"); add("Saved: SD card");
+      char mic[32];
+      snprintf(mic, sizeof(mic), "Mic: %s", TranscriptionUI::micLabel(s.micSource));
+      add(mic);
       const char* phase = s.preparing ? "Getting ready" : s.captureActive ? "Listening" :
                           s.inferenceActive ? "Transcribing" : s.active ? "Stopping" : s.done ? "Finished" : "Ready";
-      const size_t tailLen = strlen(s.tail);
-      const char* tail = s.tail + (tailLen > 160 ? tailLen - 160 : 0);
-      while ((*tail & 0xc0) == 0x80) ++tail;
-      snprintf(sidebar, sizeof(sidebar), "%s%s\n%lus%s\n%.95s%s%.63s\nRecent:\n%.160s", phase,
+      snprintf(sidebar, sizeof(sidebar), "%s%s\n%lus%s\n%.95s%s%.63s", phase,
                s.pending != Op::None ? "..." : "", (unsigned long)(s.elapsedMs / 1000),
                s.active ? (s.saveEnabled ? " | saving" : " | not saving") : (s.saveComplete ? " | saved" : ""),
-               s.message, s.saveError[0] ? "\nSave: " : "", s.saveError, tail);
+               s.message, s.saveError[0] ? "\nSave: " : "", s.saveError);
+      sidebar[kSidebarUpdateMax] = '\0';
+      // Body: the newest words that fit, starting on a UTF-8 boundary.
+      const size_t textLen = strlen(liveText);
+      const char* newest = liveText + (textLen > kBodyMax ? textLen - kBodyMax : 0);
+      while ((*newest & 0xc0) == 0x80) ++newest;
+      snprintf(body, sizeof(body), "%s", newest);
     } else {
       add("<- Transcription");
       for (size_t i = 0; i < s.count; ++i) add(s.entries[i].name);
       if (!s.count) add("(no saved transcripts)");
       if (s.listOffset) add("<< Previous files");
       if (s.more) add("Next files >>");
-      snprintf(sidebar, sizeof(sidebar), "%s storage\nSaved transcripts\n%s",
-               s.sd ? "SD" : "Internal", s.message);
+      snprintf(sidebar, sizeof(sidebar), "%s storage\nSaved transcripts", s.sd ? "SD" : "Internal");
+      snprintf(body, sizeof(body), "%.*s", (int)kBodyMax, s.message);
     }
-    const G2TextChildSpec child = {"transcription", sidebar, 98, G2_GEOM_SPLIT_RIGHT, false};
+    const G2TextChildSpec header = {"trhead", sidebar, kHeaderId, kHeaderGeom, false};
+    const G2TextChildSpec text = {"transcription", body, kBodyId, kBodyGeom, false};
     const bool sameRows = renderedEpoch == s.epoch && renderedView == s.view && renderedCount == n &&
         memcmp(renderedRows, rows, n * sizeof(rows[0])) == 0;
     if (identity.stillCurrent()) {
-      if (sameRows) shown = g2UpdateMixedTextChild("transcription", 98, sidebar);
-      if (!shown) shown = g2ShowMixedListText(rowPtrs, n, G2_GEOM_SPLIT_LIST, child);
+      // Only the text half changes while the rows are unchanged; the list
+      // (and its selection) is rebuilt only when a row label itself changes.
+      // Each child is patched only when its own text changed.
+      if (sameRows) {
+        const bool headOk = strcmp(renderedSidebar, sidebar) == 0 ||
+            g2UpdateMixedTextChild("trhead", kHeaderId, sidebar);
+        const bool bodyOk = strcmp(renderedBody, body) == 0 ||
+            g2UpdateMixedTextChild("transcription", kBodyId, body);
+        shown = headOk && bodyOk;
+      }
+      if (!shown) shown = g2ShowMixedListText2(rowPtrs, n, G2_GEOM_SPLIT_LIST, header, text);
     }
-    if (shown) { memcpy(renderedRows, rows, n * sizeof(rows[0])); renderedView = s.view; renderedCount = n; renderedEpoch = s.epoch; }
+    if (shown) {
+      memcpy(renderedRows, rows, n * sizeof(rows[0])); renderedView = s.view; renderedCount = n; renderedEpoch = s.epoch;
+      snprintf(renderedSidebar, sizeof(renderedSidebar), "%s", sidebar);
+      snprintf(renderedBody, sizeof(renderedBody), "%s", body);
+    }
   }
   if (!shown) { portENTER_CRITICAL(&stateMux); state.dirty = true; portEXIT_CRITICAL(&stateMux); }
   renderState = State{};
@@ -231,7 +270,7 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
   state.pending = Op::None;
   const bool success = ok && parsed && (doc["success"] | false) &&
       !(op == Op::Status && state.recoveringStart && !doc["exchange"].is<const char*>());
-  if (op == Op::Save) {
+  if (op == Op::Save || op == Op::Mic) {
     if (!ok || (result && strncmp(result, "Error", 5) == 0))
       snprintf(state.message, sizeof(state.message), "Setting change denied or failed");
     if (state.queued == Op::None) state.queued = Op::Status;
@@ -263,6 +302,8 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
     state.elapsedMs = doc["elapsedMs"] | 0u;
     state.saveDefault = doc["saveDefault"] | false; state.saveEnabled = doc["saveEnabled"] | false;
     state.saveComplete = doc["saveComplete"] | false;
+    snprintf(state.micSource, sizeof(state.micSource), "%s", doc["micSource"] | "auto");
+    state.micPdm = doc["micPdm"] | false; state.micG2 = doc["micG2"] | false;
     snprintf(state.saveError, sizeof(state.saveError), "%s", doc["saveError"] | "");
     const char* failure = doc["failure"] | "";
     if (failure[0]) snprintf(state.message, sizeof(state.message), "%s", failure);
@@ -291,6 +332,13 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
         appendTailLocked(text, length, state.receiptOffset == 0);
         state.ackPending = true;
       } else snprintf(state.message, sizeof(state.message), "Invalid text receipt");
+    }
+    if (strcmp(id, state.exchange) == 0 && !state.exiting) {
+      const uint32_t version = doc["draftVersion"] | 0u;
+      if (version != state.draftVersion) {
+        state.draftVersion = version;
+        snprintf(state.draft, sizeof(state.draft), "%s", doc["draft"] | "");
+      }
     }
     state.nextPoll = false;
   } else if (op == Op::Ack) {
@@ -346,6 +394,13 @@ void g2TranscriptionHandleTap(uint32_t index) {
     else if (index == 1 && !state.exiting && !state.recoveringStart && state.pending != Op::Start && state.pending != Op::Cancel) state.queued = state.active ? Op::Stop : Op::Start;
     else if (index == 2) { changeViewLocked(View::Live); state.page = 255; viewChanged = true; }
     else if (index == 3) state.queued = Op::Save;
+    else if (index == 6) {
+      // The source is claimed when a session starts; changing it mid-session
+      // would only apply to the next one, so make that explicit.
+      if (state.active || state.recoveringStart)
+        snprintf(state.message, sizeof(state.message), "Stop transcription to change mic");
+      else state.queued = Op::Mic;
+    }
     else if (index == 4 || index == 5) {
       changeViewLocked(View::List); state.sd = index == 5; state.count = 0;
       state.listOffset = 0; state.more = false; state.queued = Op::List; viewChanged = true;
@@ -386,7 +441,11 @@ void g2TranscriptionTick() {
   bool dirty = false;
   const bool onPage = g2GetHijackPage() == G2_HIJACK_PAGE_TRANSCRIPTION && g2LensGetState().hijackActive;
   portENTER_CRITICAL(&stateMux);
-  if (!onPage) state.exiting = true;
+  // The glasses blank the lens after ~30-60 s without ring/temple input
+  // (DISPLAY_OFF), which also ends the hijack. That must not end a running
+  // meeting transcription: keep polling/acking in the background and show
+  // it again when the app is reopened. Explicit Back still cancels.
+  if (!onPage && !(state.active && state.exchange[0])) state.exiting = true;
   if (state.exitReady || (state.exiting && !state.recoveringStart &&
       state.pending == Op::None && !state.exchange[0])) {
     resetLocked(0); portEXIT_CRITICAL(&stateMux);
@@ -404,7 +463,8 @@ void g2TranscriptionTick() {
       else { resetLocked(0); portEXIT_CRITICAL(&stateMux); return; }
     } else if (state.queued != Op::None) { op = state.queued; state.queued = Op::None; }
     else if (state.ackPending) op = Op::Ack;
-    else if ((uint32_t)(now - state.lastPoll) >= 1000) op = state.nextPoll ? Op::Next : Op::Status;
+    // Live mode: poll twice as often while a session runs so drafts move.
+    else if ((uint32_t)(now - state.lastPoll) >= (state.active ? 500u : 1000u)) op = state.nextPoll ? Op::Next : Op::Status;
     switch (op) {
       case Op::Start: snprintf(command, sizeof(command), "transcription start"); break;
       case Op::Status: snprintf(command, sizeof(command), "transcription status%s%s", !state.recoveringStart && state.exchange[0] ? " " : "", state.recoveringStart ? "" : state.exchange); break;
@@ -416,6 +476,8 @@ void g2TranscriptionTick() {
       case Op::List: snprintf(command, sizeof(command), "transcripts list %s %lu", state.sd ? "sd" : "internal", (unsigned long)state.listOffset); break;
       case Op::Read: snprintf(command, sizeof(command), "transcripts read \"%s\" %lu", state.path, (unsigned long)state.fileOffset); break;
       case Op::Save: snprintf(command, sizeof(command), "sttsavetranscripts %u", state.saveDefault ? 0 : 1); break;
+      case Op::Mic: snprintf(command, sizeof(command), "micsource %s",
+          TranscriptionUI::nextMicSource(state.micSource, state.micPdm, state.micG2)); break;
       default: break;
     }
     if (op != Op::None) { state.pending = op; state.requestView = state.viewGeneration; request = ++state.request; state.lastPoll = now; }

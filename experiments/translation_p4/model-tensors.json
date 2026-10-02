@@ -1,0 +1,3219 @@
+{
+  "schema": 1,
+  "model_sha256": "fa7460037a3163e03fe1d23602f964bff2331da6ee813637e092ddf37156ef53",
+  "file_bytes": 17140755,
+  "binary_version": 1,
+  "tensor_count": 195,
+  "metadata_range": [
+    0,
+    12408
+  ],
+  "alignment_padding_range": [
+    12408,
+    12544
+  ],
+  "tensor_data_range": [
+    12544,
+    17140755
+  ],
+  "ranges_are_half_open": true,
+  "all_bytes_accounted_for": true,
+  "type_summary": {
+    "intgemm8": {
+      "tensors": 54,
+      "stored_bytes": 16856576,
+      "elements": 16842753
+    },
+    "float32": {
+      "tensors": 140,
+      "stored_bytes": 270592,
+      "elements": 64309
+    },
+    "int8": {
+      "tensors": 1,
+      "stored_bytes": 1043,
+      "elements": 1043
+    }
+  },
+  "model_elements_excluding_metadata": 16907062,
+  "embedding_float32_bytes": 32768004,
+  "stock_loader_item_logical_bytes_inferred": 41703703,
+  "note": "Disk layout only; stock loader copies/reformats tensors and expands intgemm embeddings.",
+  "tensors": [
+    {
+      "name": "Wemb",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        32000,
+        256
+      ],
+      "elements": 8192000,
+      "offset": 12544,
+      "end": 8204800,
+      "stored_bytes": 8192256,
+      "value_bytes": 8192000,
+      "padding_bytes": 252,
+      "sha256": "f301b9089611d24f3a98e9fde9b2610bf9412c311f5c54168fa7a06f0b6e40b2",
+      "quantization_multiplier": 88.24735260009766,
+      "stock_loader_float32_embedding_bytes": 32768000
+    },
+    {
+      "name": "Wemb_QuantMultA",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 8204800,
+      "end": 8205056,
+      "stored_bytes": 256,
+      "value_bytes": 1,
+      "padding_bytes": 251,
+      "sha256": "5fa8057e49a28d7d491c753514b7bdf0ec8da11e7d5d00da79aa22b825796011",
+      "quantization_multiplier": 18.23577880859375,
+      "stock_loader_float32_embedding_bytes": 4
+    },
+    {
+      "name": "decoder_ff_logit_out_b",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        32000
+      ],
+      "elements": 32000,
+      "offset": 8205056,
+      "end": 8333056,
+      "stored_bytes": 128000,
+      "value_bytes": 128000,
+      "padding_bytes": 0,
+      "sha256": "71552f277bc9996c7c9970a542282f110cc4edbbf9697437576710eb5c073961"
+    },
+    {
+      "name": "decoder_l1_context_Wk",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 8333056,
+      "end": 8398848,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "22f6813ffaf6640e1a7a9960fec3c7b84ecab7e735aa644643a61efb3b25dad0",
+      "quantization_multiplier": 201.4319610595703
+    },
+    {
+      "name": "decoder_l1_context_Wk_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 8398848,
+      "end": 8399104,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "8896027ac6792eb9521b5e78cf249c2b5e1b4e2ea37ec25866985ae13d52164f"
+    },
+    {
+      "name": "decoder_l1_context_Wo",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 8399104,
+      "end": 8464896,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "8e432e1d4c35b0c450770b6c3b43711937795e24414fc7ce0a86de8549911372",
+      "quantization_multiplier": 176.66732788085938
+    },
+    {
+      "name": "decoder_l1_context_Wo_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 8464896,
+      "end": 8465152,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "910ec40e3b4c0a88972777ad22a3eb87f9fd17bc042f1e0a294575cfe277a2c3"
+    },
+    {
+      "name": "decoder_l1_context_Wo_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 8465152,
+      "end": 8466176,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "24b890f66b99990d231a35a468f2e8f5eb51a7b63962fededbc1f68a3869c35a"
+    },
+    {
+      "name": "decoder_l1_context_Wo_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 8466176,
+      "end": 8467200,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "1767b8f4606e5649988db251e5577ca33cd74d253cc72c59e59ef56ece3e4265"
+    },
+    {
+      "name": "decoder_l1_context_Wq",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 8467200,
+      "end": 8532992,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "213460f453bec76d5164c45181c21a21172b948c150ba34f2a19bf490eb72220",
+      "quantization_multiplier": 142.39340209960938
+    },
+    {
+      "name": "decoder_l1_context_Wq_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 8532992,
+      "end": 8533248,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "d05b820d3f10ff62d377a660d713c6c6ef25e12dd0d686d0703cbba3480d8c17"
+    },
+    {
+      "name": "decoder_l1_context_Wv",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 8533248,
+      "end": 8599040,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "b6be98e4299cc5b5091d9e55676d87d675c5afa77aba682658a7c9dbc15653bf",
+      "quantization_multiplier": 227.2868194580078
+    },
+    {
+      "name": "decoder_l1_context_Wv_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 8599040,
+      "end": 8599296,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "8896027ac6792eb9521b5e78cf249c2b5e1b4e2ea37ec25866985ae13d52164f"
+    },
+    {
+      "name": "decoder_l1_context_bk",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 8599296,
+      "end": 8600320,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "53547447601eecef5a1a135c9e329778b5e290c73b60bc2a3dd21cf4ba9327eb"
+    },
+    {
+      "name": "decoder_l1_context_bo",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 8600320,
+      "end": 8601344,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "a2f5d5e74bd1820b95021b1cc94524076dcd0d7d5c36cc9e706a9541cb856141"
+    },
+    {
+      "name": "decoder_l1_context_bq",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 8601344,
+      "end": 8602368,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "9d1c18d493c21abebb6cfb683d6cc85cbfb88298e1ba21a15f8949f6e9e2be68"
+    },
+    {
+      "name": "decoder_l1_context_bv",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 8602368,
+      "end": 8603392,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "d46e797fa4b7aff6c9e0d9adb71e1f761a8bb72830dad467e782f708eb47cae5"
+    },
+    {
+      "name": "decoder_l1_ffn_W1",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        1536
+      ],
+      "elements": 393216,
+      "offset": 8603392,
+      "end": 8996864,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "50fd300c170551aa2eec2dd85aca0ab3efc832f7b9cb6fa4a06d0d554cf58edb",
+      "quantization_multiplier": 65.02374267578125
+    },
+    {
+      "name": "decoder_l1_ffn_W1_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 8996864,
+      "end": 8997120,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "258639da5bcdf23b7181c78991dff7a3804bac9c93096e3d5cd171c7925baaba"
+    },
+    {
+      "name": "decoder_l1_ffn_W2",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        1536,
+        256
+      ],
+      "elements": 393216,
+      "offset": 8997120,
+      "end": 9390592,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "1b7919957de81b2e5bd57753e9cdbd4a2c60469902da2b98b14877de6a6fdae2",
+      "quantization_multiplier": 79.64997100830078
+    },
+    {
+      "name": "decoder_l1_ffn_W2_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 9390592,
+      "end": 9390848,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "400db5debbf2b6cfbe5c6f36237a0e3888c247511d19acabceb2d42c53486390"
+    },
+    {
+      "name": "decoder_l1_ffn_b1",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1536
+      ],
+      "elements": 1536,
+      "offset": 9390848,
+      "end": 9396992,
+      "stored_bytes": 6144,
+      "value_bytes": 6144,
+      "padding_bytes": 0,
+      "sha256": "63a733769b249c7c15622757071b73efccc58092d3a4472f7ced6fa7295ced3b"
+    },
+    {
+      "name": "decoder_l1_ffn_b2",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9396992,
+      "end": 9398016,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "6ec60f9d2ca00088c84dafe348ac1b3211b605d4d94c2dc85c9bd50f0d38d19f"
+    },
+    {
+      "name": "decoder_l1_ffn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9398016,
+      "end": 9399040,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "2751a6f2f19ed5f236094198bddf7480ff7d2b6917aa047845b9226f0a0e98bc"
+    },
+    {
+      "name": "decoder_l1_ffn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9399040,
+      "end": 9400064,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "2da6d181a7e1ed8f28f7124a004c714f2f353afbb071877a2532ac331959fd5f"
+    },
+    {
+      "name": "decoder_l1_rnn_W",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 9400064,
+      "end": 9465856,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "d588c6ffb08b1b20975cdd1df0b93db1766fa90a622cfd0f69f06f70575bdc40",
+      "quantization_multiplier": 72.76750183105469
+    },
+    {
+      "name": "decoder_l1_rnn_W_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 9465856,
+      "end": 9466112,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "bfa1f29701f89e7c7ebee4429e8c84190984330361087a11ee8ec2b2ec780e65"
+    },
+    {
+      "name": "decoder_l1_rnn_Wf",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 9466112,
+      "end": 9531904,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "c548df5fa2c348172fa0cb98fa39a6fe89ef54807e34344b6578f9eb325a0aab",
+      "quantization_multiplier": 209.4918975830078
+    },
+    {
+      "name": "decoder_l1_rnn_Wf_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 9531904,
+      "end": 9532160,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "bfa1f29701f89e7c7ebee4429e8c84190984330361087a11ee8ec2b2ec780e65"
+    },
+    {
+      "name": "decoder_l1_rnn_bf",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9532160,
+      "end": 9533184,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "b16dec12cd269c446e089f8395023b1b9faa2dfc112802011091fee00c28debc"
+    },
+    {
+      "name": "decoder_l1_rnn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9533184,
+      "end": 9534208,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "7e8ba0f62d2828472c82cd90eb9f84c89b3c1a4c6f379b16284901767eab4621"
+    },
+    {
+      "name": "decoder_l1_rnn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9534208,
+      "end": 9535232,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "027e9e2aba0b0411e22fc9327d82a50900ce08e617145a631b3a0d040542676b"
+    },
+    {
+      "name": "decoder_l2_context_Wk",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 9535232,
+      "end": 9601024,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "a18ee916e6976e5a5bc5fb046131439a965791e9c471a7f4f0b2a112b27f8761",
+      "quantization_multiplier": 164.3385009765625
+    },
+    {
+      "name": "decoder_l2_context_Wk_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 9601024,
+      "end": 9601280,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "8896027ac6792eb9521b5e78cf249c2b5e1b4e2ea37ec25866985ae13d52164f"
+    },
+    {
+      "name": "decoder_l2_context_Wo",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 9601280,
+      "end": 9667072,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "c3f29b84c23d75ac7ce77c43e1597fa3f3b324a56ee86b22d1e775d538f3e809",
+      "quantization_multiplier": 197.36830139160156
+    },
+    {
+      "name": "decoder_l2_context_Wo_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 9667072,
+      "end": 9667328,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "2d5d5aba0adfc91b536138ca77e31983e876b9b9bb45bf6ef96e4c3ce2da3900"
+    },
+    {
+      "name": "decoder_l2_context_Wo_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9667328,
+      "end": 9668352,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "9d8e23faece2ac57bcddb5e942e233cc53520c11081f8b535567672ffe70e515"
+    },
+    {
+      "name": "decoder_l2_context_Wo_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9668352,
+      "end": 9669376,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "498ea5c593c6814cb822ce6c9b9ef9d416522507e8f0ba947d26824b57cad586"
+    },
+    {
+      "name": "decoder_l2_context_Wq",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 9669376,
+      "end": 9735168,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "b59eca2501d1518a03af77483ca95d7eca9cc9e87b7a63275a9b7457c0c4dba5",
+      "quantization_multiplier": 107.4786605834961
+    },
+    {
+      "name": "decoder_l2_context_Wq_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 9735168,
+      "end": 9735424,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "dbdef42ce0b5968379e0ada9ec75fbbbe08142869bae91ce97b7c261069d237a"
+    },
+    {
+      "name": "decoder_l2_context_Wv",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 9735424,
+      "end": 9801216,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "9b249cdf3663f63fcb80eedfb2c386671a03bb366d08af6ea351a4366222f456",
+      "quantization_multiplier": 190.36944580078125
+    },
+    {
+      "name": "decoder_l2_context_Wv_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 9801216,
+      "end": 9801472,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "8896027ac6792eb9521b5e78cf249c2b5e1b4e2ea37ec25866985ae13d52164f"
+    },
+    {
+      "name": "decoder_l2_context_bk",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9801472,
+      "end": 9802496,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "1d1bfc0de1ea80e98b5f67932c49ad38ba2123837b8d438414edac9de129adbb"
+    },
+    {
+      "name": "decoder_l2_context_bo",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9802496,
+      "end": 9803520,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "2920aae3d37aa098c585160555deded2e71d73cc9c686bea4696e78284e66465"
+    },
+    {
+      "name": "decoder_l2_context_bq",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9803520,
+      "end": 9804544,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "b513ee060cc08c720b308b8be6055a328224a9aa6df0323bc1275d242ba9c827"
+    },
+    {
+      "name": "decoder_l2_context_bv",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 9804544,
+      "end": 9805568,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "256b63934246e3aa300d59721bc7a4033023cbd9a294b2ed83900412c4414e8d"
+    },
+    {
+      "name": "decoder_l2_ffn_W1",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        1536
+      ],
+      "elements": 393216,
+      "offset": 9805568,
+      "end": 10199040,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "cb0657cd808d654730da8dc67af4a93082c257cf79941fd10081cfedcd2093d4",
+      "quantization_multiplier": 58.997581481933594
+    },
+    {
+      "name": "decoder_l2_ffn_W1_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 10199040,
+      "end": 10199296,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "65e49aaf95d48878a460c80ffcf1e55efed2899f5934afdf88639efd9ed0443c"
+    },
+    {
+      "name": "decoder_l2_ffn_W2",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        1536,
+        256
+      ],
+      "elements": 393216,
+      "offset": 10199296,
+      "end": 10592768,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "6d78b3baf6555f3d5668b169cc14f21177369b57333be55f4f0fe07c8e76f100",
+      "quantization_multiplier": 103.52491760253906
+    },
+    {
+      "name": "decoder_l2_ffn_W2_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 10592768,
+      "end": 10593024,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "7d7489cfc0e32c50f2a37259c077be2128fd6c85a2f768014d48399585dd610b"
+    },
+    {
+      "name": "decoder_l2_ffn_b1",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1536
+      ],
+      "elements": 1536,
+      "offset": 10593024,
+      "end": 10599168,
+      "stored_bytes": 6144,
+      "value_bytes": 6144,
+      "padding_bytes": 0,
+      "sha256": "9d8d3124228de0439300d3807a06eabeae01112d1494679e3e7505b19c23b0e5"
+    },
+    {
+      "name": "decoder_l2_ffn_b2",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 10599168,
+      "end": 10600192,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "85f9a3ba9e85735163c299cbdf67925964057ca37d263f5b652db3191037b330"
+    },
+    {
+      "name": "decoder_l2_ffn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 10600192,
+      "end": 10601216,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "bf40c09f4bfe039fc123a7deaa2d8cbf9bf2e1dee9aaa93b6bd283322e5b72e2"
+    },
+    {
+      "name": "decoder_l2_ffn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 10601216,
+      "end": 10602240,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "839ce3722eb0611821add3e7364eaa025885a153fc3b7f315799292d493271a3"
+    },
+    {
+      "name": "decoder_l2_rnn_W",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 10602240,
+      "end": 10668032,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "fd40391fd2130a58939ed67d1b857b645d4b143440eadb3e2baacf363b5f2153",
+      "quantization_multiplier": 99.7961654663086
+    },
+    {
+      "name": "decoder_l2_rnn_W_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 10668032,
+      "end": 10668288,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "f1bf3ee9c48c2ee82d737b3328a7cbda03af9cf652d145ac6d67f746e8d058af"
+    },
+    {
+      "name": "decoder_l2_rnn_Wf",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 10668288,
+      "end": 10734080,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "ff8570df937e13fba7e0be5f8baa904bc39fb58795aca2fda353ccf97d514638",
+      "quantization_multiplier": 133.9656524658203
+    },
+    {
+      "name": "decoder_l2_rnn_Wf_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 10734080,
+      "end": 10734336,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "f1bf3ee9c48c2ee82d737b3328a7cbda03af9cf652d145ac6d67f746e8d058af"
+    },
+    {
+      "name": "decoder_l2_rnn_bf",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 10734336,
+      "end": 10735360,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "98b7a0fec23152d9d55646aa123ebc609096b495bed3530867bbcdf38c7af3c8"
+    },
+    {
+      "name": "decoder_l2_rnn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 10735360,
+      "end": 10736384,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "3666488577a45ffc332bee99dd9a3033ee6cecc614d48c43f623ddc7bdef7bba"
+    },
+    {
+      "name": "decoder_l2_rnn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 10736384,
+      "end": 10737408,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "8442b22bf3e18aa4e64133423de5ea0149b46c9fcacbbd81e326c80746465e4b"
+    },
+    {
+      "name": "encoder_l1_ffn_W1",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        1536
+      ],
+      "elements": 393216,
+      "offset": 10737408,
+      "end": 11130880,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "241168ffbe5c9d656817d916b368587ae770d0ace3b939828f061e4051103733",
+      "quantization_multiplier": 165.60581970214844
+    },
+    {
+      "name": "encoder_l1_ffn_W1_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 11130880,
+      "end": 11131136,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "7a628a0c20743bc3a255228e867ca259cdb4c07ecb0958e32d7830556a05d2d3"
+    },
+    {
+      "name": "encoder_l1_ffn_W2",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        1536,
+        256
+      ],
+      "elements": 393216,
+      "offset": 11131136,
+      "end": 11524608,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "e4c284380bef04cb1e6798793989eb23b61086fcae3024756930f69ad03ff6f0",
+      "quantization_multiplier": 89.03260803222656
+    },
+    {
+      "name": "encoder_l1_ffn_W2_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 11524608,
+      "end": 11524864,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "d9373aee37cba4b7f704b66829fa78460a4ba26cec075e76f186605891a26d71"
+    },
+    {
+      "name": "encoder_l1_ffn_b1",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1536
+      ],
+      "elements": 1536,
+      "offset": 11524864,
+      "end": 11531008,
+      "stored_bytes": 6144,
+      "value_bytes": 6144,
+      "padding_bytes": 0,
+      "sha256": "8862e0fec69e021c50df697e878184e476d82358c5f33a95b3a4c67205dccd88"
+    },
+    {
+      "name": "encoder_l1_ffn_b2",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 11531008,
+      "end": 11532032,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "35112f83303845e424897ca4c2933d061413ca4499343276182bf11da7d4a02e"
+    },
+    {
+      "name": "encoder_l1_ffn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 11532032,
+      "end": 11533056,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "0845c20c915e1e3771a7b8bea703b96f9901a371a1fe4bad8d5f0d480660f05f"
+    },
+    {
+      "name": "encoder_l1_ffn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 11533056,
+      "end": 11534080,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "15c8dda9745f0d925d3ecdb57c89b85ba199bca7dc2287d1a0b562960039abd2"
+    },
+    {
+      "name": "encoder_l1_self_Wk",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 11534080,
+      "end": 11599872,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "b7349579cd1cda87ed494440bee759c65285332071744b0732a5ae316998cbc7",
+      "quantization_multiplier": 185.1919708251953
+    },
+    {
+      "name": "encoder_l1_self_Wk_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 11599872,
+      "end": 11600128,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "bac35aeaee73ae99a3d624a4853079da68a0cacb55d4b02a310272b3d777e68c"
+    },
+    {
+      "name": "encoder_l1_self_Wo",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 11600128,
+      "end": 11665920,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "df6d2510e3b9231ba73f56e01e15dc26d7350db45db42ab2e9b38814d51b649c",
+      "quantization_multiplier": 255.99346923828125
+    },
+    {
+      "name": "encoder_l1_self_Wo_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 11665920,
+      "end": 11666176,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "83e54fcd9e1d12d7155a46b14bbcc316d1372ceb08c1163a336b2c2d1f659493"
+    },
+    {
+      "name": "encoder_l1_self_Wo_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 11666176,
+      "end": 11667200,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "120c8bac1d1c12f2daa13ac0626d85a68df89582e0f1580c5e04a03ef2a63288"
+    },
+    {
+      "name": "encoder_l1_self_Wo_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 11667200,
+      "end": 11668224,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "1452e3f9a270076942098976d0e616c0ea9938376c733b54678c091d6d11d6f0"
+    },
+    {
+      "name": "encoder_l1_self_Wq",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 11668224,
+      "end": 11734016,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "2c25c791b6f3e6284511f039a35d7c4d2e1a848ffa0188951ae889bf35414bcd",
+      "quantization_multiplier": 198.48048400878906
+    },
+    {
+      "name": "encoder_l1_self_Wq_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 11734016,
+      "end": 11734272,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "bac35aeaee73ae99a3d624a4853079da68a0cacb55d4b02a310272b3d777e68c"
+    },
+    {
+      "name": "encoder_l1_self_Wv",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 11734272,
+      "end": 11800064,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "f40e0c895cc0ddc1c7434f97de9caec80907ecc943627314a11e94e6b46ce6da",
+      "quantization_multiplier": 407.60931396484375
+    },
+    {
+      "name": "encoder_l1_self_Wv_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 11800064,
+      "end": 11800320,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "bac35aeaee73ae99a3d624a4853079da68a0cacb55d4b02a310272b3d777e68c"
+    },
+    {
+      "name": "encoder_l1_self_bk",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 11800320,
+      "end": 11801344,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "15d0fef381d7c33c5ef1b7d6546b7ac00648cb6b2a5fa10454e11c75bf944564"
+    },
+    {
+      "name": "encoder_l1_self_bo",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 11801344,
+      "end": 11802368,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "3ba2e5862e218a5587cec2b318eedfcea20ddcd9c33b15c2422cbc1e55cce41b"
+    },
+    {
+      "name": "encoder_l1_self_bq",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 11802368,
+      "end": 11803392,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "43dc180ae6db950b1968b3d54c81a0112f4a409e1f94990c9037ba14d8f6b86c"
+    },
+    {
+      "name": "encoder_l1_self_bv",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 11803392,
+      "end": 11804416,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "b33792627fe29dd925771b8f935320b040d598921e71482d78ec24e67ed84ff0"
+    },
+    {
+      "name": "encoder_l2_ffn_W1",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        1536
+      ],
+      "elements": 393216,
+      "offset": 11804416,
+      "end": 12197888,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "4642925ab26c6c23cbbb1a75e5c72503c7379aa003f5fbd135aa84ca9f3abff3",
+      "quantization_multiplier": 200.67123413085938
+    },
+    {
+      "name": "encoder_l2_ffn_W1_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 12197888,
+      "end": 12198144,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "5feb19be6dd79f3ca3ff6fd1522c226d3cdf8db4e638dceb6aad08a0cac33017"
+    },
+    {
+      "name": "encoder_l2_ffn_W2",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        1536,
+        256
+      ],
+      "elements": 393216,
+      "offset": 12198144,
+      "end": 12591616,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "74dfcc5501bf3cf8de877f070366ebd6589a5212ce130bbf3b8c333411dfb75c",
+      "quantization_multiplier": 140.56224060058594
+    },
+    {
+      "name": "encoder_l2_ffn_W2_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 12591616,
+      "end": 12591872,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "8e3a1e50f4d0380928021653c44236c30bf58e6e816aab7d4e6514de70ac0d93"
+    },
+    {
+      "name": "encoder_l2_ffn_b1",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1536
+      ],
+      "elements": 1536,
+      "offset": 12591872,
+      "end": 12598016,
+      "stored_bytes": 6144,
+      "value_bytes": 6144,
+      "padding_bytes": 0,
+      "sha256": "8746e0474a00699969826e95e095072a0601462ac54ea3b38db1e839e139164c"
+    },
+    {
+      "name": "encoder_l2_ffn_b2",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 12598016,
+      "end": 12599040,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "dfc95743306ebb78f2337ad6fb4ea5eec4c6c006fcfa20707033e6a11c16f578"
+    },
+    {
+      "name": "encoder_l2_ffn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 12599040,
+      "end": 12600064,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "6a409aba4b7a793fb4dfa512ab085d9810b481cc35eedc975309b809999a7073"
+    },
+    {
+      "name": "encoder_l2_ffn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 12600064,
+      "end": 12601088,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "69809374871805abd17ac29efb71849c92cc523452488958d0a13de040d6b720"
+    },
+    {
+      "name": "encoder_l2_self_Wk",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 12601088,
+      "end": 12666880,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "d4b7cbbc3148c3e9c087a832009a974b0b0aba00c39b4b1de0f82f3da003e2d6",
+      "quantization_multiplier": 177.10638427734375
+    },
+    {
+      "name": "encoder_l2_self_Wk_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 12666880,
+      "end": 12667136,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "f0c06b8b01a976b8699d844ec146e5985ae08b9c4fe72d9cc34433b55b36975c"
+    },
+    {
+      "name": "encoder_l2_self_Wo",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 12667136,
+      "end": 12732928,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "f1abdead6146894d2faccb8a58c88c4ec6f4f92e1a3fe306a2ed4ec6d6019b33",
+      "quantization_multiplier": 447.65228271484375
+    },
+    {
+      "name": "encoder_l2_self_Wo_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 12732928,
+      "end": 12733184,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "85ad7af5f6c0b163468cf7ea248bdbeb50faf20d131b0bbd6c15ef0270d5c93c"
+    },
+    {
+      "name": "encoder_l2_self_Wo_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 12733184,
+      "end": 12734208,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "9aa00c95b067a8a97687225bd950bbaff9c78947bc89b8fa491253f02d5b111e"
+    },
+    {
+      "name": "encoder_l2_self_Wo_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 12734208,
+      "end": 12735232,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "8c0594fc4faadb3b47e5c40bc02daf2d53f16bcfb21570dec7380a38ee6fc03c"
+    },
+    {
+      "name": "encoder_l2_self_Wq",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 12735232,
+      "end": 12801024,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "67a7d9d92197656d9db49e18417a8d5826b35f316f6d91e95f0ae06330fa0f24",
+      "quantization_multiplier": 252.4784698486328
+    },
+    {
+      "name": "encoder_l2_self_Wq_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 12801024,
+      "end": 12801280,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "f0c06b8b01a976b8699d844ec146e5985ae08b9c4fe72d9cc34433b55b36975c"
+    },
+    {
+      "name": "encoder_l2_self_Wv",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 12801280,
+      "end": 12867072,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "5610380ee25c0632746b901797898fdfd472d7ae4511e7abde551c1c0260577f",
+      "quantization_multiplier": 304.51708984375
+    },
+    {
+      "name": "encoder_l2_self_Wv_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 12867072,
+      "end": 12867328,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "f0c06b8b01a976b8699d844ec146e5985ae08b9c4fe72d9cc34433b55b36975c"
+    },
+    {
+      "name": "encoder_l2_self_bk",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 12867328,
+      "end": 12868352,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "135b4904620580d2f56236e43be303f4c87d0c8a0df9cd10723004ee89043202"
+    },
+    {
+      "name": "encoder_l2_self_bo",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 12868352,
+      "end": 12869376,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "81858f9d4df3076c46c073531c5c20cbcd341df8dbcb4b44a40e373cfc6119b9"
+    },
+    {
+      "name": "encoder_l2_self_bq",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 12869376,
+      "end": 12870400,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "cb67f9c39e19e4f458333ca39a68cc3c6a71667569b6a618acc5bf5862876921"
+    },
+    {
+      "name": "encoder_l2_self_bv",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 12870400,
+      "end": 12871424,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "bbb63b8be6e57ab588aad29f0d7f17963429457d7efbf862aaea6ec9d469df8c"
+    },
+    {
+      "name": "encoder_l3_ffn_W1",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        1536
+      ],
+      "elements": 393216,
+      "offset": 12871424,
+      "end": 13264896,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "38f8ef99aaeef7e23c93c7ad5042c794fb6abde1f6472b32a5dc4b97d8c4df01",
+      "quantization_multiplier": 251.6558837890625
+    },
+    {
+      "name": "encoder_l3_ffn_W1_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 13264896,
+      "end": 13265152,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "c5a10dc92fc9769cf4df603e0425936e797dc0a3053245cbf09d8e52c699cedf"
+    },
+    {
+      "name": "encoder_l3_ffn_W2",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        1536,
+        256
+      ],
+      "elements": 393216,
+      "offset": 13265152,
+      "end": 13658624,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "71c9e7ad07770026c48692d3e19818f76abed78170f2643f8fad3cfec2a17ae4",
+      "quantization_multiplier": 200.8097686767578
+    },
+    {
+      "name": "encoder_l3_ffn_W2_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 13658624,
+      "end": 13658880,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "d0844f793821a736661a7cde879deb50d7fc284beee137b57b7347d163ecc0fb"
+    },
+    {
+      "name": "encoder_l3_ffn_b1",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1536
+      ],
+      "elements": 1536,
+      "offset": 13658880,
+      "end": 13665024,
+      "stored_bytes": 6144,
+      "value_bytes": 6144,
+      "padding_bytes": 0,
+      "sha256": "176314378ed4e7d64b9fb189c0ebad135cc564c820cf3dd3f3e7e8c669feafe4"
+    },
+    {
+      "name": "encoder_l3_ffn_b2",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 13665024,
+      "end": 13666048,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "5d4a8dd31345f82730c5261077ccf17b58ec1b001e11eea7b25b490c04c9af68"
+    },
+    {
+      "name": "encoder_l3_ffn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 13666048,
+      "end": 13667072,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "63ac312fada5204f0fef534593b3837c4eac3c3f9984b2529040c45254ff5b52"
+    },
+    {
+      "name": "encoder_l3_ffn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 13667072,
+      "end": 13668096,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "b0fca1da08178e6b6de4d6e2bab0e47d63ffa666a200cee4cb231b88267c3d72"
+    },
+    {
+      "name": "encoder_l3_self_Wk",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 13668096,
+      "end": 13733888,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "02e4ee5a55bbca7d5f6dbf93617a22f62a5cf75fc2e10029e744383079d053c0",
+      "quantization_multiplier": 92.2441177368164
+    },
+    {
+      "name": "encoder_l3_self_Wk_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 13733888,
+      "end": 13734144,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "8e548cf835e57e90a2129e00d55b15fa87cd9b5c5acf73f8558cae3e22d9b61b"
+    },
+    {
+      "name": "encoder_l3_self_Wo",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 13734144,
+      "end": 13799936,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "4a1f63e76a69c9fb9c25877a1baa9a6596e494bba87cb1b96e97f9c50767a3cc",
+      "quantization_multiplier": 234.9125213623047
+    },
+    {
+      "name": "encoder_l3_self_Wo_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 13799936,
+      "end": 13800192,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "35e75e7290c3001fea24d699a72c95b54415d49011bb4b92755303fb1ae89b33"
+    },
+    {
+      "name": "encoder_l3_self_Wo_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 13800192,
+      "end": 13801216,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "00e329d8ee152571b562c2c883083b73167b950425e5e50993efcc8bd6870bad"
+    },
+    {
+      "name": "encoder_l3_self_Wo_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 13801216,
+      "end": 13802240,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "8279462a6527b8b5f5d5fb5110bff6a46eba8494c847a98ea65f5cfa977a23ca"
+    },
+    {
+      "name": "encoder_l3_self_Wq",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 13802240,
+      "end": 13868032,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "314de8bc4fa9655e9a5b0cbca278c4b9addedcc5c49e560a53992e9aa42cf790",
+      "quantization_multiplier": 214.72032165527344
+    },
+    {
+      "name": "encoder_l3_self_Wq_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 13868032,
+      "end": 13868288,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "8e548cf835e57e90a2129e00d55b15fa87cd9b5c5acf73f8558cae3e22d9b61b"
+    },
+    {
+      "name": "encoder_l3_self_Wv",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 13868288,
+      "end": 13934080,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "c2a8867f4f99d42c6b88bd9216c3dd8f4b47d73bd53af2f4d416847980a22814",
+      "quantization_multiplier": 414.2249755859375
+    },
+    {
+      "name": "encoder_l3_self_Wv_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 13934080,
+      "end": 13934336,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "8e548cf835e57e90a2129e00d55b15fa87cd9b5c5acf73f8558cae3e22d9b61b"
+    },
+    {
+      "name": "encoder_l3_self_bk",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 13934336,
+      "end": 13935360,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "96eebdb14b6de35f1d46187f6ff4e6a250b351d15af4fd5052513202eac0424f"
+    },
+    {
+      "name": "encoder_l3_self_bo",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 13935360,
+      "end": 13936384,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "aa538062a45967e1e9c2216d2f0d7df3a6a971e14648b35f09857c158923313f"
+    },
+    {
+      "name": "encoder_l3_self_bq",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 13936384,
+      "end": 13937408,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "c013257824b91748bf9720ac46b4da6a4094aa695631e415c702a9c5681736ef"
+    },
+    {
+      "name": "encoder_l3_self_bv",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 13937408,
+      "end": 13938432,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "f9f41af77acb51b12364f6dc7d0a72e54f52d87aff1c742e96274f16be4ec91e"
+    },
+    {
+      "name": "encoder_l4_ffn_W1",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        1536
+      ],
+      "elements": 393216,
+      "offset": 13938432,
+      "end": 14331904,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "5a16f635bea393ae75447e22af1365a180b11a672b416ec227c587e6416ee4b2",
+      "quantization_multiplier": 152.82760620117188
+    },
+    {
+      "name": "encoder_l4_ffn_W1_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 14331904,
+      "end": 14332160,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "ce316ac0c629a94d27c0514aaa8379308943350dc335621728e691892fe0e00a"
+    },
+    {
+      "name": "encoder_l4_ffn_W2",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        1536,
+        256
+      ],
+      "elements": 393216,
+      "offset": 14332160,
+      "end": 14725632,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "8ccf5598344f006684aa81d9b7b9cbb3fdaab0865b894d83f117cdf27b9b4552",
+      "quantization_multiplier": 126.70905303955078
+    },
+    {
+      "name": "encoder_l4_ffn_W2_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 14725632,
+      "end": 14725888,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "181ad6cc6c9be3e880c9102ab362d1c74d4921020ba232d97317d85701f4238a"
+    },
+    {
+      "name": "encoder_l4_ffn_b1",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1536
+      ],
+      "elements": 1536,
+      "offset": 14725888,
+      "end": 14732032,
+      "stored_bytes": 6144,
+      "value_bytes": 6144,
+      "padding_bytes": 0,
+      "sha256": "bf9dfa5e4cd59375c730d0056217f13eb267a5a94a2663177bcfb114dd12969a"
+    },
+    {
+      "name": "encoder_l4_ffn_b2",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 14732032,
+      "end": 14733056,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "d7cb5a840493f000fc82dc70e59b65db3c30f3de31a7009a7eafdfdffa3cd21d"
+    },
+    {
+      "name": "encoder_l4_ffn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 14733056,
+      "end": 14734080,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "39039700076e6734fc8c5dfb288912f531d15483b1011d64c64b89a58acff00b"
+    },
+    {
+      "name": "encoder_l4_ffn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 14734080,
+      "end": 14735104,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "5ec5588921d4686e8b5ee8195c4504bfc34f5a8bc07df196defe2547d52e26c6"
+    },
+    {
+      "name": "encoder_l4_self_Wk",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 14735104,
+      "end": 14800896,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "282eadc0ed58aef9487c7588e1381713b3a611d46645b8c4733353c2019b658c",
+      "quantization_multiplier": 159.1536865234375
+    },
+    {
+      "name": "encoder_l4_self_Wk_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 14800896,
+      "end": 14801152,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "d3dc9fb1922acbd95d6da1fa96e67f2716ab30eb6282bb1bb481c023afbdefea"
+    },
+    {
+      "name": "encoder_l4_self_Wo",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 14801152,
+      "end": 14866944,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "572be2b12b1d06e93458bb511ffd89176696e9237ed9dd7036854ac8042aebc1",
+      "quantization_multiplier": 481.3017883300781
+    },
+    {
+      "name": "encoder_l4_self_Wo_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 14866944,
+      "end": 14867200,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "bc59457d4ad1390d7bcee0dc8d3c1b786e63f19169bf522e99250b414f17255e"
+    },
+    {
+      "name": "encoder_l4_self_Wo_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 14867200,
+      "end": 14868224,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "25aa3cc5b99c5a6926ed4ea7cb3c4b1929c5d6206c5cc95f865af8920eca74c6"
+    },
+    {
+      "name": "encoder_l4_self_Wo_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 14868224,
+      "end": 14869248,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "df0c130041aad8a1c1d73f6b61112bf66d639e1cd38ee44a0e5590ab574b90d3"
+    },
+    {
+      "name": "encoder_l4_self_Wq",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 14869248,
+      "end": 14935040,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "2f73c4f058405b4f6943d97a16b17c46f5910d283cd4bec0cbf98048667c1ffd",
+      "quantization_multiplier": 287.27215576171875
+    },
+    {
+      "name": "encoder_l4_self_Wq_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 14935040,
+      "end": 14935296,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "d3dc9fb1922acbd95d6da1fa96e67f2716ab30eb6282bb1bb481c023afbdefea"
+    },
+    {
+      "name": "encoder_l4_self_Wv",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 14935296,
+      "end": 15001088,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "342c584b075d6db107bffe68cbded124f55de9e05391f08ca887a75e2aa86390",
+      "quantization_multiplier": 416.9192810058594
+    },
+    {
+      "name": "encoder_l4_self_Wv_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 15001088,
+      "end": 15001344,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "d3dc9fb1922acbd95d6da1fa96e67f2716ab30eb6282bb1bb481c023afbdefea"
+    },
+    {
+      "name": "encoder_l4_self_bk",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 15001344,
+      "end": 15002368,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "02bcc062306df25758f5c780005c7f294b195e55d32011f3931d5dfedffa5c04"
+    },
+    {
+      "name": "encoder_l4_self_bo",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 15002368,
+      "end": 15003392,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "ffe0ed1bb17c013b1b5b589739fb48a2dec24d3756461a8deacda9226ad99465"
+    },
+    {
+      "name": "encoder_l4_self_bq",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 15003392,
+      "end": 15004416,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "10a7a52944ebcf8bd0b6c7fb8ad93700052559ce83d17ce9ce8e5e89d8b1bd9f"
+    },
+    {
+      "name": "encoder_l4_self_bv",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 15004416,
+      "end": 15005440,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "363770f08668cd41020f93657813c0a0aa6ae661d092ba5c09455b8e1dbd0ad5"
+    },
+    {
+      "name": "encoder_l5_ffn_W1",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        1536
+      ],
+      "elements": 393216,
+      "offset": 15005440,
+      "end": 15398912,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "6c2c89073a2caf627dc6d1655358d97b8d82e143f46ab70f3e20d5f6108bbc60",
+      "quantization_multiplier": 202.23146057128906
+    },
+    {
+      "name": "encoder_l5_ffn_W1_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 15398912,
+      "end": 15399168,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "7187b87323f54e76f07a5b6dc5ad97135f4c5c41c30852b350de88fb6f373e9d"
+    },
+    {
+      "name": "encoder_l5_ffn_W2",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        1536,
+        256
+      ],
+      "elements": 393216,
+      "offset": 15399168,
+      "end": 15792640,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "68a86227f3be80d0a5a855f69c2c6cee0d2d6a0f19580f0cf9398b3d9e9649cb",
+      "quantization_multiplier": 139.35655212402344
+    },
+    {
+      "name": "encoder_l5_ffn_W2_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 15792640,
+      "end": 15792896,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "c63d4e0a5209fee11556c075097b6aefcea10baecfeb9f34c2490d8c8e2e490a"
+    },
+    {
+      "name": "encoder_l5_ffn_b1",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1536
+      ],
+      "elements": 1536,
+      "offset": 15792896,
+      "end": 15799040,
+      "stored_bytes": 6144,
+      "value_bytes": 6144,
+      "padding_bytes": 0,
+      "sha256": "938a5d7cec2cbcd938d1e3a09f61702385bd098b5663d3905d607c6de12d4256"
+    },
+    {
+      "name": "encoder_l5_ffn_b2",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 15799040,
+      "end": 15800064,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "6440f726dfe32d820053e536aebee79a1caf65667b0ed948b32c26f0b2a1a83e"
+    },
+    {
+      "name": "encoder_l5_ffn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 15800064,
+      "end": 15801088,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "5cfff71e8ed5a133455308dab696820c781b6e89d94da2eb34c04dc560d43f6b"
+    },
+    {
+      "name": "encoder_l5_ffn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 15801088,
+      "end": 15802112,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "d95dd0ae81058b9dcd6084c3b7f491f14d4537fac685656b35b81646856d069b"
+    },
+    {
+      "name": "encoder_l5_self_Wk",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 15802112,
+      "end": 15867904,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "40955f65de8abac663fbab936b6a7cee6146e33b450900d0e0418d3e731a57d0",
+      "quantization_multiplier": 110.26427459716797
+    },
+    {
+      "name": "encoder_l5_self_Wk_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 15867904,
+      "end": 15868160,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "35f8cee7144a1063e9cec3f73eb01ef6907059a833269958751cc07a5c1f3672"
+    },
+    {
+      "name": "encoder_l5_self_Wo",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 15868160,
+      "end": 15933952,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "531ce2e4e71edf4af8cd56ede5c647905b4569d9317f82bfa9ac135a2edeb1b9",
+      "quantization_multiplier": 233.94699096679688
+    },
+    {
+      "name": "encoder_l5_self_Wo_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 15933952,
+      "end": 15934208,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "d9e86df63ea612b4291c492b7a867046a59f62c57d55daeffff31361715d0800"
+    },
+    {
+      "name": "encoder_l5_self_Wo_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 15934208,
+      "end": 15935232,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "5dae0a90d0dd9e1b1e591bd2b192a60f6e1ffddd20c8a4861a14371e33c30ca1"
+    },
+    {
+      "name": "encoder_l5_self_Wo_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 15935232,
+      "end": 15936256,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "77be5eee661de5a6be3305cc1b73d49fb847017e73a0a1eda9967f0a23f3f719"
+    },
+    {
+      "name": "encoder_l5_self_Wq",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 15936256,
+      "end": 16002048,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "6ab122c8add553c3ede95f97cf8c34cd2afc4a4de2ae35542d78b73ed1e3e0cc",
+      "quantization_multiplier": 206.85289001464844
+    },
+    {
+      "name": "encoder_l5_self_Wq_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 16002048,
+      "end": 16002304,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "35f8cee7144a1063e9cec3f73eb01ef6907059a833269958751cc07a5c1f3672"
+    },
+    {
+      "name": "encoder_l5_self_Wv",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 16002304,
+      "end": 16068096,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "73c4058b4ba060f3ec338ec780da2f7111b723d6ab69de448922b3d90209e1da",
+      "quantization_multiplier": 284.0999755859375
+    },
+    {
+      "name": "encoder_l5_self_Wv_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 16068096,
+      "end": 16068352,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "35f8cee7144a1063e9cec3f73eb01ef6907059a833269958751cc07a5c1f3672"
+    },
+    {
+      "name": "encoder_l5_self_bk",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 16068352,
+      "end": 16069376,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "a8ca8a698daa2ddc66aeabcb678d2b6b0ad5ad4017209dfbe7be2a805c1b1229"
+    },
+    {
+      "name": "encoder_l5_self_bo",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 16069376,
+      "end": 16070400,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "7e5ae29bb12c2e49be77ca5ab2cf11cc21280c4c82e5717ef433f6c2b93c3731"
+    },
+    {
+      "name": "encoder_l5_self_bq",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 16070400,
+      "end": 16071424,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "85f6fc22170a6478f0a3d87d1cbd9cb77903e109dba74c7ad0b12a8426d86657"
+    },
+    {
+      "name": "encoder_l5_self_bv",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 16071424,
+      "end": 16072448,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "93f7abd868c60ca1da8a3f3fb613556f3d620a006a2b4767ee622317cc8e06fb"
+    },
+    {
+      "name": "encoder_l6_ffn_W1",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        1536
+      ],
+      "elements": 393216,
+      "offset": 16072448,
+      "end": 16465920,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "75e9ceca492e6871ba48c2bb091b356a0d0e251b9c80df426bb8022b8a676139",
+      "quantization_multiplier": 224.32669067382812
+    },
+    {
+      "name": "encoder_l6_ffn_W1_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 16465920,
+      "end": 16466176,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "67aeab99fa164280640c032086fdc05398bfb305ce6afdc4c1b1158dd787cb17"
+    },
+    {
+      "name": "encoder_l6_ffn_W2",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        1536,
+        256
+      ],
+      "elements": 393216,
+      "offset": 16466176,
+      "end": 16859648,
+      "stored_bytes": 393472,
+      "value_bytes": 393216,
+      "padding_bytes": 252,
+      "sha256": "7c57b598085e73e527dbec2426e98f31189d805da891def1c555be47244a4967",
+      "quantization_multiplier": 177.4921112060547
+    },
+    {
+      "name": "encoder_l6_ffn_W2_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 16859648,
+      "end": 16859904,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "0e891b84184bd6c15cacd7e25c53960870e377509ea86ff1962a6714e3786a92"
+    },
+    {
+      "name": "encoder_l6_ffn_b1",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1536
+      ],
+      "elements": 1536,
+      "offset": 16859904,
+      "end": 16866048,
+      "stored_bytes": 6144,
+      "value_bytes": 6144,
+      "padding_bytes": 0,
+      "sha256": "fb4aae036657dbdf0fbf6fd4688043fd4478aaa81e56790709b5181e90f4000c"
+    },
+    {
+      "name": "encoder_l6_ffn_b2",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 16866048,
+      "end": 16867072,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "6bf5a669c004fca7b9bf19b20c2d01c39af0e1cca4b716c36bcaa6725b6b44ab"
+    },
+    {
+      "name": "encoder_l6_ffn_ffn_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 16867072,
+      "end": 16868096,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "92e94f56a473cb4aa7c103b6b1ede3f725f029ffdce0af9114d002402f8a9ad6"
+    },
+    {
+      "name": "encoder_l6_ffn_ffn_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 16868096,
+      "end": 16869120,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "4d8c7de1219533a40eea4741ff3a2169fecab9355296838085032c33d5a21a28"
+    },
+    {
+      "name": "encoder_l6_self_Wk",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 16869120,
+      "end": 16934912,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "8f66018129bf22ed6baf52bf3eb0994006ab1f90cae362bfaea6a6d80c56c7c6",
+      "quantization_multiplier": 113.64920806884766
+    },
+    {
+      "name": "encoder_l6_self_Wk_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 16934912,
+      "end": 16935168,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "319da83b0149dcf87b60700bf39f8215024a653391b4b37125cdf09f7cd2412b"
+    },
+    {
+      "name": "encoder_l6_self_Wo",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 16935168,
+      "end": 17000960,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "542ecfd3c7b52542203536959f9f917bb292af6c45188ae329d5626c0e5f11bb",
+      "quantization_multiplier": 234.13821411132812
+    },
+    {
+      "name": "encoder_l6_self_Wo_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 17000960,
+      "end": 17001216,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "3f35074e259e58ea61d934a2931960d5ee5cf91165b61f95ea574c1873d445c3"
+    },
+    {
+      "name": "encoder_l6_self_Wo_ln_bias",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 17001216,
+      "end": 17002240,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "462d60c9fb2795143c575c65228b5bfd58873b1faf844fa7c5418a2359c6bd06"
+    },
+    {
+      "name": "encoder_l6_self_Wo_ln_scale",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 17002240,
+      "end": 17003264,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "eb2cee91890cad0fac0a9c7b6234426b76ee57b4a41a3ea2726d3b0ba642cf19"
+    },
+    {
+      "name": "encoder_l6_self_Wq",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 17003264,
+      "end": 17069056,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "388711fe2d8a6041f684762263f9eb5f8a67cf92c5020dbb901bc9407a0673b5",
+      "quantization_multiplier": 188.4488067626953
+    },
+    {
+      "name": "encoder_l6_self_Wq_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 17069056,
+      "end": 17069312,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "319da83b0149dcf87b60700bf39f8215024a653391b4b37125cdf09f7cd2412b"
+    },
+    {
+      "name": "encoder_l6_self_Wv",
+      "type": "intgemm8",
+      "type_code": 16641,
+      "shape": [
+        256,
+        256
+      ],
+      "elements": 65536,
+      "offset": 17069312,
+      "end": 17135104,
+      "stored_bytes": 65792,
+      "value_bytes": 65536,
+      "padding_bytes": 252,
+      "sha256": "9f06a1fa5f84c256c820a89bac8f7e7351f954a22984619d68591f8a6de22479",
+      "quantization_multiplier": 310.0889587402344
+    },
+    {
+      "name": "encoder_l6_self_Wv_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 17135104,
+      "end": 17135360,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "319da83b0149dcf87b60700bf39f8215024a653391b4b37125cdf09f7cd2412b"
+    },
+    {
+      "name": "encoder_l6_self_bk",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 17135360,
+      "end": 17136384,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "5798801024df41dc62a3bad4dd5969b4d6d92c642f76d0978684625516ed1648"
+    },
+    {
+      "name": "encoder_l6_self_bo",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 17136384,
+      "end": 17137408,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "63cc12c910a35e2b3fca7c6d7bdd06fdd0be32d39f062f428bcb4f37c1c805c3"
+    },
+    {
+      "name": "encoder_l6_self_bq",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 17137408,
+      "end": 17138432,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "72832333e04c17018f231bde2ea870be0972cc367ef461ebdabebd7eb2502a6a"
+    },
+    {
+      "name": "encoder_l6_self_bv",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        256
+      ],
+      "elements": 256,
+      "offset": 17138432,
+      "end": 17139456,
+      "stored_bytes": 1024,
+      "value_bytes": 1024,
+      "padding_bytes": 0,
+      "sha256": "f0ec32b7f144c2d1c939d2051e2f2f5018ea0671c750f0cf9905fa66819d04da"
+    },
+    {
+      "name": "none_QuantMultA",
+      "type": "float32",
+      "type_code": 1028,
+      "shape": [
+        1,
+        1
+      ],
+      "elements": 1,
+      "offset": 17139456,
+      "end": 17139712,
+      "stored_bytes": 256,
+      "value_bytes": 4,
+      "padding_bytes": 252,
+      "sha256": "f792d1e5db8758c512ca83ecbb3d4b5fa261c70ff43f0b8c0fd091595741da13"
+    },
+    {
+      "name": "special:model.yml",
+      "type": "int8",
+      "type_code": 257,
+      "shape": [
+        1043
+      ],
+      "elements": 1043,
+      "offset": 17139712,
+      "end": 17140755,
+      "stored_bytes": 1043,
+      "value_bytes": 1043,
+      "padding_bytes": 0,
+      "sha256": "4f23dc358911fc510cf1e90b49cce0cf57248371be366626201630be2efdd0eb"
+    }
+  ]
+}

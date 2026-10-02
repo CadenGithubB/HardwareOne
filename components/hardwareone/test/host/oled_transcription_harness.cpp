@@ -104,6 +104,12 @@ int main(){
   // Numeric toggle reports ordinary command failure and refreshes state.
   v.menu.selectedIndex=2;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="sttsavetranscripts 1");answer("Error: Admin required",true);tick(1);assert(std::string(v.message)=="Setting change failed");assert(request()=="transcription status");answer(status(false,""));tick(1);
   // List and file reads cannot publish after Back or selecting another file.
+  // Mic row cycles reachable sources through micsource, then refreshes status.
+  v.micPdm=true;v.micG2=false;std::strcpy(v.micSource,"auto");populateMenu();assert(std::string(v.menu.items[5])=="Mic: Auto");
+  v.menu.selectedIndex=5;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="micsource pdm");answer("Mic source preference set to 'pdm'",true);tick(1);assert(std::string(v.message)=="Setting updated");
+  assert(request()=="transcription status");answer("{\"success\":true,\"available\":true,\"micSource\":\"pdm\",\"micPdm\":true,\"micG2\":false}");tick(1);
+  populateMenu();assert(std::string(v.menu.items[5])=="Mic: Onboard");
+  v.menu.selectedIndex=5;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="micsource auto");answer("ok",true);tick(1);answer(status(false,""));tick(1);
   list();v.list.selectedIndex=0;listInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcripts read \"/stt/u7/one.txt\" 0");currentOLEDMode=OLED_TRANSCRIPTS;tick(1);v.list.selectedIndex=1;listInput(0,0,INPUT_BUTTON_A);tick(1);assert(requests.size()==1);answer("{\"success\":true,\"sttText\":\"late private one\",\"offset\":0,\"nextOffset\":10,\"eof\":true}");tick(1);assert(v.text[0]==0);assert(request()=="transcripts read \"/stt/u7/two.txt\" 0");answer("{\"success\":true,\"sttText\":\"second file\",\"offset\":0,\"nextOffset\":509,\"eof\":false}");tick(1);assert(std::string(v.text)=="second file");
   gNavEvents.down=true;fileInput(0,0,0);gNavEvents={};tick(1);assert(request()=="transcripts read \"/stt/u7/two.txt\" 509");answer("{\"success\":true,\"sttText\":\"next window\",\"offset\":509,\"nextOffset\":1021,\"eof\":false}");tick(1);gNavEvents.up=true;fileInput(0,0,0);gNavEvents={};tick(1);assert(request()=="transcripts read \"/stt/u7/two.txt\" 0");answer("{\"success\":true,\"sttText\":\"first window\",\"offset\":0,\"nextOffset\":509,\"eof\":false}");tick(1);
   // A queued read is dropped if navigation leaves before command admission.

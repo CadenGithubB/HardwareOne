@@ -266,7 +266,7 @@ file; nothing defaults to the old board's USB paths. Example (fill the local
 variables first; do not put credential values in shell arguments):
 
 ```sh
-/Users/cadbecaimacmini/Documents/Codex/Projects/hardwareone/experiments/p4_connectivity/private/ble-env/bin/python \
+experiments/p4_connectivity/private/ble-env/bin/python \
   experiments/board_qualification/test_board_roles.py --physical \
   --p4-port "$P4_PORT" --s3-port "$S3_PORT" \
   --credentials "$PRIVATE_CREDENTIAL_FILE" --ble-mac "$OBSERVED_P4_BLE_MAC" \

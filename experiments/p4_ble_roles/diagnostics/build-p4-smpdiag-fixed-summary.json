@@ -1,0 +1,21 @@
+{
+  "target": "esp32p4",
+  "idf": "5.5.5",
+  "buildStatus": "passed",
+  "binary": "experiments/p4_ble_roles/private/build-p4-smpdiag/hardwareone-idf.bin",
+  "binarySize": 4107600,
+  "binarySha256": "ea930b70dcceada0daf744b7f0aeef420a9b3e6e7006cb8d0ba597cdb6684a4c",
+  "btComponent": "experiments/p4_ble_roles/private/diagnostic-components/bt",
+  "verifiedSourcePaths": [
+    "experiments/p4_ble_roles/private/diagnostic-components/bt/common/tinycrypt/port/esp_tinycrypt_port.c",
+    "experiments/p4_ble_roles/private/diagnostic-components/bt/common/tinycrypt/src/ecc.c",
+    "experiments/p4_ble_roles/private/diagnostic-components/bt/common/tinycrypt/src/ecc_dh.c",
+    "experiments/p4_ble_roles/private/diagnostic-components/bt/common/tinycrypt/src/ecc_dsa.c",
+    "experiments/p4_ble_roles/private/diagnostic-components/bt/host/bluedroid/stack/smp/smp_act.c",
+    "experiments/p4_ble_roles/private/diagnostic-components/bt/host/bluedroid/stack/smp/smp_keys.c"
+  ],
+  "officialTinyCryptFix": "9fd7cb7e606a06111e1b14be7f4e00d77d9cf3dd",
+  "diagnosticManifestSha256": "fc2d5d9aae22e5baa5e2af20eef47e0c12098a0d43d8ba9b21c70dd8ea96a466",
+  "log": "experiments/p4_ble_roles/private/build-p4-smpdiag-fixed.log",
+  "scope": "Build only. Metadata-only SMP diagnostic instrumentation plus exact five-file upstream TinyCrypt fix. No device access or shared SDK/application edits."
+}

@@ -20,14 +20,22 @@ struct Gaussian {
         return radius*std::cos(angle);
     }
 };
-void fft(FrontendWorkspace& w) {
-    for (size_t i=0;i<512;++i) {
-        const size_t j=constants::bit_reverse[i];
-        if (j>i) { const float temp=w.real[i]; w.real[i]=w.real[j]; w.real[j]=temp; }
+// Power spectrum of the real 512-sample frame in w.real (w.imag ignored) via
+// one 256-point complex FFT plus the standard real-input split: half the
+// butterflies of the 512-point complex FFT, same result to float rounding.
+void real_power_spectrum(FrontendWorkspace& w) {
+    for (size_t n=0;n<256;++n) w.imag[n]=w.real[2*n+1];
+    for (size_t n=0;n<256;++n) w.real[n]=w.real[2*n];   // forward: reads 2n >= n
+    for (size_t i=0;i<256;++i) {                          // 8-bit reverse = 9-bit table >> 1
+        const size_t j=constants::bit_reverse[i]>>1;
+        if (j>i) {
+            float t=w.real[i]; w.real[i]=w.real[j]; w.real[j]=t;
+            t=w.imag[i]; w.imag[i]=w.imag[j]; w.imag[j]=t;
+        }
     }
-    for (size_t width=2;width<=512;width*=2) {
-        const size_t half=width/2, step=512/width;
-        for (size_t base=0;base<512;base+=width) for (size_t j=0;j<half;++j) {
+    for (size_t width=2;width<=256;width*=2) {
+        const size_t half=width/2, step=512/width;          // W256^j == W512^(2j)
+        for (size_t base=0;base<256;base+=width) for (size_t j=0;j<half;++j) {
             const size_t a=base+j,b=a+half,t=j*step;
             const float tr=constants::twiddle_real[t]*w.real[b]-constants::twiddle_imag[t]*w.imag[b];
             const float ti=constants::twiddle_real[t]*w.imag[b]+constants::twiddle_imag[t]*w.real[b];
@@ -35,6 +43,16 @@ void fft(FrontendWorkspace& w) {
             w.real[a]=ar+tr; w.imag[a]=ai+ti;
             w.real[b]=ar-tr; w.imag[b]=ai-ti;
         }
+    }
+    // X[k] = E[k] + W512^k O[k], E=(Z[k]+conj Z[256-k])/2, O=(Z[k]-conj Z[256-k])/(2i)
+    for (size_t k=0;k<=256;++k) {
+        const size_t a=k&255, b=(256-k)&255;
+        const float zr=w.real[a], zi=w.imag[a], cr=w.real[b], ci=-w.imag[b];
+        const float er=0.5f*(zr+cr), ei=0.5f*(zi+ci);
+        const float or_=0.5f*(zi-ci), oi=-0.5f*(zr-cr);
+        const float wr=k<256?constants::twiddle_real[k]:-1.0f, wi=k<256?constants::twiddle_imag[k]:0.0f;
+        const float xr=er+wr*or_-wi*oi, xi=ei+wr*oi+wi*or_;
+        w.power[k]=xr*xr+xi*xi;
     }
 }
 size_t reflect(int index, size_t samples) {
@@ -73,7 +91,8 @@ Status feed(CtcState* state,const Score* scores,size_t frames,size_t stride,char
 }
 size_t feature_frames(size_t samples) { return samples>=kMinSamples&&samples<=kMaxSamples?(samples+159)/160:0; }
 Status compute_features(const int16_t* pcm,size_t samples,float* output,size_t capacity,
-                        FrontendWorkspace* workspace,uint32_t seed,bool dither) {
+                        FrontendWorkspace* workspace,uint32_t seed,bool dither,FrontendTiming* timing) {
+    const auto now=[timing]() -> uint64_t { return timing&&timing->now_us?timing->now_us():0; };
     const size_t frames=feature_frames(samples);
     if (!pcm||!output||!workspace||!frames||(dither&&!seed)) return Status::InvalidArgument;
     if (capacity<frames*kMelBins) return Status::OutputTooSmall;
@@ -82,6 +101,7 @@ Status compute_features(const int16_t* pcm,size_t samples,float* output,size_t c
     size_t generated=0;
     float previous=0;
     for (size_t frame=0;frame<frames;++frame) {
+        const uint64_t t0=now();
         const size_t center=frame*160;
         size_t required=center+159;
         if (required<160) required=160;
@@ -97,29 +117,55 @@ Status compute_features(const int16_t* pcm,size_t samples,float* output,size_t c
             const size_t input=reflect(static_cast<int>(center+k)-160,samples);
             w.real[96+k]=w.conditioned[input%512]*constants::window[k];
         }
-        fft(w);
-        for (size_t k=0;k<257;++k) w.power[k]=w.real[k]*w.real[k]+w.imag[k]*w.imag[k];
+        const uint64_t t1=now();
+        real_power_spectrum(w);
+        const uint64_t t2=now();
         for (size_t m=0;m<kMelBins;++m) {
             float value=0;
             for (size_t j=0;j<constants::mel_count[m];++j)
                 value+=constants::mel_weight[constants::mel_offset[m]+j]*w.power[constants::mel_start[m]+j];
             output[frame*kMelBins+m]=std::log(value+kLogGuard);
         }
-    }
-    for (size_t m=0;m<kMelBins;++m) {
-        double sum=0;
-        for (size_t t=0;t<frames;++t) sum+=output[t*kMelBins+m];
-        const double exact_mean=sum/frames;
-        const float mean=static_cast<float>(exact_mean);
-        double variance=0;
-        for (size_t t=0;t<frames;++t) {
-            const double d=static_cast<double>(output[t*kMelBins+m])-exact_mean;
-            variance+=d*d;
+        if (timing&&timing->now_us) {
+            const uint64_t t3=now();
+            timing->conditionUs+=uint32_t(t1-t0); timing->fftUs+=uint32_t(t2-t1); timing->melUs+=uint32_t(t3-t2);
         }
-        const float stddev=std::sqrt(static_cast<float>(variance/(frames-1)))+1e-5f;
-        w.means[m]=mean; w.variances[m]=stddev;
-        for (size_t t=0;t<frames;++t) output[t*kMelBins+m]=(output[t*kMelBins+m]-mean)/stddev;
     }
+    const uint64_t normStart=now();
+    // Per-utterance CMVN, row-wise over the [frames,64] matrix (cache-friendly)
+    // in float: the P4 has no double FPU, and the previous column-wise float64
+    // passes cost 0.15-0.37 s per 8 s segment. Values are shifted by frame 0
+    // first (exact for nearby floats), so near-constant bins such as silence
+    // keep the precision the double version had; sums are Kahan-compensated.
+    float shift[kMelBins], sum[kMelBins]={}, carry[kMelBins]={};
+    for (size_t m=0;m<kMelBins;++m) shift[m]=output[m];
+    for (size_t t=0;t<frames;++t) {
+        const float* row=output+t*kMelBins;
+        for (size_t m=0;m<kMelBins;++m) {
+            const float y=(row[m]-shift[m])-carry[m], s=sum[m]+y;
+            carry[m]=(s-sum[m])-y; sum[m]=s;
+        }
+    }
+    float mean[kMelBins], var[kMelBins]={};
+    for (size_t m=0;m<kMelBins;++m) { mean[m]=sum[m]/static_cast<float>(frames); carry[m]=0; }
+    for (size_t t=0;t<frames;++t) {
+        const float* row=output+t*kMelBins;
+        for (size_t m=0;m<kMelBins;++m) {
+            const float d=(row[m]-shift[m])-mean[m], y=d*d-carry[m], s=var[m]+y;
+            carry[m]=(s-var[m])-y; var[m]=s;
+        }
+    }
+    float stddev[kMelBins];
+    for (size_t m=0;m<kMelBins;++m) {
+        stddev[m]=std::sqrt(var[m]/static_cast<float>(frames-1))+1e-5f;
+        mean[m]+=shift[m];   // the float-rounded mean, as the reference applies it
+        w.means[m]=mean[m]; w.variances[m]=stddev[m];
+    }
+    for (size_t t=0;t<frames;++t) {
+        float* row=output+t*kMelBins;
+        for (size_t m=0;m<kMelBins;++m) row[m]=(row[m]-mean[m])/stddev[m];
+    }
+    if (timing&&timing->now_us) timing->normUs+=uint32_t(now()-normStart);
     return Status::Ok;
 }
 Status ctc_reset(CtcState* state,char* text,size_t capacity) {

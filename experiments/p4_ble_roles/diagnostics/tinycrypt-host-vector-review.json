@@ -1,0 +1,60 @@
+{
+  "vectorSource": "/private/tmp/hw1-p4-investigation-20260927/esp-idf-v5.5.5/components/mbedtls/mbedtls/tests/suites/test_suite_ecdh.data",
+  "vector": "RFC 5903 P-256",
+  "work": "/var/folders/yz/sg_wfg3j3437wrnzt88cfkrw0000gn/T/hw1-tinycrypt-vectors-r6dbuwh9",
+  "runs": [
+    {
+      "name": "baseline-software",
+      "checks": {
+        "public_A": true,
+        "ecdh_A": true,
+        "ecdh_A_hardware_calls": 0,
+        "public_B": true,
+        "ecdh_B": true,
+        "ecdh_B_hardware_calls": 0,
+        "valid_point_accepted": true,
+        "invalid_zero_y_rejected": true,
+        "public_scalar_one_rc": 0,
+        "public_scalar_one_correct": false,
+        "public_scalar_two_rc": 1,
+        "public_scalar_two_correct": true
+      }
+    },
+    {
+      "name": "patched-software",
+      "checks": {
+        "public_A": true,
+        "ecdh_A": true,
+        "ecdh_A_hardware_calls": 0,
+        "public_B": true,
+        "ecdh_B": true,
+        "ecdh_B_hardware_calls": 0,
+        "valid_point_accepted": true,
+        "invalid_zero_y_rejected": true,
+        "public_scalar_one_rc": 0,
+        "public_scalar_one_correct": false,
+        "public_scalar_two_rc": 1,
+        "public_scalar_two_correct": true
+      }
+    },
+    {
+      "name": "patched-hardware-unavailable",
+      "checks": {
+        "public_A": true,
+        "ecdh_A": true,
+        "ecdh_A_hardware_calls": 0,
+        "public_B": true,
+        "ecdh_B": true,
+        "ecdh_B_hardware_calls": 0,
+        "valid_point_accepted": true,
+        "invalid_zero_y_rejected": true,
+        "public_scalar_one_rc": 1,
+        "public_scalar_one_correct": false,
+        "public_scalar_two_rc": 1,
+        "public_scalar_two_correct": false
+      }
+    }
+  ],
+  "scalarTwoReference": "P-256 2G independently checked with openssl ec SEC1 derivation",
+  "scalarTwoReferenceMatched": true
+}

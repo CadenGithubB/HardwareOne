@@ -1,0 +1,44 @@
+{
+  "name": "@browsermt/bergamot-translator",
+  "version": "0.4.9",
+  "url": "https://registry.npmjs.org/@browsermt/bergamot-translator/-/bergamot-translator-0.4.9.tgz",
+  "integrity": "sha512-bNuuCwM/JnsIYQCKXcYKFT4Qc5vLMoB8Nbvz8ReIgs7xzebK8Sa+R8iEK8mLvNBe/WaZ6zrPaUQilLsRT/ea8Q==",
+  "archive_bytes": 1852075,
+  "files": [
+    {
+      "path": "package/worker/bergamot-translator-worker.js",
+      "bytes": 80474,
+      "sha256": "748b2418418a2ffc6e70721aeb10098d8e6fb589ea156b91f4ae8bc3490d8f7a"
+    },
+    {
+      "path": "package/main.js",
+      "bytes": 481,
+      "sha256": "bd87a583a14525cd101fb31bd0ed08d1a9ea36cf09e585267a5166789e310cd7"
+    },
+    {
+      "path": "package/worker/translator-worker.js",
+      "bytes": 17191,
+      "sha256": "90257af9ee0758983501bdce77ca7ec168cd7360d4689298c20a81b0251d6b62"
+    },
+    {
+      "path": "package/translator.js",
+      "bytes": 30661,
+      "sha256": "b46f0ccf834392caf097cf4eed968d72e3ec8a855faaabe1b57bcc5f661994a5"
+    },
+    {
+      "path": "package/package.json",
+      "bytes": 1433,
+      "sha256": "fc2ba60606309cfd77f10d127ee67b99acf429a01c0a94b5ef235219cba5f894"
+    },
+    {
+      "path": "package/README.md",
+      "bytes": 10075,
+      "sha256": "a682bd6680c72d441252dd3b6cc819ccdba8ec09f148e496f37757d75a2011c2"
+    },
+    {
+      "path": "package/worker/bergamot-translator-worker.wasm",
+      "bytes": 5174294,
+      "sha256": "95a2b58dd6773bf1b3f345d71f9149928b9f75f4ec9c9064c0b3e42c298671b2"
+    }
+  ]
+}

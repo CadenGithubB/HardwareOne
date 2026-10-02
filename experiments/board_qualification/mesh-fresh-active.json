@@ -6,12 +6,12 @@
   "boards": {
     "p4": {
       "port": "/dev/cu.usbmodem2201",
-      "mac": "fc:01:2c:e0:b9:a8",
+      "mac": "02:48:57:31:01:a8",
       "name": "HW1_P4"
     },
     "s3": {
       "port": "/dev/cu.usbmodem1101",
-      "mac": "68:ee:8f:50:e9:d0",
+      "mac": "02:48:57:31:00:d0",
       "name": "HW1_S3"
     }
   },
@@ -35,7 +35,7 @@
       "name": "inspect_p4",
       "status": "passed",
       "evidence": {
-        "mac": "FC:01:2C:E0:B9:A8",
+        "mac": "02:48:57:31:01:A8",
         "channel": 6,
         "wifiJoined": false,
         "meshSlot": 0,
@@ -56,7 +56,7 @@
       "name": "inspect_s3",
       "status": "passed",
       "evidence": {
-        "mac": "68:EE:8F:50:E9:D0",
+        "mac": "02:48:57:31:00:D0",
         "channel": 6,
         "wifiJoined": false,
         "meshSlot": 0,
@@ -107,7 +107,7 @@
       "status": "passed",
       "evidence": {
         "alreadyUnpaired": true,
-        "peer": "68:ee:8f:50:e9:d0"
+        "peer": "02:48:57:31:00:d0"
       },
       "durationSec": 0.576
     },
@@ -116,7 +116,7 @@
       "status": "passed",
       "evidence": {
         "alreadyUnpaired": true,
-        "peer": "fc:01:2c:e0:b9:a8"
+        "peer": "02:48:57:31:01:a8"
       },
       "durationSec": 0.458
     },

@@ -55,6 +55,22 @@ if ! command -v idf.py >/dev/null 2>&1; then
   exit 1
 fi
 
+# Every board compiles against the vendored, git-ignored components/arduino,
+# and every board depends on the local patches recorded in
+# docs/arduino-local-patches (BLE fixes for the S3 boards, ESP-Hosted radio
+# support for the P4). A fresh clone or re-vendor silently drops them while the
+# firmware still compiles, so refuse to build until they are present.
+if [[ ! -d "$REPO/components/arduino" ]]; then
+  echo "error: components/arduino is missing. Vendor arduino-esp32 3.3.5 there and" >&2
+  echo "       apply docs/arduino-local-patches/arduino-local-patches.patch (see its README)." >&2
+  exit 1
+fi
+if ! bash "$REPO/docs/arduino-local-patches/verify_patches.sh" >/dev/null; then
+  echo "error: components/arduino is missing local patches; re-run" >&2
+  echo "       bash docs/arduino-local-patches/verify_patches.sh for the list and the re-apply command." >&2
+  exit 1
+fi
+
 BUILD_DIR="$REPO/build-$BOARD"
 
 env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" \

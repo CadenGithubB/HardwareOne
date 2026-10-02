@@ -1,0 +1,60 @@
+{
+  "sdk": "5.5.5",
+  "sourceComponent": "/private/tmp/hw1-p4-investigation-20260927/esp-idf-v5.5.5/components/bt",
+  "unchangedFiles": 2047,
+  "changedFiles": [
+    {
+      "path": "common/tinycrypt/port/esp_tinycrypt_port.c",
+      "sha256": "79af032845f54e9e61091f01c6ffbbcb3b31c12e6281b0d2c77885de65b929d3",
+      "baseSha256": "eea4471e5d549ac187d2b2171d7dabf9079b5710569af1e3a75af095adb11c40",
+      "layer": "officialTinyCryptFix"
+    },
+    {
+      "path": "common/tinycrypt/port/esp_tinycrypt_port.h",
+      "sha256": "56ba7201fea3a1b8dfdea283f42787190f29e6c3a1ef76b4517cd9276b0184f0",
+      "baseSha256": "2357d7a612f903218b92bdb7f8f562980300eee5166a34d35e59f549bdb638aa",
+      "layer": "officialTinyCryptFix"
+    },
+    {
+      "path": "common/tinycrypt/src/ecc.c",
+      "sha256": "025b237331acb4e800f4d6fdaee83ed263e41e4428e6233be9ad9f11dab5dc34",
+      "baseSha256": "b604b889d36bd1c9b1a0e0020f928a6c5e137b5c229d8bac2932a422f07f63ff",
+      "layer": "officialTinyCryptFix"
+    },
+    {
+      "path": "common/tinycrypt/src/ecc_dh.c",
+      "sha256": "c0cb59554bb0a20f143b861441218d27a90289fc25dc3fe9c221819cd5d84a58",
+      "baseSha256": "e183bdb0c77179adb9916de4db65a2cd16d0360137b610da15aa01aa825b326c",
+      "layer": "officialTinyCryptFix"
+    },
+    {
+      "path": "common/tinycrypt/src/ecc_dsa.c",
+      "sha256": "e6e876d13f1ebbafb439e4866cbc28a7c83b01dcdc32251745509717648748ed",
+      "baseSha256": "e031b36423076f79106b79ac87153f97dbe1e3fd8461216cec29bea23e76f807",
+      "layer": "officialTinyCryptFix"
+    },
+    {
+      "path": "host/bluedroid/stack/smp/smp_act.c",
+      "sha256": "7d7c6a656fe5f0674ecbfa2f45d3073cbafaa8736597b7226b9a1b4fe99abd99",
+      "baseSha256": "761269d72de30779adef7d54770fbb2eaa8adb283859a15c931c6ff8195970d4",
+      "layer": "metadataDiagnostics"
+    },
+    {
+      "path": "host/bluedroid/stack/smp/smp_hw1_diag.h",
+      "sha256": "4b2905c028b1cf86b66fc30bd3298a1fe87c38f0b6f79a22c8167c6abfe05407",
+      "baseSha256": null,
+      "layer": "metadataDiagnostics"
+    },
+    {
+      "path": "host/bluedroid/stack/smp/smp_keys.c",
+      "sha256": "b7f2d3bbdb5069f79cd7bd56bc87fad2850fd72a2ad2c27330188a0b50cd32f8",
+      "baseSha256": "000ae00b07fa4d90214337f27aee28633289935ba93de2f32826bfeb0fa5e64c",
+      "layer": "metadataDiagnostics"
+    }
+  ],
+  "layers": [
+    "smp-diagnostic.patch",
+    "../idf-tinycrypt-9fd7cb7.patch"
+  ],
+  "scope": "Temporary metadata diagnostics plus five exact official TinyCrypt fix files. SMP comparison/authentication requirements unchanged. Pre-fix manifest and sources preserved in smpdiag-before-tinycrypt-fix."
+}

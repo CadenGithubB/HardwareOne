@@ -1,0 +1,18 @@
+--- port opened 1790768131 ---
+[151391] [CMD] a@g2: transcription start -> OK
+I (153203) STT: TL capture_start t=151402
+I (158582) STT: TL warm s=151397 e=156780 load=3977 ok=1 lm=1
+I (159366) STT: TL draft seq=1 audio_ms=1000 s=156781 e=157564 ok=1
+I (162054) STT: TL draft seq=1 audio_ms=4550 s=157599 e=160252 ok=1
+I (166223) STT: TL draft seq=1 audio_ms=7250 s=160299 e=164421 ok=1
+I (171688) STT: TL draft seq=1 audio_ms=11400 s=164468 e=169887 ok=0
+I (181303) STT: TL seg=1 a0=151902 a1=168642 q=169862 s=169888 m=201 f=476 n=8532 d=253 sv0=179387 sv1=179486 e=179501 ok=1
+I (185573) STT: TL seg=2 a0=168972 a1=175932 q=177205 s=179504 m[183056] [LOOPHEALTH] stall: lap took 208 ms | 111 ms outside secti=ons (bl1ocked/8preemp4ted â €” rrftop) [+more suppressed]
+I (186646) STT: TL draft seq=2 audio_ms=5030 s=183775 e=184845 ok=0
+I (191151) STT: TL seg=3 a0=175952 a1=183512 q=184825 s=184845 m=224 f=205 n=3712 d=252 sv0=189256 sv1=189333 e=189349 ok=1
+I (193764) STT: TL draft seq=4 audio_ms=4140 s=189368 e=191962 ok=1
+I (197975) STT: TL draft seq=4 audio_ms=7190 s=192008 e=196173 ok=1
+I (204488) STT: TL draft seq=4 audio_ms=11390 s=196239 e=202686 ok=1
+I (207604) STT: TL draft seq=4 audio_ms=17840 s=202726 e=205802 ok=0
+[206075] [CMD] a@g2: transcription cancel 33a321b500000001 -> OK
+I (208032) STT: TL seg=4 a0=183512 a1=203512 q=205781 s=205804 m=398 f=0 n=0 d=0 sv0=0 sv1=0 e=206230 ok=0

@@ -25,5 +25,10 @@ int main() {
  TranscriptionUI::clear(tail,sizeof(tail));for(char c:tail)assert(c==0);
  assert(TranscriptionUI::safeFilename("My session.txt"));
  for(const char* bad:{"","../x.txt","a\".txt","a\\b.txt","a\nb.txt"})assert(!TranscriptionUI::safeFilename(bad));
+ using TranscriptionUI::nextMicSource; using TranscriptionUI::micLabel;
+ assert(std::string(nextMicSource("auto",true,true))=="pdm"&&std::string(nextMicSource("pdm",true,true))=="g2");
+ assert(std::string(nextMicSource("g2",true,true))=="auto"&&std::string(nextMicSource("auto",false,true))=="g2");
+ assert(std::string(nextMicSource("auto",false,false))=="auto"&&std::string(nextMicSource("g2",true,false))=="pdm");
+ assert(std::string(micLabel("pdm"))=="Onboard"&&std::string(micLabel("g2"))=="Glasses"&&std::string(micLabel(nullptr))=="Auto");
  puts("Transcription UI policy: strict IDs/offsets, bounded UTF-8 pages/tails and filenames passed");
 }

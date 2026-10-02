@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Build only. No flashing, serial access, or automatic ESP-IDF installation.
+#
+# The native S3 and Hosted P4 probes build here. The C6 companion firmware and
+# the P4 programmer service moved to tools/p4/companion; `programmer`, `c6` and
+# `all` delegate to its build script, so their outputs live under
+# tools/p4/companion/private/.
 set -euo pipefail
 
 experiment_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+companion_root="$(cd -- "$experiment_root/../../tools/p4/companion" && pwd -P)"
 selection="${1:-all}"
 if [[ $# -gt 1 ]]; then
     printf 'Usage: %s [programmer|s3|p4|c6|all]\n' "$0" >&2
@@ -23,15 +29,12 @@ case "$idf_version" in
     *) printf 'ESP-IDF 5.5.5 required; found %s\n' "$idf_version" >&2; exit 1 ;;
 esac
 
-python3 "$experiment_root/prepare.py"
-
 build_one() {
     local name="$1" source_dir target build_dir config_file
     case "$name" in
-        programmer) source_dir="$experiment_root/c6_programmer"; target=esp32p4 ;;
+        programmer|c6) "$companion_root/build.sh" "$name"; return ;;
         s3) source_dir="$experiment_root/native_s3"; target=esp32s3 ;;
         p4) source_dir="$experiment_root/hosted_p4"; target=esp32p4 ;;
-        c6) source_dir="$experiment_root/private/c6-slave"; target=esp32c6 ;;
     esac
     build_dir="$experiment_root/private/build-$name"
     config_file="$source_dir/sdkconfig"

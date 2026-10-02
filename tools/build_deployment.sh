@@ -7,6 +7,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
   echo "usage: HW1_OTA_SIGNING_KEY=/absolute/key.pem $(basename "$0") <deployment> <board>" >&2
+  echo "       (the key is only needed for OTA_LAYOUT=1 deployments)" >&2
   echo "available deployments:" >&2
   find "$REPO/deployments" -path '*/boards/*/contract.conf' -type f 2>/dev/null |
     sed -E "s#^$REPO/deployments/([^/]+)/boards/([^/]+)/contract.conf#  \1 \2#" >&2
@@ -31,21 +32,34 @@ contract_value() {
 
 CONTRACT_BOARD="$(contract_value BOARD_ID)"
 TARGET="$(contract_value TARGET)"
+OTA_LAYOUT="$(contract_value OTA_LAYOUT)"
+MAIN_RELEASE_MAX="$(contract_value MAIN_RELEASE_MAX)"
 [[ "$CONTRACT_BOARD" == "$BOARD" ]] || {
   echo "error: $CONTRACT says BOARD_ID=$CONTRACT_BOARD, expected $BOARD" >&2
   exit 1
 }
 [[ -n "$TARGET" ]] || { echo "error: $CONTRACT has no TARGET" >&2; exit 1; }
+[[ "$OTA_LAYOUT" == "0" || "$OTA_LAYOUT" == "1" ]] || {
+  echo "error: $CONTRACT must declare OTA_LAYOUT=0 or OTA_LAYOUT=1" >&2
+  exit 1
+}
 
+# A recovery-OTA deployment (OTA_LAYOUT=1) is a signed pair: factory updater
+# plus main image, audited together, with a manifest and offline bundle.
+# A factory-only deployment (OTA_LAYOUT=0) is one unsigned app image for a
+# board without a recovery layout; it is flashed over the cable and still gets
+# its contract, partition table, size gate and build manifest.
 SIGNING_KEY="${HW1_OTA_SIGNING_KEY:-}"
-[[ -n "$SIGNING_KEY" ]] || {
-  echo "error: set HW1_OTA_SIGNING_KEY to the deployment RSA-3072 private key" >&2
-  exit 1
-}
-[[ "$SIGNING_KEY" = /* && -f "$SIGNING_KEY" ]] || {
-  echo "error: HW1_OTA_SIGNING_KEY must name an existing absolute path" >&2
-  exit 1
-}
+if [[ "$OTA_LAYOUT" == "1" ]]; then
+  [[ -n "$SIGNING_KEY" ]] || {
+    echo "error: set HW1_OTA_SIGNING_KEY to the deployment RSA-3072 private key" >&2
+    exit 1
+  }
+  [[ "$SIGNING_KEY" = /* && -f "$SIGNING_KEY" ]] || {
+    echo "error: HW1_OTA_SIGNING_KEY must name an existing absolute path" >&2
+    exit 1
+  }
+fi
 command -v idf.py >/dev/null 2>&1 || {
   echo "error: idf.py not on PATH; source the ESP-IDF export script first" >&2
   exit 1
@@ -100,50 +114,76 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo "==> Building $SELECTOR factory updater"
-env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" HW_DEPLOYMENT="$SELECTOR" \
-  HW1_OTA_SIGNING_KEY="$SIGNING_KEY" \
-  idf.py -C "$REPO/updater" -B "$UPDATER_BUILD" build
+MAIN_BIN="$MAIN_BUILD/hardwareone-idf.bin"
 
-UPDATER_BIN="$UPDATER_BUILD/hw1-updater.bin"
-[[ -f "$UPDATER_BIN" ]] || { echo "error: updater output missing: $UPDATER_BIN" >&2; exit 1; }
+if [[ "$OTA_LAYOUT" == "1" ]]; then
+  echo "==> Building $SELECTOR factory updater"
+  env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" HW_DEPLOYMENT="$SELECTOR" \
+    HW1_OTA_SIGNING_KEY="$SIGNING_KEY" \
+    idf.py -C "$REPO/updater" -B "$UPDATER_BUILD" build
 
-echo "==> Building $SELECTOR main image"
-env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" HW_DEPLOYMENT="$SELECTOR" \
-  HW_OTA_LAYOUT=1 HW1_OTA_SIGNING_KEY="$SIGNING_KEY" \
-  HW1_UPDATER_BIN="$UPDATER_BIN" \
-  idf.py -C "$REPO" -B "$MAIN_BUILD" -DSDKCONFIG="$MAIN_BUILD/sdkconfig" build
+  UPDATER_BIN="$UPDATER_BUILD/hw1-updater.bin"
+  [[ -f "$UPDATER_BIN" ]] || { echo "error: updater output missing: $UPDATER_BIN" >&2; exit 1; }
 
-echo "==> Auditing paired artifacts"
-python3 "$REPO/tools/ota/check_ota_builds.py" \
-  --board "$BOARD" --deployment "$SELECTOR" \
-  --main-build "$MAIN_BUILD" --updater-build "$UPDATER_BUILD"
+  echo "==> Building $SELECTOR main image"
+  env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" HW_DEPLOYMENT="$SELECTOR" \
+    HW_OTA_LAYOUT=1 HW1_OTA_SIGNING_KEY="$SIGNING_KEY" \
+    HW1_UPDATER_BIN="$UPDATER_BIN" \
+    idf.py -C "$REPO" -B "$MAIN_BUILD" -DSDKCONFIG="$MAIN_BUILD/sdkconfig" build
+
+  echo "==> Auditing paired artifacts"
+  python3 "$REPO/tools/ota/check_ota_builds.py" \
+    --board "$BOARD" --deployment "$SELECTOR" \
+    --main-build "$MAIN_BUILD" --updater-build "$UPDATER_BUILD"
+else
+  echo "==> Building $SELECTOR main image (factory-only deployment)"
+  env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" HW_DEPLOYMENT="$SELECTOR" \
+    idf.py -C "$REPO" -B "$MAIN_BUILD" -DSDKCONFIG="$MAIN_BUILD/sdkconfig" build
+
+  # The OTA audit does not apply; enforce the one gate the contract still
+  # carries, the main image size, so a factory-only release cannot outgrow
+  # the partition its own table declares.
+  [[ -f "$MAIN_BIN" ]] || { echo "error: main image missing: $MAIN_BIN" >&2; exit 1; }
+  MAIN_BYTES="$(stat -f %z "$MAIN_BIN" 2>/dev/null || stat -c %s "$MAIN_BIN")"
+  if (( MAIN_BYTES > MAIN_RELEASE_MAX )); then
+    printf 'error: %s is %d bytes, over the contract MAIN_RELEASE_MAX of %d\n' \
+      "$MAIN_BIN" "$MAIN_BYTES" "$MAIN_RELEASE_MAX" >&2
+    exit 1
+  fi
+  echo "==> Main image ${MAIN_BYTES} bytes within MAIN_RELEASE_MAX ${MAIN_RELEASE_MAX}"
+fi
 
 python3 "$REPO/tools/gen_build_info.py" "$MAIN_BUILD" "$BOARD" "$SELECTOR"
 
 STAGING_RELEASE="$(mktemp -d "$OUTPUT_ROOT/.release-stage.XXXXXX")"
 
-MANIFEST="$STAGING_RELEASE/manifest.json"
-BUNDLE="$STAGING_RELEASE/HardwareOne-$DEPLOYMENT-$BOARD.hw1ota"
-MAIN_BIN="$MAIN_BUILD/hardwareone-idf.bin"
+if [[ "$OTA_LAYOUT" == "1" ]]; then
+  MANIFEST="$STAGING_RELEASE/manifest.json"
+  BUNDLE="$STAGING_RELEASE/HardwareOne-$DEPLOYMENT-$BOARD.hw1ota"
 
-echo "==> Creating signed manifest and offline bundle"
-python3 "$REPO/tools/ota/make_manifest.py" create \
-  --board "$BOARD" --deployment "$SELECTOR" \
-  --image "$MAIN_BIN" --key "$SIGNING_KEY" \
-  --output "$MANIFEST"
-python3 "$REPO/tools/ota/make_bundle.py" create \
-  --image "$MAIN_BIN" --manifest "$MANIFEST" \
-  --public-key "$MAIN_BUILD/hw1_ota_public_key.pem" \
-  --output "$BUNDLE"
+  echo "==> Creating signed manifest and offline bundle"
+  python3 "$REPO/tools/ota/make_manifest.py" create \
+    --board "$BOARD" --deployment "$SELECTOR" \
+    --image "$MAIN_BIN" --key "$SIGNING_KEY" \
+    --output "$MANIFEST"
+  python3 "$REPO/tools/ota/make_bundle.py" create \
+    --image "$MAIN_BIN" --manifest "$MANIFEST" \
+    --public-key "$MAIN_BUILD/hw1_ota_public_key.pem" \
+    --output "$BUNDLE"
+
+  cp "$UPDATER_BIN" "$STAGING_RELEASE/factory-updater.bin"
+  cp "$MAIN_BUILD/hw1_ota_public_key.pem" "$STAGING_RELEASE/public-key.pem"
+  cp "$MAIN_BUILD/ota_data_initial.bin" "$STAGING_RELEASE/ota-data-initial.bin"
+else
+  # Everything a cable flash needs, plus the esptool argument file IDF
+  # generated for this exact build so the offsets travel with the images.
+  cp "$MAIN_BUILD/flasher_args.json" "$STAGING_RELEASE/flasher_args.json"
+fi
 
 cp "$MAIN_BIN" "$STAGING_RELEASE/firmware.bin"
-cp "$UPDATER_BIN" "$STAGING_RELEASE/factory-updater.bin"
 cp "$MAIN_BUILD/partition_table/partition-table.bin" "$STAGING_RELEASE/partition-table.bin"
-cp "$MAIN_BUILD/hw1_ota_public_key.pem" "$STAGING_RELEASE/public-key.pem"
 cp "$MAIN_BUILD/BUILD_INFO.md" "$STAGING_RELEASE/BUILD_INFO.md"
 cp "$MAIN_BUILD/bootloader/bootloader.bin" "$STAGING_RELEASE/bootloader.bin"
-cp "$MAIN_BUILD/ota_data_initial.bin" "$STAGING_RELEASE/ota-data-initial.bin"
 cp "$MAIN_BUILD/littlefs.bin" "$STAGING_RELEASE/littlefs.bin"
 cp "$CONTRACT" "$STAGING_RELEASE/contract.conf"
 cp "$REPO/deployments/$DEPLOYMENT/boards/$BOARD/partitions.csv" \

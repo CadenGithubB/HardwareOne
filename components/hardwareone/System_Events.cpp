@@ -200,8 +200,7 @@ void systemEventPost(uint8_t kind, const char* subject, const char* detail,
     const NotifContext& nctx = *getSlotReadOnly();
     ev.source = (nctx.source == NOTIF_SOURCE_UNKNOWN) ? NOTIF_SOURCE_SYSTEM : nctx.source;
     if (!whoOverride && nctx.subsource[0]) {
-      strncpy(ev.who, nctx.subsource, sizeof(ev.who) - 1);
-      ev.who[sizeof(ev.who) - 1] = '\0';
+      strlcpy(ev.who, nctx.subsource, sizeof(ev.who));
     }
   }
   if (whoOverride && whoOverride[0]) {

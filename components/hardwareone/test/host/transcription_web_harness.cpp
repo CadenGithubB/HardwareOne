@@ -38,7 +38,10 @@ static struct Scenario {
   uint64_t exchange=0x1122334455667788ULL;
   DictationTextReceipt last{};
 } scenario;
-static struct {bool sttSaveTranscripts=true;} gSettings;
+static struct {bool sttSaveTranscripts=true; String micSource="auto";} gSettings;
+enum AudioSource {AUDIO_SRC_NONE, AUDIO_SRC_LOCAL_PDM, AUDIO_SRC_G2_LEFT};
+static bool micPdmAvailable=true, micG2Available=false;
+static bool audioSourceAvailable(AudioSource source){return source==AUDIO_SRC_LOCAL_PDM?micPdmAvailable:source==AUDIO_SRC_G2_LEFT&&micG2Available;}
 void webBatchTestStringAppend(){if(scenario.revokeOnSerialize)scenario.live=false;}
 static AuthContext makeWebAuthCtx(httpd_req_t*){AuthContext c;if(!scenario.stateful)c.sid="";if(!scenario.named)c.user="";return c;}
 static bool tgRequireAuth(const AuthContext&){return scenario.authenticated;}
@@ -54,6 +57,7 @@ static bool owns(const DictationAppLease& l){return scenario.haveLease&&l.source
 static bool dictationAppCurrent(CommandSource source,TransportSessionEpoch epoch,DictationAppLease* lease){assert(scenario.identity);scenario.calls++;*lease=DictationAppLease{};if(!scenario.haveLease)return false;*lease={source,epoch,scenario.exchange};return true;}
 static bool dictationAppSnapshot(const DictationAppLease& l,DictationAppSnapshot* out){assert(scenario.identity);scenario.calls++;*out=DictationAppSnapshot{};if(!transportSessionEpochIsLive(l.source,l.epoch))return false;out->busy=scenario.active;if(!owns(l))return false;out->valid=true;out->active=scenario.active;out->done=!scenario.active;out->status.captureActive=scenario.active;out->status.transcript.enabled=true;std::strcpy(out->status.transcript.path,"/stt/u7/private.txt");return true;}
 static bool dictationAppPeekText(const DictationAppLease& l,char* out,size_t size,DictationTextReceipt* r){assert(owns(l));scenario.calls++;if(!scenario.text)return false;std::snprintf(out,size,"private \"text\"");*r={l.exchange,9,0,14};if(scenario.revokeOnPeek)scenario.live=false;return true;}
+static bool dictationAppPeekDraft(const DictationAppLease&,char* out,size_t size,uint32_t* version){if(out&&size)out[0]=0;if(version)*version=0;return false;}
 static bool dictationAppBegin(CommandSource source,TransportSessionEpoch epoch,DictationAppLease* lease){assert(scenario.identity);scenario.calls++;scenario.beginCalls++;*lease={source,epoch,scenario.exchange};if(scenario.revokeOnBegin)scenario.live=false;return scenario.accept;}
 static bool dictationAppRequestStop(const DictationAppLease& l){scenario.calls++;scenario.stopCalls++;return owns(l)&&scenario.accept;}
 static bool dictationAppCancel(const DictationAppLease& l){scenario.calls++;scenario.cancelCalls++;return owns(l)&&scenario.accept;}

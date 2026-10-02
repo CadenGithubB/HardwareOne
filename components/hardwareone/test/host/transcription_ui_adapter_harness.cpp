@@ -33,7 +33,10 @@ static unsigned fsDepth=0,readCalls=0,beginCalls=0,stopCalls=0,cancelCalls=0,com
 static bool shortRead=false,seekFails=false,allowBegin=true;
 static std::function<void()> readHook,peekHook,snapshotHook;
 static std::vector<std::string> openedPaths;
-static struct {bool sttSaveTranscripts=true;} gSettings;
+static struct {bool sttSaveTranscripts=true; String micSource="auto";} gSettings;
+enum AudioSource {AUDIO_SRC_NONE, AUDIO_SRC_LOCAL_PDM, AUDIO_SRC_G2_LEFT};
+static bool micPdmAvailable=true, micG2Available=false;
+static bool audioSourceAvailable(AudioSource source){return source==AUDIO_SRC_LOCAL_PDM?micPdmAvailable:source==AUDIO_SRC_G2_LEFT&&micG2Available;}
 static const AuthContext& currentAuthContext(){return auth;}
 static uint32_t captureTransportSessionEpoch(const AuthContext& c){return c.epoch;}
 static bool transportSessionEpochIsLive(CommandSource s,uint32_t e){return epochLive&&s==auth.transport&&e==auth.epoch&&e!=0;}
@@ -73,6 +76,7 @@ static bool dictationAppBegin(CommandSource source,uint32_t epoch,DictationAppLe
 static bool dictationAppRequestStop(const DictationAppLease& lease){++stopCalls;return owns(lease);}
 static bool dictationAppCancel(const DictationAppLease& lease){++cancelCalls;return owns(lease);}
 static bool dictationAppPeekText(const DictationAppLease& lease,char* text,size_t size,DictationTextReceipt* receipt){if(!owns(lease)||!haveText)return false;snprintf(text,size,"private words");*receipt={lease.exchange,9,0,13};if(peekHook){auto hook=peekHook;peekHook=nullptr;hook();}return true;}
+static bool dictationAppPeekDraft(const DictationAppLease&,char* out,size_t size,uint32_t* version){if(out&&size)out[0]=0;if(version)*version=0;return false;}
 static bool dictationAppCommitText(const DictationAppLease& lease,const DictationTextReceipt& receipt,size_t accepted){++commitCalls;committed=receipt;return owns(lease)&&receipt.sequence==9&&receipt.offset==0&&accepted==13;}
 // INSERT_ADAPTER
 static std::shared_ptr<Node> add(const std::string& path,const std::string& data,bool dir=false){auto node=std::make_shared<Node>();node->path=path;node->data=data;node->directory=dir;nodes[path]=node;return node;}

@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""One table of every model version on the same full test sets.
+
+benchmark.py [--run] [--import-existing]
+
+Models are listed in benchmark_models.json (name, checkpoint dir, note), in
+the order they were made. Results are cached per (weights SHA-256, test set)
+in /Volumes/USB2/stt/work/benchmark/, so a model is only scored on sets it has
+not been scored on yet and a renamed or moved checkpoint is not re-run.
+
+  --import-existing  seed the cache from final.json / baseline.json files the
+                     training runs already wrote (same evaluate.py, greedy)
+  --run              score every missing (model, set) pair (MPS, ~3 min/set)
+
+Writes BENCHMARK.md next to this file: greedy WER (no language model), which
+is what training changes; the device's LM decoding is tuned per checkpoint
+separately (stt_train/lm/tune.py) and is not part of this table.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+CACHE = Path('/Volumes/USB2/stt/work/benchmark')
+SETS = ['ami-sdm-test', 'ami-ihm-test', 'librispeech-test-clean', 'ami-sdm-test-g2', 'ami-ihm-test-g2']
+LABELS = {'ami-sdm-test': 'AMI far', 'ami-ihm-test': 'AMI headset', 'librispeech-test-clean': 'Libri clean',
+          'ami-sdm-test-g2': 'AMI far (G2 sim)', 'ami-ihm-test-g2': 'AMI headset (G2 sim)'}
+# Result files written by earlier runs: (checkpoint dir, result json)
+EXISTING = [
+    ('/Volumes/USB/stt/models/quartznet15x5', '/Volumes/USB2/stt/work/run15x5/baseline.json'),
+    ('/Volumes/USB2/stt/work/run15x5/best', '/Volumes/USB2/stt/work/run15x5/final.json'),
+    ('/Volumes/USB2/stt/work/run15x5/best', '/Volumes/USB2/stt/work/run15x5/final-g2.json'),
+    ('/Volumes/USB2/stt/work/run15x5b/full/best', '/Volumes/USB2/stt/work/run15x5b/full/final.json'),
+    ('/Volumes/USB2/stt/models/citrinet384_ls', '/Volumes/USB2/stt/work/citrinet384-ls-ami.json'),
+    ('/Volumes/USB2/stt/models/citrinet384_ls', '/Volumes/USB2/stt/work/citrinet384-ls-libri.json'),
+    ('/Volumes/USB2/stt/work/citrinet384/full/best', '/Volumes/USB2/stt/work/citrinet384/full/final.json'),
+    ('/Volumes/USB2/stt/work/expanded/citrinet384/best', '/Volumes/USB2/stt/work/expanded/citrinet384/final.json'),
+    ('/Volumes/USB2/stt/work/expanded/quartznet15x5/best', '/Volumes/USB2/stt/work/expanded/quartznet15x5/final.json'),
+]
+
+
+def weights_sha(ckpt):
+    h = hashlib.sha256()
+    with open(Path(ckpt) / 'model_weights.ckpt', 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def cache_path(sha, name):
+    return CACHE / sha[:16] / f'{name}.json'
+
+
+def store(sha, name, result, source):
+    path = cache_path(sha, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keep = {k: result[k] for k in ('wer', 'errors', 'words', 'utterances')}
+    path.write_text(json.dumps({**keep, 'source': source}, indent=1))
+
+
+def import_existing():
+    for ckpt, report in EXISTING:
+        if not Path(report).exists() or not (Path(ckpt) / 'model_weights.ckpt').exists():
+            continue
+        sha = weights_sha(ckpt)
+        for name, result in json.loads(Path(report).read_text())['results'].items():
+            if name in SETS and not cache_path(sha, name).exists():
+                store(sha, name, result, report)
+                print(f'imported {name} for {ckpt} from {report}')
+
+
+def run_missing(models):
+    import torch
+    from common import QuartzNet, load_checkpoint
+    from citrinet import is_citrinet, Citrinet, load_vocab
+    from evaluate import evaluate_stores
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+    for m in models:
+        missing = [s for s in SETS if not cache_path(m['sha'], s).exists()]
+        if not missing:
+            continue
+        config, state = load_checkpoint(m['ckpt'])
+        model = (Citrinet(config, load_vocab(m['ckpt'])) if is_citrinet(config) else QuartzNet(config))
+        model = model.load_nemo(state).to(device).eval()
+        for name in missing:
+            print(f"scoring {m['name']} on {name}", flush=True)
+            result = evaluate_stores(model, state, [(name, None)], device)[name]
+            store(m['sha'], name, result, 'benchmark.py')
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--run', action='store_true')
+    p.add_argument('--import-existing', action='store_true')
+    a = p.parse_args()
+    if a.import_existing:
+        import_existing()
+    models = json.loads((HERE / 'benchmark_models.json').read_text())
+    for m in models:
+        m['sha'] = weights_sha(m['ckpt'])
+    if a.run:
+        run_missing(models)
+    lines = ['# STT model benchmark', '',
+             'Greedy WER % (no language model) on the full test sets; G2 sim = the same audio through the',
+             'simulated glasses mic channel (make_g2_stores.py). Lower is better. Generated by benchmark.py.', '',
+             '| # | Model | ' + ' | '.join(LABELS[s] for s in SETS) + ' | Notes |',
+             '|---|---|' + '---:|' * len(SETS) + '---|']
+    for i, m in enumerate(models, 1):
+        cells = []
+        for s in SETS:
+            path = cache_path(m['sha'], s)
+            cells.append(f"{json.loads(path.read_text())['wer'] * 100:.2f}" if path.exists() else '–')
+        lines.append(f"| {i} | {m['name']} | " + ' | '.join(cells) + f" | {m.get('note', '')} |")
+    (HERE / 'BENCHMARK.md').write_text('\n'.join(lines) + '\n')
+    print('\n'.join(lines))
+
+
+if __name__ == '__main__':
+    main()

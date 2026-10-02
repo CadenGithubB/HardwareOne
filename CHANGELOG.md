@@ -8,6 +8,111 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.96] - 2026-10-02
+
+The ESP32-P4X-EYE becomes a regular board that builds from a clean checkout,
+its ESP32-C6 radio companion becomes a first-class firmware of this
+repository, and local transcription on the P4 gains a language model. Every
+board now builds on one ESP-IDF version, 5.5.5. Work that lived only in side
+folders - a translation study, the P4X feasibility study, STT results and
+tools, Bluetooth pairing diagnostics and the P4X-EYE enclosure - is now part
+of the repository.
+
+### Added
+- **ESP32-P4X-EYE as a regular board** (`tools/build_board.sh p4x_eye`):
+  `boards/p4x_eye.defaults`, the ESP32-P4 chip defaults, its own dependency
+  lock, an optional per-board feature profile (`boards/<board>.features.h`,
+  applied only for that board) and `tools/p4/prepare_sdk.sh`, which stages
+  patched ESP-IDF `bt` (TinyCrypt ECC fix) and `esp_driver_jpeg` copies.
+- **Wi-Fi, BLE and ESP-NOW through the onboard ESP32-C6** (ESP-Hosted): radio
+  startup in `main/radio_backend.cpp`, a `HAL_Bluetooth` controller lifecycle
+  for native and Hosted controllers, and the `components/esp_now_hosted`
+  bridge. The Arduino patches this needs are recorded in
+  `docs/arduino-local-patches`.
+- **C6 companion firmware in the main tree** (`tools/p4/companion`): the pinned
+  ESP-Hosted slave plus the HardwareOne ESP-NOW bridge, its build and
+  preparation scripts, the P4 programmer service and the C6 backup/flash tool.
+  The pins live in one header that the firmware also checks.
+- **Companion check at boot**: the P4 compares the C6's ESP-Hosted version
+  with the pinned one and asks whether the ESP-NOW bridge is present, then
+  logs one clear line (bridge present, stock firmware without ESP-NOW, or not
+  answering). Nothing is fatal.
+- **Language model for local transcription** (`ENABLE_STT_LM`, on wherever
+  local STT is): a word n-gram model with CTC prefix beam search and custom
+  words, loaded and verified from storage, with a fallback to plain decoding.
+  Host tests, parity fixtures and the model builder/tuner live in
+  `experiments/stt_train/lm`.
+- **Factory-only deployments** (`OTA_LAYOUT=0`): a reproducible release with a
+  feature header, partition table and size gate, but no recovery updater or
+  signing, for boards without a recovery layout. `deployments/handheld/boards/p4x_eye`
+  is the first (`tools/build_deployment.sh handheld p4x_eye`).
+- **P4X-EYE enclosure** under `physical_enclosures/p4x_eye`: OpenSCAD source,
+  measured dimensions, revision 21 STL files and manufacturing drawings, and
+  the geometry, clearance and packaging scripts.
+- **Offline translation study** (`experiments/translation_p4`): English to
+  Spanish on the P4, Mozilla/Bergamot tiny and EuroNano compared on a host
+  reference, with a port assessment and a training plan.
+- **P4X feasibility study** (`docs/investigations/2026-09-27-p4x`): the
+  investigation behind the P4 work, with code links pinned to the audited
+  commit.
+- **STT results and tools**: 5x5 fine-tune results and plan, the 15x5 run
+  report, the dataset fetch script, the bench and device scripts behind the
+  STT validation files, 15x5 deploy analysis scripts, an int8 LM evaluation
+  script and a measured 68-second transcription timeline.
+- **Bluetooth SMP pairing diagnostics** (`experiments/p4_ble_roles/diagnostics`)
+  and the local dictation provider draft (`experiments/stt_p4/dictation-provider`).
+- Tracked host tests `hal_bluetooth` and `esp_now_hosted_protocol`.
+
+### Changed
+- `tools/build_board.sh` checks the recorded local patches to the vendored
+  `components/arduino` before every build and refuses to build without them.
+- The mesh never asks the radio for its own identity per message: STA and AP
+  addresses are cached for each ESP-NOW session, and on Hosted radios
+  `esp_now_is_peer_exist()` answers from the host's mirror of the C6 peer
+  table. This removes a blocking SDIO round trip from every received frame
+  on the P4 and repeated driver calls on other boards.
+- Power presets and `cpufreq` use each chip's clock steps (P4: 400/200/100
+  MHz); the web, OLED and G2 power pages list them from firmware.
+- BLE Device Information reports the board name instead of "ESP32-S3 Hub".
+- ESP-IDF 5.5.5 is the single documented SDK for every board, and the
+  ESP32-S3 dependency lock is re-resolved against the current manifest.
+- The P4X-EYE has its own partition table (7 MB factory partition, LittleFS
+  moved to `0x725000`). **A P4X-EYE flashed with the old table needs one full
+  reflash, which reformats its data partition**; NVS and saved Wi-Fi
+  credentials survive.
+- The coverage and size-sweep tools take the board as their first argument and
+  respect board feature profiles.
+- The 15x5 STT deploy patch now carries its PSRAM and language-model
+  instrumentation, and the deploy script's feature headers and staging script
+  are tracked.
+- `experiments/p4_espnow` builds its probes against `components/esp_now_hosted`
+  and delegates the companion builds to `tools/p4/companion`.
+
+### Fixed
+- The vendored Adafruit GPS library no longer uses truncating `strncpy`
+  copies, which fixes a GCC 14 build failure and an unterminated and an
+  out-of-range write in its field parser.
+- The login screen accepts wheel-only navigation from rotary input devices.
+- BLE server callbacks are no longer leaked on each start; notification
+  descriptors are reclaimed after a checked host teardown.
+- `blename` and `bletxpower` skipped their first argument as if it were the
+  command name; a TX-power change that fails is no longer reported as applied.
+- G2/R1 MTU exchange waits for service discovery instead of colliding with it;
+  R1 requests link encryption before subscribing to notifications.
+- Bounded string copies in BLE, events and help history no longer rely on
+  `strncpy` termination.
+- Host tests: the event-catalog structure scan skips ignored experiment copies,
+  and the raw-allocation ratchet matches the tree.
+
+### Security
+- Device MAC addresses in experiment results, tests and notes are replaced by
+  fixed placeholders; local user paths, a home-network address and a device
+  identity in the STT deploy script are removed. Hardware test runners and
+  benches read real board addresses and credentials from the environment
+  (`HW1_P4_MAC`, `HW1_S3_MAC`, `HW1_CREDENTIALS`, `P4_USER`/`P4_PASS`) or from
+  ignored local files. Earlier releases in git history still contain the
+  original values.
+
 ## [0.99.95] - 2026-09-28
 
 Shared camera, audio, battery and transcription services now support the P4

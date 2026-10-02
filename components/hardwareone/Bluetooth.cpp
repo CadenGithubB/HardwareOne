@@ -59,8 +59,7 @@
 #include <freertos/semphr.h>
 
 #include <esp_gatts_api.h>
-#include <esp_bt.h>            // esp_bt_controller_get_status()
-#include <esp_bt_main.h>       // esp_bluedroid_get_status()
+#include "HAL_Bluetooth.h"    // native or companion controller lifecycle
 #include <stdlib.h>
 #include <string.h>
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
@@ -495,12 +494,12 @@ static void macToStackBuf(const uint8_t* mac, char* buf) {
 // keeps an upper-cased fast-path copy for hot identification paths
 // that don't want to allocate or call toUpperCase on every check.
 static void copyMacUpper(char* dst, size_t dstCap, const char* src) {
-  if (src && src[0]) {
-    strncpy(dst, src, dstCap - 1);
-    dst[dstCap - 1] = '\0';
-    for (char* p = dst; *p; p++) *p = toupper(*p);
-  } else {
-    dst[0] = '\0';
+  if (!dst || dstCap == 0) return;
+  const size_t len = src ? strnlen(src, dstCap - 1) : 0;
+  if (len) memcpy(dst, src, len);
+  dst[len] = '\0';
+  for (size_t i = 0; i < len; i++) {
+    dst[i] = (char)toupper((unsigned char)dst[i]);
   }
 }
 static void bleUpdateMACCache() {
@@ -753,6 +752,13 @@ class CmdResponseCallbacks : public BLECharacteristicCallbacks {
     else                               gLastNotifyResult = BleNotifyResult::TERMINAL;   // no client / notify disabled → don't spin
   }
 };
+
+// Arduino borrows these callback pointers. Their stateless implementations
+// survive role changes; allocating them on every Server start leaks them.
+static ServerCallbacks sServerCallbacks;
+static CmdRequestCallbacks sCmdRequestCallbacks;
+static CmdResponseCallbacks sCmdResponseCallbacks;
+static CmdStatusCallbacks sCmdStatusCallbacks;
 
 // =============================================================================
 // COMMAND PROCESSING
@@ -1359,7 +1365,7 @@ bool initBluetooth() {
       return false;
     }
     BLEDevice::setCustomGapHandler(nullptr);
-    const BLEDeviceDeinitResult reset = BLEDevice::deinitChecked(false);
+    const BluetoothHalShutdownResult reset = bluetoothHalDeinit();
     if (!reset.success) {
       bleStackSetLifecycleFault(true);
       broadcastOutput("[BLE] Existing client host could not be normalized; reboot required");
@@ -1374,14 +1380,14 @@ bool initBluetooth() {
   if (!checkMemoryAvailable("bluetooth", nullptr)) {
     if (sBLEToggleCount > 0) {
       broadcastOutput("[BLE] Insufficient memory for Bluetooth (need 52KB DRAM)");
-      broadcastOutput("[BLE] ESP32 BLE leaks ~10KB DRAM per stop/start cycle. Reboot to recover.");
+      broadcastOutput("[BLE] Free internal DRAM before restarting Bluetooth.");
     } else {
       broadcastOutput("[BLE] Insufficient memory for Bluetooth (need 52KB DRAM)");
     }
     return false;
   }
   
-  // Track DRAM before init to measure leak on deinit
+  // Track total free-heap change; other subsystems can allocate in this interval.
   sBLEHeapBeforeInit = ESP.getFreeHeap();
   
   // BLESystemState owns Arduino String members. ps_alloc() supplies raw storage,
@@ -1409,12 +1415,11 @@ bool initBluetooth() {
   
   // Initialize ESP32 BLE with configured device name
   const char* deviceName = gSettings.bleDeviceName.length() > 0 ? gSettings.bleDeviceName.c_str() : "HardwareOne";
-  BLEDevice::init(deviceName);
+  const bool stackReady = bluetoothHalInit(deviceName);
 
-  if (!BLEDevice::getInitialized() || !isBluedroidHostEnabled() ||
-      !isBleControllerEnabled()) {
+  if (!stackReady) {
     broadcastOutput("[BLE] Init failed (host/controller incomplete)");
-    const BLEDeviceDeinitResult rollback = BLEDevice::deinitChecked(false);
+    const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
     if (!rollback.success) bleStackSetLifecycleFault(true);
     if (gBLEState) {
@@ -1433,12 +1438,15 @@ bool initBluetooth() {
   // is a global Bluedroid setting — the G2 client path sets its own (244).
   BLEDevice::setMTU(517);
 
-  // Set TX power level (ESP_PWR_LVL_N12 to ESP_PWR_LVL_P9)
-  // Map 0-7 to actual power levels
-  esp_power_level_t powerLevel = (esp_power_level_t)constrain(gSettings.bleTxPower, 0, 7);
-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, powerLevel);
-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, powerLevel);
-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, powerLevel);
+  // Apply the existing setting only where the controller exposes power control.
+  if (bluetoothHalSupportsTxPower()) {
+    const esp_err_t powerErr = bluetoothHalSetTxPower((uint8_t)constrain(gSettings.bleTxPower, 0, 7));
+    if (powerErr != ESP_OK) {
+      BROADCAST_PRINTF("[BLE] TX power setting failed: %s", esp_err_to_name(powerErr));
+    }
+  } else {
+    BLE_DEBUGF(DEBUG_BLE_CORE, "Radio backend uses its default BLE TX power");
+  }
   
   // Capture this server app's GATT interface so plaintext command replies can
   // use IDF's connection-directed notify instead of Arduino's peer broadcast.
@@ -1447,7 +1455,7 @@ bool initBluetooth() {
 
   // Create server
   pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new ServerCallbacks());
+  pServer->setCallbacks(&sServerCallbacks);
   
   // --------------------------------------------
   // Device Info Service (standard 0x180A)
@@ -1464,7 +1472,9 @@ bool initBluetooth() {
     BLE_MODEL_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ
   );
-  pModelChar->setValue("ESP32-S3 Hub");
+  const char* boardModel = BOARD_NAME;
+  pModelChar->setValue(boardModel[0] && strcmp(boardModel, "Unknown/Unsupported") != 0
+                          ? boardModel : "HardwareOne");
   
   pFirmwareChar = pDeviceInfoService->createCharacteristic(
     BLE_FIRMWARE_CHAR_UUID,
@@ -1488,22 +1498,22 @@ bool initBluetooth() {
   // Refuse ATT prepared writes: the generic Arduino accumulator is shared by
   // connections and an allocation failure can otherwise commit a prefix.
   pCmdRequestChar->setPreparedWriteEnabled(false);
-  pCmdRequestChar->setCallbacks(new CmdRequestCallbacks());
+  pCmdRequestChar->setCallbacks(&sCmdRequestCallbacks);
   
   // Response characteristic (notify to client - command results)
   pCmdResponseChar = pCommandService->createCharacteristic(
     BLE_CMD_RESPONSE_CHAR_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
-  pCmdResponseChar->addDescriptor(new BLE2902());  // Required for notifications
-  pCmdResponseChar->setCallbacks(new CmdResponseCallbacks());  // onStatus → notify backpressure
+  pCmdResponseChar->addDescriptor(new BLE2902(), true);  // Owned CCCD for notifications
+  pCmdResponseChar->setCallbacks(&sCmdResponseCallbacks);  // onStatus → notify backpressure
   
   // Status characteristic (read - connection info)
   pCmdStatusChar = pCommandService->createCharacteristic(
     BLE_CMD_STATUS_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ
   );
-  pCmdStatusChar->setCallbacks(new CmdStatusCallbacks());
+  pCmdStatusChar->setCallbacks(&sCmdStatusCallbacks);
   
   pCommandService->start();
   
@@ -1517,21 +1527,21 @@ bool initBluetooth() {
     BLE_SENSOR_DATA_CHAR_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
-  pSensorDataChar->addDescriptor(new BLE2902());
+  pSensorDataChar->addDescriptor(new BLE2902(), true);
   
   // System status characteristic (notify - system health updates)
   pSystemStatusChar = pDataService->createCharacteristic(
     BLE_SYSTEM_STATUS_CHAR_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
-  pSystemStatusChar->addDescriptor(new BLE2902());
+  pSystemStatusChar->addDescriptor(new BLE2902(), true);
   
   // Event notification characteristic (notify - important events)
   pEventNotifyChar = pDataService->createCharacteristic(
     BLE_EVENT_NOTIFY_CHAR_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
-  pEventNotifyChar->addDescriptor(new BLE2902());
+  pEventNotifyChar->addDescriptor(new BLE2902(), true);
   
   // Stream control characteristic (write - enable/disable streams)
   pStreamControlChar = pDataService->createCharacteristic(
@@ -1608,7 +1618,7 @@ void deinitBluetooth() {
   // Just deinit the device
   sBleGattsIf.store(ESP_GATT_IF_NONE, std::memory_order_release);
   BLEDevice::setCustomGattsHandler(nullptr);
-  const BLEDeviceDeinitResult deinitResult = BLEDevice::deinitChecked(false);
+  const BluetoothHalShutdownResult deinitResult = bluetoothHalDeinit();
   if (!deinitResult.success) {
     bleStackSetLifecycleFault(true);
     char buf[196];
@@ -1660,7 +1670,7 @@ void deinitBluetooth() {
   int leaked = (int)sBLEHeapBeforeInit - (int)heapAfterDeinit;
   if (leaked > 0) {
     char buf[96];
-    snprintf(buf, sizeof(buf), "[BLE] Deinitialized (DRAM leak: ~%dKB this cycle, %d toggle%s total)",
+    snprintf(buf, sizeof(buf), "[BLE] Deinitialized (heap change since start: -%dKB, %d toggle%s total)",
              leaked / 1024, sBLEToggleCount, sBLEToggleCount == 1 ? "" : "s");
     broadcastOutput(buf);
   } else {
@@ -2083,20 +2093,11 @@ void bleStackSetLifecycleFault(bool faulted) {
 }
 
 bool isBleControllerEnabled() {
-#if CONFIG_BT_CONTROLLER_ENABLED
-  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
-    return true;
-  }
-#endif
-  return false;
+  return bluetoothHalStatus().controller == BluetoothHalControllerState::Enabled;
 }
 
 bool isBluedroidHostEnabled() {
-#if defined(CONFIG_BLUEDROID_ENABLED)
-  return esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED;
-#else
-  return false;
-#endif
+  return bluetoothHalStatus().hostEnabled;
 }
 
 bool isBleServerInitialized() {
@@ -2551,10 +2552,9 @@ static const char* cmd_bleevent(const String& argsInput) {
 }
 
 static const char* cmd_blename(const String& argsInput) {
-  // Parse args - skip command name
+  // The command dispatcher supplies arguments without the command name.
   const char* args = argsInput.c_str();
-  while (*args && *args != ' ') args++;  // Skip command name
-  while (*args == ' ') args++;  // Skip spaces
+  while (*args == ' ') args++;
   
   if (*args != '\0') {
     // Extract new name
@@ -2584,9 +2584,11 @@ static const char* cmd_blename(const String& argsInput) {
 }
 
 static const char* cmd_bletxpower(const String& argsInput) {
-  // Parse args - skip command name
+  if (!bluetoothHalSupportsTxPower()) {
+    return "Error: BLE TX power control is unavailable on this radio backend";
+  }
+  // The dispatcher supplies arguments without the command name.
   const char* args = argsInput.c_str();
-  while (*args && *args != ' ') args++;  // Skip command name
   while (*args == ' ') args++;  // Skip spaces
   
   if (*args != '\0') {
@@ -2596,15 +2598,17 @@ static const char* cmd_bletxpower(const String& argsInput) {
       return "Error: TX power must be 0-7 (0=min/-12dBm, 7=max/+9dBm)";
     }
     
-    setSetting(gSettings.bleTxPower, level);
-    
-    // Apply immediately if BLE is running
-    if (gBLEState && gBLEState->initialized) {
-      esp_power_level_t powerLevel = (esp_power_level_t)level;
-      esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, powerLevel);
-      esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, powerLevel);
-      esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, powerLevel);
+    // Apply first: a failed controller operation must not be reported as saved
+    // and applied. With BLE off, preserve the setting for the next start.
+    if (bluetoothHalStatus().ready()) {
+      const esp_err_t powerErr = bluetoothHalSetTxPower((uint8_t)level);
+      if (powerErr != ESP_OK) {
+        if (!ensureDebugBuffer()) return "Error: BLE TX power update failed";
+        snprintf(getDebugBuffer(), 1024, "Error: BLE TX power update failed: %s", esp_err_to_name(powerErr));
+        return getDebugBuffer();
+      }
     }
+    setSetting(gSettings.bleTxPower, level);
     
     if (!ensureDebugBuffer()) return "TX power updated";
     char* buf = getDebugBuffer();

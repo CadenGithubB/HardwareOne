@@ -93,9 +93,9 @@ def compiler_cmd_for_buildconfig(build_dir):
     return out, entry.get("directory", build_dir)
 
 
-def deployment_header_from_argv(argv):
-    """Return the deployment feature overlay named by the compile command."""
-    prefix = "-DHW1_DEPLOYMENT_CONFIG_HEADER="
+def deployment_header_from_argv(argv, macro="HW1_DEPLOYMENT_CONFIG_HEADER"):
+    """Return the feature overlay header named by the compile command."""
+    prefix = "-D%s=" % macro
     for token in argv:
         if token.startswith(prefix):
             value = token[len(prefix):].strip()
@@ -125,6 +125,12 @@ def resolve_macros(build_dir, artifact_path=None):
             return None, ("deployment feature overlay recorded by this build is missing: "
                           "%s" % deployment_hdr)
         source_headers.append(deployment_hdr)
+    board_hdr = deployment_header_from_argv(argv, "HW1_BOARD_CONFIG_HEADER")
+    if board_hdr:
+        if not os.path.isfile(board_hdr):
+            return None, ("board feature profile recorded by this build is missing: "
+                          "%s" % board_hdr)
+        source_headers.append(board_hdr)
     if artifact_path and os.path.exists(artifact_path):
         changed = [path for path in source_headers
                    if os.path.getmtime(path) > os.path.getmtime(artifact_path)]
@@ -324,6 +330,20 @@ def artifact_info(build_dir):
     return out
 
 
+def deployment_is_ota(selector):
+    """Read OTA_LAYOUT from the contract as text; no tooling import needed."""
+    family, board = selector.split("/", 1)
+    contract = os.path.join(REPO, "deployments", family, "boards", board, "contract.conf")
+    try:
+        with open(contract) as f:
+            for line in f:
+                if line.strip().startswith("OTA_LAYOUT="):
+                    return line.strip().split("=", 1)[1] == "1"
+    except OSError:
+        pass
+    return True
+
+
 def fmt_kb(n):
     return "%s bytes (%.1f KB)" % ("{:,}".format(n), n / 1024.0)
 
@@ -440,8 +460,12 @@ def main():
     A("```bash")
     if deployment:
         family, deployment_board = deployment.split("/", 1)
-        A("HW1_OTA_SIGNING_KEY=/absolute/path/to/key.pem \\")
-        A("  tools/build_deployment.sh %s %s" % (family, deployment_board))
+        if deployment_is_ota(deployment):
+            A("HW1_OTA_SIGNING_KEY=/absolute/path/to/key.pem \\")
+            A("  tools/build_deployment.sh %s %s" % (family, deployment_board))
+        else:
+            A("tools/build_deployment.sh %s %s   # factory-only: no signing key"
+              % (family, deployment_board))
     else:
         A("tools/build_board.sh %s" % board)
     A("```")

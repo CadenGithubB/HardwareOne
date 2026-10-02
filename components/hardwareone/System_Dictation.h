@@ -180,6 +180,7 @@ bool dictationAppPeekText(const DictationAppLease& lease, char* out, size_t outS
                           DictationTextReceipt* receipt);
 bool dictationAppCommitText(const DictationAppLease& lease,
                             const DictationTextReceipt& receipt, size_t accepted);
+bool dictationAppPeekDraft(const DictationAppLease& lease, char* out, size_t outSize, uint32_t* version);
 
 // Post-publication hook. The mic layer invokes this only AFTER it has published
 // the owner-scoped completion result and IDLE. It copies the stable local result
@@ -248,6 +249,11 @@ inline bool dictationAppPeekText(const DictationAppLease&, char* out, size_t siz
   return false;
 }
 inline bool dictationAppCommitText(const DictationAppLease&, const DictationTextReceipt&, size_t) { return false; }
+inline bool dictationAppPeekDraft(const DictationAppLease&, char* out, size_t size, uint32_t* version) {
+  if (out && size) out[0] = '\0';
+  if (version) *version = 0;
+  return false;
+}
 inline void dictationOnCapturePublished(uint64_t, const char*, bool,
                                         const char*) {}
 inline void dictationResetForSessionBoundary() {}

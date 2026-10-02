@@ -23,8 +23,8 @@ struct View {
   OLEDMode viewMode = OLED_MENU;
   bool entered=false, active=false, busy=false, saveDefault=false, saveEnabled=false;
   bool continuous=false, preparing=false, captureActive=false, inferenceActive=false;
-  bool nextPoll=false, more=false, eof=true;
-  char exchange[17]{}, recent[1024]{}, text[513]{}, path[128]{}, message[96]{};
+  bool nextPoll=false, more=false, eof=true, micPdm=false, micG2=false;
+  char exchange[17]{}, recent[1024]{}, text[513]{}, path[128]{}, message[96]{}, micSource[8]{};
   Entry files[8]{};
   unsigned count=0, listOffset=0, listNext=0, fileOffset=0, fileNext=0;
   uint32_t history[32]{};
@@ -114,6 +114,8 @@ static void acceptReply(const Ticket& ticket,bool ok) {
     v.active=doc["active"]|false; v.busy=doc["busy"]|false;
     v.saveDefault=doc["saveDefault"]|false; v.saveEnabled=doc["saveEnabled"]|false;
     v.continuous=doc["continuous"]|false;
+    copy(v.micSource,sizeof(v.micSource),doc["micSource"]|"auto");
+    v.micPdm=doc["micPdm"]|false; v.micG2=doc["micG2"]|false;
     v.preparing=doc["preparing"]|false;
     v.captureActive=doc["captureActive"]|false;
     v.inferenceActive=doc["inferenceActive"]|false;
@@ -195,6 +197,9 @@ static void populateMenu() {
   oledScrollAddItem(&v.menu,v.saveDefault?"Save next: ON":"Save next: OFF");
   oledScrollAddItem(&v.menu,"Saved: internal");
   oledScrollAddItem(&v.menu,"Saved: SD card");
+  static char mic[22];
+  snprintf(mic,sizeof(mic),"Mic: %s",TranscriptionUI::micLabel(v.micSource));
+  oledScrollAddItem(&v.menu,mic);
   oledScrollClampSelection(&v.menu);
 }
 static void displayTranscriptionHome() {
@@ -243,6 +248,11 @@ static bool menuInput(int,int,uint32_t buttons) {
       v.sd=v.menu.selectedIndex==4; v.count=0; v.more=false; v.listOffset=0;
       oledScrollInit(&v.list,nullptr,4); listAt(0);
       requestOLEDMode(OLED_TRANSCRIPTS,"transcription.files"); break;
+    case 5:
+      // The source is claimed at session start; a change applies next session.
+      if(v.active) oledToastShow("Stop session first",1200);
+      else queue(String("micsource ")+TranscriptionUI::nextMicSource(v.micSource,v.micPdm,v.micG2),Op::Toggle);
+      break;
   }
   return true;
 }
@@ -322,7 +332,7 @@ void prepareTranscriptionData() {
     inFlight=false;
     if(ticket.op==Op::Toggle && ticket.generation==v.generation && ticket.epoch==v.epoch) {
       const bool changed=ok && strncmp(received,"Error",5)!=0 && strncmp(received,"Failed",6)!=0;
-      copy(v.message,sizeof(v.message),changed?"Saving setting updated":"Setting change failed");
+      copy(v.message,sizeof(v.message),changed?"Setting updated":"Setting change failed");
       v.nextPoll=false; v.pollAt=0;
     } else acceptReply(ticket,ok);
     TranscriptionUI::clear(received,sizeof(received)); oledMarkDirty();

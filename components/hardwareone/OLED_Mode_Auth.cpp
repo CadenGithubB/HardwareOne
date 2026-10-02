@@ -172,8 +172,10 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
     return false;
   }
   
-  // Early return if no meaningful input
-  if (newlyPressed == 0 && abs(deltaX) < JOYSTICK_DEADZONE && abs(deltaY) < JOYSTICK_DEADZONE) {
+  // Rotary devices emit navigation events without joystick deflection or a
+  // button press. Keep those events so either wheel can select login fields.
+  if (newlyPressed == 0 && abs(deltaX) < JOYSTICK_DEADZONE && abs(deltaY) < JOYSTICK_DEADZONE &&
+      !gNavEvents.up && !gNavEvents.down) {
     return false;
   }
   

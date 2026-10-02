@@ -1,0 +1,81 @@
+# ESP32-P4 family build configuration — common to ALL ESP32-P4 boards.
+# Loaded automatically by ESP-IDF when target is esp32p4 (idf.py set-target esp32p4).
+#
+# BOARD-SPECIFIC settings (flash size, companion-radio wiring, camera sensor)
+# are NOT here — they live in boards/<name>.defaults. The P4 has no radio of its
+# own: Wi-Fi, BLE and ESP-NOW run on an ESP-Hosted companion chip, so a P4 board
+# file must also describe that transport. See docs/P4X_EYE_PERIPHERALS.md.
+
+# Revision 3.x silicon uses the 400 MHz PLL (System_Power.h derives the power
+# presets from this; pre-v3 silicon would use 360 MHz).
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=n
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=400
+
+# Hex-mode PSRAM at 200 MHz (32 MB on the P4X-EYE). BSS may live in PSRAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# Console and Arduino Serial both use the USB-Serial/JTAG port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_ARDUINO_USB_CDC_ON_BOOT=y
+CONFIG_ARDUINO_USB_MODE=1
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# main/hardwareone-idf.cpp owns app_main().
+CONFIG_AUTOSTART_ARDUINO=n
+
+# Wi-Fi through the ESP-Hosted companion (esp_wifi_remote). Transport wiring
+# (interface, slot, pins, reset GPIO) is board-specific.
+CONFIG_ESP_WIFI_REMOTE_ENABLED=y
+CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
+CONFIG_ESP_HOSTED_ENABLED=y
+# Hosted buffers prefer PSRAM so MultiNet reloads with BLE active keep enough
+# internal memory; the SDMMC driver handles cache sync and short bounce copies.
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+# ESP-NOW is bridged through Hosted CustomRpc (components/esp_now_hosted). The
+# host needs three custom handler slots.
+CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER=y
+CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS=8
+
+# Bluedroid host on the P4, controller on the companion over Hosted VHCI.
+# Arduino BLE uses the legacy (4.2) scan/advertising APIs, which the C6 supports.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=n
+CONFIG_BT_CONTROLLER_DISABLED=y
+CONFIG_BT_CLASSIC_ENABLED=n
+CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_GATTS_ENABLE=y
+CONFIG_BT_GATTC_ENABLE=y
+CONFIG_BT_SMP_ENABLE=y
+CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_BLE_42_ADV_EN=y
+CONFIG_BT_BLE_42_SCAN_EN=y
+CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID=y
+CONFIG_ESP_HOSTED_BLUEDROID_HCI_VHCI=y
+CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=n
+
+# ESP-SR wake word qualified on the P4X-EYE. The packed model set in the
+# device filesystem must match this choice (HW1_SR_MODELS_IN_FILESYSTEM).
+# CONFIG_SR_WN_WN9_HILEXIN is not set
+CONFIG_SR_WN_WN9_HIESP=y
+
+# Camera: MIPI-CSI through esp_video's ISP pipeline. Hardware JPEG runs through
+# the driver API directly, so esp_video's codec devices stay off.
+CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=n
+CONFIG_ESP_VIDEO_ENABLE_SPI_VIDEO_DEVICE=n
+CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE=n
+CONFIG_ESP_VIDEO_ENABLE_HW_H264_VIDEO_DEVICE=n
+CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_ENC_VIDEO_DEVICE=n
+CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_DEC_VIDEO_DEVICE=n
