@@ -58,7 +58,7 @@ mask opening is 0.29 mm away. Verify the real solder/component envelopes.
 
 **The lid must close freely before tightening the case screws.** Printed size
 and PCB thickness can consume the stop's 0.2 mm gap. Do not force it shut or
-use the screws to apply PCB preload. Physical fit and support loads are untested.
+use the screws to apply PCB preload. Physical fit was verified by the builder; support loads remain untested.
 
 ## Battery cable and power access
 
@@ -143,8 +143,8 @@ bearing surfaces free of coating buildup and check free fit without forcing.
   screw; it is not one of the six M2 insert mounts.
 - No button-strip screws or metal inserts. The separate keeper and required
   removable silicone bead provide its retention.
-- Screen retention, controls and PCB seating still need the physical fit check
-  described in the parent README.
+- Screen retention, controls and PCB seating were physically fit-checked by
+  the builder.
 
 ## Export checks
 
@@ -156,13 +156,13 @@ boundary/nonmanifold edges. Each starts at minimum XYZ=0. Actual file and
 source hashes match the manifest. The three-page PDF passed independent
 file/hash, dimension and text-scope checks; all three final rendered pages
 passed visual inspection. Package verification is recorded separately in
-`work/p4x-enclosure/package-validation-r21.json`. Numerical viewer checks passed with
+`../validation/package-validation-r21.json`. Numerical viewer checks passed with
 72,216 finite faces and 64 simple perimeter rings. The Button keeper browser
 view was inspected after the final refinements, seated, at its +3.3 mm Y entry
-position and lowered, with no reported console errors or warnings. No physical fit validation is claimed. The base retains its prior cleanup of five zero-area faces using
+position and lowered, with no reported console errors or warnings. The package record predates the builder’s physical-fit check. The base retains its prior cleanup of five zero-area faces using
 existing vertices without moving coordinates.
 
 Revision 20's five final meshes and shortened three-page drawing passed their
-recorded checks and are preserved in `work/p4x-enclosure/revision20/`. The R21
+recorded checks and are preserved in the repository Git history. The R21
 PDF remains three pages, with the strip and keeper assembly on sheet 3;
 standalone midframe and captive power-slider sections remain omitted.

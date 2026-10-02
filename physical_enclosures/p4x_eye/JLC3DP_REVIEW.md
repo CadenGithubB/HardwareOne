@@ -10,15 +10,15 @@ triangle checks. Actual files and source match the manifest hashes; base,
 midframe and power slider are identical to R20. The three-page PDF passed
 independent file/hash, dimension and text-scope checks, and all three final
 rendered pages passed visual inspection. Package verification is recorded separately in
-`work/p4x-enclosure/package-validation-r21.json`. Numerical viewer checks passed with 72,216 finite faces and 64 simple
+`validation/package-validation-r21.json`. Numerical viewer checks passed with 72,216 finite faces and 64 simple
 perimeter rings. The Button keeper view rendered cleanly seated, at +3.3 mm Y
 entry, and lowered after final refinements, with no reported console errors
-or warnings. No physical
-fit or strength validation is claimed.
+or warnings. Physical assembly fit was subsequently verified by the builder; no strength
+validation is claimed.
 
 The prior R20 five-part export and shortened three-page PDF passed their
 recorded checks; matching files are preserved in
-`work/p4x-enclosure/revision20/`. Existing supplier research below is retained,
+the repository Git history. Existing supplier research below is retained,
 not a new quotation. PCBWay remains a quotation candidate; Protolabs was
 excluded by the user on price.
 

@@ -2548,7 +2548,7 @@
     "package_validation": "10 files: six STLs, PRINTING.md, export-manifest.json, JLC3DP_REVIEW.md and the three-page R21 PDF. CRC check passed; all member bytes match current files and all source/STL hashes match the manifest.",
     "package_size_bytes": 1130564,
     "package_sha256": "961ef94c27736481fde0c1c103e18a5f56be571598860c810e3deaa003ffa72e",
-    "package_validation_record": "work/p4x-enclosure/package-validation-r21.json"
+    "package_validation_record": "validation/package-validation-r21.json"
   },
   "previous_stl_export_revision_15": {
     "revision": 15,
@@ -4749,7 +4749,7 @@
     "retention": "Required small removable resin-compatible silicone bead bridges accessible rear keeper tab and fixed ledge. Adhesive anti-backout, no positive mechanical lock or snap fit. Ledges carry operating loads.",
     "assembly": "With lid off, insert cap then drop strip vertically against roof datums. Lower keeper 3.3 mm toward +Y from seated position, slide 3.3 mm -Y to front stop. Strip remains in position. Test controls, bridge an accessible rear keeper tab and ledge with required removable resin-compatible silicone bead, keep arms/guides/socket clear and cure before use. Remove bead before reversing keeper slide.",
     "print_orientation": "Flat, 1 mm thickness",
-    "source_review": "work/p4x-enclosure/button-keeper-clearance-review.md",
+    "source_review": "validation/button-keeper-clearance-review.md",
     "clearance_review": "Targeted source review found 0.35 mm nominal XY to USB body envelope and 1.10 mm Z to highest reviewed component under rail; actual installed fit unverified",
     "validation": "Final keeper STL has 76 triangles, watertight consistent winding, positive volume, one closed component and no invalid edges/triangles. Independent file hash, final source assertions, numerical viewer/pose clearance and latest browser inspection at seated/entry/lowered positions passed. PDF text/hash and all three rendered-page inspections passed. Physical fit/strength/adhesive checks remain unverified.",
     "preview_image": "work/p4x-enclosure/keeper-r21-preview.png",
