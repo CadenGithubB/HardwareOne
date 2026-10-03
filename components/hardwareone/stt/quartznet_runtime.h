@@ -43,6 +43,7 @@ class ModelCache {
     ModelCache() = default;
     ~ModelCache();
     void reset();
+    bool loaded() const { return raw_ != nullptr; }
 #if HW1_STT_RUNTIME_DIAGNOSTICS
     // Probe integrity after the vendor model and arena have been destroyed.
     bool verify() const;

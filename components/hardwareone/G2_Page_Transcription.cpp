@@ -1,4 +1,11 @@
 #include "G2_Page_Transcription.h"
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#define TL_LENS_LOG(start, ok) ESP_LOGI("STT", "TL lens s=%lu e=%lu tail=%u draft=%u ok=%d", \
+    (unsigned long)(start), (unsigned long)millis(), unsigned(strlen(s.tail)), unsigned(strlen(s.draft)), (ok) ? 1 : 0)
+#else
+#define TL_LENS_LOG(start, ok) ((void)(start))
+#endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_DICTATION
 #include "G2_Glasses.h"
 #include "G2_HijackCmd.h"
@@ -188,7 +195,11 @@ static void render() {
                textBody[0] ? textBody : chrome.emptyMsg);
     }
     if (sameView && strcmp(renderedText, textPage) == 0) shown = true;
-    else if (identity.stillCurrent()) shown = g2ShowTextPage(textPage, G2_GEOM_LARGE, exitText, navigateText);
+    else if (identity.stillCurrent()) {
+      const uint32_t sendStart = millis();
+      shown = g2ShowTextPage(textPage, G2_GEOM_LARGE, exitText, navigateText);
+      TL_LENS_LOG(sendStart, shown);  // timeline: lens page sent
+    }
     if (shown) {
       snprintf(renderedText, sizeof(renderedText), "%s", textPage);
       renderedView = s.view; renderedEpoch = s.epoch; renderedCount = 0;
@@ -238,8 +249,12 @@ static void render() {
       if (sameRows) {
         const bool headOk = strcmp(renderedSidebar, sidebar) == 0 ||
             g2UpdateMixedTextChild("trhead", kHeaderId, sidebar);
-        const bool bodyOk = strcmp(renderedBody, body) == 0 ||
-            g2UpdateMixedTextChild("transcription", kBodyId, body);
+        bool bodyOk = strcmp(renderedBody, body) == 0;
+        if (!bodyOk) {
+          const uint32_t sendStart = millis();
+          bodyOk = g2UpdateMixedTextChild("transcription", kBodyId, body);
+          TL_LENS_LOG(sendStart, bodyOk);  // timeline: lens text sent
+        }
         shown = headOk && bodyOk;
       }
       if (!shown) shown = g2ShowMixedListText2(rowPtrs, n, G2_GEOM_SPLIT_LIST, header, text);

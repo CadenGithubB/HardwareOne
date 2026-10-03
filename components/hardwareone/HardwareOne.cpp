@@ -2495,6 +2495,21 @@ static void powerSaveTick() {
     return;
   }
 
+#if ENABLE_LOCAL_STT
+  // Local transcription is real-time inference on this CPU: at the idle clock
+  // (100 MHz on the P4) it runs ~3x slower than speech and falls behind
+  // (measured 2026-10-01). Hold the interactive clock for the whole session,
+  // and wake if it started while asleep (e.g. Conversate opened on the glasses,
+  // which is not local activity).
+  extern bool sttAnySessionActive();
+  if (sttAnySessionActive()) {
+    if (asleep) wake();
+    powerSaveNoteActivity();
+    lastSeenActivityMs = powerSaveLastActivityMs();
+    return;
+  }
+#endif
+
   if (asleep) return;  // already dark, waiting for activity
 
   // Defer the countdown while genuinely busy (camera/mic, or a bonded peer).
