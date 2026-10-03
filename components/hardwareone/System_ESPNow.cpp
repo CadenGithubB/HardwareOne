@@ -13598,6 +13598,9 @@ const char* cmd_espnow_roomcmd(const String& argsInput) {
     char macStrBuf[18];
     formatMacAddressBuf(gMeshPeerMeta[i].mac, macStrBuf, sizeof(macStrBuf));
     char roomCmdPayload[ESPNOW_V4_MAX_PLAINTEXT];
+    if (user.length() + pass.length() + command.length() + 2 >= sizeof(roomCmdPayload)) {
+      return "Error: command too long for one encrypted ESP-NOW frame (credentials and command must fit 201 bytes)";
+    }
     snprintf(roomCmdPayload, sizeof(roomCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
     // Phase 3.5 task #6 — encrypt-or-wait. Payload carries credentials, so it
     // never goes out in plaintext. A peer without a KEY_EX-derived identity is
@@ -13667,6 +13670,9 @@ const char* cmd_espnow_tagcmd(const String& argsInput) {
     char tagMacStrBuf[18];
     formatMacAddressBuf(gMeshPeerMeta[i].mac, tagMacStrBuf, sizeof(tagMacStrBuf));
     char tagCmdPayload[ESPNOW_V4_MAX_PLAINTEXT];
+    if (user.length() + pass.length() + command.length() + 2 >= sizeof(tagCmdPayload)) {
+      return "Error: command too long for one encrypted ESP-NOW frame (credentials and command must fit 201 bytes)";
+    }
     snprintf(tagCmdPayload, sizeof(tagCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
     // Phase 3.5 task #6 — encrypted-or-queue (credentials protection).
     v4_send_encrypted_or_queue(gMeshPeerMeta[i].mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ,
@@ -16067,7 +16073,10 @@ const char* cmd_espnow_browse(const String& argsInput) {
   char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
   int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:files \"%s\"",
                             username.c_str(), password.c_str(), path.c_str());
-  if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
+  if (payloadLen >= (int)sizeof(cmdPayload)) {
+    // Never send a prefix: a cut command would run as something else on the peer.
+    return "Error: command too long for one ESP-NOW frame (credentials and command must fit 217 bytes)";
+  }
 
   if (isMeshMode()) {
     if (!isPairedDevice(targetMac)) {
@@ -16148,7 +16157,10 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:espnowsendfile %s \"%s\"",
                             username.c_str(), password.c_str(),
                             gSettings.espnowDeviceName.c_str(), path.c_str());
-  if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
+  if (payloadLen >= (int)sizeof(cmdPayload)) {
+    // Never send a prefix: a cut command would run as something else on the peer.
+    return "Error: command too long for one ESP-NOW frame (credentials and command must fit 217 bytes)";
+  }
 
   if (isMeshMode()) {
     if (!isPairedDevice(targetMac)) {
@@ -16233,7 +16245,10 @@ const char* cmd_espnow_remote(const String& argsInput) {
   char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
   int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:%s", 
                             username.c_str(), password.c_str(), command.c_str());
-  if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
+  if (payloadLen >= (int)sizeof(cmdPayload)) {
+    // Never send a prefix: a cut command would run as something else on the peer.
+    return "Error: command too long for one ESP-NOW frame (credentials and command must fit 217 bytes)";
+  }
 
   uint32_t msgId = generateMessageId();
 

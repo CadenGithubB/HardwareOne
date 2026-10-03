@@ -94,6 +94,14 @@ assert "kUartLineCap = CMD_INPUT_MAX" in uart
 assert "sDiscardingLine = true" in uart
 assert "line too long" in uart and "discarded" in uart
 
+# The USB console buffers match the command limits and over-limit lines are
+# discarded whole, the same rule the UART link applies.
+assert "Serial.setRxBufferSize(CMD_RESULT_MAX)" in hardwareone
+assert "Serial.setTxBufferSize(CMD_RESULT_MAX)" in hardwareone
+assert "gSerialCLI.reserve(CMD_INPUT_MAX + 1)" in hardwareone
+assert "gSerialCLIOverflow = true" in hardwareone
+assert "line too long" in hardwareone and "discarded" in hardwareone
+
 ble_line = function_body(bluetooth, "static void processBleCommandLine(")
 raw_length_guard = ble_line.index("if (len > sizeof(cmdBuf) - 1)")
 ble_overflow = ble_line.index("if (lineTooLong)")

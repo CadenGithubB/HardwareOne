@@ -42,7 +42,9 @@ Neither check is fatal, and a C6 that does not answer at all is not fatal
 either: the P4 boots without its radio features and retries in the
 background. From then on the companion is monitored (heartbeat, Hosted
 transport events, C6 reset notifications) and recovered in place when it
-stops answering; `c6status` shows all of it. The P4 side is described in
+stops answering; `c6status` shows all of it, and the C6's own console is
+mirrored into the P4 log as `C6>` lines (`c6console`), which is how a crash
+in the companion shows up without the programmer. The P4 side is described in
 [docs/P4X_EYE_PERIPHERALS.md](../../../docs/P4X_EYE_PERIPHERALS.md#radio-companion-esp32-c6).
 
 The bridge answers two requests for this beyond ESP-NOW itself: `GET_INFO`
@@ -173,9 +175,10 @@ The programmer service and `c6_tool.py` remain the way to flash a C6 that has
 no bridge yet, to replace the bootloader or partition table, and to take or
 restore full backups.
 
-The update, recovery and hold paths were written against the ESP-Hosted
-2.12.13 host API with a host-tested policy core; their hardware runs are not
-recorded yet.
+Restart, hold and release ran on the board on 2026-10-03. The update path
+has not: the bench device's LittleFS had less free space than the image
+needs (about 1.3 MB), so the transfer and the rollback confirmation remain
+to be exercised.
 
 ## Changing the pin
 

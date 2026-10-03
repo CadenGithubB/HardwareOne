@@ -141,6 +141,11 @@ esp_err_t radioHalHold(bool hold);
 bool radioHalHeld();
 // Hold through host deep sleep: the enable line stays low until the next boot.
 void radioHalPrepareForDeepSleep();
+// Mirror the companion's UART console into the P4 log (tag "C6>"). Started by
+// radioHalPrepare(); the only view of the C6's own boot log and crashes while
+// HardwareOne is running.
+esp_err_t radioHalConsoleMirror(bool on);
+bool radioHalConsoleMirrorOn();
 
 // Companion firmware update, streamed over the transport (ESP-Hosted OTA).
 esp_err_t radioHalUpdateBegin();
@@ -180,6 +185,8 @@ inline bool radioHalTransportLost() { return false; }
 inline esp_err_t radioHalHold(bool) { return ESP_ERR_NOT_SUPPORTED; }
 inline bool radioHalHeld() { return false; }
 inline void radioHalPrepareForDeepSleep() {}
+inline esp_err_t radioHalConsoleMirror(bool) { return ESP_ERR_NOT_SUPPORTED; }
+inline bool radioHalConsoleMirrorOn() { return false; }
 inline esp_err_t radioHalUpdateBegin() { return ESP_ERR_NOT_SUPPORTED; }
 inline esp_err_t radioHalUpdateWrite(const uint8_t*, size_t) { return ESP_ERR_NOT_SUPPORTED; }
 inline esp_err_t radioHalUpdateEnd() { return ESP_ERR_NOT_SUPPORTED; }

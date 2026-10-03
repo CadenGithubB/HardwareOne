@@ -187,6 +187,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <vector>
 #include <functional>
 #include "System_MemUtil.h"
+#include "System_CommandLimits.h"  // CMD_INPUT_MAX / CMD_RESULT_MAX for the console buffers
 #include "System_MemTracker.h"
 
 bool createInputTask();
@@ -400,6 +401,7 @@ volatile unsigned long gWebMirrorSeq = 0;
 Settings gSettings;
 
 String gSerialCLI = "";
+static bool gSerialCLIOverflow = false;  // the line being assembled exceeded CMD_INPUT_MAX; discarded whole at newline
 static TransportSessionEpoch gSerialCLIEpoch = 0;
 
 #if ENABLE_WIFI
@@ -1219,12 +1221,13 @@ static String exitHelpAndExecute(const String& originalCmd) {
   String banner = exitToNormalBanner() + "\n";
   AuthContext ctx = currentAuthContext();
   ctx.path = "/help/exit";
-  // Deliberately BELOW CMD_RESULT_MAX: this is a stack array, and internal
-  // stack is the scarce resource here — 4 KB in this frame is not worth it for
-  // the help-exit path. A result that doesn't fit now reports that explicitly
-  // (executeCommand's ceiling check) instead of being silently halved.
-  char out[2048];
-  (void)executeCommand(ctx, originalCmd.c_str(), out, sizeof(out));
+  // Full result size without carrying 4 KB on this task's stack: one PSRAM
+  // buffer for the lifetime of the firmware. A result that does not fit is
+  // reported by executeCommand's ceiling check, never halved.
+  static char* out = nullptr;
+  if (!out) out = static_cast<char*>(ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPSRAM, "help.exit"));
+  if (!out) return banner + "Error: out of memory";
+  (void)executeCommand(ctx, originalCmd.c_str(), out, CMD_RESULT_MAX);
   banner += out;
   return banner;
 }
@@ -1385,7 +1388,16 @@ void hardwareone_setup() {
   // 2. SERIAL + FILESYSTEM + SETTINGS
   // ========================================================================
   crashRecordSetPhase(CRASH_PHASE_FS_SETTINGS);
+  // The console drains its receive buffer once per loop lap; the 256-byte
+  // default loses most of a chunked upload line (filewrite is ~1.4 KB per
+  // chunk) whenever a lap runs long. The transmit ring at 256 bytes made a
+  // 4 KB result leave in sixteen pieces, each blocking the loop. Both sized
+  // to the command limits (CMD_RESULT_MAX); must precede begin() on
+  // USB-Serial-JTAG. 8 KB of internal RAM in total.
+  Serial.setRxBufferSize(CMD_RESULT_MAX);
+  Serial.setTxBufferSize(CMD_RESULT_MAX);
   Serial.begin(115200);
+  gSerialCLI.reserve(CMD_INPUT_MAX + 1);  // one allocation for the longest accepted line
   delay(500);  // Longer delay for serial connection
 
   // Filesystem and settings code below already uses FsLockGuard. Create the
@@ -2784,6 +2796,16 @@ void hardwareone_loop() {
       gSerialCLIEpoch = 0;
     }
     if (c == '\n') {
+      if (gSerialCLIOverflow) {
+        // Over-limit lines are rejected whole, never run as a prefix (the
+        // UART host link applies the same rule).
+        gSerialCLIOverflow = false;
+        gSerialCLI = "";
+        gSerialCLIEpoch = 0;
+        Serial.printf("Serial - line too long (limit %u bytes), discarded\n", (unsigned)CMD_INPUT_MAX);
+        Serial.print("$ ");
+        break;
+      }
       if (gSerialCLIEpoch == 0 ||
           gSerialCLIEpoch != liveSerialInputEpoch) {
         gSerialCLI = "";
@@ -2986,7 +3008,8 @@ void hardwareone_loop() {
       break;  // Process at most one command per loop() iteration to avoid starving WDT
     } else {
       if (gSerialCLIEpoch == 0) gSerialCLIEpoch = liveSerialInputEpoch;
-      gSerialCLI += c;
+      if (gSerialCLI.length() < CMD_INPUT_MAX) gSerialCLI += c;
+      else gSerialCLIOverflow = true;
     }
   }
 

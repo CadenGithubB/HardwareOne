@@ -22,8 +22,11 @@ the peer-metadata items shipped earlier in v0.95.10).
   status/data commands return their object; action commands return `OK`.
 - **No console spam.** JSON replies are returned only to the caller - they are *not*
   broadcast to other consoles. Plain (non-json) calls behave exactly as before.
-- **Transport.** BLE responses are already chunked by the BLE secure-channel layer
-  (frames <=195 B payload); reassemble frames as you do today.
+- **Transport.** Over the BLE secure channel, responses are chunked by the
+  secure-channel layer (frames <=195 B payload); reassemble frames as you do
+  today. Plaintext BLE notifications are not chunked: one notification of at
+  most MTU-3 bytes (514 with the 517 MTU), so long results need the secure
+  channel.
 - **WARNING: 4 KB result ceiling (important).** Every command that runs through the
   cmd_exec path - **both BLE and the web `/api/cli`** - copies the handler's result
   into a fixed **4096-byte** buffer (`ExecReq.out` = `CMD_RESULT_MAX`), including

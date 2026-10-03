@@ -78,8 +78,11 @@ in P4 images; every other board compiles it to nothing.
   the P4: the radio users are stopped, the transport is rebuilt (which resets
   the C6), and what was running is restored. Only when soft recovery fails
   three times within ten minutes does the P4 reboot, after posting
-  `companion_reboot`. `c6autorecover off` leaves every outage to the user;
-  `c6restart` is the manual restart. P4 images set
+  `companion_reboot`. That reboot happens at most once per power cycle: a
+  boot that follows it keeps retrying slowly (every 15 min) instead of
+  rebooting again, so a dead companion never puts the P4 in a reboot loop.
+  `c6autorecover off` leaves every outage to the user; `c6restart` is the
+  manual restart. P4 images set
   `CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n` so ESP-Hosted itself
   never reboots the P4 for a transport failure.
 - **Power.** The companion never acts on its own. `lightsleep` pauses the
@@ -89,6 +92,11 @@ in P4 images; every other board compiles it to nothing.
   time and `c6hold off` brings back what was running. With `c6autohold on`
   the P4 does that by itself after the radio has been idle for 30 s, and
   releases the companion when a feature asks for the radio.
+- **Console mirror.** The C6's own UART console reaches the P4 on GPIO36 and
+  is mirrored into the P4 log as `C6>` lines (`c6console [on|off]`, on by
+  default). It is the only view of the companion's boot messages and crash
+  backtraces while HardwareOne is running; it found the first hardware bug of
+  this subsystem within minutes.
 - **Firmware updates.** `c6update "<file>"` streams an image from the P4's
   storage to the C6 over SDIO (ESP-Hosted OTA into the inactive ota slot).
   The file is checked first: an ESP32-C6 application image of at most 1920 KB
@@ -98,10 +106,11 @@ in P4 images; every other board compiles it to nothing.
   to the previous image on its next reset. `c6confirm` accepts a pending
   image by hand.
 
-The recovery, hold and update paths were built against the ESP-Hosted
-2.12.13 host API with a host-tested policy core
-(`test_radio_companion_core.cpp`); their first hardware runs are still to be
-recorded.
+Boot, status, restart, hold and release, the heartbeat watchdog and the
+automatic recovery of a crashing companion were exercised on the board on
+2026-10-03. `c6update` has not run on hardware yet: it needs about 1.3 MB of
+free space on the P4's storage for the image, which the bench device did not
+have. The deep-sleep hold is covered by the host tests only.
 
 The shared mesh code never queries the radio per message on this board: the
 STA and AP identities are cached for the life of each ESP-NOW instance and

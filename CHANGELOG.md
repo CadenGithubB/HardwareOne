@@ -44,20 +44,47 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   - Bridge protocol: `GET_INFO` (image state, slot, uptime, heap, reset
     reason, build) and `CONFIRM_IMAGE`; the slave carries the marker string
     `c6update` looks for.
-  - Arduino local patch (2026-10-02): a "transport lost" flag so Wi-Fi and
-    BLE teardown completes on a dead or restarting companion.
+  - Arduino local patch (2026-10-02): a "transport lost" flag so Wi-Fi
+    teardown completes on a dead companion without RPC timeouts, while the
+    BLE controller is reported as lost so the host refuses to reopen BLE
+    until a reboot rather than re-initialising on unconfirmed state.
+  - `c6console [on|off]`: the C6's UART console mirrored into the P4 log as
+    `C6>` lines (on by default), the only view of the companion's own boot
+    log and crash backtraces while HardwareOne runs.
+  - The reboot escalation fires at most once per power cycle; the boot after
+    it retries slowly instead of rebooting again.
 
 ### Changed
+- Command-line buffers now match the command limits on every transport that
+  had a smaller one: the USB console receive and transmit buffers are 4 KB
+  each (the 256-byte defaults dropped long lines and sent results in sixteen
+  pieces), the console discards an over-limit line whole instead of running
+  a prefix, the MQTT client buffers are 4 KB in and out, and the help-exit
+  result lives in PSRAM at the full 4 KB. ESP-NOW remote, browse, fetch, room
+  and tag commands, the web bond exec endpoint and automation IF/THEN/ELSE
+  parts now reject an over-long command instead of silently truncating it.
+- A companion restart, hold or update takes the BLE host down whole (role
+  retirement, then the checked host and controller teardown) before the C6
+  is reset, and the roles re-initialise it afterwards; retiring only the
+  role left the host inconsistent and crashed the P4 on the bench.
 - P4 images set `CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n`: an SDIO
   failure is handled by the companion monitor instead of a P4 reboot.
 - Settings gain `c6AutoRecover`, `c6AutoHold` and `c6HeartbeatSec` (module
   `companion`), present on every board so the settings layout stays one.
 
+### Verified on hardware (P4X-EYE, 2026-10-03)
+- Boot with the companion online, `c6status`, heartbeat and memory monitor
+  configuration, `c6restart` (companion reset, back in 2 s, BLE client
+  restored), `c6hold on` and `c6hold off`, the console mirror, and automatic
+  soft recovery of a crashing companion (the bench found and the mirror
+  showed a companion crash in the first bridge build, fixed in the same day).
+- A 946 KB chunked upload over the USB console with the 4 KB buffers.
+
 ### Not yet verified on hardware
-- The recovery, hold, deep-sleep hold and `c6update` paths were built against
-  the ESP-Hosted 2.12.13 host API and a host-tested policy core
-  (`test_radio_companion_core.cpp`); their first hardware runs are still to
-  be recorded.
+- `c6update` itself: the bench device's LittleFS had 0.9 MB free, less than
+  the 1.2 MB companion image, so the transfer and the rollback confirmation
+  were not exercised. The deep-sleep hold and the once-per-power-cycle reboot
+  guard are covered by host tests only.
 
 ## [0.99.96] - 2026-10-02
 
