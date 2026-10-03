@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-962 commands across 52 modules (974 registry entries).
+963 commands across 52 modules (975 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,7 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 26 commands
 - [`wifi`](#wifi) — 20 commands
 - [`espnow`](#espnow) — 119 commands
-- [`c6`](#c6) — 8 commands
+- [`c6`](#c6) — 9 commands
 - [`mqtt`](#mqtt) — 27 commands
 - [`bluetooth`](#bluetooth) — 19 commands
 - [`filesystem`](#filesystem) — 10 commands
@@ -273,6 +273,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `c6autohold` | A | Hold the companion in reset while no radio feature runs: c6autohold [on\|off] (persists). |
 | `c6autorecover` | A | Auto-recover the companion after an outage: c6autorecover [on\|off] (persists). |
 | `c6confirm` | A | Confirm the companion's running image so it cannot roll back. |
+| `c6console` | A | Mirror the C6's own console into the P4 log: c6console [on\|off]. |
 | `c6heartbeat` | A | Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists). |
 | `c6hold` | A | Hold the C6 in reset (radio fully off) or release it: c6hold [on\|off].<br/>`Usage: c6hold [on\|off] on - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset off - release it and restore what was running` |
 | `c6restart` | A | Restart the C6 companion in place (radio features stop and come back). |

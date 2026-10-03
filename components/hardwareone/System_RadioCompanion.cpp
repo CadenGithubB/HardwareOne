@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "esp_app_format.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -16,6 +17,9 @@
 
 #include "BLE_Peers.h"
 #include "Bluetooth.h"
+#if ENABLE_BLUETOOTH
+#include "HAL_Bluetooth.h"
+#endif
 #include "G2_Glasses.h"
 #include "Radio_CompanionCore.h"
 #include "System_AuthIdentity.h"
@@ -60,6 +64,7 @@ constexpr uint32_t kLowMemoryEventCooldownMs = 60000;
 constexpr size_t kUpdateChunk = 4096;
 constexpr size_t kMaxImageBytes = 1920 * 1024;       // the C6's OTA slot size
 constexpr size_t kEventRing = 16;
+constexpr uint32_t kRebootMarker = 0xC6C6B007u;  // "this reboot was for the companion"
 
 enum class Op : uint8_t { None = 0, Start, Recover, Hold, Release, Update };
 
@@ -76,6 +81,7 @@ bool sMismatchReported = false;
 bool sBridgeAbsentReported = false;
 uint32_t sLastLowMemoryEventMs = 0;
 char sLastResult[160] = "none";
+bool sHardRebootAllowed = true;  // one companion reboot per power cycle
 
 // What was running before a stop, so recovery, hold and update put it back.
 struct RadioUsers {
@@ -86,6 +92,14 @@ struct RadioUsers {
   bool radioPoweredOff = false;   // stopUsers ran `radiopower off`; `radiopower on` replays its snapshot
 };
 RadioUsers sHeldUsers;  // restored by `c6hold off`
+
+}  // namespace
+
+// Survives a software reset: set right before the companion escalation
+// reboots the P4, read once at the next boot.
+RTC_DATA_ATTR uint32_t gCompanionRebootMarker;
+
+namespace {
 
 template <typename F>
 void withMonitor(F fn) {
@@ -120,6 +134,7 @@ void applyPolicyFromSettings() {
   policy.heartbeatMs = gSettings.c6HeartbeatSec > 0 ? static_cast<uint32_t>(gSettings.c6HeartbeatSec) * 1000u : 0;
   policy.autoRecover = gSettings.c6AutoRecover;
   policy.autoHold = gSettings.c6AutoHold;
+  policy.hardRebootAllowed = sHardRebootAllowed;
   withMonitor([&](CompanionMonitor& m) { m.setPolicy(policy); });
   radioHalConfigureMonitoring(static_cast<uint16_t>(gSettings.c6HeartbeatSec < 0 ? 0 : gSettings.c6HeartbeatSec),
                               kLowMemoryBytes);
@@ -170,11 +185,48 @@ bool anyRadioUser() {
   return u.espnow || u.wifi || u.bleServer || u.g2Client;
 }
 
+#if ENABLE_BLUETOOTH
+// The BLE host (Bluedroid) does not survive its controller rebooting
+// underneath it: retiring only the active role left the host believing in
+// links and scans the fresh companion never had, and re-initialising the
+// client then faulted inside the host's event dispatcher (seen on the bench).
+// Retire the role, then take the whole host and controller down through the
+// checked HAL teardown, under the recovery transition so no other role change
+// can interleave. The role restarts afterwards re-initialise the host.
+void shutDownBleForCompanionReset(const RadioUsers& users) {
+  if (!users.bleServer && !users.g2Client && bluetoothHalStatus().stopped()) return;
+  if (!bleRoleTransitionBegin(BleRoleTransition::RECOVERING)) {
+    logSystemEvent("C6", "BLE role transition busy; the host stays up across the companion reset");
+    return;
+  }
+  if (users.bleServer && isBleServerInitialized()) deinitBluetooth();  // takes the host down itself
+#if ENABLE_G2_GLASSES
+  for (int attempt = 0; attempt < 10 && users.g2Client && isG2ClientInitialized(); attempt++) {
+    if (deinitG2Client()) break;
+    vTaskDelay(pdMS_TO_TICKS(500));  // a worker still owns the runtime; it settles
+  }
+#endif
+  if (!bluetoothHalStatus().stopped()) {
+    const BluetoothHalShutdownResult result = bluetoothHalDeinit();
+    if (result.success) {
+#if ENABLE_G2_GLASSES
+      bleCentralClientsTerminalTeardownAcknowledged();
+#endif
+      bleStackSetLifecycleFault(false);
+    } else {
+      bleStackSetLifecycleFault(true);
+      logSystemEvent("C6", "BLE host teardown incomplete (phase %u): Bluetooth stays off until a reboot",
+                     (unsigned)result.phase);
+    }
+  }
+  bleRoleTransitionEnd();
+}
+#endif
+
 // Stop everything that uses the transport, in the order the radio stack needs.
 void stopUsers(RadioUsers& users) {
 #if ENABLE_BLUETOOTH
-  if (users.g2Client) deinitG2Client();
-  if (users.bleServer) deinitBluetooth();
+  shutDownBleForCompanionReset(users);
 #endif
 #if ENABLE_WIFI
   // `radiopower off` stops ESP-NOW, the HTTP server and Wi-Fi in order and
@@ -289,6 +341,10 @@ void finishOp() {
 }
 
 void startProc(void*) {
+  // Offline means the transport is dead or never came up; Arduino may still
+  // consider Hosted initialised. Tear it down as lost so the start is real.
+  radioHalMarkTransportLost();
+  radioHalStopTransport();
   const bool ok = radioHalStartTransport() == ESP_OK;
   withMonitor([&](CompanionMonitor& m) { m.onStartResult(millis(), ok); });
   if (ok) {
@@ -306,15 +362,19 @@ void startProc(void*) {
 
 void recoverProc(void*) {
   RadioUsers users = snapshotUsers();
-  // The restart resets the companion either way, so no clean stop request is
-  // worth waiting for: mark the host side lost so every remote call fails
-  // fast instead of timing out one by one on a companion that may be dead.
-  radioHalMarkTransportLost();
+  // A companion that still answers (manual restart, watchdog miss on a live
+  // link) gets a clean stop: the BLE host must retire its controller through
+  // real acknowledgements or it cannot be reopened safely. Only a dead link is
+  // torn down as lost, where every remote call would just time out.
+  if (!radioHalTransportUp()) radioHalMarkTransportLost();
   logSystemEvent("C6", "recovery: stopping radio users (espnow=%d wifi=%d ble=%d g2=%d)", users.espnow,
                  users.wifi, users.bleServer, users.g2Client);
   stopUsers(users);
   radioHalStopTransport();
   const bool ok = radioHalStartTransport() == ESP_OK;
+  // Record the result first: the radio gate consults the monitor state, and
+  // the users restored below must not be refused as "still recovering".
+  withMonitor([&](CompanionMonitor& m) { m.onRecoveryResult(millis(), ok); });
   if (ok) {
     applyPolicyFromSettings();
     reportIdentity();
@@ -326,7 +386,6 @@ void recoverProc(void*) {
     systemEventPost(SYSEVT_COMPANION_OFFLINE, "recovery_failed", "no answer on SDIO");
     logSystemEvent("C6", "recovery failed: companion did not answer");
   }
-  withMonitor([&](CompanionMonitor& m) { m.onRecoveryResult(millis(), ok); });
   finishOp();
 }
 
@@ -441,8 +500,7 @@ void updateProc(void* arg) {
     // transport carries the update whether or not Wi-Fi uses it.
     RadioUsers users = snapshotUsers();
 #if ENABLE_BLUETOOTH
-    if (users.g2Client) deinitG2Client();
-    if (users.bleServer) deinitBluetooth();
+    shutDownBleForCompanionReset(users);  // the companion reboots into the new image
 #endif
 #if ENABLE_ESPNOW
     if (users.espnow) cmd_espnow_deinit("");
@@ -477,7 +535,7 @@ void updateProc(void* arg) {
       snprintf(why, sizeof(why), "transfer failed after %u bytes: %s", static_cast<unsigned>(sent),
                esp_err_to_name(err));
       withMonitor([&](CompanionMonitor& m) { m.onUpdateFinished(millis(), radioHalTransportUp()); });
-      restoreUsers(users);
+      restoreUsers(users);  // after the state change: the radio gate reads it
     } else {
       // The companion reboots into the new image two seconds after activate.
       // Tear the host side down as lost, then rebuild the link, which resets
@@ -493,6 +551,8 @@ void updateProc(void* arg) {
       users.radioPoweredOff = rest.radioPoweredOff;
       radioHalStopTransport();
       ok = radioHalStartTransport() == ESP_OK;
+      // State first, then the users: the radio gate must not refuse them.
+      withMonitor([&](CompanionMonitor& m) { m.onUpdateFinished(millis(), radioHalTransportUp()); });
       if (ok) {
         applyPolicyFromSettings();
         const RadioCompanionIdentity& id = radioHalIdentity();
@@ -512,7 +572,6 @@ void updateProc(void* arg) {
       } else {
         snprintf(why, sizeof(why), "companion did not come back after the update");
       }
-      withMonitor([&](CompanionMonitor& m) { m.onUpdateFinished(millis(), radioHalTransportUp()); });
     }
   }
   if (file) file.close();
@@ -578,8 +637,8 @@ void handleEvent(const RadioHalEventData& event, uint32_t now) {
       break;
     case RadioHalEvent::CompanionBoot: {
       const CompanionState before = monitorState();
-      withMonitor([&](CompanionMonitor& m) { m.onCompanionBoot(now, static_cast<uint8_t>(event.value)); });
       const bool expected = sOpInFlight.load() || before != CompanionState::Online;
+      withMonitor([&](CompanionMonitor& m) { m.onCompanionBoot(now, static_cast<uint8_t>(event.value), expected); });
       systemEventPost(SYSEVT_COMPANION_RESTARTED, radioHalResetReasonLabel(static_cast<uint8_t>(event.value)),
                       expected ? "expected" : "unexpected");
       if (!expected) {
@@ -628,6 +687,7 @@ void dispatch(CompanionAction action, uint32_t now) {
                      companionOutageName(stats.lastOutage), stats.softRecoveries);
       broadcastOutput("[C6] Companion keeps failing; rebooting to recover the radio");
       vTaskDelay(pdMS_TO_TICKS(750));  // let the notification and log leave the device
+      gCompanionRebootMarker = kRebootMarker;
       esp_restart();
       break;
     }
@@ -655,6 +715,8 @@ void fillStatus(JsonObject out, bool full) {
   out["outage"] = companionOutageName(stats.lastOutage);
   out["auto_recover"] = (bool)gSettings.c6AutoRecover;
   out["auto_hold"] = (bool)gSettings.c6AutoHold;
+  out["reboot_escalation"] = sHardRebootAllowed;
+  out["console_mirror"] = radioHalConsoleMirrorOn();
   JsonObject fw = out["firmware"].to<JsonObject>();
   if (id.versionKnown) {
     char v[24];
@@ -814,8 +876,9 @@ const char* cmd_c6status(const String& argsInput) {
                    stats.startAttempts, stats.startFailures, stats.softRecoveries, stats.recoveriesFailed,
                    stats.hardRebootsRequested, companionOutageName(stats.lastOutage));
   if (stats.retryPending) BROADCAST_PRINTF("  Next start attempt in %ld ms", (long)(stats.nextRetryAt - now));
-  BROADCAST_PRINTF("  Auto-recover: %s, auto-hold when idle: %s", gSettings.c6AutoRecover ? "on" : "off",
-                   gSettings.c6AutoHold ? "on" : "off");
+  BROADCAST_PRINTF("  Auto-recover: %s, auto-hold when idle: %s, reboot escalation: %s, console mirror: %s",
+                   gSettings.c6AutoRecover ? "on" : "off", gSettings.c6AutoHold ? "on" : "off",
+                   sHardRebootAllowed ? "armed" : "off until power cycle", radioHalConsoleMirrorOn() ? "on" : "off");
   char last[sizeof(sLastResult)];
   portENTER_CRITICAL(&sLock);
   memcpy(last, sLastResult, sizeof(last));
@@ -920,6 +983,26 @@ const char* setBoolSetting(const String& argsInput, bool& field, const char* lab
   return getDebugBuffer();
 }
 
+const char* cmd_c6console(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(argsInput);
+  String arg = a.arg(0);
+  arg.toLowerCase();
+  if (arg.length() == 0) {
+    return radioHalConsoleMirrorOn() ? "C6 console mirror: on (the companion's log appears as C6> lines)"
+                                     : "C6 console mirror: off";
+  }
+  if (arg != "on" && arg != "off") return "Usage: c6console [on|off]";
+  const esp_err_t err = radioHalConsoleMirror(arg == "on");
+  if (err != ESP_OK) {
+    if (!ensureDebugBuffer()) return "Error: console mirror failed";
+    snprintf(getDebugBuffer(), 1024, "Error: console mirror failed: %s", esp_err_to_name(err));
+    return getDebugBuffer();
+  }
+  return arg == "on" ? "C6 console mirror on: the companion's own log appears as C6> lines"
+                     : "C6 console mirror off";
+}
+
 const char* cmd_c6autorecover(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return setBoolSetting(argsInput, gSettings.c6AutoRecover, "Companion auto-recover");
@@ -953,6 +1036,13 @@ const char* cmd_c6heartbeat(const String& argsInput) {
 // ---- public API --------------------------------------------------------------
 void radioCompanionBootInit() {
   if (sBootInitDone) return;
+  if (gCompanionRebootMarker == kRebootMarker) {
+    // The last thing the previous boot did was reboot for this companion. A
+    // second one would not help; keep retrying slowly instead.
+    gCompanionRebootMarker = 0;
+    sHardRebootAllowed = false;
+    logSystemEvent("C6", "previous boot ended in a reboot for the companion; automatic reboots are off until the next power cycle");
+  }
   radioHalSetEventHandler(onHalEvent);
   applyPolicyFromSettings();
   const bool up = radioHalPrepared() && radioHalTransportUp();
@@ -1069,6 +1159,7 @@ const CommandEntry companionCommands[] = {
   { "c6update",      "Flash companion firmware from a file over SDIO: c6update \"<path>\".", true, cmd_c6update,
     "Usage: c6update \"/sd/firmware/network_adapter.bin\"\nThe file must be an ESP32-C6 image built by tools/p4/companion (it is checked for the ESP-NOW bridge marker before anything is sent).", true },
   { "c6confirm",     "Confirm the companion's running image so it cannot roll back.", true, cmd_c6confirm },
+  { "c6console",     "Mirror the C6's own console into the P4 log: c6console [on|off].", true, cmd_c6console },
   { "c6autorecover", "Auto-recover the companion after an outage: c6autorecover [on|off] (persists).", true, cmd_c6autorecover },
   { "c6autohold",    "Hold the companion in reset while no radio feature runs: c6autohold [on|off] (persists).", true, cmd_c6autohold },
   { "c6heartbeat",   "Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists).", true, cmd_c6heartbeat },

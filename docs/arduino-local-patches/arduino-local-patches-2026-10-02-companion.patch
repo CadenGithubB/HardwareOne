@@ -62,24 +62,26 @@ diff --git a/cores/esp32/esp32-hal-hosted.c b/cores/esp32/esp32-hal-hosted.c
 diff --git a/cores/esp32/esp32-hal-bt.c b/cores/esp32/esp32-hal-bt.c
 --- a/cores/esp32/esp32-hal-bt.c
 +++ b/cores/esp32/esp32-hal-bt.c
-@@ -104,7 +104,9 @@
+@@ -104,7 +104,11 @@
    if (err != ESP_OK) return err;
    sHostedHciAttached = false;
    const int32_t before = btHostedControllerStatus();
 -  err = esp_hosted_bt_controller_disable();
-+  // [hardwareone local patch 2026-10-02] A lost companion cannot acknowledge;
-+  // its controller is gone with it, so the host records the terminal state.
-+  err = hostedTransportLost() ? ESP_OK : esp_hosted_bt_controller_disable();
++  // [hardwareone local patch 2026-10-02] A lost companion cannot acknowledge.
++  // Report that honestly: the host then records an incomplete retirement and
++  // refuses to reopen BLE until a reboot, instead of re-initialising on top of
++  // a state the controller never confirmed (seen as a BTA dispatcher crash).
++  err = hostedTransportLost() ? ESP_ERR_INVALID_STATE : esp_hosted_bt_controller_disable();
    // With an unknown starting state, disable alone does not prove initialized.
    // Deinit is idempotent and establishes the terminal state in the next phase.
    const int32_t disabledState = before == BT_HOSTED_CONTROLLER_IDLE ? BT_HOSTED_CONTROLLER_IDLE
-@@ -121,7 +123,8 @@
+@@ -121,7 +125,8 @@
    }
    // Never release C6 controller memory: BLE must be reopenable and Wi-Fi,
    // ESP-NOW, and the shared Hosted/SDIO connection must remain operational.
 -  esp_err_t err = esp_hosted_bt_controller_deinit(false);
 +  // [hardwareone local patch 2026-10-02] see btHostedControllerDisable().
-+  esp_err_t err = hostedTransportLost() ? ESP_OK : esp_hosted_bt_controller_deinit(false);
++  esp_err_t err = hostedTransportLost() ? ESP_ERR_INVALID_STATE : esp_hosted_bt_controller_deinit(false);
    hostedControllerAcknowledge(err, BT_HOSTED_CONTROLLER_IDLE);
    if (err == ESP_OK) hostedReleaseBLE();
    return err;

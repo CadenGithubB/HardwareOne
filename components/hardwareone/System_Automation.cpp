@@ -3723,7 +3723,11 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
       // Extract condition part (between IF and THEN) to stack buffer
       char conditionBuf[128];
       size_t condLen = thenPos - 3;
-      if (condLen >= sizeof(conditionBuf)) condLen = sizeof(conditionBuf) - 1;
+      if (condLen >= sizeof(conditionBuf)) {
+        strncpy(errorBuf, "Error: IF condition too long (max 127 characters)", sizeof(errorBuf) - 1);
+        errorBuf[sizeof(errorBuf) - 1] = '\0';
+        return errorBuf;
+      }
       strncpy(conditionBuf, cmdStr + 3, condLen);
       conditionBuf[condLen] = '\0';
       // Trim
@@ -3737,7 +3741,11 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
       size_t thenStart = thenPos + 5;
       size_t thenEnd = (elsePos > thenPos) ? elsePos : cmdLen;
       size_t thenLen = thenEnd - thenStart;
-      if (thenLen >= sizeof(thenBuf)) thenLen = sizeof(thenBuf) - 1;
+      if (thenLen >= sizeof(thenBuf)) {
+        strncpy(errorBuf, "Error: THEN command too long (max 127 characters)", sizeof(errorBuf) - 1);
+        errorBuf[sizeof(errorBuf) - 1] = '\0';
+        return errorBuf;
+      }
       strncpy(thenBuf, cmdStr + thenStart, thenLen);
       thenBuf[thenLen] = '\0';
       // Trim
@@ -3752,7 +3760,11 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
       if (elsePos > thenPos) {
         size_t elseStart = elsePos + 5;
         size_t elseLen = cmdLen - elseStart;
-        if (elseLen >= sizeof(elseBuf)) elseLen = sizeof(elseBuf) - 1;
+        if (elseLen >= sizeof(elseBuf)) {
+          strncpy(errorBuf, "Error: ELSE command too long (max 127 characters)", sizeof(errorBuf) - 1);
+          errorBuf[sizeof(errorBuf) - 1] = '\0';
+          return errorBuf;
+        }
         strncpy(elseBuf, cmdStr + elseStart, elseLen);
         elseBuf[elseLen] = '\0';
         // Trim

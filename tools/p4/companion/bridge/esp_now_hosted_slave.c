@@ -33,6 +33,10 @@ static const char *TAG = "hw1_now_slave";
 /* Kept in the image's read-only data so a host can verify a firmware file
  * carries this bridge before flashing it (see ESP_NOW_HOSTED_BRIDGE_MARKER). */
 __attribute__((used)) const char esp_now_hosted_bridge_marker[] = ESP_NOW_HOSTED_BRIDGE_MARKER;
+/* True between a successful OP_INIT and OP_DEINIT. esp_now_get_version() on an
+ * uninitialised ESP-NOW dereferences a null driver handle (seen on hardware:
+ * load access fault at 0x4c), so GET_INFO must not touch it before then. */
+static bool s_espnow_initialized;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t s_events;
 static QueueHandle_t s_requests;
@@ -217,6 +221,7 @@ static void process_request(const uint8_t *data, size_t len)
         EXPECT_SIZE(0);
         response.status = ensure_event_worker();
         if (response.status == ESP_OK) response.status = esp_now_init();
+        if (response.status == ESP_OK) s_espnow_initialized = true;
         if (response.status == ESP_OK) {
             portENTER_CRITICAL(&s_state_lock);
             s_epoch = req.seq;
@@ -226,6 +231,7 @@ static void process_request(const uint8_t *data, size_t len)
     case ESP_NOW_HOSTED_OP_DEINIT:
         EXPECT_SIZE(0);
         response.status = esp_now_deinit();
+        s_espnow_initialized = false;
         if (response.status == ESP_OK) {
             portENTER_CRITICAL(&s_state_lock);
             s_epoch = 0;
@@ -362,7 +368,7 @@ static void process_request(const uint8_t *data, size_t len)
         info.min_free_heap = esp_get_minimum_free_heap_size();
         info.cpu_mhz = (uint32_t)(esp_clk_cpu_freq() / 1000000);
         uint32_t version = 0;
-        if (esp_now_get_version(&version) == ESP_OK) info.native_espnow_version = version;
+        if (s_espnow_initialized && esp_now_get_version(&version) == ESP_OK) info.native_espnow_version = version;
         const esp_app_desc_t *desc = esp_app_get_description();
         if (desc) memcpy(info.build, desc->version, sizeof(info.build));
         memcpy(result, &info, sizeof(info));
@@ -424,7 +430,7 @@ static void slave_req_cb(uint32_t msg_id, const uint8_t *data, size_t len, void 
             ESP_LOGE(TAG, "request queue allocation failed; host will time out");
             return;
         }
-        if (xTaskCreate(request_task, "now_requests", 4096, NULL, 5, NULL) != pdPASS) {
+        if (xTaskCreate(request_task, "now_requests", 6144, NULL, 5, NULL) != pdPASS) {
             vQueueDelete(s_requests);
             s_requests = NULL;
             ESP_LOGE(TAG, "request worker allocation failed; host will time out");

@@ -26,6 +26,7 @@
 #include "System_Debug.h"
 #include "System_Command.h"
 #include "System_MemUtil.h"
+#include "System_CommandLimits.h"  // the client buffers match the command result ceiling
 #include "System_MQTTLifecycleGate.h"
 #include "System_User.h"
 #include "System_Utils.h"
@@ -1141,6 +1142,11 @@ bool startMQTT() {
   
   esp_mqtt_client_config_t mqtt_cfg = {};
   mqtt_cfg.broker.address.uri = brokerUri.c_str();
+  // A command envelope is parsed whole only when it fits the client's
+  // buffer; the 1 KB default delivered anything larger as unparseable pieces.
+  // Sized to the command result ceiling, in and out (8 KB of internal RAM).
+  mqtt_cfg.buffer.size = CMD_RESULT_MAX;
+  mqtt_cfg.buffer.out_size = CMD_RESULT_MAX;
   
   // TLS configuration based on mqttTLSMode: 0=None, 1=TLS (no verify), 2=TLS+Verify
   static String caCertData;  // Must persist for MQTT client lifetime

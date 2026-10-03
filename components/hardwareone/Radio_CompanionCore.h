@@ -32,6 +32,7 @@ struct CompanionPolicy {
   uint32_t heartbeatMs = 5000;        // 0 disables the heartbeat watchdog
   uint8_t missedHeartbeatsLimit = 3;  // consecutive missed beats before recovery
   uint32_t retryBackoffMs[5] = {5000, 15000, 60000, 300000, 900000};
+  bool hardRebootAllowed = true;      // false: past the limit, back off instead of rebooting the P4
   uint8_t softRecoveriesBeforeHard = 3;  // soft recoveries inside the window...
   uint32_t softRecoveryWindowMs = 600000; // ...before the next outage asks for a reboot
   uint32_t idleHoldDelayMs = 30000;   // idle this long before holding the companion
@@ -123,10 +124,12 @@ class CompanionMonitor {
 
   // CP_INIT: the companion (re)booted. Expected while we are starting or
   // recovering (we reset it); anything else means it reset underneath us.
-  void onCompanionBoot(uint32_t now, uint8_t resetReason) {
+  // `expected` is true while the owner is restarting the companion itself
+  // (the event may only be drained after the owner already reported success).
+  void onCompanionBoot(uint32_t now, uint8_t resetReason, bool expected = false) {
     stats_.bootCount++;
     stats_.lastResetReason = resetReason;
-    if (state_ == CompanionState::Online) outage(now, CompanionOutage::UnexpectedReset);
+    if (!expected && state_ == CompanionState::Online) outage(now, CompanionOutage::UnexpectedReset);
   }
 
   // ---- owner-driven operations ------------------------------------------
@@ -276,10 +279,17 @@ class CompanionMonitor {
       return;
     }
     if (recoveriesInWindow(now) >= policy_.softRecoveriesBeforeHard) {
-      stats_.hardRebootsRequested++;
-      state_ = CompanionState::Offline;
-      stats_.retryPending = false;
-      pendingAction_ = CompanionAction::HardReboot;
+      if (policy_.hardRebootAllowed) {
+        stats_.hardRebootsRequested++;
+        state_ = CompanionState::Offline;
+        stats_.retryPending = false;
+        pendingAction_ = CompanionAction::HardReboot;
+        return;
+      }
+      // Rebooting is off, or was already tried: stop churning the radio and
+      // come back on the slowest retry step instead.
+      stats_.consecutiveFailures = 5;
+      failed(now, why);
       return;
     }
     state_ = CompanionState::Recovering;

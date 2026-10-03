@@ -694,7 +694,7 @@ endif()
 # ESP32-C6 radio companion over ESP-Hosted. HAL_Radio.cpp and
 # System_RadioCompanion.cpp compile to nothing without CONFIG_ESP_WIFI_REMOTE_ENABLED.
 if(IDF_TARGET STREQUAL "esp32p4")
-    list(APPEND hardwareone_requires esp_hosted esp_now_hosted esp_event esp_timer)
+    list(APPEND hardwareone_requires esp_hosted esp_now_hosted esp_event esp_timer esp_driver_uart)
 endif()
 
 idf_component_register(

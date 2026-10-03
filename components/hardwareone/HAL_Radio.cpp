@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
@@ -41,6 +42,37 @@ constexpr int8_t kSdioD1 = 30;
 constexpr int8_t kSdioD2 = 31;
 constexpr int8_t kSdioD3 = 32;
 }  // namespace eye
+
+// ---- companion console mirror ------------------------------------------------
+// The C6's UART0 console reaches the P4 on GPIO36. Mirroring it into the P4 log
+// is the only way to see the companion's own boot messages, crashes and
+// backtraces while HardwareOne drives it (the programmer service is the
+// alternative, and it replaces the application).
+constexpr uart_port_t kConsoleUart = UART_NUM_1;
+TaskHandle_t sConsoleTask = nullptr;
+volatile bool sConsoleStop = false;
+
+void consoleTask(void*) {
+  uint8_t buf[256];
+  char line[200];
+  size_t n = 0;
+  while (!sConsoleStop) {
+    const int got = uart_read_bytes(kConsoleUart, buf, sizeof(buf), pdMS_TO_TICKS(200));
+    for (int i = 0; i < got; i++) {
+      const char c = static_cast<char>(buf[i]);
+      if (c == '\n' || n >= sizeof(line) - 1) {
+        line[n] = '\0';
+        if (n) ESP_LOGI("C6>", "%s", line);
+        n = 0;
+        if (c != '\n' && c != '\r') line[n++] = c;
+      } else if (c != '\r') {
+        line[n++] = c;
+      }
+    }
+  }
+  sConsoleTask = nullptr;
+  vTaskDelete(nullptr);
+}
 
 constexpr int kBootAttempts = 2;  // each attempt resets the C6 and waits up to ~20 s
 
@@ -236,9 +268,43 @@ esp_err_t startOnce() {
 
 }  // namespace
 
+esp_err_t radioHalConsoleMirror(bool on) {
+  if (on == (sConsoleTask != nullptr)) return ESP_OK;
+  if (on) {
+    uart_config_t cfg = {};
+    cfg.baud_rate = 115200;
+    cfg.data_bits = UART_DATA_8_BITS;
+    cfg.parity = UART_PARITY_DISABLE;
+    cfg.stop_bits = UART_STOP_BITS_1;
+    cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    cfg.source_clk = UART_SCLK_DEFAULT;
+    ESP_RETURN_ON_ERROR(uart_driver_install(kConsoleUart, 2048, 0, 0, nullptr, 0), kTag, "C6 console UART");
+    esp_err_t err = uart_param_config(kConsoleUart, &cfg);
+    if (err == ESP_OK) {
+      err = uart_set_pin(kConsoleUart, UART_PIN_NO_CHANGE, eye::kC6UartTx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    }
+    if (err == ESP_OK) {
+      sConsoleStop = false;
+      if (xTaskCreate(consoleTask, "c6console", 3072, nullptr, 3, &sConsoleTask) != pdPASS) err = ESP_ERR_NO_MEM;
+    }
+    if (err != ESP_OK) {
+      sConsoleTask = nullptr;
+      uart_driver_delete(kConsoleUart);
+      ESP_LOGW(kTag, "C6 console mirror not started: %s", esp_err_to_name(err));
+    }
+    return err;
+  }
+  sConsoleStop = true;
+  while (sConsoleTask) vTaskDelay(pdMS_TO_TICKS(20));  // the task leaves uart_read_bytes and exits
+  return uart_driver_delete(kConsoleUart);
+}
+
+bool radioHalConsoleMirrorOn() { return sConsoleTask != nullptr; }
+
 esp_err_t radioHalPrepare() {
   quietRpcLogs();
   ESP_RETURN_ON_ERROR(prepareEyeBoard(), kTag, "EYE board preparation failed");
+  radioHalConsoleMirror(true);  // not fatal; c6console off silences it
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   esp_err_t err = ESP_FAIL;
   for (int attempt = 1; attempt <= kBootAttempts; attempt++) {
@@ -392,6 +458,12 @@ esp_err_t radioHalStartTransport() {
   }
   radioHalRefreshIdentity();
   applyMonitoring();
+  if (!radioHalTransportUp()) {
+    // A transport failure arrived while the identity was being read: the
+    // companion answered the version query and then went away.
+    ESP_LOGW(kTag, "C6 answered, then the transport failed while reading its identity");
+    return ESP_FAIL;
+  }
   const RadioCompanionIdentity& id = sIdentity;
   ESP_LOGI(kTag, "C6 up: Hosted %" PRIu32 ".%" PRIu32 ".%" PRIu32 " (%s), bridge %s%s", id.major, id.minor, id.patch,
            id.versionMatches ? "qualified" : "differs from " HW1_C6_HOSTED_TAG, radioHalBridgeStateName(id.bridge),

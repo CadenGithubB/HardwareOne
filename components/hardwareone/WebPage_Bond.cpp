@@ -20,6 +20,8 @@
 #include "System_Settings.h"
 #include "System_Filesystem.h"
 #include "System_MemUtil.h"       // ps_alloc / AllocPref for batch body buffer
+#include "System_CommandLimits.h"  // the exec body and command buffers match the command limits
+#include <esp_attr.h>
 #include "System_BondedPeer.h"    // BondedPeer:: — unified accessor for the bonded worker (settings/schema sync, cache reads)
 #include "System_SelfDevice.h"    // SelfDevice:: — local MAC / name / uptime / heap accessors
 #include "System_ESPNow_Wire.h"   // V4PayloadFsListReplyHeader, V4PayloadFsEntry, FsListStatus
@@ -1345,8 +1347,13 @@ extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t 
 static esp_err_t handleBondExec(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
   
-  // Parse POST body
-  char buf[512];
+  // Parse POST body. Whole command line or nothing: the bonded link rejects
+  // what it cannot carry, and the web side must not silently shorten it first.
+  EXT_RAM_BSS_ATTR static char buf[CMD_RESULT_MAX];
+  if (req->content_len >= sizeof(buf)) {
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"Request too large\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
   int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
   if (len <= 0) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"No data\"}", HTTPD_RESP_USE_STRLEN);
@@ -1355,7 +1362,8 @@ static esp_err_t handleBondExec(httpd_req_t* req) {
   buf[len] = '\0';
   
   // Parse command
-  char cmdParam[256] = {0};
+  EXT_RAM_BSS_ATTR static char cmdParam[CMD_INPUT_MAX + 1];
+  cmdParam[0] = '\0';
   char* cmdStart = strstr(buf, "cmd=");
   if (cmdStart) {
     cmdStart += 4;
@@ -1375,6 +1383,10 @@ static esp_err_t handleBondExec(httpd_req_t* req) {
       }
     }
     *out = '\0';
+    if (*cmdStart && *cmdStart != '&') {
+      httpd_resp_send(req, "{\"success\":false,\"error\":\"Command too long\"}", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
   }
   
   if (strlen(cmdParam) == 0) {

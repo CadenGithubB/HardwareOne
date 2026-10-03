@@ -110,6 +110,27 @@ static void repeated_outages_escalate_to_a_reboot() {
   late.onBootResult(0, true);
   late.onTransportFailure(1000);
   assert(late.tick(1000) == CompanionAction::Recover);
+  // With rebooting disallowed (the previous boot already was one), the same
+  // overflow goes Offline on the slowest retry step instead of rebooting.
+  CompanionPolicy q = p;
+  q.hardRebootAllowed = false;
+  CompanionMonitor n(q);
+  n.onBootResult(0, true);
+  now = 1000;
+  for (int i = 0; i < 2; i++) {
+    n.onTransportFailure(now);
+    assert(n.tick(now) == CompanionAction::Recover);
+    n.onRecoveryStarted(now);
+    now += 3000;
+    n.onRecoveryResult(now, true);
+  }
+  n.onTransportFailure(now + 100);
+  assert(n.tick(now + 100) == CompanionAction::None);
+  assert(n.state() == CompanionState::Offline);
+  assert(n.stats().hardRebootsRequested == 0);
+  assert(n.stats().retryPending);
+  assert(n.stats().nextRetryAt == now + 100 + q.retryBackoffMs[4]);
+  assert(n.tick(now + 100 + q.retryBackoffMs[4]) == CompanionAction::StartTransport);
   late.onRecoveryStarted(1000);
   late.onRecoveryResult(2000, true);
   late.onTransportFailure(200000);
