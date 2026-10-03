@@ -12,11 +12,12 @@ inline uint32_t word(const uint8_t* p) {
 }
 inline bool valid_size(size_t bytes) { return bytes==kHeaderBytes+identity::kCompressedBytes; }
 // Only a complete, exactly identified envelope may reach decompression. The
+// codec is pinned too: 1 = zlib payload, 0 = stored (payload is the raw graph). The
 // runtime separately verifies the decompressed SHA before invoking ESP-DL.
 inline bool valid_header(const uint8_t* header,size_t available,size_t bytes) {
     return header && available==kHeaderBytes && valid_size(bytes)
         && std::memcmp(header,"HW1STT1\0",8)==0
-        && word(header+8)==1 && word(header+12)==1
+        && word(header+8)==1 && word(header+12)==identity::kCodec
         && word(header+16)==identity::kRawBytes && word(header+20)==identity::kCompressedBytes
         && word(header+24)==identity::kSampleRate && word(header+28)==identity::kMaxSamples
         && std::memcmp(header+32,identity::kRawSha,32)==0

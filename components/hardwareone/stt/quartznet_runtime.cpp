@@ -4,6 +4,9 @@
 #include "stt_model_container.h"
 #include "dl_model_base.hpp"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_task_wdt.h"
+#include "sdkconfig.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,6 +39,48 @@ void stageProfileReset() {
 namespace {
 static_assert(kSampleRate==identity::kSampleRate && kMaxSamples==identity::kMaxSamples);
 uint32_t millis() { return uint32_t(esp_timer_get_time()/1000); }
+// Inference is deliberately CPU-bound on both cores: ESP-DL runs each layer
+// on two workers at this task's priority, so core 0's idle task can go
+// unscheduled for several seconds on a long 15x5 segment and the task
+// watchdog reports it (a false alarm; nothing is stuck). For the duration
+// of one inference only, stop watching IDLE0; everything else keeps the
+// sdkconfig watchdog settings, which are restored exactly afterwards.
+// Lowering the workers' priority instead halved inference speed while BLE
+// was busy on core 0 (measured 2026-09-30), so priority is left unchanged.
+class InferenceWatchdogScope {
+ public:
+    InferenceWatchdogScope() {
+#if CONFIG_ESP_TASK_WDT_INIT && CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+        active_ = esp_task_wdt_reconfigure(&config(false)) == ESP_OK;
+#endif
+    }
+    ~InferenceWatchdogScope() {
+#if CONFIG_ESP_TASK_WDT_INIT && CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+        if(active_) esp_task_wdt_reconfigure(&config(true));
+#endif
+    }
+    InferenceWatchdogScope(const InferenceWatchdogScope&)=delete;
+    InferenceWatchdogScope& operator=(const InferenceWatchdogScope&)=delete;
+ private:
+#if CONFIG_ESP_TASK_WDT_INIT && CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+    static const esp_task_wdt_config_t& config(bool watchCore0) {
+        static esp_task_wdt_config_t c;
+        c.timeout_ms = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000;
+        c.idle_core_mask = (watchCore0 ? 1u : 0u)
+#if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
+                         | 2u
+#endif
+                         ;
+#if CONFIG_ESP_TASK_WDT_PANIC
+        c.trigger_panic = true;
+#else
+        c.trigger_panic = false;
+#endif
+        return c;
+    }
+#endif
+    bool active_ = false;
+};
 bool cancelled(const STTLocalControl& c) { return c.cancelled && c.cancelled(c.context); }
 void progress(const STTLocalControl& c, STTLocalPhase phase) { if(c.progress)c.progress(c.context,phase); }
 struct Buffer {
@@ -60,6 +105,28 @@ bool digest(const void* data, size_t bytes, uint8_t* hash) {
 }
 // ROM streaming inflate uses a non-wrapping output buffer of exactly the pinned
 // size. No untrusted length reaches ESP-DL's unchecked flatbuffer parser.
+// Time spent inside reader calls during the current load (card/file I/O only).
+int64_t gLoadReadUs = 0;
+bool timedRead(ModelReader& r, void* dest, size_t size) {
+    const int64_t start=esp_timer_get_time();
+    const bool ok=readExact(r,dest,size);
+    gLoadReadUs+=esp_timer_get_time()-start;
+    return ok;
+}
+// Stored (codec 0) graph: read straight into the final buffer in large blocks.
+// A 20 MB graph in 4 KB reads spends most of its time in per-call file-system
+// and SDMMC overhead; 256 KB transfers let the driver stream multi-block DMA.
+bool readStoredModel(ModelReader& r, uint8_t* raw, const STTLocalControl& control) {
+    constexpr size_t kBlock=256*1024;
+    for(size_t done=0;done<identity::kRawBytes;) {
+        if(cancelled(control))return false;
+        const size_t n=std::min(kBlock,identity::kRawBytes-done);
+        if(!timedRead(r,raw+done,n))return false;
+        done+=n;
+        vTaskDelay(1);
+    }
+    return true;
+}
 bool inflateModel(ModelReader& r, uint8_t* raw, const STTLocalControl& control) {
     Buffer workspace(sizeof(tinfl_decompressor)+4096);
     if(!workspace.p)return false;
@@ -71,7 +138,7 @@ bool inflateModel(ModelReader& r, uint8_t* raw, const STTLocalControl& control) 
         if(cancelled(control))return false;
         if(available==offset && left) {
             available=std::min(left,size_t(4096));offset=0;
-            if(!readExact(r,in,available))return false;
+            if(!timedRead(r,in,available))return false;
             left-=available;
         }
         size_t n=available-offset, out=identity::kRawBytes-output;
@@ -144,9 +211,23 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     if(!reused) {
         Buffer candidate(identity::kRawBytes);
         if(!candidate.p)return fail("Cannot allocate STT model");
-        if(!inflateModel(reader,static_cast<uint8_t*>(candidate.p),control))return fail(cancelled(control)?"Cancelled":"STT model decompression failed");
+        gLoadReadUs=0;
+        const int64_t loadStart=esp_timer_get_time();
+        const bool loaded=identity::kCodec==0
+            ? readStoredModel(reader,static_cast<uint8_t*>(candidate.p),control)
+            : inflateModel(reader,static_cast<uint8_t*>(candidate.p),control);
+        if(!loaded)return fail(cancelled(control)?"Cancelled":"STT model read failed");
+        const int64_t hashStart=esp_timer_get_time();
         uint8_t hash[32];
         if(!digest(candidate.p,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32))return fail("STT model checksum mismatch");
+        const int64_t hashEnd=esp_timer_get_time();
+        // Once per session (weights are cached after this), so always logged.
+        ESP_LOGI("STT","model %u bytes %s: read %lu ms, inflate %lu ms, sha256 %lu ms, total %lu ms",
+                 unsigned(identity::kRawBytes),identity::kCodec==0?"stored":"zlib",
+                 (unsigned long)(gLoadReadUs/1000),
+                 (unsigned long)((hashStart-loadStart-gLoadReadUs)/1000),
+                 (unsigned long)((hashEnd-hashStart)/1000),
+                 (unsigned long)((hashEnd-loadStart)/1000));
         if(cancelled(control))return fail("Cancelled");
         weights.raw_=candidate.release(); // publish only fully verified weights
     }
@@ -231,6 +312,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
 #endif
     if(cancelled(control))return fail("Cancelled");
     progress(control,STTLocalPhase::Inference);start=millis();
+    InferenceWatchdogScope watchdogScope;
     for(int stage=0;stage<identity::kNodeCount;++stage) {
         if(cancelled(control))return fail("Cancelled");
         const int64_t stageStart=esp_timer_get_time();

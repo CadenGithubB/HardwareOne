@@ -148,7 +148,7 @@ void missing() {
     assert(run(nullptr)=="greedy");
     // One existence probe per session/one-shot, never an open; logged once per boot.
     assert(fake::state.exists[kLm]==3 && fake::state.opens[kLm]==0 && fake::state.exists[kWords]==0);
-    assert(fake::state.logs.size()==1 && logged("I [STT] No /STT Models/meeting.lm"));
+    assert(fake::state.logs.size()==1 && logged("I [STT] No /sd/STT Models/meeting.lm or /STT Models/meeting.lm"));
 }
 void loadedOncePerSession() {
     reset(); fake::state.files[kLm]=meetingLm();
@@ -163,7 +163,7 @@ void loadedOncePerSession() {
     }
     assert(fake::state.heap.empty()); // session destruction frees the LM
     assert(run(nullptr)=="cat" && fake::state.heap.empty() && fake::state.lastCache==nullptr);
-    assert(fake::state.opens[kLm]==2 && logged("I [STT] Language model: 4 words, 0 bigrams, 0 trigrams, beam 8, 0 custom words")==1);
+    assert(fake::state.opens[kLm]==2 && logged("I [STT] Language model /STT Models/meeting.lm: 4 words, 0 bigrams, 0 trigrams, beam 8, 0 custom words")==1);
     assert(fake::state.logs.size()==1);
 }
 void customWords() {

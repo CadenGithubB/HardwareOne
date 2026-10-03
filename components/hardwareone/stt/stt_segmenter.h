@@ -28,6 +28,21 @@ struct SegmenterConfig {
     // Callers may tune these for other microphones or acoustic conditions.
     uint16_t adaptive_speech_floor=45;
     uint16_t adaptive_silence_floor=16;
+    // Opt-in for microphones with a jittery noise floor (e.g. the G2 glasses
+    // mic, whose quiet frames swing ~21..60+ RMS). 0 keeps the minimum of the
+    // window; 25 uses its lower quartile, which tracks the real background
+    // instead of its quietest 10 ms frame.
+    uint8_t noise_percentile=0;
+    // Opt-in: louder runs up to this long do not restart the end-silence
+    // count (a click or codec blip is not speech). 0 keeps the strict rule.
+    size_t silence_blip_samples=0;
+    // Opt-in: when a segment reaches max_segment_samples without a pause, cut
+    // in the middle of the quietest 10 ms frame within its last N samples
+    // (usually a gap between words) instead of at the exact limit. Samples
+    // after the cut start the continuation as fresh audio (not overlap), so
+    // every sample is still delivered exactly once. 0 cuts at the limit.
+    // Requires forced_overlap_samples == 0.
+    size_t hard_cut_search_samples=0;
 };
 enum class SegmentEnd : uint8_t { Pause, HardLimit, SessionEnd };
 enum class SegmentStatus : uint8_t { Ok, Ready, Finished, InvalidArgument, NotInitialized, CounterOverflow };
@@ -57,7 +72,8 @@ public:
         buffer_=buffer;config_=config;initialized_=true;reset_session();return true;
     }
     void reset_session() {
-        seen_=start_=fresh_start_=0;used_=head_=history_=voice_=silence_=0;
+        seen_=start_=fresh_start_=0;used_=head_=history_=voice_=silence_=0;loud_run_=0;
+        cut_=carry_voice_=0;
         frame_count_=0;frame_sum_=0;frame_square_=0;
         active_=continuation_=ready_=finishing_=finished_=false;segment_={};
         calibrated_=!config_.adaptive;heard_speech_=false;calibration_seen_=0;
@@ -109,7 +125,12 @@ public:
     SegmentStatus finish() {
         if(!initialized_)return SegmentStatus::NotInitialized;
         finishing_=true;
-        if(ready_)return SegmentStatus::Ready;
+        if(ready_) {
+            // A pending quiet-point cut would leave its carry behind when the
+            // session seals on release: deliver the whole buffer instead.
+            if(cut_) { segment_.samples=used_;segment_.end_sample=seen_;cut_=carry_voice_=0; }
+            return SegmentStatus::Ready;
+        }
         if(finished_)return SegmentStatus::Finished;
         if(frame_count_) { evaluate_frame(true);clear_frame(); }
         if(active_ && eligible()) { publish(SegmentEnd::SessionEnd);return SegmentStatus::Ready; }
@@ -119,7 +140,15 @@ public:
         if(!ready_)return false;
         ready_=false;
         if(finishing_) { active_=false;finished_=true;return true; }
-        if(segment_.end==SegmentEnd::HardLimit) {
+        if(segment_.end==SegmentEnd::HardLimit && cut_) {
+            // Quiet-point cut: the samples after the cut were never delivered,
+            // so they open the continuation as fresh audio.
+            const size_t keep=used_-cut_;
+            if(keep)std::memmove(buffer_,buffer_+cut_,keep*sizeof(int16_t));
+            used_=keep;start_=seen_-keep;fresh_start_=start_;
+            voice_=carry_voice_;silence_=0;active_=true;continuation_=true;
+            cut_=carry_voice_=0;
+        } else if(segment_.end==SegmentEnd::HardLimit) {
             const size_t keep=config_.forced_overlap_samples;
             if(keep)std::memmove(buffer_,buffer_+used_-keep,keep*sizeof(int16_t));
             used_=keep;start_=seen_-keep;fresh_start_=seen_;
@@ -127,7 +156,7 @@ public:
         } else {
             // Already-delivered trailing silence must not become a new segment's
             // pre-roll: the default zero-overlap mode is exactly nonoverlapping.
-            used_=head_=history_=voice_=silence_=0;active_=continuation_=false;
+            used_=head_=history_=voice_=silence_=0;loud_run_=0;active_=continuation_=false;
             reset_utterance_levels();
         }
         segment_={};return true;
@@ -147,7 +176,11 @@ private:
                 && c.calibration_samples>=kSegmentAnalysisSamples
                 && c.calibration_samples<=kSegmentNoiseWindowFrames*kSegmentAnalysisSamples && aligned(c.calibration_samples)
                 && c.adaptive_speech_floor>0 && c.adaptive_speech_floor<=32767
-                && c.adaptive_silence_floor>0 && c.adaptive_silence_floor<=c.adaptive_speech_floor));
+                && c.adaptive_silence_floor>0 && c.adaptive_silence_floor<=c.adaptive_speech_floor))
+            && c.noise_percentile<=50 && aligned(c.silence_blip_samples)
+            && c.silence_blip_samples<c.end_silence_samples
+            && aligned(c.hard_cut_search_samples) && c.hard_cut_search_samples<=c.max_segment_samples/2
+            && (!c.hard_cut_search_samples || !c.forced_overlap_samples);
     }
     size_t history_capacity() const { return config_.pre_roll_samples+kSegmentAnalysisSamples; }
     void append_history(int16_t sample) {
@@ -162,7 +195,7 @@ private:
         // A full ring contains pre-roll plus the triggering analysis frame.
         if(head_) { reverse(0,head_);reverse(head_,history_);reverse(0,history_); }
         used_=history_;start_=seen_-used_;fresh_start_=start_;
-        head_=history_=voice_=silence_=0;active_=true;continuation_=false;
+        head_=history_=voice_=silence_=0;loud_run_=0;active_=true;continuation_=false;
     }
     bool eligible() const { return voice_>0 && (continuation_ || voice_>=config_.min_voice_samples); }
     void clear_frame() { frame_count_=0;frame_sum_=0;frame_square_=0; }
@@ -209,12 +242,17 @@ private:
         if(!active_ && voiced)begin_segment();
         if(!active_)return;
         if(voiced)voice_+=frame_count_;
-        if(silent)silence_+=frame_count_;else silence_=0;
+        if(silent) { silence_+=frame_count_; loud_run_=0; }
+        else {
+            loud_run_+=frame_count_;
+            if(loud_run_>config_.silence_blip_samples)silence_=0;
+        }
         if(finalizing)return;
         const bool pause=used_>=config_.min_segment_samples && silence_>=config_.end_silence_samples;
         if(pause || used_>=config_.max_segment_samples) {
-            if(eligible())publish(pause?SegmentEnd::Pause:SegmentEnd::HardLimit);
-            else discard_candidate();
+            if(!eligible())discard_candidate();
+            else if(pause || !config_.hard_cut_search_samples)publish(pause?SegmentEnd::Pause:SegmentEnd::HardLimit);
+            else publish_quiet_cut();
         }
     }
     static uint16_t integer_sqrt(uint32_t value) {
@@ -231,9 +269,31 @@ private:
         noise_window_[noise_head_]=level;
         noise_head_=(noise_head_+1)%config_.noise_window_frames;
         if(noise_count_<config_.noise_window_frames)++noise_count_;
-        uint16_t minimum=noise_window_[0];
-        for(size_t i=1;i<noise_count_;++i)if(noise_window_[i]<minimum)minimum=noise_window_[i];
-        return minimum;
+        return window_floor();
+    }
+    // Minimum (default) or a low percentile of the ambient window. Percentiles
+    // use a 2-RMS-wide histogram (0..190, larger levels in the last bin): no
+    // copy of the window and 192 bytes of stack on the real-time capture task.
+    uint16_t window_floor() const {
+        if(!noise_count_)return 0;
+        if(!config_.noise_percentile) {
+            uint16_t minimum=noise_window_[0];
+            for(size_t i=1;i<noise_count_;++i)if(noise_window_[i]<minimum)minimum=noise_window_[i];
+            return minimum;
+        }
+        constexpr size_t kBins=96, kWidth=2;
+        uint16_t bins[kBins]{};
+        for(size_t i=0;i<noise_count_;++i) {
+            const size_t bin=noise_window_[i]/kWidth;
+            ++bins[bin<kBins?bin:kBins-1];
+        }
+        const size_t rank=noise_count_*config_.noise_percentile/100;
+        size_t seen=0;
+        for(size_t b=0;b<kBins;++b) {
+            seen+=bins[b];
+            if(seen>rank)return static_cast<uint16_t>(b*kWidth);
+        }
+        return static_cast<uint16_t>((kBins-1)*kWidth);
     }
     uint16_t onset_threshold() const {
         uint16_t threshold=static_cast<uint16_t>(2*noise_rms_);
@@ -244,8 +304,7 @@ private:
         heard_speech_=false;peak_rms_=0;
         if(config_.adaptive) {
             if(noise_count_) {
-                noise_rms_=noise_window_[0];
-                for(size_t i=1;i<noise_count_;++i)if(noise_window_[i]<noise_rms_)noise_rms_=noise_window_[i];
+                noise_rms_=window_floor();
             }
             threshold_rms_=onset_threshold();
         }
@@ -255,6 +314,49 @@ private:
                   end==SegmentEnd::HardLimit?config_.forced_overlap_samples:0,voice_,end,continuation_};
         ready_=true;
     }
+    // Hard limit with hard_cut_search_samples: find the analysis frame with the
+    // least DC-removed energy in the last N samples (latest wins ties: the
+    // shorter carry) and cut at its START, so the phrase ends in the quiet and
+    // the carry stays a whole number of frames. Cuts must stay on the stream's
+    // frame grid: limits are only checked at frame ends, and a carry of a
+    // fractional frame would let the next phrase overrun the buffer (found by
+    // ASan, 2026-10-02). Frames after the cut above the current threshold count
+    // as the carry's voice, so a word right after the cut is not dropped as
+    // silence if speech stops. Once per hard limit: N/160 frames of integer math.
+    void publish_quiet_cut() {
+        constexpr size_t F=kSegmentAnalysisSamples;
+        // Buffer index i is a frame start when (start_+i) is on the grid.
+        const size_t phase=static_cast<size_t>((F-start_%F)%F);
+        const size_t search=config_.hard_cut_search_samples;
+        size_t first=used_>search ? used_-search : 0;
+        if(first<phase)first=phase;
+        first+=(F-(first-phase)%F)%F;
+        size_t best=0;   // 0: no candidate, cut at the limit
+        uint64_t best_energy=std::numeric_limits<uint64_t>::max();
+        for(size_t at=first; at+F<=used_; at+=F) {
+            if(!at)continue;  // never an empty phrase
+            const uint64_t e=frame_energy(at);
+            if(e<=best_energy) { best_energy=e; best=at; }
+        }
+        if(!best) { publish(SegmentEnd::HardLimit); return; }
+        cut_=best;
+        carry_voice_=0;
+        const uint64_t limit=uint64_t(threshold_rms_)*threshold_rms_*F*F;
+        for(size_t at=best; at+F<=used_; at+=F)
+            if(frame_energy(at)>=limit)carry_voice_+=F;
+        segment_={buffer_,cut_,start_,start_+cut_,fresh_start_,static_cast<size_t>(fresh_start_-start_),
+                  0,voice_,SegmentEnd::HardLimit,continuation_};
+        ready_=true;
+    }
+    // n^2 * variance of one analysis frame (same scale as evaluate_frame).
+    uint64_t frame_energy(size_t at) const {
+        int64_t sum=0; uint64_t square=0;
+        for(size_t i=0;i<kSegmentAnalysisSamples;++i) {
+            const int32_t v=buffer_[at+i];
+            sum+=v; square+=static_cast<uint64_t>(static_cast<int64_t>(v)*v);
+        }
+        return square*kSegmentAnalysisSamples-static_cast<uint64_t>(sum*sum);
+    }
     void discard_candidate() {
         const size_t fresh=static_cast<size_t>(seen_-fresh_start_);
         size_t keep=used_<history_capacity()?used_:history_capacity();
@@ -262,14 +364,15 @@ private:
         // context. Only fresh samples may seed a subsequent ordinary pre-roll.
         if(keep>fresh)keep=fresh;
         if(keep)std::memmove(buffer_,buffer_+used_-keep,keep*sizeof(int16_t));
-        history_=keep;head_=used_=voice_=silence_=0;active_=continuation_=false;
+        history_=keep;head_=used_=voice_=silence_=0;loud_run_=0;active_=continuation_=false;
         reset_utterance_levels();
     }
     int16_t* buffer_=nullptr;
     SegmenterConfig config_{};
     SpeechSegment segment_{};
     uint64_t seen_=0,start_=0,fresh_start_=0;
-    size_t used_=0,head_=0,history_=0,voice_=0,silence_=0;
+    size_t used_=0,head_=0,history_=0,voice_=0,silence_=0,loud_run_=0;
+    size_t cut_=0,carry_voice_=0;  // pending quiet-point cut (publish_quiet_cut -> release)
     int64_t frame_sum_=0;
     uint64_t frame_square_=0;
     uint16_t frame_count_=0;

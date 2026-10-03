@@ -19,6 +19,9 @@
 #include <ArduinoJson.h>
 #include <esp_random.h>
 #include <algorithm>
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#endif
 #include <cmath>
 #include <cstring>
 
@@ -41,6 +44,17 @@ struct STTRun {
   STTSnapshot snapshot;
   uint32_t startedMs = 0;
   uint32_t completedMs = 0;
+  // When continuous capture stopped (0 while recording). The session clock
+  // the UIs show is recording time, so it freezes here even though the worker
+  // keeps transcribing the tail afterwards.
+  uint32_t captureEndedMs = 0;
+  uint32_t captureStartedMs = 0;  // audio sample 0 of this session (timeline log)
+  uint8_t captureSource = 0;
+  // Native G2 (Conversate) capture: the exact left-temple connection that the
+  // native session's audio belongs to (0 = ordinary STT-owned capture), and
+  // whether that session is paused by the wearer.
+  uint32_t nativeG2Generation = 0;
+  bool paused = false;
   bool cancelRequested = false;
   bool finishRequested = false;
   AudioSource requestedSource = AUDIO_SRC_NONE;
@@ -387,10 +401,55 @@ struct StreamRun {
   uint32_t draftSequence = 0;
   size_t draftTakenSamples = 0;  // capture-side: length at the last snapshot
   bool draftReady = false, draftBusy = false;
+  // Compute time of the last completed draft. The next snapshot waits for at
+  // least this much new audio, so drafts can never occupy more than about
+  // half the worker's time, whatever the model's cost (15x5 ~ 3x the 5x5).
+  uint32_t lastDraftMs = 0;
   bool captureDone = false;
   bool failed = false;
   uint32_t clockMs = 0;
+  uint32_t nativeGeneration = 0;  // see STTRun::nativeG2Generation
+  // Glasses-mic faults survived instead of ending the session (capture task
+  // counts under gSTTMux; the worker logs changes). Conversate owns the
+  // session's lifetime, and a few lost 10 ms frames or one dropped phrase
+  // must not end the captions or split the saved transcript.
+  uint32_t lossEvents = 0, droppedSegments = 0, stalls = 0;
+  uint32_t loggedFaults = 0;  // worker-side: sum already logged
 };
+// Timeline level samples: written by the capture task under gSTTMux, printed
+// by the STT worker (never by the real-time capture task).
+#ifdef ESP_PLATFORM
+struct TLLevel { uint32_t t; uint16_t rms, noise, thr; bool open; };
+static constexpr uint32_t kTLLevels = 64;
+static TLLevel gTLLevels[kTLLevels];
+static uint32_t gTLLevelHead = 0, gTLLevelTail = 0;
+#endif
+static void sttDrainLevelLog(StreamRun& run) {
+#ifdef ESP_PLATFORM
+  portENTER_CRITICAL(&gSTTMux);
+  const uint32_t loss = run.lossEvents, dropped = run.droppedSegments, stalls = run.stalls;
+  const uint32_t overruns = gSTT.snapshot.audioOverruns;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (loss + dropped + stalls != run.loggedFaults) {
+    run.loggedFaults = loss + dropped + stalls;
+    ESP_LOGW("STT", "TL fault audio_loss=%lu (frames %lu) dropped_phrases=%lu mic_stalls=%lu; session continues",
+             (unsigned long)loss, (unsigned long)overruns, (unsigned long)dropped, (unsigned long)stalls);
+  }
+  for (;;) {
+    TLLevel e{};
+    bool have = false;
+    portENTER_CRITICAL(&gSTTMux);
+    if (gTLLevelHead - gTLLevelTail > kTLLevels) gTLLevelTail = gTLLevelHead - kTLLevels;
+    if (gTLLevelTail != gTLLevelHead) { e = gTLLevels[gTLLevelTail++ % kTLLevels]; have = true; }
+    portEXIT_CRITICAL(&gSTTMux);
+    if (!have) break;
+    ESP_LOGI("STT", "TL level t=%lu rms=%u noise=%u thr=%u open=%d", (unsigned long)e.t,
+             unsigned(e.rms), unsigned(e.noise), unsigned(e.thr), e.open ? 1 : 0);
+  }
+#else
+  (void)run;
+#endif
+}
 static void sttStreamTick(StreamRun& run) {
   portENTER_CRITICAL(&gSTTMux);
   const uint32_t now = millis();
@@ -410,6 +469,19 @@ static bool sttStreamCancelled(void* context) {
   const bool failed = run.failed;
   portEXIT_CRITICAL(&gSTTMux);
   return failed || sttCancelled(&run.token);
+}
+// A draft is only provisional text. Abandon it (the runtime checks between
+// model stages) as soon as a finished segment is queued, so a final result
+// never waits behind a whole draft of a long utterance.
+static bool sttDraftPreempted(void* context) {
+  auto& run = *static_cast<StreamRun*>(context);
+  bool finalWaiting = false;
+  portENTER_CRITICAL(&gSTTMux);
+  for (const auto& candidate : run.slots) {
+    if (candidate.state == StreamSlotState::Ready) { finalWaiting = true; break; }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  return finalWaiting || sttStreamCancelled(context);
 }
 static void sttStreamProgress(void* context, STTLocalPhase phase) {
   auto& run = *static_cast<StreamRun*>(context);
@@ -527,6 +599,16 @@ static bool sttQueueSegment(StreamRun& run) {
   }
   const bool exhausted = gSTT.snapshot.segmentsCaptured == UINT32_MAX;
   portEXIT_CRITICAL(&gSTTMux);
+  if (!slot && !exhausted && run.nativeGeneration) {
+    // Conversate: drop this phrase (it is never shown or saved) and keep the
+    // session; the backlog drains and later phrases continue in order.
+    portENTER_CRITICAL(&gSTTMux);
+    ++run.droppedSegments;
+    portEXIT_CRITICAL(&gSTTMux);
+    // Release it, or the segmenter stays Ready and capture stalls until a slot
+    // frees (then queues the "dropped" phrase late after all).
+    return run.segmenter.release();
+  }
   if (!slot || exhausted) {
     sttStreamFail(run, exhausted ? "STT sequence exhausted; start a new session"
                                 : "STT audio queue full; backend cannot keep up");
@@ -558,19 +640,28 @@ static void sttCaptureWorker(void* context) {
     if (audioCaptureBusy() || micRecordingBusy() || gMicRunning) {
       sttStreamFail(run, "Audio became busy; close SR/mic and retry"); break;
     }
-    if (run.requested != AUDIO_SRC_NONE && !audioSourceAvailable(run.requested)) {
-      sttStreamFail(run, "Selected microphone is unavailable"); break;
-    }
-    selected = audioSetSource(run.requested);
-    if (!selected || !audioCaptureStart("stt", STT_SAMPLE_RATE)) {
-      sttStreamFail(run, "Could not claim microphone; close SR/mic first"); break;
+    if (run.nativeGeneration) {
+      // Conversate owns the glasses mic lifecycle (START/pause/close); claim
+      // its native stream for this exact connection. The HAL selects the left
+      // G2 source itself and restores the previous source on release.
+      if (!audioCaptureStartG2Native("stt", run.nativeGeneration)) {
+        sttStreamFail(run, "Could not claim the Conversate microphone"); break;
+      }
+    } else {
+      if (run.requested != AUDIO_SRC_NONE && !audioSourceAvailable(run.requested)) {
+        sttStreamFail(run, "Selected microphone is unavailable"); break;
+      }
+      selected = audioSetSource(run.requested);
+      if (!selected || !audioCaptureStart("stt", STT_SAMPLE_RATE)) {
+        sttStreamFail(run, "Could not claim microphone; close SR/mic first"); break;
+      }
     }
     claimed = true;
     source = audioGetSource();
     if (run.requested != AUDIO_SRC_NONE && source != run.requested) {
       sttStreamFail(run, "Selected microphone changed during startup"); break;
     }
-    if (source == AUDIO_SRC_G2_LEFT) g2Held = sttG2CaptureBegin();
+    if (source == AUDIO_SRC_G2_LEFT && !run.nativeGeneration) g2Held = sttG2CaptureBegin();
     audioTrimBufferedPcm("stt", 0);
     uint32_t initialOverruns = 0;
     if (!audioCaptureOverruns("stt", &initialOverruns)) {
@@ -588,28 +679,51 @@ static void sttCaptureWorker(void* context) {
     gSTT.snapshot.state = STTState::Preparing;
     gSTT.snapshot.captureActive = true;
     gSTT.snapshot.audioSource = static_cast<uint8_t>(source);
+    gSTT.captureStartedMs = millis();
+    gSTT.captureSource = static_cast<uint8_t>(source);
     portEXIT_CRITICAL(&gSTTMux);
     uint32_t lastAudioMs = millis();
+    bool wasPaused = false;
+    size_t pauseSilence = 0;  // zero samples still to feed after a pause edge
     while (!sttStreamCancelled(&run)) {
-      bool finish;
+      bool finish, paused;
       portENTER_CRITICAL(&gSTTMux);
       finish = gSTT.finishRequested;
+      paused = gSTT.paused;
       portEXIT_CRITICAL(&gSTTMux);
       if (finish) break;
+      // A native pause stops PCM delivery. Feed one second of silence so the
+      // phrase in progress can end on its normal pause rule, then wait without
+      // treating the missing audio as a failed microphone.
+      if (paused && !wasPaused) pauseSilence = STT_SAMPLE_RATE;
+      wasPaused = paused;
+      if (paused) lastAudioMs = millis();
       if (!audioCaptureOwnedBy("stt") || !audioCaptureActive() || !audioSourceAvailable(source)) {
         sttStreamFail(run, "Microphone source lost"); break;
       }
-      const size_t count = audioReadPcm(block, kStreamReadSamples, 80);
+      size_t count = audioReadPcm(block, kStreamReadSamples, 80);
       if (count > kStreamReadSamples) { sttStreamFail(run, "Invalid microphone sample count"); break; }
+      if (!count && paused && pauseSilence) {
+        count = std::min<size_t>(kStreamReadSamples, pauseSilence);
+        memset(block, 0, count * sizeof(block[0]));
+        pauseSilence -= count;
+      }
       uint32_t overruns = 0;
       if (!audioCaptureOverruns("stt", &overruns)) {
         sttStreamFail(run, "Microphone integrity monitor lost"); break;
       }
       if (overruns != initialOverruns) {
         portENTER_CRITICAL(&gSTTMux);
-        gSTT.snapshot.audioOverruns = overruns - initialOverruns;
+        gSTT.snapshot.audioOverruns = overruns;  // startup required a zero baseline
+        if (source == AUDIO_SRC_G2_LEFT) ++run.lossEvents;
         portEXIT_CRITICAL(&gSTTMux);
-        sttStreamFail(run, "Microphone audio loss detected; session stopped"); break;
+        // Glasses mic: lost LC3 frames are already concealed (PLC) and a short
+        // gap only nudges a caption; count it and continue. The onboard mic
+        // keeps the strict rule (a gap there means the device is overloaded).
+        if (source != AUDIO_SRC_G2_LEFT) {
+          sttStreamFail(run, "Microphone audio loss detected; session stopped"); break;
+        }
+        initialOverruns = overruns;
       }
       if (count) {
         lastAudioMs = millis();
@@ -641,8 +755,10 @@ static void sttCaptureWorker(void* context) {
           const uint32_t nextSequence = gSTT.snapshot.segmentsCaptured + 1;
           const bool idle = !run.draftReady && !run.draftBusy;
           if (run.draftSequence != nextSequence) run.draftTakenSamples = 0;
+          const size_t paceSamples = std::max<size_t>(STT_SAMPLE_RATE * 6 / 10,
+                                                      size_t(run.lastDraftMs) * (STT_SAMPLE_RATE / 1000));
           const bool grown = liveSamples >= STT_SAMPLE_RATE &&
-                             liveSamples >= run.draftTakenSamples + STT_SAMPLE_RATE * 6 / 10;
+                             liveSamples >= run.draftTakenSamples + paceSamples;
           portEXIT_CRITICAL(&gSTTMux);
           if (idle && grown) {
             memcpy(run.draftPcm, live, liveSamples * sizeof(int16_t));
@@ -660,6 +776,23 @@ static void sttCaptureWorker(void* context) {
         gSTT.snapshot.rms = run.segmenter.current_rms();
         gSTT.snapshot.noiseRms = run.segmenter.noise_rms();
         gSTT.snapshot.thresholdRms = run.segmenter.threshold_rms();
+#ifdef ESP_PLATFORM
+        {
+          // Timeline: once a second, the endpointing inputs (is a phrase open?).
+          static uint32_t lastLevelLogMs = 0;
+          const uint32_t nowMs = millis();
+          if (nowMs - lastLevelLogMs >= 1000) {
+            // Never log from this real-time task (console writes can block and
+            // drop audio); queue the sample for the worker to print.
+            lastLevelLogMs = nowMs;
+            const int16_t* openPcm = nullptr; size_t openSamples = 0;
+            TLLevel& e = gTLLevels[gTLLevelHead++ % kTLLevels];
+            e.t = nowMs; e.rms = gSTT.snapshot.rms; e.noise = gSTT.snapshot.noiseRms;
+            e.thr = gSTT.snapshot.thresholdRms;
+            e.open = run.segmenter.in_progress(&openPcm, &openSamples);
+          }
+        }
+#endif
         gSTT.snapshot.peakRms = run.segmenter.peak_rms();
         gSTT.snapshot.level = level;
         gSTT.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
@@ -667,7 +800,13 @@ static void sttCaptureWorker(void* context) {
       } else vTaskDelay(pdMS_TO_TICKS(1));
       sttStreamTick(run);
       if (millis() - lastAudioMs >= sttSourceTimeoutMs(source)) {
-        sttStreamFail(run, "Microphone PCM delivery timed out"); break;
+        if (!run.nativeGeneration) { sttStreamFail(run, "Microphone PCM delivery timed out"); break; }
+        // Conversate decides when the session ends (CLOSE, or the temple's
+        // disconnect, which "source lost" above catches); keep waiting.
+        portENTER_CRITICAL(&gSTTMux);
+        ++run.stalls;
+        portEXIT_CRITICAL(&gSTTMux);
+        lastAudioMs = millis();
       }
     }
     // A normal stop seals and drains the final voiced tail. Cancel/error never
@@ -677,10 +816,17 @@ static void sttCaptureWorker(void* context) {
       if (!audioCaptureOverruns("stt", &finalOverruns)) {
         sttStreamFail(run, "Microphone integrity monitor lost at stop");
       } else if (finalOverruns) {
+        // Loss first seen here happened after the last in-session check, i.e.
+        // around the stop gesture itself: tapping the G2 touchpad to stop can
+        // drop a concealed (PLC) mic frame. Record it, but still seal and
+        // transcribe the tail instead of failing the whole session and
+        // discarding it. Loss during recording is still a hard failure above.
         portENTER_CRITICAL(&gSTTMux);
         gSTT.snapshot.audioOverruns = finalOverruns;
         portEXIT_CRITICAL(&gSTTMux);
-        sttStreamFail(run, "Microphone audio loss detected at stop");
+#ifdef ESP_PLATFORM
+        ESP_LOGW("STT", "audio integrity count %lu at stop; tail kept", (unsigned long)finalOverruns);
+#endif
       }
     }
     if (!sttStreamCancelled(&run)) {
@@ -692,6 +838,7 @@ static void sttCaptureWorker(void* context) {
   } while (false);
   portENTER_CRITICAL(&gSTTMux);
   gSTT.snapshot.captureActive = false;
+  if (!gSTT.captureEndedMs) gSTT.captureEndedMs = millis();
   gSTT.snapshot.state = STTState::Stopping;
   gSTT.snapshot.level = 0;
   portEXIT_CRITICAL(&gSTTMux);
@@ -717,6 +864,7 @@ static void sttContinuousWorker(void*) {
   portENTER_CRITICAL(&gSTTMux);
   run.token = gSTT.snapshot.token;
   run.requested = gSTT.requestedSource;
+  run.nativeGeneration = gSTT.nativeG2Generation;
   run.clockMs = millis();
   transcriptOptions = gSTT.transcriptOptions;
   portEXIT_CRITICAL(&gSTTMux);
@@ -737,6 +885,21 @@ static void sttContinuousWorker(void*) {
     if (sttStreamCancelled(&run)) break;
     hw1::stt::SegmenterConfig segmentConfig;
     segmentConfig.adaptive = true;
+    // Close a phrase after >=4 s (was the 8 s default) plus the usual 600 ms
+    // pause, so text is finalised while the speaker is still talking and a
+    // Stop leaves only a short tail. The 15x5 transcribes at ~0.45x real time,
+    // so 4 s phrases keep up; less context at each cut is the trade-off.
+    segmentConfig.min_segment_samples = 4 * STT_SAMPLE_RATE;
+    // The G2 glasses mic's quiet level jitters (~21..60+ RMS per 10 ms frame,
+    // measured 2026-09-30), so the window minimum underestimated the room and
+    // stray blips kept restarting the 600 ms pause: phrases ran to the 20 s
+    // limit and noise opened new ones. Track the lower quartile instead, and
+    // let up to 30 ms of louder frames pass without restarting the pause.
+    segmentConfig.noise_percentile = 25;
+    segmentConfig.silence_blip_samples = 3 * hw1::stt::kSegmentAnalysisSamples;
+    // A phrase that reaches the length limit is cut at the quietest point of
+    // its last 2 s (usually between words), not mid-word at the exact limit.
+    segmentConfig.hard_cut_search_samples = 2 * STT_SAMPLE_RATE;
     if (!run.segmenter.reset(run.working, kStreamSamples, segmentConfig)) {
       sttStreamFail(run, "Invalid continuous segmentation settings"); break;
     }
@@ -762,6 +925,14 @@ static void sttContinuousWorker(void*) {
         const bool warmed = sttLocalTranscribe(silence, kWarmSamples, warmText, sizeof(warmText), warmControl,
                                                warmStats, warmError, sizeof(warmError), &backendSession);
         heap_caps_free(silence);
+        ESP_LOGI("STT", "TL capture_start t=%lu source=%u", (unsigned long)gSTT.captureStartedMs,
+                 unsigned(gSTT.captureSource));
+        // PSRAM after the model and LM are resident: the room a larger LM has.
+        ESP_LOGI("STT", "TL warm s=%lu e=%lu load=%lu ok=%d lm=%d cpu=%luMHz psram_free=%u psram_largest=%u",
+                 (unsigned long)warmStart, (unsigned long)millis(), (unsigned long)warmStats.loadMs,
+                 warmed ? 1 : 0, warmStats.lmUsed ? 1 : 0, (unsigned long)getCpuFrequencyMhz(),
+                 unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                 unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
         if (gSTTPerfLog)
           INFO_SYSTEMF("[STTPERF] warm-up %s in %lu ms (load %lu, lm %s)", warmed ? "ok" : warmError,
                        (unsigned long)(millis() - warmStart), (unsigned long)warmStats.loadMs,
@@ -804,7 +975,8 @@ static void sttContinuousWorker(void*) {
           char draftText[STT_MAX_TEXT + 1] = {};
           char draftError[96] = {};
           STTLocalStats draftStats;
-          const STTLocalControl draftControl{&run, sttStreamCancelled, sttStreamProgress};
+          const STTLocalControl draftControl{&run, sttDraftPreempted, sttStreamProgress};
+          const uint32_t draftStart = millis();
           const bool ok = sttLocalTranscribe(run.draftPcm, draftSamples, draftText, sizeof(draftText), draftControl,
                                              draftStats, draftError, sizeof(draftError), &backendSession);
           portENTER_CRITICAL(&gSTTMux);
@@ -816,7 +988,13 @@ static void sttContinuousWorker(void*) {
             ++gSTT.draft.version;
           }
           run.draftBusy = false;
+          if (ok) run.lastDraftMs = millis() - draftStart;
           portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+          ESP_LOGI("STT", "TL draft seq=%lu audio_ms=%lu s=%lu e=%lu ok=%d",
+                   (unsigned long)draftSequence, (unsigned long)(draftSamples / (STT_SAMPLE_RATE / 1000)),
+                   (unsigned long)draftStart, (unsigned long)millis(), ok ? 1 : 0);
+#endif
           sttWipe(draftText, sizeof(draftText));
           if (gSTTPerfLog)
             INFO_SYSTEMF("[STTPERF] draft seq %lu audio %.1fs in %lu ms (%s)", (unsigned long)draftSequence,
@@ -824,10 +1002,12 @@ static void sttContinuousWorker(void*) {
                          (unsigned long)(draftStats.loadMs + draftStats.frontendMs + draftStats.inferenceMs + draftStats.decodeMs),
                          ok ? "ok" : draftError);
           sttStreamTick(run);
+          sttDrainLevelLog(run);
           continue;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
         sttStreamTick(run);
+        sttDrainLevelLog(run);
         continue;
       }
       char text[STT_MAX_TEXT + 1] = {};
@@ -886,14 +1066,39 @@ static void sttContinuousWorker(void*) {
       }
       // Save the whole accepted chunk once, before UI splitting/ACK can erase
       // its mailbox copy. Only this inference worker performs transcript I/O.
+      uint32_t saveStartMs = 0, saveEndMs = 0;
       if (acceptedText) {
+        saveStartMs = millis();
         (void)transcript.append(slot->sequence, text, strlen(text));
         sttPublishTranscript(run.token, transcript.snapshot());
+        saveEndMs = millis();
       }
       sttWipe(text, sizeof(text));
       sttWipe(slot->pcm, inferenceSamples * sizeof(int16_t));
       perf.doneMs = millis();
       perf.stats = stats;
+#ifdef ESP_PLATFORM
+      {
+        // One timeline record per finished phrase, all times ms since boot:
+        // audio a0..a1, closed q, inference start s (after model build m,
+        // frontend f, network n, decode d), saved sv0..sv1, done e.
+        const uint32_t base = gSTT.captureStartedMs;
+        // lm: this phrase was LM-decoded; psram_min: PSRAM low-water mark since
+        // boot (includes this phrase's inference arena and LM workspace).
+        ESP_LOGI("STT", "TL seg=%lu a0=%lu a1=%lu q=%lu s=%lu m=%lu f=%lu n=%lu d=%lu sv0=%lu sv1=%lu e=%lu ok=%d lm=%d psram_min=%u",
+                 (unsigned long)slot->sequence,
+                 (unsigned long)(base + slot->start / (STT_SAMPLE_RATE / 1000)),
+                 (unsigned long)(base + slot->end / (STT_SAMPLE_RATE / 1000)),
+                 (unsigned long)slot->queuedMs, (unsigned long)perf.startMs,
+                 (unsigned long)stats.loadMs, (unsigned long)stats.frontendMs,
+                 (unsigned long)stats.inferenceMs, (unsigned long)stats.decodeMs,
+                 (unsigned long)saveStartMs, (unsigned long)saveEndMs,
+                 (unsigned long)perf.doneMs, ok ? 1 : 0, stats.lmUsed ? 1 : 0,
+                 unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)));
+      }
+#else
+      (void)saveStartMs; (void)saveEndMs;
+#endif
 #ifdef ESP_PLATFORM
       if (sttTaskSample(gPerfAfter)) sttTaskShares(perf);
 #endif
@@ -909,6 +1114,7 @@ static void sttContinuousWorker(void*) {
       slot->state = StreamSlotState::Free;
       portEXIT_CRITICAL(&gSTTMux);
       sttStreamTick(run);
+      sttDrainLevelLog(run);
     }
   } while (false);
   // On normal stop the producer has already joined; on failure/cancel its
@@ -954,7 +1160,8 @@ static void sttContinuousWorker(void*) {
 
 static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
                          STTToken* token, char* error, size_t errorCap,
-                         const TranscriptOptions* suppliedOptions = nullptr) {
+                         const TranscriptOptions* suppliedOptions = nullptr,
+                         uint32_t nativeG2Generation = 0) {
   sttReapTerminal();
   if (token) *token = 0;
   if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
@@ -1001,13 +1208,15 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
     gSTT.owner = owner;
     gSTT.transcriptOptions = transcriptOptions;
     gSTT.snapshot.transcript.enabled = transcriptOptions.enabled;
-    gSTT.requestedSource = requestedSource;
+    gSTT.requestedSource = nativeG2Generation ? AUDIO_SRC_G2_LEFT : requestedSource;
+    gSTT.nativeG2Generation = nativeG2Generation;
     gSTT.snapshot.token = (static_cast<uint64_t>(gSTTNonce) << 32) | gSTTCounter;
     gSTT.snapshot.state = STTState::Preparing;
     gSTT.snapshot.captureLimitMs = continuous ? 0 : captureMs;
     gSTT.snapshot.continuous = continuous;
     gSTT.snapshot.workerActive = true;
     gSTT.startedMs = millis();
+    gSTT.captureEndedMs = 0;
     *token = gSTT.snapshot.token;
     admitted = true;
   }
@@ -1042,7 +1251,36 @@ bool sttBeginContinuous(STTOwner owner, STTToken* token,
   return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions);
 }
 
+bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
+                                char* error, size_t errorCap,
+                                const TranscriptOptions* transcriptOptions) {
+  if (!leftGeneration) {
+    if (token) *token = 0;
+    return sttError(error, errorCap, "No glasses microphone connection");
+  }
+  return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions, leftGeneration);
+}
+
+bool sttSetPaused(STTOwner owner, STTToken token, bool paused) {
+  bool ok = false;
+  portENTER_CRITICAL(&gSTTMux);
+  if (sttMatchesLocked(owner, token) && gSTT.snapshot.continuous && gSTT.snapshot.workerActive) {
+    gSTT.paused = paused;
+    ok = true;
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  return ok;
+}
+
+bool sttAnySessionActive() {
+  portENTER_CRITICAL(&gSTTMux);
+  const bool active = gSTT.snapshot.workerActive;
+  portEXIT_CRITICAL(&gSTTMux);
+  return active;
+}
+
 bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {
+  uint32_t tlReadSeq = 0, tlReadMs = 0;  // logged after the critical section
   if (out) *out = {};
   sttReapTerminal();
   if (!out || !sttOwnerLive(owner)) return false;
@@ -1054,8 +1292,20 @@ bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {
     // First read of a chunk by its consumer (lens, UI, CLI) closes its pacing record.
     for (auto& r : gSTTPerf)
       if (r.sequence == out->sequence && r.doneMs && !r.deliveredMs) { r.deliveredMs = millis(); break; }
+    // The perf record is stored after the text is published, so log the first
+    // read of each sequence here regardless of it.
+    static uint32_t lastReadLogged = 0;
+    if (out->sequence != lastReadLogged) {
+      lastReadLogged = out->sequence;
+      tlReadSeq = out->sequence; tlReadMs = millis();
+    }
   }
   portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+  if (tlReadSeq) ESP_LOGI("STT", "TL read seg=%lu t=%lu", (unsigned long)tlReadSeq, (unsigned long)tlReadMs);
+#else
+  (void)tlReadSeq; (void)tlReadMs;
+#endif
   if (!sttOwnerLive(owner)) { sttWipe(out, sizeof(*out)); return false; }
   return ready;
 }
@@ -1130,7 +1380,9 @@ bool sttSnapshot(STTOwner owner, STTToken token, STTSnapshot* out) {
                        (!token || token == gSTT.snapshot.token);
   if (matched) {
     *out = gSTT.snapshot;
-    out->elapsedMs = (gSTT.snapshot.workerActive ? millis() : gSTT.completedMs) - gSTT.startedMs;
+    const uint32_t clockEnd = gSTT.captureEndedMs ? gSTT.captureEndedMs
+                              : gSTT.snapshot.workerActive ? millis() : gSTT.completedMs;
+    out->elapsedMs = clockEnd - gSTT.startedMs;
   }
   portEXIT_CRITICAL(&gSTTMux);
   return matched && sttOwnerLive(owner);

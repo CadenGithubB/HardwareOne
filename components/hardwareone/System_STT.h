@@ -94,6 +94,17 @@ bool sttAcknowledgeChunk(STTOwner owner, STTToken token, uint32_t sequence);
 // Internal join predicate: contains no transcript/session data and remains
 // usable after revocation. Unknown or terminal tokens are inactive.
 bool sttRunActive(STTToken token);
+// Continuous transcription on the native Conversate microphone stream of the
+// exact left-temple connection `leftGeneration` (see audioCaptureStartG2Native).
+bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
+                                char* error, size_t errorCap,
+                                const TranscriptOptions* transcriptOptions = nullptr);
+// Wearer pause/resume of a native session: no PCM arrives while paused, which
+// must not be mistaken for a failed microphone; the open phrase is closed.
+bool sttSetPaused(STTOwner owner, STTToken token, bool paused);
+// True while any STT worker (capture or transcription tail) is running.
+// Owner-free and read-only: lets UI keep-alives follow device activity.
+bool sttAnySessionActive();
 bool sttRequestFinish(STTOwner owner, STTToken token);
 bool sttCancel(STTOwner owner, STTToken token);
 // token=0 means this owner's current run. No other session's data is exposed.

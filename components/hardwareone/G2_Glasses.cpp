@@ -28,12 +28,16 @@
                               // IRAM-only heap nothing can malloc from (not PSRAM).
 #include <esp_system.h>       // esp_random — boot-unique EvenAI exchange IDs
 #include <esp_timer.h>        // esp_timer_create/start_once — replaces notifyClearTaskBody
+#include "esp_log.h"
 
 #include "System_G2_Protocol.h"
 #include "G2_ConversateSession.h"
 #include "System_Lz4.h"     // lz4Compress* — CompressMode=2 image push (Q32/Q32f)
 #include "Bluetooth.h"
 #include "HAL_Bluetooth.h"
+#if ENABLE_LOCAL_STT
+#include "System_STT.h"  // transcription page keep-alive
+#endif
 #include "System_RadioCompanion.h"  // radio companion gate (P4X-EYE); no-op with an on-chip radio
 #include "System_Debug.h"
 #include "System_Filesystem.h"  // requireQuotedToken (uniform quoted-path rule)
@@ -3013,6 +3017,23 @@ static bool g2ConversateActive() {
 static void g2ConversateStop(G2ConversateSession::Stop reason,
                              uint32_t replyMagic = 0);
 static void g2ConversateTick(bool requestsOnly = false);
+#ifndef HW1_CONVERSATE_CAPTION_TEST
+#define HW1_CONVERSATE_CAPTION_TEST 0
+#endif
+#if HW1_CONVERSATE_CAPTION_TEST
+static bool g2CaptionTestNoteAck(uint32_t magic, uint32_t error);
+static void g2CaptionTestTick();
+#endif
+#define HW1_CONVERSATE_LOCAL_STT (ENABLE_LOCAL_STT && !ENABLE_UART_HOST_LINK)
+#if HW1_CONVERSATE_LOCAL_STT
+// Local transcription as the Conversate audio consumer (no UART/Pi host):
+// captions go back to the native UI as TRANSCRIBE_DATA.
+static bool g2ConversateLocalBegin(uint32_t leftGeneration);
+static void g2ConversateLocalPause(bool paused);
+static void g2ConversateLocalFinish();
+static bool g2ConversateLocalOwnsCapture();
+static void g2ConversateLocalTick();
+#endif
 static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
                             const uint8_t* pb, size_t len);
 static bool g2ConversateDeclineEvenAi(G2Temple& temple, uint32_t generation);
@@ -14240,7 +14261,11 @@ static bool g2ConversateBusy() {
   // Only our current native lease may share its own HAL claim. A prior
   // stream still draining after CLOSE prevents a replacement PREP until done.
   const bool ownCapture = g2ConversateSnapshot().active() &&
-      audioCaptureOwnedBy("g2-conversate");
+      (audioCaptureOwnedBy("g2-conversate")
+#if HW1_CONVERSATE_LOCAL_STT
+       || g2ConversateLocalOwnsCapture()
+#endif
+      );
   return (audioCaptureBusy() && !ownCapture) || gMicStreamOn || gMicProbeActive ||
       gMicRecFile || gMicWavFile || g2EvenAiSessionIsActive() ||
       g2LensGetState().containerReady || g2FsmHijackActive();
@@ -14285,6 +14310,9 @@ static void g2ConversateStop(G2ConversateSession::Stop reason, uint32_t replyMag
       reason == G2ConversateSession::Stop::NativeExit ||
       reason == G2ConversateSession::Stop::User ||
       reason == G2ConversateSession::Stop::Deadline));
+#if HW1_CONVERSATE_LOCAL_STT
+  g2ConversateLocalFinish();  // transcribe the tail; captions end with the session
+#endif
   bool closed = false;
   if (s.prepared && g2TempleReadyAtGeneration(gR, s.rightGeneration)) {
     uint8_t frame[40];
@@ -14402,6 +14430,9 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
     if (matched && event.value)
       DEBUG_G2F("[G2-CONVERSATE] heartbeat rejected error=%lu consecutive=%lu/12",
                 (unsigned long)event.value, (unsigned long)failures);
+#if HW1_CONVERSATE_CAPTION_TEST
+    if (!matched) (void)g2CaptionTestNoteAck(event.magic, event.value);
+#endif
     return;
   }
   if (event.command == 161 || event.command == 164 || event.command == 166) {
@@ -14418,6 +14449,9 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
                              (event.value == 4 && s.phase == G2ConversateSession::Phase::Running);
       if (!changed && !duplicate) return;
       liveAudioConversatePause(s.audioExchange, event.value == 3);
+#if HW1_CONVERSATE_LOCAL_STT
+      g2ConversateLocalPause(event.value == 3);
+#endif
       n = g2BuildConversatePauseResume(allocSeq(), event.magic, event.value == 4, frame, sizeof(frame));
     } else if (event.command == 164) {
       const bool valid = event.transcribe <= 1 && event.aiCue <= 1;
@@ -14487,6 +14521,13 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
       g2ConversateStop(G2ConversateSession::Stop::HostAudio);
       return;
     }
+#if HW1_CONVERSATE_LOCAL_STT
+    // No Pi consumer on this board: transcribe locally. A local failure (not
+    // logged in on the glasses, model missing, ...) leaves the native session
+    // running without captions rather than refusing the wearer's START.
+    if (admission == LiveAudioConversateAdmission::Disabled)
+      (void)g2ConversateLocalBegin(s.leftGeneration);
+#endif
     n = g2BuildConversateControl(allocSeq(), event.magic, true, frame, sizeof(frame),
                                  s.transcribeVisible, s.aiCueVisible);
   } else {
@@ -14496,6 +14537,324 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
   if (!n || !sendEnvelopeAtGeneration(gR, frame, n, s.rightGeneration))
     g2ConversateStop(G2ConversateSession::Stop::TxFailed);
 }
+
+#if HW1_CONVERSATE_CAPTION_TEST || HW1_CONVERSATE_LOCAL_STT
+// Native caption: Conversate cmd 6 TRANSCRIBE_DATA, field 8 {1: text, 2: final}.
+// The glasses show the newest ~4-5 lines (~140-150 chars) and scroll older text
+// away; a final commits the caption and the next one starts on a new line.
+// Format and behaviour from the 2026-09-20 phone captures and 2026-09-30 tests.
+// Returns the magic (the glasses' COMM_RSP echoes it), or 0 on failure.
+static uint32_t g2ConversateSendCaption(const char* text, size_t length, bool final,
+                                        const G2ConversateSession& s) {
+  EXT_RAM_BSS_ATTR static uint8_t pb[700];
+  size_t n = 0, body = 0;
+  const uint32_t magic = g2ConversateNextMagic();
+  if (!g2PbWriteUint32(pb, sizeof(pb), &n, 1, 6) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) ||
+      !g2PbBeginNested(pb, sizeof(pb), &n, 8, &body) ||
+      !g2PbWriteBytes(pb, sizeof(pb), &n, 1, reinterpret_cast<const uint8_t*>(text), length) ||
+      !g2PbWriteUint32(pb, sizeof(pb), &n, 2, final ? 1 : 0) ||
+      !g2PbEndNested(pb, sizeof(pb), &n, body)) return 0;
+  portENTER_CRITICAL(&gConversateMux);
+  gConversate.reserveReply(magic);  // never let this ACK pass for a heartbeat's
+  portEXIT_CRITICAL(&gConversateMux);
+  return sendPbFragmented(gR, allocSeq(), G2_SID_CONVERSATE, G2_FLAG_REQUEST,
+                          pb, n, s.rightGeneration) ? magic : 0;
+}
+#endif
+
+#if HW1_CONVERSATE_LOCAL_STT
+namespace {
+// Owned by the G2 control worker. The STT broker owns audio, drafts, finals
+// and transcript saving; this only drives it and forwards its text.
+struct ConversateLocal {
+  bool attached = false;
+  STTOwner owner;
+  STTToken token = 0;
+  uint32_t draftVersion = 0, lastFinalSequence = 0;
+  bool finishing = false;  // the wearer closed Conversate; an end is expected
+};
+ConversateLocal gConvLocal;
+// Unexpected ends (mic dropout, PCM timeout, ...) restart transcription while
+// Conversate stays open; more than kConvRestarts within a minute gives up and
+// tells the wearer, so a persistent fault cannot loop.
+constexpr uint8_t kConvRestarts = 3;
+uint32_t gConvRestartMs[kConvRestarts] = {};
+uint8_t gConvRestartNext = 0;
+esp_timer_handle_t gConvLocalWake = nullptr;
+// Drafts: only the visible tail is useful on the glasses (~140-150 chars).
+constexpr size_t kCaptionDraftTail = 150;
+
+void convLocalWakeTimer(bool on) {
+  if (on && !gConvLocalWake) {
+    const esp_timer_create_args_t args = {
+        .callback = [](void*) { g2ControlWake(); }, .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK, .name = "conv-stt", .skip_unhandled_events = true};
+    if (esp_timer_create(&args, &gConvLocalWake) != ESP_OK) gConvLocalWake = nullptr;
+  }
+  if (!gConvLocalWake) return;
+  esp_timer_stop(gConvLocalWake);
+  if (on) esp_timer_start_periodic(gConvLocalWake, 200 * 1000);
+}
+}  // namespace
+
+static bool g2ConversateLocalOwnsCapture() {
+  return gConvLocal.attached && audioCaptureOwnedBy("stt");
+}
+
+static bool g2ConversateLocalBegin(uint32_t leftGeneration) {
+  if (gConvLocal.attached) return false;  // a previous session is still draining
+  BlePeerOwnerSession peer;
+  const bool live = blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, peer) && peer.live();
+  const TransportSessionEpoch epoch = live ? peer.transportEpoch : 0;
+  secureClearString(peer.user);
+  if (!live) {
+    WARN_SYSTEMF("[G2-CONVERSATE] local transcription needs a login on the glasses");
+    return false;
+  }
+  const STTOwner owner{SOURCE_G2_GLASSES, epoch};
+  const TranscriptOptions options = transcriptCaptureOptions(SOURCE_G2_GLASSES, epoch);
+  char error[96] = {};
+  STTToken token = 0;
+  if (!sttBeginContinuousG2Native(owner, leftGeneration, &token, error, sizeof(error), &options)) {
+    WARN_SYSTEMF("[G2-CONVERSATE] local transcription unavailable: %s", error);
+    return false;
+  }
+  gConvLocal = ConversateLocal{};
+  gConvLocal.attached = true;
+  gConvLocal.owner = owner;
+  gConvLocal.token = token;
+  convLocalWakeTimer(true);
+  ESP_LOGI("G2CONV", "local transcription started; control stack min free %u B",
+           unsigned(uxTaskGetStackHighWaterMark(nullptr)));
+  INFO_SYSTEMF("[G2-CONVERSATE] local transcription started (saving %s)",
+               options.enabled ? "on" : "off");
+  return true;
+}
+
+static void g2ConversateLocalPause(bool paused) {
+  if (!gConvLocal.attached) return;
+  audioCapturePauseG2Native("stt", paused);
+  (void)sttSetPaused(gConvLocal.owner, gConvLocal.token, paused);
+}
+
+static void g2ConversateLocalFinish() {
+  // Seal and transcribe the tail. The pump keeps draining and acknowledging
+  // text until the broker's worker exits, so saving completes after CLOSE.
+  if (!gConvLocal.attached) return;
+  gConvLocal.finishing = true;
+  (void)sttRequestFinish(gConvLocal.owner, gConvLocal.token);
+}
+
+// Phone-free boards answer the glasses' Conversate launch themselves: arm the
+// native handler (as `g2conversate on`) whenever both temples are ready and no
+// HardwareOne page or capture is in the way. Checked at most every 5 s.
+static void g2ConversateLocalArm() {
+  static uint32_t lastTry = 0;
+  const uint32_t now = millis();
+  if (now - lastTry < 5000) return;
+  lastTry = now;
+  const auto s = g2ConversateSnapshot();
+  if (s.enabled || s.active()) return;
+  if (!g2TempleReadyAtGeneration(gL) || !g2TempleReadyAtGeneration(gR) || !gL.audioNotifyChar ||
+      g2ConversateBusy()) return;
+  portENTER_CRITICAL(&gConversateMux);
+  const bool idle = !gConversate.active() && gConversateRequest == 0;
+  if (idle) gConversateRequest = -3;  // user-ended mode, no duration cutoff
+  portEXIT_CRITICAL(&gConversateMux);
+  if (idle) {
+    INFO_SYSTEMF("[G2-CONVERSATE] ready: open Conversate on the glasses for local captions");
+    g2ControlWake();
+  }
+}
+
+// The local session ended: log why and, if Conversate is still open and the
+// wearer did not close it, start again. Kept out of g2ConversateLocalTick and
+// off the stack: g2_ctrl_owner has ~6 KB and the tick already holds a chunk
+// and a draft (a stack frame here overflowed it, 2026-10-01).
+static __attribute__((noinline)) void g2ConversateLocalEnded() {
+  static STTSnapshot end;
+  static char note[160];
+  end = STTSnapshot{};
+  const bool haveEnd = sttSnapshot(gConvLocal.owner, gConvLocal.token, &end);
+  const bool expected = gConvLocal.finishing;
+  ESP_LOGW("G2CONV", "local transcription ended (%s): %s; control stack min free %u B", expected ? "closed" : "unexpected",
+           haveEnd && end.error[0] ? end.error : "no error", unsigned(uxTaskGetStackHighWaterMark(nullptr)));
+  convLocalWakeTimer(false);
+  gConvLocal = ConversateLocal{};
+  const auto now = g2ConversateSnapshot();
+  if (expected || now.phase != G2ConversateSession::Phase::Running) return;
+  const uint32_t nowMs = millis();
+  uint32_t& oldest = gConvRestartMs[gConvRestartNext];
+  bool restarted = false;
+  if (oldest && nowMs - oldest < 60000) {
+    ESP_LOGW("G2CONV", "local transcription gave up after %u restarts in a minute", unsigned(kConvRestarts));
+  } else {
+    oldest = nowMs;
+    gConvRestartNext = (gConvRestartNext + 1) % kConvRestarts;
+    restarted = g2ConversateLocalBegin(now.leftGeneration);
+    ESP_LOGW("G2CONV", "local transcription restart %s", restarted ? "ok" : "failed");
+  }
+  if (!restarted && now.transcribeVisible && g2ConversateConnections(now)) {
+    const int n = snprintf(note, sizeof(note), "[Captions stopped: %s. Close and reopen Conversate.]",
+                           haveEnd && end.error[0] ? end.error : "transcription ended");
+    if (n > 0) (void)g2ConversateSendCaption(note, std::min(size_t(n), sizeof(note) - 1), true, now);
+  }
+}
+
+// Forwards finished phrases and the current draft; false once the STT run has
+// ended (after draining what it published last). Its chunk/draft buffers are
+// gone again before g2ConversateLocalEnded runs.
+static __attribute__((noinline)) bool g2ConversateLocalPump() {
+  // Sample liveness BEFORE draining: text published just before the worker
+  // exits is then still drained on this tick rather than stranded.
+  const bool running = sttRunActive(gConvLocal.token);
+  const auto s = g2ConversateSnapshot();
+  const bool show = s.phase == G2ConversateSession::Phase::Running && s.transcribeVisible &&
+                    g2ConversateConnections(s);
+  // Finished phrases first: full text as a final caption, then acknowledge.
+  STTTextChunk chunk;
+  while (sttReadChunk(gConvLocal.owner, gConvLocal.token, &chunk)) {
+    const size_t length = strnlen(chunk.text, sizeof(chunk.text));
+    if (show && length) (void)g2ConversateSendCaption(chunk.text, length, true, s);
+    gConvLocal.lastFinalSequence = chunk.sequence;
+    (void)sttAcknowledgeChunk(gConvLocal.owner, gConvLocal.token, chunk.sequence);
+    memset(chunk.text, 0, sizeof(chunk.text));
+  }
+  // The phrase in progress: send only its visible tail, cut at a word.
+  STTDraft draft;
+  if (sttReadDraft(gConvLocal.owner, gConvLocal.token, &draft) &&
+      draft.version != gConvLocal.draftVersion) {
+    gConvLocal.draftVersion = draft.version;
+    const size_t length = strnlen(draft.text, sizeof(draft.text));
+    if (show && length && draft.sequence > gConvLocal.lastFinalSequence) {
+      const char* tail = draft.text;
+      if (length > kCaptionDraftTail) {
+        tail = draft.text + (length - kCaptionDraftTail);
+        while (*tail && *tail != ' ') ++tail;
+        while (*tail == ' ') ++tail;
+      }
+      if (*tail) (void)g2ConversateSendCaption(tail, strlen(tail), false, s);
+    }
+    memset(draft.text, 0, sizeof(draft.text));
+  }
+  return running;
+}
+
+static void g2ConversateLocalTick() {
+#if !HW1_CONVERSATE_CAPTION_TEST
+  g2ConversateLocalArm();
+#endif
+  if (gConvLocal.attached && !g2ConversateLocalPump()) g2ConversateLocalEnded();
+}
+#endif  // HW1_CONVERSATE_LOCAL_STT
+
+#if HW1_CONVERSATE_CAPTION_TEST
+// ---------------------------------------------------------------------------
+// Conversate caption test (test builds only). Arms the native handler once both
+// temples are ready (the equivalent of `g2conversate on`); when the wearer opens
+// Conversate and the session reaches Running, sends scripted TRANSCRIBE_DATA
+// captions (cmd 6: field 8 {1: text, 2: final}) of 100/200/300/500 characters,
+// each as growing drafts then a final, and logs every COMM_RSP by its magic.
+// Wire format decoded from the 2026-09-20 phone captures (.scratch/btsnoop).
+// ---------------------------------------------------------------------------
+namespace {
+// v2: find the glasses' display cut-off. Each caption is position markers
+// "#005 #010 ... #NNN" (5 chars each; the number is the character count at
+// the end of that marker), so the last marker visible IS the limit.
+// Block 1: one 500-char DRAFT held 10 s. Block 2: the same as FINAL, held
+// 10 s. Block 3: a 250-char FINAL. Then a normal 60-char final as a control.
+constexpr uint16_t kCapLengths[] = {500, 500, 250, 60};
+constexpr uint8_t kCapDraftsPerBlock = 0;
+constexpr uint32_t kCapStepMs = 800, kCapBlockGapMs = 10000;
+struct CapSent { uint32_t magic, sentMs; uint16_t length; bool final; };
+CapSent gCapSent[16];
+uint8_t gCapSentHead = 0;
+uint16_t gCapStep = 0;          // blocks x (drafts + 1 final)
+uint32_t gCapNextMs = 0, gCapLastArmTry = 0;
+bool gCapDone = false;
+esp_timer_handle_t gCapWakeTimer = nullptr;
+
+size_t capFill(char* out, size_t cap, uint16_t block, size_t length) {
+  (void)block;
+  size_t n = 0;
+  while (n + 5 <= length && n + 6 < cap) n += snprintf(out + n, cap - n, "#%03u ", unsigned(n + 5));
+  out[n] = '\0';
+  return n;
+}
+}  // namespace
+
+static bool g2CaptionTestNoteAck(uint32_t magic, uint32_t error) {
+  for (auto& e : gCapSent) {
+    if (e.magic && e.magic == magic) {
+      ESP_LOGI("CAPTEST", "ack magic=%lu len=%u %s error=%lu after %lu ms", (unsigned long)magic,
+               unsigned(e.length), e.final ? "final" : "draft", (unsigned long)error,
+               (unsigned long)(millis() - e.sentMs));
+      e.magic = 0;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool g2CaptionSend(const char* text, size_t length, bool final,
+                          const G2ConversateSession& s) {
+  const uint32_t magic = g2ConversateSendCaption(text, length, final, s);
+  if (magic) gCapSent[gCapSentHead++ % 16] = {magic, millis(), uint16_t(length), final};
+  ESP_LOGI("CAPTEST", "sent magic=%lu len=%u %s %s", (unsigned long)magic,
+           unsigned(length), final ? "final" : "draft", magic ? "ok" : "TX FAILED");
+  return magic != 0;
+}
+
+static void g2CaptionTestTick() {
+  const uint32_t now = millis();
+  const auto s = g2ConversateSnapshot();
+  if (!s.enabled && !s.active() && now - gCapLastArmTry >= 5000) {
+    gCapLastArmTry = now;
+    if (g2TempleReadyAtGeneration(gL) && g2TempleReadyAtGeneration(gR) && gL.audioNotifyChar &&
+        !g2ConversateBusy()) {
+      portENTER_CRITICAL(&gConversateMux);
+      const bool idle = !gConversate.active() && gConversateRequest == 0;
+      if (idle) gConversateRequest = -3;  // same as `g2conversate on` (user-ended)
+      portEXIT_CRITICAL(&gConversateMux);
+      if (idle) {
+        ESP_LOGI("CAPTEST", "armed native Conversate handler; open Conversate on the glasses");
+        g2ControlWake();
+      }
+    }
+    return;
+  }
+  if (s.phase != G2ConversateSession::Phase::Running) {
+    if (!s.active()) { gCapStep = 0; gCapDone = false; gCapNextMs = 0; }  // rerun on next session
+    return;
+  }
+  if (!gCapWakeTimer) {
+    const esp_timer_create_args_t args = {
+        .callback = [](void*) { g2ControlWake(); }, .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK, .name = "captest", .skip_unhandled_events = true};
+    if (esp_timer_create(&args, &gCapWakeTimer) == ESP_OK)
+      esp_timer_start_periodic(gCapWakeTimer, 250 * 1000);
+  }
+  if (gCapDone) return;
+  if (!gCapNextMs) { gCapNextMs = now + 3000; ESP_LOGI("CAPTEST", "session running; captions start in 3 s"); return; }
+  if (int32_t(now - gCapNextMs) < 0) return;
+  const uint16_t perBlock = kCapDraftsPerBlock + 1;
+  const uint16_t block = gCapStep / perBlock, step = gCapStep % perBlock;
+  if (block >= sizeof(kCapLengths) / sizeof(kCapLengths[0])) {
+    gCapDone = true;
+    ESP_LOGI("CAPTEST", "all caption blocks sent; exit Conversate on the glasses when done");
+    return;
+  }
+  (void)step;
+  const bool final = block != 0;  // v2: block 0 is a held draft, the rest finals
+  const size_t target = kCapLengths[block];
+  char text[520];
+  const size_t length = capFill(text, sizeof(text), block, target);
+  (void)g2CaptionSend(text, length, final, s);
+  ++gCapStep;
+  gCapNextMs = now + kCapBlockGapMs;
+}
+#endif  // HW1_CONVERSATE_CAPTION_TEST
 
 static void g2ConversateTick(bool requestsOnly) {
   int32_t request;
@@ -14745,6 +15104,12 @@ static void heartbeatWorkerTask(void* /*arg*/) {
 
     // Process native EXIT/ACK first, then renew only a still-live lease.
     g2ConversateTick();
+#if HW1_CONVERSATE_CAPTION_TEST
+    g2CaptionTestTick();
+#endif
+#if HW1_CONVERSATE_LOCAL_STT
+    g2ConversateLocalTick();
+#endif
 
     if (g2ControlTakeDirty()) g2ControlReconcileTick();
 
@@ -14776,6 +15141,14 @@ static void heartbeatWorkerTask(void* /*arg*/) {
       // broadened g2FsmHijackActive() to include ImageProbing — without
       // this gate, every g2bmp / QGlizzy from cold would trip the watchdog
       // on the first heartbeat tick after device-uptime > 60 s.
+#if ENABLE_LOCAL_STT
+      // A running transcription session is authoritative device-side activity
+      // (like chat generation below): keep its page alive while it runs. Once
+      // it stops, the normal tap-only 60 s watchdog governs passive reading.
+      if (g2FsmHijackActive() && gHijackStartedMs > 0 &&
+          g2GetHijackPage() == G2_HIJACK_PAGE_TRANSCRIPTION && sttAnySessionActive())
+        gHijackStartedMs = millis();
+#endif
       if (g2FsmHijackActive() && gHijackStartedMs > 0 &&
           (millis() - gHijackStartedMs) > HIJACK_SAFETY_MS) {
         sendHijackShutdown("safety-timeout");

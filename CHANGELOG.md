@@ -54,6 +54,15 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   - The reboot escalation fires at most once per power cycle; the boot after
     it retries slowly instead of rebooting again.
 
+### Added (local transcription, landed from the STT experiment)
+- The `experiments/stt_p4` deploy patch is now part of `main`: the stored
+  (uncompressed) model container and loader with load timings, Conversate
+  captions produced by local transcription when no UART host is present
+  (plus a caption test build flag), a transcription page keep-alive, paced
+  and preemptible drafts, inference watchdog scoping, a recording clock, and
+  the word language model read from the SD card first. The experiment's
+  snapshot build is no longer the only firmware with these features.
+
 ### Changed
 - Command-line buffers now match the command limits on every transport that
   had a smaller one: the USB console receive and transmit buffers are 4 KB

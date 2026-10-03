@@ -34,8 +34,13 @@ size_t readModel(void* context,void* dest,size_t bytes) {
 // logs once per boot and the runtime decodes greedily. The runtime may also
 // release it to admit a later call under memory pressure.
 namespace lm=hw1::stt::lm;
-constexpr const char* kLmPath="/STT Models/meeting.lm";
-constexpr const char* kWordsPath="/STT Models/custom_words.txt";
+// The microSD copy wins when present, so the LM can be swapped with the card
+// (like the 15x5 model) and the onboard copy removed to free LittleFS.
+struct LmFiles { const char* lm; const char* words; };
+constexpr LmFiles kLmFiles[]={
+    {"/sd/STT Models/meeting.lm","/sd/STT Models/custom_words.txt"},
+    {"/STT Models/meeting.lm","/STT Models/custom_words.txt"},
+};
 // Free PSRAM kept beside a resident LM: a warm worst-case (30 s) runtime call
 // needs ~5 MiB; the beam workspace is separately checked per decode.
 constexpr size_t kLmMaxBytes=32u<<20, kWordsMaxBytes=64u<<10, kLmReserveBytes=6u<<20;
@@ -47,6 +52,7 @@ struct LanguageModel {
     uint8_t* blob=nullptr;
     lm::CustomWords* words=nullptr;   // PSRAM, trivially destructible
     lm::Lm view;
+    const LmFiles* files=nullptr;      // where the loaded copy came from
     LmState state=LmState::Unloaded;
     ~LanguageModel() { reset(); }
     void reset() { view=lm::Lm{}; heap_caps_free(words); words=nullptr; heap_caps_free(blob); blob=nullptr; }
@@ -64,6 +70,7 @@ bool readAll(File& file,uint8_t* dest,size_t bytes,const STTLocalControl& contro
 void loadCustomWords(LanguageModel& model) {
     // trusted: fixed optional hotword list beside the model.
     const auto auth=VFS::systemAuth("stt.lm_words_read");
+    const char* kWordsPath=model.files->words;   // beside the LM that was loaded
     if(!VFS::existsGuarded(kWordsPath,auth))return;
     File file=VFS::openGuarded(kWordsPath,"r",auth);
     const size_t bytes=file && !file.isDirectory() ? file.size() : 0;
@@ -82,12 +89,16 @@ void loadCustomWords(LanguageModel& model) {
 // only cancellation returns false and leaves it Unloaded for a later retry.
 bool loadLanguageModel(LanguageModel& model,const STTLocalControl& control) {
     model.state=LmState::Unavailable;
+    model.files=nullptr;
     // trusted: fixed LM path beside the pinned model; content is SHA-checked.
     const auto auth=VFS::systemAuth("stt.lm_read");
-    if(!VFS::existsGuarded(kLmPath,auth)) {
-        if(firstNote(kLmMissing))INFO_SYSTEMF("[STT] No %s; using greedy decoding",kLmPath);
+    for(const LmFiles& f:kLmFiles)
+        if(VFS::existsGuarded(f.lm,auth)) { model.files=&f; break; }
+    if(!model.files) {
+        if(firstNote(kLmMissing))INFO_SYSTEMF("[STT] No %s or %s; using greedy decoding",kLmFiles[0].lm,kLmFiles[1].lm);
         return true;
     }
+    const char* kLmPath=model.files->lm;
     File file=VFS::openGuarded(kLmPath,"r",auth);
     const size_t bytes=file && !file.isDirectory() ? file.size() : 0;
     if(bytes<96 || bytes>kLmMaxBytes) {
@@ -115,8 +126,8 @@ bool loadLanguageModel(LanguageModel& model,const STTLocalControl& control) {
     loadCustomWords(model);
     model.state=LmState::Ready;
     if(firstNote(kLmLoaded))
-        INFO_SYSTEMF("[STT] Language model: %u words, %u bigrams, %u trigrams, beam %u, %u custom words, %u bytes",
-                     unsigned(model.view.vocab()),unsigned(model.view.bigrams()),unsigned(model.view.trigrams()),
+        INFO_SYSTEMF("[STT] Language model %s: %u words, %u bigrams, %u trigrams, beam %u, %u custom words, %u bytes",
+                     kLmPath,unsigned(model.view.vocab()),unsigned(model.view.bigrams()),unsigned(model.view.trigrams()),
                      unsigned(model.view.beamWidth()),unsigned(model.words ? model.words->size() : 0),unsigned(bytes));
     return true;
 }
@@ -140,6 +151,10 @@ bool releaseLanguageModel(void* context) {
     if(model.state!=LmState::Ready)return false;
     model.reset(); model.state=LmState::Unavailable; // no reload thrash in this session
     if(firstNote(kLmShed))WARN_SYSTEMF("[STT] Released language model to admit transcription; greedy until the session restarts");
+#ifdef ESP_PLATFORM
+    // Always on the console: an LM too large for PSRAM silently costs accuracy otherwise.
+    ESP_LOGW("STT","TL lm_released: PSRAM short for inference; greedy decoding for the rest of this session");
+#endif
     return true;
 }
 #endif
