@@ -10,12 +10,14 @@ Usage:
   prepare_data.py librispeech --name train-clean-100|train-clean-360|dev-clean|test-clean [--fraction F]
   prepare_data.py voxpopuli --split train [--shards 8-11 --store voxpopuli-train-b]
   prepare_data.py peoples [--max-hours H]
+  prepare_data.py commonvoice --split train|dev [--max-hours H]
   prepare_data.py musan
   prepare_data.py rirs
 """
 import argparse
 import io
 import json
+import hashlib
 import random
 import tarfile
 import zipfile
@@ -26,9 +28,11 @@ import soundfile as sf
 from scipy.signal import resample_poly
 
 from common import SAMPLE_RATE, normalize_text, encode, ctc_min_frames, HOP
+import os
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
-USB = Path('/Volumes/USB/stt')
-USB2 = Path('/Volumes/USB2/stt')
+USB = STT_ROOT
+USB2 = STT_ROOT
 STORES = USB2 / 'stores'
 MIN_SECONDS, MAX_SECONDS = 0.5, 20.0
 
@@ -38,12 +42,15 @@ class StoreWriter:
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.bin = open(self.dir / 'audio.bin.tmp', 'wb')
+        self.sha = hashlib.sha256()  # of exactly what was written; verify_stores.py re-reads it from disk
         self.offsets, self.lengths, self.texts, self.speakers = [], [], [], []
         self.position = 0
 
     def add(self, samples, text='', speaker=''):
         pcm = np.clip(np.round(samples * 32767.0), -32768, 32767).astype('<i2')
-        self.bin.write(pcm.tobytes())
+        data = pcm.tobytes()
+        self.bin.write(data)
+        self.sha.update(data)
         self.offsets.append(self.position)
         self.lengths.append(len(pcm))
         self.texts.append(text)
@@ -51,10 +58,13 @@ class StoreWriter:
         self.position += len(pcm)
 
     def close(self):
+        self.bin.flush()
+        os.fsync(self.bin.fileno())
         self.bin.close()
         (self.dir / 'audio.bin.tmp').replace(self.dir / 'audio.bin')
         (self.dir / 'index.json').write_text(json.dumps({
             'offsets': self.offsets, 'lengths': self.lengths,
+            'audio_sha256': self.sha.hexdigest(),
             'texts': self.texts, 'speakers': self.speakers}))
         hours = self.position / SAMPLE_RATE / 3600
         print(f'{self.dir}: {len(self.lengths)} items, {hours:.1f} h')
@@ -247,23 +257,32 @@ def prepare_rirs(limit=4000):
     writer.close()
 
 
-def prepare_peoples(max_hours):
+def prepare_peoples(max_hours, split='train', fraction=1.0, store=None, shards=None):
     """People's Speech "clean" (MLCommons, CC-BY/CC-BY-SA): mostly public
     meetings, interviews and talks. Text is already lowercase with numbers
     spelled out; anything else outside the alphabet is skipped, not mapped."""
     import re
     import pyarrow.parquet as pq
-    files = sorted(p for p in (USB / 'peoples_speech').glob('clean_train_*.parquet')
+    files = sorted(p for p in (USB / 'peoples_speech').glob(f'clean_{split}_*.parquet')
                    if Path(str(p) + '.done').exists())
+    if shards == 'new':  # download.sh peoples2: everything except the first 30 (k*804/30)
+        first = {k * 804 // 30 for k in range(30)}
+        files = [p for p in files if int(p.stem.split('_')[-1]) not in first]
     if not files:
         raise SystemExit('no People\'s Speech parquet files yet')
-    writer = StoreWriter(STORES / 'peoples-clean-train')
+    out = STORES / (store or f'peoples-clean-{split}')
+    if (out / 'index.json').exists():
+        raise SystemExit(f'{out.name} exists; refusing to overwrite it (keep.json, held-out dev views)')
+    writer = StoreWriter(out)
+    pick = random.Random(31)  # fraction < 1: a seeded share of every shard
     budget = max_hours * 3600 * SAMPLE_RATE
     kept = dropped = 0
     foreign = re.compile(r"[^a-z' ]")
     for path in files:
         for batch in pq.ParquetFile(path).iter_batches(batch_size=64, columns=['id', 'audio', 'text']):
             for row in batch.to_pylist():
+                if fraction < 1.0 and pick.random() >= fraction:
+                    continue
                 raw = (row['text'] or '').strip()
                 if not raw or foreign.search(raw):
                     dropped += 1
@@ -286,12 +305,64 @@ def prepare_peoples(max_hours):
     print(f'kept {kept}, dropped {dropped}')
 
 
+def prepare_commonvoice(split, max_hours):
+    """Common Voice 17 English (CC0; unofficial HF mirror fsicoli/common_voice_17_0,
+    as downloaded by download.sh cv): tar shards of 48 kHz MP3 + {split}.tsv.
+    Thousands of speakers reading on their own phones/laptops. Sentences with
+    digits or non-ASCII letters are skipped (normalisation would turn "1990"
+    into nothing and "cafe" with an accent into "caf"); curly apostrophes are
+    straightened. Store: commonvoice-en-train, or commonvoice-en-test for the
+    dev split (never trained on; a held-out accent/microphone test)."""
+    import csv
+    import re
+    root = USB / 'common_voice' / 'en'
+    tars = sorted(p for p in root.glob(f'en_{split}_*.tar') if Path(str(p) + '.done').exists())
+    if not tars:
+        raise SystemExit(f'no Common Voice {split} tars yet')
+    rows = {}
+    with open(root / f'{split}.tsv', newline='') as f:
+        for r in csv.DictReader(f, delimiter='\t', quoting=csv.QUOTE_NONE):
+            rows[r['path']] = (r['sentence'], r['client_id'])
+    name = 'commonvoice-en-train' if split == 'train' else 'commonvoice-en-test'
+    writer = StoreWriter(STORES / name)
+    budget = max_hours * 3600 * SAMPLE_RATE
+    bad = re.compile(r'[0-9]|[^\x00-\x7f]')
+    kept = dropped = 0
+    for t in tars:
+        with tarfile.open(t) as tf:
+            for m in tf:
+                if not m.isfile() or not m.name.endswith('.mp3'):
+                    continue
+                row = rows.get(Path(m.name).name)
+                if row is None:
+                    dropped += 1
+                    continue
+                raw = row[0].replace('\u2019', "'").replace('\u2018', "'")
+                if bad.search(raw):
+                    dropped += 1
+                    continue
+                data, rate = sf.read(io.BytesIO(tf.extractfile(m).read()), dtype='float32')
+                samples = to_mono16k(data, rate)
+                text = normalize_text(raw)
+                if usable(samples, text):
+                    writer.add(samples, text, row[1][:16])
+                    kept += 1
+                else:
+                    dropped += 1
+                if writer.position >= budget:
+                    break
+        if writer.position >= budget:
+            break
+    writer.close()
+    print(f'kept {kept}, dropped {dropped}')
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('corpus', choices=['ami', 'librispeech', 'voxpopuli', 'peoples', 'musan', 'rirs'])
+    p.add_argument('corpus', choices=['ami', 'librispeech', 'voxpopuli', 'peoples', 'commonvoice', 'musan', 'rirs'])
     p.add_argument('--fraction', type=float, default=1.0, help='librispeech: share of utterances to keep')
-    p.add_argument('--shards', help='voxpopuli: shard range, e.g. 8-11')
-    p.add_argument('--store', help='voxpopuli: output store name')
+    p.add_argument('--shards', help="voxpopuli: shard range, e.g. 8-11; peoples: 'new' = the peoples2 shards")
+    p.add_argument('--store', help='voxpopuli / peoples: output store name')
     p.add_argument('--max-hours', type=float, default=120.0)
     p.add_argument('--mic')
     p.add_argument('--split')
@@ -303,8 +374,10 @@ def main():
         prepare_librispeech(a.name, a.fraction)
     elif a.corpus == 'voxpopuli':
         prepare_voxpopuli(a.split, a.max_hours, a.shards, a.store)
+    elif a.corpus == 'commonvoice':
+        prepare_commonvoice(a.split or 'train', a.max_hours)
     elif a.corpus == 'peoples':
-        prepare_peoples(a.max_hours)
+        prepare_peoples(a.max_hours, a.split or 'train', a.fraction, a.store, a.shards)
     elif a.corpus == 'musan':
         prepare_musan()
     else:

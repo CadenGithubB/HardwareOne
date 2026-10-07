@@ -157,3 +157,8 @@ companion_mismatch
 companion_low_memory
 companion_updated
 companion_reboot
+g2_long_press
+g2_long_release
+note_started
+note_saved
+note_failed

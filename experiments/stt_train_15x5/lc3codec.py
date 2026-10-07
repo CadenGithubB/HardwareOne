@@ -7,18 +7,22 @@ kMicLc3*). A lost or corrupt frame is concealed by LC3 packet-loss concealment
 
 This wraps the repo's vendored reference liblc3 (components/hardwareone_libs/
 liblc3, Apache-2.0) through ctypes. The shared library is compiled on first
-use into build/ next to this file (ignored by git), with the same LC3_PLUS=0 /
+use into build/ next to this file (ignored by git), or into $HW1_LC3_BUILD when
+set (the Ubuntu kit keeps it on the PC's own disk), with the same LC3_PLUS=0 /
 LC3_PLUS_HR=0 baseline configuration as the firmware.
 """
 import ctypes
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
 LIBLC3 = HERE.parents[1] / 'components/hardwareone_libs/liblc3'
-DYLIB = HERE / 'build' / 'liblc3.dylib'
+BUILD = Path(os.environ.get('HW1_LC3_BUILD') or HERE / 'build')
+DYLIB = BUILD / ('liblc3.dylib' if sys.platform == 'darwin' else 'liblc3.so')  # macOS / Linux
 
 FRAME_US = 10000
 SAMPLE_RATE = 16000
@@ -28,12 +32,22 @@ S16 = 0                                               # LC3_PCM_FORMAT_S16
 
 
 def _build():
+    # Safe when several processes build at once (DataLoader workers): each
+    # writes its own temporary file and swaps it in atomically; a process whose
+    # compile fails still uses a library that another one finished.
     DYLIB.parent.mkdir(parents=True, exist_ok=True)
-    sources = sorted(str(p) for p in (LIBLC3 / 'src').glob('*.c'))
-    tmp = DYLIB.with_suffix('.tmp')
-    subprocess.run(['cc', '-O2', '-shared', '-fPIC', '-DLC3_PLUS=0', '-DLC3_PLUS_HR=0',
-                    '-I', str(LIBLC3 / 'include'), *sources, '-o', str(tmp)], check=True)
-    tmp.replace(DYLIB)
+    # Skip dotfiles: macOS leaves "._name.c" metadata files on exFAT drives.
+    sources = sorted(str(p) for p in (LIBLC3 / 'src').glob('*.c') if not p.name.startswith('.'))
+    tmp = DYLIB.with_name(f'{DYLIB.name}.{os.getpid()}.tmp')
+    try:
+        subprocess.run(['cc', '-O2', '-shared', '-fPIC', '-DLC3_PLUS=0', '-DLC3_PLUS_HR=0',
+                        '-I', str(LIBLC3 / 'include'), *sources, '-o', str(tmp), '-lm'], check=True)
+        os.replace(tmp, DYLIB)
+    except subprocess.CalledProcessError:
+        if not DYLIB.exists():
+            raise
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 _lib = None

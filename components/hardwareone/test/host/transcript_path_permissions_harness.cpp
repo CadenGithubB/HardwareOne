@@ -112,6 +112,19 @@ static void matrix() {
         expect((std::string(root)+"/u2/a\"b.txt").c_str(),alice,0);
         expect((std::string(root)+"/u2/file.bin").c_str(),alice,PERM_ALL&~(PERM_READ|PERM_WRITE));
         expect((std::string(root)+"/u2/pic.jpg").c_str(),alice,PERM_ALL&~PERM_WRITE);
+        // QuickNote files sit in the owner's notes/ folder and inherit exactly
+        // the transcript rights, with no path-policy change.
+        const std::string ownNote=std::string(root)+"/u2/notes/boot-0000000000000001.txt";
+        const std::string otherNote=std::string(root)+"/u3/notes/boot-0000000000000001.txt";
+        expect(ownNote.c_str(),alice,PERM_ALL);expect(otherNote.c_str(),alice,0);
+        expect(ownNote.c_str(),admin,0);expect(ownNote.c_str(),guest,0);
+        expect((std::string(root)+"/u5/notes/boot-0000000000000001.txt").c_str(),guest,PERM_READ);
+        for(const auto& who:{super,system})expect(otherNote.c_str(),who,PERM_ALL);
+        {
+            FsInternal::LockedListingPermissions view(alice);
+            assert(view.forChildOf((std::string(root)+"/u2/notes").c_str())==PERM_ALL);
+            assert(view.forChildOf((std::string(root)+"/u3/notes").c_str())==0);
+        }
         AuthContext confined=system;confined.scope=String(root)+"/u2";
         expect(own.c_str(),confined,PERM_ALL);expect(other.c_str(),confined,0);
         FsInternal::LockedListingPermissions view(alice);
@@ -122,7 +135,8 @@ static void matrix() {
     // separators. Non-transcript trees retain their previous permissions.
     for(const char* alias:{"/sd/STT/u2/a.txt","/sd/stt./u2/a.txt","/sd/stt /u2/a.txt",
                           "/sd/stt... /u2/a.txt","/sd/stt\\u2/a.txt","/sd/\\stt/u2/a.txt",
-                          "/sd/.\\stt/u2/a.txt","/sd/stt/u2\\a.txt"})expect(alias,alice,0);
+                          "/sd/.\\stt/u2/a.txt","/sd/stt/u2\\a.txt","/sd/STT/u2/notes/a.txt",
+                          "/sd/stt/u2\\notes/a.txt","/sd/stt./u2/notes/a.txt"})expect(alias,alice,0);
     expect(" /sd//./stt/u2/note.txt/ ",alice,PERM_ALL);
     expect("/stt2/u3/a.txt",alice,PERM_ALL);expect("/sd/stt2/u3/a.txt",alice,PERM_ALL);
     expect("/STT/u3/a.txt",alice,PERM_ALL); // distinct LittleFS spelling

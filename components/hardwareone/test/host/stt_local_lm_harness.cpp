@@ -89,12 +89,14 @@ File openGuarded(const char* path, const char* mode, const AuthContext& auth) {
 namespace hw1::stt {
 ModelCache::~ModelCache() { reset(); }
 void ModelCache::reset() { raw_=nullptr; }
+static int fakeWeights=0;  // stands in for the verified raw weights a call leaves cached
 // Mirrors quartznet_runtime.cpp's hook contract around a fixed logit tensor.
 bool transcribe(ModelReader reader, const int16_t*, size_t, char* text, size_t capacity,
                 const STTLocalControl& control, STTLocalStats&, char* error, size_t errorCapacity,
                 Diagnostics*, ModelCache* cache, const Decoder* decoder) {
     assert(reader.read && reader.bytes==fake::state.files.at("/STT Models/quartznet5x5.p4.stt").size());
     fake::state.lastCache=cache;
+    if(cache && !cache->loaded())cache->raw_=&fakeWeights;
     text[0]=0; error[0]=0;
     assert(bool(decoder)==bool(ENABLE_STT_LM) && (!decoder || (decoder->decode && decoder->release)));
     if(decoder && fake::state.releaseBeforeDecode)fake::state.released=decoder->release(decoder->context);
@@ -228,6 +230,36 @@ void released() {
     assert(logged("W [STT] Released language model")==1);
     { STTLocalSession session; assert(run(&session)=="cat" && fake::state.opens[kLm]==2); }
 }
+// The broker hands an idle session to its next run (sttKeepWarm): weights and
+// a loaded LM move whole; an LM shed under memory pressure gets one load
+// attempt again, as in a new session; the source is left empty.
+void handOff() {
+    reset(); fake::state.files[kLm]=meetingLm();
+    const size_t bytes=fake::state.files[kLm].size();
+    STTLocalSession first, next;
+    assert(!first.warm() && !next.warm());
+    assert(run(&first)=="cat" && first.warm() && fake::used()==bytes);
+    first.moveTo(next);
+    assert(!first.warm() && next.warm() && fake::used()==bytes);
+    assert(run(&next)=="cat" && fake::state.opens[kLm]==1);   // LM and weights reused, not reloaded
+    first.moveTo(first); next.moveTo(next);                    // self-moves change nothing
+    assert(next.warm() && !first.warm());
+    first.reset(); assert(fake::used()==bytes);                 // an empty session owns nothing
+    // Shed for this session, then handed on: the next owner loads it again.
+    fake::state.releaseBeforeDecode=true;
+    assert(run(&next)=="greedy" && fake::state.released && fake::state.heap.empty());
+    fake::state.releaseBeforeDecode=false;
+    assert(run(&next)=="greedy" && fake::state.opens[kLm]==1);
+    next.moveTo(first);
+    assert(first.warm() && !next.warm());
+    assert(run(&first)=="cat" && fake::state.opens[kLm]==2);
+    // Moving over a session that holds something frees what it held.
+    STTLocalSession other;
+    assert(run(&other)=="cat" && fake::state.opens[kLm]==3 && fake::used()==2*bytes);
+    first.moveTo(other);
+    assert(other.warm() && !first.warm() && fake::used()==bytes);
+    other.reset(); assert(fake::state.heap.empty() && !other.warm());
+}
 void cancellation() {
     reset(); fake::state.files[kLm]=meetingLm();
     fake::state.maxRead=16; fake::state.cancelAfterReads=3; // mid-read (file is ~150 bytes)
@@ -244,12 +276,13 @@ void cancellation() {
 
 int main() {
 #if ENABLE_STT_LM
-    missing(); loadedOncePerSession(); customWords(); invalid(); memory(); released(); cancellation();
+    missing(); loadedOncePerSession(); customWords(); invalid(); memory(); released(); handOff(); cancellation();
 #else
     // Flag off: no decoder, no LM file access, greedy text unchanged.
     reset(); fake::state.files[kLm]=meetingLm();
     { STTLocalSession session; assert(run(&session)=="greedy" && run(nullptr)=="greedy"); }
     assert(fake::state.exists.empty() && !fake::state.opens.count(kLm) && !fake::state.opens.count(kWords) && fake::state.logs.empty());
+    { STTLocalSession session, next; run(&session); assert(session.warm()); session.moveTo(next); assert(next.warm() && !session.warm()); }
 #endif
     reset();
     std::printf("System_STTLocal language-model integration tests passed (ENABLE_STT_LM=%d)\n",ENABLE_STT_LM);

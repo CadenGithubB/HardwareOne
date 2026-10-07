@@ -28,6 +28,15 @@ TranscriptOptions transcriptCaptureOptions(CommandSource source, TransportSessio
   options.epoch = epoch;
   if (!options.enabled || !epoch) return options;
   transcriptStartTime(options.started, sizeof(options.started));
+  (void)transcriptCaptureIdentity(source, epoch, options.user, sizeof(options.user));
+  return options;
+}
+
+bool transcriptCaptureIdentity(CommandSource source, TransportSessionEpoch epoch,
+                               char* out, size_t cap) {
+  if (!out || !cap) return false;
+  out[0] = '\0';
+  if (!epoch) return false;
   String user;
   if (source == SOURCE_LOCAL_DISPLAY) {
     bool authed = false;
@@ -44,11 +53,11 @@ TranscriptOptions transcriptCaptureOptions(CommandSource source, TransportSessio
     const auto& ctx = currentAuthContext();
     if (ctx.transport == source && captureTransportSessionEpoch(ctx) == epoch) user = ctx.user;
   }
-  if (user.length() && user.length() < sizeof(options.user) &&
-      transportSessionEpochIsLive(source, epoch))
-    memcpy(options.user, user.c_str(), user.length() + 1);
+  const bool resolved = user.length() && user.length() < cap &&
+      transportSessionEpochIsLive(source, epoch);
+  if (resolved) memcpy(out, user.c_str(), user.length() + 1);
   secureClearString(user);
-  return options;
+  return resolved;
 }
 
 void TranscriptSession::begin(const TranscriptOptions& options, const char* provider, uint64_t id) {

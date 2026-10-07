@@ -127,6 +127,26 @@ static void disabled_and_identity(){
  for(bool revokeDuringLookup:{false,true}){reset();auto x=options();TranscriptSession expired;expired.begin(x,"pi",3);live=revokeDuringLookup;idRevokes=revokeDuringLookup;assert(!expired.append(1,"old",3)&&VFS::files.empty());}
  reset();TranscriptSession renamed;renamed.begin(options(),"pi",4);assert(renamed.append(1,"original",8));const auto prior=text(renamed);uid=3;assert(!renamed.append(2,"replacement",11)&&text(renamed)==prior);
 }
+// The identity half resolves the same users whether or not transcripts are saved.
+static void identity_without_saving(){
+ reset();gSettings.sttSaveTranscripts=false;char user[65];
+ assert(!transcriptCaptureOptions(SOURCE_SERIAL,7).user[0]); // the options half still returns early
+ memset(user,'x',sizeof(user));assert(transcriptCaptureIdentity(SOURCE_SERIAL,7,user,sizeof(user))&&!strcmp(user,"alice"));
+ assert(transcriptCaptureIdentity(SOURCE_LOCAL_DISPLAY,7,user,sizeof(user))&&!strcmp(user,"alice"));
+ peerUser="bob";assert(transcriptCaptureIdentity(SOURCE_G2_GLASSES,7,user,sizeof(user))&&!strcmp(user,"bob"));peerUser="alice";
+ // Every refusal leaves the caller's buffer empty, never a stale name.
+ const auto refused=[&](CommandSource source,uint32_t e){memset(user,'x',sizeof(user));return !transcriptCaptureIdentity(source,e,user,sizeof(user))&&!user[0];};
+ assert(refused(SOURCE_SERIAL,0)&&refused(SOURCE_SERIAL,8)&&refused(SOURCE_WEB,7));
+ authed=false;assert(refused(SOURCE_LOCAL_DISPLAY,7));authed=true;
+ peerEpoch=8;assert(refused(SOURCE_G2_GLASSES,7));peerEpoch=7;
+ live=false;assert(refused(SOURCE_SERIAL,7));live=true;
+ auth.user="";assert(refused(SOURCE_SERIAL,7));auth.user="alice";
+ char tight[5];memset(tight,'x',sizeof(tight));assert(!transcriptCaptureIdentity(SOURCE_SERIAL,7,tight,sizeof(tight))&&!tight[0]);
+ char fits[6];assert(transcriptCaptureIdentity(SOURCE_SERIAL,7,fits,sizeof(fits))&&!strcmp(fits,"alice"));
+ assert(!transcriptCaptureIdentity(SOURCE_SERIAL,7,nullptr,8)&&!transcriptCaptureIdentity(SOURCE_SERIAL,7,user,0));
+ assert(!opens&&!userLookups&&!locks); // resolution only: no filesystem or account lookup
+ gSettings.sttSaveTranscripts=true;assert(!strcmp(options().user,"alice")); // and the options half is unchanged
+}
 static void faults(){
  for(int fault=0;fault<10;++fault){
   reset();TranscriptSession s;s.begin(options(),"local",10+fault);
@@ -151,4 +171,4 @@ static void terminal_and_bounds(){
  reset();TranscriptSession oversized;oversized.begin(options(),"local",43);std::string huge(513,'x');assert(!oversized.append(1,huge.c_str(),huge.size())&&VFS::files.empty());
  assert(!locks&&!filesOpen);
 }
-int main(){complete();disabled_and_identity();faults();terminal_and_bounds();puts("Shared transcript writer: identity, latch, replay, storage and cleanup checks passed");}
+int main(){complete();disabled_and_identity();identity_without_saving();faults();terminal_and_bounds();puts("Shared transcript writer: identity, latch, replay, storage and cleanup checks passed");}

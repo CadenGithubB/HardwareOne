@@ -24,6 +24,24 @@ set_target_properties(dictation_policy_tests PROPERTIES
 target_compile_options(dictation_policy_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Long-press (hold) press/release pairing and route policy used by
+# G2_Glasses.cpp. Production dependency-free header; the firmware owns the
+# portMUX and the clock.
+add_executable(g2_hold_gesture_tests test_g2_hold_gesture.cpp)
+set_target_properties(g2_hold_gesture_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(g2_hold_gesture_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# QuickNote lifecycle FSM, title/junk heuristics, v1 header, file names and
+# private notes path. Production dependency-free header (with the transcript
+# path policy it builds on); QuickNote_Store.cpp does the I/O.
+add_executable(quicknote_policy_tests test_quicknote_policy.cpp)
+set_target_properties(quicknote_policy_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(quicknote_policy_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # The packed atomic command-admission/lifecycle gate is the production header
 # used by System_MQTT.cpp. Exercise its deterministic transitions and the
 # command-vs-stop race without an Arduino or ESP-IDF shim.
@@ -232,6 +250,14 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(dictation_policy_tests PRIVATE
     -fsanitize=address,undefined)
+  target_compile_options(g2_hold_gesture_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(g2_hold_gesture_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(quicknote_policy_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(quicknote_policy_tests PRIVATE
+    -fsanitize=address,undefined)
   target_compile_options(mqtt_lifecycle_gate_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(mqtt_lifecycle_gate_tests PRIVATE
@@ -419,6 +445,8 @@ add_test(NAME sdmmc_lifecycle
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
+add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)
+add_test(NAME quicknote_policy_tests COMMAND quicknote_policy_tests)
 add_test(NAME mqtt_lifecycle_gate_tests COMMAND mqtt_lifecycle_gate_tests)
 add_test(NAME memutil_tests COMMAND memutil_tests)
 add_test(NAME memutil_no_psram COMMAND memutil_no_psram_tests)
@@ -535,6 +563,51 @@ add_test(
   NAME notification_integration_guards
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_notification_integration_guards.py)
+# Production osEventTypeName() names 0-10 and the G2 hold (long-press) RX hook
+# order and producer/dispatcher guards in G2_Glasses.cpp. Uses the xcrun c++
+# shim (clang++) so it needs no SDKROOT.
+add_test(
+  NAME g2_hold_decode
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_hold_decode.py)
+# The production G2 hold section (pairing, gates, g2_tap_disp routing, page
+# side table, events, aborts, sim) and the SysEvent exit tail of
+# handleDevEvent run against fakes. Same xcrun shim note.
+add_test(
+  NAME g2_hold_dispatch
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_hold_dispatch.py)
+# The production QuickNote store (create/list/read/delete with tmp+rename and
+# the free-space reserve) against a fake guarded VFS whose owner decision is
+# the production transcript path policy. Same xcrun shim note.
+set(QUICKNOTE_STORE_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND QUICKNOTE_STORE_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME quicknote_store
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_quicknote_store.py
+          ${QUICKNOTE_STORE_TEST_ARGS})
+# The production QuickNote service and `note` CLI (authority matrix, one note
+# at a time, save/discard/fail, revocation, limits, private replies) against
+# fakes, once per transcription backend, plus its event/settings/CLI wiring.
+# Same xcrun shim note.
+add_test(
+  NAME quicknote_service
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_quicknote_service.py
+          ${QUICKNOTE_STORE_TEST_ARGS})
+# The production Notes lens page (views, holds on the page and through the
+# global hold action, no container rebuild while a note records, stale replies,
+# refusal without navigation, privacy) against fakes, plus its Apps row,
+# watchdog keep-alive, container-ready mic re-arm, unlogged row labels and
+# registration in G2_Glasses.cpp. Same xcrun shim note.
+add_test(
+  NAME g2_notes_page
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_notes_page.py
+          ${QUICKNOTE_STORE_TEST_ARGS})
 add_test(
   NAME i2c_transaction_contract
   COMMAND ${Python3_EXECUTABLE}

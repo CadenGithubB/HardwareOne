@@ -1,4 +1,4 @@
-# Hardware One v0.99.96 - User Guide
+# Hardware One v0.99.96.1 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -184,6 +184,8 @@ Requires `ENABLE_BLUETOOTH=1` and `ENABLE_G2_GLASSES=1`. The ESP32 acts as BLE
 central and drives the Even Realities G2 temples directly - the firmware
 "hijacks" the lens to render its own pages, so this is a full on-glasses UI, not
 a notification mirror. Connect with `openg2`; navigate by tapping the temple.
+Holding the ring on any of these pages records a private note - see
+[Hold (long-press) and QuickNote](#hold-long-press-and-quicknote).
 
 The main menu mirrors the OLED's six categories:
 
@@ -193,7 +195,7 @@ The main menu mirrors the OLED's six categories:
 | **Config** | Settings, Users (admin only) |
 | **Connect** | WiFi >>, Bluetooth >>, ESP-NOW >> |
 | **Hardware** | Sensor list (one row per compiled sensor), LED, FM tuner |
-| **Apps** | ESP-NOW, Files, Maps, LLM, Automations, Health |
+| **Apps** | ESP-NOW, Files, Notes, Maps, LLM, Automations, Health |
 | **Power** | CPU presets, restart, power off |
 
 Sub-pages are registered but hidden from the top level - they are reached
@@ -207,6 +209,7 @@ deeper still: **Camera settings** is reached from Hardware -> sensor list -> `CA
 | --- | ----- |
 | **ESP-NOW** | Peer messaging. Distinct from Connect -> ESP-NOW, which owns the settings |
 | **Files** | Browse, view, rename, delete. Folders carry an item-count badge |
+| **Notes** | Private spoken notes (QuickNote): `● New note`, your newest notes, read and delete (requires `ENABLE_QUICKNOTE`) - see [QUICKNOTE.md](QUICKNOTE.md) |
 | **Maps** | Pan/zoom offline map viewer. Row reads `Maps (none)` when no map files are present (requires `ENABLE_MAPS`) |
 | **LLM** | Submenu: Open chat / Ask (Mic / Keys) / Ask (guided) / Re-run last / Select Model (requires `ENABLE_LLM_BACKEND`) - see [LLM](#llm) |
 | **Automations** | List, view, and run automations (requires `ENABLE_AUTOMATION`) |
@@ -233,6 +236,32 @@ data that far back". Trends keeps its own left-anchored day window.
 
 Pair the ring under Connect -> Bluetooth. The same vitals appear on the OLED
 (**Apps -> Health**) and the web (**`/r1-health`**).
+
+### Hold (long-press) and QuickNote
+
+A plain hold of the ring (or a temple) on a HardwareOne page reaches the
+firmware as a press when the glasses recognise it and a release when the finger
+lifts. On the Notes page a hold records a note; on any other HardwareOne page
+the global hold action (`g2holdaction`, default QuickNote where it is built)
+switches to Notes and records. Letting go saves the note. Full guide:
+[QUICKNOTE.md](QUICKNOTE.md).
+
+- Holds reach the firmware only while a HardwareOne page is on the lens - open
+  Blocks first. There is no trigger from the idle lens, the dashboard or a
+  native app.
+- Tap then hold (the glasses menu), holding both temples (silent mode) and
+  double tap (back) stay with the glasses.
+- Holds are ignored while the firmware menu or a notification covers the page,
+  while the keyboard is open, and on pages that cannot be left (Maps, Health,
+  the LLM, image and camera viewers).
+- By default only the ring starts a note (`g2holdsource 0`); `g2holdsource 1`
+  adds the temples. That needs glasses firmware that reports the source
+  (2.3.2.14); on 2.2.9.22 every hold is accepted.
+- Holds act only on glasses firmware with a hold profile (both arms 2.3.2.14
+  or 2.2.9.22). On anything else they are recorded but do nothing;
+  `g2hold status` shows the profile and the last 16 holds.
+- Nothing is written to the glasses: the Even app's own Press & hold binding,
+  the gesture table and the menu are left as they are.
 
 ### Config -> Users
 
@@ -322,7 +351,9 @@ Captures are capped at 30 seconds.
 Most lens pages have a CLI equivalent - `g2status`, `g2show`, `g2clear`,
 `g2nav`, `g2health`, `g2map`, `g2files`, `g2sensors`, `g2settings`,
 `g2network`, `g2battery`, and the `g2ai*` / `g2mic*` / `g2notify*` families.
-Run `help g2` on the device for the full list.
+Run `help g2` on the device for the full list. `g2hold status` reports the hold
+input, and `note` starts, stops and browses QuickNotes (`note start glasses`
+from serial, the BLE app or UART).
 
 > `openg2` and `ringconnect` return OK when the connection is *kicked off*, not
 > when it completes. A menu that reads the link state immediately after may
@@ -631,6 +662,8 @@ setting, regardless of which setting it was.
 | `voice_wake` / `voice_command` | wake word / successful voice command | - / command |
 | `user_request` / `user_added` / `user_approved` / `user_deleted` | account lifecycle | username |
 | `password_changed` | password rotated | username / self\|admin-reset |
+| `g2_long_press` / `g2_long_release` | ring/temple hold pressed / released on a HardwareOne lens page | ring\|left\|right\|unknown / press: consumer, `ignored:<reason>` or `refused:<reason>`; release: `<ms>ms` |
+| `note_started` / `note_saved` / `note_failed` | a QuickNote began / was saved / was not saved (never the note text) | hold\|lens\|cli\|web (failed: reason) / started: local\|pi; saved: `<words>w <ms>ms` |
 
 Run `events` in the CLI to watch the register live (last 48 events, newest
 first, each tagged with who caused it, e.g. `by web:hub`) - handy for finding
@@ -914,6 +947,7 @@ Available debug modules (type `help debug` on device for full list):
 | `debugllmforward` | Transformer forward pass (verbose - use sparingly) |
 | `debugllmgenerate` | Generation loop, sampling, throughput |
 | `debugllmmemory` | PSRAM estimates, context cap, allocations |
+| `debugg2events` | G2 list/text/system events and ring/temple holds (`debugg2` includes them) |
 
 ---
 
@@ -1585,6 +1619,11 @@ g2deinit                        - Deinitialize G2 client mode
 g2nav [on|off]                  - Map G2 gestures to OLED menu navigation
 g2verbose [on|off]              - Toggle verbose packet logging
 g2health                        - Open Apps -> Health (R1 vitals + graphs) on the lens (ENABLE_R1_HEALTH)
+g2hold [status|clear]           - Hold (long-press) input: firmware profile, settings, last 16 holds
+g2hold sim <press|release|abort> - Admin: synthetic hold through the real dispatcher (press: paired wearer only)
+g2holdaction [0|1]              - What a hold does on a HW1 page: 0 = Off, 1 = QuickNote
+g2holdsource [0|1]              - 0 = ring only, 1 = ring + temples
+g2holdunprofiled [0|1]          - Testing: act on holds from unprofiled glasses firmware
 ```
 
 **Apps -> Health** (lens, `ENABLE_R1_HEALTH`): left list (Overview / Activity / Trends / Heart Rate /
@@ -1601,6 +1640,25 @@ Ring/Health CLI: `ringconnect`, `ringstatus`, `ringquery hr|temp|wear`,
 `healthstatus [json|poll]`, `healthlogging status|interval`. A Bluetooth App can call the
 same commands over GATT (no dedicated phone UI yet).
 3-pane list+text+image experiments: Tests -> Image -> Com2 (LZ4 multi) -> Q30*.
+</details>
+
+<details>
+<summary><strong>note - QuickNote private spoken notes (requires ENABLE_QUICKNOTE)</strong></summary>
+
+```
+note start [hold|toggle] [mic=auto|g2|pdm]   - Start a note (lens, web CLI or local display)
+note start glasses [hold|toggle]             - Start on the paired wearer's glasses (serial, BLE app, UART)
+note stop|cancel <id>                        - Save / discard the live note
+note status [id]                             - Live note or how it ended (never the text)
+note list [internal|sd] [offset] [u<id>]     - Your notes, eight per page, newest first
+note read "<path>" [offset]                  - 512-byte window of a note
+note delete "<path>"                         - Delete a note
+notemaxsec <10-120>                          - Longest note (CM5 builds cap it at 30)
+notemic <0|1|2>                              - Mic for web/display notes: auto, glasses, board
+```
+
+Notes are saved under `/sd/stt/u<id>/notes/` (or `/stt/...`), open to their
+owner and superadmins only. See [QUICKNOTE.md](QUICKNOTE.md).
 </details>
 
 <details>
@@ -1827,7 +1885,9 @@ Tune, seek up/down, set volume, mute. `fmradio tune <MHz>` - e.g., `fmradio tune
 ### Even Realities G2 Glasses
 BLE client for Even G2 temples (`openg2` / hijack menus / Apps -> Health). Requires
 `ENABLE_G2_GLASSES`. See the `g2` / `g2health` / `ring*` command sections above.
-R1 ring connect and vitals share the same Bluetooth central stack.
+R1 ring connect and vitals share the same Bluetooth central stack. A ring or
+temple hold on a HardwareOne page is an input of its own; QuickNote uses it
+([QUICKNOTE.md](QUICKNOTE.md)).
 
 ---
 

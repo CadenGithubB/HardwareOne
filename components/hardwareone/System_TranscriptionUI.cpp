@@ -82,7 +82,8 @@ const char* commandSession(const String& input) {
   const String op = args.count() ? args.arg(0) : "status";
   if (op == "status" && args.count() <= 1) {
     DictationAppLease current{};
-    if (dictationAppCurrent(lease.source, lease.epoch, &current)) lease = current;
+    if (dictationAppCurrent(lease.source, lease.epoch, &current,
+                            DictationAppPurpose::Transcription)) lease = current;
     putStatus(doc, lease);
   } else if (op == "start" && args.count() == 1) {
     String role;

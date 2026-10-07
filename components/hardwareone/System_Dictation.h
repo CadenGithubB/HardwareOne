@@ -39,6 +39,7 @@
 
 #include "System_BuildConfig.h"
 #include "System_DictationPolicy.h"  // exact direct-UART namespace predicate
+#include "HAL_Audio.h"     // AudioSource (DictationAppOptions)
 #include "System_User.h"   // TransportSessionEpoch
 #include "System_Transcript.h"
 
@@ -76,6 +77,12 @@ struct DictationTextReceipt {
   uint16_t length = 0;
 };
 
+// What an App exchange is for. The purpose is part of the lease identity, so
+// a surface sees only its own kind: the Transcription UIs (`transcription
+// status` with no id, the web panel) never adopt, page or acknowledge a
+// QuickNote held by the same signed-in session, and the reverse.
+enum class DictationAppPurpose : uint8_t { Transcription = 0, QuickNote = 1 };
+
 // An application lease is distinct from the keyboard consumer, even on the
 // same display/session. Treat exchange as an opaque exact-run token. Possessing
 // it never replaces the live source+epoch authority checked by every operation.
@@ -83,6 +90,7 @@ struct DictationAppLease {
   CommandSource source = SOURCE_INTERNAL;
   TransportSessionEpoch epoch = kNoTransportSessionEpoch;
   uint64_t exchange = 0;
+  DictationAppPurpose purpose = DictationAppPurpose::Transcription;
 };
 
 struct DictationAppSnapshot {
@@ -166,10 +174,30 @@ void dictationFieldFullFor(CommandSource source);
 // repeated-segment capture. Neither provider promises partial-word streaming.
 bool dictationAppBegin(CommandSource source, TransportSessionEpoch epoch,
                        DictationAppLease* lease);
-// Recover an active or terminal lease only for this live exact owner. Use a
-// separate output object: every failure clears it.
+// Per-exchange App options. A default-constructed value is exactly
+// dictationAppBegin(): Transcription purpose, the micsource setting, the
+// dictation silence window and the sttsavetranscripts preference.
+struct DictationAppOptions {
+  DictationAppPurpose purpose = DictationAppPurpose::Transcription;
+  // NONE = gSettings.micSource (today's behaviour). Any other source is
+  // strict, like an explicit setting: the exchange fails rather than record
+  // from a different microphone.
+  AudioSource preferredSource = AUDIO_SRC_NONE;
+  // CM5 recorder only: the VAD silence that ends the capture. 0 = the
+  // dictation default (1200 ms). The local broker segments on its own.
+  uint32_t silenceStopMs = 0;
+  // false = no shared /stt/u<id>/*.txt copy whatever sttsavetranscripts says;
+  // the caller keeps the text itself.
+  bool saveTranscript = true;
+};
+bool dictationAppBeginWith(CommandSource source, TransportSessionEpoch epoch,
+                           const DictationAppOptions& options,
+                           DictationAppLease* lease);
+// Recover an active or terminal lease of `purpose` only for this live exact
+// owner. Use a separate output object: every failure clears it.
 bool dictationAppCurrent(CommandSource source, TransportSessionEpoch epoch,
-                         DictationAppLease* lease);
+                         DictationAppLease* lease,
+                         DictationAppPurpose purpose = DictationAppPurpose::Transcription);
 // A live caller with an invalid/zero exchange receives only generic busy and
 // false; all private fields stay empty. This supports an idle app's Start gate.
 bool dictationAppSnapshot(const DictationAppLease& lease,
@@ -232,7 +260,11 @@ inline bool dictationAppBegin(CommandSource, TransportSessionEpoch, DictationApp
   if (lease) *lease = DictationAppLease{};
   return false;
 }
-inline bool dictationAppCurrent(CommandSource, TransportSessionEpoch, DictationAppLease* lease) {
+// No dictationAppBeginWith stub: its options name an AudioSource, which exists
+// only with the microphone, and QuickNote, its consumer, builds only with
+// dictation.
+inline bool dictationAppCurrent(CommandSource, TransportSessionEpoch, DictationAppLease* lease,
+                                DictationAppPurpose = DictationAppPurpose::Transcription) {
   if (lease) *lease = DictationAppLease{};
   return false;
 }

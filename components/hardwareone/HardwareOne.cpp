@@ -2646,6 +2646,10 @@ void hardwareone_loop() {
   g2Tick();             // glasses: overlay auto-dismiss + adaptive clock/tz re-push (self-throttled)
   ntpSyncDrainTick();   // hand real SNTP replies to the clock-step chokepoint
   Clock::clockDutiesTick(); // drain filesystem-touching clock-step chores
+#if ENABLE_LOCAL_STT
+  extern void sttWarmTick();
+  sttWarmTick();        // free a kept-warm STT model once idle or PSRAM runs short
+#endif
 #if ENABLE_BLUETOOTH
   // Before scheduling another reseek: if the host stack is wedged, no number
   // of retries can clear it — recycle instead. Self-gating (worker idle,

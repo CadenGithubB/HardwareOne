@@ -68,8 +68,9 @@ static File openGuarded(const String& path,const char* mode,const AuthContext& c
 static DictationAppLease current{SOURCE_WEB,7,0x1122334455667788ULL};
 static bool haveLease=true,active=true,haveText=true;
 static DictationTextReceipt committed{};
-static bool owns(const DictationAppLease& l){return haveLease&&l.source==current.source&&l.epoch==current.epoch&&l.exchange==current.exchange&&transportSessionEpochIsLive(l.source,l.epoch);}
-static bool dictationAppCurrent(CommandSource source,uint32_t epoch,DictationAppLease* out){*out={};if(!haveLease||source!=current.source||epoch!=current.epoch||!epochLive)return false;*out=current;return true;}
+static bool owns(const DictationAppLease& l){return haveLease&&l.source==current.source&&l.epoch==current.epoch&&l.exchange==current.exchange&&l.purpose==current.purpose&&transportSessionEpochIsLive(l.source,l.epoch);}
+static unsigned currentLookups=0;
+static bool dictationAppCurrent(CommandSource source,uint32_t epoch,DictationAppLease* out,DictationAppPurpose purpose=DictationAppPurpose::Transcription){++currentLookups;assert(purpose==DictationAppPurpose::Transcription);*out={};if(!haveLease||source!=current.source||epoch!=current.epoch||purpose!=current.purpose||!epochLive)return false;*out=current;return true;}
 static bool dictationAvailable(const char** reason){*reason=nullptr;return true;}
 static bool dictationAppSnapshot(const DictationAppLease& lease,DictationAppSnapshot* out){*out={};out->busy=active;if(!owns(lease))return false;out->valid=true;out->active=active;out->done=!active;out->status.continuous=true;out->status.captureActive=active;out->status.transcript.enabled=true;snprintf(out->status.transcript.path,sizeof(out->status.transcript.path),"/stt/u7/private.txt");if(snapshotHook){auto hook=snapshotHook;snapshotHook=nullptr;hook();}return true;}
 static bool dictationAppBegin(CommandSource source,uint32_t epoch,DictationAppLease* out){++beginCalls;if(!allowBegin)return false;current={source,epoch,0x1122334455667788ULL};*out=current;haveLease=true;return true;}
@@ -80,7 +81,7 @@ static bool dictationAppPeekDraft(const DictationAppLease&,char* out,size_t size
 static bool dictationAppCommitText(const DictationAppLease& lease,const DictationTextReceipt& receipt,size_t accepted){++commitCalls;committed=receipt;return owns(lease)&&receipt.sequence==9&&receipt.offset==0&&accepted==13;}
 // INSERT_ADAPTER
 static std::shared_ptr<Node> add(const std::string& path,const std::string& data,bool dir=false){auto node=std::make_shared<Node>();node->path=path;node->data=data;node->directory=dir;nodes[path]=node;return node;}
-static void reset(){auth={};epochLive=accountExists=sdAvailable=allowBegin=true;guest=storageBusy=shortRead=seekFails=false;readCalls=beginCalls=stopCalls=cancelCalls=commitCalls=0;readHook=peekHook=snapshotHook=nullptr;openedPaths.clear();nodes.clear();haveLease=active=haveText=true;current={SOURCE_WEB,7,0x1122334455667788ULL};assert(!fsDepth);gSettings.sttSaveTranscripts=true;}
+static void reset(){auth={};epochLive=accountExists=sdAvailable=allowBegin=true;guest=storageBusy=shortRead=seekFails=false;readCalls=beginCalls=stopCalls=cancelCalls=commitCalls=currentLookups=0;readHook=peekHook=snapshotHook=nullptr;openedPaths.clear();nodes.clear();haveLease=active=haveText=true;current={SOURCE_WEB,7,0x1122334455667788ULL};assert(!fsDepth);gSettings.sttSaveTranscripts=true;}
 static JsonDocument parsed(const char* result){JsonDocument doc;assert(!deserializeJson(doc,result));assert(!doc["transcriptPath"].isNull());return doc;}
 static JsonDocument files(const String& args){auto doc=parsed(commandFiles(args));assert(!fsDepth);return doc;}
 static JsonDocument session(const String& args){return parsed(commandSession(args));}
@@ -88,10 +89,13 @@ static void deniedFile(const char* args){auto d=files(args);assert(d["success"]=
 static void testFiles(){
  reset();auto dir=add("/stt/u7","",true);for(int i=0;i<11;++i){char p[64];snprintf(p,sizeof(p),"/stt/u7/session-%02d.txt",i);dir->children.push_back(add(p,"saved"));}
  dir->children.insert(dir->children.begin(),add("/stt/u7/hidden.bin","private"));dir->children.insert(dir->children.begin(),add("/stt/u7/subdir.txt","",true));
+ // A QuickNote folder beside the transcripts (readable, owner's own) is not a transcript.
+ auto notes=add("/stt/u7/notes","",true);notes->children.push_back(add("/stt/u7/notes/boot-0000000000000001.txt","note"));dir->children.insert(dir->children.begin(),notes);
  auto denied=add("/stt/u7/denied.txt","private");denied->denied=true;dir->children.insert(dir->children.begin(),denied);
  dir->children.insert(dir->children.begin(),add("/stt/u7/a\"b.txt","private"));dir->children.insert(dir->children.begin(),add("/stt/u7/"+std::string(70,'x')+".txt","private"));
  auto d=files("list internal 0");assert(d["success"]==true&&d["entries"].size()==8&&d["more"]==true&&d["nextOffset"]==8);
  assert(d["entries"][0]["name"]=="session-00.txt"&&d["entries"][7]["name"]=="session-07.txt");
+ for(JsonObject row:d["entries"].as<JsonArray>())assert(row["name"].as<std::string>().find("notes")==std::string::npos&&row["name"].as<std::string>().find("boot-")==std::string::npos);
  d=files("list internal 8");assert(d["entries"].size()==3&&d["more"]==false&&d["nextOffset"]==11);
  d=files("list internal 999");assert(d["entries"].size()==0&&d["more"]==false);
  reset();d=files("list internal 0");assert(d["success"]==true&&d["entries"].size()==0);
@@ -118,5 +122,13 @@ static void testSession(){
  for(const auto* args:{"ack 1122334455667788 9 0 0","ack 1122334455667788 9 0 257","ack 1122334455667788 9 65536 13","ack 1122334455667788 4294967296 0 13","ack 1122334455667788 9 -1 13","next 9999999999999999","next 1","next 0000000000000000","next \"1122334455667788"}){reset();d=session(args);assert(d["success"]==false&&!d.containsKey("sttText")&&commitCalls==0);}
  reset();d=session("stop 1122334455667788");assert(d["success"]==true&&stopCalls==1);
  reset();d=session("cancel 1122334455667788");assert(d["success"]==true&&cancelCalls==1);
+ // A QuickNote held by this same session is not a transcription: status with
+ // no id does not adopt it, and its id cannot page, acknowledge or end it.
+ reset();current.purpose=DictationAppPurpose::QuickNote;d=session("status");
+ assert(currentLookups==1&&d["exchange"]==""&&d["busy"]==true&&d["active"]==false&&d["transcriptPath"]=="");
+ for(const auto* args:{"next 1122334455667788","ack 1122334455667788 9 0 13","stop 1122334455667788","cancel 1122334455667788","status 1122334455667788"}){
+  reset();current.purpose=DictationAppPurpose::QuickNote;d=session(args);
+  assert(d["success"]==false&&!d.containsKey("sttText")&&commitCalls==0&&stopCalls==0&&cancelCalls==0);
+ }
 }
 int main(){testFiles();testSession();puts("Transcription command adapter: real parser/normalizer/JSON; owner file paging, UTF-8 bounds, epoch fences and App receipts passed");}

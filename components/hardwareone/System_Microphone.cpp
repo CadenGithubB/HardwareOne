@@ -1501,7 +1501,8 @@ static void recordingTask(void* param) {
 static bool startRecordingInternal(MicRecordingOwner owner,
                                    uint32_t silenceStopMs, bool trim,
                                    uint32_t admissionSessionEpoch,
-                                   const LiveAudioRecorderAuthorization& shadowAuth) {
+                                   const LiveAudioRecorderAuthorization& shadowAuth,
+                                   AudioSource preferred = AUDIO_SRC_NONE) {
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] ========== startRecording() ENTRY ==========");
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] gMicRunning=%d state=%s", gMicRunning,
                        micRecordingStateName(getMicRecordingState()));
@@ -1529,7 +1530,16 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   // in-flight capture. If the glasses are NOT connected, audioSourceAvailable()
   // is false and the incumbent source is left alone — an out-of-range G2 must
   // never take the mic away from PDM.
-  if (gSettings.micSource == "g2" &&
+  //
+  // A caller's `preferred` source (a dictation exchange that asked for one
+  // microphone) is honoured, never re-resolved: a running mic this capture did
+  // not open belongs to its opener (openmic, ESP-SR, a web stream), and moving
+  // it would leave that owner on a microphone it never chose, with nothing to
+  // hand it back when the exchange ends. A mic the caller opened itself came
+  // up on `preferred` already (initMicrophone(preferred)). So a request is only
+  // checked, and a mismatch is refused below instead of recording another mic.
+  if (preferred == AUDIO_SRC_NONE &&
+      gSettings.micSource == "g2" &&
       audioGetSource() != AUDIO_SRC_G2_LEFT &&
       audioSourceAvailable(AUDIO_SRC_G2_LEFT) &&
       !micRecordingBusy()) {
@@ -1548,6 +1558,12 @@ static bool startRecordingInternal(MicRecordingOwner owner,
       // Finalizing a previous capture — keep the incumbent source and record.
       WARN_SYSTEMF("[MIC_START_REC] re-resolve skipped (mic busy stopping)");
     }
+  }
+  if (preferred != AUDIO_SRC_NONE && audioGetSource() != preferred) {
+    WARN_SYSTEMF("[MIC_START_REC] requested source is not the running mic "
+                 "(active=%s) — refusing", micSourceName());
+    INFO_MIC_LIFECYCLEF("Requested mic source not active");
+    return false;
   }
 
   // This claim MUST precede every write to the capture globals below. A start
@@ -1719,11 +1735,12 @@ bool startRecording(uint32_t silenceStopMs, bool trim) {
 }
 
 bool startRecordingOwned(MicRecordingOwner owner,
-                         uint32_t silenceStopMs, bool trim) {
+                         uint32_t silenceStopMs, bool trim,
+                         AudioSource preferred) {
   if (!micRecordingOwnerValid(owner)) return false;
   return startRecordingInternal(owner, silenceStopMs, trim,
                                 /*admissionSessionEpoch=*/0,
-                                LiveAudioRecorderAuthorization{});
+                                LiveAudioRecorderAuthorization{}, preferred);
 }
 
 bool stopRecording(uint32_t timeoutMs) {
@@ -1923,7 +1940,7 @@ bool deleteRecording(const char* filename) {
   return false;
 }
 
-bool initMicrophone() {
+bool initMicrophone(AudioSource preferred) {
   MicSourceOpGuard sourceOp;
   if (!sourceOp) return false;
 
@@ -1990,6 +2007,11 @@ bool initMicrophone() {
     INFO_MIC_LIFECYCLEF("No mic source available");
     return false;
   }
+  if (preferred != AUDIO_SRC_NONE && !audioSourceAvailable(preferred)) {
+    WARN_SYSTEMF("[MIC_INIT] requested source is not available — cannot start");
+    INFO_MIC_LIFECYCLEF("Requested mic source unavailable");
+    return false;
+  }
   if (gSettings.micSource == "pdm" && audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) {
     audioSetSource(AUDIO_SRC_LOCAL_PDM);
   } else if (gSettings.micSource == "g2" && audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
@@ -2001,6 +2023,12 @@ bool initMicrophone() {
   // Capture is owned by HAL_Audio (the single owner). audioCaptureStart resolves
   // the source (PDM-first if the selection is unavailable), starts the PDM I2S
   // channel + warm-up flush OR arms the G2 ring and enables the glasses stream.
+  // A caller's requested source replaces the preference resolved just above.
+  if (preferred != AUDIO_SRC_NONE && !audioSetSource(preferred)) {
+    WARN_SYSTEMF("[MIC_INIT] requested source refused — cannot start");
+    INFO_MIC_LIFECYCLEF("Requested mic source unavailable");
+    return false;
+  }
   if (!audioCaptureStart("mic", (uint32_t)micSampleRate)) {
     WARN_SYSTEMF("[MIC_INIT] *** audioCaptureStart(\"mic\") FAILED at rate=%d Hz ***", micSampleRate);
     INFO_MIC_LIFECYCLEF("Failed to start microphone capture");

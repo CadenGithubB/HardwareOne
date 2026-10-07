@@ -2724,6 +2724,44 @@ static const SettingsModule sttSettingsModule = {
 };
 #endif
 
+// G2 long-press ("hold") input on HW1 lens pages (G2_Glasses.cpp). These are
+// HardwareOne-side policy: holds are only read from the glasses, and no hold
+// setting is ever written to them. Read live by the hold dispatcher.
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+static const SettingEntry g2HoldSettingEntries[] = {
+  { "g2holdaction", SETTING_U8, &gSettings.g2HoldAction, HW1_G2_HOLD_ACTION_DEFAULT, 0, nullptr, 0, 1, "Hold action on HW1 lens pages", "0|Off,1|QuickNote", false, nullptr, "g2holdaction" },
+  { "g2holdsource", SETTING_U8, &gSettings.g2HoldSource, 0, 0, nullptr, 0, 1, "Hold action source", "0|Ring only,1|Ring + temples", false, nullptr, "g2holdsource" },
+  { "g2holdunprofiled", SETTING_BOOL, &gSettings.g2HoldUnprofiled, 0, 0, nullptr, 0, 1, "Allow hold actions on unprofiled glasses firmware (testing)", nullptr, false, nullptr, "g2holdunprofiled" },
+};
+
+static const SettingsModule g2HoldSettingsModule = {
+  "g2hold",
+  "g2hold",
+  g2HoldSettingEntries,
+  sizeof(g2HoldSettingEntries) / sizeof(g2HoldSettingEntries[0]),
+  nullptr,
+  "Ring/temple hold on HW1 lens pages; the ring is the trigger unless temples are allowed."
+};
+#endif
+
+// QuickNote private spoken notes (System_QuickNote.cpp). Read when a note
+// starts and on each service pass; a running note keeps its microphone.
+#if ENABLE_QUICKNOTE
+static const SettingEntry quickNoteSettingEntries[] = {
+  { "notemaxsec", SETTING_U16, &gSettings.noteMaxSec, HW1_NOTE_MAX_SEC_DEFAULT, 0, nullptr, 10, 120, "Longest note (seconds)", nullptr, false, nullptr, "notemaxsec" },
+  { "notemic", SETTING_U8, &gSettings.noteMic, 0, 0, nullptr, 0, 2, "Note microphone", "0|Auto,1|Glasses,2|Board mic", false, nullptr, "notemic" },
+};
+
+static const SettingsModule quickNoteSettingsModule = {
+  "quicknote",
+  "quicknote",
+  quickNoteSettingEntries,
+  sizeof(quickNoteSettingEntries) / sizeof(quickNoteSettingEntries[0]),
+  nullptr,
+  "Private spoken notes: the longest note and the microphone for CLI and web notes."
+};
+#endif
+
 // ============================================================================
 // Crash / Reset Tracking Settings Module
 // ============================================================================
@@ -2949,6 +2987,12 @@ void registerAllSettingsModules() {
 #endif
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
   registerSettingsModule(&sttSettingsModule);
+#endif
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  registerSettingsModule(&g2HoldSettingsModule);
+#endif
+#if ENABLE_QUICKNOTE
+  registerSettingsModule(&quickNoteSettingsModule);
 #endif
 #if ENABLE_EDGE_IMPULSE
   registerSettingsModule(&edgeImpulseSettingsModule);
@@ -3613,6 +3657,15 @@ SETTING_EDITOR_CMD(cmd_set_srmodelsource,       "srmodelsource")
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
 SETTING_EDITOR_CMD(cmd_set_sttsavetranscripts,   "sttsavetranscripts")
 #endif
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+SETTING_EDITOR_CMD(cmd_set_g2holdaction,         "g2holdaction")
+SETTING_EDITOR_CMD(cmd_set_g2holdsource,         "g2holdsource")
+SETTING_EDITOR_CMD(cmd_set_g2holdunprofiled,     "g2holdunprofiled")
+#endif
+#if ENABLE_QUICKNOTE
+SETTING_EDITOR_CMD(cmd_set_notemaxsec,           "notemaxsec")
+SETTING_EDITOR_CMD(cmd_set_notemic,              "notemic")
+#endif
 SETTING_EDITOR_CMD(cmd_set_eventlog,            "eventlog")
 SETTING_EDITOR_CMD(cmd_set_notifydevicebanners,        "notifydevicebanners")
 SETTING_EDITOR_CMD(cmd_set_notifydevicetoasts,         "notifydevicetoasts")
@@ -3705,6 +3758,20 @@ const CommandEntry settingEditorCommands[] = {
   { "srmodelsource",       "Set ESP-SR model source",                    true, cmd_set_srmodelsource,       "Usage: srmodelsource <value>" },
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
   { "sttsavetranscripts", "Save recognized text; changes apply to the next STT session.", true, cmd_set_sttsavetranscripts, "Usage: sttsavetranscripts [0|1]" },
+#endif
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  { "g2holdaction",     "Set what a ring/temple hold on a HW1 lens page does", true, cmd_set_g2holdaction,
+    "Usage: g2holdaction [0|1]\n  0 = Off, 1 = QuickNote; a page with its own hold handler always gets the hold first" },
+  { "g2holdsource",     "Set which hold starts the hold action", true, cmd_set_g2holdsource,
+    "Usage: g2holdsource [0|1]\n  0 = ring only, 1 = ring + temples; glasses firmware that reports no hold source accepts any" },
+  { "g2holdunprofiled", "Allow hold actions on unprofiled glasses firmware (testing)", true, cmd_set_g2holdunprofiled,
+    "Usage: g2holdunprofiled [0|1]\n  Profiled: both arms 2.2.9.22 or 2.3.2.14 (see g2hold status)" },
+#endif
+#if ENABLE_QUICKNOTE
+  { "notemaxsec",       "Set the longest QuickNote, in seconds", true, cmd_set_notemaxsec,
+    "Usage: notemaxsec [10-120]\n  Default 60 with on-device transcription, 30 with the Pi (which caps every note at 30)" },
+  { "notemic",          "Set the microphone for CLI and web QuickNotes", true, cmd_set_notemic,
+    "Usage: notemic [0|1|2]\n  0 = Auto (the paired wearer's glasses if connected, else the board mic), 1 = Glasses, 2 = Board mic\n  Notes started from the glasses always use the glasses mic" },
 #endif
   { "eventlog",            "Enable/disable the structured event-history log (events.log)", true, cmd_set_eventlog,
     "Usage: eventlog <0|1>\n  One line per system event, durable across reboots. Display/behavior unaffected." },

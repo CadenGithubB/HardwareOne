@@ -28,6 +28,12 @@ struct TranscriptStatus {
 // No filesystem I/O. Unresolvable identities fail saving, not transcription.
 TranscriptOptions transcriptCaptureOptions(CommandSource source,
                                             TransportSessionEpoch epoch);
+// The user-resolution half of the above, independent of sttsavetranscripts:
+// the named user of this exact live source+epoch (OLED login, paired G2
+// wearer, or the current command's transport). False, with `user` cleared,
+// when it cannot be resolved or does not fit. No filesystem I/O.
+bool transcriptCaptureIdentity(CommandSource source, TransportSessionEpoch epoch,
+                               char* user, size_t cap);
 
 // One worker owns each instance. All methods except begin/snapshot can block
 // on bounded filesystem locking; never call from a critical section, display

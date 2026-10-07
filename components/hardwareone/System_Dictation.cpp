@@ -110,21 +110,24 @@ static DictationControl gDict = {
     {}, {false, 0, false, {}, {}}, {false, 0, 0}};
 
 // Lock-only identity predicate. Keyboard calls cannot impersonate an App on
-// the same display; the exchange also distinguishes successive same-user runs.
+// the same display; the exchange also distinguishes successive same-user runs,
+// and the purpose keeps a Transcription handle off a QuickNote and vice versa.
 static bool dictationConsumerMatchesLocked(CommandSource source,
                                            const DictationAppLease* app = nullptr) {
   if (!app) return !gDict.appConsumer && gDict.displaySource == source;
   return gDict.appConsumer && app->exchange && source == app->source &&
       gDict.appLease.source == app->source && gDict.appLease.epoch == app->epoch &&
-      gDict.appLease.exchange == app->exchange;
+      gDict.appLease.exchange == app->exchange && gDict.appLease.purpose == app->purpose;
 }
 
+// `app` carries the requested purpose in; the admitted lease is copied back.
 static void dictationAdmitConsumerLocked(CommandSource source,
                                          TransportSessionEpoch epoch,
                                          uint64_t exchange,
                                          DictationAppLease* app) {
   gDict.appConsumer = app != nullptr;
-  gDict.appLease = app ? DictationAppLease{source, epoch, exchange} : DictationAppLease{};
+  gDict.appLease = app ? DictationAppLease{source, epoch, exchange, app->purpose}
+                       : DictationAppLease{};
   gDict.appLastReceipt = DictationTextReceipt{};
   gDict.appLastAccepted = 0;
   if (app) *app = gDict.appLease;
@@ -626,6 +629,19 @@ static bool dictationProcessCleanup() {
   return clear;
 }
 
+// Admission-time transcript identity for one exchange. An App that keeps its
+// own copy of the text (saveTranscript=false) gets the same shape as the
+// setting being off, without resolving or retaining any user identity.
+static TranscriptOptions dictationTranscriptOptions(CommandSource source,
+                                                    TransportSessionEpoch epoch,
+                                                    const DictationAppOptions* options) {
+  if (!options || options->saveTranscript) return transcriptCaptureOptions(source, epoch);
+  TranscriptOptions off;
+  off.source = source;
+  off.epoch = epoch;
+  return off;
+}
+
 #if ENABLE_LOCAL_STT
 // A local exchange never enters the UART/WAV path. This slot survives UI
 // cancellation until a late begin/worker has acknowledged the exact token.
@@ -636,6 +652,7 @@ struct LocalDictation {
   bool beginPending = false;
   bool beginInFlight = false;
   TranscriptOptions transcriptOptions;
+  AudioSource requestedSource = AUDIO_SRC_NONE; // Latched App option; NONE = micsource.
 };
 static LocalDictation gLocalDict;
 static bool gLocalReadyPending = false;
@@ -686,10 +703,12 @@ static bool dictationLocalAvailable(const char** whyNot) {
 }
 
 static bool dictationBeginLocal(CommandSource source, TransportSessionEpoch epoch,
-                                 DictationAppLease* app = nullptr) {
+                                 DictationAppLease* app = nullptr,
+                                 const DictationAppOptions* options = nullptr) {
   const char* why = nullptr;
   if (!dictationAvailable(&why)) return false;
-  const TranscriptOptions transcriptOptions = transcriptCaptureOptions(source, epoch);
+  const TranscriptOptions transcriptOptions = dictationTranscriptOptions(source, epoch, options);
+  const AudioSource requestedSource = options ? options->preferredSource : AUDIO_SRC_NONE;
   const uint32_t nonce = esp_random();
   bool admitted = false;
   portENTER_CRITICAL(&gDictMux);
@@ -704,6 +723,7 @@ static bool dictationBeginLocal(CommandSource source, TransportSessionEpoch epoc
     gLocalDict.exchange = id;
     gLocalDict.actor = STTOwner{source, epoch};
     gLocalDict.transcriptOptions = transcriptOptions;
+    gLocalDict.requestedSource = requestedSource;
     gDict.transcriptOptions = transcriptOptions;
     gDict.transcriptStatus = TranscriptStatus{};
     gDict.transcriptStatus.enabled = transcriptOptions.enabled;
@@ -788,7 +808,8 @@ static void dictationProcessLocal() {
     char error[96] = {};
     const bool accepted = current &&
         displaySessionStillLive(run.actor.source, run.actor.epoch) &&
-        sttBeginContinuous(run.actor, &token, error, sizeof(error), &run.transcriptOptions);
+        sttBeginContinuous(run.actor, &token, error, sizeof(error), &run.transcriptOptions,
+                           run.requestedSource);
     portENTER_CRITICAL(&gDictMux);
     if (gLocalDict.exchange == run.exchange) {
       gLocalDict.beginInFlight = false;
@@ -1040,9 +1061,12 @@ bool dictationAvailable(const char** whyNot) {
   return dictationHostReadyForEpoch(hostEpoch, whyNot);
 }
 
+// `options` is null for the keyboard consumers; an App passes its own (the
+// defaults reproduce the keyboard behaviour exactly).
 static bool dictationBeginImpl(CommandSource displaySource,
                                TransportSessionEpoch displayEpoch,
-                               DictationAppLease* app) {
+                               DictationAppLease* app,
+                               const DictationAppOptions* options) {
   if ((displaySource != SOURCE_LOCAL_DISPLAY &&
        displaySource != SOURCE_G2_GLASSES &&
        !(app && displaySource == SOURCE_WEB)) ||
@@ -1050,7 +1074,7 @@ static bool dictationBeginImpl(CommandSource displaySource,
   if (!displaySessionStillLive(displaySource, displayEpoch)) return false;
 
 #if ENABLE_LOCAL_STT
-  return dictationBeginLocal(displaySource, displayEpoch, app);
+  return dictationBeginLocal(displaySource, displayEpoch, app, options);
 #endif
 
   if (!dictationEnsureWorker()) return false;
@@ -1058,10 +1082,15 @@ static bool dictationBeginImpl(CommandSource displaySource,
   const char* why = nullptr;
   if (!dictationAvailable(&why)) return false;
 
+  const AudioSource preferredSource = options ? options->preferredSource : AUDIO_SRC_NONE;
+  const uint32_t silenceStopMs = options && options->silenceStopMs
+      ? options->silenceStopMs : kDictationVadSilenceMs;
+
   // Refuse a second arm rather than stacking captures; the recorder would
   // reject the start anyway. Cleanup/publication debt is also an admission
   // fence: its fixed slot must never be overwritten by a later path.
-  const TranscriptOptions transcriptOptions = transcriptCaptureOptions(displaySource, displayEpoch);
+  const TranscriptOptions transcriptOptions =
+      dictationTranscriptOptions(displaySource, displayEpoch, options);
   uint32_t nonceCandidate = esp_random();
   if (!nonceCandidate) nonceCandidate = 1;
   bool armed = false;
@@ -1114,13 +1143,21 @@ static bool dictationBeginImpl(CommandSource displaySource,
   // own openmic/closemic state survives a dictation untouched.
   bool startedMic = false;
   if (!gMicRunning) {
-    if (!initMicrophone()) {
+    if (!initMicrophone(preferredSource)) {
       (void)dictFailOwned(owner, "mic would not start");
       dictationResolveCleanup(owner);
       dictationWakeWorker();
       return false;
     }
     startedMic = true;
+  } else if (preferredSource != AUDIO_SRC_NONE &&
+             audioGetSource() != preferredSource) {
+    // Someone else's mic is never re-sourced for an exchange: nothing here
+    // could hand it back, and a moved G2 stream would outlive the note (R15).
+    (void)dictFailOwned(owner, "microphone in use on another source");
+    dictationResolveCleanup(owner);
+    dictationWakeWorker();
+    return false;
   }
 
   // Cancellation may run while initMicrophone() is opening the source. Publish
@@ -1166,8 +1203,9 @@ static bool dictationBeginImpl(CommandSource displaySource,
   }
 
   // Source-agnostic by construction: startRecordingOwned re-resolves the
-  // preference against what is connected now and owns every G2-only step.
-  if (!startRecordingOwned(owner, kDictationVadSilenceMs, /*trim=*/true)) {
+  // preference against what is connected now (or checks this exchange's
+  // requested source, strictly) and owns every G2-only step.
+  if (!startRecordingOwned(owner, silenceStopMs, /*trim=*/true, preferredSource)) {
     // A false start is not synonymous with contention. Setup can also fail
     // after the lifecycle claim (guarded WAV create/header/task startup), in
     // which case the recorder publishes the exact owner-scoped failure before
@@ -1216,16 +1254,23 @@ static bool dictationBeginImpl(CommandSource displaySource,
 }
 
 bool dictationBeginFor(CommandSource source, TransportSessionEpoch epoch) {
-  return dictationBeginImpl(source, epoch, nullptr);
+  return dictationBeginImpl(source, epoch, nullptr, nullptr);
+}
+
+bool dictationAppBeginWith(CommandSource source, TransportSessionEpoch epoch,
+                           const DictationAppOptions& options,
+                           DictationAppLease* lease) {
+  if (!lease) return false;
+  *lease = DictationAppLease{};
+  lease->purpose = options.purpose;
+  if (dictationBeginImpl(source, epoch, lease, &options)) return true;
+  *lease = DictationAppLease{};
+  return false;
 }
 
 bool dictationAppBegin(CommandSource source, TransportSessionEpoch epoch,
                        DictationAppLease* lease) {
-  if (!lease) return false;
-  *lease = DictationAppLease{};
-  if (dictationBeginImpl(source, epoch, lease)) return true;
-  *lease = DictationAppLease{};
-  return false;
+  return dictationAppBeginWith(source, epoch, DictationAppOptions{}, lease);
 }
 
 bool dictationBegin(TransportSessionEpoch displayEpoch) {
@@ -1391,13 +1436,14 @@ DictationSnapshot dictationSnapshotNow() {
 }
 
 bool dictationAppCurrent(CommandSource source, TransportSessionEpoch epoch,
-                         DictationAppLease* lease) {
+                         DictationAppLease* lease, DictationAppPurpose purpose) {
   if (!lease) return false;
   *lease = DictationAppLease{};
   if (!displaySessionStillLive(source, epoch)) return false;
   portENTER_CRITICAL(&gDictMux);
   if (gDict.appConsumer && gDict.appLease.source == source &&
-      gDict.appLease.epoch == epoch) *lease = gDict.appLease;
+      gDict.appLease.epoch == epoch && gDict.appLease.purpose == purpose)
+    *lease = gDict.appLease;
   portEXIT_CRITICAL(&gDictMux);
   if (!displaySessionStillLive(source, epoch)) {
     *lease = DictationAppLease{};

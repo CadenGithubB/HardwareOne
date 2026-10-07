@@ -11,6 +11,7 @@
 #include "System_Events.h"      // systemEventPost + SYSEVT_TIME_SYNCED (X-macro enum — cannot be forward-declared)
 #include "System_Debug.h"       // logSystemEvent, BROADCAST_PRINTF
 #include "System_Automation.h"  // notifyAutomationScheduler (inline no-op stub when automations disabled)
+#include "System_QuickNote.h"   // quickNoteClockSet (inline no-op stub without QuickNote)
 
 // Duty targets that always link (their TUs are unconditional):
 extern bool filesystemReady;
@@ -257,7 +258,10 @@ static void drainDuties() {
   }
   if (pend & PEND_MARKER)  logTimeSyncedMarkerIfReady(srcName);
   if (pend & PEND_ANCHOR)  writeBootAnchor();
-  if (pend & PEND_RESOLVE) resolvePendingUserCreationTimes();
+  if (pend & PEND_RESOLVE) {
+    resolvePendingUserCreationTimes();
+    quickNoteClockSet();  // notes saved as "boot" this boot get their real time
+  }
 
 #if ENABLE_RTC_SENSOR
   if (pend & PEND_RTC_WRITEBACK) {

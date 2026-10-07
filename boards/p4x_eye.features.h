@@ -100,6 +100,10 @@
 // Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud).
 #undef ENABLE_LOCAL_STT
 #define ENABLE_LOCAL_STT 1
+// Private spoken notes (ring hold on a HW1 lens page, Notes page, `note` CLI),
+// transcribed locally and saved under /stt/u<id>/notes/.
+#undef ENABLE_QUICKNOTE
+#define ENABLE_QUICKNOTE 1
 
 // --- Not used on this board --------------------------------------------------
 #undef ENABLE_EDGE_IMPULSE

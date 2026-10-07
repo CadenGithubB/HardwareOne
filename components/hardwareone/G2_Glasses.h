@@ -899,6 +899,9 @@ void g2EvenAiHostStateChanged();
 // The LIVE native EvenAI exchange id, 0 when no session is active. The
 // recorder's since-wake preroll gate compares the recording owner to this.
 uint64_t g2EvenAiActiveExchangeId();
+// True while a native Even AI or Conversate session owns the glasses' voice
+// path. QuickNote refuses to start, and finishes a running note, meanwhile.
+bool g2NativeVoiceActive();
 // Drains up to `capSamples` samples into `out`. Returns number of
 // samples actually read (0 on timeout). Blocks up to `timeoutMs` if
 // the ring is empty.
@@ -1029,6 +1032,7 @@ enum G2HijackPage : uint8_t {
   // to the other module.
   G2_HIJACK_PAGE_LLM_MENU        = 22,
   G2_HIJACK_PAGE_TRANSCRIPTION   = 23, // Apps: private live text and saved sessions
+  G2_HIJACK_PAGE_NOTES           = 24, // Apps: private spoken notes (QuickNote)
 };
 G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);
@@ -1185,6 +1189,24 @@ size_t                g2RegisteredPageCount(void);
 const G2PageModule*   g2RegisteredPageAt(size_t i);
 const G2PageModule*   g2FindPageByName(const char* name);
 const G2PageModule*   g2FindPageByHijackPage(G2HijackPage page);
+
+// Long-press ("hold") handler for a page, kept in a side table keyed by page
+// id instead of a 12th G2PageModule member. Register once at startup, next
+// to g2RegisterPage; nullptr unregisters. The handler runs on g2_tap_disp:
+//   phase 9  = press on this page while it is current; return true to
+//              consume it (false lets the global hold action try);
+//   phase 10 = release of a press this page consumed, while still current;
+//   phase 0  = abort (implicit release, or a release after the page was
+//              swapped away). It may arrive while the page is not current,
+//              so it must finish the work and never draw.
+// source is the G2HoldSource (0 unknown, 1 right, 2 ring, 3 left). A page
+// applies the user's hold source policy itself with g2HoldSourceAdmitted().
+typedef bool (*G2PageHoldFn)(uint8_t phase, uint8_t source);
+bool g2RegisterPageHold(G2HijackPage page, G2PageHoldFn fn);
+// True if `source` may start the hold action under the g2holdsource setting
+// on the connected firmware profile (every source on one whose holds carry
+// no source).
+bool g2HoldSourceAdmitted(uint8_t source);
 
 // Mutators. Each one logs the transition for visibility. Setting
 // hijackActive=true also stamps hijackStartedMs.
@@ -1514,6 +1536,7 @@ inline bool g2MicCaptureDegraded() { return false; }
 inline uint32_t g2EvenAiLastWakeMs() { return 0; }
 inline void g2EvenAiHostStateChanged() {}
 inline uint64_t g2EvenAiActiveExchangeId() { return 0; }
+inline bool g2NativeVoiceActive() { return false; }
 inline size_t g2MicReadPcmSamples(int16_t*, size_t, uint32_t) { return 0; }
 inline size_t g2MicTrimAfeRingToNewest(size_t) { return 0; }
 inline size_t g2MicAfeRingDepth() { return 0; }

@@ -89,5 +89,19 @@ int main() {
   reset();ctx.origin=ORIGIN_SERIAL;ctx.outputMask=MSG_ROUTE_SERIAL|MSG_ROUTE_WEB|MSG_ROUTE_FILE;
   deliverCommandResult(path,ctx);
   assert(Serial.out==path.s+"\n"&&shared.size()==1&&shared[0]=="[private STT result]");
-  puts("STT result privacy: escaped text, targeted serial/BLE, shared redaction and stale session suppression passed");
+  // QuickNote: every `note` reply carries the same producer tag, so a read
+  // window or a page of titles reaches only the direct reply (R22).
+  const String noteRead=R"({"success":true,"error":"","transcriptPath":"/stt/u7/notes/boot-0000000000000001.txt","sttText":"buy oat milk"})";
+  const String noteList=R"({"notes":[{"title":"Buy oat milk"}],"success":true,"error":"","transcriptPath":true})";
+  for(const String* note:{&noteRead,&noteList}){
+    assert(redactOutputForLog(*note).s=="[private STT result]");
+    reset();ctx.origin=ORIGIN_SERIAL;ctx.outputMask=MSG_ROUTE_SERIAL|MSG_ROUTE_WEB|MSG_ROUTE_FILE;
+    deliverCommandResult(*note,ctx);
+    assert(Serial.out==note->s+"\n"&&shared.size()==1&&shared[0]=="[private STT result]");
+    reset();ctx.origin=ORIGIN_BLUETOOTH;ctx.auth.sid="23";ctx.outputMask=MSG_ROUTE_BLE|MSG_ROUTE_WEB|MSG_ROUTE_FILE;
+    deliverCommandResult(*note,ctx);
+    assert(bleTarget==23&&ble==note->s&&shared.size()==1&&shared[0]=="[private STT result]");
+    ctx.auth.sid="";
+  }
+  puts("STT result privacy: escaped text, targeted serial/BLE, shared redaction, QuickNote replies and stale session suppression passed");
 }

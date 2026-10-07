@@ -9,8 +9,10 @@ import torch
 from scipy.signal import fftconvolve, resample_poly, butter, sosfilt
 
 from common import SAMPLE_RATE, HOP, Frontend, encode, ctc_min_frames
+import os
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
-STORES = Path('/Volumes/USB2/stt/stores')
+STORES = (STT_ROOT / 'stores')
 
 
 class Store:
@@ -52,6 +54,41 @@ class Store:
             return audio[start:start + length]
         reps = math.ceil(length / len(audio))
         return np.tile(audio, reps)[:length]
+
+
+class NoisePool:
+    """Background noise drawn from several noise stores (store.random_chunk API):
+    e.g. MUSAN's short sound effects plus DEMAND's real everyday ambiences."""
+
+    def __init__(self, stores, weights=None):
+        self.stores = list(stores)
+        self.weights = list(weights) if weights else [1.0] * len(self.stores)
+
+    def random_chunk(self, rng, length):
+        return rng.choices(self.stores, self.weights)[0].random_chunk(rng, length)
+
+
+class NoiseOnlyStore:
+    """Virtual training source: pure background noise with an EMPTY transcript,
+    so the model learns to write nothing for traffic, cafe chatter, coughs,
+    music or clicks instead of inventing words. Item i is a seeded 1.5-12 s
+    cut from the noise pool (augmentation varies it further each time)."""
+
+    noise_only = True
+
+    def __init__(self, pool, items=20000, seed=11):
+        self.pool, self.seed = pool, seed
+        self.name = 'noise-only'
+        gen = random.Random(seed)
+        self.lengths = np.asarray([gen.randrange(24000, 192001) for _ in range(items)], dtype=np.int64)
+        self.texts = [''] * items
+
+    def __len__(self):
+        return len(self.lengths)
+
+    def samples(self, i):
+        x = self.pool.random_chunk(random.Random(self.seed * 1_000_003 + i), int(self.lengths[i]))
+        return np.asarray(x, dtype=np.float32)
 
 
 def _rms(x):
@@ -104,7 +141,9 @@ class Augmenter:
             return None
         return sum(rng.choice(self.speech_pool).random_chunk(rng, n) for _ in range(rng.randint(3, 6)))
 
-    def __call__(self, x, rng, far_field=False):
+    def __call__(self, x, rng, far_field=False, allow_babble=True):
+        # allow_babble=False for noise-only items: babble is speech, and an empty
+        # transcript over it would teach the model to ignore real voices.
         s = self.strength
         # Speed perturbation (pitch + tempo), standard for ASR robustness.
         r = rng.random()
@@ -128,7 +167,7 @@ class Augmenter:
             snr = rng.uniform(0, 25)
             x = x + n * (_rms(x) / _rms(n)) / (10 ** (snr / 20))
         # Babble: several overlapping talkers, like meeting crosstalk.
-        if rng.random() < 0.2 * s:
+        if allow_babble and rng.random() < 0.2 * s:
             b = self._babble(rng, len(x))
             if b is not None:
                 snr = rng.uniform(5, 20)
@@ -183,7 +222,7 @@ class TrainSet(torch.utils.data.Dataset):
         store = self.stores[s]
         x = store.samples(i)
         if self.augmenter is not None:
-            x = self.augmenter(x, rng, self.far_field[s])
+            x = self.augmenter(x, rng, self.far_field[s], allow_babble=not getattr(store, 'noise_only', False))
         feats = self.frontend(x, dither=True, rng=np.random.default_rng(rng.randrange(1 << 30)))
         label = self.encoder(store.texts[i])
         # Speed-up can make a label too long for CTC; the collate drops those.

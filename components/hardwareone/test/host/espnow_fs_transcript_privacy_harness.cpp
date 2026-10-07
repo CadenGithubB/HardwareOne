@@ -108,7 +108,9 @@ static void denied(const char* path,uint8_t status=FS_LIST_STATUS_PERM_DENIED){
     }
 }
 int main(){
-    for(const char* path:{"/stt","/stt/","/stt/u2","/stt/u2/secret.txt","/stt/u3/secret.txt","/stt/u02/a","/stt/U2/a","/stt/u4294967295/a","/stt/u4294967296/a","stt/u2/a"," //./stt//u2/a ","/sd/stt","/sd/./stt/u2/a","//sd//stt/u2/a","/sd/STT/u2/a","/sd/stt./u2/a","/sd/stt /u2/a","/sd/stt/u2~1/a","/sd/stt/U2/a","/sd/\\stt/u2/a","/sd/.\\stt/u2/a","/sd/stt\\u2\\a","/sd/stt/u2\\a","/ordinary/../stt/u2/a","/sd/stt/u2/../u3/a","/sd/stt/u2/a\n"})denied(path);
+    for(const char* path:{"/stt","/stt/","/stt/u2","/stt/u2/secret.txt","/stt/u3/secret.txt","/stt/u02/a","/stt/U2/a","/stt/u4294967295/a","/stt/u4294967296/a","stt/u2/a"," //./stt//u2/a ","/sd/stt","/sd/./stt/u2/a","//sd//stt/u2/a","/sd/STT/u2/a","/sd/stt./u2/a","/sd/stt /u2/a","/sd/stt/u2~1/a","/sd/stt/U2/a","/sd/\\stt/u2/a","/sd/.\\stt/u2/a","/sd/stt\\u2\\a","/sd/stt/u2\\a","/ordinary/../stt/u2/a","/sd/stt/u2/../u3/a","/sd/stt/u2/a\n",
+        // QuickNote files live inside the private transcript tree.
+        "/stt/u2/notes","/stt/u2/notes/20261004T153012Z-6f1c9a2e00000007.txt","/sd/stt/u2/notes/boot-0000000000000001.txt","/sd/STT/u2/notes/boot-0000000000000001.txt"})denied(path);
     denied("/stt/u2/secret.txt",FS_LIST_STATUS_NOT_READY);denied("/hello.txt",FS_LIST_STATUS_NOT_READY);
     // Root LIST may reveal the protected root's name, never its descendants.
     for(const char* path:{"/","/sd","/ordinary"}){reset();auto q=request<V4PayloadFsListReq>(path);q.maxEntries=32;processListDeferred(mac,q);auto r=decoded<V4PayloadFsListReplyHeader>(ESPNOW_V4_TYPE_FS_LIST_REPLY);assert(r.status==FS_LIST_STATUS_OK&&r.entryCount>0&&scopes==1&&fsCalls>0&&transfers==0);V4PayloadFsEntry first;std::memcpy(&first,response.data()+sizeof(r),sizeof(first));assert(!std::strcmp(first.name,path==String("/ordinary")?"note.txt":"stt"));++checks;}

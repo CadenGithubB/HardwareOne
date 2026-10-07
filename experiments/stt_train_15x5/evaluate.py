@@ -71,7 +71,8 @@ def main():
     p.add_argument('--limit', type=int)
     p.add_argument('--examples', type=int, default=8)
     p.add_argument('--out')
-    p.add_argument('--device', default='mps' if torch.backends.mps.is_available() else 'cpu')
+    p.add_argument('--device', default='cuda' if torch.cuda.is_available() else
+                   'mps' if torch.backends.mps.is_available() else 'cpu')
     a = p.parse_args()
     device = torch.device(a.device)
     config, state = load_checkpoint(a.ckpt)

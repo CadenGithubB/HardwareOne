@@ -25,7 +25,7 @@ DECLARATION_ORDER_FIXTURE_PATH = (
     HERE / "fixtures" / "event_catalog_declaration_order_v1.txt"
 )
 EXPECTED_FAMILY_COUNT = 13
-EXPECTED_KIND_COUNT = 159
+EXPECTED_KIND_COUNT = 164
 
 if not __debug__:
     raise RuntimeError(

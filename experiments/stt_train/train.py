@@ -23,6 +23,7 @@ import torch.nn.functional as F
 from common import QuartzNet, load_checkpoint, save_checkpoint, BLANK
 from data import Store, Augmenter, TrainSet, MixedBatchSampler, collate
 from evaluate import evaluate_stores
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
 TRAIN_MIX = [  # (store, weight, far_field); missing stores are skipped
     ('ami-sdm-train', 0.25, True),
@@ -122,7 +123,7 @@ def main():
             emit(event='missing_store', store=name)
             return None
     augmenter = Augmenter(optional('musan-noise'), optional('musan-speech'), optional('rirs'))
-    present = [(n, w, f) for n, w, f in TRAIN_MIX if (Path('/Volumes/USB2/stt/stores') / n / 'index.json').exists()]
+    present = [(n, w, f) for n, w, f in TRAIN_MIX if ((STT_ROOT / 'stores') / n / 'index.json').exists()]
     pending = [n for n, _, _ in TRAIN_MIX if n not in {m for m, _, _ in present}]
     if pending:
         emit(event='missing_train_stores', using=[n for n, _, _ in present], pending=pending)
@@ -207,7 +208,7 @@ def main():
             last_eval = guard['last_eval'] = time.time()
             save_resume()
             train_mode(model)
-            arrived = [n for n in pending if (Path('/Volumes/USB2/stt/stores') / n / 'index.json').exists()]
+            arrived = [n for n in pending if ((STT_ROOT / 'stores') / n / 'index.json').exists()]
             if arrived:  # restart so the new corpora join the mix
                 emit(event='data_restart', step=step, arrived=arrived)
                 log.close()

@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-963 commands across 52 modules (975 registry entries).
+970 commands across 53 modules (982 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -41,6 +41,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`microphone`](#microphone) — 15 commands
 - [`edgeimpulse`](#edgeimpulse) — 16 commands
 - [`transcription`](#transcription) — 2 commands
+- [`note`](#note) — 1 commands
 - [`stt`](#stt) — 2 commands
 - [`espsr`](#espsr) — 45 commands
 - [`i2c`](#i2c) — 24 commands
@@ -60,10 +61,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`cm5`](#cm5) — 15 commands
 - [`ota`](#ota) — 18 commands
 - [`setpattern`](#setpattern) — 1 commands
-- [`even_g2`](#even-g2) — 56 commands
+- [`even_g2`](#even-g2) — 57 commands
 - [`even_r1`](#even-r1) — 5 commands
 - [`llm`](#llm) — 30 commands
-- [`settingsedit`](#settingsedit) — 58 commands
+- [`settingsedit`](#settingsedit) — 63 commands
 
 ---
 
@@ -727,6 +728,14 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `transcription` |  | Transcription interface controls |
 | `transcripts` |  | Browse your saved transcripts |
 
+## note
+
+> Private spoken notes saved under your own /stt/u<id>/notes/. note start works from the lens, web or local display; other consoles use note start glasses (paired wearer only). Status never shows the text; list/read/delete browse your notes.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `note` |  | Private spoken notes (QuickNote) |
+
 ## stt
 
 > Buffered local dictation through the shared audio HAL. Stop SR and the microphone sensor first, then use stt record [seconds]. Poll stt status [id], finish early with stt stop <id>, discard with stt cancel <id>, and read stt result <id> from the same authenticated session. Audio and results stay local; no host link is required. This backend produces text for review, not voice command execution.
@@ -1256,6 +1265,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `g2glasses` | A | Change glasses-device settings (including capture-proven HeadUp on fw 2.2.6.10)<br/>`Usage: g2glasses [show\|refresh] \| g2glasses <brightness\|autobright\|weardetect\|x\|y\|headup\|headangle\|silent\|unitformat\|distunit\|timeformat\|dateformat\|tempunit> [value]` |
 | `g2health` |  | Open the Health (R1 vitals + graphs) app on the G2 lens<br/>`Usage: g2health (Overview/HR/HRV/SpO2/Battery on the lens; Back to exit)` |
 | `g2hijacktest` |  | Simulate a Blocks tap (status-page hijack) |
+| `g2hold` |  | Long-press (hold) input: firmware profile, pairing, routes and last 16 hold records<br/>`Usage: g2hold [status\|clear\|sim <press [ring\|right\|left\|unknown]\|release\|abort>] bare = status; clear empties the record ring and counters sim (admin; press only by the paired wearer): synthetic right-arm hold through the real pairing and dispatcher (default source ring)` |
 | `g2imgprobe` |  | Probe Cmd=3 multi-frag wire path: g2imgprobe [size_bytes]<br/>`Usage: g2imgprobe [size_bytes] (1..4096, default 1024)` |
 | `g2info` |  | Dump device info (firmware, MAC, battery, etc.) |
 | `g2init` |  | Initialize G2 client mode |
@@ -1363,6 +1373,9 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `eventlog` | A | Enable/disable the structured event-history log (events.log)<br/>`Usage: eventlog <0\|1> One line per system event, durable across reboots. Display/behavior unaffected.` |
 | `fmradiodevicepollms` | A | Set FM radio poll interval (ms)<br/>`Usage: fmradiodevicepollms <value>` |
 | `fmradioenabled` | A | Enable/disable the FM radio subsystem<br/>`Usage: fmradioenabled <0\|1>` |
+| `g2holdaction` | A | Set what a ring/temple hold on a HW1 lens page does<br/>`Usage: g2holdaction [0\|1] 0 = Off, 1 = QuickNote; a page with its own hold handler always gets the hold first` |
+| `g2holdsource` | A | Set which hold starts the hold action<br/>`Usage: g2holdsource [0\|1] 0 = ring only, 1 = ring + temples; glasses firmware that reports no hold source accepts any` |
+| `g2holdunprofiled` | A | Allow hold actions on unprofiled glasses firmware (testing)<br/>`Usage: g2holdunprofiled [0\|1] Profiled: both arms 2.2.9.22 or 2.3.2.14 (see g2hold status)` |
 | `gpsdevicepollms` | A | Set GPS poll interval (ms)<br/>`Usage: gpsdevicepollms <value>` |
 | `gpsenabled` | A | Enable/disable the GPS subsystem<br/>`Usage: gpsenabled <0\|1>` |
 | `httpenabled` | A | Enable/disable the web server subsystem<br/>`Usage: httpenabled <0\|1>` |
@@ -1371,6 +1384,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `llmenabled` | A | Enable/disable the on-device LLM subsystem<br/>`Usage: llmenabled <0\|1>` |
 | `logcategorytags` | A | Set log category-tags flag (persist only)<br/>`Usage: logcategorytags <0\|1>` |
 | `micenabled` | A | Enable/disable the microphone subsystem<br/>`Usage: micenabled <0\|1>` |
+| `notemaxsec` | A | Set the longest QuickNote, in seconds<br/>`Usage: notemaxsec [10-120] Default 60 with on-device transcription, 30 with the Pi (which caps every note at 30)` |
+| `notemic` | A | Set the microphone for CLI and web QuickNotes<br/>`Usage: notemic [0\|1\|2] 0 = Auto (the paired wearer's glasses if connected, else the board mic), 1 = Glasses, 2 = Board mic Notes started from the glasses always use the glasses mic` |
 | `notifydeviceapp` | A | Enable/disable Android app notification cards<br/>`Usage: notifydeviceapp <0\|1> Cards go only to BLE sessions that are logged in; an unauthenticated app sees none.` |
 | `notifydevicebanners` | A | Enable/disable OLED notification banners<br/>`Usage: notifydevicebanners <0\|1>` |
 | `notifydeviceg2` | A | Enable/disable G2 lens notification cards<br/>`Usage: notifydeviceg2 <0\|1>` |

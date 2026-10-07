@@ -34,14 +34,23 @@ struct STTLocalStats {
   bool lmUsed = false;  // decode used the language model (else greedy)
 };
 
-// Single-worker backend lifetime, never shared between authenticated runs.
-// Reset after the final call has returned, including failure/cancellation.
+// Single-worker backend lifetime: one task uses a session at a time. Reset
+// after the final call has returned, including failure/cancellation.
 // FreeRTOS self-deleting tasks must reset explicitly before vTaskDelete().
+// A session holds only the pinned, SHA-verified model weights and the system
+// language model; PCM, features, activations and text never outlive a call,
+// so the broker may hand an idle session to its next run (sttKeepWarm).
 class STTLocalSession {
  public:
   STTLocalSession() = default;
   ~STTLocalSession();
   void reset();
+  // Verified weights are resident (the next call skips the model load).
+  bool warm() const;
+  // Hands this idle session's backend to the empty, idle `to`; this one is
+  // left empty. A language model the old owner shed under memory pressure
+  // gets one load attempt again, as in a new session.
+  void moveTo(STTLocalSession& to);
   STTLocalSession(const STTLocalSession&) = delete;
   STTLocalSession& operator=(const STTLocalSession&) = delete;
  private:

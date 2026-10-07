@@ -103,6 +103,7 @@ bool isEspNowInitialized() { return false; }
 #include "System_ESPSR.h"
 #include "System_STT.h"
 #include "System_TranscriptionUI.h"
+#include "System_QuickNote.h"
 
 extern "C" {
   extern uint8_t _bss_start;
@@ -3482,6 +3483,11 @@ static constexpr CommandModule gCommandModules[] = {
 
 #if ENABLE_DICTATION
   { "transcription", "Transcription interfaces", "Session controls and private transcript pages shared by display and web interfaces.", transcriptionUICommands, &transcriptionUICommandsCount, CMD_MODULE_SENSOR, nullptr },
+#endif
+#if ENABLE_QUICKNOTE
+  { "note", "QuickNote private notes", "Private spoken notes saved under your own /stt/u<id>/notes/. "
+    "note start works from the lens, web or local display; other consoles use note start glasses (paired "
+    "wearer only). Status never shows the text; list/read/delete browse your notes.", noteCommands, &noteCommandsCount, CMD_MODULE_SENSOR, nullptr },
 #endif
 
 #if ENABLE_LOCAL_STT

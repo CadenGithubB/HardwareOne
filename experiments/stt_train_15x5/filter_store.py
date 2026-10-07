@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drop training items whose transcript does not match their audio.
 
-filter_store.py --store peoples-clean-train --ckpt /Volumes/USB2/stt/work/run15x5b/full/best
+filter_store.py --store peoples-clean-train --ckpt $STT_ROOT/work/run15x5b/full/best
                 [--max-cer 0.5] [--dry-run]
 
 Corpora aligned from subtitles (People's Speech) contain clips whose text is
@@ -24,6 +24,9 @@ import torch
 
 from common import QuartzNet, Frontend, load_checkpoint, greedy_decode
 from data import STORES
+import os
+from pathlib import Path
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
 
 def edit_distance(a, b):
@@ -42,7 +45,7 @@ def score(store_dir, ckpt, batch_seconds=200.0):
     offsets, lengths, texts = index['offsets'], index['lengths'], index['texts']
     audio = np.memmap(store_dir / 'audio.bin', dtype='<i2', mode='r')
     config, state = load_checkpoint(ckpt)
-    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     model = QuartzNet(config).load_nemo(state).to(device).eval()
     frontend = Frontend(state)
     rng = np.random.default_rng(0)

@@ -35,9 +35,11 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(1, str(HERE.parent))
 import hw1lm  # noqa: E402
 from tune import ckpt_key, wer  # noqa: E402
+import os
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
-USB = Path('/Volumes/USB/stt')
-WORK = Path('/Volumes/USB2/stt/work/lm/context')
+USB = STT_ROOT
+WORK = (STT_ROOT / 'work/lm/context')
 MODES = ['base', 'open', 'ctx', 'ctx-open', 'oracle']
 
 

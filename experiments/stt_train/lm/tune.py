@@ -8,7 +8,7 @@
      dev:  AMI sdm validation 200, AMI ihm validation 150, LibriSpeech dev 100
      test: AMI sdm test 200, AMI ihm test 150, LibriSpeech test 100
 2. Float logits of the checkpoint (CPU, 2 threads, no dither) are cached under
-   /Volumes/USB2/stt/work/lm/logits/<ckpt-name>-<sha12>/<set>.npz.
+   $STT_ROOT/work/lm/logits/<ckpt-name>-<sha12>/<set>.npz.
 3. Coordinate search on dev only: alpha x beta grid, refinement, unk_log10,
    then beam_width x char_prune for the accuracy/speed trade-off.
    Objective: 0.4*WER(ami-sdm-dev) + 0.4*WER(ami-ihm-dev) + 0.2*WER(libri-dev).
@@ -38,9 +38,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(1, str(HERE.parent))
 import hw1lm  # noqa: E402
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
-USB = Path('/Volumes/USB/stt')
-WORK = Path('/Volumes/USB2/stt/work/lm')
+USB = STT_ROOT
+WORK = (STT_ROOT / 'work/lm')
 DEFAULT_LM = WORK / 'meeting.lm'
 FPS = 50.0  # model output frames per second (hop 10 ms, stride 2)
 
@@ -51,6 +52,10 @@ SETS = {  # name: (kind, directory, pattern, count, seed)
     'ami-sdm-test': ('ami', USB / 'ami' / 'sdm', 'test-*.parquet', 200, 21),
     'ami-ihm-test': ('ami', USB / 'ami' / 'ihm', 'test-*.parquet', 150, 22),
     'libri-test': ('libri', USB / 'librispeech', 'clean_test_*.parquet', 100, 23),
+    # Held-out non-AMI conversation (2026-10-02); not part of DEV/TEST or tuning.
+    'peoples-test': ('libri', USB / 'peoples_speech', 'clean_test_*.parquet', 300, 31),
+    # VoxPopuli validation: never used in training (2026-10-02 broad score).
+    'vox-test': ('vox', USB / 'voxpopuli', 'validation_*.parquet', 300, 41),
 }
 DEV = ['ami-sdm-dev', 'ami-ihm-dev', 'libri-dev']
 TEST = ['ami-sdm-test', 'ami-ihm-test', 'libri-test']
@@ -78,10 +83,16 @@ def select_utterances(name):
     rows = []
     for fi, f in enumerate(files):
         pf = pq.ParquetFile(f)
-        cols = ['audio_id', 'text', 'begin_time', 'end_time'] if kind == 'ami' else ['id', 'text']
+        cols = {'ami': ['audio_id', 'text', 'begin_time', 'end_time'],
+                'vox': ['audio_id', 'raw_text', 'is_gold_transcript']}.get(kind, ['id', 'text'])
         start = 0
         for rg in range(pf.metadata.num_row_groups):
             t = pf.read_row_group(rg, columns=cols).to_pydict()
+            if kind == 'vox':  # same filter as prepare_data.py: gold, no digits/acronyms
+                import re
+                bad = re.compile(r'[0-9]|[A-Z]{2,}|[%&@/$€£+=]')
+                t['text'] = [x if g and not bad.search(x or '') else '' for x, g in zip(t['raw_text'], t['is_gold_transcript'])]
+                t['id'] = t['audio_id']
             for r in range(len(t['text'])):
                 text = hw1lm.normalize_text(t['text'][r] or '')
                 if not text:

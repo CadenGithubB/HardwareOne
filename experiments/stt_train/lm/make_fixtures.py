@@ -34,10 +34,12 @@ sys.path.insert(0, str(HERE))
 import build_lm  # noqa: E402
 import hw1lm  # noqa: E402
 from hw1lm import BLANK, CHAR_TO_ID  # noqa: E402
+import os
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
 REPO = HERE.parents[2]
 OUT = REPO / 'components' / 'hardwareone' / 'test' / 'host' / 'fixtures' / 'stt_lm'
-WORK = Path('/Volumes/USB2/stt/work/lm')
+WORK = (STT_ROOT / 'work/lm')
 EXPONENT = 2          # logit = q * 2^-EXPONENT (ESP-DL tensor exponent -2)
 BUILDER_CUSTOM = ['zorblax']   # forced into tiny.lm's vocabulary
 MARGIN = 0.3                   # nats between the top two final beams (float32 safety; lead asked >= 0.25)

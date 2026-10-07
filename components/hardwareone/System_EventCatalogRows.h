@@ -215,4 +215,11 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_MISMATCH,   "companion_mismatch", SY
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_LOW_MEMORY, "companion_low_memory", SYSEVT_FAM_COMPANION) /* companion internal heap under the alarm line  subject=free detail=minimum */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_UPDATED,    "companion_updated", SYSEVT_FAM_COMPANION)    /* companion firmware updated or its image confirmed  subject=build detail=running|confirmed */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMPANION_REBOOT,     "companion_reboot", SYSEVT_FAM_COMPANION)     /* the P4 reboots because soft recovery kept failing  subject=outage detail=reason */
+  /* --- Glasses long-press input (event-only: never a banner/toast, no speech or text) --- */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_LONG_PRESS,       "g2_long_press", SYSEVT_FAM_GLASSES)        /* hold on a HW1 lens page  subject=ring|left|right|unknown detail=consumer|ignored:<reason>|refused:<why> */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_LONG_RELEASE,     "g2_long_release", SYSEVT_FAM_GLASSES)      /* end of that hold  subject=source detail=<ms>ms or <ms>ms aborted:<reason> */
+  /* --- QuickNote (queue-only at most: never a banner/toast, never note text) --- */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_NOTE_STARTED,        "note_started", SYSEVT_FAM_MEDIA)           /* a private note began recording  subject=hold|lens|cli|web detail=local|pi */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_NOTE_SAVED,          "note_saved", SYSEVT_FAM_MEDIA)             /* that note was saved privately  subject=trigger detail=<words>w <ms>ms */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_NOTE_FAILED,         "note_failed", SYSEVT_FAM_MEDIA)            /* that note was not saved  subject=reason (a discarded slip posts nothing) */
 #endif

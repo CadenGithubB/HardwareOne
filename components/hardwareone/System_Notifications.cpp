@@ -143,6 +143,11 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
     case SYSEVT_COMPANION_RESTARTED:  return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 10000};
     case SYSEVT_COMPANION_LOW_MEMORY: return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 60000};
     case SYSEVT_COMPANION_UPDATED:    return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 3000, 0};
+    // QuickNote outcomes: queue-only, never an interrupt. A banner/toast rule
+    // would also grant the G2 card sink, which draws a firmware card over HW1's
+    // own lens page mid-note. note_started stays event-only.
+    case SYSEVT_NOTE_SAVED:           return {NSINK_QUEUE, 1, 0, 0};
+    case SYSEVT_NOTE_FAILED:          return {NSINK_QUEUE, 2, 0, 0};
     // Everything else: event-only (automations/`events`/queue-off).
     default: return {NSINK_NONE, 0, 0, 0};
   }
