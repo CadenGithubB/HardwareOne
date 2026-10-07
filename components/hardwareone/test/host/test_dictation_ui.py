@@ -21,6 +21,11 @@ def main():
     for signature in ('static bool kbdPadConsumeDictationText(', 'static void kbdPadDictationServiceOnTap('):
         assert 'ENABLE_LOCAL_STT' not in function(g2,signature)
     assert 'ENABLE_LOCAL_STT' not in function(oled,'void oledKeyboardDictationTick(')
+    # Keyboard fields drain only the keyboard mailbox, which never matches an
+    # App lease: neither a Transcription nor a QuickNote can type into a field.
+    for text,signature in ((g2,'static bool kbdPadConsumeDictationText('),(g2,'static void kbdPadDictationServiceOnTap('),
+                           (oled,'static bool oledKeyboardConsumeDictationText('),(oled,'void oledKeyboardDictationTick(')):
+        assert 'dictationApp' not in function(text,signature)
     with tempfile.TemporaryDirectory(prefix='hw1-dictation-ui-') as d:
         cpp=Path(d)/'test.cpp';exe=Path(d)/'test';cpp.write_text(unit)
         cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-variable','-Wno-missing-field-initializers',str(cpp),'-o',str(exe)]

@@ -32,6 +32,7 @@
 
 #include "System_G2_Protocol.h"
 #include "G2_ConversateSession.h"
+#include "G2_HoldGesture.h"  // long-press pairing + route policy (host-tested)
 #include "System_Lz4.h"     // lz4Compress* — CompressMode=2 image push (Q32/Q32f)
 #include "Bluetooth.h"
 #include "HAL_Bluetooth.h"
@@ -72,6 +73,8 @@ extern "C" {
 #include "G2_Page_Network.h"   // g2ShowNetworkMenu / g2NetworkHandleTap
 #include "G2_Page_Settings.h"  // g2ShowSettingsMenu / g2SettingsHandleTap
 #include "G2_Page_Transcription.h"
+#include "G2_Page_Notes.h"     // Apps → Notes + the QuickNote hold consumer
+#include "System_QuickNote.h"  // quickNoteActive / quickNoteMaxMs (stubs when not built)
 #include "G2_Page_Files.h"     // g2ShowFilesMenu / g2FilesHandleTap / g2FilesTick
 #include "G2_Page_Power.h"     // g2ShowPowerMenu / g2PowerHandleTap
 #include "G2_Page_CameraSettings.h"  // g2ShowCameraSettingsMenu / g2CameraSettingsHandleTap
@@ -1322,6 +1325,24 @@ static bool tapDispatcherEnqueueNav(G2TapFn fn, G2TapKind kind,
                                     uint32_t presentationEpoch,
                                     uint32_t lifecycleEpoch,
                                     uint32_t slotSerial);
+// Hold jobs (press, release, abort) for g2HoldDeliver. Zero-wait like every
+// producer here; callable from g2_ctrl_owner, the main loop and cmd_exec.
+static bool tapDispatcherEnqueueHold(const G2HoldJob& job,
+                                     uint32_t presentationEpoch);
+
+// Forward decls — long-press ("hold") input. Defined with the tap dedup state;
+// handleDevEvent (g2_ctrl_owner) feeds 9/10 and the page-exit events, the
+// terminal path and g2Tick close an open press, g2_tap_disp delivers. The
+// producers are all non-blocking.
+static void g2HoldIngest(G2Temple& t, uint32_t etype, uint32_t src,
+                         G2HoldVia via, uint32_t rxGeneration,
+                         uint32_t rxLifecycleEpoch,
+                         uint32_t rxPresentationEpoch);
+static void g2HoldAbortFromPacket(G2Temple& t, uint32_t rxGeneration,
+                                  uint32_t rxLifecycleEpoch,
+                                  G2HoldReason reason);
+static bool g2HoldAbort(G2HoldReason reason, char side = '-');
+static void g2HoldExpireTick();
 
 // Echo-guard stamp for intentional Cmd=9 sends. clearOurShutdownStamp is
 // called in the worker cleanup so the window doesn't bleed into unrelated
@@ -2293,6 +2314,8 @@ volatile bool            gImgProbeAbort          = false;
 // the prior surface. The handler appears before the persistent session worker
 // implementation, so forward-declare its cooperative abort fan-out here.
 static void g2SessionRequestAbort();
+// The global hold action (g2HoldPageBusy) must not leave a session page.
+static bool g2SessionWorkerBusy();
 
 // Camera-stream list-tap dispatch. The stream worker uses a list+image
 // compound CREATE (container name "lstCam"); single-taps on its rows
@@ -3123,6 +3146,7 @@ static bool shouldDedupKeyboardSysDouble(char side,
                                          uint32_t presentationEpoch);
 static void handleHijackMenuTap(uint32_t idx, const char* wireName,
                                 uint32_t presentationEpoch);
+static bool g2HijackRowsPrivate();
 static void handleKeyboardSelectDoubleTap(uint32_t presentationEpoch);
 static bool kbdPadHandleDoubleTap();
 static void kbdPadDictationServiceOnTap(uint32_t presentationEpoch);
@@ -5823,9 +5847,17 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
           if (!g2PbSkipField(sub, subN, &sp, sw)) break;
         }
       }
-      DEBUG_G2F("[G2-%c] ListEvent: container='%s' cid=%u idx=%u item='%s' type=%s(%u)",
-                t.side, cname, (unsigned)cid, (unsigned)idx, iname,
-                osEventTypeName(etype), (unsigned)etype);
+      DEBUG_G2_EVENTSF("[G2-%c] ListEvent: container='%s' cid=%u idx=%u item='%s' type=%s(%u)",
+                       t.side, cname, (unsigned)cid, (unsigned)idx,
+                       iname[0] && g2HijackRowsPrivate() ? "private" : iname,
+                       osEventTypeName(etype), (unsigned)etype);
+      // Hold copies (LONG_PRESS/LONG_RELEASE) are paired and recorded, never
+      // a row tap or any container's input. ListEvent carries no source.
+      if (g2HoldIsEvent(etype)) {
+        g2HoldIngest(t, etype, 0, G2HoldVia::List, rxGeneration,
+                     rxLifecycleEpoch, rxPresentationEpoch);
+        continue;
+      }
       // Camera-stream list dispatch. The stream uses a list+image
       // compound CREATE with container name "lstCam"; rows are
       //   idx 0 = "<- Back"         bit 0x1
@@ -6016,9 +6048,16 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
           if (!g2PbSkipField(sub, subN, &sp, sw)) break;
         }
       }
-      DEBUG_G2F("[G2-%c] TextEvent: container='%s' cid=%u type=%s(%u)",
-                t.side, cname, (unsigned)cid,
-                osEventTypeName(etype), (unsigned)etype);
+      DEBUG_G2_EVENTSF("[G2-%c] TextEvent: container='%s' cid=%u type=%s(%u)",
+                       t.side, cname, (unsigned)cid,
+                       osEventTypeName(etype), (unsigned)etype);
+      // Hold copies go to the hold pairing (TextEvent carries no source);
+      // they are never page navigation or dismissal.
+      if (g2HoldIsEvent(etype)) {
+        g2HoldIngest(t, etype, 0, G2HoldVia::Text, rxGeneration,
+                     rxLifecycleEpoch, rxPresentationEpoch);
+        continue;
+      }
       // The verified TextEvent input set is CLICK/SCROLL_TOP/SCROLL_BOTTOM.
       // Do not reinterpret a newly introduced hold/foreground/status enum as
       // navigation or dismissal of the underlying page.
@@ -6120,9 +6159,9 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
           if (!g2PbSkipField(sub, subN, &sp, sw)) break;
         }
       }
-      DEBUG_G2F("[G2-%c] SysEvent: type=%s(%u) src=%u reason=%u",
-                t.side, osEventTypeName(etype), (unsigned)etype,
-                (unsigned)src, (unsigned)reason);
+      DEBUG_G2_EVENTSF("[G2-%c] SysEvent: type=%s(%u) src=%u reason=%u",
+                       t.side, osEventTypeName(etype), (unsigned)etype,
+                       (unsigned)src, (unsigned)reason);
 
       // FG_ENTER (4) / FG_EXIT (5) refresh the hijack safety timer.
       // These fire when the firmware overlays/dismisses its own native UI
@@ -6152,6 +6191,15 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
       // direct-BLE-to-ring connection state (gRing.connected).
       extern uint32_t gRingViaGlassesLastSeenMs;
       if (src == 2) gRingViaGlassesLastSeenMs = millis();
+
+      // Long-press (hold) on our page: pair and record before any keyboard,
+      // image-probe, live-page or text-view gesture handling below, all of
+      // which key on 0..3 and must never see a hold. src=0 is normal here.
+      if (g2HoldIsEvent(etype)) {
+        g2HoldIngest(t, etype, src, G2HoldVia::Sys, rxGeneration,
+                     rxLifecycleEpoch, rxPresentationEpoch);
+        continue;
+      }
 
       // Production keyboard selection. Captured firmware 2.2.0.242 sends a
       // rowless SysEvent DOUBLE_CLICK(3) for the gesture even while the List
@@ -6310,14 +6358,16 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
         }
       }
 
+      bool ownShutdownEcho = false;
       if (etype == 7 &&
           g2LifecyclePacketCurrent(t, rxGeneration, rxLifecycleEpoch)) {
         // Capture-proven intentional Shutdown echoes use reason=1. Do not
         // broaden this to every nonzero reason: an unknown reason is terminal
         // until evidence establishes otherwise. The coherent generation/
         // lifecycle lease accepts a mirrored copy from either current arm.
-        if (reason == 1 &&
-            g2ExpectedEchoForGeneration(t.side, rxGeneration)) {
+        ownShutdownEcho = reason == 1 &&
+            g2ExpectedEchoForGeneration(t.side, rxGeneration);
+        if (ownShutdownEcho) {
           DEBUG_G2F("[G2-%c] expected reason-1 SYSTEM_EXIT ignored; "
                     "replacement presentation remains valid", t.side);
           g2OverlayResetForPacket(t, rxGeneration, rxLifecycleEpoch);
@@ -6325,6 +6375,28 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
           g2TerminalInvalidate("fw-system-exit", t.side, rxGeneration,
                                rxLifecycleEpoch);
         }
+      }
+
+      // Implicit hold release (R10/R11/R14). FG_ENTER is the firmware's own
+      // UI (OS menu, Even AI, a notification) rising over our page, FG_EXIT
+      // its dismissal (the overlay fusion above): a hold must not stay with
+      // its consumer while the firmware owns the screen, so the rise ends it.
+      // A SyncInfo-only rise or a lost FG_ENTER is caught by g2HoldExpireTick.
+      // After FG_EXIT, ABNORMAL_EXIT or SYSTEM_EXIT no LONG_RELEASE follows
+      // either. A terminal SYSTEM_EXIT already closed it via
+      // g2TerminalInvalidate (and advanced the lifecycle, so this is a no-op).
+      // The echo of HW1's own replacement Shutdown is not an exit: a HW1 page
+      // swap (the global action showing Notes, a Notes view change) stays
+      // inside the Hub app, whose press flag only a Hub exit clears (E-3), so
+      // the press stays open for its release (probe H2). If that release is
+      // lost anyway, g2HoldExpireTick still bounds the press.
+      if ((etype == 4 || etype == 5 || etype == 6 || etype == 7) &&
+          !ownShutdownEcho) {
+        g2HoldAbortFromPacket(t, rxGeneration, rxLifecycleEpoch,
+                              etype == 4 ? G2HoldReason::Overlay :
+                              etype == 5 ? G2HoldReason::FgExit :
+                              etype == 6 ? G2HoldReason::AbnormalExit :
+                                           G2HoldReason::SystemExit);
       }
     }
   }
@@ -6443,6 +6515,8 @@ static const char* osEventTypeName(uint32_t ev) {
     case 6:  return "ABNORMAL_EXIT";
     case 7:  return "SYSTEM_EXIT";
     case 8:  return "IMU_DATA_REPORT";
+    case 9:  return "LONG_PRESS";
+    case 10: return "LONG_RELEASE";
     default: return "?";
   }
 }
@@ -6948,9 +7022,10 @@ static void buildG2StatusMeter(char* out, size_t cap) {
 // at startup; the hijack dispatcher and the templated CLI handler iterate
 // the table.
 
-// A full board (LLM + camera + FM) registers 19 pages today; the two menu-
-// reorg launchers (System, Config) make 21. Transcription adds one; headroom to 23 so a future page
-// doesn't silently drop at the register cap. NOTE: verify on an all-features
+// A full board (LLM + camera + FM + LED + tests + automations) registers every
+// page registerG2Pages lists: 22, with Transcription and Notes (QuickNote).
+// Headroom to 23 so a future page doesn't silently drop at the register cap
+// (test_g2_notes_page.py pins the count). NOTE: verify on an all-features
 // build, not just feathers3 — a green feathers3 build hides the overflow
 // (FM/camera pages are compiled out there).
 #define G2_PAGE_REGISTRY_MAX 23
@@ -7256,12 +7331,14 @@ enum G2AppRow : uint8_t {
   APP_ROW_AUTOMATIONS,
   APP_ROW_HEALTH,
   APP_ROW_TRANSCRIPTION,
+  APP_ROW_NOTES,
   // System Events + Logging moved to the System launcher; Users moved to the
   // Config launcher (menu reorg — mirrors the OLED categories).
 };
 
-// Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Health + Transcription.
-#define G2_APPS_MAX_ROWS 8
+// Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Health +
+// Transcription + Notes.
+#define G2_APPS_MAX_ROWS 9
 
 static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
   size_t n = 0;
@@ -7277,6 +7354,9 @@ static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
   add("Files",        APP_ROW_FILES);
 #if ENABLE_DICTATION
   add("Transcription", APP_ROW_TRANSCRIPTION);
+#endif
+#if ENABLE_QUICKNOTE
+  add("Notes",        APP_ROW_NOTES);
 #endif
 #if ENABLE_MAPS
   // Reflect map availability in the label so tapping "Maps" with no tiles
@@ -7344,6 +7424,9 @@ static void g2AppsHandleTap(uint32_t idx) {
     case APP_ROW_FILES:  g2ShowFilesMenu();     return;  // callee sets gHijackPage
 #if ENABLE_DICTATION
     case APP_ROW_TRANSCRIPTION: g2ShowTranscriptionMenu(); return;
+#endif
+#if ENABLE_QUICKNOTE
+    case APP_ROW_NOTES:  g2ShowNotesMenu();     return;  // callee sets gHijackPage
 #endif
 #if ENABLE_MAPS
     case APP_ROW_MAPS:   g2ShowMapPage(&g2ShowAppsMenu); return;   // Back → Apps
@@ -9519,6 +9602,13 @@ static const G2PageModule kTranscriptionPage = {
   G2_HIJACK_PAGE_TRANSCRIPTION, 0, "<- Apps", false, nullptr,
 };
 #endif
+#if ENABLE_QUICKNOTE
+static const G2PageModule kNotesPage = {
+  "notes", nullptr, "Open private spoken notes (QuickNote) on the lens",
+  g2BuildNotesInfo, g2ShowNotesMenu, g2NotesHandleTap,
+  G2_HIJACK_PAGE_NOTES, 0, "<- Apps", false, nullptr,
+};
+#endif
 
 static void registerG2Pages(void) {
   // Order = menu order in the hijack list. Menu reorg (mirrors the OLED's 6
@@ -9542,6 +9632,10 @@ static void registerG2Pages(void) {
   g2RegisterPage(kFilesPage);            // hidden — reached via Apps
 #if ENABLE_DICTATION
   g2RegisterPage(kTranscriptionPage);    // hidden — reached via Apps
+#endif
+#if ENABLE_QUICKNOTE
+  g2RegisterPage(kNotesPage);            // hidden — reached via Apps
+  g2RegisterPageHold(G2_HIJACK_PAGE_NOTES, g2NotesHandleHold);  // hold = record here
 #endif
   g2RegisterPage(kEspNowAppPage);        // hidden — reached via Apps
 #if ENABLE_AUTOMATION
@@ -9741,6 +9835,675 @@ static bool shouldDedupKeyboardSysDouble(char side,
   return false;
 }
 
+// -----------------------------------------------------------------------------
+// Long-press ("hold") input: decode, pair, record and dispatch
+// -----------------------------------------------------------------------------
+// A plain ring/temple hold on a HW1 (Even Hub) page arrives as SysEvent
+// LONG_PRESS(9) and, at lift, LONG_RELEASE(10), from the right arm only. On
+// 2.2.9.22 src is always 0; on 2.3.2.14 it is 1 right / 2 ring / 3 left (bench
+// 2026-10-05). The tap-then-long-press menu, both-temple silent toggle and
+// double tap stay OS-owned and never come here. HW1 never writes the glasses'
+// long-press table or any other persistent setting for this, and never
+// emulates, answers or suppresses native QuickNote/shortcut traffic (R1, R20).
+//
+// g2_ctrl_owner (g2HoldIngest) only pairs, records, samples the gates that need
+// no page state, counts the hold as user activity and queues a G2HoldJob.
+// g2_tap_disp (g2HoldDeliver) routes the press to the current page's hold
+// handler or the global hold action (g2holdaction), hands its release or abort
+// to that same consumer, and posts g2_long_press / g2_long_release. Records and
+// events carry source, phase, consumer and timing only, never text (R22).
+//
+// Pairing (G2_HoldGesture.h) absorbs mirrored-arm and Sys/Text/List copies and
+// never keys on the presentation epoch, so a page swap mid-hold keeps the pair.
+// Open presses close when a firmware overlay rises over the page (FG_ENTER, or
+// a SyncInfo-only rise seen by the main-loop tick), on FG_EXIT/ABNORMAL_EXIT/
+// SYSTEM_EXIT (never the echo of HW1's own page-swap Shutdown), terminal
+// widget loss, the end of the widget lifecycle that admitted them, or
+// g2HoldMaxOpenMs().
+// State is shared by g2_ctrl_owner (ingest/aborts), the main loop (expiry),
+// cmd_exec (status, sim) and g2_tap_disp (route results), hence gHoldMux; every
+// clock read that stamps or ages a press is taken inside it, and every log line
+// and queue send after it.
+static portMUX_TYPE gHoldMux = portMUX_INITIALIZER_UNLOCKED;
+static G2HoldPairing gHold;
+// gWidgetLifecycleEpoch of the packet that admitted the open press; 0 while
+// none is open. Page swaps keep that epoch, but every lifecycle boundary
+// advances it: R-arm disconnect/reconnect, closeg2 or deinit (topology down),
+// a fresh Blocks start, terminal loss. Only the last of these passes
+// g2TerminalInvalidate, and none is followed by a LONG_RELEASE. Written under
+// gHoldMux; g2HoldExpireTick also reads it lock-free as a fast-path hint.
+static uint32_t gHoldOpenLifecycle = 0;
+
+// One ring row per copy that reached HW1 (or per implicit release). Holds
+// carry no text by construction: source, phase, timing and outcome only. The
+// dispatcher writes a press's route (consumer, or why it was ignored) back
+// onto the press row.
+struct G2HoldRecord {
+  uint32_t atMs, pressId, presentationEpoch, heldMs;
+  uint8_t  phase, src, via, verdict, reason;  // verdict = G2HoldVerdict; reason = G2HoldReason
+  uint8_t  consumer, page;                    // G2HoldConsumer; G2HijackPage of a page consumer
+  char     side;
+};
+static constexpr uint8_t kHoldRecNoVerdict = 0xFF;   // stale: never paired
+static constexpr size_t  kHoldLogCap = 16;
+EXT_RAM_BSS_ATTR static G2HoldRecord gHoldLog[kHoldLogCap];
+static size_t gHoldLogHead  = 0;     // next write slot
+static size_t gHoldLogCount = 0;     // saturates at cap
+
+// Per-verdict counts (NothingOpen never counts), plus the closes that are
+// not ordinary aborts, the copies that never reached the pairing, and the
+// dispatcher side: jobs the queue refused, events posted or rate-limited,
+// and releases whose page was gone.
+struct G2HoldCounters {
+  uint32_t verdict[kG2HoldVerdictCount];
+  uint32_t expired, stale;
+  uint32_t queueFull, eventsPosted, eventsLimited, pageGone;
+};
+static G2HoldCounters gHoldCounters = {};
+
+// An open press older than this lost its release without any exit event: the
+// longest note (notemaxsec as QuickNote clamps it; 120 s when QuickNote is not
+// built) plus 15 s.
+static uint32_t g2HoldMaxOpenMs() { return quickNoteMaxMs() + 15000u; }
+
+// Page hold handlers (g2RegisterPageHold), keyed by G2HijackPage id rather
+// than registry slot: page ids already reach G2_PAGE_REGISTRY_MAX.
+static constexpr size_t kG2PageHoldSlots = 32;
+static_assert(G2_HIJACK_PAGE_NOTES < kG2PageHoldSlots,
+              "the page hold table must cover every G2HijackPage id");
+static G2HoldPageTable<G2PageHoldFn, kG2PageHoldSlots> gPageHold;
+
+bool g2RegisterPageHold(G2HijackPage page, G2PageHoldFn fn) {
+  if (!gPageHold.set((uint32_t)page, fn)) {
+    DEBUG_G2F("[G2-Pages] Hold handler for page %u rejected (id out of range)",
+              (unsigned)page);
+    return false;
+  }
+  return true;
+}
+
+static void g2HoldFirmwareSnapshot(char (&left)[32], char (&right)[32]) {
+  static_assert(sizeof(G2Temple::firmwareVersion) == 32,
+                "hold firmware snapshot buffers");
+  portENTER_CRITICAL(&gRxPacketMux);
+  memcpy(left, gL.firmwareVersion, sizeof(left));
+  memcpy(right, gR.firmwareVersion, sizeof(right));
+  portEXIT_CRITICAL(&gRxPacketMux);
+  left[sizeof(left) - 1] = '\0';
+  right[sizeof(right) - 1] = '\0';
+}
+
+// The exact firmware profile of the connected pair (R19), or nullptr while
+// the pair is unprofiled or a version is not known yet.
+static const G2HoldProfile* g2HoldProfileCurrent() {
+  char left[32];
+  char right[32];
+  g2HoldFirmwareSnapshot(left, right);
+  return g2HoldProfileFor(left, right);
+}
+
+bool g2HoldSourceAdmitted(uint8_t source) {
+  const G2HoldProfile* profile = g2HoldProfileCurrent();
+  return g2HoldSourceAllowed(source, profile && profile->sourceReliable,
+                             gSettings.g2HoldSource);
+}
+
+// Caller holds gHoldMux.
+static void g2HoldRecordLocked(const G2HoldRecord& r) {
+  gHoldLog[gHoldLogHead] = r;
+  gHoldLogHead = (gHoldLogHead + 1) % kHoldLogCap;
+  if (gHoldLogCount < kHoldLogCap) gHoldLogCount++;
+}
+
+// Writes the dispatcher's route onto the newest row of that press (if it is
+// still in the ring). Caller holds gHoldMux.
+static void g2HoldRecordRouteLocked(uint32_t pressId, G2HoldConsumer consumer,
+                                    uint8_t page, G2HoldReason reason) {
+  for (size_t i = 1; i <= gHoldLogCount; i++) {
+    G2HoldRecord& r = gHoldLog[(gHoldLogHead + kHoldLogCap - i) % kHoldLogCap];
+    if (r.pressId != pressId || r.phase != (uint8_t)G2HoldPhase::Press ||
+        (r.verdict != (uint8_t)G2HoldVerdict::Press &&
+         r.verdict != (uint8_t)G2HoldVerdict::PressAfterLostRelease)) {
+      continue;
+    }
+    r.consumer = (uint8_t)consumer;
+    r.page = page;
+    if (reason != G2HoldReason::None) r.reason = (uint8_t)reason;
+    return;
+  }
+}
+
+// "Press→quicknote", "Press→ignored:overlay", "Aborted(fg-exit)", "stale"...
+// A press row with no route yet is still queued for g2_tap_disp ("pending").
+static void g2HoldRecordOutcome(const G2HoldRecord& r, char* out, size_t cap) {
+  const char* reason = g2HoldReasonName((G2HoldReason)r.reason);
+  if (r.verdict == kHoldRecNoVerdict) {
+    snprintf(out, cap, "%s", reason);
+    return;
+  }
+  const G2HoldVerdict v = (G2HoldVerdict)r.verdict;
+  const char* name = g2HoldVerdictName(v);
+  if (v == G2HoldVerdict::Aborted) {
+    snprintf(out, cap, "%s(%s)", name, reason);
+  } else if (v != G2HoldVerdict::Press &&
+             v != G2HoldVerdict::PressAfterLostRelease) {
+    snprintf(out, cap, "%s", name);
+  } else if (r.reason != (uint8_t)G2HoldReason::None) {
+    snprintf(out, cap, "%s→ignored:%s", name, reason);
+  } else if (r.consumer == (uint8_t)G2HoldConsumer::Page) {
+    snprintf(out, cap, "%s→page:%u", name, (unsigned)r.page);
+  } else if (r.consumer == (uint8_t)G2HoldConsumer::Global) {
+    snprintf(out, cap, "%s→quicknote", name);
+  } else {
+    snprintf(out, cap, "%s→pending", name);
+  }
+}
+
+// One line per record, emitted after gHoldMux is released. Shared by ingest
+// and aborts so the probe log has a single grep-able shape.
+static __attribute__((noinline)) void g2HoldLogRecord(const G2HoldRecord& r) {
+  if (!isDebugOutputEnabled(DEBUG_G2 | DEBUG_G2_EVENTS)) return;
+  char outcome[56];
+  g2HoldRecordOutcome(r, outcome, sizeof(outcome));
+  DEBUG_G2_EVENTSF("[G2-%c] Hold %s via=%s src=%u(%s) verdict=%s held=%ums "
+                   "id=%u ep=%u", r.side, g2HoldPhaseName(r.phase),
+                   g2HoldViaName(r.via), (unsigned)r.src,
+                   g2HoldSourceName(r.src), outcome, (unsigned)r.heldMs,
+                   (unsigned)r.pressId, (unsigned)r.presentationEpoch);
+}
+
+// Implicit release: the firmware sends LONG_RELEASE only while the Hub page
+// that saw the press stays up, so every page exit closes the open press.
+// Caller holds gHoldMux. Returns true (and fills/records *rec, and fills the
+// dispatcher's abort *job) only if a press was open; nothing open is the
+// common case (every overlay edge) and silent.
+static bool g2HoldAbortLocked(G2HoldReason reason, char side, uint32_t now,
+                              G2HoldRecord* rec, G2HoldJob* job) {
+  uint32_t openMs = 0;
+  if (gHold.abort(now, &openMs) != G2HoldVerdict::Aborted) return false;
+  __atomic_store_n(&gHoldOpenLifecycle, 0u, __ATOMIC_RELEASE);
+  if (reason == G2HoldReason::Expired) gHoldCounters.expired++;
+  else gHoldCounters.verdict[(size_t)G2HoldVerdict::Aborted]++;
+  *rec = {};
+  rec->atMs = now;
+  rec->pressId = gHold.lastPressId;
+  rec->presentationEpoch = g2PresentationEpochCurrent();
+  rec->heldMs = openMs;
+  rec->phase = (uint8_t)G2HoldPhase::Abort;
+  rec->src = gHold.source;
+  rec->verdict = (uint8_t)G2HoldVerdict::Aborted;
+  rec->reason = (uint8_t)reason;
+  rec->side = side ? side : '-';
+  g2HoldRecordLocked(*rec);
+  *job = {};
+  job->phase = (uint8_t)G2HoldPhase::Abort;
+  job->source = gHold.source;
+  job->reason = (uint8_t)reason;
+  job->side = rec->side;
+  job->pressId = gHold.lastPressId;
+  job->heldMs = openMs;
+  return true;
+}
+
+// Hands one job to g2_tap_disp (zero-wait). A press the queue refuses is
+// marked queue-full on its row; its release or abort still goes out, and the
+// dispatcher, which never saw that press, delivers and posts nothing for it.
+static void g2HoldQueue(const G2HoldJob& job, uint32_t presentationEpoch) {
+  if (tapDispatcherEnqueueHold(job, presentationEpoch)) return;
+  portENTER_CRITICAL(&gHoldMux);
+  gHoldCounters.queueFull++;
+  if (job.phase == (uint8_t)G2HoldPhase::Press) {
+    g2HoldRecordRouteLocked(job.pressId, G2HoldConsumer::None, 0,
+                            G2HoldReason::QueueFull);
+  }
+  portEXIT_CRITICAL(&gHoldMux);
+  DEBUG_G2_EVENTSF("[G2] Hold %s id=%u not queued (tap dispatcher full or down)",
+                   g2HoldPhaseName(job.phase), (unsigned)job.pressId);
+}
+
+// The press gates that need no page state (R6, R11, R19), sampled by the
+// producer before the press is queued. g2_tap_disp re-checks all of them, with
+// the page-level ones, when it routes. A press dropped here still pairs (so
+// its release is absorbed) and still reaches the dispatcher for its event.
+static G2HoldReason g2HoldIngestGate(uint32_t presentationEpoch,
+                                     bool profileBypass) {
+  G2HoldGateInputs in;
+  in.trusted = profileBypass || g2HoldProfileCurrent() != nullptr;
+  in.allowUnprofiled = gSettings.g2HoldUnprofiled;
+  in.overlay = firmwareOverlayActive();
+  in.hijackActive = g2LensGetState().hijackActive;
+  in.presentationCurrent = presentationEpoch == g2PresentationEpochCurrent();
+  in.pageHasHandler = true;   // stop before the page/action/source decisions
+  G2HoldReason reason = G2HoldReason::None;
+  (void)g2HoldRouteDecide(in, nullptr, &reason);
+  return reason;
+}
+
+// Shared by the RX hooks and `g2hold sim`: pair one copy and record it, count
+// a hold on a live HW1 page as user activity, then queue for g2_tap_disp the
+// end of any press this copy closed implicitly, followed by the copy's own
+// press or release. Duplicates and orphans queue nothing. Non-blocking for
+// every caller (g2_ctrl_owner, cmd_exec): one spinlock, then zero-wait sends.
+static void g2HoldAccept(char side, uint32_t etype, uint8_t src, G2HoldVia via,
+                         bool current, uint32_t lifecycleEpoch,
+                         uint32_t presentationEpoch, bool profileBypass) {
+  const bool press = etype == 9;
+  G2HoldRecord rec = {};
+  rec.presentationEpoch = presentationEpoch;
+  rec.phase = (uint8_t)(press ? G2HoldPhase::Press : G2HoldPhase::Release);
+  rec.src = src;
+  rec.via = (uint8_t)via;
+  rec.side = side;
+  // Any hold on a live HW1 page is user activity, consumed or not (R13): the
+  // firmware sends no other traffic while a finger is down, so without this a
+  // run of holds lets the 60 s safety watchdog end the page under the user.
+  const bool onPage = current && g2LensGetState().hijackActive &&
+      presentationEpoch == g2PresentationEpochCurrent();
+  const G2HoldReason gate = (current && press)
+      ? g2HoldIngestGate(presentationEpoch, profileBypass)
+      : G2HoldReason::None;
+
+  G2HoldRecord gone;
+  bool goneAborted = false;
+  // At most an implicit end plus this copy: after a lifecycle abort nothing
+  // is open, so the same copy cannot also be a PressAfterLostRelease.
+  G2HoldJob jobs[2];
+  size_t jobCount = 0;
+  portENTER_CRITICAL(&gHoldMux);
+  const uint32_t now = millis();
+  rec.atMs = now;
+  if (!current) {
+    gHoldCounters.stale++;
+    rec.verdict = kHoldRecNoVerdict;
+    rec.reason = (uint8_t)G2HoldReason::Stale;
+  } else {
+    // A press admitted on an older widget lifecycle lost its page at that
+    // boundary (g2HoldExpireTick normally closes it first): never pair it.
+    if (gHold.open && gHoldOpenLifecycle != lifecycleEpoch) {
+      goneAborted = g2HoldAbortLocked(G2HoldReason::Lifecycle, side, now,
+                                      &gone, &jobs[jobCount]);
+      if (goneAborted) jobCount++;
+    }
+    const G2HoldPairing before = gHold;
+    const G2HoldVerdict verdict = press
+        ? gHold.onPress(side, src, now)
+        : gHold.onRelease(side, src, now, &rec.heldMs);
+    if (verdict == G2HoldVerdict::Press ||
+        verdict == G2HoldVerdict::PressAfterLostRelease) {
+      __atomic_store_n(&gHoldOpenLifecycle, lifecycleEpoch, __ATOMIC_RELEASE);
+    } else if (!gHold.open) {
+      __atomic_store_n(&gHoldOpenLifecycle, 0u, __ATOMIC_RELEASE);
+    }
+    gHoldCounters.verdict[(size_t)verdict]++;
+    // A release (or its duplicate) belongs to the press that just closed;
+    // an orphan belongs to none.
+    rec.pressId = verdict == G2HoldVerdict::OrphanRelease ? 0
+        : (press ? gHold.pressId : gHold.lastPressId);
+    rec.verdict = (uint8_t)verdict;
+    if (verdict == G2HoldVerdict::PressAfterLostRelease) {
+      // The superseded press never got its release: its consumer gets an
+      // abort, queued ahead of the new press.
+      G2HoldJob& lost = jobs[jobCount++];
+      lost = {};
+      lost.phase = (uint8_t)G2HoldPhase::Abort;
+      lost.source = before.source;
+      lost.reason = (uint8_t)G2HoldReason::LostRelease;
+      lost.side = side;
+      lost.pressId = before.pressId;
+      lost.heldMs = before.openAgeMs(now);
+    }
+    if (verdict == G2HoldVerdict::Press ||
+        verdict == G2HoldVerdict::PressAfterLostRelease) {
+      rec.reason = (uint8_t)gate;   // ignored here, or routed by g2_tap_disp
+      G2HoldJob& job = jobs[jobCount++];
+      job = {};
+      job.phase = (uint8_t)G2HoldPhase::Press;
+      job.source = gHold.source;
+      job.via = (uint8_t)via;
+      job.reason = (uint8_t)gate;
+      job.side = side;
+      job.pressId = gHold.pressId;
+    } else if (verdict == G2HoldVerdict::Release) {
+      G2HoldJob& job = jobs[jobCount++];
+      job = {};
+      job.phase = (uint8_t)G2HoldPhase::Release;
+      job.source = gHold.source;
+      job.via = (uint8_t)via;
+      job.side = side;
+      job.pressId = gHold.lastPressId;
+      job.heldMs = rec.heldMs;
+    }
+  }
+  g2HoldRecordLocked(rec);
+  portEXIT_CRITICAL(&gHoldMux);
+  if (goneAborted) g2HoldLogRecord(gone);
+  g2HoldLogRecord(rec);
+  if (onPage && g2FsmHijackActive()) gHijackStartedMs = millis();
+  for (size_t i = 0; i < jobCount; i++) {
+    g2HoldQueue(jobs[i], jobs[i].phase == (uint8_t)G2HoldPhase::Press
+                             ? presentationEpoch : 0);
+  }
+}
+
+static void g2HoldIngest(G2Temple& t, uint32_t etype, uint32_t src,
+                         G2HoldVia via, uint32_t rxGeneration,
+                         uint32_t rxLifecycleEpoch,
+                         uint32_t rxPresentationEpoch) {
+  // A copy queued before a reconnect or widget teardown belongs to a page
+  // that no longer exists: record it, but never let it open or close a pair.
+  const bool current =
+      g2LifecyclePacketCurrent(t, rxGeneration, rxLifecycleEpoch);
+  g2HoldAccept(t.side, etype, (uint8_t)(src > 0xFFu ? 0xFFu : src), via,
+               current, rxLifecycleEpoch, rxPresentationEpoch,
+               /*profileBypass=*/false);
+}
+
+// Returns true if a press was open (and is now closed and queued for abort).
+static bool g2HoldAbort(G2HoldReason reason, char side) {
+  G2HoldRecord rec;
+  G2HoldJob job;
+  portENTER_CRITICAL(&gHoldMux);
+  const bool aborted = g2HoldAbortLocked(reason, side, millis(), &rec, &job);
+  portEXIT_CRITICAL(&gHoldMux);
+  if (!aborted) return false;
+  g2HoldLogRecord(rec);
+  g2HoldQueue(job, 0);
+  return true;
+}
+
+static void g2HoldAbortFromPacket(G2Temple& t, uint32_t rxGeneration,
+                                  uint32_t rxLifecycleEpoch,
+                                  G2HoldReason reason) {
+  if (!g2LifecyclePacketCurrent(t, rxGeneration, rxLifecycleEpoch)) return;
+  g2HoldAbort(reason, t.side);
+}
+
+// Main-loop safety net for a press whose release will never come.
+//   * Every tick: a press admitted on an older widget lifecycle closes at once
+//     (R10: BLE disconnect, closeg2, topology change and a fresh Blocks start
+//     end the page without g2TerminalInvalidate or any exit event). Two
+//     lock-free loads skip the common case.
+//   * Every tick while the firmware overlay is up: a press open under it
+//     closes (R11). FG_ENTER already closed it on the RX path; this catches a
+//     rise seen only through SyncInfo, or an FG_ENTER that never arrived. The
+//     raw overlay flag is a lock-free hint; firmwareOverlayActive() decides
+//     (a stale, unconfirmed flag past kFirmwareOverlayMaxMs ends nothing).
+//   * Once a second: a press open longer than g2HoldMaxOpenMs() lost its
+//     release without any exit event; the bound is the longest note + 15 s.
+// The clock and the lifecycle are read inside gHoldMux, after any ingest that
+// stamped the press, so a press admitted meanwhile is never the victim. The
+// overlay victim is the press that was open before the overlay was sampled
+// and is still open, never one admitted after it.
+static void g2HoldExpireTick() {
+  static uint32_t lastCheckMs = 0;
+  const uint32_t tickMs = millis();
+  const bool expiryDue = (uint32_t)(tickMs - lastCheckMs) >= 1000;
+  const uint32_t openLifecycle =
+      __atomic_load_n(&gHoldOpenLifecycle, __ATOMIC_ACQUIRE);
+  const bool lifecycleGone = openLifecycle != 0 &&
+      openLifecycle != __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
+  const bool overlayHint = openLifecycle != 0 && gFirmwareOverlayUp;
+  if (!expiryDue && !lifecycleGone && !overlayHint) return;
+  if (expiryDue) lastCheckMs = tickMs;
+  uint32_t coveredId = 0;
+  if (overlayHint) {
+    portENTER_CRITICAL(&gHoldMux);
+    const uint32_t openId = gHold.open ? gHold.pressId : 0;
+    portEXIT_CRITICAL(&gHoldMux);
+    if (openId != 0 && firmwareOverlayActive()) coveredId = openId;
+  }
+  if (!expiryDue && !lifecycleGone && coveredId == 0) return;
+  const uint32_t maxOpenMs = g2HoldMaxOpenMs();
+  G2HoldRecord rec;
+  G2HoldJob job;
+  bool aborted = false;
+  portENTER_CRITICAL(&gHoldMux);
+  const uint32_t now = millis();
+  const uint32_t lifecycle =
+      __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
+  if (gHold.open && gHoldOpenLifecycle != lifecycle) {
+    aborted = g2HoldAbortLocked(G2HoldReason::Lifecycle, '-', now, &rec, &job);
+  } else if (coveredId != 0 && gHold.open && gHold.pressId == coveredId) {
+    aborted = g2HoldAbortLocked(G2HoldReason::Overlay, '-', now, &rec, &job);
+  } else if (gHold.expired(now, maxOpenMs)) {
+    aborted = g2HoldAbortLocked(G2HoldReason::Expired, '-', now, &rec, &job);
+  }
+  portEXIT_CRITICAL(&gHoldMux);
+  if (!aborted) return;
+  g2HoldLogRecord(rec);
+  g2HoldQueue(job, 0);
+}
+
+// True while the current page cannot be left: a session job draws it (Maps,
+// Health, the LLM viewer, the image and camera viewers) or an image probe
+// holds the lens. Swapping to another page would leave that worker running,
+// and its fenced post-session SHUTDOWN and onDone would later tear down or
+// replace whatever page is current (a recording Notes page included). A live
+// list/text page also runs on the session worker, but the page swap stops it.
+static bool g2HoldPageBusy() {
+  if (hijackFsmState() == HijackState::ImageProbing) return true;
+  return g2SessionWorkerBusy() && !livePageIsActive() && !liveTextIsActive();
+}
+
+// The global hold action (g2holdaction 1 = QuickNote): a press on a HW1 page
+// that has no hold handler of its own records a note on the Notes page. Begin
+// refuses, without leaving the page, whenever the page cannot be left
+// ("page-busy") or a note cannot start now (another note or dictation, Even
+// AI / Conversate, storage, no paired wearer); a build without QuickNote
+// refuses every press ("quicknote-not-built"), exactly like Off. The
+// dispatcher has already applied the source policy.
+static bool g2HoldGlobalBegin(uint32_t pressId, uint8_t source,
+                              const char** why) {
+  (void)source;
+  if (g2HoldPageBusy()) {
+    *why = "page-busy";
+    return false;
+  }
+  return g2NotesHoldBegin(pressId, why);
+}
+
+static void g2HoldGlobalEnd(uint32_t pressId, uint32_t heldMs) {
+  g2NotesHoldEnd(pressId, heldMs);
+}
+
+static void g2HoldGlobalAbort(uint32_t pressId, G2HoldReason reason) {
+  g2NotesHoldAbort(pressId, reason);
+}
+
+// Hands the end of a consumed press to its consumer. A page gets its release
+// only while it is still the current page; otherwise, and for every abort, it
+// gets phase 0 so a page that started work on the press can always finish it
+// (an abort handler must not draw: its page may be gone). Returns true when a
+// release was turned into an abort because the page was gone.
+static bool g2HoldEndOwner(const G2HoldOwner& owner, bool release,
+                           uint32_t heldMs, G2HoldReason reason) {
+  if (owner.consumer == G2HoldConsumer::Global) {
+    if (release) g2HoldGlobalEnd(owner.pressId, heldMs);
+    else g2HoldGlobalAbort(owner.pressId, reason);
+    return false;
+  }
+  if (owner.consumer != G2HoldConsumer::Page) return false;
+  const G2PageHoldFn fn = gPageHold.get(owner.page);
+  if (!fn) return false;
+  const bool pageGone = release && (uint8_t)g2GetHijackPage() != owner.page;
+  (void)fn((uint8_t)(release && !pageGone ? G2HoldPhase::Release
+                                          : G2HoldPhase::Abort),
+           owner.source);
+  return pageGone;
+}
+
+// At most two hold events per second (a press and its release); automations
+// and the event log never see a burst. g2_tap_disp only.
+static void g2HoldPostEvent(uint8_t kind, uint8_t source, const char* detail) {
+  static G2HoldEventRate sRate;
+  const bool admit = sRate.admit(millis());
+  portENTER_CRITICAL(&gHoldMux);
+  if (admit) gHoldCounters.eventsPosted++;
+  else gHoldCounters.eventsLimited++;
+  portEXIT_CRITICAL(&gHoldMux);
+  if (admit) systemEventPost(kind, g2HoldSourceName(source), detail);
+}
+
+// g2_tap_disp side of the hold input. A press is re-gated with page state and
+// routed: the current page's hold handler first (the page applies the source
+// policy itself, via g2HoldSourceAdmitted), else the global action. Its
+// release or abort then reaches exactly that consumer. Events are posted here,
+// never on g2_ctrl_owner; they carry no text (R22, R23: event-only rows).
+static void g2HoldDeliver(const G2HoldJob& job, uint32_t pressEpoch) {
+  static G2HoldDelivery sDelivery;   // g2_tap_disp only
+  char detail[48];
+  if (job.phase != (uint8_t)G2HoldPhase::Press) {
+    const bool release = job.phase == (uint8_t)G2HoldPhase::Release;
+    const G2HoldReason reason = (G2HoldReason)job.reason;
+    bool seen = false;
+    const G2HoldOwner owner = sDelivery.end(job.pressId, &seen);
+    const bool pageGone = g2HoldEndOwner(owner, release, job.heldMs, reason);
+    if (pageGone) {
+      portENTER_CRITICAL(&gHoldMux);
+      gHoldCounters.pageGone++;
+      portEXIT_CRITICAL(&gHoldMux);
+    }
+    DEBUG_G2_EVENTSF("[G2] Hold %s id=%u → %s%s", g2HoldPhaseName(job.phase),
+                     (unsigned)job.pressId,
+                     owner.consumer == G2HoldConsumer::Page ? "page"
+                     : owner.consumer == G2HoldConsumer::Global ? "quicknote"
+                     : "absorbed",
+                     pageGone ? " (page-gone: abort)" : "");
+    if (!seen) return;   // its press never reached us: no event for the end
+    if (release) {
+      snprintf(detail, sizeof(detail), "%ums", (unsigned)job.heldMs);
+    } else {
+      snprintf(detail, sizeof(detail), "%ums aborted:%s", (unsigned)job.heldMs,
+               g2HoldReasonName(reason));
+    }
+    g2HoldPostEvent(SYSEVT_G2_LONG_RELEASE, job.source, detail);
+    return;
+  }
+
+  G2HoldOwner superseded;
+  const bool live = sDelivery.beginPress(job.pressId, &superseded);
+  if (superseded.consumer != G2HoldConsumer::None) {
+    // That press's end was lost (queue full) or overtaken: close it now.
+    (void)g2HoldEndOwner(superseded, false, 0, G2HoldReason::LostRelease);
+    DEBUG_G2_EVENTSF("[G2] Hold id=%u superseded by id=%u → abort",
+                     (unsigned)superseded.pressId, (unsigned)job.pressId);
+  }
+  if (!live) {
+    DEBUG_G2_EVENTSF("[G2] Hold press id=%u ended before delivery — dropped",
+                     (unsigned)job.pressId);
+    return;
+  }
+
+  // The freshest source for this press: a later copy may have upgraded it.
+  uint8_t source = job.source;
+  portENTER_CRITICAL(&gHoldMux);
+  if (gHold.pressId == job.pressId) source = gHold.source;
+  portEXIT_CRITICAL(&gHoldMux);
+
+  G2HoldReason reason = (G2HoldReason)job.reason;   // ingest drop, if any
+  G2HoldConsumer consumer = G2HoldConsumer::None;
+  const G2HijackPage page = g2GetHijackPage();
+  const char* why = "";
+  if (reason == G2HoldReason::None) {
+    const G2PageHoldFn handler = gPageHold.get((uint32_t)page);
+    const G2HoldProfile* profile = g2HoldProfileCurrent();
+    G2HoldGateInputs in;
+    in.trusted = job.via == (uint8_t)G2HoldVia::Sim || profile != nullptr;
+    in.allowUnprofiled = gSettings.g2HoldUnprofiled;
+    in.hijackActive = g2LensGetState().hijackActive;
+    in.presentationCurrent = pressEpoch == g2PresentationEpochCurrent();
+    in.overlay = firmwareOverlayActive();
+    in.keyboard = kbdPadSysDoubleOwned();
+    in.camStream = gCamStreamActive;
+    in.imageProbe = gImgProbeHoldActive;
+    in.swapInFlight = pageSwapInFlight();
+    in.pageHasHandler = handler != nullptr;
+    in.sourceAllowed = g2HoldSourceAllowed(
+        source, profile && profile->sourceReliable, gSettings.g2HoldSource);
+    in.action = gSettings.g2HoldAction;
+    G2HoldRoute route = g2HoldRouteDecide(in, nullptr, &reason);
+    if (route == G2HoldRoute::Page) {
+      if (handler((uint8_t)G2HoldPhase::Press, source)) {
+        consumer = G2HoldConsumer::Page;
+      } else if (!in.sourceAllowed) {
+        // The page applied the same source policy: record it as such, even
+        // with the global action off.
+        route = G2HoldRoute::Drop;
+        reason = G2HoldReason::Source;
+      } else {
+        // The page declined this press; the global action may take it.
+        in.pageHasHandler = false;
+        route = g2HoldRouteDecide(in, nullptr, &reason);
+      }
+    }
+    if (route == G2HoldRoute::Global) {
+      if (g2HoldGlobalBegin(job.pressId, source, &why)) {
+        consumer = G2HoldConsumer::Global;
+      } else {
+        reason = G2HoldReason::Refused;
+      }
+    }
+  }
+  if (consumer != G2HoldConsumer::None) {
+    sDelivery.consume(job.pressId, consumer, (uint8_t)page, source);
+  }
+  portENTER_CRITICAL(&gHoldMux);
+  g2HoldRecordRouteLocked(job.pressId, consumer, (uint8_t)page, reason);
+  portEXIT_CRITICAL(&gHoldMux);
+
+  if (consumer == G2HoldConsumer::Page) {
+    const G2PageModule* module = g2FindPageByHijackPage(page);
+    snprintf(detail, sizeof(detail), "%s",
+             module && module->name ? module->name : "page");
+  } else if (consumer == G2HoldConsumer::Global) {
+    snprintf(detail, sizeof(detail), "quicknote");
+  } else if (reason == G2HoldReason::Refused) {
+    snprintf(detail, sizeof(detail), "refused:%s", why);
+  } else {
+    snprintf(detail, sizeof(detail), "ignored:%s", g2HoldReasonName(reason));
+  }
+  DEBUG_G2_EVENTSF("[G2] Hold press id=%u src=%u(%s) via=%s page=%u → %s",
+                   (unsigned)job.pressId, (unsigned)source,
+                   g2HoldSourceName(source), g2HoldViaName(job.via),
+                   (unsigned)page, detail);
+  g2HoldPostEvent(SYSEVT_G2_LONG_PRESS, source, detail);
+}
+
+// `g2hold sim`: drives the real pairing and dispatcher without the glasses, as
+// a right-arm copy on the current widget lifecycle and presentation. It skips
+// only the BLE decode and the firmware-profile gate; its rows show via=sim.
+static const char* g2HoldSim(const String& what, uint8_t src) {
+  EXT_RAM_BSS_ATTR static char out[160];
+  const uint32_t lifecycle =
+      __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
+  if (what == "press" || what == "release") {
+    const bool press = what == "press";
+    g2HoldAccept('R', press ? 9u : 10u, press ? src : 0, G2HoldVia::Sim,
+                 /*current=*/true, lifecycle, g2PresentationEpochCurrent(),
+                 /*profileBypass=*/true);
+  } else if (what == "abort") {
+    if (!g2HoldAbort(G2HoldReason::Sim, 'R')) {
+      return "G2 hold sim abort: no press was open";
+    }
+  } else {
+    return "Error: invalid arguments — Usage: g2hold sim <press [ring|right|left|unknown]|release|abort>";
+  }
+  // The newest row is this copy's (another hold landing in between is the
+  // only exception, and status shows both).
+  G2HoldRecord last = {};
+  portENTER_CRITICAL(&gHoldMux);
+  if (gHoldLogCount) last = gHoldLog[(gHoldLogHead + kHoldLogCap - 1) % kHoldLogCap];
+  portEXIT_CRITICAL(&gHoldMux);
+  char outcome[56];
+  g2HoldRecordOutcome(last, outcome, sizeof(outcome));
+  snprintf(out, sizeof(out),
+           "G2 hold sim %s: id=%u src=%u(%s) %s held=%ums "
+           "(`g2hold status` shows the route)",
+           what.c_str(), (unsigned)last.pressId, (unsigned)last.src,
+           g2HoldSourceName(last.src), outcome, (unsigned)last.heldMs);
+  return out;
+}
+
 // Called by g2_tap_disp after g2_ctrl_owner sees and deduplicates a ListEvent
 // CLICK on container "app". This worker may allocate and enqueue UI work; the
 // separate control owner remains available to decode synchronous ACKs.
@@ -9852,9 +10615,17 @@ static constexpr size_t kTapLabelWidth = 32;  // log labels; truncation is fine
 EXT_RAM_BSS_ATTR static char gTapLabels[kTapLabelRows][kTapLabelWidth];
 static volatile uint32_t gTapLabelCount = 0;
 
+// The Notes page's rows are "hh:mm <the note's first words>", private text
+// (R22): they are never cached, and a tap or ListEvent on that page logs the
+// row index only.
+static bool g2HijackRowsPrivate() {
+  return g2GetHijackPage() == G2_HIJACK_PAGE_NOTES;
+}
+
 static void tapLabelCacheStore(const char* const* items, size_t n) {
   if (!items) return;
-  const size_t take = (n < kTapLabelRows) ? n : kTapLabelRows;
+  const size_t take = g2HijackRowsPrivate() ? 0
+                    : (n < kTapLabelRows) ? n : kTapLabelRows;
   for (size_t i = 0; i < take; i++) {
     const char* s = items[i] ? items[i] : "";
     strncpy(gTapLabels[i], s, kTapLabelWidth - 1);
@@ -9915,9 +10686,12 @@ static void handleHijackMenuTap(uint32_t idx, const char* wireName,
 
   // Row label for the "Hijack tap:" lines below. The wire-reported item
   // name wins when present (the firmware rarely populates it); otherwise
-  // fall back to the cache's snapshot of the rows we last sent.
+  // fall back to the cache's snapshot of the rows we last sent. A private
+  // page's rows are never named.
   char lbl[kTapLabelWidth];
-  if (wireName && wireName[0]) {
+  if (g2HijackRowsPrivate()) {
+    snprintf(lbl, sizeof(lbl), "private");
+  } else if (wireName && wireName[0]) {
     strncpy(lbl, wireName, sizeof(lbl) - 1);
     lbl[sizeof(lbl) - 1] = '\0';
   } else {
@@ -10181,6 +10955,22 @@ static void sendHijackShutdown(const char* reason) {
     DEBUG_G2F("[G2] Hijack exit (%s) — terminal claimed at gen=%u",
               reason ? reason : "?", (unsigned)generation);
   }
+}
+
+// Up to the first (cap - 1) / 2 bytes of `data` as unspaced uppercase hex
+// ("0812..."), NUL-terminated; paste it into any protobuf decoder. Returns
+// the bytes shown.
+static constexpr size_t kG2UnknownSidHexMax = 64;  // one log line (DEBUG_MSG_SIZE)
+static size_t g2HexCompact(const uint8_t* data, size_t len, char* out, size_t cap) {
+  if (!out || !cap) return 0;
+  static const char kDigits[] = "0123456789ABCDEF";
+  size_t shown = data ? std::min(len, (cap - 1) / 2) : 0;
+  for (size_t i = 0; i < shown; i++) {
+    out[2 * i] = kDigits[data[i] >> 4];
+    out[2 * i + 1] = kDigits[data[i] & 0x0F];
+  }
+  out[2 * shown] = '\0';
+  return shown;
 }
 
 // Log every top-level pb field in `payload` as a single line per field.
@@ -11305,8 +12095,16 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
       break;
 
     default:
-      DEBUG_G2F("[G2-%c] sid=0x%02X flag=0x%02X len=%u", t.side,
-                env.sid, env.flag, (unsigned)env.payloadLen);
+      // An unmapped sid, e.g. 0x12 that G2 2.3.2.14 sends from its own
+      // QuickNote: logged so it can be decoded, never answered, emulated or
+      // suppressed (R20), and nothing here changes state.
+      if (isDebugOutputEnabled(DEBUG_G2)) {
+        char hex[2 * kG2UnknownSidHexMax + 1];
+        g2HexCompact(env.payload, env.payloadLen, hex, sizeof(hex));
+        DEBUG_G2F("[G2-%c] sid=0x%02X (%s) flag=0x%02X len=%u pb=%s%s", t.side,
+                  env.sid, g2sidName(env.sid), env.flag, (unsigned)env.payloadLen, hex,
+                  env.payloadLen > kG2UnknownSidHexMax ? "..." : "");
+      }
       break;
   }
 }
@@ -13401,6 +14199,12 @@ static bool g2EvenAiSessionIsActive() {
   return g2EvenAiCurrentExchangeId() != 0;
 }
 
+// QuickNote's stand-down check (R16): never start or keep a note over a
+// native Even AI or Conversate session.
+bool g2NativeVoiceActive() {
+  return g2EvenAiSessionIsActive() || g2ConversateActive();
+}
+
 bool g2EvenAiExchangeBoundToUartSession(uint64_t exchangeId,
                                         uint32_t sessionEpoch) {
   if (!exchangeId || !sessionEpoch ||
@@ -14947,6 +15751,19 @@ static void g2ConversateTick(bool requestsOnly) {
   portEXIT_CRITICAL(&gConversateMux);
 }
 
+// R13: authoritative device-side work that keeps the HW1 page alive past the
+// 60 s tap-only hijack watchdog while it runs: a local-STT Transcription
+// session on its own page, and a QuickNote on any page (a G2 capture needs a
+// lens container up). Once it stops, the watchdog governs passive reading
+// again. quickNoteActive() is false on a build without QuickNote.
+static bool g2PageHoldsHijackAlive() {
+#if ENABLE_LOCAL_STT
+  if (g2GetHijackPage() == G2_HIJACK_PAGE_TRANSCRIPTION && sttAnySessionActive())
+    return true;
+#endif
+  return quickNoteActive();
+}
+
 static void heartbeatWorkerTask(void* /*arg*/) {
   while (!gBeatTaskStop) {
     // This is now the G2 control owner as well as the heartbeat worker.
@@ -15141,14 +15958,8 @@ static void heartbeatWorkerTask(void* /*arg*/) {
       // broadened g2FsmHijackActive() to include ImageProbing — without
       // this gate, every g2bmp / QGlizzy from cold would trip the watchdog
       // on the first heartbeat tick after device-uptime > 60 s.
-#if ENABLE_LOCAL_STT
-      // A running transcription session is authoritative device-side activity
-      // (like chat generation below): keep its page alive while it runs. Once
-      // it stops, the normal tap-only 60 s watchdog governs passive reading.
-      if (g2FsmHijackActive() && gHijackStartedMs > 0 &&
-          g2GetHijackPage() == G2_HIJACK_PAGE_TRANSCRIPTION && sttAnySessionActive())
+      if (g2FsmHijackActive() && gHijackStartedMs > 0 && g2PageHoldsHijackAlive())
         gHijackStartedMs = millis();
-#endif
       if (g2FsmHijackActive() && gHijackStartedMs > 0 &&
           (millis() - gHijackStartedMs) > HIJACK_SAFETY_MS) {
         sendHijackShutdown("safety-timeout");
@@ -18861,6 +19672,8 @@ static bool g2TerminalInvalidate(const char* reason, char side,
     kbdPadSysDoubleUnpublish();
     g2SessionRequestAbort();
     g2TextViewDisarm();
+    // The widget that saw any open hold is gone; its release never comes.
+    g2HoldAbort(G2HoldReason::Terminal, side);
     gImgProbeAbort = true;
     if (gImgProbeHoldActive) gImgProbeHoldTapPending = true;
 
@@ -21410,6 +22223,7 @@ enum TapDispatchKind : uint8_t {
   TAP_DISPATCH_KBD_SELECT = 4,  // rowless SysEvent selects current grid key
   TAP_DISPATCH_TEXT_ENTRY_CLEANUP = 5,  // exact terminal tombstone teardown
   TAP_DISPATCH_KBD_SERVICE = 6,  // exact-source keyboard dictation service
+  TAP_DISPATCH_HOLD = 7,  // long-press press/release/abort for g2HoldDeliver
 };
 
 struct TapDispatchEntry {
@@ -21430,6 +22244,7 @@ struct TapDispatchEntry {
     } nav;
     uint32_t barrierGeneration;
     G2TextEntryCleanupToken textEntryCleanup;
+    G2HoldJob hold;   // 16 B (G2_HoldGesture.h)
   } payload;
 };
 static_assert(sizeof(TapDispatchEntry) == 56,
@@ -21598,6 +22413,16 @@ static void tapDispatcherWorkerLoop(void* arg) {
       __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
       continue;
     }
+    if (e.kind == TAP_DISPATCH_HOLD) {
+      // A hold's release or abort must reach the consumer of its press
+      // whatever the lens shows now; a press re-checks its own presentation
+      // epoch and the page swap inside the route, so its drop is recorded and
+      // posted instead of vanishing in the generic stale filter below.
+      g2HoldDeliver(e.payload.hold, e.presentationEpoch);
+      __atomic_add_fetch(&gTapProcessed, 1, __ATOMIC_RELAXED);
+      __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
+      continue;
+    }
     if (e.kind == TAP_DISPATCH_BARRIER) {
       // Unlike presentation work, a lifecycle fence must acknowledge even
       // while a page transition is active or its presentation epoch is stale.
@@ -21694,6 +22519,9 @@ static void tapDispatcherWorkerLoop(void* arg) {
         // Handled before presentation applicability checks above.
         break;
       case TAP_DISPATCH_TEXT_ENTRY_CLEANUP:
+        // Handled before presentation applicability checks above.
+        break;
+      case TAP_DISPATCH_HOLD:
         // Handled before presentation applicability checks above.
         break;
     }
@@ -21967,6 +22795,32 @@ static bool tapDispatcherEnqueueKeyboardService(uint32_t presentationEpoch) {
   e.kind = TAP_DISPATCH_KBD_SERVICE;
   e.presentationEpoch = presentationEpoch;
   e.enqueuedAtMs = millis();
+  if (xQueueSend(queue, &e, 0) != pdPASS) {
+    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    return false;
+  }
+  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&gTapQueueDepthPeak,
+             (uint32_t)uxQueueMessagesWaiting(queue));
+  return true;
+}
+
+// Producer for long-press jobs (g2HoldAccept / g2HoldAbort / expiry). A press
+// carries the presentation epoch it was received on (the route re-checks it);
+// a release or abort carries 0, since it must reach the consumer of its press
+// whatever is on the lens by then. Only a press may bring the worker up: if
+// it is down, no press was ever delivered, so an end has nobody to reach.
+static bool tapDispatcherEnqueueHold(const G2HoldJob& job,
+                                     uint32_t presentationEpoch) {
+  if (job.phase == (uint8_t)G2HoldPhase::Press) (void)tapDispatcherInit();
+  QueueHandle_t queue = nullptr;
+  if (!tapRuntimeSnapshot(&queue)) return false;
+  G2UiSubmitClaim submitClaim;
+  TapDispatchEntry e{};
+  e.kind              = TAP_DISPATCH_HOLD;
+  e.presentationEpoch = presentationEpoch;
+  e.enqueuedAtMs      = millis();
+  e.payload.hold      = job;
   if (xQueueSend(queue, &e, 0) != pdPASS) {
     __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
     return false;
@@ -24492,7 +25346,10 @@ void g2LensApplyContainer(bool ready, bool isList, uint32_t widgetId) {
 #if ENABLE_MICROPHONE
     // A page swap mid-capture stopped the glasses' mic stream; wake the owner
     // to re-arm now that a container exists again (no BLE TX from here).
-    if (!gMicStreamOn && g2MicCaptureWanted()) {
+    // Not gated on gMicStreamOn: a capture that started during the swap (a
+    // hold note bringing up the Notes page) armed into the torn-down lens,
+    // which set the flag but streams nothing until re-armed.
+    if (g2MicCaptureWanted()) {
       gMicReassertNow.store(true);
       if (gBeatSem) xSemaphoreGive(gBeatSem);
       DEBUG_G2F("[G2-MIC] container back mid-capture — re-arming stream now");
@@ -24717,6 +25574,9 @@ void g2Tick() {
   // this main-loop tick never mutates the text-entry session cross-task.
   kbdPadDictationTickMain();
   g2TranscriptionTick(); // async command scheduling only; no filesystem work here
+  g2NotesTick();         // same: `note` commands go to cmd_exec
+  // Close a hold whose release was lost without any exit event (1 Hz check).
+  g2HoldExpireTick();
   // Lifecycle reset tombstones routing synchronously; this bounded retry only
   // wakes the FIFO cleanup that owns callback-free pad/buffer teardown.
   (void)g2TextEntryCleanupKick();
@@ -24910,6 +25770,173 @@ static const char* cmd_g2status(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char buf[384];
   getG2Status(buf, sizeof(buf));
+  return buf;
+}
+
+// Bounded printf-append for multi-line command replies; truncates silently
+// at the buffer end. *n tracks the written length.
+static void g2HoldAppendf(char* buf, size_t cap, size_t* n, const char* fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+static void g2HoldAppendf(char* buf, size_t cap, size_t* n, const char* fmt, ...) {
+  if (!buf || !n || cap == 0 || *n >= cap - 1) return;
+  va_list ap;
+  va_start(ap, fmt);
+  const int w = vsnprintf(buf + *n, cap - *n, fmt, ap);
+  va_end(ap);
+  if (w > 0) *n = (*n + (size_t)w < cap) ? *n + (size_t)w : cap - 1;
+}
+
+// Long-press input: settings, firmware profile, pairing state, counters and
+// the record ring kept by g2HoldAccept / g2HoldDeliver. Read-only apart from
+// `clear` (empties the ring and counters, leaves an open press paired) and the
+// admin-only `sim`, which drives the real pairing and dispatcher (`sim press`
+// also needs the paired wearer, R21). Rows carry no text of any kind.
+static const char* cmd_g2hold(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs ca(argsInput);
+  String sub = ca.arg(0); sub.toLowerCase();
+  if (sub == "clear") {
+    portENTER_CRITICAL(&gHoldMux);
+    gHoldLogHead = 0;
+    gHoldLogCount = 0;
+    gHoldCounters = {};
+    portEXIT_CRITICAL(&gHoldMux);
+    return "G2 hold: record ring and counters cleared (open press kept)";
+  }
+  if (sub == "sim") {
+    if (!currentExecIsAdmin()) {
+      return "Error: g2hold sim requires admin authorization";
+    }
+    String what = ca.arg(1); what.toLowerCase();
+    // A synthetic press runs the real dispatcher, so it can start the hold
+    // action (a recording on the glasses mic, once QuickNote lands). Bind it
+    // like `note start glasses` (R21): never from automations, ESP-NOW, MQTT
+    // or voice, and only by the paired wearer, with no admin override.
+    // Release and abort stay admin-only so a stuck press can be cleared.
+    if (what == "press") {
+      const CommandSource via = currentAuthContext().transport;
+      if (via == SOURCE_INTERNAL || via == SOURCE_ESPNOW ||
+          via == SOURCE_MQTT || via == SOURCE_VOICE) {
+        return "Error: g2hold sim press: not from automations, remote or voice";
+      }
+      BlePeerOwnerSession owner;
+      const bool wearer =
+          blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, owner) &&
+          owner.live() && owner.user == currentExecUser();
+      secureClearString(owner.user);
+      if (!wearer) {
+        return "Error: g2hold sim press: only the paired wearer may simulate a hold";
+      }
+    }
+    String from = ca.arg(2); from.toLowerCase();
+    uint8_t src = (uint8_t)G2HoldSource::Ring;   // the default trigger
+    if (from.length()) {
+      if (what != "press") return "Error: g2hold sim: only press takes a source";
+      if (from == "ring") src = (uint8_t)G2HoldSource::Ring;
+      else if (from == "right") src = (uint8_t)G2HoldSource::RightTemple;
+      else if (from == "left") src = (uint8_t)G2HoldSource::LeftTemple;
+      else if (from == "unknown") src = (uint8_t)G2HoldSource::Unknown;
+      else return "Error: g2hold sim press: source must be ring|right|left|unknown";
+    }
+    return g2HoldSim(what, src);
+  }
+  if (sub.length() && sub != "status") {
+    return "Error: invalid arguments — Usage: g2hold [status|clear|sim <press [ring|right|left|unknown]|release|abort>]";
+  }
+
+  char left[32];
+  char right[32];
+  g2HoldFirmwareSnapshot(left, right);
+  // Exact-profile rule (R19): only a listed L = R pair dispatches actions.
+  const G2HoldProfile* profile = g2HoldProfileFor(left, right);
+  const G2HijackPage page = g2GetHijackPage();
+
+  EXT_RAM_BSS_ATTR static G2HoldRecord snap[kHoldLogCap];
+  G2HoldPairing pair;
+  G2HoldCounters c;
+  size_t count = 0;
+  portENTER_CRITICAL(&gHoldMux);
+  pair = gHold;
+  c = gHoldCounters;
+  count = gHoldLogCount;
+  const size_t start = (gHoldLogHead + kHoldLogCap - gHoldLogCount) % kHoldLogCap;
+  for (size_t i = 0; i < count; i++) snap[i] = gHoldLog[(start + i) % kHoldLogCap];
+  portEXIT_CRITICAL(&gHoldMux);
+  const uint32_t now = millis();   // after the snapshot: every age is >= 0
+
+  EXT_RAM_BSS_ATTR static char buf[3072];
+  const size_t cap = sizeof(buf);
+  size_t n = 0;
+  buf[0] = '\0';
+  g2HoldAppendf(buf, cap, &n,
+                "G2 hold (long-press): action=%s source=%s unprofiled=%s\n",
+                gSettings.g2HoldAction ? "quicknote" : "off",
+                gSettings.g2HoldSource == kG2HoldSourceRingOnly
+                    ? "ring-only" : "ring+temples",
+                gSettings.g2HoldUnprofiled ? "allowed" : "blocked");
+  if (profile) {
+    g2HoldAppendf(buf, cap, &n,
+                  "  profile: L=%s R=%s trusted=yes (%s) sourceReliable=%s\n",
+                  left, right, profile->firmware,
+                  profile->sourceReliable ? "yes" : "no");
+  } else {
+    // R20: an unknown firmware may also run the Even app's own Press & hold
+    // binding; HW1 never answers or unbinds it.
+    g2HoldAppendf(buf, cap, &n,
+                  "  profile: L=%s R=%s trusted=no (unprofiled) sourceReliable=n/a\n"
+                  "  hint: this glasses firmware is not profiled for hold: holds are "
+                  "recorded and posted, not dispatched%s. If the Even app bound "
+                  "Press & hold to a shortcut, set it to None there.\n",
+                  left[0] ? left : "?", right[0] ? right : "?",
+                  gSettings.g2HoldUnprofiled ? " (g2holdunprofiled overrides)" : "");
+  }
+  g2HoldAppendf(buf, cap, &n,
+                "  lens: hijack=%s page=%u pageHandler=%s presentationEpoch=%u\n",
+                g2LensGetState().hijackActive ? "active" : "off",
+                (unsigned)page,
+                gPageHold.get((uint32_t)page) ? "yes" : "no",
+                (unsigned)g2PresentationEpochCurrent());
+  if (pair.open) {
+    g2HoldAppendf(buf, cap, &n, "  open: id=%u age=%ums side=%c src=%u(%s)\n",
+                  (unsigned)pair.pressId, (unsigned)(now - pair.pressAtMs),
+                  pair.side ? pair.side : '-', (unsigned)pair.source,
+                  g2HoldSourceName(pair.source));
+  } else {
+    g2HoldAppendf(buf, cap, &n, "  open: none\n");
+  }
+  g2HoldAppendf(buf, cap, &n, "  counters:");
+  for (size_t v = 0; v + 1 < kG2HoldVerdictCount; v++) {   // NothingOpen never counts
+    g2HoldAppendf(buf, cap, &n, " %s=%u", g2HoldVerdictName((G2HoldVerdict)v),
+                  (unsigned)c.verdict[v]);
+  }
+  g2HoldAppendf(buf, cap, &n, " Expired=%u Stale=%u\n", (unsigned)c.expired,
+                (unsigned)c.stale);
+  g2HoldAppendf(buf, cap, &n,
+                "  dispatch: queueFull=%u pageGone=%u events=%u rateLimited=%u\n",
+                (unsigned)c.queueFull, (unsigned)c.pageGone,
+                (unsigned)c.eventsPosted, (unsigned)c.eventsLimited);
+  if (count == 0) {
+    g2HoldAppendf(buf, cap, &n,
+                  "  records: none (hold the ring or a temple on a HW1 page)");
+    return buf;
+  }
+  g2HoldAppendf(buf, cap, &n,
+                "  records (oldest first; Δ = ms since previous, t- = age ms):\n");
+  for (size_t i = 0; i < count; i++) {
+    const G2HoldRecord& r = snap[i];
+    char outcome[56];
+    g2HoldRecordOutcome(r, outcome, sizeof(outcome));
+    g2HoldAppendf(buf, cap, &n,
+                  "    Δ%-6u %c %-7s %-4s src=%u(%s) %s held=%ums id=%u "
+                  "ep=%u t-%u\n",
+                  (unsigned)(i ? r.atMs - snap[i - 1].atMs : 0),
+                  r.side ? r.side : '-', g2HoldPhaseName(r.phase),
+                  g2HoldViaName(r.via), (unsigned)r.src,
+                  g2HoldSourceName(r.src), outcome,
+                  (unsigned)r.heldMs, (unsigned)r.pressId,
+                  (unsigned)r.presentationEpoch, (unsigned)(now - r.atMs));
+  }
+  if (n > 0 && buf[n - 1] == '\n') buf[n - 1] = '\0';
   return buf;
 }
 
@@ -27321,6 +28348,7 @@ extern const CommandEntry g2Commands[] = {
   { "openg2",       "Connect to G2 glasses: openg2 [left|right|auto|saved]", true, cmd_g2connect, "Usage: openg2 [left|right|auto|saved]  (default auto; saved = peer MACs)" },
   { "closeg2",      "Disconnect G2 glasses [full=also free ~30KB GATT cache].", true, cmd_g2disconnect, "Usage: closeg2 [full]" },
   { "g2status",     "Show G2 connection status",                       false, cmd_g2status },
+  { "g2hold",       "Long-press (hold) input: firmware profile, pairing, routes and last 16 hold records", false, cmd_g2hold, "Usage: g2hold [status|clear|sim <press [ring|right|left|unknown]|release|abort>]\n  bare = status; clear empties the record ring and counters\n  sim (admin; press only by the paired wearer): synthetic right-arm hold through the real pairing and dispatcher (default source ring)" },
   { "g2info",       "Dump device info (firmware, MAC, battery, etc.)",  false, cmd_g2info },
   { "g2settings",   "Settings debug: g2settings verbose [on|off]",     false, cmd_g2settings, "Usage: g2settings verbose [<on|off>]  (bare verbose = toggle)" },
   { "g2liverate",   "Get/set live-update probe cadence (ms), default 600: g2liverate [N]", false, cmd_g2liverate, "Usage: g2liverate [ms>=100]  (bare = report)" },

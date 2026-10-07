@@ -72,11 +72,60 @@ EXPANDED_MIX = [
     ('voxpopuli-train', 0.08, False),
     ('voxpopuli-train-b', 0.07, False),
 ]
-MIXES = {'run2': TRAIN_MIX, 'broad': BROAD_MIX, 'expanded': EXPANDED_MIX}
+# --mix general (2026-10-02): wide everyday use, not only meetings. Varied
+# real-world talk 30%, meetings 25%, read speech 20%, accented formal 25%.
+GENERAL_MIX = [
+    ('peoples-clean-train', 0.30, False),
+    ('ami-sdm-train', 0.15, True),
+    ('ami-ihm-train', 0.10, False),
+    ('librispeech-train-clean-100', 0.10, False),
+    ('librispeech-train-clean-360-p28', 0.10, False),
+    ('voxpopuli-train', 0.13, False),
+    ('voxpopuli-train-b', 0.12, False),
+]
+# --mix general2 (2026-10-03): the general mix over the bigger pool: 60 more
+# People's Speech shards (peoples-clean-train2) and Common Voice English
+# (thousands of speakers on their own phones and laptops).
+GENERAL2_MIX = [
+    ('peoples-clean-train', 0.15, False),
+    ('peoples-clean-train2', 0.15, False),
+    ('commonvoice-en-train', 0.12, False),
+    ('ami-sdm-train', 0.15, True),
+    ('ami-ihm-train', 0.10, False),
+    ('librispeech-train-clean-100', 0.08, False),
+    ('librispeech-train-clean-360-p28', 0.07, False),
+    ('voxpopuli-train', 0.10, False),
+    ('voxpopuli-train-b', 0.08, False),
+]
+MIXES = {'run2': TRAIN_MIX, 'broad': BROAD_MIX, 'expanded': EXPANDED_MIX, 'general': GENERAL_MIX,
+         'general2': GENERAL2_MIX}
+NOISE_ONLY = '__noise_only__'  # mix entry name for data.NoiseOnlyStore
 DEV_SETS = [('ami-sdm-validation', 400), ('ami-ihm-validation', 400), ('librispeech-dev-clean', 400)]
 # --dev g2 adds the same AMI subsets passed through the simulated glasses
 # channel (make_g2_stores.py), so selection also rewards glasses robustness.
 G2_DEV_SETS = DEV_SETS + [('ami-sdm-validation-g2', 400), ('ami-ihm-validation-g2', 400)]
+# --dev broad: four kinds of speech, each plain and through the simulated
+# glasses channel; peoples-dev / voxpopuli-dev are held out of the training
+# stores (make_dev_views.py). Scored by broad_score, not a plain mean.
+BROAD_DEV_SETS = [(n, 300) for base in ('ami-sdm-validation', 'ami-ihm-validation', 'librispeech-dev-clean',
+                                        'peoples-dev', 'voxpopuli-dev') for n in (base, base + '-g2')]
+
+
+def domain(name):
+    for prefix, d in (('ami-', 'meetings'), ('libri', 'read'), ('peoples-', 'varied'), ('vox', 'accented')):
+        if name.startswith(prefix):
+            return d
+    return name
+
+
+def broad_score(wers):
+    """Mean over kinds of speech (meetings, varied talk, read, accented) of the
+    mean WER of that kind's sets (plain and glasses-simulated; AMI far and
+    headset are one kind). Same formula as BENCHMARK.md's Broad column."""
+    groups = {}
+    for name, w in wers.items():
+        groups.setdefault(domain(name), []).append(w)
+    return float(np.mean([np.mean(v) for v in groups.values()]))
 
 
 class NovoGrad(torch.optim.Optimizer):
@@ -122,6 +171,21 @@ RESTART_EXIT = 75  # run_15x5.sh restarts on this without shrinking batches
 MEMORY_EXIT = 3    # benchmark exceeded the footprint limit
 
 
+# Characters an empty-transcript item counts as, per output frame (~15 letters/s
+# at 50 frames/s). See ctc_divisor.
+EMPTY_CHARS_PER_FRAME = 0.3
+
+
+def ctc_divisor(label_lengths, out_lengths):
+    """Per-item divisor of the CTC loss: the transcript length, as in PyTorch's
+    reduction='mean'. That reduction divides an EMPTY transcript (noise-only clip)
+    by 1, so one clip's whole-sequence loss outweighed ~100 speech items and the
+    noise-only clips made up ~90% of the loss (2026-10-05). An empty item is
+    divided by the letters speech of its duration would hold instead."""
+    n = label_lengths.float()
+    return torch.where(n > 0, n, (out_lengths.float() * EMPTY_CHARS_PER_FRAME).clamp(min=1.0))
+
+
 def footprint_gb():
     """Physical footprint incl. compressed/swapped pages (what top's MEM shows)."""
     try:
@@ -135,6 +199,8 @@ def footprint_gb():
 
 
 def parse_deadline(text):
+    if text.startswith('+'):  # '+30h': runs longer than a day (HH:MM is at most 24 h ahead)
+        return time.time() + float(text[1:].rstrip('h')) * 3600
     now = dt.datetime.now()
     hh, mm = map(int, text.split(':'))
     deadline = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
@@ -147,7 +213,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--init', required=True, help='NeMo-format checkpoint dir to start from')
     p.add_argument('--out', required=True)
-    p.add_argument('--deadline', required=True, help='HH:MM local time to stop at the latest')
+    p.add_argument('--deadline', required=True, help="HH:MM local time to stop at the latest, or '+30h'")
     p.add_argument('--target-hours', type=float, default=175.0,
                    help='stop after this many hours of (augmented) training audio; run2 saw ~175 h')
     p.add_argument('--lr', type=float, default=2e-5)
@@ -156,7 +222,7 @@ def main():
     p.add_argument('--betas', type=float, nargs=2, help='default: AdamW (0.9, 0.999), NovoGrad (0.95, 0.5)')
     p.add_argument('--weight-decay', type=float, default=1e-3)
     p.add_argument('--mix', choices=sorted(MIXES), default='run2')
-    p.add_argument('--dev', choices=['default', 'g2'], default='default')
+    p.add_argument('--dev', choices=['default', 'g2', 'broad'], default='default')
     p.add_argument('--g2-prob', type=float, default=0.0,
                    help='fraction of training items passed through the simulated glasses channel '
                         '(slow AGC + LC3 16k/10ms/32kbps with occasional PLC)')
@@ -173,11 +239,19 @@ def main():
                    help='save and exit with code 75 (restart) above this memory footprint')
     p.add_argument('--patience', type=int, default=2, help='worse evals before rolling back to best')
     p.add_argument('--benchmark-steps', type=int, default=0, help='run N steps, report speed, exit')
-    p.add_argument('--device', default='mps' if torch.backends.mps.is_available() else 'cpu',
-                   help='cpu only for tiny smoke tests')
+    p.add_argument('--device', default='cuda' if torch.cuda.is_available() else
+                   'mps' if torch.backends.mps.is_available() else 'cpu', help='cpu only for tiny smoke tests')
+    p.add_argument('--rollback', choices=['on', 'off'], default='on',
+                   help="off: never revert to the best checkpoint or halve the LR on a worse eval "
+                        "(every eval is still saved and the best one kept)")
+    p.add_argument('--amp', action='store_true', help='CUDA only: bfloat16 autocast for the model forward pass')
+    p.add_argument('--noise-pool', choices=['musan', 'musan+demand'], default='musan',
+                   help='background noise for augmentation; +demand adds DEMAND everyday ambiences')
+    p.add_argument('--noise-only-share', type=float, default=0.0,
+                   help='share of training items that are pure noise with an EMPTY transcript (e.g. 0.04)')
     a = p.parse_args()
     train_mix = MIXES[a.mix]
-    dev_sets = G2_DEV_SETS if a.dev == 'g2' else DEV_SETS
+    dev_sets = {'g2': G2_DEV_SETS, 'broad': BROAD_DEV_SETS}.get(a.dev, DEV_SETS)
     micro_seconds = a.max_seconds / a.accum
     micro_items = max(1, a.max_items // a.accum)
 
@@ -222,15 +296,27 @@ def main():
         emit(event='resumed', step=step, best=best, guard=guard)
     emit(event='config', accum=a.accum, micro_seconds=micro_seconds, micro_items=micro_items,
          target_hours=a.target_hours, lr=a.lr, optimizer=a.optimizer, betas=a.betas,
-         weight_decay=a.weight_decay, mix=train_mix, dev=dev_sets, g2_prob=a.g2_prob)
+         weight_decay=a.weight_decay, mix=train_mix, dev=dev_sets, g2_prob=a.g2_prob,
+         rollback=a.rollback, amp=a.amp, noise_pool=a.noise_pool, noise_only_share=a.noise_only_share,
+         empty_chars_per_frame=EMPTY_CHARS_PER_FRAME,
+         device=str(device))
 
     def save_resume():
         torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
                     'step': step, 'best': best, 'guard': guard}, out / 'resume.pt.tmp')
         (out / 'resume.pt.tmp').replace(resume)
 
-    augmenter = Augmenter(Store('musan-noise'), Store('musan-speech'), Store('rirs'), g2_prob=a.g2_prob)
-    stores = [Store(name) for name, _, _ in train_mix]
+    from data import NoisePool, NoiseOnlyStore
+    if a.g2_prob:  # build the LC3 library once here, not in every DataLoader worker
+        import lc3codec
+        lc3codec._load()
+    noise = Store('musan-noise')
+    if a.noise_pool == 'musan+demand':
+        noise = NoisePool([noise, Store('demand-noise-train')])
+    augmenter = Augmenter(noise, Store('musan-speech'), Store('rirs'), g2_prob=a.g2_prob)
+    if a.noise_only_share > 0:
+        train_mix = train_mix + [(NOISE_ONLY, a.noise_only_share, False)]
+    stores = [NoiseOnlyStore(noise) if name == NOISE_ONLY else Store(name) for name, _, _ in train_mix]
     dataset = TrainSet(stores, [f for _, _, f in train_mix], template, augmenter, seed=step + 1,
                        **({'encoder': encoder} if encoder else {}))
     total_steps = (a.benchmark_steps * a.accum) or 10 ** 9
@@ -253,7 +339,8 @@ def main():
     span = max(deadline - start, 1.0)
     # Score the starting point first so "best" can never be worse than it.
     if best is None and not a.benchmark_steps:
-        best = run_eval(model, template, config, out, step, best, emit, device, guard, a.patience, dev_sets)
+        best = run_eval(model, template, config, out, step, best, emit, device, guard, a.patience, dev_sets,
+                        rollback=a.rollback == 'on')
         guard['last_eval_audio'] = -(a.eval_hours - a.first_eval_hours) * 3600
         save_resume()
     guard.setdefault('last_eval_audio', 0.0)
@@ -281,10 +368,19 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             micro_loss = 0.0
 
-        log_probs, out_lengths = model(feats.to(device), lengths.to(device))
+        if a.amp and device.type == 'cuda':
+            with torch.autocast('cuda', dtype=torch.bfloat16):
+                log_probs, out_lengths = model(feats.to(device), lengths.to(device))
+        else:
+            log_probs, out_lengths = model(feats.to(device), lengths.to(device))
         log_probs = F.log_softmax(log_probs.float(), dim=-1)
-        loss = F.ctc_loss(log_probs.transpose(0, 1).cpu(), labels, out_lengths.cpu(), label_lengths,
-                          blank=blank, reduction='mean', zero_infinity=True)
+        if device.type == 'mps':  # no CTC on MPS: compute the loss on the CPU
+            log_probs, out_lengths = log_probs.cpu(), out_lengths.cpu()
+        else:
+            labels, label_lengths = labels.to(device), label_lengths.to(device)
+        nll = F.ctc_loss(log_probs.transpose(0, 1), labels, out_lengths, label_lengths,
+                         blank=blank, reduction='none', zero_infinity=True)
+        loss = (nll / ctc_divisor(label_lengths, out_lengths)).mean()
         (loss / a.accum).backward()
         micro_loss += loss.item() / a.accum
         seconds = float(lengths.sum()) * 0.01
@@ -323,7 +419,8 @@ def main():
                 rate = process_audio / (time.time() - t_process)
                 emit(event='benchmark', accum=a.accum, audio_seconds_per_second=round(rate, 2),
                      mem_gb=round(footprint_gb(), 2),
-                     peak_mps_mb=round(torch.mps.driver_allocated_memory() / 2**20) if device.type == 'mps' else None)
+                     peak_mps_mb=round(torch.mps.driver_allocated_memory() / 2**20) if device.type == 'mps' else None,
+                     peak_cuda_mb=round(torch.cuda.max_memory_allocated() / 2**20) if device.type == 'cuda' else None)
                 log.close()
                 os._exit(0)  # skip slow DataLoader worker teardown
             continue
@@ -332,13 +429,15 @@ def main():
             save_resume()
 
         if guard['audio_seconds'] - guard['last_eval_audio'] >= a.eval_hours * 3600:
-            best = run_eval(model, template, config, out, step, best, emit, device, guard, a.patience, dev_sets)
+            best = run_eval(model, template, config, out, step, best, emit, device, guard, a.patience, dev_sets,
+                        rollback=a.rollback == 'on')
             guard['last_eval_audio'] = guard['audio_seconds']
             save_resume()
             train_mode(model)
 
     save_checkpoint(model, template, config, out / 'last')
-    best = run_eval(model, template, config, out, step, best, emit, device, guard, a.patience, dev_sets)
+    best = run_eval(model, template, config, out, step, best, emit, device, guard, a.patience, dev_sets,
+                        rollback=a.rollback == 'on')
     save_resume()
     emit(event='finished', step=step, best=best, audio_hours=round(guard['audio_seconds'] / 3600, 2))
     log.close()
@@ -355,17 +454,21 @@ def train_mode(model):
             m.eval()
 
 
-def run_eval(model, template, config, out, step, best, emit, device, guard, patience, dev_sets=DEV_SETS):
+def run_eval(model, template, config, out, step, best, emit, device, guard, patience, dev_sets=DEV_SETS,
+             rollback=True):
     model.eval()
-    # Evaluate a CPU copy: eval batches have many distinct shapes, each of
-    # which would otherwise leave a cached graph behind on MPS.
     t0 = time.time()
-    cpu_model = copy.deepcopy(model).cpu().eval()
-    # 30 s batches instead of 200 s: identical WER (padding is masked), but
-    # ~3x faster for the 15x5 on CPU.
-    results = evaluate_stores(cpu_model, template, dev_sets, torch.device('cpu'), batch_seconds=30.0)
-    del cpu_model
-    score = float(np.mean([r['wer'] for r in results.values()]))
+    if device.type == 'mps':
+        # Evaluate a CPU copy: eval batches have many distinct shapes, each of
+        # which would otherwise leave a cached graph behind on MPS. 30 s batches
+        # instead of 200 s: identical WER (padding is masked), ~3x faster on CPU.
+        cpu_model = copy.deepcopy(model).cpu().eval()
+        results = evaluate_stores(cpu_model, template, dev_sets, torch.device('cpu'), batch_seconds=30.0)
+        del cpu_model
+    else:
+        results = evaluate_stores(model, template, dev_sets, device)
+    wers = {k: r['wer'] for k, r in results.items()}
+    score = broad_score(wers) if dev_sets is BROAD_DEV_SETS else float(np.mean(list(wers.values())))
     metrics = {'score': score, 'step': step, 'audio_hours': round(guard['audio_seconds'] / 3600, 2),
                'sets': {k: v['wer'] for k, v in results.items()}}
     emit(event='eval', step=step, score=round(score, 4), eval_s=round(time.time() - t0),
@@ -380,6 +483,8 @@ def run_eval(model, template, config, out, step, best, emit, device, guard, pati
         save_checkpoint(model, template, config, out / 'best')
         (out / 'best' / 'metrics.json').write_text(json.dumps(best, indent=2))
         emit(event='new_best', step=step, score=round(score, 4))
+        return best
+    if not rollback:  # --rollback off: keep training straight through
         return best
     # Noise on the dev subsets is ~0.3% absolute: only a clear loss counts,
     # and a big one rolls back immediately.

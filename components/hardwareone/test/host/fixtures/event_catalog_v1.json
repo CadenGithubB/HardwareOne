@@ -63,7 +63,9 @@
         "g2_reconnect_failed",
         "g2_silent_mode",
         "g2_hijack_entered",
-        "g2_hijack_exited"
+        "g2_hijack_exited",
+        "g2_long_press",
+        "g2_long_release"
       ]
     },
     {
@@ -111,7 +113,10 @@
         "video_record_started",
         "ei_continuous_started",
         "voice_disarmed",
-        "llm_model_unloaded"
+        "llm_model_unloaded",
+        "note_started",
+        "note_saved",
+        "note_failed"
       ]
     },
     {

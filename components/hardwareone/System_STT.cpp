@@ -25,6 +25,10 @@
 #include <cmath>
 #include <cstring>
 
+#ifndef ESP_PLATFORM
+size_t sttPsramFree();  // host builds: the test harness supplies free PSRAM
+#endif
+
 namespace {
 constexpr uint32_t kWorkerStackBytes = 12288; // IDF task stack sizes are bytes.
 constexpr uint32_t kResultRetentionMs = 300000;
@@ -171,6 +175,149 @@ static void sttG2CaptureEnd() {
   g2MicLinkFastRelease();
   g2MicReleaseCaptureContainer();
 }
+
+// ---- Keep-warm (sttKeepWarm) -------------------------------------------------
+// Between runs the verified model may stay parked in gWarmSession while a
+// caller holds it warm. A session carries only the pinned, SHA-verified
+// weights and the system LM (System_STTLocal.h), never call data, so any next
+// run may take it. gWarmSession belongs to whoever holds the claim (taken
+// under gSTTMux): the warm loader while it loads, a worker while it adopts or
+// parks, the releaser while it frees. Admission runs one worker at a time and
+// a worker parks before it publishes workerActive=false, so the weights are
+// only ever in one place and a run never loads a second copy beside them.
+#ifdef ESP_PLATFORM
+// heap_caps comes in with System_MemUtil.h (above the namespace).
+static size_t sttPsramFree() { return heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
+#endif
+constexpr uint32_t kWarmMaxHoldMs = 600000;    // the longest hold a caller may ask
+constexpr uint32_t kWarmRetryMs = 60000;       // no new warm load this soon after a failure
+constexpr uint32_t kWarmAdoptWaitMs = 20000;   // a run's longest wait on a claim other than a load
+constexpr size_t kWarmMinFreePsram = 4u << 20; // less free PSRAM releases the parked model
+struct STTWarm {
+  uint32_t untilMs = 0;    // hold deadline (millis), while `wanted`
+  uint32_t failedMs = 0;   // last failed load (or low-PSRAM release), while `failed`
+  size_t loadBytes = 0;    // PSRAM the last successful warm load took (0: none yet)
+  bool wanted = false, parked = false, claimed = false, loading = false, failed = false;
+};
+static STTWarm gWarm;
+static STTLocalSession gWarmSession;
+static bool sttWarmHeldLocked(uint32_t now) {
+  return gWarm.wanted && static_cast<int32_t>(gWarm.untilMs - now) > 0;
+}
+// The warm load stops early once nobody holds it any more.
+static bool sttWarmLoadCancelled(void*) {
+  portENTER_CRITICAL(&gSTTMux);
+  const bool stop = !sttWarmHeldLocked(millis());
+  portEXIT_CRITICAL(&gSTTMux);
+  return stop;
+}
+// Short-lived task: load and verify the model into gWarmSession (its claim
+// was taken by sttKeepWarm) with half a second of silence, like a session's
+// own warm-up, then park it.
+static void sttWarmLoader(void*) {
+  const size_t freeBefore = sttPsramFree();
+  constexpr size_t kSamples = STT_SAMPLE_RATE / 2;
+  auto* silence = static_cast<int16_t*>(ps_alloc(kSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.warm"));
+  bool ok = false;
+  STTLocalStats stats;
+  if (silence) {
+    memset(silence, 0, kSamples * sizeof(int16_t));
+    char text[STT_MAX_TEXT + 1] = {};
+    char error[96] = {};
+    const STTLocalControl control{nullptr, sttWarmLoadCancelled, nullptr};
+    ok = sttLocalTranscribe(silence, kSamples, text, sizeof(text), control, stats, error,
+                            sizeof(error), &gWarmSession) && gWarmSession.warm();
+    free(silence);
+  }
+  if (!ok) gWarmSession.reset();
+  const size_t freeAfter = sttPsramFree();
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&gSTTMux);
+  gWarm.parked = ok;
+  if (ok) gWarm.loadBytes = freeBefore > freeAfter ? freeBefore - freeAfter : 0;
+  gWarm.claimed = gWarm.loading = false;
+  // A load stopped because the hold ended is no failure (no back-off).
+  gWarm.failed = !ok && sttWarmHeldLocked(now);
+  gWarm.failedMs = now;
+  portEXIT_CRITICAL(&gSTTMux);
+  // The PSRAM left beside the resident model is what kWarmMinFreePsram guards.
+  INFO_SYSTEMF("[STT] Warm model %s (load %lu ms, %u KB PSRAM free)", ok ? "resident" : "not loaded",
+               static_cast<unsigned long>(stats.loadMs), static_cast<unsigned>(sttPsramFree() / 1024));
+  vTaskDelete(nullptr);
+}
+// A run's session takes the parked model before its first call. A warm load
+// in progress is awaited to its end (it stops by itself once the hold
+// lapses; `cancelled` ends the wait) rather than raced with a second copy;
+// the caller's capture keeps running meanwhile. Any other claim (a release
+// under way) is awaited at most kWarmAdoptWaitMs.
+static void sttWarmAdopt(STTLocalSession& session, bool (*cancelled)(void*), void* context) {
+  const uint32_t start = millis();
+  for (;;) {
+    bool take = false, busy = false, loading = false;
+    portENTER_CRITICAL(&gSTTMux);
+    take = gWarm.parked && !gWarm.claimed;
+    if (take) gWarm.claimed = true;
+    busy = gWarm.claimed && !take;
+    loading = gWarm.loading;
+    portEXIT_CRITICAL(&gSTTMux);
+    if (take) {
+      gWarmSession.moveTo(session);
+      portENTER_CRITICAL(&gSTTMux);
+      gWarm.parked = gWarm.claimed = false;
+      portEXIT_CRITICAL(&gSTTMux);
+      return;
+    }
+    if (!busy || (!loading && millis() - start >= kWarmAdoptWaitMs) || cancelled(context)) return;
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+// A one-shot run makes room instead: it takes the parked model (awaiting a
+// warm load in progress, like a continuous run) and frees it.
+static void sttWarmYield(bool (*cancelled)(void*), void* context) {
+  STTLocalSession parked;
+  sttWarmAdopt(parked, cancelled, context);
+  parked.reset();
+}
+// A run's end, before workerActive=false: while a hold lasts its model stays
+// parked for the next run, otherwise the session is closed as before.
+static void sttWarmPark(STTLocalSession& session) {
+  const bool warm = session.warm();
+  bool park = false;
+  portENTER_CRITICAL(&gSTTMux);
+  park = warm && sttWarmHeldLocked(millis()) && !gWarm.parked && !gWarm.claimed;
+  if (park) gWarm.claimed = true;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (park) {
+    session.moveTo(gWarmSession);
+    portENTER_CRITICAL(&gSTTMux);
+    gWarm.parked = true;
+    gWarm.claimed = false;
+    portEXIT_CRITICAL(&gSTTMux);
+  }
+  session.reset();
+}
+// Frees the parked model once no hold covers it, or at once for low PSRAM
+// (then no warm load for kWarmRetryMs, so it cannot thrash).
+static void sttWarmRelease(bool lowMemory) {
+  const uint32_t now = millis();
+  bool release = false;
+  portENTER_CRITICAL(&gSTTMux);
+  if (!sttWarmHeldLocked(now)) gWarm.wanted = false;
+  release = gWarm.parked && !gWarm.claimed && (lowMemory || !gWarm.wanted);
+  if (release) gWarm.claimed = true;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (!release) return;
+  gWarmSession.reset();
+  portENTER_CRITICAL(&gSTTMux);
+  gWarm.parked = gWarm.claimed = false;
+  if (lowMemory) {
+    gWarm.failed = true;
+    gWarm.failedMs = now;
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  INFO_SYSTEMF("[STT] Warm model released (%s)", lowMemory ? "low PSRAM" : "idle");
+}
+
 static void sttWorker(void*) {
   STTToken token;
   uint32_t captureMs;
@@ -297,6 +444,9 @@ static void sttWorker(void*) {
     gSTT.snapshot.level = 0;
     portEXIT_CRITICAL(&gSTTMux);
     STTLocalControl control{&token, sttCancelled, sttProgress};
+    // One-shot runs keep the self-contained backend path: a kept-warm model
+    // is freed first rather than loaded a second time beside this call's.
+    sttWarmYield(sttCancelled, &token);
     ok = sttLocalTranscribe(pcm, samples, text, sizeof(text), control,
                             stats, error, sizeof(error));
     if (ok && !memchr(text, '\0', sizeof(text))) {
@@ -909,6 +1059,9 @@ static void sttContinuousWorker(void*) {
       sttStreamFail(run, "Could not create continuous capture worker"); break;
     }
     captureStarted = true;
+    // A model kept warm (sttKeepWarm) is adopted, not loaded again; a warm
+    // load still in progress is awaited while capture runs.
+    sttWarmAdopt(backendSession, sttStreamCancelled, &run);
 #ifdef ESP_PLATFORM
     {
       // Warm-up: load/verify the 7 MB model and the LM now, while the capture
@@ -1128,9 +1281,10 @@ static void sttContinuousWorker(void*) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
   }
-  // FreeRTOS self-delete does not unwind C++ locals. Close the backend before
-  // publishing workerActive=false, after every inference/capture user joined.
-  backendSession.reset();
+  // FreeRTOS self-delete does not unwind C++ locals. Close the backend (or
+  // park it for the next run while a hold lasts) before publishing
+  // workerActive=false, after every inference/capture user joined.
+  sttWarmPark(backendSession);
   if (run.working) { sttWipe(run.working, kStreamSamples * sizeof(int16_t)); free(run.working); }
   if (run.draftPcm) { sttWipe(run.draftPcm, kStreamSamples * sizeof(int16_t)); free(run.draftPcm); }
   for (auto& slot : run.slots) {
@@ -1161,7 +1315,8 @@ static void sttContinuousWorker(void*) {
 static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
                          STTToken* token, char* error, size_t errorCap,
                          const TranscriptOptions* suppliedOptions = nullptr,
-                         uint32_t nativeG2Generation = 0) {
+                         uint32_t nativeG2Generation = 0,
+                         AudioSource preferredSource = AUDIO_SRC_NONE) {
   sttReapTerminal();
   if (token) *token = 0;
   if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
@@ -1183,7 +1338,9 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
   portEXIT_CRITICAL(&gSTTMux);
   const bool previousLive = sttOwnerLive(previousOwner);
   const uint32_t nonce = esp_random();
-  const AudioSource requestedSource = gSettings.micSource == "pdm" ? AUDIO_SRC_LOCAL_PDM
+  // A caller's per-session source wins over the setting; both are strict.
+  const AudioSource requestedSource = preferredSource != AUDIO_SRC_NONE ? preferredSource
+      : gSettings.micSource == "pdm" ? AUDIO_SRC_LOCAL_PDM
       : gSettings.micSource == "g2" ? AUDIO_SRC_G2_LEFT : AUDIO_SRC_NONE;
   TranscriptOptions transcriptOptions = suppliedOptions ? *suppliedOptions
       : transcriptCaptureOptions(owner.source, owner.epoch);
@@ -1247,8 +1404,10 @@ bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
 }
 bool sttBeginContinuous(STTOwner owner, STTToken* token,
                         char* error, size_t errorCap,
-                        const TranscriptOptions* transcriptOptions) {
-  return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions);
+                        const TranscriptOptions* transcriptOptions,
+                        AudioSource requestedSource) {
+  return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions,
+                      /*nativeG2Generation=*/0, requestedSource);
 }
 
 bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
@@ -1277,6 +1436,69 @@ bool sttAnySessionActive() {
   const bool active = gSTT.snapshot.workerActive;
   portEXIT_CRITICAL(&gSTTMux);
   return active;
+}
+
+void sttKeepWarm(uint32_t holdMs, bool load) {
+  const uint32_t now = millis();
+  // Never beside ESP-SR (no STT run starts while it runs), and never without
+  // room for the model, as the last warm load took, above the floor that
+  // would free it again at once (sttWarmTick): no load/release loop.
+#if ENABLE_ESP_SR
+  if (isESPSRRunning()) load = false;
+#endif
+  const size_t freePsram = load ? sttPsramFree() : 0;
+  bool spawn = false;
+  portENTER_CRITICAL(&gSTTMux);
+  if (!holdMs) {
+    gWarm.wanted = false;
+  } else {
+    const uint32_t until = now + std::min(holdMs, kWarmMaxHoldMs);
+    if (!sttWarmHeldLocked(now) || static_cast<int32_t>(until - gWarm.untilMs) > 0) gWarm.untilMs = until;
+    gWarm.wanted = true;
+    // A run loads (or adopts) its own model; only an idle broker warms one.
+    spawn = load && freePsram >= gWarm.loadBytes + kWarmMinFreePsram && !gWarm.parked &&
+            !gWarm.claimed && !gSTT.snapshot.workerActive &&
+            (!gWarm.failed || now - gWarm.failedMs >= kWarmRetryMs);
+    if (spawn) gWarm.claimed = gWarm.loading = true;
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  if (spawn) {
+    taskStackRecord("stt_warm", kWorkerStackBytes);
+    // Priority 1, core 1: background work beside the loop, below a run (2).
+    if (xTaskCreatePinnedToCore(sttWarmLoader, "stt_warm", kWorkerStackBytes, nullptr, 1,
+                                nullptr, 1) != pdPASS) {
+      portENTER_CRITICAL(&gSTTMux);
+      gWarm.claimed = gWarm.loading = false;
+      gWarm.failed = true;
+      gWarm.failedMs = now;
+      portEXIT_CRITICAL(&gSTTMux);
+    }
+  }
+  if (!holdMs) sttWarmRelease(false);
+}
+
+void sttWarmTick() {
+  static uint32_t lastMs = 0;
+  const uint32_t now = millis();
+  if (now - lastMs < 1000) return;
+  lastMs = now;
+  // Expired stamps are dropped here even with nothing parked (a failed or
+  // freed load, a run that took the model past the hold): a stale deadline
+  // would read as held again once millis has wrapped half way (~24.9 days).
+  // millis is read under the lock, so no stamp it compares with is newer.
+  portENTER_CRITICAL(&gSTTMux);
+  const uint32_t lockedMs = millis();
+  if (!sttWarmHeldLocked(lockedMs)) gWarm.wanted = false;
+  if (gWarm.failed && lockedMs - gWarm.failedMs >= kWarmRetryMs) gWarm.failed = false;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (sttWarmResident()) sttWarmRelease(sttPsramFree() < kWarmMinFreePsram);
+}
+
+bool sttWarmResident() {
+  portENTER_CRITICAL(&gSTTMux);
+  const bool parked = gWarm.parked;
+  portEXIT_CRITICAL(&gSTTMux);
+  return parked;
 }
 
 bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {

@@ -1141,7 +1141,8 @@ static esp_err_t handleTranscriptionGet(httpd_req_t* req) {
     // Current clears its output when another consumer owns Dictation. Preserve
     // this authenticated owner for Snapshot's non-private busy indication.
     DictationAppLease current{};
-    if (dictationAppCurrent(SOURCE_WEB, epoch, &current)) lease = current;
+    if (dictationAppCurrent(SOURCE_WEB, epoch, &current,
+                            DictationAppPurpose::Transcription)) lease = current;
   }
 
   DictationAppSnapshot snap{};

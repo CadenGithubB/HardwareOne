@@ -1,6 +1,7 @@
 #pragma once
 
 #include "System_BuildConfig.h"
+#include "HAL_Audio.h"
 #include "System_User.h"
 #include "System_STTLocal.h"
 #include "System_Transcript.h"
@@ -74,9 +75,13 @@ bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
 // segments; capture proceeds while the previous segment is transcribed. Stop
 // drains admitted audio. Cancel discards it. A slow backend/client causes an
 // explicit bounded-queue failure, never silent audio/text overwrite.
+// requestedSource replaces the micsource setting for this session only
+// (NONE keeps it); like an explicit setting, an unavailable source fails the
+// session rather than record from another microphone.
 bool sttBeginContinuous(STTOwner owner, STTToken* token,
                         char* error, size_t errorCap,
-                        const TranscriptOptions* transcriptOptions = nullptr);
+                        const TranscriptOptions* transcriptOptions = nullptr,
+                        AudioSource requestedSource = AUDIO_SRC_NONE);
 // Retry-safe oldest-result peek. Acknowledge only after a consumer accepts the
 // text; an ack can remove only the exact oldest chunk (or repeat an earlier ack).
 // Both APIs enforce the same live owner/epoch/token fence as one-shot results.
@@ -105,6 +110,24 @@ bool sttSetPaused(STTOwner owner, STTToken token, bool paused);
 // True while any STT worker (capture or transcription tail) is running.
 // Owner-free and read-only: lets UI keep-alives follow device activity.
 bool sttAnySessionActive();
+// Keep-warm: a caller expecting speech soon (QuickNote's lens page, a running
+// note) asks for the verified model to stay resident until `holdMs` (at most
+// 10 min) from now, so the next run skips the multi-second load. A continuous
+// run (dictation, QuickNote, Transcription, Conversate) adopts the resident
+// model instead of loading a second copy and parks it again on exit while the
+// hold lasts; a one-shot run, which keeps its self-contained load, frees it.
+// `load` also loads it now on a short-lived task when nothing is resident, no
+// run is active, ESP-SR is not running and free PSRAM holds the model (as the
+// last warm load took) above sttWarmTick's floor (60 s back-off after a failed
+// load or a low-PSRAM release). Only weights and the system LM are ever kept:
+// never audio, text or any session's state. Any task; never blocks.
+void sttKeepWarm(uint32_t holdMs, bool load);
+// Main loop: ends a hold once it has passed (resident model or not) and frees
+// the resident model then, or at once when free PSRAM drops below a floor
+// that other features need. Self-throttled.
+void sttWarmTick();
+// The model is resident between runs now (status only).
+bool sttWarmResident();
 bool sttRequestFinish(STTOwner owner, STTToken token);
 bool sttCancel(STTOwner owner, STTToken token);
 // token=0 means this owner's current run. No other session's data is exposed.

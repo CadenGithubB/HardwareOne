@@ -3,10 +3,11 @@
 import json
 import os
 from pathlib import Path
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
-WORK = Path('/Volumes/USB2/stt/work')
+WORK = (STT_ROOT / 'work')
 RUN = Path(os.environ.get('RUN15X5', WORK / 'run15x5'))
-MODEL = Path('/Volumes/USB/stt/models/quartznet15x5')
+MODEL = (STT_ROOT / 'models/quartznet15x5')
 LITTLEFS_BYTES = 9.86e6
 LM_BYTES = 2.5e6
 

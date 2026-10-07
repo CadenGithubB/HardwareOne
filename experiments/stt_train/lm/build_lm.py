@@ -3,7 +3,7 @@
 
 Pipeline:
   1. transcripts (AMI train + LibriSpeech train-clean-100 only) -> normalised
-     text cache under /Volumes/USB2/stt/work/lm/text/
+     text cache under $STT_ROOT/work/lm/text/
   2. vocabulary (all words, or --max-vocab top words; --custom-words always in)
   3. one interpolated modified Kneser-Ney trigram per corpus (numpy)
   4. static linear mixture p = lam*AMI + (1-lam)*Libri (--mode mix, default
@@ -18,7 +18,7 @@ Dev text (AMI sdm validation, LibriSpeech validation) is only used to pick
 lam and to report perplexity; it never enters the counts.
 
 Example:
-  nice -n 15 python build_lm.py --out /Volumes/USB2/stt/work/lm/meeting.lm
+  nice -n 15 python build_lm.py --out $STT_ROOT/work/lm/meeting.lm
 """
 from __future__ import annotations
 
@@ -36,9 +36,11 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import hw1lm  # noqa: E402
+import os
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
-USB = Path('/Volumes/USB/stt')
-WORK = Path('/Volumes/USB2/stt/work/lm')
+USB = STT_ROOT
+WORK = (STT_ROOT / 'work/lm')
 TEXT_DIR = WORK / 'text'
 LN10 = math.log(10.0)
 

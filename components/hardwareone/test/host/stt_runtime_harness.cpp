@@ -19,6 +19,7 @@ using String = std::string;
 using TransportSessionEpoch = uint32_t;
 enum CommandSource { SOURCE_WEB, SOURCE_SERIAL, SOURCE_INTERNAL, SOURCE_ESPNOW,
   SOURCE_LOCAL_DISPLAY, SOURCE_BLUETOOTH, SOURCE_MQTT, SOURCE_VOICE, SOURCE_G2_GLASSES, SOURCE_UART };
+enum AudioSource { AUDIO_SRC_NONE, AUDIO_SRC_LOCAL_PDM, AUDIO_SRC_G2_LEFT };
 // INSERT_INTERFACE
 using portMUX_TYPE = int;
 #define portMUX_INITIALIZER_UNLOCKED 0
@@ -55,7 +56,6 @@ bool gMicRunning = false;
 static bool recordingBusy = false;
 bool micRecordingBusy() { return recordingBusy; }
 struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000; } gSettings;
-enum AudioSource { AUDIO_SRC_NONE, AUDIO_SRC_LOCAL_PDM, AUDIO_SRC_G2_LEFT };
 static AudioSource audioSource = AUDIO_SRC_LOCAL_PDM;
 static std::string halOwner;
 static bool sourceAvailable = true, startFails = false, active = false, fallbackOnStart = false;
@@ -138,6 +138,10 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
 }
 STTLocalSession::~STTLocalSession() { reset(); }
 void STTLocalSession::reset() { assert(!backendState_); }
+// Keep-warm is never engaged here (stt_continuous_harness.cpp covers it).
+bool STTLocalSession::warm() const { return false; }
+void STTLocalSession::moveTo(STTLocalSession&) { assert(false); }
+size_t sttPsramFree() { return SIZE_MAX; }
 #define free trackedFree
 // INSERT_BROKER
 #undef free

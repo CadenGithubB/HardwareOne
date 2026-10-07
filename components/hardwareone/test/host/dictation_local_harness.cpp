@@ -19,6 +19,7 @@ using TransportSessionEpoch=uint32_t;
 constexpr uint32_t kNoTransportSessionEpoch=0;
 enum CommandSource { SOURCE_WEB,SOURCE_SERIAL,SOURCE_INTERNAL,SOURCE_ESPNOW,
  SOURCE_LOCAL_DISPLAY,SOURCE_BLUETOOTH,SOURCE_MQTT,SOURCE_VOICE,SOURCE_G2_GLASSES,SOURCE_UART };
+enum AudioSource { AUDIO_SRC_NONE, AUDIO_SRC_LOCAL_PDM, AUDIO_SRC_G2_LEFT };
 // INSERT_HEADERS
 using portMUX_TYPE=int;
 #define portMUX_INITIALIZER_UNLOCKED 0
@@ -95,12 +96,20 @@ bool audioCaptureBusy(){return !halOwner.empty();}
 static constexpr uint32_t kDictationVadSilenceMs=1200;
 struct MicRecordingResult { bool failed=false; char failure[48]={}; };
 enum class MicRecordingOwnedOp { OK, NOT_FOUND };
-enum AudioSource { AUDIO_SRC_NONE, AUDIO_SRC_LOCAL_PDM, AUDIO_SRC_G2_LEFT };
-static AudioSource audioGetSource(){return AUDIO_SRC_LOCAL_PDM;}
+static AudioSource activeSource=AUDIO_SRC_LOCAL_PDM; // the running mic's source
+static AudioSource audioGetSource(){return activeSource;}
 static int getAudioLevel(){return 0;}
 static const char* sourceLabel(AudioSource){return "PDM";}
-static bool initMicrophone(){gMicRunning=true;return true;}
-static bool startRecordingOwned(uint64_t,uint32_t,bool){return true;}
+// What each CM5 call received: the App options must reach the mic and recorder.
+static unsigned micInitCalls=0,recorderStarts=0;
+static AudioSource micInitSource=AUDIO_SRC_NONE,recorderSource=AUDIO_SRC_NONE;
+static uint32_t recorderSilenceMs=0;
+static bool initMicrophone(AudioSource preferred){
+ ++micInitCalls;micInitSource=preferred;gMicRunning=true;if(preferred!=AUDIO_SRC_NONE)activeSource=preferred;return true;
+}
+static bool startRecordingOwned(uint64_t,uint32_t silenceMs,bool trim,AudioSource preferred){
+ assert(trim);++recorderStarts;recorderSilenceMs=silenceMs;recorderSource=preferred;return true;
+}
 static MicRecordingOwnedOp getRecordingResultOwned(uint64_t,MicRecordingResult*){return MicRecordingOwnedOp::NOT_FOUND;}
 static void dictationResolveCleanup(uint64_t){}
 static void dictFormatId(uint64_t id,char out[17]){snprintf(out,17,"%016llx",static_cast<unsigned long long>(id));}
@@ -111,11 +120,12 @@ static int beginCalls=0,cancelCalls=0,finishCalls=0,ackCalls=0;
 static bool beginOK=true,ackOK=true;
 static STTOwner brokerOwner;
 static TranscriptOptions brokerTranscriptOptions;
+static AudioSource brokerRequestedSource=AUDIO_SRC_NONE;
 static STTSnapshot broker;
 static std::deque<STTTextChunk> chunks;
 static std::function<void()> beginHook,ackHook,runActiveHook;
-bool sttBeginContinuous(STTOwner owner,STTToken* token,char* error,size_t cap,const TranscriptOptions* options){
- assert(options);brokerTranscriptOptions=*options;
+bool sttBeginContinuous(STTOwner owner,STTToken* token,char* error,size_t cap,const TranscriptOptions* options,AudioSource requested){
+ assert(options);brokerTranscriptOptions=*options;brokerRequestedSource=requested;
  ++beginCalls;if(beginHook)beginHook();
  if(!beginOK){snprintf(error,cap,"run closemic first");return false;}
  brokerOwner=owner;broker=STTSnapshot{};broker.token=42;broker.continuous=true;
@@ -173,6 +183,8 @@ static void runSaveWorker(){assert(!inTranscriptWorker);inTranscriptWorker=true;
 static STTOwner glasses{SOURCE_G2_GLASSES,3};
 static void reset(){
  gDict=DictationControl{};gDict.state=DictationState::IDLE;gDictSave=DictationSaveJob{};brokerTranscriptOptions={};
+ brokerRequestedSource=micInitSource=recorderSource=AUDIO_SRC_NONE;micInitCalls=recorderStarts=0;recorderSilenceMs=0;
+ activeSource=AUDIO_SRC_LOCAL_PDM;
 #if ENABLE_LOCAL_STT
  gLocalDict=LocalDictation{};gLocalReadyKnown=gLocalReady=gLocalReadyPending=false;gLocalReadyCheckedMs=0;
 #endif
@@ -531,13 +543,133 @@ static void testConsumerIdentity() {
  auto other=app; other.epoch=8; assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&other));
  other=app;other.exchange=99;assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&other));
  other=app;other.source=SOURCE_LOCAL_DISPLAY;assert(!dictationConsumerMatchesLocked(SOURCE_LOCAL_DISPLAY,&other));
+ other=app;other.purpose=DictationAppPurpose::QuickNote;assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&other));
  dictationAdmitConsumerLocked(SOURCE_WEB,7,101,&other);
  assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&app));
  dictationAdmitConsumerLocked(SOURCE_LOCAL_DISPLAY,4,102,nullptr);
  assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&other));
  assert(dictationConsumerMatchesLocked(SOURCE_LOCAL_DISPLAY));
+ // The caller's requested purpose is admitted and copied back with the lease.
+ DictationAppLease note;note.purpose=DictationAppPurpose::QuickNote;
+ dictationAdmitConsumerLocked(SOURCE_WEB,7,103,&note);
+ assert(note.exchange==103&&note.purpose==DictationAppPurpose::QuickNote);
+ assert(gDict.appLease.purpose==DictationAppPurpose::QuickNote&&dictationConsumerMatchesLocked(SOURCE_WEB,&note));
+ auto transcription=note;transcription.purpose=DictationAppPurpose::Transcription;
+ assert(!dictationConsumerMatchesLocked(SOURCE_WEB,&transcription));
 }
-int main(){testAppLocalLifecycle();testWorkerSupervision();testAppSnapshotAndRecovery();testAppDelivery();testAppControls();testAppAdmission();testConsumerIdentity();testPiMailbox();
+// B2.1: a QuickNote lease is invisible to the Transcription surfaces and the
+// reverse. Knowing the exchange id is not enough to read or end the other kind.
+static void testAppPurpose() {
+ DictationAppOptions note;note.purpose=DictationAppPurpose::QuickNote;
+ reset();sessions.insert({SOURCE_WEB,7});
+#if ENABLE_LOCAL_STT
+ ready();
+#endif
+ DictationAppLease app,found,wrong;DictationAppSnapshot snap;
+ assert(dictationAppBeginWith(SOURCE_WEB,7,note,&app));
+ assert(app.purpose==DictationAppPurpose::QuickNote&&app.exchange==gDict.owner);
+ assert(gDict.appLease.purpose==DictationAppPurpose::QuickNote);
+ assert(!dictationAppCurrent(SOURCE_WEB,7,&found)&&!found.exchange); // default = Transcription
+ assert(!dictationAppCurrent(SOURCE_WEB,7,&found,DictationAppPurpose::Transcription)&&!found.exchange);
+ assert(dictationAppCurrent(SOURCE_WEB,7,&found,DictationAppPurpose::QuickNote));
+ assert(found.exchange==app.exchange&&found.purpose==DictationAppPurpose::QuickNote);
+ wrong=app;wrong.purpose=DictationAppPurpose::Transcription;
+ assert(!dictationAppSnapshot(wrong,&snap)&&!snap.valid&&snap.busy&&!snap.status.transcript.path[0]);
+ assert(dictationAppSnapshot(app,&snap)&&snap.valid&&snap.active);
+ assert(!dictationAppRequestStop(wrong)&&!dictationAppCancel(wrong)&&gDict.owner==app.exchange);
+ dictationStageTextLocked(app.exchange,1,"private note",12,0,false);
+ char text[32];DictationTextReceipt receipt;
+ assert(!dictationAppPeekText(wrong,text,sizeof(text),&receipt)&&!text[0]&&!receipt.exchange);
+ assert(dictationAppPeekText(app,text,sizeof(text),&receipt)&&std::string(text)=="private note");
+ assert(!dictationAppCommitText(wrong,receipt,receipt.length)&&gDict.textPending);
+ assert(dictationAppCommitText(app,receipt,receipt.length)&&!gDict.textPending);
+ // One shared service: a running Transcription refuses a note and keeps its lease.
+ reset();sessions.insert({SOURCE_WEB,7});
+#if ENABLE_LOCAL_STT
+ ready();
+#endif
+ assert(dictationAppBegin(SOURCE_WEB,7,&app)&&app.purpose==DictationAppPurpose::Transcription);
+ assert(!dictationAppCurrent(SOURCE_WEB,7,&found,DictationAppPurpose::QuickNote)&&!found.exchange);
+ assert(dictationAppCurrent(SOURCE_WEB,7,&found)&&found.exchange==app.exchange);
+ wrong=app;wrong.purpose=DictationAppPurpose::QuickNote;
+ assert(!dictationAppSnapshot(wrong,&snap)&&snap.busy&&!dictationAppCancel(wrong));
+ DictationAppLease second;
+ assert(!dictationAppBeginWith(SOURCE_WEB,7,note,&second)&&!second.exchange);
+ assert(second.purpose==DictationAppPurpose::Transcription&&gDict.appLease.exchange==app.exchange);
+ assert(dictationAppCancel(app));
+}
+// B2.2: default options are exactly dictationAppBegin; requested options reach
+// the latched provider (local broker or CM5 mic + recorder) and nowhere else.
+static void testAppOptions() {
+ const DictationAppOptions defaults{};
+ assert(defaults.purpose==DictationAppPurpose::Transcription&&defaults.preferredSource==AUDIO_SRC_NONE);
+ assert(defaults.silenceStopMs==0&&defaults.saveTranscript);
+ DictationAppLease app;
+ reset();sessions.insert({SOURCE_WEB,7});savePreference=true;
+#if ENABLE_LOCAL_STT
+ ready();
+#endif
+ assert(dictationAppBegin(SOURCE_WEB,7,&app)&&transcriptCaptureCalls==1&&gDict.transcriptOptions.enabled);
+#if ENABLE_LOCAL_STT
+ assert(gLocalDict.requestedSource==AUDIO_SRC_NONE);
+ dictationProcessLocal();assert(beginCalls==1&&brokerRequestedSource==AUDIO_SRC_NONE&&brokerTranscriptOptions.enabled);
+#else
+ assert(micInitCalls==1&&micInitSource==AUDIO_SRC_NONE);
+ assert(recorderStarts==1&&recorderSilenceMs==kDictationVadSilenceMs&&recorderSource==AUDIO_SRC_NONE);
+#endif
+ // Keyboard consumers pass no options and keep the same provider calls.
+ reset();
+#if ENABLE_LOCAL_STT
+ ready();assert(dictationBeginFor(glasses.source,glasses.epoch));dictationProcessLocal();
+ assert(beginCalls==1&&brokerRequestedSource==AUDIO_SRC_NONE);
+#else
+ assert(dictationBeginFor(glasses.source,glasses.epoch));
+ assert(recorderStarts==1&&recorderSilenceMs==kDictationVadSilenceMs&&recorderSource==AUDIO_SRC_NONE);
+#endif
+ DictationAppOptions note;note.purpose=DictationAppPurpose::QuickNote;
+ note.preferredSource=AUDIO_SRC_G2_LEFT;note.silenceStopMs=6000;note.saveTranscript=false;
+ reset();sessions.insert({SOURCE_WEB,7});savePreference=true;
+#if ENABLE_LOCAL_STT
+ ready();
+#endif
+ assert(dictationAppBeginWith(SOURCE_WEB,7,note,&app));
+ // saveTranscript=false never resolves an identity and never writes a file.
+ assert(transcriptCaptureCalls==0&&!gDict.transcriptOptions.enabled&&!gDict.transcriptOptions.user[0]);
+ assert(gDict.transcriptOptions.source==SOURCE_WEB&&gDict.transcriptOptions.epoch==7&&!gDict.transcriptStatus.enabled);
+ char text[32];DictationTextReceipt receipt;
+#if ENABLE_LOCAL_STT
+ assert(gLocalDict.requestedSource==AUDIO_SRC_G2_LEFT&&!gLocalDict.transcriptOptions.enabled);
+ dictationProcessLocal();assert(beginCalls==1&&brokerRequestedSource==AUDIO_SRC_G2_LEFT);
+ assert(!brokerTranscriptOptions.enabled&&!brokerTranscriptOptions.user[0]);
+ broker.state=STTState::Recording;broker.captureActive=true;produce(1,"note text");dictationProcessLocal();
+#else
+ assert(micInitCalls==1&&micInitSource==AUDIO_SRC_G2_LEFT);
+ assert(recorderStarts==1&&recorderSilenceMs==6000&&recorderSource==AUDIO_SRC_G2_LEFT);
+ gDict.state=DictationState::WAITING;gDict.requestHostEpoch=9;
+ acceptPi(app.exchange,"note text");assert(!gDictSave.pending&&!gDictSave.inFlight);
+#endif
+ assert(dictationAppPeekText(app,text,sizeof(text),&receipt)&&std::string(text)=="note text");
+ assert(dictationAppCommitText(app,receipt,receipt.length));
+ runSaveWorker();assert(savedTranscripts.empty()&&transcriptAppendCalls==0);
+#if !ENABLE_LOCAL_STT
+ // An already-open microphone is never re-sourced (R15): on the requested
+ // source it is used as-is and stays its opener's...
+ reset();sessions.insert({SOURCE_WEB,7});gMicRunning=true;activeSource=AUDIO_SRC_G2_LEFT;
+ assert(dictationAppBeginWith(SOURCE_WEB,7,note,&app)&&!gDict.weStartedMic);
+ assert(micInitCalls==0&&recorderSource==AUDIO_SRC_G2_LEFT&&recorderSilenceMs==6000);
+ // ...and on another source the exchange is refused before the recorder,
+ // leaving the mic running on its own source with no stop debt.
+ reset();sessions.insert({SOURCE_WEB,7});gMicRunning=true;
+ assert(!dictationAppBeginWith(SOURCE_WEB,7,note,&app)&&!app.exchange);
+ assert(micInitCalls==0&&recorderStarts==0&&gMicRunning&&activeSource==AUDIO_SRC_LOCAL_PDM);
+ assert(gDict.state==DictationState::FAILED&&!gDict.owner&&!gDict.micStopPending&&stops.empty());
+ assert(std::string(gDict.failure)=="microphone in use on another source");
+ // No request keeps today's behaviour: whatever source is running records.
+ reset();sessions.insert({SOURCE_WEB,7});gMicRunning=true;
+ assert(dictationAppBegin(SOURCE_WEB,7,&app)&&micInitCalls==0&&recorderStarts==1&&recorderSource==AUDIO_SRC_NONE);
+#endif
+}
+int main(){testAppLocalLifecycle();testWorkerSupervision();testAppSnapshotAndRecovery();testAppDelivery();testAppControls();testAppAdmission();testConsumerIdentity();testAppPurpose();testAppOptions();testPiMailbox();
 #if ENABLE_LOCAL_STT
  testLocalSaving();testLocal();
 #else

@@ -32,6 +32,7 @@ static struct Scenario {
   bool revokeOnPeek=false, revokeOnSerialize=false, revokeOnBegin=false;
   bool haveLease=true, active=true, text=true, accept=true;
   bool identity=false;
+  DictationAppPurpose purpose=DictationAppPurpose::Transcription; // of the lease the broker holds
   int calls=0, beginCalls=0, commitCalls=0, stopCalls=0, cancelCalls=0;
   TransportSessionEpoch epoch=42;
   uint32_t account=7;
@@ -53,8 +54,8 @@ struct ExecIdentityGuard {explicit ExecIdentityGuard(const AuthContext& c){asser
 static bool isAdminUser(const String& u){assert(scenario.identity&&u=="alice");return true;}
 static bool getUserIdByUsername(const String& u,uint32_t& id){assert(scenario.identity&&u=="alice");id=scenario.account;return true;}
 static bool dictationAvailable(const char** why){assert(scenario.identity);*why=nullptr;return true;}
-static bool owns(const DictationAppLease& l){return scenario.haveLease&&l.source==SOURCE_WEB&&l.epoch==scenario.epoch&&l.exchange==scenario.exchange;}
-static bool dictationAppCurrent(CommandSource source,TransportSessionEpoch epoch,DictationAppLease* lease){assert(scenario.identity);scenario.calls++;*lease=DictationAppLease{};if(!scenario.haveLease)return false;*lease={source,epoch,scenario.exchange};return true;}
+static bool owns(const DictationAppLease& l){return scenario.haveLease&&l.source==SOURCE_WEB&&l.epoch==scenario.epoch&&l.exchange==scenario.exchange&&l.purpose==scenario.purpose;}
+static bool dictationAppCurrent(CommandSource source,TransportSessionEpoch epoch,DictationAppLease* lease,DictationAppPurpose purpose=DictationAppPurpose::Transcription){assert(scenario.identity&&purpose==DictationAppPurpose::Transcription);scenario.calls++;*lease=DictationAppLease{};if(!scenario.haveLease||purpose!=scenario.purpose)return false;*lease={source,epoch,scenario.exchange,purpose};return true;}
 static bool dictationAppSnapshot(const DictationAppLease& l,DictationAppSnapshot* out){assert(scenario.identity);scenario.calls++;*out=DictationAppSnapshot{};if(!transportSessionEpochIsLive(l.source,l.epoch))return false;out->busy=scenario.active;if(!owns(l))return false;out->valid=true;out->active=scenario.active;out->done=!scenario.active;out->status.captureActive=scenario.active;out->status.transcript.enabled=true;std::strcpy(out->status.transcript.path,"/stt/u7/private.txt");return true;}
 static bool dictationAppPeekText(const DictationAppLease& l,char* out,size_t size,DictationTextReceipt* r){assert(owns(l));scenario.calls++;if(!scenario.text)return false;std::snprintf(out,size,"private \"text\"");*r={l.exchange,9,0,14};if(scenario.revokeOnPeek)scenario.live=false;return true;}
 static bool dictationAppPeekDraft(const DictationAppLease&,char* out,size_t size,uint32_t* version){if(out&&size)out[0]=0;if(version)*version=0;return false;}
@@ -85,6 +86,12 @@ int main(){
   // still needs the original authenticated web owner, with no private fields.
   reset();scenario.haveLease=false;r=get();d=json(r);assert(d["valid"]==false&&d["busy"]==true&&!d.containsKey("sttText")&&!d.containsKey("transcriptPath"));
   reset();scenario.haveLease=false;scenario.active=false;r=get();d=json(r);assert(d["valid"]==false&&d["busy"]==false&&!d.containsKey("sttText"));
+  // A QuickNote held by this same web session is not the panel's: no adoption,
+  // and its id cannot page, acknowledge or end it.
+  reset();scenario.purpose=DictationAppPurpose::QuickNote;r=get();d=json(r);assert(d["valid"]==false&&d["busy"]==true&&!d.containsKey("sttText")&&!d.containsKey("transcriptPath"));
+  reset();scenario.purpose=DictationAppPurpose::QuickNote;r=get("id=1122334455667788");assert(r.status=="410 Gone"&&r.output.find("private")==std::string::npos);
+  reset();scenario.purpose=DictationAppPurpose::QuickNote;r=post("id=1122334455667788&sequence=9&offset=0&length=14",true);assert(r.status=="409 Conflict");
+  for(const char* action:{"action=stop&id=1122334455667788","action=cancel&id=1122334455667788"}){reset();scenario.purpose=DictationAppPurpose::QuickNote;r=post(action);assert(r.status=="409 Conflict");}
   reset();r=get("id=9999999999999999");assert(r.status=="410 Gone"&&r.output.find("private")==std::string::npos);
   for(const auto& query:std::initializer_list<std::string>{"id=1","id=0000000000000000","id=zz22334455667788","id="+std::string(80,'a')}){reset();r=get(query);assert(r.status=="400 Bad Request");}
   reset();scenario.revokeOnPeek=true;r=get("id=1122334455667788");assert(r.status=="401 Unauthorized"&&r.output.find("private")==std::string::npos);

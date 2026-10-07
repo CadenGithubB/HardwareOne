@@ -33,8 +33,9 @@
 #   PORT      P4 USB-Serial/JTAG port         (/dev/cu.usbmodem2101)
 #   ARTIFACT  file name on the card           (quartznet15x5-<name>.p4.stt)
 #   CODEC     none (stored, ~20 MB, fast load) or zlib (~15 MB)   (none)
+#   CALIB     int8 calibration clips, "store:count ..."  (AMI sdm/ihm + Libri dev, 20 each)
 #   CAPTION_TEST=1  also build the Conversate caption test (see G2_Glasses.cpp)
-#   IDF_ENV   script that exports ESP-IDF 5.5.5
+#   IDF_ENV   script that exports ESP-IDF 5.5.5 (~/esp/esp-idf/export.sh)
 #
 # The firmware pins the model by SHA-256, so each checkpoint gets its own image;
 # re-flash the matching build (or the original install) to switch back.
@@ -56,6 +57,8 @@ EXPORT=$DEPLOY/export-$NAME
 ARTIFACT=${ARTIFACT:-quartznet15x5-$NAME.p4.stt}
 IDENTITY=stt_model_identity_$NAME.h
 CODEC=${CODEC:-none}
+# int8 calibration clips (dev stores only). Broad-use models: add peoples-dev:20 voxpopuli-dev:20.
+CALIB=${CALIB:-ami-sdm-validation:20 ami-ihm-validation:20 librispeech-dev-clean:20}
 FW_PATCH=$HERE/deploy_15x5.patch   # stored-codec loader, load timings, 40 MHz SD, draft pacing, LM on card
 PY=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
 SRC_APP=$HERE/private/app-p4-15x5
@@ -100,7 +103,7 @@ step_export() {
   say "exporting (int8 w8a8, 60 calibration clips; ~8 min) → $EXPORT.log"
   (cd "$HERE" && PYTHONPATH=$STT/pydeps HW1_STT_ALLOW_WEIGHTS_SHA256=$want caffeinate -i "$PY" export_quartznet.py \
       --checkpoint "$CKPT" --output "$EXPORT" --frontend portable --stage full --quant-type w8a8 \
-      --calib-stores ami-sdm-validation:20 ami-ihm-validation:20 librispeech-dev-clean:20 --calib-seed 2026 \
+      --calib-stores $CALIB --calib-seed 2026 \
       --frontend-checkpoint ../speech_portable/private/stt-quartznet) > "$EXPORT.log" 2>&1 \
     || { say "export FAILED; see $EXPORT.log"; exit 1; }
   say "export done"

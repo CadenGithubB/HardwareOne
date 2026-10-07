@@ -221,4 +221,22 @@ void STTLocalSession::reset() {
 #endif
     backendState_=nullptr;
 }
+bool STTLocalSession::warm() const {
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+    return backendState_ && static_cast<const Backend*>(backendState_)->weights.loaded();
+#else
+    return false;
+#endif
+}
+void STTLocalSession::moveTo(STTLocalSession& to) {
+    if(&to==this)return;
+    to.reset();
+#if defined(CONFIG_IDF_TARGET_ESP32P4) && ENABLE_STT_LM
+    // A shed LM stays Unavailable only for the rest of its own session.
+    auto* backend=static_cast<Backend*>(backendState_);
+    if(backend && backend->lm.state==LmState::Unavailable && !backend->lm.blob)backend->lm.state=LmState::Unloaded;
+#endif
+    to.backendState_=backendState_;
+    backendState_=nullptr;
+}
 #endif

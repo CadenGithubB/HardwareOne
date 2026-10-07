@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
+#include "HAL_Audio.h"  // AudioSource (per-capture source requests)
 
 // WAV capture lifecycle. This is deliberately separate from gMicRunning:
 // gMicRunning owns the underlying audio source, while every non-IDLE state
@@ -83,8 +84,10 @@ extern int micBitDepth;
 extern int micChannels;
 extern int micGain;
 
-// Microphone initialization
-bool initMicrophone();
+// Microphone initialization. `preferred` (a capture that asked for one
+// microphone) replaces the micsource setting for this start and is strict:
+// unavailable fails instead of opening another source. NONE = the setting.
+bool initMicrophone(AudioSource preferred = AUDIO_SRC_NONE);
 // Stops the source and joins any recorder through FINALIZING. False means the
 // bounded join expired and callers must not reconfigure/restart the source.
 bool stopMicrophone();
@@ -124,8 +127,13 @@ bool stopRecording(uint32_t timeoutMs = 3000);
 // other active owner. `discard=true` is monotonic and orthogonal to the first
 // terminal stop cause: the task still finalizes/closes the WAV before removing
 // the exact token-derived path and publishes IDLE only afterwards.
+// `preferred` replaces the start-time micsource re-resolution with a strict
+// check: the running mic must already be on that source (it is never
+// re-sourced), else the start is refused rather than recorded from another
+// microphone. NONE keeps the setting-driven behaviour.
 bool startRecordingOwned(MicRecordingOwner owner,
-                         uint32_t silenceStopMs = 0, bool trim = false);
+                         uint32_t silenceStopMs = 0, bool trim = false,
+                         AudioSource preferred = AUDIO_SRC_NONE);
 MicRecordingOwnedOp stopRecordingOwned(MicRecordingOwner owner,
                                        bool discard = false,
                                        uint32_t timeoutMs = 3000);

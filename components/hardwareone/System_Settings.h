@@ -346,6 +346,8 @@ struct Settings {
       microphoneBitDepth(16),
       micSource("auto"),  // Mic source preference: "auto" | "pdm" | "g2" (resolved at capture time)
       sttSaveTranscripts(false),
+      noteMaxSec(HW1_NOTE_MAX_SEC_DEFAULT),
+      noteMic(0),                     // Auto
       cameraBrightness(2),
       cameraContrast(2),
       cameraSaturation(2),
@@ -361,6 +363,9 @@ struct Settings {
       cameraStreamFps(5),
       g2HeadUpDesired(0),             // Preserve official-app/device state
       g2NotificationsDesired(0),      // Preserve; Off is not capture-proven
+      g2HoldAction(HW1_G2_HOLD_ACTION_DEFAULT),
+      g2HoldSource(0),                // ring only
+      g2HoldUnprofiled(false),
       g2StreamWidth(96),
       g2StreamHeight(96),
       g2StreamToneMap(1),  // 1=Balanced (see g2StreamToneMap comment)
@@ -1011,6 +1016,13 @@ struct Settings {
   int microphoneBitDepth;       // Bit depth (cosmetic; HAL/WAV are always 16-bit int)
   String micSource;             // Preferred mic source: "auto" | "pdm" | "g2" (resolved lazily against availability)
   bool sttSaveTranscripts;      // Save recognized text; latched when a local or Pi dictation session starts
+  // QuickNote (System_QuickNote.cpp), read when a note starts / each pass:
+  //   noteMaxSec: longest note, 10-120 s (clamped to 30 s on CM5 builds)
+  //   noteMic:    CLI/web notes only: 0 = Auto (the paired wearer's glasses
+  //               if connected, else the board mic), 1 = Glasses, 2 = Board
+  //               mic. Notes started from the glasses always use the glasses.
+  uint16_t noteMaxSec;
+  uint8_t noteMic;
   // Camera image settings (persisted) - use int for settings system compatibility
   // OV3660 ships flat/washed-out, so we default brightness/contrast/saturation
   // to +2 (the API max). User-validated empirically — see camerafx command +
@@ -1033,6 +1045,16 @@ struct Settings {
   // captures prove replace-whole configurations, not an On/Off operation.
   uint8_t g2HeadUpDesired;
   uint8_t g2NotificationsDesired;
+  // G2 long-press ("hold") input on HW1 lens pages (G2_HoldGesture.h). HW-side
+  // policy only: holds are read from the glasses, nothing is written to them.
+  //   g2HoldAction:     0 = Off, 1 = QuickNote (the global hold action)
+  //   g2HoldSource:     0 = ring only, 1 = ring + temples (firmware that
+  //                     reports no hold source accepts every source)
+  //   g2HoldUnprofiled: admin testing override: dispatch holds on glasses
+  //                     firmware without an exact hold profile (R19)
+  uint8_t g2HoldAction;
+  uint8_t g2HoldSource;
+  bool g2HoldUnprofiled;
   // G2 lens stream resolution. Caps at 288x144 (lens panel native size) and
   // floors at 16. Wider/taller = more Cmd=3 fragments per frame = lower fps;
   // user picks from a small preset list in the lens Camera Settings page.
@@ -1441,7 +1463,7 @@ struct SettingsModule {
 // Maximum number of settings modules that can be registered.
 //
 // Must stay ahead of the registerSettingsModule() call count in
-// registerAllSettingsModules(), which is 39 - most behind #if guards, so no
+// registerAllSettingsModules(), which is 41 - most behind #if guards, so no
 // shipping board reaches the cap today. Overflow is not loud: the registration
 // simply logs and returns (System_Settings.cpp), and a dropped module then
 // neither loads nor persists ANY of its settings - it silently runs on
@@ -1452,7 +1474,7 @@ struct SettingsModule {
 // also the destination bound for the bonded-peer module list (that source
 // array is heap-allocated from the peer's own count, so the two must be raised
 // together - they already are, both keying off this macro).
-#define MAX_SETTINGS_MODULES 40
+#define MAX_SETTINGS_MODULES 44
 
 // Register a settings module (call during setup or static init)
 void registerSettingsModule(const SettingsModule* module);

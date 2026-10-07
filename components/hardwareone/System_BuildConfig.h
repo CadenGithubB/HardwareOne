@@ -1530,6 +1530,34 @@
 #define ENABLE_DICTATION        (ENABLE_MICROPHONE && \
                                  (ENABLE_OLED_DISPLAY || ENABLE_G2_GLASSES || ENABLE_WEB_SENSORS))
 
+// QuickNote = a private spoken note (hold on a HW1 lens page, the Notes page or
+// the `note` CLI) recorded through dictation and saved under the speaker's
+// /stt/u<id>/notes/ (QuickNote_Policy.h, QuickNote_Store.cpp). Defaults on
+// wherever dictation and the G2 glasses are both built; a board or deployment
+// may define 0 to save flash (the hold input itself stays).
+#ifndef ENABLE_QUICKNOTE
+  #define ENABLE_QUICKNOTE (ENABLE_DICTATION && ENABLE_G2_GLASSES && ENABLE_BLUETOOTH)
+#endif
+#if ENABLE_QUICKNOTE && !(ENABLE_DICTATION && ENABLE_G2_GLASSES && ENABLE_BLUETOOTH)
+  #error "ENABLE_QUICKNOTE records through dictation and the G2 glasses. Enable both (and Bluetooth) or set ENABLE_QUICKNOTE 0."
+#endif
+
+// Default of the g2holdaction setting: what a ring/temple hold on a HW1 lens
+// page does when the page has no hold handler of its own (0 = Off,
+// 1 = QuickNote: the hold records a note on the Notes page, G2_Page_Notes.cpp).
+// On a build without QuickNote, 1 refuses every press ("quicknote-not-built")
+// exactly like Off. A deployment may override the default directly.
+#ifndef HW1_G2_HOLD_ACTION_DEFAULT
+  #define HW1_G2_HOLD_ACTION_DEFAULT (ENABLE_QUICKNOTE ? 1 : 0)
+#endif
+
+// Default of the notemaxsec setting (10-120 s): the longest QuickNote. The CM5
+// recorder caps every capture at 30 s (MIC_STT_MAX_CAPTURE_MS), so a Pi build
+// defaults there and clamps any longer setting to it at runtime.
+#ifndef HW1_NOTE_MAX_SEC_DEFAULT
+  #define HW1_NOTE_MAX_SEC_DEFAULT (ENABLE_LOCAL_STT ? 60 : 30)
+#endif
+
 // Word n-gram language-model beam search for the local STT backend
 // (stt/stt_lm.h; format experiments/stt_train/lm/FORMAT.md). Defaults to the
 // backend's own switch, after the deployment profile has set it; a profile may

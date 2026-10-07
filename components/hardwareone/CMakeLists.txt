@@ -359,9 +359,12 @@ set(hardwareone_srcs
         System_Microphone.cpp
         System_Dictation.cpp
         System_Transcript.cpp
+        QuickNote_Store.cpp
+        System_QuickNote.cpp
         System_TranscriptionUI.cpp
         OLED_Mode_Transcription.cpp
         G2_Page_Transcription.cpp
+        G2_Page_Notes.cpp
         HAL_Audio.cpp
         System_SensorRegistry.cpp
         System_Notifications.cpp
@@ -710,6 +713,12 @@ idf_component_register(
 
 # IDF evaluates component requirements in script mode before registration.
 # Source properties are only legal after idf_component_register returns.
+# QuickNote runs on cold paths only (`note` commands, a worker that wakes at
+# most every 200 ms while a note records, and the Notes lens page's taps and
+# 500 ms polls), so it is built for size: the XIAO-S3 app partition has little
+# headroom left.
+set_source_files_properties(System_QuickNote.cpp QuickNote_Store.cpp G2_Page_Notes.cpp
+                            PROPERTIES COMPILE_OPTIONS "-Os")
 if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
     set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
     # ESP-SR also registers a model whitelist. Union QuartzNet's exact ops and

@@ -27,6 +27,7 @@ using String = std::string;
 using TransportSessionEpoch = uint32_t;
 enum CommandSource { SOURCE_WEB, SOURCE_SERIAL, SOURCE_INTERNAL, SOURCE_ESPNOW,
   SOURCE_LOCAL_DISPLAY, SOURCE_BLUETOOTH, SOURCE_MQTT, SOURCE_VOICE, SOURCE_G2_GLASSES, SOURCE_UART };
+enum AudioSource { AUDIO_SRC_NONE, AUDIO_SRC_LOCAL_PDM, AUDIO_SRC_G2_LEFT };
 // INSERT_INTERFACE
 using portMUX_TYPE = std::mutex;
 #define portMUX_INITIALIZER_UNLOCKED {}
@@ -51,6 +52,7 @@ int xTaskCreatePinnedToCore(void (*fn)(void*), const char* name, uint32_t bytes,
                             void* context, int priority, void*, int core) {
   assert(core == 1);
   assert((std::string(name) == "stt" && bytes == 12288 && priority == 2) ||
+         (std::string(name) == "stt_warm" && bytes == 12288 && priority == 1) ||
          (std::string(name) == "stt_capture" && bytes >= 4096 && bytes <= 8192 && priority == 3));
   if (failedTask == name) return 0;
   ++activeTasks;
@@ -73,12 +75,12 @@ bool gMicRunning = false;
 static bool recordingBusy = false;
 bool micRecordingBusy() { return recordingBusy; }
 struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000; } gSettings;
-enum AudioSource { AUDIO_SRC_NONE, AUDIO_SRC_LOCAL_PDM, AUDIO_SRC_G2_LEFT };
 static std::mutex halMutex;
 static AudioSource audioSource = AUDIO_SRC_LOCAL_PDM;
 static std::string halOwner;
 static bool halActive = false;
 static std::atomic<bool> sourceAvailable{true}, startFails{false}, fallbackOnStart{false};
+static std::atomic<bool> g2Available{true}; // The glasses alone can be out of range.
 static std::atomic<bool> stopHeld{false}, stopRequested{false}, integrityAvailable{true};
 static std::atomic<bool> invalidRead{false}, readTimeout{false};
 static std::atomic<uint32_t> halOverruns{0};
@@ -113,11 +115,13 @@ void g2MicLinkFastRelease() { --g2FastHolds; }
 void g2MicEnsureCaptureContainer() { ++g2Containers; }
 void g2MicReleaseCaptureContainer() { --g2Containers; }
 bool g2MicKickStream() { ++g2Kicks; return true; }
-bool audioSourceAvailable(AudioSource s) { return s != AUDIO_SRC_NONE && sourceAvailable.load(); }
+bool audioSourceAvailable(AudioSource s) {
+  return s != AUDIO_SRC_NONE && sourceAvailable.load() && (s != AUDIO_SRC_G2_LEFT || g2Available.load());
+}
 bool audioAnySourceAvailable() { return sourceAvailable.load(); }
 bool audioSetSource(AudioSource s) {
   std::lock_guard<std::mutex> lock(halMutex);
-  if (!halOwner.empty() || (s != AUDIO_SRC_NONE && !sourceAvailable)) return false;
+  if (!halOwner.empty() || (s != AUDIO_SRC_NONE && !audioSourceAvailable(s))) return false;
   audioSource = s; return true;
 }
 bool audioCaptureStart(const char* owner, uint32_t rate) {
@@ -206,6 +210,13 @@ static std::atomic<unsigned> engineCalls{0}, enginePermits{UINT32_MAX};
 static std::atomic<bool> modelAvailable{true}, engineOK{true}, engineOverlong{false};
 static std::atomic<bool> ignoreEngineCancel{false}, engineActive{false}, cacheStartFails{false};
 static std::atomic<unsigned> liveWeightCaches{0}, weightLoads{0}, weightReuses{0}, sessionCloses{0};
+// Keep-warm: the model may outlive a run only in these tests (and only while
+// the broker holds it parked); the warm loader can be held at a gate or fail.
+static std::atomic<bool> warmTest{false}, warmLoadHeld{false}, warmLoadFails{false}, warmLoaderEntered{false};
+static std::atomic<unsigned> warmMoves{0};
+static std::atomic<size_t> psramFree{SIZE_MAX};
+static std::atomic<size_t> warmLoadTakes{0};  // PSRAM a successful warm load takes
+size_t sttPsramFree() { return psramFree.load(); }
 struct FakeWeights { STTToken token; unsigned id; };
 struct EngineCall {
   size_t rawSamples, inferenceSamples;
@@ -281,6 +292,14 @@ static SavedTranscript saved(STTToken token) {
 }
 
 void STTLocalSession::reset() {
+  if (this == &gWarmSession) {  // the loader, a parking/adopting worker or the releaser
+    if (backendState_) {
+      delete static_cast<FakeWeights*>(backendState_);
+      backendState_ = nullptr;
+      assert(liveWeightCaches.fetch_sub(1) == 1);
+    }
+    return;
+  }
   if (!taskSelfDeleted) {
     assert(mainWorker && !backendResetBeforeDelete);
     assert(!engineActive && !audioCaptureOwnedBy("stt"));
@@ -294,6 +313,15 @@ void STTLocalSession::reset() {
     assert(liveWeightCaches.fetch_sub(1) == 1);
   }
 }
+bool STTLocalSession::warm() const { return backendState_ != nullptr; }
+void STTLocalSession::moveTo(STTLocalSession& to) {
+  assert(warmTest && !to.backendState_ && !engineActive);
+  // A parked model belongs to no run until a run's next call takes it.
+  if (backendState_) static_cast<FakeWeights*>(backendState_)->token = 0;
+  to.backendState_ = backendState_;
+  backendState_ = nullptr;
+  ++warmMoves;
+}
 STTLocalSession::~STTLocalSession() {
   // Host threads return and unwind after our vTaskDelete fake. Real FreeRTOS
   // does not: the deletion check below must already have seen explicit reset.
@@ -302,7 +330,9 @@ STTLocalSession::~STTLocalSession() {
 }
 void vTaskDelete(void*) {
   if (mainWorker) {
-    assert(backendResetBeforeDelete && liveWeightCaches == 0 && transcriptFinished);
+    // Only a model the broker parked for the next run may outlive the worker.
+    assert(backendResetBeforeDelete && transcriptFinished &&
+           (liveWeightCaches == 0 || (warmTest && liveWeightCaches == 1 && sttWarmResident())));
     assert(!engineActive && !audioCaptureOwnedBy("stt"));
     { std::lock_guard<std::mutex> lock(gSTTMux); assert(!gSTT.snapshot.workerActive); }
   }
@@ -314,6 +344,21 @@ static std::atomic<int> draftCalls{0};
 bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap,
                         const STTLocalControl& control, STTLocalStats& stats,
                         char* error, size_t errorCap, STTLocalSession* session) {
+  if (control.cancelled == sttWarmLoadCancelled) {
+    // The warm loader: half a second of silence into the parked session.
+    assert(warmTest && !mainWorker && session == &gWarmSession && !session->backendState_);
+    assert(count == 8000 && !control.context);
+    for (size_t i = 0; i < count; ++i) assert(pcm[i] == 0);
+    warmLoaderEntered = true;
+    while (warmLoadHeld) std::this_thread::sleep_for(std::chrono::microseconds(100));
+    if (warmLoadFails || control.cancelled(nullptr)) { snprintf(error, errorCap, "warm load failed"); return false; }
+    assert(liveWeightCaches.fetch_add(1) == 0);
+    session->backendState_ = new FakeWeights{0, ++weightLoads};
+    psramFree -= warmLoadTakes;
+    stats.loadMs = 4400;
+    snprintf(text, cap, "%s", "");
+    return true;
+  }
   assert(mainWorker && session && !backendResetBeforeDelete);
   auto& run = *static_cast<StreamRun*>(control.context);
   if (pcm == run.draftPcm) {
@@ -351,8 +396,11 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
     assert(liveWeightCaches.fetch_add(1) == 0);
     session->backendState_ = new FakeWeights{run.token, ++weightLoads};
   } else ++weightReuses;
-  const auto& weights = *static_cast<FakeWeights*>(session->backendState_);
-  assert(weights.token == run.token); // A successor must receive fresh ownership.
+  auto& weights = *static_cast<FakeWeights*>(session->backendState_);
+  // A successor must receive fresh ownership: only a model the broker parked
+  // (token 0, keep-warm tests only) passes to the next run.
+  if (!weights.token) { assert(warmTest); weights.token = run.token; }
+  assert(weights.token == run.token);
   call.cacheId = weights.id;
   {
     std::lock_guard<std::mutex> lock(engineMutex); engineHistory.push_back(call);
@@ -386,7 +434,8 @@ static void joinTasks() {
   std::vector<std::thread> joined;
   { std::lock_guard<std::mutex> lock(tasksMutex); joined.swap(tasks); }
   for (auto& task : joined) task.join();
-  assert(allocationCount() == 0 && !audioCaptureBusy() && !engineActive && liveWeightCaches == 0);
+  assert(allocationCount() == 0 && !audioCaptureBusy() && !engineActive &&
+         liveWeightCaches == (warmTest && sttWarmResident() ? 1u : 0u));
 }
 static STTSnapshot snapshot(STTToken token) {
   STTSnapshot out; assert(sttSnapshot(owner, token, &out)); return out;
@@ -400,7 +449,7 @@ static void reset() {
   srRunning = gMicRunning = recordingBusy = false;
   gSettings.micSource = "auto";
   audioSource = AUDIO_SRC_LOCAL_PDM; halOwner.clear(); halActive = false;
-  sourceAvailable = integrityAvailable = true; startFails = fallbackOnStart = false;
+  sourceAvailable = integrityAvailable = g2Available = true; startFails = fallbackOnStart = false;
   stopHeld = stopRequested = invalidRead = readTimeout = false; halOverruns = 0;
   gateNextIntegrity = integrityGateEntered = releaseIntegrityGate = false;
   allowedSamples = deliveredSamples = 0; starts = stops = 0;
@@ -409,6 +458,10 @@ static void reset() {
   modelAvailable = engineOK = true; engineOverlong = ignoreEngineCancel = engineActive = false;
   engineCalls = 0; enginePermits = UINT32_MAX; engineHistory.clear();
   cacheStartFails = false; weightLoads = weightReuses = sessionCloses = 0;
+  sttKeepWarm(0, false);  // drops a parked model (keep-warm tests)
+  assert(!sttWarmResident() && liveWeightCaches == 0);
+  gWarm = STTWarm{};
+  warmTest = warmLoadHeld = warmLoadFails = warmLoaderEntered = false; warmMoves = 0; psramFree = SIZE_MAX; warmLoadTakes = 0;
   savePreference = saveFailure = saveHeld = saveEntered = finishHeld = finishEntered = false;
   savedTranscripts.clear();
 }
@@ -748,6 +801,31 @@ static void testNativeFaultTolerance() {
   assert(s.state == STTState::Done && !s.error[0] && s.segmentsCaptured >= 4 &&
          s.segmentsCompleted == s.segmentsCaptured);
 }
+// A caller's per-session source (dictation's preferredSource) replaces the
+// micsource setting for that session only, and is strict like the setting.
+static void testRequestedSource() {
+  const auto beginWith = [](AudioSource requested) {
+    allowedSamples = deliveredSamples = 0; readCounter = 0;
+    STTToken token = 0; char error[96] = {};
+    assert(sttBeginContinuous(owner, &token, error, sizeof(error), nullptr, requested) && token && !error[0]);
+    return token;
+  };
+  reset(); const int kicks = g2Kicks;
+  auto token = beginWith(AUDIO_SRC_G2_LEFT); started(token);
+  assert(audioGetSource() == AUDIO_SRC_G2_LEFT && snapshot(token).audioSource == AUDIO_SRC_G2_LEFT);
+  feed(token, 16000); assert(sttRequestFinish(owner, token)); complete(token); // complete(): setting still "auto"
+  assert(snapshot(token).state == STTState::Done && g2Kicks == kicks + 1 && !g2FastHolds && !g2Containers);
+  // The default keeps "auto": the HAL resolves PDM first.
+  reset(); token = beginWith(AUDIO_SRC_NONE); started(token);
+  assert(audioGetSource() == AUDIO_SRC_LOCAL_PDM && snapshot(token).audioSource == AUDIO_SRC_LOCAL_PDM);
+  assert(sttRequestFinish(owner, token)); complete(token); assert(snapshot(token).state == STTState::Done);
+  // Glasses out of range: the request fails rather than record the board mic.
+  reset(); g2Available = false; token = beginWith(AUDIO_SRC_G2_LEFT); complete(token);
+  assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "unavailable") && starts == 0);
+  reset(); g2Available = false; token = beginWith(AUDIO_SRC_NONE); started(token);
+  assert(audioGetSource() == AUDIO_SRC_LOCAL_PDM);
+  assert(sttRequestFinish(owner, token)); complete(token); assert(snapshot(token).state == STTState::Done);
+}
 static void testTranscriptSaving() {
   reset(); savePreference = true; saveHeld = true;
   // A silent 10 ms frame before each phrase's 20 s limit (the second phrase
@@ -847,6 +925,158 @@ static void testWideCountersAndRetention() {
   STTTextChunk expired; assert(!sttReadChunk(owner, token, &expired) && !expired.text[0]);
   assert(!gSTT.snapshot.pendingTexts);
 }
+// One ordinary 2 s phrase, stopped and joined; the model may stay parked.
+static STTToken warmRun() {
+  const auto token = begin(); started(token);
+  feed(token, 2 * 16000);
+  assert(sttRequestFinish(owner, token));
+  await([&] { return !sttRunActive(token); }, "terminal warm session");
+  joinTasks();
+  assert(snapshot(token).state == STTState::Done);
+  acknowledgeAll(token);
+  return token;
+}
+static void testKeepWarm() {
+  // Held warm: the first run loads and parks the model, the next adopts it.
+  reset(); warmTest = true;
+  sttKeepWarm(60000, false);
+  assert(!sttWarmResident() && activeTasks == 0);  // no load: nothing asked for one
+  warmRun();
+  assert(sttWarmResident() && liveWeightCaches == 1 && weightLoads == 1 && sessionCloses == 1);
+  warmRun();
+  assert(weightLoads == 1 && engineHistory.size() == 2 && engineHistory[1].weightsReused &&
+         engineHistory[1].cacheId == engineHistory[0].cacheId && sessionCloses == 2);
+  assert(sttWarmResident() && liveWeightCaches == 1 && warmMoves == 3);  // park, adopt, park
+  // A tick inside the hold keeps it; once the hold passes it is freed.
+  clockMs += 30000; sttWarmTick();
+  assert(sttWarmResident());
+  clockMs += 31000; sttWarmTick();
+  assert(!sttWarmResident() && liveWeightCaches == 0);
+  // With no hold left a run closes its model as before.
+  warmRun();
+  assert(!sttWarmResident() && liveWeightCaches == 0 && weightLoads == 2);
+
+  // An explicit release frees it at once.
+  reset(); warmTest = true;
+  sttKeepWarm(60000, false); warmRun();
+  assert(sttWarmResident());
+  sttKeepWarm(0, false);
+  assert(!sttWarmResident() && liveWeightCaches == 0);
+
+  // Low PSRAM frees it even inside the hold, and no warm load follows for a minute.
+  reset(); warmTest = true;
+  sttKeepWarm(600000, false); warmRun();
+  psramFree = (4u << 20) - 1; clockMs += 1000; sttWarmTick();
+  assert(!sttWarmResident() && liveWeightCaches == 0);
+  psramFree = SIZE_MAX;
+  sttKeepWarm(600000, true);
+  assert(activeTasks == 0 && !warmLoaderEntered);
+  clockMs += 60000;
+  sttKeepWarm(600000, true);
+  await([] { return sttWarmResident(); }, "warm load after the back-off");
+  joinTasks();
+
+  // An idle broker loads one on request; the next run adopts it (one load).
+  reset(); warmTest = true;
+  sttKeepWarm(60000, true);
+  await([] { return sttWarmResident(); }, "warm load");
+  joinTasks();
+  assert(weightLoads == 1 && liveWeightCaches == 1);
+  sttKeepWarm(60000, true);  // already resident: no second load
+  assert(activeTasks == 0);
+  warmRun();
+  assert(weightLoads == 1 && engineHistory[0].weightsReused && sttWarmResident());
+
+  // A run that starts during the warm load waits for it and adopts the
+  // result, while its capture keeps running: never a second copy.
+  reset(); warmTest = true; warmLoadHeld = true;
+  sttKeepWarm(60000, true);
+  await([] { return warmLoaderEntered.load(); }, "warm load in progress");
+  sttKeepWarm(60000, true);  // a load is in flight: no second loader
+  {
+    const auto token = begin(); started(token);
+    feed(token, 2 * 16000);
+    assert(engineCalls == 0);  // waiting for the loader, not loading
+    warmLoadHeld = false;
+    assert(sttRequestFinish(owner, token));
+    await([&] { return !sttRunActive(token); }, "terminal session after the warm load");
+    joinTasks();
+    acknowledgeAll(token);
+  }
+  assert(weightLoads == 1 && engineHistory.size() == 1 && engineHistory[0].weightsReused && sttWarmResident());
+
+  // A warm load slower than kWarmAdoptWaitMs is still awaited (21 s of
+  // capture pass meanwhile), never raced with a second copy.
+  reset(); warmTest = true; warmLoadHeld = true;
+  sttKeepWarm(60000, true);
+  await([] { return warmLoaderEntered.load(); }, "slow warm load in progress");
+  {
+    const auto token = begin(); started(token);
+    feed(token, 21 * 16000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    assert(engineCalls == 0 && liveWeightCaches == 0);  // still waiting, not loading
+    warmLoadHeld = false;
+    assert(sttRequestFinish(owner, token));
+    await([&] { return !sttRunActive(token); }, "terminal session after the slow warm load");
+    joinTasks();
+    acknowledgeAll(token);
+  }
+  assert(weightLoads == 1 && engineHistory.size() >= 1 && engineHistory[0].weightsReused && sttWarmResident());
+
+  // A failed warm load leaves nothing and backs off.
+  reset(); warmTest = true; warmLoadFails = true;
+  sttKeepWarm(60000, true);
+  await([] { return warmLoaderEntered.load(); }, "failing warm load");
+  joinTasks();
+  assert(!sttWarmResident() && liveWeightCaches == 0);
+  warmLoaderEntered = false;
+  sttKeepWarm(60000, true);
+  assert(activeTasks == 0 && !warmLoaderEntered);
+  // A run still loads its own model then, and parks it while held.
+  warmLoadFails = false;
+  warmRun();
+  assert(weightLoads == 1 && sttWarmResident());
+
+  // A warm load needs room for the model, as the last one took, above the
+  // floor that frees it: one that left PSRAM short is not repeated (no
+  // load/release loop) until that room is back.
+  reset(); warmTest = true;
+  psramFree = 24u << 20; warmLoadTakes = 21u << 20;
+  sttKeepWarm(600000, true);
+  await([] { return sttWarmResident(); }, "warm load into scarce PSRAM");
+  joinTasks();
+  clockMs += 1000; sttWarmTick();  // 3 MB left: freed at once
+  assert(!sttWarmResident() && liveWeightCaches == 0);
+  psramFree = 24u << 20; clockMs += 60000;  // its PSRAM is back, the back-off over
+  warmLoaderEntered = false;
+  sttKeepWarm(600000, true);
+  assert(activeTasks == 0 && !warmLoaderEntered);  // 24 MB < 21 + 4 MB
+  psramFree = 25u << 20;
+  sttKeepWarm(600000, true);
+  await([] { return sttWarmResident(); }, "warm load with room again");
+  joinTasks();
+  clockMs += 1000; sttWarmTick();
+  assert(sttWarmResident() && weightLoads == 2);
+  // Never beside ESP-SR, which no STT run starts with.
+  reset(); warmTest = true; srRunning = true;
+  sttKeepWarm(60000, true);
+  assert(activeTasks == 0 && !warmLoaderEntered && !sttWarmResident());
+  srRunning = false;
+  sttKeepWarm(60000, true);
+  await([] { return sttWarmResident(); }, "warm load once ESP-SR stopped");
+  joinTasks();
+
+  // A hold that ends with nothing parked is dropped by the tick: 2^31 ms
+  // later (millis half way round) its stale deadline must not hold again.
+  reset(); warmTest = true;
+  sttKeepWarm(60000, false);
+  clockMs += 61000; sttWarmTick();
+  clockMs += 0x80000000ULL;
+  warmRun();
+  assert(!sttWarmResident() && liveWeightCaches == 0 && weightLoads == 1);
+  reset();
+}
+
 int main() {
   setvbuf(stdout, nullptr, _IONBF, 0);
   testAdaptiveReadiness(); puts("PASS real adaptive500ms readiness, immediate speech, calibration stop");
@@ -861,5 +1091,7 @@ int main() {
   testNativeFaultTolerance(); puts("PASS Conversate sessions survive glasses audio loss, stalls and a full queue");
   testWideCountersAndRetention(); puts("PASS 64-bit time/positions and result expiry");
   testTranscriptSaving(); puts("PASS transcript admission latch, ACK-independent saving, save failure, cancel and finalization");
+  testRequestedSource(); puts("PASS per-session requested source overrides the setting and fails strictly");
+  testKeepWarm(); puts("PASS keep-warm: park/adopt across runs, hold expiry and millis wrap, low-PSRAM release, warm load (awaited past 20 s) and its back-off");
   reset(); puts("Continuous production STT broker multithread tests passed, including explicit backend-session cleanup");
 }

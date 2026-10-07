@@ -32,6 +32,9 @@ sizefiles.txt
 docs/HealthCapture/
 docs/NewCapture/
 
+# Local working notes, not for publication (QuickNote study, 2026-10-04).
+docs/investigations/2026-10-04-quicknote/
+
 # Serial-monitor captures. One of these was committed in the repo's first
 # commit and carried the operator's WiFi passphrase and admin password in
 # plaintext, because the [Tx] lines record every keystroke typed at the

@@ -9,8 +9,10 @@ import torch
 from scipy.signal import fftconvolve, resample_poly, butter, sosfilt
 
 from common import SAMPLE_RATE, HOP, Frontend, encode, ctc_min_frames
+import os
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
-STORES = Path('/Volumes/USB2/stt/stores')
+STORES = (STT_ROOT / 'stores')
 
 
 class Store:

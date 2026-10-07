@@ -28,7 +28,7 @@ def main():
     local=source[source.index('#if ENABLE_LOCAL_STT\n// A local exchange'):source.index('#endif // ENABLE_LOCAL_STT',source.index('// A local exchange'))]+'\n#endif\n'
     harness=(HERE/'dictation_local_harness.cpp').read_text()
     dict_header=(base/'System_Dictation.h').read_text()
-    headers+='\n'+'\n'.join(extract_block(dict_header,sig)+';' for sig in ('enum class DictationState','struct DictationTextReceipt','struct DictationSnapshot','struct DictationAppLease','struct DictationAppSnapshot','enum class DictationUartIntrinsicResult'))+'\n'
+    headers+='\n'+'\n'.join(extract_block(dict_header,sig)+';' for sig in ('enum class DictationState','struct DictationTextReceipt','struct DictationSnapshot','enum class DictationAppPurpose','struct DictationAppLease','struct DictationAppOptions','struct DictationAppSnapshot','enum class DictationUartIntrinsicResult'))+'\n'
     off_prefix=harness.split('// INSERT_HEADERS')[0].replace('#define ENABLE_DICTATION 1','#define ENABLE_DICTATION 0')
     off_unit=off_prefix+headers+dict_header.split('\n#else\n',1)[1].split('#endif  // ENABLE_DICTATION',1)[0]+'''
 int main(){
@@ -36,6 +36,7 @@ int main(){
  DictationTextReceipt receipt{123,1,0,3}; char text[8]="private";
  assert(!dictationAppBegin(SOURCE_WEB,7,&lease)&&!lease.exchange);
  lease={SOURCE_WEB,7,123};assert(!dictationAppCurrent(SOURCE_WEB,7,&lease)&&!lease.exchange);
+ lease={SOURCE_WEB,7,123};assert(!dictationAppCurrent(SOURCE_WEB,7,&lease,DictationAppPurpose::QuickNote)&&!lease.exchange);
  assert(!dictationAppSnapshot(lease,&snap)&&!snap.valid&&!snap.busy);
  assert(!dictationAppPeekText(lease,text,sizeof(text),&receipt)&&!text[0]&&!receipt.exchange);
  assert(!dictationAppCommitText(lease,receipt,1));
@@ -45,16 +46,18 @@ int main(){
 '''
     harness=harness.replace('// INSERT_HEADERS',headers)
     harness=harness.replace('// INSERT_CONTROL',controls)
-    harness=harness.replace('// INSERT_LOCAL',local)
+    harness=harness.replace('// INSERT_LOCAL',function(source,'static TranscriptOptions dictationTranscriptOptions(')+'\n'+local)
     harness=harness.replace('// INSERT_LIVE',function(source,'static bool displaySessionStillLive('))
     shared='\n'.join(function(source, sig) for sig in ['static bool dictFailOwned(', 'static bool dictationPeekTextImpl(', 'static bool dictationCommitTextImpl(', 'bool dictationPeekTextFor(', 'bool dictationCommitTextFor(', 'bool dictationAppPeekText(', 'bool dictationAppCommitText(', 'bool dictationTakeTextFor(', 'static bool dictationCancelImpl(', 'bool dictationAppCancel(', 'void dictationFieldFullFor(', 'static const char* dictDeliver('])
     harness=harness.replace('// INSERT_DRAIN',shared)
     harness=harness.replace('// INSERT_STOP','\n'.join(function(source,sig) for sig in ('static bool dictationRequestStopImpl(', 'void dictationRequestStopFor(', 'bool dictationAppRequestStop(')))
-    harness=harness.replace('// INSERT_BEGIN','\n'.join(function(source,sig) for sig in ('static bool dictationBeginImpl(', 'bool dictationBeginFor(', 'bool dictationAppBegin(')))
-    harness=harness.replace('// INSERT_SAVE', '\n'.join(function(source, sig) for sig in ('static void dictationProcessSave(', 'static bool dictationWorkerHasWork(', 'DictationSnapshot dictationSnapshotNow(', 'bool dictationAppCurrent(', 'bool dictationAppSnapshot(', 'static void dictationSupervise(')))
+    harness=harness.replace('// INSERT_BEGIN','\n'.join(function(source,sig) for sig in ('static bool dictationBeginImpl(', 'bool dictationBeginFor(', 'bool dictationAppBeginWith(', 'bool dictationAppBegin(')))
+    # The real prototype carries dictationAppCurrent's default purpose.
+    current=re.search(r'\nbool dictationAppCurrent\([^;]*\);',dict_header).group(0)
+    harness=harness.replace('// INSERT_SAVE', current+'\n'+'\n'.join(function(source, sig) for sig in ('static void dictationProcessSave(', 'static bool dictationWorkerHasWork(', 'DictationSnapshot dictationSnapshotNow(', 'bool dictationAppCurrent(', 'bool dictationAppSnapshot(', 'static void dictationSupervise(')))
     # Verify the old host body remains selected by the compile-time provider
     # branch, and local tokens cannot enter either UART completion operation.
-    assert 'return dictationBeginLocal(displaySource, displayEpoch, app);\n#endif' in function(source,'static bool dictationBeginImpl(')
+    assert 'return dictationBeginLocal(displaySource, displayEpoch, app, options);\n#endif' in function(source,'static bool dictationBeginImpl(')
     assert 'gDict.requestHostEpoch != 0' in function(source,'static const char* dictDeliver(')
     assert 'gDict.requestHostEpoch != 0' in function(source,'static const char* dictationHandleArgs(')
     assert 'dictationSupervise();' in function(source,'static void dictationWorkerBody(')

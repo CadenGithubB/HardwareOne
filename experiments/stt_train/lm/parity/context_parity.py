@@ -21,6 +21,8 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import hw1lm  # noqa: E402
+import os
+STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
 
 STARTS = [('', True), ('', False), ('we need to', True), ('we need to', False),
           ('okay', False), ('the zzqxv', False)]
@@ -30,7 +32,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--harness', required=True)
     ap.add_argument('--lm', required=True)
-    ap.add_argument('--logits', default='/Volumes/USB2/stt/work/lm/logits/best-a3487a5e8f68')
+    ap.add_argument('--logits', default=str(STT_ROOT / 'work/lm/logits/best-a3487a5e8f68'))
     ap.add_argument('--count', type=int, default=40)
     a = ap.parse_args()
     lm = hw1lm.read_lm(a.lm)

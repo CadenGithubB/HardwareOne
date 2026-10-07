@@ -27,6 +27,16 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.repeat <= 100:
         parser.error('--repeat must be 1..100')
+    # Keep-warm wiring the harness cannot run: the main loop frees a resident
+    # model (local-STT builds only), and a one-shot run keeps its
+    # self-contained load, freeing a resident model first instead of loading
+    # a second copy beside it.
+    main_loop = (SOURCE / 'HardwareOne.cpp').read_text()
+    assert re.search(r'#if ENABLE_LOCAL_STT\n\s*extern void sttWarmTick\(\);\n\s*sttWarmTick\(\);', main_loop)
+    stt = (SOURCE / 'System_STT.cpp').read_text()
+    one_shot = stt[stt.index('static void sttWorker(void*) {'):stt.index('// Independent producer/consumer tasks')]
+    assert one_shot.index('sttWarmYield(sttCancelled, &token);') < one_shot.index('ok = sttLocalTranscribe(')
+    assert 'stats, error, sizeof(error));' in one_shot and 'sttWarmPark' not in one_shot
     interface = '\n'.join(no_includes((SOURCE / name).read_text()) for name in
                           ('System_Transcript.h', 'System_STTLocal.h', 'System_STT.h', 'Audio_VadPolicy.h', 'stt/stt_segmenter.h'))
     broker = no_includes((SOURCE / 'System_STT.cpp').read_text().split('// CLI_ADAPTER_BEGIN')[0]) + '\n#endif\n'

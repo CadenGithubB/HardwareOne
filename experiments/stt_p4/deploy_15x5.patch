@@ -158,7 +158,7 @@
      bool verify() const;
 --- a/components/hardwareone/stt/stt_segmenter.h
 +++ b/components/hardwareone/stt/stt_segmenter.h
-@@ -28,6 +28,14 @@
+@@ -28,6 +28,21 @@
      // Callers may tune these for other microphones or acoustic conditions.
      uint16_t adaptive_speech_floor=45;
      uint16_t adaptive_silence_floor=16;
@@ -170,19 +170,58 @@
 +    // Opt-in: louder runs up to this long do not restart the end-silence
 +    // count (a click or codec blip is not speech). 0 keeps the strict rule.
 +    size_t silence_blip_samples=0;
++    // Opt-in: when a segment reaches max_segment_samples without a pause, cut
++    // in the middle of the quietest 10 ms frame within its last N samples
++    // (usually a gap between words) instead of at the exact limit. Samples
++    // after the cut start the continuation as fresh audio (not overlap), so
++    // every sample is still delivered exactly once. 0 cuts at the limit.
++    // Requires forced_overlap_samples == 0.
++    size_t hard_cut_search_samples=0;
  };
  enum class SegmentEnd : uint8_t { Pause, HardLimit, SessionEnd };
  enum class SegmentStatus : uint8_t { Ok, Ready, Finished, InvalidArgument, NotInitialized, CounterOverflow };
-@@ -57,7 +65,7 @@
+@@ -57,7 +72,8 @@
          buffer_=buffer;config_=config;initialized_=true;reset_session();return true;
      }
      void reset_session() {
 -        seen_=start_=fresh_start_=0;used_=head_=history_=voice_=silence_=0;
 +        seen_=start_=fresh_start_=0;used_=head_=history_=voice_=silence_=0;loud_run_=0;
++        cut_=carry_voice_=0;
          frame_count_=0;frame_sum_=0;frame_square_=0;
          active_=continuation_=ready_=finishing_=finished_=false;segment_={};
          calibrated_=!config_.adaptive;heard_speech_=false;calibration_seen_=0;
-@@ -127,7 +135,7 @@
+@@ -109,7 +125,12 @@
+     SegmentStatus finish() {
+         if(!initialized_)return SegmentStatus::NotInitialized;
+         finishing_=true;
+-        if(ready_)return SegmentStatus::Ready;
++        if(ready_) {
++            // A pending quiet-point cut would leave its carry behind when the
++            // session seals on release: deliver the whole buffer instead.
++            if(cut_) { segment_.samples=used_;segment_.end_sample=seen_;cut_=carry_voice_=0; }
++            return SegmentStatus::Ready;
++        }
+         if(finished_)return SegmentStatus::Finished;
+         if(frame_count_) { evaluate_frame(true);clear_frame(); }
+         if(active_ && eligible()) { publish(SegmentEnd::SessionEnd);return SegmentStatus::Ready; }
+@@ -119,7 +140,15 @@
+         if(!ready_)return false;
+         ready_=false;
+         if(finishing_) { active_=false;finished_=true;return true; }
+-        if(segment_.end==SegmentEnd::HardLimit) {
++        if(segment_.end==SegmentEnd::HardLimit && cut_) {
++            // Quiet-point cut: the samples after the cut were never delivered,
++            // so they open the continuation as fresh audio.
++            const size_t keep=used_-cut_;
++            if(keep)std::memmove(buffer_,buffer_+cut_,keep*sizeof(int16_t));
++            used_=keep;start_=seen_-keep;fresh_start_=start_;
++            voice_=carry_voice_;silence_=0;active_=true;continuation_=true;
++            cut_=carry_voice_=0;
++        } else if(segment_.end==SegmentEnd::HardLimit) {
+             const size_t keep=config_.forced_overlap_samples;
+             if(keep)std::memmove(buffer_,buffer_+used_-keep,keep*sizeof(int16_t));
+             used_=keep;start_=seen_-keep;fresh_start_=seen_;
+@@ -127,7 +156,7 @@
          } else {
              // Already-delivered trailing silence must not become a new segment's
              // pre-roll: the default zero-overlap mode is exactly nonoverlapping.
@@ -191,18 +230,20 @@
              reset_utterance_levels();
          }
          segment_={};return true;
-@@ -147,7 +155,9 @@
+@@ -147,7 +176,11 @@
                  && c.calibration_samples>=kSegmentAnalysisSamples
                  && c.calibration_samples<=kSegmentNoiseWindowFrames*kSegmentAnalysisSamples && aligned(c.calibration_samples)
                  && c.adaptive_speech_floor>0 && c.adaptive_speech_floor<=32767
 -                && c.adaptive_silence_floor>0 && c.adaptive_silence_floor<=c.adaptive_speech_floor));
 +                && c.adaptive_silence_floor>0 && c.adaptive_silence_floor<=c.adaptive_speech_floor))
 +            && c.noise_percentile<=50 && aligned(c.silence_blip_samples)
-+            && c.silence_blip_samples<c.end_silence_samples;
++            && c.silence_blip_samples<c.end_silence_samples
++            && aligned(c.hard_cut_search_samples) && c.hard_cut_search_samples<=c.max_segment_samples/2
++            && (!c.hard_cut_search_samples || !c.forced_overlap_samples);
      }
      size_t history_capacity() const { return config_.pre_roll_samples+kSegmentAnalysisSamples; }
      void append_history(int16_t sample) {
-@@ -162,7 +172,7 @@
+@@ -162,7 +195,7 @@
          // A full ring contains pre-roll plus the triggering analysis frame.
          if(head_) { reverse(0,head_);reverse(head_,history_);reverse(0,history_); }
          used_=history_;start_=seen_-used_;fresh_start_=start_;
@@ -211,7 +252,7 @@
      }
      bool eligible() const { return voice_>0 && (continuation_ || voice_>=config_.min_voice_samples); }
      void clear_frame() { frame_count_=0;frame_sum_=0;frame_square_=0; }
-@@ -209,7 +219,11 @@
+@@ -209,12 +242,17 @@
          if(!active_ && voiced)begin_segment();
          if(!active_)return;
          if(voiced)voice_+=frame_count_;
@@ -224,7 +265,15 @@
          if(finalizing)return;
          const bool pause=used_>=config_.min_segment_samples && silence_>=config_.end_silence_samples;
          if(pause || used_>=config_.max_segment_samples) {
-@@ -231,10 +245,32 @@
+-            if(eligible())publish(pause?SegmentEnd::Pause:SegmentEnd::HardLimit);
+-            else discard_candidate();
++            if(!eligible())discard_candidate();
++            else if(pause || !config_.hard_cut_search_samples)publish(pause?SegmentEnd::Pause:SegmentEnd::HardLimit);
++            else publish_quiet_cut();
+         }
+     }
+     static uint16_t integer_sqrt(uint32_t value) {
+@@ -231,10 +269,32 @@
          noise_window_[noise_head_]=level;
          noise_head_=(noise_head_+1)%config_.noise_window_frames;
          if(noise_count_<config_.noise_window_frames)++noise_count_;
@@ -260,7 +309,7 @@
      uint16_t onset_threshold() const {
          uint16_t threshold=static_cast<uint16_t>(2*noise_rms_);
          if(threshold<config_.adaptive_speech_floor)threshold=config_.adaptive_speech_floor;
-@@ -244,8 +280,7 @@
+@@ -244,8 +304,7 @@
          heard_speech_=false;peak_rms_=0;
          if(config_.adaptive) {
              if(noise_count_) {
@@ -270,7 +319,57 @@
              }
              threshold_rms_=onset_threshold();
          }
-@@ -262,14 +297,14 @@
+@@ -255,6 +314,49 @@
+                   end==SegmentEnd::HardLimit?config_.forced_overlap_samples:0,voice_,end,continuation_};
+         ready_=true;
+     }
++    // Hard limit with hard_cut_search_samples: find the analysis frame with the
++    // least DC-removed energy in the last N samples (latest wins ties: the
++    // shorter carry) and cut at its START, so the phrase ends in the quiet and
++    // the carry stays a whole number of frames. Cuts must stay on the stream's
++    // frame grid: limits are only checked at frame ends, and a carry of a
++    // fractional frame would let the next phrase overrun the buffer (found by
++    // ASan, 2026-10-02). Frames after the cut above the current threshold count
++    // as the carry's voice, so a word right after the cut is not dropped as
++    // silence if speech stops. Once per hard limit: N/160 frames of integer math.
++    void publish_quiet_cut() {
++        constexpr size_t F=kSegmentAnalysisSamples;
++        // Buffer index i is a frame start when (start_+i) is on the grid.
++        const size_t phase=static_cast<size_t>((F-start_%F)%F);
++        const size_t search=config_.hard_cut_search_samples;
++        size_t first=used_>search ? used_-search : 0;
++        if(first<phase)first=phase;
++        first+=(F-(first-phase)%F)%F;
++        size_t best=0;   // 0: no candidate, cut at the limit
++        uint64_t best_energy=std::numeric_limits<uint64_t>::max();
++        for(size_t at=first; at+F<=used_; at+=F) {
++            if(!at)continue;  // never an empty phrase
++            const uint64_t e=frame_energy(at);
++            if(e<=best_energy) { best_energy=e; best=at; }
++        }
++        if(!best) { publish(SegmentEnd::HardLimit); return; }
++        cut_=best;
++        carry_voice_=0;
++        const uint64_t limit=uint64_t(threshold_rms_)*threshold_rms_*F*F;
++        for(size_t at=best; at+F<=used_; at+=F)
++            if(frame_energy(at)>=limit)carry_voice_+=F;
++        segment_={buffer_,cut_,start_,start_+cut_,fresh_start_,static_cast<size_t>(fresh_start_-start_),
++                  0,voice_,SegmentEnd::HardLimit,continuation_};
++        ready_=true;
++    }
++    // n^2 * variance of one analysis frame (same scale as evaluate_frame).
++    uint64_t frame_energy(size_t at) const {
++        int64_t sum=0; uint64_t square=0;
++        for(size_t i=0;i<kSegmentAnalysisSamples;++i) {
++            const int32_t v=buffer_[at+i];
++            sum+=v; square+=static_cast<uint64_t>(static_cast<int64_t>(v)*v);
++        }
++        return square*kSegmentAnalysisSamples-static_cast<uint64_t>(sum*sum);
++    }
+     void discard_candidate() {
+         const size_t fresh=static_cast<size_t>(seen_-fresh_start_);
+         size_t keep=used_<history_capacity()?used_:history_capacity();
+@@ -262,14 +364,15 @@
          // context. Only fresh samples may seed a subsequent ordinary pre-roll.
          if(keep>fresh)keep=fresh;
          if(keep)std::memmove(buffer_,buffer_+used_-keep,keep*sizeof(int16_t));
@@ -284,6 +383,7 @@
      uint64_t seen_=0,start_=0,fresh_start_=0;
 -    size_t used_=0,head_=0,history_=0,voice_=0,silence_=0;
 +    size_t used_=0,head_=0,history_=0,voice_=0,silence_=0,loud_run_=0;
++    size_t cut_=0,carry_voice_=0;  // pending quiet-point cut (publish_quiet_cut -> release)
      int64_t frame_sum_=0;
      uint64_t frame_square_=0;
      uint16_t frame_count_=0;
@@ -393,7 +493,7 @@
  static void sttStreamProgress(void* context, STTLocalPhase phase) {
    auto& run = *static_cast<StreamRun*>(context);
    sttProgress(&run.token, phase);
-@@ -527,6 +599,14 @@
+@@ -527,6 +599,16 @@
    }
    const bool exhausted = gSTT.snapshot.segmentsCaptured == UINT32_MAX;
    portEXIT_CRITICAL(&gSTTMux);
@@ -403,12 +503,14 @@
 +    portENTER_CRITICAL(&gSTTMux);
 +    ++run.droppedSegments;
 +    portEXIT_CRITICAL(&gSTTMux);
-+    return true;
++    // Release it, or the segmenter stays Ready and capture stalls until a slot
++    // frees (then queues the "dropped" phrase late after all).
++    return run.segmenter.release();
 +  }
    if (!slot || exhausted) {
      sttStreamFail(run, exhausted ? "STT sequence exhausted; start a new session"
                                  : "STT audio queue full; backend cannot keep up");
-@@ -558,19 +638,28 @@
+@@ -558,19 +640,28 @@
      if (audioCaptureBusy() || micRecordingBusy() || gMicRunning) {
        sttStreamFail(run, "Audio became busy; close SR/mic and retry"); break;
      }
@@ -444,7 +546,7 @@
      audioTrimBufferedPcm("stt", 0);
      uint32_t initialOverruns = 0;
      if (!audioCaptureOverruns("stt", &initialOverruns)) {
-@@ -588,28 +677,51 @@
+@@ -588,28 +679,51 @@
      gSTT.snapshot.state = STTState::Preparing;
      gSTT.snapshot.captureActive = true;
      gSTT.snapshot.audioSource = static_cast<uint8_t>(source);
@@ -500,7 +602,7 @@
        }
        if (count) {
          lastAudioMs = millis();
-@@ -641,8 +753,10 @@
+@@ -641,8 +755,10 @@
            const uint32_t nextSequence = gSTT.snapshot.segmentsCaptured + 1;
            const bool idle = !run.draftReady && !run.draftBusy;
            if (run.draftSequence != nextSequence) run.draftTakenSamples = 0;
@@ -512,7 +614,7 @@
            portEXIT_CRITICAL(&gSTTMux);
            if (idle && grown) {
              memcpy(run.draftPcm, live, liveSamples * sizeof(int16_t));
-@@ -660,6 +774,23 @@
+@@ -660,6 +776,23 @@
          gSTT.snapshot.rms = run.segmenter.current_rms();
          gSTT.snapshot.noiseRms = run.segmenter.noise_rms();
          gSTT.snapshot.thresholdRms = run.segmenter.threshold_rms();
@@ -536,7 +638,7 @@
          gSTT.snapshot.peakRms = run.segmenter.peak_rms();
          gSTT.snapshot.level = level;
          gSTT.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
-@@ -667,7 +798,13 @@
+@@ -667,7 +800,13 @@
        } else vTaskDelay(pdMS_TO_TICKS(1));
        sttStreamTick(run);
        if (millis() - lastAudioMs >= sttSourceTimeoutMs(source)) {
@@ -551,7 +653,7 @@
        }
      }
      // A normal stop seals and drains the final voiced tail. Cancel/error never
-@@ -677,10 +814,17 @@
+@@ -677,10 +816,17 @@
        if (!audioCaptureOverruns("stt", &finalOverruns)) {
          sttStreamFail(run, "Microphone integrity monitor lost at stop");
        } else if (finalOverruns) {
@@ -570,7 +672,7 @@
        }
      }
      if (!sttStreamCancelled(&run)) {
-@@ -692,6 +836,7 @@
+@@ -692,6 +838,7 @@
    } while (false);
    portENTER_CRITICAL(&gSTTMux);
    gSTT.snapshot.captureActive = false;
@@ -578,7 +680,7 @@
    gSTT.snapshot.state = STTState::Stopping;
    gSTT.snapshot.level = 0;
    portEXIT_CRITICAL(&gSTTMux);
-@@ -717,6 +862,7 @@
+@@ -717,6 +864,7 @@
    portENTER_CRITICAL(&gSTTMux);
    run.token = gSTT.snapshot.token;
    run.requested = gSTT.requestedSource;
@@ -586,7 +688,7 @@
    run.clockMs = millis();
    transcriptOptions = gSTT.transcriptOptions;
    portEXIT_CRITICAL(&gSTTMux);
-@@ -737,6 +883,18 @@
+@@ -737,6 +885,21 @@
      if (sttStreamCancelled(&run)) break;
      hw1::stt::SegmenterConfig segmentConfig;
      segmentConfig.adaptive = true;
@@ -602,10 +704,13 @@
 +    // let up to 30 ms of louder frames pass without restarting the pause.
 +    segmentConfig.noise_percentile = 25;
 +    segmentConfig.silence_blip_samples = 3 * hw1::stt::kSegmentAnalysisSamples;
++    // A phrase that reaches the length limit is cut at the quietest point of
++    // its last 2 s (usually between words), not mid-word at the exact limit.
++    segmentConfig.hard_cut_search_samples = 2 * STT_SAMPLE_RATE;
      if (!run.segmenter.reset(run.working, kStreamSamples, segmentConfig)) {
        sttStreamFail(run, "Invalid continuous segmentation settings"); break;
      }
-@@ -762,6 +920,14 @@
+@@ -762,6 +925,14 @@
          const bool warmed = sttLocalTranscribe(silence, kWarmSamples, warmText, sizeof(warmText), warmControl,
                                                 warmStats, warmError, sizeof(warmError), &backendSession);
          heap_caps_free(silence);
@@ -620,7 +725,7 @@
          if (gSTTPerfLog)
            INFO_SYSTEMF("[STTPERF] warm-up %s in %lu ms (load %lu, lm %s)", warmed ? "ok" : warmError,
                         (unsigned long)(millis() - warmStart), (unsigned long)warmStats.loadMs,
-@@ -804,7 +970,8 @@
+@@ -804,7 +975,8 @@
            char draftText[STT_MAX_TEXT + 1] = {};
            char draftError[96] = {};
            STTLocalStats draftStats;
@@ -630,7 +735,7 @@
            const bool ok = sttLocalTranscribe(run.draftPcm, draftSamples, draftText, sizeof(draftText), draftControl,
                                               draftStats, draftError, sizeof(draftError), &backendSession);
            portENTER_CRITICAL(&gSTTMux);
-@@ -816,7 +983,13 @@
+@@ -816,7 +988,13 @@
              ++gSTT.draft.version;
            }
            run.draftBusy = false;
@@ -644,7 +749,7 @@
            sttWipe(draftText, sizeof(draftText));
            if (gSTTPerfLog)
              INFO_SYSTEMF("[STTPERF] draft seq %lu audio %.1fs in %lu ms (%s)", (unsigned long)draftSequence,
-@@ -824,10 +997,12 @@
+@@ -824,10 +1002,12 @@
                           (unsigned long)(draftStats.loadMs + draftStats.frontendMs + draftStats.inferenceMs + draftStats.decodeMs),
                           ok ? "ok" : draftError);
            sttStreamTick(run);
@@ -657,7 +762,7 @@
          continue;
        }
        char text[STT_MAX_TEXT + 1] = {};
-@@ -886,15 +1061,40 @@
+@@ -886,15 +1066,40 @@
        }
        // Save the whole accepted chunk once, before UI splitting/ACK can erase
        // its mailbox copy. Only this inference worker performs transcript I/O.
@@ -698,7 +803,7 @@
        if (sttTaskSample(gPerfAfter)) sttTaskShares(perf);
  #endif
        if (gSTTPerfLog) {
-@@ -909,6 +1109,7 @@
+@@ -909,6 +1114,7 @@
        slot->state = StreamSlotState::Free;
        portEXIT_CRITICAL(&gSTTMux);
        sttStreamTick(run);
@@ -706,7 +811,7 @@
      }
    } while (false);
    // On normal stop the producer has already joined; on failure/cancel its
-@@ -954,7 +1155,8 @@
+@@ -954,7 +1160,8 @@
  
  static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
                           STTToken* token, char* error, size_t errorCap,
@@ -716,7 +821,7 @@
    sttReapTerminal();
    if (token) *token = 0;
    if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
-@@ -1001,13 +1203,15 @@
+@@ -1001,13 +1208,15 @@
      gSTT.owner = owner;
      gSTT.transcriptOptions = transcriptOptions;
      gSTT.snapshot.transcript.enabled = transcriptOptions.enabled;
@@ -733,12 +838,10 @@
      *token = gSTT.snapshot.token;
      admitted = true;
    }
-@@ -1040,9 +1244,38 @@
-                         char* error, size_t errorCap,
-                         const TranscriptOptions* transcriptOptions) {
+@@ -1042,7 +1251,36 @@
    return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions);
-+}
-+
+ }
+ 
 +bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
 +                                char* error, size_t errorCap,
 +                                const TranscriptOptions* transcriptOptions) {
@@ -765,14 +868,14 @@
 +  const bool active = gSTT.snapshot.workerActive;
 +  portEXIT_CRITICAL(&gSTTMux);
 +  return active;
- }
- 
++}
++
  bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {
 +  uint32_t tlReadSeq = 0, tlReadMs = 0;  // logged after the critical section
    if (out) *out = {};
    sttReapTerminal();
    if (!out || !sttOwnerLive(owner)) return false;
-@@ -1054,8 +1287,20 @@
+@@ -1054,8 +1292,20 @@
      // First read of a chunk by its consumer (lens, UI, CLI) closes its pacing record.
      for (auto& r : gSTTPerf)
        if (r.sequence == out->sequence && r.doneMs && !r.deliveredMs) { r.deliveredMs = millis(); break; }
@@ -793,7 +896,7 @@
    if (!sttOwnerLive(owner)) { sttWipe(out, sizeof(*out)); return false; }
    return ready;
  }
-@@ -1130,7 +1375,9 @@
+@@ -1130,7 +1380,9 @@
                         (!token || token == gSTT.snapshot.token);
    if (matched) {
      *out = gSTT.snapshot;

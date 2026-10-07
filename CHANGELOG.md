@@ -8,7 +8,15 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
-## [Unreleased]
+## [0.99.96.1] - 2026-10-07
+
+The ESP32-C6 radio companion on the P4X-EYE is now a managed subsystem with
+a watchdog, soft recovery, firmware update over SDIO and power that follows
+the P4. A ring or temple hold on the glasses becomes a lens input, and
+QuickNote turns a hold into a private spoken note transcribed on the device.
+The local-transcription patch from the STT experiment is part of `main`, and
+command buffers are 4 KB on every transport.
+
 
 ### Added
 - **The ESP32-C6 radio companion is a managed subsystem** on the P4X-EYE
@@ -63,6 +71,69 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   the word language model read from the SD card first. The experiment's
   snapshot build is no longer the only firmware with these features.
 
+### Added (glasses hold input and QuickNote)
+- **A ring or temple hold is a lens input** (`G2_HoldGesture.h`,
+  `G2_Glasses.cpp`). A plain hold on a HardwareOne lens page arrives as
+  `LONG_PRESS` (9) when the glasses recognise it and `LONG_RELEASE` (10) when
+  the finger lifts. HardwareOne pairs the two, absorbing mirrored and duplicate
+  copies, and closes a hold whose release can no longer come (a firmware
+  overlay, a page exit, the end of the page, a timeout). The press goes to the
+  current page's hold handler, else to the global hold action; the release
+  goes to whoever took the press.
+  - Hold actions run only on exact glasses firmware profiles: both arms
+    2.3.2.14 (the glasses report ring, right or left temple) or 2.2.9.22 (no
+    source reported). Any other pair is unprofiled: holds are recorded and
+    posted as events, not acted on. `g2holdunprofiled` is the admin override
+    for testing.
+  - Settings `g2holdaction` (Off / QuickNote), `g2holdsource` (ring only by
+    default, or ring + temples) and `g2holdunprofiled` (module `g2hold`).
+  - `g2hold [status|clear]`: firmware profile, settings, the open hold,
+    counters and the last 16 holds. `g2hold sim press|release|abort` (admin)
+    drives the real dispatcher without the glasses.
+  - Events `g2_long_press` / `g2_long_release`: source, who took the hold or
+    why it was ignored, and the held time. Event-only, at most two a second.
+  - Nothing is written to the glasses: not the gesture table, the menu or any
+    other persistent setting. HardwareOne never answers or imitates the Even
+    app's own Press & hold or QuickNote binding.
+- **QuickNote, private spoken notes** (`System_QuickNote`, `QuickNote_Store`,
+  `QuickNote_Policy.h`, `ENABLE_QUICKNOTE`, on by default wherever dictation,
+  the G2 glasses and Bluetooth are built). Hold the ring on a HardwareOne page,
+  speak and let go: the note is transcribed (on the device on the P4X-EYE, by
+  the Pi on CM5 builds) and saved under the speaker's own
+  `/stt/u<id>/notes/`, on the SD card when it is writable. One note at a time,
+  at most `notemaxsec` long and 4 KB of text; a slip, a take under 0.6 s of
+  audio or a filler-only take is discarded.
+  - Apps -> Notes on the lens: `● New note`, a recording timer, the six newest
+    notes, a reader and delete.
+  - `note start|stop|cancel|status|list|read|delete`. `note start glasses`
+    starts on the paired wearer's glasses from serial, the BLE app or UART,
+    for the wearer only, with no admin override. Automations, ESP-NOW, MQTT
+    and voice cannot start a note. Replies are private.
+  - Settings `notemaxsec` (default 60 on the P4X-EYE; 30, and capped there,
+    on CM5 builds) and `notemic` (module `quicknote`).
+  - Events `note_started`, `note_saved` and `note_failed` never carry the note
+    text. By default `note_saved` and `note_failed` go to the
+    notification-center queue only, never to a banner, a toast or a card on
+    the glasses.
+  - Notes saved before the clock is set (Wi-Fi off, no ring) record the boot
+    (`Boot:`, the boot counter) and the uptime (`Uptime-s:`) in their header.
+    The list then shows `5m ago` for this boot's notes and `earlier` for older
+    ones instead of `--:--` (`note list` rows carry it as `when`). Their ids
+    start with the boot counter and the uptime, so they list newest first.
+    When the clock is set later in the same boot, those notes get their real
+    time and their normal file name.
+  - On the P4X-EYE the speech model stays loaded while the Notes page is open
+    and for two minutes after it or the last note, so a hold there starts
+    transcribing without the ~4 s model load. Transcription and Conversate
+    reuse it; it is freed after that, or at once when PSRAM runs short. It is
+    not loaded beside ESP-SR, or without room for it above that floor.
+  - User guide: `docs/QUICKNOTE.md`.
+- **Unmapped glasses messages are logged with their bytes** (`G2_Glasses.cpp`).
+  With `debugg2` on, a message on a service HardwareOne does not handle is
+  logged with up to 64 bytes of payload in hex, so it can be decoded. Service
+  0x12, which the glasses' own QuickNote sends on 2.3.2.14, is named
+  `QuickNote?` in `g2protostats`. HardwareOne still never answers it.
+
 ### Changed
 - Command-line buffers now match the command limits on every transport that
   had a smaller one: the USB console receive and transmit buffers are 4 KB
@@ -80,6 +151,21 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   failure is handled by the companion monitor instead of a P4 reboot.
 - Settings gain `c6AutoRecover`, `c6AutoHold` and `c6HeartbeatSec` (module
   `companion`), present on every board so the settings layout stays one.
+- `debugg2events` on its own now prints the G2 list, text and system event
+  lines (before, they needed `debugg2`), and system events 9 and 10 are named
+  `LONG_PRESS` and `LONG_RELEASE`.
+- A hold on a HardwareOne page counts as user activity, and a running note
+  keeps the page open, so the 60-second safety timeout no longer closes Blocks
+  while the wearer holds the ring.
+- Dictation App leases carry a purpose (Transcription or QuickNote):
+  `transcription status` and the web Transcription panel never pick up a
+  note, and the reverse. A dictation exchange can also ask for a microphone,
+  a CM5 silence window and no transcript copy; the defaults behave as before.
+- The event catalog has 164 kinds (159 before), the five new ones appended at
+  the end; BLE event-catalog clients pin the new count.
+- QuickNote sources are compiled for size (`-Os`). The XIAO-S3 image keeps
+  just over 100 KB of app headroom with QuickNote built; a deployment can set
+  `ENABLE_QUICKNOTE 0` to get the room back (the hold input stays).
 
 ### Verified on hardware (P4X-EYE, 2026-10-03)
 - Boot with the companion online, `c6status`, heartbeat and memory monitor
@@ -94,6 +180,15 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   the 1.2 MB companion image, so the transfer and the rollback confirmation
   were not exercised. The deep-sleep hold and the once-per-power-cycle reboot
   guard are covered by host tests only.
+- The hold input and QuickNote firmware. Only the glasses' side was observed,
+  with the previous firmware on the P4X-EYE (G2 2.3.2.14 on both arms,
+  2026-10-05): each plain hold on a HardwareOne list page delivered one
+  `LONG_PRESS` and one `LONG_RELEASE`, from the right arm only, with the source
+  filled in (right temple 1, ring 2, left temple 3) and no overlay. Those holds
+  did not yet count as activity, and the safety timeout closed Blocks during
+  them. The hold dispatch, the Notes page, QuickNote recording and saving,
+  holds on text pages, a page change mid-hold and CM5 notes have host-test
+  coverage only, and going back to the phone afterwards is unchecked.
 
 ## [0.99.96] - 2026-10-02
 
