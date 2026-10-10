@@ -9,7 +9,7 @@ partition and survive an application reflash; they are erased only by a full
 ## Prerequisites
 
 - ESP-IDF 5.5.5 exported, `tools/p4/prepare_sdk.sh` run once (patched `bt`
-  and `esp_driver_jpeg` components).
+  and `esp_driver_jpeg` components and the patched ESP-DL 3.3.12).
 - The board's ESP32-C6 must run the HardwareOne companion firmware (ESP-Hosted
   with the ESP-NOW bridge). Build and flash it with
   [`tools/p4/companion`](../../../../tools/p4/companion/README.md). The P4
