@@ -57,6 +57,12 @@ struct SpeechSegment {
     size_t new_voiced_samples=0; // Classified voiced samples, excluding retained overlap.
     SegmentEnd end=SegmentEnd::Pause;
     bool continuation=false;
+    // Offset from start_sample of the end of the last ambient-voiced run
+    // (level >= trimCut = max(silence floor, 2 x noise floor), the gate that
+    // keeps quiet word tails) longer than silence_blip_samples, so 30 ms
+    // clicks do not count. 0: no such run in this segment. Reported only; the
+    // segment's samples are unchanged.
+    size_t voiced_end_samples=0;
 };
 
 // Single-owner, no heap or platform dependencies. Buffer must remain valid and
@@ -74,6 +80,7 @@ public:
     void reset_session() {
         seen_=start_=fresh_start_=0;used_=head_=history_=voice_=silence_=0;loud_run_=0;
         cut_=carry_voice_=0;
+        voiced_run_=0;voiced_end_abs_=0;
         frame_count_=0;frame_sum_=0;frame_square_=0;
         active_=continuation_=ready_=finishing_=finished_=false;segment_={};
         calibrated_=!config_.adaptive;heard_speech_=false;calibration_seen_=0;
@@ -101,6 +108,22 @@ public:
     bool live_view(uint64_t* start,size_t* samples) const {
         if(!initialized_||!active_||ready_)return false;
         *start=start_;*samples=used_;return true;
+    }
+    // The in-progress phrase's final input if the current pause goes on to
+    // close it. True once the phrase's voiced end (voiced_end_samples) plus
+    // `tail` samples has been captured and that pause, at
+    // end_silence_samples, would close it as an ordinary Pause: eligible, the
+    // minimum length reached by then, below the hard limit.
+    // start/voiced_end/samples describe exactly the prefix the broker's
+    // trailing-silence trim would infer. Same thread and lifetime rules as
+    // in_progress().
+    bool speculation(size_t tail,uint64_t* start,size_t* voiced_end_out,size_t* samples) const {
+        if(!initialized_||!active_||ready_||finishing_||finished_||!eligible()||!silence_)return false;
+        const size_t ve=voiced_end(used_);
+        if(!ve || ve+tail>used_)return false;
+        const size_t remaining=silence_<config_.end_silence_samples?config_.end_silence_samples-silence_:0;
+        if(used_+remaining<config_.min_segment_samples || used_+remaining>config_.max_segment_samples)return false;
+        *start=start_;*voiced_end_out=ve;*samples=ve+tail;return true;
     }
     SegmentPushResult push(const int16_t* pcm,size_t count) {
         if(!initialized_)return {0,SegmentStatus::NotInitialized};
@@ -135,7 +158,7 @@ public:
         if(ready_) {
             // A pending quiet-point cut would leave its carry behind when the
             // session seals on release: deliver the whole buffer instead.
-            if(cut_) { segment_.samples=used_;segment_.end_sample=seen_;cut_=carry_voice_=0; }
+            if(cut_) { segment_.samples=used_;segment_.end_sample=seen_;cut_=carry_voice_=0;segment_.voiced_end_samples=voiced_end(used_); }
             return SegmentStatus::Ready;
         }
         if(finished_)return SegmentStatus::Finished;
@@ -164,6 +187,7 @@ public:
             // Already-delivered trailing silence must not become a new segment's
             // pre-roll: the default zero-overlap mode is exactly nonoverlapping.
             used_=head_=history_=voice_=silence_=0;loud_run_=0;active_=continuation_=false;
+            voiced_run_=0;voiced_end_abs_=0;
             reset_utterance_levels();
         }
         segment_={};return true;
@@ -249,6 +273,10 @@ private:
         if(!active_ && voiced)begin_segment();
         if(!active_)return;
         if(voiced)voice_+=frame_count_;
+        // End of the last ambient-voiced run longer than the blip limit
+        // (absolute samples, so it survives a quiet-cut continuation).
+        if(voiced) { voiced_run_+=frame_count_; if(voiced_run_>config_.silence_blip_samples)voiced_end_abs_=seen_; }
+        else voiced_run_=0;
         if(silent) { silence_+=frame_count_; loud_run_=0; }
         else {
             loud_run_+=frame_count_;
@@ -319,7 +347,15 @@ private:
     void publish(SegmentEnd end) {
         segment_={buffer_,used_,start_,seen_,fresh_start_,static_cast<size_t>(fresh_start_-start_),
                   end==SegmentEnd::HardLimit?config_.forced_overlap_samples:0,voice_,end,continuation_};
+        segment_.voiced_end_samples=voiced_end(used_);
         ready_=true;
+    }
+    // Voiced end as an offset into the current segment, clamped to its first
+    // `samples` samples; 0 when the last qualifying run ended before it.
+    size_t voiced_end(size_t samples) const {
+        if(voiced_end_abs_<=start_)return 0;
+        const uint64_t offset=voiced_end_abs_-start_;
+        return offset<samples?static_cast<size_t>(offset):samples;
     }
     // Hard limit with hard_cut_search_samples: find the analysis frame with the
     // least DC-removed energy in the last N samples (latest wins ties: the
@@ -353,6 +389,7 @@ private:
             if(frame_energy(at)>=limit)carry_voice_+=F;
         segment_={buffer_,cut_,start_,start_+cut_,fresh_start_,static_cast<size_t>(fresh_start_-start_),
                   0,voice_,SegmentEnd::HardLimit,continuation_};
+        segment_.voiced_end_samples=voiced_end(cut_);
         ready_=true;
     }
     // n^2 * variance of one analysis frame (same scale as evaluate_frame).
@@ -372,6 +409,7 @@ private:
         if(keep>fresh)keep=fresh;
         if(keep)std::memmove(buffer_,buffer_+used_-keep,keep*sizeof(int16_t));
         history_=keep;head_=used_=voice_=silence_=0;loud_run_=0;active_=continuation_=false;
+        voiced_run_=0;voiced_end_abs_=0;
         reset_utterance_levels();
     }
     int16_t* buffer_=nullptr;
@@ -380,6 +418,8 @@ private:
     uint64_t seen_=0,start_=0,fresh_start_=0;
     size_t used_=0,head_=0,history_=0,voice_=0,silence_=0,loud_run_=0;
     size_t cut_=0,carry_voice_=0;  // pending quiet-point cut (publish_quiet_cut -> release)
+    size_t voiced_run_=0;          // current ambient-voiced run (samples)
+    uint64_t voiced_end_abs_=0;    // end of the last run longer than the blip limit
     int64_t frame_sum_=0;
     uint64_t frame_square_=0;
     uint16_t frame_count_=0;
