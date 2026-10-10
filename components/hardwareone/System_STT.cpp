@@ -810,19 +810,20 @@ static bool sttSpecReferencedLocked(const StreamRun& run, uint32_t id) {
     if (c.state != StreamSlotState::Free && c.specId == id) return true;
   return false;
 }
-// Stop a speculative run whose phrase changed, or when any other final is
-// waiting (it is then useless); keep going for the phrase it matched.
+// Stop a speculative run whose phrase changed, or when a final it does not
+// match is waiting; keep going for the phrase it matched. Only the oldest
+// Ready phrase counts, because the worker takes that one next; later phrases
+// waiting behind a matched one do not abort the run (which made the matched
+// phrase start again from scratch: up to ~1.2 s close->start).
 static bool sttSpecPreempted(void* context) {
   auto& run = *static_cast<StreamRun*>(context);
-  bool stop = false;
+  bool stop;
   portENTER_CRITICAL(&gSTTMux);
-  bool referenced = run.specRunId == run.specLiveId;
-  for (const auto& candidate : run.slots) {
-    if (candidate.state != StreamSlotState::Ready) continue;
-    if (candidate.specId == run.specRunId) referenced = true;
-    else stop = true;
-  }
-  if (!referenced) stop = true;
+  const StreamSlot* oldest = nullptr;
+  for (const auto& candidate : run.slots)
+    if (candidate.state == StreamSlotState::Ready && (!oldest || candidate.sequence < oldest->sequence))
+      oldest = &candidate;
+  stop = oldest ? oldest->specId != run.specRunId : run.specRunId != run.specLiveId;
   portEXIT_CRITICAL(&gSTTMux);
   return stop || sttStreamCancelled(context);
 }
