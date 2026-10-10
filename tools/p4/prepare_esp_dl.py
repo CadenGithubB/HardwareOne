@@ -7,7 +7,12 @@ EXTRA_COMPONENT_DIRS). It is the pristine 3.3.12 package that
 dependencies.lock.esp32p4 pins plus tools/p4/esp-dl-3.3.12-hw1.patch:
 
   - pointwise-conv tiles sized for the P4's shared 64 KB L1D (16 KB filter
-    tile instead of 32 KB; bit-exact, only the order of tile calls changes);
+    tile instead of 32 KB, 64-pixel spatial tile instead of 32; bit-exact,
+    only the order of tile calls changes);
+  - single-column int8 depthwise layers ([K,1] filters) run per 64-channel
+    block so the sliding window and the block's filter stay in L1, and split
+    across the two cores by channel halves at every length instead of by
+    rows (bit-identical output: channels are independent);
   - dl_tool_metadata.{hpp,cpp}: every block a dl::Model keeps for its lifetime
     is requested through one allocator hook. With no hook installed each site
     behaves exactly as upstream; the STT runtime installs an explicit PSRAM
@@ -38,8 +43,8 @@ VERSION = "3.3.12"
 COMPONENT_HASH = "d792e72ab3858d805d8918d1215a862541344625f62134597866834de666fd04"
 SOURCE_TREE_SHA256 = "e5c5155078c46e090ad7f08a7239bb52d456394fab1356d78b4c127eefcb6e86"
 PATCH = ROOT / "esp-dl-3.3.12-hw1.patch"
-PATCH_SHA256 = "ea549dc38e38cd2cc22287a8a114080e526c71316a2e95ad4d34c2d882300520"
-PATCHED_TREE_SHA256 = "453bc544b0e3837dfc481c658032734daa3220a49e780980941e8a5db0ade8f3"
+PATCH_SHA256 = "6b707907c6e97affd66c3784e49d2c490640375480412136f28efa7765a0db4c"
+PATCHED_TREE_SHA256 = "96b738dfa06e56bf4b61d07c2c01f9549fb2311e42a4b1fc2fd30a6dc35d3bd6"
 MANIFEST = "hw1-esp-dl-override.json"
 # Present only in component-manager copies; not part of the package itself.
 IGNORED = {".component_hash", MANIFEST}
