@@ -101,9 +101,14 @@ bool sttAcknowledgeChunk(STTOwner owner, STTToken token, uint32_t sequence);
 bool sttRunActive(STTToken token);
 // Continuous transcription on the native Conversate microphone stream of the
 // exact left-temple connection `leftGeneration` (see audioCaptureStartG2Native).
+// publishWake (optional) is called on the STT worker, outside the broker's
+// lock, right after each final or draft is published (HW1_STT_PUBLISH_WAKE),
+// so the consumer can read it at once; it must only signal (e.g. give a
+// semaphore).
 bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
                                 char* error, size_t errorCap,
-                                const TranscriptOptions* transcriptOptions = nullptr);
+                                const TranscriptOptions* transcriptOptions = nullptr,
+                                void (*publishWake)() = nullptr);
 // Wearer pause/resume of a native session: no PCM arrives while paused, which
 // must not be mistaken for a failed microphone; the open phrase is closed.
 bool sttSetPaused(STTOwner owner, STTToken token, bool paused);

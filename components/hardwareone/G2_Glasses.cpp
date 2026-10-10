@@ -15505,7 +15505,12 @@ static bool g2ConversateLocalBegin(uint32_t leftGeneration) {
   const TranscriptOptions options = transcriptCaptureOptions(SOURCE_G2_GLASSES, epoch);
   char error[96] = {};
   STTToken token = 0;
-  if (!sttBeginContinuousG2Native(owner, leftGeneration, &token, error, sizeof(error), &options)) {
+  // The broker wakes this owner (g2ControlWake, a semaphore give from the STT
+  // worker) as soon as a final or a draft is published (HW1_STT_PUBLISH_WAKE);
+  // the 200 ms conv-stt timer below stays as the fallback, and is what
+  // notices the end of a run (a worker exit publishes nothing).
+  if (!sttBeginContinuousG2Native(owner, leftGeneration, &token, error, sizeof(error), &options,
+                                  g2ControlWake)) {
     WARN_SYSTEMF("[G2-CONVERSATE] local transcription unavailable: %s", error);
     return false;
   }
