@@ -1300,6 +1300,25 @@ static void testSpeculativeFinal() {
   assert(specAborts >= 1);
   for (const auto& call : engineHistory) assert(call.inferenceSamples <= call.rawSamples);
 
+  // A run whose phrase is the oldest waiting final keeps going while a later
+  // phrase closes behind it (the worker takes the matched one next), and is
+  // promoted; the later phrase then runs normally.
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {96000, 176000}}; specHold = true;
+  token = begin(); started(token);
+  feedPastSpeculation(token, 83000, 85600);
+  await([] { return specCalls == 1; }, "held speculative run for phrase 1");
+  feed(token, 14 * 16000);
+  await([&] { return snapshot(token).segmentsCaptured == 2; }, "phrase 2 closed behind the matched phrase 1");
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));  // a preemption would have landed by now
+  assert(specAborts == 0 && engineCalls == 0);
+  specHold = false;
+  await([&] { return snapshot(token).segmentsCompleted == 2; }, "promoted phrase 1, then phrase 2");
+  assert(specHistory.size() == 1 && specHistory[0].sequence == 1 && specHistory[0].samples == 83200);
+  assert(engineHistory.size() == 1 && engineHistory[0].sequence == 2);
+  std::vector<STTTextChunk> queued; acknowledgeAll(token, &queued);
+  assert(queued.size() == 2 && std::string(queued[0].text) == "segment 1" && std::string(queued[1].text) == "segment 2");
+  assert(sttRequestFinish(owner, token)); complete(token);
+
   // A sub-4 s phrase (1 s voice) that short-close closes on its 1 s pause
   // speculates on voiced end + 200 ms as well and is promoted.
   reset(); allVoice = false; voiceIntervals = {{0, 16000}};
@@ -1494,8 +1513,9 @@ static void testNativeQueueFullWithCaches() {
   // attached, so phrase 3 has none), 4 and 5 are dropped with their caches
   // and speculation; nothing fails, leaks or mismatches, and later phrases
   // continue in order with capture-features again.
-  // Phrase 1's speculative run is held, so its final cannot be promoted;
-  // phrase 2's close aborts it and phrase 1's final then blocks the engine.
+  // Phrase 1's speculative run is held. Phrase 1's final matches it and is
+  // the oldest waiting, so phrases 2 and 3 queued behind it do not abort it;
+  // once released it is promoted and phrase 2's final blocks the engine.
   reset(); enginePermits = 0; specHold = true; allVoice = false; readLimit = 800;
   for (unsigned i = 0; i < 6; ++i) voiceIntervals.push_back({i * 96000, i * 96000 + 80000});
   const unsigned mismatchesBefore = rowMismatches.load();
@@ -1503,10 +1523,12 @@ static void testNativeQueueFullWithCaches() {
   feedPastSpeculation(token, 82800, 84000);
   await([] { return specCalls == 1; }, "phrase 1 speculative run held");
   feed(token, 5 * 96000);
-  await([] { return engineCalls == 1 && specAborts == 1; }, "speculation aborted, first native final blocked");
+  await([&] { return snapshot(token).segmentsCaptured == 3 && droppedPhrases() == 2; }, "queue full behind the held run");
   auto s = snapshot(token);
-  assert(s.workerActive && !s.error[0] && s.segmentsCaptured == 3 && droppedPhrases() == 2);
-  specHold = false; enginePermits = UINT32_MAX;
+  assert(s.workerActive && !s.error[0] && specAborts == 0 && engineCalls == 0);
+  specHold = false;
+  await([] { return engineCalls == 1; }, "phrase 1 promoted, phrase 2's native final blocked");
+  enginePermits = UINT32_MAX;
   await([&] { return snapshot(token).segmentsCompleted == 3; }, "native backlog drained");
   feed(token, 6 * 96000);
   await([&] { return snapshot(token).segmentsCompleted == 4; }, "native phrase after the drops");
@@ -1575,7 +1597,7 @@ int main() {
   testRequestedSource(); puts("PASS per-session requested source overrides the setting and fails strictly");
   testKeepWarm(); puts("PASS keep-warm: park/adopt across runs, hold expiry and millis wrap, low-PSRAM release, warm load (awaited past 20 s) and its back-off");
   testTrailingTrim(); puts("PASS trailing-silence trim: ambient gate, 30 ms blips ignored, spans whole, session end");
-  testSpeculativeFinal(); puts("PASS speculative final: promoted on the same input, dropped on resumed speech, aborted when busy, short closes too, never at 20 s");
+  testSpeculativeFinal(); puts("PASS speculative final: promoted on the same input, dropped on resumed speech, aborted when busy, kept while later phrases queue behind its own, short closes too, never at 20 s");
   testFeatureFaults(); puts("PASS capture-feature pool/task failures leave the session on the batch frontend");
   testShortClose(); puts("PASS short close: short phrases close after 1 s of silence, 600 ms from 4 s");
   testShortCloseSpeculation(); puts("PASS short closes speculate on their trimmed input and promote; 4 s-in-pause phrases speculate and promote");
