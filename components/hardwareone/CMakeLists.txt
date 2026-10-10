@@ -698,7 +698,14 @@ idf_component_register(
 set_source_files_properties(System_QuickNote.cpp QuickNote_Store.cpp G2_Page_Notes.cpp
                             PROPERTIES COMPILE_OPTIONS "-Os")
 if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
-    set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    # The STT engine is built with -O2 instead of the app-wide -Os (source
+    # options follow the component's, so -O2 wins): measured ~41 ms per 15x5
+    # phrase on the P4. The frontend keeps -ffp-contract=off (no FMA
+    # contraction: features stay bit-identical to the reference). One call per
+    # file: set_source_files_properties replaces COMPILE_OPTIONS.
+    set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-O2")
+    set_source_files_properties(stt/quartznet_runtime.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    set_source_files_properties(stt/stt_lm.cpp PROPERTIES COMPILE_OPTIONS "-O2")
     # ESP-SR also registers a model whitelist. Union QuartzNet's exact ops and
     # kernel variants into it; otherwise SR's WN10 list strips our Relu/int8 Conv.
     idf_build_get_property(_stt_build_components BUILD_COMPONENTS)
