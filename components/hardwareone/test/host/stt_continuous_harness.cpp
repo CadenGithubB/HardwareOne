@@ -368,6 +368,11 @@ static std::atomic<unsigned> draftsPublished{0};
 static std::atomic<int> trimmedCalls{0};
 struct SpecCall { uint64_t start; size_t samples; uint32_t sequence; };
 static std::vector<SpecCall> specHistory;
+// Phrase `sequence` was transcribed exactly once on `samples` of input (0: any):
+// by one final run, or with no final run by its promoted speculative run. Short
+// closes speculate too, so when a test feeds a whole phrase at once capture
+// timing decides which of the two it is.
+static void assertTranscribedOnce(uint32_t sequence, size_t samples = 0);
 static std::atomic<int> specCalls{0}, specAborts{0};
 static std::atomic<bool> specHold{false};
 static StreamRun* gRun = nullptr;
@@ -709,7 +714,8 @@ static void testLongRunsAndPauses() {
     assert(sttAcknowledgeChunk(owner, paused, chunk.sequence));
   }
   assert(sttRequestFinish(owner, paused)); complete(paused);
-  assert(snapshot(paused).state == STTState::Done && engineCalls == 10 && snapshot(paused).sessionMs >= 100000);
+  assert(snapshot(paused).state == STTState::Done && snapshot(paused).sessionMs >= 100000);
+  for (uint32_t sequence = 1; sequence <= 10; ++sequence) assertTranscribedOnce(sequence);
 
   reset(); allVoice = false; dc = 16000;
   const auto silent = begin(); started(silent); feed(silent, 120 * 16000);
@@ -1220,6 +1226,15 @@ static void testTrailingTrim() {
 }
 
 static bool specHeld() { std::lock_guard<std::mutex> lock(gSTTMux); return gRun && gRun->specDoneId; }
+static void assertTranscribedOnce(uint32_t sequence, size_t samples) {
+  std::lock_guard<std::mutex> lock(engineMutex);
+  unsigned finals = 0, specs = 0;
+  for (const auto& call : engineHistory)
+    if (call.sequence == sequence) { ++finals; assert(!samples || call.inferenceSamples == samples); }
+  for (const auto& call : specHistory)
+    if (call.sequence == sequence) { ++specs; assert(!samples || call.samples == samples); }
+  assert(finals == 1 || (!finals && specs));
+}
 // combined: feed to under one block (1024) before a speculation point (voiced end
 // + 200 ms), let the worker finish any draft, then feed past it, so the
 // trigger falls in the first block, where the capture task's speculation
@@ -1235,7 +1250,8 @@ static void feedPastSpeculation(STTToken token, uint64_t before, uint64_t after)
 }
 // speculation: speculation starts at voiced end + 200 ms, is promoted when the pause
 // closes the phrase with the same voiced end, and is dropped when speech
-// resumes; phrases held by the 4 s floor or cut at 20 s never speculate.
+// resumes; short phrases closed by the 1 s short close speculate too, phrases
+// cut at 20 s never do.
 static void testSpeculativeFinal() {
   // Promoted: 5 s voice; feed to 5.35 s, let the run finish, then the pause.
   reset(); allVoice = false; voiceIntervals = {{0, 80000}};
@@ -1284,14 +1300,20 @@ static void testSpeculativeFinal() {
   assert(specAborts >= 1);
   for (const auto& call : engineHistory) assert(call.inferenceSamples <= call.rawSamples);
 
-  // A sub-4 s phrase (1 s voice; combined: short-close closes it on its 1 s pause) and a
-  // 20 s hard limit never speculate.
+  // A sub-4 s phrase (1 s voice) that short-close closes on its 1 s pause
+  // speculates on voiced end + 200 ms as well and is promoted.
   reset(); allVoice = false; voiceIntervals = {{0, 16000}};
-  token = begin(); started(token); feed(token, 6 * 16000);
-  await([&] { return snapshot(token).segmentsCompleted == 1; }, "floor phrase");
-  assert(peek(token).endSample - peek(token).startSample == 32000 && specCalls == 0 && engineHistory.size() == 1);
-  assert(engineHistory[0].inferenceSamples == 4960 + 16000 - 160 + 3200 || engineHistory[0].inferenceSamples < 64000);
+  token = begin(); started(token);
+  feedPastSpeculation(token, 19000, 16000 + 3200 + 2400);
+  await([] { return specCalls == 1; }, "speculative run on a short phrase");
+  await([] { return specHeld(); }, "short phrase's speculative result held");
+  feed(token, 6 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "promoted short phrase");
+  chunk = peek(token);
+  assert(chunk.endSample - chunk.startSample == 32000 && std::string(chunk.text) == "segment 1");
+  assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 16000 + 3200);
   assert(sttRequestFinish(owner, token)); complete(token);
+  // A 20 s hard limit never speculates.
   reset();
   token = begin(); started(token); feed(token, 21 * 16000);
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "hard-limit phrase");
@@ -1339,49 +1361,57 @@ static void testShortClose() {
   }
 }
 
-// All four together: short-close's sub-4 s close (1 s of silence) is never
-// speculated and is trimmed like any pause; a phrase that reaches 4 s during
-// its pause closes on the 600 ms pause and is speculated/promoted as in speculation.
+// All four together: short-close's sub-4 s close (1 s of silence) is
+// speculated on voiced end + 200 ms (the trimmed input) and promoted; a phrase
+// that reaches 4 s during its pause closes on the 600 ms pause and is
+// speculated/promoted as in speculation.
 static void testShortCloseSpeculation() {
   // 2 s voice: 600 ms of silence leaves it at 2.6 s (< 4 s), so only short-close's 1 s
-  // pause closes it (span 3 s); trim infers voiced end + 200 ms.
+  // pause closes it (span 3 s); the speculative run takes voiced end + 200 ms.
   reset(); allVoice = false; voiceIntervals = {{0, 32000}};
-  auto token = begin(); started(token); feed(token, 6 * 16000);
+  auto token = begin(); started(token);
+  feedPastSpeculation(token, 35000, 32000 + 3200 + 2400);
+  await([] { return specCalls == 1; }, "speculation on a short-close phrase");
+  await([] { return specHeld(); }, "held short-close speculative result");
+  feed(token, 6 * 16000);
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "short-close short phrase");
   auto chunk = peek(token);
   assert(chunk.endSample - chunk.startSample == 48000 && std::string(chunk.text) == "segment 1");
-  assert(specCalls == 0 && engineHistory.size() == 1 && engineHistory[0].inferenceSamples == 32000 + 3200);
+  assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 32000 + 3200);
   assert(sttAcknowledgeChunk(owner, token, 1));
   assert(sttRequestFinish(owner, token)); complete(token);
 
   // Voice 0-1 s and 1.8-3.5 s: 4 s is reached during the second pause, so the
   // 600 ms rule closes it (span 4.1 s) and it is speculated on voiced end +
-  // 200 ms, then promoted.
+  // 200 ms, then promoted. The first pause is speculated on too (a 1 s short
+  // close could have followed); that result is dropped when speech resumes.
   reset(); allVoice = false; voiceIntervals = {{0, 16000}, {28800, 56000}};
   token = begin(); started(token);
+  feedPastSpeculation(token, 19000, 16000 + 3200 + 2400);
+  await([] { return specCalls == 1; }, "speculation in the first, short pause");
+  await([] { return specHeld(); }, "held first-pause speculative result");
   feedPastSpeculation(token, 59000, 56000 + 3200 + 960);
-  await([] { return specCalls == 1; }, "speculation on a phrase reaching 4 s in its pause");
+  await([] { return specCalls == 2; }, "speculation on a phrase reaching 4 s in its pause");
   await([] { return specHeld(); }, "held speculative result");
   feed(token, 10 * 16000);
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "promoted phrase reaching 4 s in its pause");
   chunk = peek(token);
   assert(chunk.endSample - chunk.startSample == 65600 && std::string(chunk.text) == "segment 1");
-  assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 56000 + 3200);
+  assert(engineHistory.empty() && specHistory.size() == 2);
+  assert(specHistory[0].samples == 16000 + 3200 && specHistory[1].samples == 56000 + 3200);
   assert(sttAcknowledgeChunk(owner, token, 1));
   assert(sttRequestFinish(owner, token)); complete(token);
 
-  // Several short replies in one session: each closes on its 1 s pause, none
-  // speculates, all are trimmed.
+  // Several short replies in one session: each closes on its 1 s pause and
+  // is transcribed once on its trimmed input (final run or promoted
+  // speculative run).
   reset(); allVoice = false;
   for (unsigned i = 0; i < 4; ++i) voiceIntervals.push_back({i * 64000, i * 64000 + 24000});
   token = begin(); started(token); feed(token, 4 * 64000 + 16000);
   await([&] { return snapshot(token).segmentsCompleted == 4; }, "four short replies");
-  assert(specCalls == 0 && engineHistory.size() == 4);
   // Pre-roll: none before the first (calibration ends at its voice), 300 ms later.
-  for (size_t i = 0; i < engineHistory.size(); ++i) {
-    const auto& call = engineHistory[i];
-    assert(call.rawSamples == (i ? 44800u : 40000u) && call.inferenceSamples == call.rawSamples - 16000 + 3200);
-  }
+  for (const auto& call : engineHistory) assert(call.rawSamples == (call.sequence > 1 ? 44800u : 40000u));
+  for (uint32_t seq = 1; seq <= 4; ++seq) assertTranscribedOnce(seq, (seq > 1 ? 4800 : 0) + 24000 + 3200);
   for (uint32_t seq = 1; seq <= 4; ++seq) {
     STTTextChunk out; assert(sttReadChunk(owner, token, &out) && out.sequence == seq);
     assert(sttAcknowledgeChunk(owner, token, seq));
@@ -1399,7 +1429,8 @@ static void testShortCloseSpeculation() {
 static uint32_t droppedPhrases() { std::lock_guard<std::mutex> lock(gSTTMux); return gRun ? gRun->droppedSegments : 0; }
 static void testNativeMechanisms() {
   // short-close short close (2 s reply, 1 s pause), then a 5 s phrase that speculation
-  // speculates on its voiced end + 200 ms and promotes; trim trims both.
+  // speculates on its voiced end + 200 ms and promotes; trim trims both (the
+  // reply is transcribed once on its trimmed input: final or promoted run).
   reset(); allVoice = false; readLimit = 800;
   voiceIntervals = {{0, 32000}, {64000, 144000}};
   const unsigned rowsBefore = cachedRows.load(), mismatchesBefore = rowMismatches.load();
@@ -1409,19 +1440,20 @@ static void testNativeMechanisms() {
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "native short-close short phrase");
   auto chunk = peek(token);
   assert(chunk.endSample - chunk.startSample == 48000 && std::string(chunk.text) == "segment 1");
-  assert(engineHistory.size() == 1 && engineHistory[0].inferenceSamples == 32000 + 3200 && specCalls == 0);
+  assertTranscribedOnce(1, 32000 + 3200);
   await([] { return publishWakes == 1; }, "publish wake wake for the first final");
   assert(sttAcknowledgeChunk(owner, token, 1));
+  const size_t firstFinals = engineHistory.size(), firstSpecs = specHistory.size();
   feedPastSpeculation(token, 146800, 148000);
-  await([] { return specCalls == 1; }, "native speculative run");
+  await([&] { return size_t(specCalls) == firstSpecs + 1; }, "native speculative run");
   await([] { return specHeld(); }, "native speculative result held");
   feed(token, 160000);
   await([&] { return snapshot(token).segmentsCompleted == 2; }, "native promoted final");
   chunk = peek(token);
   assert(chunk.sequence == 2 && std::string(chunk.text) == "segment 2");
   assert(chunk.startSample == kCalibrationSamples + 64000 - 4800 && chunk.endSample == kCalibrationSamples + 144000 + 9600);
-  assert(engineHistory.size() == 1 && specHistory.size() == 1);
-  assert(specHistory[0].start == kCalibrationSamples + 64000 - 4800 && specHistory[0].samples == 80000 + 4800 + 3200);
+  assert(engineHistory.size() == firstFinals && specHistory.size() == firstSpecs + 1);
+  assert(specHistory.back().start == kCalibrationSamples + 64000 - 4800 && specHistory.back().samples == 80000 + 4800 + 3200);
   await([] { return publishWakes == 2; }, "publish wake wake for the promoted final");
   assert(sttAcknowledgeChunk(owner, token, 2));
   assert(sttRequestFinish(owner, token)); complete(token);
@@ -1450,7 +1482,7 @@ static void testNativePauseCloses() {
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "paused phrase transcribed");
   const auto chunk = peek(token);
   assert(chunk.startSample == kCalibrationSamples && std::string(chunk.text) == "segment 1");
-  assert(engineHistory.size() == 1 && engineHistory[0].inferenceSamples == 32160 + 3200);  // trim: voiced frame end + 200 ms
+  assertTranscribedOnce(1, 32160 + 3200);  // trim: voiced frame end + 200 ms
   assert(publishWakes == 1 && snapshot(token).workerActive && !snapshot(token).error[0]);
   assert(sttAcknowledgeChunk(owner, token, 1));
   assert(sttSetPaused(owner, token, false));
@@ -1543,10 +1575,10 @@ int main() {
   testRequestedSource(); puts("PASS per-session requested source overrides the setting and fails strictly");
   testKeepWarm(); puts("PASS keep-warm: park/adopt across runs, hold expiry and millis wrap, low-PSRAM release, warm load (awaited past 20 s) and its back-off");
   testTrailingTrim(); puts("PASS trailing-silence trim: ambient gate, 30 ms blips ignored, spans whole, session end");
-  testSpeculativeFinal(); puts("PASS speculative final: promoted on the same input, dropped on resumed speech, aborted when busy, never under the floor or at 20 s");
+  testSpeculativeFinal(); puts("PASS speculative final: promoted on the same input, dropped on resumed speech, aborted when busy, short closes too, never at 20 s");
   testFeatureFaults(); puts("PASS capture-feature pool/task failures leave the session on the batch frontend");
   testShortClose(); puts("PASS short close: short phrases close after 1 s of silence, 600 ms from 4 s");
-  testShortCloseSpeculation(); puts("PASS short closes never speculate and are trimmed; 4 s-in-pause phrases speculate and promote");
+  testShortCloseSpeculation(); puts("PASS short closes speculate on their trimmed input and promote; 4 s-in-pause phrases speculate and promote");
   testNativeMechanisms(); puts("PASS native path: short close, speculative promote, trim, cached feature rows on 800-sample reads; a publish wake per final, none without a hook");
   testNativePauseCloses(); puts("PASS native pause: a mid-word paused short phrase closes on the fed silence");
   testNativeQueueFullWithCaches(); puts("PASS native full queue drops phrases with live feature caches/speculative requests, nothing leaks or mismatches");

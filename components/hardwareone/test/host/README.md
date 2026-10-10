@@ -1419,11 +1419,11 @@ python3 components/hardwareone/test/host/test_g2_tl_send.py
 at its default (on): capture-time features (`HW1_STT_CAPTURE_FEATURES`; each
 cached row is compared bit for bit with the real frontend's batch row of the
 exact, possibly trimmed or speculative, input), trailing-silence trim,
-speculative finals (promoted on the same input, dropped on resumed speech,
-aborted when a queued final needs the worker), the 1 s short close, the publish
-wake for drafts and finals, the 1.25 s native pause feed, feature-pool and task
-failures, native full queues and restarts, alongside the existing keep-warm,
-per-session source and transcript tests. `test_stt_runtime.py` builds the
+speculative finals (short closes included; promoted on the same input, dropped
+on resumed speech, aborted when a queued final needs the worker), the 1 s short
+close, the publish wake for drafts and finals, the 1.25 s native pause feed,
+feature-pool and task failures, native full queues and restarts, alongside the
+existing keep-warm, per-session source and transcript tests. `test_stt_runtime.py` builds the
 one-shot path with all of those switches off, so every off path still compiles.
 
 `test_quartznet_cache.py` runs the runtime twice: per-call models

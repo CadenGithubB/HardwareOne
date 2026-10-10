@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -116,9 +117,11 @@ public:
     }
     // The in-progress phrase's final input if the current pause goes on to
     // close it. True once the phrase's voiced end (voiced_end_samples) plus
-    // `tail` samples has been captured and that pause, at
-    // end_silence_samples, would close it as an ordinary Pause: eligible, the
-    // minimum length reached by then, below the hard limit.
+    // `tail` samples has been captured and that pause would close it as an
+    // ordinary Pause below the hard limit: eligible, and at
+    // end_silence_samples the minimum length reached by then or, with
+    // short_close_silence_samples, at the short close or on reaching the
+    // minimum, whichever comes first.
     // start/voiced_end/samples describe exactly the prefix the broker's
     // trailing-silence trim would infer. Same thread and lifetime rules as
     // in_progress().
@@ -127,7 +130,17 @@ public:
         const size_t ve=voiced_end(used_);
         if(!ve || ve+tail>used_)return false;
         const size_t remaining=silence_<config_.end_silence_samples?config_.end_silence_samples-silence_:0;
-        if(used_+remaining<config_.min_segment_samples || used_+remaining>config_.max_segment_samples)return false;
+        // Below the minimum length a continuing pause still closes the phrase
+        // as a Pause, at short_close_silence_samples or on reaching the
+        // minimum, whichever comes first (the evaluate_frame rule).
+        size_t need=remaining;
+        if(used_+remaining<config_.min_segment_samples) {
+            if(!config_.short_close_silence_samples)return false;
+            const size_t to_min=config_.min_segment_samples-used_;
+            const size_t to_short=silence_<config_.short_close_silence_samples?config_.short_close_silence_samples-silence_:0;
+            need=std::max(remaining,std::min(to_min,to_short));
+        }
+        if(used_+need>config_.max_segment_samples)return false;
         *start=start_;*voiced_end_out=ve;*samples=ve+tail;return true;
     }
     SegmentPushResult push(const int16_t* pcm,size_t count) {
