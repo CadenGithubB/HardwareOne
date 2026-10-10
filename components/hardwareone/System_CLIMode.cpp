@@ -380,6 +380,17 @@ bool cliModeDispatchInput(const String& line, char* out, size_t outSize) {
   return consumed;
 }
 
+bool cliModeExitCanComplete() {
+  if (!gCmdExecTaskHandle ||
+      xTaskGetCurrentTaskHandle() != gCmdExecTaskHandle) {
+    return false;
+  }
+  ModeLock lock;
+  return lock && sMode.mode && sMode.phase == CLIModePhase::Exiting &&
+         ownerStillLive(sMode.owner) &&
+         !modeTimedOutLocked(esp_timer_get_time());
+}
+
 bool cliModeExecutorDrainPending() {
   if (!gCmdExecTaskHandle ||
       xTaskGetCurrentTaskHandle() != gCmdExecTaskHandle) {

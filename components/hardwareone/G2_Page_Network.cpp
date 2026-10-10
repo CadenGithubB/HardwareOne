@@ -27,7 +27,7 @@
 #if ENABLE_WIFI
 #include <WiFi.h>
 #include "System_WiFi.h"
-#include "System_WiFiNetworks.h"
+#include "network/wifi/System_WiFiNetworks.h"
 #endif
 
 #if ENABLE_ESPNOW

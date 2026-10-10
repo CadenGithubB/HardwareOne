@@ -7,44 +7,16 @@
 // Setup Wizard — CLIMode-based, exact-session-owned
 // ============================================================================
 //
-// Phase 5 of the CLIMode rollout. Replaces the synchronous-blocking
-// runSetupWizard() for `cmd_featuresetup` invocations: instead of parking
-// the cmd_exec task in waitForSerialInputBlocking() for the duration of
-// the wizard, each user input is one short handler call that mutates
-// persistent state and returns. The cmd_exec task is free between
-// keystrokes. The wizard accepts input only from the live stateful session
-// that opened it (human web CLI, serial, or OLED); machine/stateless inputs
-// continue through normal command dispatch without touching wizard state.
+// Each input edits the shared wizard draft and returns, leaving cmd_exec free
+// between keystrokes. Input belongs to the live stateful session that opened
+// the mode; machine/stateless inputs continue through normal command dispatch.
+// Serial and OLED reuse the same choices, navigation and rendering model as
+// boot-time setup. Sub-pages collect one text field per input.
 //
-// What stays the same:
-//   - The wizard's logical state model (SetupWizardPage, currentSelection,
-//     toggles, timezone/LED/etc. selectors) is unchanged. All the
-//     existing state mutators (wizardToggleCurrentItem, wizardNextPage,
-//     setWizardTimezoneSelection, ...) and the rendering helpers
-//     (printSerialPageStatus, render*Page) are reused as-is.
-//   - The result struct (SetupWizardResult) is unchanged.
-//   - WiFi credentials and settings still get applied via
-//     wizardFinalize() at completion.
-//
-// What's different:
-//   - One CLIMode owns the wizard. cmd_featuresetup enters it and
-//     returns immediately. The user's next CLI input is interpreted
-//     as wizard navigation (n / b / number / field value).
-//   - Sub-pages (ESPNOW identity, MQTT broker config, WiFi credentials)
-//     are unrolled into linear sub-modes: one user input per field,
-//     no inner while(!Serial.available()) loops.
-//   - OLED joystick input (when the user is invoking featuresetup
-//     from an OLED-equipped device) flows through the CLIMode's
-//     onTick callback, called from the main task's loop().
-//
-// What is NOT migrated by this phase:
-//   - The boot-time first-time-setup path (firstTimeSetupIfNeeded ->
-//     runAndApplyFeatureWizard) keeps using the old synchronous
-//     runSetupWizard(). That path has no cmd_exec hostage problem
-//     because cmd_exec doesn't exist at boot yet; it's running on the
-//     main task as part of app initialization. The OLED + joystick
-//     polling integrates naturally there. A future phase can unify
-//     FTS too if motivated, but the cost/benefit is much lower.
+// Completion calls wizardSaveAndApplySettings once. Cancellation, inactivity
+// timeout and session loss discard the draft. The boot-time entry point keeps
+// its blocking input loop but uses this same draft and completion owner.
+// OLED input is polled by onTick on the main task.
 //
 // Caller pattern (`cmd_featuresetup`):
 //

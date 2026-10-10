@@ -24,6 +24,7 @@
 #include <sys/socket.h>
 #include <time.h>
 
+#include "System_Automation.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_Icons.h"
@@ -1470,13 +1471,6 @@ int webBroadcastSessionsHuman() {
 extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
 extern void streamSensorsContent(httpd_req_t* req, const String& username);
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
-#if ENABLE_AUTOMATION
-extern bool sanitizeAutomationsJson(String& json);
-extern String redactAutomationsJsonForResponse(const String& json);
-extern void writeAutomationsJsonAtomic(const String& json);
-extern const char* AUTOMATIONS_JSON_FILE;
-extern bool gAutomationsDirty;
-#endif
 extern bool readText(const char* path, String& out);
 extern const char* buildSensorStatusJson();
 // gSensorStatusSeq declared below
@@ -5352,7 +5346,6 @@ extern bool extractArrayByKey(const String& json, const char* key, String& out);
 extern bool extractArrayItem(const String& arrayStr, int& pos, String& out);
 extern bool parseJsonInt(const String& json, const char* key, int& out);
 extern bool parseJsonString(const String& json, const char* key, String& out);
-extern const char* AUTOMATIONS_JSON_FILE;
 
 esp_err_t handleAutomationsExport(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);

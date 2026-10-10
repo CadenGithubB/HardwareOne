@@ -84,7 +84,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_SelfDevice.h"
 #include "System_Clock.h"
 #include "System_NTP.h"
-#include "System_WiFiNetworks.h"
+#include "network/wifi/System_WiFiNetworks.h"
 #include "System_CLI.h"
 #include "System_Cm5Presence.h"
 #include "System_LiveAudio.h"
@@ -1626,7 +1626,7 @@ void hardwareone_setup() {
 #if ENABLE_AUTOMATION
   // Both axes: automationEnabled is permission, automationAutoStart is boot
   // intent. The scheduler can still be brought up later with
-  // `automation system enable`, which sets gAutomationSchedulerRunning itself.
+  // `automation system enable`, which starts the scheduler through its owner.
   if (gSettings.automationEnabled && ramFlushResolve(RF_AUTOMATION, gSettings.automationAutoStart)) {
     if (!initAutomationSystem()) {
       ERROR_SYSTEMF("FATAL: Failed to initialize automation system");
@@ -2226,7 +2226,7 @@ void hardwareone_setup() {
   // BOOT-trigger automations fired even with automations switched off —
   // runAutomationsOnBoot() itself only checks a once-per-boot latch and the
   // filesystem, never the setting.
-  if (gAutomationSchedulerRunning) {
+  if (automationSchedulerRunning()) {
     runAutomationsOnBoot();
   }
 #endif
@@ -2681,31 +2681,10 @@ void hardwareone_loop() {
   }
 
 #if ENABLE_AUTOMATION
-  // gAutomationSchedulerRunning, not automationAutoStart: autostart is boot
-  // intent only, and gating the tick on it would leave a runtime
-  // `automation system enable` enabled-but-never-ticking. The flag is also what
-  // makes the boot gate hold — without it, automationsAnyDue() would report due
-  // on a null cache and schedulerTickMinute() would rebuild and run anyway.
-  if (gSettings.automationEnabled && gAutomationSchedulerRunning) {
-    static unsigned long lastAutoCheck = 0;
-    unsigned long nowAuto = millis();
-    time_t nowT = time(nullptr);
-    // Fast in-RAM due check: just an array scan of cached nextAt values, no
-    // I/O. The expensive schedulerTickMinute only runs when something is
-    // actually due, a subscribed bus event arrived, the cache is stale, an
-    // edit occurred, or the 60s safety interval elapses. Event-driven ticks
-    // are rate-limited to one per 250ms so a chatty subscribed source
-    // (gesture waving, text spam) can't degenerate the loop into a full
-    // file-read+parse every pass — events buffer in the ring meanwhile.
-    bool needFullTick = gAutomationsDirty ||
-                        automationsAnyDue(nowT) ||
-                        (automationEventsPending() && (nowAuto - lastAutoCheck >= 250)) ||
-                        (nowAuto - lastAutoCheck >= 60000);
-    if (needFullTick) {
-      gAutomationsDirty = false;
-      schedulerTickMinute();
-      lastAutoCheck = nowAuto;
-    }
+  // Settings grant permission; the scheduler owns runtime state and decides
+  // when due work, file changes or subscribed events require a full scan.
+  if (gSettings.automationEnabled) {
+    automationTick();
   }
 #endif
 

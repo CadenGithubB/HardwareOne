@@ -331,3 +331,47 @@ Evidence: `remaining-xiao-restore.log`, `remaining-xiao-final.log`, and
 SD-card testing and memory reduction remain deferred as requested. No claim is
 made here for those features or for a complete physical qualification of every
 logger entry point.
+
+## Map live recording — 2026-10-10
+
+The QT Py ESP32 Pico passed 33 bounded command/lifecycle checks using the
+preserved `0.99.97.1` `qtpy-maps-test` checkpoint image. Its application image
+is 3,702,576 bytes, SHA-256
+`607d8ed2ea6534c3a4604616a755561f0d19cba0b529e8e3fc0015c4ae1b1aef`.
+This is the image before the saved-Wi-Fi directory relocation, not the later
+build at the same version. The XIAO was not accessed during this pass.
+
+Preflight found the logger inactive, GPS stopped and the tracks directory
+empty. Original logger/GPS preferences and relevant runtime settings were saved
+privately before testing. An optional partition-table read encountered serial
+noise; application-only flashing subsequently completed with hash verification.
+Bootloader, partition table, NVS and filesystem partitions were not written.
+
+Passed checks covered:
+
+- Invalid arguments and a disabled logger refuse live recording.
+- An independent active logger prevents Map startup and remains active.
+- Live start succeeds, a repeated start is idempotent, and stop/toggle produce
+  the expected recording state.
+- Clear and load refuse while live recording is active.
+- GPS and logger boot auto-start preferences remain unchanged.
+- An external logger stop is reflected by Map status.
+- A stale Map stop leaves a replacement logger running, even when it uses the
+  same capture path as the former Map session.
+
+GPS returned connected, valid samples with no fix and zero satellites, matching
+indoor conditions. The resulting capture establishes session/file startup, not
+coordinate recording or positional accuracy. Visible display output, physical
+buttons and actual HTTP routes were not qualified in this pass. Existing host
+UI tests remain separate evidence, and broader track-buffer concurrency is
+outside this lifecycle check.
+
+After testing, logger/GPS preferences matched their original values exactly;
+ESP-NOW and display preferences were unchanged. The logger is inactive, GPS is
+stopped, both test captures were removed and the tracks directory is empty.
+The OLED is authenticated in Menu. No crash record was reported. The QT Py
+remains on the tested checkpoint Maps firmware, and its serial port is closed.
+
+Private evidence includes `checks.json`, `summary.json`, `final-state.json`,
+`gps-live-sample.json`, the verified firmware snapshot and raw command/flash
+logs. Settings backups, credentials and device identifiers stay outside Git.

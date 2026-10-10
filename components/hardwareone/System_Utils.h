@@ -128,9 +128,6 @@ inline const char* saturationLabel(uint32_t used, uint32_t cap) {
 // Settings persistence
 // NOTE: Use writeSettingsJson() from .ino instead of saveUnifiedSettings()
 
-// Automation logging
-bool appendAutoLogEntry(const char* type, const String& message);
-
 // Command audit logging (always-on, lightweight)
 void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, const char* result);
 

@@ -231,4 +231,9 @@ void cliModeTick();
 // tasks only request cancellation; they never execute mode cleanup themselves.
 bool cliModeExecutorDrainPending();
 
+// Called from onExit on cmd_exec before accepting staged work. Revalidates the
+// exact owner's session and idle deadline, including exits queued by physical
+// input. Once accepted, work may finish even if the session later disconnects.
+bool cliModeExitCanComplete();
+
 #endif // SYSTEM_CLIMODE_H

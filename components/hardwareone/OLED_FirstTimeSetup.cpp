@@ -18,6 +18,7 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_SetupWizard.h"
 #include "System_Utils.h"
 
 // OLED_I2C_ADDRESS and OLED_TRANSACTION defined in OLED_Display.h
@@ -63,8 +64,13 @@ static bool isOLEDAvailable() {
 static uint32_t waitForButtonPress() {
   uint32_t pressed = 0;
   while (pressed == 0) {
+    if (gWizardOwnsSerial) {
+      if (isWizardCancelRequested()) return 0;
+      if (Serial.available() && wizardHandleCancelInput(Serial.readStringUntil('\n'))) return 0;
+    }
     updateInputState();
     pressed = getNewlyPressedButtons();
+    if (gWizardOwnsSerial && pressed) noteWizardInputActivity();
     delay(10);
   }
   return pressed;
@@ -84,7 +90,12 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
   if (!isOLEDAvailable()) {
     Serial.print(prompt);
     Serial.print(": ");
-    return waitForSerialInputBlocking();
+    String input = waitForSerialInputBlocking();
+    if (gWizardOwnsSerial && wizardHandleCancelInput(input)) {
+      if (wasCancelled) *wasCancelled = true;
+      return "";
+    }
+    return input;
   }
 
   // Initialize keyboard
@@ -101,13 +112,23 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
     Serial.println(" (type here or use OLED keyboard):");
   }
   
-  // Store original keyboard state to modify for password mode
-  bool originalActive = true;
-  
+  // Distinguish whole-wizard cancellation from Back within this field.
+  bool wizardCancelled = false;
+
   while (oledKeyboardIsActive()) {
+    if (gWizardOwnsSerial && isWizardCancelRequested()) {
+      wizardCancelled = true;
+      oledKeyboardComplete();
+      break;
+    }
     // Check for serial input first (non-blocking)
     if (Serial.available()) {
       String serialInput = Serial.readStringUntil('\n');
+      if (gWizardOwnsSerial && wizardHandleCancelInput(serialInput)) {
+        wizardCancelled = true;
+        oledKeyboardComplete();
+        break;
+      }
       serialInput.trim();
       // 'n' = skip this field (leave blank) — only if skipping is allowed
       if (canSkip && serialInput.equalsIgnoreCase("n")) serialInput = "";
@@ -181,7 +202,11 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
     int deltaX, deltaY;
     getJoystickDelta(deltaX, deltaY);
     uint32_t newlyPressed = getNewlyPressedButtons();
-    
+    if (gWizardOwnsSerial && (newlyPressed || gNavEvents.wheelDelta ||
+        abs(deltaX) > JOYSTICK_DEADZONE || abs(deltaY) > JOYSTICK_DEADZONE)) {
+      noteWizardInputActivity();
+    }
+
     oledKeyboardHandleInput(deltaX, deltaY, newlyPressed);
     
     delay(50);
@@ -194,7 +219,7 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
   );
   
   // Check if cancelled
-  if (oledKeyboardIsCancelled()) {
+  if (wizardCancelled || oledKeyboardIsCancelled()) {
     if (wasCancelled) *wasCancelled = true;
     oledKeyboardReset();
     return "";
@@ -416,6 +441,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
   if (!isOLEDAvailable()) {
     Serial.println("Enter WiFi SSID (or press Enter to skip): ");
     outSSID = waitForSerialInputBlocking();
+    if (gWizardOwnsSerial && wizardHandleCancelInput(outSSID)) { outSSID = ""; return false; }
     outSSID.trim();
     return (outSSID.length() > 0);
   }
@@ -423,6 +449,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
 #if ENABLE_WIFI
   FtsWifiScanCacheGuard cacheGuard;
   for (;;) {  // rescan/manual-back return here without recursive stack growth
+    if (gWizardOwnsSerial && isWizardCancelRequested()) { outSSID = ""; return false; }
     clearFtsWifiScanCache();
 
     OLED_TRANSACTION(
@@ -534,6 +561,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
     bool rescanRequested = false;
 
     while (!confirmed) {
+      if (gWizardOwnsSerial && isWizardCancelRequested()) { outSSID = ""; return false; }
       const int maxVisible = 5;
       if (selection < scrollOffset) {
         scrollOffset = selection;
@@ -590,6 +618,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
 
       if (Serial.available()) {
         String serialInput = Serial.readStringUntil('\n');
+        if (gWizardOwnsSerial && wizardHandleCancelInput(serialInput)) { outSSID = ""; return false; }
         serialInput.trim();
         if (serialInput.length() > 0) {
           if (serialInput.equalsIgnoreCase("skip")) {
@@ -628,6 +657,10 @@ bool getOLEDWiFiSelection(String& outSSID) {
       int deltaX, deltaY;
       getJoystickDelta(deltaX, deltaY);
       const uint32_t newlyPressed = getNewlyPressedButtons();
+      if (gWizardOwnsSerial && (newlyPressed || gNavEvents.wheelDelta ||
+          abs(deltaX) > JOYSTICK_DEADZONE || abs(deltaY) > JOYSTICK_DEADZONE)) {
+        noteWizardInputActivity();
+      }
 
       if (deltaY < -JOYSTICK_DEADZONE || gNavEvents.wheelDelta < 0) {
         if (selection > 0) --selection;

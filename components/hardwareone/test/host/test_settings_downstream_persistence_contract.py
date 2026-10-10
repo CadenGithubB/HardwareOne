@@ -62,10 +62,12 @@ assert mode_exit.find("if (sWizard.result.completed)") < mode_exit.find("wizardS
 for adapter in (legacy_apply, mode_exit):
     assert "writeSettingsJson()" not in adapter
     assert "writeDebugJson()" not in adapter
-completion = between(legacy, "void wizardSaveAndApplySettings(", "\n}")
-assert completion.count("writeSettingsJson()") == 1
-assert completion.count("writeDebugJson()") == 1
-assert completion.find("if (!result.completed)") < completion.find("writeSettingsJson()")
+completion = between(legacy, "bool wizardSaveAndApplySettings(", "\n}")
+assert "SettingsWriteScope writes;" in completion
+assert "writeSettingsJson()" not in completion and "writeDebugJson()" not in completion
+assert completion.index("!result.completed") < completion.index("SettingsWriteScope writes;")
+assert completion.index("writes.active()") < completion.index("setSetting(")
+assert completion.index("writes.finish()") < completion.index("applySettings()")
 
 ble = source("BLE_Peers.cpp")
 owner_rollback = between(ble, "if (!ownerAvailable) {", "if (!config.applied) {")

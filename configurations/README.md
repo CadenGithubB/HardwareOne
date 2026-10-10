@@ -76,7 +76,8 @@ automatically pair devices.
 the shared `gpstrack live start|stop|toggle` operation with local GPS and OLED
 controls. Live recording leaves GPS and logger boot auto-start preferences
 unchanged; a GPS fix is required to collect coordinates. The Maps image has
-passed build and host checks; physical qualification is recorded separately.
+passed build and host checks; command/lifecycle hardware qualification is
+recorded in [the Map test results](../docs/LOGGER_TEST.md#map-live-recording--2026-10-10).
 
 ## Guided setup
 

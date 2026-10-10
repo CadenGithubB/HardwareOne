@@ -1,11 +1,15 @@
 // Production owner transitions, generic setting mutation and parser are inserted
 // by test_sensorlog_settings.py. Persistence/events/startup are observations.
 #include <Arduino.h>
+#include <cerrno>
+#include <climits>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -42,6 +46,10 @@ bool requestSettingsPersist() {
   return true;
 }
 void notifySettingChanged(const void* field) { changedFields.push_back(field); }
+void finishSettingChange(const void* field, const SettingEntry*) {
+  (void)requestSettingsPersist();
+  notifySettingChanged(field);
+}
 void applyMasterEnableDisable(const char*) { ++disableCalls; }
 void cliHint(const char* value) { hints.emplace_back(value); }
 void broadcastPrintf(const char* format, ...) {
@@ -163,12 +171,12 @@ static void noEffects(uint8_t liveMask, int savedMask, SensorLogFormat liveForma
 }
 static void genericMutation(const char* key, const char* label, int value,
                             unsigned expectedPersists = 1) {
+  (void)label;  // The shared formatter is exercised by settings_mutation.
   check(persistCalls == expectedPersists, "incorrect persistence count");
   check(broadcasts.size() == 1 && broadcasts[0] ==
         std::string(key) + " set to " + std::to_string(value), "generic broadcast changed");
-  check(events.size() == 1 && events[0].type == SYSEVT_SETTING_CHANGED &&
-        events[0].label == label && events[0].value == std::to_string(value),
-        "generic setting event changed");
+  check(events.empty() && changedFields.size() == expectedPersists,
+        "generic mutation bypassed/duplicated shared finalization");
   check(disableCalls == 0 && hints.empty(), "unrelated mutation effect");
 }
 
@@ -234,21 +242,21 @@ static void numericMaskPolicy() {
         check(std::string(cmd_sensorlogmask(String(std::to_string(mask)))) == "[Settings] Configuration updated", "mask response changed");
         check(sensorLogSelectedMask() == mask && gSettings.sensorLogMask == (int)mask, "mask not applied in owner");
         check(gSensorLogFormat == format && gSensorLoggingRunning == running, "mask changed session/format");
-        genericMutation("sensorLogMask", "Sensors to log", mask);
-        check(changedFields.empty(), "numeric editor added unrelated notification pathway");
+        genericMutation("sensorLogMask", "Sensors to log", mask, mask == LOG_TOF ? 0 : 1);
       }
     }
   }
-  // Preserve the generic editor's established atoi behavior, including numeric
-  // prefixes and nonnumeric zero; this pass does not invent another parser.
-  for (const char* request : {"garbage", "0xFF", "32junk", " +32 "}) {
+  // The generic editor now rejects incomplete integer tokens instead of
+  // accepting atoi's numeric prefixes and nonnumeric zero.
+  for (const char* request : {"garbage", "0xFF", "32junk"}) {
     reset();
-    const unsigned expected = std::atoi(request);
     context = std::string("generic grammar ") + request;
-    check(std::string(cmd_sensorlogmask(request)) == "[Settings] Configuration updated", "generic mask grammar changed");
-    check(sensorLogSelectedMask() == expected, "generic mask value changed");
-    genericMutation("sensorLogMask", "Sensors to log", expected);
+    check(std::string(cmd_sensorlogmask(request)).rfind("Error:", 0) == 0, "malformed mask accepted");
+    noEffects(LOG_TOF, LOG_TOF, SENSOR_LOG_TEXT, SENSOR_LOG_TEXT, false);
   }
+  reset();
+  check(std::string(cmd_sensorlogmask(" +32 ")) == "[Settings] Configuration updated", "trimmed signed decimal rejected");
+  genericMutation("sensorLogMask", "Sensors to log", 32);
 }
 
 static void formatPaths() {
@@ -262,17 +270,18 @@ static void formatPaths() {
         const uint8_t expectedMask = format == SENSOR_LOG_TRACK ? LOG_GPS : LOG_TOF | LOG_R1;
         check(sensorLogSelectedMask() == expectedMask && gSettings.sensorLogMask == expectedMask, "numeric TRACK did not apply GPS-only policy");
         check(gSensorLoggingRunning == running, "format unexpectedly restarted/stopped session");
-        genericMutation("sensorLogFormat", "Format", format, format == SENSOR_LOG_TRACK ? 2 : 1);
-        check(!persistedLiveStates.empty() && persistedLiveStates[0].mask == (LOG_TOF | LOG_R1) &&
-              persistedLiveStates[0].format == initial,
-              "numeric editor changed its persist-before-live-apply ordering");
+        const bool formatChanged = format != initial;
+        const unsigned expectedPersists = (formatChanged ? 1 : 0) + (format == SENSOR_LOG_TRACK ? 1 : 0);
+        genericMutation("sensorLogFormat", "Format", format, expectedPersists);
+        if (formatChanged) check(!persistedLiveStates.empty() &&
+              persistedLiveStates[0].mask == (LOG_TOF | LOG_R1) && persistedLiveStates[0].format == initial,
+              "changed numeric editor lost persist-before-live-apply ordering");
         if (format == SENSOR_LOG_TRACK) {
-          check(persistedLiveStates.size() > 1 && persistedLiveStates[1].mask == LOG_GPS &&
-                persistedLiveStates[1].format == SENSOR_LOG_TRACK,
+          check(persistedLiveStates.size() == expectedPersists && persistedLiveStates.back().mask == LOG_GPS &&
+                persistedLiveStates.back().format == SENSOR_LOG_TRACK,
                 "TRACK dependent persistence observed mismatched live values");
+          check(changedFields.back() == &gSettings.sensorLogMask, "TRACK notified wrong dependent setting");
         }
-        check(changedFields.size() == (format == SENSOR_LOG_TRACK ? 1u : 0u), "duplicate format notification");
-        if (!changedFields.empty()) check(changedFields[0] == &gSettings.sensorLogMask, "TRACK notified wrong dependent setting");
         const uint8_t numericMask = sensorLogSelectedMask();
         const SensorLogFormat numericFormat = sensorLogCurrentFormat();
         reset(LOG_TOF | LOG_R1, initial, running);
@@ -291,7 +300,7 @@ static void formatPaths() {
   context = "TRACK repeated with already GPS-only mask";
   reset(LOG_GPS, SENSOR_LOG_TRACK, true);
   check(std::string(cmd_sensorlogformat("2")) == "[Settings] Configuration updated", "same format rejected");
-  genericMutation("sensorLogFormat", "Format", 2);
+  genericMutation("sensorLogFormat", "Format", 2, 0);
   check(changedFields.empty(), "unchanged dependent mask persisted again");
   context = "text format query/error";
   reset(LOG_R1, SENSOR_LOG_CSV, true);

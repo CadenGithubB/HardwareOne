@@ -36,10 +36,8 @@ void drawWizardFooter(const char* leftAction, const char* rightAction, const cha
 // title is clipped to the space left of it (so it never overlaps). OLED-only.
 void drawSetupInfoPage(const char* title, const char* body, const char* footer,
                        int pageNum = 0, int pageCount = 0);
-void renderFeaturesPage();
-void renderSensorsPage();
-void renderNetworkPage();
-void renderSystemPage();
+void renderWizardPage();
+// True means this optional page advanced; only result.completed means Finish.
 bool renderWiFiPage(SetupWizardResult& result);
 
 // OLED handlers for text-input pages (own event loops)
@@ -47,10 +45,8 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running);
 void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
 
 // Input handlers (joystick/button - called from unified loop when OLED connected)
-bool handleFeaturesInput(uint32_t buttons, JoystickNav& nav);
-bool handleSensorsInput(uint32_t buttons, JoystickNav& nav);
-bool handleNetworkInput(uint32_t buttons, JoystickNav& nav);
-bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result);
+// Returns whether input was handled; result.completed is the Finish signal.
+bool handleWizardPageInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result);
 
 // Conditional mode-picker page (WEBMODE -> HTTP/HTTPS, BTMODE -> Server/G2).
 // Self-contained blocking sub-flow (OLED + serial) navigated via the wizard's

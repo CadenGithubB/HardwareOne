@@ -9,6 +9,7 @@
 #include <esp_partition.h>  // blank-partition probe — see littlefsPartitionIsBlank()
 #include <optional>
 
+#include "System_Automation.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Filesystem.h"
@@ -37,13 +38,6 @@
 
 // External dependencies
 extern bool readText(const char* path, String& out);
-extern bool sanitizeAutomationsJson(String& json);
-extern void writeAutomationsJsonAtomic(const String& json);
-extern void notifyAutomationScheduler();
-extern bool gAutomationsDirty;
-
-// External constants
-extern const char* AUTOMATIONS_JSON_FILE;
 
 // Forward declarations (none needed — permissions are table-driven)
 
@@ -283,10 +277,11 @@ bool initFilesystem() {
 
       // Write back if any changes were made
       if (modified) {
-        writeAutomationsJsonAtomic(json);
-        gAutomationsDirty = true;
-        notifyAutomationScheduler();
-        DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot: wrote updated automations.json; scheduler refresh queued");
+        if (writeAutomationsJsonAtomic(json)) {
+          DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot: wrote updated automations.json; scheduler refresh queued");
+        } else {
+          DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot sanitize: failed to write automations.json");
+        }
       }
     } else {
       DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot sanitize: failed to read automations.json");
@@ -574,12 +569,14 @@ bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdm
 // Safe to call for any path — no-ops unless the path is automations.json.
 void runFileWritePostSaveHooks(const String& path) {
 #if ENABLE_AUTOMATION
-  if (path == "/system/automations.json") {
+  if (path == AUTOMATIONS_JSON_FILE) {
     String json;
     if (readText(AUTOMATIONS_JSON_FILE, json) && sanitizeAutomationsJson(json)) {
       writeAutomationsJsonAtomic(json);  // best-effort atomic writeback
-      gAutomationsDirty = true;                // ensure scheduler refreshes
     }
+    // The caller has already saved the file. Refresh even when sanitation
+    // makes no change or its optional writeback fails.
+    notifyAutomationScheduler();
   }
 #else
   (void)path;

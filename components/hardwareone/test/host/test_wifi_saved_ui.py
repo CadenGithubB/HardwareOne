@@ -37,7 +37,7 @@ def main():
 
     oled = (COMPONENT / "OLED_Mode_Network.cpp").read_text()
     g2 = (COMPONENT / "G2_Page_Network.cpp").read_text()
-    header = (COMPONENT / "System_WiFiNetworks.h").read_text()
+    header = (COMPONENT / "network/wifi/System_WiFiNetworks.h").read_text()
     types = "\n".join(extract_block(header, marker) + ";" for marker in [
         "struct SavedWifiNetwork", "struct WifiNetworkSnapshot",
     ]) + "\n" + extract_block(g2, "enum NetworkSubMode") + ";"

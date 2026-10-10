@@ -616,6 +616,20 @@ add_test(
   NAME settings_write_batch_contract
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_settings_write_batch_contract.py)
+set(SETTINGS_MUTATION_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND SETTINGS_MUTATION_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME settings_mutation
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_settings_mutation.py
+          ${SETTINGS_MUTATION_TEST_ARGS})
+add_test(
+  NAME settings_write_scope
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_settings_write_scope.py
+          ${SETTINGS_MUTATION_TEST_ARGS})
 set(WEB_BATCH_HANDLER_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND WEB_BATCH_HANDLER_TEST_ARGS --sanitize)
@@ -760,6 +774,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_setup_completion.py
           ${SETUP_MQTT_TEST_ARGS})
+foreach(test_name IN ITEMS setup_draft setup_display_cancel climode_completion_owner initial_admin_setup
+                           setup_mode_choices setup_menu_layout setup_wifi_navigation)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${SETUP_MQTT_TEST_ARGS})
+endforeach()
 set(POWER_CPU_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND POWER_CPU_TEST_ARGS --sanitize)
@@ -940,6 +962,16 @@ add_test(
   NAME automation_scheduler_contract
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_scheduler_contract.py)
+add_test(
+  NAME automation_scheduler
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_automation_scheduler.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME automation_log
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_automation_log.py
+          ${SETUP_MQTT_TEST_ARGS})
 add_test(
   NAME raw_allocation_inventory
   COMMAND ${Python3_EXECUTABLE}

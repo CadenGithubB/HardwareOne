@@ -359,7 +359,7 @@ set(hardwareone_srcs
         System_SelfDevice.cpp
         System_Clock.cpp
         System_NTP.cpp
-        System_WiFiNetworks.cpp
+        network/wifi/System_WiFiNetworks.cpp
 )
 
 # cm5 power and cm5 fan share one module (System_Cm5HostControl.cpp) but keep

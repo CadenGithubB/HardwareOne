@@ -5,6 +5,30 @@ small change with a visible result, reuse the existing path, and remove an old
 dependency or duplicate when replacing it. Apply these rules to code being
 changed; unrelated subsystems do not need a simultaneous rewrite.
 
+## The 0.99.97.x cleanup series
+
+The focus of `0.99.97.x` is long-term readability, editability and consistent
+module design. Each milestone should make an existing feature easier to find,
+understand and change. Useful outcomes include one owner for shared behavior,
+fewer dependencies between unrelated systems, simpler control flow, clearer
+names and interfaces, and related code grouped in predictable places.
+
+Before editing, inspect the current implementation and its downstream callers,
+including existing examples that already solve the problem well. Define one
+bounded area, the concrete maintenance problem and a stopping condition. Reuse
+the project's existing mechanisms; a new abstraction must reduce the work a
+reader or caller needs to do. Remove replaced paths once callers have migrated.
+
+Preserve supported behavior and configuration during structural changes.
+Identify intentional bug fixes or behavior changes separately and verify their
+downstream effects. Keep file relocation separate from behavior changes where
+practical so reviewers can follow both. Use the verification guidance below.
+
+Complete and record each milestone before expanding its scope. Judge progress
+by how easily someone can trace and edit a feature, rather than lines removed
+or files split. Memory slimming and SD qualification remain deferred until
+explicitly resumed.
+
 ## Give each decision one owner
 
 | Decision | Owner |
@@ -16,10 +40,16 @@ changed; unrelated subsystems do not need a simultaneous rewrite.
 | Feature prerequisites and conflicts | Derived rules in `System_BuildConfig.h`; SDK prerequisites resolve through Kconfig |
 | Release identity, partitions, signing and provisioning | Existing deployment/OTA contracts |
 | Runtime feature availability and toggles | `System_FeatureRegistry`, using compiled predicates and persisted settings |
+| Ordinary runtime setting mutation, persistence requests and change events | `setSetting` in `System_Settings`; generic commands validate their `SettingEntry` before using it. Feature toggles use the same path; service owners retain their live actions. |
+| On-device wizard drafts, page choices and completion | `System_SetupWizard`; serial and local-display adapters edit its draft. `wizardSaveAndApplySettings` is the sole commit boundary; cancellation discards the draft. |
+| Initial admin creation | `System_FirstTimeSetup`'s shared `createInitialAdminUser`; Basic/Advanced and post-restore setup require success before completion. Store credentials before publishing `users.json`, which boot uses to detect completed setup. |
 | Command module grouping, help order and availability callbacks | `System_CommandRegistry.cpp`; command tables stay with their owning modules |
 | Clock state, timezone and shared clock-step duties | `System_Clock`; network synchronization and reply tracking use `System_NTP` |
-| Saved Wi-Fi entries, lifetime and consistent reads | `System_WiFiNetworks`; screens use credential-free snapshots and boot-local entry IDs; Settings retains crypto and file-write policy |
+| Saved Wi-Fi entries, lifetime and consistent reads | [`network/wifi`](components/hardwareone/network/wifi/README.md) (`System_WiFiNetworks`); screens use credential-free snapshots and boot-local entry IDs; Settings retains crypto and file-write policy |
 | Sensor readings, cache synchronization and sensor-envelope serialization | The sensor module; consumers use its snapshot/JSON functions and keep presentation outside the cache lock. Thermal frames are copied into caller-owned buffers. |
+| GPS track lifetime, recording transitions and consistent reads | `GPSTrackManager` in `System_Maps`; consumers use value status or owned point snapshots. Rendering, HTTP and file writes run after the track state lock is released. |
+| Automation log session, captured writer identity and checked appends | `System_Automation`; command/event callers use its active hint and append operation. The existing filesystem guard serializes writes and session changes; status uses a short private state lock. |
+| Automation scheduling cadence, pending changes and due-cache lifetime | `System_Automation`; the main task calls `automationTick()`, while other tasks use start/stop/notify and the atomic runtime-state query. Stop prevents new passes; an already claimed pass may finish. |
 | I2C sensor start/stop request ordering | The existing I2C queue worker; sensor owners initialize, roll back failures and release their resources. A stop request cancels pending starts; cleanup completion permits restarting. |
 | Shared physical input readings and latched button presses | `HAL_Input`; backends publish through its internal producer API. Screens peek at snapshots; dispatch consumes presses atomically. Driver-specific detents remain with the encoder backend. |
 | Display hardware initialization, readiness, brightness, power and sleep/wake | `HAL_Display`; UI code owns boot policy, screen drawing and authentication. A retained canvas does not imply that the display is ready. |
@@ -54,6 +84,11 @@ attachment should report unavailable without breaking unrelated services.
 - UI and transport code collect input and present results. Reuse service methods
   and the existing authorized command executor for command requests. Preserve
   source/session identity and permission checks across every entry point.
+- Ordinary setting updates use `setSetting` so unchanged values do not request
+  another save or change event. Generic scalar commands use the registered type
+  and range; dedicated service commands keep their runtime actions. A failed
+  persistence request retains the accepted live value and existing save retry;
+  it is not a rollback of the setting or its runtime effects.
 - Treat display, physical input, networking and storage as separate consumers.
   Gate the driver that is absent, not shared state needed by another consumer.
   Disabled-feature APIs keep compatible signatures and report unavailable;
@@ -92,6 +127,21 @@ restores inheritance. Support previewing changes, keep edits atomic, and
 leave builds in their own directories. Report actual compiled results through
 the compiler/Kconfig path and actual size through the linked image. Do not add
 another dependency table or silently drop features to make an image fit.
+
+On-device wizard pages read and edit the shared wizard draft, including page
+visibility and estimates. Keep live setting writes, persistence and runtime
+effects in the completion owner. Apply only values edited from the starting
+draft so unrelated settings changed elsewhere survive. Use `SettingsWriteScope`
+for the short synchronous commit; never hold a persistence scope while waiting
+for user input. A failed save retains accepted live values and retry intent,
+and must be reported. It is not a transaction across settings files.
+
+Keep the wizard's Connections, Display & Controls, Sensors and System groups
+in its shared menu model. Serial and display adapters use the same rows,
+labels, actions and navigation. Feature rows come from the runtime registry;
+distinguish feature enablement from startup behavior without changing the
+registry's categories just to arrange a screen. First-time setup's
+Basic/Advanced/Import choices likewise share one list and availability rule.
 
 Preserve `System_BuildConfig.h` as the human-editable entry point for shared
 build flags. Saved configurations and guided setup are additional supported

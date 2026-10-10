@@ -12,7 +12,7 @@
 #if ENABLE_WIFI
 
 #include "System_WiFi.h"
-#include "System_WiFiNetworksInternal.h"
+#include "network/wifi/System_WiFiNetworksInternal.h"
 #include "System_Settings.h"      // Unified settings persistence
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson

@@ -151,38 +151,41 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
       }
       if (strcmp(liveParam, "save") == 0) {
         char savedPath[96];
-        bool ok = GPSTrackManager::saveTrack(savedPath, sizeof(savedPath));
+        int savedPointCount = 0;
+        bool ok = GPSTrackManager::saveTrack(savedPath, sizeof(savedPath), &savedPointCount);
         char resp[160];
         if (ok) {
           snprintf(resp, sizeof(resp), "{\"saved\":true,\"path\":\"%s\",\"points\":%d}",
-                   savedPath, GPSTrackManager::getPointCount());
+                   savedPath, savedPointCount);
         } else {
-          snprintf(resp, sizeof(resp), "{\"saved\":false,\"error\":\"No track data to save\"}");
+          snprintf(resp, sizeof(resp), "{\"saved\":false,\"error\":\"Unable to save track data\"}");
         }
         httpd_resp_sendstr(req, resp);
         return ESP_OK;
       }
 
       // ?live=1 — return current live track data
-      bool isLive = GPSTrackManager::isLiveTracking();
-      int pointCount = GPSTrackManager::getPointCount();
-      const GPSTrackStats& stats = GPSTrackManager::getStats();
+      GPSTrackSnapshot track;
+      if (!GPSTrackManager::readSnapshot(track, 500)) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "{\"error\":\"Unable to copy track data\"}");
+        return ESP_OK;
+      }
+      const GPSTrackStatus& status = track.status;
+      const GPSTrackStats& stats = status.stats;
       
       char header[384];
       snprintf(header, sizeof(header), 
                "{\"live\":%s,\"count\":%d,\"distance\":%.1f,\"duration\":%.0f,\"speed\":%.2f,\"lastUpdate\":%lu,\"points\":[",
-               isLive ? "true" : "false", pointCount,
+               status.live ? "true" : "false", status.pointCount,
                stats.totalDistanceM, stats.durationSec, stats.avgSpeedMps,
-               (unsigned long)GPSTrackManager::getLastUpdateTime());
+               (unsigned long)status.lastUpdateMs);
       httpd_resp_sendstr_chunk(req, header);
       
-      const GPSTrackPoint* points = GPSTrackManager::getPoints();
-      int startIdx = (pointCount > 500) ? (pointCount - 500) : 0;
-      
-      for (int i = startIdx; i < pointCount; i++) {
+      for (int i = 0; i < track.pointCount; i++) {
         char pointJson[64];
         snprintf(pointJson, sizeof(pointJson), "%s{\"lat\":%.6f,\"lon\":%.6f}",
-                 (i == startIdx) ? "" : ",", points[i].lat, points[i].lon);
+                 (i == 0) ? "" : ",", track.points.get()[i].lat, track.points.get()[i].lon);
         httpd_resp_sendstr_chunk(req, pointJson);
       }
       
@@ -201,7 +204,8 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
       }
 
       String errorMsg;
-      if (!GPSTrackManager::loadTrack(decodedPath.c_str(), errorMsg)) {
+      GPSTrackSnapshot track;
+      if (!GPSTrackManager::loadTrack(decodedPath.c_str(), errorMsg, track)) {
         httpd_resp_set_type(req, "application/json");
         char errJson[256];
         snprintf(errJson, sizeof(errJson), "{\"error\":\"%s\"}", errorMsg.c_str());
@@ -209,9 +213,9 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
         return ESP_OK;
       }
 
-      float coverage;
-      TrackValidation validation = GPSTrackManager::validateTrack(coverage);
-      const char* validMsg = GPSTrackManager::getValidationMessage(validation, coverage);
+      const TrackValidation validation = track.status.validation;
+      const float coverage = track.status.coveragePercent;
+      const String validMsg = GPSTrackManager::getValidationMessage(validation, coverage);
 
       httpd_resp_set_type(req, "application/json");
       
@@ -223,19 +227,16 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
                coverage);
       httpd_resp_sendstr_chunk(req, header);
 
-      const GPSTrackPoint* points = GPSTrackManager::getPoints();
-      int pointCount = GPSTrackManager::getPointCount();
-      
-      for (int i = 0; i < pointCount; i++) {
+      for (int i = 0; i < track.pointCount; i++) {
         char pointJson[128];
         snprintf(pointJson, sizeof(pointJson), "%s{\"lat\":%.6f,\"lon\":%.6f}",
-                 (i == 0) ? "" : ",", points[i].lat, points[i].lon);
+                 (i == 0) ? "" : ",", track.points.get()[i].lat, track.points.get()[i].lon);
         httpd_resp_sendstr_chunk(req, pointJson);
       }
 
       char footer[256];
       snprintf(footer, sizeof(footer), "],\"count\":%d,\"message\":\"%s\"}", 
-               pointCount, validMsg);
+               track.pointCount, validMsg.c_str());
       httpd_resp_sendstr_chunk(req, footer);
       httpd_resp_sendstr_chunk(req, NULL);
       return ESP_OK;

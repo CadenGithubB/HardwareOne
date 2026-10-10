@@ -5,7 +5,7 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 
-#include "System_WiFiNetworks.h"
+#include "network/wifi/System_WiFiNetworks.h"
 
 #if ENABLE_WIFI
 

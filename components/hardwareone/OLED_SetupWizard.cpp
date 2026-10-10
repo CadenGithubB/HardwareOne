@@ -13,9 +13,8 @@
 #include <Adafruit_SSD1306.h>
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
-#include "System_FeatureRegistry.h"
-#include "System_Settings.h"
 #include "System_SetupWizard.h"
+#include "System_FirstTimeSetup.h"
 #include "HAL_Input.h"
 #include "i2csensor_seesaw.h"
 #include "System_I2C.h"
@@ -40,25 +39,28 @@ static bool sJoyRightHeld = false;
 void drawWizardHeader(int pageNum, int totalPages, const char* title) {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(SSD1306_WHITE);
+  oledDisplay->setTextWrap(false);
+
+  // Keep the group title readable, with its position aligned on the right.
+  char position[12];
+  snprintf(position, sizeof(position), "%d/%d", pageNum, totalPages);
+  const int positionX = 128 - (int)strlen(position) * 6;
+  char heading[22];
+  snprintf(heading, sizeof(heading), "%.*s", positionX / 6, title);
   oledDisplay->setCursor(0, 0);
-  
-  // Line 1: Full page title
-  char header[22];
-  snprintf(header, sizeof(header), "SETUP %d/%d: %s", pageNum, totalPages, title);
-  oledDisplay->print(header);
-  
-  // Line 2: Heap bar using shared utility
+  oledDisplay->print(heading);
+  oledDisplay->setCursor(positionX, 0);
+  oledDisplay->print(position);
+  oledDisplay->setTextWrap(true);
+
   uint32_t enabledKB = 0, maxKB = 1;
   int percentage = 0;
   getHeapBarData(&enabledKB, &maxKB, &percentage);
   char heapLabel[12];
   snprintf(heapLabel, sizeof(heapLabel), "%lu/%luKB", (unsigned long)enabledKB, (unsigned long)maxKB);
   oledDrawBar(oledDisplay, 0, 10, 70, 6, percentage, 100, heapLabel);
-  
-  // Separator below heap bar
   oledDisplay->drawFastHLine(0, 18, 128, SSD1306_WHITE);
 }
-
 
 void drawWizardFooter(const char* leftAction, const char* rightAction, const char* backAction) {
   const int footerStartY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
@@ -134,325 +136,83 @@ void drawSetupInfoPage(const char* title, const char* body, const char* footer,
 // Page Renderers
 // ============================================================================
 
-// Shared renderer for feature/sensor toggle lists
-static void renderToggleList(const char* title, SetupWizardPage page,
-                             WizardFeatureItem* items, size_t itemCount,
-                             const char* footerLeft, const char* footerRight,
-                             const char* footerBack) {
-  oledDisplay->clearDisplay();
-  drawWizardHeader(getWizardPageNumber(page), getWizardTotalPages(), title);
-  
-  // Content area: y=20 to y=52 (below 2-line header)
-  const int startY = 20;
-  const int lineHeight = 10;
-  const int maxVisible = 3;
-  
+void renderWizardPage() {
+  const SetupWizardPage page = getWizardCurrentPage();
+  const int itemCount = (int)getWizardMenuItemCount(page);
+  const int selection = getWizardCurrentSelection();
+  const int maxVisible = 4;
   int scrollOffset = getWizardScrollOffset();
-  int currentSelection = getWizardCurrentSelection();
-  
-  // Adjust scroll to keep selection visible
-  if (currentSelection < scrollOffset) {
-    setWizardScrollOffset(currentSelection);
-    scrollOffset = currentSelection;
-  } else if (currentSelection >= scrollOffset + maxVisible) {
-    setWizardScrollOffset(currentSelection - maxVisible + 1);
-    scrollOffset = currentSelection - maxVisible + 1;
-  }
-  
-  for (int i = 0; i < maxVisible && (scrollOffset + i) < (int)itemCount; i++) {
-    int idx = scrollOffset + i;
-    WizardFeatureItem* item = &items[idx];
-    
-    int y = startY + i * lineHeight;
-    bool isSelected = (idx == currentSelection);
-    
-    // Highlight bar for selected item (like main menu)
-    if (isSelected) {
+  if (selection < scrollOffset) scrollOffset = selection;
+  if (selection >= scrollOffset + maxVisible) scrollOffset = selection - maxVisible + 1;
+  if (scrollOffset < 0) scrollOffset = 0;
+  setWizardScrollOffset(scrollOffset);
+
+  oledDisplay->clearDisplay();
+  drawWizardHeader(getWizardPageNumber(page), getWizardTotalPages(), getWizardPageTitle(page));
+  const int startY = 21;
+  const int lineHeight = 8;
+  for (int row = 0; row < maxVisible && scrollOffset + row < itemCount; ++row) {
+    const int index = scrollOffset + row;
+    const int y = startY + row * lineHeight;
+    char label[64], value[64];
+    if (!wizardFormatMenuItem(page, index, label, sizeof(label), value, sizeof(value))) continue;
+    if (index == selection) {
       oledDisplay->fillRect(0, y - 1, 126, lineHeight, SSD1306_WHITE);
       oledDisplay->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
     } else {
       oledDisplay->setTextColor(SSD1306_WHITE);
     }
-    
-    oledDisplay->setCursor(1, y);
-    
-    // Checkbox + label + heap cost
-    bool enabled = item->setting ? *item->setting : false;
+    // Keep the current value visible beside its label; long names remain editable.
+    const int valueWidth = min((int)strlen(value), 12);
     char line[22];
-    const char* essential = item->essential ? "*" : "";
-    snprintf(line, sizeof(line), "%s %.11s%s %dK",
-             enabled ? "[X]" : "[ ]", item->label, essential, item->heapKB);
+    snprintf(line, sizeof(line), "%.*s %.*s", 19 - valueWidth, label, valueWidth, value);
+    oledDisplay->setCursor(1, y);
     oledDisplay->print(line);
-    
-    oledDisplay->setTextColor(SSD1306_WHITE);
   }
-  
-  // Scroll indicators
-  if (itemCount > (size_t)maxVisible) {
-    if (scrollOffset > 0) {
-      oledDisplay->setCursor(121, startY);
-      oledDisplay->print("^");
-    }
-    if (scrollOffset + maxVisible < (int)itemCount) {
-      oledDisplay->setCursor(121, startY + (maxVisible - 1) * lineHeight);
-      oledDisplay->print("v");
-    }
+  oledDisplay->setTextColor(SSD1306_WHITE);
+  if (scrollOffset > 0) {
+    oledDisplay->setCursor(121, startY);
+    oledDisplay->print("^");
   }
-  
-  drawWizardFooter(footerLeft, footerRight, footerBack);
+  if (scrollOffset + maxVisible < itemCount) {
+    oledDisplay->setCursor(121, startY + (maxVisible - 1) * lineHeight);
+    oledDisplay->print("v");
+  }
+  drawWizardFooter("Edit", wizardAdvanceFrom(page) == WIZARD_PAGE_COUNT ? "Finish" : "Next",
+                   wizardIsFirstPage() ? "Cancel" : "Back");
   OLED_TRANSACTION(oledDisplay->display());
 }
 
-void renderFeaturesPage() {
-  renderToggleList("Features", WIZARD_PAGE_FEATURES,
-                   getWizardFeaturesPage(), getWizardFeaturesPageCount(),
-                   "Toggle", "Next", nullptr);
-}
-
-void renderSensorsPage() {
-  renderToggleList("Sensors", WIZARD_PAGE_SENSORS,
-                   getWizardSensorsPage(), getWizardSensorsPageCount(),
-                   "Toggle", "Next", "Back");
-}
-
-void renderNetworkPage() {
-  oledDisplay->clearDisplay();
-  drawWizardHeader(getWizardPageNumber(WIZARD_PAGE_NETWORK), getWizardTotalPages(), "Network");
-
-  const int startY = 20;
-  const int lineHeight = 10;
-  const int maxVisible = 3;
-
-  int currentSelection = getWizardCurrentSelection();
-  size_t networkPageCount = getWizardNetworkPageCount();
-  WizardNetworkItem* networkPage = getWizardNetworkPage();
-  int scrollOffset = getWizardScrollOffset();
-
-  // Adjust scroll to keep selection visible
-  if (currentSelection < scrollOffset) {
-    setWizardScrollOffset(currentSelection);
-    scrollOffset = currentSelection;
-  } else if (currentSelection >= scrollOffset + maxVisible) {
-    setWizardScrollOffset(currentSelection - maxVisible + 1);
-    scrollOffset = currentSelection - maxVisible + 1;
-  }
-
-  for (int i = 0; i < maxVisible && (scrollOffset + i) < (int)networkPageCount; i++) {
-    int idx = scrollOffset + i;
-    int y = startY + i * lineHeight;
-    bool isSelected = (idx == currentSelection);
-
-    // Highlight bar for selected item
-    if (isSelected) {
-      oledDisplay->fillRect(0, y - 1, 126, lineHeight, SSD1306_WHITE);
-      oledDisplay->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-    } else {
-      oledDisplay->setTextColor(SSD1306_WHITE);
-    }
-
-    oledDisplay->setCursor(1, y);
-
-    // Label + value
-    if (networkPage[idx].isBool) {
-      bool enabled = *networkPage[idx].boolSetting;
-      char line[22];
-      snprintf(line, sizeof(line), "%s %s", enabled ? "[ON] " : "[OFF]", networkPage[idx].label);
-      oledDisplay->print(line);
-    } else {
-      oledDisplay->print(networkPage[idx].label);
-    }
-
-    oledDisplay->setTextColor(SSD1306_WHITE);
-  }
-
-  // Scroll indicators
-  if (networkPageCount > (size_t)maxVisible) {
-    if (scrollOffset > 0) {
-      oledDisplay->setCursor(121, startY);
-      oledDisplay->print("^");
-    }
-    if (scrollOffset + maxVisible < (int)networkPageCount) {
-      oledDisplay->setCursor(121, startY + (maxVisible - 1) * lineHeight);
-      oledDisplay->print("v");
-    }
-  }
-
-  drawWizardFooter("Toggle", "Next", "Back");
-  OLED_TRANSACTION(oledDisplay->display());
-}
-
-void renderSystemPage() {
-  oledDisplay->clearDisplay();
-  drawWizardHeader(getWizardPageNumber(WIZARD_PAGE_SYSTEM), getWizardTotalPages(), "System");
-
-  const int startY = 20;
-  const int lineHeight = 10;
-  const int maxVisible = 3;
-
-  int currentSelection = getWizardCurrentSelection();
-  int scrollOffset = getWizardScrollOffset();
-  size_t itemCount = getWizardSystemPageCount();
-
-  // Adjust scroll to keep selection visible
-  if (currentSelection < scrollOffset) {
-    setWizardScrollOffset(currentSelection);
-    scrollOffset = currentSelection;
-  } else if (currentSelection >= scrollOffset + maxVisible) {
-    setWizardScrollOffset(currentSelection - maxVisible + 1);
-    scrollOffset = currentSelection - maxVisible + 1;
-  }
-
-  // Build display strings for each system item
-  int timezoneSelection = getWizardTimezoneSelection();
-  int logLevelSelection = getWizardLogLevelSelection();
-  int ntpSel = getWizardNTPSelection();
-  int ledSel = getWizardLEDEffectSelection();
-  const TimezoneEntry* timezones = getTimezones();
-  const char** logLevelNames = getLogLevelNames();
-  const char* const* ntpPresets = getNTPPresets();
-  const char* const* ledEffects = getLEDEffects();
-
-  for (int i = 0; i < maxVisible && (scrollOffset + i) < (int)itemCount; i++) {
-    int idx = scrollOffset + i;
-    int y = startY + i * lineHeight;
-    bool isSelected = (idx == currentSelection);
-
-    if (isSelected) {
-      oledDisplay->fillRect(0, y - 1, 126, lineHeight, SSD1306_WHITE);
-      oledDisplay->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-    } else {
-      oledDisplay->setTextColor(SSD1306_WHITE);
-    }
-
-    oledDisplay->setCursor(1, y);
-    char line[22];
-
-    // Map idx to logical item (log=0, timezone=1, ntp=2?, led=3?)
-    // Use same mapping as getSystemItemAt() in System_SetupWizard.cpp
-    int logicalIdx = 0;
-    if (idx == logicalIdx) {
-      // Log level (first)
-      snprintf(line, sizeof(line), "Log: %s", logLevelNames[logLevelSelection]);
-      oledDisplay->print(line);
-    }
-    logicalIdx++;
-
-    if (idx == logicalIdx) {
-      // Timezone
-      int offMin = timezones[timezoneSelection].offsetMinutes;
-      int offH = offMin / 60;
-      int offMrem = abs(offMin % 60);
-      if (offMrem != 0)
-        snprintf(line, sizeof(line), "Timezone:%-4s %+d:%02d", timezones[timezoneSelection].abbrev, offH, offMrem);
-      else
-        snprintf(line, sizeof(line), "Timezone:%-4s %+dh", timezones[timezoneSelection].abbrev, offH);
-      oledDisplay->print(line);
-    }
-    logicalIdx++;
-
-    // NTP (conditional)
-    bool hasNTP = (getNTPPresetCount() > 0);
-#if ENABLE_WIFI
-    {
-      extern const FeatureEntry* getFeatureById(const char*);
-      extern bool isFeatureEnabled(const FeatureEntry*);
-      const FeatureEntry* wf = getFeatureById("wifi");
-      hasNTP = wf && isFeatureEnabled(wf);
-    }
-#else
-    hasNTP = false;
-#endif
-    if (hasNTP) {
-      if (idx == logicalIdx) {
-        snprintf(line, sizeof(line), "NTP:%.16s", ntpPresets[ntpSel]);
-        oledDisplay->print(line);
-      }
-      logicalIdx++;
-    }
-
-    // LED (conditional)
-    {
-      extern const FeatureEntry* getFeatureById(const char*);
-      extern bool isFeatureCompiled(const FeatureEntry*);
-      const FeatureEntry* lf = getFeatureById("led");
-      if (lf && isFeatureCompiled(lf)) {
-        if (idx == logicalIdx) {
-          snprintf(line, sizeof(line), "LED: %s", ledEffects[ledSel]);
-          oledDisplay->print(line);
-        }
-        logicalIdx++;
-      }
-    }
-
-    // Device Name (conditional — only when ESP-NOW not compiled)
-#ifndef ENABLE_ESPNOW
-    {
-      if (idx == logicalIdx) {
-        snprintf(line, sizeof(line), "Name:%.15s", getWizardDeviceName());
-        oledDisplay->print(line);
-      }
-      logicalIdx++;
-    }
-#endif
-
-    oledDisplay->setTextColor(SSD1306_WHITE);
-  }
-
-  // Scroll indicators
-  if (itemCount > (size_t)maxVisible) {
-    if (scrollOffset > 0) {
-      oledDisplay->setCursor(121, startY);
-      oledDisplay->print("^");
-    }
-    if (scrollOffset + maxVisible < (int)itemCount) {
-      oledDisplay->setCursor(121, startY + (maxVisible - 1) * lineHeight);
-      oledDisplay->print("v");
-    }
-  }
-
-  drawWizardFooter("Change", "Next", "Back");
-  OLED_TRANSACTION(oledDisplay->display());
-}
+static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
+                                       const char* description);
 
 bool renderWiFiPage(SetupWizardResult& result) {
-  // Loop to allow going back from password entry to network selection
-  // Returns true if WiFi setup completed (or skipped), false if user pressed B to go back
   while (true) {
-    // This page uses existing WiFi selection UI
-    oledDisplay->clearDisplay();
-    drawWizardHeader(getWizardPageNumber(WIZARD_PAGE_WIFI), getWizardTotalPages(), "WiFi");
-    
-    oledDisplay->setCursor(0, 20);
-    oledDisplay->println("Select network or");
-    oledDisplay->println("press B to go back");
-    
-    drawWizardFooter("Select", "Done", "Back");
-    OLED_TRANSACTION(oledDisplay->display());
-    
-    // Wait a moment then launch WiFi selector
-    delay(500);
-    
-    String selectedSSID;
-    if (getOLEDWiFiSelection(selectedSSID)) {
-      result.wifiSSID = selectedSSID;
-      
-      // Get password - check if user cancels to go back
-      bool passwordCancelled = false;
-      result.wifiPassword = getOLEDTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
-      
-      if (passwordCancelled) {
-        // User pressed B during password entry - loop back to network selection
-        continue;
-      }
-      
-      // Password entered (may be empty for open networks)
-      result.wifiConfigured = true;
+    if (isWizardCancelRequested()) { result.completed = false; return false; }
+    const int choice = showWizardOptionalPageIntro(WIZARD_PAGE_WIFI, "WiFi", "Optional: network");
+    if (choice < 0) return false; // Back already navigated; Cancel is handled by the owner.
+    if (choice == 0) {
+      result.wifiConfigured = false;
+      result.wifiSSID = "";
+      result.wifiPassword = "";
+      wizardNextPage(result);
       return true;
-    } else {
-      // getOLEDWiFiSelection returned false = user pressed B/cancelled at network list
-      // Go back to system settings page
-      wizardPrevPage();
-      return false;
+    }
+
+    // Back from password entry returns to the picker. Back from the picker
+    // returns to Configure/Skip; only the intro's Back leaves this page.
+    while (true) {
+      String selectedSSID;
+      if (!getOLEDWiFiSelection(selectedSSID)) break;
+      bool passwordCancelled = false;
+      String password = getOLEDTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
+      if (isWizardCancelRequested()) { result.completed = false; return false; }
+      if (passwordCancelled) continue;
+      result.wifiSSID = selectedSSID;
+      result.wifiPassword = password;
+      result.wifiConfigured = true;
+      wizardNextPage(result);
+      return true;
     }
   }
 }
@@ -503,6 +263,7 @@ JoystickNav readWizardJoystickNav() {
     }
   }
 
+  if (gWizardOwnsSerial && (nav.up || nav.down || nav.left || nav.right)) noteWizardInputActivity();
   return nav;
 }
 
@@ -521,101 +282,39 @@ static bool wizardNextRequested(uint32_t buttons, const JoystickNav& nav) {
   return false;
 }
 
-static bool handleTogglePageInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result) {
+bool handleWizardPageInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result) {
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
-    wizardToggleCurrentItem();
-    return true;
-  }
-
-  if (nav.up) { wizardMoveUp(); return true; }
-  if (nav.down) { wizardMoveDown(); return true; }
-
-  if (wizardNextRequested(buttons, nav)) {
-    wizardNextPage(result);
-    return true;
-  }
-
-  if ((buttons & INPUT_MASK(INPUT_BUTTON_B)) || nav.left) {
-    wizardPrevPage();
-    return true;
-  }
-
-  return false;
-}
-
-// We need a dummy result for pages that don't need it
-EXT_RAM_BSS_ATTR static SetupWizardResult sDummyResult;  // PSRAM: only wifiEnabled/completed bools ever written — no credential can land here (verified 2026-08-19)
-
-bool handleFeaturesInput(uint32_t buttons, JoystickNav& nav) {
-  if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
-    wizardToggleCurrentItem();
-    return true;
-  }
-  if (nav.up) { wizardMoveUp(); return true; }
-  if (nav.down) { wizardMoveDown(); return true; }
-
-  if (wizardNextRequested(buttons, nav)) {
-    wizardNextPage(sDummyResult);
-    return true;
-  }
-  // No back from first page
-  return false;
-}
-
-bool handleSensorsInput(uint32_t buttons, JoystickNav& nav) {
-  return handleTogglePageInput(buttons, nav, sDummyResult);
-}
-
-bool handleNetworkInput(uint32_t buttons, JoystickNav& nav) {
-  return handleTogglePageInput(buttons, nav, sDummyResult);
-}
-
-bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result) {
-  if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
-    if (getSystemItemAt(getWizardCurrentSelection()) == SYS_ITEM_DEVICE_NAME) {
+    const WizardMenuItem* item = getWizardMenuItem(getWizardCurrentPage(), getWizardCurrentSelection());
+    if (item && item->type == WIZARD_ITEM_DEVICE_NAME) {
       bool cancelled = false;
       String newName = getOLEDTextInput("Device Name:", false, getWizardDeviceName(), 19, &cancelled);
-      if (!cancelled && newName.length() > 0) {
+      if (!cancelled && !isWizardCancelRequested() && newName.length() > 0) {
         char* buf = getWizardDeviceNameBuf();
         strncpy(buf, newName.c_str(), 19);
         buf[19] = '\0';
       }
     } else {
-      // Cycle through options
-      wizardCycleOption();
+      wizardActivateCurrentItem();
     }
     return true;
   }
-
-  if (nav.up) {
-    wizardMoveUp();
-    return true;
-  }
-
-  if (nav.down) {
-    wizardMoveDown();
-    return true;
-  }
-
+  if (nav.up) { wizardMoveUp(); return true; }
+  if (nav.down) { wizardMoveDown(); return true; }
   if (wizardNextRequested(buttons, nav)) {
-    if (!wizardNextPage(result)) {
-      return false;  // Signal completion
-    }
+    wizardNextPage(result);
     return true;
   }
-
   if ((buttons & INPUT_MASK(INPUT_BUTTON_B)) || nav.left) {
-    wizardPrevPage();
-    setWizardCurrentSelection(0);
+    if (wizardIsFirstPage()) requestWizardCancel();
+    else wizardPrevPage();
     return true;
   }
-
   return false;
 }
 
 // ============================================================================
 // Optional page intro: shows a "Configure / Skip" selection screen.
-// Returns: 1=Configure, 0=Skip, -1=Back (wizardPrevPage already called)
+// Returns: 1=Configure, 0=Skip, -1=Back (already navigated), -2=Cancel
 // ============================================================================
 
 static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
@@ -636,9 +335,11 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
   Serial.print("Choice: ");
 
   while (true) {
-    // Check serial input (non-blocking) — 'c'/'s'/'n'/'b' all work
+    if (isWizardCancelRequested()) return -2;
+    // Check serial input (non-blocking) — 'c'/'n'/'b'/'cancel' all work
     if (Serial.available()) {
       String in = Serial.readStringUntil('\n');
+      if (wizardHandleCancelInput(in)) return -2;
       in.trim(); in.toLowerCase();
       Serial.println(in);
       if (in == "b" || in == "back") { wizardPrevPage(); return -1; }
@@ -680,6 +381,7 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
     }
 
     const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+    if (newButtons) noteWizardInputActivity();
 
     if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
       return (selection == 0) ? 1 : 0; // 1=configure, 0=skip
@@ -700,44 +402,55 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
   // Show intro screen: Configure or Skip?
   int choice = showWizardOptionalPageIntro(WIZARD_PAGE_ESPNOW, "ESP-NOW",
       "Optional: ESP-NOW ID");
+  if (choice == -2) { result.completed = false; running = false; return; }
   if (choice == -1) return; // went back
   if (choice == 0) {        // skip — disable ESP-NOW since it's unconfigured
-    gSettings.espnowEnabled = false;
+    wizardSetFeatureEnabled("espnow", false);
     if (!wizardNextPage(result)) running = false;
     return;
   }
 
   bool cancelled = false;
+  result.espnowFriendlyName = "";
+  result.espnowRoom = "";
+  result.espnowZone = "";
+  result.espnowStationary = getWizardDraftValues().espnowStationary;
 
   // Device Name (used for Bluetooth + ESP-NOW identity)
-  String currentName = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "HardwareOne";
+  const String& draftName = getWizardDraftValues().deviceName;
+  String currentName = draftName.length() > 0 ? draftName : "HardwareOne";
   String deviceName = getOLEDTextInput("Device Name:", false, currentName.c_str(), 19, &cancelled);
+  if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
   if (deviceName.length() == 0) deviceName = currentName;
   result.espnowFriendlyName = deviceName;
 
   // Room
-  String room = getOLEDTextInput("Room:", false, gSettings.espnowRoom.c_str(), 20, &cancelled);
+  String room = getOLEDTextInput("Room:", false, getWizardDraftValues().espnowRoom.c_str(), 20, &cancelled);
+  if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
   result.espnowRoom = room;
 
   // Zone
-  String zone = getOLEDTextInput("Zone:", false, gSettings.espnowZone.c_str(), 20, &cancelled);
+  String zone = getOLEDTextInput("Zone:", false, getWizardDraftValues().espnowZone.c_str(), 20, &cancelled);
+  if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
   result.espnowZone = zone;
 
   // Stationary - simple toggle selection (OLED + serial)
   {
-    int selection = gSettings.espnowStationary ? 1 : 0;
+    int selection = getWizardDraftValues().espnowStationary ? 1 : 0;
     uint32_t lastButtons = 0;
     bool lastButtonsInitialized = false;
     sJoyUpHeld = false;
     sJoyDownHeld = false;
 
     // Echo prompt to serial so users monitoring via terminal can respond
-    Serial.println("The device will be — (m)obile or (s)tationary [m]:");
+    Serial.println(selection ? "The device will be — (m)obile or (s)tationary [s]:"
+                             : "The device will be — (m)obile or (s)tationary [m]:");
 
     while (true) {
+      if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
       oledDisplay->clearDisplay();
       drawWizardHeader(getWizardPageNumber(WIZARD_PAGE_ESPNOW), getWizardTotalPages(), "ESP-NOW");
       oledDisplay->setCursor(0, 20);
@@ -756,12 +469,14 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
       // Check for serial input
       if (Serial.available()) {
         String serialInput = Serial.readStringUntil('\n');
+        if (wizardHandleCancelInput(serialInput)) { result.completed = false; running = false; return; }
         serialInput.trim();
         if (serialInput.equalsIgnoreCase("b") || serialInput.equalsIgnoreCase("back")) {
           wizardPrevPage();
           return;
         }
-        result.espnowStationary = (serialInput.equalsIgnoreCase("s") || serialInput.equalsIgnoreCase("stationary"));
+        result.espnowStationary = serialInput.length() == 0 ? (selection == 1)
+          : (serialInput.equalsIgnoreCase("s") || serialInput.equalsIgnoreCase("stationary"));
         break;
       }
 
@@ -769,6 +484,7 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
       if (nav.up || nav.down) { selection = selection == 0 ? 1 : 0; delay(150); continue; }
 
       const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+      if (newButtons) noteWizardInputActivity();
 
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
         result.espnowStationary = (selection == 1);
@@ -781,7 +497,10 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
     }
   }
 
-  wizardApplyESPNowSettings(result);
+  if (!wizardStageESPNowSettings(result)) {
+    broadcastOutput("Error: ESP-NOW choices could not be staged. Try again or cancel.");
+    return;
+  }
 
   // Advance to next page
   if (!wizardNextPage(result)) {
@@ -797,39 +516,55 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
   // Show intro screen: Configure or Skip?
   int choice = showWizardOptionalPageIntro(WIZARD_PAGE_MQTT, "MQTT",
       "Optional: MQTT broker");
+  if (choice == -2) { result.completed = false; running = false; return; }
   if (choice == -1) return; // went back
   if (choice == 0) {        // skip — disable MQTT auto-start since it's unconfigured
-    gSettings.mqttAutoStart = false;
+    wizardSetMQTTAutoStart(false);
     if (!wizardNextPage(result)) running = false;
     return;
   }
 
   bool cancelled = false;
+  result.mqttHost = "";
+  result.mqttPort = 0;
+  result.mqttUser = "";
+  result.mqttPassword = "";
 
   // Host
   String host = getOLEDTextInput("MQTT Host:", false,
-    gSettings.mqttHost.length() > 0 ? gSettings.mqttHost.c_str() : "", 40, &cancelled);
+    getWizardDraftValues().mqttHost.c_str(), 40, &cancelled);
+  if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
   result.mqttHost = host;
 
   // Port
-  String portStr = getOLEDTextInput("MQTT Port:", false, "1883", 5, &cancelled);
-  if (cancelled) { wizardPrevPage(); return; }
-  result.mqttPort = portStr.length() > 0 ? portStr.toInt() : 0;
+  const String currentPort(getWizardDraftValues().mqttPort);
+  while (true) {
+    String portStr = getOLEDTextInput("MQTT Port:", false, currentPort.c_str(), 5, &cancelled);
+    if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
+    if (cancelled) { wizardPrevPage(); return; }
+    if (wizardParseMQTTPort(portStr, result.mqttPort)) break;
+    broadcastOutput("Error: MQTT port must be 1..65535, or blank to keep it.");
+  }
 
   // Username
-  String user = getOLEDTextInput("MQTT User:", false, "", 32, &cancelled);
+  String user = getOLEDTextInput("MQTT User:", false, getWizardDraftValues().mqttUser.c_str(), 32, &cancelled);
+  if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
   result.mqttUser = user;
 
   // Password (only if username was entered)
   if (user.length() > 0) {
     String pass = getOLEDTextInput("MQTT Password:", true, "", 32, &cancelled);
+    if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
     if (cancelled) { wizardPrevPage(); return; }
     result.mqttPassword = pass;
   }
 
-  wizardApplyMQTTSettings(result);
+  if (!wizardStageMQTTSettings(result)) {
+    broadcastOutput("Error: MQTT choices could not be staged. Try again or cancel.");
+    return;
+  }
 
   // Advance to next page
   if (!wizardNextPage(result)) {
@@ -850,7 +585,7 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
 // enabled (wizardShouldShowWebMode/BtMode), so it's never skipped silently.
 void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& running) {
   const WizardModeMenu* sub = wizardModeMenuForPage(page);
-  if (!sub) { wizardNextPage(result); return; }   // nothing to pick — skip
+  if (!sub) { if (!wizardNextPage(result)) running = false; return; }   // nothing to pick — skip
 
   int sel = wizardModeCurrentIndex(sub);
   int lastPrinted = -1;
@@ -860,6 +595,7 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
   sJoyDownHeld = false;
 
   while (true) {
+    if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
     if (sel != lastPrinted) {
       Serial.println();
       Serial.printf("=== SETUP %d/%d: %s ===\n", getWizardPageNumber(page), getWizardTotalPages(), sub->title);
@@ -905,6 +641,7 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
       if (nav.right) { wizardModeApply(sub, sel); if (!wizardNextPage(result)) running = false; return; }
 
       const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+      if (newButtons) noteWizardInputActivity();
       if (newButtons & (INPUT_MASK(INPUT_BUTTON_A) | INPUT_MASK(INPUT_BUTTON_START))) {
         wizardModeApply(sub, sel);
         if (!wizardNextPage(result)) running = false;
@@ -915,6 +652,7 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
 
     if (Serial.available()) {
       String input = Serial.readStringUntil('\n');
+      if (wizardHandleCancelInput(input)) { result.completed = false; running = false; return; }
       input.trim();
       if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) { wizardPrevPage(); return; }
       if (input.equalsIgnoreCase("n") || input.equalsIgnoreCase("next")) {
@@ -942,127 +680,83 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
 // ============================================================================
 
 bool getOLEDSetupModeSelection(int& setupMode) {
-  int selection = 0;  // 0 = Basic, 1 = Advanced, 2 = Import from Backup
-#if ENABLE_HTTP_SERVER && ENABLE_WIFI
-  const int NUM_OPTIONS = 3;
-  const bool importAvailable = true;
-#else
-  const int NUM_OPTIONS = 2;
-  const bool importAvailable = false;
-#endif
+  const int optionCount = (int)getSetupModeCount();
+  if (optionCount == 0) return false;
+  int selection = 0;
   uint32_t lastButtons = 0;
   bool lastButtonsInitialized = false;
   int lastPrintedSelection = -1;
-
-  // Reset joystick state
   sJoyUpHeld = false;
   sJoyDownHeld = false;
 
   while (true) {
-    // Print to Serial if selection changed (dual-interface support)
     if (selection != lastPrintedSelection) {
       Serial.println();
       Serial.println("========================================");
       Serial.println("       SELECT SETUP MODE");
       Serial.println("========================================");
-      Serial.printf(" %s1. Basic Setup\n", selection == 0 ? ">" : " ");
-      Serial.printf(" %s2. Advanced Setup\n", selection == 1 ? ">" : " ");
-      if (importAvailable) {
-        Serial.printf(" %s3. Import from Backup\n", selection == 2 ? ">" : " ");
+      for (int i = 0; i < optionCount; ++i) {
+        const SetupModeOption* option = getSetupModeOption(i);
+        Serial.printf(" %s%d. %s - %s\n", selection == i ? ">" : " ", i + 1,
+                      option->label, option->description);
       }
       Serial.println("----------------------------------------");
-      Serial.printf("Serial: Enter 1%s\n", importAvailable ? ", 2, or 3" : " or 2");
+      Serial.printf("Serial: Enter 1..%d (blank = Basic)\n", optionCount);
       Serial.println("OLED: Joystick to move, A to select");
       Serial.print("> ");
       lastPrintedSelection = selection;
     }
 
-    // Draw selection screen on OLED (if available)
     if (oledDisplay && oledConnected) {
       oledDisplay->clearDisplay();
       oledDisplay->setTextSize(1);
       oledDisplay->setTextColor(SSD1306_WHITE);
-
-      // Title
       oledDisplay->setCursor(20, 0);
       oledDisplay->println("FIRST-TIME SETUP");
       oledDisplay->drawFastHLine(0, 10, 128, SSD1306_WHITE);
-
-      // Subtitle
       oledDisplay->setCursor(0, 13);
       oledDisplay->println("Select setup mode:");
-
-      // Option 1: Basic
-      oledDisplay->setCursor(0, 24);
-      oledDisplay->print(selection == 0 ? ">" : " ");
-      oledDisplay->println(" Basic Setup");
-
-      // Option 2: Advanced
-      oledDisplay->setCursor(0, 34);
-      oledDisplay->print(selection == 1 ? ">" : " ");
-      oledDisplay->println(" Advanced Setup");
-
-      // Option 3: Import from Backup (only if WiFi+HTTP compiled)
-      if (importAvailable) {
-        oledDisplay->setCursor(0, 44);
-        oledDisplay->print(selection == 2 ? ">" : " ");
-        oledDisplay->println(" Import from Backup");
+      for (int i = 0; i < optionCount; ++i) {
+        const SetupModeOption* option = getSetupModeOption(i);
+        oledDisplay->setCursor(0, 24 + i * 10);
+        oledDisplay->print(selection == i ? "> " : "  ");
+        oledDisplay->println(option->label);
       }
-
-      // Footer at standard position (matching drawOLEDFooter)
       const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
       oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
       oledDisplay->setCursor(0, footerY + 2);
       oledDisplay->print("A:Select  Joy:Move");
-
       OLED_TRANSACTION(oledDisplay->display());
     }
-
     delay(50);
 
-    // Read joystick (if OLED/gamepad available)
     if (oledDisplay && oledConnected) {
       JoystickNav nav = readWizardJoystickNav();
-
       if (nav.up) {
-        selection = (selection > 0) ? selection - 1 : NUM_OPTIONS - 1;
+        selection = selection > 0 ? selection - 1 : optionCount - 1;
         delay(150);
         continue;
       }
       if (nav.down) {
-        selection = (selection < NUM_OPTIONS - 1) ? selection + 1 : 0;
+        selection = selection < optionCount - 1 ? selection + 1 : 0;
         delay(150);
         continue;
       }
-
-      // Read buttons
       const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
-
-      // A button = select
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
-        setupMode = selection;
+        setupMode = (int)getSetupModeOption(selection)->mode;
         return true;
       }
     }
-
-    // Also check serial input
     if (Serial.available()) {
-      String input = Serial.readStringUntil('\n');
-      input.trim();
-      if (input == "1" || input.equalsIgnoreCase("basic")) {
-        setupMode = 0;
-        return true;
-      } else if (input == "2" || input.equalsIgnoreCase("advanced")) {
-        setupMode = 1;
-        return true;
-      } else if (importAvailable && (input == "3" || input.equalsIgnoreCase("restore") || input.equalsIgnoreCase("import"))) {
-        setupMode = 2;
+      const String input = Serial.readStringUntil('\n');
+      SetupMode selected;
+      if (parseSetupModeInput(input, selected)) {
+        setupMode = (int)selected;
         return true;
       }
     }
   }
-
-  return false;
 }
 
 // ============================================================================

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +14,8 @@ class String : public std::string {
  public:
   using std::string::string;
   String(const std::string& value) : std::string(value) {}
+  String(int value) : std::string(std::to_string(value)) {}
+  bool isEmpty() const { return empty(); }
   void trim() {
     const size_t first = find_first_not_of(" \t\r\n");
     *this = first == npos ? "" : substr(first, find_last_not_of(" \t\r\n") - first + 1);
@@ -35,6 +38,14 @@ struct SettingsBoundary {
   int mqttPort;
   bool mqttAutoStart, mqttEnabled;
 } gSettings;
+static SetupWizardResult draftValues;
+static std::vector<SetupWizardResult> staged;
+static bool draftAutoStart, stageSucceeds;
+static const SetupWizardResult& getWizardDraftValues() { return draftValues; }
+static void wizardSetMQTTAutoStart(bool enabled) { draftAutoStart = enabled; }
+static bool wizardStageMQTTSettings(const SetupWizardResult& value) {
+  staged.push_back(value); return stageSucceeds;
+}
 
 static std::vector<String> inputs;
 static size_t inputIndex;
@@ -51,6 +62,10 @@ struct SerialBoundary {
 } Serial;
 
 static String readInput() {
+  assert(gSettings.mqttHost == "old.host" && gSettings.mqttPort == 8883);
+  assert(gSettings.mqttUser == "old-user" && gSettings.mqttPassword == "old-secret");
+  assert(gSettings.mqttAutoStart && gSettings.mqttEnabled && saveCalls == 0 && startCalls == 0);
+  if (cancelRequested) return "";
   assert(inputIndex < inputs.size());
   if (static_cast<int>(inputIndex) == cancelInput) cancelRequested = true;
   return inputs[inputIndex++];
@@ -63,12 +78,15 @@ static String getOLEDTextInput(const char*, bool, const char*, int, bool* cancel
 }
 static int showWizardOptionalPageIntro(SetupWizardPage, const char*, const char*) { return introChoice; }
 static bool isWizardCancelRequested() { return cancelRequested; }
+static void requestWizardCancel() { cancelRequested = true; }
+static void noteWizardInputActivity() {}
 static int getWizardPageNumber(SetupWizardPage) { return 2; }
 static int getWizardTotalPages() { return 4; }
 static SetupWizardPage getWizardCurrentPage() { return currentPage; }
 static bool wizardPrevPage() { ++previousCalls; currentPage = WIZARD_PAGE_ESPNOW; return true; }
-static bool wizardNextPage(SetupWizardResult&) {
+static bool wizardNextPage(SetupWizardResult& result) {
   ++nextCalls;
+  result.completed = !hasNextPage;
   currentPage = hasNextPage ? WIZARD_PAGE_WIFI : WIZARD_PAGE_COUNT;
   return hasNextPage;
 }
@@ -87,6 +105,10 @@ static auto dispatchModePage = unrelatedPage;
 static auto dispatchESPNow = unrelatedPage;
 static auto dispatchWiFi = unrelatedPage;
 
+static bool wizardIsGroupPage(SetupWizardPage page) {
+  return page == WIZARD_PAGE_CONNECTIONS || page == WIZARD_PAGE_DISPLAY ||
+         page == WIZARD_PAGE_SENSORS || page == WIZARD_PAGE_SYSTEM;
+}
 // INSERT_PRODUCTION_FUNCTIONS
 
 static void reset() {
@@ -95,6 +117,9 @@ static void reset() {
   previousCalls = nextCalls = clearCalls = saveCalls = startCalls = 0;
   cancelRequested = false; hasNextPage = true; currentPage = WIZARD_PAGE_MQTT;
   sWizard = {}; sWizard.subMode = WizardSubMode::MQTT_INTRO;
+  draftValues = {}; draftValues.mqttHost = "old.host"; draftValues.mqttPort = 8883;
+  draftValues.mqttUser = "old-user"; draftValues.mqttPassword = "old-secret";
+  staged.clear(); draftAutoStart = stageSucceeds = true;
 }
 static void broker(const char* host = "old.host", int port = 8883,
                    const char* user = "old-user", const char* password = "old-secret") {
@@ -107,112 +132,88 @@ static CLIModeInputResult cli(const char* line) {
   return wizardMode_onInput(line, nullptr, output, sizeof(output));
 }
 
-static void helperCases() {
-  reset();
-  SetupWizardResult result{};
-  for (int port : {0, -1, -70000}) {
-    result.mqttPort = port;
-    wizardApplyMQTTSettings(result);
-    broker();
-  }
-  result.mqttHost = " host with spaces ";
-  wizardApplyMQTTSettings(result);
-  broker(" host with spaces ");
-  result = {}; result.mqttPassword = "new-secret";
-  wizardApplyMQTTSettings(result);
-  broker(" host with spaces ", 8883, "old-user", "new-secret");
-  result = {}; result.mqttUser = "new-user"; result.mqttPort = 70000;
-  wizardApplyMQTTSettings(result);
-  broker(" host with spaces ", 70000, "new-user", "new-secret");
-  assert(gSettings.mqttAutoStart);  // Neither helper nor page auto-starts a client.
+static void submitted(const char* host, int port, const char* user, const char* password) {
+  broker(); assert(staged.size() == 1);
+  const auto& patch = staged.back();
+  assert(patch.mqttHost == host && patch.mqttPort == port);
+  assert(patch.mqttUser == user && patch.mqttPassword == password);
 }
-
 static void serialCases() {
   SetupWizardResult result{}; bool running = true;
-  reset(); inputs = {"c", " new.host ", "70000", "new-user", "new-secret"};
+  reset(); inputs = {"c", " new.host ", "65535", "new-user", "new-secret"};
   handleSerialMQTTPage(result, running);
-  broker("new.host", 70000, "new-user", "new-secret");
-  assert(nextCalls == 1 && running && gSettings.mqttAutoStart);
-
-  reset(); result = {}; inputs = {"c", "", "", ""}; hasNextPage = false;
-  handleSerialMQTTPage(result, running);
-  broker(); assert(!running && nextCalls == 1 && inputIndex == 4);
-
+  submitted("new.host", 65535, "new-user", "new-secret");
+  assert(nextCalls == 1 && running && draftAutoStart);
+  for (const char* port : {"70000", "0", "-1", "1883junk", "bad"}) {
+    reset(); result = {}; inputs = {"c", "new.host", port};
+    handleSerialMQTTPage(result, running);
+    broker(); assert(staged.empty() && nextCalls == 0);
+  }
   for (int back = 0; back < 5; ++back) {
     reset(); result = {}; running = true;
-    inputs = {"c", "new.host", "2000", "new-user", "new-secret"};
-    inputs[back] = "back";
+    inputs = {"c", "new.host", "2000", "new-user", "new-secret"}; inputs[back] = "back";
     handleSerialMQTTPage(result, running);
-    broker(); assert(previousCalls == 1 && nextCalls == 0 && running);
+    broker(); assert(staged.empty() && previousCalls == 1 && nextCalls == 0 && running);
   }
-  reset(); result = {}; running = true; inputs = {"c", "new.host", "2000", "new-user", "new-secret"};
-  cancelInput = 2;
+  reset(); result = {}; inputs = {"c", "new.host", "2000", "new-user", "new-secret"}; cancelInput = 2;
   handleSerialMQTTPage(result, running);
-  broker(); assert(!running && nextCalls == 0 && gSettings.mqttAutoStart);
-
+  broker(); assert(staged.empty() && !running && nextCalls == 0 && draftAutoStart);
   reset(); result = {}; running = true; inputs = {"n"};
   handleSerialMQTTPage(result, running);
-  broker(); assert(!gSettings.mqttAutoStart && nextCalls == 1);
+  broker(); assert(!draftAutoStart && nextCalls == 1 && staged.empty());
+  reset(); result = {}; inputs = {"c", "new.host", "2000", "user", "pass"}; stageSucceeds = false;
+  handleSerialMQTTPage(result, running); broker(); assert(nextCalls == 0 && staged.size() == 1);
 }
-
 static void oledCases() {
   SetupWizardResult result{}; bool running = true;
-  reset(); inputs = {"new.host", "70000", "new-user", "new-secret"};
+  reset(); inputs = {"new.host", "65535", "new-user", "new-secret"};
   handleOLEDMQTTPage(result, running);
-  broker("new.host", 70000, "new-user", "new-secret");
-  assert(nextCalls == 1 && running && gSettings.mqttAutoStart);
-
-  reset(); result = {}; inputs = {"", "", ""}; hasNextPage = false;
+  submitted("new.host", 65535, "new-user", "new-secret"); assert(nextCalls == 1 && running);
+  reset(); result = {}; inputs = {"new.host", "70000", "1883", "user", "pass"};
   handleOLEDMQTTPage(result, running);
-  broker(); assert(!running && nextCalls == 1 && inputIndex == 3);
-
+  submitted("new.host", 1883, "user", "pass"); assert(inputIndex == 5);
   for (int cancel = 0; cancel < 4; ++cancel) {
-    reset(); result = {}; running = true;
-    inputs = {"new.host", "2000", "new-user", "new-secret"}; cancelInput = cancel;
+    reset(); result = {}; running = true; inputs = {"new.host", "2000", "new-user", "new-secret"}; cancelInput = cancel;
     handleOLEDMQTTPage(result, running);
-    broker(); assert(previousCalls == 1 && nextCalls == 0 && running);
+    broker(); assert(staged.empty() && previousCalls == 0 && nextCalls == 0 && !running);
   }
-  reset(); result = {}; running = true; introChoice = -1;
+  reset(); result = {}; introChoice = 0;
   handleOLEDMQTTPage(result, running);
-  broker(); assert(nextCalls == 0 && running && gSettings.mqttAutoStart);
-  reset(); introChoice = 0;
-  handleOLEDMQTTPage(result, running);
-  broker(); assert(!gSettings.mqttAutoStart && nextCalls == 1);
+  broker(); assert(!draftAutoStart && staged.empty() && nextCalls == 1);
+  reset(); result = {}; inputs = {"new.host", "1883", "user", "pass"}; stageSucceeds = false;
+  handleOLEDMQTTPage(result, running); broker(); assert(nextCalls == 0 && staged.size() == 1);
 }
-
 static void cliCases() {
   reset();
-  for (const char* value : {"c", "new.host", "70000", "new-user"}) {
-    assert(cli(value) == CLI_MODE_HANDLED); broker();
+  for (const char* value : {"c", "new.host", "65535", "new-user"}) {
+    assert(cli(value) == CLI_MODE_HANDLED); broker(); assert(staged.empty());
   }
   hasNextPage = false;
   assert(cli("new-secret") == CLI_MODE_HANDLED_AND_EXIT);
-  broker("new.host", 70000, "new-user", "new-secret");
-  assert(sWizard.result.completed && nextCalls == 1 && gSettings.mqttAutoStart);
-
-  reset();
-  for (const char* value : {"c", "", "", "", ""}) cli(value);
-  broker("old.host", 1883);  // CLI's existing blank-port default differs from FTS.
+  submitted("new.host", 65535, "new-user", "new-secret");
+  assert(sWizard.result.completed && nextCalls == 1 && draftAutoStart);
+  reset(); for (const char* value : {"c", "", "", "", ""}) cli(value);
+  submitted("", 0, "", "");
   reset(); cli("c"); cli("new.host"); cli("n");
-  broker("new.host"); assert(nextCalls == 1);  // Apply a partial page without completed=true.
-  reset(); cli("c"); cli("new.host"); cli("-1"); cli(""); cli("");
-  broker("new.host");
-
-  for (int field = 0; field < 5; ++field) {
-    reset();
-    const char* prefix[] = {"c", "new.host", "2000", "new-user"};
-    for (int i = 0; i < field; ++i) cli(prefix[i]);
-    cli("b"); broker(); assert(nextCalls == 0);
-    reset();
-    for (int i = 0; i < field; ++i) cli(prefix[i]);
-    assert(cli("cancel") == CLI_MODE_HANDLED_AND_EXIT);
-    broker(); assert(!sWizard.result.completed && clearCalls == 1 && nextCalls == 0);
+  submitted("new.host", 0, "", ""); assert(nextCalls == 1);
+  for (const char* invalid : {"70000", "0", "-1", "1883junk", "bad"}) {
+    reset(); cli("c"); cli("new.host"); cli(invalid);
+    broker(); assert(staged.empty() && nextCalls == 0 && sWizard.subMode == WizardSubMode::MQTT_PORT);
   }
-  reset(); cli("n");
-  broker(); assert(gSettings.mqttAutoStart && nextCalls == 1);  // Legacy CLI skip keeps auto-start.
+  for (int field = 0; field < 5; ++field) {
+    const char* prefix[] = {"c", "new.host", "2000", "new-user"};
+    reset(); for (int i = 0; i < field; ++i) cli(prefix[i]);
+    cli("b"); broker(); assert(staged.empty() && nextCalls == 0);
+    reset(); for (int i = 0; i < field; ++i) cli(prefix[i]);
+    assert(cli("cancel") == CLI_MODE_HANDLED_AND_EXIT);
+    broker(); assert(staged.empty() && !sWizard.result.completed && clearCalls == 1 && nextCalls == 0);
+  }
+  reset(); cli("n"); broker(); assert(!draftAutoStart && nextCalls == 1);
+  reset(); stageSucceeds = false;
+  for (const char* value : {"c", "new.host", "1883", "user", "pass"}) cli(value);
+  broker(); assert(staged.size() == 1 && nextCalls == 0 && !sWizard.result.completed);
 }
-
 int main() {
-  helperCases(); serialCases(); oledCases(); cliCases();
-  std::puts("MQTT setup: shared apply, partial inputs, back/cancel and legacy page behavior passed");
+  serialCases(); oledCases(); cliCases();
+  std::puts("MQTT setup: three production interfaces stage only, strict ports, skip parity, failure/back/cancel passed");
 }

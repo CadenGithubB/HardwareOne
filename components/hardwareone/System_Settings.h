@@ -1258,15 +1258,43 @@ bool requestDebugSettingsPersist();
 // ordered behind commands whose synchronous HTTP wait may have timed out.
 uint32_t allocateSettingsWriteBatchId();
 
+// Coalesce a synchronous group of mutations on this task, including callers
+// without a command context. Check active() before changing values, then call
+// finish() to observe persistence failure. Destruction also finishes an active
+// scope; failed writes retain the ordinary background retry intent.
+// Scopes must remain on their creating task and finish in nesting order.
+// A first scope uses its own owner, leaving existing command batches intact;
+// nested scopes share it and only the outer finish writes the changed files.
+// This coalesces writes, not live RAM changes or authorization.
+class SettingsWriteScope final {
+ public:
+  SettingsWriteScope();
+  ~SettingsWriteScope();
+  SettingsWriteScope(const SettingsWriteScope&) = delete;
+  SettingsWriteScope& operator=(const SettingsWriteScope&) = delete;
+  bool active() const { return active_; }
+  bool finish();
+
+ private:
+  uint32_t batchId_ = 0;
+  void* task_ = nullptr;
+  void* previousScope_ = nullptr;
+  bool active_ = false;
+  bool result_ = false;
+};
+
 // Reap abandoned owner batches and retry retained failed writes. Cheaply
 // self-throttled; call from the main loop.
 void settingsWriteBatchTick();
 
-// Fire SYSEVT_SETTING_CHANGED for a field mutated via setSetting(). setSetting() is
-// name-agnostic (it only has the field reference), so this reverse-looks-up the
-// registered SettingEntry by valuePtr for the setting's name + type. A field with no
-// registered entry (internal/runtime state) fires nothing. Defined in System_Settings.cpp.
-void notifySettingChanged(const void* fieldPtr);
+struct SettingEntry;
+// Describe a changed field using its supplied command descriptor, or the first
+// registered descriptor for that field. Fields without metadata emit no event.
+void notifySettingChanged(const void* fieldPtr, const SettingEntry* entry = nullptr);
+// Shared completion of an accepted value change: request persistence, apply a
+// descriptor's existing generic disable action, then notify. Failed saves retain
+// the live value and enter the existing retry path; this is not a transaction.
+void finishSettingChange(const void* fieldPtr, const SettingEntry* entry = nullptr);
 
 // Apply settings to runtime flags
 void applySettings();
@@ -1286,31 +1314,31 @@ void applySettings();
 // From the web UI, save buttons use a request-scoped batch automatically.
 // From the serial CLI, each setSetting() writes immediately unless the same
 // serial session explicitly opened a batch.
+// Generic editor commands supply their descriptor to preserve alias labels and
+// stop-before-notification behavior. Dedicated commands keep their own live
+// actions and normally use the two-argument form.
 
 template<typename T>
-inline void setSetting(T& field, const T& value) {
+inline void setSetting(T& field, const T& value, const SettingEntry* entry = nullptr) {
   if (field != value) {
     field = value;
-    (void)requestSettingsPersist();
-    notifySettingChanged(&field);  // fire setting_changed for the registered setting (if any)
+    finishSettingChange(&field, entry);
   }
 }
 
 // String overload (avoids unnecessary copy when equal)
-inline void setSetting(String& field, const String& value) {
+inline void setSetting(String& field, const String& value, const SettingEntry* entry = nullptr) {
   if (field != value) {
     field = value;
-    (void)requestSettingsPersist();
-    notifySettingChanged(&field);
+    finishSettingChange(&field, entry);
   }
 }
 
 // const char* convenience overload
-inline void setSetting(String& field, const char* value) {
+inline void setSetting(String& field, const char* value, const SettingEntry* entry = nullptr) {
   if (field != value) {
     field = value;
-    (void)requestSettingsPersist();
-    notifySettingChanged(&field);
+    finishSettingChange(&field, entry);
   }
 }
 

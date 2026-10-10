@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise the production ESP-NOW setup application and its three interfaces.
+"""Exercise the production ESP-NOW setup staging and its three interfaces.
 
-The shared helper and serial/OLED/CLI handlers are extracted intact. Only input,
-drawing, settings storage and navigation are substituted; no radio is started.
+The serial/OLED/CLI handlers are extracted intact. Draft-owner calls are recording
+boundaries; test_setup_draft.py separately exercises the real owner.
 """
 import argparse
 import os
@@ -28,18 +28,15 @@ def main():
     header = (COMPONENT / "System_SetupWizard.h").read_text()
     oled = (COMPONENT / "OLED_SetupWizard.cpp").read_text()
     mode = (COMPONENT / "System_SetupWizardMode.cpp").read_text()
-    assert "void wizardApplyESPNowSettings(const SetupWizardResult& result);" in header
+    assert "bool wizardStageESPNowSettings(const SetupWizardResult& result);" in header
     handlers = [extract_block(setup, "static void handleSerialESPNowPage("),
                 extract_block(oled, "void handleOLEDESPNowPage("),
                 extract_block(mode[mode.rindex("static CLIModeInputResult dispatchESPNow("):],
                               "static CLIModeInputResult dispatchESPNow(")]
     for handler in handlers:
-        assert handler.count("wizardApplyESPNowSettings(") == 1
+        assert handler.count("wizardStageESPNowSettings(") == 1
         for field in ("bleDeviceName", "espnowDeviceName", "espnowFriendlyName", "espnowRoom", "espnowZone", "espnowStationary"):
             assert f"gSettings.{field} =" not in handler, f"duplicate {field} application"
-    helper = extract_block(setup, "void wizardApplyESPNowSettings(")
-    for forbidden in ("writeSettingsJson", "requestSettingsPersist", "setSetting(", "wizardNextPage", "wizardPrevPage"):
-        assert forbidden not in helper, f"ESP-NOW application must remain RAM-only: {forbidden}"
     definitions = "\n\n".join([
         extract_block(header, "enum SetupWizardPage") + ";",
         extract_block(header, "struct SetupWizardResult") + ";",
@@ -48,7 +45,9 @@ def main():
         extract_block(mode, "static struct") + " sWizard;",
     ])
     functions = "\n\n".join([
-        helper, extract_block(mode, "static WizardSubMode subModeForPage("),
+        extract_block(setup, "bool wizardHandleCancelInput("),
+        extract_block(setup, "static String waitForWizardInput("),
+        extract_block(mode, "static WizardSubMode subModeForPage("),
         *handlers, extract_block(mode, "static CLIModeInputResult wizardMode_onInput("),
     ])
     harness = (HERE / "setup_espnow_application_harness.cpp").read_text()
@@ -60,7 +59,7 @@ def main():
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-Wno-unused-function", str(source), "-o", str(executable)]
         if args.sanitize:
-            command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
+            command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
         subprocess.run(command, check=True, timeout=60)
         subprocess.run([str(executable)], check=True, timeout=60)
 

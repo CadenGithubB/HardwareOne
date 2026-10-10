@@ -172,7 +172,15 @@ class NetworkBuildSelection(unittest.TestCase):
         self.assertEqual(evaluated.returncode, 0, evaluated.stdout + evaluated.stderr)
         self.assertTrue(result.exists(), "actual idf_component_register was not reached")
         entries = result.read_text().splitlines()
-        sources = {line.removeprefix("source:") for line in entries if line.startswith("source:")}
+        source_list = [line.removeprefix("source:") for line in entries if line.startswith("source:")]
+        sources = set(source_list)
+        # The owner remains registered in both phases with Wi-Fi enabled or
+        # disabled; its own feature guard supplies the disabled implementation.
+        # Retain duplicates here: a set alone would hide double registration.
+        wifi_owner = "network/wifi/System_WiFiNetworks.cpp"
+        self.assertTrue((COMPONENT / wifi_owner).is_file())
+        self.assertEqual(source_list.count(wifi_owner), 1)
+        self.assertNotIn("System_WiFiNetworks.cpp", sources)
         dependencies = {line.removeprefix("dependency:") for line in entries
                         if line.startswith("dependency:")}
         self.assertFalse(enabled - sources, f"enabled source omitted: {sorted(enabled - sources)}")

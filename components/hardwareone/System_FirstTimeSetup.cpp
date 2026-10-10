@@ -31,7 +31,7 @@
 #include "System_SetupWizard.h"
 #include "System_FeatureRegistry.h"
 #include "System_WiFi.h"
-#include "System_WiFiNetworks.h"
+#include "network/wifi/System_WiFiNetworks.h"
 #include "System_NTP.h"
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -80,6 +80,40 @@ extern void resolvePendingUserCreationTimes();
 // ============================================================================
 // State Management Implementation
 // ============================================================================
+
+static const SetupModeOption kSetupModes[] = {
+  {SETUP_MODE_BASIC, "Basic Setup", "Choose a preset and create your login"},
+  {SETUP_MODE_ADVANCED, "Advanced Setup", "Configure features and create your login"},
+#if ENABLE_MIGRATION_TOOL && ENABLE_WIFI
+  {SETUP_MODE_IMPORT, "Import from Backup", "Restore settings from a .hwbackup file"},
+#endif
+};
+
+size_t getSetupModeCount() { return sizeof(kSetupModes) / sizeof(kSetupModes[0]); }
+
+const SetupModeOption* getSetupModeOption(size_t index) {
+  return index < getSetupModeCount() ? &kSetupModes[index] : nullptr;
+}
+
+bool parseSetupModeInput(const String& input, SetupMode& mode) {
+  String choice = input;
+  if (choice.length() != input.length()) return false;
+  choice.trim();
+  SetupMode requested;
+  if (choice.length() == 0 || choice == "1" || choice.equalsIgnoreCase("basic")) {
+    requested = SETUP_MODE_BASIC;
+  } else if (choice == "2" || choice.equalsIgnoreCase("advanced")) {
+    requested = SETUP_MODE_ADVANCED;
+  } else if (choice == "3" || choice.equalsIgnoreCase("restore") || choice.equalsIgnoreCase("import")) {
+    requested = SETUP_MODE_IMPORT;
+  } else {
+    return false;
+  }
+  for (const auto& option : kSetupModes) {
+    if (option.mode == requested) { mode = requested; return true; }
+  }
+  return false;
+}
 
 void detectFirstTimeSetupState() {
   // Use USERS_JSON_FILE as the determinant - this is the actual indicator
@@ -239,14 +273,19 @@ static bool serialWifiSelectionForRestore(String& outSSID) {
 #include "WebServer_MigrationTool.h"
 #endif
 
-#if ENABLE_MIGRATION_TOOL
-// Create the initial admin user: users.json (id 1, bootCounter 1, nextId 2) plus the
-// per-user settings file holding the hashed password and theme. Mirrors the inline
-// creation in firstTimeSetupIfNeeded()'s Basic/Advanced path and is used by the
-// post-restore streamlined credential flow. (If the first-admin shape changes, update
-// both — a future cleanup could unify them.)
+// Shared by Basic/Advanced setup and the post-restore credential flow. Publish
+// the first admin only after its credentials are stored; callers may finish
+// setup only when this operation succeeds.
 static bool createInitialAdminUser(const String& username, const String& plaintextPassword, bool useDarkTheme) {
+  if (username.length() == 0 || plaintextPassword.length() == 0) {
+    broadcastOutput("ERROR: Admin username and password cannot be blank");
+    return false;
+  }
   String hashedPassword = hashUserPassword(plaintextPassword);
+  if (hashedPassword.length() == 0) {
+    broadcastOutput("ERROR: Failed to prepare admin password");
+    return false;
+  }
 
   PSRAM_JSON_DOC(doc);
   doc["nextId"] = 2;
@@ -264,7 +303,21 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   admin["bootCount"] = 1;
   // Boot anchors live in their own file (BOOT_ANCHORS_FILE), not users.json.
 
-  // ORDER IS LOAD-BEARING — mirrors the note in firstTimeSetupIfNeeded().
+  // Prepare the complete user index before any writes. A nonempty but truncated
+  // JSON string must never become the file that marks setup complete.
+  if (doc.overflowed()) {
+    broadcastOutput("ERROR: Failed to prepare initial user record");
+    return false;
+  }
+  String json;
+  const size_t expected = measureJson(doc);
+  if (expected == 0 || !json.reserve(expected) ||
+      serializeJson(doc, json) != expected || json.length() != expected) {
+    broadcastOutput("ERROR: Failed to serialize initial user record");
+    return false;
+  }
+
+  // ORDER IS LOAD-BEARING.
   // detectFirstTimeSetupState() keys strictly on users.json, so users.json is
   // the "setup complete" commit token. Writing it before the credential would
   // let a power cut in between leave a device that believes setup is done but
@@ -283,14 +336,11 @@ static bool createInitialAdminUser(const String& username, const String& plainte
     }
   }
 
-  {
-    // Atomic create (tmp + rename) — the commit token.
-    String json;
-    serializeJson(doc, json);
-    if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
-      broadcastOutput("ERROR: Failed to write users.json");
-      return false;
-    }
+  // Atomic create (tmp + rename) — the commit token. A failed publication leaves
+  // only an orphan credential file, which the next setup attempt can replace.
+  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
+    broadcastOutput("ERROR: Failed to write users.json");
+    return false;
   }
   broadcastOutput("Saved /system/users/users.json");
 
@@ -304,6 +354,7 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   return true;
 }
 
+#if ENABLE_MIGRATION_TOOL
 // Streamlined post-restore login setup. Runs when a cross-device (partial) restore
 // left settings in place but no user credentials. Collects just username + password,
 // creates the admin, and reboots into the (now fully configured) device. Returns
@@ -412,7 +463,7 @@ void firstTimeSetupIfNeeded() {
   // ============================================================================
   // Setup Mode Selection: Basic vs Advanced vs Import from Backup
   // ============================================================================
-  int setupMode = 0;  // 0 = Basic, 1 = Advanced, 2 = Import from Backup
+  int setupMode = SETUP_MODE_BASIC;
   
 #if ENABLE_OLED_DISPLAY
   // Use OLED selection if available
@@ -423,28 +474,20 @@ void firstTimeSetupIfNeeded() {
     // Serial-only mode selection
     broadcastOutput("");
     broadcastOutput("Select setup mode:");
-    broadcastOutput("  1. Basic Setup        - Quick start (username + password only)");
-    broadcastOutput("  2. Advanced Setup     - Full configuration wizard");
-#if ENABLE_MIGRATION_TOOL && ENABLE_WIFI
-    broadcastOutput("  3. Import from Backup - Restore settings from .hwbackup file");
-    broadcastOutput("");
-    broadcastOutput("Enter 1, 2, or 3 (default: 1): ");
-#else
-    broadcastOutput("");
-    broadcastOutput("Enter 1 or 2 (default: 1): ");
-#endif
-
-    String modeInput = waitForSerialInputBlocking();
-    modeInput.trim();
-    if (modeInput == "2" || modeInput.equalsIgnoreCase("advanced")) {
-      setupMode = 1;
-#if ENABLE_MIGRATION_TOOL && ENABLE_WIFI
-    } else if (modeInput == "3" || modeInput.equalsIgnoreCase("restore") || modeInput.equalsIgnoreCase("import")) {
-      setupMode = 2;
-#endif
-    } else {
-      setupMode = 0;
+    for (size_t i = 0; i < getSetupModeCount(); ++i) {
+      const SetupModeOption* option = getSetupModeOption(i);
+      char line[128];
+      snprintf(line, sizeof(line), "  %u. %s - %s", (unsigned)i + 1, option->label, option->description);
+      broadcastOutput(line);
     }
+    char prompt[64];
+    snprintf(prompt, sizeof(prompt), "Enter 1-%u (default: 1): ", (unsigned)getSetupModeCount());
+    broadcastOutput(prompt);
+    SetupMode selected = SETUP_MODE_BASIC;
+    while (!parseSetupModeInput(waitForSerialInputBlocking(), selected)) {
+      broadcastOutput("Choose one of the listed setup modes.");
+    }
+    setupMode = selected;
 #if ENABLE_OLED_DISPLAY
   }
 #endif
@@ -452,7 +495,7 @@ void firstTimeSetupIfNeeded() {
   // ============================================================================
   // Handle "Import from Backup" mode
   // ============================================================================
-  if (setupMode == 2) {
+  if (setupMode == SETUP_MODE_IMPORT) {
     broadcastOutput("Import from Backup selected.");
     broadcastOutput("");
 
@@ -697,11 +740,11 @@ void firstTimeSetupIfNeeded() {
 
   if (goBack) continue;  // Jump back to mode selection
 
-  bool advancedSetup = (setupMode == 1);
+  bool advancedSetup = (setupMode == SETUP_MODE_ADVANCED);
 
   // Basic (setupMode 0) -> Level 2: pick a deployment archetype, seed its bundle.
   // (Advanced runs the classic manual wizard; Import was handled above.)
-  if (setupMode == 0) {
+  if (setupMode == SETUP_MODE_BASIC) {
     int archIdx = 0;
 #if ENABLE_OLED_DISPLAY
     if (gOledRunning && oledConnected) {
@@ -802,10 +845,6 @@ void firstTimeSetupIfNeeded() {
   }
   if (setupBack) continue;  // back to the Basic/Advanced/Import menu
 
-  // Create users.json with admin (ID 1), nextId field, and empty bootAnchors array - hash the password
-  String hashedPassword = hashUserPassword(p);
-  // At first-time setup, users.json does not exist yet; seed bootCounter starting at 1 and set admin bootCount to 1
-  
   // ============================================================================
   // Feature Configuration Wizard (Advanced mode only)
   // ============================================================================
@@ -874,74 +913,9 @@ void firstTimeSetupIfNeeded() {
   setSetupProgressStage(SETUP_SAVING_CONFIG);
   broadcastOutput("Saving configuration...");
   
-  // Build JSON with ArduinoJson
-  PSRAM_JSON_DOC(doc);
-  doc["nextId"] = 2;
-  
-  JsonArray users = doc["users"].to<JsonArray>();
-  JsonObject admin = users.add<JsonObject>();
-  admin["id"] = 1;
-  admin["username"] = u;
-  // Password now stored in per-user settings file, not here
-  admin["role"] = "superadmin";  // first user is the device owner → top tier
-  admin["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
-  admin["createdBy"] = "firstsetup";          // provenance: onboarding wizard owner
-  admin["createdAtSource"] = "pending";       // time-derivation status (see resolver)
-  admin["createdMs"] = millis();
-  admin["ntpAnchorId"] = gNTPAnchorId;
-  admin["bootCount"] = 1;
-  // Boot anchors live in their own file (BOOT_ANCHORS_FILE), not users.json.
-
-  DEBUG_SYSTEMF("FTS: Writing initial users.json: admin.bootCount=%u, gNTPAnchorId=%lu",
-                1, (unsigned long)gNTPAnchorId);
-
-  // ORDER IS LOAD-BEARING — the credential must be durable BEFORE users.json.
-  //
-  // detectFirstTimeSetupState() keys strictly on USERS_JSON_FILE existing (see
-  // the top of this file), so users.json IS the "setup complete" commit token.
-  // If it landed first and power was cut before the password file did, the next
-  // boot would report SETUP_NOT_NEEDED, fail every login (user 1 has no stored
-  // hash, so isValidUser() rejects it), and never re-run first-time setup —
-  // a permanent, unrecoverable lockout with no path back except reflashing.
-  //
-  // Writing the credential first inverts that: a power cut in the same window
-  // leaves an orphan user-1 settings file and no users.json, so the device
-  // stays SETUP_REQUIRED and simply runs setup again, overwriting it.
-  // saveUserSettings() is path-based and never reads users.json, so it is safe
-  // to call before the user record exists.
-  bool credentialStored = false;
-  {
-    // Create user settings with password and theme
-    PSRAM_JSON_DOC(defaults);
-    defaults["theme"] = useDarkTheme ? "dark" : "light";
-    defaults["password"] = hashedPassword;  // Store password in user settings
-    credentialStored = saveUserSettings(1, defaults);
-    if (!credentialStored) {
-      broadcastOutput("ERROR: Failed to create user settings");
-    }
-  }
-
-  // Write atomically (tmp + rename).
-  String usersJson;
-  serializeJson(doc, usersJson);
-  if (!credentialStored) {
-    // Refuse to commit. Withholding users.json keeps the device in
-    // SETUP_REQUIRED so the owner gets another attempt on the next boot,
-    // instead of committing an account nobody can ever authenticate as.
-    broadcastOutput("ERROR: credential not stored — users.json withheld; setup will re-run on next boot");
-  } else if (usersJson.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, usersJson)) {
-    broadcastOutput("ERROR: Failed to write users.json");
-  } else {
-    broadcastOutput("Saved /system/users/users.json");
-
-    // Re-sync the RAM global to the authoritative NVS counter (loadAndIncrementBootSeq
-    // already loaded it). Must NOT hardcode 1 — telemetry/heartbeats read this.
-    gBootCounter = bootStateGetBootCount();
-    DEBUG_SYSTEMF("FTS: Re-synced gBootCounter to %lu from NVS", (unsigned long)gBootCounter);
-    // If NTP already synced, resolve the creation timestamp immediately
-    if (time(nullptr) > 0) {
-      resolvePendingUserCreationTimes();
-    }
+  if (!createInitialAdminUser(u, p, useDarkTheme)) {
+    broadcastOutput("ERROR: Could not create admin user. Returning to setup menu.");
+    continue;
   }
 
   // Create automations.json (empty) on first-time setup

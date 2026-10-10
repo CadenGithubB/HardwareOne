@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Source-contract guards for the Automation scheduler's empty-file state."""
+"""Integration guards beside the behavioral Automation scheduler owner tests."""
 
 from pathlib import Path
 
@@ -72,6 +72,7 @@ assert "markAutomationsCacheEmptyValid();" in parse_failure
 # early read-failure path must therefore publish the same valid-empty state or
 # the next main-loop pass immediately retries the entire tick.
 tick = function_body(automation, "void schedulerTickMinute()")
+assert "gAutomationEventsPending.exchange(false);" in tick
 tick_read_failure = function_body(
     tick, "if (!readText(AUTOMATIONS_JSON_FILE, json))"
 )
@@ -82,6 +83,19 @@ assert tick_read_failure.index("markAutomationsCacheEmptyValid();") < (
 
 due = function_body(automation, "bool automationsAnyDue(time_t now)")
 assert "if (!gAutomationsCacheValid) return true;" in due
+
+# Shared mutable scheduler state and its poll policy belong to this owner.
+# These integration guards complement runtime behavior in automation_scheduler.
+header = (COMPONENT / "System_Automation.h").read_text(encoding="utf-8")
+main = (COMPONENT / "HardwareOne.cpp").read_text(encoding="utf-8")
+assert "automationTick();" in main
+for retired in ("gAutomationsDirty", "gAutomationSchedulerRunning",
+                "gAutomationsMemo", "schedulerTickMinute", "automationsAnyDue",
+                "automationEventsPending"):
+    assert retired not in header
+    assert retired not in main
+for name in ("automationSchedulerRunning", "notifyAutomationScheduler", "automationTick"):
+    assert name in header
 
 # Starting from any entry point (boot init, resume, or `automation system
 # enable`) creates the canonical empty v2 file when an older deployment profile
@@ -110,4 +124,4 @@ release = sanitize.index("ps_free(seen);", failure)
 result = sanitize.rindex("return changed;")
 assert allocation < failure < release < result
 
-print("Automation scheduler empty-file source guards passed")
+print("Automation scheduler integration and empty-file source guards passed")

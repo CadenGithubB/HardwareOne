@@ -106,7 +106,6 @@ def main() -> None:
         arduino = (HERE / "web_batch_stubs" / "Arduino.h").read_text()
         arduino = arduino.replace("#include <algorithm>", "#include <algorithm>\n#include <cstdlib>")
         arduino = arduino.replace("  char operator[]", """  explicit String(uint32_t value) : text_(std::to_string(value)) {}
-  char charAt(size_t index) const { return text_.at(index); }
   long toInt() const { return std::strtol(text_.c_str(), nullptr, 10); }
   int lastIndexOf(char value) const {
     auto pos = text_.rfind(value);

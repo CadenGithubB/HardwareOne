@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Execute production wizard completion and both exit adapters on the host.
+"""Execute both production wizard exit adapters and cancellation on the host.
 
-The interactive dialog, storage owners, network and output are boundaries. The
-helper, adapters, cancel dispatch and serial timeout implementation are shipping
-code extracted unchanged. Wi-Fi-enabled and disabled variants run separately.
+The dialog and draft apply are recording boundaries. test_setup_draft exercises
+the real draft owner; these tests exercise shipping adapters, cancel dispatch and
+serial timeout code. Wi-Fi-enabled and disabled variants run separately.
 """
 from __future__ import annotations
 
@@ -26,39 +26,36 @@ def generate() -> str:
     header = (COMPONENT / "System_SetupWizard.h").read_text()
     mode = (COMPONENT / "System_SetupWizardMode.cpp").read_text()
     utils = (COMPONENT / "System_Utils.cpp").read_text()
-    wifi = (COMPONENT / "System_WiFiNetworks.h").read_text()
-    helper = extract_block(setup, "void wizardSaveAndApplySettings(")
     wrapper = extract_block(setup, "SetupWizardResult runAndApplyFeatureWizard(")
     on_exit = extract_block(mode, "static void wizardMode_onExit(")
-    require("void wizardSaveAndApplySettings(const SetupWizardResult& result);" in header,
+    require("bool wizardSaveAndApplySettings(SetupWizardResult& result);" in header,
             "shared setup completion declaration missing")
     for adapter in (wrapper, on_exit):
         require(adapter.count("wizardSaveAndApplySettings(") == 1, "adapter must call shared completion once")
         for obsolete in ("saveSetupWiFiNetwork(", "writeSettingsJson(", "writeDebugJson(",
                          "applySettings(", "setupNTP("):
             require(obsolete not in adapter, f"adapter duplicates completion operation: {obsolete}")
-    require("wizardFinalize(" not in helper, "completion must not move or repeat finalization")
-    require(extract_block(setup, "SetupWizardResult runSetupWizard(").count("wizardFinalize(result);") == 1,
-            "blocking dialog finalization must remain in its existing owner")
-    require(on_exit.index("wizardFinalize(sWizard.result)") < on_exit.index("wizardSaveAndApplySettings("),
-            "CLI finalization must precede shared persistence")
-    for dependency in ('"System_NTP.h"', '"System_WiFiNetworks.h"', '<WiFi.h>'):
+    require("wizardFinalize(" not in setup + mode, "obsolete live finalization remains")
+    for dependency in ('"System_NTP.h"', '"network/wifi/System_WiFiNetworks.h"', '<WiFi.h>'):
         require(dependency not in mode, f"CLI adapter still depends on completion implementation: {dependency}")
 
-    types = [extract_block(header, "struct SetupWizardResult") + ";",
+    types = [extract_block(header, "enum SetupWizardPage") + ";",
+             extract_block(header, "struct SetupWizardResult") + ";",
              extract_block(mode, "enum class WizardSubMode") + ";",
              extract_block(mode, "static struct") + " sWizard;",
-             extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CLIModeInputResult") + ";",
-             extract_block(wifi, "enum class WifiNetworkSaveResult") + ";"]
+             extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CLIModeInputResult") + ";"]
     state = [re.search(r"(?m)^static volatile[^\n]*\b" + name + r"\b[^\n]*;", utils)[0]
              for name in ("sSerialWaitTimeoutMs", "sSerialWaitLastActivityMs", "sWizardCancelRequested")]
     state.append(re.search(r"(?m)^volatile bool gWizardOwnsSerial[^\n]*;", setup)[0])
-    functions = [extract_block(wifi, "inline const char* wifiNetworkSaveResultMessage("),
-                 extract_block(utils, "void setSerialWaitTimeout("),
+    functions = [extract_block(utils, "void setSerialWaitTimeout("),
+                 extract_block(utils, "void requestWizardCancel("),
+                 extract_block(utils, "void noteWizardInputActivity("),
                  extract_block(utils, "bool isWizardCancelRequested("),
                  extract_block(utils, "String waitForSerialInputBlocking("),
                  extract_block(mode, "static void clearWizardWifiChoices("),
-                 helper, wrapper, on_exit,
+                 extract_block(setup, "bool wizardHandleCancelInput("),
+                 extract_block(setup, "static String waitForWizardInput("),
+                 wrapper, on_exit,
                  extract_block(mode, "static CLIModeInputResult wizardMode_onInput(")]
     harness = (HERE / "setup_completion_harness.cpp").read_text()
     for marker, text in {"// INSERT_PRODUCTION_TYPES": "\n\n".join(types),
@@ -84,7 +81,7 @@ def main() -> None:
                        "-Wno-unused-function", "-Wno-unused-parameter", f"-DENABLE_WIFI={wifi}",
                        str(source), "-o", str(executable)]
             if args.sanitize:
-                command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
+                command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
             subprocess.run(command, check=True, timeout=60)
             subprocess.run([str(executable)], check=True, timeout=60)
 

@@ -238,10 +238,6 @@ extern bool appendLineWithCap(const char* path, const String& line, size_t capBy
   #include "i2csensor_pa1010d.h"      // For gpsCommands
 #endif
 
-// External dependencies from .ino
-// (filesystemReady is provided by System_Filesystem.h, included above)
-extern bool gAutomationLogActive;
-extern String gAutomationLogFile;
 // ============================================================================
 // Base64 Encoding (moved from .ino)
 // ============================================================================
@@ -613,15 +609,11 @@ String waitForSerialInput(unsigned long timeoutMs) {
 // (the setup wizard, first-time-setup) can poll isWizardCancelRequested() to
 // short-circuit out of the wizard cleanly.
 //
-// FTS at boot uses timeout=0 (wait forever — fresh-device owner may need
-// time to read instructions). cmd_featuresetup uses timeout=60s so a CLI
-// invocation can't park the cmd_exec task indefinitely if the user walks
-// away or invokes from a transport that can't actually deliver input.
-//
-// Single-writer single-reader semantics: only the wizard entry points
-// (setSerialWaitTimeout) write the timeout, only waitForSerialInputBlocking
-// reads + writes the activity timestamp. The cancel flag is set by the
-// timeout path and read by wizard code on the same task.
+// FTS uses timeout=0 so a new owner has time to read instructions. Blocking
+// wizard callers may opt into an idle timeout. The interactive CLIMode uses
+// its own session/inactivity policy and leaves this timer disabled.
+// Wizard input loops refresh activity and poll cancellation, including local
+// display loops that do not call the blocking serial reader.
 static volatile unsigned long sSerialWaitTimeoutMs = 0;
 static volatile unsigned long sSerialWaitLastActivityMs = 0;
 static volatile bool sWizardCancelRequested = false;
@@ -632,12 +624,20 @@ void setSerialWaitTimeout(unsigned long timeoutMs) {
   sWizardCancelRequested = false;
 }
 
+void requestWizardCancel() { sWizardCancelRequested = true; }
+void noteWizardInputActivity() { sSerialWaitLastActivityMs = millis(); }
+
 bool isWizardCancelRequested() {
+  if (sSerialWaitTimeoutMs > 0 &&
+      (millis() - sSerialWaitLastActivityMs) > sSerialWaitTimeoutMs) {
+    sWizardCancelRequested = true;
+  }
   return sWizardCancelRequested;
 }
 
 String waitForSerialInputBlocking() {
   for (;;) {
+    if (isWizardCancelRequested()) return String();
     if (Serial.available()) {
       sSerialWaitLastActivityMs = millis();
       String input = Serial.readStringUntil('\n');
@@ -905,62 +905,6 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success,
   const CommandResolution resolution = resolveCommand(command);
   const String redactedCmd = redactCmdForAudit(command, resolution);
   logCommandExecutionPrepared(ctx, cmd, redactedCmd, success, result);
-}
-
-// Automation logging
-//
-// Writes are gated by gAutomationLogOwnerCtx — the AuthContext captured when the
-// user ran `autolog start`. See the comment on gAutomationLogOwnerCtx in
-// System_Automation.cpp for the design rationale (captured identity vs.
-// reading the current task's identity at write time, which fires from event
-// triggers detached from any CLI session).
-//
-// If the captured ctx loses permission to the path mid-run (e.g. admin
-// demoted to user), individual writes start failing — that's intentional.
-bool appendAutoLogEntry(const char* type, const String& message) {
-  if (!gAutomationLogActive || gAutomationLogFile.length() == 0) return false;
-  if (!filesystemReady) return false;
-
-  extern AuthContext gAutomationLogOwnerCtx;
-
-  // Get timestamp in same format as existing logs: [YYYY-MM-DD HH:MM:SS.mmm]
-  char tsPrefix[32];
-  getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
-
-  // Format: [YYYY-MM-DD HH:MM:SS.mmm] | type | content
-  String line;
-  line.reserve(200);
-  if (tsPrefix[0]) line += tsPrefix;  // already includes trailing " | "
-  line += type;
-  line += " | ";
-  line += message;
-  line += "\n";
-
-  // Resolve destination — routes to /sd mirror when LittleFS is full.
-  char dest[128];
-  VFS::resolveOverflowPath(gAutomationLogFile.c_str(), line.length() + 512,
-                           dest, sizeof(dest));
-
-  // Ensure the parent directory exists on whichever FS we're writing to.
-  // Both exists and mkdir go through the guarded path so the captured user
-  // can't create directories they don't have CREATE perm on.
-  String destStr(dest);
-  int lastSlash = destStr.lastIndexOf('/');
-  if (lastSlash > 0) {
-    String dir = destStr.substring(0, lastSlash);
-    if (!VFS::existsGuarded(dir, gAutomationLogOwnerCtx)) {
-      if (!VFS::mkdirGuarded(dir, gAutomationLogOwnerCtx)) return false;
-    }
-  }
-
-  FsLockGuard fsGuard("automation.log.append");
-  File f = VFS::openGuarded(destStr, "a", gAutomationLogOwnerCtx);
-  if (!f) return false;
-
-  size_t written = f.print(line);
-  f.close();
-
-  return written > 0;
 }
 
 // NOTE: processCommand() removed - use executeCommand() directly
@@ -3766,7 +3710,6 @@ const char* cmd_perftop(const String& originalCmd) {
 // Command Execution Functions - MIGRATED from main .ino
 // ============================================================================
 // External dependencies for command execution
-extern bool gAutomationLogActive;
 extern bool gCLIValidateOnly;
 extern QueueHandle_t gCmdExecQ;
 
@@ -4225,7 +4168,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 
   // Log command execution if automation logging is active and this command
   // carries an automationName (i.e. it was queued as an automation sub-command).
-  if (gAutomationLogActive && cmdCtx && cmdCtx->automationName[0]) {
+  if (automationLogActive() && cmdCtx && cmdCtx->automationName[0]) {
     char logBuf[300];
     snprintf(logBuf, sizeof(logBuf), "[%s] %s", cmdCtx->automationName,
              safeCommandForTrace.c_str());
@@ -4467,7 +4410,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // ===== END INLINED REGISTRY LOGIC =====
 
   // Log command output if this is an automation sub-command with logging active.
-  if (gAutomationLogActive && cmdCtx && cmdCtx->automationName[0]) {
+  if (automationLogActive() && cmdCtx && cmdCtx->automationName[0]) {
     const String safeAutomationOutput = redactOutputForLog(String(out));
     char logBuf[201];
     snprintf(logBuf, sizeof(logBuf), "%.197s%s",

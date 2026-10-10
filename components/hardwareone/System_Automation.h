@@ -21,9 +21,6 @@ extern bool gCLIValidateOnly;
 void fsLock(const char* reason);
 void fsUnlock();
 
-// Automation system constants
-#define kAutomationsMemoCap 128
-
 // Automation callback type
 typedef bool (*AutomationCallback)(const char* autoJson, size_t jsonLen, void* userData);
 
@@ -35,28 +32,26 @@ void runAutomationsOnBoot();
 
 // Automation scheduler functions (runs from main loop, no dedicated task)
 bool startAutomationScheduler();
+// Prevents new passes and releases the cache. A pass already claimed by the
+// main task may finish dispatching; stop does not cancel queued commands.
 void stopAutomationScheduler();
 
-// True while the scheduler cache is live and the main-loop tick should run.
-// Not the same as gSettings.automationEnabled (permission) or
-// automationAutoStart (boot intent) — see the definition for why the tick
-// cannot be gated on either of those alone.
-extern bool gAutomationSchedulerRunning;
+// Runtime state is separate from automationEnabled (permission) and
+// automationAutoStart (boot intent). Only the owner changes it.
+bool automationSchedulerRunning();
+// Call from the main task while automationEnabled permits execution. The
+// owner checks runtime state, due work, file changes and event throttling.
+void automationTick();
 void notifyAutomationScheduler();
-// Fast in-RAM check used by the main loop to decide whether to run the
-// expensive schedulerTickMinute. Returns true if any enabled automation's
-// nextAt is at or before `now`, or if the cache is invalid (forcing a rebuild).
-bool automationsAnyDue(time_t now);
 
 // Event-bus hook: called by systemEventPost() from ANY task. Sets the
-// events-pending flag only when an enabled automation actually subscribes
-// to this event kind (per the cache's kind mask), so unsubscribed events
-// never force a scheduler tick. Flag-write only — no I/O, no locks.
+// events-pending flag for subscribed kinds, or conservatively while the cache
+// needs refreshing. Valid unsubscribed kinds do not force a tick. Atomic
+// reads/writes only — no I/O, no locks.
 void automationOnSystemEvent(uint8_t kind);
-// Main-loop check: true when posted events are waiting for the matcher.
-bool automationEventsPending();
 
 // Automation file operations
+extern const char* AUTOMATIONS_JSON_FILE;
 bool sanitizeAutomationsJson(String& jsonRef);
 // Redact credential-bearing command strings in an automations JSON document
 // before it crosses a CLI/HTTP/log boundary. Returns an empty String on parse
@@ -77,14 +72,10 @@ const char* cmd_automation_delete(const String& originalCmd);
 const char* cmd_automation_run(const String& originalCmd);
 const char* cmd_automation_trigger(const String& originalCmd);
 const char* cmd_validate_conditions(const String& argsInput);
-// NOTE: cmd_downloadautomation, cmd_autolog, and cmd_conditional are declared
-// and implemented in the main .ino file to avoid duplication
+const char* cmd_autolog(const String& argsInput);
 
 // Automation execution
 void runAutomationCommandUnified(const String& argsInput);
-
-// Automation scheduler tick (called from main loop)
-void schedulerTickMinute();
 
 // Helper function for automation processing (public)
 time_t computeNextRunTime(const char* automationJson, time_t fromTime);
@@ -95,15 +86,12 @@ const char* executeConditionalCommand(const char* command, const char* owner);
 bool evaluateCondition(const char* condition);
 const char* validateConditionalHierarchy(const char* conditions);
 
-// Global automation state
-extern long* gAutomationsMemoId;
-extern time_t* gAutomationsMemoNextAt;
-extern int gAutomationsMemoCount;
-extern bool gAutomationsDirty;
-
-// Automation logging state (defined in System_Automation.cpp)
-extern bool gAutomationLogActive;
-extern String gAutomationLogFile;
+// The active check is a cheap hint for avoiding unused message formatting.
+// Append rechecks the session and writes with its captured starter identity.
+// True means the complete entry passed byte-count, write-error and size checks.
+// A failed append can leave a partial line; it does not replace existing data.
+bool automationLogActive();
+bool appendAutoLogEntry(const char* type, const String& message);
 
 #else // !ENABLE_AUTOMATION
 
@@ -114,21 +102,18 @@ inline void resumeAutomationSystem() {}
 inline void runAutomationsOnBoot() {}
 inline bool startAutomationScheduler() { return false; }
 inline void stopAutomationScheduler() {}
-const bool gAutomationSchedulerRunning = false;
+inline bool automationSchedulerRunning() { return false; }
+inline void automationTick() {}
 inline void notifyAutomationScheduler() {}
-inline bool automationsAnyDue(time_t) { return false; }
 inline void automationOnSystemEvent(uint8_t) {}
-inline bool automationEventsPending() { return false; }
 inline bool sanitizeAutomationsJson(String&) { return false; }
 inline String redactAutomationsJsonForResponse(const String&) { return String(); }
 inline bool writeAutomationsJsonAtomic(const String&) { return false; }
-inline void schedulerTickMinute() {}
 inline const char* executeConditionalCommand(const char*, const char*) { return "disabled"; }
 inline bool evaluateCondition(const char*) { return false; }
-
-// Global state stubs
-static bool gAutomationsDirty = false;
-static bool gAutomationLogActive = false;
+inline bool automationLogActive() { return false; }
+inline bool appendAutoLogEntry(const char*, const String&) { return false; }
+inline const char* cmd_autolog(const String&) { return "Error: Automation support is not enabled in this build"; }
 
 #endif // ENABLE_AUTOMATION
 
