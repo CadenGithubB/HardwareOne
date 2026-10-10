@@ -43,6 +43,20 @@ size_t sttPsramFree();  // host builds: the test harness supplies free PSRAM
 #ifndef HW1_STT_CAPTURE_FEATURES
 #define HW1_STT_CAPTURE_FEATURES 1
 #endif
+// A phrase closed by a pause or the session end is inferred only up to its
+// voiced end + 200 ms (published positions and the saved text are unchanged).
+#ifndef HW1_STT_TRIM_SILENCE
+#define HW1_STT_TRIM_SILENCE 1
+#endif
+// Needs HW1_STT_TRIM_SILENCE: once a phrase's trimmed input is captured and
+// its pause will close it, its final is computed early and published when
+// the phrase closes exactly as predicted.
+#ifndef HW1_STT_SPECULATIVE_FINAL
+#define HW1_STT_SPECULATIVE_FINAL HW1_STT_TRIM_SILENCE
+#endif
+#if HW1_STT_SPECULATIVE_FINAL && !HW1_STT_TRIM_SILENCE
+#error "HW1_STT_SPECULATIVE_FINAL needs HW1_STT_TRIM_SILENCE"
+#endif
 
 namespace {
 constexpr uint32_t kWorkerStackBytes = 12288; // IDF task stack sizes are bytes.
@@ -573,6 +587,35 @@ struct FeCache {
   bool overrun = false;         // the feature task fell a ring behind: stop
 };
 #endif
+#if HW1_STT_TRIM_SILENCE
+// A phrase that closes on a pause, or at the session end, is transcribed only
+// up to its voiced end + 200 ms. The voiced end is the end of the last
+// ambient-voiced run longer than 30 ms (the
+// segmenter's trimCut = max(16, 2 x floor) gate with the silence-blip rule),
+// never the peak/8 stop gate, so quiet word endings stay in. Hard-limit cuts
+// are never trimmed. Only the inference copy is shortened: the published
+// start/end samples, the saved transcript and the wipe cover the whole phrase.
+constexpr size_t kTrimTailSamples = STT_SAMPLE_RATE / 5;
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+// Speculative final, on top of the trim: once a phrase's voiced end + 200 ms
+// has been captured and its pause would close it as an ordinary Pause
+// (Segmenter::speculation), the capture task snapshots exactly the trimmed
+// input into the draft buffer (no extra PSRAM; a running draft is preempted
+// first) and the worker starts the final early. When the phrase then closes
+// on that pause with the same start and voiced end, the queued slot is tagged
+// with the request id and the finished result is published as its final:
+// bit-identical to the trimmed final for the same audio. Speech that resumes
+// (a new voiced run), a hard-limit cut, a session end or any other close
+// discards it. The capture task never logs; the worker prints TL spec_*.
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define STT_SPEC_TEXT_ATTR EXT_RAM_BSS_ATTR
+#else
+#define STT_SPEC_TEXT_ATTR
+#endif
+STT_SPEC_TEXT_ATTR static char gSpecText[STT_MAX_TEXT + 1];  // worker only
+#endif
 enum class StreamSlotState : uint8_t { Free, Ready, Processing };
 struct StreamSlot {
   int16_t* pcm = nullptr;
@@ -585,6 +628,13 @@ struct StreamSlot {
   int fe = -1;            // attached feature cache (-1: none)
   uint32_t feGen = 0;
   size_t feRows = 0;      // rows of that cache valid for this phrase
+#endif
+#if HW1_STT_TRIM_SILENCE
+  size_t voicedEnd = 0;   // SpeechSegment::voiced_end_samples
+  hw1::stt::SegmentEnd endKind = hw1::stt::SegmentEnd::Pause;
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+  uint32_t specId = 0;    // speculative request this phrase matched (0: none)
 #endif
   StreamSlotState state = StreamSlotState::Free;
 };
@@ -632,6 +682,26 @@ struct StreamRun {
   size_t draftFeRows = 0;
   uint32_t feRowsComputed = 0, feOverruns = 0, feFinals = 0, feCachedFinals = 0;
   uint32_t feCachedRows = 0, feDraftRows = 0;
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+  // Speculative final (all under gSTTMux). Capture task: the live request
+  // (id, segment start, voiced end, input length) and its snapshot state.
+  uint32_t specNextId = 0, specLiveId = 0, specSequence = 0;
+  uint64_t specStart = 0;
+  size_t specVoiced = 0, specSamples = 0;
+  bool specCopied = false, specWanted = false;
+  // Snapshot handed to the worker (in draftPcm), the run and a held result.
+  bool specReady = false, specBusy = false;
+  uint32_t specReadyId = 0, specReadySequence = 0, specRunId = 0, specDoneId = 0;
+  uint64_t specReadyStart = 0;
+  size_t specReadySamples = 0, specDoneSamples = 0;
+  uint32_t specDoneStartMs = 0;
+  STTLocalStats specDoneStats;
+#if HW1_STT_CAPTURE_FEATURES
+  // Feature cache of the phrase the snapshot was taken from.
+  int specReadyFe = -1;
+  uint32_t specReadyFeGen = 0;
+#endif
 #endif
 };
 // Timeline level samples: written by the capture task under gSTTMux, printed
@@ -698,9 +768,39 @@ static bool sttDraftPreempted(void* context) {
   for (const auto& candidate : run.slots) {
     if (candidate.state == StreamSlotState::Ready) { finalWaiting = true; break; }
   }
+#if HW1_STT_SPECULATIVE_FINAL
+  if (run.specWanted) finalWaiting = true;  // the speculative snapshot needs the draft buffer
+#endif
   portEXIT_CRITICAL(&gSTTMux);
   return finalWaiting || sttStreamCancelled(context);
 }
+#if HW1_STT_SPECULATIVE_FINAL
+// A speculative request id is still worth something while it is the live
+// request or a queued/processing phrase matched it. Caller holds gSTTMux.
+static bool sttSpecReferencedLocked(const StreamRun& run, uint32_t id) {
+  if (!id) return false;
+  if (id == run.specLiveId) return true;
+  for (const auto& c : run.slots)
+    if (c.state != StreamSlotState::Free && c.specId == id) return true;
+  return false;
+}
+// Stop a speculative run whose phrase changed, or when any other final is
+// waiting (it is then useless); keep going for the phrase it matched.
+static bool sttSpecPreempted(void* context) {
+  auto& run = *static_cast<StreamRun*>(context);
+  bool stop = false;
+  portENTER_CRITICAL(&gSTTMux);
+  bool referenced = run.specRunId == run.specLiveId;
+  for (const auto& candidate : run.slots) {
+    if (candidate.state != StreamSlotState::Ready) continue;
+    if (candidate.specId == run.specRunId) referenced = true;
+    else stop = true;
+  }
+  if (!referenced) stop = true;
+  portEXIT_CRITICAL(&gSTTMux);
+  return stop || sttStreamCancelled(context);
+}
+#endif
 static void sttStreamProgress(void* context, STTLocalPhase phase) {
   auto& run = *static_cast<StreamRun*>(context);
   sttProgress(&run.token, phase);
@@ -825,6 +925,9 @@ static bool sttQueueSegment(StreamRun& run) {
 #if HW1_STT_CAPTURE_FEATURES
     if (run.feLive >= 0) { run.fe[run.feLive].state = FeState::Orphan; run.feLive = -1; }
 #endif
+#if HW1_STT_SPECULATIVE_FINAL
+    run.specLiveId = 0; run.specWanted = false;  // that phrase is gone
+#endif
     portEXIT_CRITICAL(&gSTTMux);
     // Release it, or the segmenter stays Ready and capture stalls until a slot
     // frees (then queues the "dropped" phrase late after all).
@@ -842,6 +945,10 @@ static bool sttQueueSegment(StreamRun& run) {
   slot->start = segment->start_sample;
   slot->end = segment->end_sample;
   slot->forced = segment->end == hw1::stt::SegmentEnd::HardLimit;
+#if HW1_STT_TRIM_SILENCE
+  slot->voicedEnd = segment->voiced_end_samples;
+  slot->endKind = segment->end;
+#endif
   slot->queuedMs = millis();
   portENTER_CRITICAL(&gSTTMux);
 #if HW1_STT_CAPTURE_FEATURES
@@ -860,6 +967,16 @@ static bool sttQueueSegment(StreamRun& run) {
     }
     run.feLive = -1;
   }
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+  // The live speculative request belonged to this phrase. It matches only if
+  // the phrase closed on a pause with the same start and voiced end, i.e. if
+  // the trim will infer exactly the snapshot; either way the request is now
+  // settled.
+  slot->specId = run.specLiveId && segment->end == hw1::stt::SegmentEnd::Pause &&
+      segment->start_sample == run.specStart && segment->voiced_end_samples == run.specVoiced &&
+      run.specVoiced + kTrimTailSamples <= segment->samples ? run.specLiveId : 0;
+  run.specLiveId = 0; run.specWanted = false;
 #endif
   slot->sequence = ++gSTT.snapshot.segmentsCaptured;
   slot->state = StreamSlotState::Ready;
@@ -958,6 +1075,60 @@ static void sttFeatureTrack(StreamRun& run) {
   const TaskHandle_t task = run.feLive >= 0 ? run.feTask : nullptr;
   portEXIT_CRITICAL(&gSTTMux);
   if (task) xTaskNotifyGive(task);
+}
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+// Capture task, after each pushed block. Issues/keeps/drops the live
+// speculative request and copies its snapshot into the draft buffer when that
+// buffer is free (a running draft is asked to stop first). Never logs.
+static void sttSpecCapture(StreamRun& run) {
+  if (!run.draftPcm) return;
+  uint64_t start = 0;
+  size_t voiced = 0, samples = 0, liveSamples = 0;
+  const int16_t* live = nullptr;
+  const bool want = run.segmenter.speculation(kTrimTailSamples, &start, &voiced, &samples) &&
+                    run.segmenter.in_progress(&live, &liveSamples) && samples <= liveSamples;
+  bool copy = false;
+  portENTER_CRITICAL(&gSTTMux);
+  if (!want) {
+    run.specLiveId = 0; run.specWanted = false;
+  } else {
+    if (!run.specLiveId || run.specStart != start || run.specVoiced != voiced) {
+      if (!++run.specNextId) ++run.specNextId;
+      run.specLiveId = run.specNextId;
+      run.specStart = start; run.specVoiced = voiced; run.specSamples = samples;
+      run.specSequence = gSTT.snapshot.segmentsCaptured + 1;
+      run.specCopied = false;
+    }
+    if (!run.specCopied) {
+      if (!run.draftBusy && !run.specBusy) {
+        // Nothing reads the buffer until a Ready flag is set again below.
+        run.draftReady = run.specReady = false;
+        copy = true;
+      } else {
+        run.specWanted = true;
+      }
+    }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  if (!copy) return;
+  memcpy(run.draftPcm, live, samples * sizeof(int16_t));
+  portENTER_CRITICAL(&gSTTMux);
+  run.specReady = true; run.specReadyId = run.specLiveId; run.specReadySamples = samples;
+  run.specReadyStart = run.specStart; run.specReadySequence = run.specSequence;
+  run.specCopied = true; run.specWanted = false;
+#if HW1_STT_CAPTURE_FEATURES
+  // The live phrase's feature cache may serve this snapshot's rows. Only the
+  // cache identity is noted here; the worker takes the rows that are
+  // committed when the run starts, clipped to the snapshot, i.e. only rows of
+  // samples the snapshot itself contains (sttFeatureTrack ran just before
+  // this, so feLive is the phrase being speculated on).
+  run.specReadyFe = -1;
+  if (run.feLive >= 0 && run.fe[run.feLive].state == FeState::Live && run.fe[run.feLive].start == run.specStart) {
+    run.specReadyFe = run.feLive; run.specReadyFeGen = run.fe[run.feLive].gen;
+  }
+#endif
+  portEXIT_CRITICAL(&gSTTMux);
 }
 #endif
 static void sttCaptureWorker(void* context) {
@@ -1085,6 +1256,9 @@ static void sttCaptureWorker(void* context) {
 #if HW1_STT_CAPTURE_FEATURES
         if (feRing) sttFeatureTrack(run);
 #endif
+#if HW1_STT_SPECULATIVE_FINAL
+        sttSpecCapture(run);  // before drafts, which it outranks
+#endif
         // Live mode: offer the utterance in progress for a draft once it has
         // >=1 s of audio and >=0.6 s more than the last snapshot. The worker
         // paces itself: a new snapshot waits until the previous draft is done.
@@ -1093,7 +1267,12 @@ static void sttCaptureWorker(void* context) {
         if (run.draftPcm && run.segmenter.in_progress(&live, &liveSamples)) {
           portENTER_CRITICAL(&gSTTMux);
           const uint32_t nextSequence = gSTT.snapshot.segmentsCaptured + 1;
+#if HW1_STT_SPECULATIVE_FINAL
+          const bool idle = !run.draftReady && !run.draftBusy &&
+                            !run.specLiveId && !run.specReady && !run.specBusy;
+#else
           const bool idle = !run.draftReady && !run.draftBusy;
+#endif
           if (run.draftSequence != nextSequence) run.draftTakenSamples = 0;
           const size_t paceSamples = std::max<size_t>(STT_SAMPLE_RATE * 6 / 10,
                                                       size_t(run.lastDraftMs) * (STT_SAMPLE_RATE / 1000));
@@ -1441,6 +1620,97 @@ static void sttContinuousWorker(void*) {
         // speculative path too, which skips the draft code below).
         sttFeatureRetireOrphans(run);
 #endif
+#if HW1_STT_SPECULATIVE_FINAL
+        // A speculative snapshot outranks drafts. A held result whose phrase
+        // no longer matches it (speech resumed, other close) is dropped.
+        bool speculating = false;
+        size_t specSamples = 0;
+        uint32_t specId = 0, specSeq = 0, staleDone = 0, staleSnapshot = 0;
+        uint64_t specA0 = 0;
+        STTFeaturePrefix specPrefix;  // capture-time rows (HW1_STT_CAPTURE_FEATURES)
+        portENTER_CRITICAL(&gSTTMux);
+        if (run.specDoneId && !sttSpecReferencedLocked(run, run.specDoneId)) {
+          staleDone = run.specDoneId; run.specDoneId = 0;
+        }
+        if (run.specReady && !run.failed && !gSTT.cancelRequested) {
+          run.specReady = false;
+          if (sttSpecReferencedLocked(run, run.specReadyId)) {
+            speculating = run.specBusy = true;
+            specId = run.specRunId = run.specReadyId;
+            specSamples = run.specReadySamples;
+            specSeq = run.specReadySequence;
+            specA0 = run.specReadyStart;
+#if HW1_STT_CAPTURE_FEATURES
+            // Rows of the speculated phrase's cache committed by now, clipped
+            // to rows whose samples all lie inside the snapshot
+            // ((r + 1) * 160 <= specSamples: the same rows the batch frontend
+            // computes on it). Only the worker frees a cache, so they stay put
+            // during the run; gen/start guard against a reused cache.
+            if (run.specReadyFe >= 0 && specSamples >= 320) {
+              const FeCache& c = run.fe[run.specReadyFe];
+              if (c.gen == run.specReadyFeGen && c.state != FeState::Free && c.start == specA0) {
+                specPrefix.rows = c.rows;
+                specPrefix.count = std::min(c.frames, specSamples / 160);
+              }
+            }
+#endif
+          } else {
+            staleSnapshot = run.specReadyId;
+          }
+        }
+        portEXIT_CRITICAL(&gSTTMux);
+        if (staleDone) sttWipe(gSpecText, sizeof(gSpecText));
+#ifdef ESP_PLATFORM
+        if (staleDone)
+          ESP_LOGI("STT", "TL spec_discard id=%lu t=%lu why=2 stale", (unsigned long)staleDone, (unsigned long)millis());
+        if (staleSnapshot)
+          ESP_LOGI("STT", "TL spec_discard id=%lu t=%lu why=3 unrun", (unsigned long)staleSnapshot, (unsigned long)millis());
+#else
+        (void)staleSnapshot;
+#endif
+        if (speculating) {
+          char specError[96] = {};
+          STTLocalStats specStats;
+          const STTLocalControl specControl{&run, sttSpecPreempted, sttStreamProgress};
+          const uint32_t specStart = millis();
+#ifdef ESP_PLATFORM
+          // a0: phrase start on the TL seg clock (capture start + samples).
+          ESP_LOGI("STT", "TL spec_start seq=%lu id=%lu a0=%lu samples=%u t=%lu", (unsigned long)specSeq,
+                   (unsigned long)specId, (unsigned long)(gSTT.captureStartedMs + specA0 / (STT_SAMPLE_RATE / 1000)),
+                   unsigned(specSamples), (unsigned long)specStart);
+#else
+          (void)specA0; (void)specSeq;
+#endif
+          const bool ok = sttLocalTranscribe(run.draftPcm, specSamples, gSpecText, sizeof(gSpecText), specControl,
+                                             specStats, specError, sizeof(specError), &backendSession,
+                                             specPrefix.count ? &specPrefix : nullptr);
+          bool kept = false;
+          portENTER_CRITICAL(&gSTTMux);
+          run.specBusy = false;
+          if (ok && memchr(gSpecText, '\0', sizeof(gSpecText)) && !run.failed && !gSTT.cancelRequested &&
+              sttSpecReferencedLocked(run, specId)) {
+            run.specDoneId = specId; run.specDoneSamples = specSamples;
+            run.specDoneStartMs = specStart; run.specDoneStats = specStats;
+            kept = true;
+          }
+          portEXIT_CRITICAL(&gSTTMux);
+          if (!kept) sttWipe(gSpecText, sizeof(gSpecText));
+#ifdef ESP_PLATFORM
+          // cached = feature rows this run took from the capture-time cache.
+          ESP_LOGI("STT", "TL spec_end seq=%lu id=%lu samples=%u s=%lu e=%lu ok=%d kept=%d m=%lu f=%lu n=%lu d=%lu cached=%u",
+                   (unsigned long)specSeq, (unsigned long)specId, unsigned(specSamples), (unsigned long)specStart,
+                   (unsigned long)millis(), ok ? 1 : 0, kept ? 1 : 0, (unsigned long)specStats.loadMs,
+                   (unsigned long)specStats.frontendMs, (unsigned long)specStats.inferenceMs,
+                   (unsigned long)specStats.decodeMs, unsigned(specStats.featureCachedFrames));
+          if (!kept)
+            ESP_LOGI("STT", "TL spec_discard seq=%lu id=%lu t=%lu why=1 %s", (unsigned long)specSeq,
+                     (unsigned long)specId, (unsigned long)millis(), ok ? "superseded" : "aborted");
+#endif
+          sttStreamTick(run);
+          sttDrainLevelLog(run);
+          continue;
+        }
+#endif
         bool drafting = false;
         size_t draftSamples = 0;
         uint32_t draftSequence = 0;
@@ -1525,15 +1795,41 @@ static void sttContinuousWorker(void*) {
       // A stop immediately after a forced boundary can leave fewer than20 ms
       // of real audio. Pad only the backend copy; published positions retain
       // the exact captured extent, so no samples disappear or move in time.
+#if HW1_STT_TRIM_SILENCE
+      // Trim the inference copy of a pause/session-end phrase to its voiced
+      // end + 200 ms (no qualifying voiced run: keep it whole).
+      size_t trimmedSamples = slot->samples;
+      if (slot->endKind != hw1::stt::SegmentEnd::HardLimit && slot->voicedEnd &&
+          slot->voicedEnd + kTrimTailSamples < slot->samples)
+        trimmedSamples = slot->voicedEnd + kTrimTailSamples;
+      const size_t inferenceSamples = std::max(trimmedSamples, size_t(320));
+#else
       const size_t inferenceSamples = std::max(slot->samples, size_t(320));
+#endif
       if (inferenceSamples > slot->samples)
         memset(slot->pcm + slot->samples, 0, (inferenceSamples - slot->samples) * sizeof(int16_t));
 #if HW1_STT_CAPTURE_FEATURES
       // Orphaned feature caches are retired before every final.
       sttFeatureRetireOrphans(run);
 #endif
+#if HW1_STT_SPECULATIVE_FINAL
+      // Promote a finished speculative run on exactly this input.
+      bool promoted = false;
+      uint32_t promotedId = 0;
+      portENTER_CRITICAL(&gSTTMux);
+      if (slot->specId && slot->specId == run.specDoneId) {
+        promotedId = run.specDoneId;
+        promoted = run.specDoneSamples == inferenceSamples;
+        if (promoted) { stats = run.specDoneStats; perf.startMs = run.specDoneStartMs; }
+        run.specDoneId = 0;
+      }
+      portEXIT_CRITICAL(&gSTTMux);
+      bool ok = promoted;
+      if (promoted) memcpy(text, gSpecText, sizeof(text));
+#else
       constexpr bool promoted = false;
       bool ok = false;
+#endif
       if (!promoted) {
         STTFeaturePrefix prefix;
 #if HW1_STT_CAPTURE_FEATURES
@@ -1556,6 +1852,9 @@ static void sttContinuousWorker(void*) {
                                 stats, error, sizeof(error), &backendSession,
                                 prefix.count ? &prefix : nullptr);
       }
+#if HW1_STT_SPECULATIVE_FINAL
+      if (promotedId) sttWipe(gSpecText, sizeof(gSpecText));
+#endif
 #if HW1_STT_CAPTURE_FEATURES
       // Feature counters; a promoted final counts with its speculative run's rows.
       portENTER_CRITICAL(&gSTTMux);
@@ -1604,7 +1903,7 @@ static void sttContinuousWorker(void*) {
         saveEndMs = millis();
       }
       sttWipe(text, sizeof(text));
-      sttWipe(slot->pcm, inferenceSamples * sizeof(int16_t));
+      sttWipe(slot->pcm, std::max(inferenceSamples, slot->samples) * sizeof(int16_t));
 #if HW1_STT_CAPTURE_FEATURES
       sttFeatureRelease(run, slot->fe, slot->feGen);  // after publish and save
       slot->fe = -1;
@@ -1636,6 +1935,27 @@ static void sttContinuousWorker(void*) {
         // Feature rows of this final, and how many came from the capture-time cache.
         ESP_LOGI("STT", "TL fe seg=%lu frames=%u cached=%u", (unsigned long)slot->sequence,
                  unsigned(stats.featureFrames), unsigned(stats.featureCachedFrames));
+#endif
+#if HW1_STT_TRIM_SILENCE
+        // Captured vs inferred samples (a0/a1 above stay the captured span),
+        // voiced end offset (0 = none) and end kind (0 pause, 1 hard limit,
+        // 2 session end).
+        ESP_LOGI("STT", "TL trim seg=%lu samples=%u inf=%u voiced_end=%u end=%u cut_ms=%u",
+                 (unsigned long)slot->sequence, unsigned(slot->samples), unsigned(inferenceSamples),
+                 unsigned(slot->voicedEnd), unsigned(slot->endKind),
+                 unsigned((slot->samples - trimmedSamples) / (STT_SAMPLE_RATE / 1000)));
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+        // This phrase matched a speculative request: promoted (s = that run's
+        // start, before q; saved_ms = q - its end), or missed (the run had not
+        // finished, was aborted, or its length differed).
+        if (promoted)
+          ESP_LOGI("STT", "TL spec_promote seg=%lu id=%lu s=%lu q=%lu t=%lu", (unsigned long)slot->sequence,
+                   (unsigned long)promotedId, (unsigned long)perf.startMs, (unsigned long)slot->queuedMs,
+                   (unsigned long)perf.doneMs);
+        else if (slot->specId)
+          ESP_LOGI("STT", "TL spec_miss seg=%lu id=%lu held=%d", (unsigned long)slot->sequence,
+                   (unsigned long)slot->specId, promotedId ? 1 : 0);
 #endif
       }
 #else
@@ -1683,6 +2003,9 @@ static void sttContinuousWorker(void*) {
   // park it for the next run while a hold lasts) before publishing
   // workerActive=false, after every inference/capture user joined.
   sttWarmPark(backendSession);
+#if HW1_STT_SPECULATIVE_FINAL
+  sttWipe(gSpecText, sizeof(gSpecText));  // a held, never-promoted result
+#endif
   if (run.working) { sttWipe(run.working, kStreamSamples * sizeof(int16_t)); free(run.working); }
   if (run.draftPcm) { sttWipe(run.draftPcm, kStreamSamples * sizeof(int16_t)); free(run.draftPcm); }
   for (auto& slot : run.slots) {
