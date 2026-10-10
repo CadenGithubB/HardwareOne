@@ -3,6 +3,12 @@
 #include "stt_model_identity.h"
 #include "stt_model_container.h"
 #include "dl_model_base.hpp"
+#if HW1_STT_RESIDENT_MODEL
+// The tree-local ESP-DL (tools/p4/prepare_esp_dl.py) provides the metadata
+// allocator hook; stt_dl_metadata.h installs a PSRAM one.
+#include "dl_tool_metadata.hpp"
+#include "stt_dl_metadata.h"
+#endif
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
@@ -159,8 +165,109 @@ bool tensor(dl::TensorBase* t, size_t frames, size_t channels, int exponent) {
         && t->get_bytes()==int(frames*channels);
 }
 }
+#if HW1_STT_RESIDENT_MODEL
+// ---- HW1_STT_RESIDENT_MODEL: one resident vendor model per session ----
+// Built once at the broker's 20 s cap (STT_MAX_CAPTURE_MS; the broker never
+// sends more) and re-shaped for every later call. ESP-DL modules keep no
+// shape state (Conv rebuilds its arguments from the live tensor shapes on each
+// forward), TensorBase::set_shape never reallocates, and the greedy plan gave
+// each tensor its max-length extent, so a call runs on a prefix of the same
+// arena: same kernels, same arithmetic, no per-call load()/build().
+constexpr size_t kResidentMaxSamples=20*kSampleRate;
+constexpr size_t kResidentCallMargin=256*1024;    // per-call PSRAM beyond the frontend
+constexpr size_t kResidentInternalFloor=48*1024;   // never admit a call below this
+constexpr size_t kResidentKeepFree=2u<<20;         // PSRAM left free after the build
+// Everything the resident model keeps between phrases is requested
+// explicitly from PSRAM where it is allocated. The vendor model's own objects
+// and containers come from ESP-DL's metadata allocator, which transcribe()
+// points at PSRAM before the first model is built (installDlMetadataAllocator,
+// stt_dl_metadata.h: ps_alloc PreferPSRAM). The model object itself is one of
+// those blocks (dl::Model's class operator new/delete, so unique_ptr's delete
+// returns it), and this bookkeeping is ps_alloc'd too (class operator
+// new/delete below, PsramStlAllocator for the tensor list). No malloc
+// interception, no task-gated window, no heap threshold change.
+struct ModelCache::Resident {
+    struct Entry { dl::TensorBase* tensor; int channels; bool fullRate; };
+    std::unique_ptr<dl::Model> model;
+    std::vector<Entry,PsramStlAllocator<Entry>> tensors;  // every activation tensor, once
+    dl::TensorBase* input=nullptr;
+    dl::TensorBase* output=nullptr;
+    size_t internalBytes=0;      // internal RAM the resident model holds
+    size_t frames=0;             // feature frames of the current shapes
+    // Only new(std::nothrow): a plain new Resident does not compile.
+    static void* operator new(size_t n,const std::nothrow_t&) noexcept {
+        static_assert(alignof(Resident)<=sizeof(void*),"the heap aligns blocks to the pointer size");
+        return sttPsramAlloc(n,"stt.resident");
+    }
+    static void operator delete(void* p) noexcept { sttPsramFree(p); }
+    static void operator delete(void* p,const std::nothrow_t&) noexcept { sttPsramFree(p); }
+};
+namespace {
+// Lists every activation tensor with the rate it runs at: feature frames for
+// the graph input, output frames after the stride-2 first layer. Any tensor
+// whose shape cannot be re-derived that way refuses the resident model.
+// The caller measures the internal RAM it keeps, after this function's locals
+// (the name lists) are gone.
+ModelCache::Resident* buildResident(const void* raw,const char*& why) {
+    const size_t maxFrames=feature_frames(kResidentMaxSamples), maxOutputs=(maxFrames+1)/2;
+    std::unique_ptr<ModelCache::Resident> r(new(std::nothrow) ModelCache::Resident);
+    if(!r) { why="alloc"; return nullptr; }
+    std::map<std::string,std::vector<int>> shapes{{identity::kInputName,{1,int(maxFrames),1,64}}};
+    r->model.reset(new(std::nothrow) dl::Model(static_cast<const char*>(raw),fbs::MODEL_LOCATION_IN_FLASH_RODATA,0,
+        dl::MEMORY_MANAGER_GREEDY,nullptr,false,shapes));
+    if(!r->model) { why="model"; return nullptr; }
+    r->input=r->model->get_input(identity::kInputName);
+    r->output=r->model->get_output(identity::kOutputName);
+    if(!tensor(r->input,maxFrames,64,identity::kInputExponent) || !tensor(r->output,maxOutputs,29,identity::kOutputExponent)) {
+        why="io"; return nullptr;
+    }
+    fbs::FbsModel* graph=r->model->get_fbs_model();
+    if(!graph) { why="graph"; return nullptr; }
+    graph->load_map();
+    std::vector<std::string> names=graph->get_graph_inputs();
+    std::vector<std::string> inputs,outputs;
+    bool listed=true;
+    for(const std::string& node:graph->topological_sort()) {
+        if(graph->get_operation_inputs_and_outputs(node,inputs,outputs)!=ESP_OK) { listed=false; break; }
+        names.insert(names.end(),outputs.begin(),outputs.end());
+    }
+    graph->clear_map();
+    if(!listed) { why="graph"; return nullptr; }
+    r->tensors.reserve(names.size());  // one block, no growth copies
+    for(const std::string& name:names) {
+        dl::TensorBase* t=name.empty() ? nullptr : r->model->get_intermediate(name);
+        if(!t) { why="tensor"; return nullptr; }
+        bool seen=false;
+        for(const auto& e:r->tensors) if(e.tensor==t) { seen=true; break; }
+        if(seen) continue;
+        const auto& s=t->shape;
+        if(s.size()!=4 || s[0]!=1 || s[2]!=1 || s[3]<1 || t->dtype!=dl::DATA_TYPE_INT8
+           || (s[1]!=int(maxFrames) && s[1]!=int(maxOutputs))) { why="shape"; return nullptr; }
+        r->tensors.push_back({t,s[3],s[1]==int(maxFrames)});
+    }
+    r->frames=maxFrames;
+    return r.release();
+}
+bool shapeResident(ModelCache::Resident& r,size_t frames,size_t outputs) {
+    if(r.frames!=frames) {
+        for(const auto& e:r.tensors) e.tensor->set_shape({1,int(e.fullRate ? frames : outputs),1,e.channels});
+        r.frames=frames;
+    }
+    return tensor(r.input,frames,64,identity::kInputExponent) && tensor(r.output,outputs,29,identity::kOutputExponent);
+}
+}
+#endif  // HW1_STT_RESIDENT_MODEL
 ModelCache::~ModelCache() { reset(); }
+#if HW1_STT_RESIDENT_MODEL
+// The resident model references the weights zero-copy: destroy it first.
+void ModelCache::reset() { dropResident(); heap_caps_free(raw_); raw_=nullptr; }
+// Its arena still holds the last call's activations and quantized input:
+// freed whenever the session changes hands (STTLocalSession::moveTo), and the
+// next owner's first call may build a fresh one.
+void ModelCache::dropResident() { delete resident_; resident_=nullptr; residentTried_=false; }
+#else
 void ModelCache::reset() { heap_caps_free(raw_); raw_=nullptr; }
+#endif
 #if HW1_STT_RUNTIME_DIAGNOSTICS
 bool ModelCache::verify() const {
     uint8_t hash[32];
@@ -179,6 +286,13 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     (void)diagnostics;
 #endif
     auto fail=[&](const char* why) { if(text && capacity)text[0]=0; if(error && errorCapacity)snprintf(error,errorCapacity,"%s",why);return false; };
+#if HW1_STT_RESIDENT_MODEL
+    // Before this process builds its first STT model, point ESP-DL's
+    // metadata allocator at PSRAM (stt_dl_metadata.h). Idempotent; it stays
+    // installed, so per-call models (the warm-up, calls beyond the resident
+    // length) keep their metadata in PSRAM too.
+    installDlMetadataAllocator();
+#endif
     if(!pcm || !text || capacity<2 || !reader.read || samples<kMinSamples || samples>kMaxSamples)return fail("Invalid STT audio buffer");
     if(cancelled(control))return fail("Cancelled");
     const size_t frames=feature_frames(samples), outputs=(frames+1)/2;
@@ -199,6 +313,26 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     ModelCache& weights=cache ? *cache : temporary;
     const bool reused=weights.raw_!=nullptr;
     const size_t newWeights=reused ? 0 : identity::kRawBytes;
+#if HW1_STT_RESIDENT_MODEL
+    // A resident model already holds its arena and metadata, so a call
+    // needs only the frontend buffers. Its internal floor drops by exactly what
+    // the resident model holds: free internal RAM during inference is bounded
+    // as for a per-call build (150 KB before the build, minus the build).
+    ModelCache::Resident* const resident=reused && weights.resident_ && samples<=kResidentMaxSamples
+        ? weights.resident_ : nullptr;
+    const size_t callBudget=resident ? frontendBytes+kResidentCallMargin : remainingBudget;
+    const size_t callLargest=resident ? frames*kMelBins*sizeof(float)+kResidentCallMargin : arenaBudget+metadataMargin;
+    const size_t callInternal=resident
+        ? std::max(kResidentInternalFloor,internalMinimum>resident->internalBytes ? internalMinimum-resident->internalBytes : size_t(0))
+        : internalMinimum;
+    // Optional decoder memory (a cached LM) yields before any refusal.
+    auto shed=[&] { return decoder && decoder->release && decoder->release(decoder->context); };
+    auto admitted=[&] {
+        return heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>=newWeights+callBudget
+            && (reused || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=identity::kRawBytes)
+            && heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)>=callInternal;
+    };
+#else
     // Optional decoder memory (a cached LM) yields before any refusal.
     auto shed=[&] { return decoder && decoder->release && decoder->release(decoder->context); };
     auto admitted=[&] {
@@ -206,6 +340,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
             && (reused || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=identity::kRawBytes)
             && heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)>=internalMinimum;
     };
+#endif
     if(!admitted() && (!shed() || !admitted()))
         return fail("Not enough free memory; stop camera, speech and other large models");
     if(!reused) {
@@ -249,6 +384,35 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     if(cancelled(control))return fail("Cancelled");
     // Raw model allocation can split the largest block. Check again before
     // the vendor constructor requests a contiguous arena and creates metadata.
+#if HW1_STT_RESIDENT_MODEL
+    auto contiguous=[&] {
+        return heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>=callBudget
+            && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=callLargest
+            && heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)>=callInternal;
+    };
+    if(!contiguous() && (!shed() || !contiguous()))
+        return fail("Not enough contiguous memory for STT activations");
+    // A fresh model per utterance avoids Model::build's resize allocation leak.
+    // Aligned EDL2+ in PSRAM allows zero-copy parameters; weights outlive model.
+    // Later calls of a session use the resident model instead.
+    std::unique_ptr<dl::Model> perCall;
+    dl::Model* model=nullptr;
+    dl::TensorBase* input=nullptr;
+    dl::TensorBase* output=nullptr;
+    if(resident) {
+        if(!shapeResident(*resident,frames,outputs))return fail("STT runtime tensor mismatch");
+        model=resident->model.get(); input=resident->input; output=resident->output;
+    } else {
+        std::map<std::string,std::vector<int>> shapes{{identity::kInputName,{1,int(frames),1,64}}};
+        perCall.reset(new(std::nothrow) dl::Model(
+            static_cast<const char*>(weights.raw_),fbs::MODEL_LOCATION_IN_FLASH_RODATA,0,
+            dl::MEMORY_MANAGER_GREEDY,nullptr,false,shapes));
+        if(!perCall)return fail("Cannot create STT model");
+        model=perCall.get();
+        input=model->get_input(identity::kInputName);output=model->get_output(identity::kOutputName);
+        if(!tensor(input,frames,64,identity::kInputExponent) || !tensor(output,outputs,29,identity::kOutputExponent))return fail("STT runtime tensor mismatch");
+    }
+#else
     auto contiguous=[&] {
         return heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>=remainingBudget
             && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=arenaBudget+metadataMargin
@@ -265,6 +429,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     if(!model)return fail("Cannot create STT model");
     auto input=model->get_input(identity::kInputName);auto output=model->get_output(identity::kOutputName);
     if(!tensor(input,frames,64,identity::kInputExponent) || !tensor(output,outputs,29,identity::kOutputExponent))return fail("STT runtime tensor mismatch");
+#endif
 #if HW1_STT_RUNTIME_DIAGNOSTICS
     if(diagnostics) {
         const auto memory=model->get_memory_info();
@@ -372,6 +537,76 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     stats.lmUsed=decoded==DecodeResult::Decoded;
     stats.decodeMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
+#if HW1_STT_RESIDENT_MODEL
+    // Build the session's resident model once, after the session's first
+    // call (the warm-up) has decoded, so a lazily loaded LM already took its
+    // PSRAM, and after this call's own model and arena are gone. It needs the
+    // budget of a 20 s per-call build and must leave kResidentKeepFree.
+    if(cache && !cache->resident_ && !cache->residentTried_) {
+        cache->residentTried_=true;
+        perCall.reset();
+        const size_t maxOutputs=(feature_frames(kResidentMaxSamples)+1)/2;
+        const size_t need=2048*maxOutputs+64*1024+metadataMargin;
+        const size_t internal0=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+        const size_t psram0=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        const char* why="memory";
+        const uint32_t buildStart=millis();
+        DlMetadataStats kind0[kDlMetadataKinds];
+        for(size_t k=0;k<kDlMetadataKinds;++k)kind0[k]=dlMetadataStats(k);
+        const DlMetadataStats meta0=dlMetadataStats();
+        const dl::tool::MetadataForeignStats foreign0=dl::tool::metadata_foreign_stats();
+        if(psram0>=need+kResidentKeepFree && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=need
+           && internal0>=internalMinimum)
+            cache->resident_=buildResident(cache->raw_,why);
+        // Measured after buildResident's locals are gone, so it is what
+        // the resident model keeps in internal RAM (the net change, so other
+        // tasks' activity during the build shows in it too). It lowers the
+        // per-call internal floor by exactly that much.
+        const size_t internal1=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+        if(cache->resident_)cache->resident_->internalBytes=internal0>internal1 ? internal0-internal1 : 0;
+        const DlMetadataStats meta=dlMetadataDelta(meta0,dlMetadataStats());
+        const dl::tool::MetadataForeignStats foreign1=dl::tool::metadata_foreign_stats();
+        // int_used is the internal RAM the resident model keeps (near 0
+        // by design); psram_used is arena + metadata + this bookkeeping;
+        // meta_n / meta_bytes are the blocks (and bytes) ESP-DL requested
+        // through the metadata allocator during the build (growth copies
+        // included; meta_frees of them were returned), fallback /
+        // fallback_bytes those that landed in internal RAM (PSRAM refused),
+        // meta_failed those neither heap could serve. param_objs are the
+        // parameter tensor objects prebuilt libfbs_model allocated itself
+        // (heap order puts them in PSRAM), param_int how many of them are in
+        // internal RAM. TL e3m: bytes requested per metadata kind. All
+        // numeric, so tl_capture.py records both lines.
+        if(cache->resident_) {
+            size_t arenaPsram=0,arenaInternal=0;
+            cache->resident_->model->get_arena_size(&arenaPsram,&arenaInternal);
+            ESP_LOGI("STT","TL e3 resident=1 t=%lu build_ms=%lu tensors=%u int_used=%u psram_used=%u int_free=%u psram_free=%u"
+                     " arena=%u arena_int=%u meta_n=%u meta_bytes=%u meta_frees=%u fallback=%u fallback_bytes=%u"
+                     " meta_failed=%u param_objs=%u param_int=%u",
+                     (unsigned long)millis(),(unsigned long)(millis()-buildStart),unsigned(cache->resident_->tensors.size()),
+                     unsigned(cache->resident_->internalBytes),
+                     unsigned(psram0-std::min(psram0,heap_caps_get_free_size(MALLOC_CAP_SPIRAM))),
+                     unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),
+                     unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                     unsigned(arenaPsram),unsigned(arenaInternal),unsigned(meta.allocs),unsigned(meta.bytes),
+                     unsigned(meta.frees),unsigned(meta.internal),unsigned(meta.internalBytes),unsigned(meta.failed),
+                     unsigned(foreign1.objects-foreign0.objects),unsigned(foreign1.internal-foreign0.internal));
+            uint32_t kindBytes[kDlMetadataKinds];
+            for(size_t k=0;k<kDlMetadataKinds;++k)kindBytes[k]=dlMetadataDelta(kind0[k],dlMetadataStats(k)).bytes;
+            static_assert(kDlMetadataKinds==11,"TL e3m lists every metadata kind");
+            ESP_LOGI("STT","TL e3m model=%u ctx=%u loader=%u fbs=%u module=%u tensor=%u exp=%u shape=%u index=%u list=%u names=%u",
+                     unsigned(kindBytes[0]),unsigned(kindBytes[1]),unsigned(kindBytes[2]),unsigned(kindBytes[3]),
+                     unsigned(kindBytes[4]),unsigned(kindBytes[5]),unsigned(kindBytes[6]),unsigned(kindBytes[7]),
+                     unsigned(kindBytes[8]),unsigned(kindBytes[9]),unsigned(kindBytes[10]));
+        } else {
+            ESP_LOGW("STT","TL e3 resident=0 reason=%s int_free=%u psram_free=%u psram_largest=%u meta_n=%u fallback=%u; per-call models",
+                     why,unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),
+                     unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                     unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+                     unsigned(meta.allocs),unsigned(meta.internal));
+        }
+    }
+#endif
     // Model destructor releases its arena before temporary weights are freed.
     // Session weights remain immutable and are rechecked on the next call.
     return true;

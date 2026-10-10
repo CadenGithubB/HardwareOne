@@ -236,7 +236,13 @@ void STTLocalSession::moveTo(STTLocalSession& to) {
     auto* backend=static_cast<Backend*>(backendState_);
     if(backend && backend->lm.state==LmState::Unavailable && !backend->lm.blob)backend->lm.state=LmState::Unloaded;
 #endif
+    dropCallState();  // the resident model's arena still holds this run's last activations
     to.backendState_=backendState_;
     backendState_=nullptr;
+}
+void STTLocalSession::dropCallState() {
+#if defined(CONFIG_IDF_TARGET_ESP32P4) && HW1_STT_RESIDENT_MODEL
+    if(backendState_)static_cast<Backend*>(backendState_)->weights.dropResident();
+#endif
 }
 #endif

@@ -7,6 +7,23 @@
 #ifndef HW1_STT_RUNTIME_DIAGNOSTICS
 #define HW1_STT_RUNTIME_DIAGNOSTICS 0
 #endif
+// The resident model: one dl::Model per session, built after the session's
+// first call and re-shaped for every later call, instead of building and
+// freeing a model and its arena on every call (measured on the P4 with the
+// 15x5: a phrase's per-call load()/build() was most of its non-inference
+// time). Its metadata (about 97 KB that would otherwise stay in internal RAM
+// between phrases) is requested explicitly from PSRAM at ESP-DL's own
+// allocation sites (the tree-local ESP-DL's metadata allocator hook,
+// stt_dl_metadata.h, which uses ps_alloc), so internal RAM between phrases
+// stays as with per-call models. Default ON. =0 restores per-call models and
+// the 150 KB internal-RAM admission floor, and never installs the hook (ESP-DL
+// then places its metadata exactly as upstream). The component CMake passes
+// the value (-DHW1_STT_RESIDENT_MODEL=0 at configure time turns it off) for
+// the whole hardwareone component, never a features file: ModelCache's layout
+// depends on it, so every translation unit must see the same value.
+#ifndef HW1_STT_RESIDENT_MODEL
+#define HW1_STT_RESIDENT_MODEL 1
+#endif
 namespace hw1::stt {
 // A read-only stream already opened by the caller's storage/auth boundary.
 struct ModelReader {
@@ -35,15 +52,28 @@ struct Decoder {
                            char* text, size_t capacity, const STTLocalControl& control) = nullptr;
     bool (*release)(void* context) = nullptr;
 };
-// Retains only the pinned, verified raw weights. Each call still constructs
-// a fresh shape-specific model/arena; vendor resize/rebuild is never reused.
-// One worker owns this object. Destroy/reset only after transcribe returns.
+// Retains the pinned, verified raw weights and, with HW1_STT_RESIDENT_MODEL,
+// the session's resident model (its arena holds the last call's activations
+// until the session ends or changes hands: dropResident). Without it each call
+// constructs a fresh shape-specific model/arena; vendor resize/rebuild is
+// never reused. One worker owns this object. Destroy/reset only after
+// transcribe returns.
 class ModelCache {
  public:
     ModelCache() = default;
     ~ModelCache();
     void reset();
     bool loaded() const { return raw_ != nullptr; }
+#if HW1_STT_RESIDENT_MODEL
+    // One vendor model per session, built at the broker's 20 s cap after the
+    // session's first call and re-shaped for every later call, its metadata
+    // and this bookkeeping requested from PSRAM (quartznet_runtime.cpp,
+    // stt_dl_metadata.h). Destroyed before the weights.
+    struct Resident;
+    // Frees the resident model and its arena (the weights stay); the next
+    // call may build a new one. For a session that changes hands.
+    void dropResident();
+#endif
 #if HW1_STT_RUNTIME_DIAGNOSTICS
     // Probe integrity after the vendor model and arena have been destroyed.
     bool verify() const;
@@ -52,6 +82,10 @@ class ModelCache {
     ModelCache& operator=(const ModelCache&) = delete;
  private:
     void* raw_ = nullptr;
+#if HW1_STT_RESIDENT_MODEL
+    Resident* resident_ = nullptr;
+    bool residentTried_ = false;  // one build attempt per session
+#endif
     friend bool transcribe(ModelReader, const int16_t*, size_t, char*, size_t,
                            const STTLocalControl&, STTLocalStats&, char*, size_t,
                            Diagnostics*, ModelCache*, const Decoder*);

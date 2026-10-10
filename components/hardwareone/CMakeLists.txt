@@ -663,6 +663,18 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
     if(IDF_TARGET STREQUAL "esp32p4")
         # stt_lm.cpp is inert unless System_STTLocal.cpp uses it (ENABLE_STT_LM).
         list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp stt/stt_lm.cpp)
+        # The resident model (stt/quartznet_runtime.h) is on unless the build is
+        # configured with -DHW1_STT_RESIDENT_MODEL=0. stt_dl_metadata.cpp is its
+        # PSRAM metadata hook for the tree-local ESP-DL (tools/p4/prepare_esp_dl.py).
+        if(NOT DEFINED HW1_STT_RESIDENT_MODEL)
+            set(HW1_STT_RESIDENT_MODEL 1)
+        endif()
+        if(HW1_STT_RESIDENT_MODEL)
+            set(_hw1_stt_resident_model 1)
+            list(APPEND hardwareone_srcs stt/stt_dl_metadata.cpp)
+        else()
+            set(_hw1_stt_resident_model 0)
+        endif()
         list(APPEND hardwareone_requires espressif__esp-dl esp_rom mbedtls)
     endif()
 endif()
@@ -706,6 +718,9 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
     set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-O2")
     set_source_files_properties(stt/quartznet_runtime.cpp PROPERTIES COMPILE_OPTIONS "-O2")
     set_source_files_properties(stt/stt_lm.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    # Component-wide: ModelCache's layout depends on it, so every translation
+    # unit (System_STTLocal.cpp included) must see the same value.
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE HW1_STT_RESIDENT_MODEL=${_hw1_stt_resident_model})
     # ESP-SR also registers a model whitelist. Union QuartzNet's exact ops and
     # kernel variants into it; otherwise SR's WN10 list strips our Relu/int8 Conv.
     idf_build_get_property(_stt_build_components BUILD_COMPONENTS)

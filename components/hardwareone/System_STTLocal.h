@@ -38,9 +38,12 @@ struct STTLocalStats {
 // Single-worker backend lifetime: one task uses a session at a time. Reset
 // after the final call has returned, including failure/cancellation.
 // FreeRTOS self-deleting tasks must reset explicitly before vTaskDelete().
-// A session holds only the pinned, SHA-verified model weights and the system
-// language model; PCM, features, activations and text never outlive a call,
-// so the broker may hand an idle session to its next run (sttKeepWarm).
+// A session holds the pinned, SHA-verified model weights, the system language
+// model and, with HW1_STT_RESIDENT_MODEL, its resident model, whose arena
+// keeps the last call's activations until the next call of the same run
+// overwrites them. moveTo frees the resident model first, so an idle session
+// the broker hands to its next run (sttKeepWarm) carries only weights and LM:
+// PCM, features, activations and text never pass from one run to the next.
 class STTLocalSession {
  public:
   STTLocalSession() = default;
@@ -51,7 +54,13 @@ class STTLocalSession {
   // Hands this idle session's backend to the empty, idle `to`; this one is
   // left empty. A language model the old owner shed under memory pressure
   // gets one load attempt again, as in a new session.
+  // A resident model is freed, never handed over (dropCallState); the new
+  // owner's first call builds its own.
   void moveTo(STTLocalSession& to);
+  // Frees what calls left for this session's later calls, i.e. the resident
+  // model and its activation arena (HW1_STT_RESIDENT_MODEL; otherwise
+  // nothing); verified weights and the LM stay.
+  void dropCallState();
   STTLocalSession(const STTLocalSession&) = delete;
   STTLocalSession& operator=(const STTLocalSession&) = delete;
  private:
