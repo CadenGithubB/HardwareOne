@@ -17,6 +17,16 @@
 #include <Arduino.h>
 #include "System_BuildConfig.h"
 
+// Gamepad input cache structure (always available for type-safe references)
+struct InputCache {
+  uint32_t buttons = 0;
+  int joyX = 0, joyY = 0;
+  unsigned long lastUpdate = 0;
+  bool dataValid = false;
+  uint32_t seq = 0;
+  uint32_t buttonPressedAccum = 0;  // Latched press edges — OR'd in by task, read+cleared by UI
+};
+
 // =============================================================================
 // Input Type Selection (compile-time default)
 // =============================================================================
@@ -121,9 +131,17 @@ uint32_t inputGetCustomButtonMapping(InputButton button);
 // Device-agnostic data accessors
 // =============================================================================
 // Replaces gamepadGetX/Y/Buttons() — both gamepad and ANO drivers populate
-// gInputCache, so these work under either build. For ANO, joyX/Y are always
+// the shared input reading, so these work under either build. For ANO, joyX/Y are always
 // JOYSTICK_CENTER (no analog deflection); read gNavEvents.wheelDelta for
 // rotary state.
+// Copies are data-only. Failed reads clear output and leave pending input intact.
+bool inputCacheSnapshot(InputCache& out, uint32_t timeoutMs = 10);
+// Atomically copies a running, valid reading and consumes its latched presses.
+bool inputConsumeSnapshot(InputCache& out, uint32_t timeoutMs = 10);
+// On failure, preserve the caller's last sequence (no synthetic activity).
+bool inputActivitySequence(uint32_t& out, uint32_t timeoutMs = 10);
+size_t inputCacheStorageBytes();
+
 int       inputGetX();
 int       inputGetY();
 

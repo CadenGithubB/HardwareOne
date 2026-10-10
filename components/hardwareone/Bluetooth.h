@@ -2,6 +2,7 @@
 #define BLUETOOTH_H
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 
 #include "System_BuildConfig.h"
 #include "System_User.h"
@@ -232,6 +233,11 @@ void bleStackSetLifecycleFault(bool faulted);
 bool isBLERunning();
 void getBLEStatus(char* buffer, size_t bufferSize);
 const char* getBLEStateString();
+// Shared bleinfo schema for CLI and web. Copies live connection fields into
+// caller-owned JSON under the lifecycle lock; settings retain their existing
+// read contract. False means unavailable: discard the partial object. Callers
+// also check their document's overflowed() before serializing.
+bool buildBLEInfoJson(JsonObject out);
 // Recent BLE message history, newest first (used by the OLED status screen in
 // OLED_Mode_Bluetooth.cpp). Fills out[] with up to maxLines entries; returns count.
 int bleGetRecentMessages(const char* out[], int maxLines);
@@ -308,6 +314,7 @@ inline void bleStackSetLifecycleFault(bool) {}
 inline bool isBLERunning() { return false; }
 inline void getBLEStatus(char* buffer, size_t) { if (buffer) buffer[0] = '\0'; }
 inline const char* getBLEStateString() { return "disabled"; }
+inline bool buildBLEInfoJson(JsonObject) { return false; }
 inline const char* getBleModeString() { return "disabled"; }
 inline bool bleSubsystemActive() { return false; }
 inline const char* bleSubsystemStateString() { return "disabled"; }

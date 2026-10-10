@@ -3,8 +3,7 @@
 // cell is installed, and voltage never establishes USB or charging state.
 #include "System_Battery.h"
 #include "System_Events.h"
-#include "System_Command.h"
-#include "System_Utils.h"
+#include "System_CommandRegistry.h"  // argWantsJson
 #include "System_MemUtil.h"
 #include "System_Debug.h"
 #include "System_Notifications.h"
@@ -24,7 +23,7 @@
 #include "i2csensor_max17048.h"
 #endif
 
-BatteryState gBatteryState;
+static BatteryState sBatteryState;
 static portMUX_TYPE sStateMux = portMUX_INITIALIZER_UNLOCKED;
 // Created once by setup's initBattery(), before the first battery tick. All
 // hardware init/read/recalibration and transition detection share this mutex.
@@ -38,13 +37,13 @@ struct BatteryGuard {
 };
 static BatteryState storedSnapshot() {
   portENTER_CRITICAL(&sStateMux);
-  const BatteryState result = gBatteryState;
+  const BatteryState result = sBatteryState;
   portEXIT_CRITICAL(&sStateMux);
   return result;
 }
 static void publishSnapshot(const BatteryState& state) {
   portENTER_CRITICAL(&sStateMux);
-  gBatteryState = state;
+  sBatteryState = state;
   portEXIT_CRITICAL(&sStateMux);
 }
 BatteryState getBatterySnapshot() {
@@ -661,4 +660,4 @@ extern const SettingsModule batteryLogSettingsModule = {
   "Battery time-series CSV logging"
 };
 
-// Command registration handled in System_Utils.cpp.
+// Command registration handled in System_CommandRegistry.cpp.

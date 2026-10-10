@@ -146,7 +146,8 @@ credentials. Never commit or publish them.**
    present.
 
 To restore the original C6, repeat step 2, then
-`c6_tool.py write --offset 0 --file .../c6-original-4mb.bin` and `run`.
+`c6_tool.py --port "$P4_PORT" write --offset 0 --file .../c6-original-4mb.bin`
+and `c6_tool.py --port "$P4_PORT" run`.
 
 ## Updating the C6 from the P4 (`c6update`)
 

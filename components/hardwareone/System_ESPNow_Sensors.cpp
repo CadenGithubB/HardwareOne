@@ -3,6 +3,7 @@
 #if ENABLE_ESPNOW
 
 #include <atomic>
+#include <memory>
 #include <ArduinoJson.h>
 #include <freertos/semphr.h>
 
@@ -1183,65 +1184,32 @@ String getRemoteDevicesListJSON() {
 #if ENABLE_THERMAL_SENSOR
 int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
-  
-  extern bool lockThermalCache(TickType_t timeout);
-  extern void unlockThermalCache();
-  
-  int pos = 0;
-  
-  if (lockThermalCache(pdMS_TO_TICKS(100))) {
-    // Use raw frame only (no interpolation for remote streaming)
-    // Swap dimensions if rotation is 90° or 270°
-    int width = (gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 24 : 32;
-    int height = (gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 32 : 24;
-    int frameSize = 768;
-    
-    // Header
-    pos = snprintf(buf, bufSize,
-                   "{\"val\":%d,\"seq\":%lu,\"mn\":%d,\"mx\":%d,\"w\":%d,\"h\":%d,\"data\":[",
-                   gThermalCache.thermalDataValid ? 1 : 0,
-                   (unsigned long)gThermalCache.thermalSeq,
-                   (int)gThermalCache.thermalMinTemp,  // Integer min
-                   (int)gThermalCache.thermalMaxTemp,  // Integer max
-                   width, height);
-    if (pos < 0 || (size_t)pos >= bufSize) {
-      unlockThermalCache();
-      return 0;
-    }
-    
-    // Frame data - convert centidegrees to whole degrees
-    if (gThermalCache.thermalFrame) {
-      for (int i = 0; i < frameSize; i++) {
-        // Convert centidegrees (int16_t) to whole degrees (int)
-        int wholeDegrees = gThermalCache.thermalFrame[i] / 100;
-        int written = snprintf(buf + pos, bufSize - pos, "%d%s", wholeDegrees, (i < frameSize - 1) ? "," : "");
-        if (written < 0 || (size_t)written >= (bufSize - pos)) {
-          unlockThermalCache();
-          return 0;
-        }
-        pos += written;
-      }
-    } else {
-      unlockThermalCache();
-      pos = snprintf(buf, bufSize, "{\"val\":0,\"error\":\"Sensor stopped\"}");
-      return (pos > 0) ? pos : 0;
-    }
-    
-    // Footer
-    int tail = snprintf(buf + pos, bufSize - pos, "]}");
-    if (tail < 0 || (size_t)tail >= (bufSize - pos)) {
-      unlockThermalCache();
-      return 0;
-    }
-    pos += tail;
-    
-    unlockThermalCache();
-  } else {
-    pos = snprintf(buf, bufSize, "{\"error\":\"Sensor data temporarily unavailable\"}");
-    if (pos < 0) pos = 0;
+  std::unique_ptr<int16_t, decltype(&ps_free)> frame(
+      static_cast<int16_t*>(ps_alloc(THERMAL_RAW_FRAME_PIXELS * sizeof(int16_t),
+                                    AllocPref::PreferPSRAM, "thermal.espnow.snapshot")), ps_free);
+  ThermalCache reading;
+  if (!frame || !thermalFrameSnapshot(reading, frame.get(), THERMAL_RAW_FRAME_PIXELS, false, 100)) {
+    int n = snprintf(buf, bufSize, "{\"error\":\"Sensor data temporarily unavailable\"}");
+    return n < 0 || static_cast<size_t>(n) >= bufSize ? 0 : n;
   }
-  
-  return pos;
+  if (!reading.thermalFrameAvailable) {
+    int n = snprintf(buf, bufSize, "{\"val\":0,\"error\":\"Sensor stopped\"}");
+    return n < 0 || static_cast<size_t>(n) >= bufSize ? 0 : n;
+  }
+  int pos = snprintf(buf, bufSize,
+      "{\"val\":%d,\"seq\":%lu,\"mn\":%d,\"mx\":%d,\"w\":%d,\"h\":%d,\"data\":[",
+      reading.thermalDataValid ? 1 : 0, (unsigned long)reading.thermalSeq,
+      (int)reading.thermalMinTemp, (int)reading.thermalMaxTemp,
+      reading.thermalFrameWidth, reading.thermalFrameHeight);
+  if (pos < 0 || static_cast<size_t>(pos) >= bufSize) return 0;
+  for (size_t i = 0; i < THERMAL_RAW_FRAME_PIXELS; ++i) {
+    int n = snprintf(buf + pos, bufSize - pos, "%d%s", frame.get()[i] / 100,
+                     i + 1 < THERMAL_RAW_FRAME_PIXELS ? "," : "");
+    if (n < 0 || static_cast<size_t>(n) >= bufSize - pos) return 0;
+    pos += n;
+  }
+  int n = snprintf(buf + pos, bufSize - pos, "]}");
+  return n < 0 || static_cast<size_t>(n) >= bufSize - pos ? 0 : pos + n;
 }
 #else
 int buildThermalDataJSONInteger(char* buf, size_t bufSize) {

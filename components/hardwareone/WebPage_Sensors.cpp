@@ -6,6 +6,7 @@
 
 #if ENABLE_WEB_SENSORS
 
+#include "HAL_Input.h"
 #include <Arduino.h>
 #include <LittleFS.h>
 #include "System_VFS.h"
@@ -20,7 +21,7 @@
 #include "System_I2C.h"           // I2C system helpers
 #include "System_BuildConfig.h"        // Conditional sensor configuration
 #if ENABLE_THERMAL_SENSOR
-  #include "i2csensor_mlx90640.h"     // ThermalCache, gThermalCache, thermalBuildDataJSON
+  #include "i2csensor_mlx90640.h"     // ThermalCache, readings, thermalBuildDataJSON
 #endif
 #if ENABLE_TOF_SENSOR
   #include "i2csensor_vl53l4cx.h"         // tofBuildDataJSON
@@ -35,13 +36,13 @@
   #include "i2csensor_ano_encoder.h"  // anoEncoderBuildDataJSON + gAnoEncoder*
 #endif
 #if ENABLE_GPS_SENSOR
-  #include "i2csensor_pa1010d.h"    // GPSCache, gGpsCache
+  #include "i2csensor_pa1010d.h"    // GPSCache, gpsCacheSnapshot
 #endif
 #if ENABLE_RTC_SENSOR
-  #include "i2csensor_ds3231.h"     // RTCCache, RTCDateTime, gRtcCache
+  #include "i2csensor_ds3231.h"     // RTCCache, RTCDateTime, readings
 #endif
 #if ENABLE_PRESENCE_SENSOR
-  #include "i2csensor_sths34pf80.h" // presenceEnabled, presenceConnected, gPresenceCache
+  #include "i2csensor_sths34pf80.h" // presenceCacheSnapshot, gPresenceRunning, gPresenceConnected
 #endif
 #if ENABLE_EDGE_IMPULSE
   #include "System_EdgeImpulse.h"
@@ -133,54 +134,9 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           xSemaphoreGive(gJsonResponseMutex);
         }
 
-        // Fallback to ArduinoJson path (avoids String concatenation heap fragmentation)
-        String json;
-        if (lockThermalCache(pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS))) {
-          bool useInterpolated = (gThermalCache.thermalInterpolated != nullptr && gThermalCache.thermalInterpolatedWidth > 0 && gThermalCache.thermalInterpolatedHeight > 0);
-          // For raw frame, convert int16_t to float on the fly
-          float* frame = useInterpolated ? gThermalCache.thermalInterpolated : nullptr;
-          int frameSize = useInterpolated ? (gThermalCache.thermalInterpolatedWidth * gThermalCache.thermalInterpolatedHeight) : 768;
-          // For raw frame, swap dimensions if rotation is 90° or 270°
-          int width = useInterpolated ? gThermalCache.thermalInterpolatedWidth : ((gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 24 : 32);
-          int height = useInterpolated ? gThermalCache.thermalInterpolatedHeight : ((gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 32 : 24);
-
-          // Debug: Track rotation value when JSON dimensions are determined (fallback path)
-          DEBUG_MEMORYF("[ROTATION_DEBUG] JSON fallback: rotation=%d, w=%d, h=%d, seq=%lu",
-                        gSettings.thermalRotation, width, height,
-                        (unsigned long)gThermalCache.thermalSeq);
-
-          // Use ArduinoJson to avoid 768+ String concatenations
-          PSRAM_JSON_DOC(doc);
-          doc["schema"] = 1;
-          doc["ok"] = gThermalCache.thermalDataValid;
-          doc["seq"] = gThermalCache.thermalSeq;
-          doc["mn"] = serialized(String(gThermalCache.thermalMinTemp, 1));
-          doc["mx"] = serialized(String(gThermalCache.thermalMaxTemp, 1));
-          doc["w"] = width;
-          doc["h"] = height;
-
-          JsonArray data = doc["data"].to<JsonArray>();
-          if (useInterpolated && frame) {
-            for (int i = 0; i < frameSize; i++) {
-              data.add((int)frame[i]);
-            }
-          } else if (gThermalCache.thermalFrame) {
-            for (int i = 0; i < frameSize; i++) {
-              data.add(gThermalCache.thermalFrame[i]);
-            }
-          }
-          
-          unlockThermalCache();
-          
-          String json;
-          serializeJson(doc, json);
-        } else {
-          json = "{\"error\":\"Sensor data temporarily unavailable\"}";
-        }
-
-        httpd_resp_set_type(req, "application/json");
-        DEBUG_HTTPF("/api/sensors thermal json_len=%u", (unsigned)json.length());
-        httpd_resp_send(req, json.c_str(), json.length());
+        // The owner is the only thermal serializer. If its shared response
+        // buffer is busy or unavailable, return valid JSON and let the client retry.
+        sendJsonResponse(req, SENSOR_JSON_UNAVAILABLE);
         return ESP_OK;
       } else if (sensorType == "tof") {
 #if !ENABLE_TOF_SENSOR
@@ -239,22 +195,8 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           return ESP_OK;
         }
 
-        // Read from shared state (no direct I2C access)
-        uint32_t buttons = 0;
-        int x = 0, y = 0;
-        bool dataValid = false;
-
-        {
-          SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(50), "web.gamepadApi");
-          if (g.held) {
-            buttons = gInputCache.buttons;
-            x = gInputCache.joyX;
-            y = gInputCache.joyY;
-            dataValid = gInputCache.dataValid;
-          }
-        }
-
-        if (!dataValid) {
+        InputCache input{};
+        if (!inputCacheSnapshot(input, 50) || !input.dataValid) {
           sendJsonResponse(req, "{\"val\":0, \"error\":\"no_data\"}");
           return ESP_OK;
         }
@@ -263,7 +205,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         char gamepadBuf[128];
         int jsonLen = snprintf(gamepadBuf, sizeof(gamepadBuf),
                                "{\"val\":1,\"x\":%d,\"y\":%d,\"buttons\":%lu}",
-                               x, y, (unsigned long)buttons);
+                               input.joyX, input.joyY, (unsigned long)input.buttons);
 
         httpd_resp_set_type(req, "application/json");
         DEBUG_HTTPF("/api/sensors gamepad json_len=%d", jsonLen);
@@ -275,7 +217,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
 #else
         // ANO-shaped JSON: {val, pos, axis, buttons}. Built from the native
-        // gAnoEncoderCache (encoder position + per-mode axis) so the sensor
+        // ANO reading (encoder position + per-mode axis) so the sensor
         // card shows the real driver state, not the gamepad-shaped proxy.
         if (!gAnoEncoderEnabled || !gAnoEncoderConnected) {
           sendJsonResponse(req, "{\"val\":0, \"error\":\"not_connected\"}");
@@ -339,44 +281,24 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "presence") {
 #if ENABLE_PRESENCE_SENSOR
-        extern bool gPresenceRunning;
-        extern bool gPresenceConnected;
-        extern PresenceCache gPresenceCache;
-        
         if (!gPresenceRunning || !gPresenceConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
         
-        // Read from cache
+        // Read one presence snapshot (no I2C access).
         char buf[256];
-        bool dataValid = false;
-        float ambient = 0;
-        int16_t presenceVal = 0, motionVal = 0;
-        bool presenceDetected = false, motionDetected = false;
-        
-        {
-          SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(50), "web.presenceApi");
-          if (g.held) {
-            dataValid = gPresenceCache.dataValid;
-            ambient = gPresenceCache.ambientTemp;
-            presenceVal = gPresenceCache.presenceValue;
-            motionVal = gPresenceCache.motionValue;
-            presenceDetected = gPresenceCache.presenceDetected;
-            motionDetected = gPresenceCache.motionDetected;
-          }
-        }
-        
-        if (!dataValid) {
+        PresenceCache presence{};
+        if (!presenceCacheSnapshot(presence, 50) || !presence.dataValid) {
           sendJsonResponse(req, "{\"error\":\"no_data\"}");
           return ESP_OK;
         }
         
         int len = snprintf(buf, sizeof(buf),
           "{\"ambientTemp\":%.1f,\"presenceValue\":%d,\"motionValue\":%d,\"presenceDetected\":%s,\"motionDetected\":%s}",
-          ambient, presenceVal, motionVal,
-          presenceDetected ? "true" : "false",
-          motionDetected ? "true" : "false");
+          presence.ambientTemp, presence.presenceValue, presence.motionValue,
+          presence.presenceDetected ? "true" : "false",
+          presence.motionDetected ? "true" : "false");
         
         sendJsonResponse(req, buf, len);
         return ESP_OK;
@@ -386,54 +308,24 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "gps") {
 #if ENABLE_GPS_SENSOR
-        extern bool gGpsRunning;
-        extern bool gGpsConnected;
-        extern GPSCache gGpsCache;
-        
         if (!gGpsRunning || !gGpsConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
         
-        // Read from GPS cache (no I2C access)
+        // Read one GPS snapshot (no I2C access).
         char buf[512];
-        bool dataValid = false;
-        float lat = 0, lon = 0, alt = 0, speed = 0, angle = 0;
-        bool hasFix = false;
-        uint8_t quality = 0, sats = 0;
-        uint8_t hour = 0, minute = 0, second = 0, day = 0, month = 0;
-        uint16_t year = 0;
-        
-        {
-          SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(50), "web.gpsApi");
-          if (g.held) {
-            dataValid = gGpsCache.dataValid;
-            lat = gGpsCache.latitude;
-            lon = gGpsCache.longitude;
-            alt = gGpsCache.altitude;
-            speed = gGpsCache.speed;
-            angle = gGpsCache.angle;
-            hasFix = gGpsCache.hasFix;
-            quality = gGpsCache.fixQuality;
-            sats = gGpsCache.satellites;
-            hour = gGpsCache.hour;
-            minute = gGpsCache.minute;
-            second = gGpsCache.second;
-            day = gGpsCache.day;
-            month = gGpsCache.month;
-            year = gGpsCache.year;
-          }
-        }
-        
-        if (!dataValid) {
+        GPSCache gps{};
+        if (!gpsCacheSnapshot(gps, 50) || !gps.dataValid) {
           sendJsonResponse(req, "{\"error\":\"no_data\"}");
           return ESP_OK;
         }
         
         int len = snprintf(buf, sizeof(buf),
           "{\"fix\":%s,\"quality\":%d,\"satellites\":%d,\"latitude\":%.6f,\"longitude\":%.6f,\"altitude\":%.1f,\"speed\":%.1f,\"angle\":%.1f,\"time\":\"%02d:%02d:%02d\",\"date\":\"%04d-%02d-%02d\"}",
-          hasFix ? "true" : "false", quality, sats, lat, lon, alt, speed, angle,
-          hour, minute, second, year, month, day);
+          gps.hasFix ? "true" : "false", gps.fixQuality, gps.satellites,
+          gps.latitude, gps.longitude, gps.altitude, gps.speed, gps.angle,
+          gps.hour, gps.minute, gps.second, gps.year, gps.month, gps.day);
         
         sendJsonResponse(req, buf, len);
         return ESP_OK;
@@ -445,33 +337,21 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #if ENABLE_RTC_SENSOR
         extern bool gRtcRunning;
         extern bool gRtcConnected;
-        extern RTCCache gRtcCache;
         
         if (!gRtcRunning || !gRtcConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
         
-        // Read from RTC cache (no I2C access)
         char buf[256];
-        bool dataValid = false;
-        RTCDateTime dt = {0};
-        float temp = 0.0f;
-        
-        {
-          SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(50), "web.rtcApi");
-          if (g.held) {
-            dataValid = gRtcCache.dataValid;
-            dt = gRtcCache.dateTime;
-            temp = gRtcCache.temperature;
-          }
-        }
-        
-        if (!dataValid) {
+        RTCCache rtc{};
+        if (!rtcCacheSnapshot(rtc, 50) || !rtc.dataValid) {
           sendJsonResponse(req, "{\"error\":\"no_data\"}");
           return ESP_OK;
         }
-        
+        const RTCDateTime& dt = rtc.dateTime;
+        const float temp = rtc.temperature;
+
         // RTC stores UTC time - convert to local time using gSettings.tzOffsetMinutes
         // Manual calculation to avoid unsafe setenv/tzset that causes watchdog timeout
         extern Settings gSettings;

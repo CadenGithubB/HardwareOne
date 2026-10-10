@@ -7,9 +7,11 @@
 #  3. retune LM candidate A (2.5 MB, broader text) for this checkpoint
 #  4. wait for the SD card in the Mac (P4SD): copy model + LM, verify, eject
 set -u
+: "${PORT:=${HW1_P4_PORT:?set PORT or HW1_P4_PORT for the target board}}"
+export PORT
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
-P=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
+P=${HW1_STT_PYTHON:-$HERE/private/export-venv/bin/python}
 RUN=/Volumes/USB2/stt/work/general/quartznet15x5
 LOG=/Volumes/USB2/stt/logs/deploy-general.log
 say() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }

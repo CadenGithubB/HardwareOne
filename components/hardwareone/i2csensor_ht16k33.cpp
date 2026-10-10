@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include "System_Command.h"
+#include "System_Utils.h"  // validate-only command guard
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include "System_AuthIdentity.h"

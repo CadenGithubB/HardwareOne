@@ -7,6 +7,7 @@
 #if ENABLE_TOF_SENSOR
 
 #include <Arduino.h>
+#include <freertos/semphr.h>
 #include <vl53l4cx_class.h>
 #include <Wire.h>
 #include <new>
@@ -16,15 +17,12 @@
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_MemUtil.h"
+#include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
-#if ENABLE_ESPNOW
-  #include "System_ESPNow.h"
-  #include "System_ESPNow_Sensors.h"
-#endif
 
 // VL53L4CX ToF sensor object (owned by this module)
-VL53L4CX* gVL53L4CX = nullptr;
+static VL53L4CX* gVL53L4CX = nullptr;
 
 // Settings and debug
 
@@ -36,7 +34,33 @@ VL53L4CX* gVL53L4CX = nullptr;
 // ============================================================================
 // ToF Sensor Cache (owned by this module)
 // ============================================================================
-TofCache gTofCache;
+// The mutex is retained across stops; readers never own the live storage.
+static TofCache sTofCache{};
+static SemaphoreHandle_t sTofCacheMutex = nullptr;
+
+bool tofCacheSnapshot(TofCache& out, uint32_t timeoutMs) {
+  out = {};
+  SensorCacheGuard guard(sTofCacheMutex, pdMS_TO_TICKS(timeoutMs), "tof.snapshot");
+  if (!guard.held) return false;
+  out = sTofCache;
+  return true;
+}
+
+size_t tofCacheStorageBytes() {
+  return sizeof(sTofCache) + sizeof(sTofCacheMutex);
+}
+
+static bool tofInvalidateCache() {
+  SensorCacheGuard guard(sTofCacheMutex, pdMS_TO_TICKS(50), "tof.invalidate");
+  if (!guard.held) return false;
+  sTofCache.tofDataValid = false;
+  sTofCache.tofTotalObjects = 0;
+  for (auto& object : sTofCache.tofObjects) {
+    object.detected = false;
+    object.valid = false;
+  }
+  return true;
+}
 
 // Debug macros (use centralized versions from debug_system.h)
 // MIN_RESTART_DELAY_MS defined in System_I2C.h
@@ -58,82 +82,6 @@ extern bool createToFTask();
 // Queue system functions now in System_I2C.h
 
 // ============================================================================
-// ToF Sensor Reading Functions (moved from .ino)
-// ============================================================================
-
-float readToFDistance() {
-  if (!gTofConnected || !gTofRunning || gVL53L4CX == nullptr) {
-    if (!gTofConnected) {
-      broadcastOutput("ToF sensor not connected. Check wiring.");
-      cliHint("to start the sensor once it is wired, run 'opentof'");
-    } else if (!gTofRunning) {
-      broadcastOutput("ToF sensor not started. Use 'opentof' first.");
-    } else {
-      broadcastOutput("ToF sensor initialization failed.");
-    }
-    return 999.9;
-  }
-
-  // Use i2cTransaction wrapper for safe mutex + clock management
-  uint32_t clockHz = (gSettings.i2cClockToFHz > 0) ? (uint32_t)gSettings.i2cClockToFHz : 100000;
-  const uint8_t tofBus = (uint8_t)gSettings.tofBus;
-  float result = i2cDeviceTransaction(tofBus, I2C_ADDR_TOF, clockHz, 200, [&]() -> float {
-    VL53L4CX_MultiRangingData_t MultiRangingData;
-    VL53L4CX_MultiRangingData_t* pMultiRangingData = &MultiRangingData;
-    uint8_t NewDataReady = 0;
-    VL53L4CX_Error status;
-
-    // Wait for data ready with timeout (matches 200ms measurement timing budget)
-    unsigned long startTime = millis();
-    do {
-      status = gVL53L4CX->VL53L4CX_GetMeasurementDataReady(&NewDataReady);
-      if (status != VL53L4CX_ERROR_NONE) return 999.9f;
-      if (millis() - startTime > 250) return 999.9f;
-    } while (!NewDataReady);
-
-    if ((!status) && (NewDataReady != 0)) {
-      status = gVL53L4CX->VL53L4CX_GetMultiRangingData(pMultiRangingData);
-
-      if (!status) {
-        int no_of_object_found = pMultiRangingData->NumberOfObjectsFound;
-
-        // Find best valid measurement
-        float best_distance = 999.9;
-        bool found_valid = false;
-
-        for (int j = 0; j < no_of_object_found; j++) {
-          if (pMultiRangingData->RangeData[j].RangeStatus == VL53L4CX_RANGESTATUS_RANGE_VALID) {
-            float distance_cm = pMultiRangingData->RangeData[j].RangeMilliMeter / 10.0;
-
-            // Use closest valid object
-            if (distance_cm < best_distance) {
-              best_distance = distance_cm;
-              found_valid = true;
-            }
-          }
-        }
-
-        // Clear interrupt and restart
-        gVL53L4CX->VL53L4CX_ClearInterruptAndStartMeasurement();
-
-        if (found_valid) {
-          BROADCAST_PRINTF("Distance: %.1f cm", best_distance);
-          return best_distance;
-        }
-      }
-
-      // Clear interrupt even on error
-      gVL53L4CX->VL53L4CX_ClearInterruptAndStartMeasurement();
-    }
-
-    broadcastOutput("No valid distance measurement");
-    return 999.9;  // No valid measurement
-  });
-
-  return result;
-}
-
-// ============================================================================
 // ToF Sensor Command Handlers
 // ============================================================================
 
@@ -146,18 +94,34 @@ const char* cmd_tof(const String& argsInput) {
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
-  float distance = readToFDistance();
-  if (distance < 999.0) {
-    BROADCAST_PRINTF("Distance: %.1f cm", distance);
-    return "[ToF] Reading complete";
-  } else {
-    // readToFDistance() already output error message
-    return "ERROR";
+  if (!gTofRunning) return "Error: [ToF] Sensor stopped. Use 'opentof' first.";
+  if (!gTofConnected) return "Error: [ToF] Sensor not connected. Check wiring.";
+
+  TofCache reading;
+  if (!tofCacheSnapshot(reading, CACHE_MUTEX_TIMEOUT_MS)) {
+    return "Error: [ToF] Reading cache busy or unavailable. Try again.";
   }
+  if (!reading.tofDataValid) return "Error: [ToF] Reading not yet available.";
+
+  // Use the same filtered/smoothed published distances as JSON. Reading a
+  // snapshot neither waits for a new hardware sample nor clears its interrupt.
+  int nearestMm = 0;
+  for (const auto& object : reading.tofObjects) {
+    if (!object.detected || !object.valid || object.distance_mm <= 0) continue;
+    if (nearestMm == 0 || object.distance_mm < nearestMm) nearestMm = object.distance_mm;
+  }
+  if (nearestMm == 0) return "Error: [ToF] No valid detected object in the latest reading.";
+
+  BROADCAST_PRINTF("Distance: %.1f cm", nearestMm / 10.0f);
+  return "[ToF] Reading complete";
 }
 
 // Internal function called by queue processor
 bool tofStartInternal() {
+  if (gTofRunning) return true;
+  // A stopped task owns its resources until cleanup publishes a null handle.
+  if (gTofTaskHandle != nullptr) return false;
+
   // Check if too soon after stop (prevent rapid restart crashes)
   if (gTofLastStopTime > 0) {
     unsigned long timeSinceStop = millis() - gTofLastStopTime;
@@ -174,9 +138,9 @@ bool tofStartInternal() {
   }
 
   // Create cache mutex if not already created
-  if (!gTofCache.mutex) {
-    gTofCache.mutex = xSemaphoreCreateMutex();
-    if (!gTofCache.mutex) {
+  if (!sTofCacheMutex) {
+    sTofCacheMutex = xSemaphoreCreateMutex();
+    if (!sTofCacheMutex) {
       ERROR_TOFF("Failed to create cache mutex");
       return false;
     }
@@ -184,23 +148,20 @@ bool tofStartInternal() {
   }
 
   // Clean up any stale cache from previous run BEFORE starting
-  // CRITICAL: Cache wasn't invalidated during stop to avoid dying-task crashes
   {
-    SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(100), "tof.cleanStaleCache");
-    if (g.held) {
-      gTofCache.tofDataValid = false;
-      gTofCache.tofTotalObjects = 0;
-      for (int j = 0; j < 4; j++) {
-        gTofCache.tofObjects[j].detected = false;
-        gTofCache.tofObjects[j].valid = false;
-        gTofCache.tofObjects[j].distance_mm = 0;
-        gTofCache.tofObjects[j].distance_cm = 0.0;
-        gTofCache.tofObjects[j].status = 0;
-        gTofCache.tofObjects[j].smoothed_distance_mm = 0.0;
-        gTofCache.tofObjects[j].smoothed_distance_cm = 0.0;
-        gTofCache.tofObjects[j].hasHistory = false;
-      }
-      DEBUG_CLIF("[TOF_INTERNAL] Cleaned up stale cache from previous run");
+    SensorCacheGuard g(sTofCacheMutex, pdMS_TO_TICKS(100), "tof.cleanStaleCache");
+    if (!g.held) return false;
+    sTofCache.tofDataValid = false;
+    sTofCache.tofTotalObjects = 0;
+    for (int j = 0; j < 4; j++) {
+      sTofCache.tofObjects[j].detected = false;
+      sTofCache.tofObjects[j].valid = false;
+      sTofCache.tofObjects[j].distance_mm = 0;
+      sTofCache.tofObjects[j].distance_cm = 0.0;
+      sTofCache.tofObjects[j].status = 0;
+      sTofCache.tofObjects[j].smoothed_distance_mm = 0.0;
+      sTofCache.tofObjects[j].smoothed_distance_cm = 0.0;
+      sTofCache.tofObjects[j].hasHistory = false;
     }
   }
 
@@ -231,6 +192,15 @@ bool tofStartInternal() {
   // Create ToF task lazily
   if (!createToFTask()) {
     DEBUG_CLIF("Failed to create ToF task");
+    gTofRunning = false;
+    gTofConnected = false;
+    if (gVL53L4CX != nullptr) {
+      i2cDeviceTransactionVoid((uint8_t)gSettings.tofBus, I2C_ADDR_TOF, 100000, 500, [&]() {
+        (void)gVL53L4CX->VL53L4CX_StopMeasurement();
+      });
+      ps_delete(gVL53L4CX);
+      gVL53L4CX = nullptr;
+    }
     return false;
   }
   // Clock is now managed automatically by i2cTaskWithStandardTimeout wrapper
@@ -239,10 +209,6 @@ bool tofStartInternal() {
   sensorStatusBumpWith("opentof@queue");
   DEBUG_CLIF("SUCCESS: ToF sensor started successfully");
   
-  // Broadcast sensor status to ESP-NOW master
-#if ENABLE_ESPNOW
-  broadcastSensorStatus(REMOTE_SENSOR_TOF, true);
-#endif
   
   return true;
 }
@@ -250,39 +216,15 @@ bool tofStartInternal() {
 // Public command - uses centralized queue
 const char* cmd_tofstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-
-  // Check if already enabled or queued
-  if (gTofRunning) {
-    return "[ToF] Sensor already running";
-  }
-  if (isInQueue(I2C_DEVICE_TOF)) {
-    int pos = getQueuePosition(I2C_DEVICE_TOF);
-    BROADCAST_PRINTF("ToF sensor already queued (position %d)", pos);
-    return "[ToF] Already queued";
-  }
-
-  if (!i2cPingAddress(I2C_ADDR_TOF, 100000, 50,
-                      (uint8_t)gSettings.tofBus)) {
-    return "Error: [ToF] Not detected on I2C bus";
-  }
-
-  // Enqueue the request to centralized queue
-  if (enqueueDeviceStart(I2C_DEVICE_TOF)) {
-    sensorStatusBumpWith("opentof@enqueue");
-    int pos = getQueuePosition(I2C_DEVICE_TOF);
-    BROADCAST_PRINTF("ToF sensor queued for open (position %d)", pos);
-    cliHint("the sensor opens in the background - read a distance with 'tofread' once it is up");
-    return "[ToF] Sensor queued for open";
-  } else {
-    return "Error: [ToF] Failed to enqueue open (queue full)";
-  }
+  const char* result = cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", "opentof@enqueue");
+  cliHint("the sensor opens in the background - read a distance with 'tofread' once it is up");
+  return result;
 }
 
 const char* cmd_tofstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-
-  handleDeviceStopped(I2C_DEVICE_TOF);
-  return "[ToF] Close requested; cleanup will complete asynchronously";
+  if (!requestSensorStop(I2C_DEVICE_TOF)) return "Error: [ToF] Could not queue stop";
+  return "[ToF] Stop requested; cleanup will complete asynchronously";
 }
 
 const char* cmd_toftransitionms(const String& argsInput) {
@@ -315,7 +257,9 @@ bool tofInit() {
   if (gVL53L4CX != nullptr) {
     // Sensor object exists - clean it up and reinitialize to ensure fresh state
     INFO_TOF_LIFECYCLEF("Cleaning up existing sensor object before reinit");
-    (void)gVL53L4CX->VL53L4CX_StopMeasurement();
+    i2cDeviceTransactionVoid((uint8_t)gSettings.tofBus, I2C_ADDR_TOF, 100000, 500, [&]() {
+      (void)gVL53L4CX->VL53L4CX_StopMeasurement();
+    });
     ps_delete(gVL53L4CX);
     gVL53L4CX = nullptr;
     gTofConnected = false;
@@ -388,79 +332,67 @@ bool tofInit() {
 // reset on task start keeps a hovering object from re-posting every poll.
 static bool gTofNear = false;
 
+// Return bus-operation success, not sample freshness. The task owns the driver
+// until this call returns, so an asynchronous stop can let one admitted read
+// finish safely; it must not turn cancellation/cache contention into I2C faults.
 bool tofPoll() {
-  // gDebugFlags now from debug_system.h
-  
-  if (!gTofConnected || !gTofRunning || gVL53L4CX == nullptr) {
-    if (!gTofConnected) {
-      broadcastOutput("ToF sensor not connected. Check wiring.");
-    } else if (!gTofRunning) {
-      broadcastOutput("ToF sensor not started. Use 'opentof' first.");
-    } else {
-      broadcastOutput("ToF sensor initialization failed.");
-    }
-    return false;
-  }
+  if (!gTofConnected || !gTofRunning || gVL53L4CX == nullptr) return false;
 
-  // Clock is managed by i2cTaskWithStandardTimeout wrapper - no manual changes needed
-
-  VL53L4CX_MultiRangingData_t MultiRangingData;
+  VL53L4CX_MultiRangingData_t MultiRangingData{};
   VL53L4CX_MultiRangingData_t* pMultiRangingData = &MultiRangingData;
-  uint8_t NewDataReady = 0;
-  VL53L4CX_Error status;
+  bool dataReady = false;
+  const uint8_t tofBus = (uint8_t)gSettings.tofBus;
+  const uint32_t tofHz = (gSettings.i2cClockToFHz > 0) ? (uint32_t)gSettings.i2cClockToFHz : 200000;
+  const bool transactionOk = i2cTaskWithTimeout(tofBus, I2C_ADDR_TOF, tofHz, 500, [&]() -> bool {
+    // Inspect readiness once. A conversion still in progress is a successful
+    // status read; release the shared bus and try again on the next task poll.
+    uint8_t ready = 0;
+    if (gVL53L4CX->VL53L4CX_GetMeasurementDataReady(&ready) != VL53L4CX_ERROR_NONE) return false;
+    if (!ready) return true;
+    if (gVL53L4CX->VL53L4CX_GetMultiRangingData(pMultiRangingData) != VL53L4CX_ERROR_NONE) return false;
+    if (gVL53L4CX->VL53L4CX_ClearInterruptAndStartMeasurement() != VL53L4CX_ERROR_NONE) return false;
+    dataReady = true;
+    return true;
+  });
+  if (!transactionOk || !dataReady || !gTofRunning) return transactionOk;
 
-  // Wait for data ready with optimized timeout for 200ms timing budget
-  unsigned long startTime = millis();
-  do {
-    status = gVL53L4CX->VL53L4CX_GetMeasurementDataReady(&NewDataReady);
-    if (millis() - startTime > 250) {
-      return false;
+  int no_of_object_found = pMultiRangingData->NumberOfObjectsFound;
+  float nearestMm = 1e9f;  // smallest committed object distance this poll (survives guard scope)
+  struct ObjectDiagnostic {
+    int rangeMm, status;
+    float signalRate, minSignalRate;
+    bool valid, goodSignal;
+  } diagnostics[4]{};
+  int validObjectIndex = 0;
+  uint32_t publishedSeq = 0;
+
+  // The bus is released before filtering or waiting for the cache. A busy
+  // consumer can delay publication without holding up other I2C devices.
+  {
+    SensorCacheGuard tofGuard(sTofCacheMutex, pdMS_TO_TICKS(50), "tof.pollWrite");
+    if (!tofGuard.held || !gTofRunning) {
+      return true;  // The bus operation succeeded; no reading was published.
     }
-    if (status != VL53L4CX_ERROR_NONE) {
-      return false;
-    }
-  } while (!NewDataReady);
 
-  if ((!status) && (NewDataReady != 0)) {
-    status = gVL53L4CX->VL53L4CX_GetMultiRangingData(pMultiRangingData);
-
-    if (status != VL53L4CX_ERROR_NONE) {
-      return false;
-    }
-
-    int no_of_object_found = pMultiRangingData->NumberOfObjectsFound;
-    float nearestMm = 1e9f;  // smallest committed object distance this poll (survives guard scope)
-
-    // Pattern 3: take, do all cache writes, release BEFORE the
-    // VL53L4CX_ClearInterruptAndStartMeasurement hardware call. Explicit
-    // { } block scopes the guard so the dtor releases before line 1 of
-    // the post-block hardware call.
-    {
-      SensorCacheGuard tofGuard(gTofCache.mutex, pdMS_TO_TICKS(50), "tof.pollWrite");
-      if (!tofGuard.held) {
-        return false;
-      }
-
-      gTofCache.tofTotalObjects = no_of_object_found;
+    sTofCache.tofTotalObjects = no_of_object_found;
 
     for (int j = 0; j < 4; j++) {
-      gTofCache.tofObjects[j].detected = false;
-      gTofCache.tofObjects[j].distance_mm = 0;
-      gTofCache.tofObjects[j].distance_cm = 0.0;
-      gTofCache.tofObjects[j].status = 0;
-      gTofCache.tofObjects[j].valid = false;
+      sTofCache.tofObjects[j].detected = false;
+      sTofCache.tofObjects[j].distance_mm = 0;
+      sTofCache.tofObjects[j].distance_cm = 0.0;
+      sTofCache.tofObjects[j].status = 0;
+      sTofCache.tofObjects[j].valid = false;
     }
 
-    int validObjectIndex = 0;
     for (int j = 0; j < no_of_object_found && j < 4; j++) {
       int range_mm = pMultiRangingData->RangeData[j].RangeMilliMeter;
       int range_status = pMultiRangingData->RangeData[j].RangeStatus;
 
       float signal_rate = (float)pMultiRangingData->RangeData[j].SignalRateRtnMegaCps / 65536.0;
 
-      bool isValid = (range_status != VL53L4CX_RANGESTATUS_SIGNAL_FAIL && 
-                      range_status != VL53L4CX_RANGESTATUS_SIGMA_FAIL && 
-                      range_status != VL53L4CX_RANGESTATUS_WRAP_TARGET_FAIL && 
+      bool isValid = (range_status != VL53L4CX_RANGESTATUS_SIGNAL_FAIL &&
+                      range_status != VL53L4CX_RANGESTATUS_SIGMA_FAIL &&
+                      range_status != VL53L4CX_RANGESTATUS_WRAP_TARGET_FAIL &&
                       range_status != VL53L4CX_RANGESTATUS_XTALK_SIGNAL_FAIL);
 
       float minSignalRate;
@@ -474,8 +406,7 @@ bool tofPoll() {
 
       bool hasGoodSignal = (signal_rate > minSignalRate);
 
-      DEBUG_TOF_VALUESF("ToF obj[%d]: range=%dmm, status=%d, signal=%.3f (min=%.3f), isValid=%d, hasGoodSignal=%d",
-                   j, range_mm, range_status, signal_rate, minSignalRate, isValid ? 1 : 0, hasGoodSignal ? 1 : 0);
+      diagnostics[j] = {range_mm, range_status, signal_rate, minSignalRate, isValid, hasGoodSignal};
 
       if (isValid && hasGoodSignal && range_mm > 0 && range_mm <= 6000 && validObjectIndex < 4) {
         float distance_cm = range_mm / 10.0;
@@ -490,59 +421,61 @@ bool tofPoll() {
         }
         float smoothed_mm, smoothed_cm;
 
-        if (gTofCache.tofObjects[validObjectIndex].hasHistory) {
-          smoothed_mm = alpha * range_mm + (1.0 - alpha) * gTofCache.tofObjects[validObjectIndex].smoothed_distance_mm;
-          smoothed_cm = alpha * distance_cm + (1.0 - alpha) * gTofCache.tofObjects[validObjectIndex].smoothed_distance_cm;
+        if (sTofCache.tofObjects[validObjectIndex].hasHistory) {
+          smoothed_mm = alpha * range_mm + (1.0 - alpha) * sTofCache.tofObjects[validObjectIndex].smoothed_distance_mm;
+          smoothed_cm = alpha * distance_cm + (1.0 - alpha) * sTofCache.tofObjects[validObjectIndex].smoothed_distance_cm;
         } else {
           smoothed_mm = range_mm;
           smoothed_cm = distance_cm;
-          gTofCache.tofObjects[validObjectIndex].hasHistory = true;
+          sTofCache.tofObjects[validObjectIndex].hasHistory = true;
         }
 
-        gTofCache.tofObjects[validObjectIndex].detected = true;
-        gTofCache.tofObjects[validObjectIndex].distance_mm = (int)smoothed_mm;
-        gTofCache.tofObjects[validObjectIndex].distance_cm = smoothed_cm;
-        gTofCache.tofObjects[validObjectIndex].smoothed_distance_mm = smoothed_mm;
-        gTofCache.tofObjects[validObjectIndex].smoothed_distance_cm = smoothed_cm;
-        gTofCache.tofObjects[validObjectIndex].status = range_status;
-        gTofCache.tofObjects[validObjectIndex].valid = true;
+        sTofCache.tofObjects[validObjectIndex].detected = true;
+        sTofCache.tofObjects[validObjectIndex].distance_mm = (int)smoothed_mm;
+        sTofCache.tofObjects[validObjectIndex].distance_cm = smoothed_cm;
+        sTofCache.tofObjects[validObjectIndex].smoothed_distance_mm = smoothed_mm;
+        sTofCache.tofObjects[validObjectIndex].smoothed_distance_cm = smoothed_cm;
+        sTofCache.tofObjects[validObjectIndex].status = range_status;
+        sTofCache.tofObjects[validObjectIndex].valid = true;
 
         if (smoothed_mm < nearestMm) nearestMm = smoothed_mm;
         validObjectIndex++;
       }
     }
 
-    gTofCache.tofTotalObjects = validObjectIndex;
-    gTofCache.tofLastUpdate = millis();
-    gTofCache.tofDataValid = true;
-    gTofCache.tofSeq++;
+    sTofCache.tofTotalObjects = validObjectIndex;
+    sTofCache.tofLastUpdate = millis();
+    sTofCache.tofDataValid = true;
+    sTofCache.tofSeq++;
 
-    DEBUG_TOF_POLLINGF("tofPoll: found=%d, valid=%d, seq=%lu",
-                 no_of_object_found, validObjectIndex,
-                 (unsigned long)gTofCache.tofSeq);
-    }  // tofGuard releases here, before the hardware call
+    publishedSeq = sTofCache.tofSeq;
+  }  // tofGuard releases here, before diagnostics and events
 
-    // Object presence, edge-latched with hysteresis: enter close range below
-    // 300mm, leave above 400mm. Posts once per crossing, never every poll.
-    {
-      int reportMm = (nearestMm >= 1e9f) ? 9999 : (int)nearestMm;
-      char mm[12];
-      snprintf(mm, sizeof(mm), "%dmm", reportMm);
-      if (!gTofNear && nearestMm < 300.0f) {
-        gTofNear = true;
-        systemEventPost(SYSEVT_TOF_OBJECT_DETECTED, "near", mm);
-      } else if (gTofNear && nearestMm > 400.0f) {
-        gTofNear = false;
-        systemEventPost(SYSEVT_TOF_OBJECT_DETECTED, "far", mm);
-      }
+  for (int j = 0; j < no_of_object_found && j < 4; ++j) {
+    const auto& d = diagnostics[j];
+    DEBUG_TOF_VALUESF("ToF obj[%d]: range=%dmm, status=%d, signal=%.3f (min=%.3f), isValid=%d, hasGoodSignal=%d",
+                     j, d.rangeMm, d.status, d.signalRate, d.minSignalRate,
+                     d.valid ? 1 : 0, d.goodSignal ? 1 : 0);
+  }
+  DEBUG_TOF_POLLINGF("tofPoll: found=%d, valid=%d, seq=%lu",
+                     no_of_object_found, validObjectIndex, (unsigned long)publishedSeq);
+
+  // Object presence, edge-latched with hysteresis: enter close range below
+  // 300mm, leave above 400mm. Posts once per crossing, never every poll.
+  {
+    int reportMm = (nearestMm >= 1e9f) ? 9999 : (int)nearestMm;
+    char mm[12];
+    snprintf(mm, sizeof(mm), "%dmm", reportMm);
+    if (!gTofNear && nearestMm < 300.0f) {
+      gTofNear = true;
+      systemEventPost(SYSEVT_TOF_OBJECT_DETECTED, "near", mm);
+    } else if (gTofNear && nearestMm > 400.0f) {
+      gTofNear = false;
+      systemEventPost(SYSEVT_TOF_OBJECT_DETECTED, "far", mm);
     }
-
-    gVL53L4CX->VL53L4CX_ClearInterruptAndStartMeasurement();
-
-    return true;
   }
 
-  return false;
+  return true;
 }
 
 // ============================================================================
@@ -553,26 +486,32 @@ bool tofPoll() {
 int tofBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
+  buf[0] = '\0';
   int pos = 0;
 
-  SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS), "tof.buildJSON");
-  if (g.held) {
-    if (!gTofCache.tofDataValid) {
+  TofCache reading;
+  const bool available = tofCacheSnapshot(reading, CACHE_MUTEX_TIMEOUT_MS);
+  if (available) {
+    if (!reading.tofDataValid) {
       DEBUG_TOF_POLLINGF("tofBuildDataJSON: tofDataValid=%s, gTofRunning=%d, gTofConnected=%d, lastUpdate=%lu",
-                   "false", gTofRunning ? 1 : 0, gTofConnected ? 1 : 0, gTofCache.tofLastUpdate);
+                   "false", gTofRunning ? 1 : 0, gTofConnected ? 1 : 0, reading.tofLastUpdate);
       // Not-ready reading: uniform envelope with valid=false + empty object list
       // (replaces the old {"error":"ToF sensor not ready"} shape).
-      pos = sensorEnvelopeBegin(buf, bufSize, false, gTofConnected, gTofCache.tofLastUpdate);
-      if (pos == 0) return 0;
-      pos += snprintf(buf + pos, bufSize - pos, ",\"objects\":[]}");
+      pos = sensorEnvelopeBegin(buf, bufSize, false, gTofConnected, reading.tofLastUpdate);
+      if (pos == 0) { buf[0] = '\0'; return 0; }
+      int n = snprintf(buf + pos, bufSize - pos, ",\"objects\":[]}");
+      if (n < 0 || (size_t)n >= bufSize - pos) { buf[0] = '\0'; return 0; }
+      pos += n;
       return pos;
     }
 
     // Valid reading: shared envelope opening, then ToF's own object list + counts.
     // ts now carries the timestamp, so the old top-level "timestamp" key is gone.
-    pos = sensorEnvelopeBegin(buf, bufSize, true, gTofConnected, gTofCache.tofLastUpdate);
-    if (pos == 0) return 0;
-    pos += snprintf(buf + pos, bufSize - pos, ",\"objects\":[");
+    pos = sensorEnvelopeBegin(buf, bufSize, true, gTofConnected, reading.tofLastUpdate);
+    if (pos == 0) { buf[0] = '\0'; return 0; }
+    int n = snprintf(buf + pos, bufSize - pos, ",\"objects\":[");
+    if (n < 0 || (size_t)n >= bufSize - pos) { buf[0] = '\0'; return 0; }
+    pos += n;
 
     // Emit ONLY detected objects (variable-length). Presence in the array IS the
     // detection, so per-object "detected" is redundant and dropped; "distance_cm"
@@ -580,26 +519,31 @@ int tofBuildDataJSON(char* buf, size_t bufSize) {
     // (1-4) identifies which target slot.
     bool first = true;
     for (int j = 0; j < 4; j++) {
-      if (pos < 0 || (size_t)pos >= bufSize) break;  // buffer full — stop before bufSize-pos underflows
-      if (!gTofCache.tofObjects[j].detected) continue;
-      pos += snprintf(buf + pos, bufSize - pos,
+      if (!reading.tofObjects[j].detected) continue;
+      int n = snprintf(buf + pos, bufSize - pos,
                       "%s{\"id\":%d,\"distance_mm\":%d,\"status\":%d,\"valid\":%s}",
                       first ? "" : ",", j + 1,
-                      gTofCache.tofObjects[j].distance_mm,
-                      gTofCache.tofObjects[j].status,
-                      gTofCache.tofObjects[j].valid ? "true" : "false");
+                      reading.tofObjects[j].distance_mm,
+                      reading.tofObjects[j].status,
+                      reading.tofObjects[j].valid ? "true" : "false");
+      if (n < 0 || (size_t)n >= bufSize - pos) { buf[0] = '\0'; return 0; }
+      pos += n;
       first = false;
     }
 
-    if (pos >= 0 && (size_t)pos < bufSize) {
-      pos += snprintf(buf + pos, bufSize - pos, "]}");
+    {
+      int n = snprintf(buf + pos, bufSize - pos, "]}");
+      if (n < 0 || (size_t)n >= bufSize - pos) { buf[0] = '\0'; return 0; }
+      pos += n;
     }
   } else {
     // Cache timeout: can't read the cache under lock, so ts=0 (unknown) + valid=false
     // (replaces the old {"error":"ToF cache timeout"} shape).
     pos = sensorEnvelopeBegin(buf, bufSize, false, gTofConnected, 0);
-    if (pos == 0) return 0;
-    pos += snprintf(buf + pos, bufSize - pos, ",\"objects\":[],\"total_objects\":0}");
+    if (pos == 0) { buf[0] = '\0'; return 0; }
+    int n = snprintf(buf + pos, bufSize - pos, ",\"objects\":[],\"total_objects\":0}");
+    if (n < 0 || (size_t)n >= bufSize - pos) { buf[0] = '\0'; return 0; }
+    pos += n;
   }
 
   return pos;
@@ -712,20 +656,20 @@ const size_t tofCommandsCount = sizeof(tofCommands) / sizeof(tofCommands[0]);
 // ToF Task - FreeRTOS Task Function
 // ============================================================================
 // Purpose: Continuously reads distance measurements from VL53L4CX ToF sensor
-// Stack: 3072 BYTES (3 KB) | Priority: 1 | Core: Any
+// Stack: TOF_STACK_WORDS bytes (4 KB) | Priority: 1 | Core: I2C_SENSOR_CORE
 // Lifecycle: Created by cmd_tofstart, deleted when gTofRunning=false
 // Polling: Configurable via tofPollingMs (default 100ms) | I2C Clock: 50-400kHz
 //
 // Cleanup Strategy:
 //   1. Check gTofRunning flag at loop start
 //   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
-//   3. Stop measurement, delete sensor object, and invalidate cache
-//   4. Release mutex and delete task
+//   3. Stop measurement under the bus lock, release it, then delete the object
+//   4. Clear connected state and delete the task
 // ============================================================================
 
 void tofTask(void* parameter) {
-  INFO_TOF_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
-                (void*)xTaskGetCurrentTaskHandle(), 
+  INFO_TOF_LIFECYCLEF("Task started (handle=%p, stack=%u bytes)",
+                (void*)xTaskGetCurrentTaskHandle(),
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_TOF_LIFECYCLEF("[MODULAR] tofTask() running from i2csensor_vl53l4cx.cpp");
   gTofNear = false;
@@ -734,19 +678,21 @@ void tofTask(void* parameter) {
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!gTofRunning) {
+      if (!tofInvalidateCache()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        continue;
+      }
       if (gVL53L4CX != nullptr) {
-        (void)gVL53L4CX->VL53L4CX_StopMeasurement();
+        // Polling pauses do not exclude other bus users. Keep the hardware
+        // stop inside the manager transaction, but always release our object.
+        i2cDeviceTransactionVoid((uint8_t)gSettings.tofBus, I2C_ADDR_TOF, 100000, 500, [&]() {
+          (void)gVL53L4CX->VL53L4CX_StopMeasurement();
+        });
         ps_delete(gVL53L4CX);
         gVL53L4CX = nullptr;
       }
       gTofConnected = false;
-      gTofCache.tofDataValid = false;
-      gTofCache.tofTotalObjects = 0;
-      for (int j = 0; j < 4; j++) {
-        gTofCache.tofObjects[j].detected = false;
-        gTofCache.tofObjects[j].valid = false;
-      }
-      SENSOR_TASK_EXIT(TOF);
+      SENSOR_TASK_EXIT(TOF, gTofTaskHandle);
     }
     
     // Update watermark diagnostics (only when enabled)
@@ -764,7 +710,7 @@ void tofTask(void* parameter) {
       if (checkTaskStackSafety("tof", TOF_STACK_WORDS, &gTofRunning)) continue;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gTofRunning) {
-        DEBUG_PERFORMANCEF("[STACK] tof_task watermark_now=%u min=%u words", (unsigned)gTofWatermarkNow, (unsigned)gTofWatermarkMin);
+        DEBUG_PERFORMANCEF("[STACK] tof_task watermark_now=%u min=%u bytes", (unsigned)gTofWatermarkNow, (unsigned)gTofWatermarkMin);
         DEBUG_MEMORY_HEAPF("[HEAP] tof_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
@@ -773,18 +719,13 @@ void tofTask(void* parameter) {
       unsigned long tofPollMs = (gSettings.tofDevicePollMs > 0) ? (unsigned long)gSettings.tofDevicePollMs : 100;
       unsigned long nowMs = millis();
       if (nowMs - lastToFRead >= tofPollMs) {
-        uint32_t tofHz = (gSettings.i2cClockToFHz > 0) ? (uint32_t)gSettings.i2cClockToFHz : 200000;
-        bool ok = false;
-        
-        // ToF busy-waits up to 250ms for data ready; 500ms timeout gives headroom without over-blocking
-        ok = i2cTaskWithTimeout(tofBus, I2C_ADDR_TOF, tofHz, 500, [&]() -> bool {
-          return tofPoll();
-        });
+        // The owner separates bus access from cache publication, as presencePoll does.
+        bool ok = tofPoll();
         
         lastToFRead = nowMs;
         
-        // Auto-disable if too many consecutive failures
-        if (!ok) {
+        // A stop is normal cleanup, even if an in-flight read also failed.
+        if (!ok && gTofRunning) {
           if (i2cShouldAutoDisable(I2C_ADDR_TOF, (uint8_t)gSettings.tofBus)) {
             ERROR_TOFF("Too many consecutive ToF failures - auto-disabling");
             gTofRunning = false;
@@ -799,7 +740,7 @@ void tofTask(void* parameter) {
           DEBUG_TOF_POLLINGF("ToF readObjects: %s", ok ? "ok" : "fail");
         }
         
-        // ESP-NOW broadcaster reads tofBuildDataJSON() on demand from gTofCache.
+        // ESP-NOW broadcaster reads tofBuildDataJSON() on demand from sTofCache.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     } else {

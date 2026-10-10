@@ -132,7 +132,7 @@ hardware. Do not use it while another coordinator owns the port:
 ```sh
 experiments/p4_connectivity/private/ble-env/bin/python \
   experiments/p4_connectivity/test_ble.py --physical \
-  --s3-port /dev/cu.usbmodem1101 --ble-mac 02:48:57:31:01:aa
+  --s3-port /dev/cu.usbmodemS3 --ble-mac 02:48:57:31:01:aa
 ```
 
 Read dependencies without opening a port or accessing any radio:

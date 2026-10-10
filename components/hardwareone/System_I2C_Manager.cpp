@@ -56,6 +56,8 @@ I2CDeviceManager::I2CDeviceManager()
   wires[0] = &Wire1;  // bus 0 = primary  → Wire1 → ESP I2C_NUM_1
   wires[1] = &Wire;   // bus 1 = secondary → Wire  → ESP I2C_NUM_0
   memset(deviceQueue, 0, sizeof(deviceQueue));
+  memset(pendingDeviceStops, 0, sizeof(pendingDeviceStops));
+  memset(deviceStopQueuedAt, 0, sizeof(deviceStopQueuedAt));
 }
 
 void I2CDeviceManager::initialize() {
@@ -471,42 +473,19 @@ uint8_t I2CDeviceManager::probeAddress(uint8_t busIdx, uint8_t address,
 
   setBusClock(busIdx, clockHz);
   wires[busIdx]->beginTransmission(address);
-  const uint8_t status = wires[busIdx]->endTransmission(true);
+  uint8_t status = wires[busIdx]->endTransmission(true);
+  // Confirm a positive reply without reading device data. A QT Py scan showed
+  // a transient ACK at an unattached address; arbitrary read-back is unsafe
+  // for write-only devices and devices requiring a register-selection command.
+  if (status == 0) {
+    wires[busIdx]->beginTransmission(address);
+    status = wires[busIdx]->endTransmission(true);
+  }
 
   clockStackPop(busIdx);
   setBusClock(busIdx, clockStackTopOrDefault(busIdx));
   xSemaphoreGive(mutex);
   return status;
-}
-
-bool I2CDeviceManager::confirmRead(uint8_t busIdx, uint8_t address,
-                                   const I2CTransactionOptions& options) {
-  if (busIdx >= NUM_BUSES || !busInitialized[busIdx] || !wires[busIdx] ||
-      !busMutexes[busIdx]) {
-    return false;
-  }
-
-  SemaphoreHandle_t mutex = busMutexes[busIdx];
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(options.lockWaitMs)) != pdTRUE) {
-    return false;
-  }
-
-  const uint32_t clockHz = options.clockHz > 0 ? options.clockHz : 100000;
-  if (!clockStackPush(busIdx, clockHz)) {
-    xSemaphoreGive(mutex);
-    return false;
-  }
-
-  setBusClock(busIdx, clockHz);
-  const size_t received = wires[busIdx]->requestFrom((uint16_t)address, (size_t)1);
-  if (received >= 1) {
-    while (wires[busIdx]->available()) (void)wires[busIdx]->read();
-  }
-
-  clockStackPop(busIdx);
-  setBusClock(busIdx, clockStackTopOrDefault(busIdx));
-  xSemaphoreGive(mutex);
-  return received >= 1;
 }
 
 void I2CDeviceManager::checkBusRecoveryNeeded() {
@@ -646,12 +625,22 @@ void I2CDeviceManager::updateHistogram(uint8_t bus, uint32_t txDurationUs) {
 bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
   // Refuse to enqueue if the bus is disabled — nothing will drain the queue
   extern bool gI2CBusRunning;
-  if (!gI2CBusRunning) return false;
-
-  if (!queueMutex) return false;
+  if (!gI2CBusRunning || sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
-    int nextTail = (queueTail + 1) % 8;
+    if (pendingDeviceStops[sensor]) {
+      xSemaphoreGive(queueMutex);
+      return false;
+    }
+    // Admission is idempotent even when callers race between their status
+    // check and enqueue, or when the ring is already full.
+    for (int i = queueHead; i != queueTail; i = (i + 1) % DEVICE_QUEUE_SIZE) {
+      if (deviceQueue[i].device == sensor) {
+        xSemaphoreGive(queueMutex);
+        return true;
+      }
+    }
+    int nextTail = (queueTail + 1) % DEVICE_QUEUE_SIZE;
     if (nextTail == queueHead) {
       xSemaphoreGive(queueMutex);
       return false;  // Queue full
@@ -659,6 +648,7 @@ bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
     
     deviceQueue[queueTail].device = sensor;
     deviceQueue[queueTail].queuedAt = millis();
+    deviceQueue[queueTail].action = I2CDeviceRequestAction::Start;
     queueTail = nextTail;
     
     xSemaphoreGive(queueMutex);
@@ -668,17 +658,47 @@ bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
   return false;
 }
 
-bool I2CDeviceManager::dequeueDeviceStart(I2CDeviceStartRequest* req) {
+bool I2CDeviceManager::enqueueDeviceStop(I2CDeviceType sensor) {
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
+
+  if (xSemaphoreTake(queueMutex, portMAX_DELAY) != pdTRUE) return false;
+
+  // Compact in place from the head, retaining the order of other starts even
+  // when the ring wraps. Remove every matching entry, including old duplicates.
+  int write = queueHead;
+  for (int read = queueHead; read != queueTail; read = (read + 1) % DEVICE_QUEUE_SIZE) {
+    if (deviceQueue[read].device != sensor) {
+      deviceQueue[write] = deviceQueue[read];
+      write = (write + 1) % DEVICE_QUEUE_SIZE;
+    }
+  }
+  queueTail = write;
+  if (!pendingDeviceStops[sensor]) deviceStopQueuedAt[sensor] = millis();
+  pendingDeviceStops[sensor] = true;
+  xSemaphoreGive(queueMutex);
+  return true;
+}
+
+bool I2CDeviceManager::dequeueDeviceRequest(I2CDeviceRequest* req) {
   if (!queueMutex || !req) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
+    for (int sensor = 0; sensor < I2C_DEVICE_COUNT; ++sensor) {
+      if (!pendingDeviceStops[sensor]) continue;
+      req->device = static_cast<I2CDeviceType>(sensor);
+      req->queuedAt = deviceStopQueuedAt[sensor];
+      req->action = I2CDeviceRequestAction::Stop;
+      pendingDeviceStops[sensor] = false;
+      xSemaphoreGive(queueMutex);
+      return true;
+    }
     if (queueHead == queueTail) {
       xSemaphoreGive(queueMutex);
       return false;  // Queue empty
     }
     
     *req = deviceQueue[queueHead];
-    queueHead = (queueHead + 1) % 8;
+    queueHead = (queueHead + 1) % DEVICE_QUEUE_SIZE;
     
     xSemaphoreGive(queueMutex);
     return true;
@@ -687,12 +707,20 @@ bool I2CDeviceManager::dequeueDeviceStart(I2CDeviceStartRequest* req) {
   return false;
 }
 
+bool I2CDeviceManager::hasPendingDeviceStop(I2CDeviceType sensor) {
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
+  if (xSemaphoreTake(queueMutex, portMAX_DELAY) != pdTRUE) return false;
+  const bool pending = pendingDeviceStops[sensor];
+  xSemaphoreGive(queueMutex);
+  return pending;
+}
+
 bool I2CDeviceManager::isInQueue(I2CDeviceType sensor) {
-  if (!queueMutex) return false;
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
   
   bool found = false;
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
-    for (int i = queueHead; i != queueTail; i = (i + 1) % 8) {
+    for (int i = queueHead; i != queueTail; i = (i + 1) % DEVICE_QUEUE_SIZE) {
       if (deviceQueue[i].device == sensor) {
         found = true;
         break;
@@ -705,12 +733,12 @@ bool I2CDeviceManager::isInQueue(I2CDeviceType sensor) {
 }
 
 int I2CDeviceManager::getQueuePosition(I2CDeviceType sensor) {
-  if (!queueMutex) return -1;
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return -1;
   
   int pos = -1;
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
     int idx = 1;
-    for (int i = queueHead; i != queueTail; i = (i + 1) % 8) {
+    for (int i = queueHead; i != queueTail; i = (i + 1) % DEVICE_QUEUE_SIZE) {
       if (deviceQueue[i].device == sensor) {
         pos = idx;
         break;
@@ -724,7 +752,10 @@ int I2CDeviceManager::getQueuePosition(I2CDeviceType sensor) {
 }
 
 int I2CDeviceManager::getQueueDepth() {
-  return (queueTail - queueHead + 8) % 8;
+  if (!queueMutex || xSemaphoreTake(queueMutex, portMAX_DELAY) != pdTRUE) return 0;
+  const int depth = (queueTail - queueHead + DEVICE_QUEUE_SIZE) % DEVICE_QUEUE_SIZE;
+  xSemaphoreGive(queueMutex);
+  return depth;
 }
 
 // These delegate to the global pollPause/pollResume (System_PollPause.h) but

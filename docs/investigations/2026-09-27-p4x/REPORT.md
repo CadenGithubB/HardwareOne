@@ -8,8 +8,8 @@ Created local branch `codex/investigate-esp32-p4x-eye` at `6ba1c6c`. No commits 
 
 | Device | USB serial port during investigation | Observed hardware and firmware |
 |---|---|---|
-| ESP32-P4X-EYE | `/dev/cu.usbmodem2101` | ESP32-P4 revision **3.2**, 400 MHz, **16 MB flash**; factory boot detects **32 MB PSRAM** and **OV2710** camera. Running `factory_demo` 1.1.0, built February 5, 2026. |
-| XIAO ESP32-S3 Sense control | `/dev/cu.usbmodem1101` | ESP32-S3 revision **0.2**, **8 MB flash**, **8 MB embedded PSRAM**; existing firmware prints the Seeed XIAO Sense greeting. |
+| ESP32-P4X-EYE | `/dev/cu.usbmodemP4` | ESP32-P4 revision **3.2**, 400 MHz, **16 MB flash**; factory boot detects **32 MB PSRAM** and **OV2710** camera. Running `factory_demo` 1.1.0, built February 5, 2026. |
+| XIAO ESP32-S3 Sense control | `/dev/cu.usbmodemS3` | ESP32-S3 revision **0.2**, **8 MB flash**, **8 MB embedded PSRAM**; existing firmware prints the Seeed XIAO Sense greeting. |
 
 Both USB links and existing firmware responded. This does not validate HardwareOne on either device. The P4 factory image identifies itself as `v5.5.2-712-g4297f22f8ab-dirty`: a vendor development snapshot after 5.5.2, not evidence that stock 5.5.2 supports this silicon. The onboard C6's firmware version and Hosted configuration were not established.
 
@@ -58,7 +58,7 @@ One source tree is realistic within the ESP-IDF family. This does not imply the 
 
 **Experiment record**
 
-ESP-IDF 5.5.5, RISC-V/S3 compilers and isolated Python tooling were installed under `/private/tmp/hw1-p4-investigation-20260927/`. No global shell configuration was changed. Disposable directories may be removed by macOS; the report and selected evidence are saved separately as durable outputs.
+ESP-IDF 5.5.5, RISC-V/S3 compilers and isolated Python tooling were installed under `/path/to/private-investigation/`. No global shell configuration was changed. Disposable directories may be removed by macOS; the report and selected evidence are saved separately as durable outputs.
 
 The official hello-world source compiled and linked successfully for both chips using the same IDF checkout. P4 configuration selected RISC-V and revision >=3.1, with the older-revision option disabled. These are build controls, not on-device tests of the newly compiled images.
 

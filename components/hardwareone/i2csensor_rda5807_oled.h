@@ -4,14 +4,12 @@
 #define I2CSENSOR_RDA5807_OLED_H
 
 #include "OLED_Display.h"
+#include "OLED_UI.h"
 #include "OLED_Utils.h"
 #include <Adafruit_SSD1306.h>
 
 // FM Radio OLED display function - shows radio data
 static void displayFmRadio() {
-  extern void oledDrawIcon(int x, int y, const char* iconName, int targetSize);
-  extern void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight);
-  
   // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
@@ -25,13 +23,12 @@ static void displayFmRadio() {
     return;
   }
   
-  // Take a snapshot under the cache mutex so we don't tear strings mid-draw.
   FMRadioCache snap;
-  if (gFmRadioCache.mutex && xSemaphoreTake(gFmRadioCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    snap = gFmRadioCache;
-    xSemaphoreGive(gFmRadioCache.mutex);
-  } else {
-    snap = gFmRadioCache;  // best-effort
+  if (!fmRadioCacheSnapshot(snap, 10)) {
+    oledDisplay->setCursor(0, y);
+    oledDisplay->print("FM reading unavailable");
+    oledMarkDirty();
+    return;
   }
 
   // Frequency (large) — replaced by a seek indicator while a seek is pending
@@ -118,10 +115,13 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
   // Everything below drives a running tuner.
   if (!gRadioInitialized || !gFmRadioConnected) return false;
 
+  FMRadioCache snap;
+  if (!fmRadioCacheSnapshot(snap, 10)) return false;
+
   // L/R: step tune ±0.1 MHz (10 kHz-unit command form), clamped to the band.
   if (gNavEvents.left || gNavEvents.right) {
     if (oledGuestBlocksMutate()) return true;
-    int f = (int)gFmRadioCache.frequency + (gNavEvents.right ? 10 : -10);
+    int f = (int)snap.frequency + (gNavEvents.right ? 10 : -10);
     if (f < 7600)  f = 7600;
     if (f > 10800) f = 10800;
     char cmd[28];
@@ -133,7 +133,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
   // Up/Down: station seek. Ignored while one is already pending.
   if (gNavEvents.up || gNavEvents.down) {
     if (oledGuestBlocksMutate()) return true;
-    if (!gFmRadioCache.seekInProgress) {
+    if (!snap.seekInProgress) {
       executeOLEDCommand(gNavEvents.up ? "fmradioseek up" : "fmradioseek down");
       oledMarkDirty();  // show the Seek... indicator immediately
     }
@@ -143,7 +143,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
   // A: mute toggle.
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     if (oledGuestBlocksMutate()) return true;
-    executeOLEDCommand(gFmRadioCache.muted ? "fmradiounmute" : "fmradiomute");
+    executeOLEDCommand(snap.muted ? "fmradiounmute" : "fmradiomute");
     return true;
   }
 
@@ -153,7 +153,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
     static const uint8_t kVolLadder[] = {0, 3, 6, 9, 12, 15};
     uint8_t next = kVolLadder[0];
     for (size_t i = 0; i < sizeof(kVolLadder); i++) {
-      if (kVolLadder[i] > gFmRadioCache.volume) { next = kVolLadder[i]; break; }
+      if (kVolLadder[i] > snap.volume) { next = kVolLadder[i]; break; }
     }
     char cmd[24];
     snprintf(cmd, sizeof(cmd), "fmradiovolume %u", (unsigned)next);

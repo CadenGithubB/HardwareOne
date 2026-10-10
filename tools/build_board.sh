@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # build_board.sh — per-board isolated builds.
 #
-#   tools/build_board.sh <board> [idf.py action/args...]      (default action: build)
+#   tools/build_board.sh <board> [--config <name>] [idf.py action/args...]
 #
 #   tools/build_board.sh feathers3                 # build FeatherS3[D] in build-feathers3/
 #   tools/build_board.sh qtpy_esp32 build          # classic-ESP32 board, own toolchain cache
 #   tools/build_board.sh xiao_s3 flash monitor     # actions pass straight through to idf.py
+#   tools/build_board.sh xiao_s3 --config xiao-mqtt # saved features, own build directory
 #
 # Each board gets its own build directory (build-<board>/) AND its own sdkconfig
 # (build-<board>/sdkconfig), so switching boards never needs `idf.py fullclean`
@@ -16,13 +17,14 @@
 # The chip target comes from the board file's `# HW_TARGET:` marker, and
 # HW_BOARD is always passed — which closes the known footgun where a bare
 # `idf.py build` could combine one board's sdkconfig with another board's
-# partition selection. Each build now depends directly on its authoritative
-# checked-in partition table, so different boards may build concurrently.
+# partition selection. Each build uses its authoritative partition table.
+# Dependency resolution still shares managed_components: serialize cross-target
+# configuration before running builds concurrently.
 
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") <board> [idf.py args...]" >&2
+  echo "usage: $(basename "$0") <board> [--config <name>] [idf.py args...]" >&2
   echo "boards:" >&2
   for f in "$REPO"/boards/*.defaults; do
     b="$(basename "$f" .defaults)"
@@ -37,6 +39,29 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BOARD="${1:-}"
 [[ -n "$BOARD" ]] || usage
 shift || true
+
+CONFIG_NAME=""
+if [[ "${1:-}" == "--config" ]]; then
+  CONFIG_NAME="${2:?--config requires a saved configuration name}"
+  shift 2
+  for action in "$@"; do
+    case "$action" in
+      -D*|-B*|-C*|--build-dir*|--project-dir*|--define-cache-entry*)
+        echo "error: saved configurations manage CMake inputs and build paths; remove '$action'" >&2
+        exit 1
+        ;;
+    esac
+    if [[ "$action" == "fullclean" || "$action" == "set-target" ]]; then
+      echo "error: saved configurations own their target and generated inputs; use clean or reconfigure instead of $action" >&2
+      exit 1
+    fi
+  done
+  if [[ -n "${HW_DEPLOYMENT:-}" ]]; then
+    echo "error: saved feature configurations cannot override deployment contracts" >&2
+    exit 1
+  fi
+  python3 "$REPO/tools/build_config.py" prepare "$CONFIG_NAME" "$BOARD"
+fi
 
 BOARD_FILE="$REPO/boards/$BOARD.defaults"
 if [[ ! -f "$BOARD_FILE" ]]; then
@@ -72,9 +97,25 @@ if ! bash "$REPO/docs/arduino-local-patches/verify_patches.sh" >/dev/null; then
 fi
 
 BUILD_DIR="$REPO/build-$BOARD"
+FEATURE_FILE=""
+SDK_FEATURE_FILE=""
+if [[ -n "$CONFIG_NAME" ]]; then
+  BUILD_DIR="$REPO/build-config-$CONFIG_NAME"
+  FEATURE_FILE="$BUILD_DIR/features.h"
+  SDK_FEATURE_FILE="$BUILD_DIR/sdkconfig.features"
+  # Resolve with the real SDK and compiler before spending time compiling (or
+  # running a requested flash action). No second dependency implementation.
+  env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" \
+    idf.py -C "$REPO" -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" \
+    -DHW1_FEATURE_CONFIG_FILE="$FEATURE_FILE" \
+    -DHW1_SDK_CONFIG_FILE="$SDK_FEATURE_FILE" reconfigure
+  python3 "$REPO/tools/build_config.py" check "$CONFIG_NAME"
+fi
 
 env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" \
-  idf.py -C "$REPO" -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" "${@:-build}"
+  idf.py -C "$REPO" -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" \
+  -DHW1_FEATURE_CONFIG_FILE="$FEATURE_FILE" \
+  -DHW1_SDK_CONFIG_FILE="$SDK_FEATURE_FILE" "${@:-build}"
 status=$?
 
 # Refresh the build manifest while the tree state still matches this build --

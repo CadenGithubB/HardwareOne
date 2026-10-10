@@ -12,7 +12,7 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
-P=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
+P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
 export PYTHONPATH=/Volumes/USB2/stt/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 ROOT=/Volumes/USB2/stt

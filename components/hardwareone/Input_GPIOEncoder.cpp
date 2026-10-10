@@ -2,6 +2,8 @@
 
 #if ENABLE_GPIO_ENCODER
 #include "HAL_Input.h"
+#include "HAL_InputInternal.h"
+#include <freertos/semphr.h>
 #include "Input_RotaryCore.h"
 #if ENABLE_GPIO_ENCODER_BUTTONS
 #include "Input_ButtonCore.h"
@@ -28,7 +30,7 @@ static_assert(GPIO_ENCODER_PIN_A != GPIO_ENCODER_PIN_B &&
 
 bool gInputRunning = false;
 bool gInputConnected = false;
-InputCache gInputCache;
+static SemaphoreHandle_t sGpioStateMutex = nullptr;
 
 static portMUX_TYPE sEncoderMux = portMUX_INITIALIZER_UNLOCKED;
 static rotary::Quadrature sDecoder;
@@ -36,6 +38,8 @@ static rotary::Gestures sGestures;
 static int sCapturedDetents = 0;  // ISR writes, task drains under sEncoderMux.
 static int sPendingDetents = 0;   // UI consumes under cache mutex.
 static int32_t sPosition = 0;
+static uint32_t sUnpublishedPresses = 0;
+static bool sUnpublishedActivity = false;
 extern TaskHandle_t gInputTaskHandle;  // Shared slot used by task/memory monitors.
 static constexpr int kPendingLimit = 1024;
 static constexpr uint32_t kSampleMs = 5;
@@ -80,18 +84,21 @@ static bool buttonPressed() {
   return digitalRead(GPIO_ENCODER_PIN_BUTTON) == (GPIO_ENCODER_BUTTON_ACTIVE_LOW ? LOW : HIGH);
 }
 
-static void clearCacheLocked() {
-  gInputCache.buttons = UINT32_MAX;  // Active-low cache: all buttons released.
-  gInputCache.buttonPressedAccum = 0;
-  gInputCache.joyX = gInputCache.joyY = JOYSTICK_CENTER;
-  gInputCache.dataValid = false;
+static bool clearCacheLocked() {
+  if (!inputCacheReset(UINT32_MAX, JOYSTICK_CENTER, JOYSTICK_CENTER, true)) return false;
+  sUnpublishedPresses = 0;
+  sUnpublishedActivity = false;
   sPendingDetents = 0;
 #if ENABLE_GPIO_ENCODER_BUTTONS
   sAuxPressedActions = 0;
 #endif
+  return true;
 }
 
-static void stopLocked() {
+static bool stopLocked(bool failedStart = false) {
+  // A failed start already invalidated the HAL cache before touching pins.
+  // Even if that cache is now contended, always unwind the installed hardware.
+  if (!clearCacheLocked() && !failedStart) return false;
   gInputRunning = gInputConnected = false;
   detachInterrupt(GPIO_ENCODER_PIN_A);
   detachInterrupt(GPIO_ENCODER_PIN_B);
@@ -104,12 +111,12 @@ static void stopLocked() {
   portENTER_CRITICAL(&sEncoderMux);
   sCapturedDetents = 0;
   portEXIT_CRITICAL(&sEncoderMux);
-  clearCacheLocked();
+  return true;
 }
 
 void inputTask(void*) {
   for (;;) {
-    if (xSemaphoreTake(gInputCache.mutex, portMAX_DELAY) == pdTRUE) {
+    if (xSemaphoreTake(sGpioStateMutex, portMAX_DELAY) == pdTRUE) {
       if (gInputRunning) {
         portENTER_CRITICAL(&sEncoderMux);
         const int detents = sCapturedDetents;
@@ -135,13 +142,15 @@ void inputTask(void*) {
         sPendingDetents += events.detents;
         if (sPendingDetents > kPendingLimit) sPendingDetents = kPendingLimit;
         if (sPendingDetents < -kPendingLimit) sPendingDetents = -kPendingLimit;
-        gInputCache.buttons = ~(heldActions | events.actions);
-        gInputCache.buttonPressedAccum |= pressedActions;
-        gInputCache.lastUpdate = now;
-        gInputCache.dataValid = true;
-        if (detents || events.actions || auxiliaryChanged || previousPress != sGestures.pressed()) ++gInputCache.seq;
+        sUnpublishedPresses |= pressedActions;
+        sUnpublishedActivity |= detents || events.actions || auxiliaryChanged || previousPress != sGestures.pressed();
+        if (inputPublishState(~(heldActions | events.actions), JOYSTICK_CENTER, JOYSTICK_CENTER,
+                              sUnpublishedPresses, sUnpublishedActivity, now)) {
+          sUnpublishedPresses = 0;
+          sUnpublishedActivity = false;
+        }
       }
-      xSemaphoreGive(gInputCache.mutex);
+      xSemaphoreGive(sGpioStateMutex);
     }
     // Phase transitions use interrupts. Switches and gesture timers are sampled
     // here; slow I2C polling settings cannot lose turns or delay button sampling.
@@ -156,9 +165,11 @@ bool inputStartInternal() {
 #if ENABLE_GPIO_ENCODER_BUTTONS
   if (!auxiliaryPinsValid()) return false;
 #endif
-  if (!gInputCache.mutex) gInputCache.mutex = xSemaphoreCreateMutex();
-  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
-  if (gInputRunning) { xSemaphoreGive(gInputCache.mutex); return true; }
+  if (!inputCacheInit()) return false;
+  if (!sGpioStateMutex) sGpioStateMutex = xSemaphoreCreateMutex();
+  if (!sGpioStateMutex || xSemaphoreTake(sGpioStateMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  if (gInputRunning) { xSemaphoreGive(sGpioStateMutex); return true; }
+  if (!clearCacheLocked()) { xSemaphoreGive(sGpioStateMutex); return false; }
   pinMode(GPIO_ENCODER_PIN_A, INPUT_PULLUP);
   pinMode(GPIO_ENCODER_PIN_B, INPUT_PULLUP);
   pinMode(GPIO_ENCODER_PIN_BUTTON, GPIO_ENCODER_BUTTON_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
@@ -173,7 +184,6 @@ bool inputStartInternal() {
   sDecoder.reset((digitalRead(GPIO_ENCODER_PIN_A) << 1) | digitalRead(GPIO_ENCODER_PIN_B));
   portEXIT_CRITICAL(&sEncoderMux);
   sGestures.reset(buttonPressed(), millis());
-  clearCacheLocked();
   sPosition = 0;
   inputAbstractionInit();
   attachInterrupt(GPIO_ENCODER_PIN_A, encoderEdge, CHANGE);
@@ -183,14 +193,17 @@ bool inputStartInternal() {
   if (!gInputTaskHandle && xTaskCreateLogged(inputTask, INPUT_TASK_NAME, INPUT_STACK_WORDS, nullptr,
                                        TASK_PRIORITY_LOW, &gInputTaskHandle, INPUT_TASK_TAG,
                                        tskNO_AFFINITY) != pdPASS) {
-    stopLocked();
-    xSemaphoreGive(gInputCache.mutex);
+    stopLocked(true);
+    xSemaphoreGive(sGpioStateMutex);
     return false;
   }
-  gInputCache.dataValid = true;
-  gInputCache.lastUpdate = millis();
+  if (!inputPublishState(UINT32_MAX, JOYSTICK_CENTER, JOYSTICK_CENTER, 0, false, millis())) {
+    stopLocked(true);
+    xSemaphoreGive(sGpioStateMutex);
+    return false;
+  }
   gInputRunning = gInputConnected = true;
-  xSemaphoreGive(gInputCache.mutex);
+  xSemaphoreGive(sGpioStateMutex);
   INFO_INPUT_LIFECYCLEF("GPIO encoder started (A=%d B=%d click=%d)",
                         GPIO_ENCODER_PIN_A, GPIO_ENCODER_PIN_B, GPIO_ENCODER_PIN_BUTTON);
 #if ENABLE_GPIO_ENCODER_BUTTONS
@@ -200,42 +213,52 @@ bool inputStartInternal() {
 }
 
 void gpioEncoderStop() {
-  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+  if (!sGpioStateMutex || xSemaphoreTake(sGpioStateMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
   if (gInputRunning) stopLocked();
-  xSemaphoreGive(gInputCache.mutex);
+  xSemaphoreGive(sGpioStateMutex);
 }
 
 bool gpioEncoderHasPendingDetents() {
-  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, 0) != pdTRUE) return false;
+  if (!sGpioStateMutex || xSemaphoreTake(sGpioStateMutex, 0) != pdTRUE) return false;
   const bool pending = gInputRunning && sPendingDetents != 0;
-  xSemaphoreGive(gInputCache.mutex);
+  xSemaphoreGive(sGpioStateMutex);
   return pending;
 }
 
 int gpioEncoderConsumeOneDetent() {
-  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(5)) != pdTRUE) return 0;
+  if (!sGpioStateMutex || xSemaphoreTake(sGpioStateMutex, pdMS_TO_TICKS(5)) != pdTRUE) return 0;
   const int step = (sPendingDetents > 0) - (sPendingDetents < 0);
   sPendingDetents -= step;
-  xSemaphoreGive(gInputCache.mutex);
+  xSemaphoreGive(sGpioStateMutex);
   return step;
 }
 
 int gpioEncoderBuildDataJSON(char* buf, size_t size) {
   if (!buf || !size) return 0;
-  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+  if (!sGpioStateMutex || xSemaphoreTake(sGpioStateMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
     const int n = snprintf(buf, size, "{\"connected\":false,\"valid\":false}");
     return n > 0 && static_cast<size_t>(n) < size ? n : 0;
   }
+  InputCache reading;
+  if (!inputCacheSnapshot(reading, 50)) {
+    xSemaphoreGive(sGpioStateMutex);
+    const int n = snprintf(buf, size, "{\"connected\":false,\"valid\":false}");
+    return n > 0 && static_cast<size_t>(n) < size ? n : 0;
+  }
+  const int32_t position = sPosition;
+  const int pending = sPendingDetents;
+  const bool running = gInputRunning, connected = gInputConnected;
+  const bool pressed = running && sGestures.pressed();
+  xSemaphoreGive(sGpioStateMutex);
   const int n = snprintf(buf, size,
       "{\"connected\":%s,\"running\":%s,\"valid\":%s,\"ts\":%lu,\"pos\":%ld,\"axis\":0,"
       "\"pendingDetents\":%d,\"buttons\":%lu,\"pressed\":%s,\"sampleMs\":%lu,\"auxButtonsEnabled\":%s}",
-      gInputConnected ? "true" : "false", gInputRunning ? "true" : "false",
-      gInputCache.dataValid ? "true" : "false", static_cast<unsigned long>(gInputCache.lastUpdate),
-      static_cast<long>(sPosition), sPendingDetents,
-      static_cast<unsigned long>(gInputCache.dataValid ? ~gInputCache.buttons : 0),
-      gInputRunning && sGestures.pressed() ? "true" : "false", static_cast<unsigned long>(kSampleMs),
+      connected ? "true" : "false", running ? "true" : "false",
+      reading.dataValid ? "true" : "false", static_cast<unsigned long>(reading.lastUpdate),
+      static_cast<long>(position), pending,
+      static_cast<unsigned long>(reading.dataValid ? ~reading.buttons : 0),
+      pressed ? "true" : "false", static_cast<unsigned long>(kSampleMs),
       ENABLE_GPIO_ENCODER_BUTTONS ? "true" : "false");
-  xSemaphoreGive(gInputCache.mutex);
   return n > 0 && static_cast<size_t>(n) < size ? n : 0;
 }
 #endif  // ENABLE_GPIO_ENCODER

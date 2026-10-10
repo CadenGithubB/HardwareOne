@@ -361,12 +361,6 @@ static bool buildFilesListingImpl(
 
   DEBUG_STORAGEF("[buildFilesListing] START path='%s' heap=%u", dirPath.c_str(), (unsigned)ESP.getFreeHeap());
 
-  // SD entry names come back rooted at the SD's own "/", not at our
-  // "/sd/..." mount-point convention. Compute the underlying-FS path
-  // once so we can strip the right prefix from each entry name below.
-  // For LittleFS paths stripSdPrefix is a pass-through.
-  String fsDirPath = VFS::stripSdPrefix(dirPath);
-
   FsLockGuard _dirGuard("dir.list");
 
   File root = VFS::openGuarded(dirPath, "r", ctx);
@@ -403,149 +397,61 @@ static bool buildFilesListingImpl(
     out = "";  // array body only
   }
 
-  // Mount-point entries (e.g. /sd at LittleFS root). The VFS layer is
-  // the authority on which synthetic entries belong here; we render each
-  // one with the same JSON / text formatting the real entries use below.
-  // Item-count display is web-listing polish so it lives here, not in VFS.
-  {
-    VFS::VirtualEntry virtuals[4];
-    const size_t nVirt = VFS::listVirtualEntries(
-        dirPath, virtuals, sizeof(virtuals) / sizeof(virtuals[0]));
-    for (size_t v = 0; v < nVirt && listingOutputOk(out); v++) {
-      char fullPath[160];
-      snprintf(fullPath, sizeof(fullPath), "%s%s%s",
-               dirPath.c_str(), dirPath == "/" ? "" : "/", virtuals[v].name);
-      uint32_t childCount = 0;
-      if (virtuals[v].isFolder) {
-        File mount = VFS::openGuarded(fullPath, "r", ctx);
-        if (mount && mount.isDirectory()) {
-          File child = mount.openNextFile();
-          while (child) { childCount++; child = mount.openNextFile(); }
-          mount.close();
+  VFS::DirectoryReader reader(root, dirPath);
+  VFS::DirectoryEntry entry;
+  while (listingOutputOk(out) && reader.next(entry)) {
+    // Visibility is a presentation policy. Virtual mounts keep their existing
+    // visibility; regular entries may hide admin-only branches for this caller.
+    if (hideAdminPaths && !entry.isVirtual && isAdminOnlyPath(entry.path)) continue;
+
+    uint32_t itemCount = 0;
+    if (entry.isFolder) {
+      // Web/text listings show the full child count. Display browsers may opt
+      // out or cap theirs, so counting does not belong in the directory reader.
+      File subDir = VFS::openGuarded(entry.path, "r", ctx);
+      if (subDir && subDir.isDirectory()) {
+        File child = subDir.openNextFile();
+        while (child) {
+          itemCount++;
+          child = subDir.openNextFile();
         }
-      }
-      if (asJson) {
-        if (!first) out += ",";
-        uint8_t perms = listingPermissions->forPath(String(fullPath));
-        char buf[128];
-        snprintf(buf, sizeof(buf),
-                 "{\"name\":\"%s\",\"type\":\"folder\",\"size\":\"%u items\",\"count\":%u,\"perms\":%u}",
-                 virtuals[v].name, (unsigned)childCount, (unsigned)childCount, (unsigned)perms);
-        out += buf;
-        first = false;
-      } else {
-        out += "  ";
-        out += virtuals[v].name;
-        out += " (";
-        out += childCount;
-        out += " items) [mount]\n";
-        fileCount++;
-      }
-    }
-  }
-
-  File file = root.openNextFile();
-  while (file && listingOutputOk(out)) {
-    // Extract display name (strip leading directory)
-    String fileName = String(file.name());
-    if (fsDirPath != "/") {
-      String expectedPrefix = fsDirPath;
-      if (!expectedPrefix.endsWith("/")) expectedPrefix += "/";
-      if (fileName.startsWith(expectedPrefix)) fileName = fileName.substring(expectedPrefix.length());
-    } else {
-      if (fileName.startsWith("/")) fileName = fileName.substring(1);
-    }
-    // Skip nested paths that still contain '/'
-    if (fileName.length() == 0 || fileName.indexOf('/') != -1) {
-      file = root.openNextFile();
-      continue;
-    }
-
-    // Hide admin-only folders from non-admin users
-    if (hideAdminPaths) {
-      char entryFullPath[128];
-      snprintf(entryFullPath, sizeof(entryFullPath), "%s%s%s", dirPath.c_str(), dirPath == "/" ? "" : "/", fileName.c_str());
-      if (isAdminOnlyPath(entryFullPath)) {
-        file = root.openNextFile();
-        continue;
+        subDir.close();
       }
     }
 
-    bool isDirEntry = file.isDirectory();
     if (asJson) {
       if (!first) out += ",";
       first = false;
-      if (isDirEntry) {
-        // Count children in subdirectory
-        String subPath = dirPath;
-        if (!subPath.endsWith("/")) subPath += "/";
-        subPath += fileName;
-        int itemCount = 0;
-        File subDir = VFS::openGuarded(subPath, "r", ctx);
-        if (subDir && subDir.isDirectory()) {
-          File child = subDir.openNextFile();
-          while (child) {
-            itemCount++;
-            child = subDir.openNextFile();
-          }
-          subDir.close();
-        }
-        // Build the full path for permission lookup using String to avoid fixed-size overflow
-        String folderFullPath = dirPath;
-        if (dirPath != "/") folderFullPath += "/";
-        folderFullPath += fileName;
-        uint8_t folderPerms = listingPermissions->forPath(folderFullPath);
-        // Build JSON entry directly into out — no fixed buffer, handles any filename length
-        out += "{\"name\":\"";
-        appendListingJsonName(out, fileName);
-        out += "\",\"type\":\"folder\",\"size\":\"";
+      const uint8_t perms = listingPermissions->forPath(entry.path);
+      out += "{\"name\":\"";
+      appendListingJsonName(out, entry.name);
+      out += "\",\"type\":\"";
+      out += entry.isFolder ? "folder" : "file";
+      out += "\",\"size\":\"";
+      if (entry.isFolder) {
         out += itemCount;
         out += " items\",\"count\":";
         out += itemCount;
-        out += ",\"perms\":";
-        out += (int)folderPerms;
-        out += "}";
       } else {
-        String fileFullPath = dirPath;
-        if (dirPath != "/") fileFullPath += "/";
-        fileFullPath += fileName;
-        uint8_t filePerms = listingPermissions->forPath(fileFullPath);
-        out += "{\"name\":\"";
-        appendListingJsonName(out, fileName);
-        out += "\",\"type\":\"file\",\"size\":\"";
-        out += (unsigned long)file.size();
-        out += " bytes\",\"perms\":";
-        out += (int)filePerms;
-        out += "}";
+        out += (unsigned long)entry.size;
+        out += " bytes\"";
       }
+      out += ",\"perms\":";
+      out += (int)perms;
+      out += "}";
     } else {
-      // Human-readable text
-      out += "  " + fileName + " (";
-      if (isDirEntry) {
-        // Count children for display
-        String subPath = dirPath;
-        if (!subPath.endsWith("/")) subPath += "/";
-        subPath += fileName;
-        int itemCount = 0;
-        File subDir = VFS::openGuarded(subPath, "r", ctx);
-        if (subDir && subDir.isDirectory()) {
-          File child = subDir.openNextFile();
-          while (child) {
-            itemCount++;
-            child = subDir.openNextFile();
-          }
-          subDir.close();
-        }
+      out += "  " + entry.name + " (";
+      if (entry.isFolder) {
         out += itemCount;
-        out += " items)\n";
+        out += " items)";
+        if (entry.isVirtual) out += " [mount]";
+        out += "\n";
       } else {
-        out += (unsigned long)file.size();
+        out += (unsigned long)entry.size;
         out += " bytes)\n";
       }
       fileCount++;
     }
-
-    file = root.openNextFile();
   }
   root.close();
 
@@ -596,7 +502,10 @@ void buildFilesStatsJson(const String& path, char* out, size_t outSize) {
     return;
   }
   uint64_t total = 0, used = 0, freeBytes = 0;
-  VFS::getStats(st, total, used, freeBytes);
+  if (!VFS::getStats(st, total, used, freeBytes)) {
+    snprintf(out, outSize, "{\"success\":false,\"error\":\"Storage statistics unavailable\"}");
+    return;
+  }
   int usagePercent = (total == 0) ? 0 : (int)((used * 100) / total);
   snprintf(out, outSize,
            "{\"success\":true,\"total\":%llu,\"used\":%llu,\"free\":%llu,\"usagePercent\":%d}",

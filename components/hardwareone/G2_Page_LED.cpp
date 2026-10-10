@@ -19,7 +19,6 @@
 #include "System_NeoPixel.h"   // colorTable / ledEffectNames / ledBrightnessNextPreset
 #include "System_Settings.h"   // gSettings.ledBrightness (label)
 #include "System_Debug.h"
-#include <new>                 // std::nothrow — RedrawSpec / LensUiJob
 
 // -----------------------------------------------------------------------------
 // Sub-level state
@@ -41,28 +40,6 @@ static G2CmdCookie buildCookie() {
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gSub;
   return cookie;
-}
-
-// cmd_exec completion → lens-applier redraw marshal (verbatim shape from
-// G2_Page_Automations.cpp / G2_Page_ESPNow.cpp).
-static void enqueueRedrawFromCallback(const G2CmdCookie& cookie,
-                                      void (*renderFn)(),
-                                      const char* tag) {
-  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
-  if (!spec) { DEBUG_G2F("[G2-LED] %s: RedrawSpec alloc failed", tag); return; }
-  spec->render = renderFn;
-  LensUiJob* job = new (std::nothrow) LensUiJob{};
-  if (!job) { DEBUG_G2F("[G2-LED] %s: LensUiJob alloc failed", tag); delete spec; return; }
-  job->kind           = LensJobKind::Redraw;
-  job->submitMenuGen  = cookie.menuGen;
-  job->cmdSeq         = cookie.seq;
-  job->targetPage     = cookie.targetPage;
-  job->targetNetSub   = cookie.targetNetSub;
-  job->payload.redraw = spec;
-  if (!g2EnqueueLensJob(job)) {
-    DEBUG_G2F("[G2-LED] %s: lens job enqueue FAILED", tag);
-    delete spec; delete job;
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -135,7 +112,7 @@ static void showEffectsMenu() {
 static void ledBrightnessDone(bool /*ok*/, const char* /*result*/,
                               const G2CmdCookie& c, void* /*ud*/) {
   // Re-render ROOT so the brightness label reflects the committed value.
-  enqueueRedrawFromCallback(c, showRootMenu, "brightness-done");
+  (void)g2EnqueueRedraw(c, showRootMenu, "LED brightness");
 }
 
 static void rootHandleTap(uint32_t idx) {

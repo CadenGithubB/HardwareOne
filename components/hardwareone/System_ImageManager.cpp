@@ -12,10 +12,8 @@
 #include "System_VFS.h"
 #include "System_Filesystem.h"  // filesystemReady
 
-#include <LittleFS.h>
-#include <SD.h>
-#include <SPI.h>
 #include <esp_heap_caps.h>
+#include <stdint.h>
 #include <time.h>
 
 #if ENABLE_CAMERA_SENSOR
@@ -97,39 +95,21 @@ String ImageManager::getCaptureFolder(ImageStorageLocation location) {
 
 
 bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
+  const bool isSD = location == IMAGE_STORAGE_SD;
+  if (!(isSD ? sdAvailable : littleFSAvailable)) return false;
+
   String folder = getCaptureFolder(location);
-  
-  if (location == IMAGE_STORAGE_SD) {
-    if (!sdAvailable) return false;
-    // Route through VFS (shared lock + permission guard) like the LittleFS
-    // branch below; pass the "/sd/..." path form — VFS dispatches to SD.
-    AuthContext sys = VFS::systemAuth("imgmgr.ensure_capture_folder.sd");
-    if (!VFS::existsGuarded(folder, sys)) {
-      if (VFS::mkdirGuarded(folder, sys)) {
-        INFO_STORAGEF("[ImageManager] Created folder on SD: %s", folder.c_str());
-        return true;
-      } else {
-        ERROR_STORAGEF("[ImageManager] Failed to create folder on SD: %s", folder.c_str());
-        return false;
-      }
-    }
-    return true;
-  } else {
-    if (!littleFSAvailable) return false;
-    {
-      FsLockGuard guard("ImageManager.ensureCaptureFolder.lfs");
-      if (!VFS::existsGuarded(folder, VFS::systemAuth("imgmgr.ensure_capture_folder"))) {
-        if (VFS::mkdirGuarded(folder, VFS::systemAuth("imgmgr.ensure_capture_folder"))) {
-          INFO_STORAGEF("[ImageManager] Created folder on LittleFS: %s", folder.c_str());
-          return true;
-        } else {
-          ERROR_STORAGEF("[ImageManager] Failed to create folder on LittleFS: %s", folder.c_str());
-          return false;
-        }
-      }
-      return true;
-    }
+  const char* storageName = isSD ? "SD" : "LittleFS";
+  AuthContext sys = VFS::systemAuth(isSD ? "imgmgr.ensure_capture_folder.sd"
+                                       : "imgmgr.ensure_capture_folder");
+  FsLockGuard guard("ImageManager.ensureCaptureFolder");
+  if (VFS::existsGuarded(folder, sys)) return true;
+  if (!VFS::mkdirGuarded(folder, sys)) {
+    ERROR_STORAGEF("[ImageManager] Failed to create folder on %s: %s", storageName, folder.c_str());
+    return false;
   }
+  INFO_STORAGEF("[ImageManager] Created folder on %s: %s", storageName, folder.c_str());
+  return true;
 }
 
 String ImageManager::generateFilename() {
@@ -180,192 +160,110 @@ String ImageManager::captureAndSave(ImageStorageLocation location) {
 #define MIN_FREE_SPACE_BYTES (100 * 1024)
 
 String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLocation location) {
-  if (!data || len == 0) return "";
-  
-  // Check for sufficient free space before saving
-  size_t requiredSpace = len + MIN_FREE_SPACE_BYTES;
-  if (location == IMAGE_STORAGE_SD || location == IMAGE_STORAGE_BOTH) {
-    if (sdAvailable) {
-      uint64_t total = 0, used = 0, freeSD = 0;
-      VFS::getStats(VFS::SDCARD, total, used, freeSD);
-      if (freeSD < requiredSpace) {
-        ERROR_STORAGEF("[ImageManager] SD card low on space: %lu free, need %lu", (unsigned long)freeSD, (unsigned long)requiredSpace);
-        if (location == IMAGE_STORAGE_SD) return "";
-        // For BOTH, fall through to try LittleFS
-      }
-    }
-  }
-  if (location == IMAGE_STORAGE_LITTLEFS || location == IMAGE_STORAGE_BOTH) {
-    if (littleFSAvailable) {
-      // getStats takes the FS lock itself and resolves total+used in a
-      // single traverse; the old pair walked the whole volume twice.
-      uint64_t total = 0, used = 0, freeLFS = 0;
-      (void)VFS::getStats(VFS::INTERNAL, total, used, freeLFS);
-      if (freeLFS < requiredSpace) {
-        ERROR_STORAGEF("[ImageManager] LittleFS low on space: %lu free, need %lu", (unsigned long)freeLFS, (unsigned long)requiredSpace);
-        if (location == IMAGE_STORAGE_LITTLEFS) return "";
-      }
-    }
-  }
-  
-  String filename = generateFilename();
-  String folder = getCaptureFolder(location);
-  String fullPath = folder + "/" + filename;
-  
-  bool success = false;
-  
-  // Handle saving to both locations
-  if (location == IMAGE_STORAGE_BOTH) {
-    bool savedLittleFS = false;
-    bool savedSD = false;
-    
-    if (littleFSAvailable) {
-      ensureCaptureFolder(IMAGE_STORAGE_LITTLEFS);
-      String lfsPath = getCaptureFolder(IMAGE_STORAGE_LITTLEFS) + "/" + filename;
-      {
-        FsLockGuard guard("ImageManager.saveImage.lfs_both");
-        File f = VFS::openGuarded(lfsPath, "w", VFS::systemAuth("imgmgr.save_image_lfs"), true);
-        if (f) {
-          f.write(data, len);
-          f.close();
-          savedLittleFS = true;
-          INFO_STORAGEF("[ImageManager] Saved to LittleFS: %s (%u bytes)", lfsPath.c_str(), len);
-        }
-      }
-    }
-    
-    if (sdAvailable) {
-      ensureCaptureFolder(IMAGE_STORAGE_SD);
-      String sdDisplayPath = getCaptureFolder(IMAGE_STORAGE_SD) + "/" + filename;
-      // Route through VFS (shared lock + guard); pass the "/sd/..." form.
-      FsLockGuard guard("ImageManager.saveImage.sd_both");
-      File f = VFS::openGuarded(sdDisplayPath, FILE_WRITE, VFS::systemAuth("imgmgr.save_sd"), /*create=*/true);
-      if (f) {
-        f.write(data, len);
-        f.close();
-        savedSD = true;
-        INFO_STORAGEF("[ImageManager] Saved to SD: %s (%u bytes)", sdDisplayPath.c_str(), len);
-      }
-    }
-    
-    success = savedLittleFS || savedSD;
-    if (savedLittleFS) {
-      fullPath = getCaptureFolder(IMAGE_STORAGE_LITTLEFS) + "/" + filename;
-    } else if (savedSD) {
-      fullPath = getCaptureFolder(IMAGE_STORAGE_SD) + "/" + filename;
-    }
-  } else if (location == IMAGE_STORAGE_SD) {
-    if (!sdAvailable) {
-      ERROR_STORAGEF("[ImageManager] SD card not available");
+  if (!data || len == 0 || len > SIZE_MAX - MIN_FREE_SPACE_BYTES) return "";
+
+  const size_t requiredSpace = len + MIN_FREE_SPACE_BYTES;
+  const String filename = generateFilename();
+  auto saveTo = [&](ImageStorageLocation target) -> String {
+    const bool isSD = target == IMAGE_STORAGE_SD;
+    const char* storageName = isSD ? "SD" : "LittleFS";
+    if (!(isSD ? sdAvailable : littleFSAvailable)) {
+      ERROR_STORAGEF("[ImageManager] %s not available", storageName);
       return "";
     }
-    ensureCaptureFolder(IMAGE_STORAGE_SD);
-    FsLockGuard guard("ImageManager.saveImage.sd");
-    File f = VFS::openGuarded(fullPath, FILE_WRITE, VFS::systemAuth("imgmgr.save_sd"), /*create=*/true);
-    if (f) {
-      f.write(data, len);
-      f.close();
-      success = true;
-      INFO_STORAGEF("[ImageManager] Saved to SD: %s (%u bytes)", fullPath.c_str(), len);
-    }
-  } else {
-    if (!littleFSAvailable) {
-      ERROR_STORAGEF("[ImageManager] LittleFS not available");
+
+    String path = getCaptureFolder(target);
+    if (!path.concat("/") || !path.concat(filename)) return "";
+    String normalizedPath;
+    const VFS::StorageType storage = isSD ? VFS::SDCARD : VFS::INTERNAL;
+    if (!normalizeFsPath(path, normalizedPath) || VFS::getStorageType(normalizedPath) != storage) {
+      ERROR_STORAGEF("[ImageManager] Invalid capture path for %s: %s", storageName, path.c_str());
       return "";
     }
-    ensureCaptureFolder(IMAGE_STORAGE_LITTLEFS);
-    {
-      FsLockGuard guard("ImageManager.saveImage.lfs");
-      File f = VFS::openGuarded(fullPath, "w", VFS::systemAuth("imgmgr.save_image_lfs"), true);
-      if (f) {
-        f.write(data, len);
-        f.close();
-        success = true;
-        INFO_STORAGEF("[ImageManager] Saved to LittleFS: %s (%u bytes)", fullPath.c_str(), len);
-      }
+    path = normalizedPath;
+    AuthContext sys = VFS::systemAuth(isSD ? "imgmgr.save_sd" : "imgmgr.save_image_lfs");
+    FsLockGuard guard("ImageManager.saveImage");
+    uint64_t total = 0, used = 0, free = 0;
+    if (!VFS::getStats(storage, total, used, free)) {
+      ERROR_STORAGEF("[ImageManager] %s storage statistics unavailable", storageName);
+      return "";
     }
-  }
-  
-  if (!success) {
-    ERROR_STORAGEF("[ImageManager] Failed to save image: %s", fullPath.c_str());
+    if (free < requiredSpace) {
+      ERROR_STORAGEF("[ImageManager] %s low on space: %llu free, need %u",
+                     storageName, (unsigned long long)free, (unsigned)requiredSpace);
+      return "";
+    }
+    if (!ensureCaptureFolder(target)) return "";
+
+    File f = VFS::openGuarded(path, "w", sys, /*create=*/true);
+    if (!f || f.isDirectory()) return "";
+    const size_t written = f.write(data, len);
+    f.flush();
+    // Match checked text saves: Arduino exposes no flush/close result, so
+    // require every available completion signal before publishing success.
+    const bool complete = written == len && !f.getWriteError() && f.size() == len;
+    f.close();
+    if (!isSD && written) VFS::noteLittleFsBytesWritten(written);
+    if (!complete) {
+      ERROR_STORAGEF("[ImageManager] Incomplete image write: %s (%u/%u bytes)",
+                     path.c_str(), (unsigned)written, (unsigned)len);
+      if (isSD) VFS::noteSDWriteFailure("image save");
+      // Direct writes may have truncated an existing generated filename.
+      // Remove only this opened file; cleanup failure still means save failure.
+      if (!VFS::removeGuarded(path, sys)) {
+        ERROR_STORAGEF("[ImageManager] Failed to remove incomplete image: %s", path.c_str());
+      }
+      return "";
+    }
+    INFO_STORAGEF("[ImageManager] Saved to %s: %s (%u bytes)", storageName, path.c_str(), (unsigned)len);
+    return path;
+  };
+
+  String internalPath;
+  String sdPath;
+  if (location != IMAGE_STORAGE_SD) internalPath = saveTo(IMAGE_STORAGE_LITTLEFS);
+  if (location == IMAGE_STORAGE_SD || location == IMAGE_STORAGE_BOTH) sdPath = saveTo(IMAGE_STORAGE_SD);
+  const String& fullPath = internalPath.length() ? internalPath : sdPath;
+  if (fullPath.length() == 0) {
+    ERROR_STORAGEF("[ImageManager] Failed to save image: %s", filename.c_str());
     return "";
   }
 
-  // Bus event: single chokepoint for CLI capture, camerasave, and web/G2
-  // (all route through this saveImage).
-  {
-    const char* base = fullPath.c_str();
-    const char* slash = strrchr(base, '/');
-    systemEventPost(SYSEVT_PHOTO_SAVED, slash ? slash + 1 : base, fullPath.c_str());
-  }
-
-  // Enforce max images limit
+  // Emit one event after both attempts have closed their files and released
+  // their guards. BOTH retains its preferred internal path and retention policy.
+  systemEventPost(SYSEVT_PHOTO_SAVED, filename.c_str(), fullPath.c_str());
   enforceMaxImages(location);
-
   return fullPath;
 }
 
 std::vector<ImageInfo> ImageManager::listImages(ImageStorageLocation location) {
   std::vector<ImageInfo> images;
-  String folder = getCaptureFolder(location);
-  
-  if (location == IMAGE_STORAGE_SD) {
-    if (!sdAvailable) return images;
-    
-    File dir = VFS::openGuarded(folder, FILE_READ, VFS::systemAuth("imgmgr.list_sd"));
-    if (!dir || !dir.isDirectory()) return images;
-    
-    File file = dir.openNextFile();
-    while (file) {
-      if (!file.isDirectory()) {
-        String name = String(file.name());
-        int lastSlash = name.lastIndexOf('/');
-        if (lastSlash >= 0) name = name.substring(lastSlash + 1);
-        if (name.endsWith(".jpg") || name.endsWith(".jpeg")) {
-          ImageInfo info;
-          info.filename = name;
-          info.fullPath = folder + "/" + name;
-          info.size = file.size();
-          info.timestamp = file.getLastWrite();
-          info.location = IMAGE_STORAGE_SD;
-          info.isOnSD = true;
-          images.push_back(info);
-        }
-      }
-      file = dir.openNextFile();
-    }
-    dir.close();
-  } else {
-    if (!littleFSAvailable) return images;
+  const bool isSD = location == IMAGE_STORAGE_SD;
+  if (!(isSD ? sdAvailable : littleFSAvailable)) return images;
 
-    FsLockGuard guard("ImageManager.listImages.lfs");
-    File dir = VFS::openGuarded(folder, "r", VFS::systemAuth("imgmgr.list_images"));
-    if (!dir || !dir.isDirectory()) return images;
-    
-    File file = dir.openNextFile();
-    while (file) {
-      if (!file.isDirectory()) {
-        String name = String(file.name());
-        // Strip path if present
-        int lastSlash = name.lastIndexOf('/');
-        if (lastSlash >= 0) name = name.substring(lastSlash + 1);
-        
-        if (name.endsWith(".jpg") || name.endsWith(".jpeg")) {
-          ImageInfo info;
-          info.filename = name;
-          info.fullPath = folder + "/" + name;
-          info.size = file.size();
-          info.timestamp = 0;  // LittleFS doesn't track timestamps well
-          info.location = IMAGE_STORAGE_LITTLEFS;
-          info.isOnSD = false;
-          images.push_back(info);
-        }
-      }
-      file = dir.openNextFile();
-    }
-    dir.close();
+  String folder = getCaptureFolder(location);
+  FsLockGuard guard("ImageManager.listImages");
+  File dir = VFS::openGuarded(folder, "r",
+                            VFS::systemAuth(isSD ? "imgmgr.list_sd" : "imgmgr.list_images"));
+  if (!dir || !dir.isDirectory()) return images;
+
+  // SD modification times determine retention order. LittleFS retains its
+  // filename-based ordering and does not need the extra timestamp stat.
+  VFS::DirectoryReader reader(dir, folder, /*includeModifiedTime=*/isSD);
+  VFS::DirectoryEntry entry;
+  while (reader.next(entry)) {
+    if (entry.isFolder ||
+        !(entry.name.endsWith(".jpg") || entry.name.endsWith(".jpeg"))) continue;
+    ImageInfo info;
+    info.filename = entry.name;
+    info.fullPath = entry.path;
+    info.size = entry.size;
+    info.timestamp = isSD ? entry.modifiedAt : 0;
+    info.location = isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+    info.isOnSD = isSD;
+    images.push_back(info);
   }
-  
+  dir.close();
   return images;
 }
 
@@ -382,7 +280,7 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
     return nullptr;
   }
 
-  const bool isSD = normalizedPath.startsWith("/sd/");
+  const bool isSD = VFS::getStorageType(normalizedPath) == VFS::SDCARD;
   const ImageStorageLocation location =
       isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
   String normalizedRoot;
@@ -462,42 +360,31 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
 }
 
 bool ImageManager::getImageInfo(const String& path, ImageInfo& info) {
-  bool isSD = path.startsWith("/sd");
-  File f;
-  
-  if (isSD) {
-    if (!sdAvailable) return false;
-    f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image_info"));  // path is /sd/...
-  } else {
-    if (!littleFSAvailable) return false;
-    FsLockGuard guard("ImageManager.getImageInfo.open");
-    f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image_info"));
-  }
-  
+  const bool isSD = VFS::getStorageType(path) == VFS::SDCARD;
+  if (!(isSD ? sdAvailable : littleFSAvailable)) return false;
+
+  FsLockGuard guard("ImageManager.getImageInfo");
+  File f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image_info"));
   if (!f) return false;
-  
+
   info.fullPath = path;
   info.filename = path.substring(path.lastIndexOf('/') + 1);
   info.size = f.size();
   info.timestamp = isSD ? f.getLastWrite() : 0;
   info.location = isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
   info.isOnSD = isSD;
-  
+
   f.close();
   return true;
 }
 
 bool ImageManager::deleteImage(const String& path) {
-  bool isSD = path.startsWith("/sd");
-  
-  if (isSD) {
-    if (!sdAvailable) return false;
-    return VFS::removeGuarded(path, VFS::systemAuth("imgmgr.delete.sd"));
-  } else {
-    if (!littleFSAvailable) return false;
-    FsLockGuard guard("ImageManager.deleteImage");
-    return VFS::removeGuarded(path, VFS::systemAuth("imgmgr.delete_image"));
-  }
+  const bool isSD = VFS::getStorageType(path) == VFS::SDCARD;
+  if (!(isSD ? sdAvailable : littleFSAvailable)) return false;
+
+  FsLockGuard guard("ImageManager.deleteImage");
+  return VFS::removeGuarded(path, VFS::systemAuth(isSD ? "imgmgr.delete.sd"
+                                                     : "imgmgr.delete_image"));
 }
 
 bool ImageManager::deleteOldestImages(int count, ImageStorageLocation location) {
@@ -539,32 +426,16 @@ bool ImageManager::enforceMaxImages(ImageStorageLocation location) {
 
 StorageStats ImageManager::getStorageStats(ImageStorageLocation location) {
   StorageStats stats = {0, 0, 0, 0, false};
-  
-  if (location == IMAGE_STORAGE_SD) {
-    if (!sdAvailable) return stats;
-    uint64_t total = 0, used = 0, free = 0;
-    if (!VFS::getStats(VFS::SDCARD, total, used, free)) return stats;
-    stats.totalBytes = total;
-    stats.usedBytes = used;
-    stats.freeBytes = free;
-    stats.imageCount = getImageCount(IMAGE_STORAGE_SD);
-    stats.available = true;
-  } else {
-    if (!littleFSAvailable) return stats;
-    {
-      // One traverse instead of two, and getStats guards the subtraction —
-      // the old `total - used` here could underflow if the two samples
-      // straddled a concurrent write.
-      uint64_t t = 0, u = 0, f = 0;
-      (void)VFS::getStats(VFS::INTERNAL, t, u, f);
-      stats.totalBytes = t;
-      stats.usedBytes = u;
-      stats.freeBytes = f;
-    }
-    stats.imageCount = getImageCount(IMAGE_STORAGE_LITTLEFS);
-    stats.available = true;
-  }
-  
+  const bool isSD = location == IMAGE_STORAGE_SD;
+  if (!(isSD ? sdAvailable : littleFSAvailable)) return stats;
+
+  uint64_t total = 0, used = 0, free = 0;
+  if (!VFS::getStats(isSD ? VFS::SDCARD : VFS::INTERNAL, total, used, free)) return stats;
+  stats.totalBytes = total;
+  stats.usedBytes = used;
+  stats.freeBytes = free;
+  stats.imageCount = getImageCount(isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS);
+  stats.available = true;
   return stats;
 }
 

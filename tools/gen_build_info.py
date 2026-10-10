@@ -30,6 +30,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Macro families worth reporting, in display order. (prefix/exact, section)
 SECTIONS = [
     ("Feature flags", lambda n: n.startswith("ENABLE_")),
+    ("Custom selections", lambda n: n.startswith("CUSTOM_ENABLE_")),
     ("Levels & selection", lambda n: n.endswith("_FEATURE_LEVEL") or n in (
         "DISPLAY_TYPE", "INPUT_DEVICE_TYPE", "HW1_OTA_LAYOUT")),
     ("Board hardware", lambda n: n.startswith((
@@ -66,7 +67,8 @@ def compiler_cmd_for_buildconfig(build_dir):
     if not os.path.exists(ccj):
         return None, None
     try:
-        entries = json.load(open(ccj))
+        with open(ccj) as source:
+            entries = json.load(source)
     except Exception:
         return None, None
     hw = [e for e in entries
@@ -120,6 +122,12 @@ def resolve_macros(build_dir, artifact_path=None):
     hdr = os.path.join(REPO, "components", "hardwareone", "System_BuildConfig.h")
     deployment_hdr = deployment_header_from_argv(argv)
     source_headers = [hdr]
+    # SDK changes also alter derived flags. Do not report the new SDK's choices
+    # as facts about an older image that has not been rebuilt yet.
+    for sdk_input in ("sdkconfig", "sdkconfig.features", os.path.join("config", "sdkconfig.h")):
+        sdk_input = os.path.join(build_dir, sdk_input)
+        if os.path.isfile(sdk_input):
+            source_headers.append(sdk_input)
     if deployment_hdr:
         if not os.path.isfile(deployment_hdr):
             return None, ("deployment feature overlay recorded by this build is missing: "
@@ -131,6 +139,14 @@ def resolve_macros(build_dir, artifact_path=None):
             return None, ("board feature profile recorded by this build is missing: "
                           "%s" % board_hdr)
         source_headers.append(board_hdr)
+    configuration_hdr = deployment_header_from_argv(argv, "HW1_FEATURE_CONFIG_HEADER")
+    if configuration_hdr:
+        if not os.path.isfile(configuration_hdr):
+            return None, "saved configuration header is missing: %s" % configuration_hdr
+        source_headers.append(configuration_hdr)
+        snapshot = os.path.join(os.path.dirname(configuration_hdr), "configuration.json")
+        if os.path.isfile(snapshot):
+            source_headers.append(snapshot)
     if artifact_path and os.path.exists(artifact_path):
         changed = [path for path in source_headers
                    if os.path.getmtime(path) > os.path.getmtime(artifact_path)]
@@ -160,9 +176,8 @@ def resolve_macros(build_dir, artifact_path=None):
                 if m:
                     err = m.group(1).strip()
                     break
-            return None, ("System_BuildConfig.h no longer preprocesses for this board "
-                          "— it has been edited since this build, so flags cannot be "
-                          "resolved retroactively. Rebuild to refresh. Compiler said: %s"
+            return None, ("System_BuildConfig.h cannot resolve this configuration. "
+                          "Compiler said: %s"
                           % (err or "(no detail)"))
 
         names = set()
@@ -187,7 +202,10 @@ def resolve_macros(build_dir, artifact_path=None):
             f.write('#include "%s"\n' % hdr)
             for n in ordered:
                 f.write("#if defined(%s)\n" % n)
-                f.write('#if %s\nHW1BOOL "%s" 1\n#else\nHW1BOOL "%s" 0\n#endif\n' % (n, n, n))
+                # Board names and voltage/divider constants are strings/floats,
+                # which cannot appear in a preprocessor integer expression.
+                if n.startswith(("ENABLE_", "CUSTOM_ENABLE_")):
+                    f.write('#if %s\nHW1BOOL "%s" 1\n#else\nHW1BOOL "%s" 0\n#endif\n' % (n, n, n))
                 f.write('HW1VAL "%s" %s\n' % (n, n))
                 f.write("#endif\n")
         try:
@@ -195,6 +213,8 @@ def resolve_macros(build_dir, artifact_path=None):
                                 cwd=cwd, capture_output=True, text=True, timeout=180)
         except Exception as e:
             return None, "value pass failed: %s" % e
+        if p2.returncode != 0:
+            return None, "value pass failed: %s" % p2.stderr.strip()
 
         boolean, value = {}, {}
         for line in p2.stdout.splitlines():
@@ -211,6 +231,7 @@ def resolve_macros(build_dir, artifact_path=None):
             "value": value,
             "names": ordered,
             "deployment_header": deployment_hdr,
+            "configuration_header": configuration_hdr,
         }, None
 
 
@@ -221,7 +242,9 @@ def read_sdkconfig(build_dir):
         path = os.path.join(REPO, "sdkconfig")
     if not os.path.exists(path):
         return cfg, None
-    for line in open(path, errors="replace"):
+    with open(path, errors="replace") as source:
+        lines = source.readlines()
+    for line in lines:
         line = line.strip()
         m = re.match(r'^(CONFIG_[A-Z0-9_]+)=(.*)$', line)
         if m:
@@ -361,13 +384,21 @@ def main():
     art = artifact_info(build_dir)
     art_abs = os.path.join(REPO, art["bin_path"]) if art.get("bin_path") else None
     macros, macro_err = resolve_macros(build_dir, art_abs)
+    configuration = None
+    configuration_name = ""
+    if macros and macros.get("configuration_header"):
+        snapshot = os.path.join(os.path.dirname(macros["configuration_header"]), "configuration.json")
+        if os.path.isfile(snapshot):
+            with open(snapshot) as source:
+                configuration = json.load(source)
+            configuration_name = os.path.basename(build_dir).removeprefix("build-config-")
     cfg, cfg_path = read_sdkconfig(build_dir)
     commit, desc, n_dirty = git_provenance()
     now = datetime.now(timezone.utc).astimezone()
 
     L = []
     A = L.append
-    identity = deployment or board
+    identity = configuration_name or deployment or board
     A("# Build manifest — `%s`" % identity)
     A("")
     A("_Generated by `tools/gen_build_info.py` at build time. Regenerated on every")
@@ -380,6 +411,8 @@ def main():
         A("**Board:** `HW_BOARD=%s`  " % board)
     if deployment:
         A("**Deployment:** `%s`  " % deployment)
+    if configuration_name:
+        A("**Saved configuration:** `configurations/%s.json`  " % configuration_name)
     A("**Chip:** %s  " % cfg.get("CONFIG_IDF_TARGET", "?"))
     A("**Built:** %s  " % now.strftime("%Y-%m-%d %H:%M:%S %Z"))
     if commit:
@@ -403,6 +436,26 @@ def main():
         if art.get("version"):
             A("| Project version | `%s` |" % art["version"])
         A("")
+
+    if configuration:
+        A("## Saved feature choices")
+        A("")
+        A("Unlisted choices inherit the board and shared defaults at the source revision above.")
+        A("`configuration.json` and `features.h` in this build directory record its input.")
+        A("Custom selectors also depend on their group/dependencies; see effective `ENABLE_*` flags below.")
+        A("")
+        A("| Input | Saved value | Resolved input |")
+        A("|---|---|---|")
+        for key, selected in sorted(configuration["features"].items()):
+            A("| `%s` | %s | %s |" % (key, selected, macros["value"].get(key, "undefined")))
+        A("")
+        if configuration.get("sdkconfig"):
+            A("| SDK feature | Selected | Kconfig result |")
+            A("|---|---|---|")
+            for key, selected in sorted(configuration["sdkconfig"].items()):
+                A("| `%s` | %s | %s |" % (key, "on" if selected else "off",
+                                            "on" if cfg.get(key) == "y" else "off"))
+            A("")
 
     A("## Chip / SDK configuration")
     A("")
@@ -458,7 +511,9 @@ def main():
     A("## Reproduce this build")
     A("")
     A("```bash")
-    if deployment:
+    if configuration_name:
+        A("python3 tools/build_config.py build %s" % configuration_name)
+    elif deployment:
         family, deployment_board = deployment.split("/", 1)
         if deployment_is_ota(deployment):
             A("HW1_OTA_SIGNING_KEY=/absolute/path/to/key.pem \\")
@@ -470,7 +525,10 @@ def main():
         A("tools/build_board.sh %s" % board)
     A("```")
     A("")
-    if deployment and macros and macros.get("deployment_header"):
+    if configuration_name:
+        A("Saved feature choices override the shared defaults and the board feature preset.")
+        A("Edit `configurations/%s.json` to change these choices;" % configuration_name)
+    elif deployment and macros and macros.get("deployment_header"):
         overlay = os.path.relpath(macros["deployment_header"], REPO)
         A("Feature defaults come from `components/hardwareone/System_BuildConfig.h` and")
         A("are overridden by the checked-in deployment policy `%s`;" % overlay)
@@ -486,6 +544,10 @@ def main():
     with open(out_path, "w") as f:
         f.write("\n".join(L) + "\n")
     print("gen_build_info: wrote %s" % os.path.relpath(out_path, REPO))
+    if art.get("bin_bytes") and art.get("app_part_bytes"):
+        print("Image: %s; app partition: %s; headroom: %s" % (
+            fmt_kb(art["bin_bytes"]), fmt_kb(art["app_part_bytes"]),
+            fmt_kb(art["app_part_bytes"] - art["bin_bytes"])))
     if macro_err:
         print("gen_build_info: warning: %s" % macro_err, file=sys.stderr)
 

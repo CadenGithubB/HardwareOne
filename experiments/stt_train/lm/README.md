@@ -16,15 +16,15 @@ Host-side tools for the `HW1LM1` trigram LM and CTC prefix beam decoder.
 Environment used for everything below (CPU only):
 
 ```sh
-P=~/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
-export PYTHONPATH=/Volumes/USB2/stt/pydeps
+P=/path/to/export-venv/bin/python
+export PYTHONPATH=/path/to/stt-data/pydeps
 cd experiments/stt_train/lm
 ```
 
 ## Rebuild the LM
 
 ```sh
-nice -n 15 $P build_lm.py --out /Volumes/USB2/stt/work/lm/meeting.lm \
+nice -n 15 $P build_lm.py --out /path/to/stt-data/work/lm/meeting.lm \
     [--target-bytes 2500000] [--custom-words words.txt] [--params tuned.lm]
 ```
 
@@ -49,8 +49,8 @@ nice -n 15 $P build_lm.py --out /Volumes/USB2/stt/work/lm/meeting.lm \
 ## Retune for a new checkpoint (for example the fine-tuned one)
 
 ```sh
-nice -n 15 $P tune.py --ckpt /Volumes/USB2/stt/work/run1/best \
-    --lm /Volumes/USB2/stt/work/lm/meeting.lm --out-lm /Volumes/USB2/stt/work/lm/meeting-run1.lm
+nice -n 15 $P tune.py --ckpt /path/to/stt-data/work/run1/best \
+    --lm /path/to/stt-data/work/lm/meeting.lm --out-lm /path/to/stt-data/work/lm/meeting-run1.lm
 ```
 
 * The subsets are fixed and seeded, so every checkpoint sees the same
@@ -58,7 +58,7 @@ nice -n 15 $P tune.py --ckpt /Volumes/USB2/stt/work/run1/best \
   dev-clean 100 for tuning, and AMI sdm test 200, ihm test 150, LibriSpeech
   test-clean 100 for reporting only.
 * Logits are computed on the CPU with 2 threads and no dither, then cached in
-  `/Volumes/USB2/stt/work/lm/logits/<ckpt>-<sha12>/`. This takes about 4 min
+  `/path/to/stt-data/work/lm/logits/<ckpt>-<sha12>/`. This takes about 4 min
   per checkpoint.
 * Search (dev only). The objective is `0.4*sdm + 0.4*ihm + 0.2*libri` WER.
   1. alpha x beta x `unk_log10` grid (5 x 5 x 4), run at a fixed
@@ -72,7 +72,7 @@ nice -n 15 $P tune.py --ckpt /Volumes/USB2/stt/work/run1/best \
      chosen by dev WER: the objective is noisy at about +/-0.3, and picking it
      that way fitted noise (see below).
 * Search time is about 7 minutes with 2 workers.
-* The report goes to `/Volumes/USB2/stt/work/lm/tune/<ckpt>-<sha12>.json`. It
+* The report goes to `/path/to/stt-data/work/lm/tune/<ckpt>-<sha12>.json`. It
   holds every search row, test WER, WER with int8-quantised logits (the device
   output scale 2^-2), a cost estimate and example transcripts.
 * The LM n-grams do not depend on the checkpoint. Only the header params
@@ -81,13 +81,13 @@ nice -n 15 $P tune.py --ckpt /Volumes/USB2/stt/work/run1/best \
 ## Regenerate the parity fixtures
 
 ```sh
-nice -n 15 $P make_fixtures.py --params /Volumes/USB2/stt/work/lm/meeting.lm
+nice -n 15 $P make_fixtures.py --params /path/to/stt-data/work/lm/meeting.lm
 nice -n 15 $P test_hw1lm.py
 ```
 
 ## Results: baseline checkpoint (`stt-quartznet`, weights sha 51a92f946c8c)
 
-Shipped LM: `/Volumes/USB2/stt/work/lm/meeting.lm`
+Shipped LM: `/path/to/stt-data/work/lm/meeting.lm`
 
 | property | value |
 |---|---|

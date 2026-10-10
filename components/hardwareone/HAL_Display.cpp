@@ -7,20 +7,66 @@
 
 #include "HAL_Display.h"
 #include "System_BuildConfig.h"
+#include <atomic>
 
 #if DISPLAY_ENABLED
 
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   #include "System_I2C.h"
   #include "System_Settings.h"  // gSettings.oledBus for dual-bus routing
-  #include "OLED_Display.h"
   #include <Wire.h>
 #endif
 
 // Global display instance
 DisplayDriver* gDisplay = nullptr;
+namespace {
+std::atomic<bool> displayReady{false};
+bool resumeAfterSleep = false;
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+constexpr uint32_t kOledClockHz = 400000;
+uint8_t oledBus = 0;  // Latched when the retained canvas is first published.
+#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+bool displayRailOff = false;
+#endif
+bool oledNeedsInit = false;
+
+// The library restores the same rate it uses, so it cannot invalidate the
+// manager's clock cache. Wire initialization remains owned by the manager.
+bool beginOled(DisplayDriver* display, uint8_t bus, uint8_t address, uint32_t waitMs) {
+  const bool initialized = i2cDeviceTransaction(bus, address, kOledClockHz, waitMs, [&]() -> bool {
+    return display->begin(SSD1306_SWITCHCAPVCC, address, true, false);
+  });
+  if (!initialized || !oledNeedsInit) return initialized;
+  // Keep the post-power-cycle workaround on both wake and manual retry.
+  return i2cDeviceTransaction(bus, address, kOledClockHz, 200, [&]() -> bool {
+    display->ssd1306_command(SSD1306_DISPLAYOFF);
+    display->ssd1306_command(SSD1306_CHARGEPUMP);
+    display->ssd1306_command(0x14);
+    display->ssd1306_command(SSD1306_DISPLAYON);
+    return true;
+  });
+}
+
+void restoreDisplayRail() {
+#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+  if (displayRailOff) {
+    pinMode(I2C2_POWER_PIN, OUTPUT);
+    digitalWrite(I2C2_POWER_PIN, HIGH);
+    delay(100);  // Retain the panel's power-on settling interval.
+    if (auto* mgr = i2c()) mgr->performBusRecovery(1);
+    displayRailOff = false;
+  }
+#endif
+}
+#endif
+} // namespace
+
+bool displayIsReady() { return displayReady.load(); }
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
 uint8_t gDisplayI2cAddress = DISPLAY_I2C_ADDR_ALT;
+uint8_t displayI2cBus() {
+  return gDisplay ? oledBus : static_cast<uint8_t>(gSettings.oledBus);
+}
 #endif
 
 /**
@@ -28,89 +74,69 @@ uint8_t gDisplayI2cAddress = DISPLAY_I2C_ADDR_ALT;
  * Returns true on success, false on failure
  */
 bool displayInit() {
-  if (gDisplay) {
-#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
-    return gDisplay->begin(); // Reopen hardware on the retained software canvas.
-#else
-    return true;  // Already initialized
-#endif
-  }
-  
-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
-  // ============================================================================
-  // I2C OLED (SSD1306) Initialization — bus-aware
-  // ============================================================================
-  // Resolve the OLED's bus from settings (defaults to 0 = I2C1 = Wire1).
-  // i2c()->getWire(bus) returns the right TwoWire* pointer or nullptr when
-  // the bus isn't initialized — we hard-fail in the nullptr case rather than
-  // silently falling back to Wire1, so a misconfigured oledBus is visible.
-  const uint8_t oledBus = (uint8_t)gSettings.oledBus;
-  TwoWire* oledWire = i2c() ? i2c()->getWire(oledBus) : nullptr;
-  if (!oledWire) {
-    // bus not initialized (e.g. user set oledBus=1 but i2c2Enabled=false)
-    return false;
-  }
+  if (displayIsReady()) return true;
 
-  // Probe both common SSD1306 addresses (0x3D first, then 0x3C) on the OLED's bus.
-  uint8_t oledAddresses[] = {DISPLAY_I2C_ADDR_ALT, DISPLAY_I2C_ADDR};
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  restoreDisplayRail();
+  const uint8_t bus = displayI2cBus();
+  TwoWire* wire = i2c() ? i2c()->getWire(bus) : nullptr;
+  if (!wire) return false;
+
+  // Boot and manual start share the same cold-panel retry policy. Address
+  // replies establish presence, not device identity or successful rendering.
   uint8_t detectedAddr = 0;
-  for (uint8_t addr : oledAddresses) {
-    uint8_t probeResult = i2cProbeAddress(addr, 100000, 200, oledBus);
-    if (probeResult == 0) {
-      detectedAddr = addr;
-      break;
+  const uint8_t addresses[] = {DISPLAY_I2C_ADDR_ALT, DISPLAY_I2C_ADDR};
+  for (int attempt = 0; attempt < 3 && !detectedAddr; ++attempt) {
+    if (attempt) delay(50);
+    for (uint8_t address : addresses) {
+      if (i2cPingAddress(address, 100000, 200, bus)) {
+        detectedAddr = address;
+        break;
+      }
     }
   }
-  if (detectedAddr == 0) {
-    return false;  // No OLED found at either address on this bus
-  }
+  if (!detectedAddr) return false;
 
-  // Construct Adafruit_SSD1306 with the resolved TwoWire pointer; all the
-  // library's later display() / clearDisplay() / etc. calls go through this
-  // wire automatically.
-  gDisplay = new Adafruit_SSD1306(DISPLAY_WIDTH, DISPLAY_HEIGHT, oledWire, DISPLAY_RESET_PIN);
-  if (!gDisplay) {
+  DisplayDriver* candidate = gDisplay;
+  if (!candidate) {
+    candidate = new Adafruit_SSD1306(DISPLAY_WIDTH, DISPLAY_HEIGHT, wire,
+                                     DISPLAY_RESET_PIN, kOledClockHz, kOledClockHz);
+  }
+  if (!candidate) return false;
+  if (!beginOled(candidate, bus, detectedAddr, 500)) {
+    // An unpublished failure can be freed safely. A published canvas may
+    // still be borrowed by UI code and is retained for the next attempt.
+    if (!gDisplay) delete candidate;
     return false;
   }
-
-  // Use bus-aware transaction wrapper for thread-safe initialization. Routes
-  // mutex acquisition + clock change to the OLED's bus so other devices on
-  // the OTHER bus stay live during the init handshake.
-  bool success = i2cDeviceTransaction(oledBus, detectedAddr, 100000, 100, [&]() -> bool {
-    return gDisplay->begin(SSD1306_SWITCHCAPVCC, detectedAddr);
-  });
-
-  if (!success) {
-    delete gDisplay;
-    gDisplay = nullptr;
-    return false;
-  }
-
+  oledNeedsInit = false;
+  oledBus = bus;
   gDisplayI2cAddress = detectedAddr;
-  if (I2CDeviceManager* mgr = I2CDeviceManager::getInstance()) {
-    mgr->registerDevice(detectedAddr, "SSD1306", oledBus);
-  }
-  
-  // Clear the display buffer and push to OLED via transaction-wrapped update
-  gDisplay->clearDisplay();
+  gDisplay = candidate;
+  if (auto* mgr = i2c()) mgr->registerDevice(detectedAddr, "SSD1306", bus);
+  displayReady = true;
+  resumeAfterSleep = false;
+  displayClear();
   displayUpdate();
   return true;
-  
+
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
-  gDisplay = new P4EyeDisplay();
+  if (!gDisplay) gDisplay = new P4EyeDisplay();
   if (!gDisplay) return false;
   if (!gDisplay->begin()) {
     // Keep the canvas stable for legacy UI pointers. A retry calls begin()
     // again; the driver releases failed hardware allocations itself.
     return false;
   }
+  displayReady = true;
+  resumeAfterSleep = false;
   return true;
 
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789
   // ============================================================================
   // SPI TFT (ST7789) Initialization
   // ============================================================================
-  gDisplay = new Adafruit_ST7789(DISPLAY_SPI_CS, DISPLAY_SPI_DC, DISPLAY_SPI_RST);
+  if (!gDisplay) gDisplay = new Adafruit_ST7789(DISPLAY_SPI_CS, DISPLAY_SPI_DC, DISPLAY_SPI_RST);
   if (!gDisplay) {
     return false;
   }
@@ -130,13 +156,15 @@ bool displayInit() {
     digitalWrite(DISPLAY_BL_PIN, HIGH);  // Turn on backlight
   #endif
   
+  displayReady = true;
+  resumeAfterSleep = false;
   return true;
   
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
   // ============================================================================
   // SPI TFT (ILI9341) Initialization - PLACEHOLDER
   // ============================================================================
-  gDisplay = new Adafruit_ILI9341(DISPLAY_SPI_CS, DISPLAY_SPI_DC, DISPLAY_SPI_RST);
+  if (!gDisplay) gDisplay = new Adafruit_ILI9341(DISPLAY_SPI_CS, DISPLAY_SPI_DC, DISPLAY_SPI_RST);
   if (!gDisplay) {
     return false;
   }
@@ -150,6 +178,8 @@ bool displayInit() {
     digitalWrite(DISPLAY_BL_PIN, HIGH);
   #endif
   
+  displayReady = true;
+  resumeAfterSleep = false;
   return true;
   
 #else
@@ -163,7 +193,7 @@ bool displayInit() {
  * TFT: Fills screen with black (immediate)
  */
 void displayClear() {
-  if (!gDisplay) return;
+  if (!displayIsReady() || !gDisplay) return;
   
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 || DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
   gDisplay->clearDisplay();
@@ -178,21 +208,21 @@ void displayClear() {
  * TFT: No-op (direct rendering, already on screen)
  */
 void displayUpdate() {
-  if (!gDisplay) return;
+  if (!displayIsReady() || !gDisplay) return;
   
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   // Skip I2C push while sensor polling is paused (bus recovery, i2cpause, etc.).
   // CPU-side framebuffer is still updated so the first push after resume is current.
   // gSensorPollingPaused comes from System_PollPause.h (via System_I2C.h).
-  if (pollPaused((uint8_t)gSettings.oledBus)) return;
+  if (pollPaused(oledBus)) return;
   
   // Use bus-aware device transaction. Routes mutex/clock to the OLED's
-  // configured bus (gSettings.oledBus). Run at 400kHz to reduce bus hold
+  // latched bus. Run at 400kHz to reduce bus hold
   // time (~20ms vs ~80ms at 100kHz); SSD1306 supports up to 400kHz I2C.
   // Short bus-lock wait (15ms) so OLED yields to higher-priority devices on the
   // SAME bus. If the bus is busy, this frame is skipped and retried next
   // cycle — no visible flicker.
-  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, gDisplayI2cAddress, 400000, 15, [&]() {
+  i2cDeviceTransactionVoid(oledBus, gDisplayI2cAddress, kOledClockHz, 15, [&]() {
     gDisplay->display();  // Push framebuffer to OLED (~20ms at 400kHz)
   });
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
@@ -208,9 +238,13 @@ void displayUpdate() {
  * TFT: Controls backlight PWM if available
  */
 void displayDim(bool dim) {
-  if (!gDisplay) return;
+  if (!displayIsReady() || !gDisplay) return;
   
-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 || DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  i2cDeviceTransactionVoid(oledBus, gDisplayI2cAddress, kOledClockHz, 500, [&]() {
+    gDisplay->dim(dim);
+  });
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
   gDisplay->dim(dim);
   
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
@@ -227,13 +261,15 @@ void displayDim(bool dim) {
  * TFT: Controls backlight PWM if available
  */
 void displaySetBrightness(uint8_t level) {
-  if (!gDisplay) return;
+  if (!displayIsReady() || !gDisplay) return;
   
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   // SSD1306 contrast control via command interface
   // Contrast range is 0x00-0xFF, maps directly to level
-  gDisplay->ssd1306_command(0x81);  // Set Contrast Control
-  gDisplay->ssd1306_command(level);
+  i2cDeviceTransactionVoid(oledBus, gDisplayI2cAddress, kOledClockHz, 500, [&]() {
+    gDisplay->ssd1306_command(SSD1306_SETCONTRAST);
+    gDisplay->ssd1306_command(level);
+  });
   
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
   gDisplay->setBrightness(level);
@@ -243,6 +279,92 @@ void displaySetBrightness(uint8_t level) {
     analogWrite(DISPLAY_BL_PIN, level);
   #endif
 #endif
+}
+
+// Power commands report whether the operation ran. The SSD1306 library's
+// void writes cannot confirm that the physical panel accepted each command.
+bool displaySetPower(bool on) {
+  if (!displayIsReady() || !gDisplay) return false;
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  return i2cDeviceTransaction(oledBus, gDisplayI2cAddress, kOledClockHz, 500, [&]() -> bool {
+    gDisplay->ssd1306_command(on ? SSD1306_DISPLAYON : SSD1306_DISPLAYOFF);
+    return true;
+  });
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+  gDisplay->setPower(on);
+  return true;
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789
+  gDisplay->enableDisplay(on);
+  return true;
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
+  gDisplay->sendCommand(on ? ILI9341_DISPON : ILI9341_DISPOFF);
+  return true;
+#endif
+}
+
+void displayStop() {
+  resumeAfterSleep = false;
+  const bool wasReady = displayReady.exchange(false);
+  if (!gDisplay) return;
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  if (wasReady) {
+    i2cDeviceTransactionVoid(oledBus, gDisplayI2cAddress, kOledClockHz, 500, [&]() {
+      gDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
+    });
+  }
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+  gDisplay->end();
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789
+  if (wasReady) gDisplay->enableDisplay(false);
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
+  if (wasReady) gDisplay->sendCommand(ILI9341_DISPOFF);
+#endif
+  // UI drawing borrows this canvas outside the bus lock. Retain it across
+  // stop/restart, as the P4 backend does, so those pointers never dangle.
+  (void)wasReady;
+}
+
+void displayPrepareForSleep() {
+  if (resumeAfterSleep) return;  // Preserve an already pending resume.
+  resumeAfterSleep = displayIsReady();
+  displaySetPower(false);
+  displayReady = false;
+  delay(10);  // Let the panel's off sequence complete before removing power.
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+  if (displayI2cBus() == 1) {
+    digitalWrite(I2C2_POWER_PIN, LOW);
+    delay(200);  // Preserve the existing rail decay / power-on-reset interval.
+    displayRailOff = true;
+    oledNeedsInit = gDisplay != nullptr;
+  }
+#endif
+}
+
+bool displayResumeFromSleep() {
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  restoreDisplayRail();
+#endif
+  if (!resumeAfterSleep || !gDisplay) return displayIsReady();
+
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  if (oledNeedsInit) {
+    bool initialized = false;
+    for (int attempt = 0; attempt < 2 && !initialized; ++attempt) {
+      if (attempt) delay(100);
+      initialized = i2cPingAddress(gDisplayI2cAddress, 100000, 200, oledBus) &&
+                    beginOled(gDisplay, oledBus, gDisplayI2cAddress, 300);
+    }
+    if (!initialized) return false;
+    oledNeedsInit = false;
+  }
+#endif
+  displayReady = true;
+  if (!displaySetPower(true)) {
+    displayReady = false;
+    return false;
+  }
+  resumeAfterSleep = false;
+  return true;
 }
 
 #endif // DISPLAY_ENABLED

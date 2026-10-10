@@ -7,6 +7,7 @@
 #if ENABLE_MICROPHONE && ENABLE_OLED_DISPLAY
 
 #include "OLED_Display.h"
+#include "OLED_UI.h"
 #include "OLED_Utils.h"
 #include "System_Microphone.h"
 #include "System_Debug.h"
@@ -14,9 +15,6 @@
 
 // Microphone OLED display function - shows VU meter and recording status
 static void displayMicrophone() {
-  extern void oledDrawIcon(int x, int y, const char* iconName, int targetSize);
-  extern void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight);
-  
   // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);

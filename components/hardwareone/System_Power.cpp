@@ -8,6 +8,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include "System_Power.h"
+#include "System_BuildConfig.h"
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_Command.h"
@@ -15,8 +16,76 @@
 #include "System_MemUtil.h"    // ps_alloc / PSRAM_JSON_DOC — `power json` blob
 #include "System_OTASafety.h"  // otaSafetyIsPendingVerification — sleep gate
 #include "System_Utils.h"      // argWantsJson() — opt-in JSON output
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
-// Forward declarations
+#if ENABLE_I2C_SYSTEM
+#include "System_I2C_Manager.h"
+#include "System_PollPause.h"
+#endif
+
+// Serialize the complete HAL transition, including its before/after callbacks.
+// A concurrent or recursive request is refused without waiting on its caller.
+static StaticSemaphore_t sCpuFrequencyMutexStorage;
+static SemaphoreHandle_t sCpuFrequencyMutex =
+    xSemaphoreCreateMutexStatic(&sCpuFrequencyMutexStorage);
+
+bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged) {
+  if (outClockChanged) *outClockChanged = false;
+  if (!sCpuFrequencyMutex || xSemaphoreTake(sCpuFrequencyMutex, 0) != pdTRUE) {
+    return false;
+  }
+
+  bool applied = true;
+  if (getCpuFrequencyMhz() != mhz) {
+#if ENABLE_I2C_SYSTEM
+    PollPauseGuard pause;
+    // Settings may apply before I2C startup. Changing the clock must not create
+    // the manager or initialize buses as a side effect.
+    I2CDeviceManager* mgr = I2CDeviceManager::existingInstance();
+    SemaphoreHandle_t held[I2CDeviceManager::NUM_BUSES] = {};
+    if (mgr) {
+      // Bus locks are non-recursive. Reject a transaction's own request before
+      // taking another bus, rather than waiting with the buses in reverse order.
+      for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; ++b) {
+        SemaphoreHandle_t mutex = mgr->getBusMutex(b);
+        if (mutex && xSemaphoreGetMutexHolder(mutex) == xTaskGetCurrentTaskHandle()) {
+          applied = false;
+          break;
+        }
+      }
+      if (applied) {
+        // Pausing stops new polls; the locks also drain in-flight transfers and
+        // exclude command-driven I2C work until the clock transition completes.
+        for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; ++b) {
+          SemaphoreHandle_t mutex = mgr->getBusMutex(b);
+          if (!mutex) continue;
+          if (xSemaphoreTake(mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            applied = false;
+            break;
+          }
+          held[b] = mutex;
+        }
+      }
+    }
+#endif
+    if (applied) {
+      const uint32_t before = getCpuFrequencyMhz();
+      const bool accepted = setCpuFrequencyMhz(mhz);
+      const uint32_t actual = getCpuFrequencyMhz();
+      if (outClockChanged) *outClockChanged = actual != before;
+      applied = accepted && actual == mhz;
+    }
+#if ENABLE_I2C_SYSTEM
+    for (uint8_t b = I2CDeviceManager::NUM_BUSES; b > 0; --b) {
+      if (held[b - 1]) xSemaphoreGive(held[b - 1]);
+    }
+#endif
+  }
+  xSemaphoreGive(sCpuFrequencyMutex);
+  return applied;
+}
 
 // Power mode configuration
 struct PowerModeConfig {
@@ -121,15 +190,11 @@ bool applyPowerMode(uint8_t mode) {
   if (currentFreq != targetFreq) {
     INFO_SYSTEMF("Changing CPU frequency: %lu MHz -> %lu MHz",
                  (unsigned long)currentFreq, (unsigned long)targetFreq);
-    if (!setCpuFrequencyMhz(targetFreq) || getCpuFrequencyMhz() != targetFreq) {
-      ERROR_SYSTEMF("CPU frequency change failed: requested %lu MHz, actual %lu MHz",
-                    (unsigned long)targetFreq, (unsigned long)getCpuFrequencyMhz());
-      return false;
-    }
-    DEBUG_SYSTEMF("[POWER] After setCpuFrequencyMhz, actual freq: %lu MHz",
-                  (unsigned long)getCpuFrequencyMhz());
-  } else {
-    DEBUG_SYSTEMF("[POWER] CPU frequency already at target, skipping");
+  }
+  if (!powerSetCpuFrequencyMhz(targetFreq)) {
+    ERROR_SYSTEMF("CPU frequency change failed: requested %lu MHz, actual %lu MHz",
+                  (unsigned long)targetFreq, (unsigned long)getCpuFrequencyMhz());
+    return false;
   }
   
   // Apply display brightness

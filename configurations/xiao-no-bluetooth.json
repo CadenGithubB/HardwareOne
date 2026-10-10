@@ -1,0 +1,10 @@
+{
+  "board": "xiao_s3",
+  "features": {
+    "ENABLE_BLUETOOTH": 0,
+    "ENABLE_MQTT": 0
+  },
+  "sdkconfig": {
+    "CONFIG_BT_ENABLED": false
+  }
+}

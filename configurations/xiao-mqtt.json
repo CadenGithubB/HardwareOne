@@ -1,0 +1,11 @@
+{
+  "board": "xiao_s3",
+  "features": {
+    "CUSTOM_ENABLE_NET_WIFI": 1,
+    "CUSTOM_ENABLE_WEB_MQTT": 1,
+    "ENABLE_MAPS": 0,
+    "ENABLE_MQTT": 1,
+    "NETWORK_FEATURE_LEVEL": 4,
+    "WEB_FEATURE_LEVEL": 4
+  }
+}

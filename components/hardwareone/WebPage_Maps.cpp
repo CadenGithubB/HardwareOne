@@ -14,7 +14,7 @@
 #include "System_User.h"
 #include <ArduinoJson.h>
 #include "System_MemUtil.h"
-#include "System_Command.h"
+#include "System_Utils.h"  // urlDecode
 #include <LittleFS.h>
 #include <cstring>
 #include <cstdio>
@@ -106,6 +106,25 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
 // GPS Tracks API
 // =============================================================================
 
+static esp_err_t handleGPSLiveTrackAction(httpd_req_t* req, AuthContext& ctx,
+                                         bool start) {
+  String result;
+  const bool executed = executeUnifiedWebCommand(
+      req, ctx, start ? "gpstrack live start" : "gpstrack live stop", result);
+  if (!executed || !result.startsWith("SUCCESS:")) {
+    httpd_resp_set_status(req, "409 Conflict");
+    PSRAM_JSON_DOC(doc);
+    doc["error"] = result.length() ? result : String("Live track command failed");
+    String response;
+    serializeJson(doc, response);
+    httpd_resp_sendstr(req, response.c_str());
+    return ESP_OK;
+  }
+  httpd_resp_sendstr(req, start ? "{\"live\":true,\"started\":true}"
+                              : "{\"live\":false,\"stopped\":true}");
+  return ESP_OK;
+}
+
 esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   // GPSTrackManager::loadTrack/saveTrack read+write the filesystem via
@@ -125,22 +144,10 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 
       // Handle live tracking toggle: ?live=start or ?live=stop
       if (strcmp(liveParam, "start") == 0) {
-        // Auto-start GPS sensor if not running
-        executeCommandThroughRegistry("opengps");
-        GPSTrackManager::clearTrack();
-        GPSTrackManager::setLiveTracking(true);
-        // Auto-start file logging in track format so data persists
-        executeCommandThroughRegistry("sensorlog format track");
-        executeCommandThroughRegistry("sensorlog sensors gps");
-        executeCommandThroughRegistry("sensorlog start /logging_captures/tracks/live.csv 1000");
-        httpd_resp_sendstr(req, "{\"live\":true,\"started\":true}");
-        return ESP_OK;
+        return handleGPSLiveTrackAction(req, ctx, true);
       }
       if (strcmp(liveParam, "stop") == 0) {
-        GPSTrackManager::setLiveTracking(false);
-        executeCommandThroughRegistry("sensorlog stop");
-        httpd_resp_sendstr(req, "{\"live\":false,\"stopped\":true}");
-        return ESP_OK;
+        return handleGPSLiveTrackAction(req, ctx, false);
       }
       if (strcmp(liveParam, "save") == 0) {
         char savedPath[96];

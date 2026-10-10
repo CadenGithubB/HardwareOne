@@ -4,6 +4,7 @@
 #define I2CSENSOR_SEESAW_OLED_H
 
 #include "OLED_Display.h"
+#include "HAL_Input.h"
 #include "OLED_Utils.h"
 #include "HAL_Display.h"  // For gDisplay and oledDisplay macro alias
 
@@ -30,14 +31,12 @@ static void displayGamepadVisual() {
   uint32_t buttons = 0xFFFFFFFF;  // All unpressed (active low)
   bool dataValid = false;
   
-  if (gInputCache.mutex && xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    if (gInputCache.dataValid) {
-      joyX = gInputCache.joyX;
-      joyY = gInputCache.joyY;
-      buttons = gInputCache.buttons;
-      dataValid = true;
-    }
-    xSemaphoreGive(gInputCache.mutex);
+  InputCache reading;
+  if (inputCacheSnapshot(reading, 10) && reading.dataValid) {
+    joyX = reading.joyX;
+    joyY = reading.joyY;
+    buttons = reading.buttons;
+    dataValid = true;
   }
   
   if (!dataValid) {

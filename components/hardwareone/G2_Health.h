@@ -71,6 +71,10 @@ bool g2HealthWantTextOnlyShape(void);
 // uses the separate normal, freshness-throttled history lane.
 bool g2HealthConsumePollRequest(void);
 
+// The transport worker submits this through its authorized command executor.
+// The model never changes the logger directly; repeated pending taps coalesce.
+bool g2HealthConsumeLoggingToggleRequest(void);
+
 // Worker lifecycle: suppress parallel ring traffic (sensorlog) while open, and
 // drive "Refreshing…/Refreshed" status in Overview/metric text so Poll Now is
 // visible even when vitals values are unchanged.
@@ -192,6 +196,7 @@ inline bool g2HealthLoggingIsActive(void) { return false; }
 inline G2HealthMetric g2HealthSelectedMetric(void) { return HEALTH_METRIC_OVERVIEW; }
 inline bool g2HealthWantTextOnlyShape(void) { return true; }
 inline bool g2HealthConsumePollRequest(void) { return false; }
+inline bool g2HealthConsumeLoggingToggleRequest(void) { return false; }
 inline void g2HealthSetPageActive(bool) {}
 inline bool g2HealthPageIsActive(void) { return false; }
 inline void g2HealthNotePollStarted(void) {}

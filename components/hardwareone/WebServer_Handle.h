@@ -25,10 +25,9 @@ extern httpd_handle_t server;
 #if ENABLE_HTTP_SERVER
 inline bool isHttpServerRunning() { return server != nullptr; }
 #else
-// No server exists to be running. Declared unconditionally because non-web
-// callers (WiFi teardown, OLED network/system menus, first-time setup, RAM
-// flush) ask this on every build; the esp_http_server component is not even a
-// REQUIRES dependency when HTTP is off, so httpd_handle_t is not a type here.
+// The regular web server is absent. Keep this query available to non-web
+// callers without exposing SDK types; a restore-only server has its own
+// lifecycle and is not reported as the regular web UI.
 inline bool isHttpServerRunning() { return false; }
 #endif
 

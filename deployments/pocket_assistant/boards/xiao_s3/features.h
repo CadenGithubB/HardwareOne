@@ -119,11 +119,10 @@
 
 // --- The wearable link: BLE radio, G2 glasses, R1 ring ---
 //
-// A 1 here is only a REQUEST; the derived rules force it to 0 unless the
-// active sdkconfig actually carries Bluedroid.  boards/xiao_s3.defaults sets
-// CONFIG_BT_ENABLED=n, so this deployment's sdkconfig.defaults overlay turns
-// the stack back on.  Without that overlay every flag below silently
-// collapses to 0 and the image builds green with no glasses support at all.
+// These application features require Bluedroid in the active sdkconfig.
+// This deployment's sdkconfig.defaults pins that SDK requirement independently
+// of ordinary software presets. The derived rules disable these flags if the
+// required stack is absent.
 #undef ENABLE_BLUETOOTH
 #define ENABLE_BLUETOOTH 1
 

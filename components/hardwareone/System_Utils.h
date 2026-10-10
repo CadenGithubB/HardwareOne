@@ -10,6 +10,10 @@
 
 #include <Arduino.h>
 
+// Kept as a compatibility re-export for existing utility consumers. New
+// command-table consumers should include System_CommandRegistry.h directly.
+#include "System_CommandRegistry.h"
+
 // ============================================================================
 // Task Execution Performance Monitoring
 // ============================================================================
@@ -44,122 +48,17 @@ extern "C" uint32_t cmdExecDropCountLoad(void);
 // Prevents plaintext passwords from lingering in RAM after use
 void secureClearString(String& s);
 
-// Bring in command/context definitions for shared use
+// Legacy subsystem imports retained for existing utility consumers.
 #include "System_BuildConfig.h"
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Server.h"
 #endif
 #include "System_SensorStubs.h"
-// ============================================================================
-// Command Registry System
-// ============================================================================
-
-// Command entry structure - used by all modules to define their commands.
-// Voice phrases for ESP-SR do NOT live here: they live in the SR-owned route
-// table (kVoiceRoutes in System_ESPSR.cpp), keyed by command name and filtered
-// against the live registry at grammar-build time. Adding a voice alias for a
-// command is one row there; this struct stays feature-neutral.
-
-struct CommandEntry {
-  const char* name;                           // canonical command name
-  const char* help;                           // short help text
-  bool requiresAdmin;                         // whether admin is required
-  const char* (*handler)(const String& argsInput);  // function pointer to command handler
-  const char* usage;                          // optional longer usage string (may be nullptr)
-  bool requiresSuperAdmin;                     // top tier: ordinary admin is not enough (see authorizeCommand)
-
-  // Trailing + defaulted so the ~hundreds of existing entries are untouched;
-  // only the handful of super-admin commands pass the final `true`. It must be
-  // LAST: a stray string in this position would bind pointer→bool and silently
-  // mark the command super — the deleted overload below makes that a compile
-  // error instead.
-  constexpr CommandEntry(const char* name_,
-                         const char* help_,
-                         bool requiresAdmin_,
-                         const char* (*handler_)(const String& cmd_),
-                         const char* usage_ = nullptr,
-                         bool requiresSuperAdmin_ = false)
-      : name(name_),
-        help(help_),
-        requiresAdmin(requiresAdmin_),
-        handler(handler_),
-        usage(usage_),
-        requiresSuperAdmin(requiresSuperAdmin_) {}
-
-  // Guard: a const char* in the super-admin slot (e.g. a voice phrase left
-  // over from the pre-route-table era) must fail loudly, not convert to bool.
-  constexpr CommandEntry(const char*, const char*, bool,
-                         const char* (*)(const String&),
-                         const char*, const char*) = delete;
-};
-
-// Defined by System_Command.h. Kept incomplete here so command consumers that
-// only need the legacy findCommand() API do not gain another include cycle.
+// Defined by System_Command.h; only needed by the audit-redaction overload.
 struct CommandResolution;
-
-// Command module flags
-#define CMD_MODULE_SENSOR    0x01  // Module controls a sensor/peripheral
-#define CMD_MODULE_CORE      0x02  // Core system module (skip in help menu)
-#define CMD_MODULE_ADMIN     0x04  // Module requires admin access
-#define CMD_MODULE_NETWORK   0x08  // Network-related module
-
-// Command module structure - each module registers its command table
-struct CommandModule {
-  const char* name;                           // module name (for help categories)
-  const char* description;                    // short one-line blurb for the `help` module list (can be nullptr)
-  const char* long_description;               // full subsystem overview shown atop `help <module>` (can be nullptr)
-  const CommandEntry* commands;               // pointer to command array
-  const size_t* countPtr;                     // address of immutable command-array count
-  uint8_t flags;                              // module flags (CMD_MODULE_*)
-  bool (*isConnected)();                      // optional connection check (can be nullptr)
-
-  size_t commandCount() const {
-    return countPtr ? *countPtr : 0;
-  }
-};
-
-// Get the global module registry (defined in system_utils.cpp)
-// Returns pointer to array, sets count via output parameter
-const CommandModule* getCommandModules(size_t& count);
-
-// Find a command entry by name (searches all modules, returns longest match)
-// Returns nullptr if not found
-const CommandEntry* findCommand(const String& cmdLine);
-
-// Check if a command should stay in help mode (CLI-module command or module-name navigation).
-// Returns true for help/back/exit/clear and any registered module name.
-bool isHelpModeCommand(const char* cmdName);
-
-// Check if a command requires admin privileges
-bool commandRequiresAdmin(const String& cmdLine);
-// True if the command is in the super-admin (top-tier) allowlist — gated
-// independently of the admin flag. See System_Utils.cpp.
-bool commandRequiresSuperAdmin(const String& cmdLine);
-
-// Opt-in structured (JSON) output detector. Returns true if `args` contains a
-// standalone `json` token at a word boundary (so it won't false-match a value
-// that merely contains the substring). Per the output contract (see
-// executeCommand in System_Utils.cpp), a command in JSON mode emits its payload
-// ONLY via the return value (one verbatim document) and calls NO broadcastOutput.
-bool argWantsJson(const String& args);
-
-// argLeadingTokenIsJson() — true iff the FIRST space-delimited token is exactly
-// "json". The positional counterpart to argWantsJson(): use it where "json" must
-// lead because later tokens are real args that may contain a "json" token
-// (e.g. `llm json <prompt>`, `files json <path>`, `files /logs json`).
-bool argLeadingTokenIsJson(const String& args);
-
-// Execute a command through the registry (returns result string)
-// Note: This is a lower-level function; executeCommand() in .ino handles auth context
-const char* dispatchCommand(const String& argsInput);
 
 // HTTP server control (lowercase 'h' matches implementation in .ino)
 void startHttpServer();
-
-// ============================================================================
-// NTP Time Synchronization
-// ============================================================================
-void setupNTP();
 
 // Reboot helpers. Route all intentional restarts through these so every reboot is
 // attributable (durable REBOOT audit line) AND emits a typed SYSEVT_REBOOT on the
@@ -169,44 +68,6 @@ void setupNTP();
 void rebootStashReason(const char* reason, const char* who, uint8_t source);
 void recordRebootIntent(const char* reason, const char* auditDetail);
 void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDelayMs);
-// What actually happened during a foreground NTP attempt. Clock::isSynced()
-// cannot distinguish "a server replied" from "the clock was already set";
-// this can.
-enum class NtpSyncOutcome : uint8_t {
-  Reply,        // an SNTP server actually answered during the wait window
-  KeptPrior,    // no reply yet, but the clock was already valid — kept it
-  RtcFallback,  // dark timeout, adopted the DS3231's time instead
-  Failed,       // no reply and no other source — clock still dark
-};
-
-// Runtime facts captured from the real lwIP SNTP reply callback. "Armed"
-// means esp_sntp_enabled() sees a client PCB; it deliberately does not claim a
-// packet is in flight, retries are progressing, or the network can deliver one.
-struct NtpRuntimeStatus {
-  uint32_t replyCount;       // actual server replies observed this boot
-  uint32_t foregroundTimeoutCount;
-  uint32_t lateReplyCount;
-  int64_t lastReplyEpoch;    // reply-supplied Unix epoch; 0 until first reply
-  uint64_t lastReplyAgeMs;   // monotonic age at snapshot time
-  bool clientArmed;          // client PCB exists; not proof of traffic/reachability
-  bool awaitingLateReply;    // a foreground wait elapsed with no reply
-};
-
-// Synchronous - runs in calling task's stack. Returns true when the clock is
-// valid on exit (any outcome but Failed).
-bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut = nullptr);
-
-#if ENABLE_WIFI
-NtpRuntimeStatus getNtpRuntimeStatus();
-// Main-loop drain (HardwareOne loop is the ONLY caller — a second consumer
-// would race the pending flag): hands stored SNTP-reply facts to
-// Clock::clockStepped(). Covers both foreground syncs and later corrections
-// the lwIP daemon can make after this foreground caller has returned.
-void ntpSyncDrainTick();
-#else
-inline NtpRuntimeStatus getNtpRuntimeStatus() { return {}; }
-inline void ntpSyncDrainTick() {}
-#endif
 
 // Note: BROADCAST_PRINTF is defined as a macro in debug_system.h, not a function
 
@@ -217,7 +78,15 @@ struct AuthContext;
 
 // File I/O functions
 bool readText(const char* path, String& out);
+// Trusted internal persistence helpers; callers own authorization. True means
+// the expected bytes were written, no write error was reported, and the file
+// size matched after flush. The Arduino API cannot report flush/close failure.
+// Direct writes may leave a truncated/partial destination when they fail.
 bool writeText(const char* path, const String& content);
+// Writes a sibling .tmp and renames it only after checked completion. One FS
+// lock covers writing, promotion and best-effort temp cleanup. Failure never
+// falls back to deleting or rewriting the destination; backend rename and
+// power-loss durability guarantees still apply.
 bool writeTextAtomic(const char* path, const String& content);
 
 // ============================================================================
@@ -403,38 +272,6 @@ const char* cmd_perftop(const String& argsInput);
 // Note: Command execution functions (executeCommand, submitAndExecuteSync, etc.) 
 // are implemented in system_utils.cpp but declared in main .ino where the 
 // Command/CommandContext types are defined to avoid circular dependencies
-
-// ============================================================================
-// Icon System - Unified PNG-based icons for OLED/Web/TFT
-// ============================================================================
-
-// Forward declaration for OLED display
-class Adafruit_SSD1306;
-
-// Icon system initialization (creates /icons/ directory if needed)
-bool initIconSystem();
-
-// Load icon from PNG file and draw to OLED display
-// Icons are 32x32 PNG files stored in /icons/ directory
-bool drawIcon(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color = 1);
-
-// Draw icon with scaling (0.5 = half size, 2.0 = double size)
-// Optimized path for 0.5x scale (32→16) uses 2×2 block sampling
-bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color, float scale);
-
-// Load raw icon bitmap data (for custom rendering)
-// Buffer must be at least 128 bytes for 32x32 monochrome bitmap
-bool loadIconData(const char* name, uint8_t* buffer, size_t bufferSize, uint8_t& width, uint8_t& height);
-
-// Get full path to icon file
-String getIconPath(const char* name);
-
-// Check if icon exists
-bool iconExists(const char* name);
-
-// Get icon name for file extension (modular mapping)
-// Returns static string that is valid for the duration of the program
-const char* getIconNameForExtension(const char* ext);
 
 // ============================================================================
 // Input Abstraction Layer

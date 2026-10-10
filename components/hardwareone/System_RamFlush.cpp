@@ -137,9 +137,8 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
     case RF_GPS:        return gGpsRunning;
     case RF_FMRADIO:    return gFmRadioRunning;
 
-    // NEVER gApdsRunning — it is defined and externed but never assigned true, so
-    // it would read false forever and record a spurious "user turned APDS off" on
-    // every capture. The sub-flags are the ones actually maintained.
+    // Capture active measurement modes. The separate gApdsRunning latch owns
+    // task lifetime and prevents mode commands from reviving pending cleanup.
 #if ENABLE_APDS_SENSOR
     case RF_APDS:       return (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning);
 #else
@@ -461,4 +460,4 @@ const char* cmd_ramflush(const String& argsInput) {
   return "[System] RAM flush reboot";  // Won't actually return due to restart
 }
 
-// Registered in systemCommands[] (System_Utils.cpp) next to `reboot`.
+// Registered in systemCommands[] (System_CommandRegistry.cpp) next to `reboot`.

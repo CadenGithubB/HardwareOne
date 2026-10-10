@@ -5965,6 +5965,30 @@ void g2RingGetStatus(char* buf, size_t cap) {
            (unsigned)gRingConnectTaskActive);
 }
 
+bool g2RingBuildStatusJson(JsonObject out) {
+  if (out.isNull()) return false;
+  const uint32_t upMs = (gRing.connected && gRing.connectedSince)
+      ? (millis() - gRing.connectedSince) : 0;
+  const uint32_t stackFree = sRingOwnerTask
+      ? (uint32_t)uxTaskGetStackHighWaterMark(sRingOwnerTask)
+      : RING_OWNER_STACK_BYTES;
+  const uint32_t stackUsed = stackFree < RING_OWNER_STACK_BYTES
+      ? RING_OWNER_STACK_BYTES - stackFree : 0;
+  out["schema"] = 1;
+  out["connected"] = (bool)gRing.connected;
+  out["connectPending"] = g2RingConnectInFlight();
+  out["name"] = JsonString(gRingDeviceName.length() ? gRingDeviceName.c_str() : "", false);
+  out["addr"] = JsonString(gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : "", false);
+  out["mtu"] = (unsigned)gRing.mtu;
+  out["rx"] = (unsigned long)gRing.packetsReceived;
+  out["upMs"] = (unsigned long)upMs;
+  out["stackBytes"] = (unsigned long)RING_OWNER_STACK_BYTES;
+  out["stackUsedMax"] = (unsigned long)stackUsed;
+  out["stackFreeMin"] = (unsigned long)stackFree;
+  out["scanFound"] = (bool)gRingScanFound;
+  return true;
+}
+
 // =============================================================================
 // Spoof-push to glasses
 // =============================================================================
@@ -6147,27 +6171,13 @@ static const char* cmd_ringstatus(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char buf[320];
   if (argWantsJson(args)) {
-    const uint32_t upMs = (gRing.connected && gRing.connectedSince) ? (millis() - gRing.connectedSince) : 0;
-    const uint32_t stackFree = sRingOwnerTask
-        ? (uint32_t)uxTaskGetStackHighWaterMark(sRingOwnerTask)
-        : RING_OWNER_STACK_BYTES;
-    const uint32_t stackUsed = stackFree < RING_OWNER_STACK_BYTES
-        ? RING_OWNER_STACK_BYTES - stackFree
-        : 0;
-    CompactJson j(buf, sizeof(buf));
-    j.kv("schema", 1)
-     .kv("connected", (bool)gRing.connected)
-     .kv("connectPending", (bool)gRingConnectTaskActive)
-     .kv("name", gRingDeviceName.length() ? gRingDeviceName.c_str() : "")
-     .kv("addr", gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : "")
-     .kv("mtu", (unsigned)gRing.mtu)
-     .kv("rx", (unsigned long)gRing.packetsReceived)
-     .kv("upMs", (unsigned long)upMs)
-     .kv("stackBytes", (unsigned long)RING_OWNER_STACK_BYTES)
-     .kv("stackUsedMax", (unsigned long)stackUsed)
-     .kv("stackFreeMin", (unsigned long)stackFree)
-     .kv("scanFound", (bool)gRingScanFound);
-    return j.c_str();
+    PSRAM_JSON_DOC(doc);
+    const bool available = g2RingBuildStatusJson(doc.to<JsonObject>());
+    if (doc.overflowed()) return "{\"error\":\"oom\"}";
+    if (!available) return "{\"error\":\"unavailable\"}";
+    if (measureJson(doc) >= sizeof(buf)) return "{\"error\":\"status too large\"}";
+    serializeJson(doc, buf, sizeof(buf));
+    return buf;
   }
   g2RingGetStatus(buf, sizeof(buf));
   return buf;

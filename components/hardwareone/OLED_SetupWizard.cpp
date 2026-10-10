@@ -22,7 +22,6 @@
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 // OLED_I2C_ADDRESS, OLED_TRANSACTION, and oledConnected from OLED_Display.h
-extern InputCache gInputCache;
 
 // OLED text input
 extern String getOLEDTextInput(const char* prompt, bool masked, const char* defaultValue, int maxLen, bool* wasCancelled = nullptr, bool canSkip = true);
@@ -476,11 +475,11 @@ JoystickNav readWizardJoystickNav() {
   nav.up = detent < 0;
   nav.down = detent > 0;
 
-  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.joystickNav");
-  if (g.held) {
-    if (gInputCache.dataValid) {
-      int joyX = gInputCache.joyX;
-      int joyY = gInputCache.joyY;
+  InputCache input{};
+  if (inputCacheSnapshot(input)) {
+    if (input.dataValid) {
+      int joyX = input.joyX;
+      int joyY = input.joyY;
       
       int deltaX = joyX - JOYSTICK_CENTER;
       int deltaY = JOYSTICK_CENTER - joyY;  // Physical DOWN = positive (matches main menu)
@@ -716,8 +715,6 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
   if (cancelled) { wizardPrevPage(); return; }
   if (deviceName.length() == 0) deviceName = currentName;
   result.espnowFriendlyName = deviceName;
-  gSettings.bleDeviceName = deviceName;
-  gSettings.espnowDeviceName = deviceName;
 
   // Room
   String room = getOLEDTextInput("Room:", false, gSettings.espnowRoom.c_str(), 20, &cancelled);
@@ -784,11 +781,7 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
     }
   }
 
-  // Apply to settings
-  if (result.espnowRoom.length() > 0) gSettings.espnowRoom = result.espnowRoom;
-  if (result.espnowZone.length() > 0) gSettings.espnowZone = result.espnowZone;
-  if (result.espnowFriendlyName.length() > 0) gSettings.espnowFriendlyName = result.espnowFriendlyName;
-  gSettings.espnowStationary = result.espnowStationary;
+  wizardApplyESPNowSettings(result);
 
   // Advance to next page
   if (!wizardNextPage(result)) {
@@ -836,11 +829,7 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
     result.mqttPassword = pass;
   }
 
-  // Apply to settings
-  if (result.mqttHost.length() > 0) gSettings.mqttHost = result.mqttHost;
-  if (result.mqttPort > 0) gSettings.mqttPort = result.mqttPort;
-  if (result.mqttUser.length() > 0) gSettings.mqttUser = result.mqttUser;
-  if (result.mqttPassword.length() > 0) gSettings.mqttPassword = result.mqttPassword;
+  wizardApplyMQTTSettings(result);
 
   // Advance to next page
   if (!wizardNextPage(result)) {

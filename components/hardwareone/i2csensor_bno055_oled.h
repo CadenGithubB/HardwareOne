@@ -5,6 +5,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "i2csensor_bno055.h"
 #include <Adafruit_SSD1306.h>
 
 // Forward declaration for IMU action detection
@@ -28,34 +29,33 @@ static void displayIMUActions() {
   imuUpdateActions();
 
   // Show orientation and acceleration data from cache
-  if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+  ImuCache reading{};
+  if (imuCacheSnapshot(reading)) {
     oledDisplay->setCursor(0, y);
     oledDisplay->print("Y:");
-    oledDisplay->print((int)gImuCache.oriYaw);
+    oledDisplay->print((int)reading.oriYaw);
     oledDisplay->print(" P:");
-    oledDisplay->print((int)gImuCache.oriPitch);
+    oledDisplay->print((int)reading.oriPitch);
     oledDisplay->print(" R:");
-    oledDisplay->println((int)gImuCache.oriRoll);
+    oledDisplay->println((int)reading.oriRoll);
     y += 10;
 
     oledDisplay->setCursor(0, y);
     oledDisplay->print("Ax:");
-    oledDisplay->print(gImuCache.accelX, 1);
+    oledDisplay->print(reading.accelX, 1);
     oledDisplay->print(" Ay:");
-    oledDisplay->println(gImuCache.accelY, 1);
+    oledDisplay->println(reading.accelY, 1);
     y += 10;
 
     oledDisplay->setCursor(0, y);
     oledDisplay->print("Az:");
-    oledDisplay->print(gImuCache.accelZ, 1);
+    oledDisplay->print(reading.accelZ, 1);
     y += 10;
 
     oledDisplay->setCursor(0, y);
     oledDisplay->print("Temp:");
-    oledDisplay->print(gImuCache.imuTemp, 1);
+    oledDisplay->print(reading.imuTemp, 1);
     oledDisplay->print("C");
-
-    xSemaphoreGive(gImuCache.mutex);
   } else {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("Reading...");

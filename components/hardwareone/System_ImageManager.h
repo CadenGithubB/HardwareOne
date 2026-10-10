@@ -43,10 +43,12 @@ public:
   bool isLittleFSAvailable() const { return littleFSAvailable; }
   
   // Capture and save
-  // Returns the filename of the saved image, or empty string on failure
+  // Returns the saved image's full path, or empty string on failure.
   String captureAndSave(ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   
-  // Save existing buffer to storage
+  // Save directly to generated paths; failed-write cleanup is best-effort.
+  // BOTH tries each tier independently, succeeds if either completes, and
+  // prefers the internal path when both complete. Empty means neither saved.
   String saveImage(const uint8_t* data, size_t len, ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   
   // List images

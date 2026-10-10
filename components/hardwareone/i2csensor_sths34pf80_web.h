@@ -7,33 +7,7 @@
 #if ENABLE_PRESENCE_SENSOR && ENABLE_HTTP_SERVER
 
 #include <Arduino.h>
-#include <ArduinoJson.h>
 #include <esp_http_server.h>
-#include "i2csensor_sths34pf80.h"  // For PresenceCache definition
-
-// Get presence sensor data as JSON for web API
-inline void getPresenceDataJson(JsonObject& doc) {
-  doc["enabled"] = gPresenceRunning;
-  doc["connected"] = gPresenceConnected;
-  
-  if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    doc["dataValid"] = gPresenceCache.dataValid;
-    doc["ambientTemp"] = gPresenceCache.ambientTemp;
-    doc["objectTemp"] = gPresenceCache.objectTemp;
-    doc["compObjectTemp"] = gPresenceCache.compObjectTemp;
-    doc["presenceValue"] = gPresenceCache.presenceValue;
-    doc["motionValue"] = gPresenceCache.motionValue;
-    doc["tempShockValue"] = gPresenceCache.tempShockValue;
-    doc["presenceDetected"] = gPresenceCache.presenceDetected;
-    doc["motionDetected"] = gPresenceCache.motionDetected;
-    doc["tempShockDetected"] = gPresenceCache.tempShockDetected;
-    doc["lastUpdate"] = gPresenceCache.lastUpdate;
-    xSemaphoreGive(gPresenceCache.mutex);
-  } else {
-    doc["dataValid"] = false;
-  }
-}
-
 
 // Stream presence sensor card HTML
 inline void streamSTHS34PF80PresenceSensorCard(httpd_req_t* req) {

@@ -8,7 +8,7 @@
 
 #include "G2_Glasses.h"
 #include "System_Events.h"  // systemEventPost — event register producer
-#include "System_SensorLogging.h"  // gSensorLoggingRunning/gSensorLogMask/LOG_* — G2 Logging app
+#include "System_SensorLogging.h"  // Sensor catalog and logger state — G2 Logging app
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -82,7 +82,7 @@ extern "C" {
 #include "G2_Page_Users.h"     // g2ShowUsersMenu / g2UsersHandleTap — admin user manager
 #include "G2_Page_TextEntry.h" // generic on-glasses text-entry overlay
 #if ENABLE_FM_RADIO
-#include "i2csensor_rda5807.h" // gFmRadioCache + lifecycle globals — FM tuner page
+#include "i2csensor_rda5807.h" // readings + lifecycle globals — FM tuner page
 #endif
 #include "G2_Page_ESPNow.h"    // g2ShowESPNowAppMenu / g2ESPNowAppHandleTap
 #include "G2_Page_Automations.h" // g2ShowAutomationsMenu / g2AutomationsHandleTap
@@ -811,7 +811,94 @@ static void g2RingDump(const char* reason) {
 // Aggregate state
 // =============================================================================
 
-static G2ClientState* gG2State = nullptr;
+// Runtime state and worker admission share this existing lifecycle guard.
+// The small record has program lifetime; callers copy values, never a pointer
+// whose lifetime depends on initialization or teardown.
+static portMUX_TYPE gControlLifecycleMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t gClientInitters = 0;
+struct G2ClientRuntime {
+  bool initialized = false;
+  G2State state = G2_STATE_IDLE;
+  uint32_t connectedSince = 0;
+};
+static G2ClientRuntime gClientRuntime;
+
+static G2ClientRuntime g2ClientRuntimeSnapshot() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const G2ClientRuntime out = gClientRuntime;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return out;
+}
+
+// Used only by the init/teardown owner, after its existing resource barriers.
+// A failed/deferred teardown must leave the initialized runtime published.
+static void g2ClientRuntimeReset(bool initialized = false) {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  gClientRuntime = {initialized, G2_STATE_IDLE, 0};
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+static void g2ClientSetState(G2State state) {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gClientRuntime.initialized) gClientRuntime.state = state;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+static void g2ClientConnected(bool newSession) {
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gClientRuntime.initialized) {
+    gClientRuntime.state = G2_STATE_CONNECTED;
+    if (newSession || gClientRuntime.connectedSince == 0) {
+      gClientRuntime.connectedSince = now;
+    }
+  }
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+struct G2ClientStatusSnapshot {
+  G2ClientRuntime runtime;
+  G2LinkSnapshot links;
+};
+
+// Caller holds gControlLifecycleMux. Initialization reconstructs the temple
+// objects outside critical sections; its existing claim fences status readers
+// until the completed runtime is published. Otherwise preserve off-state
+// diagnostic values left by teardown.
+static G2ClientStatusSnapshot g2ClientStatusSnapshotLocked() {
+  G2ClientStatusSnapshot out{gClientRuntime, {}};
+  if (gClientInitters == 0 || gClientRuntime.initialized) {
+    out.links = g2LinkSnapshot();
+  }
+  return out;
+}
+
+static G2ClientStatusSnapshot g2ClientStatusSnapshot() {
+  // Lock order: lifecycle -> topology. Copy scalars only; never call BLE,
+  // allocate, log, or acquire the lifecycle guard while holding topology.
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const G2ClientStatusSnapshot out = g2ClientStatusSnapshotLocked();
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return out;
+}
+
+static const char* g2ClientStateName(const G2ClientStatusSnapshot& status) {
+  if (!status.runtime.initialized) return "off";
+  switch (status.runtime.state) {
+    case G2_STATE_IDLE:           return "idle";
+    case G2_STATE_SCANNING:       return "scanning";
+    case G2_STATE_CONNECTING:     return "connecting";
+    case G2_STATE_AUTHENTICATING: return "authenticating";
+    case G2_STATE_CONNECTED:
+      // A missing temple is still connecting while the remaining link lives.
+      if (status.links.left && status.links.right) return "connected";
+      if (status.links.left || status.links.right) return "connecting";
+      return "idle";
+    case G2_STATE_DISCONNECTING:  return "disconnecting";
+    default:                     return "error";
+  }
+}
+
 static BLEScan*       gScan    = nullptr;
 
 // Set by G2ScanCallbacks immediately before its early gScan->stop(). Arduino
@@ -2514,7 +2601,7 @@ static G2TapFn gTextViewTapFn;
 static void g2GetSessionContext(uint32_t* sessionStartMs,
                                 uint32_t* hijackStartMs,
                                 bool* hijackActive) {
-  if (sessionStartMs) *sessionStartMs = (gG2State) ? gG2State->connectedSince : 0;
+  if (sessionStartMs) *sessionStartMs = g2ClientRuntimeSnapshot().connectedSince;
   if (hijackStartMs)  *hijackStartMs  = gHijackStartedMs;
   if (hijackActive)   *hijackActive   = g2FsmHijackActive();
 }
@@ -3253,7 +3340,9 @@ static bool tearDownActiveContainerAtGeneration(G2Temple& arm,
                                                 bool force,
                                                 uint32_t lifecycleEpoch = 0,
                                                 uint32_t createCleanupSerial = 0);
-static bool sendMenuFailedAndSettle(G2Temple& arm, uint32_t settleMs);
+static bool sendMenuFailedAndSettle(G2Temple& arm, uint32_t settleMs,
+                                    uint32_t generation,
+                                    uint32_t lifecycleEpoch);
 
 // =============================================================================
 // Seq / magic allocation
@@ -3681,7 +3770,7 @@ public:
     // If neither temple is connected, roll back global state so the
     // heartbeat timer can stop itself.
     if (!gL.connected && !gR.connected) {
-      if (gG2State) gG2State->state = G2_STATE_IDLE;
+      g2ClientSetState(G2_STATE_IDLE);
       stopHeartbeatTimer();
     }
   }
@@ -7696,6 +7785,7 @@ static bool sendUpdateTextNamed(G2Temple& arm,
 // worker immediately after a toggle, instead of waiting up to 1 s
 // for the next scheduled tick.
 static void liveTextKickRefresh();
+static void liveTextExitToHijackMenu();
 
 // Layout: list left+top, readout text bottom-right corner. Disjoint x
 // ranges so the two never overlap.
@@ -7710,6 +7800,18 @@ static const char* const         kMicDetailReadoutName = "micLive";
 // time), and quiet ticks where nothing changed produce no UX value
 // from the repaint.
 static char gMicDetailLastReadout[80] = {0};
+
+// The lens applier accepts the original command cookie before this handoff.
+// Keep the accepted view's generation until the session worker consumes it:
+// a refresh already accepted before navigation must not rebuild a later visit.
+static uint32_t gMicDetailRecreateMenuGen = 0;
+
+static void requestMicDetailRecreate() {
+  const uint32_t menuGen = g2CurrentMenuGen();
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL) return;
+  __atomic_store_n(&gMicDetailRecreateMenuGen, menuGen, __ATOMIC_RELEASE);
+  liveTextKickRefresh();
+}
 
 // Build the live readout string. Three lines so a sustained look at
 // the page tells the user the audio level, the I2S configuration, and
@@ -7743,16 +7845,39 @@ static void buildMicReadoutText(char* out, size_t cap) {
 // Live render fn driven by liveTextWorker. First call (containerReady=
 // false): CREATE the compound (1 list + 1 text). Subsequent ticks:
 // UPDATE_TEXT on the readout child only — list child untouched, so
-// selection stays put. Toggle/back actions force a fresh CREATE by
-// calling g2LensClearContainer() in the tap handler, which flips
-// containerReady back to false.
+// selection stays put. Command completions request a fresh CREATE, but
+// teardown and rendering both stay on this session worker so a periodic
+// UPDATE_TEXT cannot race the SHUTDOWN/CREATE sequence.
 static bool renderMicDetailLive() {
+  const uint32_t redrawMenuGen = __atomic_exchange_n(
+      &gMicDetailRecreateMenuGen, 0u, __ATOMIC_ACQ_REL);
+  if (redrawMenuGen != 0 &&
+      (redrawMenuGen != g2CurrentMenuGen() ||
+       g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL)) return false;
+  const bool recreate = redrawMenuGen != 0;
   G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
                 : (gL.connected && !gL.pluginDead) ? &gL
                                                    : nullptr;
   if (!arm) {
     DEBUG_G2F("[G2] mic-detail: no eligible temple");
     return false;
+  }
+  const uint32_t createLifecycleEpoch =
+      __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
+  // REBUILD-list would blank the compound's sibling text child. A local
+  // clear alone also leaves the firmware's old compound live. Use the
+  // existing session/connection-fenced SHUTDOWN and stop if it fails.
+  if (recreate) {
+    if (!tearDownActiveContainer(*arm)) {
+      DEBUG_G2F("[G2] mic-detail: refresh SHUTDOWN failed");
+      return false;
+    }
+    // Navigation can change while SHUTDOWN settles. Do not CREATE the old
+    // compound over the destination page, even if the request was current
+    // when the renderer consumed it.
+    if (redrawMenuGen != g2CurrentMenuGen() ||
+        g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL ||
+        !g2SessionLifecycleAllows(createLifecycleEpoch)) return false;
   }
 
 #if ENABLE_MICROPHONE
@@ -7770,7 +7895,8 @@ static bool renderMicDetailLive() {
   // AudioCtrCmd{en=1} into a torn-down lens, set gMicStreamOn, and then the
   // idempotency check would suppress the re-arm that would actually have stuck.
   // Waiting one tick for the container costs a second and always lands.
-  if (g2TempleReadyAtGeneration(gL) && g2LensGetState().containerReady &&
+  if (!recreate && g2TempleReadyAtGeneration(gL) &&
+      g2LensGetState().containerReady &&
       audioGetSource() == AUDIO_SRC_G2_LEFT &&
       audioCaptureActive() && !gMicStreamOn) {
     if (g2MicStreamEnable(true)) {
@@ -7784,10 +7910,9 @@ static bool renderMicDetailLive() {
   char readout[80];
   buildMicReadoutText(readout, sizeof(readout));
 
-  if (!g2LensGetState().containerReady) {
-    const uint32_t createLifecycleEpoch =
-        __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
-    // First call (or post-toggle re-init): CREATE compound.
+  if (recreate || !g2LensGetState().containerReady) {
+    // First call (or post-toggle re-init): CREATE compound. After teardown,
+    // do not depend on the asynchronously updated lens mirror catching up.
     // List rows mirror what the legacy generic Sensors-detail showed
     // for MIC, with the merged "MIC: <hw> | <state>" row replacing the
     // old 2-row pair. Drives the same toggle as the legacy row when
@@ -7847,8 +7972,17 @@ static bool renderMicDetailLive() {
     }
     // Mirror container state into the FSM. isList=false because this is
     // a mixed-mode compound — same convention renderStatusCompound uses.
+    uint32_t presentationEpoch = 0;
     if (!g2NoteCreateSuccess(*arm, /*isList*/ false, BLOCKS_WIDGET_ID,
-                             createLifecycleEpoch)) {
+                             createLifecycleEpoch, &presentationEpoch)) {
+      return false;
+    }
+    // The generic live worker publishes the initial exit callback. A
+    // recreation advances presentation identity, so bind its replacement
+    // callback to this exact committed CREATE as well.
+    if (recreate && !g2TextViewPublishForLifecycle(
+                        liveTextExitToHijackMenu, nullptr,
+                        createLifecycleEpoch, presentationEpoch)) {
       return false;
     }
     strncpy(gMicDetailLastReadout, readout, sizeof(gMicDetailLastReadout) - 1);
@@ -7908,6 +8042,7 @@ static const G2PageModule kMicDetailPage = {
 };
 
 bool g2ShowMicDetail() {
+  __atomic_store_n(&gMicDetailRecreateMenuGen, 0u, __ATOMIC_RELEASE);
   // Mirror handleHijackMenuTap's live-text dispatch (the menu does this
   // when the user taps "Status" etc.). For MIC detail the entry isn't
   // the main menu — it's Sensors-detail tap on MIC — so we replicate
@@ -7954,21 +8089,7 @@ static void onMicDetailRuntimeDone(bool ok, const char* result,
               wantOn ? 1 : 0, result ? result : "");
   }
 
-  // Force a fresh CREATE. REBUILD-list on a compound blanks the sibling
-  // text child (verified 2026-04-24 against firmware 2.2.0.24).
-  // tearDownActiveContainer sends Shutdown on the wire first — local
-  // clear alone leaves the firmware thinking the old compound is live
-  // ("container not primed", verified 2026-05-08).
-  if (g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL) return;
-  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
-                : (gL.connected && !gL.pluginDead) ? &gL
-                                                   : nullptr;
-  if (arm) {
-    tearDownActiveContainer(*arm);
-  } else {
-    g2LensClearContainer();
-  }
-  liveTextKickRefresh();
+  (void)g2EnqueueRedraw(cookie, requestMicDetailRecreate, "MIC runtime");
 }
 
 // micrecord start/stop done — re-CREATE so the Record row label flips
@@ -7976,17 +8097,11 @@ static void onMicDetailRuntimeDone(bool ok, const char* result,
 // one-shot, not a boot preference. The ~1 s worst-case flush on `stop` (WAV
 // header) runs on cmd_exec_task, not here.
 static void onMicDetailRecordDone(bool ok, const char* result,
-                                  const G2CmdCookie& /*cookie*/, void* /*userData*/) {
+                                  const G2CmdCookie& cookie, void* /*userData*/) {
   if (!ok || (result && strncmp(result, "Error", 5) == 0)) {
     DEBUG_G2F("[G2] MIC detail: record cmd result '%s'", result ? result : "");
   }
-  if (g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL) return;
-  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
-                : (gL.connected && !gL.pluginDead) ? &gL
-                                                   : nullptr;
-  if (arm) tearDownActiveContainer(*arm);
-  else     g2LensClearContainer();
-  liveTextKickRefresh();
+  (void)g2EnqueueRedraw(cookie, requestMicDetailRecreate, "MIC record");
 }
 #endif
 
@@ -7995,14 +8110,8 @@ static void onMicDetailRecordDone(bool ok, const char* result,
 // label must refresh, and list rows can't UPDATE_TEXT — so force a fresh CREATE
 // (the same teardown the toggle uses, without the micautostart write).
 static void onMicDetailSourceDone(bool /*ok*/, const char* /*result*/,
-                                  const G2CmdCookie& /*cookie*/, void* /*userData*/) {
-  if (g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL) return;
-  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
-                : (gL.connected && !gL.pluginDead) ? &gL
-                                                   : nullptr;
-  if (arm) tearDownActiveContainer(*arm);
-  else     g2LensClearContainer();
-  liveTextKickRefresh();
+                                  const G2CmdCookie& cookie, void* /*userData*/) {
+  (void)g2EnqueueRedraw(cookie, requestMicDetailRecreate, "MIC source");
 }
 
 void g2MicDetailHandleTap(uint32_t idx) {
@@ -8159,9 +8268,9 @@ static void g2SysEvFormatAge(uint32_t ageS, char* out, size_t cap) {
 // Snapshot the ring into gSysEvBody, newest first, two lines per event:
 //
 //   3m   peer_online
-//        kitchen - 24:0a:c4:11:22:33
+//        example-peer - 02:00:00:00:00:01
 //   1m   login_ok
-//        morgan - web  (by web:morgan)
+//        example-user - web  (by web:example-user)
 //
 // Line 1 is the age column + the kind name; line 2 is indented under it and
 // carries subject, detail and attribution, soft-wrapping at the lens column
@@ -8369,38 +8478,26 @@ static const G2PageModule kSysEventsPage = {
 // rather than as a per-sensor row. Plain list page (own showMenu); each
 // action dispatches a real sensorlog command via cmd_exec, and the
 // completion callback re-renders the list so the [x] markers / Start/Stop
-// label reflect the new state. NOTE: `sensorlog sensors <list>` sets the
-// mask to EXACTLY the list, so a per-sensor toggle rebuilds the whole list
-// with one bit flipped (same idiom as the OLED notif-mute toggle).
+// label reflect the new state. Sensor toggles are resolved by the logger
+// when their commands run, using its shared sensor catalog.
 // ─────────────────────────────────────────────────────────────────────
-static const struct { uint8_t bit; const char* name; const char* label; } kLogSensors[] = {
-  { LOG_THERMAL,  "thermal",  "Thermal"  },
-  { LOG_TOF,      "tof",      "ToF"      },
-  { LOG_IMU,      "imu",      "IMU"      },
-  { LOG_GAMEPAD,  "gamepad",  "Gamepad"  },
-  { LOG_APDS,     "apds",     "APDS"     },
-  { LOG_GPS,      "gps",      "GPS"      },
-  { LOG_PRESENCE, "presence", "Presence" },
-  { LOG_R1,       "r1",       "R1 Health"},
-};
-static constexpr size_t kLogSensorCount = sizeof(kLogSensors) / sizeof(kLogSensors[0]);
-
 #define G2_LOG_ROW_LEN 24
-EXT_RAM_BSS_ATTR static char        gLogRows[2 + kLogSensorCount][G2_LOG_ROW_LEN];
-static const char* gLogRowPtrs[2 + kLogSensorCount];
+EXT_RAM_BSS_ATTR static char        gLogRows[2 + kSensorLogSensorCount][G2_LOG_ROW_LEN];
+static const char* gLogRowPtrs[2 + kSensorLogSensorCount];
 
 // Rows: 0="<- System", 1=Start/Stop (live state), 2..N=[x] sensor toggles.
 static size_t g2BuildLoggingRows() {
   snprintf(gLogRows[0], G2_LOG_ROW_LEN, "<- System");
   snprintf(gLogRows[1], G2_LOG_ROW_LEN, "%s",
            gSensorLoggingRunning ? "Stop logging" : "Start logging");
-  for (size_t i = 0; i < kLogSensorCount; i++) {
+  const uint8_t selectedMask = sensorLogSelectedMask();
+  for (size_t i = 0; i < kSensorLogSensorCount; i++) {
     snprintf(gLogRows[2 + i], G2_LOG_ROW_LEN, "[%c] %s",
-             (gSensorLogMask & kLogSensors[i].bit) ? 'x' : ' ',
-             kLogSensors[i].label);
+             (selectedMask & kSensorLogSensors[i].bit) ? 'x' : ' ',
+             kSensorLogSensors[i].label);
   }
-  for (size_t i = 0; i < (2 + kLogSensorCount); i++) gLogRowPtrs[i] = gLogRows[i];
-  return 2 + kLogSensorCount;
+  for (size_t i = 0; i < (2 + kSensorLogSensorCount); i++) gLogRowPtrs[i] = gLogRows[i];
+  return 2 + kSensorLogSensorCount;
 }
 
 static void g2ShowLoggingMenu() {
@@ -8414,18 +8511,18 @@ static void g2ShowLoggingMenu() {
   }
 }
 
-// Completion on cmd_exec_task — re-render so Start/Stop + [x] markers reflect
-// the now-updated gSensorLoggingRunning / gSensorLogMask. Direct list draw
-// from the callback is the established Power-page pattern.
+// The original command generation is checked by the lens applier before any
+// row construction or display work. Recheck the page at dispatch as well.
+static void g2RefreshLoggingMenu() {
+  if (g2GetHijackPage() == G2_HIJACK_PAGE_LOGGING) g2ShowLoggingMenu();
+}
+
 static void onLoggingCmdDone(bool ok, const char* result,
-                             const G2CmdCookie& /*cookie*/, void* /*userData*/) {
+                             const G2CmdCookie& cookie, void* /*userData*/) {
   if (!ok || (result && strncmp(result, "Error", 5) == 0)) {
     DEBUG_G2F("[G2] Logging: cmd result '%s'", result ? result : "");
   }
-  if (g2GetHijackPage() != G2_HIJACK_PAGE_LOGGING) return;
-  size_t n = g2BuildLoggingRows();
-  g2ShowListPage(gLogRowPtrs, n);
-  g2SetHijackPage(G2_HIJACK_PAGE_LOGGING);
+  (void)g2EnqueueRedraw(cookie, g2RefreshLoggingMenu, "Logging result");
 }
 
 static void g2BuildLoggingInfo(char* out, size_t cap) {
@@ -8445,7 +8542,7 @@ static void g2LoggingHandleTap(uint32_t idx) {
   if (idx == 1) {   // Start / Stop
     if (gSensorLoggingRunning) {
       (void)g2SubmitHijackCommand("sensorlog stop", cookie, onLoggingCmdDone, nullptr);
-    } else if (gSensorLogMask == 0) {
+    } else if (sensorLogSelectedMask() == 0) {
       // A bare start with no sensors selected succeeds but logs only
       // timestamps — nudge the user to pick a sensor instead.
       g2ShowText("Pick a sensor first");
@@ -8462,23 +8559,8 @@ static void g2LoggingHandleTap(uint32_t idx) {
   }
 
   size_t si = idx - 2;
-  if (si < kLogSensorCount) {
-    // Toggle one sensor: rebuild the full comma-list with this bit flipped
-    // ('none' when it empties), since `sensorlog sensors` is replace-not-add.
-    uint8_t newMask = gSensorLogMask ^ kLogSensors[si].bit;
-    String line = "sensorlog sensors ";
-    if (newMask == 0) {
-      line += "none";
-    } else {
-      bool first = true;
-      for (size_t i = 0; i < kLogSensorCount; i++) {
-        if (newMask & kLogSensors[i].bit) {
-          if (!first) line += ",";
-          line += kLogSensors[i].name;
-          first = false;
-        }
-      }
-    }
+  if (si < kSensorLogSensorCount) {
+    String line = String("sensorlog sensors toggle ") + kSensorLogSensors[si].name;
     (void)g2SubmitHijackCommand(line.c_str(), cookie, onLoggingCmdDone, nullptr);
     return;
   }
@@ -8535,13 +8617,10 @@ static void buildFmTunerReadout(char* out, size_t cap) {
     snprintf(out, cap, "Radio off\nTap Power\nto start");
     return;
   }
-  FMRadioCache snap;
-  if (gFmRadioCache.mutex &&
-      xSemaphoreTake(gFmRadioCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    snap = gFmRadioCache;
-    xSemaphoreGive(gFmRadioCache.mutex);
-  } else {
-    snap = gFmRadioCache;  // best-effort (strings may tear, values stay sane)
+  FMRadioCache snap{};
+  if (!fmRadioCacheSnapshot(snap)) {
+    snprintf(out, cap, "Radio busy\n(reading...)");
+    return;
   }
   char freq[20];
   if (snap.seekInProgress) {
@@ -8645,18 +8724,21 @@ static void g2FmTunerHandleTap(uint32_t idx) {
   }
   if (!on) return;  // seek/vol/mute are no-ops until the radio runs
 
+  FMRadioCache radio{};
+  if (!fmRadioCacheSnapshot(radio)) return;
+
   switch (idx) {
     case 1:   // Seek Up
     case 2: { // Seek Down
-      if (gFmRadioCache.seekInProgress) return;  // one seek at a time
+      if (radio.seekInProgress) return;  // one seek at a time
       g2FmTunerSubmit(idx == 1 ? "fmradioseek up" : "fmradioseek down");
       return;
     }
     case 3:   // Vol +
     case 4: { // Vol -
-      // Single-byte cache reads are atomic; ±3 steps keep tap counts sane
+      // ±3 steps keep tap counts sane
       // across the 0-15 range (mirrors the OLED's preset-ladder spirit).
-      int v = (int)gFmRadioCache.volume + (idx == 3 ? 3 : -3);
+      int v = (int)radio.volume + (idx == 3 ? 3 : -3);
       if (v < 0) v = 0;
       if (v > 15) v = 15;
       char cmd[24];
@@ -8665,7 +8747,7 @@ static void g2FmTunerHandleTap(uint32_t idx) {
       return;
     }
     case 5:   // Mute toggle — static label, conditional dispatch
-      g2FmTunerSubmit(gFmRadioCache.muted ? "fmradiounmute" : "fmradiomute");
+      g2FmTunerSubmit(radio.muted ? "fmradiounmute" : "fmradiomute");
       return;
     default:
       return;
@@ -9159,32 +9241,11 @@ static bool llmMenuStartPromptEntry(LlmPromptReturn returnTo) {
 
 // --- terminal ask (submit → viewer, or busy/stale message) ----------------
 
-// Runs on the lens-applier context (see enqueueLlmRedraw): spawn the
+// Runs on the lens-applier context (see g2EnqueueRedraw): spawn the
 // interactive viewer to stream the answer. Back returns to the submenu.
 static void llmMenuOpenViewerRender() {
   if (!g2ShowLlmPage(g2ShowLlmMenu))
     DEBUG_G2F("[G2-LLM] guided ask: viewer spawn declined (low RAM)");
-}
-
-// Marshal a post-command render onto the lens applier from a cmd_exec
-// completion callback (same shape as G2_Page_Automations' helper). The
-// applier's Redraw gen-guard drops it if the user has navigated away.
-static void enqueueLlmRedraw(const G2CmdCookie& cookie, void (*renderFn)(), const char* tag) {
-  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
-  if (!spec) { DEBUG_G2F("[G2-LLM] %s: RedrawSpec alloc failed", tag); return; }
-  spec->render = renderFn;
-  LensUiJob* job = new (std::nothrow) LensUiJob{};
-  if (!job) { DEBUG_G2F("[G2-LLM] %s: LensUiJob alloc failed", tag); delete spec; return; }
-  job->kind           = LensJobKind::Redraw;
-  job->submitMenuGen  = cookie.menuGen;
-  job->cmdSeq         = cookie.seq;
-  job->targetPage     = cookie.targetPage;
-  job->targetNetSub   = cookie.targetNetSub;
-  job->payload.redraw = spec;
-  if (!g2EnqueueLensJob(job)) {
-    DEBUG_G2F("[G2-LLM] %s: lens job enqueue FAILED", tag);
-    delete spec; delete job;
-  }
 }
 
 // cmd_exec completion for `llmask json ...`. executeCommand returns true even
@@ -9195,12 +9256,12 @@ static void llmMenuAskDone(bool ok, const char* result, const G2CmdCookie& c, vo
     int guidedSession = 0;
     if (llmMenuLastAskInfo(&guidedSession))
       llmMenuMarkGuidedTurn(guidedSession);
-    enqueueLlmRedraw(c, llmMenuOpenViewerRender, "ask-ok");     // stream the answer
+    (void)g2EnqueueRedraw(c, llmMenuOpenViewerRender, "LLM ask-ok");     // stream the answer
     return;
   }
   const bool stale = result && strstr(result, "menu changed");
   snprintf(sLlmMsg, sizeof(sLlmMsg), "%s", stale ? "Menu changed - reopen" : "Busy - try again");
-  enqueueLlmRedraw(c, llmMenuMsgRender, "ask-msg");
+  (void)g2EnqueueRedraw(c, llmMenuMsgRender, "LLM ask-msg");
 }
 
 // Compose + submit on cmd_exec_task under the paired user's auth. entityIdx < 0
@@ -9229,7 +9290,7 @@ static void llmMenuSubmit(int entityIdx) {
 static void llmMenuModelCmdDone(bool ok, const char* result, const G2CmdCookie& c, void* /*ud*/) {
   if (ok && result && strstr(result, "\"ok\":true")) {
     sLlmResume = LLM_MENU_HOME;   // guided resume is stale after a model swap
-    enqueueLlmRedraw(c, g2ShowLlmMenu, "model-ok");
+    (void)g2EnqueueRedraw(c, g2ShowLlmMenu, "LLM model-ok");
     return;
   }
   if (result && (strstr(result, "Admin") || strstr(result, "admin")))
@@ -9238,7 +9299,7 @@ static void llmMenuModelCmdDone(bool ok, const char* result, const G2CmdCookie& 
     snprintf(sLlmMsg, sizeof(sLlmMsg), "Load failed");
   else
     snprintf(sLlmMsg, sizeof(sLlmMsg), "Command failed");
-  enqueueLlmRedraw(c, llmMenuMsgRender, "model-err");
+  (void)g2EnqueueRedraw(c, llmMenuMsgRender, "LLM model-err");
 }
 
 // Show a wait message, then run llmload/llmunload on cmd_exec (never call
@@ -9673,6 +9734,24 @@ static void registerG2Pages(void) {
 // Hijack entry / exit
 // =============================================================================
 
+// The old interactive worker owns its lease until cooperative cleanup finishes.
+// Run this only on the lens applier, leaving the control/ACK owner free to drain
+// responses. A replacement lifecycle or link must stop the pending bootstrap.
+static bool hijackBootstrapWaitForLease(uint32_t lifecycleEpoch,
+                                        uint32_t generation) {
+  const uint32_t started = millis();
+  while (g2LensTxFenceCurrent(gR, generation, lifecycleEpoch)) {
+    if (!interactiveLensLeaseHeld()) return true;
+    if ((uint32_t)(millis() - started) >= 3500u) {
+      DEBUG_G2F("[G2] Hijack: interactive lease did not release — bootstrap cancelled");
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  DEBUG_G2F("[G2] Hijack: lifecycle/link replaced while awaiting lease");
+  return false;
+}
+
 // Hijack worker — runs the Shutdown+CREATE handshake on its own short-lived
 // task because the CREATE path blocks up to 1.5 s waiting for the ack to
 // arrive on the R temple's notify pipe. If we ran this synchronously from
@@ -9710,6 +9789,9 @@ static void hijackBootstrapBody(uint32_t lifecycleEpoch) {
     DEBUG_G2F("[G2] Hijack: right temple not connected — aborting");
     return;
   }
+  const uint32_t generation = __atomic_load_n(
+      &gR.connectionGeneration, __ATOMIC_ACQUIRE);
+  if (!g2LensTxFenceCurrent(gR, generation, lifecycleEpoch)) return;
 
   // The firmware draws a native selection highlight and routes indexed list
   // input through List_ItemEvent on sid=0xE0. Sid=0x0D is SyncInfo lifecycle
@@ -9726,7 +9808,8 @@ static void hijackBootstrapBody(uint32_t lifecycleEpoch) {
             "%u-item menu", (unsigned)kHijackMenuCount);
 
   // Step 1 + 2: cancel the pending Blocks launch, give firmware time to settle.
-  if (!sendMenuFailedAndSettle(gR, /*settleMs*/ 300)) {
+  if (!sendMenuFailedAndSettle(gR, /*settleMs*/ 300,
+                               generation, lifecycleEpoch)) {
     DEBUG_G2F("[G2] Hijack: MenuStartupFailed send failed");
     return;
   }
@@ -9745,20 +9828,7 @@ static void hijackBootstrapBody(uint32_t lifecycleEpoch) {
   // the shared CREATE ACK slot or installing a replacement surface. Running
   // here (lens applier), rather than in the control/ACK owner, keeps response
   // decoding live while the old session unwinds.
-  const uint32_t leaseWaitStarted = millis();
-  while (interactiveLensLeaseHeld()) {
-    if ((uint32_t)(millis() - leaseWaitStarted) >= 3500u) {
-      DEBUG_G2F("[G2] Hijack: interactive lease did not release after "
-                "fresh MenuStartUp — bootstrap cancelled");
-      return;
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-  if (lifecycleEpoch !=
-      __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE)) {
-    DEBUG_G2F("[G2] Hijack: stale lifecycle before CREATE");
-    return;
-  }
+  if (!hijackBootstrapWaitForLease(lifecycleEpoch, generation)) return;
 
   // Step 4: CREATE-list tagged with the Blocks widgetId so firmware
   // associates it with the launch it just announced.
@@ -9788,6 +9858,23 @@ static void hijackBootstrapBody(uint32_t lifecycleEpoch) {
     DEBUG_G2F("[G2] Hijack: CREATE-list failed — menu NOT displayed");
     g2PushStatusEvent("hijack-fail");
   }
+}
+
+// A CLI reopen is not a firmware MenuStartUp event: an existing text/list
+// widget may still be live. Cmd18 only cancels a pending launch, so explicitly
+// tear down that widget before the shared launch sequence. Force the teardown
+// even when the local mirror was cleared by a previous failed CREATE. The
+// existing helper fences both wire TX and final publication to this lifecycle.
+static void hijackReopenBody(uint32_t lifecycleEpoch) {
+  const uint32_t generation = __atomic_load_n(
+      &gR.connectionGeneration, __ATOMIC_ACQUIRE);
+  if (!hijackBootstrapWaitForLease(lifecycleEpoch, generation)) return;
+  if (!tearDownActiveContainerAtGeneration(
+          gR, generation, /*force*/ true, lifecycleEpoch)) {
+    DEBUG_G2F("[G2] Hijack: manual reopen teardown failed — bootstrap cancelled");
+    return;
+  }
+  hijackBootstrapBody(lifecycleEpoch);
 }
 
 // Cross-arm dedup for hijack list CLICK and rowless keyboard SysEvent
@@ -10821,19 +10908,20 @@ void g2RedrawHijackMainMenu() {
   }
 }
 
-// Called from handleEnvelope() on the right temple only when a cmd=17
-// MenuStartUpEvent is decoded. Any widget other than BLOCKS_WIDGET_ID is
-// logged and ignored so the remaining built-in mini-apps still function.
-static void handleMenuStartUp(G2Temple& t, uint32_t widgetId,
+// Admit a right-arm cmd=17 startup or an explicit CLI reopen. Only the latter
+// must tear down a possibly live widget before bootstrapping. Other widget IDs
+// are ignored so the remaining built-in mini-apps still function.
+static bool handleMenuStartUp(G2Temple& t, uint32_t widgetId,
                               uint32_t rxGeneration,
-                              uint32_t rxLifecycleEpoch) {
+                              uint32_t rxLifecycleEpoch,
+                              bool manualReopen = false) {
   DEBUG_G2F("[G2-%c] MenuStartUp widgetId=%u", t.side, (unsigned)widgetId);
-  if (widgetId != BLOCKS_WIDGET_ID) return;
-  if (t.side != 'R') return;  // right-arm master (match reference convention)
+  if (widgetId != BLOCKS_WIDGET_ID) return false;
+  if (t.side != 'R') return false;  // right-arm master (match reference convention)
   uint32_t bootstrapEpoch = 0;
   {
     G2CompletionGuard completion;
-    if (!completion) return;
+    if (!completion) return false;
     // Revalidate the RX token and reopen the lifecycle in one transaction.
     // A terminal or reconnect cannot land between the stale check and reset.
     portENTER_CRITICAL(&gSyncLifecycleMux);
@@ -10855,7 +10943,7 @@ static void handleMenuStartUp(G2Temple& t, uint32_t widgetId,
   }
   if (!bootstrapEpoch) {
     DEBUG_G2F("[G2-R] stale MenuStartUp lifecycle dropped");
-    return;
+    return false;
   }
   (void)g2TextEntryCleanupKick();
   // A fresh physical Blocks launch is a new app lifecycle. Revoke queued
@@ -10877,9 +10965,9 @@ static void handleMenuStartUp(G2Temple& t, uint32_t widgetId,
   if (g2TerminalWireBlocksCreate() && !g2TerminalShutdownWireKick()) {
     DEBUG_G2F("[G2] Hijack: terminal Shutdown not queued; fresh bootstrap "
               "deferred to preserve Cmd9-before-CREATE order");
-    return;
+    return false;
   }
-  if (g2FsmHijackActive()) {
+  if (g2FsmHijackActive() && !manualReopen) {
     // A fresh cmd=17 for the same widget definitively means the prior
     // launch is gone on the firmware side — the glasses don't re-announce
     // a widget that's already running. If we still think we're active,
@@ -10906,16 +10994,16 @@ static void handleMenuStartUp(G2Temple& t, uint32_t widgetId,
   if (!spec) {
     DEBUG_G2F("[G2] Hijack: CustomSpec alloc failed — dropping (would "
               "deadlock to run inline on control/ACK owner)");
-    return;
+    return false;
   }
-  spec->run = &hijackBootstrapBody;
+  spec->run = manualReopen ? &hijackReopenBody : &hijackBootstrapBody;
   spec->lifecycleEpoch = bootstrapEpoch;
 
   LensUiJob* job = new (std::nothrow) LensUiJob{};
   if (!job) {
     DEBUG_G2F("[G2] Hijack: LensUiJob alloc failed — dropping");
     delete spec;
-    return;
+    return false;
   }
   job->kind           = LensJobKind::Custom;
   job->submitMenuGen  = g2CurrentMenuGen();   // not enforced for Custom; harmless
@@ -10928,7 +11016,9 @@ static void handleMenuStartUp(G2Temple& t, uint32_t widgetId,
     DEBUG_G2F("[G2] Hijack: lens job enqueue FAILED — applier queue full?");
     delete spec;
     delete job;
+    return false;
   }
+  return true;
 }
 
 // Safety/manual teardown. Firmware-driven E0 SYSTEM_EXIT and SyncInfo absence
@@ -12909,7 +12999,6 @@ static TaskHandle_t      gBeatTaskHandle = nullptr;
 static volatile bool     gBeatTaskStop   = false;
 static volatile bool     gBeatPending    = false;
 static constexpr uint32_t G2_CONTROL_STACK_BYTES = 6144;
-static portMUX_TYPE       gControlLifecycleMux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t            gControlStartBlocks = 0;
 
 static bool g2ManualConnectAdmissionOpen() {
@@ -12930,7 +13019,6 @@ static uint8_t            gUiWorkerInitters = 0;
 static uint8_t            gUiSubmitters = 0;
 static uint8_t            gBleConnectSubmitters = 0;
 static uint8_t            gSessionSubmitters = 0;
-static uint8_t            gClientInitters = 0;
 
 static bool g2RoleAdmissionOpen() {
   return bleRoleTransitionState() == BleRoleTransition::IDLE ||
@@ -13321,7 +13409,7 @@ static void resetRecoveryBackoff() {
 // Returns true if the missing temple was found and connected.
 static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
                                           const BleConnectJob& job) {
-  if (!gG2State || !gG2State->initialized || !gScan) return false;
+  if (!isG2ClientInitialized() || !gScan) return false;
   // Need exactly one connected and one missing. Both connected = nothing
   // to do; both missing = user initiated a teardown and a fresh
   // g2ConnectSync is the right path, not partial recovery.
@@ -13498,10 +13586,7 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
         gG2PublishedTempleMask |= 0x03;
         BROADCAST_PRINTF("[G2] Recovery: %s temple reconnected — both sides up",
                          sideStr);
-        gG2State->state = G2_STATE_CONNECTED;
-        if (gG2State->connectedSince == 0) {
-          gG2State->connectedSince = millis();
-        }
+        g2ClientConnected(false);
         startHeartbeatTimer();
         g2PushStatusEvent("recovery-ok");
       }
@@ -13605,7 +13690,7 @@ static void missingArmRecoveryComplete(bool ok) {
 // tick based on current state and the backoff schedule. Idempotent;
 // safe to call every tick.
 static void recoveryHeartbeatTick() {
-  if (!gG2State || !gG2State->initialized) return;
+  if (!isG2ClientInitialized()) return;
 
   // Both up — nothing to do, and reset the backoff so the next
   // half-connect cycle starts fresh.
@@ -16984,7 +17069,7 @@ static bool bleConnectShutdown();
 static bool g2SessionEnsureWorker();
 static bool g2SessionShutdown();
 // Boot-lifetime lens/tap workers must positively release any job that could
-// still dereference temple/runtime state before deinit frees it.
+// still dereference temple resources before deinit releases them.
 static bool g2UiWorkersQuiesce(uint32_t timeoutMs);
 
 class G2BleRoleTransitionClaim {
@@ -17029,7 +17114,7 @@ bool initG2Client() {
     return false;
   }
   G2ClientInitClaim initClaim(initClaimed);
-  if (gG2State && gG2State->initialized) return true;
+  if (isG2ClientInitialized()) return true;
   if (!g2RendererLivenessSelfTest()) {
     broadcastOutput("[G2] Client start blocked: renderer-liveness selftest failed");
     return false;
@@ -17039,22 +17124,10 @@ bool initG2Client() {
     return false;
   }
 
-  // Memory gate. Must sit here: after the RAII claims (whose destructors run on
-  // every return path) but BEFORE the gG2State ps_calloc and BLEDevice::init
-  // below, so a refusal allocates nothing and leaves no partial client state.
-  // See the "g2client" row in System_MemoryMonitor.cpp for the measurement this
-  // threshold is derived from.
-  {
-    String g2MemReason;
-    if (!checkMemoryAvailable("g2client", &g2MemReason)) {
-      broadcastOutput((String("[G2] Client start refused: ") + g2MemReason).c_str());
-      broadcastOutput("[G2] Free internal DRAM first ('closehttp' / 'closewifi') or reboot.");
-      return false;
-    }
-  }
-
   DEBUG_G2F("[G2] Initializing client mode");
   broadcastOutput("[G2] Initializing client mode");
+  DEBUG_G2F("[G2] Client memory before cleanup: free=%u largest=%u",
+            (unsigned)hw1InternalFreeBytes(), (unsigned)hw1InternalLargestBlock());
 
   // Controller-level TX gate shared with R1 ring writes.
   bleCentralTxInit();
@@ -17109,43 +17182,43 @@ bool initG2Client() {
     return false;
   }
 
-  // gG2State lives for the program's life and is touched only by regular
-  // task contexts (BLE notify, command dispatch, etc.) — safe in PSRAM.
-  // Note: the embedded `String deviceName/deviceAddress` members hold
-  // their own heap-backed buffers via Arduino's allocator (DRAM); only
-  // the struct shell moves here.
-  gG2State = (G2ClientState*)ps_calloc(1, sizeof(G2ClientState),
-                                       AllocPref::PreferPSRAM, "g2.clientState");
-  if (!gG2State) {
-    broadcastOutput("[G2] State alloc failed");
-    return false;
+  // Measure the fresh-start budget only after the previous BLE host has been
+  // stopped. Runtime-only G2 deinit retains that host; checking earlier counts
+  // its allocations against the budget for replacing it and can refuse a
+  // restart that fits. The same ordering applies when switching from server.
+  // A refusal leaves the previous role stopped and starts no new temple, host
+  // or worker; the scope-owned claims are released so the user can retry.
+  // See the "g2client" row in System_MemoryMonitor.cpp for the unchanged floor.
+  DEBUG_G2F("[G2] Client memory at admission: free=%u largest=%u",
+            (unsigned)hw1InternalFreeBytes(), (unsigned)hw1InternalLargestBlock());
+  {
+    String g2MemReason;
+    if (!checkMemoryAvailable("g2client", &g2MemReason)) {
+      broadcastOutput((String("[G2] Client start refused: ") + g2MemReason).c_str());
+      broadcastOutput("[G2] Free internal DRAM first ('closehttp' / 'closewifi') or reboot.");
+      return false;
+    }
   }
-  // ps_calloc() zeroes the struct but does NOT run constructors. G2ClientState
-  // embeds String members (deviceName/deviceAddress); a zeroed String reads as
-  // {isSSO=0, ptr.buff=NULL} so c_str() returns NULL → strlen(NULL) crash if
-  // read before assignment. Placement-new runs the constructors (same fix as
-  // gEspNow / gSessions / gWifiNetworks).
-  new (gG2State) G2ClientState();
 
   templeInit(gL, 'L');
   templeInit(gR, 'R');
 
   if (!bluetoothHalInit("HardwareOne")) {
     // Initialization can fail after enabling the controller/host but
-    // before publishing its Arduino initialized flag. Never free app state
-    // while that partial host generation can still dispatch callbacks.
+    // before publishing its Arduino initialized flag. Retire the partial
+    // host generation before completing rollback of the unpublished runtime.
     BLEDevice::setCustomGapHandler(nullptr);
     const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
     if (!rollback.success) bleStackSetLifecycleFault(true);
-    gG2State->~G2ClientState();
-    free(gG2State);
-    gG2State = nullptr;
+    g2ClientRuntimeReset();
     broadcastOutput(rollback.success
         ? "[G2] BLE host initialization failed (rolled back)"
         : "[G2] BLE host initialization failed; teardown incomplete — reboot required");
     return false;
   }
+  DEBUG_G2F("[G2] Client memory after BLE init: free=%u largest=%u",
+            (unsigned)hw1InternalFreeBytes(), (unsigned)hw1InternalLargestBlock());
   // Respect the shared setting in either role when the backend can apply it.
   // Hosted keeps its companion default and explicitly lacks this capability.
   if (bluetoothHalSupportsTxPower()) {
@@ -17174,8 +17247,7 @@ bool initG2Client() {
     const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
     if (!rollback.success) bleStackSetLifecycleFault(true);
-    gG2State->~G2ClientState();
-    free(gG2State); gG2State = nullptr;
+    g2ClientRuntimeReset();
     broadcastOutput("[G2] Scan init failed");
     return false;
   }
@@ -17206,8 +17278,7 @@ bool initG2Client() {
     broadcastOutput("[G2] UI worker memory unavailable; lens actions may be rejected");
   }
 
-  gG2State->initialized = true;
-  gG2State->state = G2_STATE_IDLE;
+  g2ClientRuntimeReset(true);
 
   // Register with the BLE peer registry. The spec/ops pair is file-static
   // (see g2PeerSpec / g2PeerOps below) so registration is just publishing
@@ -17250,7 +17321,8 @@ bool initG2Client() {
   // misleading for this task.
   g2SessionEnsureWorker();
 
-
+  DEBUG_G2F("[G2] Client memory ready: free=%u largest=%u",
+            (unsigned)hw1InternalFreeBytes(), (unsigned)hw1InternalLargestBlock());
   DEBUG_G2F("[G2] Client initialized");
   return true;
 }
@@ -17271,7 +17343,7 @@ bool deinitG2Client() {
     }
     vTaskDelay(pdMS_TO_TICKS(5));
   }
-  if (!gG2State) {
+  if (!isG2ClientInitialized()) {
     g2ControlStartBlockRelease();
     return true;
   }
@@ -17324,9 +17396,7 @@ bool deinitG2Client() {
     g2ControlStartBlockRelease();
     return false;
   }
-  gG2State->~G2ClientState();
-  free(gG2State);
-  gG2State = nullptr;
+  g2ClientRuntimeReset();
   gScan = nullptr;
   g2ControlStartBlockRelease();
   DEBUG_G2F("[G2] Client deinitialized");
@@ -17334,7 +17404,7 @@ bool deinitG2Client() {
 }
 
 bool isG2ClientInitialized() {
-  return gG2State && gG2State->initialized;
+  return g2ClientRuntimeSnapshot().initialized;
 }
 
 // Recover from a wedged Bluedroid host — the condition bleConnectWatched
@@ -17385,7 +17455,7 @@ bool bleStackRecycleIfWedged(void) {
   const bool mustRetireClient = retirementPeers != 0;
   if (gBleWedgeStreak < kBleWedgeStreakTrip && !mustRetireClient) return false;
   if (mustRetireClient && retirementAgeMs < kBleRetirementGraceMs) return false;
-  const bool hadClientRuntime = gG2State && gG2State->initialized;
+  const bool hadClientRuntime = isG2ClientInitialized();
   if (!hadClientRuntime && !mustRetireClient)              return false;
   if (!bleConnectWorkerIdle())                            return false;
   // A forced terminal reset for one lost native route tears down the whole
@@ -17562,7 +17632,7 @@ static bool g2ConnectSync(G2Eye eye,
                           const BlePeerConnectRequest* expectedRequest = nullptr,
                           const BlePeerSavedTarget* savedFilter = nullptr,
                           uint32_t cancelEpoch = 0) {
-  if (!gG2State && !initG2Client()) return false;
+  if (!isG2ClientInitialized() && !initG2Client()) return false;
   if (cancelEpoch == 0) cancelEpoch = bleConnectCancelEpochSnapshot();
   if (!g2PeerRequestCurrent(expectedRequest)) {
     DEBUG_G2F("[G2] Connect request became stale before scan");
@@ -17599,7 +17669,7 @@ static bool g2ConnectSync(G2Eye eye,
     return false;
   }
   gConnectTarget = eye;
-  gG2State->state = G2_STATE_SCANNING;
+  g2ClientSetState(G2_STATE_SCANNING);
   g2PushStatusEvent("scan-start");
 
   // Clear any stale scan residue.
@@ -17641,7 +17711,7 @@ static bool g2ConnectSync(G2Eye eye,
   const uint32_t scanEpoch = g2ScanCallbackBegin();
   if (scanEpoch == 0) {
     g2ScanClearMacContext();
-    gG2State->state = G2_STATE_IDLE;
+    g2ClientSetState(G2_STATE_IDLE);
     DEBUG_G2F("[G2] Scan generation unavailable; connect aborted");
     return false;
   }
@@ -17664,19 +17734,19 @@ static bool g2ConnectSync(G2Eye eye,
   g2ScanClearMacContext();
   if (!scanCallbacksIdle) {
     DEBUG_G2F("[G2] Scan callback did not quiesce; connect aborted");
-    gG2State->state = G2_STATE_IDLE;
+    g2ClientSetState(G2_STATE_IDLE);
     return false;
   }
 
   if (!g2PeerRequestCurrent(expectedRequest)) {
     DEBUG_G2F("[G2] Connect request became stale during scan");
-    gG2State->state = G2_STATE_IDLE;
+    g2ClientSetState(G2_STATE_IDLE);
     return false;
   }
 
   if (gConnectCancel) {
     DEBUG_G2F("[G2] Connect cancelled after scan");
-    gG2State->state = G2_STATE_IDLE;
+    g2ClientSetState(G2_STATE_IDLE);
     return false;
   }
 
@@ -17687,14 +17757,14 @@ static bool g2ConnectSync(G2Eye eye,
             needL ? 1 : 0, needR ? 1 : 0);
   bool haveAny = (needL && gScanFoundL) || (needR && gScanFoundR);
   if (!haveAny) {
-    gG2State->state = G2_STATE_IDLE;
+    g2ClientSetState(G2_STATE_IDLE);
     DEBUG_G2F("[G2] No matching temples found in scan window");
     broadcastOutput("[G2] No glasses found");
     g2NoteConnectFailure("not-seen", eye);
     return false;
   }
 
-  gG2State->state = G2_STATE_CONNECTING;
+  g2ClientSetState(G2_STATE_CONNECTING);
   bool ok = false;
   if (needL && gScanFoundL && !gConnectCancel &&
       g2PeerRequestCurrent(expectedRequest)) {
@@ -17717,12 +17787,12 @@ static bool g2ConnectSync(G2Eye eye,
     const G2LinkSnapshot after = g2LinkSnapshot();
     if (!before.left && after.left) disconnectTemple(gL);
     if (!before.right && after.right) disconnectTemple(gR);
-    gG2State->state = G2_STATE_IDLE;
+    g2ClientSetState(G2_STATE_IDLE);
     return false;
   }
 
   if (!ok) {
-    gG2State->state = G2_STATE_IDLE;
+    g2ClientSetState(G2_STATE_IDLE);
     broadcastOutput("[G2] Connect failed");
     // "seen but wouldn't link" — the wedge-prone case. Distinguished from
     // "not-seen" above because only this one burns a 35 s connect and leaves
@@ -17799,10 +17869,7 @@ static bool g2ConnectSync(G2Eye eye,
         if (after.left) gG2PublishedTempleMask |= 0x01;
         if (after.right) gG2PublishedTempleMask |= 0x02;
         sG2ConnFailStreak = 0;
-        gG2State->state = G2_STATE_CONNECTED;
-        if ((!before.left && !before.right) || gG2State->connectedSince == 0) {
-          gG2State->connectedSince = millis();
-        }
+        g2ClientConnected(!before.left && !before.right);
         startHeartbeatTimer();
         broadcastOutput("[G2] Connected");
         const bool repairedPair =
@@ -17823,7 +17890,7 @@ static bool g2ConnectSync(G2Eye eye,
     const G2LinkSnapshot cleanupAfter = g2LinkSnapshot();
     if (!before.left && cleanupAfter.left) disconnectTemple(gL);
     if (!before.right && cleanupAfter.right) disconnectTemple(gR);
-    gG2State->state = G2_STATE_IDLE;
+    g2ClientSetState(G2_STATE_IDLE);
     DEBUG_G2F("[G2] Saved reconnect completion superseded — success discarded");
     return false;
   }
@@ -18225,7 +18292,7 @@ bool g2SubmitBleConnect(const BleConnectJob& job) {
 // Public API: non-blocking connect. Returns immediately after enqueueing.
 // Use g2status to observe progress (scanning → connecting → connected | idle).
 bool g2Connect(G2Eye eye) {
-  if (!gG2State && !initG2Client()) return false;
+  if (!isG2ClientInitialized() && !initG2Client()) return false;
   uint32_t cancelEpoch = 0;
   BleConnectJob job{};
   job.kind = BleConnectKind::G2_EYE;
@@ -18352,7 +18419,7 @@ static bool g2ConnectSavedSync(const BleConnectJob& job) {
 // Public API: non-blocking auto-reconnect from saved MACs. Used by the
 // boot hook; safe to call from any context.
 bool g2ConnectSaved() {
-  if (!gG2State && !initG2Client()) return false;
+  if (!isG2ClientInitialized() && !initG2Client()) return false;
   uint32_t cancelEpoch = 0;
   BleConnectJob job{};
   job.kind = BleConnectKind::G2_SAVED;
@@ -18435,7 +18502,7 @@ bool g2Disconnect(bool userInitiated) {
   // stack.
   if (gConnectTaskActive) {
     DEBUG_G2F("[G2] Cancelling in-flight connect");
-    if (gG2State && gG2State->state == G2_STATE_SCANNING) {
+    if (getG2State() == G2_STATE_SCANNING) {
       g2ScanStopIfActive();
     }
     if (gL.client && gL.client->isConnected()) gL.client->disconnect();
@@ -18455,7 +18522,7 @@ bool g2Disconnect(bool userInitiated) {
   const bool controlStopped = g2ControlWorkerShutdown();
   disconnectTemple(gL);
   disconnectTemple(gR);
-  if (gG2State) gG2State->state = G2_STATE_IDLE;
+  g2ClientSetState(G2_STATE_IDLE);
   {
     G2CompletionGuard completion;
     if (completion) g2PushStatusEvent("disconnect");
@@ -18919,29 +18986,11 @@ bool g2SendToRightTemple(const uint8_t* env, size_t envLen) {
 uint8_t g2AllocSeq() { return allocSeq(); }
 
 G2State getG2State() {
-  return gG2State ? gG2State->state : G2_STATE_IDLE;
+  return g2ClientRuntimeSnapshot().state;
 }
 
 const char* getG2StateString() {
-  // Uninitialized client must not report "idle" — the Bluetooth web page
-  // (and anything else polling g2status) treated that as "stack is up",
-  // so opening the page looked like an auto-start.
-  if (!gG2State || !gG2State->initialized) return "off";
-  switch (getG2State()) {
-    case G2_STATE_IDLE:           return "idle";
-    case G2_STATE_SCANNING:       return "scanning";
-    case G2_STATE_CONNECTING:     return "connecting";
-    case G2_STATE_AUTHENTICATING: return "authenticating";
-    case G2_STATE_CONNECTED:
-      // Internal FSM may stay CONNECTED while one temple is up (heartbeat
-      // + missing-arm recovery). Surface "connected" only when both sides
-      // are paired — one temple is still "connecting".
-      if (gL.connected && gR.connected) return "connected";
-      if (gL.connected || gR.connected) return "connecting";
-      return "idle";
-    case G2_STATE_DISCONNECTING:  return "disconnecting";
-    default:                      return "error";
-  }
+  return g2ClientStateName(g2ClientStatusSnapshot());
 }
 
 bool g2StartScan(uint32_t /*durationMs*/) { return g2Connect(G2_EYE_AUTO); }
@@ -20846,15 +20895,21 @@ sendShutdownAndSettle(G2Temple& arm, uint32_t settleMs) {
 // `errorCode` is advisory; any nonzero value cancels the launch. We pass 1
 // (generic "not handled") so the firmware's own error-recovery path runs
 // briefly before our CREATE overwrites the lens.
-static bool sendMenuFailedAndSettle(G2Temple& arm, uint32_t settleMs) {
+static bool sendMenuFailedAndSettle(G2Temple& arm, uint32_t settleMs,
+                                    uint32_t generation,
+                                    uint32_t lifecycleEpoch) {
   uint8_t buf[64];
   size_t n = g2BuildMenuStartupFailed(allocSeq(), G2_MAGIC_MENU_FAILED,
                                       /*errorCode*/ 1, /*errorString*/ nullptr,
                                       buf, sizeof(buf));
   if (n == 0) return false;
-  if (!sendEnvelope(arm, buf, n)) return false;
+  if (!sendEnvelopeAtGeneration(arm, buf, n, generation,
+                                /*finalChunkAttempted*/ nullptr,
+                                /*createCleanupSerial*/ 0,
+                                /*createTxnSerial*/ 0,
+                                lifecycleEpoch)) return false;
   vTaskDelay(pdMS_TO_TICKS(settleMs));
-  return true;
+  return g2LensTxFenceCurrent(arm, generation, lifecycleEpoch);
 }
 
 bool g2ShowText(const char* text) {
@@ -21576,7 +21631,7 @@ static bool pageSwapRuntimeSnapshot(QueueHandle_t* queueOut,
   portENTER_CRITICAL(&gControlLifecycleMux);
   const bool ready = gPageSwapInitState == G2WorkerInitState::Ready &&
       gPageSwapQueue != nullptr && gPageSwapTaskH != nullptr &&
-      gControlStartBlocks == 0 && gG2State && gG2State->initialized &&
+      gControlStartBlocks == 0 && gClientRuntime.initialized &&
       gUiSubmitters < 0xFF;
   if (ready) {
     gUiSubmitters++;
@@ -22277,7 +22332,7 @@ static bool tapRuntimeSnapshot(QueueHandle_t* queueOut) {
   portENTER_CRITICAL(&gControlLifecycleMux);
   const bool ready = gTapInitState == G2WorkerInitState::Ready &&
       gTapQueue != nullptr && gTapTaskHandle != nullptr &&
-      gControlStartBlocks == 0 && gG2State && gG2State->initialized &&
+      gControlStartBlocks == 0 && gClientRuntime.initialized &&
       gUiSubmitters < 0xFF;
   if (ready) {
     gUiSubmitters++;
@@ -25587,18 +25642,49 @@ void g2Tick() {
   if (g2TerminalWireBlocksCreate()) (void)g2TerminalShutdownWireKick();
 }
 
-void getG2Status(char* buffer, size_t bufferSize) {
+bool g2ConnectionStatusSnapshot(G2ConnectionStatus* out) {
+  if (!out) return false;
+  G2ConnectionStatus status{};
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const G2ClientStatusSnapshot client = g2ClientStatusSnapshotLocked();
+  status.state = g2ClientStateName(client);
+  status.running = client.runtime.initialized;
+  // Do not sample temple objects while init is reconstructing them. The
+  // lifecycle guard also prevents a new init claim until these copies finish.
+  // MTUs, batteries and counters still have independent live writers; this
+  // protects their object lifetime, not a coherent telemetry transaction.
+  if (gClientInitters == 0 || client.runtime.initialized) {
+    status.left = {client.links.left, gL.mtu, (int)gBatteryL,
+                   gL.packetsSent, gL.packetsReceived};
+    status.right = {client.links.right, gR.mtu, (int)gBatteryR,
+                    gR.packetsSent, gR.packetsReceived};
+  }
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  *out = status;
+  return true;
+}
+
+void formatG2Status(const G2ConnectionStatus& status, char* buffer, size_t bufferSize) {
   if (!buffer || bufferSize == 0) return;
-  const char* stateStr = getG2StateString();
   snprintf(buffer, bufferSize,
            "state=%s L=%s R=%s mtu=L%u/R%u batt=L%d/R%d tx=L%lu/R%lu rx=L%lu/R%lu",
-           stateStr,
-           gL.connected ? "up" : "down",
-           gR.connected ? "up" : "down",
-           (unsigned)gL.mtu, (unsigned)gR.mtu,
-           (int)gBatteryL, (int)gBatteryR,
-           (unsigned long)gL.packetsSent, (unsigned long)gR.packetsSent,
-           (unsigned long)gL.packetsReceived, (unsigned long)gR.packetsReceived);
+           status.state,
+           status.left.connected ? "up" : "down",
+           status.right.connected ? "up" : "down",
+           (unsigned)status.left.mtu, (unsigned)status.right.mtu,
+           status.left.battery, status.right.battery,
+           (unsigned long)status.left.tx, (unsigned long)status.right.tx,
+           (unsigned long)status.left.rx, (unsigned long)status.right.rx);
+}
+
+void getG2Status(char* buffer, size_t bufferSize) {
+  if (!buffer || bufferSize == 0) return;
+  G2ConnectionStatus status{};
+  if (!g2ConnectionStatusSnapshot(&status)) {
+    buffer[0] = '\0';
+    return;
+  }
+  formatG2Status(status, buffer, bufferSize);
 }
 
 // Push a `g2-status` Server-Sent Event to every logged-in browser so the
@@ -28248,16 +28334,16 @@ static const char* cmd_g2verbose(const String& argsInput) {
 
 // Fake a Blocks menu tap to exercise the hijack path without needing to
 // physically reach into the G2 side menu for every test. Invokes the
-// same handleMenuStartUp() the real cmd=17 frame would — so if this CLI
-// command shows the snapshot, the wire path will too.
+// same handleMenuStartUp() the real cmd=17 frame would. Queue acceptance does
+// not establish CREATE acknowledgement or visible content.
 static const char* cmd_g2hijacktest(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gR.connected) return "Error: G2: right temple not connected";
-  handleMenuStartUp(gR, BLOCKS_WIDGET_ID, gR.connectionGeneration,
-                    __atomic_load_n(&gWidgetLifecycleEpoch,
-                                    __ATOMIC_ACQUIRE));
-  return g2FsmHijackActive() ? "G2 hijack: fired (status page shown)"
-                             : "G2 hijack: fire attempted — check logs";
+  const bool queued = handleMenuStartUp(
+      gR, BLOCKS_WIDGET_ID, gR.connectionGeneration,
+      __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE));
+  return queued ? "G2 hijack: startup queued (watch logs for CREATE ack)"
+                : "Error: G2 hijack: startup could not be queued";
 }
 
 // Manual missing-arm recovery — same path as the heartbeat-tick auto-
@@ -28266,7 +28352,7 @@ static const char* cmd_g2hijacktest(const String& /*argsInput*/) {
 // fresh allowance if this manual try doesn't succeed.
 static const char* cmd_g2recover(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gG2State || !gG2State->initialized) return "Error: G2: client not initialized";
+  if (!isG2ClientInitialized()) return "Error: G2: client not initialized";
   if (gL.connected && gR.connected) return "G2: both temples already connected";
   if (!gL.connected && !gR.connected) {
     return "Error: G2: both temples down — use 'openg2 auto' for a full reconnect";
@@ -28284,8 +28370,9 @@ static const char* cmd_g2recover(const String& /*argsInput*/) {
 // Manual recovery for the "hijack ended abnormally and won't re-launch"
 // case (firmware-side state stuck, lens dark, tapping Blocks in the
 // glasses menu does nothing because the firmware thinks the app is
-// still running). Force-clears the local hijack flag and runs the same
-// Cmd=18 + CREATE handshake as the real cmd=17 path. Cmd=18 is harmless
+// still running). Queues a fenced Shutdown before the shared Cmd=18 + CREATE
+// handshake. Unlike a real cmd=17, manual reopen cannot assume the firmware
+// already discarded the previous widget. Cmd=18 is harmless
 // when no launch is pending — it's the same fire-and-forget cancel —
 // so this is safe to invoke even when the hijack ended cleanly and
 // nothing's stuck.
@@ -28298,10 +28385,12 @@ static const char* cmd_g2reopen(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gR.connected) return "Error: G2: right temple not connected — reconnect first";
   if (gR.pluginDead) return "Error: G2: plugin task silent — reconnect to recover";
-  handleMenuStartUp(gR, BLOCKS_WIDGET_ID, gR.connectionGeneration,
-                    __atomic_load_n(&gWidgetLifecycleEpoch,
-                                    __ATOMIC_ACQUIRE));
-  return "G2: hijack re-launch dispatched (watch logs for CREATE ack)";
+  const bool queued = handleMenuStartUp(
+      gR, BLOCKS_WIDGET_ID, gR.connectionGeneration,
+      __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE),
+      /*manualReopen*/ true);
+  return queued ? "G2: hijack reopen queued (watch logs for CREATE ack)"
+                : "Error: G2: hijack reopen could not be queued";
 }
 
 // Print the last ~32 G2 envelopes (TX + RX) to the log. Handy for
@@ -34183,6 +34272,14 @@ struct HealthPageArgs {
   uint32_t gen;
 };
 
+static void onHealthLoggingCmdDone(bool ok, const char* result,
+                                    const G2CmdCookie&, void*) {
+  DEBUG_G2_PAGESF("[HEALTH] Health Logging ok=%d → %s", (int)ok,
+                 result ? result : "(null)");
+  // The live Health worker owns its lens updates and observes logger state
+  // on its next loop. Command completions never render on the executor task.
+}
+
 static void g2HealthPageWorker(void* arg) {
   G2HijackCtxGuard ctxGuard;
   auto* a = (HealthPageArgs*)arg;
@@ -34397,6 +34494,16 @@ static void g2HealthPageWorker(void* arg) {
       if (activeRowCount > 32) activeRowCount = 32;  // tap bitmap width
       for (uint32_t r = 1; r < activeRowCount; r++) {
         if (taps & (1u << r)) g2HealthAction(r);
+      }
+
+      if (g2HealthConsumeLoggingToggleRequest()) {
+        G2CmdCookie cookie{};
+        cookie.targetPage = G2_HIJACK_PAGE_HEALTH;
+        cookie.targetNetSub = static_cast<uint8_t>(g2HealthNav());
+        if (!g2SubmitHijackCommand("healthlogging toggle", cookie,
+                                  onHealthLoggingCmdDone, nullptr)) {
+          DEBUG_G2_PAGESF("[HEALTH] Health Logging command not queued");
+        }
       }
 
       if (g2HealthConsumePollRequest()) {

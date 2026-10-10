@@ -10,7 +10,7 @@ import serial
 USER, PASS = os.environ['P4_USER'], os.environ['P4_PASS']
 LOG = sys.argv[1]
 s = serial.Serial()
-s.port, s.baudrate, s.timeout, s.dtr, s.rts = '/dev/cu.usbmodem2101', 115200, 0.05, False, False
+s.port, s.baudrate, s.timeout, s.dtr, s.rts = os.environ['HW1_P4_PORT'], 115200, 0.05, False, False
 s.open()  # resets the P4
 buf = bytearray()
 

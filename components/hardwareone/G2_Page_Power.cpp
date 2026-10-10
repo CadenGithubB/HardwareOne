@@ -24,13 +24,7 @@
 // so authorizeCommand enforces admin (same gates as CLI / OLED Power). Never
 // call rebootDevice / setCpuFrequencyMhz inline on the tap task.
 //
-// NOTE (known firmware gap, NOT introduced here): `power mode X` → applyPowerMode
-// calls setCpuFrequencyMhz raw, WITHOUT the I2C-drain guard that wraps the
-// power-save downclock (setCpuFrequencyDrained, HardwareOne.cpp). The OLED and
-// CLI already carry the same gap; hardening the command path is a separate
-// firmware change. Active modes stay at the target PLL floor or above;
-// UltraSaver's lower idle clock is applied solely by the drain-guarded
-// idle power-save path, so the riskiest transition is already covered.)
+// CPU clock and I2C-drain policy remain in the shared power command owner.
 
 #include "G2_Page_Power.h"
 #include "System_Utils.h"
@@ -75,7 +69,7 @@ enum PowerAction : uint8_t {
   POWER_ACTION_POWEROFF = 3,
 };
 
-static PowerLevel  gLevel   = POWER_LEVEL_ACTIONS;
+static PowerLevel  gLevel = POWER_LEVEL_ACTIONS;
 static PowerAction gPending = POWER_ACTION_NONE;
 
 #define POWER_ROW_LEN  24
@@ -83,6 +77,24 @@ static PowerAction gPending = POWER_ACTION_NONE;
 
 EXT_RAM_BSS_ATTR static char        gRows[POWER_MAX_ROWS][POWER_ROW_LEN];
 static const char* gRowPtrs[POWER_MAX_ROWS];
+
+// The executor copies its short result; the lens worker consumes completions.
+// Navigation and newer requests invalidate old results through menuGen.
+static portMUX_TYPE gPowerResultMux = portMUX_INITIALIZER_UNLOCKED;
+static struct {
+  bool ready;
+  uint32_t menuGen;
+  PowerLevel level;
+  char message[POWER_ROW_LEN];
+} gPowerResult{};
+
+static void powerBeginView(PowerLevel level) {
+  g2BumpMenuGen();
+  gLevel = level;
+  portENTER_CRITICAL(&gPowerResultMux);
+  gPowerResult.ready = false;
+  portEXIT_CRITICAL(&gPowerResultMux);
+}
 
 // -----------------------------------------------------------------------------
 // Row builders
@@ -171,73 +183,117 @@ void g2BuildPowerInfo(char* out, size_t cap) {
 // cmd_exec path — admin-gated via authorizeCommand
 // -----------------------------------------------------------------------------
 
-static void onPowerCmdDone(bool ok, const char* result,
-                           const G2CmdCookie& /*cookie*/, void* /*userData*/) {
-  // reboot / ramflush / deepsleep success paths do not return to us.
-  // Failures: admin deny, cooldown refuse, or other Error: lines.
-  if (ok && result && strstr(result, "refused")) {
-    ok = false;  // deepsleep cooldown returns a non-Error string
+// Completions run this on the lens applier; submission refusals may use it on
+// the tap dispatcher. Failure text stays in the back row until the next action.
+static void renderPowerResult() {
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_POWER) return;
+  PowerLevel level;
+  char message[POWER_ROW_LEN];
+  bool ready = false;
+  portENTER_CRITICAL(&gPowerResultMux);
+  if (gPowerResult.ready && gPowerResult.menuGen == g2CurrentMenuGen()) {
+    level = gPowerResult.level;
+    memcpy(message, gPowerResult.message, sizeof(message));
+    gPowerResult.ready = false;
+    ready = true;
   }
-  if (ok) return;
+  portEXIT_CRITICAL(&gPowerResultMux);
+  if (!ready) return;
 
-  const char* msg = (result && result[0]) ? result : "Command failed";
-  // Lens list rows are short — strip a leading "Error: " for fit.
-  if (strncmp(msg, "Error: ", 7) == 0) msg += 7;
-  char banner[48];
-  snprintf(banner, sizeof(banner), "%.44s", msg);
-  g2ShowText(banner);
-  vTaskDelay(pdMS_TO_TICKS(1400));
-  gLevel   = POWER_LEVEL_ACTIONS;
+  if (gLevel != level) powerBeginView(level);
   gPending = POWER_ACTION_NONE;
-  size_t n = buildActionRows();
+  const size_t n = level == POWER_LEVEL_CPU ? buildCpuRows() : buildActionRows();
+  if (message[0]) snprintf(gRows[0], POWER_ROW_LEN, "<- %.20s", message);
   g2ShowListPage(gRowPtrs, n);
-  g2SetHijackPage(G2_HIJACK_PAGE_POWER);
 }
 
-// Preset completion — re-render the CPU picker so the "[X]" reflects the now-
-// updated mode (the command ran setSetting on cmd_exec before this fires), so
-// the user can compare/re-pick, mirroring the OLED CPU list. Runs on
-// cmd_exec_task; direct lens draws here are the established Power-page pattern.
-static void onPowerPresetDone(bool ok, const char* result,
-                              const G2CmdCookie& /*cookie*/, void* /*userData*/) {
-  const bool failed = !ok || (result && strncmp(result, "Error", 5) == 0);
-  if (failed) {
-    const char* msg = (result && result[0]) ? result : "Set failed";
-    if (strncmp(msg, "Error: ", 7) == 0) msg += 7;
-    char banner[48];
-    snprintf(banner, sizeof(banner), "%.44s", msg);
-    g2ShowText(banner);
-    vTaskDelay(pdMS_TO_TICKS(1400));
+static void powerClearResult(uint32_t menuGen) {
+  portENTER_CRITICAL(&gPowerResultMux);
+  if (gPowerResult.menuGen == menuGen) gPowerResult.ready = false;
+  portEXIT_CRITICAL(&gPowerResultMux);
+}
+
+static bool powerPublishResult(const G2CmdCookie& cookie, PowerLevel level,
+                               const char* message) {
+  char copy[POWER_ROW_LEN] = {};
+  if (message) {
+    if (strncmp(message, "Error: ", 7) == 0) message += 7;
+    snprintf(copy, sizeof(copy), "%s", message);
   }
-  if (g2GetHijackPage() != G2_HIJACK_PAGE_POWER) return;  // user navigated away
-  gLevel = POWER_LEVEL_CPU;
-  size_t n = buildCpuRows();
-  g2ShowListPage(gRowPtrs, n);
-  g2SetHijackPage(G2_HIJACK_PAGE_POWER);
+  bool published = false;
+  portENTER_CRITICAL(&gPowerResultMux);
+  if (g2GetHijackPage() == G2_HIJACK_PAGE_POWER &&
+      cookie.menuGen == g2CurrentMenuGen()) {
+    gPowerResult.menuGen = cookie.menuGen;
+    gPowerResult.level = level;
+    memcpy(gPowerResult.message, copy, sizeof(copy));
+    gPowerResult.ready = true;
+    published = true;
+  }
+  portEXIT_CRITICAL(&gPowerResultMux);
+  return published;
+}
+
+static void powerQueueResult(const G2CmdCookie& cookie, PowerLevel level,
+                             const char* message) {
+  if (!powerPublishResult(cookie, level, message)) return;
+  if (!g2EnqueueRedraw(cookie, renderPowerResult, "Power result")) {
+    powerClearResult(cookie.menuGen);
+  }
+}
+
+static bool powerCommandFailed(bool ok, const char* result) {
+  return !ok || (result && (strncmp(result, "Error", 5) == 0 ||
+                            strncmp(result, "ERROR", 5) == 0 ||
+                            strstr(result, "refused")));
+}
+
+static void onPowerCmdDone(bool ok, const char* result,
+                           const G2CmdCookie& cookie, void* /*userData*/) {
+  // reboot / ramflush / deepsleep success paths do not return to us.
+  if (!powerCommandFailed(ok, result)) return;
+  DEBUG_G2F("[G2] Power: command failed: %s", result ? result : "no result");
+  powerQueueResult(cookie, POWER_LEVEL_ACTIONS,
+                   result && result[0] ? result : "Command failed");
+}
+
+// Preset completion only publishes its result and queues a redraw. The picker
+// reads the actual power setting when the lens worker renders it.
+static void onPowerPresetDone(bool ok, const char* result,
+                              const G2CmdCookie& cookie, void* /*userData*/) {
+  const bool failed = powerCommandFailed(ok, result);
+  if (failed) DEBUG_G2F("[G2] Power: preset failed: %s", result ? result : "no result");
+  powerQueueResult(cookie, POWER_LEVEL_CPU,
+                   failed ? (result && result[0] ? result : "Set failed") : nullptr);
+}
+
+// A rejected submission is still on the tap dispatcher. Reuse the ordinary
+// result row without queueing a command or waiting on a transient banner.
+static void powerShowSubmitFailure(const G2CmdCookie& cookie, PowerLevel level) {
+  if (powerPublishResult(cookie, level, "Busy - try again")) renderPowerResult();
 }
 
 // Apply a CPU preset directly (no confirm). Fire the command; the picker
 // re-renders on completion. On a submit failure, stay on the picker.
 static void submitPowerPreset(const char* line) {
+  powerBeginView(POWER_LEVEL_CPU);
   G2CmdCookie cookie{};
+  cookie.menuGen = g2CurrentMenuGen();
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = 0;
+  cookie.targetNetSub = (uint8_t)gLevel;
   DEBUG_G2F("[G2] Power: preset '%s' via cmd_exec", line);
   if (!g2SubmitHijackCommand(line, cookie, onPowerPresetDone, nullptr)) {
     DEBUG_G2F("[G2] Power: preset '%s' submit FAILED", line);
-    g2ShowText("Busy - try again");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    gLevel = POWER_LEVEL_CPU;
-    size_t n = buildCpuRows();
-    g2ShowListPage(gRowPtrs, n);
-    g2SetHijackPage(G2_HIJACK_PAGE_POWER);
+    powerShowSubmitFailure(cookie, POWER_LEVEL_CPU);
   }
 }
 
 static void submitPowerCmd(const char* line, const char* pendingBanner) {
+  powerBeginView(POWER_LEVEL_CONFIRM);
   G2CmdCookie cookie{};
+  cookie.menuGen = g2CurrentMenuGen();
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = 0;
+  cookie.targetNetSub = (uint8_t)gLevel;
   g2ShowText(pendingBanner);
   // Brief breath so the CREATE-text can hit the air before cmd_exec may
   // tear down BLE / reboot (rebootDevice itself also delays).
@@ -245,13 +301,7 @@ static void submitPowerCmd(const char* line, const char* pendingBanner) {
   DEBUG_G2F("[G2] Power: submit '%s' via cmd_exec", line);
   if (!g2SubmitHijackCommand(line, cookie, onPowerCmdDone, nullptr)) {
     DEBUG_G2F("[G2] Power: '%s' submit FAILED — no inline mutate", line);
-    g2ShowText("Busy - try again");
-    vTaskDelay(pdMS_TO_TICKS(1200));
-    gLevel   = POWER_LEVEL_ACTIONS;
-    gPending = POWER_ACTION_NONE;
-    size_t n = buildActionRows();
-    g2ShowListPage(gRowPtrs, n);
-    g2SetHijackPage(G2_HIJACK_PAGE_POWER);
+    powerShowSubmitFailure(cookie, POWER_LEVEL_ACTIONS);
   }
 }
 
@@ -260,7 +310,7 @@ static void submitPowerCmd(const char* line, const char* pendingBanner) {
 // -----------------------------------------------------------------------------
 
 void g2ShowPowerMenu() {
-  gLevel   = POWER_LEVEL_ACTIONS;
+  powerBeginView(POWER_LEVEL_ACTIONS);
   gPending = POWER_ACTION_NONE;
 
   size_t n = buildActionRows();
@@ -289,7 +339,7 @@ void g2PowerHandleTap(uint32_t idx) {
       }
       if (idx == 1) {
         // Live status row → open the CPU preset picker (applies directly).
-        gLevel = POWER_LEVEL_CPU;
+        powerBeginView(POWER_LEVEL_CPU);
         size_t n = buildCpuRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Power: CPU preset picker opened");
@@ -304,7 +354,7 @@ void g2PowerHandleTap(uint32_t idx) {
       } else {
         return;
       }
-      gLevel = POWER_LEVEL_CONFIRM;
+      powerBeginView(POWER_LEVEL_CONFIRM);
       size_t n = buildConfirmRows(gPending);
       g2ShowListPage(gRowPtrs, n);
       DEBUG_G2F("[G2] Power: confirm prompt for %s", actionDebugName(gPending));
@@ -314,7 +364,7 @@ void g2PowerHandleTap(uint32_t idx) {
     case POWER_LEVEL_CONFIRM: {
       if (idx == 0) {
         // <- Cancel: back to action list.
-        gLevel   = POWER_LEVEL_ACTIONS;
+        powerBeginView(POWER_LEVEL_ACTIONS);
         PowerAction was = gPending;
         gPending = POWER_ACTION_NONE;
         size_t n = buildActionRows();
@@ -323,6 +373,7 @@ void g2PowerHandleTap(uint32_t idx) {
         return;
       }
       if (idx == 1) {
+        if (gPending == POWER_ACTION_NONE) return;  // command already submitted
         if (gPending == POWER_ACTION_POWEROFF) {
           submitPowerCmd("deepsleep", "Powering off...");
         } else if (gPending == POWER_ACTION_RAMFLUSH) {
@@ -338,7 +389,7 @@ void g2PowerHandleTap(uint32_t idx) {
     case POWER_LEVEL_CPU: {
       if (idx == 0) {
         // <- Back to the action list (rebuilt so the status row is fresh).
-        gLevel = POWER_LEVEL_ACTIONS;
+        powerBeginView(POWER_LEVEL_ACTIONS);
         size_t n = buildActionRows();
         g2ShowListPage(gRowPtrs, n);
         return;

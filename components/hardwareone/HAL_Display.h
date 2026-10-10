@@ -17,6 +17,8 @@
 #ifndef HAL_DISPLAY_H
 #define HAL_DISPLAY_H
 
+#include <stdint.h>
+
 #include "System_BuildConfig.h"
 
 // =============================================================================
@@ -232,18 +234,39 @@ extern DisplayDriver* gDisplay;
 // Address selected by the successful 0x3D/0x3C probe. All manager wrappers
 // must key health and failure probes to the same address the library uses.
 extern uint8_t gDisplayI2cAddress;
+uint8_t displayI2cBus();  // Latched for the canvas lifetime; bus settings require reboot.
 #endif
 
 // Legacy compatibility alias
 #define oledDisplay gDisplay
 
 // Display control functions
-bool displayInit();                      // Initialize display hardware
+// Hardware lifetime belongs to the HAL. A retained canvas is not proof of
+// readiness; callers must use displayIsReady(). Stop keeps borrowed UI pointers
+// valid. Successful initialization means the probe and library setup ran, not
+// that every write was acknowledged (some drivers provide no write result).
+bool displayInit();
+bool displayIsReady();
+void displayStop();
+bool displaySetPower(bool on);            // Whether the power operation ran
+void displayPrepareForSleep();
+bool displayResumeFromSleep();            // Restores only a previously active panel
 void displayClear();                     // Clear entire display
 void displayUpdate();                    // Update display (no-op for TFT, display() for OLED)
 void displayDim(bool dim);               // Dim display (on/off brightness)
 void displaySetBrightness(uint8_t level); // Set brightness 0-255 (PWM for TFT, contrast for OLED)
 
+#else
+inline bool displayInit() { return false; }
+inline bool displayIsReady() { return false; }
+inline void displayStop() {}
+inline bool displaySetPower(bool) { return false; }
+inline void displayPrepareForSleep() {}
+inline bool displayResumeFromSleep() { return false; }
+inline void displayClear() {}
+inline void displayUpdate() {}
+inline void displayDim(bool) {}
+inline void displaySetBrightness(uint8_t) {}
 #endif // DISPLAY_ENABLED
 
 #endif // HAL_DISPLAY_H

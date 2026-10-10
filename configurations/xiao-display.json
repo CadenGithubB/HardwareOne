@@ -1,0 +1,12 @@
+{
+  "board": "xiao_s3",
+  "features": {
+    "DISPLAY_TYPE": 1,
+    "ENABLE_CAMERA_SENSOR": 0,
+    "ENABLE_LLM_SOURCE_ONBOARD": 0,
+    "ENABLE_MAPS": 0,
+    "ENABLE_MQTT": 0,
+    "I2C_FEATURE_LEVEL": 1,
+    "INPUT_DEVICE_TYPE": 0
+  }
+}

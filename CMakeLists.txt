@@ -201,6 +201,44 @@ if(_hw_board AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/boards/${_hw_board}.feature
     message(STATUS "HW_BOARD=${_hw_board} feature profile: ${HW1_BOARD_FEATURE_FILE}")
 endif()
 
+# An ordinary build can select an isolated, generated feature header without
+# changing its board identity or choosing a deployment/partition contract.
+set(HW1_FEATURE_CONFIG_FILE "" CACHE FILEPATH "HardwareOne feature configuration header")
+if(HW1_FEATURE_CONFIG_FILE)
+    if(HW1_DEPLOYMENT_ACTIVE)
+        message(FATAL_ERROR
+            "HW1_FEATURE_CONFIG_FILE cannot be combined with HW_DEPLOYMENT; "
+            "use an ordinary board build for feature configurations.")
+    endif()
+    get_filename_component(HW1_FEATURE_CONFIG_FILE "${HW1_FEATURE_CONFIG_FILE}"
+        ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(NOT EXISTS "${HW1_FEATURE_CONFIG_FILE}" OR IS_DIRECTORY "${HW1_FEATURE_CONFIG_FILE}")
+        message(FATAL_ERROR
+            "HW1 feature configuration header is missing or not a file: ${HW1_FEATURE_CONFIG_FILE}")
+    endif()
+    set(HW1_FEATURE_CONFIG_FILE "${HW1_FEATURE_CONFIG_FILE}" CACHE FILEPATH
+        "HardwareOne feature configuration header" FORCE)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${HW1_FEATURE_CONFIG_FILE}")
+    message(STATUS "HardwareOne feature configuration: ${HW1_FEATURE_CONFIG_FILE}")
+endif()
+
+# Named SDK choices accompany a named feature selection; deployments keep their
+# own complete release contract. The helper also validates the editable keys.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1Sdkconfig.cmake")
+set(HW1_SDK_CONFIG_FILE "" CACHE FILEPATH "HardwareOne optional SDK configuration")
+if(HW1_SDK_CONFIG_FILE)
+    if(HW1_DEPLOYMENT_ACTIVE)
+        message(FATAL_ERROR "HW1_SDK_CONFIG_FILE cannot be combined with HW_DEPLOYMENT")
+    endif()
+    get_filename_component(HW1_SDK_CONFIG_FILE "${HW1_SDK_CONFIG_FILE}"
+        ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    set(HW1_SDK_CONFIG_FILE "${HW1_SDK_CONFIG_FILE}" CACHE FILEPATH
+        "HardwareOne optional SDK configuration" FORCE)
+endif()
+hw1_sdkconfig_policy_files("${CMAKE_CURRENT_SOURCE_DIR}" "${_hw_board}"
+    "${HW1_FEATURE_CONFIG_FILE}" "${HW1_SDK_CONFIG_FILE}"
+    "${HW1_DEPLOYMENT_SDKCONFIG_FILE}" _sdk_policy_files)
+
 # --- 3. Partition table selection ---
 #
 # Two axes: SR vs no_sr (from #define ENABLE_ESP_SR in System_BuildConfig.h)
@@ -407,6 +445,10 @@ if(EXISTS "${_buildconfig}")
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
             "${HW1_DEPLOYMENT_FEATURE_FILE}")
     endif()
+    if(HW1_FEATURE_CONFIG_FILE)
+        file(READ "${HW1_FEATURE_CONFIG_FILE}" _feature_config_contents)
+        set(_bc_contents "${_feature_config_contents}\n${_bc_contents}")
+    endif()
     string(REGEX MATCH "#define[ \t]+HW1_SR_MODELS_IN_FILESYSTEM[ \t]+([0-9]+)"
            _model_location_match "${_bc_contents}")
     set(_sr_models_in_filesystem "${CMAKE_MATCH_1}")
@@ -525,25 +567,10 @@ if(_board_file)
         endif()
     endif()
 
-    # A deployment's optional sdkconfig overlay, layered LAST so it outranks
-    # every board and layout default above it. This is the only place a
-    # deployment can state policy that CONTRADICTS boards/<board>.defaults --
-    # pocket_assistant/xiao_s3 needs it because that board file turns the
-    # Bluedroid stack off, which would silently force ENABLE_BLUETOOTH,
-    # ENABLE_G2_GLASSES and ENABLE_R1_HEALTH to 0 in the derived rules and
-    # produce a green build with the entire product missing.
-    #
-    # Deliberately NOT applied to the recovery updater: it is a separate
-    # project whose configuration is updater/boards/<board>.defaults, and it
-    # has no use for the application's radios.
-    if(HW1_DEPLOYMENT_ACTIVE AND
-       NOT "${HW1_DEPLOYMENT_SDKCONFIG_FILE}" STREQUAL "")
-        list(APPEND SDKCONFIG_DEFAULTS "${HW1_DEPLOYMENT_SDKCONFIG_FILE}")
-        set_property(DIRECTORY APPEND PROPERTY
-            CMAKE_CONFIGURE_DEPENDS "${HW1_DEPLOYMENT_SDKCONFIG_FILE}")
-        message(STATUS
-            "HardwareOne deployment sdkconfig overlay: ${HW1_DEPLOYMENT_SDKCONFIG_FILE}")
-    endif()
+    # Optional SDK policy follows hardware/layout: shared preset, board preset,
+    # then a named selection or deployment contract. The updater is a separate
+    # project and retains its own configuration.
+    list(APPEND SDKCONFIG_DEFAULTS ${_sdk_policy_files})
 
     if(_ota_layout)
 
@@ -648,71 +675,17 @@ if(_board_file)
             CMAKE_CONFIGURE_DEPENDS "${_family_defaults}")
     endif()
 
-    # Auto-recovery: if HW_BOARD is explicitly set, ensure sdkconfig honors
-    # the board file's settings. IDF's defaults-files only apply to UNSET
-    # options, so a stale sdkconfig (e.g. restored by `set-target` from a
-    # sdkconfig.<target> snapshot of a different board) sticks. We surgically
-    # remove ONLY the keys the board file controls — Kconfig then re-applies
-    # them from the board file as defaults. Everything else the user has
-    # tuned in sdkconfig is preserved.
-    set(_hw_board_explicit FALSE)
-    if(DEFINED ENV{HW_BOARD} AND NOT "$ENV{HW_BOARD}" STREQUAL "")
-        set(_hw_board_explicit TRUE)
-    endif()
-    if(_hw_board_explicit AND EXISTS "${_sdkconfig}")
-        file(READ "${_sdkconfig}" _sdk_contents)
-        file(STRINGS "${_board_file}" _board_settings REGEX "^CONFIG_[A-Z0-9_]+=")
-        set(_modified FALSE)
-        set(_changed_keys "")
-
-        foreach(_setting IN LISTS _board_settings)
-            string(REGEX MATCH "^(CONFIG_[A-Z0-9_]+)" _ "${_setting}")
-            set(_key "${CMAKE_MATCH_1}")
-
-            # Skip if sdkconfig already has the exact expected line.
-            if(_sdk_contents MATCHES "(^|\n)${_setting}(\n|$)")
-                continue()
-            endif()
-
-            # A board-file "KEY=n" is satisfied by Kconfig's "# KEY is not set"
-            # form too - without this, an =n guard line would strip-and-rewrite
-            # sdkconfig on every configure.
-            if(_setting MATCHES "=n$" AND _sdk_contents MATCHES "(^|\n)# ${_key} is not set(\n|$)")
-                continue()
-            endif()
-
-            # Strip existing value/notset forms of this key.
-            string(REGEX REPLACE "(^|\n)${_key}=[^\n]*" "\\1" _sdk_contents "${_sdk_contents}")
-            string(REGEX REPLACE "(^|\n)# ${_key} is not set" "\\1" _sdk_contents "${_sdk_contents}")
-            list(APPEND _changed_keys "${_key}")
-            set(_modified TRUE)
-
-            # Choice groups: when one key is set, the others must be unset, or
-            # Kconfig will keep the old active choice and ignore the board-file
-            # default. We strip ALL siblings of any matched group so Kconfig
-            # re-resolves the choice from the board file.
-            if(_key STREQUAL "CONFIG_SPIRAM_MODE_OCT" OR _key STREQUAL "CONFIG_SPIRAM_MODE_QUAD")
-                string(REGEX REPLACE "(^|\n)CONFIG_SPIRAM_MODE_(OCT|QUAD)=[^\n]*" "\\1" _sdk_contents "${_sdk_contents}")
-                string(REGEX REPLACE "(^|\n)# CONFIG_SPIRAM_MODE_(OCT|QUAD) is not set" "\\1" _sdk_contents "${_sdk_contents}")
-            elseif(_key MATCHES "^CONFIG_ESPTOOLPY_FLASHSIZE_[0-9]+MB$")
-                # Flash size choice: strip every _<n>MB sibling and the
-                # derived CONFIG_ESPTOOLPY_FLASHSIZE="<n>MB" string (which
-                # Kconfig recomputes from whichever boolean ends up active).
-                string(REGEX REPLACE "(^|\n)CONFIG_ESPTOOLPY_FLASHSIZE_[0-9]+MB=[^\n]*" "\\1" _sdk_contents "${_sdk_contents}")
-                string(REGEX REPLACE "(^|\n)# CONFIG_ESPTOOLPY_FLASHSIZE_[0-9]+MB is not set" "\\1" _sdk_contents "${_sdk_contents}")
-                string(REGEX REPLACE "(^|\n)CONFIG_ESPTOOLPY_FLASHSIZE=\"[^\"]*\"" "\\1" _sdk_contents "${_sdk_contents}")
-            endif()
-        endforeach()
-
-        if(_modified)
-            # Collapse blank lines left behind by the surgical removals.
-            string(REGEX REPLACE "\n\n+" "\n" _sdk_contents "${_sdk_contents}")
-            file(WRITE "${_sdkconfig}" "${_sdk_contents}")
-            string(JOIN ", " _changed_str ${_changed_keys})
-            message(STATUS
-                "HW_BOARD=${_hw_board}: cleared stale [${_changed_str}] from sdkconfig "
-                "so board file values re-apply (other settings preserved)")
+    # Defaults affect unset keys only. Reconcile the merged selection so a
+    # saved SDK choice wins over its preset, and deleting that choice restores
+    # the inherited preset. Unrelated menuconfig tuning remains untouched.
+    if((DEFINED ENV{HW_BOARD} AND NOT "$ENV{HW_BOARD}" STREQUAL "") OR
+       HW1_FEATURE_CONFIG_FILE OR HW1_DEPLOYMENT_ACTIVE)
+        set(_sdk_reconcile_files "${_board_file}")
+        if(_ota_layout AND EXISTS "${_board_ota_file}")
+            list(APPEND _sdk_reconcile_files "${_board_ota_file}")
         endif()
+        list(APPEND _sdk_reconcile_files ${_sdk_policy_files})
+        hw1_reconcile_sdkconfig("${_sdkconfig}" ${_sdk_reconcile_files})
     endif()
 endif()
 
@@ -729,6 +702,9 @@ endif()
 
 if(HW1_BOARD_FEATURE_FILE)
     add_compile_definitions(HW1_BOARD_CONFIG_HEADER="${HW1_BOARD_FEATURE_FILE}")
+endif()
+if(HW1_FEATURE_CONFIG_FILE)
+    add_compile_definitions(HW1_FEATURE_CONFIG_HEADER="${HW1_FEATURE_CONFIG_FILE}")
 endif()
 
 # ESP32-P4 builds replace two ESP-IDF 5.5.5 components with verified patched
@@ -754,6 +730,7 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # Component CMake files (including IDF's script-mode requirement expansion,
 # which does not see these variables) read the profile from build properties.
 idf_build_set_property(HW1_BOARD_FEATURE_FILE "${HW1_BOARD_FEATURE_FILE}")
+idf_build_set_property(HW1_FEATURE_CONFIG_FILE "${HW1_FEATURE_CONFIG_FILE}")
 
 # The component-manager lock embeds its target.  Keep classic ESP32 resolution
 # out of the tracked ESP32-S3 lock so switching between Headless Feather and
@@ -768,9 +745,9 @@ endif()
 idf_build_set_property(DEPENDENCIES_LOCK "${_hw1_dependencies_lock}")
 
 if(_ota_layout)
-    set(PROJECT_VER "0.99.96.1+${_ota_version_suffix}")
+    set(PROJECT_VER "0.99.97.1+${_ota_version_suffix}")
 else()
-    set(PROJECT_VER "0.99.96.1")
+    set(PROJECT_VER "0.99.97.1")
 endif()
 project(hardwareone-idf)
 
@@ -787,6 +764,10 @@ endif()
 if(HW1_BOARD_FEATURE_FILE)
     target_compile_definitions(${_hw1_app_component} PRIVATE
         HW1_BOARD_CONFIG_HEADER="${HW1_BOARD_FEATURE_FILE}")
+endif()
+if(HW1_FEATURE_CONFIG_FILE)
+    target_compile_definitions(${_hw1_app_component} PRIVATE
+        HW1_FEATURE_CONFIG_HEADER="${HW1_FEATURE_CONFIG_FILE}")
 endif()
 if(HW1_DEPLOYMENT_ACTIVE)
     target_compile_definitions(${_hw1_app_component} PRIVATE

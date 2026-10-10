@@ -27,10 +27,10 @@
 #     flash is never implied; add it explicitly (PORT=/dev/cu.usbmodemXXXX).
 #   e.g. deploy_15x5.sh /Volumes/USB2/stt/work/run15x5/best ft15-8877 all flash
 #
-# Environment (defaults match this Mac):
+# Environment (local defaults can be overridden):
 #   CARD      mounted SD card volume          (/Volumes/P4SD)
 #   LM        word LM for the lm step         (work/lm/meeting-15x5ft.lm)
-#   PORT      P4 USB-Serial/JTAG port         (/dev/cu.usbmodem2101)
+#   PORT      P4 USB-Serial/JTAG port         (or HW1_P4_PORT; required for USB steps)
 #   ARTIFACT  file name on the card           (quartznet15x5-<name>.p4.stt)
 #   CODEC     none (stored, ~20 MB, fast load) or zlib (~15 MB)   (none)
 #   CALIB     int8 calibration clips, "store:count ..."  (AMI sdm/ihm + Libri dev, 20 each)
@@ -60,7 +60,7 @@ CODEC=${CODEC:-none}
 # int8 calibration clips (dev stores only). Broad-use models: add peoples-dev:20 voxpopuli-dev:20.
 CALIB=${CALIB:-ami-sdm-validation:20 ami-ihm-validation:20 librispeech-dev-clean:20}
 FW_PATCH=$HERE/deploy_15x5.patch   # stored-codec loader, load timings, 40 MHz SD, draft pacing, LM on card
-PY=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
+PY=${HW1_STT_PYTHON:-$HERE/private/export-venv/bin/python}
 SRC_APP=$HERE/private/app-p4-15x5
 SRC_FEATURES=$HERE/features-p4-noweb-15x5.h
 APP=$HERE/private/app-p4-$NAME
@@ -73,8 +73,8 @@ LM=${LM:-$STT/work/lm/meeting-15x5ft.lm}
 [ -f "$HERE/private/unit.env" ] && . "$HERE/private/unit.env"
 UNIT_MAC=${UNIT_MAC:?set UNIT_MAC (env or private/unit.env) to the target P4X-EYE MAC}
 LFS_OFFSET=0x625000 LFS_SIZE=0x9DB000
-LFS_PY=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/build-p4/littlefs_py_venv/bin/python
-PORT=${PORT:-/dev/cu.usbmodem2101}
+LFS_PY=${HW1_LITTLEFS_PYTHON:-$HERE/private/build-p4/littlefs_py_venv/bin/python}
+PORT=${PORT:-${HW1_P4_PORT:-}}
 IDF_ENV=${IDF_ENV:-$HOME/esp/esp-idf/export.sh}   # ESP-IDF 5.5.5; the /tmp install was wiped 2026-10-02
 EXP=$(cd "$HERE/.." && pwd)
 SDK_DEFAULTS="$EXP/p4_ble_roles/sdkconfig.connectivity.defaults;$EXP/p4_ble_roles/sdkconfig.p4.bluetooth.defaults;$EXP/camera_portable/sdkconfig.p4.camera.defaults;$EXP/speech_portable/sdkconfig.speech.defaults;$EXP/speech_portable/sdkconfig.p4.speech.defaults;$HERE/sdkconfig.stt.defaults"
@@ -163,6 +163,7 @@ step_card() {
 }
 
 step_flash() {
+  : "${PORT:?set PORT or HW1_P4_PORT for the target board}"
   [ -c "$PORT" ] || { say "no serial port $PORT"; exit 1; }
   # shellcheck disable=SC1090
   source "$IDF_ENV" >/dev/null 2>&1
@@ -189,6 +190,7 @@ step_lm() {
 }
 
 step_lm_remove_onboard() {
+  : "${PORT:?set PORT or HW1_P4_PORT for the target board}"
   [ -c "$PORT" ] || { say "no serial port $PORT"; exit 1; }
   # shellcheck disable=SC1090
   source "$IDF_ENV" >/dev/null 2>&1

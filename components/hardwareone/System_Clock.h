@@ -9,6 +9,9 @@
 // Clock — time / sync state / timezone / formatting accessors
 // =============================================================================
 //
+// System_NTP owns network synchronization and hands replies to clockStepped().
+// This module owns clock behavior shared by NTP, RTC, manual, and peer sources.
+//
 // Pre-consolidation footguns:
 //   - "tm_year >= 120" (years since 2020) magic-number check repeated 6 places,
 //     each one a "is the clock synced yet?" test rolled by hand

@@ -1,0 +1,6 @@
+{
+  "board": "xiao_s3",
+  "features": {
+    "ENABLE_MQTT": 0
+  }
+}

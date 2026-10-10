@@ -75,7 +75,7 @@ Set these once per shell:
 . ~/esp/esp-idf/export.sh
 export HW1_BOARD=feathers3
 export HW1_KEY=/absolute/path/to/hw1-ota-signing.pem
-export HW1_PORT=/dev/cu.usbmodem1301
+export HW1_PORT=/dev/cu.YOUR_PORT
 export ESPPORT="$HW1_PORT"   # see the note below - idf.py -p does NOT reach these targets
 export HW1_MAIN_BUILD=build-ota
 export HW1_UPDATER_BUILD=/private/tmp/hw1-updater-migration

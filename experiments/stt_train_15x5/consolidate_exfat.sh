@@ -10,7 +10,8 @@
 set -u
 DST=/Volumes/Audiodrive/stt
 LOG=/Volumes/Audiodrive/consolidate.log
-P=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
+HERE=$(cd "$(dirname "$0")" && pwd)
+P=${HW1_STT_PYTHON:-$HERE/../stt_p4/private/export-venv/bin/python}
 say() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 mkdir -p "$DST"
 

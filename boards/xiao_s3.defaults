@@ -43,13 +43,6 @@ CONFIG_NVS_ENCRYPTION=n
 # CSVs start nvs at 0xA000 so both offsets work).
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 
-# Bluetooth is a board capability, not an opt-in carrier-only feature. Keep
-# Bluedroid available for the Bluetooth web page and the G2 glasses; the shared
-# ESP32-S3 defaults provide the matching controller, Bluedroid and BLE 4.2
-# settings. Feature profiles may still compile application Bluetooth out, but
-# the ordinary XIAO firmware must not silently remove it at the SDK layer.
-CONFIG_BT_ENABLED=y
-
 # Camera sensor policy — the XIAO Sense fleet uses the OV family. Keep all
 # three OV variants supported by HardwareOne and compile out unrelated sensor
 # drivers whose register tables otherwise consume internal DRAM permanently.

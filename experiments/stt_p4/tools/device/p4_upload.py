@@ -13,7 +13,7 @@ chunk = int(sys.argv[3]) if len(sys.argv) > 3 else 4096
 data = local.read_bytes()
 
 s = serial.Serial()
-s.port, s.baudrate, s.timeout, s.dtr, s.rts = '/dev/cu.usbmodem2101', 115200, 0.02, False, False
+s.port, s.baudrate, s.timeout, s.dtr, s.rts = os.environ['HW1_P4_PORT'], 115200, 0.02, False, False
 s.open()
 buf = bytearray()
 

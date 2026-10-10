@@ -50,16 +50,22 @@ assert enable.rfind("requestSettingsPersist()") > enable.rfind("fingerprint =")
 
 legacy = source("System_SetupWizard.cpp")
 legacy_apply = between(legacy, "SetupWizardResult runAndApplyFeatureWizard(", "\n}")
-assert "writeSettingsJson()" in legacy_apply
-assert "writeDebugJson()" in legacy_apply
-assert legacy_apply.find("if (!result.completed)") < legacy_apply.find("writeDebugJson()")
+assert legacy_apply.count("wizardSaveAndApplySettings(") == 1
+assert legacy_apply.find("if (!result.completed)") < legacy_apply.find("wizardSaveAndApplySettings(")
 
 cli_mode = source("System_SetupWizardMode.cpp")
 mode_exit = between(cli_mode, "static void wizardMode_onExit(",
                     "static void wizardMode_onTick(")
 assert "if (sWizard.result.completed)" in mode_exit
-assert "writeSettingsJson()" in mode_exit
-assert "writeDebugJson()" in mode_exit
+assert mode_exit.count("wizardSaveAndApplySettings(") == 1
+assert mode_exit.find("if (sWizard.result.completed)") < mode_exit.find("wizardSaveAndApplySettings(")
+for adapter in (legacy_apply, mode_exit):
+    assert "writeSettingsJson()" not in adapter
+    assert "writeDebugJson()" not in adapter
+completion = between(legacy, "void wizardSaveAndApplySettings(", "\n}")
+assert completion.count("writeSettingsJson()") == 1
+assert completion.count("writeDebugJson()") == 1
+assert completion.find("if (!result.completed)") < completion.find("writeSettingsJson()")
 
 ble = source("BLE_Peers.cpp")
 owner_rollback = between(ble, "if (!ownerAvailable) {", "if (!config.applied) {")

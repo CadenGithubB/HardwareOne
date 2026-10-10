@@ -58,6 +58,7 @@ class VL53L4CX {
   ~VL53L4CX() {
     check(scenario.driverAlive && this == scenario.storage,
           "driver destructor runs once on owned storage");
+    if (stopped_) check(!scenario.inTransaction, "stop releases bus before driver destruction");
     scenario.driverAlive = false; ++scenario.destructions;
     scenario.events.push_back("destroy");
   }
@@ -85,9 +86,12 @@ class VL53L4CX {
   }
   VL53L4CX_Error VL53L4CX_StopMeasurement() {
     check(scenario.driverAlive, "measurement stops before driver destruction");
+    check(scenario.inTransaction, "measurement stop owns the shared I2C transaction");
+    stopped_ = true;
     ++scenario.stops; scenario.events.push_back("stop"); return 0;
   }
  private:
+  bool stopped_ = false;
   // This mock checks lifetime, not the target ABI's real 9,496-byte size.
   unsigned char representativeState_[32] = {};
 };
@@ -99,8 +103,12 @@ static struct {
   bool tofDataValid = true;
   int tofTotalObjects = 4;
   ObjectCache tofObjects[4];
-} gTofCache;
+} sTofCache;
 
+// Cache admission is tested separately by the snapshot suite.
+static int sTofCacheMutex=1;
+struct SensorCacheGuard { bool held=true; SensorCacheGuard(int,unsigned,const char*) {} };
+static unsigned pdMS_TO_TICKS(unsigned value);
 static void* ps_alloc(size_t size, AllocPref preference, const char* tag) {
   check(scenario.inTransaction, "object allocation remains inside I2C transaction");
   check(size == sizeof(VL53L4CX), "allocation uses sizeof driver, not stale constant");
@@ -150,12 +158,17 @@ static bool i2cDeviceTransaction(uint8_t bus, uint8_t address, uint32_t hz,
   scenario.inTransaction = false;
   return result;
 }
+template <class F>
+static void i2cDeviceTransactionVoid(uint8_t bus, uint8_t address, uint32_t hz,
+                                    unsigned wait, F&& operation) {
+  i2cDeviceTransaction(bus, address, hz, wait, [&]() { operation(); return true; });
+}
 #define INFO_TOF_LIFECYCLEF(...) ((void)0)
 #define DEBUG_PERFORMANCEF(...) ((void)0)
 #define DEBUG_MEMORY_HEAPF(...) ((void)0)
 #define ERROR_TOFF(...) ((void)0)
 #define DEBUG_TOF_POLLINGF(...) ((void)0)
-#define SENSOR_TASK_EXIT(sensor) do { ++scenario.taskExits; scenario.events.push_back("task-exit"); return; } while (0)
+#define SENSOR_TASK_EXIT(sensor, ...) do { ++scenario.taskExits; scenario.events.push_back("task-exit"); return; } while (0)
 static bool isDebugFlagSet(int) { return false; }
 static UBaseType_t uxTaskGetStackHighWaterMark(void*) { return 1024; }
 static unsigned long millis() { return 100; }
@@ -180,8 +193,8 @@ static void resetScenario() {
         "previous fixture released driver ownership");
   scenario = Scenario{};
   gTofConnected = false; gTofRunning = false; gTofNear = false;
-  gTofCache.tofDataValid = true; gTofCache.tofTotalObjects = 4;
-  for (auto& object : gTofCache.tofObjects) { object.detected = true; object.valid = true; }
+  sTofCache.tofDataValid = true; sTofCache.tofTotalObjects = 4;
+  for (auto& object : sTofCache.tofObjects) { object.detected = true; object.valid = true; }
   gSettings.i2cClockToFHz = 200000; gSettings.tofBus = 1;
 }
 static void expectReleased() {
@@ -194,9 +207,9 @@ static void stopTask() {
   gTofRunning = false;
   tofTask(nullptr);
   expectReleased();
-  check(!gTofConnected && !gTofCache.tofDataValid && gTofCache.tofTotalObjects == 0,
+  check(!gTofConnected && !sTofCache.tofDataValid && sTofCache.tofTotalObjects == 0,
         "task stop invalidates connection and cache");
-  for (const auto& object : gTofCache.tofObjects)
+  for (const auto& object : sTofCache.tofObjects)
     check(!object.detected && !object.valid, "task stop clears every cached detection");
 }
 static size_t eventAt(const char* event) {
@@ -296,9 +309,28 @@ static void testPreallocationGatesAndClock() {
     stopTask();
   }
 }
+static void testBusyStopReleasesOwnership() {
+  resetScenario();
+  check(tofInit(), "busy-stop fixture initializes");
+  scenario.transaction = false;
+  stopTask();
+  check(scenario.stops == 0 && scenario.taskExits == 1,
+        "busy bus skips hardware stop but still releases task and driver");
+  check(scenario.transactionWait == 500 && scenario.transactionBus == 1,
+        "task shutdown uses a bounded transaction on the configured bus");
+
+  resetScenario();
+  check(tofInit(), "busy-reinit fixture initializes");
+  scenario.transaction = false;
+  check(!tofInit(), "busy bus prevents reinitialization");
+  expectReleased();
+  check(scenario.stops == 0 && !gTofConnected && !scenario.inTransaction,
+        "busy reinit releases stale ownership without unprotected hardware I/O");
+}
 int main() {
   try {
     testSuccessAndTaskStop(); testInitFailures(); testReinitialization();
+    testBusyStopReleasesOwnership();
     testPreallocationGatesAndClock();
     expectReleased();
     std::cout << "ToF extracted lifecycle tests passed (" << assertions << " assertions; A1="

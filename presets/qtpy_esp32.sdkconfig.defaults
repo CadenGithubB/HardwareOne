@@ -1,0 +1,3 @@
+# Preserve the lean QT Py default. Bluetooth is selectable in a named
+# configuration, subject to the classic ESP32's runtime and image budgets.
+CONFIG_BT_ENABLED=n

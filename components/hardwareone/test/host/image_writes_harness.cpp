@@ -1,0 +1,413 @@
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <functional>
+#include <limits>
+#include <map>
+#include <memory>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+static unsigned concatCalls = 0, failConcatCall = 0;
+// INSERT_BOUNDARIES
+// INSERT_FS_GUARD
+
+template <class... Args> static void logIgnored(const char*, Args...) {}
+#define INFO_STORAGEF(...) logIgnored(__VA_ARGS__)
+#define ERROR_STORAGEF(...) logIgnored(__VA_ARGS__)
+#define DEBUG_STORAGEF(...) logIgnored(__VA_ARGS__)
+#define WARN_STORAGEF(...) logIgnored(__VA_ARGS__)
+#define FILE_READ "r"
+#define FILE_WRITE "w"
+
+static constexpr uint8_t jpeg[] = {0xff, 0xd8, 4, 3, 2, 1};
+static constexpr size_t reserveBytes = 100 * 1024;
+struct Settings { String cameraCaptureFolder = "/photos"; } gSettings;
+static bool filesystemReady = true, sdMounted = true;
+static bool expectOuterLock = false;
+static time_t fakeNow = 0;
+static time_t fakeTime(time_t*) { return fakeNow; }
+static tm* fakeLocaltime(const time_t*, tm* out) {
+  *out = {}; out->tm_year = 126; out->tm_mon = 9; out->tm_mday = 9;
+  out->tm_hour = 12; out->tm_min = 34; out->tm_sec = 56; return out;
+}
+namespace Clock { static bool isValidEpoch(time_t value) { return value != 0; } }
+
+enum class Fault { None, Open, Short, Zero, WriteError, FlushError, SizeMismatch, Directory, Cleanup };
+struct Tier {
+  Fault fault = Fault::None;
+  bool statsFailed = false, mkdirFailed = false, denied = false, openDenied = false;
+  uint64_t free = 8 * 1024 * 1024;
+  unsigned stats = 0, opens = 0, writes = 0, flushes = 0, closes = 0, removes = 0, mkdirs = 0;
+} tiers[2];
+struct AuthContext { String user, reason; };
+struct Access { std::string operation, path, reason; };
+static std::vector<Access> accesses;
+static std::set<std::string> directories;
+static unsigned activeFiles = 0, unlockedIo = 0, sdFailureNotes = 0;
+static size_t internalBytesNoted = 0;
+static void io() { if (!heldFs) ++unlockedIo; }
+struct Node {
+  std::vector<uint8_t> bytes;
+  int tier = 0;
+  bool directory = false, error = false, flushed = false;
+};
+static std::map<std::string, std::shared_ptr<Node>> files;
+struct Handle {
+  explicit Handle(std::shared_ptr<Node> value) : node(std::move(value)) { ++activeFiles; }
+  ~Handle() { close(); }
+  void close() {
+    if (closed) return;
+    io(); closed = true; ++tiers[node->tier].closes; --activeFiles;
+  }
+  std::shared_ptr<Node> node;
+  bool closed = false;
+};
+class File {
+ public:
+  File() = default;
+  explicit File(std::shared_ptr<Node> value) : handle_(std::make_shared<Handle>(std::move(value))) {}
+  explicit operator bool() const { return handle_ && !handle_->closed; }
+  bool isDirectory() const { io(); return handle_->node->directory; }
+  size_t write(const uint8_t* data, size_t length) {
+    io(); auto& node = *handle_->node; auto& tier = tiers[node.tier]; ++tier.writes;
+    // A host fault boundary must not dereference an intentionally oversized
+    // request used to verify admission overflow. Baseline still reports success.
+    size_t count = length > sizeof(jpeg) ? 0 : length;
+    if (tier.fault == Fault::Short || tier.fault == Fault::Cleanup) count = std::min(size_t(2), count);
+    if (tier.fault == Fault::Zero || node.directory) count = 0;
+    if (!node.directory) node.bytes.assign(data, data + count);
+    if (tier.fault == Fault::WriteError) node.error = true;
+    return count;
+  }
+  void flush() {
+    io(); auto& node = *handle_->node; ++tiers[node.tier].flushes; node.flushed = true;
+    // This is a reported-error fault, not a claim that Arduino currently
+    // propagates real fsync/fflush failures through Print::getWriteError.
+    if (tiers[node.tier].fault == Fault::FlushError) node.error = true;
+  }
+  int getWriteError() const { io(); return handle_->node->error; }
+  size_t size() const { io(); return handle_->node->bytes.size() + (tiers[handle_->node->tier].fault == Fault::SizeMismatch ? 1 : 0); }
+  void close() { if (handle_) handle_->close(); handle_.reset(); }
+ private:
+  std::shared_ptr<Handle> handle_;
+};
+// INSERT_NORMALIZE_FS_PATH
+namespace VFS {
+enum StorageType { INTERNAL = 0, SDCARD = 1, AUTO = 2 };
+static bool isSDAvailable() { return sdMounted; }
+String normalize(const String&);
+}
+// INSERT_VFS_PATHS
+namespace VFS {
+static AuthContext systemAuth(const char* reason) { return {"system", reason}; }
+static bool allowed(const char* operation, const String& raw, const AuthContext& auth, String& path) {
+  io(); check(auth.user == "system" && auth.reason.length(), "image writer keeps explicit trusted identity and audit reason");
+  accesses.push_back({operation, raw.c_str(), auth.reason.c_str()});
+  if (!normalizeFsPath(raw, path)) return false;
+  const auto storage = getStorageType(path);
+  return !tiers[storage].denied &&
+         !(tiers[storage].openDenied && std::strcmp(operation, "open") == 0) &&
+         (storage == SDCARD ? sdMounted : filesystemReady);
+}
+static bool existsGuarded(const String& raw, const AuthContext& auth) {
+  FsLockGuard guard("mock.exists"); String path;
+  return allowed("exists", raw, auth, path) && directories.count(path.c_str());
+}
+static bool mkdirGuarded(const String& raw, const AuthContext& auth) {
+  FsLockGuard guard("mock.mkdir"); String path;
+  if (!allowed("mkdir", raw, auth, path)) return false;
+  auto& tier = tiers[getStorageType(path)]; ++tier.mkdirs;
+  if (tier.mkdirFailed) return false;
+  directories.insert(path.c_str()); return true;
+}
+static File openGuarded(const String& raw, const char* mode, const AuthContext& auth, bool create) {
+  FsLockGuard guard("mock.open"); String path;
+  const bool admitted = allowed("open", raw, auth, path);
+  auto& tier = tiers[getStorageType(raw)]; ++tier.opens;
+  check(std::strcmp(mode, "w") == 0 && create, "image saves explicitly create/truncate the guarded output");
+  if (!admitted || tier.fault == Fault::Open) return {};
+  auto node = std::make_shared<Node>(); node->tier = getStorageType(path); node->directory = tier.fault == Fault::Directory;
+  files[path.c_str()] = node; return File(node);
+}
+static bool removeGuarded(const String& raw, const AuthContext& auth) {
+  FsLockGuard guard("mock.remove"); String path;
+  const bool admitted = allowed("remove", raw, auth, path);
+  auto& tier = tiers[getStorageType(raw)]; ++tier.removes;
+  check(activeFiles == 0, "failed output is closed before cleanup removal");
+  return admitted && tier.fault != Fault::Cleanup && files.erase(path.c_str()) != 0;
+}
+static void noteLittleFsBytesWritten(size_t bytes) {
+  io(); check(activeFiles == 0 && bytes > 0, "internal write accounting follows close and counts actual positive bytes");
+  internalBytesNoted += bytes;
+}
+static void noteSDWriteFailure(const char* reason) {
+  io(); check(activeFiles == 0 && std::strcmp(reason, "image save") == 0, "SD write health records closed incomplete image attempt");
+  ++sdFailureNotes;
+}
+static bool getStats(StorageType type, uint64_t& total, uint64_t& used, uint64_t& free) {
+  FsLockGuard guard("mock.stats"); io(); auto& tier = tiers[type]; ++tier.stats;
+  if (tier.statsFailed || !(type == SDCARD ? sdMounted : filesystemReady)) return false;
+  free = tier.free; total = free + 4096; used = 4096; return true;
+}
+}
+static constexpr int SYSEVT_PHOTO_SAVED = 42;
+struct SavedEvent { std::string name, path; };
+static std::vector<SavedEvent> events;
+static std::vector<int> retentions;
+static bool retentionSucceeds = true;
+static void systemEventPost(int type, const char* name, const char* path) {
+  check(type == SYSEVT_PHOTO_SAVED && activeFiles == 0 && heldFs == expectOuterLock,
+        "saved event follows file cleanup and writer-owned lock release");
+  events.push_back({name, path});
+}
+#define time fakeTime
+#define localtime_r fakeLocaltime
+// INSERT_IMAGE_MANAGER
+#undef localtime_r
+#undef time
+bool ImageManager::enforceMaxImages(ImageStorageLocation location) {
+  check(activeFiles == 0 && heldFs == expectOuterLock, "retention follows writer resource release");
+  retentions.push_back(location); return retentionSucceeds;
+}
+
+static void balanced(bool outer = false) {
+  check(activeFiles == 0 && unlockedIo == 0, "all file resources close under filesystem lock");
+  check(heldFs == outer && gives + unsigned(outer) == takes, "filesystem scopes preserve external ownership and balance");
+}
+static void clearObservations() {
+  for (auto& tier : tiers) tier.stats = tier.opens = tier.writes = tier.flushes = tier.closes = tier.removes = tier.mkdirs = 0;
+  accesses.clear(); events.clear(); retentions.clear(); concatCalls = failConcatCall = 0;
+  takes = gives = 0; unlockedIo = 0; internalBytesNoted = 0; sdFailureNotes = 0;
+}
+static ImageManager setup(bool internal = true, bool sd = true) {
+  balanced(); files.clear(); directories.clear(); accesses.clear(); events.clear(); retentions.clear();
+  tiers[0] = {}; tiers[1] = {}; filesystemReady = internal; sdMounted = sd;
+  gSettings.cameraCaptureFolder = "/photos"; fakeNow = 0; retentionSucceeds = true; expectOuterLock = false;
+  ImageManager out; out.init(); clearObservations(); return out;
+}
+static const char* pathFor(bool sd) { return sd ? "/sd/photos/img_000000.jpg" : "/photos/img_000000.jpg"; }
+static ImageStorageLocation locationFor(bool sd) { return sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS; }
+static void hooks(const String& result, ImageStorageLocation location) {
+  if (!result.length()) check(events.empty() && retentions.empty(), "failed save must publish no saved event or retention work");
+  else check(events.size() == 1 && events[0].path == result.c_str() && retentions == std::vector<int>{location},
+             "successful save publishes once and retains once with original location policy");
+}
+static void cleanupIdentity(bool sd) {
+  const std::string expected = sd ? "imgmgr.save_sd" : "imgmgr.save_image_lfs";
+  for (const auto& access : accesses) {
+    if ((access.operation == "open" || access.operation == "remove") && VFS::getStorageType(access.path.c_str()) == (sd ? VFS::SDCARD : VFS::INTERNAL))
+      check(access.reason == expected, "write and failed-output cleanup use the same existing save identity");
+  }
+}
+static void incomplete(bool sd, Fault failure) {
+  auto owner = setup(); tiers[sd].fault = failure;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+  check(!result.length(), "incomplete or rejected image output must not report success");
+  auto& tier = tiers[sd];
+  check(tier.opens == 1 && tier.closes == unsigned(failure != Fault::Open), "every acquired output file is closed once");
+  const bool writable = failure != Fault::Open && failure != Fault::Directory;
+  check(tier.removes == unsigned(writable), "only failed opened regular outputs receive cleanup");
+  if (writable && failure != Fault::Cleanup) check(!files.count(pathFor(sd)), "failed output is removed best-effort");
+  if (failure == Fault::Cleanup) check(files.count(pathFor(sd)) == 1, "cleanup refusal keeps failure visible despite residual partial bytes");
+  if (failure == Fault::Directory) check(files.count(pathFor(sd)) == 1 && !tier.writes, "directory output is never written or removed");
+  const size_t expectedBytes = !writable || failure == Fault::Zero ? 0 :
+      failure == Fault::Short || failure == Fault::Cleanup ? 2 : sizeof(jpeg);
+  check(internalBytesNoted == (sd ? 0 : expectedBytes) && sdFailureNotes == unsigned(sd && writable),
+        "actual partial internal bytes are accounted; only incomplete attempted SD writes update SD health");
+  cleanupIdentity(sd); hooks(result, locationFor(sd)); balanced();
+}
+static void preserveBeforeOpen(bool sd, bool denial) {
+  auto owner = setup();
+  auto original = std::make_shared<Node>(); original->tier = sd;
+  original->bytes = {7, 8, 9}; files[pathFor(sd)] = original;
+  if (denial) tiers[sd].openDenied = true;
+  else tiers[sd].fault = Fault::Open;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+  check(!result.length() && tiers[sd].opens == 1 && !tiers[sd].writes && !tiers[sd].closes && !tiers[sd].removes,
+        "denied/failed open cannot write, close or remove an unacquired destination");
+  check(files.at(pathFor(sd)) == original && original->bytes == std::vector<uint8_t>({7, 8, 9}),
+        "existing destination sentinel survives failed/denied open unchanged");
+  check(!internalBytesNoted && !sdFailureNotes, "unacquired file causes no write accounting or SD health failure");
+  cleanupIdentity(sd); hooks(result, locationFor(sd)); balanced();
+}
+static void bothShort(bool failInternal, bool failSD) {
+  auto owner = setup(); if (failInternal) tiers[0].fault = Fault::Short; if (failSD) tiers[1].fault = Fault::Short;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH);
+  const String expected = !failInternal ? pathFor(false) : !failSD ? pathFor(true) : "";
+  check(result == expected, "BOTH reports only a fully saved tier and prefers successful internal output");
+  for (unsigned tier = 0; tier < 2; ++tier) {
+    const bool failed = tier == 0 ? failInternal : failSD;
+    check(tiers[tier].writes == 1 && tiers[tier].removes == unsigned(failed) && files.count(pathFor(tier)) == unsigned(!failed), "BOTH attempts and cleans each tier independently");
+    cleanupIdentity(tier);
+  }
+  hooks(result, IMAGE_STORAGE_BOTH); balanced();
+}
+static void failedFolder(bool sd) {
+  auto owner = setup(); directories.erase(sd ? "/sd/photos" : "/photos"); tiers[sd].mkdirFailed = true;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+  check(!result.length() && tiers[sd].opens == 0, "failed capture-folder creation must prevent opening the image output");
+  hooks(result, locationFor(sd)); balanced();
+}
+static void lowSpaceBoth(unsigned lowTier, bool bothLow = false) {
+  auto owner = setup(); tiers[lowTier].free = reserveBytes + sizeof(jpeg) - 1;
+  if (bothLow) tiers[1 - lowTier].free = 0;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH);
+  check(tiers[lowTier].opens == 0 && tiers[lowTier].writes == 0, "BOTH must not write a tier that failed free-space admission");
+  check(result == (bothLow ? String("") : String(pathFor(!lowTier))), "BOTH selects only the admitted tier");
+  hooks(result, IMAGE_STORAGE_BOTH); balanced();
+}
+static void overflowLength() {
+  auto owner = setup();
+  const auto result = owner.saveImage(jpeg, SIZE_MAX, IMAGE_STORAGE_BOTH);
+  check(!result.length() && !tiers[0].stats && !tiers[1].stats && !tiers[0].opens && !tiers[1].opens,
+        "oversized length cannot wrap required capacity and must be rejected before I/O");
+  hooks(result, IMAGE_STORAGE_BOTH); balanced();
+}
+static void successful(ImageStorageLocation location) {
+  auto owner = setup(); const auto result = owner.saveImage(jpeg, sizeof(jpeg), location);
+  check(result == pathFor(location == IMAGE_STORAGE_SD), "successful output keeps existing filename and preferred path");
+  for (unsigned tier = 0; tier < 2; ++tier) {
+    const bool wanted = location == IMAGE_STORAGE_BOTH || unsigned(location) == tier;
+    check(tiers[tier].stats == unsigned(wanted) && tiers[tier].opens == unsigned(wanted) && tiers[tier].flushes == unsigned(wanted), "each requested available tier samples fresh capacity and completes one output");
+    if (wanted) check(files.at(pathFor(tier))->bytes == std::vector<uint8_t>(jpeg, jpeg + sizeof(jpeg)) && !tiers[tier].removes, "complete image bytes are retained without cleanup");
+    cleanupIdentity(tier);
+  }
+  check(internalBytesNoted == (location == IMAGE_STORAGE_SD ? 0 : sizeof(jpeg)) && sdFailureNotes == 0,
+        "complete internal writes update existing accounting; complete SD writes do not invalidate health");
+  hooks(result, location); balanced();
+}
+static void admission(bool sd, unsigned failure) {
+  auto owner = setup(); auto& tier = tiers[sd];
+  if (failure == 0) tier.statsFailed = true;
+  if (failure == 1) tier.free = reserveBytes + sizeof(jpeg) - 1;
+  if (failure == 2) tier.free = reserveBytes + sizeof(jpeg);
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+  check(bool(result.length()) == (failure == 2) && tier.opens == unsigned(failure == 2), "single-tier admission checks query outcome and exact safety-margin threshold");
+  check(sdFailureNotes == 0, "admission/query failures do not mark SD write health failed");
+  hooks(result, locationFor(sd)); balanced();
+}
+static void unavailable(bool internal, bool sd, ImageStorageLocation location) {
+  auto owner = setup(internal, sd);
+  // Backend flags can change independently; manager initialization remains its gate.
+  filesystemReady = sdMounted = true;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), location);
+  const bool expectedInternal = internal && location != IMAGE_STORAGE_SD;
+  const bool expectedSD = sd && location != IMAGE_STORAGE_LITTLEFS;
+  check(result == (expectedInternal ? String(pathFor(false)) : expectedSD ? String(pathFor(true)) : String("")), "manager availability controls tier selection and BOTH fallback");
+  check(tiers[0].stats == unsigned(expectedInternal) && tiers[1].stats == unsigned(expectedSD), "unavailable manager tiers perform no capacity query");
+  hooks(result, location); balanced();
+}
+static void invalidInput(bool nullData) {
+  auto owner = setup(); const auto result = owner.saveImage(nullData ? nullptr : jpeg, nullData ? sizeof(jpeg) : 0, IMAGE_STORAGE_BOTH);
+  check(!result.length() && accesses.empty() && !tiers[0].stats && !tiers[1].stats, "null/empty image input performs no storage work");
+  hooks(result, IMAGE_STORAGE_BOTH); balanced();
+}
+static void failedConcat(bool sd, unsigned call) {
+  auto owner = setup(); failConcatCall = call;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+  check(!result.length() && !tiers[sd].opens && files.empty(), "failed complete output-path construction cannot open a truncated path");
+  hooks(result, locationFor(sd)); balanced();
+}
+static void configuredPath(const char* folder, ImageStorageLocation location, const char* expected) {
+  auto owner = setup(); gSettings.cameraCaptureFolder = folder;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), location);
+  check(result == expected, "configured capture path is validated against the tier and returned canonically");
+  if (!result.length()) {
+    check(!tiers[0].stats && !tiers[1].stats && !tiers[0].opens && !tiers[1].opens && accesses.empty(),
+          "invalid/tier-mismatched capture configuration cannot query or touch another storage tier");
+  } else {
+    check(files.count(expected) == 1, "reported canonical output path identifies the completed image");
+    const bool sd = VFS::getStorageType(result) == VFS::SDCARD;
+    check(tiers[sd].writes == 1 && tiers[!sd].writes == 0, "only admitted matching storage tier receives data");
+  }
+  hooks(result, location); balanced();
+}
+static void bothRejected(unsigned rejected, unsigned failure) {
+  auto owner = setup(); auto& tier = tiers[rejected];
+  if (failure == 0) tier.statsFailed = true;
+  if (failure == 1) { tier.mkdirFailed = true; directories.erase(rejected ? "/sd/photos" : "/photos"); }
+  if (failure == 2) tier.fault = Fault::Open;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH);
+  check(result == pathFor(!rejected) && tier.writes == 0 && tier.removes == 0 && sdFailureNotes == 0,
+        "BOTH independently tries other tier after query, folder or open failure without deleting/marking the rejected tier");
+  hooks(result, IMAGE_STORAGE_BOTH); balanced();
+}
+static void nestedSave() {
+  auto owner = setup();
+  { FsLockGuard outer("caller"); expectOuterLock = true;
+    const auto result = owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH);
+    check(result == pathFor(false) && takes == 1 && gives == 0, "nested image save retains original caller lock");
+    hooks(result, IMAGE_STORAGE_BOTH); balanced(true);
+  }
+  expectOuterLock = false; balanced();
+}
+static void filenameAndRetention() {
+  auto owner = setup();
+  check(owner.saveImage(jpeg, sizeof(jpeg)) == "/photos/img_000000.jpg", "untimed image uses current counter");
+  check(owner.saveImage(jpeg, sizeof(jpeg)) == "/photos/img_000001.jpg", "counter advances once per save call");
+  fakeNow = 1; retentionSucceeds = false;
+  check(owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_SD) == "/sd/photos/img_20261009_123456.jpg", "valid clock selects timestamp filename; post-save retention failure keeps saved result");
+  check(events.size() == 3 && events.back().name == "img_20261009_123456.jpg" && retentions.size() == 3, "generated filename agrees with event payload"); balanced();
+}
+int main(int argc, char** argv) {
+  const std::string selected = argc > 1 ? argv[1] : "all";
+  unsigned scenarios = 0, failures = 0;
+  const auto run = [&](const std::string& name, const std::function<void()>& test) {
+    ++scenarios;
+    try { test(); std::printf("PASS %s\n", name.c_str()); }
+    catch (const std::exception& error) { ++failures; std::printf("FAIL %s: %s\n", name.c_str(), error.what()); }
+  };
+  if (selected == "all" || selected == "short") {
+    for (bool sd : {false, true}) run(std::string(sd ? "SD" : "internal") + " short write", [=] { incomplete(sd, Fault::Short); });
+    for (const auto pair : {std::pair<bool, bool>{true, false}, {false, true}, {true, true}})
+      run("BOTH short internal=" + std::to_string(pair.first) + " sd=" + std::to_string(pair.second), [=] { bothShort(pair.first, pair.second); });
+  }
+  if (selected == "all" || selected == "folder") {
+    for (bool sd : {false, true}) run(std::string(sd ? "SD" : "internal") + " capture-folder failure", [=] { failedFolder(sd); });
+  }
+  if (selected == "all" || selected == "capacity") {
+    for (unsigned tier = 0; tier < 2; ++tier) run("BOTH low capacity tier " + std::to_string(tier), [=] { lowSpaceBoth(tier); });
+    run("BOTH neither tier admitted", [] { lowSpaceBoth(0, true); });
+  }
+  if (selected == "all" || selected == "overflow") run("capacity addition overflow", overflowLength);
+  if (selected == "all") {
+    for (bool sd : {false, true}) {
+      const std::string tier = sd ? "SD " : "internal ";
+      for (const auto fault : {Fault::Open, Fault::Zero, Fault::WriteError, Fault::FlushError, Fault::SizeMismatch, Fault::Directory, Fault::Cleanup})
+        run(tier + "write fault " + std::to_string(int(fault)), [=] { incomplete(sd, fault); });
+      for (bool denial : {false, true}) run(tier + (denial ? "denied open preserves prior file" : "failed open preserves prior file"), [=] { preserveBeforeOpen(sd, denial); });
+      for (unsigned failure = 0; failure < 3; ++failure) run(tier + "admission case " + std::to_string(failure), [=] { admission(sd, failure); });
+      for (unsigned call = 1; call <= 2; ++call) run(tier + "path allocation " + std::to_string(call), [=] { failedConcat(sd, call); });
+    }
+    for (auto location : {IMAGE_STORAGE_LITTLEFS, IMAGE_STORAGE_SD, IMAGE_STORAGE_BOTH}) {
+      run("successful tier selection " + std::to_string(location), [=] { successful(location); });
+      for (auto availability : {std::pair<bool, bool>{false, false}, {true, false}, {false, true}})
+        run("availability " + std::to_string(availability.first) + std::to_string(availability.second) + " selection " + std::to_string(location),
+            [=] { unavailable(availability.first, availability.second, location); });
+    }
+    run("null input", [] { invalidInput(true); }); run("empty input", [] { invalidInput(false); });
+    for (unsigned tier = 0; tier < 2; ++tier) for (unsigned failure = 0; failure < 3; ++failure)
+      run("BOTH rejected tier " + std::to_string(tier) + " reason " + std::to_string(failure), [=] { bothRejected(tier, failure); });
+    for (const char* folder : {"/sd/photos", "/./sd/photos", "//sd/photos"}) {
+      run(std::string("configured tier mismatch ") + folder, [=] { configuredPath(folder, IMAGE_STORAGE_LITTLEFS, ""); });
+      run(std::string("BOTH configured SD destination ") + folder, [=] { configuredPath(folder, IMAGE_STORAGE_BOTH, "/sd/sd/photos/img_000000.jpg"); });
+    }
+    run("internal /sdata destination", [] { configuredPath("/sdata", IMAGE_STORAGE_LITTLEFS, "/sdata/img_000000.jpg"); });
+    run("configured internal root", [] { configuredPath("/", IMAGE_STORAGE_LITTLEFS, "/img_000000.jpg"); });
+    run("configured SD root", [] { configuredPath("/", IMAGE_STORAGE_SD, "/sd/img_000000.jpg"); });
+    run("configured trailing slash", [] { configuredPath("/photos//", IMAGE_STORAGE_SD, "/sd/photos/img_000000.jpg"); });
+    run("configured relative folder", [] { configuredPath("pictures", IMAGE_STORAGE_LITTLEFS, "/pictures/img_000000.jpg"); });
+    run("configured empty default", [] { configuredPath("", IMAGE_STORAGE_LITTLEFS, "/photos/img_000000.jpg"); });
+    run("configured traversal refused", [] { configuredPath("/../photos", IMAGE_STORAGE_BOTH, ""); });
+    run("nested filesystem guard", nestedSave);
+    run("counter/clock/event/retention compatibility", filenameAndRetention);
+  }
+  std::printf("ImageManager production writes: %u scenarios, %zu assertions, %u failed\n", scenarios, checks, failures);
+  return failures ? 1 : 0;
+}

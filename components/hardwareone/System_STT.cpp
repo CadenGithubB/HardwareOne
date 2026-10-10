@@ -9,6 +9,7 @@
 #include "G2_Glasses.h"
 #include "System_AuthIdentity.h"
 #include "System_Command.h"
+#include "System_Utils.h"  // secureClearString and validate-only command guard
 #include "System_Debug.h"
 #include "System_ESPSR.h"
 #include "System_MemUtil.h"

@@ -5,14 +5,14 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <freertos/semphr.h>
 
 #include "i2csensor_sths34pf80.h"
 #include "System_Command.h"
 #include "System_Debug.h"
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
 #include "System_MemoryMonitor.h"
+#include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
@@ -67,7 +67,25 @@
 // ============================================================================
 // Presence Sensor Cache (owned by this module)
 // ============================================================================
-PresenceCache gPresenceCache;
+// The mutex is created on first start and retained across stops so readers can
+// safely copy the invalidated reading. No caller owns or holds this lock.
+static PresenceCache sPresenceCache{};
+static SemaphoreHandle_t sPresenceCacheMutex = nullptr;
+
+bool presenceCacheSnapshot(PresenceCache& out, uint32_t timeoutMs) {
+  out = {};
+  SensorCacheGuard guard(sPresenceCacheMutex, pdMS_TO_TICKS(timeoutMs), "presence.snapshot");
+  if (!guard.held) return false;
+  out = sPresenceCache;
+  return true;
+}
+
+static bool presenceInvalidateCache() {
+  SensorCacheGuard guard(sPresenceCacheMutex, pdMS_TO_TICKS(50), "presence.invalidate");
+  if (!guard.held) return false;
+  sPresenceCache.dataValid = false;
+  return true;
+}
 
 // Presence sensor state
 bool gPresenceRunning = false;
@@ -160,44 +178,15 @@ static bool readInt16(TwoWire& wire, uint8_t regL, int16_t* value) {
 
 const char* cmd_presencestart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-
-  if (gPresenceRunning) {
-    return "Error: [PRESENCE] Already running";
-  }
-  
-  if (isInQueue(I2C_DEVICE_PRESENCE)) {
-    if (!ensureDebugBuffer()) return "[PRESENCE] Already in queue";
-    int pos = getQueuePosition(I2C_DEVICE_PRESENCE);
-    snprintf(getDebugBuffer(), 1024, "[PRESENCE] Already in queue at position %d", pos);
-    return getDebugBuffer();
-  }
-
-  if (!i2cPingAddress(I2C_ADDR_PRESENCE, 100000, 50, (uint8_t)gSettings.presenceBus)) {
-    return "Error: [Presence] Not detected on I2C bus";
-  }
-
-  if (enqueueDeviceStart(I2C_DEVICE_PRESENCE)) {
-    sensorStatusBumpWith("openpresence@enqueue");
-    cliHint("the sensor opens in the background - read it with 'presenceread' once it is up");
-    if (!ensureDebugBuffer()) return "[PRESENCE] Sensor queued for open";
-    int pos = getQueuePosition(I2C_DEVICE_PRESENCE);
-    snprintf(getDebugBuffer(), 1024, "[PRESENCE] Sensor queued for open (position %d)", pos);
-    return getDebugBuffer();
-  }
-  
-  return "Error: [PRESENCE] Failed to enqueue open (queue full)";
+  const char* result = cmd_sensorstart_queued(I2C_DEVICE_PRESENCE, "Presence", "openpresence@enqueue");
+  cliHint("the sensor opens in the background - read it with 'presenceread' once it is up");
+  return result;
 }
 
 const char* cmd_presencestop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!gPresenceRunning) {
-    return "Error: [PRESENCE] Not running";
-  }
-  
-  handleDeviceStopped(I2C_DEVICE_PRESENCE);
-  sensorStatusBumpWith("closepresence@CLI");
-  return "[PRESENCE] Sensor close requested; cleanup will complete asynchronously";
+  if (!requestSensorStop(I2C_DEVICE_PRESENCE)) return "Error: [Presence] Could not queue stop";
+  return "[Presence] Stop requested; cleanup will complete asynchronously";
 }
 
 const char* cmd_presenceread(const String& argsInput) {
@@ -215,20 +204,18 @@ const char* cmd_presenceread(const String& argsInput) {
   
   if (!ensureDebugBuffer()) return "Error: [PRESENCE] Debug buffer unavailable";
   
-  {
-    SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(100), "presence.cmdRead");
-    if (g.held) {
-      snprintf(getDebugBuffer(), 1024,
-        "[PRESENCE] Ambient: %.2f°C | Presence: %d %s | Motion: %d %s | TShock: %d %s",
-        gPresenceCache.ambientTemp,
-        gPresenceCache.presenceValue,
-        gPresenceCache.presenceDetected ? "[DETECTED]" : "",
-        gPresenceCache.motionValue,
-        gPresenceCache.motionDetected ? "[DETECTED]" : "",
-        gPresenceCache.tempShockValue,
-        gPresenceCache.tempShockDetected ? "[DETECTED]" : "");
-      return getDebugBuffer();
-    }
+  PresenceCache presence;
+  if (presenceCacheSnapshot(presence, 100)) {
+    snprintf(getDebugBuffer(), 1024,
+      "[PRESENCE] Ambient: %.2f°C | Presence: %d %s | Motion: %d %s | TShock: %d %s",
+      presence.ambientTemp,
+      presence.presenceValue,
+      presence.presenceDetected ? "[DETECTED]" : "",
+      presence.motionValue,
+      presence.motionDetected ? "[DETECTED]" : "",
+      presence.tempShockValue,
+      presence.tempShockDetected ? "[DETECTED]" : "");
+    return getDebugBuffer();
   }
 
   return "Error: [PRESENCE] Could not read cache";
@@ -245,10 +232,13 @@ const char* cmd_presencestatus(const String& argsInput) {
 
   if (!ensureDebugBuffer()) return "Error: [PRESENCE] Debug buffer unavailable";
   
+  PresenceCache presence;
+  // A failed copy reports no available reading while retaining lifecycle status.
+  (void)presenceCacheSnapshot(presence);
   snprintf(getDebugBuffer(), 1024,
     "[PRESENCE] Status: connected=%d enabled=%d taskHandle=%p dataValid=%d",
     gPresenceConnected, gPresenceRunning, (void*)gPresenceTaskHandle,
-    gPresenceCache.dataValid);
+    presence.dataValid);
   return getDebugBuffer();
 }
 
@@ -257,6 +247,10 @@ const char* cmd_presencestatus(const String& argsInput) {
 // ============================================================================
 
 bool presenceStartInternal() {
+  if (gPresenceRunning) return true;
+  // A stopped task owns its resources until cleanup publishes a null handle.
+  if (gPresenceTaskHandle != nullptr) return false;
+
   // Check memory before creating task
   if (!checkMemoryAvailable("presence", nullptr)) {
     ERROR_PRESENCEF("Error: Insufficient memory for presence sensor");
@@ -264,9 +258,9 @@ bool presenceStartInternal() {
   }
 
   // Create cache mutex if not already created
-  if (!gPresenceCache.mutex) {
-    gPresenceCache.mutex = xSemaphoreCreateMutex();
-    if (!gPresenceCache.mutex) {
+  if (!sPresenceCacheMutex) {
+    sPresenceCacheMutex = xSemaphoreCreateMutex();
+    if (!sPresenceCacheMutex) {
       ERROR_PRESENCEF("Error: Failed to create cache mutex");
       return false;
     }
@@ -275,19 +269,12 @@ bool presenceStartInternal() {
 
   // Clean up stale cache
   {
-    SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(100), "presence.cleanStaleCache");
-    if (g.held) {
-      gPresenceCache.dataValid = false;
-      gPresenceCache.ambientTemp = 0.0f;
-      gPresenceCache.objectTemp = 0;
-      gPresenceCache.compObjectTemp = 0.0f;
-      gPresenceCache.presenceValue = 0;
-      gPresenceCache.motionValue = 0;
-      gPresenceCache.tempShockValue = 0;
-      gPresenceCache.presenceDetected = false;
-      gPresenceCache.motionDetected = false;
-      gPresenceCache.tempShockDetected = false;
+    SensorCacheGuard g(sPresenceCacheMutex, pdMS_TO_TICKS(100), "presence.cleanStaleCache");
+    if (!g.held) {
+      ERROR_PRESENCEF("Error: Could not clear stale presence readings");
+      return false;
     }
+    sPresenceCache = {};
   }
   INFO_PRESENCE_LIFECYCLEF("Cleaned up stale cache");
 
@@ -306,6 +293,7 @@ bool presenceStartInternal() {
   // Create task
   if (!createPresenceTask()) {
     gPresenceRunning = false;
+    gPresenceConnected = false;
     ERROR_PRESENCEF("Error: Failed to create presence task");
     return false;
   }
@@ -425,7 +413,7 @@ bool presencePoll() {
   float compObj = compObjRaw / 100.0f;
 
   // Extract detection flags from FUNC_STATUS
-  // Bit 0 = PRES_FLAG, Bit 1 = MOT_FLAG, Bit 2 = TAMB_SHOCK_FLAG
+  // Current mapping: bit 2 = presence, bit 1 = motion, bit 0 = ambient shock
   bool presence = (funcStatus & 0x04) != 0;
   bool motion = (funcStatus & 0x02) != 0;
   bool tempShock = (funcStatus & 0x01) != 0;
@@ -433,19 +421,19 @@ bool presencePoll() {
   // Update cache after releasing the I2C bus, so cache contention cannot hold
   // up unrelated devices sharing that bus.
   {
-    SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(50), "presence.pollWrite");
+    SensorCacheGuard g(sPresenceCacheMutex, pdMS_TO_TICKS(50), "presence.pollWrite");
     if (g.held) {
-      gPresenceCache.ambientTemp = ambient;
-      gPresenceCache.objectTemp = objectRaw;
-      gPresenceCache.compObjectTemp = compObj;
-      gPresenceCache.presenceValue = presenceVal;
-      gPresenceCache.motionValue = motionVal;
-      gPresenceCache.tempShockValue = tempShockVal;
-      gPresenceCache.presenceDetected = presence;
-      gPresenceCache.motionDetected = motion;
-      gPresenceCache.tempShockDetected = tempShock;
-      gPresenceCache.lastUpdate = millis();
-      gPresenceCache.dataValid = true;
+      sPresenceCache.ambientTemp = ambient;
+      sPresenceCache.objectTemp = objectRaw;
+      sPresenceCache.compObjectTemp = compObj;
+      sPresenceCache.presenceValue = presenceVal;
+      sPresenceCache.motionValue = motionVal;
+      sPresenceCache.tempShockValue = tempShockVal;
+      sPresenceCache.presenceDetected = presence;
+      sPresenceCache.motionDetected = motion;
+      sPresenceCache.tempShockDetected = tempShock;
+      sPresenceCache.lastUpdate = millis();
+      sPresenceCache.dataValid = true;
     }
   }
 
@@ -533,8 +521,8 @@ const size_t presenceCommandsCount = sizeof(presenceCommands) / sizeof(presenceC
 int presenceBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
-  SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(50), "presence.buildJSON");
-  if (!g.held) {
+  PresenceCache presence;
+  if (!presenceCacheSnapshot(presence, 50)) {
     // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
     int pos = sensorEnvelopeBegin(buf, bufSize, false, gPresenceConnected, 0);
     if (pos == 0) return 0;
@@ -545,15 +533,15 @@ int presenceBuildDataJSON(char* buf, size_t bufSize) {
     return pos + n;
   }
 
-  int pos = sensorEnvelopeBegin(buf, bufSize, gPresenceCache.dataValid, gPresenceConnected, gPresenceCache.lastUpdate);
+  int pos = sensorEnvelopeBegin(buf, bufSize, presence.dataValid, gPresenceConnected, presence.lastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
                    ",\"ambient\":%.2f,\"presence\":%d,\"presenceDetected\":%s,"
                    "\"motion\":%d,\"motionDetected\":%s,\"tempShock\":%d,\"tempShockDetected\":%s}",
-                   gPresenceCache.ambientTemp,
-                   gPresenceCache.presenceValue, gPresenceCache.presenceDetected ? "true" : "false",
-                   gPresenceCache.motionValue, gPresenceCache.motionDetected ? "true" : "false",
-                   gPresenceCache.tempShockValue, gPresenceCache.tempShockDetected ? "true" : "false");
+                   presence.ambientTemp,
+                   presence.presenceValue, presence.presenceDetected ? "true" : "false",
+                   presence.motionValue, presence.motionDetected ? "true" : "false",
+                   presence.tempShockValue, presence.tempShockDetected ? "true" : "false");
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;
   return pos + n;
 }
@@ -578,8 +566,13 @@ void presenceTask(void* parameter) {
     // Check if sensor disabled for graceful shutdown
     if (!gPresenceRunning) {
       gPresenceConnected = false;
-      gPresenceCache.dataValid = false;
-      SENSOR_TASK_EXIT(PRESENCE);
+      // Invalidate under the same lock as readers. Defer task cleanup when a
+      // copy is in flight; each wait is bounded and no unlocked write is needed.
+      if (!presenceInvalidateCache()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        continue;
+      }
+      SENSOR_TASK_EXIT(PRESENCE, gPresenceTaskHandle);
     }
 
     // Stack watermark tracking + safety bailout
@@ -608,7 +601,7 @@ void presenceTask(void* parameter) {
         bool ok = presencePoll();
         
         if (ok) {
-          // ESP-NOW broadcaster reads presenceBuildDataJSON() on demand from gPresenceCache.
+          // ESP-NOW broadcaster obtains a snapshot through presenceBuildDataJSON().
         } else {
           if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE,
                                    (uint8_t)gSettings.presenceBus)) {

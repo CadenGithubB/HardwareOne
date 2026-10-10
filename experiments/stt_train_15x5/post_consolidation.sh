@@ -14,7 +14,7 @@ cd "$HERE"
 export STT_ROOT=/Volumes/Audiodrive/stt
 export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
-P=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
+P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
 LOG=$STT_ROOT/logs/post-consolidation.log
 KIT=/Volumes/Audiodrive/hw1-stt-kit
 REPO=$(cd "$HERE/../.." && pwd)

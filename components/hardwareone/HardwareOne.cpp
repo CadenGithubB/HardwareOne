@@ -83,6 +83,8 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_Filesystem.h"
 #include "System_SelfDevice.h"
 #include "System_Clock.h"
+#include "System_NTP.h"
+#include "System_WiFiNetworks.h"
 #include "System_CLI.h"
 #include "System_Cm5Presence.h"
 #include "System_LiveAudio.h"
@@ -162,9 +164,6 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
 #endif
-#if ENABLE_NEOPIXEL
-#include <Adafruit_NeoPixel.h>
-#endif
 #if ENABLE_APDS_SENSOR
 #include "Adafruit_APDS9960.h"
 #endif
@@ -242,11 +241,11 @@ const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
 #endif
 
 #include "System_Mutex.h"
+#include "HAL_Input.h"
 
 // Forward declarations
 class VL53L4CX;
 class Adafruit_BNO055;
-extern VL53L4CX* gVL53L4CX;
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 String setSession(httpd_req_t* req, const String& u);
 String getCookieSID(httpd_req_t* req);
@@ -320,7 +319,7 @@ std::atomic<unsigned long> gSerialLastInteractionMs{0};
 bool gLocalDisplayAuthed = false;
 String gLocalDisplayUser = String();
 // Last REAL physical interaction with the OLED session (millis, 0 = never).
-// Stamped on local-display login and whenever gInputCache.seq advances (a
+// Stamped on local-display login and whenever the input activity sequence advances (a
 // gamepad/ANO button or encoder edge). Network commands never touch it, so an
 // OLED login still goes idle while the box is busy serving web/ESP-NOW. Drives
 // the shared per-transport idle-logout policy (sessionIdleExpired).
@@ -372,11 +371,6 @@ void sensorStatusBump() {
 #endif
 }
 
-#if ENABLE_NEOPIXEL
-extern Adafruit_NeoPixel pixels;
-#endif
-extern BatteryState gBatteryState;
-
 // Globals
 #if ENABLE_HTTP_SERVER
 httpd_handle_t server = NULL;
@@ -397,17 +391,13 @@ volatile unsigned long gWebMirrorSeq = 0;
 
 #include "System_RamFlush.h"
 #include "System_Settings.h"
-#include "System_Power.h"  // powerSleepTransitionAllowed/Mark — power-save anti-flap guard
+#include "System_Power.h"  // Shared CPU transitions, power-save policy and cooldown
 Settings gSettings;
 
 String gSerialCLI = "";
 static bool gSerialCLIOverflow = false;  // the line being assembled exceeded CMD_INPUT_MAX; discarded whole at newline
 static TransportSessionEpoch gSerialCLIEpoch = 0;
 
-#if ENABLE_WIFI
-WifiNetwork* gWifiNetworks = nullptr;
-int gWifiNetworkCount = 0;
-#endif
 
 extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, size_t size,
                                                     bool requestedPS, bool usedPS, bool fellBack,
@@ -460,6 +450,7 @@ static inline void printToSerial(const String& s) {
 }
 
 void appendCommandToFeed(const char* source, const String& cmd, const String& user = String(), const String& ip = String()) {
+#if ENABLE_HTTP_SERVER
   // Machine CM5/live-audio inspection may be polled from UART, web, serial,
   // or a future interface. Keep this policy at the shared feed boundary so no
   // transport can evict useful human history with status/capability polls.
@@ -480,6 +471,7 @@ void appendCommandToFeed(const char* source, const String& cmd, const String& us
   if (gWebMirror.buf) {
     gWebMirror.appendDirect(line.c_str(), line.length(), true);
   }
+#endif
 }
 
 static String originPrefix(const char* source, const String& user, const String& ip) {
@@ -1429,21 +1421,10 @@ void hardwareone_setup() {
   detectFirstTimeSetupState();
 
 #if ENABLE_WIFI
-  // WiFi networks array must exist before readSettingsJson deserializes into it
-  if (!gWifiNetworks) {
-    // RequireInternal keeps inline/SSO password bytes out of probeable PSRAM.
-    // A String that allocates a separate payload still follows Arduino's
-    // ordinary allocator; this protects the WifiNetwork object storage itself.
-    gWifiNetworks = (WifiNetwork*)ps_alloc(
-        MAX_WIFI_NETWORKS * sizeof(WifiNetwork),
-        AllocPref::RequireInternal, "wifi.networks");
-    if (!gWifiNetworks) {
-      Serial.println("FATAL: Failed to allocate WiFi networks array");
-      while (1) delay(1000);
-    }
-    for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
-      new (&gWifiNetworks[i]) WifiNetwork();
-    }
+  // The saved-network owner constructs its storage before settings restore.
+  if (!initWiFiNetworks()) {
+    Serial.println("FATAL: Failed to allocate WiFi networks array");
+    while (1) delay(1000);
   }
 #endif
 
@@ -1672,8 +1653,8 @@ void hardwareone_setup() {
       // write-with-response ceiling.
       //
       // 24 = one 16-frame burst + 8 slots for the checkpoint and whatever else
-      // shares this queue (the web Bluetooth page polls `bleinfo json` every
-      // 1.5 s through here). Depth is now cheap: the queue carries a 12-byte
+      // shares this queue. Bluetooth web status reads its owner directly and
+      // needs no command slot. Depth is now cheap: the queue carries a 12-byte
       // CmdExecItem by value (288 B total) and deferred work no longer
       // allocates an ExecReq at all, so a slot costs 12 B rather than 6.4 KB.
       gCmdExecQ = xQueueCreate(24, sizeof(CmdExecItem));
@@ -1840,8 +1821,13 @@ void hardwareone_setup() {
     // so the OLED keyboard can receive input.
     if (oledConnected && gOledRunning) {
       DEBUG_SYSTEMF("[Boot] Starting input device for OLED first-time setup");
-      bool ok = inputStartInternal();  // Properly initializes hardware and creates task
+#if ENABLE_GPIO_ENCODER
+      bool ok = inputStartInternal();
       DEBUG_INPUTF("[Boot] Input device init result: %s", ok ? "SUCCESS" : "FAILED");
+#else
+      const char* result = cmd_sensorstart_queued(I2C_DEVICE_INPUT, "Input", "input@setup");
+      DEBUG_INPUTF("[Boot] %s", result);
+#endif
       delay(100);  // Give input task time to start polling
     }
 #endif
@@ -2404,37 +2390,9 @@ static bool powerSaveInhibited() {
   return micRecordingBusy() || cameraStreaming;
 }
 
-// Clock switch with an ACTIVE I2C drain. pausePolling() only stops NEW poll
-// cycles — the flag is checked at top-of-loop, so an in-flight transaction
-// (a thermal frame read can hold its bus up to its 1500 ms timeout) runs to
-// completion regardless; a fixed post-pause delay is a guess, not a guarantee.
-// Holding every bus mutex across the switch proves the buses are idle AND
-// blocks any new transaction from starting (including cmd_exec-driven reads,
-// which never consult the pause flag) for the microseconds the switch takes.
-// The 2 s take outlasts the worst legitimate holder; on timeout the bus is
-// already wedged (bus-recovery territory), so switch anyway rather than pin
-// the power state forever.
-static void setCpuFrequencyDrained(uint32_t mhz) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  if (mgr) mgr->pausePolling();
-  SemaphoreHandle_t held[I2CDeviceManager::NUM_BUSES] = {};
-  if (mgr) {
-    for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; b++) {
-      SemaphoreHandle_t m = mgr->getBusMutex(b);
-      if (m && xSemaphoreTake(m, pdMS_TO_TICKS(2000)) == pdTRUE) held[b] = m;
-    }
-  }
-  setCpuFrequencyMhz(mhz);
-  if (mgr) {
-    for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; b++) {
-      if (held[b]) xSemaphoreGive(held[b]);
-    }
-    mgr->resumePolling();
-  }
-}
-
 static void powerSaveTick() {
   static bool          asleep = false;
+  static bool          wakePending = false;
   static uint32_t      lastSeq = 0;
   static uint32_t      savedCpuMhz = 0;
   static unsigned long lastSeenActivityMs = 0;
@@ -2449,11 +2407,18 @@ static void powerSaveTick() {
     // test would strand it at 40 after wake. savedCpuMhz holds the pre-idle
     // (interactive) clock; 0 means "we never lowered".
     if (savedCpuMhz != 0 && getCpuFrequencyMhz() < savedCpuMhz) {
-      // Same hazard as the enter path below: switching the CPU clock while
-      // any I2C task is mid-transaction panics the chip (reset=panic(4)).
-      setCpuFrequencyDrained(savedCpuMhz);
+      if (!powerSetCpuFrequencyMhz(savedCpuMhz)) {
+        // The activity stamp may already have been consumed. Remember this
+        // request independently so the next loop still retries restoration.
+        wakePending = true;
+        return;
+      }
     }
     savedCpuMhz = 0;
+    wakePending = false;
+    // A refused idle transition can still need clock recovery if the HAL
+    // changed it before reporting failure. The panel never slept in that case.
+    if (!asleep) return;
     gOledRunning = true;
     oledResumeFromSleep();
     oledMarkDirty();
@@ -2467,22 +2432,28 @@ static void powerSaveTick() {
   const unsigned long now = millis();
   if (!inited) {
     inited = true;
-    lastSeq = gInputCache.seq;
+    inputActivitySequence(lastSeq, 5);
     powerSaveNoteActivity();
     lastSeenActivityMs = powerSaveLastActivityMs();
+  }
+
+  if (wakePending) {
+    wake();
+    return;
   }
 
   // Feature disabled — keep the panel up and the idle clock fresh.
   if (gSettings.powerSaveTimeoutMinutes == 0) {
     if (asleep) wake();
-    lastSeq = gInputCache.seq;
+    inputActivitySequence(lastSeq, 5);
     powerSaveNoteActivity();
     lastSeenActivityMs = powerSaveLastActivityMs();
     return;
   }
 
   // Any input device (gamepad or ANO) advancing seq counts as activity.
-  const uint32_t seq = gInputCache.seq;
+  uint32_t seq = lastSeq;
+  inputActivitySequence(seq, 5);
   if (seq != lastSeq) { lastSeq = seq; powerSaveNoteActivity(); }
 
   // Any noted activity (input OR a user/peer command) wakes it / resets idle.
@@ -2524,17 +2495,14 @@ static void powerSaveTick() {
 
   // Idle long enough — enter power-save, respecting the anti-flap cooldown.
   if (!powerSleepTransitionAllowed(nullptr)) return;
-  powerSleepTransitionMark();
-  oledPrepareForSleep();   // DISPLAYOFF (+ LDO2 cut on FeatherS3); board-aware
-  gOledRunning = false;    // updateOLEDDisplay() now early-returns → refresh stops
   // Downclock to the current mode's IDLE floor. Locked keeps 240 through idle
   // (OLED blanks, core stays hot). Performance/Balanced/PowerSaver hold the
   // 80 MHz Wi-Fi floor while asleep — radio stays up so HTTP/ESP-NOW remain
   // reachable; we only shed dynamic core power. UltraSaver is the exception:
-  // it sinks all the way to 40 MHz here (its headline deep-save clock), which
-  // is safe ONLY because the panel is blanked and idle — 40 MHz makes the
-  // interactive UI unusably laggy, so it's confined to this asleep state and
-  // any input (gInputCache.seq) or command wakes it back to >=80 via wake()
+  // it sinks all the way to 40 MHz here (its headline deep-save clock). The
+  // panel is blanked immediately after the confirmed clock change — 40 MHz
+  // makes the interactive UI unusably laggy, so it is reserved for idle and
+  // any input (the input activity sequence) or command wakes it back to >=80 via wake()
   // above. Only switch if the floor is actually below the live clock (never
   // raise here).
   savedCpuMhz = getCpuFrequencyMhz();
@@ -2564,15 +2532,25 @@ static void powerSaveTick() {
 #endif
 
   if (idleFloorMhz < savedCpuMhz) {
-    // Guard the clock switch. setCpuFrequencyMhz() swaps the CPU clock and
-    // fires clock-change callbacks; unguarded, doing that while gps_task was
-    // mid-I2C transaction panic-rebooted the device on every idle power-save
-    // entry (reset=panic(4) every ~10 min whenever it was left alone with a
-    // GPS fix — the whole 2026-07-17 crash-loop day).
-    setCpuFrequencyDrained(idleFloorMhz);
+    // The shared owner drains I2C before switching. Leave the display and
+    // transition state untouched when it cannot confirm the requested clock.
+    bool clockChanged = false;
+    if (!powerSetCpuFrequencyMhz(idleFloorMhz, &clockChanged)) {
+      // A busy refusal can race another command's accepted clock change.
+      // Recover only our own partial transition, never that other request.
+      if (clockChanged && getCpuFrequencyMhz() < savedCpuMhz) {
+        wakePending = true;
+      } else {
+        savedCpuMhz = 0;
+      }
+      return;
+    }
   } else {
     savedCpuMhz = 0;  // nothing lowered → wake() must not "restore" a raise
   }
+  powerSleepTransitionMark();
+  oledPrepareForSleep();   // DISPLAYOFF (+ LDO2 cut on FeatherS3); board-aware
+  gOledRunning = false;    // updateOLEDDisplay() now early-returns → refresh stops
   asleep = true;
   batteryLogEvent("powersave:enter");
   {

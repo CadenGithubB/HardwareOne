@@ -436,6 +436,113 @@ add_test(NAME input_button_snapshot
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_input_button_snapshot.py)
 add_test(NAME optional_peripheral_config
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_optional_peripheral_config.py)
+add_test(NAME saved_build_config
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_saved_build_config.py)
+add_test(NAME build_config_workflow
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_build_config_workflow.py)
+add_test(NAME build_config_wizard
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_build_config_wizard.py)
+add_test(NAME xiao_peripheral_config
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_xiao_peripheral_config.py)
+add_test(NAME sdkconfig_policy
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdkconfig_policy.py)
+add_test(NAME command_header_boundary
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_command_header_boundary.py
+    --cxx ${CMAKE_CXX_COMPILER})
+set(COMMAND_CATALOGUE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND COMMAND_CATALOGUE_TEST_ARGS --sanitize)
+endif()
+add_test(NAME command_catalogue
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_command_catalogue.py
+    ${COMMAND_CATALOGUE_TEST_ARGS})
+set(NTP_TRANSPORT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND NTP_TRANSPORT_TEST_ARGS --sanitize)
+endif()
+add_test(NAME ntp_transport
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_ntp_transport.py
+    ${NTP_TRANSPORT_TEST_ARGS})
+set(WIFI_NETWORKS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND WIFI_NETWORKS_TEST_ARGS --sanitize)
+endif()
+add_test(NAME wifi_networks
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wifi_networks.py
+    ${WIFI_NETWORKS_TEST_ARGS})
+add_test(NAME wifi_network_consumers
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wifi_network_consumers.py)
+add_test(NAME wifi_saved_ui
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wifi_saved_ui.py
+    ${WIFI_NETWORKS_TEST_ARGS})
+set(GPS_SNAPSHOT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND GPS_SNAPSHOT_TEST_ARGS --sanitize)
+endif()
+add_test(NAME gps_snapshot
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_gps_snapshot.py
+    ${GPS_SNAPSHOT_TEST_ARGS})
+set(PRESENCE_SNAPSHOT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND PRESENCE_SNAPSHOT_TEST_ARGS --sanitize)
+endif()
+add_test(NAME presence_snapshot
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_presence_snapshot.py
+    ${PRESENCE_SNAPSHOT_TEST_ARGS})
+set(SENSOR_READING_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND SENSOR_READING_TEST_ARGS --sanitize)
+endif()
+add_test(NAME small_sensor_snapshots
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_small_sensor_snapshots.py
+    ${SENSOR_READING_TEST_ARGS})
+add_test(NAME apds_read_commands
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_apds_read_commands.py
+    ${SENSOR_READING_TEST_ARGS})
+add_test(NAME apds_gesture_driver
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_apds_gesture_driver.py
+    ${SENSOR_READING_TEST_ARGS})
+add_test(NAME tof_read_command
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_tof_read_command.py
+    ${SENSOR_READING_TEST_ARGS})
+add_test(NAME thermal_snapshot
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_thermal_snapshot.py
+    ${SENSOR_READING_TEST_ARGS})
+add_test(NAME fm_radio_snapshot
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_fm_radio_snapshot.py
+    ${SENSOR_READING_TEST_ARGS})
+add_test(NAME servo_command_outcomes
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_servo_command_outcomes.py
+    ${SENSOR_READING_TEST_ARGS})
+add_test(NAME sensor_reading_consumers
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sensor_reading_consumers.py
+    ${SENSOR_READING_TEST_ARGS})
+add_test(NAME g2_disabled_header
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_g2_disabled_header.py
+    ${SENSOR_READING_TEST_ARGS})
+add_test(NAME oled_without_input
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_without_input.py
+    --cxx ${CMAKE_CXX_COMPILER})
+set(DISPLAY_LIFECYCLE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND DISPLAY_LIFECYCLE_TEST_ARGS --sanitize)
+endif()
+add_test(NAME display_lifecycle
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_display_lifecycle.py
+    ${DISPLAY_LIFECYCLE_TEST_ARGS})
+add_test(NAME mqtt_feature_config
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_feature_config.py
+          --cxx ${CMAKE_CXX_COMPILER})
+add_test(NAME network_build_selection
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_network_build_selection.py
+          --cxx ${CMAKE_CXX_COMPILER} --cmake ${CMAKE_COMMAND})
+set(ESPNOW_INTERFACE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_INTERFACE_TEST_ARGS --sanitize)
+endif()
+add_test(NAME espnow_disabled_interface
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_espnow_disabled_interface.py
+          ${ESPNOW_INTERFACE_TEST_ARGS})
 set(SDMMC_TEST_ARGS)
 if(HW1_SANITIZE)
   list(APPEND SDMMC_TEST_ARGS --sanitize)
@@ -535,6 +642,144 @@ add_test(
   NAME mqtt_lifecycle_contract
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_lifecycle_contract.py)
+set(SETUP_MQTT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND SETUP_MQTT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME setup_mqtt_application
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_setup_mqtt_application.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME mqtt_boolean_commands
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_boolean_commands.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME ble_info_status
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_info_status.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME ring_info_status
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ring_info_status.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME g2_connection_status
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_connection_status.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME g2_client_lifecycle
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_client_lifecycle.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME g2_redraw
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_redraw.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME g2_power_completion
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_power_completion.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME g2_mic_completion
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_mic_completion.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME sensorlog_selection
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensorlog_selection.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME sensorlog_ui
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensorlog_ui.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME sensorlog_settings
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensorlog_settings.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME gpslog_start
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_gpslog_start.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME map_live_tracking
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_map_live_tracking.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME map_live_ui
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_map_live_ui.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME health_logging_ui
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_health_logging_ui.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME g2_reopen
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_reopen.py
+          ${SETUP_MQTT_TEST_ARGS})
+find_program(HW1_NODE_EXECUTABLE NAMES node nodejs)
+if(HW1_NODE_EXECUTABLE)
+  add_test(
+    NAME map_live_browser
+    COMMAND ${HW1_NODE_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/map_live_browser_test.js)
+  add_test(
+    NAME g2_status_browser
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_g2_status_browser.py
+            --node ${HW1_NODE_EXECUTABLE})
+  add_test(
+    NAME sensor_mic_card
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_sensor_mic_card.py
+            --node ${HW1_NODE_EXECUTABLE})
+else()
+  message(STATUS "Node.js not found: map_live_browser, g2_status_browser and sensor_mic_card are not registered")
+endif()
+add_test(
+  NAME setup_espnow_application
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_setup_espnow_application.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME setup_completion
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_setup_completion.py
+          ${SETUP_MQTT_TEST_ARGS})
+set(POWER_CPU_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND POWER_CPU_TEST_ARGS --sanitize)
+endif()
+foreach(test_name IN ITEMS power_cpu_frequency power_save_tick)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${POWER_CPU_TEST_ARGS})
+endforeach()
+set(ICON_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ICON_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME icon_ownership
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_icon_ownership.py
+          ${ICON_TEST_ARGS})
 add_test(
   NAME user_settings_transaction_guards
   COMMAND ${Python3_EXECUTABLE}
@@ -547,7 +792,10 @@ set(FILESYSTEM_PSRAM_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND FILESYSTEM_PSRAM_TEST_ARGS --sanitize)
 endif()
-foreach(test_name IN ITEMS fileread_psram g2_files_psram filesystem_psram_listing)
+foreach(test_name IN ITEMS fileread_psram g2_files_psram filesystem_psram_listing
+                           filemanager_directory espnow_directory checked_text_writes
+                           upload_lifecycle storage_stats espnow_fs_transcript_privacy
+                           image_storage image_writes)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}
@@ -612,6 +860,30 @@ add_test(
   NAME i2c_transaction_contract
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_i2c_transaction_contract.py)
+set(I2C_PROBE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND I2C_PROBE_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME i2c_probe
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_i2c_probe.py
+          ${I2C_PROBE_TEST_ARGS})
+add_test(
+  NAME i2c_device_queue
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_i2c_device_queue.py
+          ${I2C_PROBE_TEST_ARGS})
+add_test(
+  NAME sensor_lifecycle_requests
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensor_lifecycle_requests.py
+          ${I2C_PROBE_TEST_ARGS})
+add_test(
+  NAME sensor_start_outcomes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensor_start_outcomes.py
+          ${I2C_PROBE_TEST_ARGS})
 set(TOF_PSRAM_LIFECYCLE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND TOF_PSRAM_LIFECYCLE_TEST_ARGS --sanitize)
@@ -620,6 +892,11 @@ add_test(
   NAME tof_psram_lifecycle
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_tof_psram_lifecycle.py
+          ${TOF_PSRAM_LIFECYCLE_TEST_ARGS})
+add_test(
+  NAME tof_poll_outcomes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_tof_poll_outcomes.py
           ${TOF_PSRAM_LIFECYCLE_TEST_ARGS})
 set(SENSOR_PARENT_LIFECYCLE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
@@ -630,6 +907,16 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_sensor_parent_lifecycle.py
           ${SENSOR_PARENT_LIFECYCLE_TEST_ARGS})
+
+set(SENSOR_TASK_RESTART_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND SENSOR_TASK_RESTART_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME sensor_task_restart
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensor_task_restart.py
+          ${SENSOR_TASK_RESTART_TEST_ARGS})
 
 set(OTA_PSRAM_REPLIES_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)

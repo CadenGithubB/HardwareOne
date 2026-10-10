@@ -46,10 +46,21 @@ static constexpr unsigned long kGamepadInitMinIntervalMs = 2000, kAnoInitMinInte
 static bool gImuConnected = false, gApdsConnected = false, gPwmDriverConnected = false;
 static bool gInputConnected = false, gInputRunning = false, gAnoEncoderConnected = false;
 static bool gAnoEncoderEnabled = false, gImuRunning = false;
+static bool gApdsRunning = false, gApdsColorRunning = false, gApdsProximityRunning = false, gApdsGestureRunning = false;
 static bool gImuInitRequested = true, gImuInitDone = true, gImuInitResult = true;
-static struct { bool imuDataValid = true; unsigned imuSeq = 4; } gImuCache;
-static struct { bool apdsDataValid = true; } gApdsCache;
-static struct { bool dataValid = true; } gInputCache, gAnoEncoderCache;
+static struct { bool imuDataValid = true; unsigned imuSeq = 4; } sImuCache;
+static struct {
+  bool apdsDataValid = true;
+  bool apdsColorValid = true, apdsProximityValid = true, apdsGestureValid = true;
+} sApdsCache;
+static struct { bool dataValid = true; } gInputCache, sAnoEncoderCache;
+// Synchronization is a boundary mock here; the snapshot suite executes the
+// production guard and invalidation under admission failure separately.
+static int sImuCacheMutex=1, sApdsCacheMutex=1, sAnoCacheMutex=1;
+struct SensorCacheGuard { bool held=true; SensorCacheGuard(int,unsigned,const char*) {} };
+static unsigned pdMS_TO_TICKS(unsigned ms) { return ms; }
+static void vTaskDelay(unsigned) { throw std::runtime_error("unexpected cache admission failure"); }
+static bool inputCacheInvalidate() { gInputCache.dataValid=false; return true; }
 struct ServoProfile {
   bool configured = true;
   int minPulse = 0, maxPulse = 0, centerPulse = 0;
@@ -204,7 +215,7 @@ static void broadcastOutput(const char*) {}
 #define WARN_INPUTF(...) testLog(__VA_ARGS__)
 #define ERROR_ANO_ENCODERF(...) testLog(__VA_ARGS__)
 #define INFO_ANO_ENCODER_LIFECYCLEF(...) testLog(__VA_ARGS__)
-#define SENSOR_TASK_EXIT(sensor) do { ++scenario.taskExits; return; } while (0)
+#define SENSOR_TASK_EXIT(sensor, ...) do { ++scenario.taskExits; return; } while (0)
 
 // INSERT_PRODUCTION_SENSOR_CODE_HERE
 
@@ -228,8 +239,9 @@ static void resetScenario() {
   gImuRunning = false; gAnoEncoderEnabled = false;
   gLastGamepadInitMs = 0; gLastAnoInitMs = 0;
   gImuInitRequested = true; gImuInitDone = true; gImuInitResult = true;
-  gImuCache.imuDataValid = true; gImuCache.imuSeq = 4;
-  gApdsCache.apdsDataValid = true; gInputCache.dataValid = true; gAnoEncoderCache.dataValid = true;
+  sImuCache.imuDataValid = true; sImuCache.imuSeq = 4;
+  sApdsCache.apdsDataValid = true; gInputCache.dataValid = true; sAnoEncoderCache.dataValid = true;
+  sApdsCache.apdsColorValid = sApdsCache.apdsProximityValid = sApdsCache.apdsGestureValid = true;
 }
 static void testAllocationAndBusFailure() {
   const std::vector<bool(*)()> initializers = {imuInit, apdsInit, servoInit, gamepadInit,
@@ -255,7 +267,7 @@ static void testFreedFailureParents() {
   check(imuInit() && gBNO055 == imu && stats["imu.obj"].allocations == imuAllocations,
         "already initialized BNO does not allocate again");
   stopImuBranch();
-  check(!gBNO055 && !gImuConnected && !gImuCache.imuDataValid && gImuCache.imuSeq == 0 &&
+  check(!gBNO055 && !gImuConnected && !sImuCache.imuDataValid && sImuCache.imuSeq == 0 &&
         !gImuInitRequested && !gImuInitDone && !gImuInitResult,
         "actual BNO task shutdown frees parent and resets cache/init flags");
   resetScenario(); scenario.beginResults = {false, false, true};
@@ -273,16 +285,29 @@ static void testFreedFailureParents() {
   check(apdsInit() && gAPDS9960 == apds && stats["apds.obj"].allocations == 2,
         "already initialized APDS retains object");
   stopApdsBranch();
-  check(!gAPDS9960 && !gApdsConnected && !gApdsCache.apdsDataValid,
+  check(!gAPDS9960 && !gApdsConnected && !sApdsCache.apdsDataValid,
         "actual APDS shutdown frees parent and invalidates cache");
+  check(!sApdsCache.apdsColorValid && !sApdsCache.apdsProximityValid && !sApdsCache.apdsGestureValid,
+        "APDS shutdown invalidates every sampled field");
 
   resetScenario(); scenario.defaultBegin = false;
+  for (auto& profile : servoProfiles) profile = {};
+  servoProfiles[0].minPulse = 700;
+  servoProfiles[0].maxPulse = 2300;
+  servoProfiles[0].centerPulse = 1500;
+  for (int i = 1; i < MAX_SERVO_CHANNELS; ++i) servoProfiles[i].configured = false;
   check(!servoInit() && !gPwmDriver && stats["servo.obj"].frees == 1, "servo begin failure frees parent");
   scenario.defaultBegin = true;
   check(servoInit() && gPwmDriverConnected, "servo retries with new parent");
-  for (const auto& profile : servoProfiles)
+  check(servoProfiles[0].configured && servoProfiles[0].minPulse == 700 &&
+        servoProfiles[0].maxPulse == 2300 && servoProfiles[0].centerPulse == 1500 &&
+        std::strcmp(servoProfiles[0].name, "previous") == 0,
+        "servo retry preserves a configured profile");
+  for (int i = 1; i < MAX_SERVO_CHANNELS; ++i) {
+    const auto& profile = servoProfiles[i];
     check(!profile.configured && profile.minPulse == 500 && profile.maxPulse == 2500 &&
-          profile.centerPulse == 1500 && profile.name[0] == '\0', "servo profile initialization unchanged");
+          profile.centerPulse == 1500 && profile.name[0] == '\0', "unconfigured servo defaults unchanged");
+  }
   auto* servo = gPwmDriver;
   check(servoInit() && gPwmDriver == servo && stats["servo.obj"].allocations == 2,
         "connected servo retains its parent");
@@ -302,7 +327,7 @@ static void testRetainedGamepad() {
     stopGamepadBranch();
     check(gGamepadSeesaw == retained && !gInputConnected && !gInputCache.dataValid,
           "actual gamepad stop keeps parent and invalidates cache");
-    check(gamepadInitConnection() && gGamepadSeesaw == retained && gInputRunning &&
+    check(gamepadInitConnection() && gGamepadSeesaw == retained && !gInputRunning &&
           stats["input.gamepad.obj"].allocations == 1,
           "reconnect path reuses parent retained by ordinary init/stop");
   }
@@ -329,7 +354,7 @@ static void testRetainedAno() {
           "ANO reconnect reuses failed-init parent and initializes encoder/proxy");
     stopAnoBranch();
     check(gAnoSeesaw == retained && !gAnoEncoderConnected && !gInputConnected &&
-          !gAnoEncoderCache.dataValid && !gInputCache.dataValid && stats["input.ano.obj"].frees == 0,
+          !sAnoEncoderCache.dataValid && !gInputCache.dataValid && stats["input.ano.obj"].frees == 0,
           "actual ANO stop retains parent and invalidates own/proxy cache");
     check(!anoEncoderInitConnection(), "ANO reconnect preserves backoff window");
     scenario.now += 2001;

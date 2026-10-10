@@ -1,5 +1,7 @@
 # ESP32-P4X-EYE feasibility study (2026-09-27)
 
+Device MAC addresses in this evidence use synthetic aliases. Serial ports and private workspace locations use generic placeholders; hardware observations and measurements are unchanged.
+
 The investigation that preceded HardwareOne's P4X-EYE support: can one
 HardwareOne application run on the ESP32-P4X-EYE, and what would it take?
 It recommended staying on ESP-IDF 5.5.5 instead of migrating to IDF 6 first,

@@ -28,7 +28,6 @@
 #include "System_LLMTypes.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
-#include "System_Utils.h"
 #include "System_VFS.h"
 
 #if ENABLE_LLM_SOURCE_ONBOARD

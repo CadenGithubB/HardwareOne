@@ -116,8 +116,10 @@ public:
   // filter(entry) returns false. Folders are ALWAYS kept regardless so the
   // user can still navigate. Used by the OLED file-picker layer (see
   // FilePickerRequest in OLED_Display.h) to scope a browse session to e.g.
-  // *.bin or *.hwmap. Setter triggers a refresh so the new filter applies
-  // immediately to the cached directory.
+  // *.bin or *.hwmap. The predicate uses name, isFolder and size; permission
+  // and child-count metadata is populated only after an entry is accepted.
+  // Keep it deterministic so cached and uncached lookups see the same view.
+  // Setter rescans the directory, applying the filter before the cache limit.
   using VisibilityFilter = bool (*)(const FileEntry& entry);
   void setVisibilityFilter(VisibilityFilter filter);
 
@@ -161,6 +163,7 @@ private:
   // FileEntry.childCount. Off by default — see setCountFolderChildren().
   bool countFolderChildren_ = false;
 
+  bool isVisible(const FileEntry& entry) const;
   bool loadDirectory();
   void ensureValidSelection();
   bool isProtectedPath(const char* path);

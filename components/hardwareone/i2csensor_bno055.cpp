@@ -9,21 +9,21 @@
 #include <Adafruit_BNO055.h>
 #include <Adafruit_Sensor.h>
 #include <Arduino.h>
+#include <freertos/semphr.h>
 #include <new>
 #include <utility/imumaths.h>
 
 #include "OLED_Display.h"
 #include "System_Command.h"
 #include "System_Debug.h"
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
 #include "System_MemUtil.h"
+#include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 
 // BNO055 sensor object (owned by this module)
-Adafruit_BNO055* gBNO055 = nullptr;
+static Adafruit_BNO055* gBNO055 = nullptr;
 
 // IMU initialization handoff variables
 volatile bool gImuInitRequested = false;
@@ -36,10 +36,76 @@ volatile bool gImuInitResult = false;
 // ============================================================================
 // IMU Sensor Cache (owned by this module)
 // ============================================================================
-ImuCache gImuCache;
+// The mutex is retained across stops; readers never own the live storage.
+static ImuCache sImuCache{};
+static SemaphoreHandle_t sImuCacheMutex = nullptr;
+
+bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs) {
+  out = {};
+  SensorCacheGuard guard(sImuCacheMutex, pdMS_TO_TICKS(timeoutMs), "imu.snapshot");
+  if (!guard.held) return false;
+  out = sImuCache;
+  return true;
+}
+
+size_t imuCacheStorageBytes() {
+  return sizeof(sImuCache) + sizeof(sImuCacheMutex);
+}
+
+static bool imuInvalidateCache() {
+  SensorCacheGuard guard(sImuCacheMutex, pdMS_TO_TICKS(50), "imu.invalidate");
+  if (!guard.held) return false;
+  sImuCache.imuDataValid = false;
+  sImuCache.imuSeq = 0;
+  return true;
+}
 
 // IMU Action Detection System - definitions
-IMUActionState gImuActions = {
+// Derived action history is internal; only imuUpdateActions and CLI use it.
+struct IMUActionState {
+  bool isShaking;
+  unsigned long lastShakeMs;
+  uint32_t shakeCount;
+  float shakeIntensity;
+
+  bool isTilted;
+  float tiltAngle;
+  char tiltDirection;  // 'F'=forward, 'B'=back, 'L'=left, 'R'=right, 'N'=none
+
+  bool tapDetected;
+  unsigned long lastTapMs;
+  uint32_t tapCount;
+  float tapStrength;
+
+  bool isRotating;
+  float rotationRate;  // deg/s
+  char rotationAxis;   // 'X', 'Y', 'Z', or 'N' for none
+
+  bool isFreefalling;
+  unsigned long freefallStartMs;
+  uint32_t freefallDurationMs;
+
+  bool isWalking;
+  uint32_t stepCount;
+  unsigned long lastStepMs;
+  float stepFrequency;
+
+  char orientation;  // 'P'=portrait, 'L'=landscape, 'U'=upside-down, 'R'=reverse, 'F'=face-up, 'D'=face-down
+  char lastOrientation;
+  unsigned long lastOrientationChangeMs;
+
+  float accelHistory[10];
+  int accelHistoryIndex;
+  unsigned long lastUpdateMs;
+  float baselineAccel;
+
+  float lastAccelMag;
+  bool stepPeakDetected;
+  unsigned long stepWindowStartMs;
+  uint32_t stepsInWindow;
+};
+
+static IMUActionState gImuActions = {
   false, 0, 0, 0.0f,  // shake
   false, 0.0f, 'N',   // tilt
   false, 0, 0, 0.0f,  // tap
@@ -92,16 +158,16 @@ const char* cmd_imu(const String& argsInput) {
 
   // Read from sensor cache instead of accessing hardware directly
   {
-    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(100), "imu.cmdRead");
-    if (g.held) {
-      if (gImuCache.imuDataValid) {
+    ImuCache reading;
+    if (imuCacheSnapshot(reading, 100)) {
+      if (reading.imuDataValid) {
         BROADCAST_PRINTF("Orientation - Yaw: %.1f° Pitch: %.1f° Roll: %.1f°",
-                         gImuCache.oriYaw, gImuCache.oriPitch, gImuCache.oriRoll);
+                         reading.oriYaw, reading.oriPitch, reading.oriRoll);
         BROADCAST_PRINTF("Acceleration - X: %.2f Y: %.2f Z: %.2f m/s²",
-                         gImuCache.accelX, gImuCache.accelY, gImuCache.accelZ);
+                         reading.accelX, reading.accelY, reading.accelZ);
         BROADCAST_PRINTF("Gyroscope - X: %.2f Y: %.2f Z: %.2f rad/s",
-                         gImuCache.gyroX, gImuCache.gyroY, gImuCache.gyroZ);
-        BROADCAST_PRINTF("Temperature: %.1f°C", gImuCache.imuTemp);
+                         reading.gyroX, reading.gyroY, reading.gyroZ);
+        BROADCAST_PRINTF("Temperature: %.1f°C", reading.imuTemp);
       } else {
         broadcastOutput("IMU data not yet available");
       }
@@ -116,6 +182,10 @@ const char* cmd_imu(const String& argsInput) {
 
 // Internal function called by queue processor
 bool imuStartInternal() {
+  if (gImuRunning) return true;
+  // A stopped task owns its resources until cleanup publishes a null handle.
+  if (gImuTaskHandle != nullptr) return false;
+
   // Check if too soon after stop (prevent rapid restart crashes)
   if (gImuLastStopTime > 0) {
     unsigned long timeSinceStop = millis() - gImuLastStopTime;
@@ -132,9 +202,9 @@ bool imuStartInternal() {
   }
 
   // Create cache mutex if not already created
-  if (!gImuCache.mutex) {
-    gImuCache.mutex = xSemaphoreCreateMutex();
-    if (!gImuCache.mutex) {
+  if (!sImuCacheMutex) {
+    sImuCacheMutex = xSemaphoreCreateMutex();
+    if (!sImuCacheMutex) {
       ERROR_IMUF("Failed to create cache mutex");
       return false;
     }
@@ -142,23 +212,20 @@ bool imuStartInternal() {
   }
 
   // Clean up any stale cache from previous run BEFORE starting
-  // CRITICAL: Cache wasn't invalidated during stop to avoid dying-task crashes
   {
-    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(100), "imu.cleanStaleCache");
-    if (g.held) {
-      gImuCache.imuDataValid = false;
-      gImuCache.oriYaw = 0;
-      gImuCache.oriPitch = 0;
-      gImuCache.oriRoll = 0;
-      gImuCache.accelX = 0;
-      gImuCache.accelY = 0;
-      gImuCache.accelZ = 0;
-      gImuCache.gyroX = 0;
-      gImuCache.gyroY = 0;
-      gImuCache.gyroZ = 0;
-      gImuCache.imuTemp = 0;
-      DEBUG_CLIF("[IMU_INTERNAL] Cleaned up stale cache from previous run");
-    }
+    SensorCacheGuard g(sImuCacheMutex, pdMS_TO_TICKS(100), "imu.cleanStaleCache");
+    if (!g.held) return false;
+    sImuCache.imuDataValid = false;
+    sImuCache.oriYaw = 0;
+    sImuCache.oriPitch = 0;
+    sImuCache.oriRoll = 0;
+    sImuCache.accelX = 0;
+    sImuCache.accelY = 0;
+    sImuCache.accelZ = 0;
+    sImuCache.gyroX = 0;
+    sImuCache.gyroY = 0;
+    sImuCache.gyroZ = 0;
+    sImuCache.imuTemp = 0;
   }
 
   // CRITICAL: Enable flag BEFORE creating task to prevent race condition
@@ -177,6 +244,12 @@ bool imuStartInternal() {
   if (!createIMUTask()) {
     DEBUG_CLIF("Failed to create IMU task (insufficient memory or resources)");
     gImuRunning = false;  // Reset flag on failure
+    gImuConnected = false;
+    gImuInitRequested = false;
+    gImuInitDone = false;
+    gImuInitResult = false;
+    ps_delete(gBNO055);
+    gBNO055 = nullptr;
     return false;
   }
   if (gImuRunning != prev) {
@@ -186,10 +259,10 @@ bool imuStartInternal() {
   // If init was requested, block up to 3s for a result so CLI returns accurate status
   if (gImuInitRequested || gBNO055 == nullptr || !gImuConnected) {
     unsigned long start = millis();
-    while (!gImuInitDone && (millis() - start) < 3000UL) {
+    while (gImuRunning && !gImuInitDone && (millis() - start) < 3000UL) {
       delay(10);
     }
-    if (!gImuInitDone) {
+    if (!gImuRunning || !gImuInitDone) {
       gImuRunning = false;
       DEBUG_CLIF("Failed to initialize IMU sensor (timeout after 3s)");
       return false;
@@ -202,10 +275,6 @@ bool imuStartInternal() {
   }
   DEBUG_CLIF("[IMU_INTERNAL] SUCCESS: BNO055 IMU sensor started");
   
-  // Broadcast sensor status to ESP-NOW master
-#if ENABLE_ESPNOW
-  broadcastSensorStatus(REMOTE_SENSOR_IMU, true);
-#endif
   
   return true;
 }
@@ -213,38 +282,13 @@ bool imuStartInternal() {
 // Public command - uses centralized queue
 const char* cmd_imustart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-
-  // Check if already enabled or queued
-  if (gImuRunning) {
-    return "Error: [IMU] Already running";
-  }
-  if (isInQueue(I2C_DEVICE_IMU)) {
-    int pos = getQueuePosition(I2C_DEVICE_IMU);
-    BROADCAST_PRINTF("IMU sensor already queued (position %d)", pos);
-    return "[IMU] Already queued";
-  }
-
-  if (!i2cPingAddress(I2C_ADDR_IMU, 100000, 50,
-                      (uint8_t)gSettings.imuBus)) {
-    return "Error: [IMU] Not detected on I2C bus";
-  }
-
-  // Enqueue the request to centralized queue
-  if (enqueueDeviceStart(I2C_DEVICE_IMU)) {
-    sensorStatusBumpWith("openimu@enqueue");
-    int pos = getQueuePosition(I2C_DEVICE_IMU);
-    BROADCAST_PRINTF("IMU sensor queued for open (position %d)", pos);
-    return "[IMU] Sensor queued for open";
-  } else {
-    return "Error: [IMU] Failed to enqueue open (queue full)";
-  }
+  return cmd_sensorstart_queued(I2C_DEVICE_IMU, "IMU", "openimu@enqueue");
 }
 
 const char* cmd_imustop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  handleDeviceStopped(I2C_DEVICE_IMU);
-  return "[IMU] Close requested; cleanup will complete asynchronously";
+  if (!requestSensorStop(I2C_DEVICE_IMU)) return "Error: [IMU] Could not queue stop";
+  return "[IMU] Stop requested; cleanup will complete asynchronously";
 }
 
 const char* cmd_imuactions(const String& argsInput) {
@@ -566,21 +610,21 @@ void imuPoll() {
   {
     // Pattern 3: take/write/release, then run imuUpdateActions WITHOUT the lock
     // (intentional — action detection does its own short take in the function).
-    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(50), "imu.pollWrite");
+    SensorCacheGuard g(sImuCacheMutex, pdMS_TO_TICKS(50), "imu.pollWrite");
     if (g.held) {
-      gImuCache.accelX = accelEvent.acceleration.x;
-      gImuCache.accelY = accelEvent.acceleration.y;
-      gImuCache.accelZ = accelEvent.acceleration.z;
-      gImuCache.gyroX = gyroEvent.gyro.x;
-      gImuCache.gyroY = gyroEvent.gyro.y;
-      gImuCache.gyroZ = gyroEvent.gyro.z;
-      gImuCache.oriYaw = rawYaw;
-      gImuCache.oriPitch = rawPitch;
-      gImuCache.oriRoll = rawRoll;
-      gImuCache.imuTemp = (float)t;
-      gImuCache.imuLastUpdate = millis();
-      gImuCache.imuDataValid = true;
-      gImuCache.imuSeq++;
+      sImuCache.accelX = accelEvent.acceleration.x;
+      sImuCache.accelY = accelEvent.acceleration.y;
+      sImuCache.accelZ = accelEvent.acceleration.z;
+      sImuCache.gyroX = gyroEvent.gyro.x;
+      sImuCache.gyroY = gyroEvent.gyro.y;
+      sImuCache.gyroZ = gyroEvent.gyro.z;
+      sImuCache.oriYaw = rawYaw;
+      sImuCache.oriPitch = rawPitch;
+      sImuCache.oriRoll = rawRoll;
+      sImuCache.imuTemp = (float)t;
+      sImuCache.imuLastUpdate = millis();
+      sImuCache.imuDataValid = true;
+      sImuCache.imuSeq++;
       updated = true;
     }
   }
@@ -598,8 +642,9 @@ void imuPoll() {
 int imuBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
-  SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS), "imu.buildJSON");
-  if (!g.held) {
+  ImuCache reading;
+  const bool available = imuCacheSnapshot(reading, CACHE_MUTEX_TIMEOUT_MS);
+  if (!available) {
     // Cache-lock timeout: not-ready envelope (was: {"error":"IMU cache timeout"}).
     int pos = sensorEnvelopeBegin(buf, bufSize, false, gImuConnected, 0);
     if (pos == 0) return 0;
@@ -612,7 +657,7 @@ int imuBuildDataJSON(char* buf, size_t bufSize) {
   // measurement (accel/gyro/ori/temp). Dropped: seq (bookkeeping, redundant with
   // ts), enabled (duplicate of the discovery-layer enabled), init* flags
   // (device-state, unconsumed) — see docs/SENSOR_ENVELOPE_CLEANUP_PLAN.md.
-  int pos = sensorEnvelopeBegin(buf, bufSize, gImuCache.imuDataValid, gImuConnected, gImuCache.imuLastUpdate);
+  int pos = sensorEnvelopeBegin(buf, bufSize, reading.imuDataValid, gImuConnected, reading.imuLastUpdate);
   if (pos == 0) return 0;
   // Precision is matched to the hardware, not habit: accel LSB is 0.01 m/s²
   // (driver raw/100 — a third decimal is always '0'), gyro LSB is 0.0625 dps
@@ -624,10 +669,10 @@ int imuBuildDataJSON(char* buf, size_t bufSize) {
                    "\"gyro\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},"
                    "\"ori\":{\"yaw\":%.2f,\"pitch\":%.2f,\"roll\":%.2f},"
                    "\"temp\":%d}",
-                   gImuCache.accelX, gImuCache.accelY, gImuCache.accelZ,
-                   gImuCache.gyroX, gImuCache.gyroY, gImuCache.gyroZ,
-                   gImuCache.oriYaw, gImuCache.oriPitch, gImuCache.oriRoll,
-                   (int)gImuCache.imuTemp);
+                   reading.accelX, reading.accelY, reading.accelZ,
+                   reading.gyroX, reading.gyroY, reading.gyroZ,
+                   reading.oriYaw, reading.oriPitch, reading.oriRoll,
+                   (int)reading.imuTemp);
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;
   return pos + n;
 }
@@ -641,26 +686,15 @@ static bool gWasWalking = false;
 
 // Update all IMU action detections
 void imuUpdateActions(bool postEvents) {
-  if (!gImuRunning || !gImuConnected || !gImuCache.imuDataValid) return;
+  if (!gImuRunning || !gImuConnected) return;
+  ImuCache reading;
+  if (!imuCacheSnapshot(reading) || !reading.imuDataValid) return;
 
   unsigned long now = millis();
 
-  // Pattern 3: snapshot cache values into locals, release the lock, then do
-  // the math (sqrt, history buffer) outside the lock. The explicit { } block
-  // controls the guard's lifetime so the lock releases before the math runs.
-  float ax, ay, az, gx, gy, gz, roll, pitch;
-  {
-    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "imu.actionDetect");
-    if (!g.held) return;
-    ax = gImuCache.accelX;
-    ay = gImuCache.accelY;
-    az = gImuCache.accelZ;
-    gx = gImuCache.gyroX;
-    gy = gImuCache.gyroY;
-    gz = gImuCache.gyroZ;
-    roll = gImuCache.oriRoll;
-    pitch = gImuCache.oriPitch;
-  }
+  const float ax = reading.accelX, ay = reading.accelY, az = reading.accelZ;
+  const float gx = reading.gyroX, gy = reading.gyroY, gz = reading.gyroZ;
+  const float roll = reading.oriRoll, pitch = reading.oriPitch;
 
   // Calculate acceleration magnitude
   float accelMag = sqrt(ax * ax + ay * ay + az * az);
@@ -1146,19 +1180,21 @@ void imuTask(void* parameter) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!gImuRunning) {
       gImuConnected = false;
+      if (!imuInvalidateCache()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        continue;
+      }
       if (gBNO055 != nullptr) {
         ps_delete(gBNO055);
         gBNO055 = nullptr;
       }
-      gImuCache.imuDataValid = false;
-      gImuCache.imuSeq = 0;
       
       // Reset initialization flags for clean restart
       gImuInitRequested = false;
       gImuInitDone = false;
       gImuInitResult = false;
       
-      SENSOR_TASK_EXIT(IMU);
+      SENSOR_TASK_EXIT(IMU, gImuTaskHandle);
     }
     
     // Update watermark diagnostics (only when enabled)
@@ -1228,7 +1264,7 @@ void imuTask(void* parameter) {
           }
         }
         
-        // ESP-NOW broadcaster reads imuBuildDataJSON() on demand from gImuCache.
+        // ESP-NOW broadcaster reads imuBuildDataJSON() on demand from sImuCache.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     } else {

@@ -18,6 +18,7 @@
 #include <mbedtls/platform_util.h>
 #include <ctype.h>
 #include <memory>
+#include <optional>
 #include <atomic>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -30,6 +31,7 @@
 #include "System_MemUtil.h"
 #include "System_PsramBuffer.h"
 #include "System_Mutex.h"
+#include "System_PollPause.h"
 #include "System_Settings.h"
 #include "System_SelfDevice.h"
 #include "System_Clock.h"
@@ -2290,24 +2292,21 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   uint32_t heapStart = ESP.getFreeHeap();
   
   // Pause sensor polling during file upload to prevent I2C timeouts
-  pollPause();
+  PollPauseGuard pollGuard;
   DEBUG_STORAGEF("[handleFileUpload] Sensor polling paused for upload");
 
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileUpload] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
-    pollResume();
     return ESP_OK;
   }
   if (!webGuestAccessAllowed(req, ctx)) {
-    pollResume();
     return ESP_OK;
   }
   DEBUG_STORAGEF("[handleFileUpload] Auth SUCCESS for user: %s", ctx.user.c_str());
 
   if (!filesystemReady) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Filesystem not ready");
-    pollResume();
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Filesystem not initialized\"}");
     return ESP_OK;
   }
@@ -2330,7 +2329,6 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   // If the destination is SD but it isn't mounted, reject early with a clear message.
   if (uploadStorage == VFS::SDCARD && !VFS::isSDAvailable()) {
-    pollResume();
     sendJsonResponse(req, "{\"success\":false,\"error\":\"SD card not available\"}");
     return ESP_OK;
   }
@@ -2353,7 +2351,6 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   // Check if estimated file size exceeds available space
   if (estimatedFileSize > maxFileSize) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: File too large for available space");
-    pollResume();
     httpd_resp_set_type(req, "application/json");
     char errBuf[128];
     snprintf(errBuf, sizeof(errBuf),
@@ -2384,10 +2381,10 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   // Output buffer for writes - use PSRAM for larger buffer (better throughput)
   const size_t OUT_BUF_SIZE = 4096;  // 4KB instead of 256 bytes
-  uint8_t* uploadOutBuf = (uint8_t*)ps_alloc(OUT_BUF_SIZE, AllocPref::PreferPSRAM);
+  std::unique_ptr<uint8_t[], void (*)(void*)> uploadOutBuf(
+      (uint8_t*)ps_alloc(OUT_BUF_SIZE, AllocPref::PreferPSRAM), free);
   if (!uploadOutBuf) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Failed to allocate output buffer");
-    pollResume();
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Memory allocation failed\"}");
     return ESP_OK;
   }
@@ -2398,14 +2395,15 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   size_t freeLimit = freeBytes;
   bool outOfSpace = false;
 
+  // Acquire only when the validated destination opens; keep it through cleanup.
+  std::optional<FsLockGuard> fileLock;
   File file;
   bool fileOpen = false;
-  bool fsLockedForUpload = false;
 
   bool shortWrite = false;
   auto flushWrite = [&]() {
     if (outLen && fileOpen) {
-      size_t w = file.write(uploadOutBuf, outLen);
+      size_t w = file.write(uploadOutBuf.get(), outLen);
       if (w != outLen) {
         shortWrite = true;
       }
@@ -2490,13 +2488,10 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     }
     DEBUG_STORAGEF("[handleFileUpload] Opening file for write: %s", path.c_str());
 
-    fsLock("handleFileUpload.file");
-    fsLockedForUpload = true;
+    fileLock.emplace("handleFileUpload.file");
     file = VFS::openGuarded(path, "w", ctx, /*create=*/true);
     if (!file) {
       ERROR_STORAGEF("Failed to open file for write or denied: %s", path.c_str());
-      fsUnlock();
-      fsLockedForUpload = false;
       return false;
     }
     fileOpen = true;
@@ -2505,15 +2500,14 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   // Stream receive and parse - use PSRAM for larger buffer (better throughput)
   const size_t RECV_BUF_SIZE = 4096;  // 4KB instead of 512 bytes
-  char* uploadRecvBuf = (char*)ps_alloc(RECV_BUF_SIZE, AllocPref::PreferPSRAM);
+  std::unique_ptr<char[], void (*)(void*)> uploadRecvBuf(
+      (char*)ps_alloc(RECV_BUF_SIZE, AllocPref::PreferPSRAM), free);
   if (!uploadRecvBuf) {
-    free(uploadOutBuf);
-    pollResume();
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Failed to allocate recv buffer");
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Memory allocation failed\"}");
     return ESP_OK;
   }
-  char* buf = uploadRecvBuf;
+  char* buf = uploadRecvBuf.get();
   size_t received = 0;
   int attempts = 0;
   size_t chunkIndex = 0;
@@ -2522,206 +2516,177 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   const char* expect = "path=";
   size_t expectPos = 0;
 
-  while (received < contentLen) {
-    attempts++;
-    int toRead = (int)min((size_t)(contentLen - received), RECV_BUF_SIZE);
-    int ret = httpd_req_recv(req, buf, toRead);
-    if (ret <= 0) {
-      if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
-      DEBUG_STORAGEF("[handleFileUpload] Recv error %d", ret);
-      if (fileOpen) file.close();
-      if (fsLockedForUpload) {
-        fsUnlock();
-        fsLockedForUpload = false;
+  // All receive/write exits return here, so finalization has one owner.
+  const char* uploadError = [&]() -> const char* {
+    while (received < contentLen) {
+      attempts++;
+      int toRead = (int)min((size_t)(contentLen - received), RECV_BUF_SIZE);
+      int ret = httpd_req_recv(req, buf, toRead);
+      if (ret <= 0) {
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        DEBUG_STORAGEF("[handleFileUpload] Recv error %d", ret);
+        return "Recv error";
       }
-      free(uploadOutBuf);
-      free(uploadRecvBuf);
-      pollResume();
-      sendJsonResponse(req, "{\"success\":false, \"error\":\"Recv error\"}");
-      return ESP_OK;
-    }
-    received += ret;
-    chunkIndex++;
-    DEBUG_STORAGEF("[handleFileUpload] Chunk %d: %d bytes (total %d/%d)", (int)chunkIndex, ret, (int)received, (int)contentLen);
+      received += ret;
+      chunkIndex++;
+      DEBUG_STORAGEF("[handleFileUpload] Chunk %d: %d bytes (total %d/%d)", (int)chunkIndex, ret, (int)received, (int)contentLen);
 
-    for (int i = 0; i < ret; i++) {
-      // Yield every 64 bytes to prevent WDT timeout during base64 decoding
-      // Use delay(0) instead of taskYIELD() to ensure IDLE task runs and feeds watchdog
-      if ((i & 0x3F) == 0) {
-        delay(0);
-      }
-      
-      char c = buf[i];
-      if (field != F_CONTENT) {
-        // Matching expected literal until '=' consumed
-        if (expect && expect[expectPos] != 0) {
-          if (c == expect[expectPos]) {
-            expectPos++;
-            continue;
-          }
-        }
-      }
-
-      if (field == F_PATH) {
-        if (c == '&' && urlState == 0) {
-          DEBUG_STORAGEF("[handleFileUpload] PATH parsed: %s", path.c_str());
-          field = F_BINARY;
-          expect = "binary=";
-          expectPos = 0;
-          continue;
-        }
-        urlConsume(c);
-      } else if (field == F_BINARY) {
-        if (c == '=') { continue; }
-        if (c == '&') {
-          binaryKnown = true;
-          DEBUG_STORAGEF("[handleFileUpload] BINARY parsed: %d", (int)isBinary);
-          field = F_CONTENT;
-          expect = "content=";
-          expectPos = 0;
-          continue;
-        }
-        if (c == '1') isBinary = true;
-        else if (c == '0') isBinary = false;   // single digit expected
-      } else {                                 // F_CONTENT
-        if (!binaryKnown) binaryKnown = true;  // fallback
-        if (!fileOpen) {
-          if (!openFileIfNeeded()) {
-            free(uploadOutBuf);
-            free(uploadRecvBuf);
-            sendJsonResponse(req, "{\"success\":false, \"error\":\"Invalid path\"}");
-            return ESP_OK;
-          }
-        }
-        if (expect && expect[expectPos] != 0) {
-          if (c == expect[expectPos]) {
-            expectPos++;
-            continue;
-          }
-          // If mismatch, assume content starts immediately after '=' in rare cases
-          expect = nullptr;
+      for (int i = 0; i < ret; i++) {
+        // Yield every 64 bytes to prevent WDT timeout during base64 decoding
+        // Use delay(0) instead of taskYIELD() to ensure IDLE task runs and feeds watchdog
+        if ((i & 0x3F) == 0) {
+          delay(0);
         }
 
-        if (!isBinary) {
-          // URL-decode to bytes and write
+        char c = buf[i];
+        if (field != F_CONTENT) {
+          // Matching expected literal until '=' consumed
+          if (expect && expect[expectPos] != 0) {
+            if (c == expect[expectPos]) {
+              expectPos++;
+              continue;
+            }
+          }
+        }
+
+        if (field == F_PATH) {
           if (c == '&' && urlState == 0) {
-            // End of content (unlikely, content is last). Flush and ignore rest
-            flushWrite();
+            DEBUG_STORAGEF("[handleFileUpload] PATH parsed: %s", path.c_str());
+            field = F_BINARY;
+            expect = "binary=";
+            expectPos = 0;
+            continue;
+          }
+          urlConsume(c);
+        } else if (field == F_BINARY) {
+          if (c == '=') { continue; }
+          if (c == '&') {
+            binaryKnown = true;
+            DEBUG_STORAGEF("[handleFileUpload] BINARY parsed: %d", (int)isBinary);
+            field = F_CONTENT;
+            expect = "content=";
+            expectPos = 0;
+            continue;
+          }
+          if (c == '1') isBinary = true;
+          else if (c == '0') isBinary = false;   // single digit expected
+        } else {                                 // F_CONTENT
+          if (!binaryKnown) binaryKnown = true;  // fallback
+          if (!fileOpen) {
+            if (!openFileIfNeeded()) return "Invalid path";
+          }
+          if (expect && expect[expectPos] != 0) {
+            if (c == expect[expectPos]) {
+              expectPos++;
+              continue;
+            }
+            // If mismatch, assume content starts immediately after '=' in rare cases
+            expect = nullptr;
+          }
+
+          if (!isBinary) {
+            // URL-decode to bytes and write
+            if (c == '&' && urlState == 0) {
+              // End of content (unlikely, content is last). Flush and ignore rest
+              flushWrite();
+            } else {
+              // Stream URL decoding for text
+              if (urlState == 0 && c == '%') {
+                urlState = 1;
+              } else if (urlState == 1) {
+                hexBuf[0] = c;
+                urlState = 2;
+              } else if (urlState == 2) {
+                hexBuf[1] = c;
+                hexBuf[2] = 0;
+                putByte((uint8_t)strtol(hexBuf, NULL, 16));
+                urlState = 0;
+              } else if (c == '+') {
+                putByte(' ');
+              } else {
+                putByte((uint8_t)c);
+              }
+            }
           } else {
-            // Stream URL decoding for text
-            if (urlState == 0 && c == '%') {
-              urlState = 1;
+            // URL-decode to base64 chars, then base64-decode to bytes
+            char emitB64 = 0;
+            bool haveEmit = false;
+            if (urlState == 0) {
+              if (c == '%') {
+                urlState = 1;
+              } else if (c == '+') {
+                emitB64 = ' ';
+                haveEmit = true;
+              } else {
+                emitB64 = c;
+                haveEmit = true;
+              }
             } else if (urlState == 1) {
               hexBuf[0] = c;
               urlState = 2;
-            } else if (urlState == 2) {
+            } else {  // urlState==2
               hexBuf[1] = c;
               hexBuf[2] = 0;
-              putByte((uint8_t)strtol(hexBuf, NULL, 16));
+              emitB64 = (char)strtol(hexBuf, NULL, 16);
+              haveEmit = true;
               urlState = 0;
-            } else if (c == '+') {
-              putByte(' ');
-            } else {
-              putByte((uint8_t)c);
             }
-          }
-        } else {
-          // URL-decode to base64 chars, then base64-decode to bytes
-          char emitB64 = 0;
-          bool haveEmit = false;
-          if (urlState == 0) {
-            if (c == '%') {
-              urlState = 1;
-            } else if (c == '+') {
-              emitB64 = ' ';
-              haveEmit = true;
-            } else {
-              emitB64 = c;
-              haveEmit = true;
-            }
-          } else if (urlState == 1) {
-            hexBuf[0] = c;
-            urlState = 2;
-          } else {  // urlState==2
-            hexBuf[1] = c;
-            hexBuf[2] = 0;
-            emitB64 = (char)strtol(hexBuf, NULL, 16);
-            haveEmit = true;
-            urlState = 0;
-          }
-          if (haveEmit) {
-            char ch = emitB64;
-            if (ch == '=') { b64pad = true; }
-            const char* table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            const char* p = strchr(table, ch);
-            if (p || ch == '=') {
-              if (ch != '=') {
-                b64val = (b64val << 6) + (p - table);
-                b64valb += 6;
-                if (b64valb >= 0) {
-                  putByte((uint8_t)((b64val >> b64valb) & 0xFF));
-                  b64valb -= 8;
+            if (haveEmit) {
+              char ch = emitB64;
+              if (ch == '=') { b64pad = true; }
+              const char* table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+              const char* p = strchr(table, ch);
+              if (p || ch == '=') {
+                if (ch != '=') {
+                  b64val = (b64val << 6) + (p - table);
+                  b64valb += 6;
+                  if (b64valb >= 0) {
+                    putByte((uint8_t)((b64val >> b64valb) & 0xFF));
+                    b64valb -= 8;
+                  }
                 }
               }
             }
           }
         }
       }
+      if ((chunkIndex % 8) == 0) {
+        flushWrite();
+        if (outOfSpace || shortWrite) break;
+        delay(0);
+      }
     }
-    if ((chunkIndex % 8) == 0) {
-      flushWrite();
-      if (outOfSpace || shortWrite) break;
-      delay(0);
-    }
-  }
+    // No destination means the request never reached its content field.
+    if (!fileOpen) return "Missing content";
+    // Preserve the streaming decoder's handling of a trailing partial '%'.
+    flushWrite();
+    if (outOfSpace) return "Insufficient storage space";
+    if (shortWrite) return "Write failed (short write)";
+    return nullptr;
+  }();
 
-  // Flush any remaining url-decode state for text content (nothing to emit for partial %)
-  flushWrite();
-  if (outOfSpace || shortWrite) {
-    if (fileOpen) {
-      file.close();
-      fileOpen = false;
-    }
-    {
-      FsLockGuard fsGuard("handleFileUpload.cleanup");
-      // We just opened this file with the user's identity; cleaning up
-      // the failed write should use the same identity, not system. The
-      // user wouldn't have been allowed to OPEN it without DELETE-able
-      // semantics for the directory; but if cleanup denies (rule says
-      // user can write but not delete?), fall back to system as a last
-      // resort to avoid leaving an orphan partial upload.
+  if (fileOpen) {
+    if (!uploadError) file.flush();
+    file.close();
+    if (uploadError) {
+      // Remove only the partial destination opened by this upload, while its
+      // lock is still held. Retain the existing user-first cleanup policy.
       if (!VFS::removeGuarded(path, ctx)) {
         VFS::removeGuarded(path, VFS::systemAuth("upload.cleanup.partial"));
       }
     }
-    if (fsLockedForUpload) {
-      fsUnlock();
-      fsLockedForUpload = false;
-    }
-    const char* reason = outOfSpace ? "Insufficient storage space" : "Write failed (short write)";
-    DEBUG_STORAGEF("[handleFileUpload] ERROR: %s (wrote %d / free %d)", reason, (int)totalWritten, (int)freeLimit);
-    free(uploadOutBuf);
-    free(uploadRecvBuf);
-    pollResume();
-    httpd_resp_set_type(req, "application/json");
+  }
+  fileLock.reset();
+  uploadOutBuf.reset();
+  uploadRecvBuf.reset();
+
+  if (uploadError) {
+    DEBUG_STORAGEF("[handleFileUpload] ERROR: %s (wrote %d / free %d)", uploadError, (int)totalWritten, (int)freeLimit);
     char errBuf[128];
-    snprintf(errBuf, sizeof(errBuf), "{\"success\":false,\"error\":\"%s\"}", reason);
-    httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
+    snprintf(errBuf, sizeof(errBuf), "{\"success\":false,\"error\":\"%s\"}", uploadError);
+    sendJsonResponse(req, errBuf);
     return ESP_OK;
   }
-
-  if (fileOpen) {
-    file.flush();
-    file.close();
-  }
-  if (fsLockedForUpload) {
-    fsUnlock();
-    fsLockedForUpload = false;
-  }
-
-  // Free PSRAM buffers
-  free(uploadOutBuf);
-  free(uploadRecvBuf);
 
   DEBUG_STORAGEF("[handleFileUpload] COMPLETE: wrote %d bytes to '%s' (binary=%s), heap delta=%d, dur=%u ms",
                  (int)totalWritten, path.c_str(), isBinary ? "true" : "false", (int)ESP.getFreeHeap() - (int)heapStart, (unsigned)(millis() - tStart));
@@ -2769,10 +2734,6 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     }
   }
  #endif
-
-  // Resume sensor polling after upload completes
-  pollResume();
-  DEBUG_STORAGEF("[handleFileUpload] Sensor polling resumed");
 
   sendJsonResponse(req, "{\"success\":true}");
   return ESP_OK;
@@ -2913,7 +2874,11 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   // Build settings object using unified builder (passwords excluded for security)
   JsonObject settings = response["settings"].to<JsonObject>();
   PSRAM_JSON_DOC(settingsDoc);
-  buildSettingsJsonDoc(settingsDoc, true);  // true = exclude WiFi passwords from web API
+  if (!buildSettingsJsonDoc(settingsDoc, true)) {  // exclude passwords from web API
+    DEBUG_STORAGEF("[Settings API] Could not snapshot saved WiFi networks");
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
   settings.set(settingsDoc.as<JsonObject>());
   
   // Add response envelope
@@ -5126,7 +5091,6 @@ esp_err_t handleIconGet(httpd_req_t* req) {
 
   DEBUG_HTTPF("[Icon] GET name='%s' debug=%d", name, debug ? 1 : 0);
 
-  extern const EmbeddedIcon* findEmbeddedIcon(const char* name);
   const EmbeddedIcon* icon = findEmbeddedIcon(name);
   
   if (!icon) {

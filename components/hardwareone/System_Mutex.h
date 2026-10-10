@@ -152,12 +152,9 @@ struct I2sMicLockGuard {
 /**
  * SensorCacheGuard - RAII guard for per-sensor cache mutexes.
  *
- * Sensor cache structs (gImuCache, gTofCache, gGpsCache, gThermalCache,
- * gApdsCache, gInputCache, gRtcCache, gPresenceCache, gFmRadioCache) all
- * follow the convention `SemaphoreHandle_t mutex = nullptr;` as their first
- * field. This guard takes that mutex by handle. Unlike the other guards in
- * this file, it has no "the" mutex — each sensor cache has its own, so the
- * handle is stored in the guard for the destructor.
+ * Cache data and mutexes stay private to their sensor owner. Consumers ask
+ * for snapshots; this guard is for the owner's short read/write sections.
+ * Each owner supplies its mutex handle, retained here for the destructor.
  *
  * Timeouts are caller-specified because reads (UI, snapshot) and writes
  * (driver task) have different patience: UI uses 5ms ("show '...' if busy"),
@@ -170,9 +167,9 @@ struct I2sMicLockGuard {
  *
  * Usage (block-scoped read/write):
  *   {
- *     SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(5), "g2.imuRead");
+ *     SensorCacheGuard g(sImuCacheMutex, pdMS_TO_TICKS(5), "imu.publish");
  *     if (g.held) {
- *       // ... read/write gImuCache.* fields ...
+ *       // ... read/write sImuCache.* fields ...
  *       if (errorCondition) return "ERROR";  // dtor releases automatically
  *     }
  *   }
@@ -180,7 +177,7 @@ struct I2sMicLockGuard {
  * Usage (function-scoped with intentional early release):
  *   void someTask() {
  *     {
- *       SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "imu.snapshot");
+ *       SensorCacheGuard g(sImuCacheMutex, pdMS_TO_TICKS(10), "imu.snapshot");
  *       if (!g.held) return;
  *       // copy cache fields into locals
  *     }  // ← guard released here, BEFORE the work below

@@ -149,7 +149,7 @@ struct OLEDScrollItem {
   bool isHighlighted;
   void* userData;
   uint8_t icon;
-  const char* iconName;   // Icon name for drawIcon() in split-pane mode
+  const char* iconName;   // Icon name for oledDrawIcon() in split-pane mode
   uint32_t validationKey;
 };
 

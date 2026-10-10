@@ -19,14 +19,18 @@
 #if ENABLE_OLED_DISPLAY && ENABLE_MAPS
 
 #include <Adafruit_SSD1306.h>
+#include <cstring>
 #include "System_Maps.h"
 #include "System_Mutex.h"   // MapCacheGuard — serialize tile-cache reads vs mapRenderTask
 #include "OLED_Utils.h"
+#include "OLED_UI.h"  // Shared command-failure toasts
 #include "System_FileManager.h"
 #include "i2csensor_seesaw.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_Command.h"
+#include "HAL_Input.h"
+#include "System_SensorStubs.h"  // gGpsRunning when the GPS sensor is disabled
 #include "System_TaskUtils.h"
 #include "System_VFS.h"
 
@@ -1512,7 +1516,18 @@ static void executeSubmenuAction(int submenuType, int action) {
           }
           break;
         case 1:  // Clear Track
-          GPSTrackManager::clearTrack();
+          {
+            char result[160] = {};
+            const bool executed = executeOLEDCommandWithResult(
+                "gpstrack clear", result, sizeof(result));
+            const char* message = strncmp(result, "OK: ", 4) == 0 ? result + 4 : result;
+            if (!executed || strcmp(message, "GPS track cleared") != 0) {
+              oledToastShow(result[0] ? result : "Clear track failed", 3000,
+                            OledUIIcon::ERROR);
+            } else {
+              sForceRender = true;
+            }
+          }
           break;
         case 2:  // Track Status
           gShowTrackStatus = true;
@@ -1525,25 +1540,17 @@ static void executeSubmenuAction(int submenuType, int action) {
           }
           break;
         case 4:  // Live Track - toggle
-          // executeOLEDCommand builds a proper SOURCE_LOCAL_DISPLAY
-          // AuthContext and goes through the cmd_exec queue. Permission
-          // decisions in `sensorlog start` and friends are correctly
-          // attributed to the local-display user.
           {
-            if (GPSTrackManager::isLiveTracking()) {
-              GPSTrackManager::setLiveTracking(false);
-              executeOLEDCommand("sensorlog stop");
+            // One owner decides whether to start or stop, under this display's
+            // authenticated command session, and publishes the resulting state.
+            char result[160] = {};
+            const bool executed = executeOLEDCommandWithResult(
+                "gpstrack live toggle", result, sizeof(result));
+            if (!executed || strncmp(result, "SUCCESS:", 8) != 0) {
+              oledToastShow(result[0] ? result : "Live track failed", 3000,
+                            OledUIIcon::ERROR);
             } else {
-              // Auto-start GPS sensor if not running
-              if (!gGpsRunning) {
-                executeOLEDCommand("opengps");
-              }
-              GPSTrackManager::clearTrack();
-              GPSTrackManager::setLiveTracking(true);
-              // Auto-start file logging in track format so data persists
-              executeOLEDCommand("sensorlog format track");
-              executeOLEDCommand("sensorlog sensors gps");
-              executeOLEDCommand("sensorlog start /logging_captures/tracks/live.csv 1000");
+              sForceRender = true;
             }
           }
           break;
@@ -1996,10 +2003,18 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
             if (validation == TRACK_OUT_OF_BOUNDS) {
               GPSTrackManager::clearTrack();
             }
+            sForceRender = true;
+          } else {
+            oledToastShow(errorMsg.length() ? errorMsg.c_str() : "Load track failed",
+                          3000, OledUIIcon::ERROR);
           }
         } else if (gTrackSelectMode == 2) {
           // Delete track
-          GPSTrackManager::deleteTrackFile(gTrackFiles[gTrackFileIdx]);
+          if (GPSTrackManager::deleteTrackFile(gTrackFiles[gTrackFileIdx])) {
+            sForceRender = true;
+          } else {
+            oledToastShow("Delete track failed", 3000, OledUIIcon::ERROR);
+          }
         }
       }
       gTrackSelectMode = 0;
@@ -2145,12 +2160,12 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   bool aHeld = false;
 #if ENABLE_OLED_INPUT
   {
-    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "map.aHeldCheck");
-    if (g.held) {
+    InputCache input{};
+    if (inputCacheSnapshot(input, 5)) {
       // buttons stores active-low (1 = unpressed). Inverting + mask
       // gives "currently pressed" for whichever logical A bit the active
       // input driver uses.
-      aHeld = (~gInputCache.buttons & INPUT_MASK(INPUT_BUTTON_A)) != 0;
+      aHeld = (~input.buttons & INPUT_MASK(INPUT_BUTTON_A)) != 0;
     }
   }
 #endif

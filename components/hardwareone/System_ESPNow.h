@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <esp_attr.h>   // EXT_RAM_BSS_ATTR (MAC_STR static)
+#include <esp_err.h>
 
 #include "System_BuildConfig.h"
 
@@ -29,6 +30,15 @@ enum class EspNowMeshRxKind : uint8_t {
   BootstrapLiveness = 3,
 };
 
+// This radio instance's own STA / AP address. ESP-NOW uses its checked cache
+// while running; a driver query can be a blocking RPC on a Hosted (P4 + C6)
+// radio, so it is only the fallback before start or after stop.
+// With ESP-NOW disabled, WiFi builds query the driver directly. With both
+// disabled, non-null outputs are zeroed and ESP_ERR_NOT_SUPPORTED is returned.
+// Every configuration rejects a null output with ESP_ERR_INVALID_ARG.
+esp_err_t espnowSelfStaMac(uint8_t out[6]);
+esp_err_t espnowSelfApMac(uint8_t out[6]);
+
 #if ENABLE_ESPNOW
 
 #include <ArduinoJson.h>
@@ -41,7 +51,7 @@ enum class EspNowMeshRxKind : uint8_t {
 #include "System_Debug.h"
 #include "System_Settings.h"
 #include "System_User.h"
-#include "System_Utils.h"
+#include "System_CommandRegistry.h"
 
 // ESP-NOW command registry
 extern const CommandEntry espNowCommands[];
@@ -1242,12 +1252,6 @@ MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing = f
 // Compare against the checked STA identity cached for this ESP-NOW instance.
 // While stopped, a checked driver query preserves the existing helper behavior.
 bool isSelfMac(const uint8_t* mac);
-// This radio instance's own STA / AP address, from the same cache. A driver
-// query is a blocking RPC on a Hosted (P4 + C6) radio, so mesh code must not
-// call esp_wifi_get_mac() per message; these are a memcpy while running and
-// fall back to the checked driver read only before start or after stop.
-esp_err_t espnowSelfStaMac(uint8_t out[6]);
-esp_err_t espnowSelfApMac(uint8_t out[6]);
 void macFromHexString(const String& s, uint8_t out[6]);
 String macToHexString(const uint8_t mac[6]);
 // Zero-allocation MAC formatter for debug log call sites.
@@ -1531,8 +1535,6 @@ inline const char* checkEspNowFirstTimeSetup() { return "ESP-NOW disabled"; }
 inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }
 inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
 inline bool isSelfMac(const uint8_t* mac) { return false; }
-inline esp_err_t espnowSelfStaMac(uint8_t out[6]) { return esp_wifi_get_mac(WIFI_IF_STA, out); }
-inline esp_err_t espnowSelfApMac(uint8_t out[6]) { return esp_wifi_get_mac(WIFI_IF_AP, out); }
 inline bool isMeshPeerAlive(const MeshPeerHealth* peer) { return false; }
 inline bool isMeshPeerRecentlyActive(const MeshPeerHealth*) { return false; }
 inline void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t = -128, int8_t = -128) {}

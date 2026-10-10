@@ -69,7 +69,7 @@ python experiments/p4_mesh/test_persistence.py
 python -m unittest discover -s experiments/p4_mesh -p 'test_*.py'
 ```
 
-The default ports are P4 `/dev/cu.usbmodem2101` and S3 `/dev/cu.usbmodem1101`;
+The default ports are P4 `/dev/cu.usbmodemP4` and S3 `/dev/cu.usbmodemS3`;
 override them with `--p4-port` / `--s3-port`. Port names may change. The runner
 checks each board's radio MAC and channel. On these boards, opening the serial
 connection was observed to reset the chip; the runner allows startup time.

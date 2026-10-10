@@ -19,6 +19,10 @@
 #if ENABLE_FM_RADIO
 
 #include <Arduino.h>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <freertos/portmacro.h>
 #include <radio.h>
 #include <RDA5807M.h>
 #include <RDSParser.h>
@@ -35,10 +39,6 @@
 #include "System_MemoryMonitor.h"
 #include "System_Settings.h"
 
-#if ENABLE_ESPNOW
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
-#endif
 
 // The RDA5807 used to be hardcoded to Wire1; with dual-bus it lives on
 // whatever gSettings.fmRadioBus selects (default bus 0 = Wire1). The
@@ -78,9 +78,35 @@ bool gFmRadioConnected = false;
 TaskHandle_t gFmRadioTaskHandle = nullptr;
 unsigned long gFmRadioLastStopTime = 0;
 
-// Cache struct: all data fields + mutex. Initialized with defaults via
-// FMRadioCache's default member initializers.
-FMRadioCache gFmRadioCache;
+// Fixed-size reading storage. Critical sections copy/compare data only; radio
+// I/O, allocation and presentation always happen outside this short lock.
+static FMRadioCache sFmRadioCache;
+static portMUX_TYPE sFmRadioCacheMux = portMUX_INITIALIZER_UNLOCKED;
+struct FmRadioCacheGuard {
+  FmRadioCacheGuard() { portENTER_CRITICAL(&sFmRadioCacheMux); }
+  ~FmRadioCacheGuard() { portEXIT_CRITICAL(&sFmRadioCacheMux); }
+};
+
+bool fmRadioCacheSnapshot(FMRadioCache& out, uint32_t timeoutMs) {
+  (void)timeoutMs;  // Compatibility with other sensor snapshot interfaces.
+  FmRadioCacheGuard guard;
+  out = sFmRadioCache;
+  return true;
+}
+
+static void fmRadioSetMuted(bool muted) {
+  FmRadioCacheGuard guard;
+  sFmRadioCache.muted = muted;
+}
+
+static void fmRadioInvalidate() {
+  FmRadioCacheGuard guard;
+  sFmRadioCache.seekInProgress = false;
+  sFmRadioCache.dataValid = false;
+  sFmRadioCache.muted = true;
+  memset(sFmRadioCache.stationName, 0, sizeof(sFmRadioCache.stationName));
+  memset(sFmRadioCache.stationText, 0, sizeof(sFmRadioCache.stationText));
+}
 
 // RDA5807M radio object (mathertel library)
 static RDA5807M radio;
@@ -122,45 +148,42 @@ static void rdsScrub(char* dst, const char* src, size_t maxChars) {
   dst[i] = '\0';
 }
 
-// RDS callback to update station name (mutex-protected to prevent readers from
+// RDS callback to update station name (protected to prevent readers from
 // seeing torn strings mid-write).
 static void RDS_ServiceNameCallback(const char* name) {
   DEBUG_FMRADIO_VALUESF("[FM_RADIO] RDS Station Name callback: '%s'", name ? name : "null");
-
-  if (name != nullptr && strlen(name) > 0) {
-    // Scrub BEFORE the change-gate compare, so the gate sees the same bytes that
-    // get stored — comparing raw against a scrubbed cache would re-fire on every
-    // callback whenever the raw name contains a scrubbed character.
-    char clean[sizeof(gFmRadioCache.stationName)];
-    rdsScrub(clean, name, sizeof(clean) - 1);
-    SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(50), "fmRadio.rdsStationName");
-    if (g.held && strcmp(gFmRadioCache.stationName, clean) != 0) {
-      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station name changed from '%s' to '%s'", gFmRadioCache.stationName, clean);
-      memcpy(gFmRadioCache.stationName, clean, sizeof(clean));
-      // Bus event rides the existing change gate (a few intermediate partial
-      // PS-name assemblies can post right after a retune, then it's quiet).
-      char freq[16];
-      snprintf(freq, sizeof(freq), "%.1f MHz", gFmRadioCache.frequency / 100.0);
-      systemEventPost(SYSEVT_FM_RDS_STATION, gFmRadioCache.stationName, freq);
-    }
+  if (!name || !name[0]) return;
+  char clean[sizeof(sFmRadioCache.stationName)]{};
+  char previous[sizeof(sFmRadioCache.stationName)]{};
+  rdsScrub(clean, name, sizeof(clean) - 1);
+  uint16_t frequency = 0;
+  {
+    FmRadioCacheGuard guard;
+    if ( strcmp(sFmRadioCache.stationName, clean) == 0) return;
+    memcpy(previous, sFmRadioCache.stationName, sizeof(previous));
+    memcpy(sFmRadioCache.stationName, clean, sizeof(clean));
+    frequency = sFmRadioCache.frequency;
   }
+  DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station name changed from '%s' to '%s'", previous, clean);
+  char freq[16];
+  snprintf(freq, sizeof(freq), "%.1f MHz", frequency / 100.0);
+  systemEventPost(SYSEVT_FM_RDS_STATION, clean, freq);
 }
 
-// RDS callback to update radio text (mutex-protected).
+// RDS callback to update radio text (fixed-size critical copy).
 static void RDS_TextCallback(const char* text) {
   DEBUG_FMRADIO_VALUESF("[FM_RADIO] RDS Text callback: '%s'", text ? text : "null");
-
-  if (text != nullptr && strlen(text) > 0) {
-    // See rdsScrub() above — RadioText is the higher-risk of the two fields: it is
-    // 64 chars, gets no stability vote in the parser, and sits last in the JSON.
-    char clean[sizeof(gFmRadioCache.stationText)];
-    rdsScrub(clean, text, sizeof(clean) - 1);
-    SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(50), "fmRadio.rdsStationText");
-    if (g.held && strcmp(gFmRadioCache.stationText, clean) != 0) {
-      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station text changed from '%s' to '%s'", gFmRadioCache.stationText, clean);
-      memcpy(gFmRadioCache.stationText, clean, sizeof(clean));
-    }
+  if (!text || !text[0]) return;
+  char clean[sizeof(sFmRadioCache.stationText)]{};
+  char previous[sizeof(sFmRadioCache.stationText)]{};
+  rdsScrub(clean, text, sizeof(clean) - 1);
+  {
+    FmRadioCacheGuard guard;
+    if ( strcmp(sFmRadioCache.stationText, clean) == 0) return;
+    memcpy(previous, sFmRadioCache.stationText, sizeof(previous));
+    memcpy(sFmRadioCache.stationText, clean, sizeof(clean));
   }
+  DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station text changed from '%s' to '%s'", previous, clean);
 }
 
 // RDS data processor callback
@@ -181,6 +204,8 @@ bool fmRadioInit() {
     return true;  // Already initialized
   }
   
+  FMRadioCache reading;
+  if (!fmRadioCacheSnapshot(reading, 50)) return false;
   bool success = false;
   INFO_FMRADIO_LIFECYCLEF("Starting FM Radio I2C initialization");
 
@@ -205,12 +230,12 @@ bool fmRadioInit() {
     radio.debugEnable(false);
 
     // Set band and initial frequency
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Setting band to FM and frequency to %.1f MHz", gFmRadioCache.frequency / 10.0);
-    radio.setBandFrequency(RADIO_BAND_FM, gFmRadioCache.frequency);
+    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Setting band to FM and frequency to %.1f MHz", reading.frequency / 10.0);
+    radio.setBandFrequency(RADIO_BAND_FM, reading.frequency);
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Band/frequency set successfully");
     
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Setting volume to %d/15", gFmRadioCache.volume);
-    radio.setVolume(gFmRadioCache.volume);
+    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Setting volume to %d/15", reading.volume);
+    radio.setVolume(reading.volume);
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Volume set successfully");
     
     radio.setMono(false);  // Stereo mode
@@ -231,7 +256,7 @@ bool fmRadioInit() {
   
   if (success) {
     INFO_FMRADIO_LIFECYCLEF("FM Radio initialized successfully - RDA5807M ready at %.1f MHz, volume %d",
-                  gFmRadioCache.frequency / 100.0, gFmRadioCache.volume);
+                  reading.frequency / 100.0, reading.volume);
     sensorStatusBumpWith("fmradio initialized");
   } else {
     ERROR_FMRADIOF("FM Radio initialization failed - I2C mutex acquisition failed or transaction error");
@@ -259,9 +284,7 @@ void fmRadioDeinit() {
   gRadioInitialized = false;
   gFmRadioConnected = false;
   gFmRadioRunning = false;
-  gFmRadioCache.dataValid = false;  // stale on shutdown → envelope reports valid:false
-  memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
-  memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
+  fmRadioInvalidate();
   DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Deinitialization completed");
 }
 
@@ -296,20 +319,10 @@ void fmRadioTask(void* parameter) {
         continue;
       }
 
-      // Unmute now that init succeeded
-      DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Unmuting radio for audio output");
-      i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
-        radio.setMute(false);
-        gFmRadioCache.muted = false;
-        DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Radio unmuted successfully");
-      });
-      DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] FM Radio started successfully at %.1f MHz", gFmRadioCache.frequency / 100.0);
-      sensorStatusBumpWith("fmradio started");
-      
-      // Broadcast sensor status to ESP-NOW master
-#if ENABLE_ESPNOW
-      broadcastSensorStatus(REMOTE_SENSOR_FMRADIO, true);
-#endif
+      // fmRadioInit already unmutes. A stop or timeout during initialization
+      // must proceed directly to task-owned teardown, never announce a start.
+      if (!gFmRadioRunning) continue;
+      fmRadioSetMuted(false);
 
       // One-time watermark log right after init completes (captures peak without waiting 30s)
       if (!initWatermarkLogged) {
@@ -327,10 +340,12 @@ void fmRadioTask(void* parameter) {
     
     // Check if radio is disabled - delete task if so
     if (!gFmRadioRunning) {
+      fmRadioDeinit();
+      fmRadioInitRequested = false;
+      fmRadioInitDone = false;
+      fmRadioInitResult = false;
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Radio disabled, deleting task (loop %lu)", loopCount);
-      // NOTE: Do NOT clear gFmRadioTaskHandle here - let create function use eTaskGetState()
-      // to detect stale handles. Clearing here creates a race condition window.
-      vTaskDelete(nullptr);
+      SENSOR_TASK_EXIT(FMRADIO, gFmRadioTaskHandle);
     }
     
     // Skip polling if sensor polling is paused (to avoid I2C bus conflicts)
@@ -348,7 +363,7 @@ void fmRadioTask(void* parameter) {
     }
     updateFMRadio();
 
-    // ESP-NOW broadcaster reads fmRadioBuildDataJSON() on demand from gFmRadioCache.
+    // ESP-NOW broadcaster reads fmRadioBuildDataJSON() on demand from sFmRadioCache.
     
     // Log stack usage every 30 seconds (for debugging stack overflow issues)
     unsigned long now = millis();
@@ -378,68 +393,37 @@ void fmRadioTask(void* parameter) {
 // ============================================================================
 
 bool fmRadioStartInternal() {
-  DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] fmRadioStartInternal() called - gFmRadioRunning=%s", gFmRadioRunning ? "true" : "false");
+  if (gFmRadioRunning) return true;
+  // The old task must finish deinitializing before a new task can start.
+  if (gFmRadioTaskHandle != nullptr) return false;
+  if (!checkMemoryAvailable("fmradio", nullptr)) return false;
 
-  if (gFmRadioRunning) {
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Already enabled, skipping initialization");
-    return true;
-  }
-
-  // Check memory before creating FM Radio task
-  if (!checkMemoryAvailable("fmradio", nullptr)) {
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Insufficient memory for FM Radio sensor");
+  // Initialization runs on the radio task's stack; the worker waits for its
+  // existing handshake before reporting the lifecycle result.
+  fmRadioInitRequested = !gRadioInitialized || !gFmRadioConnected;
+  fmRadioInitDone = !fmRadioInitRequested;
+  fmRadioInitResult = !fmRadioInitRequested;
+  gFmRadioRunning = true;
+  if (!createFMRadioTask()) {
+    gFmRadioRunning = false;
+    fmRadioInitRequested = false;
+    fmRadioInitDone = false;
+    fmRadioInitResult = false;
+    fmRadioDeinit();
     return false;
   }
-
-  // Create cache mutex if not already created
-  if (!gFmRadioCache.mutex) {
-    gFmRadioCache.mutex = xSemaphoreCreateMutex();
-    if (!gFmRadioCache.mutex) {
-      ERROR_FMRADIOF("Failed to create cache mutex");
-      return false;
-    }
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Cache mutex created");
+  const unsigned long startedAt = millis();
+  while (gFmRadioRunning && !fmRadioInitDone && millis() - startedAt < 3000UL) {
+    delay(10);
   }
-
-  // Enable first, then let fmradio_task perform initialization on its own stack
-  gFmRadioRunning = true;
-  fmRadioInitRequested = true;
-  fmRadioInitDone = false;
-  fmRadioInitResult = false;
-  DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Radio enabled flag set; init will run on fmradio_task");
-
-  // Create FM Radio task if not already running
-  if (gFmRadioTaskHandle == nullptr) {
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Creating FM Radio task...");
-    if (!createFMRadioTask()) {
-      DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] ERROR: Failed to create FM Radio task");
-      gFmRadioRunning = false;
-      return false;
-    }
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] FM Radio task created successfully (handle=%p)", gFmRadioTaskHandle);
-  } else {
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] FM Radio task already running (handle=%p)", gFmRadioTaskHandle);
+  if (!gFmRadioRunning || !fmRadioInitDone || !fmRadioInitResult) {
+    // The task owns cleanup, including an init that finishes after this timeout.
+    gFmRadioRunning = false;
+    return false;
   }
   return true;
 }
 
-void fmRadioStopInternal() {
-  // Note: gFmRadioRunning is set to false by handleDeviceStopped() before this is called
-  DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] fmRadioStopInternal() called - hardware cleanup");
-  
-  // Properly deinitialize the radio hardware
-  if (gRadioInitialized) {
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Calling fmRadioDeinit() to shut down hardware");
-    fmRadioDeinit();
-  } else {
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Radio not initialized, skipping hardware shutdown");
-  }
-  
-  gFmRadioCache.muted = true;
-  
-  broadcastOutput("FM Radio stopped");
-  DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] FM Radio stopped successfully");
-}
 
 // ============================================================================
 // FM Radio Polling (for RDS updates)
@@ -449,72 +433,60 @@ void updateFMRadio() {
   static unsigned long lastUpdateLog = 0;
   static int lastRSSI = -999;
   static bool lastStereo = false;
-  
-  if (!gRadioInitialized || !gFmRadioRunning) {
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Skipping update - radio not ready");
-    return;
-  }
-  
-  // Skip polling if sensor polling is paused (to avoid I2C bus conflicts)
-  if (pollPaused((uint8_t)gSettings.fmRadioBus)) {
-    return;  // Don't log this - too frequent
-  }
-  
-  // One NACK-tolerant transaction owns the bus for the complete poll. Wrapping
-  // this in a standard transaction would try to take the same non-recursive
-  // mutex twice, so the actual radio reads would never run.
+  if (!gRadioInitialized || !gFmRadioRunning || pollPaused((uint8_t)gSettings.fmRadioBus)) return;
+
+  RADIO_INFO ri{};
+  bool read = false, finalized = false, timedOut = false;
+  uint16_t tunedFrequency = 0;
+  unsigned long now = 0;
+  // Hardware reads and their cache commits share bus ordering with commands.
+  // The cache critical section never spans a radio call or output formatting.
   i2cTransactionNACKTolerant((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO,
-                             FM_RADIO_I2C_CLOCK, 100, [&]() {
-    // Check for RDS data (this triggers callbacks)
+                           FM_RADIO_I2C_CLOCK, 100, [&]() {
     radio.checkRDS();
-
-    // Update signal quality and stereo status
-    RADIO_INFO ri;
     radio.getRadioInfo(&ri);
-    gFmRadioCache.rssi = ri.rssi;
-    gFmRadioCache.stereo = ri.stereo;
-    gFmRadioCache.snr = ri.snr;
-
-    // Finalize a pending async seek (started by cmd_fmradio_seek). The
-    // 300 ms arm delay keeps the first poll from trusting a stale
-    // ri.tuned=true before the chip has actually dropped it; 6 s is the
-    // failsafe for a band edge with no station (seekUp(false) = no wrap).
-    if (gFmRadioCache.seekInProgress) {
-      unsigned long sinceStart = millis() - gFmRadioCache.seekStartMs;
-      bool armed    = sinceStart >= 300;
-      bool timedOut = sinceStart > 6000;
-      if ((armed && ri.tuned) || timedOut) {
-        gFmRadioCache.frequency = radio.getFrequency();
-        // RDS was cleared at seek start; clear again in case a late
-        // callback for the old station landed mid-seek.
-        memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
-        memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
-        gFmRadioCache.seekInProgress = false;
-        char mhz[12];
-        snprintf(mhz, sizeof(mhz), "%.1f", gFmRadioCache.frequency / 100.0);
-        systemEventPost(SYSEVT_FM_TUNED, mhz, timedOut ? "seek timeout" : "seek");
-        DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Seek finalized at %s MHz%s",
-                                 mhz, timedOut ? " (timeout)" : "");
+    FMRadioCache before;
+    fmRadioCacheSnapshot(before);
+    now = millis();
+    bool seekFinished = false;
+    if (before.seekInProgress) {
+      const unsigned long elapsed = now - before.seekStartMs;
+      timedOut = elapsed > 6000;
+      seekFinished = (elapsed >= 300 && ri.tuned) || timedOut;
+      if (seekFinished) tunedFrequency = radio.getFrequency();
+    }
+    {
+      FmRadioCacheGuard guard;
+      if (!gRadioInitialized || !gFmRadioRunning) return;
+      sFmRadioCache.rssi = ri.rssi;
+      sFmRadioCache.stereo = ri.stereo;
+      sFmRadioCache.snr = ri.snr;
+      if (seekFinished && sFmRadioCache.seekInProgress) {
+        sFmRadioCache.frequency = tunedFrequency;
+        memset(sFmRadioCache.stationName, 0, sizeof(sFmRadioCache.stationName));
+        memset(sFmRadioCache.stationText, 0, sizeof(sFmRadioCache.stationText));
+        sFmRadioCache.seekInProgress = false;
+        finalized = true;
       }
+      sFmRadioCache.headphonesConnected = ri.rssi >= 15;
+      sFmRadioCache.lastUpdate = now;
+      sFmRadioCache.dataValid = true;
     }
-
-    // Only log when signal changes significantly (reduces flood)
-    unsigned long now = millis();
-    if (abs(gFmRadioCache.rssi - lastRSSI) >= 2 || gFmRadioCache.stereo != lastStereo || (now - lastUpdateLog > 30000)) {
-      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Signal: RSSI=%d, SNR=%d, Stereo=%s",
-                     gFmRadioCache.rssi, gFmRadioCache.snr, gFmRadioCache.stereo ? "true" : "false");
-      lastRSSI = gFmRadioCache.rssi;
-      lastStereo = gFmRadioCache.stereo;
-      lastUpdateLog = now;
-    }
-
-    // Update headphone detection based on RSSI
-    gFmRadioCache.headphonesConnected = (gFmRadioCache.rssi >= 15);
-
-    // Freshness stamp for the shared sensor envelope (ts + valid).
-    gFmRadioCache.lastUpdate = now;
-    gFmRadioCache.dataValid = true;
+    read = true;
   });
+  if (!read) return;
+  if (finalized) {
+    char mhz[12];
+    snprintf(mhz, sizeof(mhz), "%.1f", tunedFrequency / 100.0);
+    systemEventPost(SYSEVT_FM_TUNED, mhz, timedOut ? "seek timeout" : "seek");
+    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Seek finalized at %s MHz%s", mhz, timedOut ? " (timeout)" : "");
+  }
+  if (abs(ri.rssi - lastRSSI) >= 2 || ri.stereo != lastStereo || now - lastUpdateLog > 30000) {
+    DEBUG_FMRADIO_VALUESF("[FM_RADIO] Signal: RSSI=%d, SNR=%d, Stereo=%s", ri.rssi, ri.snr, ri.stereo ? "true" : "false");
+    lastRSSI = ri.rssi;
+    lastStereo = ri.stereo;
+    lastUpdateLog = now;
+  }
 }
 
 // ============================================================================
@@ -563,38 +535,15 @@ const char* cmd_fmradio(const String& argsInput) {
 
 const char* cmd_fmradio_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (gFmRadioRunning) {
-    return "FM Radio already running";
-  }
-
-  if (isInQueue(I2C_DEVICE_FMRADIO)) {
-    return "FM Radio already queued";
-  }
-
-  if (!i2cPingAddress(I2C_ADDR_FM_RADIO, 100000, 50, (uint8_t)gSettings.fmRadioBus)) {
-    return "Error: [FM Radio] Not detected on I2C bus";
-  }
-
-  // Queue the FM radio start request
-  enqueueDeviceStart(I2C_DEVICE_FMRADIO);
-
+  const char* result = cmd_sensorstart_queued(I2C_DEVICE_FMRADIO, "FM Radio", "openfmradio@enqueue");
   cliHint("the radio powers up in the background - check it with 'fmradioread', then tune with 'fmradiotune <freq>'");
-  return "FM Radio start queued";
+  return result;
 }
 
 const char* cmd_fmradio_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!gFmRadioRunning) {
-    return "Error: FM Radio not running";
-  }
-
-  handleDeviceStopped(I2C_DEVICE_FMRADIO);
-  fmRadioStopInternal();  // Sensor-specific: hardware deinit
-  sensorStatusBumpWith("fmradio stopped");
-  
-  return "OK";
+  if (!requestSensorStop(I2C_DEVICE_FMRADIO)) return "Error: [FM Radio] Could not queue stop";
+  return "[FM Radio] Stop requested; cleanup will complete asynchronously";
 }
 
 const char* cmd_fmradio_tune(const String& argsInput) {
@@ -608,88 +557,87 @@ const char* cmd_fmradio_tune(const String& argsInput) {
     return "Error: invalid arguments — Usage: fmradio tune <frequency> (e.g., 103.9 or 10390)";
   }
   
-  float freq = freqStr.toFloat();
-  uint16_t freqInt;
-  
-  if (freq < 200) {
-    // Assume MHz format (e.g., 103.9)
-    freqInt = (uint16_t)(freq * 100);
-  } else {
-    // Assume 10kHz format (e.g., 10390)
-    freqInt = (uint16_t)freq;
+  char* end = nullptr;
+  errno = 0;
+  const double freq = std::strtod(freqStr.c_str(), &end);
+  if (end == freqStr.c_str() || end != freqStr.c_str() + freqStr.length() ||
+      errno == ERANGE || !std::isfinite(freq)) {
+    return "Error: [FM Radio] Expected a frequency in MHz or 10 kHz units";
   }
-  
-  // Validate frequency range (76-108 MHz)
-  if (freqInt < 7600 || freqInt > 10800) {
+  const double freqUnits = freq < 200 ? freq * 100 : freq;
+  // Validate before narrowing or initializing hardware. Round to 10 kHz units
+  // so decimal MHz input does not lose a unit through floating-point truncation.
+  if (freqUnits < 7600 || freqUnits > 10800) {
     return "Error: [FM Radio] Frequency must be 76.0-108.0 MHz";
   }
+  const uint16_t freqInt = static_cast<uint16_t>(std::lround(freqUnits));
   
+  if (!gFmRadioRunning && gFmRadioTaskHandle != nullptr) {
+    return "Error: [FM Radio] Cleanup pending - retry shortly";
+  }
   if (!gFmRadioConnected || !gRadioInitialized) {
     if (!fmRadioInit()) {
       return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
     }
   }
   
+  // The library's setters return void: issued means the driver call ran, not
+  // that the chip acknowledged the write or has finished tuning.
+  bool issued = false;
   i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
     radio.setFrequency(freqInt);
-    gFmRadioCache.frequency = freqInt;
-    
-    // Clear RDS data on frequency change
-    memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
-    memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
+    FmRadioCacheGuard guard;
+    sFmRadioCache.frequency = freqInt;
+    memset(sFmRadioCache.stationName, 0, sizeof(sFmRadioCache.stationName));
+    memset(sFmRadioCache.stationText, 0, sizeof(sFmRadioCache.stationText));
+    issued = true;
   });
-  
+  if (!issued) return "Error: [FM Radio] Tune command could not run";
+
   char mhz[12];
   snprintf(mhz, sizeof(mhz), "%.1f", freqInt / 100.0);
   systemEventPost(SYSEVT_FM_TUNED, mhz);
 
-  BROADCAST_PRINTF("Tuned to %.1f MHz", freqInt / 100.0);
+  BROADCAST_PRINTF("Tune command sent: %.1f MHz", freqInt / 100.0);
   return "OK";
 }
 
 const char* cmd_fmradio_seek(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!gFmRadioConnected || !gRadioInitialized) {
-    return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
-  }
-  
-  bool seekUp = true;  // Default seek up
-
   String dir = argsInput;
   dir.trim();
   dir.toLowerCase();
-  if (dir == "down") {
-    seekUp = false;
-  }
-
-  if (gFmRadioCache.seekInProgress) {
-    return "Error: [FM Radio] Seek already in progress";
-  }
-
-  // Start-and-return: the hardware seek is just register writes. The old code
-  // busy-waited ri.tuned up to 5 s INSIDE one 6000 ms transaction — holding
-  // the per-bus mutex the whole time, which starved the gamepad poll and OLED
-  // render on the shared bus (and parked whichever task ran the command).
-  // Completion is finalized by updateFMRadio()'s 250 ms poll (ri.tuned, 6 s
-  // failsafe), which commits the frequency, clears RDS, and posts
-  // SYSEVT_FM_TUNED. Callers watch cache.seekInProgress / "seeking" in JSON.
+  if (dir.length() && dir != "up" && dir != "down")
+    return "Error: invalid arguments — Usage: fmradio seek [up|down]";
+  if (!gFmRadioConnected || !gRadioInitialized)
+    return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
+  const bool seekUp = dir != "down";
+  uint16_t frequency = 0;
+  bool issued = false, busy = false;
   i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
-    if (seekUp) {
-      radio.seekUp(false);  // false = don't wrap
-    } else {
-      radio.seekDown(false);
+    {
+      FmRadioCacheGuard guard;
+      if (sFmRadioCache.seekInProgress) { busy = true; return; }
+      sFmRadioCache.seekInProgress = true;
+      sFmRadioCache.seekDirUp = seekUp;
+      frequency = sFmRadioCache.frequency;
+      memset(sFmRadioCache.stationName, 0, sizeof(sFmRadioCache.stationName));
+      memset(sFmRadioCache.stationText, 0, sizeof(sFmRadioCache.stationText));
     }
+    if (seekUp) radio.seekUp(false);
+    else radio.seekDown(false);
+    const unsigned long startedAt = millis();
+    {
+      FmRadioCacheGuard guard;
+      sFmRadioCache.seekStartMs = startedAt;
+    }
+    // Polling shares this bus, so it cannot finalize a reserved seek before
+    // hardware starts and its arm-delay timestamp is committed.
+    issued = true;
   });
-
-  // Stale RDS from the old station would linger on displays during the seek.
-  memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
-  memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
-  gFmRadioCache.seekDirUp      = seekUp;
-  gFmRadioCache.seekStartMs    = millis();
-  gFmRadioCache.seekInProgress = true;
-
-  BROADCAST_PRINTF("Seeking %s from %.1f MHz...", seekUp ? "up" : "down", gFmRadioCache.frequency / 100.0);
+  if (busy) return "Error: [FM Radio] Seek already in progress";
+  if (!issued) return "Error: [FM Radio] Seek could not start";
+  BROADCAST_PRINTF("Seeking %s from %.1f MHz...", seekUp ? "up" : "down", frequency / 100.0);
   return "OK";
 }
 
@@ -701,28 +649,40 @@ const char* cmd_fmradio_volume(const String& argsInput) {
   volStr.trim();
   
   if (volStr.length() == 0) {
-    BROADCAST_PRINTF("Current volume: %d", gFmRadioCache.volume);
+    FMRadioCache reading;
+    if (!fmRadioCacheSnapshot(reading, 50)) return "Error: [FM Radio] Snapshot unavailable";
+    BROADCAST_PRINTF("Current volume: %d", reading.volume);
     return "OK";
   }
   
-  int vol = volStr.toInt();
-  
-  if (vol < 0 || vol > 15) {
+  char* end = nullptr;
+  errno = 0;
+  const long parsedVolume = std::strtol(volStr.c_str(), &end, 10);
+  if (end == volStr.c_str() || end != volStr.c_str() + volStr.length() ||
+      errno == ERANGE || parsedVolume < 0 || parsedVolume > 15) {
     return "Error: [FM Radio] Volume must be 0-15";
   }
+  const int vol = static_cast<int>(parsedVolume);
   
   if (!gFmRadioConnected || !gRadioInitialized) {
-    gFmRadioCache.volume = vol;  // Store for when radio starts
+    {
+      FmRadioCacheGuard guard;
+      sFmRadioCache.volume = vol;
+    }  // Store for when radio starts
     BROADCAST_PRINTF("Volume set to %d (will apply when radio starts)", vol);
     return "OK";
   }
   
+  bool issued = false;
   i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
     radio.setVolume(vol);
-    gFmRadioCache.volume = vol;
+    FmRadioCacheGuard guard;
+    sFmRadioCache.volume = vol;
+    issued = true;
   });
-  
-  BROADCAST_PRINTF("Volume set to %d", vol);
+  if (!issued) return "Error: [FM Radio] Volume command could not run";
+
+  BROADCAST_PRINTF("Volume command sent: %d", vol);
   
   // Volume feedback is UI, not a notification (reclassified in the
   // Phase-1 cutover) — render the banner directly.
@@ -739,40 +699,39 @@ const char* cmd_fmradio_volume(const String& argsInput) {
 
 const char* cmd_fmradio_mute(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!gFmRadioConnected || !gRadioInitialized) {
-    return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
-  }
-  
-  // Check if this is "mute" or "unmute" command
+
   String arg = argsInput;
   arg.trim();
   arg.toLowerCase();
-  bool shouldMute = (arg != "off" && arg != "unmute");  // Default to mute unless explicitly unmute
-  gFmRadioCache.muted = shouldMute;
-  
-  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
-    radio.setMute(gFmRadioCache.muted);
-  });
-  
-  BROADCAST_PRINTF("FM Radio %s", gFmRadioCache.muted ? "muted" : "unmuted");
-  return "OK";
-}
-
-// Dedicated unmute: cmd_fmradio_mute decides mute/unmute from its argument and
-// can't see the invoked command name, so a bare `fmradiounmute` (empty args)
-// used to fall through to MUTE. This forces unmute unconditionally.
-const char* cmd_fmradio_unmute(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (arg.length() && arg != "on" && arg != "mute" && arg != "off" && arg != "unmute") {
+    return "Error: invalid arguments — Usage: fmradio mute [on|off|mute|unmute]";
+  }
+  const bool shouldMute = arg != "off" && arg != "unmute";
   if (!gFmRadioConnected || !gRadioInitialized) {
     return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
   }
-  gFmRadioCache.muted = false;
+  
+  bool issued = false;
   i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
-    radio.setMute(false);
+    radio.setMute(shouldMute);
+    fmRadioSetMuted(shouldMute);
+    issued = true;
   });
-  BROADCAST_PRINTF("FM Radio unmuted");
+  if (!issued) return "Error: [FM Radio] Mute command could not run";
+  
+  BROADCAST_PRINTF("FM Radio %s command sent", shouldMute ? "mute" : "unmute");
   return "OK";
+}
+
+// Dedicated unmute shares the same hardware operation and outcome handling.
+const char* cmd_fmradio_unmute(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = argsInput;
+  arg.trim();
+  if (arg.length()) {
+    return "Error: invalid arguments — Usage: fmradiounmute";
+  }
+  return cmd_fmradio_mute("off");
 }
 
 const char* cmd_fmradio_status(const String& argsInput) {
@@ -784,35 +743,33 @@ const char* cmd_fmradio_status(const String& argsInput) {
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
-  // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
+  if (gFmRadioConnected && gRadioInitialized) {
+    RADIO_INFO ri{};
+    i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
+      radio.getRadioInfo(&ri);
+      FmRadioCacheGuard guard;
+      sFmRadioCache.rssi = ri.rssi;
+      sFmRadioCache.stereo = ri.stereo;
+    });
+  }
+  FMRadioCache reading;
+  if (!fmRadioCacheSnapshot(reading, 50)) return "Error: [FM Radio] Snapshot unavailable";
   broadcastOutput("FM Radio Status:");
   BROADCAST_PRINTF("  Connected: %s", gFmRadioConnected ? "Yes" : "No");
   BROADCAST_PRINTF("  Enabled: %s", gFmRadioRunning ? "Yes" : "No");
-  
   if (!gFmRadioConnected) {
-    BROADCAST_PRINTF("  Stored Frequency: %.1f MHz", gFmRadioCache.frequency / 100.0);
-    BROADCAST_PRINTF("  Stored Volume: %d", gFmRadioCache.volume);
+    BROADCAST_PRINTF("  Stored Frequency: %.1f MHz", reading.frequency / 100.0);
+    BROADCAST_PRINTF("  Stored Volume: %d", reading.volume);
   } else {
-    // Update signal info
-    if (gRadioInitialized) {
-      i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
-        RADIO_INFO ri;
-        radio.getRadioInfo(&ri);
-        gFmRadioCache.rssi = ri.rssi;
-        gFmRadioCache.stereo = ri.stereo;
-      });
-    }
-    
-    BROADCAST_PRINTF("  Frequency: %.1f MHz", gFmRadioCache.frequency / 100.0);
-    BROADCAST_PRINTF("  Volume: %d/15", gFmRadioCache.volume);
-    BROADCAST_PRINTF("  Muted: %s", gFmRadioCache.muted ? "Yes" : "No");
-    BROADCAST_PRINTF("  Stereo: %s", gFmRadioCache.stereo ? "Yes" : "No");
-    BROADCAST_PRINTF("  RSSI: %d", gFmRadioCache.rssi);
-    BROADCAST_PRINTF("  Headphones: %s", gFmRadioCache.headphonesConnected ? "Yes" : "No");
-    BROADCAST_PRINTF("  Station: %s", strlen(gFmRadioCache.stationName) > 0 ? gFmRadioCache.stationName : "(none)");
-    BROADCAST_PRINTF("  Radio Text: %s", strlen(gFmRadioCache.stationText) > 0 ? gFmRadioCache.stationText : "(none)");
+    BROADCAST_PRINTF("  Frequency: %.1f MHz", reading.frequency / 100.0);
+    BROADCAST_PRINTF("  Volume: %d/15", reading.volume);
+    BROADCAST_PRINTF("  Muted: %s", reading.muted ? "Yes" : "No");
+    BROADCAST_PRINTF("  Stereo: %s", reading.stereo ? "Yes" : "No");
+    BROADCAST_PRINTF("  RSSI: %d", reading.rssi);
+    BROADCAST_PRINTF("  Headphones: %s", reading.headphonesConnected ? "Yes" : "No");
+    BROADCAST_PRINTF("  Station: %s", reading.stationName[0] ? reading.stationName : "(none)");
+    BROADCAST_PRINTF("  Radio Text: %s", reading.stationText[0] ? reading.stationText : "(none)");
   }
-  
   return "OK";
 }
 
@@ -821,19 +778,9 @@ const char* cmd_fmradio_status(const String& argsInput) {
 // ============================================================================
 
 int fmRadioBuildDataJSON(char* buf, size_t bufSize) {
-  // Take a consistent snapshot under the mutex so RDS callbacks can't tear
-  // strings mid-serialize and callers get coherent values.
+  if (!buf || !bufSize) return 0;
   FMRadioCache snap;
-  {
-    SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(50), "fmRadio.buildJSONSnapshot");
-    if (g.held) {
-      snap = gFmRadioCache;  // value copy
-    } else {
-      // Best-effort: mutex unavailable or contended. Read directly; strings may
-      // tear in rare races but values stay in valid ranges.
-      snap = gFmRadioCache;
-    }
-  }
+  if (!fmRadioCacheSnapshot(snap, 50)) return 0;
 
   // valid = fresh poll data (set in updateFMRadio, cleared on deinit),
   // connected = radio present on the bus, ts from the last poll. Dropped:

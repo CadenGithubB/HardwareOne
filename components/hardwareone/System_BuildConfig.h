@@ -1,7 +1,7 @@
 #ifndef SYSTEM_BUILDCONFIG_H
 #define SYSTEM_BUILDCONFIG_H
 
-// The active board's sdkconfig is ground truth for which ESP-IDF stacks exist —
+// The resolved sdkconfig is ground truth for which ESP-IDF stacks exist —
 // the DERIVED section at the bottom reads it (see the CONFIG_BT_ENABLED rule).
 // Guarded so host-side tooling that preprocesses this header without the IDF
 // include paths still parses; such a run keeps the literals un-derived.
@@ -38,26 +38,27 @@
 // to decide which .cpp files get compiled (a coarse first-pass filter — the
 // per-file `#if` guards remain the fine-grained control inside each .cpp):
 //
-//     NETWORK_FEATURE_LEVEL, WEB_FEATURE_LEVEL, I2C_FEATURE_LEVEL,
-//     DISPLAY_TYPE,
-//     ENABLE_MQTT, ENABLE_HTTPS,
+//     I2C_FEATURE_LEVEL, DISPLAY_TYPE,
+//     ENABLE_MQTT,
 //     ENABLE_LLM_BACKEND, ENABLE_LLM_SOURCE_ONBOARD, ENABLE_LLM_SOURCE_CM5,
 //     ENABLE_MAPS, ENABLE_AUTOMATION, ENABLE_EDGE_IMPULSE, ENABLE_GAMES,
 //     ENABLE_G2_TESTSUITE,
 //     ENABLE_RASPBERRY_PI_HOST_POWER, ENABLE_RASPBERRY_PI_HOST_FAN
 //
-// The regex expects EXACTLY this shape, on a single non-indented line:
+// Keep these values as integer literals on a single line:
 //     #define NAME <integer>
 //
-// Do NOT use parentheses, inline comments, expressions, or indentation on
-// these specific lines, e.g. all of the following will silently fall back
-// to 0 and strip features out of the build:
-//     #define WEB_FEATURE_LEVEL (4)            // parentheses break the match
-//     #define WEB_FEATURE_LEVEL 4  // comment  // trailing comment may break
-//       #define WEB_FEATURE_LEVEL 4            // indented — not matched
+// Parentheses and expressions can disagree with the CMake interpretation:
+//     #define NAME (4)     // no literal found; CMake uses 0
+//     #define NAME 0 + 4   // CMake reads only the first integer
 //
 // Other flags in this file are only read by the C++ preprocessor and can use
 // any valid macro form.
+// Core HTTP/web and migration sources and their HTTP(S) SDK dependencies stay
+// available to the compiler. Their #if guards use the derived rules below,
+// including restore-only builds. Application source filters (MQTT, Maps, LLM,
+// etc.) remain, but CMake does not interpret NETWORK_FEATURE_LEVEL,
+// WEB_FEATURE_LEVEL, ENABLE_HTTP_SERVER, ENABLE_MIGRATION_TOOL or ENABLE_HTTPS.
 // ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -130,15 +131,10 @@
 //   2 = STANDALONE - OLED + Gamepad
 //   3 = FULL       - OLED + all sensors
 //   4 = CUSTOM     - Use individual CUSTOM_ENABLE_* flags below
-// Set to DISABLED for the XIAO ESP32S3 Sense build (camera + mic only,
-// no breakout sensors, no OLED) — the Sense expansion has no I2C
-// breakouts wired and no on-board display.
-//
-// CURRENT: FeatherS3 (CUSTOM). Set to 0 (DISABLED) for the XIAO ESP32S3 Sense
-// build (camera + mic only) — level 0 also zeroes ENABLE_OLED_DISPLAY and every
-// ENABLE_*_SENSOR below (see the level table further down), so the screen and the
-// sensor drivers fall out on their own.
-#define I2C_FEATURE_LEVEL       4   // CARRIER BUILD: XIAO Sense setting
+// Board profiles select assembly defaults. XIAO defaults to 0 because its
+// base/Sense assembly has no external I2C peripherals. A saved configuration
+// can enable the bus for an attached display or input controller.
+#define I2C_FEATURE_LEVEL       4
 
 #if I2C_FEATURE_LEVEL == 4
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
@@ -161,10 +157,9 @@
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
 //   4 = P4X-EYE ST7789 (SPI panel, compatible monochrome UI framebuffer)
 //
-// CURRENT: SSD1306 (OLED) for the FeatherS3. Set to 0 (NONE) for the XIAO — no
-// on-board display. HAL_Display.cpp compiles unconditionally and switches on
-// DISPLAY_TYPE, so a screenless build must set 0 here even though
-// I2C_FEATURE_LEVEL 0 already zeroes ENABLE_OLED_DISPLAY.
+// Board profiles default to SSD1306 on FeatherS3 and NONE on XIAO. A saved
+// configuration may select fitted hardware. SSD1306 also needs the I2C/OLED
+// selection; a display-free configuration selects NONE explicitly.
 #define DISPLAY_TYPE            1
 
 // Input device: which optional physical input controller is fitted.
@@ -175,8 +170,8 @@
 //   2 = ANO_ENCODER      (Adafruit ANO Rotary Encoder breakout, 0x49)
 //   3 = GPIO_ENCODER     (quadrature wheel + click and optional board buttons)
 //
-// CURRENT: SEESAW_GAMEPAD for the FeatherS3. Set to 0 (NONE) for the XIAO —
-// the two Seesaw options require I2C; GPIO input is independent.
+// Board profiles default to SEESAW_GAMEPAD on FeatherS3 and NONE on XIAO.
+// The two Seesaw options require I2C; GPIO input needs explicit assembly pins.
 #define INPUT_DEVICE_TYPE       1
 
 // Optional native SDMMC card backend; an explicit board profile supplies pins.
@@ -245,15 +240,10 @@
 
 // Bluetooth: BLE server with GATT services. Required for G2 Glasses below.
 //
-// **NB:** this flag only gates OUR application code. To actually free the
-// ~14 KB IRAM + ~70 KB flash + ~80 KB DRAM that the ESP-IDF Bluedroid
-// stack consumes, you also need `CONFIG_BT_ENABLED=n` in sdkconfig.
-// The reverse direction is automatic: on a board whose sdkconfig drops the
-// stack (boards/qtpy_esp32.defaults), the DERIVED section forces this flag
-// to 0 — a 1 here is a *request*, honored only where Bluedroid exists.
-// CARRIER BUILD (2026-08-07): BT enabled so the G2 glasses mic can reach the
-// CM5 over the UART link. Flash recovered by dropping maps + I2C sensors
-// (already off) below; camera kept.
+// This gates application code. To omit the SDK stack too, select
+// "CONFIG_BT_ENABLED": false in the saved configuration's sdkconfig choices.
+// If the SDK stack is absent (as in presets/qtpy_esp32.sdkconfig.defaults),
+// the derived dependency rules disable this application flag and its consumers.
 #define ENABLE_BLUETOOTH        1
 
 // Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses.
@@ -443,31 +433,18 @@
 // resolve the same profile file, so a lean build never depends on temporarily
 // rewriting this shared header and restoring it afterward.
 // A board feature profile (boards/<board>.features.h, selected by HW_BOARD)
-// applies first; a deployment profile may then refine it further.
+// applies first; a deployment profile may then refine it further. An ordinary
+// build may instead supply an isolated feature configuration. CMake rejects
+// combining that configuration with a named deployment's release contract.
 #ifdef HW1_BOARD_CONFIG_HEADER
 #include HW1_BOARD_CONFIG_HEADER
 #endif
 #ifdef HW1_DEPLOYMENT_CONFIG_HEADER
 #include HW1_DEPLOYMENT_CONFIG_HEADER
 #endif
-
-// The XIAO ESP32-S3/Sense has its camera, PDM microphone, microSD and BLE/G2
-// hardware on the carrier, but no built-in I2C display or input controller.
-// Keep its board image focused on those actual peripherals: this also recovers
-// the flash needed for the Bluedroid/G2 stack. These are board policy overrides
-// rather than changes to the shared editable defaults above, so Feather and
-// classic-ESP32 builds retain their selected MQTT/I2C/OLED/input features.
-#if defined(ARDUINO_XIAO_ESP32S3_DEV) || defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV)
-  #undef ENABLE_MQTT
-  #define ENABLE_MQTT 0
-  #undef I2C_FEATURE_LEVEL
-  #define I2C_FEATURE_LEVEL 0
-  #undef DISPLAY_TYPE
-  #define DISPLAY_TYPE 0
-  #undef INPUT_DEVICE_TYPE
-  #define INPUT_DEVICE_TYPE 0
+#ifdef HW1_FEATURE_CONFIG_HEADER
+#include HW1_FEATURE_CONFIG_HEADER
 #endif
-
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
 // ║                    END OF USER CONFIGURATION                              ║
@@ -506,6 +483,14 @@
 #define INPUT_DEVICE_TYPE_SEESAW_GAMEPAD 1
 #define INPUT_DEVICE_TYPE_ANO_ENCODER    2
 #define INPUT_DEVICE_TYPE_GPIO_ENCODER   3
+
+// The generic color TFT branches still use example wiring and do not supply
+// the SSD1306-compatible framebuffer/commands expected by the shared UI.
+// A saved selection must not advertise them as working display backends.
+#if defined(HW1_FEATURE_CONFIG_HEADER) && \
+    (DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341)
+  #error "Generic color TFT displays need an integrated UI backend and board wiring; use SSD1306 or the P4X-EYE display profile"
+#endif
 
 // =============================================================================
 // DERIVED FLAGS (automatically set based on I2C_FEATURE_LEVEL)
@@ -615,6 +600,10 @@
   #define ENABLE_OLED_DISPLAY 0
 #endif
 
+#if defined(HW1_FEATURE_CONFIG_HEADER) && DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && !ENABLE_OLED_DISPLAY
+  #error "SSD1306 requires I2C and the OLED selection; enable I2C_FEATURE_LEVEL 1 or CUSTOM_ENABLE_OLED at level 4"
+#endif
+
 // =============================================================================
 // DERIVED INPUT DEVICE FLAGS (based on INPUT_DEVICE_TYPE)
 // =============================================================================
@@ -653,6 +642,15 @@
 // The two source-specific paths inside each block stay gated on their own
 // ENABLE_* flag.
 #define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER)
+
+// Keep legacy auto-disable behavior, but reject an ineffective saved choice.
+#if defined(HW1_FEATURE_CONFIG_HEADER)
+  #if INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_SEESAW_GAMEPAD && !ENABLE_GAMEPAD_SENSOR
+    #error "Seesaw gamepad input requires I2C and its gamepad selection; use I2C_FEATURE_LEVEL 2 or CUSTOM_ENABLE_GAMEPAD at level 4"
+  #elif INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_ANO_ENCODER && !ENABLE_I2C_SYSTEM
+    #error "ANO encoder input requires I2C_FEATURE_LEVEL greater than 0"
+  #endif
+#endif
 
 // The device-start queue is only used by optional sensors that initialize in
 // their own tasks. Infrastructure-only I2C builds (for example FeatherS3[D]'s
@@ -805,11 +803,11 @@
 // Adding a new rule: pick the right prerequisite, undef + redefine each
 // dependent. Don't try to predict combinations — let the rules compose.
 
-// BLE app code requires the Bluedroid stack in the active board's sdkconfig.
-// ENABLE_BLUETOOTH=1 above only *requests* BT; a board whose sdkconfig drops
-// the stack (boards/qtpy_esp32.defaults sets CONFIG_BT_ENABLED=n to reclaim
-// ~80 KB DRAM on the classic ESP32) would otherwise fail every BT translation
-// unit with `esp_gap_ble_api.h: No such file or directory`. Downgrading here
+// BLE app code requires the Bluedroid stack in the resolved sdkconfig.
+// ENABLE_BLUETOOTH=1 requires that SDK stack. The lean QT Py preset in
+// presets/qtpy_esp32.sdkconfig.defaults sets CONFIG_BT_ENABLED=n; without
+// this guard its BT translation units would fail on missing SDK headers.
+// Downgrading here
 // keeps the ONE shared header correct for every per-board build lane, and the
 // dependent rules below (WEB_BLUETOOTH, G2_GLASSES → R1_HEALTH/TESTSUITE)
 // cascade off the derived value. components/hardwareone/CMakeLists.txt applies
@@ -930,6 +928,9 @@
 
 // MQTT subsystem itself requires WiFi (broker is over TCP).
 #if !ENABLE_WIFI
+  #if defined(HW1_FEATURE_CONFIG_HEADER) && ENABLE_MQTT
+    #error "ENABLE_MQTT requires WiFi; enable networking/WiFi or disable MQTT in saved configuration"
+  #endif
   #undef ENABLE_MQTT
   #define ENABLE_MQTT 0
 #endif
@@ -1462,6 +1463,21 @@
   #define CAMERA_SCCB_I2C_PORT 1
 #else
   #define CAMERA_SCCB_I2C_PORT 0
+#endif
+
+// The shared primary sensor bus is Wire1/I2C1. The camera reservation is
+// enforced at runtime too, but an image selecting both owners cannot provide
+// its requested external peripherals. Select SCCB I2C0 in the SDK or omit the
+// camera; changing GPIO numbers alone cannot resolve a controller collision.
+#if ENABLE_I2C_SYSTEM && CAMERA_SCCB_I2C_PORT == 1
+  #error "External I2C uses controller 1, reserved by camera SCCB; select SCCB I2C0 in sdkconfig or disable ENABLE_CAMERA_SENSOR"
+#endif
+
+// A native encoder driver exists, but each board/assembly must supply wiring.
+// I2C input controllers do not require these pins and remain independent.
+#if ENABLE_GPIO_ENCODER && (!defined(GPIO_ENCODER_PIN_A) || \
+    !defined(GPIO_ENCODER_PIN_B) || !defined(GPIO_ENCODER_PIN_BUTTON))
+  #error "GPIO encoder requires GPIO_ENCODER_PIN_A, GPIO_ENCODER_PIN_B and GPIO_ENCODER_PIN_BUTTON in a board/assembly profile"
 #endif
 
 // =============================================================================

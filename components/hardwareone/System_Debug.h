@@ -809,7 +809,7 @@ void streamDebugFlush();
 // Debug Command Registry
 // ============================================================================
 
-// CommandEntry is defined in system_utils.h (included by files that need it)
+// CommandEntry is defined in System_CommandRegistry.h (included by files that need it)
 // Forward declare here for header-only usage
 struct CommandEntry;
 

@@ -1,5 +1,7 @@
 # P4 / S3 full-feature investigation
 
+Recorded device MAC addresses use synthetic aliases, and serial-port locations use generic placeholders. Measurement values and test outcomes are unchanged.
+
 Investigation completed on 28 September 2026 in the isolated
 `codex/jpeg-portable` worktree. Production sources were not changed this phase.
 Both boards were restored from verified original flash backups, then their

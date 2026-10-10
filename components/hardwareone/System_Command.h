@@ -1,8 +1,8 @@
 #ifndef SYSTEM_COMMAND_H
 #define SYSTEM_COMMAND_H
 
-#include "System_Utils.h"
-#include <Arduino.h>
+#include "System_CommandRegistry.h"
+#include <WString.h>
 
 // ============================================================================
 // Command System - Centralized command registry and execution

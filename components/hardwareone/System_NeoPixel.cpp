@@ -1,12 +1,12 @@
 /**
- * NeoPixel LED Module - QT Py ESP32 built-in RGB LED control
+ * NeoPixel LED colors, effects, commands and persistent settings
  */
 
 #include "System_NeoPixel.h"
 #include "System_Utils.h"
 #include "System_Command.h"
-#include "System_Settings.h"        // For SettingsModule (merged from System_LED.cpp)
-#include "System_Debug.h"    // For debug macros (merged from System_LED.cpp)
+#include "System_Settings.h"
+#include "System_Debug.h"
 #include "System_BuildConfig.h"  // For NEOPIXEL_PIN_DEFAULT
 
 // Board power rail — asserted independently of ENABLE_NEOPIXEL because the
@@ -25,10 +25,12 @@ void boardPowerRailInit() {
 }
 
 #if ENABLE_NEOPIXEL
-// Global NeoPixel instance (ENABLE_NEOPIXEL guarantees a real pin — the
+#include <Adafruit_NeoPixel.h>
+
+// Private driver instance (ENABLE_NEOPIXEL guarantees a real pin — the
 // BuildConfig #error refuses pin -1, so no dummy branch exists anymore).
 #define NUMPIXELS 1
-Adafruit_NeoPixel pixels(NUMPIXELS, NEOPIXEL_PIN_DEFAULT, NEO_GRB + NEO_KHZ800);
+static Adafruit_NeoPixel pixels(NUMPIXELS, NEOPIXEL_PIN_DEFAULT, NEO_GRB + NEO_KHZ800);
 #endif
 
 // ============================================================================
@@ -499,10 +501,102 @@ const CommandEntry neopixelCommands[] = {
 
 const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Command grouping is owned by System_CommandRegistry.cpp.
+// Keep the live controls and persistent settings as separate help groups.
+
+// Persistent LED settings commands
+static const char* cmd_hardwareled_brightness(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String arg = argsInput; arg.trim();
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledbrightness <0..100>";
+  int v = arg.toInt();
+  if (v < 0 || v > 100) return "Error: LED brightness must be 0..100";
+  setSetting(gSettings.ledBrightness, v);
+  // Apply immediately to hardware (0-100% -> 0-255)
+  pixels.setBrightness((uint8_t)(v * 255 / 100));
+  pixels.show();
+  snprintf(getDebugBuffer(), 1024, "LED brightness set to %d%%", v);
+  return getDebugBuffer();
+}
+
+static const char* cmd_hardwareled_startupenabled(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String arg = argsInput; arg.trim();
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupenabled <0|1>";
+  bool enabled = (arg == "1" || arg.equalsIgnoreCase("true"));
+  setSetting(gSettings.ledStartupEnabled, enabled);
+  snprintf(getDebugBuffer(), 1024, "LED startup effect %s", enabled ? "enabled" : "disabled");
+  return getDebugBuffer();
+}
+
+static const char* cmd_hardwareled_startupeffect(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String arg = argsInput; arg.trim(); arg.toLowerCase();
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>";
+  if (arg == "none"   || arg == "rainbow" || arg == "pulse" ||
+      arg == "fade"   || arg == "blink"   || arg == "strobe") {
+    setSetting(gSettings.ledStartupEffect, arg.c_str());
+  } else {
+    return "Error: Unknown effect. Valid: none, rainbow, pulse, fade, blink, strobe";
+  }
+  snprintf(getDebugBuffer(), 1024, "LED startup effect set to %s", gSettings.ledStartupEffect.c_str());
+  return getDebugBuffer();
+}
+
+static const char* cmd_hardwareled_startupcolor(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String arg = argsInput; arg.trim();
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupcolor <color name|off>  (any of ~80 named colors; unknown names default to cyan)";
+  setSetting(gSettings.ledStartupColor, arg.c_str());
+  snprintf(getDebugBuffer(), 1024, "LED startup color set to %s", gSettings.ledStartupColor.c_str());
+  return getDebugBuffer();
+}
+
+static const char* cmd_hardwareled_startupcolor2(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String arg = argsInput; arg.trim();
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors; unknown names default to magenta)";
+  setSetting(gSettings.ledStartupColor2, arg.c_str());
+  snprintf(getDebugBuffer(), 1024, "LED startup color 2 set to %s", gSettings.ledStartupColor2.c_str());
+  return getDebugBuffer();
+}
+
+static const char* cmd_hardwareled_startupduration(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String arg = argsInput; arg.trim();
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupduration <100..10000>";
+  int v = arg.toInt();
+  if (v < 100 || v > 10000) return "Error: LED duration must be 100..10000 ms";
+  setSetting(gSettings.ledStartupDuration, v);
+  snprintf(getDebugBuffer(), 1024, "LED startup duration set to %dms", v);
+  return getDebugBuffer();
+}
 
 // ============================================================================
-// LED Settings Module (merged from System_LED.cpp)
+// Persistent LED Command Registry
+// ============================================================================
+
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+extern const CommandEntry ledCommands[] = {
+  { "ledbrightness",        "Set LED brightness 0-100.",                      false, cmd_hardwareled_brightness,    "Usage: ledbrightness <0..100>" },
+  { "ledstartupenabled",    "Enable/disable LED startup effect [0|1].",        false, cmd_hardwareled_startupenabled,"Usage: ledstartupenabled <0|1>" },
+  { "ledstartupeffect",     "Set LED startup effect [none|rainbow|pulse|fade|blink|strobe].",   false, cmd_hardwareled_startupeffect, "Usage: ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>" },
+  { "ledstartupcolor",      "Set LED startup primary color (any of ~80 named colors or 'off'; unknown defaults to cyan).",                  false, cmd_hardwareled_startupcolor,  "Usage: ledstartupcolor <color name|off>  (any of ~80 named colors; unknown names default to cyan)" },
+  { "ledstartupcolor2",     "Set LED startup secondary color (any of ~80 named colors or 'off'; unknown defaults to magenta).",                false, cmd_hardwareled_startupcolor2, "Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors; unknown names default to magenta)" },
+  { "ledstartupduration",   "Set LED startup effect duration in ms.",         false, cmd_hardwareled_startupduration,"Usage: ledstartupduration <100..10000>" },
+};
+
+extern const size_t ledCommandsCount = sizeof(ledCommands) / sizeof(ledCommands[0]);
+
+
+// ============================================================================
+// LED Settings Module
 // ============================================================================
 // (Still inside #if ENABLE_NEOPIXEL — the schema goes with the hardware.)
 

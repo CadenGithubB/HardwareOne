@@ -31,6 +31,31 @@
 #define LOG_PRESENCE (1 << 6)
 #define LOG_R1       (1 << 7)   // Even R1 ring vitals (HR/HRV/SpO2/temp/battery/wear)
 
+// Selection names and display labels belong to the logger, independent of
+// which sensor drivers a build includes. Keep the persisted mask bits stable.
+struct SensorLogSensor {
+  uint8_t bit;
+  const char* name;
+  const char* label;
+};
+inline constexpr SensorLogSensor kSensorLogSensors[] = {
+  { LOG_THERMAL,  "thermal",  "Thermal"   },
+  { LOG_TOF,      "tof",      "ToF"       },
+  { LOG_IMU,      "imu",      "IMU"       },
+  { LOG_GAMEPAD,  "gamepad",  "Gamepad"   },
+  { LOG_APDS,     "apds",     "APDS"      },
+  { LOG_GPS,      "gps",      "GPS"       },
+  { LOG_PRESENCE, "presence", "Presence"  },
+  { LOG_R1,       "r1",       "R1 Health" },
+};
+inline constexpr size_t kSensorLogSensorCount =
+    sizeof(kSensorLogSensors) / sizeof(kSensorLogSensors[0]);
+
+// A scalar presentation read, not a synchronized snapshot of logger state.
+// UI changes go through the authorized command executor: `sensorlog sensors
+// toggle <name>` applies to the selection when executed, not when rendered.
+uint8_t sensorLogSelectedMask();
+
 // Snapshot of sensor cache and flags for logging
 struct SensorCacheSnapshot {
   // flags
@@ -119,28 +144,40 @@ enum SensorLogFormat {
   SENSOR_LOG_TRACK = 2   // GPS-only compact track format with signal loss dedup
 };
 
+// Scalar presentation read; format changes use the authorized logger commands.
+SensorLogFormat sensorLogCurrentFormat();
+uint32_t sensorLogIntervalMs();
+
+// Boot-local identity of the active capture (0 when stopped). A new successful
+// start gets a new ID, even at the same path; rotation retains it. The guarded
+// stop checks identity and stops together, so a consumer cannot stop a
+// replacement capture. These do not synchronize the logger's sample buffers.
+uint32_t sensorLogCurrentSessionId();
+bool sensorLogStopSession(uint32_t sessionId);
+
 // Sensor logging state (extern for access from other modules)
 extern bool gSensorLoggingRunning;
 extern String gSensorLogPath;
-extern uint32_t gSensorLogIntervalMs;
-extern size_t gSensorLogMaxSize;
-extern SensorLogFormat gSensorLogFormat;
-extern uint8_t gSensorLogMaxRotations;
-extern uint8_t gSensorLogMask;
 // Sensor logging functions (called from main loop)
 void sensorLogTick();
 
-// Auto-start logging with persisted parameters (called from boot)
+// Start a timestamped session with saved parameters, without the boot-only
+// health-policy overrides. For already-authorized manual setup callers; this
+// performs normal start validation and returns the same borrowed command result
+// (consume it before another command). This is not a synchronization boundary.
+const char* sensorLogStartConfiguredSession();
+
+// Auto-start logging with persisted parameters and boot health policy.
 void sensorLogAutoStart();
 
 // R1 Health logging — HardwareOne's local durable-vitals capture. This is
 // independent from the ring's own health-collection privacy setting.
-// Turns LOG_R1 on, coerces format to CSV, starts the sensor logger under
+// The authorized `healthlogging` command turns LOG_R1 on, coerces format to CSV,
+// starts the sensor logger under
 // /logging_captures/sensors/ (per-day file when synced, boot-<N>/ when dark),
 // and persists healthLoggingEnabled (+ sensorlog autostart) so boot resumes.
 // Off removes LOG_R1; stops logging when no other sensors remain.
 bool healthLoggingIsActive();
-const char* healthLoggingSet(bool on);   // returns SUCCESS:/Error: message (static/debug buf)
 // The three R1 health commands exist only when the feature is compiled — they
 // are registered through healthCommands[] below, not sensorLoggingCommands[].
 #if ENABLE_R1_HEALTH
@@ -182,6 +219,9 @@ void sensorLogRequestSample(bool bypassR1Dedup);
 
 // Command handler
 const char* cmd_sensorlog(const String& originalCmd);
+// Admin-only numeric editors retain their settings registry entries.
+const char* cmd_sensorlogmask(const String& args);
+const char* cmd_sensorlogformat(const String& args);
 
 // Command registry
 struct CommandEntry;

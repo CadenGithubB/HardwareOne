@@ -8,7 +8,8 @@
 #include "System_BuildConfig.h"
 #include <stdint.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/task.h>
+#include <stddef.h>
 
 // RTC type definitions (always available for type-safe references)
 struct RTCDateTime {
@@ -22,19 +23,16 @@ struct RTCDateTime {
 };
 
 struct RTCCache {
-  SemaphoreHandle_t mutex = nullptr;
   RTCDateTime dateTime;
   float temperature;
   bool dataValid;
   unsigned long lastUpdate;
 };
 
+// Values only: callers own their copy; the live cache and lock stay in the driver.
 #if ENABLE_RTC_SENSOR
 
-#include "System_I2C.h"
-
 // State variables
-extern RTCCache gRtcCache;
 extern bool gRtcRunning;
 extern bool gRtcConnected;
 extern unsigned long gRtcLastStopTime;
@@ -62,8 +60,8 @@ extern const size_t rtcCommandsCount;
 
 // Core functions
 bool rtcInit();
+void rtcStop();  // Lifecycle worker only; live tasks complete their own cleanup.
 // createRTCTask() is declared in System_TaskUtils.h
-void rtcStop();
 bool rtcStartInternal();  // For sensor queue processor
 
 // Read/Write functions
@@ -105,6 +103,20 @@ const char* cmd_rtcsync(const String& argsInput);
 const char* cmd_rtcstart(const String& argsInput);
 const char* cmd_rtcstop(const String& argsInput);
 
+// Copy one reading; false clears out when uninitialized or the lock is busy.
+// Success only means a copy was available; check dataValid where required.
+bool rtcCacheSnapshot(RTCCache& out, uint32_t timeoutMs = 10);
+
+#else
+inline bool rtcCacheSnapshot(RTCCache& out, uint32_t timeoutMs = 10) {
+  (void)timeoutMs;
+  out = {};
+  return false;
+}
+inline int rtcBuildDataJSON(char* buf, size_t bufSize) {
+  if (buf && bufSize) buf[0] = '\0';
+  return 0;
+}
 #endif // ENABLE_RTC_SENSOR
 
 #endif // I2CSENSOR_DS3231_H

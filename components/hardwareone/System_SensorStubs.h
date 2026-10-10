@@ -19,7 +19,6 @@
 
 #if !ENABLE_THERMAL_SENSOR
   #include "i2csensor_mlx90640.h"  // Provides ThermalCache struct
-  extern ThermalCache gThermalCache;
   extern bool gThermalRunning;
   extern bool gThermalConnected;
   extern unsigned long gThermalLastStopTime;
@@ -29,13 +28,11 @@
   extern const struct CommandEntry thermalCommands[];
   extern const size_t thermalCommandsCount;
   // Thermal stub functions
-  inline int thermalBuildDataJSON(char* buf, size_t bufSize) { return 0; }
   inline bool thermalStartInternal() { return false; }
 #endif
 
 #if !ENABLE_TOF_SENSOR
   #include "i2csensor_vl53l4cx.h"  // Provides TofCache struct
-  extern TofCache gTofCache;
   extern bool gTofRunning;
   extern bool gTofConnected;
   extern uint32_t gTofLastStopTime;
@@ -45,13 +42,11 @@
   extern const struct CommandEntry tofCommands[];
   extern const size_t tofCommandsCount;
   // ToF stub functions
-  inline int tofBuildDataJSON(char* buf, size_t bufSize) { return 0; }
   inline bool tofStartInternal() { return false; }
 #endif
 
 #if !ENABLE_IMU_SENSOR
-  #include "i2csensor_bno055.h"  // Provides ImuCache and IMUActionState structs
-  extern ImuCache gImuCache;
+  #include "i2csensor_bno055.h"  // Provides disabled IMU reading APIs
   extern bool gImuRunning;
   extern bool gImuConnected;
   extern unsigned long gImuLastStopTime;
@@ -61,14 +56,12 @@
   extern const struct CommandEntry imuCommands[];
   extern const size_t imuCommandsCount;
   // IMU stub functions
-  inline int imuBuildDataJSON(char* buf, size_t bufSize) { return 0; }
   inline bool imuStartInternal() { return false; }
   void imuUpdateActions();
 #endif
 
 #if !ENABLE_GAMEPAD_SENSOR
   #include "i2csensor_seesaw.h"  // Provides InputCache struct
-  extern InputCache gInputCache;
   extern bool gInputRunning;
   extern bool gInputConnected;
   extern unsigned long gGamepadLastStopTime;
@@ -93,14 +86,13 @@
   inline bool earlyOLEDInit() { return false; }
   inline void processOLEDBootSequence() { }
   inline void updateOLEDDisplay() { }
-  // Command stubs for system_utils.cpp command registry
+  // Command stubs for System_CommandRegistry.cpp command registry
   extern const struct CommandEntry oledCommands[];
   extern const size_t oledCommandsCount;
 #endif
 
 #if !ENABLE_APDS_SENSOR
   #include "i2csensor_apds9960.h"  // Provides APDSCache struct
-  extern APDSCache gApdsCache;
   extern bool gApdsConnected;
   extern bool gApdsColorRunning;
   extern bool gApdsProximityRunning;
@@ -114,12 +106,10 @@
 #endif
 
 #if !ENABLE_GPS_SENSOR
-  #include "i2csensor_pa1010d.h"  // Provides GPSCache struct
-  extern GPSCache gGpsCache;
+  #include "i2csensor_pa1010d.h"  // Provides disabled GPS reading APIs
   extern bool gGpsRunning;
   extern bool gGpsConnected;
   extern unsigned long gGpsLastStopTime;
-  extern class Adafruit_GPS* gPA1010D;
   extern TaskHandle_t gGpsTaskHandle;
   extern const struct CommandEntry gpsCommands[];
   extern const size_t gpsCommandsCount;
@@ -134,20 +124,17 @@
   extern bool gFmRadioConnected;
   extern unsigned long gFmRadioLastStopTime;
   extern bool gRadioInitialized;
-  extern FMRadioCache gFmRadioCache;
   extern TaskHandle_t gFmRadioTaskHandle;
   extern const struct CommandEntry fmRadioCommands[];
   extern const size_t fmRadioCommandsCount;
   inline bool fmRadioInit() { return false; }
   inline void fmRadioDeinit() {}
   inline void fmRadioPoll() {}
-  inline int fmRadioBuildDataJSON(char* buf, size_t bufSize) { return 0; }
   inline bool fmRadioStartInternal() { return false; }
 #endif
 
 #if !ENABLE_PRESENCE_SENSOR
-  #include "i2csensor_sths34pf80.h"  // Provides PresenceCache struct
-  extern PresenceCache gPresenceCache;
+  #include "i2csensor_sths34pf80.h"  // Provides disabled presence reading APIs
   extern bool gPresenceRunning;
   extern bool gPresenceConnected;
   extern unsigned long gPresenceLastStopTime;
@@ -158,12 +145,10 @@
   inline bool presenceStartInternal() { return false; }
   inline bool presenceInit() { return false; }
   inline bool presencePoll() { return false; }
-  inline int presenceBuildDataJSON(char* buf, size_t bufSize) { return 0; }
 #endif
 
 #if !ENABLE_RTC_SENSOR
   #include "i2csensor_ds3231.h"  // Provides RTCDateTime and RTCCache structs
-  extern RTCCache gRtcCache;
   extern bool gRtcRunning;
   extern bool gRtcConnected;
   extern unsigned long gRtcLastStopTime;
@@ -174,7 +159,6 @@
   extern const size_t rtcCommandsCount;
   // RTC stub functions
   bool rtcStartInternal();
-  inline int rtcBuildDataJSON(char* buf, size_t bufSize) { return 0; }
 #endif
 
 #if !ENABLE_SERVO
@@ -284,7 +268,7 @@
 // =============================================================================
 
 #if !ENABLE_WIFI
-  // WifiNetwork struct and constants come from System_WiFi.h (single source of truth)
+  // Wi-Fi APIs and saved-network disabled operations have their own headers.
   #include "System_WiFi.h"
   extern bool gSkipNTPInWifiConnect;
   extern const struct CommandEntry wifiCommands[];
@@ -292,10 +276,6 @@
   // WiFi stub functions
   inline void setupWiFi() {}
   inline bool connectToBestWiFiNetwork() { return false; }
-  inline void setupNTP() {}
-  inline bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool enabled) { return false; }
-  inline void sortWiFiByPriority() {}
-  inline bool saveWiFiNetworks() { return false; }
   inline void wifiEventLogDrain() {}
   inline const char* cmd_wifitxpower(const String& argsInput) { return "WiFi disabled"; }
   inline const char* cmd_wifiautoreconnect(const String& argsInput) { return "WiFi disabled"; }

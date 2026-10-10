@@ -1,4 +1,5 @@
 #include "WebServer_Handle.h"
+#include "HAL_Input.h"
 #include "OLED_Utils.h"
 #include "System_Events.h"  // systemEventPost — SYSEVT_DISPLAY_INIT_FAILED
 #include "System_EventCatalog.h"  // shared indexed notification picker
@@ -9,6 +10,7 @@
 #include "System_Battery.h"
 #include "System_BuildConfig.h"
 #include "System_Command.h"
+#include "System_Icons.h"
 #include "System_RamFlush.h"
 #include "System_Settings.h"
 #include "System_ESPNow.h"
@@ -57,9 +59,7 @@ bool shouldBlockForDisplayAuth() {
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <esp_sleep.h>
-#include <Wire.h>
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
 #endif
@@ -1429,9 +1429,8 @@ void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
     int iconAreaX = state->separatorX + 4;
     int iconY = OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - state->iconSize) / 2;
     if (selected->iconName && selected->iconName[0] != '\0') {
-      extern bool drawIcon(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color);
       int iconX = iconAreaX + (128 - iconAreaX - state->iconSize) / 2;
-      drawIcon(display, selected->iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
+      oledDrawIcon(display, selected->iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
     }
     // Right-pane decorator (e.g. availability badge + status text). Drawn after
     // the icon so it can overlay a corner badge and place text below the icon.
@@ -3469,11 +3468,11 @@ void oledMarkDirtyUntil(unsigned long untilMs) {
 
 bool oledIsDirty() {
   extern volatile unsigned long gSensorStatusSeq;
-  extern InputCache gInputCache;
 
   if (oledDirtySeq.load(std::memory_order_acquire) !=
       oledConsumedDirtySeq) return true;
-  if (gInputCache.seq != oledLastRenderedGamepadSeq) return true;
+  uint32_t inputSeq = oledLastRenderedGamepadSeq;
+  if (inputActivitySequence(inputSeq, 5) && inputSeq != oledLastRenderedGamepadSeq) return true;
   if (gSensorStatusSeq != oledLastRenderedSensorSeq) return true;
   if (oledPairingRibbonActive()) return true;  // Continuous render during notification animations
   if (millis() < oledDirtyUntilMs) return true;  // Timed dirty (popup auto-dismiss, etc.)
@@ -3484,10 +3483,10 @@ bool oledIsDirty() {
 // Anything that changes after this point stays pending for the next frame.
 static void oledSnapshotFrameSeqs() {
   extern volatile unsigned long gSensorStatusSeq;
-  extern InputCache gInputCache;
 
   oledFrameDirtySeq   = oledDirtySeq.load(std::memory_order_acquire);
-  oledFrameGamepadSeq = gInputCache.seq;
+  oledFrameGamepadSeq = oledLastRenderedGamepadSeq;
+  inputActivitySequence(oledFrameGamepadSeq, 5);
   oledFrameSensorSeq  = gSensorStatusSeq;
 }
 
@@ -3859,9 +3858,6 @@ extern const int gAnimationCount;
 
 // Settings and EspNowState now come from espnow_system.h -> settings.h
 
-// GPS module
-extern Adafruit_GPS* gPA1010D;
-
 // ESP-NOW mesh state (defined in espnow_system.h or stubs)
 #if ENABLE_ESPNOW
 // gEspNow already declared in espnow_system.h
@@ -3870,10 +3866,6 @@ extern size_t gMeshTopologySize;
 // ESP-NOW stubs provide gEspNow, gMeshTopology, gMeshPeers
 static size_t gMeshTopologySize = 0;
 #endif
-
-// Cache locking functions
-extern bool lockThermalCache(TickType_t timeout);
-extern void unlockThermalCache();
 
 // Helper functions
 extern bool meshEnabled();
@@ -3890,13 +3882,7 @@ extern void imuUpdateActions();
 // ============================================================================
 
 bool initOLEDDisplay() {
-#if DISPLAY_TYPE != DISPLAY_TYPE_ST7789_P4_EYE
-  if (gDisplay != nullptr) {
-    gOledConsole.init();
-    broadcastOutput("OLED display already initialized");
-    return true;
-  }
-#endif
+  const bool wasReady = displayIsReady();
 
   DEBUG_DISPLAYF("Starting display initialization (%s)...", DISPLAY_NAME);
 
@@ -3907,13 +3893,18 @@ bool initOLEDDisplay() {
     oledConnected = true;
     gOledRunning = true;
     gOledConsole.init();
-    
+    if (wasReady) {
+      broadcastOutput("OLED display already initialized");
+      return true;
+    }
+
     broadcastOutput("Display initialized successfully");
     INFO_SYSTEMF("Display initialized: %s (%dx%d)", DISPLAY_NAME, DISPLAY_WIDTH, DISPLAY_HEIGHT);
     
     // Show initial splash screen
     gDisplay->clearDisplay();
     gDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
+    displaySetBrightness(gSettings.oledBrightness);
     gDisplay->setTextSize(1);
     gDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     gDisplay->setCursor(0, 0);
@@ -3933,9 +3924,11 @@ bool initOLEDDisplay() {
     }
 #endif
   } else {
+    oledConnected = false;
+    gOledRunning = false;
     ERROR_SYSTEMF("Display initialization failed");
   }
-  
+
   return success;
 }
 
@@ -3947,36 +3940,9 @@ void stopOLEDDisplay() {
   // publish the boundary, including epoch zero: the owner may still have a
   // stale UI mirror/callback cache that must be wiped before any later start.
   localDisplayTransportSessionCleared();
-  if (!oledConnected || gDisplay == nullptr) {
-    return;
-  }
-
-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
-  // Clear the framebuffer and push it while holding exactly one bus-aware
-  // transaction. Calling displayUpdate() here would try to acquire this same
-  // non-recursive bus mutex a second time and silently skip the final frame.
-  // delete/null must happen after the transaction completes, not inside it.
-  OLED_TRANSACTION(
-    gDisplay->clearDisplay();
-    gDisplay->display();
-  );
-  delete gDisplay;
-  gDisplay = nullptr;
-#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
-  // Commands can stop the display while the render owner still holds a canvas
-  // pointer. Retain that small software canvas and its lock for the firmware
-  // lifetime; end() drains DMA and releases only the hardware resources.
-  gDisplay->end();
-#else
-  // For SPI displays, no transaction needed
-  displayClear();
-  displayUpdate();
-  delete gDisplay;
-  gDisplay = nullptr;
-#endif
-
   oledConnected = false;
   gOledRunning = false;
+  displayStop();
 
   DEBUG_DISPLAYF("Display stopped");
 }
@@ -4065,7 +4031,7 @@ void updateOLEDDisplay() {
   oledApplyPendingSessionBoundary();
   prepareTranscriptionData();
   
-  if (!gOledRunning || !oledConnected || oledDisplay == nullptr) {
+  if (!gOledRunning || !oledConnected || !displayIsReady() || oledDisplay == nullptr) {
     return;
   }
 
@@ -4140,7 +4106,7 @@ void updateOLEDDisplay() {
 
   // Skip if OLED is degraded (will auto-retry after recovery timeout)
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
-  if (i2cDeviceIsDegraded(OLED_I2C_ADDRESS, (uint8_t)gSettings.oledBus)) {
+  if (i2cDeviceIsDegraded(OLED_I2C_ADDRESS, displayI2cBus())) {
     static unsigned long lastDegradedLog = 0;
     unsigned long nowLog = millis();
     if ((isDebugFlagSet(DEBUG_MEMORY) || isDebugFlagSet(DEBUG_SYSTEM)) && (nowLog - lastDegradedLog > 2000)) {
@@ -4593,7 +4559,7 @@ const char* cmd_oledmode(const String& argsInput) {
   mode.trim();
   
   if (mode.length() == 0) {
-    broadcastOutput("Usage: oledmode <menu|status|sensordata|sensorlist|thermal|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|automations|espnow|memory|off>");
+    broadcastOutput("Usage: oledmode <menu|status|sensordata|sensorlist|thermal|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>");
     return "ERROR";
   }
 
@@ -4610,7 +4576,7 @@ const char* cmd_oledmode(const String& argsInput) {
   if ((int)target == -1) {
     broadcastOutput("Invalid mode. Options: menu, status, sensordata, sensorlist, gamepad, "
                     "thermal, network, gps, text, logo, anim, imuactions, fmradio, files, "
-                    "automations, espnow, memory, off");
+                    "logging, automations, espnow, memory, off");
     return "ERROR";
   }
 
@@ -4953,6 +4919,7 @@ OLEDMode modeFromSlug(const String& slug) {
   if (slug == "gps") return OLED_GPS_DATA;
   if (slug == "fmradio") return OLED_FM_RADIO;
   if (slug == "files" || slug == "filebrowser" || slug == "fb") return OLED_FILE_BROWSER;
+  if (slug == "logging") return OLED_LOGGING;
   if (slug == "automations" || slug == "auto") return OLED_AUTOMATIONS;
   if (slug == "espnow") return OLED_ESPNOW;
   if (slug == "tof") return OLED_TOF_DATA;
@@ -5133,11 +5100,15 @@ bool earlyOLEDInit() {
     }
   }
   
-#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+  // Hardware probing, retries, allocation and readiness have one owner.
+  // This function owns only boot policy and the initial screen.
   if (!displayInit()) {
     oledConnected = false;
     gOledRunning = false;
-    if (gSettings.oledEnabled) systemEventPost(SYSEVT_DISPLAY_INIT_FAILED, DISPLAY_NAME);
+    if (gSettings.oledEnabled) {
+      logSystemEvent("DISPLAY", "%s initialization failed at boot", DISPLAY_NAME);
+      systemEventPost(SYSEVT_DISPLAY_INIT_FAILED, DISPLAY_NAME);
+    }
     return false;
   }
   oledConnected = true;
@@ -5158,115 +5129,8 @@ bool earlyOLEDInit() {
   displayClear();
   displayAnimation();
   displayUpdate();
-  logSystemEvent("DISPLAY", "%s online (SPI)", DISPLAY_NAME);
+  logSystemEvent("DISPLAY", "%s online (%s)", DISPLAY_NAME, DISPLAY_INTERFACE);
   return true;
-#else
-  // Resolve OLED's bus from settings (default 0 = I2C1 = Wire1). Same
-  // hard-fail-on-unavailable contract as HAL_Display.cpp's displayInit.
-  const uint8_t oledBus = (uint8_t)gSettings.oledBus;
-  TwoWire* oledWire = i2c() ? i2c()->getWire(oledBus) : nullptr;
-  if (!oledWire) {
-    DEBUG_DISPLAYF("OLED bus %u not initialized — skip boot-anim OLED init", oledBus);
-    return false;
-  }
-  const int oledSda = (oledBus == 0) ? gSettings.i2cSdaPin  : gSettings.i2c2SdaPin;
-  const int oledScl = (oledBus == 0) ? gSettings.i2cSclPin  : gSettings.i2c2SclPin;
-
-  // Try both common OLED addresses: 0x3D (default) and 0x3C (alternate).
-  // Retry a few times — cold boot / shared I2C bus can NACK the first probe intermittently.
-  uint8_t oledAddresses[] = {0x3D, 0x3C};
-  uint8_t detectedAddr = 0;
-  constexpr int kOledProbeAttempts = 3;
-  for (int attempt = 0; attempt < kOledProbeAttempts && detectedAddr == 0; attempt++) {
-    if (attempt > 0) {
-      delay(50);
-      DEBUG_DISPLAYF("OLED probe retry %d/%d", attempt + 1, kOledProbeAttempts);
-    }
-    for (uint8_t addr : oledAddresses) {
-      DEBUG_DISPLAYF("Probing for OLED at 0x%02X on bus %u (SDA=%d, SCL=%d)",
-                     addr, oledBus, oledSda, oledScl);
-      uint8_t probeResult = i2cProbeAddress(addr, 100000, 200, oledBus);
-      DEBUG_DISPLAYF("OLED probe at 0x%02X result: %d (0=found, 2=NACK)", addr, probeResult);
-      if (probeResult == 0) {
-        detectedAddr = addr;
-        break;
-      }
-    }
-  }
-
-  if (detectedAddr != 0) {
-    DEBUG_DISPLAYF("OLED detected at 0x%02X on bus %u - initializing for boot animation",
-                   detectedAddr, oledBus);
-
-    // Use Display HAL's gDisplay (oledDisplay is a macro alias for gDisplay in Display_HAL.h).
-    // Construct with the OLED's resolved Wire pointer; all later library
-    // calls (clearDisplay, display, etc.) route through it automatically.
-    extern DisplayDriver* gDisplay;
-    if (!gDisplay) {
-      gDisplay = new Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, oledWire, OLED_RESET);
-    }
-
-    bool beginOk = gDisplay && i2cDeviceTransaction(oledBus, detectedAddr, 100000, 500, [&]() -> bool {
-      return gDisplay->begin(SSD1306_SWITCHCAPVCC, detectedAddr);
-    });
-    if (beginOk) {
-      gDisplayI2cAddress = detectedAddr;
-      if (I2CDeviceManager* mgr = I2CDeviceManager::getInstance()) {
-        mgr->registerDevice(detectedAddr, "SSD1306", oledBus);
-      }
-      oledConnected = true;
-      gOledRunning = true;
-      gOledConsole.init();
-
-      // Set rotation (0 = normal, 2 = 180 degrees) — persisted via oledFlipped
-      oledDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
-
-      // Set up the input abstraction layer NOW (not lazily from
-      // initOLEDDisplay later) so button mappings are live for any pre-WiFi
-      // OLED mode that reads INPUT_CHECK. The static initializer in
-      // HAL_Input.cpp already derives from INPUT_TYPE; this is a no-op
-      // resync in case the controller type was changed at runtime earlier.
-      inputAbstractionInit();
-
-      // Start boot animation immediately
-      currentBootPhase = BOOT_PHASE_ANIMATION;
-      bootPhaseStartTime = millis();
-      oledBootModeActive = true;
-
-      requestOLEDMode(OLED_ANIMATION, "boot.init", false);
-      currentAnimation = ANIM_BOOT_PROGRESS;
-      animationFrame = 0;
-      animationLastUpdate = millis();
-
-      // Initialize boot progress
-      bootProgressPercent = 0;
-      bootProgressLabel = "Initializing...";
-
-      // Clear display and render first animation frame (I2C-safe)
-      OLED_TRANSACTION(
-        oledDisplay->clearDisplay();
-        displayAnimation();
-        oledDisplay->display();
-      );
-
-      DEBUG_DISPLAYF("OLED boot animation started at 0x%02X", detectedAddr);
-      logSystemEvent("DISPLAY", "OLED online at 0x%02X (bus %u)", detectedAddr, oledBus);
-      return true;
-    }
-  }
-  
-  DEBUG_DISPLAYF("OLED not detected or initialization failed");
-  // Genuine "configured but didn't come up" divergence only when OLED is actually
-  // enabled in settings. During first-time setup the enabled gate above is bypassed,
-  // so a board with no OLED attached reaches here with oledEnabled=false — don't
-  // write a false hardware-failure record into a fresh device's very first log.
-  if (gSettings.oledEnabled) {
-    logSystemEvent("DISPLAY", "OLED enabled but init FAILED at boot (not detected / begin() failed on bus %u)", oledBus);
-    char dispDet[24]; snprintf(dispDet, sizeof(dispDet), "bus %u", oledBus);
-    systemEventPost(SYSEVT_DISPLAY_INIT_FAILED, dispDet);
-  }
-  return false;
-#endif
 }
 
 // Process boot sequence phase transitions in loop()
@@ -6210,8 +6074,11 @@ static bool wasDeflectedX = false;
 static bool wasDeflectedY = false;
 static const unsigned long MENU_INITIAL_DELAY_MS = 200;  // Delay before auto-repeat starts
 static const unsigned long MENU_REPEAT_DELAY_MS = 100;   // Delay between repeated movements
+#endif // ENABLE_OLED_INPUT
 
-// Centralized navigation events - computed once per frame, used by all handlers
+// Display state exists even without a local controller: renderers and serial
+// setup prompts share it, and data-source selection is independent of input.
+// Navigation stays neutral until an actual input source supplies events.
 NavEvents gNavEvents = {false, false, false, false, 0, 0, 0};
 
 // =============================================================================
@@ -6269,6 +6136,7 @@ bool oledRemoteSourceAvailable() {
 #endif
 }
 
+#if ENABLE_OLED_INPUT
 // Debug throttle for gamepad menu input
 static unsigned long lastGamepadDebugTime = 0;
 static const unsigned long GAMEPAD_DEBUG_INTERVAL = 30000; // Log every 30 seconds max (reduce spam)
@@ -6279,6 +6147,7 @@ static int gCurrentJoyY = 0;
 static uint32_t gCurrentButtons = 0xFFFFFFFF;
 static uint32_t gHelperPressedAccum = 0;
 static bool gInputStateValid = false;
+#endif
 
 /**
  * Update input state from gamepad cache (thread-safe)
@@ -6288,17 +6157,13 @@ void updateInputState() {
 #if ENABLE_OLED_INPUT
   gNavEvents = {false, false, false, false, 0, 0, 0};
   gInputStateValid = false;
-  if (!gInputCache.mutex) return;
-  {
-    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.inputStateRead");
-    if (g.held && gInputCache.dataValid) {
-      gCurrentJoyX = gInputCache.joyX;
-      gCurrentJoyY = gInputCache.joyY;
-      gCurrentButtons = gInputCache.buttons;
-      gHelperPressedAccum |= gInputCache.buttonPressedAccum;
-      gInputCache.buttonPressedAccum = 0;
-      gInputStateValid = true;
-    }
+  InputCache input{};
+  if (inputConsumeSnapshot(input)) {
+    gCurrentJoyX = input.joyX;
+    gCurrentJoyY = input.joyY;
+    gCurrentButtons = input.buttons;
+    gHelperPressedAccum |= input.buttonPressedAccum;
+    gInputStateValid = true;
   }
   // Setup prompts use this helper outside the normal processOLEDInput pump.
   // Release the shared input mutex before asking the driver for detents.
@@ -6312,7 +6177,7 @@ void updateInputState() {
     gNavEvents.down = gNavEvents.wheelDelta > 0;
   }
 #else
-  gInputStateValid = false;
+  gNavEvents = {false, false, false, false, 0, 0, 0};
 #endif
 }
 
@@ -6370,6 +6235,7 @@ void getJoystickDelta(int& deltaX, int& deltaY) {
 #endif
 }
 
+#if ENABLE_OLED_INPUT
 /**
  * Handle X button context-sensitive action based on current OLED mode
  * 
@@ -6530,38 +6396,16 @@ bool processOLEDInput() {
     return false;
   }
   
-  // Read from gamepad cache (thread-safe)
-  if (!gInputCache.mutex) {
-    if (shouldDebug) {
-      DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: gInputCache.mutex is NULL addrs &en=%p &conn=%p &cache=%p\n", (void*)&gInputRunning, (void*)&gInputConnected, (void*)&gInputCache);
-      lastGamepadDebugTime = now;
-    }
-    return false;
-  }
-  
-  int joyX = 0, joyY = 0;
-  uint32_t buttons = 0;
-  bool dataValid = false;
-  bool mutexTaken = false;
-  
-  uint32_t latchedPresses = 0;
-  {
-    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.gamepadMenuRead");
-    if (g.held) {
-      mutexTaken = true;
-      if (gInputCache.dataValid) {
-        joyX = gInputCache.joyX;
-        joyY = gInputCache.joyY;
-        buttons = gInputCache.buttons;
-        latchedPresses = gInputCache.buttonPressedAccum;
-        dataValid = true;
-      }
-    }
-  }
-  
+  InputCache input{};
+  const bool snapshotAvailable = inputCacheSnapshot(input);
+  const bool dataValid = snapshotAvailable && input.dataValid;
+  int joyX = input.joyX, joyY = input.joyY;
+  uint32_t buttons = input.buttons;
+  uint32_t latchedPresses = input.buttonPressedAccum;
+
   if (!dataValid) {
     if (shouldDebug) {
-      DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: mutexTaken=%d dataValid=%d\n", mutexTaken, dataValid);
+      DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: snapshotAvailable=%d dataValid=%d\n", snapshotAvailable, dataValid);
       lastGamepadDebugTime = now;
     }
     return false;
@@ -6628,17 +6472,11 @@ bool processOLEDInput() {
   
   // Consume only after all early exits. Short click pulses must remain latched
   // across navigation debounce and the first-read initialization frame.
-  {
-    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.consumePresses");
-    if (!g.held) return false;
-    if (!gInputRunning || !gInputCache.dataValid) return false;
-    // Pair the latch with the same raw sample. A press arriving after the
-    // earlier peek must not be delivered from the latch now and as a fresh
-    // raw edge on the next frame.
-    buttons = gInputCache.buttons;
-    latchedPresses = gInputCache.buttonPressedAccum;
-    gInputCache.buttonPressedAccum = 0;
-  }
+  if (!inputConsumeSnapshot(input)) return false;
+  // Pair the latch with the same raw sample so a newly arrived press is
+  // delivered once, even if it arrived after the peek above.
+  buttons = input.buttons;
+  latchedPresses = input.buttonPressedAccum;
 
   // Reset auto-repeat state when mode changes to prevent stuck joystick
   static OLEDMode lastProcessedMode = OLED_OFF;
@@ -6715,9 +6553,9 @@ bool processOLEDInput() {
     if (totalDetents != 0) {
       bool vertical = true;
 #if ENABLE_ANO_ENCODER
-      if (gAnoEncoderCache.mutex) {
-        SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(5), "ano.readAxis");
-        if (g.held) vertical = (gAnoEncoderCache.currentAxis == ANO_AXIS_VERTICAL);
+      AnoEncoderCache ano{};
+      if (anoEncoderCacheSnapshot(ano, 5)) {
+        vertical = (ano.currentAxis == ANO_AXIS_VERTICAL);
       }
 #endif
       if (totalDetents > 0) {
@@ -7038,29 +6876,8 @@ void tryAutoStartInputForMenu() {
   // queued I2C device. Reuse the same driver start and saved autostart policy.
   inputStartInternal();
 #else
-  // Resolve the active input device's I2C address — gamepad at 0x50, or
-  // the ANO encoder at whatever the user configured (default 0x49).
-#if ENABLE_ANO_ENCODER
-  uint8_t inputAddr = (gSettings.anoEncoderI2cAddr > 0 && gSettings.anoEncoderI2cAddr < 0x80)
-                        ? (uint8_t)gSettings.anoEncoderI2cAddr
-                        : I2C_ADDR_ANO_ENCODER;
-#else
-  uint8_t inputAddr = I2C_ADDR_GAMEPAD;
-#endif
-  // Ping on the input device's CONFIGURED bus (was implicit bus 0 — would miss
-  // an input device on bus 1). The device-start queue then routes to the same bus.
-  bool pingResult = i2cPingAddress(inputAddr, 100000, 50, (uint8_t)gSettings.inputBus);
-  DEBUG_DISPLAYF("[INPUT_AUTO] I2C ping 0x%02X on bus %d result: %d\n", inputAddr, gSettings.inputBus, pingResult);
-  if (pingResult) {
-    // Input device detected — try to start it via the shared queue slot.
-    bool inQueue = isInQueue(I2C_DEVICE_INPUT);
-    DEBUG_DISPLAYF("[INPUT_AUTO] inQueue=%d\n", inQueue);
-    if (!inQueue) {
-      bool enqueued = enqueueDeviceStart(I2C_DEVICE_INPUT);
-      DEBUG_DISPLAYF("[INPUT_AUTO] enqueueDeviceStart result: %d\n", enqueued);
-      DEBUG_DISPLAYF("[OLED] Auto-starting input device for menu navigation");
-    }
-  }
+  const char* result = cmd_sensorstart_queued(I2C_DEVICE_INPUT, "Input", "input@menu");
+  DEBUG_DISPLAYF("[INPUT_AUTO] %s", result);
 #endif
 }
 
@@ -7112,7 +6929,7 @@ const CommandEntry oledCommands[] = {
   { "oledstart", "Start OLED display.", false, cmd_oledstart },
   { "oledstop", "Stop OLED display.", false, cmd_oledstop },
   { "oledmode", "Set display mode: <mode>", false, cmd_oledmode,
-    "Usage: oledmode <menu|status|sensordata|sensorlist|thermal|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|automations|espnow|memory|off>\n"
+    "Usage: oledmode <menu|status|sensordata|sensorlist|thermal|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>\n"
     "Example: oledmode memory\n"
     "Example: oledmode off" },
   { "oledtext", "Set custom text: <message>", false, cmd_oledtext, "Usage: oledtext <message>" },
@@ -7189,14 +7006,7 @@ void applyOLEDBrightness() {
 #if ENABLE_OLED_DISPLAY
   if (oledConnected && gOledRunning) {
     if (gSettings.oledBrightness >= 0 && gSettings.oledBrightness <= 255) {
-#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
       displaySetBrightness(gSettings.oledBrightness);
-#else
-      OLED_TRANSACTION(
-        oledDisplay->ssd1306_command(SSD1306_SETCONTRAST);
-        oledDisplay->ssd1306_command(gSettings.oledBrightness);
-      );
-#endif
     }
   }
 #endif
@@ -7213,7 +7023,7 @@ void applyOLEDBrightness() {
 // It used to rotate, clearDisplay() and flush right here. That blanked the
 // panel from the calling task and then marked nothing dirty, so the render loop
 // had no reason to repaint: the screen stayed BLACK until some unrelated event
-// (a joystick nudge bumping gInputCache.seq, a sensor status change, a live
+// (a joystick nudge bumping the input activity sequence, a sensor status change, a live
 // page's timed dirty) happened to wake it. On a static page — menu, logo,
 // settings list — that meant "flip does nothing but turn the screen off".
 void applyOLEDRotation() {
@@ -7235,7 +7045,7 @@ void oledApplySettings() {
 }
 
 // Local-display (OLED) session idle-logout. Same per-transport policy as
-// web/serial/BLE, keyed on PHYSICAL input only: gInputCache.seq is a monotonic
+// web/serial/BLE, keyed on PHYSICAL input only: the input activity sequence is a monotonic
 // counter advanced solely by the gamepad/ANO input devices (the same signal
 // power-save uses), so CLI/web/ESP-NOW commands never refresh the OLED session
 // — a network-busy box still locks its own screen. Deliberately independent of
@@ -7243,11 +7053,11 @@ void oledApplySettings() {
 // running while the panel is asleep so an idle session still expires in the dark.
 void localDisplaySessionTick() {
 #if ENABLE_OLED_DISPLAY
-  extern InputCache gInputCache;
 
   static uint32_t lastSeenSeq = 0;
   static bool inited = false;
-  const uint32_t seq = gInputCache.seq;
+  uint32_t seq = lastSeenSeq;
+  inputActivitySequence(seq, 5);
   if (!inited) { inited = true; lastSeenSeq = seq; }
 
   if (!gLocalDisplayAuthed) {        // no local session → nothing to age
@@ -7430,173 +7240,38 @@ void oledNotifyLocalDisplayAuthChanged() {
 
 void oledDisplayOff() {
 #if ENABLE_OLED_DISPLAY
-  if (oledDisplay && oledConnected) {
-#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
-    oledDisplay->setPower(false);
-#else
-    OLED_TRANSACTION(
-      oledDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
-    );
-#endif
-  }
+  if (oledConnected) displaySetPower(false);
 #endif
 }
 
-// Pre-sleep + post-wake helpers. These supersede oledDisplayOff/On for
-// sleep flows because on power-gated boards (FeatherS3[D]) we also have to
-// kill / restore LDO2 — which means the SSD1306 chip loses Vcc and needs a
-// full re-init on wake. On other boards they degrade gracefully to a plain
-// SSD1306-DISPLAYOFF / DISPLAYON, so cmd_lightsleep + deep-sleep entry can
-// always call these instead of the lower-level helpers.
 void oledPrepareForSleep() {
 #if ENABLE_OLED_DISPLAY
-  // Step 1: send DISPLAYOFF while the chip still has power, so it shuts down
-  // its charge pump cleanly rather than just losing Vcc mid-frame.
-  oledDisplayOff();
-  delay(10);  // let the SSD1306 internal sequencer settle
-
-  // Step 2: if our bus has a software-controllable power rail, drop it. The
-  // pin's LOW state is preserved through light sleep automatically (the I/O
-  // MUX retains digital state). For deep sleep, GPIO39 isn't an RTC IO on
-  // ESP32-S3 so it gets reset on wake — but that's a fresh boot path anyway,
-  // and the LDO defaults disabled when its enable line floats, so this is
-  // also the desired sleep state.
-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
-  if (gSettings.oledBus == 1) {
-    digitalWrite(I2C2_POWER_PIN, LOW);
-    // Hold LDO low long enough for SSD1306 Vcc to fully decay past its
-    // POR-rearm threshold before we hand off to esp_light_sleep_start.
-    // Without this wait, the CPU gates a few ms after the enable pin
-    // drops — Vcc is still ramping down across the chip's internal caps
-    // and bus capacitance when sleep latches. On wake, the chip's POR
-    // circuit may have never seen a clean falling edge, leaving it in
-    // a half-reset state where the I2C peripheral is alive but the
-    // analog/display subsystem is wedged. 200ms is overkill on paper
-    // (SSD1306 internal caps discharge through quiescent current in
-    // ~tens of ms) but cheap insurance against slow-decay variants.
-    delay(200);
-    DEBUG_SYSTEMF("[OLED] sleep: dropped I2C2 power pin GPIO%d + 200ms decay wait",
-                  (int)I2C2_POWER_PIN);
-  }
-#endif
+  displayPrepareForSleep();
 #endif
 }
 
 void oledResumeFromSleep() {
 #if ENABLE_OLED_DISPLAY
-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
-  if (gSettings.oledBus == 1) {
-    // Step 1: raise the LDO enable and wait for the rail + chip to come up.
-    // The AP2127 LDO itself stabilises in ~5ms, BUT the SSD1306's internal
-    // power-on reset + charge-pump startup wants ~100ms after VCC is good
-    // before it's reliably ready to take I2C commands. The old 10ms wait was
-    // enough for the LDO but not for the SSD1306 — begin() would land before
-    // the chip was awake and fail silently, leaving the panel blank on wake.
-    pinMode(I2C2_POWER_PIN, OUTPUT);
-    digitalWrite(I2C2_POWER_PIN, HIGH);
-    delay(100);
-
-    // Step 1.5: BUS RECOVERY. When the SSD1306 lost Vcc mid-transaction (or
-    // even just had a slow power-down), it may have left SDA stuck LOW. The
-    // ESP32 I2C peripheral then sees a "busy" bus and silently NACKs every
-    // transaction we issue — Wire1.endTransmission() returns an error but
-    // the Adafruit library doesn't check it, so begin() reports success
-    // (the test-ACK probe succeeds against the I2C controller's own ACK,
-    // not the device) and frames pretend to push but never actually clock
-    // out on the wire. Symptom: render counter ticks, no transactions
-    // visible on scope, panel stays dark.
-    //
-    // performBusRecovery does the textbook fix: Wire1.end(), manually
-    // toggle SCL 9 times with SDA released to clock out any device stuck
-    // mid-byte, generate a clean STOP, then Wire1.begin() to fully reset
-    // the I2C peripheral state on the MCU side. After this, the bus is
-    // guaranteed in IDLE and the SSD1306 is in the same state begin()
-    // expects at first-boot.
-    {
-      I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-      if (mgr) {
-        mgr->performBusRecovery(1);
-      }
-    }
-
-    // Step 2: the SSD1306 just power-cycled, so EVERY register is back at
-    // ROM defaults — contrast, segment remap, COM scan dir, display on/off,
-    // GDDRAM contents, the lot. Re-running begin() walks the standard init
-    // sequence, then we reapply rotation + brightness + force a redraw.
-    //
-    // One automatic retry with another 100ms wait: cheap insurance against
-    // edge cases (cold panel, marginal LDO, bus needing a recovery clock).
-    if (oledDisplay) {
-      bool ok = false;
-      for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
-        if (attempt > 0) {
-          WARN_SYSTEMF("[OLED] wake: begin() attempt %d failed — waiting + retrying", attempt);
-          delay(100);
-        }
-        ok = i2cDeviceTransaction((uint8_t)1, OLED_I2C_ADDRESS, 100000, 300, [&]() -> bool {
-          return oledDisplay->begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS);
-        });
-      }
-      if (ok) {
-        // CRITICAL: After a real power-cycle of the SSD1306, the Adafruit
-        // library's begin() reports success (chip ACKs I2C) but in practice
-        // the panel often stays dark — the high-voltage charge pump that
-        // drives the OLED pixels doesn't latch on. The chip is fully
-        // responsive over I2C and our framebuffer pushes succeed silently,
-        // but nothing is lit. Symptom: render counter ticks up, OLED back
-        // power LED is on, but panel is black.
-        //
-        // Workaround: re-send the three commands that matter directly,
-        // bypassing the library's init path entirely. DISPLAYOFF first
-        // (clean state), CHARGEPUMP=0x14 (enable internal DC-DC for
-        // SWITCHCAPVCC), DISPLAYON last. Wrapped in our own transaction
-        // so we own the bus lock and timing.
-        i2cDeviceTransactionVoid((uint8_t)1, OLED_I2C_ADDRESS, 400000, 200, [&]() {
-          oledDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
-          oledDisplay->ssd1306_command(SSD1306_CHARGEPUMP);
-          oledDisplay->ssd1306_command(0x14);  // enable charge pump (SWITCHCAPVCC)
-          oledDisplay->ssd1306_command(SSD1306_DISPLAYON);
-        });
-
-        applyOLEDRotation();
-        applyOLEDBrightness();
-        // Push an explicit blank frame — proves the chip is responsive AND
-        // overwrites whatever GDDRAM ended up at after the power cycle, so
-        // there's no glitchy first-frame flash before the next mode render.
-        i2cDeviceTransactionVoid((uint8_t)1, OLED_I2C_ADDRESS, 400000, 200, [&]() {
-          oledDisplay->clearDisplay();
-          oledDisplay->display();
-        });
-        oledMarkDirty();
-        // And immediately render the current mode so the user sees something
-        // the instant they wake — don't wait for the next main-loop tick (the
-        // cmd_exec task that called us may keep the floor for a few more ms).
-        updateOLEDDisplay();
-        WARN_SYSTEMF("[OLED] wake: SSD1306 re-init + charge-pump kick on bus 1");
-      } else {
-        ERROR_SYSTEMF("[OLED] wake: SSD1306 begin() failed after LDO2 restore (both attempts)");
-      }
-    }
+  const bool wasRunning = oledConnected && gOledRunning;
+  const bool restored = displayResumeFromSleep();
+  if (!wasRunning) return;
+  if (!restored) {
+    oledConnected = false;
+    gOledRunning = false;
+    ERROR_SYSTEMF("[OLED] Display could not resume; use oledstart to retry");
     return;
   }
-#endif
-  // Bus 0 / no power-gating: nothing was actually power-cycled, just flip
-  // the panel back on with the existing software command.
-  oledDisplayOn();
+  applyOLEDRotation();
+  applyOLEDBrightness();
+  oledMarkDirty();
+  // The existing owner-task guard schedules rendering when called by cmd_exec.
+  updateOLEDDisplay();
 #endif
 }
 
 void oledDisplayOn() {
 #if ENABLE_OLED_DISPLAY
-  if (oledDisplay && oledConnected) {
-#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
-    oledDisplay->setPower(true);
-#else
-    OLED_TRANSACTION(
-      oledDisplay->ssd1306_command(SSD1306_DISPLAYON);
-    );
-#endif
-  }
+  if (oledConnected) displaySetPower(true);
 #endif
 }
 

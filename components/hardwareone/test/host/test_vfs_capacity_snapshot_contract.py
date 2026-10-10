@@ -40,20 +40,17 @@ legacy = function_body(vfs_cpp, "bool getStats(StorageType type")
 assert "sampleCapacityFreshLocked(type)" in legacy
 assert "readCapacitySnapshot" not in legacy
 assert "publishCapacitySnapshot(type, generation" in legacy
-assert "if (!result.apiOk) return false;" in legacy
+assert "if (!result.valid) return false;" in legacy
 
 snapshot = function_body(vfs_cpp, "bool getStatsSnapshot(StorageType type")
 assert snapshot.count("readCapacitySnapshot(type, maxAgeMs, out)") == 2
 assert "FsLockGuard guard(\"VFS.getStatsSnapshot\")" in snapshot
 assert "sampleCapacityFreshLocked(type)" in snapshot
-assert "if (!result.apiOk) return false" in snapshot
+assert "if (!result.valid) return false" in snapshot
 assert "publishCapacitySnapshot(type, generation" in snapshot
 
-fresh = function_body(vfs_cpp, "static FreshCapacitySample sampleCapacityFreshLocked")
-assert "const esp_err_t infoErr" in fresh
-assert "result.apiOk = true" in fresh
-assert "infoErr == ESP_OK" in fresh
-assert "result.snapshot.totalBytes > 0" in fresh
+# The storage_stats executable covers sample validity and unchanged outputs on
+# failure against the actual sampler/APIs, including the shared cache core.
 
 invalidate = function_body(vfs_cpp, "void invalidateStatsSnapshot(StorageType type)")
 assert "gCapacitySnapshots.invalidate(tier)" in invalidate

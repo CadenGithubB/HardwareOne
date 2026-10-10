@@ -5,21 +5,7 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 
-// WiFi Constants
-#define MAX_WIFI_NETWORKS 8
-
-// WiFi Network Structure (always available for type-safe references)
-struct WifiNetwork {
-  String ssid;
-  String password;
-  int priority;            // 1 = highest priority
-  bool hidden;             // informational only
-  uint32_t lastConnected;  // millis when last connected
-};
-
-// Global WiFi network storage (defined in .ino)
-extern WifiNetwork* gWifiNetworks;
-extern int gWifiNetworkCount;
+#include "System_WiFiNetworks.h"
 
 #if ENABLE_WIFI
 
@@ -150,7 +136,7 @@ bool connectToBestWiFiNetwork();
 // task (wifiEventLogger keeps its stack frame tiny; the logging happens here).
 void wifiEventLogDrain();
 
-// Command registry (for system_utils.cpp)
+// Command registry (for System_CommandRegistry.cpp)
 struct CommandEntry;
 extern const CommandEntry wifiCommands[];
 extern const size_t wifiCommandsCount;

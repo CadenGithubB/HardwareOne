@@ -31,7 +31,7 @@ void beginBusOnCpu1(TwoWire* wire,int sda,int scl){++cpu1Begins;wire->begin(sda,
 using SemaphoreHandle_t=void*;
 struct I2CDevice {};
 struct I2CBusMetrics {uint32_t unused;};
-struct I2CDeviceStartRequest {unsigned unused;};
+// INSERT_PRODUCTION_REQUEST_TYPES
 
 // INSERT_PRODUCTION_MANAGER_DECLARATION
 // INSERT_PRODUCTION_MANAGER_CONSTANTS

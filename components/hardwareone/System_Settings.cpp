@@ -9,9 +9,7 @@
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"   // ENABLE_WIFI, ENABLE_ESPNOW flags
 #include "System_PollPause.h"     // pollPause/pollResume — global sensor-poll pause
-#if ENABLE_WIFI
-  #include "System_WiFi.h"   // WifiNetwork struct, OUTPUT_* macros, MAX_WIFI_NETWORKS
-#endif
+#include "System_WiFiNetworks.h"  // saved-network settings JSON hooks
 #include "System_Debug.h"    // DEBUG_* macros
 #if ENABLE_ESPNOW
   #include "System_ESPNow.h" // EspNowMode enum
@@ -21,6 +19,7 @@
 #include "System_Utils.h"    // RETURN_VALID_IF_VALIDATE_CSTR macro
 #include "System_RadioCompanion.h"  // companionSettingsModule (P4X-EYE)
 #include "System_Clock.h"    // Clock::applyTimezone — push tz offset into libc TZ
+#include "System_NTP.h"
 #include "BLE_Peers.h"       // bluetooth.peers JSON (de)serialization
 #include "System_Command.h"
 #include "System_CommandTypes.h"
@@ -28,7 +27,7 @@
 #include "System_Notifications.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel() — derive legacy gSrDebugLevel from flags
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() — Stage 1 consolidation
-#include "System_SensorLogging.h"  // gSensorLogMask / gSensorLogFormat sync from settings editors
+#include "System_SensorLogging.h"  // Logger-owned settings editors
 #include "System_UartLink.h"       // uartLinkStart/Stop/StatusLine — cmd_uartlink live apply
 #include "System_User.h"           // rotate transport generations on auth-policy changes
 #include <LittleFS.h>
@@ -53,7 +52,6 @@
 // ============================================================================
 
 // Note: Settings struct is defined in settings.h
-// Note: WifiNetwork struct and gWifiNetworks are defined in wifi_system.h
 
 // External dependencies from main .ino
 // (filesystemReady is provided by System_Filesystem.h, included below)
@@ -1266,7 +1264,7 @@ void applySettings() {
 // Build Settings JSON Document
 // ============================================================================
 
-void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFileOnly) {
+bool buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFileOnly) {
   // Stamp firmware version so we know which build last wrote this file
   doc["firmwareVersion"] = SelfDevice::firmwareVersion();
 
@@ -1350,55 +1348,13 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
   espnowMeshesWriteJson(doc, excludePasswords);
 #endif
 
-  // WiFi networks array - now nested under network.wifi.networks
-  //
-  // Rebuild from RAM whenever the array exists AND this boot's settings load
-  // completed (or there was no file to load). The old `gWifiNetworkCount > 0`
-  // gate skipped the rebuild when the LAST network was removed, so the
-  // merge-read's stale entries were serialized straight back — wifirm of the
-  // final network never persisted and it resurrected on reboot (the
-  // SETTINGS_LIFECYCLE_AUDIT "empty-list resurrect", observed live 2026-07-20).
-  // gSettingsLoadedOk keeps the one thing that gate accidentally protected:
-  // a save issued after a FAILED load cannot wipe the on-disk list. The
-  // null-check stays for ENABLE_WIFI=0 builds, where gWifiNetworks is never
-  // allocated (a failed alloc halts boot, so null here can't mean that).
-  if (gWifiNetworks && gSettingsLoadedOk) {
-    // Capture the merge-read's on-disk password blobs BEFORE to<JsonArray>()
-    // clears the array, so the guarded write below can keep a still-recoverable
-    // blob when the RAM password is empty after a damaged load.
-    String oldSsid[MAX_WIFI_NETWORKS];
-    String oldBlob[MAX_WIFI_NETWORKS];
-    int oldCount = 0;
-    JsonArrayConst oldNets = doc["network"]["wifi"]["networks"].as<JsonArrayConst>();
-    for (JsonObjectConst oldNet : oldNets) {
-      if (oldCount >= MAX_WIFI_NETWORKS) break;
-      const char* pb = oldNet["password"] | "";
-      if (strncmp(pb, "AES:", 4) == 0) {
-        oldSsid[oldCount] = (const char*)(oldNet["ssid"] | "");
-        oldBlob[oldCount] = pb;
-        oldCount++;
-      }
-    }
-    JsonArray networks = doc["network"]["wifi"]["networks"].to<JsonArray>();
-    for (int i = 0; i < gWifiNetworkCount; i++) {
-      JsonObject net = networks.add<JsonObject>();
-      net["ssid"] = gWifiNetworks[i].ssid;
-      
-      // Security: Encrypt passwords in file, exclude from web API
-      if (!excludePasswords) {
-        String prevBlob;
-        for (int k = 0; k < oldCount; k++) {
-          if (oldSsid[k] == gWifiNetworks[i].ssid) { prevBlob = oldBlob[k]; break; }
-        }
-        putSecretPreserving(net, "password", gWifiNetworks[i].password, prevBlob);  // at-rest AES (device key)
-      }
-      // For web API (excludePasswords=true), password field is omitted entirely
-      
-      net["priority"] = gWifiNetworks[i].priority;
-      net["hidden"] = gWifiNetworks[i].hidden;
-      net["lastConnected"] = gWifiNetworks[i].lastConnected;
-    }
+  // Only a completed load (or a confirmed absent file) makes RAM authoritative.
+  // The owner also writes an empty list, so removing the last network persists,
+  // and leaves the on-disk section intact when WiFi is unavailable.
+  if (gSettingsLoadedOk) {
+    if (!wifiNetworksWriteJson(doc, excludePasswords)) return false;
   }
+  return true;
 }
 
 // ============================================================================
@@ -1504,7 +1460,13 @@ bool writeSettingsJson() {
   
   // Now build/overwrite with current settings (orphaned sections remain untouched).
   // mainFileOnly=true → debug is excluded (it persists in DEBUG_JSON_FILE now).
-  buildSettingsJsonDoc(doc, /*excludePasswords=*/false, /*mainFileOnly=*/true);
+  if (!buildSettingsJsonDoc(doc, /*excludePasswords=*/false, /*mainFileOnly=*/true)) {
+    ERROR_STORAGEF("Could not snapshot saved WiFi networks for settings");
+    logSystemEvent("SETTINGS", "save FAILED (WiFi snapshot unavailable) — settings NOT persisted");
+    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "snapshot", "settings.json");
+    pollResume();
+    return false;
+  }
 
   // Remove runtime-only fields that must never be persisted to disk
   doc.remove("wifiPrimarySSID");
@@ -2020,44 +1982,9 @@ bool readSettingsJson() {
     DEBUG_STORAGEF("[Settings] Applied %zu settings from registered modules", registeredCount);
   }
 
-  // WiFi networks array
-#if ENABLE_WIFI
-  JsonArray networks = doc["network"]["wifi"]["networks"];
-  if (networks && gWifiNetworks) {
-    gWifiNetworkCount = 0;
-    for (JsonObject net : networks) {
-      if (gWifiNetworkCount >= MAX_WIFI_NETWORKS) {
-        DEBUG_STORAGEF("[WiFi Networks] Max networks reached (%d), skipping rest", MAX_WIFI_NETWORKS);
-        break;
-      }
-      
-      const char* ssid = net["ssid"];
-      const char* password = net["password"];
-      int priority = net["priority"] | 99;
-      bool hidden = net["hidden"] | false;
-      uint32_t lastConnected = net["lastConnected"] | 0;
-      
-      if (ssid && password) {
-        gWifiNetworks[gWifiNetworkCount].ssid = ssid;
-        gWifiNetworks[gWifiNetworkCount].password = getSecret(net, "password");
-        if (strncmp(password, "AES:", 4) == 0 && gWifiNetworks[gWifiNetworkCount].password.length() == 0) {
-          gSecretLoadFailures++;
-          logSystemEvent("CRYPTO", "wifi password for '%s' failed to decrypt at load — stored blob preserved", ssid);
-          { char sBuf[48]; snprintf(sBuf, sizeof(sBuf), "wifi:%s", ssid); systemEventPost(SYSEVT_SECRET_DECRYPT_FAILED, sBuf, "stored blob preserved"); }
-        }
-        gWifiNetworks[gWifiNetworkCount].priority = priority;
-        gWifiNetworks[gWifiNetworkCount].hidden = hidden;
-        gWifiNetworks[gWifiNetworkCount].lastConnected = lastConnected;
-        gWifiNetworkCount++;
-      }
-    }
-    DEBUG_STORAGEF("[WiFi Networks] Loaded %d networks from JSON", gWifiNetworkCount);
-  } else if (!networks) {
-    WARN_STORAGEF("No wifiNetworks array found in JSON");
-  } else if (!gWifiNetworks) {
-    ERROR_STORAGEF("gWifiNetworks not allocated");
-  }
-#endif
+  // The network owner loads records after key selection above. Keep the shared
+  // damaged-secret count here so all secret writers preserve recoverable blobs.
+  gSecretLoadFailures += wifiNetworksReadJson(doc);
 
   DEBUG_STORAGEF("[Settings] Load complete");
   gSettingsLoadedOk = true;  // full-array rewrites (wifi networks) now trusted
@@ -2069,7 +1996,6 @@ bool readSettingsJson() {
 // Settings command implementations (migrated from .ino)
 // ============================================================================
 
-extern void setupNTP();
 
 const char* cmd_tzoffsetminutes(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -3703,25 +3629,8 @@ SETTING_EDITOR_CMD(cmd_set_oledautostart, "oledautostart")
 SETTING_EDITOR_CMD(cmd_set_eiautostart, "eiautostart")
 SETTING_EDITOR_CMD(cmd_set_automationautostart, "automationautostart")
 
-// Bitmask / format editors — persist via SettingEntry, then sync live globals
-// so Settings-page saves affect the next logging session without reboot.
-static const char* cmd_set_sensorlogmask(const String& a) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  const SettingEntry* e = findSettingByCmdKey("sensorlogmask");
-  if (!e) return "Error: setting not found for this command";
-  const char* r = handleSettingCommand(e, a);
-  gSensorLogMask = (uint8_t)(gSettings.sensorLogMask & 0xFF);
-  return r;
-}
-static const char* cmd_set_sensorlogformat(const String& a) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  const SettingEntry* e = findSettingByCmdKey("sensorlogformat");
-  if (!e) return "Error: setting not found for this command";
-  const char* r = handleSettingCommand(e, a);
-  if (gSettings.sensorLogFormat >= 0 && gSettings.sensorLogFormat <= 2)
-    gSensorLogFormat = (SensorLogFormat)gSettings.sensorLogFormat;
-  return r;
-}
+// System logging retains its persisted-flags editor; sensor-log editors live
+// with their runtime policy in System_SensorLogging.
 static const char* cmd_set_systemlogflags(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   const SettingEntry* e = findSettingByCmdKey("systemlogflags");
@@ -3747,8 +3656,9 @@ const CommandEntry settingEditorCommands[] = {
   { "fmradiodevicepollms", "Set FM radio poll interval (ms)",            true, cmd_set_fmradiodevicepollms, "Usage: fmradiodevicepollms <value>" },
   { "gpsdevicepollms",     "Set GPS poll interval (ms)",                 true, cmd_set_gpsdevicepollms,     "Usage: gpsdevicepollms <value>" },
   { "sensorlogpath",       "Set default sensor-log file path",           true, cmd_set_sensorlogpath,       "Usage: sensorlogpath <\"/path\">" },
-  { "sensorlogmask",       "Set sensor-log sensor bitmask",              true, cmd_set_sensorlogmask,       "Usage: sensorlogmask <0-255>" },
-  { "sensorlogformat",     "Set sensor-log format (0=text,1=csv,2=track)", true, cmd_set_sensorlogformat,   "Usage: sensorlogformat <0|1|2>" },
+  { "sensorlogmask",       "Set sensor-log sensor bitmask",              true, cmd_sensorlogmask,       "Usage: sensorlogmask <0-255>" },
+  { "sensorlogformat",     "Set sensor-log format (0=text,1=csv,2=track)", true, cmd_sensorlogformat,
+    "Usage: sensorlogformat <0|1|2>\n  Track (2) replaces the saved sensor selection with GPS-only." },
   { "systemlogflags",      "Set system-log debug category mask (hex)",   true, cmd_set_systemlogflags,      "Usage: systemlogflags <0x...>" },
   { "eirequirelabels",     "Set Edge Impulse require-labels flag",       true, cmd_set_eirequirelabels,     "Usage: eirequirelabels <0|1>" },
   { "eimaxdetections",     "Set Edge Impulse max detections",            true, cmd_set_eimaxdetections,     "Usage: eimaxdetections <value>" },

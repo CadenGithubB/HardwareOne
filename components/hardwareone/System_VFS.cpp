@@ -488,6 +488,48 @@ size_t listVirtualEntries(const String& parentPath, VirtualEntry* out, size_t ca
   return n;
 }
 
+DirectoryReader::DirectoryReader(File& directory, const String& parentPath, bool includeModifiedTime)
+    : directory_(directory), parentPath_(normalize(parentPath)),
+      backendPrefix_(stripSdPrefix(parentPath_)),
+      includeModifiedTime_(includeModifiedTime),
+      virtualCount_(listVirtualEntries(parentPath_, virtuals_,
+                                      sizeof(virtuals_) / sizeof(virtuals_[0]))) {
+  if (!backendPrefix_.endsWith("/")) backendPrefix_ += "/";
+}
+
+bool DirectoryReader::next(DirectoryEntry& entry) {
+  if (!directory_ || !directory_.isDirectory()) return false;
+
+  DirectoryEntry next;
+  if (virtualIndex_ < virtualCount_) {
+    const VirtualEntry& mount = virtuals_[virtualIndex_++];
+    next.name = mount.name;
+    next.isFolder = mount.isFolder;
+    next.isVirtual = true;
+  } else {
+    for (;;) {
+      File child = directory_.openNextFile();
+      if (!child) return false;
+      next.name = child.name();
+      if (next.name.startsWith(backendPrefix_)) {
+        next.name = next.name.substring(backendPrefix_.length());
+      }
+      next.isFolder = child.isDirectory();
+      next.size = next.isFolder ? 0 : child.size();
+      next.modifiedAt = !next.isFolder && includeModifiedTime_ ? child.getLastWrite() : 0;
+      child.close();
+      // Backends may return leaf names or directory-rooted names. Anything
+      // still containing a slash is not a direct child of this directory.
+      if (next.name.length() && next.name.indexOf('/') == -1) break;
+    }
+  }
+  next.path = parentPath_;
+  if (!next.path.endsWith("/")) next.path += "/";
+  next.path += next.name;
+  entry = next;
+  return true;
+}
+
 static FS* fsForPath(const String& path) {
   return (getStorageType(path) == SDCARD) ? (FS*)&SD : (FS*)&LittleFS;
 }
@@ -614,59 +656,39 @@ bool rmdir(const String& path) {
 
 struct FreshCapacitySample {
   CapacitySnapshot snapshot = {};
-  bool apiOk = false;
-  bool cacheable = false;
+  bool valid = false;
 };
 
-// The caller owns gFsMutex. `apiOk` deliberately mirrors the legacy getStats
-// contract, including its two unusual edges: unavailable tiers return false
-// without touching outputs, while an esp_littlefs_info failure after a valid
-// mount still returns true with the zero values left in the locals. Such a
-// failed/zero sample is returned to that caller but is never cached.
+// The caller owns gFsMutex. Only a usable sample succeeds or enters the cache;
+// public callers leave their output parameters untouched on failure.
 static FreshCapacitySample sampleCapacityFreshLocked(StorageType type) {
   FreshCapacitySample result;
 
   if (type == SDCARD) {
     if (!isSDAvailable()) return result;
     result.snapshot.totalBytes = SD.totalBytes();
+    // Arduino SD reports zero on failure. A mounted volume with zero total
+    // capacity is unusable; zero used bytes alone can also mean an empty card.
+    if (result.snapshot.totalBytes == 0) return result;
     result.snapshot.usedBytes = SD.usedBytes();
-    result.snapshot.freeBytes =
-        (result.snapshot.totalBytes > result.snapshot.usedBytes)
-            ? (result.snapshot.totalBytes - result.snapshot.usedBytes)
-            : 0;
-    result.snapshot.sampledAtMs = millis();
-    result.apiOk = true;
-    // Arduino SD exposes no f_getfree error code here; both accessors return 0
-    // on failure. A mounted FAT volume with zero total bytes is not a usable
-    // capacity sample, so do not let it poison later cached presentation reads.
-    result.cacheable = result.snapshot.totalBytes > 0;
-    return result;
+  } else {
+    if (!filesystemReady) return result;
+    // Sample total and used in one driver call. Calling both Arduino getters
+    // would traverse LittleFS twice and could straddle a concurrent write.
+    size_t lfsTotal = 0, lfsUsed = 0;
+    const esp_err_t infoErr =
+        esp_littlefs_info(kLittleFsPartitionLabel, &lfsTotal, &lfsUsed);
+    if (infoErr != ESP_OK || lfsTotal == 0) return result;
+    result.snapshot.totalBytes = lfsTotal;
+    result.snapshot.usedBytes = lfsUsed;
   }
 
-  if (!filesystemReady) return result;
-  // One traverse, not two. LittleFS.totalBytes() and LittleFS.usedBytes() both
-  // call esp_littlefs_info() with a non-NULL `used` pointer, and
-  // get_total_and_used_bytes() runs lfs_fs_size() -- a full walk of every
-  // metadata pair and every file's CTZ block chain -- whenever that pointer is
-  // set. So the Arduino pair costs two full traverses and throws one result
-  // away, even though `total` is just block_size * block_count. Calling
-  // esp_littlefs_info() once also makes the pair atomic: total and used now
-  // come from one driver lock window instead of two, so they can no longer
-  // straddle a concurrent write and produce used > total.
-  size_t lfsTotal = 0, lfsUsed = 0;
-  // On failure the values stay 0, which is exactly what the Arduino getters
-  // returned in that case -- deliberately unchanged.
-  const esp_err_t infoErr =
-      esp_littlefs_info(kLittleFsPartitionLabel, &lfsTotal, &lfsUsed);
-  result.snapshot.totalBytes = lfsTotal;
-  result.snapshot.usedBytes = lfsUsed;
   result.snapshot.freeBytes =
       (result.snapshot.totalBytes > result.snapshot.usedBytes)
           ? (result.snapshot.totalBytes - result.snapshot.usedBytes)
           : 0;
   result.snapshot.sampledAtMs = millis();
-  result.apiOk = true;  // Preserve the legacy post-mount return contract.
-  result.cacheable = (infoErr == ESP_OK && result.snapshot.totalBytes > 0);
+  result.valid = true;
   return result;
 }
 
@@ -677,14 +699,12 @@ bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes,
   FsLockGuard guard("VFS.getStats");
   const uint32_t generation = capacitySnapshotGeneration(type);
   const FreshCapacitySample result = sampleCapacityFreshLocked(type);
-  if (!result.apiOk) return false;
+  if (!result.valid) return false;
 
   totalBytes = result.snapshot.totalBytes;
   usedBytes = result.snapshot.usedBytes;
   freeBytes = result.snapshot.freeBytes;
-  if (result.cacheable) {
-    publishCapacitySnapshot(type, generation, result.snapshot);
-  }
+  publishCapacitySnapshot(type, generation, result.snapshot);
   return true;
 }
 
@@ -703,12 +723,10 @@ bool getStatsSnapshot(StorageType type, CapacitySnapshot& out,
 
   const uint32_t generation = capacitySnapshotGeneration(type);
   const FreshCapacitySample result = sampleCapacityFreshLocked(type);
-  if (!result.apiOk) return false;  // Leave `out` untouched on failure.
+  if (!result.valid) return false;  // Leave `out` untouched on failure.
 
   out = result.snapshot;
-  if (result.cacheable) {
-    publishCapacitySnapshot(type, generation, result.snapshot);
-  }
+  publishCapacitySnapshot(type, generation, result.snapshot);
   return true;
 }
 
@@ -1479,5 +1497,5 @@ const CommandEntry sdCommands[] = {
 };
 
 const size_t sdCommandsCount = sizeof(sdCommands) / sizeof(sdCommands[0]);
-// Note: SD commands registered via gCommandModules in System_Utils.cpp (not via static registrar)
+// Note: SD commands registered via gCommandModules in System_CommandRegistry.cpp (not via static registrar)
 // This allows conditional compilation based on ENABLE_SD_CARD for board compatibility

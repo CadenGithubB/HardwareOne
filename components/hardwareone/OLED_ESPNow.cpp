@@ -1111,10 +1111,14 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
             if (!gMeshPeerMeta[i].isActive) continue;
             
             if (gOledEspNowState.filterMode == 1 && gMeshPeerMeta[i].room[0]) {
-              strncpy(gOledEspNowState.filterValue, gMeshPeerMeta[i].room, sizeof(gOledEspNowState.filterValue) - 1);
+              const size_t length = strnlen(gMeshPeerMeta[i].room, sizeof(gOledEspNowState.filterValue) - 1);
+              memcpy(gOledEspNowState.filterValue, gMeshPeerMeta[i].room, length);
+              gOledEspNowState.filterValue[length] = '\0';
               break;
             } else if (gOledEspNowState.filterMode == 2 && gMeshPeerMeta[i].zone[0]) {
-              strncpy(gOledEspNowState.filterValue, gMeshPeerMeta[i].zone, sizeof(gOledEspNowState.filterValue) - 1);
+              const size_t length = strnlen(gMeshPeerMeta[i].zone, sizeof(gOledEspNowState.filterValue) - 1);
+              memcpy(gOledEspNowState.filterValue, gMeshPeerMeta[i].zone, length);
+              gOledEspNowState.filterValue[length] = '\0';
               break;
             }
           }

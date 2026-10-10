@@ -1,6 +1,7 @@
 """p4_steps.py LOG 'expect1=>answer1' 'expect2=>answer2' ... : answer each expected screen in order, then show the next screen."""
+import os
 import serial, time, sys
-s = serial.Serial(); s.port='/dev/cu.usbmodem2101'; s.baudrate=115200; s.timeout=0.05; s.dtr=False; s.rts=False; s.open()
+s = serial.Serial(); s.port=os.environ['HW1_P4_PORT']; s.baudrate=115200; s.timeout=0.05; s.dtr=False; s.rts=False; s.open()
 log = open(sys.argv[1], 'wb'); buf = ''; mark = 0; steps = [a.split('=>', 1) for a in sys.argv[2:]]; i = 0
 t_end = time.time() + 120; quiet = time.time()
 while time.time() < t_end:

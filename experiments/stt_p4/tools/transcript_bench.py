@@ -1,4 +1,5 @@
 """Private physical qualification; inference is on P4, Mac plays test sound only."""
+import os
 import base64,contextlib,datetime,hashlib,json,pathlib,re,subprocess,sys,time
 ROOT=pathlib.Path(__file__).resolve().parents[3]
 sys.path[:0]=[str(ROOT/'experiments'/x) for x in ('p4_ble_roles','p4_connectivity','p4_mesh')]
@@ -27,7 +28,7 @@ def playback_volume(volume):
   subprocess.run(['/usr/bin/osascript','-e',f'set volume output volume {volume} output muted false'],check=True,capture_output=True)
   yield
  finally:subprocess.run(['/usr/bin/osascript','-e',f'set volume output volume {old[0]} output muted {old[1]}'],check=True,capture_output=True)
-with RolesConsole('/dev/cu.usbmodem2201',RUN/('transcripts-'+tag+'.log'),secrets=private_encodings(creds),completion='hardwareone',chunk_delay=.12) as board:
+with RolesConsole(os.environ['HW1_P4_PORT'],RUN/('transcripts-'+tag+'.log'),secrets=private_encodings(creds),completion='hardwareone',chunk_delay=.12) as board:
  time.sleep(3)
  fatal_marker=board.marker();fatal_tail=""
  def cmd(text):

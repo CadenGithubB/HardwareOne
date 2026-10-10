@@ -2,6 +2,23 @@
 
 This document explains how to switch between different ESP32 board configurations.
 
+## Saved feature configurations
+
+For different feature selections on the same board, use a saved configuration:
+
+```bash
+python3 tools/build_config.py build xiao-default
+python3 tools/build_config.py build xiao-mqtt
+```
+
+These build independently in `build-config-<name>/`, including separate
+`sdkconfig` files. They use the same board build and compiler dependency rules,
+without editing shared headers. XIAO keeps MQTT off by default; the MQTT
+configuration enables it and its settings page, with offline maps disabled to
+fit the existing partition. See
+[saved configurations](../configurations/README.md) for creation, inherited
+defaults, validation, and build reports.
+
 ## Preferred: per-board isolated builds (no fullclean, ever)
 
 ```bash
@@ -13,7 +30,8 @@ tools/build_board.sh p4x_eye                 # ESP32-P4X-EYE (run tools/p4/prepa
 
 Every board builds in its own `build-<board>/` directory with its own
 `sdkconfig`, generated fresh from `sdkconfig.defaults` + the chip-family
-defaults + `boards/<board>.defaults`. Consequences:
+defaults + `boards/<board>.defaults`, followed by the optional SDK policy in
+`presets/` and any saved SDK choices. Consequences:
 
 - **Switching boards never needs `idf.py fullclean`** — the PSRAM-mode/
   bootloader mismatch that forced it cannot happen, since each board keeps its
@@ -25,9 +43,9 @@ defaults + `boards/<board>.defaults`. Consequences:
   marker and always sets `HW_BOARD` — closing the footgun where a bare
   `idf.py build` reconfigure on esp32s3 could combine `flash=16mb` with an
   8 MB board's saved configuration.
-- Different board builds may run concurrently. Each build depends directly on
-  its selected checked-in partition table; there is no shared generated
-  partition input between build directories.
+- Build directories and partition inputs are independent. Dependency installation
+  still shares `managed_components/`: finish component resolution before running
+  builds concurrently, and serialize configuration when changing chip targets.
 - Local sdkconfig experiments (`menuconfig`) apply per board dir, since each
   dir owns its sdkconfig.
 - Each successful build writes **`build-<board>/BUILD_INFO.md`** — a manifest
@@ -38,20 +56,28 @@ defaults + `boards/<board>.defaults`. Consequences:
 
 ### Board and deployment are independent axes
 
-Per-board dirs isolate **sdkconfig** (chip, PSRAM mode, flash size, BT stack).
-Ordinary builds still take their feature choices from the shared
-`components/hardwareone/System_BuildConfig.h`, so switching ordinary board
-builds can require editing that header:
+The [configuration ownership and portability report](CONFIGURATION_OWNERSHIP.md)
+classifies current hardware facts, resource constraints, and application policy,
+and describes the migration toward reusable feature selections. Saved configurations
+now cover XIAO MQTT, external I2C/display/input choices, and Bluetooth SDK support.
 
-| Board | Requires | Why |
-|---|---|---|
-| XIAO Sense (carrier) | `I2C_FEATURE_LEVEL 0`, `ENABLE_BLUETOOTH 1` | no breakout sensors/OLED; BT for G2 |
-| FeatherS3[D] | `I2C_FEATURE_LEVEL > 0` | MAX17048 fuel gauge is on I2C — a `#error` fires otherwise |
-| QT Py ESP32 | `ENABLE_BLUETOOTH 0` | `boards/qtpy_esp32.defaults` sets `CONFIG_BT_ENABLED=n`, so the Bluedroid headers do not exist |
+Per-board directories isolate **sdkconfig**, including hardware settings and
+optional SDK features. Shared application defaults live in
+`components/hardwareone/System_BuildConfig.h`; board feature defaults live in
+`boards/<board>.features.h`. Saved configurations override those defaults
+without editing shared headers.
 
-Building an ordinary board with the wrong header state fails loudly (a
-`#error`, or a missing `esp_gap_ble_api.h`-style include) rather than producing
-a bad image.
+| Selection | Default or constraint |
+|---|---|
+| XIAO Sense | MQTT, external I2C, display and input default off; saved configurations can enable them. |
+| XIAO external I2C | GPIO5/6 on controller 1; the current camera SDK also uses controller 1, so the supplied display configuration explicitly disables the camera. |
+| FeatherS3[D] | Its onboard MAX17048 requires I2C; the build diagnoses a disabled bus. |
+| Bluetooth SDK | Shared default on; QT Py defaults off through `presets/qtpy_esp32.sdkconfig.defaults`. Saved SDK choices can override either default. |
+
+`xiao-no-bluetooth` disables both the application feature and SDK Bluetooth
+support. `xiao-display` selects the supported SSD1306 backend. Missing bus,
+backend and assembly-pin requirements produce build errors. Physical flash,
+PSRAM, radio wiring and security settings remain outside the saved feature API.
 
 Checked-in deployment profiles solve that problem for reproducible release
 images. A deployment selects a feature overlay and an exact OTA/partition
@@ -174,8 +200,9 @@ HW_BOARD=feathers3 idf.py fullclean
 HW_BOARD=feathers3 idf.py build
 HW_BOARD=feathers3 idf.py -p /dev/cu.usbmodem* flash monitor
 
-# Back to XIAO ESP32-S3 (HW_BOARD can be unset since xiao_s3 is the default)
-idf.py fullclean && idf.py build
+# Back to XIAO ESP32-S3
+HW_BOARD=xiao_s3 idf.py fullclean
+HW_BOARD=xiao_s3 idf.py build
 
 # Confirm which board the build picked up
 HW_BOARD=feathers3 idf.py reconfigure 2>&1 | grep HW_BOARD

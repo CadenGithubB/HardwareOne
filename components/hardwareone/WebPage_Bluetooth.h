@@ -96,7 +96,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     <div class='bt-header-left'>
       <span class='status-indicator status-disabled' id='bt-status-dot'></span>
       <span class='bt-header-title'>Bluetooth</span>
-      <span class='bt-pill idle' id='bt-mode-pill'>Server</span>
+      <span class='bt-pill idle' id='bt-mode-pill'>--</span>
       <span class='bt-pill idle' id='bt-state-pill'>--</span>
     </div>
     <div class='bt-header-right'>
@@ -106,12 +106,12 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   // The mode toggle only makes sense in builds that actually include the G2
   // client — otherwise there's no second role to switch to.
   httpd_resp_send_chunk(req, R"HTML(
-      <button class='btn' id='btn-bt-mode' title='Switch BLE role (server phone-peripheral vs. G2 glasses client)' data-guest-hide>Mode: Server</button>
+      <button class='btn' id='btn-bt-mode' title='Switch BLE role (server phone-peripheral vs. G2 glasses client)' disabled data-guest-hide>Mode: --</button>
 )HTML", HTTPD_RESP_USE_STRLEN);
 #endif
 
   httpd_resp_send_chunk(req, R"HTML(
-      <button class='btn' id='btn-bt-open' data-guest-hide>Enable Bluetooth</button>
+      <button class='btn' id='btn-bt-open' disabled data-guest-hide>Enable Bluetooth</button>
       <button class='btn' id='btn-bt-close' style='display:none' data-guest-hide>Disable Bluetooth</button>
       <button class='btn' id='btn-bt-adv' style='display:none' data-guest-hide>Advertise</button>
       <button class='btn' id='btn-bt-disconnect' style='display:none' data-guest-hide>Disconnect</button>
@@ -119,13 +119,14 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     </div>
   </div>
   <div class='bt-header-status' id='bt-status-text'></div>
+  <div id='bt-action-status' role='status' style='font-size:.82em;color:var(--muted);margin-top:8px'></div>
 </div>
 
 <!-- Not initialized state (copy swapped by JS based on current mode) -->
 <div class='bt-not-init' id='bt-not-init'>
-  <h3 id='bt-not-init-title'>Bluetooth is not running</h3>
-  <p id='bt-not-init-body'>Enable the BLE server to begin advertising and accept connections from clients.</p>
-  <button class='btn' id='btn-bt-open2' data-guest-hide>Enable Bluetooth</button>
+  <h3 id='bt-not-init-title'>Reading Bluetooth status…</h3>
+  <p id='bt-not-init-body'>Controls will be available after the device reports its current mode.</p>
+  <button class='btn' id='btn-bt-open2' disabled data-guest-hide>Enable Bluetooth</button>
 </div>
 
 <!-- Initialized panels -->
@@ -284,6 +285,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           <input type='checkbox' id='cb-g2-autoreconnect' style='flex-shrink:0'>
           <span>Auto-reconnect</span>
         </label>
+        <div id='g2-auto-status' role='status' style='font-size:.82em;color:var(--muted);margin-top:8px'></div>
       </div>
     </div>
 
@@ -322,6 +324,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           <input type='checkbox' id='cb-ring-autoreconnect' style='flex-shrink:0'>
           <span>Auto-reconnect</span>
         </label>
+        <div id='ring-auto-status' role='status' style='font-size:.82em;color:var(--muted);margin-top:8px'></div>
         <div style='font-size:.78em;color:var(--muted);margin-top:8px;line-height:1.4'>
           Connect / Auto-reconnect for the ring. Live vitals and Health Logging
           live on the <a href='/r1-health'>R1 Health</a> page (when compiled in).
@@ -378,7 +381,13 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         </div>
         <div class='bt-stream-grid' style='grid-template-columns:1fr 1fr 1fr;margin-top:10px'>
           <button class='btn bt-stream-btn' id='btn-g2-clear' data-guest-hide>Clear Display</button>
-          <button class='btn bt-stream-btn' id='btn-g2-mic-toggle' data-guest-hide>Mic: --</button>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_WEB_SENSORS && ENABLE_MICROPHONE
+  // Microphone source and recording lifecycle belong to the shared controls.
+  // Navigation deliberately leaves an existing capture and preference alone.
+  httpd_resp_send_chunk(req, "<a class='btn bt-stream-btn' id='g2-mic-controls' href='/sensors#mic-card' data-guest-hide>Microphone controls</a>", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, R"HTML(
           <button class='btn bt-stream-btn' id='btn-g2-reopen' title='Re-open the hijacked Blocks app after an abnormal exit (lens went dark, tapping Blocks in the menu does nothing). Sends Cmd=18 + CREATE so the firmware accepts a fresh container.' data-guest-hide>Re-open Hijack</button>
         </div>
         <div id='g2-display-status' style='font-size:.82em;color:var(--muted);min-height:1.2em;margin-top:8px'></div>
@@ -432,13 +441,10 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 <script>
 (function(){
   // ── helpers ──────────────────────────────────────────────────────────────
-  // Client-side queue for /api/cli. The server rate-limits at 1 req
-  // per 50 ms and returns 429 on burst; without queuing, page-load
-  // alone fires loadMode + loadConfig + refresh (g2status+ringstatus)
-  // + g2nav + g2verbose all in parallel, and several get 429ed before
-  // the limiter window opens. The queue serialises every cli() call
-  // with 80 ms minimum spacing — invisible to the user, eliminates
-  // the 429 storm. Per-call .then/.catch semantics are preserved.
+  // Queue command requests with 80 ms spacing to respect /api/cli's
+  // 50 ms rate limit, including page-load queries such as g2nav/g2verbose.
+  // Status reads use /api/ble/status independently of this command queue.
+  // Per-call .then/.catch semantics are preserved.
   var _cliQueue = [];
   var _cliBusy  = false;
   var _cliMinGapMs = 80;
@@ -478,13 +484,16 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   function setText(id,v){ var e=el(id); hw.setText(e,v||''); }
 
   // ── state ─────────────────────────────────────────────────────────────────
-  var bleMode = 'server';  // 'server' | 'client' — tracks gSettings.bleMode
+  var bleMode = null;      // Unknown until the owner reports 'server' or 'client'.
   var btState = 'unknown'; // 'off' | 'advertising' | 'connected' | 'on' (server) or 'on' (client)
   var autoStartState = null;
   var requireAuthState = null;
   var navState = null;
   var verboseState = null;
-  var micState = false;
+  var reconnectState = { g2: null, ring: null };
+  var controlPending = false;
+  var controlsConfirmed = false;
+  var statusRequest = 0;
 
   var G2_ENABLED = !!window.__bluetoothG2Enabled;
 
@@ -497,15 +506,9 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   }
 
   function applyMode(mode){
-    var next = (mode === 'client') ? 'client' : 'server';
-    // No-op when the mode is unchanged. Load-bearing: refresh()'s handler
-    // calls applyMode(d.mode) on every status response (the server always
-    // includes mode), and the trailing refresh() below would otherwise
-    // recurse refresh→applyMode→refresh at HTTP round-trip speed (~330 ms
-    // observed), bypassing the pollTick cadence entirely and flooding
-    // command-audit.log with `bleinfo json` lines.
-    if (next === bleMode) return;
-    bleMode = next;
+    if(mode !== 'server' && mode !== 'client') return;
+    if(mode === bleMode) return;
+    bleMode = mode;
 
     var modePill = el('bt-mode-pill');
     hw.setText(modePill, (bleMode === 'client') ? 'G2 Client' : 'Server');
@@ -533,8 +536,22 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     var discBtn = el('btn-bt-disconnect');
     if(discBtn && bleMode === 'client') discBtn.style.display = 'none';
 
-    // Force a fresh status read for the new mode.
-    refresh();
+    // The same status response supplies the mode and its runtime state.
+  }
+
+  function updateControlAvailability(){
+    var disabled = controlPending || !controlsConfirmed;
+    ['btn-bt-mode', 'btn-bt-open', 'btn-bt-open2', 'btn-bt-close',
+     'btn-bt-adv', 'btn-bt-disconnect'].forEach(function(id){
+      var button = el(id); if(button) button.disabled = disabled;
+    });
+    ['g2', 'ring'].forEach(function(peer){
+      var cb = el('cb-' + peer + '-autoreconnect'); if(!cb) return;
+      var state = reconnectState[peer];
+      cb.checked = state === true;
+      cb.indeterminate = state === null;
+      cb.disabled = disabled || state === null;
+    });
   }
 
   function applyState(state){
@@ -592,40 +609,11 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     return 'on';
   }
 
-  // Parse the single-line format produced by getG2Status():
-  //   state=<name> L=up|down R=up|down mtu=L244/R244 batt=L82/R75 tx=L12/R9 rx=L3/R1
-  // state=off means the G2 client stack was never initialized (not the same
-  // as idle-after-init). Only idle/scanning/connecting/... count as running.
-  function parseG2Status(text){
-    var lower = (text || '').toLowerCase();
-    if(lower.indexOf('state=') < 0) {
-      return { running: false, state: 'off' };
-    }
-    function grab(re, def){ var m = text.match(re); return m ? m[1] : def; }
-    var state = (grab(/state=(\w+)/i, 'off') || 'off').toLowerCase();
-    var running = (state !== 'off' && state !== 'uninitialized' && state !== 'disabled');
-
-    return {
-      running: running,
-      state:   state,
-      lUp:     /L=up/i.test(text),
-      rUp:     /R=up/i.test(text),
-      mtuL:    grab(/mtu=L(\d+)\/R\d+/i, '--'),
-      mtuR:    grab(/mtu=L\d+\/R(\d+)/i, '--'),
-      battL:   grab(/batt=L(-?\d+)\/R-?\d+/i, '?'),
-      battR:   grab(/batt=L-?\d+\/R(-?\d+)/i, '?'),
-      txL:     grab(/tx=L(\d+)\/R\d+/i, '0'),
-      txR:     grab(/tx=L\d+\/R(\d+)/i, '0'),
-      rxL:     grab(/rx=L(\d+)\/R\d+/i, '0'),
-      rxR:     grab(/rx=L\d+\/R(\d+)/i, '0')
-    };
-  }
-
   // Overall G2 "connected" means both temples are up. One side pairing is
   // still in progress (or a recovery gap) — surface that as connecting.
   function g2OverallState(status){
-    if (status.lUp && status.rUp) return 'connected';
-    if (status.lUp || status.rUp) return 'connecting';
+    if (status.left.connected && status.right.connected) return 'connected';
+    if (status.left.connected || status.right.connected) return 'connecting';
     var s = status.state || 'idle';
     if (s === 'scanning' || s === 'connecting' || s === 'authenticating') return s;
     return s;
@@ -633,35 +621,19 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 
   function renderG2(status){
     setText('g2-state-summary', 'state: ' + g2OverallState(status));
-    function setSide(prefix, up, batt, mtu, tx, rx){
+    function setSide(prefix, temple){
       var stEl = el('g2-' + prefix + '-state');
       if(stEl){
-        stEl.textContent = up ? 'connected' : 'idle';
-        stEl.style.color = up ? 'var(--success,#00c853)' : 'var(--muted)';
+        stEl.textContent = temple.connected ? 'connected' : 'idle';
+        stEl.style.color = temple.connected ? 'var(--success,#00c853)' : 'var(--muted)';
       }
-      setText('g2-' + prefix + '-batt', (batt === '?' || batt === '-1') ? '?' : batt);
-      setText('g2-' + prefix + '-mtu',  mtu);
-      setText('g2-' + prefix + '-tx',   tx);
-      setText('g2-' + prefix + '-rx',   rx);
+      setText('g2-' + prefix + '-batt', temple.battery === -1 ? '?' : String(temple.battery));
+      setText('g2-' + prefix + '-mtu',  String(temple.mtu));
+      setText('g2-' + prefix + '-tx',   String(temple.tx));
+      setText('g2-' + prefix + '-rx',   String(temple.rx));
     }
-    setSide('l', status.lUp, status.battL, status.mtuL, status.txL, status.rxL);
-    setSide('r', status.rUp, status.battR, status.mtuR, status.txR, status.rxR);
-  }
-
-  // R1 ring status parser — mirrors the `ringstatus` CLI output format
-  // (G2_Ring.cpp::g2RingGetStatus). Example line:
-  //   ring=up name='EVEN R1_XXXXXX' addr=xx:xx:xx:xx:xx:xx mtu=64 rx=12 up=5.230s (scan=found)
-  function parseRingStatus(text){
-    if(!text) return { up:false, name:'--', addr:'--', mtu:'--', rx:'0', scan:'not-found' };
-    function grab(re, def){ var m = text.match(re); return m ? m[1] : def; }
-    return {
-      up:   /ring=up/i.test(text),
-      name: grab(/name='([^']*)'/, '--'),
-      addr: grab(/addr=([0-9a-f:]{17})/i, '--'),
-      mtu:  grab(/mtu=(\d+)/i, '--'),
-      rx:   grab(/rx=(\d+)/i, '0'),
-      scan: grab(/scan=([\w-]+)/i, '--')
-    };
+    setSide('l', status.left);
+    setSide('r', status.right);
   }
 
   function renderRing(status){
@@ -754,33 +726,40 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   }
 
   // ── refresh ───────────────────────────────────────────────────────────────
-  // Issues sequential CLI calls to avoid the server's 50 ms /api/cli
-  // rate limiter — firing g2status + ringstatus in parallel had them
-  // arrive within ~1 ms and the second got 429'd, which the page used
-  // to render as "G2 client off" until the next tick succeeded.
-  // Sequencing keeps the requests >50 ms apart in the worst case.
-  //
-  // On any HTTP error (including 429), we deliberately do NOT flip the
-  // state to 'off' — we just leave whatever was last rendered alone.
-  // True "off" comes through a successful response with parsed.running
-  // === false; transient errors shouldn't make the UI lie.
-  function refresh(){
-    hw.fetchJSON('/api/ble/status').then(function(d){
-      if(!d) return;
-      if(d.mode) applyMode(d.mode);
+  // One authenticated status request reads the BLE, glasses and ring owners.
+  // On an HTTP error, keep the last rendered state until a successful poll.
+  function refresh(force){
+    if(controlPending && !force) return Promise.resolve(false);
+    var request = ++statusRequest;
+    return hw.fetchJSON('/api/ble/status').then(function(d){
+      if(request !== statusRequest || !d) return false;
+      if(d.mode !== 'server' && d.mode !== 'client') return false;
+      // Validate the selected owner's state before publishing any part of it.
+      if(d.mode === 'client' && G2_ENABLED){
+        var connection = d.g2 && d.g2.connection;
+        if(!connection || typeof connection.running !== 'boolean' ||
+           !connection.left || !connection.right) return false;
+      } else if(!d.ble || typeof d.ble.initialized !== 'boolean') return false;
+      applyMode(d.mode);
+      reconnectState.g2 = d.g2 && typeof d.g2.autoReconnect === 'boolean'
+        ? d.g2.autoReconnect : null;
+      reconnectState.ring = d.ring && typeof d.ring.autoReconnect === 'boolean'
+        ? d.ring.autoReconnect : null;
+      controlsConfirmed = true;
+      updateControlAvailability();
       if(bleMode === 'client' && G2_ENABLED){
         var out = d.g2Text || '';
-        var parsed = parseG2Status(out);
-        if(!parsed.running){
+        var status = d.g2 && d.g2.connection;
+        if(!status.running){
           applyState('off');
           showStatusText('');
         } else {
-          var overall = g2OverallState(parsed);
+          var overall = g2OverallState(status);
           applyState(overall === 'connected' ? 'connected'
                    : (overall === 'connecting' || overall === 'scanning' ||
                       overall === 'authenticating') ? 'connecting'
                    : 'on');
-          renderG2(parsed);
+          renderG2(status);
           showStatusText(out);
         }
         if(d.ring){
@@ -792,8 +771,6 @@ inline void streamBluetoothInner(httpd_req_t* req) {
             rx: (d.ring.rx != null) ? String(d.ring.rx) : '0',
             scan: d.ring.scanFound ? 'found' : 'not-found'
           });
-        } else if(d.ringText){
-          renderRing(parseRingStatus(d.ringText));
         }
       } else {
         var info = d.ble || {};
@@ -805,20 +782,11 @@ inline void streamBluetoothInner(httpd_req_t* req) {
              (info.commandsReceived || 0) + ' commands')
           : '');
       }
+      return true;
     }).catch(function(){
       // Transient error — leave the previous state/list rather than flicker.
+      return false;
     });
-  }
-
-  // ── mode load ─────────────────────────────────────────────────────────────
-  function loadMode(){
-    if(!G2_ENABLED){
-      applyMode('server');   // No G2 compiled in — there's nothing to switch to
-      return;
-    }
-    hw.fetchJSON('/api/ble/status').then(function(d){
-      applyMode((d && d.mode === 'client') ? 'client' : 'server');
-    }).catch(function(){ applyMode('server'); });
   }
 
   // ── config load (server mode) ─────────────────────────────────────────────
@@ -853,6 +821,30 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     });
   }
 
+  // Mode and reconnect settings are owned by the device. A CLI reply is shown
+  // as feedback; only the subsequent status response changes these controls.
+  function runControl(cmd, statusId){
+    if(controlPending || !controlsConfirmed) return;
+    controlPending = true;
+    controlsConfirmed = false;
+    ++statusRequest;  // Discard status reads started before this action.
+    updateControlAvailability();
+    setText(statusId, 'Applying…');
+    var message = '';
+    return cli(cmd).then(function(out){
+      message = out || 'Command completed.';
+    }, function(error){
+      message = 'Request failed: ' + error.message;
+    }).then(function(){
+      setText(statusId, message + ' Checking device state…');
+      return refresh(true);
+    }).then(function(confirmed){
+      controlPending = false;
+      updateControlAvailability();
+      setText(statusId, message + (confirmed ? '' : ' Device state could not be confirmed after this request.'));
+    });
+  }
+
   // Mode-aware open / close dispatchers
   function openCmd(){  return (bleMode === 'client') ? 'g2init'   : 'openble';  }
   function closeCmd(){ return (bleMode === 'client') ? 'g2deinit' : 'closeble'; }
@@ -863,6 +855,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 
   // ── event bindings ────────────────────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', function(){
+    updateControlAvailability();
 
     // Header buttons
     bind('btn-bt-open',       function(){ runAndRefresh(openCmd(),  null, null); });
@@ -874,17 +867,9 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 
     // Mode toggle (only present when G2 is compiled in)
     bind('btn-bt-mode', function(){
+      if(controlPending || !controlsConfirmed) return;
       var next = (bleMode === 'server') ? 'client' : 'server';
-      var btn = el('btn-bt-mode');
-      if(btn){ btn.disabled = true; btn.textContent = 'Switching…'; }
-      cli('blemode ' + next).then(function(out){
-        showStatusText(out);
-        applyMode(next);
-      }).catch(function(e){
-        showStatusText('Mode switch failed: ' + e.message);
-      }).then(function(){
-        if(btn) btn.disabled = false;
-      });
+      runControl('blemode ' + next, 'bt-action-status');
     });
 
     // Streaming (server mode only, but binding is harmless when panels hidden)
@@ -1027,28 +1012,18 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         });
       });
 
-      // Auto-reconnect-at-boot toggles. Fire-and-forget — settings are
-      // persisted to flash by the CLI handler. Initial state is pulled
-      // by sniffing the no-arg form of each command (which returns
-      // "enabled" / "disabled" in the output text).
-      function bindAutoToggle(cbId, cmd) {
+      function bindAutoToggle(peer, cmd, statusId) {
+        var cbId = 'cb-' + peer + '-autoreconnect';
         var cb = el(cbId); if (!cb) return;
         cb.addEventListener('change', function() {
-          cli(cmd + ' ' + (cb.checked ? 'on' : 'off'));
-        });
-        // Pull current state once at page load.
-        cli(cmd).then(function(o) {
-          cb.checked = /enabled/i.test(o || '');
+          var wanted = cb.checked;
+          updateControlAvailability(); // Keep the confirmed checkmark while pending.
+          if(reconnectState[peer] === null) return;
+          runControl(cmd + ' ' + (wanted ? 'on' : 'off'), statusId);
         });
       }
-      bindAutoToggle('cb-g2-autoreconnect',   'bleautoreconnect g2-glasses');
-      bindAutoToggle('cb-ring-autoreconnect', 'bleautoreconnect r1-ring');
-      bind('btn-g2-mic-toggle', function(){
-        micState = !micState;
-        var btn = el('btn-g2-mic-toggle');
-        hw.setText(btn, 'Mic: ' + (micState ? 'On' : 'Off'));
-        cli('g2mic ' + (micState ? 'on' : 'off')).then(function(o){ setText('g2-display-status', o); });
-      });
+      bindAutoToggle('g2', 'bleautoreconnect g2-glasses', 'g2-auto-status');
+      bindAutoToggle('ring', 'bleautoreconnect r1-ring', 'ring-auto-status');
 
       bind('btn-g2-nav', function(){
         // Always send an explicit on/off — never a bare `g2nav`. Bare is a
@@ -1073,12 +1048,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       });
     }
 
-    // Initial load — determine mode first (applyMode triggers a refresh()
-    // only when the reported mode differs from the 'server' default; the
-    // immediate pollTick below fires the first refresh either way); then pull
-    // the saved server config so toggles show their real state regardless of
-    // which mode we end up in.
-    loadMode();
+    // Configuration fields load separately so status polling cannot overwrite
+    // edits in progress. pollTick below is the single source of mode/state.
     loadConfig();
 
     // G2 Session toggles — query their current state so the buttons show
@@ -1120,8 +1091,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     // overnight-run review found a setup session writing ~800 audit
     // lines in 4 min (each tick lands one audited `bleinfo json`).
     // That flood was ~3.3 Hz — far faster than this poll ever ran —
-    // and was traced to the refresh→applyMode→refresh recursion now
-    // guarded in applyMode(), so the original cadences are restored.
+    // and was traced to refresh→applyMode→refresh recursion, since removed.
     //
     // Why not pure SSE: the EventSource handle wedged in readyState=0
     // (CONNECTING) across WiFi-reconnect cycles. Polling has no long-
@@ -1162,12 +1132,11 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     }
 
     function pollTick(){
-      try { refresh(); } catch(e){ /* never let the chain die */ }
-      // Schedule the next tick whenever this one's HTTP fetches settle.
-      // refresh() is fire-and-forget against multiple cli() promises;
-      // we don't await them — the cadence is from-tick-start to next-
-      // tick-start, which is what users intuit by "every N seconds."
-      window.__btPollTimer = setTimeout(pollTick, pickNextDelay());
+      // Wait for this response before scheduling another poll. A slow network
+      // must not keep invalidating every in-flight read with a newer request.
+      refresh().then(function(){
+        window.__btPollTimer = setTimeout(pollTick, pickNextDelay());
+      });
     }
 
     if (window.__btPollTimer) {

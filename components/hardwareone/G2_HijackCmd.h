@@ -18,8 +18,8 @@
 //   g2SubmitHijackCommand("wifi disconnect", cookie, onWifiDoneCb, nullptr);
 //
 // The callback runs on cmd_exec_task. It must NOT touch the lens directly —
-// instead it should enqueue a LensUiJob (introduced in step 3) gated by the
-// cookie's gen/seq. See proposal §5.4 for the staleness contract.
+// instead it should call g2EnqueueRedraw with the completion cookie. The lens
+// applier discards the redraw if its navigation generation is no longer current.
 // =============================================================================
 
 #include "System_BuildConfig.h"
@@ -36,9 +36,9 @@
 #include "BLE_Peers.h"            // BlePeerOwnerSession generation fence
 
 // Snapshot of UI state at the moment a hijack command is submitted.
-// The completion callback uses this to detect staleness — if the user has
-// navigated away (gMenuGen changed) or a newer command for the same
-// subsystem has completed (cmdSeq comparison), the lens redraw is dropped.
+// The lens applier drops redraws if the user has navigated away (gMenuGen
+// changed). seq/targetPage/targetNetSub remain metadata for callbacks and
+// diagnostics; the applier does not enforce separate checks on those fields.
 //
 // Caller populates targetPage / targetNetSub before calling
 // g2SubmitHijackCommand(). The helper itself overwrites `seq` (assigning
@@ -167,8 +167,8 @@ class G2HijackCtxGuard {
 // applier. The current worker stack is 8192 bytes; see G2_Glasses.cpp for the
 // measured sizing evidence. Toast remains reserved but unimplemented.
 //
-// Producers stamp the cookie fields (submitMenuGen / targetPage /
-// targetNetSub) at enqueue time. The applier checks submitMenuGen against
+// Command completions copy the original cookie fields (submitMenuGen /
+// targetPage / targetNetSub). The applier checks submitMenuGen against
 // the live gMenuGen. Redraw jobs hard-drop when stale; PageSwap jobs log and
 // continue, while the other kinds use their own applicability rules.
 // =============================================================================
@@ -243,7 +243,7 @@ enum class LensJobKind : uint8_t {
 
 struct LensUiJob {
   LensJobKind   kind;
-  uint32_t      submitMenuGen;   // captured at enqueue time
+  uint32_t      submitMenuGen;   // original command generation, or current for navigation
   uint32_t      enqueuedAtMs;    // set by g2EnqueueLensJob/pageSwapEnqueue
   uint64_t      cmdSeq;          // 0 for navigation-origin (no command in flight)
   G2HijackPage  targetPage;      // viewId snapshot at submit time
@@ -281,6 +281,16 @@ enum class G2LensEnqueueWait : uint8_t {
 bool g2EnqueueLensJob(
     LensUiJob* job,
     G2LensEnqueueWait wait = G2LensEnqueueWait::Bounded50Ms);
+
+// Queue a command-completion redraw on the existing lens applier. Copies the
+// original completion cookie unchanged; never refresh its generation here or
+// render inline. The applier checks that generation before calling render.
+// Uses the queue's bounded 50 ms wait, suitable for cmd_exec_task callbacks.
+// Returns false for a null renderer, allocation failure or queue rejection;
+// all allocations are cleaned up on failure. Pages retain their result state
+// and any additional staleness/recovery policy. tag is only used for immediate
+// diagnostics and may be null.
+bool g2EnqueueRedraw(const G2CmdCookie& cookie, void (*render)(), const char* tag);
 
 #endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #endif // G2_HIJACKCMD_H

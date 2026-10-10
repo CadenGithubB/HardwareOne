@@ -24,6 +24,7 @@
 #include "System_MemUtil.h"  // PSRAM-preferred replies/JSON/hash storage, with internal fallback
 #include "System_Mutex.h"
 #include "System_VFS.h"
+#include "System_Utils.h"
 #include "esp_app_format.h"
 #include "esp_app_desc.h"
 #include "esp_err.h"

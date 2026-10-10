@@ -4,8 +4,8 @@
   "finished_at": "2026-09-27T14:47:31.435+00:00",
   "passed_tests": 26,
   "ports": {
-    "p4": "/dev/cu.usbmodem2101",
-    "s3": "/dev/cu.usbmodem1101"
+    "p4": "/dev/cu.usbmodemP4",
+    "s3": "/dev/cu.usbmodemS3"
   },
   "schema_version": 1,
   "started_at": "2026-09-27T14:46:13.778+00:00",

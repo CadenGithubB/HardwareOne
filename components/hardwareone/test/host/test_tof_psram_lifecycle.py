@@ -36,14 +36,15 @@ def main() -> None:
     source = (COMPONENT / "i2csensor_vl53l4cx.cpp").read_text()
     memory = (COMPONENT / "System_MemUtil.h").read_text()
     init = extract_block(source, "\nbool tofInit()")
+    invalidation = extract_block(source, "static bool tofInvalidateCache(")
     task = extract_block(source, "void tofTask(void* parameter)")
     destruction = extract_block(memory, "template <typename T>\ninline void ps_delete(")
     require("new VL53L4CX" not in source, "ToF restored ordinary allocating new")
     require(not re.search(r"\bdelete\s+gVL53L4CX\s*;", source),
             "ToF mixes delete with PSRAM placement construction")
     require(len(re.findall(r"ps_delete\s*\(\s*gVL53L4CX\s*\)\s*;\s*"
-                           r"gVL53L4CX\s*=\s*nullptr\s*;", source)) == 5,
-            "every one of the five ownership releases must destroy/free and null the pointer")
+                           r"gVL53L4CX\s*=\s*nullptr\s*;", source)) == 6,
+            "every one of the six ownership releases must destroy/free and null the pointer")
     require(init.count("ps_delete(gVL53L4CX)") == 4,
             "reinit and all three driver-init failure paths must release ownership")
     require(task.count("ps_delete(gVL53L4CX)") == 1,
@@ -56,7 +57,7 @@ def main() -> None:
     harness = (HERE / "tof_psram_lifecycle_harness.cpp").read_text()
     replacements = {
         "// INSERT_PRODUCTION_PS_DELETE_HERE": destruction,
-        "// INSERT_PRODUCTION_TOF_FUNCTIONS_HERE": init + "\n\n" + task,
+        "// INSERT_PRODUCTION_TOF_FUNCTIONS_HERE": invalidation + "\n\n" + init + "\n\n" + task,
     }
     for marker, definition in replacements.items():
         require(harness.count(marker) == 1, f"expected one harness marker: {marker}")

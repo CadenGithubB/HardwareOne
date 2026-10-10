@@ -4,11 +4,11 @@
 #include "System_BuildConfig.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/task.h>
+#include <stddef.h>
 
 // IMU sensor cache structure (always available for type-safe references)
 struct ImuCache {
-  SemaphoreHandle_t mutex = nullptr;
   float accelX = 0.0, accelY = 0.0, accelZ = 0.0;
   float gyroX = 0.0, gyroY = 0.0, gyroZ = 0.0;
   float imuTemp = 0.0;
@@ -18,63 +18,11 @@ struct ImuCache {
   uint32_t imuSeq = 0;
 };
 
-// IMU Action Detection System (always available for type-safe references)
-struct IMUActionState {
-  bool isShaking;
-  unsigned long lastShakeMs;
-  uint32_t shakeCount;
-  float shakeIntensity;
-
-  bool isTilted;
-  float tiltAngle;
-  char tiltDirection;  // 'F'=forward, 'B'=back, 'L'=left, 'R'=right, 'N'=none
-
-  bool tapDetected;
-  unsigned long lastTapMs;
-  uint32_t tapCount;
-  float tapStrength;
-
-  bool isRotating;
-  float rotationRate;  // deg/s
-  char rotationAxis;   // 'X', 'Y', 'Z', or 'N' for none
-
-  bool isFreefalling;
-  unsigned long freefallStartMs;
-  uint32_t freefallDurationMs;
-
-  bool isWalking;
-  uint32_t stepCount;
-  unsigned long lastStepMs;
-  float stepFrequency;
-
-  char orientation;  // 'P'=portrait, 'L'=landscape, 'U'=upside-down, 'R'=reverse, 'F'=face-up, 'D'=face-down
-  char lastOrientation;
-  unsigned long lastOrientationChangeMs;
-
-  float accelHistory[10];
-  int accelHistoryIndex;
-  unsigned long lastUpdateMs;
-  float baselineAccel;
-
-  float lastAccelMag;
-  bool stepPeakDetected;
-  unsigned long stepWindowStartMs;
-  uint32_t stepsInWindow;
-};
-
+// Values only: callers own their copy; the live cache and lock stay in the driver.
 #if ENABLE_IMU_SENSOR
 
 // Forward declarations
 class String;
-class Adafruit_BNO055;
-
-extern Adafruit_BNO055* gBNO055;
-
-// (gImuInit{Requested,Done,Result} declared further below — duplicated set
-// at this position has been removed.)
-
-extern ImuCache gImuCache;
-extern IMUActionState gImuActions;
 
 // IMU watermark tracking
 extern volatile UBaseType_t gImuWatermarkMin;
@@ -130,10 +78,27 @@ int imuBuildDataJSON(char* buf, size_t bufSize);
 // IMU command registration (sensor-specific naming)
 void registerImuBno055Commands();
 
-// Command registry (for system_utils.cpp module list)
+// Command registry (for System_CommandRegistry.cpp module list)
 struct CommandEntry;
 extern const CommandEntry imuCommands[];
 extern const size_t imuCommandsCount;
 
+// Copy one reading; false clears out when uninitialized or the lock is busy.
+// Success only means a copy was available; check imuDataValid where required.
+bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs = 10);
+// Static cache data plus its mutex handle, for memory attribution (not RTOS allocation).
+size_t imuCacheStorageBytes();
+
+#else
+inline bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs = 10) {
+  (void)timeoutMs;
+  out = {};
+  return false;
+}
+inline int imuBuildDataJSON(char* buf, size_t bufSize) {
+  if (buf && bufSize) buf[0] = '\0';
+  return 0;
+}
+inline size_t imuCacheStorageBytes() { return 0; }
 #endif // ENABLE_IMU_SENSOR
 #endif // IMU_SENSOR_H

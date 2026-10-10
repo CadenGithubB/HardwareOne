@@ -206,6 +206,38 @@ bool g2SubmitHijackCommand(const char* line,
   return true;
 }
 
+bool g2EnqueueRedraw(const G2CmdCookie& cookie, void (*render)(), const char* tag) {
+  if (!render) return false;
+  if (!tag) tag = "redraw";
+
+  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
+  if (!spec) {
+    DEBUG_G2F("[G2] %s: RedrawSpec alloc failed", tag);
+    return false;
+  }
+  spec->render = render;
+
+  LensUiJob* job = new (std::nothrow) LensUiJob{};
+  if (!job) {
+    DEBUG_G2F("[G2] %s: LensUiJob alloc failed", tag);
+    delete spec;
+    return false;
+  }
+  job->kind           = LensJobKind::Redraw;
+  job->submitMenuGen  = cookie.menuGen;
+  job->cmdSeq         = cookie.seq;
+  job->targetPage     = cookie.targetPage;
+  job->targetNetSub   = cookie.targetNetSub;
+  job->payload.redraw = spec;
+  if (!g2EnqueueLensJob(job)) {
+    DEBUG_G2F("[G2] %s: redraw enqueue failed", tag);
+    delete spec;
+    delete job;
+    return false;
+  }
+  return true;
+}
+
 // =============================================================================
 // In-callback AuthContext helper + RAII guard. See G2_HijackCmd.h for the
 // rationale (file-UI hijack handlers run synchronously in BLE callbacks

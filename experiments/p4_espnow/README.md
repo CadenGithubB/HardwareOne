@@ -114,8 +114,8 @@ P4 probe releases the C6 boot strap high before Hosted resets the companion.
 Hosted's `RESET_ACTIVE_HIGH` option describes the enable polarity here; the
 actual reset is a low pulse on the C6 enable line.
 
-The observed USB serial ports were `/dev/cu.usbmodem2101` for P4 and
-`/dev/cu.usbmodem1101` for S3. **Identify them again before flashing**: macOS may
+The observed USB serial ports were `/dev/cu.usbmodemP4` for P4 and
+`/dev/cu.usbmodemS3` for S3. **Identify them again before flashing**: macOS may
 assign different names after reconnecting or changing USB connectors. A P4
 programmer `PROGRAMMER_READY` banner and the C6 tool's `INFO chip=esp32c6`
 response are distinct from the S3/P4 probe `READY` banners. Close other serial
@@ -132,7 +132,7 @@ when `c6_tool.py` and the `private/` paths are read as
 
 The commands below assume the current directory is `experiments/p4_espnow/`,
 the IDF environment is exported, and `P4_PORT`/`S3_PORT` name the independently
-identified boards. Do not rely on `c6_tool.py`'s default port. Its Python runtime
+identified boards. `c6_tool.py` requires an explicit `--port`. Its Python runtime
 needs `pyserial`, included by the isolated tooling installation below.
 
 The validated P4 path uses **esptool 5.4 with `--no-stub`**. The exported IDF

@@ -5,12 +5,12 @@
   "status": "passed",
   "boards": {
     "p4": {
-      "port": "/dev/cu.usbmodem2101",
+      "port": "/dev/cu.usbmodemP4",
       "mac": "02:48:57:31:01:a8",
       "name": "HW1_P4"
     },
     "s3": {
-      "port": "/dev/cu.usbmodem1101",
+      "port": "/dev/cu.usbmodemS3",
       "mac": "02:48:57:31:00:d0",
       "name": "HW1_S3"
     }

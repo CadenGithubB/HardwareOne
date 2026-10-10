@@ -2873,10 +2873,15 @@ function applyColorPreset() {
 // Live tracking
 let liveTrackInterval = null;
 let lastLiveUpdate = 0;
+let liveTrackRequestPending = false;
 
 async function pollLiveTrack() {
+  if (liveTrackRequestPending || !liveTrackInterval) return;
+  const pollingInterval = liveTrackInterval;
   try {
     const data = await hw.fetchJSON('/api/gps/tracks?live=1');
+    // A start/stop may have replaced this poll while its request was in flight.
+    if (liveTrackRequestPending || liveTrackInterval !== pollingInterval) return;
 
     if (data.live && data.points && data.points.length > 0) {
       // Only update if track changed
@@ -2895,7 +2900,7 @@ async function pollLiveTrack() {
         
         renderMap();
       }
-    } else if (!data.live && liveTrackInterval) {
+    } else if (data.live === false && liveTrackInterval) {
       // Live tracking stopped on device
       clearInterval(liveTrackInterval);
       liveTrackInterval = null;
@@ -2907,18 +2912,38 @@ async function pollLiveTrack() {
 }
 
 async function toggleLiveTrack() {
-  if (liveTrackInterval) {
-    clearInterval(liveTrackInterval);
-    liveTrackInterval = null;
-    await hw.fetchJSON('/api/gps/tracks?live=stop').catch(()=>{});
-    hw.$('track-info').textContent = 'Live tracking stopped';
-  } else {
-    await hw.fetchJSON('/api/gps/tracks?live=start').catch(()=>{});
-    lastLiveUpdate = 0;
-    liveTrackInterval = setInterval(pollLiveTrack, 1000);
-    pollLiveTrack();
-    hw.$('track-info').innerHTML = '<span style="color:#69db7c">LIVE</span> Connecting...';
+  if (liveTrackRequestPending) return;
+  const stopping = !!liveTrackInterval;
+  const button = hw.$('btn-live-track');
+  liveTrackRequestPending = true;
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch('/api/gps/tracks?live=' + (stopping ? 'stop' : 'start'), {
+      credentials: 'include', cache: 'no-store', headers: { 'Accept': 'application/json' }
+    }).then(hw._auth401);
+    const data = await response.json();
+    const confirmed = data && (stopping
+      ? data.live === false && data.stopped === true
+      : data.live === true && data.started === true);
+    if (!response.ok || !confirmed) {
+      throw new Error((data && data.error) || (stopping ? 'Live track stop failed' : 'Live track start failed'));
+    }
+    if (stopping) {
+      clearInterval(liveTrackInterval);
+      liveTrackInterval = null;
+      hw.$('track-info').textContent = 'Live tracking stopped';
+    } else {
+      lastLiveUpdate = 0;
+      liveTrackInterval = setInterval(pollLiveTrack, 1000);
+      hw.$('track-info').innerHTML = '<span style="color:#69db7c">LIVE</span> Connecting...';
+    }
+  } catch (e) {
+    alert(e.message || 'Live track command failed');
+  } finally {
+    liveTrackRequestPending = false;
+    if (button) button.disabled = false;
   }
+  if (!stopping && liveTrackInterval) pollLiveTrack();
 }
 
 // Initialize

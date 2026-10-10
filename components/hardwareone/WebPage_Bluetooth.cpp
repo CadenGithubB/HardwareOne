@@ -10,11 +10,12 @@
 #include "System_User.h"
 #include "System_Settings.h"
 #include <ArduinoJson.h>
-#include "System_Utils.h"
-#include "System_CommandTypes.h"
+#include "Bluetooth.h"
 #include "System_MemUtil.h"
 #if ENABLE_G2_GLASSES
+#include "BLE_Peers.h"
 #include "G2_Glasses.h"
+#include "G2_Ring.h"
 #endif
 
 static void streamBluetoothContent(httpd_req_t* req, const String& username) {
@@ -29,16 +30,6 @@ esp_err_t handleBluetoothPage(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   streamPageWithContent(req, "bluetooth", ctx.user, streamBluetoothContent);
   return ESP_OK;
-}
-
-static bool bleRunInternal(const char* cmd, char* out, size_t outSize) {
-  AuthContext sys;
-  sys.transport = SOURCE_INTERNAL;
-  sys.user = "system";
-  sys.ip = "local";
-  sys.path = cmd;
-  out[0] = '\0';
-  return executeCommand(sys, cmd, out, outSize);
 }
 
 #if ENABLE_G2_GLASSES
@@ -80,42 +71,61 @@ static void addG2FeatureJson(JsonObject out,
   out["desired"] = g2DesiredJsonName(feature.desired);
   out["observed"] = g2ObservedJsonName(feature.observed);
   out["phase"] = g2PhaseJsonName(feature.phase);
-  out["detail"] = feature.detail;
+  // feature belongs to a temporary status snapshot; JSON must own this text.
+  out["detail"] = JsonString(feature.detail, false);
   out["changedAtMs"] = feature.changedAtMs;
   out["appliedGeneration"] = feature.appliedGeneration;
 }
+
+static void addG2TempleConnectionJson(JsonObject out,
+                                     const G2TempleConnectionStatus& status) {
+  out["connected"] = status.connected;
+  out["mtu"] = status.mtu;
+  out["battery"] = status.battery;
+  out["tx"] = status.tx;
+  out["rx"] = status.rx;
+}
 #endif
 
-// GET /api/ble/status — mode + bleinfo + optional g2/ring text for the BT page.
+// GET /api/ble/status — owner-built BLE info + optional G2/ring status.
 static esp_err_t handleBleStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   httpd_resp_set_type(req, "application/json");
 
   const char* mode = (gSettings.bleMode == 1) ? "client" : "server";
-  EXT_RAM_BSS_ATTR static char bleJson[CMD_RESULT_MAX];
-  bleRunInternal("bleinfo json", bleJson, sizeof(bleJson));
-
   PSRAM_JSON_DOC(doc);
   doc["schema"] = 1;
   doc["mode"] = mode;
-  {
-    PSRAM_JSON_DOC(ble);
-    if (!deserializeJson(ble, bleJson)) {
-      doc["ble"] = ble;
-    } else {
-      doc["bleRaw"] = bleJson;
-    }
+  const bool available = buildBLEInfoJson(doc["ble"].to<JsonObject>());
+  if (doc.overflowed()) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_send(req, "{\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
+  }
+  if (!available) {
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    return httpd_resp_send(req, "{\"error\":\"BLE status unavailable\"}", HTTPD_RESP_USE_STRLEN);
   }
 
 #if ENABLE_G2_GLASSES
   {
+    G2ConnectionStatus connection{};
+    if (!g2ConnectionStatusSnapshot(&connection)) {
+      httpd_resp_set_status(req, "503 Service Unavailable");
+      return httpd_resp_send(req, "{\"error\":\"G2 status unavailable\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    JsonObject g2 = doc["g2"].to<JsonObject>();
+    g2["autoReconnect"] = blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES);
+    JsonObject link = g2["connection"].to<JsonObject>();
+    link["running"] = connection.running;
+    link["state"] = connection.state;
+    addG2TempleConnectionJson(link["left"].to<JsonObject>(), connection.left);
+    addG2TempleConnectionJson(link["right"].to<JsonObject>(), connection.right);
     char g2Buf[256];
-    getG2Status(g2Buf, sizeof(g2Buf));
+    formatG2Status(connection, g2Buf, sizeof(g2Buf));
     doc["g2Text"] = g2Buf;
 
     G2ControlStatus status{};
     if (g2ControlStatusSnapshot(&status)) {
-      JsonObject g2 = doc["g2"].to<JsonObject>();
       g2["revision"] = status.revision;
       g2["rightGeneration"] = status.rightGeneration;
       JsonObject firmware = g2["firmware"].to<JsonObject>();
@@ -130,24 +140,24 @@ static esp_err_t handleBleStatus(httpd_req_t* req) {
                        status.notifications);
     }
   }
-  {
-    EXT_RAM_BSS_ATTR static char ringBuf[512];
-    bleRunInternal("ringstatus json", ringBuf, sizeof(ringBuf));
-    PSRAM_JSON_DOC(ring);
-    if (!deserializeJson(ring, ringBuf)) {
-      doc["ring"] = ring;
-    } else {
-      // Fallback text form for older parsers
-      bleRunInternal("ringstatus", ringBuf, sizeof(ringBuf));
-      doc["ringText"] = ringBuf;
-    }
+  const bool ringAvailable = g2RingBuildStatusJson(doc["ring"].to<JsonObject>());
+  if (!ringAvailable && !doc.overflowed()) {
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    return httpd_resp_send(req, "{\"error\":\"Ring status unavailable\"}", HTTPD_RESP_USE_STRLEN);
   }
+  doc["ring"]["autoReconnect"] = blePeerAutoReconnectEnabled(BLE_PEER_R1_RING);
 #endif
 
   String out;
-  serializeJson(doc, out);
-  httpd_resp_send(req, out.c_str(), out.length());
-  return ESP_OK;
+  if (!doc.overflowed()) serializeJson(doc, out);
+  // ArduinoJson's String writer can report accepted bytes before its final
+  // flush. Check the resulting length so allocation failure cannot publish a
+  // truncated status document as a successful response.
+  if (doc.overflowed() || out.length() != measureJson(doc)) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_send(req, "{\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
+  }
+  return httpd_resp_send(req, out.c_str(), out.length());
 }
 
 void registerBluetoothHandlers(httpd_handle_t server) {
@@ -167,4 +177,4 @@ void registerBluetoothHandlers(httpd_handle_t server) {
   httpd_register_uri_handler(server, &bleStatus);
 }
 
-#endif // ENABLE_HTTP_SERVER
+#endif // ENABLE_WEB_BLUETOOTH

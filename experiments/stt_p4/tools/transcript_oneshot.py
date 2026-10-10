@@ -1,3 +1,4 @@
+import os
 import base64,contextlib,datetime,hashlib,json,pathlib,re,subprocess,sys,time
 ROOT=pathlib.Path(__file__).resolve().parents[3]
 sys.path[:0]=[str(ROOT/'experiments'/x) for x in ('p4_ble_roles','p4_connectivity','p4_mesh')]
@@ -14,7 +15,7 @@ def emit(v):
  if 'sttText' in shown:shown['sttText']='<private; '+str(len(shown['sttText']))+' characters>'
  if 'reply' in shown and len(shown['reply'])>1800:shown['reply']=shown['reply'][-1800:]
  print(json.dumps(shown),flush=True)
-with RolesConsole('/dev/cu.usbmodem2201',RUN/('transcript-oneshot-'+tag+'.log'),secrets=private_encodings(c),completion='hardwareone',chunk_delay=.08) as b:
+with RolesConsole(os.environ['HW1_P4_PORT'],RUN/('transcript-oneshot-'+tag+'.log'),secrets=private_encodings(c),completion='hardwareone',chunk_delay=.08) as b:
  time.sleep(3)
  def clean(text):
   for val in private_encodings(c):text=text.replace(val,'<redacted>')

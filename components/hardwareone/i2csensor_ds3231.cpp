@@ -7,6 +7,7 @@
 #if ENABLE_RTC_SENSOR
 
 #include <Arduino.h>
+#include <freertos/semphr.h>
 #include <Wire.h>
 #include <time.h>
 #include <sys/time.h>
@@ -15,11 +16,10 @@
 #include "System_Command.h"
 #include "System_Clock.h"
 #include "System_Debug.h"
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_I2C.h"
 #include "System_MemoryMonitor.h"
+#include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
@@ -27,7 +27,25 @@
 extern TwoWire Wire1;
 
 // RTC Cache
-RTCCache gRtcCache = {nullptr, {0}, 0.0f, false, 0};
+// The mutex is retained across stops; readers never own the live storage.
+static RTCCache sRtcCache{};
+static SemaphoreHandle_t sRtcCacheMutex = nullptr;
+
+bool rtcCacheSnapshot(RTCCache& out, uint32_t timeoutMs) {
+  out = {};
+  SensorCacheGuard guard(sRtcCacheMutex, pdMS_TO_TICKS(timeoutMs), "rtc.snapshot");
+  if (!guard.held) return false;
+  out = sRtcCache;
+  return true;
+}
+
+static bool rtcInvalidateCache() {
+  if (!sRtcCacheMutex) return true;  // No reading can exist before initialization.
+  SensorCacheGuard guard(sRtcCacheMutex, pdMS_TO_TICKS(50), "rtc.invalidate");
+  if (!guard.held) return false;
+  sRtcCache.dataValid = false;
+  return true;
+}
 
 // Resolve which I2C bus + TwoWire* the DS3231 is on, from settings. Returns
 // false (with outputs unchanged) if the requested bus isn't initialized —
@@ -362,8 +380,9 @@ RTCDateTime rtcLocalTime(const RTCDateTime* utc) {
 int rtcBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
-  SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(50), "rtc.buildJSON");
-  if (!g.held) {
+  RTCCache reading;
+  const bool available = rtcCacheSnapshot(reading, 50);
+  if (!available) {
     // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
     int pos = sensorEnvelopeBegin(buf, bufSize, false, gRtcConnected, 0);
     if (pos == 0) return 0;
@@ -373,14 +392,14 @@ int rtcBuildDataJSON(char* buf, size_t bufSize) {
     return pos + n;
   }
 
-  int pos = sensorEnvelopeBegin(buf, bufSize, gRtcCache.dataValid, gRtcConnected, gRtcCache.lastUpdate);
+  int pos = sensorEnvelopeBegin(buf, bufSize, reading.dataValid, gRtcConnected, reading.lastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
                    ",\"year\":%u,\"month\":%u,\"day\":%u,"
                    "\"hour\":%u,\"minute\":%u,\"second\":%u,\"temp\":%.1f}",
-                   gRtcCache.dateTime.year, gRtcCache.dateTime.month, gRtcCache.dateTime.day,
-                   gRtcCache.dateTime.hour, gRtcCache.dateTime.minute, gRtcCache.dateTime.second,
-                   gRtcCache.temperature);
+                   reading.dateTime.year, reading.dateTime.month, reading.dateTime.day,
+                   reading.dateTime.hour, reading.dateTime.minute, reading.dateTime.second,
+                   reading.temperature);
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;
   return pos + n;
 }
@@ -389,7 +408,7 @@ int rtcBuildDataJSON(char* buf, size_t bufSize) {
 // RTC Task
 // ============================================================================
 
-// Read DS3231 + write to gRtcCache. Factored out so the task can perform a
+// Read DS3231 + write to sRtcCache. Factored out so the task can perform a
 // cold-start poll before entering its 30s periodic loop — keeps the cache
 // fresh for local readers (OLED, web UI) without waiting up to 30s.
 static void rtcReadAndCacheOnce(unsigned long now) {
@@ -398,12 +417,12 @@ static void rtcReadAndCacheOnce(unsigned long now) {
   if (!rtcReadDateTime(&dt)) return;
 
   {
-    SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(50), "rtc.pollWrite");
+    SensorCacheGuard g(sRtcCacheMutex, pdMS_TO_TICKS(50), "rtc.pollWrite");
     if (g.held) {
-      gRtcCache.dateTime = dt;
-      gRtcCache.temperature = temp;
-      gRtcCache.dataValid = true;
-      gRtcCache.lastUpdate = now;
+      sRtcCache.dateTime = dt;
+      sRtcCache.temperature = temp;
+      sRtcCache.dataValid = true;
+      sRtcCache.lastUpdate = now;
     }
   }
 #if ENABLE_OLED_DISPLAY
@@ -486,10 +505,10 @@ void rtcTask(void* pvParameters) {
   }
   
   DEBUG_RTC_LIFECYCLEF("[RTC] Task exiting");
-  // Invalidate the cache here as well as in rtcStop(): this tail also runs on the
-  // stack-safety self-exit (checkTaskStackSafety breaks the loop), which rtcStop()
-  // never sees. Direct write — shutdown must not block on a held mutex.
-  gRtcCache.dataValid = false;
+  // The task acknowledges exit only after the reading is invalidated. Each
+  // attempt is bounded; readers hold this lock only long enough to copy.
+  gRtcConnected = false;
+  while (!rtcInvalidateCache()) vTaskDelay(pdMS_TO_TICKS(10));
   gRtcTaskHandle = nullptr;
   vTaskDelete(nullptr);
 }
@@ -510,9 +529,9 @@ bool rtcInit() {
   }
   
   // Initialize cache mutex
-  if (!gRtcCache.mutex) {
-    gRtcCache.mutex = xSemaphoreCreateMutex();
-    if (!gRtcCache.mutex) {
+  if (!sRtcCacheMutex) {
+    sRtcCacheMutex = xSemaphoreCreateMutex();
+    if (!sRtcCacheMutex) {
       DEBUG_RTC_LIFECYCLEF("[RTC] Failed to create cache mutex");
       return false;
     }
@@ -535,32 +554,16 @@ bool rtcInit() {
 
 // createRTCTask() is now defined in System_TaskUtils.cpp (centralized helper).
 
+
+// Called only by the lifecycle worker. A live task owns its own cleanup;
+// rtcInit() can also connect hardware without creating a polling task.
 void rtcStop() {
-  // Note: gRtcRunning is set to false by handleDeviceStopped() before this is called
-  
-  // Wait for task to exit
-  int timeout = 50;
-  while (gRtcTaskHandle != nullptr && timeout-- > 0) {
-    vTaskDelay(pdMS_TO_TICKS(20));
-  }
-  
-  if (gRtcTaskHandle != nullptr) {
-    // rtcTask can be inside setSetting()/writeSettingsJson(). Force-deleting a
-    // C++ task skips stack destructors and could permanently strand the shared
-    // settings-writer mutex (or leave polling paused). Keep the stop bounded,
-    // but let the task acknowledge exit and clear its own handle naturally.
-    DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RTC,
-                 "[WARN][RTC] Task exit still pending; refusing unsafe force-delete");
-  }
-  
+  gRtcRunning = false;
+  if (gRtcTaskHandle != nullptr) return;
   gRtcConnected = false;
-  // Invalidate the cache alongside `connected` (matches fmRadioDeinit and the
-  // other sensors' task-exits). Without this, dataValid stayed true after
-  // `closertc` and the envelope reported valid:true,connected:false with a stale
-  // timestamp until the next start's stale-cache wipe. Covers the case where the
-  // task was never running, so rtcTask's own tail clear didn't fire.
-  gRtcCache.dataValid = false;
-  DEBUG_RTC_LIFECYCLEF("[RTC] Sensor stopped");
+  if (!rtcInvalidateCache()) {
+    DEBUG_RTC_LIFECYCLEF("[RTC] Reading invalidation unavailable");
+  }
 }
 
 // Internal start function for sensor queue processor
@@ -574,16 +577,9 @@ bool rtcStartInternal() {
   // write. Do not flip gRtcRunning back to true underneath that old task or
   // create a second poller; retry is safe once its exit tail clears the handle.
   if (gRtcTaskHandle != nullptr) {
-    const eTaskState state = eTaskGetState(gRtcTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      // Preserve createRTCTask()'s stale-handle recovery even though a live
-      // exiting task must now be rejected before initialization changes state.
-      gRtcTaskHandle = nullptr;
-    } else {
-      DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RTC,
-                   "[WARN][RTC] Previous task is still exiting; retry start shortly");
-      return false;
-    }
+    DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RTC,
+                 "[WARN][RTC] Previous task is still exiting; retry start shortly");
+    return false;
   }
 
   // Check memory before creating RTC task
@@ -592,15 +588,18 @@ bool rtcStartInternal() {
     return false;
   }
 
+  if (!sRtcCacheMutex) {
+    sRtcCacheMutex = xSemaphoreCreateMutex();
+    if (!sRtcCacheMutex) return false;
+  }
+
   // Clean up any stale cache from previous run BEFORE starting
   {
-    SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(100), "rtc.cleanStaleCache");
-    if (g.held) {
-      gRtcCache.dataValid = false;
-      gRtcCache.temperature = 0.0f;
-      memset(&gRtcCache.dateTime, 0, sizeof(RTCDateTime));
-      DEBUG_RTC_LIFECYCLEF("[RTC] Cleaned up stale cache from previous run");
-    }
+    SensorCacheGuard g(sRtcCacheMutex, pdMS_TO_TICKS(100), "rtc.cleanStaleCache");
+    if (!g.held) return false;
+    sRtcCache.dataValid = false;
+    sRtcCache.temperature = 0.0f;
+    memset(&sRtcCache.dateTime, 0, sizeof(RTCDateTime));
   }
 
   if (!rtcInit()) {
@@ -616,6 +615,7 @@ bool rtcStartInternal() {
   if (!createRTCTask()) {
     DEBUG_RTC_LIFECYCLEF("[RTC] Failed to create task");
     gRtcRunning = false;
+    gRtcConnected = false;
     return false;
   }
 
@@ -789,34 +789,13 @@ const char* cmd_rtcsync(const String& argsInput) {
 
 const char* cmd_rtcstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)argsInput;
-
-  if (gRtcRunning && gRtcConnected) {
-    return "[RTC] Already running";
-  }
-
-  // Delegate to rtcStartInternal() rather than re-rolling init + task creation:
-  // it sets gRtcRunning before createRTCTask(), which the task's `while
-  // (gRtcRunning)` loop requires. Open-coding the sequence here skipped that and
-  // the task exited immediately — the exact race rtcStartInternal() documents.
-  if (!rtcStartInternal()) {
-    return "Error: [RTC] Failed to start - check wiring";
-  }
-
-  return "[RTC] Opened successfully";
+  return cmd_sensorstart_queued(I2C_DEVICE_RTC, "RTC", "openrtc@enqueue");
 }
 
 const char* cmd_rtcstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)argsInput;
-  
-  if (!gRtcRunning) {
-    return "Error: [RTC] Not running";
-  }
-
-  handleDeviceStopped(I2C_DEVICE_RTC);
-  rtcStop();  // Sensor-specific: wait for task exit and cleanup
-  return "[RTC] Closed";
+  if (!requestSensorStop(I2C_DEVICE_RTC)) return "Error: [RTC] Could not queue stop";
+  return "[RTC] Stop requested; cleanup will complete asynchronously";
 }
 
 // ============================================================================
@@ -824,38 +803,45 @@ const char* cmd_rtcstop(const String& argsInput) {
 // ============================================================================
 
 int rtcGetYear() {
-  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
-  return gRtcCache.dateTime.year;
+  RTCCache reading;
+  if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return reading.dateTime.year;
 }
 
 int rtcGetMonth() {
-  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
-  return gRtcCache.dateTime.month;
+  RTCCache reading;
+  if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return reading.dateTime.month;
 }
 
 int rtcGetDay() {
-  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
-  return gRtcCache.dateTime.day;
+  RTCCache reading;
+  if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return reading.dateTime.day;
 }
 
 int rtcGetHour() {
-  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
-  return gRtcCache.dateTime.hour;
+  RTCCache reading;
+  if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return reading.dateTime.hour;
 }
 
 int rtcGetMinute() {
-  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
-  return gRtcCache.dateTime.minute;
+  RTCCache reading;
+  if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return reading.dateTime.minute;
 }
 
 int rtcGetSecond() {
-  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
-  return gRtcCache.dateTime.second;
+  RTCCache reading;
+  if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return reading.dateTime.second;
 }
 
 float rtcGetTemperature() {
-  if (!gRtcConnected || !gRtcCache.dataValid) return 0.0f;
-  return gRtcCache.temperature;
+  RTCCache reading;
+  if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0.0f;
+  return reading.temperature;
 }
 
 // ============================================================================

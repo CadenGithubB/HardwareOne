@@ -20,12 +20,11 @@
 #include "System_Debug.h"
 #include "System_ESPNow.h"          // generateMessageId
 #include "System_ESPNow_Tx.h"       // espnowtx::sendAead / sendAeadSync (Step 3c)
-#include "System_FileManager.h"     // FileEntry, FILE_MANAGER_MAX_CACHED_ITEMS
 #include "System_Filesystem.h"      // filesystemReady, getPermissions
 #include "System_MemUtil.h"         // ps_alloc — PSRAM-backed reply buffer (off espnow_task stack)
 #include "System_Mutex.h"           // FsLockGuard
 #include "Transcript_PathPolicy.h"
-#include "System_VFS.h"             // VFS::openGuarded, listVirtualEntries, etc.
+#include "System_VFS.h"             // guarded storage access and directory traversal
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 // v4_send_payload_smart is the universal "send this payload to that MAC"
@@ -688,64 +687,23 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
                          ? FS_LIST_ENTRIES_PER_REPLY
                          : req.maxEntries;
 
-      // SD entries come back rooted at the SD root, not at our "/sd/..."
-      // mount convention. Mirror the prefix stripping logic in
-      // buildFilesListing — see System_Filesystem.cpp:230 for the canonical
-      // version. Mount points + nested-path skip likewise mirror that code.
-      String fsDirPath = VFS::stripSdPrefix(dirPath);
-
-      // Virtual mount points first (e.g. /sd at LittleFS root).
-      VFS::VirtualEntry virtuals[4];
-      const size_t nVirt = VFS::listVirtualEntries(
-          dirPath, virtuals, sizeof(virtuals) / sizeof(virtuals[0]));
-      for (size_t v = 0; v < nVirt; v++) {
-        if (total >= skip && emit < cap) {
-          V4PayloadFsEntry& e = entries[emit++];
-          strlcpy(e.name, virtuals[v].name, sizeof(e.name));
-          e.isFolder = virtuals[v].isFolder ? 1 : 0;
-          e.size = 0;
-          char fullPath[160];
-          snprintf(fullPath, sizeof(fullPath), "%s%s%s",
-                   dirPath.c_str(), dirPath == "/" ? "" : "/",
-                   virtuals[v].name);
-          e.perms = getPermissions(String(fullPath), ctx);
-        }
-        total++;
-      }
-
-      File file = dir.openNextFile();
-      while (file) {
-        String fileName = String(file.name());
-        if (fsDirPath != "/") {
-          String expectedPrefix = fsDirPath;
-          if (!expectedPrefix.endsWith("/")) expectedPrefix += "/";
-          if (fileName.startsWith(expectedPrefix)) {
-            fileName = fileName.substring(expectedPrefix.length());
-          }
-        } else if (fileName.startsWith("/")) {
-          fileName = fileName.substring(1);
-        }
-        // Skip nested paths
-        if (fileName.length() == 0 || fileName.indexOf('/') != -1) {
-          file = dir.openNextFile();
-          continue;
-        }
-        // Skip hidden
-        if (fileName.startsWith(".")) {
-          file = dir.openNextFile();
-          continue;
-        }
+      // VFS supplies virtual mounts first and translates backend entry names.
+      // Hidden-file policy and wire pagination remain local to this protocol.
+      VFS::DirectoryReader reader(dir, dirPath);
+      VFS::DirectoryEntry entry;
+      while (reader.next(entry)) {
+        if (!entry.isVirtual && entry.name.startsWith(".")) continue;
 
         if (total >= skip && emit < cap) {
           V4PayloadFsEntry& e = entries[emit++];
-          strlcpy(e.name, fileName.c_str(), sizeof(e.name));
-          e.isFolder = file.isDirectory() ? 1 : 0;
-          e.size = e.isFolder ? 0 : (uint32_t)file.size();
-          String full = formatPath(dirPath.c_str(), e.name);
-          e.perms = getPermissions(full, ctx);
+          strlcpy(e.name, entry.name.c_str(), sizeof(e.name));
+          e.isFolder = entry.isFolder ? 1 : 0;
+          e.size = e.isFolder ? 0 : (uint32_t)entry.size;
+          // Permission metadata belongs to the real path, even when the wire
+          // field is too short to carry its entire leaf name.
+          e.perms = getPermissions(entry.path, ctx);
         }
         total++;
-        file = dir.openNextFile();
       }
       dir.close();
 
@@ -801,9 +759,7 @@ static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatRe
       goto send_stat;
     }
     SYSTEM_IDENTITY_SCOPE("espnow.fs_stat_reply");
-    String norm = VFS::normalize(req.path);
-    VFS::StorageType tier = VFS::INTERNAL;
-    if (norm.startsWith("/sd")) tier = VFS::SDCARD;
+    VFS::StorageType tier = VFS::getStorageType(req.path);
     if (tier == VFS::SDCARD && !VFS::isSDAvailable()) {
       reply.status = FS_LIST_STATUS_NOT_FOUND;
       goto send_stat;

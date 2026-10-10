@@ -8,7 +8,7 @@
 #     test subset with the deployed acoustic checkpoint
 set -u
 cd "$(dirname "$0")"
-P=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
+P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
 export PYTHONPATH=/Volumes/USB2/stt/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 LOG=/Volumes/USB2/stt/logs/peoples-eval.log

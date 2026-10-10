@@ -61,7 +61,8 @@ constexpr uint32_t THERMAL_STACK_WORDS = 6144;     // 6 KB (was annotated ~24KB 
                                                      // frame reads fail (NACK retry storm). 24KB was the
                                                      // original pre-trim value.
 constexpr uint32_t IMU_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — BNO055 init retries need extra stack
-constexpr uint32_t TOF_STACK_WORDS = 3072;     // 3 KB (was ~12KB)
+constexpr uint32_t TOF_STACK_WORDS = 4096;     // 4 KB. QT Py ESP32: normal polling used 2468 B;
+                                           // 3 KB left 604 B and overflowed during I2C error logging.
 constexpr uint32_t FMRADIO_STACK_WORDS = 4608;     // 4.5 KB (was ~18KB)
 constexpr uint32_t INPUT_STACK_WORDS = 3584;     // 3.5 KB (was ~14KB)
 constexpr uint32_t DEBUG_OUT_STACK_WORDS = 4096;     // 4 KB (was annotated 16KB — 4x wrong). ⚠ HW-OBSERVED 81% USED (~764 B free):
@@ -324,15 +325,20 @@ bool createRTCTask();
 
 // Emit the standard "task disabled" log message and self-delete the task.
 // `subsys` must match one of the per-subsystem INFO_*_LIFECYCLEF macros — e.g.
-// SENSOR_TASK_EXIT(IMU) expands to INFO_IMU_LIFECYCLEF(...).
+// SENSOR_TASK_EXIT(IMU, gImuTaskHandle) expands to INFO_IMU_LIFECYCLEF(...).
 // Routes through the Lifecycle sub-flag (added in Option β) so the user can
 // suppress task-exit chatter via the per-sensor Lifecycle toggle without
 // touching the master flag.
-// NOTE: do NOT clear the task handle before calling this — the create/start
-// function uses eTaskGetState() to detect whether the task is still running.
-#define SENSOR_TASK_EXIT(subsys)                                               \
-  INFO_##subsys##_LIFECYCLEF("Task disabled - cleaning up and deleting");      \
-  vTaskDelete(nullptr)
+// Call only after all sensor cleanup is complete. Publishing a null handle
+// permits the next start, so this task must not touch shared sensor state after
+// that point. A deleted task's TCB is freed by idle; eTaskGetState() cannot
+// safely validate a retained handle after deletion.
+#define SENSOR_TASK_EXIT(subsys, handle)                                      \
+  do {                                                                       \
+    INFO_##subsys##_LIFECYCLEF("Task disabled - cleaning up and deleting");    \
+    (handle) = nullptr;                                                       \
+    vTaskDelete(nullptr);                                                     \
+  } while (0)
 
 // ============================================================================
 // Automated Stack Watermark Monitoring

@@ -11,7 +11,7 @@
 // must default to the only application role it actually contains.
 static constexpr int kBleModeDefaultForBuild = ENABLE_G2_GLASSES ? 1 : 0;
 
-// CommandEntry is defined in system_utils.h (included by files that need it)
+// CommandEntry is defined in System_CommandRegistry.h (included by files that need it)
 // Forward declare here for header-only usage
 struct CommandEntry;
 
@@ -472,7 +472,7 @@ struct Settings {
   }
 
   // wifiSSID / wifiPassword removed 2026-07-20 — dead legacy single-network
-  // fields; saved credentials live in gWifiNetworks[] (network.wifi.networks).
+  // fields; System_WiFiNetworks owns saved credentials (network.wifi.networks).
   bool wifiEnabled;        // Enable/disable WiFi at boot (default: true)
   bool wifiAutoStart;
   int webCliHistorySize;   // Web CLI history buffer size
@@ -1222,7 +1222,8 @@ void settingsDefaults();
 // mainFileOnly=true excludes own-file modules (debug) — used only by the
 // settings.json writer. The web/bond/G2 builders keep the default (all modules)
 // so those in-RAM payloads still carry system.debug after the split.
-void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords = false, bool mainFileOnly = false);
+// False means a required state snapshot failed; discard the partial document.
+bool buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords = false, bool mainFileOnly = false);
 bool readSettingsJson();
 bool writeSettingsJson();
 
@@ -1338,6 +1339,10 @@ String getDeviceEncryptionKey();
 // passphrases, etc. — so the at-rest encryption can't be forgotten or drift.
 // (For binary keys / manually-written files, call encryptString directly.)
 void   putSecret(JsonObject obj, const char* key, const String& plaintext);
+// Array rebuilds retain the prior ciphertext before clearing the JSON entries.
+// Pass it directly to preserve recoverable blobs without another String copy.
+void   putSecretPreserving(JsonObject obj, const char* key, const String& plaintext,
+                           const String& prevBlob);
 String getSecret(JsonObjectConst obj, const char* key);
 
 // Device fingerprint for backup compatibility checking
@@ -1381,14 +1386,6 @@ const char* cmd_oled_updateinterval(const String& argsInput);
 const char* cmd_oled_brightness(const String& argsInput);
 const char* cmd_oled_thermalscale(const String& argsInput);
 const char* cmd_oled_thermalcolormode(const String& argsInput);
-
-// LED Settings
-const char* cmd_hardwareled_brightness(const String& argsInput);
-const char* cmd_hardwareled_startupenabled(const String& argsInput);
-const char* cmd_hardwareled_startupeffect(const String& argsInput);
-const char* cmd_hardwareled_startupcolor(const String& argsInput);
-const char* cmd_hardwareled_startupcolor2(const String& argsInput);
-const char* cmd_hardwareled_startupduration(const String& argsInput);
 
 // CLI Settings
 const char* cmd_webclihistorysize(const String& argsInput);

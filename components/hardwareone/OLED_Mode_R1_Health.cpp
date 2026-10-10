@@ -244,9 +244,7 @@ static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
         healthKickPollBurst();
         break;
       case HEALTH_ACTION_LOGGING:
-        executeOLEDCommand(gSettings.healthLoggingEnabled
-                           ? "healthlogging off"
-                           : "healthlogging on");
+        executeOLEDCommand("healthlogging toggle");
         break;
       case HEALTH_ACTION_COLLECTION: {
         if (!healthRequireAdmin()) break;

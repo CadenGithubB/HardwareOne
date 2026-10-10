@@ -46,8 +46,10 @@ enum class G2WorkerInitState { Uninitialized, Ready };
 G2WorkerInitState gPageSwapInitState = G2WorkerInitState::Ready;
 QueueHandle_t gPageSwapQueue = reinterpret_cast<void*>(1);
 TaskHandle_t gPageSwapTaskH = reinterpret_cast<void*>(2);
-struct Runtime { bool initialized = true; } runtime;
-Runtime* gG2State = &runtime;
+// Support the pinned heap-backed app and the current owner-held runtime. Only
+// their initialized boundary is used by the extracted admission gate.
+struct Runtime { bool initialized = true; } gClientRuntime;
+Runtime* gG2State = &gClientRuntime;
 bool stampAllowed = true, allocationAllowed = true, queueAllowed = true;
 int jobCount = 0, sends = 0;
 uint32_t gLensDropped = 0, gLensAccepted = 0, gLensQueueDepthPeak = 0;
@@ -105,6 +107,7 @@ int main(int argc, char** argv) {
     }
     assert(sends == 0 && jobCount == 0 && args.lifecycleEpoch == 0);
   } else if (!std::strcmp(scenario, "unavailable")) {
+    gClientRuntime.initialized = false;
     gG2State = nullptr;
     assert(!pageSwapEnqueue(&args));
     assert(gUiSubmitters == 0 && sends == 0);

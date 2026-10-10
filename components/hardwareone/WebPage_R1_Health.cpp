@@ -3,12 +3,10 @@
 #if ENABLE_WEB_R1_HEALTH
 
 #include <Arduino.h>
-#include <string.h>
 
 #include "G2_Ring.h"
 #include "System_MemUtil.h"           // ps_alloc, AllocPref
 #include "System_SensorLogging.h"     // buildHealthStatusJson, health*
-#include "System_Settings.h"
 #include "System_User.h"              // AuthContext
 #include "WebPage_R1_Health.h"
 #include "WebServer_Server.h"
@@ -95,9 +93,10 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
               "ring setup/profile is not ready for health refresh; no command was sent");
   }
   if (action == "logging-toggle") {
-    const char* result = healthLoggingSet(!gSettings.healthLoggingEnabled);
-    const bool ok = result && strncmp(result, "SUCCESS", 7) == 0;
-    return healthActionReply(req, ok ? nullptr : "409 Conflict", result);
+    String result;
+    const bool executed = executeUnifiedWebCommand(req, ctx, "healthlogging toggle", result);
+    const bool ok = executed && result.startsWith("SUCCESS");
+    return healthActionReply(req, ok ? nullptr : "409 Conflict", result.c_str());
   }
   if (action == "control-refresh") {
     if (g2RingRefreshControlStatus()) {

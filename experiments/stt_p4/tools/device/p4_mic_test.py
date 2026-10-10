@@ -8,7 +8,7 @@ import json, os, re, subprocess, sys, time
 from pathlib import Path
 import serial
 
-PORT = '/dev/cu.usbmodem2101'
+PORT = os.environ['HW1_P4_PORT']
 USER, PASS = os.environ['P4_USER'], os.environ['P4_PASS']
 CLIPS = Path('/Volumes/USB2/stt/work/deploy/mic-test')
 OUT = Path(sys.argv[1])

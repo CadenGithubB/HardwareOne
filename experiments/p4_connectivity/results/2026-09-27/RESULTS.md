@@ -1,5 +1,7 @@
 # Connectivity results — 2026-09-27
 
+Device MAC addresses use synthetic aliases, and serial ports use generic placeholders. IP addresses describe the isolated test fixture; measurement values and test outcomes are unchanged.
+
 The P4/C6 serves the real HardwareOne web interface to the S3, with working
 login, protected APIs, command execution and logout. Encrypted BLE login,
 commands and reconnect pass with P4/C6 as both central and server. Mesh messages

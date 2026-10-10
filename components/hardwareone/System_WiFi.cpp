@@ -12,11 +12,13 @@
 #if ENABLE_WIFI
 
 #include "System_WiFi.h"
+#include "System_WiFiNetworksInternal.h"
 #include "System_Settings.h"      // Unified settings persistence
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson
 #include "System_RadioCompanion.h"  // radio companion gate (P4X-EYE); no-op with an on-chip radio
 #include "System_Clock.h"  // Clock::syncSource ledger for ntpstatus
+#include "System_NTP.h"
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
 #include <atomic>
@@ -50,11 +52,7 @@
 #endif
 
 // External dependencies from main .ino
-// WifiNetwork struct and gWifiNetworks are now in wifi_system.h
 extern bool wifiConnected;
-// syncNTPAndResolve now comes from System_Utils.h (included below) — its
-// signature grew an NtpSyncOutcome out-param and a mismatched local extern
-// would be a silent link break under C++ mangling.
 #if ENABLE_HTTP_SERVER
 extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
 #endif
@@ -82,12 +80,9 @@ static inline void espnowNoteWifiChannelMayHaveChanged() {}
 // Helper functions defined later in this file
 static const char* wifiStatusToString(wl_status_t status);
 static void wifiEnsureIdle(unsigned long waitMs);
-int findWiFiNetwork(const String& ssid);
-void sortWiFiByPriority();
-bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
-bool removeWiFiNetwork(const String& ssid);
-bool saveWiFiNetworks();
+static bool connectWiFiTarget(const WifiConnectionTarget& network, unsigned long timeoutMs, bool showPriority);
 bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriority = false);
+static bool connectWiFiId(uint32_t id, unsigned long timeoutMs, bool showPriority = false);
 bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs);
 
 // Global flags (defined later in this file)
@@ -350,6 +345,8 @@ WifiScanResult wifiScanForEach(bool includeHidden, WifiScanVisitor visitor,
 
 const char* cmd_wifiinfo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  WifiNetworkSnapshot saved;
+  if (!wifiNetworkSnapshot(saved)) return "Error: saved WiFi networks unavailable";
 
   // JSON: returned to the caller only. The text path below still uses
   // broadcastOutput exactly as before, so plain `wifistatus` is unchanged.
@@ -366,7 +363,7 @@ const char* cmd_wifiinfo(const String& argsInput) {
       // Top-priority saved network (array is priority-sorted). The old
       // gSettings.wifiSSID here was a dead legacy field frozen at "" — it
       // showed a blank even with networks saved.
-      doc["savedSsid"] = (gWifiNetworks && gWifiNetworkCount > 0) ? gWifiNetworks[0].ssid : String("");
+      doc["savedSsid"] = (saved.count > 0) ? saved.entries[0].ssid : String("");
     }
     doc["radioOn"] = wifiRadioOn();  // RADIO axis (power) — separate from `connected` (association)
     doc["radioHeldForEspnow"] = (wifiRadioState() == WIFI_RADIO_UP_FOR_ESPNOW);
@@ -393,7 +390,7 @@ const char* cmd_wifiinfo(const String& argsInput) {
                       ? "WiFi: Not connected (radio up, held for ESP-NOW)"
                       : "WiFi: Not connected");
     snprintf(getDebugBuffer(), 1024, "  Saved SSID: %s",
-             (gWifiNetworks && gWifiNetworkCount > 0) ? gWifiNetworks[0].ssid.c_str() : "(none)");
+             (saved.count > 0) ? saved.entries[0].ssid.c_str() : "(none)");
     broadcastOutput(getDebugBuffer());
     snprintf(getDebugBuffer(), 1024, "  MAC: %s", WiFi.macAddress().c_str());
     broadcastOutput(getDebugBuffer());
@@ -404,27 +401,29 @@ const char* cmd_wifiinfo(const String& argsInput) {
 
 const char* cmd_wifilist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  WifiNetworkSnapshot saved;
+  if (!wifiNetworkSnapshot(saved)) return "Error: saved WiFi networks unavailable";
 
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray arr = doc["networks"].to<JsonArray>();
-    for (int i = 0; i < gWifiNetworkCount; ++i) {
+    for (int i = 0; i < saved.count; ++i) {
       JsonObject o = arr.add<JsonObject>();
       o["index"]    = i + 1;
-      o["priority"] = gWifiNetworks[i].priority;
-      o["ssid"]     = gWifiNetworks[i].ssid;
-      o["hidden"]   = gWifiNetworks[i].hidden;
+      o["priority"] = saved.entries[i].priority;
+      o["ssid"]     = saved.entries[i].ssid;
+      o["hidden"]   = saved.entries[i].hidden;
       o["primary"]  = (i == 0);
     }
-    doc["count"] = gWifiNetworkCount;
+    doc["count"] = saved.count;
     doc["hint"] = "current connection: 'wifistatus'; connect: 'openwifi'";
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
 
   // Networks already loaded from settings.json by readSettingsJson()
-  if (gWifiNetworkCount == 0) {
+  if (saved.count == 0) {
     broadcastOutput("No saved networks.");
     return "[WiFi] Network list displayed";
   }
@@ -432,15 +431,15 @@ const char* cmd_wifilist(const String& argsInput) {
   broadcastOutput("Saved Networks (priority asc, numbered)");
   broadcastOutput("Use 'openwifi --index <N>' to connect to a specific entry.");
 
-  for (int i = 0; i < gWifiNetworkCount; ++i) {
+  for (int i = 0; i < saved.count; ++i) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
     // Build the line in gDebugBuffer
     char* buf = getDebugBuffer();
     int len = snprintf(buf, 1024, "  %d. [%d] '%s'",
-                       i + 1, gWifiNetworks[i].priority, gWifiNetworks[i].ssid.c_str());
+                       i + 1, saved.entries[i].priority, saved.entries[i].ssid.c_str());
 
-    if (gWifiNetworks[i].hidden && len < 1020) {
+    if (saved.entries[i].hidden && len < 1020) {
       len += snprintf(buf + len, 1024 - len, " (hidden)");
     }
 
@@ -457,7 +456,7 @@ const char* cmd_wifilist(const String& argsInput) {
 
 const char* cmd_wifiadd(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  // upsertWiFiNetwork, sortWiFiByPriority, saveWiFiNetworks are now defined in this file
+  // Saved-network validation and storage belong to System_WiFiNetworks.
   
   // wifiadd <ssid> <pass> [priority] [hidden0|1]
   CommandArgs a(originalCmd);
@@ -507,24 +506,19 @@ const char* cmd_wifiadd(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_wifirm(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  // removeWiFiNetwork, saveWiFiNetworks are now defined in this file
-  
-  String ssid = originalCmd;
-  ssid.trim();
-  // Strip one layer of surrounding quotes. cmd_wifiadd parses through the
-  // quote-aware CommandArgs, but this takes the raw remainder so an SSID can be
-  // added quoted and then never removed quoted — OLED_Mode_Network.cpp:554
-  // builds `wifirm "<ssid>"` unconditionally, so its Forget action failed every
-  // time (G2_Page_Network.cpp:1598 sends it unquoted and worked). Keep the raw
-  // remainder otherwise, so an UNQUOTED SSID containing spaces still resolves.
-  if (ssid.length() >= 2 && ssid.startsWith("\"") && ssid.endsWith("\"")) {
-    ssid = ssid.substring(1, ssid.length() - 1);
+// IDs come from a displayed snapshot and are valid only for this boot.
+static uint32_t parseSavedNetworkId(const String& text) {
+  if (text.length() == 0) return 0;
+  uint32_t value = 0;
+  for (size_t i = 0; i < text.length(); ++i) {
+    const char digit = text[i];
+    if (digit < '0' || digit > '9' || value > (UINT32_MAX - (digit - '0')) / 10) return 0;
+    value = value * 10 + (digit - '0');
   }
-  if (ssid.length() == 0) return "Error: invalid arguments — Usage: wifirm <ssid>";
-  // Networks already in memory from settings.json
-  bool ok = removeWiFiNetwork(ssid);
+  return value;
+}
+
+static const char* finishWiFiRemoval(bool ok, const String& ssid) {
   if (ok) {
     if (!saveWiFiNetworks()) {
       // RAM is already mutated; without the file write the network resurrects
@@ -543,9 +537,33 @@ const char* cmd_wifirm(const String& originalCmd) {
   }
 }
 
+const char* cmd_wifirm(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String ssid = originalCmd;
+  ssid.trim();
+  // Preserve both quoted names and the raw remainder for names with spaces.
+  if (ssid.length() >= 2 && ssid.startsWith("\"") && ssid.endsWith("\"")) {
+    ssid = ssid.substring(1, ssid.length() - 1);
+  }
+  if (ssid.length() == 0) return "Error: invalid arguments — Usage: wifirm <ssid>";
+  return finishWiFiRemoval(removeWiFiNetwork(ssid), ssid);
+}
+
+// Separate command preserves wifirm's raw-SSID syntax, including flag-like names.
+static const char* cmd_wifirmid(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String argument = originalCmd;
+  argument.trim();
+  const uint32_t id = parseSavedNetworkId(argument);
+  if (!id) return "Error: invalid arguments — Usage: wifirmid <saved-id>";
+  String ssid;
+  if (!removeWiFiNetworkById(id, &ssid)) return "Error: selected WiFi network no longer exists; refresh the list";
+  return finishWiFiRemoval(true, ssid);
+}
+
 const char* cmd_wifipromote(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  // findWiFiNetwork, sortWiFiByPriority, saveWiFiNetworks are now defined in this file
+  // The saved-network owner applies the priority change under its list lock.
   
   // wifipromote <ssid> [newPriority]
   CommandArgs a(originalCmd);
@@ -554,12 +572,10 @@ const char* cmd_wifipromote(const String& originalCmd) {
   int newPri = a.argInt(1, 1);
   if (newPri <= 0) newPri = 1;
   // Networks already in memory from settings.json
-  int idx = findWiFiNetwork(ssid);
-  if (idx < 0) {
+  if (!setWiFiNetworkPriority(ssid, newPri)) {
     snprintf(getDebugBuffer(), 1024, "Error: Network not found: '%s'", ssid.c_str());
     return getDebugBuffer();
   }
-  gWifiNetworks[idx].priority = newPri;
   sortWiFiByPriority();
   if (!saveWiFiNetworks()) {
     snprintf(getDebugBuffer(), 1024,
@@ -592,13 +608,13 @@ bool connectToBestWiFiNetwork() {
     }
   }
 
-  if (gWifiNetworkCount == 0) return false;
-
   sortWiFiByPriority();
+  WifiNetworkSnapshot saved;
+  if (!wifiNetworkSnapshot(saved) || saved.count == 0) return false;
   gWifiUserCancelled = false;
   bool connected = false;
 
-  for (int i = 0; i < gWifiNetworkCount && !connected; ++i) {
+  for (int i = 0; i < saved.count && !connected; ++i) {
     if (i > 0) {
       // Brief pause between trying different saved networks
       delay(2000);
@@ -611,7 +627,7 @@ bool connectToBestWiFiNetwork() {
     // this timeout disconnected it 2.4 s later — logged as "run -> init (0x0)",
     // reason 0 meaning WE dropped it, not the AP. A fresh attempt then joined
     // in 40 ms. 25 s gives the driver room for two full cycles.
-    connected = connectWiFiIndex(i, 35000, true);
+    connected = connectWiFiId(saved.entries[i].id, 35000, true);
     
     if (gWifiUserCancelled) {
       WifiRadioMutationGuard radioGuard;
@@ -678,19 +694,26 @@ const char* cmd_wificonnect(const String& originalCmd) {
   String prevSSID = WiFi.isConnected() ? WiFi.SSID() : String("");
   bool connected = false;
 
-  // Parse flags: --best, --index N, or legacy positional index
+  // Preserve CLI indexes; UI snapshots use a stable saved-entry ID.
   bool useBest = false;
   int index1 = -1;
+  WifiConnectionTarget selected;
+  bool useSavedId = false;
   String firstArg = a.arg(0);
   if (a.count() == 0) {
     useBest = true;  // default behavior
   } else if (firstArg == "--best") {
     useBest = true;
+  } else if (firstArg == "--saved-id") {
+    const uint32_t id = parseSavedNetworkId(a.arg(1));
+    if (a.count() != 2 || !id) return "Usage: openwifi --saved-id <id>";
+    if (!wifiNetworkConnectionById(id, selected)) return "Error: selected WiFi network no longer exists; refresh the list";
+    useSavedId = true;
   } else if (firstArg == "--index") {
     index1 = a.argInt(1, 0);
-    if (index1 <= 0 || index1 > gWifiNetworkCount) {
+    if (index1 <= 0 || index1 > wifiNetworkCount()) {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      snprintf(getDebugBuffer(), 1024, "Usage: openwifi --index <1..%d>", gWifiNetworkCount);
+      snprintf(getDebugBuffer(), 1024, "Usage: openwifi --index <1..%d>", wifiNetworkCount());
       return getDebugBuffer();
     }
   } else {
@@ -699,7 +722,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
     if (sel > 0) index1 = sel;
     else {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      snprintf(getDebugBuffer(), 1024, "Usage: openwifi [--best | --index <1..%d>]", gWifiNetworkCount);
+      snprintf(getDebugBuffer(), 1024, "Usage: openwifi [--best | --index <1..%d>]", wifiNetworkCount());
       return getDebugBuffer();
     }
   }
@@ -707,7 +730,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
   if (useBest) {
     // Use shared connection logic
     connected = connectToBestWiFiNetwork();
-  } else if (index1 > 0) {
+  } else if (useSavedId || index1 > 0) {
     // 25 s, not 12 s. The driver's own 4-way-handshake timeout is 10 s and it
     // retries internally; a 12 s budget (12.5 s from esp_wifi_connect() — the
     // 500 ms settle is spent before the deadline clock starts) fits exactly ONE
@@ -716,7 +739,8 @@ const char* cmd_wificonnect(const String& originalCmd) {
     // this timeout disconnected it 2.4 s later — logged as "run -> init (0x0)",
     // reason 0 meaning WE dropped it, not the AP. A fresh attempt then joined
     // in 40 ms. 25 s gives the driver room for two full cycles.
-    connected = connectWiFiIndex(index1 - 1, 35000);
+    connected = useSavedId ? connectWiFiTarget(selected, 35000, false)
+                           : connectWiFiIndex(index1 - 1, 35000);
     if (!connected && prevSSID.length() > 0) {
       connectWiFiSSID(prevSSID, 15000);
     }
@@ -1339,115 +1363,6 @@ static void wifiEnsureIdle(unsigned long waitMs) {
               wifiStatusToString(afterStatus), afterStatus, millis() - start);
 }
 
-int findWiFiNetwork(const String& ssid) {
-  for (int i = 0; i < gWifiNetworkCount; ++i)
-    if (gWifiNetworks[i].ssid == ssid) return i;
-  return -1;
-}
-
-void sortWiFiByPriority() {
-  // Simple selection sort by ascending priority (1 is highest)
-  for (int i = 0; i < gWifiNetworkCount; ++i) {
-    int minIdx = i;
-    for (int j = i + 1; j < gWifiNetworkCount; ++j) {
-      if (gWifiNetworks[j].priority < gWifiNetworks[minIdx].priority) minIdx = j;
-    }
-    if (minIdx != i) {
-      WifiNetwork tmp = gWifiNetworks[i];
-      gWifiNetworks[i] = gWifiNetworks[minIdx];
-      gWifiNetworks[minIdx] = tmp;
-    }
-  }
-}
-
-bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden) {
-  // Block blank SSIDs at the source: a network with no name can only fail to
-  // connect (and previously crashed the connect path), so never store one. This
-  // is the single chokepoint every save path funnels through.
-  String trimmed = ssid;
-  trimmed.trim();
-  if (trimmed.length() == 0) {
-    ERROR_WIFIF("Refusing to save WiFi network with a blank SSID");
-    broadcastOutput("ERROR: cannot save a WiFi network with a blank name");
-    return false;
-  }
-  // Reject over-long credentials loudly rather than silently mangling them at
-  // connect time. 32 octets is the 802.11 SSID maximum and 64 the WPA2 password
-  // maximum (a raw hex PSK); both match the wifi_sta_config_t field widths, so
-  // anything longer could never have been stored usefully.
-  if (ssid.length() > 32) {
-    ERROR_WIFIF("Refusing to save WiFi network: SSID is %u chars (max 32)",
-                (unsigned)ssid.length());
-    broadcastOutput("ERROR: WiFi name is too long (max 32 characters)");
-    return false;
-  }
-  if (password.length() > 64) {
-    ERROR_WIFIF("Refusing to save WiFi network '%s': password is %u chars (max 64)",
-                ssid.c_str(), (unsigned)password.length());
-    broadcastOutput("ERROR: WiFi password is too long (max 64 characters)");
-    return false;
-  }
-  // A double-quote in either field cannot survive the quoted command line every
-  // UI builds (`wifiadd "<ssid>" "<pass>"`). CommandArgs has no escape support,
-  // so the quote ENDS the token early and the rest becomes a separate argument:
-  // `wifiadd "My"Net" pass123` stores ssid="My", password='Net"' — the WRONG
-  // CREDENTIALS, silently. It also shifts the audit redactor's token positions.
-  // G2 already refuses this at its own entry (G2_Page_Network.cpp); doing it
-  // here covers OLED, web, CLI, the wizard and first-time setup from the one
-  // chokepoint every save path funnels through.
-  if (ssid.indexOf('"') >= 0 || password.indexOf('"') >= 0) {
-    ERROR_WIFIF("Refusing to save WiFi network: SSID or password contains a double-quote");
-    broadcastOutput("ERROR: WiFi name and password cannot contain a double-quote");
-    return false;
-  }
-
-  int idx = findWiFiNetwork(ssid);
-  if (idx >= 0) {
-    if (password.length() == 0 && gWifiNetworks[idx].password.length() > 0) {
-      // Empty password for an already-saved network keeps the stored one.
-      // Every UI funnels here (web quick-connect, OLED scan-pick, CLI) and an
-      // empty re-entry is almost always "didn't retype it", not "make this an
-      // open network". To genuinely blank it: wifirm, then wifiadd.
-      broadcastOutput("[WiFi] Kept existing password for '" + ssid + "' (empty password given; use wifirm to replace the entry)");
-      logSystemEvent("WIFI", "wifiadd '%s' with empty password — kept existing stored password", ssid.c_str());
-    } else {
-      gWifiNetworks[idx].password = password;
-    }
-    if (priority > 0) gWifiNetworks[idx].priority = priority;
-    gWifiNetworks[idx].hidden = hidden;
-    return true;
-  }
-  if (gWifiNetworkCount >= MAX_WIFI_NETWORKS) {
-    broadcastOutput("[WiFi] Network list full; cannot add");
-    return false;
-  }
-  WifiNetwork nw;
-  nw.ssid = ssid;
-  nw.password = password;
-  nw.priority = (priority > 0) ? priority : 1;
-  nw.hidden = hidden;
-  nw.lastConnected = 0;
-  gWifiNetworks[gWifiNetworkCount++] = nw;
-  return true;
-}
-
-bool removeWiFiNetwork(const String& ssid) {
-  int idx = findWiFiNetwork(ssid);
-  if (idx < 0) return false;
-  for (int i = idx + 1; i < gWifiNetworkCount; ++i) gWifiNetworks[i - 1] = gWifiNetworks[i];
-  gWifiNetworkCount--;
-  return true;
-}
-
-static void normalizeWiFiPriorities() {
-  // Ensure priorities are unique and >=1, compacted ascending by sort order
-  sortWiFiByPriority();
-  int nextPri = 1;
-  for (int i = 0; i < gWifiNetworkCount; ++i) {
-    gWifiNetworks[i].priority = nextPri++;
-  }
-}
-
 // Arduino-ESP32 deliberately replaces IDF's large static WiFi buffer profile
 // with this leaner runtime profile unless the application explicitly requests
 // static buffers. Raw recovery calls must do the same: WIFI_INIT_CONFIG_DEFAULT
@@ -1466,27 +1381,23 @@ static wifi_init_config_t makeArduinoCompatibleWifiInitConfig() {
   return cfg;
 }
 
-// Returns false when a persistence request could not be accepted (filesystem
-// not ready, immediate write failure, etc.). Inside an owner-scoped batch true
-// means the matching finalizer owns the eventual write result. Matches the
-// setup-wizard externs and the ENABLE_WIFI=0 stub, which are also `bool`.
-bool saveWiFiNetworks() {
-  if (!filesystemReady) return false;
-  sortWiFiByPriority();
-  normalizeWiFiPriorities();
-  // Persist via unified settings.json only
-  return requestSettingsPersist();
-}
-
 // Connect to a saved network by index (0-based). Update lastConnected on success.
 // If showPriority is true, displays priority in connection message (for --best mode)
 // Returns: true if connected, false if failed or user cancelled
 bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriority) {
-  if (index0based < 0 || index0based >= gWifiNetworkCount) {
-    DEBUG_WIFIF("[connectWiFiIndex] Invalid index: %d (count=%d)", index0based, gWifiNetworkCount);
-    return false;
-  }
-  const WifiNetwork& nw = gWifiNetworks[index0based];
+  WifiConnectionTarget network;
+  if (!wifiNetworkConnectionByIndex(index0based, network)) return false;
+  return connectWiFiTarget(network, timeoutMs, showPriority);
+}
+
+static bool connectWiFiId(uint32_t id, unsigned long timeoutMs, bool showPriority) {
+  WifiConnectionTarget network;
+  if (!wifiNetworkConnectionById(id, network)) return false;
+  return connectWiFiTarget(network, timeoutMs, showPriority);
+}
+
+static bool connectWiFiTarget(const WifiConnectionTarget& nw, unsigned long timeoutMs, bool showPriority) {
+  const int index0based = nw.index;
   DEBUG_WIFIF("[connectWiFiIndex] Attempting connection to [%d] SSID='%s'", index0based + 1, nw.ssid.c_str());
 
   // Display connection message with or without priority
@@ -1842,7 +1753,7 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
       logSystemEvent("WIFI", "connected to '%s' (%s)",
                      nw.ssid.c_str(), WiFi.localIP().toString().c_str());
       systemEventPost(SYSEVT_WIFI_CONNECTED, WiFi.localIP().toString().c_str());
-      gWifiNetworks[index0based].lastConnected = millis();
+      wifiNetworkMarkConnected(nw.id, millis());
       radioGuard.release();
       saveWiFiNetworks();
       return true;
@@ -1929,9 +1840,9 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
 
 // Connect to a saved network by SSID.
 bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs) {
-  int idx = findWiFiNetwork(ssid);
-  if (idx < 0) return false;
-  return connectWiFiIndex(idx, timeoutMs, false);
+  WifiConnectionTarget network;
+  if (!wifiNetworkConnectionBySSID(ssid, network)) return false;
+  return connectWiFiTarget(network, timeoutMs, false);
 }
 
 // ============================================================================
@@ -2406,6 +2317,7 @@ const CommandEntry wifiCommands[] = {
   { "wifilist", "List saved WiFi networks. (add 'json' for JSON output)", false, cmd_wifilist },
   { "wifiadd", "Add WiFi network: <ssid> <pass> [priority] [hidden]", true, cmd_wifiadd, "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]" },
   { "wifirm", "Remove WiFi network: <ssid>", true, cmd_wifirm, "Usage: wifirm <ssid>" },
+  { "wifirmid", "Remove a saved WiFi entry selected by a screen", true, cmd_wifirmid, "Usage: wifirmid <saved-id>" },
   { "wifipromote", "Promote WiFi to top priority: <ssid> [newPriority]", true, cmd_wifipromote, "Usage: wifipromote <ssid> [newPriority]" },
   
   // Connection Control — lifecycle open/close is admin-only (status/scan stay open)
@@ -2598,23 +2510,25 @@ void setupWiFi() {
   // Inform user they can escape WiFi connection attempts
   broadcastOutput("Starting WiFi connection... (Press any key in Serial Monitor to skip)");
 
+  WifiNetworkSnapshot saved;
+  wifiNetworkSnapshot(saved);
   // WiFi networks already loaded by readSettingsJson() during boot
   DEBUG_WIFIF("[WiFi Setup] Using WiFi networks loaded from settings");
-  DEBUG_WIFIF("[WiFi Setup] Found %d saved networks", gWifiNetworkCount);
+  DEBUG_WIFIF("[WiFi Setup] Found %d saved networks", saved.count);
   
   char debugBuf[128];
-  snprintf(debugBuf, sizeof(debugBuf), "DEBUG: Found %d saved networks", gWifiNetworkCount);
+  snprintf(debugBuf, sizeof(debugBuf), "DEBUG: Found %d saved networks", saved.count);
   broadcastOutput(debugBuf);
 
-  if (gWifiNetworkCount > 0) {
-    snprintf(debugBuf, sizeof(debugBuf), "DEBUG: First network SSID: '%s'", gWifiNetworks[0].ssid.c_str());
+  if (saved.count > 0) {
+    snprintf(debugBuf, sizeof(debugBuf), "DEBUG: First network SSID: '%s'", saved.entries[0].ssid.c_str());
     broadcastOutput(debugBuf);
     DEBUG_WIFIF("[WiFi Setup] First network: SSID='%s', priority=%d",
-                gWifiNetworks[0].ssid.c_str(), gWifiNetworks[0].priority);
+                saved.entries[0].ssid.c_str(), saved.entries[0].priority);
   }
 
   bool connected = false;
-  if (gWifiNetworkCount > 0) {
+  if (saved.count > 0) {
     broadcastOutput("Attempting WiFi connection directly...");
     DEBUG_WIFIF("[WiFi Setup] Calling connectToBestWiFiNetwork() directly");
     DEBUG_WIFIF("[DEBUG] About to call connectToBestWiFiNetwork");
@@ -2635,7 +2549,7 @@ void setupWiFi() {
     if (!sBootConnectFailLogged) {
       sBootConnectFailLogged = true;
       logSystemEvent("WIFI", "boot connect failed — continuing offline (%d saved networks, final status=%d)",
-                     gWifiNetworkCount, (int)WiFi.status());
+                     saved.count, (int)WiFi.status());
     }
     DEBUG_WIFIF("[WiFi Setup] Final WiFi status: %d", WiFi.status());
   } else {

@@ -23,7 +23,6 @@
 #include "System_MemUtil.h"    // PSRAM_JSON_DOC
 #include "System_Debug.h"      // DEBUG_G2F / BROADCAST_PRINTF
 #include <ArduinoJson.h>
-#include <new>                 // std::nothrow
 
 // The automations JSON path is a global defined in the app globals (same
 // extern System_Automation.cpp uses). Declared here rather than pulled from a
@@ -66,29 +65,6 @@ static G2CmdCookie buildCookie() {
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gSub;
   return cookie;
-}
-
-// Marshal a re-render back onto the lens applier context from a cmd_exec
-// completion callback (mirrors G2_Page_ESPNow.cpp's copy). The applier
-// gen-guard drops the job if the user has since navigated away.
-static void enqueueRedrawFromCallback(const G2CmdCookie& cookie,
-                                      void (*renderFn)(),
-                                      const char* tag) {
-  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
-  if (!spec) { DEBUG_G2F("[G2-AUTO] %s: RedrawSpec alloc failed", tag); return; }
-  spec->render = renderFn;
-  LensUiJob* job = new (std::nothrow) LensUiJob{};
-  if (!job) { DEBUG_G2F("[G2-AUTO] %s: LensUiJob alloc failed", tag); delete spec; return; }
-  job->kind           = LensJobKind::Redraw;
-  job->submitMenuGen  = cookie.menuGen;
-  job->cmdSeq         = cookie.seq;
-  job->targetPage     = cookie.targetPage;
-  job->targetNetSub   = cookie.targetNetSub;
-  job->payload.redraw = spec;
-  if (!g2EnqueueLensJob(job)) {
-    DEBUG_G2F("[G2-AUTO] %s: lens job enqueue FAILED", tag);
-    delete spec; delete job;
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -249,14 +225,14 @@ static void showRunResult() {
 static void autoToggleDone(bool ok, const char* /*result*/,
                            const G2CmdCookie& c, void* /*ud*/) {
   (void)ok;
-  enqueueRedrawFromCallback(c, showDetailMenu, "toggle-done");
+  (void)g2EnqueueRedraw(c, showDetailMenu, "Automation toggle");
 }
 
 static void autoRunDone(bool ok, const char* result,
                         const G2CmdCookie& c, void* /*ud*/) {
   snprintf(gRunResult, sizeof(gRunResult), "%s",
            (result && result[0]) ? result : (ok ? "OK" : "Error"));
-  enqueueRedrawFromCallback(c, showRunResult, "run-done");
+  (void)g2EnqueueRedraw(c, showRunResult, "Automation run");
 }
 
 // -----------------------------------------------------------------------------

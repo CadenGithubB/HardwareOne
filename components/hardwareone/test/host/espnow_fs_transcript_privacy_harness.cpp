@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <string>
 #include <vector>
@@ -27,10 +28,12 @@ class String {
     String substring(size_t i)const{return text_.substr(std::min(i,length()));}
     void reserve(size_t n){text_.reserve(n);}
     void remove(size_t i){text_.erase(i);}
+    void replace(const char* before,const char* after){const size_t n=std::strlen(before);for(size_t i=0;(i=text_.find(before,i))!=std::string::npos;i+=std::strlen(after))text_.replace(i,n,after);}
     void toLowerCase(){for(char& c:text_)c=char(std::tolower(static_cast<unsigned char>(c)));}
     void trim(){const auto a=text_.find_first_not_of(" \t\r\n"),b=text_.find_last_not_of(" \t\r\n");text_=a==std::string::npos?"":text_.substr(a,b-a+1);}
     String& operator+=(char c){text_+=c;return *this;}
     String& operator+=(const String& s){text_+=s.text_;return *this;}
+    String& operator=(char c){text_=c;return *this;}
     friend String operator+(const String& a,const String& b){return a.text_+b.text_;}
     friend bool operator==(const String& a,const String& b){return a.text_==b.text_;}
     friend bool operator!=(const String& a,const String& b){return !(a==b);}
@@ -40,7 +43,7 @@ constexpr uint8_t ESPNOW_V4_TYPE_FS_LIST_REPLY=1,ESPNOW_V4_TYPE_FS_STAT_REPLY=2,
 // INSERT_WIRE
 struct AuthContext {};
 static AuthContext auth;
-static unsigned scopes=0,scopeDepth=0,fsCalls=0,transfers=0,statsCalls=0;
+static unsigned scopes=0,scopeDepth=0,fsCalls=0,transfers=0,statsCalls=0,sdChecks=0,sends=0;
 static bool filesystemReady=true,sdAvailable=true,statsOkay=true,allocFails=false,openFails=false;
 static std::vector<uint8_t> response;
 static uint8_t responseType;
@@ -57,7 +60,7 @@ void* ps_alloc(size_t n,AllocPref,const char*){return allocFails?nullptr:std::ma
 size_t strlcpy(char* dst,const char* src,size_t cap){size_t n=std::strlen(src);if(cap){size_t copy=std::min(n,cap-1);std::memcpy(dst,src,copy);dst[copy]=0;}return n;}
 uint32_t generateMessageId(){return 1;}
 namespace espnowtx{
-bool sendAeadSync(const uint8_t*,uint8_t type,uint16_t,uint32_t,const uint8_t* data,uint16_t n,uint8_t,uint32_t){response.assign(data,data+n);responseType=type;return true;}
+bool sendAeadSync(const uint8_t*,uint8_t type,uint16_t,uint32_t,const uint8_t* data,uint16_t n,uint8_t,uint32_t){assert(scopeDepth==0);++sends;response.assign(data,data+n);responseType=type;return true;}
 }
 struct Node{bool directory;size_t size;std::vector<std::string> children;};
 static std::map<std::string,Node> nodes={
@@ -74,6 +77,7 @@ public:
     explicit operator bool()const{return node_;}
     bool isDirectory()const{return node_&&node_->directory;}
     size_t size()const{return node_?node_->size:0;}
+    time_t getLastWrite()const{assert(false && "ESP-NOW listings must not request modification times");return 0;}
     const char* name()const{return path_.c_str();}
     void close(){node_=nullptr;}
     File openNextFile(){assert(scopeDepth);++fsCalls;if(!node_||cursor_>=node_->children.size())return {};return File(node_->children[cursor_++]);}
@@ -82,29 +86,68 @@ bool normalizeFsPath(const String&,String&);
 namespace VFS{
 enum StorageType{INTERNAL,SDCARD};
 struct VirtualEntry{const char* name;bool isFolder;};
-String normalize(const String& raw){String out;normalizeFsPath(raw,out);return out;}
+static std::vector<StorageType> requestedTiers;
 bool existsGuarded(const String& path,const AuthContext&){assert(scopeDepth);++fsCalls;return nodes.count(path.c_str());}
 File openGuarded(const String& path,const char*,const AuthContext&){assert(scopeDepth);++fsCalls;return openFails?File():File(path);}
-String stripSdPrefix(const String& path){if(path=="/sd")return "/";return path.startsWith("/sd/")?path.substring(3):path;}
 size_t listVirtualEntries(const String&,VirtualEntry*,size_t){assert(scopeDepth);++fsCalls;return 0;}
-bool isSDAvailable(){assert(scopeDepth);++fsCalls;return sdAvailable;}
-bool getStats(StorageType,uint64_t& total,uint64_t& used,uint64_t& free){assert(scopeDepth);++fsCalls;++statsCalls;total=1000;used=400;free=600;return statsOkay;}
+bool isSDAvailable(){assert(scopeDepth);++fsCalls;++sdChecks;return sdAvailable;}
+bool getStats(StorageType tier,uint64_t& total,uint64_t& used,uint64_t& free){assert(scopeDepth);++fsCalls;++statsCalls;requestedTiers.push_back(tier);total=tier==INTERNAL?1000:2000;used=tier==INTERNAL?400:1400;free=600;return statsOkay;}
+// INSERT_VFS
 }
 uint8_t getPermissions(const String&,const AuthContext&){assert(scopeDepth);++fsCalls;return 0x3f;}
 String formatPath(const char* dir,const char* name){return String(dir)+(String(dir)=="/"?"":"/")+name;}
 bool sendFileToMac(const uint8_t*,const String& path){assert(scopeDepth);++transfers;transferPath=path;return true;}
 // INSERT_PRODUCTION
-static void reset(){assert(scopeDepth==0);scopes=fsCalls=transfers=statsCalls=0;response.clear();transferPath="";filesystemReady=sdAvailable=statsOkay=true;allocFails=openFails=false;}
+static void reset(){assert(scopeDepth==0);scopes=fsCalls=transfers=statsCalls=sdChecks=sends=0;response.clear();transferPath="";VFS::requestedTiers.clear();filesystemReady=sdAvailable=statsOkay=true;allocFails=openFails=false;}
 static const uint8_t mac[6]={1,2,3,4,5,6};
 template<class Req>Req request(const char* path){Req r={};r.reqId=0x87654321;strlcpy(r.path,path,sizeof(r.path));return r;}
 template<class Reply>Reply decoded(uint8_t type){assert(responseType==type&&response.size()>=sizeof(Reply));Reply r;std::memcpy(&r,response.data(),sizeof(r));return r;}
 static unsigned checks=0;
+static unsigned statRoutingChecks=0,statRoutingFailures=0;
+static void statRouting(const char* path, VFS::StorageType expected, bool mounted, bool readable) {
+    reset();
+    sdAvailable = mounted;
+    statsOkay = readable;
+    auto q = request<V4PayloadFsStatReq>(path);
+    processStatDeferred(mac, q);
+    auto r = decoded<V4PayloadFsStatReply>(ESPNOW_V4_TYPE_FS_STAT_REPLY);
+    const bool missing = expected == VFS::SDCARD && !mounted;
+    const uint8_t status = missing ? FS_LIST_STATUS_NOT_FOUND
+        : readable ? FS_LIST_STATUS_OK : FS_LIST_STATUS_IO_ERROR;
+    const unsigned queryCount = missing ? 0u : 1u;
+    bool okay = sends == 1 && response.size() == sizeof(r) && r.reqId == q.reqId
+        && !std::strcmp(r.path, q.path) && r.status == status && r.reserved2 == 0;
+    for (uint8_t reserved : r.reserved1) okay &= reserved == 0;
+    okay &= scopes == 1 && scopeDepth == 0 && transfers == 0
+        && sdChecks == (expected == VFS::SDCARD ? 1u : 0u);
+    okay &= statsCalls == queryCount && VFS::requestedTiers.size() == queryCount;
+    if (queryCount && !VFS::requestedTiers.empty())
+        okay &= VFS::requestedTiers.front() == expected;
+    if (status == FS_LIST_STATUS_OK) {
+        okay &= r.totalBytes == (expected == VFS::INTERNAL ? 1000u : 2000u)
+            && r.usedBytes == (expected == VFS::INTERNAL ? 400u : 1400u)
+            && r.freeBytes == 600 && r.percentUsedX10 == (expected == VFS::INTERNAL ? 400 : 700);
+    } else {
+        okay &= r.totalBytes == 0 && r.usedBytes == 0 && r.freeBytes == 0 && r.percentUsedX10 == 0;
+    }
+    ++statRoutingChecks;
+    if (!okay) {
+        ++statRoutingFailures;
+        const char* queriedTier = VFS::requestedTiers.empty() ? "none"
+            : VFS::requestedTiers.front() == VFS::INTERNAL ? "internal" : "sd";
+        std::fprintf(stderr, "FAIL STAT path='%s' mounted=%d readable=%d: "
+                     "expected tier=%s status=%u, got tier=%s status=%u total=%llu\n",
+                     path, mounted, readable, expected == VFS::INTERNAL ? "internal" : "sd",
+                     unsigned(status), queriedTier, unsigned(r.status),
+                     static_cast<unsigned long long>(r.totalBytes));
+    }
+}
 static void denied(const char* path,uint8_t status=FS_LIST_STATUS_PERM_DENIED){
     for(unsigned op=0;op<3;++op){reset();filesystemReady=status!=FS_LIST_STATUS_NOT_READY;
         if(op==0){auto q=request<V4PayloadFsListReq>(path);q.maxEntries=32;processListDeferred(mac,q);auto r=decoded<V4PayloadFsListReplyHeader>(ESPNOW_V4_TYPE_FS_LIST_REPLY);assert(r.reqId==q.reqId&&!std::strcmp(r.path,q.path));assert(r.status==status&&r.entryCount==0&&r.totalEntries==0&&r.hasMore==0&&r.nextStartIndex==0);assert(response.size()==sizeof(r));}
         if(op==1){auto q=request<V4PayloadFsStatReq>(path);processStatDeferred(mac,q);auto r=decoded<V4PayloadFsStatReply>(ESPNOW_V4_TYPE_FS_STAT_REPLY);assert(r.reqId==q.reqId&&!std::strcmp(r.path,q.path));assert(r.status==status&&r.totalBytes==0&&r.usedBytes==0&&r.freeBytes==0&&r.percentUsedX10==0);}
         if(op==2){auto q=request<V4PayloadFsGetReq>(path);processGetDeferred(mac,q);auto r=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);assert(r.reqId==q.reqId&&!std::strcmp(r.path,q.path));assert(r.status==status&&r.fileSize==0);}
-        assert(scopes==0&&fsCalls==0&&transfers==0);++checks;
+        assert(sends==1&&scopes==0&&fsCalls==0&&transfers==0);++checks;
     }
 }
 int main(){
@@ -115,7 +158,7 @@ int main(){
     // Root LIST may reveal the protected root's name, never its descendants.
     for(const char* path:{"/","/sd","/ordinary"}){reset();auto q=request<V4PayloadFsListReq>(path);q.maxEntries=32;processListDeferred(mac,q);auto r=decoded<V4PayloadFsListReplyHeader>(ESPNOW_V4_TYPE_FS_LIST_REPLY);assert(r.status==FS_LIST_STATUS_OK&&r.entryCount>0&&scopes==1&&fsCalls>0&&transfers==0);V4PayloadFsEntry first;std::memcpy(&first,response.data()+sizeof(r),sizeof(first));assert(!std::strcmp(first.name,path==String("/ordinary")?"note.txt":"stt"));++checks;}
     for(const char* path:{"/hello.txt","/ordinary/note.txt","/sd/public.txt","/stt2/a.txt","/STT/a.txt"}){reset();auto q=request<V4PayloadFsGetReq>(path);processGetDeferred(mac,q);auto r=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);assert(r.status==FS_LIST_STATUS_OK&&r.fileSize==nodes[path].size&&transfers==1&&transferPath==path&&scopes==2);++checks;}
-    for(const char* path:{"/","/sd","/ordinary","/stt2","/STT"}){reset();auto q=request<V4PayloadFsStatReq>(path);processStatDeferred(mac,q);auto r=decoded<V4PayloadFsStatReply>(ESPNOW_V4_TYPE_FS_STAT_REPLY);assert(r.status==FS_LIST_STATUS_OK&&r.totalBytes==1000&&r.usedBytes==400&&r.freeBytes==600&&r.percentUsedX10==400&&statsCalls==1&&transfers==0);++checks;}
+    for(const char* path:{"/","/ordinary","/stt2","/STT"}){reset();auto q=request<V4PayloadFsStatReq>(path);processStatDeferred(mac,q);auto r=decoded<V4PayloadFsStatReply>(ESPNOW_V4_TYPE_FS_STAT_REPLY);assert(r.status==FS_LIST_STATUS_OK&&r.totalBytes==1000&&r.usedBytes==400&&r.freeBytes==600&&r.percentUsedX10==400&&statsCalls==1&&transfers==0);++checks;}
     reset();auto get=request<V4PayloadFsGetReq>("/missing");processGetDeferred(mac,get);assert(decoded<V4PayloadFsGetAck>(3).status==FS_LIST_STATUS_NOT_FOUND&&transfers==0);
     reset();get=request<V4PayloadFsGetReq>("/ordinary");processGetDeferred(mac,get);assert(decoded<V4PayloadFsGetAck>(3).status==FS_LIST_STATUS_NOT_A_DIR&&transfers==0);
     reset();openFails=true;get=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,get);assert(decoded<V4PayloadFsGetAck>(3).status==FS_LIST_STATUS_PERM_DENIED&&transfers==0);
@@ -124,4 +167,10 @@ int main(){
     reset();sdAvailable=false;auto stat=request<V4PayloadFsStatReq>("/sd");processStatDeferred(mac,stat);assert(decoded<V4PayloadFsStatReply>(2).status==FS_LIST_STATUS_NOT_FOUND&&statsCalls==0);
     reset();statsOkay=false;stat=request<V4PayloadFsStatReq>("/");processStatDeferred(mac,stat);assert(decoded<V4PayloadFsStatReply>(2).status==FS_LIST_STATUS_IO_ERROR);
     assert(scopeDepth==0);std::printf("FS-RPC transcript privacy: %u path/operation checks plus ordinary/error behavior passed\n",checks);
+    for(bool mounted:{false,true})for(bool readable:{false,true}){
+        for(const char* path:{"/sd","/sd/","//sd//x","sd"," sd/x "})statRouting(path,VFS::SDCARD,mounted,readable);
+        for(const char* path:{"/","/ordinary","/sdata","/sdcard","/sdcard/x","/SD"})statRouting(path,VFS::INTERNAL,mounted,readable);
+    }
+    std::printf("FS-RPC STAT routing: %u scenarios, %u failures\n",statRoutingChecks,statRoutingFailures);
+    return statRoutingFailures?1:0;
 }

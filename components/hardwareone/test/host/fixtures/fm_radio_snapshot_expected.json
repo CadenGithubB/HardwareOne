@@ -1,0 +1,16 @@
+[
+  "{\"valid\":true,\"connected\":true,\"ts\":43210,\"frequency\":99.5,\"volume\":11,\"muted\":false,\"stereo\":true,\"rssi\":42,\"headphones\":true,\"seeking\":false,\"station\":\"MUSIC FM\",\"radioText\":\"Artist - Track\"}\n",
+  "OLED:[size1]@0,8[size2]99.5 MHz[size1]@0,26Station: MUSIC FM@0,36Artist - Track@0,46Vol[bars:22,46,6,8,8]@64,46 RSSI:42 ST|dirty=0\n",
+  "{\"valid\":false,\"connected\":true,\"ts\":43210,\"frequency\":99.5,\"volume\":11,\"muted\":false,\"stereo\":true,\"rssi\":42,\"headphones\":true,\"seeking\":false,\"station\":\"\",\"radioText\":\"\"}\n",
+  "OLED:[size1]@0,8[size2]99.5 MHz[size1]@0,26No RDS Station@0,36@0,46Vol[bars:22,46,6,8,8]@64,46 RSSI:42 ST|dirty=0\n",
+  "{\"valid\":true,\"connected\":true,\"ts\":43210,\"frequency\":99.5,\"volume\":11,\"muted\":true,\"stereo\":false,\"rssi\":42,\"headphones\":true,\"seeking\":false,\"station\":\"MUSIC FM\",\"radioText\":\"Artist - Track\"}\n",
+  "OLED:[size1]@0,8[size2]99.5 MHz[size1]@0,26Station: MUSIC FM@0,36Artist - Track@0,46MUTED@64,46 RSSI:42 MO|dirty=0\n",
+  "{\"valid\":true,\"connected\":true,\"ts\":43210,\"frequency\":99.5,\"volume\":11,\"muted\":false,\"stereo\":true,\"rssi\":42,\"headphones\":true,\"seeking\":true,\"station\":\"MUSIC FM\",\"radioText\":\"Artist - Track\"}\n",
+  "OLED:[size1]@0,8[size2]Seek dn...[size1]@0,26Station: MUSIC FM@0,36Artist - Track@0,46Vol[bars:22,46,6,8,8]@64,46 RSSI:42 ST|dirty=1\n",
+  "{\"valid\":true,\"connected\":false,\"ts\":43210,\"frequency\":99.5,\"volume\":11,\"muted\":false,\"stereo\":true,\"rssi\":42,\"headphones\":true,\"seeking\":false,\"station\":\"MUSIC FM\",\"radioText\":\"Artist - Track\"}\n",
+  "OLED:[size1][icon:vol_mute:48,10,16]@16,30FM Radio not active\n",
+  "@0,48X: Start|dirty=0\n",
+  "{\"valid\":true,\"connected\":true,\"ts\":0,\"frequency\":103.9,\"volume\":6,\"muted\":false,\"stereo\":true,\"rssi\":0,\"headphones\":false,\"seeking\":false,\"station\":\"AB C D  \",\"radioText\":\"hello  radio text  \"}\n",
+  "EVENT:0:AB C D  :103.9 MHz\n",
+  "{\"valid\":true,\"connected\":true,\"ts\":0,\"frequency\":103.9,\"volume\":6,\"muted\":false,\"stereo\":true,\"rssi\":0,\"headphones\":false,\"seeking\":false,\"station\":\"AB C D  \",\"radioText\":\"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT\"}\n"
+]
