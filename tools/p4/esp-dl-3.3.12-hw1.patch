@@ -1,5 +1,5 @@
 diff --git a/dl/base/dl_base_conv_args.hpp b/dl/base/dl_base_conv_args.hpp
-index 75f7d57..41805f9 100644
+index 75f7d57..8b8c020 100644
 --- a/dl/base/dl_base_conv_args.hpp
 +++ b/dl/base/dl_base_conv_args.hpp
 @@ -237,12 +237,15 @@ inline void conv_1x1_body_view(const ConvArgsType &args,
@@ -21,32 +21,141 @@ index 75f7d57..41805f9 100644
                 const int group,
                 TensorBase *bias,
                 const activation_type_t activate,
+@@ -441,6 +444,30 @@ public:
+             args.debug_value = tool::calloc_aligned(16, 1, MALLOC_CAP_DEFAULT);
+         }
+         m_args.assign(1, args);
++#if CONFIG_PIE_V1_BOOST || CONFIG_PIE_V2_BOOST
++        // HardwareOne: split single-column int8 depthwise layers across the cores by
++        // channel halves at every length (column blocks, dl_base_dwconv_loop.cpp), not by
++        // rows above 4 x dilation x K. Channels are independent and each half keeps the full
++        // rows and border handling, so the split is exact (bit-identical output). Strides
++        // stay those of the full C.
++        if (group > 1 && runtime_mode == RUNTIME_MODE_MULTI_CORE && act_bytes == 1 && args.input_width == 1 &&
++            args.output_width == 1 && args.filter_width == 1 && args.input_channel == args.output_channel &&
++            args.input_channel % 128 == 0 && !args.c_remainder && !args.bias_element && !args.activation_alpha_ptr) {
++            const int half = args.input_channel / 2;
++            m_args[0].c_div_x_1 = half / 16 - 1;
++            m_args[0].n_div_x = half / 16;
++            m_args.push_back(m_args[0]);
++            m_args[1].input_element = conv_ptr_add(args.input_element, half, 1);
++            m_args[1].output_element = conv_ptr_add(args.output_element, half, 1);
++            m_args[1].filter_element =
++                conv_ptr_add(args.filter_element, half * args.filter_height * args.filter_width, 1);
++            m_args[1].filter_element_unaligned = m_args[1].filter_element;
++            if (args.tie_filter_channel_factor) {
++                m_args[1].tie_filter_channel_factor = conv_ptr_add(args.tie_filter_channel_factor, half, 1);
++            }
++            return;
++        }
++#endif
+         if (args.input_height > 4 * args.dilation_h * args.filter_height) {
+             if (runtime_mode == RUNTIME_MODE_MULTI_CORE ||
+                 (runtime_mode == RUNTIME_MODE_AUTO && args.input_height >= 100 && args.input_width >= 50)) {
 diff --git a/dl/base/dl_base_conv_loop.cpp b/dl/base/dl_base_conv_loop.cpp
-index 96c5377..c91cce2 100644
+index 96c5377..0d29e0c 100644
 --- a/dl/base/dl_base_conv_loop.cpp
 +++ b/dl/base/dl_base_conv_loop.cpp
-@@ -40,10 +40,19 @@ static bool conv_loop_pie_tiled(ConvArgsType &args,
+@@ -40,10 +40,20 @@ static bool conv_loop_pie_tiled(ConvArgsType &args,
  {
  #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32S31
      constexpr int filter_bytes = 16 * 1024;
 +    constexpr int spatial_tile = 32;
  #else
 -    constexpr int filter_bytes = 32 * 1024;
--#endif
 +    // HardwareOne: pointwise tiles sized for the ESP32-P4's 64 KB 2-way L1D,
 +    // which both HP cores share. The shipped 32 KB filter tile x 32-pixel
 +    // spatial tile per core is 2 x (32 + 16) = 96 KB. Here: 16 KB filter
-+    // tile, 32-pixel spatial tile (int8, C_in 512: 32-channel tiles, 16 KB of
-+    // input per tile).
++    // tile (int8, C_in 512: 32-channel tiles), 64-pixel spatial tile: on the
++    // 15x5 the fastest tile measured once the single-column depthwise layers
++    // split by channel halves (dl_base_conv_args.hpp).
 +    // Bit-exact: each body() call still reduces one pixel over all input
 +    // channels in the same order; only the order of (pixel, channel-tile)
 +    // calls changes.
 +    constexpr int filter_bytes = 16 * 1024;
-     constexpr int spatial_tile = 32;
-+#endif
++    constexpr int spatial_tile = 64;
+ #endif
+-    constexpr int spatial_tile = 32;
  
      // height/width/pointers are the body rectangle: the full map when there is
      // no pad, or conv_1x1_body_view() after 1x1 pad fill. Stride is already in
+diff --git a/dl/base/dl_base_dwconv_loop.cpp b/dl/base/dl_base_dwconv_loop.cpp
+index fc57844..8854e7c 100644
+--- a/dl/base/dl_base_dwconv_loop.cpp
++++ b/dl/base/dl_base_dwconv_loop.cpp
+@@ -3,6 +3,7 @@
+ #include "dl_base_isa.hpp"
+ #include "dl_compile_config.h"
+ #include "dl_tool.hpp"
++#include "esp_cpu.h"
+ #include "esp_log.h"
+ 
+ namespace dl {
+@@ -551,6 +552,50 @@ static void dwconv_loop_pie(
+ }
+ #endif
+ 
++#if CONFIG_PIE_V1_BOOST || CONFIG_PIE_V2_BOOST
++// HardwareOne: 64-channel column blocks for single-column int8 depthwise layers.
++// The kernel computes one output row across all channels per call. For [K,1] filters
++// (the 15x5 has K = 33..87) one row touches K input rows x C bytes plus the whole
++// K x C filter (~77 KB at K = 75, C = 512), more than the 64 KB L1D, so every output
++// row refetched both from L2. The same kernel run on 64 channels (one 64-byte line
++// per row) across all rows keeps the sliding window and the block's filter in L1.
++// Same kernel, per-channel shifts and border handling, per block: bit-identical
++// output. The filter is group-major (16 channels x K taps contiguous) and the
++// per-channel shifts advance 16 bytes per group, so a block is four pointer offsets.
++// With two tasks, core 1 walks the blocks in reverse so the cores never work on the
++// same block, whose rows map to the same L1D sets.
++static bool dwconv_column_blocks(
++    ConvArgsType &args, conv_pie_fn_t body, conv_pie_fn_t border, int feat_bytes, int filt_bytes)
++{
++    constexpr int kGroupsPerBlock = 4;
++    constexpr int kBlockChannels = kGroupsPerBlock * 16;
++    const int groups = args.c_div_x_1 + 1;
++    if (feat_bytes != 1 || filt_bytes != 1 || args.input_width != 1 || args.output_width != 1 ||
++        args.filter_width != 1 || args.c_remainder || args.n_remainder || groups <= kGroupsPerBlock ||
++        groups % kGroupsPerBlock || args.bias_element || args.activation_alpha_ptr ||
++        args.input_channel != args.output_channel || args.n_div_x != groups) {
++        return false;
++    }
++    const int blocks = groups / kGroupsPerBlock;
++    const bool reverse = esp_cpu_get_core_id() == 1;
++    for (int i = 0; i < blocks; i++) {
++        const int b = reverse ? blocks - 1 - i : i;
++        ConvArgsType a = args;
++        a.input_element = conv_ptr_add(args.input_element, b * kBlockChannels, 1);
++        a.output_element = conv_ptr_add(args.output_element, b * kBlockChannels, 1);
++        a.filter_element = conv_ptr_add(args.filter_element, b * kBlockChannels * args.filter_height, 1);
++        a.filter_element_unaligned = a.filter_element;
++        if (args.tie_filter_channel_factor) {
++            a.tie_filter_channel_factor = conv_ptr_add(args.tie_filter_channel_factor, b * kBlockChannels, 1);
++        }
++        a.c_div_x_1 = kGroupsPerBlock - 1;
++        a.n_div_x = kGroupsPerBlock;
++        dwconv_loop_pie(a, body, border, feat_bytes, filt_bytes);
++    }
++    return true;
++}
++#endif
++
+ #if !(CONFIG_PIE_V1_BOOST || CONFIG_PIE_V2_BOOST)
+ static void dwconv_loop_c(ConvArgsType &args,
+                           conv_c_mac_fn_t mac_border,
+@@ -602,8 +647,11 @@ void depthwise_conv2d(
+     const int feat_bytes = conv_feature_bytes(quant);
+     const int filt_bytes = conv_filter_bytes(quant);
+ #if CONFIG_PIE_V1_BOOST || CONFIG_PIE_V2_BOOST
+-    dwconv_loop_pie(
+-        args, reinterpret_cast<conv_pie_fn_t>(fn0), reinterpret_cast<conv_pie_fn_t>(fn1), feat_bytes, filt_bytes);
++    if (!dwconv_column_blocks(
++            args, reinterpret_cast<conv_pie_fn_t>(fn0), reinterpret_cast<conv_pie_fn_t>(fn1), feat_bytes, filt_bytes)) {
++        dwconv_loop_pie(
++            args, reinterpret_cast<conv_pie_fn_t>(fn0), reinterpret_cast<conv_pie_fn_t>(fn1), feat_bytes, filt_bytes);
++    }
+ #else
+     if (!fn2) {
+         ESP_LOGE("depthwise_conv2d", "unbound Conv tail kernel");
 diff --git a/dl/base/dl_base_elemwise.cpp b/dl/base/dl_base_elemwise.cpp
 index ec19478..44dec11 100644
 --- a/dl/base/dl_base_elemwise.cpp
