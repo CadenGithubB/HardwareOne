@@ -57,6 +57,11 @@ size_t sttPsramFree();  // host builds: the test harness supplies free PSRAM
 #if HW1_STT_SPECULATIVE_FINAL && !HW1_STT_TRIM_SILENCE
 #error "HW1_STT_SPECULATIVE_FINAL needs HW1_STT_TRIM_SILENCE"
 #endif
+// A phrase shorter than the 4 s minimum closes after 1 s of silence instead of
+// waiting for more speech (a short reply gets its caption).
+#ifndef HW1_STT_SHORT_CLOSE
+#define HW1_STT_SHORT_CLOSE 1
+#endif
 
 namespace {
 constexpr uint32_t kWorkerStackBytes = 12288; // IDF task stack sizes are bytes.
@@ -636,6 +641,9 @@ struct StreamSlot {
 #if HW1_STT_SPECULATIVE_FINAL
   uint32_t specId = 0;    // speculative request this phrase matched (0: none)
 #endif
+#if HW1_STT_SHORT_CLOSE
+  bool pauseEnd = false;  // closed on a pause (TL short)
+#endif
   StreamSlotState state = StreamSlotState::Free;
 };
 struct StreamRun {
@@ -948,6 +956,9 @@ static bool sttQueueSegment(StreamRun& run) {
 #if HW1_STT_TRIM_SILENCE
   slot->voicedEnd = segment->voiced_end_samples;
   slot->endKind = segment->end;
+#endif
+#if HW1_STT_SHORT_CLOSE
+  slot->pauseEnd = segment->end == hw1::stt::SegmentEnd::Pause;
 #endif
   slot->queuedMs = millis();
   portENTER_CRITICAL(&gSTTMux);
@@ -1540,6 +1551,12 @@ static void sttContinuousWorker(void*) {
     // Stop leaves only a short tail. The 15x5 transcribes at ~0.45x real time,
     // so 4 s phrases keep up; less context at each cut is the trade-off.
     segmentConfig.min_segment_samples = 4 * STT_SAMPLE_RATE;
+#if HW1_STT_SHORT_CLOSE
+    // Below 4 s a phrase closes after 1 s of silence instead of waiting for
+    // the 4 s floor (a short reply gets its caption); at 4 s or more the
+    // 600 ms end wait is unchanged.
+    segmentConfig.short_close_silence_samples = STT_SAMPLE_RATE;
+#endif
     // The G2 glasses mic's quiet level jitters (~21..60+ RMS per 10 ms frame,
     // measured 2026-09-30), so the window minimum underestimated the room and
     // stray blips kept restarting the 600 ms pause: phrases ran to the 20 s
@@ -1956,6 +1973,12 @@ static void sttContinuousWorker(void*) {
         else if (slot->specId)
           ESP_LOGI("STT", "TL spec_miss seg=%lu id=%lu held=%d", (unsigned long)slot->sequence,
                    (unsigned long)slot->specId, promotedId ? 1 : 0);
+#endif
+#if HW1_STT_SHORT_CLOSE
+        // A pause closed this phrase below the 4 s minimum.
+        if (slot->pauseEnd && slot->samples < size_t(4 * STT_SAMPLE_RATE))
+          ESP_LOGI("STT", "TL short seg=%lu len_ms=%lu", (unsigned long)slot->sequence,
+                   (unsigned long)(slot->samples / (STT_SAMPLE_RATE / 1000)));
 #endif
       }
 #else

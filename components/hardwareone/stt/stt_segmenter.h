@@ -43,6 +43,11 @@ struct SegmenterConfig {
     // every sample is still delivered exactly once. 0 cuts at the limit.
     // Requires forced_overlap_samples == 0.
     size_t hard_cut_search_samples=0;
+    // Opt-in: a phrase still shorter than min_segment_samples also closes
+    // once its pause reaches this many samples (>= end_silence_samples), so a
+    // short reply is not held back by the minimum length. 0 keeps the strict
+    // minimum length.
+    size_t short_close_silence_samples=0;
 };
 enum class SegmentEnd : uint8_t { Pause, HardLimit, SessionEnd };
 enum class SegmentStatus : uint8_t { Ok, Ready, Finished, InvalidArgument, NotInitialized, CounterOverflow };
@@ -211,7 +216,10 @@ private:
             && c.noise_percentile<=50 && aligned(c.silence_blip_samples)
             && c.silence_blip_samples<c.end_silence_samples
             && aligned(c.hard_cut_search_samples) && c.hard_cut_search_samples<=c.max_segment_samples/2
-            && (!c.hard_cut_search_samples || !c.forced_overlap_samples);
+            && (!c.hard_cut_search_samples || !c.forced_overlap_samples)
+            && aligned(c.short_close_silence_samples)
+            && (!c.short_close_silence_samples || (c.short_close_silence_samples>=c.end_silence_samples
+                && c.short_close_silence_samples<=c.max_segment_samples));
     }
     size_t history_capacity() const { return config_.pre_roll_samples+kSegmentAnalysisSamples; }
     void append_history(int16_t sample) {
@@ -283,7 +291,11 @@ private:
             if(loud_run_>config_.silence_blip_samples)silence_=0;
         }
         if(finalizing)return;
-        const bool pause=used_>=config_.min_segment_samples && silence_>=config_.end_silence_samples;
+        // Below the minimum length a pause closes the phrase only once it
+        // reaches short_close_silence_samples; at or above it, end_silence.
+        const bool pause=silence_>=config_.end_silence_samples &&
+            (used_>=config_.min_segment_samples ||
+             (config_.short_close_silence_samples && silence_>=config_.short_close_silence_samples));
         if(pause || used_>=config_.max_segment_samples) {
             if(!eligible())discard_candidate();
             else if(pause || !config_.hard_cut_search_samples)publish(pause?SegmentEnd::Pause:SegmentEnd::HardLimit);
