@@ -228,6 +228,9 @@ static void sttWarmLoader(void*) {
     const STTLocalControl control{nullptr, sttWarmLoadCancelled, nullptr};
     ok = sttLocalTranscribe(silence, kSamples, text, sizeof(text), control, stats, error,
                             sizeof(error), &gWarmSession) && gWarmSession.warm();
+    // Parked, the session holds only weights and the LM (a resident model the
+    // load built is freed; the adopting run builds its own).
+    gWarmSession.dropCallState();
     free(silence);
   }
   if (!ok) gWarmSession.reset();
