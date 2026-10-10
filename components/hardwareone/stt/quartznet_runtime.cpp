@@ -275,10 +275,32 @@ bool ModelCache::verify() const {
 }
 #endif
 
+// Mirrors transcribe()'s admission below (arenaBudget, frontendBytes,
+// metadataMargin and the resident model's call budget); test_quartznet_cache
+// checks that a call is admitted at exactly this much free PSRAM and refused
+// one byte below.
+size_t callBudget(size_t samples, const ModelCache* cache, size_t* contiguous) {
+    const size_t frames=feature_frames(samples), outputs=(frames+1)/2;
+    const size_t arenaBudget=2048*outputs+64*1024;
+    const size_t frontendBytes=frames*kMelBins*sizeof(float)+sizeof(FrontendWorkspace);
+    constexpr size_t metadataMargin=1024*1024;
+#if HW1_STT_RESIDENT_MODEL
+    if(cache && cache->raw_ && cache->resident_ && samples<=kResidentMaxSamples) {
+        if(contiguous)*contiguous=frames*kMelBins*sizeof(float)+kResidentCallMargin;
+        return frontendBytes+kResidentCallMargin;
+    }
+#else
+    (void)cache;
+#endif
+    if(contiguous)*contiguous=arenaBudget+metadataMargin;
+    return arenaBudget+frontendBytes+metadataMargin;
+}
+
 bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
                 char* text, size_t capacity, const STTLocalControl& control,
                 STTLocalStats& stats, char* error, size_t errorCapacity,
-                Diagnostics* diagnostics, ModelCache* cache, const Decoder* decoder) {
+                Diagnostics* diagnostics, ModelCache* cache, const Decoder* decoder,
+                const STTFeaturePrefix* prefix) {
     stats={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
 #if HW1_STT_RUNTIME_DIAGNOSTICS
     if(diagnostics)*diagnostics={};
@@ -451,7 +473,24 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
         timing.now_us=[]() -> uint64_t { return static_cast<uint64_t>(esp_timer_get_time()); };
         // No dither on device: the microphone noise floor is ~10x its 1e-5
         // amplitude, and the Gaussian generator cost ~1.2 s per 8 s segment.
-        if(compute_features(pcm,samples,f,frames*64,static_cast<FrontendWorkspace*>(workspace.p),
+        // Rows computed during capture (HW1_STT_CAPTURE_FEATURES) are copied,
+        // only the rest are computed here (log_mel_frame: the same per-row
+        // arithmetic), then the same CMVN. Bit-identical to compute_features
+        // on this PCM. A row computed alone re-conditions its whole
+        // 320-sample window (about 1.4x a batch row), so a cache covering
+        // under a third of the rows falls back to the unchanged batch frontend.
+        auto* ws=static_cast<FrontendWorkspace*>(workspace.p);
+        if(prefix && prefix->rows && prefix->count && prefix->count<=frames && prefix->count*3>=frames) {
+            const int64_t copyStart=esp_timer_get_time();
+            memcpy(f,prefix->rows,prefix->count*64*sizeof(float));
+            const int64_t tailStart=esp_timer_get_time();
+            for(size_t row=prefix->count;row<frames;++row)
+                if(log_mel_frame(pcm,samples,row,f+row*64,ws)!=Status::Ok)return fail("STT frontend failed");
+            timing.conditionUs=static_cast<uint32_t>(tailStart-copyStart);   // copy of cached rows
+            timing.fftUs=static_cast<uint32_t>(esp_timer_get_time()-tailStart);  // rows computed here
+            if(normalize_features(f,frames,ws,&timing)!=Status::Ok)return fail("STT frontend failed");
+            stats.featureCachedFrames=static_cast<uint32_t>(prefix->count);
+        } else if(compute_features(pcm,samples,f,frames*64,ws,
                             kDitherSeed,false,&timing)!=Status::Ok)return fail("STT frontend failed");
         stats.frontendConditionUs=timing.conditionUs; stats.frontendFftUs=timing.fftUs;
         stats.frontendMelUs=timing.melUs; stats.frontendNormUs=timing.normUs;

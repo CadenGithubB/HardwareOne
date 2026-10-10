@@ -175,7 +175,8 @@ bool sttLocalAvailable(char* error,size_t cap) {
 }
 bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t textCap,
                        const STTLocalControl& control,STTLocalStats& stats,
-                       char* error,size_t errorCap,STTLocalSession* session) {
+                       char* error,size_t errorCap,STTLocalSession* session,
+                       const STTFeaturePrefix* prefix) {
     stats={};
     File file=openModel();
     if(!file||file.isDirectory()) {
@@ -202,15 +203,22 @@ bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t text
     const hw1::stt::Decoder* decoding=nullptr;
 #endif
     return hw1::stt::transcribe({&file,file.size(),readModel},pcm,samples,text,textCap,control,stats,error,errorCap,
-                              nullptr,backend ? &backend->weights : nullptr,decoding);
+                              nullptr,backend ? &backend->weights : nullptr,decoding,prefix);
+}
+STTLocalCallBudget sttLocalCallBudget(size_t samples,const STTLocalSession* session) {
+    const Backend* backend=session ? static_cast<const Backend*>(session->backendState_) : nullptr;
+    STTLocalCallBudget out;
+    out.total=hw1::stt::callBudget(samples,backend ? &backend->weights : nullptr,&out.contiguous);
+    return out;
 }
 #else
+STTLocalCallBudget sttLocalCallBudget(size_t,const STTLocalSession*) { return {}; }
 bool sttLocalAvailable(char* error,size_t cap) {
     if(error&&cap)snprintf(error,cap,"No local STT backend is qualified for this target");
     return false;
 }
 bool sttLocalTranscribe(const int16_t*,size_t,char* text,size_t cap,const STTLocalControl&,
-                       STTLocalStats& stats,char* error,size_t errorCap,STTLocalSession*) {
+                       STTLocalStats& stats,char* error,size_t errorCap,STTLocalSession*,const STTFeaturePrefix*) {
     if(text&&cap)text[0]=0;stats={};return sttLocalAvailable(error,errorCap);
 }
 #endif
