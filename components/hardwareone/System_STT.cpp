@@ -1919,6 +1919,7 @@ static void sttContinuousWorker(void*) {
       portEXIT_CRITICAL(&gSTTMux);
 #endif
       bool acceptedText = false;
+      uint32_t tlPubMs = 0;  // millis() (esp_timer) at the mailbox publish
       if (!sttStreamCancelled(&run)) {
         if (!ok || !memchr(text, '\0', sizeof(text))) {
           sttStreamFail(run, error[0] ? error : "Continuous transcription failed");
@@ -1935,6 +1936,7 @@ static void sttContinuousWorker(void*) {
             ++gSTT.snapshot.segmentsCompleted;
             gSTT.snapshot.textReady = true;
             acceptedText = true;
+            tlPubMs = millis();
             if (gSTT.draft.sequence && gSTT.draft.sequence <= slot->sequence) {
               // The final text supersedes the draft for this utterance.
               volatile char* d = gSTT.draft.text;
@@ -1953,6 +1955,12 @@ static void sttContinuousWorker(void*) {
             // console write below is not part of its publish-to-read time.
             // Outside gSTTMux: the woken task may preempt this one.
             if (run.publishWake) run.publishWake();
+#endif
+#ifdef ESP_PLATFORM
+            // t is the publish instant (the mailbox write above).
+            ESP_LOGI("STT", "TL pub seq=%lu t=%lu", (unsigned long)slot->sequence, (unsigned long)tlPubMs);
+#else
+            (void)tlPubMs;
 #endif
           }
         }
@@ -1982,7 +1990,12 @@ static void sttContinuousWorker(void*) {
         const uint32_t base = gSTT.captureStartedMs;
         // lm: this phrase was LM-decoded; psram_min: PSRAM low-water mark since
         // boot (includes this phrase's inference arena and LM workspace).
-        ESP_LOGI("STT", "TL seg=%lu a0=%lu a1=%lu q=%lu s=%lu m=%lu f=%lu n=%lu d=%lu sv0=%lu sv1=%lu e=%lu ok=%d lm=%d psram_min=%u",
+        // int_free/int_min: internal RAM now and its low-water mark since
+        // boot, so anything eroding the runtime's per-call internal floor (or
+        // BLE's and the 6 KB g2_ctrl_owner stack's headroom) shows on every
+        // phrase.
+        ESP_LOGI("STT", "TL seg=%lu a0=%lu a1=%lu q=%lu s=%lu m=%lu f=%lu n=%lu d=%lu sv0=%lu sv1=%lu e=%lu ok=%d lm=%d psram_min=%u"
+                 " int_free=%u int_min=%u",
                  (unsigned long)slot->sequence,
                  (unsigned long)(base + slot->start / (STT_SAMPLE_RATE / 1000)),
                  (unsigned long)(base + slot->end / (STT_SAMPLE_RATE / 1000)),
@@ -1991,7 +2004,9 @@ static void sttContinuousWorker(void*) {
                  (unsigned long)stats.inferenceMs, (unsigned long)stats.decodeMs,
                  (unsigned long)saveStartMs, (unsigned long)saveEndMs,
                  (unsigned long)perf.doneMs, ok ? 1 : 0, stats.lmUsed ? 1 : 0,
-                 unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)));
+                 unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
+                 unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         // Blocking yields (timed vTaskDelay(1)) and total yield time in n.
         ESP_LOGI("STT", "TL yield seg=%lu blocks=%u yield_us=%lu", (unsigned long)slot->sequence,
                  unsigned(stats.inferenceBlocks), (unsigned long)stats.inferenceYieldUs);
@@ -2313,6 +2328,10 @@ bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {
     // The perf record is stored after the text is published, so log the first
     // read of each sequence here regardless of it.
     static uint32_t lastReadLogged = 0;
+    // Sequences restart at 1 per session (e.g. a Conversate restart): forget
+    // the previous session's last.
+    static STTToken lastReadToken = 0;
+    if (token != lastReadToken) { lastReadToken = token; lastReadLogged = 0; }
     if (out->sequence != lastReadLogged) {
       lastReadLogged = out->sequence;
       tlReadSeq = out->sequence; tlReadMs = millis();

@@ -3143,6 +3143,7 @@ static void g2ConversateLocalPause(bool paused);
 static void g2ConversateLocalFinish();
 static bool g2ConversateLocalOwnsCapture();
 static void g2ConversateLocalTick();
+static void g2ConvTLNoteAck(uint32_t magic, uint32_t error);
 #endif
 static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
                             const uint8_t* pb, size_t len);
@@ -15322,6 +15323,9 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
 #if HW1_CONVERSATE_CAPTION_TEST
     if (!matched) (void)g2CaptionTestNoteAck(event.magic, event.value);
 #endif
+#if HW1_CONVERSATE_LOCAL_STT
+    if (!matched) g2ConvTLNoteAck(event.magic, event.value);  // TL send: a caption's COMM_RSP
+#endif
     return;
   }
   if (event.command == 161 || event.command == 164 || event.command == 166) {
@@ -15428,6 +15432,49 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
 }
 
 #if HW1_CONVERSATE_CAPTION_TEST || HW1_CONVERSATE_LOCAL_STT
+#if HW1_CONVERSATE_LOCAL_STT
+namespace {
+// Live timing (TL send), all on g2_ctrl_owner: g2ConversateSendCaption notes
+// each final caption the pump flags (gConvTLSendSeq), the RX path notes the
+// glasses' COMM_RSP for it, and g2ConvTLFlush prints both from
+// g2ConversateLocalTick, outside the pump's and the RX chain's frames (the
+// ~6 KB stack keeps ~1.2 KB spare; none of their frames grow for this).
+// Printed as  TL send seq=<final> t=<write start> ack_ms=-1 tx_ms=<write> ok=<0|1>
+// and         TL send seq=<final> t=<write start> ack_ms=<ack - t> err=<rsp error>.
+struct ConvTLPending { uint32_t magic = 0, seq = 0, sentMs = 0; };
+struct ConvTLEvent { uint32_t seq, sentMs, txMs, ackMs, err; bool ack, ok; };
+constexpr uint8_t kConvTLPending = 8, kConvTLEvents = 16;
+constexpr uint32_t kConvTLAckWindowMs = 10000;  // magics wrap at 250: ignore stale echoes
+// PSRAM (like the caption frame buffer): ~0.5 KB that internal RAM need not hold.
+EXT_RAM_BSS_ATTR ConvTLPending gConvTLPending[kConvTLPending];
+EXT_RAM_BSS_ATTR ConvTLEvent gConvTLEvents[kConvTLEvents];
+uint8_t gConvTLPendingNext = 0, gConvTLHead = 0, gConvTLTail = 0;
+uint32_t gConvTLLost = 0;
+uint32_t gConvTLSendSeq = 0;      // pump: the final the next caption write is (0: not a final)
+uint32_t gConvTLSendStartMs = 0;  // start of that write
+void g2ConvTLPush(const ConvTLEvent& e) {
+  if (uint8_t(gConvTLHead - gConvTLTail) >= kConvTLEvents) { ++gConvTLLost; return; }
+  gConvTLEvents[gConvTLHead++ % kConvTLEvents] = e;
+}
+// After the write returned (magic 0: not sent); out of line.
+__attribute__((noinline)) void g2ConvTLNoteSendDone(uint32_t magic) {
+  const uint32_t seq = gConvTLSendSeq, sentMs = gConvTLSendStartMs;
+  gConvTLSendSeq = 0;
+  g2ConvTLPush({seq, sentMs, millis() - sentMs, 0, 0, false, magic != 0});
+  if (!magic) return;
+  gConvTLPending[gConvTLPendingNext] = {magic, seq, sentMs};
+  gConvTLPendingNext = (gConvTLPendingNext + 1) % kConvTLPending;
+}
+}  // namespace
+#endif
+// TL send hook around a caption write; a no-op unless the pump flagged a final.
+static inline uint32_t g2ConvTLSent(uint32_t sent) {
+#if HW1_CONVERSATE_LOCAL_STT
+  if (gConvTLSendSeq) g2ConvTLNoteSendDone(sent);
+#endif
+  return sent;
+}
+
 // Native caption: Conversate cmd 6 TRANSCRIBE_DATA, field 8 {1: text, 2: final}.
 // The glasses show the newest ~4-5 lines (~140-150 chars) and scroll older text
 // away; a final commits the caption and the next one starts on a new line.
@@ -15438,17 +15485,20 @@ static uint32_t g2ConversateSendCaption(const char* text, size_t length, bool fi
   EXT_RAM_BSS_ATTR static uint8_t pb[700];
   size_t n = 0, body = 0;
   const uint32_t magic = g2ConversateNextMagic();
+#if HW1_CONVERSATE_LOCAL_STT
+  if (gConvTLSendSeq) gConvTLSendStartMs = millis();  // TL send: a final from the pump
+#endif
   if (!g2PbWriteUint32(pb, sizeof(pb), &n, 1, 6) ||
       !g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) ||
       !g2PbBeginNested(pb, sizeof(pb), &n, 8, &body) ||
       !g2PbWriteBytes(pb, sizeof(pb), &n, 1, reinterpret_cast<const uint8_t*>(text), length) ||
       !g2PbWriteUint32(pb, sizeof(pb), &n, 2, final ? 1 : 0) ||
-      !g2PbEndNested(pb, sizeof(pb), &n, body)) return 0;
+      !g2PbEndNested(pb, sizeof(pb), &n, body)) return g2ConvTLSent(0);
   portENTER_CRITICAL(&gConversateMux);
   gConversate.reserveReply(magic);  // never let this ACK pass for a heartbeat's
   portEXIT_CRITICAL(&gConversateMux);
-  return sendPbFragmented(gR, allocSeq(), G2_SID_CONVERSATE, G2_FLAG_REQUEST,
-                          pb, n, s.rightGeneration) ? magic : 0;
+  return g2ConvTLSent(sendPbFragmented(gR, allocSeq(), G2_SID_CONVERSATE, G2_FLAG_REQUEST,
+                                       pb, n, s.rightGeneration) ? magic : 0);
 }
 #endif
 
@@ -15489,6 +15539,37 @@ void convLocalWakeTimer(bool on) {
 
 static bool g2ConversateLocalOwnsCapture() {
   return gConvLocal.attached && audioCaptureOwnedBy("stt");
+}
+
+// RX path (g2ConversateOnRx, COMM_RSP not matched by a heartbeat): note only,
+// out of line so the RX chain's frames stay as they were.
+static __attribute__((noinline)) void g2ConvTLNoteAck(uint32_t magic, uint32_t error) {
+  if (!magic) return;
+  const uint32_t now = millis();
+  for (auto& p : gConvTLPending) {
+    if (p.magic != magic) continue;
+    const bool fresh = now - p.sentMs < kConvTLAckWindowMs;
+    if (fresh) g2ConvTLPush({p.seq, p.sentMs, 0, now - p.sentMs, error, true, true});
+    p = ConvTLPending{};
+    if (fresh) return;
+  }
+}
+
+// Prints the noted TL send lines; small frame, static data only.
+static __attribute__((noinline)) void g2ConvTLFlush() {
+  while (gConvTLTail != gConvTLHead) {
+    const ConvTLEvent e = gConvTLEvents[gConvTLTail++ % kConvTLEvents];
+    if (e.ack)
+      ESP_LOGI("STT", "TL send seq=%lu t=%lu ack_ms=%lu err=%lu", (unsigned long)e.seq, (unsigned long)e.sentMs,
+               (unsigned long)e.ackMs, (unsigned long)e.err);
+    else
+      ESP_LOGI("STT", "TL send seq=%lu t=%lu ack_ms=-1 tx_ms=%lu ok=%d", (unsigned long)e.seq,
+               (unsigned long)e.sentMs, (unsigned long)e.txMs, e.ok ? 1 : 0);
+  }
+  if (gConvTLLost) {
+    ESP_LOGW("STT", "TL send_lost n=%lu", (unsigned long)gConvTLLost);
+    gConvTLLost = 0;
+  }
 }
 
 static bool g2ConversateLocalBegin(uint32_t leftGeneration) {
@@ -15610,7 +15691,10 @@ static __attribute__((noinline)) bool g2ConversateLocalPump() {
   STTTextChunk chunk;
   while (sttReadChunk(gConvLocal.owner, gConvLocal.token, &chunk)) {
     const size_t length = strnlen(chunk.text, sizeof(chunk.text));
-    if (show && length) (void)g2ConversateSendCaption(chunk.text, length, true, s);
+    if (show && length) {
+      gConvTLSendSeq = chunk.sequence;  // TL send: the write below is this final (g2ConvTLFlush prints it)
+      (void)g2ConversateSendCaption(chunk.text, length, true, s);
+    }
     gConvLocal.lastFinalSequence = chunk.sequence;
     (void)sttAcknowledgeChunk(gConvLocal.owner, gConvLocal.token, chunk.sequence);
     memset(chunk.text, 0, sizeof(chunk.text));
@@ -15640,6 +15724,7 @@ static void g2ConversateLocalTick() {
   g2ConversateLocalArm();
 #endif
   if (gConvLocal.attached && !g2ConversateLocalPump()) g2ConversateLocalEnded();
+  g2ConvTLFlush();  // after the pump returned: its chunk/draft frame is gone
 }
 #endif  // HW1_CONVERSATE_LOCAL_STT
 
