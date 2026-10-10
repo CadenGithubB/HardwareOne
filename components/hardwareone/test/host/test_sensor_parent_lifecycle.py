@@ -30,8 +30,8 @@ def main() -> None:
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     modules = {
-        "imu": ("bno055", "gBNO055", "Adafruit_BNO055", "imu.obj", 1, 4),
-        "apds": ("apds9960", "gAPDS9960", "Adafruit_APDS9960", "apds.obj", 1, 2),
+        "imu": ("bno055", "gBNO055", "Adafruit_BNO055", "imu.obj", 1, 5),
+        "apds": ("apds9960", "gAPDS9960", "Adafruit_APDS9960", "apds.obj", 1, 3),
         "servo": ("pca9685", "gPwmDriver", "Adafruit_PWMServoDriver", "servo.obj", 1, 1),
         "gamepad": ("seesaw", "gGamepadSeesaw", "Adafruit_seesaw", "input.gamepad.obj", 2, 0),
         "ano": ("ano_encoder", "gAnoSeesaw", "Adafruit_seesaw", "input.ano.obj", 1, 0),
@@ -56,6 +56,10 @@ def main() -> None:
                              ("gamepad", "gamepadInitConnection"),
                              ("ano", "anoEncoderInit"), ("ano", "anoEncoderInitConnection")):
         init_definitions.append(extract_block(sources[module], f"\nbool {function}()"))
+    invalidations = [extract_block(sources[module], marker) for module, marker in [
+        ("imu", "static bool imuInvalidateCache("), ("apds", "static bool apdsInvalidateCache("),
+        ("ano", "static bool invalidateAnoCache("),
+    ]]
     shutdowns = []
     for module, task, condition, wrapper, prefix in (
         ("imu", "imuTask", "if (!gImuRunning)", "stopImuBranch", ""),
@@ -65,13 +69,13 @@ def main() -> None:
     ):
         task_definition = extract_block(sources[module], f"void {task}(void* parameter)")
         branch = extract_block(task_definition, condition)
-        shutdowns.append(f"static void {wrapper}() {{ {prefix}\n{branch}\n}}")
+        shutdowns.append(f"static void {wrapper}() {{ {prefix}\nwhile (true) {{ {branch} break; }}\n}}")
     memory = (COMPONENT / "System_MemUtil.h").read_text()
     destruction = extract_block(memory, "template <typename T>\ninline void ps_delete(")
     harness = (HERE / "sensor_parent_lifecycle_harness.cpp").read_text()
     for marker, definition in {
         "// INSERT_PRODUCTION_PS_DELETE_HERE": destruction,
-        "// INSERT_PRODUCTION_SENSOR_CODE_HERE": "\n\n".join(init_definitions + shutdowns),
+        "// INSERT_PRODUCTION_SENSOR_CODE_HERE": "\n\n".join(invalidations + init_definitions + shutdowns),
     }.items():
         require(harness.count(marker) == 1, f"expected one marker: {marker}")
         harness = harness.replace(marker, definition)

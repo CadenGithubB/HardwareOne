@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include <time.h>
 #include "System_User.h"   // AuthContext (for the *Guarded variants)
 #include "System_VFSCapacityCache.h"
 
@@ -120,6 +121,43 @@ struct VirtualEntry {
  */
 size_t listVirtualEntries(const String& parentPath, VirtualEntry* out, size_t cap);
 
+// One entry in the VFS directory view. Names and full VFS paths are owned
+// strings; no child File or backend-relative path escapes the reader.
+struct DirectoryEntry {
+  String name;
+  String path;
+  bool isFolder = false;
+  bool isVirtual = false;
+  size_t size = 0;
+  time_t modifiedAt = 0;
+};
+
+// Iterate virtual mounts first, then direct children in backend order.
+// The caller must hold its filesystem lock and supply a guarded-open directory
+// at parentPath. The reader borrows it without closing or rewinding it. Keep
+// both the lock and File alive until iteration ends; next() closes child files
+// before returning. Filtering, permissions, counts and presentation stay with
+// callers. This reader neither opens paths nor grants access.
+// Modification times are opt-in because the Arduino backend performs another
+// stat for each requested file; folders, virtual mounts and default readers
+// leave modifiedAt at zero.
+class DirectoryReader {
+public:
+  DirectoryReader(File& directory, const String& parentPath, bool includeModifiedTime = false);
+  DirectoryReader(const DirectoryReader&) = delete;
+  DirectoryReader& operator=(const DirectoryReader&) = delete;
+  bool next(DirectoryEntry& entry);
+
+private:
+  File& directory_;
+  String parentPath_;
+  String backendPrefix_;
+  bool includeModifiedTime_;
+  VirtualEntry virtuals_[4];
+  size_t virtualCount_;
+  size_t virtualIndex_ = 0;
+};
+
 bool exists(const String& path);
 File open(const String& path, const char* mode = FILE_READ, bool create = false);
 bool mkdir(const String& path);
@@ -127,9 +165,12 @@ bool remove(const String& path);
 bool rename(const String& pathFrom, const String& pathTo);
 bool rmdir(const String& path);
 
-// Authoritative capacity query. This legacy API always samples the backing
-// filesystem; it never serves the snapshot cache below. Keep admission and
-// correctness decisions (uploads, captures, log start) on this API.
+// Authoritative capacity query: always samples the backing filesystem and
+// never serves the snapshot cache below. Keep admission and correctness
+// decisions (uploads, captures, log start) on this API. Returns false for an
+// unavailable tier, a reported backend error or zero total capacity; outputs
+// remain unchanged on failure. SD cannot distinguish zero used bytes from a
+// failed usedBytes() call, so that value alone is not a failure signal.
 bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint64_t& freeBytes);
 
 /**
@@ -140,8 +181,9 @@ bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint6
  * tier. Successful fresh getStats() calls also seed this cache, but cached
  * calls never change getStats()'s fresh semantics.
  *
- * Returns false when the requested tier is unavailable. On false, `out` is
- * left unchanged, matching the legacy out-parameter contract.
+ * On a cache miss, the same validity rules as getStats() apply. On failure,
+ * returns false and leaves `out` unchanged. A prior valid sample remains
+ * eligible for reuse within the caller's explicitly allowed age.
  */
 bool getStatsSnapshot(StorageType type, CapacitySnapshot& out,
                       uint32_t maxAgeMs = 0);
@@ -298,7 +340,7 @@ void noteLittleFsBytesWritten(size_t bytes);
 
 }  // namespace VFS
 
-// SD card command registry (for gCommandModules in System_Utils.cpp)
+// SD card command registry (for gCommandModules in System_CommandRegistry.cpp)
 struct CommandEntry;  // Forward declaration
 extern const CommandEntry sdCommands[];
 extern const size_t sdCommandsCount;

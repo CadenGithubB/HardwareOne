@@ -3,6 +3,8 @@
  */
 
 #include "HAL_Input.h"
+#include "HAL_InputInternal.h"
+#include "System_Mutex.h"
 #include "System_Debug.h"
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
@@ -18,6 +20,133 @@
 #endif
 #include "System_Utils.h"
 #endif
+
+// Shared input readings and edge ownership, independent of the selected driver.
+#if ENABLE_OLED_INPUT
+static InputCache sInputCache;
+static StaticSemaphore_t sInputCacheMutexStorage;
+static SemaphoreHandle_t sInputCacheMutex = xSemaphoreCreateMutexStatic(&sInputCacheMutexStorage);
+#endif
+
+bool inputCacheInit() {
+#if ENABLE_OLED_INPUT
+  return sInputCacheMutex != nullptr;
+#else
+  return false;
+#endif
+}
+
+size_t inputCacheStorageBytes() {
+#if ENABLE_OLED_INPUT
+  return sizeof(sInputCache) + sizeof(sInputCacheMutex) + sizeof(sInputCacheMutexStorage);
+#else
+  return 0;
+#endif
+}
+
+bool inputCacheSnapshot(InputCache& out, uint32_t timeoutMs) {
+  out = {};
+#if ENABLE_OLED_INPUT
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(timeoutMs), "input.snapshot");
+  if (!guard.held) return false;
+  out = sInputCache;
+  return true;
+#else
+  (void)timeoutMs;
+  return false;
+#endif
+}
+
+bool inputConsumeSnapshot(InputCache& out, uint32_t timeoutMs) {
+  out = {};
+#if ENABLE_OLED_INPUT
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(timeoutMs), "input.consume");
+  if (!guard.held || !gInputRunning || !sInputCache.dataValid) return false;
+  out = sInputCache;
+  sInputCache.buttonPressedAccum = 0;
+  return true;
+#else
+  (void)timeoutMs;
+  return false;
+#endif
+}
+
+bool inputActivitySequence(uint32_t& out, uint32_t timeoutMs) {
+  InputCache reading;
+  const bool copied = inputCacheSnapshot(reading, timeoutMs);
+  if (copied) out = reading.seq;
+  return copied;
+}
+
+bool inputCacheInvalidate() {
+#if ENABLE_OLED_INPUT
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(100), "input.invalidate");
+  if (!guard.held) return false;
+  sInputCache.dataValid = false;
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool inputCacheReset(uint32_t buttons, int joyX, int joyY, bool clearPresses) {
+#if ENABLE_OLED_INPUT
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(100), "input.reset");
+  if (!guard.held) return false;
+  sInputCache.buttons = buttons;
+  sInputCache.joyX = joyX;
+  sInputCache.joyY = joyY;
+  sInputCache.dataValid = false;
+  if (clearPresses) sInputCache.buttonPressedAccum = 0;
+  return true;
+#else
+  (void)buttons; (void)joyX; (void)joyY; (void)clearPresses;
+  return false;
+#endif
+}
+
+#if ENABLE_OLED_INPUT
+static void publishInputLocked(uint32_t buttons, int joyX, int joyY,
+                               uint32_t pressedEdges, bool activity, unsigned long stamp) {
+  sInputCache.buttons = buttons;
+  sInputCache.joyX = joyX;
+  sInputCache.joyY = joyY;
+  sInputCache.buttonPressedAccum |= pressedEdges;
+  sInputCache.lastUpdate = stamp;
+  sInputCache.dataValid = true;
+  if (activity) ++sInputCache.seq;
+}
+#endif
+
+bool inputPublishState(uint32_t buttons, int joyX, int joyY,
+                       uint32_t pressedEdges, bool activity, unsigned long stamp) {
+#if ENABLE_OLED_INPUT
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(50), "input.publish");
+  if (!guard.held) return false;
+  publishInputLocked(buttons, joyX, joyY, pressedEdges, activity, stamp);
+  return true;
+#else
+  (void)buttons; (void)joyX; (void)joyY; (void)pressedEdges; (void)activity; (void)stamp;
+  return false;
+#endif
+}
+
+bool inputPublishGamepadState(uint32_t buttons, int joyX, int joyY,
+                              uint32_t interruptPresses, unsigned long stamp) {
+#if ENABLE_OLED_INPUT
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(50), "input.gamepadPublish");
+  if (!guard.held) return false;
+  const bool activity = sInputCache.buttons != buttons ||
+                        abs(sInputCache.joyX - joyX) > 1 || abs(sInputCache.joyY - joyY) > 1;
+  // Active-low transitions plus the hardware latch preserve short completed taps.
+  const uint32_t presses = (sInputCache.buttons & ~buttons) | interruptPresses;
+  publishInputLocked(buttons, joyX, joyY, presses, activity, stamp);
+  return true;
+#else
+  (void)buttons; (void)joyX; (void)joyY; (void)interruptPresses; (void)stamp;
+  return false;
+#endif
+}
 
 // =============================================================================
 // Static State
@@ -209,25 +338,28 @@ uint32_t inputGetCustomButtonMapping(InputButton button) {
 // ============================================================================
 // Device-agnostic data accessors
 // ============================================================================
-// Both gamepad and ANO drivers populate gInputCache (the gamepad-shaped proxy
+// Both gamepad and ANO drivers populate the shared input reading (the gamepad-shaped proxy
 // — joyX/Y + buttons), so these accessors work under either build. The
 // previous gamepadGetX/Y/Buttons functions in i2csensor_seesaw.cpp are
 // gamepad-only by virtue of where they live; this generalisation lives in
 // the HAL so it's available regardless of which driver is compiled.
 
 int inputGetX() {
-  if (!gInputConnected || !gInputCache.dataValid) return 0;
-  return gInputCache.joyX;
+  InputCache reading;
+  if (!gInputConnected || !inputCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return reading.joyX;
 }
 
 int inputGetY() {
-  if (!gInputConnected || !gInputCache.dataValid) return 0;
-  return gInputCache.joyY;
+  InputCache reading;
+  if (!gInputConnected || !inputCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return reading.joyY;
 }
 
 uint32_t inputGetButtonsRaw() {
-  if (!gInputConnected || !gInputCache.dataValid) return 0;
-  return gInputCache.buttons;
+  InputCache reading;
+  if (!gInputConnected || !inputCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return reading.buttons;
 }
 
 uint32_t inputButtonsToLogical(uint32_t deviceCacheButtonsActiveLow) {
@@ -249,17 +381,17 @@ uint32_t inputButtonsToLogical(uint32_t deviceCacheButtonsActiveLow) {
 }
 
 uint32_t inputGetButtonsLogical() {
-  // A stopped/missing device has no pressed buttons. Its raw accessor's zero
-  // sentinel must not be inverted into every logical button being pressed.
-  if (!gInputConnected || !gInputCache.dataValid) return 0;
-  return inputButtonsToLogical(inputGetButtonsRaw());
+  InputCache reading;
+  if (!gInputConnected || !inputCacheSnapshot(reading) || !reading.dataValid) return 0;
+  return inputButtonsToLogical(reading.buttons);
 }
 
 bool inputHasPendingDetents() {
 #if ENABLE_GPIO_ENCODER
   return gpioEncoderHasPendingDetents();
 #elif ENABLE_ANO_ENCODER
-  return gAnoEncoderCache.encoderDelta != 0;
+  AnoEncoderCache reading;
+  return anoEncoderCacheSnapshot(reading, 0) && reading.encoderDelta != 0;
 #else
   return false;
 #endif
@@ -276,18 +408,12 @@ int inputConsumeOneDetent() {
 }
 
 uint32_t inputConsumeButtonPresses(uint32_t& previousActiveLow, bool& initialized) {
-  if (!gInputCache.mutex || xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(10)) != pdTRUE) return 0;
-  if (!gInputRunning || !gInputCache.dataValid) {
-    xSemaphoreGive(gInputCache.mutex);
-    return 0;
-  }
-  const uint32_t raw = gInputCache.buttons;
-  uint32_t pressed = gInputCache.buttonPressedAccum;
-  gInputCache.buttonPressedAccum = 0;
-  if (initialized) pressed |= ~raw & previousActiveLow;
-  previousActiveLow = raw;
+  InputCache reading;
+  if (!inputConsumeSnapshot(reading)) return 0;
+  uint32_t pressed = reading.buttonPressedAccum;
+  if (initialized) pressed |= ~reading.buttons & previousActiveLow;
+  previousActiveLow = reading.buttons;
   initialized = true;
-  xSemaphoreGive(gInputCache.mutex);
   return pressed;
 }
 
@@ -308,9 +434,6 @@ static const char* inputDeviceLabel() {
 #endif
 }
 
-// Defined in System_I2C.cpp — generic queued-start dispatcher.
-extern const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName,
-                                          const bool& enabledFlag, const char* eventTag);
 #endif
 
 static const char* cmd_openinput(const String& argsInput) {
@@ -319,7 +442,7 @@ static const char* cmd_openinput(const String& argsInput) {
   return inputStartInternal() ? "[Input] GPIO encoder started" : "Error: GPIO encoder start failed";
 #else
   const char* result = cmd_sensorstart_queued(I2C_DEVICE_INPUT, inputDeviceLabel(),
-                                              gInputRunning, "openinput@enqueue");
+                                              "openinput@enqueue");
   // The device starts asynchronously and this command returns no button state —
   // point at the driver read command so the next step is to read live input.
 #if ENABLE_ANO_ENCODER
@@ -338,7 +461,7 @@ static const char* cmd_closeinput(const String& argsInput) {
   gpioEncoderStop();
   return gInputRunning ? "Error: GPIO encoder is busy; retry closeinput" : "[Input] GPIO encoder stopped";
 #else
-  handleDeviceStopped(I2C_DEVICE_INPUT);
+  if (!requestSensorStop(I2C_DEVICE_INPUT)) return "Error: Input stop queue unavailable";
   return "[Input] Stop requested; cleanup will complete asynchronously";
 #endif
 }

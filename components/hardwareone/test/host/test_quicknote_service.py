@@ -110,8 +110,8 @@ def check_wiring():
         if 'SYSEVT_NOTE_' in line:
             assert 'BANNER' not in line and 'TOAST' not in line and 'ALL' not in line, line
 
-    utils = (c / 'System_Utils.cpp').read_text()
-    table = utils[utils.index('static constexpr CommandModule gCommandModules[] = {'):]
+    registry = (c / 'System_CommandRegistry.cpp').read_text()
+    table = registry[registry.index('static constexpr CommandModule gCommandModules[] = {'):]
     ordered(table, 'transcriptionUICommands, &transcriptionUICommandsCount, CMD_MODULE_SENSOR, nullptr },',
             '#endif', '#if ENABLE_QUICKNOTE', '{ "note", ',
             'noteCommands, &noteCommandsCount, CMD_MODULE_SENSOR, nullptr },', '#endif')

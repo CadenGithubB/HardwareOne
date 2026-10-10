@@ -11,6 +11,8 @@
 #include "HAL_Input.h"
 #include "System_Icons.h"
 #include <cstring>
+#include <cmath>
+#include <climits>
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 // Spinlock for thread-safe toast access (called from ESP-NOW, ESP-SR, BLE, main loop)
@@ -98,14 +100,79 @@ void oledDrawIcon(int x, int y, OledUIIcon icon) {
   }
 }
 
+// Helper to get a bit from 32x32 1bpp bitmap (row-major, LSB first per byte)
+static inline bool getBitmapBit(const uint8_t* buffer, int x, int y) {
+  if (x < 0 || x >= 32 || y < 0 || y >= 32) return false;
+  int byteIndex = y * 4 + (x / 8);  // 32 pixels / 8 = 4 bytes per row
+  int bitIndex = x % 8;
+  return (buffer[byteIndex] >> bitIndex) & 1;
+}
+
+bool oledDrawIcon(Adafruit_GFX* display, const char* name, int x, int y, uint16_t color, float scale) {
+  if (!display || !name || !name[0] || !std::isfinite(scale) || scale <= 0 ||
+      scale >= static_cast<float>(INT_MAX) / 32.0f) {
+    return false;
+  }
+
+  const EmbeddedIcon* icon = findEmbeddedIcon(name);
+  if (!icon) return false;
+  const uint8_t width = pgm_read_byte(&icon->width);
+  const uint8_t height = pgm_read_byte(&icon->height);
+  const uint8_t* bitmap = (const uint8_t*)pgm_read_ptr(&icon->bitmapData);
+  // The embedded monochrome format is fixed at 32x32, LSB first. A PNG-only
+  // entry has no drawable bitmap; do not treat it as a successful draw.
+  if (!bitmap || width != 32 || height != 32) return false;
+  uint8_t buffer[128];
+  memcpy_P(buffer, bitmap, sizeof(buffer));
+
+  // Calculate output dimensions
+  int outWidth = (int)(width * scale);
+  int outHeight = (int)(height * scale);
+
+  // Handle 0.5x scale (32→16) with 2×2 block sampling
+  if (scale >= 0.49f && scale <= 0.51f && width == 32 && height == 32) {
+    for (int dy = 0; dy < 16; dy++) {
+      for (int dx = 0; dx < 16; dx++) {
+        // Sample 2×2 block from source
+        int srcX = dx * 2;
+        int srcY = dy * 2;
+        bool p00 = getBitmapBit(buffer, srcX, srcY);
+        bool p01 = getBitmapBit(buffer, srcX + 1, srcY);
+        bool p10 = getBitmapBit(buffer, srcX, srcY + 1);
+        bool p11 = getBitmapBit(buffer, srcX + 1, srcY + 1);
+
+        // OR logic: draw pixel if any source pixel is set (preserves thin lines)
+        if (p00 || p01 || p10 || p11) {
+          display->drawPixel(x + dx, y + dy, color);
+        }
+      }
+    }
+    return true;
+  }
+
+  // Generic scaling for other factors (nearest neighbor). This also handles
+  // 1.0x deliberately: embedded icon rows are LSB-first, while Adafruit's
+  // drawBitmap() consumes MSB-first bytes.
+  float invScale = 1.0f / scale;
+  for (int dy = 0; dy < outHeight; dy++) {
+    for (int dx = 0; dx < outWidth; dx++) {
+      int srcX = (int)(dx * invScale);
+      int srcY = (int)(dy * invScale);
+      if (getBitmapBit(buffer, srcX, srcY)) {
+        display->drawPixel(x + dx, y + dy, color);
+      }
+    }
+  }
+
+  return true;
+}
+
 void oledDrawIcon(int x, int y, const char* iconName, int targetSize) {
   if (!gDisplay || !iconName || !iconName[0]) return;
   
-  extern bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color, float scale);
-  
   // Icons are 32x32; compute scale factor from target size
   float scale = (float)targetSize / 32.0f;
-  drawIconScaled(gDisplay, iconName, x, y, DISPLAY_FG, scale);
+  oledDrawIcon(gDisplay, iconName, x, y, DISPLAY_FG, scale);
 }
 
 void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight) {

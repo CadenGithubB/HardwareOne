@@ -6,6 +6,7 @@
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
 #include "HAL_Display.h"  // For gDisplay and oledDisplay macro alias
+#include "i2csensor_sths34pf80.h"
 
 // Display function for Presence OLED mode
 void displayPresenceData() {
@@ -25,16 +26,17 @@ void displayPresenceData() {
   } else {
     oledDisplay->println("== PRESENCE ==");
     
-    if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    PresenceCache presence{};
+    if (presenceCacheSnapshot(presence)) {
       // Ambient temperature
       oledDisplay->print("Ambient: ");
-      oledDisplay->print(gPresenceCache.ambientTemp, 1);
+      oledDisplay->print(presence.ambientTemp, 1);
       oledDisplay->println("C");
       
       // Presence detection with value
       oledDisplay->print("Presence: ");
-      oledDisplay->print(gPresenceCache.presenceValue);
-      if (gPresenceCache.presenceDetected) {
+      oledDisplay->print(presence.presenceValue);
+      if (presence.presenceDetected) {
         oledDisplay->println(" [!]");
       } else {
         oledDisplay->println();
@@ -42,8 +44,8 @@ void displayPresenceData() {
       
       // Motion detection with value
       oledDisplay->print("Motion: ");
-      oledDisplay->print(gPresenceCache.motionValue);
-      if (gPresenceCache.motionDetected) {
+      oledDisplay->print(presence.motionValue);
+      if (presence.motionDetected) {
         oledDisplay->println(" [!]");
       } else {
         oledDisplay->println();
@@ -51,14 +53,12 @@ void displayPresenceData() {
       
       // Temperature shock
       oledDisplay->print("TShock: ");
-      oledDisplay->print(gPresenceCache.tempShockValue);
-      if (gPresenceCache.tempShockDetected) {
+      oledDisplay->print(presence.tempShockValue);
+      if (presence.tempShockDetected) {
         oledDisplay->println(" [!]");
       } else {
         oledDisplay->println();
       }
-      
-      xSemaphoreGive(gPresenceCache.mutex);
     }
   }
   

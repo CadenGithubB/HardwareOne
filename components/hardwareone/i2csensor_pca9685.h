@@ -23,16 +23,11 @@ struct ServoProfile {
 #if ENABLE_SERVO
 
 #include <Arduino.h>
-#include <Adafruit_PWMServoDriver.h>
 #include "System_I2C.h"
 
 // PCA9685 constants
 #define PCA9685_I2C_ADDRESS I2C_ADDR_PCA9685
 #define MAX_SERVO_CHANNELS 16
-
-// Global PCA9685 driver instance
-extern Adafruit_PWMServoDriver* gPwmDriver;
-extern ServoProfile servoProfiles[MAX_SERVO_CHANNELS];
 
 // PCA9685 initialization
 bool servoInit();
@@ -41,7 +36,7 @@ bool servoInit();
 void servoSetAngle(uint8_t channel, int angle);
 void servoSetPWM(uint8_t channel, uint16_t value);
 
-// PCA9685/Servo command registry (for system_utils.cpp)
+// PCA9685/Servo command registry (for System_CommandRegistry.cpp)
 struct CommandEntry;
 extern const CommandEntry servoCommands[];
 extern const size_t servoCommandsCount;

@@ -5,8 +5,7 @@
  * subsystems (automation, commands, etc.) to avoid circular dependencies
  * and work around Arduino IDE's 1MB .ino file symbol export limitation.
  * 
- * Also contains the centralized command registry system that collects
- * command tables from all modules.
+ * Command-module composition lives in System_CommandRegistry.cpp.
  */
 
 #include <Arduino.h>
@@ -52,15 +51,12 @@ bool isEspNowInitialized() { return false; }
 #include "System_I2C.h"
 #include "System_User.h"
 #include "System_UartLink.h"
-#include "System_Dictation.h"     // dictationAvailable — command-module gate
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
 #include "System_BootState.h"     // bootStateGetBootCount / bootStateResetBootCount (NVS boot counter)
 #include "System_CrashRecord.h"   // crashRecord* — RTC post-mortem record for `crashlog`
 #include "System_OTASafety.h"     // pending trial images must finish probation before power-off
 #include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
 #include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
-#include <esp_sntp.h>            // sntp_set_time_sync_notification_cb — real-reply signal
-                                 // (never also include lwip/apps/sntp.h in this TU)
 #include "System_Command.h"
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
@@ -100,10 +96,6 @@ bool isEspNowInitialized() { return false; }
 #if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
 #endif
-#include "System_ESPSR.h"
-#include "System_STT.h"
-#include "System_TranscriptionUI.h"
-#include "System_QuickNote.h"
 
 extern "C" {
   extern uint8_t _bss_start;
@@ -194,6 +186,7 @@ void secureClearString(String& s) {
 }
 
 #include "System_Settings.h"
+#include "HAL_Input.h"
 #include "System_Mutex.h"   // For FsLockGuard
 #include "System_I2C.h"     // For I2CSensorEntry, ConnectedDevice, MAX_CONNECTED_DEVICES
 #include "System_MemUtil.h"       // For AllocPref
@@ -202,117 +195,7 @@ void secureClearString(String& s) {
 // Extern declarations for logging functions (implemented in .ino)
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 
-// Extern declarations for command arrays moved to individual modules
-#if ENABLE_THERMAL_SENSOR
-extern const CommandEntry thermalCommands[];
-extern const size_t thermalCommandsCount;
-#endif
-#if ENABLE_TOF_SENSOR
-extern const CommandEntry tofCommands[];
-extern const size_t tofCommandsCount;
-#endif
-#if ENABLE_IMU_SENSOR
-extern const CommandEntry imuCommands[];
-extern const size_t imuCommandsCount;
-#endif
-#if ENABLE_GAMEPAD_SENSOR
-extern const CommandEntry gamepadCommands[];
-extern const size_t gamepadCommandsCount;
-#endif
-#if ENABLE_ANO_ENCODER
-extern const CommandEntry anoEncoderCommands[];
-extern const size_t anoEncoderCommandsCount;
-#endif
-#if ENABLE_OLED_INPUT
-extern const CommandEntry inputCommands[];
-extern const size_t inputCommandsCount;
-#endif
-#if ENABLE_APDS_SENSOR
-extern const CommandEntry apdsCommands[];
-extern const size_t apdsCommandsCount;
-#endif
-#if ENABLE_GPS_SENSOR
-extern const CommandEntry gpsCommands[];
-extern const size_t gpsCommandsCount;
-#endif
-#if ENABLE_FM_RADIO
-extern const CommandEntry fmRadioCommands[];
-extern const size_t fmRadioCommandsCount;
-#endif
-#if ENABLE_RTC_SENSOR
-extern const CommandEntry rtcCommands[];
-extern const size_t rtcCommandsCount;
-#endif
-#if ENABLE_PRESENCE_SENSOR
-extern const CommandEntry presenceCommands[];
-extern const size_t presenceCommandsCount;
-#endif
-#if ENABLE_LED_MATRIX
-extern const CommandEntry matrixCommands[];
-extern const size_t matrixCommandsCount;
-#endif
-#if ENABLE_CAMERA_SENSOR
-extern const CommandEntry cameraCommands[];
-extern const size_t cameraCommandsCount;
-extern bool cameraConnected;
-#endif
-#if ENABLE_EDGE_IMPULSE
-extern const CommandEntry edgeImpulseCommands[];
-extern const size_t edgeImpulseCommandsCount;
-#endif
-
- #if ENABLE_ESP_SR
- extern const CommandEntry espsrCommands[];
- extern const size_t espsrCommandsCount;
- #endif
-#if ENABLE_MICROPHONE
-extern const CommandEntry micCommands[];
-extern const size_t micCommandsCount;
-extern bool micConnected;
-bool audioAnySourceAvailable();   // HAL_Audio — a mic source (PDM or G2) is reachable
-#endif
-extern const CommandEntry userSystemCommands[];
-extern const size_t userSystemCommandsCount;
-extern const CommandEntry sensorLoggingCommands[];
-extern const size_t sensorLoggingCommandsCount;
-#if ENABLE_R1_HEALTH
-extern const CommandEntry healthCommands[];
-extern const size_t healthCommandsCount;
-#endif
-#if ENABLE_NEOPIXEL
-extern const CommandEntry ledCommands[];
-extern const size_t ledCommandsCount;
-#endif
-extern const CommandEntry featureCommands[];
-extern const size_t featureCommandsCount;
-#if ENABLE_CAMERA_SENSOR
-extern const CommandEntry imageCommands[];
-extern const size_t imageCommandsCount;
-#endif
-extern const CommandEntry mapCommands[];
-extern const size_t mapCommandsCount;
-extern const CommandEntry mapsSettingCommands[];
-extern const size_t mapsSettingCommandsCount;
-extern const CommandEntry powerCommands[];
-extern const size_t powerCommandsCount;
-extern const CommandEntry liveAudioCommands[];
-extern const size_t liveAudioCommandsCount;
-extern const CommandEntry cm5PresenceCommands[];
-extern const size_t cm5PresenceCommandsCount;
-extern const CommandEntry otaCommands[];
-extern const size_t otaCommandsCount;
-#if ENABLE_OLED_DISPLAY
-extern const CommandEntry setPatternCommands[];
-extern const size_t setPatternCommandsCount;
-#endif
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-extern const CommandEntry g2Commands[];
-extern const size_t g2CommandsCount;
-extern const CommandEntry g2RingCommands[];
-extern const size_t g2RingCommandsCount;
-#endif
-
-// Include module headers to access their command registries
+// Runtime subsystem interfaces used by the utilities and executor below
 #include "System_Filesystem.h"
 #include "System_Debug.h"
 #include "System_CLI.h"
@@ -322,10 +205,6 @@ extern const size_t g2RingCommandsCount;
   #include "System_WiFi.h"
 #endif
 #include "OLED_Display.h"
-#include "System_NeoPixel.h"
-#if ENABLE_SERVO
-#include "i2csensor_pca9685.h"
-#endif
 #include "System_Automation.h"
 #include "System_I2C.h"
 #if ENABLE_ESPNOW
@@ -350,12 +229,6 @@ extern const size_t g2RingCommandsCount;
 #if ENABLE_GAMEPAD_SENSOR
   #include "i2csensor_seesaw.h"  // For gamepadCommands
 #endif
-#if ENABLE_ANO_ENCODER
-  #include "i2csensor_ano_encoder.h"  // For anoEncoderCommands
-#endif
-#if ENABLE_OLED_INPUT
-  #include "HAL_Input.h"  // For inputCommands
-#endif
 #include "System_RadioCompanion.h"  // companionCommands, sleep hooks, status (P4X-EYE); no-ops elsewhere
 #if ENABLE_APDS_SENSOR
   #include "i2csensor_apds9960.h"     // For apdsCommands
@@ -364,7 +237,6 @@ extern const size_t g2RingCommandsCount;
 #if ENABLE_GPS_SENSOR
   #include "i2csensor_pa1010d.h"      // For gpsCommands
 #endif
-#include "i2csensor_rda5807.h"        // For fmRadioCommands
 
 // External dependencies from .ino
 // (filesystemReady is provided by System_Filesystem.h, included above)
@@ -843,39 +715,48 @@ bool readText(const char* path, String& out) {
 }
 
 bool writeText(const char* path, const String& in) {
+  if (!path || !*path) return false;
+  String destination;
+  if (!destination.concat(path)) return false;
+
   PollPauseGuard pollGuard;   // pause sensor polling during file I/O (RAII)
 
   FsLockGuard guard("writeText");
-  File f = VFS::open(String(path), "w", true);
-  if (!f) {
+  File f = VFS::open(destination, "w", true);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
     return false;
   }
-  f.print(in);
+  const size_t written = f.print(in);
   f.flush();
+  // flush() has no result in Arduino File. Check every completion signal the
+  // API exposes before a caller may promote this file over its live state.
+  const bool complete = written == in.length() && !f.getWriteError() &&
+                        f.size() == in.length();
   f.close();
 
-  return true;
+  return complete;
 }
 
 bool writeTextAtomic(const char* path, const String& content) {
-  String tmp = String(path) + ".tmp";
-
-  // Write to temp file first
-  if (!writeText(tmp.c_str(), content)) return false;
-
-  // Atomic rename — VFS dispatches to the correct filesystem based on path.
-  {
-    FsLockGuard guard("atomicRename");
-    if (VFS::rename(tmp, String(path))) {
-      return true;
-    }
+  if (!path || !*path) return false;
+  String destination;
+  String tmp;
+  if (!destination.concat(path) || !tmp.concat(destination) || !tmp.concat(".tmp")) {
+    return false;  // No I/O until both complete paths are allocated.
   }
 
-  // Rename failed: do NOT fall back to a truncate-in-place writeText(path,...).
-  // "w" mode shreds the destination — the exact crash window this atomic write
-  // exists to close (a power cut mid-write leaves an empty/half file). Drop the
-  // tmp and fail loudly; the existing file is left fully intact and every caller
-  // already checks the returned bool.
+  // The fixed sibling temp belongs to this whole operation. Keep competing
+  // saves out until promotion or cleanup finishes; both guards allow nesting.
+  PollPauseGuard pollGuard;
+  FsLockGuard guard("writeTextAtomic");
+
+  if (writeText(tmp.c_str(), content) && VFS::rename(tmp, destination)) {
+    return true;
+  }
+
+  // Failed write or rename: discard only the temp, never truncate or delete
+  // the destination. Cleanup is best-effort and cannot turn failure into success.
   VFS::remove(tmp);
   return false;
 }
@@ -1612,7 +1493,7 @@ const char* cmd_cpufreq(const String& argsInput) {
     if (!isPowerCpuFrequencySupported(newFreq)) {
       return "Error: Unsupported CPU frequency; run cpufreq for supported values";
     }
-    if (!setCpuFrequencyMhz(newFreq) || getCpuFrequencyMhz() != newFreq) {
+    if (!powerSetCpuFrequencyMhz(newFreq)) {
       return "Error: CPU frequency change failed";
     }
     {
@@ -2586,341 +2467,6 @@ const char* cmd_wait(const String& argsInput) {
 }
 
 // =========================================================================
-// NTP Time Synchronization (moved from .ino)
-// =========================================================================
-
-#if ENABLE_WIFI
-
-extern void resolvePendingUserCreationTimes();
-extern void writeBootAnchor();
-extern void logTimeSyncedMarkerIfReady(const char* source);
-
-// ---------------------------------------------------------------------------
-// SNTP sync notification — the only honest "an NTP server actually replied"
-// signal. lwIP's daemon steps the clock itself after a valid reply and can
-// schedule later updates per CONFIG_LWIP_SNTP_UPDATE_DELAY. Before this
-// callback existed those steps were completely invisible: no event, no log,
-// and syncNTPAndResolve's old getLocalTime() "success" test couldn't tell a
-// reply from a clock that was already set.
-//
-// The callback runs on lwIP's tcpip task (~3 KB stack): STORE-ONLY — no
-// broadcast, no filesystem, no event post. ntpSyncDrainTick() (main loop,
-// the ONLY caller) hands the stored facts to Clock::clockStepped(), which
-// owns every post-step duty.
-// ---------------------------------------------------------------------------
-// Every field shared with lwIP's callback is covered by this mux. In
-// particular, publishing the counter and drain flag together avoids losing a
-// callback that lands while the main loop is clearing the previous one.
-static portMUX_TYPE gSntpMux = portMUX_INITIALIZER_UNLOCKED;
-static uint32_t gSntpSyncCount = 0;
-static uint32_t gSntpForegroundTimeoutCount = 0;
-static uint32_t gSntpLateReplyCount = 0;
-static uint32_t gSntpLateNoticeReplyCount = 0;
-static bool gSntpDrainPending = false;
-static bool gSntpAwaitingLateReply = false;
-static bool gSntpLateNoticePending = false;
-static int64_t gSntpPrevProjUs = 0;
-static int64_t gSntpLastReplyEpoch = 0;
-static int64_t gSntpLastReplyMonotonicUs = 0;
-
-static uint32_t beginSntpForegroundWait() {
-  portENTER_CRITICAL(&gSntpMux);
-  // A new explicit attempt supersedes an unanswered older wait, but never
-  // erase a late-reply notice that a callback has already made pending.
-  gSntpAwaitingLateReply = false;
-  const uint32_t startCount = gSntpSyncCount;
-  portEXIT_CRITICAL(&gSntpMux);
-  return startCount;
-}
-
-static uint32_t sntpReplyCountSnapshot() {
-  portENTER_CRITICAL(&gSntpMux);
-  const uint32_t count = gSntpSyncCount;
-  portEXIT_CRITICAL(&gSntpMux);
-  return count;
-}
-
-// Atomically closes the deadline race. If the callback won the mux first,
-// the caller observes a reply. If this transition wins, that callback is
-// classified as late and the main-loop drain will announce it exactly once.
-static bool markSntpForegroundTimeout(uint32_t startCount, bool clientArmed) {
-  portENTER_CRITICAL(&gSntpMux);
-  const bool noReply = (gSntpSyncCount == startCount);
-  if (noReply) {
-    ++gSntpForegroundTimeoutCount;
-    gSntpAwaitingLateReply = clientArmed;
-  }
-  portEXIT_CRITICAL(&gSntpMux);
-  return noReply;
-}
-
-static void onSntpTimeSync(struct timeval* tv) {
-  // lwIP already stepped the real clock before invoking us; the projection
-  // reference is the only remaining evidence of the PRE-step clock.
-  const int64_t prev = Clock::projectedEpochUs();
-  const int64_t replyEpoch = tv ? static_cast<int64_t>(tv->tv_sec) : 0;
-  const int64_t replyMonotonicUs = esp_timer_get_time();
-  Clock::refreshProjection();
-
-  portENTER_CRITICAL(&gSntpMux);
-  gSntpPrevProjUs = prev;
-  gSntpLastReplyEpoch = replyEpoch;
-  gSntpLastReplyMonotonicUs = replyMonotonicUs;
-  ++gSntpSyncCount;
-  gSntpDrainPending = true;
-  if (gSntpAwaitingLateReply) {
-    gSntpAwaitingLateReply = false;
-    ++gSntpLateReplyCount;
-    gSntpLateNoticeReplyCount = gSntpSyncCount;
-    gSntpLateNoticePending = true;
-  }
-  portEXIT_CRITICAL(&gSntpMux);
-}
-
-NtpRuntimeStatus getNtpRuntimeStatus() {
-  NtpRuntimeStatus status{};
-  const int64_t nowUs = esp_timer_get_time();
-
-  portENTER_CRITICAL(&gSntpMux);
-  status.replyCount = gSntpSyncCount;
-  status.foregroundTimeoutCount = gSntpForegroundTimeoutCount;
-  status.lateReplyCount = gSntpLateReplyCount;
-  status.lastReplyEpoch = gSntpLastReplyEpoch;
-  status.awaitingLateReply = gSntpAwaitingLateReply;
-  const int64_t lastReplyUs = gSntpLastReplyMonotonicUs;
-  portEXIT_CRITICAL(&gSntpMux);
-
-  status.clientArmed = esp_sntp_enabled();
-  if (status.replyCount > 0 && lastReplyUs > 0 && nowUs >= lastReplyUs) {
-    status.lastReplyAgeMs = static_cast<uint64_t>(nowUs - lastReplyUs) / 1000ULL;
-  }
-  return status;
-}
-
-void ntpSyncDrainTick() {
-  bool drainPending = false;
-  bool lateNoticePending = false;
-  int64_t prevUs = 0;
-  uint32_t lateReplyNumber = 0;
-
-  portENTER_CRITICAL(&gSntpMux);
-  if (gSntpDrainPending) {
-    drainPending = true;
-    prevUs = gSntpPrevProjUs;
-    gSntpDrainPending = false;
-  }
-  if (gSntpLateNoticePending) {
-    lateNoticePending = true;
-    lateReplyNumber = gSntpLateNoticeReplyCount;
-    gSntpLateNoticePending = false;
-  }
-  portEXIT_CRITICAL(&gSntpMux);
-
-  if (!drainPending && !lateNoticePending) return;
-  if (drainPending) {
-    const time_t before = static_cast<time_t>(prevUs / 1000000LL);
-    Clock::clockStepped(Clock::SYNC_NTP, before);
-  }
-  if (lateNoticePending) {
-    char message[96];
-    snprintf(message, sizeof(message),
-             "[OK] NTP reply received after foreground timeout (reply #%lu)",
-             static_cast<unsigned long>(lateReplyNumber));
-    broadcastOutput(message);
-  }
-  // Duties (step log, edge event, marker, anchor, resolve, scheduler wake,
-  // RTC write-back) drain via Clock::clockDutiesTick() on this same lap.
-}
-
-void setupNTP() {
-  long gmtOffset = (long)Clock::tzOffsetMinutes() * 60;  // seconds
-  DEBUG_NTP_SETUPF("[NTP Setup] Starting NTP configuration");
-  DEBUG_NTP_SETUPF("[NTP Setup] Primary server: %s", gSettings.ntpServer.c_str());
-  DEBUG_NTP_SETUPF("[NTP Setup] GMT offset: %ld seconds (%d minutes)", gmtOffset, Clock::tzOffsetMinutes());
-  DEBUG_NTP_SETUPF("[NTP Setup] WiFi status: %s", WiFi.isConnected() ? "CONNECTED" : "DISCONNECTED");
-  if (WiFi.isConnected()) {
-    DEBUG_NTP_SETUPF("[NTP Setup] WiFi IP: %s", WiFi.localIP().toString().c_str());
-    DEBUG_NTP_SETUPF("[NTP Setup] WiFi gateway: %s", WiFi.gatewayIP().toString().c_str());
-    DEBUG_NTP_SETUPF("[NTP Setup] WiFi DNS: %s", WiFi.dnsIP().toString().c_str());
-    DEBUG_NTP_SETUPF("[NTP Setup] WiFi subnet: %s", WiFi.subnetMask().toString().c_str());
-  }
-
-  // Register the reply callback BEFORE (re)starting SNTP. Registration is a
-  // bare static-pointer store inside lwIP that survives sntp_stop/init
-  // cycles; re-registering the same function is harmless.
-  sntp_set_time_sync_notification_cb(&onSntpTimeSync);
-
-  // Seed the projection so the FIRST background reply on a warm boot (clock
-  // carried across a soft reboot) doesn't reconstruct a garbage "before".
-  Clock::refreshProjection();
-
-  // lwIP stores server-name POINTERS (sntp_setservername does not copy), so
-  // the primary must live in storage that never moves. gSettings.ntpServer
-  // is an Arduino String whose buffer reallocates on assignment — hand lwIP
-  // a stable copy instead. Refreshed on every setupNTP(), which every
-  // ntpserver-change path already calls.
-  static char sNtpServer[64];
-  strlcpy(sNtpServer, gSettings.ntpServer.c_str(), sizeof(sNtpServer));
-
-  // configTime forwards all three names. lwIP uses as many as the board's
-  // CONFIG_LWIP_SNTP_MAX_SERVERS provides (the current XIAO build provides
-  // all three); any extras remain harmless on a smaller-slot build.
-  configTime(gmtOffset, 0,
-             sNtpServer,             // Primary (usually pool.ntp.org)
-             "time.google.com",      // Backup (needs MAX_SERVERS >= 2)
-             "time.cloudflare.com"); // Backup (needs MAX_SERVERS >= 3)
-
-  // configTime()'s trailing setTimeZone() rewrites TZ from its numeric
-  // offset (a rule-less "UTC<h>DST<h>" string). Re-assert the canonical
-  // settings-derived TZ so this call can never clobber it — this is also
-  // the hook that keeps a future DST rule alive across NTP restarts.
-  Clock::applyTimezone();
-
-  DEBUG_NTP_SETUPF("[NTP Setup] configTime() done; primary=%s, server slots=%d",
-                   sNtpServer, CONFIG_LWIP_SNTP_MAX_SERVERS);
-}
-
-bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
-  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting NTP sync process");
-  if (outcomeOut) *outcomeOut = NtpSyncOutcome::Failed;
-
-  if (!WiFi.isConnected()) {
-    DEBUG_NTP_SYNCF("[syncNTPAndResolve] FAILED - WiFi not connected");
-    broadcastOutput("NTP sync requires WiFi connection");
-    return false;
-  }
-
-  DEBUG_NTP_SYNCF("[syncNTPAndResolve] WiFi connected, proceeding with NTP sync");
-  // No DNS pre-flight: lwIP's SNTP client resolves names itself, and the
-  // wait loop below detects failure. (A synchronous hostByName probe here
-  // used to add 5-8 s of dead wait on healthy networks.)
-
-  // Capture the pre-attempt state BEFORE setupNTP restarts the daemon: the
-  // success test below is "did the reply counter advance", and a reply can
-  // land between sntp_init and our first poll.
-  const time_t preSyncTime = time(nullptr);
-  const bool preSet = Clock::isValidEpoch(preSyncTime);
-  const uint32_t startCount = beginSntpForegroundWait();
-
-  broadcastOutput("Synchronizing time with NTP server...");
-  setupNTP();
-  broadcastOutput("  Contacting NTP server, please wait...");
-
-  // Success = an actual SNTP reply (the notification callback fired), NOT
-  // "the clock looks set" — getLocalTime() is a clock-is-set test, and with
-  // RTC/ring/warm-reboot sources able to pre-set the clock it reported
-  // "NTP synchronized" without a single packet coming back.
-  //
-  // Wait budget: a dark boot has nothing better to do than wait the full
-  // window; a boot whose clock is already valid shouldn't stall the caller.
-  // Reaching the deadline proves only "no reply during this wait". The live
-  // client state is reported separately as armed/stopped below.
-  bool ntpSynced = false;
-  const int maxWaitSeconds = preSet ? 7 : 15;
-  const int iterationsPerSecond = 10;  // 100ms per iteration
-  const int maxIterations = maxWaitSeconds * iterationsPerSecond;
-  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting %d-second wait loop for NTP reply", maxWaitSeconds);
-
-  for (int i = 0; i < maxIterations; i++) {
-    delay(100);
-    oledUpdate();  // Keep boot animation running during NTP wait
-
-    if (i > 0 && i % iterationsPerSecond == 0) {
-      char progressMsg[64];
-      snprintf(progressMsg, sizeof(progressMsg), "  Looking for updates... %d/%d seconds", i / iterationsPerSecond, maxWaitSeconds);
-      broadcastOutput(progressMsg);
-    }
-
-    const uint32_t replyCount = sntpReplyCountSnapshot();
-    if (replyCount != startCount) {
-      DEBUG_NTP_SYNCF("[syncNTPAndResolve] SNTP reply received (count %lu)",
-                      static_cast<unsigned long>(replyCount));
-      ntpSynced = true;
-      break;
-    }
-  }
-
-  // Close the final-check race under the same mux as the callback. A callback
-  // that wins first turns this into foreground success; one that arrives
-  // after this transition is counted and announced as a late reply.
-  const bool clientArmedAtDeadline = esp_sntp_enabled();
-  if (!ntpSynced) {
-    ntpSynced = !markSntpForegroundTimeout(startCount, clientArmedAtDeadline);
-  }
-
-  if (ntpSynced) {
-    DEBUG_NTP_SYNCF("[syncNTPAndResolve] NTP sync completed successfully");
-    broadcastOutput("[OK] NTP time synchronized");
-    // Post-step duties (edge event, marker, anchor, resolve, scheduler wake,
-    // RTC write-back, step diagnostic) all arrive via ntpSyncDrainTick →
-    // Clock::clockStepped on the next main-loop lap — do NOT duplicate here.
-    //
-    // One deliberate exception, the warm-boot baseline: when the clock was
-    // ALREADY valid (carried across a soft reboot), the helper sees no
-    // invalid→valid edge and a small correction pends nothing — but THIS
-    // boot still needs its anchor (gNTPAnchorId bumps every boot, and
-    // same-boot users can only resolve against a same-boot anchor). The
-    // anchor write is an upsert, so this is idempotent with the drain.
-    if (preSet) {
-      writeBootAnchor();
-      resolvePendingUserCreationTimes();
-      logTimeSyncedMarkerIfReady("ntp");
-    }
-    if (outcomeOut) *outcomeOut = NtpSyncOutcome::Reply;
-    return true;
-  }
-
-  DEBUG_NTP_SYNCF("[syncNTPAndResolve] no SNTP reply after %d seconds", maxWaitSeconds);
-  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Check: WiFi=%s, DNS=%s, Gateway=%s",
-                  WiFi.isConnected() ? "OK" : "FAIL",
-                  WiFi.dnsIP().toString().c_str(),
-                  WiFi.gatewayIP().toString().c_str());
-
-  if (clientArmedAtDeadline) {
-    BROADCAST_PRINTF("[INFO] No NTP reply within %d seconds; SNTP client remains armed",
-                     maxWaitSeconds);
-  } else {
-    BROADCAST_PRINTF("[WARN] No NTP reply within %d seconds; SNTP client is stopped",
-                     maxWaitSeconds);
-  }
-
-  if (preSet) {
-    // No reply yet, but a prior source already supplied a valid clock. Keep
-    // that distinct from both an NTP success and the armed client state.
-    broadcastOutput("[OK] Clock kept its existing time");
-    writeBootAnchor();
-    resolvePendingUserCreationTimes();
-    // Marker names WHO supplied this boot's clock: the ledger when a real
-    // source stepped it (rtc/ring/manual), "carryover" only for the true
-    // soft-reboot case where no settimeofday ever happened.
-    logTimeSyncedMarkerIfReady(Clock::syncSource() != Clock::SYNC_NONE
-                                   ? Clock::syncSourceName(Clock::syncSource())
-                                   : "carryover");
-    if (outcomeOut) *outcomeOut = NtpSyncOutcome::KeptPrior;
-    return true;
-  }
-
-  // Dark timeout — try the RTC as a fallback source. rtcSyncToSystem() runs
-  // its duties through Clock::clockStepped itself now.
-#if ENABLE_RTC_SENSOR
-  if (gRtcRunning && gRtcConnected) {
-    if (rtcSyncToSystem()) {
-      broadcastOutput("[OK] System time set from RTC (no NTP reply in foreground window)");
-      if (outcomeOut) *outcomeOut = NtpSyncOutcome::RtcFallback;
-      return true;
-    }
-  }
-#endif
-
-  broadcastOutput("[ERROR] NTP sync timeout - no other time source");
-  broadcastOutput("  Check internet access, DNS, and whether UDP port 123 is blocked");
-  return false;
-}
-
-#endif // ENABLE_WIFI
-
-
-// =========================================================================
 // Command Registry System
 // =========================================================================
 
@@ -3029,7 +2575,7 @@ const char* cmd_crashlog(const String& argsInput) {
   return "OK";
 }
 
-const CommandEntry commands[] = {
+extern const CommandEntry commands[] = {
   // ---- Core / General ----
   { "status", "Show system status (WiFi, FS, memory). (add 'json' for JSON output)", false, cmd_status },
   { "crashlog", "Show the last recorded crash (panic text, core/PC, boot phase, repeat count). (add 'json')", false, cmd_crashlog,
@@ -3087,9 +2633,9 @@ const CommandEntry commands[] = {
     "Usage: deepsleep  (admin; wakes only via physical reset)" },
 };
 
-const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
+extern const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
 
-// Registration handled by gCommandModules[] below
+// Registered by System_CommandRegistry.cpp
 
 // Battery commands (from System_Battery.cpp)
 #if ENABLE_BATTERY_MONITOR
@@ -3098,724 +2644,17 @@ extern const char* cmd_battery_calibrate(const String& argsInput);
 extern const char* cmd_batterylog(const String& argsInput);
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
-const CommandEntry batteryCommands[] = {
+extern const CommandEntry batteryCommands[] = {
   {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status},
   {"batterycalibrate", "Reinitialize ADC calibration or re-probe the fuel gauge", true, cmd_battery_calibrate},
   {"batterylog", "Battery time-series CSV log (on/off/interval/tail/clear)", false, cmd_batterylog, "Usage: batterylog [on|off|interval <s>|tail|clear]"}
 };
 
-const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryCommands[0]);
-// Registration handled by gCommandModules[] below
+extern const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryCommands[0]);
+// Registered by System_CommandRegistry.cpp
 #endif
 
-// MQTT commands (from System_MQTT.cpp)
-#if ENABLE_MQTT
-extern const CommandEntry mqttCommands[];
-extern const size_t mqttCommandsCount;
-#endif
-
-// LLM commands (from System_LLM.cpp)
-#if ENABLE_LLM_BACKEND
-extern const CommandEntry llmCommands[];
-extern const size_t llmCommandsCount;
-#endif
-
-// Module registry - collects all command tables from modules
-// Now includes metadata: description, flags, isConnected callback
-// Order matters for help display; longest-match search handles conflicts
-// Columns: name, description, long description, commands, count pointer,
-// flags, isConnected. Count addresses are link-time constants, so this whole
-// build-specific registry remains in flash instead of writable DRAM.
-static constexpr CommandModule gCommandModules[] = {
-  { "cli",        "Help and CLI navigation", "The cli module is the on-device help and CLI navigation layer, not a feature "
-    "subsystem. help opens a paged help browser: bare help shows the main menu listing "
-    "every registered module, help <module> drills into page 1 of that module (and "
-    "prints its subsystem overview at the top), and help <module> p<N> opens an "
-    "explicit later page. The special topics help "
-    "sensors (aggregate view across all sensor modules), help all (show every command "
-    "including hidden ones), and help tail (dump suppressed output) cover the rest. "
-    "While the browser is open the CLI is in a help state, so p<N>, next and prev move "
-    "within a module, back steps from a module page up to the main menu, and exit leaves "
-    "help mode entirely and returns to the normal "
-    "prompt, and clear wipes the CLI scrollback/history.", cliCommands,          &cliCommandsCount, CMD_MODULE_CORE, nullptr },
-  { "system",     "Core system commands", "The system module holds core device commands that do not belong to any peripheral. "
-    "Status and inspection: status (WiFi, filesystem, memory summary), uptime, time "
-    "(uptime plus NTP wall-clock if synced), temperature and voltage (ESP32 internal "
-    "die temp and supply rail), taskstats/perftop (FreeRTOS task and live loop/CPU "
-    "profiling), fsusage, events (recent system events from the in-memory register "
-    "that drives automation event triggers), and the memory tools memsample (snapshot, with memsample "
-    "track on|off|reset|status for allocation tracking) and memreport. Control and "
-    "power: reboot, ramflush, cpufreq [MHz] to read or set a supported CPU clock, lightsleep "
-    "[seconds] for ESP32 light sleep, deepsleep for power-off (reset to wake), and "
-    "wait <ms>/sleep <ms> to pause command-script execution. "
-    "timeset sets the clock manually. broadcast <message> pushes a line of text to all "
-    "connected output interfaces, and factoryreset deletes the user-accounts file so "
-    "the first-boot setup wizard re-runs on next reboot while deliberately preserving "
-    "WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, "
-    "reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.", commands,             &commandsCount, 0, nullptr },
-#if ENABLE_WIFI
-  { "wifi",       "Network management (connect, scan, add/remove networks)", "The WiFi subsystem manages station-mode network connections plus the network "
-    "services that ride on top of them: NTP time sync and the on-device HTTP/HTTPS "
-    "server. Saved networks are stored as a prioritized list (wifilist, wifiadd, "
-    "wifirm, wifipromote) and persist to flash; openwifi connects by best-priority "
-    "(default) or by --index <N>, and a failed indexed attempt auto-rolls back to the "
-    "previously connected network. Note two distinct disconnects: closewifi tears down "
-    "the link AND stops the HTTP server and web output to free heap, while "
-    "wifidisconnect (drop) leaves the radio and web server up so you can move to "
-    "another network. closewifi powers the radio down only when ESP-NOW is not "
-    "using it; 'radiopower off' is the unconditional airplane switch. wifiscan lists nearby APs, ntpsync/ntpstatus handle clock sync, "
-    "and openhttp/closehttp/httpstatus run the web server (compiled in only when the "
-    "HTTP server is enabled). certinfo and certgen (admin-only) manage the self-signed "
-    "HTTPS certificate.", wifiCommands,         &wifiCommandsCount, CMD_MODULE_NETWORK, nullptr },
-#endif
-#if ENABLE_ESPNOW
-  { "espnow",     "ESP-NOW wireless communication (peer-to-peer, mesh)",
-    "ESP-NOW links HardwareOne devices directly over the WiFi radio with no router or "
-    "access point, as named peers that can also form a multi-hop mesh. Pair with "
-    "espnowpair, then message (espnowsend/espnowbroadcast), push a file (espnowsendfile), "
-    "pull a file (espnowfetch), browse a peer's files (espnowbrowse), or run a command on "
-    "a peer (espnowremote). espnowremote, espnowfetch, espnowbrowse, espnowroomcmd and "
-    "espnowtagcmd are ASYNCHRONOUS: they return OK on delivery; the real result arrives "
-    "later in the message buffer, read with 'espnowmessages json [mac]'. Mesh mode "
-    "(espnowmode mesh) adds routing with a TTL and master/worker/backup roles; each "
-    "device carries identity metadata (name, friendly name, room, zone, tags) queried "
-    "with espnowdeviceinfo locally or espnowrequestmeta for a peer.",
-    espNowCommands,       &espNowCommandsCount, CMD_MODULE_NETWORK, nullptr },
-#endif
-#if HW1_RADIO_COMPANION
-  { "c6",         "ESP32-C6 radio companion (ESP-Hosted)",
-    "On the ESP32-P4X-EYE the Wi-Fi, Bluetooth and ESP-NOW radio is a separate ESP32-C6 "
-    "that the P4 drives over SDIO (ESP-Hosted). c6status reports its firmware, the ESP-NOW "
-    "bridge, heartbeat, memory and recovery counters; c6restart resets it in place; c6hold "
-    "turns the radio fully off by holding the C6 in reset and brings it back; c6update "
-    "flashes a new companion image over SDIO with rollback protection and c6confirm accepts "
-    "the running image; c6autorecover, c6autohold and c6heartbeat tune the background "
-    "monitor. Radio features never start while the companion is offline, and a companion "
-    "that stops answering is recovered without rebooting the P4.",
-    companionCommands,    &companionCommandsCount, CMD_MODULE_NETWORK, radioCompanionOnline },
-#endif
-#if ENABLE_MQTT
-  { "mqtt",       "MQTT broker connection for Home Assistant", "The MQTT subsystem connects the device to a broker, primarily to publish its "
-    "sensor and system telemetry to Home Assistant via HA discovery. It is almost "
-    "entirely configuration: broker host/port (mqttHost, mqttPort), credentials "
-    "(mqttUser, mqttPassword), TLS mode and CA path, base/discovery topics, publish "
-    "interval, and a long list of per-source publish toggles (mqttPublishThermal, "
-    "mqttPublishIMU, and so on). These are persisted settings and most config commands "
-    "are admin-only; after changing them, reconnect with closemqtt/openmqtt to apply to "
-    "a live session. openmqtt and closemqtt start and stop the client, mqttstatus shows "
-    "connection state, and mqttautostart controls whether it connects at boot. For "
-    "inbound data, enable mqttSubscribeExternal with mqttSubscribeTopics; values "
-    "received from those topics are cached and read back with mqttExternalSensors.", mqttCommands,         &mqttCommandsCount, CMD_MODULE_NETWORK, nullptr },
-#endif
-  #if ENABLE_BLUETOOTH
-  { "bluetooth",  "Bluetooth LE control and status", "The Bluetooth subsystem runs the device BLE stack in one of two mutually exclusive "
-    "roles selected by blemode: server mode (the device advertises and a phone/app "
-    "connects to it) or client mode (the device acts as a BLE central for Even G2 "
-    "glasses; the even_g2 commands then apply). Switching modes tears down the other "
-    "role automatically. In server mode, openble/closeble start and stop advertising, "
-    "blesend pushes a one-off message and bleevent an event to the connected client, "
-    "and blestream toggles periodic pushes as a bitmask of sensors/system/events "
-    "(blestream on/off/sensors/system/events, plus interval) -- all of which require an "
-    "active connection. An app-layer Secure Channel (X25519 + passphrase + "
-    "ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and "
-    "required with blesecure; both are admin-only, as is blerequireauth. Boot "
-    "reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] "
-    "(see blepeers for names).", bluetoothCommands, &bluetoothCommandsCount, CMD_MODULE_NETWORK, nullptr },
-  #endif
-  { "filesystem", "File operations and storage management", "Manages files and directories on the device internal LittleFS flash. Browse with "
-    "files [\"/path\"] (add json for app/BLE, or files stats json for storage usage); "
-    "create and remove with mkdir, rmdir, filecreate, and filedelete; view and rename "
-    "with fileview and filerename. Critically, every path argument MUST be wrapped in "
-    "double quotes, e.g. fileview \"/system/notes\" -- an unquoted or unmatched-quote "
-    "path is rejected, and a leading slash is added automatically. For programmatic "
-    "transfer, fileread and filewrite move data in chunks: fileread returns "
-    "{success,size,offset,len,eof,enc,data} and you loop offset until eof, while "
-    "filewrite is strictly sequential -- offset 0 truncates/creates the file, each "
-    "later offset must equal the current file size, and passing final runs the "
-    "post-save hooks. Access is permission-gated per path: system trees like /system "
-    "are read-only (or browse-only) for admins, while user data is fully writable; "
-    "logtier reports whether logs are writing to LittleFS or have spilled into SD "
-    "overflow.", filesystemCommands,   &filesystemCommandsCount, 0, nullptr },
-#if ENABLE_SD_CARD
-  { "sd",         "SD card mount, format, and info", "Controls the optional microSD card, which mounts at /sd and serves as "
-    "overflow/bulk storage (and is only compiled in on boards that wire a "
-    "supported SPI or SDMMC slot). sdmount attempts to mount the card and sdunmount safely "
-    "unmounts it; sdinfo shows the card type, size, and used/free space, and sddiag "
-    "reports backend-specific diagnostics to troubleshoot a card that will not mount. "
-    "sdformat erases the entire card and reformats it as FAT32 and therefore requires "
-    "sdformat confirm to proceed. Once mounted, file commands address the card through "
-    "its /sd/... path prefix.", sdCommands,           &sdCommandsCount, 0, []() { return VFS::isSDAvailable(); } },
-#endif
-  { "oled",       "Local display control and graphics", "Drives the selected local display backend: its lifecycle, the live screen contents, "
-    "and persistent appearance settings. oledstart/oledstop (aliases "
-    "openoled/closeoled) power the display task on and off, and oledstatus (alias "
-    "oledread) reports its state. oledmode <mode> switches the live screen among the "
-    "built-in views (menu, status, sensordata, thermal, network, mesh, gps, espnow, "
-    "memory, off, and more); oledtext <message> shows custom text and oledanim "
-    "<name>|fps <n> picks the animation -- both require the display to be running (run "
-    "oledstart first) and neither persists across reboot. Separately, the oled* config "
-    "commands write settings to flash immediately: oledbootmode and oleddefaultmode set "
-    "the screen shown at boot and as the idle default, while oledbrightness <0-255>, "
-    "oledflip, oledbootduration, oledupdateinterval, oledthermalscale, "
-    "oledthermalcolormode, and oledenabled tune appearance and timing. oledrequireauth "
-    "<0|1> (admin-only) controls whether a user must log in at the display before "
-    "interacting with it.", oledCommands,         &oledCommandsCount, 0, nullptr },
-#if ENABLE_NEOPIXEL
-  { "neopixel",   "RGB LED strip and effects", "Controls the addressable RGB status LED (WS2812/NeoPixel). ledcolor <name> lights "
-    "it a solid color from a fixed palette (red, green, blue, yellow, magenta, cyan, "
-    "white, orange, purple, pink), and ledclear turns it off. ledeffect "
-    "<fade|blink|pulse|strobe> [color] [color2] [duration 100-60000ms] runs an animated "
-    "effect (defaults: red/blue, 3000 ms; ledeffect off clears it). These commands "
-    "change the LED immediately and are not saved -- the persistent power-on brightness "
-    "and startup animation live in the led settings module, not here. Note the effect "
-    "call runs synchronously for its full duration before returning.", neopixelCommands,     &neopixelCommandsCount, 0, nullptr },
-  { "led",        "LED brightness and startup effects", "Configures the board onboard single LED -- its brightness and the one-shot effect "
-    "played at startup. These are persistent settings written to flash, not live "
-    "controls: ledbrightness <0-100> sets the global brightness, ledstartupenabled "
-    "<0|1> toggles the boot effect, and ledstartupeffect "
-    "<none|rainbow|pulse|fade|blink|strobe> with ledstartupcolor, ledstartupcolor2, and "
-    "ledstartupduration <100-10000ms> define what plays on power-up. (The live, "
-    "immediate RGB controls are the separate ledcolor/ledeffect commands in the "
-    "neopixel module.)", ledCommands,           &ledCommandsCount, 0, nullptr },
-#endif  // ENABLE_NEOPIXEL (neopixel + led modules)
-#if ENABLE_LED_MATRIX
-  { "matrix", "HT16K33 monochrome LED matrix", "matrix test draws an orientation pattern. matrix text HI, matrix pixel 3 2 on, "
-    "matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; "
-    "matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. "
-    "matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. "
-    "Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.",
-    matrixCommands, &matrixCommandsCount, 0, nullptr },
-#endif
-#if ENABLE_SERVO
-  { "servo",      "PCA9685 servo motor control", "The PCA9685 is a 16-channel I2C PWM driver used to control hobby servos (and "
-    "generic PWM outputs) without tying up the ESP32 own timers. servo <channel> "
-    "<angle> moves the servo on a channel to an angle, while pwm <channel> <value> "
-    "[freq] writes a raw PWM duty (and optional frequency) for non-servo loads like "
-    "LEDs or motor drivers. Because different servos expect different pulse ranges, "
-    "servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name> stores a per-channel "
-    "calibration that maps angles to the correct pulse widths (servolist shows the "
-    "saved profiles), and servocalibrate <channel> opens an interactive mode to find "
-    "those pulse limits by hand.", servoCommands,        &servoCommandsCount, 0, nullptr },
-#endif
-#if ENABLE_THERMAL_SENSOR
-  { "thermal",    "MLX90640 thermal camera (32x24)", "The MLX90640 is a 32x24 (768-pixel) infrared thermal camera. openthermal starts "
-    "it, thermalread reports the current frame min/max/avg temperature in Celsius, and "
-    "closethermal stops it; thermalautostart [on|off] persists launching it at boot, "
-    "and it runs on the fixed secondary I2C bus (Wire1). The sensor runs in "
-    "chess-pattern mode at 16-bit ADC resolution, with thermaltargetfps <1..8> "
-    "selecting the device refresh rate. Display tuning is extensive: "
-    "thermalpalettedefault picks the color map (grayscale, iron, rainbow, hot, or "
-    "coolwarm), thermalrotation <0..3> rotates the image 0/90/180/270 degrees, and "
-    "thermalupscalefactor plus the thermalinterpolation* commands smooth and enlarge "
-    "the 32x24 grid for the web/OLED view. Frame readings are stabilized by "
-    "temporal/EWMA smoothing, per-pixel outlier rejection, and an optional rolling "
-    "min/max auto-scale that keeps the color scale from flickering; thermaldiag prints "
-    "a hardware self-check.", thermalCommands,      &thermalCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("thermal"); } },
-#endif
-#if ENABLE_TOF_SENSOR
-  { "tof",        "VL53L4CX time-of-flight distance sensor", "The VL53L4CX is a laser time-of-flight ranging sensor that measures distance to "
-    "nearby objects. opentof starts it, tofread reports the closest valid distance in "
-    "centimeters (or full object data as JSON), and closetof stops it; tofautostart "
-    "[on|off] persists launching it at boot, and it runs on the fixed secondary I2C bus "
-    "(Wire1). It is configured for LONG distance mode with a 200 ms timing budget, and "
-    "is multi-target: each measurement can return up to four objects, which are "
-    "signal-rate-gated and exponentially smoothed before the nearest valid one is "
-    "reported. Most tunables are client-side visualization knobs rather than sensor "
-    "settings: tofpollingms, toftransitionms, and tofmaxdistancemm shape the UI, "
-    "tofstabilitythreshold sets how steady a reading must be, and tofdevicepollms "
-    "controls how often the firmware reads the hardware.", tofCommands,          &tofCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("tof"); } },
-#endif
-#if ENABLE_IMU_SENSOR
-  { "imu",        "BNO055 9-DOF orientation sensor", "The BNO055 is a 9-DOF inertial measurement unit providing fused absolute "
-    "orientation. openimu starts it, imuread reports yaw/pitch/roll (degrees) plus "
-    "acceleration, gyroscope, and chip temperature, and closeimu stops it; imuautostart "
-    "[on|off] persists launching it at boot, and it runs on the fixed secondary I2C bus "
-    "(Wire1) using the board external crystal. Beyond raw orientation, imuactions runs "
-    "gesture/event detection derived from the motion data: shake, tilt (with "
-    "direction), tap/knock, rotation (with axis), freefall, a step counter with "
-    "cadence, and screen-style orientation. Because the chip can be mounted in any "
-    "pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, "
-    "90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles "
-    "that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in "
-    "degrees.", imuCommands,          &imuCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("imu"); } },
-#endif
-#if ENABLE_OLED_INPUT
-  { "input",      "Input device (gamepad or rotary encoder)", "Device-agnostic abstraction for the OLED input controller, which is either the "
-    "Seesaw gamepad, ANO encoder or GPIO rotary encoder -- chosen at compile time via "
-    "INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per "
-    "firmware. These commands operate on whichever driver was built in: openinput "
-    "starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, "
-    "and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default "
-    "90 for I2C devices; GPIO input uses a fixed 5 ms button sample). Driver-specific debugging and tuning live in the gamepad and anoencoder "
-    "modules; this module holds only the shared settings (poll interval and "
-    "auto-start).", inputCommands,       &inputCommandsCount,       CMD_MODULE_SENSOR, []() { return gInputConnected; } },
-#endif
-#if ENABLE_GAMEPAD_SENSOR
-  { "gamepad",    "Seesaw gamepad — raw debug commands", "Adafruit Seesaw I2C gamepad (analog joystick plus buttons), exposed here as a "
-    "low-level debug interface for the raw device. The driver-agnostic "
-    "open/close/autostart/poll commands live under the input module; the only "
-    "gamepad-specific command is gamepadread, which polls the Seesaw once and dumps raw "
-    "state -- joystick X/Y and the button bitmask -- attempting an on-demand connect "
-    "with backoff if the device is not yet initialized. A background task polls the "
-    "gamepad at roughly 50 ms and caches the latest reading for the OLED UI and sensor "
-    "JSON. This module is mutually exclusive at build time with anoencoder; only one "
-    "input device is compiled in per firmware (see input).", gamepadCommands,      &gamepadCommandsCount, CMD_MODULE_SENSOR, []() { return gInputConnected; } },
-#endif
-#if ENABLE_ANO_ENCODER
-  { "anoencoder", "ANO rotary encoder — debug + driver-specific config", "Adafruit ANO directional navigation rotary encoder on Seesaw I2C: a click wheel "
-    "with a center IN press and UP/DOWN/LEFT/RIGHT buttons, used as the OLED navigation "
-    "input. This module provides debug and remap commands; the actual "
-    "open/close/autostart/poll lifecycle lives under the input module. anoencoderread "
-    "dumps raw state -- encoder position, the currently selected rotary axis, and the "
-    "button bitmask. Remap commands persist to settings: anoencoderi2caddr <1-127> "
-    "changes the device address (reboot required), anoencoderinvert [on|off] reverses "
-    "rotation direction, and anoencoderswapud / anoencoderswaplr [on|off|toggle] swap "
-    "the UP/DOWN and LEFT/RIGHT button pairs. A polling task accumulates encoder "
-    "detents so fast spins do not drop clicks. Mutually exclusive at build time with "
-    "the Seesaw gamepad.", anoEncoderCommands, &anoEncoderCommandsCount, CMD_MODULE_SENSOR, []() { return gAnoEncoderConnected; } },
-#endif
-#if ENABLE_APDS_SENSOR
-  { "apds",       "APDS9960 color, proximity, gesture sensor", "The APDS9960 is a combined RGB color, proximity, and gesture sensor. openapds "
-    "starts it (color sensing enabled by default), apdsread shows which modes are "
-    "active plus the latest RGBC and proximity values, and closeapds stops it; "
-    "apdsautostart [on|off] persists launching it at boot, and it runs on the fixed "
-    "secondary I2C bus (Wire1). Its three functions are toggled independently at "
-    "runtime with apdsmode <color|proximity|gesture> [on|off] -- note that enabling "
-    "gesture also turns proximity on, since the gesture engine needs it. Dedicated "
-    "reads apdscolor, apdsproximity, and apdsgesture print a single sample on demand "
-    "(gesture returns UP/DOWN/LEFT/RIGHT), and apdsdevicepollms sets how often the "
-    "background task samples the hardware.", apdsCommands,         &apdsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("apds"); } },
-#endif
-#if ENABLE_GPS_SENSOR
-  { "gps",        "PA1010D GPS module", "PA1010D I2C GPS receiver. Lifecycle: opengps starts the parser task, gpsread "
-    "prints the current fix, and closegps stops it; gpsautostart [on|off] persists boot "
-    "auto-start, and the module appears in help only when the chip is detected. gpsread "
-    "reports fix yes/no, fix quality, satellite count, and (only when a fix is held) "
-    "latitude/longitude in degrees, altitude in meters, speed in knots, heading angle, "
-    "plus GPS UTC time and date; with no fix it shows just quality and satellites. The "
-    "distinctive gpslog [interval_ms] command is a one-shot setup that turns on "
-    "gpsAutoStart, configures sensorlog to format=track with sensors=gps, then "
-    "immediately starts both the GPS sensor and the logger to record a track (default "
-    "1000 ms, minimum 100 ms) that persists across reboots.", gpsCommands,          &gpsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("gps"); } },
-#endif
-#if ENABLE_FM_RADIO
-  { "fmradio",    "RDA5807 FM radio receiver", "RDA5807M I2C FM radio receiver. Lifecycle: openfmradio starts it, fmradioread "
-    "reports status, and closefmradio stops it; fmradioautostart [on|off] persists boot "
-    "auto-start and the module shows in help only when detected. fmradiotune <freq> "
-    "accepts either MHz (e.g. 103.9) or 10 kHz integer units (e.g. 10390) -- values "
-    "under 200 are read as MHz, otherwise as raw units -- and rejects anything outside "
-    "76.0-108.0 MHz; tuning clears any decoded RDS station name and text. fmradioseek "
-    "[up|down] STARTS a hunt for the next station (no band wrap) and returns "
-    "immediately -- the radio task finalizes the result within a few seconds; watch "
-    "'fmradioread' (JSON field \"seeking\") or the OLED FM screen. fmradiovolume <0-15> "
-    "sets output level, and fmradiomute / fmradiounmute toggle audio. The OLED FM "
-    "screen drives all of this from the gamepad: L/R tune, Up/Down seek, A mute, "
-    "Y volume, X power.", fmRadioCommands,      &fmRadioCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("fmradio"); } },
-#endif
-#if ENABLE_RTC_SENSOR
-  { "rtc",        "DS3231 precision RTC", "DS3231 precision I2C real-time clock with battery backup and an on-chip "
-    "temperature sensor. Lifecycle: openrtc starts the RTC task, rtcread [status|temp] "
-    "reads the clock (or die temperature), and closertc stops it; rtcautostart [on|off] "
-    "persists boot auto-start and the module appears in help only when detected. rtcset "
-    "accepts either \"YYYY-MM-DD HH:MM:SS\" or a bare Unix timestamp and writes it to "
-    "the chip, computing day-of-week automatically. rtcsync [to|from] moves time "
-    "between the RTC and the system clock: to (the default) copies RTC -> system, from "
-    "copies system -> RTC (use this after an NTP sync to persist accurate time into the "
-    "battery-backed chip). Setting the time via rtcset or rtcsync from also marks the "
-    "RTC as calibrated so later boots trust it as a time source.", rtcCommands,          &rtcCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("rtc"); } },
-#endif
-#if ENABLE_PRESENCE_SENSOR
-  { "presence",   "STHS34PF80 IR presence/motion sensor", "The STHS34PF80 is an infrared presence and motion sensor that detects warm bodies "
-    "without contact. openpresence starts it, presenceread reports ambient temperature "
-    "plus presence, motion, and temperature-shock values (each with a DETECTED flag), "
-    "and closepresence stops it; presenceautostart [on|off] persists launching it at "
-    "boot. The sensor is initialized at an 8 Hz output data rate with block-data-update "
-    "enabled, and its on-chip presence/motion/ambient-shock detection engines provide "
-    "the detection flags directly; presencestatus prints connection and data-validity "
-    "diagnostics, and presencedevicepollms controls the hardware read interval.", presenceCommands,     &presenceCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("presence"); } },
-#endif
-#if ENABLE_CAMERA_SENSOR
-  { "camera",     "ESP32-S3 DVP camera sensor", "Driver and CLI for the attached DVP camera sensor (OV2640/OV3660 class). The "
-    "sensor must be powered up first with opencamera before any capture or tuning "
-    "command works (closecamera stops it); cameraread and cameradump report status and "
-    "all current sensor register values. Three distinct capture paths exist: "
-    "cameracapture grabs one JPEG frame into RAM and reports its size only, camerasave "
-    "captures and writes a frame to storage (LittleFS, SD, or both, per "
-    "camerastoragelocation, into cameracapturefolder), and cameratiny produces a "
-    "160x120 frame small enough for a single ESP-NOW packet; camerarecord start|stop "
-    "records MJPEG-AVI video and requires an SD card. Resolution and image controls "
-    "(camerares/cameraframesize, cameraquality, camerafps) and a large set of "
-    "sensor-tuning commands (brightness/contrast/saturation, white balance, "
-    "exposure/AEC, gain/AGC, special effects, mirror/flip/rotate, plus raw camerareg "
-    "register writes) adjust the live image. Automation settings (cameraautostart, "
-    "cameraautocapture/cameraautocaptureinterval, "
-    "camerasendaftercapture/cameratargetdevice) drive timed capture and optional "
-    "ESP-NOW delivery to a named peer.", cameraCommands,       &cameraCommandsCount, CMD_MODULE_SENSOR, []() { return cameraConnected; } },
-#endif
-#if ENABLE_MICROPHONE
-  { "microphone", "Microphone (PDM or G2 glasses)", "Driver and CLI for the microphone — the on-board PDM mic and/or the G2 glasses mic, selected with micsource. The mic must be started with "
-    "openmic before reads or recording (closemic stops it); commands that need the "
-    "running mic return a use-openmic-first error otherwise. miclevel returns the "
-    "current audio level (percent; add json for structured output) and micviz shows a "
-    "live level meter until a key is pressed. micrecord start [vad <ms>] [trim]|stop "
-    "records audio to a WAV file; owner-correlated capture uses micrecord "
-    "startid|statusid|stopid with a strict 16-hex ID and optional discard. miclist "
-    "lists saved recordings, while micdelete and micdeleteid remove manual or exact "
-    "owner-scoped results. Audio format is configured with micsamplerate (8000-48000), micgain (0-100), "
-    "and micbitdepth (16 or 32), each usable as a getter with no argument; micautostart "
-    "on|off persists whether the mic powers up automatically at boot.", micCommands,          &micCommandsCount, CMD_MODULE_SENSOR, []() { return audioAnySourceAvailable(); } },
-#endif
-#if ENABLE_EDGE_IMPULSE
-  { "edgeimpulse", "Edge Impulse ML inference", "On-device machine-learning image inference using TensorFlow Lite Micro models "
-    "exported from Edge Impulse. Two things must be in place before inference: a model "
-    "must be loaded with eimodelload \"<file>\" (models live in the models directory on "
-    "LittleFS; eimodellist/eimodelinfo/eimodelunload manage them) and inference must be "
-    "enabled with eienable 1 (which also initializes the inference buffers). eidetect "
-    "runs a single detection on a live camera frame and so additionally requires the "
-    "camera to be opened (see opencamera), returning detected objects with confidence "
-    "and bounding boxes as JSON; eifile \"<path>\" runs the same inference against a "
-    "stored JPEG instead of the camera. eicontinuous 1 runs detection repeatedly in the "
-    "background, eiconfidence <0.0-1.0> sets the minimum confidence to report, and "
-    "eistatus shows current state. The eitrack family (eitrackenable, eitrackstatus, "
-    "eitrackclear) adds cross-frame state tracking of detected objects on top of raw "
-    "detections.", edgeImpulseCommands,  &edgeImpulseCommandsCount, CMD_MODULE_SENSOR, nullptr },
-#endif
-
-#if ENABLE_DICTATION
-  { "transcription", "Transcription interfaces", "Session controls and private transcript pages shared by display and web interfaces.", transcriptionUICommands, &transcriptionUICommandsCount, CMD_MODULE_SENSOR, nullptr },
-#endif
-#if ENABLE_QUICKNOTE
-  { "note", "QuickNote private notes", "Private spoken notes saved under your own /stt/u<id>/notes/. "
-    "note start works from the lens, web or local display; other consoles use note start glasses (paired "
-    "wearer only). Status never shows the text; list/read/delete browse your notes.", noteCommands, &noteCommandsCount, CMD_MODULE_SENSOR, nullptr },
-#endif
-
-#if ENABLE_LOCAL_STT
-  { "stt", "Local speech-to-text", "Buffered local dictation through the shared audio HAL. "
-    "Stop SR and the microphone sensor first, then use stt record [seconds]. "
-    "Poll stt status [id], finish early with stt stop <id>, discard with stt cancel <id>, "
-    "and read stt result <id> from the same authenticated session. Audio and results "
-    "stay local; no host link is required. This backend produces text for review, "
-    "not voice command execution.", sttCommands, &sttCommandsCount, CMD_MODULE_SENSOR, nullptr },
-#endif
-
- #if ENABLE_ESP_SR
-   { "espsr", "ESP-SR speech recognition", "Offline voice control built on Espressif ESP-SR: a WakeNet wake-word stage gates a "
-    "MultiNet command-phrase recognizer, so the device waits for the wake word and then "
-    "listens for a known command phrase. Note that srenable/sr enable only reports the "
-    "compile-time build flag and cannot toggle the feature at runtime; the real "
-    "lifecycle commands are opensr/srstart to start the recognition pipeline and "
-    "closesr/srstop to stop it. Starting the pipeline also arms voice command execution "
-    "as the current authenticated user (and stopping it disarms); arming can be managed "
-    "directly with voicearm/voicedisarm/voicestatus, and recognized phrases only "
-    "execute commands while armed. The command vocabulary is managed with the srcmds "
-    "family (list/add/del/clear plus save/reload to an SD file and srcmdssync to import "
-    "phrases from the CLI registry). Recognition is tuned through srconfidence, "
-    "srtimeout, the srtuning* audio controls (gain, AGC, VAD, filters), and srdebug* "
-    "telemetry; the mic feed follows the device-wide source (set with `micsource "
-    "auto|pdm|g2` — onboard PDM or the G2 glasses left-temple mic), and the srsnip* commands capture audio "
-    "snippets (by default on the wake word) for debugging.", espsrCommands,  &espsrCommandsCount, CMD_MODULE_SENSOR, nullptr },
- #endif
-#if ENABLE_I2C_SYSTEM
-  { "i2c",        "I2C bus diagnostics and scanning", "The i2c module configures and diagnoses up to two I2C buses and the sensor device "
-    "registry. There are two buses with a deliberate naming convention: bus 0 is I2C1 "
-    "(Arduino Wire1, the primary STEMMA QT / sensor bus) and bus 1 is I2C2 (Wire, the "
-    "optional secondary bus); each has its own enable flag and SDA/SCL pin settings, "
-    "and bus/pin changes require a reboot. Each sensor can be routed to either bus with "
-    "a per-device command. Each sensor's routing verb now lives in that sensor's own "
-    "module (run 'help gps' for gpsBus, 'help rtc' for rtcBus, and so on); oledBus, "
-    "inputBus and fuelGaugeBus stay here. The persisted setting names are unchanged. "
-    "all taking 0 or 1 and needing a reboot. Discovery and diagnostics: i2cscan dumps "
-    "raw addresses found on each active bus; detect reports configured-vs-present "
-    "hardware and detect apply (admin) auto-enables newly detected cheap devices; "
-    "i2cmetrics/i2cstats/i2chealth show bus performance, error counters, and per-device "
-    "health. Bus recovery: i2cpause/i2cresume stop and restart sensor polling, i2creset "
-    "does a pause-recover-resume cycle, and i2crecover <address> clears a single device "
-    "degraded state. The device registry is exposed via sensors [filter|json], "
-    "sensorinfo <name>, devices, discover, and devicefile; sensorautostart [sensor] "
-    "[on|off] controls which sensors start polling automatically at boot.", i2cCommands,          &i2cCommandsCount, 0, nullptr },
-#endif
-#if ENABLE_AUTOMATION
-  { "automation", "Scheduled tasks and conditional commands", "The automation module runs saved jobs (stored in automations.json) that execute "
-    "one or more CLI commands on a schedule, condition, or system event. Every automation has one of "
-    "four trigger types: atTime (fires daily at time=HH:MM, optionally limited to "
-    "days=Mon,Tue,...), afterDelay (fires once after delayms milliseconds), interval "
-    "(fires repeatedly every intervalms milliseconds), or event (fires when a system "
-    "event occurs: on=<kind> with an optional match=<text> filter against the event's "
-    "subject/detail — run 'events' to see recent kinds like peer_online, text_rx, "
-    "battery_low, login_fail); jobs can also carry runatboot=1 "
-    "to fire at startup. The primary entry point is automation <subcommand> (list, add, "
-    "enable, disable, delete, run, trigger, sanitize, recompute) with single-word "
-    "aliases automationlist, automationadd, automationrun, and automationtrigger. Note "
-    "the important distinction: automationrun id=<id> executes a job commands "
-    "immediately, whereas automationtrigger id=<id> only arms an afterDelay/manual "
-    "timer so it fires after its delay; and automation system enable|disable|status is "
-    "the global master switch that gates whether the scheduler runs at all, independent "
-    "of each job own enabled flag. Jobs may also include an optional condition "
-    "expression, and conditional commands use an IF <expr> THEN <command> [ELSE "
-    "<command>] form (e.g. IF temp>75 THEN ledcolor red). Conditions can check sensors "
-    "(temp, distance, light, motion), time (time, hour, day, ntp), system state "
-    "(battery, heap, psram, fsfree, uptime, chiptemp), connectivity (wifi, rssi, peers, "
-    "ble), ESP-NOW/bond (espnow, bond_mode, bond_paired, bond_online, bond_synced, "
-    "bond_role, bond_rssi, bond_peer_heap, bond_peer_uptime, pairmode, pairmode_secs, "
-    "peersknown, stalestpeerage), location (gps, speed, sats, wp_dist:<name>), the on-device model (llm), "
-    "and ESP-NOW metadata "
-    "(room, zone, tags); numeric variables use the > < = >= <= != operators and "
-    "string/enum variables use = != CONTAINS. A true condition fires every time its "
-    "trigger is due. Supporting commands: validate-conditions checks conditional syntax without "
-    "running it, autolog records automation activity to a file, and print <message> "
-    "broadcasts text to all outputs.", automationCommands,   &automationCommandsCount, 0, nullptr },
-#endif
-#if ENABLE_BATTERY_MONITOR
-  { "battery",    "Battery voltage and charge monitoring", "The battery module reports cell state and keeps a time-series log; it is only "
-    "present when battery monitoring is compiled in. The backend is a MAX17048 fuel "
-    "gauge over I2C or a calibrated ADC voltage divider selected by the board. "
-    "ADC charge percentage is approximate; the charger can drive the measured BAT "
-    "node even without a cell. USB, charging and cell presence are reported only "
-    "when known. Missing readings are null in JSON, not zero/full estimates. "
-    "batterystatus prints voltage, charge percentage, charging/USB state, and a coarse "
-    "status label, or returns the same data as JSON. batterylog manages a CSV "
-    "discharge/charge log written to the device for later graphing: with no args it "
-    "shows status, and subcommands are on/off (enable/disable), interval <5..3600> "
-    "seconds (sampling period), tail (show the most recent rows), and clear (erase the "
-    "log); significant events such as sleep/wake are always recorded regardless of the "
-    "interval. batterycalibrate (admin) reinitializes ADC calibration or re-probes the fuel gauge.", batteryCommands,      &batteryCommandsCount, 0, nullptr },
-#endif
-  { "debug",      "System debugging and diagnostics", "The debug subsystem controls diagnostic logging verbosity across every part of the "
-    "firmware. Its core is a large set of per-subsystem debug-flag toggles (for example "
-    "debugwifi, debughttprequests, debugespnowcore, debugcamera, debugimuvalues) that "
-    "each follow a <0|1> [temp|runtime] model: with no mode the new state is persisted "
-    "to flash, while temp or runtime flips only the live runtime flag and is NOT saved "
-    "(it reverts on reboot). Many subsystems have a parent flag plus finer sub-flags "
-    "(lifecycle/polling/values, or core/router/mesh/topo for ESP-NOW); the parent acts "
-    "as a master switch and any sub-flag also lights its parent. Separate from the "
-    "on/off flags, loglevel sets a severity threshold (error|warn|info|debug, "
-    "persisted) and debugverbose is a global override. Related commands manage where "
-    "output goes: outserial gates the UART lane (persisted), outg2/outble open "
-    "runtime CLI streams to G2 glasses / BLE clients (session-only, reset on "
-    "reboot), log starts/stops system-wide logging to a file, loglink routes ESP-IDF "
-    "framework logs through the unified output queue, and debugstack/debugbuffer expose "
-    "low-level trace and queue diagnostics.", debugCommands,        &debugCommandsCount, 0, nullptr },
-  { "settings",   "Device configuration and preferences", "The settings subsystem holds the device persisted configuration and the commands "
-    "that change it. Each setting command (for example outserial, "
-    "serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, "
-    "webclihistorysize) sets one value and normally requests an immediate settings-file "
-    "write. Because flash writes are costly, beginwrite and savesettings can coalesce "
-    "changes made by the same request or transport session: the final save writes each "
-    "changed settings file at most once. This is write coalescing, not a RAM transaction; "
-    "unrelated sources continue to persist immediately, and their full snapshot can "
-    "include live values changed while a batch is open. Idle batches expire after two "
-    "minutes. savesettings remains an explicit flush-now command when no batch is open. "
-    "Most commands here are admin-gated. Some "
-    "changes only take effect after a reboot (for example espnowenabled and "
-    "httpsEnabled are marked reboot required). The controls command emits a "
-    "machine-readable JSON descriptor of a module's settable controls for UI use. Note "
-    "that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) "
-    "are owned and registered by their own modules; this module hosts the cross-cutting "
-    "CLI/output/auth/time settings plus the batch-write machinery.", settingsCommands,     &settingsCommandsCount, 0, nullptr },
-  { "sensorlog", "Sensor data logging to files", "Periodically samples the onboard sensors and appends readings to a file, driven by "
-    "the single multiplexed sensorlog <subcommand> command. sensorlog start <filepath> "
-    "[interval_ms] begins logging (default 5000 ms; the filepath must start with / and "
-    "parent directories are created automatically) and sensorlog stop ends it; only one "
-    "log can run at a time, so start refuses if logging is already active. sensorlog "
-    "status reports the active file, interval, format, rotation settings, selected "
-    "sensors, and last-write age. Configure behavior with format <text|csv|track> "
-    "(track is a compact GPS-only format with signal-loss dedup), maxsize and rotations "
-    "for log rotation, and sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none> "
-    "to choose which sensors are recorded. sensorlog interval <ms> sets the poll period "
-    "(100-3600000, default 5000). NOTE: format track additionally REPLACES the sensor "
-    "mask with GPS-only and persists it, so a prior selection is lost — and rotations 0 "
-    "deletes the active file at the size cap rather than pruning older generations. "
-    "sensorlog autostart [on|off] makes logging "
-    "resume on the next boot using the last-used parameters; the "
-    "format/maxsize/rotations/sensors/autostart choices are persisted.", sensorLoggingCommands, &sensorLoggingCommandsCount, 0, nullptr },
-#if ENABLE_R1_HEALTH
-  { "health",     "R1 ring health vitals and local health logging", "Live vitals from a paired R1 ring (HR, HRV, SpO2, temperature, battery) "
-    "plus the on-device health logger. healthstatus reads live values, ring control state, "
-    "logging state and typed-history status; healthstatus json is what the app and web page consume. "
-    "healthlogging drives the local CSV logger independently of the ring's own health-collection "
-    "privacy setting, and healthlogmerge stitches captures together. The ring rides the G2 BLE "
-    "transport, so this whole family requires Bluetooth + G2; connect via ringconnect.",
-    healthCommands, &healthCommandsCount, 0, nullptr },
-#endif
-  { "users",      "User authentication and management", "The users subsystem provides admin-gated account management, authentication, "
-    "sessions, and bans. Accounts have two roles, admin and standard; the first account "
-    "is the owner-admin, and userpromote/userdemote change roles while useradd creates "
-    "an account directly (optionally forcing a password change on first login). New "
-    "accounts can also come through an approval flow: userrequest files a pending "
-    "request that an admin clears with userapprove or rejects with userdeny "
-    "(pendinglist shows the queue). login and logout authenticate per transport "
-    "(serial, display, bluetooth, g2), userlist enumerates accounts, and the password "
-    "commands cover both self-service (userchangepassword) and admin reset "
-    "(userresetpassword). Sessions are tracked per transport: sessionlist shows active "
-    "sessions and sessionrevoke force-logs-out a session by SID or by username. Two "
-    "independent ban mechanisms exist: ban/unban/banlist block an IP address, while "
-    "banuser/unbanuser suspend a user account so it cannot log in until unbanned; the "
-    "primary admin account cannot be banned. usersync pushes a user credentials to "
-    "another device over ESP-NOW, authenticated by an admin account on the receiving "
-    "device.", userSystemCommands,         &userSystemCommandsCount, CMD_MODULE_ADMIN, nullptr },
-  { "features",   "System feature management", "The features subsystem enables or disables compiled-in capabilities at runtime and "
-    "reports their memory cost. features with no argument lists every feature grouped "
-    "by category (Network, Display, Sensors, System) with an approximate heap estimate "
-    "and a status of ON, OFF, or N/C (not compiled in this build); features <id> shows "
-    "one feature details and features <id> <on|off> toggles it, persisting the change "
-    "immediately. Only features that are compiled and marked runtime-toggleable can be "
-    "changed; a few are compile-time only, and some (wifi, oled, i2c, https) are "
-    "flagged reboot required so the toggle persists but the capability does not "
-    "actually start or stop until the next restart. featuresetup launches an "
-    "interactive, admin-only wizard that walks through the same toggles and works from "
-    "any CLI transport.", featureCommands,      &featureCommandsCount, 0, nullptr },
-#if ENABLE_CAMERA_SENSOR
-  { "image",      "Image capture and management", "Captures stills from the camera and manages the saved photo library. capture grabs "
-    "a frame and saves it as a JPG (target storage chosen by argument: littlefs/lfs, "
-    "sd, or both; default follows the cameraStorageLocation setting), and requires a "
-    "camera sensor that is both compiled in and enabled -- on boards with no camera the "
-    "capture simply fails. images lists saved photos with sizes and storage stats (add "
-    "sd to list the card, json for app/BLE output); imagedelete \"<path>\" removes one "
-    "(path must be quoted). imagesend transmits a photo to another device over ESP-NOW: "
-    "imagesend <device> \"<path>\" resolves the device by name or MAC and sends the "
-    "named file (path required).", imageCommands,        &imageCommandsCount, 0, nullptr },
-#endif
-#if ENABLE_MAPS
-  { "map",        "Map navigation and waypoints", "On-device offline map subsystem backed by region map files stored under /maps/ "
-    "(custom HWMap tile format). A map must be loaded before any lookup works: mapload "
-    "\"<path>\" loads a file into PSRAM, maplist shows what is available, map prints "
-    "the current map region/feature-count/bounds (add json for structured output), and "
-    "mapunload frees the PSRAM and tile cache. search <name> finds named features in "
-    "the loaded map, while whereami reports the nearest road and area for the current "
-    "GPS position and therefore needs both a loaded map and a live GPS fix. Waypoints "
-    "are persistent user markers managed through waypoint "
-    "(list/add/del/goto/clear/clearall/rename/notes) and can have files attached via "
-    "waypointfile/waypointfiles; gpstrack loads, inspects, or clears a recorded GPS "
-    "breadcrumb track (and rejects tracks that fall outside the loaded map bounds), and "
-    "maporganize sorts loose files in /maps into subdirectories.", mapCommands,          &mapCommandsCount, 0, nullptr },
-  { "mapsettings","Maps app settings (zoom, layers, cache)", "Persisted rendering defaults for the maps app, stored under apps.maps and applied "
-    "to the live map at boot. mapzoom <0.5..20.0> sets the initial zoom, maplayers "
-    "<0..1023> sets a bitmask controlling which feature layers are drawn, and "
-    "mapcachekb <256..4096> sizes the tile LRU cache pool. The zoom and layers setters "
-    "also mirror immediately into the running renderer so changes take effect without a "
-    "reboot, but the cache size only re-applies on the next map load (or reboot). All "
-    "three are admin-only and, run from the CLI, write to flash immediately so they "
-    "survive a reboot.", mapsSettingCommands, &mapsSettingCommandsCount, 0, nullptr },
-#endif
-  { "power",      "Power management", "The power subsystem manages CPU frequency and battery-oriented power saving. The "
-    "main command is power: power alone prints the current mode, CPU clock, display "
-    "brightness, and auto-mode state; power mode <perf|balanced|saver|ultra|locked|0-4> "
-    "selects one of five target-specific presets: Performance, Balanced, PowerSaver, "
-    "UltraSaver, or Locked. Run power or power json to see their active and idle MHz. "
-    "Modes set the CPU clock and display brightness; the chosen mode is persisted. "
-    "Locked keeps the maximum active clock when the OLED blanks. UltraSaver uses its "
-    "lower idle-only clock when powersave blanks the display; input or a command "
-    "restores the target's interactive floor. power auto <on|off> enables an "
-    "automatic low-battery downshift gated by power threshold <0-100>. Two related idle "
-    "controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; "
-    "0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) "
-    "while the radio stays up so the device remains reachable, and powercooldown "
-    "<0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid "
-    "back-to-back sleep transitions. All of these values persist.", powerCommands,        &powerCommandsCount, 0, nullptr },
-  { "liveaudio",  "Opt-in live PCM transport and recorder shadow", "Exercises the live-pcm-v1 UART framing and bounded receiver path. "
-    "A real authenticated UART host first acquires a renewable 3-second controller lease with liveaudio ready. liveaudio synth schedules "
-    "deterministic 16 kHz signed-16-bit mono PCM; an explicit, exact-ID liveaudio shadow arm can instead tee an owned 16 kHz PDM or G2 "
-    "recording through a fixed 16 KiB PSRAM queue. Shadow transport is disabled by default, never delays or replaces the WAV writer, and a "
-    "transport fault aborts only the live copy while the finalized WAV remains authoritative. This diagnostic transport does not enable "
-    "production streaming STT, LLM, or lens delivery.", liveAudioCommands, &liveAudioCommandsCount,
-    CMD_MODULE_NETWORK, nullptr },
-  { "cm5", "CM5 service presence and host power/fan control", "Everything that talks to the CM5 Linux host over the authenticated UART link. "
-    "cm5 status exposes the current named-UART epoch binding, freshness, state, command bridge, monitor transitions, and task stack watermark; "
-    "cm5 capabilities reports the heartbeat protocol constants. The five-second heartbeat itself is authenticated UART control-plane traffic, "
-    "not a user command, so it remains responsive even while the shared command executor is occupied. "
-    "cm5 power and cm5 fan drive the host through two independent finite request/ACK/report state machines that share one ID space: "
-    "cm5 power status requests fresh CM5 state, cm5 power profile <eco|balanced|performance|auto> requests a power profile, and cm5 fan "
-    "<quiet|max> pins a fan mode while cm5 fan auto returns control to the Linux temperature curve. Bare cm5 power / cm5 fan (or their show "
-    "form) display local delivery state and the last CM5 report. Initiation requires an admin; reboot, halt, suspend, and sleep_for "
-    "<1..1440 minutes> additionally require superadmin plus a literal same-command confirm token, and recover confirm clears only an "
-    "inspected fail-closed transition. ACK/report callbacks are accepted from a real authenticated UART session only, which lets the CM5 "
-    "service account stay user-tier. One request per protocol may be pending at a time and delivery retries are finite; destructive "
-    "execution additionally requires confirmed accepted and committed ACK phases, while a normalized Linux boot ID distinguishes a daemon "
-    "restart from a completed host boot. A max fan request may supersede one pending non-max request.",
-    cm5PresenceCommands, &cm5PresenceCommandsCount,
-    CMD_MODULE_NETWORK, nullptr },
-  { "ota",        "Signed firmware recovery and update", "Native ESP-IDF signed OTA support. otastatus reports the journal, "
-    "partition identity, staged pair, and last result. A superadmin sets a persistent recovery credential with otapin - "
-    "on the physical serial console only, because it decides whether recovery can be reached at all - then "
-    "uploads /system/ota/candidate.part and manifest.part, validates and journals them with otastage confirm, then uses "
-    "otaupdate confirm to reboot into the immutable factory recovery updater. otarecovery confirm enters the same "
-    "authenticated recovery image for a direct upload when the main filesystem cannot stage an image; its explicit "
-    "allow-downgrade option is required for older signed releases. otacancel replaces a staged request safely, and "
-    "otaack <result-sequence> confirm acknowledges exactly the durable result that was reviewed. Mutating OTA "
-    "commands are forbidden from automations and require the opt-in 16 MB OTA partition layout.",
-    otaCommands, &otaCommandsCount, CMD_MODULE_ADMIN | CMD_MODULE_CORE, nullptr },
-#if ENABLE_OLED_DISPLAY
-  { "setpattern", "OLED gamepad password entry", "Provides the single admin-only command setgamepadpassword, which opens the "
-    "gamepad-pattern password setup flow on the OLED screen. A pattern is a sequence of "
-    "joystick directions that is hashed and stored as the logged-in user password, "
-    "usable for on-device login. You must already be logged in at the OLED display "
-    "first (the command errors otherwise); the guided on-screen flow then "
-    "re-authenticates you, prompts you to enter the new pattern and confirm it, and "
-    "saves it to your account. This command only launches the OLED mode -- the actual "
-    "entry and confirmation happen on the device screen.", setPatternCommands,   &setPatternCommandsCount, 0, nullptr },
-#endif
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  { "even_g2",    "Even G2 smart glasses control", "This subsystem drives Even Reality G2 smart glasses while Bluetooth is in client "
-    "mode (blemode client); the two temples are addressed as left/right/auto. openg2 "
-    "starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not "
-    "block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link "
-    "is up, and nearly every other command here requires that connection first. Display "
-    "commands render to the lens: g2show prints text, g2ai/g2ai-noask/g2ai-direct push "
-    "a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, "
-    "and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav "
-    "[on|off] enables menu-navigation mode and g2clear blanks the display. For audio, "
-    "g2mic only sends the enable/disable control frame (LC3 decode is not yet wired, so "
-    "no audio arrives); the working capture path is g2micrec (raw LC3 packets to SD) "
-    "and g2micwav (decodes to a 16 kHz mono WAV on SD), each an SD-backed "
-    "start/stop/status lifecycle that needs an SD card. closeg2 disconnects but keeps "
-    "the GATT cache for fast reconnect; closeg2 full also frees the cache to recover "
-    "about 30 KB. The remaining g2* commands are low-level protocol probes and "
-    "diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).", g2Commands,           &g2CommandsCount, 0, nullptr },
-  { "even_r1",    "Even R1 ring link, health, and controls", "This subsystem talks to the Even R1 smart ring over BLE through a serialized, "
-    "profile-gated transaction owner. ringscan [seconds] discovers the ring and "
-    "ringconnect [mac] connects "
-    "(auto-scanning when no MAC is given, or connecting directly when one is), with "
-    "ringstatus and ringdisconnect for state and teardown. ringquery is the main data "
-    "command, requesting wear/heart-rate/HRV/SpO2/temperature/activity/sleep readings. "
-    "Its raw diagnostic form is admin-only, requires confirmation for SETs, and "
-    "prohibits user-profile writes. Ring health collection and low-power desired state "
-    "are managed through the authenticated Health surfaces; health SETs remain "
-    "ACKed-unverified while low power has capture-proven readback. debugringdump toggles "
-    "a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is "
-    "deliberately unavailable -- the commands exist in the code but are intentionally "
-    "left unregistered because both approaches proved to be dead ends.", g2RingCommands,    &g2RingCommandsCount, 0, nullptr },
-#endif
-#if ENABLE_LLM_BACKEND
-  { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "
-    "device (model weights held in PSRAM). A model must be loaded before generation: "
-    "llmload [file.bin] loads one (bare filenames are looked up on the SD card under "
-    "/sd/llm then internal /system/llm), llmmodels lists available files, llmunload "
-    "frees the PSRAM, llmstatus shows engine state, and llmautostart 0|1 / "
-    "llmdefaultmodel control boot-time loading. Two generate forms: bare 'llmgenerate "
-    "<prompt>' BLOCKS and prints the whole reply, while 'llmgenerate json ...' starts "
-    "async and returns a session id immediately — then poll llmresult json <offset> "
-    "repeatedly (each call returns new text, the running total length, and a done flag) "
-    "until done flips true; llmstop aborts an in-progress generation. The engine keeps a "
-    "multi-turn conversation: llmclear resets it, llmretry regenerates the last reply "
-    "(async), and llmturns json <index> reads back one turn at a time. The llm* setters "
-    "(temperature, topp, minp, maxtokens, sentencelimit, hardcap, reppenalty/repwindow, "
-    "maxcontext, kvprec, norepeatngram, confthreshold, contentboost) are admin-only "
-    "sampler and KV-cache defaults that persist to flash; kvprec and maxcontext only take "
-    "effect on the next model load.", llmCommands,          &llmCommandsCount, 0, nullptr },
-#endif
-  { "settingsedit", "Per-field settings save commands",
-    "Static CLI commands the web/OLED settings screen uses to persist individual settings fields that have no dedicated module command. Each writes one setting via handleSettingCommand; the value is read live or applied on next start. Fields that need a live apply action are routed to their module command instead of getting one of these.",
-    settingEditorCommands, &settingEditorCommandsCount, 0, nullptr },
- };
-static constexpr size_t gCommandModulesCount = sizeof(gCommandModules) / sizeof(gCommandModules[0]);
-
-const CommandModule* getCommandModules(size_t& count) {
-  count = gCommandModulesCount;
-  return gCommandModules;
-}
-
-// Note: findCommand() is now defined in command_system.cpp
+// Command lookup is implemented in System_Command.cpp.
 
 // Check if command requires admin
 bool commandRequiresAdmin(const String& cmdLine) {
@@ -4375,11 +3214,11 @@ void printMemoryReport() {
   
   // Sensor Module State Variables
   broadcastOutput("  Sensor Modules (Global State):");
-  size_t thermal_state_bytes = sizeof(gThermalCache) + sizeof(gThermalRunning) + sizeof(gThermalConnected) + sizeof(gThermalTaskHandle);
-  size_t imu_state_bytes = sizeof(gImuCache) + sizeof(gImuRunning) + sizeof(gImuConnected) + sizeof(gImuTaskHandle);
-  size_t tof_state_bytes = sizeof(gTofCache) + sizeof(gTofRunning) + sizeof(gTofConnected) + sizeof(gTofTaskHandle);
-  size_t gamepad_state_bytes = sizeof(gInputCache) + sizeof(gInputRunning) + sizeof(gInputConnected) + sizeof(gInputTaskHandle);
-  size_t apds_state_bytes = sizeof(gApdsCache) + sizeof(gApdsConnected) + sizeof(gApdsColorRunning) + sizeof(gApdsProximityRunning) + sizeof(gApdsGestureRunning);
+  size_t thermal_state_bytes = thermalCacheStorageBytes() + sizeof(gThermalRunning) + sizeof(gThermalConnected) + sizeof(gThermalTaskHandle);
+  size_t imu_state_bytes = imuCacheStorageBytes() + sizeof(gImuRunning) + sizeof(gImuConnected) + sizeof(gImuTaskHandle);
+  size_t tof_state_bytes = tofCacheStorageBytes() + sizeof(gTofRunning) + sizeof(gTofConnected) + sizeof(gTofTaskHandle);
+  size_t gamepad_state_bytes = inputCacheStorageBytes() + sizeof(gInputRunning) + sizeof(gInputConnected) + sizeof(gInputTaskHandle);
+  size_t apds_state_bytes = apdsCacheStorageBytes() + sizeof(gApdsConnected) + sizeof(gApdsColorRunning) + sizeof(gApdsProximityRunning) + sizeof(gApdsGestureRunning);
   size_t gps_state_bytes = sizeof(gGpsRunning) + sizeof(gGpsConnected);
   size_t oled_state_bytes = sizeof(gOledRunning) + sizeof(oledConnected);
 
@@ -5982,209 +4821,6 @@ bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& 
   }
   return ok;
 }
-
-// ============================================================================
-// Icon System Implementation - Unified PNG-based icons for OLED/Web/TFT
-// ============================================================================
-
-#if ENABLE_OLED_DISPLAY
-#include <Adafruit_SSD1306.h>
-#endif
-#include "System_Icons.h"
-
-bool initIconSystem() {
-  DEBUG_STORAGEF("[Icons] Icon system initialized");
-  return true;
-}
-
-String getIconPath(const char* name) {
-  char pathBuf[64];
-  snprintf(pathBuf, sizeof(pathBuf), "/icons/%s.png", name);
-  return String(pathBuf);
-}
-
-bool iconExists(const char* name) {
-  // Check embedded icons first
-  if (findEmbeddedIcon(name) != nullptr) {
-    return true;
-  }
-
-  return false;
-}
-
-// Extension-to-icon mapping (shared logic)
-static const struct {
-  const char* ext;
-  const char* icon;
-} kExtIconMap[] = {
-  {"json", "file_json"},
-  {"txt", "file_text"},
-  {"md", "file_text"},
-  {"log", "file_text"},
-  {"ino", "file_code"},
-  {"cpp", "file_code"},
-  {"h", "file_code"},
-  {"hpp", "file_code"},
-  {"c", "file_code"},
-  {"py", "file_code"},
-  {"js", "file_code"},
-  {"html", "file_code"},
-  {"css", "file_code"},
-  {"xml", "file_code"},
-  {"yaml", "file_code"},
-  {"yml", "file_code"},
-  {"jpg", "file_image"},
-  {"jpeg", "file_image"},
-  {"png", "file_image"},
-  {"gif", "file_image"},
-  {"bmp", "file_image"},
-  {"svg", "file_image"},
-  {"zip", "file_zip"},
-  {"tar", "file_zip"},
-  {"gz", "file_zip"},
-  {"7z", "file_zip"},
-  {"rar", "file_zip"},
-  {"pdf", "file_pdf"},
-  {"bin", "file_bin"},
-  {"hex", "file_bin"},
-  {"elf", "file_bin"},
-  {nullptr, "file"}  // default fallback
-};
-
-const char* getIconNameForExtension(const char* ext) {
-  if (!ext || !*ext) return "file";
-  
-  // Normalize: skip leading dot and lowercase
-  const char* p = ext;
-  if (*p == '.') p++;
-  
-  // Simple lowercase without locale
-  char lower[16];
-  size_t i = 0;
-  for (; i < sizeof(lower)-1 && p[i]; ++i) {
-    char c = p[i];
-    if (c >= 'A' && c <= 'Z') c += 32;
-    lower[i] = c;
-  }
-  lower[i] = '\0';
-  
-  for (size_t idx = 0; kExtIconMap[idx].ext; ++idx) {
-    if (strcmp(lower, kExtIconMap[idx].ext) == 0) {
-      return kExtIconMap[idx].icon;
-    }
-  }
-  return "file";  // default
-}
-
-bool loadIconData(const char* name, uint8_t* buffer, size_t bufferSize, uint8_t& width, uint8_t& height) {
-  if (bufferSize < 128) {
-    DEBUG_STORAGEF("[Icons] Buffer too small (need 128 bytes minimum)");
-    return false;
-  }
-
-  // First, try embedded PROGMEM icons (zero heap, instant)
-  const EmbeddedIcon* embedded = findEmbeddedIcon(name);
-  if (embedded) {
-    width = pgm_read_byte(&embedded->width);
-    height = pgm_read_byte(&embedded->height);
-    const uint8_t* bitmapPtr = (const uint8_t*)pgm_read_ptr(&embedded->bitmapData);
-    memcpy_P(buffer, bitmapPtr, 128);
-    return true;
-  }
-
-  return false;
-}
-
-#if ENABLE_OLED_DISPLAY
-bool drawIcon(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color) {
-  if (!display) {
-    return false;
-  }
-
-  uint8_t buffer[128];
-  uint8_t width, height;
-
-  if (!loadIconData(name, buffer, sizeof(buffer), width, height)) {
-    return false;
-  }
-
-  // Icons are stored LSB-first, but drawBitmap expects MSB-first.
-  // Draw pixel-by-pixel with correct bit ordering.
-  for (int py = 0; py < height; py++) {
-    for (int px = 0; px < width; px++) {
-      int byteIndex = py * (width / 8) + (px / 8);
-      int bitIndex = px % 8;  // LSB-first: bit 0 = leftmost pixel
-      if ((buffer[byteIndex] >> bitIndex) & 1) {
-        display->drawPixel(x + px, y + py, color);
-      }
-    }
-  }
-  return true;
-}
-
-// Helper to get a bit from 32x32 1bpp bitmap (row-major, LSB first per byte)
-static inline bool getBitmapBit(const uint8_t* buffer, int x, int y) {
-  if (x < 0 || x >= 32 || y < 0 || y >= 32) return false;
-  int byteIndex = y * 4 + (x / 8);  // 32 pixels / 8 = 4 bytes per row
-  int bitIndex = x % 8;
-  return (buffer[byteIndex] >> bitIndex) & 1;
-}
-
-bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color, float scale) {
-  if (!display || scale <= 0) {
-    return false;
-  }
-
-  uint8_t buffer[128];
-  uint8_t width, height;
-
-  if (!loadIconData(name, buffer, sizeof(buffer), width, height)) {
-    return false;
-  }
-
-  // Calculate output dimensions
-  int outWidth = (int)(width * scale);
-  int outHeight = (int)(height * scale);
-
-  // Handle 0.5x scale (32→16) with 2×2 block sampling
-  if (scale >= 0.49f && scale <= 0.51f && width == 32 && height == 32) {
-    for (int dy = 0; dy < 16; dy++) {
-      for (int dx = 0; dx < 16; dx++) {
-        // Sample 2×2 block from source
-        int srcX = dx * 2;
-        int srcY = dy * 2;
-        bool p00 = getBitmapBit(buffer, srcX, srcY);
-        bool p01 = getBitmapBit(buffer, srcX + 1, srcY);
-        bool p10 = getBitmapBit(buffer, srcX, srcY + 1);
-        bool p11 = getBitmapBit(buffer, srcX + 1, srcY + 1);
-
-        // OR logic: draw pixel if any source pixel is set (preserves thin lines)
-        if (p00 || p01 || p10 || p11) {
-          display->drawPixel(x + dx, y + dy, color);
-        }
-      }
-    }
-    return true;
-  }
-
-  // Generic scaling for other factors (nearest neighbor). This also handles
-  // 1.0x deliberately: embedded icon rows are LSB-first, while Adafruit's
-  // drawBitmap() consumes MSB-first bytes.
-  float invScale = 1.0f / scale;
-  for (int dy = 0; dy < outHeight; dy++) {
-    for (int dx = 0; dx < outWidth; dx++) {
-      int srcX = (int)(dx * invScale);
-      int srcY = (int)(dy * invScale);
-      if (getBitmapBit(buffer, srcX, srcY)) {
-        display->drawPixel(x + dx, y + dy, color);
-      }
-    }
-  }
-
-  return true;
-}
-
-#endif  // ENABLE_OLED_DISPLAY
 
 // ============================================================================
 // Authentication Commands (critical system functions)

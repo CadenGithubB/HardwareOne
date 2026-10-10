@@ -5,6 +5,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "i2csensor_pa1010d.h"
 #include <Adafruit_SSD1306.h>
 
 // Persistent scroll state for the GPS view — survives between render frames
@@ -29,28 +30,9 @@ static void displayGPSData() {
     return;
   }
 
-  // Read from GPS cache (thread-safe, no I2C contention)
-  float lat = 0, lon = 0, alt = 0, speed = 0;
-  uint8_t sats = 0, quality = 0;
-  uint8_t hour = 0, minute = 0, second = 0;
-  bool hasFix = false, valid = false;
-
-  if (gGpsCache.mutex && xSemaphoreTake(gGpsCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    lat     = gGpsCache.latitude;
-    lon     = gGpsCache.longitude;
-    alt     = gGpsCache.altitude;
-    speed   = gGpsCache.speed;
-    hasFix  = gGpsCache.hasFix;
-    quality = gGpsCache.fixQuality;
-    sats    = gGpsCache.satellites;
-    hour    = gGpsCache.hour;
-    minute  = gGpsCache.minute;
-    second  = gGpsCache.second;
-    valid   = gGpsCache.dataValid;
-    xSemaphoreGive(gGpsCache.mutex);
-  }
-
-  if (!valid) {
+  // Read one GPS snapshot (thread-safe, no I2C contention).
+  GPSCache gps{};
+  if (!gpsCacheSnapshot(gps) || !gps.dataValid) {
     oledContentPrint(&sGPSContent, "Reading GPS...");
     oledContentEnd(&sGPSContent);
     return;
@@ -60,24 +42,24 @@ static void displayGPSData() {
 
   // Line 0: Fix status + satellites + quality
   snprintf(buf, sizeof(buf), "%s Sat:%d Q:%d",
-           hasFix ? "\x10FIX" : "\xDB---", (int)sats, (int)quality);
+           gps.hasFix ? "\x10FIX" : "\xDB---", (int)gps.satellites, (int)gps.fixQuality);
   oledContentPrint(&sGPSContent, buf);
 
-  if (hasFix) {
+  if (gps.hasFix) {
     // Line 1: Latitude
-    snprintf(buf, sizeof(buf), "Lat: %.4f%c", lat, lat >= 0 ? 'N' : 'S');
+    snprintf(buf, sizeof(buf), "Lat: %.4f%c", gps.latitude, gps.latitude >= 0 ? 'N' : 'S');
     oledContentPrint(&sGPSContent, buf);
 
     // Line 2: Longitude
-    snprintf(buf, sizeof(buf), "Lon: %.4f%c", lon, lon >= 0 ? 'E' : 'W');
+    snprintf(buf, sizeof(buf), "Lon: %.4f%c", gps.longitude, gps.longitude >= 0 ? 'E' : 'W');
     oledContentPrint(&sGPSContent, buf);
 
     // Line 3: Altitude + Speed
-    snprintf(buf, sizeof(buf), "Alt:%.0fm Spd:%.1fkn", alt, speed);
+    snprintf(buf, sizeof(buf), "Alt:%.0fm Spd:%.1fkn", gps.altitude, gps.speed);
     oledContentPrint(&sGPSContent, buf);
 
     // Line 4: UTC time
-    snprintf(buf, sizeof(buf), "%02d:%02d:%02d UTC", (int)hour, (int)minute, (int)second);
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d UTC", (int)gps.hour, (int)gps.minute, (int)gps.second);
     oledContentPrint(&sGPSContent, buf);
   } else {
     oledContentPrint(&sGPSContent, "Waiting for fix");

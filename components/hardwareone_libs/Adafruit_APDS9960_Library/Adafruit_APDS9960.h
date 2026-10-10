@@ -231,6 +231,7 @@ private:
   void write8(byte reg, byte value);
   uint8_t read8(byte reg);
 
+  unsigned long gestureLastActivity = 0; ///< Last directional sample, for idle expiry
   uint8_t gestCnt;
 
   uint8_t UCount;

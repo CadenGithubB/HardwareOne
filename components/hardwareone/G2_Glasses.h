@@ -2,7 +2,7 @@
 #define G2_GLASSES_H
 
 #include "System_BuildConfig.h"
-#include "System_G2_Protocol.h"   // G2ContainerGeom + G2_GEOM_* presets
+#include "G2_RenderTypes.h"       // shared geometry and text-child specifications
 #include <Arduino.h>
 
 // =============================================================================
@@ -25,6 +25,21 @@ enum G2State {
   G2_STATE_CONNECTED,
   G2_STATE_DISCONNECTING,
   G2_STATE_ERROR
+};
+
+struct G2TempleConnectionStatus {
+  bool connected = false;
+  uint16_t mtu = 0;
+  int battery = -1;
+  uint32_t tx = 0;
+  uint32_t rx = 0;
+};
+
+struct G2ConnectionStatus {
+  const char* state = "off";  // Owner-provided static state name, never heap-backed.
+  bool running = false;
+  G2TempleConnectionStatus left;
+  G2TempleConnectionStatus right;
 };
 
 enum G2Eye {
@@ -60,6 +75,23 @@ enum G2EventType {
 
 typedef void (*G2EventCallback)(G2EventType event);
 
+// Rendering callback and page-chrome types are shared by enabled and disabled APIs.
+enum G2TapKind : uint8_t {
+  G2_TAP_PAGE_NEXT = 0,
+  G2_TAP_PAGE_PREV = 1,
+};
+typedef void (*G2TapFn)(G2TapKind kind);
+
+struct TextPager;  // defined in System_TextPager.h
+
+struct G2TextPageChrome {
+  const char* title;       // heading text (e.g. "Pretty foo.json", "Inbox")
+  const char* navHint;     // multi-page hint; null -> "tap/scroll=nav, 2x-tap=exit"
+  const char* singleHint;  // single-page hint; null -> "2x-tap=exit"
+  const char* separator;   // rule drawn under the header; null/"" -> none
+  const char* emptyMsg;    // shown when the current page slice is empty
+};
+
 // G2 requires Bluetooth to be enabled first
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -93,37 +125,6 @@ typedef void (*G2EventCallback)(G2EventType event);
 #define G2_SVC_DISPLAY_CFG_LO 0x20
 #define G2_SVC_SYNC_HI        0x80
 #define G2_SVC_SYNC_LO        0x00
-
-// -----------------------------------------------------------------------------
-// G2 Client State Structure
-// -----------------------------------------------------------------------------
-struct G2ClientState {
-  G2State state;
-  G2Eye targetEye;
-  bool initialized;
-  
-  // Connection info
-  String deviceName;
-  String deviceAddress;
-  uint16_t mtu;
-  uint32_t connectedSince;
-  
-  // Protocol state
-  uint8_t seqNumber;      // Incrementing sequence for packets
-  uint16_t msgId;         // Message ID for payloads
-  
-  // Statistics
-  uint32_t packetsSent;
-  uint32_t packetsReceived;
-  uint32_t authAttempts;
-  
-  // Event callback
-  G2EventCallback eventCallback;
-  
-  // Deferred event handling (ISR-safe pattern: callback sets flag, task processes)
-  bool deferredGesturePending;
-  G2EventType deferredGestureEvent;
-};
 
 // -----------------------------------------------------------------------------
 // Public API
@@ -408,7 +409,7 @@ void g2ConnPriReapply();
 
 // Fill `out` with the 6-byte BLE address of the right (or left) temple in
 // natural high-to-low order (matching the colon-separated string form, e.g.
-// "02:48:57:31:03:69" → {0xC8,0x8D,0x65,0x00,0x97,0x69}). Returns true if
+// "02:00:00:00:00:01" → {0x02,0x00,0x00,0x00,0x00,0x01}). Returns true if
 // the temple link is currently up; on false, `out` is zeroed. Used by the
 // R1 ring's advStart payload, which wants the right-temple MAC reversed
 // (LSB-first); reverse on the caller side.
@@ -487,7 +488,7 @@ bool g2EvenAiExchangeBoundToUartSession(uint64_t exchangeId,
 // `geom` controls the on-lens rectangle. Defaults to G2_GEOM_LARGE so any
 // existing caller immediately benefits from a near-full-lens widget;
 // pages that want a tighter look can pass G2_GEOM_MEDIUM / _SMALL / etc.
-// (see System_G2_Protocol.h for the full preset list). Geometry takes
+// (see G2_RenderTypes.h for the full preset list). Geometry takes
 // effect on the CREATE half of the swap, so callers can change geom
 // freely between successive g2ShowListPage calls without an extra step.
 //
@@ -526,11 +527,6 @@ bool g2ShowListPage(const char* const* items, size_t itemCount,
 //   ring scroll-up   (SCROLL_TOP)    → tapFn(G2_TAP_PAGE_PREV)
 //   single tap       (CLICK)         → tapFn(G2_TAP_PAGE_NEXT)
 //   double tap       (DOUBLE_CLICK)  → exitFn
-enum G2TapKind : uint8_t {
-  G2_TAP_PAGE_NEXT = 0,
-  G2_TAP_PAGE_PREV = 1,
-};
-typedef void (*G2TapFn)(G2TapKind kind);
 
 // Returns true if synchronous admission succeeded and the boot-lifetime lens
 // worker accepted ownership. CREATE/REBUILD can still fail asynchronously.
@@ -545,15 +541,6 @@ bool g2ShowTextPage(const char* content,
 // API (g2ShowTextPage), so it lives here rather than in the dependency-free
 // common header. Used by Files, Settings JSON, and ESPNow chat.
 // -----------------------------------------------------------------------------
-struct TextPager;  // defined in G2_Page_Common.h
-
-struct G2TextPageChrome {
-  const char* title;       // heading text (e.g. "Pretty foo.json", "Inbox")
-  const char* navHint;     // multi-page hint; null -> "tap/scroll=nav, 2x-tap=exit"
-  const char* singleHint;  // single-page hint; null -> "2x-tap=exit"
-  const char* separator;   // rule drawn under the header; null/"" -> none
-  const char* emptyMsg;    // shown when the current page slice is empty
-};
 
 // Assemble "title [n/m] hint" + optional separator + the current page slice
 // into caller-owned `pageBuf`, then (re)render via g2ShowTextPage. `navFn` is
@@ -1276,6 +1263,13 @@ void g2SetEventCallback(G2EventCallback callback);
 void g2Tick();  // Call from main loop to process events
 
 // Status
+// Copies status for CLI/OLED/web. Lifecycle state and link flags are captured
+// together; startup reports off with default readings until runtime publication.
+// Batteries, MTUs and counters remain independently sampled live telemetry.
+// False means unavailable; the caller must not use the output.
+bool g2ConnectionStatusSnapshot(G2ConnectionStatus* out);
+// Format a captured status without reading live state again.
+void formatG2Status(const G2ConnectionStatus& status, char* buffer, size_t bufferSize);
 void getG2Status(char* buffer, size_t bufferSize);
 
 // Low-level packet functions (for advanced use)
@@ -1541,31 +1535,26 @@ inline size_t g2MicReadPcmSamples(int16_t*, size_t, uint32_t) { return 0; }
 inline size_t g2MicTrimAfeRingToNewest(size_t) { return 0; }
 inline size_t g2MicAfeRingDepth() { return 0; }
 inline uint32_t g2MicAfeOverrunCount() { return 0; }
-// NB: when G2 is disabled, these stubs intentionally drop the
-// G2ContainerGeom / G2TextChildSpec parameters (those types only exist
-// inside the #if branch above). Callers are themselves gated by
-// ENABLE_G2_GLASSES, so they shouldn't be reaching these stubs in
-// practice — these exist only to keep "find a g2*-prototyped declaration"
-// compiles working for code that takes function-pointer addresses or
-// uses sizeof on the prototype set.
-inline bool g2ShowListPage(const char* const*, size_t) { return false; }
-enum G2TapKind : uint8_t { G2_TAP_PAGE_NEXT = 0, G2_TAP_PAGE_PREV = 1 };
-typedef void (*G2TapFn)(G2TapKind kind);
+// Disabled rendering keeps the same typed arguments and defaults. Callers
+// can compile independently of feature selection and observe unavailable.
+inline bool g2ShowListPage(const char* const*, size_t,
+                           const G2ContainerGeom& = G2_GEOM_LARGE) { return false; }
 inline bool g2ShowTextPage(const char*,
+                           const G2ContainerGeom& = G2_GEOM_LARGE,
                            void (*)() = nullptr,
                            G2TapFn = nullptr) { return false; }
-struct G2TextPageChrome {
-  const char *title, *navHint, *singleHint, *separator, *emptyMsg;
-};
-// Geom param omitted here (like the g2ShowTextPage stub above): G2ContainerGeom
-// isn't declared in the G2-disabled build. Nothing calls this stub anyway.
-inline bool g2TextPagerRender(struct TextPager&, char*, size_t,
-                              const G2TextPageChrome&,
+inline bool g2TextPagerRender(TextPager&, char*, size_t,
+                              const G2TextPageChrome&, const G2ContainerGeom&,
                               void (*)(), G2TapFn) { return false; }
-inline bool g2ShowMultiTextPage(const void*, size_t,
+inline bool g2ShowTextPageRebuildProbe(const char*, const char*,
+                                       const G2ContainerGeom& = G2_GEOM_LARGE,
+                                       void (*)() = nullptr) { return false; }
+inline bool g2ShowMultiTextPage(const G2TextChildSpec*, size_t,
                                 void (*)() = nullptr,
                                 G2TapFn = nullptr) { return false; }
-inline bool g2ShowMixedListText(const char* const*, size_t) { return false; }
+inline bool g2ShowMixedListText(const char* const*, size_t,
+                                const G2ContainerGeom&,
+                                const G2TextChildSpec&) { return false; }
 inline bool g2ShowMixedListText2(const char* const*, size_t, const G2ContainerGeom&,
                                  const G2TextChildSpec&, const G2TextChildSpec&) { return false; }
 inline bool g2KbdPadBegin(const char*) { return false; }
@@ -1592,8 +1581,9 @@ inline void g2TextEntrySessionCleanupComplete(uint32_t, uint32_t, uint32_t,
                                               char) {}
 inline bool g2ShowKeyboardChunkTest(bool (*)() = nullptr) { return false; }
 inline bool g2KeyboardChunkTestRunning() { return false; }
-// Geom/spec params dropped (same NB as above — those types are gated out).
-inline bool g2RelistMixedListText(const char* const*, size_t) { return false; }
+inline bool g2RelistMixedListText(const char* const*, size_t,
+                                  const G2ContainerGeom&,
+                                  const G2TextChildSpec&) { return false; }
 inline bool g2UpdateMixedTextChild(const char*, uint32_t, const char*) { return false; }
 inline const char* g2ProbeRebuildTextChild() { return "G2 disabled"; }
 inline bool g2ShowNotification(const char* text, uint32_t durationMs = 5000) { return false; }
@@ -1603,7 +1593,13 @@ inline bool g2ShowMultiLine(const char* lines[], size_t lineCount) { return fals
 inline bool g2ClearDisplay() { return false; }
 inline void g2SetEventCallback(G2EventCallback callback) {}
 inline void g2Tick() {}
-inline void getG2Status(char* buffer, size_t bufferSize) { if (buffer) buffer[0] = '\0'; }
+inline bool g2ConnectionStatusSnapshot(G2ConnectionStatus*) { return false; }
+inline void formatG2Status(const G2ConnectionStatus&, char* buffer, size_t bufferSize) {
+  if (buffer && bufferSize > 0) buffer[0] = '\0';
+}
+inline void getG2Status(char* buffer, size_t bufferSize) {
+  if (buffer && bufferSize > 0) buffer[0] = '\0';
+}
 
 inline const char* g2ProbeImageQ4Lifecycle()        { return "G2 disabled"; }
 inline const char* g2ProbeImageDocSummary()         { return "G2 disabled"; }
@@ -1641,6 +1637,6 @@ inline bool g2ReadBmp4bppFromVfs(const char*, uint8_t**, size_t*, int32_t*, int3
 }
 inline const char* g2ProbeImageQ21LiveFullScreenBurst() { return "G2 disabled"; }
 
-#endif // ENABLE_BLUETOOTH
+#endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #endif // G2_GLASSES_H

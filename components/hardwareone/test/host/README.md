@@ -16,6 +16,94 @@ cmake --build /tmp/hw1-hardwareone-host
 ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure
 ```
 
+## Map live recording
+
+`map_live_tracking` executes the production Map owner, argument parser and
+logger session-identity helpers with GPS enabled and disabled. GPS queueing,
+logger file startup, allocation and VFS are controlled boundaries. It covers
+startup refusals, retained imported tracks, checked child results, unchanged
+boot preferences, same-path logger replacement, live clear/load refusal and
+publication order when restarting after an external stop.
+
+`map_live_ui` executes the HTTP authentication/identity prefix, unified web
+command helper and OLED Tracks action branch. Command submission and transport
+sessions are boundary doubles; tests check source identity, guest/session
+refusal, JSON errors and display feedback. Both compiled suites use ASan/UBSan
+when `HW1_SANITIZE=ON`.
+
+`map_live_browser` runs the actual Maps JavaScript functions in Node with
+controlled requests, timers and DOM elements. It checks confirmed state changes,
+failed-stop polling, duplicate clicks and stale responses. Node must be available
+when configuring CMake for this test to be registered.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^map_live_(tracking|ui|browser)$' --output-on-failure
+```
+
+These checks do not qualify physical GPS fixes, display layout, real filesystem
+writes or the existing concurrency of borrowed track buffers. The GPS-start and
+logger-settings suites also exercise the logger lifecycle helpers.
+
+## Host configuration tool
+
+`saved_build_config`, `build_config_workflow`, and `build_config_wizard`
+exercise the production configuration helpers and terminal flow with temporary
+configuration files. They cover inheritance, compiler verification, isolated
+build inputs, atomic saves, competing edits, cancellation, and build delegation.
+The wizard tests substitute user input and build execution; they do not flash
+hardware or claim that every selectable feature combination fits.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^(saved_build_config|build_config_workflow|build_config_wizard)$' --output-on-failure
+```
+
+## Network build selection and disabled ESP-NOW
+
+`network_build_selection` compiles the real feature header and evaluates the
+component CMake through registration in both early requirement discovery and
+configured phases. It covers manual edits, board defaults, named/deployment
+overrides, custom network choices and restore without the web UI. Enabled
+implementations and SDK dependencies must reach the compiler; guarded-out
+sources may stay in the build graph.
+
+`espnow_disabled_interface` compiles the production ESP-NOW header and disabled
+source with Wi-Fi on and off. Controlled driver calls verify error propagation,
+invalid arguments and unavailable outputs. The unchanged enabled MAC cache
+functions are also exercised so Hosted-radio cache reads retain their behavior.
+This suite uses ASan/UBSan when `HW1_SANITIZE=ON`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^(network_build_selection|espnow_disabled_interface)$' --output-on-failure
+```
+
+These checks do not establish device connectivity or restore/reboot behavior.
+
+## Display lifecycle
+
+`display_lifecycle` compiles the complete production `HAL_Display.cpp` and its
+header against controlled I2C, SSD1306/P4 driver and GPIO boundaries. It checks
+initialization failure/retry, both OLED addresses on both buses, initialization
+without restarting Wire, retained canvas lifetime, latched bus routing, bus-lock
+refusal, brightness/dim/power transactions, and the power-rail sleep/wake order.
+Failed wake must remain unavailable until a successful retry; manual retry uses
+the same charge-pump restoration as wake. Repeated sleep/resume calls are safe,
+stopping while asleep cancels automatic resume, and disabled builds expose
+compatible stubs.
+ASan/UBSan follow `HW1_SANITIZE`.
+
+The separate `p4eye_display_lifecycle` target runs the actual P4 backend with
+SDK boundaries substituted, including DMA cleanup and canvas retention. Neither
+test establishes OLED presence, visual output, electrical bus timing or physical
+power-rail behavior; those require attached display hardware.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^(display_lifecycle|p4eye_display_lifecycle|oled_without_input)$' --output-on-failure
+```
+
 ## Untrusted web file responses
 
 `web_file_response_policy` compiles the production CSP/header helper and the
@@ -66,12 +154,84 @@ savings, real executor races, or final-String allocation failure on hardware.
 
 ## Filesystem and G2 PSRAM output
 
+`image_writes` exercises the production image-save routine with filesystem,
+capacity, event and retention boundaries. It checks complete and failed writes
+on each tier, independent BOTH attempts, admission failures, matching the
+configured path to its requested storage, guarded cleanup and success-only
+notifications. Saves still write directly to generated destinations; these
+checks do not establish atomic replacement or power-loss durability. The
+`--baseline <component-directory>` option accepts saved sources to reproduce
+the original failure cases. ASan/UBSan follow `HW1_SANITIZE`.
+
+`image_storage` runs the actual ImageManager inventory methods, VFS routing,
+directory reader and filesystem guard. It covers SD/internal folder creation,
+JPEG listing and retention metadata, path routing, availability and operation
+failures, nested locking and handle cleanup. The shared reader's timestamp
+option is exercised by SD images; existing listing suites reject timestamp
+calls with the default option, preserving their previous I/O cost. The
+`--baseline <component-directory>` option accepts saved sources for regressions.
+ASan/UBSan follow `HW1_SANITIZE`. These are filesystem-boundary tests, not
+camera capture, physical-card or power-loss qualification.
+
+`storage_stats` runs the actual VFS sampler, fresh/snapshot APIs, routing and
+shared web/CLI JSON builder with the production cache core and filesystem
+guard. It covers backend errors (including nonzero outputs on error), zero
+capacity, unchanged caller outputs on failure, freshness/cache integration,
+generation invalidation, separate storage tiers, 64-bit SD capacity and JSON
+responses. `--baseline <component-directory>` replays regressions against
+saved sources. `vfs_capacity_cache_tests` and `vfs_capacity_snapshot_contract`
+retain expiry, clock-wrap, invalidation and consumer-boundary checks.
+
+`espnow_fs_transcript_privacy` runs the actual LIST/STAT/GET handlers, path
+policies, VFS normalization/directory reader and packed wire definitions. Its
+STAT cases distinguish `/sd` and `/sd/...` from `/sdata` and `/sdcard`, with
+mounted/unmounted SD and query failures, while checking response fields and
+authorization before storage access. `--source-dir <component-directory>`
+can replay the former routing bug. Both Python suites use ASan/UBSan when
+`HW1_SANITIZE` is enabled. They mock backend/transport boundaries and do not
+qualify physical SD or radio behavior. SD's used-byte accessor cannot report
+failure separately from valid zero usage; the owner does not guess that state.
+
+`upload_lifecycle` runs the actual streamed web upload handler and filesystem
+and polling guards against HTTP, authentication, allocation and file doubles.
+It checks resource ownership on rejected requests, failed allocations/opens,
+disconnections and failed writes, including partial-file cleanup and nested
+guard ownership. Successful chunked text/binary uploads retain their bytes and
+run post-save hooks after file, buffer and lock cleanup. `--baseline <cpp>`
+accepts a saved pre-change `WebServer_Server.cpp` for the original regressions.
+It runs with map hooks enabled and disabled, using C++23 to match the firmware.
+ASan/UBSan follow `HW1_SANITIZE`. Uploads still write directly to their
+destination; these tests do not establish atomic replacement, power-loss
+durability or real HTTP/SD behavior.
+
+`checked_text_writes` compiles the actual `writeText`/`writeTextAtomic` helpers,
+filesystem lock guard and polling guard against file/RTOS boundary doubles.
+It checks incomplete writes, reported errors, post-flush size, empty content,
+failed opens/renames, destination preservation, temp cleanup, path allocation
+failure and nested ownership. A deterministic two-thread test exposes the old
+gap between writing and renaming the shared temporary file. `--baseline <cpp>`
+can run the same regressions against a saved pre-change `System_Utils.cpp`.
+ASan/UBSan follow `HW1_SANITIZE`. These are checked-completion tests; the Arduino
+backend does not expose flush/close failures or establish power-loss durability.
+
 `fileread_psram`, `filesystem_psram_listing`, and `g2_files_psram` compile the
 actual extracted handlers/walkers/viewer with the production `PsramBuffer`.
 They mock filesystem, authentication, HTTP/BLE/rendering and crypto-key/open
 boundaries; the listing permission source contract still checks the real
 lock-bound authorization implementation separately. ASan/UBSan follow
 `HW1_SANITIZE`.
+
+`filemanager_directory` executes the production browser cache/fallback methods
+and shared VFS directory reader. It covers 255/256/257-entry boundaries, virtual
+SD mounts, picker matches beyond the cache, hidden and malformed entries,
+SD-relative names, full permission paths, identity refresh, child-count limits
+and borrowed directory/owned entry lifetimes. Its `--baseline <directory>` mode
+can run the same regressions against a saved pre-change FileManager source.
+
+`espnow_directory` executes the production remote listing handler and
+reader against protocol/filesystem doubles. It checks pagination, visibility,
+permission metadata, errors and reply ownership. These tests do not establish
+physical SD behavior or a radio connection.
 
 Coverage includes complete listing JSON/text parity, independent HTTP/command
 output ownership, SD naming/counts, permissions-query order, allocation and
@@ -111,6 +271,27 @@ I2C/Wire buffers, task stack, cache, and sensor timing settings are unchanged.
 Host tests cannot establish physical RAM placement, ranging accuracy, or the
 polling-time impact of PSRAM access; those require an on-device check.
 
+## ToF polling and stop outcomes
+
+`tof_poll_outcomes` executes the production poll and task through the real I2C
+manager transaction template, clock handling, and health accounting on both
+buses. Mock RTOS waits inject a stop before polling, during bus acquisition,
+and during cache acquisition. A stop before entry does no bus work; a stop
+after admission permits one hardware operation to finish without publishing.
+Every cache admission, event, and driver destruction requires the bus released.
+Repeated not-ready samples do one readiness read each and leave timestamp and
+sequence unchanged. Bus/cache refusal and real readiness/read/rearm failures
+exercise the distinct health and publication outcomes. Task cleanup executes
+the real invalidation and matching object destruction/free path.
+
+The optional `--baseline /path/to/pre-change-checkout` mode reproduces the old
+stop-during-bus-wait defect: no vendor read, an ACK diagnostic probe, and a
+synthetic NACK recorded by the actual manager. It accepts a bounded snapshot
+of the old owner and I2C headers, using unchanged support files from this
+checkout. The normal registered test requires the corrected behavior;
+`HW1_SANITIZE` enables ASan/UBSan. Hardware timing and physical ranging still
+require device testing.
+
 ## Optional PSRAM for sensor objects
 
 Application-owned heap driver objects use `AllocPref::PreferPSRAM`: external
@@ -126,6 +307,16 @@ It checks placement construction and matching destruction, failed initialization
 and retries, and Seesaw's existing retain-across-retry/stop behavior. Vendor-owned
 I2C helpers, Wire buffers, locks, static caches, and driver algorithms are outside
 this migration. The tests do not exercise real hardware or task races.
+
+`sensor_task_restart` compiles all nine production sensor task-creation helpers,
+the shared self-exit macro, and RTC's existing exit tail with minimal RTOS
+boundary mocks. It checks failed creation/retry, duplicate starts, publication
+of the correct null handle before deletion, and repeated restarts before and
+after idle frees the old task control block. Source checks bind each driver's
+exit to its own handle and require cleanup before restart is published. This
+guards against querying a deleted task's retired handle; it does not reproduce
+the real scheduler, sensor cleanup, or I2C transactions. ASan/UBSan follow
+`HW1_SANITIZE`.
 
 `memutil_tests` and `memutil_no_psram` compile the real allocation implementation
 with and without `BOARD_HAS_PSRAM`, respectively. They cover runtime-absent
@@ -229,7 +420,579 @@ ms and 400 kHz / 15 ms policies to the bus clock and mutex wait. The companion
 requires every standard and NACK-tolerant helper to forward explicit per-call
 options, and requires boot identities to use their configured physical bus.
 
+`i2c_probe` extracts the production address probe, clock helpers, constructors
+and inline probe/ping wrappers, compiling them against the actual manager
+header and Wire/RTOS substitutes. It verifies both physical bus mappings,
+write-only/unprimed device ACKs without payload reads or writes, confirmation
+of positive ACKs under the same bus lock, transient ACK rejection, unchanged
+NACK/error statuses, mutex and clock-stack refusal, clock restoration, and
+runtime-disabled wrappers. Discovery must not change registry identities,
+device health or transaction metrics. Source guards keep CLI, OLED, boot and
+hardware detection scans on this shared probe and polling guard, without direct
+Wire initialization or clock changes. ASan/UBSan follow `HW1_SANITIZE`;
+electrical faults, real device identity and timing still require hardware testing.
+
+## Command catalogue coverage
+
+`command_catalogue` compiles the complete production `System_CommandRegistry.cpp`
+with the real metadata header and small command-table/connection-provider link
+fixtures. Seven selections cover no optional modules, networking, gamepad and
+peripherals, ANO input, applications, glasses without Bluetooth, and combined
+features. Readable snapshots captured from the pre-extraction table preserve
+module order, command/count addresses, flags and callback provider/sensor names.
+Callbacks run with every provider off and each provider enabled individually;
+ASan/UBSan follow `HW1_SANITIZE`. These are resolved feature inputs, not a second
+board/dependency model or hardware qualification. When deliberately changing the
+catalogue, review the affected snapshot rows and selections alongside the change.
+
+## Saved WiFi network coverage
+
+`wifi_networks` compiles the production saved-network owner, real ArduinoJson
+and the existing Settings secret wrappers with host String, mutex, allocation,
+crypto and persistence boundaries. Cases preserve the original helper behavior:
+input limits, blank-password updates, eight-entry capacity, priority ties,
+normalization, final removal and RAM changes after persistence failure. New
+coverage checks stable entry IDs, credential-free presentation snapshots,
+coherent connection copies under concurrent updates, setup-result/autostart
+handling, legacy JSON loading, ciphertext preservation and password omission.
+The real removal commands and ID parser cover quoted/plain SSIDs, invalid IDs,
+stale selections and persistence failures; command registration guards retain
+their existing authentication requirement.
+Injected record-copy, initialization and JSON allocation failures must report
+failure; crypto, output and persistence must run outside the list lock.
+The disabled source/API also compile and run without platform headers.
+ASan/UBSan follow `HW1_SANITIZE`; these fixtures do not qualify ESP allocation
+placement, radio connections or RTOS scheduling. `wifi_network_consumers` guards
+Settings load readiness/key selection, snapshot-failure propagation and setup
+callers' result/cancellation handling.
+`wifi_saved_ui` executes the production OLED and G2 list, selection and command
+submission functions against changing snapshots. It checks retained identities
+across reorder/removal, confirmation callbacks, session reset, access checks and
+failed page admission without testing radio hardware.
+
+## GPS snapshot boundary
+
+```sh
+python3 -B components/hardwareone/test/host/test_gps_snapshot.py --sanitize
+```
+
+`gps_snapshot` compiles the production snapshot/JSON/invalidation functions,
+startup reset and task publication/shutdown blocks, the real cache guard, and
+the GPS portions of G2, web, MQTT and sensor logging. It checks independent
+copies, cleared failed reads, 5/10/50 ms consumer budgets, all JSON buffer
+capacities, disabled-header behavior, failed startup reset, and deferred stop
+cleanup. Publication holds the cache lock only for the copy; JSON formatting,
+track/event callbacks and destruction run after its release. ASan/UBSan follow
+`HW1_SANITIZE`.
+
+The output fixture was captured from the pre-refactor production functions.
+An optional `--baseline /path/to/old/components/hardwareone` also executes that
+source and compares its output directly. MQTT timeout now omits GPS data; its
+successful wire format, raw speed units, and existing no-fix behavior remain
+covered. OLED has a narrow source-boundary check; its full renderer is not
+compiled because an existing glyph escape is rejected by desktop Clang.
+
+The host semaphore, driver and transport substitutes do not exercise real RTOS
+scheduling, NMEA parsing, I2C hardware or rapid stop/restart lifecycle races.
+Shutdown waits are bounded individually; persistent lock contention can defer
+cleanup. This test does not claim a maximum total shutdown duration.
+
+## Presence snapshot boundary
+
+```sh
+python3 -B components/hardwareone/test/host/test_presence_snapshot.py --sanitize
+```
+
+`presence_snapshot` extracts the production snapshot, JSON, CLI, startup reset,
+shutdown and complete polling functions, the real cache guard, and the presence
+portions of G2, web, MQTT, OLED and logging. It verifies independent copies,
+cleared unavailable reads, 5/10/50/100 ms budgets, JSON buffer boundaries,
+disabled-header behavior, reset failure and deferred shutdown retry. Formatting
+and callbacks must run outside the cache lock; cache waits must follow release
+of the shared I2C bus. ASan/UBSan follow `HW1_SANITIZE`.
+
+Polling checks cover all detection-bit combinations, signed/raw temperature
+units, every register-read failure, no new sample, failed I2C admission,
+cache contention, presence clear after ten consecutive polls, reset of that
+debounce by renewed detection, and motion edge notifications. A saved output
+fixture retains successful, invalid, inactive and busy consumer behavior,
+including JSON's distinct `ambient:0` timeout and `ambient:0.00` successful-zero
+formats. `--baseline /path/to/old/components/hardwareone` additionally executes
+the pre-change code and compares its output directly.
+
+Register I/O, RTOS admission, HTTP and OLED printing are host substitutes.
+These checks do not qualify hardware detection accuracy, actual display
+formatting, bus timing or task scheduling. Each shutdown wait is bounded;
+persistent contention can defer completion. General sensor restart lifecycle
+and I2C teardown are outside this cache-boundary test.
+
+## Remaining sensor reading boundaries
+
+```sh
+ctest --test-dir /path/to/host-build --output-on-failure \
+  -R '^(small_sensor_snapshots|thermal_snapshot|fm_radio_snapshot|sensor_reading_consumers|input_button_snapshot|gpio_encoder_integration)$'
+```
+
+Configure the host build with `HW1_SANITIZE=ON` for ASan/UBSan coverage.
+`small_sensor_snapshots` executes production IMU, ToF, APDS and RTC snapshot,
+JSON, OLED and lifecycle blocks, including ToF polling/filtering and RTC
+publication. It covers cleared failed copies, disabled interfaces, reset
+failure and bounded shutdown attempts. Existing `sensor_parent_lifecycle` and
+`tof_psram_lifecycle` suites continue to cover parent teardown and ToF storage.
+
+`thermal_snapshot` executes production metadata/frame copies, serialization
+and OLED rendering. It checks raw/interpolated units, all four rotations,
+caller capacity, unavailable/allocation-failure paths, copied-frame lifetime,
+startup and shutdown. The output fixture includes the integer ESP-NOW payload.
+Consumers own copied frame buffers; a failed copy leaves the supplied buffer
+untouched and clears its metadata.
+
+`fm_radio_snapshot` exercises the production fixed-size critical copy, RDS
+scrubbing, JSON, OLED, commands and polling. It checks seek admission, the
+300 ms arm delay and 6 s failsafe, failed bus admission and command/poll order.
+Hardware calls and output must occur outside the critical section. The enabled
+snapshot always takes that short critical section; its timeout argument is
+retained for interface compatibility.
+
+`sensor_reading_consumers` executes the affected G2 formatters, Bluetooth JSON,
+logging blocks, automation conditions and FM readout using substituted owner
+APIs. It preserves successful output and consumer-specific validity policies;
+owner synchronization is covered by the suites above. These four suites accept
+`--baseline /path/to/old/components/hardwareone` for direct comparison with
+pre-change production source. Checked-in output fixtures support ordinary runs.
+
+`input_button_snapshot` executes the real HAL peek, atomic consume, publication
+and activity sequence operations, disabled input and ANO detent/reset/start
+paths. `gpio_encoder_integration` compiles the GPIO backend and HAL owner with
+both three- and five-button wiring, including failed initial publication,
+failed task creation and a contended stop. Snapshot readers do not consume
+latched presses, and a failed activity read preserves the previous sequence.
+
+Host driver, bus, display and RTOS substitutes do not qualify physical sensors,
+interrupt timing or real task scheduling. Lifecycle flags remain separate from
+reading ownership; these tests do not claim a general restart/teardown redesign.
+
+## PCA9685 and FM command outcomes
+
+```sh
+ctest --test-dir /path/to/host-build --output-on-failure \
+  -R '^(servo_command_outcomes|fm_radio_snapshot|sensor_parent_lifecycle)$'
+```
+
+`servo_command_outcomes` executes production command parsing, initialization,
+servo/profile/calibration and PWM handlers. Invalid input must not initialize
+or write hardware; refused transactions must not report success. It covers
+initialization failure and retry, profile preservation, reported PWM write
+failure and the single lock around optional frequency plus PWM updates.
+
+`fm_radio_snapshot` also covers strict tune/volume/seek/mute argument validation,
+refused transactions followed by recovery, unchanged cache/events/banners on
+refusal, and offline volume storage. Its existing JSON/OLED fixtures remain
+unchanged. Both suites use controlled driver and bus outcomes and inherit
+`HW1_SANITIZE`. Void driver calls establish only that a request was issued;
+these tests do not qualify physical writes, servo motion or radio reception.
+
+## Cached APDS and ToF read commands
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure \
+  -R '^(apds_read_commands|tof_read_command|small_sensor_snapshots|sensor_reading_consumers)$'
+```
+
+`apds_read_commands` executes the production commands, snapshots, JSON,
+invalidation and startup cache reset in a variant with no hardware or event
+APIs declared. A second variant executes the task's actual sampling block
+across 32 bus/mode/readiness combinations, bus/cache refusal and fault handling.
+It checks per-field availability, color-not-ready without an I2C health error,
+and gesture/presence event ownership. Reading a gesture repeatedly does not
+consume the cached value or read the hardware again.
+
+`tof_read_command` executes the production command, snapshot guard and JSON
+builder. It checks stopped/disconnected/busy/invalid/no-object outcomes,
+nearest-object selection within the four cached slots, text/JSON distance
+agreement, and exactly one distance message outside the cache lock. Validation
+does not perform a read. Both suites enable ASan/UBSan with `HW1_SANITIZE`.
+
+These checks qualify cached command behavior; APDS mode writes, driver
+teardown synchronization and the vendor gesture reader's execution time remain
+separate from this read-command change.
+
+## Incremental APDS gesture reader
+
+`apds_gesture_driver` extracts the vendor's actual `readGesture`, `resetCounts`
+and FIFO read methods, with I2C transfers, register reads, gesture-valid status
+and Arduino time supplied by the harness. Every call performs at most one FIFO
+transfer and three I/O operations, with no sleeping or polling loop. Continuous
+held input over many calls must release the bus after each available batch.
+It checks all four directions within a batch or across calls 200 ms apart,
+recent partial gestures surviving no-data gaps, 300 ms inactivity expiration,
+FIFO levels 0/1/2/3/32/33, failed partial transfers, direction state surviving
+256+ records, and unsigned clock rollover. ASan/UBSan follow `HW1_SANITIZE`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure \
+  -R '^apds_gesture_driver$'
+```
+
+These controlled FIFO fixtures do not qualify physical gesture accuracy or
+Wire timeout behavior; each underlying I/O call must still return.
+
+## Sensor start and stop requests
+
+```sh
+ctest --test-dir /path/to/host-build --output-on-failure \
+  -R '^(i2c_device_queue|sensor_lifecycle_requests|sensor_start_outcomes|sensor_task_restart|tof_psram_lifecycle)$'
+```
+
+`i2c_device_queue` compiles the production manager queue methods. It covers
+duplicate starts, wrapped/full rings, cancellation, stop priority, unavailable
+queues and stop admission with the bus disabled. Queue position/depth remain
+start-only; stop requests have independent capacity.
+
+`sensor_lifecycle_requests` executes the production command admission and full
+worker with the actual manager queue. It injects close requests after dequeue,
+during startup spacing and inside initialization. It checks returned start
+outcomes, suppressed cancelled-start announcements, cleanup before stop events,
+taskless FM/RTC stops, probe errors and balanced polling pauses. ESP-NOW enabled
+and disabled variants run separately.
+
+`sensor_start_outcomes` executes all nine production sensor starters, including
+both I2C input backends. Cleanup guards must run before initialization or cache
+reset; initialization, allocation and task-creation failures must roll back
+state. Thermal/IMU/FM initialization handshakes also exercise failure and timeout.
+The existing task-restart test covers retired task handles. ToF lifecycle tests
+check protected stop-measurement writes and release when bus access is refused.
+All compiled suites inherit `HW1_SANITIZE`. These deterministic interleavings
+do not simulate every RTOS schedule or concurrent hardware command.
+
+## Shared ESP-NOW setup application
+
+`setup_espnow_application` follows the MQTT setup harness and runs the shared
+settings operation plus the actual serial, CLI-mode and OLED page handlers.
+It covers full/partial input, blank and early-next names, stale drafts, skip,
+back, cancellation, timeout and OLED button paths. Settings apply on accepted
+page completion; final persistence remains outside this operation. Cancellation
+of the whole wizard does not roll back settings accepted on previous pages.
+
+## Shared setup completion
+
+`setup_completion` executes the production save/apply helper, blocking wrapper,
+CLI exit adapter, universal cancel dispatch and serial timeout functions. It
+checks incomplete/cancelled/timed-out exits, all saved-Wi-Fi outcomes, each
+settings writer failing independently, both writes still being attempted,
+runtime application and connected-only NTP refresh, and existing completion
+messages. Wi-Fi-enabled and disabled variants run under `HW1_SANITIZE`.
+The interactive dialog, finalizer, storage owners and network are controlled
+boundaries; this does not simulate physical UI, durable flash writes or real
+SNTP. Finalization stays at its existing call sites and cancellation is not
+treated as rollback of settings already accepted on earlier pages.
+
+```sh
+ctest --test-dir /path/to/host-build --output-on-failure \
+  -R '^(setup_completion|wifi_network_consumers|settings_downstream_persistence_contract)$'
+```
+
+## Shared CPU clock changes
+
+`power_cpu_frequency` executes the production clock owner, power-mode application
+and `cpufreq` command with the real power-policy header. I2C-enabled variants link
+the actual polling-pause implementation; disabled variants provide no manager or
+pause symbols. It checks both bus locks, partial acquisition failure, recursive
+and concurrent request refusal, absent buses/manager, nested pause preservation,
+HAL refusal and readback mismatch, and whether the owner's own HAL call changed
+the clock. Commands retain validation and admin registration; mode/command success
+messages, settings and events follow confirmed changes. ESP32/S3 and both P4
+revision policies run separately, including HAL-accepted idle-only 40 MHz.
+
+`power_save_tick` executes the unchanged idle/wake function in a fresh process
+for each scenario. It checks refused idle entry, retained wake retries after
+activity is consumed, recovery after an owner's partially failed clock change,
+and refusal overlapping another owner's clock change. Display/cooldown/events
+must follow confirmed CPU transitions. Disabled power-save, STT, Locked mode and
+UART baud-floor behavior are included. These suites inherit `HW1_SANITIZE`; RTOS
+semaphores, clock hardware and display effects remain deterministic boundaries,
+so they do not qualify electrical I2C timing or physical sleep/wake.
+
+```sh
+ctest --test-dir /path/to/host-build --output-on-failure \
+  -R '^(power_cpu_frequency|power_save_tick)$'
+HW1_POWER_TEST_APP="$PWD" python3 experiments/p4_ble_roles/tests/test_power_profile.py
+```
+
+The existing experiment profile test additionally checks power JSON and CPU menu
+labels against the selected application's production source.
+
+## Icon lookup and rendering ownership
+
+`icon_ownership` compiles the generated icon assets, complete handwritten lookup
+owner and extracted production renderer/adapter with their actual public headers.
+OLED+web, OLED-only, web-only and headless selections run separately. The real
+`HAL_Display.h` selects SSD1306 and ST7789 aliases over controlled pixel sinks;
+an `Adafruit_GFX`-typed SSD1306 caller checks the shared rendering interface.
+Web-only and headless compilation have no display-library headers available.
+
+The fixture was captured by executing the previous `System_Utils.cpp` icon
+functions before their move. It pins the generated source hash, asset bytes,
+every extension mapping/fallback and every compiled icon's pixels at nine scales
+(0.01, 0.25, 0.49, 0.5, 0.51, 0.75, 1, 1.3 and 2), plus a clipped placement.
+Normal-size legacy and scaled drawings must match. New validation cases cover
+null/unknown names, null display/bitmap, invalid dimensions and invalid/overflow
+scales. Named global rendering must match the shared pointer overload. ASan/UBSan
+follow `HW1_SANITIZE`. Display libraries are pixel-recording boundaries; this
+does not test panel transport or prove physical display output.
+
+```sh
+ctest --test-dir /path/to/host-build --output-on-failure -R '^icon_ownership$'
+```
+
+For an intentional artwork or rendering change, review the changed assets/code,
+explicitly regenerate the fixture from current production, then review the
+fixture diff with the change:
+
+```sh
+python3 components/hardwareone/test/host/test_icon_ownership.py --update-fixture --sanitize
+```
+
+Ordinary test runs never update fixtures. `--capture-baseline <source-directory>`
+remains available only for the original historical capture from a pre-move
+source snapshot; it is mutually exclusive with `--update-fixture`.
+
+## NTP transport coverage
+
+`ntp_transport` compiles the complete production `System_NTP.cpp` and its real
+public header with deterministic SNTP, WiFi, time and Clock service substitutes.
+It checks actual replies versus retained time, warm/dark timeout budgets, RTC
+fallback, disconnected/stopped clients, late-reply status and notices, and
+deferred Clock handoff. Callback injection at the deadline and during drain
+covers those ordering boundaries; multiple queued replies retain the existing
+coalescing behavior. Setup checks callback ordering, timezone reapplication and
+stable server storage. RTC-disabled paths run separately; WiFi-disabled source
+and APIs compile and run without any platform headers. ASan/UBSan follow
+`HW1_SANITIZE`. This does not test real SNTP traffic, RTOS scheduling or Clock's
+separately owned post-step duties.
+
+## Bluetooth status coverage
+
+`ble_info_status` compiles the production BLE info formatter, CLI command,
+lifecycle guard, state strings, BLE types and Bluetooth HTTP status handler with
+vendored ArduinoJson. It checks the existing JSON/text schema, active-slot
+ordering, authenticated/anonymous identity, escaping, wrapping connection age,
+copied string lifetimes, independent caller documents, bounded lock refusal,
+absent initialization, every observed JSON allocation/growth failure, CLI size limits,
+HTTP authorization and short final serialization. G2-enabled and disabled
+variants preserve G2/ring fields through direct owner access, check typed G2
+connection fields independently of display text and all four combinations of
+their independent auto-reconnect policies, report unavailable G2/ring
+status and allocation errors, and accept ring JSON larger than the CLI
+buffer; the BLE-disabled public header is compiled and executed separately. `--baseline <component-dir>`
+compares successful CLI output against saved pre-change source.
+
+`sensor_mic_card` executes the actual Sensors empty-grid JavaScript chunk with a
+small DOM boundary. It checks that a microphone-only page preserves the shared
+microphone target, other available sensors remain, and an empty grid
+still shows its placeholder. `--baseline <header-or-component-dir>` replays the
+same expectations against a saved header; it does not test layout or audio.
+
+The extracted command-write callback and advertising functions also execute
+against boundary mocks, checking guarded counter/state updates, invalid writes
+and dispatch after lock release. Initialization/teardown as a whole is not
+executed by this suite.
+
+Two host reader threads and a writer exercise coherent lock-protected fields
+with the extracted guard and formatter. This substitutes host locking for
+FreeRTOS and does not qualify radio callbacks, hardware or firmware scheduling.
+HTTP, String append failure and allocation policies are host boundaries.
+ASan/UBSan follow `HW1_SANITIZE`.
+
+`ring_info_status` compiles the production ring status owner, CLI command,
+state type, text formatter, pending-state reader, shared JSON-argument parser
+and validation macro. It checks the twelve-field schema, empty/invalid Arduino
+Strings, escaping, copied string ownership, independent output documents,
+wrapping uptime, absent-task stack defaults and stack-use clamping. The CLI
+checks cover validation without sampling, every observed JSON allocation
+failure, and the exact 319/320-byte output boundary. The actual public header
+is compiled and executed with either or both feature gates disabled.
+
+`--baseline <component-dir>` compares ordinary CLI JSON/text bytes and parsed
+escaped values against the saved pre-change command using its real CompactJson
+implementation. Python's strict JSON decoder checks emitted JSON. A serializer
+regression case uses the real vendored ArduinoJson to cover every control byte
+(including explicit-length embedded NUL) in object keys and values, quotes,
+slashes and UTF-8, compact/pretty output, and measured versus written length.
+Allocation policy, String storage and RTOS stack sampling are host boundaries;
+this suite does not claim coherent whole-ring snapshots, radio lifecycle or
+physical ring qualification. ASan/UBSan follow `HW1_SANITIZE`.
+
+`g2_connection_status` executes the production state-name function, topology
+snapshot, public connection snapshot and shared legacy text formatter. All seven FSM
+states, both lifecycle presence gates and four temple-link combinations are
+covered, including off versus initialized idle, partially connected glasses,
+physical links before session promotion, unknown batteries, maximum counters,
+independent caller copies, and every output capacity through the complete text
+length. Formatting a captured copy does not resample the owner. Null/zero-length
+output skips capture. `--baseline <component-dir>`
+compares successful text bytes with saved production source. The real disabled
+header is separately compiled and executed by `g2_disabled_header` for all three
+feature/SDK-off configurations; unavailable snapshots leave caller data alone.
+That suite also compiles the same eight typed rendering signatures and default
+calls with G2 enabled and disabled. Disabled calls return false without invoking
+callbacks or modifying pager/output state. Six test cases cover those four gate
+combinations, standalone `G2_RenderTypes.h`, both public/protocol include orders,
+and the public header's independence from wire-protocol declarations.
+Both suites follow `HW1_SANITIZE`. The runtime-state and topology values are
+captured under their existing lifecycle/topology guards. During initialization,
+status skips temple objects being reconstructed and returns off/default values
+until the runtime is published. Driver state carriers and critical-section
+primitives are host boundaries; MTUs, batteries and traffic counters still have
+independent writers and are not a coherent whole-device snapshot.
+
+`g2_client_lifecycle` executes the production initialization and teardown bodies,
+role/init claims, private runtime publication/read helpers, combined status and
+page/tap worker admission. BLE, resource allocation, clocks and worker outcomes
+are host boundaries. It exercises startup refusals, host/scan rollback (including
+failed rollback), repeated initialization, retryable worker allocation failures,
+and every deferred teardown barrier without retiring the runtime prematurely.
+It also executes the production memory checker and G2 registry entry against
+15 admission scenarios: cold startup and retained-worker restart below, at and
+above the threshold; server-to-client switching; and simultaneous low memory
+and failed/deferred cleanup. These check that old host cleanup and temple
+quiescence precede memory admission, while new temple/host/worker initialization
+follows it. Retained workers remain subject to the unchanged registry floor.
+The low-memory restart and role-switch cases retry the same stopped instance
+after memory becomes available, checking claim release and worker reuse. The
+worker boundary retains page-swap, tap and ring tasks across runtime shutdown;
+it retires the session worker and checks that an admitted restart recreates it
+once, without duplicating persistent workers or acknowledgement semaphores.
+Heap samples and retained allocations are boundary outcomes, not measured
+device usage. The existing shared TX mutex may initialize before cleanup.
+`--baseline <component-dir>` compares unchanged lifecycle outcomes with saved
+production `G2_Glasses.cpp/.h` and `System_MemoryMonitor.cpp/.h`. The additional
+admission cases reproduce an older source's early memory refusal and explicitly
+account for the intended change in cleanup-versus-memory refusal precedence.
+The production state writers and four concurrent readers use
+real host mutexes across 12,000 publication/reset cycles and 100 real init/deinit
+control-flow cycles; raw temple reconstruction in the host boundary checks that
+the existing init claim excludes status readers. This covers state lifetime and
+lock ordering, including worker admission without recursive lifecycle locking;
+it does not qualify BLE resources, temple teardown, scheduling on-device or
+independently sampled telemetry. ASan/UBSan follow `HW1_SANITIZE`. Run
+`python3 test_g2_client_lifecycle.py --thread-sanitize` separately for
+ThreadSanitizer (do not combine sanitizer modes).
+
+`g2_redraw` executes the production command-completion redraw helper and the
+lens worker's Redraw dispatch branch, using the shipping cookie/job declarations.
+It covers original command metadata after navigation advances, stale generations
+before and after queue admission, deferred rendering, both allocation failures,
+queue rejection, null callbacks, and accepted/rejected ownership cleanup. The
+RTOS queue and allocation failures are host boundaries; this does not qualify
+physical lens rendering or device scheduling. ASan/UBSan follow `HW1_SANITIZE`.
+
+`g2_power_completion` compiles the full Power page with the production redraw
+helper and worker dispatch. It checks copied result lifetime, deferred display,
+leaving/reopening pages and submenus, overlapping requests, allocation/queue
+failures, submission refusal, and duplicate destructive confirmations. Error
+rows replace timed completion banners; the pre-reboot tap delay remains.
+
+`g2_mic_completion` executes the microphone callbacks, redraw handoff and live
+renderer with microphone support enabled and disabled. It covers navigation
+before and after handoff, failed teardown, a delayed container-state mirror,
+exact exit-callback publication after recreation, and unchanged command policy.
+Logging completion cases cover success/error deferral, stale cookies and enqueue
+failure. Both suites use ASan/UBSan with `HW1_SANITIZE`; driver, display, command
+submission and RTOS operations are controlled host boundaries, not physical
+glasses or scheduler qualification.
+
+`sensorlog_selection` compiles the logger's production sensor catalog, selection
+helpers, shared argument parser and changed-only settings mutator. It covers
+every initial selection/toggle bit, queued toggle intentions, intervening set
+replacement, aliases/case/whitespace, all/none, legacy trailing commas, query
+labels, status names/formats, rejected-list rollback, CSV refusal and buffer
+allocation failure.
+Persistence and notification calls are boundary observations; this does not
+qualify flash writes, CSV output, task races or physical sensor logging.
+`--baseline <component-directory>` replays the same assertions against the saved
+old sensors command branch and reproduces partial invalid-list mutation and
+the missing toggle operation. ASan/UBSan follow `HW1_SANITIZE`.
+
+`sensorlog_ui` executes the production G2/OLED logging rows and input handlers
+with the shared catalog. It checks labels/checkmarks, one selection read per
+render, independent toggle requests despite stale displayed masks, repeated
+taps, negative/out-of-range indices, guest/navigation gates, authorized executor
+handoff, G2 cookie/completion forwarding, start/stop paths and the remaining
+interval/format/back controls. UI, input, logger reads and command submission
+are host boundaries; this does not qualify physical displays or asynchronous
+device execution. ASan/UBSan follow `HW1_SANITIZE`.
+
+`sensorlog_settings` compiles the production numeric logger handlers, complete
+generic settings editor, shared argument parser and changed-only settings
+mutator, with R1 Health enabled and disabled. It covers queries and errors when
+live/saved state differ, validation-only requests, running-CSV selection refusal,
+all numeric masks, unchanged generic parsing/output/events, shared text/numeric
+format policy and TRACK's GPS-only persistence. Persistence observations check
+publication order without claiming atomic snapshots. Enabled cases also run
+the production health setter/restart helper: added-R1 header restarts, existing
+CSV shortcuts, TEXT/TRACK coercion, stop/restart decisions, failure behavior,
+custom paths and fallback intervals. Persistence, path shaping and session start
+are host boundaries; this does not qualify actual file writes or scheduling.
+`--baseline <component-directory>` reproduces the old query/error live-state
+resets, numeric CSV bypass and numeric/text TRACK divergence. ASan/UBSan follow
+`HW1_SANITIZE`.
+
+`gpslog_start` executes the production GPS-log orchestration, GPS queued-start
+adapter and auto-start command, with the real shared argument parser and settings
+mutator. It checks strict interval input, disabled/running/health preflight,
+queued versus ready GPS outcomes, borrowed-result lifetime, failures at each
+owner boundary and auto-start preferences enabled only after confirmed startup.
+A separate unit executes the actual logger typed start, saved-parameter restore,
+configured-session entry point, boot helper and explicit-start adapter. It covers
+literal paths containing spaces/quotes, default paths, legacy restore/clamp
+limits, boot-only health policy, admission failures and session publication.
+VFS, sealing, clock/path shaping, persistence and GPS queue outcomes are controlled
+host boundaries; this does not qualify storage devices, GPS reception or task
+scheduling. `--baseline <component-directory>` reproduces the old orchestration's
+partial-input acceptance, early auto-start changes, ignored failures and false
+active/ready claims. `--start-baseline <saved-System_SensorLogging.cpp>` verifies
+that the extracted filesystem/admission/publication body is unchanged apart from
+indentation. ASan/UBSan follow `HW1_SANITIZE`.
+
+`health_logging_ui` executes production G2 Health model requests, request reset,
+worker dispatch and log-only completion handling, plus OLED Health input and the
+Health HTTP handler with the real unified web executor. It covers queued toggle
+intent, guest/auth gates, web source/user/session forwarding, stale-session reply
+rejection, owner/helper failures and unchanged unrelated Health actions. Logger
+mutation, transport, session lookup and command submission are boundaries; this
+does not qualify physical glasses, radio traffic or the device scheduler.
+ASan/UBSan follow `HW1_SANITIZE`.
+
+`g2_status_browser` runs extracted production browser JavaScript with Node.js,
+using small DOM/network boundaries. It checks structured connection status
+rendering and button state independently of the human-readable status text,
+preserves control metadata handling, and compares ordinary rendering against
+the historical text-parsing production with `--baseline <component-dir>`.
+The same runner also executes the complete shipping page script with event,
+timer and request boundaries. It covers unknown initial mode, command/refusal
+and transport failures, authoritative mode/reconnect readback, repeat clicks,
+stale responses, slow polling, persistent connected-ring feedback, and the
+G2/Sensors/microphone link guards. It verifies navigation issues no microphone,
+source-selection or recording command. CMake registers this test
+when Node.js is found; set `HW1_NODE_EXECUTABLE` at configure time for a runtime
+outside PATH. These tests do not qualify physical G2 traffic, radio lifecycle,
+actual HTTP transport, browser layout or device scheduling.
+
 ## MQTT lifecycle coverage
+
+`mqtt_boolean_commands` executes all thirteen production MQTT toggle handlers
+with the real shared boolean parser, validation macro and settings mutator.
+It checks empty queries, every supported alias with case/whitespace variations,
+invalid inputs with no mutation or stop request, validation-only calls, exact
+responses, changed-only persistence/notifications and disable-stop ordering.
+Gamepad and ANO Encoder labels run separately. The subscription enable response
+retains its restart instruction; enabling settings never starts a client.
+`--baseline <component-directory>` replays the same expectations against saved
+sources to reproduce the former invalid-input and alias regressions.
+String storage, persistence/notifications and stop scheduling are deterministic
+host boundaries. This does not qualify a broker connection or actual teardown.
+ASan/UBSan follow `HW1_SANITIZE`.
 
 `mqtt_lifecycle_gate_tests` compiles the production packed atomic gate and
 checks command-first, stop-first, duplicate-stop, stop-during-start, retry, and
@@ -238,6 +1001,15 @@ two-thread admission-versus-stop orderings. The companion
 admission precedes queue submission and lasts through response publication,
 all driver teardown is main-loop-affine, both shutdown commands use the shared
 request path, and pending teardown runs before periodic publication.
+
+`setup_mqtt_application` extracts and executes the production shared settings
+helper and serial/OLED/CLI MQTT page handlers. It checks partial and complete
+updates, blank/nonpositive preservation, legacy positive-port acceptance,
+back/cancel paths, and the existing blank-port and skip/autostart differences.
+Settings persistence and MQTT start calls must remain absent from this apply
+step. String storage, settings storage, input, navigation and output are host
+substitutes; this test does not qualify a broker connection or physical UI.
+ASan/UBSan follow `HW1_SANITIZE`.
 
 To build and run only the dependency-free map geometry target (without the
 Python-backed allocation inventory):
@@ -438,10 +1210,13 @@ python3 components/hardwareone/test/host/test_camera_i2c_reservation.py --saniti
 
 This runs the actual `System_BuildConfig.h` reservation policy and unchanged
 manager constructor, `initBus`, `cmd_i2cbusenabled` and `cmd_i2c2busenabled`
-definitions in 18 host variants: P4, S3 and classic ESP32, camera enabled and
+definitions across 18 configurations: P4, S3 and classic ESP32, camera enabled and
 disabled, with the DVP SDK I2C1 option undefined, explicitly false, and true.
 P4 always reserves hardware I2C0 when its camera is compiled. DVP follows the
 SDK-selected port, and camera-disabled builds reserve neither controller.
+Sixteen configurations compile and run. The two DVP configurations selecting
+camera SCCB I2C1 with external I2C enabled must fail compilation with the specific
+controller-ownership conflict diagnostic.
 
 The runtime checks verify logical bus 0 maps to Wire1 / hardware I2C1 and bus 1
 to Wire / hardware I2C0. The unreserved controller initializes normally while

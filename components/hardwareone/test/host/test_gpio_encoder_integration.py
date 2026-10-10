@@ -1,6 +1,7 @@
 """Run the actual GPIO input task with fake pins, time, mutexes and task creation."""
 from pathlib import Path
 import shutil
+import re
 import subprocess
 import tempfile
 import unittest
@@ -18,8 +19,15 @@ class GPIOEncoderIntegrationTest(unittest.TestCase):
                     # Copy it intact so heavy platform headers can be substituted.
                     for name in ("Input_GPIOEncoder.cpp", "Input_GPIOEncoder.h",
                                  "Input_ButtonCore.h", "Input_RotaryCore.h",
-                                 "System_Board_P4X_EYE.h"):
+                                 "System_Board_P4X_EYE.h", "HAL_InputInternal.h"):
                         shutil.copyfile(production / name, work / name)
+                    header = (production / "HAL_Input.h").read_text()
+                    reading = re.search(r"struct InputCache \{.*?\n\};", header, re.S)
+                    self.assertIsNotNone(reading)
+                    (work / "input_reading_under_test.h").write_text(reading.group())
+                    source = (production / "HAL_Input.cpp").read_text()
+                    owner = source[source.index("// Shared input readings"):source.index("// Static State")]
+                    (work / "input_owner_under_test.h").write_text(owner)
                     binary = work / "gpio-input"
                     subprocess.run([
                         "c++", "-std=c++11", "-Wall", "-Wextra", "-Werror",

@@ -5,6 +5,7 @@
 #include "test_memutil.cpp"
 #undef main
 #include "System_CommandLimits.h"
+#include <ctime>
 #include <functional>
 #include <map>
 #include <memory>
@@ -126,6 +127,10 @@ struct File {
   bool isDirectory() const { return node && node->directory; }
   const char* name() const { return node ? node->name.c_str() : ""; }
   size_t size() const { return node ? node->bytes : 0; }
+  time_t getLastWrite() const {
+    check(false, "existing listing consumers must not request modification times");
+    return 0;
+  }
   File openNextFile() {
     check(fsDepth > 0, "directory cursor remains under FS lock");
     if (!node || cursor >= node->children.size()) return {};

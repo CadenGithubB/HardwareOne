@@ -5,6 +5,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "i2csensor_apds9960.h"
 #include "HAL_Display.h"  // For gDisplay and oledDisplay macro alias
 
 // Display function for APDS OLED mode
@@ -26,18 +27,18 @@ void displayAPDSData() {
     oledDisplay->println("== APDS DATA ==");
     oledDisplay->println();
     
-    if (gApdsCache.mutex && xSemaphoreTake(gApdsCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    APDSCache reading{};
+    if (apdsCacheSnapshot(reading)) {
       oledDisplay->print("R:");
-      oledDisplay->print(gApdsCache.apdsRed);
+      oledDisplay->print(reading.apdsRed);
       oledDisplay->print(" G:");
-      oledDisplay->println(gApdsCache.apdsGreen);
+      oledDisplay->println(reading.apdsGreen);
       oledDisplay->print("B:");
-      oledDisplay->print(gApdsCache.apdsBlue);
+      oledDisplay->print(reading.apdsBlue);
       oledDisplay->print(" C:");
-      oledDisplay->println(gApdsCache.apdsClear);
+      oledDisplay->println(reading.apdsClear);
       oledDisplay->print("Prox: ");
-      oledDisplay->println(gApdsCache.apdsProximity);
-      xSemaphoreGive(gApdsCache.mutex);
+      oledDisplay->println(reading.apdsProximity);
     }
   }
   

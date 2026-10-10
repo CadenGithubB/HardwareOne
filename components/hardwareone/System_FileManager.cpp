@@ -170,85 +170,56 @@ void FileManager::moveToBottom() {
   }
 }
 
+// Convert to the browser's bounded display record before applying its picker
+// predicate. Keep the reader's full path separately for permission metadata.
+static FileEntry makeBrowserEntry(const VFS::DirectoryEntry& item) {
+  FileEntry entry{};
+  strncpy(entry.name, item.name.c_str(), FILE_MANAGER_MAX_NAME - 1);
+  entry.isFolder = item.isFolder;
+  entry.size = item.size;
+  return entry;
+}
+
+bool FileManager::isVisible(const FileEntry& entry) const {
+  if (!state.showHidden && entry.name[0] == '.') return false;
+  return entry.isFolder || !visibilityFilter_ || visibilityFilter_(entry);
+}
+
 bool FileManager::getItem(int index, FileEntry& entry) {
   if (index < 0 || index >= state.totalItems) return false;
-  
-  // Use cached entries if available
+
   if (cacheValid && index < cachedCount) {
-    memcpy(&entry, &cachedEntries[index], sizeof(FileEntry));
+    entry = cachedEntries[index];
     return true;
   }
-  
-  // Fallback: scan filesystem if index is beyond cache
-  // (This should rarely happen with FILE_MANAGER_MAX_CACHED_ITEMS=256)
 
+  // Beyond the cache, replay the same entry order and visibility predicate as
+  // loadDirectory(), including virtual mounts and picker matches.
   FsLockGuard guard("FileManager.getItem.scan");
   const AuthContext& ctx = currentAuthContext();
-
   File dir = VFS::openGuarded(state.currentPath, "r", ctx);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     return false;
   }
 
-  // Same SD prefix-translation as loadDirectory — needed when the user
-  // is browsing /sd/* with more than FILE_MANAGER_MAX_CACHED_ITEMS (256) per directory.
-  String effectivePath = VFS::stripSdPrefix(String(state.currentPath));
-
+  VFS::DirectoryReader reader(dir, state.currentPath);
+  VFS::DirectoryEntry item;
   int currentIdx = 0;
-  File file = dir.openNextFile();
+  while (reader.next(item)) {
+    FileEntry candidate = makeBrowserEntry(item);
+    if (!isVisible(candidate)) continue;
+    if (currentIdx++ != index) continue;
 
-  while (file) {
-    // Extract display name
-    String fileName = String(file.name());
-    if (effectivePath != "/") {
-      char prefix[96];
-      snprintf(prefix, sizeof(prefix), "%s/", effectivePath.c_str());
-      if (fileName.startsWith(prefix)) {
-        fileName = fileName.substring(strlen(prefix));
-      }
-    } else if (fileName.startsWith("/")) {
-      fileName = fileName.substring(1);
-    }
-    
-    // Skip nested paths
-    if (fileName.indexOf('/') != -1) {
-      file = dir.openNextFile();
-      continue;
-    }
-    
-    // Skip hidden files if configured
-    if (!state.showHidden && fileName.startsWith(".")) {
-      file = dir.openNextFile();
-      continue;
-    }
-    
-    if (currentIdx == index) {
-      // Found it
-      strncpy(entry.name, fileName.c_str(), FILE_MANAGER_MAX_NAME - 1);
-      entry.name[FILE_MANAGER_MAX_NAME - 1] = '\0';
-      entry.isFolder = file.isDirectory();
-      entry.size = entry.isFolder ? 0 : file.size();
-      
-      // Get permissions for the *current* caller (so the toolbar in the
-      // UI reflects what the user can actually do, not what some stale
-      // context allows).
-      String fullPath = formatPath(state.currentPath, entry.name);
-      entry.permissions = getPermissions(fullPath, ctx);
-      // Cheap here (one subfolder open for the single found entry), so the
-      // uncached >256-item path still gets a correct badge.
-      entry.childCount = (countFolderChildren_ && entry.isFolder)
-                             ? countFolderEntries(fullPath, ctx) : 0;
-
-      file.close();
-      dir.close();
-      return true;
-    }
-    
-    currentIdx++;
-    file = dir.openNextFile();
+    entry = candidate;
+    // A one-item fallback uses a fresh live query, just as before. This mask
+    // is UI metadata; every later file operation still checks its own access.
+    entry.permissions = getPermissions(item.path, ctx);
+    entry.childCount = (countFolderChildren_ && entry.isFolder)
+                           ? countFolderEntries(item.path, ctx) : 0;
+    dir.close();
+    return true;
   }
-  
   dir.close();
   return false;
 }
@@ -440,118 +411,26 @@ bool FileManager::loadDirectory() {
   // later VFS operation still performs its own live guarded check.
   FsInternal::LockedListingPermissions listingPermissions(ctx);
 
-  // The SD library returns entry names rooted at the SD card root ("/")
-  // — it doesn't know about our "/sd" mount-point convention. So when
-  // currentPath is "/sd" or "/sd/foo", the prefix the underlying FS
-  // sees is the SD-relative path (with "/sd" stripped). Compute that
-  // once so we can strip it from each entry name correctly. For
-  // LittleFS paths this is a no-op (stripSdPrefix returns the input
-  // unchanged when there's no /sd prefix).
-  String effectivePath = VFS::stripSdPrefix(String(state.currentPath));
-
-  // Load and cache directory entries
   cachedCount = 0;
   state.totalItems = 0;
 
-  // Mount points (e.g. /sd at LittleFS root) — the VFS layer is the
-  // authority on which synthetic entries belong at this path. Each one
-  // gets translated into a FileEntry so the rest of the FileManager
-  // pipeline treats it like any other folder. Permissions come from the same
-  // rule table through the lock-bound listing view (e.g. /sd is PERM_READ —
-  // browse but don't delete the mount point).
-  {
-    VFS::VirtualEntry virtuals[4];
-    const size_t nVirt = VFS::listVirtualEntries(
-        String(state.currentPath), virtuals,
-        sizeof(virtuals) / sizeof(virtuals[0]));
-    for (size_t v = 0; v < nVirt; v++) {
-      if (cachedCount >= FILE_MANAGER_MAX_CACHED_ITEMS) break;
-      strncpy(cachedEntries[cachedCount].name, virtuals[v].name,
-              FILE_MANAGER_MAX_NAME - 1);
-      cachedEntries[cachedCount].name[FILE_MANAGER_MAX_NAME - 1] = '\0';
-      cachedEntries[cachedCount].isFolder = virtuals[v].isFolder;
-      cachedEntries[cachedCount].size = 0;
-      String fullPath = formatPath(state.currentPath, virtuals[v].name);
-      cachedEntries[cachedCount].permissions =
-          listingPermissions.forPath(fullPath);
-      cachedEntries[cachedCount].childCount =
-          (countFolderChildren_ && virtuals[v].isFolder) ? countFolderEntries(fullPath, ctx) : 0;
-      cachedCount++;
-      state.totalItems++;
-    }
-  }
+  VFS::DirectoryReader reader(dir, state.currentPath);
+  VFS::DirectoryEntry item;
+  while (reader.next(item)) {
+    FileEntry entry = makeBrowserEntry(item);
+    // Filter before counting/caching so matching files beyond the first 256
+    // physical entries remain reachable, using getItem()'s identical view.
+    if (!isVisible(entry)) continue;
 
-  File file = dir.openNextFile();
-
-  while (file) {
-    String fileName = String(file.name());
-
-    // Extract display name and filter. Strip the *effective* path
-    // prefix so SD entries (where the FS-level path is SD-rooted) are
-    // handled the same as LittleFS entries.
-    if (effectivePath != "/") {
-      char prefix[96];
-      snprintf(prefix, sizeof(prefix), "%s/", effectivePath.c_str());
-      if (fileName.startsWith(prefix)) {
-        fileName = fileName.substring(strlen(prefix));
-      }
-    } else if (fileName.startsWith("/")) {
-      fileName = fileName.substring(1);
-    }
-
-    // Skip nested paths
-    if (fileName.indexOf('/') != -1) {
-      file = dir.openNextFile();
-      continue;
-    }
-
-    // Skip hidden files if configured
-    if (!state.showHidden && fileName.startsWith(".")) {
-      file = dir.openNextFile();
-      continue;
-    }
-
-    // Cache this entry if we have space
     if (cachedCount < FILE_MANAGER_MAX_CACHED_ITEMS) {
-      strncpy(cachedEntries[cachedCount].name, fileName.c_str(), FILE_MANAGER_MAX_NAME - 1);
-      cachedEntries[cachedCount].name[FILE_MANAGER_MAX_NAME - 1] = '\0';
-      cachedEntries[cachedCount].isFolder = file.isDirectory();
-      cachedEntries[cachedCount].size = cachedEntries[cachedCount].isFolder ? 0 : file.size();
-
-      // Get permissions for the *current* caller — drives toolbar
-      // enable/disable in the UI per actual identity.
-      String fullPath = formatPath(state.currentPath, cachedEntries[cachedCount].name);
-      cachedEntries[cachedCount].permissions =
-          listingPermissions.forPath(fullPath);
-      cachedEntries[cachedCount].childCount =
-          (countFolderChildren_ && cachedEntries[cachedCount].isFolder)
-              ? countFolderEntries(fullPath, ctx) : 0;
-
-      cachedCount++;
+      entry.permissions = listingPermissions.forPath(item.path);
+      entry.childCount = (countFolderChildren_ && entry.isFolder)
+                             ? countFolderEntries(item.path, ctx) : 0;
+      cachedEntries[cachedCount++] = entry;
     }
-
     state.totalItems++;
-    file = dir.openNextFile();
   }
-
   dir.close();
-
-  // Apply visibility filter (picker mode). Compacts cachedEntries[] in place,
-  // keeping folders + files where filter() returns true. Done AFTER the dir
-  // scan so a refresh under a new filter doesn't require re-reading the FS.
-  if (visibilityFilter_ && cachedCount > 0) {
-    int writeIdx = 0;
-    for (int i = 0; i < cachedCount; i++) {
-      if (cachedEntries[i].isFolder || visibilityFilter_(cachedEntries[i])) {
-        if (writeIdx != i) {
-          memcpy(&cachedEntries[writeIdx], &cachedEntries[i], sizeof(FileEntry));
-        }
-        writeIdx++;
-      }
-    }
-    cachedCount = writeIdx;
-    state.totalItems = cachedCount;
-  }
 
   cacheValid = true;
   // Tag the cache with the generation it was filled under. refresh() reads

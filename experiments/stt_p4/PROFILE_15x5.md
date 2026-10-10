@@ -3,7 +3,7 @@
 Measured on the P4X-EYE (`02:48:57:31:04:68`, 400 MHz, Performance mode) with
 the `sttperf stages` counters: each of the 201 ESP-DL stages is timed around
 `model->run(...)` and summed over 8 speaker-test segments (~9 s audio each,
-~450 output frames). Raw per-stage averages: `/Volumes/USB2/stt/work/deploy15/stage_us.json`.
+~450 output frames). Raw per-stage averages: `/path/to/stt-data/work/deploy15/stage_us.json`.
 
 **Network total: ~2.6 s per ~9 s segment** (plus ~0.2 s of scheduler yields, now
 reduced by yielding every 5 stages instead of every stage).

@@ -6,7 +6,7 @@
 #include <ArduinoJson.h>
 
 #include "System_User.h"          // AuthContext
-#include "System_Battery.h"       // gBatteryState, getBatteryStatusString()
+#include "System_Battery.h"       // the battery snapshot, getBatteryStatusString()
 #include "System_MemUtil.h"       // ps_alloc, AllocPref, PSRAM_JSON_DOC
 #include "WebPage_Battery.h"
 #include "WebServer_Server.h"     // streamBeginHtml/EndHtml, streamPageWithContent, WEB_AUTH_OR_RETURN

@@ -6,6 +6,7 @@
 #include "System_ESPNow.h"       // Safe espnow_task stack snapshot
 #include "System_ESPNow_Tx.h"    // Safe espnow_tx stack snapshot
 #include "System_I2C.h"          // For queueProcessorTask
+#include "System_SensorStubs.h"  // Task handles/state for compiled-out sensors
 #include "HAL_Input.h"           // For INPUT_TASK_NAME / INPUT_TASK_TAG
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -361,16 +362,11 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
 
 // ============================================================================
 // Sensor Task Creation Helpers
+// Sensor tasks clear their owning handle after cleanup and before self-delete.
+// Never inspect a deleted task through a retained handle: idle frees its TCB.
 // ============================================================================
 
 bool createInputTask() {
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gInputTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gInputTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gInputTaskHandle = nullptr;
-    }
-  }
   if (gInputTaskHandle == nullptr) {
     const uint32_t stackWords = INPUT_STACK_WORDS;  // BYTES (3584 = 3.5 KB); name is a misnomer, see System_TaskUtils.h
     // Pin to Core 1 (APP): espnow_task + the Wi-Fi stack saturate Core 0, and a
@@ -389,8 +385,7 @@ bool createInputTask() {
       1);
 
     if (result != pdPASS) {
-      handleDeviceStopped(I2C_DEVICE_INPUT);
-      return false;
+      return false;  // The input owner rolls back a failed start.
     }
   }
   return true;  // Task created successfully or already exists
@@ -410,13 +405,6 @@ bool createInputTask() {
 // (created in HardwareOne.cpp / System_I2C.cpp) can pin to the same core.
 
 bool createThermalTask() {
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gThermalTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gThermalTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gThermalTaskHandle = nullptr;
-    }
-  }
   if (gThermalTaskHandle == nullptr) {
     const uint32_t thermalStack = THERMAL_STACK_WORDS;  // words; ~24KB (16KB was too tight on ESP32-classic — overflowed on failed-read retry storm + debug logging)
     if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, TASK_PRIORITY_LOW, &gThermalTaskHandle, "thermal", I2C_SENSOR_CORE) != pdPASS) {
@@ -427,13 +415,6 @@ bool createThermalTask() {
 }
 
 bool createIMUTask() {
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gImuTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gImuTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gImuTaskHandle = nullptr;
-    }
-  }
   if (gImuTaskHandle == nullptr) {
     const uint32_t imuStack = IMU_STACK_WORDS;  // words; ~16KB (BNO055 init retries need extra stack)
     if (xTaskCreateLogged(imuTask, "imu_task", imuStack, nullptr, TASK_PRIORITY_LOW, &gImuTaskHandle, "imu", I2C_SENSOR_CORE) != pdPASS) {
@@ -445,15 +426,8 @@ bool createIMUTask() {
 }
 
 bool createToFTask() {
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gTofTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gTofTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gTofTaskHandle = nullptr;
-    }
-  }
   if (gTofTaskHandle == nullptr) {
-    const uint32_t tofStack = TOF_STACK_WORDS;  // words; ~12KB
+    const uint32_t tofStack = TOF_STACK_WORDS;  // ESP-IDF task stack size in bytes
     if (xTaskCreateLogged(tofTask, "tof_task", tofStack, nullptr, TASK_PRIORITY_LOW, &gTofTaskHandle, "tof", I2C_SENSOR_CORE) != pdPASS) {
       DEBUG_CLIF("tofstart: FAILED to create ToF task");
       return false;
@@ -463,13 +437,6 @@ bool createToFTask() {
 }
 
 bool createFMRadioTask() {
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gFmRadioTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gFmRadioTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gFmRadioTaskHandle = nullptr;
-    }
-  }
   if (gFmRadioTaskHandle == nullptr) {
     const uint32_t fmRadioStack = FMRADIO_STACK_WORDS;  // words; ~18KB
     if (xTaskCreateLogged(fmRadioTask, "fmradio_task", fmRadioStack, nullptr, TASK_PRIORITY_LOW, &gFmRadioTaskHandle, "fmradio", I2C_SENSOR_CORE) != pdPASS) {
@@ -482,13 +449,6 @@ bool createFMRadioTask() {
 }
 
 bool createAPDSTask() {
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gApdsTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gApdsTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gApdsTaskHandle = nullptr;
-    }
-  }
   if (gApdsTaskHandle == nullptr) {
     const uint32_t apdsStack = APDS_STACK_WORDS;  // words; ~12KB
     if (xTaskCreateLogged(apdsTask, "apds_task", apdsStack, nullptr, TASK_PRIORITY_LOW, &gApdsTaskHandle, "apds", I2C_SENSOR_CORE) != pdPASS) {
@@ -500,13 +460,6 @@ bool createAPDSTask() {
 }
 
 bool createPresenceTask() {
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gPresenceTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gPresenceTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gPresenceTaskHandle = nullptr;
-    }
-  }
   if (gPresenceTaskHandle == nullptr) {
     const uint32_t presenceStack = PRESENCE_STACK_WORDS;  // words; ~12KB
     if (xTaskCreateLogged(presenceTask, "presence_task", presenceStack, nullptr, TASK_PRIORITY_LOW, &gPresenceTaskHandle, "presence", I2C_SENSOR_CORE) != pdPASS) {
@@ -518,13 +471,6 @@ bool createPresenceTask() {
 }
 
 bool createGPSTask() {
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gGpsTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gGpsTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gGpsTaskHandle = nullptr;
-    }
-  }
   if (gGpsTaskHandle == nullptr) {
     const uint32_t gpsStack = GPS_STACK_WORDS;  // words; ~12KB
     if (xTaskCreateLogged(gpsTask, "gps_task", gpsStack, nullptr, TASK_PRIORITY_LOW, &gGpsTaskHandle, "gps", I2C_SENSOR_CORE) != pdPASS) {
@@ -536,13 +482,6 @@ bool createGPSTask() {
 }
 
 bool createRTCTask() {
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gRtcTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gRtcTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gRtcTaskHandle = nullptr;
-    }
-  }
   if (gRtcTaskHandle == nullptr) {
     const uint32_t rtcStack = RTC_STACK_WORDS;  // words; ~16KB
     if (xTaskCreateLogged(rtcTask, "rtc_task", rtcStack, nullptr, TASK_PRIORITY_LOW, &gRtcTaskHandle, "rtc", I2C_SENSOR_CORE) != pdPASS) {
@@ -771,7 +710,7 @@ void reportAllTaskStacks() {
     return false;
   };
   
-  // Enabled flags for each task — if false, handle may be stale (task self-deleted)
+  // Skip tasks whose stop was requested, including cleanup still in progress.
   const bool taskAlive[] = {
     espnowSnapshotValid,                                            // espnow_task
     espnowTxSnapshotValid,                                         // espnow_tx

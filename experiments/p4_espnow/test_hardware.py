@@ -13,6 +13,7 @@ import dataclasses
 import datetime as dt
 import json
 import math
+import os
 import queue
 import re
 import sys
@@ -434,8 +435,8 @@ class Runner:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--p4-port", default="/dev/cu.usbmodem2101")
-    parser.add_argument("--s3-port", default="/dev/cu.usbmodem1101")
+    parser.add_argument("--p4-port", default=os.environ.get("HW1_P4_PORT", "/dev/ttyP4"))
+    parser.add_argument("--s3-port", default=os.environ.get("HW1_S3_PORT", "/dev/ttyS3"))
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--output-root", type=Path,
                         default=Path(__file__).resolve().parent / "private" / "test-runs")

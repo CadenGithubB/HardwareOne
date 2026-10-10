@@ -17,4 +17,11 @@ extern const size_t EMBEDDED_ICONS_COUNT;
 
 const EmbeddedIcon* findEmbeddedIcon(const char* name);
 
+// Embedded asset availability, independent of the display backend.
+bool iconExists(const char* name);
+
+// Map a file extension to its icon name. Ignores one leading dot and ASCII case;
+// empty/unknown extensions use "file". The returned string has static lifetime.
+const char* getIconNameForExtension(const char* ext);
+
 #endif

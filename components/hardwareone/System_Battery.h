@@ -10,9 +10,6 @@
 // platform-independent policy header. Voltage bands are estimates; charger
 // state and battery presence remain unknown without independent evidence.
 
-// Compatibility symbol. Consumers should use the coherent snapshot accessor.
-extern BatteryState gBatteryState;
-
 // Lifecycle.
 void initBattery();
 void updateBattery();

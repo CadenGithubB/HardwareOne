@@ -134,7 +134,7 @@ struct I2CBusMetrics {
 // I2C Device Lifecycle Management
 // ============================================================================
 
-enum I2CDeviceType {
+enum I2CDeviceType : int {
   I2C_DEVICE_THERMAL = 0,
   I2C_DEVICE_TOF = 1,
   I2C_DEVICE_IMU = 2,
@@ -143,12 +143,16 @@ enum I2CDeviceType {
   I2C_DEVICE_FMRADIO = 5,
   I2C_DEVICE_APDS = 6,
   I2C_DEVICE_RTC = 7,
-  I2C_DEVICE_PRESENCE = 8
+  I2C_DEVICE_PRESENCE = 8,
+  I2C_DEVICE_COUNT
 };
 
-struct I2CDeviceStartRequest {
+enum class I2CDeviceRequestAction { Start, Stop };
+
+struct I2CDeviceRequest {
   I2CDeviceType device;
   unsigned long queuedAt;
+  I2CDeviceRequestAction action;
 };
 
 // ============================================================================
@@ -192,9 +196,14 @@ private:
 
   // Shared (cross-bus) state — device registry mutex, request queue, etc.
   SemaphoreHandle_t managerMutex;
-  I2CDeviceStartRequest deviceQueue[8];
+  static const int DEVICE_QUEUE_SIZE = 8;
+  I2CDeviceRequest deviceQueue[DEVICE_QUEUE_SIZE];
   int queueHead;
   int queueTail;
+  // Stops cannot be refused because the start ring is full. Each device has
+  // one pending stop, which cancels its queued starts under the same mutex.
+  bool pendingDeviceStops[I2C_DEVICE_COUNT];
+  unsigned long deviceStopQueuedAt[I2C_DEVICE_COUNT];
   SemaphoreHandle_t queueMutex;
   volatile bool pollingPaused;
 
@@ -221,6 +230,9 @@ public:
   // Singleton access
   static I2CDeviceManager* getInstance();
   static void initialize();
+  // Inspect already-created buses without allocating the manager during early
+  // settings application or another operation that does not start I2C.
+  static I2CDeviceManager* existingInstance() { return instance; }
 
   // Device registration records identity and health only. Clock rate and
   // mutex-wait policy are per-transaction options and never live here.
@@ -263,17 +275,20 @@ public:
   bool busRecoveryThrottled(uint8_t busIdx) const;
   void discoverDevices();
 
-  // Unregistered discovery operations. These share the manager's mutex and
+  // Address-only discovery; a positive result requires two ACKs. Uses the mutex and
   // clock cache but deliberately do not create device-health records or alter
   // the normal device-transaction metrics.
   uint8_t probeAddress(uint8_t busIdx, uint8_t address,
                        const I2CTransactionOptions& options);
-  bool confirmRead(uint8_t busIdx, uint8_t address,
-                   const I2CTransactionOptions& options);
 
-  // I2C device lifecycle
+  // I2C device lifecycle. The existing sensor worker is the sole consumer:
+  // it applies a dequeued stop before dispatching another start. Pending stops
+  // cancel queued starts, take priority and remain visible during initialization.
   bool enqueueDeviceStart(I2CDeviceType sensor);
-  bool dequeueDeviceStart(I2CDeviceStartRequest* req);
+  bool enqueueDeviceStop(I2CDeviceType sensor);
+  bool dequeueDeviceRequest(I2CDeviceRequest* req);
+  bool hasPendingDeviceStop(I2CDeviceType sensor);
+  // Queue status describes pending starts only; stops take dispatch priority.
   bool isInQueue(I2CDeviceType sensor);
   int getQueuePosition(I2CDeviceType sensor);
   int getQueueDepth();

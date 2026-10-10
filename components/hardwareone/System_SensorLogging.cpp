@@ -24,6 +24,7 @@
 #include "System_Mutex.h"         // FsLockGuard
 #include "System_AuthIdentity.h"  // currentAuthContext
 #include <LittleFS.h>
+#include "freertos/FreeRTOS.h"
 
 // Conditional sensor includes (same approach as main .ino)
 #include "System_BuildConfig.h"
@@ -37,7 +38,7 @@
   #include "i2csensor_vl53l4cx.h"
 #endif
 #if ENABLE_OLED_INPUT
-  #include "HAL_Input.h"   // gInputCache, gInputRunning/Connected — populated by either driver
+  #include "HAL_Input.h"   // readings, gInputRunning/Connected — populated by either driver
 #endif
 #if ENABLE_APDS_SENSOR
   #include "i2csensor_apds9960.h"
@@ -72,11 +73,58 @@ extern void getTimestampPrefixMsCached(char* out, size_t outSize);
 bool gSensorLoggingRunning = false;
 String gSensorLogPath = "";
 unsigned long gSensorLogLastWrite = 0;
-uint32_t gSensorLogIntervalMs = 5000;
-size_t gSensorLogMaxSize = 250 * 1024;
-SensorLogFormat gSensorLogFormat = SENSOR_LOG_TEXT;
-uint8_t gSensorLogMaxRotations = 3;
-uint8_t gSensorLogMask = 0x00;
+static uint32_t gSensorLogIntervalMs = 5000;
+static size_t gSensorLogMaxSize = 250 * 1024;
+static SensorLogFormat gSensorLogFormat = SENSOR_LOG_TEXT;
+static uint8_t gSensorLogMaxRotations = 3;
+static uint8_t gSensorLogMask = 0x00;
+
+static portMUX_TYPE sSensorLogSessionMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t sSensorLogSessionId = 0;
+
+static void sensorLogPublishStarted() {
+  portENTER_CRITICAL(&sSensorLogSessionMux);
+  if (++sSensorLogSessionId == 0) ++sSensorLogSessionId;
+  gSensorLoggingRunning = true;
+  portEXIT_CRITICAL(&sSensorLogSessionMux);
+}
+
+// expected=0 is the owner's unconditional stop; public consumers must supply
+// their successful start's identity. Keep the comparison and stop indivisible.
+static bool sensorLogMarkStopped(uint32_t expected = 0) {
+  portENTER_CRITICAL(&sSensorLogSessionMux);
+  const bool stopped = gSensorLoggingRunning &&
+                       (!expected || expected == sSensorLogSessionId);
+  if (stopped) gSensorLoggingRunning = false;
+  portEXIT_CRITICAL(&sSensorLogSessionMux);
+  return stopped;
+}
+
+uint32_t sensorLogCurrentSessionId() {
+  portENTER_CRITICAL(&sSensorLogSessionMux);
+  const uint32_t id = gSensorLoggingRunning ? sSensorLogSessionId : 0;
+  portEXIT_CRITICAL(&sSensorLogSessionMux);
+  return id;
+}
+
+bool sensorLogStopSession(uint32_t sessionId) {
+  if (!sessionId || !sensorLogMarkStopped(sessionId)) return false;
+  systemEventPost(SYSEVT_SENSOR_STOPPED, "Logging");
+  broadcastOutput("Sensor logging stop requested; will stop safely");
+  return true;
+}
+
+uint8_t sensorLogSelectedMask() {
+  return gSensorLogMask;
+}
+
+SensorLogFormat sensorLogCurrentFormat() {
+  return gSensorLogFormat;
+}
+
+uint32_t sensorLogIntervalMs() {
+  return gSensorLogIntervalMs;
+}
 
 // ============================================================================
 // Sensor Logging Tick (called from main loop — no dedicated task needed)
@@ -669,32 +717,32 @@ void sensorLogTick() {
     SensorCacheSnapshot snap = {};
     const uint8_t mask = gSensorLogMask;
     
-    // Only lock caches for sensors selected in the mask
+    // Read snapshots only for sensors selected in the mask
     if (mask & LOG_THERMAL) {
-      if (lockThermalCache(pdMS_TO_TICKS(10))) {
+      ThermalCache thermal{};
+      if (thermalCacheSnapshot(thermal)) {
         snap.gThermalRunning = gThermalRunning;
         snap.gThermalConnected = gThermalConnected;
-        snap.thermalValid = gThermalCache.thermalDataValid;
-        snap.thermalMin = gThermalCache.thermalMinTemp;
-        snap.thermalAvg = gThermalCache.thermalAvgTemp;
-        snap.thermalMax = gThermalCache.thermalMaxTemp;
-        unlockThermalCache();
+        snap.thermalValid = thermal.thermalDataValid;
+        snap.thermalMin = thermal.thermalMinTemp;
+        snap.thermalAvg = thermal.thermalAvgTemp;
+        snap.thermalMax = thermal.thermalMaxTemp;
       }
     }
     
 #if ENABLE_TOF_SENSOR
     if (mask & LOG_TOF) {
-      SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(10), "sensorLog.tofSnapshot");
-      if (g.held) {
+      TofCache tof{};
+      if (tofCacheSnapshot(tof, 10)) {
         snap.gTofRunning = gTofRunning;
         snap.gTofConnected = gTofConnected;
-        snap.tofValid = gTofCache.tofDataValid;
-        snap.tofTotal = gTofCache.tofTotalObjects;
+        snap.tofValid = tof.tofDataValid;
+        snap.tofTotal = tof.tofTotalObjects;
         for (int i = 0; i < 4; i++) {
-          snap.tof[i].valid = gTofCache.tofObjects[i].valid;
-          snap.tof[i].detected = gTofCache.tofObjects[i].detected;
-          snap.tof[i].distance_mm = gTofCache.tofObjects[i].distance_mm;
-          snap.tof[i].status = gTofCache.tofObjects[i].status;
+          snap.tof[i].valid = tof.tofObjects[i].valid;
+          snap.tof[i].detected = tof.tofObjects[i].detected;
+          snap.tof[i].distance_mm = tof.tofObjects[i].distance_mm;
+          snap.tof[i].status = tof.tofObjects[i].status;
         }
       }
     }
@@ -702,56 +750,56 @@ void sensorLogTick() {
 
 #if ENABLE_IMU_SENSOR
     if (mask & LOG_IMU) {
-      SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "sensorLog.imuSnapshot");
-      if (g.held) {
+      ImuCache imu{};
+      if (imuCacheSnapshot(imu, 10)) {
         snap.gImuRunning = gImuRunning;
         snap.gImuConnected = gImuConnected;
-        snap.yaw = gImuCache.oriYaw;
-        snap.pitch = gImuCache.oriPitch;
-        snap.roll = gImuCache.oriRoll;
-        snap.ax = gImuCache.accelX;
-        snap.ay = gImuCache.accelY;
-        snap.az = gImuCache.accelZ;
-        snap.gx = gImuCache.gyroX;
-        snap.gy = gImuCache.gyroY;
-        snap.gz = gImuCache.gyroZ;
-        snap.imuTemp = gImuCache.imuTemp;
+        snap.yaw = imu.oriYaw;
+        snap.pitch = imu.oriPitch;
+        snap.roll = imu.oriRoll;
+        snap.ax = imu.accelX;
+        snap.ay = imu.accelY;
+        snap.az = imu.accelZ;
+        snap.gx = imu.gyroX;
+        snap.gy = imu.gyroY;
+        snap.gz = imu.gyroZ;
+        snap.imuTemp = imu.imuTemp;
       }
     }
 #endif
 
-#if ENABLE_OLED_INPUT  // gInputCache populated by either gamepad or ANO driver
+#if ENABLE_OLED_INPUT  // readings populated by either gamepad or ANO driver
     if (mask & LOG_GAMEPAD) {
-      SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "sensorLog.inputSnapshot");
-      if (g.held) {
+      InputCache input{};
+      if (inputCacheSnapshot(input, 10)) {
         snap.gInputRunning = gInputRunning;
         snap.gInputConnected = gInputConnected;
-        snap.inputValid = gInputCache.dataValid;
+        snap.inputValid = input.dataValid;
         // Stored in the cache's native bit layout (per-device, active-low).
         // Replay code that crosses devices should pass this through
         // inputButtonsToLogical() — buttons field is the device-native form.
-        snap.buttons = gInputCache.buttons;
-        snap.joyX = gInputCache.joyX;
-        snap.joyY = gInputCache.joyY;
+        snap.buttons = input.buttons;
+        snap.joyX = input.joyX;
+        snap.joyY = input.joyY;
       }
     }
 #endif
 
 #if ENABLE_APDS_SENSOR
     if (mask & LOG_APDS) {
-      SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(10), "sensorLog.apdsSnapshot");
-      if (g.held) {
+      APDSCache apds{};
+      if (apdsCacheSnapshot(apds, 10)) {
         snap.gApdsColorRunning = gApdsColorRunning;
         snap.gApdsProximityRunning = gApdsProximityRunning;
         snap.gApdsGestureRunning = gApdsGestureRunning;
         snap.gApdsConnected = gApdsConnected;
-        snap.apdsValid = gApdsCache.apdsDataValid;
-        snap.apdsRed = gApdsCache.apdsRed;
-        snap.apdsGreen = gApdsCache.apdsGreen;
-        snap.apdsBlue = gApdsCache.apdsBlue;
-        snap.apdsClear = gApdsCache.apdsClear;
-        snap.apdsProximity = gApdsCache.apdsProximity;
-        snap.apdsGesture = gApdsCache.apdsGesture;
+        snap.apdsValid = apds.apdsDataValid;
+        snap.apdsRed = apds.apdsRed;
+        snap.apdsGreen = apds.apdsGreen;
+        snap.apdsBlue = apds.apdsBlue;
+        snap.apdsClear = apds.apdsClear;
+        snap.apdsProximity = apds.apdsProximity;
+        snap.apdsGesture = apds.apdsGesture;
       }
     }
 #endif
@@ -760,19 +808,19 @@ void sensorLogTick() {
     if (mask & LOG_GPS) {
       snap.gGpsRunning = gGpsRunning;
       snap.gGpsConnected = gGpsConnected;
-      SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(10), "sensorLog.gpsSnapshot");
-      if (g.held) {
-        if (gGpsCache.dataValid && gGpsCache.hasFix) {
+      GPSCache gps{};
+      if (gpsCacheSnapshot(gps)) {
+        if (gps.dataValid && gps.hasFix) {
           snap.gpsFix = true;
-          snap.gpsLatitude = gGpsCache.latitude;
-          snap.gpsLongitude = gGpsCache.longitude;
-          snap.gpsAltitude = gGpsCache.altitude;
-          snap.gpsSpeed = gGpsCache.speed;
-          snap.gpsSatellites = gGpsCache.satellites;
-          snap.gpsFixQuality = gGpsCache.fixQuality;
-          snap.gpsHour = gGpsCache.hour;
-          snap.gpsMinute = gGpsCache.minute;
-          snap.gpsSecond = gGpsCache.second;
+          snap.gpsLatitude = gps.latitude;
+          snap.gpsLongitude = gps.longitude;
+          snap.gpsAltitude = gps.altitude;
+          snap.gpsSpeed = gps.speed;
+          snap.gpsSatellites = gps.satellites;
+          snap.gpsFixQuality = gps.fixQuality;
+          snap.gpsHour = gps.hour;
+          snap.gpsMinute = gps.minute;
+          snap.gpsSecond = gps.second;
           snap.gpsHasTime = true;
         } else {
           snap.gpsFix = false;
@@ -786,13 +834,13 @@ void sensorLogTick() {
     if (mask & LOG_PRESENCE) {
       snap.gPresenceRunning = gPresenceRunning;
       snap.gPresenceConnected = gPresenceConnected;
-      SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(10), "sensorLog.presenceSnapshot");
-      if (g.held) {
-        snap.presenceAmbientTemp = gPresenceCache.ambientTemp;
-        snap.presenceValue = gPresenceCache.presenceValue;
-        snap.motionValue = gPresenceCache.motionValue;
-        snap.presenceDetected = gPresenceCache.presenceDetected;
-        snap.motionDetected = gPresenceCache.motionDetected;
+      PresenceCache presence{};
+      if (presenceCacheSnapshot(presence)) {
+        snap.presenceAmbientTemp = presence.ambientTemp;
+        snap.presenceValue = presence.presenceValue;
+        snap.motionValue = presence.motionValue;
+        snap.presenceDetected = presence.presenceDetected;
+        snap.motionDetected = presence.motionDetected;
       }
     }
 #endif
@@ -1080,6 +1128,300 @@ void sensorLogTick() {
 // Command Handler
 // ============================================================================
 
+static uint8_t sensorLogSensorBit(const String& name) {
+  for (const auto& sensor : kSensorLogSensors) {
+    if (name == sensor.name) return sensor.bit;
+  }
+  // Retain the established CLI aliases without duplicating display entries.
+  if (name == "input") return LOG_GAMEPAD;
+  if (name == "health" || name == "ring") return LOG_R1;
+  return 0;
+}
+
+static String sensorLogSensorNames(uint8_t mask) {
+  String names;
+  for (const auto& sensor : kSensorLogSensors) {
+    if (mask & sensor.bit) {
+      names += sensor.name;
+      names += " ";
+    }
+  }
+  return names;
+}
+
+static const char* sensorLogSelectionChangeError() {
+  // Selection edits cannot change a running CSV file's column set. Health
+  // logging manages its own schema transition by restarting the session.
+  if (gSensorLoggingRunning && gSensorLogFormat == SENSOR_LOG_CSV) {
+    cliHint("run 'sensorlog stop' first, then reselect sensors and restart — or use 'healthlogging' which restarts the session itself");
+    return "Error: can't change the sensor selection while a CSV session is running (rows would stop matching the file's header)";
+  }
+  return nullptr;
+}
+
+static void sensorLogApplyFormat(SensorLogFormat format) {
+  gSensorLogFormat = format;
+  // Publish TRACK's coupled live values before settings persistence can run.
+  if (format == SENSOR_LOG_TRACK) gSensorLogMask = LOG_GPS;
+  setSetting(gSettings.sensorLogFormat, (int)format);
+  if (format == SENSOR_LOG_TRACK) {
+    setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
+  }
+}
+
+// These remain admin-only settings-editor commands. The generic editor owns
+// numeric parsing, range errors, persistence and setting-change output. Only
+// an accepted mutation may update live logger state; queries and errors cannot.
+const char* cmd_sensorlogmask(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const SettingEntry* entry = findSettingByCmdKey("sensorlogmask");
+  if (!entry) return "Error: setting not found for this command";
+  String value = args;
+  value.trim();
+  if (value.length() == 0) return handleSettingCommand(entry, args);
+  if (const char* error = sensorLogSelectionChangeError()) return error;
+  const char* result = handleSettingCommand(entry, args);
+  if (result && strncmp(result, "Error", 5) != 0) {
+    gSensorLogMask = (uint8_t)gSettings.sensorLogMask;
+  }
+  return result;
+}
+
+const char* cmd_sensorlogformat(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const SettingEntry* entry = findSettingByCmdKey("sensorlogformat");
+  if (!entry) return "Error: setting not found for this command";
+  String value = args;
+  value.trim();
+  if (value.length() == 0) return handleSettingCommand(entry, args);
+  const char* result = handleSettingCommand(entry, args);
+  if (result && strncmp(result, "Error", 5) != 0) {
+    sensorLogApplyFormat((SensorLogFormat)gSettings.sensorLogFormat);
+  }
+  return result;
+}
+
+static const char* sensorLogSelectSensors(const CommandArgs& a) {
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  if (!a.has(1)) {
+    String listing = "Selected sensors:\n";
+    const uint8_t mask = sensorLogSelectedMask();
+    for (const auto& sensor : kSensorLogSensors) {
+      listing += "  ";
+      listing += (mask & sensor.bit) ? "☑" : "☐";
+      listing += " ";
+      listing += sensor.label;
+      listing += "\n";
+    }
+    snprintf(getDebugBuffer(), 1024,
+             "%s\nUsage: sensorlog sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>\n"
+             "       sensorlog sensors toggle <sensor>", listing.c_str());
+    return getDebugBuffer();
+  }
+
+  if (const char* error = sensorLogSelectionChangeError()) return error;
+
+  String sensorList = a.remaining(0);
+  sensorList.toLowerCase();
+  String action = a.arg(1);
+  action.toLowerCase();
+  uint8_t selected = 0;
+  if (action == "toggle") {
+    if (a.count() != 3 || a.unterminatedQuote()) {
+      return "Error: Usage: sensorlog sensors toggle <sensor>";
+    }
+    String sensor = a.arg(2);
+    sensor.toLowerCase();
+    const uint8_t bit = sensorLogSensorBit(sensor);
+    if (!bit) {
+      snprintf(getDebugBuffer(), 1024, "Error: Unknown sensor '%s'", sensor.c_str());
+      return getDebugBuffer();
+    }
+    // Resolve the intent when the authorized command executes. A screen's
+    // earlier read must not overwrite changes from other queued commands.
+    selected = gSensorLogMask ^ bit;
+  } else if (sensorList == "all") {
+    for (const auto& sensor : kSensorLogSensors) selected |= sensor.bit;
+  } else if (sensorList != "none") {
+    int start = 0;
+    while (start < (int)sensorList.length()) {
+      int comma = sensorList.indexOf(',', start);
+      String sensor = (comma >= 0) ? sensorList.substring(start, comma) : sensorList.substring(start);
+      sensor.trim();
+      const uint8_t bit = sensorLogSensorBit(sensor);
+      if (!bit) {
+        snprintf(getDebugBuffer(), 1024, "Error: Unknown sensor '%s'", sensor.c_str());
+        return getDebugBuffer();
+      }
+      selected |= bit;
+      if (comma < 0) break;
+      start = comma + 1;
+    }
+  }
+
+  // Publish only after the entire request validates, including every token in
+  // a replacement list. Invalid input leaves live and saved selections alone.
+  gSensorLogMask = selected;
+  setSetting(gSettings.sensorLogMask, (int)selected);
+  if (sensorList == "all") return "All sensors enabled for logging";
+  if (sensorList == "none") return "All sensors disabled for logging";
+  snprintf(getDebugBuffer(), 1024, "Logging enabled for: %s",
+           sensorLogSensorNames(selected).c_str());
+  return getDebugBuffer();
+}
+
+static uint32_t sensorLogClampInterval(uint32_t interval) {
+  if (interval < 100) interval = 100;
+  if (interval > 3600000) interval = 3600000;
+  return interval;
+}
+
+static const char* sensorLogStartError() {
+  // Master switch. Owned here rather than by each caller because sensor
+  // logging is startable from several places that are not obviously "start
+  // logging" - notably the OLED Map screen, which begins a GPS track log as a
+  // side effect of opening it. Without this, "never write logs on this device"
+  // was not expressible.
+  if (!gSettings.sensorLogEnabled) {
+    return "Error: sensor logging is disabled - run 'sensorlogenabled 1' first";
+  }
+  if (gSensorLoggingRunning) {
+    return "Error: Sensor logging already running. Use 'sensorlog stop' first.";
+  }
+  return nullptr;
+}
+
+static const char* sensorLogStart(String filepath, uint32_t interval) {
+  if (const char* error = sensorLogStartError()) return error;
+
+  if (filepath.length() == 0 || filepath.charAt(0) != '/') {
+    return "Error: Filepath must start with / (e.g., /logging_captures/sensors/sensors.txt)";
+  }
+
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  // Ensure directory exists (mkdir is non-recursive, create parents first)
+  int lastSlash = filepath.lastIndexOf('/');
+  if (lastSlash > 0) {
+    String dir = filepath.substring(0, lastSlash);
+    if (!VFS::existsGuarded(dir, VFS::systemAuth("senlog.setup_mkdir"))) {
+      // Create parent directories iteratively via VFS so the sensor log's
+      // write path and directory creation use the same dispatcher.
+      for (int i = 1; i <= (int)dir.length(); i++) {
+        if (i == (int)dir.length() || dir.charAt(i) == '/') {
+          String parent = dir.substring(0, i);
+          if (parent.length() > 0 && !VFS::existsGuarded(parent, VFS::systemAuth("senlog.setup_mkdir"))) {
+            VFS::mkdirGuarded(parent, VFS::systemAuth("senlog.setup_mkdir"));
+          }
+        }
+      }
+      if (!VFS::existsGuarded(dir, VFS::systemAuth("senlog.setup_mkdir"))) {
+        snprintf(getDebugBuffer(), 1024, "Error: Failed to create directory: %s", dir.c_str());
+        return getDebugBuffer();
+      }
+      broadcastOutput("Created directory: " + dir);
+    }
+  }
+
+  // Per-day append: pick the compatible target. Reuses an existing day
+  // file only when its header matches the current mask; a mismatch mints a
+  // -2..-9 variant (timestamped fallback on exhaustion). No-op for
+  // TEXT/TRACK and for non-day paths. See docs/SENSORLOG_PERDAY_APPEND_PLAN.md.
+  filepath = resolveSessionTarget(filepath);
+
+  // Sealing decision for this session — sticky until the next start or day
+  // rollover so a file is never mixed-mode. Fail CLOSED when the key can't
+  // be loaded: a session that promised sealing must not quietly fall back
+  // to plaintext vitals on disk.
+  gSensorLogSealed = sessionWantsSealing(gSensorLogMask);
+  if (gSensorLogSealed && !captureCryptoEnsureKey()) {
+    return "Error: capture encryption key unavailable (NVS) — retry, or 'capturecrypt off' to log unsealed";
+  }
+
+  // Create file if needed. Variants/fallbacks stay in the same directory,
+  // so the parent-mkdir walk above already covers them. The append path
+  // additionally header-on-creates empty files (post-rotation base, /sd
+  // overflow mirror), so a file skipped here is still safe.
+  if (!VFS::existsGuarded(filepath, VFS::systemAuth("senlog.setup_create"))) {
+    FsLockGuard fsGuard("sensorlog.setup_create");
+    File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("senlog.setup_create"), true);
+    if (!f) {
+      snprintf(getDebugBuffer(), 1024, "Error: Failed to create file: %s", filepath.c_str());
+      return getDebugBuffer();
+    }
+    if (!writeHeaderChecked(f)) {
+      // Short write = truncated header that would poison every later
+      // day-file compatibility compare — remove the husk and fail loudly.
+      f.close();
+      VFS::removeGuarded(filepath, VFS::systemAuth("senlog.setup_create"));
+      snprintf(getDebugBuffer(), 1024, "Error: header write failed for %s (flash full?)", filepath.c_str());
+      return getDebugBuffer();
+    }
+    f.close();
+    broadcastOutput("Created log file: " + filepath);
+  }
+
+  if (ESP.getFreeHeap() < 8192) {
+    return "Error: Insufficient memory (need 8KB free)";
+  }
+
+  // Check filesystem space — need at least gSensorLogMaxSize free on
+  // LittleFS OR SD card (if mounted) to allow start. Writes will route
+  // transparently to whichever tier has room via the overflow system.
+  {
+    // Same accessor as the SD branch below. It takes the FS lock itself and
+    // resolves total+used in a single filesystem traverse; the old
+    // totalBytes()/usedBytes() pair walked the whole volume twice.
+    uint64_t lfsTotal = 0, lfsUsed = 0, freeBytes = 0;
+    (void)VFS::getStats(VFS::INTERNAL, lfsTotal, lfsUsed, freeBytes);
+    bool littleFsOk = (freeBytes >= (uint64_t)gSensorLogMaxSize);
+    bool sdOk = false;
+    if (!littleFsOk && VFS::isSDAvailable()) {
+      uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
+      if (VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree)) {
+        sdOk = (sdFree >= (uint64_t)gSensorLogMaxSize);
+      }
+    }
+    if (!littleFsOk && !sdOk) {
+      char errMsg[120];
+      snprintf(errMsg, sizeof(errMsg),
+               "Not enough space for log (need %uKB, flash has %uKB, no usable SD overflow)",
+               (unsigned)(gSensorLogMaxSize / 1024), (unsigned)(freeBytes / 1024));
+      systemEventPost(SYSEVT_SENSOR_START_FAILED, "Logging");
+      logSystemEvent("SENSOR", "Logging start FAILED");
+      snprintf(getDebugBuffer(), 1024, "Error: %s", errMsg);
+      return getDebugBuffer();
+    }
+  }
+
+  gSensorLogPath = filepath;
+  gSensorLogIntervalMs = interval;
+  sensorLogPublishStarted();
+  gSensorLogLastWrite = millis();
+  // Day/boot/manual mode + honest rotation accounting for the (possibly
+  // pre-existing, already-large) day file we're appending to.
+  sensorLogClassifyActivePath(filepath.c_str());
+  gApproxSizeBytes = sensorLogResolvedSize(filepath);
+
+  // Persist last-used parameters for auto-start. The path persists as the
+  // UN-shaped base (strip the session subfolder/stamp/variant): autostart
+  // and healthlogging re-shape fresh each session, and persisting a shaped
+  // path would compound variants / nest day folders. For manual literal
+  // paths the strip is a no-op, so they persist exactly as typed.
+  setSetting(gSettings.sensorLogPath, stripSessionShaping(filepath));
+  setSetting(gSettings.sensorLogIntervalMs, (int)interval);
+  setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
+  setSetting(gSettings.sensorLogFormat, (int)gSensorLogFormat);
+
+  systemEventPost(SYSEVT_SENSOR_STARTED, "Logging");
+  logSystemEvent("SENSOR", "Logging online");
+  snprintf(getDebugBuffer(), 1024, "SUCCESS: Sensor logging started\n  File: %s\n  Interval: %lums",
+           filepath.c_str(), (unsigned long)interval);
+  broadcastOutput(getDebugBuffer());
+  cliHintf("readings are written to the file, not to this output - read them back with 'fileview \"%s\"', and stop logging with 'sensorlog stop'", filepath.c_str());
+  return getDebugBuffer();
+}
+
 const char* cmd_sensorlog(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -1096,6 +1438,7 @@ const char* cmd_sensorlog(const String& argsInput) {
            "  rotations <count>: Old generations to keep (1-9). 0 = DELETE the active\n"
            "                     file at the size cap, losing the current day (default: 3)\n"
            "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>: Select sensors to log\n"
+           "  sensors toggle <sensor>: Toggle one sensor in the current selection\n"
            "  interval <ms>: Set poll interval 100-3600000 (default 5000)\n"
            "  autostart [on|off]: Auto-start logging on boot with last-used parameters";
   }
@@ -1105,16 +1448,7 @@ const char* cmd_sensorlog(const String& argsInput) {
   // Handle 'status' subcommand
   if (subCmd == "status") {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    // Build sensors string
-    String sensors = "";
-    if (gSensorLogMask & LOG_THERMAL) sensors += "thermal ";
-    if (gSensorLogMask & LOG_TOF) sensors += "tof ";
-    if (gSensorLogMask & LOG_IMU) sensors += "imu ";
-    if (gSensorLogMask & LOG_GAMEPAD) sensors += "gamepad ";
-    if (gSensorLogMask & LOG_APDS) sensors += "apds ";
-    if (gSensorLogMask & LOG_GPS) sensors += "gps ";
-    if (gSensorLogMask & LOG_PRESENCE) sensors += "presence ";
-    if (gSensorLogMask & LOG_R1) sensors += "r1 ";
+    String sensors = sensorLogSensorNames(sensorLogSelectedMask());
     if (sensors.length() == 0) sensors = "(none)";
     
     const char* fmtName = (gSensorLogFormat == SENSOR_LOG_CSV) ? "CSV" :
@@ -1158,10 +1492,9 @@ const char* cmd_sensorlog(const String& argsInput) {
 
   // Handle 'stop' subcommand
   if (subCmd == "stop") {
-    if (!gSensorLoggingRunning) {
+    if (!sensorLogMarkStopped()) {
       return "Error: Sensor logging is not running";
     }
-    gSensorLoggingRunning = false;
     systemEventPost(SYSEVT_SENSOR_STOPPED, "Logging");
     broadcastOutput("Sensor logging stop requested; will stop safely");
     return "SUCCESS: Sensor logging stop requested; will stop safely";
@@ -1169,158 +1502,19 @@ const char* cmd_sensorlog(const String& argsInput) {
 
   // Handle 'start' subcommand
   if (subCmd == "start") {
-    // Master switch. Checked here rather than at each caller because sensor
-    // logging is startable from several places that are not obviously "start
-    // logging" - notably the OLED Map screen, which begins a GPS track log as a
-    // side effect of opening it. Without this, "never write logs on this device"
-    // was not expressible.
-    if (!gSettings.sensorLogEnabled) {
-      return "Error: sensor logging is disabled - run 'sensorlogenabled 1' first";
-    }
-    if (gSensorLoggingRunning) {
-      return "Error: Sensor logging already running. Use 'sensorlog stop' first.";
-    }
+    // Keep the existing disabled/running errors ahead of argument errors.
+    if (const char* error = sensorLogStartError()) return error;
 
     if (!a.has(1)) {
       return "Error: invalid arguments — Usage: sensorlog start <filepath> [interval_ms]\n"
              "Example: sensorlog start /logging_captures/sensors/sensors.txt 1000";
     }
 
-    String filepath = a.arg(1);
     uint32_t interval = gSensorLogIntervalMs;
-
     if (a.has(2)) {
-      interval = a.argInt(2, (int)gSensorLogIntervalMs);
-      if (interval < 100) interval = 100;
-      if (interval > 3600000) interval = 3600000;
+      interval = sensorLogClampInterval(a.argInt(2, (int)gSensorLogIntervalMs));
     }
-
-    if (filepath.length() == 0 || filepath.charAt(0) != '/') {
-      return "Error: Filepath must start with / (e.g., /logging_captures/sensors/sensors.txt)";
-    }
-
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-
-    // Ensure directory exists (mkdir is non-recursive, create parents first)
-    int lastSlash = filepath.lastIndexOf('/');
-    if (lastSlash > 0) {
-      String dir = filepath.substring(0, lastSlash);
-      if (!VFS::existsGuarded(dir, VFS::systemAuth("senlog.setup_mkdir"))) {
-        // Create parent directories iteratively via VFS so the sensor log's
-        // write path and directory creation use the same dispatcher.
-        for (int i = 1; i <= (int)dir.length(); i++) {
-          if (i == (int)dir.length() || dir.charAt(i) == '/') {
-            String parent = dir.substring(0, i);
-            if (parent.length() > 0 && !VFS::existsGuarded(parent, VFS::systemAuth("senlog.setup_mkdir"))) {
-              VFS::mkdirGuarded(parent, VFS::systemAuth("senlog.setup_mkdir"));
-            }
-          }
-        }
-        if (!VFS::existsGuarded(dir, VFS::systemAuth("senlog.setup_mkdir"))) {
-          snprintf(getDebugBuffer(), 1024, "Error: Failed to create directory: %s", dir.c_str());
-          return getDebugBuffer();
-        }
-        broadcastOutput("Created directory: " + dir);
-      }
-    }
-
-    // Per-day append: pick the compatible target. Reuses an existing day
-    // file only when its header matches the current mask; a mismatch mints a
-    // -2..-9 variant (timestamped fallback on exhaustion). No-op for
-    // TEXT/TRACK and for non-day paths. See docs/SENSORLOG_PERDAY_APPEND_PLAN.md.
-    filepath = resolveSessionTarget(filepath);
-
-    // Sealing decision for this session — sticky until the next start or day
-    // rollover so a file is never mixed-mode. Fail CLOSED when the key can't
-    // be loaded: a session that promised sealing must not quietly fall back
-    // to plaintext vitals on disk.
-    gSensorLogSealed = sessionWantsSealing(gSensorLogMask);
-    if (gSensorLogSealed && !captureCryptoEnsureKey()) {
-      return "Error: capture encryption key unavailable (NVS) — retry, or 'capturecrypt off' to log unsealed";
-    }
-
-    // Create file if needed. Variants/fallbacks stay in the same directory,
-    // so the parent-mkdir walk above already covers them. The append path
-    // additionally header-on-creates empty files (post-rotation base, /sd
-    // overflow mirror), so a file skipped here is still safe.
-    if (!VFS::existsGuarded(filepath, VFS::systemAuth("senlog.setup_create"))) {
-      FsLockGuard fsGuard("sensorlog.setup_create");
-      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("senlog.setup_create"), true);
-      if (!f) {
-        snprintf(getDebugBuffer(), 1024, "Error: Failed to create file: %s", filepath.c_str());
-        return getDebugBuffer();
-      }
-      if (!writeHeaderChecked(f)) {
-        // Short write = truncated header that would poison every later
-        // day-file compatibility compare — remove the husk and fail loudly.
-        f.close();
-        VFS::removeGuarded(filepath, VFS::systemAuth("senlog.setup_create"));
-        snprintf(getDebugBuffer(), 1024, "Error: header write failed for %s (flash full?)", filepath.c_str());
-        return getDebugBuffer();
-      }
-      f.close();
-      broadcastOutput("Created log file: " + filepath);
-    }
-
-    if (ESP.getFreeHeap() < 8192) {
-      return "Error: Insufficient memory (need 8KB free)";
-    }
-
-    // Check filesystem space — need at least gSensorLogMaxSize free on
-    // LittleFS OR SD card (if mounted) to allow start. Writes will route
-    // transparently to whichever tier has room via the overflow system.
-    {
-      // Same accessor as the SD branch below. It takes the FS lock itself and
-      // resolves total+used in a single filesystem traverse; the old
-      // totalBytes()/usedBytes() pair walked the whole volume twice.
-      uint64_t lfsTotal = 0, lfsUsed = 0, freeBytes = 0;
-      (void)VFS::getStats(VFS::INTERNAL, lfsTotal, lfsUsed, freeBytes);
-      bool littleFsOk = (freeBytes >= (uint64_t)gSensorLogMaxSize);
-      bool sdOk = false;
-      if (!littleFsOk && VFS::isSDAvailable()) {
-        uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
-        if (VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree)) {
-          sdOk = (sdFree >= (uint64_t)gSensorLogMaxSize);
-        }
-      }
-      if (!littleFsOk && !sdOk) {
-        char errMsg[120];
-        snprintf(errMsg, sizeof(errMsg),
-                 "Not enough space for log (need %uKB, flash has %uKB, no usable SD overflow)",
-                 (unsigned)(gSensorLogMaxSize / 1024), (unsigned)(freeBytes / 1024));
-        systemEventPost(SYSEVT_SENSOR_START_FAILED, "Logging");
-        logSystemEvent("SENSOR", "Logging start FAILED");
-        snprintf(getDebugBuffer(), 1024, "Error: %s", errMsg);
-        return getDebugBuffer();
-      }
-    }
-
-    gSensorLogPath = filepath;
-    gSensorLogIntervalMs = interval;
-    gSensorLoggingRunning = true;
-    gSensorLogLastWrite = millis();
-    // Day/boot/manual mode + honest rotation accounting for the (possibly
-    // pre-existing, already-large) day file we're appending to.
-    sensorLogClassifyActivePath(filepath.c_str());
-    gApproxSizeBytes = sensorLogResolvedSize(filepath);
-
-    // Persist last-used parameters for auto-start. The path persists as the
-    // UN-shaped base (strip the session subfolder/stamp/variant): autostart
-    // and healthlogging re-shape fresh each session, and persisting a shaped
-    // path would compound variants / nest day folders. For manual literal
-    // paths the strip is a no-op, so they persist exactly as typed.
-    setSetting(gSettings.sensorLogPath, stripSessionShaping(filepath));
-    setSetting(gSettings.sensorLogIntervalMs, (int)interval);
-    setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
-    setSetting(gSettings.sensorLogFormat, (int)gSensorLogFormat);
-
-    systemEventPost(SYSEVT_SENSOR_STARTED, "Logging");
-    logSystemEvent("SENSOR", "Logging online");
-    snprintf(getDebugBuffer(), 1024, "SUCCESS: Sensor logging started\n  File: %s\n  Interval: %lums",
-             filepath.c_str(), (unsigned long)interval);
-    broadcastOutput(getDebugBuffer());
-    cliHintf("readings are written to the file, not to this output - read them back with 'fileview \"%s\"', and stop logging with 'sensorlog stop'", filepath.c_str());
-    return getDebugBuffer();
+    return sensorLogStart(a.arg(1), interval);
   }
 
   // Handle 'format' subcommand
@@ -1342,18 +1536,13 @@ const char* cmd_sensorlog(const String& argsInput) {
     formatType.toLowerCase();
 
     if (formatType == "csv") {
-      gSensorLogFormat = SENSOR_LOG_CSV;
-      setSetting(gSettings.sensorLogFormat, (int)SENSOR_LOG_CSV);
+      sensorLogApplyFormat(SENSOR_LOG_CSV);
       return "Log format set to CSV (applies to next 'sensorlog start')";
     } else if (formatType == "text") {
-      gSensorLogFormat = SENSOR_LOG_TEXT;
-      setSetting(gSettings.sensorLogFormat, (int)SENSOR_LOG_TEXT);
+      sensorLogApplyFormat(SENSOR_LOG_TEXT);
       return "Log format set to TEXT (applies to next 'sensorlog start')";
     } else if (formatType == "track") {
-      gSensorLogFormat = SENSOR_LOG_TRACK;
-      gSensorLogMask = LOG_GPS;  // Track format is GPS-only
-      setSetting(gSettings.sensorLogFormat, (int)SENSOR_LOG_TRACK);
-      setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
+      sensorLogApplyFormat(SENSOR_LOG_TRACK);
       return "Log format set to TRACK — sensor mask REPLACED with GPS-only and persisted "
              "(prior selection not recoverable). Takes effect immediately, including on a "
              "session already running.";
@@ -1408,97 +1597,8 @@ const char* cmd_sensorlog(const String& argsInput) {
     }
   }
 
-  // Handle 'sensors' subcommand
-  if (subCmd == "sensors") {
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    if (!a.has(1)) {
-      char* p = getDebugBuffer();
-      size_t remaining = 1024;
-      int n = snprintf(p, remaining, "Selected sensors:\n");
-      p += n; remaining -= n;
-
-      n = snprintf(p, remaining, "  %s Thermal\n", (gSensorLogMask & LOG_THERMAL) ? "☑" : "☐");
-      p += n; remaining -= n;
-      n = snprintf(p, remaining, "  %s ToF\n", (gSensorLogMask & LOG_TOF) ? "☑" : "☐");
-      p += n; remaining -= n;
-      n = snprintf(p, remaining, "  %s IMU\n", (gSensorLogMask & LOG_IMU) ? "☑" : "☐");
-      p += n; remaining -= n;
-      n = snprintf(p, remaining, "  %s Gamepad\n", (gSensorLogMask & LOG_GAMEPAD) ? "☑" : "☐");
-      p += n; remaining -= n;
-      n = snprintf(p, remaining, "  %s APDS\n", (gSensorLogMask & LOG_APDS) ? "☑" : "☐");
-      p += n; remaining -= n;
-      n = snprintf(p, remaining, "  %s GPS\n", (gSensorLogMask & LOG_GPS) ? "☑" : "☐");
-      p += n; remaining -= n;
-      n = snprintf(p, remaining, "  %s Presence\n", (gSensorLogMask & LOG_PRESENCE) ? "☑" : "☐");
-      p += n; remaining -= n;
-      n = snprintf(p, remaining, "  %s R1 Health\n", (gSensorLogMask & LOG_R1) ? "☑" : "☐");
-      p += n; remaining -= n;
-      snprintf(p, remaining, "\nUsage: sensorlog sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>");
-      return getDebugBuffer();
-    }
-
-    // Mutating form. Refuse while a CSV session runs: this path changes the
-    // column set live with no restart, instantly misaligning every later row
-    // against the file's header and bypassing the day-file compat guard.
-    // (Refusal over auto-restart: the restart path can fail after flipping
-    // the run flag and silently kill capture.) TEXT rows are self-describing
-    // key=value, so live changes stay allowed there.
-    if (gSensorLoggingRunning && gSensorLogFormat == SENSOR_LOG_CSV) {
-      cliHint("run 'sensorlog stop' first, then reselect sensors and restart — or use 'healthlogging' which restarts the session itself");
-      return "Error: can't change the sensor selection while a CSV session is running (rows would stop matching the file's header)";
-    }
-
-    String sensorList = a.remaining(0);
-    sensorList.toLowerCase();
-
-    if (sensorList == "all") {
-      gSensorLogMask = LOG_THERMAL | LOG_TOF | LOG_IMU | LOG_GAMEPAD | LOG_APDS | LOG_GPS | LOG_PRESENCE | LOG_R1;
-      setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
-      return "All sensors enabled for logging";
-    }
-
-    if (sensorList == "none") {
-      gSensorLogMask = 0x00;
-      setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
-      return "All sensors disabled for logging";
-    }
-
-    gSensorLogMask = 0x00;
-    int start = 0;
-    while (start < (int)sensorList.length()) {
-      int comma = sensorList.indexOf(',', start);
-      String sensor = (comma >= 0) ? sensorList.substring(start, comma) : sensorList.substring(start);
-      sensor.trim();
-
-      if (sensor == "thermal") gSensorLogMask |= LOG_THERMAL;
-      else if (sensor == "tof") gSensorLogMask |= LOG_TOF;
-      else if (sensor == "imu") gSensorLogMask |= LOG_IMU;
-      else if (sensor == "gamepad" || sensor == "input") gSensorLogMask |= LOG_GAMEPAD;
-      else if (sensor == "apds") gSensorLogMask |= LOG_APDS;
-      else if (sensor == "gps") gSensorLogMask |= LOG_GPS;
-      else if (sensor == "presence") gSensorLogMask |= LOG_PRESENCE;
-      else if (sensor == "r1" || sensor == "health" || sensor == "ring") gSensorLogMask |= LOG_R1;
-      else {
-        snprintf(getDebugBuffer(), 1024, "Error: Unknown sensor '%s'", sensor.c_str());
-        return getDebugBuffer();
-      }
-
-      if (comma < 0) break;
-      start = comma + 1;
-    }
-
-    setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
-    snprintf(getDebugBuffer(), 1024, "Logging enabled for: %s%s%s%s%s%s%s%s",
-             (gSensorLogMask & LOG_THERMAL) ? "thermal " : "",
-             (gSensorLogMask & LOG_TOF) ? "tof " : "",
-             (gSensorLogMask & LOG_IMU) ? "imu " : "",
-             (gSensorLogMask & LOG_GAMEPAD) ? "gamepad " : "",
-             (gSensorLogMask & LOG_APDS) ? "apds " : "",
-             (gSensorLogMask & LOG_GPS) ? "gps " : "",
-             (gSensorLogMask & LOG_PRESENCE) ? "presence " : "",
-             (gSensorLogMask & LOG_R1) ? "r1 " : "");
-    return getDebugBuffer();
-  }
+  // Selection policy and persistence stay with the logger for every UI.
+  if (subCmd == "sensors") return sensorLogSelectSensors(a);
 
   // Handle 'interval' subcommand
   if (subCmd == "interval") {
@@ -2072,10 +2172,11 @@ static String shapeSessionPath(String path) {
   return String(pathBuf);
 }
 
+#if ENABLE_R1_HEALTH
 static const char* healthLoggingRestartWithCurrentMask() {
   // Stop then start so CSV headers match the new mask.
   if (gSensorLoggingRunning) {
-    gSensorLoggingRunning = false;
+    sensorLogMarkStopped();
   }
   String path = gSettings.sensorLogPath;
   if (path.length() == 0 || path.charAt(0) != '/') path = CAPTURE_HEALTHLOG_DEFAULT;
@@ -2085,21 +2186,16 @@ static const char* healthLoggingRestartWithCurrentMask() {
   path = shapeSessionPath(path);
   uint32_t interval = gSensorLogIntervalMs;
   if (interval < 100) interval = 5000;
-  char cmd[320];
-  snprintf(cmd, sizeof(cmd), "start \"%s\" %lu", path.c_str(), (unsigned long)interval);
-  return cmd_sensorlog(String(cmd));
+  return sensorLogStart(path, sensorLogClampInterval(interval));
 }
 
-const char* healthLoggingSet(bool on) {
+static const char* healthLoggingSet(bool on) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (on) {
     if (!gSettings.sensorLogEnabled) {
       return "Error: sensor logging is disabled — run 'sensorlogenabled 1' first";
     }
-#if !ENABLE_R1_HEALTH
-    return "Error: R1 Health logging requires ENABLE_R1_HEALTH in this build";
-#else
     setSetting(gSettings.healthLoggingEnabled, true);
     // Capture BEFORE the OR: the "already logging" shortcut below must only
     // fire when R1 was ALREADY in the mask. Otherwise `healthlogging on` during
@@ -2151,7 +2247,6 @@ const char* healthLoggingSet(bool on) {
       return getDebugBuffer();
     }
     return result ? result : "Error: Health logging failed to start sensorlog";
-#endif
   }
 
   // Off
@@ -2166,7 +2261,7 @@ const char* healthLoggingSet(bool on) {
   }
 
   if (gSensorLogMask == 0) {
-    gSensorLoggingRunning = false;
+    sensorLogMarkStopped();
     setSetting(gSettings.sensorLogAutoStart, false);
     systemEventPost(SYSEVT_SENSOR_STOPPED, "Logging");
     return "SUCCESS: Health logging OFF — sensor logging stopped";
@@ -2180,7 +2275,6 @@ const char* healthLoggingSet(bool on) {
   return result ? result : "SUCCESS: Health logging OFF";
 }
 
-#if ENABLE_R1_HEALTH
 const char* cmd_healthlogging(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -2496,6 +2590,7 @@ const CommandEntry sensorLoggingCommands[] = {
     "  rotations <count>: Old generations to keep (1-9). 0 = DELETE the active\n"
     "                     file at the size cap, losing the current day (default: 3)\n"
     "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>: Select sensors to log\n"
+    "  sensors toggle <sensor>: Toggle one sensor in the current selection\n"
     "  interval <ms>: Set poll interval 100-3600000 (default 5000)\n"
     "  autostart [on|off]: Auto-start logging on boot (bare = toggle)" },
   { "capturecrypt", "Capture at-rest encryption: status, mode (off/health/all), plaintext export", true, cmd_capturecrypt,
@@ -2592,12 +2687,7 @@ extern const SettingsModule sensorLogSettingsModule = {
 // Auto-Start (called from boot after sensors are initialized)
 // ============================================================================
 
-void sensorLogAutoStart() {
-  // Health logging alone is enough to resume capture at boot (it also sets
-  // sensorLogAutoStart when enabled, but honor the setting either way).
-  if (!gSettings.sensorLogAutoStart && !gSettings.healthLoggingEnabled) return;
-  if (gSensorLoggingRunning) return;  // Already running
-
+static void sensorLogRestoreSettings() {
   // Restore persisted parameters
   if (gSettings.sensorLogMask > 0) gSensorLogMask = (uint8_t)gSettings.sensorLogMask;
   if (gSettings.sensorLogFormat >= 0 && gSettings.sensorLogFormat <= 2) gSensorLogFormat = (SensorLogFormat)gSettings.sensorLogFormat;
@@ -2606,6 +2696,27 @@ void sensorLogAutoStart() {
     gSensorLogMaxSize = (size_t)gSettings.sensorLogMaxSize;
   if (gSettings.sensorLogMaxRotations >= 0 && gSettings.sensorLogMaxRotations <= 9)
     gSensorLogMaxRotations = (uint8_t)gSettings.sensorLogMaxRotations;
+}
+
+const char* sensorLogStartConfiguredSession() {
+  // Manual setup must fail without overwriting a live or disabled session.
+  if (const char* error = sensorLogStartError()) return error;
+  sensorLogRestoreSettings();
+
+  String path = gSettings.sensorLogPath;
+  if (path.length() == 0 || path.charAt(0) != '/') {
+    path = CAPTURE_SENSORLOG_DEFAULT;
+  }
+  return sensorLogStart(shapeSessionPath(path), sensorLogClampInterval(gSensorLogIntervalMs));
+}
+
+void sensorLogAutoStart() {
+  // Health logging alone is enough to resume capture at boot (it also sets
+  // sensorLogAutoStart when enabled, but honor the setting either way).
+  if (!gSettings.sensorLogAutoStart && !gSettings.healthLoggingEnabled) return;
+  if (gSensorLoggingRunning) return;  // Already running
+
+  sensorLogRestoreSettings();
 
   if (gSettings.healthLoggingEnabled) {
     gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
@@ -2636,15 +2747,10 @@ void sensorLogAutoStart() {
   // Session subfolder + timestamp shaping (shared with healthlogging starts).
   path = shapeSessionPath(path);
 
-  // No mkdir here: this used to hand-create /logs + /logs/sensors, which is
-  // both the wrong tree now and redundant — cmd_sensorlog below creates every
-  // parent recursively, and the boot block already makes the capture tree.
-
-  // Build and execute the CLI command so all validation/space checks run
-  char cmd[320];
-  snprintf(cmd, sizeof(cmd), "sensorlog start %s %d", path.c_str(), (int)gSensorLogIntervalMs);
-  BROADCAST_PRINTF("[sensorlog] Auto-start: %s", cmd);
-  const char* result = cmd_sensorlog(String(cmd).substring(10));  // Pass everything after "sensorlog " (10 chars)
+  // Share the command's start operation directly: paths stay literal even
+  // when they contain spaces or quotes, and all validation/space checks run.
+  BROADCAST_PRINTF("[sensorlog] Auto-start: sensorlog start %s %d", path.c_str(), (int)gSensorLogIntervalMs);
+  const char* result = sensorLogStart(path, sensorLogClampInterval(gSensorLogIntervalMs));
   if (result && strncmp(result, "SUCCESS", 7) != 0) {
     // Command failed - broadcast the error
     BROADCAST_PRINTF("[sensorlog] Auto-start failed: %s", result);

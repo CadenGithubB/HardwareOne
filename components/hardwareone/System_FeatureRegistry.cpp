@@ -447,7 +447,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   // setting => enabled==compiled, toggleable false). Listed unconditionally
   // like "llm" below so a USB-only board reports compiled:false instead of
   // going silent: on such a build batterystatus / batterycalibrate /
-  // batterylog are not registered at all (System_Utils.cpp #if
+  // batterylog are not registered at all (System_CommandRegistry.cpp #if
   // ENABLE_BATTERY_MONITOR), so without this row the app's only way to find
   // out is to send batterystatus and get "Unknown command". Heap is ~0 (a 36 B
   // ADC-calibration struct, or nothing at all on a fuel-gauge board — it's

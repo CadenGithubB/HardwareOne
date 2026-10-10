@@ -5,6 +5,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "i2csensor_ds3231.h"
 #include "OLED_UI.h"
 #include "HAL_Input.h"
 #include <Adafruit_SSD1306.h>
@@ -12,6 +13,7 @@
 #include <WiFi.h>
 #endif
 #include "System_Debug.h"
+#include "System_I2C.h"  // ConnectedDevice and RTC address for mode availability
 
 // RTC OLED display function - shows date, time, and temperature
 // Respects OLED_CONTENT_HEIGHT to not overlap footer/navigation bar
@@ -33,11 +35,11 @@ static void displayRTCData() {
   float temp = 0.0f;
   bool valid = false;
   
-  if (gRtcCache.mutex && xSemaphoreTake(gRtcCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    dt = rtcLocalTime(&gRtcCache.dateTime);  // Apply timezone offset for display
-    temp = gRtcCache.temperature;
-    valid = gRtcCache.dataValid;
-    xSemaphoreGive(gRtcCache.mutex);
+  RTCCache reading{};
+  if (rtcCacheSnapshot(reading)) {
+    dt = rtcLocalTime(&reading.dateTime);  // Apply timezone offset for display
+    temp = reading.temperature;
+    valid = reading.dataValid;
   }
   
   if (!valid) {

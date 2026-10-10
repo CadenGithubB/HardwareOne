@@ -563,11 +563,13 @@ require(
 
 # The RTC worker can persist calibration. Force-deleting it while the shared
 # writer guard is live would skip C++ destructors and strand the mutex forever.
-rtc_stop = block_after(rtc, "void rtcStop(")
+rtc_task = block_after(rtc, "void rtcTask(")
 rtc_start = block_after(rtc, "bool rtcStartInternal(")
 require(
-    "vTaskDelete(gRtcTaskHandle)" not in cpp_code(rtc_stop),
-    "RTC stop can force-delete a task that owns the settings writer guard",
+    "vTaskDelete(gRtcTaskHandle)" not in cpp_code(rtc) and
+    "gRtcConnected = false;" in rtc_task and
+    "while (!rtcInvalidateCache())" in rtc_task,
+    "RTC cleanup must remain task-owned and invalidate before self-deletion",
 )
 require(
     "gRtcTaskHandle != nullptr" in rtc_start,
@@ -579,8 +581,8 @@ require(
     "RTC idempotent-start success must precede the stale exiting-task guard",
 )
 require(
-    "eDeleted" in rtc_start and "eInvalid" in rtc_start,
-    "RTC start no longer recovers a genuinely stale deleted task handle",
+    "eTaskGetState" not in cpp_code(rtc_start),
+    "RTC start must not inspect a deleted task's freed TCB through a retained handle",
 )
 
 

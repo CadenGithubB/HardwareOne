@@ -12,6 +12,7 @@
 
 #include "Bluetooth.h"
 #include "System_Events.h"  // systemEventPost — event register producer
+#include "System_Mutex.h"  // FsLockGuard for authentication
 #include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during BLE init
 #include "G2_Glasses.h"  // Header provides stubs when ENABLE_G2_GLASSES=0, so blemode CLI compiles either way
 #include "G2_Ring.h"     // g2RingInvalidateLink before BLEDevice::deinit
@@ -29,7 +30,6 @@
 #include "System_Debug.h"
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
-#include "System_Mutex.h"   // SensorCacheGuard — used by the G2 sensor-stream paths below
 #include "System_OTA.h"     // encrypted BLE OTA binary-frame sink
 
 // Sensor caches for the BLE sensor-stream path (buildSensorDataJSON). Pull in the
@@ -40,13 +40,13 @@
 // imuTemp as "heading", never sent roll, and gated validity on a millis() byte).
 // System_SensorStubs.h supplies the types/globals when a sensor is compiled out.
 #if ENABLE_THERMAL_SENSOR
-  #include "i2csensor_mlx90640.h"   // ThermalCache, gThermalCache, gThermalRunning/Connected
+  #include "i2csensor_mlx90640.h"   // ThermalCache, readings, gThermalRunning/Connected
 #endif
 #if ENABLE_TOF_SENSOR
-  #include "i2csensor_vl53l4cx.h"   // TofCache, gTofCache, gTofRunning/Connected
+  #include "i2csensor_vl53l4cx.h"   // TofCache, readings, gTofRunning/Connected
 #endif
 #if ENABLE_IMU_SENSOR
-  #include "i2csensor_bno055.h"     // ImuCache, gImuCache, gImuRunning/Connected
+  #include "i2csensor_bno055.h"     // ImuCache, readings, gImuRunning/Connected
 #endif
 #include "System_SensorStubs.h"     // stubs for disabled sensors
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic
@@ -693,7 +693,7 @@ class ServerCallbacks : public BLEServerCallbacks {
 class CmdRequestCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) override {
     // NOTE: Callback runs on BTC_TASK - defer logging to task context (ISR-safe pattern)
-    if (!param || !gBLEState) return;
+    if (!param) return;
     // Zero-copy read: getData()/getLength() return the characteristic's internal
     // buffer (getData() is (uint8_t*)m_value.c_str(), so still NUL-terminated),
     // avoiding the by-value getValue() String heap-copy on BTC_TASK for every
@@ -701,12 +701,16 @@ class CmdRequestCallbacks : public BLECharacteristicCallbacks {
     const uint8_t* data = pCharacteristic->getData();
     size_t len = pCharacteristic->getLength();
     if (len > 0) {
-      gBLEState->commandsReceived++;
+      {
+        BleLifecycleGuard lifecycle;
+        if (!lifecycle || !gBLEState) return;
+        gBLEState->commandsReceived++;
 
-      // Defer logging to task context
-      gBLEState->deferredCmdReceivedConnId = param->write.conn_id;
-      gBLEState->deferredCmdReceivedLen = len;
-      gBLEState->deferredCmdReceivedPending = true;
+        // Defer logging to task context
+        gBLEState->deferredCmdReceivedConnId = param->write.conn_id;
+        gBLEState->deferredCmdReceivedLen = len;
+        gBLEState->deferredCmdReceivedPending = true;
+      }
 
       BLE_DEBUGF(DEBUG_BLE_GATT,
                  "Command write conn=%u len=%u",
@@ -1406,18 +1410,26 @@ bool initBluetooth() {
     broadcastOutput("[BLE] Failed to allocate state");
     return false;
   }
-  gBLEState = new (stateStorage) BLESystemState{};
+  BLESystemState* state = new (stateStorage) BLESystemState{};
   
   // Initialize connection slots
   for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-    gBLEState->connections[i].active = false;
-    gBLEState->connections[i].connId = 0;
-    gBLEState->connections[i].deviceType = BLE_DEVICE_UNKNOWN;
-    gBLEState->connections[i].authed = false;
-    gBLEState->connections[i].user = "";
-    gBLEState->connections[i].lastActivityMs = 0;
+    state->connections[i].active = false;
+    state->connections[i].connId = 0;
+    state->connections[i].deviceType = BLE_DEVICE_UNKNOWN;
+    state->connections[i].authed = false;
+    state->connections[i].user = "";
+    state->connections[i].lastActivityMs = 0;
   }
-  gBLEState->activeConnectionCount = 0;
+  state->activeConnectionCount = 0;
+  {
+    BleLifecycleGuard lifecycle;
+    if (!lifecycle) {
+      ps_delete(state);
+      return false;
+    }
+    gBLEState = state;
+  }
   
   BLE_DEBUGF(DEBUG_BLE_CORE, "Initializing ESP32 BLE...");
   
@@ -1430,7 +1442,8 @@ bool initBluetooth() {
     const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
     if (!rollback.success) bleStackSetLifecycleFault(true);
-    if (gBLEState) {
+    BleLifecycleGuard lifecycle;
+    if (lifecycle && gBLEState) {
       ps_delete(gBLEState);
       gBLEState = nullptr;
     }
@@ -1579,8 +1592,12 @@ bool initBluetooth() {
   gBLEState->systemStreamCount = 0;
   gBLEState->eventCount = 0;
   
-  gBLEState->initialized = true;
-  gBLEState->connectionState = BLE_STATE_IDLE;
+  {
+    BleLifecycleGuard lifecycle;
+    if (!lifecycle || !gBLEState) return false;
+    gBLEState->initialized = true;
+    gBLEState->connectionState = BLE_STATE_IDLE;
+  }
 
   // Secure Channel: create the tx mutex, then pre-derive the PSK here (init runs on a
   // large-stack task) so the per-connection handshake never pays the PBKDF2 cost.
@@ -1704,7 +1721,11 @@ bool startBLEAdvertising() {
   
   if (pAdvertising) {
     BLEDevice::startAdvertising();
-    gBLEState->connectionState = BLE_STATE_ADVERTISING;
+    {
+      BleLifecycleGuard lifecycle;
+      if (!lifecycle || !gBLEState) return false;
+      gBLEState->connectionState = BLE_STATE_ADVERTISING;
+    }
     BLE_DEBUGF(DEBUG_BLE_CORE, "Advertising started");
     broadcastOutput("[BLE] Advertising started - device visible as 'HardwareOne'");
     return true;
@@ -1718,7 +1739,11 @@ void stopBLEAdvertising() {
   
   if (pAdvertising && gBLEState->connectionState == BLE_STATE_ADVERTISING) {
     BLEDevice::stopAdvertising();
-    gBLEState->connectionState = BLE_STATE_IDLE;
+    {
+      BleLifecycleGuard lifecycle;
+      if (!lifecycle || !gBLEState) return;
+      gBLEState->connectionState = BLE_STATE_IDLE;
+    }
     BLE_DEBUGF(DEBUG_BLE_CORE, "Advertising stopped");
   }
 }
@@ -2632,44 +2657,58 @@ static const char* cmd_bletxpower(const String& argsInput) {
   return buf;
 }
 
+bool buildBLEInfoJson(JsonObject out) {
+  if (out.isNull()) return false;
+  out["schema"]              = 1;
+  out["deviceName"]     = gSettings.bleDeviceName;
+  out["txPower"]        = gSettings.bleTxPower;
+  out["autoStart"]      = gSettings.bleAutoStart;
+  out["requireAuth"]    = gSettings.bleRequireAuth;
+  out["secureChannelRequired"] = bleScRequired();
+  // Before the first server start there is no mutex and no published state.
+  // Never dereference gBLEState in that case. Once created, the mutex survives
+  // server stops and protects this copy against callbacks and state deletion.
+  BleLifecycleGuard lifecycle(pdMS_TO_TICKS(100));
+  if (sBleLifecycleMutex && !lifecycle) return false;
+  const bool init = lifecycle && gBLEState && gBLEState->initialized;
+  out["initialized"]    = init;
+  out["state"]          = init ? getBLEStateString() : "uninitialized";
+  out["connections"]    = init ? gBLEState->activeConnectionCount : 0;
+  out["maxConnections"] = BLE_MAX_CONNECTIONS;
+  out["totalConnections"] = init ? gBLEState->totalConnections : 0;  // lifetime
+  out["commandsReceived"] = init ? gBLEState->commandsReceived : 0;  // lifetime
+  // Per-connection identity for the web "Connected Clients" card. Emit the
+  // AUTHENTICATED facts (authed + raw user) rather than a pre-baked "Unknown",
+  // so the UI can tell an unauthenticated connection from a user named
+  // "Unknown" — the ambiguity the old text format couldn't represent.
+  JsonArray clients = out["clients"].to<JsonArray>();
+  if (init) {
+    for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+      const BLEConnection& c = gBLEState->connections[i];
+      if (!c.active) continue;
+      JsonObject o = clients.add<JsonObject>();
+      o["connId"]   = c.connId;
+      o["authed"]   = c.authed;
+      o["user"]     = c.user;   // "" when not authed; UI renders authed ? user : "Unknown"
+      o["since"]    = (uint32_t)((millis() - c.connectedSince) / 1000);
+      o["commands"] = c.commandsReceived;
+      char macStr[18]; macToStackBuf(c.deviceAddr, macStr);
+      o["mac"]      = JsonString(macStr, false);
+    }
+  }
+  return true;
+}
+
 static const char* cmd_bleinfo(const String& argsInput) {
   // Structured path: BLE config + live state, one verbatim JSON blob via the
   // return value. No broadcastOutput. ArduinoJson escapes the user-settable
   // device name correctly. No secrets emitted.
   if (argWantsJson(argsInput)) {
-    bool init = (gBLEState && gBLEState->initialized);
     PSRAM_JSON_DOC(doc);
-    doc["schema"]              = 1;
-    doc["deviceName"]     = gSettings.bleDeviceName;
-    doc["txPower"]        = gSettings.bleTxPower;
-    doc["autoStart"]      = gSettings.bleAutoStart;
-    doc["requireAuth"]    = gSettings.bleRequireAuth;
-    doc["secureChannelRequired"] = bleScRequired();
-    doc["initialized"]    = init;
-    doc["state"]          = getBLEStateString();
-    doc["connections"]    = init ? gBLEState->activeConnectionCount : 0;
-    doc["maxConnections"] = BLE_MAX_CONNECTIONS;
-    doc["totalConnections"] = init ? gBLEState->totalConnections : 0;  // lifetime
-    doc["commandsReceived"] = init ? gBLEState->commandsReceived : 0;  // lifetime
-    // Per-connection identity for the web "Connected Clients" card. Emit the
-    // AUTHENTICATED facts (authed + raw user) rather than a pre-baked "Unknown",
-    // so the UI can tell an unauthenticated connection from a user named
-    // "Unknown" — the ambiguity the old text format couldn't represent.
-    JsonArray clients = doc["clients"].to<JsonArray>();
-    if (init) {
-      for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-        const BLEConnection& c = gBLEState->connections[i];
-        if (!c.active) continue;
-        JsonObject o = clients.add<JsonObject>();
-        o["connId"]   = c.connId;
-        o["authed"]   = c.authed;
-        o["user"]     = c.user;   // "" when not authed; UI renders authed ? user : "Unknown"
-        o["since"]    = (uint32_t)((millis() - c.connectedSince) / 1000);
-        o["commands"] = c.commandsReceived;
-        char macStr[18]; macToStackBuf(c.deviceAddr, macStr);
-        o["mac"]      = String(macStr);
-      }
-    }
+    const bool available = buildBLEInfoJson(doc.to<JsonObject>());
+    if (doc.overflowed()) return "{\"error\":\"oom\"}";
+    if (!available) return "{\"error\":\"unavailable\"}";
+    if (measureJson(doc) >= 2048) return "{\"error\":\"status too large\"}";
     static char* jbuf = nullptr;
     if (!jbuf) jbuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "bleinfo.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
@@ -2879,8 +2918,9 @@ extern const SettingsModule bluetoothSettingsModule = {
 // Add message to history (called when command received)
 void bleAddMessageToHistory(const char* msg) {
   // Truncate if needed
-  strncpy(bleMessageHistory[bleMessageHead], msg, BLE_MSG_MAX_LEN - 1);
-  bleMessageHistory[bleMessageHead][BLE_MSG_MAX_LEN - 1] = '\0';
+  const size_t length = strnlen(msg, BLE_MSG_MAX_LEN - 1);
+  memcpy(bleMessageHistory[bleMessageHead], msg, length);
+  bleMessageHistory[bleMessageHead][length] = '\0';
   
   bleMessageHead = (bleMessageHead + 1) % BLE_MSG_HISTORY_SIZE;
   if (bleMessageCount < BLE_MSG_HISTORY_SIZE) bleMessageCount++;
@@ -3161,45 +3201,45 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   
   #if ENABLE_THERMAL_SENSOR
   if (gThermalRunning && gThermalConnected) {
-    SensorCacheGuard g(gThermalCache.mutex, pdMS_TO_TICKS(10), "ble.thermalStream");
-    if (g.held && gThermalCache.thermalDataValid) {
+    ThermalCache thermal{};
+    if (thermalCacheSnapshot(thermal, 10) && thermal.thermalDataValid) {
       // "avg" (was "center"): ThermalCache has no center field — the old local
       // struct invented thermalCenterTemp/HottestX/HottestY, so this read landed
       // on thermalMinTemp while min/max read the interpolated width/height ints
       // punned as floats (both printed 0.0). thermalAvgTemp is the real field.
       pos += snprintf(buf + pos, bufSize - pos,
                       "\"thermal\":{\"min\":%.1f,\"max\":%.1f,\"avg\":%.1f,\"valid\":true},",
-                      gThermalCache.thermalMinTemp,
-                      gThermalCache.thermalMaxTemp,
-                      gThermalCache.thermalAvgTemp);
+                      thermal.thermalMinTemp,
+                      thermal.thermalMaxTemp,
+                      thermal.thermalAvgTemp);
     }
   }
   #endif
   
   #if ENABLE_TOF_SENSOR
   if (gTofRunning && gTofConnected) {
-    SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(10), "ble.tofStream");
-    if (g.held && gTofCache.tofDataValid && gTofCache.tofTotalObjects > 0) {
+    TofCache tof{};
+    if (tofCacheSnapshot(tof, 10) && tof.tofDataValid && tof.tofTotalObjects > 0) {
       pos += snprintf(buf + pos, bufSize - pos,
                       "\"tof\":{\"dist_mm\":%d,\"valid\":true},",
-                      gTofCache.tofObjects[0].distance_mm);
+                      tof.tofObjects[0].distance_mm);
     }
   }
   #endif
   
   #if ENABLE_IMU_SENSOR
   if (gImuRunning && gImuConnected) {
-    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "ble.imuStream");
-    if (g.held && gImuCache.imuDataValid) {
+    ImuCache imu{};
+    if (imuCacheSnapshot(imu, 10) && imu.imuDataValid) {
       // Real field names are oriYaw/oriPitch/oriRoll. The old local struct omitted
       // imuTemp, shifting everything after it: "heading" read imuTemp (streamed
       // TEMPERATURE), pitch read oriYaw, roll read oriPitch, and oriRoll was never
       // sent at all. JSON keys kept (heading == yaw) so the wire format is stable.
       pos += snprintf(buf + pos, bufSize - pos,
                       "\"imu\":{\"heading\":%.1f,\"pitch\":%.1f,\"roll\":%.1f,\"valid\":true},",
-                      gImuCache.oriYaw,
-                      gImuCache.oriPitch,
-                      gImuCache.oriRoll);
+                      imu.oriYaw,
+                      imu.oriPitch,
+                      imu.oriRoll);
     }
   }
   #endif

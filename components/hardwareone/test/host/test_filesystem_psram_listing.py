@@ -23,6 +23,17 @@ COMPONENT = HERE.parents[1]
 JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 
 
+def directory_reader_source() -> str:
+    """Compile the production reader declaration and methods against File/VFS mocks."""
+    header = (COMPONENT / "System_VFS.h").read_text()
+    source = (COMPONENT / "System_VFS.cpp").read_text()
+    declarations = header[header.index("struct DirectoryEntry {"):
+                          header.index("bool exists(const String& path);")]
+    methods = source[source.index("DirectoryReader::DirectoryReader("):
+                     source.index("static FS* fsForPath(")]
+    return "namespace VFS {\n" + declarations + methods + "\n}\n"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -54,7 +65,7 @@ def main() -> None:
             "text command uses an owned output sink without changing the public String API")
     harness = (HERE / "filesystem_psram_listing_harness.cpp").read_text()
     for marker, replacement in {
-        "// INSERT_PRODUCTION_LISTING_HERE": "\n\n".join((walk, buffers, compatibility, command)),
+        "// INSERT_PRODUCTION_LISTING_HERE": "\n\n".join((directory_reader_source(), walk, buffers, compatibility, command)),
         "// INSERT_PRODUCTION_HTTP_HERE": decode + "\n\n" + http,
     }.items():
         require(harness.count(marker) == 1, f"expected one insertion marker: {marker}")

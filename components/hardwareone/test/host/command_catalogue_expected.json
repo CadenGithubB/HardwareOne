@@ -1,0 +1,165 @@
+{
+  "provenance": "Compiled pre-extraction System_Utils.cpp catalogue, 2026-10-08. Each row: module|command-array symbol (paired Count address)|flags|callback provider. Selections are resolved flags, not supported board profiles.",
+  "rows": [
+    "cli|cliCommands|2|-",
+    "system|commands|0|-",
+    "wifi|wifiCommands|8|-",
+    "espnow|espNowCommands|8|-",
+    "c6|companionCommands|8|radio",
+    "mqtt|mqttCommands|8|-",
+    "bluetooth|bluetoothCommands|8|-",
+    "filesystem|filesystemCommands|0|-",
+    "sd|sdCommands|0|sd",
+    "oled|oledCommands|0|-",
+    "neopixel|neopixelCommands|0|-",
+    "led|ledCommands|0|-",
+    "matrix|matrixCommands|0|-",
+    "servo|servoCommands|0|-",
+    "thermal|thermalCommands|1|sensor:thermal",
+    "tof|tofCommands|1|sensor:tof",
+    "imu|imuCommands|1|sensor:imu",
+    "input|inputCommands|1|input",
+    "gamepad|gamepadCommands|1|input",
+    "anoencoder|anoEncoderCommands|1|ano",
+    "apds|apdsCommands|1|sensor:apds",
+    "gps|gpsCommands|1|sensor:gps",
+    "fmradio|fmRadioCommands|1|sensor:fmradio",
+    "rtc|rtcCommands|1|sensor:rtc",
+    "presence|presenceCommands|1|sensor:presence",
+    "camera|cameraCommands|1|camera",
+    "microphone|micCommands|1|audio",
+    "edgeimpulse|edgeImpulseCommands|1|-",
+    "transcription|transcriptionUICommands|1|-",
+    "note|noteCommands|1|-",
+    "stt|sttCommands|1|-",
+    "espsr|espsrCommands|1|-",
+    "i2c|i2cCommands|0|-",
+    "automation|automationCommands|0|-",
+    "battery|batteryCommands|0|-",
+    "debug|debugCommands|0|-",
+    "settings|settingsCommands|0|-",
+    "sensorlog|sensorLoggingCommands|0|-",
+    "health|healthCommands|0|-",
+    "users|userSystemCommands|4|-",
+    "features|featureCommands|0|-",
+    "image|imageCommands|0|-",
+    "map|mapCommands|0|-",
+    "mapsettings|mapsSettingCommands|0|-",
+    "power|powerCommands|0|-",
+    "liveaudio|liveAudioCommands|8|-",
+    "cm5|cm5PresenceCommands|8|-",
+    "ota|otaCommands|6|-",
+    "setpattern|setPatternCommands|0|-",
+    "even_g2|g2Commands|0|-",
+    "even_r1|g2RingCommands|0|-",
+    "llm|llmCommands|0|-",
+    "settingsedit|settingEditorCommands|0|-"
+  ],
+  "profiles": {
+    "minimal": {
+      "enabled": [],
+      "modules": "cli system filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
+    },
+    "network": {
+      "enabled": [
+        "ENABLE_WIFI",
+        "ENABLE_ESPNOW",
+        "ENABLE_MQTT",
+        "ENABLE_BLUETOOTH",
+        "HW1_RADIO_COMPANION"
+      ],
+      "modules": "cli system wifi espnow c6 mqtt bluetooth filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
+    },
+    "gamepad_peripherals": {
+      "enabled": [
+        "ENABLE_I2C_SYSTEM",
+        "ENABLE_SD_CARD",
+        "ENABLE_NEOPIXEL",
+        "ENABLE_LED_MATRIX",
+        "ENABLE_SERVO",
+        "ENABLE_THERMAL_SENSOR",
+        "ENABLE_TOF_SENSOR",
+        "ENABLE_IMU_SENSOR",
+        "ENABLE_GAMEPAD_SENSOR",
+        "ENABLE_APDS_SENSOR",
+        "ENABLE_GPS_SENSOR",
+        "ENABLE_FM_RADIO",
+        "ENABLE_RTC_SENSOR",
+        "ENABLE_PRESENCE_SENSOR",
+        "ENABLE_BATTERY_MONITOR",
+        "ENABLE_OLED_DISPLAY"
+      ],
+      "modules": "cli system filesystem sd oled neopixel led matrix servo thermal tof imu gamepad apds gps fmradio rtc presence i2c battery debug settings sensorlog users features power liveaudio cm5 ota setpattern settingsedit"
+    },
+    "ano_input": {
+      "enabled": [
+        "ENABLE_I2C_SYSTEM",
+        "ENABLE_OLED_INPUT",
+        "ENABLE_ANO_ENCODER",
+        "ENABLE_OLED_DISPLAY"
+      ],
+      "modules": "cli system filesystem oled input anoencoder i2c debug settings sensorlog users features power liveaudio cm5 ota setpattern settingsedit"
+    },
+    "applications": {
+      "enabled": [
+        "ENABLE_CAMERA_SENSOR",
+        "ENABLE_MICROPHONE",
+        "ENABLE_EDGE_IMPULSE",
+        "ENABLE_DICTATION",
+        "ENABLE_QUICKNOTE",
+        "ENABLE_LOCAL_STT",
+        "ENABLE_ESP_SR",
+        "ENABLE_AUTOMATION",
+        "ENABLE_R1_HEALTH",
+        "ENABLE_MAPS",
+        "ENABLE_LLM_BACKEND"
+      ],
+      "modules": "cli system filesystem oled camera microphone edgeimpulse transcription note stt espsr automation debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota llm settingsedit"
+    },
+    "glasses_without_bluetooth": {
+      "enabled": [
+        "ENABLE_G2_GLASSES"
+      ],
+      "modules": "cli system filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
+    },
+    "combined": {
+      "enabled": [
+        "ENABLE_APDS_SENSOR",
+        "ENABLE_AUTOMATION",
+        "ENABLE_BATTERY_MONITOR",
+        "ENABLE_BLUETOOTH",
+        "ENABLE_CAMERA_SENSOR",
+        "ENABLE_DICTATION",
+        "ENABLE_EDGE_IMPULSE",
+        "ENABLE_ESPNOW",
+        "ENABLE_ESP_SR",
+        "ENABLE_FM_RADIO",
+        "ENABLE_G2_GLASSES",
+        "ENABLE_GAMEPAD_SENSOR",
+        "ENABLE_GPS_SENSOR",
+        "ENABLE_I2C_SYSTEM",
+        "ENABLE_IMU_SENSOR",
+        "ENABLE_LED_MATRIX",
+        "ENABLE_LLM_BACKEND",
+        "ENABLE_LOCAL_STT",
+        "ENABLE_MAPS",
+        "ENABLE_MICROPHONE",
+        "ENABLE_MQTT",
+        "ENABLE_NEOPIXEL",
+        "ENABLE_OLED_DISPLAY",
+        "ENABLE_OLED_INPUT",
+        "ENABLE_PRESENCE_SENSOR",
+        "ENABLE_QUICKNOTE",
+        "ENABLE_R1_HEALTH",
+        "ENABLE_RTC_SENSOR",
+        "ENABLE_SD_CARD",
+        "ENABLE_SERVO",
+        "ENABLE_THERMAL_SENSOR",
+        "ENABLE_TOF_SENSOR",
+        "ENABLE_WIFI",
+        "HW1_RADIO_COMPANION"
+      ],
+      "modules": "cli system wifi espnow c6 mqtt bluetooth filesystem sd oled neopixel led matrix servo thermal tof imu input gamepad apds gps fmradio rtc presence camera microphone edgeimpulse transcription note stt espsr i2c automation battery debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota setpattern even_g2 even_r1 llm settingsedit"
+    }
+  }
+}

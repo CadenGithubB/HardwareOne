@@ -77,7 +77,7 @@ update may leave a partial picture on the physical display.
 ## Build and initial provisioning
 
 ```sh
-source /Users/morgan/esp/esp-idf/export.sh
+source "$IDF_PATH/export.sh"
 tools/build_board.sh qtpy_esp32 build
 ```
 

@@ -79,9 +79,10 @@ static const MemoryRequirement gMemoryRequirements[] = {
   { "gps",           16384,    GPS_STACK_WORDS,       0 },       // 12KB stack + overhead
   { "rtc",           20480,    RTC_STACK_WORDS,       0 },       // 16KB stack + overhead
   { "espnow",        20480,    ESPNOW_HB_STACK_WORDS, 327680 }, // 16KB stack + overhead (~310KB PSRAM for state)
-  // 84 KB. initG2Client is the most expensive operation in this firmware and was
-  // COMPLETELY UNGATED until now -- the "bluetooth" row below is only consulted
-  // from initBluetooth (server path), never from the client path.
+  // 84 KB for a fresh BLE core plus G2 workers. initG2Client checks this after
+  // checked shutdown of any previous host, before new temple/host/worker init.
+  // Some workers persist across runtime restarts, so this cold-start budget
+  // remains conservative when they already exist. Server uses its own row.
   // MEASURED on feather_esp32_v2, one boot, probes 587 ms apart:
   //   pre-BLEDevice::init   148,115
   //   post-BLEDevice::init  104,843   -> BLE core   43,272

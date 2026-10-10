@@ -206,43 +206,6 @@ static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref) {
 }
 #endif  // ENABLE_ESPNOW
 
-// -----------------------------------------------------------------------------
-// Lens redraw from cmd_exec_task — mirrors Network's helper
-// -----------------------------------------------------------------------------
-// Used by every g2SubmitHijackCommand completion callback below. Builds a
-// Redraw LensUiJob and enqueues — gen-guard in the lens applier drops it
-// if the user has navigated away by the time it lands.
-
-static void enqueueRedrawFromCallback(const G2CmdCookie& cookie,
-                                      void (*renderFn)(),
-                                      const char* tag) {
-  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
-  if (!spec) {
-    DEBUG_G2F("[G2-ESP-NOW-APP] %s: RedrawSpec alloc failed", tag);
-    return;
-  }
-  spec->render = renderFn;
-
-  LensUiJob* job = new (std::nothrow) LensUiJob{};
-  if (!job) {
-    DEBUG_G2F("[G2-ESP-NOW-APP] %s: LensUiJob alloc failed", tag);
-    delete spec;
-    return;
-  }
-  job->kind           = LensJobKind::Redraw;
-  job->submitMenuGen  = cookie.menuGen;
-  job->cmdSeq         = cookie.seq;
-  job->targetPage     = cookie.targetPage;
-  job->targetNetSub   = cookie.targetNetSub;
-  job->payload.redraw = spec;
-
-  if (!g2EnqueueLensJob(job)) {
-    DEBUG_G2F("[G2-ESP-NOW-APP] %s: lens job enqueue FAILED", tag);
-    delete spec;
-    delete job;
-  }
-}
-
 // Build a cookie for a hijack command originating from this page. Centralised
 // so every submit site stamps the same fields and a future schema change
 // only touches one place.
@@ -839,7 +802,7 @@ static void onMainRedrawDone(bool ok,
   DEBUG_G2F("[G2-ESP-NOW-APP] main redraw cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  enqueueRedrawFromCallback(cookie, &showMainMenu, "main redraw");
+  (void)g2EnqueueRedraw(cookie, &showMainMenu, "main redraw");
 }
 
 #if ENABLE_ESPNOW
@@ -860,7 +823,7 @@ static void onNameThenOpenDone(bool ok,
             (result && result[0]) ? result : "ESP-NOW needs a device name",
             sizeof(sAppOpenMsg) - 1);
     sAppOpenMsg[sizeof(sAppOpenMsg) - 1] = '\0';
-    enqueueRedrawFromCallback(cookie, &showAppOpenMsg, "setname failed");
+    (void)g2EnqueueRedraw(cookie, &showAppOpenMsg, "setname failed");
     return;
   }
   const bool stillHere =
@@ -870,7 +833,7 @@ static void onNameThenOpenDone(bool ok,
   if (!g2SubmitHijackCommand("openespnow", cookie, cb, nullptr)) {
     DEBUG_G2F("[G2-ESP-NOW-APP] name-then-open: openespnow submit FAILED");
     if (stillHere) {
-      enqueueRedrawFromCallback(cookie, &showMainMenu, "open submit failed");
+      (void)g2EnqueueRedraw(cookie, &showMainMenu, "open submit failed");
     }
   }
 }
@@ -882,7 +845,7 @@ static void onPeerDetailRedrawDone(bool ok,
                                    void* /*userData*/) {
   DEBUG_G2F("[G2-ESP-NOW-APP] peer-detail redraw cmd done: ok=%d result='%s'",
             (int)ok, result ? result : "");
-  enqueueRedrawFromCallback(cookie, &showPeerDetail, "peer-detail redraw");
+  (void)g2EnqueueRedraw(cookie, &showPeerDetail, "peer-detail redraw");
 }
 
 static void onPeersRedrawDone(bool ok,
@@ -891,7 +854,7 @@ static void onPeersRedrawDone(bool ok,
                               void* /*userData*/) {
   DEBUG_G2F("[G2-ESP-NOW-APP] peers redraw cmd done: ok=%d result='%s'",
             (int)ok, result ? result : "");
-  enqueueRedrawFromCallback(cookie, &showPeersMenu, "peers redraw");
+  (void)g2EnqueueRedraw(cookie, &showPeersMenu, "peers redraw");
 }
 
 static void onBroadcastRedrawDone(bool ok,
@@ -900,7 +863,7 @@ static void onBroadcastRedrawDone(bool ok,
                                   void* /*userData*/) {
   DEBUG_G2F("[G2-ESP-NOW-APP] broadcast redraw cmd done: ok=%d result='%s'",
             (int)ok, result ? result : "");
-  enqueueRedrawFromCallback(cookie, &showBroadcastMenu, "broadcast redraw");
+  (void)g2EnqueueRedraw(cookie, &showBroadcastMenu, "broadcast redraw");
 }
 
 static void onStatsRedrawDone(bool ok,
@@ -909,7 +872,7 @@ static void onStatsRedrawDone(bool ok,
                               void* /*userData*/) {
   DEBUG_G2F("[G2-ESP-NOW-APP] stats redraw cmd done: ok=%d result='%s'",
             (int)ok, result ? result : "");
-  enqueueRedrawFromCallback(cookie, &showStatsMenu, "stats redraw");
+  (void)g2EnqueueRedraw(cookie, &showStatsMenu, "stats redraw");
 }
 
 // -----------------------------------------------------------------------------

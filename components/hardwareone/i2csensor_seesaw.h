@@ -4,27 +4,15 @@
 #include "System_BuildConfig.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
-
-// Gamepad input cache structure (always available for type-safe references)
-struct InputCache {
-  SemaphoreHandle_t mutex = nullptr;
-  uint32_t buttons = 0;
-  int joyX = 0, joyY = 0;
-  unsigned long lastUpdate = 0;
-  bool dataValid = false;
-  uint32_t seq = 0;
-  uint32_t buttonPressedAccum = 0;  // Latched press edges — OR'd in by task, read+cleared by UI
-};
+#include <freertos/task.h>
 
 // OLED-facing input state. Defined by exactly one input driver — either
 // i2csensor_seesaw.cpp (when ENABLE_GAMEPAD_SENSOR) or i2csensor_ano_encoder.cpp
-// (when ENABLE_ANO_ENCODER). The ANO driver populates gInputCache with
+// (when ENABLE_ANO_ENCODER). The ANO driver populates the shared input reading with
 // synthesized values (buttons in active-low layout matching the gamepad's
 // semantics) so the OLED input pipeline doesn't care which driver is live.
 extern bool gInputRunning;
 extern bool gInputConnected;
-extern InputCache gInputCache;
 
 // Joystick calibration constants. Shared by both input drivers since the
 // ANO encoder driver synthesizes joyX/Y at CENTER (encoder-to-nav-event goes
@@ -44,10 +32,9 @@ class Adafruit_seesaw;
 // failed init). Was a stack global `Adafruit_seesaw gGamepadSeesaw(&Wire1)`
 // pre-dual-bus, but the library binds the TwoWire pointer at construction
 // time so we need to defer construction until we know which bus to use.
-extern Adafruit_seesaw* gGamepadSeesaw;
 
-// Build gamepad JSON snapshot from gInputCache. Safe to call from any task —
-// acquires gInputCache.mutex. Returns bytes written or 0 on failure.
+// Build gamepad JSON snapshot from the shared input reading. Safe to call from any task —
+// acquires the HAL cache mutex. Returns bytes written or 0 on failure.
 int gamepadBuildDataJSON(char* buf, size_t bufSize);
 
 // Seesaw gamepad button bit masks (active-low, so invert before checking)
@@ -96,7 +83,7 @@ int gamepadGetX();
 int gamepadGetY();
 uint32_t gamepadGetButtons();
 
-// Command registry (for system_utils.cpp module list)
+// Command registry (for System_CommandRegistry.cpp module list)
 struct CommandEntry;
 extern const CommandEntry gamepadCommands[];
 extern const size_t gamepadCommandsCount;

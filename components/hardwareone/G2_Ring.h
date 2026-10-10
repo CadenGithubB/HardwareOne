@@ -3,6 +3,7 @@
 
 #include "System_BuildConfig.h"
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -392,9 +393,14 @@ bool g2RingSubmitRawTransaction(
     const uint8_t* payload, size_t payloadLen,
     G2RingTransactionHandle* outHandle = nullptr);
 
-// Fill `buf` with a short human-readable status line. Used by the
-// `ringstatus` CLI command and the web UI Ring panel.
+// Fill `buf` with the ringstatus CLI's short human-readable status line.
 void g2RingGetStatus(char* buf, size_t cap);
+
+// Shared ringstatus schema for CLI and web; JSON owns copied identity strings.
+// Fields retain the existing independently sampled status contract, not an
+// atomic link/scan snapshot. False means unavailable; discard partial output.
+// Callers also check their document's overflowed() before serializing.
+bool g2RingBuildStatusJson(JsonObject out);
 
 // Snapshot of the live R1 telemetry cache for read-only display (e.g. the
 // G2 Ring dashboard). The implementation copies cache source, transport
@@ -547,6 +553,7 @@ inline bool g2RingSubmitRawTransaction(
 inline void g2RingGetStatus(char* buf, size_t cap) {
   if (buf && cap > 0) buf[0] = '\0';
 }
+inline bool g2RingBuildStatusJson(JsonObject) { return false; }
 struct G2RingTelemetry {
   bool     connected;
   uint8_t  hr;            bool hrValid;

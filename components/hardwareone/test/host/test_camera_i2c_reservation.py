@@ -32,6 +32,9 @@ def main():
         r'^static constexpr uint32_t I2C_WIRE_IO_TIMEOUT_MS[^\n]+'))
     source = (HERE / 'camera_i2c_reservation_harness.cpp').read_text()
     insertions = {
+        '// INSERT_PRODUCTION_REQUEST_TYPES': '\n'.join(
+            extract_block(header, marker) + ';' for marker in (
+                'enum I2CDeviceType', 'enum class I2CDeviceRequestAction', 'struct I2CDeviceRequest')),
         '// INSERT_PRODUCTION_MANAGER_DECLARATION': declaration,
         '// INSERT_PRODUCTION_MANAGER_CONSTANTS': constants,
         '// INSERT_PRODUCTION_MANAGER_CONSTRUCTOR': extract_block(manager, 'I2CDeviceManager::I2CDeviceManager()'),
@@ -44,6 +47,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-camera-i2c-') as directory:
         work=Path(directory)
         generated=work/'test.cpp';generated.write_text(source)
+        runtime_variants = 0
+        rejected_variants = 0
         boards=(('p4',('HW_BOARD_P4X_EYE=1','CONFIG_IDF_TARGET_ESP32P4=1')),
                 ('s3',('ARDUINO_XIAO_ESP32S3_DEV=1','CONFIG_IDF_TARGET_ESP32S3=1')),
                 ('esp32',('ARDUINO_ADAFRUIT_FEATHER_ESP32_V2_DEV=1','CONFIG_IDF_TARGET_ESP32=1')))
@@ -64,9 +69,25 @@ def main():
                     flags.extend('-D'+item for item in definitions)
                     if sdk_port1 is not None: flags.append(f'-DCONFIG_SCCB_HARDWARE_I2C_PORT1={sdk_port1}')
                     if args.sanitize:flags.extend(['-fsanitize=address,undefined','-g'])
-                    subprocess.run([args.cxx,*flags,str(generated),'-o',str(binary)],check=True)
+                    compile_command = [args.cxx,*flags,str(generated),'-o',str(binary)]
+                    if reserved == 1:
+                        # The shared external bus already owns controller 1.
+                        # DVP cannot reserve it while external I2C is enabled.
+                        result = subprocess.run(compile_command, capture_output=True, text=True)
+                        expected_error = ('External I2C uses controller 1, reserved by camera SCCB; '
+                                          'select SCCB I2C0 in sdkconfig or disable ENABLE_CAMERA_SENSOR')
+                        assert result.returncode != 0, 'Conflicting camera/external I2C configuration compiled'
+                        assert expected_error in result.stderr, result.stderr
+                        print(board, 'camera', enabled, 'SDK port1', sdk_port1,
+                              'expected controller conflict PASS', flush=True)
+                        rejected_variants += 1
+                        continue
+                    subprocess.run(compile_command, check=True)
                     print(board, 'camera', enabled, 'SDK port1', sdk_port1, flush=True)
                     subprocess.run([str(binary)],check=True)
+                    runtime_variants += 1
+        print(f'CAMERA_I2C_RESERVATION {runtime_variants} runtime variants, '
+              f'{rejected_variants} expected compiler rejections PASS', flush=True)
 
 
 if __name__=='__main__':

@@ -9,7 +9,7 @@ import serial
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--port', default='/dev/cu.usbmodem2101')
+    p.add_argument('--port', required=True, help='Explicit USB serial port for the P4 service firmware')
     p.add_argument('action', choices=['info', 'read', 'hash', 'write', 'run', 'monitor'])
     p.add_argument('--offset', type=lambda s: int(s, 0), default=0)
     p.add_argument('--size', type=lambda s: int(s, 0))

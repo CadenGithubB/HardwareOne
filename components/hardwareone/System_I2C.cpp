@@ -43,6 +43,9 @@
 #include "Adafruit_APDS9960.h"
 #include "i2csensor_apds9960.h"
 #endif
+#if ENABLE_ANO_ENCODER
+#include "i2csensor_ano_encoder.h"
+#endif
 #if ENABLE_GAMEPAD_SENSOR
 #include "Adafruit_seesaw.h"
 #include "i2csensor_seesaw.h"
@@ -388,9 +391,46 @@ static uint8_t i2cBusForDeviceType(I2CDeviceType sensor) {
   }
 }
 
+// Lifecycle state stays with the sensor owners. These reads coordinate queue
+// admission; the owner repeats the cleanup guard immediately before startup.
+static bool sensorIsRunning(I2CDeviceType sensor) {
+  switch (sensor) {
+    case I2C_DEVICE_THERMAL: return gThermalRunning;
+    case I2C_DEVICE_TOF: return gTofRunning;
+    case I2C_DEVICE_IMU: return gImuRunning;
+    case I2C_DEVICE_INPUT: return gInputRunning;
+    case I2C_DEVICE_GPS: return gGpsRunning;
+    case I2C_DEVICE_FMRADIO: return gFmRadioRunning;
+    case I2C_DEVICE_APDS:
+#if ENABLE_APDS_SENSOR
+      return gApdsRunning;
+#else
+      return false;
+#endif
+    case I2C_DEVICE_RTC: return gRtcRunning;
+    case I2C_DEVICE_PRESENCE: return gPresenceRunning;
+    default: return false;
+  }
+}
+
+static bool sensorHasTask(I2CDeviceType sensor) {
+  switch (sensor) {
+    case I2C_DEVICE_THERMAL: return gThermalTaskHandle != nullptr;
+    case I2C_DEVICE_TOF: return gTofTaskHandle != nullptr;
+    case I2C_DEVICE_IMU: return gImuTaskHandle != nullptr;
+    case I2C_DEVICE_INPUT: return gInputTaskHandle != nullptr;
+    case I2C_DEVICE_GPS: return gGpsTaskHandle != nullptr;
+    case I2C_DEVICE_FMRADIO: return gFmRadioTaskHandle != nullptr;
+    case I2C_DEVICE_APDS: return gApdsTaskHandle != nullptr;
+    case I2C_DEVICE_RTC: return gRtcTaskHandle != nullptr;
+    case I2C_DEVICE_PRESENCE: return gPresenceTaskHandle != nullptr;
+    default: return false;
+  }
+}
+
 // Externally linkable so HAL_Input.cpp's unified cmd_openinput can dispatch
 // through the same queue as the other sensor start commands.
-const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const bool& enabledFlag, const char* eventTag) {
+const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const char* eventTag) {
 #if ENABLE_GPIO_ENCODER
   if (sensor == I2C_DEVICE_INPUT) return "Error: GPIO input is not an I2C device; use openinput";
 #endif
@@ -398,11 +438,18 @@ const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName
 
   // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
   if (!gI2CBusRunning) {
-    snprintf(getDebugBuffer(), 1024, "[%s] I2C bus is disabled — enable it in settings and reboot", displayName);
+    snprintf(getDebugBuffer(), 1024, "Error: [%s] I2C bus is disabled — enable it in settings and reboot", displayName);
     return getDebugBuffer();
   }
 
-  if (enabledFlag) {
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return "Error: Sensor request queue is unavailable";
+  if (mgr->hasPendingDeviceStop(sensor) ||
+      (!sensorIsRunning(sensor) && sensorHasTask(sensor))) {
+    snprintf(getDebugBuffer(), 1024, "Error: [%s] Stop/cleanup is still pending; retry open shortly", displayName);
+    return getDebugBuffer();
+  }
+  if (sensorIsRunning(sensor)) {
     snprintf(getDebugBuffer(), 1024, "%s sensor already running", displayName);
     return getDebugBuffer();
   }
@@ -415,8 +462,12 @@ const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName
   // Verify hardware is physically present before attempting start
   uint8_t addr = i2cAddressForDeviceType(sensor);
   const uint8_t bus = i2cBusForDeviceType(sensor);
-  if (addr != 0 && !i2cPingAddress(addr, 100000, 50, bus)) {
-    snprintf(getDebugBuffer(), 1024, "[%s] Not detected on I2C bus", displayName);
+  const uint8_t probe = addr ? i2cProbeAddress(addr, 100000, 50, bus) : 0;
+  if (probe != 0) {
+    snprintf(getDebugBuffer(), 1024, probe == 2
+        ? "Error: [%s] No acknowledgement from device on I2C bus"
+        : "Error: [%s] I2C probe could not complete (bus busy, unavailable or transfer error); retry",
+        displayName);
     return getDebugBuffer();
   }
 
@@ -427,29 +478,29 @@ const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName
              displayName, pos, getQueueDepth());
     return getDebugBuffer();
   } else {
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to queue %s sensor (queue full)", displayName);
+    snprintf(getDebugBuffer(), 1024, "Error: Could not queue %s sensor (queue unavailable/full or stop pending)", displayName);
     return getDebugBuffer();
   }
 }
 
 const char* cmd_thermalstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", gThermalRunning, "openthermal@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", "openthermal@enqueue");
 }
 
 const char* cmd_tofstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", gTofRunning, "opentof@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", "opentof@enqueue");
 }
 
 const char* cmd_imustart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_IMU, "IMU", gImuRunning, "openimu@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_IMU, "IMU", "openimu@enqueue");
 }
 
 const char* cmd_apdsstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning, "openapds@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", "openapds@enqueue");
 }
 
 // cmd_openinput (in HAL_Input.cpp) handles the input device's queued start —
@@ -738,19 +789,32 @@ const char* cmd_i2cmetrics(const String& argsInput) {
 
 // ========== I2C Helper Functions ==========
 
-// Helper function to identify sensor by I2C address
-String identifySensor(uint8_t address) {
+// Shared address-table lookup. Labels are hints; drivers validate identity.
+static int findSensorIndexByAddress(uint8_t address) {
+  // Pass 1: prefer exact primary address matches
   for (size_t i = 0; i < i2cSensorsCount; i++) {
-    const I2CSensorEntry sensor = configuredSensor(i2cSensors[i]);
-    if (sensor.address == address || (sensor.multiAddress && sensor.altAddress == address)) {
-      String result = sensor.name;
-      result += " (";
-      result += sensor.description;
-      result += ")";
-      return result;
+    if (configuredSensor(i2cSensors[i]).address == address) {
+      return i;
     }
   }
-  return "Unknown Device";
+  // Pass 2: then allow alternate address matches if declared
+  for (size_t i = 0; i < i2cSensorsCount; i++) {
+    if (i2cSensors[i].multiAddress && i2cSensors[i].altAddress == address) {
+      return i;
+    }
+  }
+  return -1;  // Not found
+}
+
+String identifySensor(uint8_t address) {
+  const int index = findSensorIndexByAddress(address);
+  if (index < 0) return "Unknown Device";
+  const I2CSensorEntry sensor = configuredSensor(i2cSensors[index]);
+  String result = sensor.name;
+  result += " (";
+  result += sensor.description;
+  result += ")";
+  return result;
 }
 
 // ========== End I2C Helper Functions ==========
@@ -904,7 +968,7 @@ const char* cmd_i2cscan(const String& originalCmd) {
   // matches the pattern cmd_i2cstats / streamDeviceRegistryOutput use.
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
 
-  broadcastOutput("I2C Bus Scan with Device Identification:\n========================================");
+  broadcastOutput("I2C Bus Scan (address-table labels):\n========================================");
 
   int totalCount = 0;
 
@@ -912,9 +976,10 @@ const char* cmd_i2cscan(const String& originalCmd) {
   if (mgr && mgr->isBusInitialized(0)) {
     BROADCAST_PRINTF("I2C1 / Wire1 (bus 0, SDA=%d SCL=%d):",
                      gSettings.i2cSdaPin, gSettings.i2cSclPin);
+    PollPauseGuard pollGuard(0);
     int count = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
-      if (i2cPingAddress(addr, 100000, 50, 0) && i2cConfirmPresent(addr, 100000, 50, 0)) {
+      if (i2cPingAddress(addr, 100000, 50, 0)) {
         String identification = identifySensor(addr);
         BROADCAST_PRINTF("  0x%02X (%d) - %s", addr, addr, identification.c_str());
         count++;
@@ -932,9 +997,10 @@ const char* cmd_i2cscan(const String& originalCmd) {
     broadcastOutput("");
     BROADCAST_PRINTF("I2C2 / Wire (bus 1, SDA=%d SCL=%d):",
                      gSettings.i2c2SdaPin, gSettings.i2c2SclPin);
+    PollPauseGuard pollGuard(1);
     int count = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
-      if (i2cPingAddress(addr, 100000, 50, 1) && i2cConfirmPresent(addr, 100000, 50, 1)) {
+      if (i2cPingAddress(addr, 100000, 50, 1)) {
         // identifySensor() looks up by address only — same name on either bus.
         String identification = identifySensor(addr);
         BROADCAST_PRINTF("  0x%02X (%d) - %s", addr, addr, identification.c_str());
@@ -1013,10 +1079,6 @@ const char* cmd_i2cstats(const String& originalCmd) {
 
 // ========== End I2C Infrastructure Commands ==========
 
-#if ENABLE_TOF_SENSOR
-// gTofRunning / gTofConnected / gTofTaskHandle / gVL53L4CX provided by i2csensor_vl53l4cx.h
-extern bool tofPoll();
-#endif
 // i2cDeviceTransaction helpers are template functions in System_I2C.h
 // gThermalRunning provided by i2csensor_mlx90640.h
 
@@ -1032,21 +1094,6 @@ extern void imuPoll();        // i2csensor_bno055.cpp
 extern bool thermalInit();    // i2csensor_mlx90640.cpp
 extern bool thermalPoll();
 #endif
-
-// ============================================================================
-// Sensor Cache Lock/Unlock Helpers (moved from .ino)
-// ============================================================================
-// Legacy lockSensorCache/unlockSensorCache removed - use modular sensor cache locks
-
-bool lockThermalCache(TickType_t timeout) {
-  return gThermalCache.mutex && (xSemaphoreTake(gThermalCache.mutex, timeout) == pdTRUE);
-}
-
-void unlockThermalCache() {
-  if (gThermalCache.mutex) {
-    xSemaphoreGive(gThermalCache.mutex);
-  }
-}
 
 // ============================================================================
 // Sensor Task Implementations
@@ -1070,23 +1117,8 @@ extern const I2CSensorEntry i2cSensors[];
 extern const size_t i2cSensorsCount;
 extern bool readText(const char* path, String& out);
 
-static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, int addressCount);  // Smart scan
 
-static int findSensorIndexByAddress(uint8_t address) {
-  // Pass 1: prefer exact primary address matches
-  for (size_t i = 0; i < i2cSensorsCount; i++) {
-    if (configuredSensor(i2cSensors[i]).address == address) {
-      return i;
-    }
-  }
-  // Pass 2: then allow alternate address matches if declared
-  for (size_t i = 0; i < i2cSensorsCount; i++) {
-    if (i2cSensors[i].multiAddress && i2cSensors[i].altAddress == address) {
-      return i;
-    }
-  }
-  return -1;  // Not found
-}
+
 
 static void addDiscoveredDevice(uint8_t address, uint8_t bus) {
   // MAX_CONNECTED_DEVICES is now a #define in i2c_system.h
@@ -1156,14 +1188,10 @@ void detectHardware(DetectionResult& out) {
     for (size_t i = 0; i < n && i < MAXSENS; i++) {
       if (found[i]) continue;                   // already located on the other bus
       const I2CSensorEntry s = configuredSensor(i2cSensors[i]);
-      // Probe for an ACK, then confirm by read-back to reject phantom ACKs
-      // (see i2cConfirmPresent — write-only OLED is exempt). Prevents a ghost
-      // address (e.g. 0x68) from being reported as a real device.
-      bool hit = (i2cProbeAddress(s.address, kProbeClockHz, s.i2cTimeoutMs, bus) == 0) &&
-                 i2cConfirmPresent(s.address, kProbeClockHz, s.i2cTimeoutMs, bus);
+      // Discovery checks address replies only; initialization belongs to the driver.
+      bool hit = i2cPingAddress(s.address, kProbeClockHz, s.i2cTimeoutMs, bus);
       if (!hit && s.multiAddress) {
-        hit = (i2cProbeAddress(s.altAddress, kProbeClockHz, s.i2cTimeoutMs, bus) == 0) &&
-              i2cConfirmPresent(s.altAddress, kProbeClockHz, s.i2cTimeoutMs, bus);
+        hit = i2cPingAddress(s.altAddress, kProbeClockHz, s.i2cTimeoutMs, bus);
       }
       if (hit) { found[i] = true; foundBus[i] = bus; }
     }
@@ -1274,7 +1302,7 @@ const char* cmd_detect(const String& argsInput) {
     return "[detect apply] done";
   }
 
-  BROADCAST_PRINTF("[detect] Hardware vs. configuration (I2C1=bus0, I2C2=bus1):");
+  BROADCAST_PRINTF("[detect] Address matches vs. configuration (I2C1=bus0, I2C2=bus1):");
 
   if (r.nPresentEnabled) {
     BROADCAST_PRINTF("  Present & enabled:");
@@ -1315,125 +1343,20 @@ const char* cmd_detect(const String& argsInput) {
   return "[detect] done";
 }
 
-// Bus convention (post-dual-bus refactor):
-//   bus 0 → Wire1 → primary "I2C1" (horizontal STEMMA QT on FeatherS3[D])
-//   bus 1 → Wire  → secondary "I2C2" (vertical STEMMA QT on FeatherS3[D])
-// This flips the inverted mapping that the original single-bus stub had
-// (`(busNumber == 0) ? &Wire : &Wire1`) and matches what users expect:
-// bus 0 is the primary, bus 1 is the secondary. ConnectedDevice.bus is
-// rendered as "I2C1" / "I2C2" in the registry output below.
-static inline TwoWire* wireForBus(uint8_t busNumber) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  return mgr ? mgr->getWire(busNumber) : nullptr;
-}
-
-static void scanBusForDevices(uint8_t busNumber) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  if (!mgr || !mgr->isBusInitialized(busNumber)) return;
-  TwoWire* wire = mgr->getWire(busNumber);
-  if (!wire) return;
-
-  // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/
-  // scanning (RAII — resumes on every return path; System_PollPause.h).
-  SemaphoreHandle_t busMutex = mgr->getBusMutex(busNumber);
-  PollPauseGuard pollGuard(busNumber);   // scope to the bus being scanned
-
-  // Phase 1: Bus re-init under mutex (brief hold). Re-initializes from
-  // the bus's settings pins (bus 0 = i2cSdaPin/SclPin; bus 1 = i2c2*).
-  {
-    bool locked = (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
-    if (!locked) {
-      return;
-    }
-
-    const int sda = (busNumber == 0) ? gSettings.i2cSdaPin  : gSettings.i2c2SdaPin;
-    const int scl = (busNumber == 0) ? gSettings.i2cSclPin  : gSettings.i2c2SclPin;
-    if (sda >= 0 && scl >= 0) {
-      wire->begin(sda, scl);
-      wire->setClock(I2C_WIRE1_DEFAULT_FREQ);
-    }
-
-    xSemaphoreGive(busMutex);
-  }
-
-  // Small delay to let bus stabilize (outside mutex)
-  delay(10);
-
-  // Phase 2: Per-probe mutex acquire/release (full scan of 126 addresses)
-  for (uint8_t addr = 1; addr < 127; addr++) {
-    if (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-      wire->beginTransmission(addr);
-      uint8_t err = wire->endTransmission();
-      xSemaphoreGive(busMutex);
-
-      // Confirm by read-back before registering. A bare address-ACK can be a
-      // phantom (bus capacitance / a neighbour chip / a clock-stretch glitch),
-      // which would otherwise be mislabeled from the address table (e.g. a
-      // ghost 0x68 shown as "DS3231 RTC"). OLED is exempt (write-only).
-      if (err == 0 && i2cConfirmPresent(addr, 100000, 200, busNumber)) {
-        addDiscoveredDevice(addr, busNumber);
-      }
-    }
-  }
-  // pollGuard resumes sensor polling on return.
-}
-
-// Smart scan function - only checks specific addresses (used by discoverI2CDevices)
+// Boot discovery uses the same probe, locking and clock restoration as the
+// command/UI scans. Bus 0 is primary Wire1; bus 1 is secondary Wire.
 static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, int addressCount) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr || !mgr->isBusInitialized(busNumber)) return;
-  TwoWire* wire = mgr->getWire(busNumber);
-  if (!wire) return;
 
-  // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/
-  // scanning (RAII — resumes on every return path; System_PollPause.h).
-  SemaphoreHandle_t busMutex = mgr->getBusMutex(busNumber);
-  PollPauseGuard pollGuard(busNumber);   // scope to the bus being scanned
-
-  // Phase 1: Bus re-init under mutex (brief hold)
-  {
-    bool locked = (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
-    if (!locked) {
-      return;
-    }
-
-    const int sda = (busNumber == 0) ? gSettings.i2cSdaPin  : gSettings.i2c2SdaPin;
-    const int scl = (busNumber == 0) ? gSettings.i2cSclPin  : gSettings.i2c2SclPin;
-    if (sda >= 0 && scl >= 0) {
-      wire->begin(sda, scl);
-      wire->setClock(I2C_WIRE1_DEFAULT_FREQ);
-    }
-
-    xSemaphoreGive(busMutex);
-  }
-
-  // Small delay to let bus stabilize (outside mutex)
-  delay(10);
-
-  // Phase 2: Probe each address with per-probe mutex acquire/release.
-  // This avoids holding the bus mutex for the entire scan (~300ms+),
-  // which would block any concurrent I2C transaction (e.g. manual openpresence).
+  PollPauseGuard pollGuard(busNumber);
   for (int i = 0; i < addressCount; i++) {
-    uint8_t addr = addresses[i];
-    if (addr == 0) continue;
-
-    if (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-      wire->beginTransmission(addr);
-      uint8_t err = wire->endTransmission();
-      xSemaphoreGive(busMutex);
-
-      // Confirm by read-back before registering. A bare address-ACK can be a
-      // phantom (bus capacitance / a neighbour chip / a clock-stretch glitch),
-      // which would otherwise be mislabeled from the address table (e.g. a
-      // ghost 0x68 shown as "DS3231 RTC"). OLED is exempt (write-only).
-      if (err == 0 && i2cConfirmPresent(addr, 100000, 200, busNumber)) {
-        addDiscoveredDevice(addr, busNumber);
-      }
+    const uint8_t address = addresses[i];
+    if (address != 0 && i2cPingAddress(address, 100000, 200, busNumber)) {
+      addDiscoveredDevice(address, busNumber);
     }
   }
-  // pollGuard resumes sensor polling on return.
 }
-
 
 void discoverI2CDevices() {
   // Early exit if I2C bus is disabled
@@ -1470,7 +1393,7 @@ void discoverI2CDevices() {
 
   // Bus 0 (I2C1, Wire1) — always scanned when the primary bus is up. Note
   // the convention flip from the pre-dual-bus stub: bus 0 is now the
-  // primary, not the empty secondary slot. See wireForBus()'s header.
+  // primary, not the empty secondary slot.
   scanBusForDevicesSmart(0, scanAddresses, scanCount);
 
   // Bus 1 (I2C2, Wire) — scan only when the user has enabled the secondary
@@ -2382,9 +2305,19 @@ const char* deviceTypeDisplayName(I2CDeviceType sensor) {
   }
 }
 
-void handleDeviceStopped(I2CDeviceType sensor) {
-  const char* name = deviceTypeDisplayName(sensor);
+bool requestSensorStop(I2CDeviceType sensor) {
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  return mgr && mgr->enqueueDeviceStop(sensor);
+}
 
+// Written only by the queue worker; tasks publish cleanup completion by
+// clearing their handles. A stop event means that old task has finished.
+static bool sSensorStopAwaitingCleanup[I2C_DEVICE_COUNT] = {};
+
+// Only the queue worker changes lifecycle flags in response to commands. A
+// close during initialization is applied after the owner returns, so teardown
+// cannot free resources still being used by the starter.
+static void applySensorStop(I2CDeviceType sensor) {
   // Set enabled flag to false and record stop time (common boilerplate)
   switch (sensor) {
     case I2C_DEVICE_THERMAL:
@@ -2406,9 +2339,13 @@ void handleDeviceStopped(I2CDeviceType sensor) {
 #endif
       break;
     case I2C_DEVICE_INPUT:
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
       gInputRunning = false;
+#if ENABLE_ANO_ENCODER
+      gAnoEncoderEnabled = false;
+#else
       gGamepadLastStopTime = millis();
+#endif
 #endif
       break;
     case I2C_DEVICE_GPS:
@@ -2421,10 +2358,13 @@ void handleDeviceStopped(I2CDeviceType sensor) {
 #if ENABLE_FM_RADIO
       gFmRadioRunning = false;
       gFmRadioLastStopTime = millis();
+      // Tune/boot can initialize the radio without creating a polling task.
+      if (!gFmRadioTaskHandle) fmRadioDeinit();
 #endif
       break;
     case I2C_DEVICE_APDS:
 #if ENABLE_APDS_SENSOR
+      gApdsRunning = false;
       gApdsColorRunning = false;
       gApdsProximityRunning = false;
       gApdsGestureRunning = false;
@@ -2433,8 +2373,8 @@ void handleDeviceStopped(I2CDeviceType sensor) {
       break;
     case I2C_DEVICE_RTC:
 #if ENABLE_RTC_SENSOR
-      gRtcRunning = false;
       gRtcLastStopTime = millis();
+      rtcStop();  // The owner also handles initialization without a task.
 #endif
       break;
     case I2C_DEVICE_PRESENCE:
@@ -2443,28 +2383,36 @@ void handleDeviceStopped(I2CDeviceType sensor) {
       gPresenceLastStopTime = millis();
 #endif
       break;
-    default: break;
+    default: return;
   }
 
+  sSensorStopAwaitingCleanup[sensor] = true;
+  sensorStatusBumpWith("stop@requested");
+}
+
+static void finishSensorStops() {
+  for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
+    const auto sensor = static_cast<I2CDeviceType>(index);
+    if (!sSensorStopAwaitingCleanup[index] || sensorHasTask(sensor)) continue;
+    sSensorStopAwaitingCleanup[index] = false;
+    const char* name = deviceTypeDisplayName(sensor);
 #if ENABLE_ESPNOW
-  // Broadcast status to mesh peers for sensors that have remote types
-  switch (sensor) {
-    case I2C_DEVICE_THERMAL:  broadcastSensorStatus(REMOTE_SENSOR_THERMAL, false);  break;
-    case I2C_DEVICE_TOF:      broadcastSensorStatus(REMOTE_SENSOR_TOF, false);      break;
-    case I2C_DEVICE_IMU:      broadcastSensorStatus(REMOTE_SENSOR_IMU, false);      break;
-    case I2C_DEVICE_INPUT:  broadcastSensorStatus(REMOTE_SENSOR_INPUT, false);  break;
-    case I2C_DEVICE_GPS:      broadcastSensorStatus(REMOTE_SENSOR_GPS, false);      break;
-    case I2C_DEVICE_FMRADIO:  broadcastSensorStatus(REMOTE_SENSOR_FMRADIO, false);  break;
-    default: break;  // APDS, RTC, Presence have no remote sensor type
-  }
+    // Broadcast status to mesh peers for sensors that have remote types
+    switch (sensor) {
+      case I2C_DEVICE_THERMAL:  broadcastSensorStatus(REMOTE_SENSOR_THERMAL, false);  break;
+      case I2C_DEVICE_TOF:      broadcastSensorStatus(REMOTE_SENSOR_TOF, false);      break;
+      case I2C_DEVICE_IMU:      broadcastSensorStatus(REMOTE_SENSOR_IMU, false);      break;
+      case I2C_DEVICE_INPUT:  broadcastSensorStatus(REMOTE_SENSOR_INPUT, false);  break;
+      case I2C_DEVICE_GPS:      broadcastSensorStatus(REMOTE_SENSOR_GPS, false);      break;
+      case I2C_DEVICE_FMRADIO:  broadcastSensorStatus(REMOTE_SENSOR_FMRADIO, false);  break;
+      default: break;  // APDS, RTC, Presence have no remote sensor type
+    }
 #endif
 
-  systemEventPost(SYSEVT_SENSOR_STOPPED, name);
+    systemEventPost(SYSEVT_SENSOR_STOPPED, name);
 
-  // Bump sensor status so SSE + bonded peer get notified immediately
-  char cause[48];
-  snprintf(cause, sizeof(cause), "close_%s@handleDeviceStopped", name);
-  sensorStatusBumpWith(cause);
+    sensorStatusBumpWith("stop@complete");
+  }
 }
 
 // Helper: set cause then bump (to preserve existing call-sites)
@@ -2747,6 +2695,47 @@ const char* buildSensorStatusJson() {
 // Sensor Queue Processor Task (moved from HardwareOne.ino)
 // ============================================================================
 
+static bool startSensorInternal(I2CDeviceType sensor) {
+  switch (sensor) {
+    case I2C_DEVICE_THERMAL: return thermalStartInternal();
+    case I2C_DEVICE_TOF: return tofStartInternal();
+    case I2C_DEVICE_IMU: return imuStartInternal();
+    case I2C_DEVICE_GPS: return gpsStartInternal();
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
+    case I2C_DEVICE_INPUT: return inputStartInternal();
+#endif
+#if ENABLE_APDS_SENSOR
+    case I2C_DEVICE_APDS: return apdsStartInternal();
+#endif
+#if ENABLE_FM_RADIO
+    case I2C_DEVICE_FMRADIO: return fmRadioStartInternal();
+#endif
+#if ENABLE_RTC_SENSOR
+    case I2C_DEVICE_RTC: return rtcStartInternal();
+#endif
+#if ENABLE_PRESENCE_SENSOR
+    case I2C_DEVICE_PRESENCE: return presenceStartInternal();
+#endif
+    default: return false;
+  }
+}
+
+static void broadcastStartedSensor(I2CDeviceType sensor) {
+#if ENABLE_ESPNOW
+  switch (sensor) {
+    case I2C_DEVICE_THERMAL: broadcastSensorStatus(REMOTE_SENSOR_THERMAL, true); break;
+    case I2C_DEVICE_TOF: broadcastSensorStatus(REMOTE_SENSOR_TOF, true); break;
+    case I2C_DEVICE_IMU: broadcastSensorStatus(REMOTE_SENSOR_IMU, true); break;
+    case I2C_DEVICE_INPUT: broadcastSensorStatus(REMOTE_SENSOR_INPUT, true); break;
+    case I2C_DEVICE_GPS: broadcastSensorStatus(REMOTE_SENSOR_GPS, true); break;
+    case I2C_DEVICE_FMRADIO: broadcastSensorStatus(REMOTE_SENSOR_FMRADIO, true); break;
+    default: break;
+  }
+#else
+  (void)sensor;
+#endif
+}
+
 // Post the sensor lifecycle event + the durable [EVENT][SENSOR] line the old
 // notifySensorStarted wrapper emitted — at boot this is the manifest of what
 // came up vs what was configured-but-failed (Phase-1 cutover).
@@ -2768,8 +2757,9 @@ void sensorQueueProcessorTask(void* param) {
   }
 
   while (true) {
-    I2CDeviceStartRequest req;
-    if (mgr->dequeueDeviceStart(&req)) {
+    finishSensorStops();
+    I2CDeviceRequest req;
+    if (mgr->dequeueDeviceRequest(&req)) {
       // Pause polling once for the entire batch of queued sensors.
       // This prevents already-running tasks (e.g. gamepad started during setup wizard)
       // from hammering the I2C bus with mutex timeouts while other sensors initialize.
@@ -2784,8 +2774,15 @@ void sensorQueueProcessorTask(void* param) {
 
       // Process all queued sensors in one batch while polling stays paused
       do {
+      finishSensorStops();
       DEBUG_CLIF("[QUEUE] Processing queued sensor: type=%d, queuedAt=%lu",
                  req.device, req.queuedAt);
+
+      if (req.action == I2CDeviceRequestAction::Stop) {
+        applySensorStop(req.device);
+        continue;
+      }
+      if (mgr->hasPendingDeviceStop(req.device)) continue;
 
       // Stack instrumentation (do not assume any fixed stack size)
       if (isDebugFlagSet(DEBUG_MEMORY)) {
@@ -2827,6 +2824,7 @@ void sensorQueueProcessorTask(void* param) {
           case I2C_DEVICE_PRESENCE:
             requiredDelay = 400;  // Presence sensor init is relatively quick
             break;
+          default: break;
         }
       }
 
@@ -2843,136 +2841,31 @@ void sensorQueueProcessorTask(void* param) {
         }
       }
 
-      // Safety check: skip if sensor is already running
-      bool alreadyRunning = false;
-      switch (req.device) {
-        case I2C_DEVICE_THERMAL:
-          alreadyRunning = gThermalRunning;
-          break;
-        case I2C_DEVICE_TOF:
-          alreadyRunning = gTofRunning;
-          break;
-        case I2C_DEVICE_IMU:
-          alreadyRunning = gImuRunning;
-          break;
-        case I2C_DEVICE_INPUT:
-          alreadyRunning = gInputRunning;
-          break;
-        case I2C_DEVICE_APDS:
-          alreadyRunning = gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning;
-          break;
-        case I2C_DEVICE_GPS:
-          alreadyRunning = gGpsRunning;
-          break;
-        case I2C_DEVICE_FMRADIO:
-          alreadyRunning = gFmRadioRunning;
-          break;
-        case I2C_DEVICE_RTC:
-#if ENABLE_RTC_SENSOR
-          alreadyRunning = gRtcRunning;
-#endif
-          break;
-        case I2C_DEVICE_PRESENCE:
-#if ENABLE_PRESENCE_SENSOR
-          { extern bool gPresenceRunning;
-          alreadyRunning = gPresenceRunning; }
-#endif
-          break;
-      }
-
-      if (alreadyRunning) {
-        DEBUG_CLIF("[QUEUE] Skipping sensor (already running): type=%d", req.device);
+      // A close may arrive after dequeue or while waiting for the previous
+      // device. Do not initialize a request that has since been cancelled.
+      if (mgr->hasPendingDeviceStop(req.device)) continue;
+      if (sensorIsRunning(req.device)) {
         sensorStatusBumpWith("queue@already_running");
-      } else {
-
-      // Clear any stale health errors before init — boot-time probes/scans may have
-      // recorded NACKs for devices that are now ready. Without this, a device could
-      // enter degraded state from just one failed init combined with stale boot errors.
-      {
-        uint8_t devAddr = i2cAddressForDeviceType(req.device);
-        if (devAddr != 0) {
-          i2cResetGracePeriod(devAddr, i2cBusForDeviceType(req.device));
-        }
+        continue;
+      }
+      if (sensorHasTask(req.device)) {
+        BROADCAST_PRINTF("Error: [%s] Previous task is still cleaning up; retry open shortly",
+                         deviceTypeDisplayName(req.device));
+        announceSensorStart(deviceTypeDisplayName(req.device), false);
+        continue;
       }
 
-      // Use stack-efficient approach: discard result String, combine Serial calls
-      switch (req.device) {
-        case I2C_DEVICE_THERMAL:
-          thermalStartInternal();
-          INFO_I2C_AUTOSTARTF("Thermal: %s", gThermalRunning ? "SUCCESS" : "FAILED");
-          announceSensorStart("Thermal", gThermalRunning);
-          break;
-        case I2C_DEVICE_TOF:
-          tofStartInternal();
-          INFO_I2C_AUTOSTARTF("ToF: %s", gTofRunning ? "SUCCESS" : "FAILED");
-          announceSensorStart("ToF", gTofRunning);
-          break;
-        case I2C_DEVICE_IMU:
-          imuStartInternal();
-          INFO_I2C_AUTOSTARTF("IMU: %s", gImuRunning ? "SUCCESS" : "FAILED");
-          announceSensorStart("IMU", gImuRunning);
-          break;
-        case I2C_DEVICE_INPUT:
-#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
-          // I2C_DEVICE_INPUT is the shared input-device slot — under ANO
-          // build, inputStartInternal() comes from the ANO driver. The label
-          // reflects whichever input device is compiled in.
-          inputStartInternal();
-#if ENABLE_ANO_ENCODER
-          INFO_I2C_AUTOSTARTF("ANO Encoder: %s", gInputRunning ? "SUCCESS" : "FAILED");
-          announceSensorStart("ANO Encoder", gInputRunning);
-#else
-          INFO_I2C_AUTOSTARTF("Gamepad: %s", gInputRunning ? "SUCCESS" : "FAILED");
-          announceSensorStart("Gamepad", gInputRunning);
-#endif
-#endif
-          break;
-        case I2C_DEVICE_APDS:
-#if ENABLE_APDS_SENSOR
-          apdsStartInternal();
-          { bool apdsOk = gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning;
-          INFO_I2C_AUTOSTARTF("APDS: %s (color=%d prox=%d gest=%d)",
-                        apdsOk ? "SUCCESS" : "FAILED",
-                        gApdsColorRunning ? 1 : 0, gApdsProximityRunning ? 1 : 0, gApdsGestureRunning ? 1 : 0);
-          announceSensorStart("APDS", apdsOk); }
-#else
-          INFO_I2C_AUTOSTARTF("APDS: skipped (not compiled)");
-#endif
-          break;
-        case I2C_DEVICE_GPS:
-          gpsStartInternal();
-          INFO_I2C_AUTOSTARTF("GPS: %s", gGpsRunning ? "SUCCESS" : "FAILED");
-          announceSensorStart("GPS", gGpsRunning);
-          break;
-        case I2C_DEVICE_FMRADIO:
-#if ENABLE_FM_RADIO
-          fmRadioStartInternal();
-          INFO_I2C_AUTOSTARTF("FM Radio: %s", gFmRadioRunning ? "SUCCESS" : "FAILED");
-          announceSensorStart("FM Radio", gFmRadioRunning);
-#else
-          INFO_I2C_AUTOSTARTF("FM Radio: skipped (not compiled)");
-#endif
-          break;
-        case I2C_DEVICE_RTC:
-#if ENABLE_RTC_SENSOR
-          rtcStartInternal();
-          INFO_I2C_AUTOSTARTF("RTC: %s", gRtcRunning ? "SUCCESS" : "FAILED");
-          announceSensorStart("RTC", gRtcRunning);
-#else
-          INFO_I2C_AUTOSTARTF("RTC: skipped (not compiled)");
-#endif
-          break;
-        case I2C_DEVICE_PRESENCE:
-#if ENABLE_PRESENCE_SENSOR
-          extern bool presenceStartInternal();
-          extern bool gPresenceRunning;
-          presenceStartInternal();
-          INFO_I2C_AUTOSTARTF("Presence: %s", gPresenceRunning ? "SUCCESS" : "FAILED");
-          announceSensorStart("Presence", gPresenceRunning);
-#else
-          INFO_I2C_AUTOSTARTF("Presence: skipped (not compiled)");
-#endif
-          break;
+      finishSensorStops();  // Publish any old stop before announcing a fresh start.
+      const uint8_t devAddr = i2cAddressForDeviceType(req.device);
+      if (devAddr != 0) i2cResetGracePeriod(devAddr, i2cBusForDeviceType(req.device));
+
+      const bool started = startSensorInternal(req.device);
+      // An in-flight initialization cannot be interrupted safely. A close
+      // received during it is the next request processed; suppress stale
+      // success output and let that stop trigger owner-task cleanup.
+      if (!mgr->hasPendingDeviceStop(req.device)) {
+        announceSensorStart(deviceTypeDisplayName(req.device), started);
+        if (started) broadcastStartedSensor(req.device);
       }
 
       if (isDebugFlagSet(DEBUG_MEMORY)) {
@@ -3005,9 +2898,7 @@ void sensorQueueProcessorTask(void* param) {
       // Note: Each sensor's start function already calls sensorStatusBumpWith(),
       // so we don't need to bump here (would cause redundant SSE events)
 
-      } // end else (not alreadyRunning)
-
-      } while (mgr->dequeueDeviceStart(&req)); // drain entire batch
+      } while (mgr->dequeueDeviceRequest(&req)); // drain entire batch
 
       // Resume sensor polling after ALL queued sensors are initialized.
       pollResume();

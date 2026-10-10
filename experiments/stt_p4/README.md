@@ -1,5 +1,7 @@
 # Fully local P4 speech-to-text
 
+Device MAC addresses in the evidence use synthetic aliases. Examples use generic local workspace paths; replace them with your own locations. Model identities and measurements are unchanged.
+
 Experimental English dictation for HardwareOne, on `codex/jpeg-portable`, based
 on the qualified ESP-SR milestone `f9bfe98`. The P4 transcribes onboard microphone
 audio without a Pi, UART inference, Wi-Fi connection or cloud API.
@@ -288,10 +290,10 @@ difference was not identified. `$P` below is `private/export-venv/bin/python`
 
 ```sh
 export HW1_STT_ALLOW_WEIGHTS_SHA256=d6e7f963195194345e313d0a4ec6182967313a71acfff49a4622a42c968d9900
-nice -n 10 $P export_quartznet.py --checkpoint /Volumes/USB2/stt/work/deploy/ckpt-run2 \
-    --output /Volumes/USB2/stt/work/deploy/export-run2 --threads 6 \
+nice -n 10 $P export_quartznet.py --checkpoint /path/to/stt-data/work/deploy/ckpt-run2 \
+    --output /path/to/stt-data/work/deploy/export-run2 --threads 6 \
     --calib-stores ami-sdm-validation:20 ami-ihm-validation:20 librispeech-dev-clean:20
-nice -n 10 $P pack_model.py --manifest /Volumes/USB2/stt/work/deploy/export-run2/manifest.json \
+nice -n 10 $P pack_model.py --manifest /path/to/stt-data/work/deploy/export-run2/manifest.json \
     --frontend-sha256 ca91eb9683f7151b8be1a01532a6790c6eb7d515f67169a207751e3fc48cc58b
 ```
 
@@ -312,7 +314,7 @@ The fine-tune costs about 1.1 points of int8 WER on LibriSpeech.
 ## QuartzNet15x5 base export (separate artifact, 2026-09-29)
 
 An int8 export of the NGC `QuartzNet15x5Base-En` checkpoint (not fine-tuned) is
-kept under `/Volumes/USB2/stt/work/deploy15/`. It is **not** installed. The
+kept under `/path/to/stt-data/work/deploy15/`. It is **not** installed. The
 deployed 5x5 run2 model and `components/hardwareone/stt/stt_model_identity.h`
 are unchanged. The packed `quartznet15x5.p4.stt` is 15,315,794 bytes. It
 inflates to a 20,112,032-byte ESPDL with 201 nodes (171 Conv, 15 Add,
@@ -345,7 +347,7 @@ is byte-identical to the installed header and artifact.
   tensors are always used. The default is 0, meaning exact equality.
 
 ```sh
-D=/Volumes/USB2/stt/work/deploy15   # ckpt-base15/ = symlinks to the NGC files + fixtures
+D=/path/to/stt-data/work/deploy15   # ckpt-base15/ = symlinks to the NGC files + fixtures
 export HW1_STT_ALLOW_WEIGHTS_SHA256=b2eb3ebc66e9e82829818131c4da02cf9e1109003c3d445b824d9489869143f9
 nice -n 10 $P export_quartznet.py --checkpoint $D/ckpt-base15 --output $D/export-base15 --threads 4 \
     --frontend-checkpoint ../speech_portable/private/stt-quartznet \

@@ -4,24 +4,28 @@
 #include "System_BuildConfig.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/task.h>
+#include <stddef.h>
 
 // APDS sensor cache structure (always available for type-safe references)
 struct APDSCache {
-  SemaphoreHandle_t mutex = nullptr;
   uint16_t apdsRed = 0, apdsGreen = 0, apdsBlue = 0, apdsClear = 0;
   uint8_t apdsProximity = 0;
   uint8_t apdsGesture = 0;
   unsigned long apdsLastUpdate = 0;
   bool apdsDataValid = false;
+  // Which fields the polling task actually sampled in this cache entry.
+  bool apdsColorValid = false;
+  bool apdsProximityValid = false;
+  bool apdsGestureValid = false;
 };
 
+// Values only: callers own their copy; the live cache and lock stay in the driver.
 #if ENABLE_APDS_SENSOR
 
 // Forward declarations
 class String;
 
-extern APDSCache gApdsCache;
 extern bool gApdsColorRunning;
 extern bool gApdsProximityRunning;
 extern bool gApdsGestureRunning;
@@ -31,10 +35,6 @@ int apdsBuildDataJSON(char* buf, size_t bufSize);
 extern bool gApdsConnected;
 extern unsigned long gApdsLastStopTime;
 extern TaskHandle_t gApdsTaskHandle;
-
-// APDS sensor object
-class Adafruit_APDS9960;
-extern Adafruit_APDS9960* gAPDS9960;
 
 // Command handlers
 const char* cmd_apdscolor(const String& argsInput);
@@ -48,9 +48,6 @@ const char* cmd_apdsmode(const String& argsInput);
 // APDS sensor functions
 bool apdsStartInternal();  // Called by queue processor
 bool apdsInit();
-void apdsColorPoll();
-void apdsProximityPoll();
-void apdsGesturePoll();
 
 // Accessor functions (for MQTT and other modules)
 uint8_t apdsGetProximity();
@@ -60,10 +57,27 @@ uint16_t apdsGetColorB();
 uint16_t apdsGetColorC();
 extern bool gApdsRunning;
 
-// Command registry (for system_utils.cpp module list)
+// Command registry (for System_CommandRegistry.cpp module list)
 struct CommandEntry;
 extern const CommandEntry apdsCommands[];
 extern const size_t apdsCommandsCount;
 
+// Copy one reading; false clears out when uninitialized or the lock is busy.
+// Success only means a copy was available; check apdsDataValid where required.
+bool apdsCacheSnapshot(APDSCache& out, uint32_t timeoutMs = 10);
+// Static cache data plus its mutex handle, for memory attribution (not RTOS allocation).
+size_t apdsCacheStorageBytes();
+
+#else
+inline bool apdsCacheSnapshot(APDSCache& out, uint32_t timeoutMs = 10) {
+  (void)timeoutMs;
+  out = {};
+  return false;
+}
+inline int apdsBuildDataJSON(char* buf, size_t bufSize) {
+  if (buf && bufSize) buf[0] = '\0';
+  return 0;
+}
+inline size_t apdsCacheStorageBytes() { return 0; }
 #endif // ENABLE_APDS_SENSOR
 #endif // APDS_SENSOR_H

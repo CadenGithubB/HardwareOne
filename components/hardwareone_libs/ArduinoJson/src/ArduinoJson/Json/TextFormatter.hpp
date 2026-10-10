@@ -74,10 +74,15 @@ class TextFormatter {
     if (specialChar) {
       writeRaw('\\');
       writeRaw(specialChar);
-    } else if (c) {
-      writeRaw(c);
+    } else if (static_cast<unsigned char>(c) < 0x20) {
+      // HardwareOne: JSON requires every control byte to be escaped, including
+      // those without a named escape. Keep non-ASCII UTF-8 bytes unchanged.
+      const char hex[] = "0123456789abcdef";
+      writeRaw("\\u00");
+      writeRaw(hex[static_cast<unsigned char>(c) >> 4]);
+      writeRaw(hex[static_cast<unsigned char>(c) & 0x0f]);
     } else {
-      writeRaw("\\u0000");
+      writeRaw(c);
     }
   }
 

@@ -49,7 +49,6 @@ CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n
 
 # Bluedroid host on the P4, controller on the companion over Hosted VHCI.
 # Arduino BLE uses the legacy (4.2) scan/advertising APIs, which the C6 supports.
-CONFIG_BT_ENABLED=y
 CONFIG_BT_BLUEDROID_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=n
 CONFIG_BT_CONTROLLER_DISABLED=y

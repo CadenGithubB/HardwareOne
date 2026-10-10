@@ -38,8 +38,8 @@
                                    // remote peer's ANO input regardless of its own input HW
 #include <math.h>                  // cosf/sinf for the remote ANO rotary dial
 #include "System_I2C.h"            // OLED_TRANSACTION (i2cDeviceTransactionVoid)
-#include "System_WiFi.h"           // gWifiNetworks / gWifiNetworkCount / WifiNetwork /
-                                   // ensureWiFiInitialized
+#include "System_WiFi.h"           // ensureWiFiInitialized, scan operations
+#include "System_WiFiNetworks.h"   // credential-free saved-network snapshots
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -346,6 +346,8 @@ static TransportSessionEpoch sWifiAddEpoch = kNoTransportSessionEpoch;
 // and the Power submenus (oledScrollRenderSimple) — no separate popup mechanism.
 EXT_RAM_BSS_ATTR static OLEDScrollState sSavedNetScroll;
 static bool sSavedNetInitialized = false;
+static WifiNetworkSnapshot sSavedNetSnapshot;
+static bool sSavedNetSnapshotValid = false;
 EXT_RAM_BSS_ATTR static OLEDScrollState sWifiScanScroll;
 static bool sWifiScanInitialized = false;
 
@@ -356,9 +358,9 @@ EXT_RAM_BSS_ATTR static char sWifiScanLabels[16][40];
 EXT_RAM_BSS_ATTR static char sWifiScanFailure[40];
 static int  sWifiScanCount = 0;
 
-// Pending removal SSID + confirm-prompt buffer. oledConfirmRequest stores the
+// Pending removal identity + confirm-prompt buffer. oledConfirmRequest stores the
 // prompt as a const char* pointer (it does NOT copy), so the buffer must persist.
-static String sPendingRemoveSSID = "";
+static uint32_t sPendingRemoveId = 0;
 static char   sRemovePromptBuf[40];
 
 static void populateWifiMenu() {
@@ -426,7 +428,10 @@ static void wifiAddReset() {
 
 void oledNetworkModeResetSessionState() {
   wifiAddReset();
-  secureClearString(sPendingRemoveSSID);
+  sPendingRemoveId = 0;
+  if (sSavedNetInitialized) oledScrollClearKeepSelection(&sSavedNetScroll);
+  sSavedNetSnapshot = WifiNetworkSnapshot{};
+  sSavedNetSnapshotValid = false;
   memset(sRemovePromptBuf, 0, sizeof(sRemovePromptBuf));
 }
 
@@ -513,21 +518,31 @@ static void populateSavedNetScroll() {
     sSavedNetInitialized = true;
   }
   oledScrollClearKeepSelection(&sSavedNetScroll);
-  for (int i = 0; i < gWifiNetworkCount && i < OLED_SCROLL_MAX_ITEMS; i++) {
-    oledScrollAddItem(&sSavedNetScroll, gWifiNetworks[i].ssid.c_str());
+  sSavedNetSnapshotValid = wifiNetworkSnapshot(sSavedNetSnapshot);
+  for (int i = 0; i < sSavedNetSnapshot.count && i < OLED_SCROLL_MAX_ITEMS; i++) {
+    oledScrollAddItem(&sSavedNetScroll, sSavedNetSnapshot.entries[i].ssid.c_str());
   }
   oledScrollClampSelection(&sSavedNetScroll);
+}
+
+static void savedNetworksOnEnter(bool isForward) {
+  // Capture once per visit: labels and actions refer to the same entries even
+  // if another interface reorders or removes a network while this menu is open.
+  if (isForward || !sSavedNetSnapshotValid) {
+    populateSavedNetScroll();
+    sSavedNetScroll.selectedIndex = 0;
+    sSavedNetScroll.scrollOffset = 0;
+  }
 }
 
 // Shared display for List + Remove (the header names which one).
 static void displaySavedNetworksRendered() {
   if (!oledDisplay || !oledConnected) return;
-  populateSavedNetScroll();
-  if (sSavedNetScroll.itemCount == 0) {
+  if (!sSavedNetSnapshotValid || sSavedNetScroll.itemCount == 0) {
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-    oledDisplay->println("No saved networks");
+    oledDisplay->println(sSavedNetSnapshotValid ? "No saved networks" : "Saved list unavailable");
     return;
   }
   oledScrollRenderSimple(oledDisplay, &sSavedNetScroll);
@@ -538,10 +553,10 @@ static bool networkWifiListInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPr
   if (oledScrollHandleNav(&sSavedNetScroll)) return true;
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     int sel = sSavedNetScroll.selectedIndex;
-    if (sel >= 0 && sel < gWifiNetworkCount) {
-      // Registered command is `openwifi`; `wificonnect` is only the handler's
-      // C function name (cmd_wificonnect) and never resolved here.
-      executeOLEDCommand("openwifi --index " + String(sel + 1));
+    if (sSavedNetSnapshotValid && sel >= 0 && sel < sSavedNetSnapshot.count) {
+      // The command resolves this boot-local identity when it executes. A
+      // removed entry fails instead of connecting a different network by index.
+      executeOLEDCommand("openwifi --saved-id " + String(sSavedNetSnapshot.entries[sel].id));
       oledMenuBack();  // pop back to the WiFi menu after kicking off the connect
     }
     return true;
@@ -550,9 +565,11 @@ static bool networkWifiListInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPr
 }
 
 static void onWifiRemoveConfirmed(void* /*ud*/) {
-  if (sPendingRemoveSSID.length() > 0) {
-    executeOLEDCommand("wifirm \"" + sPendingRemoveSSID + "\"");
-    sPendingRemoveSSID = "";
+  if (sPendingRemoveId != 0) {
+    executeOLEDCommand("wifirmid " + String(sPendingRemoveId));
+    sPendingRemoveId = 0;
+    populateSavedNetScroll();
+    oledMarkDirty();
   }
 }
 
@@ -561,9 +578,10 @@ static bool networkWifiRemoveInputHandler(int /*dx*/, int /*dy*/, uint32_t newly
   if (oledScrollHandleNav(&sSavedNetScroll)) return true;
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     int sel = sSavedNetScroll.selectedIndex;
-    if (sel >= 0 && sel < gWifiNetworkCount) {
-      sPendingRemoveSSID = gWifiNetworks[sel].ssid;
-      snprintf(sRemovePromptBuf, sizeof(sRemovePromptBuf), "Delete %s?", sPendingRemoveSSID.c_str());
+    if (sSavedNetSnapshotValid && sel >= 0 && sel < sSavedNetSnapshot.count) {
+      const SavedWifiNetwork& selected = sSavedNetSnapshot.entries[sel];
+      sPendingRemoveId = selected.id;
+      snprintf(sRemovePromptBuf, sizeof(sRemovePromptBuf), "Delete %s?", selected.ssid.c_str());
       oledConfirmRequest(sRemovePromptBuf, nullptr, onWifiRemoveConfirmed, nullptr, /*defaultYes=*/false);
     }
     return true;
@@ -695,16 +713,12 @@ static bool networkWifiMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     switch (sWifiMenuScroll.selectedIndex) {
       case 0: // List Networks — push the saved-network picker (A connects)
-        sSavedNetScroll.selectedIndex = 0;
-        sSavedNetScroll.scrollOffset = 0;
         requestOLEDMode(OLED_NETWORK_WIFI_LIST, "network.wifi.list");
         break;
       case 1: // Add Network — manual SSID → PASS keyboard flow
         startWifiAddSSID();
         break;
       case 2: // Remove Network — push the saved-network picker (A confirms+deletes)
-        sSavedNetScroll.selectedIndex = 0;
-        sSavedNetScroll.scrollOffset = 0;
         requestOLEDMode(OLED_NETWORK_WIFI_REMOVE, "network.wifi.remove");
         break;
       case 3: // Connect Best
@@ -1394,7 +1408,7 @@ REGISTER_OLED_MODE_MODULE(remoteSensorsOLEDModes,
 // Mode Registration — every screen is its own enum entry
 // ============================================================================
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc,
-//          showInMenu, menuOrder, hints
+//          showInMenu, menuOrder, hints, onEnter
 
 static const OLEDModeEntry sNetworkModes[] = {
   { OLED_NETWORK_INFO,      "Network", "wifi",          displayNetworkInfoRendered,
@@ -1404,9 +1418,9 @@ static const OLEDModeEntry sNetworkModes[] = {
   { OLED_NETWORK_WIFI_MENU, "WiFi",    "wifi",          displayNetworkWifiMenuRendered,
     nullptr, networkWifiMenuInputHandler, false, -1, "A:Select B:Back" },
   { OLED_NETWORK_WIFI_LIST, "Saved",   "wifi",          displaySavedNetworksRendered,
-    nullptr, networkWifiListInputHandler,   false, -1, "A:Connect B:Back" },
+    nullptr, networkWifiListInputHandler,   false, -1, "A:Connect B:Back", savedNetworksOnEnter },
   { OLED_NETWORK_WIFI_REMOVE,"Remove", "wifi",          displaySavedNetworksRendered,
-    nullptr, networkWifiRemoveInputHandler, false, -1, "A:Delete B:Back" },
+    nullptr, networkWifiRemoveInputHandler, false, -1, "A:Delete B:Back", savedNetworksOnEnter },
   { OLED_NETWORK_WIFI_SCAN, "Scan",    "wifi",          displayNetworkWifiScanRendered,
     nullptr, networkWifiScanInputHandler,   false, -1, "A:Add B:Back" },
   { OLED_MESH_STATUS,       "Mesh",    "wifi",          displayMeshStatusRendered,

@@ -22,8 +22,7 @@
 #include "System_LLM.h"
 #include "System_LLM_Internal.h"   // gLLM, LLMMenuGroupDesc, lifecycle hooks, llmPsramFree
 #include "System_LLMChat.h"        // ChatParamOverride, chatBeginTurn, chatGetSessionId
-#include "System_Command.h"        // CommandArgs
-#include "System_Utils.h"          // argLeadingTokenIsJson
+#include "System_Command.h"        // CommandArgs, argLeadingTokenIsJson
 #include "System_Debug.h"          // cliHint
 #include "System_MemUtil.h"        // PSRAM_JSON_DOC, ps_alloc, AllocPref
 

@@ -4,7 +4,7 @@
  * Single owner of microphone PCM capture. Abstracts the physical sources —
  * the onboard PDM mic (I2S) and the G2 glasses left-temple mic (BLE LC3 → PCM
  * ring) — behind ONE pull API, the same way HAL_Input abstracts the gamepad and
- * ANO encoder behind a single inputTask()/gInputCache. Unlike HAL_Input (which
+ * ANO encoder behind a shared input API. Unlike HAL_Input (which
  * is poll-and-cache: many cheap readers), audio is an exclusive single-drainer
  * STREAM — one owner captures at a time and destructively pulls samples; a UI
  * that wants a live level while another consumer owns the stream must read the

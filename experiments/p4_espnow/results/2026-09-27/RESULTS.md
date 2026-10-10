@@ -1,5 +1,7 @@
 # P4/C6 ↔ S3 transport milestone: passed
 
+Device MAC addresses use synthetic aliases, and serial-port locations use generic placeholders. Measurement values and test outcomes are unchanged.
+
 On 27 September 2026, the ESP32-P4X-EYE exchanged ESP-NOW packets with the
 XIAO ESP32-S3 Sense through the EYE's onboard C6. All **26 test steps passed**.
 The run used ESP-IDF **5.5.5** on all three chips and ESP-Hosted **2.12.13**;

@@ -1,4 +1,6 @@
 #include "i2csensor_ano_encoder.h"
+#include "HAL_InputInternal.h"
+#include "System_Mutex.h"
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
@@ -16,8 +18,6 @@
 #include "OLED_Display.h"
 #include "System_Command.h"
 #include "System_Debug.h"
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
@@ -29,20 +29,35 @@
 TaskHandle_t gAnoEncoderTaskHandle = nullptr;
 // Retained across stops/retries; PSRAM-preferred placement-new needs ps_delete
 // if an explicit teardown is introduced. Wire/BusIO storage stays separate.
-Adafruit_seesaw* gAnoSeesaw = nullptr;
-AnoEncoderCache  gAnoEncoderCache;
+static Adafruit_seesaw* gAnoSeesaw = nullptr;
+static AnoEncoderCache sAnoEncoderCache;
+static SemaphoreHandle_t sAnoCacheMutex = nullptr;
+
+bool anoEncoderCacheSnapshot(AnoEncoderCache& out, uint32_t timeoutMs) {
+  out = {};
+  SensorCacheGuard guard(sAnoCacheMutex, pdMS_TO_TICKS(timeoutMs), "ano.snapshot");
+  if (!guard.held) return false;
+  out = sAnoEncoderCache;
+  return true;
+}
+
+static bool invalidateAnoCache() {
+  SensorCacheGuard guard(sAnoCacheMutex, pdMS_TO_TICKS(100), "ano.invalidate");
+  if (!guard.held) return false;
+  sAnoEncoderCache.dataValid = false;
+  return true;
+}
 
 bool gAnoEncoderEnabled = false;
 bool gAnoEncoderConnected = false;
 
 // Gamepad-shaped proxies: the OLED input pipeline reads these. When ANO is the
 // active driver (this .cpp compiled, i2csensor_seesaw.cpp excluded by CMake),
-// the ANO task populates gInputCache with synthesized state so processGamepad-
+// the ANO task populates the shared input reading with synthesized state so processGamepad-
 // MenuInput keeps working unchanged. gInputRunning/gInputConnected mirror
 // gAnoEncoderEnabled/gAnoEncoderConnected.
 bool gInputRunning = false;
 bool gInputConnected = false;
-InputCache gInputCache;
 
 static unsigned long gLastAnoInitMs = 0;
 static const unsigned long kAnoInitMinIntervalMs = 2000;
@@ -210,6 +225,10 @@ bool anoEncoderInitConnection() {
 }
 
 bool inputStartInternal() {
+  if (gInputRunning) return true;
+  // Do not reinitialize resources while the previous input task is exiting.
+  if (gInputTaskHandle != nullptr) return false;
+
   DEBUG_CLIF("[QUEUE] Processing ANO encoder start from queue");
   anoLogHeap("start.begin");
 
@@ -219,26 +238,27 @@ bool inputStartInternal() {
     return false;
   }
 
-  if (!gAnoEncoderCache.mutex) {
-    gAnoEncoderCache.mutex = xSemaphoreCreateMutex();
-    if (!gAnoEncoderCache.mutex) {
+  if (!sAnoCacheMutex) {
+    sAnoCacheMutex = xSemaphoreCreateMutex();
+    if (!sAnoCacheMutex) {
       ERROR_ANO_ENCODERF("Failed to create ANO cache mutex");
       return false;
     }
   }
-  // Sibling mutex for the gamepad-shaped proxy cache the OLED reads.
-  if (!gInputCache.mutex) {
-    gInputCache.mutex = xSemaphoreCreateMutex();
+  if (!inputCacheInit()) {
+    ERROR_ANO_ENCODERF("Failed to create shared input cache mutex");
+    return false;
   }
 
   {
-    SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(100), "ano.cleanStaleCache");
-    if (g.held) {
-      gAnoEncoderCache.dataValid = false;
-      gAnoEncoderCache.buttons = 0;
-      gAnoEncoderCache.encoderDelta = 0;
-      gAnoEncoderCache.encoderPosition = 0;
-      gAnoEncoderCache.buttonPressedAccum = 0;
+    SensorCacheGuard g(sAnoCacheMutex, pdMS_TO_TICKS(100), "ano.cleanStaleCache");
+    if (!g.held) return false;
+    {
+      sAnoEncoderCache.dataValid = false;
+      sAnoEncoderCache.buttons = 0;
+      sAnoEncoderCache.encoderDelta = 0;
+      sAnoEncoderCache.encoderPosition = 0;
+      sAnoEncoderCache.buttonPressedAccum = 0;
     }
   }
 
@@ -257,12 +277,14 @@ bool inputStartInternal() {
   // dot can stay red until the next polling tick.
   if (gInputRunning != prev) sensorStatusBumpWith("openinput@enabled");
 
-  // Broadcast sensor status to ESP-NOW master so paired peers see the change.
-#if ENABLE_ESPNOW
-  broadcastSensorStatus(REMOTE_SENSOR_INPUT, true);
-#endif
 
   if (!createInputTask()) {  // Reuse the existing gamepad task slot — only one input device runs.
+    gAnoEncoderEnabled = false;
+    gInputRunning = false;
+    gAnoEncoderConnected = false;
+    gInputConnected = false;
+    (void)invalidateAnoCache();
+    (void)inputCacheInvalidate();
     ERROR_ANO_ENCODERF("Failed to create ANO encoder task");
     return false;
   }
@@ -274,27 +296,27 @@ bool inputStartInternal() {
 // Axis state (per-mode)
 // ============================================================================
 void anoEncoderResetAxisForMode(uint8_t defaultAxis) {
-  if (!gAnoEncoderCache.mutex) return;
-  SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(10), "ano.resetAxis");
+  if (!sAnoCacheMutex) return;
+  SensorCacheGuard g(sAnoCacheMutex, pdMS_TO_TICKS(10), "ano.resetAxis");
   if (g.held) {
-    gAnoEncoderCache.currentAxis =
+    sAnoEncoderCache.currentAxis =
         (defaultAxis == ANO_AXIS_HORIZONTAL) ? ANO_AXIS_HORIZONTAL : ANO_AXIS_VERTICAL;
   }
 }
 
 int anoEncoderConsumeOneDetent() {
-  if (!gAnoEncoderCache.mutex) return 0;
-  SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(5), "ano.consumeDetent");
+  if (!sAnoCacheMutex) return 0;
+  SensorCacheGuard g(sAnoCacheMutex, pdMS_TO_TICKS(5), "ano.consumeDetent");
   if (!g.held) return 0;
-  if (gAnoEncoderCache.encoderDelta > 0) { gAnoEncoderCache.encoderDelta--; return 1; }
-  if (gAnoEncoderCache.encoderDelta < 0) { gAnoEncoderCache.encoderDelta++; return -1; }
+  if (sAnoEncoderCache.encoderDelta > 0) { sAnoEncoderCache.encoderDelta--; return 1; }
+  if (sAnoEncoderCache.encoderDelta < 0) { sAnoEncoderCache.encoderDelta++; return -1; }
   return 0;
 }
 
 int anoEncoderBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
-  SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(50), "ano.buildJSON");
-  if (!g.held) {
+  AnoEncoderCache reading;
+  if (!anoEncoderCacheSnapshot(reading, 50)) {
     // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
     int pos = sensorEnvelopeBegin(buf, bufSize, false, gAnoEncoderConnected, 0);
     if (pos == 0) return 0;
@@ -303,13 +325,13 @@ int anoEncoderBuildDataJSON(char* buf, size_t bufSize) {
     return pos + n;
   }
 
-  int pos = sensorEnvelopeBegin(buf, bufSize, gAnoEncoderCache.dataValid, gAnoEncoderConnected, gAnoEncoderCache.lastUpdate);
+  int pos = sensorEnvelopeBegin(buf, bufSize, reading.dataValid, gAnoEncoderConnected, reading.lastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
                    ",\"pos\":%ld,\"axis\":%u,\"buttons\":%lu}",
-                   (long)gAnoEncoderCache.encoderPosition,
-                   (unsigned)gAnoEncoderCache.currentAxis,
-                   (unsigned long)gAnoEncoderCache.buttons);
+                   (long)reading.encoderPosition,
+                   (unsigned)reading.currentAxis,
+                   (unsigned long)reading.buttons);
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;
   return pos + n;
 }
@@ -329,16 +351,11 @@ const char* cmd_anoencoder(const String& argsInput) {
       return "Error: [ANO] Not connected - check wiring";
     }
   }
-  long pos; unsigned axis; unsigned long buttons;
-  {
-    SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(50), "ano.read");
-    // On guard timeout this degrades to the pre-guard unlocked read (best-effort
-    // debug output) rather than failing the CLI; each field is word-sized so the
-    // individual reads are atomic — the guard buys cross-field consistency.
-    pos     = (long)gAnoEncoderCache.encoderPosition;
-    axis    = (unsigned)gAnoEncoderCache.currentAxis;
-    buttons = (unsigned long)gAnoEncoderCache.buttons;
-  }
+  AnoEncoderCache reading;
+  if (!anoEncoderCacheSnapshot(reading, 50)) return "Error: [ANO] Snapshot unavailable";
+  const long pos = reading.encoderPosition;
+  const unsigned axis = reading.currentAxis;
+  const unsigned long buttons = reading.buttons;
   static char buf[80];
   snprintf(buf, sizeof(buf), "[ANO] pos=%ld axis=%u buttons=0x%08lX", pos, axis, buttons);
   return buf;
@@ -482,11 +499,11 @@ void inputTask(void* parameter) {
   while (true) {
     if (!gAnoEncoderEnabled) {
       gAnoEncoderConnected = false;
-      gAnoEncoderCache.dataValid = false;
+      if (!invalidateAnoCache()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
       gInputRunning = false;
       gInputConnected = false;
-      gInputCache.dataValid = false;
-      SENSOR_TASK_EXIT(INPUT);
+      if (!inputCacheInvalidate()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+      SENSOR_TASK_EXIT(INPUT, gInputTaskHandle);
     }
 
     unsigned long nowMs = millis();
@@ -601,28 +618,28 @@ void inputTask(void* parameter) {
 
           // ----- Publish to native ANO cache -----
           {
-            SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(50), "ano.pollWrite");
+            SensorCacheGuard g(sAnoCacheMutex, pdMS_TO_TICKS(50), "ano.pollWrite");
             if (g.held) {
-              bool changed = (gAnoEncoderCache.buttons != btns) ||
+              bool changed = (sAnoEncoderCache.buttons != btns) ||
                              (detentDelta != 0);
-              uint32_t prevAccum = gAnoEncoderCache.buttonPressedAccum;
-              int32_t  prevPendingDetents = gAnoEncoderCache.encoderDelta;
-              gAnoEncoderCache.buttons = btns;
-              gAnoEncoderCache.buttonPressedAccum |= newlyPressed;
-              gAnoEncoderCache.encoderPosition = encPos;
-              gAnoEncoderCache.encoderDelta += detentDelta;
-              gAnoEncoderCache.lastUpdate = nowMs;
-              gAnoEncoderCache.dataValid = true;
-              if (changed) gAnoEncoderCache.seq++;
+              uint32_t prevAccum = sAnoEncoderCache.buttonPressedAccum;
+              int32_t  prevPendingDetents = sAnoEncoderCache.encoderDelta;
+              sAnoEncoderCache.buttons = btns;
+              sAnoEncoderCache.buttonPressedAccum |= newlyPressed;
+              sAnoEncoderCache.encoderPosition = encPos;
+              sAnoEncoderCache.encoderDelta += detentDelta;
+              sAnoEncoderCache.lastUpdate = nowMs;
+              sAnoEncoderCache.dataValid = true;
+              if (changed) sAnoEncoderCache.seq++;
               // Log cache mutations (VALUES). Only on actual change to avoid noise.
               if (changed) {
                 DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] cache  buttons=0x%02lX accum=0x%02lX→0x%02lX pendingDetents=%ld→%ld seq=%lu",
                                           (unsigned long)btns,
                                           (unsigned long)prevAccum,
-                                          (unsigned long)gAnoEncoderCache.buttonPressedAccum,
+                                          (unsigned long)sAnoEncoderCache.buttonPressedAccum,
                                           (long)prevPendingDetents,
-                                          (long)gAnoEncoderCache.encoderDelta,
-                                          (unsigned long)gAnoEncoderCache.seq);
+                                          (long)sAnoEncoderCache.encoderDelta,
+                                          (unsigned long)sAnoEncoderCache.seq);
               }
             }
           }
@@ -632,26 +649,8 @@ void inputTask(void* parameter) {
           // state. We store ~btns so the inversion yields the ANO_BTN_* bits.
           // Joystick X/Y stay at CENTER — encoder→nav-event happens via the
           // ANO-specific branch in processOLEDInput, not joystick math.
-          {
-            SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(50), "ano.proxyWrite");
-            if (g.held) {
-              gInputCache.buttons = ~btns;
-              gInputCache.buttonPressedAccum |= newlyPressed;
-              gInputCache.joyX = JOYSTICK_CENTER;
-              gInputCache.joyY = JOYSTICK_CENTER;
-              gInputCache.lastUpdate = nowMs;
-              gInputCache.dataValid = true;
-              // Bump seq ONLY on a real input edge (button change or detent),
-              // matching the native ANO cache (gAnoEncoderCache.seq above) and
-              // the seesaw path. The proxy write runs every poll (~30 ms), so an
-              // unconditional seq++ made gInputCache.seq advance ~33x/s forever
-              // — which silently defeats BOTH power-save and OLED idle-logout,
-              // since each treats any seq change as "real user activity" and so
-              // would never go idle on an ANO-encoder board. prevButtons is still
-              // the previous poll here (updated below); detentDelta is this poll.
-              if ((btns != prevButtons) || (detentDelta != 0)) gInputCache.seq++;
-            }
-          }
+          inputPublishState(~btns, JOYSTICK_CENTER, JOYSTICK_CENTER,
+                            newlyPressed, (btns != prevButtons) || (detentDelta != 0), nowMs);
 
           prevButtons = btns;
         } else if (!readOk) {
@@ -660,7 +659,7 @@ void inputTask(void* parameter) {
           WARN_ANO_ENCODERF("[ANO_TASK] I2C read failure (consecutive: %u)", errors);
           if (i2cShouldAutoDisable(anoI2cAddr(), (uint8_t)gSettings.inputBus)) {
             ERROR_ANO_ENCODERF("[ANO_TASK] Too many failures - auto-disabling");
-            handleDeviceStopped(I2C_DEVICE_INPUT);
+            requestSensorStop(I2C_DEVICE_INPUT);
             logSystemEvent("SENSOR", "ANO Encoder auto-disabled after %u consecutive I2C failures", errors);
             { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
               systemEventPost(SYSEVT_SENSOR_FAULT, "ANO", det); }
@@ -669,7 +668,7 @@ void inputTask(void* parameter) {
           consecutiveInvalidReads++;
           if (consecutiveInvalidReads >= INVALID_READ_AUTO_DISABLE_THRESHOLD) {
             ERROR_ANO_ENCODERF("[ANO_TASK] %u invalid reads - auto-disabling", consecutiveInvalidReads);
-            handleDeviceStopped(I2C_DEVICE_INPUT);
+            requestSensorStop(I2C_DEVICE_INPUT);
             logSystemEvent("SENSOR", "ANO Encoder auto-disabled after %u consecutive invalid reads (device likely disconnected)", consecutiveInvalidReads);
             { char det[24]; snprintf(det, sizeof(det), "%u invalid reads", (unsigned)consecutiveInvalidReads);
               systemEventPost(SYSEVT_SENSOR_FAULT, "ANO", det); }

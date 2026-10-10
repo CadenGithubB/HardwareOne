@@ -18,7 +18,6 @@
 #include "System_Debug.h"
 #include "System_R1_Protocol.h"
 #include "System_SensorLogging.h"
-#include "System_Settings.h"
 #include "System_Clock.h"   // isValidEpoch — honest day labels on Trends
 
 #include <time.h>
@@ -55,6 +54,7 @@ static G2HealthNav sNav = HEALTH_NAV_MAIN;
 static uint32_t sMenuGen = 1;
 static G2HealthMetric sSelected = HEALTH_METRIC_OVERVIEW;
 static bool sPollRequest = false;
+static bool sLoggingToggleRequest = false;
 static bool sHistoryRefreshRequest = false;
 static bool sHistoryRefreshForce = false;
 static uint32_t sLastSyncMs = 0;
@@ -1292,6 +1292,7 @@ void g2HealthOpen(void) {
   // Even 2.2.9 refreshes Health with DAILY reads. Page entry may use the
   // normal freshness-throttled sweep; only explicit Poll Now forces it.
   sPollRequest = false;
+  sLoggingToggleRequest = false;
   sHistoryRefreshRequest = true;
   sHistoryRefreshForce = false;
   sPollUi = POLL_UI_IDLE;
@@ -1345,8 +1346,8 @@ void g2HealthClearGraphPush(void) {
 
 void g2HealthAction(uint32_t rowIdx) {
   if (sNav == HEALTH_NAV_TRENDS) {
-    // The lens has no user/admin identity, so it exposes normal refresh only.
-    // Force refresh remains on authenticated admin surfaces (web/CLI/OLED).
+    // This menu exposes normal refresh only. Force refresh remains on the
+    // explicit admin controls (web/CLI/OLED).
     // 0 <- Health · 1 HR · 2 HRV · 3 SpO2 · 4 Refresh
     switch (rowIdx) {
       case 0:
@@ -1435,8 +1436,7 @@ void g2HealthAction(uint32_t rowIdx) {
       DEBUG_RING_HEALTHF("[HEALTH] Poll Now requested");
       break;
     case 10: {
-      const char* r = healthLoggingSet(!gSettings.healthLoggingEnabled);
-      DEBUG_G2_PAGESF("[HEALTH] Health Logging → %s", r ? r : "(null)");
+      sLoggingToggleRequest = true;
       break;
     }
     default: break;
@@ -1444,6 +1444,12 @@ void g2HealthAction(uint32_t rowIdx) {
 }
 
 G2HealthMetric g2HealthSelectedMetric(void) { return sSelected; }
+
+bool g2HealthConsumeLoggingToggleRequest(void) {
+  if (!sLoggingToggleRequest) return false;
+  sLoggingToggleRequest = false;
+  return true;
+}
 
 bool g2HealthConsumePollRequest(void) {
   if (!sPollRequest) return false;
@@ -1454,6 +1460,7 @@ bool g2HealthConsumePollRequest(void) {
 void g2HealthSetPageActive(bool active) {
   sPageActive = active;
   if (!active) {
+    sLoggingToggleRequest = false;
     sPollUi = POLL_UI_IDLE;
     sPollUiMs = 0;
   }
@@ -1905,7 +1912,7 @@ void g2HealthBuildOverviewText(char* out, size_t cap) {
 
   const char* track =
       healthLoggingIsActive() ? "Logging on" :
-      (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) ? "LOG on" : "Logging off";
+      (gSensorLoggingRunning && (sensorLogSelectedMask() & LOG_R1)) ? "LOG on" : "Logging off";
   const char* poll = healthPollStatusLine(nullptr);
 
   // One shared recentness (freshest vital), not per-line ages — avoids
@@ -2512,7 +2519,7 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
   // Range lives on the graph Y-axis now — right column is n= / TRACK / wear.
   const char* track =
       healthLoggingIsActive() ? "Logging on" :
-      (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) ? "LOG on" : "Logging off";
+      (gSensorLoggingRunning && (sensorLogSelectedMask() & LOG_R1)) ? "LOG on" : "Logging off";
   const char* poll = healthPollStatusLine(nullptr);
   char status[40];
   if (poll && poll[0]) snprintf(status, sizeof(status), "%s", poll);

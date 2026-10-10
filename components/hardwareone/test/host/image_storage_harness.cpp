@@ -1,0 +1,398 @@
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <functional>
+#include <map>
+#include <memory>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+static size_t checks = 0;
+static void check(bool okay, const std::string& why) {
+  ++checks; if (!okay) throw std::runtime_error(why);
+}
+class String {
+ public:
+  String() = default;
+  String(const char* value) : value_(value ? value : "") {}
+  String(const std::string& value) : value_(value) {}
+  String(char value) : value_(1, value) {}
+  size_t length() const { return value_.size(); }
+  const char* c_str() const { return value_.c_str(); }
+  char operator[](size_t index) const { return value_[index]; }
+  bool reserve(size_t size) { value_.reserve(size); return true; }
+  bool startsWith(const String& prefix) const { return value_.rfind(prefix.value_, 0) == 0; }
+  bool endsWith(const String& suffix) const {
+    return value_.size() >= suffix.length() && value_.compare(value_.size() - suffix.length(), suffix.length(), suffix.value_) == 0;
+  }
+  int indexOf(const String& text) const { const auto pos = value_.find(text.value_); return pos == std::string::npos ? -1 : static_cast<int>(pos); }
+  int indexOf(char value) const { return indexOf(String(value)); }
+  int lastIndexOf(char value) const { const auto pos = value_.rfind(value); return pos == std::string::npos ? -1 : static_cast<int>(pos); }
+  String substring(size_t start) const { return value_.substr(std::min(start, value_.size())); }
+  void remove(size_t start) { value_.erase(start); }
+  void trim() {
+    const auto first = value_.find_first_not_of(" \t\r\n"), last = value_.find_last_not_of(" \t\r\n");
+    value_ = first == std::string::npos ? "" : value_.substr(first, last - first + 1);
+  }
+  void replace(const String& from, const String& to) {
+    size_t start = 0;
+    while ((start = value_.find(from.value_, start)) != std::string::npos) {
+      value_.replace(start, from.length(), to.value_); start += to.length();
+    }
+  }
+  String& operator+=(const String& value) { value_ += value.value_; return *this; }
+  friend String operator+(const String& a, const String& b) { return a.value_ + b.value_; }
+  friend bool operator==(const String& a, const String& b) { return a.value_ == b.value_; }
+  friend bool operator!=(const String& a, const String& b) { return !(a == b); }
+  friend bool operator<(const String& a, const String& b) { return a.value_ < b.value_; }
+ private:
+  std::string value_;
+};
+
+using TickType_t = uint32_t;
+using SemaphoreHandle_t = int*;
+static constexpr TickType_t portMAX_DELAY = UINT32_MAX;
+static constexpr int pdTRUE = 1;
+static int semaphore;
+static SemaphoreHandle_t gFsMutex = &semaphore;
+static bool heldFs = false;
+static unsigned takes = 0, gives = 0;
+static bool isHeldByCurrentTask(SemaphoreHandle_t) { return heldFs; }
+static int xSemaphoreTake(SemaphoreHandle_t, TickType_t) {
+  check(!heldFs, "nested production FsLockGuard must not take the RTOS mutex twice");
+  heldFs = true; ++takes; return pdTRUE;
+}
+static void xSemaphoreGive(SemaphoreHandle_t) {
+  check(heldFs, "only current filesystem owner releases mutex"); heldFs = false; ++gives;
+}
+// INSERT_FS_GUARD
+
+template <class... Args> static void logIgnored(const char*, Args...) {}
+#define INFO_STORAGEF(...) logIgnored(__VA_ARGS__)
+#define ERROR_STORAGEF(...) logIgnored(__VA_ARGS__)
+#define DEBUG_STORAGEF(...) logIgnored(__VA_ARGS__)
+#define WARN_STORAGEF(...) logIgnored(__VA_ARGS__)
+#define FILE_READ "r"
+
+struct Settings { String cameraCaptureFolder = "/photos"; } gSettings;
+static bool filesystemReady = true, sdMounted = false;
+struct AuthContext { String user; String reason; };
+struct Access { std::string operation, path, user, reason; };
+static std::vector<Access> accesses;
+static std::set<std::string> denied;
+static bool failOpen = false, failMkdir = false, failRemove = false, failStats = false;
+static unsigned metadataUnlocked = 0, closesUnlocked = 0, directoryOpens = 0;
+static unsigned activeFiles = 0, closeCalls = 0, statCalls = 0, mtimeCalls = 0;
+static int lastStatType = -1;
+static bool trackIo = true;
+static void metadata() { if (trackIo && !heldFs) ++metadataUnlocked; }
+struct Node {
+  std::string name;
+  bool directory = false;
+  size_t size = 12;
+  time_t modified = 12345;
+  std::vector<std::shared_ptr<Node>> children;
+  std::vector<uint8_t> bytes = {0xff, 0xd8, 3, 4};
+};
+static std::map<std::string, std::shared_ptr<Node>> nodes;
+struct Handle {
+  explicit Handle(std::shared_ptr<Node> value) : node(std::move(value)) { ++activeFiles; }
+  ~Handle() { close(); }
+  void close() {
+    if (closed) return;
+    if (trackIo && !heldFs) ++closesUnlocked;
+    closed = true; ++closeCalls; --activeFiles;
+  }
+  std::shared_ptr<Node> node;
+  size_t cursor = 0;
+  bool closed = false;
+};
+class File {
+ public:
+  File() = default;
+  explicit File(std::shared_ptr<Node> value) : handle_(std::make_shared<Handle>(std::move(value))) {}
+  explicit operator bool() const { return handle_ && !handle_->closed; }
+  bool isDirectory() const { metadata(); return *this && handle_->node->directory; }
+  const char* name() const { metadata(); return *this ? handle_->node->name.c_str() : ""; }
+  size_t size() const { metadata(); return *this ? handle_->node->size : 0; }
+  time_t getLastWrite() const { metadata(); ++mtimeCalls; return handle_->node->modified; }
+  File openNextFile() {
+    metadata();
+    if (!*this || handle_->cursor >= handle_->node->children.size()) return {};
+    return File(handle_->node->children[handle_->cursor++]);
+  }
+  size_t read(uint8_t* out, size_t length) {
+    metadata(); const auto count = std::min(length, handle_->node->bytes.size());
+    std::memcpy(out, handle_->node->bytes.data(), count); return count;
+  }
+  void close() { if (handle_) handle_->close(); handle_.reset(); }
+ private:
+  std::shared_ptr<Handle> handle_;
+};
+// INSERT_NORMALIZE_FS_PATH
+namespace VFS {
+enum StorageType { INTERNAL = 0, SDCARD = 1, AUTO = 2 };
+struct VirtualEntry { const char* name; bool isFolder; };
+static bool isSDAvailable() { return sdMounted; }
+String normalize(const String&);
+}
+// INSERT_VFS_PATHS
+// INSERT_DIRECTORY_READER
+
+namespace VFS {
+static AuthContext systemAuth(const char* reason) { return {"system", reason}; }
+static bool allowed(const char* operation, const String& input, const AuthContext& ctx, String& path) {
+  check(heldFs, "guarded boundary performs I/O under its own nested guard");
+  accesses.push_back({operation, input.c_str(), ctx.user.c_str(), ctx.reason.c_str()});
+  check(ctx.user == "system" && ctx.reason.length() != 0, "ImageManager retains explicit trusted system identity");
+  return normalizeFsPath(input, path) && !denied.count(path.c_str()) &&
+         (getStorageType(path) == SDCARD ? sdMounted : filesystemReady);
+}
+static File openGuarded(const String& input, const char* mode, const AuthContext& ctx, bool = false) {
+  FsLockGuard guard("mock.open"); String path;
+  if (!allowed("open", input, ctx, path) || failOpen) return {};
+  check(std::strcmp(mode, "r") == 0, "inventory opens read-only");
+  const auto found = nodes.find(path.c_str());
+  if (found == nodes.end()) return {};
+  if (found->second->directory) ++directoryOpens;
+  return File(found->second);
+}
+static bool existsGuarded(const String& input, const AuthContext& ctx) {
+  FsLockGuard guard("mock.exists"); String path;
+  return allowed("exists", input, ctx, path) && nodes.count(path.c_str());
+}
+static bool mkdirGuarded(const String& input, const AuthContext& ctx) {
+  FsLockGuard guard("mock.mkdir"); String path;
+  if (!allowed("mkdir", input, ctx, path) || failMkdir) return false;
+  auto node = std::make_shared<Node>(); node->directory = true; node->name = stripSdPrefix(path).c_str();
+  nodes[path.c_str()] = node; return true;
+}
+static bool removeGuarded(const String& input, const AuthContext& ctx) {
+  FsLockGuard guard("mock.remove"); String path;
+  return allowed("remove", input, ctx, path) && !failRemove && nodes.erase(path.c_str()) != 0;
+}
+static bool getStats(StorageType type, uint64_t& total, uint64_t& used, uint64_t& free) {
+  FsLockGuard guard("mock.stats"); ++statCalls; lastStatType = type;
+  if (failStats || (type == SDCARD ? !sdMounted : !filesystemReady)) return false;
+  total = 4096; used = 1024; free = 3072; return true;
+}
+}
+static constexpr uint32_t MALLOC_CAP_SPIRAM = 1, MALLOC_CAP_8BIT = 2;
+enum class AllocPref { RequirePSRAM };
+static size_t largestBlock = 4096;
+static bool failAlloc = false;
+static size_t heap_caps_get_largest_free_block(uint32_t) { return largestBlock; }
+static void* ps_alloc(size_t length, AllocPref, const char*) { return failAlloc ? nullptr : std::malloc(length); }
+static void ps_free(void* ptr) { std::free(ptr); }
+// INSERT_IMAGE_MANAGER
+
+static void balanced(bool expectOuter = false) {
+  check(heldFs == expectOuter && gives + unsigned(expectOuter) == takes, "all filesystem guard scopes balance");
+  check(activeFiles == 0, "all directory/child/image handles are closed");
+}
+static void reset(bool sd = false, bool internal = true) {
+  balanced(); nodes.clear(); accesses.clear(); denied.clear();
+  sdMounted = sd; filesystemReady = internal; gSettings.cameraCaptureFolder = "/photos";
+  failOpen = failMkdir = failRemove = failStats = failAlloc = false; largestBlock = 4096;
+  metadataUnlocked = closesUnlocked = directoryOpens = closeCalls = statCalls = mtimeCalls = 0;
+  takes = gives = 0; lastStatType = -1;
+  auto root = std::make_shared<Node>(); root->name = "/"; root->directory = true; nodes["/"] = root;
+  if (sd) { auto sdroot = std::make_shared<Node>(*root); nodes["/sd"] = sdroot; }
+}
+static std::shared_ptr<Node> add(const std::string& path, bool directory = false, const std::string& backend = "") {
+  auto node = std::make_shared<Node>(); node->directory = directory;
+  node->name = backend.empty() ? std::string(VFS::stripSdPrefix(path.c_str()).c_str()) : backend;
+  nodes[path] = node;
+  const auto slash = path.rfind('/'); const auto parent = slash == 0 ? "/" : path.substr(0, slash);
+  if (nodes.count(parent)) nodes.at(parent)->children.push_back(node);
+  return node;
+}
+static ImageManager manager() { ImageManager out; out.init(); accesses.clear(); statCalls = 0; takes = gives = 0; return out; }
+static void expectIdentity(const std::string& operation, const std::string& reason) {
+  auto found = std::find_if(accesses.begin(), accesses.end(), [&](const Access& access) { return access.operation == operation; });
+  check(found != accesses.end() && found->user == "system" && found->reason == reason, "operation retains its existing systemAuth audit reason: " + operation);
+}
+static void routeMetadata() {
+  reset(); auto image = add("/sdata/photo.jpg"); auto owner = manager(); ImageInfo info{};
+  check(owner.getImageInfo("/sdata/photo.jpg", info), "/sdata is internal and must work when SD is absent");
+  check(!info.isOnSD && info.location == IMAGE_STORAGE_LITTLEFS && info.size == image->size && info.timestamp == 0, "internal metadata reports internal storage");
+  expectIdentity("open", "imgmgr.get_image_info"); balanced();
+}
+static void routeDelete() {
+  reset(); add("/sdata/photo.jpg"); auto owner = manager();
+  check(owner.deleteImage("/sdata/photo.jpg") && !nodes.count("/sdata/photo.jpg"), "/sdata deletion must use internal availability when SD is absent");
+  expectIdentity("remove", "imgmgr.delete_image"); balanced();
+}
+static void metadataLock(bool sd) {
+  reset(sd); auto owner = manager(); const char* path = sd ? "/sd/photos/image.jpg" : "/photos/image.jpg";
+  auto node = add(path); ImageInfo info{};
+  check(owner.getImageInfo(path, info), "metadata lookup succeeds");
+  check(metadataUnlocked == 0 && closesUnlocked == 0, "metadata size/timestamp/close must all occur while holding FS mutex");
+  check(info.timestamp == (sd ? node->modified : 0), "SD timestamps and internal zero timestamp remain intact"); balanced();
+}
+static void listLock() {
+  reset(true); add("/sd/photos", true); add("/sd/photos/image.jpg"); auto owner = manager();
+  check(owner.listImages(IMAGE_STORAGE_SD).size() == 1, "SD fixture image is listed");
+  check(metadataUnlocked == 0 && closesUnlocked == 0, "SD directory traversal and child/parent cleanup must remain locked"); balanced();
+}
+static void failedCapacity(bool sd) {
+  reset(sd); auto owner = manager(); failStats = true; const auto stats = owner.getStorageStats(sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS);
+  check(!stats.available && !stats.totalBytes && !stats.usedBytes && !stats.freeBytes && !stats.imageCount,
+        "failed capacity query returns unavailable zero-initialized stats");
+  check(statCalls == 1 && accesses.empty(), "failed capacity query must not scan image directory"); balanced();
+}
+static void pathForms(bool sd) {
+  for (const char* path : (sd ? std::vector<const char*>{"sd/photos/image.jpg", " /sd//photos/image.jpg "} :
+                                std::vector<const char*>{"photos/image.jpg", " /photos//image.jpg "})) {
+    reset(sd); auto owner = manager(); add(sd ? "/sd/photos/image.jpg" : "/photos/image.jpg");
+    ImageInfo info{}; check(owner.getImageInfo(path, info), "existing guarded normalization handles alternate path spelling");
+    String spelling(path); check(info.fullPath == spelling && info.filename == spelling.substring(spelling.lastIndexOf('/') + 1), "metadata preserves caller-supplied spelling");
+    check(info.isOnSD == sd, "alternate spelling selects actual storage tier");
+    check(owner.deleteImage(path), "deletion uses the same tier as normalized guarded I/O"); balanced();
+  }
+}
+static void inventory(ImageStorageLocation location, const char* capture = "/photos") {
+  const bool sd = location == IMAGE_STORAGE_SD;
+  reset(true); gSettings.cameraCaptureFolder = capture; auto owner = manager();
+  const std::string folder = VFS::normalize(owner.getCaptureFolder(location)).c_str();
+  if (!nodes.count(folder)) add(folder, true);
+  const std::string join = folder + (folder == "/" ? "" : "/");
+  add(join + "z.jpg")->modified = 11;
+  add(join + "b.jpeg", false, "b.jpeg")->modified = 22;
+  add(join + "UPPER.JPG"); add(join + "text.txt"); add(join + "dir.jpg", true);
+  add(join + ".hidden.jpg")->modified = 33;
+  // The shared reader excludes malformed/non-direct backend entries. Image
+  // inventory still keeps dotfiles because it has no browser visibility policy.
+  add(join + "empty.jpg")->name = "";
+  add(join + "nested.jpg")->name = std::string(VFS::stripSdPrefix(folder.c_str()).c_str()) + "/nested/file.jpg";
+  const auto images = owner.listImages(location);
+  check(images.size() == 3 && images[0].filename == "z.jpg" && images[1].filename == "b.jpeg" && images[2].filename == ".hidden.jpg", "only direct lowercase JPEG files retain backend order and dotfile visibility; virtual mounts/directories excluded");
+  check(images[0].fullPath == String((join + "z.jpg").c_str()) && images[1].fullPath == String((join + "b.jpeg").c_str()), "listed paths use canonical VFS folder join");
+  check(images[0].size == 12 && images[1].size == 12 && images[0].isOnSD == sd && images[0].location == (sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS), "listing retains image metadata and tier");
+  check(images[0].timestamp == (sd ? 11 : 0) && images[1].timestamp == (sd ? 22 : 0) && images[2].timestamp == (sd ? 33 : 0), "only SD exposes native timestamps");
+  if (!sd) check(mtimeCalls == 0, "internal listing avoids unnecessary backend timestamp queries");
+  expectIdentity("open", sd ? "imgmgr.list_sd" : "imgmgr.list_images");
+  check(metadataUnlocked == 0 && closesUnlocked == 0, "list operations and cleanup keep filesystem lock"); balanced();
+}
+static void availability(bool sd) {
+  reset(!sd, sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+  const char* path = sd ? "/sd/photos/no.jpg" : "/photos/no.jpg"; ImageInfo info{};
+  // A newly mounted backend must not silently bypass the manager snapshot.
+  sdMounted = filesystemReady = true;
+  check(!owner.ensureCaptureFolder(location) && owner.listImages(location).empty() && !owner.getImageInfo(path, info) && !owner.deleteImage(path), "unavailable manager tier rejects inventory operations");
+  check(!owner.getStorageStats(location).available && accesses.empty() && !statCalls, "unavailable tier avoids I/O and capacity queries"); balanced();
+}
+static void ensureFolder(bool sd, unsigned failure) {
+  reset(sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+  const std::string folder = sd ? "/sd/photos" : "/photos"; nodes.erase(folder);
+  if (failure == 1) failMkdir = true;
+  if (failure == 2) denied.insert(folder);
+  check(owner.ensureCaptureFolder(location) == (failure == 0), "capture folder reports mkdir/permission outcome");
+  expectIdentity("mkdir", sd ? "imgmgr.ensure_capture_folder.sd" : "imgmgr.ensure_capture_folder");
+  check(takes == 1 && gives == 1, "capture-folder exists/create stays in one filesystem lock scope");
+  if (!failure) { accesses.clear(); check(owner.ensureCaptureFolder(location), "existing capture folder succeeds"); check(accesses.size() == 1 && accesses[0].operation == "exists", "existing folder is not recreated"); }
+  balanced();
+}
+static void failures(bool sd, unsigned failure) {
+  reset(sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+  const std::string folder = sd ? "/sd/photos" : "/photos", path = folder + "/photo.jpg";
+  if (!nodes.count(folder)) add(folder, true); add(path);
+  if (failure == 0) failOpen = true;
+  if (failure == 1) { denied.insert(folder); denied.insert(path); }
+  if (failure == 2) { nodes[folder]->directory = false; nodes.erase(path); }
+  check(owner.listImages(location).empty(), "missing/denied/non-directory list gives empty inventory");
+  ImageInfo info{}; check(!owner.getImageInfo(path.c_str(), info), "failed guarded metadata open reports false");
+  if (failure == 0) failRemove = true;
+  check(!owner.deleteImage(path.c_str()), "delete failure/denial/missing path reports false"); balanced();
+  check(!metadataUnlocked && !closesUnlocked, "failure cleanup retains lock for all File activity");
+}
+static void capacitySuccess(ImageStorageLocation location) {
+  reset(true); auto owner = manager(); const bool sd = location == IMAGE_STORAGE_SD;
+  const std::string folder = sd ? "/sd/photos" : "/photos";
+  if (!nodes.count(folder)) add(folder, true); add(folder + "/one.jpg"); add(folder + "/skip.txt");
+  const auto stats = owner.getStorageStats(location);
+  check(stats.available && stats.totalBytes == 4096 && stats.usedBytes == 1024 && stats.freeBytes == 3072 && stats.imageCount == 1, "fresh successful stats include selected inventory count");
+  check(statCalls == 1 && lastStatType == (sd ? VFS::SDCARD : VFS::INTERNAL), "BOTH keeps legacy internal inventory/capacity semantics"); balanced();
+}
+static void nested(bool sd) {
+  reset(sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+  const char* path = sd ? "/sd/photos/test.jpg" : "/photos/test.jpg";
+  { FsLockGuard caller("outer caller");
+    check(owner.ensureCaptureFolder(location), "nested ensure succeeds"); add(path);
+    check(owner.listImages(location).size() == 1, "nested directory scan succeeds");
+    ImageInfo info{}; check(owner.getImageInfo(path, info), "nested metadata succeeds");
+    check(owner.getStorageStats(location).available && owner.deleteImage(path), "nested stats/delete succeed");
+    check(heldFs && takes == 1 && gives == 0, "nested methods retain caller's original lock ownership"); balanced(true);
+  }
+  balanced();
+}
+static void retention(bool sd, unsigned failure) {
+  reset(sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+  const std::string folder = sd ? "/sd/photos" : "/photos";
+  if (!nodes.count(folder)) add(folder, true);
+  const std::string alpha = folder + "/a.jpg", omega = folder + "/z.jpg";
+  add(alpha)->modified = 200; add(omega)->modified = 100;
+  const std::string first = sd ? omega : alpha, second = sd ? alpha : omega;
+  if (failure == 1) failRemove = true;
+  if (failure == 2) denied.insert(first);
+  check(owner.deleteOldestImages(failure == 2 ? 2 : 1, location) == (failure != 1),
+        "retention preserves success/failed-removal/partial-success outcomes");
+  if (failure == 0) check(!nodes.count(first) && nodes.count(second),
+        "SD selects oldest timestamp; internal selects earliest filename");
+  if (failure == 1) check(nodes.count(first) && nodes.count(second), "failed retention removal leaves both files");
+  if (failure == 2) check(nodes.count(first) && !nodes.count(second), "retention continues after one denied removal");
+  check(!metadataUnlocked && !closesUnlocked, "retention uses locked shared inventory"); balanced();
+}
+static void imageRead(bool sd) {
+  reset(sd); auto owner = manager(); const char* path = sd ? "/sd/photos/data.jpg" : "/photos/data.jpg";
+  auto node = add(path); node->size = node->bytes.size(); size_t count = 0;
+  uint8_t* bytes = owner.getImage(path, &count);
+  check(bytes && count == 4 && bytes[0] == 0xff && bytes[1] == 0xd8, "image reader retains JPEG/PSRAM path and storage routing"); ps_free(bytes);
+  check(!metadataUnlocked && !closesUnlocked, "reader metadata/data/close keep existing locking"); balanced();
+}
+int main(int argc, char** argv) {
+  const std::string selected = argc > 1 ? argv[1] : "all";
+  unsigned failuresCount = 0, scenarios = 0;
+  const auto run = [&](const std::string& label, const std::function<void()>& test) {
+    ++scenarios;
+    try { test(); std::printf("PASS %s\n", label.c_str()); }
+    catch (const std::exception& error) { ++failuresCount; std::printf("FAIL %s: %s\n", label.c_str(), error.what()); }
+  };
+  if (selected == "all" || selected == "routing") {
+    run("internal /sdata metadata with SD absent", routeMetadata);
+    run("internal /sdata delete with SD absent", routeDelete);
+  }
+  if (selected == "all" || selected == "locking") {
+    run("SD directory lifetime lock", listLock);
+    for (bool sd : {false, true}) run(std::string(sd ? "SD" : "internal") + " metadata lifetime lock", [=] { metadataLock(sd); });
+  }
+  if (selected == "all" || selected == "capacity") {
+    for (bool sd : {false, true}) run(std::string(sd ? "SD" : "internal") + " failed capacity", [=] { failedCapacity(sd); });
+  }
+  if (selected == "all") {
+    for (bool sd : {false, true}) {
+      const std::string tier = sd ? "SD " : "internal ";
+      run(tier + "alternate path spellings and metadata compatibility", [=] { pathForms(sd); });
+      run(tier + "unavailable manager gate", [=] { availability(sd); });
+      run(tier + "nested filesystem guards", [=] { nested(sd); });
+      run(tier + "JPEG buffer read compatibility", [=] { imageRead(sd); });
+      for (unsigned fault = 0; fault < 3; ++fault) {
+        run(tier + "retention outcome " + std::to_string(fault), [=] { retention(sd, fault); });
+        run(tier + "ensure folder outcome " + std::to_string(fault), [=] { ensureFolder(sd, fault); });
+        run(tier + "failed list/metadata/delete " + std::to_string(fault), [=] { failures(sd, fault); });
+      }
+    }
+    for (auto location : {IMAGE_STORAGE_LITTLEFS, IMAGE_STORAGE_SD, IMAGE_STORAGE_BOTH}) {
+      run("ordered JPEG inventory tier " + std::to_string(location), [=] { inventory(location); });
+      run("canonical root inventory tier " + std::to_string(location), [=] { inventory(location, "/"); });
+      run("successful capacity/count tier " + std::to_string(location), [=] { capacitySuccess(location); });
+    }
+  }
+  std::printf("ImageManager production storage: %u scenarios, %zu assertions, %u failed\n", scenarios, checks, failuresCount);
+  return failuresCount ? 1 : 0;
+}

@@ -9,8 +9,8 @@ ESP-IDF v5.5.5, commit b774170ff46c393eeb5e495ea37936038d3f4f4f
 Compilers: GCC 14.2.0, esp-14.2.0_20260121, Apple Silicon host
 Python 3.12.14; CMake 4.4.3; Ninja 1.13.2
 Identification tool: esptool 5.4.0 (separate tools-env)
-SDK/toolchains and experiments: /private/tmp/hw1-p4-investigation-20260927
-Activate in bash: source /private/tmp/hw1-p4-investigation-20260927/activate-idf.sh
+SDK/toolchains and experiments: /path/to/private-investigation
+Activate in bash: source /path/to/private-investigation/activate-idf.sh
 These /private/tmp paths are disposable and are not guaranteed to survive OS cleanup.
 
 Device queries:

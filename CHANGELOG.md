@@ -8,6 +8,51 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.97.1] - 2026-10-09
+
+Checkpoint of the configuration and module-ownership work. Boards remain
+general-purpose, with selectable features and shared editable build defaults.
+
+### Added
+- Saved build configurations and a terminal setup wizard that share discovery,
+  validation, persistence and the existing board build workflow. Build reports
+  show compiler-resolved choices, image size and partition headroom.
+- Contributor guidance defining configuration ownership and module boundaries,
+  plus focused host tests and hardware verification records.
+
+### Changed
+- Give command registration, network time synchronization and saved Wi-Fi
+  entries their own implementations and smaller public interfaces.
+- Share sensor snapshots, I2C lifecycle requests, display hardware control,
+  physical input state, icon lookup and CPU-frequency changes through their
+  existing owners.
+- Consolidate directory iteration, storage statistics, checked writes and
+  upload cleanup while retaining caller authorization and filesystem guards.
+- Route OLED, web and G2 controls through shared operations for Bluetooth,
+  power, sensors and logging. Keep connection state and asynchronous outcomes
+  with the owning service.
+- Share Map live-recording startup and stop behavior. A Map recording owns a
+  specific logger session; stopping it preserves an unrelated replacement.
+
+### Fixed
+- Correct APDS9960 gesture handling and sensor start/restart outcomes.
+- Reopen the G2 menu through the existing teardown/bootstrap sequence, and
+  preserve acknowledgement and failure handling for display controls.
+- Escape all JSON control bytes in the locally patched ArduinoJson formatter.
+- Remove personal workstation references from published source and test notes.
+
+### Verification scope
+- Checkpoint verification passed 243 host/Python tests across the firmware,
+  updater, web UI, OTA and model suites. The firmware host suite used ASan/UBSan
+  and included browser tests.
+- Rebuilt `qtpy-maps-test`, `qtpy-logging-test` and `xiao-default`; all three
+  binaries embed `0.99.97.1` and fit their existing application partitions.
+- Hardware records distinguish observed results from host tests and builds.
+  The latest Map recording changes have host/build coverage; they have not
+  been flashed for physical qualification.
+- Broader Map buffer concurrency, additional R1 firmware compatibility, SD
+  testing and memory slimming remain outside this checkpoint.
+
 ## [0.99.96.1] - 2026-10-07
 
 The ESP32-C6 radio companion on the P4X-EYE is now a managed subsystem with

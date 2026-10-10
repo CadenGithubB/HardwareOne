@@ -1,9 +1,9 @@
 === p4 USB identification ===
 esptool v5.4.0
-Serial port /dev/cu.usbmodem2101:
+Serial port /dev/cu.usbmodemP4:
 Connecting...
 Detecting chip type... ESP32-P4
-Connected to ESP32-P4 on /dev/cu.usbmodem2101:
+Connected to ESP32-P4 on /dev/cu.usbmodemP4:
 Chip type:          ESP32-P4 (revision v3.2)
 Features:           Dual Core + LP Core, 400MHz
 Crystal frequency:  40MHz
@@ -30,10 +30,10 @@ I (1623) app_init: ESP-IDF:          v5.5.2-712-g4297f22f8ab-dirty
 I (2861) ov2710: Detected Camera sensor PID=0x2710
 === xiao USB identification ===
 esptool v5.4.0
-Serial port /dev/cu.usbmodem1101:
+Serial port /dev/cu.usbmodemS3:
 Connecting...
 Detecting chip type... ESP32-S3
-Connected to ESP32-S3 on /dev/cu.usbmodem1101:
+Connected to ESP32-S3 on /dev/cu.usbmodemS3:
 Chip type:          ESP32-S3 (QFN56) (revision v0.2)
 Features:           Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 8MB (AP_3v3)
 Crystal frequency:  40MHz

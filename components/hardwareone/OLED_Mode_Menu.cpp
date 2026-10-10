@@ -5,7 +5,6 @@
 #include "OLED_Utils.h"
 #include "HAL_Input.h"
 #include "System_Battery.h"
-#include "System_Icons.h"
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 #include <esp_app_desc.h>
@@ -29,8 +28,6 @@ extern const int oledSensorMenuItemCount;
 // External functions
 extern float getBatteryPercentage();
 extern char getBatteryIcon();
-extern void drawIcon(DisplayDriver* display, const char* iconName, int x, int y, uint16_t color);
-extern void drawIconScaled(DisplayDriver* display, const char* iconName, int x, int y, uint16_t color, float scale);
 extern void enterUnavailablePage(const String& title, const String& reason);
 extern void resetOLEDMenu();  // defined in OLED_Utils.cpp; called by the launcher onEnter hook
 

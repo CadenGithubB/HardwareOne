@@ -345,9 +345,8 @@ static FilesStorageSnapshot getFilesStorageSnapshot(bool force) {
   next.internalTotal = internal.totalBytes;
   next.internalFree = internal.freeBytes;
 
-  // Query SD even when unmounted. A fresh/cache miss returns false without
-  // modifying the local zero snapshot; a mounted but unreadable FAT volume can
-  // still surface as 0/0 and is omitted just as it was before this migration.
+  // Query SD even when unmounted. An unavailable or unreadable tier returns
+  // false on a fresh read/cache miss, leaving the local zero snapshot untouched.
   VFS::CapacitySnapshot sd = {};
   const bool sdStatsOk =
       VFS::getStatsSnapshot(VFS::SDCARD, sd, maxAgeMs);

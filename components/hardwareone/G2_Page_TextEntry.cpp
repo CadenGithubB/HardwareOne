@@ -28,7 +28,7 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
-#include "System_G2_Protocol.h"  // G2TextChildSpec + geometry presets
+#include "G2_RenderTypes.h"     // G2TextChildSpec + geometry presets
 #include "System_Debug.h"
 
 #include <stdio.h>

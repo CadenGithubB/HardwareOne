@@ -18,13 +18,14 @@ static void displayThermalVisual() {
     return;
   }
 
-  if (!lockThermalCache(pdMS_TO_TICKS(10))) {
+  auto frame = thermalSnapshotBuffer(THERMAL_RAW_FRAME_PIXELS);
+  ThermalCache reading;
+  if (!frame || !thermalFrameSnapshot(reading, frame.get(), THERMAL_RAW_FRAME_PIXELS, false, 10)) {
     oledDisplay->println("Thermal: Busy");
     return;
   }
 
-  if (!gThermalCache.thermalDataValid || !gThermalCache.thermalFrame) {
-    unlockThermalCache();
+  if (!reading.thermalDataValid || !reading.thermalFrameAvailable) {
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Waiting for");
     oledDisplay->println("thermal data...");
@@ -32,13 +33,13 @@ static void displayThermalVisual() {
   }
 
   // Get thermal data from cache
-  float minTemp = gThermalCache.thermalMinTemp;
-  float maxTemp = gThermalCache.thermalMaxTemp;
-  float avgTemp = gThermalCache.thermalAvgTemp;
+  float minTemp = reading.thermalMinTemp;
+  float maxTemp = reading.thermalMaxTemp;
+  float avgTemp = reading.thermalAvgTemp;
 
   // Adjust dimensions based on rotation setting
-  const int thermalWidth = (gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 24 : 32;
-  const int thermalHeight = (gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 32 : 24;
+  const int thermalWidth = reading.thermalFrameWidth;
+  const int thermalHeight = reading.thermalFrameHeight;
   const float scale = (gSettings.oledThermalScale > 0.0) ? gSettings.oledThermalScale : 2.5;
   const int imageWidth = (int)(thermalWidth * scale);
   const int textStartX = imageWidth + 2;
@@ -51,7 +52,7 @@ static void displayThermalVisual() {
   for (int ty = 0; ty < thermalHeight; ty++) {
     for (int tx = 0; tx < thermalWidth; tx++) {
       int pixelIndex = ty * thermalWidth + tx;
-      float temp = gThermalCache.thermalFrame[pixelIndex] / 100.0f;
+      float temp = frame.get()[pixelIndex] / 100.0f;
 
       // Map temperature to brightness (0-1)
       float normalized = (temp - minTemp) / tempRange;
@@ -81,8 +82,6 @@ static void displayThermalVisual() {
       }
     }
   }
-
-  unlockThermalCache();
 
   // Draw temperature data on the right side
   oledDisplay->setTextSize(1);

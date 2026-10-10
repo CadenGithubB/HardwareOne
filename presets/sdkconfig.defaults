@@ -1,0 +1,4 @@
+# Optional SDK features enabled by the shared software preset.
+# Named configurations may override these boolean choices. Keep hardware,
+# backend selection, memory geometry and provisioning in their existing files.
+CONFIG_BT_ENABLED=y

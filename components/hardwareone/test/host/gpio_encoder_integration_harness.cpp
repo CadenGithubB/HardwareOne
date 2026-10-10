@@ -1,10 +1,12 @@
 #include "Input_GPIOEncoder.cpp"
+#include "input_owner_under_test.h"
 #include <algorithm>
 #include <string.h>
 
 namespace fixture {
 uint32_t now = 0;
-bool locked = false;
+bool locked = false, cacheBusy = false, failTaskCreate = false, busyAfterTaskCreate = false;
+int lockDepth = 0;
 int levels[55], reads[55], modes[55], resets[55];
 void (*interrupts[55])() = {};
 int taskCreates = 0, abstractionInits = 0;
@@ -18,12 +20,17 @@ static void sample(uint32_t now) {
   catch (const fixture::SampleComplete&) {}
   assert(!fixture::locked);
 }
-static uint32_t consumePresses() {
-  const uint32_t actions = gInputCache.buttonPressedAccum;
-  gInputCache.buttonPressedAccum = 0;
-  return actions;
+static InputCache reading() {
+  InputCache result;
+  assert(inputCacheSnapshot(result));
+  return result;
 }
-static uint32_t held() { return ~gInputCache.buttons; }
+static uint32_t consumePresses() {
+  InputCache result;
+  if (!inputConsumeSnapshot(result)) return 0;
+  return result.buttonPressedAccum;
+}
+static uint32_t held() { return ~reading().buttons; }
 
 static void turnPositive() {
   // Startup phase is 11; 11 -> 10 -> 00 -> 01 -> 11 is one positive detent.
@@ -44,7 +51,7 @@ int main() {
   (void)x; (void)y; (void)start;
   std::fill(fixture::levels, fixture::levels + 55, HIGH);
   assert(inputStartInternal());
-  assert(gInputRunning && gInputConnected && gInputCache.dataValid);
+  assert(gInputRunning && gInputConnected && reading().dataValid);
   assert(fixture::taskCreates == 1 && fixture::abstractionInits == 1);
   assert(inputStartInternal());
   assert(fixture::taskCreates == 1 && fixture::abstractionInits == 1);
@@ -66,10 +73,10 @@ int main() {
   fixture::levels[3] = LOW; sample(35);
   sample(55);
   assert(held() == x && consumePresses() == x);
-  const uint32_t pressedSeq = gInputCache.seq;
+  const uint32_t pressedSeq = reading().seq;
   sample(60);
   sample(200);
-  assert(held() == x && consumePresses() == 0 && gInputCache.seq == pressedSeq);
+  assert(held() == x && consumePresses() == 0 && reading().seq == pressedSeq);
 
   // Debounced release changes held state but never latches a new press.
   fixture::levels[3] = HIGH; sample(205); sample(225);
@@ -106,13 +113,19 @@ int main() {
   assert(gpioEncoderConsumeOneDetent() == 1);
   assert(!gpioEncoderHasPendingDetents() && gpioEncoderConsumeOneDetent() == 0);
   turnPositive(); sample(1510); // Leave a pending turn to be cleared on stop.
+  // A cache timeout while closing leaves the running hardware intact; retry
+  // closes it without raw cache writes or a falsely successful stop.
+  fixture::cacheBusy = true;
   gpioEncoderStop();
-  assert(!gInputRunning && !gInputConnected && !gInputCache.dataValid);
+  assert(gInputRunning && gInputConnected && fixture::interrupts[48]);
+  fixture::cacheBusy = false;
+  gpioEncoderStop();
+  assert(!gInputRunning && !gInputConnected && !reading().dataValid);
   assert(held() == 0 && consumePresses() == 0 && !gpioEncoderHasPendingDetents());
   assert(fixture::resets[48] == 1 && fixture::resets[47] == 1 && fixture::resets[2] == 1);
   assert(!fixture::interrupts[48] && !fixture::interrupts[47]);
   sample(1600);
-  assert(fixture::lastDelay == 100 && !gInputCache.dataValid);
+  assert(fixture::lastDelay == 100 && !reading().dataValid);
 
   // Opening while a key is held must wait for a full release and new press.
   fixture::levels[3] = LOW;
@@ -140,4 +153,21 @@ int main() {
     assert(fixture::modes[pin] == 0 && fixture::reads[pin] == 0 && fixture::resets[pin] == 0);
 #endif
   }
+  // Task creation / initial publication failures always unwind IRQs and pins,
+  // even when the shared cache becomes contended after initial admission.
+  gInputTaskHandle = nullptr;
+  fixture::busyAfterTaskCreate = true;
+  fixture::failTaskCreate = true;
+  assert(!inputStartInternal());
+  assert(!gInputRunning && !gInputConnected);
+  assert(!fixture::interrupts[48] && !fixture::interrupts[47]);
+  fixture::cacheBusy = false;
+  fixture::failTaskCreate = false;
+  assert(!inputStartInternal());
+  assert(!gInputRunning && !gInputConnected);
+  assert(!fixture::interrupts[48] && !fixture::interrupts[47]);
+  fixture::cacheBusy = false;
+  fixture::busyAfterTaskCreate = false;
+  assert(!reading().dataValid && fixture::lockDepth == 0);
+
 }

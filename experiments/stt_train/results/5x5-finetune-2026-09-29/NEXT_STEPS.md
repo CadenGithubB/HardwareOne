@@ -20,11 +20,11 @@ weights and halves the LR after 2 worse evals in a row.
 
 ## LM decoder (built 2026-09-29 night)
 - Host: experiments/stt_train/lm/ (build_lm.py, tune.py, hw1lm.py reference, README.md). Shipped LM:
-  /Volumes/USB2/stt/work/lm/meeting.lm (2.5 MB; alpha .45 beta 2 beam 32). Baseline model: 5-9% rel WER gain.
+  /path/to/stt-data/work/lm/meeting.lm (2.5 MB; alpha .45 beta 2 beam 32). Baseline model: 5-9% rel WER gain.
 - Firmware: components/hardwareone/stt/stt_lm.{h,cpp}, ENABLE_STT_LM, loads /STT Models/meeting.lm (+custom_words.txt);
   falls back to greedy if absent. Host tests stt_lm_tests + stt_lm_parity pass.
 - Morning: retune for the new checkpoint:
-  nice -n 15 $P lm/tune.py --ckpt /Volumes/USB2/stt/work/run1/best --lm /Volumes/USB2/stt/work/lm/meeting.lm --out-lm /Volumes/USB2/stt/work/lm/meeting-run1.lm
+  nice -n 15 $P lm/tune.py --ckpt /path/to/stt-data/work/run1/best --lm /path/to/stt-data/work/lm/meeting.lm --out-lm /path/to/stt-data/work/lm/meeting-run1.lm
 - Unresolved: STTLocalStats has no "LM used" field; measure decode time on the P4; LittleFS space (9.86 MB) for 5.5 MB model + 2.5 MB LM.
 
 ## Other pending
@@ -40,7 +40,7 @@ weights and halves the LR after 2 worse evals in a row.
   lower augmentation strength on the clean share, or add other clean/varied corpora; resume from run2/best.
 
 ## 2026-09-29 morning: deployed to the cased P4 (MAC 02:48:57:31:04:73)
-- Full flash backup before changes: /Volumes/USB2/p4-backups/p4-024857310473-20260929-0633-full.bin
+- Full flash backup before changes: /path/to/private-backups/p4-024857310473-20260929-0633-full.bin
 - Firmware: headless (web UI off to fit the LM decoder; features private/features-p4-noweb.h), LM decoder,
   new model identity (run2 step 7484), G2 fix: lens DISPLAY_OFF no longer cancels a running transcription.
 - LittleFS: /STT Models/quartznet5x5.p4.stt (run2) + meeting.lm (unk_log10 -5, hotword 3; -7.5 glued OOV words).

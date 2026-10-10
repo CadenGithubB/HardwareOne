@@ -22,7 +22,6 @@
 #include "System_Debug.h"
 #include "G2_HijackCmd.h"             // g2SubmitHijackCommand — Group A migration
 #include <Arduino.h>
-#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -160,29 +159,7 @@ static void onCameraSettingDone(bool ok, const char* result,
               (result && result[0]) ? result : "no result");
   }
 
-  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
-  if (!spec) {
-    DEBUG_G2F("[G2] Camera settings: redraw allocation failed");
-    return;
-  }
-  spec->render = redrawCurrentCameraSettings;
-  LensUiJob* job = new (std::nothrow) LensUiJob{};
-  if (!job) {
-    delete spec;
-    DEBUG_G2F("[G2] Camera settings: redraw job allocation failed");
-    return;
-  }
-  job->kind           = LensJobKind::Redraw;
-  job->submitMenuGen  = cookie.menuGen;
-  job->cmdSeq         = cookie.seq;
-  job->targetPage     = cookie.targetPage;
-  job->targetNetSub   = cookie.targetNetSub;
-  job->payload.redraw = spec;
-  if (!g2EnqueueLensJob(job)) {
-    delete spec;
-    delete job;
-    DEBUG_G2F("[G2] Camera settings: redraw queue full");
-  }
+  (void)g2EnqueueRedraw(cookie, redrawCurrentCameraSettings, "Camera settings");
 }
 
 static bool applyByCmd(const char* cmdName, int v) {

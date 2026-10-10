@@ -11,7 +11,7 @@ Scans (flat, no recursion into subdirs):
 import os
 from pathlib import Path
 
-REPO_ROOT = Path("/Users/morgan/esp/hardwareone-idf")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Flat scan dirs (no recursion) — avoids picking up third-party libs
 SCAN_DIRS = [

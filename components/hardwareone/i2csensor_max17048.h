@@ -5,7 +5,7 @@
 // Lifecycle: this is NOT a user-toggleable sensor — it's the battery backend
 // for boards that select BATTERY_BACKEND_FUEL_GAUGE. System_Battery.cpp owns
 // the polling cadence (10s tick from the main loop) and writes results into
-// gBatteryState. No CLI start/stop, no I2CSensorEntry, no task.
+// the battery snapshot. No CLI start/stop, no I2CSensorEntry, no task.
 //
 // Why no task: a single read pass (~5ms of I2C) at 0.1 Hz can ride the
 // existing main-loop tick without spinning up a dedicated task. Saves ~2 KB
@@ -22,7 +22,7 @@
 
 // Snapshot of one MAX17048 read pass. All fields are valid only when
 // fuelGaugeRead() returned true. Owned by the caller (System_Battery
-// allocates on the stack and copies relevant bits into gBatteryState).
+// allocates on the stack and copies relevant bits into the battery snapshot).
 struct FuelGaugeReading {
   float voltage;          // Cell voltage in volts (typ. 3.0 - 4.2 for LiPo)
   float socPct;           // State of charge in percent (0.0 - 100.0)
@@ -38,7 +38,7 @@ struct FuelGaugeReading {
 bool fuelGaugeProbe();
 
 // Read VCELL/SOC/CRATE/VERSION into `out`. Returns false on I2C error.
-// Does NOT update gBatteryState — that's System_Battery's job. Safe to call
+// Does NOT update the battery snapshot — that's System_Battery's job. Safe to call
 // before fuelGaugeProbe() (will fail gracefully if the chip isn't there).
 bool fuelGaugeRead(FuelGaugeReading* out);
 

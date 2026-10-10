@@ -3,7 +3,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"             // oledAuthContext() — shared OLED identity builder
-#include "OLED_UI.h"                // oledToastShow() — transfer confirmations (thread-safe, self-dirties)
+#include "OLED_UI.h"                // shared icon drawing and transfer confirmation toasts
 #include "System_BuildConfig.h"
 
 #if ENABLE_OLED_DISPLAY
@@ -32,8 +32,7 @@
 #include "System_ESPNow_FsList.h"   // fsListSendRequest / fsGetSendRequest / fsListCancel
 #include "System_BondedPeer.h"      // BondedPeer::isPaired, peerMacBytes
 #include "System_CommandTypes.h"    // ExecReq::DeferredFn (submitDeferredToCmdExec)
-// Externs into System_ESPNow.cpp (avoid including the heavy System_ESPNow.h here,
-// which redeclares drawIcon and clashes with this file's local extern).
+// Narrow interfaces into System_ESPNow.cpp keep its broader header out of this screen.
 //  - sendFileToMac: pump a local file to a peer (multi-second).
 //  - submitDeferredToCmdExec: run a job on cmd_exec_task so the send never blocks
 //    the OLED render/input task.
@@ -76,9 +75,6 @@ extern FileManager* gOledFileManager;
 extern bool oledFileBrowserNeedsInit;
 extern bool oledMenuBack();
 
-// Icon functions (from System_Icons.cpp)
-extern void drawIcon(Adafruit_SSD1306* display, const char* iconName, int x, int y, uint16_t color);
-extern const char* getIconNameForExtension(const char* extension);
 extern String formatFileSize(size_t bytes);
 
 // ============================================================================
@@ -1190,22 +1186,24 @@ void displayFileBrowserRendered() {
     if (selectedItemIdx >= 0 && selectedItemIdx < FILE_MANAGER_PAGE_SIZE) {
       FileEntry& selectedEntry = fileBrowserRenderData.items[selectedItemIdx];
       
-      // Draw icon (centered in content area, not touching header)
-      const int availableIconHeight = OLED_CONTENT_HEIGHT - 10;
+      // Center the icon and its one-line label together between header/footer.
+      const int infoHeight = 8;
+      const int infoGap = 2;
+      const int groupHeight = iconSize + infoGap + infoHeight;
       int iconX = iconAreaX + (128 - iconAreaX - iconSize) / 2;
-      int iconY = OLED_CONTENT_START_Y + (availableIconHeight - iconSize - 18) / 2;  // Relative to content area
+      int iconY = OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - groupHeight) / 2;
       
       if (selectedEntry.isFolder) {
-        drawIcon(oledDisplay, "folder", iconX, iconY, DISPLAY_COLOR_WHITE);
+        oledDrawIcon(oledDisplay, "folder", iconX, iconY, DISPLAY_COLOR_WHITE);
       } else {
         const char* ext = strrchr(selectedEntry.name, '.');
         const char* iconName = getIconNameForExtension(ext ? ext + 1 : "");
-        drawIcon(oledDisplay, iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
+        oledDrawIcon(oledDisplay, iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
       }
       
       // Draw file info below icon
-      int textY = iconY + iconSize + 2;
-      if (textY + 16 <= OLED_CONTENT_HEIGHT) {
+      int textY = iconY + iconSize + infoGap;
+      if (textY + infoHeight <= OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT) {
         oledDisplay->setTextSize(1);
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
         

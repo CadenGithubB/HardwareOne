@@ -13,7 +13,6 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <new>                  // std::nothrow — RedrawSpec / LensUiJob
 
 #include "G2_Glasses.h"        // g2ShowListPage / g2Set/GetHijackPage / g2BumpMenuGen
 #include "G2_HijackCmd.h"      // G2CmdCookie / g2SubmitHijackCommand / g2HijackAuthContext
@@ -242,35 +241,6 @@ static void setResultMessage(bool failed, const char* result) {
   snprintf(gResultMessage, sizeof(gResultMessage), "%.108s", msg);
 }
 
-// Marshal cmd_exec completion back to the lens applier. Redraw jobs are
-// menu-generation guarded, so navigating away while a command is in flight can
-// never snap the wearer back to a stale Users page.
-static void enqueueResultFromCallback(const G2CmdCookie& cookie) {
-  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
-  if (!spec) {
-    DEBUG_G2F("[G2-USERS] result RedrawSpec alloc failed");
-    return;
-  }
-  spec->render = showResultMenu;
-  LensUiJob* job = new (std::nothrow) LensUiJob{};
-  if (!job) {
-    DEBUG_G2F("[G2-USERS] result LensUiJob alloc failed");
-    delete spec;
-    return;
-  }
-  job->kind           = LensJobKind::Redraw;
-  job->submitMenuGen  = cookie.menuGen;
-  job->cmdSeq         = cookie.seq;
-  job->targetPage     = cookie.targetPage;
-  job->targetNetSub   = cookie.targetNetSub;
-  job->payload.redraw = spec;
-  if (!g2EnqueueLensJob(job)) {
-    DEBUG_G2F("[G2-USERS] result lens job enqueue failed");
-    delete spec;
-    delete job;
-  }
-}
-
 // Completion runs on cmd_exec_task and never touches the lens directly.
 static void onUserCmdDone(bool ok, const char* result,
                           const G2CmdCookie& cookie, void* userData) {
@@ -284,7 +254,7 @@ static void onUserCmdDone(bool ok, const char* result,
   // Publish only after the message is complete. If the lens redraw allocation
   // or enqueue fails, a tap on the pending row can safely recover the result.
   __atomic_store_n(&gResultReadyToken, token, __ATOMIC_RELEASE);
-  enqueueResultFromCallback(cookie);
+  (void)g2EnqueueRedraw(cookie, showResultMenu, "Users result");
 }
 
 static bool submitUserCmd(const char* line) {

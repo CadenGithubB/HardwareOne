@@ -6,6 +6,7 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Arduino.h>
+#include <Adafruit_GFX.h>
 #include "HAL_Display.h"
 
 // ============================================================================
@@ -265,6 +266,12 @@ void oledDrawIcon(int x, int y, OledUIIcon icon);
 
 // Draw an embedded icon by name, scaled to targetSize pixels (e.g. 12, 16, 32)
 void oledDrawIcon(int x, int y, const char* iconName, int targetSize);
+
+// Draw a named 32x32 monochrome asset on a caller's canvas. Half-size scaling
+// preserves thin lines; other scales use nearest-neighbor sampling. Returns
+// false for an invalid target/scale or unavailable bitmap. Does not flush.
+bool oledDrawIcon(Adafruit_GFX* display, const char* name, int x, int y,
+                  uint16_t color, float scale = 1.0f);
 
 // Draw vertical level bars (for volume, signal strength, etc.)
 void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight);

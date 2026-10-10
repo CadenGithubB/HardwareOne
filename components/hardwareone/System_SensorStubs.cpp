@@ -20,7 +20,6 @@ size_t gWebMirrorCap = 0;
 
 #if !ENABLE_THERMAL_SENSOR
 // Thermal stub variables (global definitions)
-ThermalCache gThermalCache;
 bool gThermalRunning = false;
 bool gThermalConnected = false;
 unsigned long gThermalLastStopTime = 0;
@@ -33,7 +32,6 @@ const size_t thermalCommandsCount = 0;
 
 #if !ENABLE_TOF_SENSOR
 // ToF stub variables (global definitions)
-TofCache gTofCache;
 bool gTofRunning = false;
 bool gTofConnected = false;
 uint32_t gTofLastStopTime = 0;
@@ -46,7 +44,6 @@ const size_t tofCommandsCount = 0;
 
 #if !ENABLE_IMU_SENSOR
 // IMU stub variables (global definitions)
-ImuCache gImuCache;
 bool gImuRunning = false;
 bool gImuConnected = false;
 unsigned long gImuLastStopTime = 0;
@@ -62,11 +59,9 @@ void imuUpdateActions() {
 
 #if !ENABLE_GAMEPAD_SENSOR
 // Gamepad stub variables. Only the symbols NOT supplied by the ANO encoder
-// driver get stubbed here — gInputRunning/gInputConnected/gInputCache
-// are populated live by the ANO task when ENABLE_ANO_ENCODER is on, so the
-// OLED input pipeline sees real state instead of zeros.
+// or GPIO driver get stubbed here. HAL_Input owns the reading cache; the
+// selected driver owns gInputRunning/gInputConnected.
 #if !ENABLE_ANO_ENCODER && !ENABLE_GPIO_ENCODER
-InputCache gInputCache;
 bool gInputRunning = false;
 bool gInputConnected = false;
 #endif
@@ -80,7 +75,6 @@ const size_t gamepadCommandsCount = 0;
 
 #if !ENABLE_APDS_SENSOR
 // APDS stub variables (global definitions)
-APDSCache gApdsCache;
 bool gApdsConnected = false;
 bool gApdsColorRunning = false;
 bool gApdsProximityRunning = false;
@@ -93,11 +87,9 @@ const size_t apdsCommandsCount = 0;
 
 #if !ENABLE_GPS_SENSOR
 // GPS stub variables (global definitions)
-GPSCache gGpsCache;
 bool gGpsRunning = false;
 bool gGpsConnected = false;
 unsigned long gGpsLastStopTime = 0;
-Adafruit_GPS* gPA1010D = nullptr;
 TaskHandle_t gGpsTaskHandle = nullptr;
 const struct CommandEntry gpsCommands[] = {};
 const size_t gpsCommandsCount = 0;
@@ -105,7 +97,6 @@ const size_t gpsCommandsCount = 0;
 
 #if !ENABLE_PRESENCE_SENSOR
 // Presence sensor stub variables (global definitions)
-PresenceCache gPresenceCache;
 bool gPresenceRunning = false;
 bool gPresenceConnected = false;
 unsigned long gPresenceLastStopTime = 0;
@@ -129,7 +120,6 @@ bool gFmRadioRunning = false;
 bool gFmRadioConnected = false;
 unsigned long gFmRadioLastStopTime = 0;
 bool gRadioInitialized = false;
-FMRadioCache gFmRadioCache;
 TaskHandle_t gFmRadioTaskHandle = nullptr;
 const struct CommandEntry fmRadioCommands[] = {};
 const size_t fmRadioCommandsCount = 0;
@@ -138,7 +128,6 @@ const size_t fmRadioCommandsCount = 0;
 #if !ENABLE_RTC_SENSOR
 // RTC stub variables (global definitions)
 // Types are defined in System_SensorStubs.h when disabled
-RTCCache gRtcCache = {nullptr, {0, 0, 0, 0, 0, 0, 0}, 0.0f, false, 0};
 bool gRtcRunning = false;
 bool gRtcConnected = false;
 unsigned long gRtcLastStopTime = 0;
@@ -196,8 +185,6 @@ const size_t bluetoothCommandsCount = 0;
 
 #if !ENABLE_WIFI
 // WiFi stub variables (global definitions)
-WifiNetwork* gWifiNetworks = nullptr;
-int gWifiNetworkCount = 0;
 bool gSkipNTPInWifiConnect = false;
 const struct CommandEntry wifiCommands[] = {};
 const size_t wifiCommandsCount = 0;

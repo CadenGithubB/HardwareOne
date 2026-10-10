@@ -31,6 +31,8 @@
 #include "System_SetupWizard.h"
 #include "System_FeatureRegistry.h"
 #include "System_WiFi.h"
+#include "System_WiFiNetworks.h"
+#include "System_NTP.h"
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
@@ -57,7 +59,6 @@ extern const char* AUTOMATIONS_JSON_FILE;
 // Global variables
 extern uint32_t gNTPAnchorId;
 extern uint32_t gBootCounter;
-extern int gWifiNetworkCount;
 
 // Utility functions
 extern String waitForSerialInputBlocking();
@@ -519,14 +520,17 @@ void firstTimeSetupIfNeeded() {
     showOLEDMessage(("Connecting WiFi:\n" + restoreSSID).c_str(), false);
 #endif
 
-    // Save credentials to the WiFi network list and persist to flash
-    extern bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
-    extern void sortWiFiByPriority();
-    extern bool saveWiFiNetworks();
-    upsertWiFiNetwork(restoreSSID, restorePass, 1, false);
-    sortWiFiByPriority();
-    saveWiFiNetworks();
-    gSettings.wifiAutoStart = true;
+    const WifiNetworkSaveResult wifiSaved =
+        saveSetupWiFiNetwork(restoreSSID, restorePass);
+    broadcastOutput(wifiNetworkSaveResultMessage(wifiSaved));
+    if (wifiSaved != WifiNetworkSaveResult::Accepted) {
+      broadcastOutput("Returning to setup mode selection.");
+#if ENABLE_OLED_DISPLAY
+      showOLEDMessage("WiFi save failed\nReturning to\nsetup menu", true);
+#endif
+      continue;
+    }
+    broadcastOutput("WiFi network: " + restoreSSID);
 
     // Use the project's standard WiFi connection (ESP-IDF API internally)
     setupWiFi();

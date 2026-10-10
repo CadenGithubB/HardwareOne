@@ -23,6 +23,7 @@
 #include <mqtt_client.h>
 #include <new>
 #include "System_Settings.h"
+#include "System_SelfDevice.h"
 #include "System_Debug.h"
 #include "System_Command.h"
 #include "System_MemUtil.h"
@@ -35,7 +36,6 @@
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
 #include "System_MeshPeers.h"
-#include "System_SelfDevice.h"
 #include "System_ESPNow_Sensors.h"
 // Forward declarations for mesh bridge command routing
 extern const char* cmd_espnow_roomcmd(const String& argsInput);
@@ -1394,24 +1394,27 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_PRESENCE_SENSOR
-  if (gSettings.mqttPublishPresence && gPresenceRunning && gPresenceCache.dataValid) {
+  PresenceCache presence{};
+  if (gSettings.mqttPublishPresence && gPresenceRunning &&
+      presenceCacheSnapshot(presence) && presence.dataValid) {
     pos += snprintf(jsonBuf + pos, 16384 - pos, 
       ",\"presence\":{\"detected\":%s,\"motion\":%s,\"presence_raw\":%d,\"motion_raw\":%d,\"ambient_temp\":%.1f,\"object_temp\":%d}",
-      gPresenceCache.presenceDetected ? "true" : "false",
-      gPresenceCache.motionDetected ? "true" : "false",
-      gPresenceCache.presenceValue, gPresenceCache.motionValue,
-      gPresenceCache.ambientTemp, gPresenceCache.objectTemp);
+      presence.presenceDetected ? "true" : "false",
+      presence.motionDetected ? "true" : "false",
+      presence.presenceValue, presence.motionValue,
+      presence.ambientTemp, presence.objectTemp);
   }
 #endif
 
 #if ENABLE_GPS_SENSOR
-  if (gSettings.mqttPublishGPS && gGpsRunning && gGpsConnected && gPA1010D) {
-    if (gGpsCache.hasFix) {
+  GPSCache gps{};
+  if (gSettings.mqttPublishGPS && gGpsRunning && gGpsConnected && gpsCacheSnapshot(gps)) {
+    if (gps.hasFix) {
       pos += snprintf(jsonBuf + pos, 16384 - pos,
         ",\"gps\":{\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.1f,\"speed\":%.1f,\"satellites\":%d}",
-        gGpsCache.latitude, gGpsCache.longitude, gGpsCache.altitude, gGpsCache.speed, gGpsCache.satellites);
+        gps.latitude, gps.longitude, gps.altitude, gps.speed, gps.satellites);
     } else {
-      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"gps\":{\"fix\":false,\"satellites\":%d}", gGpsCache.satellites);
+      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"gps\":{\"fix\":false,\"satellites\":%d}", gps.satellites);
     }
   }
 #endif
@@ -1601,7 +1604,9 @@ const char* cmd_mqttclientenabled(const String& argsInput) {
   if (arg.length() == 0) {
     return gSettings.mqttEnabled ? "MQTT client: enabled" : "MQTT client: disabled";
   }
-  bool enable = (arg == "1" || arg.equalsIgnoreCase("on") || arg.equalsIgnoreCase("true") || arg.equalsIgnoreCase("enable"));
+  const int parsed = parseBoolArg(arg);
+  if (parsed < 0) return "Error: Use 0/1, true/false, on/off, or enable/disable";
+  const bool enable = (parsed == 1);
   setSetting(gSettings.mqttEnabled, enable);
   if (!enable) {
     return stopMQTT()
@@ -1619,7 +1624,9 @@ const char* cmd_mqttautostart(const String& argsInput) {
   if (arg.length() == 0) {
     return gSettings.mqttAutoStart ? "MQTT auto-start: ON" : "MQTT auto-start: OFF";
   }
-  setSetting(gSettings.mqttAutoStart, (bool)(arg == "1" || arg.equalsIgnoreCase("on") || arg.equalsIgnoreCase("true")));
+  const int parsed = parseBoolArg(arg);
+  if (parsed < 0) return "Error: Use 0/1, true/false, on/off, or enable/disable";
+  setSetting(gSettings.mqttAutoStart, parsed == 1);
   return gSettings.mqttAutoStart ? "MQTT auto-start enabled" : "MQTT auto-start disabled";
 }
 
@@ -1856,14 +1863,12 @@ const char* cmd_mqttsubscribe(const String& argsInput) {
     return gSettings.mqttSubscribeExternal ? 
       "MQTT external subscriptions: enabled" : "MQTT external subscriptions: disabled";
   }
-  if (arg == "1" || arg == "true" || arg == "on") {
-    setSetting(gSettings.mqttSubscribeExternal, true);
-    return "MQTT external subscriptions enabled - restart MQTT to apply";
-  } else if (arg == "0" || arg == "false" || arg == "off") {
-    setSetting(gSettings.mqttSubscribeExternal, false);
-    return "MQTT external subscriptions disabled";
-  }
-  return "Error: Use 0/1, true/false, or on/off";
+  const int parsed = parseBoolArg(arg);
+  if (parsed < 0) return "Error: Use 0/1, true/false, on/off, or enable/disable";
+  setSetting(gSettings.mqttSubscribeExternal, parsed == 1);
+  return parsed == 1 ?
+      "MQTT external subscriptions enabled - restart MQTT to apply" :
+      "MQTT external subscriptions disabled";
 }
 
 const char* cmd_mqtttopics(const String& argsInput) {
@@ -1958,7 +1963,9 @@ const char* cmd_mqttpublish##name(const String& argsInput) { \
   if (arg.length() == 0) { \
     return gSettings.setting ? "MQTT publish " label ": ON" : "MQTT publish " label ": OFF"; \
   } \
-  setSetting(gSettings.setting, (bool)(arg == "1" || arg.equalsIgnoreCase("on") || arg.equalsIgnoreCase("true"))); \
+  const int parsed = parseBoolArg(arg); \
+  if (parsed < 0) return "Error: Use 0/1, true/false, on/off, or enable/disable"; \
+  setSetting(gSettings.setting, parsed == 1); \
   return gSettings.setting ? "MQTT publish " label " enabled" : "MQTT publish " label " disabled"; \
 }
 

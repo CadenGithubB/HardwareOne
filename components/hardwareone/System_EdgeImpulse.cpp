@@ -7,6 +7,7 @@
 #if ENABLE_EDGE_IMPULSE
 
 #include "System_Settings.h"
+#include "System_Utils.h"  // validate-only command guard
 #include "System_Debug.h"
 #include "System_Camera_DVP.h"
 #include "System_MemUtil.h"

@@ -2967,17 +2967,9 @@ bool evaluateCondition(const char* condition) {
 
   if (strcmp(sensor, "TEMP") == 0) {
  #if ENABLE_THERMAL_SENSOR
-    float v = 0.0f;
-    bool ok = false;
-    {
-      SensorCacheGuard g(gThermalCache.mutex, pdMS_TO_TICKS(50), "automation.thermalAvgRead");
-      if (g.held) {
-        ok = gThermalCache.thermalDataValid;
-        v = gThermalCache.thermalAvgTemp;
-      }
-    }
-    if (!ok) return false;
-    currentValue = v;
+    ThermalCache thermal{};
+    if (!thermalCacheSnapshot(thermal, 50) || !thermal.thermalDataValid) return false;
+    currentValue = thermal.thermalAvgTemp;
  #else
     return false;
  #endif
@@ -2989,16 +2981,10 @@ bool evaluateCondition(const char* condition) {
     float targetValue = atof(value);
 #if ENABLE_TOF_SENSOR
     bool anyObjectMeetsCondition = false;
-    int tofTotal = 0;
-    TofCache::TofObject objs[4];
-    for (int i = 0; i < 4; i++) objs[i] = gTofCache.tofObjects[i];
-    {
-      SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(50), "automation.tofObjectsRead");
-      if (g.held) {
-        tofTotal = gTofCache.tofTotalObjects;
-        for (int i = 0; i < 4; i++) objs[i] = gTofCache.tofObjects[i];
-      }
-    }
+    TofCache tof{};
+    if (!tofCacheSnapshot(tof, 50)) return false;
+    const int tofTotal = tof.tofTotalObjects;
+    const auto& objs = tof.tofObjects;
 
     DEBUGF(DEBUG_AUTOMATIONS, "[condition] distance: checking %d objects against %s%.1f",
            tofTotal, op, targetValue);
@@ -3033,34 +3019,18 @@ bool evaluateCondition(const char* condition) {
  #endif
   } else if (strcmp(sensor, "LIGHT") == 0) {
  #if ENABLE_APDS_SENSOR
-    uint16_t clear = 0;
-    bool ok = false;
-    {
-      SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(50), "automation.apdsLightRead");
-      if (g.held) {
-        ok = gApdsCache.apdsDataValid;
-        clear = gApdsCache.apdsClear;
-      }
-    }
-    if (!ok) return false;
-    currentValue = (float)clear;
+    APDSCache apds{};
+    if (!apdsCacheSnapshot(apds, 50) || !apds.apdsDataValid) return false;
+    currentValue = (float)apds.apdsClear;
  #else
     return false;
  #endif
   } else if (strcmp(sensor, "MOTION") == 0) {
     isNumeric = false;
  #if ENABLE_APDS_SENSOR
-    uint8_t prox = 0;
-    bool ok = false;
-    {
-      SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(50), "automation.apdsMotionRead");
-      if (g.held) {
-        ok = gApdsCache.apdsDataValid;
-        prox = gApdsCache.apdsProximity;
-      }
-    }
-    if (!ok) return false;
-    strncpy(currentStringValue, (prox > 50) ? "DETECTED" : "NONE", sizeof(currentStringValue) - 1);
+    APDSCache apds{};
+    if (!apdsCacheSnapshot(apds, 50) || !apds.apdsDataValid) return false;
+    strncpy(currentStringValue, (apds.apdsProximity > 50) ? "DETECTED" : "NONE", sizeof(currentStringValue) - 1);
  #else
     return false;
  #endif

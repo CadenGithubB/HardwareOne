@@ -1,3 +1,4 @@
+import os
 import datetime,hashlib,json,pathlib,re,serial,sys,termios,time
 ROOT=pathlib.Path(__file__).resolve().parents[3]
 sys.path[:0]=[str(ROOT/'experiments'/x) for x in ('p4_connectivity','p4_mesh')]
@@ -13,7 +14,7 @@ class NoControlSerial(serial.Serial):
 RUN=pathlib.Path(__file__).resolve().parent
 c=json.loads(pathlib.Path(__import__('os').environ.get('HW1_CREDENTIALS', 'experiments/p4_ble_roles/private/credentials.json')).read_text())
 tag=datetime.datetime.now(datetime.timezone.utc).strftime('%H%M%S');result={}
-with ConnectivityConsole('/dev/cu.usbmodem2201',RUN/('transcription-usb-'+tag+'.log'),secrets=private_encodings(c),completion='hardwareone',chunk_delay=.12,serial_factory=NoControlSerial) as b:
+with ConnectivityConsole(os.environ['HW1_P4_PORT'],RUN/('transcription-usb-'+tag+'.log'),secrets=private_encodings(c),completion='hardwareone',chunk_delay=.12,serial_factory=NoControlSerial) as b:
  time.sleep(2)
  b.command('login '+command_token(c['username'])+' '+command_token(c['password']),timeout=30)
  assert f'You are {c["username"]} (admin)' in b.command('whoami')

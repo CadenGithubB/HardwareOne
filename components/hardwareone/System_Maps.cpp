@@ -9,8 +9,10 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <cstring>
+#include <memory>
 
 #include "System_Command.h"
+#include "System_SensorLogging.h"
 #include "System_Debug.h"
 #include "System_VFS.h"
 #include "System_AuthIdentity.h"  // currentAuthContext
@@ -2710,6 +2712,7 @@ GPSTrackBounds GPSTrackManager::_bounds = {0, 0, 0, 0, false};
 GPSTrackStats GPSTrackManager::_stats = {0, 0, 0, false};
 EXT_RAM_BSS_ATTR char GPSTrackManager::_filename[256];
 bool GPSTrackManager::_liveTracking = false;
+uint32_t GPSTrackManager::_liveLogSessionId = 0;
 uint32_t GPSTrackManager::_lastUpdateMs = 0;
 
 // Haversine formula for distance between two GPS points (returns meters)
@@ -2840,7 +2843,10 @@ void GPSTrackManager::calculateBounds() {
 }
 
 bool GPSTrackManager::loadTrack(const char* filepath, String& errorMsg) {
-  clearTrack();
+  if (!clearTrack()) {
+    errorMsg = "Stop live tracking before loading another track";
+    return false;
+  }
 
   FsLockGuard fsGuard("GPSTrackManager.loadTrack");
   
@@ -2904,7 +2910,10 @@ bool GPSTrackManager::loadTrack(const char* filepath, String& errorMsg) {
   return true;
 }
 
-void GPSTrackManager::clearTrack() {
+bool GPSTrackManager::clearTrack() {
+  if (isLiveTracking()) return false;
+  __atomic_store_n(&_liveTracking, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&_liveLogSessionId, 0u, __ATOMIC_RELEASE);
   if (_points) {
     free(_points);
     _points = nullptr;
@@ -2913,6 +2922,8 @@ void GPSTrackManager::clearTrack() {
   _bounds.valid = false;
   _stats.valid = false;
   _filename[0] = '\0';
+  _lastUpdateMs = 0;
+  return true;
 }
 
 bool GPSTrackManager::deleteTrackFile(const char* filepath) {
@@ -2920,7 +2931,7 @@ bool GPSTrackManager::deleteTrackFile(const char* filepath) {
   
   // Clear if this is the currently loaded track
   if (strcmp(_filename, filepath) == 0) {
-    clearTrack();
+    if (!clearTrack()) return false;
   }
   
   fsLock("gpstrack.delete");
@@ -2976,33 +2987,80 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
   return true;
 }
 
-void GPSTrackManager::setLiveTracking(bool enabled) {
-  if (enabled && !_liveTracking) {
-    // Starting live tracking - allocate buffer if not already allocated
-    if (!_points) {
-      _points = (GPSTrackPoint*)ps_alloc(MAX_TRACK_POINTS * sizeof(GPSTrackPoint), 
-                                          AllocPref::PreferPSRAM, "gps.live");
-      if (!_points) {
-        ERROR_MAPSF("Failed to allocate live track buffer");
-        return;
-      }
-    }
-    _pointCount = 0;
-    _bounds.valid = false;
-    _stats.valid = false;
-    strlcpy(_filename, "[LIVE]", sizeof(_filename));
-    INFO_MAPSF("Live tracking started");
-  } else if (!enabled && _liveTracking) {
-    INFO_MAPSF("Live tracking stopped (%d points)", _pointCount);
-    // Calculate final stats
-    calculateBounds();
-    calculateStats();
+bool GPSTrackManager::isLiveTracking() {
+  const uint32_t sessionId = __atomic_load_n(&_liveLogSessionId, __ATOMIC_ACQUIRE);
+  return __atomic_load_n(&_liveTracking, __ATOMIC_ACQUIRE) && sessionId != 0 &&
+         sensorLogCurrentSessionId() == sessionId;
+}
+
+const char* GPSTrackManager::startLiveTracking() {
+#if !ENABLE_GPS_SENSOR
+  return "Error: GPS support is not enabled in this build";
+#else
+  if (isLiveTracking()) return "SUCCESS: Live tracking already active";
+  if (!gSettings.sensorLogEnabled) return "Error: Sensor logging is disabled";
+  if (gSensorLoggingRunning) return "Error: Stop the existing sensor log before starting a live track";
+  if (gSettings.healthLoggingEnabled) return "Error: Disable health logging before starting a live track";
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  // Keep an imported/previous track intact if GPS or logger startup fails.
+  // A newly allocated buffer is released automatically on every failure path.
+  std::unique_ptr<GPSTrackPoint, decltype(&free)> pending(nullptr, &free);
+  if (!_points) {
+    pending.reset((GPSTrackPoint*)ps_alloc(
+        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPSRAM, "gps.live"));
+    if (!pending) return "Error: Cannot allocate live track buffer";
   }
-  _liveTracking = enabled;
+
+  const char* result = cmd_gpsstart("");
+  if (!result) return "Error: GPS startup returned no result";
+  if (strncmp(result, "Error", 5) == 0) return result;
+  const String gpsStatus(result);  // command replies share a borrowed buffer
+
+  // TRACK already selects GPS. Reuse the logger's policy and literal start
+  // path; gpslog instead creates a dated session and enables boot auto-start.
+  result = cmd_sensorlog("format track");
+  if (!result) return "Error: Track format returned no result";
+  if (strncmp(result, "Error", 5) == 0) return result;
+  result = cmd_sensorlog("start /logging_captures/tracks/live.csv 1000");
+  if (!result) return "Error: Sensor logger returned no result";
+  if (strncmp(result, "Error", 5) == 0) return result;
+  if (strncmp(result, "SUCCESS:", 8) != 0) return "Error: Sensor logger did not confirm startup";
+
+  // A previous capture may have been stopped from another UI while Maps
+  // retained its old flag. Revoke that flag before adopting the new session.
+  __atomic_store_n(&_liveTracking, false, __ATOMIC_RELEASE);
+  const uint32_t sessionId = sensorLogCurrentSessionId();
+  if (!sessionId) return "Error: Live track logger is no longer active";
+  __atomic_store_n(&_liveLogSessionId, sessionId, __ATOMIC_RELEASE);
+  if (pending) _points = pending.release();
+  _pointCount = 0;
+  _bounds = {};
+  _stats = {};
+  _lastUpdateMs = 0;
+  strlcpy(_filename, "[LIVE]", sizeof(_filename));
+  __atomic_store_n(&_liveTracking, true, __ATOMIC_RELEASE);
+  INFO_MAPSF("Live tracking started");
+  snprintf(getDebugBuffer(), 1024, "SUCCESS: Live track recording started\n  GPS: %s",
+           gpsStatus.c_str());
+  return getDebugBuffer();
+#endif
+}
+
+const char* GPSTrackManager::stopLiveTracking() {
+  __atomic_store_n(&_liveTracking, false, __ATOMIC_RELEASE);
+  const uint32_t sessionId = __atomic_exchange_n(&_liveLogSessionId, 0u, __ATOMIC_ACQ_REL);
+  // An external stop/restart can reuse the filename. Only the logger's
+  // session identity can establish that this is still our capture.
+  const bool stopped = sensorLogStopSession(sessionId);
+  calculateBounds();
+  calculateStats();
+  return stopped ? "SUCCESS: Live tracking stopped"
+                 : "SUCCESS: Live tracking inactive; other logging left unchanged";
 }
 
 bool GPSTrackManager::appendPoint(float lat, float lon) {
-  if (!_liveTracking || !_points) return false;
+  if (!isLiveTracking() || !_points) return false;
   if (_pointCount >= MAX_TRACK_POINTS) return false;
   
   // Skip if too close to last point (avoid clutter)
@@ -3204,7 +3262,26 @@ const char* cmd_gpstrack(const String& argsInput) {
   String sub = a.arg(0);
   sub.toLowerCase();
 
+  if (sub == "live") {
+    if (a.unterminatedQuote() || a.count() != 2) return "Error: Usage: gpstrack live <start|stop|toggle>";
+    String action = a.arg(1);
+    action.toLowerCase();
+    if (action == "start") return GPSTrackManager::startLiveTracking();
+    if (action == "stop") return GPSTrackManager::stopLiveTracking();
+    if (action == "toggle") {
+      return GPSTrackManager::isLiveTracking()
+          ? GPSTrackManager::stopLiveTracking() : GPSTrackManager::startLiveTracking();
+    }
+    return "Error: Usage: gpstrack live <start|stop|toggle>";
+  }
+
   if (sub.length() == 0 || sub == "status") {
+    if (GPSTrackManager::isLiveTracking()) {
+      snprintf(buf, 1024, "Live GPS track recording active\nPoints: %d%s",
+               GPSTrackManager::getPointCount(),
+               GPSTrackManager::hasTrack() ? "" : " (waiting for GPS fix)");
+      return buf;
+    }
     if (!GPSTrackManager::hasTrack()) {
       cliHint("to load a track, use 'gpstrack load <filepath>'");
       return "No GPS track loaded";
@@ -3250,11 +3327,11 @@ const char* cmd_gpstrack(const String& argsInput) {
   }
 
   if (sub == "clear") {
-    GPSTrackManager::clearTrack();
+    if (!GPSTrackManager::clearTrack()) return "Error: Stop live tracking before clearing the track";
     return "GPS track cleared";
   }
 
-  return "Error: invalid arguments — Usage: gpstrack [status|load <filepath>|clear]";
+  return "Error: invalid arguments — Usage: gpstrack [status|load <filepath>|clear|live <start|stop|toggle>]";
 }
 
 // Stitch several GPS/sensor capture logs into one file, in the given order, so
@@ -3754,7 +3831,7 @@ const CommandEntry mapCommands[] = {
   {"whereami", "Show current location context (add 'json' for JSON output)", false, cmd_whereami, nullptr},
   {"search", "Search map features: <name>", false, cmd_search, "Usage: search <name>"},
   {"waypoint", "Manage waypoints: <list|add|del|goto|clear|clearall|rename|notes>", false, cmd_waypoint, "Usage: waypoint [list|add <lat> <lon> [name]|del <index>|goto <index>|clear|clearall|rename <index> <name>|notes <index> <notes>]"},
-  {"gpstrack", "Manage GPS tracks: <status|load|clear>", false, cmd_gpstrack, "Usage: gpstrack [status|load <filepath>|clear]"},
+  {"gpstrack", "Manage GPS tracks: status, load, clear, live recording", false, cmd_gpstrack, "Usage: gpstrack [status|load <filepath>|clear|live <start|stop|toggle>]"},
   {"gpstrackmerge", "Stitch GPS logs in order: \"<out>\" \"<in1>\" \"<in2>\" ...", true, cmd_gpstrackmerge, "Usage: gpstrackmerge \"<output>\" \"<in1>\" \"<in2>\" [...]  (output first, then inputs in stitch order; max 9 inputs)"},
   {"waypointfile", "Link file to waypoint: \"<file>\" <wpName>", false, cmd_waypointfile, "Usage: waypointfile \"<file>\" <wpName> | waypointfile \"<file>\" <lat> <lon> [wpName]"},
   {"waypointfiles", "Waypoint files: <name> [del <idx>]", false, cmd_waypointfiles, "Usage: waypointfiles <wpName> [del <index>]"},

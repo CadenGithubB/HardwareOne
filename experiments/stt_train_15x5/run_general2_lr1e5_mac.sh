@@ -10,7 +10,7 @@
 # Re-running resumes (training from resume.pt).
 set -u
 cd "$(dirname "$0")"
-P=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
+P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
 export STT_ROOT=/Volumes/Audiodrive/stt
 export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1

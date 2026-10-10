@@ -45,7 +45,7 @@ struct SetupWizardResult {
   bool espnowStationary;      // false = mobile (default)
   // MQTT broker
   String mqttHost;
-  int mqttPort;               // 0 = use default (1883)
+  int mqttPort;               // <= 0 leaves the current setting unchanged
   String mqttUser;
   String mqttPassword;
   // NTP server
@@ -183,8 +183,28 @@ bool wizardShouldShowWiFi();
 bool wizardShouldShowESPNow();
 bool wizardShouldShowMQTT();
 
+// Apply an accepted ESP-NOW identity page to in-memory settings. A nonempty
+// friendly name also sets both device names. An empty name keeps the friendly
+// name and reuses the current ESP-NOW device name (or HardwareOne) for both
+// device names. Empty room/zone values keep existing settings; stationary is
+// always applied. This does not save, start ESP-NOW or change page navigation.
+// Call only after the interface's page-completion and cancel/back checks.
+void wizardApplyESPNowSettings(const SetupWizardResult& result);
+
+// Apply broker fields collected by any wizard interface to in-memory settings.
+// Empty strings and nonpositive ports leave existing values unchanged. This
+// preserves the wizard's current patch semantics; it does not clear credentials,
+// validate input, save settings, start MQTT, or change auto-start/navigation.
+// Call only at the interface's existing apply point, after its cancel/back checks.
+void wizardApplyMQTTSettings(const SetupWizardResult& result);
+
 // Finalize wizard results
 void wizardFinalize(SetupWizardResult& result);
+
+// Save optional WiFi credentials and main/debug settings, apply runtime settings,
+// and refresh NTP when connected. Call after wizardFinalize. Incomplete results
+// do nothing; save failures are reported and do not prevent runtime application.
+void wizardSaveAndApplySettings(const SetupWizardResult& result);
 
 // ============================================================================
 // Unified Wizard (single implementation - serial always, OLED optional)
@@ -195,14 +215,12 @@ void wizardFinalize(SetupWizardResult& result);
 // rendering and joystick input are layered on top automatically.
 SetupWizardResult runSetupWizard();
 
-// Shared helper: runs the wizard and applies results (WiFi credentials,
-// settings save). Used by both cmd_featuresetup and firstTimeSetupIfNeeded().
+// Blocking first-time setup entry point. The CLI uses System_SetupWizardMode;
+// both engines save completed results through wizardSaveAndApplySettings.
 //
 // idleTimeoutMs: 0 = wait forever (correct for first-time-setup at boot —
 // fresh-device owner may need time to read instructions). Non-zero = cancel
-// the wizard if no input arrives for `idleTimeoutMs` milliseconds (correct
-// for `featuresetup` CLI, to prevent the cmd_exec task from being parked
-// indefinitely if the invoking user can't actually deliver wizard input).
+// the wizard if no input arrives for `idleTimeoutMs` milliseconds.
 SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs = 0);
 
 // Wizard-input timing controls (definitions in System_Utils.cpp).

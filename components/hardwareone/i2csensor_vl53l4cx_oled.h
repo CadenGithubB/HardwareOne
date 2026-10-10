@@ -5,6 +5,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "i2csensor_vl53l4cx.h"
 #include <Adafruit_SSD1306.h>
 
 // ToF OLED display function - shows distance data
@@ -21,10 +22,11 @@ static void displayToFData() {
     return;
   }
 
-  if (gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    if (gTofCache.tofDataValid && gTofCache.tofTotalObjects > 0) {
+  TofCache reading{};
+  if (tofCacheSnapshot(reading)) {
+    if (reading.tofDataValid && reading.tofTotalObjects > 0) {
       // Show first detected object distance
-      int distMM = gTofCache.tofObjects[0].distance_mm;
+      int distMM = reading.tofObjects[0].distance_mm;
       oledDisplay->setCursor(0, y);
       oledDisplay->setTextSize(2);
       oledDisplay->print(distMM);
@@ -45,7 +47,6 @@ static void displayToFData() {
       oledDisplay->setCursor(0, y);
       oledDisplay->println("Waiting for data...");
     }
-    xSemaphoreGive(gTofCache.mutex);
   } else {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("ToF: Busy");

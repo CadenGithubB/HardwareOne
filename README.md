@@ -26,6 +26,10 @@ On any single device, control works the same way no matter how you reach it: one
 
 Hardware One can be used in several different ways depending on the hardware you attach and the role you want the device to play:
 
+These are starting feature selections. A board can use any combination supported
+by its attached hardware, implemented backends and available resources. Use
+[saved configurations](configurations/README.md) to customize those choices.
+
 ### 1) Headless Node
 - Just the microcontroller board - no display, no sensors, no gamepad.
 - WiFi, web, ESP-NOW, Bluetooth, Automations, CLI, signed recovery OTA, and remote management remain available in the checked-in lean deployment.
@@ -177,6 +181,18 @@ What you get with the pair: ask the Pi questions from the web LLM page, the OLED
 ---
 
 ## Build System
+
+Use [saved build configurations](configurations/README.md) to choose features
+without editing shared headers. For code changes, follow the
+[development guidelines](CONTRIBUTING.md): clear ownership, small module
+interfaces, shared validation, and independently selectable features.
+
+Start guided setup to choose a board or saved configuration, select features,
+and review before saving or building:
+
+```sh
+python3 tools/build_config.py configure
+```
 
 Hardware One uses **ESP-IDF** (not Arduino IDE). The quickest way to get going:
 

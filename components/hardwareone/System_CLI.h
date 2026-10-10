@@ -3,10 +3,8 @@
 
 #include <Arduino.h>
 
-#include "System_I2C.h"
 #include "System_User.h"
-#include "System_Utils.h"
-#include "WebServer_Utils.h"
+#include "System_CommandRegistry.h"
 
 // ============================================================================
 // CLI System - Help Interface and State Management
@@ -86,9 +84,6 @@ String exitToNormalBanner();
 // ============================================================================
 // CLI Command Registry
 // ============================================================================
-
-// Forward declaration from system_utils.h
-struct CommandEntry;
 
 // CLI command registry (help, clear, etc.)
 extern const CommandEntry cliCommands[];

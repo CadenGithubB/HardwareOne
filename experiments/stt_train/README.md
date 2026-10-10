@@ -1,5 +1,7 @@
 # STT fine-tuning (QuartzNet 5x5)
 
+Device MAC addresses in the evidence use synthetic aliases. Examples use generic local workspace paths; replace them with your own locations. Model identities and measurements are unchanged.
+
 Host-side fine-tuning of the QuartzNet 5x5 speech model that runs on the
 P4X-EYE, aimed at meetings with several speakers, plus the word language
 model used by on-device decoding. Training runs on a Mac with the export
@@ -24,5 +26,5 @@ headset from 53.3% to 43.0%, while LibriSpeech clean rose from 5.6% to 7.5%.
 run and [NEXT_STEPS.md](results/5x5-finetune-2026-09-29/NEXT_STEPS.md) the plan
 that followed, including the move to the 15x5 model in `experiments/stt_train_15x5`.
 
-Paths in the scripts assume the data drives are mounted at `/Volumes/USB` and
-`/Volumes/USB2`.
+The historical runs used two local data drives. Supply your own dataset and
+work directories when reproducing them; machine-specific mount paths are omitted.

@@ -5,7 +5,7 @@
 # directly comparable with meeting-15x5b.lm (2.5 MB, AMI + Libri-100 text).
 set -u
 cd "$(dirname "$0")"
-P=$HOME/.codex/worktrees/jpeg-portable/hardwareone/experiments/stt_p4/private/export-venv/bin/python
+P=${HW1_STT_PYTHON:-$PWD/../../stt_p4/private/export-venv/bin/python}
 export PYTHONPATH=/Volumes/USB2/stt/pydeps
 OUT=/Volumes/USB2/stt/work/lm/v2
 CKPT=/Volumes/USB2/stt/work/run15x5b/full/best

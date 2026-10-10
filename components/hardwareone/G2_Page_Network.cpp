@@ -19,7 +19,7 @@
 #include "System_Settings.h" // setSetting — peer autoReconnect + bleAutoStart
 #include "G2_Page_TextEntry.h"   // on-glasses keyboard for "Set Name"
 #include "G2_HijackCmd.h"        // g2BumpMenuGen() for setNetSub navigation tracking
-#include <new>                   // std::nothrow — for LensUiJob/RedrawSpec allocation
+#include <utility>               // move an admitted saved-network snapshot
 #include "System_Debug.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -27,6 +27,7 @@
 #if ENABLE_WIFI
 #include <WiFi.h>
 #include "System_WiFi.h"
+#include "System_WiFiNetworks.h"
 #endif
 
 #if ENABLE_ESPNOW
@@ -46,7 +47,7 @@ enum NetworkSubMode : uint8_t {
   NET_SUB_MAIN          = 0,  // top-level chooser (WiFi / HTTP(S) / ESP-NOW / Bluetooth)
   NET_SUB_WIFI          = 1,  // WiFi action menu
   NET_SUB_WIFI_SCAN     = 2,  // WiFi scan results
-  NET_SUB_WIFI_SAVED    = 3,  // WiFi saved-network list (tap = forget)
+  NET_SUB_WIFI_SAVED    = 3,  // WiFi saved-network list (tap opens actions)
   NET_SUB_WIFI_STATUS   = 4,  // WiFi detailed status dump (info only)
   NET_SUB_ESPNOW        = 5,  // ESP-NOW action menu
   NET_SUB_ESPNOW_DEVS   = 6,  // ESP-NOW paired-device list (info only)
@@ -57,9 +58,12 @@ enum NetworkSubMode : uint8_t {
   NET_SUB_WIFI_SAVED_ACT= 11, // per-saved-network action menu (Connect / Forget)
 };
 static NetworkSubMode gNetSub = NET_SUB_MAIN;
-// Index (into gWifiNetworks) of the saved network the user drilled into from
-// the saved list — consumed by the Connect/Forget action submenu.
+// Index into the admitted list snapshot, preserved through the action submenu.
+// Commands use the selected entry's stable identity, never its live array index.
 static int gWifiSavedSel = -1;
+#if ENABLE_WIFI
+static WifiNetworkSnapshot gWifiSavedSnapshot;
+#endif
 
 // Single mutator so every gNetSub transition bumps the menu generation —
 // in-flight hijack-command callbacks compare cookie.menuGen against the
@@ -481,57 +485,65 @@ static void showScanResults() {
             (unsigned)gScanCacheCount);
 }
 
-// Saved-network list. Tap to forget that entry (no password required —
-// only the SSID is needed for cmd_wifirm).
+// Saved-network list. Retain the exact identities used for these rows until the
+// next admitted list; store changes cannot retarget a later Connect/Forget tap.
 static void showWiFiSavedList() {
-  setNetSub(NET_SUB_WIFI_SAVED);
 #if ENABLE_WIFI
+  WifiNetworkSnapshot snapshot;
+  const bool available = wifiNetworkSnapshot(snapshot);
   static EXT_RAM_BSS_ATTR char rows[1 + MAX_WIFI_NETWORKS][48];  // PSRAM: deep-copied by g2ShowListPage
   strcpy(rows[0], "<- WiFi");
   const char* ptrs[1 + MAX_WIFI_NETWORKS];
   ptrs[0] = rows[0];
   size_t n = 1;
-  const int count = gWifiNetworkCount;
+  const int count = snapshot.count;
   for (int i = 0; i < count && i < MAX_WIFI_NETWORKS; i++) {
     snprintf(rows[1 + i], sizeof(rows[1 + i]),
              "[%d] %s%s",
-             gWifiNetworks[i].priority,
-             gWifiNetworks[i].ssid.c_str(),
+             snapshot.entries[i].priority,
+             snapshot.entries[i].ssid.c_str(),
              i == 0 ? " *" : "");
     ptrs[n++] = rows[1 + i];
   }
+  bool admitted;
   if (n == 1) {
-    static const char* empty[] = { "<- WiFi", "(no saved networks)" };
-    g2ShowListPage(empty, 2);
+    const char* empty[] = {
+      "<- WiFi", available ? "(no saved networks)" : "(saved list unavailable)"
+    };
+    admitted = g2ShowListPage(empty, 2);
   } else {
-    g2ShowListPage(ptrs, n);
+    admitted = g2ShowListPage(ptrs, n);
   }
-  DEBUG_G2F("[G2] WiFi saved list (%d entries) — tap to forget",
+  if (!admitted) return;
+  gWifiSavedSnapshot = std::move(snapshot);
+  gWifiSavedSel = -1;
+  setNetSub(NET_SUB_WIFI_SAVED);
+  DEBUG_G2F("[G2] WiFi saved list (%d entries) — tap for actions",
             count);
 #else
   static const char* na[] = { "<- WiFi", "(WiFi not compiled)" };
-  g2ShowListPage(na, 2);
+  if (g2ShowListPage(na, 2)) setNetSub(NET_SUB_WIFI_SAVED);
 #endif
 }
 
 // Per-saved-network action menu — reached by tapping a network on the saved
-// list. gWifiSavedSel holds its index into gWifiNetworks. Lets the user CONNECT
+// list. gWifiSavedSel holds its index into the retained snapshot. Lets the user CONNECT
 // to that saved network (password already stored) or FORGET it, instead of the
 // old behaviour where a tap immediately forgot it.
 static void showWiFiSavedActionMenu() {
-  setNetSub(NET_SUB_WIFI_SAVED_ACT);
 #if ENABLE_WIFI
   static char back[48];
-  if (gWifiSavedSel >= 0 && gWifiSavedSel < gWifiNetworkCount) {
-    snprintf(back, sizeof(back), "<- %s", gWifiNetworks[gWifiSavedSel].ssid.c_str());
+  if (gWifiSavedSel >= 0 && gWifiSavedSel < gWifiSavedSnapshot.count) {
+    snprintf(back, sizeof(back), "<- %s", gWifiSavedSnapshot.entries[gWifiSavedSel].ssid.c_str());
   } else {
     strcpy(back, "<- Saved");
   }
   const char* items[] = { back, "Connect", "Forget" };
-  g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+  if (g2ShowListPage(items, sizeof(items) / sizeof(items[0])))
+    setNetSub(NET_SUB_WIFI_SAVED_ACT);
 #else
   static const char* na[] = { "<- Saved", "(WiFi not compiled)" };
-  g2ShowListPage(na, 2);
+  if (g2ShowListPage(na, 2)) setNetSub(NET_SUB_WIFI_SAVED_ACT);
 #endif
 }
 
@@ -1036,42 +1048,6 @@ static void wifiPendingWatchdogTask(void* /*arg*/) {
 }
 #endif  // ENABLE_WIFI
 
-// Generic helper used by every WiFi-tap cmd_exec callback below. Takes a
-// render fn (showWiFiMenu / showWiFiSavedList / etc.), wraps it in a Redraw
-// job, and enqueues — gen-guard in the lens applier handles the "user
-// navigated away" case automatically. MUST be called from cmd_exec_task
-// (i.e. from inside a g2SubmitHijackCommand callback). Does NOT touch the
-// lens directly.
-static void enqueueWifiRedrawFromCallback(const G2CmdCookie& cookie,
-                                          void (*renderFn)(),
-                                          const char* tag) {
-  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
-  if (!spec) {
-    DEBUG_G2F("[G2] %s: RedrawSpec alloc failed — lens won't refresh", tag);
-    return;
-  }
-  spec->render = renderFn;
-
-  LensUiJob* job = new (std::nothrow) LensUiJob{};
-  if (!job) {
-    DEBUG_G2F("[G2] %s: LensUiJob alloc failed", tag);
-    delete spec;
-    return;
-  }
-  job->kind           = LensJobKind::Redraw;
-  job->submitMenuGen  = cookie.menuGen;
-  job->cmdSeq         = cookie.seq;
-  job->targetPage     = cookie.targetPage;
-  job->targetNetSub   = cookie.targetNetSub;
-  job->payload.redraw = spec;
-
-  if (!g2EnqueueLensJob(job)) {
-    DEBUG_G2F("[G2] %s: lens job enqueue FAILED — lens won't refresh", tag);
-    delete spec;
-    delete job;
-  }
-}
-
 // Step 4 + Group A: hijack-tap cmd_exec completion callbacks.
 // All run on cmd_exec_task after the underlying CLI command finishes; each
 // just enqueues a Redraw of the appropriate WiFi-related view. Naming
@@ -1084,7 +1060,7 @@ static void onWifiMenuRefreshDone(bool ok,
   DEBUG_G2F("[G2] WiFi-menu refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  enqueueWifiRedrawFromCallback(cookie, &showWiFiMenu, "WiFi-menu refresh");
+  (void)g2EnqueueRedraw(cookie, &showWiFiMenu, "WiFi-menu refresh");
 }
 
 // openwifi is a synchronous command on cmd_exec_task: by callback time it has
@@ -1100,7 +1076,7 @@ static void onWifiConnectRefreshDone(bool ok,
   DEBUG_G2F("[G2] WiFi-connect refresh cmd done: ok=%d pending=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (int)ownedPending, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  enqueueWifiRedrawFromCallback(cookie, &showWiFiMenu, "WiFi-connect refresh");
+  (void)g2EnqueueRedraw(cookie, &showWiFiMenu, "WiFi-connect refresh");
 }
 
 static void onWifiSavedListRefreshDone(bool ok,
@@ -1110,12 +1086,10 @@ static void onWifiSavedListRefreshDone(bool ok,
   DEBUG_G2F("[G2] WiFi-saved refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  enqueueWifiRedrawFromCallback(cookie, &showWiFiSavedList, "WiFi-saved refresh");
+  (void)g2EnqueueRedraw(cookie, &showWiFiSavedList, "WiFi-saved refresh");
 }
 
-// ESP-NOW / Bluetooth submenu refresh callbacks. Identical pattern to the
-// WiFi ones above — the "Wifi" in enqueueWifiRedrawFromCallback's name is
-// historical; the helper itself is render-fn agnostic.
+// ESP-NOW / Bluetooth submenu refresh callbacks use the same redraw bridge.
 #if ENABLE_ESPNOW
 static void onEspNowMenuRefreshDone(bool ok,
                                     const char* result,
@@ -1124,7 +1098,7 @@ static void onEspNowMenuRefreshDone(bool ok,
   DEBUG_G2F("[G2] ESP-NOW-menu refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  enqueueWifiRedrawFromCallback(cookie, &showEspNowMenu, "ESP-NOW-menu refresh");
+  (void)g2EnqueueRedraw(cookie, &showEspNowMenu, "ESP-NOW-menu refresh");
 }
 
 // Completion handler for the ESP-NOW *open* (start) toggle. Unlike the generic
@@ -1144,7 +1118,7 @@ static void onEspNowOpenDone(bool ok,
             (int)ok, result ? result : "");
   if (gEspNow && gEspNow->initialized) {
     // Started successfully — re-render the menu (now shows "ESP-NOW: ON").
-    enqueueWifiRedrawFromCallback(cookie, &showEspNowMenu, "ESP-NOW open ok");
+    (void)g2EnqueueRedraw(cookie, &showEspNowMenu, "ESP-NOW open ok");
     return;
   }
   // Still not running → the start failed. Show the captured reason on the lens
@@ -1152,7 +1126,7 @@ static void onEspNowOpenDone(bool ok,
   strncpy(sEspNowOpenMsg, (result && result[0]) ? result : "ESP-NOW failed to start",
           sizeof(sEspNowOpenMsg) - 1);
   sEspNowOpenMsg[sizeof(sEspNowOpenMsg) - 1] = '\0';
-  enqueueWifiRedrawFromCallback(cookie, &showEspNowOpenMsg, "ESP-NOW open failed");
+  (void)g2EnqueueRedraw(cookie, &showEspNowOpenMsg, "ESP-NOW open failed");
 }
 
 // After the first-time name is persisted, start ESP-NOW. If the user has
@@ -1170,7 +1144,7 @@ static void onEspNowNameThenOpenDone(bool ok,
             (result && result[0]) ? result : "ESP-NOW needs a device name",
             sizeof(sEspNowOpenMsg) - 1);
     sEspNowOpenMsg[sizeof(sEspNowOpenMsg) - 1] = '\0';
-    enqueueWifiRedrawFromCallback(cookie, &showEspNowOpenMsg,
+    (void)g2EnqueueRedraw(cookie, &showEspNowOpenMsg,
                                   "ESP-NOW setname failed");
     return;
   }
@@ -1181,7 +1155,7 @@ static void onEspNowNameThenOpenDone(bool ok,
   if (!g2SubmitHijackCommand("openespnow", cookie, cb, nullptr)) {
     DEBUG_G2F("[G2] ESP-NOW name-then-open: openespnow submit FAILED");
     if (stillHere) {
-      enqueueWifiRedrawFromCallback(cookie, &showEspNowMenu,
+      (void)g2EnqueueRedraw(cookie, &showEspNowMenu,
                                     "ESP-NOW open submit failed");
     }
   }
@@ -1195,7 +1169,7 @@ static void onBluetoothMenuRefreshDone(bool ok,
   DEBUG_G2F("[G2] Bluetooth-menu refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  enqueueWifiRedrawFromCallback(cookie, &showBluetoothMenu, "Bluetooth-menu refresh");
+  (void)g2EnqueueRedraw(cookie, &showBluetoothMenu, "Bluetooth-menu refresh");
 }
 
 static void onBluetoothG2MenuRefreshDone(bool ok,
@@ -1205,7 +1179,7 @@ static void onBluetoothG2MenuRefreshDone(bool ok,
   DEBUG_G2F("[G2] Bluetooth-G2-menu refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  enqueueWifiRedrawFromCallback(cookie, &showBluetoothG2Menu, "Bluetooth-G2-menu refresh");
+  (void)g2EnqueueRedraw(cookie, &showBluetoothG2Menu, "Bluetooth-G2-menu refresh");
 }
 
 // Watchdog for the R1 ring connect — mirror of wifiPendingWatchdogTask. Polls
@@ -1264,7 +1238,7 @@ static void onBluetoothR1MenuRefreshDone(bool ok,
   DEBUG_G2F("[G2] Bluetooth-R1-menu refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  enqueueWifiRedrawFromCallback(cookie, &showBluetoothR1Menu, "Bluetooth-R1-menu refresh");
+  (void)g2EnqueueRedraw(cookie, &showBluetoothR1Menu, "Bluetooth-R1-menu refresh");
 }
 
 static void handleWiFiTap(uint32_t idx) {
@@ -1476,7 +1450,7 @@ static void onWifiAddDone(bool ok, const char* result,
           (result && result[0]) ? result : (ok ? "Network saved" : "Add failed"),
           sizeof(sWifiAddMsg) - 1);
   sWifiAddMsg[sizeof(sWifiAddMsg) - 1] = '\0';
-  enqueueWifiRedrawFromCallback(cookie, &showWifiAddMsg, "wifiadd done");
+  (void)g2EnqueueRedraw(cookie, &showWifiAddMsg, "wifiadd done");
 }
 
 // Build + submit from the snapshot SSID and a password. Runs on the BLE
@@ -1549,7 +1523,7 @@ static void handleWiFiSavedTap(uint32_t idx) {
   if (idx == 0) { showWiFiMenu(); return; }
 #if ENABLE_WIFI
   size_t savedIdx = idx - 1;
-  if ((int)savedIdx < gWifiNetworkCount) {
+  if (savedIdx < static_cast<size_t>(gWifiSavedSnapshot.count)) {
     gWifiSavedSel = (int)savedIdx;
     showWiFiSavedActionMenu();
   }
@@ -1560,19 +1534,19 @@ static void handleWiFiSavedTap(uint32_t idx) {
 static void handleWiFiSavedActionTap(uint32_t idx) {
   if (idx == 0) { showWiFiSavedList(); return; }   // <- back to the saved list
 #if ENABLE_WIFI
-  if (gWifiSavedSel < 0 || gWifiSavedSel >= gWifiNetworkCount) {
+  if (gWifiSavedSel < 0 || gWifiSavedSel >= gWifiSavedSnapshot.count) {
     showWiFiSavedList();
     return;
   }
-  String ssid = gWifiNetworks[gWifiSavedSel].ssid;
+  const SavedWifiNetwork& selected = gWifiSavedSnapshot.entries[gWifiSavedSel];
   G2CmdCookie cookie{};
   cookie.targetPage = g2GetHijackPage();
 
-  if (idx == 1) {  // Connect — openwifi --index is 1-based into gWifiNetworks.
+  if (idx == 1) {  // Resolve the displayed entry's identity on cmd_exec.
     char line[40];
-    snprintf(line, sizeof(line), "openwifi --index %d", gWifiSavedSel + 1);
-    DEBUG_G2F("[G2] WiFi: Connect saved '%s' (--index %d) via cmd_exec",
-              ssid.c_str(), gWifiSavedSel + 1);
+    snprintf(line, sizeof(line), "openwifi --saved-id %lu", (unsigned long)selected.id);
+    DEBUG_G2F("[G2] WiFi: Connect saved '%s' (--saved-id %lu) via cmd_exec",
+              selected.ssid.c_str(), (unsigned long)selected.id);
     cookie.targetNetSub   = NET_SUB_WIFI;     // land back on the WiFi menu
     const uint32_t pendingDeadline = armWifiPendingOverlay();
     setNetSub(NET_SUB_WIFI);
@@ -1593,11 +1567,12 @@ static void handleWiFiSavedActionTap(uint32_t idx) {
         showWiFiMenu();
       }
     }
-  } else {  // idx == 2: Forget — wifirm <ssid>, return to the saved list.
+  } else if (idx == 2) {  // Forget the same displayed entry, return to the list.
     cookie.targetNetSub = NET_SUB_WIFI_SAVED;
-    String line = String("wifirm ") + ssid;
-    DEBUG_G2F("[G2] WiFi: Forget saved '%s' via cmd_exec", ssid.c_str());
-    if (!g2SubmitHijackCommand(line.c_str(), cookie,
+    char line[32];
+    snprintf(line, sizeof(line), "wifirmid %lu", (unsigned long)selected.id);
+    DEBUG_G2F("[G2] WiFi: Forget saved '%s' via cmd_exec", selected.ssid.c_str());
+    if (!g2SubmitHijackCommand(line, cookie,
                                onWifiSavedListRefreshDone, nullptr)) {
       DEBUG_G2F("[G2] WiFi: Forget saved submit FAILED — no inline mutate");
     }
@@ -2169,7 +2144,7 @@ static void showHttpMenu() {
 
   g2ShowListPage(items, n);
   DEBUG_G2F("[G2] HTTP submenu shown (running=%d, https=%d, auto=%d)",
-            (server != nullptr) ? 1 : 0,
+            isHttpServerRunning() ? 1 : 0,
             gSettings.httpsEnabled ? 1 : 0,
             gSettings.httpAutoStart ? 1 : 0);
 }
@@ -2179,7 +2154,7 @@ static void showHttpMenu() {
 // state (running flag, label change) shows up as soon as cmd_exec finishes.
 static void onHttpMenuRefreshDone(bool /*ok*/, const char* /*result*/,
                                   const G2CmdCookie& cookie, void* /*userData*/) {
-  enqueueWifiRedrawFromCallback(cookie, &showHttpMenu, "HTTP-menu refresh");
+  (void)g2EnqueueRedraw(cookie, &showHttpMenu, "HTTP-menu refresh");
 }
 
 static void handleHttpTap(uint32_t idx) {

@@ -331,7 +331,7 @@ def parse_args(argv=None):
     mode.add_argument("--physical", action="store_true", help="Open S3 USB serial and use its BLE radio")
     parser.add_argument("--credentials", type=Path, default=HERE / "private" / "credentials.json")
     parser.add_argument("--run-root", type=Path, default=HERE / "private" / "ble-runs")
-    parser.add_argument("--s3-port", default="/dev/cu.usbmodem1101")
+    parser.add_argument("--s3-port", default=os.environ.get("HW1_S3_PORT", "/dev/ttyS3"))
     parser.add_argument("--name", default="HW1_P4_BLE", help="Exact BLE advertised server name")
     parser.add_argument("--ble-mac", help="Explicit observed BLE MAC, taking precedence over advertised name")
     parser.add_argument("--expected-mac", default=DEFAULT_MACS["p4"], help="Server ESP-NOW MAC for board identity check")

@@ -8,7 +8,7 @@
 // User System - User and session management command handlers
 // ============================================================================
 
-// CommandEntry is defined in system_utils.h (included by files that need it)
+// CommandEntry is defined in System_CommandRegistry.h (included by files that need it)
 // Forward declare here for header-only usage
 struct CommandEntry;
 
@@ -359,7 +359,7 @@ void cleanupOldBootAnchors(void* doc = nullptr);  // doc is StaticJsonDocument<8
 const char* cmd_login(const String& argsInput);
 const char* cmd_logout(const String& argsInput);
 
-// Export command registry for system_utils.cpp
+// Export command registry for System_CommandRegistry.cpp
 extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
 const char* cmd_user_approve(const String& argsInput);   // bump        — approval makes account real

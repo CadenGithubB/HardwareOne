@@ -14,14 +14,12 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/semphr.h>
 
 // FM Radio cache structure (always available for type-safe references).
-// Groups all sensor data fields under one mutex so readers (web API, OLED,
+// Groups all sensor data fields in one copied reading so readers (web API, OLED,
 // ESP-NOW broadcaster) get a consistent snapshot and writers (fmRadio task,
 // RDS callbacks) don't tear strings mid-update.
 struct FMRadioCache {
-  SemaphoreHandle_t mutex = nullptr;
   bool dataValid = false;
   unsigned long lastUpdate = 0;  // millis() of the last successful poll — feeds the sensor envelope's ts
   uint16_t frequency = 10390;    // Current frequency in 10kHz units (10390 = 103.9 MHz)
@@ -52,8 +50,10 @@ extern unsigned long gFmRadioLastStopTime;
 extern bool gRadioInitialized;      // Radio hardware initialization status
 extern TaskHandle_t gFmRadioTaskHandle;
 
-// FM Radio data cache (mutex-protected)
-extern FMRadioCache gFmRadioCache;
+// Fixed-size copy under a private critical section. Enabled builds always
+// acquire it; timeoutMs is retained for snapshot-interface compatibility.
+// No I2C, allocation or formatting occurs in the critical section.
+bool fmRadioCacheSnapshot(FMRadioCache& out, uint32_t timeoutMs = 10);
 
 // Command handlers
 const char* cmd_fmradio(const String& argsInput);
@@ -74,10 +74,17 @@ void fmRadioPoll();  // Called periodically to update RDS data
 // JSON data builder (for web API)
 int fmRadioBuildDataJSON(char* buf, size_t bufSize);
 
-// Command registry (for system_utils.cpp module list)
+// Command registry (for System_CommandRegistry.cpp module list)
 struct CommandEntry;
 extern const CommandEntry fmRadioCommands[];
 extern const size_t fmRadioCommandsCount;
 
+#else
+inline bool fmRadioCacheSnapshot(FMRadioCache& out, uint32_t timeoutMs = 10) {
+  (void)timeoutMs;
+  out = {};
+  return false;
+}
+inline int fmRadioBuildDataJSON(char*, size_t) { return 0; }
 #endif // ENABLE_FM_RADIO
 #endif // I2CSENSOR_RDA5807_H

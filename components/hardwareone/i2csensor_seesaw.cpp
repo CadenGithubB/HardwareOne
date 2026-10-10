@@ -1,4 +1,5 @@
 #include "i2csensor_seesaw.h"
+#include "HAL_InputInternal.h"
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
@@ -17,8 +18,6 @@
 #include "OLED_Display.h"
 #include "System_Command.h"
 #include "System_Debug.h"
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
@@ -32,7 +31,7 @@ TaskHandle_t gInputTaskHandle = nullptr;
 // we defer until gamepadBus is resolved. All callsites use `->` and check
 // for nullptr. PSRAM is preferred with internal fallback. The object is retained
 // across stops/retries; any future teardown must pair placement-new with ps_delete.
-Adafruit_seesaw* gGamepadSeesaw = nullptr;
+static Adafruit_seesaw* gGamepadSeesaw = nullptr;
 
 // Resolve the gamepad's bus + TwoWire* from settings. Returns false if the
 // bus isn't initialized (e.g., gamepadBus=1 but i2c2BusEnabled=false).
@@ -53,7 +52,6 @@ static bool gamepadResolveBus(uint8_t* outBus, TwoWire** outWire) {
 // ============================================================================
 // Gamepad/Control Cache (owned by this module)
 // ============================================================================
-InputCache gInputCache;
 
 // Gamepad sensor state (definitions)
 bool gInputRunning = false;
@@ -110,6 +108,10 @@ const char* cmd_gamepad(const String& argsInput) {
 // ============================================================================
 
 bool inputStartInternal() {
+  if (gInputRunning) return true;
+  // Do not reinitialize resources while the previous input task is exiting.
+  if (gInputTaskHandle != nullptr) return false;
+
   DEBUG_CLIF("[QUEUE] Processing Gamepad start from queue");
 
    gamepadLogHeap("start.begin");
@@ -120,26 +122,11 @@ bool inputStartInternal() {
     return false;
   }
 
-  // Create cache mutex if not already created
-  if (!gInputCache.mutex) {
-    gInputCache.mutex = xSemaphoreCreateMutex();
-    if (!gInputCache.mutex) {
-      ERROR_INPUTF("Failed to create cache mutex");
-      return false;
-    }
-    DEBUG_INPUT_LIFECYCLEF("[GAMEPAD] Cache mutex created");
+  if (!inputCacheInit()) {
+    ERROR_INPUTF("Failed to create input cache mutex");
+    return false;
   }
-
-  // Clean up any stale cache from previous run BEFORE starting
-  {
-    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(100), "gamepad.cleanStaleCache");
-    if (g.held) {
-      gInputCache.dataValid = false;
-      gInputCache.buttons = 0;
-      gInputCache.joyX = 0;
-      gInputCache.joyY = 0;
-    }
-  }
+  if (!inputCacheReset(0, 0, 0, false)) return false;
 
   // Initialize Seesaw
   if (!gamepadInit()) {
@@ -157,13 +144,12 @@ bool inputStartInternal() {
   DEBUG_INPUT_LIFECYCLEF("[GAMEPAD] inputStartInternal: Set gInputRunning=true (was %d), gInputConnected=%d", prev, gInputConnected);
   if (gInputRunning != prev) sensorStatusBumpWith("opengamepad@enabled");
 
-  // Broadcast sensor status to ESP-NOW master
-#if ENABLE_ESPNOW
-  broadcastSensorStatus(REMOTE_SENSOR_INPUT, true);
-#endif
 
   // Create dedicated gamepad task
   if (!createInputTask()) {
+    gInputRunning = false;
+    gInputConnected = false;
+    (void)inputCacheInvalidate();
     ERROR_INPUTF("Failed to create Gamepad task");
     return false;
   }
@@ -251,8 +237,8 @@ bool gamepadInit() {
   // Set gInputConnected OUTSIDE the lambda (like IMU pattern)
   if (initSuccess) {
     gInputConnected = true;
-    DEBUG_INPUT_LIFECYCLEF("[GAMEPAD] SUCCESS: gInputConnected=%d gInputRunning=%d &enabled=%p &connected=%p &cache=%p",
-                  gInputConnected, gInputRunning, (void*)&gInputRunning, (void*)&gInputConnected, (void*)&gInputCache);
+    DEBUG_INPUT_LIFECYCLEF("[GAMEPAD] SUCCESS: gInputConnected=%d gInputRunning=%d &enabled=%p &connected=%p",
+                  gInputConnected, gInputRunning, (void*)&gInputRunning, (void*)&gInputConnected);
     broadcastOutput("Gamepad (Seesaw) initialized");
   } else {
     ERROR_INPUTF("FAILED: gamepadInit returning false");
@@ -344,9 +330,8 @@ bool gamepadInitConnection() {
         (void)gGamepadSeesaw->analogRead(15);
       });
 
-      gInputRunning = true;
       gInputConnected = true;
-      DEBUG_INPUT_LIFECYCLEF("[GAMEPAD_DEBUG] gamepadInitConnection: &enabled=%p &connected=%p &gInputCache=%p", (void*)&gInputRunning, (void*)&gInputConnected, (void*)&gInputCache);
+      DEBUG_INPUT_LIFECYCLEF("[GAMEPAD_DEBUG] gamepadInitConnection: &enabled=%p &connected=%p", (void*)&gInputRunning, (void*)&gInputConnected);
       
       INFO_INPUT_LIFECYCLEF("Gamepad connected on attempt %d", attempt);
       snprintf(msg, sizeof(msg), "Gamepad: re-init success (attempt %d)", attempt);
@@ -417,12 +402,12 @@ const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadComm
 // ============================================================================
 
 // Build gamepad JSON directly into buffer from cache. Safe to call from any task —
-// only reads gInputCache under its own mutex. Returns bytes written or 0.
+// only reads the shared input reading under its own mutex. Returns bytes written or 0.
 int gamepadBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
-  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(50), "gamepad.buildJSON");
-  if (!g.held) {
+  InputCache reading;
+  if (!inputCacheSnapshot(reading, 50)) {
     // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
     int pos = sensorEnvelopeBegin(buf, bufSize, false, gInputConnected, 0);
     if (pos == 0) return 0;
@@ -431,12 +416,12 @@ int gamepadBuildDataJSON(char* buf, size_t bufSize) {
     return pos + n;
   }
 
-  int pos = sensorEnvelopeBegin(buf, bufSize, gInputCache.dataValid, gInputConnected, gInputCache.lastUpdate);
+  int pos = sensorEnvelopeBegin(buf, bufSize, reading.dataValid, gInputConnected, reading.lastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
                    ",\"x\":%d,\"y\":%d,\"buttons\":%lu}",
-                   gInputCache.joyX, gInputCache.joyY,
-                   (unsigned long)gInputCache.buttons);
+                   reading.joyX, reading.joyY,
+                   (unsigned long)reading.buttons);
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;
   return pos + n;
 }
@@ -465,8 +450,8 @@ void inputTask(void* parameter) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!gInputRunning) {
       gInputConnected = false;
-      gInputCache.dataValid = false;
-      SENSOR_TASK_EXIT(INPUT);
+      if (!inputCacheInvalidate()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+      SENSOR_TASK_EXIT(INPUT, gInputTaskHandle);
     }
 
     // Stack watermark tracking + safety bailout
@@ -493,8 +478,10 @@ void inputTask(void* parameter) {
     // Periodic state logging (every 60 seconds)
     if ((nowMs - lastStateLog) >= 60000) {
       lastStateLog = nowMs;
+      InputCache reading;
+      inputCacheSnapshot(reading);
       DEBUG_INPUT_POLLINGF("[GAMEPAD_TASK] State: enabled=%d connected=%d paused=%d dataValid=%d",
-                    gInputRunning, gInputConnected, gSensorPollingPaused, gInputCache.dataValid);
+                    gInputRunning, gInputConnected, gSensorPollingPaused, reading.dataValid);
     }
 
     if (gInputRunning && gInputConnected && !pollPaused((uint8_t)gSettings.inputBus)) {
@@ -620,42 +607,11 @@ void inputTask(void* parameter) {
             filtY = (int)lroundf(kAlpha * rawY + (1.0f - kAlpha) * filtY);
           }
 
-          {
-            SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(50), "gamepad.pollWrite");
-            if (g.held) {
-            // Only increment seq when data actually changes to avoid unnecessary OLED re-renders
-            // Use threshold of 2 for joystick to ignore ADC noise/rounding jitter
-            bool changed = (gInputCache.buttons != buttons ||
-                            abs(gInputCache.joyX - filtX) > 1 ||
-                            abs(gInputCache.joyY - filtY) > 1);
-            // Latch press edges into the accumulator so the UI never misses a tap.
-            // Active-low: 1 = unpressed, 0 = pressed.
-            //
-            // Two sources of press evidence:
-            //
-            // 1. Debounce-confirmed press: button state changed and debounce accepted it.
-            //    Covers normal (held) presses where the button is still down this poll.
-            uint32_t confirmedPressed = gInputCache.buttons & ~buttons;
-            //
-            // 2. INTFLAG-based press: hardware edge-latch fired this poll interval.
-            //    Covers quick taps released before the second confirmation poll — the
-            //    debounce filter would discard these entirely, but INTFLAG saw the edge.
-            //    Condition: intflag set AND (currently pressed OR was previously unpressed).
-            //    The "was previously unpressed" arm catches press+release within one interval.
-            //    The "currently pressed" arm catches first-detected holds (belt-and-suspenders).
-            uint32_t intflagPressed = intflags & (~buttons | lastButtons);
-            //
-            gInputCache.buttonPressedAccum |= confirmedPressed | intflagPressed;
-            gInputCache.buttons = buttons;  // Only changes after debounce
-            gInputCache.joyX = filtX;
-            gInputCache.joyY = filtY;
-            gInputCache.lastUpdate = nowMs;
-            gInputCache.dataValid = true;
-            if (changed) gInputCache.seq++;
-            }
-          }  // gamepad guard releases here
+          // The hardware latch preserves clicks completed between debounce polls.
+          inputPublishGamepadState(buttons, filtX, filtY,
+                                   intflags & (~buttons | lastButtons), nowMs);
 
-          // ESP-NOW broadcaster reads gamepadBuildDataJSON() on demand from gInputCache
+          // ESP-NOW broadcaster reads gamepadBuildDataJSON() on demand from the shared input reading
           // (paced per-sensor in gSensorSpecs — 100ms for snappy button-press response).
         } else if (!readSuccess) {
           // Actual I2C transaction failure
@@ -666,7 +622,7 @@ void inputTask(void* parameter) {
           
           if (i2cShouldAutoDisable(I2C_ADDR_GAMEPAD, (uint8_t)gSettings.inputBus)) {
             ERROR_INPUTF("[GAMEPAD_TASK] Too many consecutive failures - auto-disabling");
-            handleDeviceStopped(I2C_DEVICE_INPUT);
+            requestSensorStop(I2C_DEVICE_INPUT);
             DEBUG_INPUT_LIFECYCLEF("Gamepad auto-disabled: %u consecutive I2C failures", errors);
             sensorStatusBumpWith("gamepad@auto_disabled");
             logSystemEvent("SENSOR", "Gamepad auto-disabled after %u consecutive I2C failures", errors);
@@ -681,7 +637,7 @@ void inputTask(void* parameter) {
           }
           if (consecutiveInvalidReads >= INVALID_READ_AUTO_DISABLE_THRESHOLD) {
             ERROR_INPUTF("[GAMEPAD_TASK] %u consecutive invalid reads - auto-disabling gamepad", consecutiveInvalidReads);
-            handleDeviceStopped(I2C_DEVICE_INPUT);
+            requestSensorStop(I2C_DEVICE_INPUT);
             sensorStatusBumpWith("gamepad@invalid_data_disabled");
             logSystemEvent("SENSOR", "Gamepad auto-disabled after %u consecutive invalid reads (device likely disconnected)", consecutiveInvalidReads);
             { char det[24]; snprintf(det, sizeof(det), "%u invalid reads", (unsigned)consecutiveInvalidReads);
@@ -703,20 +659,11 @@ void inputTask(void* parameter) {
 // Gamepad Accessor Functions (for MQTT and other modules)
 // ============================================================================
 
-int gamepadGetX() {
-  if (!gInputConnected || !gInputCache.dataValid) return 0;
-  return gInputCache.joyX;
-}
+int gamepadGetX() { return inputGetX(); }
 
-int gamepadGetY() {
-  if (!gInputConnected || !gInputCache.dataValid) return 0;
-  return gInputCache.joyY;
-}
+int gamepadGetY() { return inputGetY(); }
 
-uint32_t gamepadGetButtons() {
-  if (!gInputConnected || !gInputCache.dataValid) return 0;
-  return gInputCache.buttons;
-}
+uint32_t gamepadGetButtons() { return inputGetButtonsRaw(); }
 
 // ============================================================================
 // Gamepad OLED Mode

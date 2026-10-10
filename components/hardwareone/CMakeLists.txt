@@ -7,13 +7,10 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${hw_cfg_file}")
 # decide which files reach the compiler. A "0" default means "skip it"
 # rather than "include it" so a parse failure is fail-safe (no spurious
 # compile errors) and easy to spot in build output.
-set(HW_CFG_NETWORK_FEATURE_LEVEL 0)
-set(HW_CFG_WEB_FEATURE_LEVEL 0)
 set(HW_CFG_I2C_FEATURE_LEVEL 0)
 set(HW_CFG_DISPLAY_TYPE 0)
 set(HW_CFG_INPUT_DEVICE_TYPE 0)  # 0 = NONE; header values 1/2 select a driver
 set(HW_CFG_ENABLE_MQTT 0)
-set(HW_CFG_ENABLE_HTTPS 0)
 set(HW_CFG_ENABLE_LLM_BACKEND 0)         # the LLM feature (registry/chat/commands/surfaces)
 set(HW_CFG_ENABLE_LLM_SOURCE_ONBOARD 0)  # on-device PSRAM engine as a source
 set(HW_CFG_ENABLE_LLM_SOURCE_CM5 0)      # CM5 co-processor as a source
@@ -68,20 +65,26 @@ if(EXISTS "${hw_cfg_file}")
             "HardwareOne feature profile: ${HW1_DEPLOYMENT_FEATURE_FILE}")
     endif()
 
+    # Ordinary named feature configurations are generated in the build tree.
+    # Like board profiles, use a build property so the requirement-expansion
+    # script sees the exact same file as the compiler and root build.
+    idf_build_get_property(_hw_feature_config_file HW1_FEATURE_CONFIG_FILE)
+    if(_hw_feature_config_file)
+        if(NOT EXISTS "${_hw_feature_config_file}")
+            message(FATAL_ERROR
+                "HW1 feature configuration header is missing: ${_hw_feature_config_file}")
+        endif()
+        file(READ "${_hw_feature_config_file}" _hw_feature_config)
+        set(HW_CFG_CONTENT "${_hw_feature_config}\n${HW_CFG_CONTENT}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${_hw_feature_config_file}")
+        message(STATUS "HardwareOne feature configuration: ${_hw_feature_config_file}")
+    endif()
+
     # Helper-equivalent: extract `#define NAME <integer>` from the header
     # and bind it to the matching HW_CFG_* variable. Inline-repeated
     # because CMake macros over file scope add more rope than this is
     # worth for ~10 flags.
-    string(REGEX MATCH "#define[ \t]+NETWORK_FEATURE_LEVEL[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_NETWORK_FEATURE_LEVEL "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+WEB_FEATURE_LEVEL[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_WEB_FEATURE_LEVEL "${CMAKE_MATCH_1}")
-    endif()
-
     string(REGEX MATCH "#define[ \t]+I2C_FEATURE_LEVEL[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_I2C_FEATURE_LEVEL "${CMAKE_MATCH_1}")
@@ -100,11 +103,6 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+ENABLE_MQTT[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_MQTT "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_HTTPS[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_HTTPS "${CMAKE_MATCH_1}")
     endif()
 
     # LLM: one feature flag plus one flag per answer SOURCE. Each must stay a
@@ -197,24 +195,12 @@ if(EXISTS "${hw_cfg_file}")
     endif()
 endif()
 
-# XIAO carrier policy: it has no built-in I2C display/input hardware, and its
-# Bluetooth/G2 image needs the space otherwise consumed by MQTT and that stack.
-# Mirror the board-only System_BuildConfig.h override above so the source list
-# excludes the same implementations rather than compiling guarded-empty TUs.
-if(DEFINED ENV{HW_BOARD} AND "$ENV{HW_BOARD}" STREQUAL "xiao_s3")
-    set(HW_CFG_ENABLE_MQTT 0)
-    set(HW_CFG_I2C_FEATURE_LEVEL 0)
-    set(HW_CFG_DISPLAY_TYPE 0)
-    set(HW_CFG_INPUT_DEVICE_TYPE 0)
-    message(STATUS "XIAO board profile: MQTT/I2C/OLED/input EXCLUDED for Bluetooth/G2 headroom")
-endif()
-
-# The active board's sdkconfig is ground truth for whether the Bluedroid stack
-# exists — mirror of the System_BuildConfig.h derived rule. A board that drops
-# the stack (boards/qtpy_esp32.defaults: CONFIG_BT_ENABLED=n) force-downgrades
-# the app-side BT flag so this file's source-list filter matches what the
-# per-file #if gates resolve to. CONFIG_* comes from the per-board sdkconfig;
-# during early expansion it is unset, which only affects the early no-op pass.
+# The resolved sdkconfig determines whether Bluedroid exists. Mirror the
+# System_BuildConfig.h dependency rule so source selection matches C++ guards.
+# Optional SDK policy comes from presets and a named/deployment selection;
+# presets/qtpy_esp32.sdkconfig.defaults keeps the lean QT Py default BT-free.
+# CONFIG_* is unset during early requirement expansion, which only affects
+# that early no-op pass.
 if(NOT CONFIG_BT_ENABLED OR NOT CONFIG_BT_BLUEDROID_ENABLED)
     set(HW_CFG_ENABLE_BLUETOOTH 0)
 endif()
@@ -223,11 +209,6 @@ endif()
 if(NOT (HW_CFG_ENABLE_BLUETOOTH GREATER 0 AND HW_CFG_ENABLE_G2_GLASSES GREATER 0))
     set(HW_CFG_ENABLE_R1_HEALTH 0)
     set(HW_CFG_ENABLE_G2_TESTSUITE 0)
-endif()
-
-set(HW_CFG_ENABLE_HTTP_SERVER 0)
-if(HW_CFG_NETWORK_FEATURE_LEVEL GREATER_EQUAL 2 AND HW_CFG_WEB_FEATURE_LEVEL GREATER 0)
-    set(HW_CFG_ENABLE_HTTP_SERVER 1)
 endif()
 
 # Coarse OLED gate: skip every OLED_*.cpp (except OLED_Utils.cpp, which
@@ -289,6 +270,7 @@ set(hardwareone_srcs
         System_CLIConfirm.cpp
         System_SetupWizardMode.cpp
         System_Command.cpp
+        System_CommandRegistry.cpp
         System_CrashRecord.cpp
         System_OTA.cpp
         System_OTASafety.cpp
@@ -312,6 +294,7 @@ set(hardwareone_srcs
         System_I2C_Manager.cpp
         System_PollPause.cpp
         System_Icons.cpp
+        System_Icons_Lookup.cpp
         HAL_Input.cpp
         HAL_Display.cpp
         HAL_JPEG.cpp
@@ -330,7 +313,6 @@ set(hardwareone_srcs
         System_MemUtil.cpp
         System_MemTracker.cpp
         System_MemoryMonitor.cpp
-        System_Hardware.cpp
         System_SensorLogging.cpp
         System_CaptureCrypto.cpp
         System_SensorStubs.cpp
@@ -376,6 +358,8 @@ set(hardwareone_srcs
         System_MeshPeers.cpp
         System_SelfDevice.cpp
         System_Clock.cpp
+        System_NTP.cpp
+        System_WiFiNetworks.cpp
 )
 
 # cm5 power and cm5 fan share one module (System_Cm5HostControl.cpp) but keep
@@ -554,6 +538,8 @@ set(hardwareone_requires
         json
         mbedtls
         esp_wifi
+        esp_http_server
+        esp_https_server
         esp32-camera
         espressif__esp_jpeg
         fatfs
@@ -577,41 +563,35 @@ else()
     message(STATUS "MQTT support DISABLED")
 endif()
 
-if(HW_CFG_ENABLE_HTTP_SERVER)
-    list(APPEND hardwareone_srcs
-            WebServer_Events.cpp
-            WebServer_Server.cpp
-            WebServer_Utils.cpp
-            WebAssets.cpp
-            WebPage_Sensors.cpp
-            WebPage_ESPNow.cpp
-            WebPage_ESPNow_Metadata.cpp
-            WebPage_Bond.cpp
-            WebPage_Bluetooth.cpp
-            WebPage_Speech.cpp
-            WebPage_MQTT.cpp
-            WebPage_Battery.cpp
-            WebPage_Power.cpp
-            WebServer_MigrationTool.cpp
-    )
-    # Maps / Games web pages: tied to their feature flags. Their .cpp
-    # files have `#if ENABLE_WEB_*` guards but skipping them at CMake
-    # level avoids parsing 1000s of lines of guarded-out content on
-    # every build.
-    if(HW_CFG_ENABLE_MAPS GREATER 0)
-        list(APPEND hardwareone_srcs WebPage_Maps.cpp)
-    endif()
-    if(HW_CFG_ENABLE_R1_HEALTH GREATER 0)
-        list(APPEND hardwareone_srcs WebPage_R1_Health.cpp)
-    endif()
-    if(HW_CFG_ENABLE_GAMES GREATER 0 AND HW_CFG_ENABLE_WEB_GAME_DARKROOM GREATER 0)
-        list(APPEND hardwareone_srcs WebPage_DarkRoom.cpp)
-    endif()
-    list(APPEND hardwareone_requires esp_http_server)
-    if(HW_CFG_ENABLE_HTTPS GREATER 0)
-        list(APPEND hardwareone_requires esp_https_server)
-        message(STATUS "HTTPS support ENABLED")
-    endif()
+# Network/web policy belongs to System_BuildConfig.h. These sources already
+# guard their implementations, including migration restore without the web UI.
+# Keep their SDK requirements above available during IDF's early discovery pass;
+# unused implementations are removed by the compiler/linker in lean builds.
+list(APPEND hardwareone_srcs
+    WebServer_Events.cpp
+    WebServer_Server.cpp
+    WebServer_Utils.cpp
+    WebAssets.cpp
+    WebPage_Sensors.cpp
+    WebPage_ESPNow.cpp
+    WebPage_ESPNow_Metadata.cpp
+    WebPage_Bond.cpp
+    WebPage_Bluetooth.cpp
+    WebPage_Speech.cpp
+    WebPage_MQTT.cpp
+    WebPage_Battery.cpp
+    WebPage_Power.cpp
+    WebServer_MigrationTool.cpp
+)
+# Application source filters remain independent of the network/web selection.
+if(HW_CFG_ENABLE_MAPS GREATER 0)
+    list(APPEND hardwareone_srcs WebPage_Maps.cpp)
+endif()
+if(HW_CFG_ENABLE_R1_HEALTH GREATER 0)
+    list(APPEND hardwareone_srcs WebPage_R1_Health.cpp)
+endif()
+if(HW_CFG_ENABLE_GAMES GREATER 0 AND HW_CFG_ENABLE_WEB_GAME_DARKROOM GREATER 0)
+    list(APPEND hardwareone_srcs WebPage_DarkRoom.cpp)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -649,9 +629,7 @@ if(HW_CFG_ENABLE_LLM_BACKEND GREATER 0)
         list(APPEND hardwareone_srcs System_LLMCm5.cpp)
         message(STATUS "LLM source: CM5 co-processor ENABLED")
     endif()
-    if(HW_CFG_ENABLE_HTTP_SERVER)
-        list(APPEND hardwareone_srcs WebPage_LLM.cpp)
-    endif()
+    list(APPEND hardwareone_srcs WebPage_LLM.cpp)
     # OLED modes are always compiled and self-gate on ENABLE_OLED_DISPLAY —
     # see the OLED block above; no CMake-side display gate belongs here.
     list(APPEND hardwareone_srcs OLED_Mode_LLM.cpp)
@@ -805,17 +783,15 @@ endif()
 # Exact, generated gzip assets are committed for Arduino and other build systems.
 # Always check source/header consistency, including incremental builds; never
 # modify the checkout while CMake/Ninja are running.
-if(HW_CFG_ENABLE_HTTP_SERVER)
-    if(PYTHON)
-        set(_hw_web_python "${PYTHON}")
-    else()
-        set(_hw_web_python "${Python3_EXECUTABLE}")
-    endif()
-    add_custom_target(hardwareone_check_web_assets
-        COMMAND "${_hw_web_python}"
-            "${CMAKE_CURRENT_LIST_DIR}/web_assets/generate.py" --check
-        COMMENT "Checking embedded web assets"
-        VERBATIM
-    )
-    add_dependencies(${COMPONENT_LIB} hardwareone_check_web_assets)
+if(PYTHON)
+    set(_hw_web_python "${PYTHON}")
+else()
+    set(_hw_web_python "${Python3_EXECUTABLE}")
 endif()
+add_custom_target(hardwareone_check_web_assets
+    COMMAND "${_hw_web_python}"
+        "${CMAKE_CURRENT_LIST_DIR}/web_assets/generate.py" --check
+    COMMENT "Checking embedded web assets"
+    VERBATIM
+)
+add_dependencies(${COMPONENT_LIB} hardwareone_check_web_assets)

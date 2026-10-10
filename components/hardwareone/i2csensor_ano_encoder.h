@@ -4,7 +4,7 @@
 #include "System_BuildConfig.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 // ANO Rotary Encoder Breakout (Adafruit, seesaw-based, default I2C 0x49).
 // Drop-in replacement for the Mini Gamepad on the same STEMMA QT bus.
@@ -44,7 +44,6 @@
 #define ANO_AXIS_HORIZONTAL 1
 
 struct AnoEncoderCache {
-  SemaphoreHandle_t mutex = nullptr;
   uint32_t buttons = 0;              // Current button state (active-high after invert)
   uint32_t buttonPressedAccum = 0;   // Latched press edges — OR'd in by task, read+cleared by UI
   int32_t  encoderPosition = 0;      // Monotonic absolute count
@@ -60,8 +59,7 @@ struct AnoEncoderCache {
 class String;
 class Adafruit_seesaw;
 
-extern Adafruit_seesaw* gAnoSeesaw;
-extern AnoEncoderCache  gAnoEncoderCache;
+bool anoEncoderCacheSnapshot(AnoEncoderCache& out, uint32_t timeoutMs = 10);
 
 extern bool gAnoEncoderEnabled;
 extern bool gAnoEncoderConnected;
@@ -95,5 +93,11 @@ struct CommandEntry;
 extern const CommandEntry anoEncoderCommands[];
 extern const size_t anoEncoderCommandsCount;
 
+#else
+inline bool anoEncoderCacheSnapshot(AnoEncoderCache& out, uint32_t timeoutMs = 10) {
+  (void)timeoutMs;
+  out = {};
+  return false;
+}
 #endif // ENABLE_ANO_ENCODER
 #endif // I2CSENSOR_ANO_ENCODER_H

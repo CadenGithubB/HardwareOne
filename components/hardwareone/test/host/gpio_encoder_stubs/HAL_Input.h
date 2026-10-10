@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <assert.h>
+#include <stdlib.h>
+#define ENABLE_OLED_INPUT 1
+using StaticSemaphore_t = bool;
 
 using SemaphoreHandle_t = void*;
 using TaskHandle_t = void*;
@@ -24,7 +27,8 @@ using portMUX_TYPE = int;
 namespace fixture {
 struct SampleComplete {};
 extern uint32_t now;
-extern bool locked;
+extern bool locked, cacheBusy, failTaskCreate, busyAfterTaskCreate;
+extern int lockDepth;
 extern int levels[55], reads[55], modes[55], resets[55];
 extern void (*interrupts[55])();
 extern int taskCreates, abstractionInits;
@@ -44,28 +48,38 @@ inline void attachInterrupt(int pin, void (*callback)(), int mode) {
 }
 inline void detachInterrupt(int pin) { fixture::interrupts[pin] = nullptr; }
 inline SemaphoreHandle_t xSemaphoreCreateMutex() { return &fixture::locked; }
+inline SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t* storage) { return storage; }
 inline int xSemaphoreTake(SemaphoreHandle_t mutex, TickType_t wait) {
   (void)wait;
-  assert(mutex && !fixture::locked);
-  fixture::locked = true;
+  assert(mutex);
+  if (mutex != &fixture::locked && fixture::cacheBusy) return 0;
+  bool& held = *static_cast<bool*>(mutex);
+  assert(!held);
+  held = true;
+  ++fixture::lockDepth;
   return pdTRUE;
 }
 inline void xSemaphoreGive(SemaphoreHandle_t mutex) {
-  assert(mutex && fixture::locked);
-  fixture::locked = false;
+  assert(mutex && *static_cast<bool*>(mutex));
+  *static_cast<bool*>(mutex) = false;
+  --fixture::lockDepth;
 }
+class SensorCacheGuard {
+ public:
+  bool held;
+  SemaphoreHandle_t mutex;
+  SensorCacheGuard(SemaphoreHandle_t value, TickType_t wait, const char*)
+      : held(value && xSemaphoreTake(value, wait) == pdTRUE), mutex(value) {}
+  ~SensorCacheGuard() { if (held) xSemaphoreGive(mutex); }
+};
 inline void vTaskDelay(TickType_t interval) {
-  assert(!fixture::locked);
+  assert(!fixture::locked && fixture::lockDepth == 0);
   fixture::lastDelay = interval;
   throw fixture::SampleComplete{};
 }
 
-struct InputCache {
-  SemaphoreHandle_t mutex = nullptr;
-  uint32_t buttons = UINT32_MAX;
-  uint32_t buttonPressedAccum = 0;
-  int joyX = JOYSTICK_CENTER, joyY = JOYSTICK_CENTER;
-  bool dataValid = false;
-  uint32_t seq = 0, lastUpdate = 0;
-};
+#include "input_reading_under_test.h"
+bool inputCacheSnapshot(InputCache&, uint32_t timeoutMs = 10);
+bool inputConsumeSnapshot(InputCache&, uint32_t timeoutMs = 10);
+bool inputActivitySequence(uint32_t&, uint32_t timeoutMs = 10);
 inline void inputAbstractionInit() { ++fixture::abstractionInits; }

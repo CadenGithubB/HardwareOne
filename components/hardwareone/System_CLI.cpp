@@ -8,7 +8,7 @@
 #include "System_Debug.h"
 #include "System_HelpPagerCore.h"
 #include "System_Utils.h"
-#include "System_WiFi.h"
+#include "System_WiFiNetworks.h"
 #include "WebServer_Utils.h"
 
 // External dependencies from main .ino
@@ -89,7 +89,7 @@ static HelpRenderSnapshot captureHelpRenderSnapshot(
   snapshot.connected =
       !sensor || !module->isConnected || module->isConnected();
 #if ENABLE_WIFI
-  snapshot.wifiNetworkCount = gWifiNetworkCount;
+  snapshot.wifiNetworkCount = wifiNetworkCount();
 #endif
   return snapshot;
 }
@@ -561,7 +561,7 @@ static void broadcastHelpUsageIndented(const char* usage) {
         formatted[0] = '\0';
 
 #if ENABLE_WIFI
-        snprintf(formatted, sizeof(formatted), line, gWifiNetworkCount);
+        snprintf(formatted, sizeof(formatted), line, wifiNetworkCount());
 #else
         strncpy(formatted, line, sizeof(formatted) - 1);
         formatted[sizeof(formatted) - 1] = '\0';

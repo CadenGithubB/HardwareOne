@@ -1,8 +1,6 @@
 #pragma once
 
-#include <Arduino.h>
-
-#include "System_Utils.h"
+#include "System_CommandRegistry.h"
 
 // Native ESP-IDF recovery OTA integration for the main HardwareOne image.
 // The command surface is always registered so ordinary builds can explain why

@@ -63,6 +63,16 @@ size_t getPowerCpuFrequencyCount();
 uint32_t getPowerCpuFrequencyMhz(size_t index);
 bool isPowerCpuFrequencySupported(uint32_t mhz);
 
+// Change the clock through the HAL after draining existing I2C buses. This does
+// not initialize buses, change settings or publish events. Returns false when
+// another change is in progress, a bus cannot be acquired, or the HAL/readback
+// fails. Lock refusal leaves the clock unchanged; a HAL failure may require the
+// caller to inspect the live clock. Optional outClockChanged reports only a
+// change made by this call, even on HAL failure; refusal/no-op sets it false.
+// The caller chooses active/idle policy.
+// Task context only; call outside I2C/SPI transactions and clock callbacks.
+bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged = nullptr);
+
 // False if the target clock cannot be applied; no success event is emitted.
 bool applyPowerMode(uint8_t mode);
 void checkAutoPowerMode();

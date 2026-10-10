@@ -1,7 +1,5 @@
 /**
- * NeoPixel LED Module - QT Py ESP32 built-in RGB LED control
- * 
- * Controls the single built-in NeoPixel LED on the QT Py board
+ * NeoPixel LED control for boards with an addressable RGB LED
  */
 
 #ifndef SYSTEM_NEOPIXEL_H
@@ -12,9 +10,6 @@
 // stub branch would be chosen there and collide with the real definitions.
 #include "System_BuildConfig.h"
 #include <Arduino.h>
-#if ENABLE_NEOPIXEL
-#include <Adafruit_NeoPixel.h>
-#endif
 
 // RGB color structure
 struct RGB {
@@ -66,9 +61,6 @@ void boardPowerRailInit();
 
 #if ENABLE_NEOPIXEL
 
-// Global NeoPixel instance
-extern Adafruit_NeoPixel pixels;
-
 // LED control functions
 void initNeoPixelLED();
 void setLEDColor(RGB color);
@@ -104,7 +96,7 @@ RGB rainbowColor(int step, int maxSteps);
 String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRGB);
 
 #if ENABLE_NEOPIXEL
-// NeoPixel command registry (for system_utils.cpp)
+// NeoPixel command registry (for System_CommandRegistry.cpp)
 struct CommandEntry;
 extern const CommandEntry neopixelCommands[];
 extern const size_t neopixelCommandsCount;

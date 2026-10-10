@@ -12,7 +12,8 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_Clock.h"  // Clock::applyTimezone — keep libc TZ in step with the picker
-#include "System_Mutex.h"  // SensorCacheGuard
+#include "System_NTP.h"
+#include "System_WiFiNetworks.h"
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -24,7 +25,6 @@
 #include "HAL_Display.h"
 #include "HAL_Input.h"
 extern bool oledConnected;
-extern InputCache gInputCache;
 // OLED page handlers for ESP-NOW and MQTT (defined in OLED_SetupWizard.cpp)
 void handleOLEDESPNowPage(SetupWizardResult& result, bool& running);
 void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
@@ -575,6 +575,25 @@ bool wizardShouldShowMQTT() {
 #else
   return false;
 #endif
+}
+
+void wizardApplyESPNowSettings(const SetupWizardResult& result) {
+  const String deviceName = result.espnowFriendlyName.length() > 0
+      ? result.espnowFriendlyName
+      : (gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : String("HardwareOne"));
+  gSettings.bleDeviceName = deviceName;
+  gSettings.espnowDeviceName = deviceName;
+  if (result.espnowFriendlyName.length() > 0) gSettings.espnowFriendlyName = result.espnowFriendlyName;
+  if (result.espnowRoom.length() > 0) gSettings.espnowRoom = result.espnowRoom;
+  if (result.espnowZone.length() > 0) gSettings.espnowZone = result.espnowZone;
+  gSettings.espnowStationary = result.espnowStationary;
+}
+
+void wizardApplyMQTTSettings(const SetupWizardResult& result) {
+  if (result.mqttHost.length() > 0) gSettings.mqttHost = result.mqttHost;
+  if (result.mqttPort > 0) gSettings.mqttPort = result.mqttPort;
+  if (result.mqttUser.length() > 0) gSettings.mqttUser = result.mqttUser;
+  if (result.mqttPassword.length() > 0) gSettings.mqttPassword = result.mqttPassword;
 }
 
 // ---- Shared "enable -> pick a mode" table (used by BOTH wizard engines) ----
@@ -1142,7 +1161,10 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
     if (deviceName.equalsIgnoreCase("b") || deviceName.equalsIgnoreCase("back")) {
       wizardPrevPage(); return;
     }
-    if (deviceName.equalsIgnoreCase("n")) { deviceName = currentName; goto espnow_done; }
+    if (deviceName.equalsIgnoreCase("n")) {
+      result.espnowFriendlyName = "";  // Early finish keeps the current name, not an earlier draft.
+      goto espnow_done;
+    }
     if (deviceName.length() == 0) deviceName = currentName;
   } else {
     // Not b/n/c — the user almost certainly typed their device name directly
@@ -1191,13 +1213,7 @@ espnow_done:
     return;
   }
 
-  // Apply to settings
-  gSettings.bleDeviceName = deviceName;
-  gSettings.espnowDeviceName = deviceName;
-  if (result.espnowFriendlyName.length() > 0) gSettings.espnowFriendlyName = result.espnowFriendlyName;
-  if (result.espnowRoom.length() > 0) gSettings.espnowRoom = result.espnowRoom;
-  if (result.espnowZone.length() > 0) gSettings.espnowZone = result.espnowZone;
-  gSettings.espnowStationary = result.espnowStationary;
+  wizardApplyESPNowSettings(result);
 
   Serial.println("ESP-NOW identity configured.");
 
@@ -1282,11 +1298,7 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
     return;
   }
 
-  // Apply to settings
-  if (result.mqttHost.length() > 0) gSettings.mqttHost = result.mqttHost;
-  if (result.mqttPort > 0) gSettings.mqttPort = result.mqttPort;
-  if (result.mqttUser.length() > 0) gSettings.mqttUser = result.mqttUser;
-  if (result.mqttPassword.length() > 0) gSettings.mqttPassword = result.mqttPassword;
+  wizardApplyMQTTSettings(result);
 
   Serial.println("MQTT broker configured.");
 
@@ -1775,10 +1787,40 @@ SetupWizardResult runSetupWizard() {
   return result;
 }
 
+void wizardSaveAndApplySettings(const SetupWizardResult& result) {
+  if (!result.completed) return;
+
+#if ENABLE_WIFI
+  if (result.wifiConfigured && result.wifiSSID.length() > 0) {
+    const WifiNetworkSaveResult wifiSaved =
+        saveSetupWiFiNetwork(result.wifiSSID, result.wifiPassword);
+    broadcastOutput(wifiNetworkSaveResultMessage(wifiSaved));
+    if (wifiSaved == WifiNetworkSaveResult::Accepted) {
+      broadcastOutput("WiFi network: " + result.wifiSSID);
+    }
+  }
+#endif
+
+  // logLevel lives in the split debug module, not settings.json. Flush both
+  // files after completion. Both writes are attempted even if one fails;
+  // runtime settings are still applied, with the save failure reported below.
+  const bool mainSaved = writeSettingsJson();
+  const bool debugSaved = writeDebugJson();
+  if (!mainSaved || !debugSaved) {
+    broadcastOutput("Warning: one or more setup settings files could not be saved.");
+  }
+  applySettings();
+#if ENABLE_WIFI
+  // Re-register SNTP with the wizard's NTP choice — applySettings() does
+  // not reach setupNTP(), so without this the new server only took effect
+  // on the next reboot.
+  if (WiFi.isConnected()) setupNTP();
+#endif
+}
+
 // ============================================================================
-// runAndApplyFeatureWizard - shared entry point for feature configuration.
-// Runs the wizard, saves any WiFi credentials entered, and persists settings.
-// Used by both cmd_featuresetup (CLI) and firstTimeSetupIfNeeded() (FTS).
+// Blocking first-time setup entry point. The CLI uses System_SetupWizardMode;
+// both engines save completed results through wizardSaveAndApplySettings.
 // ============================================================================
 
 // "Wizard owns Serial" flag — see header for rationale. RAII-style
@@ -1791,7 +1833,7 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
   // setter also clears any stale cancel flag from a prior wizard run.
   // idleTimeoutMs=0 means waitForSerialInputBlocking() waits forever (FTS
   // boot behavior). Non-zero means we cancel the wizard after that many
-  // milliseconds of idleness (CLI featuresetup behavior).
+  // milliseconds of idleness.
   setSerialWaitTimeout(idleTimeoutMs);
 
   // Claim Serial. While this is true, the main loop's CLI-input section
@@ -1806,7 +1848,7 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
 
   // Always reset to "wait forever" after the wizard returns so a later
   // FTS-style use of waitForSerialInputBlocking() doesn't inherit a stale
-  // CLI timeout.
+  // timeout.
   setSerialWaitTimeout(0);
 
   if (isWizardCancelRequested()) {
@@ -1832,35 +1874,7 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
     broadcastOutput(buf);
   }
 
-#if ENABLE_WIFI
-  if (result.wifiConfigured && result.wifiSSID.length() > 0) {
-    extern bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
-    extern void sortWiFiByPriority();
-    extern bool saveWiFiNetworks();
-    upsertWiFiNetwork(result.wifiSSID, result.wifiPassword, 1, false);
-    sortWiFiByPriority();
-    saveWiFiNetworks();
-    setSetting(gSettings.wifiAutoStart, true);
-    broadcastOutput("WiFi credentials saved: " + result.wifiSSID);
-  }
-#endif
-
-  // logLevel lives in the split debug module, not settings.json. Flush both
-  // files only after a completed wizard; the cancel/timeout returns above
-  // intentionally remain no-save paths.
-  const bool mainSaved = writeSettingsJson();
-  const bool debugSaved = writeDebugJson();
-  if (!mainSaved || !debugSaved) {
-    broadcastOutput("Warning: one or more setup settings files could not be saved.");
-  }
-  applySettings();
-#if ENABLE_WIFI
-  // Re-register SNTP with the wizard's NTP choice — applySettings() does
-  // not reach setupNTP(), so without this the new server only took effect
-  // on the next reboot.
-  extern void setupNTP();
-  if (WiFi.isConnected()) setupNTP();
-#endif
+  wizardSaveAndApplySettings(result);
 
   return result;
 }

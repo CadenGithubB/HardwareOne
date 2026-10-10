@@ -59,7 +59,7 @@ for source_path in ROOT.glob("*.cpp"):
     assert "LockedListingPermissions" not in source, source_path.name
     assert "System_Filesystem_Internal.h" not in source, source_path.name
 assert "LockedListingPermissions" not in ESPNOW_FS_LIST_CPP
-assert ESPNOW_FS_LIST_CPP.count("e.perms = getPermissions(") == 2
+assert ESPNOW_FS_LIST_CPP.count("e.perms = getPermissions(") == 1
 
 class_pos = FS_INTERNAL_H.index("class LockedListingPermissions final")
 class_text = FS_INTERNAL_H[class_pos:]
@@ -171,7 +171,7 @@ assert "permissionsForResolvedRole(normalizedPath, ctx.scope" in one_shot
 listing = function_body(FS_CPP, "static bool buildFilesListingImpl")
 assert "std::optional<FsInternal::LockedListingPermissions>" in listing
 assert "if (asJson && listingPermissions == nullptr)" in listing
-assert listing.count("listingPermissions->forPath") == 3
+assert listing.count("listingPermissions->forPath") == 1
 assert "getPermissions(" not in listing
 
 public_listing = function_body(
@@ -188,11 +188,11 @@ assert "listingPermissions.forChildOf(path)" in listing_json
 
 load_dir = function_body(FILE_MANAGER_CPP, "bool FileManager::loadDirectory()")
 assert "LockedListingPermissions listingPermissions(ctx)" in load_dir
-assert load_dir.count("listingPermissions.forPath") == 2
+assert load_dir.count("listingPermissions.forPath") == 1
 assert ".permissions = getPermissions(" not in load_dir
 
 get_item = function_body(FILE_MANAGER_CPP, "bool FileManager::getItem")
-assert "entry.permissions = getPermissions(fullPath, ctx)" in get_item
+assert "entry.permissions = getPermissions(item.path, ctx)" in get_item
 assert "LockedListingPermissions" not in get_item
 
 print("filesystem listing permission contract: OK")

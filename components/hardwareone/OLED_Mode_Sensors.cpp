@@ -7,8 +7,10 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_SSD1306.h>
+#include "HAL_Input.h"  // Logical buttons are available without a fitted controller.
 #include "System_Settings.h"
 #include "System_I2C.h"
+#include "System_PollPause.h"
 
 #if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
@@ -391,7 +393,7 @@ bool sensorDataInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 // ============================================================================
 // Scan-on-demand: A runs the scan, results list the found addresses + their
 // identified names, per bus. Reuses the same probe primitives as the CLI
-// `i2cscan` (i2cPingAddress + i2cConfirmPresent + identifySensor) — no logic
+// `i2cscan` (address-only i2cPingAddress + identifySensor labels) — no logic
 // duplicated. The scan is a blocking bus sweep (~a few hundred ms), so it runs
 // in the pre-render prepare hook (outside the display I2C transaction) after a
 // one-frame "Scanning..." paint, never in the render or the input task.
@@ -414,9 +416,9 @@ static void i2cDiagRunScan() {
   if (!mgr) return;
   for (uint8_t bus = 0; bus < 2; bus++) {
     if (!mgr->isBusInitialized(bus)) continue;
+    PollPauseGuard pollGuard(bus);
     for (uint8_t addr = 1; addr < 127 && sI2cDiagCount < I2C_DIAG_MAX; addr++) {
-      if (i2cPingAddress(addr, 100000, 50, bus) &&
-          i2cConfirmPresent(addr, 100000, 50, bus)) {
+      if (i2cPingAddress(addr, 100000, 50, bus)) {
         I2cDiagEntry& e = sI2cDiagResults[sI2cDiagCount++];
         e.bus  = bus;
         e.addr = addr;

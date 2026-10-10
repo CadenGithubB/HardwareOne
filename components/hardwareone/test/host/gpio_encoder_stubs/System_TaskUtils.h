@@ -10,6 +10,8 @@ inline int xTaskCreateLogged(void (*task)(void*), const char* name, int words,
                              const char* tag, int affinity) {
   (void)task; (void)name; (void)words; (void)arg; (void)priority; (void)tag; (void)affinity;
   ++fixture::taskCreates;
+  if (fixture::busyAfterTaskCreate) fixture::cacheBusy = true;
+  if (fixture::failTaskCreate) { *handle = nullptr; return 0; }
   *handle = &fixture::taskCreates;
   return pdPASS;
 }

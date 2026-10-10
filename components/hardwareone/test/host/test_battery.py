@@ -68,7 +68,7 @@ int main() {{ assert(std::fabs(BATTERY_ADC_DIVIDER - ({divider})) < 0.00001f); }
                 (f'-DHW1_DEPLOYMENT_CONFIG_HEADER="{neutral}"', '-Wno-cpp', '-Wno-pedantic'))
         print('Battery board configurations: EYE, generic P4, classic Feather, XIAO Sense, FeatherS3 passed')
         source = (COMPONENT / 'System_Battery.cpp').read_text()
-        backend = source[source.index('BatteryState gBatteryState;'):source.index('void buildBatteryJson(')]
+        backend = source[source.index('static BatteryState sBatteryState;'):source.index('void buildBatteryJson(')]
         calibration = extract_block(source, 'const char* cmd_battery_calibrate(')
         backend_harness = (HERE / 'battery_backend_harness.cpp').read_text()
         generated_backend = work / 'battery_backend.cpp'

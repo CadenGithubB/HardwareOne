@@ -30,19 +30,12 @@
 #include "HAL_Input.h"
 #include "System_SetupWizard.h"   // existing state mutators + renderers
 #include "System_CLIMode.h"
-#include "System_Settings.h"      // gSettings, setSetting (applied at finalize)
-#include "System_Utils.h"          // broadcastOutput
+#include "System_Settings.h"      // gSettings
 #include "System_Debug.h"
-
-#if ENABLE_WIFI
-#include <WiFi.h>
-#endif
 
 #if ENABLE_OLED_DISPLAY
 #include "OLED_Display.h"          // oledDisplay, oledConnected
 #include "OLED_SetupWizard.h"      // renderFeaturesPage / handleFeaturesInput / etc.
-#include "System_Mutex.h"          // SensorCacheGuard for gInputCache
-#include "i2csensor_seesaw.h"      // gInputCache
 #endif
 
 #include <Arduino.h>
@@ -503,16 +496,7 @@ static CLIModeInputResult dispatchESPNow(const String& line,
     sWizard.subMode = subModeForPage(getWizardCurrentPage());
   };
   auto applyAndAdvance = [&]() {
-    // Apply collected fields to gSettings (mirrors handleSerialESPNowPage)
-    gSettings.bleDeviceName    = sWizard.result.espnowFriendlyName;
-    gSettings.espnowDeviceName = sWizard.result.espnowFriendlyName;
-    if (sWizard.result.espnowFriendlyName.length() > 0)
-      gSettings.espnowFriendlyName = sWizard.result.espnowFriendlyName;
-    if (sWizard.result.espnowRoom.length() > 0)
-      gSettings.espnowRoom = sWizard.result.espnowRoom;
-    if (sWizard.result.espnowZone.length() > 0)
-      gSettings.espnowZone = sWizard.result.espnowZone;
-    gSettings.espnowStationary = sWizard.result.espnowStationary;
+    wizardApplyESPNowSettings(sWizard.result);
     broadcastOutput("ESP-NOW identity configured.");
     goNextPage();
   };
@@ -554,7 +538,10 @@ static CLIModeInputResult dispatchESPNow(const String& line,
 
     case WizardSubMode::ESPNOW_NAME:
       if (isBack) { goBack(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
-      if (isNext) { applyAndAdvance(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
+      if (isNext) {
+        sWizard.result.espnowFriendlyName = "";  // Match serial early finish, including after Back.
+        applyAndAdvance(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
+      }
       // Empty -> keep current. Non-empty -> use as friendly name.
       if (raw.length() > 0) sWizard.result.espnowFriendlyName = raw;
       else                  sWizard.result.espnowFriendlyName = gSettings.espnowDeviceName.length() > 0
@@ -610,10 +597,7 @@ static CLIModeInputResult dispatchMQTT(const String& line,
     sWizard.subMode = subModeForPage(getWizardCurrentPage());
   };
   auto applyAndAdvance = [&]() {
-    if (sWizard.result.mqttHost.length() > 0)     gSettings.mqttHost     = sWizard.result.mqttHost;
-    if (sWizard.result.mqttPort > 0)              gSettings.mqttPort     = sWizard.result.mqttPort;
-    if (sWizard.result.mqttUser.length() > 0)     gSettings.mqttUser     = sWizard.result.mqttUser;
-    if (sWizard.result.mqttPassword.length() > 0) gSettings.mqttPassword = sWizard.result.mqttPassword;
+    wizardApplyMQTTSettings(sWizard.result);
     broadcastOutput("MQTT broker configured.");
     goNextPage();
   };
@@ -795,18 +779,6 @@ static void wizardMode_onEnter(void* /*ud*/) {
   broadcastOutput("Type 'cancel' at any time to abort the wizard.");
 }
 
-// External WiFi save helpers (definitions in System_WiFi.cpp). Mirror the
-// approach used by runAndApplyFeatureWizard in System_SetupWizard.cpp:
-// the wizard's WiFi credentials go through the saved-networks list
-// (network.wifi.networks[] in settings.json), which the runtime
-// connect-prefer-saved logic reads on next boot.
-extern bool upsertWiFiNetwork(const String& ssid, const String& password,
-                              int priority, bool hidden);
-extern void sortWiFiByPriority();
-extern bool saveWiFiNetworks();
-extern bool writeSettingsJson();
-extern void applySettings();
-
 static void wizardMode_onExit(void* /*ud*/) {
   // onExit also covers timeout/session-owner loss and cliExitMode().
   clearWizardWifiChoices();
@@ -823,36 +795,7 @@ static void wizardMode_onExit(void* /*ud*/) {
     // and writes to gSettings.
     wizardFinalize(sWizard.result);
 
-#if ENABLE_WIFI
-    if (sWizard.result.wifiConfigured && sWizard.result.wifiSSID.length() > 0) {
-      // Use the saved-networks list, matching runAndApplyFeatureWizard:
-      // upsert the entry, re-sort by priority, persist to disk. This
-      // writes network.wifi.networks[] in settings.json, which the runtime
-      // connect-saved-networks loop reads.
-      upsertWiFiNetwork(sWizard.result.wifiSSID, sWizard.result.wifiPassword,
-                        /*priority=*/1, /*hidden=*/false);
-      sortWiFiByPriority();
-      saveWiFiNetworks();
-      setSetting(gSettings.wifiAutoStart, true);
-      broadcastOutput("WiFi credentials saved: " + sWizard.result.wifiSSID);
-    }
-#endif
-
-    // logLevel lives in debug.json, while the rest of the wizard settings
-    // live in settings.json. This branch runs only for completed sessions;
-    // cancelled/session-lost exits below remain no-save paths.
-    const bool mainSaved = writeSettingsJson();
-    const bool debugSaved = writeDebugJson();
-    if (!mainSaved || !debugSaved) {
-      broadcastOutput("Warning: one or more setup settings files could not be saved.");
-    }
-    applySettings();
-#if ENABLE_WIFI
-    // Re-register SNTP with the wizard's NTP choice — applySettings() does
-    // not reach setupNTP(), so without this the new server only took effect
-    // on the next reboot.
-    if (WiFi.isConnected()) setupNTP();
-#endif
+    wizardSaveAndApplySettings(sWizard.result);
   } else {
     broadcastOutput("Feature setup cancelled. No changes saved.");
   }

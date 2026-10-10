@@ -15,13 +15,10 @@
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_MemUtil.h"
+#include <memory>
 #include <new>                 // placement-new: gMLX90640 lives in PSRAM (ps_alloc)
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
-#if ENABLE_ESPNOW
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
-#endif
 
 // External dependencies still needed
 // sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h
@@ -73,8 +70,94 @@ extern const SettingsModule thermalSettingsModule = {
 
 // ============================================================================
 
-// Thermal cache (now defined here, declared in i2csensor_mlx90640.h)
-ThermalCache gThermalCache;
+// Readers copy data; only this implementation owns the frame buffers and lock.
+struct ThermalCacheState : ThermalCache {
+  int16_t* thermalFrame = nullptr;
+  float* thermalInterpolated = nullptr;
+  int thermalInterpolatedWidth = 0;
+  int thermalInterpolatedHeight = 0;
+};
+static ThermalCacheState sThermalCache;
+static SemaphoreHandle_t sThermalCacheMutex = nullptr;
+
+// Existing writer sections use the same private mutex as the copy operations.
+static bool lockThermalCache(TickType_t timeout = pdMS_TO_TICKS(100)) {
+  return sThermalCacheMutex && xSemaphoreTake(sThermalCacheMutex, timeout) == pdTRUE;
+}
+static void unlockThermalCache() { xSemaphoreGive(sThermalCacheMutex); }
+
+static void thermalCopyMetadata(ThermalCache& out, bool preferInterpolated) {
+  out = sThermalCache;
+  out.thermalFrameInterpolated = preferInterpolated && sThermalCache.thermalInterpolated &&
+      sThermalCache.thermalInterpolatedWidth > 0 && sThermalCache.thermalInterpolatedHeight > 0;
+  out.thermalFrameAvailable = out.thermalFrameInterpolated || sThermalCache.thermalFrame;
+  const bool sideways = gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3;
+  out.thermalFrameWidth = out.thermalFrameInterpolated ? sThermalCache.thermalInterpolatedWidth : (sideways ? 24 : 32);
+  out.thermalFrameHeight = out.thermalFrameInterpolated ? sThermalCache.thermalInterpolatedHeight : (sideways ? 32 : 24);
+}
+
+bool thermalCacheSnapshot(ThermalCache& out, uint32_t timeoutMs) {
+  out = {};
+  SensorCacheGuard guard(sThermalCacheMutex, pdMS_TO_TICKS(timeoutMs), "thermal.snapshot");
+  if (!guard.held) return false;
+  thermalCopyMetadata(out, false);
+  return true;
+}
+
+bool thermalFrameSnapshot(ThermalCache& out, int16_t* values, size_t capacity,
+                          bool preferInterpolated, uint32_t timeoutMs) {
+  out = {};
+  if (!values || capacity < THERMAL_RAW_FRAME_PIXELS) return false;
+  SensorCacheGuard guard(sThermalCacheMutex, pdMS_TO_TICKS(timeoutMs), "thermal.frameSnapshot");
+  if (!guard.held) return false;
+  ThermalCache metadata;
+  thermalCopyMetadata(metadata, preferInterpolated);
+  const size_t count = static_cast<size_t>(metadata.thermalFrameWidth) * metadata.thermalFrameHeight;
+  if (count > THERMAL_MAX_FRAME_PIXELS || count > capacity) return false;
+  if (metadata.thermalFrameInterpolated) {
+    for (size_t i = 0; i < count; ++i) values[i] = static_cast<int16_t>(sThermalCache.thermalInterpolated[i]);
+  } else if (metadata.thermalFrameAvailable) {
+    memcpy(values, sThermalCache.thermalFrame, count * sizeof(*values));
+  }
+  out = metadata;
+  return true;
+}
+
+size_t thermalCacheStorageBytes() { return sizeof(sThermalCache) + sizeof(sThermalCacheMutex); }
+
+using ThermalFrameBuffer = std::unique_ptr<int16_t, decltype(&ps_free)>;
+static ThermalFrameBuffer thermalSnapshotBuffer(size_t count) {
+  return ThermalFrameBuffer(static_cast<int16_t*>(ps_alloc(count * sizeof(int16_t),
+                            AllocPref::PreferPSRAM, "thermal.snapshot")), ps_free);
+}
+
+static bool thermalResetCacheForStart() {
+  int16_t* oldFrame;
+  float* oldInterpolated;
+  {
+    SensorCacheGuard guard(sThermalCacheMutex, pdMS_TO_TICKS(100), "thermal.reset");
+    if (!guard.held) return false;
+    oldFrame = sThermalCache.thermalFrame;
+    oldInterpolated = sThermalCache.thermalInterpolated;
+    sThermalCache.thermalFrame = nullptr;
+    sThermalCache.thermalInterpolated = nullptr;
+    sThermalCache.thermalInterpolatedWidth = 0;
+    sThermalCache.thermalInterpolatedHeight = 0;
+    sThermalCache.thermalDataValid = false;
+    sThermalCache.thermalSeq = 0;
+  }
+  free(oldFrame);
+  free(oldInterpolated);
+  return true;
+}
+
+static bool thermalInvalidateCache() {
+  SensorCacheGuard guard(sThermalCacheMutex, pdMS_TO_TICKS(50), "thermal.invalidate");
+  if (!guard.held) return false;
+  sThermalCache.thermalDataValid = false;
+  sThermalCache.thermalSeq = 0;
+  return true;
+}
 
 // Thermal sensor state (definitions)
 bool gThermalRunning = false;
@@ -95,7 +178,7 @@ volatile UBaseType_t gThermalWatermarkNow = (UBaseType_t)0;
 // Thermal sensor hardware state
 bool gMlx90640Initialized = false;
 volatile bool gThermalPendingFirstFrame = false;
-Adafruit_MLX90640* gMLX90640 = nullptr;
+static Adafruit_MLX90640* gMLX90640 = nullptr;
 
 // Thermal timing constants
 const unsigned long MLX90640_READ_INTERVAL = 62;  // 16 Hz
@@ -107,7 +190,6 @@ static int16_t* g_localFrame = nullptr;
 // Settings
 
 
-// Note: lockThermalCache() and unlockThermalCache() are declared in i2c_system.h
 
 // Forward declarations (implementations in main .ino)
 extern bool thermalInit();
@@ -123,6 +205,10 @@ extern bool thermalPoll();
 
 // Internal function called by queue processor
 bool thermalStartInternal() {
+  if (gThermalRunning) return true;
+  // A stopped task owns its resources until cleanup publishes a null handle.
+  if (gThermalTaskHandle != nullptr) return false;
+
   DEBUG_CLIF("[THERMAL_INTERNAL] Starting thermal sensor initialization");
   DEBUG_CLIF("[THERMAL_INTERNAL] Current state: enabled=%d, connected=%d, heap=%lu", 
              gThermalRunning ? 1 : 0, gThermalConnected ? 1 : 0,
@@ -148,9 +234,9 @@ bool thermalStartInternal() {
              (unsigned long)ESP.getFreeHeap());
 
   // Create cache mutex if not already created
-  if (!gThermalCache.mutex) {
-    gThermalCache.mutex = xSemaphoreCreateMutex();
-    if (!gThermalCache.mutex) {
+  if (!sThermalCacheMutex) {
+    sThermalCacheMutex = xSemaphoreCreateMutex();
+    if (!sThermalCacheMutex) {
       ERROR_THERMALF("Failed to create cache mutex");
       return false;
     }
@@ -163,21 +249,9 @@ bool thermalStartInternal() {
 
   // Clean up any stale memory from previous run BEFORE starting
   // CRITICAL: Memory wasn't freed during stop to avoid dying-task crashes
-  if (lockThermalCache()) {
-    if (gThermalCache.thermalFrame) {
-      free(gThermalCache.thermalFrame);
-      gThermalCache.thermalFrame = nullptr;
-    }
-    if (gThermalCache.thermalInterpolated) {
-      free(gThermalCache.thermalInterpolated);
-      gThermalCache.thermalInterpolated = nullptr;
-      gThermalCache.thermalInterpolatedWidth = 0;
-      gThermalCache.thermalInterpolatedHeight = 0;
-    }
-    gThermalCache.thermalDataValid = false;
-    gThermalCache.thermalSeq = 0;
-    unlockThermalCache();
-    DEBUG_CLIF("[THERMAL_INTERNAL] Cleaned up stale memory from previous run");
+  if (!thermalResetCacheForStart()) {
+    ERROR_THERMALF("Could not reset thermal cache before start");
+    return false;
   }
 
   // Initialize thermal sensor independently (no ToF coordination)
@@ -194,12 +268,20 @@ bool thermalStartInternal() {
   DEBUG_CLIF("[THERMAL_INTERNAL] Setting gThermalRunning=true (was %d)", prev ? 1 : 0);
   gThermalRunning = true;
 
-  // Create Thermal task lazily (stale handle detection now in createThermalTask)
+  // Create Thermal task lazily; its exit clears the handle after cleanup.
   if (gThermalTaskHandle == nullptr) {
     DEBUG_CLIF("[THERMAL_INTERNAL] Creating thermal task (handle is NULL)");
     if (!createThermalTask()) {
       DEBUG_CLIF("[THERMAL_INTERNAL] FAILED to create Thermal task");
       gThermalRunning = false;  // Restore on failure
+      gThermalConnected = false;
+      gThermalInitRequested = false;
+      gThermalInitDone = false;
+      gThermalInitResult = false;
+      gThermalPendingFirstFrame = false;
+      gThermalArmAtMs = 0;
+      ps_delete(gMLX90640);
+      gMLX90640 = nullptr;
       return false;
     }
     DEBUG_CLIF("[THERMAL_INTERNAL] Thermal task created successfully");
@@ -219,14 +301,14 @@ bool thermalStartInternal() {
   if (gThermalInitRequested || !gThermalConnected || gMLX90640 == nullptr) {
     DEBUG_CLIF("[THERMAL_INTERNAL] Waiting for sensor initialization (timeout=3000ms)");
     unsigned long start = millis();
-    while (!gThermalInitDone && (millis() - start) < 3000UL) {
+    while (gThermalRunning && !gThermalInitDone && (millis() - start) < 3000UL) {
       delay(10);
     }
     unsigned long elapsed = millis() - start;
     DEBUG_CLIF("[THERMAL_INTERNAL] Init wait complete: elapsed=%lu ms, done=%d, result=%d", 
                elapsed, gThermalInitDone ? 1 : 0, gThermalInitResult ? 1 : 0);
     
-    if (!gThermalInitDone || !gThermalInitResult) {
+    if (!gThermalRunning || !gThermalInitDone || !gThermalInitResult) {
       // Cleanup flags on failure - no ToF interference, just fail gracefully
       gThermalRunning = false;
       gThermalPendingFirstFrame = false;
@@ -237,10 +319,6 @@ bool thermalStartInternal() {
   }
   DEBUG_CLIF("[THERMAL_INTERNAL] SUCCESS: MLX90640 thermal sensor started");
   
-  // Broadcast sensor status to ESP-NOW master
-#if ENABLE_ESPNOW
-  broadcastSensorStatus(REMOTE_SENSOR_THERMAL, true);
-#endif
   
   return true;
 }
@@ -248,87 +326,54 @@ bool thermalStartInternal() {
 // Public command - uses centralized queue
 const char* cmd_thermalstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-
   if (!gSettings.thermalEnabled) {
-    return "ERROR: Thermal camera is disabled - run 'thermalenabled 1' first";
+    return "Error: Thermal camera is disabled - run 'thermalenabled 1' first";
   }
-
-  DEBUG_CLIF("[THERMAL_START] Command called - checking state");
-  DEBUG_CLIF("[THERMAL_START] gThermalRunning=%d, heap=%lu",
-             gThermalRunning ? 1 : 0, (unsigned long)ESP.getFreeHeap());
-
-  // Check if already enabled or queued
-  if (gThermalRunning) {
-    DEBUG_CLIF("[THERMAL_START] Already running - returning");
-    return "[Thermal] Sensor already running";
-  }
-  if (isInQueue(I2C_DEVICE_THERMAL)) {
-    int pos = getQueuePosition(I2C_DEVICE_THERMAL);
-    DEBUG_CLIF("[THERMAL_START] Already in queue at position %d", pos);
-    BROADCAST_PRINTF("Thermal sensor already queued (position %d)", pos);
-    return "[Thermal] Already queued";
-  }
-
-  if (!i2cPingAddress(I2C_ADDR_THERMAL, 100000, 50,
-                      (uint8_t)gSettings.thermalBus)) {
-    return "Error: [Thermal] Not detected on I2C bus";
-  }
-
-  DEBUG_CLIF("[THERMAL_START] Calling enqueueDeviceStart(I2C_DEVICE_THERMAL=%d)", I2C_DEVICE_THERMAL);
-  // Enqueue the request to centralized queue
-  if (enqueueDeviceStart(I2C_DEVICE_THERMAL)) {
-    DEBUG_CLIF("[THERMAL_START] Successfully enqueued");
-    sensorStatusBumpWith("openthermal@enqueue");
-    int pos = getQueuePosition(I2C_DEVICE_THERMAL);
-    DEBUG_CLIF("[THERMAL_START] Queue position: %d", pos);
-    BROADCAST_PRINTF("Thermal sensor queued for open (position %d)", pos);
-    return "[Thermal] Sensor queued for open";
-  } else {
-    DEBUG_CLIF("[THERMAL_START] FAILED to enqueue (queue full)");
-    return "Error: [Thermal] Failed to enqueue open (queue full)";
-  }
+  return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", "openthermal@enqueue");
 }
 
 // Compact SUMMARY reading on the shared sensor envelope: the raw min/avg/max
-// scene temperature (recomputed from the cached frame under the thermal mutex).
+// scene temperature (recomputed from an independent copy of the raw frame).
 // The full 768-pixel frame stays on its own channel (thermalBuildDataJSON /
 // the ESP-NOW frame) — this is the lightweight "what's the thermal scene" read.
 // NB: uses the RAW frame min/max, not the rolling/smoothed display-scale values.
-int thermalBuildSummaryJSON(char* buf, size_t bufSize) {
-  if (!buf || bufSize == 0) return 0;
-
-  if (!lockThermalCache(pdMS_TO_TICKS(50))) {
-    // Cache-lock timeout: not-ready envelope.
-    int pos = sensorEnvelopeBegin(buf, bufSize, false, gThermalConnected, 0);
-    if (pos == 0) return 0;
-    int n = snprintf(buf + pos, bufSize - pos, ",\"min\":0,\"avg\":0,\"max\":0}");
-    if (n < 0 || (size_t)n >= bufSize - pos) return 0;
-    return pos + n;
+static bool thermalReadRawSummary(ThermalCache& reading, float& minT, float& maxT, float& avgT) {
+  minT = maxT = avgT = 0.0f;
+  auto frame = thermalSnapshotBuffer(THERMAL_RAW_FRAME_PIXELS);
+  if (!frame || !thermalFrameSnapshot(reading, frame.get(), THERMAL_RAW_FRAME_PIXELS, false, 50)) {
+    reading = {};
+    return false;
   }
-
-  bool ready = gThermalCache.thermalDataValid && gThermalCache.thermalFrame;
-  unsigned long ts = gThermalCache.thermalLastUpdate;
-  float minT = 0.0f, maxT = 0.0f, avgT = 0.0f;
-  if (ready) {
+  if (reading.thermalDataValid && reading.thermalFrameAvailable) {
     minT = 9999.0f; maxT = -9999.0f;
     float sumT = 0.0f;
-    for (int i = 0; i < 768; i++) {
-      float t = gThermalCache.thermalFrame[i] / 100.0f;
+    for (size_t i = 0; i < THERMAL_RAW_FRAME_PIXELS; ++i) {
+      float t = frame.get()[i] / 100.0f;
       if (t < minT) minT = t;
       if (t > maxT) maxT = t;
       sumT += t;
     }
-    avgT = sumT / 768.0f;
+    avgT = sumT / THERMAL_RAW_FRAME_PIXELS;
   }
-  unlockThermalCache();
+  return true;
+}
 
-  int pos = sensorEnvelopeBegin(buf, bufSize, ready, gThermalConnected, ts);
+int thermalBuildSummaryJSON(char* buf, size_t bufSize) {
+  if (!buf || bufSize == 0) return 0;
+  ThermalCache reading;
+  float minT, maxT, avgT;
+  if (!thermalReadRawSummary(reading, minT, maxT, avgT)) {
+    int pos = sensorEnvelopeBegin(buf, bufSize, false, gThermalConnected, 0);
+    if (pos == 0) return 0;
+    int n = snprintf(buf + pos, bufSize - pos, ",\"min\":0,\"avg\":0,\"max\":0}");
+    return n < 0 || static_cast<size_t>(n) >= bufSize - pos ? 0 : pos + n;
+  }
+  const bool ready = reading.thermalDataValid && reading.thermalFrameAvailable;
+  int pos = sensorEnvelopeBegin(buf, bufSize, ready, gThermalConnected, reading.thermalLastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
-                   ",\"min\":%.1f,\"avg\":%.1f,\"max\":%.1f}",
-                   minT, avgT, maxT);
-  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
-  return pos + n;
+                   ",\"min\":%.1f,\"avg\":%.1f,\"max\":%.1f}", minT, avgT, maxT);
+  return n < 0 || static_cast<size_t>(n) >= bufSize - pos ? 0 : pos + n;
 }
 
 const char* cmd_thermalread(const String& argsInput) {
@@ -354,29 +399,21 @@ const char* cmd_thermalread(const String& argsInput) {
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
-  if (!gThermalCache.thermalDataValid || !gThermalCache.thermalFrame) {
+  ThermalCache reading;
+  float minT, maxT, avgT;
+  if (!thermalReadRawSummary(reading, minT, maxT, avgT) ||
+      !reading.thermalDataValid || !reading.thermalFrameAvailable) {
     return "[Thermal] No data available yet";
   }
 
-  // Human path: raw min/max/avg from the cached frame, broadcast as text.
-  float minT = 9999.0f, maxT = -9999.0f, sumT = 0.0f;
-  for (int i = 0; i < 768; i++) {
-    float t = gThermalCache.thermalFrame[i] / 100.0f;
-    if (t < minT) minT = t;
-    if (t > maxT) maxT = t;
-    sumT += t;
-  }
-  float avgT = sumT / 768.0f;
-
   BROADCAST_PRINTF("Thermal: min=%.1f°C max=%.1f°C avg=%.1f°C (seq=%lu)",
-                   minT, maxT, avgT, (unsigned long)gThermalCache.thermalSeq);
+                   minT, maxT, avgT, (unsigned long)reading.thermalSeq);
   return "[Thermal] Reading complete";
 }
 
 const char* cmd_thermalstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  handleDeviceStopped(I2C_DEVICE_THERMAL);
+  if (!requestSensorStop(I2C_DEVICE_THERMAL)) return "Error: [Thermal] Could not queue stop";
   return "[Thermal] Stop requested; cleanup will complete asynchronously";
 }
 
@@ -578,8 +615,6 @@ static bool gThermalHot = false;
 
 bool thermalPoll() {
   extern bool gMlx90640Initialized;
-  extern bool lockThermalCache(TickType_t timeout);
-  extern void unlockThermalCache();
   // interpolateThermalFrame is defined at the bottom of this file
   
   DEBUG_THERMAL_POLLINGF("thermalPoll() entry");
@@ -594,15 +629,15 @@ bool thermalPoll() {
   }
   
   // Ensure thermal frame buffer is allocated
-  if (!gThermalCache.thermalFrame) {
+  {
     if (lockThermalCache(pdMS_TO_TICKS(100))) {
-      if (!gThermalCache.thermalFrame) {
+      if (!sThermalCache.thermalFrame) {
         size_t psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         size_t heap_before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
         DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] Before frame alloc: PSRAM=%zu, Heap=%zu", psram_before, heap_before);
 
-        gThermalCache.thermalFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "cache.thermal");
-        if (!gThermalCache.thermalFrame) {
+        sThermalCache.thermalFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "cache.thermal");
+        if (!sThermalCache.thermalFrame) {
           DEBUG_THERMAL_POLLINGF("thermalPoll() exit: failed to allocate frame buffer");
           unlockThermalCache();
           return false;
@@ -623,24 +658,24 @@ bool thermalPoll() {
           DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] Before interp alloc (quality=2): PSRAM=%zu, Heap=%zu",
                          psram_before_interp, heap_before_interp);
 
-          gThermalCache.thermalInterpolatedWidth = 64;
-          gThermalCache.thermalInterpolatedHeight = 48;
+          sThermalCache.thermalInterpolatedWidth = 64;
+          sThermalCache.thermalInterpolatedHeight = 48;
           int interpSize = 64 * 48;
-          gThermalCache.thermalInterpolated = (float*)ps_alloc(interpSize * sizeof(float), AllocPref::PreferPSRAM, "cache.thermal.interp");
+          sThermalCache.thermalInterpolated = (float*)ps_alloc(interpSize * sizeof(float), AllocPref::PreferPSRAM, "cache.thermal.interp");
 
-          if (gThermalCache.thermalInterpolated) {
+          if (sThermalCache.thermalInterpolated) {
             size_t psram_after_interp = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
             size_t heap_after_interp = heap_caps_get_free_size(MALLOC_CAP_8BIT);
             DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] After interp alloc (12288 bytes): PSRAM=%zu (-%zu), Heap=%zu (-%zu)",
                            psram_after_interp, psram_before_interp - psram_after_interp,
                            heap_after_interp, heap_before_interp - heap_after_interp);
             DEBUG_THERMAL_POLLINGF("Allocated interpolated buffer: %dx%d (%d pixels, %d bytes)",
-                         gThermalCache.thermalInterpolatedWidth, gThermalCache.thermalInterpolatedHeight,
+                         sThermalCache.thermalInterpolatedWidth, sThermalCache.thermalInterpolatedHeight,
                          interpSize, interpSize * (int)sizeof(float));
           } else {
             DEBUG_THERMAL_POLLINGF("Warning: Failed to allocate interpolated buffer, falling back to 1x");
-            gThermalCache.thermalInterpolatedWidth = 0;
-            gThermalCache.thermalInterpolatedHeight = 0;
+            sThermalCache.thermalInterpolatedWidth = 0;
+            sThermalCache.thermalInterpolatedHeight = 0;
           }
         } else {
           DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] Interpolation disabled (upscale=%d), no additional buffer allocated", upscale);
@@ -912,21 +947,26 @@ bool thermalPoll() {
   }
 
   if (lockThermalCache(pdMS_TO_TICKS(50))) {
-    memcpy(gThermalCache.thermalFrame, g_localFrame, 768 * sizeof(int16_t));
+    // A start/reset can retire storage while a hardware read is in flight.
+    if (!sThermalCache.thermalFrame) {
+      unlockThermalCache();
+      return false;
+    }
+    memcpy(sThermalCache.thermalFrame, g_localFrame, 768 * sizeof(int16_t));
     
     if (previousFrame) {
       memcpy(previousFrame, g_localFrame, 768 * sizeof(int16_t));
       previousFrameValid = true;
     }
 
-    gThermalCache.thermalMinTemp = minTemp;
-    gThermalCache.thermalMaxTemp = maxTemp;
-    gThermalCache.thermalAvgTemp = avgTemp;
-    gThermalCache.thermalLastUpdate = millis();
-    gThermalCache.thermalDataValid = true;
-    gThermalCache.thermalSeq++;
+    sThermalCache.thermalMinTemp = minTemp;
+    sThermalCache.thermalMaxTemp = maxTemp;
+    sThermalCache.thermalAvgTemp = avgTemp;
+    sThermalCache.thermalLastUpdate = millis();
+    sThermalCache.thermalDataValid = true;
+    sThermalCache.thermalSeq++;
 
-    if (gThermalCache.thermalInterpolated && gThermalCache.thermalInterpolatedWidth > 0) {
+    if (sThermalCache.thermalInterpolated && sThermalCache.thermalInterpolatedWidth > 0) {
       size_t psram_before_op = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
       size_t heap_before_op = heap_caps_get_free_size(MALLOC_CAP_8BIT);
 
@@ -943,8 +983,8 @@ bool thermalPoll() {
       for (int i = 0; i < 768; i++) {
         floatFrame[i] = g_localFrame[i] / 100.0f;
       }
-      thermalInterpolateFrame(floatFrame, gThermalCache.thermalInterpolated,
-                              gThermalCache.thermalInterpolatedWidth, gThermalCache.thermalInterpolatedHeight);
+      thermalInterpolateFrame(floatFrame, sThermalCache.thermalInterpolated,
+                              sThermalCache.thermalInterpolatedWidth, sThermalCache.thermalInterpolatedHeight);
       uint32_t interpTime = millis() - interpStart;
 
       if (isDebugFlagSet(DEBUG_THERMAL | DEBUG_THERMAL_POLLING)) {
@@ -959,7 +999,7 @@ bool thermalPoll() {
 
       DEBUG_THERMAL_POLLINGF("Interpolation completed in %lums (%dx%d -> %dx%d)",
                    (unsigned long)interpTime, 32, 24,
-                   gThermalCache.thermalInterpolatedWidth, gThermalCache.thermalInterpolatedHeight);
+                   sThermalCache.thermalInterpolatedWidth, sThermalCache.thermalInterpolatedHeight);
     }
 
     if (gSettings.thermalRotation != 0) {
@@ -979,13 +1019,13 @@ bool thermalPoll() {
       
       DEBUG_THERMAL_POLLINGF("[ROTATION_DEBUG] Frame capture: applying rotation=%d, seq=%lu",
                      gSettings.thermalRotation,
-                     (unsigned long)gThermalCache.thermalSeq);
+                     (unsigned long)sThermalCache.thermalSeq);
       DEBUG_THERMAL_POLLINGF("[THERMAL_ROTATION] Applying rotation=%d (after all processing)", gSettings.thermalRotation);
       DEBUG_THERMAL_POLLINGF("[THERMAL_ROTATION] Before: TL=%d TR=%d BL=%d BR=%d",
-                     gThermalCache.thermalFrame[0],
-                     gThermalCache.thermalFrame[width - 1],
-                     gThermalCache.thermalFrame[(height - 1) * width],
-                     gThermalCache.thermalFrame[(height - 1) * width + width - 1]);
+                     sThermalCache.thermalFrame[0],
+                     sThermalCache.thermalFrame[width - 1],
+                     sThermalCache.thermalFrame[(height - 1) * width],
+                     sThermalCache.thermalFrame[(height - 1) * width + width - 1]);
       
       if (gSettings.thermalRotation == 1) {
         DEBUG_THERMAL_POLLINGF("[THERMAL_ROTATION] Performing 90° clockwise rotation");
@@ -995,7 +1035,7 @@ bool thermalPoll() {
             int newX = y;
             int newY = width - 1 - x;
             int dstIdx = newY * height + newX;
-            rotatedFrame[dstIdx] = gThermalCache.thermalFrame[srcIdx];
+            rotatedFrame[dstIdx] = sThermalCache.thermalFrame[srcIdx];
           }
         }
       } else if (gSettings.thermalRotation == 2) {
@@ -1004,7 +1044,7 @@ bool thermalPoll() {
           for (int x = 0; x < width; x++) {
             int srcIdx = y * width + x;
             int dstIdx = (height - 1 - y) * width + (width - 1 - x);
-            rotatedFrame[dstIdx] = gThermalCache.thermalFrame[srcIdx];
+            rotatedFrame[dstIdx] = sThermalCache.thermalFrame[srcIdx];
           }
         }
       } else if (gSettings.thermalRotation == 3) {
@@ -1015,18 +1055,18 @@ bool thermalPoll() {
             int newX = height - 1 - y;
             int newY = x;
             int dstIdx = newY * height + newX;
-            rotatedFrame[dstIdx] = gThermalCache.thermalFrame[srcIdx];
+            rotatedFrame[dstIdx] = sThermalCache.thermalFrame[srcIdx];
           }
         }
       }
 
-      memcpy(gThermalCache.thermalFrame, rotatedFrame, 768 * sizeof(int16_t));
+      memcpy(sThermalCache.thermalFrame, rotatedFrame, 768 * sizeof(int16_t));
 
       DEBUG_THERMAL_POLLINGF("[THERMAL_ROTATION] After:  TL=%d TR=%d BL=%d BR=%d",
-                     gThermalCache.thermalFrame[0],
-                     gThermalCache.thermalFrame[width - 1],
-                     gThermalCache.thermalFrame[(height - 1) * width],
-                     gThermalCache.thermalFrame[(height - 1) * width + width - 1]);
+                     sThermalCache.thermalFrame[0],
+                     sThermalCache.thermalFrame[width - 1],
+                     sThermalCache.thermalFrame[(height - 1) * width],
+                     sThermalCache.thermalFrame[(height - 1) * width + width - 1]);
     }
 
     unlockThermalCache();
@@ -1094,89 +1134,29 @@ void resetThermalFrameBuffers() {
 
 int thermalBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
-  
-  unsigned long startMs = millis();
-  int pos = 0;
-
-  if (lockThermalCache(pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS))) {
-    // Determine which frame to send based on interpolation availability
-    bool useInterpolated = (gThermalCache.thermalInterpolated != nullptr && gThermalCache.thermalInterpolatedWidth > 0 && gThermalCache.thermalInterpolatedHeight > 0);
-
-    float* frame = useInterpolated ? gThermalCache.thermalInterpolated : nullptr;
-    // For raw frame, swap dimensions if rotation is 90° or 270° (output is 24x32 instead of 32x24)
-    int width = useInterpolated ? gThermalCache.thermalInterpolatedWidth : ((gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 24 : 32);
-    int height = useInterpolated ? gThermalCache.thermalInterpolatedHeight : ((gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 32 : 24);
-    int frameSize = useInterpolated ? (width * height) : 768;
-    
-    // Debug: Track rotation value when JSON dimensions are determined
-    DEBUG_THERMAL_POLLINGF("[ROTATION_DEBUG] JSON generation: rotation=%d, w=%d, h=%d, seq=%lu",
-                   gSettings.thermalRotation, width, height,
-                   (unsigned long)gThermalCache.thermalSeq);
-    DEBUG_THERMAL_POLLINGF("[RACE_CONDITION_DEBUG] Reading thermalFrame WITH lock held (seq=%lu)",
-                   (unsigned long)gThermalCache.thermalSeq);
-
-    // Header
-    pos = snprintf(buf, bufSize,
-                   "{\"val\":%d,\"seq\":%lu,\"mn\":%.1f,\"mx\":%.1f,\"w\":%d,\"h\":%d,\"data\":[",
-                   gThermalCache.thermalDataValid ? 1 : 0,
-                   (unsigned long)gThermalCache.thermalSeq,
-                   gThermalCache.thermalMinTemp,
-                   gThermalCache.thermalMaxTemp,
-                   width, height);
-    if (pos < 0 || (size_t)pos >= bufSize) {
-      unlockThermalCache();
-      return 0;
-    }
-
-    // Frame data - interpolated uses whole degrees, raw uses centidegrees
-    if (useInterpolated && frame) {
-      // Interpolated frame is float - send as whole degree integers
-      for (int i = 0; i < frameSize; i++) {
-        int wholeDegrees = (int)frame[i];
-        int written = snprintf(buf + pos, bufSize - pos, "%d%s", wholeDegrees, (i < frameSize - 1) ? "," : "");
-        if (written < 0 || (size_t)written >= (bufSize - pos)) {
-          unlockThermalCache();
-          return 0;
-        }
-        pos += written;
-      }
-    } else if (gThermalCache.thermalFrame) {
-      // Raw frame is int16_t centidegrees (frontend divides by 100)
-      for (int i = 0; i < frameSize; i++) {
-        int written = snprintf(buf + pos, bufSize - pos, "%d%s", gThermalCache.thermalFrame[i], (i < frameSize - 1) ? "," : "");
-        if (written < 0 || (size_t)written >= (bufSize - pos)) {
-          unlockThermalCache();
-          return 0;
-        }
-        pos += written;
-      }
-    } else {
-      // Frame buffer was freed (sensor stopped) - return empty array
-      unlockThermalCache();
-      pos = snprintf(buf, bufSize, "{\"val\":0,\"error\":\"Sensor stopped\"}");
-      return (pos > 0) ? pos : 0;
-    }
-
-    // Footer
-    int tail = snprintf(buf + pos, bufSize - pos, "]}");
-    if (tail < 0 || (size_t)tail >= (bufSize - pos)) {
-      unlockThermalCache();
-      return 0;
-    }
-    pos += tail;
-
-    unlockThermalCache();
-
-    unsigned long elapsedMs = millis() - startMs;
-    DEBUG_PERFORMANCEF("thermalBuildDataJSON: %lu ms, %d bytes, %d pixels",
-                       elapsedMs, pos, frameSize);
-  } else {
-    // Timeout - return error response (non-zero so caller can respond)
-    pos = snprintf(buf, bufSize, "{\"error\":\"Sensor data temporarily unavailable\"}");
-    if (pos < 0) pos = 0;
+  auto frame = thermalSnapshotBuffer(THERMAL_MAX_FRAME_PIXELS);
+  ThermalCache reading;
+  if (!frame || !thermalFrameSnapshot(reading, frame.get(), THERMAL_MAX_FRAME_PIXELS, true, CACHE_MUTEX_TIMEOUT_MS)) {
+    int n = snprintf(buf, bufSize, "{\"error\":\"Sensor data temporarily unavailable\"}");
+    return n < 0 || static_cast<size_t>(n) >= bufSize ? 0 : n;
   }
-
-  return pos;
+  if (!reading.thermalFrameAvailable) {
+    int n = snprintf(buf, bufSize, "{\"val\":0,\"error\":\"Sensor stopped\"}");
+    return n < 0 || static_cast<size_t>(n) >= bufSize ? 0 : n;
+  }
+  int pos = snprintf(buf, bufSize,
+      "{\"val\":%d,\"seq\":%lu,\"mn\":%.1f,\"mx\":%.1f,\"w\":%d,\"h\":%d,\"data\":[",
+      reading.thermalDataValid ? 1 : 0, (unsigned long)reading.thermalSeq,
+      reading.thermalMinTemp, reading.thermalMaxTemp, reading.thermalFrameWidth, reading.thermalFrameHeight);
+  if (pos < 0 || static_cast<size_t>(pos) >= bufSize) return 0;
+  const int count = reading.thermalFrameWidth * reading.thermalFrameHeight;
+  for (int i = 0; i < count; ++i) {
+    int n = snprintf(buf + pos, bufSize - pos, "%d%s", frame.get()[i], i < count - 1 ? "," : "");
+    if (n < 0 || static_cast<size_t>(n) >= bufSize - pos) return 0;
+    pos += n;
+  }
+  int n = snprintf(buf + pos, bufSize - pos, "]}");
+  return n < 0 || static_cast<size_t>(n) >= bufSize - pos ? 0 : pos + n;
 }
 
 // ============================================================================
@@ -1488,19 +1468,25 @@ void thermalTask(void* parameter) {
     // CRITICAL: Check enabled flag FIRST before any debug calls or operations
     // This allows graceful shutdown when thermalstop is called
     if (!gThermalRunning) {
+      if (!thermalInvalidateCache()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        continue;
+      }
       gThermalConnected = false;
       if (gMLX90640 != nullptr) {
         ps_delete(gMLX90640);
         gMLX90640 = nullptr;
       }
-      gThermalCache.thermalDataValid = false;
-      gThermalCache.thermalSeq = 0;
-      
       // Free static buffers in thermalPoll to prevent heap corruption on restart
       extern void resetThermalFrameBuffers();
       resetThermalFrameBuffers();
+      gThermalInitRequested = false;
+      gThermalInitDone = false;
+      gThermalInitResult = false;
+      gThermalPendingFirstFrame = false;
+      gThermalArmAtMs = 0;
       
-      SENSOR_TASK_EXIT(THERMAL);
+      SENSOR_TASK_EXIT(THERMAL, gThermalTaskHandle);
     }
     
     // Update watermark diagnostics (only when enabled)
@@ -1529,6 +1515,7 @@ void thermalTask(void* parameter) {
         gThermalInitResult = ok;
         gThermalInitDone = true;
         gThermalInitRequested = false;
+        if (!ok) gThermalRunning = false;
       }
     }
 

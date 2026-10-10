@@ -112,7 +112,7 @@ espnowstats json
 
 Use `loglink on` for the runtime console if it is not already on, so IDF warnings cannot split command completion output. Record and restore its prior value if changed. Serial open/reopen may reset these boards; keep one owner and avoid gratuitous reconnects.
 
-The P4’s mesh MAC is its companion radio identity reported by `espnowstatus json`, NOT the P4 chip/USB MAC. Never reuse the old P4 board’s default MAC just because the serial port matches. Current verified USB port names from the preceding JPEG run were P4 `/dev/cu.usbmodem2201` and S3 `/dev/cu.usbmodem1101`; re-identify before opening.
+The P4’s mesh MAC is its companion radio identity reported by `espnowstatus json`, NOT the P4 chip/USB MAC. Never reuse the old P4 board’s default MAC just because the serial port matches. Current verified USB port names from the preceding JPEG run were P4 `/dev/cu.usbmodemP4` and S3 `/dev/cu.usbmodemS3`; re-identify before opening.
 
 Existing reusable coordinators:
 
@@ -128,7 +128,7 @@ Conditional exact existing-runner command (only after same-login/shared mesh/cur
   experiments/p4_mesh/test_mesh.py \
   --credentials experiments/board_qualification/private/mesh-credentials.json \
   --run-root experiments/board_qualification/private/mesh-runs \
-  --p4-port /dev/cu.usbmodem2201 --s3-port /dev/cu.usbmodem1101 \
+  --p4-port /dev/cu.usbmodemP4 --s3-port /dev/cu.usbmodemS3 \
   --p4-mac <radio-MAC-from-P4-status> --s3-mac <radio-MAC-from-S3-status> \
   --pair preserve
 ```

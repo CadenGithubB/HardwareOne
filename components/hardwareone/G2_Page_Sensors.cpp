@@ -16,13 +16,11 @@
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
+#include "HAL_Input.h"
 #include "G2_Glasses.h"            // g2ShowText, g2ShowListPage, etc.
 #include "System_Debug.h"
 #include "System_FeatureRegistry.h"     // getFeatureById, FeatureEntry
 #include "System_Settings.h"            // setSetting, gSettings
-#include "System_Mutex.h"               // SensorCacheGuard (was pulled in transitively via
-                                        // i2csensor_* headers; include directly so it survives
-                                        // disabling individual sensors)
 #include "G2_HijackCmd.h"               // g2SubmitHijackCommand — Group A migration
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -31,47 +29,38 @@
 // -----------------------------------------------------------------------------
 // Per-sensor extern declarations + cache headers
 // -----------------------------------------------------------------------------
-// Each sensor module owns its own gXEnabled / gXConnected pair AND a
-// gXCache struct populated by its polling task. The OLED and web
-// renderers already consume those caches; we do the same here to
-// surface the most useful single value per sensor on the lens.
-// Guarded by the same compile flags the sensor uses, so a stripped
-// build doesn't reference the cache symbols.
+// Each sensor owns its readings and synchronization. Formatters request
+// snapshots and render locally; lifecycle flags still describe runtime state.
 
 #if ENABLE_IMU_SENSOR
-#include "i2csensor_bno055.h"     // gImuCache + gImuRunning / gImuConnected
+#include "i2csensor_bno055.h"     // readings + gImuRunning / gImuConnected
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor_vl53l4cx.h"   // gTofCache + gTofRunning / gTofConnected
+#include "i2csensor_vl53l4cx.h"   // readings + gTofRunning / gTofConnected
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor_mlx90640.h"   // gThermalCache + gThermalRunning / gThermalConnected
+#include "i2csensor_mlx90640.h"   // readings + gThermalRunning / gThermalConnected
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor_seesaw.h"     // gInputCache + gInputRunning / gInputConnected
+#include "i2csensor_seesaw.h"     // readings + gInputRunning / gInputConnected
 #endif
 #if ENABLE_ANO_ENCODER
-#include "i2csensor_ano_encoder.h" // gAnoEncoderCache + ANO_BTN_* + axis consts
-// The ANO driver defines these gamepad-shaped proxies (kept in sync with
-// gAnoEncoderEnabled/Connected) but, unlike the seesaw header, doesn't export
-// them — declare them here for the input row's enabled/connected state.
-extern bool gInputRunning;
-extern bool gInputConnected;
+#include "i2csensor_ano_encoder.h" // readings + ANO_BTN_* + axis consts
 #endif
 #if ENABLE_APDS_SENSOR
-#include "i2csensor_apds9960.h"   // gApdsCache + gApdsRunning / gApdsConnected
+#include "i2csensor_apds9960.h"   // readings + gApdsRunning / gApdsConnected
 #endif
 #if ENABLE_RTC_SENSOR
-#include "i2csensor_ds3231.h"     // gRtcCache + gRtcRunning / gRtcConnected
+#include "i2csensor_ds3231.h"     // readings + gRtcRunning / gRtcConnected
 #endif
 #if ENABLE_FM_RADIO
-#include "i2csensor_rda5807.h"    // gFmRadioCache + gFmRadioRunning / gFmRadioConnected
+#include "i2csensor_rda5807.h"    // readings + gFmRadioRunning / gFmRadioConnected
 #endif
 #if ENABLE_GPS_SENSOR
-#include "i2csensor_pa1010d.h"    // gGpsCache + gGpsRunning / gGpsConnected
+#include "i2csensor_pa1010d.h"    // gpsCacheSnapshot + gGpsRunning / gGpsConnected
 #endif
 #if ENABLE_PRESENCE_SENSOR
-#include "i2csensor_sths34pf80.h" // gPresenceCache + gPresenceRunning / gPresenceConnected
+#include "i2csensor_sths34pf80.h" // presenceCacheSnapshot + gPresenceRunning / gPresenceConnected
 #endif
 #if ENABLE_OLED_DISPLAY
 extern bool gOledRunning;
@@ -90,8 +79,8 @@ extern bool gOledRunning;
 // -----------------------------------------------------------------------------
 // Per-sensor "current value" formatters
 // -----------------------------------------------------------------------------
-// One formatter per compiled-in sensor. Each takes the cache mutex with a
-// short timeout (5 ms) — same pattern as the OLED renderers. Output is
+// One formatter per compiled-in sensor. Each requests a reading with a
+// short timeout (5 ms), then formats outside the owner's lock. Output is
 // limited to ~10 chars to keep total list pb body under the
 // single-fragment CREATE ceiling (~253 B).
 //
@@ -103,11 +92,11 @@ extern bool gOledRunning;
 
 #if ENABLE_IMU_SENSOR
 static void imuG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(5), "g2.imuFormat");
-  if (g.held) {
-    if (gImuCache.imuDataValid) {
+  ImuCache imu{};
+  if (imuCacheSnapshot(imu, 5)) {
+    if (imu.imuDataValid) {
       snprintf(out, cap, "Y%d P%d R%d",
-               (int)gImuCache.oriYaw, (int)gImuCache.oriPitch, (int)gImuCache.oriRoll);
+               (int)imu.oriYaw, (int)imu.oriPitch, (int)imu.oriRoll);
     } else {
       snprintf(out, cap, "...");
     }
@@ -119,11 +108,11 @@ static void imuG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_TOF_SENSOR
 static void tofG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(5), "g2.tofFormat");
-  if (g.held) {
-    if (gTofCache.tofDataValid && gTofCache.tofTotalObjects > 0) {
-      snprintf(out, cap, "%dmm", gTofCache.tofObjects[0].distance_mm);
-    } else if (gTofCache.tofDataValid) {
+  TofCache tof{};
+  if (tofCacheSnapshot(tof, 5)) {
+    if (tof.tofDataValid && tof.tofTotalObjects > 0) {
+      snprintf(out, cap, "%dmm", tof.tofObjects[0].distance_mm);
+    } else if (tof.tofDataValid) {
       snprintf(out, cap, "no obj");
     } else {
       snprintf(out, cap, "...");
@@ -136,11 +125,11 @@ static void tofG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_THERMAL_SENSOR
 static void thermalG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gThermalCache.mutex, pdMS_TO_TICKS(5), "g2.thermalFormat");
-  if (g.held) {
-    if (gThermalCache.thermalDataValid) {
+  ThermalCache thermal{};
+  if (thermalCacheSnapshot(thermal, 5)) {
+    if (thermal.thermalDataValid) {
       snprintf(out, cap, "%d/%dC",
-               (int)gThermalCache.thermalMinTemp, (int)gThermalCache.thermalMaxTemp);
+               (int)thermal.thermalMinTemp, (int)thermal.thermalMaxTemp);
     } else {
       snprintf(out, cap, "...");
     }
@@ -152,10 +141,10 @@ static void thermalG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_APDS_SENSOR
 static void apdsG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(5), "g2.apdsFormat");
-  if (g.held) {
-    if (gApdsCache.apdsDataValid) {
-      snprintf(out, cap, "px:%u", (unsigned)gApdsCache.apdsProximity);
+  APDSCache apds{};
+  if (apdsCacheSnapshot(apds, 5)) {
+    if (apds.apdsDataValid) {
+      snprintf(out, cap, "px:%u", (unsigned)apds.apdsProximity);
     } else {
       snprintf(out, cap, "...");
     }
@@ -170,8 +159,8 @@ static void gamepadG2FormatValue(char* out, size_t cap) {
   // Landing-list overview value — kept generic ("ready"). Raw button hex was
   // unreadable here; the specific Joy X / Joy Y / Btns readout lives in the
   // sensor's live page (g2BuildSensorReadout).
-  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "g2.gamepadFormat");
-  snprintf(out, cap, (g.held && gInputCache.dataValid) ? "ready" : "...");
+  InputCache input{};
+  snprintf(out, cap, (inputCacheSnapshot(input, 5) && input.dataValid) ? "ready" : "...");
 }
 #endif
 
@@ -179,22 +168,22 @@ static void gamepadG2FormatValue(char* out, size_t cap) {
 static void anoG2FormatValue(char* out, size_t cap) {
   // Landing-list overview value — kept generic ("ready"). The live wheel /
   // D-pad readout lives in the sensor's live page (g2BuildAnoArt).
-  SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(5), "g2.anoFormat");
-  snprintf(out, cap, (g.held && gAnoEncoderCache.dataValid) ? "ready" : "...");
+  AnoEncoderCache ano{};
+  snprintf(out, cap, (anoEncoderCacheSnapshot(ano, 5) && ano.dataValid) ? "ready" : "...");
 }
 #endif
 
 #if ENABLE_RTC_SENSOR
 static void rtcG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(5), "g2.rtcFormat");
-  if (g.held) {
-    if (gRtcCache.dataValid) {
+  RTCCache rtc{};
+  if (rtcCacheSnapshot(rtc, 5)) {
+    if (rtc.dataValid) {
       // Show clock time HH:MM — the temperature reading is a
       // secondary feature on this part and the date eats too much
       // of the value column.
       snprintf(out, cap, "%02u:%02u",
-               (unsigned)gRtcCache.dateTime.hour,
-               (unsigned)gRtcCache.dateTime.minute);
+               (unsigned)rtc.dateTime.hour,
+               (unsigned)rtc.dateTime.minute);
     } else {
       snprintf(out, cap, "...");
     }
@@ -206,13 +195,13 @@ static void rtcG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_GPS_SENSOR
 static void gpsG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(5), "g2.gpsFormat");
-  if (g.held) {
-    if (gGpsCache.dataValid) {
-      if (gGpsCache.hasFix) {
-        snprintf(out, cap, "fix %u", (unsigned)gGpsCache.satellites);
+  GPSCache gps{};
+  if (gpsCacheSnapshot(gps, 5)) {
+    if (gps.dataValid) {
+      if (gps.hasFix) {
+        snprintf(out, cap, "fix %u", (unsigned)gps.satellites);
       } else {
-        snprintf(out, cap, "no fix %u", (unsigned)gGpsCache.satellites);
+        snprintf(out, cap, "no fix %u", (unsigned)gps.satellites);
       }
     } else {
       snprintf(out, cap, "...");
@@ -225,11 +214,11 @@ static void gpsG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_PRESENCE_SENSOR
 static void presenceG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(5), "g2.presenceFormat");
-  if (g.held) {
-    if (gPresenceCache.dataValid) {
-      const char* tag = gPresenceCache.presenceDetected ? "yes" :
-                        gPresenceCache.motionDetected   ? "mot" : "no";
+  PresenceCache presence{};
+  if (presenceCacheSnapshot(presence, 5)) {
+    if (presence.dataValid) {
+      const char* tag = presence.presenceDetected ? "yes" :
+                        presence.motionDetected   ? "mot" : "no";
       snprintf(out, cap, "%s", tag);
     } else {
       snprintf(out, cap, "...");
@@ -242,13 +231,13 @@ static void presenceG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_FM_RADIO
 static void fmG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(5), "g2.fmRadioFormat");
-  if (g.held) {
-    if (gFmRadioCache.dataValid) {
+  FMRadioCache fmRadio{};
+  if (fmRadioCacheSnapshot(fmRadio, 5)) {
+    if (fmRadio.dataValid) {
       // Frequency stored in 10 kHz units (10390 = 103.9 MHz).
       snprintf(out, cap, "%u.%uMHz",
-               (unsigned)(gFmRadioCache.frequency / 100u),
-               (unsigned)(gFmRadioCache.frequency % 100u) / 10u);
+               (unsigned)(fmRadio.frequency / 100u),
+               (unsigned)(fmRadio.frequency % 100u) / 10u);
     } else {
       snprintf(out, cap, "...");
     }
@@ -817,12 +806,12 @@ static void gpCell(bool pressed, char letter, char* dst4) {
 // centre ~512; the trailing "x.. y.." line is for tuning the deadzone /
 // up-down-left-right mapping (tell me if a direction is flipped).
 static void g2BuildGamepadArt(char* out, size_t cap) {
-  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "g2.gamepadArt");
-  if (!(g.held && gInputCache.dataValid)) {
+  InputCache input{};
+  if (!(inputCacheSnapshot(input, 5) && input.dataValid)) {
     snprintf(out, cap, "Gamepad\n(reading...)");
     return;
   }
-  const uint32_t b = gInputCache.buttons;
+  const uint32_t b = input.buttons;
   char X[4], Y[4], A[4], B[4];
   gpCell((b & GAMEPAD_BUTTON_X) == 0, 'X', X);
   gpCell((b & GAMEPAD_BUTTON_Y) == 0, 'Y', Y);
@@ -843,8 +832,8 @@ static void g2BuildGamepadArt(char* out, size_t cap) {
     int z = (v * GRID) / 1024;
     return z < 0 ? 0 : (z >= GRID ? GRID - 1 : z);
   };
-  const int col = zone(gInputCache.joyX);
-  const int row = (GRID - 1) - zone(gInputCache.joyY);   // invert Y: up = top
+  const int col = zone(input.joyX);
+  const int row = (GRID - 1) - zone(input.joyY);   // invert Y: up = top
 
   // Sel/Start get their own header line (off the diamond) so X/Y/A/B can be a
   // roomy, evenly-spaced diamond beside the centre rows of the zone grid:
@@ -873,7 +862,7 @@ static void g2BuildGamepadArt(char* out, size_t cap) {
 
     if (off < cap) off += snprintf(out + off, cap - off, "%s  %s\n", gline, seg);
   }
-  if (off < cap) snprintf(out + off, cap - off, "x%d y%d", gInputCache.joyX, gInputCache.joyY);
+  if (off < cap) snprintf(out + off, cap - off, "x%d y%d", input.joyX, input.joyY);
 }
 #endif  // ENABLE_GAMEPAD_SENSOR
 
@@ -899,14 +888,14 @@ static void anoCell(bool pressed, char letter, char* dst4) {
 //       [Start]
 //   d+1 b0x02
 static void g2BuildAnoArt(char* out, size_t cap) {
-  SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(5), "g2.anoArt");
-  if (!(g.held && gAnoEncoderCache.dataValid)) {
+  AnoEncoderCache ano{};
+  if (!(anoEncoderCacheSnapshot(ano, 5) && ano.dataValid)) {
     snprintf(out, cap, "Encoder\n(reading...)");
     return;
   }
-  const long     pos  = (long)gAnoEncoderCache.encoderPosition;
-  const uint32_t b    = gAnoEncoderCache.buttons;
-  const uint8_t  axis = gAnoEncoderCache.currentAxis;
+  const long     pos  = (long)ano.encoderPosition;
+  const uint32_t b    = ano.buttons;
+  const uint8_t  axis = ano.currentAxis;
 
   // Spin direction since the last render. Unlike a joystick the wheel has no
   // absolute "rest" position — movement is the signal — so we diff against the
@@ -939,7 +928,7 @@ static void g2BuildAnoArt(char* out, size_t cap) {
            L, C, R,
            D,
            start,
-           (long)gAnoEncoderCache.encoderDelta, (unsigned long)(b & 0xFFu));
+           (long)ano.encoderDelta, (unsigned long)(b & 0xFFu));
 }
 #endif  // ENABLE_ANO_ENCODER
 
@@ -953,12 +942,12 @@ static void g2BuildAnoArt(char* out, size_t cap) {
 //   Temp: 24.5 C
 static const char* kRtcDow[8] = { "?", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 static void g2BuildRtcReadout(char* out, size_t cap) {
-  SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(5), "g2.rtcReadout");
-  if (!(g.held && gRtcCache.dataValid)) {
+  RTCCache rtc{};
+  if (!(rtcCacheSnapshot(rtc, 5) && rtc.dataValid)) {
     snprintf(out, cap, "RTC\n(reading...)");
     return;
   }
-  const RTCDateTime& t = gRtcCache.dateTime;
+  const RTCDateTime& t = rtc.dateTime;
   const uint8_t dow = (t.dayOfWeek >= 1 && t.dayOfWeek <= 7) ? t.dayOfWeek : 0;
   snprintf(out, cap,
            "%s %04u-%02u-%02u\n"
@@ -966,15 +955,15 @@ static void g2BuildRtcReadout(char* out, size_t cap) {
            "Temp: %.1f C",
            kRtcDow[dow], (unsigned)t.year, (unsigned)t.month, (unsigned)t.day,
            (unsigned)t.hour, (unsigned)t.minute, (unsigned)t.second,
-           (double)gRtcCache.temperature);
+           (double)rtc.temperature);
 }
 #endif  // ENABLE_RTC_SENSOR
 
 #if ENABLE_IMU_SENSOR
 // Orientation (Euler yaw/pitch/roll), accel & gyro vectors, chip temp.
 static void g2BuildImuReadout(char* out, size_t cap) {
-  SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(5), "g2.imuReadout");
-  if (!(g.held && gImuCache.imuDataValid)) { snprintf(out, cap, "IMU\n(reading...)"); return; }
+  ImuCache imu{};
+  if (!(imuCacheSnapshot(imu, 5) && imu.imuDataValid)) { snprintf(out, cap, "IMU\n(reading...)"); return; }
   snprintf(out, cap,
            "Yaw  : %d\n"
            "Pitch: %d\n"
@@ -982,25 +971,25 @@ static void g2BuildImuReadout(char* out, size_t cap) {
            "Acc %.1f %.1f %.1f\n"
            "Gyr %.1f %.1f %.1f\n"
            "Temp: %.0f C",
-           (int)gImuCache.oriYaw, (int)gImuCache.oriPitch, (int)gImuCache.oriRoll,
-           (double)gImuCache.accelX, (double)gImuCache.accelY, (double)gImuCache.accelZ,
-           (double)gImuCache.gyroX, (double)gImuCache.gyroY, (double)gImuCache.gyroZ,
-           (double)gImuCache.imuTemp);
+           (int)imu.oriYaw, (int)imu.oriPitch, (int)imu.oriRoll,
+           (double)imu.accelX, (double)imu.accelY, (double)imu.accelZ,
+           (double)imu.gyroX, (double)imu.gyroY, (double)imu.gyroZ,
+           (double)imu.imuTemp);
 }
 #endif  // ENABLE_IMU_SENSOR
 
 #if ENABLE_TOF_SENSOR
 // Per-object distance (mm) + range status, first 3 detected objects.
 static void g2BuildTofReadout(char* out, size_t cap) {
-  SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(5), "g2.tofReadout");
-  if (!(g.held && gTofCache.tofDataValid)) { snprintf(out, cap, "TOF\n(reading...)"); return; }
-  if (gTofCache.tofTotalObjects <= 0) { snprintf(out, cap, "Objects: 0\n(nothing in range)"); return; }
+  TofCache tof{};
+  if (!(tofCacheSnapshot(tof, 5) && tof.tofDataValid)) { snprintf(out, cap, "TOF\n(reading...)"); return; }
+  if (tof.tofTotalObjects <= 0) { snprintf(out, cap, "Objects: 0\n(nothing in range)"); return; }
   size_t off = 0;
-  off += snprintf(out + off, cap - off, "Objects: %d", gTofCache.tofTotalObjects);
-  int shown = gTofCache.tofTotalObjects > 3 ? 3 : gTofCache.tofTotalObjects;
+  off += snprintf(out + off, cap - off, "Objects: %d", tof.tofTotalObjects);
+  int shown = tof.tofTotalObjects > 3 ? 3 : tof.tofTotalObjects;
   for (int i = 0; i < shown && off < cap; i++) {
     off += snprintf(out + off, cap - off, "\n#%d %dmm st%d",
-                    i + 1, gTofCache.tofObjects[i].distance_mm, gTofCache.tofObjects[i].status);
+                    i + 1, tof.tofObjects[i].distance_mm, tof.tofObjects[i].status);
   }
 }
 #endif  // ENABLE_TOF_SENSOR
@@ -1008,27 +997,27 @@ static void g2BuildTofReadout(char* out, size_t cap) {
 #if ENABLE_APDS_SENSOR
 // Proximity, RGBC colour channels, and last gesture code.
 static void g2BuildApdsReadout(char* out, size_t cap) {
-  SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(5), "g2.apdsReadout");
-  if (!(g.held && gApdsCache.apdsDataValid)) { snprintf(out, cap, "APDS\n(reading...)"); return; }
+  APDSCache apds{};
+  if (!(apdsCacheSnapshot(apds, 5) && apds.apdsDataValid)) { snprintf(out, cap, "APDS\n(reading...)"); return; }
   snprintf(out, cap,
            "Prox: %u\n"
            "R:%u G:%u B:%u\n"
            "Clear: %u\n"
            "Gesture: %u",
-           (unsigned)gApdsCache.apdsProximity,
-           (unsigned)gApdsCache.apdsRed, (unsigned)gApdsCache.apdsGreen,
-           (unsigned)gApdsCache.apdsBlue, (unsigned)gApdsCache.apdsClear,
-           (unsigned)gApdsCache.apdsGesture);
+           (unsigned)apds.apdsProximity,
+           (unsigned)apds.apdsRed, (unsigned)apds.apdsGreen,
+           (unsigned)apds.apdsBlue, (unsigned)apds.apdsClear,
+           (unsigned)apds.apdsGesture);
 }
 #endif  // ENABLE_APDS_SENSOR
 
 #if ENABLE_GPS_SENSOR
 // Fix status + satellites, and (when fixed) lat/lon/altitude/speed.
 static void g2BuildGpsReadout(char* out, size_t cap) {
-  SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(5), "g2.gpsReadout");
-  if (!(g.held && gGpsCache.dataValid)) { snprintf(out, cap, "GPS\n(reading...)"); return; }
-  if (!gGpsCache.hasFix) {
-    snprintf(out, cap, "Fix: no\nSats: %u\n(acquiring...)", (unsigned)gGpsCache.satellites);
+  GPSCache gps{};
+  if (!(gpsCacheSnapshot(gps, 5) && gps.dataValid)) { snprintf(out, cap, "GPS\n(reading...)"); return; }
+  if (!gps.hasFix) {
+    snprintf(out, cap, "Fix: no\nSats: %u\n(acquiring...)", (unsigned)gps.satellites);
     return;
   }
   snprintf(out, cap,
@@ -1037,47 +1026,47 @@ static void g2BuildGpsReadout(char* out, size_t cap) {
            "%.4f\n"
            "%.4f\n"
            "Alt:%.0fm Sp:%.1f",
-           (unsigned)gGpsCache.fixQuality, (unsigned)gGpsCache.satellites,
-           (double)gGpsCache.latitude, (double)gGpsCache.longitude,
-           (double)gGpsCache.altitude, (double)gGpsCache.speed);
+           (unsigned)gps.fixQuality, (unsigned)gps.satellites,
+           (double)gps.latitude, (double)gps.longitude,
+           (double)gps.altitude, (double)gps.speed);
 }
 #endif  // ENABLE_GPS_SENSOR
 
 #if ENABLE_PRESENCE_SENSOR
 // Presence / motion flags + raw values, plus ambient & object temps.
 static void g2BuildPresenceReadout(char* out, size_t cap) {
-  SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(5), "g2.presenceReadout");
-  if (!(g.held && gPresenceCache.dataValid)) { snprintf(out, cap, "Presence\n(reading...)"); return; }
+  PresenceCache presence{};
+  if (!(presenceCacheSnapshot(presence, 5) && presence.dataValid)) { snprintf(out, cap, "Presence\n(reading...)"); return; }
   snprintf(out, cap,
            "Presence: %s\n"
            "Motion: %s\n"
            "Pval:%d Mval:%d\n"
            "Amb: %.1f C\n"
            "Obj: %.1f C",
-           gPresenceCache.presenceDetected ? "yes" : "no",
-           gPresenceCache.motionDetected ? "yes" : "no",
-           (int)gPresenceCache.presenceValue, (int)gPresenceCache.motionValue,
-           (double)gPresenceCache.ambientTemp, (double)gPresenceCache.compObjectTemp);
+           presence.presenceDetected ? "yes" : "no",
+           presence.motionDetected ? "yes" : "no",
+           (int)presence.presenceValue, (int)presence.motionValue,
+           (double)presence.ambientTemp, (double)presence.compObjectTemp);
 }
 #endif  // ENABLE_PRESENCE_SENSOR
 
 #if ENABLE_FM_RADIO
 // Tuned frequency, volume, stereo/mute, signal (RSSI/SNR), RDS station name.
 static void g2BuildFmReadout(char* out, size_t cap) {
-  SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(5), "g2.fmReadout");
-  if (!(g.held && gFmRadioCache.dataValid)) { snprintf(out, cap, "FM\n(reading...)"); return; }
-  const char* mode = gFmRadioCache.muted ? "Muted"
-                   : gFmRadioCache.stereo ? "Stereo" : "Mono";
+  FMRadioCache fmRadio{};
+  if (!(fmRadioCacheSnapshot(fmRadio, 5) && fmRadio.dataValid)) { snprintf(out, cap, "FM\n(reading...)"); return; }
+  const char* mode = fmRadio.muted ? "Muted"
+                   : fmRadio.stereo ? "Stereo" : "Mono";
   snprintf(out, cap,
            "%u.%u MHz\n"
            "Vol:%u %s\n"
            "RSSI:%u SNR:%u\n"
            "Name:%.8s",
-           (unsigned)(gFmRadioCache.frequency / 100u),
-           (unsigned)((gFmRadioCache.frequency % 100u) / 10u),
-           (unsigned)gFmRadioCache.volume, mode,
-           (unsigned)gFmRadioCache.rssi, (unsigned)gFmRadioCache.snr,
-           gFmRadioCache.stationName[0] ? gFmRadioCache.stationName : "--");
+           (unsigned)(fmRadio.frequency / 100u),
+           (unsigned)((fmRadio.frequency % 100u) / 10u),
+           (unsigned)fmRadio.volume, mode,
+           (unsigned)fmRadio.rssi, (unsigned)fmRadio.snr,
+           fmRadio.stationName[0] ? fmRadio.stationName : "--");
 }
 #endif  // ENABLE_FM_RADIO
 

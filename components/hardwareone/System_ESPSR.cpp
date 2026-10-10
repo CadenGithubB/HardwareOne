@@ -20,6 +20,7 @@
 #include "G2_Glasses.h"  // g2MicSetAfeFeedActive / g2MicReadPcmSamples (Phase 2B)
 #include "HAL_Audio.h"   // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
 #include "System_Command.h"
+#include "System_Utils.h"        // executeCommand and validate-only command guard
 #include "System_CommandTypes.h"  // Command / ORIGIN_VOICE — voice cmds route through cmd_exec
 #include "System_CLI.h"
 #include "System_User.h"

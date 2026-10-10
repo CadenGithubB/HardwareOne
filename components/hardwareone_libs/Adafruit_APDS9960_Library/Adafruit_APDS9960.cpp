@@ -391,6 +391,7 @@ void Adafruit_APDS9960::enableGesture(boolean en) {
  *  @brief  Resets gesture counts
  */
 void Adafruit_APDS9960::resetCounts() {
+  gestureLastActivity = 0;
   gestCnt = 0;
   UCount = 0;
   DCount = 0;
@@ -399,45 +400,58 @@ void Adafruit_APDS9960::resetCounts() {
 }
 
 /*!
- *  @brief  Reads gesture
+ *  @brief  Polls available gesture data without waiting for another FIFO batch
  *  @return Received gesture (APDS9960_DOWN APDS9960_UP, APDS9960_LEFT
  *          APDS9960_RIGHT)
  */
 uint8_t Adafruit_APDS9960::readGesture() {
-  uint8_t toRead;
-  uint8_t buf[256];
-  unsigned long t = 0;
-  uint8_t gestureReceived;
-  while (1) {
+  // Process only the FIFO data already available. Waiting for the next half
+  // of a swipe here would hold the caller's shared I2C bus lock. Keep recent
+  // direction signs between polls, expiring them after 300ms without activity.
+  if (millis() - gestureLastActivity > 300)
+    resetCounts();
+  if (!gestureValid())
+    return 0;
+
+  const uint8_t datasets = this->read8(APDS9960_GFLVL);
+  if (datasets == 0)
+    return 0;
+  if (datasets > 32) {
+    resetCounts();
+    return 0;
+  }
+
+  // GFLVL counts U/D/L/R datasets, not bytes. Reading all four bytes advances
+  // the FIFO; decode only complete datasets from a successful transfer.
+  uint8_t buf[32 * 4];
+  const uint8_t bytes = datasets * 4;
+  if (this->read(APDS9960_GFIFO_U, buf, bytes) != bytes) {
+    resetCounts();
+    return 0;
+  }
+
+  for (uint8_t offset = 0; offset < bytes; offset += 4) {
+    const uint8_t* sample = buf + offset;
     int up_down_diff = 0;
     int left_right_diff = 0;
-    gestureReceived = 0;
-    if (!gestureValid())
-      return 0;
+    uint8_t gestureReceived = 0;
+    if (abs((int)sample[0] - (int)sample[1]) > 13)
+      up_down_diff += (int)sample[0] - (int)sample[1];
 
-    delay(30);
-    toRead = this->read8(APDS9960_GFLVL);
-
-    // produces sideffects needed for readGesture to work
-    this->read(APDS9960_GFIFO_U, buf, toRead);
-
-    if (abs((int)buf[0] - (int)buf[1]) > 13)
-      up_down_diff += (int)buf[0] - (int)buf[1];
-
-    if (abs((int)buf[2] - (int)buf[3]) > 13)
-      left_right_diff += (int)buf[2] - (int)buf[3];
+    if (abs((int)sample[2] - (int)sample[3]) > 13)
+      left_right_diff += (int)sample[2] - (int)sample[3];
 
     if (up_down_diff != 0) {
       if (up_down_diff < 0) {
         if (DCount > 0) {
           gestureReceived = APDS9960_UP;
         } else
-          UCount++;
+          UCount = 1;
       } else if (up_down_diff > 0) {
         if (UCount > 0) {
           gestureReceived = APDS9960_DOWN;
         } else
-          DCount++;
+          DCount = 1;
       }
     }
 
@@ -446,23 +460,24 @@ uint8_t Adafruit_APDS9960::readGesture() {
         if (RCount > 0) {
           gestureReceived = APDS9960_LEFT;
         } else
-          LCount++;
+          LCount = 1;
       } else if (left_right_diff > 0) {
         if (LCount > 0) {
           gestureReceived = APDS9960_RIGHT;
         } else
-          RCount++;
+          RCount = 1;
       }
     }
 
     if (up_down_diff != 0 || left_right_diff != 0)
-      t = millis();
+      gestureLastActivity = millis();
 
-    if (gestureReceived || millis() - t > 300) {
+    if (gestureReceived) {
       resetCounts();
       return gestureReceived;
     }
   }
+  return 0;
 }
 
 /*!
@@ -697,8 +712,7 @@ uint16_t Adafruit_APDS9960::read16R(uint8_t reg) {
  */
 uint8_t Adafruit_APDS9960::read(uint8_t reg, uint8_t *buf, uint8_t num) {
   buf[0] = reg;
-  i2c_dev->write_then_read(buf, 1, buf, num);
-  return num;
+  return i2c_dev->write_then_read(buf, 1, buf, num) ? num : 0;
 }
 
 /*!

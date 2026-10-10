@@ -77,6 +77,10 @@ class PeripheralConfig(unittest.TestCase):
     def test_board_buttons_require_eye_board(self):
         profile = self.profile(wheel=3)
         profile['HW_BOARD_P4X_EYE'] = 0
+        # An unrelated assembly can wire a native encoder, but it does not
+        # inherit the EYE's auxiliary buttons or its encoder pin map.
+        profile.update(GPIO_ENCODER_PIN_A=4, GPIO_ENCODER_PIN_B=5,
+                       GPIO_ENCODER_PIN_BUTTON=6)
         self.check_profile(profile, ['ENABLE_GPIO_ENCODER == 1',
                                      'ENABLE_GPIO_ENCODER_BUTTONS == 0'])
         profile['ENABLE_GPIO_ENCODER_BUTTONS'] = 1
@@ -90,6 +94,8 @@ class PeripheralConfig(unittest.TestCase):
         # an undefined board macro must not leak into this derived flag.
         self.check_profile(profile, ['ENABLE_GPIO_ENCODER_BUTTONS == 0'])
         profile['INPUT_DEVICE_TYPE'] = 3
+        profile.update(GPIO_ENCODER_PIN_A=4, GPIO_ENCODER_PIN_B=5,
+                       GPIO_ENCODER_PIN_BUTTON=6)
         self.check_profile(profile, ['ENABLE_GPIO_ENCODER == 1',
                                      'ENABLE_GPIO_ENCODER_BUTTONS == 0'])
 

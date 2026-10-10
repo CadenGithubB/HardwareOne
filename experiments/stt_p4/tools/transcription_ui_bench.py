@@ -1,4 +1,5 @@
 """Existing S3 USB HTTP bridge exercises P4 UI adapter; no firmware changes."""
+import os
 import base64,contextlib,datetime,hashlib,json,pathlib,re,subprocess,sys,time,urllib.parse
 ROOT=pathlib.Path(__file__).resolve().parents[3]
 sys.path[:0]=[str(ROOT/'experiments'/x) for x in ('p4_connectivity','p4_mesh')]
@@ -23,7 +24,7 @@ def play():
   subprocess.run(['/usr/bin/afplay',str(fixture)],check=True)
  finally:subprocess.run(['/usr/bin/osascript','-e',f'set volume output volume {old[0]} output muted {old[1]}'],check=True,capture_output=True)
 with contextlib.ExitStack() as stack:
- boards={k:stack.enter_context(ConnectivityConsole(p,RUN/('transcription-ui-'+k+'-'+tag+'.log'),secrets=private_encodings(c),completion='hardwareone',chunk_delay=.12)) for k,p in {'p4':'/dev/cu.usbmodem2201','s3':'/dev/cu.usbmodem1101'}.items()}
+ boards={k:stack.enter_context(ConnectivityConsole(p,RUN/('transcription-ui-'+k+'-'+tag+'.log'),secrets=private_encodings(c),completion='hardwareone',chunk_delay=.12)) for k,p in {'p4':os.environ['HW1_P4_PORT'],'s3':os.environ['HW1_S3_PORT']}.items()}
  time.sleep(3)
  p4,s3=boards['p4'],boards['s3']
  def cmd(b,text):return b.command(text,timeout=45)

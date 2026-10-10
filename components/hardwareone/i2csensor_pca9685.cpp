@@ -14,20 +14,24 @@
 #include "System_Command.h"
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC, ps_alloc, ps_delete
 #include <ArduinoJson.h>
+#include <Adafruit_PWMServoDriver.h>
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include <Wire.h>
+#include <errno.h>
+#include <ctype.h>
+#include <stdlib.h>
 #include <new>
 
 // Note: BROADCAST_PRINTF is a macro defined in debug_system.h (included via system_utils.h)
 
-// Global PCA9685 driver instance
-Adafruit_PWMServoDriver* gPwmDriver = nullptr;
+// Driver and profiles are owned by the servo operations below.
+static Adafruit_PWMServoDriver* gPwmDriver = nullptr;
 bool gPwmDriverConnected = false;
 
 // Servo profiles (16 channels)
 // PSRAM .bss: plain calibration config, read on the I2C task; never DMA'd.
-EXT_RAM_BSS_ATTR ServoProfile servoProfiles[MAX_SERVO_CHANNELS];
+EXT_RAM_BSS_ATTR static ServoProfile servoProfiles[MAX_SERVO_CHANNELS];
 
 // ============================================================================
 // PCA9685 Initialization
@@ -60,9 +64,9 @@ bool servoInit() {
   }
   gPwmDriverConnected = true;
   
-  // Initialize servo profiles
+  // Keep profiles entered before the first hardware command (or an init retry).
   for (int i = 0; i < MAX_SERVO_CHANNELS; i++) {
-    servoProfiles[i].configured = false;
+    if (servoProfiles[i].configured) continue;
     servoProfiles[i].minPulse = 500;
     servoProfiles[i].maxPulse = 2500;
     servoProfiles[i].centerPulse = 1500;
@@ -76,26 +80,31 @@ bool servoInit() {
 // PCA9685/Servo Command Handlers
 // ============================================================================
 
+// CommandArgs owns tokenization; reject partial numbers and overflow before any
+// driver initialization or output. Its legacy argInt() accepts numeric prefixes.
+static bool parseServoNumber(const String& text, int low, int high, int& value) {
+  const char* start = text.c_str();
+  if (!*start || isspace(static_cast<unsigned char>(*start))) return false;
+  errno = 0;
+  char* end = nullptr;
+  const long parsed = strtol(start, &end, 10);
+  if (errno || end == start || end != start + text.length() || parsed < low || parsed > high) return false;
+  value = static_cast<int>(parsed);
+  return true;
+}
+
 const char* cmd_servo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: [Servo] Debug buffer unavailable";
   
-  // Initialize PWM driver if not already done
-  if (!gPwmDriverConnected) {
-    if (!servoInit()) {
-      return "Error: [Servo] PCA9685 not found at 0x40 - check wiring";
-    }
-  }
-  
   // Parse: <channel> <angle>
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: servo <channel> <angle>";
+  if (a.count() != 2 || a.unterminatedQuote()) return "Error: invalid arguments — Usage: servo <channel> <angle>";
 
-  int channel = a.argInt(0, -1);
-  int angle = a.argInt(1, -1);
-  
-  if (channel < 0 || channel > 15) return "Error: [Servo] Channel must be 0-15";
-  if (angle < 0 || angle > 180) return "Error: [Servo] Angle must be 0-180";
+  int channel, angle;
+  if (!parseServoNumber(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
+  if (!parseServoNumber(a.arg(1), 0, 180, angle)) return "Error: [Servo] Angle must be an integer from 0-180";
+  if (!servoInit()) return "Error: [Servo] PCA9685 initialization failed - check bus and wiring";
   
   // Use profile if configured, otherwise use default range
   int pulseWidth;
@@ -104,19 +113,24 @@ const char* cmd_servo(const String& argsInput) {
     pulseWidth = map(angle, 0, 180, 
                      servoProfiles[channel].minPulse, 
                      servoProfiles[channel].maxPulse);
-    snprintf(getDebugBuffer(), 1024, "Servo '%s' (ch %d) set to %d° (%dµs)", 
-             servoProfiles[channel].name, channel, angle, pulseWidth);
   } else {
     // Use default range (500-2500µs)
     pulseWidth = map(angle, 0, 180, 500, 2500);
-    snprintf(getDebugBuffer(), 1024, "WARNING: Servo channel %d set to %d° (%dµs) [uncalibrated]", 
-             channel, angle, pulseWidth);
   }
   
-  i2cDeviceTransactionVoid((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
-                           100000, 200, [&]() {
+  const bool issued = i2cDeviceTransaction((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
+                           100000, 200, [&]() -> bool {
     gPwmDriver->writeMicroseconds(channel, pulseWidth);
+    return true;  // The library's microsecond API exposes no write result.
   });
+  if (!issued) return "Error: [Servo] I2C bus unavailable - command not sent";
+  if (servoProfiles[channel].configured) {
+    snprintf(getDebugBuffer(), 1024, "Servo '%s' (ch %d) request issued: %d° (%dµs)",
+             servoProfiles[channel].name, channel, angle, pulseWidth);
+  } else {
+    snprintf(getDebugBuffer(), 1024, "WARNING: Servo channel %d request issued: %d° (%dµs) [uncalibrated]",
+             channel, angle, pulseWidth);
+  }
   return getDebugBuffer();
 }
 
@@ -126,18 +140,15 @@ const char* cmd_servoprofile(const String& argsInput) {
   
   // Parse: <channel> <minPulse> <maxPulse> <centerPulse> <name>
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(5)) return "Error: invalid arguments — Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
+  if (!a.hasMinArgs(5) || a.unterminatedQuote()) return "Error: invalid arguments — Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
 
-  int channel = a.argInt(0, -1);
-  int minPulse = a.argInt(1, -1);
-  int maxPulse = a.argInt(2, -1);
-  int centerPulse = a.argInt(3, -1);
+  int channel, minPulse, maxPulse, centerPulse;
   String name = a.remaining(3);
   
-  if (channel < 0 || channel > 15) return "Error: [Servo] Channel must be 0-15";
-  if (minPulse < 500 || minPulse > 2500) return "Error: [Servo] Min pulse must be 500-2500µs";
-  if (maxPulse < 500 || maxPulse > 2500) return "Error: [Servo] Max pulse must be 500-2500µs";
-  if (centerPulse < minPulse || centerPulse > maxPulse) return "Error: [Servo] Center pulse must be between min and max";
+  if (!parseServoNumber(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
+  if (!parseServoNumber(a.arg(1), 500, 2500, minPulse)) return "Error: [Servo] Min pulse must be an integer from 500-2500µs";
+  if (!parseServoNumber(a.arg(2), 500, 2500, maxPulse)) return "Error: [Servo] Max pulse must be an integer from 500-2500µs";
+  if (!parseServoNumber(a.arg(3), minPulse, maxPulse, centerPulse)) return "Error: [Servo] Center pulse must be an integer between min and max";
   if (name.length() == 0 || name.length() > 31) return "Error: [Servo] Name must be 1-31 characters";
   
   servoProfiles[channel].configured = true;
@@ -202,16 +213,22 @@ const char* cmd_servocalibrate(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: [Servo] Debug buffer unavailable";
   
   // Parse: <channel>
-  String valStr = argsInput;
-  valStr.trim();
-  if (valStr.length() == 0) return "Error: invalid arguments — Usage: servocalibrate <channel>";
-  
-  int channel = valStr.toInt();
-  if (channel < 0 || channel > 15) return "Error: [Servo] Channel must be 0-15";
+  CommandArgs a(argsInput);
+  if (a.count() != 1 || a.unterminatedQuote()) return "Error: invalid arguments — Usage: servocalibrate <channel>";
+  int channel;
+  if (!parseServoNumber(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
   
   if (!gPwmDriverConnected) {
     return "Error: [Servo] PCA9685 not initialized - run 'servo' command first";
   }
+
+  // Only present calibration instructions after the center command was issued.
+  const bool issued = i2cDeviceTransaction((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
+                           100000, 200, [&]() -> bool {
+    gPwmDriver->writeMicroseconds(channel, 1500);
+    return true;  // The library's microsecond API exposes no write result.
+  });
+  if (!issued) return "Error: [Servo] I2C bus unavailable - command not sent";
   
   broadcastOutput("SERVO CALIBRATION MODE");
   broadcastOutput("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -229,13 +246,7 @@ const char* cmd_servocalibrate(const String& argsInput) {
   broadcastOutput("  Wide-angle servo:  500-2500µs (0-270°)");
   broadcastOutput("");
   
-  // Set to safe center
-  i2cDeviceTransactionVoid((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
-                           100000, 200, [&]() {
-    gPwmDriver->writeMicroseconds(channel, 1500);
-  });
-  
-  snprintf(getDebugBuffer(), 1024, "Channel %d set to center (1500µs). Begin testing.", channel);
+  snprintf(getDebugBuffer(), 1024, "Channel %d center request issued (1500µs). Check position before testing.", channel);
   return getDebugBuffer();
 }
 
@@ -243,43 +254,35 @@ const char* cmd_pwm(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: [Servo] Debug buffer unavailable";
   
-  // Initialize PWM driver if not already done
-  if (!gPwmDriverConnected) {
-    if (!servoInit()) {
-      return "Error: [Servo] PCA9685 not found at 0x40 - check wiring";
-    }
-  }
-  
   // Parse: <channel> <value> [freq]
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: pwm <channel> <value> [freq]";
+  if (a.count() < 2 || a.count() > 3 || a.unterminatedQuote()) return "Error: invalid arguments — Usage: pwm <channel> <value> [freq]";
 
-  int channel = a.argInt(0, -1);
-  int value = a.argInt(1, -1);
+  int channel, value, freq = 0;
+  if (!parseServoNumber(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
+  if (!parseServoNumber(a.arg(1), 0, 4095, value)) return "Error: [Servo] Value must be an integer from 0-4095";
+  if (a.has(2) && !parseServoNumber(a.arg(2), 24, 1526, freq)) return "Error: [Servo] Frequency must be an integer from 24-1526Hz";
+  if (!servoInit()) return "Error: [Servo] PCA9685 initialization failed - check bus and wiring";
 
-  if (channel < 0 || channel > 15) return "Error: [Servo] Channel must be 0-15";
-  if (value < 0 || value > 4095) return "Error: [Servo] Value must be 0-4095";
-
-  // Optional frequency parameter
-  if (a.has(2)) {
-    int freq = a.argInt(2, 0);
-    if (freq >= 24 && freq <= 1526) {
-      i2cDeviceTransactionVoid((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
-                               100000, 200, [&]() {
-        gPwmDriver->setPWMFreq(freq);
-      });
-      snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d (freq: %dHz)", channel, value, freq);
-    } else {
-      snprintf(getDebugBuffer(), 1024, "Error: [Servo] Frequency must be 24-1526Hz");
-    }
-  } else {
-    snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d", channel, value);
-  }
-  
-  i2cDeviceTransactionVoid((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
-                           100000, 200, [&]() {
-    gPwmDriver->setPWM(channel, 0, value);
+  // Frequency is chip-wide. Keep it and this channel's update under one lock.
+  // setPWM reports its transfer result; setPWMFreq does not expose one.
+  bool attempted = false;
+  const bool success = i2cDeviceTransaction((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
+                           100000, 200, [&]() -> bool {
+    attempted = true;
+    if (a.has(2)) gPwmDriver->setPWMFreq(freq);
+    return gPwmDriver->setPWM(channel, 0, value) == 0;
   });
+  if (!attempted) return "Error: [Servo] I2C bus unavailable - command not sent";
+  if (!success) return a.has(2)
+      ? "Error: [Servo] PWM write failed after frequency request; frequency may have changed"
+      : "Error: [Servo] PWM write failed";
+
+  if (a.has(2)) {
+    snprintf(getDebugBuffer(), 1024, "PWM channel %d write accepted: %d (chip frequency request: %dHz)", channel, value, freq);
+  } else {
+    snprintf(getDebugBuffer(), 1024, "PWM channel %d write accepted: %d", channel, value);
+  }
   return getDebugBuffer();
 }
 

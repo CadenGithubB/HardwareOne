@@ -4,11 +4,11 @@
  */
 
 #include "System_BuildConfig.h"
-#include "System_Clock.h"  // Clock::isValidEpoch — one epoch-validity vocabulary
-#include <esp_attr.h>
 
 #if ENABLE_ESPNOW
 
+#include "System_Clock.h"  // Clock::isValidEpoch — one epoch-validity vocabulary
+#include <esp_attr.h>
 #include <atomic>
 #include <ctype.h>
 #include <stdarg.h>
@@ -7635,7 +7635,10 @@ static String generateDeviceSettings() {
   
   // Use the existing settings serialization (excludes passwords for security).
   // buildSettingsJsonDoc is declared in System_Settings.h (now a 3-arg signature).
-  buildSettingsJsonDoc(doc, true);  // true = exclude passwords
+  if (!buildSettingsJsonDoc(doc, true)) {  // exclude passwords
+    ERROR_ESPNOWF("[SETTINGS] Could not snapshot saved WiFi networks");
+    return String();
+  }
   
   // Add device identification metadata
   doc["_deviceName"] = gSettings.espnowDeviceName;
@@ -7812,6 +7815,11 @@ static void sendBondSettings(const uint8_t* peerMac) {
   {
     String settings = generateDeviceSettings();
     settingsLen = settings.length();
+    if (settingsLen == 0) {
+      ERROR_ESPNOWF("[SETTINGS_SEND] Settings snapshot unavailable; transfer cancelled");
+      sSettingsTransferInProgress = false;
+      return;
+    }
     DEBUG_ESPNOWF("[SETTINGS_SEND] Generated settings JSON: %d bytes", settingsLen);
 
     FsLockGuard guard("pair.settings.send");
@@ -18645,6 +18653,34 @@ int espnowReassembleByReqId(const uint8_t* peerMac, uint32_t reqId, bool isSent,
   out[pos] = '\0';
   if (complete) *complete = (found >= total);
   return (int)pos;
+}
+
+#else // !ENABLE_ESPNOW
+
+#include "System_ESPNow.h"
+#include <cstring>
+#if ENABLE_WIFI
+#include <esp_wifi.h>
+#endif
+
+esp_err_t espnowSelfStaMac(uint8_t out[6]) {
+  if (!out) return ESP_ERR_INVALID_ARG;
+#if ENABLE_WIFI
+  return esp_wifi_get_mac(WIFI_IF_STA, out);
+#else
+  memset(out, 0, 6);
+  return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t espnowSelfApMac(uint8_t out[6]) {
+  if (!out) return ESP_ERR_INVALID_ARG;
+#if ENABLE_WIFI
+  return esp_wifi_get_mac(WIFI_IF_AP, out);
+#else
+  memset(out, 0, 6);
+  return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 #endif // ENABLE_ESPNOW

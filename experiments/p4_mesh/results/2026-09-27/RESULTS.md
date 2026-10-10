@@ -1,5 +1,7 @@
 # HardwareOne application milestone — 27 September 2026
 
+Device MAC addresses use synthetic aliases, and serial-port locations use generic placeholders. Measurement values and test outcomes are unchanged.
+
 **The actual shared HardwareOne application runs on P4+C6 and the native S3
 with ESP-IDF 5.5.5. The complete acceptance matrix does not yet pass.** Encrypted
 text, explicit secure peer setup and session recovery work; discovery pairing

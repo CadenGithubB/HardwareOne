@@ -3,7 +3,6 @@
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
-#include "System_Settings.h"   // gSettings.oledBus — used by the OLED_TRANSACTION macro
 
 // =============================================================================
 // OLED WRAPPER FUNCTIONS - Safe to call regardless of ENABLE_OLED_DISPLAY
@@ -349,30 +348,23 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);
 // =============================================================================
 #include "HAL_Display.h"
 
-// OLED-specific configuration. This is the address selected by display probing,
-// not a compile-time assumption about whether the panel uses 0x3C or 0x3D.
-#define OLED_RESET -1
+// Address selected by the display HAL; retained for status output.
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
 #define OLED_I2C_ADDRESS gDisplayI2cAddress
 #endif
 
-// Helper macro to wrap OLED operations in an I2C transaction.
-// Requires System_I2C.h (i2cDeviceTransactionVoid) and System_Settings.h
-// (gSettings.oledBus) in scope before use.
-//
-// Bus-aware: routes the per-bus mutex + clock to the OLED's configured bus
-// (gSettings.oledBus), matching HAL_Display's render path. The Adafruit SSD1306
-// object writes to its own TwoWire (the oledBus wire) internally regardless, so
-// the previous 4-arg legacy form (implicit bus 0) took the WRONG bus's mutex
-// when the OLED is on bus 1 (e.g. FeatherS3[D], I2C2) — fixed here.
+// Compatibility for setup screens that draw and flush in one transaction.
+// Hardware lifecycle and controls use HAL_Display directly. Route legacy
+// flushes through the same latched bus as the retained driver, even after a
+// reboot-required bus setting is saved. Requires System_I2C.h in the caller.
 #ifndef OLED_TRANSACTION
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
 #define OLED_TRANSACTION(code) \
-  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() { code; })
+  do { if (displayIsReady()) { \
+    i2cDeviceTransactionVoid(displayI2cBus(), OLED_I2C_ADDRESS, 400000, 500, [&]() { code; }); \
+  } } while (0)
 #else
-// SPI panels have their own transport lock. Never route them through an I2C
-// device manager, particularly in builds with I2C_FEATURE_LEVEL=0.
-#define OLED_TRANSACTION(code) do { code; } while (0)
+#define OLED_TRANSACTION(code) do { if (displayIsReady()) { code; } } while (0)
 #endif
 #endif
 
@@ -439,7 +431,7 @@ void oledMarkDirtyUntil(unsigned long untilMs);  // Keep rendering until timesta
 bool earlyOLEDInit();  // Probe and init OLED for boot animation
 void processOLEDBootSequence();  // Handle boot phase transitions
 
-// OLED command registry (for system_utils.cpp)
+// OLED command registry (for System_CommandRegistry.cpp)
 struct CommandEntry;
 extern const CommandEntry oledCommands[];
 extern const size_t oledCommandsCount;

@@ -699,8 +699,8 @@ public:
   // Load track from sensor log file
   static bool loadTrack(const char* filepath, String& errorMsg);
   
-  // Clear current track
-  static void clearTrack();
+  // Refuses to replace the buffer while a live recording is active.
+  static bool clearTrack();
   
   // Check if track is loaded
   static bool hasTrack() { return _pointCount > 0; }
@@ -722,8 +722,11 @@ public:
   static bool deleteTrackFile(const char* filepath);
   
   // Live tracking mode - append points in real-time
-  static bool isLiveTracking() { return _liveTracking; }
-  static void setLiveTracking(bool enabled);
+  static bool isLiveTracking();
+  // Called by the authorized gpstrack command. Preserve boot preferences;
+  // stop affects only the logger session started by this live recording.
+  static const char* startLiveTracking();
+  static const char* stopLiveTracking();
   static bool appendPoint(float lat, float lon);  // Returns true if point was added
   static uint32_t getLastUpdateTime() { return _lastUpdateMs; }
   
@@ -742,6 +745,7 @@ private:
   static GPSTrackStats _stats;
   static char _filename[256];
   static bool _liveTracking;
+  static uint32_t _liveLogSessionId;
   static uint32_t _lastUpdateMs;
   
   // Calculate bounds from loaded points

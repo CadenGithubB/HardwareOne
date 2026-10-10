@@ -33,6 +33,12 @@ class PowerProfileTests(unittest.TestCase):
     def test_profiles_and_refused_changes(self):
         power = (HW / 'System_Power.cpp').read_text()
         body = power[power.index('struct PowerModeConfig'):power.index('void checkAutoPowerMode()')]
+        # Newer applications share the clock owner. Keep using its actual body
+        # here while the dedicated host suite exercises RTOS/I2C contention.
+        # Older isolated experiment copies still have the direct HAL path.
+        if 'bool powerSetCpuFrequencyMhz(' in power:
+            owner_start = power.index('static StaticSemaphore_t sCpuFrequencyMutexStorage;')
+            body = power[owner_start:power.index('struct PowerModeConfig')] + body
         body += '\n' + function(power, 'void buildPowerJson(')
         g2 = (HW / 'G2_Page_Power.cpp').read_text()
         rows = g2[g2.index('#define POWER_ROW_LEN'):g2.index('// -----------------------------------------------------------------------------', g2.index('#define POWER_ROW_LEN'))]
@@ -53,6 +59,20 @@ class PowerProfileTests(unittest.TestCase):
 #define INFO_SYSTEMF(...) ((void)0)
 #define ERROR_SYSTEMF(...) ((void)0)
 #define SYSEVT_POWER_MODE_CHANGED 1
+#define ENABLE_I2C_SYSTEM 0
+struct StaticSemaphore_t { bool held = false; };
+using SemaphoreHandle_t = StaticSemaphore_t*;
+constexpr int pdTRUE = 1;
+static SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t* storage) { return storage; }
+static int xSemaphoreTake(SemaphoreHandle_t mutex, int timeout) {
+  assert(timeout == 0);
+  if (mutex->held) return 0;
+  mutex->held = true;
+  return pdTRUE;
+}
+static void xSemaphoreGive(SemaphoreHandle_t mutex) {
+  assert(mutex->held); mutex->held = false;
+}
 struct Settings {
   uint8_t powerMode = 0;
   uint8_t oledBrightness = 255;

@@ -3,7 +3,7 @@
  * Clean interface that delegates to I2CDevice/Manager architecture
  *
  * This header provides: enqueueDeviceStart(), isInQueue(), getQueuePosition(),
- * handleDeviceStopped(), sensorStatusBumpWith(), drainDebugRing(),
+ * requestSensorStop(), sensorStatusBumpWith(), drainDebugRing(),
  * gSensorPollingPaused, i2cPingAddress(), and all I2C helpers.
  * Include this header instead of using 'extern' declarations for these functions.
  */
@@ -19,7 +19,7 @@
 #include "System_BuildConfig.h"
 #include "System_I2C_Manager.h"
 #include "System_Mutex.h"
-#include "System_Utils.h"
+#include "System_CommandRegistry.h"
 
 // ============================================================================
 // Sensor restart cooldown - shared across all I2C sensor drivers
@@ -228,7 +228,8 @@ inline bool checkTaskStackSafety(const char* sensorName, uint32_t totalStackWord
 
 // Ping/probe helpers - DO NOT auto-register devices during probe!
 // These are used by i2cscan to check if devices exist, not to set them up
-// Probe a single address on a specific bus. Does NOT auto-register the device
+// Probe an address twice on a positive reply; never read or write payload data.
+// Does NOT auto-register the device
 // (probes are used by the scanner / wizards to check existence, not to set
 // devices up for ongoing use). `bus` defaults to 0 so legacy callers work.
 inline uint8_t i2cProbeAddress(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, uint8_t bus = 0) {
@@ -245,33 +246,12 @@ inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t lockWaitM
   return (i2cProbeAddress(address, clockHz, lockWaitMs, bus) == 0);
 }
 
-// Confirm a device is really present by reading >=1 byte after its address ACKs.
-// A bare address-ACK can be a phantom (bus capacitance, a neighbour chip partly
-// decoding the address, or a clock-stretching device glitching an ACK onto a
-// nearby address). A real device returns data; a phantom NAKs the read. Returns
-// true only if a byte actually came back. NOTE: write-only devices (the SSD1306
-// OLED) NAK reads — use i2cConfirmPresent(), which exempts them, not this raw call.
-inline bool i2cConfirmRead(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, uint8_t bus = 0) {
-  extern bool gI2CBusRunning;
-  if (!gI2CBusRunning) return false;
+// Queue a stop, cancelling pending starts. The worker applies it after any
+// active initialization; the sensor task then owns resource cleanup.
+bool requestSensorStop(I2CDeviceType device);
 
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  if (!mgr) return false;
-  return mgr->confirmRead(bus, address,
-                          I2CTransactionOptions{clockHz, lockWaitMs});
-}
-
-// True when a device that ACKed `address` is *confirmed* present. Normal devices
-// must return a read byte (filters phantom address-ACKs); the write-only SSD1306
-// OLED (0x3D primary, 0x3C alt) NAKs reads, so for it the ACK is the confirmation.
-// Scans should gate "present" on this, not on a bare ACK.
-inline bool i2cConfirmPresent(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, uint8_t bus = 0) {
-  if (address == I2C_ADDR_OLED || address == 0x3C) return true;  // OLED: write-only
-  return i2cConfirmRead(address, clockHz, lockWaitMs, bus);
-}
-
-// Centralized device stop handler: ESP-NOW broadcast + notification
-void handleDeviceStopped(I2CDeviceType device);
+const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName,
+                                   const char* eventTag);
 
 // Display name for I2CDeviceType (e.g., I2C_DEVICE_IMU → "IMU")
 const char* deviceTypeDisplayName(I2CDeviceType device);
@@ -282,9 +262,9 @@ inline bool enqueueDeviceStart(I2CDeviceType device) {
   return mgr ? mgr->enqueueDeviceStart(device) : false;
 }
 
-inline bool dequeueDeviceStart(I2CDeviceStartRequest* req) {
+inline bool dequeueDeviceRequest(I2CDeviceRequest* req) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  return mgr ? mgr->dequeueDeviceStart(req) : false;
+  return mgr ? mgr->dequeueDeviceRequest(req) : false;
 }
 
 inline bool isInQueue(I2CDeviceType device) {
@@ -352,10 +332,6 @@ inline bool i2cBusRecovery(uint8_t busIdx = 0) {
   mgr->performBusRecovery(busIdx);
   return true;
 }
-
-#if ENABLE_THERMAL_SENSOR
-#include <Adafruit_MLX90640.h>
-#endif
 
 // ============================================================================
 // I2C Device Addresses
@@ -488,6 +464,7 @@ void initSensorQueue();
 // ============================================================================
 void discoverI2CDevices();
 bool isSensorConnected(const char* name);
+// Address-table label only; driver initialization validates the actual hardware.
 String identifySensor(uint8_t address);
 
 // Shared sensor-reading envelope: every <x>BuildDataJSON opens its payload with
@@ -615,21 +592,17 @@ extern volatile bool gThermalInitDone;
 // Helper Functions
 // ============================================================================
 void drainDebugRing();
-bool lockThermalCache(TickType_t timeout = portMAX_DELAY);
-void unlockThermalCache();
 void i2cSetDefaultWire1Clock();
 void sensorStatusBumpWith(const char* reason);
 const char* buildSensorStatusJson();
 bool imuInit();
 bool fmRadioInit();
 bool fmRadioStartInternal();
-void fmRadioStopInternal();
 
 // ============================================================================
 // Thermal Sensor Externs
 // ============================================================================
 #if ENABLE_THERMAL_SENSOR
-extern Adafruit_MLX90640* gMLX90640;
 extern volatile uint32_t thermalArmAtMs;
 extern volatile bool thermalPendingFirstFrame;
 #endif

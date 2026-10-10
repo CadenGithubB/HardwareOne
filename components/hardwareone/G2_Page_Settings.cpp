@@ -51,7 +51,6 @@
 #include "G2_HijackCmd.h"      // g2SubmitHijackCommand / G2CmdCookie
 #include "G2_Page_TextEntry.h" // g2BeginTextEntry (string / numeric editing)
 #include <ArduinoJson.h>
-#include <new>          // std::nothrow
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"     // vTaskDelay (result banners)
@@ -670,38 +669,6 @@ static void settingsRenderCommitFailure() {
   settingsRenderEntries();
 }
 
-// Marshal command-completion UI work to the single lens-applier worker. The
-// command has already executed on cmd_exec_task; this helper never executes or
-// re-dispatches it inline.
-static bool settingsEnqueueCommitResult(const G2CmdCookie& cookie, bool success) {
-  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
-  if (!spec) {
-    DEBUG_G2F("[G2] Settings: RedrawSpec alloc failed");
-    return false;
-  }
-  spec->render = success ? settingsRenderCommitSuccess : settingsRenderCommitFailure;
-
-  LensUiJob* job = new (std::nothrow) LensUiJob{};
-  if (!job) {
-    DEBUG_G2F("[G2] Settings: LensUiJob alloc failed");
-    delete spec;
-    return false;
-  }
-  job->kind           = LensJobKind::Redraw;
-  job->submitMenuGen  = cookie.menuGen;
-  job->cmdSeq         = cookie.seq;
-  job->targetPage     = cookie.targetPage;
-  job->targetNetSub   = cookie.targetNetSub;
-  job->payload.redraw = spec;
-  if (!g2EnqueueLensJob(job)) {
-    DEBUG_G2F("[G2] Settings: commit redraw enqueue failed");
-    delete spec;
-    delete job;
-    return false;
-  }
-  return true;
-}
-
 // cmd_exec completion callback for a setting mutation. userData carries the
 // gNavGen captured at submit time. This callback publishes state and enqueues
 // a Redraw only; all lens access stays on the lens-applier worker.
@@ -726,7 +693,9 @@ static void onSettingsCommitDone(bool ok, const char* result,
   const char* msg = (result && result[0]) ? result : "Save failed";
   if (!success && strncmp(msg, "Error: ", 7) == 0) msg += 7;
   if (!settingsPublishCommitResult(submitNavGen, success, msg)) return;
-  if (!settingsEnqueueCommitResult(cookie, success)) {
+  if (!g2EnqueueRedraw(cookie,
+                       success ? settingsRenderCommitSuccess : settingsRenderCommitFailure,
+                       "Settings commit")) {
     settingsClearCommitForGeneration(submitNavGen);
   }
 }
@@ -980,7 +949,10 @@ static bool showModuleJsonViaTextWidget(int moduleIdx) {
   // pull one section's slice — but this is a manual user action, not
   // a hot path. PSRAM-allocated so the 8 KB peak doesn't bite DRAM.
   PSRAM_JSON_DOC(fullDoc);
-  buildSettingsJsonDoc(fullDoc, /*excludePasswords=*/ true);
+  if (!buildSettingsJsonDoc(fullDoc, /*excludePasswords=*/ true)) {
+    DEBUG_G2F("[G2] Settings JSON: saved WiFi network snapshot failed");
+    return false;
+  }
 
   String s;
   s.reserve(1024);
