@@ -1399,3 +1399,45 @@ build/stt_lm_tool bench --frames 1000 --beams 16,32
 It builds a synthetic 20k-word / 400k-bigram / 400k-trigram LM and 20 s of
 synthetic logits. Timings are host-only; the P4 has no double-precision FPU, so
 score arithmetic there is software double and must be measured on the device.
+
+## Local STT latency features
+
+These standalone scripts compile the production broker, runtime, segmenter and
+ESP-DL metadata hook against host fakes. Run each once (add `--sanitize` for
+ASan/UBSan):
+
+```sh
+python3 components/hardwareone/test/host/test_stt_continuous.py
+python3 components/hardwareone/test/host/test_quartznet_cache.py
+python3 components/hardwareone/test/host/test_stt_segmenter.py
+python3 components/hardwareone/test/host/test_stt_runtime.py
+python3 components/hardwareone/test/host/test_stt_dl_metadata.py
+python3 components/hardwareone/test/host/test_g2_tl_send.py
+```
+
+`test_stt_continuous.py` runs the continuous broker with every latency switch
+at its default (on): capture-time features (`HW1_STT_CAPTURE_FEATURES`; each
+cached row is compared bit for bit with the real frontend's batch row of the
+exact, possibly trimmed or speculative, input), trailing-silence trim,
+speculative finals (promoted on the same input, dropped on resumed speech,
+aborted when a queued final needs the worker), the 1 s short close, the publish
+wake for drafts and finals, the 1.25 s native pause feed, feature-pool and task
+failures, native full queues and restarts, alongside the existing keep-warm,
+per-session source and transcript tests. `test_stt_runtime.py` builds the
+one-shot path with all of those switches off, so every off path still compiles.
+
+`test_quartznet_cache.py` runs the runtime twice: per-call models
+(`quartznet_cache_harness.cpp`, `HW1_STT_RESIDENT_MODEL=0`) and the resident
+model (`quartznet_cache_harness_resident.cpp`, the firmware default). The latter
+checks the build after the warm-up, re-shaping, refusals and the internal-RAM
+floor, the hand-over (`dropResident`: the arena is freed and rebuilt by the next
+owner), metadata placement through the PSRAM hook with fallbacks and failures,
+`callBudget` against admission, and that every TL line stays numeric.
+
+`test_stt_dl_metadata.py` compiles the staged ESP-DL override's
+`dl_tool_metadata.cpp`, `dl_model_context.cpp` and TensorBase code (extracted
+unchanged) with `stt/stt_dl_metadata.cpp` against a fake heap: every block the
+hook hands out returns through `ps_free` on every destructor path, prebuilt-style
+blocks are accepted, PSRAM refusal falls back to internal RAM and is counted.
+Without a staged override (`tools/p4/prepare_sdk.sh`) it exits 77 (skipped).
+`test_g2_tl_send.py` checks the Conversate TL send bookkeeping.

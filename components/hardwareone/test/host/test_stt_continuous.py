@@ -38,14 +38,17 @@ def main():
     assert one_shot.index('sttWarmYield(sttCancelled, &token);') < one_shot.index('ok = sttLocalTranscribe(')
     assert 'stats, error, sizeof(error));' in one_shot and 'sttWarmPark' not in one_shot
     interface = '\n'.join(no_includes((SOURCE / name).read_text()) for name in
-                          ('System_Transcript.h', 'System_STTLocal.h', 'System_STT.h', 'Audio_VadPolicy.h', 'stt/stt_segmenter.h'))
+                          ('System_Transcript.h', 'System_STTLocal.h', 'System_STT.h', 'Audio_VadPolicy.h', 'stt/stt_segmenter.h',
+                           'stt/quartznet_frontend.h'))
+    # The real frontend, so capture-time feature rows can be checked bit for bit.
+    frontend = no_includes((SOURCE / 'stt/quartznet_constants.h').read_text()) + no_includes((SOURCE / 'stt/quartznet_frontend.cpp').read_text())
     broker = no_includes((SOURCE / 'System_STT.cpp').read_text().split('// CLI_ADAPTER_BEGIN')[0]) + '\n#endif\n'
     harness = (HERE / 'stt_continuous_harness.cpp').read_text()
-    harness = harness.replace('// INSERT_INTERFACE', interface).replace('// INSERT_BROKER', broker)
+    harness = harness.replace('// INSERT_INTERFACE', interface).replace('// INSERT_BROKER', broker).replace('// INSERT_FRONTEND', frontend)
     with tempfile.TemporaryDirectory(prefix='hw1-stt-continuous-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         unit.write_text(harness)
-        cmd = ['clang++', '-std=c++17', '-pthread', '-Wall', '-Wextra', '-Werror',
+        cmd = ['clang++', '-std=c++17', '-pthread', '-Wall', '-Wextra', '-Werror', '-ffp-contract=off',
                '-Wno-unused-function', str(unit), '-o', str(exe)]
         if args.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
