@@ -25,9 +25,10 @@
 #   experiments/stt_p4/deploy_15x5.sh <checkpoint-dir> <name> [steps...]
 #     steps default to: stage export pack build card
 #     flash is never implied; add it explicitly (PORT=/dev/cu.usbmodemXXXX).
-#   e.g. deploy_15x5.sh /Volumes/USB2/stt/work/run15x5/best ft15-8877 all flash
+#   e.g. deploy_15x5.sh /Volumes/Audiodrive/stt/work/run15x5/best ft15-8877 all flash
 #
 # Environment (local defaults can be overridden):
+#   STT_ROOT  STT data root                   (/Volumes/Audiodrive/stt)
 #   CARD      mounted SD card volume          (/Volumes/P4SD)
 #   LM        word LM for the lm step         (work/lm/meeting-15x5ft.lm)
 #   PORT      P4 USB-Serial/JTAG port         (or HW1_P4_PORT; required for USB steps)
@@ -49,7 +50,7 @@ STEPS=("$@")
 [ "${STEPS[0]}" = all ] && STEPS=(stage export pack build card "${STEPS[@]:1}")
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-STT=/Volumes/USB2/stt
+STT=${STT_ROOT:-/Volumes/Audiodrive/stt}   # all STT data moved to the SSD on 2026-10-03
 DEPLOY=$STT/work/deploy15
 BASE_CKPT=$DEPLOY/ckpt-base15            # fixtures 0.wav/1.wav + trans.txt
 CKPT=$DEPLOY/ckpt-$NAME
