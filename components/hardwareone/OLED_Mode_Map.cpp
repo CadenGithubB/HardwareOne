@@ -318,19 +318,20 @@ static void drawMapInfo() {
 // Draw track status overlay
 static void drawTrackStatus() {
   if (!oledDisplay) return;
+  const GPSTrackStatus status = GPSTrackManager::readStatus();
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setCursor(0, y);
-  if (GPSTrackManager::isLiveTracking()) {
+  if (status.live) {
     oledDisplay->print("LIVE TRACKING");
   } else {
     oledDisplay->print("Track Status");
   }
   
-  if (!GPSTrackManager::hasTrack() && !GPSTrackManager::isLiveTracking()) {
+  if (status.pointCount == 0 && !status.live) {
     oledDisplay->setCursor(0, 16);
     oledDisplay->print("No track loaded");
     oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
@@ -339,17 +340,17 @@ static void drawTrackStatus() {
   }
   
   char buf[32];
-  const char* filename = strrchr(GPSTrackManager::getFilename(), '/');
-  if (filename) filename++; else filename = GPSTrackManager::getFilename();
+  const char* filename = strrchr(status.filename, '/');
+  if (filename) filename++; else filename = status.filename;
   
   oledDisplay->setCursor(0, 10);
   oledDisplay->print(filename);
   
   oledDisplay->setCursor(0, 20);
-  snprintf(buf, sizeof(buf), "Points: %d", GPSTrackManager::getPointCount());
+  snprintf(buf, sizeof(buf), "Points: %d", status.pointCount);
   oledDisplay->print(buf);
   
-  const GPSTrackStats& stats = GPSTrackManager::getStats();
+  const GPSTrackStats& stats = status.stats;
   if (stats.valid) {
     oledDisplay->setCursor(0, 30);
     if (stats.totalDistanceM >= 1000.0f) {
@@ -371,10 +372,8 @@ static void drawTrackStatus() {
   }
   
   // Validation status
-  float coverage;
-  TrackValidation validation = GPSTrackManager::validateTrack(coverage);
   oledDisplay->setCursor(0, 50);
-  snprintf(buf, sizeof(buf), "Coverage: %.0f%%", coverage);
+  snprintf(buf, sizeof(buf), "Coverage: %.0f%%", status.coveragePercent);
   oledDisplay->print(buf);
   
   oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
@@ -1560,6 +1559,8 @@ static void executeSubmenuAction(int submenuType, int action) {
             if (GPSTrackManager::saveTrack(savedPath, sizeof(savedPath))) {
               // Show brief confirmation via track status overlay
               gShowTrackStatus = true;
+            } else {
+              oledToastShow("Save track failed", 3000, OledUIIcon::ERROR);
             }
           }
           break;
@@ -1997,12 +1998,8 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         if (gTrackSelectMode == 1) {
           // Load track
           String errorMsg;
-          if (GPSTrackManager::loadTrack(gTrackFiles[gTrackFileIdx], errorMsg)) {
-            float coverage;
-            TrackValidation validation = GPSTrackManager::validateTrack(coverage);
-            if (validation == TRACK_OUT_OF_BOUNDS) {
-              GPSTrackManager::clearTrack();
-            }
+          GPSTrackStatus track;
+          if (GPSTrackManager::loadTrack(gTrackFiles[gTrackFileIdx], errorMsg, track, true)) {
             sForceRender = true;
           } else {
             oledToastShow(errorMsg.length() ? errorMsg.c_str() : "Load track failed",

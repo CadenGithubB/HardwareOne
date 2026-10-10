@@ -18,6 +18,7 @@ import tempfile
 
 from test_mqtt_boolean_commands import extract_macro
 from test_web_batch_handlers import extract_block, require
+from test_settings_mutation import generic_setting_definitions
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -33,7 +34,7 @@ def generated(baseline: Path | None) -> str:
     types = ["\n".join(re.findall(r"(?m)^#define LOG_.*$", header)),
              extract_block(header, "enum SensorLogFormat") + ";",
              extract_block(settings, "enum SettingType") + ";",
-             extract_block(settings, "struct SettingEntry") + ";",
+             extract_block(settings, "struct SettingEntry ") + ";",
              extract_block((COMPONENT / "System_Command.h").read_text(), "class CommandArgs") + ";"]
     entries = []
     for key in ("sensorLogMask", "sensorLogFormat"):
@@ -46,7 +47,7 @@ def generated(baseline: Path | None) -> str:
             "CommandArgs::CommandArgs(", "void CommandArgs::parse()",
             "const String& CommandArgs::arg(", "String CommandArgs::remaining(")],
         extract_block(settings, "template<typename T>\ninline void setSetting("),
-        extract_block(settings_cpp, "const char* handleSettingCommand(")]
+        *generic_setting_definitions(settings_cpp, (COMPONENT / "System_Utils.h").read_text())]
     if "const char* cmd_sensorlogmask(" in owner:
         definitions += [extract_block(owner, marker) for marker in (
             "uint8_t sensorLogSelectedMask(", "SensorLogFormat sensorLogCurrentFormat(",
@@ -116,11 +117,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-sensorlog-settings-") as directory:
         source = Path(directory) / "test.cpp"
         source.write_text(generated(args.baseline))
-        # Use the established String boundary; health's path test additionally
-        # needs Arduino's charAt accessor. Production source is never rewritten.
+        # Extend the shared String boundary only for numeric parsing.
+        # Production source is never rewritten.
         arduino = (HERE / "web_batch_stubs" / "Arduino.h").read_text()
-        arduino = arduino.replace("  char operator[]", "  char charAt(size_t index) const { return text_.at(index); }\n  char operator[]")
         arduino = arduino.replace("  char operator[]", "  long toInt() const { return std::strtol(text_.c_str(), nullptr, 10); }\n  char operator[]")
+        arduino = arduino.replace("  char operator[]", "  bool reserve(size_t count) { text_.reserve(count); return true; }\n  char operator[]")
         arduino = arduino.replace("#include <algorithm>", "#include <algorithm>\n#include <cstdlib>")
         (Path(directory) / "Arduino.h").write_text(arduino)
         for health in (0, 1):

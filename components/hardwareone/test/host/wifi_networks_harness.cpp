@@ -7,8 +7,8 @@
 #include <type_traits>
 #if WIFI_NETWORKS_OWNER
 #include "wifi_networks_test_platform.h"
-#include "System_WiFiNetworks.h"
-#include "System_WiFiNetworksInternal.h"
+#include "network/wifi/System_WiFiNetworks.h"
+#include "network/wifi/System_WiFiNetworksInternal.h"
 #endif
 
 void webBatchTestStringAppend() {}

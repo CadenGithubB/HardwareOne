@@ -3,12 +3,13 @@
 
 The Map owner, parser and logger session identity functions are extracted
 unchanged. GPS requests, logger file startup, allocation and VFS are boundaries.
-This does not claim concurrent GPS/cache/render buffer safety.
+Snapshots, lifecycle publication, serialization and rendering use the real owner.
+FreeRTOS mutexes are backed by host mutexes, including deterministic reentrant
+boundaries and concurrent reader/writer checks.
 """
 import argparse
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
@@ -25,34 +26,23 @@ def generated():
     header = (COMPONENT / "System_Maps.h").read_text()
     logger = (COMPONENT / "System_SensorLogging.cpp").read_text()
     command = (COMPONENT / "System_Command.cpp").read_text()
-    types = [re.search(r"(?m)^#define MAX_TRACK_POINTS.*$", header).group()]
-    types += [extract_block(header, marker) + ";" for marker in (
-        "struct GPSTrackPoint", "struct GPSTrackBounds", "struct GPSTrackStats",
-        "enum TrackValidation", "class GPSTrackManager")]
+    types = [header[header.index("#define MAX_TRACK_POINTS"):
+                    header.index("// =============================================================================\n// Waypoint System")]]
     types += [extract_block((COMPONENT / "System_Command.h").read_text(),
                            "class CommandArgs") + ";"]
-    state = maps[maps.index("GPSTrackPoint* GPSTrackManager::_points"):
-                 maps.index("// Haversine formula for distance")]
+    owner_start = maps.index("// GPS Track Manager Implementation")
+    owner_start = maps.index("\n\n", owner_start) + 2
+    owner_end = maps.index("// Stitch several GPS/sensor capture logs", owner_start)
     definitions = [extract_macro((COMPONENT / "System_Utils.h").read_text(),
                                  "RETURN_VALID_IF_VALIDATE_CSTR"),
-                   "const String CommandArgs::empty_;", state]
+                   "const String CommandArgs::empty_;"]
     definitions += [extract_block(command, marker) for marker in (
         "CommandArgs::CommandArgs(", "void CommandArgs::parse()",
         "const String& CommandArgs::arg(")]
     definitions += [extract_block(logger, marker) for marker in (
         "static void sensorLogPublishStarted(", "static bool sensorLogMarkStopped(",
         "uint32_t sensorLogCurrentSessionId(", "bool sensorLogStopSession(")]
-    definitions += [extract_block(maps, marker) for marker in (
-        "float GPSTrackManager::haversineDistance(",
-        "void GPSTrackManager::calculateStats(", "bool GPSTrackManager::parseGPSLine(",
-        "void GPSTrackManager::calculateBounds(", "bool GPSTrackManager::loadTrack(",
-        "bool GPSTrackManager::clearTrack(", "bool GPSTrackManager::deleteTrackFile(",
-        "bool GPSTrackManager::isLiveTracking(",
-        "const char* GPSTrackManager::startLiveTracking(",
-        "const char* GPSTrackManager::stopLiveTracking(",
-        "bool GPSTrackManager::appendPoint(",
-        "const char* GPSTrackManager::getValidationMessage(",
-        "const char* cmd_gpstrack(")]
+    definitions += [maps[owner_start:owner_end]]
     harness = (HERE / "map_live_tracking_harness.cpp").read_text()
     return harness.replace("// INSERT_TYPES", "\n\n".join(types)).replace(
         "// INSERT_PRODUCTION", "\n\n".join(definitions))
@@ -61,11 +51,16 @@ def generated():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
-    parser.add_argument("--sanitize", action="store_true")
+    sanitizers = parser.add_mutually_exclusive_group()
+    sanitizers.add_argument("--sanitize", action="store_true")
+    sanitizers.add_argument("--thread-sanitize", action="store_true",
+                            help="run reader/writer checks with ThreadSanitizer")
     args = parser.parse_args()
-    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic"]
+    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-pthread"]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+    if args.thread_sanitize:
+        flags += ["-fsanitize=thread", "-fno-omit-frame-pointer"]
     with tempfile.TemporaryDirectory(prefix="hw1-map-live-") as directory:
         root = Path(directory)
         (root / "Arduino.h").write_text((HERE / "web_batch_stubs/Arduino.h").read_text())

@@ -530,7 +530,7 @@ static constexpr FeatureEntry featureRegistry[] = {
     "Text generation via the CM5 co-processor (no on-device engine)" },
 #endif
 
-  // === HARDWARE FEATURES (shown on first page) ===
+  // === CORE HARDWARE FEATURES ===
   { "i2c", "I2C Bus", FEATURE_CAT_CORE, 4,
     FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
     &gSettings.i2cEnabled, isI2CCompiled,
@@ -823,7 +823,7 @@ const char* cmd_features(const String& argsInput) {
       "[Feature Manager] (heap estimates)\n"
       "═══════════════════════════════════════════\n");
     
-    FeatureCategory lastCat = (FeatureCategory)-1;
+    int lastCat = -1;
     
     for (size_t i = 0; i < featureRegistryCount; i++) {
       const FeatureEntry* f = &featureRegistry[i];
@@ -902,6 +902,7 @@ const char* cmd_features(const String& argsInput) {
   }
   
   // Two args - toggle feature
+  if (a.count() != 2 || a.unterminatedQuote()) return "Error: Usage: features <id> <on|off>";
   String featureId = a.arg(0);
   String value = a.arg(1);
   featureId.toLowerCase();
@@ -919,17 +920,14 @@ const char* cmd_features(const String& argsInput) {
     return "Error: Feature cannot be toggled (compile-time only).";
   }
   
-  bool enable = (value == "on" || value == "true" || value == "1");
-  bool disable = (value == "off" || value == "false" || value == "0");
-  
-  if (!enable && !disable) {
-    return "Error: Value must be on/off, true/false, or 1/0";
+  const int parsed = parseBoolArg(value);
+  if (parsed < 0) {
+    return "Error: Value must be on/off, true/false, 1/0, or enable/disable";
   }
+  const bool enable = parsed != 0;
   
   bool wasEnabled = *f->enabledSetting;
-  *f->enabledSetting = enable;
-
-  (void)requestSettingsPersist();
+  setSetting(*f->enabledSetting, enable);
 
   // Runtime enable/disable — post only on an actual state transition (a no-op
   // re-set to the same value must not post). subject=feature name, detail=on|off.

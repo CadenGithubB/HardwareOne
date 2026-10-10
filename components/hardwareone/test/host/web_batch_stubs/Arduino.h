@@ -21,6 +21,7 @@ class String {
     return *this;
   }
   char operator[](size_t index) const { return text_[index]; }
+  char charAt(size_t index) const { return index < text_.size() ? text_[index] : '\0'; }
   int indexOf(const char* value, size_t from = 0) const {
     const auto pos = text_.find(value, from);
     return pos == std::string::npos ? -1 : static_cast<int>(pos);

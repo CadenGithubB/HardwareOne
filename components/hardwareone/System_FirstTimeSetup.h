@@ -16,8 +16,8 @@
 // ============================================================================
 
 enum FirstTimeSetupState {
-  SETUP_NOT_NEEDED = 0,    // Settings file exists, no setup required
-  SETUP_REQUIRED = 1,      // Settings missing, setup needed
+  SETUP_NOT_NEEDED = 0,    // User index exists, no setup required
+  SETUP_REQUIRED = 1,      // User index missing, setup needed
   SETUP_IN_PROGRESS = 2,   // Currently collecting user input
   SETUP_COMPLETE = 3       // Setup finished, ready for reboot
 };
@@ -30,6 +30,24 @@ enum SetupProgressStage {
   SETUP_SAVING_CONFIG = 4,
   SETUP_FINISHED = 5
 };
+
+// One ordered choice list for serial and local-display onboarding.
+enum SetupMode {
+  SETUP_MODE_BASIC = 0,
+  SETUP_MODE_ADVANCED = 1,
+  SETUP_MODE_IMPORT = 2
+};
+
+struct SetupModeOption {
+  SetupMode mode;
+  const char* label;
+  const char* description;
+};
+
+size_t getSetupModeCount();
+const SetupModeOption* getSetupModeOption(size_t index);
+// Blank selects Basic. Invalid/unavailable input leaves mode unchanged.
+bool parseSetupModeInput(const String& input, SetupMode& mode);
 
 // Global state variables (written once during setup, read-only afterward)
 // Thread-safe: single writer (setup) + multiple readers (OLED animation)

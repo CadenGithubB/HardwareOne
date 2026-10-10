@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Compile production Map live HTTP/OLED routing and web session delivery.
+"""Compile production Map HTTP/OLED routing, snapshots and web session delivery.
 
-The HTTP prefix retains authentication, task identity and start/stop dispatch;
-unrelated file/query operations are outside this harness. OLED retains its
-guest guard and complete Tracks action branch. Executors are boundary doubles;
-Map/logger ownership and the executors' authorization policy have owner suites.
+The HTTP handler retains authentication, task identity, live actions and track
+data responses; only filesystem listing is excluded. OLED retains its guest
+guard, complete Tracks action branch and track status drawing. Snapshot/executor
+boundaries are doubles; Map lifetime and authorization have their owner suites.
 """
 from __future__ import annotations
 
@@ -26,13 +26,14 @@ def generated() -> str:
     oled = (COMPONENT / "OLED_Mode_Map.cpp").read_text()
     utils = (COMPONENT / "WebServer_Utils.h").read_text()
     command = (COMPONENT / "System_Utils.cpp").read_text()
+    maps = (COMPONENT / "System_Maps.h").read_text()
     auth_start = utils.index("#define WEB_AUTH_OR_RETURN(req, ctx)")
     auth_end = utils.index("\n\n", auth_start)
     handler = extract_block(web, "esp_err_t handleGPSTracksAPI(")
-    # Only the unchanged file/list/data suffix is excluded. The shipping auth,
-    # identity, query parsing and both live-mutation dispatches remain verbatim.
-    handler = handler[:handler.index('      if (strcmp(liveParam, "save") == 0)')]
-    handler += "\n    }\n  }\n  return ESP_OK;\n}"
+    # Keep every query operation verbatim, including stream output. The
+    # unrelated directory traversal suffix remains outside this harness.
+    handler = handler[:handler.index("  // No query params - list available GPS log files")]
+    handler += "\n  return ESP_OK;\n}"
     action = extract_block(oled, "static void executeSubmenuAction(")
     guard = action[:action.index("  char maps[8][96];")]
     branch = action[action.index("    case MENU_CAT_TRACKS:"):action.index("    case MENU_CAT_INFO:")]
@@ -40,10 +41,13 @@ def generated() -> str:
     production = [utils[auth_start:auth_end],
                   extract_block(command, "bool executeUnifiedWebCommand("),
                   extract_block(web, "static esp_err_t handleGPSLiveTrackAction("),
-                  handler, action]
+                  handler, action, extract_block(oled, "static void drawTrackStatus(")]
     harness = (HERE / "map_live_ui_harness.cpp").read_text()
     require(harness.count("// INSERT_PRODUCTION") == 1, "missing production marker")
-    return harness.replace("// INSERT_PRODUCTION", "\n\n".join(production))
+    require(harness.count("// INSERT_TRACK_TYPES") == 1, "missing track types marker")
+    types = maps[maps.index("#define MAX_TRACK_POINTS"):maps.index("// GPS Track management")]
+    return (harness.replace("// INSERT_TRACK_TYPES", types)
+            .replace("// INSERT_PRODUCTION", "\n\n".join(production)))
 
 
 def main() -> None:

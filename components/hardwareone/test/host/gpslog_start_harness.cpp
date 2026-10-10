@@ -40,6 +40,11 @@ bool requestSettingsPersist() {
   return true;
 }
 void notifySettingChanged(const void* field) { changedFields.push_back(field); }
+struct SettingEntry;
+void finishSettingChange(const void* field, const SettingEntry*) {
+  (void)requestSettingsPersist();
+  notifySettingChanged(field);
+}
 void cliHint(const char* text) { hints.emplace_back(text); }
 #if TEST_GPS
 static const char* borrowed(const char* text) {

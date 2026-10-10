@@ -217,10 +217,10 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
 #endif
 
 #if ENABLE_AUTOMATION
-    // The scheduler's own runtime flag, not automationEnabled: the setting is
+    // The scheduler's own runtime state, not automationEnabled: the setting is
     // the permission, this is whether the cache is live and the loop is
     // ticking — which is what automationAutoStart controls.
-    case RF_AUTOMATION: return gAutomationSchedulerRunning;
+    case RF_AUTOMATION: return automationSchedulerRunning();
 #else
     case RF_AUTOMATION: return false;
 #endif

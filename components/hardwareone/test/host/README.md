@@ -23,12 +23,19 @@ logger session-identity helpers with GPS enabled and disabled. GPS queueing,
 logger file startup, allocation and VFS are controlled boundaries. It covers
 startup refusals, retained imported tracks, checked child results, unchanged
 boot preferences, same-path logger replacement, live clear/load refusal and
-publication order when restarting after an external stop.
+publication order when restarting after an external stop. Real threaded readers
+exercise append/load/clear with owned snapshots; allocation and parse failures
+preserve the previous track. Save/render callbacks clear the owner while the
+original copy remains usable, and boundary checks reject holding the track
+state lock across filesystem, renderer or command work. Metadata-only loads
+avoid a point-copy allocation.
 
 `map_live_ui` executes the HTTP authentication/identity prefix, unified web
-command helper and OLED Tracks action branch. Command submission and transport
-sessions are boundary doubles; tests check source identity, guest/session
-refusal, JSON errors and display feedback. Both compiled suites use ASan/UBSan
+command helper, live/file/save responses, OLED Tracks action branch and status
+drawing. Command submission, snapshots and transport sessions are boundary
+doubles; tests check source identity, guest/session refusal, JSON errors and
+display feedback. Replacing the owner during HTTP/OLED output cannot change
+the captured counts, points or metadata. Both compiled suites use ASan/UBSan
 when `HW1_SANITIZE=ON`.
 
 `map_live_browser` runs the actual Maps JavaScript functions in Node with
@@ -39,11 +46,57 @@ when configuring CMake for this test to be registered.
 ```sh
 ctest --test-dir /tmp/hw1-hardwareone-host \
   -R '^map_live_(tracking|ui|browser)$' --output-on-failure
+# Separate run: ThreadSanitizer cannot be combined with ASan.
+python3 components/hardwareone/test/host/test_map_live_tracking.py --thread-sanitize
 ```
 
 These checks do not qualify physical GPS fixes, display layout, real filesystem
-writes or the existing concurrency of borrowed track buffers. The GPS-start and
+writes or device performance with near-capacity tracks. The GPS-start and
 logger-settings suites also exercise the logger lifecycle helpers.
+
+## Automation logging
+
+`automation_log` compiles the production logging owner, `autolog` command,
+argument parser, filesystem guard, output redactor and command-executor logging
+hooks. Boundary doubles exercise captured user/scope permissions, revocation,
+overflow paths, allocation failures, incomplete writes, failed replacement and
+stop reporting. Controlled overlapping writes/replacements/stops and threaded
+stress check that destinations and identities stay paired; status remains
+available during blocked I/O. The real disabled header is compiled separately
+without VFS, authentication or RTOS headers.
+
+```sh
+python3 components/hardwareone/test/host/test_automation_log.py --sanitize
+# Separate run: ThreadSanitizer cannot be combined with ASan.
+python3 components/hardwareone/test/host/test_automation_log.py --thread-sanitize
+```
+
+These checks exercise firmware logic, not physical storage reliability. The
+permission and storage boundaries are controlled substitutes; existing VFS,
+redaction and command-authorization suites qualify their own implementations.
+
+## Automation scheduler
+
+`automation_scheduler` compiles the production scheduler lifecycle, main-task
+poll, cache rebuild and condition backoff with the vendored ArduinoJson parser.
+It checks startup migration and failures, stopped polling, empty/malformed
+stores, clock due times, event throttling, safety polling and millisecond wrap.
+Controlled overlap verifies that refreshes during a rebuild survive and that
+stopping during a read cannot restore a freed cache. Failed file writes leave
+the cached schedule intact. Threaded polling, notifications, event posts and
+start/stop exercise cache lifetime under ThreadSanitizer. The actual disabled
+public header is compiled independently. `automation_scheduler_contract`
+retains the main-loop integration and full-tick early-exit/source guards.
+
+```sh
+python3 components/hardwareone/test/host/test_automation_scheduler.py --sanitize
+# Separate run: ThreadSanitizer cannot be combined with ASan.
+python3 components/hardwareone/test/host/test_automation_scheduler.py --thread-sanitize
+```
+
+The full rule/command execution pass is substituted with a counter and the real
+cache rebuild. These tests qualify scheduler ownership and polling, not every
+trigger language, command side effect or physical filesystem operation.
 
 ## Host configuration tool
 
@@ -665,31 +718,80 @@ check protected stop-measurement writes and release when bus access is refused.
 All compiled suites inherit `HW1_SANITIZE`. These deterministic interleavings
 do not simulate every RTOS schedule or concurrent hardware command.
 
-## Shared ESP-NOW setup application
+## Setup draft, adapters and completion
 
-`setup_espnow_application` follows the MQTT setup harness and runs the shared
-settings operation plus the actual serial, CLI-mode and OLED page handlers.
-It covers full/partial input, blank and early-next names, stale drafts, skip,
-back, cancellation, timeout and OLED button paths. Settings apply on accepted
-page completion; final persistence remains outside this operation. Cancellation
-of the whole wizard does not roll back settings accepted on previous pages.
+`setup_draft` compiles the complete noninteractive wizard owner, its actual public
+header, registry lookup functions and settings mutators. It checks draft-only
+feature toggles, mode selection, optional-page visibility, identity/broker staging,
+strict MQTT ports, restart and discard, no-op completion, and applying only fields
+changed from the initial snapshot. Unrelated external settings edits survive.
+Completion covers cancellation despite a completed result, unavailable save scopes,
+String allocation failure before publication, accepted RAM changes with pending
+save retry, Wi-Fi save outcomes, debug/main updates and runtime effects after flush.
+Full and minimal compiled-feature variants run separately. Registry rows, platform
+memory, storage/network and the save-scope boundary are controlled fixtures.
 
-## Shared setup completion
+`setup_menu_layout` runs the wizard owner with the actual feature registry and
+compiler-resolved build configuration for QT Py Maps, XIAO, P4, minimal, and
+XIAO with Edge Impulse/MQTT enabled. Every compiled mutable registry feature must
+appear exactly once in the expected group, sorted by its displayed label, with
+adjacent startup choices and draft-only bindings. It also checks shared row
+formatting, broadcast serial output, empty-group navigation, Wi-Fi in the middle,
+and actual CLI group input including malformed/extreme numbers and rejected
+completion. The matrix uses board headers and saved configurations, not a copied
+feature catalog; it does not compile each device's firmware or drivers.
 
-`setup_completion` executes the production save/apply helper, blocking wrapper,
-CLI exit adapter, universal cancel dispatch and serial timeout functions. It
-checks incomplete/cancelled/timed-out exits, all saved-Wi-Fi outcomes, each
-settings writer failing independently, both writes still being attempted,
-runtime application and connected-only NTP refresh, and existing completion
-messages. Wi-Fi-enabled and disabled variants run under `HW1_SANITIZE`.
-The interactive dialog, finalizer, storage owners and network are controlled
-boundaries; this does not simulate physical UI, durable flash writes or real
-SNTP. Finalization stays at its existing call sites and cancellation is not
-treated as rollback of settings already accepted on earlier pages.
+`setup_wifi_navigation` executes the serial, OLED and CLI Wi-Fi adapters for
+accept, skip, rescan, back, expired selections and cancel. Wi-Fi stays an
+intermediate page; skip clears captured credentials, while backing out preserves
+the previous accepted values. Input, scan delivery and shared navigation are
+controlled boundaries; the menu suite above exercises the actual navigation.
+
+`setup_mode_choices` compiles the production Basic/Advanced/Import table and
+parser across all eight migration/Wi-Fi/HTTP combinations. It checks visible
+choices, numeric/alias parsing, invalid inputs and output preservation. Import
+requires migration and Wi-Fi independently of the regular HTTP interface.
+
+`setup_espnow_application` and `setup_mqtt_application` execute all three production
+serial, CLI-mode and OLED page handlers against a recording draft-owner boundary.
+They cover complete/partial input, blank/early-next fields, stale page scratch,
+back/cancel/timeout, staging refusal, skip behavior, strict MQTT ports and OLED
+stationary buttons. No page submission writes live settings or starts a service.
+The draft owner itself is qualified by `setup_draft`, rather than copied into the
+adapter fixtures.
+
+`setup_completion` executes both production exit adapters, universal CLI cancel,
+and actual serial timeout/input activity functions. It checks completion messages
+only after accepted apply, presentation of the applied result, cancellation before
+apply, refusal of a completed draft when the CLI exit is ineligible, scratch/credential
+cleanup, idle timeout reset and serial ownership release.
+The interactive dialog and apply operation are recording boundaries; full owner
+behavior is covered by `setup_draft`. Wi-Fi-enabled and disabled variants run.
+
+`setup_display_cancel` checks production OLED input cancellation and first-page
+back/cancel routing, plus CLI tick handling of cancel and ignored input. These
+host suites inherit `HW1_SANITIZE`; they do not qualify physical controls, rendering,
+radio connections, actual flash persistence or the device scheduler.
+
+`climode_completion_owner` executes the real CLI mode owner. It checks completion
+eligibility for serial and deferred display exits, refusal after owner loss or
+timeout, and queries from another task or outside the exit callback. The setup
+adapter suite independently verifies that refused eligibility discards the draft.
+
+`initial_admin_setup` compiles the shared first-admin creator with vendored
+ArduinoJson, the complete post-restore credential flow, and the normal setup
+caller's unchanged save-through-success tail in a bounded restart loop. It checks
+empty credentials, failed hashing, JSON allocation and String serialization faults,
+credential/index save failures, retry, account metadata and theme, and credential
+storage before publication of the user index. Failed creation must skip completion,
+automation creation, runtime settings application and reboot. Migration and OLED
+enabled/disabled variants run under `HW1_SANITIZE`. Earlier Basic/Advanced choices,
+hashing, String storage, file owners, input delivery and reboot are controlled
+boundaries; this does not simulate power loss or qualify durable flash writes.
 
 ```sh
 ctest --test-dir /path/to/host-build --output-on-failure \
-  -R '^(setup_completion|wifi_network_consumers|settings_downstream_persistence_contract)$'
+  -R '^(setup_draft|setup_menu_layout|setup_wifi_navigation|setup_mode_choices|setup_completion|setup_display_cancel|climode_completion_owner|initial_admin_setup|setup_espnow_application|setup_mqtt_application|settings_write_scope|wifi_network_consumers|settings_downstream_persistence_contract)$'
 ```
 
 ## Shared CPU clock changes
@@ -923,11 +1025,38 @@ interval/format/back controls. UI, input, logger reads and command submission
 are host boundaries; this does not qualify physical displays or asynchronous
 device execution. ASan/UBSan follow `HW1_SANITIZE`.
 
+`settings_write_scope` executes the production synchronous save scope, batching
+adapter and batch core. It covers nested scopes, an existing command owner,
+foreign task/command requests, unavailable TLS/scheduler/capacity, repeated finish,
+main/debug flush failures and retries, and simultaneous tasks. No settings scope
+is held while the wizard waits for input. The wizard suite records this boundary;
+this independent suite verifies its real persistence behavior with controlled
+RTOS and file-writer boundaries. ASan/UBSan follow `HW1_SANITIZE`.
+
+`settings_mutation` executes the production generic setting handler, all three
+`setSetting` overloads, shared change finalization/notification, feature command,
+and persistence adapter with the real owner-scoped batch core and ArduinoJson.
+OLED-enabled and disabled variants cover full integer widths and adjacent-field
+canaries, complete-token parsing, malformed/overflow/nonfinite values, metadata
+ranges, read-only and validation-only requests, bool aliases, repeated-off service
+reconciliation, publication/persistence/stop/event order, explicit and first-row
+alias labels, long string event values and secret redaction.
+Changed values notify and request persistence once; no-ops leave batching clean.
+Feature tests preserve compiled/toggle gates, reboot notes, feature-specific
+events and settings notifications. Controlled argument-copy/reserve failures
+leave the old String intact; failed persistence retains live RAM changes and
+retry intent. Foreign-owner/background writes remain independent of an open
+batch. Registry contents, task identity, filesystem writers, lifecycle commands,
+OLED and String allocation failures are host boundaries, so this does not qualify
+device concurrency or physical flash durability. ASan/UBSan follow
+`HW1_SANITIZE`, and sanitizer diagnostics fail the test.
+
 `sensorlog_settings` compiles the production numeric logger handlers, complete
 generic settings editor, shared argument parser and changed-only settings
 mutator, with R1 Health enabled and disabled. It covers queries and errors when
 live/saved state differ, validation-only requests, running-CSV selection refusal,
-all numeric masks, unchanged generic parsing/output/events, shared text/numeric
+all numeric masks, strict generic integer parsing and changed-only finalization,
+shared text/numeric
 format policy and TRACK's GPS-only persistence. Persistence observations check
 publication order without claiming atomic snapshots. Enabled cases also run
 the production health setter/restart helper: added-R1 header restarts, existing
@@ -1001,15 +1130,6 @@ two-thread admission-versus-stop orderings. The companion
 admission precedes queue submission and lasts through response publication,
 all driver teardown is main-loop-affine, both shutdown commands use the shared
 request path, and pending teardown runs before periodic publication.
-
-`setup_mqtt_application` extracts and executes the production shared settings
-helper and serial/OLED/CLI MQTT page handlers. It checks partial and complete
-updates, blank/nonpositive preservation, legacy positive-port acceptance,
-back/cancel paths, and the existing blank-port and skip/autostart differences.
-Settings persistence and MQTT start calls must remain absent from this apply
-step. String storage, settings storage, input, navigation and output are host
-substitutes; this test does not qualify a broker connection or physical UI.
-ASan/UBSan follow `HW1_SANITIZE`.
 
 To build and run only the dependency-free map geometry target (without the
 Python-backed allocation inventory):

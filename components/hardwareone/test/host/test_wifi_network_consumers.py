@@ -53,8 +53,8 @@ assert "wizardSaveAndApplySettings(" in extract_block(mode, "if (sWizard.result.
 for adapter in (legacy, mode):
     assert adapter.count("wizardSaveAndApplySettings(") == 1
     assert "saveSetupWiFiNetwork(" not in adapter
-apply = extract_block(source("System_SetupWizard.cpp"), "void wizardSaveAndApplySettings(")
-assert apply.index("if (!result.completed)") < apply.index("saveSetupWiFiNetwork(")
+apply = extract_block(source("System_SetupWizard.cpp"), "bool wizardSaveAndApplySettings(")
+assert apply.index("!result.completed") < apply.index("saveSetupWiFiNetwork(")
 assert apply.count("saveSetupWiFiNetwork(") == 1
 assert "wifiNetworkSaveResultMessage(wifiSaved)" in apply
 accepted = extract_block(apply, "if (wifiSaved == WifiNetworkSaveResult::Accepted)")

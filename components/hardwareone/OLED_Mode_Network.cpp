@@ -39,7 +39,7 @@
 #include <math.h>                  // cosf/sinf for the remote ANO rotary dial
 #include "System_I2C.h"            // OLED_TRANSACTION (i2cDeviceTransactionVoid)
 #include "System_WiFi.h"           // ensureWiFiInitialized, scan operations
-#include "System_WiFiNetworks.h"   // credential-free saved-network snapshots
+#include "network/wifi/System_WiFiNetworks.h"   // credential-free saved-network snapshots
 
 #if ENABLE_WIFI
 #include <WiFi.h>

@@ -9,7 +9,7 @@
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"   // ENABLE_WIFI, ENABLE_ESPNOW flags
 #include "System_PollPause.h"     // pollPause/pollResume — global sensor-poll pause
-#include "System_WiFiNetworks.h"  // saved-network settings JSON hooks
+#include "network/wifi/System_WiFiNetworks.h"  // saved-network settings JSON hooks
 #include "System_Debug.h"    // DEBUG_* macros
 #if ENABLE_ESPNOW
   #include "System_ESPNow.h" // EspNowMode enum
@@ -206,7 +206,27 @@ static SettingsBatchOwner explicitSettingsBatchOwner(uint32_t batchId) {
   return {kExplicitBatchDomain, static_cast<uint64_t>(batchId)};
 }
 
+// TLS slots 0/1/2 belong to pthread, AuthIdentity and Events respectively.
+// Slot 3 points to an active SettingsWriteScope's stack-owned batch ID. No task
+// allocation or deletion callback is needed; every synchronous scope restores
+// the previous pointer before leaving its stack frame.
+static constexpr BaseType_t kSettingsScopeTlsSlot = 3;
+
+static const uint32_t* currentSettingsScopeId() {
+#if configNUM_THREAD_LOCAL_STORAGE_POINTERS > 3
+  TaskHandle_t task = xTaskGetCurrentTaskHandle();
+  return task ? static_cast<const uint32_t*>(
+      pvTaskGetThreadLocalStoragePointer(task, kSettingsScopeTlsSlot)) : nullptr;
+#else
+  return nullptr;
+#endif
+}
+
 static bool currentSettingsBatchOwner(SettingsBatchOwner& ownerOut) {
+  if (const uint32_t* scopeId = currentSettingsScopeId()) {
+    ownerOut = explicitSettingsBatchOwner(*scopeId);
+    return true;
+  }
   CommandContext* command =
       static_cast<CommandContext*>(currentCommandContext());
   if (command) {
@@ -345,6 +365,49 @@ static bool flushSettingsDirtyMask(SettingsBatchOwner owner,
 }
 
 }  // namespace
+
+SettingsWriteScope::SettingsWriteScope() {
+#if configNUM_THREAD_LOCAL_STORAGE_POINTERS > 3
+  TaskHandle_t task = xTaskGetCurrentTaskHandle();
+  if (!task) return;
+  previousScope_ = pvTaskGetThreadLocalStoragePointer(task, kSettingsScopeTlsSlot);
+  batchId_ = previousScope_
+      ? *static_cast<const uint32_t*>(previousScope_)
+      : allocateSettingsWriteBatchId();
+  const uint32_t nowMs = static_cast<uint32_t>(millis());
+  portENTER_CRITICAL(&sSettingsWriteBatchMux);
+  active_ = sSettingsWriteBatches.begin(
+      explicitSettingsBatchOwner(batchId_),
+      hw1_settings_batch::BeginMode::Nested, nowMs);
+  portEXIT_CRITICAL(&sSettingsWriteBatchMux);
+  if (!active_) return;
+  task_ = task;
+  vTaskSetThreadLocalStoragePointer(task, kSettingsScopeTlsSlot, &batchId_);
+#endif
+}
+
+SettingsWriteScope::~SettingsWriteScope() {
+  if (active_) (void)finish();
+}
+
+bool SettingsWriteScope::finish() {
+  if (!active_) return result_;
+#if configNUM_THREAD_LOCAL_STORAGE_POINTERS > 3
+  TaskHandle_t task = xTaskGetCurrentTaskHandle();
+  if (task != task_ || currentSettingsScopeId() != &batchId_) return false;
+  const SettingsBatchOwner owner = explicitSettingsBatchOwner(batchId_);
+  const SettingsBatchFinish finished = finishSettingsWriteBatch(owner);
+  vTaskSetThreadLocalStoragePointer(task, kSettingsScopeTlsSlot, previousScope_);
+  active_ = false;
+  // An unexpectedly expired slot may still have a writer in flight. Match the
+  // command finalizer's conservative flush and serialize with that writer.
+  const uint8_t dirtyMask = finished.found
+      ? finished.dirtyMask : hw1_settings_batch::ALL;
+  result_ = (finished.found && !finished.final) || dirtyMask == 0 ||
+      flushSettingsDirtyMask(owner, dirtyMask);
+#endif
+  return result_;
+}
 
 bool requestSettingsPersist() {
   SettingsBatchOwner owner;
@@ -3327,52 +3390,41 @@ size_t writeRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, b
   return count;
 }
 
-// Fire SYSEVT_SETTING_CHANGED for a field changed through setSetting(). The mutator
-// only has a field reference, so reverse-look-up the registered SettingEntry by its
-// valuePtr to recover the setting's name + type, format the just-written value
-// (masking secrets), and post. A field with no registered entry (internal/runtime
-// state) posts nothing — and because setSetting() requests persistence on every
-// change, this only ever fires on genuine config changes. The handleSettingCommand
-// path below posts its own SETTING_CHANGED (it writes valuePtr directly, not via
-// setSetting), so the two paths are disjoint and never double-fire.
-void notifySettingChanged(const void* fieldPtr) {
+// Generic commands retain their descriptor's event label, including aliases.
+// Typed setters have only a field pointer and use its first registered row.
+// Formatting and secret redaction are shared by both paths.
+void notifySettingChanged(const void* fieldPtr, const SettingEntry* entry) {
   if (!fieldPtr) return;
-  for (size_t m = 0; m < gSettingsModuleCount; m++) {
+  if (entry && entry->valuePtr != fieldPtr) return;
+  for (size_t m = 0; !entry && m < gSettingsModuleCount; m++) {
     const SettingsModule* mod = gSettingsModules[m];
     if (!mod) continue;
     for (size_t i = 0; i < mod->count; i++) {
-      const SettingEntry* e = &mod->entries[i];
-      if (e->valuePtr != fieldPtr) continue;
-      char val[48];
-      switch (e->type) {
-        case SETTING_INT:   snprintf(val, sizeof(val), "%d", *((const int*)e->valuePtr)); break;
-        case SETTING_U8:    snprintf(val, sizeof(val), "%u", (unsigned)*((const uint8_t*)e->valuePtr)); break;
-        case SETTING_U16:   snprintf(val, sizeof(val), "%u", (unsigned)*((const uint16_t*)e->valuePtr)); break;
-        case SETTING_U32:   snprintf(val, sizeof(val), "%lu", (unsigned long)*((const uint32_t*)e->valuePtr)); break;
-        case SETTING_FLOAT: snprintf(val, sizeof(val), "%.3f", *((const float*)e->valuePtr)); break;
-        case SETTING_BOOL:  snprintf(val, sizeof(val), "%s", *((const bool*)e->valuePtr) ? "on" : "off"); break;
-        case SETTING_STRING:
-          if (e->isSecret) snprintf(val, sizeof(val), "********");
-          else             snprintf(val, sizeof(val), "%s", ((const String*)e->valuePtr)->c_str());
-          break;
-        default: val[0] = '\0'; break;
+      if (mod->entries[i].valuePtr == fieldPtr) {
+        entry = &mod->entries[i];
+        break;
       }
-      systemEventPost(SYSEVT_SETTING_CHANGED, e->label ? e->label : e->jsonKey, val);
-#if ENABLE_OLED_DISPLAY
-      // Repaint the OLED once for ANY setting change, from any transport. The
-      // render loop only wakes on physical input or a sensor-status bump, so a
-      // setting changed over CLI/web/BLE/ESP-NOW is invisible to it — the panel
-      // keeps showing the pre-change frame until the user happens to touch the
-      // joystick. Marking dirty here catches the whole class (thermal scale
-      // while the thermal page is up, a sensor toggle behind a sensor page, …)
-      // instead of relying on every command to remember. It costs one extra
-      // frame, and only on a real change: setSetting() already gates on
-      // field != value, so this can't fire in a hot path.
-      { extern void oledMarkDirty(); oledMarkDirty(); }
-#endif
-      return;  // valuePtr is unique across the registry — first match is the only one
     }
   }
+  if (!entry) return;
+  char val[SYSEVT_DETAIL_LEN];
+  switch (entry->type) {
+    case SETTING_INT:   snprintf(val, sizeof(val), "%d", *((const int*)fieldPtr)); break;
+    case SETTING_U8:    snprintf(val, sizeof(val), "%u", (unsigned)*((const uint8_t*)fieldPtr)); break;
+    case SETTING_U16:   snprintf(val, sizeof(val), "%u", (unsigned)*((const uint16_t*)fieldPtr)); break;
+    case SETTING_U32:   snprintf(val, sizeof(val), "%lu", (unsigned long)*((const uint32_t*)fieldPtr)); break;
+    case SETTING_FLOAT: snprintf(val, sizeof(val), "%.3f", *((const float*)fieldPtr)); break;
+    case SETTING_BOOL:  snprintf(val, sizeof(val), "%s", *((const bool*)fieldPtr) ? "on" : "off"); break;
+    case SETTING_STRING:
+      snprintf(val, sizeof(val), "%s", entry->isSecret ? "********" : ((const String*)fieldPtr)->c_str());
+      break;
+    default: return;
+  }
+  systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, val);
+#if ENABLE_OLED_DISPLAY
+  // A remote setting change must repaint without waiting for physical input.
+  { extern void oledMarkDirty(); oledMarkDirty(); }
+#endif
 }
 
 // When a master *enabled* bool is cleared via handleSettingCommand, tear down
@@ -3416,10 +3468,22 @@ static void applyMasterEnableDisable(const char* cmdKey) {
   }
 }
 
+void finishSettingChange(const void* fieldPtr, const SettingEntry* entry) {
+  (void)requestSettingsPersist();
+  // Keep generic disable ordering: value, persistence request, stop, event.
+  // Dedicated service commands omit entry and retain their own live actions.
+  if (entry && entry->type == SETTING_BOOL && !*((const bool*)fieldPtr)) {
+    applyMasterEnableDisable(entry->cmdKey ? entry->cmdKey : entry->jsonKey);
+  }
+  notifySettingChanged(fieldPtr, entry);
+}
+
 const char* handleSettingCommand(const SettingEntry* entry, const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!entry || !entry->valuePtr || !entry->jsonKey) return "Error: Setting unavailable";
   
   String valStr = argsInput;
+  if (valStr.length() != argsInput.length()) return "Error: Not enough memory to update setting";
   valStr.trim();
   if (valStr.length() == 0) {
     // No argument - show current value
@@ -3450,9 +3514,11 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
           snprintf(buf, sizeof(buf), "%s = %s", entry->jsonKey, ((String*)entry->valuePtr)->c_str());
         }
         break;
+      default: return "Error: Unknown setting type";
     }
     return buf;
   }
+  if (entry->readOnly) return "Error: Setting is read-only";
   
   const char* p = valStr.c_str();
   
@@ -3462,7 +3528,15 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
     case SETTING_U8:
     case SETTING_U16:
     case SETTING_U32: {
-      int v = atoi(p);
+      char* end = nullptr;
+      errno = 0;
+      const long long v = strtoll(p, &end, 10);
+      if (end == p || end != p + valStr.length() || errno == ERANGE) return "Error: Expected a whole decimal number";
+      const long long low = entry->type == SETTING_INT ? INT_MIN : 0;
+      const long long high = entry->type == SETTING_INT ? INT_MAX :
+                            entry->type == SETTING_U8 ? UINT8_MAX :
+                            entry->type == SETTING_U16 ? UINT16_MAX : UINT32_MAX;
+      if (v < low || v > high) return "Error: Value exceeds setting storage range";
       if (entry->minVal != 0 || entry->maxVal != 0) {
         if (v < entry->minVal || v > entry->maxVal) {
           EXT_RAM_BSS_ATTR static char errBuf[128];
@@ -3474,19 +3548,20 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
       // overflow into adjacent struct members (the bug that caused the
       // 2026-05-18 heap-corruption / WDT crash on passphrase set).
       switch (entry->type) {
-        case SETTING_INT: *((int*)entry->valuePtr)      = v;                          break;
-        case SETTING_U8:  *((uint8_t*)entry->valuePtr)  = (uint8_t)(v & 0xFF);        break;
-        case SETTING_U16: *((uint16_t*)entry->valuePtr) = (uint16_t)(v & 0xFFFF);     break;
-        case SETTING_U32: *((uint32_t*)entry->valuePtr) = (uint32_t)v;                break;
+        case SETTING_INT: setSetting(*((int*)entry->valuePtr), (int)v, entry); break;
+        case SETTING_U8:  setSetting(*((uint8_t*)entry->valuePtr), (uint8_t)v, entry); break;
+        case SETTING_U16: setSetting(*((uint16_t*)entry->valuePtr), (uint16_t)v, entry); break;
+        case SETTING_U32: setSetting(*((uint32_t*)entry->valuePtr), (uint32_t)v, entry); break;
         default: break;  // unreachable — outer switch already filtered
       }
-      (void)requestSettingsPersist();
-      BROADCAST_PRINTF("%s set to %d", entry->jsonKey, v);
-      { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%d", v); systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, vBuf); }
+      BROADCAST_PRINTF("%s set to %lld", entry->jsonKey, v);
       return "[Settings] Configuration updated";
     }
     case SETTING_FLOAT: {
-      float f = strtof(p, nullptr);
+      char* end = nullptr;
+      errno = 0;
+      const float f = strtof(p, &end);
+      if (end == p || end != p + valStr.length() || errno == ERANGE || !std::isfinite(f)) return "Error: Expected a finite number";
       if (entry->minVal != 0 || entry->maxVal != 0) {
         if (f < (float)entry->minVal || f > (float)entry->maxVal) {
           EXT_RAM_BSS_ATTR static char errBuf[128];
@@ -3494,31 +3569,32 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
           return errBuf;
         }
       }
-      *((float*)entry->valuePtr) = f;
-      (void)requestSettingsPersist();
+      setSetting(*((float*)entry->valuePtr), f, entry);
       BROADCAST_PRINTF("%s set to %.3f", entry->jsonKey, f);
-      { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%.3f", f); systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, vBuf); }
       return "[Settings] Configuration updated";
     }
     case SETTING_BOOL: {
-      bool v = (*p == '1' || strncasecmp(p, "true", 4) == 0);
-      *((bool*)entry->valuePtr) = v;
-      (void)requestSettingsPersist();
-      // Master *enabled* off → stop the live subsystem now (not only next boot).
-      if (!v) applyMasterEnableDisable(entry->cmdKey ? entry->cmdKey : entry->jsonKey);
+      const int parsed = parseBoolArg(valStr);
+      if (parsed < 0) return "Error: Expected on/off, true/false, 1/0, or enable/disable";
+      const bool v = parsed != 0;
+      const bool wasEnabled = *((bool*)entry->valuePtr);
+      setSetting(*((bool*)entry->valuePtr), v, entry);
+      // Repeated off still reconciles a live service, without another save or
+      // setting event. A changed off already requested stop in the shared path.
+      if (!v && !wasEnabled) applyMasterEnableDisable(entry->cmdKey ? entry->cmdKey : entry->jsonKey);
       BROADCAST_PRINTF("%s set to %s", entry->jsonKey, v ? "true" : "false");
-      systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, v ? "on" : "off");
       return "[Settings] Configuration updated";
     }
     case SETTING_STRING: {
-      *((String*)entry->valuePtr) = p;
-      (void)requestSettingsPersist();
+      String& field = *((String*)entry->valuePtr);
+      // Reserve before assignment: Arduino String otherwise invalidates the
+      // previous value when its copy allocation fails.
+      if (field != valStr && !field.reserve(valStr.length())) return "Error: Not enough memory to update setting";
+      setSetting(field, valStr, entry);
       if (entry->isSecret) {
         BROADCAST_PRINTF("%s updated", entry->jsonKey);
-        systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, "********");
       } else {
         BROADCAST_PRINTF("%s set to %s", entry->jsonKey, p);
-        systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, p);
       }
       return "[Settings] Configuration updated";
     }

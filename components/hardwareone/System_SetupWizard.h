@@ -16,60 +16,61 @@
 // ============================================================================
 
 enum SetupWizardPage {
-  WIZARD_PAGE_FEATURES = 0,   // Network features (WiFi, HTTP, BT, ESP-NOW)
+  WIZARD_PAGE_CONNECTIONS = 0, // Connectivity features and their startup choices
+  WIZARD_PAGE_WIFI,           // WiFi SSID/password (conditional)
   WIZARD_PAGE_WEBMODE,        // Web Interface: HTTP/HTTPS (conditional: Web Interface enabled)
   WIZARD_PAGE_BTMODE,         // Bluetooth: Server/G2 (conditional: Bluetooth enabled)
-  WIZARD_PAGE_SENSORS,        // Display + I2C sensors
-  WIZARD_PAGE_NETWORK,        // Auto-start options, device name
-  WIZARD_PAGE_SYSTEM,         // Time zone, log level, NTP, LED effect
   WIZARD_PAGE_ESPNOW,         // ESP-NOW identity (conditional: ESP-NOW enabled)
   WIZARD_PAGE_MQTT,           // MQTT broker config (conditional: MQTT enabled+autostarted)
-  WIZARD_PAGE_WIFI,           // WiFi SSID/password (conditional)
+  WIZARD_PAGE_DISPLAY,        // Display & Controls: display, input, I2C, LEDs
+  WIZARD_PAGE_SENSORS,        // Sensor enable/startup choices
+  WIZARD_PAGE_SYSTEM,         // System features, identity, clock and logging
   WIZARD_PAGE_COUNT
 };
 
 // Wizard result structure
 struct SetupWizardResult {
-  bool completed;             // User completed wizard (didn't cancel)
-  bool wifiEnabled;           // WiFi feature enabled
-  bool wifiConfigured;        // WiFi credentials entered
+  bool completed = false;
+  bool wifiEnabled = false;
+  bool wifiConfigured = false;
   String wifiSSID;
   String wifiPassword;
-  String deviceName;
-  int timezoneOffset;         // Minutes from UTC
-  String timezoneAbbrev;      // e.g., "EST", "PST"
-  // ESP-NOW identity (all optional — empty = use defaults)
+  String deviceName;           // ESP-NOW device name; UI can also set BLE name
+  String bleDeviceName;
+  int timezoneOffset = 0;
+  String timezoneAbbrev;
+  int logLevel = 0;
+  bool httpsEnabled = false;
+  int bleMode = 0;
   String espnowRoom;
   String espnowZone;
   String espnowFriendlyName;
-  bool espnowStationary;      // false = mobile (default)
-  // MQTT broker
+  bool espnowStationary = false;
   String mqttHost;
-  int mqttPort;               // <= 0 leaves the current setting unchanged
+  int mqttPort = 0;            // Page patch: zero keeps the draft's current port
   String mqttUser;
   String mqttPassword;
-  // NTP server
   String ntpServer;
-  // LED startup effect
   String ledStartupEffect;
 };
 
-// Feature item for display
-struct WizardFeatureItem {
+// One row model for every ordinary page. Startup flags choose whether a service
+// starts at boot; toggle flags enable it. Text input remains with each adapter.
+enum WizardMenuItemType {
+  WIZARD_ITEM_TOGGLE,
+  WIZARD_ITEM_STARTUP,
+  WIZARD_ITEM_TIMEZONE,
+  WIZARD_ITEM_LOGLEVEL,
+  WIZARD_ITEM_NTP,
+  WIZARD_ITEM_LED_EFFECT,
+  WIZARD_ITEM_DEVICE_NAME
+};
+struct WizardMenuItem {
   const char* id;
   const char* label;
+  WizardMenuItemType type;
+  bool* setting;              // points into the wizard draft, never live settings
   uint16_t heapKB;
-  bool* setting;
-  bool essential;
-  bool compiled;
-};
-
-// Network settings item
-struct WizardNetworkItem {
-  const char* label;
-  bool* boolSetting;
-  String* stringSetting;
-  bool isBool;
 };
 
 // Timezone entry
@@ -89,7 +90,7 @@ struct TimezoneEntry {
 // wizard heap bar adds the selected mode's extra so it reflects the choice.
 struct WizardModeOption { const char* label; int value; uint16_t extraHeapKB; };
 struct WizardModeMenu {
-  const char* featureId;          // matches the Features-page item id
+  const char* featureId;          // matches the Connections-page item id
   const char* title;              // e.g. "Web Mode"
   const WizardModeOption* modes;
   uint8_t modeCount;
@@ -99,7 +100,7 @@ struct WizardModeMenu {
 const WizardModeMenu* wizardModeMenuForFeature(const char* featureId);
 const WizardModeMenu* wizardModeMenuForPage(SetupWizardPage page);
 int  wizardModeCurrentIndex(const WizardModeMenu* m);   // index of current value
-void wizardModeApply(const WizardModeMenu* m, int idx); // write the bound setting
+void wizardModeApply(const WizardModeMenu* m, int idx); // edit the draft mode
 
 // ============================================================================
 // Wizard State Access
@@ -115,13 +116,14 @@ void setWizardCurrentPage(SetupWizardPage page);
 void setWizardCurrentSelection(int sel);
 void setWizardScrollOffset(int offset);
 
-// Get page data
-size_t getWizardFeaturesPageCount();
-size_t getWizardSensorsPageCount();
-size_t getWizardNetworkPageCount();
-WizardFeatureItem* getWizardFeaturesPage();
-WizardFeatureItem* getWizardSensorsPage();
-WizardNetworkItem* getWizardNetworkPage();
+// Shared labels, ordering and values for serial and local-display adapters.
+const char* getWizardPageTitle(SetupWizardPage page);
+bool wizardIsGroupPage(SetupWizardPage page);
+size_t getWizardMenuItemCount(SetupWizardPage page);
+const WizardMenuItem* getWizardMenuItem(SetupWizardPage page, int index);
+bool wizardFormatMenuItem(SetupWizardPage page, int index,
+                          char* label, size_t labelCap,
+                          char* value, size_t valueCap);
 
 // Timezone/log level
 size_t getTimezoneCount();
@@ -133,20 +135,7 @@ void setWizardLogLevelSelection(int sel);
 const char** getLogLevelNames();
 size_t getLogLevelCount();
 
-// Network page builder
-void rebuildNetworkSettingsPage();
-bool hasNetworkSettings();
-
-// System page items
-enum SystemPageItem {
-  SYS_ITEM_LOGLEVEL = 0,
-  SYS_ITEM_TIMEZONE,
-  SYS_ITEM_NTP,
-  SYS_ITEM_LED,
-  SYS_ITEM_DEVICE_NAME
-};
-SystemPageItem getSystemItemAt(int index);
-size_t getWizardSystemPageCount();
+// Picker values and the device-name text buffer.
 int getWizardNTPSelection();
 void setWizardNTPSelection(int sel);
 int getWizardLEDEffectSelection();
@@ -164,17 +153,24 @@ char* getWizardDeviceNameBuf();
 
 // Initialize wizard (build feature lists, set defaults)
 void initSetupWizard();
+// All page controls bind to this wizard-owned draft. Only completion publishes
+// changed values; cancellation/session loss discards it without live effects.
+const SetupWizardResult& getWizardDraftValues();
+void discardSetupWizard();
+bool wizardFeatureEnabled(const char* featureId);
+void wizardSetFeatureEnabled(const char* featureId, bool enabled);
+void wizardSetMQTTAutoStart(bool enabled);
 
 // Handle input actions (returns true if state changed)
-bool wizardToggleCurrentItem();
+bool wizardActivateCurrentItem();
 bool wizardMoveUp();
 bool wizardMoveDown();
 bool wizardNextPage(SetupWizardResult& result);
 bool wizardPrevPage();
-bool wizardCycleOption();  // For system page options
 
 // Page visibility and navigation
 bool wizardIsPageVisible(SetupWizardPage page);
+bool wizardIsFirstPage();
 SetupWizardPage wizardAdvanceFrom(SetupWizardPage current);
 SetupWizardPage wizardRetreatFrom(SetupWizardPage current);
 int getWizardTotalPages();
@@ -183,28 +179,19 @@ bool wizardShouldShowWiFi();
 bool wizardShouldShowESPNow();
 bool wizardShouldShowMQTT();
 
-// Apply an accepted ESP-NOW identity page to in-memory settings. A nonempty
-// friendly name also sets both device names. An empty name keeps the friendly
-// name and reuses the current ESP-NOW device name (or HardwareOne) for both
-// device names. Empty room/zone values keep existing settings; stationary is
-// always applied. This does not save, start ESP-NOW or change page navigation.
-// Call only after the interface's page-completion and cancel/back checks.
-void wizardApplyESPNowSettings(const SetupWizardResult& result);
+// Accept a page patch into the draft. Empty strings retain the accepted draft;
+// ESP-NOW stationary is always set. False means staging failed; do not advance.
+bool wizardStageESPNowSettings(const SetupWizardResult& result);
+bool wizardStageMQTTSettings(const SetupWizardResult& result);
+// Empty = keep existing port; otherwise require a complete decimal in 1..65535.
+bool wizardParseMQTTPort(const String& input, int& port);
 
-// Apply broker fields collected by any wizard interface to in-memory settings.
-// Empty strings and nonpositive ports leave existing values unchanged. This
-// preserves the wizard's current patch semantics; it does not clear credentials,
-// validate input, save settings, start MQTT, or change auto-start/navigation.
-// Call only at the interface's existing apply point, after its cancel/back checks.
-void wizardApplyMQTTSettings(const SetupWizardResult& result);
-
-// Finalize wizard results
-void wizardFinalize(SetupWizardResult& result);
-
-// Save optional WiFi credentials and main/debug settings, apply runtime settings,
-// and refresh NTP when connected. Call after wizardFinalize. Incomplete results
-// do nothing; save failures are reported and do not prevent runtime application.
-void wizardSaveAndApplySettings(const SetupWizardResult& result);
+// The only commit boundary, shared by all interfaces. Collects final choices,
+// validates and applies edited fields, coalesces persistence, then applies live
+// effects. Incomplete/invalid drafts do not commit. Save failures retain live
+// values and retry intent, and are reported. Discards the draft on every exit.
+// True means values were accepted, not a transaction across settings files.
+bool wizardSaveAndApplySettings(SetupWizardResult& result);
 
 // ============================================================================
 // Unified Wizard (single implementation - serial always, OLED optional)
@@ -230,6 +217,10 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs = 0);
 //   this to short-circuit cleanly from sub-page handlers.
 void setSerialWaitTimeout(unsigned long timeoutMs);
 bool isWizardCancelRequested();
+void requestWizardCancel();
+void noteWizardInputActivity();
+// Shared serial escape; call only for wizard input, not account provisioning.
+bool wizardHandleCancelInput(const String& input);
 
 // "Wizard owns Serial" flag. The setup wizard reads Serial directly via
 // waitForSerialInputBlocking() on the cmd_exec task. Meanwhile, the main

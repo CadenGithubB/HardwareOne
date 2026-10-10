@@ -12,6 +12,7 @@ from test_web_batch_handlers import extract_block
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
+WIFI_MODULE = Path("network/wifi")
 CASES = ("validation", "password_update", "capacity", "ordering", "persistence_failure", "remove_final")
 OWNER_CASES = ("stable_ids", "setup_result", "json_roundtrip", "json_load_contract",
                "coherent_connection_copy", "copy_failure", "json_overflow", "init_failure",
@@ -120,13 +121,16 @@ def main():
             for case in CASES:
                 subprocess.run([str(executable), case], check=True, timeout=60)
             print("saved WiFi: original helper characterization passed", flush=True)
+        # Keep the production module layout so includes from callers and local
+        # includes within the module resolve through the same root as firmware.
+        (work / WIFI_MODULE).mkdir(parents=True)
         for name in ("System_WiFiNetworks.h", "System_WiFiNetworksInternal.h", "System_WiFiNetworks.cpp"):
-            shutil.copyfile(COMPONENT / name, work / name)
+            shutil.copyfile(COMPONENT / WIFI_MODULE / name, work / WIFI_MODULE / name)
         (work / "System_BuildConfig.h").write_text("#pragma once\n")
         # No platform substitute headers yet: disabled source must need only
         # its public String/JSON types and leave persisted disabled data intact.
         disabled = work / "disabled.cpp"
-        disabled.write_text('''#include "System_WiFiNetworks.h"
+        disabled.write_text('''#include "network/wifi/System_WiFiNetworks.h"
 #include <cassert>
 void webBatchTestStringAppend() {}
 int main() {
@@ -144,7 +148,7 @@ int main() {
   assert(doc["network"]["wifi"]["networks"][0]["password"] == "AES:keep");
 }
 ''')
-        subprocess.run(command + ["-DENABLE_WIFI=0", str(work / "System_WiFiNetworks.cpp"),
+        subprocess.run(command + ["-DENABLE_WIFI=0", str(work / WIFI_MODULE / "System_WiFiNetworks.cpp"),
                                   str(disabled), "-o", str(executable)], check=True, timeout=120)
         subprocess.run([str(executable)], check=True, timeout=60)
         for name in ("System_Settings.h", "System_Debug.h", "System_MemUtil.h", "System_Filesystem.h",
@@ -163,7 +167,7 @@ int main() {
         source.write_text(harness.replace("// INSERT_PRODUCTION_AND_READ_ADAPTER", READ_ADAPTER)
                           .replace("// INSERT_PRODUCTION_SECRET_HELPERS", secrets)
                           .replace("// INSERT_PRODUCTION_REMOVAL_COMMANDS", removal))
-        subprocess.run(command + ["-DWIFI_NETWORKS_OWNER=1", "-DENABLE_WIFI=1", str(work / "System_WiFiNetworks.cpp"),
+        subprocess.run(command + ["-DWIFI_NETWORKS_OWNER=1", "-DENABLE_WIFI=1", str(work / WIFI_MODULE / "System_WiFiNetworks.cpp"),
                                   str(source), "-o", str(executable)], check=True, timeout=120)
         for case in CASES + OWNER_CASES:
             subprocess.run([str(executable), case], check=True, timeout=60)

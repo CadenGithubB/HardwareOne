@@ -36,6 +36,11 @@ static void notifySettingChanged(const void* field) {
   ++notifyCalls;
   notifiedField = field;
 }
+struct SettingEntry;
+static void finishSettingChange(const void* field, const SettingEntry*) {
+  (void)requestSettingsPersist();
+  notifySettingChanged(field);
+}
 
 // INSERT_PRODUCTION
 

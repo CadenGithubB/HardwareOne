@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -37,8 +39,9 @@ struct CommandContext {
 struct Command { String line; CommandContext ctx; };
 struct httpd_req_t {
   std::string query, output, status = "200 OK", type;
-  unsigned sends = 0;
+  unsigned sends = 0, chunks = 0, finishes = 0;
 };
+static std::function<void()> onFirstChunk;
 static AuthContext webIdentity;
 static bool authenticated = true, guestAllowed = true, liveSession = true;
 static bool revokeOnExecute, commandOk = true;
@@ -60,6 +63,12 @@ static bool webGuestAccessAllowed(httpd_req_t*, const AuthContext&) { return gue
 static void httpd_resp_set_type(httpd_req_t* req, const char* type) { req->type = type; }
 static void httpd_resp_set_status(httpd_req_t* req, const char* status) { req->status = status; }
 static void httpd_resp_sendstr(httpd_req_t* req, const char* body) { req->output = body; ++req->sends; }
+static void httpd_resp_sendstr_chunk(httpd_req_t* req, const char* body) {
+  if (!body) { ++req->finishes; return; }
+  req->output += body;
+  if (++req->chunks == 1 && onFirstChunk) onFirstChunk();
+}
+static String urlDecode(const String& value) { return value; }
 static int httpd_req_get_url_query_str(httpd_req_t* req, char* out, size_t length) {
   if (req->query.empty() || req->query.size() >= length) return ESP_FAIL;
   std::snprintf(out, length, "%s", req->query.c_str()); return ESP_OK;
@@ -115,7 +124,74 @@ static void oledToastShow(const char* text, unsigned duration, OledUIIcon icon) 
 }
 static void scanTrackFiles() {}
 static void goBackToMainMenu() {}
-struct GPSTrackManager { static bool saveTrack(char*, size_t) { return true; } };
+
+// INSERT_TRACK_TYPES
+
+static GPSTrackStatus currentTrack;
+static std::vector<GPSTrackPoint> suppliedPoints;
+static int snapshotCalls, statusCalls, loadCalls, requestedMaxPoints;
+static bool snapshotOk = true, loadOk = true, saveOk = true;
+static String loadError = "File not found";
+static int savedCount = 37;
+static bool rejectOutside;
+static std::string loadedPath;
+static std::function<void()> onTrackLoaded;
+static TrackValidation messageValidation;
+static float messageCoverage;
+// Return a supplied owner snapshot. The owner suite tests how it is captured;
+// this suite verifies that a consumer retains it throughout callbacks/output.
+static void supplySnapshot(GPSTrackSnapshot& out) {
+  out = {};
+  out.status = currentTrack;
+  out.pointCount = static_cast<int>(suppliedPoints.size());
+  if (!suppliedPoints.empty()) {
+    out.points.reset(static_cast<GPSTrackPoint*>(std::malloc(sizeof(GPSTrackPoint) * suppliedPoints.size())));
+    CHECK(out.points != nullptr);
+    std::memcpy(out.points.get(), suppliedPoints.data(), sizeof(GPSTrackPoint) * suppliedPoints.size());
+  }
+}
+struct GPSTrackManager {
+  static bool saveTrack(char* path, size_t length, int* count = nullptr) {
+    if (count) *count = saveOk ? savedCount : 0;
+    std::snprintf(path, length, "%s", saveOk ? "/logging_captures/tracks/saved.csv" : "");
+    return saveOk;
+  }
+  static GPSTrackStatus readStatus() { ++statusCalls; return currentTrack; }
+  static bool readSnapshot(GPSTrackSnapshot& out, int maxPoints = MAX_TRACK_POINTS) {
+    CHECK(identityDepth == 1 && installedIdentity);
+    ++snapshotCalls; requestedMaxPoints = maxPoints;
+    if (!snapshotOk) { out = {}; return false; }
+    supplySnapshot(out); return true;
+  }
+  static bool loadTrack(const char* path, String& error, GPSTrackSnapshot& out,
+                        bool rejectOutOfBounds = false) {
+    CHECK(identityDepth == 1 && installedIdentity);
+    ++loadCalls; loadedPath = path; rejectOutside = rejectOutOfBounds;
+    if (!loadOk) { error = loadError; out = {}; return false; }
+    supplySnapshot(out);
+    if (onTrackLoaded) onTrackLoaded();
+    return true;
+  }
+  static String getValidationMessage(TrackValidation validation, float coverage) {
+    messageValidation = validation; messageCoverage = coverage;
+    return "Track snapshot validation";
+  }
+};
+
+static constexpr int DISPLAY_COLOR_WHITE = 1, OLED_CONTENT_START_Y = 0, OLED_CONTENT_HEIGHT = 54;
+static std::function<void()> onFirstDraw;
+struct TestDisplay {
+  std::vector<std::string> text;
+  void setTextSize(int value) {
+    CHECK(value == 1);
+    if (onFirstDraw) onFirstDraw();
+  }
+  void setTextColor(int value) { CHECK(value == DISPLAY_COLOR_WHITE); }
+  void setCursor(int, int) {}
+  void print(const char* value) { text.emplace_back(value); }
+};
+static TestDisplay display;
+static TestDisplay* oledDisplay = &display;
 
 // INSERT_PRODUCTION
 
@@ -181,6 +257,129 @@ static void webTests() {
   request("other=start"); request("live=start-extra"); request("");
   CHECK(webRequests.size() == count);
 }
+static void setTrackFixture() {
+  currentTrack = {};
+  currentTrack.pointCount = 503;
+  currentTrack.live = true;
+  currentTrack.lastUpdateMs = 9123;
+  currentTrack.stats = {1200.0f, 120.0f, 10.0f, true};
+  currentTrack.validation = TRACK_PARTIAL;
+  currentTrack.coveragePercent = 75.0f;
+  std::snprintf(currentTrack.filename, sizeof(currentTrack.filename), "/tracks/original.csv");
+  suppliedPoints.clear();
+  for (int i = 0; i < 500; ++i) {
+    suppliedPoints.push_back({static_cast<float>(i % 80), static_cast<float>(i % 170),
+                             static_cast<unsigned long>(i)});
+  }
+}
+static void replaceTrack() {
+  currentTrack = {};
+  currentTrack.pointCount = 1;
+  std::snprintf(currentTrack.filename, sizeof(currentTrack.filename), "/tracks/replacement.csv");
+  suppliedPoints = {{-20.0f, -50.0f, 999}};
+}
+static void dataTests() {
+  setTrackFixture();
+  onFirstChunk = replaceTrack;
+  const auto beforeSnapshot = snapshotCalls;
+  auto req = request("live=1");
+  CHECK(snapshotCalls == beforeSnapshot + 1);
+  CHECK(req.status == "200 OK" && req.type == "application/json");
+  CHECK(req.sends == 0 && req.chunks == 502 && req.finishes == 1);
+  CHECK(requestedMaxPoints == 500);
+  JsonDocument parsed;
+  CHECK(!deserializeJson(parsed, req.output));
+  CHECK(parsed["live"].as<bool>() && parsed["count"].as<int>() == 503);
+  CHECK(parsed["distance"].as<float>() == 1200.0f && parsed["duration"].as<float>() == 120.0f);
+  CHECK(parsed["speed"].as<float>() == 10.0f && parsed["lastUpdate"].as<int>() == 9123);
+  CHECK(parsed["points"].size() == 500);
+  for (int i = 0; i < 500; ++i) {
+    CHECK(parsed["points"][i]["lat"].as<int>() == i % 80);
+    CHECK(parsed["points"][i]["lon"].as<int>() == i % 170);
+  }
+  CHECK(currentTrack.pointCount == 1 && !currentTrack.live);
+
+  // A failed copy must finish before streaming starts and cannot masquerade
+  // as an empty successful track.
+  snapshotOk = false;
+  req = request("live=1");
+  CHECK(req.status == "503 Service Unavailable" && req.sends == 1);
+  CHECK(req.chunks == 0 && req.finishes == 0);
+  CHECK(!deserializeJson(parsed, req.output) && parsed["error"].is<const char*>());
+  CHECK(!parsed["points"].is<JsonArray>());
+  snapshotOk = true; onFirstChunk = nullptr;
+  currentTrack = {}; suppliedPoints.clear();
+  req = request("live=1");
+  CHECK(!deserializeJson(parsed, req.output));
+  CHECK(parsed["count"].as<int>() == 0 && parsed["points"].size() == 0);
+
+  // File output must retain both the returned points and the validation
+  // text, even if another request replaces the owner at the first chunk.
+  setTrackFixture();
+  suppliedPoints.resize(3); currentTrack.pointCount = 3;
+  onTrackLoaded = replaceTrack;
+  onFirstChunk = replaceTrack;
+  req = request("file=/tracks/original.csv");
+  CHECK(messageValidation == TRACK_PARTIAL && messageCoverage == 75.0f);
+  CHECK(loadedPath == "/tracks/original.csv" && !rejectOutside);
+  CHECK(req.chunks == 5 && req.finishes == 1 && req.sends == 0);
+  CHECK(!deserializeJson(parsed, req.output));
+  CHECK(parsed["success"].as<bool>() && parsed["count"].as<int>() == 3);
+  CHECK(std::strcmp(parsed["validation"].as<const char*>(), "partial") == 0);
+  CHECK(parsed["coverage"].as<float>() == 75.0f);
+  CHECK(parsed["points"].size() == 3 && parsed["points"][2]["lat"].as<int>() == 2);
+  CHECK(std::strcmp(parsed["message"].as<const char*>(), "Track snapshot validation") == 0);
+  CHECK(currentTrack.pointCount == 1);
+  onFirstChunk = nullptr; onTrackLoaded = nullptr;
+  const auto beforeLoad = loadCalls;
+  req = request("file=relative.csv");
+  CHECK(loadCalls == beforeLoad && req.sends == 1 && req.chunks == 0);
+  loadOk = false;
+  req = request("file=/missing.csv");
+  CHECK(!deserializeJson(parsed, req.output));
+  CHECK(std::strcmp(parsed["error"].as<const char*>(), "File not found") == 0);
+  CHECK(req.sends == 1 && req.chunks == 0);
+  loadOk = true;
+
+  // The saved count belongs to saveTrack, not whatever track is current when
+  // the response is emitted.
+  req = request("live=save");
+  CHECK(!deserializeJson(parsed, req.output));
+  CHECK(parsed["saved"].as<bool>() && parsed["points"].as<int>() == savedCount);
+  CHECK(savedCount != currentTrack.pointCount);
+  saveOk = false;
+  req = request("live=save");
+  CHECK(!deserializeJson(parsed, req.output));
+  CHECK(!parsed["saved"].as<bool>() && parsed["error"].is<const char*>());
+  CHECK(std::strcmp(parsed["error"].as<const char*>(), "Unable to save track data") == 0);
+  saveOk = true;
+}
+static void oledStatusTests() {
+  setTrackFixture();
+  const auto before = statusCalls;
+  display.text.clear();
+  onFirstDraw = replaceTrack;
+  drawTrackStatus();
+  CHECK(statusCalls == before + 1);
+  const std::vector<std::string> expected = {
+    "LIVE TRACKING", "original.csv", "Points: 503", "Dist: 1.20km", "Time: 2:00",
+    "10.0m/s", "Coverage: 75%", "B:OK"};
+  CHECK(display.text == expected);
+  CHECK(currentTrack.pointCount == 1);
+  onFirstDraw = nullptr;
+  currentTrack = {}; display.text.clear();
+  drawTrackStatus();
+  CHECK(display.text == std::vector<std::string>({"Track Status", "No track loaded", "B:OK"}));
+  currentTrack.live = true; display.text.clear();
+  drawTrackStatus();
+  CHECK(display.text.front() == "LIVE TRACKING");
+  CHECK(display.text[2] == "Points: 0");
+  oledDisplay = nullptr;
+  const auto noDisplay = statusCalls;
+  drawTrackStatus();
+  CHECK(statusCalls == noDisplay);
+  oledDisplay = &display;
+}
 static void oledAction(int action, const char* result, bool executed, bool success, const char* error = nullptr) {
   oledResult = result; oledExecuted = executed; sForceRender = false;
   const auto before = oledRequests.size(), toastBefore = toasts.size();
@@ -207,8 +406,16 @@ static void oledTests() {
   oledAction(1, "Error: Stop live tracking first", true, false, "Error: Stop live tracking first");
   oledAction(1, "GPS track cleared", false, false, "GPS track cleared");
   oledAction(1, "", false, false, "Clear track failed");
+  gShowTrackStatus = false; saveOk = false;
+  const auto beforeToast = toasts.size();
+  executeSubmenuAction(MENU_CAT_TRACKS, 5);
+  CHECK(!gShowTrackStatus && toasts.size() == beforeToast + 1);
+  CHECK(toasts.back() == "Save track failed");
+  saveOk = true;
+  executeSubmenuAction(MENU_CAT_TRACKS, 5);
+  CHECK(gShowTrackStatus && toasts.size() == beforeToast + 1);
 }
 int main() {
-  webTests(); oledTests();
+  webTests(); dataTests(); oledStatusTests(); oledTests();
   std::printf("Map live UI (GPS=%d): %u production-path assertions passed\n", ENABLE_GPS_SENSOR, checks);
 }

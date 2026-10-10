@@ -23958,7 +23958,7 @@ static const char*         gLivePageBackLabel = nullptr;
 // to wire it post-hoc is exactly the kind of regression the captured
 // pattern prevents.
 //
-// Same lifecycle shape as gAutomationLogOwnerCtx (System_Automation.cpp): set on
+// Same captured-identity pattern as automation logging (System_Automation.cpp): set on
 // open, used per tick, replaced on the next open. Never explicitly
 // cleared — once the worker exits there's no consumer.
 static AuthContext         gLivePageOwnerCtx;

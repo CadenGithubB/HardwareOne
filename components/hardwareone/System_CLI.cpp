@@ -8,7 +8,7 @@
 #include "System_Debug.h"
 #include "System_HelpPagerCore.h"
 #include "System_Utils.h"
-#include "System_WiFiNetworks.h"
+#include "network/wifi/System_WiFiNetworks.h"
 #include "WebServer_Utils.h"
 
 // External dependencies from main .ino

@@ -7,13 +7,15 @@
 #include "System_SetupWizard.h"
 #include "System_MemUtil.h"
 #include <esp_attr.h>
+#include <cerrno>
+#include <cstdlib>
+#include <strings.h>
 #include "System_FeatureRegistry.h"
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
-#include "System_Clock.h"  // Clock::applyTimezone — keep libc TZ in step with the picker
 #include "System_NTP.h"
-#include "System_WiFiNetworks.h"
+#include "network/wifi/System_WiFiNetworks.h"
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -171,15 +173,15 @@ static const size_t ledEffectCount = sizeof(ledEffects) / sizeof(ledEffects[0]);
 // ============================================================================
 
 static const SetupWizardPage kPageOrder[] = {
-  WIZARD_PAGE_FEATURES,
+  WIZARD_PAGE_CONNECTIONS,
+  WIZARD_PAGE_WIFI,
   WIZARD_PAGE_WEBMODE,
   WIZARD_PAGE_BTMODE,
-  WIZARD_PAGE_SENSORS,
-  WIZARD_PAGE_NETWORK,
-  WIZARD_PAGE_SYSTEM,
   WIZARD_PAGE_ESPNOW,
   WIZARD_PAGE_MQTT,
-  WIZARD_PAGE_WIFI,
+  WIZARD_PAGE_DISPLAY,
+  WIZARD_PAGE_SENSORS,
+  WIZARD_PAGE_SYSTEM,
 };
 static const size_t kPageOrderCount = sizeof(kPageOrder) / sizeof(kPageOrder[0]);
 
@@ -187,7 +189,7 @@ static const size_t kPageOrderCount = sizeof(kPageOrder) / sizeof(kPageOrder[0])
 // Wizard State
 // ============================================================================
 
-static SetupWizardPage currentPage = WIZARD_PAGE_FEATURES;
+static SetupWizardPage currentPage = WIZARD_PAGE_CONNECTIONS;
 static int currentSelection = 0;
 static int scrollOffset = 0;
 static int timezoneSelection = 1;  // EDT default (index 1 — US Eastern Daylight, UTC-4)
@@ -196,16 +198,175 @@ static int ntpSelection = 0;       // pool.ntp.org default
 static int ledEffectSelection = 1; // rainbow default
 static char wizardDeviceName[20] = "";  // 19-byte name + NUL (matches V4 identity fields)
 
-// Feature items per page. Only touched during first-time setup; dormant
-// after FTS completes — safe to park in PSRAM.
-EXT_RAM_BSS_ATTR static WizardFeatureItem featuresPage[16];
-static size_t featuresPageCount = 0;
+// Ordinary page rows share one model. This storage is dormant after setup.
+// Capacity failures invalidate the draft and are reported; no feature is silently
+// omitted if the registry grows beyond a page's capacity.
+static constexpr size_t kWizardGroupCount = 4;
+static constexpr size_t kWizardRowsPerGroup = 24;
+EXT_RAM_BSS_ATTR static WizardMenuItem wizardRows[kWizardGroupCount][kWizardRowsPerGroup];
+static size_t wizardRowCounts[kWizardGroupCount] = {};
 
-EXT_RAM_BSS_ATTR static WizardFeatureItem sensorsPage[16];
-static size_t sensorsPageCount = 0;
+static int wizardGroupIndex(SetupWizardPage page) {
+  switch (page) {
+    case WIZARD_PAGE_CONNECTIONS: return 0;
+    case WIZARD_PAGE_DISPLAY: return 1;
+    case WIZARD_PAGE_SENSORS: return 2;
+    case WIZARD_PAGE_SYSTEM: return 3;
+    default: return -1;
+  }
+}
 
-EXT_RAM_BSS_ATTR static WizardNetworkItem networkPage[20];
-static size_t networkPageCount = 0;
+// One draft for the active wizard, shared by serial and local display controls.
+// Feature metadata remains in its registry; only values and their initial state
+// live here. The bound pointers in page rows point to these copies.
+struct WizardBoolDraft {
+  bool* live = nullptr;
+  bool initial = false;
+  bool value = false;
+};
+struct WizardDraft {
+  SetupWizardResult initial;
+  SetupWizardResult values;
+  WizardBoolDraft booleans[56]; // compiled registry flags plus separate startup choices
+  size_t boolCount = 0;
+  bool active = false;
+  bool valid = true;
+  char deviceNameBaseline[sizeof(wizardDeviceName)] = {}; // last accepted text-buffer value
+};
+static WizardDraft sWizardDraft;
+
+struct WizardStringBinding {
+  String* live;
+  String SetupWizardResult::*field;
+};
+static const WizardStringBinding kWizardStringBindings[] = {
+  { &gSettings.espnowDeviceName, &SetupWizardResult::deviceName },
+  { &gSettings.bleDeviceName, &SetupWizardResult::bleDeviceName },
+  { &gSettings.espnowFriendlyName, &SetupWizardResult::espnowFriendlyName },
+  { &gSettings.espnowRoom, &SetupWizardResult::espnowRoom },
+  { &gSettings.espnowZone, &SetupWizardResult::espnowZone },
+  { &gSettings.mqttHost, &SetupWizardResult::mqttHost },
+  { &gSettings.mqttUser, &SetupWizardResult::mqttUser },
+  { &gSettings.mqttPassword, &SetupWizardResult::mqttPassword },
+  { &gSettings.ntpServer, &SetupWizardResult::ntpServer },
+#if ENABLE_NEOPIXEL
+  { &gSettings.ledStartupEffect, &SetupWizardResult::ledStartupEffect },
+#endif
+};
+
+static bool copyWizardString(String& target, const String& value) {
+  if (!target.reserve(value.length())) {
+    sWizardDraft.valid = false;
+    return false;
+  }
+  target = value;
+  if (target != value) sWizardDraft.valid = false;
+  return sWizardDraft.valid;
+}
+
+static bool copyWizardString(String& target, const char* value) {
+  const size_t length = strlen(value);
+  if (!target.reserve(length)) {
+    sWizardDraft.valid = false;
+    return false;
+  }
+  target = value;
+  if (target.length() != length || strcmp(target.c_str(), value) != 0) sWizardDraft.valid = false;
+  return sWizardDraft.valid;
+}
+
+static bool* wizardBoolDraft(bool* live) {
+  if (!live || !sWizardDraft.active) return nullptr;
+  for (size_t i = 0; i < sWizardDraft.boolCount; ++i) {
+    if (sWizardDraft.booleans[i].live == live) return &sWizardDraft.booleans[i].value;
+  }
+  if (sWizardDraft.boolCount == sizeof(sWizardDraft.booleans) / sizeof(sWizardDraft.booleans[0])) {
+    broadcastOutput("[Setup] Too many setting choices; setup cannot be saved.");
+    sWizardDraft.valid = false;
+    return nullptr;
+  }
+  auto& choice = sWizardDraft.booleans[sWizardDraft.boolCount++];
+  choice = {live, *live, *live};
+  return &choice.value;
+}
+
+const SetupWizardResult& getWizardDraftValues() { return sWizardDraft.values; }
+
+void discardSetupWizard() {
+  sWizardDraft.active = false;
+  // Release page credentials and choices, including after timeout/session loss.
+  sWizardDraft.values = SetupWizardResult{};
+  sWizardDraft.initial = SetupWizardResult{};
+  sWizardDraft.boolCount = 0;
+  sWizardDraft.valid = true;
+  wizardDeviceName[0] = '\0';
+}
+
+static void initWizardDraft() {
+  discardSetupWizard();
+  sWizardDraft.active = true;
+  auto& values = sWizardDraft.values;
+  values.timezoneOffset = gSettings.tzOffsetMinutes;
+  values.logLevel = gSettings.logLevel;
+  values.httpsEnabled = gSettings.httpsEnabled;
+  values.bleMode = gSettings.bleMode;
+  values.espnowStationary = gSettings.espnowStationary;
+  values.mqttPort = gSettings.mqttPort;
+  sWizardDraft.initial = values;
+  for (const auto& binding : kWizardStringBindings) {
+    copyWizardString(values.*binding.field, *binding.live);
+    copyWizardString(sWizardDraft.initial.*binding.field, *binding.live);
+  }
+  for (size_t i = 0; i < getFeatureCount(); ++i) {
+    const FeatureEntry* feature = getFeatureByIndex(i);
+    if (feature && isFeatureCompiled(feature)) wizardBoolDraft(feature->enabledSetting);
+  }
+#if ENABLE_WIFI
+  wizardBoolDraft(&gSettings.wifiAutoStart);
+#endif
+#if ENABLE_ESPNOW
+  wizardBoolDraft(&gSettings.espnowmesh);
+#endif
+#if ENABLE_MQTT
+  wizardBoolDraft(&gSettings.mqttAutoStart);
+#endif
+}
+
+bool wizardFeatureEnabled(const char* featureId) {
+  const FeatureEntry* feature = getFeatureById(featureId);
+  if (!feature || !isFeatureCompiled(feature)) return false;
+  if (!feature->enabledSetting) return true;
+  if (!sWizardDraft.active) return isFeatureEnabled(feature);
+  const bool* value = wizardBoolDraft(feature->enabledSetting);
+  return value && *value;
+}
+
+void wizardSetFeatureEnabled(const char* featureId, bool enabled) {
+  const FeatureEntry* feature = getFeatureById(featureId);
+  if (!feature || !isFeatureCompiled(feature)) return;
+  bool* value = wizardBoolDraft(feature->enabledSetting);
+  if (value) *value = enabled;
+}
+
+void wizardSetMQTTAutoStart(bool enabled) {
+#if ENABLE_MQTT
+  bool* value = wizardBoolDraft(&gSettings.mqttAutoStart);
+  if (value) *value = enabled;
+#endif
+}
+
+bool wizardParseMQTTPort(const String& input, int& port) {
+  String value = input;
+  if (value.length() != input.length()) return false;
+  value.trim();
+  if (value.isEmpty()) { port = 0; return true; }
+  char* end = nullptr;
+  errno = 0;
+  const long parsed = strtol(value.c_str(), &end, 10);
+  if (end != value.c_str() + value.length() || errno == ERANGE || parsed < 1 || parsed > 65535) return false;
+  port = (int)parsed;
+  return true;
+}
 
 // ============================================================================
 // State Accessors
@@ -219,86 +380,113 @@ void setWizardCurrentPage(SetupWizardPage page) { currentPage = page; }
 void setWizardCurrentSelection(int sel) { currentSelection = sel; }
 void setWizardScrollOffset(int offset) { scrollOffset = offset; }
 
-size_t getWizardFeaturesPageCount() { return featuresPageCount; }
-size_t getWizardSensorsPageCount() { return sensorsPageCount; }
-size_t getWizardNetworkPageCount() { return networkPageCount; }
+const char* getWizardPageTitle(SetupWizardPage page) {
+  switch (page) {
+    case WIZARD_PAGE_CONNECTIONS: return "Connections";
+    case WIZARD_PAGE_WIFI: return "WiFi Setup";
+    case WIZARD_PAGE_WEBMODE: return "Web Mode";
+    case WIZARD_PAGE_BTMODE: return "Bluetooth Mode";
+    case WIZARD_PAGE_ESPNOW: return "ESP-NOW Identity";
+    case WIZARD_PAGE_MQTT: return "MQTT Broker";
+    case WIZARD_PAGE_DISPLAY: return "Display & Controls";
+    case WIZARD_PAGE_SENSORS: return "Sensors";
+    case WIZARD_PAGE_SYSTEM: return "System";
+    default: return "Setup";
+  }
+}
 
-WizardFeatureItem* getWizardFeaturesPage() { return featuresPage; }
-WizardFeatureItem* getWizardSensorsPage() { return sensorsPage; }
-WizardNetworkItem* getWizardNetworkPage() { return networkPage; }
+bool wizardIsGroupPage(SetupWizardPage page) { return wizardGroupIndex(page) >= 0; }
+
+size_t getWizardMenuItemCount(SetupWizardPage page) {
+  const int group = wizardGroupIndex(page);
+  return group >= 0 ? wizardRowCounts[group] : 0;
+}
+
+const WizardMenuItem* getWizardMenuItem(SetupWizardPage page, int index) {
+  const int group = wizardGroupIndex(page);
+  if (group < 0 || index < 0 || index >= (int)wizardRowCounts[group]) return nullptr;
+  return &wizardRows[group][index];
+}
+
+bool wizardFormatMenuItem(SetupWizardPage page, int index,
+                          char* label, size_t labelCap,
+                          char* value, size_t valueCap) {
+  if (!label || !labelCap || !value || !valueCap) return false;
+  label[0] = value[0] = '\0';
+  const WizardMenuItem* item = getWizardMenuItem(page, index);
+  if (!item) return false;
+  snprintf(label, labelCap, "%s", item->label);
+  const auto& draft = getWizardDraftValues();
+  switch (item->type) {
+    case WIZARD_ITEM_TOGGLE:
+      snprintf(value, valueCap, "%s", item->setting && *item->setting ? "On" : "Off");
+      break;
+    case WIZARD_ITEM_STARTUP:
+      snprintf(value, valueCap, "%s", item->setting && *item->setting ? "Boot on" : "Boot off");
+      break;
+    case WIZARD_ITEM_TIMEZONE: {
+      // A custom offset must be displayed as-is until the user selects a preset.
+      const long long offset = draft.timezoneOffset;
+      const long long magnitude = offset < 0 ? -offset : offset;
+      if (draft.timezoneOffset == timezones[timezoneSelection].offsetMinutes) {
+        snprintf(value, valueCap, "%s %c%lld:%02lld", timezones[timezoneSelection].abbrev,
+                 offset < 0 ? '-' : '+', magnitude / 60, magnitude % 60);
+      } else {
+        snprintf(value, valueCap, "UTC%c%lld:%02lld", offset < 0 ? '-' : '+', magnitude / 60, magnitude % 60);
+      }
+      break;
+    }
+    case WIZARD_ITEM_LOGLEVEL:
+      if (draft.logLevel >= 0 && draft.logLevel < (int)logLevelCount)
+        snprintf(value, valueCap, "%s", logLevelNames[draft.logLevel]);
+      else snprintf(value, valueCap, "%d", draft.logLevel);
+      break;
+    case WIZARD_ITEM_NTP:
+      snprintf(value, valueCap, "%s", draft.ntpServer.c_str());
+      break;
+    case WIZARD_ITEM_LED_EFFECT:
+      snprintf(value, valueCap, "%s", draft.ledStartupEffect.c_str());
+      break;
+    case WIZARD_ITEM_DEVICE_NAME:
+      snprintf(value, valueCap, "%s", wizardDeviceName);
+      break;
+  }
+  return true;
+}
 
 size_t getTimezoneCount() { return timezoneCount; }
 const TimezoneEntry* getTimezones() { return timezones; }
 int getWizardTimezoneSelection() { return timezoneSelection; }
-void setWizardTimezoneSelection(int sel) { timezoneSelection = sel; }
+void setWizardTimezoneSelection(int sel) {
+  if (sel < 0 || sel >= (int)timezoneCount || !sWizardDraft.active) return;
+  timezoneSelection = sel;
+  sWizardDraft.values.timezoneOffset = timezones[sel].offsetMinutes;
+}
 int getWizardLogLevelSelection() { return logLevelSelection; }
-void setWizardLogLevelSelection(int sel) { logLevelSelection = sel; }
+void setWizardLogLevelSelection(int sel) {
+  if (sel < 0 || sel >= (int)logLevelCount || !sWizardDraft.active) return;
+  logLevelSelection = sel;
+  sWizardDraft.values.logLevel = sel;
+}
 const char** getLogLevelNames() { return (const char**)logLevelNames; }
 size_t getLogLevelCount() { return logLevelCount; }
 
 int getWizardNTPSelection() { return ntpSelection; }
-void setWizardNTPSelection(int sel) { ntpSelection = sel; }
+void setWizardNTPSelection(int sel) {
+  if (sel < 0 || sel >= (int)ntpPresetCount || !sWizardDraft.active) return;
+  ntpSelection = sel;
+  copyWizardString(sWizardDraft.values.ntpServer, ntpPresets[sel]);
+}
 int getWizardLEDEffectSelection() { return ledEffectSelection; }
-void setWizardLEDEffectSelection(int sel) { ledEffectSelection = sel; }
+void setWizardLEDEffectSelection(int sel) {
+  if (sel < 0 || sel >= (int)ledEffectCount || !sWizardDraft.active) return;
+  ledEffectSelection = sel;
+  copyWizardString(sWizardDraft.values.ledStartupEffect, ledEffects[sel]);
+}
 const char* const* getNTPPresets() { return ntpPresets; }
 size_t getNTPPresetCount() { return ntpPresetCount; }
 const char* const* getLEDEffects() { return ledEffects; }
 size_t getLEDEffectCount() { return ledEffectCount; }
-
-// System page: items are timezone, log level, [NTP server], [LED effect]
-// Item indices depend on which conditional items are visible
-static bool systemPageHasNTP() {
-#if ENABLE_WIFI
-  // Row stays visible whenever WiFi is compiled in, regardless of whether
-  // the user currently has WiFi enabled — wizard rows don't vanish based
-  // on sibling toggles.
-  const FeatureEntry* wifiFeature = getFeatureById("wifi");
-  return wifiFeature && isFeatureCompiled(wifiFeature);
-#else
-  return false;
-#endif
-}
-
-static bool systemPageHasLED() {
-  const FeatureEntry* ledFeature = getFeatureById("led");
-  return ledFeature && isFeatureCompiled(ledFeature);
-}
-
-static bool systemPageHasDeviceName() {
-#if ENABLE_ESPNOW
-  return false;  // Device name is set in the ESP-NOW configure panel
-#else
-  return true;   // No ESP-NOW page — collect device name here
-#endif
-}
-
-size_t getWizardSystemPageCount() {
-  size_t count = 2; // timezone + log level always present
-  if (systemPageHasNTP()) count++;
-  if (systemPageHasLED()) count++;
-  if (systemPageHasDeviceName()) count++;
-  return count;
-}
-
-// Map system page selection index to logical item
-// 0=log level, 1=timezone, 2=NTP (if visible), 3=LED (if visible), 4=DeviceName (if visible)
-SystemPageItem getSystemItemAt(int index) {
-  if (index == 0) return SYS_ITEM_LOGLEVEL;
-  if (index == 1) return SYS_ITEM_TIMEZONE;
-  int nextIdx = 2;
-  if (systemPageHasNTP()) {
-    if (index == nextIdx) return SYS_ITEM_NTP;
-    nextIdx++;
-  }
-  if (systemPageHasLED()) {
-    if (index == nextIdx) return SYS_ITEM_LED;
-    nextIdx++;
-  }
-  if (systemPageHasDeviceName()) {
-    if (index == nextIdx) return SYS_ITEM_DEVICE_NAME;
-  }
-  return SYS_ITEM_TIMEZONE; // fallback
-}
 
 const char* getWizardDeviceName() { return wizardDeviceName; }
 char* getWizardDeviceNameBuf() { return wizardDeviceName; }
@@ -354,7 +542,11 @@ void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage) {
 
   // Feature-granular base + the selected sub-mode's extra (HTTPS/G2) so the bar
   // reflects mode choices, not just which features are on.
-  uint32_t enabledCostKB = getEnabledFeaturesHeapEstimate() + wizardEnabledModeExtraHeapKB();
+  uint32_t enabledCostKB = wizardEnabledModeExtraHeapKB();
+  for (size_t i = 0; i < getFeatureCount(); ++i) {
+    const FeatureEntry* feature = getFeatureByIndex(i);
+    if (feature && wizardFeatureEnabled(feature->id)) enabledCostKB += feature->heapCostKB;
+  }
   uint32_t estimatedUsedKB = sWizardBaselineKB + enabledCostKB;
   if (estimatedUsedKB > totalHeapKB) estimatedUsedKB = totalHeapKB;
 
@@ -367,192 +559,129 @@ void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage) {
 // Initialize Wizard
 // ============================================================================
 
+// The registry owns availability and settings. These two small mappings own
+// wizard presentation only; display/input do not inherit the registry's sensor
+// category, and AutoStart-backed rows must say that they affect boot behavior.
+static SetupWizardPage wizardFeaturePage(const FeatureEntry& feature) {
+  if (feature.category == FEATURE_CAT_NETWORK) return WIZARD_PAGE_CONNECTIONS;
+  if (feature.category == FEATURE_CAT_DISPLAY || strcmp(feature.id, "i2c") == 0 ||
+      strcmp(feature.id, "input") == 0) return WIZARD_PAGE_DISPLAY;
+  if (feature.category == FEATURE_CAT_SENSOR) return WIZARD_PAGE_SENSORS;
+  return WIZARD_PAGE_SYSTEM;
+}
+
+static WizardMenuItemType wizardFeatureItemType(const FeatureEntry& feature) {
+  if ((feature.category == FEATURE_CAT_SENSOR && strcmp(feature.id, "edgeimpulse") != 0) ||
+      strcmp(feature.id, "http") == 0 || strcmp(feature.id, "bluetooth") == 0 ||
+      strcmp(feature.id, "led") == 0 || strcmp(feature.id, "llm") == 0)
+    return WIZARD_ITEM_STARTUP;
+  return WIZARD_ITEM_TOGGLE;
+}
+
+static bool wizardInsertItem(SetupWizardPage page, size_t index, const WizardMenuItem& item) {
+  const int group = wizardGroupIndex(page);
+  if (group < 0) return false;
+  size_t& count = wizardRowCounts[group];
+  if (count == kWizardRowsPerGroup) {
+    broadcastOutput("[Setup] Too many menu items; setup cannot be saved.");
+    sWizardDraft.valid = false;
+    return false;
+  }
+  if (index > count) index = count;
+  for (size_t i = count; i > index; --i) wizardRows[group][i] = wizardRows[group][i - 1];
+  wizardRows[group][index] = item;
+  ++count;
+  return true;
+}
+
+static void wizardInsertAfter(SetupWizardPage page, const char* parentId, const WizardMenuItem& item) {
+  for (size_t i = 0; i < getWizardMenuItemCount(page); ++i) {
+    if (strcmp(getWizardMenuItem(page, (int)i)->id, parentId) == 0) {
+      wizardInsertItem(page, i + 1, item);
+      return;
+    }
+  }
+}
+
 void initSetupWizard() {
-  featuresPageCount = 0;
-  sensorsPageCount = 0;
-  networkPageCount = 0;
+  initWizardDraft();
+  memset(wizardRowCounts, 0, sizeof(wizardRowCounts));
 
-  // Pre-populate device name from current settings
-  String curName = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName
-                 : gSettings.bleDeviceName.length() > 0    ? gSettings.bleDeviceName
-                 : "HardwareOne";
-  strncpy(wizardDeviceName, curName.c_str(), sizeof(wizardDeviceName) - 1);
+  const auto& draft = getWizardDraftValues();
+  const char* curName = draft.deviceName.length() > 0 ? draft.deviceName.c_str()
+                      : draft.bleDeviceName.length() > 0 ? draft.bleDeviceName.c_str()
+                      : "HardwareOne";
+  strncpy(wizardDeviceName, curName, sizeof(wizardDeviceName) - 1);
   wizardDeviceName[sizeof(wizardDeviceName) - 1] = '\0';
-  
-   sWizardBaselineKB = 0;
-   sWizardBaselineCalibrated = false;
-   calibrateWizardBaseline();
-  
-  // Build features page (network features)
-  for (size_t i = 0; i < getFeatureCount(); i++) {
-    const FeatureEntry* f = getFeatureByIndex(i);
-    if (!f || !isFeatureCompiled(f)) continue;
-    // Compile-time-only features (nullptr setting — e.g. maps, games) have
-    // nothing for a checkbox to toggle. They must be skipped rather than shown
-    // unchecked: the render path falls back to false for a null pointer, which
-    // would claim "disabled" for a feature isFeatureEnabled() reports as ON.
-    // Same guard the sensor auto-start loop below already applies.
-    if (!f->enabledSetting) continue;
+  memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
 
-    if ((f->category == FEATURE_CAT_NETWORK || f->category == FEATURE_CAT_SYSTEM) && featuresPageCount < 16) {
-      featuresPage[featuresPageCount].id = f->id;
-      featuresPage[featuresPageCount].label = f->name;
-#if ENABLE_HTTPS
-      // The HTTP feature gains an HTTP/HTTPS sub-choice in the wizard, so label
-      // it "Web Interface" here (wizard-local; the registry name is unchanged).
-      if (strcmp(f->id, "http") == 0) featuresPage[featuresPageCount].label = "Web Interface";
+  sWizardBaselineKB = 0;
+  sWizardBaselineCalibrated = false;
+  calibrateWizardBaseline();
+
+  // Registry rows are alphabetical within each group. Companion choices are
+  // then inserted beside their parent so related controls remain together.
+  for (size_t i = 0; i < getFeatureCount(); ++i) {
+    const FeatureEntry* feature = getFeatureByIndex(i);
+    if (!feature || !isFeatureCompiled(feature) || !feature->enabledSetting) continue;
+    const SetupWizardPage page = wizardFeaturePage(*feature);
+    const char* label = strcmp(feature->id, "http") == 0 ? "Web Interface" : feature->name;
+    const WizardMenuItem item = {feature->id, label, wizardFeatureItemType(*feature),
+                                 wizardBoolDraft(feature->enabledSetting), feature->heapCostKB};
+    size_t index = 0;
+    while (index < getWizardMenuItemCount(page) &&
+           strcasecmp(getWizardMenuItem(page, (int)index)->label, label) <= 0) ++index;
+    wizardInsertItem(page, index, item);
+  }
+#if ENABLE_WIFI
+  wizardInsertAfter(WIZARD_PAGE_CONNECTIONS, "wifi",
+                    {"wifi_autoconnect", "WiFi auto-connect", WIZARD_ITEM_STARTUP, wizardBoolDraft(&gSettings.wifiAutoStart), 0});
 #endif
-      featuresPage[featuresPageCount].heapKB = f->heapCostKB;
-      featuresPage[featuresPageCount].setting = f->enabledSetting;
-      featuresPage[featuresPageCount].essential = (f->flags & FEATURE_FLAG_ESSENTIAL);
-      featuresPage[featuresPageCount].compiled = true;
-      featuresPageCount++;
-    }
+#if ENABLE_ESPNOW
+  wizardInsertAfter(WIZARD_PAGE_CONNECTIONS, "espnow",
+                    {"espnow_mesh", "ESP-NOW mesh", WIZARD_ITEM_TOGGLE, wizardBoolDraft(&gSettings.espnowmesh), 0});
+#endif
+#if ENABLE_MQTT
+  wizardInsertAfter(WIZARD_PAGE_CONNECTIONS, "mqtt",
+                    {"mqtt_autostart", "MQTT auto-start", WIZARD_ITEM_STARTUP, wizardBoolDraft(&gSettings.mqttAutoStart), 0});
+#endif
+#if ENABLE_NEOPIXEL
+  wizardInsertAfter(WIZARD_PAGE_DISPLAY, "led",
+                    {"led_effect", "LED effect", WIZARD_ITEM_LED_EFFECT, nullptr, 0});
+#endif
+  wizardInsertItem(WIZARD_PAGE_SYSTEM, getWizardMenuItemCount(WIZARD_PAGE_SYSTEM),
+                   {"device_name", "Device name", WIZARD_ITEM_DEVICE_NAME, nullptr, 0});
+  wizardInsertItem(WIZARD_PAGE_SYSTEM, getWizardMenuItemCount(WIZARD_PAGE_SYSTEM),
+                   {"timezone", "Timezone", WIZARD_ITEM_TIMEZONE, nullptr, 0});
+#if ENABLE_WIFI
+  const FeatureEntry* wifiFeature = getFeatureById("wifi");
+  if (wifiFeature && isFeatureCompiled(wifiFeature)) {
+    wizardInsertItem(WIZARD_PAGE_SYSTEM, getWizardMenuItemCount(WIZARD_PAGE_SYSTEM),
+                     {"ntp", "NTP server", WIZARD_ITEM_NTP, nullptr, 0});
   }
-  
-  // Build sensors page — display features only.
-  // Sensors are intentionally excluded: every sensor's persisted flag is an
-  // *AutoStart flag (not a separate enable/disable). Listing them here would
-  // make the checkbox silently toggle boot-time auto-start, which is
-  // misleading. Sensor auto-start is configured on the Startup & Auto-start
-  // page instead (see rebuildNetworkSettingsPage).
-  for (size_t i = 0; i < getFeatureCount(); i++) {
-    const FeatureEntry* f = getFeatureByIndex(i);
-    if (!f || !isFeatureCompiled(f)) continue;
-    if (!f->enabledSetting) continue;  // compile-time only — see features page above
+#endif
+  wizardInsertItem(WIZARD_PAGE_SYSTEM, getWizardMenuItemCount(WIZARD_PAGE_SYSTEM),
+                   {"loglevel", "Log level", WIZARD_ITEM_LOGLEVEL, nullptr, 0});
 
-    if (f->category == FEATURE_CAT_DISPLAY && sensorsPageCount < 16) {
-      sensorsPage[sensorsPageCount].id = f->id;
-      sensorsPage[sensorsPageCount].label = f->name;
-      sensorsPage[sensorsPageCount].heapKB = f->heapCostKB;
-      sensorsPage[sensorsPageCount].setting = f->enabledSetting;
-      sensorsPage[sensorsPageCount].essential = (f->flags & FEATURE_FLAG_ESSENTIAL);
-      sensorsPage[sensorsPageCount].compiled = true;
-      sensorsPageCount++;
-    }
+  currentPage = WIZARD_PAGE_SYSTEM;
+  for (const SetupWizardPage page : kPageOrder) {
+    if (wizardIsPageVisible(page)) { currentPage = page; break; }
   }
-  
-  // Network settings page is built dynamically based on enabled features
-  // Call rebuildNetworkSettingsPage() before showing that page
-  networkPageCount = 0;
-
-  // Reset state
-  currentPage = WIZARD_PAGE_FEATURES;
   currentSelection = 0;
   scrollOffset = 0;
-  timezoneSelection = 1;  // EDT default
-  logLevelSelection = 3;  // DEBUG (all logging enabled)
-  ntpSelection = 0;       // pool.ntp.org
-  ledEffectSelection = 1; // rainbow
-
-  // Find current timezone in list
-  for (size_t i = 0; i < timezoneCount; i++) {
-    if (timezones[i].offsetMinutes == gSettings.tzOffsetMinutes) {
-      timezoneSelection = i;
-      break;
-    }
+  timezoneSelection = 1;
+  logLevelSelection = (draft.logLevel >= 0 && draft.logLevel < (int)logLevelCount) ? draft.logLevel : 3;
+  ntpSelection = 0;
+  ledEffectSelection = 1;
+  for (size_t i = 0; i < timezoneCount; ++i) {
+    if (timezones[i].offsetMinutes == draft.timezoneOffset) { timezoneSelection = i; break; }
   }
-
-  // Find current NTP server in presets
-  if (gSettings.ntpServer.length() > 0) {
-    for (size_t i = 0; i < ntpPresetCount; i++) {
-      if (gSettings.ntpServer == ntpPresets[i]) {
-        ntpSelection = i;
-        break;
-      }
-    }
+  for (size_t i = 0; i < ntpPresetCount; ++i) {
+    if (draft.ntpServer == ntpPresets[i]) { ntpSelection = i; break; }
   }
-
-  // Find current LED effect in list (field exists only with the NeoPixel
-  // feature; the LED wizard page is runtime-hidden via systemPageHasLED then)
-#if ENABLE_NEOPIXEL
-  if (gSettings.ledStartupEffect.length() > 0) {
-    for (size_t i = 0; i < ledEffectCount; i++) {
-      if (gSettings.ledStartupEffect == ledEffects[i]) {
-        ledEffectSelection = i;
-        break;
-      }
-    }
+  for (size_t i = 0; i < ledEffectCount; ++i) {
+    if (draft.ledStartupEffect == ledEffects[i]) { ledEffectSelection = i; break; }
   }
-#endif
-}
-
-// ============================================================================
-// Dynamic Network Settings Page
-// ============================================================================
-// Rebuild network settings based on which features are currently enabled
-// This should be called before navigating to the network settings page
-
-void rebuildNetworkSettingsPage() {
-  networkPageCount = 0;
-  
-#if ENABLE_WIFI
-  // Principle: wizard rows don't vanish based on other toggles. Gate on
-  // compiled-ness only so the row stays visible even if WiFi itself is off.
-  {
-    const FeatureEntry* wifiFeature = getFeatureById("wifi");
-    if (wifiFeature && isFeatureCompiled(wifiFeature)) {
-      networkPage[networkPageCount].label = "WiFi auto-connect";
-      networkPage[networkPageCount].boolSetting = &gSettings.wifiAutoStart;
-      networkPage[networkPageCount].isBool = true;
-      networkPageCount++;
-    }
-  }
-#endif
-
-  // NOTE: "HTTP auto-start" and "BT auto-start" rows used to live here, but
-  // they bound to the very same flags (httpAutoStart / bleAutoStart) that
-  // the "Web Interface" / "Bluetooth" toggles on the Features page already set
-  // — a confusing duplicate. Enable now lives on the Features page; the
-  // HTTP/HTTPS and Server/G2 *mode* is chosen on the dedicated WEBMODE/BTMODE
-  // pages (see handleModePage). So these rows were removed.
-
-#if ENABLE_ESPNOW
-  // Gate on compiled-ness only (see WiFi comment above).
-  {
-    const FeatureEntry* espnowFeature = getFeatureById("espnow");
-    if (espnowFeature && isFeatureCompiled(espnowFeature)) {
-      networkPage[networkPageCount].label = "ESP-NOW mesh";
-      networkPage[networkPageCount].boolSetting = &gSettings.espnowmesh;
-      networkPage[networkPageCount].isBool = true;
-      networkPageCount++;
-    }
-  }
-#endif
-
-#if ENABLE_MQTT
-  // Gate on compiled-ness only (see WiFi comment above).
-  {
-    const FeatureEntry* mqttFeature = getFeatureById("mqtt");
-    if (mqttFeature && isFeatureCompiled(mqttFeature)) {
-      networkPage[networkPageCount].label = "MQTT auto-start";
-      networkPage[networkPageCount].boolSetting = &gSettings.mqttAutoStart;
-      networkPage[networkPageCount].isBool = true;
-      networkPageCount++;
-    }
-  }
-#endif
-
-  // Sensor auto-start toggles (one per compiled sensor).
-  // The registry already wires each sensor's enabledSetting pointer to its
-  // *AutoStart flag, so we can reuse it here. Each entry's label comes from
-  // the feature's display name.
-  const size_t kNetworkPageCap = sizeof(networkPage)/sizeof(networkPage[0]);
-  for (size_t i = 0; i < getFeatureCount() && networkPageCount < kNetworkPageCap; i++) {
-    const FeatureEntry* f = getFeatureByIndex(i);
-    if (!f || !isFeatureCompiled(f)) continue;
-    if (f->category != FEATURE_CAT_SENSOR) continue;
-    if (!f->enabledSetting) continue;
-    networkPage[networkPageCount].label = f->name;       // e.g. "Camera", "IMU"
-    networkPage[networkPageCount].boolSetting = f->enabledSetting;
-    networkPage[networkPageCount].isBool = true;
-    networkPageCount++;
-  }
-}
-
-bool hasNetworkSettings() {
-  rebuildNetworkSettingsPage();
-  return networkPageCount > 0;
 }
 
 // ============================================================================
@@ -562,7 +691,7 @@ bool hasNetworkSettings() {
 bool wizardShouldShowESPNow() {
 #if ENABLE_ESPNOW
   const FeatureEntry* f = getFeatureById("espnow");
-  return f && isFeatureEnabled(f);
+  return f && wizardFeatureEnabled(f->id);
 #else
   return false;
 #endif
@@ -571,29 +700,38 @@ bool wizardShouldShowESPNow() {
 bool wizardShouldShowMQTT() {
 #if ENABLE_MQTT
   const FeatureEntry* f = getFeatureById("mqtt");
-  return f && isFeatureEnabled(f) && gSettings.mqttAutoStart;
+  const bool* autoStart = wizardBoolDraft(&gSettings.mqttAutoStart);
+  return f && wizardFeatureEnabled(f->id) && autoStart && *autoStart;
 #else
   return false;
 #endif
 }
 
-void wizardApplyESPNowSettings(const SetupWizardResult& result) {
-  const String deviceName = result.espnowFriendlyName.length() > 0
-      ? result.espnowFriendlyName
-      : (gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : String("HardwareOne"));
-  gSettings.bleDeviceName = deviceName;
-  gSettings.espnowDeviceName = deviceName;
-  if (result.espnowFriendlyName.length() > 0) gSettings.espnowFriendlyName = result.espnowFriendlyName;
-  if (result.espnowRoom.length() > 0) gSettings.espnowRoom = result.espnowRoom;
-  if (result.espnowZone.length() > 0) gSettings.espnowZone = result.espnowZone;
-  gSettings.espnowStationary = result.espnowStationary;
+bool wizardStageESPNowSettings(const SetupWizardResult& result) {
+  if (!sWizardDraft.active) return false;
+  auto& draft = sWizardDraft.values;
+  const String& name = result.espnowFriendlyName.length() > 0
+      ? result.espnowFriendlyName : draft.deviceName;
+  copyWizardString(draft.bleDeviceName, name.length() ? name.c_str() : "HardwareOne");
+  copyWizardString(draft.deviceName, draft.bleDeviceName);
+  if (result.espnowFriendlyName.length()) copyWizardString(draft.espnowFriendlyName, result.espnowFriendlyName);
+  if (result.espnowRoom.length()) copyWizardString(draft.espnowRoom, result.espnowRoom);
+  if (result.espnowZone.length()) copyWizardString(draft.espnowZone, result.espnowZone);
+  draft.espnowStationary = result.espnowStationary;
+  strncpy(wizardDeviceName, draft.deviceName.c_str(), sizeof(wizardDeviceName) - 1);
+  wizardDeviceName[sizeof(wizardDeviceName) - 1] = '\0';
+  memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
+  return sWizardDraft.valid;
 }
 
-void wizardApplyMQTTSettings(const SetupWizardResult& result) {
-  if (result.mqttHost.length() > 0) gSettings.mqttHost = result.mqttHost;
-  if (result.mqttPort > 0) gSettings.mqttPort = result.mqttPort;
-  if (result.mqttUser.length() > 0) gSettings.mqttUser = result.mqttUser;
-  if (result.mqttPassword.length() > 0) gSettings.mqttPassword = result.mqttPassword;
+bool wizardStageMQTTSettings(const SetupWizardResult& result) {
+  if (!sWizardDraft.active || result.mqttPort < 0 || result.mqttPort > 65535) return false;
+  auto& draft = sWizardDraft.values;
+  if (result.mqttHost.length()) copyWizardString(draft.mqttHost, result.mqttHost);
+  if (result.mqttPort > 0) draft.mqttPort = result.mqttPort;
+  if (result.mqttUser.length()) copyWizardString(draft.mqttUser, result.mqttUser);
+  if (result.mqttPassword.length()) copyWizardString(draft.mqttPassword, result.mqttPassword);
+  return sWizardDraft.valid;
 }
 
 // ---- Shared "enable -> pick a mode" table (used by BOTH wizard engines) ----
@@ -613,10 +751,10 @@ static const WizardModeOption kBtModes[]  = { {"Server (phone)", 0, 0}, {"G2 Gla
 
 static const WizardModeMenu kModeMenus[] = {
 #if ENABLE_HTTP_SERVER && ENABLE_HTTPS
-  { "http",      "Web Mode",       kWebModes, 2, &gSettings.httpsEnabled, nullptr },
+  { "http",      "Web Mode",       kWebModes, 2, &sWizardDraft.values.httpsEnabled, nullptr },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  { "bluetooth", "Bluetooth Mode", kBtModes,  2, nullptr, &gSettings.bleMode },
+  { "bluetooth", "Bluetooth Mode", kBtModes,  2, nullptr, &sWizardDraft.values.bleMode },
 #endif
 };
 static const size_t kModeMenuCount = sizeof(kModeMenus) / sizeof(kModeMenus[0]);
@@ -660,7 +798,7 @@ uint32_t wizardEnabledModeExtraHeapKB() {
   for (size_t i = 0; i < kModeMenuCount; i++) {
     const WizardModeMenu* m = &kModeMenus[i];
     const FeatureEntry* f = getFeatureById(m->featureId);
-    if (!f || !isFeatureEnabled(f)) continue;
+    if (!f || !wizardFeatureEnabled(f->id)) continue;
     extra += m->modes[wizardModeCurrentIndex(m)].extraHeapKB;
   }
   return extra;
@@ -674,7 +812,7 @@ uint32_t wizardEnabledModeExtraHeapKB() {
 // wizardAdvanceFrom, which respects this — no engine-specific flag needed.
 bool wizardShouldShowWebMode() {
 #if ENABLE_HTTP_SERVER && ENABLE_HTTPS
-  return gSettings.httpAutoStart && wizardModeMenuForFeature("http") != nullptr;
+  return wizardFeatureEnabled("http") && wizardModeMenuForFeature("http") != nullptr;
 #else
   return false;
 #endif
@@ -682,20 +820,19 @@ bool wizardShouldShowWebMode() {
 
 bool wizardShouldShowBtMode() {
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  return gSettings.bleAutoStart && wizardModeMenuForFeature("bluetooth") != nullptr;
+  return wizardFeatureEnabled("bluetooth") && wizardModeMenuForFeature("bluetooth") != nullptr;
 #else
   return false;
 #endif
 }
 
 bool wizardIsPageVisible(SetupWizardPage page) {
+  if (wizardIsGroupPage(page)) return getWizardMenuItemCount(page) > 0;
   switch (page) {
     case WIZARD_PAGE_WEBMODE:
       return wizardShouldShowWebMode();
     case WIZARD_PAGE_BTMODE:
       return wizardShouldShowBtMode();
-    case WIZARD_PAGE_NETWORK:
-      return hasNetworkSettings();
     case WIZARD_PAGE_ESPNOW:
       return wizardShouldShowESPNow();
     case WIZARD_PAGE_MQTT:
@@ -703,7 +840,7 @@ bool wizardIsPageVisible(SetupWizardPage page) {
     case WIZARD_PAGE_WIFI:
       return wizardShouldShowWiFi();
     default:
-      return true;
+      return false;
   }
 }
 
@@ -749,138 +886,100 @@ int getWizardPageNumber(SetupWizardPage page) {
 // Wizard Actions
 // ============================================================================
 
-bool wizardToggleCurrentItem() {
-  if (currentPage == WIZARD_PAGE_FEATURES) {
-    if (currentSelection < (int)featuresPageCount) {
-      WizardFeatureItem* item = &featuresPage[currentSelection];
-      if (item->setting && !item->essential) {
-        *item->setting = !*item->setting;
-        return true;
-      }
-    }
-  } else if (currentPage == WIZARD_PAGE_SENSORS) {
-    if (currentSelection < (int)sensorsPageCount) {
-      WizardFeatureItem* item = &sensorsPage[currentSelection];
-      if (item->setting && !item->essential) {
-        *item->setting = !*item->setting;
-        return true;
-      }
-    }
-  } else if (currentPage == WIZARD_PAGE_NETWORK) {
-    if (currentSelection < (int)networkPageCount && networkPage[currentSelection].isBool) {
-      *networkPage[currentSelection].boolSetting = !*networkPage[currentSelection].boolSetting;
+bool wizardActivateCurrentItem() {
+  if (!sWizardDraft.active) return false;
+  const WizardMenuItem* item = getWizardMenuItem(currentPage, currentSelection);
+  if (!item) return false;
+  switch (item->type) {
+    case WIZARD_ITEM_TOGGLE:
+    case WIZARD_ITEM_STARTUP: {
+      const FeatureEntry* feature = getFeatureById(item->id);
+      if (feature && (feature->flags & FEATURE_FLAG_ESSENTIAL)) return false;
+      if (!item->setting) return false;
+      *item->setting = !*item->setting;
       return true;
     }
+    case WIZARD_ITEM_TIMEZONE:
+      setWizardTimezoneSelection((timezoneSelection + 1) % timezoneCount);
+      return true;
+    case WIZARD_ITEM_LOGLEVEL:
+      setWizardLogLevelSelection((logLevelSelection + 1) % logLevelCount);
+      return true;
+    case WIZARD_ITEM_NTP:
+      setWizardNTPSelection((ntpSelection + 1) % ntpPresetCount);
+      return true;
+    case WIZARD_ITEM_LED_EFFECT:
+      setWizardLEDEffectSelection((ledEffectSelection + 1) % ledEffectCount);
+      return true;
+    case WIZARD_ITEM_DEVICE_NAME:
+      return false; // Adapter opens text input using getWizardDeviceNameBuf().
   }
   return false;
 }
 
 bool wizardMoveUp() {
-  int maxItems = 0;
-  if (currentPage == WIZARD_PAGE_FEATURES) maxItems = featuresPageCount;
-  else if (currentPage == WIZARD_PAGE_SENSORS) maxItems = sensorsPageCount;
-  else if (currentPage == WIZARD_PAGE_NETWORK) maxItems = networkPageCount;
-  else if (currentPage == WIZARD_PAGE_SYSTEM) maxItems = getWizardSystemPageCount();
-
-  if (currentSelection > 0) {
-    currentSelection--;
-    if (currentSelection < scrollOffset) {
-      scrollOffset = currentSelection;
-    }
+  if (currentSelection > 0 && currentSelection < (int)getWizardMenuItemCount(currentPage)) {
+    --currentSelection;
+    if (currentSelection < scrollOffset) scrollOffset = currentSelection;
     return true;
   }
   return false;
 }
 
 bool wizardMoveDown() {
-  int maxItems = 0;
-  if (currentPage == WIZARD_PAGE_FEATURES) maxItems = featuresPageCount;
-  else if (currentPage == WIZARD_PAGE_SENSORS) maxItems = sensorsPageCount;
-  else if (currentPage == WIZARD_PAGE_NETWORK) maxItems = networkPageCount;
-  else if (currentPage == WIZARD_PAGE_SYSTEM) maxItems = getWizardSystemPageCount();
-
-  if (currentSelection < maxItems - 1) {
-    currentSelection++;
-    if (currentSelection >= scrollOffset + 4) {
-      scrollOffset = currentSelection - 3;
-    }
+  if (currentSelection >= 0 && currentSelection < (int)getWizardMenuItemCount(currentPage) - 1) {
+    ++currentSelection;
+    if (currentSelection >= scrollOffset + 4) scrollOffset = currentSelection - 3;
     return true;
   }
   return false;
 }
 
-bool wizardCycleOption() {
-  if (currentPage == WIZARD_PAGE_SYSTEM) {
-    SystemPageItem item = getSystemItemAt(currentSelection);
-    switch (item) {
-      case SYS_ITEM_TIMEZONE:
-        timezoneSelection = (timezoneSelection + 1) % timezoneCount;
-        return true;
-      case SYS_ITEM_LOGLEVEL:
-        logLevelSelection = (logLevelSelection + 1) % logLevelCount;
-        return true;
-      case SYS_ITEM_NTP:
-        ntpSelection = (ntpSelection + 1) % ntpPresetCount;
-        return true;
-      case SYS_ITEM_LED:
-        ledEffectSelection = (ledEffectSelection + 1) % ledEffectCount;
-        return true;
-      case SYS_ITEM_DEVICE_NAME:
-        return false;  // Text input — handled by caller, not cycled
-    }
-  }
-  return false;
-}
+bool wizardIsFirstPage() { return wizardRetreatFrom(currentPage) == currentPage; }
 
 bool wizardShouldShowWiFi() {
 #if ENABLE_WIFI
   const FeatureEntry* wifiFeature = getFeatureById("wifi");
-  return wifiFeature && isFeatureEnabled(wifiFeature);
+  return wifiFeature && wizardFeatureEnabled(wifiFeature->id);
 #else
   return false;
 #endif
 }
 
+static void wizardCollectDeviceName() {
+  auto& draft = sWizardDraft.values;
+  if (wizardDeviceName[0] &&
+      strcmp(wizardDeviceName, sWizardDraft.deviceNameBaseline) != 0) {
+    copyWizardString(draft.deviceName, wizardDeviceName);
+    copyWizardString(draft.bleDeviceName, draft.deviceName);
+    memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
+  }
+}
+
+static void wizardCollectSystemChoices(SetupWizardResult& result) {
+  wizardCollectDeviceName();
+  const auto& draft = sWizardDraft.values;
+  result.timezoneOffset = draft.timezoneOffset;
+  result.timezoneAbbrev = "";
+  for (const auto& timezone : timezones) {
+    if (timezone.offsetMinutes == draft.timezoneOffset) {
+      copyWizardString(result.timezoneAbbrev, timezone.abbrev);
+      break;
+    }
+  }
+}
+
 bool wizardNextPage(SetupWizardResult& result) {
-  // Save system settings when leaving system page
-  if (currentPage == WIZARD_PAGE_SYSTEM) {
-    result.timezoneOffset = timezones[timezoneSelection].offsetMinutes;
-    result.timezoneAbbrev = timezones[timezoneSelection].abbrev;
-    gSettings.tzOffsetMinutes = result.timezoneOffset;
-    // Push it into libc immediately. This page-leave write lands well before
-    // wizardFinalize()'s applySettings(), and if the wizard is cancelled or
-    // times out that call never happens — leaving gSettings on the new offset
-    // while localtime_r() still used the old one, i.e. two different "local"
-    // times in one firmware for the rest of the boot.
-    Clock::applyTimezone();
-    gSettings.logLevel = logLevelSelection;
-    if (systemPageHasNTP()) {
-      result.ntpServer = ntpPresets[ntpSelection];
-    }
-    if (systemPageHasLED()) {
-      result.ledStartupEffect = ledEffects[ledEffectSelection];
-    }
-    if (systemPageHasDeviceName() && wizardDeviceName[0] != '\0') {
-      gSettings.bleDeviceName = wizardDeviceName;
-      gSettings.espnowDeviceName = wizardDeviceName;
-    }
-  }
+  if (!sWizardDraft.active) { result.completed = false; return false; }
+  if (currentPage == WIZARD_PAGE_SYSTEM) wizardCollectSystemChoices(result);
+  result.wifiEnabled = wizardShouldShowWiFi();
 
-  // Rebuild network page before navigating away from sensors (toggles may have changed)
-  if (currentPage == WIZARD_PAGE_SENSORS) {
-    rebuildNetworkSettingsPage();
-  }
-
-  SetupWizardPage next = wizardAdvanceFrom(currentPage);
+  const SetupWizardPage next = wizardAdvanceFrom(currentPage);
   if (next == WIZARD_PAGE_COUNT) {
-    // No more pages — wizard complete
-    if (currentPage == WIZARD_PAGE_WIFI) result.wifiEnabled = true;
-    result.completed = true;
+    result.completed = sWizardDraft.valid;
     return false;
   }
-
-  if (next == WIZARD_PAGE_WIFI) result.wifiEnabled = true;
-
+  result.completed = false;
   currentPage = next;
   currentSelection = 0;
   scrollOffset = 0;
@@ -888,6 +987,7 @@ bool wizardNextPage(SetupWizardResult& result) {
 }
 
 bool wizardPrevPage() {
+  if (currentPage == WIZARD_PAGE_SYSTEM) wizardCollectDeviceName();
   SetupWizardPage prev = wizardRetreatFrom(currentPage);
   if (prev == currentPage) return false; // already at first page
 
@@ -897,232 +997,60 @@ bool wizardPrevPage() {
   return true;
 }
 
-void wizardFinalize(SetupWizardResult& result) {
-  result.timezoneOffset = timezones[timezoneSelection].offsetMinutes;
-  result.timezoneAbbrev = timezones[timezoneSelection].abbrev;
-  gSettings.tzOffsetMinutes = result.timezoneOffset;
-  gSettings.logLevel = logLevelSelection;
-  if (systemPageHasNTP()) {
-    result.ntpServer = ntpPresets[ntpSelection];
-    gSettings.ntpServer = result.ntpServer;
-  }
-#if ENABLE_NEOPIXEL
-  if (systemPageHasLED()) {
-    result.ledStartupEffect = ledEffects[ledEffectSelection];
-    gSettings.ledStartupEffect = result.ledStartupEffect;
-  }
-#endif
-  if (systemPageHasDeviceName() && wizardDeviceName[0] != '\0') {
-    gSettings.bleDeviceName = wizardDeviceName;
-    gSettings.espnowDeviceName = wizardDeviceName;
-  }
-
-#if ENABLE_HTTPS
-  // If the user picked HTTPS for the Web Interface, generate the self-signed
-  // cert now (ECDSA P-256, ~1s) so the server starts in HTTPS on first launch.
-  // The server-start path falls back to HTTP if certs are absent, so a failure
-  // here degrades gracefully rather than leaving a dead server.
-  if (gSettings.httpAutoStart && gSettings.httpsEnabled) {
-    extern const char* cmd_certgen(const String&);
-    broadcastOutput("[Wizard] HTTPS selected - generating self-signed certificate (ECDSA, ~1s)...");
-    broadcastOutput(cmd_certgen(String("")));
-  }
-#endif
-}
-
 // ============================================================================
 // Serial Console Wizard
 // ============================================================================
 
-static void printSerialHeapBar() {
-  uint32_t enabledKB, maxKB;
-  int pct;
-  getHeapBarData(&enabledKB, &maxKB, &pct);
-  
-  // Draw ASCII bar
-  Serial.print("[");
-  int barWidth = 20;
-  int filled = (barWidth * pct) / 100;
-  for (int i = 0; i < barWidth; i++) {
-    Serial.print(i < filled ? "#" : "-");
-  }
-  Serial.printf("] %lu/%luKB (%d%%)\n", (unsigned long)enabledKB, (unsigned long)maxKB, pct);
-}
-
-static void printSerialFeaturePage(const char* title, WizardFeatureItem* items, size_t count) {
-  Serial.println();
-  Serial.printf("=== %s ===\n", title);
-  printSerialHeapBar();
-  Serial.println("----------------------------------------");
-  
-  for (size_t i = 0; i < count; i++) {
-    bool enabled = items[i].setting ? *items[i].setting : false;
-    const char* essential = items[i].essential ? "*" : " ";
-    const char* status = enabled ? "[ON] " : "[OFF]";
-    Serial.printf(" %zu. %s %s%-14s ~%2dKB\n", 
-      i + 1, status, essential, items[i].label, items[i].heapKB);
-  }
-  
-  Serial.println("----------------------------------------");
-  Serial.println("Enter number to toggle, 'n' for next, 'b' for back");
-  Serial.print("> ");
-}
-
-static void printSerialNetworkPage() {
-  Serial.println();
-  Serial.println("=== Startup & Auto-start ===");
-  printSerialHeapBar();
-  Serial.println("----------------------------------------");
-  
-  for (size_t i = 0; i < networkPageCount; i++) {
-    if (networkPage[i].isBool) {
-      bool enabled = *networkPage[i].boolSetting;
-      Serial.printf(" %zu. %-20s %s\n", i + 1, networkPage[i].label, enabled ? "[ON]" : "[OFF]");
-    }
-  }
-  
-  Serial.println("----------------------------------------");
-  Serial.println("Enter number to toggle, 'n' for next, 'b' for back");
-  Serial.print("> ");
-}
-
-static void printSerialSystemPage() {
-  Serial.println();
-  Serial.println("=== System Settings ===");
-  printSerialHeapBar();
-  Serial.println("----------------------------------------");
-
-  int itemNum = 1;
-  Serial.printf(" %d. Log level: %s\n", itemNum++, logLevelNames[logLevelSelection]);
-  Serial.printf(" %d. Timezone:  %-5s %s\n", itemNum++,
-    timezones[timezoneSelection].abbrev,
-    timezones[timezoneSelection].name);
-  if (systemPageHasNTP()) {
-    Serial.printf(" %d. NTP Server: %s\n", itemNum++, ntpPresets[ntpSelection]);
-  }
-  if (systemPageHasLED()) {
-    Serial.printf(" %d. LED Effect: %s\n", itemNum++, ledEffects[ledEffectSelection]);
-  }
-  if (systemPageHasDeviceName()) {
-    Serial.printf(" %d. Device Name: %s\n", itemNum++, wizardDeviceName);
-  }
-
-  Serial.println("----------------------------------------");
-  Serial.println("Enter number to cycle/edit, 'n' for next, 'b' for back");
-  Serial.print("> ");
-}
-
-// ============================================================================
-// Shared serial page printer (used by runSetupWizard for both OLED and no-OLED)
-// ============================================================================
-
-// External linkage so the new CLIMode-based wizard (System_SetupWizardMode.cpp)
-// can reuse the page-status renderer without duplicating its logic.
-// Previously `static`; promoting doesn't change behavior, just visibility.
+// Both wizard engines print the same titles, rows, values and navigation.
 void printSerialPageStatus() {
-  SetupWizardPage page = getWizardCurrentPage();
-  int sel = getWizardCurrentSelection();
-  int pageNum = getWizardPageNumber(page);
-  int totalPages = getWizardTotalPages();
-
-  Serial.println();
-  Serial.println("========================================");
-
-  switch (page) {
-    case WIZARD_PAGE_FEATURES: {
-      Serial.printf("  SETUP %d/%d: Features\n", pageNum, totalPages);
-      WizardFeatureItem* items = getWizardFeaturesPage();
-      size_t count = getWizardFeaturesPageCount();
-      for (size_t i = 0; i < count; i++) {
-        bool enabled = items[i].setting ? *items[i].setting : false;
-        Serial.printf(" %s%zu. [%s] %s%s ~%dKB\n",
-          (int)i == sel ? ">" : " ", i + 1,
-          enabled ? "X" : " ",
-          items[i].label,
-          items[i].essential ? "*" : "",
-          items[i].heapKB);
-      }
-      break;
+  const SetupWizardPage page = getWizardCurrentPage();
+  const int selection = getWizardCurrentSelection();
+  char line[160];
+  broadcastOutput("");
+  broadcastOutput("========================================");
+  snprintf(line, sizeof(line), "  SETUP %d/%d: %s", getWizardPageNumber(page), getWizardTotalPages(), getWizardPageTitle(page));
+  broadcastOutput(line);
+  for (size_t i = 0; i < getWizardMenuItemCount(page); ++i) {
+    char label[48], value[80];
+    if (wizardFormatMenuItem(page, (int)i, label, sizeof(label), value, sizeof(value))) {
+      snprintf(line, sizeof(line), " %s%zu. %s: %s", (int)i == selection ? ">" : " ", i + 1, label, value);
+      broadcastOutput(line);
     }
-    case WIZARD_PAGE_SENSORS: {
-      Serial.printf("  SETUP %d/%d: Sensors & Display\n", pageNum, totalPages);
-      WizardFeatureItem* items = getWizardSensorsPage();
-      size_t count = getWizardSensorsPageCount();
-      for (size_t i = 0; i < count; i++) {
-        bool enabled = items[i].setting ? *items[i].setting : false;
-        Serial.printf(" %s%zu. [%s] %s%s ~%dKB\n",
-          (int)i == sel ? ">" : " ", i + 1,
-          enabled ? "X" : " ",
-          items[i].label,
-          items[i].essential ? "*" : "",
-          items[i].heapKB);
-      }
-      break;
-    }
-    case WIZARD_PAGE_NETWORK: {
-      Serial.printf("  SETUP %d/%d: Startup & Auto-start\n", pageNum, totalPages);
-      WizardNetworkItem* items = getWizardNetworkPage();
-      size_t count = getWizardNetworkPageCount();
-      for (size_t i = 0; i < count; i++) {
-        if (items[i].isBool) {
-          bool enabled = *items[i].boolSetting;
-          Serial.printf(" %s%zu. [%s] %s\n",
-            (int)i == sel ? ">" : " ", i + 1,
-            enabled ? "X" : " ",
-            items[i].label);
-        }
-      }
-      break;
-    }
-    case WIZARD_PAGE_SYSTEM: {
-      Serial.printf("  SETUP %d/%d: System Settings\n", pageNum, totalPages);
-      const TimezoneEntry* tz = getTimezones();
-      int tzSel = getWizardTimezoneSelection();
-      int logSel = getWizardLogLevelSelection();
-      const char** logNames = getLogLevelNames();
-      int idx = 0;
-      Serial.printf(" %s%d. Log Level: %s\n", sel == idx ? ">" : " ", idx + 1, logNames[logSel]);
-      idx++;
-      Serial.printf(" %s%d. Timezone: %-5s %s\n", sel == idx ? ">" : " ", idx + 1, tz[tzSel].abbrev, tz[tzSel].name);
-      idx++;
-      if (systemPageHasNTP()) {
-        Serial.printf(" %s%d. NTP Server: %s\n", sel == idx ? ">" : " ", idx + 1, ntpPresets[ntpSelection]);
-        idx++;
-      }
-      if (systemPageHasLED()) {
-        Serial.printf(" %s%d. LED Effect: %s\n", sel == idx ? ">" : " ", idx + 1, ledEffects[ledEffectSelection]);
-        idx++;
-      }
-      if (systemPageHasDeviceName()) {
-        Serial.printf(" %s%d. Device Name: %s\n", sel == idx ? ">" : " ", idx + 1, wizardDeviceName);
-        idx++;
-      }
-      break;
-    }
-    case WIZARD_PAGE_ESPNOW: {
-      Serial.printf("  SETUP %d/%d: ESP-NOW Identity\n", pageNum, totalPages);
-      Serial.println("  (All fields optional — press Enter to skip)");
-      break;
-    }
-    case WIZARD_PAGE_MQTT: {
-      Serial.printf("  SETUP %d/%d: MQTT Broker\n", pageNum, totalPages);
-      Serial.println("  (Press Enter to use defaults)");
-      break;
-    }
-    default:
-      break;
   }
-
-  Serial.println("----------------------------------------");
-  Serial.println("Serial: # to toggle, 'n' next, 'b' back");
+  broadcastOutput("----------------------------------------");
+  snprintf(line, sizeof(line), "Serial: # to edit, 'n' %s, 'b' %s, 'cancel' discard",
+           wizardAdvanceFrom(page) == WIZARD_PAGE_COUNT ? "finish" : "next",
+           wizardIsFirstPage() ? "cancel" : "back");
+  broadcastOutput(line);
 #if ENABLE_OLED_DISPLAY
-  Serial.println("OLED:   Joystick + A=Toggle, Right=Next");
+  snprintf(line, sizeof(line), "OLED:   Joystick + A=Edit, Right=%s",
+           wizardAdvanceFrom(page) == WIZARD_PAGE_COUNT ? "Finish" : "Next");
+  broadcastOutput(line);
 #endif
-  Serial.print("> ");
+  broadcastOutput("> ");
+}
+
+bool wizardHandleCancelInput(const String& input) {
+  noteWizardInputActivity();
+  String command = input;
+  command.trim();
+  if (!command.equalsIgnoreCase("cancel")) return false;
+  requestWizardCancel();
+  return true;
+}
+
+static String waitForWizardInput() {
+  const String input = waitForSerialInputBlocking();
+  if (isWizardCancelRequested() || wizardHandleCancelInput(input)) return String();
+  return input;
 }
 
 // Serial ESP-NOW identity page
 static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
+  result.espnowFriendlyName = "";
+  result.espnowRoom = "";
+  result.espnowZone = "";
+  result.espnowStationary = getWizardDraftValues().espnowStationary;
   int pageNum = getWizardPageNumber(WIZARD_PAGE_ESPNOW);
   int totalPages = getWizardTotalPages();
 
@@ -1134,7 +1062,7 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   Serial.println(" n = Next (skip)");
   Serial.println(" b = Back");
   Serial.print("Choice: ");
-  String introChoice = waitForSerialInputBlocking();
+  String introChoice = waitForWizardInput();
   introChoice.trim();
   String deviceName;
   if (introChoice.equalsIgnoreCase("b") || introChoice.equalsIgnoreCase("back")) {
@@ -1144,7 +1072,7 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   if (introChoice.equalsIgnoreCase("n") || introChoice.equalsIgnoreCase("next") || introChoice.length() == 0) {
     // Explicit skip (or blank/Enter) — disable ESP-NOW since it's unconfigured;
     // it can't start without a name.
-    gSettings.espnowEnabled = false;
+    wizardSetFeatureEnabled("espnow", false);
     if (!wizardNextPage(result)) running = false;
     return;
   }
@@ -1153,10 +1081,10 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   Serial.println("All fields optional. Enter to skip field, 'n' to finish, 'b' to go back.");
   Serial.println("----------------------------------------");
 
-  String currentName = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "HardwareOne";
+  String currentName = getWizardDraftValues().deviceName.length() > 0 ? getWizardDraftValues().deviceName : "HardwareOne";
   if (introChoice.equalsIgnoreCase("c") || introChoice.equalsIgnoreCase("configure")) {
     Serial.printf("Device Name (for Bluetooth + ESP-NOW) [%s]: ", currentName.c_str());
-    deviceName = waitForSerialInputBlocking();
+    deviceName = waitForWizardInput();
     deviceName.trim();
     if (deviceName.equalsIgnoreCase("b") || deviceName.equalsIgnoreCase("back")) {
       wizardPrevPage(); return;
@@ -1178,7 +1106,7 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   result.espnowFriendlyName = deviceName;
 
   { Serial.print("Room (e.g. 'Living Room'): ");
-  String room = waitForSerialInputBlocking();
+  String room = waitForWizardInput();
   room.trim();
   if (room.equalsIgnoreCase("b") || room.equalsIgnoreCase("back")) {
     wizardPrevPage(); return;
@@ -1187,7 +1115,7 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   result.espnowRoom = room; }
 
   { Serial.print("Zone (e.g. 'North Wall'): ");
-  String zone = waitForSerialInputBlocking();
+  String zone = waitForWizardInput();
   zone.trim();
   if (zone.equalsIgnoreCase("b") || zone.equalsIgnoreCase("back")) {
     wizardPrevPage(); return;
@@ -1195,13 +1123,13 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   if (zone.equalsIgnoreCase("n")) goto espnow_done;
   result.espnowZone = zone; }
 
-  { Serial.print("The device will be — (m)obile or (s)tationary [m]: ");
-  String stat = waitForSerialInputBlocking();
+  { Serial.print("The device will be — (m)obile or (s)tationary [Enter keeps current]: ");
+  String stat = waitForWizardInput();
   stat.trim();
   if (stat.equalsIgnoreCase("b") || stat.equalsIgnoreCase("back")) {
     wizardPrevPage(); return;
   }
-  result.espnowStationary = (stat.equalsIgnoreCase("s") || stat.equalsIgnoreCase("stationary")); }
+  if (stat.length()) result.espnowStationary = (stat.equalsIgnoreCase("s") || stat.equalsIgnoreCase("stationary")); }
 
 espnow_done:
   // If the wizard timed out partway through this page (waitForSerialInputBlocking
@@ -1213,7 +1141,10 @@ espnow_done:
     return;
   }
 
-  wizardApplyESPNowSettings(result);
+  if (!wizardStageESPNowSettings(result)) {
+    Serial.println("Error: could not stage ESP-NOW choices.");
+    return;
+  }
 
   Serial.println("ESP-NOW identity configured.");
 
@@ -1225,6 +1156,10 @@ espnow_done:
 
 // Serial MQTT broker page
 static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
+  result.mqttHost = "";
+  result.mqttUser = "";
+  result.mqttPassword = "";
+  result.mqttPort = 0;
   int pageNum = getWizardPageNumber(WIZARD_PAGE_MQTT);
   int totalPages = getWizardTotalPages();
 
@@ -1236,7 +1171,7 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
   Serial.println(" n = Next (skip)");
   Serial.println(" b = Back");
   Serial.print("Choice: ");
-  String introChoice = waitForSerialInputBlocking();
+  String introChoice = waitForWizardInput();
   introChoice.trim();
   if (introChoice.equalsIgnoreCase("b") || introChoice.equalsIgnoreCase("back")) {
     wizardPrevPage();
@@ -1244,7 +1179,7 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
   }
   if (!introChoice.equalsIgnoreCase("c") && !introChoice.equalsIgnoreCase("configure")) {
     // Skip — disable MQTT auto-start since it's unconfigured
-    gSettings.mqttAutoStart = false;
+    wizardSetMQTTAutoStart(false);
     if (!wizardNextPage(result)) running = false;
     return;
   }
@@ -1253,8 +1188,8 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
   Serial.println("Press Enter to use defaults, 'b' to go back.");
   Serial.println("----------------------------------------");
 
-  Serial.printf("Host (default: %s): ", gSettings.mqttHost.length() > 0 ? gSettings.mqttHost.c_str() : "none");
-  String host = waitForSerialInputBlocking();
+  Serial.printf("Host (default: %s): ", getWizardDraftValues().mqttHost.length() > 0 ? getWizardDraftValues().mqttHost.c_str() : "none");
+  String host = waitForWizardInput();
   host.trim();
   if (host.equalsIgnoreCase("b") || host.equalsIgnoreCase("back")) {
     wizardPrevPage();
@@ -1262,17 +1197,20 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
   }
   result.mqttHost = host;
 
-  Serial.print("Port (default: 1883): ");
-  String portStr = waitForSerialInputBlocking();
+  Serial.printf("Port (current: %d; Enter keeps it): ", getWizardDraftValues().mqttPort);
+  String portStr = waitForWizardInput();
   portStr.trim();
   if (portStr.equalsIgnoreCase("b") || portStr.equalsIgnoreCase("back")) {
     wizardPrevPage();
     return;
   }
-  result.mqttPort = portStr.length() > 0 ? portStr.toInt() : 0;
+  if (!wizardParseMQTTPort(portStr, result.mqttPort)) {
+    Serial.println("Error: MQTT port must be a decimal number from 1 to 65535.");
+    return;
+  }
 
-  Serial.print("Username (blank = no auth): ");
-  String user = waitForSerialInputBlocking();
+  Serial.print("Username (blank = keep current): ");
+  String user = waitForWizardInput();
   user.trim();
   if (user.equalsIgnoreCase("b") || user.equalsIgnoreCase("back")) {
     wizardPrevPage();
@@ -1282,7 +1220,7 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
 
   if (user.length() > 0) {
     Serial.print("Password: ");
-    String pass = waitForSerialInputBlocking();
+    String pass = waitForWizardInput();
     pass.trim();
     if (pass.equalsIgnoreCase("b") || pass.equalsIgnoreCase("back")) {
       wizardPrevPage();
@@ -1298,7 +1236,10 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
     return;
   }
 
-  wizardApplyMQTTSettings(result);
+  if (!wizardStageMQTTSettings(result)) {
+    Serial.println("Error: could not stage MQTT choices.");
+    return;
+  }
 
   Serial.println("MQTT broker configured.");
 
@@ -1419,7 +1360,7 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
     Serial.println("Enter number, SSID directly, 'rescan', or 'skip':");
     Serial.println("('b' or 'back' to return to previous page)");
     Serial.print("> ");
-    String ssidInput = waitForSerialInputBlocking();
+    String ssidInput = waitForWizardInput();
     // Honor wizard-input timeout (CLI featuresetup installs one; FTS doesn't).
     if (isWizardCancelRequested()) {
       wifiScanClearNamed();
@@ -1439,8 +1380,10 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
     }
     if (ssidInput.equalsIgnoreCase("skip") || ssidInput.length() == 0) {
       wifiScanClearNamed();
-      result.completed = true;
-      running = false;
+      result.wifiConfigured = false;
+      result.wifiSSID = "";
+      result.wifiPassword = "";
+      if (!wizardNextPage(result)) running = false;
       wifiPageDone = true;
       continue;
     }
@@ -1459,7 +1402,7 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
     if (ssid.length() > 0) {
       Serial.println("Enter WiFi password (or 'b' to go back):");
       Serial.print("> ");
-      String pass = waitForSerialInputBlocking();
+      String pass = waitForWizardInput();
       if (isWizardCancelRequested()) {
         result.completed = false;
         running = false;
@@ -1472,13 +1415,11 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
       result.wifiPassword = pass;
       result.wifiConfigured = true;
     }
-    result.completed = true;
-    running = false;
+    if (!wizardNextPage(result)) running = false;
     wifiPageDone = true;
 #else
     Serial.println("WiFi not compiled in this build.");
-    result.completed = true;
-    running = false;
+    if (!wizardNextPage(result)) running = false;
     wifiPageDone = true;
 #endif
   }
@@ -1498,6 +1439,7 @@ static void handleSerialModePage(SetupWizardPage page, SetupWizardResult& result
   int lastPrinted = -1;
 
   while (true) {
+    if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
     if (sel != lastPrinted) {
       Serial.println();
       Serial.printf("=== SETUP %d/%d: %s ===\n", getWizardPageNumber(page), getWizardTotalPages(), sub->title);
@@ -1506,12 +1448,12 @@ static void handleSerialModePage(SetupWizardPage page, SetupWizardResult& result
                       sel == i ? "X" : " ", sub->modes[i].label);
       }
       Serial.println("----------------------------------------");
-      Serial.println("Serial: # to select, 'n' next, 'b' back");
+      Serial.println("Serial: # to select, 'n' next, 'b' back, 'cancel' discard");
       Serial.print("> ");
       lastPrinted = sel;
     }
 
-    String input = waitForSerialInputBlocking();
+    String input = waitForWizardInput();
     input.trim();
     if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) { wizardPrevPage(); return; }
     if (input.equalsIgnoreCase("n") || input.equalsIgnoreCase("next")) {
@@ -1535,7 +1477,7 @@ static void handleSerialModePage(SetupWizardPage page, SetupWizardResult& result
 // ============================================================================
 
 SetupWizardResult runSetupWizard() {
-  SetupWizardResult result;
+  SetupWizardResult result{};
   result.completed = false;
   result.wifiEnabled = false;
   result.wifiConfigured = false;
@@ -1548,16 +1490,6 @@ SetupWizardResult runSetupWizard() {
   result.mqttPort = 0;
 
   initSetupWizard();
-
-  // Sync timezone selection from current settings
-  const TimezoneEntry* tzList = getTimezones();
-  size_t tzCount = getTimezoneCount();
-  for (size_t i = 0; i < tzCount; i++) {
-    if (tzList[i].offsetMinutes == gSettings.tzOffsetMinutes) {
-      setWizardTimezoneSelection(i);
-      break;
-    }
-  }
 
 #if ENABLE_OLED_DISPLAY
   resetWizardJoystickState();
@@ -1641,31 +1573,24 @@ SetupWizardResult runSetupWizard() {
     if (currentPage == WIZARD_PAGE_WIFI) {
 #if ENABLE_OLED_DISPLAY
       if (oledDisplay && oledConnected) {
-        if (renderWiFiPage(result)) {
-          result.completed = true;
-          running = false;
-        }
-        // renderWiFiPage() called wizardPrevPage() internally on back press
+        renderWiFiPage(result); // Accept/Skip/Back all use shared page navigation.
+        if (result.completed || isWizardCancelRequested()) running = false;
         lastPrintedPage = WIZARD_PAGE_COUNT;  // Force reprint on return
         continue;
       }
 #endif
       handleSerialWiFiPage(result, running);
+      lastPrintedPage = WIZARD_PAGE_COUNT;
       continue;
     }
 
     // ------------------------------------------------------------------
-    // 2. OLED rendering for pages 1-4 (when display connected)
+    // 2. OLED rendering for ordinary groups (when display connected)
     // ------------------------------------------------------------------
 #if ENABLE_OLED_DISPLAY
     if (oledDisplay && oledConnected) {
-      switch (currentPage) {
-        case WIZARD_PAGE_FEATURES: renderFeaturesPage(); break;
-        case WIZARD_PAGE_SENSORS:  renderSensorsPage();  break;
-        case WIZARD_PAGE_NETWORK:  renderNetworkPage();  break;
-        case WIZARD_PAGE_SYSTEM:   renderSystemPage();   break;
-        default: running = false;  break;
-      }
+      if (wizardIsGroupPage(currentPage)) renderWizardPage();
+      else running = false;
     }
 #endif
 
@@ -1688,58 +1613,31 @@ SetupWizardResult runSetupWizard() {
     bool serialHandled = false;
     if (Serial.available()) {
       String input = Serial.readStringUntil('\n');
+      if (wizardHandleCancelInput(input)) { result.completed = false; break; }
       input.trim();
       input.toLowerCase();
 
       if (input == "n" || input == "next") {
-#if ENABLE_OLED_DISPLAY
-        JoystickNav fakeRight = {false, false, false, true};
-        switch (currentPage) {
-          case WIZARD_PAGE_FEATURES: handleFeaturesInput(0, fakeRight); break;
-          case WIZARD_PAGE_SENSORS:  handleSensorsInput(0, fakeRight);  break;
-          case WIZARD_PAGE_NETWORK:  handleNetworkInput(0, fakeRight);  break;
-          case WIZARD_PAGE_SYSTEM:
-            if (!handleSystemInput(0, fakeRight, result)) running = false;
-            break;
-          default: break;
-        }
-#else
         if (!wizardNextPage(result)) running = false;
-#endif
         serialHandled = true;
       } else if (input == "b" || input == "back") {
-#if ENABLE_OLED_DISPLAY
-        JoystickNav fakeLeft = {false, false, true, false};
-        switch (currentPage) {
-          case WIZARD_PAGE_FEATURES: handleFeaturesInput(0, fakeLeft); break;
-          case WIZARD_PAGE_SENSORS:  handleSensorsInput(0, fakeLeft);  break;
-          case WIZARD_PAGE_NETWORK:  handleNetworkInput(0, fakeLeft);  break;
-          case WIZARD_PAGE_SYSTEM:   handleSystemInput(0, fakeLeft, result); break;
-          default: break;
-        }
-#else
-        wizardPrevPage();
-#endif
+        if (!wizardPrevPage()) requestWizardCancel();
         serialHandled = true;
       } else if (input.length() > 0) {
-        int num = input.toInt();
-        if (num > 0) {
-          setWizardCurrentSelection(num - 1);
-          if (currentPage == WIZARD_PAGE_SYSTEM) {
-            if (getSystemItemAt(num - 1) == SYS_ITEM_DEVICE_NAME) {
-              // Text input for device name — can't cycle
-              Serial.printf("Device Name [%s]: ", wizardDeviceName);
-              String newName = waitForSerialInputBlocking();
-              newName.trim();
-              if (newName.length() > 0) {
-                strncpy(wizardDeviceName, newName.c_str(), sizeof(wizardDeviceName) - 1);
-                wizardDeviceName[sizeof(wizardDeviceName) - 1] = '\0';
-              }
-            } else {
-              wizardCycleOption();
+        const long number = input.toInt();
+        if (number > 0 && number <= (long)getWizardMenuItemCount(currentPage) && String(number) == input) {
+          const WizardMenuItem* item = getWizardMenuItem(currentPage, (int)number - 1);
+          setWizardCurrentSelection((int)number - 1);
+          if (item->type == WIZARD_ITEM_DEVICE_NAME) {
+            Serial.printf("Device Name [%s]: ", wizardDeviceName);
+            String newName = waitForWizardInput();
+            newName.trim();
+            if (!isWizardCancelRequested() && newName.length() > 0) {
+              strncpy(wizardDeviceName, newName.c_str(), sizeof(wizardDeviceName) - 1);
+              wizardDeviceName[sizeof(wizardDeviceName) - 1] = '\0';
             }
           } else {
-            wizardToggleCurrentItem();
+            wizardActivateCurrentItem();
           }
           serialHandled = true;
         }
@@ -1757,22 +1655,14 @@ SetupWizardResult runSetupWizard() {
 #if ENABLE_OLED_DISPLAY
     if (oledDisplay && oledConnected) {
       const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+      if (newButtons) noteWizardInputActivity();
 
       JoystickNav nav = readWizardJoystickNav();
       bool hasInput = (newButtons != 0) || nav.up || nav.down || nav.left || nav.right;
       if (!hasInput) continue;
 
-      bool handled = false;
-      switch (currentPage) {
-        case WIZARD_PAGE_FEATURES: handled = handleFeaturesInput(newButtons, nav); break;
-        case WIZARD_PAGE_SENSORS:  handled = handleSensorsInput(newButtons, nav);  break;
-        case WIZARD_PAGE_NETWORK:  handled = handleNetworkInput(newButtons, nav);  break;
-        case WIZARD_PAGE_SYSTEM:
-          if (!handleSystemInput(newButtons, nav, result)) running = false;
-          handled = true;
-          break;
-        default: break;
-      }
+      const bool handled = handleWizardPageInput(newButtons, nav, result);
+      if (result.completed || isWizardCancelRequested()) running = false;
 
       if (handled) {
         lastPrintedSel = -1;
@@ -1782,40 +1672,86 @@ SetupWizardResult runSetupWizard() {
 #endif
   }
 
-  wizardFinalize(result);
-
+  if (!result.completed || isWizardCancelRequested()) { result = {}; discardSetupWizard(); }
   return result;
 }
 
-void wizardSaveAndApplySettings(const SetupWizardResult& result) {
-  if (!result.completed) return;
+bool wizardSaveAndApplySettings(SetupWizardResult& result) {
+  if (!result.completed || isWizardCancelRequested()) {
+    result = {};
+    discardSetupWizard();
+    return false;
+  }
+  if (!sWizardDraft.active) { result = {}; return false; }
+  wizardCollectSystemChoices(result);
+  const auto& draft = sWizardDraft.values;
+  const auto& initial = sWizardDraft.initial;
+  const bool invalid = !sWizardDraft.valid ||
+      (draft.logLevel != initial.logLevel && (draft.logLevel < 0 || draft.logLevel >= (int)logLevelCount)) ||
+      (draft.bleMode != initial.bleMode && (draft.bleMode < 0 || draft.bleMode > 1)) ||
+      (draft.mqttPort != initial.mqttPort && (draft.mqttPort < 1 || draft.mqttPort > 65535));
+  // Reserve every edited destination before publishing any value. A failed
+  // String copy must not turn Apply into a partial configuration change.
+  bool ready = !invalid;
+  for (const auto& binding : kWizardStringBindings) {
+    if (draft.*binding.field != initial.*binding.field &&
+        !binding.live->reserve((draft.*binding.field).length())) ready = false;
+  }
+  if (!ready) {
+    broadcastOutput("Error: setup choices could not be applied. No changes applied.");
+    result = {};
+    discardSetupWizard();
+    return false;
+  }
+
+  // Short synchronous scope, never held while waiting for user input. It is
+  // private to this task and leaves any caller-owned batch intact.
+  SettingsWriteScope writes;
+  if (!writes.active()) {
+    broadcastOutput("Error: setup could not start its settings save. No changes applied.");
+    result = {};
+    discardSetupWizard();
+    return false;
+  }
+  for (size_t i = 0; i < sWizardDraft.boolCount; ++i) {
+    const auto& choice = sWizardDraft.booleans[i];
+    if (choice.value != choice.initial) setSetting(*choice.live, choice.value);
+  }
+  for (const auto& binding : kWizardStringBindings) {
+    if (draft.*binding.field != initial.*binding.field) setSetting(*binding.live, draft.*binding.field);
+  }
+  if (draft.timezoneOffset != initial.timezoneOffset) setSetting(gSettings.tzOffsetMinutes, draft.timezoneOffset);
+  if (draft.logLevel != initial.logLevel) setDebugSetting(gSettings.logLevel, draft.logLevel);
+  if (draft.httpsEnabled != initial.httpsEnabled) setSetting(gSettings.httpsEnabled, draft.httpsEnabled);
+  if (draft.bleMode != initial.bleMode) setSetting(gSettings.bleMode, draft.bleMode);
+  if (draft.espnowStationary != initial.espnowStationary) setSetting(gSettings.espnowStationary, draft.espnowStationary);
+  if (draft.mqttPort != initial.mqttPort) setSetting(gSettings.mqttPort, draft.mqttPort);
 
 #if ENABLE_WIFI
   if (result.wifiConfigured && result.wifiSSID.length() > 0) {
-    const WifiNetworkSaveResult wifiSaved =
-        saveSetupWiFiNetwork(result.wifiSSID, result.wifiPassword);
+    const WifiNetworkSaveResult wifiSaved = saveSetupWiFiNetwork(result.wifiSSID, result.wifiPassword);
     broadcastOutput(wifiNetworkSaveResultMessage(wifiSaved));
-    if (wifiSaved == WifiNetworkSaveResult::Accepted) {
-      broadcastOutput("WiFi network: " + result.wifiSSID);
-    }
+    if (wifiSaved == WifiNetworkSaveResult::Accepted) broadcastOutput("WiFi network: " + result.wifiSSID);
   }
 #endif
-
-  // logLevel lives in the split debug module, not settings.json. Flush both
-  // files after completion. Both writes are attempted even if one fails;
-  // runtime settings are still applied, with the save failure reported below.
-  const bool mainSaved = writeSettingsJson();
-  const bool debugSaved = writeDebugJson();
-  if (!mainSaved || !debugSaved) {
-    broadcastOutput("Warning: one or more setup settings files could not be saved.");
+  if (!writes.finish()) {
+    broadcastOutput("Warning: one or more setup settings files could not be saved; retry is pending.");
   }
+  // These live actions happen only after successful draft acceptance. A failed
+  // disk write retains the accepted live values and the Settings owner's retry.
   applySettings();
 #if ENABLE_WIFI
-  // Re-register SNTP with the wizard's NTP choice — applySettings() does
-  // not reach setupNTP(), so without this the new server only took effect
-  // on the next reboot.
   if (WiFi.isConnected()) setupNTP();
 #endif
+#if ENABLE_HTTPS
+  if (gSettings.httpAutoStart && gSettings.httpsEnabled) {
+    extern const char* cmd_certgen(const String&);
+    broadcastOutput("[Wizard] HTTPS selected - generating self-signed certificate (ECDSA, ~1s)...");
+    broadcastOutput(cmd_certgen(String("")));
+  }
+#endif
+  discardSetupWizard();
+  return true;
 }
 
 // ============================================================================
@@ -1849,32 +1785,36 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
   // Always reset to "wait forever" after the wizard returns so a later
   // FTS-style use of waitForSerialInputBlocking() doesn't inherit a stale
   // timeout.
+  const bool cancelled = isWizardCancelRequested();
   setSerialWaitTimeout(0);
 
-  if (isWizardCancelRequested()) {
-    broadcastOutput("Feature setup timed out. No changes saved.");
-    result.completed = false;
+  if (cancelled) {
+    broadcastOutput("Feature setup cancelled or timed out. No changes saved.");
+    result = {};
+    discardSetupWizard();
     return result;
   }
 
   if (!result.completed) {
+    result = {};
     broadcastOutput("Feature setup cancelled. No changes saved.");
+    discardSetupWizard();
     return result;
   }
+
+  uint32_t usedKB = 0, totalKB = 1;
+  int pct = 0;
+  getHeapBarData(&usedKB, &totalKB, &pct);
+  if (!wizardSaveAndApplySettings(result)) return result;
 
   broadcastOutput("Feature configuration complete.");
   broadcastOutput("Timezone: " + result.timezoneAbbrev);
   {
-    uint32_t usedKB = 0, totalKB = 1;
-    int pct = 0;
-    getHeapBarData(&usedKB, &totalKB, &pct);
     uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
     char buf[64];
     snprintf(buf, sizeof(buf), "Heap estimate: ~%lu KB", (unsigned long)estFreeKB);
     broadcastOutput(buf);
   }
-
-  wizardSaveAndApplySettings(result);
 
   return result;
 }

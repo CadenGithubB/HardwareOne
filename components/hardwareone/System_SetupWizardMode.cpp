@@ -6,8 +6,7 @@
 //
 // The state-machine breakdown:
 //
-//   WizardSubMode::PAGE_*         user is on one of the top-level pages
-//                                 (Features / Sensors / Network / System);
+//   WizardSubMode::PAGE_GROUP     user is on a shared settings group;
 //                                 inputs: 'n' / 'b' / '<number>'
 //
 //   WizardSubMode::ESPNOW_*       multi-step ESP-NOW identity entry:
@@ -30,12 +29,11 @@
 #include "HAL_Input.h"
 #include "System_SetupWizard.h"   // existing state mutators + renderers
 #include "System_CLIMode.h"
-#include "System_Settings.h"      // gSettings
 #include "System_Debug.h"
 
 #if ENABLE_OLED_DISPLAY
 #include "OLED_Display.h"          // oledDisplay, oledConnected
-#include "OLED_SetupWizard.h"      // renderFeaturesPage / handleFeaturesInput / etc.
+#include "OLED_SetupWizard.h"      // shared group rendering and input
 #endif
 
 #include <Arduino.h>
@@ -45,13 +43,9 @@
 // ============================================================================
 
 enum class WizardSubMode : uint8_t {
-  // Top-level pages -- input is n/b/<number> with optional field-entry
-  // detour on the System page (device name).
-  PAGE_FEATURES = 0,
-  PAGE_SENSORS,
-  PAGE_NETWORK,
-  PAGE_SYSTEM,
-  PAGE_SYSTEM_DEVICENAME,   // detour after user picks "Device Name" item
+  // Shared settings groups -- n/b/<number>, with a device-name text detour.
+  PAGE_GROUP = 0,
+  PAGE_DEVICE_NAME,
 
   // Web Interface / Bluetooth mode picker (one numbered choice). Shared mode
   // table with the FTS engine — see System_SetupWizard.cpp wizardModeMenu*.
@@ -146,17 +140,14 @@ static void paintHeader() {
 
 // Map current top-level page to its corresponding sub-mode enum.
 static WizardSubMode subModeForPage(SetupWizardPage page) {
+  if (wizardIsGroupPage(page)) return WizardSubMode::PAGE_GROUP;
   switch (page) {
-    case WIZARD_PAGE_FEATURES: return WizardSubMode::PAGE_FEATURES;
-    case WIZARD_PAGE_WEBMODE:  return WizardSubMode::PAGE_WEBMODE;
-    case WIZARD_PAGE_BTMODE:   return WizardSubMode::PAGE_BTMODE;
-    case WIZARD_PAGE_SENSORS:  return WizardSubMode::PAGE_SENSORS;
-    case WIZARD_PAGE_NETWORK:  return WizardSubMode::PAGE_NETWORK;
-    case WIZARD_PAGE_SYSTEM:   return WizardSubMode::PAGE_SYSTEM;
-    case WIZARD_PAGE_ESPNOW:   return WizardSubMode::ESPNOW_INTRO;
-    case WIZARD_PAGE_MQTT:     return WizardSubMode::MQTT_INTRO;
-    case WIZARD_PAGE_WIFI:     return WizardSubMode::WIFI_SSID;
-    default:                   return WizardSubMode::DONE;
+    case WIZARD_PAGE_WEBMODE: return WizardSubMode::PAGE_WEBMODE;
+    case WIZARD_PAGE_BTMODE:  return WizardSubMode::PAGE_BTMODE;
+    case WIZARD_PAGE_ESPNOW:  return WizardSubMode::ESPNOW_INTRO;
+    case WIZARD_PAGE_MQTT:    return WizardSubMode::MQTT_INTRO;
+    case WIZARD_PAGE_WIFI:    return WizardSubMode::WIFI_SSID;
+    default:                  return WizardSubMode::DONE;
   }
 }
 
@@ -165,14 +156,11 @@ static WizardSubMode subModeForPage(SetupWizardPage page) {
 // should reply to the user's input with (e.g., "Enter MQTT host: ").
 static const char* paintAfterTransition() {
   switch (sWizard.subMode) {
-    case WizardSubMode::PAGE_FEATURES:
-    case WizardSubMode::PAGE_SENSORS:
-    case WizardSubMode::PAGE_NETWORK:
-    case WizardSubMode::PAGE_SYSTEM:
+    case WizardSubMode::PAGE_GROUP:
       paintCurrentPage();
       return "";  // page status already printed via broadcastOutput
 
-    case WizardSubMode::PAGE_SYSTEM_DEVICENAME: {
+    case WizardSubMode::PAGE_DEVICE_NAME: {
       static char prompt[80];
       snprintf(prompt, sizeof(prompt), "Device Name [%s]: ", getWizardDeviceName());
       return prompt;
@@ -217,18 +205,28 @@ static const char* paintAfterTransition() {
     }
     case WizardSubMode::ESPNOW_NAME: {
       static char prompt[80];
-      String cur = gSettings.espnowDeviceName.length() > 0
-                     ? gSettings.espnowDeviceName : String("HardwareOne");
+      const String& savedName = getWizardDraftValues().deviceName;
+      String cur = savedName.length() > 0 ? savedName : String("HardwareOne");
       snprintf(prompt, sizeof(prompt),
                "Device Name (for Bluetooth + ESP-NOW) [%s]: ", cur.c_str());
       return prompt;
     }
-    case WizardSubMode::ESPNOW_ROOM:
-      return "Room (e.g. 'Living Room'), 'n' to finish, 'b' to go back: ";
-    case WizardSubMode::ESPNOW_ZONE:
-      return "Zone (e.g. 'North Wall'), 'n' to finish, 'b' to go back: ";
+    case WizardSubMode::ESPNOW_ROOM: {
+      static char prompt[112];
+      snprintf(prompt, sizeof(prompt), "Room [%s], blank keeps it, 'n' to finish, 'b' back: ",
+               getWizardDraftValues().espnowRoom.c_str());
+      return prompt;
+    }
+    case WizardSubMode::ESPNOW_ZONE: {
+      static char prompt[112];
+      snprintf(prompt, sizeof(prompt), "Zone [%s], blank keeps it, 'n' to finish, 'b' back: ",
+               getWizardDraftValues().espnowZone.c_str());
+      return prompt;
+    }
     case WizardSubMode::ESPNOW_STATIONARY:
-      return "The device will be — (m)obile or (s)tationary [m]: ";
+      return getWizardDraftValues().espnowStationary
+               ? "The device will be — (m)obile or (s)tationary [s]: "
+               : "The device will be — (m)obile or (s)tationary [m]: ";
 
     case WizardSubMode::MQTT_INTRO: {
       int pageNum = getWizardPageNumber(WIZARD_PAGE_MQTT);
@@ -245,14 +243,26 @@ static const char* paintAfterTransition() {
       broadcastOutput(" b = Back");
       return "Choice: ";
     }
-    case WizardSubMode::MQTT_HOST:
-      return "MQTT broker host (e.g. mqtt.example.com), 'n' to skip, 'b' back: ";
-    case WizardSubMode::MQTT_PORT:
-      return "MQTT broker port [1883], 'n' to skip, 'b' back: ";
-    case WizardSubMode::MQTT_USER:
-      return "MQTT username (blank = none), 'n' to finish, 'b' back: ";
+    case WizardSubMode::MQTT_HOST: {
+      static char prompt[144];
+      snprintf(prompt, sizeof(prompt), "MQTT broker host [%s], blank keeps it, 'n' to finish, 'b' back: ",
+               getWizardDraftValues().mqttHost.c_str());
+      return prompt;
+    }
+    case WizardSubMode::MQTT_PORT: {
+      static char prompt[96];
+      snprintf(prompt, sizeof(prompt), "MQTT broker port [%d], blank keeps it, 'n' to finish, 'b' back: ",
+               getWizardDraftValues().mqttPort);
+      return prompt;
+    }
+    case WizardSubMode::MQTT_USER: {
+      static char prompt[128];
+      snprintf(prompt, sizeof(prompt), "MQTT username [%s], blank keeps it, 'n' to finish, 'b' back: ",
+               getWizardDraftValues().mqttUser.c_str());
+      return prompt;
+    }
     case WizardSubMode::MQTT_PASS:
-      return "MQTT password (blank = none), 'b' back: ";
+      return "MQTT password (blank keeps it), 'b' back: ";
 
     case WizardSubMode::WIFI_SSID: {
 #if ENABLE_WIFI
@@ -333,26 +343,22 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
   }
 
   switch (sWizard.subMode) {
-    case WizardSubMode::PAGE_FEATURES:
-    case WizardSubMode::PAGE_SENSORS:
-    case WizardSubMode::PAGE_NETWORK:
-    case WizardSubMode::PAGE_SYSTEM:
+    case WizardSubMode::PAGE_GROUP:
       return dispatchTopLevelPage(line, out, outSize);
 
     case WizardSubMode::PAGE_WEBMODE:
     case WizardSubMode::PAGE_BTMODE:
       return dispatchModePage(line, out, outSize);
 
-    case WizardSubMode::PAGE_SYSTEM_DEVICENAME: {
+    case WizardSubMode::PAGE_DEVICE_NAME: {
       String name = line;
       name.trim();
       if (name.length() > 0) {
         char* buf = getWizardDeviceNameBuf();
-        strncpy(buf, name.c_str(), 20);
-        buf[20] = '\0';
+        strncpy(buf, name.c_str(), 19);
+        buf[19] = '\0';
       }
-      // Return to system page
-      sWizard.subMode = WizardSubMode::PAGE_SYSTEM;
+      sWizard.subMode = subModeForPage(getWizardCurrentPage());
       appendPromptTo(out, outSize);
       return CLI_MODE_HANDLED;
     }
@@ -377,8 +383,7 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
 
     case WizardSubMode::DONE:
       // Shouldn't happen — the previous transition should have returned
-      // HANDLED_AND_EXIT. Bail safely.
-      sWizard.result.completed = true;
+      // HANDLED_AND_EXIT. Preserve the completion decision from the core.
       return CLI_MODE_HANDLED_AND_EXIT;
   }
 
@@ -387,7 +392,7 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
   return CLI_MODE_HANDLED_AND_EXIT;
 }
 
-// ---------- Top-level page dispatch (Features / Sensors / Network / System)
+// ---------- Shared settings group dispatch
 static CLIModeInputResult dispatchTopLevelPage(const String& line,
                                                char* out, size_t outSize) {
   String lc = line;
@@ -398,8 +403,7 @@ static CLIModeInputResult dispatchTopLevelPage(const String& line,
     bool advanced = wizardNextPage(sWizard.result);
     if (!advanced) {
       // Reached end -- finalize wizard
-      sWizard.result.completed = true;
-      snprintf(out, outSize, "Feature configuration complete.");
+      snprintf(out, outSize, "Applying feature configuration...");
       return CLI_MODE_HANDLED_AND_EXIT;
     }
     sWizard.subMode = subModeForPage(getWizardCurrentPage());
@@ -407,27 +411,24 @@ static CLIModeInputResult dispatchTopLevelPage(const String& line,
     return CLI_MODE_HANDLED;
   }
   if (lc == "b" || lc == "back") {
+    if (wizardIsFirstPage()) {
+      requestWizardCancel();
+      sWizard.result.completed = false;
+      snprintf(out, outSize, "Wizard cancelled. No changes saved.");
+      return CLI_MODE_HANDLED_AND_EXIT;
+    }
     wizardPrevPage();
     sWizard.subMode = subModeForPage(getWizardCurrentPage());
     appendPromptTo(out, outSize);
     return CLI_MODE_HANDLED;
   }
-  // Numeric: toggle/select item
-  int num = lc.toInt();
-  if (num > 0) {
-    setWizardCurrentSelection(num - 1);
-    SetupWizardPage page = getWizardCurrentPage();
-    if (page == WIZARD_PAGE_SYSTEM) {
-      if (getSystemItemAt(num - 1) == SYS_ITEM_DEVICE_NAME) {
-        // Field-entry detour: ask for device name next
-        sWizard.subMode = WizardSubMode::PAGE_SYSTEM_DEVICENAME;
-        appendPromptTo(out, outSize);
-        return CLI_MODE_HANDLED;
-      }
-      wizardCycleOption();
-    } else {
-      wizardToggleCurrentItem();
-    }
+  const long number = lc.toInt();
+  if (number > 0 && (size_t)number <= getWizardMenuItemCount(getWizardCurrentPage()) && String(number) == lc) {
+    const int index = (int)(number - 1);
+    const WizardMenuItem* item = getWizardMenuItem(getWizardCurrentPage(), index);
+    setWizardCurrentSelection(index);
+    if (item->type == WIZARD_ITEM_DEVICE_NAME) sWizard.subMode = WizardSubMode::PAGE_DEVICE_NAME;
+    else wizardActivateCurrentItem();
     appendPromptTo(out, outSize);
     return CLI_MODE_HANDLED;
   }
@@ -453,8 +454,7 @@ static CLIModeInputResult dispatchModePage(const String& line,
   if (lc == "n" || lc == "next") {
     // Advance, committing whatever mode is currently selected.
     if (!wizardNextPage(sWizard.result)) {
-      sWizard.result.completed = true;
-      snprintf(out, outSize, "Feature configuration complete.");
+      snprintf(out, outSize, "Applying feature configuration...");
       return CLI_MODE_HANDLED_AND_EXIT;
     }
     sWizard.subMode = subModeForPage(getWizardCurrentPage());
@@ -491,13 +491,17 @@ static CLIModeInputResult dispatchESPNow(const String& line,
   };
   auto goNextPage = [&]() {
     if (!wizardNextPage(sWizard.result)) {
-      sWizard.result.completed = true;
+      sWizard.subMode = WizardSubMode::DONE;
+    } else {
+      sWizard.subMode = subModeForPage(getWizardCurrentPage());
     }
-    sWizard.subMode = subModeForPage(getWizardCurrentPage());
   };
-  auto applyAndAdvance = [&]() {
-    wizardApplyESPNowSettings(sWizard.result);
-    broadcastOutput("ESP-NOW identity configured.");
+  auto stageAndAdvance = [&]() {
+    if (!wizardStageESPNowSettings(sWizard.result)) {
+      snprintf(out, outSize, "Error: ESP-NOW choices could not be staged. Try again or cancel.");
+      return;
+    }
+    broadcastOutput("ESP-NOW identity staged.");
     goNextPage();
   };
 
@@ -506,6 +510,10 @@ static CLIModeInputResult dispatchESPNow(const String& line,
       if (isBack)         { goBack(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
       if (lc == "c" || lc == "configure") {
         sWizard.espnowConfiguring = true;
+        sWizard.result.espnowFriendlyName = "";
+        sWizard.result.espnowRoom = "";
+        sWizard.result.espnowZone = "";
+        sWizard.result.espnowStationary = getWizardDraftValues().espnowStationary;
         sWizard.subMode = WizardSubMode::ESPNOW_NAME;
         broadcastOutput("----------------------------------------");
         broadcastOutput("All fields optional. Enter to skip field, "
@@ -516,7 +524,7 @@ static CLIModeInputResult dispatchESPNow(const String& line,
       if (isNext || raw.length() == 0) {
         // Explicit skip (or blank/Enter) — disable ESP-NOW since it's
         // unconfigured; it can't start without a name.
-        gSettings.espnowEnabled = false;
+        wizardSetFeatureEnabled("espnow", false);
         goNextPage();
         appendPromptTo(out, outSize);
         return (sWizard.subMode == WizardSubMode::DONE) ? CLI_MODE_HANDLED_AND_EXIT
@@ -528,6 +536,9 @@ static CLIModeInputResult dispatchESPNow(const String& line,
       // rather than silently skipping (which used to also disable ESP-NOW)
       // on what's very likely a menu mix-up, not an intentional skip.
       sWizard.espnowConfiguring = true;
+      sWizard.result.espnowRoom = "";
+      sWizard.result.espnowZone = "";
+      sWizard.result.espnowStationary = getWizardDraftValues().espnowStationary;
       sWizard.result.espnowFriendlyName = raw;
       sWizard.subMode = WizardSubMode::ESPNOW_ROOM;
       broadcastOutput("----------------------------------------");
@@ -540,33 +551,43 @@ static CLIModeInputResult dispatchESPNow(const String& line,
       if (isBack) { goBack(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
       if (isNext) {
         sWizard.result.espnowFriendlyName = "";  // Match serial early finish, including after Back.
-        applyAndAdvance(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
+        stageAndAdvance();
+        appendPromptTo(out, outSize);
+        return sWizard.subMode == WizardSubMode::DONE ? CLI_MODE_HANDLED_AND_EXIT : CLI_MODE_HANDLED;
       }
       // Empty -> keep current. Non-empty -> use as friendly name.
       if (raw.length() > 0) sWizard.result.espnowFriendlyName = raw;
-      else                  sWizard.result.espnowFriendlyName = gSettings.espnowDeviceName.length() > 0
-                                                                ? gSettings.espnowDeviceName : String("HardwareOne");
+      else                  sWizard.result.espnowFriendlyName = getWizardDraftValues().deviceName.length() > 0
+                                                                ? getWizardDraftValues().deviceName : String("HardwareOne");
       sWizard.subMode = WizardSubMode::ESPNOW_ROOM;
       appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
 
     case WizardSubMode::ESPNOW_ROOM:
       if (isBack) { sWizard.subMode = WizardSubMode::ESPNOW_NAME; appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
-      if (isNext) { applyAndAdvance(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
+      if (isNext) {
+        stageAndAdvance();
+        appendPromptTo(out, outSize);
+        return sWizard.subMode == WizardSubMode::DONE ? CLI_MODE_HANDLED_AND_EXIT : CLI_MODE_HANDLED;
+      }
       sWizard.result.espnowRoom = raw;
       sWizard.subMode = WizardSubMode::ESPNOW_ZONE;
       appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
 
     case WizardSubMode::ESPNOW_ZONE:
       if (isBack) { sWizard.subMode = WizardSubMode::ESPNOW_ROOM; appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
-      if (isNext) { applyAndAdvance(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
+      if (isNext) {
+        stageAndAdvance();
+        appendPromptTo(out, outSize);
+        return sWizard.subMode == WizardSubMode::DONE ? CLI_MODE_HANDLED_AND_EXIT : CLI_MODE_HANDLED;
+      }
       sWizard.result.espnowZone = raw;
       sWizard.subMode = WizardSubMode::ESPNOW_STATIONARY;
       appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
 
     case WizardSubMode::ESPNOW_STATIONARY:
       if (isBack) { sWizard.subMode = WizardSubMode::ESPNOW_ZONE; appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
-      sWizard.result.espnowStationary = (lc == "s" || lc == "stationary");
-      applyAndAdvance();
+      if (raw.length() > 0) sWizard.result.espnowStationary = (lc == "s" || lc == "stationary");
+      stageAndAdvance();
       appendPromptTo(out, outSize);
       return (sWizard.subMode == WizardSubMode::DONE) ? CLI_MODE_HANDLED_AND_EXIT
                                                        : CLI_MODE_HANDLED;
@@ -592,13 +613,17 @@ static CLIModeInputResult dispatchMQTT(const String& line,
   };
   auto goNextPage = [&]() {
     if (!wizardNextPage(sWizard.result)) {
-      sWizard.result.completed = true;
+      sWizard.subMode = WizardSubMode::DONE;
+    } else {
+      sWizard.subMode = subModeForPage(getWizardCurrentPage());
     }
-    sWizard.subMode = subModeForPage(getWizardCurrentPage());
   };
-  auto applyAndAdvance = [&]() {
-    wizardApplyMQTTSettings(sWizard.result);
-    broadcastOutput("MQTT broker configured.");
+  auto stageAndAdvance = [&]() {
+    if (!wizardStageMQTTSettings(sWizard.result)) {
+      snprintf(out, outSize, "Error: MQTT choices could not be staged. Try again or cancel.");
+      return;
+    }
+    broadcastOutput("MQTT broker staged.");
     goNextPage();
   };
 
@@ -606,13 +631,18 @@ static CLIModeInputResult dispatchMQTT(const String& line,
     case WizardSubMode::MQTT_INTRO:
       if (isBack) { goBack(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
       if (lc == "c" || lc == "configure") {
+        sWizard.result.mqttHost = "";
+        sWizard.result.mqttPort = 0;
+        sWizard.result.mqttUser = "";
+        sWizard.result.mqttPassword = "";
         sWizard.subMode = WizardSubMode::MQTT_HOST;
         broadcastOutput("----------------------------------------");
-        broadcastOutput("Enter MQTT broker fields. 'n' skips, 'b' goes back.");
+        broadcastOutput("Enter MQTT broker fields. Blank keeps the current value; 'n' finishes, 'b' goes back.");
         broadcastOutput("----------------------------------------");
         appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
       }
-      // skip
+      // Skipping broker configuration also leaves auto-start disabled.
+      wizardSetMQTTAutoStart(false);
       goNextPage();
       appendPromptTo(out, outSize);
       return (sWizard.subMode == WizardSubMode::DONE) ? CLI_MODE_HANDLED_AND_EXIT
@@ -620,22 +650,37 @@ static CLIModeInputResult dispatchMQTT(const String& line,
 
     case WizardSubMode::MQTT_HOST:
       if (isBack) { goBack(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
-      if (isNext) { applyAndAdvance(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
+      if (isNext) {
+        stageAndAdvance();
+        appendPromptTo(out, outSize);
+        return sWizard.subMode == WizardSubMode::DONE ? CLI_MODE_HANDLED_AND_EXIT : CLI_MODE_HANDLED;
+      }
       sWizard.result.mqttHost = raw;
       sWizard.subMode = WizardSubMode::MQTT_PORT;
       appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
 
     case WizardSubMode::MQTT_PORT:
       if (isBack) { sWizard.subMode = WizardSubMode::MQTT_HOST; appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
-      if (isNext) { applyAndAdvance(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
-      if (raw.length() == 0) sWizard.result.mqttPort = 1883;
-      else                   sWizard.result.mqttPort = raw.toInt();
+      if (isNext) {
+        stageAndAdvance();
+        appendPromptTo(out, outSize);
+        return sWizard.subMode == WizardSubMode::DONE ? CLI_MODE_HANDLED_AND_EXIT : CLI_MODE_HANDLED;
+      }
+      if (!wizardParseMQTTPort(raw, sWizard.result.mqttPort)) {
+        snprintf(out, outSize, "Error: MQTT port must be 1..65535, or blank to keep it.");
+        appendPromptTo(out, outSize);
+        return CLI_MODE_HANDLED;
+      }
       sWizard.subMode = WizardSubMode::MQTT_USER;
       appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
 
     case WizardSubMode::MQTT_USER:
       if (isBack) { sWizard.subMode = WizardSubMode::MQTT_PORT; appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
-      if (isNext) { applyAndAdvance(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
+      if (isNext) {
+        stageAndAdvance();
+        appendPromptTo(out, outSize);
+        return sWizard.subMode == WizardSubMode::DONE ? CLI_MODE_HANDLED_AND_EXIT : CLI_MODE_HANDLED;
+      }
       sWizard.result.mqttUser = raw;
       sWizard.subMode = WizardSubMode::MQTT_PASS;
       appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
@@ -643,7 +688,7 @@ static CLIModeInputResult dispatchMQTT(const String& line,
     case WizardSubMode::MQTT_PASS:
       if (isBack) { sWizard.subMode = WizardSubMode::MQTT_USER; appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
       sWizard.result.mqttPassword = raw;
-      applyAndAdvance();
+      stageAndAdvance();
       appendPromptTo(out, outSize);
       return (sWizard.subMode == WizardSubMode::DONE) ? CLI_MODE_HANDLED_AND_EXIT
                                                        : CLI_MODE_HANDLED;
@@ -659,12 +704,24 @@ static CLIModeInputResult dispatchWiFi(const String& line,
                                        char* out, size_t outSize) {
   String raw = line; raw.trim();
   String lc = raw; lc.toLowerCase();
+  auto advance = [&]() {
+    clearWizardWifiChoices();
+    sWizard.wifiPendingSsid = "";
+    if (!wizardNextPage(sWizard.result)) {
+      sWizard.subMode = WizardSubMode::DONE;
+      return CLI_MODE_HANDLED_AND_EXIT;
+    }
+    sWizard.subMode = subModeForPage(getWizardCurrentPage());
+    appendPromptTo(out, outSize);
+    return CLI_MODE_HANDLED;
+  };
 
   switch (sWizard.subMode) {
     case WizardSubMode::WIFI_SSID: {
 #if ENABLE_WIFI
       if (lc == "b" || lc == "back") {
         clearWizardWifiChoices();
+        sWizard.wifiPendingSsid = "";
         wizardPrevPage();
         sWizard.subMode = subModeForPage(getWizardCurrentPage());
         appendPromptTo(out, outSize);
@@ -676,10 +733,11 @@ static CLIModeInputResult dispatchWiFi(const String& line,
         return CLI_MODE_HANDLED;
       }
       if (lc == "skip" || raw.length() == 0) {
-        clearWizardWifiChoices();
-        sWizard.result.completed = true;
+        sWizard.result.wifiConfigured = false;
+        sWizard.result.wifiSSID = "";
+        sWizard.result.wifiPassword = "";
         snprintf(out, outSize, "WiFi configuration skipped.");
-        return CLI_MODE_HANDLED_AND_EXIT;
+        return advance();
       }
       // Bare in-range integer -> Nth NAMED network; digit-leading SSIDs
       // (e.g. "2WIRE123") fall through to typed-SSID handling.
@@ -708,13 +766,13 @@ static CLIModeInputResult dispatchWiFi(const String& line,
       return CLI_MODE_HANDLED;
 #else
       snprintf(out, outSize, "WiFi not compiled in this build.");
-      sWizard.result.completed = true;
-      return CLI_MODE_HANDLED_AND_EXIT;
+      return advance();
 #endif
     }
 
     case WizardSubMode::WIFI_PASSWORD: {
       if (lc == "b" || lc == "back") {
+        sWizard.wifiPendingSsid = "";
         sWizard.subMode = WizardSubMode::WIFI_SSID;
         appendPromptTo(out, outSize);
         return CLI_MODE_HANDLED;
@@ -722,10 +780,9 @@ static CLIModeInputResult dispatchWiFi(const String& line,
       sWizard.result.wifiSSID       = sWizard.wifiPendingSsid;
       sWizard.result.wifiPassword   = raw;
       sWizard.result.wifiConfigured = true;
-      sWizard.result.completed      = true;
       snprintf(out, outSize, "WiFi credentials captured for '%s'.",
                sWizard.wifiPendingSsid.c_str());
-      return CLI_MODE_HANDLED_AND_EXIT;
+      return advance();
     }
 
     default: break;
@@ -739,29 +796,17 @@ static CLIModeInputResult dispatchWiFi(const String& line,
 // ============================================================================
 
 static void wizardMode_onEnter(void* /*ud*/) {
+  // CLIMode owns inactivity/session expiry; reset the blocking input escape.
+  setSerialWaitTimeout(0);
   // Reset the wizard's state (existing initSetupWizard rebuilds the
   // features list etc.).
   initSetupWizard();
 
-  // Sync timezone selection from current settings (same as runSetupWizard).
-  const TimezoneEntry* tzList = getTimezones();
-  size_t tzCount = getTimezoneCount();
-  for (size_t i = 0; i < tzCount; i++) {
-    if (tzList[i].offsetMinutes == gSettings.tzOffsetMinutes) {
-      setWizardTimezoneSelection(i);
-      break;
-    }
-  }
-
-  // Reset our own state
-  sWizard.subMode           = WizardSubMode::PAGE_FEATURES;
-  sWizard.result            = SetupWizardResult();
-  sWizard.result.completed  = false;
-  sWizard.result.deviceName = "HardwareOne";
-  sWizard.result.timezoneOffset = -240;
-  sWizard.result.timezoneAbbrev = "EDT";
+  // Page scratch is separate from the shared draft initialized above.
+  sWizard.subMode = subModeForPage(getWizardCurrentPage());
+  sWizard.result = SetupWizardResult{};
   clearWizardWifiChoices();
-  sWizard.wifiPendingSsid   = "";
+  sWizard.wifiPendingSsid = "";
   sWizard.espnowConfiguring = false;
 
 #if ENABLE_OLED_DISPLAY
@@ -782,24 +827,27 @@ static void wizardMode_onEnter(void* /*ud*/) {
 static void wizardMode_onExit(void* /*ud*/) {
   // onExit also covers timeout/session-owner loss and cliExitMode().
   clearWizardWifiChoices();
+  bool applied = false;
+  if (!cliModeExitCanComplete() || isWizardCancelRequested()) {
+    sWizard.result.completed = false;
+  }
   if (sWizard.result.completed) {
-    // Apply collected results (mirrors what runAndApplyFeatureWizard does
-    // after runSetupWizard returns).
-    broadcastOutput("");
-    broadcastOutput("Feature configuration complete.");
-    broadcastOutput(String("Timezone: ") + sWizard.result.timezoneAbbrev);
-
-    // Push timezone / log level / NTP / LED / device name into gSettings.
-    // wizardFinalize is the shared helper used by the legacy wizard too;
-    // it reads from the wizard-state singletons (timezoneSelection, etc.)
-    // and writes to gSettings.
-    wizardFinalize(sWizard.result);
-
-    wizardSaveAndApplySettings(sWizard.result);
+    applied = wizardSaveAndApplySettings(sWizard.result);
+    if (applied) {
+      broadcastOutput("");
+      broadcastOutput("Feature configuration complete.");
+      broadcastOutput(String("Timezone: ") + sWizard.result.timezoneAbbrev);
+    }
   } else {
     broadcastOutput("Feature setup cancelled. No changes saved.");
   }
-  DEBUGF(DEBUG_CLI, "[wizardMode] exited (completed=%d)", sWizard.result.completed ? 1 : 0);
+  discardSetupWizard();
+  setSerialWaitTimeout(0);
+  sWizard.wifiPendingSsid = "";
+  sWizard.result = SetupWizardResult{};
+  sWizard.espnowConfiguring = false;
+  sWizard.subMode = WizardSubMode::DONE;
+  DEBUGF(DEBUG_CLI, "[wizardMode] exited (applied=%d)", applied ? 1 : 0);
 }
 
 // Periodic tick — called from HardwareOne.cpp loop() every iteration
@@ -814,6 +862,7 @@ static void wizardMode_onExit(void* /*ud*/) {
 // (sLastButtons, sLastRendered, ...) is declared at the top of the
 // file alongside sWizard so onEnter can reset it.
 static void wizardMode_onTick(void* /*ud*/) {
+  if (isWizardCancelRequested()) { sWizard.result.completed = false; cliExitMode(); return; }
 #if ENABLE_OLED_DISPLAY
   if (!oledDisplay || !oledConnected) return;
 
@@ -830,19 +879,9 @@ static void wizardMode_onTick(void* /*ud*/) {
       // on the top-level pages -- sub-pages (ESPNOW / MQTT / WiFi) require
       // text entry which the joystick cannot provide.
       switch (sWizard.subMode) {
-        case WizardSubMode::PAGE_FEATURES:
-          handleFeaturesInput(newButtons, nav);
-          break;
-        case WizardSubMode::PAGE_SENSORS:
-          handleSensorsInput(newButtons, nav);
-          break;
-        case WizardSubMode::PAGE_NETWORK:
-          handleNetworkInput(newButtons, nav);
-          break;
-        case WizardSubMode::PAGE_SYSTEM:
-          if (!handleSystemInput(newButtons, nav, sWizard.result)) {
-            // System page returns false to signal "user finished"
-            sWizard.result.completed = true;
+        case WizardSubMode::PAGE_GROUP:
+          handleWizardPageInput(newButtons, nav, sWizard.result);
+          if (sWizard.result.completed && !isWizardCancelRequested()) {
             cliExitMode();
             return;
           }
@@ -856,14 +895,17 @@ static void wizardMode_onTick(void* /*ud*/) {
             if (sWizard.subMode == WizardSubMode::WIFI_SSID ||
                 sWizard.subMode == WizardSubMode::WIFI_PASSWORD) {
               clearWizardWifiChoices();
+              sWizard.wifiPendingSsid = "";
             }
             wizardPrevPage();
             sWizard.subMode = subModeForPage(getWizardCurrentPage());
           }
           break;
       }
-      // Sync our sub-mode to whatever wizardNextPage/Prev changed under us.
+      if (isWizardCancelRequested()) { sWizard.result.completed = false; cliExitMode(); return; }
+      // Sync page navigation and repaint values changed without moving a row.
       sWizard.subMode = subModeForPage(getWizardCurrentPage());
+      sLastRendered = WIZARD_PAGE_COUNT;
     }
   }
 
@@ -871,13 +913,7 @@ static void wizardMode_onTick(void* /*ud*/) {
   SetupWizardPage curPage = getWizardCurrentPage();
   int curSel = getWizardCurrentSelection();
   if (curPage != sLastRendered || curSel != sLastRenderedSel) {
-    switch (sWizard.subMode) {
-      case WizardSubMode::PAGE_FEATURES: renderFeaturesPage(); break;
-      case WizardSubMode::PAGE_SENSORS:  renderSensorsPage();  break;
-      case WizardSubMode::PAGE_NETWORK:  renderNetworkPage();  break;
-      case WizardSubMode::PAGE_SYSTEM:   renderSystemPage();   break;
-      default: break;  // sub-page screens are text-based on serial
-    }
+    if (sWizard.subMode == WizardSubMode::PAGE_GROUP) renderWizardPage();
     sLastRendered    = curPage;
     sLastRenderedSel = curSel;
   }

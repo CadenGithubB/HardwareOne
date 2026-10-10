@@ -1,18 +1,104 @@
 # Code simplification plan
 
 Status: incremental implementation started, 2026-10-08; latest focused work
-2026-10-09. The sequence below describes planned work; completion records at the
+2026-10-10. The sequence below describes planned work; completion records at the
 end describe each implemented slice. The shared
 [development guidelines](../CONTRIBUTING.md) remain the source of coding rules.
 
-**Latest completed milestone: shared Map live recording.**
+**Release direction, 2026-10-10:** `0.99.97.x` is the cleanup and unification
+series, focused on long-term readability and editability. `0.99.97.1` was the
+first checkpoint; `0.99.97.2` checkpoints the follow-on work through shared
+setup menu organization. Subsequent milestones follow
+the [cleanup-series guidance](../CONTRIBUTING.md#the-09997x-cleanup-series), with
+a bounded scope and an explicit completion condition for each change.
+
+**Latest code milestone: shared setup menu organization.**
+
+Advanced setup groups compiled options under Connections, Display & Controls,
+Sensors and System. Registry rows are sorted by name, companion settings stay
+beside their parent, and serial/local-display adapters share the rows, values,
+actions and page order. Startup settings explicitly show boot behavior. The
+opening Basic/Advanced/Import menu also shares its labels and availability.
+
+**Previous milestone: shared initial-admin creation.**
+
+Basic/Advanced and post-restore setup now use one account-creation operation.
+It checks credential and user-record preparation, saves credentials before the
+user index, and reports success only after both writes succeed. Basic/Advanced
+setup returns to its menu on failure instead of declaring setup complete.
+
+**Previous milestone: shared wizard draft and completion.**
+
+On-device serial and local-display setup now edit one private draft. Page
+visibility, feature/mode selections and estimates read those choices; Finish
+is the only point that publishes edited settings and applies live effects.
+Cancel, timeout and session loss discard the draft. P4 already initializes
+its LCD and GPIO controls before first-time setup and uses this same interface.
+
+**Previous milestone: shared runtime setting mutation.**
+
+Generic setting commands and feature toggles now use the existing `setSetting`
+path for changed values, persistence requests and notifications. Generic numeric
+and boolean inputs are validated completely before mutation. Existing service
+actions, authorization and owner-scoped save batching retain their contracts.
+The wizard milestone builds on that path; neither slice adds a new build-flag
+owner or changes the host configuration tool's role.
+
+**Previous milestone: automation scheduler ownership.**
+
+`System_Automation` now owns the main-loop scheduling decision and cache
+lifetime. Consumers use operations instead of exported running/dirty state.
+Cache reads, publication and release share a short lock; pending changes and
+event hints are atomic. External rule-file saves always request a refresh.
+The completion record below covers this slice and the combined regression run
+for the recent Wi-Fi, Map snapshot and automation logging changes.
+
+**Previous milestone: automation logging ownership.**
+
+Automation log state, captured writer identity, start/stop and checked appends
+now live together in `System_Automation`. Command execution keeps its redaction
+hooks and calls the owner's small interface. Session changes and file writes
+are serialized; status reads use a short state lock. The completion record
+below distinguishes executable host checks and firmware builds from hardware
+qualification.
+
+**Previous milestone: consistent GPS track reads.**
+
+`GPSTrackManager` owns track synchronization and returns copied status or owned
+point snapshots. OLED, web, CLI, saving and rendering no longer borrow its
+replaceable buffer. Loads publish a complete result; failed or rejected loads
+retain the previous track. The completion record below separates host/build
+verification from hardware qualification.
+
+**Previous milestone: saved Wi-Fi module layout.**
+
+The saved-network owner and its public/internal interfaces now live together in
+[`network/wifi`](../components/hardwareone/network/wifi/README.md). That module
+map identifies the radio, settings, setup, boot and UI integration points. The
+three relocated files are byte-for-byte unchanged; production includes, the
+explicit CMake entry and affected host harness paths use the new location.
+Nine focused suites and QT Py/XIAO builds passed. No forwarding files, extra
+include directories or new IDF components were introduced.
+
+This completes the original first round's implementation criteria: shared setup
+operations, focused utility owners, saved Wi-Fi state ownership, one reduced
+build-rule family and a proven module layout. It does not mean every subsystem
+has migrated or every hardware combination is qualified. Work continues in
+bounded packages. Remaining build-rule duplication and other service owners
+are separate candidates beyond the completed automation and track owners.
+
+**Previous milestone: shared Map live recording.**
 
 OLED and web now submit one authorized Map recording command. The existing
 Maps owner checks GPS/logger outcomes, preserves an imported track on startup
 failure, and records the logger session it started. Stopping Maps cannot stop
 a replacement capture at the same filename. The logger's shared startup and
 settings ownership remain the foundation. Dated records below distinguish
-host/build verification from device qualification. Memory slimming and
+host/build verification from device qualification. The checkpoint Map image
+subsequently passed 33 command/lifecycle checks on the QT Py; settings were
+restored. [The hardware record](LOGGER_TEST.md#map-live-recording--2026-10-10)
+describes the no-fix GPS condition and remaining UI/coordinate limits.
+Memory slimming and
 qualification of simultaneous BLE/ESP-NOW operation are separate future work;
 these radios can be tested separately for now. SD work is deferred.
 
@@ -2606,3 +2692,619 @@ Evidence is in the private Map live-recording evidence archive, including
 `host-tests.log`, `publication-mutation-check.log`, `build-results.json` and
 `configuration-checks.json`. Each build's `map-live-test-status.json` identifies
 its new artifacts separately from older hardware qualification.
+
+**Implementation record — 2026-10-10, step 6: saved Wi-Fi module layout.**
+
+Moved `System_WiFiNetworks.cpp`, `System_WiFiNetworks.h` and
+`System_WiFiNetworksInternal.h` into `components/hardwareone/network/wifi/`.
+All three files are byte-identical to the checkpoint versions. External
+callers use the qualified include path; module-local sibling includes remain
+unchanged. The existing component CMake list names the new source explicitly,
+following its established nested-source pattern. No behavior, feature choice,
+settings schema, command, API signature or ownership policy changed.
+
+The directory README maps list edits, UI snapshots, radio connection copies,
+settings serialization, setup acceptance and boot initialization to their
+existing owners. Shared screens, radio control and persistence policy stay in
+their existing files. Tests remain in the common host suite and copy the nested
+layout when executing the owner, so they exercise the actual include boundary.
+
+Verification:
+
+- Nine existing focused suites passed: `wifi_networks`,
+  `wifi_network_consumers`, `wifi_saved_ui`, `setup_completion`,
+  `network_build_selection`, `saved_build_config`, `build_config_workflow`,
+  `build_config_wizard` and `settings_downstream_persistence_contract`.
+- Executable owner/UI/setup tests used ASan/UBSan. Wi-Fi-enabled and disabled
+  interfaces ran; build selection checked 14 inputs in both early discovery
+  and configured phases, with exactly one relocated source and no old path.
+- `qtpy-maps-test` built at 3,702,576 bytes, leaving 2,281,680 bytes free.
+  `xiao-default` built at 5,878,384 bytes, leaving 105,872 bytes free.
+  Both sizes match the checkpoint builds, and each compile database contains
+  one owner at its new path with a compiled object.
+- Build/profile/dependency selections remain unchanged. File hashes, local
+  documentation links and whitespace checks passed. Independent review found
+  no missed production callers or affected registry-discovery tools.
+
+These relocated-source builds were not flashed. Hardware validation of the
+previous Map milestone uses the preserved checkpoint image and is recorded
+separately. This relocation establishes a readable source layout, not new
+Wi-Fi connection or persistence behavior.
+
+## Completed: consistent GPS track reads (2026-10-10)
+
+The audit found that OLED status, web responses, validation, saving and rendering
+read the track through separate getters or borrowed pointers. Loading/clearing
+could free that buffer while a reader still used it; live GPS appends could
+change the count and statistics partway through a response. Existing sensor
+snapshots and the private Wi-Fi owner mutex provided the local patterns to reuse.
+
+`GPSTrackManager` now returns a value status or an owned point snapshot. A
+snapshot captures points and metadata under one private state mutex, then
+releases it before rendering, sending HTTP chunks or writing a file. Live web
+responses still include the newest 500 points while reporting the full count.
+Save responses report the saved copy's count. Validation messages are returned
+by value, removing another mutable shared buffer.
+
+A separate lifecycle try-lock refuses overlapping/reentrant start, stop, load,
+clear and delete operations without waiting while another task owns a map or
+filesystem lock. GPS append uses the state mutex. Map bounds are copied under
+the existing map guard before track state is locked; logger commands and file
+operations run outside the state lock. This is private owner synchronization,
+not a new shared synchronization framework.
+
+Loads parse privately and publish once, returning that same result to the
+caller. CLI/OLED request metadata only; HTTP requests owned points. Bounds
+rejection stays inside the load operation, removing the caller's unsafe
+load/validate/clear sequence. Intentional behavior improvement: missing,
+invalid, allocation-failed or out-of-bounds rejected loads preserve the previous
+track. OLED reports rejected loads and failed saves; web save errors no longer
+claim an empty track when copying or opening the file failed. Commands, authorization,
+logging preferences, GPS startup and logger session ownership remain unchanged.
+
+Verification:
+
+- Ten registered suites passed: `map_live_tracking`, `map_live_ui`,
+  `map_live_browser`, `gps_snapshot`, `gpslog_start`, `sensorlog_settings`,
+  `sensorlog_selection`, `sensorlog_ui`, `command_ingress_guards` and
+  `settings_downstream_persistence_contract`. Compiled suites used ASan/UBSan
+  where supported; Map owner/UI run with GPS enabled and disabled.
+- ThreadSanitizer passed the production owner with GPS enabled and disabled.
+  Concurrent tests alternate loaded generations, clear while reading, and
+  append live points while reading. Removing the snapshot state lock in a
+  temporary generated unit caused race reports, confirming the test detects
+  that regression.
+- Controlled filesystem/render/HTTP/OLED callbacks replace or clear the owner
+  during output. Captured metadata, point arrays, validation and saved counts
+  remain consistent, with no track state lock held across those callbacks.
+- Allocation failures leave empty outputs and preserve the prior owner state.
+  A 10,001-point input caps at 10,000; full and 500-point tail copies allocate
+  exactly their required point storage and remain valid after owner clear.
+- All three saved profiles built and passed compiler-based feature checks:
+
+| Profile | Relevant selection | Image bytes | App headroom bytes |
+|---|---|---:|---:|
+| `qtpy-maps-test` | Maps, GPS, OLED and web | 3,705,600 | 2,278,656 |
+| `xiao-default` | Maps and web, GPS disabled | 5,880,800 | 103,456 |
+| `qtpy-logging-test` | GPS/OLED, Maps disabled | 3,492,192 | 2,492,064 |
+
+The current images were not flashed. These checks establish host concurrency,
+capacity correctness and firmware compatibility; they do not qualify physical
+GPS fixes, display appearance or device timing/allocation pressure with large
+tracks. A full snapshot can require about 120 KB of temporary point storage on
+the device; status reads allocate no point buffer. Map tile-cache/waypoint
+ownership, memory slimming and SD qualification remain separate work.
+
+Build sizes/hashes, configuration checks, sanitizer logs and the final CTest
+report are retained in the private Map snapshot evidence archive. Each build's
+`map-snapshot-test-status.json` explicitly records that its image was not flashed.
+
+## Completed: automation logging ownership (2026-10-10)
+
+The pre-change audit found logging state and start/stop in
+`System_Automation.cpp`, the writer in `System_Utils.cpp`, and mutable state
+exported through both headers and local extern declarations. Command execution
+read the active flag directly. Start published active state before its filename;
+the writer could observe a filename and captured identity from different
+sessions. Partial writes were accepted as successful, and stop ignored failure
+to write its final marker.
+
+The session, writer, status and lifecycle now live together in
+`System_Automation.cpp`. Its public interface exposes `automationLogActive()` as
+a formatting hint and `appendAutoLogEntry()` as the checked operation. Command
+execution keeps its existing post-authorization COMMAND/OUTPUT hooks, redaction,
+length limits and newline handling. The Automation header owns the declarations
+and explicit disabled-feature stubs; the old logging globals and Utils writer
+declaration/implementation are removed.
+
+Start/stop/append hold the existing filesystem guard throughout their operation,
+so replacing a session cannot change an in-flight write's identity or destination.
+A private state mutex only protects publication and status copies; it is released
+before file access. Status therefore remains available during a blocked write.
+The active hint is atomic, and append rechecks it after acquiring the filesystem
+lock. Existing callers that already hold the filesystem lock retain its normal
+reentrant guard behavior.
+
+Captured transport, user, path, IP and scope are preserved, including live user
+role checks at every guarded VFS operation. Request pointers and session tokens
+are discarded from the durable context. Failed owning-string copies, including
+scope copies, fail closed. The existing overflow resolver still chooses the
+destination; its output buffer now fits the full path plus an overflow prefix.
+
+Intentional behavior fixes:
+
+- A new session is published only after its complete LOG_START entry succeeds.
+  A failed replacement leaves the previous session active.
+- Appends follow the existing transcript writer's checked pattern: exact byte
+  count, flush, write-error flag and expected final size. A failed append may
+  leave a partial line; it does not truncate or replace previous log data.
+- Stop still deactivates if LOG_STOP writing fails, but returns an error that
+  explicitly says the final marker was not written. Missing filesystem lock
+  ownership leaves logging unchanged and reports that failure separately.
+
+Verification:
+
+- Seven registered suites passed: `automation_log`,
+  `automation_scheduler_contract`, `command_header_boundary`, `command_catalogue`,
+  `command_resolution_contract`, `command_ingress_guards` and
+  `checked_text_writes`. The separate STT privacy suite also passed.
+- The new suite executes the production owner, command parser, filesystem guard,
+  autolog command, output redactor and executor hooks under ASan/UBSan and
+  ThreadSanitizer. It covers allocation/copy failures, permission revocation,
+  partial/zero/error writes, flush/size failures, directories, missing storage,
+  long overflow paths, failed replacement and accurate stop responses.
+- Controlled overlapping append/replacement/stop operations and threaded stress
+  preserve identity/destination pairs. Status responds during blocked file I/O;
+  nested filesystem guards and unavailable-lock behavior are covered.
+- The actual automation-disabled public header compiles and links without
+  authentication, VFS or RTOS implementations.
+- QT Py and XIAO saved profiles built and passed compiler-based feature checks.
+  A temporary QT Py profile with `ENABLE_AUTOMATION=0` also built; its compile
+  database excludes `System_Automation.cpp` and its public API links through
+  explicit stubs. The temporary profile was archived privately and removed
+  from the saved configuration directory after verification.
+
+| Profile | Automation | Image bytes | App headroom bytes |
+|---|---|---:|---:|
+| `qtpy-maps-test` | Enabled | 3,706,528 | 2,277,728 |
+| `xiao-default` | Enabled | 5,882,128 | 102,128 |
+| Temporary QT Py disabled variant | Disabled | 3,620,304 | 2,363,952 |
+
+These are host logic checks with controlled storage and permission boundaries.
+They do not qualify physical flash durability or SD overflow hardware. Scheduler,
+trigger and condition-language behavior, board defaults and memory slimming are
+outside this package.
+
+No device was flashed. Build hashes, effective choices and test logs are in the
+private automation logging evidence archive. The per-build
+`automation-log-test-status.json` identifies these unflashed images separately
+from earlier hardware qualification.
+
+## Completed: automation scheduler ownership (2026-10-10)
+
+The main loop previously assembled the scheduler's dirty, due, event and safety
+checks from exported state. Command tasks could stop the scheduler and free its
+cache while the main task scanned or rebuilt it. A rebuild could also hide a
+concurrent invalidation. The shared file-save hook requested refresh only when
+duplicate-ID repair changed the uploaded rules.
+
+`System_Automation` now owns that coordination. The main task calls
+`automationTick()` while the existing enabled setting permits execution. Boot
+and RamFlush query `automationSchedulerRunning()`; start, stop and notification
+remain the other integration points. Due checks and full ticks are private.
+Unused memo arrays and their exported declarations are removed. Filesystem and
+web consumers include the owner header instead of handwritten declarations,
+including two declarations that incorrectly gave the atomic writer a void
+return type.
+
+A short private mutex protects cache allocation, scanning, publication and
+release. File reads, JSON deserialization and rule execution run outside it.
+Stop prevents new passes and frees the cache safely; an already claimed pass
+may finish dispatching, but cannot recreate a stopped cache. Stop does not
+cancel commands already queued. Pending refreshes and event hints are atomic;
+the main task consumes refresh only before a pass, preserving changes that
+arrive during its file read or publication. Unknown subscriptions wake
+conservatively until the cache is rebuilt. The 250 ms event limit, 60-second
+safety pass and existing condition backoff remain in the owner.
+
+Intentional fixes: successful owner writes and every matching external file
+save request refresh, even when duplicate repair makes no change. Failed owner
+writes leave the previous schedule intact. Cache release and rebuild are
+synchronized rather than relying on volatile state. Trigger syntax, condition
+evaluation, authorization, file formats and boot preferences are unchanged.
+Rule-store read/modify/write transactions remain outside this slice.
+
+Combined verification for this slice and the recent saved Wi-Fi layout, Map
+snapshots and automation logging work:
+
+- A fresh host build and all **137 registered CTest suites passed**, with
+  ASan/UBSan enabled and Node browser suites included. The initial pre-scheduler
+  run also passed all 136 then-registered suites.
+- Scheduler, automation logging and Map owner ThreadSanitizer runs passed;
+  Maps covered GPS enabled/disabled. The separate STT privacy sanitizer suite
+  passed as well.
+- Scheduler behavior tests execute the production lifecycle, cache parser and
+  polling decision, including missing/malformed files, allocation/write failure,
+  due/backoff timing, event subscriptions, timer wrap, concurrent notifications,
+  and stop/restart during an older blocked rebuild. The full rule executor is a
+  host boundary double, exercised separately on the device.
+- Negative controls confirmed the new tests detect both a lost refresh and an
+  unlocked cache data race. The actual disabled header compiles and links
+  without platform implementations.
+- All four firmware configurations built at `0.99.97.1`; compiler-resolved
+  flags and source selection matched their saved choices. The temporary
+  automation-disabled profile was removed after checking its exact archived
+  and generated configuration copies.
+
+| Profile | Relevant selection | Image bytes | App headroom bytes |
+|---|---|---:|---:|
+| `qtpy-maps-test` | Maps/GPS/automation enabled | 3,706,640 | 2,277,616 |
+| `xiao-default` | Maps/automation enabled, GPS disabled | 5,882,448 | 101,808 |
+| `qtpy-logging-test` | GPS/automation enabled, Maps disabled | 3,493,280 | 2,490,976 |
+| Temporary QT Py disabled variant | Automation disabled | 3,620,304 | 2,363,952 |
+
+Build hashes, effective configuration checks, sanitizer output and the final
+CTest report are retained in the private combined-cleanup evidence archive.
+Memory slimming and SD qualification remain deferred.
+
+The combined `qtpy-maps-test` application was then flashed without erasing
+storage or replacing the partition table. **45 device checks passed**, including
+delayed and event-triggered execution, queued command/output log entries, failed
+log-session replacement, final stop markers and repeated scheduler stop/start.
+A rule uploaded through `filewrite`, with no duplicate repair or subsequent
+automation edit, responded to a setting-change event before the safety interval.
+Map import/status, preservation after a failed load, live recording and shutdown,
+saved Wi-Fi listing and a valid indoor GPS driver sample also passed.
+
+Original automation rules were restored byte for byte; automation, GPS and
+logger preferences were checked against their pre-flash values. Temporary files
+were removed, both loggers stopped, the track cleared and GPS closed. OLED status
+reported a connected display on the authenticated main menu. The final crash
+record was empty and the serial port was released.
+
+The other three images were built but not flashed. This device pass used serial
+commands; it did not retest physical buttons, G2/R1, on-device HTTP routes or OLED
+appearance. Indoor GPS had no satellite fix, so coordinate accuracy and large
+track allocation pressure remain unqualified.
+
+## Completed: shared runtime setting mutation (2026-10-10)
+
+The generic settings handler and feature command previously assigned values and
+requested persistence independently of the existing typed `setSetting` helper.
+The generic handler also emitted its own setting events, saved unchanged values,
+accepted integer prefixes such as `32junk`, wrapped narrow integer overflow,
+and interpreted unknown boolean text as false. That made equivalent entry points
+behave differently and required separate maintenance of persistence and events.
+
+All three `setSetting` overloads now enter one completion function in
+`System_Settings`. The generic handler and feature toggles use those overloads.
+The owner requests persistence and publishes one setting event/repaint only
+when the value changes. Event formatting and secret masking share one function.
+Generic commands supply their descriptor to retain command-specific alias labels;
+ordinary typed setters continue to use the first registered row for that field.
+The notification buffer uses the existing event payload capacity.
+
+Generic commands validate the entire input before mutation: decimal integers
+must fit both their storage type and declared range, floats must be finite and
+in range, and booleans use the existing `parseBoolArg` tokens. Invalid input and
+read-only writes return an error without changing values, requesting a save or
+publishing a change. Strings retain the entire trimmed argument and reserve
+destination capacity before copying, preserving the old value on allocation
+failure. Empty input remains a query, including masked secret queries. Metadata
+options remain editor hints rather than a new validation rule.
+
+Compatibility boundaries were checked before consolidation:
+
+- Generic master-disable ordering remains value change, persistence request,
+  service stop, then setting event. Repeated `off` still requests service stop
+  without another save or setting event. Autostart preferences do not stop a
+  service. Dedicated commands retain their existing runtime actions.
+- Save failure leaves the accepted live value and existing retry intent intact.
+  The result remains accepted so sensor-logging and UART wrappers apply that
+  live value. Owner-scoped batches still coalesce only their own writes; unrelated
+  sessions and background work do not inherit a batch.
+- Feature toggles retain their compiled/toggleable checks and transition-only
+  feature events, while adding the shared setting notification. Extra arguments
+  and unterminated quoted toggle values are rejected. The listing's invalid enum
+  sentinel, exposed by UBSan during this work, was replaced with an integer.
+- Authorization and command routing are unchanged. Validate-only calls preserve
+  their existing early `VALID` response without parsing or mutation.
+
+This completes the ordinary mutation slice. Direct typed String callers retain
+their previous assignment behavior; allocation checks were added to the generic
+command path only. Wizard draft/apply/cancellation and broader service lifecycle
+unification remain separate work. Build flags, saved configuration selection,
+memory slimming and SD qualification are outside this package.
+
+Verification:
+
+- All **138 registered host CTest suites passed** in a fresh ASan/UBSan-enabled
+  build, including the Node browser suites. The final settings suite was rerun
+  after its last coverage additions and passed.
+- The new settings suite executes the production generic handler, mutators,
+  notification/completion functions, feature command, persistence adapter and
+  batch core. Its **1,032 checks** cover OLED enabled/disabled, storage-width
+  canaries, invalid/range input, aliases, secrets, no-ops, allocation failures,
+  owner/background batching, retained save retry and exact disable ordering.
+  Controlled registry, String, storage and service boundaries are host doubles.
+- Updated sensor logging, selection, GPS startup and MQTT command suites passed
+  with sanitizers; the persistence contract guard now checks the shared owner
+  instead of counting the removed duplicate writes. Independent review found
+  no blocking downstream issue.
+- QT Py Maps and XIAO default firmware built at `0.99.97.1`, with saved choices
+  confirmed by compiler-based checks. All 566 captured production/configuration
+  inputs remained stable through the builds. The changed Settings and Feature
+  Registry files emitted no compiler warnings.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `qtpy-maps-test` | 3,707,568 | 2,276,688 |
+| `xiao-default` | 5,884,016 | 100,240 |
+
+Neither image was flashed. This milestone has host and build verification, not
+new device qualification. The private settings-mutation evidence archive holds
+test logs, build hashes and effective choices; each build directory contains
+`settings-mutation-test-status.json` to distinguish it from previously flashed
+firmware.
+
+## Completed: shared wizard draft and completion (2026-10-10)
+
+Wizard controls previously pointed into live settings. Accepted MQTT/ESP-NOW
+pages and leaving the System page changed RAM before completion; cancellation
+only skipped the final file writes. The blocking dialog also finalized after
+cancellation, allowing timezone/name changes and HTTPS certificate generation.
+That made Cancel incomplete and tied each input adapter to setting ownership.
+
+`System_SetupWizard` now owns a bounded draft of wizard-editable choices, their
+starting values and the existing registry bindings. Feature/network rows and
+mode selectors bind to draft values. Visibility and the heap estimate read the
+same draft. Serial, CLI mode and OLED adapters stage accepted page patches;
+backing out of a partially entered page does not publish its scratch values.
+Reopening a page uses the accepted draft. Reopening the wizard captures current
+settings afresh. The whole `Settings` object is never copied or restored.
+
+`wizardSaveAndApplySettings` is the only completion boundary. It checks completion
+and cancellation, collects final system choices, validates them and reserves all
+edited String destinations before publishing any value. It applies only fields
+that differ from their starting draft, using the existing `setSetting` and debug
+setting paths. Unedited settings changed through another interface survive.
+The old live page-application helpers and separate finalizer are removed.
+
+A short `SettingsWriteScope` groups persistence requests during Apply using the
+existing batch core and flush/retry adapter. It is task-local, uses no allocation,
+leaves existing command batches intact, and supports nested synchronous scopes.
+It uses the previously unused FreeRTOS TLS slot 3; configurations with too few
+slots refuse the scope before mutation. It is never held during human input.
+After its flush, completion applies runtime settings, refreshes NTP when connected
+and generates an HTTPS certificate if selected. A failed file save leaves the
+accepted RAM state with pending retry and reports a warning; main/debug/Wi-Fi
+storage is not an all-or-nothing transaction.
+
+Cancel, timeout and CLI session loss discard draft and scratch credentials.
+Blocking serial input accepts `cancel`, including inside mode and text pages;
+mode pickers now honor timeout. Local display Back returns through the pages,
+and Back on the first page cancels. Keyboard and Wi-Fi selection loops recognize
+wizard cancellation and release their UI/scan state. Their extra cancellation
+handling is gated to feature-wizard ownership, preserving account/Basic/Import
+setup behavior. The CLI mode keeps its existing exact-session authorization and
+its own inactivity policy. Its exit callback now revalidates that owner and the
+idle deadline before accepting a completed draft. This closes the gap where a
+session could disappear after the final input or while a physical Finish was
+waiting for the executor. Accepted work may finish after a later disconnect.
+
+Intentional adjacent fixes:
+
+- The CLI device-name detour now respects the 19-character plus NUL buffer.
+- Unhandled System-page buttons no longer count as Finish; only the shared
+  completion state does.
+- MQTT ports require a whole decimal in 1..65535; blank retains the draft port.
+  Blank credentials retain existing values, matching their documented patch
+  semantics. Skipping MQTT disables its draft auto-start in all adapters.
+- A blank stationary choice retains its displayed value. Unchanged custom NTP,
+  timezone and LED values are preserved rather than replaced by preset defaults.
+- OLED System rows use the shared item mapping instead of separately deriving
+  visibility from live settings. Feature toggle indexes are checked before use.
+
+P4 reuse was traced through the board definitions, build rules, display HAL and
+boot path. The SPI LCD already exposes the same 128x64 canvas, scaled onto its
+240x240 panel. The build enables the shared display UI independently of I2C;
+boot initializes that display and GPIO wheel/buttons before first-time setup.
+The draft and adapters therefore cover P4 without a second wizard or startup
+special case. Display layout redesign is separate from this milestone.
+
+Basic/Import setup, archetype seeding, account creation, host build configuration,
+board defaults, memory slimming and SD qualification remain outside this slice.
+Input adapters retain their existing Arduino String allocation behavior; the
+draft's checked copies and commit preflight do not claim to qualify every input
+allocation or physical flash durability.
+
+Verification:
+
+- All **142 registered host suites passed** with ASan/UBSan enabled and the
+  Node browser suites included: the bulk run passed 141/141, followed by the
+  newly registered CLI completion-owner suite. No production source changed
+  between those runs.
+- The real draft/completion owner passed **321 checks** across minimal/full
+  feature builds. Completion adapters passed **252 checks** across Wi-Fi
+  enabled/disabled builds, including completed drafts refused after session
+  loss. MQTT/ESP-NOW adapter tests verify staging without live writes.
+- Display cancellation passed all four Wi-Fi on/off and GPIO/gamepad variants,
+  executing the actual keyboard, Wi-Fi picker and button/tick paths. The full
+  CLI mode implementation passed nine lifecycle scenarios covering serial and
+  deferred display Finish, expired/replaced sessions, idle expiry and executor
+  ownership. Rendering, input delivery and session/platform services remain
+  controlled host boundaries.
+- The real settings scope/batch adapter passed **192 checks**, including TLS
+  refusal, nesting, other tasks, outer command ownership, save failures and
+  retry. Its concurrent host cases also passed ThreadSanitizer.
+- QT Py Maps, XIAO default and P4 board-default firmware all built at
+  `0.99.97.1`, including the final session-loss guard. The P4 build used the
+  existing SDK preparation script and a temporary saved profile with no feature
+  overrides; no feature was removed to fit the image. All 588 captured production
+  and configuration inputs remained unchanged across the final builds. Compiler
+  checks confirmed P4 display type 4, input type 3, shared display UI and GPIO
+  controls enabled, with I2C disabled. The temporary profile was archived and
+  removed after matching it to the build snapshot.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `qtpy-maps-test` | 3,716,128 | 2,268,128 |
+| `xiao-default` | 5,895,472 | 88,784 |
+| P4 X Eye board defaults | 6,502,064 | 923,984 |
+
+No image was flashed. This milestone has host and build verification; physical
+P4 first-time setup and display/input behavior remain unqualified. The private
+wizard-draft evidence archive holds test/build logs, saved build inputs and
+binary/source hashes; build-local status records distinguish these images from
+previously flashed firmware.
+
+## Completed: shared initial-admin creation (2026-10-10)
+
+Basic/Advanced setup duplicated the initial-account JSON, password storage and
+publication logic already used after a partial restore. The restore caller
+checked failure, while the normal path logged failed writes and continued into
+`SETUP_FINISHED`, `SETUP_NOT_NEEDED` and its success message.
+
+The existing private `createInitialAdminUser` in `System_FirstTimeSetup` now
+serves both callers and is available when migration support is disabled. The
+normal path returns to its existing setup menu on failure, before automation
+initialization, completion markers, final settings application, Wi-Fi connection
+or reboot. Previously accepted feature settings remain in place on retry.
+
+One implementation now owns the account's existing ID, owner role, creation
+metadata, password/theme file and `nextId`. Empty credentials or a failed hash
+are rejected. The user-index document must fit and serialize completely before
+any file write. `saveUserSettings` retains responsibility for checked credential
+storage; only its success permits atomic publication of `users.json`. A failed
+publication leaves an orphan credential file that the next attempt can replace.
+Boot still detects first-time setup from the absence of the user index.
+
+NVS boot-counter synchronization and pending timestamp resolution remain after
+successful publication. Account formats, hashing policy, theme choices and
+restore behavior are preserved. No new public API, module or transaction layer
+was added. Archetype seeding, earlier feature configuration and general user
+creation/approval flows remain separate work.
+
+Verification:
+
+- **Nine focused CTest suites passed** with ASan/UBSan enabled: the new
+  initial-admin suite plus existing wizard, display-cancel, CLI owner, user
+  settings, Wi-Fi consumer, persistence and network-build checks.
+- The new suite passed **2,318 checks** across migration and OLED enabled/disabled
+  combinations. It executes the actual shared helper, full post-restore
+  credential flow and normal setup's contiguous save-through-success tail,
+  using vendored ArduinoJson. Hashing, allocation/String faults, file APIs,
+  earlier input collection and reboot are controlled boundaries. It checks
+  failure, retry, account fields/theme, publication order and skipped success
+  effects; it does not simulate physical power loss.
+- QT Py Maps, XIAO default and P4 board-default firmware built successfully at
+  `0.99.97.1`. All 588 captured production/configuration inputs stayed unchanged.
+  These linked profiles enable migration; three additional checks compiled the
+  actual setup translation unit with migration explicitly disabled under each
+  board's real toolchain. Those checks are standalone objects, not additional
+  linked firmware images.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `qtpy-maps-test` | 3,715,392 | 2,268,864 |
+| `xiao-default` | 5,891,488 | 92,768 |
+| P4 X Eye board defaults | 6,500,768 | 925,280 |
+
+The temporary P4 profile was removed after comparison with its archived build
+inputs. Independent source review found no additional issue. No image was
+flashed and no device account was changed. The private initial-admin evidence
+archive contains test/build logs, effective choices and source/binary hashes;
+build-local status files identify these unflashed images.
+
+## Completed: shared setup menu organization (2026-10-10)
+
+The setup wizard previously put display controls on its Sensors page, sensor
+startup flags on Network, and general system features beside connectivity.
+Serial and display maintained separate row/action mappings; the I2C registry
+entry was omitted, and the opening menu used different Import availability
+rules in its two adapters.
+
+`System_SetupWizard` now builds four groups from the existing feature registry:
+Connections, Display & Controls, Sensors and System. Registry rows are sorted
+by their displayed names; Wi-Fi auto-connect, ESP-NOW mesh, MQTT auto-start and
+LED effect stay beside their parent feature. Only compiled features with a
+mutable setting become controls. I2C and input are grouped with the local UI
+without changing their global registry categories. Empty groups are skipped.
+
+One row type, formatter and activation operation replace the separate feature,
+network and system models. Both serial engines and the OLED/P4 adapter use
+these rows and the shared page order. Values distinguish ordinary On/Off from
+Boot on/off; Edge Impulse retains enablement semantics despite its sensor
+category. Menu capacity failures invalidate the draft and report an error
+instead of silently hiding settings. The existing heap estimate remains.
+
+Connection detail pages now precede Display & Controls, Sensors and System.
+Wi-Fi acceptance or Skip advances through the remaining pages, rather than
+completing setup early. Back preserves an accepted network choice; explicit
+Skip clears the pending credentials without deleting saved networks. First-page
+Back cancels even when earlier groups are absent. Finish remains the existing
+shared commit boundary, and adapters no longer override the core's completion
+result.
+
+Device Name is available under System even when ESP-NOW is compiled. Both entry
+points share the accepted name draft, including Back, revisiting ESP-NOW and
+reverting an edit. Compact timezone values retain the abbreviation and UTC
+offset on the display. Scroll arrows have a reserved column, numeric row input
+is validated before index arithmetic, Wi-Fi Back restores the menu prompt, and
+shared group output uses the existing broadcast path for remote CLI clients.
+
+`System_FirstTimeSetup` owns one Basic/Advanced/Import list and parser, used by
+serial and display. Import requires migration and Wi-Fi support, independent of
+the normal web interface. Blank input selects Basic; malformed or unavailable
+choices remain at the chooser. Basic's description reflects its existing preset
+selection. Build flags, saved configuration formats and feature dependencies
+are unchanged; the existing editable build header and host setup tool retain
+their roles.
+
+Verification:
+
+- **All 146 registered host suites passed**, with ASan/UBSan and the Node-based
+  checks enabled. The strengthened menu matrix and draft suite also passed
+  final focused reruns. The draft suite's **475 checks** include device-name
+  Back/revisit, reverting edits, concurrent updates and untouched long names.
+- The production registry, build header and wizard model passed **3,619 checks**
+  across QT Py Maps, XIAO defaults, P4 defaults, XIAO with Edge Impulse/MQTT and
+  a minimal configuration. Coverage includes every compiled mutable registry
+  entry exactly once, grouping/order, adjacent companion rows, startup semantics,
+  bound draft actions, empty groups, menu output, malformed/extreme CLI input
+  and refusal to finish an invalid draft.
+- The shared chooser passed **434 checks** across all eight combinations of
+  migration, Wi-Fi and regular HTTP support. Wi-Fi navigation passed **128
+  checks** across the serial, CLI and display adapters, covering acceptance,
+  Skip, Back, rescan, expired scan selections and continued page navigation.
+  Existing draft, cancellation, MQTT/ESP-NOW and initial-account checks passed.
+- QT Py Maps, XIAO default and P4 board-default firmware built at `0.99.97.1`.
+  All **589 captured production/configuration inputs** remained unchanged
+  during the builds. Effective selections and linked images were checked;
+  the temporary P4 profile was removed after matching its build snapshot.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `qtpy-maps-test` | 3,714,608 | 2,269,648 |
+| `xiao-default` | 5,894,528 | 89,728 |
+| P4 X Eye board defaults | 6,499,920 | 926,128 |
+
+The tests execute production menu and input code with controlled hardware and
+storage boundaries. No firmware was flashed. Physical display readability,
+button input and first-boot hardware behavior remain unqualified for this menu
+change. The private setup-menu evidence archive contains host/build logs,
+source and binary hashes, resolved choices and unflashed build status records.
+
+## Checkpoint: 0.99.97.2 (2026-10-10)
+
+This checkpoint includes the follow-on cleanup through shared setup menu
+organization. The production source matches the verified menu milestone;
+release preparation changes the version and release notes. The 146-suite host
+run and final focused checks remain its regression baseline. All 52 OTA tests
+passed, and release rebuilds for QT Py Maps, XIAO default and P4 board defaults
+embed `0.99.97.2` with the same feature selections and image sizes listed above.
+All 5,526 captured production/configuration/tool inputs stayed unchanged during
+those builds. The temporary P4 profile was removed after snapshot comparison.
+The release-scope privacy review found no actionable personal-information or
+credential findings. No firmware was flashed. See the
+[changelog](../CHANGELOG.md#099972---2026-10-10) for the release summary.

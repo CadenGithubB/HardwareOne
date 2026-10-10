@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include <cstdlib>
+#include <memory>
 
 #include "System_BuildConfig.h"
 
@@ -693,34 +695,54 @@ enum TrackValidation {
   TRACK_EMPTY            // No points in track
 };
 
+// A coherent value copy. No field borrows the manager's mutable storage.
+struct GPSTrackStatus {
+  int pointCount = 0;
+  GPSTrackBounds bounds = {};
+  GPSTrackStats stats = {};
+  char filename[256] = {};
+  bool live = false;
+  uint32_t lastUpdateMs = 0;
+  TrackValidation validation = TRACK_EMPTY;
+  float coveragePercent = 0;
+};
+
+// Points are owned by this read and survive append, clear, or replacement.
+// pointCount is the copied tail length; status.pointCount is the total length.
+struct GPSTrackSnapshot {
+  GPSTrackStatus status;
+  std::unique_ptr<GPSTrackPoint, decltype(&free)> points{nullptr, &free};
+  int pointCount = 0;
+};
+
 // GPS Track management
 class GPSTrackManager {
 public:
-  // Load track from sensor log file
-  static bool loadTrack(const char* filepath, String& errorMsg);
-  
-  // Refuses to replace the buffer while a live recording is active.
+  // Publish a complete load and return that same track. Failed loads preserve
+  // the previous track. UI callers can reject tracks outside the current map.
+  static bool loadTrack(const char* filepath, String& errorMsg,
+                        GPSTrackSnapshot& loaded, bool rejectOutOfBounds = false);
+  // Status-only callers do not allocate an unused point copy.
+  static bool loadTrack(const char* filepath, String& errorMsg,
+                        GPSTrackStatus& loaded, bool rejectOutOfBounds = false);
+
+  // Refuses during live recording or another lifecycle operation.
   static bool clearTrack();
-  
+
   // Check if track is loaded
-  static bool hasTrack() { return _pointCount > 0; }
-  
-  // Get track info
-  static int getPointCount() { return _pointCount; }
-  static const GPSTrackPoint* getPoints() { return _points; }
-  static const GPSTrackBounds& getBounds() { return _bounds; }
-  static const GPSTrackStats& getStats() { return _stats; }
-  static const char* getFilename() { return _filename; }
-  
-  // Validate track against current map bounds
-  static TrackValidation validateTrack(float& coveragePercent);
-  
-  // Save current track to file (returns filepath on success, empty on failure)
-  static bool saveTrack(char* outPath, size_t outPathSize);
+  static bool hasTrack();
+
+  static GPSTrackStatus readStatus();
+  // Copy the last maxPoints and their matching metadata. Failure empties out;
+  // no owner lock is retained while callers render, send, or save the copy.
+  static bool readSnapshot(GPSTrackSnapshot& out, int maxPoints = MAX_TRACK_POINTS);
+
+  // Save one snapshot; on success return its filepath and optional point count.
+  static bool saveTrack(char* outPath, size_t outPathSize, int* savedPointCount = nullptr);
 
   // Delete a track file
   static bool deleteTrackFile(const char* filepath);
-  
+
   // Live tracking mode - append points in real-time
   static bool isLiveTracking();
   // Called by the authorized gpstrack command. Preserve boot preferences;
@@ -728,17 +750,19 @@ public:
   static const char* startLiveTracking();
   static const char* stopLiveTracking();
   static bool appendPoint(float lat, float lon);  // Returns true if point was added
-  static uint32_t getLastUpdateTime() { return _lastUpdateMs; }
-  
+
   // Render track on map
-  static void renderTrack(MapRenderer* renderer, 
+  static void renderTrack(MapRenderer* renderer,
                           float centerLat, float centerLon,
                           int32_t scaleX, int32_t scaleY);
-  
+
   // Get validation message
-  static const char* getValidationMessage(TrackValidation result, float coverage);
-  
+  static String getValidationMessage(TrackValidation result, float coverage);
+
 private:
+  static bool loadTrackImpl(const char* filepath, String& errorMsg,
+                            GPSTrackStatus& loaded, GPSTrackSnapshot* snapshot,
+                            bool rejectOutOfBounds);
   static GPSTrackPoint* _points;
   static int _pointCount;
   static GPSTrackBounds _bounds;
@@ -747,16 +771,18 @@ private:
   static bool _liveTracking;
   static uint32_t _liveLogSessionId;
   static uint32_t _lastUpdateMs;
-  
-  // Calculate bounds from loaded points
-  static void calculateBounds();
-  
-  // Calculate statistics (distance, duration, speed)
-  static void calculateStats();
-  
+
+  // These helpers require the private state lock; they never perform I/O.
+  static bool isLiveTrackingLocked();
+  static void clearTrackLocked();
+  static GPSTrackStatus readStatusLocked(const GPSTrackBounds& mapBounds);
+
+  static GPSTrackBounds calculateBounds(const GPSTrackPoint* points, int count);
+  static GPSTrackStats calculateStats(const GPSTrackPoint* points, int count);
+
   // Haversine distance between two points (meters)
   static float haversineDistance(float lat1, float lon1, float lat2, float lon2);
-  
+
   // Parse GPS coordinates from log line
   static bool parseGPSLine(const char* line, float& lat, float& lon);
 };

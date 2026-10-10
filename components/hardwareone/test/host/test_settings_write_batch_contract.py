@@ -187,20 +187,29 @@ for production_path in COMPONENT.iterdir():
         )
 
 
-# Every common scalar/String mutator must both request persistence and retain
-# its setting_changed notification. Debug fields use their separate file.
+# Every common scalar/String mutator enters the same finalization owner.
+# That owner requests persistence and retains the setting_changed notification.
+# Debug fields keep their separate file.
 setting_templates = all_blocks_after(settings_h, "inline void setSetting(")
 require(len(setting_templates) == 3, "expected the three setSetting overloads")
 for body in setting_templates:
     require(
-        body.count("requestSettingsPersist(") == 1,
-        "setSetting overload bypasses centralized persistence",
+        body.count("finishSettingChange(") == 1,
+        "setSetting overload bypasses shared mutation finalization",
     )
     require(
-        "notifySettingChanged(&field)" in body,
-        "setSetting overload lost its setting_changed notification",
+        "requestSettingsPersist(" not in body and "notifySettingChanged(" not in body,
+        "setSetting overload duplicates shared finalization",
     )
     require("writeSettingsJson(" not in cpp_code(body), "setSetting writes flash directly")
+
+setting_finish = block_after(settings_cpp, "void finishSettingChange(")
+require(setting_finish.count("requestSettingsPersist(") == 1,
+        "shared mutation finalizer bypasses centralized persistence")
+require(setting_finish.count("notifySettingChanged(") == 1,
+        "shared mutation finalizer lost its one notification")
+require("writeSettingsJson(" not in cpp_code(setting_finish),
+        "shared mutation finalizer writes flash directly")
 
 debug_template = block_after(settings_h, "inline void setDebugSetting(")
 require(
@@ -210,14 +219,17 @@ require(
 require("writeDebugJson(" not in cpp_code(debug_template), "setDebugSetting writes flash directly")
 
 
-# The table-driven command handler has four mutating paths: integer-family,
-# float, bool, and String. All four must enter the same owner-aware adapter.
+# The table-driven command handler uses the existing typed mutator. The runtime
+# settings_mutation suite covers every width/type and owner-scoped batching;
+# this guard prevents an independent write/notification path from returning.
 generic_handler = block_after(
     settings_cpp, "const char* handleSettingCommand("
 )
 require(
-    generic_handler.count("requestSettingsPersist(") == 4,
-    "not all four generic setting mutation branches request persistence",
+    "setSetting(" in cpp_code(generic_handler)
+    and "requestSettingsPersist(" not in cpp_code(generic_handler)
+    and "systemEventPost(" not in cpp_code(generic_handler),
+    "generic setting handler bypasses common mutation finalization",
 )
 require(
     "writeSettingsJson(" not in cpp_code(generic_handler),

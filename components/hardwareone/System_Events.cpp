@@ -39,7 +39,7 @@
 //   slot 0 — ESP-IDF pthread (PTHREAD_TLS_INDEX). DO NOT use.
 //   slot 1 — auth identity (System_AuthIdentity.cpp).
 //   slot 2 — this module (was System_Notifications pre-cutover).
-//   slot 3 — unused (CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=4).
+//   slot 3 — short synchronous SettingsWriteScope (System_Settings.cpp).
 
 static constexpr BaseType_t kNotifTlsSlot = 2;
 

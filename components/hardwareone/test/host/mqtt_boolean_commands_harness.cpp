@@ -45,6 +45,11 @@ static bool requestSettingsPersist() {
 static void notifySettingChanged(const void* field) {
   ++notifyCalls; notifiedField = field; events.push_back("notify");
 }
+struct SettingEntry;
+static void finishSettingChange(const void* field, const SettingEntry*) {
+  (void)requestSettingsPersist();
+  notifySettingChanged(field);
+}
 static bool stopMQTT() {
   ++stopCalls; events.push_back("stop"); return stopResult;
 }

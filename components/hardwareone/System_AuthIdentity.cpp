@@ -25,7 +25,7 @@ void bumpIdentityGeneration(const char* reason) {
 }
 
 // FreeRTOS gives us configNUM_THREAD_LOCAL_STORAGE_POINTERS slots per task
-// (raised to 4 in sdkconfig to leave headroom for future TLS-backed state).
+// (4 slots in sdkconfig; slot 3 belongs to SettingsWriteScope).
 //
 // Slot 0 is OWNED BY ESP-IDF's pthread library (PTHREAD_TLS_INDEX in
 // components/pthread/pthread_local_storage.c). Anything that calls
@@ -33,8 +33,8 @@ void bumpIdentityGeneration(const char* reason) {
 // etc.) reads slot 0 as a values_list_t* and dereferences it. We MUST NOT
 // claim slot 0 — we use slot 1.
 //
-// If another subsystem wants its own TLS slot, allocate the next unused
-// index (2 or 3) and update this coordinator comment.
+// Slot 2 belongs to System_Events; slot 3 to SettingsWriteScope. Another
+// owner requires increasing the configured slot count and updating this map.
 static constexpr BaseType_t kAuthTlsSlot = 1;
 
 namespace {

@@ -8,6 +8,48 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.97.2] - 2026-10-10
+
+Cleanup checkpoint for shared runtime settings, setup and service ownership.
+
+### Changed
+- Keep saved Wi-Fi entries and their public/internal interfaces together under
+  `network/wifi`, with a module map for their consumers.
+- Give GPS tracks copied status and owned point snapshots so OLED, web and
+  file operations do not borrow replaceable track buffers.
+- Keep automation logging sessions, checked appends, scheduling and due-cache
+  lifetime with the automation owner.
+- Route ordinary setting changes through `setSetting`, with validation,
+  change notifications and scoped persistence requests.
+- Share one draft and completion operation across setup interfaces. Finish
+  applies edited choices; cancellation, timeout and session loss discard them.
+- Organize advanced setup into Connections, Display & Controls, Sensors and
+  System, using shared rows, actions and ordering on serial, OLED and P4.
+- Share Basic/Advanced/Import choices and initial-admin creation between the
+  first-time setup paths.
+
+### Fixed
+- Preserve concurrent changes to settings that the wizard did not edit.
+- Check initial credential storage before publishing the user index or
+  declaring first-time setup complete.
+- Include I2C in setup, distinguish startup flags from enablement, and make
+  Import availability independent of the regular web interface.
+- Continue through remaining setup pages after Wi-Fi, preserve accepted
+  choices on Back, and keep device-name edits consistent on revisits.
+
+### Verification scope
+- The cleanup baseline passed all 146 firmware host suites with ASan/UBSan
+  and Node-based checks, followed by final focused menu/draft checks. Its
+  production source is unchanged for this release.
+- All 52 OTA tests passed, including release-version and deployment contracts.
+- Rebuilt QT Py Maps, XIAO default and P4 board-default firmware. All three
+  application descriptors report `0.99.97.2` and images fit their existing
+  partitions with unchanged feature selections.
+- Privacy review found no personal information or live credentials in the
+  checkpoint. No image was flashed; physical qualification limits remain in
+  the dated implementation and hardware records. Memory slimming and SD
+  qualification remain deferred.
+
 ## [0.99.97.1] - 2026-10-09
 
 Checkpoint of the configuration and module-ownership work. Boards remain
