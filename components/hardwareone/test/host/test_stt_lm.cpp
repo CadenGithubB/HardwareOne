@@ -278,8 +278,9 @@ void decodeControlAndArguments() {
     // Footprint formula documented in stt_lm.h (16-byte aligned sections).
     for(size_t frames:{size_t(0),size_t(1),size_t(1000),size_t(1500)})for(size_t beam:{size_t(1),size_t(16),size_t(32),size_t(64)}) {
         const size_t nodes=frames*beam+1; size_t table=1; while(table<2*nodes)table<<=1;
-        const size_t sum=40*nodes+4*table+24*beam+40*29*beam+2*beam+512+128+2048;
-        CHECK(lm::workspace_bytes(frames,beam)>=sum && lm::workspace_bytes(frames,beam)<=sum+8*16);
+        size_t memo=256; while(memo<2*frames)memo<<=1; if(memo>8192)memo=8192;
+        const size_t sum=40*nodes+4*table+44*beam+48*29*beam+512+128+4096+34*memo;
+        CHECK(lm::workspace_bytes(frames,beam)>=sum && lm::workspace_bytes(frames,beam)<=sum+13*16);
     }
     CHECK(lm::workspace_bytes(1,0)==0 && lm::workspace_bytes(1,65)==0 && lm::workspace_bytes(lm::kMaxFrames+1,1)==0);
 }
