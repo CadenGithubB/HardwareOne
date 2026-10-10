@@ -62,6 +62,18 @@ size_t sttPsramFree();  // host builds: the test harness supplies free PSRAM
 #ifndef HW1_STT_SHORT_CLOSE
 #define HW1_STT_SHORT_CLOSE 1
 #endif
+// The broker calls the consumer's publishWake (Conversate's caption pump)
+// right after it publishes a final or a draft, instead of leaving it to the
+// consumer's next poll.
+#ifndef HW1_STT_PUBLISH_WAKE
+#define HW1_STT_PUBLISH_WAKE 1
+#endif
+// A native (glasses) pause feeds 1.25 s of silence instead of 1 s, so a short
+// phrase whose last 10 ms frame was only partly voiced still reaches the 1 s
+// short-close pause.
+#ifndef HW1_STT_LONG_PAUSE_FEED
+#define HW1_STT_LONG_PAUSE_FEED 1
+#endif
 
 namespace {
 constexpr uint32_t kWorkerStackBytes = 12288; // IDF task stack sizes are bytes.
@@ -93,6 +105,11 @@ struct STTRun {
   // whether that session is paused by the wearer.
   uint32_t nativeG2Generation = 0;
   bool paused = false;
+  // The consumer's wake (Conversate: g2ControlWake), called by the worker
+  // right after a final or a draft is published, outside gSTTMux, when
+  // HW1_STT_PUBLISH_WAKE. The consumer keeps its own periodic poll as a
+  // fallback.
+  void (*publishWake)() = nullptr;
   bool cancelRequested = false;
   bool finishRequested = false;
   AudioSource requestedSource = AUDIO_SRC_NONE;
@@ -667,6 +684,7 @@ struct StreamRun {
   bool failed = false;
   uint32_t clockMs = 0;
   uint32_t nativeGeneration = 0;  // see STTRun::nativeG2Generation
+  void (*publishWake)() = nullptr;  // see STTRun::publishWake (worker only)
   // Glasses-mic faults survived instead of ending the session (capture task
   // counts under gSTTMux; the worker logs changes). Conversate owns the
   // session's lifetime, and a few lost 10 ms frames or one dropped phrase
@@ -1205,10 +1223,21 @@ static void sttCaptureWorker(void* context) {
       paused = gSTT.paused;
       portEXIT_CRITICAL(&gSTTMux);
       if (finish) break;
+#if HW1_STT_LONG_PAUSE_FEED
+      // A native pause stops PCM delivery. Feed 1.25 s of silence so the
+      // phrase in progress can end on its normal pause rule, then wait without
+      // treating the missing audio as a failed microphone. A short phrase
+      // closes only after 1 s of silence from its last voiced 10 ms frame
+      // (HW1_STT_SHORT_CLOSE), and a wearer who pauses mid-word leaves that
+      // frame partly voiced: a 1 s feed stopped one frame short and the phrase
+      // stayed open (no caption) until speech resumed.
+      if (paused && !wasPaused) pauseSilence = STT_SAMPLE_RATE * 5 / 4;
+#else
       // A native pause stops PCM delivery. Feed one second of silence so the
       // phrase in progress can end on its normal pause rule, then wait without
       // treating the missing audio as a failed microphone.
       if (paused && !wasPaused) pauseSilence = STT_SAMPLE_RATE;
+#endif
       wasPaused = paused;
       if (paused) lastAudioMs = millis();
       if (!audioCaptureOwnedBy("stt") || !audioCaptureActive() || !audioSourceAvailable(source)) {
@@ -1526,6 +1555,7 @@ static void sttContinuousWorker(void*) {
   run.token = gSTT.snapshot.token;
   run.requested = gSTT.requestedSource;
   run.nativeGeneration = gSTT.nativeG2Generation;
+  run.publishWake = gSTT.publishWake;
   run.clockMs = millis();
   transcriptOptions = gSTT.transcriptOptions;
   portEXIT_CRITICAL(&gSTTMux);
@@ -1763,6 +1793,7 @@ static void sttContinuousWorker(void*) {
           run.feDraftRows += draftStats.featureCachedFrames;
           portEXIT_CRITICAL(&gSTTMux);
 #endif
+          bool draftPublished = false;
           portENTER_CRITICAL(&gSTTMux);
           // Publish only while its final chunk has not been produced yet.
           if (ok && memchr(draftText, '\0', sizeof(draftText)) && !gSTT.cancelRequested && !run.failed &&
@@ -1770,10 +1801,18 @@ static void sttContinuousWorker(void*) {
             memcpy(gSTT.draft.text, draftText, sizeof(draftText));
             gSTT.draft.sequence = draftSequence;
             ++gSTT.draft.version;
+            draftPublished = true;
           }
           run.draftBusy = false;
           if (ok) run.lastDraftMs = millis() - draftStart;
           portEXIT_CRITICAL(&gSTTMux);
+#if HW1_STT_PUBLISH_WAKE
+          // Wake the consumer now (never inside gSTTMux) rather than at its
+          // next poll; the console write below then follows its read.
+          if (draftPublished && run.publishWake) run.publishWake();
+#else
+          (void)draftPublished;
+#endif
 #ifdef ESP_PLATFORM
           ESP_LOGI("STT", "TL draft seq=%lu audio_ms=%lu s=%lu e=%lu ok=%d",
                    (unsigned long)draftSequence, (unsigned long)(draftSamples / (STT_SAMPLE_RATE / 1000)),
@@ -1908,6 +1947,14 @@ static void sttContinuousWorker(void*) {
             snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", "STT text queue full; receiver must acknowledge results");
           }
           portEXIT_CRITICAL(&gSTTMux);
+          if (acceptedText) {
+#if HW1_STT_PUBLISH_WAKE
+            // Wake the consumer first (Conversate's caption pump) so the
+            // console write below is not part of its publish-to-read time.
+            // Outside gSTTMux: the woken task may preempt this one.
+            if (run.publishWake) run.publishWake();
+#endif
+          }
         }
       }
       // Save the whole accepted chunk once, before UI splitting/ACK can erase
@@ -2060,7 +2107,8 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
                          STTToken* token, char* error, size_t errorCap,
                          const TranscriptOptions* suppliedOptions = nullptr,
                          uint32_t nativeG2Generation = 0,
-                         AudioSource preferredSource = AUDIO_SRC_NONE) {
+                         AudioSource preferredSource = AUDIO_SRC_NONE,
+                         void (*publishWake)() = nullptr) {
   sttReapTerminal();
   if (token) *token = 0;
   if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
@@ -2111,6 +2159,7 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
     gSTT.snapshot.transcript.enabled = transcriptOptions.enabled;
     gSTT.requestedSource = nativeG2Generation ? AUDIO_SRC_G2_LEFT : requestedSource;
     gSTT.nativeG2Generation = nativeG2Generation;
+    gSTT.publishWake = publishWake;
     gSTT.snapshot.token = (static_cast<uint64_t>(gSTTNonce) << 32) | gSTTCounter;
     gSTT.snapshot.state = STTState::Preparing;
     gSTT.snapshot.captureLimitMs = continuous ? 0 : captureMs;
@@ -2156,12 +2205,15 @@ bool sttBeginContinuous(STTOwner owner, STTToken* token,
 
 bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
                                 char* error, size_t errorCap,
-                                const TranscriptOptions* transcriptOptions) {
+                                const TranscriptOptions* transcriptOptions,
+                                void (*publishWake)()) {
   if (!leftGeneration) {
     if (token) *token = 0;
     return sttError(error, errorCap, "No glasses microphone connection");
   }
-  return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions, leftGeneration);
+  // The glasses stream is the source; the caller's wake is kept for the run.
+  return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions, leftGeneration,
+                      AUDIO_SRC_NONE, publishWake);
 }
 
 bool sttSetPaused(STTOwner owner, STTToken token, bool paused) {
