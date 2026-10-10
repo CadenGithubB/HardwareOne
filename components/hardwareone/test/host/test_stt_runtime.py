@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Compile the production STT broker against deterministic HAL/session/task fakes."""
+"""Compile the production STT broker against deterministic HAL/session/task fakes.
+
+The one-shot path tested here does not use the continuous-session latency
+switches (System_STT.cpp, HW1_STT_*); they are compiled off, so this unit also
+checks that every switch's off path still builds. test_stt_continuous.py runs
+the continuous broker with all of them on (the defaults).
+"""
 import argparse
 from pathlib import Path
 import re
@@ -8,6 +14,9 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parents[1]
+SWITCHES_OFF = [f'-D{name}=0' for name in (
+    'HW1_STT_CAPTURE_FEATURES', 'HW1_STT_TRIM_SILENCE', 'HW1_STT_SPECULATIVE_FINAL',
+    'HW1_STT_SHORT_CLOSE', 'HW1_STT_PUBLISH_WAKE', 'HW1_STT_LONG_PAUSE_FEED')]
 
 
 def no_includes(text):
@@ -31,7 +40,7 @@ def main():
         exe = Path(tmp) / 'test'
         unit.write_text(harness)
         cmd = ['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
-               '-Wno-unused-function', str(unit), '-o', str(exe)]
+               '-Wno-unused-function', *SWITCHES_OFF, str(unit), '-o', str(exe)]
         if args.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
         subprocess.run(cmd, check=True)

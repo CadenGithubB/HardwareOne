@@ -28,6 +28,7 @@ struct State {
     bool releaseBeforeDecode=false, released=false;
     std::vector<int8_t> logits;
     const void* lastCache=nullptr;
+    int residentDrops=0;  // ModelCache::dropResident calls (HW1_STT_RESIDENT_MODEL)
 } state;
 size_t used() { size_t n=0; for(const auto& a:state.heap)n+=a.second; return n; }
 bool cancelled(void*) { return state.cancelAfterReads>=0 && state.reads>=state.cancelAfterReads; }
@@ -89,11 +90,16 @@ File openGuarded(const char* path, const char* mode, const AuthContext& auth) {
 namespace hw1::stt {
 ModelCache::~ModelCache() { reset(); }
 void ModelCache::reset() { raw_=nullptr; }
+#if HW1_STT_RESIDENT_MODEL
+void ModelCache::dropResident() { ++fake::state.residentDrops; }
+#endif
+size_t callBudget(size_t, const ModelCache*, size_t* contiguous) { if(contiguous)*contiguous=0; return 0; }
 static int fakeWeights=0;  // stands in for the verified raw weights a call leaves cached
 // Mirrors quartznet_runtime.cpp's hook contract around a fixed logit tensor.
 bool transcribe(ModelReader reader, const int16_t*, size_t, char* text, size_t capacity,
                 const STTLocalControl& control, STTLocalStats&, char* error, size_t errorCapacity,
-                Diagnostics*, ModelCache* cache, const Decoder* decoder) {
+                Diagnostics*, ModelCache* cache, const Decoder* decoder, const STTFeaturePrefix* prefix) {
+    assert(!prefix);  // no capture-time rows in these calls
     assert(reader.read && reader.bytes==fake::state.files.at("/STT Models/quartznet5x5.p4.stt").size());
     fake::state.lastCache=cache;
     if(cache && !cache->loaded())cache->raw_=&fakeWeights;
@@ -239,8 +245,11 @@ void handOff() {
     STTLocalSession first, next;
     assert(!first.warm() && !next.warm());
     assert(run(&first)=="cat" && first.warm() && fake::used()==bytes);
+    const int drops=fake::state.residentDrops;
     first.moveTo(next);
     assert(!first.warm() && next.warm() && fake::used()==bytes);
+    // A resident model (and its arena) never travels with the weights.
+    assert(fake::state.residentDrops==drops+(HW1_STT_RESIDENT_MODEL ? 1 : 0));
     assert(run(&next)=="cat" && fake::state.opens[kLm]==1);   // LM and weights reused, not reloaded
     first.moveTo(first); next.moveTo(next);                    // self-moves change nothing
     assert(next.warm() && !first.warm());

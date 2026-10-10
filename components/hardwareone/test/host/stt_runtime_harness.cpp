@@ -87,6 +87,8 @@ bool audioCaptureStart(const char* owner, uint32_t rate) {
   if (audioSource == AUDIO_SRC_NONE || fallbackOnStart) audioSource = AUDIO_SRC_LOCAL_PDM;
   return true;
 }
+// The native glasses stream belongs to continuous Conversate sessions only.
+bool audioCaptureStartG2Native(const char*, uint32_t) { assert(false); return false; }
 void audioCaptureStop(const char* owner) {
   if (halOwner == owner) { halOwner.clear(); active = false; ++stops; }
 }
@@ -123,8 +125,10 @@ bool sttLocalAvailable(char* error, size_t cap) {
 }
 bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap,
                         const STTLocalControl& control, STTLocalStats& stats,
-                        char* error, size_t errorCap, STTLocalSession* session) {
+                        char* error, size_t errorCap, STTLocalSession* session,
+                        const STTFeaturePrefix* prefix) {
   assert(!session); // One-shot callers must retain the self-contained backend path.
+  assert(!prefix);  // Capture-time features belong to continuous sessions only.
   assert(halOwner == "stt" && allocations.size() == 1);
   ++engineCalls; engineSamples = count;
   for (size_t i = 0; i < count; ++i) assert(pcm[i] == static_cast<int16_t>((i % 101) - 50));
@@ -141,6 +145,7 @@ void STTLocalSession::reset() { assert(!backendState_); }
 // Keep-warm is never engaged here (stt_continuous_harness.cpp covers it).
 bool STTLocalSession::warm() const { return false; }
 void STTLocalSession::moveTo(STTLocalSession&) { assert(false); }
+void STTLocalSession::dropCallState() { assert(false); }
 size_t sttPsramFree() { return SIZE_MAX; }
 #define free trackedFree
 // INSERT_BROKER
