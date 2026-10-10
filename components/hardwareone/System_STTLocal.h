@@ -29,6 +29,7 @@ struct STTLocalStats {
   // Profiling detail for `sttperf` (P4 runtime only; zero elsewhere).
   uint32_t frontendConditionUs = 0, frontendFftUs = 0, frontendMelUs = 0, frontendNormUs = 0;
   uint32_t quantizeUs = 0, inferenceYieldUs = 0;
+  uint16_t inferenceBlocks = 0;  // blocking vTaskDelay(1) yields in this run
   uint16_t slowStage[3] = {0xffff, 0xffff, 0xffff};  // three slowest model stages
   uint32_t slowStageUs[3] = {};
   bool lmUsed = false;  // decode used the language model (else greedy)

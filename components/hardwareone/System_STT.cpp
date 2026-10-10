@@ -1249,6 +1249,9 @@ static void sttContinuousWorker(void*) {
                  (unsigned long)saveStartMs, (unsigned long)saveEndMs,
                  (unsigned long)perf.doneMs, ok ? 1 : 0, stats.lmUsed ? 1 : 0,
                  unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)));
+        // Blocking yields (timed vTaskDelay(1)) and total yield time in n.
+        ESP_LOGI("STT", "TL yield seg=%lu blocks=%u yield_us=%lu", (unsigned long)slot->sequence,
+                 unsigned(stats.inferenceBlocks), (unsigned long)stats.inferenceYieldUs);
       }
 #else
       (void)saveStartMs; (void)saveEndMs;

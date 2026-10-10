@@ -313,6 +313,17 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     if(cancelled(control))return fail("Cancelled");
     progress(control,STTLocalPhase::Inference);start=millis();
     InferenceWatchdogScope watchdogScope;
+    // Blocking with vTaskDelay(1) every 5 stages cost 41 ticks per 15x5 run
+    // (each up to 1 ms: 32-54 ms per phrase). The 5-stage points now only
+    // taskYIELD() (round-robin with other priority-2 tasks; the capture task
+    // and anything above priority 2 preempt at any time anyway), and one
+    // blocking vTaskDelay(1) is kept on an esp_timer clock: at the first
+    // 5-stage point at least kYieldBlockUs after the last block. That still
+    // runs IDLE1 (task watchdog 5 s; IDLE0 is unwatched only inside this
+    // scope) and the priority-1 loop task several times a second. Drafts stay
+    // preemptible: the cancel check still runs before every stage.
+    constexpr int64_t kYieldBlockUs=250000;
+    int64_t lastBlockUs=esp_timer_get_time();
     for(int stage=0;stage<identity::kNodeCount;++stage) {
         if(cancelled(control))return fail("Cancelled");
         const int64_t stageStart=esp_timer_get_time();
@@ -325,9 +336,16 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
             std::swap(us,stats.slowStageUs[k]); std::swap(index,stats.slowStage[k]);
         }
         if(stage<kStageProfileMax){ gStageTotalUs[stage]+=static_cast<uint32_t>(stageEnd-stageStart); }
-        // Yield every 5 stages (was every stage: 201 x ~1 ms on the 15x5).
+        // Yield every 5 stages (was every stage: 201 x ~1 ms on the 15x5);
+        // block only on the timer above, otherwise a non-blocking yield.
         if((stage+1)%5==0 || stage+1==identity::kNodeCount) {
-            vTaskDelay(1);
+            if(stageEnd-lastBlockUs>=kYieldBlockUs) {
+                vTaskDelay(1);
+                lastBlockUs=esp_timer_get_time();
+                ++stats.inferenceBlocks;
+            } else {
+                taskYIELD();
+            }
             stats.inferenceYieldUs+=static_cast<uint32_t>(esp_timer_get_time()-stageEnd);
         }
     }
