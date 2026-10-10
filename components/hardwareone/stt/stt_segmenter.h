@@ -95,6 +95,13 @@ public:
         if(!initialized_||!active_||ready_||!eligible()||!used_)return false;
         *pcm=buffer_;*samples=used_;return true;
     }
+    // The open phrase's absolute start and length, from its first sample
+    // (before it qualifies as eligible), so features can be computed while it
+    // is captured. Pushing thread only.
+    bool live_view(uint64_t* start,size_t* samples) const {
+        if(!initialized_||!active_||ready_)return false;
+        *start=start_;*samples=used_;return true;
+    }
     SegmentPushResult push(const int16_t* pcm,size_t count) {
         if(!initialized_)return {0,SegmentStatus::NotInitialized};
         if(ready_)return {0,SegmentStatus::Ready};

@@ -58,6 +58,13 @@ struct Decoder {
 // constructs a fresh shape-specific model/arena; vendor resize/rebuild is
 // never reused. One worker owns this object. Destroy/reset only after
 // transcribe returns.
+class ModelCache;
+// PSRAM one transcribe() call of `samples` needs beside `cache`'s verified
+// weights, by the same rule transcribe() admits it with (a per-call model:
+// arena, frontend and metadata margin; with HW1_STT_RESIDENT_MODEL and a built
+// resident model: the frontend only). *contiguous is the part that must be one
+// free block. The broker sizes optional per-session pools against it.
+size_t callBudget(size_t samples, const ModelCache* cache, size_t* contiguous);
 class ModelCache {
  public:
     ModelCache() = default;
@@ -88,7 +95,8 @@ class ModelCache {
 #endif
     friend bool transcribe(ModelReader, const int16_t*, size_t, char*, size_t,
                            const STTLocalControl&, STTLocalStats&, char*, size_t,
-                           Diagnostics*, ModelCache*, const Decoder*);
+                           Diagnostics*, ModelCache*, const Decoder*, const STTFeaturePrefix*);
+    friend size_t callBudget(size_t, const ModelCache*, size_t*);
 };
 // Per-stage inference time summed over segments since the last reset
 // (single STT worker writes; readers accept a racy snapshot for profiling).
@@ -98,5 +106,5 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
                 char* text, size_t capacity, const STTLocalControl& control,
                 STTLocalStats& stats, char* error, size_t errorCapacity,
                 Diagnostics* diagnostics = nullptr, ModelCache* cache = nullptr,
-                const Decoder* decoder = nullptr);
+                const Decoder* decoder = nullptr, const STTFeaturePrefix* prefix = nullptr);
 }

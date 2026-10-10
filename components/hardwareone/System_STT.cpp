@@ -17,6 +17,7 @@
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "stt/stt_segmenter.h"
+#include "stt/quartznet_frontend.h"
 #include <ArduinoJson.h>
 #include <esp_random.h>
 #include <algorithm>
@@ -28,6 +29,19 @@
 
 #ifndef ESP_PLATFORM
 size_t sttPsramFree();  // host builds: the test harness supplies free PSRAM
+#endif
+
+// Continuous-session latency features (measured on the P4 with the 15x5
+// model, speech end -> caption ~3.6 s -> ~1.7 s together with the runtime's
+// HW1_STT_RESIDENT_MODEL). Each is a compile-time switch, default ON (the
+// measured design); a features file or -D may set one to 0, which restores
+// that part of the earlier behaviour exactly. They apply to every continuous
+// session (Dictation, QuickNote, the Transcription page and Conversate).
+
+// Log-mel rows are computed while a phrase is still being captured; the final
+// call only computes the rows after the cache and runs CMVN + quantize.
+#ifndef HW1_STT_CAPTURE_FEATURES
+#define HW1_STT_CAPTURE_FEATURES 1
 #endif
 
 namespace {
@@ -532,6 +546,33 @@ constexpr size_t kAudioQueueDepth = 3;
 constexpr size_t kStreamSamples = STT_SAMPLE_RATE * STT_MAX_CAPTURE_MS / 1000;
 constexpr size_t kStreamReadSamples = 1024; // Whole PDM DMA blocks; segmenting is downstream.
 constexpr uint32_t kCaptureStackBytes = 8192; // 2 KiB PCM block plus HAL/BLE startup and G2 lens container depth.
+#if HW1_STT_CAPTURE_FEATURES
+// Log-mel rows are computed while a phrase is captured, by a separate
+// priority-1 task on core 0 (below the STT worker and ESP-DL's workers at 2,
+// so it only uses idle time; never the capture task).
+// The capture task only copies each PCM block into a stream ring and
+// publishes where the phrase in progress starts and how long it is. At the
+// close the phrase's cache travels with its queue slot; the worker copies the
+// finished rows, computes the rest and runs CMVN + quantize (bit-identical to
+// the batch frontend: hw1::stt::log_mel_frame). Drafts use the same rows. The
+// pool (2 x 512 KB rows + 128 KB ring) is allocated after the warm-up, so the
+// LM and the resident model are admitted exactly as without it.
+constexpr size_t kFeRingSamples = 65536;              // 4.1 s of stream; power of two
+constexpr size_t kFeMaxRows = 20 * STT_SAMPLE_RATE / 160;  // 20 s phrase cap
+constexpr int kFeCaches = 2;                          // phrase in progress + one queued
+constexpr size_t kFeBatchRows = 8;
+constexpr uint32_t kFeStackBytes = 3072;
+constexpr size_t kFeRowFloats = hw1::stt::kMelBins;
+enum class FeState : uint8_t { Free, Live, Attached, Orphan };
+struct FeCache {
+  float* rows = nullptr;        // kFeMaxRows x 64 floats, fixed for the session
+  uint64_t start = 0;           // stream sample of the phrase's first sample
+  size_t frames = 0;            // committed rows (final: never rewritten)
+  uint32_t gen = 0;             // bumped on every reuse
+  FeState state = FeState::Free;
+  bool overrun = false;         // the feature task fell a ring behind: stop
+};
+#endif
 enum class StreamSlotState : uint8_t { Free, Ready, Processing };
 struct StreamSlot {
   int16_t* pcm = nullptr;
@@ -540,6 +581,11 @@ struct StreamSlot {
   uint32_t sequence = 0;
   uint32_t queuedMs = 0;  // when the segmenter closed this segment (sttperf)
   bool forced = false;
+#if HW1_STT_CAPTURE_FEATURES
+  int fe = -1;            // attached feature cache (-1: none)
+  uint32_t feGen = 0;
+  size_t feRows = 0;      // rows of that cache valid for this phrase
+#endif
   StreamSlotState state = StreamSlotState::Free;
 };
 struct StreamRun {
@@ -569,6 +615,24 @@ struct StreamRun {
   // must not end the captions or split the saved transcript.
   uint32_t lossEvents = 0, droppedSegments = 0, stalls = 0;
   uint32_t loggedFaults = 0;  // worker-side: sum already logged
+#if HW1_STT_CAPTURE_FEATURES
+  // Capture-time features (under gSTTMux, except the contents of
+  // rows/ring/workspace).
+  FeCache fe[kFeCaches];
+  int16_t* feRing = nullptr;
+  hw1::stt::FrontendWorkspace* feWork = nullptr;
+  uint64_t feRingStart = 0, feRingHead = 0;  // stream samples [start, head) were written
+  bool feRingStarted = false;
+  int feLive = -1;            // cache of the phrase in progress
+  size_t feLiveLen = 0;
+  TaskHandle_t feTask = nullptr;
+  bool feStop = false, feRunning = false;
+  int draftFe = -1;           // cache rows a pending draft snapshot may use
+  uint32_t draftFeGen = 0;
+  size_t draftFeRows = 0;
+  uint32_t feRowsComputed = 0, feOverruns = 0, feFinals = 0, feCachedFinals = 0;
+  uint32_t feCachedRows = 0, feDraftRows = 0;
+#endif
 };
 // Timeline level samples: written by the capture task under gSTTMux, printed
 // by the STT worker (never by the real-time capture task).
@@ -758,6 +822,9 @@ static bool sttQueueSegment(StreamRun& run) {
     // session; the backlog drains and later phrases continue in order.
     portENTER_CRITICAL(&gSTTMux);
     ++run.droppedSegments;
+#if HW1_STT_CAPTURE_FEATURES
+    if (run.feLive >= 0) { run.fe[run.feLive].state = FeState::Orphan; run.feLive = -1; }
+#endif
     portEXIT_CRITICAL(&gSTTMux);
     // Release it, or the segmenter stays Ready and capture stalls until a slot
     // frees (then queues the "dropped" phrase late after all).
@@ -777,12 +844,122 @@ static bool sttQueueSegment(StreamRun& run) {
   slot->forced = segment->end == hw1::stt::SegmentEnd::HardLimit;
   slot->queuedMs = millis();
   portENTER_CRITICAL(&gSTTMux);
+#if HW1_STT_CAPTURE_FEATURES
+  // The phrase's feature cache goes with it; rows that read past its
+  // published end (or a sub-320-sample phrase, which inference pads) are not
+  // used.
+  slot->fe = -1; slot->feRows = 0;
+  if (run.feLive >= 0) {
+    FeCache& c = run.fe[run.feLive];
+    if (c.state == FeState::Live && c.start == segment->start_sample && segment->samples >= 320) {
+      slot->fe = run.feLive; slot->feGen = c.gen;
+      slot->feRows = std::min(c.frames, segment->samples / 160);
+      c.state = FeState::Attached;
+    } else {
+      c.state = FeState::Orphan;
+    }
+    run.feLive = -1;
+  }
+#endif
   slot->sequence = ++gSTT.snapshot.segmentsCaptured;
   slot->state = StreamSlotState::Ready;
   ++gSTT.snapshot.pendingAudio;
   portEXIT_CRITICAL(&gSTTMux);
   return run.segmenter.release();
 }
+#if HW1_STT_CAPTURE_FEATURES
+// Computes the phrase in progress's final rows from the stream ring.
+// Single writer of every cache's rows; a batch is committed only if its cache
+// is still the same live phrase and the ring was not overwritten under it.
+static void sttFeatureWorker(void* context) {
+  auto& run = *static_cast<StreamRun*>(context);
+  bool stop = false;
+  while (!stop) {
+    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    for (;;) {
+      int idx = -1;
+      uint32_t gen = 0;
+      uint64_t start = 0, head = 0;
+      size_t done = 0, len = 0;
+      portENTER_CRITICAL(&gSTTMux);
+      stop = run.feStop;
+      if (run.feLive >= 0 && run.fe[run.feLive].state == FeState::Live && !run.fe[run.feLive].overrun) {
+        idx = run.feLive;
+        gen = run.fe[idx].gen; start = run.fe[idx].start; done = run.fe[idx].frames;
+        len = run.feLiveLen;
+      }
+      head = run.feRingHead;
+      portEXIT_CRITICAL(&gSTTMux);
+      if (stop || idx < 0) break;
+      const size_t stable = len >= 320 ? std::min(len / 160, kFeMaxRows) : 0;
+      if (done >= stable) break;
+      const size_t end = std::min(stable, done + kFeBatchRows);
+      // Oldest sample this batch reads (row r: [r*160-161, r*160+160)).
+      const uint64_t lo = start + (done * 160 > 161 ? done * 160 - 161 : 0);
+      const bool safe = lo + kFeRingSamples >= head + kStreamReadSamples;
+      if (safe)
+        for (size_t r = done; r < end; ++r)
+          (void)hw1::stt::log_mel_frame_ring(run.feRing, kFeRingSamples - 1, start, len, r,
+                                             run.fe[idx].rows + r * kFeRowFloats, run.feWork);
+      portENTER_CRITICAL(&gSTTMux);
+      FeCache& c = run.fe[idx];
+      if (c.gen == gen && c.state == FeState::Live) {
+        // The capture task writes at most one block past the published head.
+        if (safe && lo + kFeRingSamples >= run.feRingHead + kStreamReadSamples) {
+          c.frames = end;
+          run.feRowsComputed += static_cast<uint32_t>(end - done);
+        } else {
+          c.overrun = true;
+          ++run.feOverruns;
+        }
+      }
+      portEXIT_CRITICAL(&gSTTMux);
+    }
+  }
+  portENTER_CRITICAL(&gSTTMux);
+  run.feRunning = false;
+  portEXIT_CRITICAL(&gSTTMux);
+  vTaskDelete(nullptr);
+}
+// Capture task, per block: copy PCM into the stream ring (before the
+// segmenter sees it) ...
+static void sttFeatureRingWrite(StreamRun& run, int16_t* ring, const int16_t* block, size_t count) {
+  const uint64_t base = run.segmenter.samples_seen();
+  const size_t at = static_cast<size_t>(base & (kFeRingSamples - 1));
+  const size_t first = std::min(count, kFeRingSamples - at);
+  memcpy(ring + at, block, first * sizeof(int16_t));
+  if (count > first) memcpy(ring, block + first, (count - first) * sizeof(int16_t));
+  portENTER_CRITICAL(&gSTTMux);
+  if (!run.feRingStarted) { run.feRingStarted = true; run.feRingStart = base; }
+  run.feRingHead = base + count;
+  portEXIT_CRITICAL(&gSTTMux);
+}
+// ... and after it: give the phrase in progress a cache (one that started
+// inside the ring), publish its length, retire one whose phrase vanished.
+static void sttFeatureTrack(StreamRun& run) {
+  uint64_t liveStart = 0;
+  size_t liveLen = 0;
+  const bool active = run.segmenter.live_view(&liveStart, &liveLen);
+  portENTER_CRITICAL(&gSTTMux);
+  if (run.feLive >= 0 && (!active || run.fe[run.feLive].start != liveStart)) {
+    run.fe[run.feLive].state = FeState::Orphan;  // discarded candidate
+    run.feLive = -1;
+  }
+  if (active && run.feLive < 0 && run.feRingStarted && liveStart >= run.feRingStart) {
+    for (int i = 0; i < kFeCaches; ++i) {
+      if (run.fe[i].state != FeState::Free) continue;
+      FeCache& c = run.fe[i];
+      c.state = FeState::Live; c.start = liveStart; c.frames = 0; c.overrun = false; ++c.gen;
+      run.feLive = i;
+      break;
+    }
+  }
+  if (run.feLive >= 0) run.feLiveLen = liveLen;
+  const TaskHandle_t task = run.feLive >= 0 ? run.feTask : nullptr;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (task) xTaskNotifyGive(task);
+}
+#endif
 static void sttCaptureWorker(void* context) {
   auto& run = *static_cast<StreamRun*>(context);
   const AudioSource previous = audioGetSource();
@@ -889,6 +1066,12 @@ static void sttCaptureWorker(void* context) {
         const double variance = static_cast<double>(square) / count -
                                 static_cast<double>(sum) * sum / count / count;
         const int level = std::min(100, static_cast<int>(std::sqrt(std::max(0.0, variance)) * 100.0 / 32768));
+#if HW1_STT_CAPTURE_FEATURES
+        portENTER_CRITICAL(&gSTTMux);
+        int16_t* const feRing = run.feRing;  // published by the worker after warm-up
+        portEXIT_CRITICAL(&gSTTMux);
+        if (feRing) sttFeatureRingWrite(run, feRing, block, count);
+#endif
         size_t offset = 0;
         while (offset < count && !sttStreamCancelled(&run)) {
           const auto fed = run.segmenter.push(block + offset, count - offset);
@@ -899,6 +1082,9 @@ static void sttCaptureWorker(void* context) {
             sttStreamFail(run, "Invalid continuous audio segment"); break;
           }
         }
+#if HW1_STT_CAPTURE_FEATURES
+        if (feRing) sttFeatureTrack(run);
+#endif
         // Live mode: offer the utterance in progress for a draft once it has
         // >=1 s of audio and >=0.6 s more than the last snapshot. The worker
         // paces itself: a new snapshot waits until the previous draft is done.
@@ -921,6 +1107,14 @@ static void sttCaptureWorker(void* context) {
             run.draftSequence = nextSequence;
             run.draftTakenSamples = liveSamples;
             run.draftReady = true;
+#if HW1_STT_CAPTURE_FEATURES
+            // The live cache's finished rows cover this snapshot's start.
+            run.draftFe = -1; run.draftFeRows = 0;
+            if (run.feLive >= 0 && run.fe[run.feLive].state == FeState::Live && liveSamples >= 320) {
+              run.draftFe = run.feLive; run.draftFeGen = run.fe[run.feLive].gen;
+              run.draftFeRows = std::min(run.fe[run.feLive].frames, liveSamples / 160);
+            }
+#endif
             portEXIT_CRITICAL(&gSTTMux);
           }
         }
@@ -1011,6 +1205,129 @@ static void sttCaptureWorker(void* context) {
   portEXIT_CRITICAL(&gSTTMux);
   vTaskDelete(nullptr);
 }
+#if HW1_STT_CAPTURE_FEATURES
+// Feature-cache helpers for the worker. Only the worker frees caches (so a
+// final or draft it is running can never lose its rows); orphans are retired
+// here.
+static void sttFeatureRetireOrphans(StreamRun& run) {
+  for (int i = 0; i < kFeCaches; ++i) {
+    size_t used = 0;
+    portENTER_CRITICAL(&gSTTMux);
+    const bool orphan = run.fe[i].state == FeState::Orphan;
+    if (orphan) used = run.fe[i].frames;
+    portEXIT_CRITICAL(&gSTTMux);
+    if (!orphan) continue;
+    sttWipe(run.fe[i].rows, std::min(used + kFeBatchRows, kFeMaxRows) * kFeRowFloats * sizeof(float));
+    portENTER_CRITICAL(&gSTTMux);
+    run.fe[i].state = FeState::Free; ++run.fe[i].gen;
+    portEXIT_CRITICAL(&gSTTMux);
+  }
+}
+static void sttFeatureRelease(StreamRun& run, int idx, uint32_t gen) {
+  if (idx < 0) return;
+  size_t used = 0;
+  portENTER_CRITICAL(&gSTTMux);
+  const bool mine = run.fe[idx].gen == gen && run.fe[idx].state == FeState::Attached;
+  if (mine) used = run.fe[idx].frames;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (!mine) return;
+  sttWipe(run.fe[idx].rows, std::min(used + kFeBatchRows, kFeMaxRows) * kFeRowFloats * sizeof(float));
+  portENTER_CRITICAL(&gSTTMux);
+  run.fe[idx].state = FeState::Free; ++run.fe[idx].gen;
+  portEXIT_CRITICAL(&gSTTMux);
+}
+// After the warm-up (weights and LM loaded): allocate the pool and start the
+// feature task, or leave capture-time features off for this session. The pool
+// must never cost a phrase its inference or its LM: what stays free beside it
+// must admit the largest call the broker makes (a 20 s phrase or draft) by the
+// runtime's own rule (sttLocalCallBudget: with a resident model only that
+// call's frontend; with per-call models its arena, frontend and metadata
+// margin, ~3.7 MB, ~3.1 MB of it contiguous), plus 1 MiB for LM beams, and
+// never less than 2 MiB. Freed again at session end (sttFeatureStop).
+static void sttFeatureStart(StreamRun& run, const STTLocalSession& session) {
+  constexpr size_t kRowsBytes = kFeMaxRows * kFeRowFloats * sizeof(float);
+  constexpr size_t kPoolBytes = kFeCaches * kRowsBytes + kFeRingSamples * sizeof(int16_t) +
+                                sizeof(hw1::stt::FrontendWorkspace);
+  const char* why = nullptr;
+  const STTLocalCallBudget call = sttLocalCallBudget(kStreamSamples, &session);
+  const size_t keepFree = std::max<size_t>(2u << 20, call.total + (1u << 20));
+#ifdef ESP_PLATFORM
+  if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < kPoolBytes + keepFree) why = "psram";
+#else
+  (void)kPoolBytes; (void)keepFree;
+#endif
+  int16_t* ring = nullptr;
+  hw1::stt::FrontendWorkspace* work = nullptr;
+  float* rows[kFeCaches] = {};
+  if (!why) {
+    ring = static_cast<int16_t*>(ps_alloc(kFeRingSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.fe_ring"));
+    work = static_cast<hw1::stt::FrontendWorkspace*>(ps_alloc(sizeof(hw1::stt::FrontendWorkspace), AllocPref::RequirePSRAM, "stt.fe_work"));
+    for (auto& r : rows) r = static_cast<float*>(ps_alloc(kRowsBytes, AllocPref::RequirePSRAM, "stt.fe_rows"));
+    if (!ring || !work || !rows[0] || !rows[1]) why = "alloc";
+  }
+#ifdef ESP_PLATFORM
+  // The pool may have split the block a per-call arena needs: then give it back.
+  if (!why && (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < keepFree ||
+               heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < call.contiguous))
+    why = "contiguous";
+#endif
+  if (!why) {
+    portENTER_CRITICAL(&gSTTMux);
+    for (int i = 0; i < kFeCaches; ++i) run.fe[i].rows = rows[i];
+    run.feWork = work;
+    run.feRunning = true;
+    portEXIT_CRITICAL(&gSTTMux);
+    TaskHandle_t task = nullptr;
+    taskStackRecord("stt_fe", kFeStackBytes);
+    if (xTaskCreatePinnedToCore(sttFeatureWorker, "stt_fe", kFeStackBytes, &run, 1, &task, 0) != pdPASS) {
+      portENTER_CRITICAL(&gSTTMux);
+      run.feRunning = false;
+      for (auto& c : run.fe) c.rows = nullptr;
+      run.feWork = nullptr;
+      portEXIT_CRITICAL(&gSTTMux);
+      why = "task";
+    } else {
+      portENTER_CRITICAL(&gSTTMux);
+      run.feTask = task;
+      run.feRing = ring;  // last: the capture task starts feeding it now
+      portEXIT_CRITICAL(&gSTTMux);
+    }
+  }
+  if (why) {
+    if (ring) { sttWipe(ring, kFeRingSamples * sizeof(int16_t)); free(ring); }
+    if (work) { sttWipe(work, sizeof(*work)); free(work); }
+    for (auto& r : rows) if (r) { sttWipe(r, kRowsBytes); free(r); }
+  }
+#ifdef ESP_PLATFORM
+  ESP_LOGI("STT", "TL fe_pool ok=%d caches=%d bytes=%u keep=%u need_block=%u psram_free=%u psram_largest=%u%s%s",
+           why ? 0 : 1, kFeCaches, unsigned(kPoolBytes), unsigned(keepFree), unsigned(call.contiguous),
+           unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+           unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)), why ? " off=" : "", why ? why : "");
+#endif
+}
+// Session end, after the capture task joined: stop and join the feature task,
+// then wipe and free the pool.
+static void sttFeatureStop(StreamRun& run) {
+  // No notification here: the task may already be deleting itself. It wakes
+  // at least every 20 ms, sees feStop, clears feRunning as its last access
+  // to `run`, and deletes itself.
+  portENTER_CRITICAL(&gSTTMux);
+  run.feStop = true;
+  portEXIT_CRITICAL(&gSTTMux);
+  for (;;) {
+    portENTER_CRITICAL(&gSTTMux);
+    const bool running = run.feRunning;
+    portEXIT_CRITICAL(&gSTTMux);
+    if (!running) break;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  run.feTask = nullptr;
+  if (run.feRing) { sttWipe(run.feRing, kFeRingSamples * sizeof(int16_t)); free(run.feRing); run.feRing = nullptr; }
+  if (run.feWork) { sttWipe(run.feWork, sizeof(*run.feWork)); free(run.feWork); run.feWork = nullptr; }
+  for (auto& c : run.fe)
+    if (c.rows) { sttWipe(c.rows, kFeMaxRows * kFeRowFloats * sizeof(float)); free(c.rows); c.rows = nullptr; }
+}
+#endif
 static void sttContinuousWorker(void*) {
   StreamRun run;
   STTLocalSession backendSession;
@@ -1098,6 +1415,9 @@ static void sttContinuousWorker(void*) {
       }
     }
 #endif
+#if HW1_STT_CAPTURE_FEATURES
+    if (!sttStreamCancelled(&run)) sttFeatureStart(run, backendSession);
+#endif
     for (;;) {
       StreamSlot* slot = nullptr;
       bool captureDone;
@@ -1116,14 +1436,28 @@ static void sttContinuousWorker(void*) {
       if (sttStreamCancelled(&run)) break;
       if (!slot) {
         if (captureDone) break;
+#if HW1_STT_CAPTURE_FEATURES
+        // Retire orphaned feature caches on every idle pass (before the
+        // speculative path too, which skips the draft code below).
+        sttFeatureRetireOrphans(run);
+#endif
         bool drafting = false;
         size_t draftSamples = 0;
         uint32_t draftSequence = 0;
+        STTFeaturePrefix draftPrefix;  // capture-time rows (HW1_STT_CAPTURE_FEATURES)
         portENTER_CRITICAL(&gSTTMux);
         if (run.draftReady && !run.failed && !gSTT.cancelRequested) {
           run.draftReady = false; run.draftBusy = drafting = true;
           draftSamples = std::max(run.draftSamples, size_t(320));
           draftSequence = run.draftSequence;
+#if HW1_STT_CAPTURE_FEATURES
+          // Only the worker frees a cache, so these rows stay put during the draft.
+          if (run.draftFe >= 0 && run.draftFeRows && run.fe[run.draftFe].gen == run.draftFeGen &&
+              run.fe[run.draftFe].state != FeState::Free && draftSamples == run.draftSamples) {
+            draftPrefix.rows = run.fe[run.draftFe].rows; draftPrefix.count = run.draftFeRows;
+          }
+          run.draftFe = -1;
+#endif
         }
         portEXIT_CRITICAL(&gSTTMux);
         if (drafting) {
@@ -1135,7 +1469,13 @@ static void sttContinuousWorker(void*) {
           const STTLocalControl draftControl{&run, sttDraftPreempted, sttStreamProgress};
           const uint32_t draftStart = millis();
           const bool ok = sttLocalTranscribe(run.draftPcm, draftSamples, draftText, sizeof(draftText), draftControl,
-                                             draftStats, draftError, sizeof(draftError), &backendSession);
+                                             draftStats, draftError, sizeof(draftError), &backendSession,
+                                             draftPrefix.count ? &draftPrefix : nullptr);
+#if HW1_STT_CAPTURE_FEATURES
+          portENTER_CRITICAL(&gSTTMux);
+          run.feDraftRows += draftStats.featureCachedFrames;
+          portEXIT_CRITICAL(&gSTTMux);
+#endif
           portENTER_CRITICAL(&gSTTMux);
           // Publish only while its final chunk has not been produced yet.
           if (ok && memchr(draftText, '\0', sizeof(draftText)) && !gSTT.cancelRequested && !run.failed &&
@@ -1188,8 +1528,41 @@ static void sttContinuousWorker(void*) {
       const size_t inferenceSamples = std::max(slot->samples, size_t(320));
       if (inferenceSamples > slot->samples)
         memset(slot->pcm + slot->samples, 0, (inferenceSamples - slot->samples) * sizeof(int16_t));
-      const bool ok = sttLocalTranscribe(slot->pcm, inferenceSamples, text, sizeof(text), control,
-                                        stats, error, sizeof(error), &backendSession);
+#if HW1_STT_CAPTURE_FEATURES
+      // Orphaned feature caches are retired before every final.
+      sttFeatureRetireOrphans(run);
+#endif
+      constexpr bool promoted = false;
+      bool ok = false;
+      if (!promoted) {
+        STTFeaturePrefix prefix;
+#if HW1_STT_CAPTURE_FEATURES
+        // Rows computed during capture for this phrase. The trim may infer
+        // only a prefix (voiced end + 200 ms); then only the cached rows whose
+        // samples all lie inside that prefix are used, row r with
+        // (r + 1) * 160 <= inferenceSamples. Such a row never reflects at the
+        // end, so it equals the batch frontend's row of the trimmed input; the
+        // runtime computes the rest on the trimmed PCM. A zero-padded input
+        // (< 320 samples captured) has no cache (none is attached).
+        portENTER_CRITICAL(&gSTTMux);
+        if (slot->fe >= 0 && slot->feRows && run.fe[slot->fe].gen == slot->feGen &&
+            run.fe[slot->fe].state == FeState::Attached && inferenceSamples <= slot->samples) {
+          prefix.rows = run.fe[slot->fe].rows;
+          prefix.count = std::min(slot->feRows, inferenceSamples / 160);
+        }
+        portEXIT_CRITICAL(&gSTTMux);
+#endif
+        ok = sttLocalTranscribe(slot->pcm, inferenceSamples, text, sizeof(text), control,
+                                stats, error, sizeof(error), &backendSession,
+                                prefix.count ? &prefix : nullptr);
+      }
+#if HW1_STT_CAPTURE_FEATURES
+      // Feature counters; a promoted final counts with its speculative run's rows.
+      portENTER_CRITICAL(&gSTTMux);
+      ++run.feFinals;
+      if (stats.featureCachedFrames) { ++run.feCachedFinals; run.feCachedRows += stats.featureCachedFrames; }
+      portEXIT_CRITICAL(&gSTTMux);
+#endif
       bool acceptedText = false;
       if (!sttStreamCancelled(&run)) {
         if (!ok || !memchr(text, '\0', sizeof(text))) {
@@ -1232,6 +1605,10 @@ static void sttContinuousWorker(void*) {
       }
       sttWipe(text, sizeof(text));
       sttWipe(slot->pcm, inferenceSamples * sizeof(int16_t));
+#if HW1_STT_CAPTURE_FEATURES
+      sttFeatureRelease(run, slot->fe, slot->feGen);  // after publish and save
+      slot->fe = -1;
+#endif
       perf.doneMs = millis();
       perf.stats = stats;
 #ifdef ESP_PLATFORM
@@ -1255,6 +1632,11 @@ static void sttContinuousWorker(void*) {
         // Blocking yields (timed vTaskDelay(1)) and total yield time in n.
         ESP_LOGI("STT", "TL yield seg=%lu blocks=%u yield_us=%lu", (unsigned long)slot->sequence,
                  unsigned(stats.inferenceBlocks), (unsigned long)stats.inferenceYieldUs);
+#if HW1_STT_CAPTURE_FEATURES
+        // Feature rows of this final, and how many came from the capture-time cache.
+        ESP_LOGI("STT", "TL fe seg=%lu frames=%u cached=%u", (unsigned long)slot->sequence,
+                 unsigned(stats.featureFrames), unsigned(stats.featureCachedFrames));
+#endif
       }
 #else
       (void)saveStartMs; (void)saveEndMs;
@@ -1288,6 +1670,15 @@ static void sttContinuousWorker(void*) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
   }
+#if HW1_STT_CAPTURE_FEATURES
+#ifdef ESP_PLATFORM
+  if (run.feRing)
+    ESP_LOGI("STT", "TL fe_end rows=%lu overruns=%lu finals=%lu cached_finals=%lu cached_rows=%lu draft_rows=%lu",
+             (unsigned long)run.feRowsComputed, (unsigned long)run.feOverruns, (unsigned long)run.feFinals,
+             (unsigned long)run.feCachedFinals, (unsigned long)run.feCachedRows, (unsigned long)run.feDraftRows);
+#endif
+  sttFeatureStop(run);  // the capture task has joined; nothing feeds the ring
+#endif
   // FreeRTOS self-delete does not unwind C++ locals. Close the backend (or
   // park it for the next run while a hold lasts) before publishing
   // workerActive=false, after every inference/capture user joined.

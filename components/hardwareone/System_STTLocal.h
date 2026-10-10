@@ -30,10 +30,32 @@ struct STTLocalStats {
   uint32_t frontendConditionUs = 0, frontendFftUs = 0, frontendMelUs = 0, frontendNormUs = 0;
   uint32_t quantizeUs = 0, inferenceYieldUs = 0;
   uint16_t inferenceBlocks = 0;  // blocking vTaskDelay(1) yields in this run
+  uint32_t featureCachedFrames = 0;  // rows taken from the capture-time cache
   uint16_t slowStage[3] = {0xffff, 0xffff, 0xffff};  // three slowest model stages
   uint32_t slowStageUs[3] = {};
   bool lmUsed = false;  // decode used the language model (else greedy)
 };
+
+// Log-mel rows already computed during capture for the first `count` 10 ms
+// frames of this exact PCM (hw1::stt::log_mel_frame, before CMVN). The
+// runtime computes only the remaining rows. Ignored when count is 0 or
+// exceeds the call's frames.
+struct STTFeaturePrefix {
+  const float* rows = nullptr;
+  size_t count = 0;
+};
+
+// PSRAM one sttLocalTranscribe call of `samples` needs beside the session's
+// verified weights, by the runtime's own admission rule, and the part of it
+// that must be one contiguous block (hw1::stt::callBudget). All zero when no
+// backend is built in. The broker sizes its capture-time feature pool
+// against it (HW1_STT_CAPTURE_FEATURES).
+struct STTLocalCallBudget {
+  size_t total = 0;
+  size_t contiguous = 0;
+};
+class STTLocalSession;
+STTLocalCallBudget sttLocalCallBudget(size_t samples, const STTLocalSession* session = nullptr);
 
 // Single-worker backend lifetime: one task uses a session at a time. Reset
 // after the final call has returned, including failure/cancellation.
@@ -67,7 +89,8 @@ class STTLocalSession {
   void* backendState_ = nullptr;
   friend bool sttLocalTranscribe(const int16_t*, size_t, char*, size_t,
                                 const STTLocalControl&, STTLocalStats&,
-                                char*, size_t, STTLocalSession*);
+                                char*, size_t, STTLocalSession*, const STTFeaturePrefix*);
+  friend STTLocalCallBudget sttLocalCallBudget(size_t, const STTLocalSession*);
 };
 
 // Cheap availability check for the configured, fixed model path; does not load
@@ -77,4 +100,5 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t samples,
                         char* text, size_t textCap,
                         const STTLocalControl& control, STTLocalStats& stats,
                         char* error, size_t errorCap,
-                        STTLocalSession* session = nullptr);
+                        STTLocalSession* session = nullptr,
+                        const STTFeaturePrefix* prefix = nullptr);
