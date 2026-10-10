@@ -13,7 +13,7 @@ With ESP-IDF 5.5.5 exported and the vendored Arduino core carrying the
 [local patches](arduino-local-patches/README.md) (including the P4 set):
 
 ```sh
-tools/p4/prepare_sdk.sh          # once: stages patched IDF bt + JPEG components
+tools/p4/prepare_sdk.sh          # once: stages patched IDF bt + JPEG components and ESP-DL
 tools/build_board.sh p4x_eye     # -> build-p4x_eye/
 tools/build_board.sh p4x_eye flash monitor
 ```
@@ -23,8 +23,16 @@ tools/build_board.sh p4x_eye flash monitor
 `bt` gets the upstream TinyCrypt ECC fix that BLE Secure Connections needs on P4
 ([esp-idf#19002](https://github.com/espressif/esp-idf/issues/19002)), and
 `esp_driver_jpeg` gets an allocation/interrupt-unwind fix that enables the
-hardware JPEG decoder. A P4 build stops with that command if they are missing.
-Other boards are unaffected.
+hardware JPEG decoder. It also stages ESP-DL 3.3.12 (the version
+`dependencies.lock.esp32p4` pins, read from `managed_components/` or the IDF
+component manager cache and checked against a pinned digest) with
+`tools/p4/esp-dl-3.3.12-hw1.patch`: pointwise-convolution tiles sized for the
+P4's shared 64 KB L1 data cache, and an allocator hook for model metadata that
+the local STT runtime points at PSRAM. P4 builds solve dependencies against a
+copy of `dependencies.lock.esp32p4` in their build directory, because the
+component manager records the local ESP-DL by its absolute path. A P4 build
+stops with that command if any override is missing. Other boards are
+unaffected.
 
 The build combines `config/sdkconfig.defaults`, the chip-family
 `config/sdkconfig.defaults.esp32p4`, `boards/p4x_eye.defaults` (C6 wiring, flash
