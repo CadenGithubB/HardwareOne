@@ -6,17 +6,18 @@
 #     dev clips), pack, build the firmware pinned to this model
 #  2. retune LM candidate A (2.5 MB) for this checkpoint
 #  3. resume the paused training run (one heavy job at a time)
-#  4. wait for the SD card in the Mac (P4SD): copy model + LM, verify after a
+#  4. wait for the SD card in the Mac ($CARD): copy model + LM, verify after a
 #     remount, eject
 #  5. check the P4 on $PORT (or HW1_P4_PORT) is the test unit (UNIT_MAC from
 #     private/unit.env), flash the app partition
 # Rollback: re-flash private/build-p4-gen-17868 and put work/lm/meeting-gen-17868.lm
 # back as meeting.lm; the old model file stays on the card.
+CARD=${CARD:?set CARD to the mounted microSD card volume}
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 P=${HW1_STT_PYTHON:-$HERE/private/export-venv/bin/python}
-export STT_ROOT=/Volumes/Audiodrive/stt
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 RUN=$STT_ROOT/work/general2-lr1e5/quartznet15x5
 LOG=$STT_ROOT/logs/deploy-gen2.log
 PORT=${PORT:-${HW1_P4_PORT:-}}
@@ -42,12 +43,12 @@ grep -E "chosen|^\| ami|^\| libri|^\| peoples|^\| vox" "$LOG" | tail -8 | tee -a
 say "resuming the general + noise-only training"
 (cd ../stt_train_15x5 && nohup caffeinate -dims ./run_general_noiseonly_mac.sh > /dev/null 2>&1 &)
 
-say "READY_FOR_CARD: put the SD card in the Mac (P4SD)"
-until [ -d /Volumes/P4SD ]; do sleep 10; done
+say "READY_FOR_CARD: put the SD card in the Mac ($CARD)"
+until [ -d "$CARD" ]; do sleep 10; done
 sleep 5
 ./deploy_15x5.sh "$CK" "$NAME" card >> "$LOG" 2>&1 || { say "card copy FAILED"; exit 1; }
 LM=$L/meeting-$NAME.lm ./deploy_15x5.sh "$CK" "$NAME" lm >> "$LOG" 2>&1 || { say "card LM copy FAILED"; exit 1; }
-diskutil eject /Volumes/P4SD >> "$LOG" 2>&1
+diskutil eject "$CARD" >> "$LOG" 2>&1
 say "CARD_DONE: model + LM on the card, verified, ejected"
 
 # shellcheck disable=SC1090

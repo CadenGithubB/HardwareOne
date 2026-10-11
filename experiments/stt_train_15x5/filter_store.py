@@ -26,7 +26,7 @@ from common import QuartzNet, Frontend, load_checkpoint, greedy_decode
 from data import STORES
 import os
 from pathlib import Path
-STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
+STT_ROOT = Path(os.environ.get('STT_ROOT', 'stt-data'))  # data root: set STT_ROOT
 
 
 def edit_distance(a, b):

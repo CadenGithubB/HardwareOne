@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 HERE = Path(__file__).parent
-STT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))
+STT = Path(os.environ.get('STT_ROOT', 'stt-data'))
 # clovaai/voxceleb_trainer checkout with baseline_lite_ap.model beside it (kept out of git)
 CLOVA = Path(os.environ.get('HW1_SPEAKER_CLOVA', STT / 'hw1-work/speaker/clova'))
 sys.path.insert(0, str(CLOVA))

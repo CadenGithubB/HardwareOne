@@ -21,7 +21,8 @@ import hashlib
 import json
 from pathlib import Path
 import os
-STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
+import re
+STT_ROOT = Path(os.environ.get('STT_ROOT', 'stt-data'))  # data root: set STT_ROOT
 
 HERE = Path(__file__).resolve().parent
 CACHE = (STT_ROOT / 'work/benchmark')
@@ -48,8 +49,8 @@ LABELS = {'ami-sdm-test': 'AMI far', 'ami-ihm-test': 'AMI headset', 'librispeech
 
 def resolve_ckpt(path):
     """Checkpoint paths in benchmark_models.json are relative to STT_ROOT
-    (absolute paths from the old USB/USB2 drives are mapped onto it)."""
-    for old in ('/Volumes/USB2/stt/', '/Volumes/USB/stt/'):
+    (absolute paths under an old drive's stt/ folder are mapped onto it)."""
+    for old in (os.environ.get('STT_ROOT', 'stt-data'), os.environ.get('STT_ROOT', 'stt-data')):
         if path.startswith(old):
             path = path[len(old):]
     return str(STT_ROOT / path) if not path.startswith('/') else path
