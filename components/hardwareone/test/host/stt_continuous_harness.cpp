@@ -376,6 +376,35 @@ static void assertTranscribedOnce(uint32_t sequence, size_t samples = 0);
 static std::atomic<int> specCalls{0}, specAborts{0};
 static std::atomic<bool> specHold{false};
 static StreamRun* gRun = nullptr;
+// Staged drafts (opt-in) follow the runtime's order: a stage check, Frontend (the
+// only PCM reads: hashed at entry and again just before Inference, which must
+// match), a stage check, Inference, a check before every stage, Decoding. A hold
+// keeps a draft in its frontend (no stage check there, as in the runtime) or in
+// its stages (still checked).
+static std::atomic<bool> draftStages{false}, draftHoldFrontend{false}, draftHoldStages{false};
+static std::atomic<bool> draftInFrontend{false};
+static std::atomic<unsigned> draftInferences{0}, draftAborts{0};
+static uint64_t pcmHash(const int16_t* pcm, size_t count) {
+  uint64_t h = 1469598103934665603ull;
+  for (size_t i = 0; i < count; ++i) { h ^= uint16_t(pcm[i]); h *= 1099511628211ull; }
+  return h;
+}
+static bool runDraftStages(const int16_t* pcm, size_t count, const STTLocalControl& control) {
+  const uint64_t entry = pcmHash(pcm, count);
+  if (control.cancelled(control.context)) { ++draftAborts; return false; }
+  control.progress(control.context, STTLocalPhase::Frontend);
+  draftInFrontend = true;
+  while (draftHoldFrontend) std::this_thread::sleep_for(std::chrono::microseconds(100));
+  assert(pcmHash(pcm, count) == entry);  // nothing wrote the input while the frontend read it
+  draftInFrontend = false;
+  if (control.cancelled(control.context)) { ++draftAborts; return false; }
+  control.progress(control.context, STTLocalPhase::Inference);
+  ++draftInferences;
+  while (draftHoldStages && !control.cancelled(control.context)) std::this_thread::sleep_for(std::chrono::microseconds(100));
+  if (control.cancelled(control.context)) { ++draftAborts; return false; }
+  control.progress(control.context, STTLocalPhase::Decoding);
+  return true;
+}
 static std::atomic<unsigned> cachedFinals{0}, cachedRows{0}, cachedDrafts{0}, rowMismatches{0};
 static std::atomic<unsigned> cachedSpecs{0}, cachedTrimmedFinals{0};  // features x speculation / features x trim
 // capture-features: every cached row must equal the batch frontend's row on this exact PCM.
@@ -388,7 +417,8 @@ static void checkPrefix(const int16_t* pcm, size_t count, const STTFeaturePrefix
   // combined: finals and speculative finals are checked row for row. A draft is
   // checked on its first/last 8 rows and every 16th: a full -O0 check of a
   // long draft held the worker long enough that speculation's speculative snapshot
-  // (copied by the capture task only while no draft runs, at the next block)
+  // (copied by the capture task only while no draft runs or a running one is past
+  // its frontend, which these unstaged drafts never report, at the next block)
   // never happened once a test stopped feeding audio. Production drafts are
   // preempted between model stages instead.
   for (size_t r = 0; r < prefix->count; ++r) {
@@ -419,7 +449,7 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
   }
   assert(mainWorker && session && !backendResetBeforeDelete);
   auto& run = *static_cast<StreamRun*>(control.context);
-  gRun = &run;
+  { std::lock_guard<std::mutex> lock(gSTTMux); gRun = &run; }  // test helpers read it under gSTTMux
   bool speculative = false;
   uint64_t specStart = 0; uint32_t specSeq = 0;
   if (pcm == run.draftPcm) {
@@ -448,6 +478,7 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
     // simply publishes no draft on failure) without touching the backend.
     { std::lock_guard<std::mutex> lock(gSTTMux); assert(run.draftBusy && count <= 320000); }
     ++draftCalls;
+    if (draftStages && !runDraftStages(pcm, count, control)) { snprintf(error, errorCap, "Cancelled"); return false; }
     if (draftsSucceed) {
       uint32_t sequence = 0;
       { std::lock_guard<std::mutex> lock(gSTTMux); sequence = run.draftSequence; }
@@ -560,6 +591,8 @@ static void reset() {
   savedTranscripts.clear();
   specHistory.clear(); specCalls = specAborts = 0; specHold = false; gRun = nullptr;
   publishWakes = 0; wakesWithText = 0; nativeStarts = 0; draftsSucceed = false; draftsPublished = 0;
+  draftStages = draftHoldFrontend = draftHoldStages = draftInFrontend = false;
+  draftCalls = 0; draftInferences = draftAborts = 0;
 }
 static STTToken begin() {
   allowedSamples = deliveredSamples = 0; readCounter = 0;
@@ -1238,8 +1271,9 @@ static void assertTranscribedOnce(uint32_t sequence, size_t samples) {
 // combined: feed to under one block (1024) before a speculation point (voiced end
 // + 200 ms), let the worker finish any draft, then feed past it, so the
 // trigger falls in the first block, where the capture task's speculation
-// check runs before any new draft snapshot. The capture task copies the
-// snapshot only while no draft runs, at its next block (production: 64 ms
+// check runs before any new draft snapshot. While a draft runs (the harness's
+// unstaged drafts never report getting past their frontend) the capture task
+// copies the snapshot only at its next block after the draft (production: 64 ms
 // later); a draft still running when a test stops feeding would leave it
 // uncopied. Once feeding stops no new draft snapshot is taken.
 static void feedPastSpeculation(STTToken token, uint64_t before, uint64_t after) {
@@ -1438,6 +1472,117 @@ static void testShortCloseSpeculation() {
   assert(sttRequestFinish(owner, token)); complete(token);
 }
 
+// The speculative snapshot over a running draft. The capture task may copy it
+// into the shared draft buffer while a draft runs once that draft is past its
+// frontend (it reported Inference: the runtime reads PCM only in its frontend),
+// and the draft then stops at its next stage check. A draft still in its
+// frontend defers the copy to a later capture block, as with no draft before.
+// Each case feeds to just before the 5 s phrase's speculation point (voiced end
+// 80000 + 200 ms = 83200), then exactly one 1024-sample capture block past it.
+struct SpecRequest { bool live, copied, wanted; uint64_t start; size_t voiced, samples; };
+static SpecRequest specRequest() {
+  std::lock_guard<std::mutex> lock(gSTTMux); assert(gRun);
+  return {gRun->specLiveId != 0, gRun->specCopied, gRun->specWanted, gRun->specStart, gRun->specVoiced, gRun->specSamples};
+}
+static bool draftIdle() { std::lock_guard<std::mutex> lock(gSTTMux); return gRun && !gRun->draftBusy && !gRun->draftReady; }
+constexpr uint64_t kSpecBefore = 83000, kSpecTrigger = kSpecBefore + kStreamReadSamples;
+// The 5 s phrase closes on its 600 ms pause and is promoted from the one
+// speculative run on [start, start + 83200), with no final run.
+static void assertPromotedFivePhrase(STTToken token) {
+  feed(token, 8 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "promoted final");
+  const auto chunk = peek(token);
+  assert(std::string(chunk.text) == "segment 1" && chunk.startSample == kCalibrationSamples &&
+         chunk.endSample - chunk.startSample == 89600);
+  assert(engineCalls == 0 && engineHistory.empty() && specHistory.size() == 1);
+  assert(specHistory[0].start == kCalibrationSamples && specHistory[0].samples == 83200 && specHistory[0].sequence == 1);
+  assert(sttAcknowledgeChunk(owner, token, 1));
+  assert(sttRequestFinish(owner, token)); complete(token);
+}
+// Safety: a draft held in its frontend while two speculations trigger (its own
+// phrase's, then, after that phrase closed, the next phrase's, whose PCM
+// differs) never sees its input change; both copies wait for the draft to end.
+static void testSpecCopyNeverInDraftFrontend() {
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {96000, 112000}};
+  draftStages = draftHoldFrontend = true;
+  const auto token = begin(); started(token);
+  feed(token, kSpecBefore);
+  await([] { return draftInFrontend.load(); }, "a draft held in its frontend");
+  // Phrase 1 reaches its speculation point at 5.2 s and closes at 5.6 s;
+  // phrase 2 (1 s voice from 6 s, 300 ms pre-roll) reaches its own at 7.2 s.
+  feed(token, 118000);
+  draftHoldFrontend = false;  // the staged draft compares its input hash here
+  await([] { return draftAborts == 1; }, "draft stopped at the check after its frontend");
+  assert(draftCalls == 1 && draftInferences == 0);
+  const auto r = specRequest();
+  assert(snapshot(token).segmentsCaptured == 1 && r.live && !r.copied && r.wanted);
+  assert(r.start == kCalibrationSamples + 91200 && r.voiced == 20800 && r.samples == 24000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "phrase 1's ordinary final");
+  feed(token, 118000 + kStreamReadSamples);
+  assert(specRequest().copied);
+  await([] { return specHeld(); }, "phrase 2's speculative result held");
+  feed(token, 140000);
+  await([&] { return snapshot(token).segmentsCompleted == 2; }, "phrase 2 promoted");
+  assert(engineHistory.size() == 1 && specHistory.size() == 1);
+  assert(specHistory[0].start == kCalibrationSamples + 91200 && specHistory[0].samples == 24000 && specHistory[0].sequence == 2);
+  assertTranscribedOnce(1, 83200); assertTranscribedOnce(2, 24000);
+  std::vector<STTTextChunk> chunks; acknowledgeAll(token, &chunks);
+  assert(chunks.size() == 2 && std::string(chunks[1].text) == "segment 2");
+  assert(sttRequestFinish(owner, token)); complete(token);
+}
+// Early copy: a draft past its frontend (held in its stages) at the trigger.
+// The snapshot is copied in that capture call, the draft stops at its next
+// stage check (the copied snapshot outranks it), and the speculative run takes
+// exactly the trimmed phrase and is promoted.
+static void testSpecCopyPastDraftFrontend() {
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}};
+  draftStages = draftHoldStages = true;
+  const auto token = begin(); started(token);
+  feed(token, kSpecBefore);
+  await([] { return draftInferences == 1; }, "a draft held past its frontend");
+  assert(draftCalls == 1 && draftAborts == 0 && !specRequest().live);
+  feed(token, kSpecTrigger);
+  const auto r = specRequest();
+  assert(r.live && r.copied && !r.wanted);
+  assert(r.start == kCalibrationSamples && r.voiced == 80000 && r.samples == 83200);
+  await([] { return draftAborts == 1; }, "draft stopped at its next stage check");
+  await([] { return specHeld(); }, "speculative result held");
+  assert(draftCalls == 1 && deliveredSamples == kCalibrationSamples + kSpecTrigger);
+  draftHoldStages = false;
+  assertPromotedFivePhrase(token);
+}
+// Unchanged: with no draft running the trigger block copies at once; with a
+// draft still in its frontend the copy waits for a capture block after it.
+static void testSpecCopyWithoutDraftOrInFrontend() {
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}}; draftStages = true;
+  auto token = begin(); started(token);
+  feed(token, kSpecBefore);
+  await(draftIdle, "drafts idle before the speculation point");
+  assert(draftInferences > 0);
+  feed(token, kSpecTrigger);
+  auto r = specRequest();
+  assert(r.live && r.copied && !r.wanted && r.start == kCalibrationSamples && r.voiced == 80000 && r.samples == 83200);
+  await([] { return specHeld(); }, "speculative result held");
+  assertPromotedFivePhrase(token);
+
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}}; draftStages = draftHoldFrontend = true;
+  token = begin(); started(token);
+  feed(token, kSpecBefore);
+  await([] { return draftInFrontend.load(); }, "a draft held in its frontend");
+  feed(token, kSpecTrigger);
+  r = specRequest();
+  assert(r.live && !r.copied && r.wanted);
+  draftHoldFrontend = false;
+  await([] { return draftAborts == 1; }, "draft stopped at the check after its frontend");
+  await(draftIdle, "worker idle after the draft");
+  r = specRequest();
+  assert(r.live && !r.copied && r.wanted && specCalls == 0 && draftInferences == 0);  // no block since
+  feed(token, kSpecTrigger + kStreamReadSamples);
+  r = specRequest();
+  assert(r.live && r.copied && !r.wanted && r.start == kCalibrationSamples && r.samples == 83200);
+  await([] { return specHeld(); }, "speculative result held");
+  assertPromotedFivePhrase(token);
+}
 
 // ---------------------------------------------------------------------------
 // The combined latency features on the native Conversate path (G2 left temple):
@@ -1601,6 +1746,9 @@ int main() {
   testFeatureFaults(); puts("PASS capture-feature pool/task failures leave the session on the batch frontend");
   testShortClose(); puts("PASS short close: short phrases close after 1 s of silence, 600 ms from 4 s");
   testShortCloseSpeculation(); puts("PASS short closes speculate on their trimmed input and promote; 4 s-in-pause phrases speculate and promote");
+  testSpecCopyNeverInDraftFrontend(); puts("PASS speculative snapshot never written over a draft's input while its frontend reads it");
+  testSpecCopyPastDraftFrontend(); puts("PASS speculative snapshot copied over a draft past its frontend in the trigger block; draft stopped, exact trimmed run promoted");
+  testSpecCopyWithoutDraftOrInFrontend(); puts("PASS speculative snapshot copied at once with no draft, deferred past a draft in its frontend");
   testNativeMechanisms(); puts("PASS native path: short close, speculative promote, trim, cached feature rows on 800-sample reads; a publish wake per final, none without a hook");
   testNativePauseCloses(); puts("PASS native pause: a mid-word paused short phrase closes on the fed silence");
   testNativeQueueFullWithCaches(); puts("PASS native full queue drops phrases with live feature caches/speculative requests, nothing leaks or mismatches");

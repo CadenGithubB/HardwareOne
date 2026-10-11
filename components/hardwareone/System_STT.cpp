@@ -676,6 +676,9 @@ struct StreamRun {
   uint32_t draftSequence = 0;
   size_t draftTakenSamples = 0;  // capture-side: length at the last snapshot
   bool draftReady = false, draftBusy = false;
+  // The running draft has finished its frontend, so it no longer reads draftPcm (the
+  // network and decoder work on its features); a speculative snapshot may overwrite it.
+  bool draftPastPcm = false;
   // Compute time of the last completed draft. The next snapshot waits for at
   // least this much new audio, so drafts can never occupy more than about
   // half the worker's time, whatever the model's cost (15x5 ~ 3x the 5x5).
@@ -795,7 +798,9 @@ static bool sttDraftPreempted(void* context) {
     if (candidate.state == StreamSlotState::Ready) { finalWaiting = true; break; }
   }
 #if HW1_STT_SPECULATIVE_FINAL
-  if (run.specWanted) finalWaiting = true;  // the speculative snapshot needs the draft buffer
+  // The speculative snapshot needs the draft buffer (specWanted), or was already copied
+  // over it after the draft's frontend and outranks the draft (specReady).
+  if (run.specWanted || run.specReady) finalWaiting = true;
 #endif
   portEXIT_CRITICAL(&gSTTMux);
   return finalWaiting || sttStreamCancelled(context);
@@ -832,6 +837,18 @@ static void sttStreamProgress(void* context, STTLocalPhase phase) {
   auto& run = *static_cast<StreamRun*>(context);
   sttProgress(&run.token, phase);
   sttStreamTick(run);
+}
+// A draft reports Inference once its features are quantized; from then on it never
+// reads draftPcm again (the runtime reads PCM only in its frontend), so sttSpecCapture may
+// copy a speculative snapshot over the buffer at once instead of at the next capture block.
+static void sttDraftProgress(void* context, STTLocalPhase phase) {
+  auto& run = *static_cast<StreamRun*>(context);
+  if (phase == STTLocalPhase::Inference || phase == STTLocalPhase::Decoding) {
+    portENTER_CRITICAL(&gSTTMux);
+    run.draftPastPcm = true;
+    portEXIT_CRITICAL(&gSTTMux);
+  }
+  sttStreamProgress(context, phase);
 }
 static void sttWipe(void* memory, size_t bytes) {
   if (!memory) return;
@@ -1131,7 +1148,8 @@ static void sttSpecCapture(StreamRun& run) {
       run.specCopied = false;
     }
     if (!run.specCopied) {
-      if (!run.draftBusy && !run.specBusy) {
+      // A running draft past its frontend no longer reads the buffer either.
+      if ((!run.draftBusy || run.draftPastPcm) && !run.specBusy) {
         // Nothing reads the buffer until a Ready flag is set again below.
         run.draftReady = run.specReady = false;
         copy = true;
@@ -1765,7 +1783,7 @@ static void sttContinuousWorker(void*) {
         STTFeaturePrefix draftPrefix;  // capture-time rows (HW1_STT_CAPTURE_FEATURES)
         portENTER_CRITICAL(&gSTTMux);
         if (run.draftReady && !run.failed && !gSTT.cancelRequested) {
-          run.draftReady = false; run.draftBusy = drafting = true;
+          run.draftReady = false; run.draftBusy = drafting = true; run.draftPastPcm = false;
           draftSamples = std::max(run.draftSamples, size_t(320));
           draftSequence = run.draftSequence;
 #if HW1_STT_CAPTURE_FEATURES
@@ -1784,7 +1802,7 @@ static void sttContinuousWorker(void*) {
           char draftText[STT_MAX_TEXT + 1] = {};
           char draftError[96] = {};
           STTLocalStats draftStats;
-          const STTLocalControl draftControl{&run, sttDraftPreempted, sttStreamProgress};
+          const STTLocalControl draftControl{&run, sttDraftPreempted, sttDraftProgress};
           const uint32_t draftStart = millis();
           const bool ok = sttLocalTranscribe(run.draftPcm, draftSamples, draftText, sizeof(draftText), draftControl,
                                              draftStats, draftError, sizeof(draftError), &backendSession,
@@ -1804,7 +1822,7 @@ static void sttContinuousWorker(void*) {
             ++gSTT.draft.version;
             draftPublished = true;
           }
-          run.draftBusy = false;
+          run.draftBusy = false; run.draftPastPcm = false;
           if (ok) run.lastDraftMs = millis() - draftStart;
           portEXIT_CRITICAL(&gSTTMux);
 #if HW1_STT_PUBLISH_WAKE
